@@ -1,6 +1,6 @@
 # Source URL: https://github.com/reachfm/orvix
-# Content Length: 7711 characters
-# Extracted at: 2026-06-06 14:04:04
+# Content Length: 12245 characters
+# Extracted at: 2026-06-06 14:09:45
 #============================================================
 
 
@@ -12,7 +12,14 @@
 
 
 
-reachfm/orvix · GitHub
+
+
+
+
+
+GitHub - reachfm/orvix: orvix entreprise mail · GitHub
+
+
 
 
 
@@ -261,7 +268,7 @@ To see all available qualifiers, see our [documentation](https://docs.github.com
 
 [Sign in](/login?return_to=https%3A%2F%2Fgithub.com%2Freachfm%2Forvix)
 
-[Sign up](/signup?ref_cta=Sign+up&ref_loc=header+logged+out&ref_page=%2F%3Cuser-name%3E%2F%3Crepo-name%3E%2Ffiles%2Fdisambiguate&source=header-repo&source_repo=reachfm%2Forvix)
+[Sign up](/signup?ref_cta=Sign+up&ref_loc=header+logged+out&ref_page=%2F%3Cuser-name%3E%2F%3Crepo-name%3E&source=header-repo&source_repo=reachfm%2Forvix)
  
 
 
@@ -338,11 +345,154 @@ Additional navigation options
 
 
 
-### This repository is empty.
+   
 
-Care to check out the [GitHub Channel on YouTube](https://youtube.com/GitHub) while you wait?
+reachfm/orvix
+=============
 
 
+ main[Branches](/reachfm/orvix/branches)[Tags](/reachfm/orvix/tags)Go to fileCodeOpen more actions menu
+
+Folders and files
+-----------------
+
+| Name | Name | Last commit message | Last commit date |
+| --- | --- | --- | --- |
+| Latest commit History[1 Commit](/reachfm/orvix/commits/main/)1 Commit |
+| [cmd/orvix](/reachfm/orvix/tree/main/cmd/orvix) | [cmd/orvix](/reachfm/orvix/tree/main/cmd/orvix) |  |  |
+| [internal](/reachfm/orvix/tree/main/internal) | [internal](/reachfm/orvix/tree/main/internal) |  |  |
+| [migrations](/reachfm/orvix/tree/main/migrations) | [migrations](/reachfm/orvix/tree/main/migrations) |  |  |
+| [release](/reachfm/orvix/tree/main/release) | [release](/reachfm/orvix/tree/main/release) |  |  |
+| [scripts](/reachfm/orvix/tree/main/scripts) | [scripts](/reachfm/orvix/tree/main/scripts) |  |  |
+| [stalwart-bin](/reachfm/orvix/tree/main/stalwart-bin) | [stalwart-bin](/reachfm/orvix/tree/main/stalwart-bin) |  |  |
+| [web](/reachfm/orvix/tree/main/web) | [web](/reachfm/orvix/tree/main/web) |  |  |
+| [.gitignore](/reachfm/orvix/blob/main/.gitignore) | [.gitignore](/reachfm/orvix/blob/main/.gitignore) |  |  |
+| [AGENT\_INSTRUCTIONS.md](/reachfm/orvix/blob/main/AGENT_INSTRUCTIONS.md) | [AGENT\_INSTRUCTIONS.md](/reachfm/orvix/blob/main/AGENT_INSTRUCTIONS.md) |  |  |
+| [AUDIT.md](/reachfm/orvix/blob/main/AUDIT.md) | [AUDIT.md](/reachfm/orvix/blob/main/AUDIT.md) |  |  |
+| [FULL\_FEATURE\_PLAN.md](/reachfm/orvix/blob/main/FULL_FEATURE_PLAN.md) | [FULL\_FEATURE\_PLAN.md](/reachfm/orvix/blob/main/FULL_FEATURE_PLAN.md) |  |  |
+| [HANDOFF.md](/reachfm/orvix/blob/main/HANDOFF.md) | [HANDOFF.md](/reachfm/orvix/blob/main/HANDOFF.md) |  |  |
+| [MVP.md](/reachfm/orvix/blob/main/MVP.md) | [MVP.md](/reachfm/orvix/blob/main/MVP.md) |  |  |
+| [Makefile](/reachfm/orvix/blob/main/Makefile) | [Makefile](/reachfm/orvix/blob/main/Makefile) |  |  |
+| [ORVIX\_INDEPENDENT\_AUDIT.md](/reachfm/orvix/blob/main/ORVIX_INDEPENDENT_AUDIT.md) | [ORVIX\_INDEPENDENT\_AUDIT.md](/reachfm/orvix/blob/main/ORVIX_INDEPENDENT_AUDIT.md) |  |  |
+| [ORVIX\_STATUS\_MATRIX.md](/reachfm/orvix/blob/main/ORVIX_STATUS_MATRIX.md) | [ORVIX\_STATUS\_MATRIX.md](/reachfm/orvix/blob/main/ORVIX_STATUS_MATRIX.md) |  |  |
+| [PROGRESS.md](/reachfm/orvix/blob/main/PROGRESS.md) | [PROGRESS.md](/reachfm/orvix/blob/main/PROGRESS.md) |  |  |
+| [RELEASE\_AUDIT.md](/reachfm/orvix/blob/main/RELEASE_AUDIT.md) | [RELEASE\_AUDIT.md](/reachfm/orvix/blob/main/RELEASE_AUDIT.md) |  |  |
+| [ROADMAP.md](/reachfm/orvix/blob/main/ROADMAP.md) | [ROADMAP.md](/reachfm/orvix/blob/main/ROADMAP.md) |  |  |
+| [VPS\_TEST\_PLAN.md](/reachfm/orvix/blob/main/VPS_TEST_PLAN.md) | [VPS\_TEST\_PLAN.md](/reachfm/orvix/blob/main/VPS_TEST_PLAN.md) |  |  |
+| [WORK\_CONTEXT.md](/reachfm/orvix/blob/main/WORK_CONTEXT.md) | [WORK\_CONTEXT.md](/reachfm/orvix/blob/main/WORK_CONTEXT.md) |  |  |
+| [go.mod](/reachfm/orvix/blob/main/go.mod) | [go.mod](/reachfm/orvix/blob/main/go.mod) |  |  |
+| [go.sum](/reachfm/orvix/blob/main/go.sum) | [go.sum](/reachfm/orvix/blob/main/go.sum) |  |  |
+| [orvix.yaml](/reachfm/orvix/blob/main/orvix.yaml) | [orvix.yaml](/reachfm/orvix/blob/main/orvix.yaml) |  |  |
+| [watchdog.ps1](/reachfm/orvix/blob/main/watchdog.ps1) | [watchdog.ps1](/reachfm/orvix/blob/main/watchdog.ps1) |  |  |
+| View all files |
+
+About
+-----
+
+orvix entreprise mail
+
+### Uh oh!
+
+
+
+There was an error while loading. Please reload this page.
+
+
+
+ 
+ 
+
+[Activity](/reachfm/orvix/activity) 
+### Stars
+
+[**0**
+stars](/reachfm/orvix/stargazers) 
+### Watchers
+
+[**0**
+watching](/reachfm/orvix/watchers) 
+### Forks
+
+[**0**
+forks](/reachfm/orvix/forks) 
+[Report repository](/contact/report-content?content_url=https%3A%2F%2Fgithub.com%2Freachfm%2Forvix&report=reachfm+%28user%29) 
+
+
+
+[Releases](/reachfm/orvix/releases)
+-----------------------------------
+
+No releases published
+
+
+[Packages
+0](/users/reachfm/packages?repo_name=orvix)
+-----------------------------------------------------
+
+ 
+
+ 
+
+ 
+
+### Uh oh!
+
+
+
+There was an error while loading. Please reload this page.
+
+
+
+ 
+ 
+
+
+
+[Contributors](/reachfm/orvix/graphs/contributors)
+--------------------------------------------------
+
+
+
+### Uh oh!
+
+
+
+There was an error while loading. Please reload this page.
+
+
+
+ 
+ 
+
+
+
+Languages
+---------
+
+
+
+
+
+
+
+* [Go
+  79.4%](/reachfm/orvix/search?l=go)
+* [TypeScript
+  9.9%](/reachfm/orvix/search?l=typescript)
+* [Shell
+  8.3%](/reachfm/orvix/search?l=shell)
+* [PowerShell
+  1.3%](/reachfm/orvix/search?l=powershell)
+* [CSS
+  0.5%](/reachfm/orvix/search?l=css)
+* [HTML
+  0.3%](/reachfm/orvix/search?l=html)
+* [Makefile
+  0.3%](/reachfm/orvix/search?l=makefile)
+
+
+
+   
 
 
 
