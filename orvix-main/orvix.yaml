@@ -1,0 +1,72 @@
+server:
+  host: "0.0.0.0"
+  port: 80
+  admin_port: 8080
+  read_timeout: 60s
+  write_timeout: 60s
+  idle_timeout: 120s
+  body_limit: 52428800
+  allowed_origins:
+    - http://localhost:3000
+    - http://localhost:3001
+  trusted_proxies: []
+
+database:
+  driver: sqlite
+  host: localhost
+  port: 5432
+  user: orvix
+  password: ""
+  dbname: orvix
+  sslmode: disable
+  max_open: 25
+  max_idle: 5
+  max_lifetime: 300
+  sqlite_path: /var/lib/orvix/orvix.db
+
+redis:
+  host: localhost
+  port: 6379
+  password: ""
+  db: 0
+
+stalwart:
+  api_url: http://localhost:18080
+  api_key: ""
+  data_dir: /var/lib/orvix/stalwart
+  config_dir: /etc/orvix/stalwart
+  log_dir: /var/log/orvix/stalwart
+
+auth:
+  jwt_access_ttl: 15m
+  jwt_refresh_ttl: 720h
+  password_min_len: 12
+  argon2_time: 3
+  argon2_memory: 65536
+  argon2_threads: 4
+  login_rate_limit: 5
+  rate_window: 15m
+
+logging:
+  level: info
+  format: json
+  output: stdout
+  log_dir: /var/log/orvix
+
+metrics:
+  enabled: true
+  path: /metrics
+
+update:
+  channel: stable
+  auto_apply: false
+  backup_before: true
+
+ai:
+  deepseek_model: deepseek-chat
+  ollama_url: http://localhost:11434
+  ollama_model: llama3
+  use_ollama: false
+
+dns:
+  default_provider: cloudflare
