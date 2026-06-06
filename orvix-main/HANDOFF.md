@@ -69,13 +69,19 @@ Orvix requires Stalwart Mail Server as an external binary.
 
 The release package is at:
 ```
-release/orvix-v1.0.4-linux-amd64.tar.gz
+release/orvix-v1.0.5-linux-amd64.tar.gz
 ```
 
 - **Git Commit:** (pending push)
-- **GitHub Release:** https://github.com/reachfm/orvix/releases/tag/v1.0.4
-- **Archive SHA256:** `48be25d12c7d9eb257680088f2d74bb6aa24250b7ac6aee5b9b305f11bd3f955`
-- **Binary SHA256:** `e7ad824523dea77858b11dfcc06793bb868a1141bf1f95dd9f511b4317b1138b`
+- **GitHub Release:** https://github.com/reachfm/orvix/releases/tag/v1.0.5
+- **Archive SHA256:** `f93d159fb27631220ef03814da910d649e72edb6b60623d344fbf192d0d80d48`
+- **Binary SHA256:** `8d5d728188ab724f5e878b43f812071b15fa969e0f0faa8b83ab12effe447556`
+
+### RC6 Fixes
+- **Systemd override syntax**: Fixed using printf instead of heredoc, proper escaping
+- **Domain-first installer**: Added prompts for Primary Domain, Mail/Admin/Webmail Hostnames
+- **Password policy**: Minimum 8 chars with weak password rejection
+- **Stalwart verification**: Enhanced healthcheck shows exact command and config path
 
 ### RC5 Fixes
 - **Systemd hardening**: Added ReadWritePaths for /etc/orvix, /var/lib/orvix, /var/log/orvix

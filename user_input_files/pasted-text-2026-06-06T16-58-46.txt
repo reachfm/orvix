@@ -1,0 +1,334 @@
+STOP ALL OTHER WORK.
+
+You are now executing RC6.
+
+RC6 MUST START FROM THE REAL VPS INSTALL RESULTS BELOW.
+
+DO NOT IGNORE THESE RESULTS.
+
+====================================================
+REAL RC5 VPS INSTALL RESULT
+===========================
+
+Fresh install partially passed, but NOT fully verified.
+
+SUCCESS:
+
+* Orvix service active
+* Health endpoint OK
+* Redis active
+* Stalwart process exists
+* Installer completed
+
+REMAINING VERIFIED BLOCKER:
+
+systemd override syntax error:
+
+/etc/systemd/system/orvix.service.d/override.conf:5: Missing '=', ignoring line.
+
+This was observed on a REAL VPS install.
+
+RC6 MUST FIX THIS FIRST.
+
+====================================================
+MANDATORY RC6 TASKS
+===================
+
+1. INSPECT GENERATED FILE
+
+Inspect:
+
+/etc/systemd/system/orvix.service.d/override.conf
+
+Find the exact invalid line.
+
+Do not guess.
+
+Show the exact root cause.
+
+====================================================
+
+2. FIX INSTALLER
+
+Fix install.sh so override.conf is generated with valid systemd syntax.
+
+Requirements:
+
+* no invalid lines
+* no malformed directives
+* no missing "="
+* no unknown directives
+
+====================================================
+
+3. VERIFY SYSTEMD
+
+Run:
+
+systemd-analyze verify /etc/systemd/system/orvix.service
+
+Run:
+
+systemctl daemon-reload
+
+Verify:
+
+No warnings:
+
+* Missing '='
+* Ignoring line
+* Unknown key
+* Failed to parse
+
+RC6 is NOT complete until this passes.
+
+====================================================
+
+4. VERIFY STALWART IS ACTUALLY HEALTHY
+
+Current RC5 only proved that a process exists.
+
+That is NOT enough.
+
+Verify:
+
+ps -fp $(pgrep stalwart)
+
+Verify:
+
+* correct executable
+* correct command line
+* correct config path
+* correct config file exists
+* no startup failures
+* no crash loop
+
+Verify logs.
+
+Expected command:
+
+stalwart --config <config path>
+
+Show exact command used.
+
+====================================================
+
+5. PRESERVE ALL RC5 FIXES
+
+RC6 must NOT break RC5.
+
+Keep working:
+
+* Redis installation
+* Redis startup
+* Redis enable
+* Health endpoint
+* Orvix service startup
+* Stalwart download
+* Stalwart v0.16.7 support
+* Installer flow
+* Existing database initialization
+
+====================================================
+
+6. DOMAIN-FIRST INSTALLER
+
+The installer currently shows server IPs.
+
+This is not acceptable.
+
+Installer must prompt for:
+
+* Primary Domain
+* Mail Hostname
+* Admin Hostname
+* Webmail Hostname
+* Admin Email
+* Admin Password
+
+Default examples:
+
+Primary Domain:
+orvix.email
+
+Mail Hostname:
+mail.orvix.email
+
+Admin Hostname:
+admin.orvix.email
+
+Webmail Hostname:
+webmail.orvix.email
+
+Admin Email:
+[admin@orvix.email](mailto:admin@orvix.email)
+
+====================================================
+
+7. DOMAIN-FIRST SUCCESS OUTPUT
+
+DO NOT SHOW:
+
+http://SERVER_IP:8080
+http://SERVER_IP:3000
+
+SHOW:
+
+Admin Console:
+https://admin.orvix.email
+
+Webmail:
+https://webmail.orvix.email
+
+Mail Hostname:
+mail.orvix.email
+
+Primary Domain:
+orvix.email
+
+====================================================
+
+8. GENERATED CONFIG VALIDATION
+
+Generated configuration must use domains for:
+
+* admin_url
+* webmail_url
+* api_base_url
+* public_base_url
+* CORS origins
+* cookie domain
+* JWT issuer
+* JWT audience
+* mail hostname
+* Stalwart hostname
+
+Reject raw IPs as hostnames.
+
+====================================================
+
+9. PASSWORD POLICY CHANGE
+
+Current:
+minimum 12 characters
+
+New:
+
+minimum 8 characters
+
+Prompt:
+
+Admin password (min 8 chars)
+
+Requirements:
+
+* minimum 8 chars
+* confirmation required
+* reject mismatch
+
+Reject:
+
+12345678
+password
+password123
+admin123
+admin1234
+qwerty123
+
+====================================================
+
+10. DOCUMENTATION
+
+Update EVERY file after code changes:
+
+* AUDIT.md
+* HANDOFF.md
+* PROGRESS.md
+* RELEASE_AUDIT.md
+* VPS_TEST_PLAN.md
+* RELEASE_NOTES.md
+
+No stale documentation allowed.
+
+Documentation must match reality.
+
+====================================================
+
+11. RELEASE
+
+Create:
+
+v1.0.5 RC6
+
+Artifacts:
+
+* install.sh
+* checksums.txt
+* RELEASE_NOTES.md
+* orvix-v1.0.5-linux-amd64
+* orvix-v1.0.5-linux-amd64.tar.gz
+
+Upload GitHub release assets.
+
+====================================================
+
+12. PUBLIC VERIFICATION
+
+Verify:
+
+curl -I https://github.com/reachfm/orvix/releases/download/v1.0.5/orvix-v1.0.5-linux-amd64
+
+Verify:
+
+curl -fsSL https://github.com/reachfm/orvix/releases/download/v1.0.5/install.sh | head -80
+
+Installer must visibly contain:
+
+* v1.0.5
+* RC6
+* Stalwart v0.16.7
+* Password minimum 8
+* Primary Domain prompt
+* Mail Hostname prompt
+* Admin Hostname prompt
+* Webmail Hostname prompt
+
+====================================================
+
+13. FINAL REPORT RULE
+
+DO NOT CLAIM SUCCESS BECAUSE:
+
+* build passes
+* tests pass
+* release uploaded
+
+ONLY CLAIM SUCCESS IF:
+
+* systemd issue fixed
+* systemd verify passes
+* no Missing '=' warnings
+* Stalwart verified healthy
+* RC5 functionality preserved
+* installer updated
+* docs updated
+* release uploaded
+* public URLs verified
+
+FINAL OUTPUT FORMAT:
+
+ORVIX RC6 READY FOR FRESH INSTALL TEST
+
+Include:
+
+* Git commit
+* Release URL
+* Binary SHA256
+* Archive SHA256
+* Exact systemd root cause
+* Exact systemd fix
+* Exact Stalwart command
+* Stalwart verification evidence
+* Redis verification
+* Public verification evidence
+* Documentation updated confirmation

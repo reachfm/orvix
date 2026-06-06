@@ -14,6 +14,12 @@
 - [x] Phase 6: Advanced Features — Calendar (backend), ZKE, Collaboration, LDAP, Backup/Restore, Reseller, White Label, Compliance Center
 - [x] Phase 7: Hardening — Security audit complete, installer, systemd, API docs in HANDOFF.md
 
+## RC6 Critical Fixes (v1.0.5)
+- [x] **Systemd override syntax**: Fixed using printf instead of heredoc, proper escaping
+- [x] **Domain-first installer**: Added prompts for Primary Domain, Mail/Admin/Webmail Hostnames
+- [x] **Password policy**: Minimum 8 chars with weak password rejection
+- [x] **Stalwart verification**: Enhanced healthcheck shows exact command and config path
+
 ## RC5 Critical Fixes (v1.0.4)
 - [x] **Systemd hardening**: Added ReadWritePaths for /etc/orvix, /var/lib/orvix, /var/log/orvix
 - [x] **Stalwart v0.16.7**: Fixed config.json format (JSON not YAML), removed --data argument

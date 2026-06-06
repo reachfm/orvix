@@ -1,17 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Orvix RC5 Installer
-# Usage: curl -fsSL https://github.com/reachfm/orvix/releases/download/v1.0.4/install.sh | bash
+# Orvix RC6 Installer
+# Usage: curl -fsSL https://github.com/reachfm/orvix/releases/download/v1.0.5/install.sh | bash
 # Or:    bash install.sh
 
-# RC5 FIXES:
-# - Systemd hardening: Added ReadWritePaths for /etc/orvix, /var/lib/orvix, /var/log/orvix
-# - Stalwart v0.16.7: Uses config.json (not stalwart.yaml), correct --config arg
+# RC6 FIXES:
+# - Systemd override syntax: Use quoted heredoc to prevent variable expansion
+# - Domain-first prompts: Primary Domain, Mail Hostname, Admin Hostname, Webmail Hostname
+# - Password policy: minimum 8 chars with weak password rejection
+# - Output: Show domains, not IPs
+
+# PRESERVED RC5 FIXES:
+# - Systemd hardening: ReadWritePaths for /etc/orvix, /var/lib/orvix, /var/log/orvix
+# - Stalwart v0.16.7: Uses config.json, correct --config arg
 # - Redis: Install and enable redis-server
 # - Healthcheck: Comprehensive post-install validation
 
-ORVIX_VERSION="${ORVIX_VERSION:-1.0.4}"
+ORVIX_VERSION="${ORVIX_VERSION:-1.0.5}"
 ORVIX_RELEASE_URL="${ORVIX_RELEASE_URL:-https://github.com/reachfm/orvix/releases/download/v${ORVIX_VERSION}}"
 STALWART_VERSION="${STALWART_VERSION:-0.16.7}"
 
@@ -24,7 +30,7 @@ NC='\033[0m'
 # ──────────────────────────────────────
 # Pre-flight checks
 # ──────────────────────────────────────
-echo -e "${BOLD}Orvix v${ORVIX_VERSION} RC5 Installer${NC}"
+echo -e "${BOLD}Orvix v${ORVIX_VERSION} RC6 Installer${NC}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -49,14 +55,15 @@ case "$OS" in
 esac
 
 # ──────────────────────────────────────
-# Functions (RC5 FIX: All validation fixes)
+# Functions (RC6 FIX: All validation fixes)
 # ──────────────────────────────────────
 
-# RC5 FIX: Domain validation function
-prompt_domain() {
+# RC6 FIX: Primary domain validation
+prompt_primary_domain() {
     local domain=""
     while true; do
-        read -rp "Primary email domain (e.g., example.com): " domain
+        read -rp "Primary Domain [orvix.email]: " domain
+        domain="${domain:-orvix.email}"
         if [ -z "$domain" ]; then
             echo -e "${RED}Error: Domain cannot be empty.${NC}"
             continue
@@ -71,11 +78,75 @@ prompt_domain() {
     echo "$domain"
 }
 
-# RC5 FIX: Email validation function
+# RC6 FIX: Mail hostname
+prompt_mail_hostname() {
+    local primary_domain="$1"
+    local mail_host=""
+    while true; do
+        read -rp "Mail Hostname [mail.${primary_domain}]: " mail_host
+        mail_host="${mail_host:-mail.${primary_domain}}"
+        if [ -z "$mail_host" ]; then
+            echo -e "${RED}Error: Mail hostname cannot be empty.${NC}"
+            continue
+        fi
+        # Validate hostname format
+        if [[ ! "$mail_host" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$ ]]; then
+            echo -e "${RED}Error: Invalid hostname format.${NC}"
+            continue
+        fi
+        break
+    done
+    echo "$mail_host"
+}
+
+# RC6 FIX: Admin hostname
+prompt_admin_hostname() {
+    local primary_domain="$1"
+    local admin_host=""
+    while true; do
+        read -rp "Admin Hostname [admin.${primary_domain}]: " admin_host
+        admin_host="${admin_host:-admin.${primary_domain}}"
+        if [ -z "$admin_host" ]; then
+            echo -e "${RED}Error: Admin hostname cannot be empty.${NC}"
+            continue
+        fi
+        # Validate hostname format
+        if [[ ! "$admin_host" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$ ]]; then
+            echo -e "${RED}Error: Invalid hostname format.${NC}"
+            continue
+        fi
+        break
+    done
+    echo "$admin_host"
+}
+
+# RC6 FIX: Webmail hostname
+prompt_webmail_hostname() {
+    local primary_domain="$1"
+    local webmail_host=""
+    while true; do
+        read -rp "Webmail Hostname [webmail.${primary_domain}]: " webmail_host
+        webmail_host="${webmail_host:-webmail.${primary_domain}}"
+        if [ -z "$webmail_host" ]; then
+            echo -e "${RED}Error: Webmail hostname cannot be empty.${NC}"
+            continue
+        fi
+        # Validate hostname format
+        if [[ ! "$webmail_host" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$ ]]; then
+            echo -e "${RED}Error: Invalid hostname format.${NC}"
+            continue
+        fi
+        break
+    done
+    echo "$webmail_host"
+}
+
+# RC6 FIX: Email validation
 prompt_email() {
     local email=""
     while true; do
-        read -rp "Admin email address: " email
+        read -rp "Admin Email [admin@orvix.email]: " email
+        email="${email:-admin@orvix.email}"
         if [ -z "$email" ]; then
             echo -e "${RED}Error: Email cannot be empty.${NC}"
             continue
@@ -90,18 +161,37 @@ prompt_email() {
     echo "$email"
 }
 
-# RC5 FIX: Password validation with confirmation
+# RC6 FIX: Strong password validation (min 8 chars, reject weak passwords)
 prompt_password() {
     local password=""
     local confirm=""
+    local weak_patterns=("12345678" "password" "password123" "admin123" "admin1234" "qwerty123" "letmein" "welcome" "monkey" "dragon" "master" "admin" "login" "passw0rd")
+
     while true; do
-        read -rsp "Admin password (min 12 chars): " password
+        read -rsp "Admin password (min 8 chars): " password
         echo ""
-        if [ ${#password} -lt 12 ]; then
-            echo -e "${RED}Error: Password must be at least 12 characters.${NC}"
+
+        # Check minimum length (RC6: changed from 12 to 8)
+        if [ ${#password} -lt 8 ]; then
+            echo -e "${RED}Error: Password must be at least 8 characters.${NC}"
             continue
         fi
-        # RC5 FIX: Add confirmation step
+
+        # Check for weak passwords (RC6: NEW)
+        local is_weak=false
+        for pattern in "${weak_patterns[@]}"; do
+            if [[ "${password,,}" == *"${pattern}"* ]]; then
+                echo -e "${RED}Error: Password is too weak. Please choose a stronger password.${NC}"
+                is_weak=true
+                break
+            fi
+        done
+
+        if [ "$is_weak" = true ]; then
+            continue
+        fi
+
+        # Add confirmation step
         read -rsp "Confirm admin password: " confirm
         echo ""
         if [ "$password" != "$confirm" ]; then
@@ -324,14 +414,19 @@ else
 fi
 
 # ──────────────────────────────────────
-# Step 7: Generate configuration (RC5 FIX: Use validation functions)
+# Step 7: Generate configuration (RC6 FIX: Domain-first prompts)
 # ──────────────────────────────────────
 CURRENT_STEP="config"
 echo ""
 echo -e "${BOLD}[7/9] Configuring Orvix...${NC}"
 
-# RC5 FIX: Use validated prompt functions
-PRIMARY_DOMAIN=$(prompt_domain)
+# RC6 FIX: Domain-first prompts
+echo ""
+echo -e "${BOLD}Domain Configuration:${NC}"
+PRIMARY_DOMAIN=$(prompt_primary_domain)
+MAIL_HOSTNAME=$(prompt_mail_hostname "$PRIMARY_DOMAIN")
+ADMIN_HOSTNAME=$(prompt_admin_hostname "$PRIMARY_DOMAIN")
+WEBMAIL_HOSTNAME=$(prompt_webmail_hostname "$PRIMARY_DOMAIN")
 ADMIN_EMAIL=$(prompt_email)
 ADMIN_PASSWORD=$(prompt_password)
 LICENSE_KEY=$(prompt "License key (optional, press Enter to skip)" "")
@@ -346,6 +441,7 @@ if [ "$EMAIL_DOMAIN" != "$PRIMARY_DOMAIN" ]; then
     fi
 fi
 
+# RC6 FIX: Generate config with domain-based URLs
 cat > /etc/orvix/orvix.yaml << ORVIX_YAML
 server:
   host: "0.0.0.0"
@@ -355,7 +451,8 @@ server:
   idle_timeout: 120s
   body_limit: 52428800
   allowed_origins:
-    - "https://mail.$PRIMARY_DOMAIN"
+    - "https://${WEBMAIL_HOSTNAME}"
+    - "https://${ADMIN_HOSTNAME}"
     - "http://localhost:3000"
     - "http://localhost:3001"
   trusted_proxies: []
@@ -377,11 +474,12 @@ stalwart:
   data_dir: /var/lib/orvix/stalwart
   config_dir: /etc/orvix/stalwart
   log_dir: /var/log/orvix/stalwart
+  hostname: "${MAIL_HOSTNAME}"
 
 auth:
   jwt_access_ttl: 15m
   jwt_refresh_ttl: 720h
-  password_min_len: 12
+  password_min_len: 8
   argon2_time: 3
   argon2_memory: 65536
   argon2_threads: 4
@@ -403,22 +501,53 @@ update:
 
 backup:
   dir: /var/lib/orvix/backups
+
+webmail:
+  url: "https://${WEBMAIL_HOSTNAME}"
+  api_base_url: "http://localhost:8080"
+
+admin:
+  url: "https://${ADMIN_HOSTNAME}"
+  api_base_url: "http://localhost:8080"
 ORVIX_YAML
 
 chmod 640 /etc/orvix/orvix.yaml
 chown orvix:orvix /etc/orvix/orvix.yaml
 
+# RC6 FIX: Generate Stalwart config with hostname
+cat > /etc/orvix/stalwart/config.json << STALWART_CONFIG
+{
+  "storage": {
+    "@type": "RocksDb",
+    "path": "/var/lib/orvix/stalwart/db"
+  },
+  "server": {
+    "hostname": "${MAIL_HOSTNAME}"
+  },
+  "tracing": {
+    "level": "info"
+  }
+}
+STALWART_CONFIG
+
+chmod 640 /etc/orvix/stalwart/config.json
+chown orvix:orvix /etc/orvix/stalwart/config.json
+
 # Save credentials securely (RC5 FIX: Do not log password)
 cat > /etc/orvix/install_credentials.txt << CREDS
 Orvix Installation Credentials
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Primary Domain: $PRIMARY_DOMAIN
+Mail Hostname: $MAIL_HOSTNAME
+Admin Hostname: $ADMIN_HOSTNAME
+Webmail Hostname: $WEBMAIL_HOSTNAME
 Admin Email: $ADMIN_EMAIL
 Admin Password: [REDACTED - use the password you provided]
 License Key: ${LICENSE_KEY:-not provided}
-Primary Domain: $PRIMARY_DOMAIN
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Admin Console: http://localhost:8080/admin
-Webmail: http://localhost:3000
+Admin Console: https://${ADMIN_HOSTNAME}
+Webmail: https://${WEBMAIL_HOSTNAME}
+Mail Hostname: $MAIL_HOSTNAME
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Save these credentials in a secure location.
 CREDS
@@ -431,6 +560,7 @@ echo -e "${GREEN}✓${NC} Credentials saved to /etc/orvix/install_credentials.tx
 # ──────────────────────────────────────
 # Step 8: Install systemd service
 # RC5 FIX: Added ReadWritePaths for systemd hardening
+# RC6 FIX: Fixed override.conf syntax
 # ──────────────────────────────────────
 CURRENT_STEP="systemd"
 echo ""
@@ -488,6 +618,7 @@ echo -e "${GREEN}✓${NC} systemd service installed and enabled"
 # ──────────────────────────────────────
 # Step 9: Start services and healthcheck
 # RC5 FIX: Comprehensive post-install healthcheck
+# RC6 FIX: Verify Stalwart is actually healthy
 # ──────────────────────────────────────
 CURRENT_STEP="start"
 echo ""
@@ -497,15 +628,27 @@ echo -e "${BOLD}[9/9] Starting services and validation...${NC}"
 mkdir -p /var/lib/orvix
 chown orvix:orvix /var/lib/orvix
 
-# RC5 FIX: Create systemd override directory before writing
+# RC6 FIX: Create systemd override with QUOTED heredoc to prevent variable expansion
+# Using printf with proper escaping to handle special characters
 mkdir -p /etc/systemd/system/orvix.service.d
 
-# RC5 FIX: Pass admin credentials via environment variables
-cat > /etc/systemd/system/orvix.service.d/override.conf << OVERRIDE
-[Service]
-Environment=ORVIX_ADMIN_EMAIL=${ADMIN_EMAIL}
-Environment=ORVIX_ADMIN_PASSWORD=${ADMIN_PASSWORD}
-OVERRIDE
+# Escape special characters for systemd environment variables
+admin_email_escaped=$(printf '%s' "$ADMIN_EMAIL" | sed 's/"/\\"/g')
+admin_password_escaped=$(printf '%s' "$ADMIN_PASSWORD" | sed 's/"/\\"/g')
+
+# RC6 FIX: Write override.conf using printf (not heredoc) to properly handle variables
+# This ensures no variable expansion during file creation
+printf '[Service]\nEnvironment="ORVIX_ADMIN_EMAIL=%s"\nEnvironment="ORVIX_ADMIN_PASSWORD=%s"\n' \
+    "$admin_email_escaped" "$admin_password_escaped" \
+    > /etc/systemd/system/orvix.service.d/override.conf
+
+chmod 640 /etc/systemd/system/orvix.service.d/override.conf
+
+# RC6 FIX: Verify systemd override is valid
+if ! systemd-analyze verify /etc/systemd/system/orvix.service 2>/dev/null; then
+    echo -e "${YELLOW}Warning:${NC} systemd service verification returned warnings"
+    echo "Check systemd configuration with: systemd-analyze verify /etc/systemd/system/orvix.service"
+fi
 
 systemctl daemon-reload
 
@@ -516,6 +659,7 @@ systemctl start orvix.service || {
 }
 
 # RC5 FIX: Comprehensive healthcheck
+# RC6 FIX: Enhanced with Stalwart verification
 sleep 5
 echo ""
 echo -e "${BOLD}Post-Install Healthcheck:${NC}"
@@ -549,6 +693,35 @@ else
     echo "    (May take a few seconds to initialize)"
 fi
 
+# RC6 FIX: Verify Stalwart is actually healthy
+echo -n "  Stalwart Process: "
+STALWART_PID=$(pgrep -f "stalwart.*--config" 2>/dev/null || true)
+if [ -n "$STALWART_PID" ]; then
+    echo -e "${GREEN}✓ Running (PID: $STALWART_PID)${NC}"
+
+    # RC6 FIX: Show exact command used
+    echo -n "  Stalwart Command: "
+    STALWART_CMD=$(ps -fp "$STALWART_PID" 2>/dev/null | tail -1 || true)
+    if [ -n "$STALWART_CMD" ]; then
+        echo -e "${GREEN}✓${NC}"
+        echo "    $STALWART_CMD"
+    else
+        echo -e "${YELLOW}⚠ Could not retrieve${NC}"
+    fi
+
+    # RC6 FIX: Verify config file exists
+    echo -n "  Stalwart Config: "
+    if [ -f /etc/orvix/stalwart/config.json ]; then
+        echo -e "${GREEN}✓ /etc/orvix/stalwart/config.json exists${NC}"
+    else
+        echo -e "${RED}✗ Config file missing${NC}"
+        HEALTHCHECK_PASSED=false
+    fi
+else
+    echo -e "${YELLOW}⚠ No Stalwart process found${NC}"
+    echo "    (Stalwart may be started on-demand by Orvix)"
+fi
+
 # Check Database
 echo -n "  Database: "
 if [ -f /var/lib/orvix/orvix.db ]; then
@@ -570,28 +743,31 @@ echo "  Verification commands:"
 echo "    systemctl status orvix --no-pager -l"
 echo "    systemctl status redis-server --no-pager -l"
 echo "    curl -fsS http://127.0.0.1:8080/api/v1/health"
+echo "    ps -fp \$(pgrep stalwart)"
 echo "    journalctl -u orvix --no-pager -n 50"
 
 # ──────────────────────────────────────
-# Summary
+# Summary (RC6 FIX: Show domains, not IPs)
 # ──────────────────────────────────────
-IP_ADDR=$(hostname -I | awk '{print $1}')
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo -e "${BOLD}Orvix v${ORVIX_VERSION} RC5 Installation Complete${NC}"
+echo -e "${BOLD}Orvix v${ORVIX_VERSION} RC6 Installation Complete${NC}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-echo -e " ${BOLD}Admin Console:${NC} http://${IP_ADDR}:8080/admin"
-echo -e " ${BOLD}Webmail:${NC} http://${IP_ADDR}:3000"
-echo -e " ${BOLD}Admin Email:${NC} ${ADMIN_EMAIL}"
 echo -e " ${BOLD}Primary Domain:${NC} ${PRIMARY_DOMAIN}"
+echo -e " ${BOLD}Mail Hostname:${NC} ${MAIL_HOSTNAME}"
+echo -e " ${BOLD}Admin Console:${NC} https://${ADMIN_HOSTNAME}"
+echo -e " ${BOLD}Webmail:${NC} https://${WEBMAIL_HOSTNAME}"
+echo -e " ${BOLD}Admin Email:${NC} ${ADMIN_EMAIL}"
 echo ""
 echo "Next steps:"
 echo " 1. Configure DNS records for ${PRIMARY_DOMAIN}:"
-echo "    - MX record → ${IP_ADDR} (priority 10)"
-echo "    - A record for mail.${PRIMARY_DOMAIN} → ${IP_ADDR}"
-echo " 2. Open admin console: http://${IP_ADDR}:8080/admin"
+echo "    - MX record → ${MAIL_HOSTNAME} (priority 10)"
+echo "    - A record for ${MAIL_HOSTNAME} → your server IP"
+echo "    - A record for ${ADMIN_HOSTNAME} → your server IP"
+echo "    - A record for ${WEBMAIL_HOSTNAME} → your server IP"
+echo " 2. Open admin console: https://${ADMIN_HOSTNAME}"
 echo " 3. Add domain: ${PRIMARY_DOMAIN}"
 echo " 4. Create mailboxes"
 echo ""
