@@ -1,15 +1,22 @@
 # Orvix Security Audit — Updated
 
 ## Release Status
-- Release package: `release/orvix-v1.0.0-linux-amd64.tar.gz`
-- Archive size: 9,445,131 bytes (9.4 MB)
-- Archive SHA256: `79226CBEABFF3F9DB0079B1B5EDFA0A4A3F949454324270DD6B72853E08EA18B`
-- Binary SHA256: `F64406D238BDB037D103950AA80A41E11E7123AC3BDB40A84209EBFB30EE9299`
-- Upload manifest: `release/UPLOAD_MANIFEST.md`
+- **RC3 Release**: `release/orvix-v1.0.2-linux-amd64.tar.gz`
+- Archive SHA256: `7a00f2fb67b86e741887fe836d0f20523618536df4473f1af0e1509b3261b4c1`
+- Binary SHA256: `d348b1050322da89a61544f3023cf29ee2b462a24e4f8ab6a278182cca3814ee`
+- Git Commit: `1849e4e`
+- GitHub Release: https://github.com/reachfm/orvix/releases/tag/v1.0.2
 - VPS test plan: `VPS_TEST_PLAN.md`
 - Release audit: `RELEASE_AUDIT.md`
 - Installer: Production-grade for Ubuntu 22.04+/Debian 12+
 - Stalwart: Managed External — downloaded by installer
+
+### RC3 Security Fixes
+- **CRITICAL**: Removed hardcoded default credentials (admin@orvix.local / admin123)
+- Admin credentials MUST be provided via environment variables:
+  - `ORVIX_ADMIN_EMAIL`
+  - `ORVIX_ADMIN_PASSWORD`
+- Installer prompts for admin email and password during installation
 
 ## Build Status
 - `go build ./...` — PASS
