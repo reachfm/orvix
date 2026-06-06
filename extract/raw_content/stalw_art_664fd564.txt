@@ -1,0 +1,1348 @@
+# Source URL: https://stalw.art/docs/install/platform/linux
+# Content Length: 68548 characters
+# Extracted at: 2026-06-07 01:30:02
+#============================================================
+
+
+ Linux / MacOS | Stalwart        
+
+  [Skip to content](#_top)     
+
+* Platform ▾    Platform
+  + [Mail Server](/mail-server)
+  + [Collaboration](/collaboration)
+  + [MTA](/mta)
+  + [Anti-spam](/anti-spam)
+  + [Architecture](/architecture)
+  + [Integrations](/integrations)  Solutions
+  + [Managed e-mail](/managed-email)
+  + [Migration](/migration)
+* Editions ▾    Editions
+  + [Enterprise](/enterprise)
+  + [Community](/open-source)
+  + [Compare](/compare)
+  + [Pricing](/pricing)
+  + [Evaluate](https://license.stalw.art/trial)
+* Documentation ▾    Install
+  + [Linux / macOS](/docs/install/platform/linux)
+  + [Windows](/docs/install/platform/windows)
+  + [Docker](/docs/install/platform/docker)  Overview
+  + [Get started](/docs/install/)
+  + [Configuration](/docs/configuration/)
+  + [Management](/docs/management/)
+  + [Development](/docs/development/)
+  + [FAQ](/docs/faq)  Settings
+  + [Server](/docs/server/)
+  + [Storage](/docs/storage/)
+  + [Access Control](/docs/auth/)
+  + [Encryption](/docs/encryption/)
+  + [MTA](/docs/mta/)
+  + [Email Store](/docs/email/)
+  + [Collaboration](/docs/collaboration/)
+  + [Spam & Phishing](/docs/spamfilter/)
+  + [Sieve](/docs/sieve/)
+  + [Clustering](/docs/cluster/)
+  + [Telemetry](/docs/telemetry/)
+* Support ▾    Support
+  + [Overview](/support)
+  + [Support Portal](https://support.stalw.art)
+* Company ▾    Company
+  + [About](/about)
+  + [Blog](/blog)
+  + [Contact](/contact)
+  + [Legal](/legal)
+     Search  `CtrlK`      Cancel                         Stalwart       Platform
+
+* [Mail Server](/mail-server)
+* [Collaboration](/collaboration)
+* [MTA](/mta)
+* [Anti-spam](/anti-spam)
+* [Architecture](/architecture)
+* [Integrations](/integrations)
+  Editions
+
+* [Enterprise](/enterprise)
+* [Community](/open-source)
+* [Compare](/compare)
+* [Pricing](/pricing)
+* [Evaluate](https://license.stalw.art/trial)
+  Solutions
+
+* [Managed e-mail](/managed-email)
+* [Migration](/migration)
+  Documentation
+
+* [Get started](/docs/install/)
+* [Configuration](/docs/configuration/)
+* [Management](/docs/management/)
+* [Development](/docs/development/)
+* [FAQ](/docs/faq)
+* [Linux / macOS](/docs/install/platform/linux)
+* [Windows](/docs/install/platform/windows)
+* [Docker](/docs/install/platform/docker)
+  Company
+
+* [About](/about)
+* [Blog](/blog)
+* [Contact](/contact)
+* [Legal](/legal)
+   [[email protected]](/cdn-cgi/l/email-protection#ee868b828281ae9d9a8f8299c08f9c9a)
+
+* [GitHub](https://github.com/stalwartlabs/stalwart)
+* [Twitter](https://twitter.com/stalwartlabs/)
+* [Mastodon](https://mastodon.social/@stalwartlabs)
+* [Discord](https://discord.com/servers/stalwart-923615863037390889)
+* [Reddit](https://www.reddit.com/r/stalwartlabs)
+* [Matrix](https://matrix.to/#/#stalwart:matrix.org)
+                 
+
+* [Stalwart Blog](/blog/)
+* Getting started    
+  + [Welcome to Stalwart](/docs/install/)
+  + Installation    
+    - [Linux / MacOS](/docs/install/platform/linux/)
+    - [Windows](/docs/install/platform/windows/)
+    - [Docker](/docs/install/platform/docker/)
+  + [System Requirements](/docs/install/requirements/)
+  + [Choosing a database](/docs/install/store/)
+  + [Choosing a directory](/docs/install/directory/)
+  + [Setting up DNS](/docs/install/dns/)
+  + [Securing your server](/docs/install/security/)
+  + [Performance tuning](/docs/install/performance/)
+  + [Upgrading](/docs/install/upgrade/)
+* Configuration    
+  + [Overview](/docs/configuration/)
+  + [Bootstrap mode](/docs/configuration/bootstrap-mode/)
+  + [Recovery mode](/docs/configuration/recovery-mode/)
+  + [Environment variables](/docs/configuration/environment-variables/)
+  + [Declarative deployments](/docs/configuration/declarative-deployments/)
+  + Expressions    
+    - [Overview](/docs/configuration/expressions/)
+    - [Operators](/docs/configuration/expressions/operators/)
+    - [Functions](/docs/configuration/expressions/functions/)
+    - [Values](/docs/configuration/expressions/values/)
+  + [Variables](/docs/configuration/variables/)
+* Server settings    
+  + [General](/docs/server/general/)
+  + [Listeners](/docs/server/listener/)
+  + TLS    
+    - [Overview](/docs/server/tls/)
+    - [Certificates](/docs/server/tls/certificates/)
+    - ACME    
+      * [Overview](/docs/server/tls/acme/)
+      * [Challenge Types](/docs/server/tls/acme/challenges/)
+      * [Configuration](/docs/server/tls/acme/configuration/)
+  + Reverse Proxy    
+    - [Overview](/docs/server/reverse-proxy/)
+    - [Proxy Protocol](/docs/server/reverse-proxy/proxy-protocol/)
+    - [Traefik](/docs/server/reverse-proxy/traefik/)
+    - [Caddy](/docs/server/reverse-proxy/caddy/)
+    - [HAProxy](/docs/server/reverse-proxy/haproxy/)
+    - [NGINX](/docs/server/reverse-proxy/nginx/)
+  + [Auto-banning](/docs/server/auto-ban/)
+  + DNS    
+    - [Overview](/docs/server/dns/)
+    - [DNS Providers](/docs/server/dns/provider/)
+    - [DNS Resolver](/docs/server/dns/resolver/)
+  + [Autoconfig](/docs/server/autoconfig/)
+  + [ASN and GeoIP](/docs/server/asn/)
+  + [AI Models](/docs/server/ai-models/)
+  + [Caching](/docs/server/cache/)
+  + [Enterprise License](/docs/server/enterprise/)
+* Storage settings    
+  + [Overview](/docs/storage/)
+  + [Data store](/docs/storage/data/)
+  + [Blob store](/docs/storage/blob/)
+  + [Search store](/docs/storage/fts/)
+  + [In-memory store](/docs/storage/in-memory/)
+  + Backends    
+    - [Overview](/docs/storage/backends/)
+    - [RocksDB](/docs/storage/backends/rocksdb/)
+    - [FoundationDB](/docs/storage/backends/foundationdb/)
+    - [PostgreSQL](/docs/storage/backends/postgresql/)
+    - [MySQL / MariaDB](/docs/storage/backends/mysql/)
+    - [SQLite](/docs/storage/backends/sqlite/)
+    - [S3-compatible](/docs/storage/backends/s3/)
+    - [Filesystem](/docs/storage/backends/filesystem/)
+    - [ElasticSearch](/docs/storage/backends/elasticsearch/)
+    - [Meilisearch](/docs/storage/backends/meilisearch/)
+    - [Redis](/docs/storage/backends/redis/)
+    - [Azure Blob Storage](/docs/storage/backends/azure/)
+    - Composite    
+      * [Overview](/docs/storage/backends/composite/)
+      * [Sharded In-Memory Store](/docs/storage/backends/composite/sharded-in-memory/)
+      * [Sharded Blob Store](/docs/storage/backends/composite/sharded-blob/)
+      * [SQL Read Replicas](/docs/storage/backends/composite/sql-replica/)
+  + Lookup lists    
+    - [Overview](/docs/storage/lookup/)
+    - [Local](/docs/storage/lookup/local/)
+    - [Remote](/docs/storage/lookup/remote/)
+* Access Control    
+  + [Overview](/docs/auth/)
+  + Principals    
+    - [Overview](/docs/auth/principals/)
+    - [Individual](/docs/auth/principals/individual/)
+    - [Group](/docs/auth/principals/group/)
+  + Authentication    
+    - [Overview](/docs/auth/authentication/)
+    - [Passwords](/docs/auth/authentication/password/)
+    - [Two-Factor Authentication](/docs/auth/authentication/2fa/)
+    - [App Passwords](/docs/auth/authentication/app-password/)
+    - [API Keys](/docs/auth/authentication/api-key/)
+  + Authorization    
+    - [Overview](/docs/auth/authorization/)
+    - [Permissions](/docs/auth/authorization/permissions/)
+    - [Roles](/docs/auth/authorization/roles/)
+    - [Administrators](/docs/auth/authorization/administrator/)
+    - [Tenants](/docs/auth/authorization/tenants/)
+    - [Quotas](/docs/auth/authorization/quotas/)
+  + OAuth    
+    - [Overview](/docs/auth/oauth/)
+    - [Authorization Flows](/docs/auth/oauth/flows/)
+    - [Tokens](/docs/auth/oauth/tokens/)
+    - [Dynamic Registration](/docs/auth/oauth/client-registration/)
+    - [Interoperability](/docs/auth/oauth/interoperability/)
+    - [Endpoints](/docs/auth/oauth/endpoints/)
+    - [OAuth Clients](/docs/auth/oauth/oauth-client/)
+  + OpenID Connect    
+    - [Overview](/docs/auth/openid/)
+    - [ID Tokens](/docs/auth/openid/id-tokens/)
+    - [OIDC Provider](/docs/auth/openid/provider/)
+    - [Endpoints](/docs/auth/openid/endpoints/)
+  + Directories    
+    - [Overview](/docs/auth/backend/)
+    - [Internal](/docs/auth/backend/internal/)
+    - [SQL Database](/docs/auth/backend/sql/)
+    - [LDAP Server](/docs/auth/backend/ldap/)
+    - [OpenID Connect](/docs/auth/backend/oidc/)
+* Domains    
+  + [Overview](/docs/domains/)
+  + [DNS records](/docs/domains/dns-records/)
+  + [TLS certificates](/docs/domains/tls-certificates/)
+  + [DKIM key rotation](/docs/domains/dkim-rotation/)
+* HTTP settings    
+  + [Overview](/docs/http/)
+  + [Settings](/docs/http/settings/)
+  + JMAP    
+    - [Overview](/docs/http/jmap/)
+    - [Protocol](/docs/http/jmap/protocol/)
+    - [WebSockets](/docs/http/jmap/websockets/)
+    - [Push notifications](/docs/http/jmap/push/)
+  + WebDAV    
+    - [Overview](/docs/http/webdav/)
+    - [Protocol](/docs/http/webdav/protocol/)
+  + [Access Control](/docs/http/access-control/)
+  + [Security](/docs/http/security/)
+  + [Rate limiting](/docs/http/ratelimit/)
+  + [Form Handling](/docs/http/form-submission/)
+* Email settings    
+  + [Overview](/docs/email/)
+  + Settings    
+    - [JMAP for Mail](/docs/email/settings/jmap/)
+    - [IMAP and POP3](/docs/email/settings/imap/)
+    - [Rate limiting](/docs/email/settings/ratelimit/)
+    - [Maintenance](/docs/email/settings/maintenance/)
+  + Management    
+    - [Mailing lists](/docs/email/management/mailing-lists/)
+    - [Masked email](/docs/email/management/masked-email/)
+* MTA settings    
+  + [Overview](/docs/mta/)
+  + Inbound    
+    - [Overview](/docs/mta/inbound/)
+    - [Connect stage](/docs/mta/inbound/connect/)
+    - [EHLO stage](/docs/mta/inbound/ehlo/)
+    - [MAIL stage](/docs/mta/inbound/mail/)
+    - [RCPT stage](/docs/mta/inbound/rcpt/)
+    - [DATA stage](/docs/mta/inbound/data/)
+    - [AUTH stage](/docs/mta/inbound/auth/)
+  + Outbound    
+    - [Overview](/docs/mta/outbound/)
+    - [Strategies](/docs/mta/outbound/strategy/)
+    - [Queues](/docs/mta/outbound/queue/)
+    - [Scheduling](/docs/mta/outbound/schedule/)
+    - [Routing](/docs/mta/outbound/routing/)
+    - [Connection](/docs/mta/outbound/connection/)
+    - [TLS](/docs/mta/outbound/tls/)
+    - [Rate limits](/docs/mta/outbound/rate-limit/)
+    - [Quotas](/docs/mta/outbound/quota/)
+  + Filtering    
+    - [Overview](/docs/mta/filter/)
+    - [Spam filter](/docs/mta/filter/spam/)
+    - [Sieve scripting](/docs/mta/filter/sieve/)
+    - [Milter filters](/docs/mta/filter/milter/)
+    - [MTA Hooks](/docs/mta/filter/mtahooks/)
+  + Rewriting    
+    - [Overview](/docs/mta/rewrite/)
+    - [Envelope](/docs/mta/rewrite/address/)
+    - [Headers](/docs/mta/rewrite/headers/)
+    - [Body & Attachments](/docs/mta/rewrite/content/)
+  + Sender Authentication    
+    - DKIM    
+      * [Overview](/docs/mta/authentication/dkim/)
+      * [Signing](/docs/mta/authentication/dkim/sign/)
+      * [Verifying](/docs/mta/authentication/dkim/verify/)
+    - [SPF](/docs/mta/authentication/spf/)
+    - [ARC](/docs/mta/authentication/arc/)
+    - [DMARC](/docs/mta/authentication/dmarc/)
+    - [Reverse IP](/docs/mta/authentication/iprev/)
+  + Transport Security    
+    - [Overview](/docs/mta/transport-security/)
+    - [DANE](/docs/mta/transport-security/dane/)
+    - [MTA-STS](/docs/mta/transport-security/mta-sts/)
+  + Reports    
+    - [Overview](/docs/mta/reports/)
+    - [Delivery Notifications](/docs/mta/reports/dsn/)
+    - [DKIM](/docs/mta/reports/dkim/)
+    - [SPF](/docs/mta/reports/spf/)
+    - [DMARC](/docs/mta/reports/dmarc/)
+    - [TLS](/docs/mta/reports/tls/)
+    - [Analysis](/docs/mta/reports/analysis/)
+  + [Management](/docs/mta/management/)
+* Collaboration settings    
+  + [Overview](/docs/collaboration/)
+  + [WebDAV](/docs/collaboration/webdav/)
+  + [Calendar](/docs/collaboration/calendar/)
+  + [Scheduling](/docs/collaboration/scheduling/)
+  + [Notifications](/docs/collaboration/notifications/)
+  + [Contacts](/docs/collaboration/contact/)
+  + [File Storage](/docs/collaboration/file-storage/)
+  + [Sharing](/docs/collaboration/sharing/)
+* Encryption settings    
+  + [Overview](/docs/encryption/)
+  + [Management](/docs/encryption/manage/)
+  + [S/MIME](/docs/encryption/smime/)
+  + [OpenPGP](/docs/encryption/pgp/)
+* Spam & Phishing filter    
+  + [Overview](/docs/spamfilter/)
+  + Settings    
+    - [Overview](/docs/spamfilter/settings/general/)
+    - [Scores](/docs/spamfilter/settings/scores/)
+    - [MIME types](/docs/spamfilter/settings/mime-types/)
+    - [Domain lists](/docs/spamfilter/settings/domain-lists/)
+  + Linear Classifier    
+    - [Overview](/docs/spamfilter/classifier/)
+    - [Training](/docs/spamfilter/classifier/training/)
+    - [Hyperparameters](/docs/spamfilter/classifier/hyperparameters/)
+    - [Learning](/docs/spamfilter/classifier/autolearn/)
+  + [LLM classifier](/docs/spamfilter/llm/)
+  + [Rules](/docs/spamfilter/rules/)
+  + [DNS blocklists](/docs/spamfilter/dnsbl/)
+  + [DMARC analysis](/docs/spamfilter/dmarc/)
+  + [Phishing protection](/docs/spamfilter/phishing/)
+  + [Collaborative digests](/docs/spamfilter/digests/)
+  + [Trusted senders](/docs/spamfilter/trusted/)
+  + [Greylisting](/docs/spamfilter/greylist/)
+  + [Spamtrap](/docs/spamfilter/spamtrap/)
+* Sieve scripting    
+  + [Overview](/docs/sieve/)
+  + Settings    
+    - [Overview](/docs/sieve/interpreter/)
+    - [Trusted Interpreter](/docs/sieve/interpreter/trusted/)
+    - [Untrusted Interpreter](/docs/sieve/interpreter/untrusted/)
+  + [Variables](/docs/sieve/variables/)
+  + [Expressions](/docs/sieve/expressions/)
+  + [LLM Integration](/docs/sieve/llm/)
+  + [ManageSieve](/docs/sieve/managesieve/)
+  + [JMAP for Sieve](/docs/sieve/jmap/)
+  + [Reference](/docs/sieve/reference/)
+  + [Examples](/docs/sieve/examples/)
+* Clustering & HA    
+  + [Overview](/docs/cluster/)
+  + Deployment    
+    - [Overview](/docs/cluster/deployment/)
+    - [Sizing](/docs/cluster/deployment/sizing/)
+    - [Storage](/docs/cluster/deployment/storage/)
+    - [Topology](/docs/cluster/deployment/topology/)
+  + Configuration    
+    - [Overview](/docs/cluster/configuration/)
+    - [Node ID](/docs/cluster/configuration/node-id/)
+    - [Coordination mechanism](/docs/cluster/configuration/coordination/)
+    - [Load balancing](/docs/cluster/configuration/load-balancing/)
+    - [Roles](/docs/cluster/configuration/roles/)
+  + Coordination    
+    - [Overview](/docs/cluster/coordination/)
+    - [Peer-to-Peer](/docs/cluster/coordination/peer-to-peer/)
+    - [Apache Kafka / Redpanda](/docs/cluster/coordination/kafka/)
+    - [NATS](/docs/cluster/coordination/nats/)
+    - [Redis](/docs/cluster/coordination/redis/)
+  + Orchestration    
+    - [Overview](/docs/cluster/orchestration/)
+    - [Kubernetes](/docs/cluster/orchestration/kubernetes/)
+    - [Docker Swarm](/docs/cluster/orchestration/docker-swarm/)
+    - [Apache Mesos](/docs/cluster/orchestration/apache-mesos/)
+* Telemetry    
+  + [Overview](/docs/telemetry/)
+  + [Events](/docs/telemetry/events/)
+  + Tracing & Logging    
+    - [Overview](/docs/telemetry/tracing/)
+    - [OpenTelemetry](/docs/telemetry/tracing/opentelemetry/)
+    - [Log file](/docs/telemetry/tracing/log/)
+    - [Console](/docs/telemetry/tracing/console/)
+    - [Journal](/docs/telemetry/tracing/journal/)
+  + Metrics    
+    - [Overview](/docs/telemetry/metrics/)
+    - [OpenTelemetry](/docs/telemetry/metrics/opentelemetry/)
+    - [Prometheus](/docs/telemetry/metrics/prometheus/)
+  + [Webhooks](/docs/telemetry/webhooks/)
+  + [Alerts](/docs/telemetry/alerts/)
+  + [Live Telemetry](/docs/telemetry/live/)
+  + [History](/docs/telemetry/history/)
+  + [Management](/docs/telemetry/management/)
+* Applications    
+  + [Overview](/docs/applications/)
+  + [Updates](/docs/applications/update/)
+* Management    
+  + [Overview](/docs/management/)
+  + Web-based Administration    
+    - [Overview](/docs/management/webui/)
+    - [Account Manager](/docs/management/webui/account-manager/)
+    - [Branding](/docs/management/webui/branding/)
+  + [Tasks](/docs/management/tasks/)
+  + [Actions](/docs/management/actions/)
+  + Command Line Interface    
+    - [Overview](/docs/management/cli/)
+    - [Exploring the schema](/docs/management/cli/describe/)
+    - [Fetching a single object](/docs/management/cli/get/)
+    - [Searching and listing](/docs/management/cli/query/)
+    - [Creating objects](/docs/management/cli/create/)
+    - [Updating objects](/docs/management/cli/update/)
+    - [Removing objects](/docs/management/cli/delete/)
+    - [Declarative bulk operations](/docs/management/cli/apply/)
+    - [Exporting server state](/docs/management/cli/snapshot/)
+  + Maintenance    
+    - [Database Console](/docs/management/maintenance/database/)
+    - [Database Migration](/docs/management/maintenance/migration/)
+  + [Troubleshooting](/docs/management/troubleshoot/)
+* Development    
+  + [Database Internals](/docs/development/database/)
+  + [Compiling Stalwart](/docs/development/compile/)
+  + [Testing Stalwart](/docs/development/test/)
+  + [RFCs](/docs/development/rfcs/)
+  + [URN Namespace](/docs/development/urn/)
+  + [API Endpoints](/docs/development/api/)
+* Schema reference    
+  + [Overview](/docs/ref/)
+  + Objects    
+    - [Account](/docs/ref/object/account/)
+    - [AccountPassword](/docs/ref/object/account-password/)
+    - [AccountSettings](/docs/ref/object/account-settings/)
+    - [AcmeProvider](/docs/ref/object/acme-provider/)
+    - [Action](/docs/ref/object/action/)
+    - [AddressBook](/docs/ref/object/address-book/)
+    - [AiModel](/docs/ref/object/ai-model/)
+    - [Alert](/docs/ref/object/alert/)
+    - [AllowedIp](/docs/ref/object/allowed-ip/)
+    - [ApiKey](/docs/ref/object/api-key/)
+    - [Application](/docs/ref/object/application/)
+    - [AppPassword](/docs/ref/object/app-password/)
+    - [ArchivedItem](/docs/ref/object/archived-item/)
+    - [ArfExternalReport](/docs/ref/object/arf-external-report/)
+    - [Asn](/docs/ref/object/asn/)
+    - [Authentication](/docs/ref/object/authentication/)
+    - [BlobStore](/docs/ref/object/blob-store/)
+    - [BlockedIp](/docs/ref/object/blocked-ip/)
+    - [Bootstrap](/docs/ref/object/bootstrap/)
+    - [Cache](/docs/ref/object/cache/)
+    - [Calendar](/docs/ref/object/calendar/)
+    - [CalendarAlarm](/docs/ref/object/calendar-alarm/)
+    - [CalendarScheduling](/docs/ref/object/calendar-scheduling/)
+    - [Certificate](/docs/ref/object/certificate/)
+    - [ClusterNode](/docs/ref/object/cluster-node/)
+    - [ClusterRole](/docs/ref/object/cluster-role/)
+    - [Coordinator](/docs/ref/object/coordinator/)
+    - [DataRetention](/docs/ref/object/data-retention/)
+    - [DataStore](/docs/ref/object/data-store/)
+    - [Directory](/docs/ref/object/directory/)
+    - [DkimReportSettings](/docs/ref/object/dkim-report-settings/)
+    - [DkimSignature](/docs/ref/object/dkim-signature/)
+    - [DmarcExternalReport](/docs/ref/object/dmarc-external-report/)
+    - [DmarcInternalReport](/docs/ref/object/dmarc-internal-report/)
+    - [DmarcReportSettings](/docs/ref/object/dmarc-report-settings/)
+    - [DnsResolver](/docs/ref/object/dns-resolver/)
+    - [DnsServer](/docs/ref/object/dns-server/)
+    - [Domain](/docs/ref/object/domain/)
+    - [DsnReportSettings](/docs/ref/object/dsn-report-settings/)
+    - [Email](/docs/ref/object/email/)
+    - [Enterprise](/docs/ref/object/enterprise/)
+    - [EventTracingLevel](/docs/ref/object/event-tracing-level/)
+    - [FileStorage](/docs/ref/object/file-storage/)
+    - [Http](/docs/ref/object/http/)
+    - [HttpForm](/docs/ref/object/http-form/)
+    - [HttpLookup](/docs/ref/object/http-lookup/)
+    - [Imap](/docs/ref/object/imap/)
+    - [InMemoryStore](/docs/ref/object/in-memory-store/)
+    - [Jmap](/docs/ref/object/jmap/)
+    - [Log](/docs/ref/object/log/)
+    - [MailingList](/docs/ref/object/mailing-list/)
+    - [MaskedEmail](/docs/ref/object/masked-email/)
+    - [MemoryLookupKey](/docs/ref/object/memory-lookup-key/)
+    - [MemoryLookupKeyValue](/docs/ref/object/memory-lookup-key-value/)
+    - [Metric](/docs/ref/object/metric/)
+    - [Metrics](/docs/ref/object/metrics/)
+    - [MetricsStore](/docs/ref/object/metrics-store/)
+    - [MtaConnectionStrategy](/docs/ref/object/mta-connection-strategy/)
+    - [MtaDeliverySchedule](/docs/ref/object/mta-delivery-schedule/)
+    - [MtaExtensions](/docs/ref/object/mta-extensions/)
+    - [MtaHook](/docs/ref/object/mta-hook/)
+    - [MtaInboundSession](/docs/ref/object/mta-inbound-session/)
+    - [MtaInboundThrottle](/docs/ref/object/mta-inbound-throttle/)
+    - [MtaMilter](/docs/ref/object/mta-milter/)
+    - [MtaOutboundStrategy](/docs/ref/object/mta-outbound-strategy/)
+    - [MtaOutboundThrottle](/docs/ref/object/mta-outbound-throttle/)
+    - [MtaQueueQuota](/docs/ref/object/mta-queue-quota/)
+    - [MtaRoute](/docs/ref/object/mta-route/)
+    - [MtaStageAuth](/docs/ref/object/mta-stage-auth/)
+    - [MtaStageConnect](/docs/ref/object/mta-stage-connect/)
+    - [MtaStageData](/docs/ref/object/mta-stage-data/)
+    - [MtaStageEhlo](/docs/ref/object/mta-stage-ehlo/)
+    - [MtaStageMail](/docs/ref/object/mta-stage-mail/)
+    - [MtaStageRcpt](/docs/ref/object/mta-stage-rcpt/)
+    - [MtaSts](/docs/ref/object/mta-sts/)
+    - [MtaTlsStrategy](/docs/ref/object/mta-tls-strategy/)
+    - [MtaVirtualQueue](/docs/ref/object/mta-virtual-queue/)
+    - [NetworkListener](/docs/ref/object/network-listener/)
+    - [OAuthClient](/docs/ref/object/o-auth-client/)
+    - [OidcProvider](/docs/ref/object/oidc-provider/)
+    - [PublicKey](/docs/ref/object/public-key/)
+    - [QueuedMessage](/docs/ref/object/queued-message/)
+    - [ReportSettings](/docs/ref/object/report-settings/)
+    - [Role](/docs/ref/object/role/)
+    - [Search](/docs/ref/object/search/)
+    - [SearchStore](/docs/ref/object/search-store/)
+    - [Security](/docs/ref/object/security/)
+    - [SenderAuth](/docs/ref/object/sender-auth/)
+    - [Sharing](/docs/ref/object/sharing/)
+    - [SieveSystemInterpreter](/docs/ref/object/sieve-system-interpreter/)
+    - [SieveSystemScript](/docs/ref/object/sieve-system-script/)
+    - [SieveUserInterpreter](/docs/ref/object/sieve-user-interpreter/)
+    - [SieveUserScript](/docs/ref/object/sieve-user-script/)
+    - [SpamClassifier](/docs/ref/object/spam-classifier/)
+    - [SpamDnsblServer](/docs/ref/object/spam-dnsbl-server/)
+    - [SpamDnsblSettings](/docs/ref/object/spam-dnsbl-settings/)
+    - [SpamFileExtension](/docs/ref/object/spam-file-extension/)
+    - [SpamLlm](/docs/ref/object/spam-llm/)
+    - [SpamPyzor](/docs/ref/object/spam-pyzor/)
+    - [SpamRule](/docs/ref/object/spam-rule/)
+    - [SpamSettings](/docs/ref/object/spam-settings/)
+    - [SpamTag](/docs/ref/object/spam-tag/)
+    - [SpamTrainingSample](/docs/ref/object/spam-training-sample/)
+    - [SpfReportSettings](/docs/ref/object/spf-report-settings/)
+    - [StoreLookup](/docs/ref/object/store-lookup/)
+    - [SystemSettings](/docs/ref/object/system-settings/)
+    - [Task](/docs/ref/object/task/)
+    - [TaskManager](/docs/ref/object/task-manager/)
+    - [Tenant](/docs/ref/object/tenant/)
+    - [TlsExternalReport](/docs/ref/object/tls-external-report/)
+    - [TlsInternalReport](/docs/ref/object/tls-internal-report/)
+    - [TlsReportSettings](/docs/ref/object/tls-report-settings/)
+    - [Trace](/docs/ref/object/trace/)
+    - [Tracer](/docs/ref/object/tracer/)
+    - [TracingStore](/docs/ref/object/tracing-store/)
+    - [WebDav](/docs/ref/object/web-dav/)
+    - [WebHook](/docs/ref/object/web-hook/)
+  + Enums    
+    - [DnsServerBootstrapType](/docs/ref/enum/dns-server-bootstrap-type/)
+    - [DnsServerType](/docs/ref/enum/dns-server-type/)
+    - [Key](/docs/ref/enum/key/)
+    - [Locale](/docs/ref/enum/locale/)
+    - [TimeZone](/docs/ref/enum/time-zone/)
+  + Expressions    
+    - Variables    
+      * [HttpVariable](/docs/ref/expression/variable/http-variable/)
+      * [MtaConnectionVariable](/docs/ref/expression/variable/mta-connection-variable/)
+      * [MtaEhloVariable](/docs/ref/expression/variable/mta-ehlo-variable/)
+      * [MtaMailFromVariable](/docs/ref/expression/variable/mta-mail-from-variable/)
+      * [MtaQueueHostVariable](/docs/ref/expression/variable/mta-queue-host-variable/)
+      * [MtaQueueRcptVariable](/docs/ref/expression/variable/mta-queue-rcpt-variable/)
+      * [MtaQueueSenderVariable](/docs/ref/expression/variable/mta-queue-sender-variable/)
+      * [MtaRcptDomainVariable](/docs/ref/expression/variable/mta-rcpt-domain-variable/)
+      * [MtaRcptToVariable](/docs/ref/expression/variable/mta-rcpt-to-variable/)
+      * [MtaRcptVariable](/docs/ref/expression/variable/mta-rcpt-variable/)
+      * [SpamDefaultVariable](/docs/ref/expression/variable/spam-default-variable/)
+      * [SpamEmailVariable](/docs/ref/expression/variable/spam-email-variable/)
+      * [SpamGenericVariable](/docs/ref/expression/variable/spam-generic-variable/)
+      * [SpamHeaderVariable](/docs/ref/expression/variable/spam-header-variable/)
+      * [SpamIpVariable](/docs/ref/expression/variable/spam-ip-variable/)
+      * [SpamUrlVariable](/docs/ref/expression/variable/spam-url-variable/)
+    - Constants    
+      * [MtaAggregateConstant](/docs/ref/expression/constant/mta-aggregate-constant/)
+      * [MtaAuthTypeConstant](/docs/ref/expression/constant/mta-auth-type-constant/)
+      * [MtaIpStrategyConstant](/docs/ref/expression/constant/mta-ip-strategy-constant/)
+      * [MtaPriorityConstant](/docs/ref/expression/constant/mta-priority-constant/)
+      * [MtaRequireConstant](/docs/ref/expression/constant/mta-require-constant/)
+      * [MtaVerifyConstant](/docs/ref/expression/constant/mta-verify-constant/)
+  + [Permissions](/docs/ref/permissions/)
+  + [Events](/docs/ref/events/)
+  + [Metrics](/docs/ref/metrics/)
+* [FAQ](/docs/faq/)
+* v0.15 (archived)    
+  + Getting started    
+    - [Welcome to Stalwart](/docs/0.15/install/get-started/)
+    - [System Requirements](/docs/0.15/install/requirements/)
+    - [Choosing a database](/docs/0.15/install/store/)
+    - Installation    
+      * [Linux / MacOS](/docs/0.15/install/platform/linux/)
+      * [Windows](/docs/0.15/install/platform/windows/)
+      * [Docker](/docs/0.15/install/platform/docker/)
+    - [Choosing a directory](/docs/0.15/install/directory/)
+    - [Setting up DNS](/docs/0.15/install/dns/)
+    - [Securing your server](/docs/0.15/install/security/)
+    - [Performance tuning](/docs/0.15/install/performance/)
+    - [Upgrading](/docs/0.15/install/upgrade/)
+  + Configuration    
+    - [Overview](/docs/0.15/configuration/)
+    - [Macros](/docs/0.15/configuration/macros/)
+    - Values    
+      * [String](/docs/0.15/configuration/values/string/)
+      * [Integer](/docs/0.15/configuration/values/integer/)
+      * [Boolean](/docs/0.15/configuration/values/boolean/)
+      * [IP Address](/docs/0.15/configuration/values/ip-address/)
+      * [Size](/docs/0.15/configuration/values/size/)
+      * [Duration](/docs/0.15/configuration/values/duration/)
+      * [Rate](/docs/0.15/configuration/values/rate/)
+      * [Array](/docs/0.15/configuration/values/array/)
+      * [Cron](/docs/0.15/configuration/values/cron/)
+    - Expressions    
+      * [Overview](/docs/0.15/configuration/expressions/)
+      * [Operators](/docs/0.15/configuration/expressions/operators/)
+      * [Functions](/docs/0.15/configuration/expressions/functions/)
+      * [Values](/docs/0.15/configuration/expressions/values/)
+    - [Variables](/docs/0.15/configuration/variables/)
+  + Server settings    
+    - [General](/docs/0.15/server/general/)
+    - [Listeners](/docs/0.15/server/listener/)
+    - TLS    
+      * [Overview](/docs/0.15/server/tls/)
+      * [Certificates](/docs/0.15/server/tls/certificates/)
+      * ACME    
+        + [Overview](/docs/0.15/server/tls/acme/)
+        + [Challenge Types](/docs/0.15/server/tls/acme/challenges/)
+        + [Configuration](/docs/0.15/server/tls/acme/configuration/)
+    - Reverse Proxy    
+      * [Overview](/docs/0.15/server/reverse-proxy/)
+      * [Proxy Protocol](/docs/0.15/server/reverse-proxy/proxy-protocol/)
+      * [Traefik](/docs/0.15/server/reverse-proxy/traefik/)
+      * [Caddy](/docs/0.15/server/reverse-proxy/caddy/)
+      * [HAProxy](/docs/0.15/server/reverse-proxy/haproxy/)
+      * [NGINX](/docs/0.15/server/reverse-proxy/nginx/)
+    - [Auto-banning](/docs/0.15/server/auto-ban/)
+    - [Autoconfig](/docs/0.15/server/autoconfig/)
+    - [ASN & GeoIP](/docs/0.15/server/asn/)
+    - [AI Models](/docs/0.15/server/ai-models/)
+    - [Caching](/docs/0.15/server/cache/)
+    - [Enterprise License](/docs/0.15/server/enterprise/)
+  + Storage settings    
+    - [Overview](/docs/0.15/storage/)
+    - [Data store](/docs/0.15/storage/data/)
+    - [Blob store](/docs/0.15/storage/blob/)
+    - [Search store](/docs/0.15/storage/fts/)
+    - [In-memory store](/docs/0.15/storage/in-memory/)
+    - Backends    
+      * [Overview](/docs/0.15/storage/backends/)
+      * [RocksDB](/docs/0.15/storage/backends/rocksdb/)
+      * [FoundationDB](/docs/0.15/storage/backends/foundationdb/)
+      * [PostgreSQL](/docs/0.15/storage/backends/postgresql/)
+      * [MySQL / MariaDB](/docs/0.15/storage/backends/mysql/)
+      * [SQLite](/docs/0.15/storage/backends/sqlite/)
+      * [S3-compatible](/docs/0.15/storage/backends/s3/)
+      * [Filesystem](/docs/0.15/storage/backends/filesystem/)
+      * [ElasticSearch](/docs/0.15/storage/backends/elasticsearch/)
+      * [Meilisearch](/docs/0.15/storage/backends/meilisearch/)
+      * [Redis](/docs/0.15/storage/backends/redis/)
+      * [Azure Blob Storage](/docs/0.15/storage/backends/azure/)
+      * Composite    
+        + [Overview](/docs/0.15/storage/backends/composite/)
+        + [Sharded In-Memory Store](/docs/0.15/storage/backends/composite/sharded-in-memory/)
+        + [Sharded Blob Store](/docs/0.15/storage/backends/composite/sharded-blob/)
+        + [SQL Read Replicas](/docs/0.15/storage/backends/composite/sql-replica/)
+    - Lookup lists    
+      * [Overview](/docs/0.15/storage/lookup/)
+      * [Local](/docs/0.15/storage/lookup/local/)
+      * [Remote](/docs/0.15/storage/lookup/remote/)
+  + Access Control    
+    - [Overview](/docs/0.15/auth/)
+    - Principals    
+      * [Overview](/docs/0.15/auth/principals/)
+      * [Individual](/docs/0.15/auth/principals/individual/)
+      * [Group](/docs/0.15/auth/principals/group/)
+      * [Mailing List](/docs/0.15/auth/principals/list/)
+      * [Domain](/docs/0.15/auth/principals/domain/)
+      * [API Key](/docs/0.15/auth/principals/api-key/)
+      * [OAuth Client](/docs/0.15/auth/principals/oauth-client/)
+    - Authentication    
+      * [Overview](/docs/0.15/auth/authentication/)
+      * [Passwords](/docs/0.15/auth/authentication/password/)
+      * [Two-Factor Authentication](/docs/0.15/auth/authentication/2fa/)
+      * [App Passwords](/docs/0.15/auth/authentication/app-password/)
+    - Authorization    
+      * [Overview](/docs/0.15/auth/authorization/)
+      * [Permissions](/docs/0.15/auth/authorization/permissions/)
+      * [Roles](/docs/0.15/auth/authorization/roles/)
+      * [Administrators](/docs/0.15/auth/authorization/administrator/)
+      * [Tenants](/docs/0.15/auth/authorization/tenants/)
+      * [Quotas](/docs/0.15/auth/authorization/quotas/)
+    - OAuth    
+      * [Overview](/docs/0.15/auth/oauth/)
+      * [Authorization Flows](/docs/0.15/auth/oauth/flows/)
+      * [Tokens](/docs/0.15/auth/oauth/tokens/)
+      * [Dynamic Registration](/docs/0.15/auth/oauth/client-registration/)
+      * [Interoperability](/docs/0.15/auth/oauth/interoperability/)
+      * [Endpoints](/docs/0.15/auth/oauth/endpoints/)
+    - OpenID Connect    
+      * [Overview](/docs/0.15/auth/openid/)
+      * [ID Tokens](/docs/0.15/auth/openid/id-tokens/)
+      * [OIDC Provider](/docs/0.15/auth/openid/provider/)
+      * [Endpoints](/docs/0.15/auth/openid/endpoints/)
+    - Directories    
+      * [Overview](/docs/0.15/auth/backend/)
+      * [Internal](/docs/0.15/auth/backend/internal/)
+      * [SQL Database](/docs/0.15/auth/backend/sql/)
+      * [LDAP Server](/docs/0.15/auth/backend/ldap/)
+      * [OpenID Connect](/docs/0.15/auth/backend/oidc/)
+      * [In-memory](/docs/0.15/auth/backend/memory/)
+      * [SMTP and IMAP](/docs/0.15/auth/backend/remote/)
+  + HTTP settings    
+    - [Overview](/docs/0.15/http/)
+    - [Settings](/docs/0.15/http/settings/)
+    - JMAP    
+      * [Overview](/docs/0.15/http/jmap/)
+      * [Protocol](/docs/0.15/http/jmap/protocol/)
+      * [WebSockets](/docs/0.15/http/jmap/websockets/)
+      * [Push notifications](/docs/0.15/http/jmap/push/)
+    - WebDAV    
+      * [Overview](/docs/0.15/http/webdav/)
+      * [Protocol](/docs/0.15/http/webdav/protocol/)
+    - [Access Control](/docs/0.15/http/access-control/)
+    - [Security](/docs/0.15/http/security/)
+    - [Rate limiting](/docs/0.15/http/ratelimit/)
+    - [Form Handling](/docs/0.15/http/form-submission/)
+  + Email settings    
+    - [Overview](/docs/0.15/email/)
+    - [JMAP for Mail](/docs/0.15/email/jmap/)
+    - [IMAP and POP3](/docs/0.15/email/imap/)
+    - [Rate limiting](/docs/0.15/email/ratelimit/)
+    - [Maintenance](/docs/0.15/email/maintenance/)
+  + MTA settings    
+    - [Overview](/docs/0.15/mta/)
+    - Inbound    
+      * [Overview](/docs/0.15/mta/inbound/)
+      * [Connect stage](/docs/0.15/mta/inbound/connect/)
+      * [EHLO stage](/docs/0.15/mta/inbound/ehlo/)
+      * [MAIL stage](/docs/0.15/mta/inbound/mail/)
+      * [RCPT stage](/docs/0.15/mta/inbound/rcpt/)
+      * [DATA stage](/docs/0.15/mta/inbound/data/)
+      * [AUTH stage](/docs/0.15/mta/inbound/auth/)
+    - Outbound    
+      * [Overview](/docs/0.15/mta/outbound/)
+      * [Strategies](/docs/0.15/mta/outbound/strategy/)
+      * [Queues](/docs/0.15/mta/outbound/queue/)
+      * [Scheduling](/docs/0.15/mta/outbound/schedule/)
+      * [Routing](/docs/0.15/mta/outbound/routing/)
+      * [Connection](/docs/0.15/mta/outbound/connection/)
+      * [TLS](/docs/0.15/mta/outbound/tls/)
+      * [DNS](/docs/0.15/mta/outbound/dns/)
+      * [Rate Limits](/docs/0.15/mta/outbound/rate-limit/)
+      * [Quotas](/docs/0.15/mta/outbound/quota/)
+    - Filtering    
+      * [Overview](/docs/0.15/mta/filter/)
+      * [Spam filter](/docs/0.15/mta/filter/spam/)
+      * [Sieve scripting](/docs/0.15/mta/filter/sieve/)
+      * [Milter filters](/docs/0.15/mta/filter/milter/)
+      * [MTA Hooks](/docs/0.15/mta/filter/mtahooks/)
+    - Rewriting    
+      * [Overview](/docs/0.15/mta/rewrite/)
+      * [Envelope](/docs/0.15/mta/rewrite/address/)
+      * [Headers](/docs/0.15/mta/rewrite/headers/)
+      * [Body & Attachments](/docs/0.15/mta/rewrite/content/)
+    - Sender Authentication    
+      * DKIM    
+        + [Overview](/docs/0.15/mta/authentication/dkim/)
+        + [Signing](/docs/0.15/mta/authentication/dkim/sign/)
+        + [Verifying](/docs/0.15/mta/authentication/dkim/verify/)
+      * [SPF](/docs/0.15/mta/authentication/spf/)
+      * [ARC](/docs/0.15/mta/authentication/arc/)
+      * [DMARC](/docs/0.15/mta/authentication/dmarc/)
+      * [Reverse IP](/docs/0.15/mta/authentication/iprev/)
+    - Transport Security    
+      * [Overview](/docs/0.15/mta/transport-security/)
+      * [DANE](/docs/0.15/mta/transport-security/dane/)
+      * [MTA-STS](/docs/0.15/mta/transport-security/mta-sts/)
+    - Reports    
+      * [Overview](/docs/0.15/mta/reports/)
+      * [Delivery Notifications](/docs/0.15/mta/reports/dsn/)
+      * [DKIM](/docs/0.15/mta/reports/dkim/)
+      * [SPF](/docs/0.15/mta/reports/spf/)
+      * [DMARC](/docs/0.15/mta/reports/dmarc/)
+      * [TLS](/docs/0.15/mta/reports/tls/)
+      * [Analysis](/docs/0.15/mta/reports/analysis/)
+  + Collaboration settings    
+    - [Overview](/docs/0.15/collaboration/)
+    - [WebDAV](/docs/0.15/collaboration/webdav/)
+    - [Calendar](/docs/0.15/collaboration/calendar/)
+    - [Scheduling](/docs/0.15/collaboration/scheduling/)
+    - [Notifications](/docs/0.15/collaboration/notifications/)
+    - [Contacts](/docs/0.15/collaboration/contact/)
+    - [File Storage](/docs/0.15/collaboration/file-storage/)
+    - [Sharing](/docs/0.15/collaboration/sharing/)
+  + Encryption settings    
+    - [Overview](/docs/0.15/encryption/)
+    - [Management](/docs/0.15/encryption/manage/)
+    - [S/MIME](/docs/0.15/encryption/smime/)
+    - [OpenPGP](/docs/0.15/encryption/pgp/)
+  + Spam & Phishing filter    
+    - [Overview](/docs/0.15/spamfilter/)
+    - Settings    
+      * [Overview](/docs/0.15/spamfilter/settings/general/)
+      * [Scores](/docs/0.15/spamfilter/settings/scores/)
+      * [MIME Types](/docs/0.15/spamfilter/settings/mime-types/)
+      * [Domain Lists](/docs/0.15/spamfilter/settings/domain-lists/)
+    - Linear Classifier    
+      * [Overview](/docs/0.15/spamfilter/classifier/)
+      * [Training](/docs/0.15/spamfilter/classifier/training/)
+      * [Hyperparameters](/docs/0.15/spamfilter/classifier/hyperparameters/)
+      * [Learning](/docs/0.15/spamfilter/classifier/autolearn/)
+    - [LLM Classifier](/docs/0.15/spamfilter/llm/)
+    - [Rules](/docs/0.15/spamfilter/rules/)
+    - [DNS Blocklists](/docs/0.15/spamfilter/dnsbl/)
+    - [DMARC Analysis](/docs/0.15/spamfilter/dmarc/)
+    - [Phishing Protection](/docs/0.15/spamfilter/phishing/)
+    - [Collaborative Digests](/docs/0.15/spamfilter/digests/)
+    - [Trusted Senders](/docs/0.15/spamfilter/trusted/)
+    - [Greylisting](/docs/0.15/spamfilter/greylist/)
+    - [Spamtrap](/docs/0.15/spamfilter/spamtrap/)
+  + Sieve scripting    
+    - [Overview](/docs/0.15/sieve/)
+    - Settings    
+      * [Overview](/docs/0.15/sieve/interpreter/)
+      * [Trusted Interpreter](/docs/0.15/sieve/interpreter/trusted/)
+      * [Untrusted Interpreter](/docs/0.15/sieve/interpreter/untrusted/)
+    - [Variables](/docs/0.15/sieve/variables/)
+    - [Expressions](/docs/0.15/sieve/expressions/)
+    - [LLM Integration](/docs/0.15/sieve/llm/)
+    - [ManageSieve](/docs/0.15/sieve/managesieve/)
+    - [JMAP for Sieve](/docs/0.15/sieve/jmap/)
+    - [Reference](/docs/0.15/sieve/reference/)
+    - [Examples](/docs/0.15/sieve/examples/)
+  + Clustering & HA    
+    - [Overview](/docs/0.15/cluster/)
+    - Deployment    
+      * [Overview](/docs/0.15/cluster/deployment/)
+      * [Sizing](/docs/0.15/cluster/deployment/sizing/)
+      * [Storage](/docs/0.15/cluster/deployment/storage/)
+      * [Topology](/docs/0.15/cluster/deployment/topology/)
+    - Configuration    
+      * [Overview](/docs/0.15/cluster/configuration/)
+      * [Node ID](/docs/0.15/cluster/configuration/node-id/)
+      * [Coordination Mechanism](/docs/0.15/cluster/configuration/coordination/)
+      * [Load Balancing](/docs/0.15/cluster/configuration/load-balancing/)
+      * [Roles](/docs/0.15/cluster/configuration/roles/)
+    - Coordination    
+      * [Overview](/docs/0.15/cluster/coordination/)
+      * [Peer-to-Peer](/docs/0.15/cluster/coordination/peer-to-peer/)
+      * [Apache Kafka / Redpanda](/docs/0.15/cluster/coordination/kafka/)
+      * [NATS](/docs/0.15/cluster/coordination/nats/)
+      * [Redis](/docs/0.15/cluster/coordination/redis/)
+    - Orchestration    
+      * [Overview](/docs/0.15/cluster/orchestration/)
+      * [Kubernetes](/docs/0.15/cluster/orchestration/kubernetes/)
+      * [Docker Swarm](/docs/0.15/cluster/orchestration/docker-swarm/)
+      * [Apache Mesos](/docs/0.15/cluster/orchestration/apache-mesos/)
+  + Telemetry    
+    - [Overview](/docs/0.15/telemetry/)
+    - [Events](/docs/0.15/telemetry/events/)
+    - Tracing & Logging    
+      * [Overview](/docs/0.15/telemetry/tracing/)
+      * [OpenTelemetry](/docs/0.15/telemetry/tracing/opentelemetry/)
+      * [Log file](/docs/0.15/telemetry/tracing/log/)
+      * [Console](/docs/0.15/telemetry/tracing/console/)
+      * [Journal](/docs/0.15/telemetry/tracing/journal/)
+    - Metrics    
+      * [Overview](/docs/0.15/telemetry/metrics/)
+      * [OpenTelemetry](/docs/0.15/telemetry/metrics/opentelemetry/)
+      * [Prometheus](/docs/0.15/telemetry/metrics/prometheus/)
+    - [Webhooks](/docs/0.15/telemetry/webhooks/)
+    - [Alerts](/docs/0.15/telemetry/alerts/)
+    - [Live Telemetry](/docs/0.15/telemetry/live/)
+    - [History](/docs/0.15/telemetry/history/)
+  + Management    
+    - [Overview](/docs/0.15/management/)
+    - Web-based Administration    
+      * [Overview](/docs/0.15/management/webadmin/)
+      * [Updates](/docs/0.15/management/webadmin/update/)
+      * [Self-service](/docs/0.15/management/webadmin/selfservice/)
+      * [Branding](/docs/0.15/management/webadmin/branding/)
+    - Command-line Interface    
+      * [Overview](/docs/0.15/management/cli/)
+      * Queue    
+        + [Messages](/docs/0.15/management/cli/queue/messages/)
+        + [Reports](/docs/0.15/management/cli/queue/reports/)
+      * Import    
+        + [From Maildir or mbox](/docs/0.15/management/cli/import/maildir/)
+        + [From JMAP](/docs/0.15/management/cli/import/jmap/)
+      * [Export](/docs/0.15/management/cli/export/)
+      * Database    
+        + [Backup](/docs/0.15/management/cli/database/backup/)
+        + [Migrate](/docs/0.15/management/cli/database/migrate/)
+        + [Maintenance](/docs/0.15/management/cli/database/maintenance/)
+      * [Configuration](/docs/0.15/management/cli/config/)
+    - [Database Console](/docs/0.15/management/database/)
+    - [Database Migration](/docs/0.15/management/migration/)
+    - [Troubleshooting](/docs/0.15/management/troubleshoot/)
+  + API Reference    
+    - Management API    
+      * [Overview](/docs/0.15/api/management/)
+      * [Endpoints](/docs/0.15/api/management/endpoints/)
+    - [Webhooks](/docs/0.15/api/webhooks/)
+    - MTA Hooks    
+      * [Overview](/docs/0.15/api/mta-hooks/)
+      * [Request](/docs/0.15/api/mta-hooks/request/)
+      * [Response](/docs/0.15/api/mta-hooks/response/)
+  + Development    
+    - [Database Internals](/docs/0.15/development/database/)
+    - [Compiling Stalwart](/docs/0.15/development/compile/)
+    - [Testing Stalwart](/docs/0.15/development/test/)
+    - [RFCs](/docs/0.15/development/rfcs/)
+    - [URN Namespace](/docs/0.15/development/urn/)
+  + [FAQ](/docs/0.15/faq/)
+    [GitHub](https://github.com/stalwartlabs)[RSS](https://stalw.art/blog/rss.xml)   [Stalwart Blog](/blog/)    Select theme   DarkLightAuto              On this page
+
+* [Overview](#_top)
+* [Run the installer](#run-the-installer)
+* [Retrieve the administrator credentials](#retrieve-the-administrator-credentials) 
+  + [On Linux with systemd](#on-linux-with-systemd)
+  + [On Linux with SysV init](#on-linux-with-sysv-init)
+  + [On MacOS](#on-macos)
+* [Open the setup wizard](#open-the-setup-wizard) 
+  + [Step 1 of 5: Server identity](#step-1-of-5-server-identity)
+  + [Step 2 of 5: Storage](#step-2-of-5-storage)
+  + [Step 3 of 5: Account directory](#step-3-of-5-account-directory)
+  + [Step 4 of 5: Logging](#step-4-of-5-logging)
+  + [Step 5 of 5: Automatic DNS management](#step-5-of-5-automatic-dns-management)
+  + [Setup complete](#setup-complete)
+* [Restart service](#restart-service)
+* [Continue setup](#continue-setup)
+* [Next steps](#next-steps)
+* [Setup demonstration](#setup-demonstration)
+* [Troubleshooting](#troubleshooting) 
+  + [Certificate warning on first sign-in](#certificate-warning-on-first-sign-in)
+  + [HTTPS not yet reachable](#https-not-yet-reachable)
+  + [Reverse proxy](#reverse-proxy)
+  + [Further diagnostics](#further-diagnostics)
+* [Additional topics](#additional-topics) 
+  + [External directory promotion](#external-directory-promotion)
+  + [FoundationDB](#foundationdb)
+  + [Retrieving DNS records via CLI](#retrieving-dns-records-via-cli)
+  + [Non-interactive setup](#non-interactive-setup)
+
+On this page
+------------
+
+* [Overview](#_top)
+* [Run the installer](#run-the-installer)
+* [Retrieve the administrator credentials](#retrieve-the-administrator-credentials) 
+  + [On Linux with systemd](#on-linux-with-systemd)
+  + [On Linux with SysV init](#on-linux-with-sysv-init)
+  + [On MacOS](#on-macos)
+* [Open the setup wizard](#open-the-setup-wizard) 
+  + [Step 1 of 5: Server identity](#step-1-of-5-server-identity)
+  + [Step 2 of 5: Storage](#step-2-of-5-storage)
+  + [Step 3 of 5: Account directory](#step-3-of-5-account-directory)
+  + [Step 4 of 5: Logging](#step-4-of-5-logging)
+  + [Step 5 of 5: Automatic DNS management](#step-5-of-5-automatic-dns-management)
+  + [Setup complete](#setup-complete)
+* [Restart service](#restart-service)
+* [Continue setup](#continue-setup)
+* [Next steps](#next-steps)
+* [Setup demonstration](#setup-demonstration)
+* [Troubleshooting](#troubleshooting) 
+  + [Certificate warning on first sign-in](#certificate-warning-on-first-sign-in)
+  + [HTTPS not yet reachable](#https-not-yet-reachable)
+  + [Reverse proxy](#reverse-proxy)
+  + [Further diagnostics](#further-diagnostics)
+* [Additional topics](#additional-topics) 
+  + [External directory promotion](#external-directory-promotion)
+  + [FoundationDB](#foundationdb)
+  + [Retrieving DNS records via CLI](#retrieving-dns-records-via-cli)
+  + [Non-interactive setup](#non-interactive-setup)
+      
+
+Linux / MacOS
+=============
+
+    
+
+Stalwart ships with an installation script that downloads the latest release, creates a dedicated service account, installs the binary under the standard Unix paths, writes a service unit, and starts the daemon. Root access on the target machine and outgoing HTTPS connectivity are required for the steps below.
+
+Run the installer
+-----------------
+
+[Section titled “Run the installer”](#run-the-installer)
+
+Open a terminal on the target host and fetch the installation script:
+
+Terminal window
+
+```
+$ curl --proto '=https' --tlsv1.2 -sSf https://get.stalw.art/install.sh -o install.sh
+```
+
+Execute the script as root:
+
+Terminal window
+
+```
+$ sudo sh install.sh
+```
+
+No arguments are required. The script follows the Filesystem Hierarchy Standard and places the binary under `/usr/local/bin/stalwart`, the configuration file under `/etc/stalwart/config.json`, environment variables under `/etc/stalwart/stalwart.env`, application data under `/var/lib/stalwart/` and log files under `/var/log/stalwart/`.
+
+A dedicated `stalwart` service account is created if it does not already exist. The script then writes the appropriate service unit (`systemd`, SysV `init.d`, or `launchd` depending on the operating system), enables the service at boot, and starts it immediately.
+
+When the standard FHS paths cannot be used (for example on a host that mounts `/opt` on a separate volume), a single prefix argument relocates the whole installation under that directory:
+
+Terminal window
+
+```
+$ sudo sh install.sh /opt/stalwart
+```
+
+The default build includes support for SQLite, PostgreSQL, MySQL, RocksDB, S3, Azure Blob Storage, Redis, and NATS. For installations that use FoundationDB as the main data store, see [FoundationDB](#foundationdb) under *Additional topics* below.
+
+Retrieve the administrator credentials
+--------------------------------------
+
+[Section titled “Retrieve the administrator credentials”](#retrieve-the-administrator-credentials)
+
+Immediately after the first start, Stalwart runs in **bootstrap mode**. A temporary administrator account is generated with a random password and printed to standard error. Bootstrap mode is a transient phase intended only to reach the setup wizard, after which a permanent administrator account is provisioned.
+
+The temporary password is shown exactly once at startup. Retrieve it from the service manager’s log facility.
+
+### On Linux with systemd
+
+[Section titled “On Linux with systemd”](#on-linux-with-systemd)
+
+Terminal window
+
+```
+$ sudo journalctl -u stalwart -n 200 | grep -A8 'bootstrap mode'
+```
+
+### On Linux with SysV init
+
+[Section titled “On Linux with SysV init”](#on-linux-with-sysv-init)
+
+Depending on the distribution’s syslog daemon, the output lands in `/var/log/syslog` or `/var/log/messages`:
+
+Terminal window
+
+```
+$ sudo grep -A8 'bootstrap mode' /var/log/syslog 2>/dev/null \    || sudo grep -A8 'bootstrap mode' /var/log/messages
+```
+
+### On MacOS
+
+[Section titled “On MacOS”](#on-macos)
+
+Terminal window
+
+```
+$ sudo log show --predicate 'process == "stalwart"' --last 5m
+```
+
+The block to look for looks like this:
+
+
+
+```
+════════════════════════════════════════════════════════════🔑 Stalwart bootstrap mode - temporary administrator account
+   username: admin   password: XXXXXXXXXXXXXXXX
+Use these credentials to complete the initial setup at the/admin web UI. Once setup is done, Stalwart will provision apermanent administrator and this temporary account will nolonger apply.════════════════════════════════════════════════════════════
+```
+
+Copy the 16-character password from the `password:` line. This is the only time the value appears in the logs.
+
+To avoid relying on a log-extracted temporary password, a fixed credential can be set in advance. Edit `/etc/stalwart/stalwart.env` and uncomment the `STALWART_RECOVERY_ADMIN` line, setting the desired username and password. On the next start, the administrator credentials will match the configured value and no temporary password will be generated.
+
+Open the setup wizard
+---------------------
+
+[Section titled “Open the setup wizard”](#open-the-setup-wizard)
+
+With the bootstrap credentials in hand, open a web browser and navigate to:
+
+
+
+```
+http://<hostname>:8080/admin
+```
+
+Replace `<hostname>` with the hostname or IP address of the machine running Stalwart. On the machine itself, `http://127.0.0.1:8080/admin` works for local access. Sign in using `admin` as the username and the temporary password retrieved in the previous step; the setup wizard appears automatically.
+
+The wizard presents five screens plus a final confirmation. Every field has a sensible default, so most installations only need to enter their hostname and domain and click through the rest. Deployments that prefer to skip the wizard entirely and drive the same configuration from the CLI should consult [Non-interactive setup](#non-interactive-setup) under *Additional topics* below.
+
+### Step 1 of 5: Server identity
+
+[Section titled “Step 1 of 5: Server identity”](#step-1-of-5-server-identity)
+
+Two required fields plus two optional toggles.
+
+* **Server hostname:**
+  
+  > The public hostname this Stalwart server answers to, for example `mail.example.com`. This value appears in SMTP greetings, outgoing message headers, and TLS certificate requests. It must be a valid domain name resolving via public DNS to this server’s IP address. For test or internal deployments, Stalwart accepts the RFC 6761 reserved TLDs (`.test`, `.local`, `.localhost`, `.invalid`, `.example`); add the hostname to `/etc/hosts` or to the private DNS zone that serves the deployment.
+  > 
+  > By default, this hostname also becomes the base URL published in OAuth, OIDC, and JMAP discovery documents, served over HTTPS on port `443`. Reverse-proxy deployments, custom HTTPS ports, and path-prefixed mounts should set [`STALWART_PUBLIC_URL`](/docs/configuration/environment-variables#public-urls) to override the published base URL; see [Reverse proxy](/docs/server/reverse-proxy/).
+* **Default email domain:**
+  
+  > The primary domain this installation will serve, for example `example.com`. Must be a valid domain name. Additional domains can be added at any time after setup. For test deployments, use a `.test` domain (e.g. `example.test`).
+* **Automatically obtain TLS certificate**:
+  
+  > Leave enabled to have Stalwart request a free TLS certificate for the server hostname from Let’s Encrypt using the ACME protocol. This is the recommended option for most deployments, because mail and web clients can then connect securely on the very first start without any additional steps. Disable the checkbox only if a certificate will be uploaded manually later, or if TLS is terminated by a reverse proxy in front of Stalwart.
+* **Generate email signing keys:**
+  
+  > Leave enabled to have Stalwart generate DKIM signing keys for the default domain. DKIM cryptographically signs outgoing messages and significantly improves the chances that they are accepted by remote servers rather than classified as spam. Disable only when DKIM keys are managed externally.
+
+ACME challenge method
+
+When the *automatically obtain TLS certificate* option is enabled and an automatic DNS provider is selected in [Step 5](#step-5-of-5-automatic-dns-management), Stalwart validates certificate requests with the DNS-01 challenge, which does not require any ports to be reachable from the internet. When DNS management is left manual in Step 5, Stalwart falls back to the TLS-ALPN-01 challenge, which Let’s Encrypt validates by connecting directly to the server on **TCP port 443**. In that case, before restarting the server after the wizard, make sure that the machine is reachable from the public internet on port 443, that no reverse proxy or load balancer is intercepting the connection, and that the server hostname entered above resolves to this machine in public DNS. See [ACME challenge types](/docs/server/tls/acme/challenges) for the full picture.
+
+
+### Step 2 of 5: Storage
+
+[Section titled “Step 2 of 5: Storage”](#step-2-of-5-storage)
+
+Storage is split into four independent stores. All four default to RocksDB on local disk, which is the recommended configuration for single-node installations and requires no action. Each store can be moved to an external backend later through the WebUI without reinstalling.
+
+* **Main data storage:**
+  
+  > Where structured data lives: email metadata, calendar events, address book entries, mailbox state, and every server settings object. The default is RocksDB. PostgreSQL, MySQL, SQLite, and FoundationDB are available for larger deployments or when a specific database is mandated by operations policy.
+* **Attachment and file storage:**
+  
+  > Where the raw bytes of email messages, attachments, and other large files are stored. Leave set to *Use Data Store* to keep blobs alongside metadata; switch to a dedicated backend such as S3 or Azure Blob Storage for deployments with many attachments or when long-term object storage is preferable.
+* **Full-text search index:**
+  
+  > Where the full-text search index is kept so that users can search across message bodies and attachments. Leave set to *Use Data Store* for single-node deployments; point to a dedicated search backend (Elasticsearch or Meilisearch) when the search workload is large enough to warrant it.
+* **Cache and temporary data:**
+  
+  > Where short-lived state lives: session caches, rate-limit counters, authentication tokens. Leave set to *Use Data Store* for a single node; point to Redis for faster lookups and especially for multi-node deployments where cache state must be shared across the cluster.
+
+### Step 3 of 5: Account directory
+
+[Section titled “Step 3 of 5: Account directory”](#step-3-of-5-account-directory)
+
+Stalwart can source user accounts from its own internal directory or delegate authentication to an external identity provider.
+
+* **Directory type:**
+  > Leave set to *Use the Internal Directory* for the simplest installation: accounts are created and managed through the WebUI, and the wizard generates an administrator credential on the final screen. Select an external directory (OIDC, LDAP, or SQL) for single sign-on or for integration with an existing identity system.
+
+The choice here affects the final screen. With the internal directory, a generated administrator credential is printed when the wizard finishes. With an external directory, no credential is generated; the administrator must be promoted after the first sign-in (see [External directory promotion](#external-directory-promotion) below for the procedure).
+
+### Step 4 of 5: Logging
+
+[Section titled “Step 4 of 5: Logging”](#step-4-of-5-logging)
+
+**Log destination.** Where the server writes log messages, traces, and diagnostic events.
+
+* *Log File* writes rotating log files to disk under the data directory. This is appropriate whenever the server has persistent disk and rotation is handled directly by Stalwart.
+* *Console* writes log lines to standard output. Select this for containerised deployments so the orchestrator’s log driver (Docker, Kubernetes, and so on) can capture them.
+
+Additional destinations (OpenTelemetry, journald, remote webhooks) can be added after setup through the [Tracer](/docs/ref/object/tracer) object.
+
+Docker
+
+Docker users should select **Console** here. A file-based logger inside a container writes to an ephemeral filesystem that is lost on every container restart; the Console logger emits structured log lines to standard output, which Docker captures through its log driver.
+
+
+### Step 5 of 5: Automatic DNS management
+
+[Section titled “Step 5 of 5: Automatic DNS management”](#step-5-of-5-automatic-dns-management)
+
+The DNS records a mail server needs (SPF, DKIM, DMARC, MX, MTA-STS, autoconfig, and so on) can either be published manually by the operator or generated and maintained by Stalwart on the operator’s behalf.
+
+**DNS server type.** Leave set to *Manual DNS Server Management* to keep full control of the DNS records. Select a supported provider (Cloudflare, AWS Route 53, Google Cloud DNS, etc, or a BIND-compatible server via RFC 2136) to have Stalwart publish and update the zone entries automatically through the provider’s API. See [DNS provider integration](/docs/server/dns/) for the supported providers and the credentials each one needs. The choice is not final; provider integration can be enabled, disabled, or changed later.
+
+#### Retrieving the DNS zone file
+
+[Section titled “Retrieving the DNS zone file”](#retrieving-the-dns-zone-file)
+
+When manual management is kept, Stalwart still generates the full set of records that must be published and makes them available as a ready-to-import zone file.
+
+From the WebUI, open the Domain list (found in the WebUI under  Management ›  Domains › Domains), click the three-dot menu next to the relevant domain, and select **View DNS Zone file**. The returned zone file can be pasted into the DNS provider’s control panel or imported as a zone template where the provider supports it. See [Setting up DNS](/docs/install/dns) for a per-record explanation of what each entry does.
+
+The same records can also be retrieved from the command line; see [Retrieving DNS records via CLI](#retrieving-dns-records-via-cli) under *Additional topics* below.
+
+### Setup complete
+
+[Section titled “Setup complete”](#setup-complete)
+
+The final screen confirms that the server has been configured. What happens next depends on the directory chosen in Step 3.
+
+**Internal directory.** The wizard prints an email address and a randomly generated password for the new administrator account, for example:
+
+
+
+```
+[[email protected]](/cdn-cgi/l/email-protection)onMjJfFMO83tQcCX
+```
+
+Write both down. The password is shown only on this screen and cannot be retrieved from the server logs afterwards. The credentials are used to sign in to the WebUI once the server has been restarted (see the platform-specific Restart section below).
+
+**External directory (OIDC / LDAP / SQL).** No administrator credential is generated here, because an account from the external directory does not exist locally until it has authenticated at least once. The administrator must be promoted manually after the first sign-in; see [External directory promotion](#external-directory-promotion) under *Additional topics* below for the procedure.
+
+
+Restart service
+---------------
+
+[Section titled “Restart service”](#restart-service)
+
+Once the wizard has been completed, restart Stalwart so that the new configuration takes effect. The exact command depends on the service manager that the installer wrote a unit for at install time.
+
+On Linux with **systemd** (the default on most modern distributions):
+
+Terminal window
+
+```
+$ sudo systemctl restart stalwart
+```
+
+On Linux with **SysV init**:
+
+Terminal window
+
+```
+$ sudo service stalwart restart
+```
+
+On **macOS** (launchd):
+
+Terminal window
+
+```
+$ sudo launchctl kickstart -k system/stalwart.mail
+```
+
+
+Continue setup
+--------------
+
+[Section titled “Continue setup”](#continue-setup)
+
+After the restart, sign in at `https://<hostname>/admin` with the administrator credentials printed on the final wizard screen, where `<hostname>` is the value entered in Step 1. If TLS or DNS for that hostname is not in place yet, sign in at `http://<host>:8080/admin` instead and switch to the HTTPS URL once the production listener is reachable.
+
+Special cases
+
+* Deployments using an external directory (OIDC, LDAP, or SQL) must promote the administrator account after first sign-in. See [External directory promotion](#external-directory-promotion) under *Additional topics* below.
+* Deployments behind a reverse proxy should follow the [Reverse proxy](#reverse-proxy) guidance under *Troubleshooting* below before signing in.
+* If the new HTTPS URL does not load, see [HTTPS not yet reachable](#https-not-yet-reachable) under *Troubleshooting* below.
+
+Next steps
+----------
+
+[Section titled “Next steps”](#next-steps)
+
+With the internal directory, additional user accounts can be added through the WebUI’s Account Manager, or directly by creating [Account](/docs/ref/object/account) objects through the WebUI administration console or the [CLI](/docs/management/cli/). See [Individual accounts](/docs/auth/principals/individual) for the full field reference. With an external directory (OIDC, LDAP, or SQL), accounts continue to be provisioned and authenticated through the identity provider; any Stalwart-specific overrides are set on the local Account record that is created on first sign-in.
+
+Diagnostic output is written to the log destination configured in Step 4 of the wizard, and can also be viewed live from the WebUI under Telemetry.
+
+Once `https://<hostname>/admin` is reachable and a permanent administrator is in use, disable the HTTP configuration listener so that `http://<host>:8080/admin` no longer accepts sign-ins. Remove the `STALWART_RECOVERY_ADMIN` environment variable, or delete the HTTP listener through the WebUI, then restart the service.
+
+If something does not behave as expected, consult [Troubleshooting](#troubleshooting) below. Further questions can be raised on the [community forum](https://support.stalw.art).
+
+Tip
+
+Before exposing the server to the public internet, review the [securing your server](/docs/install/security) checklist.
+
+
+Setup demonstration
+-------------------
+
+[Section titled “Setup demonstration”](#setup-demonstration)
+
+Troubleshooting
+---------------
+
+[Section titled “Troubleshooting”](#troubleshooting)
+### Certificate warning on first sign-in
+
+[Section titled “Certificate warning on first sign-in”](#certificate-warning-on-first-sign-in)
+
+When *automatically obtain TLS certificate* was enabled in Step 1 of the wizard, the certificate from Let’s Encrypt can take a minute or two to be issued after the restart. While the request is still in flight, the browser may show a warning because the server is presenting a self-signed fallback certificate. Accepting that warning for the initial sign-in is safe; the warning disappears once the ACME certificate has been installed and the page is reloaded. When the certificate option was disabled, the self-signed fallback remains in place until a certificate is uploaded or a reverse proxy terminates TLS in front of the server.
+
+### HTTPS not yet reachable
+
+[Section titled “HTTPS not yet reachable”](#https-not-yet-reachable)
+
+If the configured hostname does not yet resolve in DNS, port `443` is not reachable from the browser, or the deployment cannot present a trusted certificate for any other reason, sign in at `http://<host>:8080/admin` for as long as `STALWART_RECOVERY_ADMIN` is set in the service environment. Once HTTPS is in place, switch to `https://<hostname>/admin` and disable the HTTP listener as described in [Next steps](#next-steps).
+
+If the HTTP listener has already been disabled and the deployment is locked out (for example because the configured hostname is no longer reachable, the external OIDC provider is down, or the administrator account was deleted), start the server in [recovery mode](/docs/configuration/recovery-mode) (`STALWART_RECOVERY_MODE=1`). Recovery mode re-enables the HTTP listener on port `8080` with the path-relative issuer used during bootstrap and accepts the credentials in `STALWART_RECOVERY_ADMIN`, regardless of the directory state. Restart without the flag once normal sign-in is restored.
+
+### Reverse proxy
+
+[Section titled “Reverse proxy”](#reverse-proxy)
+
+When Stalwart sits behind a reverse proxy (NGINX, Traefik, Caddy, HAProxy, or similar) and the wizard or first sign-in does not behave as expected, the issue is almost always that the URL Stalwart publishes in its OAuth and JMAP discovery documents does not match the URL clients reach the proxy on. Set [`STALWART_PUBLIC_URL`](/docs/configuration/environment-variables#public-urls) to the public-facing base URL (scheme, host, port if non-`443`, path if mounted under a prefix) and restart the server. For example, `STALWART_PUBLIC_URL=https://mail.example.com:8443` for a proxy listening on port `8443`, or `https://example.com/mail` for a path-prefixed mount. The full reverse-proxy model (HTTP vs HTTPS upstream, Proxy Protocol, and per-product configuration for NGINX / Caddy / Traefik / HAProxy) is documented under [Reverse proxy › Overview](/docs/server/reverse-proxy/).
+
+### Further diagnostics
+
+[Section titled “Further diagnostics”](#further-diagnostics)
+
+For issues that go beyond initial setup (email delivery, DMARC, authentication, and so on), consult the general [troubleshooting](/docs/management/troubleshoot) guide or the [FAQ](/docs/faq).
+
+Additional topics
+-----------------
+
+[Section titled “Additional topics”](#additional-topics)
+### External directory promotion
+
+[Section titled “External directory promotion”](#external-directory-promotion)
+
+When the wizard is completed with an external directory (OIDC, LDAP, or SQL), no administrator credential is generated on the final screen, because an account from the external directory does not exist locally until it has authenticated at least once. The administrator must be promoted manually after the first sign-in using the existing recovery admin credentials. The procedure, carried out after the platform-specific restart, is:
+
+1. Keep `STALWART_RECOVERY_ADMIN=<username>:<password>` set in the service environment. The variable is honoured while the server is running normally, so this does not require recovery mode.
+2. Have the account that will become the administrator sign in once through the WebUI. Any successful authentication against the directory provisions the account locally in Stalwart.
+3. Sign in as the recovery administrator in a separate browser session and assign the appropriate administrator role to the newly provisioned account, either through the WebUI or through the CLI.
+4. Sign in as the promoted account to confirm that the assignment took effect.
+5. Remove `STALWART_RECOVERY_ADMIN` from the service environment and restart the server so that the backdoor credential is no longer active.
+
+### FoundationDB
+
+[Section titled “FoundationDB”](#foundationdb)
+
+A separate build with FoundationDB support is available for installations that use FoundationDB as the main data store. The default build does not include FoundationDB because multiple FoundationDB client versions exist and a single default would break deployments that rely on a different client.
+
+**Linux / macOS.** Run the installation script with the `--fdb` flag:
+
+Terminal window
+
+```
+$ sudo sh install.sh --fdb
+```
+
+**Docker.** No pre-built FoundationDB image is published. To produce a FoundationDB-enabled image, use the `Dockerfile.fdb` file available in the [stalwartlabs/stalwart](https://github.com/stalwartlabs/stalwart) repository as a starting point.
+
+### Retrieving DNS records via CLI
+
+[Section titled “Retrieving DNS records via CLI”](#retrieving-dns-records-via-cli)
+
+When manual DNS management is in effect, the zone file generated by Stalwart can also be fetched from the command line. List the configured domains and read the [`dnsZoneFile`](/docs/ref/object/domain#dnszonefile) field on the desired one:
+
+Terminal window
+
+```
+$ stalwart-cli query domain$ stalwart-cli get domain <id> --fields dnsZoneFile
+```
+
+The returned zone file can be pasted into the DNS provider’s control panel or imported as a zone template where the provider supports it.
+
+### Non-interactive setup
+
+[Section titled “Non-interactive setup”](#non-interactive-setup)
+
+Deployments that prefer command-line or infrastructure-as-code workflows can skip the wizard entirely and drive the same configuration from the CLI; see [bootstrap mode](/docs/configuration/bootstrap-mode) and [declarative deployments](/docs/configuration/declarative-deployments).
+
+    [Edit page](https://github.com/stalwartlabs/website/edit/main/src/content/docs/docs/install/platform/linux.md)
+
+Last updated: May 29, 2026
+
+   [Previous   
+ Welcome to Stalwart](/docs/install/)   [Next   
+ Windows](/docs/install/platform/windows/)          

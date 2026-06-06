@@ -1,0 +1,1253 @@
+# Source URL: https://stalw.art/docs/cluster/orchestration/kubernetes/
+# Content Length: 72010 characters
+# Extracted at: 2026-06-07 01:30:38
+#============================================================
+
+
+ Kubernetes | Stalwart        
+
+  [Skip to content](#_top)     
+
+* Platform ▾    Platform
+  + [Mail Server](/mail-server)
+  + [Collaboration](/collaboration)
+  + [MTA](/mta)
+  + [Anti-spam](/anti-spam)
+  + [Architecture](/architecture)
+  + [Integrations](/integrations)  Solutions
+  + [Managed e-mail](/managed-email)
+  + [Migration](/migration)
+* Editions ▾    Editions
+  + [Enterprise](/enterprise)
+  + [Community](/open-source)
+  + [Compare](/compare)
+  + [Pricing](/pricing)
+  + [Evaluate](https://license.stalw.art/trial)
+* Documentation ▾    Install
+  + [Linux / macOS](/docs/install/platform/linux)
+  + [Windows](/docs/install/platform/windows)
+  + [Docker](/docs/install/platform/docker)  Overview
+  + [Get started](/docs/install/)
+  + [Configuration](/docs/configuration/)
+  + [Management](/docs/management/)
+  + [Development](/docs/development/)
+  + [FAQ](/docs/faq)  Settings
+  + [Server](/docs/server/)
+  + [Storage](/docs/storage/)
+  + [Access Control](/docs/auth/)
+  + [Encryption](/docs/encryption/)
+  + [MTA](/docs/mta/)
+  + [Email Store](/docs/email/)
+  + [Collaboration](/docs/collaboration/)
+  + [Spam & Phishing](/docs/spamfilter/)
+  + [Sieve](/docs/sieve/)
+  + [Clustering](/docs/cluster/)
+  + [Telemetry](/docs/telemetry/)
+* Support ▾    Support
+  + [Overview](/support)
+  + [Support Portal](https://support.stalw.art)
+* Company ▾    Company
+  + [About](/about)
+  + [Blog](/blog)
+  + [Contact](/contact)
+  + [Legal](/legal)
+     Search  `CtrlK`      Cancel                         Stalwart       Platform
+
+* [Mail Server](/mail-server)
+* [Collaboration](/collaboration)
+* [MTA](/mta)
+* [Anti-spam](/anti-spam)
+* [Architecture](/architecture)
+* [Integrations](/integrations)
+  Editions
+
+* [Enterprise](/enterprise)
+* [Community](/open-source)
+* [Compare](/compare)
+* [Pricing](/pricing)
+* [Evaluate](https://license.stalw.art/trial)
+  Solutions
+
+* [Managed e-mail](/managed-email)
+* [Migration](/migration)
+  Documentation
+
+* [Get started](/docs/install/)
+* [Configuration](/docs/configuration/)
+* [Management](/docs/management/)
+* [Development](/docs/development/)
+* [FAQ](/docs/faq)
+* [Linux / macOS](/docs/install/platform/linux)
+* [Windows](/docs/install/platform/windows)
+* [Docker](/docs/install/platform/docker)
+  Company
+
+* [About](/about)
+* [Blog](/blog)
+* [Contact](/contact)
+* [Legal](/legal)
+   [[email protected]](/cdn-cgi/l/email-protection#85ede0e9e9eac5f6f1e4e9f2abe4f7f1)
+
+* [GitHub](https://github.com/stalwartlabs/stalwart)
+* [Twitter](https://twitter.com/stalwartlabs/)
+* [Mastodon](https://mastodon.social/@stalwartlabs)
+* [Discord](https://discord.com/servers/stalwart-923615863037390889)
+* [Reddit](https://www.reddit.com/r/stalwartlabs)
+* [Matrix](https://matrix.to/#/#stalwart:matrix.org)
+                 
+
+* [Stalwart Blog](/blog/)
+* Getting started    
+  + [Welcome to Stalwart](/docs/install/)
+  + Installation    
+    - [Linux / MacOS](/docs/install/platform/linux/)
+    - [Windows](/docs/install/platform/windows/)
+    - [Docker](/docs/install/platform/docker/)
+  + [System Requirements](/docs/install/requirements/)
+  + [Choosing a database](/docs/install/store/)
+  + [Choosing a directory](/docs/install/directory/)
+  + [Setting up DNS](/docs/install/dns/)
+  + [Securing your server](/docs/install/security/)
+  + [Performance tuning](/docs/install/performance/)
+  + [Upgrading](/docs/install/upgrade/)
+* Configuration    
+  + [Overview](/docs/configuration/)
+  + [Bootstrap mode](/docs/configuration/bootstrap-mode/)
+  + [Recovery mode](/docs/configuration/recovery-mode/)
+  + [Environment variables](/docs/configuration/environment-variables/)
+  + [Declarative deployments](/docs/configuration/declarative-deployments/)
+  + Expressions    
+    - [Overview](/docs/configuration/expressions/)
+    - [Operators](/docs/configuration/expressions/operators/)
+    - [Functions](/docs/configuration/expressions/functions/)
+    - [Values](/docs/configuration/expressions/values/)
+  + [Variables](/docs/configuration/variables/)
+* Server settings    
+  + [General](/docs/server/general/)
+  + [Listeners](/docs/server/listener/)
+  + TLS    
+    - [Overview](/docs/server/tls/)
+    - [Certificates](/docs/server/tls/certificates/)
+    - ACME    
+      * [Overview](/docs/server/tls/acme/)
+      * [Challenge Types](/docs/server/tls/acme/challenges/)
+      * [Configuration](/docs/server/tls/acme/configuration/)
+  + Reverse Proxy    
+    - [Overview](/docs/server/reverse-proxy/)
+    - [Proxy Protocol](/docs/server/reverse-proxy/proxy-protocol/)
+    - [Traefik](/docs/server/reverse-proxy/traefik/)
+    - [Caddy](/docs/server/reverse-proxy/caddy/)
+    - [HAProxy](/docs/server/reverse-proxy/haproxy/)
+    - [NGINX](/docs/server/reverse-proxy/nginx/)
+  + [Auto-banning](/docs/server/auto-ban/)
+  + DNS    
+    - [Overview](/docs/server/dns/)
+    - [DNS Providers](/docs/server/dns/provider/)
+    - [DNS Resolver](/docs/server/dns/resolver/)
+  + [Autoconfig](/docs/server/autoconfig/)
+  + [ASN and GeoIP](/docs/server/asn/)
+  + [AI Models](/docs/server/ai-models/)
+  + [Caching](/docs/server/cache/)
+  + [Enterprise License](/docs/server/enterprise/)
+* Storage settings    
+  + [Overview](/docs/storage/)
+  + [Data store](/docs/storage/data/)
+  + [Blob store](/docs/storage/blob/)
+  + [Search store](/docs/storage/fts/)
+  + [In-memory store](/docs/storage/in-memory/)
+  + Backends    
+    - [Overview](/docs/storage/backends/)
+    - [RocksDB](/docs/storage/backends/rocksdb/)
+    - [FoundationDB](/docs/storage/backends/foundationdb/)
+    - [PostgreSQL](/docs/storage/backends/postgresql/)
+    - [MySQL / MariaDB](/docs/storage/backends/mysql/)
+    - [SQLite](/docs/storage/backends/sqlite/)
+    - [S3-compatible](/docs/storage/backends/s3/)
+    - [Filesystem](/docs/storage/backends/filesystem/)
+    - [ElasticSearch](/docs/storage/backends/elasticsearch/)
+    - [Meilisearch](/docs/storage/backends/meilisearch/)
+    - [Redis](/docs/storage/backends/redis/)
+    - [Azure Blob Storage](/docs/storage/backends/azure/)
+    - Composite    
+      * [Overview](/docs/storage/backends/composite/)
+      * [Sharded In-Memory Store](/docs/storage/backends/composite/sharded-in-memory/)
+      * [Sharded Blob Store](/docs/storage/backends/composite/sharded-blob/)
+      * [SQL Read Replicas](/docs/storage/backends/composite/sql-replica/)
+  + Lookup lists    
+    - [Overview](/docs/storage/lookup/)
+    - [Local](/docs/storage/lookup/local/)
+    - [Remote](/docs/storage/lookup/remote/)
+* Access Control    
+  + [Overview](/docs/auth/)
+  + Principals    
+    - [Overview](/docs/auth/principals/)
+    - [Individual](/docs/auth/principals/individual/)
+    - [Group](/docs/auth/principals/group/)
+  + Authentication    
+    - [Overview](/docs/auth/authentication/)
+    - [Passwords](/docs/auth/authentication/password/)
+    - [Two-Factor Authentication](/docs/auth/authentication/2fa/)
+    - [App Passwords](/docs/auth/authentication/app-password/)
+    - [API Keys](/docs/auth/authentication/api-key/)
+  + Authorization    
+    - [Overview](/docs/auth/authorization/)
+    - [Permissions](/docs/auth/authorization/permissions/)
+    - [Roles](/docs/auth/authorization/roles/)
+    - [Administrators](/docs/auth/authorization/administrator/)
+    - [Tenants](/docs/auth/authorization/tenants/)
+    - [Quotas](/docs/auth/authorization/quotas/)
+  + OAuth    
+    - [Overview](/docs/auth/oauth/)
+    - [Authorization Flows](/docs/auth/oauth/flows/)
+    - [Tokens](/docs/auth/oauth/tokens/)
+    - [Dynamic Registration](/docs/auth/oauth/client-registration/)
+    - [Interoperability](/docs/auth/oauth/interoperability/)
+    - [Endpoints](/docs/auth/oauth/endpoints/)
+    - [OAuth Clients](/docs/auth/oauth/oauth-client/)
+  + OpenID Connect    
+    - [Overview](/docs/auth/openid/)
+    - [ID Tokens](/docs/auth/openid/id-tokens/)
+    - [OIDC Provider](/docs/auth/openid/provider/)
+    - [Endpoints](/docs/auth/openid/endpoints/)
+  + Directories    
+    - [Overview](/docs/auth/backend/)
+    - [Internal](/docs/auth/backend/internal/)
+    - [SQL Database](/docs/auth/backend/sql/)
+    - [LDAP Server](/docs/auth/backend/ldap/)
+    - [OpenID Connect](/docs/auth/backend/oidc/)
+* Domains    
+  + [Overview](/docs/domains/)
+  + [DNS records](/docs/domains/dns-records/)
+  + [TLS certificates](/docs/domains/tls-certificates/)
+  + [DKIM key rotation](/docs/domains/dkim-rotation/)
+* HTTP settings    
+  + [Overview](/docs/http/)
+  + [Settings](/docs/http/settings/)
+  + JMAP    
+    - [Overview](/docs/http/jmap/)
+    - [Protocol](/docs/http/jmap/protocol/)
+    - [WebSockets](/docs/http/jmap/websockets/)
+    - [Push notifications](/docs/http/jmap/push/)
+  + WebDAV    
+    - [Overview](/docs/http/webdav/)
+    - [Protocol](/docs/http/webdav/protocol/)
+  + [Access Control](/docs/http/access-control/)
+  + [Security](/docs/http/security/)
+  + [Rate limiting](/docs/http/ratelimit/)
+  + [Form Handling](/docs/http/form-submission/)
+* Email settings    
+  + [Overview](/docs/email/)
+  + Settings    
+    - [JMAP for Mail](/docs/email/settings/jmap/)
+    - [IMAP and POP3](/docs/email/settings/imap/)
+    - [Rate limiting](/docs/email/settings/ratelimit/)
+    - [Maintenance](/docs/email/settings/maintenance/)
+  + Management    
+    - [Mailing lists](/docs/email/management/mailing-lists/)
+    - [Masked email](/docs/email/management/masked-email/)
+* MTA settings    
+  + [Overview](/docs/mta/)
+  + Inbound    
+    - [Overview](/docs/mta/inbound/)
+    - [Connect stage](/docs/mta/inbound/connect/)
+    - [EHLO stage](/docs/mta/inbound/ehlo/)
+    - [MAIL stage](/docs/mta/inbound/mail/)
+    - [RCPT stage](/docs/mta/inbound/rcpt/)
+    - [DATA stage](/docs/mta/inbound/data/)
+    - [AUTH stage](/docs/mta/inbound/auth/)
+  + Outbound    
+    - [Overview](/docs/mta/outbound/)
+    - [Strategies](/docs/mta/outbound/strategy/)
+    - [Queues](/docs/mta/outbound/queue/)
+    - [Scheduling](/docs/mta/outbound/schedule/)
+    - [Routing](/docs/mta/outbound/routing/)
+    - [Connection](/docs/mta/outbound/connection/)
+    - [TLS](/docs/mta/outbound/tls/)
+    - [Rate limits](/docs/mta/outbound/rate-limit/)
+    - [Quotas](/docs/mta/outbound/quota/)
+  + Filtering    
+    - [Overview](/docs/mta/filter/)
+    - [Spam filter](/docs/mta/filter/spam/)
+    - [Sieve scripting](/docs/mta/filter/sieve/)
+    - [Milter filters](/docs/mta/filter/milter/)
+    - [MTA Hooks](/docs/mta/filter/mtahooks/)
+  + Rewriting    
+    - [Overview](/docs/mta/rewrite/)
+    - [Envelope](/docs/mta/rewrite/address/)
+    - [Headers](/docs/mta/rewrite/headers/)
+    - [Body & Attachments](/docs/mta/rewrite/content/)
+  + Sender Authentication    
+    - DKIM    
+      * [Overview](/docs/mta/authentication/dkim/)
+      * [Signing](/docs/mta/authentication/dkim/sign/)
+      * [Verifying](/docs/mta/authentication/dkim/verify/)
+    - [SPF](/docs/mta/authentication/spf/)
+    - [ARC](/docs/mta/authentication/arc/)
+    - [DMARC](/docs/mta/authentication/dmarc/)
+    - [Reverse IP](/docs/mta/authentication/iprev/)
+  + Transport Security    
+    - [Overview](/docs/mta/transport-security/)
+    - [DANE](/docs/mta/transport-security/dane/)
+    - [MTA-STS](/docs/mta/transport-security/mta-sts/)
+  + Reports    
+    - [Overview](/docs/mta/reports/)
+    - [Delivery Notifications](/docs/mta/reports/dsn/)
+    - [DKIM](/docs/mta/reports/dkim/)
+    - [SPF](/docs/mta/reports/spf/)
+    - [DMARC](/docs/mta/reports/dmarc/)
+    - [TLS](/docs/mta/reports/tls/)
+    - [Analysis](/docs/mta/reports/analysis/)
+  + [Management](/docs/mta/management/)
+* Collaboration settings    
+  + [Overview](/docs/collaboration/)
+  + [WebDAV](/docs/collaboration/webdav/)
+  + [Calendar](/docs/collaboration/calendar/)
+  + [Scheduling](/docs/collaboration/scheduling/)
+  + [Notifications](/docs/collaboration/notifications/)
+  + [Contacts](/docs/collaboration/contact/)
+  + [File Storage](/docs/collaboration/file-storage/)
+  + [Sharing](/docs/collaboration/sharing/)
+* Encryption settings    
+  + [Overview](/docs/encryption/)
+  + [Management](/docs/encryption/manage/)
+  + [S/MIME](/docs/encryption/smime/)
+  + [OpenPGP](/docs/encryption/pgp/)
+* Spam & Phishing filter    
+  + [Overview](/docs/spamfilter/)
+  + Settings    
+    - [Overview](/docs/spamfilter/settings/general/)
+    - [Scores](/docs/spamfilter/settings/scores/)
+    - [MIME types](/docs/spamfilter/settings/mime-types/)
+    - [Domain lists](/docs/spamfilter/settings/domain-lists/)
+  + Linear Classifier    
+    - [Overview](/docs/spamfilter/classifier/)
+    - [Training](/docs/spamfilter/classifier/training/)
+    - [Hyperparameters](/docs/spamfilter/classifier/hyperparameters/)
+    - [Learning](/docs/spamfilter/classifier/autolearn/)
+  + [LLM classifier](/docs/spamfilter/llm/)
+  + [Rules](/docs/spamfilter/rules/)
+  + [DNS blocklists](/docs/spamfilter/dnsbl/)
+  + [DMARC analysis](/docs/spamfilter/dmarc/)
+  + [Phishing protection](/docs/spamfilter/phishing/)
+  + [Collaborative digests](/docs/spamfilter/digests/)
+  + [Trusted senders](/docs/spamfilter/trusted/)
+  + [Greylisting](/docs/spamfilter/greylist/)
+  + [Spamtrap](/docs/spamfilter/spamtrap/)
+* Sieve scripting    
+  + [Overview](/docs/sieve/)
+  + Settings    
+    - [Overview](/docs/sieve/interpreter/)
+    - [Trusted Interpreter](/docs/sieve/interpreter/trusted/)
+    - [Untrusted Interpreter](/docs/sieve/interpreter/untrusted/)
+  + [Variables](/docs/sieve/variables/)
+  + [Expressions](/docs/sieve/expressions/)
+  + [LLM Integration](/docs/sieve/llm/)
+  + [ManageSieve](/docs/sieve/managesieve/)
+  + [JMAP for Sieve](/docs/sieve/jmap/)
+  + [Reference](/docs/sieve/reference/)
+  + [Examples](/docs/sieve/examples/)
+* Clustering & HA    
+  + [Overview](/docs/cluster/)
+  + Deployment    
+    - [Overview](/docs/cluster/deployment/)
+    - [Sizing](/docs/cluster/deployment/sizing/)
+    - [Storage](/docs/cluster/deployment/storage/)
+    - [Topology](/docs/cluster/deployment/topology/)
+  + Configuration    
+    - [Overview](/docs/cluster/configuration/)
+    - [Node ID](/docs/cluster/configuration/node-id/)
+    - [Coordination mechanism](/docs/cluster/configuration/coordination/)
+    - [Load balancing](/docs/cluster/configuration/load-balancing/)
+    - [Roles](/docs/cluster/configuration/roles/)
+  + Coordination    
+    - [Overview](/docs/cluster/coordination/)
+    - [Peer-to-Peer](/docs/cluster/coordination/peer-to-peer/)
+    - [Apache Kafka / Redpanda](/docs/cluster/coordination/kafka/)
+    - [NATS](/docs/cluster/coordination/nats/)
+    - [Redis](/docs/cluster/coordination/redis/)
+  + Orchestration    
+    - [Overview](/docs/cluster/orchestration/)
+    - [Kubernetes](/docs/cluster/orchestration/kubernetes/)
+    - [Docker Swarm](/docs/cluster/orchestration/docker-swarm/)
+    - [Apache Mesos](/docs/cluster/orchestration/apache-mesos/)
+* Telemetry    
+  + [Overview](/docs/telemetry/)
+  + [Events](/docs/telemetry/events/)
+  + Tracing & Logging    
+    - [Overview](/docs/telemetry/tracing/)
+    - [OpenTelemetry](/docs/telemetry/tracing/opentelemetry/)
+    - [Log file](/docs/telemetry/tracing/log/)
+    - [Console](/docs/telemetry/tracing/console/)
+    - [Journal](/docs/telemetry/tracing/journal/)
+  + Metrics    
+    - [Overview](/docs/telemetry/metrics/)
+    - [OpenTelemetry](/docs/telemetry/metrics/opentelemetry/)
+    - [Prometheus](/docs/telemetry/metrics/prometheus/)
+  + [Webhooks](/docs/telemetry/webhooks/)
+  + [Alerts](/docs/telemetry/alerts/)
+  + [Live Telemetry](/docs/telemetry/live/)
+  + [History](/docs/telemetry/history/)
+  + [Management](/docs/telemetry/management/)
+* Applications    
+  + [Overview](/docs/applications/)
+  + [Updates](/docs/applications/update/)
+* Management    
+  + [Overview](/docs/management/)
+  + Web-based Administration    
+    - [Overview](/docs/management/webui/)
+    - [Account Manager](/docs/management/webui/account-manager/)
+    - [Branding](/docs/management/webui/branding/)
+  + [Tasks](/docs/management/tasks/)
+  + [Actions](/docs/management/actions/)
+  + Command Line Interface    
+    - [Overview](/docs/management/cli/)
+    - [Exploring the schema](/docs/management/cli/describe/)
+    - [Fetching a single object](/docs/management/cli/get/)
+    - [Searching and listing](/docs/management/cli/query/)
+    - [Creating objects](/docs/management/cli/create/)
+    - [Updating objects](/docs/management/cli/update/)
+    - [Removing objects](/docs/management/cli/delete/)
+    - [Declarative bulk operations](/docs/management/cli/apply/)
+    - [Exporting server state](/docs/management/cli/snapshot/)
+  + Maintenance    
+    - [Database Console](/docs/management/maintenance/database/)
+    - [Database Migration](/docs/management/maintenance/migration/)
+  + [Troubleshooting](/docs/management/troubleshoot/)
+* Development    
+  + [Database Internals](/docs/development/database/)
+  + [Compiling Stalwart](/docs/development/compile/)
+  + [Testing Stalwart](/docs/development/test/)
+  + [RFCs](/docs/development/rfcs/)
+  + [URN Namespace](/docs/development/urn/)
+  + [API Endpoints](/docs/development/api/)
+* Schema reference    
+  + [Overview](/docs/ref/)
+  + Objects    
+    - [Account](/docs/ref/object/account/)
+    - [AccountPassword](/docs/ref/object/account-password/)
+    - [AccountSettings](/docs/ref/object/account-settings/)
+    - [AcmeProvider](/docs/ref/object/acme-provider/)
+    - [Action](/docs/ref/object/action/)
+    - [AddressBook](/docs/ref/object/address-book/)
+    - [AiModel](/docs/ref/object/ai-model/)
+    - [Alert](/docs/ref/object/alert/)
+    - [AllowedIp](/docs/ref/object/allowed-ip/)
+    - [ApiKey](/docs/ref/object/api-key/)
+    - [Application](/docs/ref/object/application/)
+    - [AppPassword](/docs/ref/object/app-password/)
+    - [ArchivedItem](/docs/ref/object/archived-item/)
+    - [ArfExternalReport](/docs/ref/object/arf-external-report/)
+    - [Asn](/docs/ref/object/asn/)
+    - [Authentication](/docs/ref/object/authentication/)
+    - [BlobStore](/docs/ref/object/blob-store/)
+    - [BlockedIp](/docs/ref/object/blocked-ip/)
+    - [Bootstrap](/docs/ref/object/bootstrap/)
+    - [Cache](/docs/ref/object/cache/)
+    - [Calendar](/docs/ref/object/calendar/)
+    - [CalendarAlarm](/docs/ref/object/calendar-alarm/)
+    - [CalendarScheduling](/docs/ref/object/calendar-scheduling/)
+    - [Certificate](/docs/ref/object/certificate/)
+    - [ClusterNode](/docs/ref/object/cluster-node/)
+    - [ClusterRole](/docs/ref/object/cluster-role/)
+    - [Coordinator](/docs/ref/object/coordinator/)
+    - [DataRetention](/docs/ref/object/data-retention/)
+    - [DataStore](/docs/ref/object/data-store/)
+    - [Directory](/docs/ref/object/directory/)
+    - [DkimReportSettings](/docs/ref/object/dkim-report-settings/)
+    - [DkimSignature](/docs/ref/object/dkim-signature/)
+    - [DmarcExternalReport](/docs/ref/object/dmarc-external-report/)
+    - [DmarcInternalReport](/docs/ref/object/dmarc-internal-report/)
+    - [DmarcReportSettings](/docs/ref/object/dmarc-report-settings/)
+    - [DnsResolver](/docs/ref/object/dns-resolver/)
+    - [DnsServer](/docs/ref/object/dns-server/)
+    - [Domain](/docs/ref/object/domain/)
+    - [DsnReportSettings](/docs/ref/object/dsn-report-settings/)
+    - [Email](/docs/ref/object/email/)
+    - [Enterprise](/docs/ref/object/enterprise/)
+    - [EventTracingLevel](/docs/ref/object/event-tracing-level/)
+    - [FileStorage](/docs/ref/object/file-storage/)
+    - [Http](/docs/ref/object/http/)
+    - [HttpForm](/docs/ref/object/http-form/)
+    - [HttpLookup](/docs/ref/object/http-lookup/)
+    - [Imap](/docs/ref/object/imap/)
+    - [InMemoryStore](/docs/ref/object/in-memory-store/)
+    - [Jmap](/docs/ref/object/jmap/)
+    - [Log](/docs/ref/object/log/)
+    - [MailingList](/docs/ref/object/mailing-list/)
+    - [MaskedEmail](/docs/ref/object/masked-email/)
+    - [MemoryLookupKey](/docs/ref/object/memory-lookup-key/)
+    - [MemoryLookupKeyValue](/docs/ref/object/memory-lookup-key-value/)
+    - [Metric](/docs/ref/object/metric/)
+    - [Metrics](/docs/ref/object/metrics/)
+    - [MetricsStore](/docs/ref/object/metrics-store/)
+    - [MtaConnectionStrategy](/docs/ref/object/mta-connection-strategy/)
+    - [MtaDeliverySchedule](/docs/ref/object/mta-delivery-schedule/)
+    - [MtaExtensions](/docs/ref/object/mta-extensions/)
+    - [MtaHook](/docs/ref/object/mta-hook/)
+    - [MtaInboundSession](/docs/ref/object/mta-inbound-session/)
+    - [MtaInboundThrottle](/docs/ref/object/mta-inbound-throttle/)
+    - [MtaMilter](/docs/ref/object/mta-milter/)
+    - [MtaOutboundStrategy](/docs/ref/object/mta-outbound-strategy/)
+    - [MtaOutboundThrottle](/docs/ref/object/mta-outbound-throttle/)
+    - [MtaQueueQuota](/docs/ref/object/mta-queue-quota/)
+    - [MtaRoute](/docs/ref/object/mta-route/)
+    - [MtaStageAuth](/docs/ref/object/mta-stage-auth/)
+    - [MtaStageConnect](/docs/ref/object/mta-stage-connect/)
+    - [MtaStageData](/docs/ref/object/mta-stage-data/)
+    - [MtaStageEhlo](/docs/ref/object/mta-stage-ehlo/)
+    - [MtaStageMail](/docs/ref/object/mta-stage-mail/)
+    - [MtaStageRcpt](/docs/ref/object/mta-stage-rcpt/)
+    - [MtaSts](/docs/ref/object/mta-sts/)
+    - [MtaTlsStrategy](/docs/ref/object/mta-tls-strategy/)
+    - [MtaVirtualQueue](/docs/ref/object/mta-virtual-queue/)
+    - [NetworkListener](/docs/ref/object/network-listener/)
+    - [OAuthClient](/docs/ref/object/o-auth-client/)
+    - [OidcProvider](/docs/ref/object/oidc-provider/)
+    - [PublicKey](/docs/ref/object/public-key/)
+    - [QueuedMessage](/docs/ref/object/queued-message/)
+    - [ReportSettings](/docs/ref/object/report-settings/)
+    - [Role](/docs/ref/object/role/)
+    - [Search](/docs/ref/object/search/)
+    - [SearchStore](/docs/ref/object/search-store/)
+    - [Security](/docs/ref/object/security/)
+    - [SenderAuth](/docs/ref/object/sender-auth/)
+    - [Sharing](/docs/ref/object/sharing/)
+    - [SieveSystemInterpreter](/docs/ref/object/sieve-system-interpreter/)
+    - [SieveSystemScript](/docs/ref/object/sieve-system-script/)
+    - [SieveUserInterpreter](/docs/ref/object/sieve-user-interpreter/)
+    - [SieveUserScript](/docs/ref/object/sieve-user-script/)
+    - [SpamClassifier](/docs/ref/object/spam-classifier/)
+    - [SpamDnsblServer](/docs/ref/object/spam-dnsbl-server/)
+    - [SpamDnsblSettings](/docs/ref/object/spam-dnsbl-settings/)
+    - [SpamFileExtension](/docs/ref/object/spam-file-extension/)
+    - [SpamLlm](/docs/ref/object/spam-llm/)
+    - [SpamPyzor](/docs/ref/object/spam-pyzor/)
+    - [SpamRule](/docs/ref/object/spam-rule/)
+    - [SpamSettings](/docs/ref/object/spam-settings/)
+    - [SpamTag](/docs/ref/object/spam-tag/)
+    - [SpamTrainingSample](/docs/ref/object/spam-training-sample/)
+    - [SpfReportSettings](/docs/ref/object/spf-report-settings/)
+    - [StoreLookup](/docs/ref/object/store-lookup/)
+    - [SystemSettings](/docs/ref/object/system-settings/)
+    - [Task](/docs/ref/object/task/)
+    - [TaskManager](/docs/ref/object/task-manager/)
+    - [Tenant](/docs/ref/object/tenant/)
+    - [TlsExternalReport](/docs/ref/object/tls-external-report/)
+    - [TlsInternalReport](/docs/ref/object/tls-internal-report/)
+    - [TlsReportSettings](/docs/ref/object/tls-report-settings/)
+    - [Trace](/docs/ref/object/trace/)
+    - [Tracer](/docs/ref/object/tracer/)
+    - [TracingStore](/docs/ref/object/tracing-store/)
+    - [WebDav](/docs/ref/object/web-dav/)
+    - [WebHook](/docs/ref/object/web-hook/)
+  + Enums    
+    - [DnsServerBootstrapType](/docs/ref/enum/dns-server-bootstrap-type/)
+    - [DnsServerType](/docs/ref/enum/dns-server-type/)
+    - [Key](/docs/ref/enum/key/)
+    - [Locale](/docs/ref/enum/locale/)
+    - [TimeZone](/docs/ref/enum/time-zone/)
+  + Expressions    
+    - Variables    
+      * [HttpVariable](/docs/ref/expression/variable/http-variable/)
+      * [MtaConnectionVariable](/docs/ref/expression/variable/mta-connection-variable/)
+      * [MtaEhloVariable](/docs/ref/expression/variable/mta-ehlo-variable/)
+      * [MtaMailFromVariable](/docs/ref/expression/variable/mta-mail-from-variable/)
+      * [MtaQueueHostVariable](/docs/ref/expression/variable/mta-queue-host-variable/)
+      * [MtaQueueRcptVariable](/docs/ref/expression/variable/mta-queue-rcpt-variable/)
+      * [MtaQueueSenderVariable](/docs/ref/expression/variable/mta-queue-sender-variable/)
+      * [MtaRcptDomainVariable](/docs/ref/expression/variable/mta-rcpt-domain-variable/)
+      * [MtaRcptToVariable](/docs/ref/expression/variable/mta-rcpt-to-variable/)
+      * [MtaRcptVariable](/docs/ref/expression/variable/mta-rcpt-variable/)
+      * [SpamDefaultVariable](/docs/ref/expression/variable/spam-default-variable/)
+      * [SpamEmailVariable](/docs/ref/expression/variable/spam-email-variable/)
+      * [SpamGenericVariable](/docs/ref/expression/variable/spam-generic-variable/)
+      * [SpamHeaderVariable](/docs/ref/expression/variable/spam-header-variable/)
+      * [SpamIpVariable](/docs/ref/expression/variable/spam-ip-variable/)
+      * [SpamUrlVariable](/docs/ref/expression/variable/spam-url-variable/)
+    - Constants    
+      * [MtaAggregateConstant](/docs/ref/expression/constant/mta-aggregate-constant/)
+      * [MtaAuthTypeConstant](/docs/ref/expression/constant/mta-auth-type-constant/)
+      * [MtaIpStrategyConstant](/docs/ref/expression/constant/mta-ip-strategy-constant/)
+      * [MtaPriorityConstant](/docs/ref/expression/constant/mta-priority-constant/)
+      * [MtaRequireConstant](/docs/ref/expression/constant/mta-require-constant/)
+      * [MtaVerifyConstant](/docs/ref/expression/constant/mta-verify-constant/)
+  + [Permissions](/docs/ref/permissions/)
+  + [Events](/docs/ref/events/)
+  + [Metrics](/docs/ref/metrics/)
+* [FAQ](/docs/faq/)
+* v0.15 (archived)    
+  + Getting started    
+    - [Welcome to Stalwart](/docs/0.15/install/get-started/)
+    - [System Requirements](/docs/0.15/install/requirements/)
+    - [Choosing a database](/docs/0.15/install/store/)
+    - Installation    
+      * [Linux / MacOS](/docs/0.15/install/platform/linux/)
+      * [Windows](/docs/0.15/install/platform/windows/)
+      * [Docker](/docs/0.15/install/platform/docker/)
+    - [Choosing a directory](/docs/0.15/install/directory/)
+    - [Setting up DNS](/docs/0.15/install/dns/)
+    - [Securing your server](/docs/0.15/install/security/)
+    - [Performance tuning](/docs/0.15/install/performance/)
+    - [Upgrading](/docs/0.15/install/upgrade/)
+  + Configuration    
+    - [Overview](/docs/0.15/configuration/)
+    - [Macros](/docs/0.15/configuration/macros/)
+    - Values    
+      * [String](/docs/0.15/configuration/values/string/)
+      * [Integer](/docs/0.15/configuration/values/integer/)
+      * [Boolean](/docs/0.15/configuration/values/boolean/)
+      * [IP Address](/docs/0.15/configuration/values/ip-address/)
+      * [Size](/docs/0.15/configuration/values/size/)
+      * [Duration](/docs/0.15/configuration/values/duration/)
+      * [Rate](/docs/0.15/configuration/values/rate/)
+      * [Array](/docs/0.15/configuration/values/array/)
+      * [Cron](/docs/0.15/configuration/values/cron/)
+    - Expressions    
+      * [Overview](/docs/0.15/configuration/expressions/)
+      * [Operators](/docs/0.15/configuration/expressions/operators/)
+      * [Functions](/docs/0.15/configuration/expressions/functions/)
+      * [Values](/docs/0.15/configuration/expressions/values/)
+    - [Variables](/docs/0.15/configuration/variables/)
+  + Server settings    
+    - [General](/docs/0.15/server/general/)
+    - [Listeners](/docs/0.15/server/listener/)
+    - TLS    
+      * [Overview](/docs/0.15/server/tls/)
+      * [Certificates](/docs/0.15/server/tls/certificates/)
+      * ACME    
+        + [Overview](/docs/0.15/server/tls/acme/)
+        + [Challenge Types](/docs/0.15/server/tls/acme/challenges/)
+        + [Configuration](/docs/0.15/server/tls/acme/configuration/)
+    - Reverse Proxy    
+      * [Overview](/docs/0.15/server/reverse-proxy/)
+      * [Proxy Protocol](/docs/0.15/server/reverse-proxy/proxy-protocol/)
+      * [Traefik](/docs/0.15/server/reverse-proxy/traefik/)
+      * [Caddy](/docs/0.15/server/reverse-proxy/caddy/)
+      * [HAProxy](/docs/0.15/server/reverse-proxy/haproxy/)
+      * [NGINX](/docs/0.15/server/reverse-proxy/nginx/)
+    - [Auto-banning](/docs/0.15/server/auto-ban/)
+    - [Autoconfig](/docs/0.15/server/autoconfig/)
+    - [ASN & GeoIP](/docs/0.15/server/asn/)
+    - [AI Models](/docs/0.15/server/ai-models/)
+    - [Caching](/docs/0.15/server/cache/)
+    - [Enterprise License](/docs/0.15/server/enterprise/)
+  + Storage settings    
+    - [Overview](/docs/0.15/storage/)
+    - [Data store](/docs/0.15/storage/data/)
+    - [Blob store](/docs/0.15/storage/blob/)
+    - [Search store](/docs/0.15/storage/fts/)
+    - [In-memory store](/docs/0.15/storage/in-memory/)
+    - Backends    
+      * [Overview](/docs/0.15/storage/backends/)
+      * [RocksDB](/docs/0.15/storage/backends/rocksdb/)
+      * [FoundationDB](/docs/0.15/storage/backends/foundationdb/)
+      * [PostgreSQL](/docs/0.15/storage/backends/postgresql/)
+      * [MySQL / MariaDB](/docs/0.15/storage/backends/mysql/)
+      * [SQLite](/docs/0.15/storage/backends/sqlite/)
+      * [S3-compatible](/docs/0.15/storage/backends/s3/)
+      * [Filesystem](/docs/0.15/storage/backends/filesystem/)
+      * [ElasticSearch](/docs/0.15/storage/backends/elasticsearch/)
+      * [Meilisearch](/docs/0.15/storage/backends/meilisearch/)
+      * [Redis](/docs/0.15/storage/backends/redis/)
+      * [Azure Blob Storage](/docs/0.15/storage/backends/azure/)
+      * Composite    
+        + [Overview](/docs/0.15/storage/backends/composite/)
+        + [Sharded In-Memory Store](/docs/0.15/storage/backends/composite/sharded-in-memory/)
+        + [Sharded Blob Store](/docs/0.15/storage/backends/composite/sharded-blob/)
+        + [SQL Read Replicas](/docs/0.15/storage/backends/composite/sql-replica/)
+    - Lookup lists    
+      * [Overview](/docs/0.15/storage/lookup/)
+      * [Local](/docs/0.15/storage/lookup/local/)
+      * [Remote](/docs/0.15/storage/lookup/remote/)
+  + Access Control    
+    - [Overview](/docs/0.15/auth/)
+    - Principals    
+      * [Overview](/docs/0.15/auth/principals/)
+      * [Individual](/docs/0.15/auth/principals/individual/)
+      * [Group](/docs/0.15/auth/principals/group/)
+      * [Mailing List](/docs/0.15/auth/principals/list/)
+      * [Domain](/docs/0.15/auth/principals/domain/)
+      * [API Key](/docs/0.15/auth/principals/api-key/)
+      * [OAuth Client](/docs/0.15/auth/principals/oauth-client/)
+    - Authentication    
+      * [Overview](/docs/0.15/auth/authentication/)
+      * [Passwords](/docs/0.15/auth/authentication/password/)
+      * [Two-Factor Authentication](/docs/0.15/auth/authentication/2fa/)
+      * [App Passwords](/docs/0.15/auth/authentication/app-password/)
+    - Authorization    
+      * [Overview](/docs/0.15/auth/authorization/)
+      * [Permissions](/docs/0.15/auth/authorization/permissions/)
+      * [Roles](/docs/0.15/auth/authorization/roles/)
+      * [Administrators](/docs/0.15/auth/authorization/administrator/)
+      * [Tenants](/docs/0.15/auth/authorization/tenants/)
+      * [Quotas](/docs/0.15/auth/authorization/quotas/)
+    - OAuth    
+      * [Overview](/docs/0.15/auth/oauth/)
+      * [Authorization Flows](/docs/0.15/auth/oauth/flows/)
+      * [Tokens](/docs/0.15/auth/oauth/tokens/)
+      * [Dynamic Registration](/docs/0.15/auth/oauth/client-registration/)
+      * [Interoperability](/docs/0.15/auth/oauth/interoperability/)
+      * [Endpoints](/docs/0.15/auth/oauth/endpoints/)
+    - OpenID Connect    
+      * [Overview](/docs/0.15/auth/openid/)
+      * [ID Tokens](/docs/0.15/auth/openid/id-tokens/)
+      * [OIDC Provider](/docs/0.15/auth/openid/provider/)
+      * [Endpoints](/docs/0.15/auth/openid/endpoints/)
+    - Directories    
+      * [Overview](/docs/0.15/auth/backend/)
+      * [Internal](/docs/0.15/auth/backend/internal/)
+      * [SQL Database](/docs/0.15/auth/backend/sql/)
+      * [LDAP Server](/docs/0.15/auth/backend/ldap/)
+      * [OpenID Connect](/docs/0.15/auth/backend/oidc/)
+      * [In-memory](/docs/0.15/auth/backend/memory/)
+      * [SMTP and IMAP](/docs/0.15/auth/backend/remote/)
+  + HTTP settings    
+    - [Overview](/docs/0.15/http/)
+    - [Settings](/docs/0.15/http/settings/)
+    - JMAP    
+      * [Overview](/docs/0.15/http/jmap/)
+      * [Protocol](/docs/0.15/http/jmap/protocol/)
+      * [WebSockets](/docs/0.15/http/jmap/websockets/)
+      * [Push notifications](/docs/0.15/http/jmap/push/)
+    - WebDAV    
+      * [Overview](/docs/0.15/http/webdav/)
+      * [Protocol](/docs/0.15/http/webdav/protocol/)
+    - [Access Control](/docs/0.15/http/access-control/)
+    - [Security](/docs/0.15/http/security/)
+    - [Rate limiting](/docs/0.15/http/ratelimit/)
+    - [Form Handling](/docs/0.15/http/form-submission/)
+  + Email settings    
+    - [Overview](/docs/0.15/email/)
+    - [JMAP for Mail](/docs/0.15/email/jmap/)
+    - [IMAP and POP3](/docs/0.15/email/imap/)
+    - [Rate limiting](/docs/0.15/email/ratelimit/)
+    - [Maintenance](/docs/0.15/email/maintenance/)
+  + MTA settings    
+    - [Overview](/docs/0.15/mta/)
+    - Inbound    
+      * [Overview](/docs/0.15/mta/inbound/)
+      * [Connect stage](/docs/0.15/mta/inbound/connect/)
+      * [EHLO stage](/docs/0.15/mta/inbound/ehlo/)
+      * [MAIL stage](/docs/0.15/mta/inbound/mail/)
+      * [RCPT stage](/docs/0.15/mta/inbound/rcpt/)
+      * [DATA stage](/docs/0.15/mta/inbound/data/)
+      * [AUTH stage](/docs/0.15/mta/inbound/auth/)
+    - Outbound    
+      * [Overview](/docs/0.15/mta/outbound/)
+      * [Strategies](/docs/0.15/mta/outbound/strategy/)
+      * [Queues](/docs/0.15/mta/outbound/queue/)
+      * [Scheduling](/docs/0.15/mta/outbound/schedule/)
+      * [Routing](/docs/0.15/mta/outbound/routing/)
+      * [Connection](/docs/0.15/mta/outbound/connection/)
+      * [TLS](/docs/0.15/mta/outbound/tls/)
+      * [DNS](/docs/0.15/mta/outbound/dns/)
+      * [Rate Limits](/docs/0.15/mta/outbound/rate-limit/)
+      * [Quotas](/docs/0.15/mta/outbound/quota/)
+    - Filtering    
+      * [Overview](/docs/0.15/mta/filter/)
+      * [Spam filter](/docs/0.15/mta/filter/spam/)
+      * [Sieve scripting](/docs/0.15/mta/filter/sieve/)
+      * [Milter filters](/docs/0.15/mta/filter/milter/)
+      * [MTA Hooks](/docs/0.15/mta/filter/mtahooks/)
+    - Rewriting    
+      * [Overview](/docs/0.15/mta/rewrite/)
+      * [Envelope](/docs/0.15/mta/rewrite/address/)
+      * [Headers](/docs/0.15/mta/rewrite/headers/)
+      * [Body & Attachments](/docs/0.15/mta/rewrite/content/)
+    - Sender Authentication    
+      * DKIM    
+        + [Overview](/docs/0.15/mta/authentication/dkim/)
+        + [Signing](/docs/0.15/mta/authentication/dkim/sign/)
+        + [Verifying](/docs/0.15/mta/authentication/dkim/verify/)
+      * [SPF](/docs/0.15/mta/authentication/spf/)
+      * [ARC](/docs/0.15/mta/authentication/arc/)
+      * [DMARC](/docs/0.15/mta/authentication/dmarc/)
+      * [Reverse IP](/docs/0.15/mta/authentication/iprev/)
+    - Transport Security    
+      * [Overview](/docs/0.15/mta/transport-security/)
+      * [DANE](/docs/0.15/mta/transport-security/dane/)
+      * [MTA-STS](/docs/0.15/mta/transport-security/mta-sts/)
+    - Reports    
+      * [Overview](/docs/0.15/mta/reports/)
+      * [Delivery Notifications](/docs/0.15/mta/reports/dsn/)
+      * [DKIM](/docs/0.15/mta/reports/dkim/)
+      * [SPF](/docs/0.15/mta/reports/spf/)
+      * [DMARC](/docs/0.15/mta/reports/dmarc/)
+      * [TLS](/docs/0.15/mta/reports/tls/)
+      * [Analysis](/docs/0.15/mta/reports/analysis/)
+  + Collaboration settings    
+    - [Overview](/docs/0.15/collaboration/)
+    - [WebDAV](/docs/0.15/collaboration/webdav/)
+    - [Calendar](/docs/0.15/collaboration/calendar/)
+    - [Scheduling](/docs/0.15/collaboration/scheduling/)
+    - [Notifications](/docs/0.15/collaboration/notifications/)
+    - [Contacts](/docs/0.15/collaboration/contact/)
+    - [File Storage](/docs/0.15/collaboration/file-storage/)
+    - [Sharing](/docs/0.15/collaboration/sharing/)
+  + Encryption settings    
+    - [Overview](/docs/0.15/encryption/)
+    - [Management](/docs/0.15/encryption/manage/)
+    - [S/MIME](/docs/0.15/encryption/smime/)
+    - [OpenPGP](/docs/0.15/encryption/pgp/)
+  + Spam & Phishing filter    
+    - [Overview](/docs/0.15/spamfilter/)
+    - Settings    
+      * [Overview](/docs/0.15/spamfilter/settings/general/)
+      * [Scores](/docs/0.15/spamfilter/settings/scores/)
+      * [MIME Types](/docs/0.15/spamfilter/settings/mime-types/)
+      * [Domain Lists](/docs/0.15/spamfilter/settings/domain-lists/)
+    - Linear Classifier    
+      * [Overview](/docs/0.15/spamfilter/classifier/)
+      * [Training](/docs/0.15/spamfilter/classifier/training/)
+      * [Hyperparameters](/docs/0.15/spamfilter/classifier/hyperparameters/)
+      * [Learning](/docs/0.15/spamfilter/classifier/autolearn/)
+    - [LLM Classifier](/docs/0.15/spamfilter/llm/)
+    - [Rules](/docs/0.15/spamfilter/rules/)
+    - [DNS Blocklists](/docs/0.15/spamfilter/dnsbl/)
+    - [DMARC Analysis](/docs/0.15/spamfilter/dmarc/)
+    - [Phishing Protection](/docs/0.15/spamfilter/phishing/)
+    - [Collaborative Digests](/docs/0.15/spamfilter/digests/)
+    - [Trusted Senders](/docs/0.15/spamfilter/trusted/)
+    - [Greylisting](/docs/0.15/spamfilter/greylist/)
+    - [Spamtrap](/docs/0.15/spamfilter/spamtrap/)
+  + Sieve scripting    
+    - [Overview](/docs/0.15/sieve/)
+    - Settings    
+      * [Overview](/docs/0.15/sieve/interpreter/)
+      * [Trusted Interpreter](/docs/0.15/sieve/interpreter/trusted/)
+      * [Untrusted Interpreter](/docs/0.15/sieve/interpreter/untrusted/)
+    - [Variables](/docs/0.15/sieve/variables/)
+    - [Expressions](/docs/0.15/sieve/expressions/)
+    - [LLM Integration](/docs/0.15/sieve/llm/)
+    - [ManageSieve](/docs/0.15/sieve/managesieve/)
+    - [JMAP for Sieve](/docs/0.15/sieve/jmap/)
+    - [Reference](/docs/0.15/sieve/reference/)
+    - [Examples](/docs/0.15/sieve/examples/)
+  + Clustering & HA    
+    - [Overview](/docs/0.15/cluster/)
+    - Deployment    
+      * [Overview](/docs/0.15/cluster/deployment/)
+      * [Sizing](/docs/0.15/cluster/deployment/sizing/)
+      * [Storage](/docs/0.15/cluster/deployment/storage/)
+      * [Topology](/docs/0.15/cluster/deployment/topology/)
+    - Configuration    
+      * [Overview](/docs/0.15/cluster/configuration/)
+      * [Node ID](/docs/0.15/cluster/configuration/node-id/)
+      * [Coordination Mechanism](/docs/0.15/cluster/configuration/coordination/)
+      * [Load Balancing](/docs/0.15/cluster/configuration/load-balancing/)
+      * [Roles](/docs/0.15/cluster/configuration/roles/)
+    - Coordination    
+      * [Overview](/docs/0.15/cluster/coordination/)
+      * [Peer-to-Peer](/docs/0.15/cluster/coordination/peer-to-peer/)
+      * [Apache Kafka / Redpanda](/docs/0.15/cluster/coordination/kafka/)
+      * [NATS](/docs/0.15/cluster/coordination/nats/)
+      * [Redis](/docs/0.15/cluster/coordination/redis/)
+    - Orchestration    
+      * [Overview](/docs/0.15/cluster/orchestration/)
+      * [Kubernetes](/docs/0.15/cluster/orchestration/kubernetes/)
+      * [Docker Swarm](/docs/0.15/cluster/orchestration/docker-swarm/)
+      * [Apache Mesos](/docs/0.15/cluster/orchestration/apache-mesos/)
+  + Telemetry    
+    - [Overview](/docs/0.15/telemetry/)
+    - [Events](/docs/0.15/telemetry/events/)
+    - Tracing & Logging    
+      * [Overview](/docs/0.15/telemetry/tracing/)
+      * [OpenTelemetry](/docs/0.15/telemetry/tracing/opentelemetry/)
+      * [Log file](/docs/0.15/telemetry/tracing/log/)
+      * [Console](/docs/0.15/telemetry/tracing/console/)
+      * [Journal](/docs/0.15/telemetry/tracing/journal/)
+    - Metrics    
+      * [Overview](/docs/0.15/telemetry/metrics/)
+      * [OpenTelemetry](/docs/0.15/telemetry/metrics/opentelemetry/)
+      * [Prometheus](/docs/0.15/telemetry/metrics/prometheus/)
+    - [Webhooks](/docs/0.15/telemetry/webhooks/)
+    - [Alerts](/docs/0.15/telemetry/alerts/)
+    - [Live Telemetry](/docs/0.15/telemetry/live/)
+    - [History](/docs/0.15/telemetry/history/)
+  + Management    
+    - [Overview](/docs/0.15/management/)
+    - Web-based Administration    
+      * [Overview](/docs/0.15/management/webadmin/)
+      * [Updates](/docs/0.15/management/webadmin/update/)
+      * [Self-service](/docs/0.15/management/webadmin/selfservice/)
+      * [Branding](/docs/0.15/management/webadmin/branding/)
+    - Command-line Interface    
+      * [Overview](/docs/0.15/management/cli/)
+      * Queue    
+        + [Messages](/docs/0.15/management/cli/queue/messages/)
+        + [Reports](/docs/0.15/management/cli/queue/reports/)
+      * Import    
+        + [From Maildir or mbox](/docs/0.15/management/cli/import/maildir/)
+        + [From JMAP](/docs/0.15/management/cli/import/jmap/)
+      * [Export](/docs/0.15/management/cli/export/)
+      * Database    
+        + [Backup](/docs/0.15/management/cli/database/backup/)
+        + [Migrate](/docs/0.15/management/cli/database/migrate/)
+        + [Maintenance](/docs/0.15/management/cli/database/maintenance/)
+      * [Configuration](/docs/0.15/management/cli/config/)
+    - [Database Console](/docs/0.15/management/database/)
+    - [Database Migration](/docs/0.15/management/migration/)
+    - [Troubleshooting](/docs/0.15/management/troubleshoot/)
+  + API Reference    
+    - Management API    
+      * [Overview](/docs/0.15/api/management/)
+      * [Endpoints](/docs/0.15/api/management/endpoints/)
+    - [Webhooks](/docs/0.15/api/webhooks/)
+    - MTA Hooks    
+      * [Overview](/docs/0.15/api/mta-hooks/)
+      * [Request](/docs/0.15/api/mta-hooks/request/)
+      * [Response](/docs/0.15/api/mta-hooks/response/)
+  + Development    
+    - [Database Internals](/docs/0.15/development/database/)
+    - [Compiling Stalwart](/docs/0.15/development/compile/)
+    - [Testing Stalwart](/docs/0.15/development/test/)
+    - [RFCs](/docs/0.15/development/rfcs/)
+    - [URN Namespace](/docs/0.15/development/urn/)
+  + [FAQ](/docs/0.15/faq/)
+    [GitHub](https://github.com/stalwartlabs)[RSS](https://stalw.art/blog/rss.xml)   [Stalwart Blog](/blog/)    Select theme   DarkLightAuto              On this page
+
+* [Overview](#_top)
+* [Liveness and readiness endpoints](#liveness-and-readiness-endpoints)
+* [Chart layout](#chart-layout) 
+  + [Chart.yaml](#chartyaml)
+  + [templates/\_helpers.tpl](#templates_helperstpl)
+  + [templates/configmap.yaml](#templatesconfigmapyaml)
+  + [templates/secret.yaml](#templatessecretyaml)
+  + [templates/statefulset.yaml](#templatesstatefulsetyaml)
+  + [templates/service.yaml](#templatesserviceyaml)
+  + [templates/ingress.yaml](#templatesingressyaml)
+* [values.yaml](#valuesyaml)
+* [config.json handling](#configjson-handling)
+* [Environment variables](#environment-variables)
+* [Clustered deployment](#clustered-deployment) 
+  + [Single role per StatefulSet replica](#single-role-per-statefulset-replica)
+  + [Multi-release layout for distinct roles](#multi-release-layout-for-distinct-roles)
+  + [External coordinator](#external-coordinator)
+* [Restricted Pod Security Standards](#restricted-pod-security-standards)
+* [Bootstrapping](#bootstrapping)
+* [Upgrading](#upgrading)
+* [Troubleshooting](#troubleshooting)
+
+On this page
+------------
+
+* [Overview](#_top)
+* [Liveness and readiness endpoints](#liveness-and-readiness-endpoints)
+* [Chart layout](#chart-layout) 
+  + [Chart.yaml](#chartyaml)
+  + [templates/\_helpers.tpl](#templates_helperstpl)
+  + [templates/configmap.yaml](#templatesconfigmapyaml)
+  + [templates/secret.yaml](#templatessecretyaml)
+  + [templates/statefulset.yaml](#templatesstatefulsetyaml)
+  + [templates/service.yaml](#templatesserviceyaml)
+  + [templates/ingress.yaml](#templatesingressyaml)
+* [values.yaml](#valuesyaml)
+* [config.json handling](#configjson-handling)
+* [Environment variables](#environment-variables)
+* [Clustered deployment](#clustered-deployment) 
+  + [Single role per StatefulSet replica](#single-role-per-statefulset-replica)
+  + [Multi-release layout for distinct roles](#multi-release-layout-for-distinct-roles)
+  + [External coordinator](#external-coordinator)
+* [Restricted Pod Security Standards](#restricted-pod-security-standards)
+* [Bootstrapping](#bootstrapping)
+* [Upgrading](#upgrading)
+* [Troubleshooting](#troubleshooting)
+      
+
+Kubernetes
+==========
+
+    
+
+Kubernetes deployments of Stalwart are driven by a Helm chart that installs the server as a StatefulSet, exposes the standard mail listeners (SMTP, submission, IMAP, POP3, ManageSieve) alongside the HTTP management listener, and provisions persistent storage for the data volume. The StatefulSet shape is used (rather than a plain Deployment) so that each replica keeps a stable hostname and its own PersistentVolumeClaim, which matters when the [DataStore](/docs/ref/object/data-store) (found in the WebUI under  Settings ›  Storage › Data Store) is a local backend such as RocksDB and when the cluster’s [node-id lease](/docs/cluster/configuration/node-id) depends on a stable hostname.
+
+The chart below is a minimal, complete reference. It can be committed to a chart repository, packaged, and installed with `helm install`, or used as a starting point for a site-specific chart.
+
+Liveness and readiness endpoints
+--------------------------------
+
+[Section titled “Liveness and readiness endpoints”](#liveness-and-readiness-endpoints)
+
+Kubernetes probes check that containers are running and ready to serve traffic. Stalwart exposes two HTTP endpoints for this purpose on the management listener:
+
+* Liveness: `/healthz/live`. A failing liveness probe causes the container to be restarted.
+* Readiness: `/healthz/ready`. A failing readiness probe causes the pod to be removed from Service endpoints until it recovers.
+
+Both endpoints are wired into the StatefulSet template below.
+
+Chart layout
+------------
+
+[Section titled “Chart layout”](#chart-layout)
+
+The chart follows the standard Helm layout. A typical tree looks like this:
+
+
+
+```
+stalwart/├── Chart.yaml├── values.yaml├── .helmignore└── templates/    ├── _helpers.tpl    ├── configmap.yaml    ├── secret.yaml    ├── statefulset.yaml    ├── service.yaml    └── ingress.yaml
+```
+
+### `Chart.yaml`
+
+[Section titled “Chart.yaml”](#chartyaml)
+
+
+
+```
+apiVersion: v2name: stalwartdescription: Helm chart for the Stalwart mail and collaboration servertype: applicationversion: 0.1.0appVersion: "v0.16"home: https://stalw.artsources:  - https://github.com/stalwartlabs/stalwartmaintainers:  - name: Stalwart Labs    url: https://stalw.art
+```
+
+### `templates/_helpers.tpl`
+
+[Section titled “templates/\_helpers.tpl”](#templates_helperstpl)
+
+
+
+```
+{{/* Expand the name of the chart. */}}{{- define "stalwart.name" -}}{{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}{{- end -}}
+{{- define "stalwart.fullname" -}}{{- if .Values.fullnameOverride -}}{{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}{{- else -}}{{- printf "%s-%s" .Release.Name (include "stalwart.name" .) | trunc 63 | trimSuffix "-" -}}{{- end -}}{{- end -}}
+{{- define "stalwart.labels" -}}app.kubernetes.io/name: {{ include "stalwart.name" . }}app.kubernetes.io/instance: {{ .Release.Name }}app.kubernetes.io/managed-by: {{ .Release.Service }}app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}{{- end -}}
+{{- define "stalwart.selectorLabels" -}}app.kubernetes.io/name: {{ include "stalwart.name" . }}app.kubernetes.io/instance: {{ .Release.Name }}{{- end -}}
+```
+
+### `templates/configmap.yaml`
+
+[Section titled “templates/configmap.yaml”](#templatesconfigmapyaml)
+
+The ConfigMap carries the `config.json` file that Stalwart reads at startup. It only describes the DataStore; every other setting lives in the database and is edited through the WebUI or the CLI. See the [configuration overview](/docs/configuration/) for the rationale.
+
+
+
+```
+apiVersion: v1kind: ConfigMapmetadata:  name: {{ include "stalwart.fullname" . }}-config  labels:    {{- include "stalwart.labels" . | nindent 4 }}data:  config.json: |{{ .Values.config | toPrettyJson | indent 4 }}
+```
+
+### `templates/secret.yaml`
+
+[Section titled “templates/secret.yaml”](#templatessecretyaml)
+
+The Secret holds environment-variable values that should not be stored in a ConfigMap: the recovery administrator credential, and any external store credentials referenced from the setup wizard.
+
+
+
+```
+apiVersion: v1kind: Secretmetadata:  name: {{ include "stalwart.fullname" . }}-env  labels:    {{- include "stalwart.labels" . | nindent 4 }}type: OpaquestringData:  {{- if .Values.recoveryAdmin.enabled }}  STALWART_RECOVERY_ADMIN: {{ printf "%s:%s" .Values.recoveryAdmin.username .Values.recoveryAdmin.password | quote }}  {{- end }}  {{- range $key, $value := .Values.extraSecretEnv }}  {{ $key }}: {{ $value | quote }}  {{- end }}
+```
+
+### `templates/statefulset.yaml`
+
+[Section titled “templates/statefulset.yaml”](#templatesstatefulsetyaml)
+
+The StatefulSet runs the Stalwart image, mounts `config.json` read-only at `/etc/stalwart/config.json`, mounts the data PVC at `/var/lib/stalwart`, and starts the binary with `--config /etc/stalwart/config.json`, matching the [Docker install flow](/docs/install/platform/docker).
+
+
+
+```
+apiVersion: apps/v1kind: StatefulSetmetadata:  name: {{ include "stalwart.fullname" . }}  labels:    {{- include "stalwart.labels" . | nindent 4 }}spec:  serviceName: {{ include "stalwart.fullname" . }}-headless  replicas: {{ .Values.replicaCount }}  selector:    matchLabels:      {{- include "stalwart.selectorLabels" . | nindent 6 }}  template:    metadata:      labels:        {{- include "stalwart.selectorLabels" . | nindent 8 }}      annotations:        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}    spec:      {{- with .Values.podSecurityContext }}      securityContext:        {{- toYaml . | nindent 8 }}      {{- end }}      containers:        - name: stalwart          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"          imagePullPolicy: {{ .Values.image.pullPolicy }}          {{- with .Values.containerSecurityContext }}          securityContext:            {{- toYaml . | nindent 12 }}          {{- end }}          args:            - "--config"            - "/etc/stalwart/config.json"          env:            {{- if .Values.role }}            - name: STALWART_ROLE              value: {{ .Values.role | quote }}            {{- end }}            {{- if .Values.pushShard }}            - name: STALWART_PUSH_SHARD              value: {{ .Values.pushShard | quote }}            {{- end }}            {{- if .Values.recoveryMode.enabled }}            - name: STALWART_RECOVERY_MODE              value: "true"            - name: STALWART_RECOVERY_MODE_PORT              value: {{ .Values.recoveryMode.port | quote }}            - name: STALWART_RECOVERY_MODE_LOG_LEVEL              value: {{ .Values.recoveryMode.logLevel | quote }}            {{- end }}            {{- range $key, $value := .Values.extraEnv }}            - name: {{ $key }}              value: {{ $value | quote }}            {{- end }}          envFrom:            - secretRef:                name: {{ include "stalwart.fullname" . }}-env          ports:            - name: smtp              containerPort: 25            - name: smtps              containerPort: 465            - name: submission              containerPort: 587            - name: imap              containerPort: 143            - name: imaps              containerPort: 993            - name: pop3              containerPort: 110            - name: pop3s              containerPort: 995            - name: sieve              containerPort: 4190            - name: http              containerPort: 80            - name: https              containerPort: 443            - name: mgmt              containerPort: 8080          livenessProbe:            httpGet:              path: /healthz/live              port: mgmt            initialDelaySeconds: 30            periodSeconds: 10          readinessProbe:            httpGet:              path: /healthz/ready              port: mgmt            initialDelaySeconds: 5            periodSeconds: 10          volumeMounts:            - name: config              mountPath: /etc/stalwart/config.json              subPath: config.json              readOnly: true            {{- if .Values.persistence.enabled }}            - name: data              mountPath: /var/lib/stalwart            {{- end }}          resources:            {{- toYaml .Values.resources | nindent 12 }}      volumes:        - name: config          configMap:            name: {{ include "stalwart.fullname" . }}-config  {{- if .Values.persistence.enabled }}  volumeClaimTemplates:    - metadata:        name: data      spec:        accessModes:          - {{ .Values.persistence.accessMode | quote }}        {{- if .Values.persistence.storageClass }}        storageClassName: {{ .Values.persistence.storageClass | quote }}        {{- end }}        resources:          requests:            storage: {{ .Values.persistence.size | quote }}  {{- end }}
+```
+
+### `templates/service.yaml`
+
+[Section titled “templates/service.yaml”](#templatesserviceyaml)
+
+Two Services are defined: a headless Service backing the StatefulSet’s stable DNS, and a regular Service that exposes the mail and management ports.
+
+
+
+```
+apiVersion: v1kind: Servicemetadata:  name: {{ include "stalwart.fullname" . }}-headless  labels:    {{- include "stalwart.labels" . | nindent 4 }}spec:  clusterIP: None  selector:    {{- include "stalwart.selectorLabels" . | nindent 4 }}  ports:    - name: mgmt      port: 8080      targetPort: mgmt---apiVersion: v1kind: Servicemetadata:  name: {{ include "stalwart.fullname" . }}  labels:    {{- include "stalwart.labels" . | nindent 4 }}spec:  type: {{ .Values.service.type }}  selector:    {{- include "stalwart.selectorLabels" . | nindent 4 }}  ports:    - name: smtp      port: {{ .Values.service.ports.smtp }}      targetPort: smtp    - name: smtps      port: {{ .Values.service.ports.smtps }}      targetPort: smtps    - name: submission      port: {{ .Values.service.ports.submission }}      targetPort: submission    - name: imap      port: {{ .Values.service.ports.imap }}      targetPort: imap    - name: imaps      port: {{ .Values.service.ports.imaps }}      targetPort: imaps    - name: pop3      port: {{ .Values.service.ports.pop3 }}      targetPort: pop3    - name: pop3s      port: {{ .Values.service.ports.pop3s }}      targetPort: pop3s    - name: sieve      port: {{ .Values.service.ports.sieve }}      targetPort: sieve    - name: http      port: {{ .Values.service.ports.http }}      targetPort: http    - name: https      port: {{ .Values.service.ports.https }}      targetPort: https    - name: mgmt      port: {{ .Values.service.ports.mgmt }}      targetPort: mgmt
+```
+
+### `templates/ingress.yaml`
+
+[Section titled “templates/ingress.yaml”](#templatesingressyaml)
+
+An Ingress is only useful for the HTTP and HTTPS listeners; SMTP, IMAP, POP3, and ManageSieve require L4 exposure and should be fronted by a `LoadBalancer` Service or an external load balancer.
+
+
+
+```
+{{- if .Values.ingress.enabled }}apiVersion: networking.k8s.io/v1kind: Ingressmetadata:  name: {{ include "stalwart.fullname" . }}  labels:    {{- include "stalwart.labels" . | nindent 4 }}  {{- with .Values.ingress.annotations }}  annotations:    {{- toYaml . | nindent 4 }}  {{- end }}spec:  {{- if .Values.ingress.className }}  ingressClassName: {{ .Values.ingress.className }}  {{- end }}  {{- if .Values.ingress.tls }}  tls:    {{- toYaml .Values.ingress.tls | nindent 4 }}  {{- end }}  rules:    {{- range .Values.ingress.hosts }}    - host: {{ .host | quote }}      http:        paths:          {{- range .paths }}          - path: {{ .path }}            pathType: {{ .pathType | default "Prefix" }}            backend:              service:                name: {{ include "stalwart.fullname" $ }}                port:                  name: {{ .portName | default "https" }}          {{- end }}    {{- end }}{{- end }}
+```
+
+`values.yaml`
+-------------
+
+[Section titled “values.yaml”](#valuesyaml)
+
+`values.yaml` is the single file an operator should need to edit to produce a working deployment. The example below exposes the full set of knobs called out in the chart templates:
+
+
+
+```
+# Container image.image:  repository: stalwartlabs/stalwart  tag: "v0.16"  pullPolicy: IfNotPresent
+# Number of pods in the StatefulSet.# Single-node deployments keep this at 1.# For a clustered deployment, raise this value and set `role` (and# `pushShard` where applicable) to a value that makes sense for the# whole StatefulSet, or install multiple releases of this chart with# different role values.replicaCount: 1
+# Maps to STALWART_ROLE. Names a ClusterRole defined in the database.# Leave empty on single-node installs to run every task and listener.# See /docs/cluster/configuration/roles for the role model.role: ""
+# Maps to STALWART_PUSH_SHARD. Only set on nodes whose role delivers# push notifications. Leave empty on single-node installs.pushShard: ""
+# Recovery / bootstrap administrator credential.# Enable this on first install so the operator can sign in without# scraping the pod logs for the generated temporary password.# Remove it once a permanent administrator account has been# provisioned through the setup wizard.recoveryAdmin:  enabled: true  username: admin  password: "change-me"
+# Starts the pods in recovery mode. Suspends mail services and# exposes only the management listener on the configured port.# See /docs/configuration/recovery-mode.recoveryMode:  enabled: false  port: 8080  logLevel: info
+# Extra environment variables injected into the container, for# store credentials that live in plain text.extraEnv: {}
+# Extra environment variables injected from the managed Secret.# Use this for anything sensitive (database passwords, S3 keys, etc.).extraSecretEnv: {}
+# config.json contents. Rendered verbatim into the ConfigMap.# Only the DataStore object belongs here; every other setting lives# in the database once the server is bootstrapped.# See /docs/configuration/overview and /docs/ref/object/data-store.config:  "@type": RocksDb  path: /var/lib/stalwart
+# Service definition. Change `type` to LoadBalancer when a cloud# load balancer should expose the mail ports directly, or keep it# as ClusterIP and front the chart with an Ingress / gateway for# the HTTP listeners only.service:  type: ClusterIP  ports:    smtp: 25    smtps: 465    submission: 587    imap: 143    imaps: 993    pop3: 110    pop3s: 995    sieve: 4190    http: 80    https: 443    mgmt: 8080
+# Ingress for the HTTP / HTTPS listeners only. Mail protocols# require L4 exposure and are not handled here.ingress:  enabled: false  className: nginx  annotations: {}  hosts:    - host: mail.example.org      paths:        - path: /          pathType: Prefix          portName: https  tls: []
+# Persistent volume for the data directory. Required when the# DataStore is a local backend such as RocksDB. Can be disabled# for deployments that use an external store (PostgreSQL, MySQL,# FoundationDB, S3-backed blob store, etc.).persistence:  enabled: true  accessMode: ReadWriteOnce  storageClass: ""  size: 20Gi
+# Resource requests and limits for the container.resources: {}
+# Pod-level security context. Applied to every container in the pod.# The defaults are sufficient for the `baseline` Pod Security Standard.# See "Restricted Pod Security Standards" below for the override# required under the `restricted` profile.podSecurityContext:  fsGroup: 2000  runAsUser: 2000  runAsGroup: 2000
+# Container-level security context for the stalwart container.# Empty by default. Set this to opt into the `restricted` Pod Security# Standard; see "Restricted Pod Security Standards" below.containerSecurityContext: {}
+```
+
+`config.json` handling
+----------------------
+
+[Section titled “config.json handling”](#configjson-handling)
+
+The server reads a single small JSON file at startup, containing only the [DataStore](/docs/ref/object/data-store) variant that tells it where its database lives. The chart renders the value of `.Values.config` into a ConfigMap key called `config.json`, mounts it as a file at `/etc/stalwart/config.json`, and starts the container with `--config /etc/stalwart/config.json`. This matches the flag used by the Docker install and by the native Linux packages, so `helm upgrade` does not change the runtime contract: only the DataStore value changes between a single-node RocksDB install and an externally-backed cluster.
+
+For an external DataStore (for example PostgreSQL), change `.Values.config` accordingly and set `persistence.enabled: false`. The [PostgreSql](/docs/ref/object/data-store) variant reads the connection password from an [`authSecret`](/docs/ref/object/data-store#authsecret) nested object whose `EnvironmentVariable` form is the natural fit for a chart-managed Secret:
+
+
+
+```
+config:  "@type": "PostgreSql"  host: postgres.db.svc.cluster.local  port: 5432  database: stalwart  authUsername: stalwart  authSecret:    "@type": "EnvironmentVariable"    variableName: STALWART_DB_PASSWORDpersistence:  enabled: falseextraSecretEnv:  STALWART_DB_PASSWORD: "s3cr3t"
+```
+
+Environment variables
+---------------------
+
+[Section titled “Environment variables”](#environment-variables)
+
+Every `STALWART_*` variable recognised by the server is documented on the [environment variables](/docs/configuration/environment-variables) page. The chart surfaces them as follows:
+
+| Variable | Values key | Notes |
+| --- | --- | --- |
+| `STALWART_ROLE` | `role` | Names the [ClusterRole](/docs/ref/object/cluster-role) (found in the WebUI under  Settings ›  Cluster › Roles) the pod adopts. |
+| `STALWART_PUSH_SHARD` | `pushShard` | Push notification shard for pods whose role delivers push. |
+| `STALWART_RECOVERY_MODE` | `recoveryMode.enabled` | Starts the pod in recovery mode. |
+| `STALWART_RECOVERY_MODE_PORT` | `recoveryMode.port` | Port the recovery listener binds to. Defaults to `8080`. |
+| `STALWART_RECOVERY_MODE_LOG_LEVEL` | `recoveryMode.logLevel` | Log verbosity while in recovery or bootstrap mode. |
+| `STALWART_RECOVERY_ADMIN` | `recoveryAdmin.username` + `recoveryAdmin.password` | Rendered into the managed Secret as `username:password`. |
+
+Any additional variable the runtime reads (database passwords, S3 credentials, and so on) can be injected via `extraEnv` for plain values or `extraSecretEnv` for sensitive values, both of which are surfaced through the same Secret-backed `envFrom` on the StatefulSet.
+
+Clustered deployment
+--------------------
+
+[Section titled “Clustered deployment”](#clustered-deployment)
+
+A single-node install leaves `role` empty, keeps `replicaCount: 1`, and runs every task and listener. Two layouts are recommended for multi-node deployments.
+
+### Single role per StatefulSet replica
+
+[Section titled “Single role per StatefulSet replica”](#single-role-per-statefulset-replica)
+
+For a cluster where every pod runs the same role (for example a stateless SMTP frontend backed by an external store), set `replicaCount` to the desired number of pods and leave the other values unchanged. `STALWART_ROLE` is applied to every pod in the StatefulSet, and `STALWART_PUSH_SHARD` is applied to every pod too; if per-pod sharding is required, split the StatefulSet or use the multi-release layout below.
+
+### Multi-release layout for distinct roles
+
+[Section titled “Multi-release layout for distinct roles”](#multi-release-layout-for-distinct-roles)
+
+For deployments that need different roles on different nodes, install the chart multiple times with distinct values files:
+
+Terminal window
+
+```
+helm install stalwart-frontend ./stalwart -f values-frontend.yamlhelm install stalwart-maintenance ./stalwart -f values-maintenance.yamlhelm install stalwart-push-shard-0 ./stalwart -f values-push-0.yamlhelm install stalwart-push-shard-1 ./stalwart -f values-push-1.yaml
+```
+
+Each release produces its own StatefulSet with its own PVCs, role, and push shard, while sharing the same DataStore and the same coordinator. `STALWART_PUSH_SHARD` is set to a different integer per release so that push-delivery work is partitioned across the cluster; see the [roles documentation](/docs/cluster/configuration/roles) for the sharding model.
+
+### External coordinator
+
+[Section titled “External coordinator”](#external-coordinator)
+
+Coordination between nodes is handled by the [Coordinator](/docs/ref/object/coordinator) singleton (found in the WebUI under  Settings ›  Cluster › Coordinator), which can be backed by peer-to-peer, Apache Kafka / Redpanda, NATS, or Redis. The coordinator is configured from the database rather than from `config.json`, so pointing a Kubernetes deployment at an external coordinator is a post-install operation: bring the first pod up, open the WebUI, set the Coordinator object in `Settings` > `Cluster`, and redeploy with the target `replicaCount`. Subsequent pods pick the coordinator configuration up from the shared DataStore on start. See the [coordination overview](/docs/cluster/coordination/) for the choice of backend.
+
+Restricted Pod Security Standards
+---------------------------------
+
+[Section titled “Restricted Pod Security Standards”](#restricted-pod-security-standards)
+
+The defaults shown in `values.yaml` produce a pod compatible with the [baseline](https://kubernetes.io/docs/concepts/security/pod-security-standards/) Pod Security Standard. The stricter `restricted` profile (enforced by `pod-security.kubernetes.io/enforce: restricted` on the namespace, and by the equivalent Security Context Constraints on OpenShift) additionally requires `runAsNonRoot: true`, `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, `seccompProfile.type: RuntimeDefault`, and `capabilities.drop: [ALL]`.
+
+One detail of the Stalwart image matters under this profile. The Dockerfile runs `setcap cap_net_bind_service=+ep /usr/local/bin/stalwart` so that the non-root `stalwart` user (UID 2000) can bind to the privileged mail ports (`25`, `110`, `143`, `443`, `465`, `587`, `993`, `995`). When the kernel `execve`s a binary with effective file capabilities, those capabilities must also be present in the calling process’s bounding set; `capabilities.drop: [ALL]` empties that set, and the exec is rejected with:
+
+
+
+```
+exec /usr/local/bin/stalwart: operation not permitted
+```
+
+Restricted PSS explicitly permits `NET_BIND_SERVICE` to be re-added through `capabilities.add`, which restores the bounding-set entry the file capability needs. Set the following in `values.yaml`:
+
+
+
+```
+podSecurityContext:  runAsNonRoot: true  runAsUser: 2000  runAsGroup: 2000  fsGroup: 2000  seccompProfile:    type: RuntimeDefault
+containerSecurityContext:  runAsNonRoot: true  allowPrivilegeEscalation: false  readOnlyRootFilesystem: true  capabilities:    drop: [ALL]    add: [NET_BIND_SERVICE]  seccompProfile:    type: RuntimeDefault
+```
+
+`NET_BIND_SERVICE` can be omitted from `capabilities.add` only if every configured listener binds to a port `>= 1024` *and* the file capability has been stripped from the binary (a custom image without the `setcap` step, or an init container that runs `setcap -r` against a copy of the binary). With the file capability still set on `/usr/local/bin/stalwart`, the bounding-set check fails regardless of which ports the configuration uses.
+
+`readOnlyRootFilesystem: true` requires that any path Stalwart writes to outside `/etc/stalwart` and `/var/lib/stalwart` is backed by a writable volume. A stock install with RocksDB and the `Console` log destination writes only into the data PVC and stdout, so no extra volumes are needed; configurations that need scratch space should add an `emptyDir` mount on `/tmp`.
+
+Bootstrapping
+-------------
+
+[Section titled “Bootstrapping”](#bootstrapping)
+
+[Bootstrap mode](/docs/configuration/bootstrap-mode) is triggered only when `config.json` is absent at startup. On Kubernetes the ConfigMap always renders a `config.json`, so the chart never enters bootstrap mode: an empty DataStore would instead cause the server to exit with an error before serving any listener. The chart therefore expects the initial `config.json` to be populated by the operator (the `.Values.config` default already points at a single-node RocksDB DataStore that lets the pod start cleanly on first install) and provisions the rest of the configuration through the management API once the pod is running. Setting `recoveryAdmin.enabled: true` makes that first sign-in possible without scraping the pod logs for a generated temporary password.
+
+1. Install the chart:
+   
+   Terminal window
+   
+   ```
+   helm install stalwart ./stalwart -f values.yaml
+   ```
+2. Port-forward the management listener:
+   
+   Terminal window
+   
+   ```
+   kubectl port-forward svc/stalwart 8080:8080
+   ```
+3. Open `http://127.0.0.1:8080/admin` and sign in with the credentials from `recoveryAdmin`.
+4. Complete the setup wizard, or run `stalwart-cli apply` against the same endpoint for a declarative bootstrap. The [CLI documentation](/docs/management/cli/) covers the `apply` flow.
+5. Once a permanent administrator account has been provisioned, remove `recoveryAdmin` from `values.yaml` and run `helm upgrade` to drop the pinned credential. Leaving `STALWART_RECOVERY_ADMIN` set on a production deployment is discouraged; see [recovery mode](/docs/configuration/recovery-mode) for the rationale.
+
+Upgrading
+---------
+
+[Section titled “Upgrading”](#upgrading)
+
+Upgrades are performed by changing `image.tag` in `values.yaml` and running:
+
+Terminal window
+
+```
+helm upgrade --install stalwart ./stalwart -f values.yaml
+```
+
+The StatefulSet rolls pods one at a time, each pod reusing its existing PVC, so on-disk data is preserved across the upgrade. Pinning a minor-version tag such as `v0.16` (rather than `latest`) keeps the deployment on a single release line and avoids breaking changes on upgrade, matching the guidance in the [Docker install page](/docs/install/platform/docker#start-the-container).
+
+Troubleshooting
+---------------
+
+[Section titled “Troubleshooting”](#troubleshooting)
+
+* Container fails to start with `exec /usr/local/bin/stalwart: operation not permitted`: the namespace enforces the `restricted` Pod Security Standard (or an equivalent SCC) and the file capability on the binary is incompatible with `capabilities.drop: [ALL]`. Add `NET_BIND_SERVICE` back to `capabilities.add` in `containerSecurityContext`. See [Restricted Pod Security Standards](#restricted-pod-security-standards).
+* No administrator sign-in on first install: set `recoveryAdmin.enabled: true` in `values.yaml` and redeploy. See [bootstrap mode](/docs/configuration/bootstrap-mode).
+* Pod stuck in `CrashLoopBackOff` on a fresh install with RocksDB: check that `persistence.enabled: true` and that the cluster’s default StorageClass can provision a `ReadWriteOnce` volume of the requested size. See [persistent storage](/docs/install/store).
+* Mail ports unreachable from outside the cluster: `service.type: ClusterIP` only exposes the listeners inside the cluster. Switch to `LoadBalancer`, add a `NodePort`, or front the chart with an L4 load balancer. Review [securing your server](/docs/install/security) before exposing SMTP and IMAP publicly.
+* TLS errors on the HTTPS listener: Stalwart needs a TLS certificate before mail clients will connect. Configure ACME in the WebUI under `Settings` > `Server` > `TLS` > `ACME Providers` or upload an existing certificate under `Settings` > `Server` > `TLS` > `Certificates`. See [ACME](/docs/server/tls/acme/).
+* Cluster nodes do not see each other: verify that `STALWART_ROLE` is set on every pod that participates and that the Coordinator is reachable from every pod. See [coordination overview](/docs/cluster/coordination/).
+* Two nodes acquire the same node id: StatefulSet pods already have stable, unique hostnames, but custom Deployment-based installs must ensure each pod runs with a distinct hostname. See [node id](/docs/cluster/configuration/node-id).
+   [Edit page](https://github.com/stalwartlabs/website/edit/main/src/content/docs/docs/cluster/orchestration/kubernetes.md)
+
+Last updated: May 29, 2026
+
+   [Previous   
+ Overview](/docs/cluster/orchestration/)   [Next   
+ Docker Swarm](/docs/cluster/orchestration/docker-swarm/)          
