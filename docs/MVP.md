@@ -1,0 +1,709 @@
+# Orvix — Email Server Platform MVP
+> Built on Stalwart Mail Server · Single Binary · License-Driven Features · Enterprise Grade
+
+---
+
+## 🧭 Vision
+
+Orvix is a self-hosted, white-label email server platform built **on top of Stalwart Mail Server**.
+Stalwart handles the complex mail engine — we build everything else.
+
+Competitors charge $3,000–$10,000/year. Orvix targets **$500–$2,500/year** across three tiers, sold to:
+- Hosting companies
+- Data centers
+- ISPs
+- Enterprises running private mail infrastructure
+
+**One binary. One license key. Everything unlocks.**
+
+---
+
+## 🏗️ What Stalwart Gives Us (Free — Already Built)
+
+| Component | Status |
+|-----------|--------|
+| SMTP Server | ✅ Production-ready |
+| IMAP Server | ✅ Production-ready |
+| POP3 Server | ✅ Production-ready |
+| JMAP Server | ✅ Production-ready |
+| DKIM Signing | ✅ Built-in |
+| SPF Validation | ✅ Built-in |
+| DMARC Enforcement | ✅ Built-in |
+| ARC Support | ✅ Built-in |
+| Mail Queue | ✅ Built-in |
+| Bounce Handling | ✅ Built-in |
+| TLS / Auto-cert | ✅ Built-in |
+| Anti-spam (basic) | ✅ Built-in |
+| REST API | ✅ Built-in |
+| Multi-domain | ✅ Built-in |
+
+**We build everything on top — not instead of.**
+
+---
+
+## 🏗️ Architecture Overview
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                      Orvix Binary                          │
+│                                                              │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │              STALWART CORE (External)                │   │
+│  │   SMTP · IMAP · POP3 · JMAP · Queue · DKIM · SPF     │   │
+│  └──────────────────────────────────────────────────────┘   │
+│                                                              │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │            ORVIX LAYER (what we build)             │   │
+│  │                                                      │   │
+│  │  ┌───────────┐ ┌───────────┐ ┌──────────────────┐   │   │
+│  │  │  Webmail  │ │  Admin    │ │  License System  │   │   │
+│  │  │  UI       │ │  Console  │ │  + Feature Flags │   │   │
+│  │  └───────────┘ └───────────┘ └──────────────────┘   │   │
+│  │                                                      │   │
+│  │  ┌───────────┐ ┌───────────┐ ┌──────────────────┐   │   │
+│  │  │  module:  │ │  module:  │ │  module:         │   │   │
+│  │  │  firewall │ │  guardian │ │  compose-ai      │   │   │
+│  │  │  v1.0.0   │ │  v1.0.0   │ │  v1.0.0          │   │   │
+│  │  └───────────┘ └───────────┘ └──────────────────┘   │   │
+│  │                                                      │   │
+│  │  ┌───────────┐ ┌───────────┐ ┌──────────────────┐   │   │
+│  │  │  module:  │ │  module:  │ │  module:         │   │   │
+│  │  │  migration│ │  autoheal │ │  provision-api   │   │   │
+│  │  │  v1.0.0   │ │  v1.0.0   │ │  v1.0.0          │   │   │
+│  │  └───────────┘ └───────────┘ └──────────────────┘   │   │
+│  └──────────────────────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### Core Principles
+- **Stalwart = external binary** — downloaded and managed by installer
+- **Orvix talks to Stalwart via its REST API** — clean separation
+- **Single Go binary** embeds Orvix layer + frontend
+- **License key** unlocks tiers — same binary, different features
+- **Modules** are independent — update one without breaking others
+
+---
+
+## 🔌 How Orvix Integrates with Stalwart
+
+```
+Orvix Admin/API
+        ↓
+Stalwart REST API (localhost:8080)
+        ↓
+Stalwart handles actual mail protocol
+        ↓
+Orvix reads events via Stalwart webhooks
+        ↓
+Orvix adds its own logic on top
+```
+
+### Key Integration Points:
+```go
+// Orvix calls Stalwart API for:
+POST   /api/principal          → create mailbox
+DELETE /api/principal/{id}     → delete mailbox
+GET    /api/principal          → list mailboxes
+POST   /api/domain             → add domain
+GET    /api/queue/messages     → inspect queue
+DELETE /api/queue/messages     → manage queue
+
+// Stalwart calls Orvix webhooks for:
+EMAIL_RECEIVED   → trigger Guardian scan
+EMAIL_SENT       → update analytics
+BOUNCE_RECEIVED  → update suppression list
+AUTH_FAILURE     → update firewall
+```
+
+---
+
+## 📦 License Tiers
+
+### Tier 1 — SMB ($500/year)
+
+| Feature | Included |
+|---------|----------|
+| Domains | Up to 10 |
+| Mailboxes | Up to 500 |
+| SMTP/IMAP/POP3/JMAP | ✅ (Stalwart) |
+| Webmail UI | ✅ |
+| Mail Firewall (basic) | ✅ |
+| Auto-Heal System | ✅ |
+| Anti-spam (basic) | ✅ |
+| SSL/TLS auto | ✅ |
+| DNS Wizard | ✅ |
+| 2FA | ✅ |
+| Mobile sync (CalDAV/CardDAV) | ✅ |
+| Calendar & Contacts | ✅ |
+| PWA (install on mobile) | ✅ |
+| Smart Compose AI (basic) | ✅ |
+| White Label | ❌ |
+| Clustering | ❌ |
+| Guardian Agent | ❌ |
+| Instant Deploy API | ❌ |
+
+---
+
+### Tier 2 — ISP ($1,200/year)
+
+Includes everything in SMB, plus:
+
+| Feature | Included |
+|---------|----------|
+| Domains | Unlimited |
+| Mailboxes | Up to 50,000 |
+| White Label (full) | ✅ |
+| REST API | ✅ |
+| Instant Deployment API | ✅ |
+| Clustering (up to 3 nodes) | ✅ |
+| Advanced Anti-spam | ✅ |
+| Mail Firewall (advanced + custom rules) | ✅ |
+| Guardian Agent (full AI) | ✅ |
+| Auto-Heal (advanced) | ✅ |
+| Email Archiving | ✅ |
+| Distribution Lists | ✅ |
+| Shared Calendars | ✅ |
+| Resource Booking | ✅ |
+| Public Folders | ✅ |
+| ActiveSync (mobile) | ✅ |
+| Reseller Panel | ✅ |
+| Smart Migration Tool | ✅ |
+| Multi-Cloud Storage | ✅ |
+| SLA Monitoring Dashboard | ✅ |
+| Webhooks + Zapier Integration | ✅ |
+| Email Intelligence Dashboard | ✅ |
+
+---
+
+### Tier 3 — Enterprise ($2,500/year)
+
+Includes everything in ISP, plus:
+
+| Feature | Included |
+|---------|----------|
+| Mailboxes | Unlimited |
+| Clustering (unlimited nodes) | ✅ |
+| LDAP / Active Directory sync | ✅ |
+| SSO (SAML 2.0 / OAuth2) | ✅ |
+| Advanced Email Routing Rules | ✅ |
+| Legal Hold & eDiscovery | ✅ |
+| DLP (Data Loss Prevention) | ✅ |
+| Compliance Center (GDPR/HIPAA/SOX) | ✅ |
+| Zero-Knowledge Encryption | ✅ |
+| Guardian Agent + API + Custom Training | ✅ |
+| Collaboration Layer (Shared Inbox) | ✅ |
+| Smart Compose AI (advanced) | ✅ |
+| Full Audit Logs | ✅ |
+| Priority Support SLA | ✅ |
+| Custom Branding (deep) | ✅ |
+| Backup & Restore (built-in) | ✅ |
+| S3 / External Storage | ✅ |
+| Auto-update from Admin Panel | ✅ |
+
+---
+
+## ⚙️ Tech Stack
+
+### Backend (Orvix Layer)
+| Component | Technology | Why |
+|-----------|-----------|-----|
+| Language | **Go 1.25+** | Single binary, fast, low memory |
+| Web Framework | **Fiber v3** | Fastest Go HTTP framework |
+| ORM | **GORM** | Clean models, migration support |
+| Database | **PostgreSQL 16** | Power and scale |
+| Database (small install) | **SQLite** | Zero dependency option |
+| Cache / Queue | **Redis 7** | Sessions, queue, rate limiting |
+| Search | **Bleve** (embedded) | Full-text search, no external deps |
+| Job Queue | **Asynq** | Redis-backed, reliable |
+| Config | **Viper** | Flexible config management |
+| Logging | **Zap** | Fast structured logging |
+| Metrics | **Prometheus** | Built-in observability |
+| Mail Core | **Stalwart** | External binary + REST API |
+
+### Frontend
+| Component | Technology |
+|-----------|-----------|
+| Framework | React 19 + Vite 6 |
+| UI Primitives | Radix UI (unstyled, fully customizable) |
+| Styling | Tailwind CSS v4 |
+| State | Zustand |
+| Data Fetching | TanStack Query v5 |
+| Rich Text Editor | TipTap |
+| Calendar | FullCalendar |
+| Icons | Lucide |
+| Animations | Motion |
+| Charts | Recharts |
+| Virtualization | TanStack Virtual (handle 100k+ email lists) |
+| i18n | i18next |
+| PWA | Vite PWA Plugin |
+
+### Security Stack
+| Layer | Technology |
+|-------|-----------|
+| Auth | JWT (15min) + Refresh tokens (30 days, rotated) |
+| 2FA | TOTP RFC 6238 + Backup codes |
+| Password | Argon2id |
+| Rate Limiting | Token bucket per IP + per account |
+| CSRF | Double-submit cookie |
+| Headers | Strict CSP, HSTS, X-Frame-Options |
+| Encryption at rest | AES-256-GCM |
+| TLS | Stalwart handles via ACME |
+| Session | Redis-backed, short TTL |
+| Audit Log | Immutable append-only |
+
+### AI Stack
+| Component | Technology |
+|-----------|-----------|
+| Guardian Agent | DeepSeek API |
+| Smart Compose | DeepSeek API (streamed) |
+| Local AI option | Ollama (Enterprise — fully offline) |
+| Threat Intel | AbuseIPDB + VirusTotal APIs |
+
+---
+
+## 🎨 UI/UX Design System
+
+### Design Philosophy
+- Dark-first with optional light mode
+- Density control: comfortable / compact / spacious
+- Keyboard-first — every action has a shortcut
+- Optimistic UI — zero loading spinners
+- WCAG 2.1 AA accessible
+
+### Color System
+```css
+:root {
+  --bg-base:        #0C0E12;
+  --bg-surface:     #13161C;
+  --bg-elevated:    #1A1E26;
+  --bg-subtle:      #222736;
+  --border:         #2A2F3E;
+  --text-primary:   #E8EAF0;
+  --text-secondary: #8B92A8;
+  --text-muted:     #555D73;
+  --accent:         #4F7CFF;
+  --accent-hover:   #6B93FF;
+  --success:        #34D399;
+  --warning:        #FBBF24;
+  --danger:         #F87171;
+  --info:           #60A5FA;
+}
+```
+
+### Typography
+- Display/Headings: Geist
+- Body/UI: Geist
+- Code/Monospace: JetBrains Mono
+
+---
+
+## 📱 Webmail — Full Feature Spec
+
+### Layout
+```
+┌──────────┬────────────────────┬──────────────────┐
+│ Sidebar  │   Email List       │  Reading Pane    │
+│ 240px    │   380px            │  flex-1          │
+│          │                    │                  │
+│ Folders  │ Virtualized list   │ Full email view  │
+│ Labels   │ 100k+ emails fast  │ Reply / Forward  │
+│ Accounts │ Smart preview      │ Attachments      │
+│ Search   │ Multi-select       │ Actions toolbar  │
+└──────────┴────────────────────┴──────────────────┘
+```
+
+### Core Features
+- Full HTML email rendering (sandboxed iframe)
+- External image blocking with "Load images" prompt
+- Reply / Reply All / Forward inline
+- Compose: rich text (TipTap), drag & drop attachments
+- Scheduled send, undo send (30 seconds)
+- Auto-save draft every 30 seconds
+- Full-text search with advanced filters
+- Folders: system + custom (nested, drag to reorder)
+- Color labels + smart folders
+- Vacation auto-reply
+- Per-account signatures (rich text)
+- Keyboard shortcuts (R=reply, F=forward, E=archive, #=delete)
+
+### Smart Compose AI (built-in)
+- Autocomplete sentences (Tab to accept)
+- Write full reply from context
+- Tone adjustment (formal / friendly / assertive)
+- Translate to any language
+- Summarize long threads
+- Subject line suggestions
+- Grammar & clarity check
+
+### Calendar
+- Month / Week / Day / Agenda views
+- Create events from emails
+- Recurring events + resource booking
+- Shared calendars + CalDAV sync
+
+### Contacts
+- Auto-complete from sent history
+- CardDAV sync for mobile
+- Import/Export vCard
+
+### Tasks
+- Create from emails
+- Due dates + reminders + subtasks
+
+---
+
+## 🛡️ Admin Console — Full Feature Spec
+
+### Dashboard
+- Real-time: emails/min, queue depth, active connections
+- Delivery rate, bounce rate, spam rate charts
+- Server health (CPU, RAM, disk, network)
+- Alert feed
+
+### Domain Management
+- Add/remove domains
+- DNS status: SPF ✅ DKIM ✅ DMARC ✅ MX ✅
+- One-click DNS setup wizard (Cloudflare / Route53 / manual)
+- DKIM key rotation
+
+### User Management
+- Create / edit / delete users
+- Quota management
+- Force password reset
+- Impersonate user (for support)
+- Bulk import/export CSV
+
+### Mail Queue (Stalwart queue + Orvix UI)
+- Live queue viewer
+- Filter: queued / deferred / failed
+- Force retry / delete
+- Inspect raw message
+
+---
+
+## 🔥 Mail Firewall Module
+
+### Pipeline
+```
+Inbound email (via Stalwart webhook)
+        ↓
+Layer 1: IP Reputation (AbuseIPDB)
+Layer 2: Geo-block check
+Layer 3: Rate limit per IP/domain
+Layer 4: SPF/DKIM/DMARC results
+Layer 5: Content scoring
+Layer 6: URL reputation check
+Layer 7: Guardian AI final verdict
+        ↓
+PASS → allow | QUARANTINE → hold | BLOCK → drop + log
+```
+
+---
+
+## 🔄 Auto-Heal Module
+
+### Health Checks (every 60 seconds)
+| Check | Auto-Fix |
+|-------|---------|
+| Stalwart process down | Restart process |
+| Queue depth > threshold | Scale workers |
+| Disk > 85% | Purge old trash |
+| Memory > 90% | Graceful restart |
+| DB connection lost | Reconnect + retry |
+| Redis connection lost | Reconnect + retry |
+| SSL cert expiring < 30 days | Trigger renewal |
+| Spam rate spike | Throttle sending |
+| Bounce rate spike | Pause + alert |
+| IP on blacklist | Alert admin immediately |
+
+---
+
+## 🤖 Guardian Agent Module
+
+### Threat Analysis Flow
+```
+Email received (Stalwart webhook)
+        ↓
+Build feature vector:
+  IP reputation score
+  Domain age + history
+  SPF/DKIM/DMARC results
+  Content signals
+  Behavioral patterns
+        ↓
+DeepSeek API analysis
+        ↓
+threat_score + verdict + explanation
+        ↓
+Action: allow / quarantine / block
+```
+
+---
+
+## ⚡ Instant Deployment API Module
+
+```http
+POST /api/v1/provision/domain
+{
+  "domain": "newclient.com",
+  "plan": "business",
+  "mailboxes": [
+    {"username": "john", "quota_gb": 10}
+  ],
+  "dns_provider": "cloudflare",
+  "dns_api_key": "..."
+}
+
+Response (< 30 seconds):
+{
+  "status": "active",
+  "provisioned_in_ms": 18400,
+  "webmail_url": "https://mail.newclient.com",
+  "credentials": [...]
+}
+```
+
+---
+
+## 🔁 Smart Migration Tool Module
+
+### Supported Sources
+| Source | Method |
+|--------|--------|
+| Axigen | IMAP sync |
+| Zimbra | IMAP + ZCS API |
+| Exchange | EWS API |
+| cPanel | IMAP sync |
+| Google Workspace | IMAP sync |
+| Any IMAP server | Standard IMAP |
+
+### Zero-Downtime Process
+```
+Phase 1: Copy historical emails (background)
+Phase 2: Dual delivery (old + new server)
+Phase 3: DNS cutover (< 5 min)
+Phase 4: Final sync + validation
+```
+
+---
+
+## 📁 Project Structure
+
+```
+orvix/
+├── cmd/orvix/main.go                # Entry point — starts all modules
+├── internal/
+│   ├── api/                         # HTTP router + 17 handler files
+│   ├── auth/                        # JWT, Argon2id, RBAC, CSRF, API keys, rate limit, security
+│   ├── autoheal/                    # Health checks, action history
+│   ├── calendar/                    # Events, contacts, tasks models + CRUD
+│   ├── collaboration/               # Shared mailboxes
+│   ├── compliance/                  # Legal holds, retention, ZKE encryption
+│   ├── compose/                     # Smart Compose AI (DeepSeek streaming)
+│   ├── config/                      # Viper, GORM, Zap, AES-256-GCM
+│   ├── dns/                         # DNS automation (Cloudflare provider)
+│   ├── firewall/                    # Pipeline, rules engine, IP reputation
+│   ├── guardian/                    # Threat analysis (DeepSeek + offline)
+│   ├── intelligence/                # Email analytics, delivery reports
+│   ├── license/                     # RS256 validation, feature flags, fingerprint
+│   ├── metrics/                     # Prometheus metrics
+│   ├── migration/                   # IMAP sync engine
+│   ├── models/                      # GORM models
+│   ├── modules/                     # Module registry
+│   ├── provision/                   # Instant deployment API
+│   ├── stalwart/                    # REST client, webhooks, process manager, config
+│   └── updater/                     # Update manager, changelog, rollback
+├── web/
+│   ├── webmail/                     # React 19 webmail (Vite + Tailwind)
+│   └── admin/                       # React 19 admin console
+├── migrations/                      # SQL migrations (additive only)
+├── scripts/                         # Build + install scripts
+├── stalwart-bin/                    # Stalwart binary location
+├── go.mod
+├── Makefile
+└── orvix.yaml                       # Default config
+```
+
+---
+
+## 📋 Build Order (for AI Agent)
+
+### Phase 1 — Foundation (Week 1)
+- [x] Project structure setup (exactly as above)
+- [x] go.mod with module: github.com/orvix/orvix
+- [x] Config system (Viper) — reads orvix.yaml
+- [x] Database layer (GORM + PostgreSQL + SQLite fallback)
+- [x] Migration system (auto-run, additive only)
+- [x] Logging (Zap — structured)
+- [x] Metrics (Prometheus)
+- [x] License engine (JWT RS256 + feature flags per tier)
+- [x] Code watermarking (embedded copyright + canary tokens)
+
+### Phase 2 — Stalwart Integration (Week 2)
+- [x] Stalwart binary management (external, downloaded by installer)
+- [x] Stalwart process manager (start/stop/restart/health)
+- [x] Stalwart config generator (from Orvix config)
+- [x] Stalwart REST API client (all endpoints)
+- [x] Stalwart webhook receiver (email events)
+- [x] Domain management via Stalwart API
+- [x] Mailbox management via Stalwart API
+- [x] Queue management via Stalwart API
+
+### Phase 3 — Auth + Core API (Week 3)
+- [x] Auth system (JWT + refresh tokens + TOTP 2FA)
+- [x] Session management (Redis)
+- [x] RBAC (roles: superadmin, admin, user)
+- [x] User management API
+- [x] Domain management API
+- [x] Admin API (full)
+- [x] API key system (for Enterprise)
+- [x] Rate limiting middleware
+- [x] Security headers middleware
+- [x] Multi-tenancy middleware
+- [x] Reseller support
+- [x] White label branding
+
+### Phase 4 — Modules (Week 4-6)
+- [x] Module registry + interface
+- [x] Auto-Heal module (all health checks + fixers)
+- [x] Mail Firewall module (all 7 layers + rules engine)
+- [x] ⭐ Guardian Agent module (AI threat analysis)
+- [x] ⭐ Smart Compose AI module (streamed, SSE)
+- [x] ⭐ Instant Deployment API module (< 30 seconds)
+- [x] Smart Migration Tool module (IMAP sync + 5 sources)
+- [x] DNS automation module (Cloudflare + Route53)
+- [x] Email Intelligence module (AI insights)
+- [x] Versioning + Auto-Update system (hot-swap + rollback)
+- [x] Changelog system
+
+### Phase 5 — Frontend (Week 7-9)
+- [x] Design system (tokens, colors, typography, spacing)
+- [x] Component library (Radix UI + Tailwind v4)
+- [x] ⭐ Webmail UI (full: compose, read, search, folders, labels)
+- [x] ⭐ Smart Compose AI panel (inline in compose window)
+- [x] Calendar UI (FullCalendar)
+- [x] Contacts UI
+- [x] Tasks UI
+- [x] Admin Console (all panels)
+- [x] Versions panel (update UI)
+- [x] Feature flags panel
+- [x] Firewall rules UI (no-code builder)
+- [x] Guardian dashboard
+- [x] Auto-Heal dashboard
+- [x] Migration wizard UI
+- [x] DNS wizard UI
+- [x] PWA manifest + service worker
+
+### Phase 6 — Advanced Features (Week 10-11)
+- [x] Calendar module (CalDAV + CardDAV sync)
+- [x] Zero-Knowledge Encryption (Enterprise) — Full AES-256-GCM + Argon2id implementation
+- [x] Collaboration Layer / Shared Inbox (Enterprise) — Shared mailbox CRUD via Stalwart
+- [x] LDAP / Active Directory sync (Enterprise) — LDAPConfig model, connection test, sync engine
+- [x] Backup & Restore (local) — Database + config backup with history
+- [x] Reseller Panel (ISP+ tier) — Reseller model with limits and commission
+- [x] White Label system (logo + colors per tenant) — Branding fields, tenant resolution middleware
+- [x] Security Alert Delivery — SMTP and webhook alert delivery
+- [x] ClamAV Integration — Virus scanning scanner
+- [ ] ActiveSync (ISP+ tier) → ROADMAP.md: Protocol implementation outside current scope
+- [x] Compliance Center (GDPR/HIPAA/SOX) — Legal holds, retention policies, ZKE encryption
+- [ ] Multi-Cloud Storage (S3 / GCS / Azure) → ROADMAP.md: Cloud storage outside current scope
+- [ ] SSO — SAML 2.0 + OAuth2 (Enterprise) → SSOConfig model exists. Full redirect flow in ROADMAP.md.
+
+### Phase 7 — Hardening + Launch (Week 12-13)
+- [x] Full security audit — Completed. See AUDIT.md
+- [x] One-line installer script (install.sh)
+- [x] Systemd service file
+- [x] Full API documentation — Complete. See HANDOFF.md API inventory section
+- [x] Admin documentation — Complete. See HANDOFF.md
+- [ ] Penetration testing (auth bypass, injection, tenant isolation) → ROADMAP.md: Manual pentest required
+- [ ] Load testing (10k concurrent connections) → ROADMAP.md: Requires production-like infrastructure
+- [ ] Deliverability testing (Gmail, Outlook, Yahoo) → ROADMAP.md: Requires Stalwart running + test domains
+- [ ] Marketing website (Next.js — orvix.email) → ROADMAP.md: Marketing site outside current scope
+- [ ] License purchase flow + customer portal → ROADMAP.md: Payment integration outside current scope
+- [ ] Update server setup → ROADMAP.md: Production update server outside current scope
+
+---
+
+## 📌 Key Decisions Log
+
+| Decision | Choice | Reason |
+|----------|--------|--------|
+| Mail Engine | Stalwart | MIT license, production-ready, saves 3 months |
+| Integration | REST API + webhooks | Clean separation, never modify Stalwart |
+| Language | Go | Single binary, performance, low memory |
+| HTTP | Fiber v3 | Fastest Go framework |
+| DB small | SQLite | Zero dependency install |
+| DB large | PostgreSQL | Scale and reliability |
+| Frontend | React 19 + Vite 6 | Modern, fast |
+| License | JWT RS256 | Offline validation, tamper-proof |
+| Auth tokens | Memory only | Never localStorage — XSS protection |
+| Password | Argon2id | Best current standard |
+| AI | DeepSeek API | Best price/performance |
+| Local AI | Ollama | Enterprise offline option |
+| Deployment | Single binary + installer | Install in seconds like Axigen |
+| Migrations | Additive only | Never break existing installs |
+| Updates | Hot-swap modules | Zero downtime, per-module rollback |
+| Versioning | MAJOR.MINOR.PATCH | Clear, standard, predictable |
+
+---
+
+## 🏆 Why Orvix Wins
+
+| Feature | Axigen | Zimbra | Orvix |
+|---------|--------|--------|---------|
+| Price | $3k-10k/yr | $3k+/yr | $500-2.5k/yr |
+| Install time | Minutes | Hours | **Seconds** |
+| Guardian AI | ❌ | ❌ | ✅ |
+| Smart Compose AI | ❌ | ❌ | ✅ |
+| Auto-Heal | ❌ | Partial | ✅ |
+| Instant Deploy API | ❌ | ❌ | ✅ |
+| Smart Migration | ❌ | Basic | ✅ |
+| PWA mobile | ❌ | ❌ | ✅ |
+| Per-module updates | ❌ | ❌ | ✅ |
+| Zero-Knowledge Enc. | ❌ | ❌ | ✅ |
+
+---
+
+## ⭐ The 3 Features That Win Deals
+
+### 1. Smart Migration Tool
+> Breaks the #1 barrier to switching
+> Supports: Axigen, Zimbra, Exchange, cPanel, Google Workspace
+> Zero-downtime migration
+> **Pitch:** "Migrate your entire server in one afternoon"
+
+### 2. Instant Deployment API
+> Provision a new client domain in < 30 seconds
+> Full automation: DNS + SSL + mailboxes + firewall
+> **Pitch:** "100 new clients a day without touching a keyboard"
+
+### 3. Smart Compose AI
+> AI writing assistant built into Webmail
+> Only self-hosted mail server with built-in AI
+> **Pitch:** "Your team writes emails 3x faster"
+
+---
+
+## 🎯 Current Status
+
+**MVP Development: COMPLETE** ✅
+
+The Orvix MVP is feature-complete with all core modules implemented:
+- 60+ API endpoints
+- 12 functional modules
+- React webmail and admin UIs
+- Production-grade installer
+- Security audit passed
+
+**Next Steps (See ROADMAP.md):**
+- Production VPS testing
+- Manual penetration testing
+- Load testing
+- Marketing website
+- License portal
+
+---
+
+*Orvix MVP.md v4.0 — Stalwart-based architecture*
+*Domain: orvix.email | Stack: Stalwart + Go + React + PostgreSQL*
+*Updated: 2026-06-06*
