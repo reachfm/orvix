@@ -23,6 +23,8 @@
 - [x] Redis rate limiting with safe fallback
 - [x] VPS-validated on 65.75.203.74
 - [x] GitHub release created: https://github.com/reachfm/orvix/releases/tag/v1.0.2
+- [x] Installer banner shows "Orvix v1.0.2 RC3 Installer"
+- [x] Download URL points to GitHub releases
 
 ## Moved to ROADMAP.md
 - ActiveSync (protocol implementation)

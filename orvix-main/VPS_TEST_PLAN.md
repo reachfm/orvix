@@ -7,10 +7,10 @@
 
 ## RC3 Release Information
 - **Version:** v1.0.2-rc3
-- **Git Commit:** 1849e4e
+- **Git Commit:** dd2bb64
 - **GitHub Release:** https://github.com/reachfm/orvix/releases/tag/v1.0.2
-- **Archive SHA256:** `7a00f2fb67b86e741887fe836d0f20523618536df4473f1af0e1509b3261b4c1`
-- **Binary SHA256:** `d348b1050322da89a61544f3023cf29ee2b462a24e4f8ab6a278182cca3814ee`
+- **Archive SHA256:** `5672e7c6e8b82d59a090e2b6366cbd72d4cf9fb41079e5e81c730ff6462842e0`
+- **Binary SHA256:** `f730934a46cfd6c2c6d401f325131366548c19d98f8b47f8bd835d202e9acabe`
 
 ## Download Release
 ```bash
@@ -19,7 +19,7 @@ curl -fsSL https://github.com/reachfm/orvix/releases/download/v1.0.2/orvix-v1.0.
 
 # Verify checksum
 sha256sum orvix.tar.gz
-# Expected: 7a00f2fb67b86e741887fe836d0f20523618536df4473f1af0e1509b3261b4c1
+# Expected: 5672e7c6e8b82d59a090e2b6366cbd72d4cf9fb41079e5e81c730ff6462842e0
 
 # Extract
 tar -xzf orvix.tar.gz
@@ -152,7 +152,7 @@ systemctl show orvix.service | grep ORVIX
 
 # Verify binary checksum
 sha256sum /usr/local/bin/orvix
-# Expected: d348b1050322da89a61544f3023cf29ee2b462a24e4f8ab6a278182cca3814ee
+# Expected: f730934a46cfd6c2c6d401f325131366548c19d98f8b47f8bd835d202e9acabe
 
 # Run diagnostics
 bash /usr/local/bin/orvix-diagnostics.sh 2>/dev/null || echo "Not installed"
