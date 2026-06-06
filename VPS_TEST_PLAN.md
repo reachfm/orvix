@@ -5,21 +5,21 @@
 - Root SSH access
 - Domain name with DNS access (optional but recommended)
 
-## RC3 Release Information
-- **Version:** v1.0.2-rc3
-- **Git Commit:** dd2bb64
-- **GitHub Release:** https://github.com/reachfm/orvix/releases/tag/v1.0.2
-- **Archive SHA256:** `5672e7c6e8b82d59a090e2b6366cbd72d4cf9fb41079e5e81c730ff6462842e0`
-- **Binary SHA256:** `f730934a46cfd6c2c6d401f325131366548c19d98f8b47f8bd835d202e9acabe`
+## RC4 Release Information
+- **Version:** v1.0.3-rc4
+- **Git Commit:** (pending push)
+- **GitHub Release:** https://github.com/reachfm/orvix/releases/tag/v1.0.3
+- **Archive SHA256:** `aed4f97924b3e9315afbe9185600e6d3b8a3cecdff8698314090e768499099bb`
+- **Binary SHA256:** `1cc564f2183ee9ad4d07e3fa4515eb2e22e8caecdfb8a6215fb817f78b7287f5`
 
 ## Download Release
 ```bash
 # Download from GitHub
-curl -fsSL https://github.com/reachfm/orvix/releases/download/v1.0.2/orvix-v1.0.2-linux-amd64.tar.gz -o orvix.tar.gz
+curl -fsSL https://github.com/reachfm/orvix/releases/download/v1.0.3/orvix-v1.0.3-linux-amd64.tar.gz -o orvix.tar.gz
 
 # Verify checksum
 sha256sum orvix.tar.gz
-# Expected: 5672e7c6e8b82d59a090e2b6366cbd72d4cf9fb41079e5e81c730ff6462842e0
+# Expected: aed4f97924b3e9315afbe9185600e6d3b8a3cecdff8698314090e768499099bb
 
 # Extract
 tar -xzf orvix.tar.gz
@@ -121,7 +121,7 @@ Expected:
 ### 8. Upgrade Test (optional)
 ```bash
 # Download new version and upgrade
-curl -fsSL https://github.com/reachfm/orvix/releases/download/v1.0.2/orvix-v1.0.2-linux-amd64 -o /tmp/orvix
+curl -fsSL https://github.com/reachfm/orvix/releases/download/v1.0.3/orvix-v1.0.3-linux-amd64 -o /tmp/orvix
 sudo cp /tmp/orvix /usr/local/bin/orvix
 sudo systemctl restart orvix.service
 ```
@@ -132,15 +132,17 @@ Expected:
 
 ## Validation Checklist
 - [ ] 1. Fresh VPS baseline verified
-- [ ] 2. Checksum verified (7a00f2fb...)
+- [ ] 2. Checksum verified (aed4f979...)
 - [ ] 3. Installer runs without errors
-- [ ] 4. No default credentials prompted
-- [ ] 5. Health endpoint responds
-- [ ] 6. Login works with provided credentials
-- [ ] 7. /me endpoint returns profile
-- [ ] 8. Service restart preserves data
-- [ ] 9. No hardcoded admin@orvix.local in binary
-- [ ] 10. Environment variables in systemd override
+- [ ] 4. Stalwart download succeeds
+- [ ] 5. No default credentials prompted
+- [ ] 6. Health endpoint responds
+- [ ] 7. Login works with provided credentials
+- [ ] 8. /me endpoint returns profile
+- [ ] 9. Service restart preserves data
+- [ ] 10. No hardcoded admin@orvix.local in binary
+- [ ] 11. Environment variables in systemd override
+- [ ] 12. Password confirmation works
 
 ## Troubleshooting
 ```bash
@@ -152,7 +154,7 @@ systemctl show orvix.service | grep ORVIX
 
 # Verify binary checksum
 sha256sum /usr/local/bin/orvix
-# Expected: f730934a46cfd6c2c6d401f325131366548c19d98f8b47f8bd835d202e9acabe
+# Expected: 1cc564f2183ee9ad4d07e3fa4515eb2e22e8caecdfb8a6215fb817f78b7287f5
 
 # Run diagnostics
 bash /usr/local/bin/orvix-diagnostics.sh 2>/dev/null || echo "Not installed"

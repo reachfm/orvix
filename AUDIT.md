@@ -1,17 +1,22 @@
 # Orvix Security Audit — Updated
 
 ## Release Status
-- **RC3 Release**: `release/orvix-v1.0.2-linux-amd64.tar.gz`
-- Archive SHA256: `5672e7c6e8b82d59a090e2b6366cbd72d4cf9fb41079e5e81c730ff6462842e0`
-- Binary SHA256: `f730934a46cfd6c2c6d401f325131366548c19d98f8b47f8bd835d202e9acabe`
-- Git Commit: `dd2bb64`
-- GitHub Release: https://github.com/reachfm/orvix/releases/tag/v1.0.2
-- Installer: Shows "Orvix v1.0.2 RC3 Installer" banner
-- Download URL: https://github.com/reachfm/orvix/releases/download/v1.0.2/
+- **RC4 Release**: `release/orvix-v1.0.3-linux-amd64.tar.gz`
+- Archive SHA256: `aed4f97924b3e9315afbe9185600e6d3b8a3cecdff8698314090e768499099bb`
+- Binary SHA256: `1cc564f2183ee9ad4d07e3fa4515eb2e22e8caecdfb8a6215fb817f78b7287f5`
+- Git Commit: (pending push)
+- GitHub Release: https://github.com/reachfm/orvix/releases/tag/v1.0.3
+- Installer: Shows "Orvix v1.0.3 RC4 Installer" banner
+- Download URL: https://github.com/reachfm/orvix/releases/download/v1.0.3/
 - VPS test plan: `VPS_TEST_PLAN.md`
 - Release audit: `RELEASE_AUDIT.md`
 - Installer: Production-grade for Ubuntu 22.04+/Debian 12+
-- Stalwart: Managed External — downloaded by installer
+- Stalwart: Managed External — downloaded by installer (v0.16.7)
+
+### RC4 Critical Fixes
+- **Stalwart URL**: Fixed 404 error, now uses correct GitHub URL
+- **Systemd directory**: Fixed missing directory before writing override.conf
+- **Password prompt**: Fixed loop issue, added confirmation step
 
 ### RC3 Security Fixes
 - **CRITICAL**: Removed hardcoded default credentials (admin@orvix.local / admin123)

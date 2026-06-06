@@ -14,6 +14,12 @@
 - [x] Phase 6: Advanced Features — Calendar (backend), ZKE, Collaboration, LDAP, Backup/Restore, Reseller, White Label, Compliance Center
 - [x] Phase 7: Hardening — Security audit complete, installer, systemd, API docs in HANDOFF.md
 
+## RC4 Critical Fixes (v1.0.3)
+- [x] **Stalwart URL**: Fixed 404 error, uses correct GitHub URL (stalwartlabs/stalwart v0.16.7)
+- [x] **Systemd directory**: Fixed missing directory before writing override.conf
+- [x] **Password prompt**: Fixed loop issue, added confirmation step
+- [x] Installer now fails with clear message if Stalwart download fails
+
 ## RC3 Security Release (v1.0.2)
 - [x] **CRITICAL**: Removed hardcoded default credentials (admin@orvix.local / admin123)
 - [x] Admin credentials via environment variables: `ORVIX_ADMIN_EMAIL`, `ORVIX_ADMIN_PASSWORD`
