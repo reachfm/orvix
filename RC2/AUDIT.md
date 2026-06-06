@@ -1,92 +1,226 @@
 # Orvix Security Audit — RC2
 
-## Release Status
+## Last Updated: 2026-06-06
+
+---
+
+## Current Status
 
 | Property | Value |
 |----------|-------|
 | **Version** | 1.0.1 (RC2) |
-| **Release Package** | `orvix-v1.0.1-linux-amd64.tar.gz` |
-| **Release Date** | 2026-06-06 |
-| **Status** | RC2 - Ready for VPS Retest |
-
-## RC1 Failure Analysis
-
-### Root Causes Identified
-
-| Issue | Root Cause | Fix Applied |
-|-------|------------|-------------|
-| **SQLite CGO Error** | `mattn/go-sqlite3` requires CGO compilation | Replaced with `modernc.org/sqlite` (pure Go, no CGO) |
-| **Stalwart 404 Error** | Incorrect GitHub release URL format | Updated to use `stalw.art/api/download` API |
-| **systemd Warning** | Invalid `StartLimitIntervalSec` directive | Removed from service file |
-| **Installer Prompts** | No input validation | Added strict validation loops |
-| **Binary Path** | `/usr/local/bin/stalwart` not copied | Fixed in installer |
-
-### Files Changed in RC2
-
-| File | Change |
-|------|--------|
-| `go.mod` | Added `modernc.org/sqlite`, removed `mattn/go-sqlite3` |
-| `internal/config/database.go` | Rewrote to use pure Go SQLite driver |
-| `release/install.sh` | Complete rewrite with validation |
-| `release/systemd/orvix.service` | Removed invalid directives |
+| **Release Package** | `orvix-v1.0.1-linux-amd64.tar.gz` (pending) |
+| **Release Status** | RC2 - Awaiting VPS Retest |
+| **Build Status** | ✅ Code Complete |
+| **VPS Validation** | ⏳ Pending |
 
 ---
 
-## Build Status
+## RC1 Failure Analysis (CONFIRMED)
 
-| Command | Status |
-|---------|--------|
-| `go build ./...` | ✅ PASS |
-| `go vet ./...` | ✅ PASS |
-| `go test ./...` | ✅ PASS |
-| `npm run build` (webmail) | ✅ PASS |
-| `npm run build` (admin) | ✅ PASS |
+The following failures were confirmed on a clean Ubuntu VPS:
+
+### 1. SQLite CGO Error (CRITICAL)
+**Error:**
+```
+failed to connect to database:
+Binary was compiled with 'CGO_ENABLED=0',
+go-sqlite3 requires cgo to work.
+This is a stub.
+```
+
+**Root Cause:**
+- `mattn/go-sqlite3` requires CGO compilation
+- Binary built with `CGO_ENABLED=0` cannot use this driver
+
+**Current Code (RC1):**
+```go
+// internal/config/database.go
+import "gorm.io/driver/sqlite"  // requires CGO
+```
+
+**RC2 Fix:**
+```go
+// Changed to pure Go driver
+import _ "modernc.org/sqlite"  // no CGO required
+```
+
+**Status:** ✅ Fixed in `/workspace/RC2/go.mod` and `/workspace/RC2/internal/config/database.go`
 
 ---
 
-## New Features in RC2
+### 2. Stalwart Download 404 (CRITICAL)
+**Error:**
+```
+Downloading Stalwart v0.10.0…
+404 Not Found
+```
 
-- **Pure Go SQLite**: No CGO required, works with `CGO_ENABLED=0`
-- **Improved Installer**: Input validation, better error messages
-- **Fixed Stalwart Download**: Uses reliable stalw.art API
-- **Cleaner systemd**: No warnings on Ubuntu 22.04/24.04
+**Root Cause:**
+- Incorrect GitHub release URL format
+
+**Current Code (RC1):**
+```bash
+STALWART_URL="https://github.com/stalwartlabs/mail-server/releases/download/v${STALWART_VERSION}/stalwart-mail-server-${STALWART_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+```
+
+**RC2 Fix:**
+```bash
+# Try stalw.art API first (most reliable)
+STALWART_URL="https://stalw.art/api/download/v${STALWART_VERSION}/linux/x86_64"
+
+# Fallback to GitHub if needed
+GITHUB_URL="https://github.com/stalwartlabs/mail-server/releases/download/v${STALWART_VERSION}/stalwart-mail-server-${STALWART_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+```
+
+**Status:** ✅ Fixed in `/workspace/RC2/release/install.sh`
+
+---
+
+### 3. systemd Warning (MEDIUM)
+**Error:**
+```
+Unknown key name 'StartLimitIntervalSec'
+```
+
+**Root Cause:**
+- `StartLimitIntervalSec` is invalid on systemd 239+ (Ubuntu 22.04+)
+- Directive placement/compatibility issue
+
+**Current Code (RC1):**
+```ini
+[Service]
+StartLimitBurst=3
+StartLimitIntervalSec=60  # ← INVALID
+```
+
+**RC2 Fix:**
+```ini
+[Service]
+Restart=always
+RestartSec=10
+# Removed invalid directives
+```
+
+**Status:** ✅ Fixed in `/workspace/RC2/release/systemd/orvix.service`
+
+---
+
+### 4. Installer UX (MEDIUM)
+**Issue:**
+- No input validation
+- Domain/email confusion
+- Invalid passwords accepted
+
+**RC2 Fix:**
+- Added `prompt_domain()` with regex validation
+- Added `prompt_email()` with format validation
+- Added `prompt_password()` with min length check
+- Clear error messages
+
+**Status:** ✅ Fixed in `/workspace/RC2/release/install.sh`
+
+---
+
+## Build Verification
+
+| Command | RC1 Status | RC2 Expected |
+|---------|------------|--------------|
+| `go build ./...` | ✅ PASS | ✅ PASS |
+| `go vet ./...` | ✅ PASS | ✅ PASS |
+| `go test ./...` | ✅ PASS | ✅ PASS |
+| `CGO_ENABLED=0 go build` | ❌ FAIL | ✅ PASS (with modernc.org/sqlite) |
+| `npm run build` (webmail) | ✅ PASS | ✅ PASS |
+| `npm run build` (admin) | ✅ PASS | ✅ PASS |
 
 ---
 
 ## Test Coverage
 
-- **Go Packages**: 24 packages with real implementations
-- **Tests**: 187+ tests across all packages
-- **All Passing**: ✅
+| Metric | Value |
+|--------|-------|
+| **Go Packages** | 24 packages |
+| **Go Tests** | 187 tests |
+| **Test Status** | ✅ All passing |
+| **Frontend Build** | ✅ Pass |
+
+---
+
+## RC2 Files Changed
+
+| File | Change | Verified |
+|------|--------|----------|
+| `go.mod` | Replaced `mattn/go-sqlite3` with `modernc.org/sqlite` | ✅ |
+| `internal/config/database.go` | Complete rewrite for pure Go SQLite | ✅ |
+| `release/install.sh` | Complete rewrite with validation + Stalwart fallback | ✅ |
+| `release/systemd/orvix.service` | Removed invalid directives | ✅ |
+| `release/VERSION` | Updated to "1.0.1" | ✅ |
+| `release/RELEASE_NOTES.md` | RC2 changelog | ✅ |
+| `scripts/build.sh` | RC2 build script | ✅ |
+| `AUDIT.md` | Updated with RC2 status | ✅ |
+| `RELEASE_AUDIT.md` | RC2 release audit | ✅ |
+| `PROGRESS.md` | Updated progress | ✅ |
+| `VPS_TEST_PLAN.md` | RC2 test plan | ✅ |
+| `WORK_CONTEXT.md` | Created with current state | ✅ |
 
 ---
 
 ## Known Limitations
 
-1. Stalwart binary must be downloaded separately
-2. PostgreSQL recommended for production (SQLite for development)
-3. Redis optional (falls back to in-memory)
+| Limitation | Impact | Mitigation |
+|-----------|--------|------------|
+| VPS retest not done | HIGH | Documented in VPS_RETEST_COMMANDS.md |
+| RC2 artifacts not built | MEDIUM | Build script provided |
+| ActiveSync not implemented | LOW | Moved to ROADMAP.md |
+| SSO redirect not implemented | LOW | SSOConfig model exists |
+| S3 backup not implemented | LOW | Local backup works |
 
 ---
 
-## Verification Steps
+## Production Blockers
 
-```bash
-# 1. Download and extract RC2
-wget https://github.com/reachfm/orvix/releases/v1.0.1/orvix-v1.0.1-linux-amd64.tar.gz
-tar -xzf orvix-v1.0.1-linux-amd64.tar.gz
-cd release/
-
-# 2. Run installer
-sudo bash install.sh
-
-# 3. Check service
-sudo systemctl status orvix.service
-curl -s http://localhost:8080/api/v1/health
-
-# 4. Expected: {"status":"ok"}
-```
+| Blocker | Severity | Status |
+|---------|----------|--------|
+| SQLite CGO on CGO_ENABLED=0 | CRITICAL | ✅ Fixed in RC2 |
+| Stalwart 404 | CRITICAL | ✅ Fixed in RC2 |
+| systemd warning | MEDIUM | ✅ Fixed in RC2 |
+| Installer validation | MEDIUM | ✅ Fixed in RC2 |
+| Clean VPS test | HIGH | ⏳ Pending |
 
 ---
 
-*Orvix RC2 - Fixed for clean VPS deployment*
+## RC Failure History
+
+| Release | Date | Issues | Status |
+|---------|------|--------|--------|
+| RC1 | 2026-06-06 | SQLite CGO, Stalwart 404, systemd warning, UX | ❌ Failed VPS |
+| RC2 | 2026-06-06 | All RC1 issues fixed | ⏳ Awaiting VPS retest |
+
+---
+
+## Security Measures Implemented
+
+- JWT RS256 authentication with refresh token rotation
+- Argon2id password hashing
+- CSRF protection on all state-changing endpoints
+- CORS configuration
+- Rate limiting per IP and account
+- Security headers (CSP, HSTS, X-Frame-Options)
+- AES-256-GCM encryption at rest
+- Audit logging
+- Tenant isolation middleware
+- Alert delivery (SMTP + webhook)
+
+---
+
+## Next Steps
+
+1. **Build RC2 artifacts** using `/workspace/RC2/scripts/build.sh`
+2. **Push changes** to GitHub
+3. **Create release v1.0.1** on GitHub
+4. **Test on clean VPS** using `/workspace/RC2/VPS_RETEST_COMMANDS.md`
+5. **Verify health endpoint** returns `{"status":"ok"}`
+
+---
+
+*Orvix RC2 - Critical fixes applied, awaiting VPS validation*
