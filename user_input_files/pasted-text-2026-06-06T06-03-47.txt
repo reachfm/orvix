@@ -1,0 +1,177 @@
+PS C:\Windows\system32> cd D:\orvix
+PS D:\orvix> # 1. إزالة الـ git من System32 لو فيه
+PS D:\orvix> Remove-Item C:\.git -Recurse -Force -ErrorAction SilentlyContinue
+PS D:\orvix>
+PS D:\orvix> # 2. تهيئة Git في مجلد المشروع الحالي
+PS D:\orvix> git init
+Initialized empty Git repository in D:/orvix/.git/
+PS D:\orvix>
+PS D:\orvix> # 3. ربطه بـ GitHub
+PS D:\orvix> git remote add origin https://github.com/reachfm/orvix.git
+PS D:\orvix>
+PS D:\orvix> # 4. إنشاء .gitignore
+PS D:\orvix> @"
+>> node_modules/
+>> dist/
+>> build/
+>> *.log
+>> .env
+>> .vscode/
+>> .idea/
+>> tmp/
+>> "@ | Out-File -FilePath ".gitignore" -Encoding utf8
+PS D:\orvix>
+PS D:\orvix> # 5. رفع الملفات
+PS D:\orvix> git add .
+warning: in the working copy of '.gitignore', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'AGENT_INSTRUCTIONS.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'AUDIT.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'FULL_FEATURE_PLAN.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'HANDOFF.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'MVP.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'Makefile', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'ORVIX_INDEPENDENT_AUDIT.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'ORVIX_STATUS_MATRIX.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'PROGRESS.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'RELEASE_AUDIT.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'ROADMAP.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'VPS_TEST_PLAN.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'WORK_CONTEXT.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'cmd/orvix/main.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'go.mod', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'go.sum', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/api/handlers/handlers.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/api/handlers/handlers_advanced.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/api/handlers/handlers_autoheal.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/api/handlers/handlers_calendar.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/api/handlers/handlers_compose.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/api/handlers/handlers_guardian.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/api/handlers/handlers_modules.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/api/router.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/auth/alerts.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/auth/apikey.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/auth/auth.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/auth/auth_test.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/auth/csrf.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/auth/ratelimit.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/auth/security.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/auth/tenant.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/autoheal/autoheal_test.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/autoheal/module.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/autoheal/monitor.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/backup/manager.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/calendar/calendar_test.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/calendar/module.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/clamav/scanner.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/collaboration/collaboration_test.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/collaboration/module.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/compliance/compliance_test.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/compliance/encryption.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/compliance/module.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/compose/compose_test.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/compose/module.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/compose/stream.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/config/config.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/config/crypto.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/config/crypto_test.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/config/database.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/config/logger.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/config/redis.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/config/watermark.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/dns/dns.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/dns/dns_test.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/dns/module.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/firewall/firewall_test.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/firewall/module.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/firewall/pipeline.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/firewall/reputation.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/firewall/rules.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/guardian/guardian_test.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/guardian/module.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/intelligence/intelligence_test.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/intelligence/module.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/ldap/syncer.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/license/features.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/license/fingerprint.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/license/license_test.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/license/validator.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/metrics/metrics.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/migration/migration_test.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/migration/module.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/models/models.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/modules/modules_test.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/modules/registry.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/provision/module.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/provision/provision_test.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/stalwart/client.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/stalwart/config.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/stalwart/events.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/stalwart/process.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/stalwart/stalwart_test.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/stalwart/webhook.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/updater/changelog.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/updater/module.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/updater/rollback.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/updater/updater.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'internal/updater/updater_test.go', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'migrations/001_initial.sql', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'orvix.yaml', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'release/RELEASE_NOTES.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'release/UPLOAD_MANIFEST.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'release/VERSION', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'release/configs/orvix.yaml.example', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'release/install.sh', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'release/scripts/diagnostics.sh', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'release/scripts/healthcheck.sh', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'release/systemd/orvix.service', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'release/uninstall.sh', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'release/upgrade.sh', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'scripts/build.sh', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'scripts/install.sh', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'stalwart-bin/.gitkeep', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'watchdog.ps1', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'web/admin/index.html', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'web/admin/package-lock.json', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'web/admin/package.json', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'web/admin/src/App.tsx', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'web/admin/src/components/AuditLog.tsx', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'web/admin/src/components/Dashboard.tsx', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'web/admin/src/components/Domains.tsx', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'web/admin/src/components/Firewall.tsx', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'web/admin/src/components/Modules.tsx', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'web/admin/src/components/UsersPage.tsx', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'web/admin/src/index.css', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'web/admin/src/main.tsx', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'web/admin/tsconfig.json', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'web/admin/vite.config.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'web/webmail/index.html', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'web/webmail/package-lock.json', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'web/webmail/package.json', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'web/webmail/src/App.tsx', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'web/webmail/src/components/ComposeModal.tsx', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'web/webmail/src/components/EmailList.tsx', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'web/webmail/src/components/ReadingPane.tsx', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'web/webmail/src/components/Sidebar.tsx', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'web/webmail/src/index.css', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'web/webmail/src/main.tsx', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'web/webmail/tsconfig.json', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'web/webmail/vite.config.ts', LF will be replaced by CRLF the next time Git touches it
+PS D:\orvix> git commit -m "Orvix MVP - Initial upload"
+Author identity unknown
+
+*** Please tell me who you are.
+
+Run
+
+  git config --global user.email "you@example.com"
+  git config --global user.name "Your Name"
+
+to set your account's default identity.
+Omit --global to set the identity only in this repository.
+
+fatal: unable to auto-detect email address (got 'Mostafa@DESKTOP-2CPOJJD.(none)')
+PS D:\orvix> git branch -M main
+PS D:\orvix> git push -u origin main --force
+error: src refspec main does not match any
+error: failed to push some refs to 'https://github.com/reachfm/orvix.git'
+PS D:\orvix>
