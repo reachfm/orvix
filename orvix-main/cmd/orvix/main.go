@@ -60,7 +60,9 @@ func main() {
 		logger.Fatal("failed to connect to database", zap.Error(err))
 	}
 
-	if err := models.MigrateAll(db); err != nil {
+	// RC2 FIX: Use raw SQL migrations instead of AutoMigrate for SQLite compatibility
+	// AutoMigrate uses postgres-specific queries that don't work with SQLite
+	if err := models.MigrateAllRaw(db); err != nil {
 		logger.Fatal("failed to run migrations", zap.Error(err))
 	}
 	logger.Info("database migrations completed")

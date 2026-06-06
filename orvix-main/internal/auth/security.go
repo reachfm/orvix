@@ -28,7 +28,7 @@ type SecurityMonitor struct {
 
 // NewSecurityMonitor creates a new database-backed security monitor.
 func NewSecurityMonitor(db *gorm.DB, logger *zap.Logger) *SecurityMonitor {
-	_ = db.AutoMigrate(&SecurityEvent{})
+	// RC2 FIX: Skip AutoMigrate - tables are created with raw SQL
 	return &SecurityMonitor{
 		db:     db,
 		logger: logger,

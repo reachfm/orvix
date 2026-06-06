@@ -24,7 +24,7 @@ func (m *Module) Init(cfg *config.Config, db *gorm.DB) error {
 	m.cfg = cfg
 	m.db = db
 	m.logger = cfg.GetLogger()
-	_ = db.AutoMigrate(&Event{}, &Contact{}, &Task{})
+	// RC2 FIX: Skip AutoMigrate - tables are created with raw SQL in models.MigrateAllRaw
 	m.logger.Info("calendar module initialized")
 	return nil
 }

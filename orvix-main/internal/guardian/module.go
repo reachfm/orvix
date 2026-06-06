@@ -40,7 +40,7 @@ func (m *Module) Init(cfg *config.Config, db *gorm.DB) error {
 	m.agent = NewAgent(apiKey, model, m.logger)
 	m.api = NewAPI(m.agent)
 
-	_ = db.AutoMigrate(&GuardianLog{})
+	// RC2 FIX: Skip AutoMigrate - tables are created with raw SQL
 
 	m.logger.Info("guardian-agent module initialized")
 	return nil

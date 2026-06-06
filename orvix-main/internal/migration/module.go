@@ -28,7 +28,7 @@ func (m *Module) Init(cfg *config.Config, db *gorm.DB) error {
 	m.db = db
 	m.logger = cfg.GetLogger()
 	m.sync = NewIMAPSync(m.logger)
-	_ = db.AutoMigrate(&MigrationJob{}, &MigrationLog{})
+	// RC2 FIX: Skip AutoMigrate - tables are created with raw SQL
 	m.logger.Info("migration-tool module initialized")
 	return nil
 }

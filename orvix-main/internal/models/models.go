@@ -256,3 +256,255 @@ func MigrateAll(db *gorm.DB) error {
 	)
 }
 
+// MigrateAllRaw uses raw SQL for SQLite compatibility (RC2 FIX)
+// AutoMigrate uses postgres-specific queries that don't work with SQLite
+func MigrateAllRaw(db *gorm.DB) error {
+	// Create all tables using raw SQL compatible with SQLite
+	sqls := []string{
+		`CREATE TABLE IF NOT EXISTS licenses (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			key_hash TEXT NOT NULL UNIQUE,
+			tier TEXT NOT NULL DEFAULT 'smb',
+			issued_at DATETIME NOT NULL,
+			expires_at DATETIME NOT NULL,
+			max_domains INTEGER NOT NULL DEFAULT 10,
+			max_mailboxes INTEGER NOT NULL DEFAULT 500,
+			hardware_id TEXT NOT NULL,
+			metadata TEXT,
+			active INTEGER NOT NULL DEFAULT 1
+		)`,
+		`CREATE TABLE IF NOT EXISTS feature_flags (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			name TEXT NOT NULL UNIQUE,
+			enabled INTEGER NOT NULL DEFAULT 0,
+			tier_required TEXT NOT NULL,
+			module_version TEXT NOT NULL DEFAULT '1.0.0',
+			description TEXT
+		)`,
+		`CREATE TABLE IF NOT EXISTS module_versions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			module_id TEXT NOT NULL UNIQUE,
+			version TEXT NOT NULL,
+			installed_at DATETIME NOT NULL,
+			checksum TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'active',
+			changelog TEXT
+		)`,
+		`CREATE TABLE IF NOT EXISTS tenants (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			name TEXT NOT NULL,
+			slug TEXT NOT NULL UNIQUE,
+			domain TEXT NOT NULL UNIQUE,
+			plan TEXT DEFAULT 'smb',
+			max_domains INTEGER DEFAULT 10,
+			max_mailboxes INTEGER DEFAULT 500,
+			logo_url TEXT,
+			primary_color TEXT DEFAULT '#4F7CFF',
+			active INTEGER DEFAULT 1,
+			reseller_id INTEGER,
+			UNIQUE(slug, deleted_at)
+		)`,
+		`CREATE TABLE IF NOT EXISTS resellers (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			name TEXT NOT NULL,
+			email TEXT NOT NULL UNIQUE,
+			password_hash TEXT NOT NULL,
+			max_tenants INTEGER DEFAULT 50,
+			max_domains INTEGER DEFAULT 500,
+			max_mailboxes INTEGER DEFAULT 10000,
+			commission REAL DEFAULT 0.0,
+			active INTEGER DEFAULT 1
+		)`,
+		`CREATE TABLE IF NOT EXISTS l_dap_configs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			tenant_id INTEGER NOT NULL,
+			host TEXT NOT NULL,
+			port INTEGER DEFAULT 389,
+			base_dn TEXT NOT NULL,
+			bind_dn TEXT NOT NULL,
+			bind_password TEXT NOT NULL,
+			user_filter TEXT DEFAULT '(objectClass=person)',
+			sync_enabled INTEGER DEFAULT 0,
+			last_sync DATETIME
+		)`,
+		`CREATE TABLE IF NOT EXISTS s_s_o_configs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			tenant_id INTEGER NOT NULL,
+			provider TEXT NOT NULL,
+			client_id TEXT NOT NULL,
+			client_secret TEXT NOT NULL,
+			issuer_url TEXT,
+			enabled INTEGER DEFAULT 0
+		)`,
+		`CREATE TABLE IF NOT EXISTS alert_configs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			tenant_id INTEGER NOT NULL,
+			smtp_enabled INTEGER DEFAULT 0,
+			smtp_server TEXT,
+			smtp_port INTEGER DEFAULT 587,
+			smtp_username TEXT,
+			smtp_password TEXT,
+			smtp_from TEXT,
+			webhook_enabled INTEGER DEFAULT 0,
+			webhook_url TEXT,
+			alert_on_failed_login INTEGER DEFAULT 1,
+			alert_on_suspicious_key INTEGER DEFAULT 1
+		)`,
+		`CREATE TABLE IF NOT EXISTS firewall_rules (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			name TEXT NOT NULL,
+			condition TEXT NOT NULL,
+			action TEXT NOT NULL,
+			priority INTEGER NOT NULL DEFAULT 0,
+			enabled INTEGER NOT NULL DEFAULT 1
+		)`,
+		`CREATE TABLE IF NOT EXISTS firewall_logs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			ip TEXT NOT NULL,
+			domain TEXT NOT NULL,
+			sender TEXT,
+			recipient TEXT,
+			action TEXT NOT NULL,
+			reason TEXT,
+			threat_score REAL NOT NULL DEFAULT 0
+		)`,
+		`CREATE TABLE IF NOT EXISTS guardian_logs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			message_id TEXT NOT NULL,
+			threat_score REAL NOT NULL,
+			verdict TEXT NOT NULL,
+			confidence REAL NOT NULL DEFAULT 0,
+			reasons TEXT,
+			action TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS heal_histories (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			check_name TEXT NOT NULL,
+			severity TEXT NOT NULL,
+			issue TEXT NOT NULL,
+			fix_applied TEXT,
+			success INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS provisioned_domains (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			domain TEXT NOT NULL UNIQUE,
+			plan TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			provisioned_by INTEGER NOT NULL,
+			metadata TEXT
+		)`,
+		`CREATE TABLE IF NOT EXISTS audit_logs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			user_id INTEGER NOT NULL,
+			action TEXT NOT NULL,
+			resource TEXT NOT NULL,
+			ip TEXT NOT NULL,
+			details TEXT
+		)`,
+		`CREATE TABLE IF NOT EXISTS sessions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			user_id INTEGER NOT NULL,
+			token_hash TEXT NOT NULL UNIQUE,
+			ip TEXT NOT NULL,
+			user_agent TEXT,
+			expires_at DATETIME NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS update_histories (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			module_id TEXT NOT NULL,
+			from_version TEXT NOT NULL,
+			to_version TEXT NOT NULL,
+			status TEXT NOT NULL,
+			backup_path TEXT
+		)`,
+	}
+
+	for _, sql := range sqls {
+		if err := db.Exec(sql).Error; err != nil {
+			return err
+		}
+	}
+
+	// Create indexes
+	indexes := []string{
+		`CREATE INDEX IF NOT EXISTS idx_licenses_deleted_at ON licenses(deleted_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_feature_flags_deleted_at ON feature_flags(deleted_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_module_versions_deleted_at ON module_versions(deleted_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_tenants_deleted_at ON tenants(deleted_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_resellers_deleted_at ON resellers(deleted_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_l_dap_configs_deleted_at ON l_dap_configs(deleted_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_s_s_o_configs_deleted_at ON s_s_o_configs(deleted_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_alert_configs_deleted_at ON alert_configs(deleted_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_firewall_rules_deleted_at ON firewall_rules(deleted_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_firewall_logs_deleted_at ON firewall_logs(deleted_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_guardian_logs_deleted_at ON guardian_logs(deleted_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_heal_histories_deleted_at ON heal_histories(deleted_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_provisioned_domains_deleted_at ON provisioned_domains(deleted_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_audit_logs_deleted_at ON audit_logs(deleted_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_deleted_at ON sessions(deleted_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_update_histories_deleted_at ON update_histories(deleted_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_guardian_logs_message_id ON guardian_logs(message_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_l_dap_configs_tenant_id ON l_dap_configs(tenant_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_s_s_o_configs_tenant_id ON s_s_o_configs(tenant_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_alert_configs_tenant_id ON alert_configs(tenant_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_tenants_reseller_id ON tenants(reseller_id)`,
+	}
+
+	for _, idx := range indexes {
+		if err := db.Exec(idx).Error; err != nil {
+			// Ignore errors for indexes that might already exist
+			continue
+		}
+	}
+
+	return nil
+}
+

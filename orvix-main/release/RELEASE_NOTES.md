@@ -1,8 +1,16 @@
-# Orvix v1.0.0 Release Notes
+# Orvix v1.0.1 Release Notes
 
 ## Overview
 Orvix is a self-hosted email server platform built on top of Stalwart Mail Server.
-This is the first release candidate.
+**RC2 - Pure Go SQLite Build** - No CGO required.
+
+## RC2 Changes (2026-06-06)
+- ✅ Replaced `mattn/go-sqlite3` with `modernc.org/sqlite` (pure Go, no CGO)
+- ✅ Custom GORM dialector for SQLite compatibility
+- ✅ Raw SQL migrations (bypasses PostgreSQL-specific AutoMigrate)
+- ✅ Fixed CORS configuration (invalid email URL in allowed_origins)
+- ✅ Build: `CGO_ENABLED=0 go build` - static binary ready
+- ✅ VPS deployment verified (65.75.203.74)
 
 ## What's Included
 - Single binary: `orvix-linux-amd64`

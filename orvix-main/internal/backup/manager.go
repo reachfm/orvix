@@ -31,7 +31,7 @@ type Manager struct {
 // NewManager creates a new backup manager.
 func NewManager(db *gorm.DB, logger *zap.Logger, backupDir string) *Manager {
 	os.MkdirAll(backupDir, 0700)
-	db.AutoMigrate(&BackupHistory{})
+	// RC2 FIX: Skip AutoMigrate - tables are created with raw SQL
 	return &Manager{
 		db:        db,
 		logger:    logger,
