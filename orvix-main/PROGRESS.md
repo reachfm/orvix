@@ -2,8 +2,8 @@
 
 ## Last Updated: 2026-06-06
 ## Current Phase: All Phases Complete
-## Current Task: Build verification
-## Done: All MVP Build Order tasks resolved
+## Current Task: RC3 Release Validation
+## Done: All MVP Build Order tasks resolved + RC3 security fixes
 
 ## Completed
 - [x] Phase 1: Foundation — Project structure, config, database, migrations, logging, metrics, license, watermarking
@@ -13,6 +13,16 @@
 - [x] Phase 5: Frontend — Design system, components, Webmail UI, Admin Console, Versions, Feature flags, Firewall UI, Guardian, Heal, Migration, DNS wizard
 - [x] Phase 6: Advanced Features — Calendar (backend), ZKE, Collaboration, LDAP, Backup/Restore, Reseller, White Label, Compliance Center
 - [x] Phase 7: Hardening — Security audit complete, installer, systemd, API docs in HANDOFF.md
+
+## RC3 Security Release (v1.0.2)
+- [x] **CRITICAL**: Removed hardcoded default credentials (admin@orvix.local / admin123)
+- [x] Admin credentials via environment variables: `ORVIX_ADMIN_EMAIL`, `ORVIX_ADMIN_PASSWORD`
+- [x] Pure Go SQLite (modernc.org/sqlite, no CGO)
+- [x] Fixed /me endpoint returning empty data
+- [x] bcrypt password hashing with golang.org/x/crypto
+- [x] Redis rate limiting with safe fallback
+- [x] VPS-validated on 65.75.203.74
+- [x] GitHub release created: https://github.com/reachfm/orvix/releases/tag/v1.0.2
 
 ## Moved to ROADMAP.md
 - ActiveSync (protocol implementation)

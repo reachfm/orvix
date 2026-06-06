@@ -24,6 +24,8 @@
 | `ORVIX_CLOUDFLARE_API_KEY` | Cloudflare API key (for DNS automation) | `""` |
 | `ORVIX_ENCRYPTION_KEY` | AES-256-GCM key (64 hex chars) | Auto-generated |
 | `ORVIX_CONFIG` | Config file path | `/etc/orvix/orvix.yaml` |
+| `ORVIX_ADMIN_EMAIL` | **Required**: Admin email for initial user | `""` |
+| `ORVIX_ADMIN_PASSWORD` | **Required**: Admin password for initial user | `""` |
 
 ## Architecture
 
@@ -66,12 +68,18 @@ Orvix requires Stalwart Mail Server as an external binary.
 
 The release package is at:
 ```
-D:\orvix\release\orvix-v1.0.0-linux-amd64.tar.gz
+release/orvix-v1.0.2-linux-amd64.tar.gz
 ```
 
-- **Archive SHA256:** `79226CBEABFF3F9DB0079B1B5EDFA0A4A3F949454324270DD6B72853E08EA18B`
-- **Binary SHA256:** `F64406D238BDB037D103950AA80A41E11E7123AC3BDB40A84209EBFB30EE9299`
-- **Upload manifest:** `release/UPLOAD_MANIFEST.md`
+- **Git Commit:** `1849e4e`
+- **GitHub Release:** https://github.com/reachfm/orvix/releases/tag/v1.0.2
+- **Archive SHA256:** `7a00f2fb67b86e741887fe836d0f20523618536df4473f1af0e1509b3261b4c1`
+- **Binary SHA256:** `d348b1050322da89a61544f3023cf29ee2b462a24e4f8ab6a278182cca3814ee`
+
+### RC3 Security Changes
+- **REMOVED**: Hardcoded default credentials (admin@orvix.local / admin123)
+- Admin credentials now provided via environment variables
+- Installer prompts for admin email and password during installation
 
 ## How to Install on a Server (One-Command)
 
@@ -379,3 +387,4 @@ D:\orvix\
 8. **Frontend mock data removed**: React apps show loading/empty/error states when backend unavailable.
 9. **No multi-tenancy**: Database is single-tenant. Cross-tenant isolation not implemented.
 10. **Frontend SPA routing**: Admin served at `/admin`, webmail at `/`. Proper fallback routing needed.
+11. **Admin credentials**: Must provide `ORVIX_ADMIN_EMAIL` and `ORVIX_ADMIN_PASSWORD` env vars. No default credentials.
