@@ -1,8 +1,6 @@
-# Orvix RC2 Release Checksums
+# Orvix RC3 Release Checksums
 # Date: 2026-06-06
 # Build: CGO_ENABLED=0 (Pure Go, no CGO)
 
-24618b6efe5ac7345163b08d2abdcd585b6242eab9a466e4183494800dfcf361  orvix-v1.0.1-linux-amd64
-
-# Archive (generated separately)
-# Generate with: tar -czvf orvix-v1.0.1-linux-amd64.tar.gz orvix-v1.0.1-linux-amd64
+orvix-v1.0.2-linux-amd64: d348b1050322da89a61544f3023cf29ee2b462a24e4f8ab6a278182cca3814ee
+orvix-v1.0.2-linux-amd64.tar.gz: 7a00f2fb67b86e741887fe836d0f20523618536df4473f1af0e1509b3261b4c1

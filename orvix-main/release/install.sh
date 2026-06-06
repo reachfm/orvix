@@ -453,6 +453,16 @@ echo -e "${BOLD}[8/8] Starting services...${NC}"
 mkdir -p /var/lib/orvix
 chown orvix:orvix /var/lib/orvix
 
+# RC3 FIX: Pass admin credentials via environment variables
+# These are consumed by Orvix on first start to create the admin user
+cat > /etc/systemd/system/orvix.service.d/override.conf << OVERRIDE
+[Service]
+Environment=ORVIX_ADMIN_EMAIL=${ADMIN_EMAIL}
+Environment=ORVIX_ADMIN_PASSWORD=${ADMIN_PASSWORD}
+OVERRIDE
+
+systemctl daemon-reload
+
 systemctl start orvix.service || {
     echo -e "${YELLOW}⚠${NC} Service failed to start. Check logs:"
     echo "  journalctl -u orvix.service -n 50"

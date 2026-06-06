@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/gofiber/fiber/v3"
@@ -258,36 +259,57 @@ func seedFeatureFlags(db *gorm.DB, logger *zap.Logger) {
 	logger.Info("feature flags seeded")
 }
 
+// seedAdminUser creates the initial admin user if ORVIX_ADMIN_EMAIL and ORVIX_ADMIN_PASSWORD
+// environment variables are set. This ensures no default credentials are shipped.
 func seedAdminUser(db *gorm.DB, authenticator *auth.Authenticator, logger *zap.Logger) {
-	// Check if admin already exists
-	var count int64
-	db.Model(&models.User{}).Where("email = ?", "admin@orvix.local").Count(&count)
-	if count > 0 {
-		logger.Info("admin user already exists")
+	// RC3 FIX: No hardcoded credentials. Admin must be provided via environment variables.
+	adminEmail := os.Getenv("ORVIX_ADMIN_EMAIL")
+	adminPassword := os.Getenv("ORVIX_ADMIN_PASSWORD")
+
+	if adminEmail == "" || adminPassword == "" {
+		logger.Info("admin credentials not provided via environment variables")
+		logger.Info("set ORVIX_ADMIN_EMAIL and ORVIX_ADMIN_PASSWORD to create admin user")
 		return
 	}
 
-	// Create default admin user
-	hashedPassword, err := authenticator.HashPassword("admin123")
+	// Check if admin already exists
+	var count int64
+	db.Model(&models.User{}).Where("email = ?", adminEmail).Count(&count)
+	if count > 0 {
+		logger.Info("admin user already exists", zap.String("email", adminEmail))
+		return
+	}
+
+	// Hash the provided password
+	hashedPassword, err := authenticator.HashPassword(adminPassword)
 	if err != nil {
 		logger.Warn("failed to hash admin password", zap.Error(err))
 		return
 	}
 
+	// Extract domain from email for tenant
+	parts := strings.Split(adminEmail, "@")
+	var tenantDomain string
+	if len(parts) == 2 {
+		tenantDomain = parts[1]
+	} else {
+		tenantDomain = "local"
+	}
+
 	// Create tenant first
 	tenant := &models.Tenant{
-		Name:   "Default Tenant",
-		Slug:   "default",
-		Domain: "orvix.local",
+		Name:   tenantDomain,
+		Slug:   strings.ReplaceAll(tenantDomain, ".", "-"),
+		Domain: tenantDomain,
 		Plan:   "enterprise",
 		Active: true,
 	}
 	if err := db.Create(tenant).Error; err != nil {
-		logger.Warn("failed to create default tenant", zap.Error(err))
+		logger.Warn("failed to create tenant", zap.Error(err))
 	}
 
 	admin := &models.User{
-		Email:          "admin@orvix.local",
+		Email:          adminEmail,
 		PasswordHash:   hashedPassword,
 		Role:           "admin",
 		TenantID:       &tenant.ID,
@@ -300,5 +322,5 @@ func seedAdminUser(db *gorm.DB, authenticator *auth.Authenticator, logger *zap.L
 		return
 	}
 
-	logger.Info("admin user created", zap.String("email", admin.Email), zap.String("password", "admin123"))
+	logger.Info("admin user created", zap.String("email", adminEmail))
 }
