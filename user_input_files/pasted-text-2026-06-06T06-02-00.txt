@@ -1,0 +1,155 @@
+PS C:\Windows\system32> # Orvix GitHub Upload Script
+PS C:\Windows\system32> # Run this in your project folder on Windows
+PS C:\Windows\system32>
+PS C:\Windows\system32> $ErrorActionPreference = "Stop"
+PS C:\Windows\system32>
+PS C:\Windows\system32> Write-Host @"
+>>
+>>      Orvix - GitHub Upload Script
+>>
+>> "@ -ForegroundColor Cyan
+
+     Orvix - GitHub Upload Script
+
+PS C:\Windows\system32>
+PS C:\Windows\system32> # Check if in git repo
+PS C:\Windows\system32> if (Test-Path ".git") {
+>>     Write-Host "  Git already initialized" -ForegroundColor Yellow
+>> } else {
+>>     Write-Host " Initializing Git..." -ForegroundColor Cyan
+>>     git init
+>>     git remote add origin https://github.com/reachfm/orvix.git
+>> }
+  Git already initialized
+PS C:\Windows\system32>
+PS C:\Windows\system32> # Create .gitignore
+PS C:\Windows\system32> Write-Host " Creating .gitignore..." -ForegroundColor Cyan
+ Creating .gitignore...
+PS C:\Windows\system32> @"
+>> # Dependencies
+>> node_modules/
+>> vendor/
+>> .venv/
+>> venv/
+>>
+>> # Build outputs
+>> dist/
+>> build/
+>> *.exe
+>> *.dll
+>>
+>> # Logs
+>> *.log
+>> logs/
+>>
+>> # Environment
+>> .env
+>> .env.local
+>> .env.*.local
+>>
+>> # IDE
+>> .vscode/
+>> .idea/
+>> *.swp
+>> *.swo
+>>
+>> # OS
+>> .DS_Store
+>> Thumbs.db
+>>
+>> # Temp
+>> tmp/
+>> temp/
+>> *.tmp
+>> "@ | Out-File -FilePath ".gitignore" -Encoding utf8
+PS C:\Windows\system32>
+PS C:\Windows\system32> # Stage all files
+PS C:\Windows\system32> Write-Host " Staging files..." -ForegroundColor Cyan
+ Staging files...
+PS C:\Windows\system32> git add .
+fatal: detected dubious ownership in repository at 'C:/Windows/System32'
+'C:/Windows/System32' is owned by:
+        NT SERVICE/TrustedInstaller (S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)
+but the current user is:
+        DESKTOP-2CPOJJD/Mostafa (S-1-5-21-2320040959-4008674404-1937484861-1001)
+To add an exception for this directory, call:
+
+        git config --global --add safe.directory C:/Windows/System32
+PS C:\Windows\system32>
+PS C:\Windows\system32> # Check what will be committed
+PS C:\Windows\system32> $status = git status --short
+fatal: detected dubious ownership in repository at 'C:/Windows/System32'
+'C:/Windows/System32' is owned by:
+        NT SERVICE/TrustedInstaller (S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)
+but the current user is:
+        DESKTOP-2CPOJJD/Mostafa (S-1-5-21-2320040959-4008674404-1937484861-1001)
+To add an exception for this directory, call:
+
+        git config --global --add safe.directory C:/Windows/System32
+PS C:\Windows\system32> if ($status -eq "") {
+>>     Write-Host "  Nothing to commit" -ForegroundColor Yellow
+>>     exit
+>> }
+PS C:\Windows\system32>
+PS C:\Windows\system32> Write-Host "`n Files to upload:" -ForegroundColor Cyan
+
+ Files to upload:
+PS C:\Windows\system32> git status --short | ForEach-Object { Write-Host "  $_" }
+fatal: detected dubious ownership in repository at 'C:/Windows/System32'
+'C:/Windows/System32' is owned by:
+        NT SERVICE/TrustedInstaller (S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)
+but the current user is:
+        DESKTOP-2CPOJJD/Mostafa (S-1-5-21-2320040959-4008674404-1937484861-1001)
+To add an exception for this directory, call:
+
+        git config --global --add safe.directory C:/Windows/System32
+PS C:\Windows\system32>
+PS C:\Windows\system32> # Commit
+PS C:\Windows\system32> Write-Host "`n Committing..." -ForegroundColor Cyan
+
+ Committing...
+PS C:\Windows\system32> git commit -m "Orvix MVP - Initial commit from local machine"
+fatal: detected dubious ownership in repository at 'C:/Windows/System32'
+'C:/Windows/System32' is owned by:
+        NT SERVICE/TrustedInstaller (S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)
+but the current user is:
+        DESKTOP-2CPOJJD/Mostafa (S-1-5-21-2320040959-4008674404-1937484861-1001)
+To add an exception for this directory, call:
+
+        git config --global --add safe.directory C:/Windows/System32
+PS C:\Windows\system32>
+PS C:\Windows\system32> # Push
+PS C:\Windows\system32> Write-Host " Pushing to GitHub..." -ForegroundColor Cyan
+ Pushing to GitHub...
+PS C:\Windows\system32> git branch -M main
+fatal: detected dubious ownership in repository at 'C:/Windows/System32'
+'C:/Windows/System32' is owned by:
+        NT SERVICE/TrustedInstaller (S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)
+but the current user is:
+        DESKTOP-2CPOJJD/Mostafa (S-1-5-21-2320040959-4008674404-1937484861-1001)
+To add an exception for this directory, call:
+
+        git config --global --add safe.directory C:/Windows/System32
+PS C:\Windows\system32> git push -u origin main --force
+fatal: detected dubious ownership in repository at 'C:/Windows/System32'
+'C:/Windows/System32' is owned by:
+        NT SERVICE/TrustedInstaller (S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)
+but the current user is:
+        DESKTOP-2CPOJJD/Mostafa (S-1-5-21-2320040959-4008674404-1937484861-1001)
+To add an exception for this directory, call:
+
+        git config --global --add safe.directory C:/Windows/System32
+PS C:\Windows\system32>
+PS C:\Windows\system32> Write-Host @"
+>>
+>>
+>>    Upload Complete!
+>>   Check: github.com/reachfm/orvix
+>>
+>> "@ -ForegroundColor Green
+
+
+   Upload Complete!
+  Check: github.com/reachfm/orvix
+
+PS C:\Windows\system32>
