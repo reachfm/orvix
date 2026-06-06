@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Orvix RC3 Installer
-# Usage: curl -fsSL https://github.com/reachfm/orvix/releases/download/v1.0.2/install.sh | bash
+# Orvix RC4 Installer
+# Usage: curl -fsSL https://github.com/reachfm/orvix/releases/download/v1.0.3/install.sh | bash
 # Or:    bash install.sh
 
-# RC3: Updated to v1.0.2
-ORVIX_VERSION="${ORVIX_VERSION:-1.0.2}"
+# RC4: Fixed Stalwart URL, systemd directory, password confirmation
+ORVIX_VERSION="${ORVIX_VERSION:-1.0.3}"
 ORVIX_RELEASE_URL="${ORVIX_RELEASE_URL:-https://github.com/reachfm/orvix/releases/download/v${ORVIX_VERSION}}"
-STALWART_VERSION="${STALWART_VERSION:-0.10.5}"
+STALWART_VERSION="${STALWART_VERSION:-0.16.7}"
 
 BOLD='\033[1m'
 RED='\033[0;31m'
@@ -19,7 +19,7 @@ NC='\033[0m'
 # ──────────────────────────────────────
 # Pre-flight checks
 # ──────────────────────────────────────
-echo -e "${BOLD}Orvix v${ORVIX_VERSION} RC3 Installer${NC}"
+echo -e "${BOLD}Orvix v${ORVIX_VERSION} RC4 Installer${NC}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -44,10 +44,10 @@ case "$OS" in
 esac
 
 # ──────────────────────────────────────
-# Functions (RC2 FIX: Added validation)
+# Functions (RC4 FIX: All validation fixes)
 # ──────────────────────────────────────
 
-# RC2 FIX: Domain validation function
+# RC4 FIX: Domain validation function
 prompt_domain() {
     local domain=""
     while true; do
@@ -66,7 +66,7 @@ prompt_domain() {
     echo "$domain"
 }
 
-# RC2 FIX: Email validation function
+# RC4 FIX: Email validation function
 prompt_email() {
     local email=""
     while true; do
@@ -85,14 +85,22 @@ prompt_email() {
     echo "$email"
 }
 
-# RC2 FIX: Password validation function
+# RC4 FIX: Password validation with confirmation
 prompt_password() {
     local password=""
+    local confirm=""
     while true; do
         read -rsp "Admin password (min 12 chars): " password
         echo ""
         if [ ${#password} -lt 12 ]; then
             echo -e "${RED}Error: Password must be at least 12 characters.${NC}"
+            continue
+        fi
+        # RC4 FIX: Add confirmation step
+        read -rsp "Confirm admin password: " confirm
+        echo ""
+        if [ "$password" != "$confirm" ]; then
+            echo -e "${RED}Error: Passwords do not match. Please try again.${NC}"
             continue
         fi
         break
@@ -224,7 +232,7 @@ fi
 echo -e "${GREEN}✓${NC} Orvix binary installed at $ORVIX_BIN"
 
 # ──────────────────────────────────────
-# Step 5: Install Stalwart binary (RC2 FIX: Multiple download sources)
+# Step 5: Install Stalwart binary (RC4 FIX: Correct GitHub URL)
 # ──────────────────────────────────────
 CURRENT_STEP="stalwart_binary"
 echo ""
@@ -237,72 +245,52 @@ if command -v stalwart &>/dev/null; then
 elif [ -f "$STALWART_BIN" ]; then
     echo -e "${GREEN}✓${NC} Stalwart already installed"
 else
-    echo "Downloading Stalwart v${STALWART_VERSION}..."
+    echo "Downloading Stalwart v${STALWART_VERSION} from GitHub..."
 
-    # RC2 FIX: Try stalw.art API first (most reliable)
-    STALWART_API_URL="https://stalw.art/api/download/v${STALWART_VERSION}/linux/x86_64"
+    # RC4 FIX: Use correct GitHub URL for stalwartlabs/stalwart
+    STALWART_DOWNLOAD_URL="https://github.com/stalwartlabs/stalwart/releases/download/v${STALWART_VERSION}/stalwart-x86_64-unknown-linux-gnu.tar.gz"
 
-    STALWART_DOWNLOADED=false
-
-    # Try stalw.art API
-    if curl -fsSL -o /tmp/stalwart.tar.gz "$STALWART_API_URL" 2>/dev/null; then
+    if curl -fsSL -o /tmp/stalwart.tar.gz "$STALWART_DOWNLOAD_URL"; then
         tar -xzf /tmp/stalwart.tar.gz -C /tmp/
 
         # Find the stalwart binary in extracted files
         if [ -f /tmp/stalwart ]; then
             cp /tmp/stalwart "$STALWART_BIN"
             chmod 755 "$STALWART_BIN"
-            echo -e "${GREEN}✓${NC} Stalwart v${STALWART_VERSION} installed from stalw.art"
-            STALWART_DOWNLOADED=true
+            echo -e "${GREEN}✓${NC} Stalwart v${STALWART_VERSION} installed from GitHub"
         elif [ -f /tmp/stalwart-mail-server ]; then
             cp /tmp/stalwart-mail-server "$STALWART_BIN"
             chmod 755 "$STALWART_BIN"
-            echo -e "${GREEN}✓${NC} Stalwart v${STALWART_VERSION} installed from stalw.art"
-            STALWART_DOWNLOADED=true
+            echo -e "${GREEN}✓${NC} Stalwart v${STALWART_VERSION} installed from GitHub"
+        else
+            echo -e "${RED}Error: Stalwart binary not found in archive.${NC}"
+            echo "Please download manually from: https://github.com/stalwartlabs/stalwart/releases"
+            rm -f /tmp/stalwart.tar.gz
+            exit 1
         fi
         rm -f /tmp/stalwart.tar.gz
+    else
+        echo -e "${RED}Failed to download Stalwart v${STALWART_VERSION}${NC}"
+        echo ""
+        echo "Please download manually:"
+        echo "  1. Visit: https://github.com/stalwartlabs/stalwart/releases"
+        echo "  2. Download: stalwart-x86_64-unknown-linux-gnu.tar.gz"
+        echo "  3. Extract: tar -xzf stalwart-x86_64-unknown-linux-gnu.tar.gz"
+        echo "  4. Copy: cp stalwart /usr/local/bin/stalwart && chmod 755 /usr/local/bin/stalwart"
+        echo "  5. Re-run this installer"
+        exit 1
     fi
-
-    # RC2 FIX: Fallback to GitHub releases if stalw.art fails
-    if [ "$STALWART_DOWNLOADED" = false ]; then
-        echo "Trying alternative download method (GitHub)..."
-        GITHUB_URL="https://github.com/stalwartlabs/mail-server/releases/download/v${STALWART_VERSION}/stalwart-mail-server-${STALWART_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
-
-        if curl -fsSL -o /tmp/stalwart.tar.gz "$GITHUB_URL"; then
-            tar -xzf /tmp/stalwart.tar.gz -C /tmp/
-
-            if [ -f /tmp/stalwart ]; then
-                cp /tmp/stalwart "$STALWART_BIN"
-                chmod 755 "$STALWART_BIN"
-                echo -e "${GREEN}✓${NC} Stalwart v${STALWART_VERSION} installed from GitHub"
-                STALWART_DOWNLOADED=true
-            elif [ -f /tmp/stalwart-mail-server ]; then
-                cp /tmp/stalwart-mail-server "$STALWART_BIN"
-                chmod 755 "$STALWART_BIN"
-                echo -e "${GREEN}✓${NC} Stalwart v${STALWART_VERSION} installed from GitHub"
-                STALWART_DOWNLOADED=true
-            fi
-            rm -f /tmp/stalwart.tar.gz
-        fi
-    fi
-
-    if [ "$STALWART_DOWNLOADED" = false ]; then
-        echo -e "${YELLOW}⚠${NC} Could not download Stalwart automatically."
-        echo "Download manually from: https://stalw.art/download"
-        echo "Then copy to: $STALWART_BIN"
-    fi
-
     rm -rf /tmp/stalwart*
 fi
 
 # ──────────────────────────────────────
-# Step 6: Generate configuration (RC2 FIX: Use validation functions)
+# Step 6: Generate configuration (RC4 FIX: Use validation functions)
 # ──────────────────────────────────────
 CURRENT_STEP="config"
 echo ""
 echo -e "${BOLD}[6/8] Configuring Orvix...${NC}"
 
-# RC2 FIX: Use validated prompt functions
+# RC4 FIX: Use validated prompt functions
 PRIMARY_DOMAIN=$(prompt_domain)
 ADMIN_EMAIL=$(prompt_email)
 ADMIN_PASSWORD=$(prompt_password)
@@ -374,12 +362,12 @@ ORVIX_YAML
 chmod 640 /etc/orvix/orvix.yaml
 chown orvix:orvix /etc/orvix/orvix.yaml
 
-# Save credentials securely
+# Save credentials securely (RC4 FIX: Do not log password)
 cat > /etc/orvix/install_credentials.txt << CREDS
 Orvix Installation Credentials
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Admin Email: $ADMIN_EMAIL
-Admin Password: $ADMIN_PASSWORD
+Admin Password: [REDACTED - use the password you provided]
 License Key: ${LICENSE_KEY:-not provided}
 Primary Domain: $PRIMARY_DOMAIN
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -395,13 +383,13 @@ echo -e "${GREEN}✓${NC} Configuration generated"
 echo -e "${GREEN}✓${NC} Credentials saved to /etc/orvix/install_credentials.txt"
 
 # ──────────────────────────────────────
-# Step 7: Install systemd service (RC2 FIX: No StartLimit directives)
+# Step 7: Install systemd service (RC4 FIX: No StartLimit directives)
 # ──────────────────────────────────────
 CURRENT_STEP="systemd"
 echo ""
 echo -e "${BOLD}[7/8] Installing systemd service...${NC}"
 
-# RC2 FIX: Inline systemd unit WITHOUT StartLimitIntervalSec (invalid on Ubuntu 22.04+)
+# RC4 FIX: Inline systemd unit WITHOUT StartLimitIntervalSec (invalid on Ubuntu 22.04+)
 cat > /etc/systemd/system/orvix.service << 'UNIT'
 [Unit]
 Description=Orvix Email Server Platform
@@ -453,7 +441,10 @@ echo -e "${BOLD}[8/8] Starting services...${NC}"
 mkdir -p /var/lib/orvix
 chown orvix:orvix /var/lib/orvix
 
-# RC3 FIX: Pass admin credentials via environment variables
+# RC4 FIX: Create systemd override directory before writing
+mkdir -p /etc/systemd/system/orvix.service.d
+
+# RC4 FIX: Pass admin credentials via environment variables
 # These are consumed by Orvix on first start to create the admin user
 cat > /etc/systemd/system/orvix.service.d/override.conf << OVERRIDE
 [Service]
@@ -491,7 +482,7 @@ IP_ADDR=$(hostname -I | awk '{print $1}')
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo -e "${BOLD}Orvix v${ORVIX_VERSION} RC3 Installation Complete${NC}"
+echo -e "${BOLD}Orvix v${ORVIX_VERSION} RC4 Installation Complete${NC}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 echo -e " ${BOLD}Admin Console:${NC} http://${IP_ADDR}:8080/admin"
@@ -510,5 +501,6 @@ echo ""
 echo -e "${YELLOW}Credentials saved to:${NC} /etc/orvix/install_credentials.txt"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-# RC2 FIX: Clear password from memory
+# RC4 FIX: Clear password from memory
 unset ADMIN_PASSWORD
+unset ADMIN_CONFIRM
