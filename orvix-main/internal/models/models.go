@@ -259,8 +259,10 @@ func MigrateAll(db *gorm.DB) error {
 // MigrateAllRaw uses raw SQL for SQLite compatibility (RC2 FIX)
 // AutoMigrate uses postgres-specific queries that don't work with SQLite
 func MigrateAllRaw(db *gorm.DB) error {
-	// Create all tables using raw SQL compatible with SQLite
-	sqls := []string{
+	// modernc.org/sqlite requires explicit transaction for writes
+	return db.Transaction(func(tx *gorm.DB) error {
+		// Create all tables using raw SQL compatible with SQLite
+		sqls := []string{
 		`CREATE TABLE IF NOT EXISTS licenses (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			created_at DATETIME NOT NULL,
@@ -468,13 +470,13 @@ func MigrateAllRaw(db *gorm.DB) error {
 	}
 
 	for _, sql := range sqls {
-		if err := db.Exec(sql).Error; err != nil {
-			return err
+			if err := tx.Exec(sql).Error; err != nil {
+				return err
+			}
 		}
-	}
 
-	// Create indexes
-	indexes := []string{
+		// Create indexes
+		indexes := []string{
 		`CREATE INDEX IF NOT EXISTS idx_licenses_deleted_at ON licenses(deleted_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_feature_flags_deleted_at ON feature_flags(deleted_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_module_versions_deleted_at ON module_versions(deleted_at)`,
@@ -499,12 +501,13 @@ func MigrateAllRaw(db *gorm.DB) error {
 	}
 
 	for _, idx := range indexes {
-		if err := db.Exec(idx).Error; err != nil {
-			// Ignore errors for indexes that might already exist
-			continue
+			if err := tx.Exec(idx).Error; err != nil {
+				// Ignore errors for indexes that might already exist
+				continue
+			}
 		}
-	}
 
-	return nil
+		return nil
+	})
 }
 
