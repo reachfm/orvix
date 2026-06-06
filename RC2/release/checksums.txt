@@ -1,0 +1,6 @@
+# Orvix RC2 Checksums
+# Generated: 2026-06-06
+# Version: 1.0.1
+
+# SHA256 checksums (to be generated after build)
+orvix-v1.0.1-linux-amd64.tar.gz  PLACEHOLDER_UNTIL_BUILD

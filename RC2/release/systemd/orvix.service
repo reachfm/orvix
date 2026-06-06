@@ -1,0 +1,34 @@
+[Unit]
+Description=Orvix Email Server Platform
+Documentation=https://github.com/reachfm/orvix
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=orvix
+Group=orvix
+ExecStart=/usr/local/bin/orvix serve
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=10
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Security hardening
+ProtectSystem=full
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Environment
+Environment=ORVIX_CONFIG=/etc/orvix/orvix.yaml
+Environment=ORVIX_LOG_DIR=/var/log/orvix
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=orvix
+
+[Install]
+WantedBy=multi-user.target
