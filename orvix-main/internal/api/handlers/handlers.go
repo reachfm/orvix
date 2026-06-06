@@ -71,19 +71,43 @@ func (h *Handler) Login(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "email and password required"})
 	}
 
-	var user struct {
-		ID           uint
-		PasswordHash string
-		Role         string
+	// Use Select to avoid GORM looking up by primary key
+	h.logger.Info("login attempt", zap.String("email", req.Email))
+
+	// Get underlying sql.DB and query directly
+	var userID uint
+	var passwordHash string
+	var userRole string
+
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		h.logger.Error("failed to get underlying DB", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
 	}
 
-	if err := h.db.Table("users").Where("email = ?", req.Email).First(&user).Error; err != nil {
+	err = sqlDB.QueryRow("SELECT id, password_hash, role FROM users WHERE email = ?", req.Email).Scan(&userID, &passwordHash, &userRole)
+	if err != nil {
+		h.logger.Warn("user not found during login", zap.String("email", req.Email), zap.Error(err))
 		h.security.RecordFailedLogin(c.Context(), c.IP(), req.Email)
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid credentials"})
 	}
 
-	if !h.auth.VerifyPassword(req.Password, user.PasswordHash) {
-		h.security.RecordFailedLogin(c.Context(), c.IP(), req.Email)
+	h.logger.Info("direct query result",
+		zap.Uint("id", userID),
+		zap.String("hash_len", fmt.Sprintf("%d", len(passwordHash))),
+		zap.String("hash_first_20", truncateHash(passwordHash)),
+		zap.String("role", userRole))
+
+	h.logger.Debug("user found during login",
+		zap.Uint("user_id", userID),
+		zap.String("role", userRole),
+		zap.String("password_hash_len", fmt.Sprintf("%d", len(passwordHash))),
+		zap.String("password_hash_prefix", truncateHash(passwordHash)))
+
+	if !h.auth.VerifyPassword(req.Password, passwordHash) {
+		h.logger.Warn("password verification failed",
+			zap.String("email", req.Email),
+			zap.String("hash_prefix", truncateHash(passwordHash)))
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid credentials"})
 	}
 
@@ -93,13 +117,13 @@ func (h *Handler) Login(c fiber.Ctx) error {
 		h.rateLimiter.ResetLoginLimit(c.IP())
 	}
 
-	accessToken, err := h.auth.GenerateAccessToken(user.ID, auth.Role(user.Role))
+	accessToken, err := h.auth.GenerateAccessToken(userID, auth.Role(userRole))
 	if err != nil {
 		h.logger.Error("failed to generate access token", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authentication failed"})
 	}
 
-	refreshToken, expiresAt, err := h.auth.GenerateRefreshToken(user.ID)
+	refreshToken, expiresAt, err := h.auth.GenerateRefreshToken(userID)
 	if err != nil {
 		h.logger.Error("failed to generate refresh token", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authentication failed"})
@@ -125,7 +149,7 @@ func (h *Handler) Login(c fiber.Ctx) error {
 		Path:     "/api/v1/auth/refresh",
 	})
 
-	h.logger.Info("user logged in", zap.Uint("user_id", user.ID))
+	h.logger.Info("user logged in", zap.Uint("user_id", userID))
 
 	return c.JSON(fiber.Map{
 		"access_expires_in":  900,
@@ -166,6 +190,14 @@ func (h *Handler) Refresh(c fiber.Ctx) error {
 	})
 
 	return c.JSON(fiber.Map{"status": "ok"})
+}
+
+// truncateHash returns first 20 chars of hash for logging.
+func truncateHash(hash string) string {
+	if len(hash) > 20 {
+		return hash[:20]
+	}
+	return hash
 }
 
 // Logout clears auth cookies.
@@ -338,18 +370,25 @@ func (h *Handler) DeleteAPIKey(c fiber.Ctx) error {
 func (h *Handler) Me(c fiber.Ctx) error {
 	userID := c.Locals("user_id").(uint)
 
-	var user struct {
-		ID    uint   `json:"id"`
-		Email string `json:"email"`
-		Role  string `json:"role"`
-		Name  string `json:"name"`
+	var email, role string
+
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		h.logger.Error("failed to get underlying DB", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
 	}
 
-	if err := h.db.Table("users").First(&user, userID).Error; err != nil {
+	err = sqlDB.QueryRow("SELECT email, role FROM users WHERE id = ?", userID).Scan(&email, &role)
+	if err != nil {
+		h.logger.Warn("user not found", zap.Uint("user_id", userID), zap.Error(err))
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "user not found"})
 	}
 
-	return c.JSON(user)
+	return c.JSON(fiber.Map{
+		"id":    userID,
+		"email": email,
+		"role":  role,
+	})
 }
 
 // ListDomains returns all mail domains.
