@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Orvix RC2 Installer
-# Usage: curl -fsSL https://orvix.email/install.sh | bash
+# Orvix RC3 Installer
+# Usage: curl -fsSL https://github.com/reachfm/orvix/releases/download/v1.0.2/install.sh | bash
 # Or:    bash install.sh
 
-# RC2 FIX: Updated to v1.0.1
-ORVIX_VERSION="${ORVIX_VERSION:-1.0.1}"
-ORVIX_RELEASE_URL="${ORVIX_RELEASE_URL:-https://releases.orvix.email/v${ORVIX_VERSION}}"
+# RC3: Updated to v1.0.2
+ORVIX_VERSION="${ORVIX_VERSION:-1.0.2}"
+ORVIX_RELEASE_URL="${ORVIX_RELEASE_URL:-https://github.com/reachfm/orvix/releases/download/v${ORVIX_VERSION}}"
 STALWART_VERSION="${STALWART_VERSION:-0.10.5}"
 
 BOLD='\033[1m'
@@ -19,7 +19,7 @@ NC='\033[0m'
 # ──────────────────────────────────────
 # Pre-flight checks
 # ──────────────────────────────────────
-echo -e "${BOLD}Orvix v${ORVIX_VERSION} RC2 Installer${NC}"
+echo -e "${BOLD}Orvix v${ORVIX_VERSION} RC3 Installer${NC}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -491,7 +491,7 @@ IP_ADDR=$(hostname -I | awk '{print $1}')
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo -e "${BOLD}Orvix v${ORVIX_VERSION} RC2 Installation Complete${NC}"
+echo -e "${BOLD}Orvix v${ORVIX_VERSION} RC3 Installation Complete${NC}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 echo -e " ${BOLD}Admin Console:${NC} http://${IP_ADDR}:8080/admin"
