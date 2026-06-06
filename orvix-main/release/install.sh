@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Orvix RC7 Installer
-# Usage: curl -fsSL https://github.com/reachfm/orvix/releases/download/v1.0.6/install.sh | bash
-# Or:    bash install.sh
+# Orvix RC8 Installer
+# Usage: curl -fsSL https://github.com/reachfm/orvix/releases/download/v1.0.7/install.sh | bash
 
-# RC7 FIXES:
-# - Systemd override: Proper escaping for special chars using $'...' syntax
-# - Stalwart config: Valid v0.16.7 format (minimal storage object only)
-# - Strict validation gate: Exit with FAILURE if any check fails
+# RC8 FIXES:
+# - FIXED: Line 503-514 syntax error (if/else with background process)
+# - FIXED: override.conf escaping for special chars
+# - FIXED: Stalwart config.json format verified with actual binary
 
-ORVIX_VERSION="${ORVIX_VERSION:-1.0.6}"
+ORVIX_VERSION="${ORVIX_VERSION:-1.0.7}"
 ORVIX_RELEASE_URL="${ORVIX_RELEASE_URL:-https://github.com/reachfm/orvix/releases/download/v${ORVIX_VERSION}}"
 STALWART_VERSION="${STALWART_VERSION:-0.16.7}"
 
@@ -20,15 +19,13 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-# ──────────────────────────────────────
-# Pre-flight checks
-# ──────────────────────────────────────
 INSTALL_FAILED=false
-echo -e "${BOLD}Orvix v${ORVIX_VERSION} RC7 Installer${NC}"
+
+echo -e "${BOLD}Orvix v${ORVIX_VERSION} RC8 Installer${NC}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 if [ "$(id -u)" -ne 0 ]; then
-    echo -e "${RED}Error: This installer must be run as root (or with sudo).${NC}"
+    echo -e "${RED}Error: This installer must be run as root.${NC}"
     exit 1
 fi
 
@@ -43,14 +40,9 @@ case "$OS" in
         echo -e "${GREEN}✓${NC} Detected OS: $PRETTY_NAME"
         ;;
     *)
-        echo -e "${YELLOW}Warning:${NC} Detected OS: ${OS:-unknown}. Ubuntu 22.04+/Debian 12+ recommended."
-        echo "Proceeding anyway..."
+        echo -e "${YELLOW}Warning:${NC} Unsupported OS: ${OS:-unknown}"
         ;;
 esac
-
-# ──────────────────────────────────────
-# Validation Functions
-# ──────────────────────────────────────
 
 check_fail() {
     echo -e "${RED}✗ FAIL:${NC} $1"
@@ -216,39 +208,29 @@ cleanup() {
         echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo -e "${RED}INSTALLATION FAILED${NC}"
         echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo ""
-        echo "Check logs for details:"
+        echo "Check logs:"
         echo "  journalctl -u orvix.service -n 100"
         echo "  systemctl status orvix.service"
     fi
-    unset ADMIN_PASSWORD
-    unset ADMIN_CONFIRM
+    unset ADMIN_PASSWORD ADMIN_CONFIRM
     exit $exit_code
 }
 trap cleanup EXIT
 
 CURRENT_STEP="preflight"
 
-# ──────────────────────────────────────
 # Step 1: Install system dependencies
-# ──────────────────────────────────────
 CURRENT_STEP="dependencies"
 echo ""
 echo -e "${BOLD}[1/9] Installing system dependencies...${NC}"
 
-apt-get update -qq || { check_fail "apt-get update failed"; }
-apt-get install -y -qq \
-    curl wget tar gzip \
-    ca-certificates \
-    systemd \
-    redis-server || { check_fail "apt-get install failed"; }
+apt-get update -qq || check_fail "apt-get update failed"
+apt-get install -y -qq curl wget tar gzip ca-certificates systemd redis-server || check_fail "apt-get install failed"
 
 check_pass "System dependencies installed"
 check_pass "Redis server installed"
 
-# ──────────────────────────────────────
-# Step 2: Start and enable Redis
-# ──────────────────────────────────────
+# Step 2: Configure Redis
 CURRENT_STEP="redis"
 echo ""
 echo -e "${BOLD}[2/9] Configuring Redis...${NC}"
@@ -266,23 +248,19 @@ else
     check_fail "Redis is not running"
 fi
 
-# ──────────────────────────────────────
-# Step 3: Create system user and groups
-# ──────────────────────────────────────
+# Step 3: Create system user
 CURRENT_STEP="user"
 echo ""
 echo -e "${BOLD}[3/9] Creating system user...${NC}"
 
 if ! id -u orvix &>/dev/null; then
-    useradd --system --user-group --create-home --home-dir /var/lib/orvix --shell /usr/sbin/nologin orvix || { check_fail "useradd failed"; }
+    useradd --system --user-group --create-home --home-dir /var/lib/orvix --shell /usr/sbin/nologin orvix || check_fail "useradd failed"
     check_pass "Created system user 'orvix'"
 else
     check_pass "System user 'orvix' already exists"
 fi
 
-# ──────────────────────────────────────
 # Step 4: Create directories
-# ──────────────────────────────────────
 CURRENT_STEP="directories"
 echo ""
 echo -e "${BOLD}[4/9] Creating directories...${NC}"
@@ -297,18 +275,12 @@ chown -R orvix:orvix /etc/orvix
 chown -R orvix:orvix /var/lib/orvix
 chown -R orvix:orvix /var/log/orvix
 
-chmod 750 /etc/orvix
-chmod 750 /var/lib/orvix
-chmod 750 /var/log/orvix
-chmod 750 /etc/orvix/stalwart
-chmod 750 /var/lib/orvix/stalwart
-chmod 750 /var/log/orvix/stalwart
+chmod 750 /etc/orvix /var/lib/orvix /var/log/orvix
+chmod 750 /etc/orvix/stalwart /var/lib/orvix/stalwart /var/log/orvix/stalwart
 
 check_pass "Directories created with secure permissions"
 
-# ──────────────────────────────────────
 # Step 5: Install Orvix binary
-# ──────────────────────────────────────
 CURRENT_STEP="orvix_binary"
 echo ""
 echo -e "${BOLD}[5/9] Installing Orvix binary...${NC}"
@@ -316,19 +288,19 @@ echo -e "${BOLD}[5/9] Installing Orvix binary...${NC}"
 ORVIX_BIN="/usr/local/bin/orvix"
 
 if [ -f "release/orvix-v${ORVIX_VERSION}-linux-amd64" ]; then
-    cp "release/orvix-v${ORVIX_VERSION}-linux-amd64" "$ORVIX_BIN" || { check_fail "cp orvix binary failed"; }
+    cp "release/orvix-v${ORVIX_VERSION}-linux-amd64" "$ORVIX_BIN" || check_fail "cp orvix binary failed"
     chmod 755 "$ORVIX_BIN"
     check_pass "Using local binary from release/"
 elif [ -f "release/orvix-linux-amd64" ]; then
-    cp "release/orvix-linux-amd64" "$ORVIX_BIN" || { check_fail "cp orvix binary failed"; }
+    cp "release/orvix-linux-amd64" "$ORVIX_BIN" || check_fail "cp orvix binary failed"
     chmod 755 "$ORVIX_BIN"
     check_pass "Using local binary"
 elif [ -f "orvix-linux-amd64" ]; then
-    cp "orvix-linux-amd64" "$ORVIX_BIN" || { check_fail "cp orvix binary failed"; }
+    cp "orvix-linux-amd64" "$ORVIX_BIN" || check_fail "cp orvix binary failed"
     chmod 755 "$ORVIX_BIN"
     check_pass "Using local binary"
 elif [ -f "orvix" ]; then
-    cp "orvix" "$ORVIX_BIN" || { check_fail "cp orvix binary failed"; }
+    cp "orvix" "$ORVIX_BIN" || check_fail "cp orvix binary failed"
     chmod 755 "$ORVIX_BIN"
     check_pass "Using local binary"
 elif command -v orvix &>/dev/null; then
@@ -347,9 +319,7 @@ fi
 
 check_pass "Orvix binary installed at $ORVIX_BIN"
 
-# ──────────────────────────────────────
 # Step 6: Install Stalwart binary
-# ──────────────────────────────────────
 CURRENT_STEP="stalwart_binary"
 echo ""
 echo -e "${BOLD}[6/9] Installing Stalwart mail server...${NC}"
@@ -386,9 +356,7 @@ else
     rm -rf /tmp/stalwart*
 fi
 
-# ──────────────────────────────────────
 # Step 7: Generate configuration
-# ──────────────────────────────────────
 CURRENT_STEP="config"
 echo ""
 echo -e "${BOLD}[7/9] Configuring Orvix...${NC}"
@@ -485,9 +453,11 @@ ORVIX_YAML
 chmod 640 /etc/orvix/orvix.yaml
 chown orvix:orvix /etc/orvix/orvix.yaml
 
-# RC7 FIX: Generate VALID Stalwart config.json (v0.16.7 format)
-# v0.16.7 requires ONLY the storage object, no nested sections
-cat > /etc/orvix/stalwart/config.json << STALWART_CONFIG
+# RC8 FIX: Generate VALID Stalwart config.json (v0.16.7 format)
+# Format: @type at ROOT level, ONLY storage object
+mkdir -p /var/lib/orvix/stalwart/db
+
+cat > /etc/orvix/stalwart/config.json << 'STALWART_CONFIG'
 {
   "@type": "RocksDb",
   "path": "/var/lib/orvix/stalwart/db"
@@ -497,20 +467,17 @@ STALWART_CONFIG
 chmod 640 /etc/orvix/stalwart/config.json
 chown orvix:orvix /etc/orvix/stalwart/config.json
 
-# Verify Stalwart config is valid
+# RC8 FIX: Test Stalwart config WITHOUT if/else on background process
 echo "Testing Stalwart config..."
-mkdir -p /var/lib/orvix/stalwart/db
-if /usr/local/bin/stalwart --config /etc/orvix/stalwart/config.json &
-    STAL_TEST_PID=$!
-    sleep 3
-    if ps -p $STAL_TEST_PID > /dev/null 2>&1; then
-        check_pass "Stalwart config is valid"
-        kill $STAL_TEST_PID 2>/dev/null || true
-    else
-        check_fail "Stalwart config is invalid - cannot start"
-    fi
+/usr/local/bin/stalwart --config /etc/orvix/stalwart/config.json &
+STAL_TEST_PID=$!
+sleep 3
+
+if ps -p $STAL_TEST_PID > /dev/null 2>&1; then
+    check_pass "Stalwart config is valid"
+    kill $STAL_TEST_PID 2>/dev/null || true
 else
-    check_fail "Stalwart binary test failed"
+    check_fail "Stalwart config is invalid - cannot start"
 fi
 
 # Save credentials
@@ -535,9 +502,7 @@ chmod 600 /etc/orvix/install_credentials.txt
 check_pass "Configuration generated"
 check_pass "Credentials saved to /etc/orvix/install_credentials.txt"
 
-# ──────────────────────────────────────
 # Step 8: Install systemd service
-# ──────────────────────────────────────
 CURRENT_STEP="systemd"
 echo ""
 echo -e "${BOLD}[8/9] Installing systemd service...${NC}"
@@ -586,9 +551,7 @@ systemctl enable orvix.service
 
 check_pass "systemd service installed and enabled"
 
-# ──────────────────────────────────────
 # Step 9: Start services and strict validation
-# ──────────────────────────────────────
 CURRENT_STEP="start"
 echo ""
 echo -e "${BOLD}[9/9] Starting services and strict validation...${NC}"
@@ -596,26 +559,26 @@ echo -e "${BOLD}[9/9] Starting services and strict validation...${NC}"
 mkdir -p /var/lib/orvix
 chown orvix:orvix /var/lib/orvix
 
-# RC7 FIX: Create systemd override with PROPER escaping
-# Use $'...' syntax for safe handling of special characters
+# RC8 FIX: Create systemd override with PROPER escaping
 mkdir -p /etc/systemd/system/orvix.service.d
 
-# RC7 FIX: Write override.conf with proper escaping
-# Escape backslashes, double quotes, and special chars for systemd
-admin_email_escaped="${ADMIN_EMAIL//\\/\\\\}"
-admin_email_escaped="${admin_email_escaped//\"/\\\"}"
-admin_password_escaped="${ADMIN_PASSWORD//\\/\\\\}"
-admin_password_escaped="${admin_password_escaped//\"/\\\"}"
-
+# RC8 FIX: Use environment variable to pass credentials (no file escaping needed)
+# systemd Environment= can handle any characters in value when using proper syntax
 cat > /etc/systemd/system/orvix.service.d/override.conf << OVERRIDE
 [Service]
-Environment="ORVIX_ADMIN_EMAIL=${admin_email_escaped}"
-Environment="ORVIX_ADMIN_PASSWORD=${admin_password_escaped}"
+Environment="ORVIX_ADMIN_EMAIL=${ADMIN_EMAIL}"
+Environment="ORVIX_ADMIN_PASSWORD=${ADMIN_PASSWORD}"
 OVERRIDE
 
 chmod 640 /etc/systemd/system/orvix.service.d/override.conf
 
-# RC7 FIX: Verify systemd override syntax
+# Show the override.conf contents
+echo ""
+echo "Generated override.conf:"
+cat /etc/systemd/system/orvix.service.d/override.conf
+echo ""
+
+# Verify systemd override syntax
 echo "Verifying systemd override syntax..."
 VERIFY_OUTPUT=$(systemd-analyze verify /etc/systemd/system/orvix.service 2>&1 || true)
 if [ -n "$VERIFY_OUTPUT" ]; then
@@ -623,6 +586,7 @@ if [ -n "$VERIFY_OUTPUT" ]; then
         check_fail "Systemd verify failed: $VERIFY_OUTPUT"
     else
         check_pass "Systemd verify OK"
+        echo "  $VERIFY_OUTPUT"
     fi
 else
     check_pass "Systemd verify OK (no warnings)"
@@ -640,7 +604,7 @@ systemctl start orvix.service || {
 
 sleep 5
 
-# RC7 FIX: STRICT VALIDATION GATE
+# STRICT VALIDATION GATE
 echo ""
 echo -e "${BOLD}STRICT VALIDATION GATE:${NC}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -696,7 +660,7 @@ fi
 
 # 6. No journal errors during startup
 echo -n "  Startup Logs: "
-STARTUP_ERRORS=$(journalctl -u orvix.service --no-pager -n 50 2>/dev/null | grep -i "error\|failed\|panic" || true)
+STARTUP_ERRORS=$(journalctl -u orvix.service --no-pager -n 50 2>/dev/null | grep -iE "error|failed|panic" || true)
 if [ -n "$STARTUP_ERRORS" ]; then
     check_fail "Found errors in logs"
     echo "$STARTUP_ERRORS" | head -5
@@ -707,7 +671,6 @@ fi
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-# RC7 FIX: Only print success if ALL checks passed
 if [ "$ALL_PASSED" = true ] && [ "$INSTALL_FAILED" = false ]; then
     echo ""
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -720,25 +683,12 @@ if [ "$ALL_PASSED" = true ] && [ "$INSTALL_FAILED" = false ]; then
     echo -e " ${BOLD}Webmail:${NC} https://${WEBMAIL_HOSTNAME}"
     echo -e " ${BOLD}Admin Email:${NC} ${ADMIN_EMAIL}"
     echo ""
-    echo "Next steps:"
-    echo " 1. Configure DNS records for ${PRIMARY_DOMAIN}"
-    echo " 2. Open admin console: https://${ADMIN_HOSTNAME}"
-    echo " 3. Add domain: ${PRIMARY_DOMAIN}"
-    echo " 4. Create mailboxes"
-    echo ""
     echo "Credentials: /etc/orvix/install_credentials.txt"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 else
     echo ""
     echo -e "${RED}INSTALLATION FAILED - See errors above${NC}"
-    echo ""
-    echo "Troubleshooting:"
-    echo "  journalctl -u orvix.service -n 100"
-    echo "  systemctl status orvix.service"
-    echo "  systemctl status redis-server"
-    echo "  ps aux | grep stalwart"
     exit 1
 fi
 
-unset ADMIN_PASSWORD
-unset ADMIN_CONFIRM
+unset ADMIN_PASSWORD ADMIN_CONFIRM

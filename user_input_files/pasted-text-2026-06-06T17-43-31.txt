@@ -1,0 +1,206 @@
+root@mail:~# systemctl stop orvix 2>/dev/null || true
+systemctl disable orvix 2>/dev/null || true
+
+rm -f /etc/systemd/system/orvix.service
+rm -rf /etc/systemd/system/orvix.service.d
+
+rm -rf /etc/orvix
+rm -rf /var/lib/orvix
+rm -rf /var/log/orvix
+
+rm -f /usr/local/bin/orvix
+rm -f /usr/local/bin/stalwart
+
+systemctl daemon-reload
+root@mail:~# curl -fsSL https://github.com/reachfm/orvix/releases/download/v1.0.6/install.sh -o install.sh
+chmod +x install.sh
+bash install.sh
+Orvix v1.0.6 RC7 Installer
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✓ Detected OS: Ubuntu 22.04.5 LTS
+
+[1/9] Installing system dependencies...
+✓ System dependencies installed
+✓ Redis server installed
+
+[2/9] Configuring Redis...
+✓ Redis server is running
+
+[3/9] Creating system user...
+✓ System user 'orvix' already exists
+
+[4/9] Creating directories...
+✓ Directories created with secure permissions
+
+[5/9] Installing Orvix binary...
+Downloading Orvix v1.0.6...
+✓ Downloaded Orvix binary
+✓ Orvix binary installed at /usr/local/bin/orvix
+
+[6/9] Installing Stalwart mail server...
+Downloading Stalwart v0.16.7 from GitHub...
+✓ Stalwart v0.16.7 installed from GitHub
+
+[7/9] Configuring Orvix...
+
+Domain Configuration:
+Primary Domain [orvix.email]: orvix.email
+Mail Hostname [mail.orvix.email]: mail.orvix.email
+Admin Hostname [admin.orvix.email]: admin.orvix.email
+Webmail Hostname [webmail.orvix.email]: webmail.orvix.email
+Admin Email [admin@orvix.email]: admin@orvix.email
+Admin password (min 8 chars): Confirm admin password: License key (optional, press Enter to skip):
+Testing Stalwart config...
+install.sh: line 512: syntax error near unexpected token `else'
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+INSTALLATION FAILED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Check logs for details:
+  journalctl -u orvix.service -n 100
+  systemctl status orvix.service
+root@mail:~# systemd-analyze verify /etc/systemd/system/orvix.service
+
+cat /etc/systemd/system/orvix.service.d/override.conf
+
+pgrep -a stalwart || true
+
+journalctl -u orvix --no-pager -n 120
+
+cat /etc/orvix/stalwart/config.json
+
+sleep 60
+
+pgrep -a stalwart || true
+/lib/systemd/system/snapd.service:23: Unknown key name 'RestartMode' in section 'Service', ignoring.
+Unit orvix.service not found.
+cat: /etc/systemd/system/orvix.service.d/override.conf: No such file or directory
+Jun 06 17:22:55 mail.orvix.email orvix[4049]: 2026-06-06T17:22:55.065Z        INFO        collaboration/module.go:33        collaboration module stopped
+Jun 06 17:22:55 mail.orvix.email orvix[4049]: 2026-06-06T17:22:55.065Z        INFO        calendar/module.go:33        calendar module stopped
+Jun 06 17:22:55 mail.orvix.email orvix[4049]: 2026-06-06T17:22:55.065Z        INFO        provision/module.go:36        provision-api module stopped
+Jun 06 17:22:55 mail.orvix.email orvix[4049]: 2026-06-06T17:22:55.065Z        INFO        updater/module.go:37        auto-update module stopped
+Jun 06 17:22:55 mail.orvix.email orvix[4049]: 2026-06-06T17:22:55.065Z        INFO        compose/module.go:32        smart-compose module stopped
+Jun 06 17:22:55 mail.orvix.email orvix[4049]: 2026-06-06T17:22:55.065Z        INFO        guardian/module.go:55        guardian-agent module stopped
+Jun 06 17:22:55 mail.orvix.email orvix[4049]: 2026-06-06T17:22:55.065Z        INFO        migration/module.go:37        migration-tool module stopped
+Jun 06 17:22:55 mail.orvix.email orvix[4049]: 2026-06-06T17:22:55.065Z        INFO        dns/module.go:40        dns-automation module stopped
+Jun 06 17:22:55 mail.orvix.email orvix[4049]: 2026-06-06T17:22:55.065Z        INFO        autoheal/monitor.go:80        health monitor stopped
+Jun 06 17:22:55 mail.orvix.email orvix[4049]: 2026-06-06T17:22:55.065Z        INFO        autoheal/module.go:46        auto-heal module stopped
+Jun 06 17:22:55 mail.orvix.email orvix[4049]: 2026-06-06T17:22:55.065Z        INFO        firewall/module.go:34        firewall module stopped
+Jun 06 17:22:55 mail.orvix.email orvix[4049]: 2026-06-06T17:22:55.065Z        INFO        stalwart/process.go:119        stalwart process stopped
+Jun 06 17:22:55 mail.orvix.email orvix[4049]: 2026-06-06T17:22:55.065Z        INFO        orvix/main.go:201        orvix shutdown complete
+Jun 06 17:22:55 mail.orvix.email systemd[1]: orvix.service: Deactivated successfully.
+Jun 06 17:22:55 mail.orvix.email systemd[1]: Stopped Orvix Email Server Platform.
+Jun 06 17:22:55 mail.orvix.email systemd[1]: orvix.service: Consumed 1.490s CPU time.
+Jun 06 17:22:55 mail.orvix.email systemd[1]: /etc/systemd/system/orvix.service.d/override.conf:3: Invalid syntax, ignoring: "ORVIX_ADMIN_PASSWORD=
+Jun 06 17:22:55 mail.orvix.email systemd[1]: /etc/systemd/system/orvix.service.d/override.conf:5: Missing '=', ignoring line.
+Jun 06 17:24:06 mail.orvix.email systemd[1]: /etc/systemd/system/orvix.service.d/override.conf:3: Invalid syntax, ignoring: "ORVIX_ADMIN_PASSWORD=
+Jun 06 17:24:06 mail.orvix.email systemd[1]: /etc/systemd/system/orvix.service.d/override.conf:5: Missing '=', ignoring line.
+Jun 06 17:24:06 mail.orvix.email systemd[1]: Started Orvix Email Server Platform.
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.282Z        INFO        orvix/main.go:49        orvix starting        {"watermark": {"product":"Orvix Email Server Platform","version":"1.0.0","copyright":"Copyright © 2026 Orvix. All rights reserved.","build_time":"development","go_version":"go1.25.0","arch":"linux/amd64","license":"Proprietary - License Required"}, "canary": "ORVIX-1.0.0-development-amd64"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.284Z        INFO        config/config.go:265        configuration loaded        {"driver": "sqlite", "server": "0.0.0.0:80", "log_level": "info"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.285Z        INFO        config/database.go:68        database connection established        {"driver": "sqlite", "max_open": 1, "max_idle": 1}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.437Z        INFO        orvix/main.go:69        database migrations completed
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.437Z        INFO        orvix/main.go:259        feature flags seeded
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.438Z        WARN        license/validator.go:45        license public key not found, using offline mode        {"error": "open : no such file or directory"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.438Z        INFO        license/features.go:41        feature flags updated        {"tier": "smb"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.557Z        INFO        auth/auth.go:109        persisted new JWT signing key        {"path": "/var/lib/orvix/jwt_key.pem"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        orvix/main.go:270        admin credentials not provided via environment variables
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        orvix/main.go:271        set ORVIX_ADMIN_EMAIL and ORVIX_ADMIN_PASSWORD to create admin user
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        modules/registry.go:66        module registered        {"id": "mail-firewall", "version": "1.0.0"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        modules/registry.go:66        module registered        {"id": "auto-heal", "version": "1.0.0"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        modules/registry.go:66        module registered        {"id": "dns-automation", "version": "1.0.0"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        modules/registry.go:66        module registered        {"id": "migration-tool", "version": "1.0.0"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        modules/registry.go:66        module registered        {"id": "guardian-agent", "version": "1.0.0"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        modules/registry.go:66        module registered        {"id": "smart-compose", "version": "1.0.0"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        modules/registry.go:66        module registered        {"id": "auto-update", "version": "1.0.0"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        modules/registry.go:66        module registered        {"id": "provision-api", "version": "1.0.0"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        modules/registry.go:66        module registered        {"id": "calendar", "version": "1.0.0"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        modules/registry.go:66        module registered        {"id": "collaboration", "version": "1.0.0"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        modules/registry.go:66        module registered        {"id": "compliance", "version": "1.0.0"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        modules/registry.go:66        module registered        {"id": "email-intelligence", "version": "1.0.0"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        modules/registry.go:102        initializing module        {"id": "auto-heal", "version": "1.0.0"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        autoheal/monitor.go:58        health check registered        {"name": "database", "severity": "high"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        autoheal/monitor.go:58        health check registered        {"name": "disk", "severity": "medium"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        autoheal/module.go:34        auto-heal module initialized
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        modules/registry.go:102        initializing module        {"id": "auto-update", "version": "1.0.0"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        updater/module.go:27        auto-update module initialized
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        modules/registry.go:102        initializing module        {"id": "calendar", "version": "1.0.0"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        calendar/module.go:28        calendar module initialized
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        modules/registry.go:102        initializing module        {"id": "collaboration", "version": "1.0.0"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        collaboration/module.go:28        collaboration module initialized
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        modules/registry.go:102        initializing module        {"id": "compliance", "version": "1.0.0"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        compliance/module.go:30        compliance module initialized
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        modules/registry.go:102        initializing module        {"id": "dns-automation", "version": "1.0.0"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        dns/module.go:30        dns-automation module initialized
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        modules/registry.go:102        initializing module        {"id": "email-intelligence", "version": "1.0.0"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        intelligence/module.go:28        email-intelligence module initialized
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        modules/registry.go:102        initializing module        {"id": "guardian-agent", "version": "1.0.0"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        guardian/module.go:45        guardian-agent module initialized
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        modules/registry.go:102        initializing module        {"id": "mail-firewall", "version": "1.0.0"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        firewall/module.go:29        firewall module initialized
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        modules/registry.go:102        initializing module        {"id": "migration-tool", "version": "1.0.0"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        migration/module.go:32        migration-tool module initialized
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        modules/registry.go:102        initializing module        {"id": "provision-api", "version": "1.0.0"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        provision/module.go:31        provision-api module initialized
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        modules/registry.go:102        initializing module        {"id": "smart-compose", "version": "1.0.0"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        compose/module.go:27        smart-compose module initialized
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        firewall/module.go:33        firewall module started
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        autoheal/monitor.go:72        health monitor started        {"checks": 2}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        autoheal/module.go:40        auto-heal module started
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        dns/module.go:35        dns-automation module started
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        migration/module.go:36        migration-tool module started
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        guardian/module.go:50        guardian-agent module started
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        compose/module.go:31        smart-compose module started
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        updater/module.go:32        auto-update module started
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        provision/module.go:35        provision-api module started
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        calendar/module.go:32        calendar module started
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        collaboration/module.go:32        collaboration module started
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        compliance/module.go:34        compliance module started
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        intelligence/module.go:32        email-intelligence module started
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        config/redis.go:18        redis client created        {"addr": "127.0.0.1:6379"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.558Z        INFO        stalwart/config.go:44        stalwart configuration generated        {"config_dir": "/etc/orvix/stalwart"}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.560Z        INFO        orvix/main.go:176        admin server starting (HTTP)        {"port": 8080}
+Jun 06 17:24:06 mail.orvix.email orvix[6409]:     _______ __
+Jun 06 17:24:06 mail.orvix.email orvix[6409]:    / ____(_) /_  ___  _____
+Jun 06 17:24:06 mail.orvix.email orvix[6409]:   / /_  / / __ \/ _ \/ ___/
+Jun 06 17:24:06 mail.orvix.email orvix[6409]:  / __/ / / /_/ /  __/ /
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: /_/   /_/_.___/\___/_/          v3.3.0
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: --------------------------------------------------
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: INFO Server started on:         http://127.0.0.1:8080 (bound on host 0.0.0.0 and port 8080)
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: INFO Application name:                 Orvix
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: INFO Total handlers:                 109
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: INFO Prefork:                         Disabled
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: INFO PID:                         6409
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: INFO Total process count:         1
+Jun 06 17:24:06 mail.orvix.email orvix[6409]: 2026-06-06T17:24:06.562Z        INFO        stalwart/process.go:80        stalwart process started        {"pid": "6418", "config": "/etc/orvix/stalwart/config.json"}
+Jun 06 17:24:06 mail.orvix.email orvix[6418]: ⚠️ Startup failed: Failed to parse data store settings at /etc/orvix/stalwart/config.json: missing field `@type` at line 12 column 1
+Jun 06 17:40:55 mail.orvix.email systemd[1]: Stopping Orvix Email Server Platform...
+Jun 06 17:40:55 mail.orvix.email orvix[6409]: 2026-06-06T17:40:55.198Z        INFO        orvix/main.go:187        shutting down orvix...
+Jun 06 17:40:55 mail.orvix.email orvix[6409]: 2026-06-06T17:40:55.198Z        INFO        intelligence/module.go:33        email-intelligence module stopped
+Jun 06 17:40:55 mail.orvix.email orvix[6409]: 2026-06-06T17:40:55.199Z        INFO        compliance/module.go:35        compliance module stopped
+Jun 06 17:40:55 mail.orvix.email orvix[6409]: 2026-06-06T17:40:55.199Z        INFO        collaboration/module.go:33        collaboration module stopped
+Jun 06 17:40:55 mail.orvix.email orvix[6409]: 2026-06-06T17:40:55.199Z        INFO        calendar/module.go:33        calendar module stopped
+Jun 06 17:40:55 mail.orvix.email orvix[6409]: 2026-06-06T17:40:55.199Z        INFO        provision/module.go:36        provision-api module stopped
+Jun 06 17:40:55 mail.orvix.email orvix[6409]: 2026-06-06T17:40:55.199Z        INFO        updater/module.go:37        auto-update module stopped
+Jun 06 17:40:55 mail.orvix.email orvix[6409]: 2026-06-06T17:40:55.199Z        INFO        compose/module.go:32        smart-compose module stopped
+Jun 06 17:40:55 mail.orvix.email orvix[6409]: 2026-06-06T17:40:55.199Z        INFO        guardian/module.go:55        guardian-agent module stopped
+Jun 06 17:40:55 mail.orvix.email orvix[6409]: 2026-06-06T17:40:55.199Z        INFO        migration/module.go:37        migration-tool module stopped
+Jun 06 17:40:55 mail.orvix.email orvix[6409]: 2026-06-06T17:40:55.199Z        INFO        dns/module.go:40        dns-automation module stopped
+Jun 06 17:40:55 mail.orvix.email orvix[6409]: 2026-06-06T17:40:55.199Z        INFO        autoheal/monitor.go:80        health monitor stopped
+Jun 06 17:40:55 mail.orvix.email orvix[6409]: 2026-06-06T17:40:55.199Z        INFO        autoheal/module.go:46        auto-heal module stopped
+Jun 06 17:40:55 mail.orvix.email orvix[6409]: 2026-06-06T17:40:55.199Z        INFO        firewall/module.go:34        firewall module stopped
+Jun 06 17:40:55 mail.orvix.email orvix[6409]: 2026-06-06T17:40:55.199Z        INFO        stalwart/process.go:124        stalwart process stopped
+Jun 06 17:40:55 mail.orvix.email orvix[6409]: 2026-06-06T17:40:55.199Z        INFO        orvix/main.go:201        orvix shutdown complete
+Jun 06 17:40:55 mail.orvix.email systemd[1]: orvix.service: Deactivated successfully.
+Jun 06 17:40:55 mail.orvix.email systemd[1]: Stopped Orvix Email Server Platform.
+Jun 06 17:40:55 mail.orvix.email systemd[1]: /etc/systemd/system/orvix.service.d/override.conf:3: Invalid syntax, ignoring: "ORVIX_ADMIN_PASSWORD=
+Jun 06 17:40:55 mail.orvix.email systemd[1]: /etc/systemd/system/orvix.service.d/override.conf:5: Missing '=', ignoring line.
+{
+  "@type": "RocksDb",
+  "path": "/var/lib/orvix/stalwart/db"
+}
+
+
+^C
+root@mail:~#
