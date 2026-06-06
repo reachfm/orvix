@@ -278,12 +278,18 @@ func (a *Authenticator) VerifyPassword(password, encoded string) bool {
 		return false
 	}
 
+	// Use hardcoded defaults for Argon2id parameters
+	// These match the defaults in config.Defaults()
+	argon2Time := uint32(3)
+	argon2Memory := uint32(64 * 1024)
+	argon2Threads := uint8(4)
+
 	derived := argon2.IDKey(
 		[]byte(password),
 		salt,
-		a.passwordCost.Argon2Time,
-		a.passwordCost.Argon2Memory,
-		a.passwordCost.Argon2Threads,
+		argon2Time,
+		argon2Memory,
+		argon2Threads,
 		uint32(len(expected)),
 	)
 

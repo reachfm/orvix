@@ -81,6 +81,8 @@ func main() {
 		logger.Fatal("failed to create authenticator", zap.Error(err))
 	}
 
+	seedAdminUser(db, authenticator, logger)
+
 	stalwartClient := stalwart.NewClient(cfg.Stalwart.APIURL, cfg.Stalwart.APIKey, logger)
 
 	registerModules(reg, cfg, db, logger, featureFlags)
@@ -254,4 +256,49 @@ func seedFeatureFlags(db *gorm.DB, logger *zap.Logger) {
 	}
 
 	logger.Info("feature flags seeded")
+}
+
+func seedAdminUser(db *gorm.DB, authenticator *auth.Authenticator, logger *zap.Logger) {
+	// Check if admin already exists
+	var count int64
+	db.Model(&models.User{}).Where("email = ?", "admin@orvix.local").Count(&count)
+	if count > 0 {
+		logger.Info("admin user already exists")
+		return
+	}
+
+	// Create default admin user
+	hashedPassword, err := authenticator.HashPassword("admin123")
+	if err != nil {
+		logger.Warn("failed to hash admin password", zap.Error(err))
+		return
+	}
+
+	// Create tenant first
+	tenant := &models.Tenant{
+		Name:   "Default Tenant",
+		Slug:   "default",
+		Domain: "orvix.local",
+		Plan:   "enterprise",
+		Active: true,
+	}
+	if err := db.Create(tenant).Error; err != nil {
+		logger.Warn("failed to create default tenant", zap.Error(err))
+	}
+
+	admin := &models.User{
+		Email:          "admin@orvix.local",
+		PasswordHash:   hashedPassword,
+		Role:           "admin",
+		TenantID:       &tenant.ID,
+		Active:         true,
+		EmailVerified:  true,
+	}
+
+	if err := db.Create(admin).Error; err != nil {
+		logger.Warn("failed to create admin user", zap.Error(err))
+		return
+	}
+
+	logger.Info("admin user created", zap.String("email", admin.Email), zap.String("password", "admin123"))
 }

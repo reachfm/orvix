@@ -1,6 +1,8 @@
 package models
 
 import (
+	"context"
+	"fmt"
 	"time"
 
 	"github.com/orvix/orvix/internal/config"
@@ -234,6 +236,59 @@ type UpdateHistory struct {
 	BackupPath  string `gorm:"type:text" json:"backup_path"`
 }
 
+// User represents a user in the system.
+type User struct {
+	Common
+	Email         string    `gorm:"uniqueIndex;not null" json:"email"`
+	PasswordHash  string    `gorm:"not null" json:"-"`
+	Role          string    `gorm:"not null;default:'user'" json:"role"`
+	TenantID      *uint     `gorm:"index" json:"tenant_id,omitempty"`
+	Active        bool      `gorm:"not null;default:true" json:"active"`
+	EmailVerified bool      `gorm:"not null;default:false" json:"email_verified"`
+	LastLogin     *time.Time `json:"last_login"`
+}
+
+// Domain represents a mail domain.
+type Domain struct {
+	Common
+	TenantID     uint    `gorm:"index;not null" json:"tenant_id"`
+	Domain       string  `gorm:"uniqueIndex;not null" json:"domain"`
+	DKIMSelector string  `gorm:"default:'mail'" json:"dkim_selector"`
+	SPFRecord    string  `gorm:"type:text" json:"spf_record"`
+	DMARCRecord  string  `gorm:"type:text" json:"dmarc_record"`
+	DKIMRecord   string  `gorm:"type:text" json:"dkim_record"`
+	MXRecord     string  `gorm:"type:text" json:"mx_record"`
+	Status       string  `gorm:"not null;default:'pending'" json:"status"`
+	IsVerified   bool    `gorm:"not null;default:false" json:"is_verified"`
+	IsPrimary    bool    `gorm:"not null;default:false" json:"is_primary"`
+}
+
+// Mailbox represents a mail account.
+type Mailbox struct {
+	Common
+	TenantID    uint    `gorm:"index;not null" json:"tenant_id"`
+	DomainID    uint    `gorm:"index;not null" json:"domain_id"`
+	LocalPart   string  `gorm:"not null" json:"local_part"`
+	PasswordHash string `gorm:"not null" json:"-"`
+	DisplayName string  `json:"display_name"`
+	IsAlias     bool    `gorm:"not null;default:false" json:"is_alias"`
+	IsCatchall  bool    `gorm:"not null;default:false" json:"is_catchall"`
+	IsActive    bool    `gorm:"not null;default:true" json:"is_active"`
+	QuotaMB     int     `gorm:"not null;default:1024" json:"quota_mb"`
+	SendLimit   int     `gorm:"not null;default:500" json:"send_limit"`
+}
+
+// APIKey represents an API key for programmatic access.
+type APIKey struct {
+	Common
+	UserID      uint       `gorm:"index;not null" json:"user_id"`
+	KeyHash     string     `gorm:"uniqueIndex;not null" json:"-"`
+	Name        string     `gorm:"not null" json:"name"`
+	ExpiresAt   *time.Time `json:"expires_at"`
+	LastUsedAt  *time.Time `json:"last_used_at"`
+	Active      bool       `gorm:"not null;default:true" json:"active"`
+}
+
 // MigrateAll auto-migrates all models.
 func MigrateAll(db *gorm.DB) error {
 	return db.AutoMigrate(
@@ -258,11 +313,19 @@ func MigrateAll(db *gorm.DB) error {
 
 // MigrateAllRaw uses raw SQL for SQLite compatibility (RC2 FIX)
 // AutoMigrate uses postgres-specific queries that don't work with SQLite
+// Uses raw database/sql directly to avoid GORM Transaction issues with modernc.org/sqlite
 func MigrateAllRaw(db *gorm.DB) error {
-	// modernc.org/sqlite requires explicit transaction for writes
-	return db.Transaction(func(tx *gorm.DB) error {
-		// Create all tables using raw SQL compatible with SQLite
-		sqls := []string{
+	// Get underlying sql.DB from GORM
+	sqlDB, err := db.DB()
+	if err != nil {
+		return fmt.Errorf("failed to get underlying sql.DB: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Create all tables using raw SQL compatible with SQLite
+	sqls := []string{
 		`CREATE TABLE IF NOT EXISTS licenses (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			created_at DATETIME NOT NULL,
@@ -467,16 +530,78 @@ func MigrateAllRaw(db *gorm.DB) error {
 			status TEXT NOT NULL,
 			backup_path TEXT
 		)`,
+		`CREATE TABLE IF NOT EXISTS users (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			email TEXT NOT NULL UNIQUE,
+			password_hash TEXT NOT NULL,
+			role TEXT NOT NULL DEFAULT 'user',
+			tenant_id INTEGER,
+			active INTEGER NOT NULL DEFAULT 1,
+			email_verified INTEGER NOT NULL DEFAULT 0,
+			last_login DATETIME,
+			UNIQUE(email, deleted_at)
+		)`,
+		`CREATE TABLE IF NOT EXISTS domains (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			tenant_id INTEGER NOT NULL,
+			domain TEXT NOT NULL,
+			dkim_selector TEXT DEFAULT 'mail',
+			spf_record TEXT,
+			dmarc_record TEXT,
+			dkim_record TEXT,
+			mx_record TEXT,
+			status TEXT NOT NULL DEFAULT 'pending',
+			is_verified INTEGER NOT NULL DEFAULT 0,
+			is_primary INTEGER NOT NULL DEFAULT 0,
+			UNIQUE(domain, deleted_at)
+		)`,
+		`CREATE TABLE IF NOT EXISTS mailboxes (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			tenant_id INTEGER NOT NULL,
+			domain_id INTEGER NOT NULL,
+			local_part TEXT NOT NULL,
+			password_hash TEXT NOT NULL,
+			display_name TEXT,
+			is_alias INTEGER NOT NULL DEFAULT 0,
+			is_catchall INTEGER NOT NULL DEFAULT 0,
+			is_active INTEGER NOT NULL DEFAULT 1,
+			quota_mb INTEGER NOT NULL DEFAULT 1024,
+			send_limit INTEGER NOT NULL DEFAULT 500,
+			UNIQUE(domain_id, local_part, deleted_at)
+		)`,
+		`CREATE TABLE IF NOT EXISTS api_keys (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			user_id INTEGER NOT NULL,
+			key_hash TEXT NOT NULL UNIQUE,
+			name TEXT NOT NULL,
+			expires_at DATETIME,
+			last_used_at DATETIME,
+			active INTEGER NOT NULL DEFAULT 1
+		)`,
 	}
 
+	// Execute table creation statements
 	for _, sql := range sqls {
-			if err := tx.Exec(sql).Error; err != nil {
-				return err
-			}
+		_, err := sqlDB.ExecContext(ctx, sql)
+		if err != nil {
+			return fmt.Errorf("failed to execute table creation: %w", err)
 		}
+	}
 
-		// Create indexes
-		indexes := []string{
+	// Create indexes
+	indexes := []string{
 		`CREATE INDEX IF NOT EXISTS idx_licenses_deleted_at ON licenses(deleted_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_feature_flags_deleted_at ON feature_flags(deleted_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_module_versions_deleted_at ON module_versions(deleted_at)`,
@@ -498,16 +623,39 @@ func MigrateAllRaw(db *gorm.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_s_s_o_configs_tenant_id ON s_s_o_configs(tenant_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_alert_configs_tenant_id ON alert_configs(tenant_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_tenants_reseller_id ON tenants(reseller_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_users_deleted_at ON users(deleted_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)`,
+		`CREATE INDEX IF NOT EXISTS idx_domains_deleted_at ON domains(deleted_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_domains_tenant_id ON domains(tenant_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_mailboxes_deleted_at ON mailboxes(deleted_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_mailboxes_tenant_id ON mailboxes(tenant_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_mailboxes_domain_id ON mailboxes(domain_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_api_keys_deleted_at ON api_keys(deleted_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_api_keys_user_id ON api_keys(user_id)`,
 	}
 
+	// Execute index creation statements
 	for _, idx := range indexes {
-			if err := tx.Exec(idx).Error; err != nil {
-				// Ignore errors for indexes that might already exist
-				continue
-			}
+		_, err := sqlDB.ExecContext(ctx, idx)
+		if err != nil {
+			// Log but don't fail on index creation (indexes might already exist)
+			fmt.Printf("WARN: index creation failed (may already exist): %v\n", err)
 		}
+	}
 
-		return nil
-	})
+	// Verify critical tables exist
+	criticalTables := []string{"licenses", "feature_flags", "sessions", "audit_logs", "users", "domains", "mailboxes", "api_keys"}
+	for _, table := range criticalTables {
+		var count int
+		err := sqlDB.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&count)
+		if err != nil {
+			return fmt.Errorf("failed to verify table %s: %w", table, err)
+		}
+		if count == 0 {
+			return fmt.Errorf("critical table '%s' was not created", table)
+		}
+	}
+
+	return nil
 }
 
