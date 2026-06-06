@@ -26,7 +26,7 @@ func (m *Module) Init(cfg *config.Config, db *gorm.DB) error {
 	m.db = db
 	m.logger = cfg.GetLogger()
 	m.zke = NewZeroKnowledgeEncryption(db)
-	_ = db.AutoMigrate(&LegalHold{}, &RetentionPolicy{})
+	// RC2 FIX: Skip AutoMigrate - tables are created with raw SQL
 	m.logger.Info("compliance module initialized")
 	return nil
 }

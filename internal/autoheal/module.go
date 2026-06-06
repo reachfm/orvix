@@ -29,7 +29,7 @@ func (m *Module) Init(cfg *config.Config, db *gorm.DB) error {
 	m.logger = cfg.GetLogger()
 	m.monitor = NewMonitor(m.logger)
 	m.monitor.SetDB(db)
-	_ = db.AutoMigrate(&HealHistory{})
+	// RC2 FIX: Skip AutoMigrate - tables are created with raw SQL in models.MigrateAllRaw
 	m.registerChecks()
 	m.logger.Info("auto-heal module initialized")
 	return nil

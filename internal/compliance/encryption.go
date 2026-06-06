@@ -34,7 +34,7 @@ type EncryptedBlob struct {
 
 // NewZeroKnowledgeEncryption creates a new ZKE service.
 func NewZeroKnowledgeEncryption(db *gorm.DB) *ZeroKnowledgeEncryption {
-	_ = db.AutoMigrate(&EncryptedBlob{})
+	// RC2 FIX: Skip AutoMigrate - tables are created with raw SQL
 	return &ZeroKnowledgeEncryption{db: db}
 }
 

@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/gofiber/fiber/v3"
@@ -60,7 +61,9 @@ func main() {
 		logger.Fatal("failed to connect to database", zap.Error(err))
 	}
 
-	if err := models.MigrateAll(db); err != nil {
+	// RC2 FIX: Use raw SQL migrations instead of AutoMigrate for SQLite compatibility
+	// AutoMigrate uses postgres-specific queries that don't work with SQLite
+	if err := models.MigrateAllRaw(db); err != nil {
 		logger.Fatal("failed to run migrations", zap.Error(err))
 	}
 	logger.Info("database migrations completed")
@@ -78,6 +81,8 @@ func main() {
 	if err != nil {
 		logger.Fatal("failed to create authenticator", zap.Error(err))
 	}
+
+	seedAdminUser(db, authenticator, logger)
 
 	stalwartClient := stalwart.NewClient(cfg.Stalwart.APIURL, cfg.Stalwart.APIKey, logger)
 
@@ -252,4 +257,70 @@ func seedFeatureFlags(db *gorm.DB, logger *zap.Logger) {
 	}
 
 	logger.Info("feature flags seeded")
+}
+
+// seedAdminUser creates the initial admin user if ORVIX_ADMIN_EMAIL and ORVIX_ADMIN_PASSWORD
+// environment variables are set. This ensures no default credentials are shipped.
+func seedAdminUser(db *gorm.DB, authenticator *auth.Authenticator, logger *zap.Logger) {
+	// RC3 FIX: No hardcoded credentials. Admin must be provided via environment variables.
+	adminEmail := os.Getenv("ORVIX_ADMIN_EMAIL")
+	adminPassword := os.Getenv("ORVIX_ADMIN_PASSWORD")
+
+	if adminEmail == "" || adminPassword == "" {
+		logger.Info("admin credentials not provided via environment variables")
+		logger.Info("set ORVIX_ADMIN_EMAIL and ORVIX_ADMIN_PASSWORD to create admin user")
+		return
+	}
+
+	// Check if admin already exists
+	var count int64
+	db.Model(&models.User{}).Where("email = ?", adminEmail).Count(&count)
+	if count > 0 {
+		logger.Info("admin user already exists", zap.String("email", adminEmail))
+		return
+	}
+
+	// Hash the provided password
+	hashedPassword, err := authenticator.HashPassword(adminPassword)
+	if err != nil {
+		logger.Warn("failed to hash admin password", zap.Error(err))
+		return
+	}
+
+	// Extract domain from email for tenant
+	parts := strings.Split(adminEmail, "@")
+	var tenantDomain string
+	if len(parts) == 2 {
+		tenantDomain = parts[1]
+	} else {
+		tenantDomain = "local"
+	}
+
+	// Create tenant first
+	tenant := &models.Tenant{
+		Name:   tenantDomain,
+		Slug:   strings.ReplaceAll(tenantDomain, ".", "-"),
+		Domain: tenantDomain,
+		Plan:   "enterprise",
+		Active: true,
+	}
+	if err := db.Create(tenant).Error; err != nil {
+		logger.Warn("failed to create tenant", zap.Error(err))
+	}
+
+	admin := &models.User{
+		Email:          adminEmail,
+		PasswordHash:   hashedPassword,
+		Role:           "admin",
+		TenantID:       &tenant.ID,
+		Active:         true,
+		EmailVerified:  true,
+	}
+
+	if err := db.Create(admin).Error; err != nil {
+		logger.Warn("failed to create admin user", zap.Error(err))
+		return
+	}
+
+	logger.Info("admin user created", zap.String("email", adminEmail))
 }

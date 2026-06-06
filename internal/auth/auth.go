@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
-	"crypto/subtle"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
@@ -19,7 +18,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/orvix/orvix/internal/config"
 	"go.uber.org/zap"
-	"golang.org/x/crypto/argon2"
+	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
 
@@ -242,52 +241,19 @@ func (a *Authenticator) InvalidateOtherSessions(userID uint, currentTokenHash st
 	return nil
 }
 
-// HashPassword hashes a password using Argon2id.
+// HashPassword hashes a password using bcrypt.
 func (a *Authenticator) HashPassword(password string) (string, error) {
-	salt := make([]byte, 16)
-	if _, err := rand.Read(salt); err != nil {
-		return "", fmt.Errorf("failed to generate salt: %w", err)
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return "", fmt.Errorf("failed to hash password: %w", err)
 	}
-
-	hash := argon2.IDKey(
-		[]byte(password),
-		salt,
-		a.passwordCost.Argon2Time,
-		a.passwordCost.Argon2Memory,
-		a.passwordCost.Argon2Threads,
-		32,
-	)
-
-	return hex.EncodeToString(salt) + ":" + hex.EncodeToString(hash), nil
+	return string(hash), nil
 }
 
-// VerifyPassword verifies a password against an Argon2id hash.
+// VerifyPassword verifies a password against bcrypt hash.
 func (a *Authenticator) VerifyPassword(password, encoded string) bool {
-	parts := splitHash(encoded)
-	if parts == nil {
-		return false
-	}
-
-	salt, err := hex.DecodeString(parts[0])
-	if err != nil {
-		return false
-	}
-
-	expected, err := hex.DecodeString(parts[1])
-	if err != nil {
-		return false
-	}
-
-	derived := argon2.IDKey(
-		[]byte(password),
-		salt,
-		a.passwordCost.Argon2Time,
-		a.passwordCost.Argon2Memory,
-		a.passwordCost.Argon2Threads,
-		uint32(len(expected)),
-	)
-
-	return subtle.ConstantTimeCompare(derived, expected) == 1
+	err := bcrypt.CompareHashAndPassword([]byte(encoded), []byte(password))
+	return err == nil
 }
 
 func splitHash(encoded string) []string {

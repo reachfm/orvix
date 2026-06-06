@@ -80,7 +80,7 @@ func (h *Handler) MigrationStart(c fiber.Ctx) error {
 		SourceUser: req.SourceUser, Provider: req.Provider,
 		TargetUser: req.TargetUser, Status: "pending",
 	}
-	h.db.AutoMigrate(&migrationJobRow{})
+	// RC2 FIX: Skip AutoMigrate - tables are created with raw SQL
 	h.db.Create(&job)
 	h.writeAuditLog(c, "migration.start", "job:"+fmt.Sprint(job.ID))
 	return c.Status(201).JSON(fiber.Map{"status": "started", "id": job.ID})

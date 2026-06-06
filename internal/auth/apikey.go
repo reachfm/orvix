@@ -34,7 +34,7 @@ type APIKeyManager struct {
 
 // NewAPIKeyManager creates a new API key manager.
 func NewAPIKeyManager(db *gorm.DB, logger *zap.Logger) *APIKeyManager {
-	_ = db.AutoMigrate(&APIKeyRecord{})
+	// RC2 FIX: Skip AutoMigrate - tables are created with raw SQL
 	return &APIKeyManager{
 		db:     db,
 		logger: logger,

@@ -25,7 +25,7 @@ type CSRFManager struct {
 
 // NewCSRFManager creates a new CSRF manager and migrates its table.
 func NewCSRFManager(db *gorm.DB, logger *zap.Logger, secure bool) *CSRFManager {
-	_ = db.AutoMigrate(&CSRFRecord{})
+	// RC2 FIX: Skip AutoMigrate - tables are created with raw SQL
 	return &CSRFManager{
 		db:     db,
 		logger: logger,
