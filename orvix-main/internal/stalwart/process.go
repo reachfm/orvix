@@ -40,6 +40,7 @@ func NewProcessManager(binPath, dataDir, configDir, logDir string, logger *zap.L
 }
 
 // Start launches the Stalwart subprocess.
+// RC5 FIX: Stalwart v0.16+ uses --config pointing to config.json (no --data arg)
 func (pm *ProcessManager) Start(ctx context.Context) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -59,10 +60,13 @@ func (pm *ProcessManager) Start(ctx context.Context) error {
 		return fmt.Errorf("stalwart binary not found: %w", err)
 	}
 
+	// RC5 FIX: v0.16 uses --config pointing to config.json (JSON format, not YAML)
+	// Data directory is specified INSIDE config.json, not as --data argument
+	configFile := filepath.Join(pm.configDir, "config.json")
+
 	ctx, pm.cancel = context.WithCancel(ctx)
 	pm.cmd = exec.CommandContext(ctx, binPath,
-		"--data", pm.dataDir,
-		"--config", pm.configDir,
+		"--config", configFile,
 	)
 
 	pm.cmd.Stdout = os.Stdout
@@ -75,6 +79,7 @@ func (pm *ProcessManager) Start(ctx context.Context) error {
 	pm.running = true
 	pm.logger.Info("stalwart process started",
 		zap.String("pid", fmt.Sprintf("%d", pm.cmd.Process.Pid)),
+		zap.String("config", configFile),
 	)
 
 	go pm.monitor(ctx)

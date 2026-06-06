@@ -9,8 +9,8 @@
 | npm | 10+ | Package management |
 | PostgreSQL 16 | 16+ | Production database (optional) |
 | SQLite 3 | 3.x | Development database (default) |
-| Redis 7 | 7.x | Session caching, rate limiting (optional) |
-| Stalwart | 0.10.x | Mail engine (REST API) - download from https://stalw.art/download |
+| Redis 7 | 7.x | Session caching, rate limiting (installed by RC5) |
+| Stalwart | 0.16.7 | Mail engine (REST API) - downloaded by installer |
 
 ## Environment Variables
 
@@ -57,8 +57,9 @@ Orvix requires Stalwart Mail Server as an external binary.
 - **Download**: https://stalw.art/download
 - **Placement**: `stalwart-bin/stalwart`, `/usr/local/bin/stalwart`, or system PATH
 - **Not embedded**: The Stalwart binary is NOT embedded in the Orvix binary.
-- **Version**: 0.10.x recommended
+- **Version**: 0.16.7 (RC5 installer downloads automatically)
 - **Orvix manages**: Starting, stopping, health checking, and config generation
+- **Config format**: v0.16+ uses JSON config.json (not YAML)
 
 ## How to Run in Development
 
@@ -68,13 +69,19 @@ Orvix requires Stalwart Mail Server as an external binary.
 
 The release package is at:
 ```
-release/orvix-v1.0.3-linux-amd64.tar.gz
+release/orvix-v1.0.4-linux-amd64.tar.gz
 ```
 
 - **Git Commit:** (pending push)
-- **GitHub Release:** https://github.com/reachfm/orvix/releases/tag/v1.0.3
-- **Archive SHA256:** `aed4f97924b3e9315afbe9185600e6d3b8a3cecdff8698314090e768499099bb`
-- **Binary SHA256:** `1cc564f2183ee9ad4d07e3fa4515eb2e22e8caecdfb8a6215fb817f78b7287f5`
+- **GitHub Release:** https://github.com/reachfm/orvix/releases/tag/v1.0.4
+- **Archive SHA256:** `48be25d12c7d9eb257680088f2d74bb6aa24250b7ac6aee5b9b305f11bd3f955`
+- **Binary SHA256:** `e7ad824523dea77858b11dfcc06793bb868a1141bf1f95dd9f511b4317b1138b`
+
+### RC5 Fixes
+- **Systemd hardening**: Added ReadWritePaths for /etc/orvix, /var/lib/orvix, /var/log/orvix
+- **Stalwart v0.16.7**: Fixed config.json format (JSON not YAML), removed --data argument
+- **Redis**: Added redis-server installation and enable
+- **Healthcheck**: Comprehensive post-install validation
 
 ### RC4 Fixes
 - **Stalwart URL**: Fixed 404 error, uses correct GitHub URL
@@ -84,8 +91,8 @@ release/orvix-v1.0.3-linux-amd64.tar.gz
 ### RC3 Security Changes
 - **REMOVED**: Hardcoded default credentials (admin@orvix.local / admin123)
 - Admin credentials now provided via environment variables
-- Installer shows "Orvix v1.0.3 RC4 Installer" banner
-- Installer downloads from GitHub releases (https://github.com/reachfm/orvix/releases/download/v1.0.3/)
+- Installer shows "Orvix v1.0.4 RC5 Installer" banner
+- Installer downloads from GitHub releases (https://github.com/reachfm/orvix/releases/download/v1.0.4/)
 
 ## How to Install on a Server (One-Command)
 

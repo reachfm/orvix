@@ -1,22 +1,24 @@
 # Orvix Security Audit — Updated
 
 ## Release Status
-- **RC4 Release**: `release/orvix-v1.0.3-linux-amd64.tar.gz`
-- Archive SHA256: `aed4f97924b3e9315afbe9185600e6d3b8a3cecdff8698314090e768499099bb`
-- Binary SHA256: `1cc564f2183ee9ad4d07e3fa4515eb2e22e8caecdfb8a6215fb817f78b7287f5`
+- **RC5 Release**: `release/orvix-v1.0.4-linux-amd64.tar.gz`
+- Archive SHA256: `48be25d12c7d9eb257680088f2d74bb6aa24250b7ac6aee5b9b305f11bd3f955`
+- Binary SHA256: `e7ad824523dea77858b11dfcc06793bb868a1141bf1f95dd9f511b4317b1138b`
 - Git Commit: (pending push)
-- GitHub Release: https://github.com/reachfm/orvix/releases/tag/v1.0.3
-- Installer: Shows "Orvix v1.0.3 RC4 Installer" banner
-- Download URL: https://github.com/reachfm/orvix/releases/download/v1.0.3/
+- GitHub Release: https://github.com/reachfm/orvix/releases/tag/v1.0.4
+- Installer: Shows "Orvix v1.0.4 RC5 Installer" banner
+- Download URL: https://github.com/reachfm/orvix/releases/download/v1.0.4/
 - VPS test plan: `VPS_TEST_PLAN.md`
 - Release audit: `RELEASE_AUDIT.md`
 - Installer: Production-grade for Ubuntu 22.04+/Debian 12+
 - Stalwart: Managed External — downloaded by installer (v0.16.7)
+- Redis: Installed and enabled by installer
 
-### RC4 Critical Fixes
-- **Stalwart URL**: Fixed 404 error, now uses correct GitHub URL
-- **Systemd directory**: Fixed missing directory before writing override.conf
-- **Password prompt**: Fixed loop issue, added confirmation step
+### RC5 Critical Fixes
+- **Systemd hardening**: Added ReadWritePaths for /etc/orvix, /var/lib/orvix, /var/log/orvix
+- **Stalwart v0.16.7**: Fixed config.json format, removed --data arg
+- **Redis**: Added redis-server installation and enable
+- **Healthcheck**: Comprehensive post-install validation added
 
 ### RC3 Security Fixes
 - **CRITICAL**: Removed hardcoded default credentials (admin@orvix.local / admin123)

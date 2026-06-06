@@ -1,9 +1,9 @@
 # Build Progress
 
-## Last Updated: 2026-06-06
+## Last Updated: 2026-06-07
 ## Current Phase: All Phases Complete
-## Current Task: RC3 Release Validation
-## Done: All MVP Build Order tasks resolved + RC3 security fixes
+## Current Task: RC5 Release Validation
+## Done: All MVP Build Order tasks resolved + RC5 runtime fixes
 
 ## Completed
 - [x] Phase 1: Foundation — Project structure, config, database, migrations, logging, metrics, license, watermarking
@@ -14,11 +14,11 @@
 - [x] Phase 6: Advanced Features — Calendar (backend), ZKE, Collaboration, LDAP, Backup/Restore, Reseller, White Label, Compliance Center
 - [x] Phase 7: Hardening — Security audit complete, installer, systemd, API docs in HANDOFF.md
 
-## RC4 Critical Fixes (v1.0.3)
-- [x] **Stalwart URL**: Fixed 404 error, uses correct GitHub URL (stalwartlabs/stalwart v0.16.7)
-- [x] **Systemd directory**: Fixed missing directory before writing override.conf
-- [x] **Password prompt**: Fixed loop issue, added confirmation step
-- [x] Installer now fails with clear message if Stalwart download fails
+## RC5 Critical Fixes (v1.0.4)
+- [x] **Systemd hardening**: Added ReadWritePaths for /etc/orvix, /var/lib/orvix, /var/log/orvix
+- [x] **Stalwart v0.16.7**: Fixed config.json format (JSON not YAML), removed --data argument
+- [x] **Redis**: Added redis-server installation and enable
+- [x] **Healthcheck**: Comprehensive post-install validation added
 
 ## RC3 Security Release (v1.0.2)
 - [x] **CRITICAL**: Removed hardcoded default credentials (admin@orvix.local / admin123)

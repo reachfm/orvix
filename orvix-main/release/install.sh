@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Orvix RC4 Installer
-# Usage: curl -fsSL https://github.com/reachfm/orvix/releases/download/v1.0.3/install.sh | bash
+# Orvix RC5 Installer
+# Usage: curl -fsSL https://github.com/reachfm/orvix/releases/download/v1.0.4/install.sh | bash
 # Or:    bash install.sh
 
-# RC4: Fixed Stalwart URL, systemd directory, password confirmation
-ORVIX_VERSION="${ORVIX_VERSION:-1.0.3}"
+# RC5 FIXES:
+# - Systemd hardening: Added ReadWritePaths for /etc/orvix, /var/lib/orvix, /var/log/orvix
+# - Stalwart v0.16.7: Uses config.json (not stalwart.yaml), correct --config arg
+# - Redis: Install and enable redis-server
+# - Healthcheck: Comprehensive post-install validation
+
+ORVIX_VERSION="${ORVIX_VERSION:-1.0.4}"
 ORVIX_RELEASE_URL="${ORVIX_RELEASE_URL:-https://github.com/reachfm/orvix/releases/download/v${ORVIX_VERSION}}"
 STALWART_VERSION="${STALWART_VERSION:-0.16.7}"
 
@@ -19,7 +24,7 @@ NC='\033[0m'
 # ──────────────────────────────────────
 # Pre-flight checks
 # ──────────────────────────────────────
-echo -e "${BOLD}Orvix v${ORVIX_VERSION} RC4 Installer${NC}"
+echo -e "${BOLD}Orvix v${ORVIX_VERSION} RC5 Installer${NC}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -44,10 +49,10 @@ case "$OS" in
 esac
 
 # ──────────────────────────────────────
-# Functions (RC4 FIX: All validation fixes)
+# Functions (RC5 FIX: All validation fixes)
 # ──────────────────────────────────────
 
-# RC4 FIX: Domain validation function
+# RC5 FIX: Domain validation function
 prompt_domain() {
     local domain=""
     while true; do
@@ -66,7 +71,7 @@ prompt_domain() {
     echo "$domain"
 }
 
-# RC4 FIX: Email validation function
+# RC5 FIX: Email validation function
 prompt_email() {
     local email=""
     while true; do
@@ -85,7 +90,7 @@ prompt_email() {
     echo "$email"
 }
 
-# RC4 FIX: Password validation with confirmation
+# RC5 FIX: Password validation with confirmation
 prompt_password() {
     local password=""
     local confirm=""
@@ -96,7 +101,7 @@ prompt_password() {
             echo -e "${RED}Error: Password must be at least 12 characters.${NC}"
             continue
         fi
-        # RC4 FIX: Add confirmation step
+        # RC5 FIX: Add confirmation step
         read -rsp "Confirm admin password: " confirm
         echo ""
         if [ "$password" != "$confirm" ]; then
@@ -139,25 +144,52 @@ CURRENT_STEP="preflight"
 
 # ──────────────────────────────────────
 # Step 1: Install system dependencies
+# RC5 FIX: Added redis-server
 # ──────────────────────────────────────
 CURRENT_STEP="dependencies"
 echo ""
-echo -e "${BOLD}[1/8] Installing system dependencies...${NC}"
+echo -e "${BOLD}[1/9] Installing system dependencies...${NC}"
 
 apt-get update -qq
 apt-get install -y -qq \
     curl wget tar gzip \
     ca-certificates \
-    systemd
+    systemd \
+    redis-server
 
 echo -e "${GREEN}✓${NC} System dependencies installed"
+echo -e "${GREEN}✓${NC} Redis server installed"
 
 # ──────────────────────────────────────
-# Step 2: Create system user and groups
+# Step 2: Start and enable Redis
+# RC5 FIX: Ensure Redis is running
+# ──────────────────────────────────────
+CURRENT_STEP="redis"
+echo ""
+echo -e "${BOLD}[2/9] Configuring Redis...${NC}"
+
+# Start Redis
+systemctl enable redis-server 2>/dev/null || true
+systemctl start redis-server || {
+    echo -e "${YELLOW}Warning:${NC} Redis failed to start, attempting configuration..."
+    # Try with protected mode disabled for local connections
+    sed -i 's/bind 127.0.0.1/bind 127.0.0.1 ::1/' /etc/redis/redis.conf 2>/dev/null || true
+    systemctl restart redis-server || true
+}
+
+# Verify Redis is running
+if systemctl is-active --quiet redis-server; then
+    echo -e "${GREEN}✓${NC} Redis server is running"
+else
+    echo -e "${YELLOW}Warning:${NC} Redis may not be running, continuing..."
+fi
+
+# ──────────────────────────────────────
+# Step 3: Create system user and groups
 # ──────────────────────────────────────
 CURRENT_STEP="user"
 echo ""
-echo -e "${BOLD}[2/8] Creating system user...${NC}"
+echo -e "${BOLD}[3/9] Creating system user...${NC}"
 
 if ! id -u orvix &>/dev/null; then
     useradd --system --user-group --create-home --home-dir /var/lib/orvix --shell /usr/sbin/nologin orvix
@@ -167,33 +199,41 @@ else
 fi
 
 # ──────────────────────────────────────
-# Step 3: Create directories
+# Step 4: Create directories
+# RC5 FIX: Ensure all required directories exist with correct ownership
 # ──────────────────────────────────────
 CURRENT_STEP="directories"
 echo ""
-echo -e "${BOLD}[3/8] Creating directories...${NC}"
+echo -e "${BOLD}[4/9] Creating directories...${NC}"
 
+# Create all required directories
 mkdir -p /etc/orvix/stalwart
 mkdir -p /var/lib/orvix/stalwart
 mkdir -p /var/lib/orvix/backups
 mkdir -p /var/log/orvix/stalwart
+mkdir -p /var/lib/orvix
 
+# Set ownership
 chown -R orvix:orvix /etc/orvix
 chown -R orvix:orvix /var/lib/orvix
 chown -R orvix:orvix /var/log/orvix
 
+# Set permissions
 chmod 750 /etc/orvix
 chmod 750 /var/lib/orvix
 chmod 750 /var/log/orvix
+chmod 750 /etc/orvix/stalwart
+chmod 750 /var/lib/orvix/stalwart
+chmod 750 /var/log/orvix/stalwart
 
 echo -e "${GREEN}✓${NC} Directories created with secure permissions"
 
 # ──────────────────────────────────────
-# Step 4: Install Orvix binary
+# Step 5: Install Orvix binary
 # ──────────────────────────────────────
 CURRENT_STEP="orvix_binary"
 echo ""
-echo -e "${BOLD}[4/8] Installing Orvix binary...${NC}"
+echo -e "${BOLD}[5/9] Installing Orvix binary...${NC}"
 
 ORVIX_BIN="/usr/local/bin/orvix"
 
@@ -232,11 +272,11 @@ fi
 echo -e "${GREEN}✓${NC} Orvix binary installed at $ORVIX_BIN"
 
 # ──────────────────────────────────────
-# Step 5: Install Stalwart binary (RC4 FIX: Correct GitHub URL)
+# Step 6: Install Stalwart binary (RC5 FIX: Correct GitHub URL)
 # ──────────────────────────────────────
 CURRENT_STEP="stalwart_binary"
 echo ""
-echo -e "${BOLD}[5/8] Installing Stalwart mail server...${NC}"
+echo -e "${BOLD}[6/9] Installing Stalwart mail server...${NC}"
 
 STALWART_BIN="/usr/local/bin/stalwart"
 
@@ -247,7 +287,7 @@ elif [ -f "$STALWART_BIN" ]; then
 else
     echo "Downloading Stalwart v${STALWART_VERSION} from GitHub..."
 
-    # RC4 FIX: Use correct GitHub URL for stalwartlabs/stalwart
+    # RC5 FIX: Use correct GitHub URL for stalwartlabs/stalwart
     STALWART_DOWNLOAD_URL="https://github.com/stalwartlabs/stalwart/releases/download/v${STALWART_VERSION}/stalwart-x86_64-unknown-linux-gnu.tar.gz"
 
     if curl -fsSL -o /tmp/stalwart.tar.gz "$STALWART_DOWNLOAD_URL"; then
@@ -284,13 +324,13 @@ else
 fi
 
 # ──────────────────────────────────────
-# Step 6: Generate configuration (RC4 FIX: Use validation functions)
+# Step 7: Generate configuration (RC5 FIX: Use validation functions)
 # ──────────────────────────────────────
 CURRENT_STEP="config"
 echo ""
-echo -e "${BOLD}[6/8] Configuring Orvix...${NC}"
+echo -e "${BOLD}[7/9] Configuring Orvix...${NC}"
 
-# RC4 FIX: Use validated prompt functions
+# RC5 FIX: Use validated prompt functions
 PRIMARY_DOMAIN=$(prompt_domain)
 ADMIN_EMAIL=$(prompt_email)
 ADMIN_PASSWORD=$(prompt_password)
@@ -324,8 +364,14 @@ database:
   driver: sqlite
   dsn: /var/lib/orvix/orvix.db?_loc=auto&_busy_timeout=5000&_txlock=immediate
 
+redis:
+  host: "127.0.0.1"
+  port: 6379
+  password: ""
+  db: 0
+
 stalwart:
-  api_url: http://localhost:18080
+  api_url: http://localhost:8080
   api_key: ""
   bin_path: /usr/local/bin/stalwart
   data_dir: /var/lib/orvix/stalwart
@@ -362,7 +408,7 @@ ORVIX_YAML
 chmod 640 /etc/orvix/orvix.yaml
 chown orvix:orvix /etc/orvix/orvix.yaml
 
-# Save credentials securely (RC4 FIX: Do not log password)
+# Save credentials securely (RC5 FIX: Do not log password)
 cat > /etc/orvix/install_credentials.txt << CREDS
 Orvix Installation Credentials
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -383,19 +429,20 @@ echo -e "${GREEN}✓${NC} Configuration generated"
 echo -e "${GREEN}✓${NC} Credentials saved to /etc/orvix/install_credentials.txt"
 
 # ──────────────────────────────────────
-# Step 7: Install systemd service (RC4 FIX: No StartLimit directives)
+# Step 8: Install systemd service
+# RC5 FIX: Added ReadWritePaths for systemd hardening
 # ──────────────────────────────────────
 CURRENT_STEP="systemd"
 echo ""
-echo -e "${BOLD}[7/8] Installing systemd service...${NC}"
+echo -e "${BOLD}[8/9] Installing systemd service...${NC}"
 
-# RC4 FIX: Inline systemd unit WITHOUT StartLimitIntervalSec (invalid on Ubuntu 22.04+)
+# RC5 FIX: Add ReadWritePaths so Orvix can write to required directories
 cat > /etc/systemd/system/orvix.service << 'UNIT'
 [Unit]
 Description=Orvix Email Server Platform
 Documentation=https://github.com/reachfm/orvix
-After=network.target
-Wants=network.target
+After=network.target redis-server.target
+Wants=network.target redis-server.target
 
 [Service]
 Type=simple
@@ -406,11 +453,19 @@ ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=10
 
-# Security hardening
+# RC5 FIX: Security hardening with ReadWritePaths
 ProtectSystem=full
 ProtectHome=true
 NoNewPrivileges=true
 PrivateTmp=true
+
+# RC5 FIX: Allow writing to Orvix directories
+ReadWritePaths=/etc/orvix
+ReadWritePaths=/etc/orvix/stalwart
+ReadWritePaths=/var/lib/orvix
+ReadWritePaths=/var/lib/orvix/stalwart
+ReadWritePaths=/var/log/orvix
+ReadWritePaths=/var/log/orvix/stalwart
 
 # Environment
 Environment=ORVIX_CONFIG=/etc/orvix/orvix.yaml
@@ -431,21 +486,21 @@ systemctl enable orvix.service
 echo -e "${GREEN}✓${NC} systemd service installed and enabled"
 
 # ──────────────────────────────────────
-# Step 8: Start services
+# Step 9: Start services and healthcheck
+# RC5 FIX: Comprehensive post-install healthcheck
 # ──────────────────────────────────────
 CURRENT_STEP="start"
 echo ""
-echo -e "${BOLD}[8/8] Starting services...${NC}"
+echo -e "${BOLD}[9/9] Starting services and validation...${NC}"
 
 # Ensure database directory exists and has correct permissions
 mkdir -p /var/lib/orvix
 chown orvix:orvix /var/lib/orvix
 
-# RC4 FIX: Create systemd override directory before writing
+# RC5 FIX: Create systemd override directory before writing
 mkdir -p /etc/systemd/system/orvix.service.d
 
-# RC4 FIX: Pass admin credentials via environment variables
-# These are consumed by Orvix on first start to create the admin user
+# RC5 FIX: Pass admin credentials via environment variables
 cat > /etc/systemd/system/orvix.service.d/override.conf << OVERRIDE
 [Service]
 Environment=ORVIX_ADMIN_EMAIL=${ADMIN_EMAIL}
@@ -454,26 +509,68 @@ OVERRIDE
 
 systemctl daemon-reload
 
+# Start Orvix service
 systemctl start orvix.service || {
     echo -e "${YELLOW}⚠${NC} Service failed to start. Check logs:"
     echo "  journalctl -u orvix.service -n 50"
 }
 
-# Health check
+# RC5 FIX: Comprehensive healthcheck
 sleep 5
-if systemctl is-active --quiet orvix.service; then
-    echo -e "${GREEN}✓${NC} Orvix service is running"
+echo ""
+echo -e "${BOLD}Post-Install Healthcheck:${NC}"
 
-    # Test health endpoint
-    if curl -sf http://localhost:8080/api/v1/health > /dev/null 2>&1; then
-        echo -e "${GREEN}✓${NC} Health check passed"
-    else
-        echo -e "${YELLOW}⚠${NC} Health endpoint not responding yet"
-    fi
+HEALTHCHECK_PASSED=true
+
+# Check Orvix service status
+echo -n "  Orvix Service: "
+if systemctl is-active --quiet orvix.service; then
+    echo -e "${GREEN}✓ Running${NC}"
 else
-    echo -e "${YELLOW}⚠${NC} Orvix service not active. Check:"
-    echo "  journalctl -u orvix.service -n 50"
+    echo -e "${RED}✗ Not running${NC}"
+    HEALTHCHECK_PASSED=false
 fi
+
+# Check Redis
+echo -n "  Redis Server: "
+if systemctl is-active --quiet redis-server; then
+    echo -e "${GREEN}✓ Running${NC}"
+else
+    echo -e "${RED}✗ Not running${NC}"
+    HEALTHCHECK_PASSED=false
+fi
+
+# Check Orvix API health
+echo -n "  Orvix API Health: "
+if curl -sf http://localhost:8080/api/v1/health > /dev/null 2>&1; then
+    echo -e "${GREEN}✓ OK${NC}"
+else
+    echo -e "${YELLOW}⚠ Not ready${NC}"
+    echo "    (May take a few seconds to initialize)"
+fi
+
+# Check Database
+echo -n "  Database: "
+if [ -f /var/lib/orvix/orvix.db ]; then
+    echo -e "${GREEN}✓ Created${NC}"
+else
+    echo -e "${YELLOW}⚠ Not created yet${NC}"
+fi
+
+# Summary
+echo ""
+if [ "$HEALTHCHECK_PASSED" = true ]; then
+    echo -e "${GREEN}✓ All core services running${NC}"
+else
+    echo -e "${YELLOW}⚠ Some services need attention${NC}"
+fi
+
+echo ""
+echo "  Verification commands:"
+echo "    systemctl status orvix --no-pager -l"
+echo "    systemctl status redis-server --no-pager -l"
+echo "    curl -fsS http://127.0.0.1:8080/api/v1/health"
+echo "    journalctl -u orvix --no-pager -n 50"
 
 # ──────────────────────────────────────
 # Summary
@@ -482,7 +579,7 @@ IP_ADDR=$(hostname -I | awk '{print $1}')
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo -e "${BOLD}Orvix v${ORVIX_VERSION} RC4 Installation Complete${NC}"
+echo -e "${BOLD}Orvix v${ORVIX_VERSION} RC5 Installation Complete${NC}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 echo -e " ${BOLD}Admin Console:${NC} http://${IP_ADDR}:8080/admin"
@@ -501,6 +598,6 @@ echo ""
 echo -e "${YELLOW}Credentials saved to:${NC} /etc/orvix/install_credentials.txt"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-# RC4 FIX: Clear password from memory
+# RC5 FIX: Clear password from memory
 unset ADMIN_PASSWORD
 unset ADMIN_CONFIRM

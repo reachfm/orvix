@@ -45,51 +45,26 @@ func (cg *ConfigGenerator) Generate() error {
 	return nil
 }
 
+// RC5 FIX: Stalwart v0.16+ uses JSON config.json, not YAML
+// The config.json only specifies the datastore - all other settings are in the database
 func (cg *ConfigGenerator) writeMainConfig() error {
-	config := fmt.Sprintf(`---
-server:
-  host: "0.0.0.0"
-  port: 25
-  tls:
-    enabled: true
-    certificate: "%s/certs/fullchain.pem"
-    private-key: "%s/certs/privkey.pem"
+	// RC5 FIX: v0.16 JSON format - only datastore path is in config.json
+	// Everything else (domains, accounts, SMTP, etc.) is managed via JMAP API
+	config := fmt.Sprintf(`{
+  "storage": {
+    "@type": "RocksDb",
+    "path": "%s"
+  },
+  "server": {
+    "hostname": "localhost"
+  },
+  "tracing": {
+    "level": "info"
+  }
+}`, cg.dataDir)
 
-imap:
-  host: "0.0.0.0"
-  port: 143
-  tls-port: 993
-
-pop3:
-  host: "0.0.0.0"
-  port: 110
-  tls-port: 995
-
-jmap:
-  host: "0.0.0.0"
-  port: 8800
-
-api:
-  host: "127.0.0.1"
-  port: 18080
-  api-key: "%s"
-
-data:
-  directory: "%s"
-
-logging:
-  directory: "%s"
-  level: "info"
-
-auth:
-  mechanism: "internal"
-
-queue:
-  type: "rocksdb"
-  directory: "%s/queue"
-`, cg.configDir, cg.configDir, cg.apiKey, cg.dataDir, cg.logDir, cg.dataDir)
-
-	return os.WriteFile(cg.configDir+"/stalwart.yaml", []byte(config), 0640)
+	// RC5 FIX: Write to config.json (v0.16 format), not stalwart.yaml
+	return os.WriteFile(cg.configDir+"/config.json", []byte(config), 0640)
 }
 
 func (cg *ConfigGenerator) writeWebhooksConfig() error {

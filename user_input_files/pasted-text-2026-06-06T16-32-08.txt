@@ -1,0 +1,229 @@
+root@mail:~# cd /root
+
+rm -rf install.sh orvix.tar.gz release configs scripts systemd VERSION checksums.txt RELEASE_NOTES.md upgrade.sh uninstall.sh orvix-v1.0.*
+
+curl -fsSL https://github.com/reachfm/orvix/releases/download/v1.0.3/install.sh -o install.sh
+
+head -30 install.sh
+
+chmod +x install.sh
+
+bash install.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Orvix RC4 Installer
+# Usage: curl -fsSL https://github.com/reachfm/orvix/releases/download/v1.0.3/install.sh | bash
+# Or:    bash install.sh
+
+# RC4: Fixed Stalwart URL, systemd directory, password confirmation
+ORVIX_VERSION="${ORVIX_VERSION:-1.0.3}"
+ORVIX_RELEASE_URL="${ORVIX_RELEASE_URL:-https://github.com/reachfm/orvix/releases/download/v${ORVIX_VERSION}}"
+STALWART_VERSION="${STALWART_VERSION:-0.16.7}"
+
+BOLD='\033[1m'
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+# ──────────────────────────────────────
+# Pre-flight checks
+# ──────────────────────────────────────
+echo -e "${BOLD}Orvix v${ORVIX_VERSION} RC4 Installer${NC}"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo -e "${RED}Error: This installer must be run as root (or with sudo).${NC}"
+    exit 1
+fi
+
+OS=""
+Orvix v1.0.3 RC4 Installer
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✓ Detected OS: Ubuntu 22.04.5 LTS
+
+[1/8] Installing system dependencies...
+✓ System dependencies installed
+
+[2/8] Creating system user...
+✓ System user 'orvix' already exists
+
+[3/8] Creating directories...
+✓ Directories created with secure permissions
+
+[4/8] Installing Orvix binary...
+✓ Orvix binary already installed at /usr/local/bin/orvix
+✓ Orvix binary installed at /usr/local/bin/orvix
+
+[5/8] Installing Stalwart mail server...
+Downloading Stalwart v0.16.7 from GitHub...
+✓ Stalwart v0.16.7 installed from GitHub
+
+[6/8] Configuring Orvix...
+Primary email domain (e.g., example.com): orvix.email
+Admin email address: admin@orvix.email
+Admin password (min 12 chars): Confirm admin password: License key (optional, press Enter to skip):
+✓ Configuration generated
+✓ Credentials saved to /etc/orvix/install_credentials.txt
+
+[7/8] Installing systemd service...
+✓ systemd service installed and enabled
+
+[8/8] Starting services...
+✓ Orvix service is running
+✓ Health check passed
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Orvix v1.0.3 RC4 Installation Complete
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ Admin Console: http://65.75.203.74:8080/admin
+ Webmail: http://65.75.203.74:3000
+ Admin Email: admin@orvix.email
+ Primary Domain: orvix.email
+
+Next steps:
+ 1. Configure DNS records for orvix.email:
+    - MX record → 65.75.203.74 (priority 10)
+    - A record for mail.orvix.email → 65.75.203.74
+ 2. Open admin console: http://65.75.203.74:8080/admin
+ 3. Add domain: orvix.email
+ 4. Create mailboxes
+
+Credentials saved to: /etc/orvix/install_credentials.txt
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+root@mail:~# ^C
+root@mail:~#
+root@mail:~#
+root@mail:~#
+root@mail:~# systemctl status orvix --no-pager -l
+
+curl -fsS http://127.0.0.1:8080/api/v1/health
+
+journalctl -u orvix --no-pager -n 100
+● orvix.service - Orvix Email Server Platform
+     Loaded: loaded (/etc/systemd/system/orvix.service; enabled; vendor preset: enabled)
+    Drop-In: /etc/systemd/system/orvix.service.d
+             └─override.conf
+     Active: active (running) since Sat 2026-06-06 16:30:08 UTC; 29s ago
+       Docs: https://github.com/reachfm/orvix
+   Main PID: 4049 (orvix)
+      Tasks: 8 (limit: 4645)
+     Memory: 5.2M
+        CPU: 150ms
+     CGroup: /system.slice/orvix.service
+             └─4049 /usr/local/bin/orvix serve
+
+Jun 06 16:30:15 mail.orvix.email orvix[4049]: github.com/gofiber/fiber/v3.(*App).next
+Jun 06 16:30:15 mail.orvix.email orvix[4049]:         /home/minimax/go/pkg/mod/github.com/gofiber/fiber/v3@v3.3.0/router.go:270
+Jun 06 16:30:15 mail.orvix.email orvix[4049]: github.com/gofiber/fiber/v3.(*App).defaultRequestHandler
+Jun 06 16:30:15 mail.orvix.email orvix[4049]:         /home/minimax/go/pkg/mod/github.com/gofiber/fiber/v3@v3.3.0/router.go:446
+Jun 06 16:30:15 mail.orvix.email orvix[4049]: github.com/valyala/fasthttp.(*Server).serveConn
+Jun 06 16:30:15 mail.orvix.email orvix[4049]:         /home/minimax/go/pkg/mod/github.com/valyala/fasthttp@v1.71.0/server.go:2555
+Jun 06 16:30:15 mail.orvix.email orvix[4049]: github.com/valyala/fasthttp.(*workerPool).workerFunc
+Jun 06 16:30:15 mail.orvix.email orvix[4049]:         /home/minimax/go/pkg/mod/github.com/valyala/fasthttp@v1.71.0/workerpool.go:225
+Jun 06 16:30:15 mail.orvix.email orvix[4049]: github.com/valyala/fasthttp.(*workerPool).getCh.func1
+Jun 06 16:30:15 mail.orvix.email orvix[4049]:         /home/minimax/go/pkg/mod/github.com/valyala/fasthttp@v1.71.0/workerpool.go:197
+{"status":"ok","timestamp":"2026-06-06T16:30:39Z","version":"1.0.0"}Jun 06 16:30:09 mail.orvix.email orvix[4049]: 2026-06-06T16:30:09.159Z        INFO        modules/registry.go:102        initializing module        {"id": "email-intelligence", "version": "1.0.0"}
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: 2026-06-06T16:30:09.159Z        INFO        intelligence/module.go:28        email-intelligence module initialized
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: 2026-06-06T16:30:09.159Z        INFO        modules/registry.go:102        initializing module        {"id": "guardian-agent", "version": "1.0.0"}
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: 2026-06-06T16:30:09.159Z        INFO        guardian/module.go:45        guardian-agent module initialized
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: 2026-06-06T16:30:09.159Z        INFO        modules/registry.go:102        initializing module        {"id": "mail-firewall", "version": "1.0.0"}
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: 2026-06-06T16:30:09.159Z        INFO        firewall/module.go:29        firewall module initialized
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: 2026-06-06T16:30:09.159Z        INFO        modules/registry.go:102        initializing module        {"id": "migration-tool", "version": "1.0.0"}
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: 2026-06-06T16:30:09.159Z        INFO        migration/module.go:32        migration-tool module initialized
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: 2026-06-06T16:30:09.159Z        INFO        modules/registry.go:102        initializing module        {"id": "provision-api", "version": "1.0.0"}
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: 2026-06-06T16:30:09.159Z        INFO        provision/module.go:31        provision-api module initialized
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: 2026-06-06T16:30:09.159Z        INFO        modules/registry.go:102        initializing module        {"id": "smart-compose", "version": "1.0.0"}
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: 2026-06-06T16:30:09.159Z        INFO        compose/module.go:27        smart-compose module initialized
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: 2026-06-06T16:30:09.159Z        INFO        firewall/module.go:33        firewall module started
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: 2026-06-06T16:30:09.159Z        INFO        autoheal/monitor.go:72        health monitor started        {"checks": 2}
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: 2026-06-06T16:30:09.159Z        INFO        autoheal/module.go:40        auto-heal module started
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: 2026-06-06T16:30:09.159Z        INFO        dns/module.go:35        dns-automation module started
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: 2026-06-06T16:30:09.159Z        INFO        migration/module.go:36        migration-tool module started
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: 2026-06-06T16:30:09.159Z        INFO        guardian/module.go:50        guardian-agent module started
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: 2026-06-06T16:30:09.159Z        INFO        compose/module.go:31        smart-compose module started
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: 2026-06-06T16:30:09.159Z        INFO        updater/module.go:32        auto-update module started
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: 2026-06-06T16:30:09.159Z        INFO        provision/module.go:35        provision-api module started
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: 2026-06-06T16:30:09.159Z        INFO        calendar/module.go:32        calendar module started
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: 2026-06-06T16:30:09.159Z        INFO        collaboration/module.go:32        collaboration module started
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: 2026-06-06T16:30:09.159Z        INFO        compliance/module.go:34        compliance module started
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: 2026-06-06T16:30:09.159Z        INFO        intelligence/module.go:32        email-intelligence module started
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: 2026-06-06T16:30:09.159Z        INFO        config/redis.go:18        redis client created        {"addr": "localhost:6379"}
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: 2026-06-06T16:30:09.159Z        WARN        orvix/main.go:123        failed to generate stalwart config        {"error": "open /etc/orvix/stalwart/stalwart.yaml: read-only file system"}
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: 2026-06-06T16:30:09.160Z        INFO        orvix/main.go:176        admin server starting (HTTP)        {"port": 8080}
+Jun 06 16:30:09 mail.orvix.email orvix[4049]:     _______ __
+Jun 06 16:30:09 mail.orvix.email orvix[4049]:    / ____(_) /_  ___  _____
+Jun 06 16:30:09 mail.orvix.email orvix[4049]:   / /_  / / __ \/ _ \/ ___/
+Jun 06 16:30:09 mail.orvix.email orvix[4049]:  / __/ / / /_/ /  __/ /
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: /_/   /_/_.___/\___/_/          v3.3.0
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: --------------------------------------------------
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: INFO Server started on:         http://127.0.0.1:8080 (bound on host 0.0.0.0 and port 8080)
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: INFO Application name:                 Orvix
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: INFO Total handlers:                 109
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: INFO Prefork:                         Disabled
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: INFO PID:                         4049
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: INFO Total process count:         1
+Jun 06 16:30:09 mail.orvix.email orvix[4049]: 2026-06-06T16:30:09.161Z        INFO        stalwart/process.go:76        stalwart process started        {"pid": "4065"}
+Jun 06 16:30:09 mail.orvix.email orvix[4065]: Missing value for argument 'data', try '--help'.
+Jun 06 16:30:14 mail.orvix.email orvix[4049]: redis: 2026/06/06 16:30:14 pool.go:715: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:6379: connect: connection refused
+Jun 06 16:30:14 mail.orvix.email orvix[4049]: redis: 2026/06/06 16:30:14 pool.go:715: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:6379: connect: connection refused
+Jun 06 16:30:15 mail.orvix.email orvix[4049]: redis: 2026/06/06 16:30:15 pool.go:715: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:6379: connect: connection refused
+Jun 06 16:30:15 mail.orvix.email orvix[4049]: redis: 2026/06/06 16:30:15 pool.go:715: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:6379: connect: connection refused
+Jun 06 16:30:15 mail.orvix.email orvix[4049]: 2026-06-06T16:30:15.605Z        ERROR        auth/ratelimit.go:55        rate limiter error        {"error": "redis rate limit check failed: dial tcp 127.0.0.1:6379: connect: connection refused"}
+Jun 06 16:30:15 mail.orvix.email orvix[4049]: github.com/orvix/orvix/internal/api.(*Router).setupMiddleware.(*RedisRateLimiter).Middleware.func3
+Jun 06 16:30:15 mail.orvix.email orvix[4049]:         /workspace/orvix-main/internal/auth/ratelimit.go:55
+Jun 06 16:30:15 mail.orvix.email orvix[4049]: github.com/gofiber/fiber/v3.(*DefaultCtx).Next
+Jun 06 16:30:15 mail.orvix.email orvix[4049]:         /home/minimax/go/pkg/mod/github.com/gofiber/fiber/v3@v3.3.0/ctx.go:258
+Jun 06 16:30:15 mail.orvix.email orvix[4049]: github.com/orvix/orvix/internal/api.(*Router).setupMiddleware.securityHeaders.func2
+Jun 06 16:30:15 mail.orvix.email orvix[4049]:         /workspace/orvix-main/internal/api/router.go:225
+Jun 06 16:30:15 mail.orvix.email orvix[4049]: github.com/gofiber/fiber/v3.(*DefaultCtx).Next
+Jun 06 16:30:15 mail.orvix.email orvix[4049]:         /home/minimax/go/pkg/mod/github.com/gofiber/fiber/v3@v3.3.0/ctx.go:258
+Jun 06 16:30:15 mail.orvix.email orvix[4049]: github.com/gofiber/fiber/v3/middleware/cors.New.func2
+Jun 06 16:30:15 mail.orvix.email orvix[4049]:         /home/minimax/go/pkg/mod/github.com/gofiber/fiber/v3@v3.3.0/middleware/cors/cors.go:123
+Jun 06 16:30:15 mail.orvix.email orvix[4049]: github.com/gofiber/fiber/v3.(*DefaultCtx).Next
+Jun 06 16:30:15 mail.orvix.email orvix[4049]:         /home/minimax/go/pkg/mod/github.com/gofiber/fiber/v3@v3.3.0/ctx.go:258
+Jun 06 16:30:15 mail.orvix.email orvix[4049]: github.com/orvix/orvix/internal/api.(*Router).setupMiddleware.New.func1
+Jun 06 16:30:15 mail.orvix.email orvix[4049]:         /home/minimax/go/pkg/mod/github.com/gofiber/fiber/v3@v3.3.0/middleware/recover/recover.go:48
+Jun 06 16:30:15 mail.orvix.email orvix[4049]: github.com/gofiber/fiber/v3.(*App).next
+Jun 06 16:30:15 mail.orvix.email orvix[4049]:         /home/minimax/go/pkg/mod/github.com/gofiber/fiber/v3@v3.3.0/router.go:270
+Jun 06 16:30:15 mail.orvix.email orvix[4049]: github.com/gofiber/fiber/v3.(*App).defaultRequestHandler
+Jun 06 16:30:15 mail.orvix.email orvix[4049]:         /home/minimax/go/pkg/mod/github.com/gofiber/fiber/v3@v3.3.0/router.go:446
+Jun 06 16:30:15 mail.orvix.email orvix[4049]: github.com/valyala/fasthttp.(*Server).serveConn
+Jun 06 16:30:15 mail.orvix.email orvix[4049]:         /home/minimax/go/pkg/mod/github.com/valyala/fasthttp@v1.71.0/server.go:2555
+Jun 06 16:30:15 mail.orvix.email orvix[4049]: github.com/valyala/fasthttp.(*workerPool).workerFunc
+Jun 06 16:30:15 mail.orvix.email orvix[4049]:         /home/minimax/go/pkg/mod/github.com/valyala/fasthttp@v1.71.0/workerpool.go:225
+Jun 06 16:30:15 mail.orvix.email orvix[4049]: github.com/valyala/fasthttp.(*workerPool).getCh.func1
+Jun 06 16:30:15 mail.orvix.email orvix[4049]:         /home/minimax/go/pkg/mod/github.com/valyala/fasthttp@v1.71.0/workerpool.go:197
+Jun 06 16:30:38 mail.orvix.email orvix[4049]: redis: 2026/06/06 16:30:38 pool.go:715: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:6379: connect: connection refused
+Jun 06 16:30:38 mail.orvix.email orvix[4049]: redis: 2026/06/06 16:30:38 pool.go:715: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:6379: connect: connection refused
+Jun 06 16:30:39 mail.orvix.email orvix[4049]: redis: 2026/06/06 16:30:39 pool.go:715: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:6379: connect: connection refused
+Jun 06 16:30:39 mail.orvix.email orvix[4049]: redis: 2026/06/06 16:30:39 pool.go:715: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:6379: connect: connection refused
+Jun 06 16:30:39 mail.orvix.email orvix[4049]: 2026-06-06T16:30:39.720Z        ERROR        auth/ratelimit.go:55        rate limiter error        {"error": "redis rate limit check failed: dial tcp 127.0.0.1:6379: connect: connection refused"}
+Jun 06 16:30:39 mail.orvix.email orvix[4049]: github.com/orvix/orvix/internal/api.(*Router).setupMiddleware.(*RedisRateLimiter).Middleware.func3
+Jun 06 16:30:39 mail.orvix.email orvix[4049]:         /workspace/orvix-main/internal/auth/ratelimit.go:55
+Jun 06 16:30:39 mail.orvix.email orvix[4049]: github.com/gofiber/fiber/v3.(*DefaultCtx).Next
+Jun 06 16:30:39 mail.orvix.email orvix[4049]:         /home/minimax/go/pkg/mod/github.com/gofiber/fiber/v3@v3.3.0/ctx.go:258
+Jun 06 16:30:39 mail.orvix.email orvix[4049]: github.com/orvix/orvix/internal/api.(*Router).setupMiddleware.securityHeaders.func2
+Jun 06 16:30:39 mail.orvix.email orvix[4049]:         /workspace/orvix-main/internal/api/router.go:225
+Jun 06 16:30:39 mail.orvix.email orvix[4049]: github.com/gofiber/fiber/v3.(*DefaultCtx).Next
+Jun 06 16:30:39 mail.orvix.email orvix[4049]:         /home/minimax/go/pkg/mod/github.com/gofiber/fiber/v3@v3.3.0/ctx.go:258
+Jun 06 16:30:39 mail.orvix.email orvix[4049]: github.com/gofiber/fiber/v3/middleware/cors.New.func2
+Jun 06 16:30:39 mail.orvix.email orvix[4049]:         /home/minimax/go/pkg/mod/github.com/gofiber/fiber/v3@v3.3.0/middleware/cors/cors.go:123
+Jun 06 16:30:39 mail.orvix.email orvix[4049]: github.com/gofiber/fiber/v3.(*DefaultCtx).Next
+Jun 06 16:30:39 mail.orvix.email orvix[4049]:         /home/minimax/go/pkg/mod/github.com/gofiber/fiber/v3@v3.3.0/ctx.go:258
+Jun 06 16:30:39 mail.orvix.email orvix[4049]: github.com/orvix/orvix/internal/api.(*Router).setupMiddleware.New.func1
+Jun 06 16:30:39 mail.orvix.email orvix[4049]:         /home/minimax/go/pkg/mod/github.com/gofiber/fiber/v3@v3.3.0/middleware/recover/recover.go:48
+Jun 06 16:30:39 mail.orvix.email orvix[4049]: github.com/gofiber/fiber/v3.(*App).next
+Jun 06 16:30:39 mail.orvix.email orvix[4049]:         /home/minimax/go/pkg/mod/github.com/gofiber/fiber/v3@v3.3.0/router.go:270
+Jun 06 16:30:39 mail.orvix.email orvix[4049]: github.com/gofiber/fiber/v3.(*App).defaultRequestHandler
+Jun 06 16:30:39 mail.orvix.email orvix[4049]:         /home/minimax/go/pkg/mod/github.com/gofiber/fiber/v3@v3.3.0/router.go:446
+Jun 06 16:30:39 mail.orvix.email orvix[4049]: github.com/valyala/fasthttp.(*Server).serveConn
+Jun 06 16:30:39 mail.orvix.email orvix[4049]:         /home/minimax/go/pkg/mod/github.com/valyala/fasthttp@v1.71.0/server.go:2555
+Jun 06 16:30:39 mail.orvix.email orvix[4049]: github.com/valyala/fasthttp.(*workerPool).workerFunc
+Jun 06 16:30:39 mail.orvix.email orvix[4049]:         /home/minimax/go/pkg/mod/github.com/valyala/fasthttp@v1.71.0/workerpool.go:225
+Jun 06 16:30:39 mail.orvix.email orvix[4049]: github.com/valyala/fasthttp.(*workerPool).getCh.func1
+Jun 06 16:30:39 mail.orvix.email orvix[4049]:         /home/minimax/go/pkg/mod/github.com/valyala/fasthttp@v1.71.0/workerpool.go:197
+root@mail:~# ^C
+root@mail:~#

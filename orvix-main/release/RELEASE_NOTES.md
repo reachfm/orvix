@@ -1,82 +1,93 @@
-# Orvix RC4 Release Notes
+# Orvix RC5 Release Notes
 
-**Version:** 1.0.3-rc4
-**Date:** 2026-06-06
-**Type:** Release Candidate 4 (RC4)
+**Version:** 1.0.4-rc5
+**Date:** 2026-06-07
+**Type:** Release Candidate 5 (RC5)
 
-## RC3 → RC4 Critical Fixes
+## RC4 → RC5 Critical Fixes
 
-### A. Stalwart Download URL Fixed
-- **ISSUE**: Stalwart download returned 404 error
-- **ROOT CAUSE**: Wrong GitHub repo URL and old version (v0.10.5)
+### A. Systemd Hardening Fixed
+- **ISSUE**: `open /etc/orvix/stalwart/stalwart.yaml: read-only file system`
+- **ROOT CAUSE**: `ProtectSystem=full` blocks writes to `/etc/orvix`, `/var/lib/orvix`, `/var/log/orvix`
 - **FIX**:
-  - Updated to v0.16.7 (latest stable)
-  - Correct URL: `https://github.com/stalwartlabs/stalwart/releases/download/v0.16.7/stalwart-x86_64-unknown-linux-gnu.tar.gz`
-  - Installer now fails with clear message if download fails
+  - Added `ReadWritePaths` directives to orvix.service:
+    ```
+    ReadWritePaths=/etc/orvix
+    ReadWritePaths=/etc/orvix/stalwart
+    ReadWritePaths=/var/lib/orvix
+    ReadWritePaths=/var/lib/orvix/stalwart
+    ReadWritePaths=/var/log/orvix
+    ReadWritePaths=/var/log/orvix/stalwart
+    ```
 
-### B. Systemd Override Directory Fixed
-- **ISSUE**: `install.sh: line 458: /etc/systemd/system/orvix.service.d/override.conf: No such file or directory`
-- **ROOT CAUSE**: Directory `/etc/systemd/system/orvix.service.d/` not created before writing
-- **FIX**: Added `mkdir -p /etc/systemd/system/orvix.service.d` before writing override.conf
-
-### C. Password Prompt Fixed
-- **ISSUE**: Password prompt repeated strangely (Admin password: Admin password: Admin password:)
-- **ROOT CAUSE**: Loop in prompt function with improper echo
+### B. Stalwart v0.16.7 Startup Fixed
+- **ISSUE**: `Missing value for argument 'data', try '--help'`
+- **ROOT CAUSE**: Stalwart v0.16+ uses JSON config.json (not YAML), no `--data` argument
 - **FIX**:
-  - Cleaned up password validation loop
-  - Added password confirmation step
-  - Rejects mismatched passwords
-  - Never echoes password in logs
+  - Config generator now writes `/etc/orvix/stalwart/config.json` (JSON format)
+  - Process manager uses `--config /etc/orvix/stalwart/config.json` only
+  - Data directory specified INSIDE config.json, not as command line arg
+  - Sample config.json:
+    ```json
+    {
+      "storage": {"@type": "RocksDb", "path": "/var/lib/orvix/stalwart"},
+      "server": {"hostname": "localhost"},
+      "tracing": {"level": "info"}
+    }
+    ```
+
+### C. Redis Installation Added
+- **ISSUE**: `dial tcp 127.0.0.1:6379: connect: connection refused`
+- **ROOT CAUSE**: Redis not installed or running
+- **FIX**:
+  - Added `redis-server` to apt-get install
+  - Installer enables and starts redis-server
+  - Orvix service now has `After=redis-server.target` dependency
+
+### D. Post-Install Healthcheck Added
+- **ADDITION**: Comprehensive post-install validation
+  - Orvix Service status check
+  - Redis Server status check
+  - Orvix API health endpoint check
+  - Database file existence check
+  - Clear status indicators (✓/✗/⚠)
 
 ## Installation
 
 ### Fresh Install
 ```bash
-curl -fsSL https://github.com/reachfm/orvix/releases/download/v1.0.3/install.sh | bash
+curl -fsSL https://github.com/reachfm/orvix/releases/download/v1.0.4/install.sh | bash
 ```
 
 Or download and run manually:
 ```bash
-curl -fsSL https://github.com/reachfm/orvix/releases/download/v1.0.3/orvix-v1.0.3-linux-amd64.tar.gz -o orvix.tar.gz
+curl -fsSL https://github.com/reachfm/orvix/releases/download/v1.0.4/orvix-v1.0.4-linux-amd64.tar.gz -o orvix.tar.gz
 tar -xzf orvix.tar.gz
 sudo ./install.sh
 ```
 
-The installer will prompt for:
-1. Primary email domain (e.g., mail.example.com)
-2. Admin email address
-3. Admin password (minimum 12 characters)
-4. Confirm admin password
-
-### Upgrade from RC3
+### Upgrade from RC4
 ```bash
 sudo systemctl stop orvix
-sudo tar -xzf orvix-v1.0.3-linux-amd64.tar.gz -C /tmp
-sudo cp /tmp/orvix-v1.0.3-linux-amd64 /usr/local/bin/orvix
+sudo tar -xzf orvix-v1.0.4-linux-amd64.tar.gz -C /tmp
+sudo cp /tmp/orvix-v1.0.4-linux-amd64 /usr/local/bin/orvix
+sudo systemctl daemon-reload
 sudo systemctl start orvix
 ```
-
-## Known Limitations
-
-### Stalwart Mail Server
-- Stalwart binary downloads from GitHub releases
-- Full mail flow (SMTP send/receive) requires additional Stalwart configuration
-- Web UI for Stalwart available at port 8080 after bootstrap setup
 
 ## Checksums
 
 ```
-orvix-v1.0.3-linux-amd64: 1cc564f2183ee9ad4d07e3fa4515eb2e22e8caecdfb8a6215fb817f78b7287f5
-orvix-v1.0.3-linux-amd64.tar.gz: aed4f97924b3e9315afbe9185600e6d3b8a3cecdff8698314090e768499099bb
+orvix-v1.0.4-linux-amd64: e7ad824523dea77858b11dfcc06793bb868a1141bf1f95dd9f511b4317b1138b
+orvix-v1.0.4-linux-amd64.tar.gz: 48be25d12c7d9eb257680088f2d74bb6aa24250b7ac6aee5b9b305f11bd3f955
 ```
 
 ## Commit Information
 
-- **Git Commit:** (to be determined on push)
 - **Source Repository:** https://github.com/reachfm/orvix
 - **Build Machine:** CGO_ENABLED=0, Pure Go binary
 
 ---
 
-**Previous Version:** RC3 (1.0.2)
-**Next Version:** Stable release planned after RC4 validation
+**Previous Version:** RC4 (1.0.3)
+**Next Version:** Stable release planned after RC5 validation
