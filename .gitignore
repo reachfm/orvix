@@ -1,0 +1,12 @@
+node_modules/
+dist/
+build/
+*.log
+.env
+.vscode/
+.idea/
+tmp/
+vendor/
+.venv/
+*.exe
+*.dll

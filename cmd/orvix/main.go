@@ -1,0 +1,255 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/api"
+	"github.com/orvix/orvix/internal/auth"
+	"github.com/orvix/orvix/internal/autoheal"
+	"github.com/orvix/orvix/internal/calendar"
+	"github.com/orvix/orvix/internal/collaboration"
+	"github.com/orvix/orvix/internal/compliance"
+	"github.com/orvix/orvix/internal/compose"
+	"github.com/orvix/orvix/internal/config"
+	"github.com/orvix/orvix/internal/dns"
+	"github.com/orvix/orvix/internal/firewall"
+	"github.com/orvix/orvix/internal/guardian"
+	"github.com/orvix/orvix/internal/intelligence"
+	"github.com/orvix/orvix/internal/license"
+	"github.com/orvix/orvix/internal/migration"
+	"github.com/orvix/orvix/internal/models"
+	"github.com/orvix/orvix/internal/modules"
+	"github.com/orvix/orvix/internal/provision"
+	"github.com/orvix/orvix/internal/stalwart"
+	"github.com/orvix/orvix/internal/updater"
+	"github.com/redis/go-redis/v9"
+	"go.uber.org/zap"
+	"golang.org/x/crypto/acme/autocert"
+	"gorm.io/gorm"
+)
+
+func main() {
+	logger, err := config.NewLogger(&config.LoggingConfig{
+		Level:  "info",
+		Format: "console",
+		Output: "stdout",
+	})
+	if err != nil {
+		log.Fatalf("failed to initialize logger: %v", err)
+	}
+	defer logger.Sync()
+
+	logger.Info("orvix starting",
+		zap.Any("watermark", config.GetWatermark()),
+		zap.String("canary", config.CanaryToken()),
+	)
+
+	cfg, err := config.Load(logger)
+	if err != nil {
+		logger.Fatal("failed to load configuration", zap.Error(err))
+	}
+
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		logger.Fatal("failed to connect to database", zap.Error(err))
+	}
+
+	if err := models.MigrateAll(db); err != nil {
+		logger.Fatal("failed to run migrations", zap.Error(err))
+	}
+	logger.Info("database migrations completed")
+
+	seedFeatureFlags(db, logger)
+
+	reg := modules.NewRegistry(logger)
+
+	_, _ = license.NewValidator("", db, logger)
+
+	featureFlags := license.NewFeatureFlags(logger)
+	featureFlags.SetTier(license.TierSMB)
+
+	authenticator, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		logger.Fatal("failed to create authenticator", zap.Error(err))
+	}
+
+	stalwartClient := stalwart.NewClient(cfg.Stalwart.APIURL, cfg.Stalwart.APIKey, logger)
+
+	registerModules(reg, cfg, db, logger, featureFlags)
+
+	if err := reg.InitAll(cfg, db); err != nil {
+		logger.Fatal("failed to initialize modules", zap.Error(err))
+	}
+
+	if err := reg.StartAll(); err != nil {
+		logger.Fatal("failed to start modules", zap.Error(err))
+	}
+
+	var redisClient *redis.Client
+	if cfg.Redis.Host != "" {
+		redisClient = config.NewRedisClient(&cfg.Redis, logger)
+	}
+
+	router := api.NewRouter(cfg, authenticator, logger, db, reg, stalwartClient, featureFlags, redisClient)
+
+	stalwartProcess := stalwart.NewProcessManager(
+		cfg.Stalwart.BinPath,
+		cfg.Stalwart.DataDir,
+		cfg.Stalwart.ConfigDir,
+		cfg.Stalwart.LogDir,
+		logger,
+	)
+
+	configGen := stalwart.NewConfigGenerator(
+		cfg.Stalwart.DataDir,
+		cfg.Stalwart.ConfigDir,
+		cfg.Stalwart.LogDir,
+		cfg.Stalwart.APIKey,
+		logger,
+	)
+
+	if err := configGen.Generate(); err != nil {
+		logger.Warn("failed to generate stalwart config", zap.Error(err))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		if err := stalwartProcess.Start(ctx); err != nil {
+			logger.Warn("failed to start stalwart", zap.Error(err))
+		}
+	}()
+
+	app := router.App()
+
+	adminPort := cfg.Server.AdminPort
+	if adminPort == 0 {
+		adminPort = 8080
+	}
+
+	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, adminPort)
+
+	if cfg.Server.TLSAuto && cfg.Server.TLSHostname != "" {
+		certManager := &autocert.Manager{
+			Prompt:     autocert.AcceptTOS,
+			HostPolicy: autocert.HostWhitelist(cfg.Server.TLSHostname),
+			Cache:      autocert.DirCache(cfg.Server.TLSCacheDir),
+			Email:      cfg.Server.TLSEmail,
+		}
+		go func() {
+			logger.Info("starting HTTPS with auto TLS via autocert",
+				zap.Int("port", adminPort),
+				zap.String("hostname", cfg.Server.TLSHostname),
+			)
+			if err := app.Listen(addr, fiber.ListenConfig{
+				AutoCertManager: certManager,
+			}); err != nil {
+				logger.Fatal("auto TLS server error", zap.Error(err))
+			}
+		}()
+	} else if cfg.Server.TLSCertFile != "" && cfg.Server.TLSKeyFile != "" {
+		go func() {
+			logger.Info("starting HTTPS with configured certificates",
+				zap.Int("port", adminPort),
+			)
+			if err := app.Listen(addr, fiber.ListenConfig{
+				CertFile:    cfg.Server.TLSCertFile,
+				CertKeyFile: cfg.Server.TLSKeyFile,
+			}); err != nil {
+				logger.Fatal("HTTPS server error", zap.Error(err))
+			}
+		}()
+	} else {
+		go func() {
+			logger.Info("admin server starting (HTTP)", zap.Int("port", adminPort))
+			if err := app.Listen(addr); err != nil {
+				logger.Fatal("admin server error", zap.Error(err))
+			}
+		}()
+	}
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	logger.Info("shutting down orvix...")
+
+	if err := app.Shutdown(); err != nil {
+		logger.Error("admin server shutdown error", zap.Error(err))
+	}
+
+	if err := reg.StopAll(); err != nil {
+		logger.Error("module shutdown error", zap.Error(err))
+	}
+
+	if err := stalwartProcess.Stop(); err != nil {
+		logger.Error("stalwart shutdown error", zap.Error(err))
+	}
+
+	logger.Info("orvix shutdown complete")
+}
+
+func registerModules(r *modules.Registry, cfg *config.Config, db *gorm.DB, logger *zap.Logger, ff *license.FeatureFlags) {
+	r.Register(&firewall.Module{})
+	r.Register(&autoheal.Module{})
+	r.Register(&dns.Module{})
+	r.Register(&migration.Module{})
+	r.Register(&guardian.Module{})
+	r.Register(&compose.Module{})
+	r.Register(&updater.Module{})
+	r.Register(&provision.Module{})
+	r.Register(&calendar.Module{})
+	r.Register(&collaboration.Module{})
+	r.Register(&compliance.Module{})
+	r.Register(&intelligence.Module{})
+}
+
+func seedFeatureFlags(db *gorm.DB, logger *zap.Logger) {
+	flags := []struct {
+		Name          string
+		TierRequired  string
+		ModuleVersion string
+		Description   string
+	}{
+		{"webmail", "smb", "1.0.0", "Webmail UI"},
+		{"firewall_basic", "smb", "1.0.0", "Mail firewall"},
+		{"two_factor_auth", "smb", "1.0.0", "Two-factor authentication"},
+		{"rest_api", "isp", "1.0.0", "REST API access"},
+		{"audit_logs", "smb", "1.0.0", "Audit log access"},
+		{"autoheal", "smb", "1.0.0", "Auto-heal system"},
+		{"dns_automation", "smb", "1.0.0", "DNS automation"},
+		{"smart_migration", "isp", "1.0.0", "Smart migration tool"},
+		{"guardian", "isp", "1.0.0", "Guardian AI threat analysis"},
+		{"smart_compose", "smb", "1.0.0", "Smart Compose AI"},
+		{"auto_update", "smb", "1.0.0", "Auto-update system"},
+		{"provision_api", "isp", "1.0.0", "Instant deployment API"},
+		{"calendar", "smb", "1.0.0", "Calendar"},
+		{"contacts", "smb", "1.0.0", "Contacts"},
+		{"collaboration", "enterprise", "1.0.0", "Collaboration layer"},
+		{"compliance", "enterprise", "1.0.0", "Compliance center"},
+		{"intelligence", "isp", "1.0.0", "Email intelligence"},
+	}
+
+	for _, f := range flags {
+		var count int64
+		db.Model(&models.FeatureFlag{}).Where("name = ?", f.Name).Count(&count)
+		if count == 0 {
+			db.Create(&models.FeatureFlag{
+				Name:          f.Name,
+				Enabled:       true,
+				TierRequired:  f.TierRequired,
+				ModuleVersion: f.ModuleVersion,
+				Description:   f.Description,
+			})
+		}
+	}
+
+	logger.Info("feature flags seeded")
+}
