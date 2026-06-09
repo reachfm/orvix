@@ -20,17 +20,200 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 CURRENT_STEP="preflight"
+CURRENT_PERCENT=0
+CURRENT_STEP_LABEL="Preparing system"
+STEP_LABELS=(
+	"Preparing system"
+	"Installing dependencies"
+	"Creating service account"
+	"Collecting admin settings"
+	"Installing Orvix binary"
+	"Writing configuration"
+	"Starting services"
+	"Verifying install"
+)
+STEP_STATUS=(
+	"PENDING"
+	"PENDING"
+	"PENDING"
+	"PENDING"
+	"PENDING"
+	"PENDING"
+	"PENDING"
+	"PENDING"
+)
 
-print_banner() {
-	cat <<'BANNER'
-   ___                 _
-  / _ \ _ __ __   __(_)__  __
- | | | | '__|\ \ / /| |\ \/ /
- | |_| | |    \ V / | | >  <
-  \___/|_|     \_/  |_|/_/\_\
+clear_screen() {
+	printf '\033[H\033[2J'
+}
 
- RC1 Clean Installer
-BANNER
+progress_bar() {
+	local percent="$1"
+	local width=30
+	local filled=$((percent * width / 100))
+	local empty=$((width - filled))
+	local bar=""
+	local i
+	for ((i = 0; i < filled; i++)); do
+		bar="${bar}#"
+	done
+	for ((i = 0; i < empty; i++)); do
+		bar="${bar}-"
+	done
+	printf '[%s] %s%%' "$bar" "$percent"
+}
+
+step_index() {
+	case "$1" in
+		preparing) echo 0 ;;
+		dependencies) echo 1 ;;
+		user) echo 2 ;;
+		configuration-input) echo 3 ;;
+		binary) echo 4 ;;
+		configuration) echo 5 ;;
+		systemd) echo 6 ;;
+		verification) echo 7 ;;
+		*) echo 0 ;;
+	esac
+}
+
+status_line() {
+	local status="$1"
+	local label="$2"
+	case "$status" in
+		PASS) printf '%b%-8s%b %s\n' "$GREEN" "$status" "$NC" "$label" ;;
+		RUNNING) printf '%b%-8s%b %s\n' "$YELLOW" "$status" "$NC" "$label" ;;
+		FAIL) printf '%b%-8s%b %s\n' "$RED" "$status" "$NC" "$label" ;;
+		*) printf '%-8s %s\n' "$status" "$label" ;;
+	esac
+}
+
+render_dashboard() {
+	clear_screen
+	cat <<'HEADER'
+=========================================================
+                 ORVIX MAIL PLATFORM
+              RC1 CLEAN INSTALLER
+=========================================================
+
+HEADER
+	progress_bar "$CURRENT_PERCENT"
+	printf '\n\nCurrent Step:\n[%s%%] %s\n\nStatus:\n' "$CURRENT_PERCENT" "$CURRENT_STEP_LABEL"
+	local i
+	for i in "${!STEP_LABELS[@]}"; do
+		status_line "${STEP_STATUS[$i]}" "${STEP_LABELS[$i]}"
+	done
+	cat <<FOOTER
+
+Detailed log:
+$INSTALL_LOG
+
+=========================================================
+FOOTER
+}
+
+set_step() {
+	local key="$1"
+	local label="$2"
+	local percent="$3"
+	local index
+	index="$(step_index "$key")"
+	CURRENT_STEP="$label"
+	CURRENT_STEP_LABEL="$label"
+	CURRENT_PERCENT="$percent"
+	local i
+	for i in "${!STEP_STATUS[@]}"; do
+		if [ "$i" -lt "$index" ]; then
+			STEP_STATUS[$i]="PASS"
+		elif [ "$i" -eq "$index" ]; then
+			STEP_STATUS[$i]="RUNNING"
+		else
+			STEP_STATUS[$i]="PENDING"
+		fi
+	done
+	render_dashboard
+	log_detail "STEP ${percent}%: $label"
+}
+
+render_failure() {
+	local failed_step="${1:-unknown}"
+	local index
+	index="$(step_index_by_label "$failed_step")"
+	if [ "$index" -ge 0 ]; then
+		STEP_STATUS[$index]="FAIL"
+	fi
+	clear_screen
+	cat <<HEADER
+${RED}=========================================================
+                 ORVIX MAIL PLATFORM
+                 INSTALLATION FAILED
+=========================================================${NC}
+
+Failed Step:
+$failed_step
+
+Detailed log:
+$INSTALL_LOG
+
+Last 80 log lines:
+HEADER
+	if [ -f "$INSTALL_LOG" ]; then
+		tail -n 80 "$INSTALL_LOG" || true
+	fi
+	cat <<FOOTER
+
+${RED}=========================================================${NC}
+FOOTER
+}
+
+step_index_by_label() {
+	local label="$1"
+	local i
+	for i in "${!STEP_LABELS[@]}"; do
+		if [ "${STEP_LABELS[$i]}" = "$label" ]; then
+			echo "$i"
+			return
+		fi
+	done
+	echo "-1"
+}
+
+render_success() {
+	local domain="$1"
+	local server_ip="$2"
+	local admin_email="$3"
+	local i
+	for i in "${!STEP_STATUS[@]}"; do
+		STEP_STATUS[$i]="PASS"
+	done
+	CURRENT_PERCENT=100
+	CURRENT_STEP_LABEL="Installation complete"
+	clear_screen
+	cat <<HEADER
+${GREEN}=========================================================
+                 ORVIX MAIL PLATFORM
+              INSTALLATION COMPLETE
+=========================================================${NC}
+
+HEADER
+	progress_bar "$CURRENT_PERCENT"
+	cat <<BODY
+
+Admin UI: http://admin.${domain}
+Mail Hostname: mail.${domain}
+SMTP: mail.${domain}:25
+IMAP: mail.${domain}:143
+POP3: mail.${domain}:110
+
+DNS required: A admin.${domain} -> ${server_ip}
+DNS required: A mail.${domain} -> ${server_ip}
+
+Temporary Admin API: http://${server_ip}:8080/admin
+Admin email: ${admin_email}
+Detailed log: ${INSTALL_LOG}
+
+${GREEN}=========================================================${NC}
+BODY
 }
 
 prepare_log() {
@@ -43,12 +226,6 @@ log_detail() {
 	printf '[%s] %s\n' "$(date -Is)" "$*" >>"$INSTALL_LOG"
 }
 
-step() {
-	CURRENT_STEP="$1"
-	printf '%b\n' "${BOLD}==>${NC} $2"
-	log_detail "STEP $1: $2"
-}
-
 run_quiet() {
 	log_detail "RUN $*"
 	"$@" >>"$INSTALL_LOG" 2>&1
@@ -56,22 +233,16 @@ run_quiet() {
 
 on_error() {
 	local exit_code=$?
-	echo -e "${RED}Installation failed during step:${NC} ${CURRENT_STEP:-unknown}" >&2
-	echo "Detailed log: $INSTALL_LOG" >&2
-	if [ -f "$INSTALL_LOG" ]; then
-		echo "Last 80 log lines:" >&2
-		tail -n 80 "$INSTALL_LOG" >&2 || true
-	fi
+	render_failure "${CURRENT_STEP:-unknown}" >&2
 	exit "$exit_code"
 }
 
 fail() {
-    echo -e "${RED}ERROR:${NC} $*" >&2
-    if [ -f "$INSTALL_LOG" ]; then
-        echo "Detailed log: $INSTALL_LOG" >&2
-        echo "Last 80 log lines:" >&2
-        tail -n 80 "$INSTALL_LOG" >&2 || true
+    if [ -d "$(dirname "$INSTALL_LOG")" ]; then
+        log_detail "ERROR: $*" || true
     fi
+    render_failure "${CURRENT_STEP:-unknown}" >&2
+    echo -e "${RED}ERROR:${NC} $*" >&2
     exit 1
 }
 
@@ -350,10 +521,11 @@ main() {
 	require_root
 	prepare_log
 	trap on_error ERR
-	print_banner
 	log_detail "Orvix RC1 clean installer started"
 
-	step "dependencies" "Installing system dependencies"
+	set_step "preparing" "Preparing system" 10
+
+	set_step "dependencies" "Installing dependencies" 20
 	run_quiet apt-get update -qq
 	run_quiet apt-get install -y -qq \
 		-o Dpkg::Options::=--force-confdef \
@@ -361,47 +533,45 @@ main() {
 		ca-certificates curl tar gzip redis-server libcap2-bin iproute2
 	run_quiet systemctl enable --now redis-server
 
-    step "user" "Creating service account"
+    set_step "user" "Creating service account" 35
     if ! id -u orvix >/dev/null 2>&1; then
         run_quiet useradd --system --user-group --create-home --home-dir /var/lib/orvix --shell /usr/sbin/nologin orvix
     fi
 
-    step "directories" "Preparing directories"
     run_quiet install -d -o orvix -g orvix -m 0750 /etc/orvix /var/lib/orvix /var/lib/orvix/coremail /var/lib/orvix/backups /var/log/orvix
     run_quiet install -d -o root -g root -m 0755 /usr/share/orvix/admin
 
-    step "configuration-input" "Collecting admin settings"
+    set_step "configuration-input" "Collecting admin settings" 45
     local primary_domain admin_email admin_password
     primary_domain="$(prompt_domain)"
     admin_email="$(prompt_email)"
     admin_password="$(prompt_password)"
 
-    step "binary" "Installing Orvix binary"
+    set_step "binary" "Installing Orvix binary" 60
     install_binary
     run_quiet chown root:root "$ORVIX_BIN"
     run_quiet chmod 0755 "$ORVIX_BIN"
     run_quiet setcap 'cap_net_bind_service=+ep' "$ORVIX_BIN"
 
-    step "configuration" "Writing configuration"
+    set_step "configuration" "Writing configuration" 75
     write_config "$primary_domain"
     write_bootstrap_env "$admin_email" "$admin_password"
     run_quiet install -m 0644 "$ORVIX_SOURCE_DIR/release/admin/index.html" /usr/share/orvix/admin/index.html
 
-    step "systemd" "Starting Orvix service"
+    set_step "systemd" "Starting services" 85
     write_service
     run_quiet systemctl daemon-reload
     run_quiet systemctl enable orvix
     run_quiet systemctl restart orvix
 
-    step "verification" "Verifying services and login"
+    set_step "verification" "Verifying install" 95
     run_quiet sleep 5
     verify_install "$admin_email" "$admin_password"
 
-    echo -e "${GREEN}PASS${NC} Orvix RC1 clean install verified"
-    echo "Admin UI: http://mail.${primary_domain}:8080/admin"
-    echo "Admin UI: http://$(hostname -f 2>/dev/null || hostname):8080/admin"
-    echo "Admin email: $admin_email"
-    echo "Detailed log: $INSTALL_LOG"
+    local server_ip
+    server_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    server_ip="${server_ip:-127.0.0.1}"
+    render_success "$primary_domain" "$server_ip" "$admin_email"
 }
 
 main "$@"

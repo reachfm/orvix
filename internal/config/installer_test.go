@@ -30,7 +30,18 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"export DEBIAN_FRONTEND=noninteractive",
 		"export NEEDRESTART_MODE=a",
 		"INSTALL_LOG=\"${INSTALL_LOG:-/var/log/orvix/install.log}\"",
-		"RC1 Clean Installer",
+		"ORVIX MAIL PLATFORM",
+		"RC1 CLEAN INSTALLER",
+		"progress_bar()",
+		"set_step \"preparing\" \"Preparing system\" 10",
+		"set_step \"dependencies\" \"Installing dependencies\" 20",
+		"set_step \"user\" \"Creating service account\" 35",
+		"set_step \"configuration-input\" \"Collecting admin settings\" 45",
+		"set_step \"binary\" \"Installing Orvix binary\" 60",
+		"set_step \"configuration\" \"Writing configuration\" 75",
+		"set_step \"systemd\" \"Starting services\" 85",
+		"set_step \"verification\" \"Verifying install\" 95",
+		"render_success",
 		"trap on_error ERR",
 		"tail -n 80 \"$INSTALL_LOG\"",
 		"run_quiet apt-get update -qq",
@@ -51,12 +62,29 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"ORVIX_ADMIN_PASSWORD",
 		"/api/v1/auth/login",
 		"journalctl -u orvix.service -n 80 --no-pager",
-		"Admin UI: http://mail.${primary_domain}:8080/admin",
-		"Admin UI: http://$(hostname -f 2>/dev/null || hostname):8080/admin",
+		"Admin UI: http://admin.${domain}",
+		"Mail Hostname: mail.${domain}",
+		"SMTP: mail.${domain}:25",
+		"IMAP: mail.${domain}:143",
+		"POP3: mail.${domain}:110",
+		"DNS required: A admin.${domain} -> ${server_ip}",
+		"DNS required: A mail.${domain} -> ${server_ip}",
+		"Temporary Admin API: http://${server_ip}:8080/admin",
 	}
 	for _, item := range required {
 		if !strings.Contains(installer, item) {
 			t.Fatalf("installer missing %q", item)
+		}
+	}
+	forbidden := []string{
+		"Admin UI: http://mail.${primary_domain}:8080/admin",
+		"Admin UI: http://$(hostname -f 2>/dev/null || hostname):8080/admin",
+		"hostname -f 2>/dev/null || hostname",
+		"==>",
+	}
+	for _, item := range forbidden {
+		if strings.Contains(installer, item) {
+			t.Fatalf("installer must not contain %q", item)
 		}
 	}
 	if strings.Contains(strings.ToLower(installer), "stalwart") {
