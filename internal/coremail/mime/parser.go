@@ -9,20 +9,20 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/textproto"
-	"path/filepath"
+	"path"
 	"strings"
 	"time"
 )
 
 // Part represents a single MIME part extracted from a message.
 type Part struct {
-	Headers    textproto.MIMEHeader
-	Body       []byte
-	Filename   string
-	ContentType string
-	ContentID  string
+	Headers      textproto.MIMEHeader
+	Body         []byte
+	Filename     string
+	ContentType  string
+	ContentID    string
 	IsAttachment bool
-	Size       int
+	Size         int
 }
 
 // ExtractParts parses RFC822 message bytes and returns all MIME parts.
@@ -165,10 +165,17 @@ func sanitizeFilename(name string) string {
 	if name == "" {
 		return ""
 	}
-	// Remove path separators to prevent path traversal.
-	name = filepath.Base(name)
 	// Remove null bytes.
 	name = strings.ReplaceAll(name, "\x00", "")
+	// Treat Windows and Unix separators the same on every platform.
+	name = strings.ReplaceAll(name, "\\", "/")
+	if len(name) >= 2 && name[1] == ':' && ((name[0] >= 'A' && name[0] <= 'Z') || (name[0] >= 'a' && name[0] <= 'z')) {
+		name = strings.TrimLeft(name[2:], "/")
+	}
+	name = path.Base(name)
+	if name == "." || name == ".." {
+		return ""
+	}
 	return name
 }
 
