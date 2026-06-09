@@ -49,7 +49,8 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"-o Dpkg::Options::=--force-confdef",
 		"-o Dpkg::Options::=--force-confold",
 		"systemctl enable --now redis-server",
-		"install -m 0644 \"$ORVIX_SOURCE_DIR/release/admin/index.html\" /usr/share/orvix/admin/index.html",
+		"cp -R \"$ORVIX_SOURCE_DIR\"/release/admin/. /usr/share/orvix/admin/",
+		"find /usr/share/orvix/admin -type f -exec chmod 0644 {} +",
 		"admin_ui_dir: /usr/share/orvix/admin",
 		"coremail:",
 		"enabled: true",
@@ -190,15 +191,49 @@ func TestReleaseAdminLoginPageExists(t *testing.T) {
 		t.Fatalf("read admin page: %v", err)
 	}
 	page := string(pageBytes)
+	appBytes, err := os.ReadFile(filepath.Join(root, "release", "admin", "app.js"))
+	if err != nil {
+		t.Fatalf("read admin app: %v", err)
+	}
+	styleBytes, err := os.ReadFile(filepath.Join(root, "release", "admin", "styles.css"))
+	if err != nil {
+		t.Fatalf("read admin styles: %v", err)
+	}
+	bundle := page + "\n" + string(appBytes) + "\n" + string(styleBytes)
 	for _, item := range []string{
-		"Orvix Admin",
+		"Orvix Mail Platform",
 		"login-form",
+		"Sign in to Orvix Admin",
 		"/api/v1/auth/login",
+		"/api/v1/health",
 		"/api/v1/me",
 		"Dashboard",
+		"Domains",
+		"Mailboxes",
+		"Queue",
+		"Logs",
+		"Settings",
+		"CoreMail Runtime",
+		"SMTP",
+		"IMAP",
+		"POP3",
+		"Redis / Queue",
+		"/admin/styles.css",
+		"/admin/app.js",
 	} {
-		if !strings.Contains(page, item) {
-			t.Fatalf("admin page missing %q", item)
+		if !strings.Contains(bundle, item) {
+			t.Fatalf("admin bundle missing %q", item)
+		}
+	}
+	for _, item := range []string{"<style>", "<script>"} {
+		if strings.Contains(page, item) {
+			t.Fatalf("admin page must not use inline CSP-blocked asset %q", item)
+		}
+	}
+
+	for _, asset := range []string{"styles.css", "app.js"} {
+		if _, err := os.Stat(filepath.Join(root, "release", "admin", asset)); err != nil {
+			t.Fatalf("admin asset %s missing: %v", asset, err)
 		}
 	}
 }

@@ -556,7 +556,10 @@ main() {
     set_step "configuration" "Writing configuration" 75
     write_config "$primary_domain"
     write_bootstrap_env "$admin_email" "$admin_password"
-    run_quiet install -m 0644 "$ORVIX_SOURCE_DIR/release/admin/index.html" /usr/share/orvix/admin/index.html
+    run_quiet cp -R "$ORVIX_SOURCE_DIR"/release/admin/. /usr/share/orvix/admin/
+    run_quiet chown -R root:root /usr/share/orvix/admin
+    run_quiet find /usr/share/orvix/admin -type d -exec chmod 0755 {} +
+    run_quiet find /usr/share/orvix/admin -type f -exec chmod 0644 {} +
 
     set_step "systemd" "Starting services" 85
     write_service

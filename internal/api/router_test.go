@@ -1,6 +1,7 @@
 package api
 
 import (
+	"io"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -75,6 +76,28 @@ func TestAdminUIStaticRoutes(t *testing.T) {
 		}
 		if resp.StatusCode != 200 {
 			t.Fatalf("%s expected 200, got %d", path, resp.StatusCode)
+		}
+	}
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{"/admin/styles.css", ".app-shell"},
+		{"/admin/app.js", "/api/v1/auth/login"},
+	} {
+		resp, err := router.App().Test(httptest.NewRequest("GET", tc.path, nil))
+		if err != nil {
+			t.Fatalf("%s request: %v", tc.path, err)
+		}
+		if resp.StatusCode != 200 {
+			t.Fatalf("%s expected 200, got %d", tc.path, resp.StatusCode)
+		}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("%s body: %v", tc.path, err)
+		}
+		if !strings.Contains(string(body), tc.want) {
+			t.Fatalf("%s missing %q", tc.path, tc.want)
 		}
 	}
 	resp, err := router.App().Test(httptest.NewRequest("HEAD", "/admin", nil))

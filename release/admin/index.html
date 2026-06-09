@@ -4,131 +4,186 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Orvix Admin</title>
-  <style>
-    :root {
-      color-scheme: dark;
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #0c0e12;
-      color: #e8eaf0;
-    }
-    * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100vh; background: #0c0e12; }
-    main { min-height: 100vh; display: grid; place-items: center; padding: 32px; }
-    .panel { width: min(440px, 100%); border: 1px solid #2a2f3e; background: #13161c; border-radius: 8px; padding: 28px; }
-    .dashboard { width: min(960px, 100%); }
-    h1 { margin: 0 0 6px; font-size: 24px; font-weight: 650; }
-    p { margin: 0; color: #9aa3b8; line-height: 1.5; }
-    form { display: grid; gap: 14px; margin-top: 24px; }
-    label { display: grid; gap: 7px; color: #cdd3df; font-size: 13px; }
-    input { width: 100%; border: 1px solid #343b4d; background: #0c0e12; color: #e8eaf0; border-radius: 6px; padding: 11px 12px; font-size: 15px; }
-    button { border: 0; border-radius: 6px; background: #4f7cff; color: white; padding: 11px 14px; font-weight: 650; cursor: pointer; }
-    button.secondary { background: #222736; color: #e8eaf0; }
-    button:disabled { opacity: .65; cursor: wait; }
-    .error { margin-top: 14px; color: #fca5a5; min-height: 22px; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; margin-top: 24px; }
-    .card { border: 1px solid #2a2f3e; background: #10131a; border-radius: 8px; padding: 18px; }
-    .card strong { display: block; margin-top: 8px; font-size: 20px; }
-    .topbar { display: flex; justify-content: space-between; gap: 16px; align-items: center; }
-    .hidden { display: none; }
-  </style>
+  <link rel="stylesheet" href="/admin/styles.css">
 </head>
 <body>
-  <main>
-    <section id="login-panel" class="panel">
-      <h1>Orvix Admin</h1>
-      <p>Sign in with the installer admin credentials.</p>
-      <form id="login-form">
-        <label>Email
-          <input id="email" name="email" type="email" autocomplete="username" required>
-        </label>
-        <label>Password
-          <input id="password" name="password" type="password" autocomplete="current-password" required>
-        </label>
-        <button id="login-button" type="submit">Sign In</button>
-      </form>
-      <div id="login-error" class="error" role="alert"></div>
-    </section>
+  <section id="login-view" class="login-shell">
+    <aside class="login-brand">
+      <div>
+        <div class="mark">O</div>
+        <div class="brand-title">Orvix Mail Platform</div>
+        <p class="brand-copy">Admin control for domains, mailboxes, delivery queues, runtime health, and operational logs.</p>
+      </div>
+      <p class="brand-copy">RC1 administrative console</p>
+    </aside>
+    <main class="login-card-wrap">
+      <section class="login-card" aria-labelledby="login-title">
+        <div class="eyebrow">Administrator Access</div>
+        <h1 id="login-title">Sign in to Orvix Admin</h1>
+        <p class="subtle">Use the administrator credentials configured during installation.</p>
+        <form id="login-form">
+          <label>Email
+            <input id="email" name="email" type="email" autocomplete="username" required>
+          </label>
+          <label>Password
+            <input id="password" name="password" type="password" autocomplete="current-password" required>
+          </label>
+          <button id="login-button" class="primary-btn" type="submit">Sign In</button>
+        </form>
+        <div id="login-message" class="message error" role="alert"></div>
+      </section>
+    </main>
+  </section>
 
-    <section id="dashboard-panel" class="panel dashboard hidden">
-      <div class="topbar">
+  <section id="app-view" class="app-shell hidden">
+    <aside class="sidebar">
+      <div class="side-brand">
+        <div class="mark">O</div>
         <div>
-          <h1>Dashboard</h1>
-          <p id="identity">Signed in</p>
+          <strong>Orvix Admin</strong>
+          <span>Mail operations</span>
         </div>
-        <button class="secondary" id="logout-button" type="button">Sign Out</button>
       </div>
-      <div class="grid">
-        <div class="card"><span>API Health</span><strong id="health-status">Checking</strong></div>
-        <div class="card"><span>Admin API</span><strong>Connected</strong></div>
-        <div class="card"><span>CoreMail</span><strong>Runtime Enabled</strong></div>
-        <div class="card"><span>Queue</span><strong>Ready</strong></div>
+      <nav class="nav" aria-label="Admin navigation">
+        <button type="button" class="active" data-page="dashboard"><span class="nav-icon">D</span>Dashboard</button>
+        <button type="button" data-page="domains"><span class="nav-icon">@</span>Domains</button>
+        <button type="button" data-page="mailboxes"><span class="nav-icon">M</span>Mailboxes</button>
+        <button type="button" data-page="queue"><span class="nav-icon">Q</span>Queue</button>
+        <button type="button" data-page="logs"><span class="nav-icon">L</span>Logs</button>
+        <button type="button" data-page="settings"><span class="nav-icon">S</span>Settings</button>
+      </nav>
+      <div class="sidebar-footer">
+        <strong>RC1 Clean Path</strong><br>
+        CoreMail native runtime, Redis queue, and Admin API.
       </div>
-    </section>
-  </main>
+    </aside>
 
-  <script>
-    const loginPanel = document.getElementById("login-panel");
-    const dashboardPanel = document.getElementById("dashboard-panel");
-    const form = document.getElementById("login-form");
-    const error = document.getElementById("login-error");
-    const button = document.getElementById("login-button");
-    const identity = document.getElementById("identity");
-    const healthStatus = document.getElementById("health-status");
-    const logout = document.getElementById("logout-button");
+    <div class="content">
+      <header class="topbar">
+        <div class="top-title">
+          <strong>Orvix Mail Platform</strong>
+          <span id="page-subtitle">System command center</span>
+        </div>
+        <div class="profile">
+          <div class="profile-meta">
+            <div id="admin-email" class="profile-email">Signed in</div>
+            <div id="admin-role" class="profile-role">admin</div>
+          </div>
+          <button id="logout-button" class="ghost-btn" type="button">Sign Out</button>
+        </div>
+      </header>
 
-    function showDashboard(profile) {
-      identity.textContent = `${profile.email} (${profile.role})`;
-      loginPanel.classList.add("hidden");
-      dashboardPanel.classList.remove("hidden");
-      fetch("/api/v1/health").then(r => {
-        healthStatus.textContent = r.ok ? "OK" : "Error";
-      }).catch(() => healthStatus.textContent = "Error");
-    }
+      <main class="workspace">
+        <div id="global-alert" class="alert hidden"></div>
 
-    async function loadProfile(token) {
-      const res = await fetch("/api/v1/me", {
-        headers: { "Authorization": `Bearer ${token}` }
-      });
-      if (!res.ok) throw new Error("profile check failed");
-      return await res.json();
-    }
+        <section class="page" data-page-view="dashboard">
+          <div class="page-head">
+            <div>
+              <h2>Dashboard</h2>
+              <p>Operational status for the RC1 mail runtime.</p>
+            </div>
+            <div class="status-pill"><span id="overall-dot" class="dot warn"></span><span id="overall-status">Checking system</span></div>
+          </div>
+          <div class="card-grid">
+            <article class="card">
+              <div>
+                <div class="card-label">API Health</div>
+                <div id="api-health" class="card-value">Checking</div>
+              </div>
+              <div id="api-health-note" class="card-note">Reading /api/v1/health</div>
+            </article>
+            <article class="card">
+              <div>
+                <div class="card-label">CoreMail Runtime</div>
+                <div id="coremail-runtime" class="card-value">Checking</div>
+              </div>
+              <div class="card-note">SMTP, IMAP, POP3, JMAP, and workers are managed by the CoreMail runtime.</div>
+            </article>
+            <article class="card">
+              <div>
+                <div class="card-label">SMTP</div>
+                <div id="smtp-status" class="card-value">Checking</div>
+              </div>
+              <div class="card-note">Inbound and outbound mail service on port 25.</div>
+            </article>
+            <article class="card">
+              <div>
+                <div class="card-label">IMAP</div>
+                <div id="imap-status" class="card-value">Checking</div>
+              </div>
+              <div class="card-note">Mailbox access service on port 143.</div>
+            </article>
+            <article class="card">
+              <div>
+                <div class="card-label">POP3</div>
+                <div id="pop3-status" class="card-value">Checking</div>
+              </div>
+              <div class="card-note">Legacy retrieval service on port 110.</div>
+            </article>
+            <article class="card">
+              <div>
+                <div class="card-label">Redis / Queue</div>
+                <div id="queue-status" class="card-value">Checking</div>
+              </div>
+              <div id="queue-note" class="card-note">Reading queue state from Admin API.</div>
+            </article>
+          </div>
+          <div class="split">
+            <section class="panel">
+              <div class="panel-head">
+                <h3>Recent Queue</h3>
+                <button class="ghost-btn" type="button" data-refresh="queue">Refresh</button>
+              </div>
+              <div class="panel-body" id="queue-preview"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-head">
+                <h3>System Notes</h3>
+              </div>
+              <div class="panel-body">
+                <div class="setting-row"><div><strong>Admin API</strong><span>Used for authentication and system data.</span></div><span id="admin-api-note">Ready</span></div>
+                <div class="setting-row"><div><strong>Runtime view</strong><span>Displayed from health and queue evidence available in RC1.</span></div><span>Read only</span></div>
+                <div class="setting-row"><div><strong>Logs</strong><span>Operational log access depends on configured audit endpoints.</span></div><span>API backed</span></div>
+              </div>
+            </section>
+          </div>
+        </section>
 
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      error.textContent = "";
-      button.disabled = true;
-      try {
-        const payload = {
-          email: document.getElementById("email").value,
-          password: document.getElementById("password").value
-        };
-        const res = await fetch("/api/v1/auth/login", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload)
-        });
-        if (!res.ok) throw new Error("invalid credentials");
-        const data = await res.json();
-        if (!data.access_token) throw new Error("login did not return an access token");
-        sessionStorage.setItem("orvix_access_token", data.access_token);
-        showDashboard(await loadProfile(data.access_token));
-      } catch (err) {
-        error.textContent = err.message || "login failed";
-      } finally {
-        button.disabled = false;
-      }
-    });
+        <section class="page hidden" data-page-view="domains">
+          <div class="page-head"><div><h2>Domains</h2><p>Provisioned mail domains visible to the Admin API.</p></div><button class="ghost-btn" type="button" data-refresh="domains">Refresh</button></div>
+          <section class="panel"><div class="panel-body" id="domains-table"></div></section>
+        </section>
 
-    logout.addEventListener("click", () => {
-      sessionStorage.removeItem("orvix_access_token");
-      dashboardPanel.classList.add("hidden");
-      loginPanel.classList.remove("hidden");
-    });
+        <section class="page hidden" data-page-view="mailboxes">
+          <div class="page-head"><div><h2>Mailboxes</h2><p>Mailbox and administrator accounts available from the users endpoint.</p></div><button class="ghost-btn" type="button" data-refresh="mailboxes">Refresh</button></div>
+          <section class="panel"><div class="panel-body" id="mailboxes-table"></div></section>
+        </section>
 
-    const existing = sessionStorage.getItem("orvix_access_token");
-    if (existing) {
-      loadProfile(existing).then(showDashboard).catch(() => sessionStorage.removeItem("orvix_access_token"));
-    }
-  </script>
+        <section class="page hidden" data-page-view="queue">
+          <div class="page-head"><div><h2>Queue</h2><p>Current message queue entries reported by Admin API.</p></div><button class="ghost-btn" type="button" data-refresh="queue">Refresh</button></div>
+          <section class="panel"><div class="panel-body" id="queue-table"></div></section>
+        </section>
+
+        <section class="page hidden" data-page-view="logs">
+          <div class="page-head"><div><h2>Logs</h2><p>Audit and operational signals for administrator activity.</p></div><button class="ghost-btn" type="button" data-refresh="logs">Refresh</button></div>
+          <section class="panel"><div class="panel-body" id="logs-table"></div></section>
+        </section>
+
+        <section class="page hidden" data-page-view="settings">
+          <div class="page-head"><div><h2>Settings</h2><p>RC1 deployment settings and service expectations.</p></div></div>
+          <section class="panel">
+            <div class="panel-body">
+              <div class="setting-row"><div><strong>Admin UI path</strong><span>Served by Orvix at /admin.</span></div><span>/admin</span></div>
+              <div class="setting-row"><div><strong>Authentication</strong><span>Uses /api/v1/auth/login and /api/v1/me.</span></div><span>JWT</span></div>
+              <div class="setting-row"><div><strong>CoreMail services</strong><span>Expected runtime listeners for SMTP, IMAP, POP3, and JMAP.</span></div><span>Enabled</span></div>
+              <div class="setting-row"><div><strong>Queue dependency</strong><span>Redis must be active for production queue operation.</span></div><span>Redis</span></div>
+            </div>
+          </section>
+        </section>
+      </main>
+    </div>
+  </section>
+
+  <script src="/admin/app.js" defer></script>
 </body>
 </html>
