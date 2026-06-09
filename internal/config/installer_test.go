@@ -1,7 +1,9 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -25,7 +27,10 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 	installer := string(installerBytes)
 
 	required := []string{
-		"apt-get install -y -qq ca-certificates curl tar gzip redis-server libcap2-bin iproute2",
+		"export DEBIAN_FRONTEND=noninteractive",
+		"export NEEDRESTART_MODE=a",
+		"apt-get install -y -qq",
+		"-o Dpkg::Options::=--force-confdef",
 		"systemctl enable --now redis-server",
 		"install -m 0644 \"$ORVIX_SOURCE_DIR/release/admin/index.html\" /usr/share/orvix/admin/index.html",
 		"admin_ui_dir: /usr/share/orvix/admin",
@@ -39,6 +44,7 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"ORVIX_ADMIN_EMAIL",
 		"ORVIX_ADMIN_PASSWORD",
 		"/api/v1/auth/login",
+		"journalctl -u orvix.service -n 80 --no-pager",
 	}
 	for _, item := range required {
 		if !strings.Contains(installer, item) {
@@ -47,6 +53,51 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(installer), "stalwart") {
 		t.Fatal("RC1 clean installer must not reference Stalwart")
+	}
+}
+
+func TestInstallerLoginPayloadGeneration(t *testing.T) {
+	root := repoRoot(t)
+	installerBytes, err := os.ReadFile(filepath.Join(root, "release", "install.sh"))
+	if err != nil {
+		t.Fatalf("read installer: %v", err)
+	}
+	installer := string(installerBytes)
+	if !strings.Contains(installer, `main "$@"`) {
+		t.Fatal("installer entrypoint marker not found")
+	}
+	harness := strings.Replace(installer, `main "$@"`, `build_login_payload "$1" "$2"`, 1)
+	harnessDir := t.TempDir()
+	harnessPath := filepath.Join(harnessDir, "payload.sh")
+	if err := os.WriteFile(harnessPath, []byte(harness), 0755); err != nil {
+		t.Fatalf("write harness: %v", err)
+	}
+
+	tests := []struct {
+		email    string
+		password string
+	}{
+		{"admin@example.com", "PlainPassword123!"},
+		{"admin@example.com", `P@ss"word!`},
+		{"admin@example.com", "P@ssword with spaces and punctuation!"},
+	}
+	for _, tt := range tests {
+		cmd := exec.Command("bash", "payload.sh", tt.email, tt.password)
+		cmd.Dir = harnessDir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("payload command failed: %v: %s", err, string(out))
+		}
+		var payload map[string]string
+		if err := json.Unmarshal(out, &payload); err != nil {
+			t.Fatalf("payload is not JSON: %q: %v", string(out), err)
+		}
+		if payload["email"] != tt.email {
+			t.Fatalf("email mismatch: %q", payload["email"])
+		}
+		if payload["password"] != tt.password {
+			t.Fatalf("password mismatch: %q", payload["password"])
+		}
 	}
 }
 

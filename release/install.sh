@@ -9,6 +9,9 @@ ORVIX_SOURCE_DIR="${ORVIX_SOURCE_DIR:-$(pwd)}"
 ORVIX_BIN="${ORVIX_BIN:-/usr/local/bin/orvix}"
 ORVIX_CONFIG="${ORVIX_CONFIG:-/etc/orvix/orvix.yaml}"
 
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+
 BOLD='\033[1m'
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -59,7 +62,23 @@ prompt_password() {
 }
 
 version_ge() {
-    [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]
+	[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]
+}
+
+json_escape() {
+	local value="$1"
+	value="${value//\\/\\\\}"
+	value="${value//\"/\\\"}"
+	value="${value//$'\n'/\\n}"
+	value="${value//$'\r'/\\r}"
+	value="${value//$'\t'/\\t}"
+	printf '%s' "$value"
+}
+
+build_login_payload() {
+	local email="$1"
+	local password="$2"
+	printf '{"email":"%s","password":"%s"}' "$(json_escape "$email")" "$(json_escape "$password")"
 }
 
 install_go_toolchain() {
@@ -244,31 +263,49 @@ ENV
 }
 
 verify_install() {
-    local email="$1"
-    local password="$2"
+	local email="$1"
+	local password="$2"
+	local login_endpoint="http://127.0.0.1:8080/api/v1/auth/login"
 
-    systemctl is-active --quiet redis-server || fail "redis-server is not active"
-    systemctl is-active --quiet orvix || fail "orvix is not active"
+	systemctl is-active --quiet redis-server || fail "redis-server is not active"
+	systemctl is-active --quiet orvix || fail "orvix is not active"
     curl -fsS http://127.0.0.1:8080/api/v1/health >/dev/null || fail "health endpoint failed"
     curl -fsSI http://127.0.0.1:8080/admin >/dev/null || fail "admin UI endpoint failed"
 
     for port in 25 110 143 8080 6379; do
         ss -ltn "( sport = :$port )" | grep -q ":$port" || fail "port $port is not listening"
-    done
+	done
 
-    local login_payload
-    login_payload="$(printf '{"email":"%s","password":"%s"}' "$email" "$password")"
-    curl -fsS -H 'Content-Type: application/json' -d "$login_payload" \
-        http://127.0.0.1:8080/api/v1/auth/login >/dev/null || fail "admin API login failed"
+	local login_payload response_file http_code
+	login_payload="$(build_login_payload "$email" "$password")"
+	response_file="$(mktemp)"
+	http_code="$(curl -sS -o "$response_file" -w "%{http_code}" -H 'Content-Type: application/json' -d "$login_payload" "$login_endpoint" || true)"
+	if [ "$http_code" != "200" ]; then
+		echo -e "${RED}Admin API login verification failed${NC}" >&2
+		echo "Endpoint: $login_endpoint" >&2
+		echo "Request shape: {\"email\":\"$email\",\"password\":\"[REDACTED]\",\"password_length\":${#password}}" >&2
+		echo "HTTP status: ${http_code:-curl_failed}" >&2
+		echo "Response body:" >&2
+		cat "$response_file" >&2 || true
+		echo >&2
+		echo "Recent Orvix journal:" >&2
+		journalctl -u orvix.service -n 80 --no-pager >&2 || true
+		rm -f "$response_file"
+		fail "admin API login failed"
+	fi
+	rm -f "$response_file"
 }
 
 main() {
     require_root
     echo -e "${BOLD}Orvix RC1 clean installer${NC}"
 
-    CURRENT_STEP="dependencies"
-    apt-get update -qq
-    apt-get install -y -qq ca-certificates curl tar gzip redis-server libcap2-bin iproute2
+	CURRENT_STEP="dependencies"
+	apt-get update -qq
+	apt-get install -y -qq \
+		-o Dpkg::Options::=--force-confdef \
+		-o Dpkg::Options::=--force-confold \
+		ca-certificates curl tar gzip redis-server libcap2-bin iproute2
     systemctl enable --now redis-server
 
     CURRENT_STEP="user"
