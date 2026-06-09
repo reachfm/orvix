@@ -1,12 +1,14 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/api"
@@ -232,8 +234,17 @@ func seedAdminUser(db *gorm.DB, authenticator *auth.Authenticator, logger *zap.L
 		return
 	}
 
+	sqlDB, err := db.DB()
+	if err != nil {
+		logger.Warn("failed to access database for admin bootstrap", zap.Error(err))
+		return
+	}
+
 	var count int64
-	db.Model(&models.User{}).Where("email = ?", adminEmail).Count(&count)
+	if err := sqlDB.QueryRow("SELECT COUNT(*) FROM users WHERE email = ?", adminEmail).Scan(&count); err != nil {
+		logger.Warn("failed to check existing admin user", zap.Error(err))
+		return
+	}
 	if count > 0 {
 		logger.Info("admin user already exists", zap.String("email", adminEmail))
 		return
@@ -253,30 +264,51 @@ func seedAdminUser(db *gorm.DB, authenticator *auth.Authenticator, logger *zap.L
 		tenantDomain = "local"
 	}
 
-	tenant := &models.Tenant{
-		Name:   tenantDomain,
-		Slug:   strings.ReplaceAll(tenantDomain, ".", "-"),
-		Domain: tenantDomain,
-		Plan:   "enterprise",
-		Active: true,
-	}
-	if err := db.Create(tenant).Error; err != nil {
-		logger.Warn("failed to create tenant", zap.Error(err))
-	}
-
-	admin := &models.User{
-		Email:         adminEmail,
-		PasswordHash:  hashedPassword,
-		Role:          "admin",
-		TenantID:      &tenant.ID,
-		Active:        true,
-		EmailVerified: true,
-	}
-
-	if err := db.Create(admin).Error; err != nil {
+	if err := insertBootstrapAdmin(sqlDB, adminEmail, hashedPassword, tenantDomain); err != nil {
 		logger.Warn("failed to create admin user", zap.Error(err))
 		return
 	}
 
 	logger.Info("admin user created", zap.String("email", adminEmail))
+}
+
+func insertBootstrapAdmin(db *sql.DB, adminEmail, hashedPassword, tenantDomain string) error {
+	now := time.Now().UTC()
+	slug := strings.ReplaceAll(tenantDomain, ".", "-")
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var tenantID int64
+	err = tx.QueryRow("SELECT id FROM tenants WHERE domain = ? AND deleted_at IS NULL", tenantDomain).Scan(&tenantID)
+	if err == sql.ErrNoRows {
+		res, err := tx.Exec(
+			`INSERT INTO tenants (created_at, updated_at, name, slug, domain, plan, active)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			now, now, tenantDomain, slug, tenantDomain, "enterprise", 1,
+		)
+		if err != nil {
+			return err
+		}
+		tenantID, err = res.LastInsertId()
+		if err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(
+		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		now, now, adminEmail, hashedPassword, "admin", tenantID, 1, 1,
+	)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }

@@ -1,40 +1,35 @@
 [Unit]
-Description=Orvix Email Server Platform
-Documentation=https://orvix.email/docs
-After=network.target
-Wants=network.target
+Description=Orvix RC1 Mail Server
+Documentation=https://github.com/reachfm/orvix
+After=network-online.target redis-server.service
+Wants=network-online.target redis-server.service
 
 [Service]
 Type=simple
 User=orvix
 Group=orvix
+WorkingDirectory=/var/lib/orvix
 ExecStart=/usr/local/bin/orvix serve
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
-RestartSec=10
+RestartSec=5
 
-# Security hardening
-ProtectSystem=full
-ProtectHome=true
-NoNewPrivileges=true
-PrivateTmp=true
-
-# File limits
-LimitNOFILE=65536
-LimitNPROC=4096
-
-# Environment
 Environment=ORVIX_CONFIG=/etc/orvix/orvix.yaml
 Environment=ORVIX_LOG_DIR=/var/log/orvix
+EnvironmentFile=-/etc/orvix/bootstrap.env
 
-# Logging
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/orvix /var/log/orvix /etc/orvix
+LimitNOFILE=65536
+
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=orvix
 
 [Install]
 WantedBy=multi-user.target
-
-# RC2 FIX: Removed StartLimitBurst and StartLimitIntervalSec
-# These directives are invalid on Ubuntu 22.04+ systemd
-# The Restart=always and RestartSec=10 provide sufficient restart behavior
