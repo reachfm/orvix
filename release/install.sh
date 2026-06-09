@@ -8,6 +8,7 @@ ORVIX_GO_VERSION="${ORVIX_GO_VERSION:-1.26.4}"
 ORVIX_SOURCE_DIR="${ORVIX_SOURCE_DIR:-$(pwd)}"
 ORVIX_BIN="${ORVIX_BIN:-/usr/local/bin/orvix}"
 ORVIX_CONFIG="${ORVIX_CONFIG:-/etc/orvix/orvix.yaml}"
+INSTALL_LOG="${INSTALL_LOG:-/var/log/orvix/install.log}"
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
@@ -20,8 +21,57 @@ NC='\033[0m'
 
 CURRENT_STEP="preflight"
 
+print_banner() {
+	cat <<'BANNER'
+   ___                 _
+  / _ \ _ __ __   __(_)__  __
+ | | | | '__|\ \ / /| |\ \/ /
+ | |_| | |    \ V / | | >  <
+  \___/|_|     \_/  |_|/_/\_\
+
+ RC1 Clean Installer
+BANNER
+}
+
+prepare_log() {
+	mkdir -p "$(dirname "$INSTALL_LOG")"
+	touch "$INSTALL_LOG"
+	chmod 0640 "$INSTALL_LOG"
+}
+
+log_detail() {
+	printf '[%s] %s\n' "$(date -Is)" "$*" >>"$INSTALL_LOG"
+}
+
+step() {
+	CURRENT_STEP="$1"
+	printf '%b\n' "${BOLD}==>${NC} $2"
+	log_detail "STEP $1: $2"
+}
+
+run_quiet() {
+	log_detail "RUN $*"
+	"$@" >>"$INSTALL_LOG" 2>&1
+}
+
+on_error() {
+	local exit_code=$?
+	echo -e "${RED}Installation failed during step:${NC} ${CURRENT_STEP:-unknown}" >&2
+	echo "Detailed log: $INSTALL_LOG" >&2
+	if [ -f "$INSTALL_LOG" ]; then
+		echo "Last 80 log lines:" >&2
+		tail -n 80 "$INSTALL_LOG" >&2 || true
+	fi
+	exit "$exit_code"
+}
+
 fail() {
     echo -e "${RED}ERROR:${NC} $*" >&2
+    if [ -f "$INSTALL_LOG" ]; then
+        echo "Detailed log: $INSTALL_LOG" >&2
+        echo "Last 80 log lines:" >&2
+        tail -n 80 "$INSTALL_LOG" >&2 || true
+    fi
     exit 1
 }
 
@@ -82,23 +132,23 @@ build_login_payload() {
 }
 
 install_go_toolchain() {
-    if command -v go >/dev/null 2>&1; then
-        local current
-        current="$(go env GOVERSION | sed 's/^go//')"
-        if version_ge "$current" "1.25.0"; then
-            echo -e "${GREEN}ok${NC} Go $current available"
-            return
-        fi
-        echo -e "${YELLOW}warning:${NC} Go $current is too old; installing Go ${ORVIX_GO_VERSION}"
-    fi
+	if command -v go >/dev/null 2>&1; then
+		local current
+		current="$(go env GOVERSION | sed 's/^go//')"
+		if version_ge "$current" "1.25.0"; then
+			log_detail "Go $current available"
+			return
+		fi
+		log_detail "Go $current is too old; installing Go ${ORVIX_GO_VERSION}"
+	fi
 
-    local archive="/tmp/go${ORVIX_GO_VERSION}.linux-amd64.tar.gz"
-    curl -fsSL -o "$archive" "https://go.dev/dl/go${ORVIX_GO_VERSION}.linux-amd64.tar.gz"
-    rm -rf /usr/local/go
-    tar -C /usr/local -xzf "$archive"
-    rm -f "$archive"
-    export PATH="/usr/local/go/bin:$PATH"
-    go version
+	local archive="/tmp/go${ORVIX_GO_VERSION}.linux-amd64.tar.gz"
+	run_quiet curl -fsSL -o "$archive" "https://go.dev/dl/go${ORVIX_GO_VERSION}.linux-amd64.tar.gz"
+	run_quiet rm -rf /usr/local/go
+	run_quiet tar -C /usr/local -xzf "$archive"
+	run_quiet rm -f "$archive"
+	export PATH="/usr/local/go/bin:$PATH"
+	go version >>"$INSTALL_LOG" 2>&1
 }
 
 install_binary() {
@@ -113,17 +163,17 @@ install_binary() {
         fi
     done
 
-    if [ -n "$local_bin" ]; then
-        install -m 0755 "$local_bin" "$ORVIX_BIN"
-        echo -e "${GREEN}ok${NC} installed prebuilt binary from $local_bin"
-        return
-    fi
+	if [ -n "$local_bin" ]; then
+		run_quiet install -m 0755 "$local_bin" "$ORVIX_BIN"
+		log_detail "installed prebuilt binary from $local_bin"
+		return
+	fi
 
-    [ -f "$ORVIX_SOURCE_DIR/go.mod" ] || fail "no prebuilt binary found and no Go source tree at $ORVIX_SOURCE_DIR"
-    install_go_toolchain
-    (cd "$ORVIX_SOURCE_DIR" && go build -o "$ORVIX_BIN" ./cmd/orvix)
-    chmod 0755 "$ORVIX_BIN"
-    echo -e "${GREEN}ok${NC} built Orvix from source"
+	[ -f "$ORVIX_SOURCE_DIR/go.mod" ] || fail "no prebuilt binary found and no Go source tree at $ORVIX_SOURCE_DIR"
+	install_go_toolchain
+	(cd "$ORVIX_SOURCE_DIR" && go build -o "$ORVIX_BIN" ./cmd/orvix) >>"$INSTALL_LOG" 2>&1
+	run_quiet chmod 0755 "$ORVIX_BIN"
+	log_detail "built Orvix from source"
 }
 
 write_config() {
@@ -297,56 +347,61 @@ verify_install() {
 }
 
 main() {
-    require_root
-    echo -e "${BOLD}Orvix RC1 clean installer${NC}"
+	require_root
+	prepare_log
+	trap on_error ERR
+	print_banner
+	log_detail "Orvix RC1 clean installer started"
 
-	CURRENT_STEP="dependencies"
-	apt-get update -qq
-	apt-get install -y -qq \
+	step "dependencies" "Installing system dependencies"
+	run_quiet apt-get update -qq
+	run_quiet apt-get install -y -qq \
 		-o Dpkg::Options::=--force-confdef \
 		-o Dpkg::Options::=--force-confold \
 		ca-certificates curl tar gzip redis-server libcap2-bin iproute2
-    systemctl enable --now redis-server
+	run_quiet systemctl enable --now redis-server
 
-    CURRENT_STEP="user"
+    step "user" "Creating service account"
     if ! id -u orvix >/dev/null 2>&1; then
-        useradd --system --user-group --create-home --home-dir /var/lib/orvix --shell /usr/sbin/nologin orvix
+        run_quiet useradd --system --user-group --create-home --home-dir /var/lib/orvix --shell /usr/sbin/nologin orvix
     fi
 
-    CURRENT_STEP="directories"
-    install -d -o orvix -g orvix -m 0750 /etc/orvix /var/lib/orvix /var/lib/orvix/coremail /var/lib/orvix/backups /var/log/orvix
-    install -d -o root -g root -m 0755 /usr/share/orvix/admin
+    step "directories" "Preparing directories"
+    run_quiet install -d -o orvix -g orvix -m 0750 /etc/orvix /var/lib/orvix /var/lib/orvix/coremail /var/lib/orvix/backups /var/log/orvix
+    run_quiet install -d -o root -g root -m 0755 /usr/share/orvix/admin
 
-    CURRENT_STEP="prompts"
+    step "configuration-input" "Collecting admin settings"
     local primary_domain admin_email admin_password
     primary_domain="$(prompt_domain)"
     admin_email="$(prompt_email)"
     admin_password="$(prompt_password)"
 
-    CURRENT_STEP="binary"
+    step "binary" "Installing Orvix binary"
     install_binary
-    chown root:root "$ORVIX_BIN"
-    chmod 0755 "$ORVIX_BIN"
-    setcap 'cap_net_bind_service=+ep' "$ORVIX_BIN"
+    run_quiet chown root:root "$ORVIX_BIN"
+    run_quiet chmod 0755 "$ORVIX_BIN"
+    run_quiet setcap 'cap_net_bind_service=+ep' "$ORVIX_BIN"
 
-    CURRENT_STEP="configuration"
+    step "configuration" "Writing configuration"
     write_config "$primary_domain"
     write_bootstrap_env "$admin_email" "$admin_password"
-    install -m 0644 "$ORVIX_SOURCE_DIR/release/admin/index.html" /usr/share/orvix/admin/index.html
+    run_quiet install -m 0644 "$ORVIX_SOURCE_DIR/release/admin/index.html" /usr/share/orvix/admin/index.html
 
-    CURRENT_STEP="systemd"
+    step "systemd" "Starting Orvix service"
     write_service
-    systemctl daemon-reload
-    systemctl enable orvix
-    systemctl restart orvix
+    run_quiet systemctl daemon-reload
+    run_quiet systemctl enable orvix
+    run_quiet systemctl restart orvix
 
-    CURRENT_STEP="verification"
-    sleep 5
+    step "verification" "Verifying services and login"
+    run_quiet sleep 5
     verify_install "$admin_email" "$admin_password"
 
     echo -e "${GREEN}PASS${NC} Orvix RC1 clean install verified"
-    echo "Admin API: http://$(hostname -I | awk '{print $1}'):8080"
+    echo "Admin UI: http://mail.${primary_domain}:8080/admin"
+    echo "Admin UI: http://$(hostname -f 2>/dev/null || hostname):8080/admin"
     echo "Admin email: $admin_email"
+    echo "Detailed log: $INSTALL_LOG"
 }
 
 main "$@"

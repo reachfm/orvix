@@ -29,8 +29,14 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 	required := []string{
 		"export DEBIAN_FRONTEND=noninteractive",
 		"export NEEDRESTART_MODE=a",
+		"INSTALL_LOG=\"${INSTALL_LOG:-/var/log/orvix/install.log}\"",
+		"RC1 Clean Installer",
+		"trap on_error ERR",
+		"tail -n 80 \"$INSTALL_LOG\"",
+		"run_quiet apt-get update -qq",
 		"apt-get install -y -qq",
 		"-o Dpkg::Options::=--force-confdef",
+		"-o Dpkg::Options::=--force-confold",
 		"systemctl enable --now redis-server",
 		"install -m 0644 \"$ORVIX_SOURCE_DIR/release/admin/index.html\" /usr/share/orvix/admin/index.html",
 		"admin_ui_dir: /usr/share/orvix/admin",
@@ -45,6 +51,8 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"ORVIX_ADMIN_PASSWORD",
 		"/api/v1/auth/login",
 		"journalctl -u orvix.service -n 80 --no-pager",
+		"Admin UI: http://mail.${primary_domain}:8080/admin",
+		"Admin UI: http://$(hostname -f 2>/dev/null || hostname):8080/admin",
 	}
 	for _, item := range required {
 		if !strings.Contains(installer, item) {
