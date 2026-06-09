@@ -27,10 +27,13 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 	required := []string{
 		"apt-get install -y -qq ca-certificates curl tar gzip redis-server libcap2-bin iproute2",
 		"systemctl enable --now redis-server",
+		"install -m 0644 \"$ORVIX_SOURCE_DIR/release/admin/index.html\" /usr/share/orvix/admin/index.html",
+		"admin_ui_dir: /usr/share/orvix/admin",
 		"coremail:",
 		"enabled: true",
 		"host: 127.0.0.1",
 		"admin_port: 8080",
+		"curl -fsSI http://127.0.0.1:8080/admin",
 		"setcap 'cap_net_bind_service=+ep' \"$ORVIX_BIN\"",
 		"AmbientCapabilities=CAP_NET_BIND_SERVICE",
 		"ORVIX_ADMIN_EMAIL",
@@ -76,6 +79,7 @@ func TestExampleConfigEnablesCoreMail(t *testing.T) {
 	example := string(exampleBytes)
 	for _, item := range []string{
 		"admin_port: 8080",
+		"admin_ui_dir: /usr/share/orvix/admin",
 		"host: 127.0.0.1",
 		"coremail:",
 		"enabled: true",
@@ -88,6 +92,26 @@ func TestExampleConfigEnablesCoreMail(t *testing.T) {
 	} {
 		if !strings.Contains(example, item) {
 			t.Fatalf("example config missing %q", item)
+		}
+	}
+}
+
+func TestReleaseAdminLoginPageExists(t *testing.T) {
+	root := repoRoot(t)
+	pageBytes, err := os.ReadFile(filepath.Join(root, "release", "admin", "index.html"))
+	if err != nil {
+		t.Fatalf("read admin page: %v", err)
+	}
+	page := string(pageBytes)
+	for _, item := range []string{
+		"Orvix Admin",
+		"login-form",
+		"/api/v1/auth/login",
+		"/api/v1/me",
+		"Dashboard",
+	} {
+		if !strings.Contains(page, item) {
+			t.Fatalf("admin page missing %q", item)
 		}
 	}
 }

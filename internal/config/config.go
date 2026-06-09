@@ -78,6 +78,7 @@ type ServerConfig struct {
 	TLSHostname    string        `mapstructure:"tls_hostname"`
 	TLSCacheDir    string        `mapstructure:"tls_cache_dir"`
 	TLSEmail       string        `mapstructure:"tls_email"`
+	AdminUIDir     string        `mapstructure:"admin_ui_dir"`
 	AllowedOrigins []string      `mapstructure:"allowed_origins"`
 	TrustedProxies []string      `mapstructure:"trusted_proxies"`
 }
@@ -178,6 +179,7 @@ func Defaults() *Config {
 			BodyLimit:      50 * 1024 * 1024,
 			TLSAuto:        false,
 			TLSCacheDir:    "/var/lib/orvix/cert-cache",
+			AdminUIDir:     "/usr/share/orvix/admin",
 			AllowedOrigins: []string{},
 			TrustedProxies: []string{},
 		},

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -62,5 +63,24 @@ func TestAdminBootstrapInsertsUserAndLoginSucceeds(t *testing.T) {
 	}
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected login 200, got %d", resp.StatusCode)
+	}
+	var loginResp struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&loginResp); err != nil {
+		t.Fatalf("decode login response: %v", err)
+	}
+	if loginResp.AccessToken == "" {
+		t.Fatal("expected access token in login response")
+	}
+
+	req = httptest.NewRequest("GET", "/api/v1/me", nil)
+	req.Header.Set("Authorization", "Bearer "+loginResp.AccessToken)
+	resp, err = router.App().Test(req)
+	if err != nil {
+		t.Fatalf("me request: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected me 200, got %d", resp.StatusCode)
 	}
 }

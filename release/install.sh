@@ -116,6 +116,7 @@ server:
   host: "0.0.0.0"
   port: 80
   admin_port: 8080
+  admin_ui_dir: /usr/share/orvix/admin
   read_timeout: 60s
   write_timeout: 60s
   idle_timeout: 120s
@@ -249,6 +250,7 @@ verify_install() {
     systemctl is-active --quiet redis-server || fail "redis-server is not active"
     systemctl is-active --quiet orvix || fail "orvix is not active"
     curl -fsS http://127.0.0.1:8080/api/v1/health >/dev/null || fail "health endpoint failed"
+    curl -fsSI http://127.0.0.1:8080/admin >/dev/null || fail "admin UI endpoint failed"
 
     for port in 25 110 143 8080 6379; do
         ss -ltn "( sport = :$port )" | grep -q ":$port" || fail "port $port is not listening"
@@ -276,6 +278,7 @@ main() {
 
     CURRENT_STEP="directories"
     install -d -o orvix -g orvix -m 0750 /etc/orvix /var/lib/orvix /var/lib/orvix/coremail /var/lib/orvix/backups /var/log/orvix
+    install -d -o root -g root -m 0755 /usr/share/orvix/admin
 
     CURRENT_STEP="prompts"
     local primary_domain admin_email admin_password
@@ -292,6 +295,7 @@ main() {
     CURRENT_STEP="configuration"
     write_config "$primary_domain"
     write_bootstrap_env "$admin_email" "$admin_password"
+    install -m 0644 "$ORVIX_SOURCE_DIR/release/admin/index.html" /usr/share/orvix/admin/index.html
 
     CURRENT_STEP="systemd"
     write_service

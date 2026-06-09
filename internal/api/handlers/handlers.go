@@ -160,6 +160,7 @@ func (h *Handler) Login(c fiber.Ctx) error {
 	h.logger.Info("user logged in", zap.Uint("user_id", userID))
 
 	return c.JSON(fiber.Map{
+		"access_token":       accessToken,
 		"access_expires_in":  900,
 		"refresh_expires_in": int(30 * 24 * 3600),
 	})

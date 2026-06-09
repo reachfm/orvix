@@ -1,6 +1,10 @@
 package api
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
+
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/cors"
 	"github.com/gofiber/fiber/v3/middleware/limiter"
@@ -57,6 +61,7 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 
 	router.setupMiddleware()
 	router.setupRoutes()
+	router.setupAdminUI()
 
 	return router
 }
@@ -207,6 +212,36 @@ func (r *Router) setupRoutes() {
 	men.Post("/compliance/policies", r.h.CreateRetentionPolicy)
 	men.Put("/compliance/policies/:id", r.h.UpdateRetentionPolicy)
 	men.Delete("/compliance/policies/:id", r.h.DeleteRetentionPolicy)
+}
+
+func (r *Router) setupAdminUI() {
+	adminDir := r.cfg.Server.AdminUIDir
+	if adminDir == "" {
+		adminDir = "/usr/share/orvix/admin"
+	}
+	indexPath := filepath.Join(adminDir, "index.html")
+
+	r.app.Get("/", func(c fiber.Ctx) error {
+		return c.Redirect().To("/admin")
+	})
+	r.app.Get("/admin", func(c fiber.Ctx) error {
+		return c.SendFile(indexPath)
+	})
+	r.app.Get("/admin/*", func(c fiber.Ctx) error {
+		requestPath := strings.TrimPrefix(c.Params("*"), "/")
+		if requestPath == "" {
+			return c.SendFile(indexPath)
+		}
+		clean := filepath.Clean(filepath.FromSlash(requestPath))
+		if clean == "." || clean == ".." || filepath.IsAbs(clean) || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+			return c.SendStatus(fiber.StatusBadRequest)
+		}
+		target := filepath.Join(adminDir, clean)
+		if info, err := os.Stat(target); err == nil && !info.IsDir() {
+			return c.SendFile(target)
+		}
+		return c.SendFile(indexPath)
+	})
 }
 
 func securityHeaders() fiber.Handler {
