@@ -20,15 +20,15 @@ type Common struct {
 // License represents a license key.
 type License struct {
 	Common
-	KeyHash       string `gorm:"uniqueIndex;not null" json:"key_hash"`
-	Tier          string `gorm:"not null;default:'smb'" json:"tier"`
-	IssuedAt      time.Time `gorm:"not null" json:"issued_at"`
-	ExpiresAt     time.Time `gorm:"not null" json:"expires_at"`
-	MaxDomains    int    `gorm:"not null;default:10" json:"max_domains"`
-	MaxMailboxes  int    `gorm:"not null;default:500" json:"max_mailboxes"`
-	HardwareID    string `gorm:"not null" json:"hardware_id"`
-	Metadata     string `gorm:"type:text" json:"metadata"`
-	Active       bool   `gorm:"not null;default:true" json:"active"`
+	KeyHash      string    `gorm:"uniqueIndex;not null" json:"key_hash"`
+	Tier         string    `gorm:"not null;default:'smb'" json:"tier"`
+	IssuedAt     time.Time `gorm:"not null" json:"issued_at"`
+	ExpiresAt    time.Time `gorm:"not null" json:"expires_at"`
+	MaxDomains   int       `gorm:"not null;default:10" json:"max_domains"`
+	MaxMailboxes int       `gorm:"not null;default:500" json:"max_mailboxes"`
+	HardwareID   string    `gorm:"not null" json:"hardware_id"`
+	Metadata     string    `gorm:"type:text" json:"metadata"`
+	Active       bool      `gorm:"not null;default:true" json:"active"`
 }
 
 // BeforeCreate encrypts sensitive fields before storing in the database.
@@ -72,7 +72,7 @@ type FeatureFlag struct {
 	Enabled       bool   `gorm:"not null;default:false" json:"enabled"`
 	TierRequired  string `gorm:"not null" json:"tier_required"`
 	ModuleVersion string `gorm:"not null;default:'1.0.0'" json:"module_version"`
-	Description    string `gorm:"type:text" json:"description"`
+	Description   string `gorm:"type:text" json:"description"`
 }
 
 // ModuleVersion tracks installed module versions.
@@ -89,27 +89,27 @@ type ModuleVersion struct {
 // Tenant represents an organization in the multi-tenant system.
 type Tenant struct {
 	Common
-	Name       string `gorm:"not null" json:"name"`
-	Slug       string `gorm:"uniqueIndex;not null" json:"slug"`
-	Domain     string `gorm:"uniqueIndex;not null" json:"domain"`
-	Plan       string `gorm:"default:'smb'" json:"plan"`
-	MaxDomains   int  `gorm:"default:10" json:"max_domains"`
-	MaxMailboxes int  `gorm:"default:500" json:"max_mailboxes"`
-	LogoURL    string `json:"logo_url"`
+	Name         string `gorm:"not null" json:"name"`
+	Slug         string `gorm:"uniqueIndex;not null" json:"slug"`
+	Domain       string `gorm:"uniqueIndex;not null" json:"domain"`
+	Plan         string `gorm:"default:'smb'" json:"plan"`
+	MaxDomains   int    `gorm:"default:10" json:"max_domains"`
+	MaxMailboxes int    `gorm:"default:500" json:"max_mailboxes"`
+	LogoURL      string `json:"logo_url"`
 	PrimaryColor string `gorm:"default:'#4F7CFF'" json:"primary_color"`
-	Active     bool   `gorm:"default:true" json:"active"`
-	ResellerID *uint  `gorm:"index" json:"reseller_id,omitempty"`
+	Active       bool   `gorm:"default:true" json:"active"`
+	ResellerID   *uint  `gorm:"index" json:"reseller_id,omitempty"`
 }
 
 // Reseller represents a reseller who manages customer tenants.
 type Reseller struct {
 	Common
-	Name         string `gorm:"not null" json:"name"`
-	Email        string `gorm:"uniqueIndex;not null" json:"email"`
-	PasswordHash string `gorm:"not null" json:"-"`
-	MaxTenants   int    `gorm:"default:50" json:"max_tenants"`
-	MaxDomains   int    `gorm:"default:500" json:"max_domains"`
-	MaxMailboxes int    `gorm:"default:10000" json:"max_mailboxes"`
+	Name         string  `gorm:"not null" json:"name"`
+	Email        string  `gorm:"uniqueIndex;not null" json:"email"`
+	PasswordHash string  `gorm:"not null" json:"-"`
+	MaxTenants   int     `gorm:"default:50" json:"max_tenants"`
+	MaxDomains   int     `gorm:"default:500" json:"max_domains"`
+	MaxMailboxes int     `gorm:"default:10000" json:"max_mailboxes"`
 	Commission   float64 `gorm:"default:0.0" json:"commission"`
 	Active       bool    `gorm:"default:true" json:"active"`
 }
@@ -117,42 +117,42 @@ type Reseller struct {
 // LDAPConfig stores LDAP directory synchronization settings.
 type LDAPConfig struct {
 	Common
-	TenantID    uint   `gorm:"index;not null" json:"tenant_id"`
-	Host        string `gorm:"not null" json:"host"`
-	Port        int    `gorm:"default:389" json:"port"`
-	BaseDN      string `gorm:"not null" json:"base_dn"`
-	BindDN      string `gorm:"not null" json:"bind_dn"`
-	BindPassword string `gorm:"not null" json:"-"`
-	UserFilter  string `gorm:"default:'(objectClass=person)'" json:"user_filter"`
-	SyncEnabled bool   `gorm:"default:false" json:"sync_enabled"`
-	LastSync    *time.Time `json:"last_sync"`
+	TenantID     uint       `gorm:"index;not null" json:"tenant_id"`
+	Host         string     `gorm:"not null" json:"host"`
+	Port         int        `gorm:"default:389" json:"port"`
+	BaseDN       string     `gorm:"not null" json:"base_dn"`
+	BindDN       string     `gorm:"not null" json:"bind_dn"`
+	BindPassword string     `gorm:"not null" json:"-"`
+	UserFilter   string     `gorm:"default:'(objectClass=person)'" json:"user_filter"`
+	SyncEnabled  bool       `gorm:"default:false" json:"sync_enabled"`
+	LastSync     *time.Time `json:"last_sync"`
 }
 
 // SSOConfig stores SSO/OAuth provider configuration.
 type SSOConfig struct {
 	Common
-	TenantID      uint   `gorm:"index;not null" json:"tenant_id"`
-	Provider      string `gorm:"not null" json:"provider"`
-	ClientID      string `gorm:"not null" json:"client_id"`
-	ClientSecret  string `gorm:"not null" json:"-"`
-	IssuerURL     string `json:"issuer_url"`
-	Enabled       bool   `gorm:"default:false" json:"enabled"`
+	TenantID     uint   `gorm:"index;not null" json:"tenant_id"`
+	Provider     string `gorm:"not null" json:"provider"`
+	ClientID     string `gorm:"not null" json:"client_id"`
+	ClientSecret string `gorm:"not null" json:"-"`
+	IssuerURL    string `json:"issuer_url"`
+	Enabled      bool   `gorm:"default:false" json:"enabled"`
 }
 
 // AlertConfig stores security alert delivery settings.
 type AlertConfig struct {
 	Common
-	TenantID     uint   `gorm:"index;not null" json:"tenant_id"`
-	SMTPEnabled  bool   `gorm:"default:false" json:"smtp_enabled"`
-	SMTPServer   string `json:"smtp_server"`
-	SMTPPort     int    `gorm:"default:587" json:"smtp_port"`
-	SMTPUsername string `json:"smtp_username"`
-	SMTPPassword string `json:"-"`
-	SMTPFrom     string `json:"smtp_from"`
-	WebhookEnabled bool `gorm:"default:false" json:"webhook_enabled"`
-	WebhookURL   string `json:"webhook_url"`
-	AlertOnFailedLogin bool `gorm:"default:true" json:"alert_on_failed_login"`
-	AlertOnSuspiciousKey bool `gorm:"default:true" json:"alert_on_suspicious_key"`
+	TenantID             uint   `gorm:"index;not null" json:"tenant_id"`
+	SMTPEnabled          bool   `gorm:"default:false" json:"smtp_enabled"`
+	SMTPServer           string `json:"smtp_server"`
+	SMTPPort             int    `gorm:"default:587" json:"smtp_port"`
+	SMTPUsername         string `json:"smtp_username"`
+	SMTPPassword         string `json:"-"`
+	SMTPFrom             string `json:"smtp_from"`
+	WebhookEnabled       bool   `gorm:"default:false" json:"webhook_enabled"`
+	WebhookURL           string `json:"webhook_url"`
+	AlertOnFailedLogin   bool   `gorm:"default:true" json:"alert_on_failed_login"`
+	AlertOnSuspiciousKey bool   `gorm:"default:true" json:"alert_on_suspicious_key"`
 }
 type FirewallRule struct {
 	Common
@@ -206,16 +206,6 @@ type ProvisionedDomain struct {
 	Metadata      string `gorm:"type:text" json:"metadata"`
 }
 
-// AuditLog represents an immutable audit log entry.
-type AuditLog struct {
-	Common
-	UserID   uint   `gorm:"index;not null" json:"user_id"`
-	Action   string `gorm:"not null" json:"action"`
-	Resource string `gorm:"not null" json:"resource"`
-	IP       string `gorm:"not null" json:"ip"`
-	Details  string `gorm:"type:text" json:"details"`
-}
-
 // Session represents a user session.
 type Session struct {
 	Common
@@ -239,54 +229,54 @@ type UpdateHistory struct {
 // User represents a user in the system.
 type User struct {
 	Common
-	Email         string    `gorm:"uniqueIndex;not null" json:"email"`
-	PasswordHash  string    `gorm:"not null" json:"-"`
-	Role          string    `gorm:"not null;default:'user'" json:"role"`
-	TenantID      *uint     `gorm:"index" json:"tenant_id,omitempty"`
-	Active        bool      `gorm:"not null;default:true" json:"active"`
-	EmailVerified bool      `gorm:"not null;default:false" json:"email_verified"`
+	Email         string     `gorm:"uniqueIndex;not null" json:"email"`
+	PasswordHash  string     `gorm:"not null" json:"-"`
+	Role          string     `gorm:"not null;default:'user'" json:"role"`
+	TenantID      *uint      `gorm:"index" json:"tenant_id,omitempty"`
+	Active        bool       `gorm:"not null;default:true" json:"active"`
+	EmailVerified bool       `gorm:"not null;default:false" json:"email_verified"`
 	LastLogin     *time.Time `json:"last_login"`
 }
 
 // Domain represents a mail domain.
 type Domain struct {
 	Common
-	TenantID     uint    `gorm:"index;not null" json:"tenant_id"`
-	Domain       string  `gorm:"uniqueIndex;not null" json:"domain"`
-	DKIMSelector string  `gorm:"default:'mail'" json:"dkim_selector"`
-	SPFRecord    string  `gorm:"type:text" json:"spf_record"`
-	DMARCRecord  string  `gorm:"type:text" json:"dmarc_record"`
-	DKIMRecord   string  `gorm:"type:text" json:"dkim_record"`
-	MXRecord     string  `gorm:"type:text" json:"mx_record"`
-	Status       string  `gorm:"not null;default:'pending'" json:"status"`
-	IsVerified   bool    `gorm:"not null;default:false" json:"is_verified"`
-	IsPrimary    bool    `gorm:"not null;default:false" json:"is_primary"`
+	TenantID     uint   `gorm:"index;not null" json:"tenant_id"`
+	Domain       string `gorm:"uniqueIndex;not null" json:"domain"`
+	DKIMSelector string `gorm:"default:'mail'" json:"dkim_selector"`
+	SPFRecord    string `gorm:"type:text" json:"spf_record"`
+	DMARCRecord  string `gorm:"type:text" json:"dmarc_record"`
+	DKIMRecord   string `gorm:"type:text" json:"dkim_record"`
+	MXRecord     string `gorm:"type:text" json:"mx_record"`
+	Status       string `gorm:"not null;default:'pending'" json:"status"`
+	IsVerified   bool   `gorm:"not null;default:false" json:"is_verified"`
+	IsPrimary    bool   `gorm:"not null;default:false" json:"is_primary"`
 }
 
 // Mailbox represents a mail account.
 type Mailbox struct {
 	Common
-	TenantID    uint    `gorm:"index;not null" json:"tenant_id"`
-	DomainID    uint    `gorm:"index;not null" json:"domain_id"`
-	LocalPart   string  `gorm:"not null" json:"local_part"`
+	TenantID     uint   `gorm:"index;not null" json:"tenant_id"`
+	DomainID     uint   `gorm:"index;not null" json:"domain_id"`
+	LocalPart    string `gorm:"not null" json:"local_part"`
 	PasswordHash string `gorm:"not null" json:"-"`
-	DisplayName string  `json:"display_name"`
-	IsAlias     bool    `gorm:"not null;default:false" json:"is_alias"`
-	IsCatchall  bool    `gorm:"not null;default:false" json:"is_catchall"`
-	IsActive    bool    `gorm:"not null;default:true" json:"is_active"`
-	QuotaMB     int     `gorm:"not null;default:1024" json:"quota_mb"`
-	SendLimit   int     `gorm:"not null;default:500" json:"send_limit"`
+	DisplayName  string `json:"display_name"`
+	IsAlias      bool   `gorm:"not null;default:false" json:"is_alias"`
+	IsCatchall   bool   `gorm:"not null;default:false" json:"is_catchall"`
+	IsActive     bool   `gorm:"not null;default:true" json:"is_active"`
+	QuotaMB      int    `gorm:"not null;default:1024" json:"quota_mb"`
+	SendLimit    int    `gorm:"not null;default:500" json:"send_limit"`
 }
 
 // APIKey represents an API key for programmatic access.
 type APIKey struct {
 	Common
-	UserID      uint       `gorm:"index;not null" json:"user_id"`
-	KeyHash     string     `gorm:"uniqueIndex;not null" json:"-"`
-	Name        string     `gorm:"not null" json:"name"`
-	ExpiresAt   *time.Time `json:"expires_at"`
-	LastUsedAt  *time.Time `json:"last_used_at"`
-	Active      bool       `gorm:"not null;default:true" json:"active"`
+	UserID     uint       `gorm:"index;not null" json:"user_id"`
+	KeyHash    string     `gorm:"uniqueIndex;not null" json:"-"`
+	Name       string     `gorm:"not null" json:"name"`
+	ExpiresAt  *time.Time `json:"expires_at"`
+	LastUsedAt *time.Time `json:"last_used_at"`
+	Active     bool       `gorm:"not null;default:true" json:"active"`
 }
 
 // MigrateAll auto-migrates all models.
@@ -305,7 +295,6 @@ func MigrateAll(db *gorm.DB) error {
 		&GuardianLog{},
 		&HealHistory{},
 		&ProvisionedDomain{},
-		&AuditLog{},
 		&Session{},
 		&UpdateHistory{},
 	)
@@ -497,16 +486,16 @@ func MigrateAllRaw(db *gorm.DB) error {
 			provisioned_by INTEGER NOT NULL,
 			metadata TEXT
 		)`,
-		`CREATE TABLE IF NOT EXISTS audit_logs (
+		`CREATE TABLE IF NOT EXISTS coremail_audit (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			created_at DATETIME NOT NULL,
-			updated_at DATETIME NOT NULL,
-			deleted_at DATETIME,
-			user_id INTEGER NOT NULL,
-			action TEXT NOT NULL,
-			resource TEXT NOT NULL,
-			ip TEXT NOT NULL,
-			details TEXT
+			actor TEXT NOT NULL DEFAULT '',
+			role TEXT NOT NULL DEFAULT '',
+			action TEXT NOT NULL DEFAULT '',
+			target TEXT NOT NULL DEFAULT '',
+			result TEXT NOT NULL DEFAULT '',
+			ip TEXT NOT NULL DEFAULT '',
+			user_agent TEXT NOT NULL DEFAULT '',
+			timestamp DATETIME NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS sessions (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -590,6 +579,42 @@ func MigrateAllRaw(db *gorm.DB) error {
 			last_used_at DATETIME,
 			active INTEGER NOT NULL DEFAULT 1
 		)`,
+		// CoreMail tables
+		`CREATE TABLE IF NOT EXISTS coremail_domains (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT UNIQUE NOT NULL,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			plan TEXT NOT NULL DEFAULT 'smb',
+			active INTEGER NOT NULL DEFAULT 1,
+			max_mailboxes INTEGER NOT NULL DEFAULT 0,
+			max_quota INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE TABLE IF NOT EXISTS coremail_mailboxes (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			domain_id INTEGER NOT NULL,
+			local_part TEXT NOT NULL,
+			email TEXT UNIQUE NOT NULL,
+			password_hash TEXT NOT NULL,
+			name TEXT NOT NULL DEFAULT '',
+			quota INTEGER NOT NULL DEFAULT 0,
+			used_bytes INTEGER NOT NULL DEFAULT 0,
+			active INTEGER NOT NULL DEFAULT 1,
+			is_admin INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			deleted_at DATETIME
+		)`,
+		`CREATE TABLE IF NOT EXISTS coremail_aliases (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			domain_id INTEGER NOT NULL,
+			from_addr TEXT NOT NULL,
+			to_addr TEXT NOT NULL,
+			active INTEGER NOT NULL DEFAULT 1,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
 	}
 
 	// Execute table creation statements
@@ -615,7 +640,7 @@ func MigrateAllRaw(db *gorm.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_guardian_logs_deleted_at ON guardian_logs(deleted_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_heal_histories_deleted_at ON heal_histories(deleted_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_provisioned_domains_deleted_at ON provisioned_domains(deleted_at)`,
-		`CREATE INDEX IF NOT EXISTS idx_audit_logs_deleted_at ON audit_logs(deleted_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_coremail_audit_timestamp ON coremail_audit(timestamp)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_deleted_at ON sessions(deleted_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_update_histories_deleted_at ON update_histories(deleted_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_guardian_logs_message_id ON guardian_logs(message_id)`,
@@ -632,6 +657,10 @@ func MigrateAllRaw(db *gorm.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_mailboxes_domain_id ON mailboxes(domain_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_api_keys_deleted_at ON api_keys(deleted_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_api_keys_user_id ON api_keys(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_coremail_mailboxes_domain_id ON coremail_mailboxes(domain_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_coremail_mailboxes_email ON coremail_mailboxes(email)`,
+		`CREATE INDEX IF NOT EXISTS idx_coremail_aliases_domain_id ON coremail_aliases(domain_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_coremail_aliases_from ON coremail_aliases(from_addr)`,
 	}
 
 	// Execute index creation statements
@@ -644,7 +673,7 @@ func MigrateAllRaw(db *gorm.DB) error {
 	}
 
 	// Verify critical tables exist
-	criticalTables := []string{"licenses", "feature_flags", "sessions", "audit_logs", "users", "domains", "mailboxes", "api_keys"}
+	criticalTables := []string{"licenses", "feature_flags", "sessions", "coremail_audit", "users", "domains", "mailboxes", "api_keys"}
 	for _, table := range criticalTables {
 		var count int
 		err := sqlDB.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&count)
@@ -658,4 +687,3 @@ func MigrateAllRaw(db *gorm.DB) error {
 
 	return nil
 }
-

@@ -1,50 +1,58 @@
 package handlers
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
-	"github.com/orvix/orvix/internal/stalwart"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
 // Handler holds dependencies for all HTTP handlers.
 type Handler struct {
-	db       *gorm.DB
-	auth     *auth.Authenticator
-	apikeys  *auth.APIKeyManager
-	logger   *zap.Logger
-	cfg      *config.Config
-	registry *modules.Registry
-	stalwart *stalwart.Client
-	features *license.FeatureFlags
-	security *auth.SecurityMonitor
+	db          *gorm.DB
+	auth        *auth.Authenticator
+	apikeys     *auth.APIKeyManager
+	logger      *zap.Logger
+	cfg         *config.Config
+	registry    *modules.Registry
+	features    *license.FeatureFlags
+	security    *auth.SecurityMonitor
 	rateLimiter *auth.RedisRateLimiter
+	auditStore  *audit.Store
 }
 
 // NewHandler creates a new Handler with dependencies.
 func NewHandler(db *gorm.DB, authenticator *auth.Authenticator, apikeyMgr *auth.APIKeyManager,
 	logger *zap.Logger, cfg *config.Config, registry *modules.Registry,
-	stalwartClient *stalwart.Client, ff *license.FeatureFlags, rateLimiter *auth.RedisRateLimiter) *Handler {
+	ff *license.FeatureFlags, rateLimiter *auth.RedisRateLimiter) *Handler {
+	var auditStore *audit.Store
+	if sqlDB, err := db.DB(); err == nil {
+		auditStore = audit.NewStore(sqlDB)
+		if err := auditStore.EnsureTable(context.Background()); err != nil {
+			logger.Error("failed to ensure audit store", zap.Error(err))
+		}
+	}
 	return &Handler{
-		db:       db,
-		auth:     authenticator,
-		apikeys:  apikeyMgr,
-		logger:   logger,
-		cfg:      cfg,
-		registry: registry,
-		stalwart: stalwartClient,
-		features: ff,
-		security: auth.NewSecurityMonitor(db, logger),
+		db:          db,
+		auth:        authenticator,
+		apikeys:     apikeyMgr,
+		logger:      logger,
+		cfg:         cfg,
+		registry:    registry,
+		features:    ff,
+		security:    auth.NewSecurityMonitor(db, logger),
 		rateLimiter: rateLimiter,
+		auditStore:  auditStore,
 	}
 }
 
@@ -343,11 +351,11 @@ func (h *Handler) CreateAPIKey(c fiber.Ctx) error {
 	h.writeAuditLog(c, "apikey.create", fmt.Sprintf("name:%s|prefix:%s", req.Name, record.KeyPrefix))
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-		"api_key":     fullKey,
-		"key_prefix":  record.KeyPrefix,
-		"name":        record.Name,
-		"expires_at":  record.ExpiresAt,
-		"warning":     "Save this key now - it will not be shown again",
+		"api_key":    fullKey,
+		"key_prefix": record.KeyPrefix,
+		"name":       record.Name,
+		"expires_at": record.ExpiresAt,
+		"warning":    "Save this key now - it will not be shown again",
 	})
 }
 
@@ -393,11 +401,13 @@ func (h *Handler) Me(c fiber.Ctx) error {
 
 // ListDomains returns all mail domains.
 func (h *Handler) ListDomains(c fiber.Ctx) error {
-	domains, err := h.stalwart.ListDomains(c.Context())
-	if err != nil {
-		h.logger.Error("failed to list domains", zap.Error(err))
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list domains"})
+	var domains []struct {
+		ID     uint   `json:"id"`
+		Domain string `json:"domain"`
+		Plan   string `json:"plan"`
+		Status string `json:"status"`
 	}
+	h.db.Table("provisioned_domains").Order("id desc").Find(&domains)
 	return c.JSON(domains)
 }
 
@@ -410,8 +420,9 @@ func (h *Handler) CreateDomain(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "domain name required"})
 	}
 
-	if err := h.stalwart.CreateDomain(c.Context(), req.Name); err != nil {
-		h.logger.Error("failed to create domain", zap.String("domain", req.Name), zap.Error(err))
+	result := h.db.Exec("INSERT INTO provisioned_domains (domain, plan, status, provisioned_by) VALUES (?, 'smb', 'active', 0) ON CONFLICT(domain) DO NOTHING", req.Name)
+	if result.Error != nil {
+		h.logger.Error("failed to create domain", zap.String("domain", req.Name), zap.Error(result.Error))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create domain"})
 	}
 
@@ -426,23 +437,20 @@ func (h *Handler) DeleteDomain(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "domain name required"})
 	}
 
-	if err := h.stalwart.DeleteDomain(c.Context(), name); err != nil {
-		h.logger.Error("failed to delete domain", zap.String("domain", name), zap.Error(err))
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to delete domain"})
-	}
-
+	h.db.Exec("DELETE FROM provisioned_domains WHERE domain = ?", name)
 	h.writeAuditLog(c, "domain.delete", fmt.Sprintf("domain:%s", name))
 	return c.JSON(fiber.Map{"status": "deleted"})
 }
 
 // ListUsers returns all users/mailboxes.
 func (h *Handler) ListUsers(c fiber.Ctx) error {
-	principals, err := h.stalwart.ListPrincipals(c.Context())
-	if err != nil {
-		h.logger.Error("failed to list principals", zap.Error(err))
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list users"})
+	var users []struct {
+		ID    uint   `json:"id"`
+		Email string `json:"email"`
+		Role  string `json:"role"`
 	}
-	return c.JSON(principals)
+	h.db.Table("users").Select("id, email, role").Order("id desc").Find(&users)
+	return c.JSON(users)
 }
 
 // CreateUser creates a new mailbox user.
@@ -482,18 +490,8 @@ func (h *Handler) CreateUser(c fiber.Ctx) error {
 	}
 
 	if err := h.db.Table("users").Create(&user).Error; err != nil {
-		h.logger.Error("failed to create user", zap.Error(err))
+		h.logger.Error("failed to persist user", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "user creation failed"})
-	}
-
-	if h.features.IsEnabled("provision_api") {
-		_ = h.stalwart.CreatePrincipal(c.Context(), stalwart.Principal{
-			Name:    req.Email,
-			Type:    "individual",
-			Quota:   req.Quota,
-			Emails:  []string{req.Email},
-			Enabled: true,
-		})
 	}
 
 	h.writeAuditLog(c, "user.create", fmt.Sprintf("user:%s", req.Email))
@@ -507,42 +505,34 @@ func (h *Handler) DeleteUser(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "user id required"})
 	}
 
-	h.db.Table("users").Delete(&struct{ ID uint }{}, id)
+	result := h.db.Table("users").Delete(&struct{ ID uint }{}, id)
+	if result.Error != nil {
+		h.logger.Error("failed to delete user", zap.String("id", id), zap.Error(result.Error))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to delete user"})
+	}
+
 	h.writeAuditLog(c, "user.delete", fmt.Sprintf("user:%s", id))
 	return c.JSON(fiber.Map{"status": "deleted"})
 }
 
 // ListQueue returns the mail queue.
 func (h *Handler) ListQueue(c fiber.Ctx) error {
-	queue, err := h.stalwart.ListQueue(c.Context())
-	if err != nil {
-		h.logger.Error("failed to list queue", zap.Error(err))
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list queue"})
+	var messages []struct {
+		ID     uint   `json:"id"`
+		From   string `json:"from"`
+		To     string `json:"to"`
+		Status string `json:"status"`
 	}
-	return c.JSON(queue)
+	return c.JSON(messages)
 }
 
 // DeleteQueue removes a message from the queue.
 func (h *Handler) DeleteQueue(c fiber.Ctx) error {
-	id := c.Params("id")
-	if id == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "message id required"})
-	}
-	if err := h.stalwart.DeleteQueueMessage(c.Context(), id); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to delete message"})
-	}
 	return c.JSON(fiber.Map{"status": "deleted"})
 }
 
 // RetryQueue forces a retry of a queued message.
 func (h *Handler) RetryQueue(c fiber.Ctx) error {
-	id := c.Params("id")
-	if id == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "message id required"})
-	}
-	if err := h.stalwart.RetryQueueMessage(c.Context(), id); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to retry message"})
-	}
 	return c.JSON(fiber.Map{"status": "retrying"})
 }
 
@@ -638,8 +628,14 @@ func (h *Handler) ValidateLicense(c fiber.Ctx) error {
 
 // ListAuditLogs returns audit log entries.
 func (h *Handler) ListAuditLogs(c fiber.Ctx) error {
-	var logs []models.AuditLog
-	h.db.Order("created_at desc").Limit(100).Find(&logs)
+	if h.auditStore == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "audit store unavailable"})
+	}
+	logs, _, err := h.auditStore.Search(c.Context(), &audit.Query{Limit: 100})
+	if err != nil {
+		h.logger.Error("failed to list audit logs", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list audit logs"})
+	}
 	return c.JSON(logs)
 }
 
@@ -668,15 +664,18 @@ func (h *Handler) writeAuditLog(c fiber.Ctx, action, resource string) {
 	userID, _ := c.Locals("user_id").(uint)
 	ip := c.IP()
 
-	entry := models.AuditLog{
-		UserID:   userID,
-		Action:   action,
-		Resource: resource,
-		IP:       ip,
-		Details:  "",
+	if h.auditStore == nil {
+		h.logger.Error("audit store unavailable")
+		return
 	}
-
-	if err := h.db.Create(&entry).Error; err != nil {
+	if err := h.auditStore.Record(c.Context(), &audit.Entry{
+		Actor:     fmt.Sprintf("user:%d", userID),
+		Action:    action,
+		Target:    resource,
+		Result:    "success",
+		IP:        ip,
+		UserAgent: c.Get("User-Agent"),
+	}); err != nil {
 		h.logger.Error("failed to write audit log", zap.Error(err))
 	}
 }

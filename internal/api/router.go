@@ -11,7 +11,6 @@ import (
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/metrics"
 	"github.com/orvix/orvix/internal/modules"
-	"github.com/orvix/orvix/internal/stalwart"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -29,7 +28,7 @@ type Router struct {
 }
 
 func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *zap.Logger,
-	db *gorm.DB, registry *modules.Registry, stalwartClient *stalwart.Client,
+	db *gorm.DB, registry *modules.Registry,
 	ff *license.FeatureFlags, redisClient *redis.Client) *Router {
 	app := fiber.New(fiber.Config{
 		ReadTimeout:  cfg.Server.ReadTimeout,
@@ -53,7 +52,7 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		redisLimiter: rateLimiter,
 		logger:       logger,
 		cfg:          cfg,
-		h:            handlers.NewHandler(db, authenticator, apikeyMgr, logger, cfg, registry, stalwartClient, ff, rateLimiter),
+		h:            handlers.NewHandler(db, authenticator, apikeyMgr, logger, cfg, registry, ff, rateLimiter),
 	}
 
 	router.setupMiddleware()
@@ -218,7 +217,7 @@ func securityHeaders() fiber.Handler {
 		c.Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		c.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		c.Set("Content-Security-Policy",
-			"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self' https:; frame-src 'none'; object-src 'none'")
+			"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https:; font-src 'self'; connect-src 'self' https:; frame-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self'")
 		if c.Protocol() == "https" {
 			c.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		}

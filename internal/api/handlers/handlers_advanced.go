@@ -5,8 +5,8 @@ import (
 	"github.com/orvix/orvix/internal/collaboration"
 	"github.com/orvix/orvix/internal/compliance"
 	"github.com/orvix/orvix/internal/intelligence"
-	"github.com/orvix/orvix/internal/stalwart"
 	"github.com/orvix/orvix/internal/updater"
+	"go.uber.org/zap"
 )
 
 func (h *Handler) CheckUpdates(c fiber.Ctx) error {
@@ -117,9 +117,11 @@ func (h *Handler) CreateSharedMailbox(c fiber.Ctx) error {
 	if err := c.Bind().JSON(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "invalid request"})
 	}
-	h.db.Create(&req)
-	_ = h.stalwart.CreatePrincipal(c.Context(), stalwart.Principal{
-		Name: req.Email, Type: "group", Emails: []string{req.Email}, Enabled: true,
-	})
+
+	if err := h.db.Create(&req).Error; err != nil {
+		h.logger.Error("failed to persist shared mailbox", zap.Error(err))
+		return c.Status(500).JSON(fiber.Map{"error": "failed to create shared mailbox"})
+	}
+
 	return c.Status(201).JSON(req)
 }

@@ -10,11 +10,10 @@ import (
 
 // Config holds all Orvix configuration values.
 type Config struct {
-	logger *zap.Logger
+	logger   *zap.Logger
 	Server   ServerConfig   `mapstructure:"server"`
 	Database DatabaseConfig `mapstructure:"database"`
 	Redis    RedisConfig    `mapstructure:"redis"`
-	Stalwart StalwartConfig `mapstructure:"stalwart"`
 	Auth     AuthConfig     `mapstructure:"auth"`
 	License  LicenseConfig  `mapstructure:"license"`
 	Logging  LoggingConfig  `mapstructure:"logging"`
@@ -24,6 +23,33 @@ type Config struct {
 	DNS      DNSConfig      `mapstructure:"dns"`
 	ClamAV   ClamAVConfig   `mapstructure:"clamav"`
 	Backup   BackupConfig   `mapstructure:"backup"`
+	CoreMail CoreMailConfig `mapstructure:"coremail"`
+}
+
+// CoreMailConfig controls the native CoreMail protocol runtime.
+type CoreMailConfig struct {
+	Enabled                   bool          `mapstructure:"enabled"`
+	Hostname                  string        `mapstructure:"hostname"`
+	LicenseFilePath           string        `mapstructure:"license_file_path"`
+	LicenseAuthorityCachePath string        `mapstructure:"license_authority_cache_path"`
+	LicenseAuthorityURL       string        `mapstructure:"license_authority_url"`
+	LicenseAuthorityTimeout   time.Duration `mapstructure:"license_authority_timeout"`
+	LicenseAuthorityTestMode  bool          `mapstructure:"license_authority_test_mode"`
+	DataPath                  string        `mapstructure:"data_path"`
+	MailStorePath             string        `mapstructure:"mailstore_path"`
+	SMTPHost                  string        `mapstructure:"smtp_host"`
+	SMTPPort                  int           `mapstructure:"smtp_port"`
+	IMAPHost                  string        `mapstructure:"imap_host"`
+	IMAPPort                  int           `mapstructure:"imap_port"`
+	POP3Host                  string        `mapstructure:"pop3_host"`
+	POP3Port                  int           `mapstructure:"pop3_port"`
+	JMAPHost                  string        `mapstructure:"jmap_host"`
+	JMAPPort                  int           `mapstructure:"jmap_port"`
+	TLSCertFile               string        `mapstructure:"tls_cert_file"`
+	TLSKeyFile                string        `mapstructure:"tls_key_file"`
+	RequireTLSForAuth         bool          `mapstructure:"require_tls_for_auth"`
+	QueueWorkers              int           `mapstructure:"queue_workers"`
+	WorkerInterval            time.Duration `mapstructure:"worker_interval"`
 }
 
 // ClamAVConfig holds ClamAV antivirus scanner settings.
@@ -80,28 +106,18 @@ type RedisConfig struct {
 	DB       int    `mapstructure:"db"`
 }
 
-// StalwartConfig holds Stalwart integration settings.
-type StalwartConfig struct {
-	APIURL    string `mapstructure:"api_url"`
-	APIKey    string `mapstructure:"api_key"`
-	BinPath   string `mapstructure:"bin_path"`
-	DataDir   string `mapstructure:"data_dir"`
-	ConfigDir string `mapstructure:"config_dir"`
-	LogDir    string `mapstructure:"log_dir"`
-}
-
 // AuthConfig holds authentication settings.
 type AuthConfig struct {
-	JWTSecret        string        `mapstructure:"jwt_secret"`
-	JWTKeyPath       string        `mapstructure:"jwt_key_path"`
-	JWTAccessTTL     time.Duration `mapstructure:"jwt_access_ttl"`
-	JWTRefreshTTL    time.Duration `mapstructure:"jwt_refresh_ttl"`
-	PasswordMinLen   int           `mapstructure:"password_min_len"`
-	Argon2Time       uint32        `mapstructure:"argon2_time"`
-	Argon2Memory     uint32        `mapstructure:"argon2_memory"`
-	Argon2Threads    uint8         `mapstructure:"argon2_threads"`
-	LoginRateLimit   int           `mapstructure:"login_rate_limit"`
-	RateWindow       time.Duration `mapstructure:"rate_window"`
+	JWTSecret      string        `mapstructure:"jwt_secret"`
+	JWTKeyPath     string        `mapstructure:"jwt_key_path"`
+	JWTAccessTTL   time.Duration `mapstructure:"jwt_access_ttl"`
+	JWTRefreshTTL  time.Duration `mapstructure:"jwt_refresh_ttl"`
+	PasswordMinLen int           `mapstructure:"password_min_len"`
+	Argon2Time     uint32        `mapstructure:"argon2_time"`
+	Argon2Memory   uint32        `mapstructure:"argon2_memory"`
+	Argon2Threads  uint8         `mapstructure:"argon2_threads"`
+	LoginRateLimit int           `mapstructure:"login_rate_limit"`
+	RateWindow     time.Duration `mapstructure:"rate_window"`
 }
 
 // LicenseConfig holds license validation settings.
@@ -112,10 +128,10 @@ type LicenseConfig struct {
 
 // LoggingConfig holds logging settings.
 type LoggingConfig struct {
-	Level    string `mapstructure:"level"`
-	Format   string `mapstructure:"format"`
-	Output   string `mapstructure:"output"`
-	LogDir   string `mapstructure:"log_dir"`
+	Level  string `mapstructure:"level"`
+	Format string `mapstructure:"format"`
+	Output string `mapstructure:"output"`
+	LogDir string `mapstructure:"log_dir"`
 }
 
 // MetricsConfig holds Prometheus metrics settings.
@@ -182,12 +198,6 @@ func Defaults() *Config {
 			Port: 6379,
 			DB:   0,
 		},
-		Stalwart: StalwartConfig{
-			APIURL:    "http://localhost:18080",
-			DataDir:   "/var/lib/orvix/stalwart",
-			ConfigDir: "/etc/orvix/stalwart",
-			LogDir:    "/var/log/orvix/stalwart",
-		},
 		Auth: AuthConfig{
 			JWTKeyPath:     "/var/lib/orvix/jwt_key.pem",
 			JWTAccessTTL:   15 * time.Minute,
@@ -229,6 +239,20 @@ func Defaults() *Config {
 		},
 		Backup: BackupConfig{
 			Dir: "/var/lib/orvix/backups",
+		},
+		CoreMail: CoreMailConfig{
+			Enabled:           false,
+			Hostname:          "mail.local",
+			MailStorePath:     "/var/lib/orvix/mailstore",
+			SMTPHost:          "0.0.0.0",
+			SMTPPort:          25,
+			IMAPHost:          "0.0.0.0",
+			IMAPPort:          143,
+			POP3Host:          "0.0.0.0",
+			POP3Port:          110,
+			RequireTLSForAuth: true,
+			QueueWorkers:      1,
+			WorkerInterval:    5 * time.Second,
 		},
 		License: LicenseConfig{
 			OfflineMode: true,
@@ -278,9 +302,6 @@ func applyEnvOverrides(v *viper.Viper, cfg *Config) {
 	if v.GetString("REDIS_PASSWORD") != "" {
 		cfg.Redis.Password = v.GetString("REDIS_PASSWORD")
 	}
-	if v.GetString("STALWART_API_KEY") != "" {
-		cfg.Stalwart.APIKey = v.GetString("STALWART_API_KEY")
-	}
 	if v.GetString("JWT_SECRET") != "" {
 		cfg.Auth.JWTSecret = v.GetString("JWT_SECRET")
 	}
@@ -289,6 +310,9 @@ func applyEnvOverrides(v *viper.Viper, cfg *Config) {
 	}
 	if v.GetString("CLOUDFLARE_API_KEY") != "" {
 		cfg.DNS.CloudflareAPIKey = v.GetString("CLOUDFLARE_API_KEY")
+	}
+	if v.GetString("COREMAIL_ENABLED") != "" {
+		cfg.CoreMail.Enabled = v.GetBool("COREMAIL_ENABLED")
 	}
 }
 
@@ -303,6 +327,9 @@ func (c *Config) GetLogger() *zap.Logger {
 }
 
 func (c *Config) validate() {
+	if c.CoreMail.DataPath != "" {
+		c.CoreMail.MailStorePath = c.CoreMail.DataPath
+	}
 	if c.Database.DSN == "" {
 		switch c.Database.Driver {
 		case "postgres":

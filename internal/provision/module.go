@@ -8,7 +8,6 @@ import (
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/modules"
 	"github.com/orvix/orvix/internal/models"
-	"github.com/orvix/orvix/internal/stalwart"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
@@ -17,7 +16,6 @@ type Module struct {
 	cfg    *config.Config
 	db     *gorm.DB
 	logger *zap.Logger
-	client *stalwart.Client
 }
 
 func (m *Module) ID() string { return "provision-api" }
@@ -35,8 +33,6 @@ func (m *Module) Init(cfg *config.Config, db *gorm.DB) error {
 func (m *Module) Start() error { m.logger.Info("provision-api module started"); return nil }
 func (m *Module) Stop() error { m.logger.Info("provision-api module stopped"); return nil }
 func (m *Module) Migrate() error { return nil }
-
-func (m *Module) SetStalwartClient(client *stalwart.Client) { m.client = client }
 
 type ProvisionRequest struct {
 	Domain    string `json:"domain"`
@@ -56,26 +52,15 @@ type ProvisionResponse struct {
 
 func (m *Module) Provision(ctx context.Context, req *ProvisionRequest, userID uint) (*ProvisionResponse, error) {
 	start := time.Now()
-	if m.client == nil {
-		return nil, fmt.Errorf("Stalwart client not configured")
-	}
-	if err := m.client.CreateDomain(ctx, req.Domain); err != nil {
-		return nil, fmt.Errorf("failed to create domain: %w", err)
-	}
+
 	adminEmail := req.AdminUser + "@" + req.Domain
-	principal := stalwart.Principal{
-		Name: adminEmail, Type: "individual",
-		Quota: int64(req.QuotaMB) * 1024 * 1024,
-		Emails: []string{adminEmail}, Enabled: true,
-	}
-	if err := m.client.CreatePrincipal(ctx, principal); err != nil {
-		m.logger.Error("provision failed, rolling back domain", zap.Error(err))
-		m.client.DeleteDomain(ctx, req.Domain)
-		return nil, fmt.Errorf("failed to create mailbox: %w", err)
-	}
-	m.db.Create(&models.ProvisionedDomain{
+
+	if err := m.db.Create(&models.ProvisionedDomain{
 		Domain: req.Domain, Plan: req.Plan, Status: "active", ProvisionedBy: userID,
-	})
+	}).Error; err != nil {
+		return nil, fmt.Errorf("failed to persist provisioned domain: %w", err)
+	}
+
 	elapsed := time.Since(start).Milliseconds()
 	m.logger.Info("domain provisioned", zap.String("domain", req.Domain), zap.Int64("ms", elapsed))
 	return &ProvisionResponse{

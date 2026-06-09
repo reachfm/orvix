@@ -30,12 +30,21 @@ redis:
   host: localhost
   port: 6379
 
-stalwart:
-  api_url: http://localhost:18080
-  api_key: ""
-  data_dir: /var/lib/orvix/stalwart
-  config_dir: /etc/orvix/stalwart
-  log_dir: /var/log/orvix/stalwart
+coremail:
+  enabled: true
+  hostname: mail.example.com
+  data_path: /var/lib/orvix/coremail
+  smtp_host: 0.0.0.0
+  smtp_port: 25
+  imap_host: 0.0.0.0
+  imap_port: 143
+  pop3_host: 0.0.0.0
+  pop3_port: 110
+  jmap_host: 0.0.0.0
+  jmap_port: 8081
+  require_tls_for_auth: true
+  license_file_path: /etc/orvix/license.json
+  license_authority_cache_path: /var/lib/orvix/license-cache.json
 
 auth:
   jwt_access_ttl: 15m

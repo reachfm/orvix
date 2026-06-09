@@ -35,4 +35,5 @@ backups/
 release/*linux-amd64
 release/*.tar.gz
 AUDIT_REPORTS_*
+AUDIT_REPORTS/
 DEPLOYMENT_CERTIFICATION*

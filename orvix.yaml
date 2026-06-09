@@ -30,13 +30,6 @@ redis:
   password: ""
   db: 0
 
-stalwart:
-  api_url: http://localhost:18080
-  api_key: ""
-  data_dir: /var/lib/orvix/stalwart
-  config_dir: /etc/orvix/stalwart
-  log_dir: /var/log/orvix/stalwart
-
 auth:
   jwt_access_ttl: 15m
   jwt_refresh_ttl: 720h

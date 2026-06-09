@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"os"
@@ -18,6 +17,7 @@ import (
 	"github.com/orvix/orvix/internal/compliance"
 	"github.com/orvix/orvix/internal/compose"
 	"github.com/orvix/orvix/internal/config"
+	coremailruntime "github.com/orvix/orvix/internal/coremail/runtime"
 	"github.com/orvix/orvix/internal/dns"
 	"github.com/orvix/orvix/internal/firewall"
 	"github.com/orvix/orvix/internal/guardian"
@@ -27,7 +27,6 @@ import (
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
 	"github.com/orvix/orvix/internal/provision"
-	"github.com/orvix/orvix/internal/stalwart"
 	"github.com/orvix/orvix/internal/updater"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
@@ -61,8 +60,6 @@ func main() {
 		logger.Fatal("failed to connect to database", zap.Error(err))
 	}
 
-	// RC2 FIX: Use raw SQL migrations instead of AutoMigrate for SQLite compatibility
-	// AutoMigrate uses postgres-specific queries that don't work with SQLite
 	if err := models.MigrateAllRaw(db); err != nil {
 		logger.Fatal("failed to run migrations", zap.Error(err))
 	}
@@ -84,8 +81,6 @@ func main() {
 
 	seedAdminUser(db, authenticator, logger)
 
-	stalwartClient := stalwart.NewClient(cfg.Stalwart.APIURL, cfg.Stalwart.APIKey, logger)
-
 	registerModules(reg, cfg, db, logger, featureFlags)
 
 	if err := reg.InitAll(cfg, db); err != nil {
@@ -101,36 +96,7 @@ func main() {
 		redisClient = config.NewRedisClient(&cfg.Redis, logger)
 	}
 
-	router := api.NewRouter(cfg, authenticator, logger, db, reg, stalwartClient, featureFlags, redisClient)
-
-	stalwartProcess := stalwart.NewProcessManager(
-		cfg.Stalwart.BinPath,
-		cfg.Stalwart.DataDir,
-		cfg.Stalwart.ConfigDir,
-		cfg.Stalwart.LogDir,
-		logger,
-	)
-
-	configGen := stalwart.NewConfigGenerator(
-		cfg.Stalwart.DataDir,
-		cfg.Stalwart.ConfigDir,
-		cfg.Stalwart.LogDir,
-		cfg.Stalwart.APIKey,
-		logger,
-	)
-
-	if err := configGen.Generate(); err != nil {
-		logger.Warn("failed to generate stalwart config", zap.Error(err))
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go func() {
-		if err := stalwartProcess.Start(ctx); err != nil {
-			logger.Warn("failed to start stalwart", zap.Error(err))
-		}
-	}()
+	router := api.NewRouter(cfg, authenticator, logger, db, reg, featureFlags, redisClient)
 
 	app := router.App()
 
@@ -194,14 +160,11 @@ func main() {
 		logger.Error("module shutdown error", zap.Error(err))
 	}
 
-	if err := stalwartProcess.Stop(); err != nil {
-		logger.Error("stalwart shutdown error", zap.Error(err))
-	}
-
 	logger.Info("orvix shutdown complete")
 }
 
 func registerModules(r *modules.Registry, cfg *config.Config, db *gorm.DB, logger *zap.Logger, ff *license.FeatureFlags) {
+	r.Register(coremailruntime.New(logger))
 	r.Register(&firewall.Module{})
 	r.Register(&autoheal.Module{})
 	r.Register(&dns.Module{})
@@ -259,10 +222,7 @@ func seedFeatureFlags(db *gorm.DB, logger *zap.Logger) {
 	logger.Info("feature flags seeded")
 }
 
-// seedAdminUser creates the initial admin user if ORVIX_ADMIN_EMAIL and ORVIX_ADMIN_PASSWORD
-// environment variables are set. This ensures no default credentials are shipped.
 func seedAdminUser(db *gorm.DB, authenticator *auth.Authenticator, logger *zap.Logger) {
-	// RC3 FIX: No hardcoded credentials. Admin must be provided via environment variables.
 	adminEmail := os.Getenv("ORVIX_ADMIN_EMAIL")
 	adminPassword := os.Getenv("ORVIX_ADMIN_PASSWORD")
 
@@ -272,7 +232,6 @@ func seedAdminUser(db *gorm.DB, authenticator *auth.Authenticator, logger *zap.L
 		return
 	}
 
-	// Check if admin already exists
 	var count int64
 	db.Model(&models.User{}).Where("email = ?", adminEmail).Count(&count)
 	if count > 0 {
@@ -280,14 +239,12 @@ func seedAdminUser(db *gorm.DB, authenticator *auth.Authenticator, logger *zap.L
 		return
 	}
 
-	// Hash the provided password
 	hashedPassword, err := authenticator.HashPassword(adminPassword)
 	if err != nil {
 		logger.Warn("failed to hash admin password", zap.Error(err))
 		return
 	}
 
-	// Extract domain from email for tenant
 	parts := strings.Split(adminEmail, "@")
 	var tenantDomain string
 	if len(parts) == 2 {
@@ -296,7 +253,6 @@ func seedAdminUser(db *gorm.DB, authenticator *auth.Authenticator, logger *zap.L
 		tenantDomain = "local"
 	}
 
-	// Create tenant first
 	tenant := &models.Tenant{
 		Name:   tenantDomain,
 		Slug:   strings.ReplaceAll(tenantDomain, ".", "-"),
@@ -309,12 +265,12 @@ func seedAdminUser(db *gorm.DB, authenticator *auth.Authenticator, logger *zap.L
 	}
 
 	admin := &models.User{
-		Email:          adminEmail,
-		PasswordHash:   hashedPassword,
-		Role:           "admin",
-		TenantID:       &tenant.ID,
-		Active:         true,
-		EmailVerified:  true,
+		Email:         adminEmail,
+		PasswordHash:  hashedPassword,
+		Role:          "admin",
+		TenantID:      &tenant.ID,
+		Active:        true,
+		EmailVerified: true,
 	}
 
 	if err := db.Create(admin).Error; err != nil {
