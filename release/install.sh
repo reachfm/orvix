@@ -306,7 +306,7 @@ json_escape() {
 build_login_payload() {
 	local email="$1"
 	local password="$2"
-	printf '{"email":"%s","password":"%s"}' "$(json_escape "$email")" "$(json_escape "$password")"
+	printf '{"username":"%s","password":"%s"}' "$(json_escape "$email")" "$(json_escape "$password")"
 }
 
 install_go_toolchain() {
@@ -510,14 +510,21 @@ verify_install() {
         ss -ltn "( sport = :$port )" | grep -q ":$port" || fail "port $port is not listening"
 	done
 
-	local login_payload response_file http_code
+	local login_payload response_file http_code attempt
 	login_payload="$(build_login_payload "$email" "$password")"
 	response_file="$(mktemp)"
-	http_code="$(curl -sS -o "$response_file" -w "%{http_code}" -H 'Content-Type: application/json' -d "$login_payload" "$login_endpoint" || true)"
+	http_code=""
+	for attempt in 1 2 3 4 5; do
+		http_code="$(curl -sS -o "$response_file" -w "%{http_code}" -H 'Content-Type: application/json' -d "$login_payload" "$login_endpoint" 2>/dev/null || true)"
+		if [ "$http_code" = "200" ]; then
+			break
+		fi
+		log_detail "login attempt $attempt: HTTP $http_code, retrying in 3s"
+		sleep 3
+	done
 	if [ "$http_code" != "200" ]; then
 		echo -e "${RED}Admin API login verification failed${NC}" >&2
 		echo "Endpoint: $login_endpoint" >&2
-		echo "Request shape: {\"email\":\"$email\",\"password\":\"[REDACTED]\",\"password_length\":${#password}}" >&2
 		echo "HTTP status: ${http_code:-curl_failed}" >&2
 		echo "Response body:" >&2
 		cat "$response_file" >&2 || true

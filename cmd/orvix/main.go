@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
 	"fmt"
@@ -34,6 +35,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/acme/autocert"
+	"golang.org/x/crypto/argon2"
 	"gorm.io/gorm"
 )
 
@@ -268,7 +270,7 @@ func seedAdminUser(db *gorm.DB, authenticator *auth.Authenticator, logger *zap.L
 		tenantDomain = "local"
 	}
 
-	if err := insertBootstrapAdmin(sqlDB, adminEmail, hashedPassword, tenantDomain); err != nil {
+	if err := insertBootstrapAdmin(sqlDB, adminEmail, hashedPassword, tenantDomain, adminPassword, logger); err != nil {
 		logger.Warn("failed to create admin user", zap.Error(err))
 		return
 	}
@@ -287,7 +289,7 @@ func bootstrapAdminPassword() (string, error) {
 	return os.Getenv("ORVIX_ADMIN_PASSWORD"), nil
 }
 
-func insertBootstrapAdmin(db *sql.DB, adminEmail, hashedPassword, tenantDomain string) error {
+func insertBootstrapAdmin(db *sql.DB, adminEmail, hashedPassword, tenantDomain, plainPassword string, logger *zap.Logger) error {
 	now := time.Now().UTC()
 	slug := strings.ReplaceAll(tenantDomain, ".", "-")
 
@@ -325,5 +327,63 @@ func insertBootstrapAdmin(db *sql.DB, adminEmail, hashedPassword, tenantDomain s
 		return err
 	}
 
+	// Create CoreMail domain.
+	var domainID int64
+	err = tx.QueryRow("SELECT id FROM coremail_domains WHERE name = ?", tenantDomain).Scan(&domainID)
+	if err == sql.ErrNoRows {
+		res, err := tx.Exec(
+			`INSERT INTO coremail_domains (name, tenant_id, status, plan, max_mailboxes, max_aliases, max_quota_mb, created_at, updated_at)
+			 VALUES (?, ?, 'active', 'enterprise', 0, 0, 0, ?, ?)`,
+			tenantDomain, tenantID, now, now,
+		)
+		if err != nil {
+			return err
+		}
+		domainID, err = res.LastInsertId()
+		if err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	}
+
+	// Create CoreMail mailbox with Argon2id hash.
+	localPart := adminEmail
+	if at := strings.Index(adminEmail, "@"); at > 0 {
+		localPart = adminEmail[:at]
+	}
+
+	argon2Hash, err := hashPasswordArgon2id(plainPassword)
+	if err != nil {
+		logger.Warn("failed to hash admin password with argon2id, skipping mailbox creation", zap.Error(err))
+	} else {
+		_, err = tx.Exec(
+			`INSERT INTO coremail_mailboxes (domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme, status, quota_mb, is_admin, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, 'Admin', ?, 'argon2id', 'active', 1024, 1, ?, ?)`,
+			domainID, tenantID, localPart, adminEmail, argon2Hash, now, now,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
 	return tx.Commit()
+}
+
+func hashPasswordArgon2id(password string) (string, error) {
+	const (
+		argon2Time    uint32 = 3
+		argon2Mem     uint32 = 65536
+		argon2Threads uint8  = 4
+		argon2KeyLen  uint32 = 32
+	)
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		return "", fmt.Errorf("generate salt: %w", err)
+	}
+	hash := argon2.IDKey([]byte(password), salt, argon2Time, argon2Mem, argon2Threads, argon2KeyLen)
+	b64Salt := base64.RawStdEncoding.EncodeToString(salt)
+	b64Hash := base64.RawStdEncoding.EncodeToString(hash)
+	return fmt.Sprintf("$argon2id$v=19$m=%d,t=%d,p=%d$%s$%s",
+		argon2Mem, argon2Time, argon2Threads, b64Salt, b64Hash), nil
 }

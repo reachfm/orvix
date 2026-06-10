@@ -119,11 +119,17 @@ check_local_port() {
 
 check_https() {
 	local url="$1"
-	if curl -fsSI --connect-timeout 15 "$url" >/dev/null; then
-		echo -e "${GREEN}PASS${NC} $url"
-		return
-	fi
-	echo -e "${YELLOW}WARN${NC} $url is not ready yet"
+	local max_attempts=12
+	local attempt
+	for attempt in $(seq 1 "$max_attempts"); do
+		if curl -fsSI --connect-timeout 5 --max-time 10 "$url" >/dev/null 2>&1; then
+			echo -e "${GREEN}PASS${NC} $url (attempt $attempt)"
+			return
+		fi
+		echo -e "${YELLOW}WAIT${NC} $url not ready yet (attempt $attempt/$max_attempts)"
+		sleep 5
+	done
+	echo -e "${RED}FAIL${NC} $url not ready after $max_attempts attempts"
 	echo "Recent Caddy certificate logs:"
 	journalctl -u caddy -n 120 --no-pager | grep -Ei 'acme|challenge|certificate|issuer|error|failed' || true
 	fail "HTTPS smoke test failed for $url; check DNS, inbound 80/443, and Caddy ACME logs above"

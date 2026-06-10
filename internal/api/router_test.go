@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/auth"
@@ -61,6 +62,72 @@ func TestLoginHandlerDoesNotLogPasswordHashMaterial(t *testing.T) {
 		if strings.Contains(source, forbidden) {
 			t.Fatalf("login handler must not log password hash material: found %q", forbidden)
 		}
+	}
+}
+
+func TestLoginAcceptsUsernameField(t *testing.T) {
+	logger := zap.NewNop()
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(t.TempDir(), "orvix.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	defer sqlDB.Close()
+	if err := models.MigrateAllRaw(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	authenticator, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	router := NewRouter(cfg, authenticator, logger, db, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
+	defer router.App().Shutdown()
+
+	hashedPw, err := authenticator.HashPassword("TestPassword123!")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+	_, err = sqlDB.Exec(
+		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
+		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		now, now, hashedPw,
+	)
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		body string
+		want int
+	}{
+		{"email field", `{"email":"admin@test.local","password":"TestPassword123!"}`, 200},
+		{"username field", `{"username":"admin@test.local","password":"TestPassword123!"}`, 200},
+		{"both fields username priority", `{"email":"wrong@test.local","username":"admin@test.local","password":"TestPassword123!"}`, 200},
+		{"empty both", `{"email":"","password":""}`, 400},
+		{"wrong password", `{"username":"admin@test.local","password":"wrong"}`, 401},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("POST", "/admin/login", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := router.App().Test(req)
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+			if resp.StatusCode != tc.want {
+				body, _ := io.ReadAll(resp.Body)
+				t.Fatalf("expected %d, got %d; body: %s", tc.want, resp.StatusCode, body)
+			}
+		})
 	}
 }
 

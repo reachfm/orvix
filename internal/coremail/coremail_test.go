@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -98,13 +99,13 @@ func TestDomainRepositoryCreateAndGet(t *testing.T) {
 	ctx := context.Background()
 
 	d := &Domain{
-		Name:       "test-enterprise.example.com",
-		TenantID:   1,
-		Plan:       "enterprise",
-		Status:     DomainActive,
+		Name:         "test-enterprise.example.com",
+		TenantID:     1,
+		Plan:         "enterprise",
+		Status:       DomainActive,
 		MaxMailboxes: 1000,
 		MaxAliases:   500,
-		DKIMEnabled: true,
+		DKIMEnabled:  true,
 		DMARCEnabled: true,
 	}
 
@@ -592,5 +593,59 @@ func TestDomainRepositoryCountByTenant(t *testing.T) {
 	}
 	if count != 3 {
 		t.Fatalf("expected 3, got %d", count)
+	}
+}
+
+func TestArgon2idPasswordSpecialChars(t *testing.T) {
+	db := testDB(t)
+	cfg := EngineConfig{DB: db, AuthCfg: DefaultAuthConfig()}
+	eng := NewEngine(cfg)
+	ctx := context.Background()
+
+	dom := &Domain{Name: "special-chars.example.com", TenantID: 1, Status: DomainActive, MaxMailboxes: 100}
+	if err := eng.Domains.Create(ctx, dom, nil); err != nil {
+		t.Fatalf("create domain: %v", err)
+	}
+
+	passwords := []string{
+		"MaghaghaMos086",
+		"Password123!",
+		"Password$123",
+		"Password With Spaces",
+		"Password\\Slash123",
+		"Password\"Quote123",
+		"Password'SingleQuote123",
+	}
+
+	for i, pw := range passwords {
+		email := fmt.Sprintf("user-%d@special-chars.example.com", i)
+		hash, err := eng.Auth.HashPassword(pw)
+		if err != nil {
+			t.Fatalf("HashPassword(%q) failed: %v", pw, err)
+		}
+		if !eng.Auth.VerifyPassword(pw, hash) {
+			t.Errorf("VerifyPassword(%q, hash) should return true", pw)
+		}
+		if eng.Auth.VerifyPassword("wrong", hash) {
+			t.Errorf("VerifyPassword(wrong, hash_of_%q) should return false", pw)
+		}
+
+		mbox := &Mailbox{
+			DomainID: dom.ID, TenantID: 1, LocalPart: strings.Split(email, "@")[0],
+			Email: email, Name: "Test", PasswordHash: hash,
+			Status: MailboxActive, QuotaMB: 1024, IsAdmin: false,
+		}
+		if err := eng.Mailboxes.Create(ctx, mbox, nil); err != nil {
+			t.Fatalf("create mailbox for %q: %v", pw, err)
+		}
+
+		authed, err := eng.Auth.AuthenticateMailbox(ctx, email, pw)
+		if err != nil || authed == nil {
+			t.Errorf("AuthenticateMailbox(%q, %q) should succeed: err=%v", email, pw, err)
+		}
+		authedWrong, err := eng.Auth.AuthenticateMailbox(ctx, email, "wrong-password")
+		if err == nil && authedWrong != nil {
+			t.Errorf("AuthenticateMailbox(%q, wrong) should fail", email)
+		}
 	}
 }

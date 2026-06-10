@@ -50,6 +50,47 @@ func TestHashAndVerifyPassword(t *testing.T) {
 	}
 }
 
+func TestSpecialCharacterPasswords(t *testing.T) {
+	logger := testLogger(t)
+	privateKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+	a := &Authenticator{
+		privateKey: privateKey,
+		publicKey:  &privateKey.PublicKey,
+		logger:     logger,
+		accessTTL:  15 * time.Minute,
+		refreshTTL: 30 * 24 * time.Hour,
+		passwordCost: config.AuthConfig{
+			Argon2Time:     1,
+			Argon2Memory:   1024,
+			Argon2Threads:  1,
+			PasswordMinLen: 6,
+		},
+	}
+
+	passwords := []string{
+		"MaghaghaMos086",
+		"Password123!",
+		"Password$123",
+		"Password With Spaces",
+		"Password\\Slash123",
+		"Password\"Quote123",
+		"Password'SingleQuote123",
+	}
+
+	for _, pw := range passwords {
+		hash, err := a.HashPassword(pw)
+		if err != nil {
+			t.Fatalf("HashPassword(%q) failed: %v", pw, err)
+		}
+		if !a.VerifyPassword(pw, hash) {
+			t.Errorf("VerifyPassword(%q, hash) should return true", pw)
+		}
+		if a.VerifyPassword("wrong", hash) {
+			t.Errorf("VerifyPassword(wrong, hash_for_%q) should return false", pw)
+		}
+	}
+}
+
 func TestGenerateAndValidateAccessToken(t *testing.T) {
 	logger := testLogger(t)
 

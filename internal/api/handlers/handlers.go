@@ -69,18 +69,23 @@ func (h *Handler) Health(c fiber.Ctx) error {
 func (h *Handler) Login(c fiber.Ctx) error {
 	var req struct {
 		Email    string `json:"email"`
+		Username string `json:"username"`
 		Password string `json:"password"`
 	}
 	if err := c.Bind().JSON(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
 	}
 
-	if req.Email == "" || req.Password == "" {
+	loginEmail := req.Username
+	if loginEmail == "" {
+		loginEmail = req.Email
+	}
+
+	if loginEmail == "" || req.Password == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "email and password required"})
 	}
 
-	// Use Select to avoid GORM looking up by primary key
-	h.logger.Info("login attempt", zap.String("email", req.Email))
+	h.logger.Info("login attempt", zap.String("email", loginEmail))
 
 	// Get underlying sql.DB and query directly
 	var userID uint
@@ -93,10 +98,10 @@ func (h *Handler) Login(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
 	}
 
-	err = sqlDB.QueryRow("SELECT id, password_hash, role FROM users WHERE email = ?", req.Email).Scan(&userID, &passwordHash, &userRole)
+	err = sqlDB.QueryRow("SELECT id, password_hash, role FROM users WHERE email = ?", loginEmail).Scan(&userID, &passwordHash, &userRole)
 	if err != nil {
-		h.logger.Warn("user not found during login", zap.String("email", req.Email), zap.Error(err))
-		h.security.RecordFailedLogin(c.Context(), c.IP(), req.Email)
+		h.logger.Warn("user not found during login", zap.String("email", loginEmail), zap.Error(err))
+		h.security.RecordFailedLogin(c.Context(), c.IP(), loginEmail)
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid credentials"})
 	}
 
@@ -106,7 +111,7 @@ func (h *Handler) Login(c fiber.Ctx) error {
 
 	if !h.auth.VerifyPassword(req.Password, passwordHash) {
 		h.logger.Warn("password verification failed",
-			zap.String("email", req.Email),
+			zap.String("email", loginEmail),
 			zap.Uint("user_id", userID))
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid credentials"})
 	}

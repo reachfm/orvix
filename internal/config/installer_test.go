@@ -292,11 +292,14 @@ func TestInstallerLoginPayloadGeneration(t *testing.T) {
 		if err := json.Unmarshal(out, &payload); err != nil {
 			t.Fatalf("payload is not JSON: %q: %v", string(out), err)
 		}
-		if payload["email"] != tt.email {
-			t.Fatalf("email mismatch: %q", payload["email"])
+		if payload["username"] != tt.email {
+			t.Fatalf("username mismatch: %q", payload["username"])
 		}
 		if payload["password"] != tt.password {
 			t.Fatalf("password mismatch: %q", payload["password"])
+		}
+		if _, ok := payload["email"]; ok {
+			t.Fatalf("payload must not contain email field, only username")
 		}
 	}
 }
