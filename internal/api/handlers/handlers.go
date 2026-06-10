@@ -100,22 +100,14 @@ func (h *Handler) Login(c fiber.Ctx) error {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid credentials"})
 	}
 
-	h.logger.Info("direct query result",
-		zap.Uint("id", userID),
-		zap.String("hash_len", fmt.Sprintf("%d", len(passwordHash))),
-		zap.String("hash_first_20", truncateHash(passwordHash)),
-		zap.String("role", userRole))
-
 	h.logger.Debug("user found during login",
 		zap.Uint("user_id", userID),
-		zap.String("role", userRole),
-		zap.String("password_hash_len", fmt.Sprintf("%d", len(passwordHash))),
-		zap.String("password_hash_prefix", truncateHash(passwordHash)))
+		zap.String("role", userRole))
 
 	if !h.auth.VerifyPassword(req.Password, passwordHash) {
 		h.logger.Warn("password verification failed",
 			zap.String("email", req.Email),
-			zap.String("hash_prefix", truncateHash(passwordHash)))
+			zap.Uint("user_id", userID))
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid credentials"})
 	}
 
@@ -199,14 +191,6 @@ func (h *Handler) Refresh(c fiber.Ctx) error {
 	})
 
 	return c.JSON(fiber.Map{"status": "ok"})
-}
-
-// truncateHash returns first 20 chars of hash for logging.
-func truncateHash(hash string) string {
-	if len(hash) > 20 {
-		return hash[:20]
-	}
-	return hash
 }
 
 // Logout clears auth cookies.

@@ -14,11 +14,11 @@ BOOTSTRAP_ENV="${BOOTSTRAP_ENV:-/etc/orvix/bootstrap.env}"
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 
-BOLD='\033[1m'
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
+BOLD=$'\033[1m'
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[1;33m'
+NC=$'\033[0m'
 
 CURRENT_STEP="preflight"
 CURRENT_PERCENT=0
@@ -213,6 +213,9 @@ Temporary Admin API: http://${server_ip}:8080/admin
 Admin email: ${admin_email}
 Detailed log: ${INSTALL_LOG}
 
+Optional HTTPS setup:
+sudo $ORVIX_SOURCE_DIR/release/scripts/setup-https.sh ${domain} ${server_ip}
+
 ${GREEN}=========================================================${NC}
 BODY
 }
@@ -243,6 +246,9 @@ fail() {
         log_detail "ERROR: $*" || true
     fi
     render_failure "${CURRENT_STEP:-unknown}" >&2
+    if [ "${CURRENT_STEP:-}" = "Verifying install" ]; then
+        echo "INSTALLATION VERIFICATION FAILED" >&2
+    fi
     echo -e "${RED}ERROR:${NC} $*" >&2
     exit 1
 }
@@ -487,10 +493,14 @@ ENV
 verify_install() {
 	local email="$1"
 	local password="$2"
-	local login_endpoint="http://127.0.0.1:8080/api/v1/auth/login"
+	local login_endpoint="http://127.0.0.1:8080/admin/login"
 
 	systemctl is-active --quiet redis-server || fail "redis-server is not active"
 	systemctl is-active --quiet orvix || fail "orvix is not active"
+	systemctl is-enabled --quiet orvix || fail "orvix is not enabled"
+	command -v sqlite3 >/dev/null 2>&1 || fail "sqlite3 is not installed"
+	[ -f /var/lib/orvix/orvix.db ] || fail "database does not exist at /var/lib/orvix/orvix.db"
+	sqlite3 /var/lib/orvix/orvix.db "SELECT 1 FROM users LIMIT 1;" >/dev/null || fail "users table is not available"
     curl -fsS http://127.0.0.1:8080/api/v1/health >/dev/null || fail "health endpoint failed"
     curl -fsSI http://127.0.0.1:8080/admin >/dev/null || fail "admin UI endpoint failed"
     curl -fsSI http://127.0.0.1:8080/webmail >/dev/null || fail "webmail UI endpoint failed"
@@ -518,6 +528,7 @@ verify_install() {
 		fail "admin API login failed"
 	fi
 	rm -f "$response_file"
+	echo "INSTALLATION VERIFICATION PASSED"
 }
 
 main() {
@@ -533,7 +544,7 @@ main() {
 	run_quiet apt-get install -y -qq \
 		-o Dpkg::Options::=--force-confdef \
 		-o Dpkg::Options::=--force-confold \
-		ca-certificates curl tar gzip redis-server libcap2-bin iproute2
+		ca-certificates curl jq sqlite3 openssl tar gzip redis-server libcap2-bin iproute2 ufw
 	run_quiet systemctl enable --now redis-server
 
     set_step "user" "Creating service account" 35

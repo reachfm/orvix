@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/api"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/config"
@@ -22,6 +23,23 @@ func TestAdminBootstrapInsertsUserAndLoginSucceeds(t *testing.T) {
 
 func TestAdminBootstrapEncodedPasswordLoginSucceeds(t *testing.T) {
 	testAdminBootstrapLogin(t, "admin@orvix.email", `Admin "quoted" \ slash $ dollar ! bang # hash 123`, true)
+}
+
+func TestAdminBootstrapInstallerPasswordCasesLoginSucceeds(t *testing.T) {
+	passwords := []string{
+		"MaghaghaMos086",
+		"Password123!",
+		"Password$123",
+		"Password With Spaces",
+		`Password\Slash123`,
+		`Password"Quote123`,
+		"Password'SingleQuote123",
+	}
+	for _, password := range passwords {
+		t.Run(password, func(t *testing.T) {
+			testAdminBootstrapLogin(t, "admin@orvix.email", password, true)
+		})
+	}
 }
 
 func testAdminBootstrapLogin(t *testing.T, email, password string, encoded bool) {
@@ -75,9 +93,9 @@ func testAdminBootstrapLogin(t *testing.T, email, password string, encoded bool)
 		t.Fatalf("marshal login payload: %v", err)
 	}
 	body := strings.NewReader(string(payload))
-	req := httptest.NewRequest("POST", "/api/v1/auth/login", body)
+	req := httptest.NewRequest("POST", "/admin/login", body)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := router.App().Test(req)
+	resp, err := router.App().Test(req, fiber.TestConfig{Timeout: 0})
 	if err != nil {
 		t.Fatalf("login request: %v", err)
 	}
@@ -96,7 +114,7 @@ func testAdminBootstrapLogin(t *testing.T, email, password string, encoded bool)
 
 	req = httptest.NewRequest("GET", "/api/v1/me", nil)
 	req.Header.Set("Authorization", "Bearer "+loginResp.AccessToken)
-	resp, err = router.App().Test(req)
+	resp, err = router.App().Test(req, fiber.TestConfig{Timeout: 0})
 	if err != nil {
 		t.Fatalf("me request: %v", err)
 	}

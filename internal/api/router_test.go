@@ -3,6 +3,7 @@ package api
 import (
 	"io"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -38,6 +39,27 @@ func TestCSPHeader(t *testing.T) {
 	for _, directive := range []string{"script-src 'self'", "style-src 'self'", "base-uri 'self'", "form-action 'self'"} {
 		if !strings.Contains(csp, directive) {
 			t.Fatalf("expected directive %q in CSP %q", directive, csp)
+		}
+	}
+}
+
+func TestLoginHandlerDoesNotLogPasswordHashMaterial(t *testing.T) {
+	sourcePath := filepath.Join("handlers", "handlers.go")
+	raw, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("read handlers source: %v", err)
+	}
+	source := string(raw)
+	for _, forbidden := range []string{
+		"hash_first_20",
+		"hash_prefix",
+		"password_hash_prefix",
+		"password_hash_len",
+		"hash_len",
+		"truncateHash",
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("login handler must not log password hash material: found %q", forbidden)
 		}
 	}
 }

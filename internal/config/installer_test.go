@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -17,6 +18,18 @@ func repoRoot(t *testing.T) string {
 		t.Fatalf("repo root: %v", err)
 	}
 	return root
+}
+
+func bashCommand(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		return "bash"
+	}
+	path := `C:\Program Files\Git\bin\bash.exe`
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
+	return "bash"
 }
 
 func TestInstallerTemplateRC1CleanPath(t *testing.T) {
@@ -47,6 +60,7 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"tail -n 80 \"$INSTALL_LOG\"",
 		"run_quiet apt-get update -qq",
 		"apt-get install -y -qq",
+		"ca-certificates curl jq sqlite3 openssl tar gzip redis-server libcap2-bin iproute2 ufw",
 		"-o Dpkg::Options::=--force-confdef",
 		"-o Dpkg::Options::=--force-confold",
 		"systemctl enable --now redis-server",
@@ -63,6 +77,11 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"curl -fsSI http://127.0.0.1:8080/admin",
 		"curl -fsSI http://127.0.0.1:8080/webmail",
 		"curl -fsS http://127.0.0.1:8081/.well-known/jmap",
+		"systemctl is-enabled --quiet orvix",
+		"command -v sqlite3",
+		"[ -f /var/lib/orvix/orvix.db ]",
+		"sqlite3 /var/lib/orvix/orvix.db \"SELECT 1 FROM users LIMIT 1;\"",
+		"INSTALLATION VERIFICATION PASSED",
 		"setcap 'cap_net_bind_service=+ep' \"$ORVIX_BIN\"",
 		"AmbientCapabilities=CAP_NET_BIND_SERVICE",
 		"BOOTSTRAP_ENV=\"${BOOTSTRAP_ENV:-/etc/orvix/bootstrap.env}\"",
@@ -70,7 +89,7 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"ORVIX_ADMIN_PASSWORD_B64",
 		"printf '%s' \"$password\" | base64 | tr -d '\\n'",
 		"rm -f \"$BOOTSTRAP_ENV\"",
-		"/api/v1/auth/login",
+		"/admin/login",
 		"journalctl -u orvix.service -n 80 --no-pager",
 		"Admin UI: http://admin.${domain}",
 		"Mail Hostname: mail.${domain}",
@@ -80,6 +99,7 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"DNS required: A admin.${domain} -> ${server_ip}",
 		"DNS required: A mail.${domain} -> ${server_ip}",
 		"Temporary Admin API: http://${server_ip}:8080/admin",
+		"release/scripts/setup-https.sh ${domain} ${server_ip}",
 	}
 	for _, item := range required {
 		if !strings.Contains(installer, item) {
@@ -103,6 +123,66 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 	}
 }
 
+func TestHTTPSSetupScriptCaddyFlow(t *testing.T) {
+	root := repoRoot(t)
+	scriptBytes, err := os.ReadFile(filepath.Join(root, "release", "scripts", "setup-https.sh"))
+	if err != nil {
+		t.Fatalf("read https setup script: %v", err)
+	}
+	script := string(scriptBytes)
+	for _, item := range []string{
+		"admin.<domain> -> 127.0.0.1:8080",
+		"mail.<domain>  -> 127.0.0.1:8081",
+		"ADMIN_DOMAIN=\"${ADMIN_DOMAIN:-admin.$PRIMARY_DOMAIN}\"",
+		"MAIL_DOMAIN=\"${MAIL_DOMAIN:-mail.$PRIMARY_DOMAIN}\"",
+		"reverse_proxy 127.0.0.1:8080",
+		"reverse_proxy 127.0.0.1:8081",
+		"ufw allow 80/tcp",
+		"ufw allow 443/tcp",
+		"caddy validate --config /etc/caddy/Caddyfile",
+		"systemctl is-active --quiet caddy",
+		"check_dns \"$ADMIN_DOMAIN\"",
+		"check_dns \"$MAIL_DOMAIN\"",
+		"check_local_port 80",
+		"check_local_port 443",
+		"https://$ADMIN_DOMAIN/admin",
+		"https://$ADMIN_DOMAIN/api/v1/health",
+		"https://$MAIL_DOMAIN/.well-known/jmap",
+		"restrict external access to TCP 8080 and 8081",
+		"keep mail protocol ports 25, 110, and 143 unchanged",
+		"sudo ufw deny 8080/tcp",
+		"sudo ufw deny 8081/tcp",
+	} {
+		if !strings.Contains(script, item) {
+			t.Fatalf("https setup script missing %q", item)
+		}
+	}
+}
+
+func TestReleaseReferencedFilesExist(t *testing.T) {
+	root := repoRoot(t)
+	for _, path := range []string{
+		filepath.Join("release", "scripts", "setup-https.sh"),
+		filepath.Join("release", "admin", "index.html"),
+		filepath.Join("release", "admin", "app.js"),
+		filepath.Join("release", "admin", "styles.css"),
+		filepath.Join("release", "webmail", "index.html"),
+		filepath.Join("release", "configs", "orvix.yaml.example"),
+		filepath.Join("release", "systemd", "orvix.service"),
+	} {
+		if _, err := os.Stat(filepath.Join(root, path)); err != nil {
+			t.Fatalf("release referenced file missing: %s: %v", path, err)
+		}
+	}
+	adminAssets, err := filepath.Glob(filepath.Join(root, "release", "webmail", "assets", "*"))
+	if err != nil {
+		t.Fatalf("glob webmail assets: %v", err)
+	}
+	if len(adminAssets) == 0 {
+		t.Fatal("release webmail assets are missing")
+	}
+}
+
 func TestInstallerBootstrapEnvEncodesPassword(t *testing.T) {
 	root := repoRoot(t)
 	installerBytes, err := os.ReadFile(filepath.Join(root, "release", "install.sh"))
@@ -113,43 +193,57 @@ func TestInstallerBootstrapEnvEncodesPassword(t *testing.T) {
 	if !strings.Contains(installer, `main "$@"`) {
 		t.Fatal("installer entrypoint marker not found")
 	}
-	harness := strings.Replace(installer, `main "$@"`, `chown() { :; }; chmod() { :; }; BOOTSTRAP_ENV="$3"; write_bootstrap_env "$1" "$2"; cat "$BOOTSTRAP_ENV"`, 1)
+	harness := strings.Replace(installer, `main "$@"`, `chown() { :; }; chmod() { :; }; BOOTSTRAP_ENV="$3"; write_bootstrap_env "$1" "$(cat "$2")"; cat "$BOOTSTRAP_ENV"`, 1)
 	harnessDir := t.TempDir()
 	harnessPath := filepath.Join(harnessDir, "bootstrap.sh")
 	if err := os.WriteFile(harnessPath, []byte(harness), 0755); err != nil {
 		t.Fatalf("write harness: %v", err)
 	}
 
-	password := `Admin "quoted" \ slash $ dollar ! bang # hash 123`
-	envPath := filepath.Join(harnessDir, "bootstrap.env")
-	cmd := exec.Command("bash", "bootstrap.sh", "admin@orvix.email", password, envPath)
-	cmd.Dir = harnessDir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("bootstrap env command failed: %v: %s", err, string(out))
+	passwords := []string{
+		"MaghaghaMos086",
+		"Password123!",
+		"Password$123",
+		"Password With Spaces",
+		`Password\Slash123`,
+		`Password"Quote123`,
+		"Password'SingleQuote123",
 	}
-	envFile := string(out)
-	if strings.Contains(envFile, password) {
-		t.Fatal("bootstrap env must not contain raw admin password")
-	}
-	if !strings.Contains(envFile, "ORVIX_ADMIN_EMAIL=admin@orvix.email") {
-		t.Fatalf("bootstrap env missing email: %s", envFile)
-	}
-	var encoded string
-	for _, line := range strings.Split(envFile, "\n") {
-		if strings.HasPrefix(line, "ORVIX_ADMIN_PASSWORD_B64=") {
-			encoded = strings.TrimPrefix(line, "ORVIX_ADMIN_PASSWORD_B64=")
+	for i, password := range passwords {
+		envName := "bootstrap-" + string(rune('a'+i)) + ".env"
+		passwordName := "password-" + string(rune('a'+i)) + ".txt"
+		if err := os.WriteFile(filepath.Join(harnessDir, passwordName), []byte(password), 0600); err != nil {
+			t.Fatalf("write password fixture: %v", err)
 		}
-	}
-	if encoded == "" {
-		t.Fatalf("bootstrap env missing encoded password: %s", envFile)
-	}
-	decoded, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		t.Fatalf("decode password: %v", err)
-	}
-	if string(decoded) != password {
-		t.Fatalf("decoded password mismatch: got %q want %q", string(decoded), password)
+		cmd := exec.Command(bashCommand(t), "bootstrap.sh", "admin@orvix.email", passwordName, envName)
+		cmd.Dir = harnessDir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bootstrap env command failed for %q: %v: %s", password, err, string(out))
+		}
+		envFile := string(out)
+		if strings.Contains(envFile, password) {
+			t.Fatalf("bootstrap env must not contain raw admin password %q", password)
+		}
+		if !strings.Contains(envFile, "ORVIX_ADMIN_EMAIL=admin@orvix.email") {
+			t.Fatalf("bootstrap env missing email: %s", envFile)
+		}
+		var encoded string
+		for _, line := range strings.Split(envFile, "\n") {
+			if strings.HasPrefix(line, "ORVIX_ADMIN_PASSWORD_B64=") {
+				encoded = strings.TrimPrefix(line, "ORVIX_ADMIN_PASSWORD_B64=")
+			}
+		}
+		if encoded == "" {
+			t.Fatalf("bootstrap env missing encoded password: %s", envFile)
+		}
+		decoded, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			t.Fatalf("decode password: %v", err)
+		}
+		if string(decoded) != password {
+			t.Fatalf("decoded password mismatch: got %q want %q", string(decoded), password)
+		}
 	}
 }
 
@@ -163,7 +257,7 @@ func TestInstallerLoginPayloadGeneration(t *testing.T) {
 	if !strings.Contains(installer, `main "$@"`) {
 		t.Fatal("installer entrypoint marker not found")
 	}
-	harness := strings.Replace(installer, `main "$@"`, `build_login_payload "$1" "$2"`, 1)
+	harness := strings.Replace(installer, `main "$@"`, `build_login_payload "$1" "$(cat "$2")"`, 1)
 	harnessDir := t.TempDir()
 	harnessPath := filepath.Join(harnessDir, "payload.sh")
 	if err := os.WriteFile(harnessPath, []byte(harness), 0755); err != nil {
@@ -177,9 +271,18 @@ func TestInstallerLoginPayloadGeneration(t *testing.T) {
 		{"admin@example.com", "PlainPassword123!"},
 		{"admin@example.com", `P@ss"word!`},
 		{"admin@example.com", "P@ssword with spaces and punctuation!"},
+		{"admin@example.com", "MaghaghaMos086"},
+		{"admin@example.com", "Password$123"},
+		{"admin@example.com", `Password\Slash123`},
+		{"admin@example.com", `Password"Quote123`},
+		{"admin@example.com", "Password'SingleQuote123"},
 	}
 	for _, tt := range tests {
-		cmd := exec.Command("bash", "payload.sh", tt.email, tt.password)
+		passwordName := "payload-password.txt"
+		if err := os.WriteFile(filepath.Join(harnessDir, passwordName), []byte(tt.password), 0600); err != nil {
+			t.Fatalf("write payload password fixture: %v", err)
+		}
+		cmd := exec.Command(bashCommand(t), "payload.sh", tt.email, passwordName)
 		cmd.Dir = harnessDir
 		out, err := cmd.CombinedOutput()
 		if err != nil {
