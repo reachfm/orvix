@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -50,17 +51,25 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"-o Dpkg::Options::=--force-confold",
 		"systemctl enable --now redis-server",
 		"cp -R \"$ORVIX_SOURCE_DIR\"/release/admin/. /usr/share/orvix/admin/",
+		"cp -R \"$ORVIX_SOURCE_DIR\"/release/webmail/. /usr/share/orvix/webmail/",
 		"find /usr/share/orvix/admin -type f -exec chmod 0644 {} +",
+		"find /usr/share/orvix/webmail -type f -exec chmod 0644 {} +",
 		"admin_ui_dir: /usr/share/orvix/admin",
+		"webmail_ui_dir: /usr/share/orvix/webmail",
 		"coremail:",
 		"enabled: true",
 		"host: 127.0.0.1",
 		"admin_port: 8080",
 		"curl -fsSI http://127.0.0.1:8080/admin",
+		"curl -fsSI http://127.0.0.1:8080/webmail",
+		"curl -fsS http://127.0.0.1:8081/.well-known/jmap",
 		"setcap 'cap_net_bind_service=+ep' \"$ORVIX_BIN\"",
 		"AmbientCapabilities=CAP_NET_BIND_SERVICE",
+		"BOOTSTRAP_ENV=\"${BOOTSTRAP_ENV:-/etc/orvix/bootstrap.env}\"",
 		"ORVIX_ADMIN_EMAIL",
-		"ORVIX_ADMIN_PASSWORD",
+		"ORVIX_ADMIN_PASSWORD_B64",
+		"printf '%s' \"$password\" | base64 | tr -d '\\n'",
+		"rm -f \"$BOOTSTRAP_ENV\"",
 		"/api/v1/auth/login",
 		"journalctl -u orvix.service -n 80 --no-pager",
 		"Admin UI: http://admin.${domain}",
@@ -81,6 +90,7 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"Admin UI: http://mail.${primary_domain}:8080/admin",
 		"Admin UI: http://$(hostname -f 2>/dev/null || hostname):8080/admin",
 		"hostname -f 2>/dev/null || hostname",
+		"ORVIX_ADMIN_PASSWORD=\"$escaped_password\"",
 		"==>",
 	}
 	for _, item := range forbidden {
@@ -90,6 +100,56 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(installer), "stalwart") {
 		t.Fatal("RC1 clean installer must not reference Stalwart")
+	}
+}
+
+func TestInstallerBootstrapEnvEncodesPassword(t *testing.T) {
+	root := repoRoot(t)
+	installerBytes, err := os.ReadFile(filepath.Join(root, "release", "install.sh"))
+	if err != nil {
+		t.Fatalf("read installer: %v", err)
+	}
+	installer := string(installerBytes)
+	if !strings.Contains(installer, `main "$@"`) {
+		t.Fatal("installer entrypoint marker not found")
+	}
+	harness := strings.Replace(installer, `main "$@"`, `chown() { :; }; chmod() { :; }; BOOTSTRAP_ENV="$3"; write_bootstrap_env "$1" "$2"; cat "$BOOTSTRAP_ENV"`, 1)
+	harnessDir := t.TempDir()
+	harnessPath := filepath.Join(harnessDir, "bootstrap.sh")
+	if err := os.WriteFile(harnessPath, []byte(harness), 0755); err != nil {
+		t.Fatalf("write harness: %v", err)
+	}
+
+	password := `Admin "quoted" \ slash $ dollar ! bang # hash 123`
+	envPath := filepath.Join(harnessDir, "bootstrap.env")
+	cmd := exec.Command("bash", "bootstrap.sh", "admin@orvix.email", password, envPath)
+	cmd.Dir = harnessDir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bootstrap env command failed: %v: %s", err, string(out))
+	}
+	envFile := string(out)
+	if strings.Contains(envFile, password) {
+		t.Fatal("bootstrap env must not contain raw admin password")
+	}
+	if !strings.Contains(envFile, "ORVIX_ADMIN_EMAIL=admin@orvix.email") {
+		t.Fatalf("bootstrap env missing email: %s", envFile)
+	}
+	var encoded string
+	for _, line := range strings.Split(envFile, "\n") {
+		if strings.HasPrefix(line, "ORVIX_ADMIN_PASSWORD_B64=") {
+			encoded = strings.TrimPrefix(line, "ORVIX_ADMIN_PASSWORD_B64=")
+		}
+	}
+	if encoded == "" {
+		t.Fatalf("bootstrap env missing encoded password: %s", envFile)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("decode password: %v", err)
+	}
+	if string(decoded) != password {
+		t.Fatalf("decoded password mismatch: got %q want %q", string(decoded), password)
 	}
 }
 
@@ -177,6 +237,7 @@ func TestExampleConfigEnablesCoreMail(t *testing.T) {
 		"jmap_port: 8081",
 		"license_file_path: /etc/orvix/license.json",
 		"license_authority_cache_path: /var/lib/orvix/license-cache.json",
+		"webmail_ui_dir: /usr/share/orvix/webmail",
 	} {
 		if !strings.Contains(example, item) {
 			t.Fatalf("example config missing %q", item)
@@ -235,5 +296,29 @@ func TestReleaseAdminLoginPageExists(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(root, "release", "admin", asset)); err != nil {
 			t.Fatalf("admin asset %s missing: %v", asset, err)
 		}
+	}
+}
+
+func TestReleaseWebmailBuildExists(t *testing.T) {
+	root := repoRoot(t)
+	pageBytes, err := os.ReadFile(filepath.Join(root, "release", "webmail", "index.html"))
+	if err != nil {
+		t.Fatalf("read webmail page: %v", err)
+	}
+	page := string(pageBytes)
+	for _, item := range []string{
+		"Orvix Webmail",
+		"/webmail/assets/",
+	} {
+		if !strings.Contains(page, item) {
+			t.Fatalf("webmail build missing %q", item)
+		}
+	}
+	assets, err := filepath.Glob(filepath.Join(root, "release", "webmail", "assets", "*.js"))
+	if err != nil {
+		t.Fatalf("glob webmail assets: %v", err)
+	}
+	if len(assets) == 0 {
+		t.Fatal("webmail release build must include JavaScript assets")
 	}
 }

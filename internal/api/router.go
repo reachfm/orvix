@@ -102,6 +102,7 @@ func (r *Router) setupRoutes() {
 		loginGroup.Post("/login", limiter.New(limiter.Config{Max: 5, Expiration: 15 * 60 * 1000}), r.h.Login)
 	}
 	loginGroup.Post("/refresh", r.h.Refresh)
+	r.app.Post("/admin/login", r.h.Login)
 
 	protected := api.Group("", r.apikeys.Middleware(), r.auth.Middleware())
 	protected.Get("/me", r.h.Me)
@@ -219,15 +220,24 @@ func (r *Router) setupAdminUI() {
 	if adminDir == "" {
 		adminDir = "/usr/share/orvix/admin"
 	}
-	indexPath := filepath.Join(adminDir, "index.html")
-
 	r.app.Get("/", func(c fiber.Ctx) error {
 		return c.Redirect().To("/admin")
 	})
-	r.app.Get("/admin", func(c fiber.Ctx) error {
+	r.serveSPA("/admin", adminDir)
+
+	webmailDir := r.cfg.Server.WebmailUIDir
+	if webmailDir == "" {
+		webmailDir = "/usr/share/orvix/webmail"
+	}
+	r.serveSPA("/webmail", webmailDir)
+}
+
+func (r *Router) serveSPA(prefix, dir string) {
+	indexPath := filepath.Join(dir, "index.html")
+	r.app.Get(prefix, func(c fiber.Ctx) error {
 		return c.SendFile(indexPath)
 	})
-	r.app.Get("/admin/*", func(c fiber.Ctx) error {
+	r.app.Get(prefix+"/*", func(c fiber.Ctx) error {
 		requestPath := strings.TrimPrefix(c.Params("*"), "/")
 		if requestPath == "" {
 			return c.SendFile(indexPath)
@@ -236,7 +246,7 @@ func (r *Router) setupAdminUI() {
 		if clean == "." || clean == ".." || filepath.IsAbs(clean) || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
 			return c.SendStatus(fiber.StatusBadRequest)
 		}
-		target := filepath.Join(adminDir, clean)
+		target := filepath.Join(dir, clean)
 		if info, err := os.Stat(target); err == nil && !info.IsDir() {
 			return c.SendFile(target)
 		}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"os"
@@ -226,11 +227,14 @@ func seedFeatureFlags(db *gorm.DB, logger *zap.Logger) {
 
 func seedAdminUser(db *gorm.DB, authenticator *auth.Authenticator, logger *zap.Logger) {
 	adminEmail := os.Getenv("ORVIX_ADMIN_EMAIL")
-	adminPassword := os.Getenv("ORVIX_ADMIN_PASSWORD")
+	adminPassword, passwordErr := bootstrapAdminPassword()
 
 	if adminEmail == "" || adminPassword == "" {
 		logger.Info("admin credentials not provided via environment variables")
-		logger.Info("set ORVIX_ADMIN_EMAIL and ORVIX_ADMIN_PASSWORD to create admin user")
+		logger.Info("set ORVIX_ADMIN_EMAIL and ORVIX_ADMIN_PASSWORD_B64 to create admin user")
+		if passwordErr != nil {
+			logger.Warn("admin password bootstrap value was invalid", zap.Error(passwordErr))
+		}
 		return
 	}
 
@@ -270,6 +274,17 @@ func seedAdminUser(db *gorm.DB, authenticator *auth.Authenticator, logger *zap.L
 	}
 
 	logger.Info("admin user created", zap.String("email", adminEmail))
+}
+
+func bootstrapAdminPassword() (string, error) {
+	if encoded := os.Getenv("ORVIX_ADMIN_PASSWORD_B64"); encoded != "" {
+		raw, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			return "", fmt.Errorf("decode ORVIX_ADMIN_PASSWORD_B64: %w", err)
+		}
+		return string(raw), nil
+	}
+	return os.Getenv("ORVIX_ADMIN_PASSWORD"), nil
 }
 
 func insertBootstrapAdmin(db *sql.DB, adminEmail, hashedPassword, tenantDomain string) error {

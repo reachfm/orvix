@@ -44,10 +44,12 @@ func TestCSPHeader(t *testing.T) {
 
 func TestAdminUIStaticRoutes(t *testing.T) {
 	adminDir := filepath.Join("..", "..", "release", "admin")
+	webmailDir := filepath.Join("..", "..", "release", "webmail")
 
 	logger := zap.NewNop()
 	cfg := config.Defaults()
 	cfg.Server.AdminUIDir = adminDir
+	cfg.Server.WebmailUIDir = webmailDir
 	cfg.Database.Driver = "sqlite"
 	cfg.Database.DSN = filepath.Join(t.TempDir(), "orvix.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
 	db, err := config.NewDatabase(&cfg.Database, logger)
@@ -69,8 +71,19 @@ func TestAdminUIStaticRoutes(t *testing.T) {
 	router := NewRouter(cfg, authenticator, logger, db, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
 	defer router.App().Shutdown()
 
+	resp, err := router.App().Test(httptest.NewRequest("POST", "/admin/login", strings.NewReader(`{}`)))
+	if err != nil {
+		t.Fatalf("POST /admin/login request: %v", err)
+	}
+	if resp.StatusCode == 405 {
+		t.Fatal("POST /admin/login must reach API handler, not SPA static route")
+	}
+	if resp.StatusCode != 400 {
+		t.Fatalf("POST /admin/login expected API validation 400, got %d", resp.StatusCode)
+	}
+
 	for _, path := range []string{"/admin", "/admin/login"} {
-		resp, err := router.App().Test(httptest.NewRequest("GET", path, nil))
+		resp, err = router.App().Test(httptest.NewRequest("GET", path, nil))
 		if err != nil {
 			t.Fatalf("%s request: %v", path, err)
 		}
@@ -100,11 +113,21 @@ func TestAdminUIStaticRoutes(t *testing.T) {
 			t.Fatalf("%s missing %q", tc.path, tc.want)
 		}
 	}
-	resp, err := router.App().Test(httptest.NewRequest("HEAD", "/admin", nil))
+	resp, err = router.App().Test(httptest.NewRequest("HEAD", "/admin", nil))
 	if err != nil {
 		t.Fatalf("HEAD /admin request: %v", err)
 	}
 	if resp.StatusCode != 200 {
 		t.Fatalf("HEAD /admin expected 200, got %d", resp.StatusCode)
+	}
+
+	for _, path := range []string{"/webmail", "/webmail/inbox"} {
+		resp, err = router.App().Test(httptest.NewRequest("GET", path, nil))
+		if err != nil {
+			t.Fatalf("%s request: %v", path, err)
+		}
+		if resp.StatusCode != 200 {
+			t.Fatalf("%s expected 200, got %d", path, resp.StatusCode)
+		}
 	}
 }

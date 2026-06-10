@@ -9,6 +9,7 @@ ORVIX_SOURCE_DIR="${ORVIX_SOURCE_DIR:-$(pwd)}"
 ORVIX_BIN="${ORVIX_BIN:-/usr/local/bin/orvix}"
 ORVIX_CONFIG="${ORVIX_CONFIG:-/etc/orvix/orvix.yaml}"
 INSTALL_LOG="${INSTALL_LOG:-/var/log/orvix/install.log}"
+BOOTSTRAP_ENV="${BOOTSTRAP_ENV:-/etc/orvix/bootstrap.env}"
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
@@ -357,6 +358,7 @@ server:
   port: 80
   admin_port: 8080
   admin_ui_dir: /usr/share/orvix/admin
+  webmail_ui_dir: /usr/share/orvix/webmail
   read_timeout: 60s
   write_timeout: 60s
   idle_timeout: 120s
@@ -471,16 +473,15 @@ UNIT
 write_bootstrap_env() {
     local email="$1"
     local password="$2"
-    local escaped_password
-    escaped_password="${password//\\/\\\\}"
-    escaped_password="${escaped_password//\"/\\\"}"
+    local encoded_password
+    encoded_password="$(printf '%s' "$password" | base64 | tr -d '\n')"
 
-    cat > /etc/orvix/bootstrap.env <<ENV
+    cat > "$BOOTSTRAP_ENV" <<ENV
 ORVIX_ADMIN_EMAIL=$email
-ORVIX_ADMIN_PASSWORD="$escaped_password"
+ORVIX_ADMIN_PASSWORD_B64=$encoded_password
 ENV
-    chown root:orvix /etc/orvix/bootstrap.env
-    chmod 0640 /etc/orvix/bootstrap.env
+    chown root:orvix "$BOOTSTRAP_ENV"
+    chmod 0640 "$BOOTSTRAP_ENV"
 }
 
 verify_install() {
@@ -492,8 +493,10 @@ verify_install() {
 	systemctl is-active --quiet orvix || fail "orvix is not active"
     curl -fsS http://127.0.0.1:8080/api/v1/health >/dev/null || fail "health endpoint failed"
     curl -fsSI http://127.0.0.1:8080/admin >/dev/null || fail "admin UI endpoint failed"
+    curl -fsSI http://127.0.0.1:8080/webmail >/dev/null || fail "webmail UI endpoint failed"
+    curl -fsS http://127.0.0.1:8081/.well-known/jmap >/dev/null || fail "JMAP endpoint failed"
 
-    for port in 25 110 143 8080 6379; do
+    for port in 25 110 143 8080 8081 6379; do
         ss -ltn "( sport = :$port )" | grep -q ":$port" || fail "port $port is not listening"
 	done
 
@@ -540,6 +543,7 @@ main() {
 
     run_quiet install -d -o orvix -g orvix -m 0750 /etc/orvix /var/lib/orvix /var/lib/orvix/coremail /var/lib/orvix/backups /var/log/orvix
     run_quiet install -d -o root -g root -m 0755 /usr/share/orvix/admin
+    run_quiet install -d -o root -g root -m 0755 /usr/share/orvix/webmail
 
     set_step "configuration-input" "Collecting admin settings" 45
     local primary_domain admin_email admin_password
@@ -557,9 +561,13 @@ main() {
     write_config "$primary_domain"
     write_bootstrap_env "$admin_email" "$admin_password"
     run_quiet cp -R "$ORVIX_SOURCE_DIR"/release/admin/. /usr/share/orvix/admin/
+    run_quiet cp -R "$ORVIX_SOURCE_DIR"/release/webmail/. /usr/share/orvix/webmail/
     run_quiet chown -R root:root /usr/share/orvix/admin
+    run_quiet chown -R root:root /usr/share/orvix/webmail
     run_quiet find /usr/share/orvix/admin -type d -exec chmod 0755 {} +
     run_quiet find /usr/share/orvix/admin -type f -exec chmod 0644 {} +
+    run_quiet find /usr/share/orvix/webmail -type d -exec chmod 0755 {} +
+    run_quiet find /usr/share/orvix/webmail -type f -exec chmod 0644 {} +
 
     set_step "systemd" "Starting services" 85
     write_service
@@ -570,6 +578,7 @@ main() {
     set_step "verification" "Verifying install" 95
     run_quiet sleep 5
     verify_install "$admin_email" "$admin_password"
+    run_quiet rm -f "$BOOTSTRAP_ENV"
 
     local server_ip
     server_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http/httptest"
 	"strings"
@@ -16,8 +17,23 @@ import (
 )
 
 func TestAdminBootstrapInsertsUserAndLoginSucceeds(t *testing.T) {
-	t.Setenv("ORVIX_ADMIN_EMAIL", "admin@example.com")
-	t.Setenv("ORVIX_ADMIN_PASSWORD", "AdminPassword123!")
+	testAdminBootstrapLogin(t, "admin@example.com", "AdminPassword123!", false)
+}
+
+func TestAdminBootstrapEncodedPasswordLoginSucceeds(t *testing.T) {
+	testAdminBootstrapLogin(t, "admin@orvix.email", `Admin "quoted" \ slash $ dollar ! bang # hash 123`, true)
+}
+
+func testAdminBootstrapLogin(t *testing.T, email, password string, encoded bool) {
+	t.Helper()
+	t.Setenv("ORVIX_ADMIN_EMAIL", email)
+	if encoded {
+		t.Setenv("ORVIX_ADMIN_PASSWORD_B64", base64.StdEncoding.EncodeToString([]byte(password)))
+		t.Setenv("ORVIX_ADMIN_PASSWORD", "wrong-plain-fallback")
+	} else {
+		t.Setenv("ORVIX_ADMIN_PASSWORD_B64", "")
+		t.Setenv("ORVIX_ADMIN_PASSWORD", password)
+	}
 
 	logger := zap.NewNop()
 	cfg := config.Defaults()
@@ -44,7 +60,7 @@ func TestAdminBootstrapInsertsUserAndLoginSucceeds(t *testing.T) {
 		t.Fatalf("sql db: %v", err)
 	}
 	defer sqlDB.Close()
-	if err := sqlDB.QueryRow("SELECT COUNT(*) FROM users WHERE email = ?", "admin@example.com").Scan(&count); err != nil {
+	if err := sqlDB.QueryRow("SELECT COUNT(*) FROM users WHERE email = ?", email).Scan(&count); err != nil {
 		t.Fatalf("count users: %v", err)
 	}
 	if count != 1 {
@@ -54,7 +70,11 @@ func TestAdminBootstrapInsertsUserAndLoginSucceeds(t *testing.T) {
 	reg := modules.NewRegistry(logger)
 	ff := license.NewFeatureFlags(logger)
 	router := api.NewRouter(cfg, authenticator, logger, db, reg, ff, nil)
-	body := strings.NewReader(`{"email":"admin@example.com","password":"AdminPassword123!"}`)
+	payload, err := json.Marshal(map[string]string{"email": email, "password": password})
+	if err != nil {
+		t.Fatalf("marshal login payload: %v", err)
+	}
+	body := strings.NewReader(string(payload))
 	req := httptest.NewRequest("POST", "/api/v1/auth/login", body)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := router.App().Test(req)
