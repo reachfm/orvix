@@ -7,6 +7,13 @@ import (
 	"github.com/spf13/viper"
 )
 
+func TestDefaultsPasswordMinLengthIsInstallerPolicy(t *testing.T) {
+	cfg := Defaults()
+	if cfg.Auth.PasswordMinLen != 8 {
+		t.Fatalf("default password minimum length must be 8, got %d", cfg.Auth.PasswordMinLen)
+	}
+}
+
 func TestReleaseExampleCoreMailConfigIsDeploymentReady(t *testing.T) {
 	v := viper.New()
 	v.SetConfigFile(filepath.Join("..", "..", "release", "configs", "orvix.yaml.example"))
@@ -48,5 +55,8 @@ func TestReleaseExampleCoreMailConfigIsDeploymentReady(t *testing.T) {
 	}
 	if cfg.CoreMail.LicenseAuthorityCachePath == "" {
 		t.Fatal("coremail.license_authority_cache_path must be present")
+	}
+	if cfg.Auth.PasswordMinLen != 8 {
+		t.Fatalf("auth.password_min_len must be 8 in deployment example, got %d", cfg.Auth.PasswordMinLen)
 	}
 }

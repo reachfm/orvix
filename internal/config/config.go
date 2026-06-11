@@ -206,7 +206,7 @@ func Defaults() *Config {
 			JWTKeyPath:     "/var/lib/orvix/jwt_key.pem",
 			JWTAccessTTL:   15 * time.Minute,
 			JWTRefreshTTL:  30 * 24 * time.Hour,
-			PasswordMinLen: 12,
+			PasswordMinLen: 8,
 			Argon2Time:     3,
 			Argon2Memory:   64 * 1024,
 			Argon2Threads:  4,

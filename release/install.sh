@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Orvix RC1 clean installer for fresh Ubuntu VPS hosts.
+# Orvix Enterprise Mail installer for fresh Ubuntu VPS hosts.
 # This path installs the native CoreMail runtime only.
 
 ORVIX_GO_VERSION="${ORVIX_GO_VERSION:-1.26.4}"
@@ -24,14 +24,14 @@ CURRENT_STEP="preflight"
 CURRENT_PERCENT=0
 CURRENT_STEP_LABEL="Preparing system"
 STEP_LABELS=(
-	"Preparing system"
-	"Installing dependencies"
-	"Creating service account"
-	"Collecting admin settings"
-	"Installing Orvix binary"
-	"Writing configuration"
-	"Starting services"
-	"Verifying install"
+	"System preflight"
+	"Platform dependencies"
+	"Service identity"
+	"Administrator enrollment"
+	"CoreMail binary deployment"
+	"Configuration provisioning"
+	"Service activation"
+	"Enterprise health verification"
 )
 STEP_STATUS=(
 	"PENDING"
@@ -93,8 +93,8 @@ render_dashboard() {
 	clear_screen
 	cat <<'HEADER'
 =========================================================
-                 ORVIX MAIL PLATFORM
-              RC1 CLEAN INSTALLER
+              ORVIX ENTERPRISE MAIL
+                COREMAIL INSTALLER
 =========================================================
 
 HEADER
@@ -146,7 +146,7 @@ render_failure() {
 	clear_screen
 	cat <<HEADER
 ${RED}=========================================================
-                 ORVIX MAIL PLATFORM
+              ORVIX ENTERPRISE MAIL
                  INSTALLATION FAILED
 =========================================================${NC}
 
@@ -183,6 +183,8 @@ render_success() {
 	local domain="$1"
 	local server_ip="$2"
 	local admin_email="$3"
+	local version
+	version="$(install_version)"
 	local i
 	for i in "${!STEP_STATUS[@]}"; do
 		STEP_STATUS[$i]="PASS"
@@ -192,15 +194,21 @@ render_success() {
 	clear_screen
 	cat <<HEADER
 ${GREEN}=========================================================
-                 ORVIX MAIL PLATFORM
-              INSTALLATION COMPLETE
+              ORVIX ENTERPRISE MAIL
+               INSTALLATION COMPLETE
 =========================================================${NC}
 
 HEADER
 	progress_bar "$CURRENT_PERCENT"
 	cat <<BODY
 
-Admin UI: http://admin.${domain}
+Product: Orvix Enterprise Mail / CoreMail
+Version: ${version}
+
+Admin URL: http://admin.${domain}/admin
+Webmail URL: http://admin.${domain}/webmail
+JMAP URL: http://mail.${domain}/.well-known/jmap
+
 Mail Hostname: mail.${domain}
 SMTP: mail.${domain}:25
 IMAP: mail.${domain}:143
@@ -213,11 +221,23 @@ Temporary Admin API: http://${server_ip}:8080/admin
 Admin email: ${admin_email}
 Detailed log: ${INSTALL_LOG}
 
-Optional HTTPS setup:
+HTTPS setup command:
 sudo $ORVIX_SOURCE_DIR/release/scripts/setup-https.sh ${domain} ${server_ip}
 
 ${GREEN}=========================================================${NC}
 BODY
+}
+
+install_version() {
+	if command -v git >/dev/null 2>&1 && git -C "$ORVIX_SOURCE_DIR" rev-parse --short HEAD >/dev/null 2>&1; then
+		git -C "$ORVIX_SOURCE_DIR" rev-parse --short HEAD
+		return
+	fi
+	if [ -x "$ORVIX_BIN" ]; then
+		"$ORVIX_BIN" version 2>/dev/null | head -n 1 || true
+		return
+	fi
+	printf 'installed build'
 }
 
 prepare_log() {
@@ -279,13 +299,13 @@ prompt_password() {
     local password="${ORVIX_ADMIN_PASSWORD:-}"
     local confirm
     while [ -z "$password" ]; do
-        read -rsp "Admin password (min 12 chars): " password
+        read -rsp "Admin password (min 8 chars): " password
         echo
         read -rsp "Confirm admin password: " confirm
         echo
         [ "$password" = "$confirm" ] || { echo "Passwords do not match"; password=""; }
     done
-    [ "${#password}" -ge 12 ] || fail "admin password must be at least 12 characters"
+    [ "${#password}" -ge 8 ] || fail "admin password must be at least 8 characters"
     echo "$password"
 }
 
@@ -412,7 +432,7 @@ auth:
   jwt_key_path: /var/lib/orvix/jwt_key.pem
   jwt_access_ttl: 15m
   jwt_refresh_ttl: 720h
-  password_min_len: 12
+  password_min_len: 8
   argon2_time: 3
   argon2_memory: 65536
   argon2_threads: 4
@@ -444,7 +464,7 @@ YAML
 write_service() {
     cat > /etc/systemd/system/orvix.service <<'UNIT'
 [Unit]
-Description=Orvix RC1 Mail Server
+Description=Orvix Enterprise Mail Server
 Documentation=https://github.com/reachfm/orvix
 After=network-online.target redis-server.service
 Wants=network-online.target redis-server.service
@@ -554,11 +574,11 @@ main() {
 	require_root
 	prepare_log
 	trap on_error ERR
-	log_detail "Orvix RC1 clean installer started"
+	log_detail "Orvix Enterprise Mail installer started"
 
-	set_step "preparing" "Preparing system" 10
+	set_step "preparing" "System preflight" 10
 
-	set_step "dependencies" "Installing dependencies" 20
+	set_step "dependencies" "Platform dependencies" 20
 	run_quiet apt-get update -qq
 	run_quiet apt-get install -y -qq \
 		-o Dpkg::Options::=--force-confdef \
@@ -566,7 +586,7 @@ main() {
 		ca-certificates curl jq sqlite3 openssl tar gzip redis-server libcap2-bin iproute2 ufw
 	run_quiet systemctl enable --now redis-server
 
-    set_step "user" "Creating service account" 35
+    set_step "user" "Service identity" 35
     if ! id -u orvix >/dev/null 2>&1; then
         run_quiet useradd --system --user-group --create-home --home-dir /var/lib/orvix --shell /usr/sbin/nologin orvix
     fi
@@ -575,19 +595,19 @@ main() {
     run_quiet install -d -o root -g root -m 0755 /usr/share/orvix/admin
     run_quiet install -d -o root -g root -m 0755 /usr/share/orvix/webmail
 
-    set_step "configuration-input" "Collecting admin settings" 45
+    set_step "configuration-input" "Administrator enrollment" 45
     local primary_domain admin_email admin_password
     primary_domain="$(prompt_domain)"
     admin_email="$(prompt_email)"
     admin_password="$(prompt_password)"
 
-    set_step "binary" "Installing Orvix binary" 60
+    set_step "binary" "CoreMail binary deployment" 60
     install_binary
     run_quiet chown root:root "$ORVIX_BIN"
     run_quiet chmod 0755 "$ORVIX_BIN"
     run_quiet setcap 'cap_net_bind_service=+ep' "$ORVIX_BIN"
 
-    set_step "configuration" "Writing configuration" 75
+    set_step "configuration" "Configuration provisioning" 75
     write_config "$primary_domain"
     write_bootstrap_env "$admin_email" "$admin_password"
     run_quiet cp -R "$ORVIX_SOURCE_DIR"/release/admin/. /usr/share/orvix/admin/
@@ -599,13 +619,13 @@ main() {
     run_quiet find /usr/share/orvix/webmail -type d -exec chmod 0755 {} +
     run_quiet find /usr/share/orvix/webmail -type f -exec chmod 0644 {} +
 
-    set_step "systemd" "Starting services" 85
+    set_step "systemd" "Service activation" 85
     write_service
     run_quiet systemctl daemon-reload
     run_quiet systemctl enable orvix
     run_quiet systemctl restart orvix
 
-    set_step "verification" "Verifying install" 95
+    set_step "verification" "Enterprise health verification" 95
     run_quiet sleep 5
     verify_install "$admin_email" "$admin_password"
 

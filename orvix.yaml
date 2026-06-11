@@ -33,7 +33,7 @@ redis:
 auth:
   jwt_access_ttl: 15m
   jwt_refresh_ttl: 720h
-  password_min_len: 12
+  password_min_len: 8
   argon2_time: 3
   argon2_memory: 65536
   argon2_threads: 4

@@ -44,18 +44,19 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"export DEBIAN_FRONTEND=noninteractive",
 		"export NEEDRESTART_MODE=a",
 		"INSTALL_LOG=\"${INSTALL_LOG:-/var/log/orvix/install.log}\"",
-		"ORVIX MAIL PLATFORM",
-		"RC1 CLEAN INSTALLER",
+		"ORVIX ENTERPRISE MAIL",
+		"COREMAIL INSTALLER",
 		"progress_bar()",
-		"set_step \"preparing\" \"Preparing system\" 10",
-		"set_step \"dependencies\" \"Installing dependencies\" 20",
-		"set_step \"user\" \"Creating service account\" 35",
-		"set_step \"configuration-input\" \"Collecting admin settings\" 45",
-		"set_step \"binary\" \"Installing Orvix binary\" 60",
-		"set_step \"configuration\" \"Writing configuration\" 75",
-		"set_step \"systemd\" \"Starting services\" 85",
-		"set_step \"verification\" \"Verifying install\" 95",
+		"set_step \"preparing\" \"System preflight\" 10",
+		"set_step \"dependencies\" \"Platform dependencies\" 20",
+		"set_step \"user\" \"Service identity\" 35",
+		"set_step \"configuration-input\" \"Administrator enrollment\" 45",
+		"set_step \"binary\" \"CoreMail binary deployment\" 60",
+		"set_step \"configuration\" \"Configuration provisioning\" 75",
+		"set_step \"systemd\" \"Service activation\" 85",
+		"set_step \"verification\" \"Enterprise health verification\" 95",
 		"render_success",
+		"install_version()",
 		"trap on_error ERR",
 		"tail -n 80 \"$INSTALL_LOG\"",
 		"run_quiet apt-get update -qq",
@@ -74,6 +75,7 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"enabled: true",
 		"host: 127.0.0.1",
 		"admin_port: 8080",
+		"password_min_len: 8",
 		"curl -fsSI http://127.0.0.1:8080/admin",
 		"curl -fsSI http://127.0.0.1:8080/webmail",
 		"curl -fsS http://127.0.0.1:8081/.well-known/jmap",
@@ -96,7 +98,10 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"rm -f \"$BOOTSTRAP_ENV\"",
 		"/admin/login",
 		"journalctl -u orvix.service -n 80 --no-pager",
-		"Admin UI: http://admin.${domain}",
+		"Product: Orvix Enterprise Mail / CoreMail",
+		"Admin URL: http://admin.${domain}/admin",
+		"Webmail URL: http://admin.${domain}/webmail",
+		"JMAP URL: http://mail.${domain}/.well-known/jmap",
 		"Mail Hostname: mail.${domain}",
 		"SMTP: mail.${domain}:25",
 		"IMAP: mail.${domain}:143",
@@ -105,6 +110,8 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"DNS required: A mail.${domain} -> ${server_ip}",
 		"Temporary Admin API: http://${server_ip}:8080/admin",
 		"release/scripts/setup-https.sh ${domain} ${server_ip}",
+		"Admin password (min 8 chars):",
+		"admin password must be at least 8 characters",
 	}
 	for _, item := range required {
 		if !strings.Contains(installer, item) {
@@ -116,6 +123,9 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"Admin UI: http://$(hostname -f 2>/dev/null || hostname):8080/admin",
 		"hostname -f 2>/dev/null || hostname",
 		"ORVIX_ADMIN_PASSWORD=\"$escaped_password\"",
+		"RC1 CLEAN INSTALLER",
+		"min 12 chars",
+		"at least 12 characters",
 		"==>",
 	}
 	for _, item := range forbidden {
@@ -158,9 +168,10 @@ func TestHTTPSSetupScriptCaddyFlow(t *testing.T) {
 		"check_dns \"$MAIL_DOMAIN\"",
 		"check_local_port 80",
 		"check_local_port 443",
-		"https://$ADMIN_DOMAIN/admin",
-		"https://$ADMIN_DOMAIN/api/v1/health",
-		"https://$MAIL_DOMAIN/.well-known/jmap",
+		"check_https \"https://$ADMIN_DOMAIN/admin\" HEAD",
+		"check_https \"https://$ADMIN_DOMAIN/api/v1/health\" GET",
+		"check_https \"https://$MAIL_DOMAIN/.well-known/jmap\" GET",
+		"curl -fsS --connect-timeout 5 --max-time 10 \"$url\"",
 		"restrict external access to TCP 8080 and 8081",
 		"keep mail protocol ports 25, 110, and 143 unchanged",
 		"sudo ufw deny 8080/tcp",
@@ -169,6 +180,9 @@ func TestHTTPSSetupScriptCaddyFlow(t *testing.T) {
 		if !strings.Contains(script, item) {
 			t.Fatalf("https setup script missing %q", item)
 		}
+	}
+	if strings.Contains(script, "check_https \"https://$ADMIN_DOMAIN/api/v1/health\" HEAD") {
+		t.Fatal("admin health smoke must use GET because the API route is GET-only")
 	}
 }
 
@@ -354,6 +368,7 @@ func TestExampleConfigEnablesCoreMail(t *testing.T) {
 		"imap_port: 143",
 		"pop3_port: 110",
 		"jmap_port: 8081",
+		"password_min_len: 8",
 		"license_file_path: /etc/orvix/license.json",
 		"license_authority_cache_path: /var/lib/orvix/license-cache.json",
 		"webmail_ui_dir: /usr/share/orvix/webmail",

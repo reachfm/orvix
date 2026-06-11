@@ -119,10 +119,16 @@ check_local_port() {
 
 check_https() {
 	local url="$1"
+	local method="${2:-HEAD}"
 	local max_attempts=12
 	local attempt
 	for attempt in $(seq 1 "$max_attempts"); do
-		if curl -fsSI --connect-timeout 5 --max-time 10 "$url" >/dev/null 2>&1; then
+		if [ "$method" = "GET" ]; then
+			if curl -fsS --connect-timeout 5 --max-time 10 "$url" >/dev/null 2>&1; then
+				echo -e "${GREEN}PASS${NC} $url (GET, attempt $attempt)"
+				return
+			fi
+		elif curl -fsSI --connect-timeout 5 --max-time 10 "$url" >/dev/null 2>&1; then
 			echo -e "${GREEN}PASS${NC} $url (attempt $attempt)"
 			return
 		fi
@@ -153,9 +159,9 @@ main() {
 	check_local_port 80
 	check_local_port 443
 
-	check_https "https://$ADMIN_DOMAIN/admin"
-	check_https "https://$ADMIN_DOMAIN/api/v1/health"
-	check_https "https://$MAIL_DOMAIN/.well-known/jmap"
+	check_https "https://$ADMIN_DOMAIN/admin" HEAD
+	check_https "https://$ADMIN_DOMAIN/api/v1/health" GET
+	check_https "https://$MAIL_DOMAIN/.well-known/jmap" GET
 
 	cat <<DONE
 
