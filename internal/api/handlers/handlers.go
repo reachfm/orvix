@@ -391,13 +391,53 @@ func (h *Handler) Me(c fiber.Ctx) error {
 
 // ListDomains returns all mail domains.
 func (h *Handler) ListDomains(c fiber.Ctx) error {
-	var domains []struct {
+	type domainRow struct {
 		ID     uint   `json:"id"`
 		Domain string `json:"domain"`
 		Plan   string `json:"plan"`
 		Status string `json:"status"`
 	}
-	h.db.Table("provisioned_domains").Order("id desc").Find(&domains)
+	var domains []domainRow
+
+	sqlDB, err := h.db.DB()
+	if err == nil {
+		seen := make(map[string]bool)
+		rows, err := sqlDB.Query("SELECT id, domain, plan, status FROM provisioned_domains ORDER BY id DESC")
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var id uint
+				var domain, plan, status string
+				if err := rows.Scan(&id, &domain, &plan, &status); err != nil {
+					continue
+				}
+				if !seen[domain] {
+					domains = append(domains, domainRow{ID: id, Domain: domain, Plan: plan, Status: status})
+					seen[domain] = true
+				}
+			}
+		}
+
+		rows, err = sqlDB.Query("SELECT id, name, plan, status FROM coremail_domains WHERE deleted_at IS NULL ORDER BY id DESC")
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var id uint
+				var name, plan, status string
+				if err := rows.Scan(&id, &name, &plan, &status); err != nil {
+					continue
+				}
+				if !seen[name] {
+					domains = append(domains, domainRow{ID: id, Domain: name, Plan: plan, Status: status})
+					seen[name] = true
+				}
+			}
+		}
+	}
+
+	if domains == nil {
+		domains = []domainRow{}
+	}
 	return c.JSON(domains)
 }
 
@@ -434,12 +474,52 @@ func (h *Handler) DeleteDomain(c fiber.Ctx) error {
 
 // ListUsers returns all users/mailboxes.
 func (h *Handler) ListUsers(c fiber.Ctx) error {
-	var users []struct {
+	type userRow struct {
 		ID    uint   `json:"id"`
 		Email string `json:"email"`
 		Role  string `json:"role"`
 	}
-	h.db.Table("users").Select("id, email, role").Order("id desc").Find(&users)
+	var users []userRow
+
+	sqlDB, err := h.db.DB()
+	if err == nil {
+		seen := make(map[string]bool)
+		rows, err := sqlDB.Query("SELECT id, email, role FROM users ORDER BY id DESC")
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var id uint
+				var email, role string
+				if err := rows.Scan(&id, &email, &role); err != nil {
+					continue
+				}
+				if !seen[email] {
+					users = append(users, userRow{ID: id, Email: email, Role: role})
+					seen[email] = true
+				}
+			}
+		}
+
+		rows, err = sqlDB.Query("SELECT id, email, 'mailbox' AS role FROM coremail_mailboxes WHERE deleted_at IS NULL ORDER BY id DESC")
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var id uint
+				var email, role string
+				if err := rows.Scan(&id, &email, &role); err != nil {
+					continue
+				}
+				if !seen[email] {
+					users = append(users, userRow{ID: id, Email: email, Role: role})
+					seen[email] = true
+				}
+			}
+		}
+	}
+
+	if users == nil {
+		users = []userRow{}
+	}
 	return c.JSON(users)
 }
 
@@ -513,7 +593,39 @@ func (h *Handler) ListQueue(c fiber.Ctx) error {
 		To     string `json:"to"`
 		Status string `json:"status"`
 	}
-	return c.JSON(messages)
+	sqlDB, err := h.db.DB()
+	if err == nil {
+		rows, err := sqlDB.Query("SELECT id, from_address, to_address, status FROM coremail_queue WHERE deleted_at IS NULL ORDER BY id DESC LIMIT 200")
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var msg struct {
+					ID     uint   `json:"id"`
+					From   string `json:"from"`
+					To     string `json:"to"`
+					Status string `json:"status"`
+				}
+				if err := rows.Scan(&msg.ID, &msg.From, &msg.To, &msg.Status); err != nil {
+					continue
+				}
+				messages = append(messages, msg)
+			}
+		}
+	}
+	type queueEntry struct {
+		ID     uint   `json:"id"`
+		From   string `json:"from"`
+		To     string `json:"to"`
+		Status string `json:"status"`
+	}
+	result := make([]queueEntry, 0, len(messages))
+	for _, m := range messages {
+		result = append(result, queueEntry{ID: m.ID, From: m.From, To: m.To, Status: m.Status})
+	}
+	if result == nil {
+		result = []queueEntry{}
+	}
+	return c.JSON(result)
 }
 
 // DeleteQueue removes a message from the queue.

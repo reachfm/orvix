@@ -426,6 +426,12 @@ func TestReleaseAdminLoginPageExists(t *testing.T) {
 		}
 	}
 
+	for _, forbidden := range []string{"RC1", "Clean Path"} {
+		if strings.Contains(bundle, forbidden) {
+			t.Fatalf("admin bundle must not contain %q", forbidden)
+		}
+	}
+
 	for _, asset := range []string{"styles.css", "app.js"} {
 		if _, err := os.Stat(filepath.Join(root, "release", "admin", asset)); err != nil {
 			t.Fatalf("admin asset %s missing: %v", asset, err)

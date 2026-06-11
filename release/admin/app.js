@@ -53,7 +53,7 @@ async function loadHealth() {
   try {
     state.health = await fetch("/api/v1/health").then((res) => res.ok ? res.json() : Promise.reject(new Error("health failed")));
     setText("api-health", "OK");
-    setText("api-health-note", `${state.health.version || "RC1"} checked ${new Date().toLocaleTimeString()}`);
+    setText("api-health-note", `${state.health.version || "Orvix Enterprise Mail"} checked ${new Date().toLocaleTimeString()}`);
     setText("coremail-runtime", "Online");
     setText("smtp-status", "Online");
     setText("imap-status", "Online");
@@ -156,6 +156,7 @@ loginForm.addEventListener("submit", async (event) => {
   try {
     const payload = {
       email: el("email").value.trim(),
+      username: el("email").value.trim(),
       password: el("password").value
     };
     const res = await fetch("/api/v1/auth/login", {
