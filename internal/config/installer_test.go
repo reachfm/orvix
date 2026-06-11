@@ -80,7 +80,12 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"systemctl is-enabled --quiet orvix",
 		"command -v sqlite3",
 		"[ -f /var/lib/orvix/orvix.db ]",
-		"sqlite3 /var/lib/orvix/orvix.db \"SELECT 1 FROM users LIMIT 1;\"",
+		"sqlite_escape()",
+		"bootstrapped admin user row was not created",
+		"bootstrapped admin mailbox row was not created",
+		"SELECT COUNT(*) FROM users WHERE email = '$sql_email' AND role = 'admin' AND active = 1;",
+		"SELECT COUNT(*) FROM coremail_mailboxes WHERE email = '$sql_email' AND is_admin = 1 AND status = 'active' AND deleted_at IS NULL;",
+		"bootstrap.env preserved for diagnosis: $BOOTSTRAP_ENV",
 		"INSTALLATION VERIFICATION PASSED",
 		"setcap 'cap_net_bind_service=+ep' \"$ORVIX_BIN\"",
 		"AmbientCapabilities=CAP_NET_BIND_SERVICE",
@@ -120,6 +125,14 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(installer), "stalwart") {
 		t.Fatal("RC1 clean installer must not reference Stalwart")
+	}
+	verifyIndex := strings.Index(installer, "if [ \"$http_code\" != \"200\" ]; then")
+	deleteIndex := strings.Index(installer, "rm -f \"$BOOTSTRAP_ENV\"")
+	if verifyIndex < 0 || deleteIndex < 0 {
+		t.Fatal("installer must check login response and delete bootstrap env after success")
+	}
+	if deleteIndex < verifyIndex {
+		t.Fatal("installer must not delete bootstrap.env before login verification succeeds")
 	}
 }
 

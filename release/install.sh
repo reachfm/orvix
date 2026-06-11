@@ -303,6 +303,11 @@ json_escape() {
 	printf '%s' "$value"
 }
 
+sqlite_escape() {
+	local value="$1"
+	printf '%s' "$value" | sed "s/'/''/g"
+}
+
 build_login_payload() {
 	local email="$1"
 	local password="$2"
@@ -494,13 +499,18 @@ verify_install() {
 	local email="$1"
 	local password="$2"
 	local login_endpoint="http://127.0.0.1:8080/admin/login"
+	local users_count mailbox_count sql_email
+	sql_email="$(sqlite_escape "$email")"
 
 	systemctl is-active --quiet redis-server || fail "redis-server is not active"
 	systemctl is-active --quiet orvix || fail "orvix is not active"
 	systemctl is-enabled --quiet orvix || fail "orvix is not enabled"
 	command -v sqlite3 >/dev/null 2>&1 || fail "sqlite3 is not installed"
 	[ -f /var/lib/orvix/orvix.db ] || fail "database does not exist at /var/lib/orvix/orvix.db"
-	sqlite3 /var/lib/orvix/orvix.db "SELECT 1 FROM users LIMIT 1;" >/dev/null || fail "users table is not available"
+	users_count="$(sqlite3 /var/lib/orvix/orvix.db "SELECT COUNT(*) FROM users WHERE email = '$sql_email' AND role = 'admin' AND active = 1;" 2>/dev/null || true)"
+	[ "$users_count" = "1" ] || fail "bootstrapped admin user row was not created for $email"
+	mailbox_count="$(sqlite3 /var/lib/orvix/orvix.db "SELECT COUNT(*) FROM coremail_mailboxes WHERE email = '$sql_email' AND is_admin = 1 AND status = 'active' AND deleted_at IS NULL;" 2>/dev/null || true)"
+	[ "$mailbox_count" = "1" ] || fail "bootstrapped admin mailbox row was not created for $email"
     curl -fsS http://127.0.0.1:8080/api/v1/health >/dev/null || fail "health endpoint failed"
     curl -fsSI http://127.0.0.1:8080/admin >/dev/null || fail "admin UI endpoint failed"
     curl -fsSI http://127.0.0.1:8080/webmail >/dev/null || fail "webmail UI endpoint failed"
@@ -525,6 +535,7 @@ verify_install() {
 	if [ "$http_code" != "200" ]; then
 		echo -e "${RED}Admin API login verification failed${NC}" >&2
 		echo "Endpoint: $login_endpoint" >&2
+		echo "bootstrap.env preserved for diagnosis: $BOOTSTRAP_ENV" >&2
 		echo "HTTP status: ${http_code:-curl_failed}" >&2
 		echo "Response body:" >&2
 		cat "$response_file" >&2 || true
@@ -535,6 +546,7 @@ verify_install() {
 		fail "admin API login failed"
 	fi
 	rm -f "$response_file"
+	run_quiet rm -f "$BOOTSTRAP_ENV"
 	echo "INSTALLATION VERIFICATION PASSED"
 }
 
@@ -596,7 +608,6 @@ main() {
     set_step "verification" "Verifying install" 95
     run_quiet sleep 5
     verify_install "$admin_email" "$admin_password"
-    run_quiet rm -f "$BOOTSTRAP_ENV"
 
     local server_ip
     server_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"

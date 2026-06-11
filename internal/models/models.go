@@ -2,6 +2,7 @@ package models
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"time"
 
@@ -652,6 +653,10 @@ func MigrateAllRaw(db *gorm.DB) error {
 		}
 	}
 
+	if err := migrateCoremailMailboxSchema(ctx, sqlDB); err != nil {
+		return err
+	}
+
 	// Create indexes
 	indexes := []string{
 		`CREATE INDEX IF NOT EXISTS idx_licenses_deleted_at ON licenses(deleted_at)`,
@@ -713,4 +718,82 @@ func MigrateAllRaw(db *gorm.DB) error {
 	}
 
 	return nil
+}
+
+func migrateCoremailMailboxSchema(ctx context.Context, db *sql.DB) error {
+	columns, err := sqliteColumns(ctx, db, "coremail_mailboxes")
+	if err != nil {
+		return fmt.Errorf("inspect coremail_mailboxes schema: %w", err)
+	}
+
+	additions := []struct {
+		name string
+		sql  string
+	}{
+		{"tenant_id", "ALTER TABLE coremail_mailboxes ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 0"},
+		{"name", "ALTER TABLE coremail_mailboxes ADD COLUMN name TEXT NOT NULL DEFAULT ''"},
+		{"auth_scheme", "ALTER TABLE coremail_mailboxes ADD COLUMN auth_scheme TEXT NOT NULL DEFAULT 'argon2id'"},
+		{"mfa_enabled", "ALTER TABLE coremail_mailboxes ADD COLUMN mfa_enabled INTEGER NOT NULL DEFAULT 0"},
+		{"mfa_secret", "ALTER TABLE coremail_mailboxes ADD COLUMN mfa_secret TEXT NOT NULL DEFAULT ''"},
+		{"app_passwords", "ALTER TABLE coremail_mailboxes ADD COLUMN app_passwords TEXT NOT NULL DEFAULT ''"},
+		{"status", "ALTER TABLE coremail_mailboxes ADD COLUMN status TEXT NOT NULL DEFAULT 'active'"},
+		{"quota_mb", "ALTER TABLE coremail_mailboxes ADD COLUMN quota_mb INTEGER NOT NULL DEFAULT 0"},
+		{"msg_count", "ALTER TABLE coremail_mailboxes ADD COLUMN msg_count INTEGER NOT NULL DEFAULT 0"},
+		{"is_forwarder", "ALTER TABLE coremail_mailboxes ADD COLUMN is_forwarder INTEGER NOT NULL DEFAULT 0"},
+		{"forward_to", "ALTER TABLE coremail_mailboxes ADD COLUMN forward_to TEXT NOT NULL DEFAULT ''"},
+		{"labels", "ALTER TABLE coremail_mailboxes ADD COLUMN labels TEXT NOT NULL DEFAULT ''"},
+		{"send_limit_per_hour", "ALTER TABLE coremail_mailboxes ADD COLUMN send_limit_per_hour INTEGER NOT NULL DEFAULT 0"},
+		{"recv_limit_per_hour", "ALTER TABLE coremail_mailboxes ADD COLUMN recv_limit_per_hour INTEGER NOT NULL DEFAULT 0"},
+		{"last_login", "ALTER TABLE coremail_mailboxes ADD COLUMN last_login DATETIME"},
+		{"last_ip", "ALTER TABLE coremail_mailboxes ADD COLUMN last_ip TEXT NOT NULL DEFAULT ''"},
+		{"deleted_at", "ALTER TABLE coremail_mailboxes ADD COLUMN deleted_at DATETIME"},
+	}
+
+	for _, addition := range additions {
+		if columns[addition.name] {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, addition.sql); err != nil {
+			return fmt.Errorf("add coremail_mailboxes.%s: %w", addition.name, err)
+		}
+		columns[addition.name] = true
+	}
+
+	if columns["quota"] && columns["quota_mb"] {
+		if _, err := db.ExecContext(ctx, "UPDATE coremail_mailboxes SET quota_mb = quota WHERE quota_mb = 0 AND quota IS NOT NULL"); err != nil {
+			return fmt.Errorf("backfill coremail_mailboxes.quota_mb: %w", err)
+		}
+	}
+	if columns["active"] && columns["status"] {
+		if _, err := db.ExecContext(ctx, "UPDATE coremail_mailboxes SET status = CASE WHEN active = 0 THEN 'suspended' ELSE 'active' END WHERE status = ''"); err != nil {
+			return fmt.Errorf("backfill coremail_mailboxes.status: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func sqliteColumns(ctx context.Context, db *sql.DB, table string) (map[string]bool, error) {
+	rows, err := db.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	columns := make(map[string]bool)
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return nil, err
+		}
+		columns[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return columns, nil
 }
