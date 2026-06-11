@@ -332,6 +332,197 @@ func createAdminQueueFixture(t *testing.T, sqlDB *sql.DB, now string) {
 	_ = now
 }
 
+func TestCreateMailboxEndpoint(t *testing.T) {
+	logger := zap.NewNop()
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(t.TempDir(), "orvix.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	defer sqlDB.Close()
+	if err := models.MigrateAllRaw(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	authenticator, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	router := NewRouter(cfg, authenticator, logger, db, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
+	defer router.App().Shutdown()
+
+	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+	hashedPw, _ := authenticator.HashPassword("TestPassword123!")
+	_, err = sqlDB.Exec(
+		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
+		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		now, now, hashedPw,
+	)
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	_, err = sqlDB.Exec(
+		`INSERT INTO coremail_domains (name, tenant_id, reseller_id, status, plan, description, max_mailboxes, max_aliases, max_quota_mb, dkim_enabled, dkim_selector, dmarc_enabled, mtasts_enabled, catchall_address, abuse_contact, labels, mailbox_count, created_at, updated_at)
+		 VALUES ('test.local', 1, 0, 'active', 'enterprise', '', 100, 50, 1024, 0, '', 0, 0, '', '', '', 0, ?, ?)`,
+		now, now,
+	)
+	if err != nil {
+		t.Fatalf("insert domain: %v", err)
+	}
+
+	token := loginForTest(t, router, "admin@test.local", "TestPassword123!")
+
+	csrfToken := getCSRFTokenForTest(t, router, token)
+
+	t.Run("missing CSRF cookie returns 403", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/mailboxes", strings.NewReader(`{"email":"user1@test.local","password":"SecurePass123!"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := router.App().Test(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if resp.StatusCode != 403 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 403, got %d: %s", resp.StatusCode, body)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if !strings.Contains(string(body), "CSRF") && !strings.Contains(string(body), "csrf") {
+			t.Fatalf("expected CSRF error message, got %s", body)
+		}
+	})
+
+	t.Run("invalid CSRF token returns 403", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/mailboxes", strings.NewReader(`{"email":"user1@test.local","password":"SecurePass123!"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Cookie", "csrf_token=invalidtoken")
+		req.Header.Set("X-CSRF-Token", "differenttoken")
+		resp, err := router.App().Test(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if resp.StatusCode != 403 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 403, got %d: %s", resp.StatusCode, body)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if !strings.Contains(string(body), "CSRF") && !strings.Contains(string(body), "csrf") {
+			t.Fatalf("expected CSRF error message, got %s", body)
+		}
+	})
+
+	tests := []struct {
+		name       string
+		payload    string
+		wantStatus int
+		wantErr    string
+	}{
+		{
+			name:       "success",
+			payload:    `{"email":"user1@test.local","password":"SecurePass123!"}`,
+			wantStatus: 201,
+		},
+		{
+			name:       "duplicate email",
+			payload:    `{"email":"user1@test.local","password":"AnotherPass456!"}`,
+			wantStatus: 409,
+			wantErr:    "already exists",
+		},
+		{
+			name:       "unknown domain",
+			payload:    `{"email":"user@nonexistent.local","password":"SecurePass123!"}`,
+			wantStatus: 404,
+			wantErr:    "domain not found",
+		},
+		{
+			name:       "short password",
+			payload:    `{"email":"user2@test.local","password":"short7"}`,
+			wantStatus: 400,
+			wantErr:    "at least 8 characters",
+		},
+		{
+			name:       "missing email",
+			payload:    `{"password":"SecurePass123!"}`,
+			wantStatus: 400,
+			wantErr:    "required",
+		},
+		{
+			name:       "missing password",
+			payload:    `{"email":"user3@test.local"}`,
+			wantStatus: 400,
+			wantErr:    "required",
+		},
+		{
+			name:       "invalid email format",
+			payload:    `{"email":"notanemail","password":"SecurePass123!"}`,
+			wantStatus: 400,
+			wantErr:    "invalid email",
+		},
+		{
+			name:       "invalid email whitespace",
+			payload:    `{"email":"bad user@test.local","password":"SecurePass123!"}`,
+			wantStatus: 400,
+			wantErr:    "invalid email",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("POST", "/api/v1/mailboxes", strings.NewReader(tc.payload))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("Cookie", "csrf_token="+csrfToken)
+			req.Header.Set("X-CSRF-Token", csrfToken)
+			resp, err := router.App().Test(req)
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+			if resp.StatusCode != tc.wantStatus {
+				body, _ := io.ReadAll(resp.Body)
+				t.Fatalf("expected %d, got %d: %s", tc.wantStatus, resp.StatusCode, body)
+			}
+			if tc.wantErr != "" {
+				body, _ := io.ReadAll(resp.Body)
+				if !strings.Contains(string(body), tc.wantErr) {
+					t.Fatalf("expected error containing %q, got %s", tc.wantErr, body)
+				}
+			}
+		})
+	}
+
+	t.Run("response does not expose password_hash", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/mailboxes", strings.NewReader(`{"email":"safe@test.local","password":"SafePass123!"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Cookie", "csrf_token="+csrfToken)
+		req.Header.Set("X-CSRF-Token", csrfToken)
+		resp, err := router.App().Test(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if resp.StatusCode != 201 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 201, got %d: %s", resp.StatusCode, body)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if strings.Contains(string(body), "password_hash") || strings.Contains(string(body), "argon2id") || strings.Contains(string(body), "$argon2") {
+			t.Fatalf("response must not expose password_hash: %s", body)
+		}
+		if !strings.Contains(string(body), `"email":"safe@test.local"`) {
+			t.Fatalf("response must include email: %s", body)
+		}
+		if !strings.Contains(string(body), `"status":"active"`) {
+			t.Fatalf("response must include status: %s", body)
+		}
+	})
+}
+
 func loginForTest(t *testing.T, router *Router, email, password string) string {
 	t.Helper()
 	payload := `{"username":"` + email + `","password":"` + password + `"}`
@@ -355,6 +546,30 @@ func loginForTest(t *testing.T, router *Router, email, password string) string {
 		t.Fatal("login did not return access token")
 	}
 	return parsed.AccessToken
+}
+
+func getCSRFTokenForTest(t *testing.T, router *Router, token string) string {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/api/v1/csrf-token", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := router.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("csrf token request: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("csrf token expected 200, got %d: %s", resp.StatusCode, body)
+	}
+	var data struct {
+		CSRFToken string `json:"csrf_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		t.Fatalf("decode csrf token: %v", err)
+	}
+	if data.CSRFToken == "" {
+		t.Fatal("csrf token endpoint returned empty token")
+	}
+	return data.CSRFToken
 }
 
 func getAdminJSON(t *testing.T, router *Router, token, path string) []byte {

@@ -154,7 +154,30 @@
         </section>
 
         <section class="page hidden" data-page-view="mailboxes">
-          <div class="page-head"><div><h2>Mailboxes</h2><p>Mailbox and administrator accounts available from the users endpoint.</p></div><button class="ghost-btn" type="button" data-refresh="mailboxes">Refresh</button></div>
+          <div class="page-head"><div><h2>Mailboxes</h2><p>Mailbox and administrator accounts available from the users endpoint.</p></div><div><button class="ghost-btn" type="button" id="show-add-mailbox">+ Add Mailbox</button><button class="ghost-btn" type="button" data-refresh="mailboxes">Refresh</button></div></div>
+          <section class="panel hidden" id="add-mailbox-panel">
+            <div class="panel-head"><h3>Add Mailbox</h3></div>
+            <div class="panel-body">
+              <form id="add-mailbox-form">
+                <div class="setting-row">
+                  <div><strong>Email</strong><span>Full email address for the new mailbox.</span></div>
+                  <input id="mb-email" type="email" placeholder="user@domain.com" required style="width:240px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:14px;">
+                </div>
+                <div class="setting-row">
+                  <div><strong>Password</strong><span>Minimum 8 characters.</span></div>
+                  <input id="mb-password" type="password" placeholder="Password" required minlength="8" style="width:240px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:14px;">
+                </div>
+                <div class="setting-row">
+                  <div><strong>Display Name</strong><span>Optional display name for this mailbox.</span></div>
+                  <input id="mb-name" type="text" placeholder="Display name (optional)" style="width:240px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:14px;">
+                </div>
+                <div style="margin-top:12px;">
+                  <button id="add-mailbox-btn" class="primary-btn" type="submit">Create Mailbox</button>
+                  <span id="add-mailbox-message" class="message" style="margin-left:12px;"></span>
+                </div>
+              </form>
+            </div>
+          </section>
           <section class="panel"><div class="panel-body" id="mailboxes-table"></div></section>
         </section>
 

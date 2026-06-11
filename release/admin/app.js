@@ -43,6 +43,13 @@ async function apiGet(path, fallback) {
   return await res.json();
 }
 
+async function getCSRFToken() {
+  const res = await fetch("/api/v1/csrf-token", { headers: authHeaders() });
+  if (!res.ok) throw new Error("Failed to get CSRF token");
+  const data = await res.json();
+  return data.csrf_token;
+}
+
 async function loadProfile() {
   state.profile = await apiGet("/api/v1/me");
   setText("admin-email", state.profile.email || "Signed in");
@@ -180,6 +187,51 @@ loginForm.addEventListener("submit", async (event) => {
 });
 
 el("logout-button").addEventListener("click", signOut);
+
+el("show-add-mailbox").addEventListener("click", () => {
+  el("add-mailbox-panel").classList.toggle("hidden");
+  el("add-mailbox-message").textContent = "";
+  el("add-mailbox-message").className = "message";
+});
+
+el("add-mailbox-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const btn = el("add-mailbox-btn");
+  const msg = el("add-mailbox-message");
+  msg.textContent = "";
+  msg.className = "message";
+  btn.disabled = true;
+  try {
+    const csrfToken = await getCSRFToken();
+    const email = el("mb-email").value.trim();
+    const password = el("mb-password").value;
+    const name = el("mb-name").value.trim();
+    const res = await fetch("/api/v1/mailboxes", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${state.token}`,
+        "X-CSRF-Token": csrfToken
+      },
+      body: JSON.stringify({ email, password, name: name || undefined })
+    });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error(errBody.error || `HTTP ${res.status}`);
+    }
+    msg.textContent = `Mailbox ${email} created successfully.`;
+    msg.className = "message success";
+    el("mb-email").value = "";
+    el("mb-password").value = "";
+    el("mb-name").value = "";
+    await loadMailboxes();
+  } catch (err) {
+    msg.textContent = err.message || "Failed to create mailbox.";
+    msg.className = "message error";
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 document.querySelectorAll("[data-page]").forEach((button) => {
   button.addEventListener("click", () => {

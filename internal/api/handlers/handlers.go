@@ -2,8 +2,13 @@ package handlers
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
+	"encoding/base64"
 	"fmt"
+	"net/mail"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -14,6 +19,7 @@ import (
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
 	"go.uber.org/zap"
+	"golang.org/x/crypto/argon2"
 	"gorm.io/gorm"
 )
 
@@ -566,6 +572,119 @@ func (h *Handler) CreateUser(c fiber.Ctx) error {
 
 	h.writeAuditLog(c, "user.create", fmt.Sprintf("user:%s", req.Email))
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"status": "created", "email": req.Email})
+}
+
+// CreateMailbox creates a new CoreMail mailbox.
+func (h *Handler) CreateMailbox(c fiber.Ctx) error {
+	var req struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+		Name     string `json:"name"`
+		QuotaMB  int64  `json:"quota_mb"`
+	}
+	if err := c.Bind().JSON(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
+	}
+
+	req.Email = strings.TrimSpace(req.Email)
+	if req.Email == "" || req.Password == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "email and password required"})
+	}
+
+	if len(req.Password) < h.cfg.Auth.PasswordMinLen {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("password must be at least %d characters", h.cfg.Auth.PasswordMinLen)})
+	}
+
+	parts := strings.SplitN(req.Email, "@", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid email format"})
+	}
+	parsed, err := mail.ParseAddress(req.Email)
+	if err != nil || parsed.Address != req.Email || strings.ContainsAny(req.Email, " \t\r\n") {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid email format"})
+	}
+	localPart := parts[0]
+	domainName := parts[1]
+
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	var domainID uint
+	var tenantID uint
+	var domainStatus string
+	err = sqlDB.QueryRow("SELECT id, tenant_id, status FROM coremail_domains WHERE name = ? AND deleted_at IS NULL", domainName).Scan(&domainID, &tenantID, &domainStatus)
+	if err == sql.ErrNoRows {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "domain not found: " + domainName})
+	}
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+	if domainStatus != "active" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "domain is not active: " + domainName})
+	}
+
+	var existing int64
+	sqlDB.QueryRow("SELECT COUNT(*) FROM coremail_mailboxes WHERE email = ? AND deleted_at IS NULL", req.Email).Scan(&existing)
+	if existing > 0 {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "mailbox already exists: " + req.Email})
+	}
+
+	argon2Hash, err := hashPasswordArgon2id(req.Password)
+	if err != nil {
+		h.logger.Error("failed to hash mailbox password", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "mailbox creation failed"})
+	}
+
+	displayName := req.Name
+	if displayName == "" {
+		displayName = localPart
+	}
+	quotaMB := req.QuotaMB
+	if quotaMB <= 0 {
+		quotaMB = 1024
+	}
+
+	result, err := sqlDB.Exec(
+		`INSERT INTO coremail_mailboxes (domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme, status, quota_mb, is_admin, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, 'argon2id', 'active', ?, 0, ?, ?)`,
+		domainID, tenantID, localPart, req.Email, displayName, argon2Hash, quotaMB, time.Now().UTC(), time.Now().UTC(),
+	)
+	if err != nil {
+		h.logger.Error("failed to create mailbox", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "mailbox creation failed"})
+	}
+
+	mailboxID, _ := result.LastInsertId()
+	h.writeAuditLog(c, "mailbox.create", fmt.Sprintf("mailbox:%s", req.Email))
+
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+		"id":     mailboxID,
+		"email":  req.Email,
+		"status": "active",
+		"domain": domainName,
+		"quota":  quotaMB,
+	})
+}
+
+// hashPasswordArgon2id creates an Argon2id password hash.
+func hashPasswordArgon2id(password string) (string, error) {
+	const (
+		argon2Time    uint32 = 3
+		argon2Mem     uint32 = 65536
+		argon2Threads uint8  = 4
+		argon2KeyLen  uint32 = 32
+	)
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		return "", fmt.Errorf("generate salt: %w", err)
+	}
+	hash := argon2.IDKey([]byte(password), salt, argon2Time, argon2Mem, argon2Threads, argon2KeyLen)
+	b64Salt := base64.RawStdEncoding.EncodeToString(salt)
+	b64Hash := base64.RawStdEncoding.EncodeToString(hash)
+	return fmt.Sprintf("$argon2id$v=19$m=%d,t=%d,p=%d$%s$%s",
+		argon2Mem, argon2Time, argon2Threads, b64Salt, b64Hash), nil
 }
 
 // DeleteUser removes a user.
