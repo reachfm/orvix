@@ -80,8 +80,28 @@ async function loadHealth() {
 }
 
 async function loadDomains() {
-  state.domains = await apiGet("/api/v1/domains", []);
-  renderTable("domains-table", state.domains, ["domain", "plan", "status"], "No domains have been provisioned yet.");
+  const domains = await apiGet("/api/v1/domains", []);
+  state.domains = domains;
+  const node = el("domains-table");
+  if (!node) return;
+  if (!Array.isArray(domains) || domains.length === 0) {
+    node.innerHTML = '<div class="empty-state">No domains have been provisioned yet.</div>';
+    return;
+  }
+  const rows = domains.map(function(d) {
+    const isActive = d.status === "active";
+    const statusBtn = isActive
+      ? '<button class="ghost-btn dm-action" data-action="disable" data-domain="' + escapeHTML(d.domain) + '" data-domain-id="' + d.id + '" style="font-size:12px;padding:4px 8px;min-height:auto;margin-right:4px;">Disable</button>'
+      : '<button class="ghost-btn dm-action" data-action="enable" data-domain="' + escapeHTML(d.domain) + '" data-domain-id="' + d.id + '" style="font-size:12px;padding:4px 8px;min-height:auto;margin-right:4px;">Enable</button>';
+    const deleteBtn = '<button class="ghost-btn dm-action" data-action="delete" data-domain="' + escapeHTML(d.domain) + '" data-domain-id="' + d.id + '" data-mailbox-count="' + (d.mailbox_count || 0) + '" style="font-size:12px;padding:4px 8px;min-height:auto;">Delete</button>';
+    return '<tr>' +
+      '<td>' + escapeHTML(d.domain || "-") + '</td>' +
+      '<td>' + escapeHTML(d.plan || "-") + '</td>' +
+      '<td>' + escapeHTML(d.status || "active") + '</td>' +
+      '<td>' + (d.mailbox_count != null ? d.mailbox_count : "-") + '</td>' +
+      '<td>' + statusBtn + deleteBtn + '</td></tr>';
+  }).join("");
+  node.innerHTML = '<table class="table"><thead><tr><th>Domain</th><th>Plan</th><th>Status</th><th>Mailboxes</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
 }
 
 async function loadMailboxes() {
@@ -322,6 +342,105 @@ el("mailboxes-table").addEventListener("click", async function(event) {
       showAlert("Mailbox " + email + " deleted.");
     }
     await loadMailboxes();
+  } catch (err) {
+    showAlert(err.message || "Operation failed.");
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+el("show-add-domain").addEventListener("click", () => {
+  el("add-domain-panel").classList.toggle("hidden");
+  el("add-domain-message").textContent = "";
+  el("add-domain-message").className = "message";
+});
+
+el("add-domain-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const btn = el("add-domain-btn");
+  const msg = el("add-domain-message");
+  msg.textContent = "";
+  msg.className = "message";
+  btn.disabled = true;
+  try {
+    const csrfToken = await getCSRFToken();
+    const name = el("dm-name").value.trim();
+    const res = await fetch("/api/v1/domains", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${state.token}`,
+        "X-CSRF-Token": csrfToken
+      },
+      body: JSON.stringify({ name })
+    });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error(errBody.error || `HTTP ${res.status}`);
+    }
+    msg.textContent = `Domain ${name} created successfully.`;
+    msg.className = "message success";
+    el("dm-name").value = "";
+    await loadDomains();
+  } catch (err) {
+    msg.textContent = err.message || "Failed to create domain.";
+    msg.className = "message error";
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+el("domains-table").addEventListener("click", async function(event) {
+  var btn = event.target.closest("button.dm-action");
+  if (!btn) return;
+  var action = btn.dataset.action;
+  var domain = btn.dataset.domain;
+  var domainId = btn.dataset.domainId;
+  btn.disabled = true;
+  try {
+    var csrfToken = await getCSRFToken();
+    if (action === "enable") {
+      var res = await fetch("/api/v1/domains/" + encodeURIComponent(domain) + "/status", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + state.token, "X-CSRF-Token": csrfToken },
+        body: JSON.stringify({ status: "active" })
+      });
+      if (!res.ok) {
+        var errBody = await res.json().catch(function() { return {}; });
+        throw new Error(errBody.error || "HTTP " + res.status);
+      }
+      showAlert("Domain " + domain + " enabled.");
+    } else if (action === "disable") {
+      if (!confirm("Disable domain " + domain + "? New mailbox creation will be blocked.")) return;
+      var res = await fetch("/api/v1/domains/" + encodeURIComponent(domain) + "/status", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + state.token, "X-CSRF-Token": csrfToken },
+        body: JSON.stringify({ status: "suspended" })
+      });
+      if (!res.ok) {
+        var errBody = await res.json().catch(function() { return {}; });
+        throw new Error(errBody.error || "HTTP " + res.status);
+      }
+      showAlert("Domain " + domain + " disabled.");
+    } else if (action === "delete") {
+      var mbCount = parseInt(btn.dataset.mailboxCount || "0", 10);
+      if (mbCount > 0) {
+        showAlert("Cannot delete domain " + domain + ": it contains " + mbCount + " mailbox(es). Remove all mailboxes first.");
+        btn.disabled = false;
+        return;
+      }
+      if (!confirm("Delete domain " + domain + "? This action cannot be undone.")) return;
+      var res = await fetch("/api/v1/domains/" + encodeURIComponent(domain), {
+        method: "DELETE",
+        headers: { "Authorization": "Bearer " + state.token, "X-CSRF-Token": csrfToken }
+      });
+      if (!res.ok) {
+        var errBody = await res.json().catch(function() { return {}; });
+        throw new Error(errBody.error || "HTTP " + res.status);
+      }
+      showAlert("Domain " + domain + " deleted.");
+    }
+    await loadDomains();
   } catch (err) {
     showAlert(err.message || "Operation failed.");
   } finally {

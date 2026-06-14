@@ -149,7 +149,22 @@
         </section>
 
         <section class="page hidden" data-page-view="domains">
-          <div class="page-head"><div><h2>Domains</h2><p>Provisioned mail domains visible to the Admin API.</p></div><button class="ghost-btn" type="button" data-refresh="domains">Refresh</button></div>
+          <div class="page-head"><div><h2>Domains</h2><p>Mail domains managed by CoreMail.</p></div><div><button class="ghost-btn" type="button" id="show-add-domain">+ Add Domain</button><button class="ghost-btn" type="button" data-refresh="domains">Refresh</button></div></div>
+          <section class="panel hidden" id="add-domain-panel">
+            <div class="panel-head"><h3>Add Domain</h3></div>
+            <div class="panel-body">
+              <form id="add-domain-form">
+                <div class="setting-row">
+                  <div><strong>Domain Name</strong><span>Fully qualified domain name (e.g. mail.example.com).</span></div>
+                  <input id="dm-name" type="text" placeholder="mail.example.com" required style="width:240px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:14px;">
+                </div>
+                <div style="margin-top:12px;">
+                  <button id="add-domain-btn" class="primary-btn" type="submit">Create Domain</button>
+                  <span id="add-domain-message" class="message" style="margin-left:12px;"></span>
+                </div>
+              </form>
+            </div>
+          </section>
           <section class="panel"><div class="panel-body" id="domains-table"></div></section>
         </section>
 

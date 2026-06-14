@@ -199,6 +199,7 @@ func (r *Router) setupRoutes() {
 
 	men := admin.Group("", r.csrf.Middleware())
 	men.Post("/domains", r.h.CreateDomain)
+	men.Patch("/domains/:name/status", r.h.UpdateDomainStatus)
 	men.Delete("/domains/:name", r.h.DeleteDomain)
 	men.Post("/users", r.h.CreateUser)
 	men.Post("/mailboxes", r.h.CreateMailbox)

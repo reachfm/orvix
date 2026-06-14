@@ -197,6 +197,9 @@ func TestAdminListEndpointsReturnArraysAndBootstrapRows(t *testing.T) {
 	if len(domains) != 1 || domains[0]["domain"] != "test.local" {
 		t.Fatalf("expected bootstrap CoreMail domain, got %s", domainsBody)
 	}
+	if _, ok := domains[0]["mailbox_count"]; !ok {
+		t.Fatalf("domains response must include mailbox_count field: %s", domainsBody)
+	}
 
 	usersBody := getAdminJSON(t, router, token, "/api/v1/users")
 	var users []map[string]any
@@ -343,6 +346,15 @@ func TestAdminUIStaticRoutes(t *testing.T) {
 	if strings.Contains(string(jsBody), "RC1") || strings.Contains(string(jsBody), "Clean Path") {
 		t.Fatalf("admin app.js must not contain RC1 or Clean Path branding")
 	}
+	if !strings.Contains(string(jsBody), "dm-action") {
+		t.Fatalf("admin app.js must have domain action controls")
+	}
+	if !strings.Contains(string(jsBody), "add-domain-btn") {
+		t.Fatalf("admin app.js must have add domain button")
+	}
+	if !strings.Contains(string(jsBody), "mailbox_count") {
+		t.Fatalf("admin app.js must reference mailbox_count for domain rows")
+	}
 	resp, err = router.App().Test(httptest.NewRequest("HEAD", "/admin", nil))
 	if err != nil {
 		t.Fatalf("HEAD /admin request: %v", err)
@@ -382,6 +394,362 @@ func createAdminQueueFixture(t *testing.T, sqlDB *sql.DB, now string) {
 		t.Fatalf("insert queue fixture: %v", err)
 	}
 	_ = now
+}
+
+func TestDomainManagement(t *testing.T) {
+	logger := zap.NewNop()
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(t.TempDir(), "orvix.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	defer sqlDB.Close()
+	if err := models.MigrateAllRaw(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	authenticator, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	router := NewRouter(cfg, authenticator, logger, db, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
+	defer router.App().Shutdown()
+
+	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+	hashedPw, _ := authenticator.HashPassword("TestPassword123!")
+	_, err = sqlDB.Exec(
+		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
+		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		now, now, hashedPw,
+	)
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	_, err = sqlDB.Exec(
+		`INSERT INTO coremail_domains (name, tenant_id, status, plan, created_at, updated_at)
+		 VALUES ('test.local', 1, 'active', 'enterprise', ?, ?)`,
+		now, now,
+	)
+	if err != nil {
+		t.Fatalf("insert domain: %v", err)
+	}
+	// Insert a mailbox for test.local so delete-with-mailboxes test works
+	testHash := "$argon2id$v=19$m=1024,t=1,p=1$c2FsdA$aGFzaA"
+	_, err = sqlDB.Exec(
+		`INSERT INTO coremail_mailboxes (domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme, status, quota_mb, is_admin, created_at, updated_at)
+		 VALUES (1, 1, 'admin', 'admin@test.local', 'Admin', ?, 'argon2id', 'active', 1024, 1, ?, ?)`,
+		testHash, now, now,
+	)
+	if err != nil {
+		t.Fatalf("insert mailbox: %v", err)
+	}
+
+	token := loginForTest(t, router, "admin@test.local", "TestPassword123!")
+	csrfToken := getCSRFTokenForTest(t, router, token)
+
+	// CREATE DOMAIN
+	t.Run("create domain success", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/domains", strings.NewReader(`{"name":"example.com"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Cookie", "csrf_token="+csrfToken)
+		req.Header.Set("X-CSRF-Token", csrfToken)
+		resp, err := router.App().Test(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if resp.StatusCode != 201 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 201, got %d: %s", resp.StatusCode, body)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if !strings.Contains(string(body), `"domain":"example.com"`) {
+			t.Fatalf("response must include domain: %s", body)
+		}
+		if !strings.Contains(string(body), `"status":"active"`) {
+			t.Fatalf("response must include status: %s", body)
+		}
+	})
+
+	t.Run("duplicate domain rejected", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/domains", strings.NewReader(`{"name":"example.com"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Cookie", "csrf_token="+csrfToken)
+		req.Header.Set("X-CSRF-Token", csrfToken)
+		resp, err := router.App().Test(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if resp.StatusCode != 409 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 409, got %d: %s", resp.StatusCode, body)
+		}
+	})
+
+	t.Run("invalid domain rejected", func(t *testing.T) {
+		tests := []struct {
+			name    string
+			payload string
+		}{
+			{"empty", `{"name":""}`},
+			{"single label", `{"name":"localhost"}`},
+			{"spaces", `{"name":"has spaces.com"}`},
+			{"wildcard", `{"name":"*.example.org"}`},
+			{"http protocol", `{"name":"http://example.com"}`},
+			{"https protocol", `{"name":"https://example.com"}`},
+			{"scheme separator", `{"name":"example.com://foo"}`},
+			{"trailing slash", `{"name":"example.com/"}`},
+			{"path segment", `{"name":"example.com/path"}`},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				req := httptest.NewRequest("POST", "/api/v1/domains", strings.NewReader(tc.payload))
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("Authorization", "Bearer "+token)
+				req.Header.Set("Cookie", "csrf_token="+csrfToken)
+				req.Header.Set("X-CSRF-Token", csrfToken)
+				resp, err := router.App().Test(req)
+				if err != nil {
+					t.Fatalf("request: %v", err)
+				}
+				if resp.StatusCode != 400 {
+					body, _ := io.ReadAll(resp.Body)
+					t.Fatalf("expected 400 for %s, got %d: %s", tc.name, resp.StatusCode, body)
+				}
+			})
+		}
+	})
+
+	t.Run("trailing slash domain rejected as invalid", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/domains", strings.NewReader(`{"name":"example.com/"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Cookie", "csrf_token="+csrfToken)
+		req.Header.Set("X-CSRF-Token", csrfToken)
+		resp, err := router.App().Test(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if resp.StatusCode != 400 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 400 (trailing slash rejected), got %d: %s", resp.StatusCode, body)
+		}
+	})
+
+	// DISABLE DOMAIN
+	t.Run("disable domain success", func(t *testing.T) {
+		req := httptest.NewRequest("PATCH", "/api/v1/domains/example.com/status", strings.NewReader(`{"status":"suspended"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Cookie", "csrf_token="+csrfToken)
+		req.Header.Set("X-CSRF-Token", csrfToken)
+		resp, err := router.App().Test(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if resp.StatusCode != 200 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 200, got %d: %s", resp.StatusCode, body)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if !strings.Contains(string(body), `"status":"suspended"`) {
+			t.Fatalf("response must include new status: %s", body)
+		}
+	})
+
+	// ENABLE DOMAIN
+	t.Run("enable domain success", func(t *testing.T) {
+		req := httptest.NewRequest("PATCH", "/api/v1/domains/example.com/status", strings.NewReader(`{"status":"active"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Cookie", "csrf_token="+csrfToken)
+		req.Header.Set("X-CSRF-Token", csrfToken)
+		resp, err := router.App().Test(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if resp.StatusCode != 200 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 200, got %d: %s", resp.StatusCode, body)
+		}
+	})
+
+	// DOMAIN NOT FOUND
+	t.Run("missing domain returns 404", func(t *testing.T) {
+		req := httptest.NewRequest("PATCH", "/api/v1/domains/nonexistent.com/status", strings.NewReader(`{"status":"suspended"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Cookie", "csrf_token="+csrfToken)
+		req.Header.Set("X-CSRF-Token", csrfToken)
+		resp, err := router.App().Test(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if resp.StatusCode != 404 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 404, got %d: %s", resp.StatusCode, body)
+		}
+	})
+
+	// DELETE EMPTY DOMAIN
+	t.Run("delete empty domain success", func(t *testing.T) {
+		req := httptest.NewRequest("DELETE", "/api/v1/domains/example.com", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Cookie", "csrf_token="+csrfToken)
+		req.Header.Set("X-CSRF-Token", csrfToken)
+		resp, err := router.App().Test(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if resp.StatusCode != 200 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 200, got %d: %s", resp.StatusCode, body)
+		}
+	})
+
+	// DELETE DOMAIN WITH MAILBOXES REJECTED
+	t.Run("delete domain with mailboxes rejected", func(t *testing.T) {
+		req := httptest.NewRequest("DELETE", "/api/v1/domains/test.local", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Cookie", "csrf_token="+csrfToken)
+		req.Header.Set("X-CSRF-Token", csrfToken)
+		resp, err := router.App().Test(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if resp.StatusCode != 409 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 409, got %d: %s", resp.StatusCode, body)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if !strings.Contains(string(body), "mailboxes") {
+			t.Fatalf("expected mailboxes error, got %s", body)
+		}
+	})
+
+	// CSRF REJECTION
+	t.Run("create domain missing CSRF rejected", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/domains", strings.NewReader(`{"name":"nocsrfdomain.com"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := router.App().Test(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if resp.StatusCode != 403 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 403, got %d: %s", resp.StatusCode, body)
+		}
+	})
+
+	t.Run("domain status missing CSRF rejected", func(t *testing.T) {
+		req := httptest.NewRequest("PATCH", "/api/v1/domains/test.local/status", strings.NewReader(`{"status":"suspended"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := router.App().Test(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if resp.StatusCode != 403 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 403, got %d: %s", resp.StatusCode, body)
+		}
+	})
+
+	t.Run("delete domain invalid CSRF rejected", func(t *testing.T) {
+		req := httptest.NewRequest("DELETE", "/api/v1/domains/test.local", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Cookie", "csrf_token=invalidtoken")
+		req.Header.Set("X-CSRF-Token", "differenttoken")
+		resp, err := router.App().Test(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if resp.StatusCode != 403 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 403, got %d: %s", resp.StatusCode, body)
+		}
+	})
+
+	// LIVE MAILBOX COUNT (Blocker 3)
+	t.Run("list domains returns live mailbox count", func(t *testing.T) {
+		body := getAdminJSON(t, router, token, "/api/v1/domains")
+		var domains []map[string]any
+		if err := json.Unmarshal(body, &domains); err != nil {
+			t.Fatalf("domains must be JSON array: %v: %s", err, body)
+		}
+		found := false
+		for _, d := range domains {
+			if d["domain"] == "test.local" {
+				found = true
+				mc, _ := d["mailbox_count"].(float64)
+				if mc < 1 {
+					t.Fatalf("test.local must have live mailbox_count >= 1, got %v: %s", d["mailbox_count"], body)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("test.local not found in domains list: %s", body)
+		}
+	})
+
+	t.Run("soft-deleted mailbox not counted in mailbox_count", func(t *testing.T) {
+		_, err = sqlDB.Exec("UPDATE coremail_mailboxes SET deleted_at = ? WHERE email = 'admin@test.local'", time.Now().UTC().Format("2006-01-02 15:04:05"))
+		if err != nil {
+			t.Fatalf("soft-delete mailbox: %v", err)
+		}
+		body := getAdminJSON(t, router, token, "/api/v1/domains")
+		var domains []map[string]any
+		if err := json.Unmarshal(body, &domains); err != nil {
+			t.Fatalf("domains must be JSON array: %v: %s", err, body)
+		}
+		for _, d := range domains {
+			if d["domain"] == "test.local" {
+				mc, _ := d["mailbox_count"].(float64)
+				if mc != 0 {
+					t.Fatalf("test.local must have mailbox_count 0 after soft-delete, got %v: %s", d["mailbox_count"], body)
+				}
+			}
+		}
+		_, err = sqlDB.Exec("UPDATE coremail_mailboxes SET deleted_at = NULL WHERE email = 'admin@test.local'")
+		if err != nil {
+			t.Fatalf("restore mailbox: %v", err)
+		}
+	})
+
+	t.Run("delete domain succeeds when only soft-deleted mailboxes remain", func(t *testing.T) {
+		_, err = sqlDB.Exec("UPDATE coremail_mailboxes SET deleted_at = ? WHERE email = 'admin@test.local'", time.Now().UTC().Format("2006-01-02 15:04:05"))
+		if err != nil {
+			t.Fatalf("soft-delete mailbox: %v", err)
+		}
+		delReq := httptest.NewRequest("DELETE", "/api/v1/domains/test.local", nil)
+		delReq.Header.Set("Authorization", "Bearer "+token)
+		delReq.Header.Set("Cookie", "csrf_token="+csrfToken)
+		delReq.Header.Set("X-CSRF-Token", csrfToken)
+		resp, err := router.App().Test(delReq)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if resp.StatusCode != 200 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 200 (delete allowed when only soft-deleted mailboxes), got %d: %s", resp.StatusCode, body)
+		}
+	})
+
+	// NO PROVISIONED_DOMAINS FALLBACK (Blocker 1)
+	t.Run("list domains does not include provisioned_domains-only rows", func(t *testing.T) {
+		_, _ = sqlDB.Exec("INSERT INTO provisioned_domains (domain, tenant_id, plan, status, created_at, updated_at) VALUES ('provisioned-only.local', 1, 'smb', 'active', ?, ?)", time.Now().UTC().Format("2006-01-02 15:04:05"), time.Now().UTC().Format("2006-01-02 15:04:05"))
+		body := getAdminJSON(t, router, token, "/api/v1/domains")
+		if strings.Contains(string(body), "provisioned-only.local") {
+			t.Fatalf("provisioned_domains fallback must not appear in ListDomains: %s", body)
+		}
+	})
 }
 
 func TestMailboxManagement(t *testing.T) {

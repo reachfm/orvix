@@ -395,59 +395,55 @@ func (h *Handler) Me(c fiber.Ctx) error {
 	})
 }
 
-// ListDomains returns all mail domains.
+// ListDomains returns all mail domains with live mailbox counts.
 func (h *Handler) ListDomains(c fiber.Ctx) error {
 	type domainRow struct {
-		ID     uint   `json:"id"`
-		Domain string `json:"domain"`
-		Plan   string `json:"plan"`
-		Status string `json:"status"`
+		ID           uint   `json:"id"`
+		Domain       string `json:"domain"`
+		Plan         string `json:"plan"`
+		Status       string `json:"status"`
+		MailboxCount int    `json:"mailbox_count"`
 	}
-	var domains []domainRow
+	var result []domainRow
 
 	sqlDB, err := h.db.DB()
-	if err == nil {
-		seen := make(map[string]bool)
-		rows, err := sqlDB.Query("SELECT id, domain, plan, status FROM provisioned_domains ORDER BY id DESC")
-		if err == nil {
-			defer rows.Close()
-			for rows.Next() {
-				var id uint
-				var domain, plan, status string
-				if err := rows.Scan(&id, &domain, &plan, &status); err != nil {
-					continue
-				}
-				if !seen[domain] {
-					domains = append(domains, domainRow{ID: id, Domain: domain, Plan: plan, Status: status})
-					seen[domain] = true
-				}
-			}
-		}
-
-		rows, err = sqlDB.Query("SELECT id, name, plan, status FROM coremail_domains WHERE deleted_at IS NULL ORDER BY id DESC")
-		if err == nil {
-			defer rows.Close()
-			for rows.Next() {
-				var id uint
-				var name, plan, status string
-				if err := rows.Scan(&id, &name, &plan, &status); err != nil {
-					continue
-				}
-				if !seen[name] {
-					domains = append(domains, domainRow{ID: id, Domain: name, Plan: plan, Status: status})
-					seen[name] = true
-				}
-			}
-		}
+	if err != nil {
+		return c.JSON([]domainRow{})
 	}
 
-	if domains == nil {
-		domains = []domainRow{}
+	type rawDomain struct {
+		ID     uint
+		Name   string
+		Plan   string
+		Status string
 	}
-	return c.JSON(domains)
+	var rawDomains []rawDomain
+	rows, err := sqlDB.Query("SELECT id, name, plan, status FROM coremail_domains WHERE deleted_at IS NULL ORDER BY id DESC")
+	if err != nil {
+		return c.JSON([]domainRow{})
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var rd rawDomain
+		if err := rows.Scan(&rd.ID, &rd.Name, &rd.Plan, &rd.Status); err != nil {
+			continue
+		}
+		rawDomains = append(rawDomains, rd)
+	}
+
+	for _, rd := range rawDomains {
+		var mailboxCount int64
+		sqlDB.QueryRow("SELECT COUNT(*) FROM coremail_mailboxes WHERE domain_id = ? AND deleted_at IS NULL", rd.ID).Scan(&mailboxCount)
+		result = append(result, domainRow{ID: rd.ID, Domain: rd.Name, Plan: rd.Plan, Status: rd.Status, MailboxCount: int(mailboxCount)})
+	}
+
+	if result == nil {
+		result = []domainRow{}
+	}
+	return c.JSON(result)
 }
 
-// CreateDomain creates a new mail domain.
+// CreateDomain creates a new mail domain in CoreMail.
 func (h *Handler) CreateDomain(c fiber.Ctx) error {
 	var req struct {
 		Name string `json:"name"`
@@ -456,26 +452,132 @@ func (h *Handler) CreateDomain(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "domain name required"})
 	}
 
-	result := h.db.Exec("INSERT INTO provisioned_domains (domain, plan, status, provisioned_by) VALUES (?, 'smb', 'active', 0) ON CONFLICT(domain) DO NOTHING", req.Name)
-	if result.Error != nil {
-		h.logger.Error("failed to create domain", zap.String("domain", req.Name), zap.Error(result.Error))
+	domainName := strings.ToLower(strings.TrimSpace(req.Name))
+	if strings.Contains(domainName, "://") || strings.Contains(domainName, "/") {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid domain: no protocol or path allowed"})
+	}
+	if strings.Contains(domainName, " ") || strings.Contains(domainName, "*") {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid domain: no spaces or wildcards"})
+	}
+	parts := strings.Split(domainName, ".")
+	if len(parts) < 2 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid domain: must be a fully qualified domain name"})
+	}
+	for _, part := range parts {
+		if part == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid domain: consecutive dots"})
+		}
+	}
+
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	var existing int64
+	sqlDB.QueryRow("SELECT COUNT(*) FROM coremail_domains WHERE name = ? AND deleted_at IS NULL", domainName).Scan(&existing)
+	if existing > 0 {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "domain already exists: " + domainName})
+	}
+
+	now := time.Now().UTC()
+	result, err := sqlDB.Exec(
+		`INSERT INTO coremail_domains (name, tenant_id, reseller_id, status, plan, description, max_mailboxes, max_aliases, max_quota_mb, dkim_enabled, dkim_selector, dmarc_enabled, mtasts_enabled, catchall_address, abuse_contact, labels, mailbox_count, created_at, updated_at)
+		 VALUES (?, 0, 0, 'active', 'smb', '', 0, 0, 0, 0, '', 0, 0, '', '', '', 0, ?, ?)`,
+		domainName, now, now,
+	)
+	if err != nil {
+		h.logger.Error("failed to create domain", zap.String("domain", domainName), zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create domain"})
 	}
 
-	h.writeAuditLog(c, "domain.create", fmt.Sprintf("domain:%s", req.Name))
-	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"status": "created", "domain": req.Name})
+	domainID, _ := result.LastInsertId()
+	h.writeAuditLog(c, "domain.create", fmt.Sprintf("domain:%s", domainName))
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+		"id":     domainID,
+		"domain": domainName,
+		"status": "active",
+	})
 }
 
-// DeleteDomain removes a mail domain.
+// DeleteDomain soft-deletes a mail domain. Domain must have zero active mailboxes.
 func (h *Handler) DeleteDomain(c fiber.Ctx) error {
+	idStr := c.Params("name")
+	if idStr == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "domain name required"})
+	}
+
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	var domainID uint
+	var domainName string
+	err = sqlDB.QueryRow("SELECT id, name FROM coremail_domains WHERE name = ? AND deleted_at IS NULL", idStr).Scan(&domainID, &domainName)
+	if err == sql.ErrNoRows {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "domain not found: " + idStr})
+	}
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	var mailboxCount int64
+	sqlDB.QueryRow("SELECT COUNT(*) FROM coremail_mailboxes WHERE domain_id = ? AND deleted_at IS NULL", domainID).Scan(&mailboxCount)
+	if mailboxCount > 0 {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "domain contains mailboxes", "mailbox_count": mailboxCount})
+	}
+
+	now := time.Now().UTC()
+	_, err = sqlDB.Exec("UPDATE coremail_domains SET deleted_at = ?, updated_at = ? WHERE id = ?", now, now, domainID)
+	if err != nil {
+		h.logger.Error("failed to delete domain", zap.String("domain", domainName), zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "delete failed"})
+	}
+
+	h.writeAuditLog(c, "domain.delete", fmt.Sprintf("domain:%s", domainName))
+	return c.JSON(fiber.Map{"status": "deleted", "domain": domainName})
+}
+
+// UpdateDomainStatus enables or disables a domain.
+func (h *Handler) UpdateDomainStatus(c fiber.Ctx) error {
 	name := c.Params("name")
 	if name == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "domain name required"})
 	}
 
-	h.db.Exec("DELETE FROM provisioned_domains WHERE domain = ?", name)
-	h.writeAuditLog(c, "domain.delete", fmt.Sprintf("domain:%s", name))
-	return c.JSON(fiber.Map{"status": "deleted"})
+	var req struct {
+		Status string `json:"status"`
+	}
+	if err := c.Bind().JSON(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
+	}
+	if req.Status != "active" && req.Status != "suspended" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "status must be 'active' or 'suspended'"})
+	}
+
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	var domainID uint
+	err = sqlDB.QueryRow("SELECT id FROM coremail_domains WHERE name = ? AND deleted_at IS NULL", name).Scan(&domainID)
+	if err == sql.ErrNoRows {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "domain not found: " + name})
+	}
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	_, err = sqlDB.Exec("UPDATE coremail_domains SET status = ?, updated_at = ? WHERE id = ?", req.Status, time.Now().UTC(), domainID)
+	if err != nil {
+		h.logger.Error("failed to update domain status", zap.String("domain", name), zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "status update failed"})
+	}
+
+	h.writeAuditLog(c, "domain.status_update", fmt.Sprintf("domain:%s|status:%s", name, req.Status))
+	return c.JSON(fiber.Map{"result": "updated", "domain": name, "status": req.Status})
 }
 
 // ListUsers returns all users/mailboxes with explicit identity contract.
