@@ -18,7 +18,16 @@ echo "=== Orvix CoreMail Runtime Update ==="
 echo "Repository root: $REPO_ROOT"
 
 echo "[1/6] Building orvix binary..."
-go build -o /tmp/orvix-next ./cmd/orvix
+GO_CMD=""
+if command -v go >/dev/null 2>&1; then
+  GO_CMD="go"
+elif [ -x /usr/local/go/bin/go ]; then
+  GO_CMD="/usr/local/go/bin/go"
+else
+  echo "ERROR: go not found in PATH or /usr/local/go/bin/go. Install Go first." >&2
+  exit 1
+fi
+"$GO_CMD" build -o /tmp/orvix-next ./cmd/orvix
 if [ ! -f /tmp/orvix-next ]; then
   echo "ERROR: Build failed, binary not found." >&2
   exit 1
