@@ -41,6 +41,7 @@ type Service struct {
 	mailStoreDB *sql.DB
 	mailDir     string
 	attachDir   string
+	configPath  string
 
 	mu      sync.Mutex
 	policy  PolicyLoader
@@ -68,6 +69,10 @@ func (s *Service) SetTrustLoader(t TrustLoader) { s.trust = t }
 // SetRuntimeReloader attaches a runtime for reload after restore.
 func (s *Service) SetRuntimeReloader(r RuntimeReloader) { s.runtime = r }
 
+// SetConfigPath sets the path to the config file for backup archives.
+// Defaults to /etc/orvix/orvix.yaml in production.
+func (s *Service) SetConfigPath(path string) { s.configPath = path }
+
 func (s *Service) ensureBasePath() error { return os.MkdirAll(s.basePath, 0750) }
 
 func generateID() string {
@@ -77,6 +82,83 @@ func generateID() string {
 }
 
 func (s *Service) backupPath(id string) string { return filepath.Join(s.basePath, id) }
+
+// safeBackupPath validates a backup ID and returns a contained path.
+// Rejects empty IDs, path traversal (..), separators (/ \), and null bytes.
+// Uses EvalSymlinks to prevent symlink escape:
+//   - If the candidate path exists, its real path is resolved and checked.
+//   - If the candidate path does not exist, an Abs+prefix check is used.
+// Returns the real (symlink-resolved) path inside basePath.
+func (s *Service) safeBackupPath(id string) (string, error) {
+	if id == "" {
+		return "", fmt.Errorf("backup ID is empty")
+	}
+	if strings.Contains(id, "..") || strings.Contains(id, "/") || strings.Contains(id, "\\") || strings.ContainsRune(id, 0) {
+		return "", fmt.Errorf("backup ID contains forbidden characters")
+	}
+
+	absBase, err := filepath.Abs(s.basePath)
+	if err != nil {
+		return "", fmt.Errorf("resolve base path: %w", err)
+	}
+
+	realBase := absBase
+	if fi, err := os.Stat(absBase); err == nil && fi.IsDir() {
+		realBase, err = filepath.EvalSymlinks(absBase)
+		if err != nil {
+			return "", fmt.Errorf("resolve base symlinks: %w", err)
+		}
+	}
+
+	candidate := filepath.Join(realBase, id)
+
+	// Use Lstat to detect symlinks (including dangling symlinks).
+	if _, err := os.Lstat(candidate); err == nil {
+		realCandidate, err := filepath.EvalSymlinks(candidate)
+		if err != nil {
+			return "", fmt.Errorf("resolve candidate symlinks: %w", err)
+		}
+		if realCandidate != realBase && !strings.HasPrefix(realCandidate, realBase+string(os.PathSeparator)) {
+			return "", fmt.Errorf("backup ID escapes base path via symlink")
+		}
+		return realCandidate, nil
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("lstat candidate: %w", err)
+	}
+
+	// Candidate does not exist — use Abs containment check.
+	absCandidate, err := filepath.Abs(candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve candidate path: %w", err)
+	}
+	if absCandidate != realBase && !strings.HasPrefix(absCandidate, realBase+string(os.PathSeparator)) {
+		return "", fmt.Errorf("backup ID escapes base path")
+	}
+	return absCandidate, nil
+}
+
+// safeCreateBackupDir creates a backup directory after resolving base symlinks.
+// Ensures the created path is within the resolved base.
+func (s *Service) safeCreateBackupDir(id string) (string, error) {
+	realBase, err := filepath.EvalSymlinks(s.basePath)
+	if err != nil {
+		return "", fmt.Errorf("resolve base path: %w", err)
+	}
+	candidate := filepath.Join(realBase, id)
+	if err := os.MkdirAll(candidate, 0750); err != nil {
+		return "", fmt.Errorf("create dir: %w", err)
+	}
+	absCandidate, err := filepath.Abs(candidate)
+	if err != nil {
+		os.RemoveAll(candidate)
+		return "", fmt.Errorf("resolve candidate: %w", err)
+	}
+	if absCandidate != realBase && !strings.HasPrefix(absCandidate, realBase+string(os.PathSeparator)) {
+		os.RemoveAll(candidate)
+		return "", fmt.Errorf("backup directory escapes base path")
+	}
+	return absCandidate, nil
+}
 
 // CreateBackup creates a full backup with mutex protection.
 func (s *Service) CreateBackup(ctx context.Context, name string) (*Backup, error) {
@@ -93,9 +175,9 @@ func (s *Service) createBackupLocked(ctx context.Context, name string) (*Backup,
 	if name == "" {
 		name = fmt.Sprintf("backup-%s", time.Now().UTC().Format("20060102-150405"))
 	}
-	bp := s.backupPath(id)
-	if err := os.MkdirAll(bp, 0750); err != nil {
-		return nil, fmt.Errorf("create dir: %w", err)
+	bp, err := s.safeCreateBackupDir(id)
+	if err != nil {
+		return nil, fmt.Errorf("safe create dir: %w", err)
 	}
 	backup := &Backup{ID: id, Name: name, Status: StatusInProgress, CreatedAt: time.Now().UTC()}
 	manifest := BackupManifest{ID: id, Name: name, CreatedAt: backup.CreatedAt}
@@ -226,7 +308,10 @@ func (s *Service) getBackupLocked(ctx context.Context, id string) (*Backup, erro
 }
 
 func (s *Service) readFromDisk(id string) (*Backup, error) {
-	bp := s.backupPath(id)
+	bp, err := s.safeBackupPath(id)
+	if err != nil {
+		return nil, err
+	}
 	manifestPath := filepath.Join(bp, "manifest.json")
 	data, err := os.ReadFile(manifestPath)
 	if err != nil {
@@ -251,7 +336,10 @@ func (s *Service) readFromDisk(id string) (*Backup, error) {
 func (s *Service) DeleteBackup(ctx context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	bp := s.backupPath(id)
+	bp, err := s.safeBackupPath(id)
+	if err != nil {
+		return err
+	}
 	if err := os.RemoveAll(bp); err != nil {
 		return err
 	}
@@ -271,7 +359,10 @@ func (s *Service) VerifyBackup(ctx context.Context, id string) (*VerifyResult, e
 
 func (s *Service) verifyBackupLocked(ctx context.Context, id string) (*VerifyResult, error) {
 	result := &VerifyResult{Valid: true}
-	bp := s.backupPath(id)
+	bp, err := s.safeBackupPath(id)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := os.Stat(filepath.Join(bp, "manifest.json")); os.IsNotExist(err) {
 		result.Valid = false
 		result.Errors = append(result.Errors, "manifest.json not found")
@@ -305,7 +396,11 @@ func (s *Service) verifyBackupLocked(ctx context.Context, id string) (*VerifyRes
 func (s *Service) RestorePreview(ctx context.Context, id string) (*RestorePreview, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	manifestPath := filepath.Join(s.backupPath(id), "manifest.json")
+	bp, err := s.safeBackupPath(id)
+	if err != nil {
+		return nil, err
+	}
+	manifestPath := filepath.Join(bp, "manifest.json")
 	data, err := os.ReadFile(manifestPath)
 	if err != nil {
 		return nil, fmt.Errorf("backup not found")
@@ -328,7 +423,10 @@ func (s *Service) RestoreBackup(ctx context.Context, id string) *RestoreResult {
 }
 
 func (s *Service) restoreBackupLocked(ctx context.Context, id string) (res *RestoreResult) {
-	bp := s.backupPath(id)
+	bp, err := s.safeBackupPath(id)
+	if err != nil {
+		return &RestoreResult{Success: false, Message: err.Error()}
+	}
 	if _, err := os.Stat(bp); os.IsNotExist(err) {
 		return &RestoreResult{Success: false, Message: "backup not found"}
 	}
@@ -387,8 +485,10 @@ func (s *Service) restoreBackupLocked(ctx context.Context, id string) (res *Rest
 		}
 	}
 
-	// Clean up safety snapshot.
-	os.RemoveAll(s.backupPath(safetyID))
+	// Clean up safety snapshot using safe path.
+	if snapPath, err := s.safeBackupPath(safetyID); err == nil {
+		os.RemoveAll(snapPath)
+	}
 
 	return &RestoreResult{Success: true, Message: "restore completed"}
 }
@@ -404,7 +504,10 @@ func (s *Service) createSafetySnapshot(ctx context.Context) (string, error) {
 
 // restoreSafetySnapshot restores from a safety snapshot.
 func (s *Service) restoreSafetySnapshot(ctx context.Context, id string) {
-	bp := s.backupPath(id)
+	bp, err := s.safeBackupPath(id)
+	if err != nil {
+		return
+	}
 	mailPath := filepath.Join(bp, "mailstore.tar.gz")
 	attPath := filepath.Join(bp, "attachments.tar.gz")
 
@@ -423,6 +526,114 @@ func (s *Service) restoreSafetySnapshot(ctx context.Context, id string) {
 }
 
 // ── Helpers ──────────────────────────────────────────────
+
+// Sensitive key patterns to redact from orvix.yaml in backup archives.
+var redactedKeys = []string{
+	"password", "secret", "token", "key", "private",
+	"license", "jwt", "bearer", "api_key", "smtp_password",
+}
+
+func redactSensitiveYAML(input []byte) []byte {
+	output := make([]byte, len(input))
+	copy(output, input)
+	lines := strings.Split(string(output), "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		for _, k := range redactedKeys {
+			if strings.Contains(strings.ToLower(trimmed), k) && strings.Contains(trimmed, ":") {
+				parts := strings.SplitN(line, ":", 2)
+				if len(parts) == 2 {
+					val := strings.TrimSpace(parts[1])
+					if val != "" && !strings.HasPrefix(val, "#") {
+						lines[i] = parts[0] + ": REDACTED"
+					}
+				}
+				break
+			}
+		}
+	}
+	return []byte(strings.Join(lines, "\n"))
+}
+
+// CreateArchive packages a completed backup into a single .tar.gz with explicit allowlist.
+// Archive contents:
+//   - var/lib/orvix/orvix.db          (database snapshot)
+//   - etc/orvix/orvix.yaml.redacted  (sanitized config, if available)
+//   - BACKUP_INFO.txt                (metadata)
+//
+// Sensitive files (.env, .key, .pem, .crt, .p12, .pfx, license, token files)
+// are NEVER included.
+func (s *Service) CreateArchive(ctx context.Context, backupID string) (string, error) {
+	bp, err := s.safeBackupPath(backupID)
+	if err != nil {
+		return "", err
+	}
+	archivePath := filepath.Join(bp, "backup-archive.tar.gz")
+
+	f, err := os.Create(archivePath)
+	if err != nil {
+		return "", fmt.Errorf("create archive: %w", err)
+	}
+	defer f.Close()
+
+	gw := gzip.NewWriter(f)
+	defer gw.Close()
+	tw := tar.NewWriter(gw)
+	defer tw.Close()
+
+	// 1. Add database snapshot: var/lib/orvix/orvix.db
+	dbPath := filepath.Join(bp, "database.sqlite")
+	if data, err := os.ReadFile(dbPath); err == nil {
+		if err := writeTarEntry(tw, "var/lib/orvix/orvix.db", data, 0640); err != nil {
+			return "", fmt.Errorf("archive db: %w", err)
+		}
+	}
+
+	// 2. Add redacted orvix.yaml: etc/orvix/orvix.yaml.redacted
+	configPath := s.configPath
+	if configPath == "" {
+		configPath = "/etc/orvix/orvix.yaml"
+	}
+	if data, err := os.ReadFile(configPath); err == nil {
+		redacted := redactSensitiveYAML(data)
+		if err := writeTarEntry(tw, "etc/orvix/orvix.yaml.redacted", redacted, 0640); err != nil {
+			return "", fmt.Errorf("archive config: %w", err)
+		}
+	}
+
+	// 3. Add BACKUP_INFO.txt
+	info := fmt.Sprintf("Backup ID: %s\nCreated At: %s\n",
+		backupID, time.Now().UTC().Format(time.RFC3339))
+	// Try to read manifest for richer metadata.
+	if manifestData, err := os.ReadFile(filepath.Join(bp, "manifest.json")); err == nil {
+		var manifest BackupManifest
+		if json.Unmarshal(manifestData, &manifest) == nil {
+			info = fmt.Sprintf("Backup ID: %s\nName: %s\nCreated At: %s\nSize Bytes: %d\nSHA256: %s\nDomain Count: %d\nMailbox Count: %d\nMessage Count: %d\nAttachment Count: %d\n",
+				manifest.ID, manifest.Name, manifest.CreatedAt.Format(time.RFC3339),
+				manifest.SizeBytes, manifest.SHA256,
+				manifest.DomainCount, manifest.MailboxCount,
+				manifest.MessageCount, manifest.AttachmentCount)
+		}
+	}
+	if err := writeTarEntry(tw, "BACKUP_INFO.txt", []byte(info), 0640); err != nil {
+		return "", fmt.Errorf("archive info: %w", err)
+	}
+
+	return archivePath, nil
+}
+
+func writeTarEntry(tw *tar.Writer, name string, data []byte, mode int64) error {
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     name,
+		Mode:     mode,
+		Size:     int64(len(data)),
+		Typeflag: tar.TypeReg,
+	}); err != nil {
+		return err
+	}
+	_, err := tw.Write(data)
+	return err
+}
 
 func (s *Service) snapshotDB(ctx context.Context, destPath string) error {
 	if s.mailStoreDB == nil {
