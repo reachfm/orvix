@@ -364,6 +364,9 @@ func TestAdminUIStaticRoutes(t *testing.T) {
 	if !strings.Contains(string(jsBody), "mailbox_count") {
 		t.Fatalf("admin app.js must reference mailbox_count for domain rows")
 	}
+	if !strings.Contains(string(jsBody), "q-action") {
+		t.Fatalf("admin app.js must have queue action controls (q-action)")
+	}
 	resp, err = router.App().Test(httptest.NewRequest("HEAD", "/admin", nil))
 	if err != nil {
 		t.Fatalf("HEAD /admin request: %v", err)
@@ -1642,4 +1645,416 @@ func TestAuditLogsReturnsSafeFields(t *testing.T) {
 			t.Fatalf("audit log entry must not expose userAgent field: %v", entry)
 		}
 	})
+}
+
+func TestAdminSummaryEndpoint(t *testing.T) {
+	logger := zap.NewNop()
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(t.TempDir(), "orvix.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	defer sqlDB.Close()
+	if err := models.MigrateAllRaw(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	authenticator, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	hashedPw, err := authenticator.HashPassword("TestPassword123!")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+	_, err = sqlDB.Exec(
+		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
+		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		now, now, hashedPw,
+	)
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	_, err = sqlDB.Exec(
+		`INSERT INTO coremail_domains (name, tenant_id, status, plan, created_at, updated_at)
+		 VALUES ('test.local', 1, 'active', 'enterprise', ?, ?)`,
+		now, now,
+	)
+	if err != nil {
+		t.Fatalf("insert domain: %v", err)
+	}
+	_, err = sqlDB.Exec(
+		`INSERT INTO coremail_mailboxes (domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme, status, quota_mb, is_admin, created_at, updated_at)
+		 VALUES (1, 1, 'admin', 'admin@test.local', 'Admin', ?, 'argon2id', 'active', 1024, 1, ?, ?)`,
+		"$argon2id$v=19$m=1024,t=1,p=1$c2FsdA$aGFzaA", now, now,
+	)
+	if err != nil {
+		t.Fatalf("insert mailbox: %v", err)
+	}
+	createAdminQueueFixture(t, sqlDB, now)
+	router := NewRouter(cfg, authenticator, logger, db, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
+	defer router.App().Shutdown()
+	token := loginForTest(t, router, "admin@test.local", "TestPassword123!")
+
+	t.Run("summary returns object with required sections", func(t *testing.T) {
+		body := getAdminJSON(t, router, token, "/api/v1/admin/summary")
+		var data map[string]any
+		if err := json.Unmarshal(body, &data); err != nil {
+			t.Fatalf("summary must be JSON object: %v: %s", err, body)
+		}
+		for _, section := range []string{"domains", "mailboxes", "queue", "audit", "runtime"} {
+			if _, ok := data[section]; !ok {
+				t.Fatalf("summary must include %s section: %s", section, body)
+			}
+		}
+	})
+
+	t.Run("summary domain counts correct for fixture", func(t *testing.T) {
+		body := getAdminJSON(t, router, token, "/api/v1/admin/summary")
+		var data map[string]any
+		json.Unmarshal(body, &data)
+		domains := data["domains"].(map[string]any)
+		if domains["total"].(float64) < 1 {
+			t.Fatalf("expected at least 1 domain, got %v: %s", domains["total"], body)
+		}
+	})
+
+	t.Run("summary mailbox counts correct for fixture", func(t *testing.T) {
+		body := getAdminJSON(t, router, token, "/api/v1/admin/summary")
+		var data map[string]any
+		json.Unmarshal(body, &data)
+		mailboxes := data["mailboxes"].(map[string]any)
+		if mailboxes["total"].(float64) < 1 {
+			t.Fatalf("expected at least 1 mailbox, got %v: %s", mailboxes["total"], body)
+		}
+		if mailboxes["admin"].(float64) < 1 {
+			t.Fatalf("expected at least 1 admin mailbox, got %v: %s", mailboxes["admin"], body)
+		}
+	})
+
+	t.Run("summary queue counts exist", func(t *testing.T) {
+		body := getAdminJSON(t, router, token, "/api/v1/admin/summary")
+		var data map[string]any
+		json.Unmarshal(body, &data)
+		queue := data["queue"].(map[string]any)
+		if _, ok := queue["total"]; !ok {
+			t.Fatalf("queue section must include total: %s", body)
+		}
+		if _, ok := queue["pending"]; !ok {
+			t.Fatalf("queue section must include pending: %s", body)
+		}
+	})
+
+	t.Run("summary runtime section present", func(t *testing.T) {
+		body := getAdminJSON(t, router, token, "/api/v1/admin/summary")
+		var data map[string]any
+		json.Unmarshal(body, &data)
+		runtime := data["runtime"].(map[string]any)
+		if _, ok := runtime["status"]; !ok {
+			t.Fatalf("runtime section must include status: %s", body)
+		}
+		if _, ok := runtime["version"]; !ok {
+			t.Fatalf("runtime section must include version: %s", body)
+		}
+	})
+
+	t.Run("summary contains no secrets", func(t *testing.T) {
+		body := getAdminJSON(t, router, token, "/api/v1/admin/summary")
+		for _, forbidden := range []string{"password", "hash", "token", "jwt", "bearer", "secret", "body", "headers"} {
+			if strings.Contains(strings.ToLower(string(body)), forbidden) {
+				t.Fatalf("summary must not contain %s: %s", forbidden, body)
+			}
+		}
+	})
+}
+
+func TestQueueActions(t *testing.T) {
+	logger := zap.NewNop()
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(t.TempDir(), "orvix.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	defer sqlDB.Close()
+	if err := models.MigrateAllRaw(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	authenticator, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	hashedPw, err := authenticator.HashPassword("TestPassword123!")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+	_, err = sqlDB.Exec(
+		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
+		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		now, now, hashedPw,
+	)
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	createAdminQueueFixture(t, sqlDB, now)
+	router := NewRouter(cfg, authenticator, logger, db, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
+	defer router.App().Shutdown()
+	token := loginForTest(t, router, "admin@test.local", "TestPassword123!")
+	csrfToken := getCSRFTokenForTest(t, router, token)
+
+	t.Run("retry success", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/queue/1/retry", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Cookie", "csrf_token="+csrfToken)
+		req.Header.Set("X-CSRF-Token", csrfToken)
+		resp, err := router.App().Test(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if resp.StatusCode != 200 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 200, got %d: %s", resp.StatusCode, body)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if !strings.Contains(string(body), `"status":"pending"`) {
+			t.Fatalf("retry must return pending status: %s", body)
+		}
+	})
+
+	t.Run("retry missing queue id returns 404", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/queue/99999/retry", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Cookie", "csrf_token="+csrfToken)
+		req.Header.Set("X-CSRF-Token", csrfToken)
+		resp, err := router.App().Test(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if resp.StatusCode != 404 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 404, got %d: %s", resp.StatusCode, body)
+		}
+	})
+
+	t.Run("retry invalid id returns 400", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/queue/abc/retry", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Cookie", "csrf_token="+csrfToken)
+		req.Header.Set("X-CSRF-Token", csrfToken)
+		resp, err := router.App().Test(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if resp.StatusCode != 400 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 400, got %d: %s", resp.StatusCode, body)
+		}
+	})
+
+	t.Run("retry missing CSRF returns 403", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/queue/1/retry", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := router.App().Test(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if resp.StatusCode != 403 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 403, got %d: %s", resp.StatusCode, body)
+		}
+	})
+
+	t.Run("retry invalid CSRF returns 403", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/queue/1/retry", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Cookie", "csrf_token=invalid")
+		req.Header.Set("X-CSRF-Token", "bad")
+		resp, err := router.App().Test(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if resp.StatusCode != 403 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 403, got %d: %s", resp.StatusCode, body)
+		}
+	})
+
+	t.Run("delete success", func(t *testing.T) {
+		req := httptest.NewRequest("DELETE", "/api/v1/queue/1", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Cookie", "csrf_token="+csrfToken)
+		req.Header.Set("X-CSRF-Token", csrfToken)
+		resp, err := router.App().Test(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if resp.StatusCode != 200 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 200, got %d: %s", resp.StatusCode, body)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if !strings.Contains(string(body), `"deleted":true`) {
+			t.Fatalf("delete must return deleted:true: %s", body)
+		}
+	})
+
+	t.Run("double-delete returns 404", func(t *testing.T) {
+		req := httptest.NewRequest("DELETE", "/api/v1/queue/1", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Cookie", "csrf_token="+csrfToken)
+		req.Header.Set("X-CSRF-Token", csrfToken)
+		resp, err := router.App().Test(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if resp.StatusCode != 404 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 404 on double-delete, got %d: %s", resp.StatusCode, body)
+		}
+	})
+
+	t.Run("retry soft-deleted queue row returns 404", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/queue/1/retry", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Cookie", "csrf_token="+csrfToken)
+		req.Header.Set("X-CSRF-Token", csrfToken)
+		resp, err := router.App().Test(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if resp.StatusCode != 404 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 404 on retry of soft-deleted queue row, got %d: %s", resp.StatusCode, body)
+		}
+	})
+
+	t.Run("delete missing queue id returns 404", func(t *testing.T) {
+		req := httptest.NewRequest("DELETE", "/api/v1/queue/99999", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Cookie", "csrf_token="+csrfToken)
+		req.Header.Set("X-CSRF-Token", csrfToken)
+		resp, err := router.App().Test(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if resp.StatusCode != 404 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 404, got %d: %s", resp.StatusCode, body)
+		}
+	})
+
+	t.Run("delete invalid id returns 400", func(t *testing.T) {
+		req := httptest.NewRequest("DELETE", "/api/v1/queue/abc", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Cookie", "csrf_token="+csrfToken)
+		req.Header.Set("X-CSRF-Token", csrfToken)
+		resp, err := router.App().Test(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if resp.StatusCode != 400 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 400, got %d: %s", resp.StatusCode, body)
+		}
+	})
+
+	t.Run("delete missing CSRF returns 403", func(t *testing.T) {
+		req := httptest.NewRequest("DELETE", "/api/v1/queue/1", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := router.App().Test(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if resp.StatusCode != 403 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 403, got %d: %s", resp.StatusCode, body)
+		}
+	})
+
+	t.Run("delete response safe no secrets", func(t *testing.T) {
+		createAdminQueueFixture(t, sqlDB, now)
+		req := httptest.NewRequest("DELETE", "/api/v1/queue/2", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Cookie", "csrf_token="+csrfToken)
+		req.Header.Set("X-CSRF-Token", csrfToken)
+		resp, err := router.App().Test(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		for _, forbidden := range []string{"body", "headers", "password", "secret", "auth", "token", "hash"} {
+			if strings.Contains(strings.ToLower(string(body)), forbidden) {
+				t.Fatalf("delete response must not expose %s: %s", forbidden, body)
+			}
+		}
+	})
+
+	t.Run("queue list after retry and delete remains safe", func(t *testing.T) {
+		body := getAdminJSON(t, router, token, "/api/v1/queue")
+		for _, forbidden := range []string{"body", "headers", "password", "secret", "auth", "token", "hash"} {
+			if strings.Contains(strings.ToLower(string(body)), forbidden) {
+				t.Fatalf("queue list must not expose %s: %s", forbidden, body)
+			}
+		}
+		var queue []map[string]any
+		if err := json.Unmarshal(body, &queue); err != nil {
+			t.Fatalf("queue must be JSON array: %v: %s", err, body)
+		}
+		for _, entry := range queue {
+			id := int(entry["id"].(float64))
+			if id == 1 || id == 2 {
+				t.Fatalf("queue list must exclude soft-deleted row %d: %s", id, body)
+			}
+		}
+	})
+
+	t.Run("dashboard queue counts exclude soft-deleted rows", func(t *testing.T) {
+		body := getAdminJSON(t, router, token, "/api/v1/admin/summary")
+		var data map[string]any
+		json.Unmarshal(body, &data)
+		queue := data["queue"].(map[string]any)
+		total := queue["total"].(float64)
+		if total != 0 {
+			t.Fatalf("queue total should be 0 after all rows deleted, got %v: %s", total, body)
+		}
+	})
+}
+
+func TestRuntimeUpdateHelperScript(t *testing.T) {
+	scriptPath := filepath.Join("..", "..", "release", "scripts", "apply-runtime-update.sh")
+	if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
+		t.Fatalf("apply-runtime-update.sh not found at %s", scriptPath)
+	}
+	content, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("read script: %v", err)
+	}
+	script := string(content)
+	if !strings.Contains(script, "/usr/local/go/bin/go") {
+		t.Fatalf("apply-runtime-update.sh must include /usr/local/go/bin/go fallback")
+	}
+	if strings.Contains(script, "git pull") {
+		t.Fatalf("apply-runtime-update.sh must not contain git pull")
+	}
+	if strings.Contains(script, "caddy") || strings.Contains(script, "Caddy") {
+		t.Fatalf("apply-runtime-update.sh must not reference Caddy")
+	}
+	if strings.Contains(script, "iptables") || strings.Contains(script, "ufw") || strings.Contains(script, "firewall") {
+		t.Fatalf("apply-runtime-update.sh must not touch firewall")
+	}
+	if !strings.Contains(script, "exit 1") {
+		t.Fatalf("apply-runtime-update.sh must exit non-zero on health failure")
+	}
 }

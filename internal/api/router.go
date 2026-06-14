@@ -133,6 +133,7 @@ func (r *Router) setupRoutes() {
 	admin.Get("/audit/logs", r.h.ListAuditLogs)
 	admin.Get("/feature-flags", r.h.ListFeatureFlags)
 	admin.Get("/api-keys", r.h.ListAPIKeys)
+	admin.Get("/admin/summary", r.h.AdminSummary)
 
 	// Auto-Heal
 	admin.Get("/heal/history", r.h.ListHealHistory)

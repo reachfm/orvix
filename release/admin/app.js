@@ -79,6 +79,19 @@ async function loadHealth() {
   }
 }
 
+async function loadSummary() {
+  var data;
+  try {
+    data = await apiGet("/api/v1/admin/summary", null);
+  } catch (_) { return; }
+  if (!data || !data.domains) return;
+  el("summary-domains").innerHTML = '<div class="setting-row"><div><strong>Total</strong><span>' + (data.domains.total || 0) + '</span></div></div><div class="setting-row"><div><strong>Active</strong><span>' + (data.domains.active || 0) + '</span></div></div><div class="setting-row"><div><strong>Suspended</strong><span>' + (data.domains.suspended || 0) + '</span></div></div>';
+  el("summary-mailboxes").innerHTML = '<div class="setting-row"><div><strong>Total</strong><span>' + (data.mailboxes.total || 0) + '</span></div></div><div class="setting-row"><div><strong>Active</strong><span>' + (data.mailboxes.active || 0) + '</span></div></div><div class="setting-row"><div><strong>Suspended</strong><span>' + (data.mailboxes.suspended || 0) + '</span></div></div><div class="setting-row"><div><strong>Admin</strong><span>' + (data.mailboxes.admin || 0) + '</span></div></div>';
+  el("summary-queue").innerHTML = '<div class="setting-row"><div><strong>Total</strong><span>' + (data.queue.total || 0) + '</span></div></div><div class="setting-row"><div><strong>Pending</strong><span>' + (data.queue.pending || 0) + '</span></div></div><div class="setting-row"><div><strong>Deferred</strong><span>' + (data.queue.deferred || 0) + '</span></div></div><div class="setting-row"><div><strong>Failed</strong><span>' + (data.queue.failed || 0) + '</span></div></div>';
+  el("summary-audit").innerHTML = '<div class="setting-row"><div><strong>Recent (24h)</strong><span>' + (data.audit.recent || 0) + '</span></div></div>';
+  el("summary-runtime").innerHTML = '<div class="setting-row"><div><strong>Status</strong><span>' + escapeHTML(data.runtime.status || "unknown") + '</span></div></div><div class="setting-row"><div><strong>Version</strong><span>' + escapeHTML(data.version || "-") + '</span></div></div>';
+}
+
 async function loadDomains() {
   const domains = await apiGet("/api/v1/domains", []);
   state.domains = domains;
@@ -142,8 +155,33 @@ async function loadQueue() {
   state.queue = await apiGet("/api/v1/queue", []);
   setText("queue-status", state.queue.length === 0 ? "Clear" : `${state.queue.length} queued`);
   setText("queue-note", state.queue.length === 0 ? "No queued messages reported." : "Queue entries require attention.");
-  renderTable("queue-table", state.queue, ["id", "from", "to", "status", "attempts", "next_attempt_at", "created_at"], "No queued messages.");
+  renderQueueTable("queue-table", state.queue);
   renderTable("queue-preview", state.queue.slice(0, 5), ["id", "from", "to", "status", "attempts"], "No queued messages.");
+}
+
+function renderQueueTable(id, rows) {
+  var node = el(id);
+  if (!node) return;
+  if (!Array.isArray(rows) || rows.length === 0) {
+    node.innerHTML = '<div class="empty-state">No queued messages.</div>';
+    return;
+  }
+  var head = '<table class="table"><thead><tr><th>ID</th><th>From</th><th>To</th><th>Status</th><th>Attempts</th><th>Next Attempt</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
+  var body = rows.map(function(r) {
+    return '<tr>' +
+      '<td>' + escapeHTML(String(r.id || "")) + '</td>' +
+      '<td>' + escapeHTML(r.from || "-") + '</td>' +
+      '<td>' + escapeHTML(r.to || "-") + '</td>' +
+      '<td>' + escapeHTML(r.status || "-") + '</td>' +
+      '<td>' + (r.attempts != null ? r.attempts : "-") + '</td>' +
+      '<td>' + escapeHTML(r.next_attempt_at || "-") + '</td>' +
+      '<td>' + escapeHTML(r.created_at || "-") + '</td>' +
+      '<td>' +
+        '<button class="ghost-btn q-action" data-action="retry" data-queue-id="' + r.id + '" style="font-size:12px;padding:4px 8px;min-height:auto;margin-right:4px;">Retry</button>' +
+        '<button class="ghost-btn q-action" data-action="delete" data-queue-id="' + r.id + '" style="font-size:12px;padding:4px 8px;min-height:auto;">Delete</button>' +
+      '</td></tr>';
+  }).join("");
+  node.innerHTML = head + body + '</tbody></table>';
 }
 
 async function loadLogs() {
@@ -185,7 +223,7 @@ function escapeHTML(value) {
 
 async function refreshAll() {
   showAlert("");
-  await Promise.allSettled([loadHealth(), loadDomains(), loadMailboxes(), loadQueue(), loadLogs()]);
+  await Promise.allSettled([loadHealth(), loadSummary(), loadDomains(), loadMailboxes(), loadQueue(), loadLogs()]);
 }
 
 function showApp() {
@@ -441,6 +479,46 @@ el("domains-table").addEventListener("click", async function(event) {
       showAlert("Domain " + domain + " deleted.");
     }
     await loadDomains();
+  } catch (err) {
+    showAlert(err.message || "Operation failed.");
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// Queue actions
+el("queue-table").addEventListener("click", async function(event) {
+  var btn = event.target.closest("button.q-action");
+  if (!btn) return;
+  var action = btn.dataset.action;
+  var queueId = btn.dataset.queueId;
+  if (!queueId) return;
+  btn.disabled = true;
+  try {
+    var csrfToken = await getCSRFToken();
+    if (action === "retry") {
+      var res = await fetch("/api/v1/queue/" + queueId + "/retry", {
+        method: "POST",
+        headers: { "Authorization": "Bearer " + state.token, "X-CSRF-Token": csrfToken }
+      });
+      if (!res.ok) {
+        var errBody = await res.json().catch(function() { return {}; });
+        throw new Error(errBody.error || "HTTP " + res.status);
+      }
+      showAlert("Queue item " + queueId + " queued for retry.");
+    } else if (action === "delete") {
+      if (!confirm("Delete queue item " + queueId + "? This action cannot be undone.")) { btn.disabled = false; return; }
+      var res = await fetch("/api/v1/queue/" + queueId, {
+        method: "DELETE",
+        headers: { "Authorization": "Bearer " + state.token, "X-CSRF-Token": csrfToken }
+      });
+      if (!res.ok) {
+        var errBody = await res.json().catch(function() { return {}; });
+        throw new Error(errBody.error || "HTTP " + res.status);
+      }
+      showAlert("Queue item " + queueId + " deleted.");
+    }
+    await loadQueue();
   } catch (err) {
     showAlert(err.message || "Operation failed.");
   } finally {

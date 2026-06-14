@@ -130,20 +130,35 @@
           <div class="split">
             <section class="panel">
               <div class="panel-head">
-                <h3>Recent Queue</h3>
-                <button class="ghost-btn" type="button" data-refresh="queue">Refresh</button>
+                <h3>Domains</h3>
               </div>
-              <div class="panel-body" id="queue-preview"></div>
+              <div class="panel-body" id="summary-domains">Loading...</div>
             </section>
             <section class="panel">
               <div class="panel-head">
-                <h3>System Notes</h3>
+                <h3>Mailboxes</h3>
               </div>
-              <div class="panel-body">
-                <div class="setting-row"><div><strong>Admin API</strong><span>Used for authentication and system data.</span></div><span id="admin-api-note">Ready</span></div>
-                <div class="setting-row"><div><strong>Runtime view</strong><span>Displayed from health and queue evidence available in Orvix Enterprise Mail.</span></div><span>Read only</span></div>
-                <div class="setting-row"><div><strong>Logs</strong><span>Operational log access depends on configured audit endpoints.</span></div><span>API backed</span></div>
+              <div class="panel-body" id="summary-mailboxes">Loading...</div>
+            </section>
+          </div>
+          <div class="split">
+            <section class="panel">
+              <div class="panel-head">
+                <h3>Queue</h3>
               </div>
+              <div class="panel-body" id="summary-queue">Loading...</div>
+            </section>
+            <section class="panel">
+              <div class="panel-head">
+                <h3>Audit</h3>
+              </div>
+              <div class="panel-body" id="summary-audit">Loading...</div>
+            </section>
+            <section class="panel">
+              <div class="panel-head">
+                <h3>Runtime</h3>
+              </div>
+              <div class="panel-body" id="summary-runtime">Loading...</div>
             </section>
           </div>
         </section>

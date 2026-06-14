@@ -1055,14 +1055,78 @@ func (h *Handler) ListQueue(c fiber.Ctx) error {
 	return c.JSON(result)
 }
 
-// DeleteQueue removes a message from the queue.
+// DeleteQueue soft-deletes a queued message.
 func (h *Handler) DeleteQueue(c fiber.Ctx) error {
-	return c.JSON(fiber.Map{"status": "deleted"})
+	idStr := c.Params("id")
+	if idStr == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "queue id required"})
+	}
+	id, parseErr := parseUint(idStr)
+	if parseErr != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid queue id"})
+	}
+
+	sqlDB, dbErr := h.db.DB()
+	if dbErr != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	now := time.Now().UTC()
+	res, execErr := sqlDB.Exec("UPDATE coremail_queue SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL", now, now, id)
+	if execErr != nil {
+		h.logger.Error("failed to delete queue item", zap.Int64("id", id), zap.Error(execErr))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "delete failed"})
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "queue item not found"})
+	}
+
+	h.writeAuditLog(c, "queue.delete", fmt.Sprintf("queue_id:%d", id))
+	return c.JSON(fiber.Map{"id": id, "deleted": true})
 }
 
-// RetryQueue forces a retry of a queued message.
+// RetryQueue resets a queued message for retry.
 func (h *Handler) RetryQueue(c fiber.Ctx) error {
-	return c.JSON(fiber.Map{"status": "retrying"})
+	idStr := c.Params("id")
+	if idStr == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "queue id required"})
+	}
+	id, parseErr := parseUint(idStr)
+	if parseErr != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid queue id"})
+	}
+
+	sqlDB, dbErr := h.db.DB()
+	if dbErr != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	var currentAttempts int
+	scanErr := sqlDB.QueryRow("SELECT attempt_count FROM coremail_queue WHERE id = ? AND deleted_at IS NULL", id).Scan(&currentAttempts)
+	if scanErr == sql.ErrNoRows {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "queue item not found"})
+	}
+	if scanErr != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	now := time.Now().UTC()
+	res, execErr := sqlDB.Exec(
+		"UPDATE coremail_queue SET status = 'pending', lease_owner = '', lease_expires_at = NULL, next_attempt_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+		now, now, id,
+	)
+	if execErr != nil {
+		h.logger.Error("failed to retry queue item", zap.Int64("id", id), zap.Error(execErr))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "retry failed"})
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "queue item not found"})
+	}
+
+	h.writeAuditLog(c, "queue.retry", fmt.Sprintf("queue_id:%d", id))
+	return c.JSON(fiber.Map{"id": id, "status": "pending", "attempts": currentAttempts, "next_attempt_at": now.Format(time.RFC3339)})
 }
 
 // ListFirewallRules returns firewall rules.
@@ -1190,6 +1254,66 @@ func (h *Handler) ListAuditLogs(c fiber.Ctx) error {
 	return c.JSON(result)
 }
 
+// AdminSummary returns aggregate counts for the admin dashboard.
+func (h *Handler) AdminSummary(c fiber.Ctx) error {
+	domTotal, domActive, domSuspended := int64(0), int64(0), int64(0)
+	mbTotal, mbActive, mbSuspended, mbAdmin := int64(0), int64(0), int64(0), int64(0)
+	qTotal, qPending, qDeferred, qFailed := int64(0), int64(0), int64(0), int64(0)
+	auditRecent := int64(0)
+
+	sqlDB, err := h.db.DB()
+	if err == nil {
+		sqlDB.QueryRow("SELECT COUNT(*) FROM coremail_domains WHERE deleted_at IS NULL").Scan(&domTotal)
+		sqlDB.QueryRow("SELECT COUNT(*) FROM coremail_domains WHERE deleted_at IS NULL AND status = 'active'").Scan(&domActive)
+		sqlDB.QueryRow("SELECT COUNT(*) FROM coremail_domains WHERE deleted_at IS NULL AND status = 'suspended'").Scan(&domSuspended)
+
+		sqlDB.QueryRow("SELECT COUNT(*) FROM coremail_mailboxes WHERE deleted_at IS NULL").Scan(&mbTotal)
+		sqlDB.QueryRow("SELECT COUNT(*) FROM coremail_mailboxes WHERE deleted_at IS NULL AND status = 'active'").Scan(&mbActive)
+		sqlDB.QueryRow("SELECT COUNT(*) FROM coremail_mailboxes WHERE deleted_at IS NULL AND status = 'suspended'").Scan(&mbSuspended)
+		sqlDB.QueryRow("SELECT COUNT(*) FROM coremail_mailboxes WHERE deleted_at IS NULL AND is_admin = 1").Scan(&mbAdmin)
+
+		sqlDB.QueryRow("SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL").Scan(&qTotal)
+		sqlDB.QueryRow("SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND status = 'pending'").Scan(&qPending)
+		sqlDB.QueryRow("SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND status = 'deferred'").Scan(&qDeferred)
+		sqlDB.QueryRow("SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND status = 'dead_letter'").Scan(&qFailed)
+	}
+
+	since := time.Now().UTC().Add(-24 * time.Hour)
+	if err == nil {
+		sqlDB.QueryRow("SELECT COUNT(*) FROM coremail_audit WHERE timestamp >= ?", since).Scan(&auditRecent)
+	}
+
+	runtimeStatus := "ok"
+	runtimeVersion := config.GetWatermark().Version
+
+	return c.JSON(fiber.Map{
+		"domains": fiber.Map{
+			"total":     domTotal,
+			"active":    domActive,
+			"suspended": domSuspended,
+		},
+		"mailboxes": fiber.Map{
+			"total":     mbTotal,
+			"active":    mbActive,
+			"suspended": mbSuspended,
+			"admin":     mbAdmin,
+		},
+		"queue": fiber.Map{
+			"total":    qTotal,
+			"pending":  qPending,
+			"deferred": qDeferred,
+			"failed":   qFailed,
+		},
+		"audit": fiber.Map{
+			"recent": auditRecent,
+		},
+		"runtime": fiber.Map{
+			"status":  runtimeStatus,
+			"version": runtimeVersion,
+		},
+	})
+}
+
 // ListFeatureFlags returns all feature flags.
 func (h *Handler) ListFeatureFlags(c fiber.Ctx) error {
 	var flags []models.FeatureFlag
@@ -1229,4 +1353,16 @@ func (h *Handler) writeAuditLog(c fiber.Ctx, action, resource string) {
 	}); err != nil {
 		h.logger.Error("failed to write audit log", zap.Error(err))
 	}
+}
+
+// parseUint parses a uint from a string for path param id values.
+func parseUint(s string) (int64, error) {
+	var n int64
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return 0, fmt.Errorf("not a number: %s", s)
+		}
+		n = n*10 + int64(c-'0')
+	}
+	return n, nil
 }
