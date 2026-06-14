@@ -20,7 +20,7 @@
 }
 * { box-sizing: border-box; }
 body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); }
-button, input { font: inherit; }
+button, input, select { font: inherit; }
 button { cursor: pointer; }
 .hidden { display: none !important; }
 .login-shell {
@@ -84,6 +84,18 @@ input {
   outline: none;
 }
 input:focus { border-color: var(--brand); box-shadow: 0 0 0 3px rgba(25, 103, 210, .14); }
+select {
+  width: 100%;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  color: var(--text);
+  border-radius: 6px;
+  padding: 12px 13px;
+  font-size: 15px;
+  outline: none;
+}
+select:focus { border-color: var(--brand); box-shadow: 0 0 0 3px rgba(25, 103, 210, .14); }
+input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--brand); }
 .primary-btn, .ghost-btn {
   border: 0;
   border-radius: 6px;
@@ -206,6 +218,27 @@ input:focus { border-color: var(--brand); box-shadow: 0 0 0 3px rgba(25, 103, 21
 .panel-head { padding: 16px 17px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; gap: 12px; align-items: center; }
 .panel-head h3 { font-size: 16px; }
 .panel-body { padding: 17px; }
+.ops-toolbar {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(150px, 180px) minmax(150px, 180px) auto auto auto minmax(160px, 1fr);
+  align-items: end;
+  gap: 12px;
+}
+.ops-toolbar label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 760;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.ops-toolbar input,
+.ops-toolbar select { margin-top: 6px; }
+.ops-toolbar .message {
+  align-self: center;
+  color: var(--muted);
+  font-size: 13px;
+  min-height: 20px;
+}
 .table { width: 100%; border-collapse: collapse; font-size: 14px; }
 .table th {
   text-align: left;
@@ -237,6 +270,7 @@ input:focus { border-color: var(--brand); box-shadow: 0 0 0 3px rgba(25, 103, 21
   .sidebar { position: static; }
   .nav { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .card-grid, .split { grid-template-columns: 1fr; }
+  .ops-toolbar { grid-template-columns: 1fr; align-items: stretch; }
   .topbar { height: auto; padding: 18px; align-items: flex-start; flex-direction: column; }
   .profile { width: 100%; justify-content: space-between; }
 }

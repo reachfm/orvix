@@ -161,6 +161,20 @@
               <div class="panel-body" id="summary-runtime">Loading...</div>
             </section>
           </div>
+          <div class="split">
+            <section class="panel">
+              <div class="panel-head">
+                <h3>Recent Activity</h3>
+              </div>
+              <div class="panel-body" id="summary-recent-activity">Loading...</div>
+            </section>
+            <section class="panel">
+              <div class="panel-head">
+                <h3>Top Domains</h3>
+              </div>
+              <div class="panel-body" id="summary-top-domains">Loading...</div>
+            </section>
+          </div>
         </section>
 
         <section class="page hidden" data-page-view="domains">
@@ -178,6 +192,26 @@
                   <span id="add-domain-message" class="message" style="margin-left:12px;"></span>
                 </div>
               </form>
+            </div>
+          </section>
+          <section class="panel">
+            <div class="panel-body">
+              <div class="ops-toolbar">
+                <label>Search
+                  <input id="domain-search" type="search" placeholder="example.com">
+                </label>
+                <label>Status
+                  <select id="domain-status-filter">
+                    <option value="">All</option>
+                    <option value="active">Active</option>
+                    <option value="suspended">Suspended</option>
+                  </select>
+                </label>
+                <button class="ghost-btn" type="button" id="domain-bulk-enable">Enable Selected</button>
+                <button class="ghost-btn" type="button" id="domain-bulk-suspend">Suspend Selected</button>
+                <button class="ghost-btn" type="button" id="domain-export">Export CSV</button>
+                <span id="domain-bulk-result" class="message"></span>
+              </div>
             </div>
           </section>
           <section class="panel"><div class="panel-body" id="domains-table"></div></section>
@@ -206,6 +240,33 @@
                   <span id="add-mailbox-message" class="message" style="margin-left:12px;"></span>
                 </div>
               </form>
+            </div>
+          </section>
+          <section class="panel">
+            <div class="panel-body">
+              <div class="ops-toolbar">
+                <label>Search
+                  <input id="mailbox-search" type="search" placeholder="user@example.com">
+                </label>
+                <label>Status
+                  <select id="mailbox-status-filter">
+                    <option value="">All</option>
+                    <option value="active">Active</option>
+                    <option value="suspended">Suspended</option>
+                  </select>
+                </label>
+                <label>Admin
+                  <select id="mailbox-admin-filter">
+                    <option value="">All</option>
+                    <option value="true">Admin only</option>
+                    <option value="false">Non-admin only</option>
+                  </select>
+                </label>
+                <button class="ghost-btn" type="button" id="mailbox-bulk-enable">Enable Selected</button>
+                <button class="ghost-btn" type="button" id="mailbox-bulk-suspend">Suspend Selected</button>
+                <button class="ghost-btn" type="button" id="mailbox-export">Export CSV</button>
+                <span id="mailbox-bulk-result" class="message"></span>
+              </div>
             </div>
           </section>
           <section class="panel"><div class="panel-body" id="mailboxes-table"></div></section>

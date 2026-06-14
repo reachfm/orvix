@@ -5,7 +5,9 @@ const state = {
   domains: [],
   users: [],
   queue: [],
-  logs: []
+  logs: [],
+  selectedDomains: new Set(),
+  selectedMailboxes: new Set()
 };
 
 const el = (id) => document.getElementById(id);
@@ -41,6 +43,47 @@ async function apiGet(path, fallback) {
     throw new Error(`${path} returned ${res.status}`);
   }
   return await res.json();
+}
+
+async function apiPost(path, payload) {
+  const csrf = await getCSRFToken();
+  const res = await fetch(path, {
+    method: "POST",
+    headers: Object.assign({}, authHeaders(), {
+      "Content-Type": "application/json",
+      "X-CSRF-Token": csrf
+    }),
+    body: JSON.stringify(payload || {})
+  });
+  if (res.status === 401) {
+    signOut();
+    throw new Error("Session expired. Sign in again.");
+  }
+  const text = await res.text();
+  var data = {};
+  if (text) {
+    try { data = JSON.parse(text); } catch (_) { data = { error: text }; }
+  }
+  if (!res.ok) throw new Error(data.error || `${path} returned ${res.status}`);
+  return data;
+}
+
+async function downloadCSV(path, filename) {
+  const res = await fetch(path, { headers: authHeaders() });
+  if (res.status === 401) {
+    signOut();
+    throw new Error("Session expired. Sign in again.");
+  }
+  if (!res.ok) throw new Error(`${path} returned ${res.status}`);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 async function getCSRFToken() {
@@ -90,11 +133,19 @@ async function loadSummary() {
   el("summary-queue").innerHTML = '<div class="setting-row"><div><strong>Total</strong><span>' + (data.queue.total || 0) + '</span></div></div><div class="setting-row"><div><strong>Pending</strong><span>' + (data.queue.pending || 0) + '</span></div></div><div class="setting-row"><div><strong>Deferred</strong><span>' + (data.queue.deferred || 0) + '</span></div></div><div class="setting-row"><div><strong>Failed</strong><span>' + (data.queue.failed || 0) + '</span></div></div>';
   el("summary-audit").innerHTML = '<div class="setting-row"><div><strong>Recent (24h)</strong><span>' + (data.audit.recent || 0) + '</span></div></div>';
   el("summary-runtime").innerHTML = '<div class="setting-row"><div><strong>Status</strong><span>' + escapeHTML(data.runtime.status || "unknown") + '</span></div></div><div class="setting-row"><div><strong>Version</strong><span>' + escapeHTML(data.version || "-") + '</span></div></div>';
+  renderTable("summary-recent-activity", data.recent_activity || [], ["action", "actor", "target", "result", "timestamp"], "No recent activity.");
+  renderTable("summary-top-domains", data.top_domains || [], ["domain", "mailbox_count"], "No domain activity.");
 }
 
 async function loadDomains() {
-  const domains = await apiGet("/api/v1/domains", []);
+  const domains = await apiGet("/api/v1/domains" + queryString({
+    q: el("domain-search") ? el("domain-search").value.trim() : "",
+    status: el("domain-status-filter") ? el("domain-status-filter").value : ""
+  }), []);
   state.domains = domains;
+  state.selectedDomains = new Set(Array.from(state.selectedDomains).filter(function(name) {
+    return domains.some(function(d) { return d.domain === name; });
+  }));
   const node = el("domains-table");
   if (!node) return;
   if (!Array.isArray(domains) || domains.length === 0) {
@@ -103,24 +154,34 @@ async function loadDomains() {
   }
   const rows = domains.map(function(d) {
     const isActive = d.status === "active";
+    const checked = state.selectedDomains.has(d.domain) ? " checked" : "";
     const statusBtn = isActive
       ? '<button class="ghost-btn dm-action" data-action="disable" data-domain="' + escapeHTML(d.domain) + '" data-domain-id="' + d.id + '" style="font-size:12px;padding:4px 8px;min-height:auto;margin-right:4px;">Disable</button>'
       : '<button class="ghost-btn dm-action" data-action="enable" data-domain="' + escapeHTML(d.domain) + '" data-domain-id="' + d.id + '" style="font-size:12px;padding:4px 8px;min-height:auto;margin-right:4px;">Enable</button>';
     const deleteBtn = '<button class="ghost-btn dm-action" data-action="delete" data-domain="' + escapeHTML(d.domain) + '" data-domain-id="' + d.id + '" data-mailbox-count="' + (d.mailbox_count || 0) + '" style="font-size:12px;padding:4px 8px;min-height:auto;">Delete</button>';
     const viewBtn = '<button class="ghost-btn dv-action" data-action="view" data-domain="' + escapeHTML(d.domain) + '" style="font-size:12px;padding:4px 8px;min-height:auto;margin-right:4px;">View</button>';
     return '<tr>' +
+      '<td><input type="checkbox" class="domain-select" data-domain="' + escapeHTML(d.domain) + '"' + checked + '></td>' +
       '<td>' + escapeHTML(d.domain || "-") + '</td>' +
       '<td>' + escapeHTML(d.plan || "-") + '</td>' +
       '<td>' + escapeHTML(d.status || "active") + '</td>' +
       '<td>' + (d.mailbox_count != null ? d.mailbox_count : "-") + '</td>' +
       '<td>' + viewBtn + statusBtn + deleteBtn + '</td></tr>';
   }).join("");
-  node.innerHTML = '<table class="table"><thead><tr><th>Domain</th><th>Plan</th><th>Status</th><th>Mailboxes</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  node.innerHTML = '<table class="table"><thead><tr><th>Select</th><th>Domain</th><th>Plan</th><th>Status</th><th>Mailboxes</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  updateBulkLabels();
 }
 
 async function loadMailboxes() {
-  const users = await apiGet("/api/v1/users", []);
+  const users = await apiGet("/api/v1/users" + queryString({
+    q: el("mailbox-search") ? el("mailbox-search").value.trim() : "",
+    status: el("mailbox-status-filter") ? el("mailbox-status-filter").value : "",
+    admin: el("mailbox-admin-filter") ? el("mailbox-admin-filter").value : ""
+  }), []);
   state.users = users;
+  state.selectedMailboxes = new Set(Array.from(state.selectedMailboxes).filter(function(id) {
+    return users.some(function(u) { return String(u.mailbox_id) === String(id) && u.is_admin !== true; });
+  }));
   const node = el("mailboxes-table");
   if (!node) return;
   if (!Array.isArray(users) || users.length === 0) {
@@ -132,6 +193,10 @@ async function loadMailboxes() {
     const isAdmin = u.is_admin === true;
     const isSuspended = u.status === "suspended";
     const canModify = hasMailbox && !isAdmin;
+    const checked = canModify && state.selectedMailboxes.has(String(u.mailbox_id)) ? " checked" : "";
+    const selectHtml = canModify
+      ? '<input type="checkbox" class="mailbox-select" data-mailbox-id="' + u.mailbox_id + '"' + checked + '>'
+      : '<span style="color:var(--muted);font-size:12px;">-</span>';
     var actionsHtml;
     if (!hasMailbox) {
       actionsHtml = '<span style="color:var(--muted);font-size:12px;">No mailbox record</span>';
@@ -144,13 +209,15 @@ async function loadMailboxes() {
         '';
     }
     return '<tr>' +
+      '<td>' + selectHtml + '</td>' +
       '<td>' + escapeHTML(u.email || "-") + '</td>' +
       '<td>' + escapeHTML(u.role || "-") + '</td>' +
       '<td>' + (isAdmin ? "Yes" : "No") + '</td>' +
       '<td>' + escapeHTML(u.status || "active") + '</td>' +
       '<td>' + actionsHtml + '</td></tr>';
   }).join("");
-  node.innerHTML = '<table class="table"><thead><tr><th>Email</th><th>Role</th><th>Admin</th><th>Status</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  node.innerHTML = '<table class="table"><thead><tr><th>Select</th><th>Email</th><th>Role</th><th>Admin</th><th>Status</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  updateBulkLabels();
 }
 
 async function loadQueue() {
@@ -211,6 +278,47 @@ function valueFor(row, key) {
 
 function titleCase(value) {
   return value.replace(/_/g, " ").replace(/\b\w/g, (ch) => ch.toUpperCase());
+}
+
+function queryString(params) {
+  const q = new URLSearchParams();
+  Object.keys(params).forEach(function(key) {
+    if (params[key]) q.set(key, params[key]);
+  });
+  const value = q.toString();
+  return value ? "?" + value : "";
+}
+
+function updateBulkLabels() {
+  setButtonText("mailbox-bulk-enable", "Enable Selected (" + state.selectedMailboxes.size + ")");
+  setButtonText("mailbox-bulk-suspend", "Suspend Selected (" + state.selectedMailboxes.size + ")");
+  setButtonText("domain-bulk-enable", "Enable Selected (" + state.selectedDomains.size + ")");
+  setButtonText("domain-bulk-suspend", "Suspend Selected (" + state.selectedDomains.size + ")");
+}
+
+function setButtonText(id, value) {
+  const node = el(id);
+  if (node) node.textContent = value;
+}
+
+async function bulkMailboxStatus(status) {
+  const ids = Array.from(state.selectedMailboxes).map(function(id) { return Number(id); }).filter(Boolean);
+  if (ids.length === 0) { setText("mailbox-bulk-result", "Select at least one non-admin mailbox."); return; }
+  const result = await apiPost("/api/v1/mailboxes/bulk/status", { mailbox_ids: ids, status: status });
+  state.selectedMailboxes.clear();
+  setText("mailbox-bulk-result", "Updated " + (result.updated || 0) + ", skipped " + (result.skipped || 0) + ".");
+  await loadMailboxes();
+  await loadSummary();
+}
+
+async function bulkDomainStatus(status) {
+  const domains = Array.from(state.selectedDomains);
+  if (domains.length === 0) { setText("domain-bulk-result", "Select at least one domain."); return; }
+  const result = await apiPost("/api/v1/domains/bulk/status", { domains: domains, status: status });
+  state.selectedDomains.clear();
+  setText("domain-bulk-result", "Updated " + (result.updated || 0) + ", skipped " + (result.skipped || 0) + ".");
+  await loadDomains();
+  await loadSummary();
 }
 
 function escapeHTML(value) {
@@ -527,6 +635,88 @@ el("queue-table").addEventListener("click", async function(event) {
     btn.disabled = false;
   }
 });
+
+["mailbox-search", "mailbox-status-filter", "mailbox-admin-filter"].forEach(function(id) {
+  var node = el(id);
+  if (!node) return;
+  var eventName = node.tagName === "SELECT" ? "change" : "input";
+  node.addEventListener(eventName, function() {
+    state.selectedMailboxes.clear();
+    setText("mailbox-bulk-result", "");
+    loadMailboxes().catch(function(err) { showAlert(err.message || "Mailbox filter failed."); });
+  });
+});
+
+["domain-search", "domain-status-filter"].forEach(function(id) {
+  var node = el(id);
+  if (!node) return;
+  var eventName = node.tagName === "SELECT" ? "change" : "input";
+  node.addEventListener(eventName, function() {
+    state.selectedDomains.clear();
+    setText("domain-bulk-result", "");
+    loadDomains().catch(function(err) { showAlert(err.message || "Domain filter failed."); });
+  });
+});
+
+el("mailboxes-table").addEventListener("change", function(event) {
+  var box = event.target.closest("input.mailbox-select");
+  if (!box) return;
+  if (box.checked) state.selectedMailboxes.add(String(box.dataset.mailboxId));
+  else state.selectedMailboxes.delete(String(box.dataset.mailboxId));
+  updateBulkLabels();
+});
+
+el("domains-table").addEventListener("change", function(event) {
+  var box = event.target.closest("input.domain-select");
+  if (!box) return;
+  if (box.checked) state.selectedDomains.add(box.dataset.domain);
+  else state.selectedDomains.delete(box.dataset.domain);
+  updateBulkLabels();
+});
+
+[
+  ["mailbox-bulk-enable", function() { return bulkMailboxStatus("active"); }],
+  ["mailbox-bulk-suspend", function() { return bulkMailboxStatus("suspended"); }],
+  ["domain-bulk-enable", function() { return bulkDomainStatus("active"); }],
+  ["domain-bulk-suspend", function() { return bulkDomainStatus("suspended"); }]
+].forEach(function(pair) {
+  var node = el(pair[0]);
+  if (!node) return;
+  node.addEventListener("click", async function() {
+    showAlert("");
+    node.disabled = true;
+    try {
+      await pair[1]();
+    } catch (err) {
+      showAlert(err.message || "Bulk operation failed.");
+    } finally {
+      node.disabled = false;
+      updateBulkLabels();
+    }
+  });
+});
+
+var mailboxExport = el("mailbox-export");
+if (mailboxExport) {
+  mailboxExport.addEventListener("click", async function() {
+    try {
+      await downloadCSV("/api/v1/mailboxes/export", "mailboxes.csv");
+    } catch (err) {
+      showAlert(err.message || "Mailbox export failed.");
+    }
+  });
+}
+
+var domainExport = el("domain-export");
+if (domainExport) {
+  domainExport.addEventListener("click", async function() {
+    try {
+      await downloadCSV("/api/v1/domains/export", "domains.csv");
+    } catch (err) {
+      showAlert(err.message || "Domain export failed.");
+    }
+  });
+}
 
 function showDetail(name) {
   document.querySelectorAll("[data-page-view]").forEach(function(v) { v.classList.add("hidden"); });
