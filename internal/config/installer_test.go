@@ -118,14 +118,15 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 			t.Fatalf("installer missing %q", item)
 		}
 	}
+	stalePasswordLen := "12"
 	forbidden := []string{
 		"Admin UI: http://mail.${primary_domain}:8080/admin",
 		"Admin UI: http://$(hostname -f 2>/dev/null || hostname):8080/admin",
 		"hostname -f 2>/dev/null || hostname",
 		"ORVIX_ADMIN_PASSWORD=\"$escaped_password\"",
 		"RC1 CLEAN INSTALLER",
-		"min 12 chars",
-		"at least 12 characters",
+		"min " + stalePasswordLen + " chars",
+		"at least " + stalePasswordLen + " characters",
 		"==>",
 	}
 	for _, item := range forbidden {

@@ -108,6 +108,9 @@ type RedisConfig struct {
 	DB       int    `mapstructure:"db"`
 }
 
+// DefaultPasswordMinLen is the default minimum password length enforced by all auth and mailbox handlers.
+const DefaultPasswordMinLen = 8
+
 // AuthConfig holds authentication settings.
 type AuthConfig struct {
 	JWTSecret      string        `mapstructure:"jwt_secret"`
@@ -206,7 +209,7 @@ func Defaults() *Config {
 			JWTKeyPath:     "/var/lib/orvix/jwt_key.pem",
 			JWTAccessTTL:   15 * time.Minute,
 			JWTRefreshTTL:  30 * 24 * time.Hour,
-			PasswordMinLen: 8,
+			PasswordMinLen: DefaultPasswordMinLen,
 			Argon2Time:     3,
 			Argon2Memory:   64 * 1024,
 			Argon2Threads:  4,

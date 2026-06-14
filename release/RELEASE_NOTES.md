@@ -45,7 +45,7 @@ sudo ./install.sh
 The installer will prompt for:
 1. Primary email domain (e.g., mail.example.com)
 2. Admin email address
-3. Admin password (minimum 12 characters)
+3. Admin password (minimum 8 characters)
 4. Confirm admin password
 
 ### Upgrade from RC3

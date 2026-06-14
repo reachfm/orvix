@@ -141,7 +141,7 @@ npm run build
 | JWT refresh TTL | 30 days |
 | Max email size | 50MB |
 | Max attachment | 25MB |
-| Password min | 12 characters |
+| Password min | 8 characters |
 | Login rate limit | 5 attempts / 15 min |
 | Queue retry | 5m, 30m, 2h, 6h, 24h |
 | Config path | /etc/orvix/orvix.yaml |

@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/coremail"
 )
 
@@ -106,8 +107,8 @@ func (s *Service) CreateMailbox(ctx context.Context, req *CreateMailboxRequest) 
 		return nil, fmt.Errorf("mailbox already exists: %s", email)
 	}
 
-	if len(req.Password) < 8 {
-		return nil, fmt.Errorf("password must be at least 8 characters")
+	if len(req.Password) < config.DefaultPasswordMinLen {
+		return nil, fmt.Errorf("password must be at least %d characters", config.DefaultPasswordMinLen)
 	}
 	if req.QuotaMB < 0 {
 		return nil, fmt.Errorf("quota cannot be negative")
@@ -195,8 +196,8 @@ func (s *Service) UpdateMailbox(ctx context.Context, id uint, req *UpdateMailbox
 }
 
 func (s *Service) ResetPassword(ctx context.Context, id uint, newPassword string) error {
-	if len(newPassword) < 8 {
-		return fmt.Errorf("password must be at least 8 characters")
+	if len(newPassword) < config.DefaultPasswordMinLen {
+		return fmt.Errorf("password must be at least %d characters", config.DefaultPasswordMinLen)
 	}
 	m, err := s.engine.Mailboxes.GetByID(ctx, id, nil)
 	if err != nil {
