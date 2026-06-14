@@ -48,6 +48,7 @@
         <button type="button" data-page="domains"><span class="nav-icon">@</span>Domains</button>
         <button type="button" data-page="mailboxes"><span class="nav-icon">M</span>Mailboxes</button>
         <button type="button" data-page="queue"><span class="nav-icon">Q</span>Queue</button>
+        <button type="button" data-page="backups"><span class="nav-icon">B</span>Backups</button>
         <button type="button" data-page="logs"><span class="nav-icon">L</span>Logs</button>
         <button type="button" data-page="settings"><span class="nav-icon">S</span>Settings</button>
       </nav>
@@ -275,6 +276,17 @@
         <section class="page hidden" data-page-view="queue">
           <div class="page-head"><div><h2>Queue</h2><p>Current message queue entries reported by Admin API.</p></div><button class="ghost-btn" type="button" data-refresh="queue">Refresh</button></div>
           <section class="panel"><div class="panel-body" id="queue-table"></div></section>
+        </section>
+
+        <section class="page hidden" data-page-view="backups">
+          <div class="page-head">
+            <div><h2>Backups</h2><p>Create, download, and remove service-managed backup archives.</p></div>
+            <div>
+              <button class="ghost-btn" type="button" id="backup-create">Backup Now</button>
+              <button class="ghost-btn" type="button" data-refresh="backups">Refresh</button>
+            </div>
+          </div>
+          <section class="panel"><div class="panel-body" id="backups-table"></div></section>
         </section>
 
         <section class="page hidden" data-page-view="logs">

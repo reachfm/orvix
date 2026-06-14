@@ -5,6 +5,7 @@ const state = {
   domains: [],
   users: [],
   queue: [],
+  backups: [],
   logs: [],
   selectedDomains: new Set(),
   selectedMailboxes: new Set()
@@ -258,6 +259,43 @@ async function loadLogs() {
   renderTable("logs-table", state.logs, ["action", "actor", "target", "result", "timestamp"], "No audit log entries.");
 }
 
+async function loadBackups() {
+  state.backups = await apiGet("/api/v1/backups", []);
+  renderBackupsTable("backups-table", state.backups);
+}
+
+function formatBytes(bytes) {
+  var value = Number(bytes || 0);
+  if (value < 1024) return value + " B";
+  if (value < 1024 * 1024) return (value / 1024).toFixed(1) + " KB";
+  if (value < 1024 * 1024 * 1024) return (value / (1024 * 1024)).toFixed(1) + " MB";
+  return (value / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+}
+
+function renderBackupsTable(id, rows) {
+  var node = el(id);
+  if (!node) return;
+  if (!Array.isArray(rows) || rows.length === 0) {
+    node.innerHTML = '<div class="empty-state">No backups have been created yet.</div>';
+    return;
+  }
+  var head = '<table class="table"><thead><tr><th>ID</th><th>Name</th><th>Status</th><th>Size</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
+  var body = rows.map(function(b) {
+    var idValue = b.id || "";
+    return '<tr>' +
+      '<td>' + escapeHTML(idValue) + '</td>' +
+      '<td>' + escapeHTML(b.name || "-") + '</td>' +
+      '<td>' + escapeHTML(b.status || "-") + '</td>' +
+      '<td>' + escapeHTML(formatBytes(b.size_bytes)) + '</td>' +
+      '<td>' + escapeHTML(b.created_at || "-") + '</td>' +
+      '<td>' +
+        '<button class="ghost-btn backup-action" data-action="download" data-backup-id="' + escapeHTML(idValue) + '" style="font-size:12px;padding:4px 8px;min-height:auto;margin-right:4px;">Download</button>' +
+        '<button class="ghost-btn backup-action" data-action="delete" data-backup-id="' + escapeHTML(idValue) + '" style="font-size:12px;padding:4px 8px;min-height:auto;">Delete</button>' +
+      '</td></tr>';
+  }).join("");
+  node.innerHTML = head + body + '</tbody></table>';
+}
+
 function renderTable(id, rows, columns, emptyText) {
   const node = el(id);
   if (!node) return;
@@ -333,7 +371,7 @@ function escapeHTML(value) {
 
 async function refreshAll() {
   showAlert("");
-  await Promise.allSettled([loadHealth(), loadSummary(), loadDomains(), loadMailboxes(), loadQueue(), loadLogs()]);
+  await Promise.allSettled([loadHealth(), loadSummary(), loadDomains(), loadMailboxes(), loadQueue(), loadBackups(), loadLogs()]);
 }
 
 function showApp() {
@@ -636,6 +674,54 @@ el("queue-table").addEventListener("click", async function(event) {
   }
 });
 
+el("backups-table").addEventListener("click", async function(event) {
+  var btn = event.target.closest("button.backup-action");
+  if (!btn) return;
+  var action = btn.dataset.action;
+  var backupId = btn.dataset.backupId;
+  if (!backupId) return;
+  btn.disabled = true;
+  try {
+    if (action === "download") {
+      window.location.href = "/api/v1/backups/" + encodeURIComponent(backupId) + "/download";
+    } else if (action === "delete") {
+      if (!confirm("Delete backup " + backupId + "? This action cannot be undone.")) { btn.disabled = false; return; }
+      var csrfToken = await getCSRFToken();
+      var res = await fetch("/api/v1/backups/" + encodeURIComponent(backupId), {
+        method: "DELETE",
+        headers: { "Authorization": "Bearer " + state.token, "X-CSRF-Token": csrfToken }
+      });
+      if (!res.ok) {
+        var errBody = await res.json().catch(function() { return {}; });
+        throw new Error(errBody.error || "HTTP " + res.status);
+      }
+      showAlert("Backup " + backupId + " deleted.");
+      await loadBackups();
+    }
+  } catch (err) {
+    showAlert(err.message || "Backup operation failed.");
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+var backupCreate = el("backup-create");
+if (backupCreate) {
+  backupCreate.addEventListener("click", async function() {
+    showAlert("");
+    backupCreate.disabled = true;
+    try {
+      var created = await apiPost("/api/v1/backups", {});
+      showAlert("Backup " + (created.id || created.name || "created") + " created.");
+      await loadBackups();
+    } catch (err) {
+      showAlert(err.message || "Backup creation failed.");
+    } finally {
+      backupCreate.disabled = false;
+    }
+  });
+}
+
 ["mailbox-search", "mailbox-status-filter", "mailbox-admin-filter"].forEach(function(id) {
   var node = el(id);
   if (!node) return;
@@ -828,6 +914,7 @@ document.querySelectorAll("[data-refresh]").forEach((button) => {
       if (button.dataset.refresh === "domains") await loadDomains();
       if (button.dataset.refresh === "mailboxes") await loadMailboxes();
       if (button.dataset.refresh === "queue") await loadQueue();
+      if (button.dataset.refresh === "backups") await loadBackups();
       if (button.dataset.refresh === "logs") await loadLogs();
     } catch (err) {
       showAlert(err.message || "Refresh failed.");

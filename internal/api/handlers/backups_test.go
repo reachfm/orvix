@@ -1,0 +1,323 @@
+package handlers_test
+
+import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"database/sql"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/api"
+	"github.com/orvix/orvix/internal/auth"
+	"github.com/orvix/orvix/internal/config"
+	"github.com/orvix/orvix/internal/license"
+	"github.com/orvix/orvix/internal/models"
+	"github.com/orvix/orvix/internal/modules"
+	"go.uber.org/zap"
+)
+
+type backupTestEntry struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Status      string `json:"status"`
+	SizeBytes   int64  `json:"size_bytes"`
+	CreatedAt   string `json:"created_at"`
+	CompletedAt string `json:"completed_at"`
+}
+
+func buildBackupHarness(t *testing.T) (*api.Router, *sql.DB, string, string, string) {
+	t.Helper()
+	logger := zap.NewNop()
+	cfg := config.Defaults()
+	root := t.TempDir()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(root, "orvix.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	cfg.Backup.Dir = filepath.Join(root, "backups")
+	cfg.CoreMail.DataPath = filepath.Join(root, "coremail")
+	cfg.CoreMail.MailStorePath = filepath.Join(cfg.CoreMail.DataPath, "mailstore")
+	if err := os.MkdirAll(cfg.CoreMail.MailStorePath, 0750); err != nil {
+		t.Fatalf("mkdir mailstore: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(cfg.CoreMail.DataPath, "attachments"), 0750); err != nil {
+		t.Fatalf("mkdir attachments: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.CoreMail.MailStorePath, "welcome.eml"), []byte("Subject: test\r\n\r\nbody"), 0640); err != nil {
+		t.Fatalf("write mail fixture: %v", err)
+	}
+
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	if err := models.MigrateAllRaw(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	authenticator, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+	hash, err := authenticator.HashPassword("TestPassword123!")
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	if _, err := sqlDB.Exec(
+		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
+		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		now, now, hash,
+	); err != nil {
+		t.Fatalf("insert admin: %v", err)
+	}
+
+	router := api.NewRouter(cfg, authenticator, logger, db, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
+	token := loginBackup(t, router)
+	csrf := csrfBackup(t, router, token)
+	return router, sqlDB, token, csrf, cfg.Backup.Dir
+}
+
+func loginBackup(t *testing.T, router *api.Router) string {
+	t.Helper()
+	req := httptest.NewRequest("POST", "/admin/login", strings.NewReader(`{"username":"admin@test.local","password":"TestPassword123!"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := router.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("login status %d: %s", resp.StatusCode, body)
+	}
+	var data struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		t.Fatalf("decode login: %v", err)
+	}
+	if data.AccessToken == "" {
+		t.Fatal("missing access token")
+	}
+	return data.AccessToken
+}
+
+func csrfBackup(t *testing.T, router *api.Router, token string) string {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/api/v1/csrf-token", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := router.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("csrf: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("csrf status %d: %s", resp.StatusCode, body)
+	}
+	var data struct {
+		CSRFToken string `json:"csrf_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		t.Fatalf("decode csrf: %v", err)
+	}
+	return data.CSRFToken
+}
+
+func backupRequest(t *testing.T, router *api.Router, method, path, body, token, csrf string) (*http.Response, []byte) {
+	t.Helper()
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	}
+	req := httptest.NewRequest(method, path, reader)
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if csrf != "" {
+		req.Header.Set("Cookie", "csrf_token="+csrf)
+		req.Header.Set("X-CSRF-Token", csrf)
+	}
+	resp, err := router.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	data, _ := io.ReadAll(resp.Body)
+	return resp, data
+}
+
+func createBackupViaAPI(t *testing.T, router *api.Router, token, csrf string) backupTestEntry {
+	t.Helper()
+	resp, body := backupRequest(t, router, "POST", "/api/v1/backups", `{}`, token, csrf)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create status %d: %s", resp.StatusCode, body)
+	}
+	var entry backupTestEntry
+	if err := json.Unmarshal(body, &entry); err != nil {
+		t.Fatalf("decode create: %v: %s", err, body)
+	}
+	if entry.ID == "" || strings.ContainsAny(entry.ID, `/\`) || strings.Contains(entry.ID, "..") {
+		t.Fatalf("unsafe backup id: %#v", entry)
+	}
+	if entry.Status != "completed" {
+		t.Fatalf("expected completed backup, got %#v", entry)
+	}
+	return entry
+}
+
+func TestBackupAPIListEmptyReturnsArray(t *testing.T) {
+	router, sqlDB, token, _, _ := buildBackupHarness(t)
+	defer router.App().Shutdown()
+	defer sqlDB.Close()
+
+	resp, body := backupRequest(t, router, "GET", "/api/v1/backups", "", token, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list status %d: %s", resp.StatusCode, body)
+	}
+	if string(body) == "null" {
+		t.Fatal("list returned null, want []")
+	}
+	var entries []backupTestEntry
+	if err := json.Unmarshal(body, &entries); err != nil {
+		t.Fatalf("decode list: %v: %s", err, body)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected empty list, got %d", len(entries))
+	}
+}
+
+func TestBackupAPICreateListDownloadDelete(t *testing.T) {
+	router, sqlDB, token, csrf, backupDir := buildBackupHarness(t)
+	defer router.App().Shutdown()
+	defer sqlDB.Close()
+
+	created := createBackupViaAPI(t, router, token, csrf)
+	if _, err := os.Stat(filepath.Join(backupDir, created.ID)); err != nil {
+		t.Fatalf("backup dir missing: %v", err)
+	}
+
+	resp, body := backupRequest(t, router, "GET", "/api/v1/backups", "", token, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list status %d: %s", resp.StatusCode, body)
+	}
+	var list []backupTestEntry
+	if err := json.Unmarshal(body, &list); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(list) != 1 || list[0].ID != created.ID {
+		t.Fatalf("unexpected list: %#v", list)
+	}
+
+	resp, archive := backupRequest(t, router, "GET", "/api/v1/backups/"+created.ID+"/download", "", token, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("download status %d: %s", resp.StatusCode, archive)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "application/gzip" {
+		t.Fatalf("unexpected content type %q", got)
+	}
+	names := readArchiveNames(t, archive)
+	for _, name := range []string{"var/lib/orvix/orvix.db", "BACKUP_INFO.txt"} {
+		if !containsString(names, name) {
+			t.Fatalf("archive missing %s, got %v", name, names)
+		}
+	}
+	for _, name := range names {
+		lower := strings.ToLower(name)
+		for _, forbidden := range []string{".env", ".key", ".pem", ".crt", ".p12", ".pfx", "license", "token", "secret", "caddy", "tls", "headers"} {
+			if strings.Contains(lower, forbidden) {
+				t.Fatalf("archive contained forbidden path %q", name)
+			}
+		}
+	}
+
+	resp, body = backupRequest(t, router, "DELETE", "/api/v1/backups/"+created.ID, "", token, csrf)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete status %d: %s", resp.StatusCode, body)
+	}
+	if _, err := os.Stat(filepath.Join(backupDir, created.ID)); !os.IsNotExist(err) {
+		t.Fatalf("backup dir should be deleted, err=%v", err)
+	}
+}
+
+func TestBackupAPIWriteRequiresCSRF(t *testing.T) {
+	router, sqlDB, token, csrf, _ := buildBackupHarness(t)
+	defer router.App().Shutdown()
+	defer sqlDB.Close()
+
+	resp, _ := backupRequest(t, router, "POST", "/api/v1/backups", `{}`, token, "")
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected missing-CSRF create to be 403, got %d", resp.StatusCode)
+	}
+
+	created := createBackupViaAPI(t, router, token, csrf)
+	resp, _ = backupRequest(t, router, "DELETE", "/api/v1/backups/"+created.ID, "", token, "")
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected missing-CSRF delete to be 403, got %d", resp.StatusCode)
+	}
+}
+
+func TestBackupAPIRejectsInvalidIDs(t *testing.T) {
+	router, sqlDB, token, csrf, _ := buildBackupHarness(t)
+	defer router.App().Shutdown()
+	defer sqlDB.Close()
+
+	for _, id := range []string{"..escape", "bad..name", "missing"} {
+		resp, _ := backupRequest(t, router, "GET", "/api/v1/backups/"+id+"/download", "", token, "")
+		if id == "missing" {
+			if resp.StatusCode != http.StatusNotFound {
+				t.Fatalf("missing backup should return 404, got %d", resp.StatusCode)
+			}
+			continue
+		}
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("invalid id %q should return 400, got %d", id, resp.StatusCode)
+		}
+		resp, _ = backupRequest(t, router, "DELETE", "/api/v1/backups/"+id, "", token, csrf)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("invalid delete id %q should return 400, got %d", id, resp.StatusCode)
+		}
+	}
+}
+
+func readArchiveNames(t *testing.T, data []byte) []string {
+	t.Helper()
+	gr, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("gzip reader: %v", err)
+	}
+	defer gr.Close()
+	tr := tar.NewReader(gr)
+	var names []string
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar reader: %v", err)
+		}
+		names = append(names, header.Name)
+	}
+	return names
+}
+
+func containsString(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}
