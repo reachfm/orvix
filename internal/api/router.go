@@ -123,10 +123,15 @@ func (r *Router) setupRoutes() {
 
 	admin := protected.Group("", auth.RequireAnyRole(auth.RoleAdmin, auth.RoleSuperAdmin))
 	admin.Get("/domains", r.h.ListDomains)
-	admin.Get("/domains/:name/audit", r.h.GetDomainAudit)
-	admin.Get("/domains/:name", r.h.GetDomain)
 	admin.Get("/users", r.h.ListUsers)
 	admin.Get("/mailboxes", r.h.ListUsers)
+	// CSV exports (admin-only, GET — no CSRF required). Registered before
+	// the parameterized :id / :name routes so the literal /export segment
+	// wins over /mailboxes/:id and /domains/:name.
+	admin.Get("/mailboxes/export", r.h.ExportMailboxesCSV)
+	admin.Get("/domains/export", r.h.ExportDomainsCSV)
+	admin.Get("/domains/:name/audit", r.h.GetDomainAudit)
+	admin.Get("/domains/:name", r.h.GetDomain)
 	admin.Get("/mailboxes/:id/audit", r.h.GetMailboxAudit)
 	admin.Get("/mailboxes/:id", r.h.GetMailbox)
 	admin.Get("/queue", r.h.ListQueue)
@@ -210,6 +215,9 @@ func (r *Router) setupRoutes() {
 	men.Post("/mailboxes", r.h.CreateMailbox)
 	men.Patch("/mailboxes/:id/password", r.h.UpdateMailboxPassword)
 	men.Patch("/mailboxes/:id/status", r.h.UpdateMailboxStatus)
+	// Bulk status operations (CSRF-protected).
+	men.Post("/mailboxes/bulk/status", r.h.BulkMailboxStatus)
+	men.Post("/domains/bulk/status", r.h.BulkDomainStatus)
 	men.Delete("/mailboxes/:id", r.h.DeleteMailbox)
 	men.Delete("/users/:id", r.h.DeleteUser)
 	men.Delete("/queue/:id", r.h.DeleteQueue)

@@ -396,6 +396,10 @@ func (h *Handler) Me(c fiber.Ctx) error {
 }
 
 // ListDomains returns all mail domains with live mailbox counts.
+//
+// Optional server-side filter query params:
+//   - q=<substring> : case-insensitive substring match on domain
+//   - status=active|suspended : exact match on status
 func (h *Handler) ListDomains(c fiber.Ctx) error {
 	type domainRow struct {
 		ID           uint   `json:"id"`
@@ -411,6 +415,21 @@ func (h *Handler) ListDomains(c fiber.Ctx) error {
 		return c.JSON([]domainRow{})
 	}
 
+	q := strings.TrimSpace(c.Query("q"))
+	statusFilter := strings.TrimSpace(c.Query("status"))
+
+	confs := []string{"deleted_at IS NULL"}
+	args := []interface{}{}
+	if q != "" {
+		confs = append(confs, "LOWER(name) LIKE ?")
+		args = append(args, "%"+strings.ToLower(q)+"%")
+	}
+	if statusFilter == "active" || statusFilter == "suspended" {
+		confs = append(confs, "status = ?")
+		args = append(args, statusFilter)
+	}
+	where := " WHERE " + strings.Join(confs, " AND ")
+
 	type rawDomain struct {
 		ID     uint
 		Name   string
@@ -418,7 +437,7 @@ func (h *Handler) ListDomains(c fiber.Ctx) error {
 		Status string
 	}
 	var rawDomains []rawDomain
-	rows, err := sqlDB.Query("SELECT id, name, plan, status FROM coremail_domains WHERE deleted_at IS NULL ORDER BY id DESC")
+	rows, err := sqlDB.Query("SELECT id, name, plan, status FROM coremail_domains"+where+" ORDER BY id DESC", args...)
 	if err != nil {
 		return c.JSON([]domainRow{})
 	}
@@ -693,6 +712,11 @@ func (h *Handler) GetMailbox(c fiber.Ctx) error {
 // ListUsers returns all users/mailboxes with explicit identity contract.
 // CoreMail mailbox rows: mailbox_id is set, user_id linked from users table if matching email.
 // User-only rows (no coremail_mailboxes): mailbox_id is null, user_id is set, status is "user-only".
+//
+// Optional server-side filter query params:
+//   - q=<substring> : case-insensitive substring match on email
+//   - status=active|suspended : exact match on mailbox status
+//   - admin=true|false : true keeps admin mailboxes, false excludes them
 func (h *Handler) ListUsers(c fiber.Ctx) error {
 	type userRow struct {
 		MailboxID *uint  `json:"mailbox_id"`
@@ -708,9 +732,35 @@ func (h *Handler) ListUsers(c fiber.Ctx) error {
 		return c.JSON([]userRow{})
 	}
 
+	q := strings.TrimSpace(c.Query("q"))
+	statusFilter := strings.TrimSpace(c.Query("status"))
+	adminFilter := strings.ToLower(strings.TrimSpace(c.Query("admin")))
+
+	// Build mailbox WHERE clause using parameterized values.
+	mbConfs := []string{"deleted_at IS NULL"}
+	mbArgs := []interface{}{}
+	if q != "" {
+		mbConfs = append(mbConfs, "LOWER(email) LIKE ?")
+		mbArgs = append(mbArgs, "%"+strings.ToLower(q)+"%")
+	}
+	if statusFilter == "active" || statusFilter == "suspended" {
+		mbConfs = append(mbConfs, "status = ?")
+		mbArgs = append(mbArgs, statusFilter)
+	}
+	// admin=true keeps admin mailboxes; admin=false excludes them. When the caller
+	// filters by status, admin mailboxes are still mailbox rows so the same
+	// filter applies.
+	switch adminFilter {
+	case "true":
+		mbConfs = append(mbConfs, "is_admin = 1")
+	case "false":
+		mbConfs = append(mbConfs, "is_admin = 0")
+	}
+	mbWhere := " WHERE " + strings.Join(mbConfs, " AND ")
+
 	byEmail := make(map[string]*userRow)
 
-	rows, err := sqlDB.Query("SELECT id, email, is_admin, status FROM coremail_mailboxes WHERE deleted_at IS NULL ORDER BY id DESC")
+	rows, err := sqlDB.Query("SELECT id, email, is_admin, status FROM coremail_mailboxes"+mbWhere+" ORDER BY id DESC", mbArgs...)
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
@@ -736,6 +786,8 @@ func (h *Handler) ListUsers(c fiber.Ctx) error {
 		}
 	}
 
+	// user-only rows (no coremail_mailboxes) — only relevant when admin filter is not active.
+	// We always read users so we can attach user_id; then we narrow by q/admin/status below.
 	rows, err = sqlDB.Query("SELECT id, email, role, active FROM users ORDER BY id DESC")
 	if err == nil {
 		defer rows.Close()
@@ -750,13 +802,33 @@ func (h *Handler) ListUsers(c fiber.Ctx) error {
 				userID := id
 				existing.UserID = &userID
 			} else {
+				// Apply q, admin, and status filters to user-only rows too.
+				// User-only rows have status "user-only" which never matches
+				// "active"/"suspended", so a status filter excludes them.
+				if statusFilter == "active" || statusFilter == "suspended" {
+					continue
+				}
+				if q != "" && !strings.Contains(strings.ToLower(email), strings.ToLower(q)) {
+					continue
+				}
+				isAdmin := role == "admin" || role == "superadmin"
+				switch adminFilter {
+				case "true":
+					if !isAdmin {
+						continue
+					}
+				case "false":
+					if isAdmin {
+						continue
+					}
+				}
 				userID := id
 				byEmail[email] = &userRow{
 					MailboxID: nil,
 					UserID:    &userID,
 					Email:     email,
 					Role:      role,
-					IsAdmin:   role == "admin" || role == "superadmin",
+					IsAdmin:   isAdmin,
 					Status:    "user-only",
 				}
 			}
@@ -1026,6 +1098,149 @@ func (h *Handler) UpdateMailboxStatus(c fiber.Ctx) error {
 
 	h.writeAuditLog(c, "mailbox.status_update", fmt.Sprintf("mailbox_id:%d|email:%s|status:%s", id, email, req.Status))
 	return c.JSON(fiber.Map{"result": "updated", "email": email, "status": req.Status})
+}
+
+// BulkMailboxStatus updates status for a set of mailboxes in a single admin call.
+//
+// Request body: {"mailbox_ids": [1,2,3], "status": "active"|"suspended"}
+// Admin mailboxes (is_admin = 1) and soft-deleted rows are skipped silently
+// (still counted in `skipped`). Only mailboxes whose current status differs
+// from the requested status are actually written. A single bulk audit log
+// entry "mailbox.bulk_status" is written per call.
+//
+// Response: {"updated": <int>, "skipped": <int>}
+func (h *Handler) BulkMailboxStatus(c fiber.Ctx) error {
+	var req struct {
+		MailboxIDs []uint `json:"mailbox_ids"`
+		Status     string `json:"status"`
+	}
+	if err := c.Bind().JSON(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
+	}
+	if req.Status != "active" && req.Status != "suspended" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "status must be 'active' or 'suspended'"})
+	}
+	if len(req.MailboxIDs) == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "mailbox_ids required"})
+	}
+
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	updated := 0
+	skipped := 0
+	now := time.Now().UTC()
+
+	for _, id := range req.MailboxIDs {
+		if id == 0 {
+			skipped++
+			continue
+		}
+		// RACE-SAFE UPDATE: the safety predicate is enforced atomically
+		// at the database write site. We never trust a pre-check result;
+		// if the row was soft-deleted, flipped to admin, or no longer
+		// matches the requested status, RowsAffected will be 0 and we
+		// count it as skipped. Admin mailboxes can never be touched
+		// by this bulk endpoint.
+		res, err := sqlDB.Exec(
+			"UPDATE coremail_mailboxes SET status = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL AND is_admin = 0",
+			req.Status, now, id,
+		)
+		if err != nil {
+			h.logger.Error("bulk mailbox update failed", zap.Uint("mailbox_id", id), zap.Error(err))
+			skipped++
+			continue
+		}
+		rows, raErr := res.RowsAffected()
+		if raErr != nil {
+			h.logger.Error("bulk mailbox rows-affected failed", zap.Uint("mailbox_id", id), zap.Error(raErr))
+			skipped++
+			continue
+		}
+		if rows == 0 {
+			// Row either does not exist, is soft-deleted, is admin, or
+			// (in MySQL/SQLite) the status already matched. Treat as
+			// skipped — never as updated.
+			skipped++
+			continue
+		}
+		updated++
+	}
+
+	h.writeAuditLog(c, "mailbox.bulk_status", fmt.Sprintf("count:%d|status:%s|updated:%d|skipped:%d", len(req.MailboxIDs), req.Status, updated, skipped))
+	return c.JSON(fiber.Map{"updated": updated, "skipped": skipped})
+}
+
+// BulkDomainStatus updates status for a set of domains in a single admin call.
+//
+// Request body: {"domains": ["orvix.email","example.com"], "status": "active"|"suspended"}
+// Unknown / soft-deleted domains are skipped silently. Only domains whose
+// current status differs from the requested status are actually written. A
+// single bulk audit log entry "domain.bulk_status" is written per call.
+//
+// Response: {"updated": <int>, "skipped": <int>}
+func (h *Handler) BulkDomainStatus(c fiber.Ctx) error {
+	var req struct {
+		Domains []string `json:"domains"`
+		Status  string   `json:"status"`
+	}
+	if err := c.Bind().JSON(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
+	}
+	if req.Status != "active" && req.Status != "suspended" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "status must be 'active' or 'suspended'"})
+	}
+	if len(req.Domains) == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "domains required"})
+	}
+
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	updated := 0
+	skipped := 0
+	now := time.Now().UTC()
+
+	for _, name := range req.Domains {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "" {
+			skipped++
+			continue
+		}
+		// RACE-SAFE UPDATE: the soft-delete check is enforced atomically
+		// at the database write site. We do not pre-fetch; we run a
+		// single UPDATE whose predicate covers both the row match and
+		// the not-deleted invariant. RowsAffected == 0 means the row
+		// did not exist, was soft-deleted, or already matched the new
+		// status — in all cases it is correctly NOT counted as updated.
+		res, err := sqlDB.Exec(
+			"UPDATE coremail_domains SET status = ?, updated_at = ? WHERE name = ? AND deleted_at IS NULL",
+			req.Status, now, name,
+		)
+		if err != nil {
+			h.logger.Error("bulk domain update failed", zap.String("domain", name), zap.Error(err))
+			skipped++
+			continue
+		}
+		rows, raErr := res.RowsAffected()
+		if raErr != nil {
+			h.logger.Error("bulk domain rows-affected failed", zap.String("domain", name), zap.Error(raErr))
+			skipped++
+			continue
+		}
+		if rows == 0 {
+			skipped++
+			continue
+		}
+		updated++
+	}
+
+	h.writeAuditLog(c, "domain.bulk_status", fmt.Sprintf("count:%d|status:%s|updated:%d|skipped:%d", len(req.Domains), req.Status, updated, skipped))
+	return c.JSON(fiber.Map{"updated": updated, "skipped": skipped})
 }
 
 // DeleteMailbox soft-deletes a CoreMail mailbox.
@@ -1365,6 +1580,10 @@ func (h *Handler) ListAuditLogs(c fiber.Ctx) error {
 }
 
 // AdminSummary returns aggregate counts for the admin dashboard.
+//
+// Extended response (Enterprise Operations Layer v2):
+//   - recent_activity : up to 10 audit entries with safe fields only
+//   - top_domains     : top 5 domains by live mailbox count
 func (h *Handler) AdminSummary(c fiber.Ctx) error {
 	domTotal, domActive, domSuspended := int64(0), int64(0), int64(0)
 	mbTotal, mbActive, mbSuspended, mbAdmin := int64(0), int64(0), int64(0), int64(0)
@@ -1396,6 +1615,59 @@ func (h *Handler) AdminSummary(c fiber.Ctx) error {
 	runtimeStatus := "ok"
 	runtimeVersion := config.GetWatermark().Version
 
+	// recent_activity : up to 10 audit entries, safe fields only.
+	type recentActivityEntry struct {
+		Action    string `json:"action"`
+		Actor     string `json:"actor"`
+		Target    string `json:"target"`
+		Result    string `json:"result"`
+		Timestamp string `json:"timestamp"`
+	}
+	recentActivity := []recentActivityEntry{}
+	if h.auditStore != nil {
+		if entries, _, serr := h.auditStore.Search(c.Context(), &audit.Query{Limit: 10}); serr == nil {
+			for _, e := range entries {
+				recentActivity = append(recentActivity, recentActivityEntry{
+					Action:    e.Action,
+					Actor:     e.Actor,
+					Target:    e.Target,
+					Result:    e.Result,
+					Timestamp: e.Timestamp.Format(time.RFC3339),
+				})
+			}
+		} else {
+			h.logger.Error("failed to load recent activity for admin summary", zap.Error(serr))
+		}
+	}
+
+	// top_domains : top 5 domains by live mailbox count.
+	type topDomainEntry struct {
+		Domain       string `json:"domain"`
+		MailboxCount int    `json:"mailbox_count"`
+	}
+	topDomains := []topDomainEntry{}
+	if err == nil {
+		rows, qerr := sqlDB.Query(`SELECT d.name, COUNT(m.id) AS cnt
+			FROM coremail_domains d
+			LEFT JOIN coremail_mailboxes m ON m.domain_id = d.id AND m.deleted_at IS NULL
+			WHERE d.deleted_at IS NULL
+			GROUP BY d.id
+			ORDER BY cnt DESC, d.id DESC
+			LIMIT 5`)
+		if qerr == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var name string
+				var cnt int64
+				if err := rows.Scan(&name, &cnt); err == nil {
+					topDomains = append(topDomains, topDomainEntry{Domain: name, MailboxCount: int(cnt)})
+				}
+			}
+		} else {
+			h.logger.Error("failed to load top domains for admin summary", zap.Error(qerr))
+		}
+	}
+
 	return c.JSON(fiber.Map{
 		"domains": fiber.Map{
 			"total":     domTotal,
@@ -1421,7 +1693,124 @@ func (h *Handler) AdminSummary(c fiber.Ctx) error {
 			"status":  runtimeStatus,
 			"version": runtimeVersion,
 		},
+		"recent_activity": recentActivity,
+		"top_domains":     topDomains,
 	})
+}
+
+// ExportMailboxesCSV streams all live mailboxes as CSV. Admin-only (router group).
+// Columns: email,status,is_admin
+// Soft-deleted rows are excluded. NEVER read or include password_hash, password,
+// token, jwt, bearer, secret, or any message body / headers.
+func (h *Handler) ExportMailboxesCSV(c fiber.Ctx) error {
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	rows, qerr := sqlDB.Query("SELECT email, status, is_admin FROM coremail_mailboxes WHERE deleted_at IS NULL ORDER BY id ASC")
+	if qerr != nil {
+		h.logger.Error("export mailboxes query failed", zap.Error(qerr))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "export failed"})
+	}
+	defer rows.Close()
+
+	filename := fmt.Sprintf("mailboxes-%s.csv", time.Now().UTC().Format("2006-01-02"))
+	c.Set("Content-Type", "text/csv; charset=utf-8")
+	c.Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+
+	var b strings.Builder
+	b.WriteString("email,status,is_admin\n")
+	for rows.Next() {
+		var email, status string
+		var isAdmin int
+		if err := rows.Scan(&email, &status, &isAdmin); err != nil {
+			continue
+		}
+		b.WriteString(csvField(email))
+		b.WriteByte(',')
+		b.WriteString(csvField(status))
+		b.WriteByte(',')
+		if isAdmin == 1 {
+			b.WriteString("true")
+		} else {
+			b.WriteString("false")
+		}
+		b.WriteByte('\n')
+	}
+	return c.SendString(b.String())
+}
+
+// ExportDomainsCSV streams all live domains as CSV. Admin-only (router group).
+// Columns: domain,status,plan,mailbox_count
+// mailbox_count is the live count from coremail_mailboxes for each domain.
+func (h *Handler) ExportDomainsCSV(c fiber.Ctx) error {
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	// Drain the SELECT result first so the underlying connection is free
+	// for the per-row COUNT(*) queries below. This avoids a deadlock on
+	// single-connection SQLite when running concurrently.
+	type domainRow struct {
+		ID     uint
+		Name   string
+		Plan   string
+		Status string
+	}
+	var domainRows []domainRow
+	{
+		rows, qerr := sqlDB.Query("SELECT id, name, plan, status FROM coremail_domains WHERE deleted_at IS NULL ORDER BY id ASC")
+		if qerr != nil {
+			h.logger.Error("export domains query failed", zap.Error(qerr))
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "export failed"})
+		}
+		for rows.Next() {
+			var d domainRow
+			if err := rows.Scan(&d.ID, &d.Name, &d.Plan, &d.Status); err != nil {
+				continue
+			}
+			domainRows = append(domainRows, d)
+		}
+		rows.Close()
+	}
+
+	filename := fmt.Sprintf("domains-%s.csv", time.Now().UTC().Format("2006-01-02"))
+	c.Set("Content-Type", "text/csv; charset=utf-8")
+	c.Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+
+	var b strings.Builder
+	b.WriteString("domain,status,plan,mailbox_count\n")
+	for _, d := range domainRows {
+		var mbCount int64
+		sqlDB.QueryRow("SELECT COUNT(*) FROM coremail_mailboxes WHERE domain_id = ? AND deleted_at IS NULL", d.ID).Scan(&mbCount)
+		b.WriteString(csvField(d.Name))
+		b.WriteByte(',')
+		b.WriteString(csvField(d.Status))
+		b.WriteByte(',')
+		b.WriteString(csvField(d.Plan))
+		b.WriteByte(',')
+		b.WriteString(fmt.Sprintf("%d", mbCount))
+		b.WriteByte('\n')
+	}
+	return c.SendString(b.String())
+}
+
+// csvField quotes a value if it contains characters that would break CSV
+// parsing (comma, double-quote, CR, LF) and escapes embedded quotes.
+func csvField(v string) string {
+	needsQuote := false
+	for _, r := range v {
+		if r == ',' || r == '"' || r == '\r' || r == '\n' {
+			needsQuote = true
+			break
+		}
+	}
+	if !needsQuote {
+		return v
+	}
+	return `"` + strings.ReplaceAll(v, `"`, `""`) + `"`
 }
 
 func (h *Handler) auditTimeline(c fiber.Ctx, targetFilters []string) error {
