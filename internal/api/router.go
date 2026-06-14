@@ -123,8 +123,12 @@ func (r *Router) setupRoutes() {
 
 	admin := protected.Group("", auth.RequireAnyRole(auth.RoleAdmin, auth.RoleSuperAdmin))
 	admin.Get("/domains", r.h.ListDomains)
+	admin.Get("/domains/:name/audit", r.h.GetDomainAudit)
+	admin.Get("/domains/:name", r.h.GetDomain)
 	admin.Get("/users", r.h.ListUsers)
 	admin.Get("/mailboxes", r.h.ListUsers)
+	admin.Get("/mailboxes/:id/audit", r.h.GetMailboxAudit)
+	admin.Get("/mailboxes/:id", r.h.GetMailbox)
 	admin.Get("/queue", r.h.ListQueue)
 	admin.Get("/firewall/rules", r.h.ListFirewallRules)
 	admin.Get("/firewall/logs", r.h.ListFirewallLogs)

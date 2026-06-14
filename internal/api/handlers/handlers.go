@@ -580,6 +580,116 @@ func (h *Handler) UpdateDomainStatus(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"result": "updated", "domain": name, "status": req.Status})
 }
 
+// GetDomain returns details for a single domain.
+func (h *Handler) GetDomain(c fiber.Ctx) error {
+	name := c.Params("name")
+	if name == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "domain name required"})
+	}
+
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	var domainID uint
+	var domainName, status, plan, createdAt, updatedAt string
+	err = sqlDB.QueryRow("SELECT id, name, status, plan, created_at, updated_at FROM coremail_domains WHERE name = ? AND deleted_at IS NULL", name).Scan(&domainID, &domainName, &status, &plan, &createdAt, &updatedAt)
+	if err == sql.ErrNoRows {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "domain not found"})
+	}
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	var mailboxCount int64
+	sqlDB.QueryRow("SELECT COUNT(*) FROM coremail_mailboxes WHERE domain_id = ? AND deleted_at IS NULL", domainID).Scan(&mailboxCount)
+
+	type briefMailbox struct {
+		MailboxID uint   `json:"mailbox_id"`
+		Email     string `json:"email"`
+		Status    string `json:"status"`
+		IsAdmin   bool   `json:"is_admin"`
+	}
+	var mailboxes []briefMailbox
+	mbRows, err := sqlDB.Query("SELECT id, email, status, is_admin FROM coremail_mailboxes WHERE domain_id = ? AND deleted_at IS NULL ORDER BY id DESC LIMIT 200", domainID)
+	if err == nil {
+		defer mbRows.Close()
+		for mbRows.Next() {
+			var mb briefMailbox
+			var isAdmin int
+			if err := mbRows.Scan(&mb.MailboxID, &mb.Email, &mb.Status, &isAdmin); err == nil {
+				mb.IsAdmin = isAdmin == 1
+				mailboxes = append(mailboxes, mb)
+			}
+		}
+	}
+	if mailboxes == nil {
+		mailboxes = []briefMailbox{}
+	}
+
+	return c.JSON(fiber.Map{
+		"domain":        domainName,
+		"status":        status,
+		"plan":          plan,
+		"mailbox_count": mailboxCount,
+		"created_at":    createdAt,
+		"updated_at":    updatedAt,
+		"deleted":       false,
+		"mailboxes":     mailboxes,
+	})
+}
+
+// GetMailbox returns details for a single mailbox.
+func (h *Handler) GetMailbox(c fiber.Ctx) error {
+	idStr := c.Params("id")
+	if idStr == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "mailbox id required"})
+	}
+	id, parseErr := parseUint(idStr)
+	if parseErr != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid mailbox id"})
+	}
+
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	var email, domainName, status, createdAt, updatedAt string
+	var isAdmin int
+	err = sqlDB.QueryRow(`SELECT m.email, COALESCE(d.name, ''), m.status, m.is_admin, m.created_at, m.updated_at
+		FROM coremail_mailboxes m LEFT JOIN coremail_domains d ON m.domain_id = d.id
+		WHERE m.id = ? AND m.deleted_at IS NULL`, id).Scan(&email, &domainName, &status, &isAdmin, &createdAt, &updatedAt)
+	if err == sql.ErrNoRows {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "mailbox not found"})
+	}
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	var messages int64
+	sqlDB.QueryRow("SELECT COUNT(*) FROM coremail_messages WHERE mailbox_id = ? AND purged_at IS NULL", id).Scan(&messages)
+
+	var queueItems int64
+	sqlDB.QueryRow("SELECT COUNT(*) FROM coremail_queue WHERE mailbox_id = ? AND deleted_at IS NULL", id).Scan(&queueItems)
+
+	return c.JSON(fiber.Map{
+		"mailbox_id": id,
+		"email":      email,
+		"domain":     domainName,
+		"status":     status,
+		"is_admin":   isAdmin == 1,
+		"created_at": createdAt,
+		"updated_at": updatedAt,
+		"deleted":    false,
+		"stats": fiber.Map{
+			"messages":    messages,
+			"queue_items": queueItems,
+		},
+	})
+}
+
 // ListUsers returns all users/mailboxes with explicit identity contract.
 // CoreMail mailbox rows: mailbox_id is set, user_id linked from users table if matching email.
 // User-only rows (no coremail_mailboxes): mailbox_id is null, user_id is set, status is "user-only".
@@ -977,15 +1087,15 @@ func (h *Handler) DeleteUser(c fiber.Ctx) error {
 // ListQueue returns the mail queue with safe fields only.
 func (h *Handler) ListQueue(c fiber.Ctx) error {
 	type queueEntry struct {
-		ID           uint   `json:"id"`
-		MessageID    string `json:"message_id"`
-		From         string `json:"from"`
-		To           string `json:"to"`
-		Status       string `json:"status"`
-		Attempts     int    `json:"attempts"`
-		NextAttempt  string `json:"next_attempt_at"`
-		CreatedAt    string `json:"created_at"`
-		UpdatedAt    string `json:"updated_at"`
+		ID          uint   `json:"id"`
+		MessageID   string `json:"message_id"`
+		From        string `json:"from"`
+		To          string `json:"to"`
+		Status      string `json:"status"`
+		Attempts    int    `json:"attempts"`
+		NextAttempt string `json:"next_attempt_at"`
+		CreatedAt   string `json:"created_at"`
+		UpdatedAt   string `json:"updated_at"`
 	}
 	var result []queueEntry
 
@@ -1312,6 +1422,90 @@ func (h *Handler) AdminSummary(c fiber.Ctx) error {
 			"version": runtimeVersion,
 		},
 	})
+}
+
+func (h *Handler) auditTimeline(c fiber.Ctx, targetFilters []string) error {
+	if h.auditStore == nil {
+		return c.JSON([]struct{}{})
+	}
+
+	// Get all entries and filter in memory for OR logic
+	allEntries, _, err := h.auditStore.Search(c.Context(), &audit.Query{
+		Limit: 500, // Get more to ensure we have enough after filtering
+	})
+	if err != nil {
+		return c.JSON([]struct{}{})
+	}
+
+	type timelineEntry struct {
+		Action    string `json:"action"`
+		Actor     string `json:"actor"`
+		Target    string `json:"target"`
+		Result    string `json:"result"`
+		Timestamp string `json:"timestamp"`
+	}
+
+	var result []timelineEntry
+	for _, e := range allEntries {
+		matched := false
+		for _, filter := range targetFilters {
+			if strings.Contains(e.Target, filter) {
+				matched = true
+				break
+			}
+		}
+		if matched {
+			result = append(result, timelineEntry{
+				Action:    e.Action,
+				Actor:     e.Actor,
+				Target:    e.Target,
+				Result:    e.Result,
+				Timestamp: e.Timestamp.Format(time.RFC3339),
+			})
+			if len(result) >= 100 {
+				break
+			}
+		}
+	}
+
+	if result == nil {
+		result = []timelineEntry{}
+	}
+	return c.JSON(result)
+}
+
+// GetMailboxAudit returns audit entries related to a mailbox.
+func (h *Handler) GetMailboxAudit(c fiber.Ctx) error {
+	idStr := c.Params("id")
+	if idStr == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "mailbox id required"})
+	}
+	id, parseErr := parseUint(idStr)
+	if parseErr != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid mailbox id"})
+	}
+
+	// Get mailbox email for filtering create events
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return c.JSON([]struct{}{})
+	}
+	var email string
+	err = sqlDB.QueryRow("SELECT email FROM coremail_mailboxes WHERE id = ? AND deleted_at IS NULL", id).Scan(&email)
+	if err != nil {
+		return c.JSON([]struct{}{})
+	}
+
+	return h.auditTimeline(c, []string{fmt.Sprintf("mailbox_id:%d", id), fmt.Sprintf("mailbox:%s", email)})
+}
+
+// GetDomainAudit returns audit entries related to a domain.
+func (h *Handler) GetDomainAudit(c fiber.Ctx) error {
+	name := c.Params("name")
+	if name == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "domain name required"})
+	}
+	return h.auditTimeline(c, []string{fmt.Sprintf("domain:%s", name)})
 }
 
 // ListFeatureFlags returns all feature flags.

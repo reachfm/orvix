@@ -367,6 +367,12 @@ func TestAdminUIStaticRoutes(t *testing.T) {
 	if !strings.Contains(string(jsBody), "q-action") {
 		t.Fatalf("admin app.js must have queue action controls (q-action)")
 	}
+	if !strings.Contains(string(jsBody), "mv-action") {
+		t.Fatalf("admin app.js must have mailbox view control (mv-action)")
+	}
+	if !strings.Contains(string(jsBody), "dv-action") {
+		t.Fatalf("admin app.js must have domain view control (dv-action)")
+	}
 	resp, err = router.App().Test(httptest.NewRequest("HEAD", "/admin", nil))
 	if err != nil {
 		t.Fatalf("HEAD /admin request: %v", err)
@@ -2057,4 +2063,307 @@ func TestRuntimeUpdateHelperScript(t *testing.T) {
 	if !strings.Contains(script, "exit 1") {
 		t.Fatalf("apply-runtime-update.sh must exit non-zero on health failure")
 	}
+}
+
+func TestMailboxDetailsEndpoint(t *testing.T) {
+	logger := zap.NewNop()
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(t.TempDir(), "orvix.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	defer sqlDB.Close()
+	if err := models.MigrateAllRaw(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	authenticator, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	hashedPw, err := authenticator.HashPassword("TestPassword123!")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+	_, err = sqlDB.Exec(
+		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
+		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		now, now, hashedPw,
+	)
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	_, err = sqlDB.Exec(
+		`INSERT INTO coremail_domains (name, tenant_id, status, plan, created_at, updated_at)
+		 VALUES ('test.local', 1, 'active', 'enterprise', ?, ?)`,
+		now, now,
+	)
+	if err != nil {
+		t.Fatalf("insert domain: %v", err)
+	}
+	_, err = sqlDB.Exec(
+		`INSERT INTO coremail_mailboxes (domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme, status, quota_mb, is_admin, created_at, updated_at)
+		 VALUES (1, 1, 'admin', 'admin@test.local', 'Admin', ?, 'argon2id', 'active', 1024, 1, ?, ?)`,
+		"$argon2id$v=19$m=1024,t=1,p=1$c2FsdA$aGFzaA", now, now,
+	)
+	if err != nil {
+		t.Fatalf("insert mailbox: %v", err)
+	}
+	router := NewRouter(cfg, authenticator, logger, db, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
+	defer router.App().Shutdown()
+	token := loginForTest(t, router, "admin@test.local", "TestPassword123!")
+
+	t.Run("mailbox detail success", func(t *testing.T) {
+		body := getAdminJSON(t, router, token, "/api/v1/mailboxes/1")
+		var data map[string]any
+		if err := json.Unmarshal(body, &data); err != nil {
+			t.Fatalf("must be JSON: %v: %s", err, body)
+		}
+		if data["mailbox_id"] == nil {
+			t.Fatalf("response must include mailbox_id: %s", body)
+		}
+		if data["email"] != "admin@test.local" {
+			t.Fatalf("expected email admin@test.local, got %v: %s", data["email"], body)
+		}
+		if _, ok := data["stats"]; !ok {
+			t.Fatalf("response must include stats: %s", body)
+		}
+		stats := data["stats"].(map[string]any)
+		if _, ok := stats["messages"]; !ok {
+			t.Fatalf("stats must include messages: %s", body)
+		}
+		if _, ok := stats["queue_items"]; !ok {
+			t.Fatalf("stats must include queue_items: %s", body)
+		}
+	})
+
+	t.Run("mailbox detail missing returns 404", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/v1/mailboxes/99999", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := router.App().Test(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if resp.StatusCode != 404 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 404, got %d: %s", resp.StatusCode, body)
+		}
+	})
+
+	t.Run("mailbox detail no password exposure", func(t *testing.T) {
+		body := getAdminJSON(t, router, token, "/api/v1/mailboxes/1")
+		for _, forbidden := range []string{"password", "argon2", "hash", "secret", "token", "jwt", "bearer"} {
+			if strings.Contains(strings.ToLower(string(body)), forbidden) {
+				t.Fatalf("mailbox detail must not contain %s: %s", forbidden, body)
+			}
+		}
+	})
+}
+
+func TestDomainDetailsEndpoint(t *testing.T) {
+	logger := zap.NewNop()
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(t.TempDir(), "orvix.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	defer sqlDB.Close()
+	if err := models.MigrateAllRaw(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	authenticator, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	hashedPw, err := authenticator.HashPassword("TestPassword123!")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+	_, err = sqlDB.Exec(
+		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
+		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		now, now, hashedPw,
+	)
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	_, err = sqlDB.Exec(
+		`INSERT INTO coremail_domains (name, tenant_id, status, plan, created_at, updated_at)
+		 VALUES ('test.local', 1, 'active', 'enterprise', ?, ?)`,
+		now, now,
+	)
+	if err != nil {
+		t.Fatalf("insert domain: %v", err)
+	}
+	_, err = sqlDB.Exec(
+		`INSERT INTO coremail_mailboxes (domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme, status, quota_mb, is_admin, created_at, updated_at)
+		 VALUES (1, 1, 'admin', 'admin@test.local', 'Admin', ?, 'argon2id', 'active', 1024, 1, ?, ?)`,
+		"$argon2id$v=19$m=1024,t=1,p=1$c2FsdA$aGFzaA", now, now,
+	)
+	if err != nil {
+		t.Fatalf("insert mailbox: %v", err)
+	}
+	router := NewRouter(cfg, authenticator, logger, db, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
+	defer router.App().Shutdown()
+	token := loginForTest(t, router, "admin@test.local", "TestPassword123!")
+
+	t.Run("domain detail success", func(t *testing.T) {
+		body := getAdminJSON(t, router, token, "/api/v1/domains/test.local")
+		var data map[string]any
+		if err := json.Unmarshal(body, &data); err != nil {
+			t.Fatalf("must be JSON: %v: %s", err, body)
+		}
+		if data["domain"] != "test.local" {
+			t.Fatalf("expected domain test.local, got %v: %s", data["domain"], body)
+		}
+		if _, ok := data["mailbox_count"]; !ok {
+			t.Fatalf("response must include mailbox_count: %s", body)
+		}
+		if _, ok := data["mailboxes"]; !ok {
+			t.Fatalf("response must include mailboxes list: %s", body)
+		}
+		mc := data["mailbox_count"].(float64)
+		if mc < 1 {
+			t.Fatalf("expected mailbox_count >= 1, got %v: %s", mc, body)
+		}
+		mbList := data["mailboxes"].([]any)
+		if len(mbList) < 1 {
+			t.Fatalf("expected at least 1 mailbox in mailboxes list: %s", body)
+		}
+	})
+
+	t.Run("domain detail missing returns 404", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/v1/domains/nonexistent.com", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := router.App().Test(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if resp.StatusCode != 404 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 404, got %d: %s", resp.StatusCode, body)
+		}
+	})
+
+	t.Run("deleted domain returns 404", func(t *testing.T) {
+		sqlDB.Exec("UPDATE coremail_domains SET deleted_at = ? WHERE name = 'test.local'", time.Now().UTC().Format("2006-01-02 15:04:05"))
+		req := httptest.NewRequest("GET", "/api/v1/domains/test.local", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := router.App().Test(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		if resp.StatusCode != 404 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 404 for deleted domain, got %d: %s", resp.StatusCode, body)
+		}
+	})
+}
+
+func TestEntityAuditEndpoints(t *testing.T) {
+	logger := zap.NewNop()
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(t.TempDir(), "orvix.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	defer sqlDB.Close()
+	if err := models.MigrateAllRaw(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	authenticator, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	hashedPw, err := authenticator.HashPassword("TestPassword123!")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+	_, err = sqlDB.Exec(
+		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
+		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		now, now, hashedPw,
+	)
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	_, err = sqlDB.Exec(
+		`INSERT INTO coremail_domains (name, tenant_id, status, plan, created_at, updated_at)
+		 VALUES ('test.local', 1, 'active', 'enterprise', ?, ?)`,
+		now, now,
+	)
+	if err != nil {
+		t.Fatalf("insert domain: %v", err)
+	}
+	_, err = sqlDB.Exec(
+		`INSERT INTO coremail_mailboxes (domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme, status, quota_mb, is_admin, created_at, updated_at)
+		 VALUES (1, 1, 'admin', 'admin@test.local', 'Admin', ?, 'argon2id', 'active', 1024, 1, ?, ?)`,
+		"$argon2id$v=19$m=1024,t=1,p=1$c2FsdA$aGFzaA", now, now,
+	)
+	if err != nil {
+		t.Fatalf("insert mailbox: %v", err)
+	}
+	router := NewRouter(cfg, authenticator, logger, db, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
+	defer router.App().Shutdown()
+	token := loginForTest(t, router, "admin@test.local", "TestPassword123!")
+
+	t.Run("mailbox audit returns array", func(t *testing.T) {
+		body := getAdminJSON(t, router, token, "/api/v1/mailboxes/1/audit")
+		var entries []map[string]any
+		if err := json.Unmarshal(body, &entries); err != nil {
+			t.Fatalf("must be JSON array: %v: %s", err, body)
+		}
+	})
+
+	t.Run("domain audit returns array", func(t *testing.T) {
+		body := getAdminJSON(t, router, token, "/api/v1/domains/test.local/audit")
+		var entries []map[string]any
+		if err := json.Unmarshal(body, &entries); err != nil {
+			t.Fatalf("must be JSON array: %v: %s", err, body)
+		}
+	})
+
+	t.Run("audit returns empty array when no entries", func(t *testing.T) {
+		_, _ = sqlDB.Exec("DELETE FROM coremail_audit")
+		body := getAdminJSON(t, router, token, "/api/v1/mailboxes/1/audit")
+		if string(body) == "null" {
+			t.Fatalf("must return [] not null: %s", body)
+		}
+		var entries []map[string]any
+		json.Unmarshal(body, &entries)
+		if len(entries) != 0 {
+			t.Fatalf("expected empty array, got %d entries: %s", len(entries), body)
+		}
+	})
+
+	t.Run("audit contains no secrets", func(t *testing.T) {
+		for _, path := range []string{"/api/v1/mailboxes/1/audit", "/api/v1/domains/test.local/audit"} {
+			body := getAdminJSON(t, router, token, path)
+			for _, forbidden := range []string{"password", "hash", "token", "jwt", "bearer", "secret", "ip", "userAgent"} {
+				if strings.Contains(strings.ToLower(string(body)), forbidden) {
+					t.Fatalf("%s must not expose %s: %s", path, forbidden, body)
+				}
+			}
+		}
+	})
 }

@@ -23,13 +23,14 @@ type Entry struct {
 
 // Query filters for audit log.
 type Query struct {
-	Actor    string
-	Action   string
-	Result   string
-	Since    *time.Time
-	Until    *time.Time
-	Limit    int
-	Offset   int
+	Actor  string
+	Action string
+	Target string
+	Result string
+	Since  *time.Time
+	Until  *time.Time
+	Limit  int
+	Offset int
 }
 
 // Store provides persistent audit log storage.
@@ -91,6 +92,10 @@ func (s *Store) Search(ctx context.Context, q *Query) ([]Entry, int64, error) {
 	if q.Action != "" {
 		where = append(where, "action = ?")
 		args = append(args, q.Action)
+	}
+	if q.Target != "" {
+		where = append(where, "target LIKE ?")
+		args = append(args, "%"+q.Target+"%")
 	}
 	if q.Result != "" {
 		where = append(where, "result = ?")

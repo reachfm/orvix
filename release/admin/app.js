@@ -107,12 +107,13 @@ async function loadDomains() {
       ? '<button class="ghost-btn dm-action" data-action="disable" data-domain="' + escapeHTML(d.domain) + '" data-domain-id="' + d.id + '" style="font-size:12px;padding:4px 8px;min-height:auto;margin-right:4px;">Disable</button>'
       : '<button class="ghost-btn dm-action" data-action="enable" data-domain="' + escapeHTML(d.domain) + '" data-domain-id="' + d.id + '" style="font-size:12px;padding:4px 8px;min-height:auto;margin-right:4px;">Enable</button>';
     const deleteBtn = '<button class="ghost-btn dm-action" data-action="delete" data-domain="' + escapeHTML(d.domain) + '" data-domain-id="' + d.id + '" data-mailbox-count="' + (d.mailbox_count || 0) + '" style="font-size:12px;padding:4px 8px;min-height:auto;">Delete</button>';
+    const viewBtn = '<button class="ghost-btn dv-action" data-action="view" data-domain="' + escapeHTML(d.domain) + '" style="font-size:12px;padding:4px 8px;min-height:auto;margin-right:4px;">View</button>';
     return '<tr>' +
       '<td>' + escapeHTML(d.domain || "-") + '</td>' +
       '<td>' + escapeHTML(d.plan || "-") + '</td>' +
       '<td>' + escapeHTML(d.status || "active") + '</td>' +
       '<td>' + (d.mailbox_count != null ? d.mailbox_count : "-") + '</td>' +
-      '<td>' + statusBtn + deleteBtn + '</td></tr>';
+      '<td>' + viewBtn + statusBtn + deleteBtn + '</td></tr>';
   }).join("");
   node.innerHTML = '<table class="table"><thead><tr><th>Domain</th><th>Plan</th><th>Status</th><th>Mailboxes</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
 }
@@ -136,6 +137,7 @@ async function loadMailboxes() {
       actionsHtml = '<span style="color:var(--muted);font-size:12px;">No mailbox record</span>';
     } else {
       actionsHtml = '' +
+        '<button class="ghost-btn mv-action" data-action="view" data-mailbox-id="' + u.mailbox_id + '" data-email="' + escapeHTML(u.email) + '" style="font-size:12px;padding:4px 8px;min-height:auto;margin-right:4px;">View</button>' +
         '<button class="ghost-btn mb-action" data-action="password" data-email="' + escapeHTML(u.email) + '" data-mailbox-id="' + u.mailbox_id + '" style="font-size:12px;padding:4px 8px;min-height:auto;margin-right:4px;"' + (canModify ? '' : ' disabled') + '>Password</button>' +
         '<button class="ghost-btn mb-action" data-action="' + (isSuspended ? 'enable' : 'disable') + '" data-email="' + escapeHTML(u.email) + '" data-mailbox-id="' + u.mailbox_id + '" style="font-size:12px;padding:4px 8px;min-height:auto;margin-right:4px;"' + (canModify ? '' : ' disabled') + '>' + (isSuspended ? 'Enable' : 'Disable') + '</button>' +
         '<button class="ghost-btn mb-action" data-action="delete" data-email="' + escapeHTML(u.email) + '" data-mailbox-id="' + u.mailbox_id + '" style="font-size:12px;padding:4px 8px;min-height:auto;"' + (canModify ? '' : ' disabled') + '>Delete</button>' +
@@ -523,6 +525,100 @@ el("queue-table").addEventListener("click", async function(event) {
     showAlert(err.message || "Operation failed.");
   } finally {
     btn.disabled = false;
+  }
+});
+
+function showDetail(name) {
+  document.querySelectorAll("[data-page-view]").forEach(function(v) { v.classList.add("hidden"); });
+  document.querySelectorAll("[data-detail-view]").forEach(function(v) { v.classList.add("hidden"); });
+  var detail = document.querySelector("[data-detail-view=\"" + name + "\"]");
+  if (detail) detail.classList.remove("hidden");
+}
+
+document.querySelectorAll("[data-detail-back]").forEach(function(btn) {
+  btn.addEventListener("click", function() {
+    document.querySelectorAll("[data-detail-view]").forEach(function(v) { v.classList.add("hidden"); });
+    document.querySelectorAll("[data-page-view]").forEach(function(v) { v.classList.remove("hidden"); });
+  });
+});
+
+async function showMailboxDetail(mailboxId, email) {
+  showDetail("mailbox-detail");
+  el("detail-mb-title").textContent = "Mailbox: " + email;
+  el("detail-mb-content").innerHTML = '<div class="loading">Loading...</div>';
+  el("detail-mb-audit").innerHTML = '<div class="loading">Loading...</div>';
+
+  try {
+    var detail = await apiGet("/api/v1/mailboxes/" + mailboxId, null);
+    if (detail) {
+      el("detail-mb-content").innerHTML =
+        '<div class="setting-row"><div><strong>Email</strong></div><span>' + escapeHTML(detail.email || "-") + '</span></div>' +
+        '<div class="setting-row"><div><strong>Domain</strong></div><span>' + escapeHTML(detail.domain || "-") + '</span></div>' +
+        '<div class="setting-row"><div><strong>Status</strong></div><span>' + escapeHTML(detail.status || "-") + '</span></div>' +
+        '<div class="setting-row"><div><strong>Admin</strong></div><span>' + (detail.is_admin ? "Yes" : "No") + '</span></div>' +
+        '<div class="setting-row"><div><strong>Created</strong></div><span>' + escapeHTML(detail.created_at || "-") + '</span></div>' +
+        '<div class="setting-row"><div><strong>Updated</strong></div><span>' + escapeHTML(detail.updated_at || "-") + '</span></div>' +
+        '<div class="setting-row"><div><strong>Messages</strong></div><span>' + (detail.stats ? (detail.stats.messages || 0) : "-") + '</span></div>' +
+        '<div class="setting-row"><div><strong>Queue Items</strong></div><span>' + (detail.stats ? (detail.stats.queue_items || 0) : "-") + '</span></div>';
+    }
+  } catch (_) {
+    el("detail-mb-content").innerHTML = '<div class="empty-state">Failed to load mailbox details.</div>';
+  }
+
+  try {
+    var audit = await apiGet("/api/v1/mailboxes/" + mailboxId + "/audit", []);
+    renderTable("detail-mb-audit", audit, ["action", "actor", "target", "result", "timestamp"], "No audit entries.");
+  } catch (_) {
+    el("detail-mb-audit").innerHTML = '<div class="empty-state">Audit unavailable.</div>';
+  }
+}
+
+async function showDomainDetail(domain) {
+  showDetail("domain-detail");
+  el("detail-dm-title").textContent = "Domain: " + domain;
+  el("detail-dm-content").innerHTML = '<div class="loading">Loading...</div>';
+  el("detail-dm-mailboxes").innerHTML = '<div class="loading">Loading...</div>';
+  el("detail-dm-audit").innerHTML = '<div class="loading">Loading...</div>';
+
+  try {
+    var detail = await apiGet("/api/v1/domains/" + encodeURIComponent(domain), null);
+    if (detail) {
+      el("detail-dm-content").innerHTML =
+        '<div class="setting-row"><div><strong>Domain</strong></div><span>' + escapeHTML(detail.domain || "-") + '</span></div>' +
+        '<div class="setting-row"><div><strong>Plan</strong></div><span>' + escapeHTML(detail.plan || "-") + '</span></div>' +
+        '<div class="setting-row"><div><strong>Status</strong></div><span>' + escapeHTML(detail.status || "-") + '</span></div>' +
+        '<div class="setting-row"><div><strong>Mailbox Count</strong></div><span>' + (detail.mailbox_count != null ? detail.mailbox_count : "-") + '</span></div>' +
+        '<div class="setting-row"><div><strong>Created</strong></div><span>' + escapeHTML(detail.created_at || "-") + '</span></div>' +
+        '<div class="setting-row"><div><strong>Updated</strong></div><span>' + escapeHTML(detail.updated_at || "-") + '</span></div>';
+    }
+    if (detail && Array.isArray(detail.mailboxes)) {
+      renderTable("detail-dm-mailboxes", detail.mailboxes, ["mailbox_id", "email", "status", "is_admin"], "No mailboxes.");
+    }
+  } catch (_) {
+    el("detail-dm-content").innerHTML = '<div class="empty-state">Failed to load domain details.</div>';
+  }
+
+  try {
+    var audit = await apiGet("/api/v1/domains/" + encodeURIComponent(domain) + "/audit", []);
+    renderTable("detail-dm-audit", audit, ["action", "actor", "target", "result", "timestamp"], "No audit entries.");
+  } catch (_) {
+    el("detail-dm-audit").innerHTML = '<div class="empty-state">Audit unavailable.</div>';
+  }
+}
+
+document.addEventListener("click", function(event) {
+  var mbViewBtn = event.target.closest("button.mv-action");
+  if (mbViewBtn) {
+    var mailboxId = mbViewBtn.dataset.mailboxId;
+    var email = mbViewBtn.dataset.email;
+    if (mailboxId) showMailboxDetail(mailboxId, email);
+    return;
+  }
+  var dmViewBtn = event.target.closest("button.dv-action");
+  if (dmViewBtn) {
+    var domain = dmViewBtn.dataset.domain;
+    if (domain) showDomainDetail(domain);
+    return;
   }
 });
 
