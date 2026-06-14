@@ -478,51 +478,83 @@ func (h *Handler) DeleteDomain(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"status": "deleted"})
 }
 
-// ListUsers returns all users/mailboxes.
+// ListUsers returns all users/mailboxes with explicit identity contract.
+// CoreMail mailbox rows: mailbox_id is set, user_id linked from users table if matching email.
+// User-only rows (no coremail_mailboxes): mailbox_id is null, user_id is set, status is "user-only".
 func (h *Handler) ListUsers(c fiber.Ctx) error {
 	type userRow struct {
-		ID    uint   `json:"id"`
-		Email string `json:"email"`
-		Role  string `json:"role"`
+		MailboxID *uint  `json:"mailbox_id"`
+		UserID    *uint  `json:"user_id"`
+		Email     string `json:"email"`
+		Role      string `json:"role"`
+		IsAdmin   bool   `json:"is_admin"`
+		Status    string `json:"status"`
 	}
-	var users []userRow
 
 	sqlDB, err := h.db.DB()
+	if err != nil {
+		return c.JSON([]userRow{})
+	}
+
+	byEmail := make(map[string]*userRow)
+
+	rows, err := sqlDB.Query("SELECT id, email, is_admin, status FROM coremail_mailboxes WHERE deleted_at IS NULL ORDER BY id DESC")
 	if err == nil {
-		seen := make(map[string]bool)
-		rows, err := sqlDB.Query("SELECT id, email, role FROM users ORDER BY id DESC")
-		if err == nil {
-			defer rows.Close()
-			for rows.Next() {
-				var id uint
-				var email, role string
-				if err := rows.Scan(&id, &email, &role); err != nil {
-					continue
-				}
-				if !seen[email] {
-					users = append(users, userRow{ID: id, Email: email, Role: role})
-					seen[email] = true
-				}
+		defer rows.Close()
+		for rows.Next() {
+			var id uint
+			var email, status string
+			var isAdmin int
+			if err := rows.Scan(&id, &email, &isAdmin, &status); err != nil {
+				continue
+			}
+			role := "mailbox"
+			if isAdmin == 1 {
+				role = "admin"
+			}
+			mailboxID := id
+			byEmail[email] = &userRow{
+				MailboxID: &mailboxID,
+				UserID:    nil,
+				Email:     email,
+				Role:      role,
+				IsAdmin:   isAdmin == 1,
+				Status:    status,
 			}
 		}
+	}
 
-		rows, err = sqlDB.Query("SELECT id, email, 'mailbox' AS role FROM coremail_mailboxes WHERE deleted_at IS NULL ORDER BY id DESC")
-		if err == nil {
-			defer rows.Close()
-			for rows.Next() {
-				var id uint
-				var email, role string
-				if err := rows.Scan(&id, &email, &role); err != nil {
-					continue
-				}
-				if !seen[email] {
-					users = append(users, userRow{ID: id, Email: email, Role: role})
-					seen[email] = true
+	rows, err = sqlDB.Query("SELECT id, email, role, active FROM users ORDER BY id DESC")
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var id uint
+			var email, role string
+			var active int
+			if err := rows.Scan(&id, &email, &role, &active); err != nil {
+				continue
+			}
+			if existing, ok := byEmail[email]; ok {
+				userID := id
+				existing.UserID = &userID
+			} else {
+				userID := id
+				byEmail[email] = &userRow{
+					MailboxID: nil,
+					UserID:    &userID,
+					Email:     email,
+					Role:      role,
+					IsAdmin:   role == "admin" || role == "superadmin",
+					Status:    "user-only",
 				}
 			}
 		}
 	}
 
+	users := make([]userRow, 0, len(byEmail))
+	for _, u := range byEmail {
+		users = append(users, *u)
+	}
 	if users == nil {
 		users = []userRow{}
 	}
@@ -685,6 +717,142 @@ func hashPasswordArgon2id(password string) (string, error) {
 	b64Hash := base64.RawStdEncoding.EncodeToString(hash)
 	return fmt.Sprintf("$argon2id$v=19$m=%d,t=%d,p=%d$%s$%s",
 		argon2Mem, argon2Time, argon2Threads, b64Salt, b64Hash), nil
+}
+
+// UpdateMailboxPassword resets a CoreMail mailbox password.
+func (h *Handler) UpdateMailboxPassword(c fiber.Ctx) error {
+	idStr := c.Params("id")
+	var id uint
+	fmt.Sscanf(idStr, "%d", &id)
+	if id == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid mailbox id"})
+	}
+
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := c.Bind().JSON(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
+	}
+	if len(req.Password) < h.cfg.Auth.PasswordMinLen {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("password must be at least %d characters", h.cfg.Auth.PasswordMinLen)})
+	}
+
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	var email string
+	err = sqlDB.QueryRow("SELECT email FROM coremail_mailboxes WHERE id = ? AND deleted_at IS NULL", id).Scan(&email)
+	if err == sql.ErrNoRows {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "mailbox not found"})
+	}
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	argon2Hash, err := hashPasswordArgon2id(req.Password)
+	if err != nil {
+		h.logger.Error("failed to hash password", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "password update failed"})
+	}
+
+	_, err = sqlDB.Exec("UPDATE coremail_mailboxes SET password_hash = ?, updated_at = ? WHERE id = ?", argon2Hash, time.Now().UTC(), id)
+	if err != nil {
+		h.logger.Error("failed to update mailbox password", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "password update failed"})
+	}
+
+	h.writeAuditLog(c, "mailbox.password_reset", fmt.Sprintf("mailbox_id:%d|email:%s", id, email))
+	return c.JSON(fiber.Map{"status": "password updated", "email": email})
+}
+
+// UpdateMailboxStatus enables or disables a CoreMail mailbox.
+func (h *Handler) UpdateMailboxStatus(c fiber.Ctx) error {
+	idStr := c.Params("id")
+	var id uint
+	fmt.Sscanf(idStr, "%d", &id)
+	if id == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid mailbox id"})
+	}
+
+	var req struct {
+		Status string `json:"status"`
+	}
+	if err := c.Bind().JSON(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
+	}
+	if req.Status != "active" && req.Status != "suspended" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "status must be 'active' or 'suspended'"})
+	}
+
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	var email string
+	var isAdmin int
+	err = sqlDB.QueryRow("SELECT email, is_admin FROM coremail_mailboxes WHERE id = ? AND deleted_at IS NULL", id).Scan(&email, &isAdmin)
+	if err == sql.ErrNoRows {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "mailbox not found"})
+	}
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	if isAdmin == 1 && req.Status != "active" {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "cannot disable admin mailbox"})
+	}
+
+	_, err = sqlDB.Exec("UPDATE coremail_mailboxes SET status = ?, updated_at = ? WHERE id = ?", req.Status, time.Now().UTC(), id)
+	if err != nil {
+		h.logger.Error("failed to update mailbox status", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "status update failed"})
+	}
+
+	h.writeAuditLog(c, "mailbox.status_update", fmt.Sprintf("mailbox_id:%d|email:%s|status:%s", id, email, req.Status))
+	return c.JSON(fiber.Map{"result": "updated", "email": email, "status": req.Status})
+}
+
+// DeleteMailbox soft-deletes a CoreMail mailbox.
+func (h *Handler) DeleteMailbox(c fiber.Ctx) error {
+	idStr := c.Params("id")
+	var id uint
+	fmt.Sscanf(idStr, "%d", &id)
+	if id == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid mailbox id"})
+	}
+
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	var email string
+	var isAdmin int
+	err = sqlDB.QueryRow("SELECT email, is_admin FROM coremail_mailboxes WHERE id = ? AND deleted_at IS NULL", id).Scan(&email, &isAdmin)
+	if err == sql.ErrNoRows {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "mailbox not found"})
+	}
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	if isAdmin == 1 {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "cannot delete admin mailbox"})
+	}
+
+	now := time.Now().UTC()
+	_, err = sqlDB.Exec("UPDATE coremail_mailboxes SET deleted_at = ?, updated_at = ? WHERE id = ?", now, now, id)
+	if err != nil {
+		h.logger.Error("failed to delete mailbox", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "delete failed"})
+	}
+
+	h.writeAuditLog(c, "mailbox.delete", fmt.Sprintf("mailbox_id:%d|email:%s", id, email))
+	return c.JSON(fiber.Map{"status": "deleted", "email": email})
 }
 
 // DeleteUser removes a user.

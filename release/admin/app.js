@@ -85,8 +85,37 @@ async function loadDomains() {
 }
 
 async function loadMailboxes() {
-  state.users = await apiGet("/api/v1/users", []);
-  renderTable("mailboxes-table", state.users, ["email", "role"], "No mailboxes or users are available yet.");
+  const users = await apiGet("/api/v1/users", []);
+  state.users = users;
+  const node = el("mailboxes-table");
+  if (!node) return;
+  if (!Array.isArray(users) || users.length === 0) {
+    node.innerHTML = '<div class="empty-state">No mailboxes or users are available yet.</div>';
+    return;
+  }
+  const rows = users.map(function(u) {
+    const hasMailbox = u.mailbox_id != null;
+    const isAdmin = u.is_admin === true;
+    const isSuspended = u.status === "suspended";
+    const canModify = hasMailbox && !isAdmin;
+    var actionsHtml;
+    if (!hasMailbox) {
+      actionsHtml = '<span style="color:var(--muted);font-size:12px;">No mailbox record</span>';
+    } else {
+      actionsHtml = '' +
+        '<button class="ghost-btn mb-action" data-action="password" data-email="' + escapeHTML(u.email) + '" data-mailbox-id="' + u.mailbox_id + '" style="font-size:12px;padding:4px 8px;min-height:auto;margin-right:4px;"' + (canModify ? '' : ' disabled') + '>Password</button>' +
+        '<button class="ghost-btn mb-action" data-action="' + (isSuspended ? 'enable' : 'disable') + '" data-email="' + escapeHTML(u.email) + '" data-mailbox-id="' + u.mailbox_id + '" style="font-size:12px;padding:4px 8px;min-height:auto;margin-right:4px;"' + (canModify ? '' : ' disabled') + '>' + (isSuspended ? 'Enable' : 'Disable') + '</button>' +
+        '<button class="ghost-btn mb-action" data-action="delete" data-email="' + escapeHTML(u.email) + '" data-mailbox-id="' + u.mailbox_id + '" style="font-size:12px;padding:4px 8px;min-height:auto;"' + (canModify ? '' : ' disabled') + '>Delete</button>' +
+        '';
+    }
+    return '<tr>' +
+      '<td>' + escapeHTML(u.email || "-") + '</td>' +
+      '<td>' + escapeHTML(u.role || "-") + '</td>' +
+      '<td>' + (isAdmin ? "Yes" : "No") + '</td>' +
+      '<td>' + escapeHTML(u.status || "active") + '</td>' +
+      '<td>' + actionsHtml + '</td></tr>';
+  }).join("");
+  node.innerHTML = '<table class="table"><thead><tr><th>Email</th><th>Role</th><th>Admin</th><th>Status</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
 }
 
 async function loadQueue() {
@@ -228,6 +257,73 @@ el("add-mailbox-form").addEventListener("submit", async (event) => {
   } catch (err) {
     msg.textContent = err.message || "Failed to create mailbox.";
     msg.className = "message error";
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+el("mailboxes-table").addEventListener("click", async function(event) {
+  var btn = event.target.closest("button.mb-action");
+  if (!btn) return;
+  var action = btn.dataset.action;
+  var mailboxId = btn.dataset.mailboxId;
+  var email = btn.dataset.email;
+  if (!mailboxId) return;
+  btn.disabled = true;
+  try {
+    var csrfToken = await getCSRFToken();
+    if (action === "password") {
+      var newPassword = prompt("Reset password for " + email + "\n\nEnter new password (min 8 characters):");
+      if (!newPassword) return;
+      if (newPassword.length < 8) { showAlert("Password must be at least 8 characters."); btn.disabled = false; return; }
+      var res = await fetch("/api/v1/mailboxes/" + mailboxId + "/password", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + state.token, "X-CSRF-Token": csrfToken },
+        body: JSON.stringify({ password: newPassword })
+      });
+      if (!res.ok) {
+        var errBody = await res.json().catch(function() { return {}; });
+        throw new Error(errBody.error || "HTTP " + res.status);
+      }
+      showAlert("Password reset for " + email + ".");
+    } else if (action === "disable") {
+      if (!confirm("Disable mailbox " + email + "? The user will not be able to access their mailbox.")) return;
+      var res = await fetch("/api/v1/mailboxes/" + mailboxId + "/status", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + state.token, "X-CSRF-Token": csrfToken },
+        body: JSON.stringify({ status: "suspended" })
+      });
+      if (!res.ok) {
+        var errBody = await res.json().catch(function() { return {}; });
+        throw new Error(errBody.error || "HTTP " + res.status);
+      }
+      showAlert("Mailbox " + email + " disabled.");
+    } else if (action === "enable") {
+      var res = await fetch("/api/v1/mailboxes/" + mailboxId + "/status", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + state.token, "X-CSRF-Token": csrfToken },
+        body: JSON.stringify({ status: "active" })
+      });
+      if (!res.ok) {
+        var errBody = await res.json().catch(function() { return {}; });
+        throw new Error(errBody.error || "HTTP " + res.status);
+      }
+      showAlert("Mailbox " + email + " enabled.");
+    } else if (action === "delete") {
+      if (!confirm("Delete mailbox " + email + "? This action cannot be undone.")) return;
+      var res = await fetch("/api/v1/mailboxes/" + mailboxId, {
+        method: "DELETE",
+        headers: { "Authorization": "Bearer " + state.token, "X-CSRF-Token": csrfToken }
+      });
+      if (!res.ok) {
+        var errBody = await res.json().catch(function() { return {}; });
+        throw new Error(errBody.error || "HTTP " + res.status);
+      }
+      showAlert("Mailbox " + email + " deleted.");
+    }
+    await loadMailboxes();
+  } catch (err) {
+    showAlert(err.message || "Operation failed.");
   } finally {
     btn.disabled = false;
   }
