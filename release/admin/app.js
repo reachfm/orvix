@@ -142,13 +142,13 @@ async function loadQueue() {
   state.queue = await apiGet("/api/v1/queue", []);
   setText("queue-status", state.queue.length === 0 ? "Clear" : `${state.queue.length} queued`);
   setText("queue-note", state.queue.length === 0 ? "No queued messages reported." : "Queue entries require attention.");
-  renderTable("queue-table", state.queue, ["from", "to", "status"], "The delivery queue is empty.");
-  renderTable("queue-preview", state.queue.slice(0, 5), ["from", "to", "status"], "The delivery queue is empty.");
+  renderTable("queue-table", state.queue, ["id", "from", "to", "status", "attempts", "next_attempt_at", "created_at"], "No queued messages.");
+  renderTable("queue-preview", state.queue.slice(0, 5), ["id", "from", "to", "status", "attempts"], "No queued messages.");
 }
 
 async function loadLogs() {
   state.logs = await apiGet("/api/v1/audit/logs", []);
-  renderTable("logs-table", state.logs, ["action", "actor", "result"], "No audit log entries are available from the API.");
+  renderTable("logs-table", state.logs, ["action", "actor", "target", "result", "timestamp"], "No audit log entries.");
 }
 
 function renderTable(id, rows, columns, emptyText) {

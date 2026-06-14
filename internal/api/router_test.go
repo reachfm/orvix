@@ -242,6 +242,15 @@ func TestAdminListEndpointsReturnArraysAndBootstrapRows(t *testing.T) {
 	if len(queue) != 1 || queue[0]["from"] != "sender@test.local" || queue[0]["to"] != "admin@test.local" || queue[0]["status"] != "pending" {
 		t.Fatalf("expected queue entry with sender/recipient/status, got %s", queueBody)
 	}
+	if _, ok := queue[0]["id"]; !ok {
+		t.Fatalf("queue entry must include id field: %s", queueBody)
+	}
+	if _, ok := queue[0]["attempts"]; !ok {
+		t.Fatalf("queue entry must include attempts field: %s", queueBody)
+	}
+	if _, ok := queue[0]["message_id"]; !ok {
+		t.Fatalf("queue entry must include message_id field: %s", queueBody)
+	}
 }
 
 func TestAdminUIStaticRoutes(t *testing.T) {
@@ -378,17 +387,40 @@ func createAdminQueueFixture(t *testing.T, sqlDB *sql.DB, now string) {
 	t.Helper()
 	_, err := sqlDB.Exec(`CREATE TABLE IF NOT EXISTS coremail_queue (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		tenant_id INTEGER NOT NULL DEFAULT 0,
+		domain_id INTEGER NOT NULL DEFAULT 0,
+		mailbox_id INTEGER,
+		message_id TEXT NOT NULL DEFAULT '',
 		from_address TEXT NOT NULL DEFAULT '',
 		to_address TEXT NOT NULL DEFAULT '',
+		recipient_domain TEXT NOT NULL DEFAULT '',
+		direction TEXT NOT NULL DEFAULT 'outbound',
 		status TEXT NOT NULL DEFAULT 'pending',
+		priority INTEGER NOT NULL DEFAULT 0,
+		attempt_count INTEGER NOT NULL DEFAULT 0,
+		max_attempts INTEGER NOT NULL DEFAULT 16,
+		next_attempt_at DATETIME,
+		last_attempt_at DATETIME,
+		last_error TEXT NOT NULL DEFAULT '',
+		delivery_mode TEXT NOT NULL DEFAULT 'remote_smtp',
+		remote_host TEXT NOT NULL DEFAULT '',
+		remote_ip TEXT NOT NULL DEFAULT '',
+		tls_used INTEGER NOT NULL DEFAULT 0,
+		lease_owner TEXT NOT NULL DEFAULT '',
+		lease_expires_at DATETIME,
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL,
+		completed_at DATETIME,
+		dead_letter_at DATETIME,
 		deleted_at DATETIME
 	)`)
 	if err != nil {
 		t.Fatalf("create queue fixture: %v", err)
 	}
 	_, err = sqlDB.Exec(
-		`INSERT INTO coremail_queue (from_address, to_address, status, deleted_at)
-		 VALUES ('sender@test.local', 'admin@test.local', 'pending', NULL)`,
+		`INSERT INTO coremail_queue (message_id, from_address, to_address, status, attempt_count, next_attempt_at, created_at, updated_at, deleted_at)
+		 VALUES ('msg-001', 'sender@test.local', 'admin@test.local', 'pending', 1, ?, ?, ?, NULL)`,
+		now, now, now,
 	)
 	if err != nil {
 		t.Fatalf("insert queue fixture: %v", err)
@@ -1414,4 +1446,200 @@ func getAdminJSON(t *testing.T, router *Router, token, path string) []byte {
 		t.Fatalf("%s must return JSON array, got null", path)
 	}
 	return body
+}
+
+func TestQueueReturnsSafeFields(t *testing.T) {
+	logger := zap.NewNop()
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(t.TempDir(), "orvix.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	defer sqlDB.Close()
+	if err := models.MigrateAllRaw(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	authenticator, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+	hashedPwTest, _ := authenticator.HashPassword("TestPassword123!")
+	_, err = sqlDB.Exec(
+		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
+		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		now, now, hashedPwTest,
+	)
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	_, err = sqlDB.Exec(
+		`INSERT INTO coremail_domains (name, tenant_id, status, plan, created_at, updated_at)
+		 VALUES ('test.local', 1, 'active', 'enterprise', ?, ?)`,
+		now, now,
+	)
+	if err != nil {
+		t.Fatalf("insert domain: %v", err)
+	}
+	_, err = sqlDB.Exec(
+		`INSERT INTO coremail_mailboxes (domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme, status, quota_mb, is_admin, created_at, updated_at)
+		 VALUES (1, 1, 'admin', 'admin@test.local', 'Admin', ?, 'argon2id', 'active', 1024, 1, ?, ?)`,
+		"$argon2id$v=19$m=1024,t=1,p=1$c2FsdA$aGFzaA", now, now,
+	)
+	if err != nil {
+		t.Fatalf("insert mailbox: %v", err)
+	}
+	createAdminQueueFixture(t, sqlDB, now)
+	router := NewRouter(cfg, authenticator, logger, db, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
+	defer router.App().Shutdown()
+	token := loginForTest(t, router, "admin@test.local", "TestPassword123!")
+
+	t.Run("queue returns JSON array always", func(t *testing.T) {
+		body := getAdminJSON(t, router, token, "/api/v1/queue")
+		var queue []map[string]any
+		if err := json.Unmarshal(body, &queue); err != nil {
+			t.Fatalf("queue must be JSON array: %v: %s", err, body)
+		}
+	})
+
+	t.Run("queue returns safe fields", func(t *testing.T) {
+		body := getAdminJSON(t, router, token, "/api/v1/queue")
+		var queue []map[string]any
+		if err := json.Unmarshal(body, &queue); err != nil {
+			t.Fatalf("queue must be JSON array: %v: %s", err, body)
+		}
+		if len(queue) == 0 {
+			t.Fatalf("expected at least one queue entry")
+		}
+		entry := queue[0]
+		for _, key := range []string{"id", "from", "to", "status", "attempts", "message_id", "next_attempt_at", "created_at", "updated_at"} {
+			if _, ok := entry[key]; !ok {
+				t.Fatalf("queue entry must include %s: %v", key, entry)
+			}
+		}
+		for _, forbidden := range []string{"body", "headers", "password", "secret", "auth", "token", "hash"} {
+			if strings.Contains(string(body), forbidden) {
+				t.Fatalf("queue response must not expose %s: %s", forbidden, body)
+			}
+		}
+	})
+
+	t.Run("queue empty returns empty array not null", func(t *testing.T) {
+		_, err := sqlDB.Exec("DELETE FROM coremail_queue")
+		if err != nil {
+			t.Fatalf("clear queue: %v", err)
+		}
+		body := getAdminJSON(t, router, token, "/api/v1/queue")
+		if string(body) == "null" {
+			t.Fatalf("queue must return [] not null")
+		}
+		var queue []map[string]any
+		if err := json.Unmarshal(body, &queue); err != nil {
+			t.Fatalf("queue must be JSON array: %v: %s", err, body)
+		}
+		if len(queue) != 0 {
+			t.Fatalf("expected empty array, got %d entries", len(queue))
+		}
+	})
+}
+
+func TestAuditLogsReturnsSafeFields(t *testing.T) {
+	logger := zap.NewNop()
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(t.TempDir(), "orvix.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	defer sqlDB.Close()
+	if err := models.MigrateAllRaw(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	authenticator, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+	hashedPwAudit, _ := authenticator.HashPassword("TestPassword123!")
+	_, err = sqlDB.Exec(
+		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
+		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		now, now, hashedPwAudit,
+	)
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	router := NewRouter(cfg, authenticator, logger, db, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
+	defer router.App().Shutdown()
+	token := loginForTest(t, router, "admin@test.local", "TestPassword123!")
+
+	t.Run("audit logs returns JSON array always", func(t *testing.T) {
+		body := getAdminJSON(t, router, token, "/api/v1/audit/logs")
+		var logs []map[string]any
+		if err := json.Unmarshal(body, &logs); err != nil {
+			t.Fatalf("audit logs must be JSON array: %v: %s", err, body)
+		}
+	})
+
+	t.Run("audit logs empty returns empty array not null", func(t *testing.T) {
+		_, err := sqlDB.Exec("DELETE FROM coremail_audit")
+		if err != nil {
+			t.Fatalf("clear audit: %v", err)
+		}
+		body := getAdminJSON(t, router, token, "/api/v1/audit/logs")
+		if string(body) == "null" {
+			t.Fatalf("audit logs must return [] not null")
+		}
+		var logs []map[string]any
+		if err := json.Unmarshal(body, &logs); err != nil {
+			t.Fatalf("audit logs must be JSON array: %v: %s", err, body)
+		}
+	})
+
+	t.Run("audit logs does not expose secrets", func(t *testing.T) {
+		_, err := sqlDB.Exec(
+			`INSERT INTO coremail_audit (actor, role, action, target, result, ip, user_agent, timestamp)
+			 VALUES ('user:1', 'admin', 'domain.create', 'domain:example.com', 'success', '127.0.0.1', 'test-agent', ?)`,
+			time.Now().UTC().Format("2006-01-02 15:04:05"),
+		)
+		if err != nil {
+			t.Fatalf("insert audit: %v", err)
+		}
+		body := getAdminJSON(t, router, token, "/api/v1/audit/logs")
+		for _, forbidden := range []string{"password", "secret", "hash", "token", "bearer"} {
+			if strings.Contains(strings.ToLower(string(body)), forbidden) {
+				t.Fatalf("audit logs must not expose %s: %s", forbidden, body)
+			}
+		}
+		var logs []map[string]any
+		if err := json.Unmarshal(body, &logs); err != nil {
+			t.Fatalf("audit logs must be JSON array: %v: %s", err, body)
+		}
+		if len(logs) == 0 {
+			t.Fatalf("expected at least one audit log entry")
+		}
+		entry := logs[0]
+		for _, key := range []string{"id", "action", "actor", "target", "result", "timestamp"} {
+			if _, ok := entry[key]; !ok {
+				t.Fatalf("audit log entry must include %s: %v", key, entry)
+			}
+		}
+		if _, ok := entry["ip"]; ok {
+			t.Fatalf("audit log entry must not expose ip field: %v", entry)
+		}
+		if _, ok := entry["userAgent"]; ok {
+			t.Fatalf("audit log entry must not expose userAgent field: %v", entry)
+		}
+	})
 }

@@ -974,43 +974,81 @@ func (h *Handler) DeleteUser(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"status": "deleted"})
 }
 
-// ListQueue returns the mail queue.
+// ListQueue returns the mail queue with safe fields only.
 func (h *Handler) ListQueue(c fiber.Ctx) error {
-	var messages []struct {
-		ID     uint   `json:"id"`
-		From   string `json:"from"`
-		To     string `json:"to"`
-		Status string `json:"status"`
-	}
-	sqlDB, err := h.db.DB()
-	if err == nil {
-		rows, err := sqlDB.Query("SELECT id, from_address, to_address, status FROM coremail_queue WHERE deleted_at IS NULL ORDER BY id DESC LIMIT 200")
-		if err == nil {
-			defer rows.Close()
-			for rows.Next() {
-				var msg struct {
-					ID     uint   `json:"id"`
-					From   string `json:"from"`
-					To     string `json:"to"`
-					Status string `json:"status"`
-				}
-				if err := rows.Scan(&msg.ID, &msg.From, &msg.To, &msg.Status); err != nil {
-					continue
-				}
-				messages = append(messages, msg)
-			}
-		}
-	}
 	type queueEntry struct {
-		ID     uint   `json:"id"`
-		From   string `json:"from"`
-		To     string `json:"to"`
-		Status string `json:"status"`
+		ID           uint   `json:"id"`
+		MessageID    string `json:"message_id"`
+		From         string `json:"from"`
+		To           string `json:"to"`
+		Status       string `json:"status"`
+		Attempts     int    `json:"attempts"`
+		NextAttempt  string `json:"next_attempt_at"`
+		CreatedAt    string `json:"created_at"`
+		UpdatedAt    string `json:"updated_at"`
 	}
-	result := make([]queueEntry, 0, len(messages))
-	for _, m := range messages {
-		result = append(result, queueEntry{ID: m.ID, From: m.From, To: m.To, Status: m.Status})
+	var result []queueEntry
+
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return c.JSON([]queueEntry{})
 	}
+
+	type rawQueue struct {
+		ID           uint
+		MessageID    sql.NullString
+		FromAddress  string
+		ToAddress    string
+		Status       string
+		AttemptCount int
+		NextAttempt  sql.NullString
+		CreatedAt    sql.NullString
+		UpdatedAt    sql.NullString
+	}
+	var raw []rawQueue
+	rows, err := sqlDB.Query("SELECT id, message_id, from_address, to_address, status, attempt_count, next_attempt_at, created_at, updated_at FROM coremail_queue WHERE deleted_at IS NULL ORDER BY id DESC LIMIT 200")
+	if err != nil {
+		return c.JSON([]queueEntry{})
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var r rawQueue
+		if err := rows.Scan(&r.ID, &r.MessageID, &r.FromAddress, &r.ToAddress, &r.Status, &r.AttemptCount, &r.NextAttempt, &r.CreatedAt, &r.UpdatedAt); err != nil {
+			continue
+		}
+		raw = append(raw, r)
+	}
+
+	for _, r := range raw {
+		msgID := ""
+		if r.MessageID.Valid {
+			msgID = r.MessageID.String
+		}
+		nextAtt := ""
+		if r.NextAttempt.Valid {
+			nextAtt = r.NextAttempt.String
+		}
+		createdAt := ""
+		if r.CreatedAt.Valid {
+			createdAt = r.CreatedAt.String
+		}
+		updatedAt := ""
+		if r.UpdatedAt.Valid {
+			updatedAt = r.UpdatedAt.String
+		}
+		result = append(result, queueEntry{
+			ID:          r.ID,
+			MessageID:   msgID,
+			From:        r.FromAddress,
+			To:          r.ToAddress,
+			Status:      r.Status,
+			Attempts:    r.AttemptCount,
+			NextAttempt: nextAtt,
+			CreatedAt:   createdAt,
+			UpdatedAt:   updatedAt,
+		})
+	}
+
 	if result == nil {
 		result = []queueEntry{}
 	}
@@ -1117,17 +1155,39 @@ func (h *Handler) ValidateLicense(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"status": "valid", "tier": lic.Tier, "expires_at": lic.ExpiresAt})
 }
 
-// ListAuditLogs returns audit log entries.
+// ListAuditLogs returns audit log entries with safe fields only.
 func (h *Handler) ListAuditLogs(c fiber.Ctx) error {
 	if h.auditStore == nil {
-		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "audit store unavailable"})
+		return c.JSON([]struct{}{})
 	}
 	logs, _, err := h.auditStore.Search(c.Context(), &audit.Query{Limit: 100})
 	if err != nil {
 		h.logger.Error("failed to list audit logs", zap.Error(err))
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list audit logs"})
+		return c.JSON([]struct{}{})
 	}
-	return c.JSON(logs)
+	type safeEntry struct {
+		ID        int64  `json:"id"`
+		Action    string `json:"action"`
+		Actor     string `json:"actor"`
+		Target    string `json:"target"`
+		Result    string `json:"result"`
+		Timestamp string `json:"timestamp"`
+	}
+	var result []safeEntry
+	for _, e := range logs {
+		result = append(result, safeEntry{
+			ID:        e.ID,
+			Action:    e.Action,
+			Actor:     e.Actor,
+			Target:    e.Target,
+			Result:    e.Result,
+			Timestamp: e.Timestamp.Format(time.RFC3339),
+		})
+	}
+	if result == nil {
+		result = []safeEntry{}
+	}
+	return c.JSON(result)
 }
 
 // ListFeatureFlags returns all feature flags.
