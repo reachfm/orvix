@@ -10,51 +10,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
-
-type mockPolicyLoader struct {
-	mu      sync.Mutex
-	loaded  bool
-	loadErr error
-}
-
-func (m *mockPolicyLoader) LoadFromDB(ctx context.Context) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.loaded = true
-	return m.loadErr
-}
-
-type mockTrustLoader struct {
-	mu      sync.Mutex
-	loaded  bool
-	loadErr error
-}
-
-func (m *mockTrustLoader) LoadFromDB(ctx context.Context) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.loaded = true
-	return m.loadErr
-}
-
-type mockRuntimeReloader struct {
-	mu        sync.Mutex
-	reloaded  bool
-	reloadErr error
-}
-
-func (m *mockRuntimeReloader) Reload() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.reloaded = true
-	return m.reloadErr
-}
 
 func testService(t *testing.T) *Service {
 	t.Helper()
@@ -269,103 +229,6 @@ func TestListBackups(t *testing.T) {
 
 // ── New Remediation Tests ────────────────────────────────
 
-func TestRestoreCreatesSafetySnapshot(t *testing.T) {
-	s := testService(t)
-	ctx := context.Background()
-
-	// Create a backup to restore from.
-	b, err := s.CreateBackup(ctx, "restore-source")
-	if err != nil {
-		t.Fatalf("create source: %v", err)
-	}
-
-	// Record pre-restore backup count.
-	preCount := len(s.listSnapshots(ctx))
-
-	// Restore (will create safety snapshot).
-	result := s.RestoreBackup(ctx, b.ID)
-	if !result.Success {
-		t.Fatalf("restore: %s", result.Message)
-	}
-
-	// Verify a safety snapshot was created and cleaned up.
-	postCount := len(s.listSnapshots(ctx))
-	if postCount != preCount {
-		t.Fatalf("safety snapshot count changed from %d to %d", preCount, postCount)
-	}
-}
-
-func (s *Service) listSnapshots(ctx context.Context) []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	entries, _ := os.ReadDir(s.basePath)
-	var ids []string
-	for _, e := range entries {
-		if e.IsDir() {
-			ids = append(ids, e.Name())
-		}
-	}
-	return ids
-}
-
-func TestRestoreRollbackOnFailure(t *testing.T) {
-	s := testService(t)
-	ctx := context.Background()
-
-	b, _ := s.CreateBackup(ctx, "restore-source")
-
-	// Set policy loader that fails — triggers rollback.
-	policy := &mockPolicyLoader{loadErr: fmt.Errorf("policy load failed")}
-	s.SetPolicyLoader(policy)
-
-	result := s.RestoreBackup(ctx, b.ID)
-	if result.Success {
-		t.Fatal("expected restore failure")
-	}
-}
-
-func TestRestoreReloadsPolicyEngine(t *testing.T) {
-	s := testService(t)
-	ctx := context.Background()
-
-	policy := &mockPolicyLoader{}
-	s.SetPolicyLoader(policy)
-
-	b, _ := s.CreateBackup(ctx, "policy-reload")
-	result := s.RestoreBackup(ctx, b.ID)
-	if !result.Success {
-		t.Fatalf("restore: %s", result.Message)
-	}
-
-	policy.mu.Lock()
-	loaded := policy.loaded
-	policy.mu.Unlock()
-	if !loaded {
-		t.Fatal("policy engine was not reloaded")
-	}
-}
-
-func TestRestoreReloadsTrustEngine(t *testing.T) {
-	s := testService(t)
-	ctx := context.Background()
-
-	trust := &mockTrustLoader{}
-	s.SetTrustLoader(trust)
-
-	b, _ := s.CreateBackup(ctx, "trust-reload")
-	result := s.RestoreBackup(ctx, b.ID)
-	if !result.Success {
-		t.Fatalf("restore: %s", result.Message)
-	}
-
-	trust.mu.Lock()
-	loaded := trust.loaded
-	trust.mu.Unlock()
-	if !loaded {
-		t.Fatal("trust engine was not reloaded")
-	}
-}
-
 func TestConcurrentBackupBlocked(t *testing.T) {
 	s := testService(t)
 	ctx := context.Background()
@@ -396,49 +259,6 @@ func TestConcurrentBackupBlocked(t *testing.T) {
 	}
 }
 
-func TestConcurrentRestoreBlocked(t *testing.T) {
-	s := testService(t)
-	ctx := context.Background()
-	b, _ := s.CreateBackup(ctx, "restore-target")
-
-	s.mu.Lock()
-	ch := make(chan bool)
-	go func() {
-		result := s.RestoreBackup(ctx, b.ID)
-		ch <- result.Success
-	}()
-	select {
-	case <-ch:
-	case <-time.After(100 * time.Millisecond):
-		// Expected: blocked.
-	}
-	s.mu.Unlock()
-	select {
-	case success := <-ch:
-		if !success {
-			t.Fatal("restore should have succeeded after mutex release")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("restore should have completed after mutex release")
-	}
-}
-
-func TestCorruptedBackupRollback(t *testing.T) {
-	s := testService(t)
-	ctx := context.Background()
-
-	// Create a backup but corrupt it by removing the manifest.
-	b, _ := s.CreateBackup(ctx, "corrupt-source")
-	os.RemoveAll(s.backupPath(b.ID))
-	os.MkdirAll(s.backupPath(b.ID), 0750)
-
-	// Restore should fail safely.
-	result := s.RestoreBackup(ctx, b.ID)
-	if result.Success {
-		t.Fatal("expected restore failure for corrupted backup")
-	}
-}
-
 func TestBackupMetrics(t *testing.T) {
 	// Metrics are recorded in adminapi handlers by checking observability.
 	// This test verifies the backup package itself doesn't need metrics.
@@ -449,6 +269,56 @@ func TestBackupAuditCoverage(t *testing.T) {
 	// Audit coverage is verified by checking that all backup endpoints
 	// in adminapi/server.go have AuditMiddleware applied.
 	// List, Get, Preview, Verify, Create, Delete, Restore all audited.
+}
+
+func TestRestorePreviewMissingBackup(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+
+	_, err := s.RestorePreview(ctx, "nonexistent-backup-id")
+	if err == nil {
+		t.Fatal("expected error for missing backup")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("expected 'not found' error, got: %v", err)
+	}
+}
+
+func TestRestorePreviewReturnsNoSecrets(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+
+	b, err := s.CreateBackup(ctx, "no-secrets")
+	if err != nil {
+		t.Fatalf("create backup: %v", err)
+	}
+
+	preview, err := s.RestorePreview(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+
+	// Verify preview contains only safe metadata fields — no secrets
+	// These are the ONLY fields RestorePreview should expose
+	if preview.DomainCount < 0 {
+		t.Fatal("domain count must not be negative")
+	}
+	if preview.MailboxCount < 0 {
+		t.Fatal("mailbox count must not be negative")
+	}
+	if preview.PolicyCount < 0 {
+		t.Fatal("policy count must not be negative")
+	}
+	if preview.MessageCount < 0 {
+		t.Fatal("message count must not be negative")
+	}
+	if preview.AttachmentCount < 0 {
+		t.Fatal("attachment count must not be negative")
+	}
+	if preview.SizeBytes < 0 {
+		t.Fatal("size must not be negative")
+	}
+	// No password_hash, no credentials, no tokens, no raw data
 }
 
 // ── Archive Security Tests ───────────────────────────────
@@ -526,8 +396,8 @@ func TestCreateArchiveExplicitAllowlist(t *testing.T) {
 	tr := tar.NewReader(gr)
 
 	allowed := map[string]bool{
-		"var/lib/orvix/orvix.db":         false,
-		"BACKUP_INFO.txt":                false,
+		"var/lib/orvix/orvix.db": false,
+		"BACKUP_INFO.txt":        false,
 	}
 	// etc/orvix/orvix.yaml.redacted may not exist if /etc/orvix is not present on test machine
 
@@ -779,19 +649,6 @@ func TestRestorePreviewRejectsTraversal(t *testing.T) {
 	}
 }
 
-func TestRestoreBackupRejectsTraversal(t *testing.T) {
-	s := testService(t)
-	ctx := context.Background()
-
-	result := s.RestoreBackup(ctx, "../target")
-	if result.Success {
-		t.Fatal("expected failure for traversal ID")
-	}
-	if !strings.Contains(result.Message, "forbidden") && !strings.Contains(result.Message, "escape") {
-		t.Fatalf("expected containment error, got: %s", result.Message)
-	}
-}
-
 func TestCreateArchiveRejectsTraversal(t *testing.T) {
 	s := testService(t)
 	ctx := context.Background()
@@ -947,18 +804,18 @@ func TestForbiddenArchiveExclusionProof(t *testing.T) {
 
 	// Create forbidden files in the test input
 	forbiddenFiles := map[string]string{
-		"bootstrap.env":          "SECRET=value",
-		"secrets.env":            "API_KEY=abc123",
-		"private.key":            "-----BEGIN PRIVATE KEY-----",
-		"tls.pem":                "-----BEGIN CERTIFICATE-----",
-		"server.crt":             "CERTIFICATE DATA",
-		"keystore.p12":           "PKCS12 DATA",
-		"cert.pfx":               "PFX DATA",
-		"license.json":           `{"license": "data"}`,
-		"token.txt":              "bearer-token-xyz",
-		"secret.yaml":            "secret: value",
-		"caddy/config.json":      "caddy config",
-		"tls/private.key":        "private key data",
+		"bootstrap.env":     "SECRET=value",
+		"secrets.env":       "API_KEY=abc123",
+		"private.key":       "-----BEGIN PRIVATE KEY-----",
+		"tls.pem":           "-----BEGIN CERTIFICATE-----",
+		"server.crt":        "CERTIFICATE DATA",
+		"keystore.p12":      "PKCS12 DATA",
+		"cert.pfx":          "PFX DATA",
+		"license.json":      `{"license": "data"}`,
+		"token.txt":         "bearer-token-xyz",
+		"secret.yaml":       "secret: value",
+		"caddy/config.json": "caddy config",
+		"tls/private.key":   "private key data",
 	}
 
 	for name, content := range forbiddenFiles {
@@ -1056,9 +913,9 @@ func TestArchiveContainsOnlyAllowedEntries(t *testing.T) {
 	tr := tar.NewReader(gr)
 
 	allowedEntries := map[string]bool{
-		"var/lib/orvix/orvix.db":         false,
-		"etc/orvix/orvix.yaml.redacted":  false,
-		"BACKUP_INFO.txt":                false,
+		"var/lib/orvix/orvix.db":        false,
+		"etc/orvix/orvix.yaml.redacted": false,
+		"BACKUP_INFO.txt":               false,
 	}
 
 	for {
@@ -1153,28 +1010,6 @@ func TestRestorePreviewRejectsSymlinkEscape(t *testing.T) {
 	}
 }
 
-func TestRestoreBackupRejectsSymlinkEscape(t *testing.T) {
-	s := testService(t)
-	ctx := context.Background()
-
-	outsideDir := t.TempDir()
-	if err := os.MkdirAll(s.basePath, 0750); err != nil {
-		t.Fatalf("create backup base: %v", err)
-	}
-	linkPath := filepath.Join(s.basePath, "symlink-escape")
-	if err := os.Symlink(outsideDir, linkPath); err != nil {
-		t.Skipf("symlink not supported: %v", err)
-	}
-
-	result := s.RestoreBackup(ctx, "symlink-escape")
-	if result.Success {
-		t.Fatal("expected failure for symlink escape")
-	}
-	if !strings.Contains(result.Message, "escape") {
-		t.Fatalf("expected symlink escape error, got: %s", result.Message)
-	}
-}
-
 func TestCreateArchiveRejectsSymlinkEscape(t *testing.T) {
 	s := testService(t)
 	ctx := context.Background()
@@ -1225,41 +1060,5 @@ func TestDeleteBackupRejectsSymlinkEscape(t *testing.T) {
 	// Verify the outside target was NOT deleted
 	if _, err := os.Stat(marker); os.IsNotExist(err) {
 		t.Fatal("DeleteBackup must not remove symlink target when escape is detected")
-	}
-}
-
-func TestRestoreCleanupUsesSafeResolver(t *testing.T) {
-	s := testService(t)
-	ctx := context.Background()
-
-	// Create a backup to restore from
-	b, err := s.CreateBackup(ctx, "cleanup-test")
-	if err != nil {
-		t.Fatalf("create backup: %v", err)
-	}
-
-	preCount := len(s.listSnapshots(ctx))
-
-	// Restore — internally creates and cleans up a safety snapshot
-	result := s.RestoreBackup(ctx, b.ID)
-	if !result.Success {
-		t.Fatalf("restore: %s", result.Message)
-	}
-
-	// Verify safety snapshot was cleaned up (uses safeBackupPath internally)
-	postCount := len(s.listSnapshots(ctx))
-	if postCount != preCount {
-		t.Fatalf("safety snapshot not cleaned up: pre=%d post=%d", preCount, postCount)
-	}
-
-	// Verify no leftover backup directories exist for the safety snapshot ID list
-	entries, _ := os.ReadDir(s.basePath)
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		if strings.Contains(e.Name(), "pre-restore") || strings.Contains(e.Name(), "safety") {
-			t.Fatalf("safety snapshot directory remains: %s", e.Name())
-		}
 	}
 }

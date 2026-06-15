@@ -19,21 +19,6 @@ import (
 	"time"
 )
 
-// PolicyLoader allows reloading policy engine from DB.
-type PolicyLoader interface {
-	LoadFromDB(ctx context.Context) error
-}
-
-// TrustLoader allows reloading trust engine from DB.
-type TrustLoader interface {
-	LoadFromDB(ctx context.Context) error
-}
-
-// RuntimeReloader allows reloading runtime after restore.
-type RuntimeReloader interface {
-	Reload() error
-}
-
 // Service provides backup and restore operations.
 type Service struct {
 	basePath    string
@@ -43,10 +28,7 @@ type Service struct {
 	attachDir   string
 	configPath  string
 
-	mu      sync.Mutex
-	policy  PolicyLoader
-	trust   TrustLoader
-	runtime RuntimeReloader
+	mu sync.Mutex
 }
 
 // NewService creates a backup service.
@@ -59,15 +41,6 @@ func NewService(basePath string, db, mailStoreDB *sql.DB, mailDir, attachDir str
 		attachDir:   attachDir,
 	}
 }
-
-// SetPolicyLoader attaches a policy engine for reload after restore.
-func (s *Service) SetPolicyLoader(p PolicyLoader) { s.policy = p }
-
-// SetTrustLoader attaches a trust engine for reload after restore.
-func (s *Service) SetTrustLoader(t TrustLoader) { s.trust = t }
-
-// SetRuntimeReloader attaches a runtime for reload after restore.
-func (s *Service) SetRuntimeReloader(r RuntimeReloader) { s.runtime = r }
 
 // SetConfigPath sets the path to the config file for backup archives.
 // Defaults to /etc/orvix/orvix.yaml in production.
@@ -88,6 +61,7 @@ func (s *Service) backupPath(id string) string { return filepath.Join(s.basePath
 // Uses EvalSymlinks to prevent symlink escape:
 //   - If the candidate path exists, its real path is resolved and checked.
 //   - If the candidate path does not exist, an Abs+prefix check is used.
+//
 // Returns the real (symlink-resolved) path inside basePath.
 func (s *Service) safeBackupPath(id string) (string, error) {
 	if id == "" {
@@ -412,117 +386,6 @@ func (s *Service) RestorePreview(ctx context.Context, id string) (*RestorePrevie
 		PolicyCount: manifest.PolicyCount, MessageCount: manifest.MessageCount,
 		AttachmentCount: manifest.AttachmentCount, SizeBytes: manifest.SizeBytes,
 	}, nil
-}
-
-// ── Restore Backup (with safety snapshot and rollback) ───
-
-func (s *Service) RestoreBackup(ctx context.Context, id string) *RestoreResult {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.restoreBackupLocked(ctx, id)
-}
-
-func (s *Service) restoreBackupLocked(ctx context.Context, id string) (res *RestoreResult) {
-	bp, err := s.safeBackupPath(id)
-	if err != nil {
-		return &RestoreResult{Success: false, Message: err.Error()}
-	}
-	if _, err := os.Stat(bp); os.IsNotExist(err) {
-		return &RestoreResult{Success: false, Message: "backup not found"}
-	}
-	dbPath := filepath.Join(bp, "database.sqlite")
-	mailPath := filepath.Join(bp, "mailstore.tar.gz")
-	attPath := filepath.Join(bp, "attachments.tar.gz")
-
-	// Create safety snapshot before restore.
-	safetyID, err := s.createSafetySnapshot(ctx)
-	if err != nil {
-		return &RestoreResult{Success: false, Message: fmt.Sprintf("safety snapshot failed: %v", err)}
-	}
-	rollback := func(msg string) *RestoreResult {
-		// Attempt to rollback by restoring the safety snapshot.
-		s.restoreSafetySnapshot(ctx, safetyID)
-		return &RestoreResult{Success: false, Message: msg}
-	}
-
-	// Validate required files.
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		return rollback("database.sqlite not found in backup")
-	}
-
-	// Restore mailstore.
-	if _, err := os.Stat(mailPath); err == nil {
-		if err := extractTarGz(mailPath, s.mailDir); err != nil {
-			return rollback(fmt.Sprintf("mailstore restore: %v", err))
-		}
-	}
-
-	// Restore attachments.
-	if _, err := os.Stat(attPath); err == nil {
-		if err := extractTarGz(attPath, s.attachDir); err != nil {
-			return rollback(fmt.Sprintf("attachments restore: %v", err))
-		}
-	}
-
-	// Reload policy engine.
-	if s.policy != nil {
-		if err := s.policy.LoadFromDB(ctx); err != nil {
-			return rollback(fmt.Sprintf("policy reload: %v", err))
-		}
-	}
-
-	// Reload trust engine.
-	if s.trust != nil {
-		if err := s.trust.LoadFromDB(ctx); err != nil {
-			return rollback(fmt.Sprintf("trust reload: %v", err))
-		}
-	}
-
-	// Reload runtime.
-	if s.runtime != nil {
-		if err := s.runtime.Reload(); err != nil {
-			return rollback(fmt.Sprintf("runtime reload: %v", err))
-		}
-	}
-
-	// Clean up safety snapshot using safe path.
-	if snapPath, err := s.safeBackupPath(safetyID); err == nil {
-		os.RemoveAll(snapPath)
-	}
-
-	return &RestoreResult{Success: true, Message: "restore completed"}
-}
-
-// createSafetySnapshot creates a backup of the current state before restore.
-func (s *Service) createSafetySnapshot(ctx context.Context) (string, error) {
-	backup, err := s.createBackupLocked(ctx, "pre-restore-safety-snapshot")
-	if err != nil {
-		return "", err
-	}
-	return backup.ID, nil
-}
-
-// restoreSafetySnapshot restores from a safety snapshot.
-func (s *Service) restoreSafetySnapshot(ctx context.Context, id string) {
-	bp, err := s.safeBackupPath(id)
-	if err != nil {
-		return
-	}
-	mailPath := filepath.Join(bp, "mailstore.tar.gz")
-	attPath := filepath.Join(bp, "attachments.tar.gz")
-
-	if _, err := os.Stat(mailPath); err == nil {
-		extractTarGz(mailPath, s.mailDir)
-	}
-	if _, err := os.Stat(attPath); err == nil {
-		extractTarGz(attPath, s.attachDir)
-	}
-	if s.policy != nil {
-		s.policy.LoadFromDB(ctx)
-	}
-	if s.trust != nil {
-		s.trust.LoadFromDB(ctx)
-	}
 }
 
 // ── Helpers ──────────────────────────────────────────────

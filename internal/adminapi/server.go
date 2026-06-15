@@ -47,10 +47,10 @@ type Server struct {
 	ComplianceService *compliance.Service
 	MonitoringService *monitoring.Service
 	LifecycleService  *lifecycle.Service
-	MigrationService   *migration.Service
-	LicensingService   *licensing.Service
-	AuthorityService   *licensingauthority.AuthorityService
-	AuditStore         *audit.Store
+	MigrationService  *migration.Service
+	LicensingService  *licensing.Service
+	AuthorityService  *licensingauthority.AuthorityService
+	AuditStore        *audit.Store
 	AllowedOrigins    []string
 	mux               *http.ServeMux
 	srv               *http.Server
@@ -110,15 +110,23 @@ func (s *Server) SetLicensingService(ls *licensing.Service) {
 	if ls != nil {
 		enf := licensing.NewEnforcementService(ls,
 			func(ctx context.Context) (int64, error) {
-				if s.DomainRegistry == nil { return 0, nil }
+				if s.DomainRegistry == nil {
+					return 0, nil
+				}
 				domains, err := s.DomainRegistry.ListDomains(ctx)
-				if err != nil { return 0, err }
+				if err != nil {
+					return 0, err
+				}
 				return int64(len(domains)), nil
 			},
 			func(ctx context.Context) (int64, error) {
-				if s.MailboxService == nil { return 0, nil }
+				if s.MailboxService == nil {
+					return 0, nil
+				}
 				mbs, err := s.MailboxService.ListMailboxes(ctx, nil)
-				if err != nil { return 0, err }
+				if err != nil {
+					return 0, err
+				}
 				return int64(len(mbs)), nil
 			},
 		)
@@ -383,7 +391,7 @@ func (s *Server) registerRoutes() {
 			case strings.HasSuffix(path, "/preview"):
 				s.RequirePermission(PermBackupRead)(s.AuditMiddleware(AuditBackupViewed)(http.HandlerFunc(s.handleBackupPreview))).ServeHTTP(rw, r)
 			case strings.HasSuffix(path, "/restore"):
-				s.RequirePermission(PermBackupWrite)(s.AuditMiddleware(AuditBackupRestored)(http.HandlerFunc(s.handleBackupRestore))).ServeHTTP(rw, r)
+				s.RequirePermission(PermBackupWrite)(s.AuditMiddleware(AuditBackupRestoreRejected)(http.HandlerFunc(s.handleBackupRestore))).ServeHTTP(rw, r)
 			case r.Method == "GET":
 				s.RequirePermission(PermBackupRead)(s.AuditMiddleware(AuditBackupViewed)(http.HandlerFunc(s.handleBackupGet))).ServeHTTP(rw, r)
 			case r.Method == "DELETE":
@@ -798,25 +806,7 @@ func (s *Server) handleBackupPreview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
-	if s.BackupService == nil {
-		jsonError(w, "backup not available", 503)
-		return
-	}
-	id := extractBackupID(r.URL.Path)
-	result := s.BackupService.RestoreBackup(r.Context(), id)
-	if !result.Success {
-		if s.Observability != nil {
-			s.Observability.EventHistory.Record("backup_restore_failed", map[string]string{"id": id, "error": result.Message})
-			s.Observability.Metrics.IncBackupsFailed()
-		}
-		jsonError(w, result.Message, 500)
-		return
-	}
-	if s.Observability != nil {
-		s.Observability.EventHistory.Record("backup_restored", map[string]string{"id": id})
-		s.Observability.Metrics.IncBackupsRestored()
-	}
-	jsonOK(w, result)
+	jsonError(w, "restore execution requires offline maintenance mode and is not available in the running API", http.StatusNotImplemented)
 }
 
 func extractBackupID(path string) string {
@@ -1204,9 +1194,9 @@ func (s *Server) handleLicensingStatus(w http.ResponseWriter, r *http.Request) {
 	if s.LicensingService == nil {
 		jsonOK(w, map[string]interface{}{
 			"edition": "community", "valid": false,
-			"machineId": licensing.GenerateMachineID(),
-			"limits":    map[string]interface{}{"domains": 1, "mailboxes": 5, "storageGB": 1},
-			"usage":     map[string]interface{}{},
+			"machineId":  licensing.GenerateMachineID(),
+			"limits":     map[string]interface{}{"domains": 1, "mailboxes": 5, "storageGB": 1},
+			"usage":      map[string]interface{}{},
 			"graceState": "valid", "daysRemaining": -1, "features": []string{},
 		})
 		return
@@ -1214,15 +1204,23 @@ func (s *Server) handleLicensingStatus(w http.ResponseWriter, r *http.Request) {
 
 	usage := s.LicensingService.StatusWithUsage(r.Context(),
 		func(ctx context.Context) (int64, error) {
-			if s.DomainRegistry == nil { return 0, nil }
+			if s.DomainRegistry == nil {
+				return 0, nil
+			}
 			domains, err := s.DomainRegistry.ListDomains(ctx)
-			if err != nil { return 0, err }
+			if err != nil {
+				return 0, err
+			}
 			return int64(len(domains)), nil
 		},
 		func(ctx context.Context) (int64, error) {
-			if s.MailboxService == nil { return 0, nil }
+			if s.MailboxService == nil {
+				return 0, nil
+			}
 			mbs, err := s.MailboxService.ListMailboxes(ctx, nil)
-			if err != nil { return 0, err }
+			if err != nil {
+				return 0, err
+			}
 			return int64(len(mbs)), nil
 		},
 	)
@@ -1306,11 +1304,21 @@ func (s *Server) handleLicensingValidate(w http.ResponseWriter, r *http.Request)
 
 	status := s.LicensingService.LoadLicense(r.Context())
 	jsonOK(w, map[string]interface{}{
-		"valid":      status.Valid,
-		"edition":    string(status.Edition),
-		"machineId":  status.MachineID,
-		"errors":     func() []string { if status.Validation != nil { return status.Validation.Errors }; return nil }(),
-		"warnings":   func() []string { if status.Validation != nil { return status.Validation.Warnings }; return nil }(),
+		"valid":     status.Valid,
+		"edition":   string(status.Edition),
+		"machineId": status.MachineID,
+		"errors": func() []string {
+			if status.Validation != nil {
+				return status.Validation.Errors
+			}
+			return nil
+		}(),
+		"warnings": func() []string {
+			if status.Validation != nil {
+				return status.Validation.Warnings
+			}
+			return nil
+		}(),
 	})
 }
 
