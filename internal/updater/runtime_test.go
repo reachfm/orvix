@@ -4,11 +4,21 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 // helper: build a RuntimeService bound to an in-memory SQLite DB and
 // a fresh temp dir as the workspace root.
@@ -55,6 +65,144 @@ func TestStatusUpdateAvailableFalseByDefault(t *testing.T) {
 	st, _ := svc.Status(context.Background())
 	if st.UpdateAvailable {
 		t.Error("UpdateAvailable must be false when no check has run")
+	}
+}
+
+func TestCheckManifestUpdateAvailable(t *testing.T) {
+	svc, _ := newService(t)
+	SetBuildInfo(BuildInfo{Version: "1.0.0", SHA: "aaaaaaaaaaaa", BuildTime: "test"})
+	restore := stubUpdateFeed(t, http.StatusOK, `{"version":"1.1.0","git_sha":"bbbbbbbbbbbbbbbb","channel":"stable","release_date":"2026-06-15","release_notes":["Security fixes","Admin polish"],"minimum_supported_version":"1.0.0"}`)
+	defer restore()
+	result, err := svc.CheckManifest(context.Background(), "https://updates.example/orvix.json")
+	if err != nil {
+		t.Fatalf("check manifest: %v", err)
+	}
+	if !result.UpdateAvailable {
+		t.Fatal("expected update available")
+	}
+	if result.LatestVersion != "1.1.0" || result.LatestSHA != "bbbbbbbbbbbb" {
+		t.Fatalf("unexpected latest fields: %+v", result)
+	}
+	if len(result.ReleaseNotes) != 2 || result.ReleaseNotes[0] != "Security fixes" {
+		t.Fatalf("release notes not preserved: %+v", result.ReleaseNotes)
+	}
+}
+
+func TestCheckManifestNoUpdateAvailable(t *testing.T) {
+	svc, _ := newService(t)
+	SetBuildInfo(BuildInfo{Version: "1.0.0", SHA: "aaaaaaaaaaaa", BuildTime: "test"})
+	restore := stubUpdateFeed(t, http.StatusOK, `{"version":"1.0.0","git_sha":"aaaaaaaaaaaa","channel":"stable","release_date":"2026-06-15","release_notes":["Current"],"minimum_supported_version":"1.0.0"}`)
+	defer restore()
+	result, err := svc.CheckManifest(context.Background(), "https://updates.example/orvix.json")
+	if err != nil {
+		t.Fatalf("check manifest: %v", err)
+	}
+	if result.UpdateAvailable {
+		t.Fatalf("expected no update available: %+v", result)
+	}
+}
+
+func TestCheckManifestMissingFeedURL(t *testing.T) {
+	svc, _ := newService(t)
+	SetBuildInfo(BuildInfo{Version: "1.0.0", SHA: "aaaaaaaaaaaa", BuildTime: "test"})
+	result, err := svc.CheckManifest(context.Background(), "")
+	if err != nil {
+		t.Fatalf("missing feed should not error: %v", err)
+	}
+	if result.Message != "update check not configured" {
+		t.Fatalf("message = %q", result.Message)
+	}
+}
+
+func TestCheckManifestInvalidFeedResponse(t *testing.T) {
+	svc, _ := newService(t)
+	restore := stubUpdateFeed(t, http.StatusOK, `{"version":"","git_sha":"","channel":"stable","release_notes":[]}`)
+	defer restore()
+	result, err := svc.CheckManifest(context.Background(), "https://updates.example/orvix.json")
+	if err != nil {
+		t.Fatalf("invalid feed should not return raw error: %v", err)
+	}
+	if result.Message != "update feed response is invalid" {
+		t.Fatalf("message = %q", result.Message)
+	}
+}
+
+func TestCheckManifestTimeout(t *testing.T) {
+	svc, _ := newService(t)
+	old := updateFeedClient
+	oldLookup := lookupFeedHost
+	lookupFeedHost = func(host string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("203.0.113.10")}, nil
+	}
+	updateFeedClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	})}
+	defer func() {
+		updateFeedClient = old
+		lookupFeedHost = oldLookup
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	result, err := svc.CheckManifest(ctx, "https://updates.example/orvix.json")
+	if err != nil {
+		t.Fatalf("timeout should be converted to safe status: %v", err)
+	}
+	if result.Message != "update check failed" {
+		t.Fatalf("message = %q", result.Message)
+	}
+}
+
+func TestCheckManifestMalformedJSON(t *testing.T) {
+	svc, _ := newService(t)
+	restore := stubUpdateFeed(t, http.StatusOK, `{not-json`)
+	defer restore()
+	result, err := svc.CheckManifest(context.Background(), "https://updates.example/orvix.json")
+	if err != nil {
+		t.Fatalf("malformed JSON should not return raw error: %v", err)
+	}
+	if result.Message != "update feed response is invalid" {
+		t.Fatalf("message = %q", result.Message)
+	}
+}
+
+func TestCheckManifestRejectsInsecureFeedURL(t *testing.T) {
+	svc, _ := newService(t)
+	for _, raw := range []string{"http://updates.example/feed.json", "file:///tmp/feed.json", "https://127.0.0.1/feed.json", "https://localhost/feed.json"} {
+		result, err := svc.CheckManifest(context.Background(), raw)
+		if err != nil {
+			t.Fatalf("%s returned raw error: %v", raw, err)
+		}
+		if result.Message != "update feed URL is invalid" {
+			t.Fatalf("%s message = %q", raw, result.Message)
+		}
+	}
+}
+
+func stubUpdateFeed(t *testing.T, status int, body string) func() {
+	t.Helper()
+	old := updateFeedClient
+	oldLookup := lookupFeedHost
+	lookupFeedHost = func(host string) ([]net.IP, error) {
+		if host != "updates.example" {
+			return nil, fmt.Errorf("unexpected host %s", host)
+		}
+		return []net.IP{net.ParseIP("203.0.113.10")}, nil
+	}
+	updateFeedClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Scheme != "https" || req.URL.Host != "updates.example" {
+			t.Fatalf("unexpected feed URL: %s", req.URL.String())
+		}
+		return &http.Response{
+			StatusCode: status,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})}
+	return func() {
+		updateFeedClient = old
+		lookupFeedHost = oldLookup
 	}
 }
 

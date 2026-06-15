@@ -38,7 +38,8 @@ func buildUpdateHarness(t *testing.T, withScript bool) (*api.Router, *sql.DB, st
 	cfg.Backup.Dir = filepath.Join(root, "backups")
 	cfg.CoreMail.DataPath = filepath.Join(root, "coremail")
 	cfg.CoreMail.MailStorePath = filepath.Join(cfg.CoreMail.DataPath, "mailstore")
-	cfg.Update.CheckURL = "https://updates.invalid"
+	cfg.Update.CheckURL = ""
+	cfg.Update.FeedURL = ""
 	cfg.Update.Channel = "stable"
 	cfg.Update.WorkspaceRoot = root // <TempDir>, where the test lays down the script
 
@@ -291,6 +292,41 @@ func TestUpdateV1_HistoryInvalidLimitRejected(t *testing.T) {
 		if resp.StatusCode == http.StatusOK {
 			t.Fatalf("history?limit=%s must not return 200, got %d", bad, resp.StatusCode)
 		}
+	}
+}
+
+func TestUpdateV1_GetUpdateCheckMissingFeedURL(t *testing.T) {
+	router, sqlDB, token, _, _ := buildUpdateHarness(t, false)
+	defer router.App().Shutdown()
+	defer sqlDB.Close()
+	resp, body := updateRequest(t, router, "GET", "/api/v1/update/check", "", token, "", false)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("check: %d %s", resp.StatusCode, body)
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("decode: %v: %s", err, body)
+	}
+	for _, key := range []string{"current_version", "current_sha", "latest_version", "latest_sha", "update_available", "channel", "release_notes", "message"} {
+		if _, ok := raw[key]; !ok {
+			t.Fatalf("missing field %q: %s", key, body)
+		}
+	}
+	if raw["message"] != "update check not configured" {
+		t.Fatalf("unexpected message: %s", body)
+	}
+	if raw["update_available"] != false {
+		t.Fatalf("update_available should be false: %s", body)
+	}
+}
+
+func TestUpdateV1_GetUpdateCheckRequiresAuth(t *testing.T) {
+	router, sqlDB, _, _, _ := buildUpdateHarness(t, false)
+	defer router.App().Shutdown()
+	defer sqlDB.Close()
+	resp, _ := updateRequest(t, router, "GET", "/api/v1/update/check", "", "", "", false)
+	if resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected auth failure, got %d", resp.StatusCode)
 	}
 }
 

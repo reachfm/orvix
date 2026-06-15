@@ -149,6 +149,7 @@ type MetricsConfig struct {
 type UpdateConfig struct {
 	Channel      string `mapstructure:"channel"`
 	CheckURL     string `mapstructure:"check_url"`
+	FeedURL      string `mapstructure:"feed_url"`
 	AutoApply    bool   `mapstructure:"auto_apply"`
 	BackupBefore bool   `mapstructure:"backup_before"`
 	// WorkspaceRoot is the absolute path to the directory that

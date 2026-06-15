@@ -133,6 +133,24 @@ func (h *Handler) GetUpdateHistory(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"history": rows})
 }
 
+// GetUpdateCheck serves GET /api/v1/update/check.
+//
+// It is read-only and admin-authenticated. Missing feed configuration
+// returns a clean status object instead of a failure response.
+func (h *Handler) GetUpdateCheck(c fiber.Ctx) error {
+	svc, err := h.updateService()
+	if err != nil {
+		h.logger.Error("update service init", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "update service unavailable"})
+	}
+	st, err := svc.CheckManifest(c.Context(), h.updateCheckURL())
+	if err != nil {
+		h.logger.Warn("update check failed", zap.Error(err))
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "update check failed"})
+	}
+	return c.JSON(st)
+}
+
 // PostUpdateCheck serves POST /api/v1/update/check.
 //
 // Triggers a fresh update check. The check URL is read from
@@ -144,12 +162,12 @@ func (h *Handler) PostUpdateCheck(c fiber.Ctx) error {
 		h.logger.Error("update service init", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "update service unavailable"})
 	}
-	st, err := svc.Check(c.Context(), h.updateCheckURL(), "orvix-core", "")
+	st, err := svc.CheckManifest(c.Context(), h.updateCheckURL())
 	if err != nil {
 		h.logger.Warn("update check failed", zap.Error(err))
-		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "check failed"})
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "update check failed"})
 	}
-	h.writeAuditLog(c, "update_check", fmt.Sprintf("available:%s|update_available:%v", st.AvailableVersion, st.UpdateAvailable))
+	h.writeAuditLog(c, "update_check", fmt.Sprintf("available:%s|update_available:%v", st.LatestVersion, st.UpdateAvailable))
 	return c.JSON(st)
 }
 
@@ -286,6 +304,9 @@ func (h *Handler) GetUpdatePreflight(c fiber.Ctx) error {
 func (h *Handler) updateCheckURL() string {
 	if h.cfg == nil {
 		return ""
+	}
+	if h.cfg.Update.FeedURL != "" {
+		return h.cfg.Update.FeedURL
 	}
 	return h.cfg.Update.CheckURL
 }

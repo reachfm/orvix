@@ -6,6 +6,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -288,6 +292,203 @@ func (s *RuntimeService) recordCheckError(msg string) *UpdateStatus {
 	s.lastCheck = st
 	s.lastCheckMu.Unlock()
 	return st
+}
+
+// CheckManifest fetches the configured HTTPS release manifest and
+// returns the operator-facing update check response. The feed URL is
+// server-side configuration only; request bodies never influence it.
+func (s *RuntimeService) CheckManifest(ctx context.Context, feedURL string) (*UpdateCheckResult, error) {
+	current := readBuildInfo()
+	result := &UpdateCheckResult{
+		CurrentVersion: current.Version,
+		CurrentSHA:     current.SHA,
+		Channel:        s.cfg.Channel,
+		Message:        "update check not configured",
+		ReleaseNotes:   []string{},
+	}
+	if strings.TrimSpace(feedURL) == "" {
+		s.cacheManifestResult(result)
+		return result, nil
+	}
+	u, err := validateFeedURL(feedURL)
+	if err != nil {
+		result.Message = "update feed URL is invalid"
+		s.cacheManifestResult(result)
+		return result, nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		result.Message = "update check failed"
+		s.cacheManifestResult(result)
+		return result, nil
+	}
+	resp, err := updateFeedClient.Do(req)
+	if err != nil {
+		result.Message = "update check failed"
+		s.cacheManifestResult(result)
+		return result, nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		result.Message = "update check failed"
+		s.cacheManifestResult(result)
+		return result, nil
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		result.Message = "update check failed"
+		s.cacheManifestResult(result)
+		return result, nil
+	}
+	var manifest ReleaseManifest
+	if err := jsonUnmarshal(body, &manifest); err != nil {
+		result.Message = "update feed response is invalid"
+		s.cacheManifestResult(result)
+		return result, nil
+	}
+	if !manifest.isValidForChannel(s.cfg.Channel) {
+		result.Message = "update feed response is invalid"
+		s.cacheManifestResult(result)
+		return result, nil
+	}
+	result.LatestVersion = manifest.Version
+	result.LatestSHA = shortSHA(manifest.GitSHA)
+	result.Channel = manifest.Channel
+	result.ReleaseNotes = safeReleaseNotes(manifest.ReleaseNotes)
+	result.UpdateAvailable = isVersionNewer(manifest.Version, current.Version) || (manifest.GitSHA != "" && shortSHA(manifest.GitSHA) != "" && shortSHA(manifest.GitSHA) != current.SHA)
+	result.Message = ""
+	s.cacheManifestResult(result)
+	return result, nil
+}
+
+func (s *RuntimeService) cacheManifestResult(result *UpdateCheckResult) {
+	if result == nil {
+		return
+	}
+	st := &UpdateStatus{
+		CurrentVersion:   result.CurrentVersion,
+		CurrentSHA:       result.CurrentSHA,
+		AvailableVersion: result.LatestVersion,
+		AvailableSHA:     result.LatestSHA,
+		Channel:          result.Channel,
+		UpdateAvailable:  result.UpdateAvailable,
+		ReleaseNotes:     strings.Join(result.ReleaseNotes, "\n"),
+		UpdateError:      result.Message,
+		CheckedAt:        time.Now().UTC(),
+		JobStatus:        "idle",
+	}
+	s.lastCheckMu.Lock()
+	s.lastCheck = st
+	s.lastCheckMu.Unlock()
+}
+
+var updateFeedClient = &http.Client{
+	Timeout: 10 * time.Second,
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
+
+var lookupFeedHost = net.LookupIP
+
+func validateFeedURL(raw string) (*url.URL, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return nil, err
+	}
+	if u.Scheme != "https" || u.Host == "" {
+		return nil, errors.New("feed URL must be HTTPS")
+	}
+	host := u.Hostname()
+	if host == "" || strings.EqualFold(host, "localhost") {
+		return nil, errors.New("feed URL host rejected")
+	}
+	if ip := net.ParseIP(host); ip != nil && isRejectedFeedIP(ip) {
+		return nil, errors.New("feed URL host rejected")
+	}
+	ips, err := lookupFeedHost(host)
+	if err != nil || len(ips) == 0 {
+		return nil, errors.New("feed URL host rejected")
+	}
+	for _, ip := range ips {
+		if isRejectedFeedIP(ip) {
+			return nil, errors.New("feed URL host rejected")
+		}
+	}
+	return u, nil
+}
+
+func isRejectedFeedIP(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
+}
+
+func (m ReleaseManifest) isValidForChannel(channel Channel) bool {
+	if m.Version == "" || m.GitSHA == "" {
+		return false
+	}
+	if m.Channel == "" {
+		return false
+	}
+	if channel != "" && m.Channel != channel {
+		return false
+	}
+	return true
+}
+
+func safeReleaseNotes(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, note := range in {
+		note = strings.TrimSpace(note)
+		if note == "" {
+			continue
+		}
+		out = append(out, truncateNotes(note))
+		if len(out) >= 50 {
+			break
+		}
+	}
+	return out
+}
+
+func isVersionNewer(latest, current string) bool {
+	if latest == "" || current == "" || current == "development" {
+		return latest != "" && latest != current
+	}
+	la := versionParts(latest)
+	cu := versionParts(current)
+	for i := 0; i < len(la) || i < len(cu); i++ {
+		var l, c int
+		if i < len(la) {
+			l = la[i]
+		}
+		if i < len(cu) {
+			c = cu[i]
+		}
+		if l > c {
+			return true
+		}
+		if l < c {
+			return false
+		}
+	}
+	return false
+}
+
+func versionParts(v string) []int {
+	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
+	fields := strings.FieldsFunc(v, func(r rune) bool { return r == '.' || r == '-' || r == '+' })
+	out := make([]int, 0, len(fields))
+	for _, f := range fields {
+		var n int
+		for _, r := range f {
+			if r < '0' || r > '9' {
+				break
+			}
+			n = n*10 + int(r-'0')
+		}
+		out = append(out, n)
+	}
+	return out
 }
 
 // History returns the most recent update history rows.

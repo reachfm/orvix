@@ -27,36 +27,62 @@ const (
 //     paths are ever populated. The install dir is a short safe label.
 //   - UpdateAvailable is a boolean; UpdateError is a safe message.
 type UpdateStatus struct {
-	CurrentVersion  string    `json:"currentVersion"`
-	CurrentSHA      string    `json:"currentSha"`
-	BuildTime       string    `json:"buildTime"`
-	AvailableVersion string   `json:"availableVersion"`
-	AvailableSHA    string    `json:"availableSha"`
-	Channel         Channel   `json:"channel"`
-	UpdateAvailable bool      `json:"updateAvailable"`
-	ReleaseNotes    string    `json:"releaseNotes"`
-	UpdateError     string    `json:"updateError,omitempty"`
-	CheckedAt       time.Time `json:"checkedAt"`
-	JobStatus       string    `json:"jobStatus"`
-	JobStartedAt    *time.Time `json:"jobStartedAt,omitempty"`
-	JobCompletedAt  *time.Time `json:"jobCompletedAt,omitempty"`
-	JobActor        string    `json:"jobActor,omitempty"`
+	CurrentVersion   string     `json:"currentVersion"`
+	CurrentSHA       string     `json:"currentSha"`
+	BuildTime        string     `json:"buildTime"`
+	AvailableVersion string     `json:"availableVersion"`
+	AvailableSHA     string     `json:"availableSha"`
+	Channel          Channel    `json:"channel"`
+	UpdateAvailable  bool       `json:"updateAvailable"`
+	ReleaseNotes     string     `json:"releaseNotes"`
+	UpdateError      string     `json:"updateError,omitempty"`
+	CheckedAt        time.Time  `json:"checkedAt"`
+	JobStatus        string     `json:"jobStatus"`
+	JobStartedAt     *time.Time `json:"jobStartedAt,omitempty"`
+	JobCompletedAt   *time.Time `json:"jobCompletedAt,omitempty"`
+	JobActor         string     `json:"jobActor,omitempty"`
+}
+
+// ReleaseManifest is the public update-feed document. It is safe to
+// deserialize from an HTTPS release feed and contains no executable
+// instructions.
+type ReleaseManifest struct {
+	Version                 string   `json:"version"`
+	GitSHA                  string   `json:"git_sha"`
+	Channel                 Channel  `json:"channel"`
+	ReleaseDate             string   `json:"release_date"`
+	ReleaseNotes            []string `json:"release_notes"`
+	MinimumSupportedVersion string   `json:"minimum_supported_version"`
+}
+
+// UpdateCheckResult is the response shape for GET/POST
+// /api/v1/update/check. It intentionally uses snake_case fields for
+// the release-manifest contract.
+type UpdateCheckResult struct {
+	CurrentVersion  string   `json:"current_version"`
+	CurrentSHA      string   `json:"current_sha"`
+	LatestVersion   string   `json:"latest_version"`
+	LatestSHA       string   `json:"latest_sha"`
+	UpdateAvailable bool     `json:"update_available"`
+	Channel         Channel  `json:"channel"`
+	ReleaseNotes    []string `json:"release_notes"`
+	Message         string   `json:"message,omitempty"`
 }
 
 // UpdateHistoryRow is a single row in the update history table.
 type UpdateHistoryRow struct {
-	ID          int64     `json:"id"`
-	StartedAt   time.Time `json:"startedAt"`
-	CompletedAt *time.Time `json:"completedAt,omitempty"`
-	DurationSeconds int64 `json:"durationSeconds"`
-	PreviousSHA string    `json:"previousSha"`
-	NewSHA      string    `json:"newSha"`
-	FromVersion string    `json:"fromVersion"`
-	ToVersion   string    `json:"toVersion"`
-	Status      string    `json:"status"` // "running" | "completed" | "failed"
-	Severity    Severity  `json:"severity"`
-	Actor       string    `json:"actor"`
-	Notes       string    `json:"notes,omitempty"`
+	ID              int64      `json:"id"`
+	StartedAt       time.Time  `json:"startedAt"`
+	CompletedAt     *time.Time `json:"completedAt,omitempty"`
+	DurationSeconds int64      `json:"durationSeconds"`
+	PreviousSHA     string     `json:"previousSha"`
+	NewSHA          string     `json:"newSha"`
+	FromVersion     string     `json:"fromVersion"`
+	ToVersion       string     `json:"toVersion"`
+	Status          string     `json:"status"` // "running" | "completed" | "failed"
+	Severity        Severity   `json:"severity"`
+	Actor           string     `json:"actor"`
+	Notes           string     `json:"notes,omitempty"`
 }
 
 // PreflightResult is the response shape for the preflight check.
@@ -68,9 +94,9 @@ type PreflightResult struct {
 
 // PreflightCheck is a single preflight item.
 type PreflightCheck struct {
-	Name    string `json:"name"`
-	Status  string `json:"status"`  // "pass" | "warning" | "fail"
-	Detail  string `json:"detail"`  // safe label, never a path/secret/env value
+	Name   string `json:"name"`
+	Status string `json:"status"` // "pass" | "warning" | "fail"
+	Detail string `json:"detail"` // safe label, never a path/secret/env value
 }
 
 // UpdateErrorCode is a closed enumeration of safe error categories

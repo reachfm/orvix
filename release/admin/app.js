@@ -387,6 +387,8 @@ async function loadUpdate() {
     setText("update-current-version", "Unavailable");
     setText("update-current-sha", "-");
     setText("update-build-time", err.message || "Update API is unavailable.");
+    setText("update-latest-version", "-");
+    setText("update-latest-sha", "Latest SHA unavailable.");
     setText("update-status", "Unavailable");
     setText("update-status-note", "Update status unavailable.");
     setText("update-channel", "Channel unavailable.");
@@ -403,25 +405,38 @@ function renderUpdateStatus(status) {
   if (!status) {
     setText("update-current-version", "Unavailable");
     setText("update-current-sha", "-");
+    setText("update-latest-version", "-");
+    setText("update-latest-sha", "Latest SHA unavailable.");
     setText("update-status", "Unavailable");
     return;
   }
-  setText("update-current-version", status.currentVersion || "unknown");
-  setText("update-current-sha", shortSHA(status.currentSha || ""));
+  var currentVersion = status.currentVersion || status.current_version || "unknown";
+  var currentSha = status.currentSha || status.current_sha || "";
+  var latestVersion = status.latest_version || status.availableVersion || "";
+  var latestSha = status.latest_sha || status.availableSha || "";
+  var updateAvailable = Boolean(status.update_available != null ? status.update_available : status.updateAvailable);
+  var releaseNotes = Array.isArray(status.release_notes) ? status.release_notes : (status.releaseNotes ? [status.releaseNotes] : []);
+  var message = status.message || status.updateError || "";
+  setText("update-current-version", currentVersion);
+  setText("update-current-sha", shortSHA(currentSha));
   setText("update-build-time", "Build: " + (status.buildTime || "-"));
   setText("update-channel", "Channel: " + (status.channel || "stable"));
   var jobStatus = status.jobStatus || "idle";
-  var updateText = status.updateAvailable ? "Update Available" : titleCase(jobStatus || "idle");
+  var updateText = updateAvailable ? "Update Available" : (message === "update check not configured" ? "Not Configured" : titleCase(jobStatus || "idle"));
   setText("update-status", updateText);
   var checked = status.checkedAt ? "Checked " + formatTimestamp(status.checkedAt) : "Not checked yet";
-  var available = status.availableVersion ? " | Available " + status.availableVersion : "";
+  var available = latestVersion ? " | Latest " + latestVersion : "";
   setText("update-status-note", checked + available);
+  setText("update-latest-version", latestVersion || "-");
+  setText("update-latest-sha", latestSha ? "Latest SHA: " + shortSHA(latestSha) : "Latest SHA unavailable.");
   var notes = el("update-release-notes");
   if (notes) {
-    if (status.releaseNotes) {
-      notes.innerHTML = '<div class="empty-state" style="white-space:pre-wrap;">' + escapeHTML(status.releaseNotes) + '</div>';
-    } else if (status.updateError) {
-      notes.innerHTML = '<div class="empty-state">Update check error: ' + escapeHTML(status.updateError) + '</div>';
+    if (releaseNotes.length) {
+      notes.innerHTML = '<ul class="plain-list">' + releaseNotes.map(function(note) {
+        return '<li>' + escapeHTML(note) + '</li>';
+      }).join("") + '</ul>';
+    } else if (message) {
+      notes.innerHTML = '<div class="empty-state">' + escapeHTML(message) + '</div>';
     } else {
       notes.innerHTML = '<div class="empty-state">No release notes available.</div>';
     }
@@ -1180,7 +1195,11 @@ if (updateCheck) {
       state.updateStatus = status;
       renderUpdateStatus(status);
       await Promise.allSettled([loadUpdateHistory(), loadUpdatePreflight()]);
-      showAlert("Update check completed.");
+      if (status && status.message === "update check not configured") {
+        showAlert("Update check not configured.");
+      } else {
+        showAlert("Update check completed.");
+      }
     } catch (err) {
       showAlert(err.message || "Update check failed.");
     } finally {

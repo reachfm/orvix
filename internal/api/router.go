@@ -244,6 +244,7 @@ func (r *Router) setupRoutes() {
 	admin.Get("/update/status", r.h.GetUpdateStatus)
 	admin.Get("/update/history", r.h.GetUpdateHistory)
 	admin.Get("/update/preflight", r.h.GetUpdatePreflight)
+	admin.Get("/update/check", r.h.GetUpdateCheck)
 
 	// Email Intelligence
 	admin.Get("/intelligence/stats", r.h.GetEmailStats)

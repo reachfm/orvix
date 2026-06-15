@@ -430,6 +430,15 @@ func TestAdminUIStaticRoutes(t *testing.T) {
 	if !strings.Contains(string(jsBody), `detailName === "webmail-detail" ? "webmail"`) {
 		t.Fatalf("admin app.js must return from webmail detail to the webmail page")
 	}
+	if !strings.Contains(string(jsBody), "update check not configured") {
+		t.Fatalf("admin app.js must render clean update-feed-not-configured state")
+	}
+	if !strings.Contains(string(jsBody), "release_notes") {
+		t.Fatalf("admin app.js must render release notes from update feed response")
+	}
+	if !strings.Contains(string(jsBody), "latest_version") || !strings.Contains(string(jsBody), "latest_sha") {
+		t.Fatalf("admin app.js must render latest version and SHA from update feed response")
+	}
 	resp, err = router.App().Test(httptest.NewRequest("GET", "/admin", nil))
 	if err != nil {
 		t.Fatalf("GET /admin request: %v", err)
