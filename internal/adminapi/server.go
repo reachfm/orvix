@@ -28,6 +28,7 @@ import (
 	"github.com/orvix/orvix/internal/runtimecontrol"
 	"github.com/orvix/orvix/internal/tlsmgmt"
 	"github.com/orvix/orvix/internal/trustmgmt"
+	"github.com/orvix/orvix/internal/webmailmgmt"
 )
 
 type Server struct {
@@ -48,6 +49,7 @@ type Server struct {
 	MonitoringService *monitoring.Service
 	LifecycleService  *lifecycle.Service
 	MigrationService  *migration.Service
+	WebmailService    *webmailmgmt.Service
 	LicensingService  *licensing.Service
 	AuthorityService  *licensingauthority.AuthorityService
 	AuditStore        *audit.Store
@@ -85,6 +87,10 @@ func (s *Server) SetDomainRegistry(dr *domainregistry.Service) {
 
 func (s *Server) SetMailboxService(ms *mailboxmgmt.Service) {
 	s.MailboxService = ms
+}
+
+func (s *Server) SetWebmailService(ws *webmailmgmt.Service) {
+	s.WebmailService = ws
 }
 
 func (s *Server) SetQueueService(qs *queuemgmt.Service) {
@@ -526,6 +532,24 @@ func (s *Server) registerRoutes() {
 			}),
 		),
 	)
+
+	// Webmail Management routes.
+	webmailRead := func(action AuditAction, h http.HandlerFunc) http.Handler {
+		return protected(PermWebmailRead, action, h)
+	}
+	webmailWrite := func(action AuditAction, h http.HandlerFunc) http.Handler {
+		return protected(PermWebmailWrite, action, h)
+	}
+	s.mux.Handle("/admin/webmail/accounts", webmailRead(AuditWebmailAccountsListed, s.handleWebmailAccounts))
+	s.mux.Handle("/admin/webmail/sessions", webmailRead(AuditWebmailSessionsListed, s.handleWebmailSessionsList))
+	s.mux.Handle("/admin/webmail/sessions/revoke/", webmailWrite(AuditWebmailSessionRevoked, s.handleWebmailSessionRevoke))
+	s.mux.Handle("/admin/webmail/sessions/revoke-all/", webmailWrite(AuditWebmailSessionsRevoked, s.handleWebmailSessionsRevokeAll))
+	s.mux.Handle("/admin/webmail/activity/", webmailRead(AuditWebmailActivityViewed, s.handleWebmailActivity))
+	s.mux.Handle("/admin/webmail/storage/", webmailRead(AuditWebmailStorageViewed, s.handleWebmailStorage))
+	s.mux.Handle("/admin/webmail/controls/force-logout/", webmailWrite(AuditWebmailForceLogout, s.handleWebmailForceLogout))
+	s.mux.Handle("/admin/webmail/controls/unlock/", webmailWrite(AuditWebmailUnlock, s.handleWebmailUnlock))
+	s.mux.Handle("/admin/webmail/controls/reset-preferences/", webmailWrite(AuditWebmailResetPreferences, s.handleWebmailResetPreferences))
+	s.mux.Handle("/admin/webmail/controls/clear-counters/", webmailWrite(AuditWebmailClearCounters, s.handleWebmailClearCounters))
 }
 
 func (s *Server) Handler() http.Handler {
@@ -2190,6 +2214,210 @@ func parsePathID(path, prefix string) (uint, error) {
 		return 0, fmt.Errorf("invalid id: %s", idStr)
 	}
 	return uint(id), nil
+}
+
+// ── Webmail Management Handlers ────────────────────────────
+
+func (s *Server) handleWebmailAccounts(w http.ResponseWriter, r *http.Request) {
+	if s.WebmailService == nil {
+		jsonError(w, "webmail service not available", 503)
+		return
+	}
+	search := r.URL.Query().Get("search")
+	domainFilter := r.URL.Query().Get("domain")
+	statusFilter := r.URL.Query().Get("status")
+	var adminFilter *bool
+	if v := r.URL.Query().Get("admin"); v != "" {
+		b := v == "1" || v == "true"
+		adminFilter = &b
+	}
+	accounts, err := s.WebmailService.ListAccounts(r.Context(), search, domainFilter, statusFilter, adminFilter)
+	if err != nil {
+		jsonError(w, err.Error(), 500)
+		return
+	}
+	jsonOK(w, map[string]interface{}{"accounts": accounts})
+}
+
+func (s *Server) handleWebmailSessionsList(w http.ResponseWriter, r *http.Request) {
+	if s.WebmailService == nil {
+		jsonError(w, "webmail service not available", 503)
+		return
+	}
+	var mailboxID *uint
+	if v := r.URL.Query().Get("mailboxId"); v != "" {
+		if id, err := parseUint64(v); err == nil {
+			mailboxID = &id
+		}
+	}
+	sessions, err := s.WebmailService.ListSessions(r.Context(), mailboxID)
+	if err != nil {
+		jsonError(w, err.Error(), 500)
+		return
+	}
+	jsonOK(w, map[string]interface{}{"sessions": sessions})
+}
+
+func (s *Server) handleWebmailSessionRevoke(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.WebmailService == nil {
+		jsonError(w, "webmail service not available", 503)
+		return
+	}
+	id, err := parsePathID(r.URL.Path, "/admin/webmail/sessions/revoke/")
+	if err != nil {
+		jsonError(w, "invalid session id", 400)
+		return
+	}
+	if err := s.WebmailService.RevokeSession(r.Context(), id); err != nil {
+		jsonError(w, err.Error(), 400)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "revoked"})
+}
+
+func (s *Server) handleWebmailSessionsRevokeAll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.WebmailService == nil {
+		jsonError(w, "webmail service not available", 503)
+		return
+	}
+	id, err := parsePathID(r.URL.Path, "/admin/webmail/sessions/revoke-all/")
+	if err != nil {
+		jsonError(w, "invalid mailbox id", 400)
+		return
+	}
+	if err := s.WebmailService.RevokeAllSessions(r.Context(), id); err != nil {
+		jsonError(w, err.Error(), 400)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "revoked"})
+}
+
+func (s *Server) handleWebmailActivity(w http.ResponseWriter, r *http.Request) {
+	if s.WebmailService == nil {
+		jsonError(w, "webmail service not available", 503)
+		return
+	}
+	id, err := parsePathID(r.URL.Path, "/admin/webmail/activity/")
+	if err != nil {
+		jsonError(w, "invalid mailbox id", 400)
+		return
+	}
+	activity, err := s.WebmailService.GetLoginActivity(r.Context(), id)
+	if err != nil {
+		jsonError(w, err.Error(), 500)
+		return
+	}
+	jsonOK(w, activity)
+}
+
+func (s *Server) handleWebmailStorage(w http.ResponseWriter, r *http.Request) {
+	if s.WebmailService == nil {
+		jsonError(w, "webmail service not available", 503)
+		return
+	}
+	id, err := parsePathID(r.URL.Path, "/admin/webmail/storage/")
+	if err != nil {
+		jsonError(w, "invalid mailbox id", 400)
+		return
+	}
+	metrics, err := s.WebmailService.GetStorageMetrics(r.Context(), id)
+	if err != nil {
+		jsonError(w, err.Error(), 500)
+		return
+	}
+	jsonOK(w, metrics)
+}
+
+func (s *Server) handleWebmailForceLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.WebmailService == nil {
+		jsonError(w, "webmail service not available", 503)
+		return
+	}
+	id, err := parsePathID(r.URL.Path, "/admin/webmail/controls/force-logout/")
+	if err != nil {
+		jsonError(w, "invalid mailbox id", 400)
+		return
+	}
+	if err := s.WebmailService.ForceLogoutAll(r.Context(), id); err != nil {
+		jsonError(w, err.Error(), 400)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "logged_out"})
+}
+
+func (s *Server) handleWebmailUnlock(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.WebmailService == nil {
+		jsonError(w, "webmail service not available", 503)
+		return
+	}
+	id, err := parsePathID(r.URL.Path, "/admin/webmail/controls/unlock/")
+	if err != nil {
+		jsonError(w, "invalid mailbox id", 400)
+		return
+	}
+	if err := s.WebmailService.UnlockMailbox(r.Context(), id); err != nil {
+		jsonError(w, err.Error(), 400)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "unlocked"})
+}
+
+func (s *Server) handleWebmailResetPreferences(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.WebmailService == nil {
+		jsonError(w, "webmail service not available", 503)
+		return
+	}
+	id, err := parsePathID(r.URL.Path, "/admin/webmail/controls/reset-preferences/")
+	if err != nil {
+		jsonError(w, "invalid mailbox id", 400)
+		return
+	}
+	if err := s.WebmailService.ResetWebmailPreferences(r.Context(), id); err != nil {
+		jsonError(w, err.Error(), 400)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "reset"})
+}
+
+func (s *Server) handleWebmailClearCounters(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.WebmailService == nil {
+		jsonError(w, "webmail service not available", 503)
+		return
+	}
+	id, err := parsePathID(r.URL.Path, "/admin/webmail/controls/clear-counters/")
+	if err != nil {
+		jsonError(w, "invalid mailbox id", 400)
+		return
+	}
+	if err := s.WebmailService.ClearFailedLoginCounters(r.Context(), id); err != nil {
+		jsonError(w, err.Error(), 400)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "cleared"})
 }
 
 func (s *Server) getSMTPStatus() string      { return s.getHealthFor("smtp_receive") }

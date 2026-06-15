@@ -29,6 +29,7 @@ import (
 	"github.com/orvix/orvix/internal/runtimecontrol"
 	"github.com/orvix/orvix/internal/trust"
 	"github.com/orvix/orvix/internal/trustmgmt"
+	"github.com/orvix/orvix/internal/webmailmgmt"
 	_ "modernc.org/sqlite"
 )
 
@@ -128,6 +129,10 @@ func testAdminServer(t *testing.T) (*coremail.Engine, string, func()) {
 	// Wire licensing service.
 	licSvc := licensing.NewService("")
 	srv.SetLicensingService(licSvc)
+
+	// Wire webmail management service.
+	webmailSvc := webmailmgmt.NewService(eng, db)
+	srv.SetWebmailService(webmailSvc)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -773,11 +778,11 @@ func TestAuditPermissionDenied(t *testing.T) {
 // ── Role Tests ──────────────────────────────────────────────
 
 func TestRolePermissionsDefault(t *testing.T) {
-	if len(GetPermissions(RoleSuperAdmin)) != 28 {
-		t.Fatalf("expected 28 permissions for super_admin, got %d", len(GetPermissions(RoleSuperAdmin)))
+	if len(GetPermissions(RoleSuperAdmin)) != 30 {
+		t.Fatalf("expected 30 permissions for super_admin, got %d", len(GetPermissions(RoleSuperAdmin)))
 	}
-	if len(GetPermissions(RoleAdmin)) != 28 {
-		t.Fatalf("expected 28 permissions for admin, got %d", len(GetPermissions(RoleAdmin)))
+	if len(GetPermissions(RoleAdmin)) != 30 {
+		t.Fatalf("expected 30 permissions for admin, got %d", len(GetPermissions(RoleAdmin)))
 	}
 	if len(GetPermissions(RoleSupport)) <= len(GetPermissions(RoleReadOnly)) {
 		t.Fatal("support should have more permissions than read_only")
@@ -1390,5 +1395,62 @@ func TestLicensingInstallMethodEnforced(t *testing.T) {
 	resp, _ := adminRequestWithClient(t, client, addr, "GET", "/admin/licensing/install", nil, "")
 	if resp.StatusCode != 405 {
 		t.Fatalf("expected 405 for GET on install, got %d", resp.StatusCode)
+	}
+}
+
+func TestAdminWebmailSessionsPath(t *testing.T) {
+	_, addr, cleanup := testAdminServer(t)
+	defer cleanup()
+	client := adminClient(t, addr)
+	adminLogin(t, client, addr)
+
+	// GET /admin/webmail/sessions (not /admin/webmailessions) must return 200.
+	resp, body := adminRequestWithClient(t, client, addr, "GET", "/admin/webmail/sessions", nil, "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200 for /admin/webmail/sessions, got %d: %s", resp.StatusCode, body)
+	}
+
+	// The legacy typo route should 404.
+	resp, _ = adminRequestWithClient(t, client, addr, "GET", "/admin/webmailessions", nil, "")
+	if resp.StatusCode != 404 {
+		t.Fatalf("expected 404 for legacy /admin/webmailessions, got %d", resp.StatusCode)
+	}
+}
+
+func TestAdminWebmailSessionRevokePath(t *testing.T) {
+	_, addr, cleanup := testAdminServer(t)
+	defer cleanup()
+	client := adminClient(t, addr)
+	adminLogin(t, client, addr)
+
+	// POST /admin/webmail/sessions/revoke/1 with valid path.
+	resp, body := adminRequestWithClient(t, client, addr, "POST", "/admin/webmail/sessions/revoke/1", nil, "")
+	if resp.StatusCode != 400 {
+		t.Fatalf("expected 400 (session not found) for POST /admin/webmail/sessions/revoke/1, got %d: %s", resp.StatusCode, body)
+	}
+
+	// The legacy typo route should 404.
+	resp, _ = adminRequestWithClient(t, client, addr, "POST", "/admin/webmailessions/revoke/1", nil, "")
+	if resp.StatusCode != 404 {
+		t.Fatalf("expected 404 for legacy /admin/webmailessions/revoke/1, got %d", resp.StatusCode)
+	}
+}
+
+func TestAdminWebmailSessionsRevokeAllPath(t *testing.T) {
+	_, addr, cleanup := testAdminServer(t)
+	defer cleanup()
+	client := adminClient(t, addr)
+	adminLogin(t, client, addr)
+
+	// POST /admin/webmail/sessions/revoke-all/1 with valid path.
+	resp, body := adminRequestWithClient(t, client, addr, "POST", "/admin/webmail/sessions/revoke-all/1", nil, "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200 for POST /admin/webmail/sessions/revoke-all/1, got %d: %s", resp.StatusCode, body)
+	}
+
+	// The legacy typo route should 404.
+	resp, _ = adminRequestWithClient(t, client, addr, "POST", "/admin/webmailessions/revoke-all/1", nil, "")
+	if resp.StatusCode != 404 {
+		t.Fatalf("expected 404 for legacy /admin/webmailessions/revoke-all/1, got %d", resp.StatusCode)
 	}
 }

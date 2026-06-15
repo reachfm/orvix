@@ -12,9 +12,11 @@ import (
 	"github.com/orvix/orvix/internal/api/handlers"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/config"
+	"github.com/orvix/orvix/internal/coremail"
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/metrics"
 	"github.com/orvix/orvix/internal/modules"
+	"github.com/orvix/orvix/internal/webmailmgmt"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -57,6 +59,15 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		logger:       logger,
 		cfg:          cfg,
 		h:            handlers.NewHandler(db, authenticator, apikeyMgr, logger, cfg, registry, ff, rateLimiter),
+	}
+
+	// Wire webmail management service.
+	if sqlDB, err := db.DB(); err == nil {
+		eng := coremail.NewEngine(coremail.EngineConfig{DB: sqlDB, AuthCfg: coremail.DefaultAuthConfig()})
+		ws := webmailmgmt.NewService(eng, sqlDB)
+		router.h.SetWebmailService(ws)
+	} else {
+		logger.Warn("webmail service not available: failed to get sql.DB", zap.Error(err))
 	}
 
 	router.setupMiddleware()
@@ -170,6 +181,12 @@ func (r *Router) setupRoutes() {
 	admin.Post("/migration/start", r.h.MigrationStart)
 	admin.Get("/migration/jobs", r.h.ListMigrationJobs)
 
+	// Webmail Management
+	admin.Get("/webmail/accounts", r.h.ListWebmailAccounts)
+	admin.Get("/webmail/sessions", r.h.ListWebmailSessions)
+	admin.Get("/webmail/activity/:mailboxId", r.h.GetWebmailLoginActivity)
+	admin.Get("/webmail/storage/:mailboxId", r.h.GetWebmailStorageMetrics)
+
 	// Provision API
 	admin.Post("/provision/domain", r.h.ProvisionDomain)
 
@@ -241,6 +258,14 @@ func (r *Router) setupRoutes() {
 	men.Post("/compliance/policies", r.h.CreateRetentionPolicy)
 	men.Put("/compliance/policies/:id", r.h.UpdateRetentionPolicy)
 	men.Delete("/compliance/policies/:id", r.h.DeleteRetentionPolicy)
+
+	// Webmail Management — CSRF-protected write routes
+	men.Post("/webmail/sessions/:id/revoke", r.h.RevokeWebmailSession)
+	men.Post("/webmail/sessions/revoke-all", r.h.RevokeAllWebmailSessions)
+	men.Post("/webmail/controls/force-logout/:mailboxId", r.h.ForceLogoutWebmail)
+	men.Post("/webmail/controls/unlock/:mailboxId", r.h.UnlockWebmailMailbox)
+	men.Post("/webmail/controls/reset-preferences/:mailboxId", r.h.ResetWebmailPreferences)
+	men.Post("/webmail/controls/clear-counters/:mailboxId", r.h.ClearFailedLoginCounters)
 }
 
 func (r *Router) setupAdminUI() {

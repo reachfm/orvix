@@ -361,3 +361,142 @@ func TestJMAPWellKnownUnauthenticated(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, body)
 	}
 }
+
+func TestJMAPAuthSucceedsEvenIfRecorderFails(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", filepath.Join(dir, "jmap_recorder_test.db")+"?_journal_mode=WAL&_busy_timeout=5000")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	for _, stmt := range coremailTables() {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("create table: %v", err)
+		}
+	}
+
+	engCfg := coremail.EngineConfig{DB: db, AuthCfg: coremail.DefaultAuthConfig()}
+	eng := coremail.NewEngine(engCfg)
+
+	_, _, err = eng.ProvisionDomain(context.Background(), "test.com", "smb",
+		"user@test.com", "pass", "Test User", 1)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+
+	srv := NewServer(eng)
+	srv.Hostname = "jmap.test.com"
+
+	// RecordSession always panics (tests recover() in recordSession).
+	srv.RecordSession = func(ctx context.Context, mailboxID uint, ip, userAgent string) error {
+		panic("session recorder failure")
+	}
+	// RecordLoginActivity always returns error (tests recover() in recordLoginActivity).
+	srv.RecordLoginActivity = func(ctx context.Context, mailboxID uint, success bool, ip, userAgent string) error {
+		panic("login activity recorder failure")
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := listener.Addr().String()
+
+	go func() {
+		srv.srv = &http.Server{
+			Addr:    addr,
+			Handler: srv.withMiddleware(srv.mux),
+		}
+		srv.srv.Serve(listener)
+	}()
+	defer listener.Close()
+
+	// Auth must succeed despite recorder panics.
+	resp, body := jmapRequest(t, addr, "GET", "/jmap/session", "user@test.com", "pass")
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200 auth success despite recorder failure, got %d: %s", resp.StatusCode, body)
+	}
+}
+
+func TestJMAPAuthRecordsLoginActivity(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", filepath.Join(dir, "jmap_login_activity.db")+"?_journal_mode=WAL&_busy_timeout=5000")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	for _, stmt := range coremailTables() {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("create table: %v", err)
+		}
+	}
+
+	engCfg := coremail.EngineConfig{DB: db, AuthCfg: coremail.DefaultAuthConfig()}
+	eng := coremail.NewEngine(engCfg)
+
+	_, mbox, err := eng.ProvisionDomain(context.Background(), "test.com", "smb",
+		"user@test.com", "pass", "Test User", 1)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+
+	// Track recorded login activities.
+	type activity struct {
+		MailboxID uint
+		Success   bool
+	}
+	var records []activity
+	var mu sync.Mutex
+
+	srv := NewServer(eng)
+	srv.Hostname = "jmap.test.com"
+	srv.RecordLoginActivity = func(ctx context.Context, mailboxID uint, success bool, ip, userAgent string) error {
+		mu.Lock()
+		records = append(records, activity{mailboxID, success})
+		mu.Unlock()
+		return nil
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := listener.Addr().String()
+
+	go func() {
+		srv.srv = &http.Server{
+			Addr:    addr,
+			Handler: srv.withMiddleware(srv.mux),
+		}
+		srv.srv.Serve(listener)
+	}()
+	defer listener.Close()
+
+	// 1. Failed login with known mailbox records failed activity.
+	resp, _ := jmapRequest(t, addr, "GET", "/jmap/session", "user@test.com", "wrongpass")
+	if resp.StatusCode != 401 {
+		t.Fatalf("expected 401 for wrong password, got %d", resp.StatusCode)
+	}
+
+	// 2. Successful login records success activity.
+	resp, _ = jmapRequest(t, addr, "GET", "/jmap/session", "user@test.com", "pass")
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200 for correct password, got %d", resp.StatusCode)
+	}
+
+	mu.Lock()
+	if len(records) != 2 {
+		t.Fatalf("expected 2 login activity records, got %d", len(records))
+	}
+	// First record: failed login (wrongpass).
+	if records[0].MailboxID != mbox.ID || records[0].Success {
+		t.Fatalf("expected first record to be failed login for mailbox %d, got mailboxID=%d success=%v", mbox.ID, records[0].MailboxID, records[0].Success)
+	}
+	// Second record: successful login.
+	if records[1].MailboxID != mbox.ID || !records[1].Success {
+		t.Fatalf("expected second record to be successful login for mailbox %d, got mailboxID=%d success=%v", mbox.ID, records[1].MailboxID, records[1].Success)
+	}
+	mu.Unlock()
+}

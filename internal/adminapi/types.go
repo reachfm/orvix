@@ -60,6 +60,8 @@ const (
 	PermLifecycleWrite  Permission = "lifecycle.write"
 	PermMigrationRead   Permission = "migration.read"
 	PermMigrationWrite  Permission = "migration.write"
+	PermWebmailRead     Permission = "webmail.read"
+	PermWebmailWrite    Permission = "webmail.write"
 )
 
 var allPermissions = []Permission{
@@ -73,6 +75,7 @@ var allPermissions = []Permission{
 	PermMonitoringRead, PermMonitoringWrite,
 	PermLifecycleRead, PermLifecycleWrite,
 	PermMigrationRead, PermMigrationWrite,
+	PermWebmailRead, PermWebmailWrite,
 }
 
 var readPermissions = []Permission{
@@ -85,6 +88,7 @@ var readPermissions = []Permission{
 	PermMonitoringRead,
 	PermLifecycleRead,
 	PermMigrationRead,
+	PermWebmailRead,
 }
 
 var rolePermissions = map[Role][]Permission{
@@ -263,6 +267,16 @@ const (
 	AuditLicenseInstallFailed    AuditAction = "license_install_failed"
 	AuditLicenseValidated        AuditAction = "license_validated"
 	AuditLicenseRefreshed        AuditAction = "license_refreshed"
+	AuditWebmailAccountsListed   AuditAction = "webmail_accounts_listed"
+	AuditWebmailSessionsListed   AuditAction = "webmail_sessions_listed"
+	AuditWebmailSessionRevoked   AuditAction = "webmail_session_revoked"
+	AuditWebmailSessionsRevoked  AuditAction = "webmail_sessions_revoked"
+	AuditWebmailActivityViewed   AuditAction = "webmail_activity_viewed"
+	AuditWebmailStorageViewed    AuditAction = "webmail_storage_viewed"
+	AuditWebmailForceLogout      AuditAction = "webmail_force_logout"
+	AuditWebmailUnlock           AuditAction = "webmail_unlock"
+	AuditWebmailResetPreferences AuditAction = "webmail_reset_preferences"
+	AuditWebmailClearCounters    AuditAction = "webmail_clear_counters"
 )
 
 type AuditEntry struct {

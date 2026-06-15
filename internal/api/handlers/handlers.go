@@ -18,6 +18,7 @@ import (
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
+	"github.com/orvix/orvix/internal/webmailmgmt"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/argon2"
 	"gorm.io/gorm"
@@ -35,6 +36,7 @@ type Handler struct {
 	security    *auth.SecurityMonitor
 	rateLimiter *auth.RedisRateLimiter
 	auditStore  *audit.Store
+	webmailSvc  *webmailmgmt.Service
 }
 
 // NewHandler creates a new Handler with dependencies.

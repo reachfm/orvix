@@ -84,6 +84,8 @@ type Server struct {
 	policyEngine interface {
 		Evaluate(req *policy.EvaluationRequest) *policy.EvaluationResult
 	}
+	RecordSession       func(ctx context.Context, mailboxID uint, ip, userAgent string) error
+	RecordLoginActivity func(ctx context.Context, mailboxID uint, success bool, ip, userAgent string) error
 }
 
 // ── Mailbox Types ───────────────────────────────────────────

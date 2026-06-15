@@ -49,6 +49,7 @@
         <button type="button" data-page="mailboxes"><span class="nav-icon">M</span>Mailboxes</button>
         <button type="button" data-page="queue"><span class="nav-icon">Q</span>Queue</button>
         <button type="button" data-page="backups"><span class="nav-icon">B</span>Backups</button>
+        <button type="button" data-page="webmail"><span class="nav-icon">W</span>Webmail</button>
         <button type="button" data-page="logs"><span class="nav-icon">L</span>Logs</button>
         <button type="button" data-page="settings"><span class="nav-icon">S</span>Settings</button>
       </nav>
@@ -323,6 +324,67 @@
             </div>
           </section>
           <section class="panel"><div class="panel-body" id="backups-table"></div></section>
+        </section>
+
+        <section class="page hidden" data-page-view="webmail">
+          <div class="page-head"><div><h2>Webmail Accounts</h2><p>Webmail mailbox accounts, active sessions, login activity, storage metrics, and account controls.</p></div><button class="ghost-btn" type="button" data-refresh="webmail">Refresh</button></div>
+          <section class="panel">
+            <div class="panel-body">
+              <div class="ops-toolbar">
+                <label>Search
+                  <input id="webmail-search" type="search" placeholder="user@example.com">
+                </label>
+                <label>Domain
+                  <input id="webmail-domain-filter" type="text" placeholder="domain.com">
+                </label>
+                <label>Status
+                  <select id="webmail-status-filter">
+                    <option value="">All</option>
+                    <option value="active">Active</option>
+                    <option value="suspended">Suspended</option>
+                    <option value="locked">Locked</option>
+                  </select>
+                </label>
+                <label>Admin
+                  <select id="webmail-admin-filter">
+                    <option value="">All</option>
+                    <option value="true">Admin</option>
+                    <option value="false">Non-admin</option>
+                  </select>
+                </label>
+              </div>
+            </div>
+          </section>
+          <section class="panel"><div class="panel-body" id="webmail-accounts-table"></div></section>
+        </section>
+
+        <section class="page hidden" data-detail-view="webmail-detail">
+          <div class="page-head"><div><h2 id="wmd-title">Webmail Account Detail</h2></div><button class="ghost-btn" type="button" data-detail-back="webmail-detail">Back</button></div>
+          <section class="panel"><div class="panel-body" id="wmd-content"></div></section>
+          <section class="panel">
+            <div class="panel-head"><h3>Sessions</h3></div>
+            <div class="panel-body" id="wmd-sessions"><div class="empty-state">Loading sessions...</div></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Login Activity</h3></div>
+            <div class="panel-body" id="wmd-activity"><div class="empty-state">Loading activity...</div></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Storage Metrics</h3></div>
+            <div class="panel-body" id="wmd-storage"><div class="empty-state">Loading storage...</div></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Account Controls</h3></div>
+            <div class="panel-body">
+              <div class="ops-toolbar">
+                <button class="ghost-btn" type="button" id="wmd-force-logout">Force Logout All Sessions</button>
+                <button class="ghost-btn" type="button" id="wmd-unlock">Unlock Mailbox</button>
+                <button class="ghost-btn" type="button" id="wmd-reset-preferences">Reset Webmail Preferences</button>
+                <button class="ghost-btn" type="button" id="wmd-clear-counters">Clear Failed Login Counters</button>
+              </div>
+              <span id="wmd-ctrl-message" class="message" style="margin-top:8px;"></span>
+            </div>
+          </section>
         </section>
 
         <section class="page hidden" data-page-view="logs">

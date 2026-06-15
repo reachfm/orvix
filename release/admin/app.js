@@ -8,7 +8,9 @@ const state = {
   backups: [],
   logs: [],
   selectedDomains: new Set(),
-  selectedMailboxes: new Set()
+  selectedMailboxes: new Set(),
+  webmailAccounts: [],
+  currentWebmailAccount: null
 };
 
 const el = (id) => document.getElementById(id);
@@ -368,6 +370,110 @@ if (backupRetentionBtn) {
       backupRetentionBtn.disabled = false;
     }
   });
+}
+
+// ── Webmail Accounts ───────────────────────────────────────
+
+async function loadWebmailAccounts() {
+  var node = el("webmail-accounts-table");
+  if (!node) return;
+  var search = el("webmail-search").value.trim();
+  var domain = el("webmail-domain-filter").value.trim();
+  var status = el("webmail-status-filter").value;
+  var admin = el("webmail-admin-filter").value;
+  try {
+    var data = await apiGet("/api/v1/webmail/accounts" + queryString({ search: search, domain: domain, status: status, admin: admin }), []);
+    state.webmailAccounts = data && Array.isArray(data) ? data : (data && Array.isArray(data.accounts) ? data.accounts : []);
+    renderWebmailAccountsTable("webmail-accounts-table", state.webmailAccounts);
+  } catch (_) {
+    node.innerHTML = '<div class="empty-state">Webmail accounts unavailable.</div>';
+  }
+}
+
+function renderWebmailAccountsTable(id, accounts) {
+  var node = el(id);
+  if (!node) return;
+  if (!Array.isArray(accounts) || accounts.length === 0) {
+    node.innerHTML = '<div class="empty-state">No webmail accounts found.</div>';
+    return;
+  }
+  var head = '<table class="table"><thead><tr><th>Mailbox ID</th><th>Email</th><th>Status</th><th>Domain</th><th>Admin</th><th>Last Login</th><th>Created</th><th></th></tr></thead><tbody>';
+  var body = accounts.map(function(a) {
+    var statusStr = escapeHTML(a.status || "unknown");
+    var lastLogin = a.last_login_at ? escapeHTML(a.last_login_at) : "-";
+    var created = a.created_at ? escapeHTML(a.created_at) : "-";
+    var isAdmin = a.is_admin ? "Yes" : "No";
+    return '<tr><td>' + a.mailbox_id + '</td><td>' + escapeHTML(a.email) + '</td><td>' + statusStr + '</td><td>' + escapeHTML(a.domain) + '</td><td>' + isAdmin + '</td><td>' + lastLogin + '</td><td>' + created + '</td>' +
+      '<td><button class="ghost-btn wm-view" data-mailbox-id="' + a.mailbox_id + '" data-email="' + escapeHTML(a.email) + '">View</button></td></tr>';
+  }).join("");
+  node.innerHTML = head + body + '</tbody></table>';
+}
+
+async function loadWebmailDetail(mailboxId, email) {
+  state.currentWebmailAccount = mailboxId;
+  el("wmd-title").textContent = "Webmail Account — " + escapeHTML(email);
+  el("wmd-content").innerHTML = '<div class="empty-state">Mailbox ID: ' + mailboxId + ' | Email: ' + escapeHTML(email) + '</div>';
+  switchDetailView("webmail-detail");
+
+  try {
+    var [sessions, activity, storage] = await Promise.all([
+      apiGet("/api/v1/webmail/sessions?mailboxId=" + mailboxId, []),
+      apiGet("/api/v1/webmail/activity/" + mailboxId, null),
+      apiGet("/api/v1/webmail/storage/" + mailboxId, null)
+    ]);
+    var sessionsArr = Array.isArray(sessions) ? sessions : (sessions && Array.isArray(sessions.sessions) ? sessions.sessions : []);
+    renderWebmailSessions(sessionsArr);
+    renderWebmailActivity(activity);
+    renderWebmailStorage(storage);
+  } catch (_) {
+    el("wmd-sessions").innerHTML = '<div class="empty-state">Sessions unavailable.</div>';
+    el("wmd-activity").innerHTML = '<div class="empty-state">Activity unavailable.</div>';
+    el("wmd-storage").innerHTML = '<div class="empty-state">Storage unavailable.</div>';
+  }
+}
+
+function renderWebmailSessions(sessions) {
+  var node = el("wmd-sessions");
+  if (!node) return;
+  if (!Array.isArray(sessions) || sessions.length === 0) {
+    node.innerHTML = '<div class="empty-state">No active sessions.</div>';
+    return;
+  }
+  var head = '<table class="table"><thead><tr><th>Session ID</th><th>IP</th><th>User Agent</th><th>Created</th><th>Last Seen</th><th></th></tr></thead><tbody>';
+  var body = sessions.map(function(s) {
+    var ua = escapeHTML((s.user_agent || "").substring(0, 80));
+    return '<tr><td>' + s.id + '</td><td>' + escapeHTML(s.ip) + '</td><td>' + ua + '</td><td>' + escapeHTML(s.created_at) + '</td><td>' + escapeHTML(s.last_seen_at) + '</td>' +
+      '<td><button class="ghost-btn wm-revoke-session" data-session-id="' + s.id + '">Revoke</button></td></tr>';
+  }).join("");
+  node.innerHTML = head + body + '</tbody></table>';
+}
+
+function renderWebmailActivity(activity) {
+  var node = el("wmd-activity");
+  if (!node) return;
+  if (!activity) {
+    node.innerHTML = '<div class="empty-state">No login activity data.</div>';
+    return;
+  }
+  node.innerHTML =
+    '<div class="setting-row"><div><strong>Successful Logins</strong></div><span>' + (activity.successful_logins || 0) + '</span></div>' +
+    '<div class="setting-row"><div><strong>Failed Logins</strong></div><span>' + (activity.failed_logins || 0) + '</span></div>' +
+    '<div class="setting-row"><div><strong>Last Login</strong></div><span>' + escapeHTML(activity.last_login_at || "-") + '</span></div>' +
+    '<div class="setting-row"><div><strong>Last Failed Login</strong></div><span>' + escapeHTML(activity.last_failed_login_at || "-") + '</span></div>';
+}
+
+function renderWebmailStorage(storage) {
+  var node = el("wmd-storage");
+  if (!node) return;
+  if (!storage) {
+    node.innerHTML = '<div class="empty-state">No storage metrics available.</div>';
+    return;
+  }
+  node.innerHTML =
+    '<div class="setting-row"><div><strong>Message Count</strong></div><span>' + (storage.message_count || 0) + '</span></div>' +
+    '<div class="setting-row"><div><strong>Mailbox Size</strong></div><span>' + formatBytes(storage.mailbox_size) + '</span></div>' +
+    '<div class="setting-row"><div><strong>Sent Count</strong></div><span>' + (storage.sent_count || 0) + '</span></div>' +
+    '<div class="setting-row"><div><strong>Received Count</strong></div><span>' + (storage.received_count || 0) + '</span></div>';
 }
 
 function formatBytes(bytes) {
@@ -851,6 +957,15 @@ if (backupCreate) {
   });
 });
 
+["webmail-search", "webmail-domain-filter", "webmail-status-filter", "webmail-admin-filter"].forEach(function(id) {
+  var node = el(id);
+  if (!node) return;
+  var eventName = node.tagName === "SELECT" ? "change" : "input";
+  node.addEventListener(eventName, function() {
+    loadWebmailAccounts().catch(function(err) { showAlert(err.message || "Webmail filter failed."); });
+  });
+});
+
 el("mailboxes-table").addEventListener("change", function(event) {
   var box = event.target.closest("input.mailbox-select");
   if (!box) return;
@@ -910,6 +1025,28 @@ if (domainExport) {
     }
   });
 }
+
+async function webmailControl(action, endpoint) {
+  var mbId = state.currentWebmailAccount;
+  if (!mbId) return;
+  try {
+    var result = await apiPost("/api/v1/webmail/controls/" + endpoint + "/" + mbId, {});
+    el("wmd-ctrl-message").textContent = action + " completed.";
+    el("wmd-ctrl-message").className = "message success";
+  } catch (err) {
+    el("wmd-ctrl-message").textContent = err.message || action + " failed.";
+    el("wmd-ctrl-message").className = "message error";
+  }
+}
+
+var wmdForceLogout = el("wmd-force-logout");
+if (wmdForceLogout) wmdForceLogout.addEventListener("click", function() { webmailControl("Force logout", "force-logout"); });
+var wmdUnlock = el("wmd-unlock");
+if (wmdUnlock) wmdUnlock.addEventListener("click", function() { webmailControl("Unlock", "unlock"); });
+var wmdResetPrefs = el("wmd-reset-preferences");
+if (wmdResetPrefs) wmdResetPrefs.addEventListener("click", function() { webmailControl("Reset preferences", "reset-preferences"); });
+var wmdClearCounters = el("wmd-clear-counters");
+if (wmdClearCounters) wmdClearCounters.addEventListener("click", function() { webmailControl("Clear counters", "clear-counters"); });
 
 function showDetail(name) {
   document.querySelectorAll("[data-page-view]").forEach(function(v) { v.classList.add("hidden"); });
@@ -1003,6 +1140,33 @@ document.addEventListener("click", function(event) {
     if (domain) showDomainDetail(domain);
     return;
   }
+  var wmViewBtn = event.target.closest("button.wm-view");
+  if (wmViewBtn) {
+    var mailboxId = wmViewBtn.dataset.mailboxId;
+    var email = wmViewBtn.dataset.email;
+    if (mailboxId) loadWebmailDetail(Number(mailboxId), email);
+    return;
+  }
+  var revokeBtn = event.target.closest("button.wm-revoke-session");
+  if (revokeBtn) {
+    var sessionId = revokeBtn.dataset.sessionId;
+    if (!sessionId) return;
+    revokeBtn.disabled = true;
+    (async function() {
+      try {
+        await apiPost("/api/v1/webmail/sessions/" + sessionId + "/revoke", {});
+        showAlert("Session " + sessionId + " revoked.");
+        var mbId = state.currentWebmailAccount;
+        var email = el("wmd-title").textContent.replace("Webmail Account — ", "");
+        if (mbId) loadWebmailDetail(mbId, email);
+      } catch (err) {
+        showAlert(err.message || "Revoke failed.");
+      } finally {
+        revokeBtn.disabled = false;
+      }
+    })();
+    return;
+  }
 });
 
 document.querySelectorAll("[data-page]").forEach((button) => {
@@ -1011,6 +1175,7 @@ document.querySelectorAll("[data-page]").forEach((button) => {
     document.querySelectorAll("[data-page]").forEach((item) => item.classList.toggle("active", item === button));
     document.querySelectorAll("[data-page-view]").forEach((view) => view.classList.toggle("hidden", view.dataset.pageView !== page));
     setText("page-subtitle", `${button.textContent.trim()} workspace`);
+    if (page === "webmail") loadWebmailAccounts().catch(function(err) { showAlert(err.message || "Failed to load webmail."); });
   });
 });
 
@@ -1022,6 +1187,7 @@ document.querySelectorAll("[data-refresh]").forEach((button) => {
       if (button.dataset.refresh === "mailboxes") await loadMailboxes();
       if (button.dataset.refresh === "queue") await loadQueue();
       if (button.dataset.refresh === "backups") { await loadBackups(); await loadBackupStats(); await loadBackupSchedule(); }
+      if (button.dataset.refresh === "webmail") await loadWebmailAccounts();
       if (button.dataset.refresh === "logs") await loadLogs();
     } catch (err) {
       showAlert(err.message || "Refresh failed.");

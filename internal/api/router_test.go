@@ -46,6 +46,48 @@ func TestCSPHeader(t *testing.T) {
 	}
 }
 
+func TestWebmailServiceWired(t *testing.T) {
+	logger := zap.NewNop()
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(t.TempDir(), "orvix.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	defer sqlDB.Close()
+	if err := models.MigrateAllRaw(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	authenticator, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	router := NewRouter(cfg, authenticator, logger, db, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
+	defer router.App().Shutdown()
+
+	// GET /api/v1/webmail/accounts without auth should return 401 (not 503).
+	// 503 would mean the webmail service is nil — proving it IS wired.
+	req := httptest.NewRequest("GET", "/api/v1/webmail/accounts", nil)
+	resp, err := router.App().Test(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	if resp.StatusCode == 503 {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("webmail service not wired: got 503: %s", body)
+	}
+	// Must be 401 (unauthorized) because service IS available but auth is missing.
+	if resp.StatusCode != 401 {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 401 (unauthorized, service available), got %d: %s", resp.StatusCode, body)
+	}
+}
+
 func TestLoginHandlerDoesNotLogPasswordHashMaterial(t *testing.T) {
 	sourcePath := filepath.Join("handlers", "handlers.go")
 	raw, err := os.ReadFile(sourcePath)
