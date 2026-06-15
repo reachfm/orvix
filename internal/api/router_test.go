@@ -415,6 +415,32 @@ func TestAdminUIStaticRoutes(t *testing.T) {
 	if !strings.Contains(string(jsBody), "dv-action") {
 		t.Fatalf("admin app.js must have domain view control (dv-action)")
 	}
+	if !strings.Contains(string(jsBody), "wm-view") {
+		t.Fatalf("admin app.js must have webmail view control (wm-view)")
+	}
+	if !strings.Contains(string(jsBody), `event.target.closest("button.wm-view")`) {
+		t.Fatalf("admin app.js must delegate clicks for webmail view buttons")
+	}
+	if !strings.Contains(string(jsBody), "loadWebmailDetail(Number(mailboxId), email)") {
+		t.Fatalf("admin app.js must call loadWebmailDetail with mailbox id and email")
+	}
+	if !strings.Contains(string(jsBody), `showDetail("webmail-detail")`) {
+		t.Fatalf("admin app.js must show the webmail detail view")
+	}
+	if !strings.Contains(string(jsBody), `detailName === "webmail-detail" ? "webmail"`) {
+		t.Fatalf("admin app.js must return from webmail detail to the webmail page")
+	}
+	resp, err = router.App().Test(httptest.NewRequest("GET", "/admin", nil))
+	if err != nil {
+		t.Fatalf("GET /admin request: %v", err)
+	}
+	indexBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("GET /admin body: %v", err)
+	}
+	if !strings.Contains(string(indexBody), `data-detail-view="webmail-detail"`) {
+		t.Fatalf("admin index.html must include webmail-detail section")
+	}
 	resp, err = router.App().Test(httptest.NewRequest("HEAD", "/admin", nil))
 	if err != nil {
 		t.Fatalf("HEAD /admin request: %v", err)

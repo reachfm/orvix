@@ -413,7 +413,7 @@ async function loadWebmailDetail(mailboxId, email) {
   state.currentWebmailAccount = mailboxId;
   el("wmd-title").textContent = "Webmail Account — " + escapeHTML(email);
   el("wmd-content").innerHTML = '<div class="empty-state">Mailbox ID: ' + mailboxId + ' | Email: ' + escapeHTML(email) + '</div>';
-  switchDetailView("webmail-detail");
+  showDetail("webmail-detail");
 
   try {
     var [sessions, activity, storage] = await Promise.all([
@@ -1057,8 +1057,19 @@ function showDetail(name) {
 
 document.querySelectorAll("[data-detail-back]").forEach(function(btn) {
   btn.addEventListener("click", function() {
+    var detailName = btn.dataset.detailBack;
+    var pageName = detailName === "webmail-detail" ? "webmail" : "";
+    if (detailName === "mailbox-detail") pageName = "mailboxes";
+    if (detailName === "domain-detail") pageName = "domains";
     document.querySelectorAll("[data-detail-view]").forEach(function(v) { v.classList.add("hidden"); });
-    document.querySelectorAll("[data-page-view]").forEach(function(v) { v.classList.remove("hidden"); });
+    document.querySelectorAll("[data-page-view]").forEach(function(v) {
+      v.classList.toggle("hidden", pageName ? v.dataset.pageView !== pageName : false);
+    });
+    if (pageName) {
+      document.querySelectorAll("[data-page]").forEach(function(item) {
+        item.classList.toggle("active", item.dataset.page === pageName);
+      });
+    }
   });
 });
 
