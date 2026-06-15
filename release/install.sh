@@ -515,6 +515,25 @@ ENV
     chmod 0640 "$BOOTSTRAP_ENV"
 }
 
+install_update_helper() {
+    # Install the runtime update systemd oneshot unit.
+    local unit_src="${ORVIX_SOURCE_DIR}/release/systemd/orvix-update.service"
+    if [ -f "$unit_src" ]; then
+        install -m 0644 -o root -g root "$unit_src" /etc/systemd/system/orvix-update.service
+        log_detail "installed /etc/systemd/system/orvix-update.service (0644 root:root)"
+    else
+        log_detail "orvix-update.service not found at $unit_src; skipping"
+    fi
+    # Install the sudoers drop-in for passwordless systemctl start.
+    local sudoers_src="${ORVIX_SOURCE_DIR}/release/sudoers.d/orvix-update"
+    if [ -f "$sudoers_src" ]; then
+        install -m 0440 -o root -g root "$sudoers_src" /etc/sudoers.d/orvix-update
+        log_detail "installed /etc/sudoers.d/orvix-update (0440 root:root)"
+    else
+        log_detail "sudoers drop-in not found at $sudoers_src; skipping"
+    fi
+}
+
 verify_install() {
 	local email="$1"
 	local password="$2"
@@ -621,6 +640,7 @@ main() {
 
     set_step "systemd" "Service activation" 85
     write_service
+    install_update_helper
     run_quiet systemctl daemon-reload
     run_quiet systemctl enable orvix
     run_quiet systemctl restart orvix

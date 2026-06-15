@@ -363,11 +363,13 @@ func TestUpdateV1_PreflightDoesNotExecScript(t *testing.T) {
 	}
 }
 
-// TestUpdateV1_PreflightPassesWhenScriptPresent verifies the
-// preflight reports pass=true when the canonical script is
-// present and the disk has space.
-func TestUpdateV1_PreflightPassesWhenScriptPresent(t *testing.T) {
-	router, sqlDB, token, _, _ := buildUpdateHarness(t, true)
+// TestUpdateV1_PreflightReportsMissingHelperUnit verifies the
+// preflight correctly reports the update helper unit as missing
+// on machines without the systemd oneshot installed (always true
+// in test/CI). This confirms the preflight gate is wired to the
+// systemd-only design.
+func TestUpdateV1_PreflightReportsMissingHelperUnit(t *testing.T) {
+	router, sqlDB, token, _, _ := buildUpdateHarness(t, false)
 	defer router.App().Shutdown()
 	defer sqlDB.Close()
 	resp, body := updateRequest(t, router, "GET", "/api/v1/update/preflight", "", token, "", false)
@@ -382,11 +384,22 @@ func TestUpdateV1_PreflightPassesWhenScriptPresent(t *testing.T) {
 	if err := json.Unmarshal(body, &pf); err != nil {
 		t.Fatalf("decode: %v: %s", err, body)
 	}
-	// The disk_space and binary_build checks may be warnings on
-	// Windows because statfs returns ENOSYS; the Pass should still
-	// be true because script_path and backup_dir_writable pass.
-	if !pf.Pass {
-		t.Fatalf("expected preflight to pass, got %s", body)
+	// The preflight must fail due to missing helper unit (systemd
+	// is not available in the test environment).
+	if pf.Pass {
+		t.Fatalf("expected preflight to fail (no systemd), but got pass=true: %s", body)
+	}
+	found := false
+	for _, c := range pf.Checks {
+		if name, _ := c["name"].(string); name == "update_helper_unit" {
+			found = true
+			if status, _ := c["status"].(string); status != "fail" {
+				t.Errorf("update_helper_unit status = %q, want fail", status)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected update_helper_unit check in preflight: %s", body)
 	}
 }
 
@@ -716,4 +729,126 @@ func bannedSubstrings(root string) []string {
 		out = append(out, p)
 	}
 	return out
+}
+
+// workspaceRoot walks up from the test package directory until it
+// finds a go.mod file, returning the absolute workspace root. Used
+// by tests that need to read release/ files.
+func workspaceRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("workspace root not found (no go.mod in any parent)")
+		}
+		dir = parent
+	}
+}
+
+// TestUpdateV1_InstallScriptReferencesUpdateHelper verifies that
+// release/install.sh contains the commands to deploy the update
+// helper unit and the sudoers drop-in with the correct permissions.
+// This test exists to catch a refactor that drops the install step.
+func TestUpdateV1_InstallScriptReferencesUpdateHelper(t *testing.T) {
+	root := workspaceRoot(t)
+	installPath := filepath.Join(root, "release", "install.sh")
+	data, err := os.ReadFile(installPath)
+	if err != nil {
+		t.Fatalf("read install.sh: %v", err)
+	}
+	content := string(data)
+
+	// The install script must install the systemd unit.
+	if !strings.Contains(content, "/etc/systemd/system/orvix-update.service") {
+		t.Error("install.sh must reference /etc/systemd/system/orvix-update.service")
+	}
+	// The install script must install the sudoers drop-in.
+	if !strings.Contains(content, "/etc/sudoers.d/orvix-update") {
+		t.Error("install.sh must reference /etc/sudoers.d/orvix-update")
+	}
+	// The unit file must be installed with 0644 root:root.
+	if !strings.Contains(content, "0644 -o root -g root") {
+		t.Error("install.sh must set unit file permissions 0644 root:root")
+	}
+	// The sudoers file must be installed with 0440 root:root.
+	if !strings.Contains(content, "0440 -o root -g root") {
+		t.Error("install.sh must set sudoers file permissions 0440 root:root")
+	}
+	// daemon-reload must be called so systemd picks up the new unit.
+	if !strings.Contains(content, "systemctl daemon-reload") {
+		t.Error("install.sh must run systemctl daemon-reload after installing the helper unit")
+	}
+}
+
+// TestUpdateV1_HelperUnitHasReadWritePaths verifies the update
+// helper unit file contains explicit ReadWritePaths entries for
+// the paths the runtime update script needs to write: /opt/orvix,
+// /usr/local/bin, /usr/share/orvix, /tmp. Without these the script
+// cannot write the updated binary, admin UI, or build artifacts.
+func TestUpdateV1_HelperUnitHasReadWritePaths(t *testing.T) {
+	root := workspaceRoot(t)
+	unitPath := filepath.Join(root, "release", "systemd", "orvix-update.service")
+	data, err := os.ReadFile(unitPath)
+	if err != nil {
+		t.Fatalf("read unit file: %v", err)
+	}
+	content := string(data)
+
+	// Must use ProtectSystem=strict (not full) with explicit paths.
+	if !strings.Contains(content, "ProtectSystem=strict") {
+		t.Error("unit must use ProtectSystem=strict")
+	}
+	if !strings.Contains(content, "ReadWritePaths") {
+		t.Error("unit must have ReadWritePaths directive")
+	}
+	for _, path := range []string{"/opt/orvix", "/usr/local/bin", "/usr/share/orvix", "/tmp"} {
+		if !strings.Contains(content, path) {
+			t.Errorf("unit ReadWritePaths must include %q", path)
+		}
+	}
+}
+
+// TestUpdateV1_HelperUnitNoEnvironmentFile verifies the update
+// helper unit does NOT load any external environment file. The
+// unit runs as root with ExecStart=/opt/orvix/release/scripts/...
+// and must NOT source /etc/orvix/update.env because that file
+// lives under a directory owned by the non-root orvix user.
+// An attacker who controls update.env would control environment
+// variables in a root process.
+//
+// The only environment variable in the unit is the hardcoded
+// ORVIX_UPDATE=1 (set via the Environment directive, which is
+// part of the root-owned unit file and cannot be modified by
+// the orvix user).
+func TestUpdateV1_HelperUnitNoEnvironmentFile(t *testing.T) {
+	root := workspaceRoot(t)
+	unitPath := filepath.Join(root, "release", "systemd", "orvix-update.service")
+	data, err := os.ReadFile(unitPath)
+	if err != nil {
+		t.Fatalf("read unit file: %v", err)
+	}
+	content := string(data)
+
+	// Must NOT contain EnvironmentFile (the whole point of this test).
+	if strings.Contains(content, "EnvironmentFile") {
+		t.Error("unit must NOT contain EnvironmentFile (injection vector)")
+	}
+	// Must NOT reference /etc/orvix/update.env.
+	if strings.Contains(content, "update.env") {
+		t.Error("unit must NOT reference update.env")
+	}
+	if strings.Contains(content, "/etc/orvix") {
+		t.Error("unit must NOT reference /etc/orvix")
+	}
+	// ExecStart must be the hardcoded canonical path.
+	if !strings.Contains(content, "ExecStart=/opt/orvix/release/scripts/apply-runtime-update.sh") {
+		t.Error("unit must have hardcoded ExecStart=/opt/orvix/release/scripts/apply-runtime-update.sh")
+	}
 }

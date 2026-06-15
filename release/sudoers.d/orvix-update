@@ -1,0 +1,7 @@
+# Allow the orvix service account to manage the runtime update helper
+# unit without a password. The web process never exec's the update
+# script directly — it drives the systemd oneshot only.
+#
+# The `start` command is the only privileged operation. Status queries
+# (is-active, show) are readable by any user without sudo.
+orvix ALL=(root) NOPASSWD: /usr/bin/systemctl start orvix-update.service

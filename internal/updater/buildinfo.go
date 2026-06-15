@@ -198,28 +198,6 @@ func statfsImpl(path string) (statfsResult, error) {
 	return statfsPlatform(path)
 }
 
-// EnsurePathUnderRoot is a public helper for tests and other
-// packages: it returns nil iff the candidate path is a descendant
-// of root and ends with suffix. Suffix comparison is path-separator
-// agnostic: callers should pass a suffix that uses forward slashes.
-func EnsurePathUnderRoot(root, candidate, suffix string) error {
-	rabs, err := filepath.Abs(root)
-	if err != nil {
-		return err
-	}
-	cabs, err := filepath.Abs(candidate)
-	if err != nil {
-		return err
-	}
-	if !strings.HasPrefix(filepath.ToSlash(cabs), filepath.ToSlash(rabs)) {
-		return ErrScriptPathRejected
-	}
-	if !strings.HasSuffix(filepath.ToSlash(cabs), suffix) {
-		return ErrScriptPathRejected
-	}
-	return nil
-}
-
 // fileExists is a small helper.
 func fileExists(p string) bool {
 	_, err := os.Stat(p)

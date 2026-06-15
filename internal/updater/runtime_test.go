@@ -4,9 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -18,14 +15,12 @@ import (
 func newService(t *testing.T) (*RuntimeService, string) {
 	t.Helper()
 	dir := t.TempDir()
-	t.Chdir(dir)
 	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s/update.db?mode=memory&cache=shared", dir))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
 	svc := NewRuntimeService(db, Config{
-		ScriptPath:    DefaultScriptPath,
 		WorkspaceRoot: dir,
 		Channel:       ChannelStable,
 		BackupDir:     dir,
@@ -65,9 +60,9 @@ func TestStatusUpdateAvailableFalseByDefault(t *testing.T) {
 
 func TestPreflightFailWhenScriptMissing(t *testing.T) {
 	svc, _ := newService(t)
-	// The workspace root has no release/scripts/apply-runtime-update.sh,
-	// so the script_path check should fail and the preflight should
-	// refuse the run.
+	// The canonical script at /opt/orvix/release/scripts/ is not
+	// present on developer machines, so the script_path check fails
+	// and the preflight refuses the run.
 	pf := svc.Preflight(context.Background())
 	if pf.Pass {
 		t.Fatalf("expected preflight to fail when script is missing, got %+v", pf)
@@ -83,89 +78,28 @@ func TestPreflightFailWhenScriptMissing(t *testing.T) {
 	}
 }
 
-func TestPreflightPassWhenScriptPresent(t *testing.T) {
-	svc, dir := newService(t)
-	// Lay down a fake script at the canonical location.
-	scriptDir := filepath.Join(dir, "release", "scripts")
-	if err := os.MkdirAll(scriptDir, 0750); err != nil {
-		t.Fatalf("mkdir scripts: %v", err)
-	}
-	scriptPath := filepath.Join(scriptDir, "apply-runtime-update.sh")
-	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\necho ok\n"), 0750); err != nil {
-		t.Fatalf("write script: %v", err)
-	}
-	pf := svc.Preflight(context.Background())
-	if !pf.Pass {
-		t.Fatalf("expected preflight to pass, got %+v", pf)
-	}
-}
-
-func TestPreflightPassesWithWorkspaceRootLayout(t *testing.T) {
-	svc, dir := newService(t)
-	createUpdateWorkspace(t, dir)
-	pf := svc.Preflight(context.Background())
-	if !pf.Pass {
-		t.Fatalf("expected preflight to pass, got %+v", pf)
-	}
-	requireCheck(t, pf, "script_path", "pass")
-	requireCheck(t, pf, "binary_build", "pass")
-	data, _ := jsonMarshal(pf)
-	for _, banned := range []string{dir, filepath.Join(dir, "release", "scripts"), filepath.Join(dir, "cmd", "orvix")} {
-		if strings.Contains(string(data), banned) {
-			t.Fatalf("preflight leaks path %q: %s", banned, data)
-		}
-	}
-}
-
-func TestPreflightWrongWorkspaceRootFailsSafely(t *testing.T) {
-	outside := t.TempDir()
-	t.Chdir(outside)
-	svc, dir := newService(t)
-	svc.cfg.WorkspaceRoot = filepath.Join(dir, "missing-root")
+func TestPreflightFailsWhenHelperUnitMissing(t *testing.T) {
+	svc, _ := newService(t)
 	pf := svc.Preflight(context.Background())
 	if pf.Pass {
-		t.Fatalf("expected preflight to fail for wrong root, got %+v", pf)
+		t.Fatalf("expected preflight to fail when helper unit is not installed, got %+v", pf)
 	}
-	requireCheck(t, pf, "script_path", "fail")
-	data, _ := jsonMarshal(pf)
-	for _, banned := range []string{dir, svc.cfg.WorkspaceRoot, "release" + string(filepath.Separator) + "scripts"} {
-		if strings.Contains(string(data), banned) {
-			t.Fatalf("preflight leak for wrong root %q: %s", banned, data)
+	found := false
+	for _, c := range pf.Checks {
+		if c.Name == "update_helper_unit" && c.Status == "fail" {
+			found = true
+			if c.Detail != "update helper not installed" {
+				t.Errorf("helper-unit detail = %q, want %q", c.Detail, "update helper not installed")
+			}
+			for _, banned := range []string{"/etc/systemd/system/", "/lib/systemd/system/", "/usr/lib/systemd/system/"} {
+				if strings.Contains(c.Detail, banned) {
+					t.Errorf("helper-unit detail leaks candidate path %q: %q", banned, c.Detail)
+				}
+			}
 		}
 	}
-}
-
-func TestDetectWorkspaceRootUsesConfiguredRootOutsideGit(t *testing.T) {
-	outside := t.TempDir()
-	t.Chdir(outside)
-	root := filepath.Join(outside, "orvix")
-	createUpdateWorkspace(t, root)
-	if got := DetectWorkspaceRoot(root); got != root {
-		t.Fatalf("DetectWorkspaceRoot() = %q, want %q", got, root)
-	}
-}
-
-func TestEnsureScriptPathRejectedOutsideRoot(t *testing.T) {
-	root := t.TempDir()
-	svc, _ := newService(t)
-	svc.cfg.WorkspaceRoot = root
-	svc.cfg.ScriptPath = "/etc/passwd" // absolute path outside root
-	_, err := svc.resolveScriptPath()
-	if err == nil {
-		t.Fatal("expected script path to be rejected")
-	}
-	if !strings.Contains(err.Error(), "rejected") {
-		t.Fatalf("expected rejection error, got %v", err)
-	}
-}
-
-func TestEnsureScriptPathRejectedWrongSuffix(t *testing.T) {
-	svc, dir := newService(t)
-	svc.cfg.WorkspaceRoot = dir
-	svc.cfg.ScriptPath = filepath.Join(dir, "release", "scripts", "evil.sh")
-	_, err := svc.resolveScriptPath()
-	if err == nil {
-		t.Fatal("expected script path to be rejected for wrong suffix")
+	if !found {
+		t.Fatalf("expected update_helper_unit check to fail, got %+v", pf.Checks)
 	}
 }
 
@@ -177,79 +111,6 @@ func TestRunIsRefusedByPreflightWhenScriptMissing(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "preflight") {
 		t.Fatalf("expected preflight error, got %v", err)
-	}
-}
-
-func TestRunExecutesScriptAndPersistsHistory(t *testing.T) {
-	// The runtime update script is a bash script (apply-runtime-update.sh)
-	// that depends on bash, `id`, `setcap`, `systemctl`, etc., which are
-	// only present on POSIX. On Windows, the kernel cannot directly
-	// execute a .sh file. We skip the test on Windows so the test suite
-	// stays platform-portable. The non-execution code paths
-	// (preflight refusal, audit logging, history persistence on a
-	// failed exec, single-flight lock) are all still covered by the
-	// other tests in this file.
-	if runtime.GOOS == "windows" {
-		t.Skip("runtime update script is bash-only; skip on Windows")
-	}
-	svc, dir := newService(t)
-	// Lay down a script that exits 0.
-	scriptDir := filepath.Join(dir, "release", "scripts")
-	if err := os.MkdirAll(scriptDir, 0750); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	scriptPath := filepath.Join(scriptDir, "apply-runtime-update.sh")
-	// A no-op script that exits 0.
-	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 0\n"), 0750); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	row, err := svc.Run(context.Background(), "user:42")
-	if err != nil {
-		t.Fatalf("run: %v", err)
-	}
-	if row.Status != "completed" {
-		t.Errorf("status: %q (want completed)", row.Status)
-	}
-	if row.Actor != "user:42" {
-		t.Errorf("actor: %q (want user:42)", row.Actor)
-	}
-	if row.DurationSeconds < 0 {
-		t.Errorf("duration: %d (must be non-negative)", row.DurationSeconds)
-	}
-	// History should have one row.
-	rows, err := svc.History(context.Background(), 10)
-	if err != nil {
-		t.Fatalf("history: %v", err)
-	}
-	if len(rows) != 1 {
-		t.Fatalf("expected 1 history row, got %d", len(rows))
-	}
-}
-
-// runtimeGoos helper removed: tests now import runtime directly.
-
-func TestRunPersistsFailureOnNonZeroExit(t *testing.T) {
-	svc, dir := newService(t)
-	scriptDir := filepath.Join(dir, "release", "scripts")
-	if err := os.MkdirAll(scriptDir, 0750); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	scriptPath := filepath.Join(scriptDir, "apply-runtime-update.sh")
-	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 1\n"), 0750); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	row, err := svc.Run(context.Background(), "user:1")
-	if err == nil {
-		t.Fatal("expected non-zero exit to surface as error")
-	}
-	if row == nil {
-		t.Fatal("expected non-nil history row on failure")
-	}
-	if row.Status != "failed" {
-		t.Errorf("status: %q (want failed)", row.Status)
-	}
-	if row.Severity != SeverityCritical {
-		t.Errorf("severity: %q (want critical)", row.Severity)
 	}
 }
 
@@ -335,11 +196,12 @@ func TestStatusDoesNotLeakPrivatePath(t *testing.T) {
 }
 
 func TestHistoryDoesNotLeakPrivatePath(t *testing.T) {
-	svc, dir := newService(t)
-	scriptDir := filepath.Join(dir, "release", "scripts")
-	_ = os.MkdirAll(scriptDir, 0750)
-	_ = os.WriteFile(filepath.Join(scriptDir, "apply-runtime-update.sh"), []byte("#!/bin/sh\nexit 0\n"), 0750)
-	_, _ = svc.Run(context.Background(), "user:1")
+	svc, _ := newService(t)
+	// Insert a history row directly (Run requires systemd).
+	if svc.db != nil {
+		_, _ = svc.db.Exec(`INSERT INTO update_history (started_at, completed_at, duration_seconds, previous_sha, new_sha, from_version, to_version, status, severity, actor, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			"2026-06-15 00:00:00", "2026-06-15 00:00:30", 30, "aaa", "bbb", "1.0.0", "1.1.0", "completed", "info", "user:1", "runtime update completed")
+	}
 	rows, _ := svc.History(context.Background(), 10)
 	for _, r := range rows {
 		for _, banned := range []string{"/etc/", "Bearer ", "Bearer:", "password=", "secret="} {
@@ -353,32 +215,4 @@ func TestHistoryDoesNotLeakPrivatePath(t *testing.T) {
 // jsonMarshal is a tiny shim to keep the test file imports small.
 func jsonMarshal(v interface{}) ([]byte, error) {
 	return jsonStdMarshal(v)
-}
-
-func createUpdateWorkspace(t *testing.T, root string) {
-	t.Helper()
-	scriptDir := filepath.Join(root, "release", "scripts")
-	if err := os.MkdirAll(scriptDir, 0750); err != nil {
-		t.Fatalf("mkdir scripts: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(scriptDir, "apply-runtime-update.sh"), []byte("#!/bin/sh\nexit 0\n"), 0750); err != nil {
-		t.Fatalf("write script: %v", err)
-	}
-	cmdDir := filepath.Join(root, "cmd", "orvix")
-	if err := os.MkdirAll(cmdDir, 0750); err != nil {
-		t.Fatalf("mkdir cmd/orvix: %v", err)
-	}
-}
-
-func requireCheck(t *testing.T, pf *PreflightResult, name, status string) {
-	t.Helper()
-	for _, check := range pf.Checks {
-		if check.Name == name {
-			if check.Status != status {
-				t.Fatalf("%s status = %q, want %q in %+v", name, check.Status, status, pf.Checks)
-			}
-			return
-		}
-	}
-	t.Fatalf("missing preflight check %q in %+v", name, pf.Checks)
 }
