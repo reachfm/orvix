@@ -81,6 +81,7 @@ type Config struct {
 // script relative to the workspace root. The handler always resolves
 // the path against the workspace root before exec.
 const DefaultScriptPath = "release/scripts/apply-runtime-update.sh"
+const defaultVPSWorkspaceRoot = "/opt/orvix"
 
 // scriptPathSuffixCanonical is the canonical suffix of the runtime
 // update script, expressed with forward slashes. The allow-list
@@ -318,6 +319,7 @@ func (s *RuntimeService) History(ctx context.Context, limit int) ([]UpdateHistor
 // metadata and (optionally) the audit log.
 func (s *RuntimeService) Preflight(ctx context.Context) *PreflightResult {
 	res := &PreflightResult{Pass: true, Checks: make([]PreflightCheck, 0, 4)}
+	root := s.effectiveWorkspaceRoot()
 
 	// 1. Disk space at the backup dir.
 	if s.cfg.BackupDir != "" {
@@ -380,10 +382,10 @@ func (s *RuntimeService) Preflight(ctx context.Context) *PreflightResult {
 	// 3. Binary build validation: ensure the source tree is present
 	// and the cmd/orvix entry point exists. We do not run `go build`
 	// here — that is the script's job.
-	if _, err := os.Stat("cmd/orvix"); err != nil {
+	if _, err := os.Stat(filepath.Join(root, "cmd", "orvix")); err != nil {
 		res.Checks = append(res.Checks, PreflightCheck{
 			Name: "binary_build", Status: "warning",
-			Detail: "cmd/orvix entry point not found in working dir",
+			Detail: "cmd/orvix entry point not found in workspace root",
 		})
 	} else {
 		res.Checks = append(res.Checks, PreflightCheck{
@@ -521,7 +523,7 @@ func (s *RuntimeService) Run(ctx context.Context, actor string) (*UpdateHistoryR
 	// variables, do not pass any arguments, and do not read stdin.
 	cmd := exec.CommandContext(ctx, absScript)
 	cmd.Env = nil // inherit only the OS env, do not add anything
-	cmd.Dir = s.cfg.WorkspaceRoot
+	cmd.Dir = s.effectiveWorkspaceRoot()
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		s.cfg.Logger.Warn("stdout pipe", zap.Error(err))
@@ -622,18 +624,10 @@ func (s *RuntimeService) IsRunning() bool {
 // runtime update script. The path is always resolved against
 // WorkspaceRoot, never against a user-supplied input.
 func (s *RuntimeService) resolveScriptPath() (string, error) {
-	root := s.cfg.WorkspaceRoot
-	if root == "" {
-		// Fall back to the current working directory.
-		wd, err := os.Getwd()
-		if err != nil {
-			return "", err
-		}
-		root = wd
-	}
+	root := s.effectiveWorkspaceRoot()
 	rootAbs, err := filepath.Abs(root)
 	if err != nil {
-		return "", err
+		return "", ErrScriptPathRejected
 	}
 	script := s.cfg.ScriptPath
 	if script == "" {
@@ -662,6 +656,61 @@ func (s *RuntimeService) resolveScriptPath() (string, error) {
 }
 
 // ── Internal helpers ─────────────────────────────────
+
+// DetectWorkspaceRoot returns the best local repository root for
+// runtime update operations. It never uses request data and never
+// returns a path to clients.
+//
+// Preference order:
+//  1. git rev-parse --show-toplevel when the process is already
+//     running inside a git checkout.
+//  2. Explicit configured root, when present.
+//  3. /opt/orvix, when it has the canonical runtime update script.
+//  4. Process working directory.
+func DetectWorkspaceRoot(configuredRoot string) string {
+	if root := gitWorkspaceRoot(); root != "" {
+		return root
+	}
+	if configuredRoot != "" {
+		return configuredRoot
+	}
+	if hasRuntimeUpdateScript(defaultVPSWorkspaceRoot) {
+		return defaultVPSWorkspaceRoot
+	}
+	if wd, err := os.Getwd(); err == nil {
+		return wd
+	}
+	return "."
+}
+
+func (s *RuntimeService) effectiveWorkspaceRoot() string {
+	return DetectWorkspaceRoot(s.cfg.WorkspaceRoot)
+}
+
+func gitWorkspaceRoot() string {
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	cmd.Stdin = nil
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	root := strings.TrimSpace(string(out))
+	if root == "" {
+		return ""
+	}
+	if hasRuntimeUpdateScript(root) {
+		return root
+	}
+	return ""
+}
+
+func hasRuntimeUpdateScript(root string) bool {
+	if root == "" {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(root, filepath.FromSlash(DefaultScriptPath)))
+	return err == nil && !info.IsDir()
+}
 
 // jobState is a runtime-only snapshot of the active update job.
 // It is never persisted; the source of truth for completed jobs is
@@ -740,10 +789,16 @@ func asIfaceReader(r interface{ Read(p []byte) (int, error) }) interface{ Read(p
 }
 
 // diskUsageFor is a small wrapper around the platform statfs shim.
-func diskUsageFor(path string) (struct{ TotalBytes, FreeBytes, UsedBytes int64; UsedPct int }, error) {
+func diskUsageFor(path string) (struct {
+	TotalBytes, FreeBytes, UsedBytes int64
+	UsedPct                          int
+}, error) {
 	stat, err := statfsImpl(path)
 	if err != nil {
-		return struct{ TotalBytes, FreeBytes, UsedBytes int64; UsedPct int }{}, err
+		return struct {
+			TotalBytes, FreeBytes, UsedBytes int64
+			UsedPct                          int
+		}{}, err
 	}
 	bsize := stat.Bsize
 	if bsize <= 0 {
@@ -756,7 +811,10 @@ func diskUsageFor(path string) (struct{ TotalBytes, FreeBytes, UsedBytes int64; 
 	if total > 0 {
 		pct = int((used * 100) / total)
 	}
-	return struct{ TotalBytes, FreeBytes, UsedBytes int64; UsedPct int }{total, free, used, pct}, nil
+	return struct {
+		TotalBytes, FreeBytes, UsedBytes int64
+		UsedPct                          int
+	}{total, free, used, pct}, nil
 }
 
 // humanBytes formats an int64 byte count for safe rendering.

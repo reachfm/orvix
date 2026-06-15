@@ -358,28 +358,16 @@ func securityHeaders() fiber.Handler {
 }
 
 // updateWorkspaceRoot returns the workspace root used to anchor
-// the runtime update script. Order:
-//  1. cfg.Update.WorkspaceRoot (operator-supplied, production).
-//  2. Parent of cfg.Server.AdminUIDir (legacy derivation).
-//  3. Process working directory.
-//
-// The returned value is the allow-list prefix for the runtime
-// script path on every Run(). The result is never sent to clients;
-// it is consumed only by the service.
+// the runtime update script. The updater detector prefers a live git
+// checkout root, then the explicit config value, then /opt/orvix when
+// the canonical runtime script exists there, then the process working
+// directory. The result is never sent to clients.
 func updateWorkspaceRoot(cfg *config.Config) string {
+	configured := ""
 	if cfg != nil && cfg.Update.WorkspaceRoot != "" {
-		return cfg.Update.WorkspaceRoot
+		configured = cfg.Update.WorkspaceRoot
 	}
-	if cfg != nil && cfg.Server.AdminUIDir != "" {
-		candidate := strings.TrimSuffix(cfg.Server.AdminUIDir, "/admin")
-		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
-			return candidate
-		}
-	}
-	if wd, err := os.Getwd(); err == nil {
-		return wd
-	}
-	return "."
+	return updater.DetectWorkspaceRoot(configured)
 }
 
 // updateChannel returns the release channel from config. The spec

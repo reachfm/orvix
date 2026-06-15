@@ -18,6 +18,7 @@ import (
 func newService(t *testing.T) (*RuntimeService, string) {
 	t.Helper()
 	dir := t.TempDir()
+	t.Chdir(dir)
 	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s/update.db?mode=memory&cache=shared", dir))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
@@ -96,6 +97,51 @@ func TestPreflightPassWhenScriptPresent(t *testing.T) {
 	pf := svc.Preflight(context.Background())
 	if !pf.Pass {
 		t.Fatalf("expected preflight to pass, got %+v", pf)
+	}
+}
+
+func TestPreflightPassesWithWorkspaceRootLayout(t *testing.T) {
+	svc, dir := newService(t)
+	createUpdateWorkspace(t, dir)
+	pf := svc.Preflight(context.Background())
+	if !pf.Pass {
+		t.Fatalf("expected preflight to pass, got %+v", pf)
+	}
+	requireCheck(t, pf, "script_path", "pass")
+	requireCheck(t, pf, "binary_build", "pass")
+	data, _ := jsonMarshal(pf)
+	for _, banned := range []string{dir, filepath.Join(dir, "release", "scripts"), filepath.Join(dir, "cmd", "orvix")} {
+		if strings.Contains(string(data), banned) {
+			t.Fatalf("preflight leaks path %q: %s", banned, data)
+		}
+	}
+}
+
+func TestPreflightWrongWorkspaceRootFailsSafely(t *testing.T) {
+	outside := t.TempDir()
+	t.Chdir(outside)
+	svc, dir := newService(t)
+	svc.cfg.WorkspaceRoot = filepath.Join(dir, "missing-root")
+	pf := svc.Preflight(context.Background())
+	if pf.Pass {
+		t.Fatalf("expected preflight to fail for wrong root, got %+v", pf)
+	}
+	requireCheck(t, pf, "script_path", "fail")
+	data, _ := jsonMarshal(pf)
+	for _, banned := range []string{dir, svc.cfg.WorkspaceRoot, "release" + string(filepath.Separator) + "scripts"} {
+		if strings.Contains(string(data), banned) {
+			t.Fatalf("preflight leak for wrong root %q: %s", banned, data)
+		}
+	}
+}
+
+func TestDetectWorkspaceRootUsesConfiguredRootOutsideGit(t *testing.T) {
+	outside := t.TempDir()
+	t.Chdir(outside)
+	root := filepath.Join(outside, "orvix")
+	createUpdateWorkspace(t, root)
+	if got := DetectWorkspaceRoot(root); got != root {
+		t.Fatalf("DetectWorkspaceRoot() = %q, want %q", got, root)
 	}
 }
 
@@ -230,8 +276,8 @@ func TestSingleFlightLock(t *testing.T) {
 
 func TestSafeModuleID(t *testing.T) {
 	cases := []struct {
-		in  string
-		ok  bool
+		in string
+		ok bool
 	}{
 		{"orvix-core", true},
 		{"auto-update", true},
@@ -307,4 +353,32 @@ func TestHistoryDoesNotLeakPrivatePath(t *testing.T) {
 // jsonMarshal is a tiny shim to keep the test file imports small.
 func jsonMarshal(v interface{}) ([]byte, error) {
 	return jsonStdMarshal(v)
+}
+
+func createUpdateWorkspace(t *testing.T, root string) {
+	t.Helper()
+	scriptDir := filepath.Join(root, "release", "scripts")
+	if err := os.MkdirAll(scriptDir, 0750); err != nil {
+		t.Fatalf("mkdir scripts: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(scriptDir, "apply-runtime-update.sh"), []byte("#!/bin/sh\nexit 0\n"), 0750); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	cmdDir := filepath.Join(root, "cmd", "orvix")
+	if err := os.MkdirAll(cmdDir, 0750); err != nil {
+		t.Fatalf("mkdir cmd/orvix: %v", err)
+	}
+}
+
+func requireCheck(t *testing.T, pf *PreflightResult, name, status string) {
+	t.Helper()
+	for _, check := range pf.Checks {
+		if check.Name == name {
+			if check.Status != status {
+				t.Fatalf("%s status = %q, want %q in %+v", name, check.Status, status, pf.Checks)
+			}
+			return
+		}
+	}
+	t.Fatalf("missing preflight check %q in %+v", name, pf.Checks)
 }

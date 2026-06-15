@@ -32,6 +32,7 @@ func buildUpdateHarness(t *testing.T, withScript bool) (*api.Router, *sql.DB, st
 	logger := zap.NewNop()
 	cfg := config.Defaults()
 	root := t.TempDir()
+	t.Chdir(root)
 	cfg.Database.Driver = "sqlite"
 	cfg.Database.DSN = filepath.Join(root, "orvix.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
 	cfg.Backup.Dir = filepath.Join(root, "backups")
@@ -332,9 +333,9 @@ func TestUpdateV1_PreflightDoesNotExecScript(t *testing.T) {
 		t.Fatalf("preflight: %d %s", resp.StatusCode, body)
 	}
 	var pf struct {
-		Pass    bool `json:"pass"`
+		Pass    bool                     `json:"pass"`
 		Checks  []map[string]interface{} `json:"checks"`
-		Message string `json:"message"`
+		Message string                   `json:"message"`
 	}
 	if err := json.Unmarshal(body, &pf); err != nil {
 		t.Fatalf("decode: %v: %s", err, body)
@@ -374,9 +375,9 @@ func TestUpdateV1_PreflightPassesWhenScriptPresent(t *testing.T) {
 		t.Fatalf("preflight: %d %s", resp.StatusCode, body)
 	}
 	var pf struct {
-		Pass    bool                   `json:"pass"`
+		Pass    bool                     `json:"pass"`
 		Checks  []map[string]interface{} `json:"checks"`
-		Message string                 `json:"message"`
+		Message string                   `json:"message"`
 	}
 	if err := json.Unmarshal(body, &pf); err != nil {
 		t.Fatalf("decode: %v: %s", err, body)
