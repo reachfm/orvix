@@ -151,6 +151,12 @@ type UpdateConfig struct {
 	CheckURL     string `mapstructure:"check_url"`
 	AutoApply    bool   `mapstructure:"auto_apply"`
 	BackupBefore bool   `mapstructure:"backup_before"`
+	// WorkspaceRoot is the absolute path to the directory that
+	// contains the runtime update script. The default is the
+	// process working directory. The Update Management v1 handler
+	// resolves the runtime script path against this root and
+	// refuses to exec anything outside it.
+	WorkspaceRoot string `mapstructure:"workspace_root"`
 }
 
 // AIConfig holds AI integration settings.

@@ -16,6 +16,7 @@ import (
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/metrics"
 	"github.com/orvix/orvix/internal/modules"
+	"github.com/orvix/orvix/internal/updater"
 	"github.com/orvix/orvix/internal/webmailmgmt"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
@@ -68,6 +69,23 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		router.h.SetWebmailService(ws)
 	} else {
 		logger.Warn("webmail service not available: failed to get sql.DB", zap.Error(err))
+	}
+
+	// Wire Update Management v1 service. The service holds the
+	// process-wide single-flight mutex; sharing it across all
+	// requests against this router is what enforces "one update
+	// job at a time" even under concurrent load.
+	if sqlDB, err := db.DB(); err == nil {
+		updSvc := updater.NewRuntimeService(sqlDB, updater.Config{
+			ScriptPath:    updater.DefaultScriptPath,
+			WorkspaceRoot: updateWorkspaceRoot(cfg),
+			Channel:       updateChannel(cfg),
+			BackupDir:     updateBackupDir(cfg),
+			Logger:        logger,
+		}).WithCheckURL(cfg.Update.CheckURL)
+		router.h.SetUpdateService(updSvc)
+	} else {
+		logger.Warn("update service not available: failed to get sql.DB", zap.Error(err))
 	}
 
 	router.setupMiddleware()
@@ -213,10 +231,15 @@ func (r *Router) setupRoutes() {
 	admin.Patch("/tasks/:id/complete", r.h.CompleteTask)
 	admin.Delete("/tasks/:id", r.h.DeleteTask)
 
-	// Auto-Update
+	// Auto-Update (legacy /updates/* routes — kept for backward compat)
 	admin.Get("/updates/check", r.h.CheckUpdates)
 	admin.Get("/updates/changelog", r.h.GetChangelog)
 	admin.Post("/updates/apply/:module", r.h.ApplyUpdate)
+
+	// Update Management v1: read-only endpoints (admin role).
+	admin.Get("/update/status", r.h.GetUpdateStatus)
+	admin.Get("/update/history", r.h.GetUpdateHistory)
+	admin.Get("/update/preflight", r.h.GetUpdatePreflight)
 
 	// Email Intelligence
 	admin.Get("/intelligence/stats", r.h.GetEmailStats)
@@ -254,6 +277,11 @@ func (r *Router) setupRoutes() {
 	men.Delete("/backups/:id", r.h.DeleteBackup)
 	// Monitoring v1: resolve an alert (CSRF-protected, admin role).
 	men.Post("/monitoring/alerts/:id/resolve", r.h.PostMonitoringAlertResolve)
+	// Update Management v1: trigger a check or a runtime update
+	// (CSRF-protected, admin role). The actual script execution is
+	// single-flight: a second concurrent call returns 409 Conflict.
+	men.Post("/update/check", r.h.PostUpdateCheck)
+	men.Post("/update/run", r.h.PostUpdateRun)
 	men.Post("/firewall/rules", r.h.CreateFirewallRule)
 	men.Post("/license/validate", r.h.ValidateLicense)
 	men.Put("/feature-flags/:id", r.h.UpdateFeatureFlag)
@@ -327,4 +355,49 @@ func securityHeaders() fiber.Handler {
 		}
 		return c.Next()
 	}
+}
+
+// updateWorkspaceRoot returns the workspace root used to anchor
+// the runtime update script. Order:
+//  1. cfg.Update.WorkspaceRoot (operator-supplied, production).
+//  2. Parent of cfg.Server.AdminUIDir (legacy derivation).
+//  3. Process working directory.
+//
+// The returned value is the allow-list prefix for the runtime
+// script path on every Run(). The result is never sent to clients;
+// it is consumed only by the service.
+func updateWorkspaceRoot(cfg *config.Config) string {
+	if cfg != nil && cfg.Update.WorkspaceRoot != "" {
+		return cfg.Update.WorkspaceRoot
+	}
+	if cfg != nil && cfg.Server.AdminUIDir != "" {
+		candidate := strings.TrimSuffix(cfg.Server.AdminUIDir, "/admin")
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return candidate
+		}
+	}
+	if wd, err := os.Getwd(); err == nil {
+		return wd
+	}
+	return "."
+}
+
+// updateChannel returns the release channel from config. The spec
+// mandates stable only; we expose a config knob for future-proofing
+// but refuse non-stable values at the response boundary.
+func updateChannel(cfg *config.Config) updater.Channel {
+	if cfg == nil || cfg.Update.Channel == "" {
+		return updater.ChannelStable
+	}
+	return updater.Channel(cfg.Update.Channel)
+}
+
+// updateBackupDir returns the operator-supplied backup directory,
+// falling back to the legacy /var/lib/orvix/backups default. The
+// result is the dir the preflight uses for the writability probe.
+func updateBackupDir(cfg *config.Config) string {
+	if cfg != nil && cfg.Backup.Dir != "" {
+		return cfg.Backup.Dir
+	}
+	return "/var/lib/orvix/backups"
 }
