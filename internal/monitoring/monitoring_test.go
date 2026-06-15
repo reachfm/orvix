@@ -126,7 +126,7 @@ func TestResolveAlert(t *testing.T) {
 	})
 	alerts, _ := svc.EvaluateAlerts(context.Background())
 	if len(alerts) > 0 {
-		if err := svc.ResolveAlert(context.Background(), alerts[0].ID); err != nil {
+		if _, err := svc.ResolveAlert(context.Background(), alerts[0].ID); err != nil {
 			t.Fatalf("resolve: %v", err)
 		}
 		active, _ := svc.ListActiveAlerts(context.Background())

@@ -1161,8 +1161,13 @@ func (s *Server) handleMonitoringAlertResolve(w http.ResponseWriter, r *http.Req
 		jsonError(w, "invalid id", 400)
 		return
 	}
-	if err := s.MonitoringService.ResolveAlert(r.Context(), id); err != nil {
+	rows, err := s.MonitoringService.ResolveAlert(r.Context(), id)
+	if err != nil {
 		jsonError(w, err.Error(), 500)
+		return
+	}
+	if rows == 0 {
+		jsonError(w, "alert not found or already resolved", 404)
 		return
 	}
 	jsonOK(w, map[string]string{"status": "resolved"})

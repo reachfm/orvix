@@ -3,39 +3,78 @@ package monitoring
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 )
 
 // DataSources provides access to all subsystems for monitoring.
+//
+// All callbacks are optional (may be nil). When nil, the corresponding
+// collector is skipped silently. Callbacks MUST NOT panic and MUST NOT
+// leak secret material; they are called from the request goroutine and
+// any value they return is reflected verbatim in the Health response.
 type DataSources struct {
-	DB                *sql.DB
-	QueuePending      func() (int64, error)
-	TLSCerts          func() (expiring30, expiring7 int, err error)
-	LatestBackup      func() (time.Time, error)
-	DomainCount       func() (int, error)
-	MailboxCount      func() (int64, error)
-	MessageCount      func() (int64, error)
-	AttachmentCount   func() (int64, error)
-	StorageBytes      func() (int64, error)
-	SMTPHealthy       func() bool
-	IMAPHealthy       func() bool
-	POP3Healthy       func() bool
-	JMAPHealthy       func() bool
-	DatabaseHealthy   func() bool
-	MailStoreHealthy  func() bool
-	BackupCount       func() (int, error)
+	// Existing fields (kept for backward compatibility with origin/main).
+	DB               *sql.DB
+	QueuePending     func() (int64, error)
+	QueueDeadLetter  func() (int64, error) // NEW
+	TLSCerts         func() (expiring30, expiring7 int, err error)
+	LatestBackup     func() (time.Time, error)
+	DomainCount      func() (int, error)
+	MailboxCount     func() (int64, error)
+	MessageCount     func() (int64, error)
+	AttachmentCount  func() (int64, error)
+	StorageBytes     func() (int64, error)
+	SMTPHealthy      func() bool
+	IMAPHealthy      func() bool
+	POP3Healthy      func() bool
+	JMAPHealthy      func() bool
+	DatabaseHealthy  func() bool
+	MailStoreHealthy func() bool
+	BackupCount      func() (int, error)
+
+	// NEW fields for Monitoring v1.
+	BackupDir            string  // absolute path to the backup dir (used for writability + disk-usage label)
+	BackupDirWritable    func() bool  // explicit writability check; if nil, the service computes one
+	DatabaseSize         func() (int64, error) // explicit DB size; if nil, computed from the live DB
+	ServiceStartedAt     time.Time // process start time, used for uptime
+	APIPing              func() error // self-ping for admin API health; nil = unknown
+	DiskPathLabels       map[string]string // map absolute path -> safe label (e.g. cfg.Backup.Dir -> "backup")
+	MemoryUsage          func() (usedBytes, totalBytes int64) // explicit memory; if nil, computed from runtime.MemStats
+	CPULoad              func() (load1, load5, load15 float64, err error) // explicit load; if nil, computed on POSIX only
 }
 
 // Service provides monitoring and alerting.
 type Service struct {
 	db  *sql.DB
 	src *DataSources
+
+	// startTime is captured at NewService so the uptime is meaningful
+	// even when the caller forgets to set DataSources.ServiceStartedAt.
+	startTime time.Time
+
+	// alertMu serializes EvaluateAlerts / saveAlert / resolveAll so two
+	// concurrent evaluations cannot interleave alert rows.
+	alertMu sync.Mutex
 }
 
 // NewService creates a monitoring service.
 func NewService(db *sql.DB, src *DataSources) *Service {
-	return &Service{db: db, src: src}
+	if src == nil {
+		src = &DataSources{}
+	}
+	return &Service{
+		db:        db,
+		src:       src,
+		startTime: time.Now().UTC(),
+	}
 }
 
 // EnsureSchema creates required tables.
@@ -48,15 +87,292 @@ func (s *Service) EnsureSchema(ctx context.Context) error {
 	return nil
 }
 
+// ── Health (NEW for Monitoring v1) ──────────────────────
+
+// GetHealth returns the full Health payload for /monitoring/health.
+//
+// Security: Disk paths in the response are mapped to safe labels via
+// DataSources.DiskPathLabels (or fall back to the basename). No env
+// values, no file contents, no tokens, no private absolute paths.
+func (s *Service) GetHealth(ctx context.Context) *Health {
+	h := &Health{
+		Status:        "ok",
+		UptimeSeconds: int64(time.Since(s.uptimeFrom()).Seconds()),
+		GeneratedAt:   time.Now().UTC(),
+		Disk:          s.collectDisk(),
+		DB:            s.collectDBHealth(ctx),
+		Queue:         s.collectQueueHealth(),
+		Backup:        s.collectBackupHealth(),
+		API:           s.collectAPIHealth(),
+		Capacity:      s.collectCapacityShim(ctx),
+		OpenAlerts:    0,
+	}
+
+	if h.DB.Status == "critical" || h.Queue.Status == "critical" || h.Backup.Status == "critical" || h.API.Status == "critical" {
+		h.Status = "down"
+	} else if h.DB.Status == "warning" || h.Queue.Status == "warning" || h.Backup.Status == "warning" || h.API.Status == "warning" {
+		h.Status = "degraded"
+	}
+	// Disk high is a global condition.
+	for _, d := range h.Disk {
+		if d.UsedPct >= 90 {
+			if h.Status == "ok" {
+				h.Status = "degraded"
+			}
+		}
+		if d.UsedPct >= 95 {
+			h.Status = "down"
+		}
+	}
+
+	if active, err := s.ListActiveAlerts(ctx); err == nil {
+		h.OpenAlerts = len(active)
+	}
+	return h
+}
+
+func (s *Service) uptimeFrom() time.Time {
+	if !s.src.ServiceStartedAt.IsZero() {
+		return s.src.ServiceStartedAt
+	}
+	return s.startTime
+}
+
+// collectDisk returns disk usage for the configured safe labels.
+//
+// We never include the absolute path in the response. If the caller
+// supplies a DataSources.DiskPathLabels map, we use the label from the
+// map. Otherwise we use the basename of the path, which is still a
+// safe label (e.g. "backups", "var-lib-orvix"). No env values, no
+// tokens, no file contents.
+func (s *Service) collectDisk() []DiskUsage {
+	out := make([]DiskUsage, 0, 4)
+
+	// Backup dir (always present when configured).
+	if s.src.BackupDir != "" {
+		out = append(out, s.diskForSafePath(s.src.BackupDir))
+	}
+	// Mailstore / data dir: derived from cfg if the caller adds it via
+	// DiskPathLabels. We always render the configured set.
+	for path, label := range s.src.DiskPathLabels {
+		if path == s.src.BackupDir && label == "" {
+			continue
+		}
+		out = append(out, s.diskForSafePathWithLabel(path, label))
+	}
+	return out
+}
+
+func (s *Service) diskForSafePath(path string) DiskUsage {
+	label := filepath.Base(path)
+	if label == "" || label == "." || label == "/" || label == string(filepath.Separator) {
+		label = "system"
+	}
+	return s.diskForSafePathWithLabel(path, label)
+}
+
+func (s *Service) diskForSafePathWithLabel(path, label string) DiskUsage {
+	if label == "" {
+		label = filepath.Base(path)
+	}
+	du := DiskUsage{Label: label}
+	du = statfsInto(path, du)
+	return du
+}
+
+func (s *Service) collectDBHealth(ctx context.Context) ComponentHealth {
+	if s.src.DatabaseHealthy != nil {
+		if s.src.DatabaseHealthy() {
+			return ComponentHealth{Status: "ok", Message: "database responsive"}
+		}
+		return ComponentHealth{Status: "critical", Message: "database health check failed"}
+	}
+	// Fallback: try a quick ping.
+	if s.src.DB != nil {
+		if err := s.src.DB.PingContext(ctx); err == nil {
+			return ComponentHealth{Status: "ok", Message: "database responsive"}
+		} else {
+			return ComponentHealth{Status: "critical", Message: "database ping failed"}
+		}
+	}
+	return ComponentHealth{Status: "unknown", Message: "no database source configured"}
+}
+
+func (s *Service) collectQueueHealth() ComponentHealth {
+	// Dead-letter is the canary; if any message has been parked in the
+	// dead-letter queue we report at least a warning.
+	if s.src.QueueDeadLetter != nil {
+		if n, err := s.src.QueueDeadLetter(); err == nil && n > 0 {
+			return ComponentHealth{
+				Status:  "critical",
+				Message: fmt.Sprintf("%d dead-lettered messages", n),
+			}
+		}
+	}
+	if s.src.QueuePending != nil {
+		if n, err := s.src.QueuePending(); err == nil {
+			switch {
+			case n > 1000:
+				return ComponentHealth{
+					Status:  "critical",
+					Message: fmt.Sprintf("%d pending messages", n),
+				}
+			case n > 100:
+				return ComponentHealth{
+					Status:  "warning",
+					Message: fmt.Sprintf("%d pending messages", n),
+				}
+			}
+		}
+	}
+	return ComponentHealth{Status: "ok", Message: "queue within limits"}
+}
+
+func (s *Service) collectBackupHealth() ComponentHealth {
+	if s.src.BackupDirWritable != nil {
+		if !s.src.BackupDirWritable() {
+			return ComponentHealth{Status: "critical", Message: "backup directory not writable"}
+		}
+	} else if s.src.BackupDir != "" {
+		// Default check: try to create and remove a temp file.
+		probe := filepath.Join(s.src.BackupDir, ".orvix-write-probe")
+		f, err := os.Create(probe)
+		if err != nil {
+			return ComponentHealth{Status: "critical", Message: "backup directory not writable"}
+		}
+		_ = f.Close()
+		_ = os.Remove(probe)
+	}
+	if s.src.LatestBackup != nil {
+		latest, err := s.src.LatestBackup()
+		if err == nil {
+			days := int(time.Since(latest).Hours() / 24)
+			if days > 30 {
+				return ComponentHealth{
+					Status:  "critical",
+					Message: fmt.Sprintf("no backup in %d days", days),
+				}
+			}
+			if days > 7 {
+				return ComponentHealth{
+					Status:  "warning",
+					Message: fmt.Sprintf("last backup %d days ago", days),
+				}
+			}
+		}
+	}
+	return ComponentHealth{Status: "ok", Message: "backup healthy"}
+}
+
+func (s *Service) collectAPIHealth() ComponentHealth {
+	if s.src.APIPing != nil {
+		if err := s.src.APIPing(); err != nil {
+			return ComponentHealth{Status: "critical", Message: "admin API self-check failed"}
+		}
+		return ComponentHealth{Status: "ok", Message: "admin API responsive"}
+	}
+	// No self-ping configured: report unknown instead of fake-ok.
+	return ComponentHealth{Status: "unknown", Message: "admin API self-ping not configured"}
+}
+
+// collectCapacityShim wraps GetCapacity so the Health response reuses the
+// same shape. The existing GetCapacity remains the canonical entry for
+// the legacy /monitoring/capacity endpoint.
+func (s *Service) collectCapacityShim(ctx context.Context) Capacity {
+	cptr := s.GetCapacity(ctx)
+	c := *cptr
+	// Merge in dead_letter if a source is configured.
+	if s.src.QueueDeadLetter != nil {
+		if n, err := s.src.QueueDeadLetter(); err == nil {
+			c.QueueDeadLetter = n
+		}
+	}
+	// Merge in DB size if the explicit source is configured.
+	if s.src.DatabaseSize != nil {
+		if n, err := s.src.DatabaseSize(); err == nil && n > 0 {
+			c.DatabaseSize = n
+		}
+	}
+	return c
+}
+
+// ── Memory / CPU (NEW) ─────────────────────────────────
+
+// MemoryBytes returns process memory usage in bytes. Always safe to
+// call. Returns (0, 0) on platforms where runtime stats are unavailable.
+func (s *Service) MemoryBytes() (usedBytes, totalBytes int64) {
+	if s.src.MemoryUsage != nil {
+		used, total := s.src.MemoryUsage()
+		if used > 0 {
+			return used, total
+		}
+	}
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	usedBytes = int64(ms.Alloc)
+	totalBytes = int64(ms.Sys)
+	return usedBytes, totalBytes
+}
+
+// CPULoad returns the system load average. On platforms where it cannot
+// be computed safely (Windows or restricted environments), it returns
+// (0, 0, 0, err). Callers should treat err != nil as "unknown".
+func (s *Service) CPULoad() (load1, load5, load15 float64, err error) {
+	if s.src.CPULoad != nil {
+		return s.src.CPULoad()
+	}
+	// Default: parse /proc/loadavg on Linux only. This is the only
+	// platform where reading load is universally considered safe. On
+	// any other OS we return an error so the handler can label the
+	// field as "unknown" rather than fabricate a value.
+	if runtime.GOOS != "linux" {
+		return 0, 0, 0, errors.New("cpu load: not available on this platform")
+	}
+	data, rerr := os.ReadFile("/proc/loadavg")
+	if rerr != nil {
+		return 0, 0, 0, rerr
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) < 3 {
+		return 0, 0, 0, errors.New("cpu load: malformed /proc/loadavg")
+	}
+	parse := func(s string) (float64, error) {
+		return strconv.ParseFloat(s, 64)
+	}
+	if l1, e1 := parse(fields[0]); e1 == nil {
+		load1 = l1
+	}
+	if l5, e2 := parse(fields[1]); e2 == nil {
+		load5 = l5
+	}
+	if l15, e3 := parse(fields[2]); e3 == nil {
+		load15 = l15
+	}
+	return load1, load5, load15, nil
+}
+
 // ── Alert Generation ────────────────────────────────────
 
+// EvaluateAlerts re-evaluates all alert rules. The function is
+// safe to call concurrently; an internal mutex serializes writes.
 func (s *Service) EvaluateAlerts(ctx context.Context) ([]Alert, error) {
+	s.alertMu.Lock()
+	defer s.alertMu.Unlock()
+
 	var alerts []Alert
 
 	// Resolve previous alerts before re-evaluating.
 	s.resolveAll(ctx)
 
-	// Queue checks.
+	// Queue dead-letter (Monitoring v1 rule).
+	if s.src.QueueDeadLetter != nil {
+		if n, err := s.src.QueueDeadLetter(); err == nil && n > 0 {
+			alerts = append(alerts, s.newAlert(CatQueue, SeverityCritical,
+				"Queue dead-letter", fmt.Sprintf("%d messages in dead-letter", n)))
+		}
+	}
+
+	// Queue pending (existing rule).
 	if s.src.QueuePending != nil {
 		if count, err := s.src.QueuePending(); err == nil {
 			if count > 1000 {
@@ -67,7 +383,7 @@ func (s *Service) EvaluateAlerts(ctx context.Context) ([]Alert, error) {
 		}
 	}
 
-	// TLS expiry.
+	// TLS expiry (existing rule).
 	if s.src.TLSCerts != nil {
 		if exp30, exp7, err := s.src.TLSCerts(); err == nil {
 			if exp7 > 0 {
@@ -79,7 +395,7 @@ func (s *Service) EvaluateAlerts(ctx context.Context) ([]Alert, error) {
 		}
 	}
 
-	// Backup freshness.
+	// Backup freshness (existing rule).
 	if s.src.LatestBackup != nil {
 		if latest, err := s.src.LatestBackup(); err == nil {
 			days := int(time.Since(latest).Hours() / 24)
@@ -91,7 +407,61 @@ func (s *Service) EvaluateAlerts(ctx context.Context) ([]Alert, error) {
 		}
 	}
 
-	// Runtime health.
+	// Backup dir not writable (Monitoring v1 rule).
+	if s.src.BackupDirWritable != nil && !s.src.BackupDirWritable() {
+		alerts = append(alerts, s.newAlert(CatBackup, SeverityCritical,
+			"Backup directory not writable", "the backup directory is not writable"))
+	} else if s.src.BackupDir != "" {
+		probe := filepath.Join(s.src.BackupDir, ".orvix-write-probe")
+		f, ferr := os.Create(probe)
+		if ferr != nil {
+			alerts = append(alerts, s.newAlert(CatBackup, SeverityCritical,
+				"Backup directory not writable", "the backup directory is not writable"))
+		} else {
+			_ = f.Close()
+			_ = os.Remove(probe)
+		}
+	}
+
+	// Database health (Monitoring v1 rule, replaces the old SMTP one for DB).
+	if s.src.DatabaseHealthy != nil && !s.src.DatabaseHealthy() {
+		alerts = append(alerts, s.newAlert(CatDatabase, SeverityCritical,
+			"Database unhealthy", "database health check failed"))
+	}
+
+	// Backup health (Monitoring v1 rule) — combines writability and
+	// freshness. We do not duplicate the per-subsystem alerts above;
+	// this rule fires only when the backup subsystem as a whole is in
+	// a critical state.
+	if s.collectBackupHealth().Status == "critical" {
+		// We only emit this if no backup-specific alert already exists
+		// for the same condition.
+		hasBackupAlert := false
+		for _, a := range alerts {
+			if a.Category == CatBackup && a.Active {
+				hasBackupAlert = true
+				break
+			}
+		}
+		if !hasBackupAlert {
+			alerts = append(alerts, s.newAlert(CatBackup, SeverityCritical,
+				"Backup unhealthy", "backup subsystem in critical state"))
+		}
+	}
+
+	// Disk usage (Monitoring v1 rule).
+	for _, d := range s.collectDisk() {
+		switch {
+		case d.UsedPct >= 95:
+			alerts = append(alerts, s.newAlert(CatStorage, SeverityCritical,
+				"Disk usage critical", fmt.Sprintf("%s disk at %d%%", d.Label, d.UsedPct)))
+		case d.UsedPct >= 85:
+			alerts = append(alerts, s.newAlert(CatStorage, SeverityWarning,
+				"Disk usage high", fmt.Sprintf("%s disk at %d%%", d.Label, d.UsedPct)))
+		}
+	}
+
+	// Runtime health (existing rules — kept for back-compat).
 	if s.src.SMTPHealthy != nil && !s.src.SMTPHealthy() {
 		alerts = append(alerts, s.newAlert(CatRuntime, SeverityCritical, "SMTP unhealthy", "SMTP service is not healthy"))
 	}
@@ -103,9 +473,6 @@ func (s *Service) EvaluateAlerts(ctx context.Context) ([]Alert, error) {
 	}
 	if s.src.JMAPHealthy != nil && !s.src.JMAPHealthy() {
 		alerts = append(alerts, s.newAlert(CatRuntime, SeverityCritical, "JMAP unhealthy", "JMAP service is not healthy"))
-	}
-	if s.src.DatabaseHealthy != nil && !s.src.DatabaseHealthy() {
-		alerts = append(alerts, s.newAlert(CatRuntime, SeverityCritical, "Database unhealthy", "Database health check failed"))
 	}
 	if s.src.MailStoreHealthy != nil && !s.src.MailStoreHealthy() {
 		alerts = append(alerts, s.newAlert(CatRuntime, SeverityCritical, "MailStore unhealthy", "MailStore health check failed"))
@@ -127,35 +494,52 @@ func (s *Service) newAlert(cat Category, sev Severity, title, msg string) Alert 
 }
 
 func (s *Service) saveAlert(ctx context.Context, a *Alert) {
-	if s.db == nil { return }
+	if s.db == nil {
+		return
+	}
 	s.db.ExecContext(ctx,
 		`INSERT INTO monitoring_alerts (category, severity, title, message, source, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		string(a.Category), string(a.Severity), a.Title, a.Message, a.Source, a.Active, a.CreatedAt)
 }
 
 func (s *Service) resolveAll(ctx context.Context) {
-	if s.db == nil { return }
+	if s.db == nil {
+		return
+	}
 	s.db.ExecContext(ctx, "UPDATE monitoring_alerts SET active=0, resolved_at=datetime('now') WHERE active=1")
 }
 
+// alertMu serializes EvaluateAlerts / saveAlert / resolveAll so two
+// concurrent evaluations cannot interleave alert rows. The handlers in
+// the Monitoring v1 surface are not concurrent in the same process, but
+// the lock is cheap and makes the unit tests deterministic.
+
 // ── Alert CRUD ──────────────────────────────────────────
 
+// ListActiveAlerts returns the active (unresolved) alerts.
 func (s *Service) ListActiveAlerts(ctx context.Context) ([]Alert, error) {
 	return s.listAlerts(ctx, true)
 }
 
+// ListAllAlerts returns the full alert history.
 func (s *Service) ListAllAlerts(ctx context.Context) ([]Alert, error) {
 	return s.listAlerts(ctx, false)
 }
 
 func (s *Service) listAlerts(ctx context.Context, activeOnly bool) ([]Alert, error) {
-	if s.db == nil { return nil, nil }
+	if s.db == nil {
+		return nil, nil
+	}
 	query := "SELECT id, category, severity, title, message, source, active, created_at, resolved_at FROM monitoring_alerts"
-	if activeOnly { query += " WHERE active=1" }
+	if activeOnly {
+		query += " WHERE active=1"
+	}
 	query += " ORDER BY created_at DESC LIMIT 200"
 
 	rows, err := s.db.QueryContext(ctx, query)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 
 	var alerts []Alert
@@ -165,29 +549,57 @@ func (s *Service) listAlerts(ctx context.Context, activeOnly bool) ([]Alert, err
 		if err := rows.Scan(&a.ID, &a.Category, &a.Severity, &a.Title, &a.Message, &a.Source, &a.Active, &a.CreatedAt, &resolvedAt); err != nil {
 			return nil, err
 		}
-		if resolvedAt.Valid { a.ResolvedAt = &resolvedAt.Time }
+		if resolvedAt.Valid {
+			a.ResolvedAt = &resolvedAt.Time
+		}
 		alerts = append(alerts, a)
 	}
 	return alerts, rows.Err()
 }
 
-func (s *Service) ResolveAlert(ctx context.Context, id uint) error {
-	_, err := s.db.ExecContext(ctx, "UPDATE monitoring_alerts SET active=0, resolved_at=datetime('now') WHERE id=?", id)
-	return err
+// ResolveAlert marks the given alert id as resolved. Returns the
+// number of rows affected so the handler can produce a 404 on zero.
+func (s *Service) ResolveAlert(ctx context.Context, id uint) (int64, error) {
+	if s.db == nil {
+		return 0, errors.New("monitoring: no database configured")
+	}
+	res, err := s.db.ExecContext(ctx, "UPDATE monitoring_alerts SET active=0, resolved_at=datetime('now') WHERE id=? AND active=1", id)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // ── Capacity ────────────────────────────────────────────
 
+// GetCapacity returns the dashboard capacity snapshot. Kept for
+// backward compatibility with origin/main.
 func (s *Service) GetCapacity(ctx context.Context) *Capacity {
 	c := &Capacity{}
-	if s.src.DomainCount != nil { c.DomainCount, _ = s.src.DomainCount() }
-	if s.src.MailboxCount != nil { c.MailboxCount, _ = s.src.MailboxCount() }
-	if s.src.MessageCount != nil { c.MessageCount, _ = s.src.MessageCount() }
-	if s.src.AttachmentCount != nil { c.AttachmentCount, _ = s.src.AttachmentCount() }
-	if s.src.StorageBytes != nil { c.StorageBytes, _ = s.src.StorageBytes() }
-	if s.src.BackupCount != nil { c.BackupCount, _ = s.src.BackupCount() }
+	if s.src.DomainCount != nil {
+		c.DomainCount, _ = s.src.DomainCount()
+	}
+	if s.src.MailboxCount != nil {
+		c.MailboxCount, _ = s.src.MailboxCount()
+	}
+	if s.src.MessageCount != nil {
+		c.MessageCount, _ = s.src.MessageCount()
+	}
+	if s.src.AttachmentCount != nil {
+		c.AttachmentCount, _ = s.src.AttachmentCount()
+	}
+	if s.src.StorageBytes != nil {
+		c.StorageBytes, _ = s.src.StorageBytes()
+	}
+	if s.src.BackupCount != nil {
+		c.BackupCount, _ = s.src.BackupCount()
+	}
 
-	if s.db != nil {
+	if s.src.DatabaseSize != nil {
+		if n, err := s.src.DatabaseSize(); err == nil && n > 0 {
+			c.DatabaseSize = n
+		}
+	} else if s.db != nil {
 		var size int64
 		s.db.QueryRowContext(ctx, "SELECT IFNULL(SUM(pgsize), 0) FROM (SELECT page_count * page_size as pgsize FROM pragma_page_count(), pragma_page_size())").Scan(&size)
 		c.DatabaseSize = size
@@ -196,6 +608,11 @@ func (s *Service) GetCapacity(ctx context.Context) *Capacity {
 	if s.src.QueuePending != nil {
 		count, _ := s.src.QueuePending()
 		c.QueueCount = count
+	}
+	if s.src.QueueDeadLetter != nil {
+		if n, err := s.src.QueueDeadLetter(); err == nil {
+			c.QueueDeadLetter = n
+		}
 	}
 
 	return c
