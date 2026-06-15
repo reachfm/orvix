@@ -1,0 +1,28 @@
+[Unit]
+Description=Orvix Runtime Update
+Documentation=https://opencode.ai
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/opt/orvix/release/scripts/apply-runtime-update.sh
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/orvix /usr/local/bin /usr/share/orvix /tmp
+ProtectHome=true
+PrivateTmp=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+RemoveIPC=true
+Environment=ORVIX_UPDATE=1
+
+[Install]
+WantedBy=multi-user.target

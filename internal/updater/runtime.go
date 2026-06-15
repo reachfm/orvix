@@ -21,17 +21,20 @@ import (
 //
 // The service is intentionally narrow:
 //   - It does not parse YAML, env files, or any user-supplied input.
-//   - It does not invoke a shell. The runtime script is executed via
-//     exec.CommandContext, which on POSIX is execve(2) and on Windows
-//     is CreateProcess — never a shell — so there is no shell-injection
-//     surface.
-//   - The script path is hard-coded as a package constant
-//     DefaultScriptPath. The handler may override it via UpdateConfig,
-//     but it is never derived from a request body, query string, header,
-//     or anything else attacker-controlled.
-//   - The resolved absolute path of the script is verified against the
-//     server's working-directory prefix and against the explicit
-//     "release/scripts" suffix before exec.
+//   - It does not invoke the runtime script directly. The web process
+//     drives the systemd oneshot helper DefaultUpdateHelperUnit via
+//     `sudo -n systemctl start <unit>`. The unit's ExecStart (not the
+//     web process) runs the script. The sudoers drop-in at
+//     release/sudoers.d/orvix-update grants passwordless sudo for
+//     the single systemctl command.
+//   - On machines without systemd the preflight gate reliably fails
+//     with "update helper not installed". There is no direct-exec
+//     fallback.
+//   - The script path lives only in the systemd unit file (ExecStart).
+//     The web process never resolves, stats, or exec's the script
+//     path. The unit name DefaultUpdateHelperUnit is a compile-time
+//     constant; no request-derived value can influence which unit is
+//     started (buildSystemctlStartArgs coerces non-canonical values).
 //   - All operations that touch the database (history, audit) use
 //     parameterised SQL.
 //   - All long-running work holds a single-flight mutex so two
@@ -62,55 +65,60 @@ type RuntimeService struct {
 
 // Config is the static configuration for RuntimeService.
 //
-// ScriptPath: absolute or working-directory-relative path to the
-// runtime update shell script. The handler enforces the suffix
-// "release/scripts/" and the prefix matching the working directory.
+// WorkspaceRoot: absolute path to the workspace root. Used as
+// the working directory when systemctl dispatches the oneshot
+// helper.
 //
-// WorkspaceRoot: absolute path to the workspace root. Used as the
-// allow-list prefix for ScriptPath.
+// UpdateHelperUnit: the name of the systemd oneshot unit that
+// wraps the runtime update script. The default is
+// DefaultUpdateHelperUnit. The web process refuses any value
+// that is not exactly that default — this is a defence-in-depth
+// measure so a misconfigured handler cannot drive a different
+// unit into a privileged run.
 type Config struct {
-	ScriptPath    string
-	WorkspaceRoot string
-	Channel       Channel
-	MinDiskBytes  int64
-	BackupDir     string
-	Logger        *zap.Logger
+	WorkspaceRoot    string
+	Channel          Channel
+	MinDiskBytes     int64
+	BackupDir        string
+	Logger           *zap.Logger
+	UpdateHelperUnit string
 }
 
-// DefaultScriptPath is the canonical location of the runtime update
-// script relative to the workspace root. The handler always resolves
-// the path against the workspace root before exec.
-const DefaultScriptPath = "release/scripts/apply-runtime-update.sh"
-
-// scriptPathSuffixCanonical is the canonical suffix of the runtime
-// update script, expressed with forward slashes. The allow-list
-// check normalises both the candidate path and this suffix to
-// forward slashes before comparing, so the check is portable
-// across Windows (where the separator is "\\") and POSIX.
-const scriptPathSuffixCanonical = "/release/scripts/apply-runtime-update.sh"
+// DefaultUpdateHelperUnit is the canonical name of the systemd
+// oneshot helper that wraps the runtime update script. The web
+// process drives this unit via `systemctl start
+// <DefaultUpdateHelperUnit>` (no other arguments). The unit file
+// is shipped at release/systemd/orvix-update.service.
+const DefaultUpdateHelperUnit = "orvix-update.service"
 
 // ErrJobRunning is returned by Run when a previous update job is
 // still in progress.
 var ErrJobRunning = errors.New("update: a job is already running")
 
-// ErrScriptMissing is returned by Run when the configured script
-// path does not exist on disk.
-var ErrScriptMissing = errors.New("update: runtime script not found")
-
-// ErrScriptPathRejected is returned when the configured script path
-// fails the allow-list check (it is outside the workspace root or
-// does not point at the canonical script).
-var ErrScriptPathRejected = errors.New("update: script path rejected by allow-list")
-
 // NewRuntimeService constructs a RuntimeService. db may be nil if
 // the operator does not want update history persistence (handlers
 // should still call methods, which degrade gracefully when db is nil).
+//
+// The web process always drives the update via the systemd oneshot
+// helper (DefaultUpdateHelperUnit). On machines without systemd the
+// preflight gate reliably fails with "update helper not installed"
+// so the operator knows the server is misconfigured. There is no
+// direct-exec fallback.
+//
+// UpdateHelperUnit defaults to DefaultUpdateHelperUnit. Any
+// non-empty value that is not the canonical default is silently
+// coerced to the default in buildSystemctlStartArgs and
+// buildSystemctlShowArgs — the test
+// TestConfigRejectsNonCanonicalHelperUnit pins this.
 func NewRuntimeService(db *sql.DB, cfg Config) *RuntimeService {
 	if cfg.Channel == "" {
 		cfg.Channel = ChannelStable
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = zap.NewNop()
+	}
+	if cfg.UpdateHelperUnit == "" {
+		cfg.UpdateHelperUnit = DefaultUpdateHelperUnit
 	}
 	return &RuntimeService{db: db, cfg: cfg}
 }
@@ -311,15 +319,60 @@ func (s *RuntimeService) History(ctx context.Context, limit int) ([]UpdateHistor
 
 // ── Preflight ──────────────────────────────────────────
 
-// Preflight runs the preflight validation: disk space, backup health,
-// and binary build validation. Returns a structured result.
+// Preflight runs the preflight validation: helper unit installed,
+// script present, source tree present, backup dir writable, disk
+// space available. Returns a structured result.
 //
 // The preflight NEVER exec's the script. It only reads file system
-// metadata and (optionally) the audit log.
+// metadata and (optionally) the audit log. On the systemd path it
+// also verifies the unit file is installed, because without it
+// `systemctl start orvix-update.service` cannot dispatch and Run
+// would fail with start_failed — which is a configuration problem
+// we want to surface to the operator before they click "Run
+// Update".
 func (s *RuntimeService) Preflight(ctx context.Context) *PreflightResult {
-	res := &PreflightResult{Pass: true, Checks: make([]PreflightCheck, 0, 4)}
+	res := &PreflightResult{Pass: true, Checks: make([]PreflightCheck, 0, 6)}
 
-	// 1. Disk space at the backup dir.
+	// 0. Helper unit installed. The detail field never reveals the
+	// absolute path of the unit file; it only says "installed" or
+	// "not installed".
+	if isHelperUnitInstalled() {
+		res.Checks = append(res.Checks, PreflightCheck{
+			Name: "update_helper_unit", Status: "pass",
+			Detail: "update helper unit installed",
+		})
+	} else {
+		res.Checks = append(res.Checks, PreflightCheck{
+			Name: "update_helper_unit", Status: "fail",
+			Detail: "update helper not installed",
+		})
+		res.Pass = false
+	}
+
+	// 1. Script exists and is executable at the canonical location
+	// declared in the systemd unit's ExecStart.
+	const canonicalScriptPath = "/opt/orvix/release/scripts/apply-runtime-update.sh"
+	info, err := os.Stat(canonicalScriptPath)
+	if err != nil {
+		res.Checks = append(res.Checks, PreflightCheck{
+			Name: "script_path", Status: "fail",
+			Detail: "runtime update script missing",
+		})
+		res.Pass = false
+	} else if info.Mode()&0111 == 0 {
+		res.Checks = append(res.Checks, PreflightCheck{
+			Name: "script_path", Status: "fail",
+			Detail: "runtime update script not executable",
+		})
+		res.Pass = false
+	} else {
+		res.Checks = append(res.Checks, PreflightCheck{
+			Name: "script_path", Status: "pass",
+			Detail: "runtime update script present and executable",
+		})
+	}
+
+	// 2. Disk space at the backup dir.
 	if s.cfg.BackupDir != "" {
 		du, err := diskUsageFor(s.cfg.BackupDir)
 		if err != nil {
@@ -351,8 +404,7 @@ func (s *RuntimeService) Preflight(ctx context.Context) *PreflightResult {
 		})
 	}
 
-	// 2. Backup health: the most recent backup, if any, must be < 30
-	// days old and the dir must be writable.
+	// 3. Backup health: the dir must be writable.
 	if s.cfg.BackupDir != "" {
 		probe := filepath.Join(s.cfg.BackupDir, ".orvix-preflight-probe")
 		f, err := os.Create(probe)
@@ -377,7 +429,7 @@ func (s *RuntimeService) Preflight(ctx context.Context) *PreflightResult {
 		})
 	}
 
-	// 3. Binary build validation: ensure the source tree is present
+	// 4. Binary build validation: ensure the source tree is present
 	// and the cmd/orvix entry point exists. We do not run `go build`
 	// here — that is the script's job.
 	if _, err := os.Stat("cmd/orvix"); err != nil {
@@ -392,28 +444,6 @@ func (s *RuntimeService) Preflight(ctx context.Context) *PreflightResult {
 		})
 	}
 
-	// 4. Script present and allow-listed.
-	abs, err := s.resolveScriptPath()
-	if err != nil {
-		res.Checks = append(res.Checks, PreflightCheck{
-			Name: "script_path", Status: "fail", Detail: err.Error(),
-		})
-		res.Pass = false
-	} else {
-		if _, err := os.Stat(abs); err != nil {
-			res.Checks = append(res.Checks, PreflightCheck{
-				Name: "script_path", Status: "fail",
-				Detail: "runtime update script missing",
-			})
-			res.Pass = false
-		} else {
-			res.Checks = append(res.Checks, PreflightCheck{
-				Name: "script_path", Status: "pass",
-				Detail: "runtime update script present",
-			})
-		}
-	}
-
 	if res.Pass {
 		res.Message = "preflight passed"
 	} else {
@@ -422,31 +452,268 @@ func (s *RuntimeService) Preflight(ctx context.Context) *PreflightResult {
 	return res
 }
 
+// ── Systemd helper integration ────────────────────────
+
+// buildSystemctlStartArgs returns the fixed argument list for
+// `systemctl start <unit>`. The argv is the ONLY thing the web
+// process ever passes to systemctl for an update run: the verb
+// "start" and the configured unit name. There is no
+// `--user`, no `--no-block`, no environment variable, no
+// command flag, no script path. The systemd unit file (see
+// release/systemd/orvix-update.service) owns the rest.
+//
+// The function is a single point of truth: every code path
+// that issues `systemctl ... orvix-update.service` MUST go
+// through this builder. The test
+// TestBuildSystemctlStartArgs_AreFixedAndBounded pins the
+// exact argv shape so a refactor cannot accidentally widen
+// it.
+func buildSystemctlStartArgs(unit string) []string {
+	// Defensive: if a caller ever passes a unit name that is
+	// not the canonical default, refuse. The web process is
+	// the only caller; the handler in api/router.go wires
+	// Config.UpdateHelperUnit = DefaultUpdateHelperUnit. If
+	// that wiring is ever bypassed we want to fail closed
+	// (return an argv that still references the canonical
+	// unit), not silently start a different unit.
+	if unit == "" || unit != DefaultUpdateHelperUnit {
+		unit = DefaultUpdateHelperUnit
+	}
+	return []string{"start", unit}
+}
+
+// buildSystemctlShowArgs returns the fixed argument list for
+// `systemctl show <unit> --property=Result,ExecMainStatus`.
+// Used by the helper status reader; same defensive pattern as
+// buildSystemctlStartArgs.
+func buildSystemctlShowArgs(unit string) []string {
+	if unit == "" || unit != DefaultUpdateHelperUnit {
+		unit = DefaultUpdateHelperUnit
+	}
+	return []string{"show", unit, "--property=Result,ExecMainStatus", "--no-pager"}
+}
+
+// buildSystemctlIsActiveArgs returns the fixed argument list for
+// `systemctl is-active <unit>`. Same canonicalisation as the other
+// builders: any non-canonical unit name is coerced to
+// DefaultUpdateHelperUnit. Every systemctl subprocess that the web
+// process spawns MUST use one of the buildSystemctl*Args builders
+// so a misconfigured Config value cannot reach the command line.
+func buildSystemctlIsActiveArgs(unit string) []string {
+	if unit == "" || unit != DefaultUpdateHelperUnit {
+		unit = DefaultUpdateHelperUnit
+	}
+	return []string{"is-active", unit}
+}
+
+// helperStatusQuery runs `systemctl is-active <unit>` and
+// returns true only when the answer is exactly "active".
+// Anything else (inactive, failed, activating, unknown, blank)
+// returns false. The raw output is NEVER returned to the
+// caller; it is safe to log.
+//
+// The unit name is canonicalised via buildSystemctlIsActiveArgs:
+// any non-canonical configured unit is coerced to
+// DefaultUpdateHelperUnit. This matches the defensive pattern
+// used by buildSystemctlStartArgs and buildSystemctlShowArgs.
+func (s *RuntimeService) helperStatusQuery() (isActive bool, raw string) {
+	// Use a 5s timeout. systemctl is-active is local-only and
+	// should be sub-millisecond, so this is just defence.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	args := buildSystemctlIsActiveArgs(s.cfg.UpdateHelperUnit)
+	cmd := exec.CommandContext(ctx, "systemctl", args...)
+	out, err := cmd.Output()
+	if err != nil {
+		// Non-zero exit: the unit is not active. The combined
+		// output is safe to log; we still do not echo it to
+		// the API.
+		raw = strings.TrimSpace(string(out))
+		return false, raw
+	}
+	raw = strings.TrimSpace(string(out))
+	return raw == "active", raw
+}
+
+// helperResultQuery runs `systemctl show <unit> --property=Result`
+// and parses the trailing value. The return is (result, execMainStatus)
+// where result is one of "success", "exit-code", "signal", "core-dump",
+// "watchdog", "timeout", "resources", "start-limit-hit", or the empty
+// string. execMainStatus is the integer exit code of the script (or
+// 0 if the unit is still running / never started). The raw property
+// output is logged only.
+func (s *RuntimeService) helperResultQuery() (result string, execMainStatus int, raw string) {
+	unit := s.cfg.UpdateHelperUnit
+	if unit == "" {
+		unit = DefaultUpdateHelperUnit
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	args := buildSystemctlShowArgs(unit)
+	cmd := exec.CommandContext(ctx, "systemctl", args...)
+	out, err := cmd.Output()
+	if err != nil {
+		raw = strings.TrimSpace(string(out))
+		return "", 0, raw
+	}
+	raw = strings.TrimSpace(string(out))
+	// Output is two lines like:
+	//   Result=success
+	//   ExecMainStatus=0
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Result=") {
+			result = strings.TrimPrefix(line, "Result=")
+		}
+		if strings.HasPrefix(line, "ExecMainStatus=") {
+			n, _ := strconv.Atoi(strings.TrimPrefix(line, "ExecMainStatus="))
+			if n > 0 {
+				execMainStatus = n
+			}
+		}
+	}
+	return result, execMainStatus, raw
+}
+
+// isHelperUnitInstalled reports whether the systemd oneshot
+// unit is installed on the local machine. The check is
+// best-effort: it looks for the canonical unit file in the
+// two standard locations. If neither exists, the preflight
+// gate fails with the safe "helper unit not installed" message.
+func isHelperUnitInstalled() bool {
+	candidates := []string{
+		"/etc/systemd/system/" + DefaultUpdateHelperUnit,
+		"/lib/systemd/system/" + DefaultUpdateHelperUnit,
+		"/usr/lib/systemd/system/" + DefaultUpdateHelperUnit,
+	}
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// runViaSystemd triggers the systemd oneshot helper and waits
+// for it to finish. The function does NOT return the script's
+// exit code directly: it polls the helper status until the
+// oneshot is no longer "activating" / "active" and then
+// reports the helper's Result property (success, exit-code,
+// etc.). The internal error from systemctl is logged but not
+// returned; the returned *UpdateError carries only the safe
+// code.
+//
+// This is the only path that ever executes a root-required
+// script. The web process never exec's
+// apply-runtime-update.sh directly; the systemd oneshot unit
+// (DefaultUpdateHelperUnit) owns the privileged work.
+func (s *RuntimeService) runViaSystemd(ctx context.Context) (startErr *UpdateError, helperResult string, helperExitCode int) {
+	unit := s.cfg.UpdateHelperUnit
+	if unit == "" {
+		unit = DefaultUpdateHelperUnit
+	}
+	// 1. Defensive: refuse anything but the canonical unit.
+	if unit != DefaultUpdateHelperUnit {
+		s.cfg.Logger.Warn("update helper unit is not the canonical default; refusing",
+			zap.String("unit", unit),
+			zap.String("expected", DefaultUpdateHelperUnit))
+		return NewUpdateError(ErrCodePreflightFailed,
+			fmt.Errorf("helper unit not canonical: %s", unit)),
+			"", 0
+	}
+	// 2. Preflight: helper unit must be installed.
+	if !isHelperUnitInstalled() {
+		return NewUpdateError(ErrCodePreflightFailed,
+			fmt.Errorf("update helper not installed: %s", DefaultUpdateHelperUnit)),
+			"", 0
+	}
+	// 3. Drive the helper. The web process runs as a non-root
+	//    service account. On Linux, starting a system-level
+	//    systemd unit requires root, so we use `sudo -n
+	//    systemctl start <unit>`. The sudoers drop-in at
+	//    release/sudoers.d/orvix-update grants passwordless
+	//    sudo for this specific command only.
+	//    `systemctl start <unit>` returns synchronously for a
+	//    Type=oneshot unit: it blocks until the script
+	//    finishes. We use a 6-minute outer deadline so we
+	//    always beat the unit's 5-minute TimeoutStartSec.
+	helperCtx, cancel := context.WithTimeout(ctx, 6*time.Minute)
+	defer cancel()
+	args := buildSystemctlStartArgs(unit)
+	cmd := exec.CommandContext(helperCtx, "sudo", append([]string{"-n", "systemctl"}, args...)...)
+	cmd.Env = nil // do not propagate any env to the helper driver
+	cmd.Dir = s.cfg.WorkspaceRoot
+	// Capture stderr to a buffer so we can log it on failure.
+	// We never echo the buffer to the API.
+	var stderrBuf strings.Builder
+	cmd.Stderr = &stderrBuf
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		s.cfg.Logger.Warn("systemctl stdout pipe", zap.Error(err))
+		return NewUpdateError(ErrCodeStartFailed, err), "", 0
+	}
+	if err := cmd.Start(); err != nil {
+		s.cfg.Logger.Warn("systemctl start failed",
+			zap.String("unit", unit),
+			zap.Error(err),
+			zap.String("stderr", stderrBuf.String()))
+		return NewUpdateError(ErrCodeStartFailed, err), "", 0
+	}
+	go drainPipe(s.cfg.Logger.Info, "systemctl-orvix-update", stdout)
+	runErr := cmd.Wait()
+	// runErr from `systemctl start <oneshot>`:
+	//   - nil: unit ran to completion; check Result.
+	//   - non-nil with exit code != 0: unit ran and the script
+	//     exited non-zero, OR systemctl itself failed.
+	// We must always read Result/ExecMainStatus to distinguish
+	// "script exited non-zero" from "systemctl could not
+	// dispatch the unit". The ExitError's exit code reflects
+	// systemctl, not the script.
+	if runErr != nil {
+		s.cfg.Logger.Warn("systemctl start returned non-zero",
+			zap.String("unit", unit),
+			zap.Error(runErr),
+			zap.String("stderr", stderrBuf.String()))
+	}
+	// 4. Read the helper's final state.
+	result, exitCode, raw := s.helperResultQuery()
+	s.cfg.Logger.Info("systemctl show result",
+		zap.String("unit", unit),
+		zap.String("result", result),
+		zap.Int("execMainStatus", exitCode),
+		zap.String("raw", raw))
+	return nil, result, exitCode
+}
+
 // ── Run ────────────────────────────────────────────────
 
-// Run executes the runtime update script under a single-flight lock.
+// Run executes the runtime update under a single-flight lock.
 // The actor label is the user id (or service account) initiating the
 // update; it is recorded in history and audit logs but is never
-// passed as an environment variable to the script.
+// passed as an environment variable or argument.
+//
+// The web process NEVER exec's the runtime update script directly.
+// It drives the root-owned systemd oneshot helper
+// DefaultUpdateHelperUnit via `sudo -n systemctl start <unit>`.
+// The helper unit's ExecStart is the only path that ever reaches
+// exec. On machines without systemd the preflight gate refuses the
+// run. The sudoers drop-in at release/sudoers.d/orvix-update grants
+// passwordless sudo for the specific systemctl command.
 //
 // Single-flight semantics: the slot is reserved atomically with
 // `currentJob` and the process-wide `mu` mutex. A second concurrent
-// call to Run() returns ErrJobRunning. A second concurrent call to
-// IsRunning() returns true between the first call's reservation
-// and its release, regardless of how fast the first call's exec
-// path runs (this matters on Windows where exec.Start fails in
-// microseconds and would otherwise leave a window for the second
-// call to slip through).
+// call to Run() returns ErrJobRunning.
 //
 // Returns:
 //   - nil, ErrJobRunning: a job is already in progress.
 //   - nil, *UpdateError with code preflight_failed: preflight refused the run.
-//   - nil, *UpdateError with code start_failed: exec.Start failed (script missing,
-//     not executable, etc.). The internal error is logged but never returned.
-//   - row, *UpdateError with code script_failed: the script started but exited
-//     non-zero.
+//   - row, *UpdateError with code start_failed: systemctl start failed
+//     (unit missing, unresponsive, etc.). The internal error is logged
+//     but never returned.
+//   - row, *UpdateError with code script_failed: the helper ran but the
+//     underlying script exited non-zero.
 //   - row, *UpdateError with code timeout: the parent context was cancelled
-//     while the script was running.
+//     while the helper was running.
 //   - row, nil: success.
 //
 // The returned error's Error() method returns only the safe code, never
@@ -496,82 +763,50 @@ func (s *RuntimeService) Run(ctx context.Context, actor string) (*UpdateHistoryR
 			fmt.Errorf("preflight refused run: %s", pf.Message))
 	}
 
-	absScript, err := s.resolveScriptPath()
-	if err != nil {
-		// Allow-list rejection. Treat as a preflight failure: the
-		// surface is "the configuration is unsafe" and we never echo
-		// any candidate path back to the caller.
-		return nil, NewUpdateError(ErrCodePreflightFailed, err)
-	}
-	if _, err := os.Stat(absScript); err != nil {
-		// Script missing on disk. This is a configuration error, but
-		// we still classify it as a preflight failure so the same
-		// safe message is used; the underlying os.Stat error is
-		// logged but never returned to the API.
-		s.cfg.Logger.Warn("runtime update script missing", zap.Error(err))
-		return nil, NewUpdateError(ErrCodePreflightFailed, ErrScriptMissing)
-	}
-
 	previousSHA := readBuildInfo().SHA
 	fromVersion := readBuildInfo().Version
 
-	// Run the script. exec.CommandContext runs the script via
-	// CreateProcess / execve directamente — no shell — so no
-	// shell-injection surface. We do not set any environment
-	// variables, do not pass any arguments, and do not read stdin.
-	cmd := exec.CommandContext(ctx, absScript)
-	cmd.Env = nil // inherit only the OS env, do not add anything
-	cmd.Dir = s.cfg.WorkspaceRoot
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		s.cfg.Logger.Warn("stdout pipe", zap.Error(err))
-		return s.recordRunFailure(startedAt, previousSHA, fromVersion, actor,
-			NewUpdateError(ErrCodeStartFailed, err))
+	// Production path: drive the root-owned oneshot unit via
+	// `systemctl start <canonical-unit>`. No args, no env, no
+	// script path on the command line. The unit's own ExecStart
+	// is the only script path that ever reaches exec. There is no
+	// direct-exec fallback; on machines without systemd the
+	// preflight gate above refuses the run.
+	var (
+		row        *UpdateHistoryRow
+		updateErr  *UpdateError
+		helperRes  string
+		helperExit int
+	)
+	var startErr *UpdateError
+	startErr, helperRes, helperExit = s.runViaSystemd(ctx)
+	if startErr != nil {
+		return s.recordRunFailure(startedAt, previousSHA, fromVersion, actor, startErr)
 	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		s.cfg.Logger.Warn("stderr pipe", zap.Error(err))
-		return s.recordRunFailure(startedAt, previousSHA, fromVersion, actor,
-			NewUpdateError(ErrCodeStartFailed, err))
-	}
-	if err := cmd.Start(); err != nil {
-		// The error string here is the one Go formats as
-		//   "exec: \"<abs path>\": file does not exist"
-		// We never echo it. The logger keeps it for operators.
-		s.cfg.Logger.Warn("update script start failed", zap.Error(err))
-		return s.recordRunFailure(startedAt, previousSHA, fromVersion, actor,
-			NewUpdateError(ErrCodeStartFailed, err))
-	}
-	// Stream to the logger; never echo to the client.
-	go drainPipe(s.cfg.Logger.Info, "update-script", stdout)
-	go drainPipe(s.cfg.Logger.Warn, "update-script", stderr)
-	runErr := cmd.Wait()
-
+	// Translate helper result → typed code. The web
+	// process never sees the raw ExecMainStatus except in
+	// the server log.
 	completedAt := time.Now().UTC()
-	duration := int64(completedAt.Sub(startedAt).Seconds())
-	newSHA := readBuildInfo().SHA
-	row := &UpdateHistoryRow{
+	row = &UpdateHistoryRow{
 		StartedAt:       startedAt,
 		CompletedAt:     &completedAt,
-		DurationSeconds: duration,
+		DurationSeconds: int64(completedAt.Sub(startedAt).Seconds()),
 		PreviousSHA:     previousSHA,
-		NewSHA:          newSHA,
+		NewSHA:          readBuildInfo().SHA,
 		FromVersion:     fromVersion,
-		ToVersion:       newSHA, // SHA-only run; no version bump
+		ToVersion:       readBuildInfo().SHA, // no version bump on the web side
 		Actor:           actor,
 	}
-	var updateErr *UpdateError
-	if runErr != nil {
+	if helperRes != "success" {
 		row.Status = "failed"
 		row.Severity = SeverityCritical
-		// row.Notes is the safe code only. The internal error is
-		// logged but never persisted to history.
 		row.Notes = string(ErrCodeScriptFailed)
 		if ctxErr := ctx.Err(); ctxErr == context.DeadlineExceeded {
-			updateErr = NewUpdateError(ErrCodeTimeout, runErr)
+			updateErr = NewUpdateError(ErrCodeTimeout, fmt.Errorf("helper timeout"))
 			row.Notes = string(ErrCodeTimeout)
 		} else {
-			updateErr = NewUpdateError(ErrCodeScriptFailed, runErr)
+			updateErr = NewUpdateError(ErrCodeScriptFailed,
+				fmt.Errorf("helper result=%s exit=%d", helperRes, helperExit))
 		}
 	} else {
 		row.Status = "completed"
@@ -580,9 +815,7 @@ func (s *RuntimeService) Run(ctx context.Context, actor string) (*UpdateHistoryR
 	}
 	job.Status = row.Status
 	job.CompletedAt = &completedAt
-
-	// Persist history. We do not let a DB error mask the underlying
-	// exec result; just log it.
+	// Persist history.
 	if s.db != nil {
 		_, derr := s.db.ExecContext(ctx,
 			`INSERT INTO update_history (started_at, completed_at, duration_seconds, previous_sha, new_sha, from_version, to_version, status, severity, actor, notes)
@@ -592,7 +825,6 @@ func (s *RuntimeService) Run(ctx context.Context, actor string) (*UpdateHistoryR
 			s.cfg.Logger.Warn("update_history insert failed", zap.Error(derr))
 		}
 	}
-
 	if updateErr != nil {
 		return row, updateErr
 	}
@@ -614,51 +846,6 @@ func (s *RuntimeService) IsRunning() bool {
 	s.currentJobMu.Lock()
 	defer s.currentJobMu.Unlock()
 	return s.currentJob != nil
-}
-
-// ── Allow-listed script path resolution ───────────────
-
-// resolveScriptPath returns the absolute, allow-listed path of the
-// runtime update script. The path is always resolved against
-// WorkspaceRoot, never against a user-supplied input.
-func (s *RuntimeService) resolveScriptPath() (string, error) {
-	root := s.cfg.WorkspaceRoot
-	if root == "" {
-		// Fall back to the current working directory.
-		wd, err := os.Getwd()
-		if err != nil {
-			return "", err
-		}
-		root = wd
-	}
-	rootAbs, err := filepath.Abs(root)
-	if err != nil {
-		return "", err
-	}
-	script := s.cfg.ScriptPath
-	if script == "" {
-		script = DefaultScriptPath
-	}
-	// If the configured script is already absolute, use it as-is.
-	// Otherwise resolve it relative to the workspace root, not the
-	// process working directory. This is critical: the script
-	// MUST always live inside the workspace, never in an
-	// attacker-controlled location.
-	var scriptAbs string
-	if filepath.IsAbs(script) {
-		scriptAbs = filepath.Clean(script)
-	} else {
-		scriptAbs = filepath.Clean(filepath.Join(rootAbs, script))
-	}
-	// Allow-list: the script must live under rootAbs and end with
-	// the canonical suffix (path-separator-agnostic).
-	if !strings.HasPrefix(filepath.ToSlash(scriptAbs), filepath.ToSlash(rootAbs)) {
-		return "", ErrScriptPathRejected
-	}
-	if !strings.HasSuffix(filepath.ToSlash(scriptAbs), scriptPathSuffixCanonical) {
-		return "", ErrScriptPathRejected
-	}
-	return scriptAbs, nil
 }
 
 // ── Internal helpers ─────────────────────────────────

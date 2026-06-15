@@ -71,19 +71,23 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		logger.Warn("webmail service not available: failed to get sql.DB", zap.Error(err))
 	}
 
-	// Wire Update Management v1 service. The service holds the
-	// process-wide single-flight mutex; sharing it across all
-	// requests against this router is what enforces "one update
-	// job at a time" even under concurrent load.
-	if sqlDB, err := db.DB(); err == nil {
-		updSvc := updater.NewRuntimeService(sqlDB, updater.Config{
-			ScriptPath:    updater.DefaultScriptPath,
-			WorkspaceRoot: updateWorkspaceRoot(cfg),
-			Channel:       updateChannel(cfg),
-			BackupDir:     updateBackupDir(cfg),
-			Logger:        logger,
-		}).WithCheckURL(cfg.Update.CheckURL)
-		router.h.SetUpdateService(updSvc)
+  // Wire Update Management v1 service. The service holds the
+  // process-wide single-flight mutex; sharing it across all
+  // requests against this router is what enforces "one update
+  // job at a time" even under concurrent load. The web process
+  // NEVER exec's the update script directly; it drives the
+  // root-owned systemd oneshot helper unit via
+  // `systemctl start orvix-update.service`. The helper unit's
+  // ExecStart is the only path that ever reaches exec.
+  if sqlDB, err := db.DB(); err == nil {
+    updSvc := updater.NewRuntimeService(sqlDB, updater.Config{
+        WorkspaceRoot:    updateWorkspaceRoot(cfg),
+        Channel:          updateChannel(cfg),
+        BackupDir:        updateBackupDir(cfg),
+        Logger:           logger,
+        UpdateHelperUnit: updater.DefaultUpdateHelperUnit,
+    }).WithCheckURL(cfg.Update.CheckURL)
+    router.h.SetUpdateService(updSvc)
 	} else {
 		logger.Warn("update service not available: failed to get sql.DB", zap.Error(err))
 	}
