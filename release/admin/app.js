@@ -7,6 +7,8 @@ const state = {
   queue: [],
   backups: [],
   logs: [],
+  monitoringHealth: null,
+  monitoringAlerts: [],
   selectedDomains: new Set(),
   selectedMailboxes: new Set(),
   webmailAccounts: [],
@@ -261,6 +263,101 @@ async function loadLogs() {
   renderTable("logs-table", state.logs, ["action", "actor", "target", "result", "timestamp"], "No audit log entries.");
 }
 
+async function loadMonitoringHealth() {
+  var health = await apiGet("/api/v1/monitoring/health", null);
+  state.monitoringHealth = health;
+  renderMonitoringHealth(health);
+}
+
+async function loadMonitoringAlerts() {
+  var data = await apiGet("/api/v1/monitoring/alerts", { alerts: [] });
+  var alerts = Array.isArray(data) ? data : (data && Array.isArray(data.alerts) ? data.alerts : []);
+  state.monitoringAlerts = alerts;
+  setText("monitoring-open-alerts", String(alerts.length));
+  renderMonitoringAlerts("monitoring-alerts-table", alerts);
+}
+
+async function loadMonitoring() {
+  try {
+    await Promise.all([loadMonitoringHealth(), loadMonitoringAlerts()]);
+  } catch (err) {
+    setText("monitoring-status", "Unavailable");
+    setText("monitoring-status-note", err.message || "Monitoring API is unavailable.");
+    setText("monitoring-open-alerts", "-");
+    setText("monitoring-queue", "-");
+    var components = el("monitoring-components");
+    var disk = el("monitoring-disk");
+    var alerts = el("monitoring-alerts-table");
+    if (components) components.innerHTML = '<div class="empty-state">Monitoring health unavailable.</div>';
+    if (disk) disk.innerHTML = '<div class="empty-state">Disk usage unavailable.</div>';
+    if (alerts) alerts.innerHTML = '<div class="empty-state">Monitoring alerts unavailable.</div>';
+  }
+}
+
+function renderMonitoringHealth(health) {
+  if (!health) {
+    setText("monitoring-status", "Unavailable");
+    setText("monitoring-status-note", "Monitoring health unavailable.");
+    return;
+  }
+  setText("monitoring-status", titleCase(health.status || "unknown"));
+  setText("monitoring-status-note", "Generated " + formatTimestamp(health.generatedAt || health.generated_at || ""));
+  setText("monitoring-open-alerts", String(health.openAlerts != null ? health.openAlerts : (health.open_alerts != null ? health.open_alerts : "-")));
+  var capacity = health.capacity || {};
+  var queueCount = capacity.queueCount != null ? capacity.queueCount : (capacity.queue_count != null ? capacity.queue_count : 0);
+  var deadLetters = capacity.queueDeadLetter != null ? capacity.queueDeadLetter : (capacity.queue_dead_letter != null ? capacity.queue_dead_letter : 0);
+  setText("monitoring-queue", queueCount + " / " + deadLetters);
+
+  var components = [
+    ["Database", health.db],
+    ["Queue", health.queue],
+    ["Backup", health.backup],
+    ["Admin API", health.api]
+  ].map(function(pair) {
+    var component = pair[1] || {};
+    return {
+      component: pair[0],
+      status: component.status || "unknown",
+      message: component.message || "-"
+    };
+  });
+  renderTable("monitoring-components", components, ["component", "status", "message"], "No component health data.");
+
+  var diskRows = Array.isArray(health.disk) ? health.disk.map(function(row) {
+    var usedPct = row.usedPct != null ? row.usedPct : row.used_pct;
+    return {
+      label: row.label || "-",
+      used: formatBytes(row.usedBytes != null ? row.usedBytes : row.used_bytes),
+      free: formatBytes(row.freeBytes != null ? row.freeBytes : row.free_bytes),
+      used_pct: usedPct != null ? usedPct + "%" : "-"
+    };
+  }) : [];
+  renderTable("monitoring-disk", diskRows, ["label", "used", "free", "used_pct"], "No disk usage data.");
+}
+
+function renderMonitoringAlerts(id, alerts) {
+  var node = el(id);
+  if (!node) return;
+  if (!Array.isArray(alerts) || alerts.length === 0) {
+    node.innerHTML = '<div class="empty-state">No active monitoring alerts.</div>';
+    return;
+  }
+  var head = '<table class="table"><thead><tr><th>ID</th><th>Severity</th><th>Category</th><th>Title</th><th>Message</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
+  var body = alerts.map(function(alert) {
+    var idValue = alert.id || "";
+    return '<tr>' +
+      '<td>' + escapeHTML(String(idValue)) + '</td>' +
+      '<td>' + escapeHTML(alert.severity || "-") + '</td>' +
+      '<td>' + escapeHTML(alert.category || "-") + '</td>' +
+      '<td>' + escapeHTML(alert.title || "-") + '</td>' +
+      '<td>' + escapeHTML(alert.message || "-") + '</td>' +
+      '<td>' + escapeHTML(formatTimestamp(alert.createdAt || alert.created_at || "")) + '</td>' +
+      '<td><button class="ghost-btn monitoring-resolve" data-alert-id="' + escapeHTML(String(idValue)) + '" style="font-size:12px;padding:4px 8px;min-height:auto;">Resolve</button></td>' +
+      '</tr>';
+  }).join("");
+  node.innerHTML = head + body + '</tbody></table>';
+}
+
 async function loadBackups() {
   state.backups = await apiGet("/api/v1/backups", []);
   renderBackupsTable("backups-table", state.backups);
@@ -484,6 +581,13 @@ function formatBytes(bytes) {
   return (value / (1024 * 1024 * 1024)).toFixed(2) + " GB";
 }
 
+function formatTimestamp(value) {
+  if (!value) return "-";
+  var date = new Date(value);
+  if (isNaN(date.getTime())) return String(value);
+  return date.toLocaleString();
+}
+
 function renderBackupsTable(id, rows) {
   var node = el(id);
   if (!node) return;
@@ -583,7 +687,7 @@ function escapeHTML(value) {
 
 async function refreshAll() {
   showAlert("");
-  await Promise.allSettled([loadHealth(), loadSummary(), loadDomains(), loadMailboxes(), loadQueue(), loadBackups(), loadBackupStats(), loadBackupSchedule(), loadLogs()]);
+  await Promise.allSettled([loadHealth(), loadSummary(), loadDomains(), loadMailboxes(), loadQueue(), loadBackups(), loadBackupStats(), loadBackupSchedule(), loadMonitoring(), loadLogs()]);
 }
 
 function showApp() {
@@ -917,6 +1021,23 @@ el("backups-table").addEventListener("click", async function(event) {
   }
 });
 
+el("monitoring-alerts-table").addEventListener("click", async function(event) {
+  var btn = event.target.closest("button.monitoring-resolve");
+  if (!btn) return;
+  var alertId = btn.dataset.alertId;
+  if (!alertId) return;
+  btn.disabled = true;
+  try {
+    await apiPost("/api/v1/monitoring/alerts/" + encodeURIComponent(alertId) + "/resolve", {});
+    showAlert("Monitoring alert " + alertId + " resolved.");
+    await loadMonitoring();
+  } catch (err) {
+    showAlert(err.message || "Alert resolve failed.");
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 var backupCreate = el("backup-create");
 if (backupCreate) {
   backupCreate.addEventListener("click", async function() {
@@ -1187,6 +1308,7 @@ document.querySelectorAll("[data-page]").forEach((button) => {
     document.querySelectorAll("[data-page-view]").forEach((view) => view.classList.toggle("hidden", view.dataset.pageView !== page));
     setText("page-subtitle", `${button.textContent.trim()} workspace`);
     if (page === "webmail") loadWebmailAccounts().catch(function(err) { showAlert(err.message || "Failed to load webmail."); });
+    if (page === "monitoring") loadMonitoring().catch(function(err) { showAlert(err.message || "Failed to load monitoring."); });
   });
 });
 
@@ -1199,6 +1321,7 @@ document.querySelectorAll("[data-refresh]").forEach((button) => {
       if (button.dataset.refresh === "queue") await loadQueue();
       if (button.dataset.refresh === "backups") { await loadBackups(); await loadBackupStats(); await loadBackupSchedule(); }
       if (button.dataset.refresh === "webmail") await loadWebmailAccounts();
+      if (button.dataset.refresh === "monitoring") await loadMonitoring();
       if (button.dataset.refresh === "logs") await loadLogs();
     } catch (err) {
       showAlert(err.message || "Refresh failed.");

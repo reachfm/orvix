@@ -50,6 +50,7 @@
         <button type="button" data-page="queue"><span class="nav-icon">Q</span>Queue</button>
         <button type="button" data-page="backups"><span class="nav-icon">B</span>Backups</button>
         <button type="button" data-page="webmail"><span class="nav-icon">W</span>Webmail</button>
+        <button type="button" data-page="monitoring"><span class="nav-icon">N</span>Monitoring</button>
         <button type="button" data-page="logs"><span class="nav-icon">L</span>Logs</button>
         <button type="button" data-page="settings"><span class="nav-icon">S</span>Settings</button>
       </nav>
@@ -356,6 +357,50 @@
             </div>
           </section>
           <section class="panel"><div class="panel-body" id="webmail-accounts-table"></div></section>
+        </section>
+
+        <section class="page hidden" data-page-view="monitoring">
+          <div class="page-head">
+            <div><h2>Monitoring</h2><p>System health, capacity, and active operational alerts.</p></div>
+            <button class="ghost-btn" type="button" data-refresh="monitoring">Refresh</button>
+          </div>
+          <div class="card-grid">
+            <article class="card">
+              <div>
+                <div class="card-label">Overall Health</div>
+                <div id="monitoring-status" class="card-value">Loading</div>
+              </div>
+              <div id="monitoring-status-note" class="card-note">Reading monitoring health.</div>
+            </article>
+            <article class="card">
+              <div>
+                <div class="card-label">Open Alerts</div>
+                <div id="monitoring-open-alerts" class="card-value">-</div>
+              </div>
+              <div class="card-note">Unresolved alerts from the monitoring engine.</div>
+            </article>
+            <article class="card">
+              <div>
+                <div class="card-label">Queue Pressure</div>
+                <div id="monitoring-queue" class="card-value">-</div>
+              </div>
+              <div class="card-note">Pending and dead-letter queue state.</div>
+            </article>
+          </div>
+          <div class="split">
+            <section class="panel">
+              <div class="panel-head"><h3>Subsystem Health</h3></div>
+              <div class="panel-body" id="monitoring-components">Loading...</div>
+            </section>
+            <section class="panel">
+              <div class="panel-head"><h3>Disk Usage</h3></div>
+              <div class="panel-body" id="monitoring-disk">Loading...</div>
+            </section>
+          </div>
+          <section class="panel">
+            <div class="panel-head"><h3>Active Alerts</h3></div>
+            <div class="panel-body" id="monitoring-alerts-table">Loading...</div>
+          </section>
         </section>
 
         <section class="page hidden" data-detail-view="webmail-detail">
