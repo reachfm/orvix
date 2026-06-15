@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/mail"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -18,6 +19,7 @@ import (
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
+	"github.com/orvix/orvix/internal/updater"
 	"github.com/orvix/orvix/internal/webmailmgmt"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/argon2"
@@ -37,6 +39,21 @@ type Handler struct {
 	rateLimiter *auth.RedisRateLimiter
 	auditStore  *audit.Store
 	webmailSvc  *webmailmgmt.Service
+
+	// updateSvc is the process-wide Update Management v1 service.
+	// It is set once at router construction (see
+	// api.NewRouter) so that the run lock is process-wide: two
+	// concurrent HTTP requests against the same router share a
+	// single RuntimeService and therefore a single mutex. A fresh
+	// service per request would defeat the single-flight
+	// guarantee. This field is read by h.updateService().
+	updateSvc *updater.RuntimeService
+
+	// updateSvcOnce ensures the schema is created exactly once
+	// for the lifetime of the Handler, even if updateService()
+	// is called many times. The schema is a CREATE TABLE IF NOT
+	// EXISTS so it is idempotent; the Once is just an optimisation.
+	updateSvcOnce sync.Once
 }
 
 // NewHandler creates a new Handler with dependencies.
