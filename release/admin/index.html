@@ -51,6 +51,7 @@
         <button type="button" data-page="backups"><span class="nav-icon">B</span>Backups</button>
         <button type="button" data-page="webmail"><span class="nav-icon">W</span>Webmail</button>
         <button type="button" data-page="monitoring"><span class="nav-icon">N</span>Monitoring</button>
+        <button type="button" data-page="update"><span class="nav-icon">U</span>Update</button>
         <button type="button" data-page="logs"><span class="nav-icon">L</span>Logs</button>
         <button type="button" data-page="settings"><span class="nav-icon">S</span>Settings</button>
       </nav>
@@ -400,6 +401,54 @@
           <section class="panel">
             <div class="panel-head"><h3>Active Alerts</h3></div>
             <div class="panel-body" id="monitoring-alerts-table">Loading...</div>
+          </section>
+        </section>
+
+        <section class="page hidden" data-page-view="update">
+          <div class="page-head">
+            <div><h2>Update Management</h2><p>Runtime update status, preflight checks, and update history.</p></div>
+            <div>
+              <button class="ghost-btn" type="button" id="update-check">Check Updates</button>
+              <button class="ghost-btn" type="button" id="update-run">Run Update</button>
+              <button class="ghost-btn" type="button" data-refresh="update">Refresh</button>
+            </div>
+          </div>
+          <div class="card-grid">
+            <article class="card">
+              <div>
+                <div class="card-label">Current Version</div>
+                <div id="update-current-version" class="card-value">Loading</div>
+              </div>
+              <div id="update-build-time" class="card-note">Build time unavailable.</div>
+            </article>
+            <article class="card">
+              <div>
+                <div class="card-label">Current SHA</div>
+                <div id="update-current-sha" class="card-value">-</div>
+              </div>
+              <div id="update-channel" class="card-note">Channel unavailable.</div>
+            </article>
+            <article class="card">
+              <div>
+                <div class="card-label">Update Status</div>
+                <div id="update-status" class="card-value">Loading</div>
+              </div>
+              <div id="update-status-note" class="card-note">Reading update status.</div>
+            </article>
+          </div>
+          <div class="split">
+            <section class="panel">
+              <div class="panel-head"><h3>Preflight Checks</h3></div>
+              <div class="panel-body" id="update-preflight">Loading...</div>
+            </section>
+            <section class="panel">
+              <div class="panel-head"><h3>Release Notes</h3></div>
+              <div class="panel-body" id="update-release-notes"><div class="empty-state">No release notes available.</div></div>
+            </section>
+          </div>
+          <section class="panel">
+            <div class="panel-head"><h3>Update History</h3></div>
+            <div class="panel-body" id="update-history-table">Loading...</div>
           </section>
         </section>
 

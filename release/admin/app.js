@@ -9,6 +9,9 @@ const state = {
   logs: [],
   monitoringHealth: null,
   monitoringAlerts: [],
+  updateStatus: null,
+  updateHistory: [],
+  updatePreflight: null,
   selectedDomains: new Set(),
   selectedMailboxes: new Set(),
   webmailAccounts: [],
@@ -358,6 +361,109 @@ function renderMonitoringAlerts(id, alerts) {
   node.innerHTML = head + body + '</tbody></table>';
 }
 
+async function loadUpdateStatus() {
+  var status = await apiGet("/api/v1/update/status", null);
+  state.updateStatus = status;
+  renderUpdateStatus(status);
+}
+
+async function loadUpdateHistory() {
+  var data = await apiGet("/api/v1/update/history?limit=50", { history: [] });
+  var rows = data && Array.isArray(data.history) ? data.history : [];
+  state.updateHistory = rows;
+  renderUpdateHistory("update-history-table", rows);
+}
+
+async function loadUpdatePreflight() {
+  var preflight = await apiGet("/api/v1/update/preflight", null);
+  state.updatePreflight = preflight;
+  renderUpdatePreflight(preflight);
+}
+
+async function loadUpdate() {
+  try {
+    await Promise.all([loadUpdateStatus(), loadUpdateHistory(), loadUpdatePreflight()]);
+  } catch (err) {
+    setText("update-current-version", "Unavailable");
+    setText("update-current-sha", "-");
+    setText("update-build-time", err.message || "Update API is unavailable.");
+    setText("update-status", "Unavailable");
+    setText("update-status-note", "Update status unavailable.");
+    setText("update-channel", "Channel unavailable.");
+    var preflight = el("update-preflight");
+    var history = el("update-history-table");
+    var notes = el("update-release-notes");
+    if (preflight) preflight.innerHTML = '<div class="empty-state">Preflight checks unavailable.</div>';
+    if (history) history.innerHTML = '<div class="empty-state">Update history unavailable.</div>';
+    if (notes) notes.innerHTML = '<div class="empty-state">Release notes unavailable.</div>';
+  }
+}
+
+function renderUpdateStatus(status) {
+  if (!status) {
+    setText("update-current-version", "Unavailable");
+    setText("update-current-sha", "-");
+    setText("update-status", "Unavailable");
+    return;
+  }
+  setText("update-current-version", status.currentVersion || "unknown");
+  setText("update-current-sha", shortSHA(status.currentSha || ""));
+  setText("update-build-time", "Build: " + (status.buildTime || "-"));
+  setText("update-channel", "Channel: " + (status.channel || "stable"));
+  var jobStatus = status.jobStatus || "idle";
+  var updateText = status.updateAvailable ? "Update Available" : titleCase(jobStatus || "idle");
+  setText("update-status", updateText);
+  var checked = status.checkedAt ? "Checked " + formatTimestamp(status.checkedAt) : "Not checked yet";
+  var available = status.availableVersion ? " | Available " + status.availableVersion : "";
+  setText("update-status-note", checked + available);
+  var notes = el("update-release-notes");
+  if (notes) {
+    if (status.releaseNotes) {
+      notes.innerHTML = '<div class="empty-state" style="white-space:pre-wrap;">' + escapeHTML(status.releaseNotes) + '</div>';
+    } else if (status.updateError) {
+      notes.innerHTML = '<div class="empty-state">Update check error: ' + escapeHTML(status.updateError) + '</div>';
+    } else {
+      notes.innerHTML = '<div class="empty-state">No release notes available.</div>';
+    }
+  }
+}
+
+function renderUpdatePreflight(preflight) {
+  var node = el("update-preflight");
+  if (!node) return;
+  if (!preflight || !Array.isArray(preflight.checks)) {
+    node.innerHTML = '<div class="empty-state">No preflight data available.</div>';
+    return;
+  }
+  var summary = '<div class="setting-row"><div><strong>Result</strong><span>' + escapeHTML(preflight.message || "-") + '</span></div><span>' + (preflight.pass ? "PASS" : "FAIL") + '</span></div>';
+  var rows = preflight.checks.map(function(check) {
+    return {
+      check: check.name || "-",
+      status: check.status || "-",
+      detail: check.detail || "-"
+    };
+  });
+  node.innerHTML = summary + tableHTML(rows, ["check", "status", "detail"], "No preflight checks.");
+}
+
+function renderUpdateHistory(id, rows) {
+  var safeRows = Array.isArray(rows) ? rows.map(function(row) {
+    return {
+      started: formatTimestamp(row.startedAt || row.started_at || ""),
+      completed: formatTimestamp(row.completedAt || row.completed_at || ""),
+      duration: (row.durationSeconds != null ? row.durationSeconds : row.duration_seconds || 0) + "s",
+      previous_sha: shortSHA(row.previousSha || row.previous_sha || ""),
+      new_sha: shortSHA(row.newSha || row.new_sha || ""),
+      status: row.status || "-",
+      actor: row.actor || "-",
+      notes: row.notes || "-"
+    };
+  }) : [];
+  var node = el(id);
+  if (!node) return;
+  node.innerHTML = tableHTML(safeRows, ["started", "completed", "duration", "previous_sha", "new_sha", "status", "actor", "notes"], "No update history.");
+}
+
 async function loadBackups() {
   state.backups = await apiGet("/api/v1/backups", []);
   renderBackupsTable("backups-table", state.backups);
@@ -588,6 +694,11 @@ function formatTimestamp(value) {
   return date.toLocaleString();
 }
 
+function shortSHA(value) {
+  if (!value) return "-";
+  return String(value).slice(0, 12);
+}
+
 function renderBackupsTable(id, rows) {
   var node = el(id);
   if (!node) return;
@@ -615,13 +726,16 @@ function renderBackupsTable(id, rows) {
 function renderTable(id, rows, columns, emptyText) {
   const node = el(id);
   if (!node) return;
+  node.innerHTML = tableHTML(rows, columns, emptyText);
+}
+
+function tableHTML(rows, columns, emptyText) {
   if (!Array.isArray(rows) || rows.length === 0) {
-    node.innerHTML = `<div class="empty-state">${escapeHTML(emptyText)}</div>`;
-    return;
+    return `<div class="empty-state">${escapeHTML(emptyText)}</div>`;
   }
   const head = columns.map((col) => `<th>${escapeHTML(titleCase(col))}</th>`).join("");
   const body = rows.map((row) => `<tr>${columns.map((col) => `<td>${escapeHTML(valueFor(row, col))}</td>`).join("")}</tr>`).join("");
-  node.innerHTML = `<table class="table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+  return `<table class="table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
 }
 
 function valueFor(row, key) {
@@ -687,7 +801,7 @@ function escapeHTML(value) {
 
 async function refreshAll() {
   showAlert("");
-  await Promise.allSettled([loadHealth(), loadSummary(), loadDomains(), loadMailboxes(), loadQueue(), loadBackups(), loadBackupStats(), loadBackupSchedule(), loadMonitoring(), loadLogs()]);
+  await Promise.allSettled([loadHealth(), loadSummary(), loadDomains(), loadMailboxes(), loadQueue(), loadBackups(), loadBackupStats(), loadBackupSchedule(), loadMonitoring(), loadUpdate(), loadLogs()]);
 }
 
 function showApp() {
@@ -1056,6 +1170,47 @@ if (backupCreate) {
   });
 }
 
+var updateCheck = el("update-check");
+if (updateCheck) {
+  updateCheck.addEventListener("click", async function() {
+    showAlert("");
+    updateCheck.disabled = true;
+    try {
+      var status = await apiPost("/api/v1/update/check", {});
+      state.updateStatus = status;
+      renderUpdateStatus(status);
+      await Promise.allSettled([loadUpdateHistory(), loadUpdatePreflight()]);
+      showAlert("Update check completed.");
+    } catch (err) {
+      showAlert(err.message || "Update check failed.");
+    } finally {
+      updateCheck.disabled = false;
+    }
+  });
+}
+
+var updateRun = el("update-run");
+if (updateRun) {
+  updateRun.addEventListener("click", async function() {
+    if (!confirm("Run runtime update? The Orvix service may restart.")) return;
+    showAlert("");
+    updateRun.disabled = true;
+    try {
+      var result = await apiPost("/api/v1/update/run", {});
+      await loadUpdate();
+      if (result && result.status === "completed") {
+        showAlert("Runtime update completed.");
+      } else {
+        showAlert("Runtime update finished with status: " + escapeHTML((result && result.status) || "failed") + ".");
+      }
+    } catch (err) {
+      showAlert(err.message || "Runtime update failed.");
+    } finally {
+      updateRun.disabled = false;
+    }
+  });
+}
+
 ["mailbox-search", "mailbox-status-filter", "mailbox-admin-filter"].forEach(function(id) {
   var node = el(id);
   if (!node) return;
@@ -1309,6 +1464,7 @@ document.querySelectorAll("[data-page]").forEach((button) => {
     setText("page-subtitle", `${button.textContent.trim()} workspace`);
     if (page === "webmail") loadWebmailAccounts().catch(function(err) { showAlert(err.message || "Failed to load webmail."); });
     if (page === "monitoring") loadMonitoring().catch(function(err) { showAlert(err.message || "Failed to load monitoring."); });
+    if (page === "update") loadUpdate().catch(function(err) { showAlert(err.message || "Failed to load update status."); });
   });
 });
 
@@ -1322,6 +1478,7 @@ document.querySelectorAll("[data-refresh]").forEach((button) => {
       if (button.dataset.refresh === "backups") { await loadBackups(); await loadBackupStats(); await loadBackupSchedule(); }
       if (button.dataset.refresh === "webmail") await loadWebmailAccounts();
       if (button.dataset.refresh === "monitoring") await loadMonitoring();
+      if (button.dataset.refresh === "update") await loadUpdate();
       if (button.dataset.refresh === "logs") await loadLogs();
     } catch (err) {
       showAlert(err.message || "Refresh failed.");
