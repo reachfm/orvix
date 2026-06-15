@@ -159,6 +159,10 @@ func (r *Router) setupRoutes() {
 	admin.Get("/feature-flags", r.h.ListFeatureFlags)
 	admin.Get("/api-keys", r.h.ListAPIKeys)
 	admin.Get("/admin/summary", r.h.AdminSummary)
+	// Monitoring v1: read-only health + alert endpoints (admin role).
+	admin.Get("/monitoring/health", r.h.GetMonitoringHealth)
+	admin.Get("/monitoring/alerts", r.h.GetMonitoringAlerts)
+	admin.Get("/monitoring/capacity", r.h.GetMonitoringCapacity)
 
 	// Auto-Heal
 	admin.Get("/heal/history", r.h.ListHealHistory)
@@ -248,6 +252,8 @@ func (r *Router) setupRoutes() {
 	men.Post("/backups/schedule", r.h.SetBackupSchedule)
 	men.Post("/backups/retention", r.h.RunBackupRetention)
 	men.Delete("/backups/:id", r.h.DeleteBackup)
+	// Monitoring v1: resolve an alert (CSRF-protected, admin role).
+	men.Post("/monitoring/alerts/:id/resolve", r.h.PostMonitoringAlertResolve)
 	men.Post("/firewall/rules", r.h.CreateFirewallRule)
 	men.Post("/license/validate", r.h.ValidateLicense)
 	men.Put("/feature-flags/:id", r.h.UpdateFeatureFlag)

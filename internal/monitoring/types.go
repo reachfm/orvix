@@ -2,6 +2,7 @@ package monitoring
 
 import "time"
 
+// Severity classifies an alert by impact.
 type Severity string
 
 const (
@@ -10,6 +11,7 @@ const (
 	SeverityCritical Severity = "critical"
 )
 
+// Category classifies an alert by subsystem.
 type Category string
 
 const (
@@ -21,30 +23,79 @@ const (
 	CatTrust    Category = "trust"
 	CatPolicy   Category = "policy"
 	CatStorage  Category = "storage"
+	CatDatabase Category = "database"
+	CatAPI      Category = "api"
 )
 
+// Alert is a single monitoring event.
+//
+// Security contract: the Message field MUST NOT contain file contents,
+// environment values, secret tokens, or private filesystem paths. The
+// field is rendered verbatim in the admin UI. Use safe labels only.
 type Alert struct {
-	ID          uint      `json:"id"`
-	Category    Category  `json:"category"`
-	Severity    Severity  `json:"severity"`
-	Title       string    `json:"title"`
-	Message     string    `json:"message"`
-	Source      string    `json:"source"`
-	Active      bool      `json:"active"`
-	CreatedAt   time.Time `json:"createdAt"`
-	ResolvedAt  *time.Time `json:"resolvedAt,omitempty"`
+	ID         uint       `json:"id"`
+	Category   Category   `json:"category"`
+	Severity   Severity   `json:"severity"`
+	Title      string     `json:"title"`
+	Message    string     `json:"message"`
+	Source     string     `json:"source"`
+	Active     bool       `json:"active"`
+	CreatedAt  time.Time  `json:"createdAt"`
+	ResolvedAt *time.Time `json:"resolvedAt,omitempty"`
 }
 
+// Capacity is a high-level set of system counters for the dashboard.
 type Capacity struct {
 	DomainCount     int   `json:"domainCount"`
 	MailboxCount    int64 `json:"mailboxCount"`
 	MessageCount    int64 `json:"messageCount"`
 	AttachmentCount int64 `json:"attachmentCount"`
 	QueueCount      int64 `json:"queueCount"`
+	QueueDeadLetter int64 `json:"queueDeadLetter"`
 	StorageBytes    int64 `json:"storageBytes"`
 	DatabaseSize    int64 `json:"databaseSize"`
 	BackupCount     int   `json:"backupCount"`
 	BackupBytes     int64 `json:"backupBytes"`
+}
+
+// DiskUsage describes filesystem consumption for a single mount or directory.
+//
+// Security contract: MountPath is a SAFE LABEL (e.g. "backup", "database",
+// "mailstore"), never the actual on-disk absolute path. The handler is
+// responsible for collapsing the real path into one of the known labels
+// before populating this struct.
+type DiskUsage struct {
+	Label      string `json:"label"`
+	TotalBytes int64  `json:"totalBytes"`
+	UsedBytes  int64  `json:"usedBytes"`
+	FreeBytes  int64  `json:"freeBytes"`
+	UsedPct    int    `json:"usedPct"`
+}
+
+// Health is the top-level response shape for /api/v1/monitoring/health.
+//
+// Security contract: Status, Uptime, DiskUsage, DBHealth, QueueHealth,
+// BackupHealth, APIHealth are all safe fields. ServiceUptime is a
+// duration, never an absolute timestamp. DiskUsage paths are safe
+// labels. No env values, no tokens, no file contents, no private
+// filesystem paths.
+type Health struct {
+	Status        string       `json:"status"`        // "ok" | "degraded" | "down"
+	UptimeSeconds int64        `json:"uptimeSeconds"` // process uptime
+	GeneratedAt   time.Time    `json:"generatedAt"`
+	Disk          []DiskUsage  `json:"disk"`
+	DB            ComponentHealth `json:"db"`
+	Queue         ComponentHealth `json:"queue"`
+	Backup        ComponentHealth `json:"backup"`
+	API           ComponentHealth `json:"api"`
+	Capacity      Capacity     `json:"capacity"`
+	OpenAlerts    int          `json:"openAlerts"`
+}
+
+// ComponentHealth is a per-subsystem status.
+type ComponentHealth struct {
+	Status  string `json:"status"`  // "ok" | "warning" | "critical" | "unknown"
+	Message string `json:"message"` // safe label, never a path/secret/env value
 }
 
 var schema = []string{
@@ -59,4 +110,12 @@ var schema = []string{
 		created_at DATETIME NOT NULL,
 		resolved_at DATETIME
 	)`,
+}
+
+// Schema returns the SQL DDL statements the monitoring service needs.
+// The handler calls this on every request to keep the schema in sync
+// with the latest definition; CREATE TABLE IF NOT EXISTS is idempotent
+// and cheap.
+func Schema() []string {
+	return schema
 }
