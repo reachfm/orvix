@@ -1,6 +1,7 @@
 package adminapi
 
 import (
+	"crypto/subtle"
 	"log"
 	"net/http"
 	"strings"
@@ -13,6 +14,9 @@ func (s *Server) RequireSession(next http.Handler) http.Handler {
 		session := s.getSession(r)
 		if session == nil {
 			jsonError(w, "not authenticated", http.StatusUnauthorized)
+			return
+		}
+		if requiresCSRF(r.Method) && !s.validateCSRF(w, r, session) {
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -36,6 +40,51 @@ func (s *Server) RequirePermission(perm Permission) func(http.Handler) http.Hand
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// RequireCSRF validates a double-submit CSRF token for state-changing requests.
+func (s *Server) RequireCSRF(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !requiresCSRF(r.Method) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		session := s.getSession(r)
+		if session == nil {
+			jsonError(w, "not authenticated", http.StatusUnauthorized)
+			return
+		}
+		if !s.validateCSRF(w, r, session) {
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func requiresCSRF(method string) bool {
+	return method != http.MethodGet && method != http.MethodHead && method != http.MethodOptions
+}
+
+func (s *Server) validateCSRF(w http.ResponseWriter, r *http.Request, session *Session) bool {
+	cookie, err := r.Cookie(csrfCookieName)
+	if err != nil || cookie.Value == "" {
+		s.recordAudit(AuditPermissionDenied, session.Username, string(session.Role), r, "csrf_cookie_missing")
+		jsonError(w, "CSRF token missing", http.StatusForbidden)
+		return false
+	}
+	header := r.Header.Get("X-CSRF-Token")
+	if header == "" {
+		s.recordAudit(AuditPermissionDenied, session.Username, string(session.Role), r, "csrf_header_missing")
+		jsonError(w, "CSRF token missing", http.StatusForbidden)
+		return false
+	}
+	if subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(header)) != 1 ||
+		subtle.ConstantTimeCompare([]byte(session.CSRFToken), []byte(header)) != 1 {
+		s.recordAudit(AuditPermissionDenied, session.Username, string(session.Role), r, "csrf_mismatch")
+		jsonError(w, "CSRF token mismatch", http.StatusForbidden)
+		return false
+	}
+	return true
 }
 
 // RequireRole checks that the authenticated session has one of the specified roles.

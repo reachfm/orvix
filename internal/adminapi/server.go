@@ -195,7 +195,6 @@ func (s *Server) registerRoutes() {
 			),
 		)
 	}
-
 	s.mux.Handle("/admin/health", protected(PermHealthRead, AuditHealthViewed, s.handleHealth))
 	s.mux.Handle("/admin/audit", protected(PermAuditRead, AuditHealthViewed, s.handleAudit))
 	s.mux.Handle("/admin/metrics", protected(PermMetricsRead, AuditHealthViewed, s.handleMetrics))
@@ -376,7 +375,7 @@ func (s *Server) registerRoutes() {
 			case "GET":
 				s.RequirePermission(PermBackupRead)(s.AuditMiddleware(AuditBackupViewed)(http.HandlerFunc(s.handleBackupList))).ServeHTTP(rw, r)
 			case "POST":
-				s.RequirePermission(PermBackupWrite)(s.AuditMiddleware(AuditBackupCreated)(http.HandlerFunc(s.handleBackupCreate))).ServeHTTP(rw, r)
+				s.RequireCSRF(s.RequirePermission(PermBackupWrite)(s.AuditMiddleware(AuditBackupCreated)(http.HandlerFunc(s.handleBackupCreate)))).ServeHTTP(rw, r)
 			default:
 				jsonError(rw, "method not allowed", http.StatusMethodNotAllowed)
 			}
@@ -391,16 +390,32 @@ func (s *Server) registerRoutes() {
 			case strings.HasSuffix(path, "/preview"):
 				s.RequirePermission(PermBackupRead)(s.AuditMiddleware(AuditBackupViewed)(http.HandlerFunc(s.handleBackupPreview))).ServeHTTP(rw, r)
 			case strings.HasSuffix(path, "/restore"):
-				s.RequirePermission(PermBackupWrite)(s.AuditMiddleware(AuditBackupRestoreRejected)(http.HandlerFunc(s.handleBackupRestore))).ServeHTTP(rw, r)
+				s.RequireCSRF(s.RequirePermission(PermBackupWrite)(s.AuditMiddleware(AuditBackupRestoreRejected)(http.HandlerFunc(s.handleBackupRestore)))).ServeHTTP(rw, r)
 			case r.Method == "GET":
 				s.RequirePermission(PermBackupRead)(s.AuditMiddleware(AuditBackupViewed)(http.HandlerFunc(s.handleBackupGet))).ServeHTTP(rw, r)
 			case r.Method == "DELETE":
-				s.RequirePermission(PermBackupWrite)(s.AuditMiddleware(AuditBackupDeleted)(http.HandlerFunc(s.handleBackupDelete))).ServeHTTP(rw, r)
+				s.RequireCSRF(s.RequirePermission(PermBackupWrite)(s.AuditMiddleware(AuditBackupDeleted)(http.HandlerFunc(s.handleBackupDelete)))).ServeHTTP(rw, r)
 			default:
 				jsonError(rw, "method not allowed", http.StatusMethodNotAllowed)
 			}
 		}),
 	))
+
+	// Backup schedule, metrics, health (exact paths, before subtree /admin/backups/).
+	s.mux.Handle("/admin/backups/schedule",
+		s.RequireSession(
+			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method {
+				case "GET":
+					s.RequirePermission(PermBackupRead)(s.AuditMiddleware(AuditBackupViewed)(http.HandlerFunc(s.handleBackupScheduleGet))).ServeHTTP(w, r)
+				default:
+					jsonError(w, "method not allowed", http.StatusMethodNotAllowed)
+				}
+			}),
+		),
+	)
+	s.mux.Handle("/admin/backups/metrics", protected(PermMetricsRead, AuditBackupViewed, s.handleBackupMetrics))
+	s.mux.Handle("/admin/backups/health", protected(PermMetricsRead, AuditBackupViewed, s.handleBackupHealth))
 
 	// TLS routes.
 	tlsRead := func(perm Permission, action AuditAction, h http.HandlerFunc) http.Handler {
@@ -807,6 +822,45 @@ func (s *Server) handleBackupPreview(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 	jsonError(w, "restore execution requires offline maintenance mode and is not available in the running API", http.StatusNotImplemented)
+}
+
+func (s *Server) handleBackupScheduleGet(w http.ResponseWriter, r *http.Request) {
+	if s.BackupService == nil {
+		jsonError(w, "backup not available", 503)
+		return
+	}
+	cfg, err := s.BackupService.GetScheduleConfig(r.Context())
+	if err != nil {
+		jsonError(w, err.Error(), 500)
+		return
+	}
+	jsonOK(w, cfg)
+}
+
+func (s *Server) handleBackupMetrics(w http.ResponseWriter, r *http.Request) {
+	if s.BackupService == nil {
+		jsonError(w, "backup not available", 503)
+		return
+	}
+	metrics, err := s.BackupService.GetBackupMetrics(r.Context())
+	if err != nil {
+		jsonError(w, err.Error(), 500)
+		return
+	}
+	jsonOK(w, metrics)
+}
+
+func (s *Server) handleBackupHealth(w http.ResponseWriter, r *http.Request) {
+	if s.BackupService == nil {
+		jsonError(w, "backup not available", 503)
+		return
+	}
+	health, err := s.BackupService.GetBackupHealth(r.Context())
+	if err != nil {
+		jsonError(w, err.Error(), 500)
+		return
+	}
+	jsonOK(w, health)
 }
 
 func extractBackupID(path string) string {

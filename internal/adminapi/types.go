@@ -114,6 +114,7 @@ func HasPermission(role Role, perm Permission) bool {
 
 type Session struct {
 	Token     string    `json:"token"`
+	CSRFToken string    `json:"-"`
 	UserID    uint      `json:"userId"`
 	Username  string    `json:"username"`
 	Role      Role      `json:"role"`

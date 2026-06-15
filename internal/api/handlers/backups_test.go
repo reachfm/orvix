@@ -266,6 +266,43 @@ func TestBackupAPIWriteRequiresCSRF(t *testing.T) {
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("expected missing-CSRF delete to be 403, got %d", resp.StatusCode)
 	}
+
+	// POST /api/v1/backups/schedule must require CSRF
+	resp, _ = backupRequest(t, router, "POST", "/api/v1/backups/schedule", `{}`, token, "")
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected missing-CSRF schedule set to be 403, got %d", resp.StatusCode)
+	}
+	req := httptest.NewRequest("POST", "/api/v1/backups/schedule", strings.NewReader(`{"enabled":true,"frequency":"daily","retentionCount":7}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Cookie", "csrf_token=invalid-cookie")
+	req.Header.Set("X-CSRF-Token", "different-header")
+	resp, err := router.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("invalid-CSRF schedule request: %v", err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected invalid-CSRF schedule set to be 403, got %d: %s", resp.StatusCode, body)
+	}
+
+	// POST /api/v1/backups/retention must require CSRF
+	resp, _ = backupRequest(t, router, "POST", "/api/v1/backups/retention", "", token, "")
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected missing-CSRF retention to be 403, got %d", resp.StatusCode)
+	}
+	req = httptest.NewRequest("POST", "/api/v1/backups/retention", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Cookie", "csrf_token=invalid-cookie")
+	req.Header.Set("X-CSRF-Token", "different-header")
+	resp, err = router.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("invalid-CSRF retention request: %v", err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected invalid-CSRF retention to be 403, got %d: %s", resp.StatusCode, body)
+	}
 }
 
 func TestBackupAPIRejectsInvalidIDs(t *testing.T) {

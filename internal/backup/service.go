@@ -388,6 +388,92 @@ func (s *Service) RestorePreview(ctx context.Context, id string) (*RestorePrevie
 	}, nil
 }
 
+// ── Backup Metrics ───────────────────────────────────────
+
+func (s *Service) GetBackupMetrics(ctx context.Context) (*BackupMetrics, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	metrics := &BackupMetrics{}
+	if s.db == nil {
+		return metrics, nil
+	}
+
+	row := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*), COALESCE(SUM(size_bytes), 0),
+		       MAX(created_at), MIN(created_at),
+		       MAX(CASE WHEN status = 'completed' THEN completed_at END)
+		FROM backup_registry
+	`)
+	var newest, oldest, lastSuccess sql.NullString
+	if err := row.Scan(&metrics.TotalBackups, &metrics.TotalSizeBytes, &newest, &oldest, &lastSuccess); err != nil {
+		return nil, err
+	}
+	if newest.Valid && newest.String != "" {
+		if t, err := time.Parse(time.RFC3339, newest.String); err == nil {
+			metrics.NewestBackupAt = t.Format(time.RFC3339)
+		} else {
+			metrics.NewestBackupAt = newest.String
+		}
+	}
+	if oldest.Valid && oldest.String != "" {
+		if t, err := time.Parse(time.RFC3339, oldest.String); err == nil {
+			metrics.OldestBackupAt = t.Format(time.RFC3339)
+		} else {
+			metrics.OldestBackupAt = oldest.String
+		}
+	}
+	if lastSuccess.Valid && lastSuccess.String != "" {
+		if t, err := time.Parse(time.RFC3339, lastSuccess.String); err == nil {
+			metrics.LastSuccessfulAt = t.Format(time.RFC3339)
+		} else {
+			metrics.LastSuccessfulAt = lastSuccess.String
+		}
+	}
+
+	var nextRun sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT next_run_at FROM backup_schedule_config WHERE id = 1`).Scan(&nextRun)
+	if err == nil && nextRun.Valid && nextRun.String != "" {
+		if t, err := time.Parse(time.RFC3339, nextRun.String); err == nil {
+			metrics.NextScheduledAt = t.Format(time.RFC3339)
+		} else {
+			metrics.NextScheduledAt = nextRun.String
+		}
+	}
+
+	return metrics, nil
+}
+
+// ── Backup Health ────────────────────────────────────────
+
+func (s *Service) GetBackupHealth(ctx context.Context) (*BackupHealth, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	health := &BackupHealth{RetentionEnabled: true}
+	if s.db != nil {
+		row := s.db.QueryRowContext(ctx, `SELECT enabled FROM backup_schedule_config WHERE id = 1`)
+		var enabled int
+		if err := row.Scan(&enabled); err == nil {
+			health.SchedulerEnabled = enabled != 0
+		}
+	}
+
+	_, err := os.Stat(s.basePath)
+	health.DirectoryExists = err == nil
+
+	if health.DirectoryExists {
+		testFile := filepath.Join(s.basePath, ".writetest")
+		if err := os.WriteFile(testFile, []byte("test"), 0640); err == nil {
+			health.Writable = true
+			os.Remove(testFile)
+		}
+		health.AvailableDiskBytes = diskFreeBytes(s.basePath)
+	}
+
+	return health, nil
+}
+
 // ── Helpers ──────────────────────────────────────────────
 
 // Sensitive key patterns to redact from orvix.yaml in backup archives.

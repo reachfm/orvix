@@ -280,12 +280,48 @@
 
         <section class="page hidden" data-page-view="backups">
           <div class="page-head">
-            <div><h2>Backups</h2><p>Create, download, and remove service-managed backup archives.</p></div>
+            <div><h2>Backups</h2><p>Create, download, schedule, and remove service-managed backup archives.</p></div>
             <div>
               <button class="ghost-btn" type="button" id="backup-create">Backup Now</button>
+              <button class="ghost-btn" type="button" id="backup-run-retention">Run Retention</button>
               <button class="ghost-btn" type="button" data-refresh="backups">Refresh</button>
             </div>
           </div>
+          <section class="panel">
+            <div class="panel-head"><h3>Backup Statistics</h3></div>
+            <div class="panel-body" id="backup-stats"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Backup Health</h3></div>
+            <div class="panel-body" id="backup-health"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Schedule Configuration</h3></div>
+            <div class="panel-body">
+              <form id="backup-schedule-form">
+                <div class="setting-row">
+                  <div><strong>Scheduled Backups</strong><span>Enable automatic backups on a schedule.</span></div>
+                  <label><input id="bs-enabled" type="checkbox" style="transform:scale(1.3);margin-right:8px;"> Enabled</label>
+                </div>
+                <div class="setting-row">
+                  <div><strong>Frequency</strong><span>How often to run scheduled backups.</span></div>
+                  <select id="bs-frequency" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:14px;">
+                    <option value="manual">Manual</option>
+                    <option value="daily">Daily</option>
+                    <option value="weekly">Weekly</option>
+                  </select>
+                </div>
+                <div class="setting-row">
+                  <div><strong>Retention Count</strong><span>Number of completed backups to keep (oldest are auto-deleted).</span></div>
+                  <input id="bs-retention" type="number" min="1" max="365" value="7" style="width:80px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:14px;">
+                </div>
+                <div style="margin-top:12px;">
+                  <button id="bs-save-btn" class="primary-btn" type="submit">Save Schedule</button>
+                  <span id="bs-message" class="message" style="margin-left:12px;"></span>
+                </div>
+              </form>
+            </div>
+          </section>
           <section class="panel"><div class="panel-body" id="backups-table"></div></section>
         </section>
 

@@ -156,15 +156,22 @@ func adminClient(t *testing.T, addr string) *http.Client {
 }
 
 type secureCookieTestTransport struct {
-	base http.RoundTripper
-	mu   sync.Mutex
-	c    *http.Cookie
+	base    http.RoundTripper
+	mu      sync.Mutex
+	cookies map[string]*http.Cookie
 }
 
 func (t *secureCookieTestTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	t.mu.Lock()
-	if t.c != nil {
-		req.AddCookie(t.c)
+	var csrfToken string
+	for _, c := range t.cookies {
+		req.AddCookie(c)
+		if c.Name == csrfCookieName {
+			csrfToken = c.Value
+		}
+	}
+	if csrfToken != "" && req.Method != http.MethodGet && req.Method != http.MethodHead && req.Method != http.MethodOptions {
+		req.Header.Set("X-CSRF-Token", csrfToken)
 	}
 	t.mu.Unlock()
 
@@ -173,15 +180,18 @@ func (t *secureCookieTestTransport) RoundTrip(req *http.Request) (*http.Response
 		return nil, err
 	}
 	for _, c := range resp.Cookies() {
-		if c.Name != sessionCookieName {
+		if c.Name != sessionCookieName && c.Name != csrfCookieName {
 			continue
 		}
 		t.mu.Lock()
+		if t.cookies == nil {
+			t.cookies = make(map[string]*http.Cookie)
+		}
 		if c.MaxAge < 0 || c.Value == "" {
-			t.c = nil
+			delete(t.cookies, c.Name)
 		} else {
 			copy := *c
-			t.c = &copy
+			t.cookies[c.Name] = &copy
 		}
 		t.mu.Unlock()
 	}

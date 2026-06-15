@@ -15,6 +15,7 @@ import (
 const sessionDuration = 24 * time.Hour
 
 const sessionCookieName = "admin_session"
+const csrfCookieName = "admin_csrf"
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
@@ -47,10 +48,16 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	csrfToken, err := generateToken()
+	if err != nil {
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 
 	now := time.Now()
 	session := &Session{
 		Token:     token,
+		CSRFToken: csrfToken,
 		UserID:    mbox.ID,
 		Username:  req.Username,
 		Role:      role,
@@ -65,6 +72,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Value:    token,
 		Path:     "/admin",
 		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   true,
+		MaxAge:   int(sessionDuration.Seconds()),
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     csrfCookieName,
+		Value:    csrfToken,
+		Path:     "/admin",
+		HttpOnly: false,
 		SameSite: http.SameSiteLaxMode,
 		Secure:   true,
 		MaxAge:   int(sessionDuration.Seconds()),
@@ -101,6 +117,13 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		Value:    "",
 		Path:     "/admin",
 		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     csrfCookieName,
+		Value:    "",
+		Path:     "/admin",
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   -1,
 	})

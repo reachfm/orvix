@@ -183,3 +183,96 @@ func (h *Handler) DeleteBackup(c fiber.Ctx) error {
 	h.writeAuditLog(c, "backup.delete", fmt.Sprintf("backup_id:%s", id))
 	return c.SendStatus(fiber.StatusNoContent)
 }
+
+func (h *Handler) ensureBackupScheduleTable(sqlDB *sql.DB) error {
+	_, err := sqlDB.Exec(`CREATE TABLE IF NOT EXISTS backup_schedule_config (
+		id INTEGER PRIMARY KEY DEFAULT 1,
+		enabled INTEGER NOT NULL DEFAULT 0,
+		frequency TEXT NOT NULL DEFAULT 'manual',
+		retention_count INTEGER NOT NULL DEFAULT 7,
+		last_run_at DATETIME,
+		next_run_at DATETIME,
+		updated_at DATETIME NOT NULL
+	)`)
+	return err
+}
+
+func (h *Handler) backupScheduleService() (*backup.Service, error) {
+	return h.backupService()
+}
+
+// GetBackupSchedule returns the current backup schedule configuration.
+func (h *Handler) GetBackupSchedule(c fiber.Ctx) error {
+	svc, err := h.backupService()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "backup service unavailable"})
+	}
+	cfg, err := svc.GetScheduleConfig(c.Context())
+	if err != nil {
+		h.logger.Error("backup schedule get failed", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to get backup schedule"})
+	}
+	return c.JSON(cfg)
+}
+
+// SetBackupSchedule updates the backup schedule configuration.
+func (h *Handler) SetBackupSchedule(c fiber.Ctx) error {
+	svc, err := h.backupService()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "backup service unavailable"})
+	}
+	var req backup.ScheduleConfig
+	if err := c.Bind().JSON(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
+	}
+	cfg, err := svc.SetScheduleConfig(c.Context(), &req)
+	if err != nil {
+		h.logger.Error("backup schedule update failed", zap.Error(err))
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	h.writeAuditLog(c, "backup.schedule_updated", fmt.Sprintf("enabled:%v|frequency:%s|retention:%d", cfg.Enabled, cfg.Frequency, cfg.RetentionCount))
+	return c.JSON(cfg)
+}
+
+// GetBackupMetrics returns aggregate backup metrics.
+func (h *Handler) GetBackupMetrics(c fiber.Ctx) error {
+	svc, err := h.backupService()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "backup service unavailable"})
+	}
+	metrics, err := svc.GetBackupMetrics(c.Context())
+	if err != nil {
+		h.logger.Error("backup metrics failed", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to get backup metrics"})
+	}
+	return c.JSON(metrics)
+}
+
+// GetBackupHealth returns backup system health status.
+func (h *Handler) GetBackupHealth(c fiber.Ctx) error {
+	svc, err := h.backupService()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "backup service unavailable"})
+	}
+	health, err := svc.GetBackupHealth(c.Context())
+	if err != nil {
+		h.logger.Error("backup health failed", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to get backup health"})
+	}
+	return c.JSON(health)
+}
+
+// RunBackupRetention triggers a retention cleanup.
+func (h *Handler) RunBackupRetention(c fiber.Ctx) error {
+	svc, err := h.backupService()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "backup service unavailable"})
+	}
+	deleted, err := svc.RunRetention(c.Context())
+	if err != nil {
+		h.logger.Error("backup retention failed", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "retention cleanup failed"})
+	}
+	h.writeAuditLog(c, "backup.retention_cleanup", fmt.Sprintf("deleted:%d", deleted))
+	return c.JSON(fiber.Map{"deleted": deleted})
+}

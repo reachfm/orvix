@@ -53,6 +53,40 @@ type RestorePreview struct {
 	SizeBytes       int64 `json:"sizeBytes"`
 }
 
+type Frequency string
+
+const (
+	FrequencyManual Frequency = "manual"
+	FrequencyDaily  Frequency = "daily"
+	FrequencyWeekly Frequency = "weekly"
+)
+
+type ScheduleConfig struct {
+	Enabled        bool       `json:"enabled"`
+	Frequency      Frequency  `json:"frequency"`
+	RetentionCount int        `json:"retentionCount"`
+	LastRunAt      *time.Time `json:"lastRunAt,omitempty"`
+	NextRunAt      *time.Time `json:"nextRunAt,omitempty"`
+	UpdatedAt      time.Time  `json:"updatedAt"`
+}
+
+type BackupMetrics struct {
+	TotalBackups     int    `json:"totalBackups"`
+	TotalSizeBytes   int64  `json:"totalSizeBytes"`
+	NewestBackupAt   string `json:"newestBackupAt,omitempty"`
+	OldestBackupAt   string `json:"oldestBackupAt,omitempty"`
+	LastSuccessfulAt string `json:"lastSuccessfulAt,omitempty"`
+	NextScheduledAt  string `json:"nextScheduledAt,omitempty"`
+}
+
+type BackupHealth struct {
+	SchedulerEnabled   bool  `json:"schedulerEnabled"`
+	RetentionEnabled   bool  `json:"retentionEnabled"`
+	DirectoryExists    bool  `json:"directoryExists"`
+	Writable           bool  `json:"writable"`
+	AvailableDiskBytes int64 `json:"availableDiskBytes"`
+}
+
 var tables = []string{
 	`CREATE TABLE IF NOT EXISTS backup_registry (
 		id TEXT PRIMARY KEY,
@@ -62,5 +96,14 @@ var tables = []string{
 		sha256 TEXT NOT NULL DEFAULT '',
 		created_at DATETIME NOT NULL,
 		completed_at DATETIME
+	)`,
+	`CREATE TABLE IF NOT EXISTS backup_schedule_config (
+		id INTEGER PRIMARY KEY DEFAULT 1,
+		enabled INTEGER NOT NULL DEFAULT 0,
+		frequency TEXT NOT NULL DEFAULT 'manual',
+		retention_count INTEGER NOT NULL DEFAULT 7,
+		last_run_at DATETIME,
+		next_run_at DATETIME,
+		updated_at DATETIME NOT NULL
 	)`,
 }

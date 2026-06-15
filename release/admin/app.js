@@ -264,6 +264,112 @@ async function loadBackups() {
   renderBackupsTable("backups-table", state.backups);
 }
 
+async function loadBackupStats() {
+  var node = el("backup-stats");
+  var healthNode = el("backup-health");
+  if (!node) return;
+  try {
+    var [metrics, health] = await Promise.all([
+      apiGet("/api/v1/backups/metrics", null),
+      apiGet("/api/v1/backups/health", null)
+    ]);
+    if (!metrics) metrics = {totalBackups:0,totalSizeBytes:0};
+    if (!health) health = {schedulerEnabled:false,retentionEnabled:true,directoryExists:false,writable:false,availableDiskBytes:0};
+    var diskSpace = "";
+    if (health.availableDiskBytes > 0) {
+      diskSpace = " | " + formatBytes(health.availableDiskBytes) + " free";
+    }
+    node.innerHTML =
+      '<div class="setting-row"><div><strong>Total Backups</strong></div><span>' + (metrics.totalBackups || 0) + '</span></div>' +
+      '<div class="setting-row"><div><strong>Total Size</strong></div><span>' + formatBytes(metrics.totalSizeBytes) + '</span></div>' +
+      '<div class="setting-row"><div><strong>Newest Backup</strong></div><span>' + escapeHTML(metrics.newestBackupAt || "-") + '</span></div>' +
+      '<div class="setting-row"><div><strong>Oldest Backup</strong></div><span>' + escapeHTML(metrics.oldestBackupAt || "-") + '</span></div>' +
+      '<div class="setting-row"><div><strong>Last Successful</strong></div><span>' + escapeHTML(metrics.lastSuccessfulAt || "-") + '</span></div>' +
+      '<div class="setting-row"><div><strong>Next Scheduled</strong></div><span>' + escapeHTML(metrics.nextScheduledAt || "-") + '</span></div>';
+    if (healthNode) {
+      healthNode.innerHTML =
+        '<div class="setting-row"><div><strong>Directory</strong></div><span>' + (health.directoryExists ? "Exists" : "MISSING") + '</span></div>' +
+        '<div class="setting-row"><div><strong>Writable</strong></div><span>' + (health.writable ? "Yes" : "No") + '</span></div>' +
+        '<div class="setting-row"><div><strong>Disk Free</strong></div><span>' + formatBytes(health.availableDiskBytes) + '</span></div>' +
+        '<div class="setting-row"><div><strong>Scheduler</strong></div><span>' + (health.schedulerEnabled ? "Enabled" : "Disabled") + '</span></div>' +
+        '<div class="setting-row"><div><strong>Retention</strong></div><span>' + (health.retentionEnabled ? "Enabled" : "Disabled") + '</span></div>';
+    }
+  } catch (_) {
+    node.innerHTML = '<div class="empty-state">Backup stats unavailable.</div>';
+    if (healthNode) healthNode.innerHTML = '<div class="empty-state">Backup health unavailable.</div>';
+  }
+}
+
+async function loadBackupSchedule() {
+  var enabledBox = el("bs-enabled");
+  var freqSelect = el("bs-frequency");
+  var retentionInput = el("bs-retention");
+  if (!enabledBox || !freqSelect || !retentionInput) return;
+  try {
+    var cfg = await apiGet("/api/v1/backups/schedule", null);
+    if (!cfg) return;
+    enabledBox.checked = cfg.enabled === true;
+    freqSelect.value = cfg.frequency || "manual";
+    retentionInput.value = cfg.retentionCount || 7;
+  } catch (_) {
+    // Use defaults
+  }
+}
+
+var backupScheduleForm = el("backup-schedule-form");
+if (backupScheduleForm) {
+  backupScheduleForm.addEventListener("submit", async function(event) {
+    event.preventDefault();
+    var btn = el("bs-save-btn");
+    var msg = el("bs-message");
+    if (!btn || !msg) return;
+    msg.textContent = "";
+    msg.className = "message";
+    btn.disabled = true;
+    try {
+      var enabled = el("bs-enabled").checked;
+      var frequency = el("bs-frequency").value;
+      var retentionCount = parseInt(el("bs-retention").value, 10);
+      if (!retentionCount || retentionCount < 1) {
+        msg.textContent = "Retention count must be at least 1.";
+        msg.className = "message error";
+        btn.disabled = false;
+        return;
+      }
+      var cfg = await apiPost("/api/v1/backups/schedule", {
+        enabled: enabled,
+        frequency: frequency,
+        retentionCount: retentionCount
+      });
+      msg.textContent = "Schedule saved (" + (cfg.frequency || frequency) + ").";
+      msg.className = "message success";
+    } catch (err) {
+      msg.textContent = err.message || "Failed to save schedule.";
+      msg.className = "message error";
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
+var backupRetentionBtn = el("backup-run-retention");
+if (backupRetentionBtn) {
+  backupRetentionBtn.addEventListener("click", async function() {
+    if (!confirm("Run retention cleanup? Oldest backups will be deleted to stay within the retention count.")) return;
+    backupRetentionBtn.disabled = true;
+    try {
+      var result = await apiPost("/api/v1/backups/retention", {});
+      showAlert("Retention cleanup: " + (result.deleted || 0) + " backup(s) deleted.");
+      await loadBackups();
+      await loadBackupStats();
+    } catch (err) {
+      showAlert(err.message || "Retention cleanup failed.");
+    } finally {
+      backupRetentionBtn.disabled = false;
+    }
+  });
+}
+
 function formatBytes(bytes) {
   var value = Number(bytes || 0);
   if (value < 1024) return value + " B";
@@ -371,7 +477,7 @@ function escapeHTML(value) {
 
 async function refreshAll() {
   showAlert("");
-  await Promise.allSettled([loadHealth(), loadSummary(), loadDomains(), loadMailboxes(), loadQueue(), loadBackups(), loadLogs()]);
+  await Promise.allSettled([loadHealth(), loadSummary(), loadDomains(), loadMailboxes(), loadQueue(), loadBackups(), loadBackupStats(), loadBackupSchedule(), loadLogs()]);
 }
 
 function showApp() {
@@ -714,6 +820,7 @@ if (backupCreate) {
       var created = await apiPost("/api/v1/backups", {});
       showAlert("Backup " + (created.id || created.name || "created") + " created.");
       await loadBackups();
+      await loadBackupStats();
     } catch (err) {
       showAlert(err.message || "Backup creation failed.");
     } finally {
@@ -914,7 +1021,7 @@ document.querySelectorAll("[data-refresh]").forEach((button) => {
       if (button.dataset.refresh === "domains") await loadDomains();
       if (button.dataset.refresh === "mailboxes") await loadMailboxes();
       if (button.dataset.refresh === "queue") await loadQueue();
-      if (button.dataset.refresh === "backups") await loadBackups();
+      if (button.dataset.refresh === "backups") { await loadBackups(); await loadBackupStats(); await loadBackupSchedule(); }
       if (button.dataset.refresh === "logs") await loadLogs();
     } catch (err) {
       showAlert(err.message || "Refresh failed.");

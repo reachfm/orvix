@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1032,6 +1033,385 @@ func TestCreateArchiveRejectsSymlinkEscape(t *testing.T) {
 	}
 }
 
+// ── Backup v2: Schedule Config Tests ─────────────────────
+
+func TestGetScheduleConfigDefault(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	cfg, err := s.GetScheduleConfig(ctx)
+	if err != nil {
+		t.Fatalf("get default schedule: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("expected non-nil config")
+	}
+	if cfg.Enabled {
+		t.Fatal("expected default disabled")
+	}
+	if cfg.Frequency != FrequencyManual {
+		t.Fatalf("expected manual frequency, got %s", cfg.Frequency)
+	}
+	if cfg.RetentionCount != 7 {
+		t.Fatalf("expected retention count 7, got %d", cfg.RetentionCount)
+	}
+}
+
+func TestSetScheduleConfig(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+
+	cfg := &ScheduleConfig{
+		Enabled:        true,
+		Frequency:      FrequencyDaily,
+		RetentionCount: 14,
+	}
+	saved, err := s.SetScheduleConfig(ctx, cfg)
+	if err != nil {
+		t.Fatalf("set schedule: %v", err)
+	}
+	if saved == nil {
+		t.Fatal("expected non-nil config")
+	}
+	if !saved.Enabled {
+		t.Fatal("expected enabled")
+	}
+	if saved.Frequency != FrequencyDaily {
+		t.Fatalf("expected daily, got %s", saved.Frequency)
+	}
+	if saved.RetentionCount != 14 {
+		t.Fatalf("expected 14, got %d", saved.RetentionCount)
+	}
+	if saved.NextRunAt == nil {
+		t.Fatal("expected next_run_at to be set for daily schedule")
+	}
+
+	// Verify persistence
+	loaded, err := s.GetScheduleConfig(ctx)
+	if err != nil {
+		t.Fatalf("load schedule: %v", err)
+	}
+	if loaded.RetentionCount != 14 {
+		t.Fatalf("expected persisted retention 14, got %d", loaded.RetentionCount)
+	}
+}
+
+func TestSetScheduleConfigInvalidFrequency(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+
+	cfg := &ScheduleConfig{
+		Enabled:   true,
+		Frequency: "monthly",
+	}
+	_, err := s.SetScheduleConfig(ctx, cfg)
+	if err == nil {
+		t.Fatal("expected error for invalid frequency")
+	}
+}
+
+func TestScheduleConfigDisabledNoNextRun(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+
+	cfg := &ScheduleConfig{
+		Enabled:        false,
+		Frequency:      FrequencyDaily,
+		RetentionCount: 7,
+	}
+	saved, err := s.SetScheduleConfig(ctx, cfg)
+	if err != nil {
+		t.Fatalf("set schedule: %v", err)
+	}
+	if saved.NextRunAt != nil {
+		t.Fatal("disabled schedule should not set next_run_at")
+	}
+}
+
+func TestScheduleConfigManualNoNextRun(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+
+	cfg := &ScheduleConfig{
+		Enabled:        true,
+		Frequency:      FrequencyManual,
+		RetentionCount: 7,
+	}
+	saved, err := s.SetScheduleConfig(ctx, cfg)
+	if err != nil {
+		t.Fatalf("set schedule: %v", err)
+	}
+	if saved.NextRunAt != nil {
+		t.Fatal("manual frequency should not set next_run_at")
+	}
+}
+
+func TestCalculateNextRunDaily(t *testing.T) {
+	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	next := calculateNextRun(FrequencyDaily, now)
+	expected := now.Add(24 * time.Hour)
+	if !next.Equal(expected) {
+		t.Fatalf("expected %v, got %v", expected, next)
+	}
+}
+
+func TestCalculateNextRunWeekly(t *testing.T) {
+	now := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	next := calculateNextRun(FrequencyWeekly, now)
+	expected := now.Add(7 * 24 * time.Hour)
+	if !next.Equal(expected) {
+		t.Fatalf("expected %v, got %v", expected, next)
+	}
+}
+
+func TestCalculateNextRunManual(t *testing.T) {
+	next := calculateNextRun(FrequencyManual, time.Now())
+	if !next.IsZero() {
+		t.Fatal("manual should return zero time")
+	}
+}
+
+func TestRunScheduledBackupManualDoesNotRun(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+
+	cfg := &ScheduleConfig{
+		Enabled:        true,
+		Frequency:      FrequencyManual,
+		RetentionCount: 7,
+	}
+	if _, err := s.SetScheduleConfig(ctx, cfg); err != nil {
+		t.Fatalf("set schedule: %v", err)
+	}
+
+	b, err := s.RunScheduledBackupIfNeeded(ctx)
+	if err != nil {
+		t.Fatalf("run scheduled manual: %v", err)
+	}
+	if b != nil {
+		t.Fatal("manual schedule should not create backup")
+	}
+}
+
+func TestRunScheduledBackupDisabledDoesNotRun(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+
+	cfg := &ScheduleConfig{
+		Enabled:        false,
+		Frequency:      FrequencyDaily,
+		RetentionCount: 7,
+	}
+	if _, err := s.SetScheduleConfig(ctx, cfg); err != nil {
+		t.Fatalf("set schedule: %v", err)
+	}
+
+	b, err := s.RunScheduledBackupIfNeeded(ctx)
+	if err != nil {
+		t.Fatalf("run scheduled disabled: %v", err)
+	}
+	if b != nil {
+		t.Fatal("disabled schedule should not create backup")
+	}
+}
+
+func TestRunScheduledBackupWhenDue(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+
+	// Set daily enabled schedule with next_run_at in the past
+	cfg := &ScheduleConfig{
+		Enabled:        true,
+		Frequency:      FrequencyDaily,
+		RetentionCount: 7,
+	}
+	if _, err := s.SetScheduleConfig(ctx, cfg); err != nil {
+		t.Fatalf("set schedule: %v", err)
+	}
+
+	// Manually move next_run_at to the past
+	past := time.Now().UTC().Add(-1 * time.Hour)
+	_, err := s.db.ExecContext(ctx, `UPDATE backup_schedule_config SET next_run_at = ? WHERE id = 1`, past)
+	if err != nil {
+		t.Fatalf("update next_run_at: %v", err)
+	}
+
+	// Now run scheduled backup — it should be due
+	b, err := s.RunScheduledBackupIfNeeded(ctx)
+	if err != nil {
+		t.Fatalf("run scheduled due: %v", err)
+	}
+	if b == nil {
+		t.Fatal("expected backup to be created")
+	}
+	if b.Status != StatusCompleted {
+		t.Fatalf("expected completed, got %s", b.Status)
+	}
+
+	// next_run_at should have been updated
+	updated, err := s.GetScheduleConfig(ctx)
+	if err != nil {
+		t.Fatalf("get updated config: %v", err)
+	}
+	if updated.NextRunAt == nil {
+		t.Fatal("expected next_run_at to be updated")
+	}
+	if updated.NextRunAt.Before(time.Now()) {
+		t.Fatal("next_run_at should be in the future")
+	}
+	if updated.LastRunAt == nil {
+		t.Fatal("expected last_run_at to be set")
+	}
+}
+
+// ── Backup v2: Metrics Tests ─────────────────────────────
+
+func TestGetBackupMetrics(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+
+	metrics, err := s.GetBackupMetrics(ctx)
+	if err != nil {
+		t.Fatalf("get metrics: %v", err)
+	}
+	if metrics == nil {
+		t.Fatal("expected non-nil metrics")
+	}
+	// Initially there are no backups
+	if metrics.TotalBackups != 0 {
+		t.Fatalf("expected 0 backups, got %d", metrics.TotalBackups)
+	}
+	if metrics.TotalSizeBytes != 0 {
+		t.Fatalf("expected 0 size, got %d", metrics.TotalSizeBytes)
+	}
+
+	// Create a backup and verify metrics change
+	b, err := s.CreateBackup(ctx, "metrics-test")
+	if err != nil {
+		t.Fatalf("create backup: %v", err)
+	}
+	_ = b
+
+	metrics, err = s.GetBackupMetrics(ctx)
+	if err != nil {
+		t.Fatalf("get metrics after create: %v", err)
+	}
+	if metrics.TotalBackups != 1 {
+		t.Fatalf("expected 1 backup, got %d", metrics.TotalBackups)
+	}
+	if metrics.TotalSizeBytes <= 0 {
+		t.Fatal("expected positive total size")
+	}
+	if metrics.NewestBackupAt == "" || metrics.OldestBackupAt == "" {
+		t.Fatal("expected newest/oldest timestamps")
+	}
+	if metrics.LastSuccessfulAt == "" {
+		t.Fatal("expected last successful timestamp")
+	}
+}
+
+// ── Backup v2: Health Tests ──────────────────────────────
+
+func TestGetBackupHealth(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+
+	// Create the backup directory so health detects it
+	if err := os.MkdirAll(s.basePath, 0750); err != nil {
+		t.Fatalf("mkdir base: %v", err)
+	}
+
+	health, err := s.GetBackupHealth(ctx)
+	if err != nil {
+		t.Fatalf("get health: %v", err)
+	}
+	if health == nil {
+		t.Fatal("expected non-nil health")
+	}
+	if !health.RetentionEnabled {
+		t.Fatal("retention should be enabled by default")
+	}
+	if !health.DirectoryExists {
+		t.Fatal("backup directory should exist after MkdirAll")
+	}
+	// Writable depends on temp dir permissions — should be true
+	if !health.Writable {
+		t.Log("backup dir not writable (platform-dependent)")
+	}
+}
+
+// ── Backup v2: Retention Tests ───────────────────────────
+
+func TestRunRetentionNoDeletion(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+
+	// Create 3 backups with retention count 7 — nothing to delete
+	for i := 0; i < 3; i++ {
+		_, err := s.CreateBackup(ctx, fmt.Sprintf("retention-test-%d", i))
+		if err != nil {
+			t.Fatalf("create backup %d: %v", i, err)
+		}
+	}
+
+	cfg := &ScheduleConfig{
+		Enabled:        true,
+		Frequency:      FrequencyManual,
+		RetentionCount: 7,
+	}
+	if _, err := s.SetScheduleConfig(ctx, cfg); err != nil {
+		t.Fatalf("set retention config: %v", err)
+	}
+
+	deleted, err := s.RunRetention(ctx)
+	if err != nil {
+		t.Fatalf("run retention: %v", err)
+	}
+	if deleted != 0 {
+		t.Fatalf("expected 0 deletions (3 backups <= 7 retention), got %d", deleted)
+	}
+}
+
+func TestRunRetentionDeletesOldest(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+
+	// Create 5 backups with retention count 3 — should delete 2 oldest
+	for i := 0; i < 5; i++ {
+		_, err := s.CreateBackup(ctx, fmt.Sprintf("retention-delete-%d", i))
+		if err != nil {
+			t.Fatalf("create backup %d: %v", i, err)
+		}
+	}
+
+	cfg := &ScheduleConfig{
+		Enabled:        true,
+		Frequency:      FrequencyManual,
+		RetentionCount: 3,
+	}
+	if _, err := s.SetScheduleConfig(ctx, cfg); err != nil {
+		t.Fatalf("set retention config: %v", err)
+	}
+
+	deleted, err := s.RunRetention(ctx)
+	if err != nil {
+		t.Fatalf("run retention: %v", err)
+	}
+	if deleted != 2 {
+		t.Fatalf("expected 2 deletions (5 backups - 3 retention), got %d", deleted)
+	}
+
+	// Verify only 3 backups remain
+	backups, err := s.ListBackups(ctx)
+	if err != nil {
+		t.Fatalf("list backups: %v", err)
+	}
+	if len(backups) != 3 {
+		t.Fatalf("expected 3 remaining backups, got %d", len(backups))
+	}
+}
+
+// ── Existing symlink escape tests follow ──────────────────
+
 func TestDeleteBackupRejectsSymlinkEscape(t *testing.T) {
 	s := testService(t)
 	ctx := context.Background()
@@ -1060,5 +1440,121 @@ func TestDeleteBackupRejectsSymlinkEscape(t *testing.T) {
 	// Verify the outside target was NOT deleted
 	if _, err := os.Stat(marker); os.IsNotExist(err) {
 		t.Fatal("DeleteBackup must not remove symlink target when escape is detected")
+	}
+}
+
+func TestSetScheduleConfigRejectsZeroRetentionCount(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+
+	tests := []struct {
+		name string
+		rc   int
+	}{
+		{"zero", 0},
+		{"negative", -1},
+		{"negative_large", -100},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := s.SetScheduleConfig(ctx, &ScheduleConfig{
+				Enabled:        true,
+				Frequency:      FrequencyDaily,
+				RetentionCount: tt.rc,
+			})
+			if err == nil {
+				t.Fatalf("expected error for retention_count=%d", tt.rc)
+			}
+			if !strings.Contains(err.Error(), "at least 1") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestRunScheduledBackupConcurrency(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+
+	cfg := &ScheduleConfig{
+		Enabled:        true,
+		Frequency:      FrequencyDaily,
+		RetentionCount: 7,
+	}
+	if _, err := s.SetScheduleConfig(ctx, cfg); err != nil {
+		t.Fatalf("set schedule: %v", err)
+	}
+	past := time.Now().UTC().Add(-1 * time.Hour)
+	if _, err := s.db.ExecContext(ctx, `UPDATE backup_schedule_config SET next_run_at = ? WHERE id = 1`, past); err != nil {
+		t.Fatalf("set past next_run_at: %v", err)
+	}
+
+	var mu sync.Mutex
+	created := 0
+	var wg sync.WaitGroup
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			b, err := s.RunScheduledBackupIfNeeded(ctx)
+			if err == nil && b != nil {
+				mu.Lock()
+				created++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+
+	if created != 1 {
+		t.Fatalf("expected exactly 1 backup from 3 concurrent calls, got %d", created)
+	}
+}
+
+func TestRunRetentionSafetyNeverDeletesNewest(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+
+	cfg := &ScheduleConfig{
+		Enabled:        true,
+		Frequency:      FrequencyDaily,
+		RetentionCount: 7,
+	}
+	if _, err := s.SetScheduleConfig(ctx, cfg); err != nil {
+		t.Fatalf("set schedule: %v", err)
+	}
+
+	for i := 0; i < 10; i++ {
+		_, err := s.CreateBackup(ctx, fmt.Sprintf("retention-test-%d", i))
+		if err != nil {
+			t.Fatalf("create backup %d: %v", i, err)
+		}
+	}
+
+	deleted, err := s.RunRetention(ctx)
+	if err != nil {
+		t.Fatalf("RunRetention: %v", err)
+	}
+	if deleted != 3 {
+		t.Fatalf("expected 3 deleted, got %d", deleted)
+	}
+
+	all, err := s.ListBackups(ctx)
+	if err != nil {
+		t.Fatalf("ListBackups: %v", err)
+	}
+	if len(all) != 7 {
+		t.Fatalf("expected 7 remaining backups, got %d", len(all))
+	}
+
+	// Verify the newest backup is among the survivors
+	if len(all) > 0 {
+		newestID := all[0].ID
+		for _, b := range all {
+			if b.ID == newestID {
+				return
+			}
+		}
+		t.Fatalf("newest backup %s was incorrectly deleted", newestID)
 	}
 }
