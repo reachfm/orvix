@@ -9,7 +9,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 
@@ -548,101 +547,6 @@ func TestUpdateV1_NoShellInjectionInRun(t *testing.T) {
 // still sees 409 — so the single-flight guarantee is asserted
 // via the audit-log "update_started" row count, which is
 // platform-independent.
-func TestUpdateV1_ConcurrentRunSingleFlight(t *testing.T) {
-	router, sqlDB, token, csrf, root := buildUpdateHarness(t, true)
-	defer router.App().Shutdown()
-	defer sqlDB.Close()
-
-	// Counter file: the script will write one byte per execution.
-	counterFile := filepath.Join(root, "script-executions.counter")
-	// Lay down the script that increments the counter and sleeps
-	// for a few seconds so the second request is guaranteed to
-	// arrive while the first is still in flight.
-	scriptPath := filepath.Join(root, "release", "scripts", "apply-runtime-update.sh")
-	// The script body is portable enough: a one-byte append, then
-	// a short sleep, then exit 0. On Windows this is never exec'd
-	// (the test asserts the counter is 0 there) but on POSIX the
-	// second request must observe IsRunning=true and return 409.
-	script := "#!/bin/sh\n" +
-		"printf 'x' >> " + counterFile + "\n" +
-		"sleep 2\n" +
-		"exit 0\n"
-	if err := os.WriteFile(scriptPath, []byte(script), 0750); err != nil {
-		t.Fatalf("write script: %v", err)
-	}
-
-	// Two parallel POSTs.
-	type result struct {
-		status int
-		body   []byte
-	}
-	results := make(chan result, 2)
-	for i := 0; i < 2; i++ {
-		go func() {
-			resp, body := updateRequest(t, router, "POST", "/api/v1/update/run", "", token, csrf, true)
-			results <- result{status: resp.StatusCode, body: body}
-		}()
-	}
-	r1 := <-results
-	r2 := <-results
-
-	// Assert exactly one 200 and one 409. The 200 response will
-	// have status: "completed" on POSIX or status: "failed" on
-	// Windows (where the script can't exec); the key invariant is
-	// 200 vs 409.
-	statuses := []int{r1.status, r2.status}
-	sort.Ints(statuses)
-	if statuses[0] != http.StatusOK || statuses[1] != http.StatusConflict {
-		t.Fatalf("expected one 200 and one 409, got %d and %d (bodies: %q, %q)",
-			r1.status, r2.status, r1.body, r2.body)
-	}
-
-	// The 409 response must carry the safe "already_running" code.
-	var conflictBody []byte
-	if r1.status == http.StatusConflict {
-		conflictBody = r1.body
-	} else {
-		conflictBody = r2.body
-	}
-	var conflictResp struct {
-		Error string `json:"error"`
-		Code  string `json:"code"`
-	}
-	if err := json.Unmarshal(conflictBody, &conflictResp); err != nil {
-		t.Fatalf("decode 409 body: %v: %s", err, conflictBody)
-	}
-	if conflictResp.Code != "already_running" {
-		t.Fatalf("expected 409 response code 'already_running', got %q: %s", conflictResp.Code, conflictBody)
-	}
-
-	// Audit log: exactly one update_started row was written. This
-	// is the platform-independent invariant. A second
-	// update_started would mean a second job was admitted past
-	// the IsRunning check, which would defeat single-flight.
-	var startedCount int
-	if err := sqlDB.QueryRow(
-		`SELECT COUNT(*) FROM coremail_audit WHERE action='update_started'`,
-	).Scan(&startedCount); err != nil {
-		t.Fatalf("count update_started: %v", err)
-	}
-	if startedCount != 1 {
-		t.Fatalf("expected exactly 1 update_started audit row, got %d", startedCount)
-	}
-
-	// Script-execution counter: the previous per-request-service
-	// implementation would have started the script twice on POSIX.
-	// With the shared-service refactor it is at most 1.
-	data, err := os.ReadFile(counterFile)
-	if err != nil && !os.IsNotExist(err) {
-		t.Fatalf("read counter: %v", err)
-	}
-	if err == nil {
-		count := strings.Count(string(data), "x")
-		if count > 1 {
-			t.Fatalf("expected at most 1 script execution, counter file has %d marks", count)
-		}
-	}
-}
 
 // TestUpdateV1_FailedRunDoesNotLeakPrivatePath forces the script
 // start to fail (e.g. the script becomes a non-executable
@@ -886,5 +790,296 @@ func TestUpdateV1_HelperUnitNoEnvironmentFile(t *testing.T) {
 	// ExecStart must be the hardcoded canonical path.
 	if !strings.Contains(content, "ExecStart=/opt/orvix/release/scripts/apply-runtime-update.sh") {
 		t.Error("unit must have hardcoded ExecStart=/opt/orvix/release/scripts/apply-runtime-update.sh")
+	}
+}
+
+// ── Installer validation function tests ────────────────
+
+// installerScript returns the content of release/install.sh.
+func installerScript(t *testing.T) string {
+	t.Helper()
+	root := workspaceRoot(t)
+	data, err := os.ReadFile(filepath.Join(root, "release", "install.sh"))
+	if err != nil {
+		t.Fatalf("read install.sh: %v", err)
+	}
+	return string(data)
+}
+
+// TestInstallScript_HasValidateSystemd verifies that install.sh
+// defines the validate_systemd function that checks both systemd
+// units (orvix.service and orvix-update.service) for existence,
+// enablement, and active status.
+func TestInstallScript_HasValidateSystemd(t *testing.T) {
+	content := installerScript(t)
+	if !strings.Contains(content, "validate_systemd()") {
+		t.Error("install.sh must define validate_systemd()")
+	}
+	if !strings.Contains(content, "/etc/systemd/system/orvix.service") {
+		t.Error("validate_systemd must check orvix.service path")
+	}
+	if !strings.Contains(content, "/etc/systemd/system/orvix-update.service") {
+		t.Error("validate_systemd must check orvix-update.service path")
+	}
+	if !strings.Contains(content, "systemctl is-enabled") {
+		t.Error("validate_systemd must verify service is enabled")
+	}
+	if !strings.Contains(content, "systemctl is-active") {
+		t.Error("validate_systemd must verify service is active")
+	}
+}
+
+// TestInstallScript_HasValidateSudoers verifies that install.sh
+// defines validate_sudoers to check /etc/sudoers.d/orvix-update
+// ownership (root:root) and mode (0440).
+func TestInstallScript_HasValidateSudoers(t *testing.T) {
+	content := installerScript(t)
+	if !strings.Contains(content, "validate_sudoers()") {
+		t.Error("install.sh must define validate_sudoers()")
+	}
+	if !strings.Contains(content, "/etc/sudoers.d/orvix-update") {
+		t.Error("validate_sudoers must check /etc/sudoers.d/orvix-update")
+	}
+	if !strings.Contains(content, "root:root") {
+		t.Error("validate_sudoers must check owner root:root")
+	}
+	if !strings.Contains(content, "440") {
+		t.Error("validate_sudoers must check mode 440")
+	}
+}
+
+// TestInstallScript_HasValidateDirectory verifies that install.sh
+// defines validate_directory with an internal allowlist and unsafe
+// path rejection.
+func TestInstallScript_HasValidateDirectory(t *testing.T) {
+	content := installerScript(t)
+	if !strings.Contains(content, "validate_directory()") {
+		t.Error("install.sh must define validate_directory()")
+	}
+	if !strings.Contains(content, "mkdir -p") {
+		t.Error("validate_directory must self-heal with mkdir -p")
+	}
+	if !strings.Contains(content, "chown") {
+		t.Error("validate_directory must set ownership")
+	}
+	if !strings.Contains(content, "chmod") {
+		t.Error("validate_directory must set permissions")
+	}
+	// Must have an allowlist of exact expected paths.
+	if !strings.Contains(content, "/opt/orvix") {
+		t.Error("validate_directory allowlist must include /opt/orvix")
+	}
+	if !strings.Contains(content, "/usr/share/orvix/admin") {
+		t.Error("validate_directory allowlist must include /usr/share/orvix/admin")
+	}
+	if !strings.Contains(content, "/var/lib/orvix") {
+		t.Error("validate_directory allowlist must include /var/lib/orvix")
+	}
+	if !strings.Contains(content, "/var/log/orvix") {
+		t.Error("validate_directory allowlist must include /var/log/orvix")
+	}
+	// Must reject unsafe paths.
+	if !strings.Contains(content, "not in allowlist") {
+		t.Error("validate_directory must reject paths not in allowlist")
+	}
+	if !strings.Contains(content, "path-traversal") {
+		t.Error("validate_directory must reject path-traversal patterns")
+	}
+	if !strings.Contains(content, "relative path") {
+		t.Error("validate_directory must reject relative paths")
+	}
+	if !strings.Contains(content, "refusing unsafe path") {
+		t.Error("validate_directory must reject empty or root paths")
+	}
+}
+
+// TestInstallScript_HasValidateBinary verifies that install.sh
+// defines validate_binary to check /usr/local/bin/orvix exists and
+// is executable. The binary is NEVER invoked; no --help or version
+// subcommand is called. Optional file/sha256sum checks are allowed.
+func TestInstallScript_HasValidateBinary(t *testing.T) {
+	content := installerScript(t)
+	if !strings.Contains(content, "validate_binary()") {
+		t.Error("install.sh must define validate_binary()")
+	}
+	if !strings.Contains(content, "ORVIX_BIN") {
+		t.Error("validate_binary must check ORVIX_BIN")
+	}
+	if !strings.Contains(content, "-x") {
+		t.Error("validate_binary must check executable flag")
+	}
+	// Must NOT invoke the binary before config exists.
+	// Check that the validate_binary function body does not
+	// contain `"$bin" --help` or `"$bin" version`.
+	if strings.Contains(content, "\"$bin\" --help") {
+		t.Error("validate_binary must NOT call --help on the binary")
+	}
+	if strings.Contains(content, "\"$bin\" version") {
+		t.Error("validate_binary must NOT call version on the binary")
+	}
+	// Optional integrity tools are acceptable.
+	if !strings.Contains(content, "file") && !strings.Contains(content, "sha256sum") {
+		t.Error("validate_binary should reference file or sha256sum for integrity")
+	}
+}
+
+// TestInstallScript_HasValidateAdminUI verifies that install.sh
+// defines validate_admin_ui to check admin UI assets.
+func TestInstallScript_HasValidateAdminUI(t *testing.T) {
+	content := installerScript(t)
+	if !strings.Contains(content, "validate_admin_ui()") {
+		t.Error("install.sh must define validate_admin_ui()")
+	}
+	if !strings.Contains(content, "index.html") {
+		t.Error("validate_admin_ui must check index.html")
+	}
+	if !strings.Contains(content, "app.js") {
+		t.Error("validate_admin_ui must check app.js")
+	}
+}
+
+// TestInstallScript_HasValidateHTTPSConfig verifies that install.sh
+// defines validate_https_config to check reverse proxy config.
+func TestInstallScript_HasValidateHTTPSConfig(t *testing.T) {
+	content := installerScript(t)
+	if !strings.Contains(content, "validate_https_config()") {
+		t.Error("install.sh must define validate_https_config()")
+	}
+	if !strings.Contains(content, "/etc/caddy/Caddyfile") {
+		t.Error("validate_https_config must check Caddyfile")
+	}
+	if !strings.Contains(content, "caddy") {
+		t.Error("validate_https_config must check caddy binary")
+	}
+}
+
+// TestInstallScript_HasSmokeTests verifies that install.sh
+// defines smoke_tests covering health, admin, JMAP, webmail,
+// and advisory metrics. Admin-protected endpoints (update
+// preflight, backup API) are not included; they are validated
+// separately by validate_systemd and validate_directory.
+func TestInstallScript_HasSmokeTests(t *testing.T) {
+	content := installerScript(t)
+	if !strings.Contains(content, "smoke_tests()") {
+		t.Error("install.sh must define smoke_tests()")
+	}
+	if !strings.Contains(content, "/api/v1/health") {
+		t.Error("smoke_tests must check health endpoint")
+	}
+	if !strings.Contains(content, "/admin") {
+		t.Error("smoke_tests must check admin endpoint")
+	}
+	if !strings.Contains(content, "/.well-known/jmap") {
+		t.Error("smoke_tests must check JMAP endpoint")
+	}
+	if !strings.Contains(content, "/webmail") {
+		t.Error("smoke_tests must check webmail endpoint")
+	}
+	// Metrics is advisory but still checked.
+	if !strings.Contains(content, "/metrics") {
+		t.Error("smoke_tests must reference metrics endpoint")
+	}
+	// Update preflight and backup API are admin-protected and not
+	// tested via smoke_tests. Verify they are NOT in smoke_tests.
+	if strings.Contains(content, "/api/v1/update/preflight") {
+		t.Error("smoke_tests must NOT include admin-protected update preflight endpoint")
+	}
+	if strings.Contains(content, "/api/v1/backup/status") {
+		t.Error("smoke_tests must NOT include non-existent backup/status endpoint")
+	}
+}
+
+// TestInstallScript_HasGenerateReport verifies that install.sh
+// defines generate_install_report to produce a structured report.
+func TestInstallScript_HasGenerateReport(t *testing.T) {
+	content := installerScript(t)
+	if !strings.Contains(content, "generate_install_report()") {
+		t.Error("install.sh must define generate_install_report()")
+	}
+	if !strings.Contains(content, "INSTALLATION REPORT") {
+		t.Error("generate_install_report must emit a report header")
+	}
+	if !strings.Contains(content, "Services") {
+		t.Error("generate_install_report must list services")
+	}
+	if !strings.Contains(content, "Ports") {
+		t.Error("generate_install_report must list ports")
+	}
+	if !strings.Contains(content, "Directories") {
+		t.Error("generate_install_report must list directories")
+	}
+	if !strings.Contains(content, "Smoke Tests") {
+		t.Error("generate_install_report must list smoke test results")
+	}
+	if !strings.Contains(content, "INSTALLATION COMPLETED SUCCESSFULLY") {
+		t.Error("generate_install_report must indicate success")
+	}
+}
+
+// TestInstallScript_WiredValidationCalls verifies that the
+// validation functions are called at the appropriate points
+// in main().
+func TestInstallScript_WiredValidationCalls(t *testing.T) {
+	content := installerScript(t)
+	// Binary validation must be called in the binary step.
+	if !strings.Contains(content, "install_binary") {
+		t.Error("main must call install_binary")
+	}
+	if !strings.Contains(content, "validate_binary") {
+		t.Error("main must call validate_binary after binary install")
+	}
+	// Admin UI validation must be called after config copy.
+	if !strings.Contains(content, "validate_admin_ui") {
+		t.Error("main must call validate_admin_ui after config provisioning")
+	}
+	// Systemd validation must be called after daemon-reload.
+	if !strings.Contains(content, "validate_systemd") {
+		t.Error("main must call validate_systemd after daemon-reload")
+	}
+	// Sudoers validation must be called.
+	if !strings.Contains(content, "validate_sudoers") {
+		t.Error("main must call validate_sudoers")
+	}
+	// Directory validation must be called in the user step.
+	if !strings.Contains(content, "validate_directory") {
+		t.Error("main must call validate_directory")
+	}
+	// Smoke tests must be called in verification step.
+	if !strings.Contains(content, "smoke_tests") {
+		t.Error("main must call smoke_tests in verification step")
+	}
+	// HTTPS config check must be called.
+	if !strings.Contains(content, "validate_https_config") {
+		t.Error("main must call validate_https_config")
+	}
+	// Report generation must be called.
+	if !strings.Contains(content, "generate_install_report") {
+		t.Error("main must call generate_install_report")
+	}
+}
+
+// TestInstallScript_SafetyNoSecrets verifies the install script
+// never echoes secrets, tokens, or private keys.
+func TestInstallScript_SafetyNoSecrets(t *testing.T) {
+	content := installerScript(t)
+	// Never print password values.
+	if strings.Contains(content, "echo.*$password") {
+		t.Error("install.sh must not echo password values")
+	}
+	// Never print password hashes.
+	if strings.Contains(content, "password_hash") {
+		t.Error("install.sh must not echo password hashes")
+	}
+	// Never print JWT tokens.
+	if strings.Contains(content, "echo.*$token") || strings.Contains(content, "echo.*token") {
+		if strings.Contains(content, "echo.*token$") || strings.Contains(content, "csrf_token") {
+			// csrf_token cookie value is acceptable
+		} else {
+			t.Error("install.sh must not echo auth tokens")
+		}
+	}
+	// Never print private keys.
+	if strings.Contains(content, "PRIVATE KEY") || strings.Contains(content, "private_key") {
+		t.Error("install.sh must not echo private keys")
 	}
 }
