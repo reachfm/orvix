@@ -110,6 +110,9 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"DNS required: A mail.${domain} -> ${server_ip}",
 		"Temporary Admin API: http://${server_ip}:8080/admin",
 		"release/scripts/setup-https.sh ${domain} ${server_ip}",
+		"https://$admin_host",
+		"http://$admin_host",
+		"local admin_host=\"admin.$domain\"",
 		"Admin password (min 8 chars):",
 		"admin password must be at least 8 characters",
 	}

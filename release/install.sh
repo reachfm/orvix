@@ -382,6 +382,7 @@ install_binary() {
 write_config() {
     local domain="$1"
     local hostname="mail.$domain"
+    local admin_host="admin.$domain"
 
     cat > "$ORVIX_CONFIG" <<YAML
 server:
@@ -394,7 +395,12 @@ server:
   write_timeout: 60s
   idle_timeout: 120s
   body_limit: 52428800
+  # The webmail SPA is served from admin.$domain and loads module
+  # assets with CORS mode. The admin origin must be explicitly
+  # allowed or browsers will block /webmail/assets/*.
   allowed_origins:
+    - "https://$admin_host"
+    - "http://$admin_host"
     - "https://$hostname"
     - "http://$hostname"
   trusted_proxies: []
