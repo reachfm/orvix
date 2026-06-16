@@ -1,12 +1,14 @@
 package config
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -30,6 +32,26 @@ func bashCommand(t *testing.T) string {
 		return path
 	}
 	return "bash"
+}
+
+func writeInstallerHarness(t *testing.T, replacement string) (string, string) {
+	t.Helper()
+	root := repoRoot(t)
+	installerBytes, err := os.ReadFile(filepath.Join(root, "release", "install.sh"))
+	if err != nil {
+		t.Fatalf("read installer: %v", err)
+	}
+	installer := string(installerBytes)
+	if !strings.Contains(installer, `main "$@"`) {
+		t.Fatal("installer entrypoint marker not found")
+	}
+	harness := strings.Replace(installer, `main "$@"`, replacement, 1)
+	harnessDir := t.TempDir()
+	harnessPath := filepath.Join(harnessDir, "installer-harness.sh")
+	if err := os.WriteFile(harnessPath, []byte(harness), 0o755); err != nil {
+		t.Fatalf("write harness: %v", err)
+	}
+	return harnessDir, harnessPath
 }
 
 func TestInstallerTemplateRC1CleanPath(t *testing.T) {
@@ -215,21 +237,7 @@ func TestReleaseReferencedFilesExist(t *testing.T) {
 }
 
 func TestInstallerBootstrapEnvEncodesPassword(t *testing.T) {
-	root := repoRoot(t)
-	installerBytes, err := os.ReadFile(filepath.Join(root, "release", "install.sh"))
-	if err != nil {
-		t.Fatalf("read installer: %v", err)
-	}
-	installer := string(installerBytes)
-	if !strings.Contains(installer, `main "$@"`) {
-		t.Fatal("installer entrypoint marker not found")
-	}
-	harness := strings.Replace(installer, `main "$@"`, `chown() { :; }; chmod() { :; }; BOOTSTRAP_ENV="$3"; write_bootstrap_env "$1" "$(cat "$2")"; cat "$BOOTSTRAP_ENV"`, 1)
-	harnessDir := t.TempDir()
-	harnessPath := filepath.Join(harnessDir, "bootstrap.sh")
-	if err := os.WriteFile(harnessPath, []byte(harness), 0755); err != nil {
-		t.Fatalf("write harness: %v", err)
-	}
+	harnessDir, _ := writeInstallerHarness(t, `chown() { :; }; chmod() { :; }; BOOTSTRAP_ENV="$3"; write_bootstrap_env "$1" "$(cat "$2")"; cat "$BOOTSTRAP_ENV"`)
 
 	passwords := []string{
 		"MaghaghaMos086",
@@ -246,7 +254,7 @@ func TestInstallerBootstrapEnvEncodesPassword(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(harnessDir, passwordName), []byte(password), 0600); err != nil {
 			t.Fatalf("write password fixture: %v", err)
 		}
-		cmd := exec.Command(bashCommand(t), "bootstrap.sh", "admin@orvix.email", passwordName, envName)
+		cmd := exec.Command(bashCommand(t), "installer-harness.sh", "admin@orvix.email", passwordName, envName)
 		cmd.Dir = harnessDir
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -275,6 +283,36 @@ func TestInstallerBootstrapEnvEncodesPassword(t *testing.T) {
 		if string(decoded) != password {
 			t.Fatalf("decoded password mismatch: got %q want %q", string(decoded), password)
 		}
+	}
+}
+
+func TestInstallerPromptPasswordPreservesTypedBytes(t *testing.T) {
+	harnessDir, _ := writeInstallerHarness(t, `password="$(prompt_password)"; printf '%s' "$password"`)
+
+	tests := []string{
+		"Password123!",
+		"Password With Spaces",
+		"  LeadingAndTrailing123!  ",
+		`Password\Slash123`,
+		`Password"Quote123`,
+		"Password'SingleQuote123",
+	}
+
+	for i, password := range tests {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			cmd := exec.Command(bashCommand(t), "installer-harness.sh")
+			cmd.Dir = harnessDir
+			cmd.Stdin = strings.NewReader(password + "\n" + password + "\n")
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("prompt_password failed for %q: %v: stdout=%q stderr=%q", password, err, string(out), stderr.String())
+			}
+			if string(out) != password {
+				t.Fatalf("prompt_password changed typed bytes: got %q want %q", string(out), password)
+			}
+		})
 	}
 }
 

@@ -299,11 +299,11 @@ prompt_password() {
     local password="${ORVIX_ADMIN_PASSWORD:-}"
     local confirm
     while [ -z "$password" ]; do
-        read -rsp "Admin password (min 8 chars): " password
-        echo
-        read -rsp "Confirm admin password: " confirm
-        echo
-        [ "$password" = "$confirm" ] || { echo "Passwords do not match"; password=""; }
+        IFS= read -rsp "Admin password (min 8 chars): " password
+        printf '\n' >&2
+        IFS= read -rsp "Confirm admin password: " confirm
+        printf '\n' >&2
+        [ "$password" = "$confirm" ] || { printf 'Passwords do not match\n' >&2; password=""; }
     done
     [ "${#password}" -ge 8 ] || fail "admin password must be at least 8 characters"
     echo "$password"
