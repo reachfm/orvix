@@ -534,6 +534,332 @@ install_update_helper() {
     fi
 }
 
+# ── Validation helpers ─────────────────────────────────
+
+# validate_systemd verifies that both systemd units exist, are
+# enabled (where applicable), and are active. Fails the install
+# if any required unit is missing or failed.
+validate_systemd() {
+    local svc
+    for svc in orvix.service; do
+        if [ ! -f "/etc/systemd/system/$svc" ]; then
+            fail "systemd unit $svc not found at /etc/systemd/system/$svc"
+        fi
+        if ! systemctl is-enabled --quiet "$svc" 2>/dev/null; then
+            fail "systemd unit $svc is not enabled"
+        fi
+        # Retry active check (service may still be starting).
+        local attempt
+        for attempt in 1 2 3 4 5; do
+            if systemctl is-active --quiet "$svc" 2>/dev/null; then
+                break
+            fi
+            if [ "$attempt" -lt 5 ]; then
+                sleep 1
+            fi
+        done
+        if ! systemctl is-active --quiet "$svc" 2>/dev/null; then
+            fail "systemd unit $svc is not active after restart"
+        fi
+        log_detail "VALIDATE systemd $svc: unit present, enabled, active"
+    done
+    # orvix-update.service is a oneshot helper; must exist but
+    # does not need to be enabled or active at rest.
+    if [ ! -f "/etc/systemd/system/orvix-update.service" ]; then
+        fail "systemd unit orvix-update.service not found at /etc/systemd/system/orvix-update.service"
+    fi
+    log_detail "VALIDATE systemd orvix-update.service: unit present"
+}
+
+# validate_sudoers verifies the sudoers drop-in ownership and
+# permissions. The file must be root:root 0440 so that visudo
+# does not reject it and a non-root attacker cannot modify it.
+validate_sudoers() {
+    local path="/etc/sudoers.d/orvix-update"
+    if [ ! -f "$path" ]; then
+        fail "sudoers drop-in $path not found"
+    fi
+    local owner
+    owner="$(stat -c '%U:%G' "$path" 2>/dev/null || true)"
+    if [ "$owner" != "root:root" ]; then
+        fail "sudoers drop-in $path owner is $owner, want root:root"
+    fi
+    local mode
+    mode="$(stat -c '%a' "$path" 2>/dev/null || true)"
+    if [ "$mode" != "440" ]; then
+        fail "sudoers drop-in $path mode is $mode, want 440"
+    fi
+    log_detail "VALIDATE sudoers $path: root:root 0440"
+}
+
+# validate_directory checks that a directory exists with the
+# specified owner:group and permissions. If missing, it creates
+# it (self-heal). If permissions or ownership are wrong, it
+# fixes them. Does NOT fail on self-heal or repair.
+#
+# Safety: only exact allowed paths may be repaired. Empty,
+# relative, root, or path-traversal values are rejected.
+validate_directory() {
+    local path="$1"
+    local owner="$2"
+    local perms="$3"
+    # Reject empty or unsafe paths.
+    if [ -z "$path" ] || [ "$path" = "/" ]; then
+        fail "validate_directory: refusing unsafe path '$path'"
+    fi
+    case "$path" in
+        */..*|*\\..*|*/./*|*\\\./*)
+            fail "validate_directory: refusing path-traversal '$path'"
+            ;;
+    esac
+    case "$path" in
+        /*)
+            # Absolute path — check against allowlist.
+            local allowed=0
+            for ap in \
+                /opt/orvix \
+                /usr/share/orvix/admin \
+                /var/lib/orvix \
+                /var/log/orvix \
+                /var/lib/orvix/backups \
+                /var/lib/orvix/coremail \
+                /var/lib/orvix/coremail/mailstore \
+                /etc/orvix
+            do
+                if [ "$path" = "$ap" ]; then
+                    allowed=1
+                    break
+                fi
+            done
+            if [ "$allowed" -eq 0 ]; then
+                fail "validate_directory: path '$path' not in allowlist"
+            fi
+            ;;
+        *)
+            fail "validate_directory: refusing relative path '$path'"
+            ;;
+    esac
+    if [ ! -d "$path" ]; then
+        log_detail "REPAIR directory $path missing; creating"
+        mkdir -p "$path"
+    fi
+    chown "$owner" "$path"
+    chmod "$perms" "$path"
+    log_detail "VALIDATE directory $path: $owner $perms"
+}
+
+# validate_binary checks that /usr/local/bin/orvix exists and is
+# executable. The binary is NEVER invoked before configuration and
+# service setup are complete. If file(1) or sha256sum are available
+# they are used for additional integrity metadata (non-fatal).
+# Fails if the binary does not exist or is not executable.
+validate_binary() {
+    local bin="$ORVIX_BIN"
+    if [ ! -f "$bin" ]; then
+        fail "binary $bin does not exist"
+    fi
+    if [ ! -x "$bin" ]; then
+        fail "binary $bin is not executable"
+    fi
+    local extra=""
+    if command -v file >/dev/null 2>&1; then
+        extra="$(file -b "$bin" 2>/dev/null || true)"
+    fi
+    if command -v sha256sum >/dev/null 2>&1; then
+        local hash
+        hash="$(sha256sum "$bin" 2>/dev/null | cut -d' ' -f1 || true)"
+        if [ -n "$hash" ]; then
+            extra="${extra:+$extra, }sha256=${hash}"
+        fi
+    fi
+    if [ -n "$extra" ]; then
+        log_detail "VALIDATE binary $bin: executable, $extra"
+    else
+        log_detail "VALIDATE binary $bin: executable"
+    fi
+}
+
+# validate_admin_ui checks that the admin UI assets were copied
+# to /usr/share/orvix/admin and that the required files exist.
+# Fails if any required file is missing.
+validate_admin_ui() {
+    local ui_dir="/usr/share/orvix/admin"
+    if [ ! -d "$ui_dir" ]; then
+        fail "admin UI directory $ui_dir does not exist"
+    fi
+    if [ ! -f "$ui_dir/index.html" ]; then
+        fail "admin UI index.html not found at $ui_dir/index.html"
+    fi
+    if [ ! -f "$ui_dir/app.js" ]; then
+        fail "admin UI app.js not found at $ui_dir/app.js"
+    fi
+    log_detail "VALIDATE admin UI $ui_dir: index.html + app.js present"
+}
+
+# validate_https_config checks whether a reverse proxy and
+# certificate are configured. This is advisory only — the
+# installer does NOT obtain certificates during installation.
+# Returns 0 if config exists, 1 if not (non-fatal).
+validate_https_config() {
+    local config_path="/etc/caddy/Caddyfile"
+    if [ ! -f "$config_path" ]; then
+        log_detail "HTTPS config $config_path not found (advisory, non-fatal)"
+        return 1
+    fi
+    if ! command -v caddy >/dev/null 2>&1; then
+        log_detail "HTTPS caddy binary not found (advisory, non-fatal)"
+        return 1
+    fi
+    # Check that the Caddyfile references the admin domain.
+    if ! grep -q "reverse_proxy 127.0.0.1:8080" "$config_path" 2>/dev/null; then
+        log_detail "HTTPS Caddyfile does not proxy to admin API (non-fatal)"
+    fi
+    log_detail "HTTPS config $config_path: present"
+    return 0
+}
+
+# ── Smoke tests ────────────────────────────────────────
+
+# smoke_tests runs the post-install health and reachability
+# checks. Tests that require authentication or are
+# config-dependent are excluded; only public, always-on
+# endpoints are fatal. Fails the install if any fatal smoke
+# test fails.
+smoke_tests() {
+    local failures=0
+    local base="http://127.0.0.1:8080"
+    local jmap_base="http://127.0.0.1:8081"
+
+    # 1. Health endpoint (fatal — always on, unauthenticated).
+    log_detail "SMOKE health $base/api/v1/health"
+    if curl -fsS "$base/api/v1/health" >/dev/null 2>&1; then
+        log_detail "  PASS health"
+    else
+        log_detail "  FAIL health"
+        failures=$((failures + 1))
+    fi
+
+    # 2. Admin login page (fatal — always on, unauthenticated).
+    log_detail "SMOKE admin $base/admin"
+    if curl -fsSI "$base/admin" >/dev/null 2>&1; then
+        log_detail "  PASS admin"
+    else
+        log_detail "  FAIL admin"
+        failures=$((failures + 1))
+    fi
+
+    # 3. JMAP discovery (fatal — always on, unauthenticated).
+    log_detail "SMOKE jmap $jmap_base/.well-known/jmap"
+    if curl -fsS "$jmap_base/.well-known/jmap" >/dev/null 2>&1; then
+        log_detail "  PASS jmap"
+    else
+        log_detail "  FAIL jmap"
+        failures=$((failures + 1))
+    fi
+
+    # 4. Webmail (fatal — always on, unauthenticated).
+    log_detail "SMOKE webmail $base/webmail"
+    if curl -fsSI "$base/webmail" >/dev/null 2>&1; then
+        log_detail "  PASS webmail"
+    else
+        log_detail "  FAIL webmail"
+        failures=$((failures + 1))
+    fi
+
+    # 5. Metrics (advisory — may be disabled in config).
+    log_detail "SMOKE metrics $base/metrics"
+    if curl -fsSI "$base/metrics" >/dev/null 2>&1; then
+        log_detail "  PASS metrics"
+    else
+        log_detail "  SKIP metrics (advisory)"
+    fi
+
+    # Update preflight and backup API are admin-protected;
+    # they cannot be verified without authentication in the
+    # installer smoke context. Their validation is handled
+    # by validate_systemd (helper unit) and validate_directory
+    # (backup directory) respectively.
+
+    if [ "$failures" -gt 0 ]; then
+        fail "$failures smoke test(s) failed"
+    fi
+    log_detail "SMOKE all fatal tests passed"
+}
+
+# ── Install report ─────────────────────────────────────
+
+# generate_install_report produces a structured summary of
+# the installation. The report is logged and appended to the
+# install log. It never includes secrets, tokens, or
+# environment variable values.
+generate_install_report() {
+    local version
+    version="$(install_version)"
+    {
+        echo ""
+        echo "========================================================="
+        echo "              ORVIX INSTALLATION REPORT"
+        echo "========================================================="
+        echo ""
+        echo "Version: $version"
+        echo "Timestamp: $(date -Is)"
+        echo "Hostname: $(hostname 2>/dev/null || echo unknown)"
+        echo "Kernel: $(uname -r 2>/dev/null || echo unknown)"
+        echo "OS: $(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"' || echo unknown)"
+        echo ""
+        echo "--- Services ---"
+        for svc in orvix.service orvix-update.service redis-server.service; do
+            local active
+            active="$(systemctl is-active "$svc" 2>/dev/null || echo unknown)"
+            local enabled
+            enabled="$(systemctl is-enabled "$svc" 2>/dev/null || echo unknown)"
+            printf "  %-30s active=%-10s enabled=%s\n" "$svc" "$active" "$enabled"
+        done
+        echo ""
+        echo "--- Ports ---"
+        for port in 25 80 110 143 443 8080 8081 6379; do
+            if ss -ltn "( sport = :$port )" 2>/dev/null | grep -q ":$port"; then
+                echo "  Port $port: LISTENING"
+            else
+                echo "  Port $port: not listening"
+            fi
+        done
+        echo ""
+        echo "--- Directories ---"
+        for dir in /opt/orvix /usr/share/orvix/admin /var/lib/orvix /var/log/orvix /etc/orvix; do
+            if [ -d "$dir" ]; then
+                local dir_owner
+                dir_owner="$(stat -c '%a %U:%G' "$dir" 2>/dev/null || echo '?')"
+                echo "  $dir ($dir_owner)"
+            else
+                echo "  $dir (MISSING)"
+            fi
+        done
+        echo ""
+        echo "--- Binary ---"
+        if [ -x "$ORVIX_BIN" ]; then
+            local bin_owner
+            local bin_size
+            bin_owner="$(stat -c '%a %U:%G' "$ORVIX_BIN" 2>/dev/null || echo '?')"
+            bin_size="$(wc -c < "$ORVIX_BIN" 2>/dev/null || echo '?')"
+            echo "  $ORVIX_BIN ($bin_owner, $bin_size bytes)"
+        else
+            echo "  $ORVIX_BIN (MISSING)"
+        fi
+        echo ""
+        echo "--- Smoke Tests ---"
+        echo "  See install log for detailed results"
+        echo ""
+        echo "--- Final Result ---"
+        echo "  INSTALLATION COMPLETED SUCCESSFULLY"
+        echo ""
+        echo "========================================================="
+    } >>"$INSTALL_LOG"
+    # Also print a short summary to stdout.
+    echo ""
+    echo "${GREEN}Installation report appended to $INSTALL_LOG${NC}"
+}
+
 verify_install() {
 	local email="$1"
 	local password="$2"
@@ -613,6 +939,12 @@ main() {
     run_quiet install -d -o orvix -g orvix -m 0750 /etc/orvix /var/lib/orvix /var/lib/orvix/coremail /var/lib/orvix/backups /var/log/orvix
     run_quiet install -d -o root -g root -m 0755 /usr/share/orvix/admin
     run_quiet install -d -o root -g root -m 0755 /usr/share/orvix/webmail
+    # Validate and self-heal runtime directories.
+    validate_directory /opt/orvix root:root 0755
+    validate_directory /usr/share/orvix/admin root:root 0755
+    validate_directory /var/lib/orvix orvix:orvix 0750
+    validate_directory /var/log/orvix orvix:orvix 0750
+    validate_directory /var/lib/orvix/backups orvix:orvix 0750
 
     set_step "configuration-input" "Administrator enrollment" 45
     local primary_domain admin_email admin_password
@@ -625,6 +957,7 @@ main() {
     run_quiet chown root:root "$ORVIX_BIN"
     run_quiet chmod 0755 "$ORVIX_BIN"
     run_quiet setcap 'cap_net_bind_service=+ep' "$ORVIX_BIN"
+    validate_binary
 
     set_step "configuration" "Configuration provisioning" 75
     write_config "$primary_domain"
@@ -637,17 +970,24 @@ main() {
     run_quiet find /usr/share/orvix/admin -type f -exec chmod 0644 {} +
     run_quiet find /usr/share/orvix/webmail -type d -exec chmod 0755 {} +
     run_quiet find /usr/share/orvix/webmail -type f -exec chmod 0644 {} +
+    validate_admin_ui
 
     set_step "systemd" "Service activation" 85
     write_service
     install_update_helper
     run_quiet systemctl daemon-reload
     run_quiet systemctl enable orvix
+    run_quiet systemctl enable orvix-update.service
     run_quiet systemctl restart orvix
+    validate_systemd
+    validate_sudoers
 
     set_step "verification" "Enterprise health verification" 95
     run_quiet sleep 5
     verify_install "$admin_email" "$admin_password"
+    smoke_tests
+    validate_https_config || true
+    generate_install_report
 
     local server_ip
     server_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"

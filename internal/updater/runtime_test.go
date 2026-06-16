@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -135,10 +136,34 @@ func TestSingleFlightLock(t *testing.T) {
 	}
 }
 
+func TestRunReturnsErrJobRunningWhenJobSlotReserved(t *testing.T) {
+	svc, _ := newService(t)
+	startedAt := time.Now().UTC()
+	svc.currentJobMu.Lock()
+	svc.currentJob = &jobState{
+		Status:    "running",
+		StartedAt: &startedAt,
+		Actor:     "test:existing",
+	}
+	svc.currentJobMu.Unlock()
+	defer svc.clearSlot()
+
+	row, err := svc.Run(context.Background(), "test:second")
+	if err != ErrJobRunning {
+		t.Fatalf("expected ErrJobRunning, got row=%+v err=%v", row, err)
+	}
+	if row != nil {
+		t.Fatalf("expected nil row when job is already running, got %+v", row)
+	}
+	if !svc.IsRunning() {
+		t.Fatal("expected service to still report running while reserved job slot exists")
+	}
+}
+
 func TestSafeModuleID(t *testing.T) {
 	cases := []struct {
-		in  string
-		ok  bool
+		in string
+		ok bool
 	}{
 		{"orvix-core", true},
 		{"auto-update", true},

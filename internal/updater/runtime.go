@@ -618,13 +618,13 @@ func (s *RuntimeService) runViaSystemd(ctx context.Context) (startErr *UpdateErr
 			zap.String("unit", unit),
 			zap.String("expected", DefaultUpdateHelperUnit))
 		return NewUpdateError(ErrCodePreflightFailed,
-			fmt.Errorf("helper unit not canonical: %s", unit)),
+				fmt.Errorf("helper unit not canonical: %s", unit)),
 			"", 0
 	}
 	// 2. Preflight: helper unit must be installed.
 	if !isHelperUnitInstalled() {
 		return NewUpdateError(ErrCodePreflightFailed,
-			fmt.Errorf("update helper not installed: %s", DefaultUpdateHelperUnit)),
+				fmt.Errorf("update helper not installed: %s", DefaultUpdateHelperUnit)),
 			"", 0
 	}
 	// 3. Drive the helper. The web process runs as a non-root
@@ -927,10 +927,16 @@ func asIfaceReader(r interface{ Read(p []byte) (int, error) }) interface{ Read(p
 }
 
 // diskUsageFor is a small wrapper around the platform statfs shim.
-func diskUsageFor(path string) (struct{ TotalBytes, FreeBytes, UsedBytes int64; UsedPct int }, error) {
+func diskUsageFor(path string) (struct {
+	TotalBytes, FreeBytes, UsedBytes int64
+	UsedPct                          int
+}, error) {
 	stat, err := statfsImpl(path)
 	if err != nil {
-		return struct{ TotalBytes, FreeBytes, UsedBytes int64; UsedPct int }{}, err
+		return struct {
+			TotalBytes, FreeBytes, UsedBytes int64
+			UsedPct                          int
+		}{}, err
 	}
 	bsize := stat.Bsize
 	if bsize <= 0 {
@@ -943,7 +949,10 @@ func diskUsageFor(path string) (struct{ TotalBytes, FreeBytes, UsedBytes int64; 
 	if total > 0 {
 		pct = int((used * 100) / total)
 	}
-	return struct{ TotalBytes, FreeBytes, UsedBytes int64; UsedPct int }{total, free, used, pct}, nil
+	return struct {
+		TotalBytes, FreeBytes, UsedBytes int64
+		UsedPct                          int
+	}{total, free, used, pct}, nil
 }
 
 // humanBytes formats an int64 byte count for safe rendering.
