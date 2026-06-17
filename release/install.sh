@@ -195,42 +195,64 @@ render_success() {
 	cat <<HEADER
 ${GREEN}=========================================================
               ORVIX ENTERPRISE MAIL
-               INSTALLATION COMPLETE
-=========================================================${NC}
+                INSTALLATION COMPLETE
+========================================================${NC}
 
 HEADER
 	progress_bar "$CURRENT_PERCENT"
+
+	# Detect HTTPS: caddy + a Caddyfile referencing the admin
+	# domain means setup-https.sh has been run. We label the
+	# URL block accordingly so the operator does not assume
+	# HTTPS is ready before it actually is.
+	local https_configured=0
+	if [ -f /etc/caddy/Caddyfile ] && grep -q "admin.${domain}" /etc/caddy/Caddyfile 2>/dev/null; then
+		https_configured=1
+	fi
+
 	cat <<BODY
 
 Product: Orvix Enterprise Mail / CoreMail
 Version: ${version}
 
-After running the HTTPS setup command below, the user-facing URLs are:
-
-  Admin URL:   https://admin.${domain}/admin
-  Webmail URL: https://admin.${domain}/webmail
-  JMAP URL:    https://mail.${domain}/.well-known/jmap
-
-Until HTTPS is configured, the same paths are reachable on plain HTTP:
-
-  Admin URL:   http://admin.${domain}/admin
-  Webmail URL: http://admin.${domain}/webmail
-  JMAP URL:    http://mail.${domain}/.well-known/jmap
+DNS required (set these with your DNS provider):
+  A admin.${domain} -> ${server_ip}
+  A mail.${domain} -> ${server_ip}
 
 Mail Hostname: mail.${domain}
 SMTP: mail.${domain}:25
 IMAP: mail.${domain}:143
 POP3: mail.${domain}:110
+BODY
 
-DNS required: A admin.${domain} -> ${server_ip}
-DNS required: A mail.${domain} -> ${server_ip}
+	if [ "$https_configured" = "1" ]; then
+		cat <<BODY
+Production URLs (HTTPS, caddy reverse proxy):
+  Admin URL:   https://admin.${domain}/admin
+  Webmail URL: https://admin.${domain}/webmail
+  JMAP URL:    https://mail.${domain}/.well-known/jmap
+BODY
+	else
+		cat <<BODY
+TEMPORARY URLs (plain HTTP, no TLS — setup-https.sh has NOT been run):
+  Admin UI:    http://${server_ip}:8080/admin
+  Webmail UI:  http://${server_ip}:8080/webmail
+  JMAP:        http://${server_ip}:8081/.well-known/jmap
 
-Temporary Admin API: http://${server_ip}:8080/admin
+NOTE: admin.${domain} and mail.${domain} are NOT reachable until HTTPS
+is set up and DNS is configured. The TEMPORARY URLs above are bound
+directly to the server IP on the listening port.
+
+To get production HTTPS URLs (REQUIRED before users can sign in):
+  sudo $ORVIX_SOURCE_DIR/release/scripts/setup-https.sh ${domain} ${server_ip}
+BODY
+	fi
+
+	cat <<BODY
+
 Admin email: ${admin_email}
 Detailed log: ${INSTALL_LOG}
-
-HTTPS setup command (REQUIRED before users can sign in to webmail):
-  sudo $ORVIX_SOURCE_DIR/release/scripts/setup-https.sh ${domain} ${server_ip}
+Admin login details saved to ${ORVIX_ADMIN_CRED_FILE:-/var/lib/orvix/admin-login.txt} (root-only).
 
 ${GREEN}=========================================================${NC}
 BODY
@@ -777,6 +799,161 @@ validate_admin_ui() {
     log_detail "VALIDATE admin UI $ui_dir: index.html + app.js present"
 }
 
+# validate_webmail_ui checks that the webmail UI assets were
+# copied to /usr/share/orvix/webmail and that the auth gate is
+# wired up. Fails the install if the deployed webmail lacks
+# the gate — without the gate, unauthenticated users see the
+# Inbox/Compose UI even though every API call returns 401.
+#
+# In Phase Real Webmail v1, the installer also REJECTS the
+# legacy React demo bundle (index-CmhA8wNq.js, vendor.js,
+# index-*.css). The demo bundle calls /api/v1/queue which
+# does not exist as a real webmail API; the install must
+# fail rather than ship it.
+validate_webmail_ui() {
+    local ui_dir="/usr/share/orvix/webmail"
+    if [ ! -d "$ui_dir" ]; then
+        fail "webmail UI directory $ui_dir does not exist"
+    fi
+    if [ ! -f "$ui_dir/index.html" ]; then
+        fail "webmail UI index.html not found at $ui_dir/index.html"
+    fi
+    if [ ! -f "$ui_dir/assets/auth-gate.js" ]; then
+        fail "webmail UI auth-gate.js not found at $ui_dir/assets/auth-gate.js (unauthenticated users would see Inbox/Compose with no API access)"
+    fi
+    if [ ! -f "$ui_dir/assets/auth-gate.css" ]; then
+        fail "webmail UI auth-gate.css not found at $ui_dir/assets/auth-gate.css"
+    fi
+    # The real webmail client (vanilla JS) must be present.
+    if [ ! -f "$ui_dir/assets/webmail.js" ]; then
+        fail "webmail UI webmail.js not found at $ui_dir/assets/webmail.js"
+    fi
+    if [ ! -f "$ui_dir/assets/webmail.css" ]; then
+        fail "webmail UI webmail.css not found at $ui_dir/assets/webmail.css"
+    fi
+    # Reject the legacy React demo bundle explicitly. The
+    # demo bundle calls /api/v1/queue and renders admin
+    # queue data — that is not a real webmail and must
+    # never ship.
+    for forbidden in "index-CmhA8wNq.js" "vendor-xxE1au3H.js" "index-BiLI_Nmd.css"; do
+        if [ -f "$ui_dir/assets/$forbidden" ]; then
+            fail "webmail UI ships the legacy demo React bundle ($forbidden); remove it and rebuild"
+        fi
+    done
+    # The index.html MUST reference both gate files BEFORE
+    # the webmail client, otherwise the gate runs after the
+    # client has already mounted.
+    local idx_html
+    idx_html="$(cat "$ui_dir/index.html")"
+    if ! printf '%s' "$idx_html" | grep -q 'auth-gate\.js'; then
+        fail "webmail UI index.html does not reference auth-gate.js"
+    fi
+    if ! printf '%s' "$idx_html" | grep -q 'auth-gate\.css'; then
+        fail "webmail UI index.html does not reference auth-gate.css"
+    fi
+    if ! printf '%s' "$idx_html" | grep -q 'webmail\.js'; then
+        fail "webmail UI index.html does not reference webmail.js"
+    fi
+    # Verify load order: the gate script reference must
+    # appear before the webmail client reference so the
+    # gate can hide #root before the client mounts.
+    local gate_pos client_pos
+    gate_pos="$(printf '%s' "$idx_html" | grep -bo 'auth-gate\.js' | head -n1 | cut -d: -f1)"
+    client_pos="$(printf '%s' "$idx_html" | grep -bo 'webmail\.js' | head -n1 | cut -d: -f1)"
+    if [ -z "$gate_pos" ] || [ -z "$client_pos" ] || [ "$gate_pos" -gt "$client_pos" ]; then
+        fail "webmail UI gate script must be referenced before the webmail client"
+    fi
+    log_detail "VALIDATE webmail UI $ui_dir: index.html + auth-gate.js + auth-gate.css + webmail.js present, gate before client"
+}
+
+# write_admin_login_file persists operator-facing access
+# information to a root-only file. The file contains the
+# admin URL, webmail URL, admin email, and the reset
+# command path — but NEVER the admin password, the
+# password hash, any JWT, or the bootstrap env secret.
+#
+# The admin password is the value typed at the install
+# prompt. The installer does not store it because:
+#
+#   - /etc/orvix/bootstrap.env is removed by verify_install
+#     immediately after the dual-login probe succeeds, so
+#     the password is already gone from the system.
+#   - storing it again on disk creates a second copy that
+#     must be kept in sync if the operator rotates the
+#     password via reset-admin-password.sh.
+#   - reset-admin-password.sh + the installer prompt are
+#     the canonical recovery path; a stored copy adds
+#     attack surface without adding recovery capability.
+#
+# The file is atomically replaced (write to a temp file,
+# chmod 0600 root:root, rename) so the file is never
+# world-readable, even briefly.
+#
+# Defaults to /var/lib/orvix/admin-login.txt. Override with
+# ORVIX_ADMIN_CRED_FILE.
+write_admin_login_file() {
+    local admin_email="$1"
+    local primary_domain="$2"
+    local server_ip="$3"
+    local cred_file="${ORVIX_ADMIN_CRED_FILE:-/var/lib/orvix/admin-login.txt}"
+
+    mkdir -p "$(dirname "$cred_file")"
+
+    # Detect HTTPS so the file shows the right URLs.
+    local https_configured=0
+    if [ -f /etc/caddy/Caddyfile ] && grep -q "admin.${primary_domain}" /etc/caddy/Caddyfile 2>/dev/null; then
+        https_configured=1
+    fi
+
+    # Atomic write: temp file is 0600 root:root from the
+    # start, then renamed. The file body NEVER contains the
+    # password, password hash, JWT, or bootstrap secret.
+    local tmpfile="${cred_file}.tmp.$$"
+    {
+        printf '%s\n' "Orvix Enterprise Mail - Admin Login"
+        printf '%s\n' "===================================="
+        printf '\n'
+        printf '%s\n' "Generated: $(date -Is)"
+        printf '%s\n' "Server:    ${server_ip}"
+        printf '\n'
+        if [ "$https_configured" = "1" ]; then
+            printf '%s\n' "URLs (HTTPS configured):"
+            printf '%s\n' "  Admin URL:   https://admin.${primary_domain}/admin"
+            printf '%s\n' "  Webmail URL: https://admin.${primary_domain}/webmail"
+            printf '%s\n' "  JMAP URL:    https://mail.${primary_domain}/.well-known/jmap"
+        else
+            printf '%s\n' "URLs (HTTPS NOT configured - these are TEMPORARY):"
+            printf '%s\n' "  Admin UI:    http://${server_ip}:8080/admin"
+            printf '%s\n' "  Webmail UI:  http://${server_ip}:8080/webmail"
+            printf '%s\n' "  JMAP:        http://${server_ip}:8081/.well-known/jmap"
+            printf '\n'
+            printf '%s\n' "To get production HTTPS URLs, run setup-https.sh."
+        fi
+        printf '\n'
+        printf '%s\n' "Admin email: ${admin_email}"
+        printf '\n'
+        printf '%s\n' "Password: the value typed at the install prompt."
+        printf '%s\n' "The installer does not store the password on disk."
+        printf '%s\n' "If you forgot it, use the reset command below."
+        printf '\n'
+        printf '%s\n' "To rotate the password:"
+        printf '%s\n' "  sudo bash release/scripts/reset-admin-password.sh ${admin_email}"
+        printf '\n'
+        printf '%s\n' "== FILE SECURITY =="
+        printf '%s\n' "This file is root-readable only (chmod 0600, owner root:root)."
+        printf '%s\n' "It does NOT contain the admin password, the password hash,"
+        printf '%s\n' "any JWT, or the bootstrap env secret."
+    } > "$tmpfile"
+    chmod 0600 "$tmpfile"
+    chown root:root "$tmpfile"
+    mv "$tmpfile" "$cred_file"
+
+    # Audit only the path. The password is never written
+    # anywhere on disk by this installer.
+    log_detail "admin login file written to $cred_file (0600 root:root); password NOT stored"
+    printf 'Admin login details saved to %s (root-only; password NOT stored)\n' "$cred_file"
+}
+
 # validate_https_config checks whether a reverse proxy and
 # certificate are configured. This is advisory only — the
 # installer does NOT obtain certificates during installation.
@@ -1261,6 +1438,7 @@ main() {
     run_quiet find /usr/share/orvix/webmail -type d -exec chmod 0755 {} +
     run_quiet find /usr/share/orvix/webmail -type f -exec chmod 0644 {} +
     validate_admin_ui
+    validate_webmail_ui
 
     set_step "systemd" "Service activation" 85
     write_service
@@ -1282,6 +1460,19 @@ main() {
     local server_ip
     server_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
     server_ip="${server_ip:-127.0.0.1}"
+
+    # Persist admin LOGIN info to a root-only file. The file
+    # does NOT contain the admin password — that lives only
+    # in the operator's memory and the bcrypt hash in the
+    # users table. The reset-admin-password.sh script is the
+    # recovery path if the operator forgets the password.
+    write_admin_login_file "$admin_email" "$primary_domain" "$server_ip"
+
+    # Clear the password from the script's environment so it
+    # never accidentally leaks into log/stdout after this
+    # point.
+    unset admin_password
+
     render_success "$primary_domain" "$server_ip" "$admin_email"
 }
 

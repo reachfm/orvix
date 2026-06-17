@@ -102,18 +102,28 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"Admin URL:   https://admin.${domain}/admin",
 		"Webmail URL: https://admin.${domain}/webmail",
 		"JMAP URL:    https://mail.${domain}/.well-known/jmap",
-		"http://admin.${domain}/admin",
-		"http://admin.${domain}/webmail",
-		"http://mail.${domain}/.well-known/jmap",
-		"HTTPS setup command (REQUIRED before users can sign in to webmail)",
+		// The TEMPORARY block is what the operator sees BEFORE
+		// setup-https.sh runs. It must be clearly labelled and
+		// bound to the server IP (since admin.${domain} is not
+		// reachable without HTTPS+DNS at this stage).
+		"TEMPORARY URLs (plain HTTP, no TLS",
+		"Admin UI:    http://${server_ip}:8080/admin",
+		"Webmail UI:  http://${server_ip}:8080/webmail",
+		"JMAP:        http://${server_ip}:8081/.well-known/jmap",
+		"setup-https.sh",
 		"Mail Hostname: mail.${domain}",
 		"SMTP: mail.${domain}:25",
 		"IMAP: mail.${domain}:143",
 		"POP3: mail.${domain}:110",
-		"DNS required: A admin.${domain} -> ${server_ip}",
-		"DNS required: A mail.${domain} -> ${server_ip}",
-		"Temporary Admin API: http://${server_ip}:8080/admin",
+		"DNS required (set these with your DNS provider)",
+		"A admin.${domain} -> ${server_ip}",
+		"A mail.${domain} -> ${server_ip}",
 		"release/scripts/setup-https.sh ${domain} ${server_ip}",
+		// Credential file UX.
+		"Admin login details saved to",
+		"write_admin_login_file",
+		"validate_webmail_ui",
+		"chmod 0600",
 		// CORS: the webmail SPA at admin.${domain} ships a
 		// `<script type="module" crossorigin>` tag, so the
 		// admin server must allow the admin host. Without
@@ -144,9 +154,26 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 	}
 	stalePasswordLen := "12"
 	forbidden := []string{
+		// The old misleading URL labels — admin.${domain} is
+		// not reachable on plain HTTP before setup-https.sh
+		// runs, so printing "Admin URL: http://admin.X/admin"
+		// implies the operator can hit it.
+		"Admin URL:   http://admin.${domain}/admin",
+		"Webmail URL: http://admin.${domain}/webmail",
+		"JMAP URL:    http://mail.${domain}/.well-known/jmap",
 		"Admin UI: http://mail.${primary_domain}:8080/admin",
 		"Admin UI: http://$(hostname -f 2>/dev/null || hostname):8080/admin",
 		"hostname -f 2>/dev/null || hostname",
+		// The plain "Temporary Admin API:" label was too
+		// vague — the new label is "Admin UI:    http://IP:8080/admin"
+		// inside a clearly-marked TEMPORARY block.
+		"Temporary Admin API: http://${server_ip}:8080/admin",
+		// No password should ever be printed to stdout. The
+		// installer must use the root-only credential file.
+		"echo \"$admin_password\"",
+		"printf \"%s\" \"$admin_password\"",
+		"log_detail \"$admin_password\"",
+		"log_detail \"$password\"",
 		"ORVIX_ADMIN_PASSWORD=\"$escaped_password\"",
 		"RC1 CLEAN INSTALLER",
 		"min " + stalePasswordLen + " chars",
@@ -534,5 +561,274 @@ func TestReleaseWebmailBuildExists(t *testing.T) {
 	}
 	if len(assets) == 0 {
 		t.Fatal("webmail release build must include JavaScript assets")
+	}
+}
+
+// TestInstallerValidatesWebmailAuthGate pins that the
+// installer refuses to complete if the deployed webmail
+// lacks the auth-gate wiring. Without the gate, an
+// unauthenticated visitor to /webmail sees the React mail UI
+// (Inbox/Compose) even though every API call returns 401 —
+// the production symptom the gate was added to prevent.
+func TestInstallerValidatesWebmailAuthGate(t *testing.T) {
+	root := repoRoot(t)
+	installerBytes, err := os.ReadFile(filepath.Join(root, "release", "install.sh"))
+	if err != nil {
+		t.Fatalf("read installer: %v", err)
+	}
+	installer := string(installerBytes)
+
+	mustHave := []string{
+		"validate_webmail_ui()",
+		`$ui_dir/assets/auth-gate.js`,
+		`$ui_dir/assets/auth-gate.css`,
+		// The validation must also gate against the
+		// webmail.js client being present and the React
+		// demo bundle being absent. The legacy bundle
+		// reference (in the rejection loop) is what
+		// enforces the "stop shipping demo webmail"
+		// rule.
+		`$ui_dir/assets/webmail.js`,
+		`"index-CmhA8wNq.js"`,
+		"webmail UI index.html does not reference auth-gate.js",
+		"webmail UI gate script must be referenced before the webmail client",
+		"webmail UI webmail.js not found",
+	}
+	for _, needle := range mustHave {
+		if !strings.Contains(installer, needle) {
+			t.Errorf("installer must contain %q (webmail validation)", needle)
+		}
+	}
+}
+
+// TestInstallerWritesRootOnlyLoginFile pins the post-
+// install login-file contract: 0600 root:root, contains
+// the URLs, the admin email, and the reset command path,
+// but NEVER the admin password, the password hash, any JWT,
+// or the bootstrap env secret.
+//
+// The contract changed in this turn: previously the file
+// also contained the plaintext admin password. We removed
+// that line because /etc/orvix/bootstrap.env is removed by
+// verify_install immediately after the dual-login probe
+// succeeds, so the password is already gone from the
+// system; storing it again on disk would create a second
+// copy that must be kept in sync if the operator rotates
+// the password via reset-admin-password.sh.
+//
+// If you ever need to add the password back, update this
+// test FIRST and explain in the comment why a second copy
+// on disk is the lesser of two evils.
+func TestInstallerWritesRootOnlyLoginFile(t *testing.T) {
+	root := repoRoot(t)
+	installerBytes, err := os.ReadFile(filepath.Join(root, "release", "install.sh"))
+	if err != nil {
+		t.Fatalf("read installer: %v", err)
+	}
+	installer := string(installerBytes)
+
+	mustHave := []string{
+		"write_admin_login_file()",
+		"ORVIX_ADMIN_CRED_FILE",
+		"chmod 0600",
+		"chown root:root",
+		// The file body must include URLs, email, and
+		// reset command — but NOT the password itself.
+		"Admin URL:",
+		"Webmail URL:",
+		"Admin email:",
+		"reset-admin-password.sh",
+		// Atomic-write pattern: write to tmp, chmod, rename.
+		"${cred_file}.tmp.$$",
+		"mv \"$tmpfile\" \"$cred_file\"",
+		// The installer must unset the password after use
+		// so it does not linger in the script's memory
+		// past this point.
+		"unset admin_password",
+	}
+	for _, needle := range mustHave {
+		if !strings.Contains(installer, needle) {
+			t.Errorf("installer must contain %q (login file UX)", needle)
+		}
+	}
+
+	// The function name was renamed; the old name must
+	// not appear anywhere in the installer.
+	if strings.Contains(installer, "write_admin_credentials_file") {
+		t.Errorf("login file must NOT contain %q (function was renamed; the password-storing version must not come back)", "write_admin_credentials_file")
+	}
+
+	// Scope the forbidden-content check to the body of
+	// write_admin_login_file. The login file is the only
+	// thing we are auditing here — the install.sh may
+	// legitimately reference ORVIX_ADMIN_PASSWORD_B64 in
+	// other contexts (write_bootstrap_env writes the env
+	// file the orvix binary reads on first boot).
+	loginBody := extractFunctionBody(installer, "write_admin_login_file() {")
+	if loginBody == "" {
+		t.Fatal("could not locate write_admin_login_file function body")
+	}
+
+	forbidden := []string{
+		// The "Admin password:" line that previously wrote
+		// the plaintext password into the login file. The
+		// user explicitly forbade storing the password
+		// anywhere after install.
+		"Admin password: ${admin_password}",
+		"Admin password: \"${admin_password}\"",
+		"Admin password: ${admin_password",
+		// bcrypt / hash markers. The login file must not
+		// contain a hash.
+		"$2a$",
+		"$2b$",
+		"password_hash",
+		// Bootstrap env secret. The whole point of
+		// /etc/orvix/bootstrap.env is that it carries the
+		// password to the first boot; we do not want a
+		// second copy on disk.
+		"ORVIX_ADMIN_PASSWORD_B64",
+		"ORVIX_ADMIN_PASSWORD=",
+	}
+	for _, f := range forbidden {
+		if strings.Contains(loginBody, f) {
+			t.Errorf("login file body must NOT contain %q (no plaintext password, no hash, no secret)", f)
+		}
+	}
+
+	// The printf block that writes the file body must
+	// reference admin_password at most in explanatory
+	// prose ("Password: the value typed at the install
+	// prompt"), never as a literal write target. We assert
+	// this by scanning for printf lines that contain
+	// "${admin_password}" as a positional argument.
+	for _, line := range strings.Split(loginBody, "\n") {
+		if strings.Contains(line, "printf") &&
+			strings.Contains(line, "${admin_password}") {
+			t.Errorf("login file body must not printf %s into anything: %q",
+				"${admin_password}", strings.TrimSpace(line))
+		}
+	}
+}
+
+// extractFunctionBody returns the body of the named
+// function, where "body" means everything between the
+// opening `{` and the matching `}` at column 0. Returns
+// "" if not found. Used by the installer credential-file
+// test to scope forbidden-pattern checks to a single
+// function.
+func extractFunctionBody(installer, header string) string {
+	idx := strings.Index(installer, header)
+	if idx < 0 {
+		return ""
+	}
+	bodyStart := idx + len(header)
+	for i := bodyStart; i < len(installer); i++ {
+		if installer[i] == '}' && (i == 0 || installer[i-1] == '\n') {
+			return installer[bodyStart:i]
+		}
+	}
+	return ""
+}
+
+// TestInstallerNoPasswordEchoToStdoutOrLog is the regression
+// test for the user's "no secret echo" requirement. The
+// installer must never print the admin password to stdout
+// (visible in the terminal), to $INSTALL_LOG (visible via
+// journalctl), or to the post-install login file. The admin
+// password lives only in the operator's memory and as a
+// bcrypt hash in the users table.
+func TestInstallerNoPasswordEchoToStdoutOrLog(t *testing.T) {
+	root := repoRoot(t)
+	installerBytes, err := os.ReadFile(filepath.Join(root, "release", "install.sh"))
+	if err != nil {
+		t.Fatalf("read installer: %v", err)
+	}
+	installer := string(installerBytes)
+
+	// Forbid any line that pipes/echoes/printf the password
+	// into a non-credential-file destination. The credential
+	// file itself is allowed to receive the password.
+	//
+	// Each pattern below is a real failure mode a careless
+	// refactor could introduce. We scan the whole installer.
+	forbiddenPatterns := []string{
+		`echo "$admin_password"`,
+		`echo "$password"`,
+		`printf '%s' "$admin_password" | tee`,
+		`printf '%s' "$password" | tee`,
+		`log_detail "$admin_password"`,
+		`log_detail "$password"`,
+		`tee -a "$INSTALL_LOG" <<EOF`, // heredoc to log is also banned
+	}
+	for _, p := range forbiddenPatterns {
+		if strings.Contains(installer, p) {
+			t.Errorf("installer must not contain %q (password leak)", p)
+		}
+	}
+
+	// log_detail MUST NOT contain any line that pipes a
+	// password variable. We assert this by scanning for
+	// `log_detail` combined with a password variable in
+	// the same line.
+	for _, line := range strings.Split(installer, "\n") {
+		if strings.Contains(line, "log_detail") &&
+			(strings.Contains(line, "$admin_password") ||
+				strings.Contains(line, " \"$password\"") ||
+				strings.Contains(line, " \"$password\n")) {
+			t.Errorf("log_detail must not log the password: %q", strings.TrimSpace(line))
+		}
+	}
+}
+
+// TestRuntimeUpdateDeploysWebmailAssets pins that
+// apply-runtime-update.sh copies release/webmail into
+// /usr/share/orvix/webmail and refuses to finish if the
+// gate is missing. Without this, an operator who only ever
+// runs the runtime update path gets a /webmail page without
+// the auth gate — the bug we are fixing in this turn.
+func TestRuntimeUpdateDeploysWebmailAssets(t *testing.T) {
+	root := repoRoot(t)
+	scriptBytes, err := os.ReadFile(filepath.Join(root, "release", "scripts", "apply-runtime-update.sh"))
+	if err != nil {
+		t.Fatalf("read runtime-update script: %v", err)
+	}
+	script := string(scriptBytes)
+
+	mustHave := []string{
+		// The script must reference both UI trees.
+		"release/admin",
+		"release/webmail",
+		"/usr/share/orvix/admin",
+		"/usr/share/orvix/webmail",
+		// It must copy via `cp -r` (idempotent overwrite in
+		// place) — not `rm -rf` first, which would wipe
+		// operator-placed assets.
+		"cp -r \"$REPO_ROOT/release/webmail/.\" /usr/share/orvix/webmail/",
+		// It must verify the deployed webmail has the gate.
+		"auth-gate.js",
+		"auth-gate.css",
+		"webmail UI deployment incomplete",
+		// Idempotency markers: the script does NOT remove the
+		// destination directory before copying.
+		"rm -rf /usr/share/orvix/webmail",
+		"rm -rf /usr/share/orvix/admin",
+		// Permissions are kept world-readable, matching the
+		// installer.
+		"chmod 0755",
+		"chmod 0644",
+		"chown -R root:root",
+	}
+	for _, needle := range mustHave {
+		// Negative assertions: the forbidden patterns must
+		// not appear. Positive assertions are split below.
+		if strings.HasPrefix(needle, "rm -rf") {
+			if strings.Contains(script, needle) {
+				t.Errorf("runtime update must not contain %q (would delete operator assets)", needle)
+			}
+			continue
+		}
+		if !strings.Contains(script, needle) {
+			t.Errorf("runtime update must contain %q", needle)
+		}
 	}
 }

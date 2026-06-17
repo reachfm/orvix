@@ -78,40 +78,42 @@ func readFile(t *testing.T, root, rel string) string {
 }
 
 // TestWebmailIndexHtmlReferencesGateBeforeBundle pins the
-// load order: the gate script must come BEFORE the React
-// bundle so it can hide #root before the bundle mounts.
+// load order: the gate script must come BEFORE the webmail
+// client so it can hide #root before the client mounts.
 func TestWebmailIndexHtmlReferencesGateBeforeBundle(t *testing.T) {
 	root := webmailRepoRoot(t)
 	html := readFile(t, root, "release/webmail/index.html")
 
 	cssIdx := strings.Index(html, "/webmail/assets/auth-gate.css")
 	jsIdx := strings.Index(html, "/webmail/assets/auth-gate.js")
-	bundleIdx := strings.Index(html, "/webmail/assets/index-CmhA8wNq.js")
+	clientIdx := strings.Index(html, "/webmail/assets/webmail.js")
 
 	if cssIdx < 0 {
-		t.Fatal("index.html must reference /webmail/assets/auth-gate.css before the React bundle")
+		t.Fatal("index.html must reference /webmail/assets/auth-gate.css")
 	}
 	if jsIdx < 0 {
-		t.Fatal("index.html must reference /webmail/assets/auth-gate.js before the React bundle")
+		t.Fatal("index.html must reference /webmail/assets/auth-gate.js")
 	}
-	if bundleIdx < 0 {
-		t.Fatal("index.html must still reference the React bundle (no removal)")
+	if clientIdx < 0 {
+		t.Fatal("index.html must reference /webmail/assets/webmail.js")
 	}
-	if !(cssIdx < bundleIdx) {
-		t.Errorf("auth-gate.css reference must appear before the React bundle reference; cssIdx=%d bundleIdx=%d", cssIdx, bundleIdx)
+	if !(cssIdx < clientIdx) {
+		t.Errorf("auth-gate.css reference must appear before webmail.js; cssIdx=%d clientIdx=%d", cssIdx, clientIdx)
 	}
-	if !(jsIdx < bundleIdx) {
-		t.Errorf("auth-gate.js reference must appear before the React bundle reference; jsIdx=%d bundleIdx=%d", jsIdx, bundleIdx)
+	if !(jsIdx < clientIdx) {
+		t.Errorf("auth-gate.js reference must appear before webmail.js; jsIdx=%d clientIdx=%d", jsIdx, clientIdx)
 	}
 
-	// The bundle must still be referenced (no removal of
-	// the React app).
-	if !strings.Contains(html, `crossorigin src="/webmail/assets/index-CmhA8wNq.js"`) {
-		t.Error("index.html must keep the crossorigin React bundle reference")
+	// The legacy React demo bundle MUST NOT be referenced.
+	// Phase Real Webmail v1 forbids shipping the demo bundle
+	// (it calls /api/v1/queue which does not exist as a real
+	// webmail API).
+	if strings.Contains(html, "index-CmhA8wNq.js") {
+		t.Error("index.html must not reference the legacy demo React bundle (index-CmhA8wNq.js)")
 	}
-	// #root must still be the mount point.
+	// #root must still be present so the gate can hide it.
 	if !strings.Contains(html, `<div id="root">`) {
-		t.Error("index.html must keep <div id=\"root\"> as the React mount point")
+		t.Error("index.html must keep <div id=\"root\"> as the gate's hidden mount point")
 	}
 }
 
@@ -349,14 +351,47 @@ func TestWebmailGateFilesAreServedByRouter(t *testing.T) {
 		t.Fatalf("auth-gate.css content unexpected: %s", body)
 	}
 
-	// /webmail/assets/index-CmhA8wNq.js — React bundle still
-	// served. This is the "no removal" regression guard.
-	status, body = get(t, "/webmail/assets/index-CmhA8wNq.js")
+	// /webmail/assets/webmail.js — the real webmail client
+	// (Phase Real Webmail v1). Must be served; this is
+	// the replacement for the legacy demo bundle.
+	status, body = get(t, "/webmail/assets/webmail.js")
 	if status != 200 {
-		t.Fatalf("GET /webmail/assets/index-CmhA8wNq.js: expected 200, got %d", status)
+		t.Fatalf("GET /webmail/assets/webmail.js: expected 200, got %d", status)
+	}
+	if strings.Contains(body, "<!doctype html") {
+		t.Fatalf("webmail.js returned the SPA fallback (index.html); the file is missing on disk. body[:200]=%q", body[:min(200, len(body))])
+	}
+	if !strings.Contains(body, "/api/v1/webmail/me") {
+		t.Fatalf("webmail.js must reference /api/v1/webmail/me: %s", body[:min(200, len(body))])
 	}
 	if len(body) < 1000 {
-		t.Fatalf("React bundle suspiciously small: %d bytes", len(body))
+		t.Fatalf("webmail.js suspiciously small: %d bytes", len(body))
+	}
+
+	// /webmail/assets/webmail.css — webmail styles.
+	status, body = get(t, "/webmail/assets/webmail.css")
+	if status != 200 {
+		t.Fatalf("GET /webmail/assets/webmail.css: expected 200, got %d", status)
+	}
+	if !strings.Contains(body, ".webmail") {
+		t.Fatalf("webmail.css content unexpected: %s", body)
+	}
+
+	// The legacy demo bundle MUST NOT be served. The
+	// Fiber SPA fallback returns the index.html for any
+	// unknown asset, so a 200 response is expected but
+	// the body must be the index.html (SPA fallback),
+	// not a real JS bundle. This proves the demo bundle
+	// file does not exist on disk anymore.
+	status, body = get(t, "/webmail/assets/index-CmhA8wNq.js")
+	if status == 200 && !strings.Contains(body, "<!doctype html") {
+		t.Fatalf("legacy demo bundle (index-CmhA8wNq.js) appears to be served as a real file; body[:200]=%q", body[:min(200, len(body))])
+	}
+	// The body must be the SPA fallback (index.html)
+	// and must not contain the React mount point that
+	// was in the original demo bundle.
+	if status == 200 && !strings.Contains(body, "auth-gate.js") {
+		t.Fatalf("GET /webmail/assets/index-CmhA8wNq.js: expected index.html fallback, got %q", body[:min(200, len(body))])
 	}
 }
 

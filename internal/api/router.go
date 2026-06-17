@@ -13,6 +13,7 @@ import (
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/coremail"
+	"github.com/orvix/orvix/internal/coremail/storage"
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/metrics"
 	"github.com/orvix/orvix/internal/modules"
@@ -69,6 +70,25 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		router.h.SetWebmailService(ws)
 	} else {
 		logger.Warn("webmail service not available: failed to get sql.DB", zap.Error(err))
+	}
+
+	// Wire MailStore from the coremail runtime module. The
+	// runtime creates the MailStore during initCore; the
+	// webmail user-facing endpoints (GET /api/v1/webmail/
+	// ...) read messages and folders directly from this
+	// store, not from /api/v1/queue or any admin-side
+	// endpoint. If the runtime module is not registered
+	// (test mode, custom builds) the webmail endpoints
+	// return 503 instead of crashing.
+	if mod, ok := registry.Get("coremail-runtime"); ok {
+		if msProvider, ok := mod.(interface {
+			MailStore() *storage.MailStore
+		}); ok {
+			if ms := msProvider.MailStore(); ms != nil {
+				router.h.SetMailStore(ms)
+				logger.Info("mailstore wired for webmail user endpoints")
+			}
+		}
 	}
 
 	// Wire Update Management v1 service. The service holds the
@@ -139,6 +159,21 @@ func (r *Router) setupRoutes() {
 
 	protected := api.Group("", r.apikeys.Middleware(), r.auth.Middleware())
 	protected.Get("/me", r.h.Me)
+
+	// User-facing webmail endpoints. Mounted on the
+	// protected group so the auth middleware rejects
+	// unauthenticated requests with 401 BEFORE any
+	// mailbox lookup runs. The handlers themselves
+	// resolve the current user to their mailbox and
+	// read from the live MailStore — there is no
+	// fallback to /api/v1/queue or any admin-side
+	// data path.
+	protected.Get("/webmail/me", r.h.WebmailMe)
+	protected.Get("/webmail/folders", r.h.WebmailFolders)
+	protected.Get("/webmail/messages", r.h.WebmailMessages)
+	protected.Get("/webmail/messages/:id", r.h.WebmailMessage)
+	protected.Post("/webmail/send", r.h.WebmailSend)
+	protected.Post("/webmail/messages/:id/delete", r.h.WebmailDelete)
 
 	protected.Get("/csrf-token", func(c fiber.Ctx) error {
 		userID, _ := c.Locals("user_id").(uint)

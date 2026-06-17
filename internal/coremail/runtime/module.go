@@ -344,6 +344,16 @@ func (m *Module) GetAuthorityService() *licensingauthority.AuthorityService {
 	return m.authorityService
 }
 
+// MailStore returns the underlying MailStore owned by this
+// module. The webmail user-facing endpoints read messages
+// and folders directly from this store — they do not need to
+// go through SMTP/IMAP/JMAP to render the inbox. Returns
+// nil if the module has not been initialized yet (MailStore
+// is created in initCore, which runs during InitAll).
+func (m *Module) MailStore() *storage.MailStore {
+	return m.store
+}
+
 func (m *Module) Stop() error {
 	if m.cancel != nil {
 		m.cancel()

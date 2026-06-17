@@ -20,6 +20,7 @@ import (
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
 	"github.com/orvix/orvix/internal/updater"
+	"github.com/orvix/orvix/internal/coremail/storage"
 	"github.com/orvix/orvix/internal/webmailmgmt"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/argon2"
@@ -39,6 +40,14 @@ type Handler struct {
 	rateLimiter *auth.RedisRateLimiter
 	auditStore  *audit.Store
 	webmailSvc  *webmailmgmt.Service
+
+	// mailStore is the same *storage.MailStore instance
+	// used by the coremail runtime module. The webmail
+	// user-facing endpoints (GET /api/v1/webmail/...)
+	// read folders, messages, RFC822 bodies, and write
+	// new outbound messages through this store directly.
+	// Set via SetMailStore at router construction time.
+	mailStore  *storage.MailStore
 
 	// updateSvc is the process-wide Update Management v1 service.
 	// It is set once at router construction (see

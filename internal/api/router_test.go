@@ -460,6 +460,113 @@ func TestAdminUIStaticRoutes(t *testing.T) {
 	}
 }
 
+// TestWebmailAssetCORSHeadersReflectAdminOrigin is the
+// regression test for the production "webmail frontend is
+// broken" symptom. The webmail index.html ships a
+// `<script type="module" crossorigin>` tag, which means the
+// browser sends every /webmail/assets/* fetch with CORS
+// mode active and requires Access-Control-Allow-Origin to
+// match the page's own origin. If the admin server's
+// allowed_origins does NOT include the admin host that
+// serves the webmail, the browser silently drops the
+// module, the React app never mounts, and the user sees
+// an empty page (the bug). This test configures the admin
+// host as a "production-like" value and asserts that the
+// CORS response header echoes it back. A change to
+// install.sh's write_config that drops the admin host
+// from allowed_origins will fail this test.
+func TestWebmailAssetCORSHeadersReflectAdminOrigin(t *testing.T) {
+	logger := zap.NewNop()
+	cfg := config.Defaults()
+	cfg.Server.AdminUIDir = filepath.Join("..", "..", "release", "admin")
+	cfg.Server.WebmailUIDir = filepath.Join("..", "..", "release", "webmail")
+	cfg.Server.AllowedOrigins = []string{
+		"https://admin.example.com",
+		"http://admin.example.com",
+		"https://mail.example.com",
+	}
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(t.TempDir(), "orvix.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	defer sqlDB.Close()
+	if err := models.MigrateAllRaw(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	authenticator, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	router := NewRouter(cfg, authenticator, logger, db, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
+	defer router.App().Shutdown()
+
+	// The browser always sends an Origin header for module
+	// script fetches, even on first load. The admin server
+	// must respond with Access-Control-Allow-Origin matching
+	// the page's own origin. Without it, the module is blocked.
+	req := httptest.NewRequest("GET", "/webmail/assets/index-CmhA8wNq.js", nil)
+	req.Header.Set("Origin", "https://admin.example.com")
+	resp, err := router.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("asset: %v", err)
+	}
+	acao := resp.Header.Get("Access-Control-Allow-Origin")
+	if acao != "https://admin.example.com" {
+		t.Fatalf("Access-Control-Allow-Origin: want %q, got %q (this is the webmail-CORS regression)", "https://admin.example.com", acao)
+	}
+}
+
+// TestWebmailAssetCORSRejectsForeignOrigin guards against
+// the inverse regression: the admin server must NOT echo
+// back a CORS allow-origin for a host that was never
+// configured. A wildcard or accidental "*" header would
+// break the credentialed cookie contract and allow
+// cross-origin admin API access from any site.
+func TestWebmailAssetCORSRejectsForeignOrigin(t *testing.T) {
+	logger := zap.NewNop()
+	cfg := config.Defaults()
+	cfg.Server.AdminUIDir = filepath.Join("..", "..", "release", "admin")
+	cfg.Server.WebmailUIDir = filepath.Join("..", "..", "release", "webmail")
+	cfg.Server.AllowedOrigins = []string{"https://admin.example.com"}
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(t.TempDir(), "orvix.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	defer sqlDB.Close()
+	if err := models.MigrateAllRaw(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	authenticator, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	router := NewRouter(cfg, authenticator, logger, db, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
+	defer router.App().Shutdown()
+
+	req := httptest.NewRequest("GET", "/webmail/assets/index-CmhA8wNq.js", nil)
+	req.Header.Set("Origin", "https://evil.example.com")
+	resp, err := router.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("asset: %v", err)
+	}
+	acao := resp.Header.Get("Access-Control-Allow-Origin")
+	if acao == "*" || acao == "https://evil.example.com" {
+		t.Fatalf("Access-Control-Allow-Origin leaked foreign origin: %q", acao)
+	}
+}
+
 func createAdminQueueFixture(t *testing.T, sqlDB *sql.DB, now string) {
 	t.Helper()
 	_, err := sqlDB.Exec(`CREATE TABLE IF NOT EXISTS coremail_queue (
