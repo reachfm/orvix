@@ -83,15 +83,33 @@ $ADMIN_DOMAIN {
 $WEBMAIL_DOMAIN {
 	# API requests hit the Go binary directly (no path
 	# rewrite) so the same /api/v1/* code paths serve
-	# both admin.<domain> and webmail.<domain>. Everything
-	# else is rewritten to the existing /webmail/* SPA route
-	# on the Go binary. The auth-gate's /api/v1/me probe,
-	# the JS bundles, and the static assets all resolve
-	# against the same backend.
+	# both admin.<domain> and webmail.<domain>.
 	@api path /api/*
 	handle @api {
 		reverse_proxy 127.0.0.1:8080
 	}
+	# Webmail SPA assets and routes pass through without
+	# rewrite. The Go backend serves /webmail/assets/* as
+	# static files with correct MIME types and /webmail/*
+	# as the SPA fallback (index.html for unknown paths).
+	# Without this separate handler, the catch-all below
+	# would double-prefix every /webmail/* path with an
+	# additional /webmail (rewrite * /webmail{uri}) and the
+	# backend would serve text/html for every JS/CSS asset.
+	@webmail path /webmail /webmail/*
+	handle @webmail {
+		reverse_proxy 127.0.0.1:8080
+	}
+	# Shorthand /assets/* paths — rewrite to /webmail/assets/*
+	# so the Go backend can serve them from the same directory.
+	@assets path /assets /assets/*
+	handle @assets {
+		rewrite * /webmail{uri}
+		reverse_proxy 127.0.0.1:8080
+	}
+	# Catch-all: everything else (/, /any/path) is rewritten
+	# to /webmail{uri} and served by the Go backend, which
+	# returns index.html for the SPA root or unknown routes.
 	handle {
 		rewrite * /webmail{uri}
 		reverse_proxy 127.0.0.1:8080
@@ -162,6 +180,33 @@ check_https() {
 	fail "HTTPS smoke test failed for $url; check DNS, inbound 80/443, and Caddy ACME logs above"
 }
 
+# check_content_type verifies that a URL returns the expected
+# Content-Type. This catches reverse-proxy rewrite bugs where
+# static JS/CSS assets are served as text/html (SPA fallback)
+# instead of their actual MIME type.
+check_content_type() {
+	local url="$1"
+	local expected="$2"
+	local actual
+	actual="$(curl -sSIL --connect-timeout 5 --max-time 10 "$url" 2>/dev/null | grep -i '^Content-Type:' | head -n1 | tr -d '\r' | sed 's/^[Cc]ontent-[Tt]ype:[[:space:]]*//' || true)"
+	if [ -z "$actual" ]; then
+		echo -e "${RED}FAIL${NC} $url: no Content-Type header received"
+		fail "Content-Type check failed for $url"
+	fi
+	case "$actual" in
+		$expected*)
+			echo -e "${GREEN}PASS${NC} $url: Content-Type $actual"
+			;;
+		*)
+			echo -e "${RED}FAIL${NC} $url: expected Content-Type \"$expected\", got \"$actual\""
+			echo "This is the production symptom of a reverse-proxy rewrite bug: the SPA fallback returned" >&2
+			echo "index.html (text/html) for a static asset path. The Caddy webmail vhost route must" >&2
+			echo "proxy /webmail/* paths without a /webmail prefix rewrite." >&2
+			fail "Content-Type mismatch for $url: got \"$actual\", expected \"$expected\""
+			;;
+	esac
+}
+
 main() {
 	require_root
 	require_input
@@ -183,9 +228,15 @@ main() {
 
 	check_https "https://$ADMIN_DOMAIN/admin" HEAD
 	check_https "https://$ADMIN_DOMAIN/api/v1/health" GET
+	check_https "https://$WEBMAIL_DOMAIN/webmail/assets/webmail.js" HEAD
+	check_https "https://$WEBMAIL_DOMAIN/webmail/assets/webmail.css" HEAD
 	check_https "https://$WEBMAIL_DOMAIN/" HEAD
 	check_https "https://$WEBMAIL_DOMAIN/api/v1/health" GET
 	check_https "https://$MAIL_DOMAIN/.well-known/jmap" GET
+
+	check_content_type "https://$WEBMAIL_DOMAIN/webmail/assets/webmail.js" "text/javascript"
+	check_content_type "https://$WEBMAIL_DOMAIN/webmail/assets/webmail.css" "text/css"
+	check_content_type "https://$WEBMAIL_DOMAIN/" "text/html"
 
 	cat <<DONE
 
