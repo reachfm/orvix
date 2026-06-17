@@ -184,8 +184,16 @@ func (h *Handler) Login(c fiber.Ctx) error {
 		Expires:  time.Now().Add(15 * time.Minute),
 		HTTPOnly: true,
 		Secure:   true,
-		SameSite: "Strict",
+		// None + Domain=cfg.Auth.CookieDomain lets the
+		// browser send this cookie to admin.<parent> AND
+		// webmail.<parent> (single sign-on across
+		// subdomains). The installer writes a non-empty
+		// CookieDomain for production; in dev / docker the
+		// field is empty and the cookie is scoped to the
+		// response Host.
+		SameSite: "None",
 		Path:     "/",
+		Domain:   h.cfg.Auth.CookieDomain,
 	})
 
 	c.Cookie(&fiber.Cookie{
@@ -194,8 +202,9 @@ func (h *Handler) Login(c fiber.Ctx) error {
 		Expires:  expiresAt,
 		HTTPOnly: true,
 		Secure:   true,
-		SameSite: "Strict",
+		SameSite: "None",
 		Path:     "/api/v1/auth/refresh",
+		Domain:   h.cfg.Auth.CookieDomain,
 	})
 
 	h.logger.Info("user logged in", zap.Uint("user_id", userID))
@@ -225,8 +234,9 @@ func (h *Handler) Refresh(c fiber.Ctx) error {
 		Expires:  time.Now().Add(15 * time.Minute),
 		HTTPOnly: true,
 		Secure:   true,
-		SameSite: "Strict",
+		SameSite: "None",
 		Path:     "/",
+		Domain:   h.cfg.Auth.CookieDomain,
 	})
 
 	c.Cookie(&fiber.Cookie{
@@ -235,11 +245,42 @@ func (h *Handler) Refresh(c fiber.Ctx) error {
 		Expires:  expiresAt,
 		HTTPOnly: true,
 		Secure:   true,
-		SameSite: "Strict",
+		SameSite: "None",
 		Path:     "/api/v1/auth/refresh",
+		Domain:   h.cfg.Auth.CookieDomain,
 	})
 
 	return c.JSON(fiber.Map{"status": "ok"})
+}
+
+// clearAuthCookies sends Set-Cookie headers that expire
+// the access_token and refresh_token cookies on the same
+// Domain the server wrote them with. fiber's ClearCookie
+// helper does not include the Domain attribute, so we
+// write the empty cookies explicitly to invalidate a
+// Domain=.parent.com cookie issued at login.
+func (h *Handler) clearAuthCookies(c fiber.Ctx) {
+	expiry := time.Now().Add(-1 * time.Hour)
+	c.Cookie(&fiber.Cookie{
+		Name:     "access_token",
+		Value:    "",
+		Expires:  expiry,
+		HTTPOnly: true,
+		Secure:   true,
+		SameSite: "None",
+		Path:     "/",
+		Domain:   h.cfg.Auth.CookieDomain,
+	})
+	c.Cookie(&fiber.Cookie{
+		Name:     "refresh_token",
+		Value:    "",
+		Expires:  expiry,
+		HTTPOnly: true,
+		Secure:   true,
+		SameSite: "None",
+		Path:     "/api/v1/auth/refresh",
+		Domain:   h.cfg.Auth.CookieDomain,
+	})
 }
 
 // Logout clears auth cookies.
@@ -248,8 +289,7 @@ func (h *Handler) Logout(c fiber.Ctx) error {
 	if ok {
 		_ = h.auth.InvalidateAllSessions(userID)
 	}
-	c.ClearCookie("access_token")
-	c.ClearCookie("refresh_token")
+	h.clearAuthCookies(c)
 	h.writeAuditLog(c, "auth.logout", "")
 	return c.JSON(fiber.Map{"status": "logged out"})
 }
@@ -261,8 +301,7 @@ func (h *Handler) LogoutAll(c fiber.Ctx) error {
 		h.logger.Error("failed to invalidate all sessions", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "logout failed"})
 	}
-	c.ClearCookie("access_token")
-	c.ClearCookie("refresh_token")
+	h.clearAuthCookies(c)
 	h.writeAuditLog(c, "auth.logout_all", "")
 	return c.JSON(fiber.Map{"status": "all sessions invalidated"})
 }

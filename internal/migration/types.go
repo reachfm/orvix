@@ -6,7 +6,6 @@ type ImportSourceType string
 
 const (
 	ImportMailcow  ImportSourceType = "mailcow"
-	ImportStalwart ImportSourceType = "stalwart"
 	ImportModoboa  ImportSourceType = "modoboa"
 	ImportExchange ImportSourceType = "exchange"
 	ImportIMAP     ImportSourceType = "imap"

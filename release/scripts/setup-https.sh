@@ -3,12 +3,14 @@ set -euo pipefail
 
 # Orvix RC1 HTTPS reverse proxy setup for Ubuntu VPS hosts.
 # This configures Caddy for:
-#   admin.<domain> -> 127.0.0.1:8080
-#   mail.<domain>  -> 127.0.0.1:8081
+#   admin.<domain>   -> 127.0.0.1:8080
+#   webmail.<domain> -> 127.0.0.1:8080   (path-rewritten to /webmail/*)
+#   mail.<domain>    -> 127.0.0.1:8081
 
 PRIMARY_DOMAIN="${1:-${ORVIX_PRIMARY_DOMAIN:-}}"
 SERVER_IP="${2:-${ORVIX_SERVER_IP:-}}"
 ADMIN_DOMAIN="${ORVIX_ADMIN_DOMAIN:-}"
+WEBMAIL_DOMAIN="${ORVIX_WEBMAIL_DOMAIN:-}"
 MAIL_DOMAIN="${ORVIX_MAIL_DOMAIN:-}"
 INSTALL_LOG="${INSTALL_LOG:-/var/log/orvix/https-setup.log}"
 
@@ -50,6 +52,7 @@ require_input() {
 	fi
 	[[ "$PRIMARY_DOMAIN" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z]{2,}$ ]] || fail "invalid primary domain: $PRIMARY_DOMAIN"
 	ADMIN_DOMAIN="${ADMIN_DOMAIN:-admin.$PRIMARY_DOMAIN}"
+	WEBMAIL_DOMAIN="${WEBMAIL_DOMAIN:-webmail.$PRIMARY_DOMAIN}"
 	MAIL_DOMAIN="${MAIL_DOMAIN:-mail.$PRIMARY_DOMAIN}"
 	if [ -z "$SERVER_IP" ]; then
 		SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
@@ -75,6 +78,24 @@ write_caddyfile() {
 	cat > /etc/caddy/Caddyfile <<CADDY
 $ADMIN_DOMAIN {
 	reverse_proxy 127.0.0.1:8080
+}
+
+$WEBMAIL_DOMAIN {
+	# API requests hit the Go binary directly (no path
+	# rewrite) so the same /api/v1/* code paths serve
+	# both admin.<domain> and webmail.<domain>. Everything
+	# else is rewritten to the existing /webmail/* SPA route
+	# on the Go binary. The auth-gate's /api/v1/me probe,
+	# the JS bundles, and the static assets all resolve
+	# against the same backend.
+	@api path /api/*
+	handle @api {
+		reverse_proxy 127.0.0.1:8080
+	}
+	handle {
+		rewrite * /webmail{uri}
+		reverse_proxy 127.0.0.1:8080
+	}
 }
 
 $MAIL_DOMAIN {
@@ -155,21 +176,24 @@ main() {
 	systemctl is-active --quiet caddy || fail "caddy service is not active"
 
 	check_dns "$ADMIN_DOMAIN"
+	check_dns "$WEBMAIL_DOMAIN"
 	check_dns "$MAIL_DOMAIN"
 	check_local_port 80
 	check_local_port 443
 
 	check_https "https://$ADMIN_DOMAIN/admin" HEAD
 	check_https "https://$ADMIN_DOMAIN/api/v1/health" GET
+	check_https "https://$WEBMAIL_DOMAIN/" HEAD
+	check_https "https://$WEBMAIL_DOMAIN/api/v1/health" GET
 	check_https "https://$MAIL_DOMAIN/.well-known/jmap" GET
 
 	cat <<DONE
 
 ${GREEN}PASS${NC} Orvix HTTPS reverse proxy verified.
 
-Admin UI: https://$ADMIN_DOMAIN/admin
-Admin API health: https://$ADMIN_DOMAIN/api/v1/health
-JMAP discovery: https://$MAIL_DOMAIN/.well-known/jmap
+Admin UI:    https://$ADMIN_DOMAIN/admin
+Webmail UI:  https://$WEBMAIL_DOMAIN/
+JMAP:        https://$MAIL_DOMAIN/.well-known/jmap
 
 Recommended after HTTPS passes:
 - restrict external access to TCP 8080 and 8081

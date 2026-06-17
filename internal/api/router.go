@@ -45,6 +45,19 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		IdleTimeout:  cfg.Server.IdleTimeout,
 		BodyLimit:    cfg.Server.BodyLimit,
 		AppName:      "Orvix",
+		// Trust the Caddy reverse proxy in front of us for
+		// X-Forwarded-* headers. The TrustedProxies list is
+		// populated by the installer with 127.0.0.1 / ::1
+		// (the loopback address Caddy listens on). Without
+		// this, c.IP() returns the loopback address for every
+		// request and the rate limiter, audit log, and login
+		// rate-limit gate see the wrong value.
+		ProxyHeader: fiber.HeaderXForwardedFor,
+		TrustProxy:  true,
+		TrustProxyConfig: fiber.TrustProxyConfig{
+			Proxies:  cfg.Server.TrustedProxies,
+			Loopback: true,
+		},
 	})
 
 	apikeyMgr := auth.NewAPIKeyManager(db, logger)
@@ -56,13 +69,21 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 	router := &Router{
 		app:          app,
 		auth:         authenticator,
-		csrf:         auth.NewCSRFManager(db, logger, false),
+		csrf:         auth.NewCSRFManager(db, logger, cfg.Server.TLSAuto),
 		apikeys:      apikeyMgr,
 		redisLimiter: rateLimiter,
 		logger:       logger,
 		cfg:          cfg,
 		h:            handlers.NewHandler(db, authenticator, apikeyMgr, logger, cfg, registry, ff, rateLimiter),
 	}
+
+	// Propagate the cookie Domain to the CSRF manager. The
+	// installer writes cfg.Auth.CookieDomain (".parent.com")
+	// for production so the csrf_token cookie is sent to
+	// admin.<parent> and webmail.<parent> alike. In dev /
+	// docker the field is empty and the browser scopes the
+	// cookie to the response Host.
+	router.csrf.SetCookieDomain(cfg.Auth.CookieDomain)
 
 	// Wire webmail management service.
 	if sqlDB, err := db.DB(); err == nil {

@@ -11,10 +11,27 @@ server:
   write_timeout: 60s
   idle_timeout: 120s
   body_limit: 52428800
+  # Hostnames the operator points their DNS A records at.
+  # The installer writes these as admin.<primary_domain>,
+  # webmail.<primary_domain>, and mail.<primary_domain>.
+  # Leave empty in dev / docker so the router falls back to
+  # the request Host header.
+  admin_host: ""
+  webmail_host: ""
+  mail_host: ""
+  # CORS allowlist. The installer replaces this list with
+  # the operator's admin + webmail + mail hostnames. Localhost
+  # entries are kept for dev-mode testing.
   allowed_origins:
     - "http://localhost:3000"
     - "http://localhost:3001"
-  trusted_proxies: []
+  # Reverse-proxy trust list. The installer writes 127.0.0.1
+  # and ::1 here so Caddy's X-Forwarded-* headers are
+  # honoured and the rate limiter / IP-allowlist see the
+  # client IP instead of the loopback.
+  trusted_proxies:
+    - "127.0.0.1"
+    - "::1"
 
 database:
   driver: sqlite
@@ -57,6 +74,11 @@ auth:
   argon2_threads: 4
   login_rate_limit: 5
   rate_window: 15m
+  # Domain attribute set on every auth cookie. The installer
+  # writes ".parent_domain" so the access_token cookie is
+  # sent to both admin.<parent> and webmail.<parent> (single
+  # sign-on across subdomains). Leave empty in dev / docker.
+  cookie_domain: ""
 
 logging:
   level: info

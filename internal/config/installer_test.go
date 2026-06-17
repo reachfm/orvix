@@ -3,12 +3,15 @@ package config
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/spf13/viper"
 )
 
 func repoRoot(t *testing.T) string {
@@ -100,7 +103,7 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"journalctl -u orvix.service -n 80 --no-pager",
 		"Product: Orvix Enterprise Mail / CoreMail",
 		"Admin URL:   https://admin.${domain}/admin",
-		"Webmail URL: https://admin.${domain}/webmail",
+		"Webmail URL: https://webmail.${domain}/",
 		"JMAP URL:    https://mail.${domain}/.well-known/jmap",
 		// The TEMPORARY block is what the operator sees BEFORE
 		// setup-https.sh runs. It must be clearly labelled and
@@ -124,15 +127,19 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"write_admin_login_file",
 		"validate_webmail_ui",
 		"chmod 0600",
-		// CORS: the webmail SPA at admin.${domain} ships a
-		// `<script type="module" crossorigin>` tag, so the
-		// admin server must allow the admin host. Without
-		// this, the React bundle is blocked and the webmail
-		// page is blank — the "webmail frontend is broken"
-		// production symptom.
+		// CORS: the webmail SPA ships from
+		// webmail.${domain} (NOT admin.${domain}/webmail —
+		// that path-based mount is removed in this release).
+		// The admin server must allow both admin.${domain}
+		// and webmail.${domain} so cross-subdomain API
+		// calls (with credentials:include) succeed.
 		"https://$admin_host",
 		"http://$admin_host",
+		"https://$webmail_host",
+		"http://$webmail_host",
 		"local admin_host=\"admin.$domain\"",
+		"local webmail_host=\"webmail.$domain\"",
+		"local cookie_domain=\".$domain\"",
 		"Admin password (8-72 bytes, hidden):",
 		"admin password must be at least 8 characters",
 		"admin password is too long for bcrypt",
@@ -206,22 +213,28 @@ func TestHTTPSSetupScriptCaddyFlow(t *testing.T) {
 	}
 	script := string(scriptBytes)
 	for _, item := range []string{
-		"admin.<domain> -> 127.0.0.1:8080",
-		"mail.<domain>  -> 127.0.0.1:8081",
+		"admin.<domain>   -> 127.0.0.1:8080",
+		"webmail.<domain> -> 127.0.0.1:8080   (path-rewritten to /webmail/*)",
+		"mail.<domain>    -> 127.0.0.1:8081",
 		"ADMIN_DOMAIN=\"${ADMIN_DOMAIN:-admin.$PRIMARY_DOMAIN}\"",
+		"WEBMAIL_DOMAIN=\"${WEBMAIL_DOMAIN:-webmail.$PRIMARY_DOMAIN}\"",
 		"MAIL_DOMAIN=\"${MAIL_DOMAIN:-mail.$PRIMARY_DOMAIN}\"",
 		"reverse_proxy 127.0.0.1:8080",
 		"reverse_proxy 127.0.0.1:8081",
+		"@api path /api/*",
+		"rewrite * /webmail{uri}",
 		"ufw allow 80/tcp",
 		"ufw allow 443/tcp",
 		"caddy validate --config /etc/caddy/Caddyfile",
 		"systemctl is-active --quiet caddy",
 		"check_dns \"$ADMIN_DOMAIN\"",
+		"check_dns \"$WEBMAIL_DOMAIN\"",
 		"check_dns \"$MAIL_DOMAIN\"",
 		"check_local_port 80",
 		"check_local_port 443",
 		"check_https \"https://$ADMIN_DOMAIN/admin\" HEAD",
 		"check_https \"https://$ADMIN_DOMAIN/api/v1/health\" GET",
+		"check_https \"https://$WEBMAIL_DOMAIN/\" HEAD",
 		"check_https \"https://$MAIL_DOMAIN/.well-known/jmap\" GET",
 		"curl -fsS --connect-timeout 5 --max-time 10 \"$url\"",
 		"restrict external access to TCP 8080 and 8081",
@@ -831,4 +844,137 @@ func TestRuntimeUpdateDeploysWebmailAssets(t *testing.T) {
 			t.Errorf("runtime update must contain %q", needle)
 		}
 	}
+}
+
+// TestInstallerWriteConfigRendersValidYAML pins the contract
+// that release/install.sh::write_config produces a YAML file
+// that the running orvix process can parse via viper and that
+// exposes the documented top-level sections (server, database,
+// auth, logging, update, backup). This is the regression test
+// for the bug where write_config emitted the `server:` block
+// at column 2 instead of column 0: the heredoc body was
+// accidentally indented alongside its bash function body,
+// which produced YAML whose `server:` key was not a clean
+// sibling of database/auth/logging/update/backup at column 0.
+//
+// The harness sources install.sh with main() replaced by a
+// call to write_config against a temp file, with chown/chmod
+// stubbed so the test runs on any host (no root required).
+// We then parse the rendered file with viper (the same loader
+// the orvix binary uses on startup) and assert both the
+// top-level keys and the server.* fields that come from the
+// installer substitutions.
+func TestInstallerWriteConfigRendersValidYAML(t *testing.T) {
+	root := repoRoot(t)
+	installerBytes, err := os.ReadFile(filepath.Join(root, "release", "install.sh"))
+	if err != nil {
+		t.Fatalf("read installer: %v", err)
+	}
+	installer := string(installerBytes)
+	if !strings.Contains(installer, `main "$@"`) {
+		t.Fatal("installer entrypoint marker not found")
+	}
+
+	const domain = "example.com"
+	// Point write_config at a temp file, then print the file
+	// contents on stdout so the Go side can read it. We
+	// override chown/chmod so this runs on any host (no root,
+	// no Linux-only stat bits).
+	harness := strings.Replace(installer,
+		`main "$@"`,
+		fmt.Sprintf(`chown() { :; }; chmod() { :; }; ORVIX_CONFIG="$1"; write_config "%s"; cat "$ORVIX_CONFIG"`, domain),
+		1,
+	)
+	harnessDir := t.TempDir()
+	harnessPath := filepath.Join(harnessDir, "render-config.sh")
+	configPath := filepath.Join(harnessDir, "orvix.yaml")
+	if err := os.WriteFile(harnessPath, []byte(harness), 0o755); err != nil {
+		t.Fatalf("write harness: %v", err)
+	}
+
+	cmd := exec.Command(bashCommand(t), "render-config.sh", configPath)
+	cmd.Dir = harnessDir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("render installer config: %v: %s", err, string(out))
+	}
+	rendered := string(out)
+	if strings.TrimSpace(rendered) == "" {
+		t.Fatal("write_config produced an empty config file")
+	}
+
+	v := viper.New()
+	v.SetConfigType("yaml")
+	if err := v.ReadConfig(strings.NewReader(rendered)); err != nil {
+		t.Fatalf("installer config is not valid YAML; viper parse failed (this is the write_config heredoc bug): %v\n--- rendered YAML ---\n%s", err, rendered)
+	}
+
+	settings := v.AllSettings()
+
+	// 1. Top-level keys must be present. This is the
+	//    primary contract the installer promises: every
+	//    block the runtime reads from Defaults() must be
+	//    reachable through the file the installer writes.
+	required := []string{"server", "database", "auth", "logging", "update", "backup"}
+	for _, key := range required {
+		if _, ok := settings[key]; !ok {
+			t.Errorf("installer config missing top-level key %q; rendered YAML was:\n%s", key, rendered)
+		}
+	}
+
+	// 2. The server block must parse as a nested mapping
+	//    with the operator-facing hostnames substituted.
+	//    If write_config emitted `server:` at column 2
+	//    instead of column 0, viper would either fold the
+	//    key into a parent mapping (so settings["server"]
+	//    would be a string or nil) or refuse to parse it
+	//    at all. Either way this assertion fails.
+	serverRaw, ok := settings["server"]
+	if !ok {
+		t.Fatalf("server block missing or not a top-level mapping: %s", rendered)
+	}
+	serverMap, ok := serverRaw.(map[string]any)
+	if !ok {
+		t.Fatalf("server block must parse as a nested mapping, got %T: %s", serverRaw, rendered)
+	}
+	for _, field := range []string{"host", "port", "admin_port", "admin_host", "webmail_host", "mail_host"} {
+		if _, ok := serverMap[field]; !ok {
+			t.Errorf("server.%s missing in rendered config: %s", field, rendered)
+		}
+	}
+
+	// 3. The heredoc must interpolate the derived hostnames
+	//    so the runtime gets admin.example.com /
+	//    webmail.example.com / mail.example.com instead of
+	//    empty strings.
+	expectations := map[string]string{
+		"server.admin_host":   "admin." + domain,
+		"server.webmail_host": "webmail." + domain,
+		"server.mail_host":    "mail." + domain,
+		"auth.cookie_domain":  "." + domain,
+	}
+	for dotted, want := range expectations {
+		got := readNestedString(settings, dotted)
+		if got != want {
+			t.Errorf("%s: got %q want %q (installer heredoc did not interpolate domain correctly): %s", dotted, got, want, rendered)
+		}
+	}
+}
+
+// readNestedString walks a dotted key path (e.g.
+// "server.admin_host") through a nested map[string]any and
+// returns the leaf as a string. Returns "" if any segment is
+// missing or the leaf is not a string.
+func readNestedString(settings map[string]any, dotted string) string {
+	parts := strings.Split(dotted, ".")
+	var cur any = settings
+	for _, p := range parts {
+		m, ok := cur.(map[string]any)
+		if !ok {
+			return ""
+		}
+		cur = m[p]
+	}
+	s, _ := cur.(string)
+	return s
 }

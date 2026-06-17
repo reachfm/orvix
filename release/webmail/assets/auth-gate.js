@@ -1,10 +1,12 @@
 // Orvix Webmail — auth gate.
 //
-// Loaded BEFORE the React bundle by release/webmail/index.html.
+// Loaded BEFORE webmail.js by release/webmail/index.html.
 // Probes /api/v1/me with credentials:include so the existing
-// admin session cookie is sent. The React bundle still loads
-// (deferred module script), but #root is hidden until the auth
-// check passes.
+// admin session cookie is sent. The webmail client is
+// deferred; this gate runs first to make sure no API call
+// (and no UI render) happens until the session check
+// resolves. On 401 the gate shows a "Please sign in" card
+// and never calls window.OrvixWebmail.init().
 //
 // Outcomes:
 //   - HTTP 200: remove the gate, show #root (React app renders
