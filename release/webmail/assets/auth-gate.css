@@ -1,15 +1,20 @@
 /* Auth gate styles for the Orvix Webmail SPA.
  *
- * Loaded BEFORE the React bundle by release/webmail/index.html.
- * The corresponding JS (auth-gate.js) probes /api/v1/me with
- * credentials:include. If the session is valid, the React mount
- * (#root) is shown. If not, the gate shows a "Please sign in"
- * card with a link to /admin.
+ * Loaded BEFORE webmail.js by release/webmail/index.html.
+ * The corresponding JS (auth-gate.js) probes
+ * /api/v1/webmail/session with credentials:include. If
+ * the session is valid and the caller has a mailbox, the
+ * gate reveals the SPA. If not, the gate shows either a
+ * webmail login form (email + password) or a "no
+ * mailbox" / "webmail unavailable" card. The login form
+ * is the primary entry point for end users; this file
+ * styles both the card layout and the form.
  *
- * This file is loaded via a <link rel="stylesheet"> tag, so
- * it is allowed under the project CSP (style-src 'self').
- * Inline <style> blocks would require 'unsafe-inline' which
- * the project CSP explicitly forbids.
+ * This file is loaded via a <link rel="stylesheet"> tag,
+ * so it is allowed under the project CSP
+ * (style-src 'self'). Inline <style> blocks would require
+ * 'unsafe-inline' which the project CSP explicitly
+ * forbids.
  */
 
 #orvix-auth-gate {
@@ -98,9 +103,98 @@
   outline-offset: 2px;
 }
 
+.orvix-gate-button[disabled] {
+  background: #2A2F3A;
+  color: #6F7585;
+  cursor: not-allowed;
+}
+
+/* The webmail login form layout. The form lives inside
+ * .orvix-gate-card but the card text-align is center —
+ * the form re-aligns to the start so labels and inputs
+ * are left-anchored. */
+.orvix-gate-form {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  text-align: left;
+  margin: 0;
+}
+
+.orvix-gate-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: #9AA0AC;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 12px 0 6px;
+}
+
+.orvix-gate-input {
+  width: 100%;
+  padding: 10px 12px;
+  background: #0C0E12;
+  color: #E8EAF0;
+  border: 1px solid #2A2F3A;
+  border-radius: 6px;
+  font-size: 14px;
+  font-family: inherit;
+  box-sizing: border-box;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.orvix-gate-input:focus {
+  border-color: #4F7CFF;
+  box-shadow: 0 0 0 3px rgba(79, 124, 255, 0.2);
+}
+
+.orvix-gate-input:focus-visible {
+  outline: 2px solid #93B5FF;
+  outline-offset: 2px;
+}
+
+.orvix-gate-form .orvix-gate-button {
+  width: 100%;
+  margin-top: 20px;
+  padding: 12px 20px;
+}
+
+.orvix-gate-error#orvix-gate-error {
+  margin: 12px 0 0;
+  padding: 8px 12px;
+  background: rgba(229, 115, 115, 0.1);
+  border: 1px solid rgba(229, 115, 115, 0.3);
+  border-radius: 6px;
+  text-align: left;
+}
+
+.orvix-gate-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  margin-top: 16px;
+}
+
+.orvix-gate-actions .orvix-gate-button {
+  background: transparent;
+  border: 1px solid #2A2F3A;
+  color: #E8EAF0;
+}
+
+.orvix-gate-actions .orvix-gate-button:hover,
+.orvix-gate-actions .orvix-gate-button:focus {
+  background: #1A1E26;
+  border-color: #4F7CFF;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .orvix-gate-spinner {
     animation: none;
     border-top-color: #4F7CFF;
+  }
+  .orvix-gate-button,
+  .orvix-gate-input {
+    transition: none;
   }
 }

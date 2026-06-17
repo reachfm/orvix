@@ -193,6 +193,21 @@ func (r *Router) setupRoutes() {
 	loginGroup.Post("/refresh", r.h.Refresh)
 	r.app.Post("/admin/login", r.h.Login)
 
+	// Webmail authentication (public — no auth middleware).
+	//
+	// /api/v1/webmail/login is the form submission. The
+	// session probe (/api/v1/webmail/session) is on the
+	// protected group below so the auth middleware
+	// rejects missing/invalid cookies with 401 before
+	// the handler runs — the gate uses that 401 as the
+	// "show the login form" signal.
+	webmailLoginGroup := api.Group("/webmail")
+	if r.redisLimiter != nil {
+		webmailLoginGroup.Post("/login", r.redisLimiter.LoginMiddleware(), r.h.WebmailLogin)
+	} else {
+		webmailLoginGroup.Post("/login", limiter.New(limiter.Config{Max: 5, Expiration: 15 * 60 * 1000}), r.h.WebmailLogin)
+	}
+
 	protected := api.Group("", r.apikeys.Middleware(), r.auth.Middleware())
 	protected.Get("/me", r.h.Me)
 
@@ -204,6 +219,13 @@ func (r *Router) setupRoutes() {
 	// read from the live MailStore — there is no
 	// fallback to /api/v1/queue or any admin-side
 	// data path.
+	//
+	// /webmail/session is also on the protected group:
+	// the auth gate uses the 401 from the auth
+	// middleware as the "show the login form" signal,
+	// and a 200 with authenticated:true as the "reveal
+	// the SPA" signal.
+	protected.Get("/webmail/session", r.h.WebmailSession)
 	protected.Get("/webmail/me", r.h.WebmailMe)
 	protected.Get("/webmail/folders", r.h.WebmailFolders)
 	protected.Get("/webmail/messages", r.h.WebmailMessages)
@@ -235,6 +257,12 @@ func (r *Router) setupRoutes() {
 	authCSRF.Post("/auth/logout", r.h.Logout)
 	authCSRF.Post("/auth/logout-all", r.h.LogoutAll)
 	authCSRF.Post("/auth/change-password", r.h.ChangePassword)
+	// Webmail logout. Mounted inside authCSRF so a CSRF
+	// token is required to clear the cookies — the
+	// session is the same one the admin panel uses, so
+	// this endpoint also kills the admin session if the
+	// caller is the same browser.
+	authCSRF.Post("/webmail/logout", r.h.WebmailLogout)
 
 	admin := protected.Group("", auth.RequireAnyRole(auth.RoleAdmin, auth.RoleSuperAdmin))
 	admin.Get("/domains", r.h.ListDomains)

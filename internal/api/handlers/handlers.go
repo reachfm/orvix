@@ -16,6 +16,7 @@ import (
 	"github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/config"
+	"github.com/orvix/orvix/internal/coremail"
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
@@ -1050,6 +1051,32 @@ func (h *Handler) CreateMailbox(c fiber.Ctx) error {
 	}
 
 	mailboxID, _ := result.LastInsertId()
+
+	// Provision the canonical system folders
+	// (INBOX, Sent, Drafts, Trash, Junk, Archive) for
+	// the freshly created mailbox. Without this, the
+	// first time the user opens Webmail and tries to
+	// send, the Send handler returns
+	//   "Sent folder not found for mailbox;
+	//    ensure system folders are provisioned"
+	// and the inbox/folder list renders empty.
+	//
+	// The provision is best-effort: if it fails the
+	// mailbox row is still created and the operator
+	// can re-run the provision by calling
+	// coremail.EnsureMailboxSystemFolders directly
+	// (e.g. via a one-off migration). The webmail
+	// login handler also re-runs the provision so
+	// legacy mailboxes that were created before this
+	// fix get patched up the first time their owner
+	// logs in via webmail.
+	if err := coremail.EnsureMailboxSystemFolders(c.Context(), sqlDB, uint(mailboxID)); err != nil {
+		h.logger.Warn("CreateMailbox: ensure system folders",
+			zap.String("email", req.Email),
+			zap.Int64("mailbox_id", mailboxID),
+			zap.Error(err))
+	}
+
 	h.writeAuditLog(c, "mailbox.create", fmt.Sprintf("mailbox:%s", req.Email))
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{

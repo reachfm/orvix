@@ -5,10 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#0e1116" />
   <title>Orvix Webmail</title>
-  <!-- Auth gate runs first; it verifies the session via /api/v1/me,
-       sets the auth-ready flag, and only then calls
-       window.OrvixWebmail.init(). The two scripts are loaded with
-       `defer` so they execute in document order. -->
+  <!-- Auth gate runs first; it probes
+       /api/v1/webmail/session to decide between the login
+       form (no session), the "no mailbox" card (session
+       but no mailbox row), or the SPA itself
+       (session + mailbox). The two scripts are loaded
+       with `defer` so they execute in document order. -->
   <link rel="stylesheet" href="/assets/auth-gate.css" />
   <link rel="stylesheet" href="/assets/webmail.css" />
 </head>

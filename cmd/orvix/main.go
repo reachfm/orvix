@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
@@ -397,13 +398,36 @@ func insertBootstrapAdmin(db *sql.DB, adminEmail, hashedPassword, tenantDomain, 
 	if err != nil {
 		logger.Warn("failed to hash admin password with argon2id, skipping mailbox creation", zap.Error(err))
 	} else {
-		_, err = tx.Exec(
+		mailboxRes, err := tx.Exec(
 			`INSERT INTO coremail_mailboxes (domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme, status, quota_mb, is_admin, created_at, updated_at)
 			 VALUES (?, ?, ?, ?, 'Admin', ?, 'argon2id', 'active', 1024, 1, ?, ?)`,
 			domainID, tenantID, localPart, adminEmail, argon2Hash, now, now,
 		)
 		if err != nil {
 			return err
+		}
+		mailboxID, err := mailboxRes.LastInsertId()
+		if err != nil {
+			return err
+		}
+
+		// Provision the canonical system folders
+		// (INBOX, Sent, Drafts, Trash, Junk,
+		// Archive) for the freshly created admin
+		// mailbox. Without this, the first time the
+		// admin opens Webmail and tries to send,
+		// the Send handler returns
+		//   "Sent folder not found for mailbox;
+		//    ensure system folders are provisioned"
+		// — which is the exact bug we are fixing
+		// here. The provision runs inside the
+		// bootstrap transaction so a partial install
+		// never leaves a mailbox with no folders.
+		if err := provisionSystemFoldersTx(context.Background(), tx, uint(mailboxID), now); err != nil {
+			logger.Warn("failed to provision system folders for admin mailbox",
+				zap.String("email", adminEmail),
+				zap.Int64("mailbox_id", mailboxID),
+				zap.Error(err))
 		}
 	}
 
@@ -426,4 +450,69 @@ func hashPasswordArgon2id(password string) (string, error) {
 	b64Hash := base64.RawStdEncoding.EncodeToString(hash)
 	return fmt.Sprintf("$argon2id$v=19$m=%d,t=%d,p=%d$%s$%s",
 		argon2Mem, argon2Time, argon2Threads, b64Salt, b64Hash), nil
+}
+
+// provisionSystemFoldersTx inserts the canonical system
+// folders (INBOX, Sent, Drafts, Trash, Junk, Archive)
+// for the given mailbox, using the supplied *sql.Tx.
+//
+// The function is a thin wrapper around
+// coremail.EnsureMailboxSystemFolders that knows how to
+// run inside the bootstrap transaction. The installer's
+// admin bootstrap is the only place we have a live
+// *sql.Tx at the right moment; everywhere else (the
+// admin CreateMailbox handler, the webmail login
+// handler) uses the standalone coremail helper against
+// the live *sql.DB.
+//
+// Like the standalone helper, this is idempotent: if a
+// folder at the canonical path already exists, it is
+// left as-is.
+func provisionSystemFoldersTx(ctx context.Context, tx *sql.Tx, mailboxID uint, now time.Time) error {
+	// Inline copy of the canonical list, kept in
+	// sync with internal/coremail/system_folders.go
+	// and internal/coremail/storage/schema.go's
+	// DefaultSystemFolders. We intentionally do NOT
+	// import those from cmd/orvix/main.go: this
+	// file is the install-time bootstrap, and
+	// pulling storage or coremail helpers into the
+	// installer binary would change its dependency
+	// surface for no gain.
+	folders := []struct {
+		path string
+		typ  string
+	}{
+		{"INBOX", "inbox"},
+		{"Sent", "sent"},
+		{"Drafts", "drafts"},
+		{"Trash", "trash"},
+		{"Junk", "junk"},
+		{"Archive", "archive"},
+	}
+	for _, f := range folders {
+		var existingID uint
+		err := tx.QueryRowContext(ctx,
+			"SELECT id FROM coremail_folders WHERE mailbox_id = ? AND path = ?",
+			mailboxID, f.path,
+		).Scan(&existingID)
+		switch err {
+		case nil:
+			continue
+		case sql.ErrNoRows:
+			// fall through to INSERT
+		default:
+			return fmt.Errorf("check system folder %s: %w", f.path, err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO coremail_folders
+				(mailbox_id, parent_id, name, path, folder_type,
+				 message_count, unread_count, total_size,
+				 created_at, updated_at)
+			VALUES (?, NULL, ?, ?, ?, 0, 0, 0, ?, ?)`,
+			mailboxID, f.path, f.path, f.typ, now, now,
+		); err != nil {
+			return fmt.Errorf("create system folder %s: %w", f.path, err)
+		}
+	}
+	return nil
 }
