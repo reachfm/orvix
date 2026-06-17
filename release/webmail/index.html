@@ -9,8 +9,8 @@
        sets the auth-ready flag, and only then calls
        window.OrvixWebmail.init(). The two scripts are loaded with
        `defer` so they execute in document order. -->
-  <link rel="stylesheet" href="/webmail/assets/auth-gate.css" />
-  <link rel="stylesheet" href="/webmail/assets/webmail.css" />
+  <link rel="stylesheet" href="/assets/auth-gate.css" />
+  <link rel="stylesheet" href="/assets/webmail.css" />
 </head>
 <body>
   <!-- The shell is rendered by webmail.js so the markup stays in
@@ -26,7 +26,7 @@
   <!-- The auth-gate overlays its UI on top of <body> if the
        session check fails. webmail.js replaces the shell itself
        (innerHTML on body) once init() runs. -->
-  <script defer src="/webmail/assets/auth-gate.js"></script>
-  <script defer src="/webmail/assets/webmail.js"></script>
+  <script defer src="/assets/auth-gate.js"></script>
+  <script defer src="/assets/webmail.js"></script>
 </body>
 </html>

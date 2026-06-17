@@ -403,6 +403,24 @@ func (r *Router) setupAdminUI() {
 	if webmailDir == "" {
 		webmailDir = "/usr/share/orvix/webmail"
 	}
+	// Serve webmail assets at /assets/* so the SPA, when
+	// accessed from admin.<domain>/webmail, can request
+	// /assets/webmail.js instead of /webmail/assets/... The
+	// dedicated webmail.<domain> vhost rewrites /assets/*
+	// to /webmail/assets/* at the Caddy layer; this route
+	// ensures the Go backend also responds for direct
+	// requests (admin hostname, localhost, dev mode).
+	r.app.Get("/assets/*", func(c fiber.Ctx) error {
+		requestPath := strings.TrimPrefix(c.Params("*"), "/")
+		if requestPath == "" || strings.Contains(requestPath, "..") {
+			return c.SendStatus(fiber.StatusBadRequest)
+		}
+		target := filepath.Join(webmailDir, "assets", requestPath)
+		if info, err := os.Stat(target); err == nil && !info.IsDir() {
+			return c.SendFile(target)
+		}
+		return c.SendStatus(fiber.StatusNotFound)
+	})
 	r.serveSPA("/webmail", webmailDir)
 }
 

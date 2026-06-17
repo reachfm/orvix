@@ -94,18 +94,18 @@ func TestWebmailIndexHtmlReferencesGateBeforeBundle(t *testing.T) {
 	root := webmailRepoRoot(t)
 	html := readFile(t, root, "release/webmail/index.html")
 
-	cssIdx := strings.Index(html, "/webmail/assets/auth-gate.css")
-	jsIdx := strings.Index(html, "/webmail/assets/auth-gate.js")
-	clientIdx := strings.Index(html, "/webmail/assets/webmail.js")
+	cssIdx := strings.Index(html, "/assets/auth-gate.css")
+	jsIdx := strings.Index(html, "/assets/auth-gate.js")
+	clientIdx := strings.Index(html, "/assets/webmail.js")
 
 	if cssIdx < 0 {
-		t.Fatal("index.html must reference /webmail/assets/auth-gate.css")
+		t.Fatal("index.html must reference /assets/auth-gate.css")
 	}
 	if jsIdx < 0 {
-		t.Fatal("index.html must reference /webmail/assets/auth-gate.js")
+		t.Fatal("index.html must reference /assets/auth-gate.js")
 	}
 	if clientIdx < 0 {
-		t.Fatal("index.html must reference /webmail/assets/webmail.js")
+		t.Fatal("index.html must reference /assets/webmail.js")
 	}
 	if !(cssIdx < clientIdx) {
 		t.Errorf("auth-gate.css reference must appear before webmail.js; cssIdx=%d clientIdx=%d", cssIdx, clientIdx)
@@ -124,7 +124,7 @@ func TestWebmailIndexHtmlReferencesGateBeforeBundle(t *testing.T) {
 	// The current webmail.js must use defer (matches auth-gate.js
 	// which is already defer); otherwise the gate would run AFTER
 	// webmail.js auto-init (a regression we are explicitly avoiding).
-	if !strings.Contains(html, `defer src="/webmail/assets/webmail.js"`) {
+	if !strings.Contains(html, `defer src="/assets/webmail.js"`) {
 		t.Error("index.html must load webmail.js with defer so auth-gate.js can run first")
 	}
 	// No inline scripts — the asset CSP forbids 'unsafe-inline'.
@@ -327,16 +327,16 @@ func TestWebmailGateFilesAreServedByRouter(t *testing.T) {
 	if status != 200 {
 		t.Fatalf("GET /webmail: expected 200, got %d", status)
 	}
-	if !strings.Contains(body, "/webmail/assets/auth-gate.js") {
+	if !strings.Contains(body, "/assets/auth-gate.js") {
 		t.Fatalf("/webmail HTML missing auth-gate.js reference: %s", body)
 	}
-	if !strings.Contains(body, "/webmail/assets/auth-gate.css") {
+	if !strings.Contains(body, "/assets/auth-gate.css") {
 		t.Fatalf("/webmail HTML missing auth-gate.css reference: %s", body)
 	}
 	// webmail.js must be loaded (defers) so the gate can hand off
 	// to it on 200. The shell itself is rendered by webmail.js, so
 	// there is no <div id="root"> anymore.
-	if !strings.Contains(body, `/webmail/assets/webmail.js`) {
+	if !strings.Contains(body, `/assets/webmail.js`) {
 		t.Fatalf("/webmail HTML missing webmail.js reference: %s", body)
 	}
 
@@ -346,7 +346,7 @@ func TestWebmailGateFilesAreServedByRouter(t *testing.T) {
 	if status != 200 {
 		t.Fatalf("GET /webmail/inbox: expected 200, got %d", status)
 	}
-	if !strings.Contains(body, "/webmail/assets/auth-gate.js") {
+	if !strings.Contains(body, "/assets/auth-gate.js") {
 		t.Fatalf("/webmail/inbox HTML missing auth-gate.js reference")
 	}
 
@@ -355,7 +355,7 @@ func TestWebmailGateFilesAreServedByRouter(t *testing.T) {
 	if status != 200 {
 		t.Fatalf("GET /webmail/compose: expected 200, got %d", status)
 	}
-	if !strings.Contains(body, "/webmail/assets/auth-gate.js") {
+	if !strings.Contains(body, "/assets/auth-gate.js") {
 		t.Fatalf("/webmail/compose HTML missing auth-gate.js reference")
 	}
 
@@ -419,6 +419,36 @@ func TestWebmailGateFilesAreServedByRouter(t *testing.T) {
 	// was in the original demo bundle.
 	if status == 200 && !strings.Contains(body, "auth-gate.js") {
 		t.Fatalf("GET /webmail/assets/index-CmhA8wNq.js: expected index.html fallback, got %q", body[:min(200, len(body))])
+	}
+
+	// /assets/auth-gate.js — the new short asset path that
+	// the webmail SPA references in index.html. Must return
+	// the same JS content as /webmail/assets/auth-gate.js.
+	status, body = get(t, "/assets/auth-gate.js")
+	if status != 200 {
+		t.Fatalf("GET /assets/auth-gate.js: expected 200, got %d", status)
+	}
+	if !strings.Contains(body, "Orvix Webmail") || !strings.Contains(body, "/api/v1/me") {
+		t.Fatalf("/assets/auth-gate.js content unexpected: %s", body)
+	}
+
+	// /assets/webmail.js — the real webmail client at the
+	// short path. Must NOT return the SPA fallback.
+	status, body = get(t, "/assets/webmail.js")
+	if status != 200 {
+		t.Fatalf("GET /assets/webmail.js: expected 200, got %d", status)
+	}
+	if strings.Contains(body, "<!doctype html") {
+		t.Fatalf("/assets/webmail.js returned the SPA fallback (index.html); body[:200]=%q", body[:min(200, len(body))])
+	}
+
+	// /assets/webmail.css — webmail styles at the short path.
+	status, body = get(t, "/assets/webmail.css")
+	if status != 200 {
+		t.Fatalf("GET /assets/webmail.css: expected 200, got %d", status)
+	}
+	if !strings.Contains(body, "--sidebar-w") {
+		t.Fatalf("/assets/webmail.css content unexpected: missing 3-pane layout markers")
 	}
 }
 

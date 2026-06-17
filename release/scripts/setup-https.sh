@@ -230,12 +230,16 @@ main() {
 	check_https "https://$ADMIN_DOMAIN/api/v1/health" GET
 	check_https "https://$WEBMAIL_DOMAIN/webmail/assets/webmail.js" HEAD
 	check_https "https://$WEBMAIL_DOMAIN/webmail/assets/webmail.css" HEAD
+	check_https "https://$WEBMAIL_DOMAIN/assets/webmail.js" HEAD
+	check_https "https://$WEBMAIL_DOMAIN/assets/webmail.css" HEAD
 	check_https "https://$WEBMAIL_DOMAIN/" HEAD
 	check_https "https://$WEBMAIL_DOMAIN/api/v1/health" GET
 	check_https "https://$MAIL_DOMAIN/.well-known/jmap" GET
 
 	check_content_type "https://$WEBMAIL_DOMAIN/webmail/assets/webmail.js" "text/javascript"
 	check_content_type "https://$WEBMAIL_DOMAIN/webmail/assets/webmail.css" "text/css"
+	check_content_type "https://$WEBMAIL_DOMAIN/assets/webmail.js" "text/javascript"
+	check_content_type "https://$WEBMAIL_DOMAIN/assets/webmail.css" "text/css"
 	check_content_type "https://$WEBMAIL_DOMAIN/" "text/html"
 
 	cat <<DONE

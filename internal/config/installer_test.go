@@ -259,6 +259,25 @@ func TestHTTPSSetupScriptCaddyFlow(t *testing.T) {
 	}
 }
 
+func TestWebmailIndexHTMLUsesAssetShortPaths(t *testing.T) {
+	root := repoRoot(t)
+	pageBytes, err := os.ReadFile(filepath.Join(root, "release", "webmail", "index.html"))
+	if err != nil {
+		t.Fatalf("read webmail index: %v", err)
+	}
+	page := string(pageBytes)
+	for _, asset := range []string{"auth-gate.css", "webmail.css", "auth-gate.js", "webmail.js"} {
+		oldPath := "/webmail/assets/" + asset
+		if strings.Contains(page, oldPath) {
+			t.Errorf("index.html must use /assets/%s not %s for dedicated webmail hostname", asset, oldPath)
+		}
+		newPath := "/assets/" + asset
+		if !strings.Contains(page, newPath) {
+			t.Errorf("index.html missing /assets/%s", asset)
+		}
+	}
+}
+
 func TestReleaseReferencedFilesExist(t *testing.T) {
 	root := repoRoot(t)
 	for _, path := range []string{
@@ -570,7 +589,7 @@ func TestReleaseWebmailBuildExists(t *testing.T) {
 	page := string(pageBytes)
 	for _, item := range []string{
 		"Orvix Webmail",
-		"/webmail/assets/",
+		"/assets/",
 	} {
 		if !strings.Contains(page, item) {
 			t.Fatalf("webmail build missing %q", item)
