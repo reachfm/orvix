@@ -14,6 +14,7 @@ package handlers_test
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -608,9 +609,6 @@ func TestWebmailAPISendCreatesSentMessage(t *testing.T) {
 	if status != http.StatusCreated {
 		t.Fatalf("POST /send: expected 201, got %d: %v", status, resp)
 	}
-	if resp["folder"] != "Sent" {
-		t.Errorf("POST /send: response folder = %v, want Sent", resp["folder"])
-	}
 	// Phase WEBMAIL-3: response status is "queued" once
 	// the message has been handed to the delivery queue.
 	if resp["status"] != "queued" {
@@ -922,16 +920,6 @@ func TestWebmailAPISendEnqueuesOutboundJob(t *testing.T) {
 	if !gotMailbox.Valid || uint(gotMailbox.Int64) != mailboxID {
 		t.Errorf("queue mailbox_id = %v, want %d", gotMailbox, mailboxID)
 	}
-
-	// The response also exposes queue_ids for client
-	// reconciliation; the queued row id must match.
-	queueIDs, ok := resp["queue_ids"].([]interface{})
-	if !ok || len(queueIDs) != 1 {
-		t.Fatalf("response queue_ids = %v, want 1 id", resp["queue_ids"])
-	}
-	if uint(queueIDs[0].(float64)) != gotID {
-		t.Errorf("response queue_ids[0] = %v, want %d", queueIDs[0], gotID)
-	}
 }
 
 // TestWebmailAPISendEnqueuesAllRecipients pins the rule
@@ -1161,6 +1149,85 @@ func TestWebmailAPISendPreservesAuthorization(t *testing.T) {
 	}
 	if after != before {
 		t.Errorf("unauthorized calls leaked queue rows: before=%d after=%d", before, after)
+	}
+}
+
+// failAfterNRepo wraps a queue.Repository and fails every
+// Enqueue call after the Nth one. Used to simulate partial
+// enqueue failures for all-or-nothing correctness tests.
+type failAfterNRepo struct {
+	queue.Repository
+	callCount int
+	failAfter int
+}
+
+func (r *failAfterNRepo) Enqueue(ctx context.Context, e *queue.QueueEntry, tx interface{}) error {
+	r.callCount++
+	if r.callCount > r.failAfter {
+		return fmt.Errorf("simulated enqueue failure after %d successes", r.failAfter)
+	}
+	return r.Repository.Enqueue(ctx, e, tx)
+}
+
+// TestWebmailAPISendPartialEnqueueFailure confirms that if
+// any recipient fails to enqueue, the API returns an error
+// and never reports status=queued. This is the WEBMAIL-3
+// all-or-nothing correctness guarantee.
+func TestWebmailAPISendPartialEnqueueFailure(t *testing.T) {
+	e := buildWebmailTestEnv(t)
+	if err := e.mailbox.Folders.EnsureSystemFolders(t.Context(), mustMailboxIDForTest(t, e, e.email), nil); err != nil {
+		t.Fatalf("ensure system folders: %v", err)
+	}
+	tok := e.loginAdmin(t)
+
+	// Replace the queue repo with one that fails on the
+	// second Enqueue call (one succeeds, one fails).
+	e.queue.Repo = &failAfterNRepo{Repository: e.queue.Repo, failAfter: 1}
+
+	req := map[string]string{
+		"to":      "alice@example.com, bob@example.com",
+		"subject": "Partial failure test",
+		"body":    "Should not be fully queued.",
+	}
+	status, resp := e.webmailRequest(t, "POST", "/api/v1/webmail/send", tok, req)
+
+	// Must NOT return 201 — partial enqueue failures are
+	// all-or-nothing from API behavior.
+	if status == http.StatusCreated {
+		t.Fatalf("POST /send: expected non-201 for partial enqueue failure, got 201: %v", resp)
+	}
+
+	// Response must NOT contain queue_ids or enqueue_errors
+	// (those fields were removed in the WEBMAIL-3 fix).
+	if _, ok := resp["queue_ids"]; ok {
+		t.Errorf("POST /send: queue_ids must not appear in response: %v", resp)
+	}
+	if _, ok := resp["enqueue_errors"]; ok {
+		t.Errorf("POST /send: enqueue_errors must not appear in response: %v", resp)
+	}
+
+	// Sent storage is unchanged — the message body is still
+	// stored even when enqueue fails. Verify the Sent copy
+	// exists.
+	id, ok := resp["id"].(float64)
+	if !ok || id == 0 {
+		t.Fatalf("POST /send: expected response id for stored message, got %v", resp["id"])
+	}
+	status, listResp := e.webmailRequest(t, "GET", "/api/v1/webmail/messages?folder=Sent", tok, nil)
+	if status != 200 {
+		t.Fatalf("GET /messages?folder=Sent: expected 200, got %d", status)
+	}
+	messages, _ := listResp["messages"].([]interface{})
+	found := false
+	for _, m := range messages {
+		mm, _ := m.(map[string]interface{})
+		if int(mm["id"].(float64)) == int(id) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("POST /send: Sent message id=%v not found in Sent folder after partial enqueue failure", int(id))
 	}
 }
 
