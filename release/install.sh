@@ -883,12 +883,13 @@ validate_webmail_ui() {
     if ! printf '%s' "$idx_html" | grep -q 'webmail\.js'; then
         fail "webmail UI index.html does not reference webmail.js"
     fi
-    # Verify load order: the gate script reference must
-    # appear before the webmail client reference so the
-    # gate can hide #root before the client mounts.
-    local gate_pos client_pos
-    gate_pos="$(printf '%s' "$idx_html" | grep -bo 'auth-gate\.js' | head -n1 | cut -d: -f1)"
-    client_pos="$(printf '%s' "$idx_html" | grep -bo 'webmail\.js' | head -n1 | cut -d: -f1)"
+    # Verify load order using actual script tags. Raw text
+    # occurrences in comments or explanatory copy must not count
+    # as client references.
+    local script_refs gate_pos client_pos
+    script_refs="$(printf '%s\n' "$idx_html" | sed '/<!--/,/-->/d' | grep -nE '<script[^>]+src=["'\''][^"'\'']*(auth-gate|webmail)\.js[^"'\'']*["'\'']' || true)"
+    gate_pos="$(printf '%s\n' "$script_refs" | grep 'auth-gate\.js' | head -n1 | cut -d: -f1)"
+    client_pos="$(printf '%s\n' "$script_refs" | grep 'webmail\.js' | head -n1 | cut -d: -f1)"
     if [ -z "$gate_pos" ] || [ -z "$client_pos" ] || [ "$gate_pos" -gt "$client_pos" ]; then
         fail "webmail UI gate script must be referenced before the webmail client"
     fi

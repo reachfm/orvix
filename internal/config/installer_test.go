@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -611,6 +612,46 @@ func TestInstallerValidatesWebmailAuthGate(t *testing.T) {
 		if !strings.Contains(installer, needle) {
 			t.Errorf("installer must contain %q (webmail validation)", needle)
 		}
+	}
+}
+
+func TestInstallerWebmailGateValidationUsesScriptTags(t *testing.T) {
+	root := repoRoot(t)
+	installerBytes, err := os.ReadFile(filepath.Join(root, "release", "install.sh"))
+	if err != nil {
+		t.Fatalf("read installer: %v", err)
+	}
+	installer := string(installerBytes)
+	for _, needle := range []string{
+		"sed '/<!--/,/-->/d'",
+		`<script[^>]+src=`,
+	} {
+		if !strings.Contains(installer, needle) {
+			t.Fatalf("installer webmail order validation must use script tags and ignore comments; missing %q", needle)
+		}
+	}
+
+	pageBytes, err := os.ReadFile(filepath.Join(root, "release", "webmail", "index.html"))
+	if err != nil {
+		t.Fatalf("read webmail page: %v", err)
+	}
+	page := string(pageBytes)
+	rawClient := strings.Index(page, "webmail.js")
+	rawGate := strings.Index(page, "auth-gate.js")
+	if rawClient == -1 || rawGate == -1 {
+		t.Fatalf("webmail page must reference both webmail.js and auth-gate.js")
+	}
+	if rawClient > rawGate {
+		t.Fatalf("test fixture no longer reproduces raw-text ordering trap: raw webmail.js=%d raw auth-gate.js=%d", rawClient, rawGate)
+	}
+
+	scriptPattern := regexp.MustCompile(`(?is)<script[^>]+src=["'][^"']*/(auth-gate|webmail)\.js[^"']*["']`)
+	matches := scriptPattern.FindAllStringSubmatch(page, -1)
+	if len(matches) < 2 {
+		t.Fatalf("webmail page must contain auth-gate.js and webmail.js script tags, got %v", matches)
+	}
+	if matches[0][1] != "auth-gate" || matches[1][1] != "webmail" {
+		t.Fatalf("webmail script tag order must be auth-gate before webmail client, got %q then %q", matches[0][1], matches[1][1])
 	}
 }
 
