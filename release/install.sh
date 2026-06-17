@@ -1275,25 +1275,35 @@ verify_install_password_login() {
     # fails" symptom needed and did not have.
     #
     # The cycle is:
-    #   1. First login â€” must return 200.
-    #   2. Logout via the CSRF-protected /api/v1/auth/logout
-    #      route, using the cookies and CSRF token from step 1.
-    #   3. Second login with the same credentials â€” must
+    #   1. First login — must return 200.
+    #   2. Drop the cookie jar so the second login is genuinely
+    #      a fresh request, not a session replay.
+    #   3. Second login with the same credentials — must
     #      return 200.
     # If any step fails, /etc/orvix/bootstrap.env is left in
     # place so the operator can diagnose (the file is removed
     # only after BOTH logins succeed).
+    #
+    # The CSRF-protected logout is deliberately NOT part of this
+    # verification. During a fresh VPS install the server runs on
+    # 127.0.0.1:8080 but the auth cookies carry a Domain attribute
+    # (".<primary_domain>") set by write_config. Curl will not
+    # send Domain-scoped cookies to a loopback IP, so the CSRF
+    # handshake always fails on localhost. The dual-login sequence
+    # (login + drop cookies + login) already proves the full
+    # password chain works without cross-subdomain cookie round-
+    # trips that require a real DNS-resolvable hostname.
     local email="$1"
     local password="$2"
     local base="http://127.0.0.1:8080"
-    local cookie_jar response_file login_payload
-    cookie_jar="$(mktemp)"
+    local response_file login_payload
     response_file="$(mktemp)"
     login_payload="$(build_login_payload "$email" "$password")"
 
-    local first_code
+    local first_code first_jar
+    first_jar="$(mktemp)"
     first_code="$(curl -sS -o "$response_file" -w "%{http_code}" \
-        -c "$cookie_jar" \
+        -c "$first_jar" \
         -H 'Content-Type: application/json' \
         -d "$login_payload" \
         "$base/api/v1/auth/login" 2>/dev/null || true)"
@@ -1304,45 +1314,15 @@ verify_install_password_login() {
         cat "$response_file" >&2 || true
         printf '\n' >&2
         echo "bootstrap.env preserved for diagnosis: $BOOTSTRAP_ENV" >&2
-        rm -f "$cookie_jar" "$response_file"
+        rm -f "$first_jar" "$response_file"
         return 1
     fi
 
-    # CSRF dance for logout: fetch the csrf_token JSON, read
-    # the csrf_token cookie the response set, and post the
-    # logout with both. We use the cookie jar curl maintains
-    # so the access_token cookie is replayed automatically.
-    local csrf_response csrf_token
-    csrf_response="$(curl -sS -c "$cookie_jar" -b "$cookie_jar" \
-        "$base/api/v1/csrf-token" 2>/dev/null || true)"
-    csrf_token="$(printf '%s' "$csrf_response" | sed -n 's/.*"csrf_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-    if [ -z "$csrf_token" ]; then
-        printf 'CSRF handshake FAILED: /api/v1/csrf-token returned no token\n' >&2
-        rm -f "$cookie_jar" "$response_file"
-        return 1
-    fi
-
-    local logout_code
-    logout_code="$(curl -sS -o "$response_file" -w "%{http_code}" \
-        -b "$cookie_jar" \
-        -X POST \
-        -H "X-CSRF-Token: $csrf_token" \
-        "$base/api/v1/auth/logout" 2>/dev/null || true)"
-    log_detail "VERIFY password-chain logout: HTTP $logout_code"
-    # Logout is best-effort: a non-200 still lets us probe
-    # the second login, which is what the production symptom
-    # is about. The CSRF-protected path returns 200 on
-    # success; missing/invalid CSRF returns 403. Either way
-    # we still need to confirm a fresh login works.
-    if [ "$logout_code" != "200" ]; then
-        printf 'Note: logout returned HTTP %s (proceeding to second login probe)\n' "$logout_code" >&2
-    fi
-
-    # Drop the cookie jar so the second login is genuinely a
-    # fresh request, not a replay. Same payload, same server,
-    # different cookie state â€” this is the regression test for
-    # the original "first login works, second fails" symptom.
-    rm -f "$cookie_jar"
+    # Drop the first session's cookies so the second login
+    # exercises a fresh bcrypt verification, not a cached
+    # session. This is the regression test for the original
+    # "first login works, second fails" symptom.
+    rm -f "$first_jar"
 
     local second_code second_jar
     second_jar="$(mktemp)"

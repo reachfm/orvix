@@ -329,9 +329,6 @@ func TestInstallerVerifyInstallCallsDualLoginBeforeDelete(t *testing.T) {
 	if !strings.Contains(block, "/api/v1/auth/login") {
 		t.Fatal("verify_install_password_login must hit /api/v1/auth/login (the bcrypt Fiber route)")
 	}
-	if !strings.Contains(block, "/api/v1/auth/logout") {
-		t.Fatal("verify_install_password_login must perform a logout between the two logins")
-	}
 	loginCalls := strings.Count(block, "$base/api/v1/auth/login")
 	if loginCalls < 2 {
 		t.Fatalf("verify_install_password_login must call /api/v1/auth/login at least twice; found %d", loginCalls)
@@ -339,8 +336,8 @@ func TestInstallerVerifyInstallCallsDualLoginBeforeDelete(t *testing.T) {
 	// The two logins must come from different cookie jars.
 	// If both use the same jar, the second login is not
 	// actually a fresh request and the test is degenerate.
-	if !strings.Contains(block, "rm -f \"$cookie_jar\"") {
-		t.Error("verify_install_password_login must drop the cookie jar before the second login")
+	if !strings.Contains(block, "rm -f \"$first_jar\"") {
+		t.Error("verify_install_password_login must drop the first cookie jar before the second login")
 	}
 	if !strings.Contains(block, "second_jar=\"$(mktemp)\"") {
 		t.Error("verify_install_password_login must use a fresh cookie jar for the second login")

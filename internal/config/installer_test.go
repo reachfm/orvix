@@ -151,7 +151,6 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"verify_install_password_login",
 		"VERIFY password-chain first login",
 		"VERIFY password-chain second login",
-		"VERIFY password-chain logout",
 		"bootstrap env base64 round-trip mismatch",
 		"second_jar",
 	}
