@@ -467,41 +467,41 @@ write_config() {
     local cookie_domain=".$domain"
 
     cat > "$ORVIX_CONFIG" <<YAML
-  server:
-    host: "0.0.0.0"
-    port: 80
-    admin_port: 8080
-    admin_ui_dir: /usr/share/orvix/admin
-    webmail_ui_dir: /usr/share/orvix/webmail
-    read_timeout: 60s
-    write_timeout: 60s
-    idle_timeout: 120s
-    body_limit: 52428800
-    # Hostnames the operator points their DNS A records at.
-    # Used by the router for log line enrichment and by the
-    # login redirect URL builder. The webmail SPA lives at
-    # https://webmail.$domain (NOT https://admin.$domain/webmail);
-    # both hostnames must be in allowed_origins so the
-    # browser sends the access_token cookie to whichever
-    # origin the user is on, and so CORS preflight for the
-    # cross-subdomain fetch succeeds.
-    admin_host: "$admin_host"
-    webmail_host: "$webmail_host"
-    mail_host: "$hostname"
-    allowed_origins:
-      - "https://$admin_host"
-      - "http://$admin_host"
-      - "https://$webmail_host"
-      - "http://$webmail_host"
-      - "https://$hostname"
-      - "http://$hostname"
-    # Caddy sits on 127.0.0.1 / ::1 in front of orvix and
-    # forwards the real client IP in X-Forwarded-For. Without
-    # this list, the rate limiter and login-attempt gate see
-    # the loopback address and never trip.
-    trusted_proxies:
-      - "127.0.0.1"
-      - "::1"
+server:
+  host: "0.0.0.0"
+  port: 80
+  admin_port: 8080
+  admin_ui_dir: /usr/share/orvix/admin
+  webmail_ui_dir: /usr/share/orvix/webmail
+  read_timeout: 60s
+  write_timeout: 60s
+  idle_timeout: 120s
+  body_limit: 52428800
+  # Hostnames the operator points their DNS A records at.
+  # Used by the router for log line enrichment and by the
+  # login redirect URL builder. The webmail SPA lives at
+  # https://webmail.$domain (NOT https://admin.$domain/webmail);
+  # both hostnames must be in allowed_origins so the
+  # browser sends the access_token cookie to whichever
+  # origin the user is on, and so CORS preflight for the
+  # cross-subdomain fetch succeeds.
+  admin_host: "$admin_host"
+  webmail_host: "$webmail_host"
+  mail_host: "$hostname"
+  allowed_origins:
+    - "https://$admin_host"
+    - "http://$admin_host"
+    - "https://$webmail_host"
+    - "http://$webmail_host"
+    - "https://$hostname"
+    - "http://$hostname"
+  # Caddy sits on 127.0.0.1 / ::1 in front of orvix and
+  # forwards the real client IP in X-Forwarded-For. Without
+  # this list, the rate limiter and login-attempt gate see
+  # the loopback address and never trip.
+  trusted_proxies:
+    - "127.0.0.1"
+    - "::1"
 
 database:
   driver: sqlite
