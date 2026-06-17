@@ -122,3 +122,74 @@ func testAdminBootstrapLogin(t *testing.T, email, password string, encoded bool)
 		t.Fatalf("expected me 200, got %d", resp.StatusCode)
 	}
 }
+
+// TestAdminBootstrapRefusesInconsistentHash simulates the
+// production failure mode "first login works, subsequent
+// fail" at the unit level. We seed a valid user, then
+// corrupt the stored password_hash directly in the database
+// to a string that bcrypt will never accept. The runtime's
+// post-insert verify guard must detect the mismatch on
+// re-bootstrap (when the env is still present) and refuse
+// to keep the broken row instead of silently returning.
+func TestAdminBootstrapRefusesInconsistentHash(t *testing.T) {
+	const (
+		email    = "admin@orvix.email"
+		password = "MaghaghaMos086"
+	)
+	t.Setenv("ORVIX_ADMIN_EMAIL", email)
+	t.Setenv("ORVIX_ADMIN_PASSWORD_B64", base64.StdEncoding.EncodeToString([]byte(password)))
+	t.Setenv("ORVIX_ADMIN_PASSWORD", "wrong-plain-fallback")
+
+	logger := zap.NewNop()
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = t.TempDir() + "/orvix.db?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	if err := models.MigrateAllRaw(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	authenticator, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	seedAdminUser(db, authenticator, logger)
+
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	defer sqlDB.Close()
+
+	// Corrupt the stored hash with a well-formed bcrypt prefix
+	// but a payload that no password can match. This is what
+	// would happen if, for example, the database was restored
+	// from an older snapshot whose hash was generated with a
+	// different cost.
+	corruptHash := "$2a$10$abcdefghijklmnopqrstuuozDVAVLAmclE3j/9pjUOH6K8RuEX2Cu"
+	if _, err := sqlDB.Exec("UPDATE users SET password_hash = ? WHERE email = ?", corruptHash, email); err != nil {
+		t.Fatalf("corrupt hash: %v", err)
+	}
+
+	// Re-run seedAdminUser with the same env. The user count
+	// is already 1, so we go down the "user exists" branch.
+	// The new guard must detect that the stored hash does not
+	// verify the env password and refuse to keep the row.
+	seedAdminUser(db, authenticator, logger)
+
+	// The hash must still be the corrupt one — we did NOT
+	// silently overwrite it. If the guard were missing, a
+	// future code change could decide to "helpfully" re-hash
+	// the password and the user would never know.
+	var after string
+	if err := sqlDB.QueryRow("SELECT password_hash FROM users WHERE email = ?", email).Scan(&after); err != nil {
+		t.Fatalf("read hash: %v", err)
+	}
+	if after != corruptHash {
+		t.Fatalf("expected guard to leave corrupt hash untouched, got %q", after)
+	}
+}

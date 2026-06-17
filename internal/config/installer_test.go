@@ -99,9 +99,13 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"/admin/login",
 		"journalctl -u orvix.service -n 80 --no-pager",
 		"Product: Orvix Enterprise Mail / CoreMail",
-		"Admin URL: http://admin.${domain}/admin",
-		"Webmail URL: http://admin.${domain}/webmail",
-		"JMAP URL: http://mail.${domain}/.well-known/jmap",
+		"Admin URL:   https://admin.${domain}/admin",
+		"Webmail URL: https://admin.${domain}/webmail",
+		"JMAP URL:    https://mail.${domain}/.well-known/jmap",
+		"http://admin.${domain}/admin",
+		"http://admin.${domain}/webmail",
+		"http://mail.${domain}/.well-known/jmap",
+		"HTTPS setup command (REQUIRED before users can sign in to webmail)",
 		"Mail Hostname: mail.${domain}",
 		"SMTP: mail.${domain}:25",
 		"IMAP: mail.${domain}:143",
@@ -110,8 +114,28 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"DNS required: A mail.${domain} -> ${server_ip}",
 		"Temporary Admin API: http://${server_ip}:8080/admin",
 		"release/scripts/setup-https.sh ${domain} ${server_ip}",
-		"Admin password (min 8 chars):",
+		// CORS: the webmail SPA at admin.${domain} ships a
+		// `<script type="module" crossorigin>` tag, so the
+		// admin server must allow the admin host. Without
+		// this, the React bundle is blocked and the webmail
+		// page is blank — the "webmail frontend is broken"
+		// production symptom.
+		"https://$admin_host",
+		"http://$admin_host",
+		"local admin_host=\"admin.$domain\"",
+		"Admin password (8-72 bytes, hidden):",
 		"admin password must be at least 8 characters",
+		"admin password is too long for bcrypt",
+		"smoke_login_admin_attempts",
+		"smoke_webmail_assets",
+		"smoke_jmap_session",
+		"multi-login gate",
+		"verify_install_password_login",
+		"VERIFY password-chain first login",
+		"VERIFY password-chain second login",
+		"VERIFY password-chain logout",
+		"bootstrap env base64 round-trip mismatch",
+		"second_jar",
 	}
 	for _, item := range required {
 		if !strings.Contains(installer, item) {
@@ -137,7 +161,7 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 	if strings.Contains(strings.ToLower(installer), "stalwart") {
 		t.Fatal("RC1 clean installer must not reference Stalwart")
 	}
-	verifyIndex := strings.Index(installer, "if [ \"$http_code\" != \"200\" ]; then")
+	verifyIndex := strings.Index(installer, "verify_install_password_login \"$email\" \"$password\"")
 	deleteIndex := strings.Index(installer, "rm -f \"$BOOTSTRAP_ENV\"")
 	if verifyIndex < 0 || deleteIndex < 0 {
 		t.Fatal("installer must check login response and delete bootstrap env after success")
@@ -272,6 +296,55 @@ func TestInstallerBootstrapEnvEncodesPassword(t *testing.T) {
 		if string(decoded) != password {
 			t.Fatalf("decoded password mismatch: got %q want %q", string(decoded), password)
 		}
+	}
+}
+
+// TestInstallerSmokeHelpersParseable sources install.sh into
+// a subshell and asks bash to parse-only the three new
+// smoke functions. If a typo breaks the installer's smoke
+// path, this test catches it before the install runs on a
+// real VPS. It is intentionally a syntax check, not a
+// behavioural test — the behavioural coverage lives in
+// cmd/orvix/freshinstall_test.go.
+func TestInstallerSmokeHelpersParseable(t *testing.T) {
+	root := repoRoot(t)
+	installerBytes, err := os.ReadFile(filepath.Join(root, "release", "install.sh"))
+	if err != nil {
+		t.Fatalf("read installer: %v", err)
+	}
+	installer := string(installerBytes)
+	if !strings.Contains(installer, `main "$@"`) {
+		t.Fatal("installer entrypoint marker not found")
+	}
+	// Replace main with a no-op that only probes for the
+	// new helper definitions. require_root is never called
+	// because main is replaced.
+	harness := strings.Replace(installer, `main "$@"`, `:`, 1) + `
+case "$(declare -F smoke_login_admin_attempts)" in
+  *smoke_login_admin_attempts*) ;;
+  *) echo "smoke_login_admin_attempts missing" >&2; exit 1 ;;
+esac
+case "$(declare -F smoke_webmail_assets)" in
+  *smoke_webmail_assets*) ;;
+  *) echo "smoke_webmail_assets missing" >&2; exit 1 ;;
+esac
+case "$(declare -F smoke_jmap_session)" in
+  *smoke_jmap_session*) ;;
+  *) echo "smoke_jmap_session missing" >&2; exit 1 ;;
+esac
+echo "smoke helpers defined"
+`
+	dir := t.TempDir()
+	script := filepath.Join(dir, "probe.sh")
+	if err := os.WriteFile(script, []byte(harness), 0o755); err != nil {
+		t.Fatalf("write harness: %v", err)
+	}
+	out, err := exec.Command(bashCommand(t), script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("smoke helpers not parseable: %v: %s", err, string(out))
+	}
+	if !strings.Contains(string(out), "smoke helpers defined") {
+		t.Fatalf("unexpected probe output: %s", string(out))
 	}
 }
 
