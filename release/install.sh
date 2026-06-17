@@ -205,9 +205,17 @@ HEADER
 Product: Orvix Enterprise Mail / CoreMail
 Version: ${version}
 
-Admin URL: http://admin.${domain}/admin
-Webmail URL: http://admin.${domain}/webmail
-JMAP URL: http://mail.${domain}/.well-known/jmap
+After running the HTTPS setup command below, the user-facing URLs are:
+
+  Admin URL:   https://admin.${domain}/admin
+  Webmail URL: https://admin.${domain}/webmail
+  JMAP URL:    https://mail.${domain}/.well-known/jmap
+
+Until HTTPS is configured, the same paths are reachable on plain HTTP:
+
+  Admin URL:   http://admin.${domain}/admin
+  Webmail URL: http://admin.${domain}/webmail
+  JMAP URL:    http://mail.${domain}/.well-known/jmap
 
 Mail Hostname: mail.${domain}
 SMTP: mail.${domain}:25
@@ -221,8 +229,8 @@ Temporary Admin API: http://${server_ip}:8080/admin
 Admin email: ${admin_email}
 Detailed log: ${INSTALL_LOG}
 
-HTTPS setup command:
-sudo $ORVIX_SOURCE_DIR/release/scripts/setup-https.sh ${domain} ${server_ip}
+HTTPS setup command (REQUIRED before users can sign in to webmail):
+  sudo $ORVIX_SOURCE_DIR/release/scripts/setup-https.sh ${domain} ${server_ip}
 
 ${GREEN}=========================================================${NC}
 BODY
@@ -296,17 +304,59 @@ prompt_email() {
 }
 
 prompt_password() {
+    # Capture an admin password into stdout with NO other output
+    # on stdout. All prompts, the newline-after-silent-read, and
+    # any error chatter go to stderr so callers can safely use
+    # `password="$(prompt_password)"` and never see prompt text
+    # leak into the captured variable.
+    #
+    # Constraints:
+    #   - >= 8 bytes (matches cfg.password_min_len)
+    #   - <= 72 bytes (bcrypt's hard input limit; anything longer
+    #     makes GenerateFromPassword return ErrPasswordTooLong
+    #     and the bootstrap silently fails to insert a row,
+    #     which would surface as "INSTALLATION VERIFICATION
+    #     PASSED" on first probe but every subsequent login
+    #     failing — see cmd/orvix/password_chain_test.go).
+    #   - leading/trailing whitespace preserved verbatim
+    #     (`IFS=` disables the implicit read-strip behaviour so
+    #     a password typed with a trailing space is captured
+    #     with that trailing space).
+    #
+    # ORVIX_PROMPT_INPUT_FD exists for tests. Production calls
+    # always read from /dev/tty (the controlling terminal).
+    # Tests set ORVIX_PROMPT_INPUT_FD=0 to feed a password
+    # through the script's stdin without needing a real TTY.
+    local input_dev="/dev/tty"
+    if [ -n "${ORVIX_PROMPT_INPUT_FD:-}" ]; then
+        input_dev="/dev/fd/${ORVIX_PROMPT_INPUT_FD}"
+    fi
+
     local password="${ORVIX_ADMIN_PASSWORD:-}"
     local confirm
     while [ -z "$password" ]; do
-        IFS= read -rsp "Admin password (min 8 chars): " password
+        printf 'Admin password (8-72 bytes, hidden): ' >&2
+        IFS= read -r -s password <"$input_dev" 2>/dev/null || password=""
         printf '\n' >&2
-        IFS= read -rsp "Confirm admin password: " confirm
+        printf 'Confirm admin password: ' >&2
+        IFS= read -r -s confirm <"$input_dev" 2>/dev/null || confirm=""
         printf '\n' >&2
-        [ "$password" = "$confirm" ] || { printf 'Passwords do not match\n' >&2; password=""; }
+        if [ "$password" != "$confirm" ]; then
+            printf 'Passwords do not match\n' >&2
+            password=""
+        fi
     done
-    [ "${#password}" -ge 8 ] || fail "admin password must be at least 8 characters"
-    echo "$password"
+    if [ "${#password}" -lt 8 ]; then
+        fail "admin password must be at least 8 characters"
+    fi
+    if [ "${#password}" -gt 72 ]; then
+        fail "admin password is too long for bcrypt (max 72 bytes); got ${#password}"
+    fi
+    # Final stdout payload: the password bytes only, no
+    # trailing newline. The shell's $() capture preserves
+    # trailing whitespace because the captured bytes do not
+    # end in IFS characters that would be stripped.
+    printf '%s' "$password"
 }
 
 version_ge() {
@@ -395,9 +445,14 @@ server:
   write_timeout: 60s
   idle_timeout: 120s
   body_limit: 52428800
-  # The webmail SPA is served from admin.$domain and loads module
-  # assets with CORS mode. The admin origin must be explicitly
-  # allowed or browsers will block /webmail/assets/*.
+  # The webmail SPA lives at admin.$domain but ships a module
+  # script tag with crossorigin. The browser therefore requires
+  # Access-Control-Allow-Origin on every /webmail/assets/* fetch
+  # to match the page's own origin. If admin.$domain is not in
+  # this list, the React bundle never loads and the page renders
+  # empty — the "webmail frontend is broken" production symptom.
+  # Both admin.$domain and mail.$domain must be present so the
+  # admin API and the JMAP server can talk to each other.
   allowed_origins:
     - "https://$admin_host"
     - "http://$admin_host"
@@ -508,10 +563,30 @@ UNIT
 }
 
 write_bootstrap_env() {
+    # Persist the bootstrap credentials so the freshly-installed
+    # systemd unit can read ORVIX_ADMIN_EMAIL and
+    # ORVIX_ADMIN_PASSWORD_B64 on first boot.
+    #
+    # The base64 round-trip is verified in-process: if anything
+    # in the chain (printf, base64, tr) mangles the password
+    # bytes — for example, a future change to `echo` instead of
+    # `printf`, or a different `base64` invocation that adds a
+    # newline we forgot to strip — the decode-back-and-compare
+    # fails immediately with a clear error instead of leaving a
+    # silent mismatch that surfaces as "first login works,
+    # subsequent fail" weeks later.
     local email="$1"
     local password="$2"
-    local encoded_password
+    local encoded_password decoded_roundtrip
     encoded_password="$(printf '%s' "$password" | base64 | tr -d '\n')"
+    decoded_roundtrip="$(printf '%s' "$encoded_password" | base64 -d 2>/dev/null || true)"
+
+    if [ "$decoded_roundtrip" != "$password" ]; then
+        # If this ever fires, the installer's bootstrap chain is
+        # broken and any admin login would fail. The operator
+        # needs to see this immediately, not days later.
+        fail "bootstrap env base64 round-trip mismatch: typed bytes do not match encoded bytes (this is an installer bug)"
+    fi
 
     cat > "$BOOTSTRAP_ENV" <<ENV
 ORVIX_ADMIN_EMAIL=$email
@@ -726,12 +801,117 @@ validate_https_config() {
 
 # ── Smoke tests ────────────────────────────────────────
 
+# smoke_login_admin_attempts probes /api/v1/auth/login and
+# /admin/login with the same credentials. Each call is in a
+# separate connection (no session reuse) so a successful run
+# proves that the admin user row is durable in the database
+# and that bcrypt verify works for fresh, unrelated requests.
+# This is the runtime gate that catches the "first login
+# works, subsequent fail" inconsistency at install time.
+smoke_login_admin_attempts() {
+    local email="$1"
+    local password="$2"
+    local endpoint="/api/v1/auth/login"
+    local failures=0
+    local attempt code
+    log_detail "SMOKE login $endpoint (multi-attempt, 3 calls)"
+    for attempt in 1 2 3; do
+        code="$(curl -sS -o /dev/null -w "%{http_code}" \
+            -H 'Content-Type: application/json' \
+            -d "{\"username\":\"$(json_escape "$email")\",\"password\":\"$(json_escape "$password")\"}" \
+            "http://127.0.0.1:8080$endpoint" 2>/dev/null || true)"
+        if [ "$code" = "200" ]; then
+            log_detail "  PASS login attempt $attempt ($code)"
+        else
+            log_detail "  FAIL login attempt $attempt ($code)"
+            failures=$((failures + 1))
+        fi
+    done
+    # Also probe the legacy /admin/login endpoint that the
+    # install verify_install hits.
+    log_detail "SMOKE login /admin/login (multi-attempt, 2 calls)"
+    for attempt in 1 2; do
+        code="$(curl -sS -o /dev/null -w "%{http_code}" \
+            -H 'Content-Type: application/json' \
+            -d "{\"username\":\"$(json_escape "$email")\",\"password\":\"$(json_escape "$password")\"}" \
+            "http://127.0.0.1:8080/admin/login" 2>/dev/null || true)"
+        if [ "$code" = "200" ]; then
+            log_detail "  PASS admin/login attempt $attempt ($code)"
+        else
+            log_detail "  FAIL admin/login attempt $attempt ($code)"
+            failures=$((failures + 1))
+        fi
+    done
+    if [ "$failures" -gt 0 ]; then
+        fail "$failures admin login attempt(s) failed (multi-login gate)"
+    fi
+}
+
+# smoke_webmail_assets loads the /webmail page and every
+# asset the SPA references. A "HEAD on /webmail" is not
+# enough: a broken asset reference or a 500 on the React
+# render still ships the HTML. The installer must prove that
+# the user-facing bundle is intact end to end.
+smoke_webmail_assets() {
+    local failures=0
+    local body asset_url base="http://127.0.0.1:8080"
+    log_detail "SMOKE webmail $base/webmail (GET)"
+    body="$(curl -fsS "$base/webmail" 2>/dev/null || true)"
+    if [ -z "$body" ]; then
+        log_detail "  FAIL webmail index empty"
+        return 1
+    fi
+    log_detail "  PASS webmail index ($(printf '%s' "$body" | wc -c) bytes)"
+    # Discover every /webmail/assets/* URL the page references
+    # and prove they all return 200. If the page references a
+    # missing asset, the browser shows a blank webmail and
+    # the install is wrong even though HEAD on /webmail passed.
+    for asset_url in $(printf '%s' "$body" | grep -oE '/webmail/assets/[A-Za-z0-9_./-]+' | sort -u); do
+        log_detail "SMOKE webmail asset $asset_url"
+        if curl -fsSI "$base$asset_url" >/dev/null 2>&1; then
+            log_detail "  PASS $asset_url"
+        else
+            log_detail "  FAIL $asset_url"
+            failures=$((failures + 1))
+        fi
+    done
+    if [ "$failures" -gt 0 ]; then
+        fail "$failures webmail asset(s) missing or non-200"
+    fi
+}
+
+# smoke_jmap_session probes the JMAP session endpoint, which
+# is what the webmail SPA actually calls. A successful
+# discovery call (no auth) is not enough: the session probe
+# proves the backend is wired and returns valid JMAP.
+smoke_jmap_session() {
+    local jmap_base="http://127.0.0.1:8081"
+    local url="$jmap_base/.well-known/jmap"
+    local body
+    log_detail "SMOKE jmap session $url"
+    body="$(curl -fsS "$url" 2>/dev/null || true)"
+    if [ -z "$body" ]; then
+        log_detail "  FAIL jmap discovery empty body"
+        fail "jmap discovery endpoint returned empty"
+    fi
+    # A valid JMAP discovery response always includes the
+    # "apiUrl" key. If the server returned a non-JMAP error
+    # (e.g. 200 with HTML from a misconfigured fallback), this
+    # catches it before the user ever logs in.
+    if ! printf '%s' "$body" | grep -q '"apiUrl"'; then
+        log_detail "  FAIL jmap discovery missing apiUrl (got: $(printf '%s' "$body" | head -c 200))"
+        fail "jmap discovery body is not a valid JMAP session document"
+    fi
+    log_detail "  PASS jmap session document"
+}
+
 # smoke_tests runs the post-install health and reachability
-# checks. Tests that require authentication or are
-# config-dependent are excluded; only public, always-on
-# endpoints are fatal. Fails the install if any fatal smoke
-# test fails.
+# checks. Public, always-on endpoints are fatal. Tests that
+# require authentication are run by smoke_login_admin_attempts.
+# Fails the install if any fatal smoke test fails.
 smoke_tests() {
+    local email="$1"
+    local password="$2"
     local failures=0
     local base="http://127.0.0.1:8080"
     local jmap_base="http://127.0.0.1:8081"
@@ -763,9 +943,11 @@ smoke_tests() {
         failures=$((failures + 1))
     fi
 
-    # 4. Webmail (fatal — always on, unauthenticated).
-    log_detail "SMOKE webmail $base/webmail"
-    if curl -fsSI "$base/webmail" >/dev/null 2>&1; then
+    # 4. Webmail (fatal — must serve a real HTML page, not just
+    #    respond to HEAD). The asset fan-out is verified by
+    #    smoke_webmail_assets.
+    log_detail "SMOKE webmail $base/webmail (GET)"
+    if curl -fsS "$base/webmail" >/dev/null 2>&1; then
         log_detail "  PASS webmail"
     else
         log_detail "  FAIL webmail"
@@ -780,15 +962,26 @@ smoke_tests() {
         log_detail "  SKIP metrics (advisory)"
     fi
 
-    # Update preflight and backup API are admin-protected;
-    # they cannot be verified without authentication in the
-    # installer smoke context. Their validation is handled
-    # by validate_systemd (helper unit) and validate_directory
-    # (backup directory) respectively.
-
     if [ "$failures" -gt 0 ]; then
         fail "$failures smoke test(s) failed"
     fi
+
+    # Multi-attempt admin login is a separate gate. It must
+    # run AFTER verify_install (which proves the first login
+    # works) to ensure subsequent logins also work. This is
+    # the runtime guard against the "first login succeeds,
+    # subsequent fail" inconsistency.
+    smoke_login_admin_attempts "$email" "$password"
+
+    # Webmail assets are validated after the page itself
+    # passes — a HEAD on /webmail says nothing about whether
+    # the JS bundle resolves.
+    smoke_webmail_assets
+
+    # JMAP session document must contain apiUrl. A broken
+    # JMAP backend would otherwise surface only at user login.
+    smoke_jmap_session
+
     log_detail "SMOKE all fatal tests passed"
 }
 
@@ -866,10 +1059,110 @@ generate_install_report() {
     echo "${GREEN}Installation report appended to $INSTALL_LOG${NC}"
 }
 
+verify_install_password_login() {
+    # End-to-end password-chain proof. Hits the SAME bcrypt
+    # Fiber route the production admin SPA uses (/api/v1/auth/login,
+    # backed by the users table credentials column), not the
+    # legacy /admin/login argon2id route. This is the test the
+    # "INSTALLATION VERIFICATION PASSED but every later login
+    # fails" symptom needed and did not have.
+    #
+    # The cycle is:
+    #   1. First login — must return 200.
+    #   2. Logout via the CSRF-protected /api/v1/auth/logout
+    #      route, using the cookies and CSRF token from step 1.
+    #   3. Second login with the same credentials — must
+    #      return 200.
+    # If any step fails, /etc/orvix/bootstrap.env is left in
+    # place so the operator can diagnose (the file is removed
+    # only after BOTH logins succeed).
+    local email="$1"
+    local password="$2"
+    local base="http://127.0.0.1:8080"
+    local cookie_jar response_file login_payload
+    cookie_jar="$(mktemp)"
+    response_file="$(mktemp)"
+    login_payload="$(build_login_payload "$email" "$password")"
+
+    local first_code
+    first_code="$(curl -sS -o "$response_file" -w "%{http_code}" \
+        -c "$cookie_jar" \
+        -H 'Content-Type: application/json' \
+        -d "$login_payload" \
+        "$base/api/v1/auth/login" 2>/dev/null || true)"
+    log_detail "VERIFY password-chain first login: HTTP $first_code"
+    if [ "$first_code" != "200" ]; then
+        printf 'Admin login verification FAILED on first login (HTTP %s)\n' "${first_code:-curl_failed}" >&2
+        printf 'Response body:\n' >&2
+        cat "$response_file" >&2 || true
+        printf '\n' >&2
+        echo "bootstrap.env preserved for diagnosis: $BOOTSTRAP_ENV" >&2
+        rm -f "$cookie_jar" "$response_file"
+        return 1
+    fi
+
+    # CSRF dance for logout: fetch the csrf_token JSON, read
+    # the csrf_token cookie the response set, and post the
+    # logout with both. We use the cookie jar curl maintains
+    # so the access_token cookie is replayed automatically.
+    local csrf_response csrf_token
+    csrf_response="$(curl -sS -c "$cookie_jar" -b "$cookie_jar" \
+        "$base/api/v1/csrf-token" 2>/dev/null || true)"
+    csrf_token="$(printf '%s' "$csrf_response" | sed -n 's/.*"csrf_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+    if [ -z "$csrf_token" ]; then
+        printf 'CSRF handshake FAILED: /api/v1/csrf-token returned no token\n' >&2
+        rm -f "$cookie_jar" "$response_file"
+        return 1
+    fi
+
+    local logout_code
+    logout_code="$(curl -sS -o "$response_file" -w "%{http_code}" \
+        -b "$cookie_jar" \
+        -X POST \
+        -H "X-CSRF-Token: $csrf_token" \
+        "$base/api/v1/auth/logout" 2>/dev/null || true)"
+    log_detail "VERIFY password-chain logout: HTTP $logout_code"
+    # Logout is best-effort: a non-200 still lets us probe
+    # the second login, which is what the production symptom
+    # is about. The CSRF-protected path returns 200 on
+    # success; missing/invalid CSRF returns 403. Either way
+    # we still need to confirm a fresh login works.
+    if [ "$logout_code" != "200" ]; then
+        printf 'Note: logout returned HTTP %s (proceeding to second login probe)\n' "$logout_code" >&2
+    fi
+
+    # Drop the cookie jar so the second login is genuinely a
+    # fresh request, not a replay. Same payload, same server,
+    # different cookie state — this is the regression test for
+    # the original "first login works, second fails" symptom.
+    rm -f "$cookie_jar"
+
+    local second_code second_jar
+    second_jar="$(mktemp)"
+    second_code="$(curl -sS -o "$response_file" -w "%{http_code}" \
+        -c "$second_jar" \
+        -H 'Content-Type: application/json' \
+        -d "$login_payload" \
+        "$base/api/v1/auth/login" 2>/dev/null || true)"
+    log_detail "VERIFY password-chain second login: HTTP $second_code"
+    if [ "$second_code" != "200" ]; then
+        printf 'Admin login verification FAILED on second login (HTTP %s)\n' "${second_code:-curl_failed}" >&2
+        printf 'This is the production symptom the dual-login probe is designed to catch.\n' >&2
+        printf 'Response body:\n' >&2
+        cat "$response_file" >&2 || true
+        printf '\n' >&2
+        echo "bootstrap.env preserved for diagnosis: $BOOTSTRAP_ENV" >&2
+        rm -f "$second_jar" "$response_file"
+        return 1
+    fi
+
+    rm -f "$second_jar" "$response_file"
+    return 0
+}
+
 verify_install() {
 	local email="$1"
 	local password="$2"
-	local login_endpoint="http://127.0.0.1:8080/admin/login"
 	local users_count mailbox_count sql_email
 	sql_email="$(sqlite_escape "$email")"
 
@@ -891,34 +1184,25 @@ verify_install() {
         ss -ltn "( sport = :$port )" | grep -q ":$port" || fail "port $port is not listening"
 	done
 
-	local login_payload response_file http_code attempt
-	login_payload="$(build_login_payload "$email" "$password")"
-	response_file="$(mktemp)"
-	http_code=""
-	for attempt in 1 2 3 4 5; do
-		http_code="$(curl -sS -o "$response_file" -w "%{http_code}" -H 'Content-Type: application/json' -d "$login_payload" "$login_endpoint" 2>/dev/null || true)"
-		if [ "$http_code" = "200" ]; then
-			break
-		fi
-		log_detail "login attempt $attempt: HTTP $http_code, retrying in 3s"
-		sleep 3
-	done
-	if [ "$http_code" != "200" ]; then
-		echo -e "${RED}Admin API login verification failed${NC}" >&2
-		echo "Endpoint: $login_endpoint" >&2
-		echo "bootstrap.env preserved for diagnosis: $BOOTSTRAP_ENV" >&2
-		echo "HTTP status: ${http_code:-curl_failed}" >&2
-		echo "Response body:" >&2
-		cat "$response_file" >&2 || true
-		echo >&2
-		echo "Recent Orvix journal:" >&2
-		journalctl -u orvix.service -n 80 --no-pager >&2 || true
-		rm -f "$response_file"
-		fail "admin API login failed"
-	fi
-	rm -f "$response_file"
-	run_quiet rm -f "$BOOTSTRAP_ENV"
-	echo "INSTALLATION VERIFICATION PASSED"
+    # Dual-login password-chain proof. Replaces the old
+    # single-login loop that was the source of the
+    # "INSTALLATION VERIFICATION PASSED but later login fails"
+    # silent-bootstrap-failure mode. Bootstrap.env is only
+    # removed AFTER both logins return 200, so any failure
+    # leaves the file in place for diagnosis.
+    if ! verify_install_password_login "$email" "$password"; then
+        echo -e "${RED}Admin API login verification failed${NC}" >&2
+        echo "Recent Orvix journal:" >&2
+        journalctl -u orvix.service -n 80 --no-pager >&2 || true
+        fail "admin API dual-login verification failed"
+    fi
+
+    # Only NOW is it safe to delete bootstrap.env. The
+    # dual-login has confirmed the runtime can authenticate
+    # the typed credentials twice, so removing the env file
+    # cannot strand a working install.
+    run_quiet rm -f "$BOOTSTRAP_ENV"
+    echo "INSTALLATION VERIFICATION PASSED"
 }
 
 main() {
@@ -991,7 +1275,7 @@ main() {
     set_step "verification" "Enterprise health verification" 95
     run_quiet sleep 5
     verify_install "$admin_email" "$admin_password"
-    smoke_tests
+    smoke_tests "$admin_email" "$admin_password"
     validate_https_config || true
     generate_install_report
 

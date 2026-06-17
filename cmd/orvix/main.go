@@ -252,7 +252,19 @@ func seedAdminUser(db *gorm.DB, authenticator *auth.Authenticator, logger *zap.L
 		return
 	}
 	if count > 0 {
-		logger.Info("admin user already exists", zap.String("email", adminEmail))
+		// User row already exists from a previous boot. Re-verify
+		// the stored hash actually matches the env password — if
+		// the env is being re-applied after a partial failure on a
+		// previous boot (e.g. the row was inserted but the hash
+		// got mangled), this is the only place we can detect the
+		// mismatch and refuse to silently keep the broken row.
+		if !verifyStoredAdminHash(sqlDB, authenticator, adminEmail, adminPassword) {
+			logger.Error("admin user row exists but password verification failed; refusing to keep inconsistent state",
+				zap.String("email", adminEmail),
+				zap.String("hint", "stop the service, delete /etc/orvix/bootstrap.env, then run the installer again"))
+			return
+		}
+		logger.Info("admin user already exists and password verifies", zap.String("email", adminEmail))
 		return
 	}
 
@@ -275,7 +287,35 @@ func seedAdminUser(db *gorm.DB, authenticator *auth.Authenticator, logger *zap.L
 		return
 	}
 
-	logger.Info("admin user created", zap.String("email", adminEmail))
+	// Post-insert guard: prove the freshly written hash verifies
+	// the same password. If this fails, the row was committed
+	// with a hash that cannot authenticate — the symptom would
+	// be "INSTALLATION VERIFICATION PASSED" on first boot but
+	// every subsequent login fails. We catch that here and log
+	// the root cause instead of waiting for the user to report it.
+	if !verifyStoredAdminHash(sqlDB, authenticator, adminEmail, adminPassword) {
+		logger.Error("admin user was created but password verification failed against the stored hash",
+			zap.String("email", adminEmail),
+			zap.String("hint", "this is a runtime bug; please report with the install log"))
+		return
+	}
+
+	logger.Info("admin user created and password verification succeeded", zap.String("email", adminEmail))
+}
+
+// verifyStoredAdminHash returns true if the row in users for
+// the given email has a password_hash that verifies the
+// supplied plain password. It is the post-condition guard for
+// the bootstrap path: a non-nil return proves the runtime
+// can authenticate the same credentials the installer's
+// verify_install used, in this process, with this database
+// connection.
+func verifyStoredAdminHash(sqlDB *sql.DB, authenticator *auth.Authenticator, email, password string) bool {
+	var storedHash string
+	if err := sqlDB.QueryRow("SELECT password_hash FROM users WHERE email = ?", email).Scan(&storedHash); err != nil {
+		return false
+	}
+	return authenticator.VerifyPassword(password, storedHash)
 }
 
 func bootstrapAdminPassword() (string, error) {
