@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/coremail/storage"
 	"github.com/orvix/orvix/internal/webmailmgmt"
 )
 
@@ -12,11 +13,27 @@ func (h *Handler) SetWebmailService(ws *webmailmgmt.Service) {
 	h.webmailSvc = ws
 }
 
+func (h *Handler) SetMailStore(ms *storage.MailStore) {
+	h.mailStore = ms
+}
+
 func (h *Handler) webmailService() *webmailmgmt.Service {
 	if h.webmailSvc == nil {
 		return nil
 	}
 	return h.webmailSvc
+}
+
+// mailStoreForUser returns the MailStore and true if it is
+// available, or nil and false otherwise. Used by the user-
+// facing webmail endpoints (me, folders, messages, send,
+// delete) which read from the same MailStore the runtime
+// coremail module uses.
+func (h *Handler) mailStoreForUser() (*storage.MailStore, bool) {
+	if h.mailStore == nil {
+		return nil, false
+	}
+	return h.mailStore, true
 }
 
 func (h *Handler) ListWebmailAccounts(c fiber.Ctx) error {

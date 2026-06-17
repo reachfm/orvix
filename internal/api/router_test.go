@@ -469,6 +469,21 @@ func TestAdminUIStaticRoutes(t *testing.T) {
 	}
 }
 
+// TestWebmailAssetCORSHeadersReflectAdminOrigin is the
+// regression test for the production "webmail frontend is
+// broken" symptom. The webmail index.html ships a
+// `<script type="module" crossorigin>` tag, which means the
+// browser sends every /webmail/assets/* fetch with CORS
+// mode active and requires Access-Control-Allow-Origin to
+// match the page's own origin. If the admin server's
+// allowed_origins does NOT include the admin host that
+// serves the webmail, the browser silently drops the
+// module, the React app never mounts, and the user sees
+// an empty page (the bug). This test configures the admin
+// host as a "production-like" value and asserts that the
+// CORS response header echoes it back. A change to
+// install.sh's write_config that drops the admin host
+// from allowed_origins will fail this test.
 func TestWebmailAssetCORSHeadersReflectAdminOrigin(t *testing.T) {
 	logger := zap.NewNop()
 	cfg := config.Defaults()
@@ -500,17 +515,28 @@ func TestWebmailAssetCORSHeadersReflectAdminOrigin(t *testing.T) {
 	router := NewRouter(cfg, authenticator, logger, db, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
 	defer router.App().Shutdown()
 
+	// The browser always sends an Origin header for module
+	// script fetches, even on first load. The admin server
+	// must respond with Access-Control-Allow-Origin matching
+	// the page's own origin. Without it, the module is blocked.
 	req := httptest.NewRequest("GET", "/webmail/assets/index-CmhA8wNq.js", nil)
 	req.Header.Set("Origin", "https://admin.example.com")
 	resp, err := router.App().Test(req, fiber.TestConfig{Timeout: 0})
 	if err != nil {
 		t.Fatalf("asset: %v", err)
 	}
-	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "https://admin.example.com" {
-		t.Fatalf("Access-Control-Allow-Origin: want %q, got %q", "https://admin.example.com", got)
+	acao := resp.Header.Get("Access-Control-Allow-Origin")
+	if acao != "https://admin.example.com" {
+		t.Fatalf("Access-Control-Allow-Origin: want %q, got %q (this is the webmail-CORS regression)", "https://admin.example.com", acao)
 	}
 }
 
+// TestWebmailAssetCORSRejectsForeignOrigin guards against
+// the inverse regression: the admin server must NOT echo
+// back a CORS allow-origin for a host that was never
+// configured. A wildcard or accidental "*" header would
+// break the credentialed cookie contract and allow
+// cross-origin admin API access from any site.
 func TestWebmailAssetCORSRejectsForeignOrigin(t *testing.T) {
 	logger := zap.NewNop()
 	cfg := config.Defaults()
@@ -544,8 +570,9 @@ func TestWebmailAssetCORSRejectsForeignOrigin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("asset: %v", err)
 	}
-	if got := resp.Header.Get("Access-Control-Allow-Origin"); got == "*" || got == "https://evil.example.com" {
-		t.Fatalf("Access-Control-Allow-Origin leaked foreign origin: %q", got)
+	acao := resp.Header.Get("Access-Control-Allow-Origin")
+	if acao == "*" || acao == "https://evil.example.com" {
+		t.Fatalf("Access-Control-Allow-Origin leaked foreign origin: %q", acao)
 	}
 }
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# Orvix Enterprise Mail â€” emergency admin password reset.
+# Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+# Orvix Enterprise Mail Ã¢â‚¬â€ emergency admin password reset.
 #
 # Run as root on the host where orvix.service is installed.
 #
@@ -8,7 +8,7 @@
 #   1. Resolves which admin email to reset (arg, env var,
 #      or first admin row in the DB).
 #   2. Prompts for a new password on /dev/tty with no echo.
-#   3. Validates the password (8-72 bytes â€” bcrypt hard
+#   3. Validates the password (8-72 bytes Ã¢â‚¬â€ bcrypt hard
 #      limit; anything longer makes the runtime silently
 #      fail to authenticate).
 #   4. Stops orvix.service so the bcrypt hash write does
@@ -51,7 +51,7 @@
 #
 #   # or, with explicit email:
 #   sudo bash release/scripts/reset-admin-password.sh admin@orvix.email
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 set -euo pipefail
 
@@ -106,7 +106,7 @@ resolve_admin_email() {
 # silent-read, and any error chatter go to stderr so callers
 # can safely use `password="$(prompt_password)"`. Honors
 # ORVIX_PROMPT_INPUT_FD for tests; production reads from
-# /dev/tty. The captured value is byte-exact â€” trailing
+# /dev/tty. The captured value is byte-exact Ã¢â‚¬â€ trailing
 # whitespace is preserved verbatim via `IFS=`.
 prompt_password() {
     local input_dev="/dev/tty"
@@ -155,7 +155,7 @@ probe_login() {
 
 # The python helper source. Written to a temp file with
 # restricted permissions (0700), executed, then removed.
-# The file contains ONLY the python source â€” no password,
+# The file contains ONLY the python source Ã¢â‚¬â€ no password,
 # no hash, no email, no DB path. The password is fed via
 # stdin (line 1). The email and DB path are the only
 # positional args.
@@ -165,7 +165,7 @@ probe_login() {
 #     leaks it to /proc/<pid>/cmdline and any process
 #     listing tool.
 #   - bash string interpolation in sqlite3 -c "..." cannot
-#     guarantee parameter binding â€” a careful attacker
+#     guarantee parameter binding Ã¢â‚¬â€ a careful attacker
 #     could craft an email that breaks out of the WHERE
 #     clause.
 #
@@ -180,7 +180,7 @@ install log, the temp filesystem, or environment variables.
 The password is read from stdin (one line); the target
 email and database path are the only positional args, and
 the email is validated against a strict pattern before use.
-The SQL is parameterized â€” no string interpolation.
+The SQL is parameterized Ã¢â‚¬â€ no string interpolation.
 """
 import sys
 import os
@@ -329,7 +329,7 @@ so the bash script can parse the status without seeing the
 password in argv or in shell variables.
 
 The script never prints the password. The body is the
-login response â€” on 200 it'\''s an access_token JSON, on
+login response Ã¢â‚¬â€ on 200 it'\''s an access_token JSON, on
 non-200 it'\''s an error envelope.
 """
 import sys
@@ -397,7 +397,7 @@ write_helper() {
     printf '%s' "$path"
 }
 
-# â”€â”€ main â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Ã¢â€â‚¬Ã¢â€â‚¬ main Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 require_root
 require_tools
@@ -428,7 +428,7 @@ log_detail "stopping orvix service"
 systemctl stop orvix.service 2>&1 | tee -a "$ORVIX_RESET_LOG" >/dev/null || log_detail "systemctl stop returned non-zero (continuing)"
 
 # Write the bcrypt helper to a temp file. The file contains
-# ONLY the Python source â€” no password, no hash, no email,
+# ONLY the Python source Ã¢â‚¬â€ no password, no hash, no email,
 # no DB path. The password is fed via stdin at execution
 # time below. The file is unlinked before this script exits.
 _BCRYPT_HELPER_PATH="$(write_helper bcrypt-helper "$_BCRYPT_HELPER_PYTHON")"
@@ -462,7 +462,7 @@ for attempt in 1 2 3 4 5 6 7 8 9 10; do
     fi
     sleep 1
 done
-[ "$READY" = "1" ] || fail "orvix did not become healthy within 10s of restart; reset state unclear â€” see $ORVIX_RESET_LOG"
+[ "$READY" = "1" ] || fail "orvix did not become healthy within 10s of restart; reset state unclear Ã¢â‚¬â€ see $ORVIX_RESET_LOG"
 
 # Re-prompt for the password so the probe can use it without
 # keeping it in any long-lived shell variable. The probe
