@@ -563,8 +563,7 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 	allRecipients = append(allRecipients, bccList...)
 
 	mailboxID := ctx.Mailbox.ID
-	queuedIDs := make([]uint, 0, len(allRecipients))
-	enqueueErrors := make([]string, 0)
+	enqueueErrors := make([]string, 0, len(allRecipients))
 	for _, addr := range allRecipients {
 		bare := addr.Address
 		domain := extractRecipientDomain(bare)
@@ -588,29 +587,24 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 				zap.Error(err),
 			)
 			enqueueErrors = append(enqueueErrors, fmt.Sprintf("%s: %v", bare, err))
-			continue
 		}
-		queuedIDs = append(queuedIDs, entry.ID)
 	}
 
-	if len(queuedIDs) == 0 {
-		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
-			"error":           "no recipients enqueued: " + strings.Join(enqueueErrors, "; "),
-			"message_id":      msg.MessageID,
-			"folder":          sentFolder.Path,
-			"status":          "stored",
-			"enqueue_errors":  enqueueErrors,
+	if len(enqueueErrors) > 0 {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error":      "failed to enqueue some recipients: " + strings.Join(enqueueErrors, "; "),
+			"id":         msg.ID,
+			"message_id": msg.MessageID,
+			"folder":     sentFolder.Path,
+			"status":     "stored",
 		})
 	}
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-		"id":             msg.ID,
-		"message_id":     msg.MessageID,
-		"folder":         sentFolder.Path,
-		"status":         "queued",
-		"queued_count":   len(queuedIDs),
-		"queue_ids":      queuedIDs,
-		"enqueue_errors": enqueueErrors,
+		"id":           msg.ID,
+		"message_id":   msg.MessageID,
+		"status":       "queued",
+		"queued_count": len(allRecipients),
 	})
 }
 
