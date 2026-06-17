@@ -354,6 +354,17 @@ func (m *Module) MailStore() *storage.MailStore {
 	return m.store
 }
 
+// QueueEngine returns the delivery queue owned by this
+// module. The user-facing webmail Send endpoint enqueues
+// outbound messages through this queue — the same queue
+// the SMTP receiver uses for inbound and the delivery
+// worker drains for outbound. Returns nil if the module has
+// not been initialized (cfg.CoreMail.Enabled == false) or
+// the runtime was not booted.
+func (m *Module) QueueEngine() *queue.QueueEngine {
+	return m.queue
+}
+
 func (m *Module) Stop() error {
 	if m.cancel != nil {
 		m.cancel()

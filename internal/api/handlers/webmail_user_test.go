@@ -30,6 +30,7 @@ import (
 	"github.com/orvix/orvix/internal/api"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/config"
+	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/models"
@@ -44,34 +45,43 @@ import (
 //   - a Fiber router with auth, MailStore wired, and the
 //     webmail user endpoints registered
 //   - a real MailStore on a temp dir
+//   - a real coremail QueueEngine against the same sqlite
+//     db, used by the WebmailSend enqueue path
 //   - a coremail_mailboxes row for admin@orvix.email
 //   - a users row for admin@orvix.email with bcrypt password
 type webmailTestEnv struct {
 	router   *api.Router
 	mailbox  *storage.MailStore
+	queue    *queue.QueueEngine
 	email    string
 	password string
 }
 
-// mailStoreProviderModule is a stand-in module that exposes
-// a MailStore without booting the full coremail runtime
-// (SMTP/IMAP/POP3). It satisfies the interface used by
-// router.go to wire MailStore into the handler.
-type mailStoreProviderModule struct {
-	store *storage.MailStore
+// runtimeProviderModule is a stand-in module that exposes
+// a MailStore and QueueEngine without booting the full
+// coremail runtime (SMTP/IMAP/POP3). It satisfies the
+// interface used by router.go to wire both into the
+// handler. The ID matches the production coremail runtime
+// module so the same wiring path in router.go picks it up.
+type runtimeProviderModule struct {
+	store    *storage.MailStore
+	queue    *queue.QueueEngine
 }
 
-func (m *mailStoreProviderModule) ID() string             { return "coremail-runtime" }
-func (m *mailStoreProviderModule) Version() string        { return "test" }
-func (m *mailStoreProviderModule) Requires() []string     { return nil }
-func (m *mailStoreProviderModule) Init(_ *config.Config, _ *gorm.DB) error {
+func (m *runtimeProviderModule) ID() string             { return "coremail-runtime" }
+func (m *runtimeProviderModule) Version() string        { return "test" }
+func (m *runtimeProviderModule) Requires() []string     { return nil }
+func (m *runtimeProviderModule) Init(_ *config.Config, _ *gorm.DB) error {
 	return nil
 }
-func (m *mailStoreProviderModule) Start() error   { return nil }
-func (m *mailStoreProviderModule) Stop() error    { return nil }
-func (m *mailStoreProviderModule) Migrate() error { return nil }
-func (m *mailStoreProviderModule) MailStore() *storage.MailStore {
+func (m *runtimeProviderModule) Start() error   { return nil }
+func (m *runtimeProviderModule) Stop() error    { return nil }
+func (m *runtimeProviderModule) Migrate() error { return nil }
+func (m *runtimeProviderModule) MailStore() *storage.MailStore {
 	return m.store
+}
+func (m *runtimeProviderModule) QueueEngine() *queue.QueueEngine {
+	return m.queue
 }
 
 // buildWebmailTestEnv wires a router with a MailStore and
@@ -139,13 +149,30 @@ func buildWebmailTestEnv(t *testing.T) *webmailTestEnv {
 		t.Fatalf("mailstore: %v", err)
 	}
 
+	// Run the queue DDL so coremail_queue exists. The
+	// production runtime calls queue.Tables() +
+	// queue.Indexes() during Migrate; we do the same
+	// here. The WebmailSend enqueue path writes one row
+	// per recipient into this table.
+	for _, stmt := range queue.Tables() {
+		if _, err := sqlDB.Exec(stmt); err != nil {
+			t.Fatalf("queue ddl: %v\nstmt: %s", err, stmt)
+		}
+	}
+	for _, stmt := range queue.Indexes() {
+		if _, err := sqlDB.Exec(stmt); err != nil {
+			t.Fatalf("queue idx: %v\nstmt: %s", err, stmt)
+		}
+	}
+	qe := queue.NewQueueEngine(sqlDB)
+
 	cfg.Server.AdminUIDir = adminDir
 	cfg.Server.WebmailUIDir = webmailDir
 	cfg.CoreMail.MailStorePath = mailstoreDir
 
 	reg := modules.NewRegistry(logger)
 	ff := license.NewFeatureFlags(logger)
-	reg.Register(&mailStoreProviderModule{store: mailStore})
+	reg.Register(&runtimeProviderModule{store: mailStore, queue: qe})
 
 	router := api.NewRouter(cfg, authenticator, logger, db, reg, ff, nil)
 
@@ -166,6 +193,7 @@ func buildWebmailTestEnv(t *testing.T) *webmailTestEnv {
 	return &webmailTestEnv{
 		router:   router,
 		mailbox:  mailStore,
+		queue:    qe,
 		email:    email,
 		password: password,
 	}
@@ -558,7 +586,11 @@ func TestWebmailAPIGetMessageBody(t *testing.T) {
 
 // TestWebmailAPISendCreatesSentMessage confirms POST
 // /api/v1/webmail/send writes a real row to the user's
-// Sent folder with the supplied subject + body.
+// Sent folder with the supplied subject + body, AND
+// enqueues the outbound message into the delivery queue.
+// After Phase WEBMAIL-3 the response status is "queued"
+// not "stored" — the message is durable in Sent AND in
+// the queue.
 func TestWebmailAPISendCreatesSentMessage(t *testing.T) {
 	e := buildWebmailTestEnv(t)
 	if err := e.mailbox.Folders.EnsureSystemFolders(t.Context(), mustMailboxIDForTest(t, e, e.email), nil); err != nil {
@@ -579,9 +611,21 @@ func TestWebmailAPISendCreatesSentMessage(t *testing.T) {
 	if resp["folder"] != "Sent" {
 		t.Errorf("POST /send: response folder = %v, want Sent", resp["folder"])
 	}
+	// Phase WEBMAIL-3: response status is "queued" once
+	// the message has been handed to the delivery queue.
+	if resp["status"] != "queued" {
+		t.Errorf("POST /send: response status = %v, want queued", resp["status"])
+	}
+	if resp["queued_count"] != float64(1) {
+		t.Errorf("POST /send: queued_count = %v, want 1", resp["queued_count"])
+	}
 	id, ok := resp["id"].(float64)
 	if !ok || id == 0 {
 		t.Fatalf("POST /send: response id invalid: %v", resp["id"])
+	}
+	msgID, _ := resp["message_id"].(string)
+	if msgID == "" {
+		t.Fatalf("POST /send: response message_id empty")
 	}
 
 	// The sent message should appear when we list the
@@ -779,6 +823,361 @@ func TestWebmailAPISendRejectsCRLFInjection(t *testing.T) {
 	if metaSubject != "helloBcc: attacker@example.com" {
 		t.Errorf("GET /messages: metadata subject = %q, want %q", metaSubject, "helloBcc: attacker@example.com")
 	}
+}
+
+// ── Phase WEBMAIL-3: real outbound send delivery ────────
+//
+// The tests below pin the new enqueue behavior added on top
+// of the existing Sent-folder storage: every successful
+// /api/v1/webmail/send MUST result in a coremail_queue row
+// with direction='outbound', status='pending', and the
+// authenticated mailbox as the sender. Invalid recipients
+// MUST be rejected with 400 before any disk write. The
+// authorization chain (auth middleware + mailbox lookup)
+// MUST remain intact.
+
+// TestWebmailAPISendEnqueuesOutboundJob is the proof that
+// the message reached the queue after the Sent copy was
+// stored. We assert the exact row contents the production
+// delivery worker would lease on its next pass.
+func TestWebmailAPISendEnqueuesOutboundJob(t *testing.T) {
+	e := buildWebmailTestEnv(t)
+	if err := e.mailbox.Folders.EnsureSystemFolders(t.Context(), mustMailboxIDForTest(t, e, e.email), nil); err != nil {
+		t.Fatalf("ensure system folders: %v", err)
+	}
+	tok := e.loginAdmin(t)
+
+	// Snapshot the queue row count before sending so
+	// we can assert exactly one new row was created.
+	sqlDB := e.mailbox.DB
+	mailboxID := mailboxIDForEmail(t, e.mailbox, e.email)
+	before, err := queueRowCount(t, sqlDB, mailboxID)
+	if err != nil {
+		t.Fatalf("queue count before: %v", err)
+	}
+
+	req := map[string]string{
+		"to":      "recipient@example.com",
+		"subject": "Enqueue proof",
+		"body":    "Body for enqueue proof.",
+	}
+	status, resp := e.webmailRequest(t, "POST", "/api/v1/webmail/send", tok, req)
+	if status != http.StatusCreated {
+		t.Fatalf("POST /send: expected 201, got %d: %v", status, resp)
+	}
+	if resp["status"] != "queued" {
+		t.Fatalf("POST /send: status = %v, want queued", resp["status"])
+	}
+	msgID, _ := resp["message_id"].(string)
+	if msgID == "" {
+		t.Fatalf("POST /send: message_id missing")
+	}
+
+	// Exactly one new row for this mailbox's outbound.
+	after, err := queueRowCount(t, sqlDB, mailboxID)
+	if err != nil {
+		t.Fatalf("queue count after: %v", err)
+	}
+	if after-before != 1 {
+		t.Fatalf("queue row count delta = %d, want 1", after-before)
+	}
+
+	// Inspect the new row in detail.
+	var (
+		gotID          uint
+		gotMessageID   string
+		gotFromAddress string
+		gotToAddress   string
+		gotDirection   string
+		gotStatus      string
+		gotDelivery    string
+		gotMailbox     sql.NullInt64
+	)
+	row := sqlDB.QueryRow(
+		`SELECT id, message_id, from_address, to_address, direction, status, delivery_mode, mailbox_id
+		 FROM coremail_queue WHERE mailbox_id = ? AND deleted_at IS NULL ORDER BY id DESC LIMIT 1`,
+		mailboxID,
+	)
+	if err := row.Scan(&gotID, &gotMessageID, &gotFromAddress, &gotToAddress, &gotDirection, &gotStatus, &gotDelivery, &gotMailbox); err != nil {
+		t.Fatalf("queue row scan: %v", err)
+	}
+	if gotMessageID != msgID {
+		t.Errorf("queue message_id = %q, want %q", gotMessageID, msgID)
+	}
+	if gotFromAddress != e.email {
+		t.Errorf("queue from_address = %q, want authenticated mailbox %q", gotFromAddress, e.email)
+	}
+	if gotToAddress != "recipient@example.com" {
+		t.Errorf("queue to_address = %q, want recipient@example.com", gotToAddress)
+	}
+	if gotDirection != "outbound" {
+		t.Errorf("queue direction = %q, want outbound", gotDirection)
+	}
+	if gotStatus != "pending" {
+		t.Errorf("queue status = %q, want pending (delivery worker picks it up)", gotStatus)
+	}
+	if gotDelivery != "remote_smtp" {
+		t.Errorf("queue delivery_mode = %q, want remote_smtp", gotDelivery)
+	}
+	if !gotMailbox.Valid || uint(gotMailbox.Int64) != mailboxID {
+		t.Errorf("queue mailbox_id = %v, want %d", gotMailbox, mailboxID)
+	}
+
+	// The response also exposes queue_ids for client
+	// reconciliation; the queued row id must match.
+	queueIDs, ok := resp["queue_ids"].([]interface{})
+	if !ok || len(queueIDs) != 1 {
+		t.Fatalf("response queue_ids = %v, want 1 id", resp["queue_ids"])
+	}
+	if uint(queueIDs[0].(float64)) != gotID {
+		t.Errorf("response queue_ids[0] = %v, want %d", queueIDs[0], gotID)
+	}
+}
+
+// TestWebmailAPISendEnqueuesAllRecipients pins the rule
+// that one queue row is created per recipient across To,
+// Cc, and Bcc — exactly what the delivery worker needs
+// to issue one RCPT TO per recipient on the wire.
+func TestWebmailAPISendEnqueuesAllRecipients(t *testing.T) {
+	e := buildWebmailTestEnv(t)
+	if err := e.mailbox.Folders.EnsureSystemFolders(t.Context(), mustMailboxIDForTest(t, e, e.email), nil); err != nil {
+		t.Fatalf("ensure system folders: %v", err)
+	}
+	tok := e.loginAdmin(t)
+	sqlDB := e.mailbox.DB
+	mailboxID := mailboxIDForEmail(t, e.mailbox, e.email)
+	before, err := queueRowCount(t, sqlDB, mailboxID)
+	if err != nil {
+		t.Fatalf("queue count before: %v", err)
+	}
+
+	req := map[string]string{
+		"to":      "to1@example.com, to2@example.com",
+		"cc":      "cc1@example.com",
+		"bcc":     "bcc1@example.com, bcc2@example.com",
+		"subject": "Multi-recipient",
+		"body":    "Hello everyone.",
+	}
+	status, resp := e.webmailRequest(t, "POST", "/api/v1/webmail/send", tok, req)
+	if status != http.StatusCreated {
+		t.Fatalf("POST /send: expected 201, got %d: %v", status, resp)
+	}
+	if resp["status"] != "queued" {
+		t.Fatalf("POST /send: status = %v, want queued", resp["status"])
+	}
+	if resp["queued_count"] != float64(5) {
+		t.Errorf("POST /send: queued_count = %v, want 5 (2 To + 1 Cc + 2 Bcc)", resp["queued_count"])
+	}
+	after, err := queueRowCount(t, sqlDB, mailboxID)
+	if err != nil {
+		t.Fatalf("queue count after: %v", err)
+	}
+	if after-before != 5 {
+		t.Errorf("queue row count delta = %d, want 5", after-before)
+	}
+
+	// All five new rows must reference the same
+	// message_id and the authenticated mailbox.
+	rows, err := sqlDB.Query(
+		`SELECT to_address, message_id, from_address, mailbox_id, direction, status, delivery_mode
+		 FROM coremail_queue WHERE mailbox_id = ? AND deleted_at IS NULL ORDER BY id DESC LIMIT 5`,
+		mailboxID,
+	)
+	if err != nil {
+		t.Fatalf("queue rows scan: %v", err)
+	}
+	defer rows.Close()
+	seen := map[string]bool{}
+	for rows.Next() {
+		var to, msgID, from string
+		var mbID int64
+		var direction, status, mode string
+		if err := rows.Scan(&to, &msgID, &from, &mbID, &direction, &status, &mode); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if msgID != resp["message_id"] {
+			t.Errorf("queue row msg_id = %q, want %q", msgID, resp["message_id"])
+		}
+		if from != e.email {
+			t.Errorf("queue row from = %q, want %q", from, e.email)
+		}
+		if direction != "outbound" {
+			t.Errorf("queue row direction = %q, want outbound", direction)
+		}
+		if status != "pending" {
+			t.Errorf("queue row status = %q, want pending", status)
+		}
+		if mode != "remote_smtp" {
+			t.Errorf("queue row delivery_mode = %q, want remote_smtp", mode)
+		}
+		seen[strings.ToLower(to)] = true
+	}
+	expected := []string{"to1@example.com", "to2@example.com", "cc1@example.com", "bcc1@example.com", "bcc2@example.com"}
+	for _, want := range expected {
+		if !seen[want] {
+			t.Errorf("missing queue row for %s; saw %v", want, seen)
+		}
+	}
+}
+
+// TestWebmailAPISendRejectsInvalidRecipient is the
+// authorization-by-input test: malformed To/Cc/Bcc values
+// must be rejected with 400 BEFORE we touch the disk or
+// the queue. No Sent copy, no queue row.
+func TestWebmailAPISendRejectsInvalidRecipient(t *testing.T) {
+	e := buildWebmailTestEnv(t)
+	if err := e.mailbox.Folders.EnsureSystemFolders(t.Context(), mustMailboxIDForTest(t, e, e.email), nil); err != nil {
+		t.Fatalf("ensure system folders: %v", err)
+	}
+	tok := e.loginAdmin(t)
+	sqlDB := e.mailbox.DB
+	mailboxID := mailboxIDForEmail(t, e.mailbox, e.email)
+	before, err := queueRowCount(t, sqlDB, mailboxID)
+	if err != nil {
+		t.Fatalf("queue count before: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		req  map[string]string
+	}{
+		{
+			name: "to missing at-sign",
+			req: map[string]string{
+				"to":      "not-an-email",
+				"subject": "x",
+				"body":    "x",
+			},
+		},
+		{
+			name: "to has display-name but no host",
+			req: map[string]string{
+				"to":      "Foo <bar>",
+				"subject": "x",
+				"body":    "x",
+			},
+		},
+		{
+			name: "cc has whitespace-only junk",
+			req: map[string]string{
+				"to":      "valid@example.com",
+				"cc":      " , ,",
+				"subject": "x",
+				"body":    "x",
+			},
+		},
+		{
+			name: "bcc is missing the domain",
+			req: map[string]string{
+				"to":      "valid@example.com",
+				"bcc":     "nobody@",
+				"subject": "x",
+				"body":    "x",
+			},
+		},
+		{
+			name: "to is empty",
+			req: map[string]string{
+				"to":      "",
+				"subject": "x",
+				"body":    "x",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			status, resp := e.webmailRequest(t, "POST", "/api/v1/webmail/send", tok, tc.req)
+			if status != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %v", status, resp)
+			}
+			if _, ok := resp["error"]; !ok {
+				t.Errorf("response missing error: %v", resp)
+			}
+		})
+	}
+
+	// After all the rejections, the queue must be
+	// untouched — no partial enqueue from any case.
+	after, err := queueRowCount(t, sqlDB, mailboxID)
+	if err != nil {
+		t.Fatalf("queue count after: %v", err)
+	}
+	if after != before {
+		t.Errorf("queue row count changed on rejection: before=%d after=%d", before, after)
+	}
+}
+
+// TestWebmailAPISendPreservesAuthorization confirms that
+// the enqueue path does NOT bypass the standard auth
+// checks: a caller with no mailbox, or no auth at all,
+// must NOT be able to enqueue. This is the regression
+// guard for "WEBMAIL-3 must not weaken authorization".
+func TestWebmailAPISendPreservesAuthorization(t *testing.T) {
+	e := buildWebmailTestEnv(t)
+	sqlDB := e.mailbox.DB
+	orphanEmail := "send-orphan@orvix.email"
+	orphanPass := "SendOrphanP@ss-321"
+	if err := createOrphanUser(t, e.mailbox, orphanEmail, orphanPass); err != nil {
+		t.Fatalf("create orphan: %v", err)
+	}
+	tok := loginAs(t, e, orphanEmail, orphanPass)
+
+	before, err := queueRowCount(t, sqlDB, 0)
+	if err != nil {
+		t.Fatalf("queue count before: %v", err)
+	}
+
+	status, resp := e.webmailRequest(t, "POST", "/api/v1/webmail/send", tok, map[string]string{
+		"to":      "victim@example.com",
+		"subject": "unauthorized",
+		"body":    "should not be sent",
+	})
+	// No mailbox -> 403 Forbidden, just like the other
+	// user-facing webmail endpoints. The body is JSON
+	// with reason=no_mailbox.
+	if status != http.StatusForbidden {
+		t.Fatalf("POST /send (no mailbox): expected 403, got %d: %v", status, resp)
+	}
+	if resp["reason"] != "no_mailbox" {
+		t.Errorf("POST /send (no mailbox): reason = %v, want no_mailbox", resp["reason"])
+	}
+
+	// Also: completely unauthenticated callers still
+	// hit 401 from the middleware, before any handler
+	// code runs.
+	req := httptest.NewRequest("POST", "/api/v1/webmail/send", strings.NewReader(`{"to":"x@example.com"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp2, err := e.router.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("unauth POST /send: %v", err)
+	}
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Errorf("unauth POST /send: expected 401, got %d", resp2.StatusCode)
+	}
+
+	after, err := queueRowCount(t, sqlDB, 0)
+	if err != nil {
+		t.Fatalf("queue count after: %v", err)
+	}
+	if after != before {
+		t.Errorf("unauthorized calls leaked queue rows: before=%d after=%d", before, after)
+	}
+}
+
+// queueRowCount returns the count of non-deleted queue
+// rows. Pass 0 for "all rows across all mailboxes" (used
+// when we want to assert no rows were created for
+// unauthorized callers).
+func queueRowCount(t *testing.T, sqlDB *sql.DB, mailboxID uint) (int64, error) {
+	t.Helper()
+	var n int64
+	var err error
+	if mailboxID == 0 {
+		err = sqlDB.QueryRow(`SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL`).Scan(&n)
+	} else {
+		err = sqlDB.QueryRow(`SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND mailbox_id = ?`, mailboxID).Scan(&n)
+	}
+	return n, err
 }
 
 // createOrphanUser inserts a users row WITHOUT a

@@ -20,6 +20,7 @@ import (
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
 	"github.com/orvix/orvix/internal/updater"
+	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
 	"github.com/orvix/orvix/internal/webmailmgmt"
 	"go.uber.org/zap"
@@ -48,6 +49,15 @@ type Handler struct {
 	// new outbound messages through this store directly.
 	// Set via SetMailStore at router construction time.
 	mailStore  *storage.MailStore
+
+	// queueEngine is the same *queue.QueueEngine used by
+	// the coremail runtime module. The user-facing
+	// webmail Send endpoint enqueues outbound messages
+	// through this engine so they are picked up by the
+	// existing delivery worker — no SMTP redesign, no
+	// parallel pipeline. Set via SetQueueEngine at router
+	// construction time.
+	queueEngine *queue.QueueEngine
 
 	// updateSvc is the process-wide Update Management v1 service.
 	// It is set once at router construction (see

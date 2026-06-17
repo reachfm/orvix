@@ -13,6 +13,7 @@ import (
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/coremail"
+	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/metrics"
@@ -87,6 +88,20 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			if ms := msProvider.MailStore(); ms != nil {
 				router.h.SetMailStore(ms)
 				logger.Info("mailstore wired for webmail user endpoints")
+			}
+		}
+		// Wire the delivery QueueEngine from the same
+		// runtime module. The webmail user-facing Send
+		// endpoint enqueues outbound messages through
+		// this engine so they are picked up by the same
+		// delivery worker the SMTP receiver uses — no
+		// separate queue, no SMTP redesign.
+		if qeProvider, ok := mod.(interface {
+			QueueEngine() *queue.QueueEngine
+		}); ok {
+			if qe := qeProvider.QueueEngine(); qe != nil {
+				router.h.SetQueueEngine(qe)
+				logger.Info("queue engine wired for webmail send")
 			}
 		}
 	}

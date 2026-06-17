@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
 	"github.com/orvix/orvix/internal/webmailmgmt"
 )
@@ -15,6 +16,17 @@ func (h *Handler) SetWebmailService(ws *webmailmgmt.Service) {
 
 func (h *Handler) SetMailStore(ms *storage.MailStore) {
 	h.mailStore = ms
+}
+
+// SetQueueEngine wires the outbound queue engine into the
+// handler. Called by the router constructor when the
+// coremail runtime module exposes QueueEngine(). The
+// webmail Send endpoint enqueues outbound messages through
+// this engine so they are picked up by the existing
+// delivery worker — the queue is shared with the SMTP
+// receiver and the delivery pipeline, not a separate one.
+func (h *Handler) SetQueueEngine(qe *queue.QueueEngine) {
+	h.queueEngine = qe
 }
 
 func (h *Handler) webmailService() *webmailmgmt.Service {
@@ -34,6 +46,19 @@ func (h *Handler) mailStoreForUser() (*storage.MailStore, bool) {
 		return nil, false
 	}
 	return h.mailStore, true
+}
+
+// queueEngineForUser returns the QueueEngine and true if
+// it is wired. The webmail Send endpoint uses this to
+// enqueue outbound messages into the same delivery queue
+// the SMTP receiver uses for inbound mail. Returns nil,
+// false if the runtime did not expose a queue (e.g.,
+// CoreMail runtime is disabled or not booted).
+func (h *Handler) queueEngineForUser() (*queue.QueueEngine, bool) {
+	if h.queueEngine == nil {
+		return nil, false
+	}
+	return h.queueEngine, true
 }
 
 func (h *Handler) ListWebmailAccounts(c fiber.Ctx) error {
