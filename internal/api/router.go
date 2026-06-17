@@ -187,8 +187,19 @@ func (r *Router) setupRoutes() {
 	protected.Get("/webmail/folders", r.h.WebmailFolders)
 	protected.Get("/webmail/messages", r.h.WebmailMessages)
 	protected.Get("/webmail/messages/:id", r.h.WebmailMessage)
-	protected.Post("/webmail/send", r.h.WebmailSend)
+	protected.Patch("/webmail/messages/:id", r.h.WebmailUpdateMessage)
+	protected.Post("/webmail/messages/:id/archive", r.h.WebmailArchive)
 	protected.Post("/webmail/messages/:id/delete", r.h.WebmailDelete)
+	protected.Post("/webmail/folders/:id/read-all", r.h.WebmailMarkFolderRead)
+	protected.Post("/webmail/send", r.h.WebmailSend)
+	// Drafts — minimal CRUD. Drafts are Message rows
+	// with Draft=true in the Drafts system folder; no
+	// separate draft table, no schema change.
+	protected.Get("/webmail/drafts", r.h.WebmailListDrafts)
+	protected.Post("/webmail/drafts", r.h.WebmailSaveDraft)
+	protected.Get("/webmail/drafts/:id", r.h.WebmailGetDraft)
+	protected.Put("/webmail/drafts/:id", r.h.WebmailSaveDraft)
+	protected.Delete("/webmail/drafts/:id", r.h.WebmailDeleteDraft)
 
 	protected.Get("/csrf-token", func(c fiber.Ctx) error {
 		userID, _ := c.Locals("user_id").(uint)

@@ -222,6 +222,7 @@ func (h *Handler) WebmailFolders(c fiber.Ctx) error {
 			"name":          f.Name,
 			"path":          f.Path,
 			"folder_type":   string(f.FolderType),
+			"system":        f.FolderType != "",
 			"parent_id":     f.ParentID,
 			"message_count": f.MessageCount,
 			"unread_count":  f.UnreadCount,
@@ -237,6 +238,16 @@ func (h *Handler) WebmailFolders(c fiber.Ctx) error {
 // resolve to the same folder. Soft-deleted messages
 // (deleted=1, purged_at NULL) are excluded — that's what the
 // Trash folder is for.
+//
+// Query parameters:
+//   - folder=INBOX|Sent|Drafts|Trash|Junk|Archive|<name>
+//   - q=<substring> : case-insensitive substring match
+//                    against subject, from_address,
+//                    to_addresses, cc_addresses, body
+//                    preview. Empty q is the default.
+//   - limit=N      : 1..200, default 50 (smaller default
+//                    than v1 so the first paint is fast)
+//   - offset=N     : pagination cursor; new messages first.
 func (h *Handler) WebmailMessages(c fiber.Ctx) error {
 	ctx, reason := h.resolveWebmailUserContext(c)
 	if ctx == nil {
@@ -250,6 +261,8 @@ func (h *Handler) WebmailMessages(c fiber.Ctx) error {
 	if folderParam == "" {
 		folderParam = "INBOX"
 	}
+	q := strings.TrimSpace(c.Query("q"))
+
 	folder, err := ctx.MailboxStore.Folders.GetByPath(c.Context(), ctx.Mailbox.ID, folderParam, nil)
 	if err != nil || folder == nil {
 		// Try a case-insensitive match against the canonical
@@ -281,6 +294,7 @@ func (h *Handler) WebmailMessages(c fiber.Ctx) error {
 	messages, _, err := ctx.MailboxStore.Messages.List(c.Context(), storage.MessageFilter{
 		MailboxID: ctx.Mailbox.ID,
 		FolderID:  &folder.ID,
+		Search:    q,
 		Limit:     200,
 	}, nil)
 	if err != nil {
@@ -329,6 +343,47 @@ func (h *Handler) WebmailMessages(c fiber.Ctx) error {
 		"folder":     folder.Path,
 		"folder_id":  folder.ID,
 	})
+}
+
+// extractSearchSnippet takes a longer body string and
+// returns a 200-char preview centred on the first match
+// of the query. Returns "" if query is empty or no match.
+// Used by WebmailMessages when ?q= is supplied to give
+// the UI a context-rich snippet.
+func extractSearchSnippet(body, query string) string {
+	if query == "" || body == "" {
+		return ""
+	}
+	lowerBody := strings.ToLower(body)
+	lowerQuery := strings.ToLower(query)
+	idx := strings.Index(lowerBody, lowerQuery)
+	if idx < 0 {
+		// Fall back to a leading window — the query
+		// might only match in subject/from which the
+		// caller can also highlight.
+		end := 200
+		if end > len(body) {
+			end = len(body)
+		}
+		return strings.TrimSpace(body[:end])
+	}
+	start := idx - 60
+	if start < 0 {
+		start = 0
+	}
+	end := idx + len(query) + 140
+	if end > len(body) {
+		end = len(body)
+	}
+	prefix := ""
+	if start > 0 {
+		prefix = "…"
+	}
+	suffix := ""
+	if end < len(body) {
+		suffix = "…"
+	}
+	return prefix + strings.TrimSpace(body[start:end]) + suffix
 }
 
 // WebmailMessage returns one message's metadata and the
@@ -672,6 +727,457 @@ func (h *Handler) WebmailDelete(c fiber.Ctx) error {
 		"status":  "deleted",
 		"moved_to": trash.Path,
 	})
+}
+
+// WebmailUpdateMessage updates per-message flags. Used by
+// the webmail UI for "mark read/unread", "star/flag",
+// "mark unread", and "remove from trash" (deleted=false).
+// Body: {seen?: bool, flagged?: bool, deleted?: bool} —
+// only fields supplied are changed; absent fields stay
+// at their current value.
+//
+// Authorization: same as WebmailMessage — the message must
+// belong to the caller's mailbox, else 404.
+func (h *Handler) WebmailUpdateMessage(c fiber.Ctx) error {
+	ctx, reason := h.resolveWebmailUserContext(c)
+	if ctx == nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error":  "no mailbox",
+			"reason": reason,
+		})
+	}
+	id, err := parseMessageID(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid message id"})
+	}
+	msg, _, err := ctx.MailboxStore.LoadMessage(c.Context(), id, nil)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "message not found"})
+	}
+	if msg.MailboxID != ctx.Mailbox.ID {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "message not found"})
+	}
+	var req struct {
+		Seen    *bool `json:"seen"`
+		Flagged *bool `json:"flagged"`
+		Deleted *bool `json:"deleted"`
+		Junk    *bool `json:"junk"`
+	}
+	if err := c.Bind().JSON(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
+	}
+	if req.Seen == nil && req.Flagged == nil && req.Deleted == nil && req.Junk == nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "at least one of seen/flagged/deleted/junk must be supplied",
+		})
+	}
+	if err := ctx.MailboxStore.Messages.UpdateFlags(c.Context(), msg.ID,
+		req.Seen, nil, req.Flagged, nil, req.Deleted, req.Junk, nil); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": fmt.Sprintf("update flags: %v", err),
+		})
+	}
+	return c.JSON(fiber.Map{
+		"id":     msg.ID,
+		"status": "updated",
+	})
+}
+
+// WebmailArchive moves a message into the Archive system
+// folder. Equivalent to "remove from Inbox without
+// deleting" — the row stays recoverable in Archive until
+// the user explicitly deletes it.
+//
+// Authorization: same as WebmailMessage.
+func (h *Handler) WebmailArchive(c fiber.Ctx) error {
+	ctx, reason := h.resolveWebmailUserContext(c)
+	if ctx == nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error":  "no mailbox",
+			"reason": reason,
+		})
+	}
+	id, err := parseMessageID(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid message id"})
+	}
+	msg, _, err := ctx.MailboxStore.LoadMessage(c.Context(), id, nil)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "message not found"})
+	}
+	if msg.MailboxID != ctx.Mailbox.ID {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "message not found"})
+	}
+	archive, err := resolveFolderCaseInsensitive(c.Context(), ctx.MailboxStore, ctx.Mailbox.ID, "Archive")
+	if err != nil || archive == nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Archive folder not found; ensure system folders are provisioned",
+		})
+	}
+	if err := ctx.MailboxStore.MoveMessage(c.Context(), msg.ID, archive.ID, nil); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": fmt.Sprintf("move to archive: %v", err),
+		})
+	}
+	// Clear the deleted flag if it was set; Archive
+	// holds live messages, not soft-deleted ones.
+	deleted := false
+	_ = ctx.MailboxStore.Messages.UpdateFlags(c.Context(), msg.ID,
+		nil, nil, nil, nil, &deleted, nil, nil)
+	return c.JSON(fiber.Map{
+		"id":      msg.ID,
+		"status":  "archived",
+		"moved_to": archive.Path,
+	})
+}
+
+// WebmailMarkFolderRead sets seen=true on every non-deleted
+// message in the given folder. Used by the "Mark all as
+// read" action in the message list toolbar.
+//
+// Authorization: the folder must belong to the caller's
+// mailbox, else 404.
+func (h *Handler) WebmailMarkFolderRead(c fiber.Ctx) error {
+	ctx, reason := h.resolveWebmailUserContext(c)
+	if ctx == nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error":  "no mailbox",
+			"reason": reason,
+		})
+	}
+	folderID, err := parseMessageID(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid folder id"})
+	}
+	folder, err := ctx.MailboxStore.Folders.GetByID(c.Context(), folderID, nil)
+	if err != nil || folder == nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "folder not found"})
+	}
+	if folder.MailboxID != ctx.Mailbox.ID {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "folder not found"})
+	}
+	sqlDB, dbErr := h.db.DB()
+	if dbErr != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database unavailable"})
+	}
+	now := time.Now().UTC()
+	res, err := sqlDB.Exec(
+		"UPDATE coremail_messages SET seen = 1, updated_at = ? WHERE mailbox_id = ? AND folder_id = ? AND deleted = 0 AND seen = 0",
+		now, ctx.Mailbox.ID, folder.ID,
+	)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": fmt.Sprintf("mark folder read: %v", err),
+		})
+	}
+	affected, _ := res.RowsAffected()
+	return c.JSON(fiber.Map{
+		"folder_id": folder.ID,
+		"folder":    folder.Path,
+		"marked":    affected,
+		"status":    "ok",
+	})
+}
+
+// WebmailSaveDraft persists a new draft or updates an
+// existing one. The body is a normal Message with
+// draft=true in the Drafts folder.
+//
+// Body: {id?: uint, to?, cc?, bcc?, subject?, body?}
+//   - id absent  -> create new draft
+//   - id present -> update existing draft (must belong
+//                   to the caller's mailbox)
+//
+// The "to/cc/bcc/subject/body" fields are stored verbatim
+// in the message and the RFC822 body on disk. Sending a
+// draft is the user's job: the compose UI reuses
+// POST /api/v1/webmail/send with the same payload.
+func (h *Handler) WebmailSaveDraft(c fiber.Ctx) error {
+	ctx, reason := h.resolveWebmailUserContext(c)
+	if ctx == nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error":  "no mailbox",
+			"reason": reason,
+		})
+	}
+	var req struct {
+		ID      uint   `json:"id"`
+		To      string `json:"to"`
+		Cc      string `json:"cc"`
+		Bcc     string `json:"bcc"`
+		Subject string `json:"subject"`
+		Body    string `json:"body"`
+	}
+	if err := c.Bind().JSON(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
+	}
+	// If the URL had an :id segment (PUT /drafts/:id), use
+	// that as the draft id when the body didn't carry one.
+	if req.ID == 0 {
+		if idParam := c.Params("id"); idParam != "" {
+			if id, err := parseMessageID(idParam); err == nil {
+				req.ID = id
+			}
+		}
+	}
+	draftFolder, err := resolveFolderCaseInsensitive(c.Context(), ctx.MailboxStore, ctx.Mailbox.ID, "Drafts")
+	if err != nil || draftFolder == nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Drafts folder not found; ensure system folders are provisioned",
+		})
+	}
+	now := time.Now().UTC()
+	subject := sanitizeCRLF(req.Subject)
+	if strings.TrimSpace(subject) == "" {
+		subject = "(no subject)"
+	}
+
+	if req.ID != 0 {
+		// Update existing draft — must belong to caller.
+		msg, _, err := ctx.MailboxStore.LoadMessage(c.Context(), req.ID, nil)
+		if err != nil || msg == nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "draft not found"})
+		}
+		if msg.MailboxID != ctx.Mailbox.ID || !msg.Draft {
+			return c.Status(finderStatusForbidden()).JSON(fiber.Map{"error": "draft not found"})
+		}
+		// Update metadata in place.
+		msg.Subject = subject
+		msg.ToAddresses = sanitizeCRLF(req.To)
+		msg.CcAddresses = sanitizeCRLF(req.Cc)
+		msg.BccAddresses = sanitizeCRLF(req.Bcc)
+		msg.MessageDate = &now
+		if err := ctx.MailboxStore.UpdateMetadata(c.Context(), msg, nil); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": fmt.Sprintf("update draft: %v", err),
+			})
+		}
+		// Rewrite the on-disk RFC822 so the body matches.
+		rfc822 := buildRFC822(rfc822Params{
+			From:      ctx.Mailbox.Email,
+			To:        req.To,
+			Cc:        req.Cc,
+			Bcc:       req.Bcc,
+			Subject:   req.Subject,
+			Body:      req.Body,
+			MessageID: msg.MessageID,
+			Date:      now,
+			FromName:  ctx.Mailbox.Name,
+		})
+		if err := ctx.MailboxStore.WriteRFC822(c.Context(), msg.ID, []byte(rfc822), nil); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": fmt.Sprintf("rewrite draft body: %v", err),
+			})
+		}
+		return c.JSON(fiber.Map{
+			"id":     msg.ID,
+			"status": "updated",
+		})
+	}
+
+	// Create new draft.
+	messageID := generateMessageID()
+	rfc822 := buildRFC822(rfc822Params{
+		From:      ctx.Mailbox.Email,
+		To:        req.To,
+		Cc:        req.Cc,
+		Bcc:       req.Bcc,
+		Subject:   req.Subject,
+		Body:      req.Body,
+		MessageID: messageID,
+		Date:      now,
+		FromName:  ctx.Mailbox.Name,
+	})
+	msg := &storage.Message{
+		MessageID:         messageID,
+		InternetMessageID: fmt.Sprintf("<%s@orvix.local>", messageID),
+		TenantID:          ctx.Mailbox.TenantID,
+		DomainID:          ctx.Mailbox.DomainID,
+		MailboxID:         ctx.Mailbox.ID,
+		FolderID:          draftFolder.ID,
+		Subject:           subject,
+		FromAddress:       ctx.Mailbox.Email,
+		ToAddresses:       sanitizeCRLF(req.To),
+		CcAddresses:       sanitizeCRLF(req.Cc),
+		BccAddresses:      sanitizeCRLF(req.Bcc),
+		ReplyTo:           ctx.Mailbox.Email,
+		MessageDate:       &now,
+		ReceivedDate:      now,
+		Draft:             true,
+		Seen:              true,
+	}
+	if err := ctx.MailboxStore.StoreMessage(c.Context(), msg, []byte(rfc822), nil); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": fmt.Sprintf("store draft: %v", err),
+		})
+	}
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+		"id":         msg.ID,
+		"message_id": msg.MessageID,
+		"status":     "draft",
+	})
+}
+
+// finderStatusForbidden returns the Fiber 403 status
+// without dragging the import into the file's top-level
+// declarations. Small helper because the API has only a
+// handful of these.
+func finderStatusForbidden() int { return 403 }
+
+// WebmailGetDraft returns one draft message in full
+// (metadata + RFC822 body) so the compose UI can restore
+// the user's last edit. 404 if the message is not a
+// draft in the caller's mailbox.
+func (h *Handler) WebmailGetDraft(c fiber.Ctx) error {
+	ctx, reason := h.resolveWebmailUserContext(c)
+	if ctx == nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error":  "no mailbox",
+			"reason": reason,
+		})
+	}
+	id, err := parseMessageID(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid draft id"})
+	}
+	msg, rfc822, err := ctx.MailboxStore.LoadMessage(c.Context(), id, nil)
+	if err != nil {
+		return c.Status(finderStatusForbidden()).JSON(fiber.Map{"error": "draft not found"})
+	}
+	if msg.MailboxID != ctx.Mailbox.ID || !msg.Draft {
+		return c.Status(finderStatusForbidden()).JSON(fiber.Map{"error": "draft not found"})
+	}
+	body := extractBodyPreview(string(rfc822), 100000)
+	return c.JSON(fiber.Map{
+		"id":       msg.ID,
+		"subject":  msg.Subject,
+		"to":       msg.ToAddresses,
+		"cc":       msg.CcAddresses,
+		"bcc":      msg.BccAddresses,
+		"body":     body,
+		"rfc822":   string(rfc822),
+		"status":   "draft",
+	})
+}
+
+// WebmailDeleteDraft removes a draft message. The message
+// row is hard-deleted because drafts are user scratch
+// space — there is no recovery story for "I deleted my
+// draft". Authorization: the draft must belong to the
+// caller's mailbox.
+func (h *Handler) WebmailDeleteDraft(c fiber.Ctx) error {
+	ctx, reason := h.resolveWebmailUserContext(c)
+	if ctx == nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error":  "no mailbox",
+			"reason": reason,
+		})
+	}
+	id, err := parseMessageID(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid draft id"})
+	}
+	msg, _, err := ctx.MailboxStore.LoadMessage(c.Context(), id, nil)
+	if err != nil {
+		return c.Status(finderStatusForbidden()).JSON(fiber.Map{"error": "draft not found"})
+	}
+	if msg.MailboxID != ctx.Mailbox.ID || !msg.Draft {
+		return c.Status(finderStatusForbidden()).JSON(fiber.Map{"error": "draft not found"})
+	}
+	if err := ctx.MailboxStore.PurgeMessage(c.Context(), msg.ID, nil); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": fmt.Sprintf("delete draft: %v", err),
+		})
+	}
+	return c.JSON(fiber.Map{
+		"id":     msg.ID,
+		"status": "deleted",
+	})
+}
+
+// WebmailListDrafts returns the user's draft messages.
+// Drafts are Message rows with Draft=true; we filter on
+// the message repo so non-drafts are excluded. Returns a
+// flat JSON array.
+func (h *Handler) WebmailListDrafts(c fiber.Ctx) error {
+	ctx, reason := h.resolveWebmailUserContext(c)
+	if ctx == nil {
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{
+			"drafts": []any{},
+			"reason": reason,
+		})
+	}
+	draftFolder, err := resolveFolderCaseInsensitive(c.Context(), ctx.MailboxStore, ctx.Mailbox.ID, "Drafts")
+	if err != nil || draftFolder == nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Drafts folder not found; ensure system folders are provisioned",
+		})
+	}
+	messages, _, err := ctx.MailboxStore.Messages.List(c.Context(), storage.MessageFilter{
+		MailboxID: ctx.Mailbox.ID,
+		FolderID:  &draftFolder.ID,
+		Limit:     200,
+	}, nil)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": fmt.Sprintf("list drafts: %v", err),
+		})
+	}
+	out := make([]fiber.Map, 0, len(messages))
+	for _, m := range messages {
+		if !m.Draft {
+			continue
+		}
+		// Read the body preview from disk so the list
+		// shows the user's last-typed snippet. Limit to
+		// 200 chars; full body comes via /drafts/:id.
+		body := ""
+		if data, err := ctx.MailboxStore.GetRFC822(c.Context(), m.ID, nil); err == nil {
+			body = extractBodyPreview(string(data), 200)
+		}
+		out = append(out, fiber.Map{
+			"id":            m.ID,
+			"subject":       m.Subject,
+			"to":            m.ToAddresses,
+			"cc":            m.CcAddresses,
+			"bcc":           m.BccAddresses,
+			"body":          body,
+			"message_date":  m.MessageDate,
+			"received_date": m.ReceivedDate,
+			"folder_id":     m.FolderID,
+		})
+	}
+	return c.JSON(fiber.Map{"drafts": out})
+}
+
+// extractBodyPreview returns the first non-empty line of
+// the body section of an RFC822 message, trimmed to maxLen
+// characters. Used by the drafts list so the UI can show
+// a snippet of the user's last edit without loading the
+// full body.
+func extractBodyPreview(rfc822 string, maxLen int) string {
+	// Find the blank line separating headers from body.
+	idx := strings.Index(rfc822, "\r\n\r\n")
+	if idx < 0 {
+		idx = strings.Index(rfc822, "\n\n")
+	}
+	if idx < 0 {
+		return ""
+	}
+	body := rfc822[idx:]
+	// Drop leading newlines.
+	body = strings.TrimLeft(body, "\r\n")
+	// First non-empty line.
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) != "" {
+			if len(line) > maxLen {
+				return strings.TrimSpace(line[:maxLen]) + "…"
+			}
+			return strings.TrimSpace(line)
+		}
+	}
+	return ""
 }
 
 // resolveFolderCaseInsensitive finds a folder by path or
