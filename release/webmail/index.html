@@ -7,11 +7,25 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="manifest" href="/manifest.json" />
     <title>Orvix Webmail</title>
+    <!--
+      Auth gate. Loaded BEFORE the React bundle so the gate
+      styles apply before the bundle's own CSS, and the gate
+      script hides #root until /api/v1/me confirms a valid
+      session. The React bundle still loads in the background
+      but its mount point is invisible.
+
+      Both files live under /webmail/assets/ so they are
+      allowed by the project CSP (script-src 'self',
+      style-src 'self') without 'unsafe-inline'.
+    -->
+    <link rel="stylesheet" href="/webmail/assets/auth-gate.css">
+    <script src="/webmail/assets/auth-gate.js" defer></script>
     <script type="module" crossorigin src="/webmail/assets/index-CmhA8wNq.js"></script>
     <link rel="modulepreload" crossorigin href="/webmail/assets/vendor-xxE1au3H.js">
     <link rel="stylesheet" crossorigin href="/webmail/assets/index-BiLI_Nmd.css">
   </head>
   <body class="bg-[#0C0E12] text-[#E8EAF0]">
-    <div id="root"></div>
+    <div id="root"></div>
+
   </body>
 </html>
