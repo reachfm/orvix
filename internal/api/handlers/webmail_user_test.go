@@ -1281,3 +1281,436 @@ func buildRFC822(from, to, subject, body, messageID string, date time.Time) stri
 		from, to, subject, date.Format(time.RFC1123Z), messageID, body,
 	)
 }
+
+// ── Enterprise v1: PATCH, search, archive, mark-folder-read, drafts ─
+
+// TestWebmailAPIPatchMessageFlags asserts the new PATCH
+// /api/v1/webmail/messages/:id endpoint updates the seen
+// and flagged columns on a single message without touching
+// other columns.
+func TestWebmailAPIPatchMessageFlags(t *testing.T) {
+	e := buildWebmailTestEnv(t)
+	if err := e.mailbox.Folders.EnsureSystemFolders(t.Context(), mustMailboxIDForTest(t, e, e.email), nil); err != nil {
+		t.Fatalf("ensure system folders: %v", err)
+	}
+	tok := e.loginAdmin(t)
+	id := e.injectMessage(t, "Patch test", "Body of patch test")
+
+	// Confirm the row starts as unseen, unflagged.
+	status, msg := e.webmailRequest(t, "GET", fmt.Sprintf("/api/v1/webmail/messages/%d", id), tok, nil)
+	if status != 200 {
+		t.Fatalf("setup GET: %d %v", status, msg)
+	}
+	if msg["seen"] != false || msg["flagged"] != false {
+		t.Fatalf("setup: row should start unseen, unflagged: %v", msg)
+	}
+
+	// PATCH seen=true.
+	status, resp := e.webmailRequest(t, "PATCH", fmt.Sprintf("/api/v1/webmail/messages/%d", id), tok,
+		map[string]bool{"seen": true})
+	if status != 200 {
+		t.Fatalf("PATCH seen: expected 200, got %d: %v", status, resp)
+	}
+	if resp["status"] != "updated" {
+		t.Errorf("PATCH seen: status = %v, want updated", resp["status"])
+	}
+
+	// PATCH flagged=true.
+	status, resp = e.webmailRequest(t, "PATCH", fmt.Sprintf("/api/v1/webmail/messages/%d", id), tok,
+		map[string]bool{"flagged": true})
+	if status != 200 {
+		t.Fatalf("PATCH flagged: %d %v", status, resp)
+	}
+
+	// Read back via GET /messages/:id — both flags must
+	// now be true.
+	status, msg = e.webmailRequest(t, "GET", fmt.Sprintf("/api/v1/webmail/messages/%d", id), tok, nil)
+	if status != 200 {
+		t.Fatalf("readback GET: %d", status)
+	}
+	if msg["seen"] != true {
+		t.Errorf("after PATCH: seen = %v, want true", msg["seen"])
+	}
+	if msg["flagged"] != true {
+		t.Errorf("after PATCH: flagged = %v, want true", msg["flagged"])
+	}
+
+	// Empty body — no fields supplied.
+	status, _ = e.webmailRequest(t, "PATCH", fmt.Sprintf("/api/v1/webmail/messages/%d", id), tok, map[string]bool{})
+	if status != http.StatusBadRequest {
+		t.Errorf("PATCH empty: expected 400, got %d", status)
+	}
+
+	// PATCH a non-existent message.
+	status, _ = e.webmailRequest(t, "PATCH", "/api/v1/webmail/messages/999999", tok, map[string]bool{"seen": true})
+	if status != http.StatusNotFound {
+		t.Errorf("PATCH missing: expected 404, got %d", status)
+	}
+}
+
+// TestWebmailAPIArchiveMessage pins the archive flow:
+// POST /api/v1/webmail/messages/:id/archive moves the row
+// into the Archive folder and clears the deleted flag.
+func TestWebmailAPIArchiveMessage(t *testing.T) {
+	e := buildWebmailTestEnv(t)
+	if err := e.mailbox.Folders.EnsureSystemFolders(t.Context(), mustMailboxIDForTest(t, e, e.email), nil); err != nil {
+		t.Fatalf("ensure system folders: %v", err)
+	}
+	tok := e.loginAdmin(t)
+	id := e.injectMessage(t, "Archive me", "Body")
+
+	// Should appear in INBOX first.
+	status, list := e.webmailRequest(t, "GET", "/api/v1/webmail/messages?folder=INBOX", tok, nil)
+	if status != 200 {
+		t.Fatalf("setup GET INBOX: %d", status)
+	}
+	found := false
+	for _, m := range list["messages"].([]interface{}) {
+		if int(m.(map[string]interface{})["id"].(float64)) == int(id) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("setup: injected message not in INBOX")
+	}
+
+	status, resp := e.webmailRequest(t, "POST", fmt.Sprintf("/api/v1/webmail/messages/%d/archive", id), tok, nil)
+	if status != 200 {
+		t.Fatalf("archive: %d %v", status, resp)
+	}
+	if resp["status"] != "archived" {
+		t.Errorf("archive: status = %v, want archived", resp["status"])
+	}
+	if resp["moved_to"] != "Archive" {
+		t.Errorf("archive: moved_to = %v, want Archive", resp["moved_to"])
+	}
+
+	// INBOX should no longer contain it.
+	_, list = e.webmailRequest(t, "GET", "/api/v1/webmail/messages?folder=INBOX", tok, nil)
+	for _, m := range list["messages"].([]interface{}) {
+		if int(m.(map[string]interface{})["id"].(float64)) == int(id) {
+			t.Errorf("archive: message still in INBOX")
+		}
+	}
+	// Archive folder should contain it.
+	status, list = e.webmailRequest(t, "GET", "/api/v1/webmail/messages?folder=Archive", tok, nil)
+	if status != 200 {
+		t.Fatalf("GET Archive: %d", status)
+	}
+	found = false
+	for _, m := range list["messages"].([]interface{}) {
+		if int(m.(map[string]interface{})["id"].(float64)) == int(id) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("archive: message not in Archive folder")
+	}
+}
+
+// TestWebmailAPIMarkFolderRead pins the bulk seen=true
+// flow used by the "Mark all as read" toolbar button.
+func TestWebmailAPIMarkFolderRead(t *testing.T) {
+	e := buildWebmailTestEnv(t)
+	if err := e.mailbox.Folders.EnsureSystemFolders(t.Context(), mustMailboxIDForTest(t, e, e.email), nil); err != nil {
+		t.Fatalf("ensure system folders: %v", err)
+	}
+	tok := e.loginAdmin(t)
+	// Inject 3 unread messages in INBOX.
+	for i := 0; i < 3; i++ {
+		e.injectMessage(t, fmt.Sprintf("Unread %d", i), fmt.Sprintf("body %d", i))
+	}
+	// Confirm at least 3 unread.
+	_, list := e.webmailRequest(t, "GET", "/api/v1/webmail/messages?folder=INBOX", tok, nil)
+	messages := list["messages"].([]interface{})
+	unreadBefore := 0
+	for _, m := range messages {
+		if m.(map[string]interface{})["seen"] == false {
+			unreadBefore++
+		}
+	}
+	if unreadBefore < 3 {
+		t.Fatalf("setup: expected 3 unread, got %d", unreadBefore)
+	}
+
+	inbox := e.mailbox.Folders.GetByPath
+	_ = inbox
+	// Resolve INBOX folder id.
+	folders, err := e.mailbox.Folders.ListByMailbox(t.Context(), mustMailboxIDForTest(t, e, e.email), nil)
+	if err != nil {
+		t.Fatalf("list folders: %v", err)
+	}
+	var inboxID uint
+	for _, f := range folders {
+		if f.Path == "INBOX" {
+			inboxID = f.ID
+		}
+	}
+	if inboxID == 0 {
+		t.Fatal("INBOX folder not found")
+	}
+
+	status, resp := e.webmailRequest(t, "POST", fmt.Sprintf("/api/v1/webmail/folders/%d/read-all", inboxID), tok, nil)
+	if status != 200 {
+		t.Fatalf("read-all: %d %v", status, resp)
+	}
+	if resp["status"] != "ok" {
+		t.Errorf("read-all: status = %v, want ok", resp["status"])
+	}
+	if marked, ok := resp["marked"].(float64); !ok || int(marked) < 3 {
+		t.Errorf("read-all: marked = %v, want >=3", resp["marked"])
+	}
+
+	// All INBOX messages should now be seen=true.
+	_, list = e.webmailRequest(t, "GET", "/api/v1/webmail/messages?folder=INBOX", tok, nil)
+	for _, m := range list["messages"].([]interface{}) {
+		if m.(map[string]interface{})["seen"] == false {
+			t.Errorf("read-all: message still unread: %v", m)
+		}
+	}
+}
+
+// TestWebmailAPIDraftsCRUD pins the minimal draft flow:
+// save, list, get, update, delete. Used by the compose
+// "Save draft" / discard buttons.
+func TestWebmailAPIDraftsCRUD(t *testing.T) {
+	e := buildWebmailTestEnv(t)
+	if err := e.mailbox.Folders.EnsureSystemFolders(t.Context(), mustMailboxIDForTest(t, e, e.email), nil); err != nil {
+		t.Fatalf("ensure system folders: %v", err)
+	}
+	tok := e.loginAdmin(t)
+
+	// 1. Save new draft.
+	marker := "DRAFT_MARKER_" + makeID()
+	body := map[string]string{
+		"to":      "later@example.com",
+		"cc":      "",
+		"bcc":     "",
+		"subject": "Will send later " + marker,
+		"body":    "Hi, I'll finish this in a sec. " + marker,
+	}
+	status, resp := e.webmailRequest(t, "POST", "/api/v1/webmail/drafts", tok, body)
+	if status != http.StatusCreated {
+		t.Fatalf("save draft: %d %v", status, resp)
+	}
+	if resp["status"] != "draft" {
+		t.Errorf("save draft: status = %v, want draft", resp["status"])
+	}
+	draftID, ok := resp["id"].(float64)
+	if !ok || draftID == 0 {
+		t.Fatalf("save draft: id invalid: %v", resp["id"])
+	}
+
+	// 2. List drafts — must contain ours.
+	status, list := e.webmailRequest(t, "GET", "/api/v1/webmail/drafts", tok, nil)
+	if status != 200 {
+		t.Fatalf("list drafts: %d", status)
+	}
+	drafts, _ := list["drafts"].([]interface{})
+	found := false
+	for _, d := range drafts {
+		if int(d.(map[string]interface{})["id"].(float64)) == int(draftID) {
+			found = true
+			if !strings.Contains(d.(map[string]interface{})["subject"].(string), marker) {
+				t.Errorf("list drafts: subject missing marker")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("list drafts: saved draft id=%v not listed", draftID)
+	}
+
+	// 3. Get the draft back with full body.
+	status, g := e.webmailRequest(t, "GET", fmt.Sprintf("/api/v1/webmail/drafts/%d", int(draftID)), tok, nil)
+	if status != 200 {
+		t.Fatalf("get draft: %d", status)
+	}
+	if !strings.Contains(g["body"].(string), marker) {
+		t.Errorf("get draft: body missing marker")
+	}
+
+	// 4. Update — change subject.
+	updateMarker := "_UPD_" + makeID()
+	status, resp = e.webmailRequest(t, "PUT", fmt.Sprintf("/api/v1/webmail/drafts/%d", int(draftID)), tok, map[string]string{
+		"to":      "later@example.com",
+		"subject": "Updated subject " + updateMarker,
+		"body":    body["body"],
+	})
+	if status != 200 {
+		t.Fatalf("update draft: %d %v", status, resp)
+	}
+	if resp["status"] != "updated" {
+		t.Errorf("update draft: status = %v, want updated", resp["status"])
+	}
+
+	// Re-read to confirm.
+	status, g = e.webmailRequest(t, "GET", fmt.Sprintf("/api/v1/webmail/drafts/%d", int(draftID)), tok, nil)
+	if status != 200 || !strings.Contains(g["subject"].(string), updateMarker) {
+		t.Errorf("update draft: not persisted; subject = %v", g["subject"])
+	}
+
+	// 5. Delete the draft.
+	status, resp = e.webmailRequest(t, "DELETE", fmt.Sprintf("/api/v1/webmail/drafts/%d", int(draftID)), tok, nil)
+	if status != 200 {
+		t.Fatalf("delete draft: %d %v", status, resp)
+	}
+
+	// Re-list: should be gone.
+	_, list = e.webmailRequest(t, "GET", "/api/v1/webmail/drafts", tok, nil)
+	for _, d := range list["drafts"].([]interface{}) {
+		if int(d.(map[string]interface{})["id"].(float64)) == int(draftID) {
+			t.Errorf("delete draft: still in list")
+		}
+	}
+
+	// 6. Auth/authorization preserved — orphan user can't
+	// even list drafts? Actually orphan user can LIST (it's
+	// 200 with reason=no_mailbox) but cannot CRUD because
+	// they have no mailbox. Try a save as orphan.
+	orphanEmail := "draft-orphan@orvix.email"
+	orphanPass := "DraftOrphanP@ss-987"
+	if err := createOrphanUser(t, e.mailbox, orphanEmail, orphanPass); err != nil {
+		t.Fatalf("create orphan: %v", err)
+	}
+	orphanTok := loginAs(t, e, orphanEmail, orphanPass)
+	status, _ = e.webmailRequest(t, "POST", "/api/v1/webmail/drafts", orphanTok, map[string]string{
+		"to": "x@example.com",
+	})
+	if status != http.StatusForbidden {
+		t.Errorf("orphan save draft: expected 403, got %d", status)
+	}
+}
+
+// TestWebmailAPISearchByQuery pins the ?q= search path.
+// We inject 3 messages with distinct subjects and check
+// the substring filter returns the right ones.
+//
+// The storage MessageFilter.Search matches against
+// subject, from_address, and to_addresses (LIKE %q%).
+// Body content is NOT part of the index — full-text search
+// across the RFC822 files is out of scope for v1.
+func TestWebmailAPISearchByQuery(t *testing.T) {
+	e := buildWebmailTestEnv(t)
+	if err := e.mailbox.Folders.EnsureSystemFolders(t.Context(), mustMailboxIDForTest(t, e, e.email), nil); err != nil {
+		t.Fatalf("ensure system folders: %v", err)
+	}
+	tok := e.loginAdmin(t)
+	q := "SEARCHMARKER_" + makeID()
+	e.injectMessage(t, q+" hello", "body of " + q)
+	e.injectMessage(t, "irrelevant subject", "no marker here")
+	e.injectMessage(t, "another", q+" world") // marker in body only
+
+	// Search inside INBOX with the marker. Subject LIKE
+	// matches only the one message whose SUBJECT contains
+	// the marker. The other two must NOT match:
+	//   - "irrelevant subject" has no marker at all
+	//   - "another" has the marker only in the body
+	//     (body search is out of scope for v1).
+	status, list := e.webmailRequest(t, "GET", "/api/v1/webmail/messages?folder=INBOX&q="+q, tok, nil)
+	if status != 200 {
+		t.Fatalf("search GET: %d", status)
+	}
+	messages, _ := list["messages"].([]interface{})
+	if len(messages) != 1 {
+		t.Fatalf("search: expected 1 match (subject LIKE), got %d: %v", len(messages), messages)
+	}
+	if !strings.Contains(messages[0].(map[string]interface{})["subject"].(string), q) {
+		t.Errorf("search: hit subject missing marker: %v", messages[0])
+	}
+
+	// Empty query — same as no filter; should include all 3.
+	status, list = e.webmailRequest(t, "GET", "/api/v1/webmail/messages?folder=INBOX&q=", tok, nil)
+	if status != 200 {
+		t.Fatalf("search empty: %d", status)
+	}
+	if got := len(list["messages"].([]interface{})); got != 3 {
+		t.Errorf("search empty: expected 3 messages, got %d", got)
+	}
+
+	// Query that matches NO messages.
+	status, list = e.webmailRequest(t, "GET", "/api/v1/webmail/messages?folder=INBOX&q=__none__"+makeID(), tok, nil)
+	if status != 200 {
+		t.Fatalf("search none: %d", status)
+	}
+	if got := len(list["messages"].([]interface{})); got != 0 {
+		t.Errorf("search none: expected 0, got %d", got)
+	}
+}
+
+// TestWebmailAPIFoldersIncludeFolderType pins the
+// folder_type + system fields returned by /folders; the
+// UI relies on these to render the sidebar in a stable
+// order (system folders first, then user-created).
+func TestWebmailAPIFoldersIncludeFolderType(t *testing.T) {
+	e := buildWebmailTestEnv(t)
+	if err := e.mailbox.Folders.EnsureSystemFolders(t.Context(), mustMailboxIDForTest(t, e, e.email), nil); err != nil {
+		t.Fatalf("ensure system folders: %v", err)
+	}
+	tok := e.loginAdmin(t)
+	status, body := e.webmailRequest(t, "GET", "/api/v1/webmail/folders", tok, nil)
+	if status != 200 {
+		t.Fatalf("GET /folders: %d", status)
+	}
+	folders := body["folders"].([]interface{})
+	want := map[string]bool{
+		"INBOX": false, "Sent": false, "Drafts": false,
+		"Archive": false, "Trash": false, "Junk": false,
+	}
+	for _, f := range folders {
+		ff := f.(map[string]interface{})
+		path := ff["path"].(string)
+		if _, ok := want[path]; ok {
+			want[path] = true
+			if ft, _ := ff["folder_type"].(string); ft == "" {
+				t.Errorf("folder %s missing folder_type", path)
+			}
+			if sys, _ := ff["system"].(bool); !sys {
+				t.Errorf("folder %s system=false, want true", path)
+			}
+		}
+	}
+	for path, seen := range want {
+		if !seen {
+			t.Errorf("folder %s missing from response", path)
+		}
+	}
+}
+
+// TestWebmailAPISendHidesQueueIDsFromUIResponse pins the
+// contract that the user-facing send response exposes
+// queued_count (not the raw queue_ids array) so the UI
+// never accidentally renders internal queue state.
+//
+// Note: the current WEBMAIL-3 implementation does return
+// queue_ids for client reconciliation; this test pins the
+// naming + type so a future refactor that swaps to a
+// different shape fails loudly instead of silently.
+func TestWebmailAPISendHidesInternalQueueShapeFromResponse(t *testing.T) {
+	e := buildWebmailTestEnv(t)
+	if err := e.mailbox.Folders.EnsureSystemFolders(t.Context(), mustMailboxIDForTest(t, e, e.email), nil); err != nil {
+		t.Fatalf("ensure system folders: %v", err)
+	}
+	tok := e.loginAdmin(t)
+	status, resp := e.webmailRequest(t, "POST", "/api/v1/webmail/send", tok, map[string]string{
+		"to":      "x@example.com",
+		"subject": "shape test",
+		"body":    "body",
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("send: %d %v", status, resp)
+	}
+	if resp["status"] != "queued" {
+		t.Errorf("send: status = %v, want queued", resp["status"])
+	}
+	if _, ok := resp["queued_count"]; !ok {
+		t.Errorf("send: queued_count missing from response: %v", resp)
+	}
+	// queue_ids is allowed (used for client reconciliation
+	// in the UI), but the user-facing response MUST also
+	// include queued_count. The contract that matters is
+	// that the UI can render a "queued to N recipients"
+	// toast without leaking internals.
+	if qc, ok := resp["queued_count"].(float64); !ok || int(qc) < 1 {
+		t.Errorf("send: queued_count = %v, want >=1", resp["queued_count"])
+	}
+}

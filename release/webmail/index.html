@@ -1,25 +1,32 @@
 <!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="Orvix Webmail - Professional Email Client" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <link rel="manifest" href="/manifest.json" />
-    <title>Orvix Webmail</title>
-    <!--
-      Auth gate. Loaded BEFORE the webmail client so the
-      gate can confirm /api/v1/me returns 200 before any UI
-      is rendered. The webmail client itself then talks to
-      /api/v1/webmail/* to read the user's real mailbox.
-    -->
-    <link rel="stylesheet" href="/webmail/assets/auth-gate.css">
-    <link rel="stylesheet" href="/webmail/assets/webmail.css">
-    <script src="/webmail/assets/auth-gate.js" defer></script>
-    <script src="/webmail/assets/webmail.js" defer></script>
-  </head>
-  <body>
-    <div id="root"></div>
-
-  </body>
+<html lang="en" dir="auto">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#0e1116" />
+  <title>Orvix Webmail</title>
+  <!-- Auth gate runs first; it verifies the session via /api/v1/me,
+       sets the auth-ready flag, and only then calls
+       window.OrvixWebmail.init(). The two scripts are loaded with
+       `defer` so they execute in document order. -->
+  <link rel="stylesheet" href="/webmail/assets/auth-gate.css" />
+  <link rel="stylesheet" href="/webmail/assets/webmail.css" />
+</head>
+<body>
+  <!-- The shell is rendered by webmail.js so the markup stays in
+       one place. If JS fails to load, the user sees the auth-gate
+       fallback below, which keeps the gate message accessible
+       without JavaScript. -->
+  <noscript>
+    <div style="padding:24px;font-family:system-ui;color:#d6dbe6;background:#0e1116;">
+      Orvix Webmail requires JavaScript. Please enable JavaScript
+      and reload this page.
+    </div>
+  </noscript>
+  <!-- The auth-gate overlays its UI on top of <body> if the
+       session check fails. webmail.js replaces the shell itself
+       (innerHTML on body) once init() runs. -->
+  <script defer src="/webmail/assets/auth-gate.js"></script>
+  <script defer src="/webmail/assets/webmail.js"></script>
+</body>
 </html>

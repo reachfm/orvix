@@ -109,6 +109,18 @@
     if (gate && gate.parentNode) gate.parentNode.removeChild(gate);
     var root = $('root');
     if (root) root.style.display = '';
+    // Hand off to the webmail client. The client is loaded
+    // via <script defer> after this gate, so by the time
+    // fetch resolves the global is available.
+    if (window.OrvixWebmail && typeof window.OrvixWebmail.init === 'function') {
+      window.OrvixWebmail.init();
+    } else if (document.readyState === 'loading') {
+      // Defer init until DOMContentLoaded if the script
+      // order somehow put webmail.js after us.
+      document.addEventListener('DOMContentLoaded', function () {
+        if (window.OrvixWebmail) window.OrvixWebmail.init();
+      });
+    }
   }
 
   function showUnauth() {

@@ -36,6 +36,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -79,7 +80,15 @@ func readFile(t *testing.T, root, rel string) string {
 
 // TestWebmailIndexHtmlReferencesGateBeforeBundle pins the
 // load order: the gate script must come BEFORE the webmail
-// client so it can hide #root before the client mounts.
+// client so the gate can run /api/v1/me first and only then
+// hand off via window.OrvixWebmail.init().
+//
+// In the enterprise v1 the shell is rendered by webmail.js
+// itself; there is no <div id="root"> to hide, and there is
+// no longer a React bundle. The gate still controls the
+// handoff: if /api/v1/me 401s, the gate shows the
+// "please sign in" card and never calls init(), so the
+// user's mailbox data is never requested.
 func TestWebmailIndexHtmlReferencesGateBeforeBundle(t *testing.T) {
 	root := webmailRepoRoot(t)
 	html := readFile(t, root, "release/webmail/index.html")
@@ -111,9 +120,23 @@ func TestWebmailIndexHtmlReferencesGateBeforeBundle(t *testing.T) {
 	if strings.Contains(html, "index-CmhA8wNq.js") {
 		t.Error("index.html must not reference the legacy demo React bundle (index-CmhA8wNq.js)")
 	}
-	// #root must still be present so the gate can hide it.
-	if !strings.Contains(html, `<div id="root">`) {
-		t.Error("index.html must keep <div id=\"root\"> as the gate's hidden mount point")
+	// The current webmail.js must use defer (matches auth-gate.js
+	// which is already defer); otherwise the gate would run AFTER
+	// webmail.js auto-init (a regression we are explicitly avoiding).
+	if !strings.Contains(html, `defer src="/webmail/assets/webmail.js"`) {
+		t.Error("index.html must load webmail.js with defer so auth-gate.js can run first")
+	}
+	// No inline scripts — the asset CSP forbids 'unsafe-inline'.
+	// Walk every <script ...> tag; flag any that do NOT carry a
+	// src= attribute (the safe form is <script defer src="...">).
+	// Go's regexp engine doesn't support negative lookahead, so we
+	// iterate manually.
+	scriptRe := regexp.MustCompile(`(?is)<script\b([^>]*)>`)
+	for _, m := range scriptRe.FindAllStringSubmatch(html, -1) {
+		attrs := m[1]
+		if !strings.Contains(attrs, "src=") {
+			t.Errorf("index.html contains inline <script> without src (CSP forbids unsafe-inline): %q", m[0])
+		}
 	}
 }
 
@@ -309,8 +332,11 @@ func TestWebmailGateFilesAreServedByRouter(t *testing.T) {
 	if !strings.Contains(body, "/webmail/assets/auth-gate.css") {
 		t.Fatalf("/webmail HTML missing auth-gate.css reference: %s", body)
 	}
-	if !strings.Contains(body, `<div id="root">`) {
-		t.Fatalf("/webmail HTML missing #root mount point: %s", body)
+	// webmail.js must be loaded (defers) so the gate can hand off
+	// to it on 200. The shell itself is rendered by webmail.js, so
+	// there is no <div id="root"> anymore.
+	if !strings.Contains(body, `/webmail/assets/webmail.js`) {
+		t.Fatalf("/webmail HTML missing webmail.js reference: %s", body)
 	}
 
 	// /webmail/inbox — SPA fallback to index.html, must
@@ -373,8 +399,8 @@ func TestWebmailGateFilesAreServedByRouter(t *testing.T) {
 	if status != 200 {
 		t.Fatalf("GET /webmail/assets/webmail.css: expected 200, got %d", status)
 	}
-	if !strings.Contains(body, ".webmail") {
-		t.Fatalf("webmail.css content unexpected: %s", body)
+	if !strings.Contains(body, "--sidebar-w") || !strings.Contains(body, "3-pane") {
+		t.Fatalf("webmail.css content unexpected: missing 3-pane layout markers")
 	}
 
 	// The legacy demo bundle MUST NOT be served. The
