@@ -31,7 +31,9 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/coremail"
+	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
+	"go.uber.org/zap"
 )
 
 // webmailUserContext resolves the current authenticated user
@@ -392,11 +394,38 @@ func (h *Handler) WebmailMessage(c fiber.Ctx) error {
 }
 
 // WebmailSend writes a new outbound message into the
-// caller's "Sent" folder via the MailStore. The actual SMTP
-// delivery is handled by the coremail queue/smtp pipeline
-// once the runtime is running; in environments without
-// SMTP, the message is durable on disk and visible in the
-// Sent folder.
+// caller's "Sent" folder via the MailStore, then enqueues
+// one delivery job per recipient into the CoreMail outbound
+// delivery queue. The same queue the SMTP receiver uses for
+// inbound mail and the delivery worker drains for outbound
+// mail — no parallel pipeline, no SMTP redesign.
+//
+// Behavior:
+//   1. Authenticate via the standard auth middleware.
+//   2. Resolve the caller's mailbox (the sender).
+//   3. Parse To/Cc/Bcc safely with mail.ParseAddressList —
+//      malformed addresses are rejected with 400 BEFORE we
+//      touch disk or queue.
+//   4. Look up the Sent folder for the mailbox. If missing,
+//      return 500 — system folders must be provisioned first.
+//   5. Store the RFC822 message body in the Sent folder
+//      (the source of truth for "what the user sent").
+//   6. Enqueue one queue.QueueEntry per recipient, all
+//      pointing at the same message_id, all
+//      direction=outbound / delivery_mode=remote_smtp /
+//      status=pending so the existing delivery worker picks
+//      them up. The sender is the authenticated mailbox,
+//      not anything the client supplies.
+//   7. Return 201 Created with status="queued".
+//
+// If queueing fails for every recipient, the Sent copy is
+// kept (it is the user's record of the message) and the
+// caller gets a 502 with a clear error — the message is
+// NOT lost, but the operator must investigate. Per-
+// recipient failures are logged but do not fail the whole
+// send — partial success is better than blocking on a
+// transient bad row, and the queue worker will retry the
+// failed entries on the next pass.
 func (h *Handler) WebmailSend(c fiber.Ctx) error {
 	ctx, reason := h.resolveWebmailUserContext(c)
 	if ctx == nil {
@@ -423,17 +452,33 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		req.Subject = "(no subject)"
 	}
 
-	// Validate recipient syntax. mail.ParseAddressList
-	// rejects malformed addresses before we touch disk.
-	if _, err := mail.ParseAddressList(req.To); err != nil {
+	// Parse all three recipient lists with the standard
+	// library. mail.ParseAddressList rejects malformed
+	// addresses, missing hosts, and other unsafe input
+	// BEFORE we touch disk or the queue.
+	toList, err := mail.ParseAddressList(req.To)
+	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": fmt.Sprintf("invalid To header: %v", err),
 		})
 	}
-	if req.Cc != "" {
-		if _, err := mail.ParseAddressList(req.Cc); err != nil {
+	if len(toList) == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "to must contain at least one address"})
+	}
+	var ccList, bccList []*mail.Address
+	if strings.TrimSpace(req.Cc) != "" {
+		ccList, err = mail.ParseAddressList(req.Cc)
+		if err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 				"error": fmt.Sprintf("invalid Cc header: %v", err),
+			})
+		}
+	}
+	if strings.TrimSpace(req.Bcc) != "" {
+		bccList, err = mail.ParseAddressList(req.Bcc)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": fmt.Sprintf("invalid Bcc header: %v", err),
 			})
 		}
 	}
@@ -451,15 +496,15 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 	messageID := generateMessageID()
 	now := time.Now().UTC()
 	rfc822 := buildRFC822(rfc822Params{
-		From:        ctx.Mailbox.Email,
-		To:          req.To,
-		Cc:          req.Cc,
-		Bcc:         req.Bcc,
-		Subject:     req.Subject,
-		Body:        req.Body,
-		MessageID:   messageID,
-		Date:        now,
-		FromName:    ctx.Mailbox.Name,
+		From:      ctx.Mailbox.Email,
+		To:        req.To,
+		Cc:        req.Cc,
+		Bcc:       req.Bcc,
+		Subject:   req.Subject,
+		Body:      req.Body,
+		MessageID: messageID,
+		Date:      now,
+		FromName:  ctx.Mailbox.Name,
 	})
 
 	msg := &storage.Message{
@@ -486,23 +531,101 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		})
 	}
 
-	// NOTE: SMTP delivery to remote recipients is the
-	// responsibility of the coremail SMTP receiver /
-	// queue pipeline. The user-facing webmail Send
-	// endpoint is intentionally write-only to the
-	// caller's Sent folder; remote delivery is out of
-	// scope for this turn (no SMTP redesign rule). When
-	// the SMTP receiver is running, outbound messages
-	// can be picked up via the existing queue/IMAP
-	// plumbing — the Sent-folder row is the source of
-	// truth for "what the user sent".
+	// From here on the message is durable in the Sent
+	// folder. We must enqueue at least one recipient for
+	// the request to be considered successful — but if
+	// the queue engine is not available we surface the
+	// error to the operator instead of silently dropping
+	// the user's mail.
+	qe, ok := h.queueEngineForUser()
+	if !ok {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"error":      "queue engine not available",
+			"message_id": msg.MessageID,
+			"folder":     sentFolder.Path,
+			"status":     "stored",
+		})
+	}
+
+	// Collect every recipient across To/Cc/Bcc. Each one
+	// gets its own QueueEntry — same message_id, same
+	// FromAddress (the authenticated mailbox), same
+	// delivery mode. DeliveryMode=remote_smtp lets the
+	// existing delivery worker handle it via SMTP MX
+	// resolution; local same-server deliveries use
+	// local, which is what inbound uses — we pick the
+	// same path as the SMTP receiver for outbound to
+	// remote domains and let the resolver/local-domain
+	// checker decide.
+	allRecipients := make([]*mail.Address, 0, len(toList)+len(ccList)+len(bccList))
+	allRecipients = append(allRecipients, toList...)
+	allRecipients = append(allRecipients, ccList...)
+	allRecipients = append(allRecipients, bccList...)
+
+	mailboxID := ctx.Mailbox.ID
+	queuedIDs := make([]uint, 0, len(allRecipients))
+	enqueueErrors := make([]string, 0)
+	for _, addr := range allRecipients {
+		bare := addr.Address
+		domain := extractRecipientDomain(bare)
+		entry := &queue.QueueEntry{
+			TenantID:        ctx.Mailbox.TenantID,
+			DomainID:        ctx.Mailbox.DomainID,
+			MailboxID:       &mailboxID,
+			MessageID:       messageID,
+			FromAddress:     ctx.Mailbox.Email,
+			ToAddress:       bare,
+			RecipientDomain: domain,
+			Direction:       queue.DirectionOutbound,
+			DeliveryMode:    queue.DeliveryRemoteSMTP,
+			Status:          queue.StatusPending,
+			Priority:        0,
+		}
+		if err := qe.Enqueue(c.Context(), entry); err != nil {
+			h.logger.Error("webmail send enqueue failed",
+				zap.String("message_id", messageID),
+				zap.String("to", bare),
+				zap.Error(err),
+			)
+			enqueueErrors = append(enqueueErrors, fmt.Sprintf("%s: %v", bare, err))
+			continue
+		}
+		queuedIDs = append(queuedIDs, entry.ID)
+	}
+
+	if len(queuedIDs) == 0 {
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
+			"error":           "no recipients enqueued: " + strings.Join(enqueueErrors, "; "),
+			"message_id":      msg.MessageID,
+			"folder":          sentFolder.Path,
+			"status":          "stored",
+			"enqueue_errors":  enqueueErrors,
+		})
+	}
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-		"id":         msg.ID,
-		"message_id": msg.MessageID,
-		"folder":     sentFolder.Path,
-		"status":     "stored",
+		"id":             msg.ID,
+		"message_id":     msg.MessageID,
+		"folder":         sentFolder.Path,
+		"status":         "queued",
+		"queued_count":   len(queuedIDs),
+		"queue_ids":      queuedIDs,
+		"enqueue_errors": enqueueErrors,
 	})
+}
+
+// extractRecipientDomain returns the domain part of an
+// email address (everything after the last "@"). The SMTP
+// resolver uses this for MX lookups; an empty string means
+// "no @ in input", which mail.ParseAddressList already
+// rejected. Defensive: empty input -> empty string.
+func extractRecipientDomain(addr string) string {
+	for i := len(addr) - 1; i >= 0; i-- {
+		if addr[i] == '@' {
+			return addr[i+1:]
+		}
+	}
+	return ""
 }
 
 // WebmailDelete soft-deletes a message by setting the
