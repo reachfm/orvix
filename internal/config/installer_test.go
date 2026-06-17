@@ -100,7 +100,7 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"journalctl -u orvix.service -n 80 --no-pager",
 		"Product: Orvix Enterprise Mail / CoreMail",
 		"Admin URL:   https://admin.${domain}/admin",
-		"Webmail URL: https://admin.${domain}/webmail",
+		"Webmail URL: https://webmail.${domain}/",
 		"JMAP URL:    https://mail.${domain}/.well-known/jmap",
 		// The TEMPORARY block is what the operator sees BEFORE
 		// setup-https.sh runs. It must be clearly labelled and
@@ -124,15 +124,19 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"write_admin_login_file",
 		"validate_webmail_ui",
 		"chmod 0600",
-		// CORS: the webmail SPA at admin.${domain} ships a
-		// `<script type="module" crossorigin>` tag, so the
-		// admin server must allow the admin host. Without
-		// this, the React bundle is blocked and the webmail
-		// page is blank — the "webmail frontend is broken"
-		// production symptom.
+		// CORS: the webmail SPA ships from
+		// webmail.${domain} (NOT admin.${domain}/webmail —
+		// that path-based mount is removed in this release).
+		// The admin server must allow both admin.${domain}
+		// and webmail.${domain} so cross-subdomain API
+		// calls (with credentials:include) succeed.
 		"https://$admin_host",
 		"http://$admin_host",
+		"https://$webmail_host",
+		"http://$webmail_host",
 		"local admin_host=\"admin.$domain\"",
+		"local webmail_host=\"webmail.$domain\"",
+		"local cookie_domain=\".$domain\"",
 		"Admin password (8-72 bytes, hidden):",
 		"admin password must be at least 8 characters",
 		"admin password is too long for bcrypt",
@@ -206,22 +210,28 @@ func TestHTTPSSetupScriptCaddyFlow(t *testing.T) {
 	}
 	script := string(scriptBytes)
 	for _, item := range []string{
-		"admin.<domain> -> 127.0.0.1:8080",
-		"mail.<domain>  -> 127.0.0.1:8081",
+		"admin.<domain>   -> 127.0.0.1:8080",
+		"webmail.<domain> -> 127.0.0.1:8080   (path-rewritten to /webmail/*)",
+		"mail.<domain>    -> 127.0.0.1:8081",
 		"ADMIN_DOMAIN=\"${ADMIN_DOMAIN:-admin.$PRIMARY_DOMAIN}\"",
+		"WEBMAIL_DOMAIN=\"${WEBMAIL_DOMAIN:-webmail.$PRIMARY_DOMAIN}\"",
 		"MAIL_DOMAIN=\"${MAIL_DOMAIN:-mail.$PRIMARY_DOMAIN}\"",
 		"reverse_proxy 127.0.0.1:8080",
 		"reverse_proxy 127.0.0.1:8081",
+		"@api path /api/*",
+		"rewrite * /webmail{uri}",
 		"ufw allow 80/tcp",
 		"ufw allow 443/tcp",
 		"caddy validate --config /etc/caddy/Caddyfile",
 		"systemctl is-active --quiet caddy",
 		"check_dns \"$ADMIN_DOMAIN\"",
+		"check_dns \"$WEBMAIL_DOMAIN\"",
 		"check_dns \"$MAIL_DOMAIN\"",
 		"check_local_port 80",
 		"check_local_port 443",
 		"check_https \"https://$ADMIN_DOMAIN/admin\" HEAD",
 		"check_https \"https://$ADMIN_DOMAIN/api/v1/health\" GET",
+		"check_https \"https://$WEBMAIL_DOMAIN/\" HEAD",
 		"check_https \"https://$MAIL_DOMAIN/.well-known/jmap\" GET",
 		"curl -fsS --connect-timeout 5 --max-time 10 \"$url\"",
 		"restrict external access to TCP 8080 and 8081",

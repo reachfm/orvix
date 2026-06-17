@@ -18,19 +18,30 @@ var (
 
 // CSRFManager handles double-submit cookie CSRF protection.
 type CSRFManager struct {
-	db     *gorm.DB
-	logger *zap.Logger
-	secure bool
+	db           *gorm.DB
+	logger       *zap.Logger
+	secure       bool
+	cookieDomain string
 }
 
 // NewCSRFManager creates a new CSRF manager and migrates its table.
 func NewCSRFManager(db *gorm.DB, logger *zap.Logger, secure bool) *CSRFManager {
 	// RC2 FIX: Skip AutoMigrate - tables are created with raw SQL
 	return &CSRFManager{
-		db:     db,
-		logger: logger,
-		secure: secure,
+		db:           db,
+		logger:       logger,
+		secure:       secure,
+		cookieDomain: "",
 	}
+}
+
+// SetCookieDomain updates the Domain attribute written on
+// the CSRF cookie. Empty means "no Domain attribute" (the
+// browser scopes the cookie to the response Host). The
+// installer sets this to ".parent_domain" so admin.<p> and
+// webmail.<p> share a single CSRF cookie.
+func (cm *CSRFManager) SetCookieDomain(domain string) {
+	cm.cookieDomain = domain
 }
 
 // CSRFRecord stores CSRF token hashes for validation.
@@ -68,8 +79,16 @@ func (cm *CSRFManager) GenerateToken(c fiber.Ctx, userID uint) (string, error) {
 		Expires:  time.Now().Add(24 * time.Hour),
 		HTTPOnly: false,
 		Secure:   cm.secure,
-		SameSite: "Strict",
+		// Lax keeps the cookie on top-level cross-site GET
+		// navigations (links, 30x redirects) without sending
+		// it on cross-site sub-resource requests. That is the
+		// right balance for an admin UI that the user might
+		// also reach through webmail.<parent> (subdomain
+		// navigation). Strict would silently break the webmail
+		// gate's /api/v1/me probe after a redirect.
+		SameSite: "Lax",
 		Path:     "/",
+		Domain:   cm.cookieDomain,
 	})
 
 	return token, nil

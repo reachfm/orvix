@@ -2,11 +2,12 @@ package handlers_test
 
 // Tests for the Orvix Webmail auth gate.
 //
-// The webmail UI is a React SPA bundled into
-// release/webmail/assets/index-CmhA8wNq.js. Without a gate,
-// the bundle mounts #root and renders Inbox/Compose before
-// any auth check — the user sees the mailbox UI even when
-// every API call returns 401.
+// The webmail UI is a vanilla-JS enterprise client
+// (release/webmail/assets/webmail.js, loaded by
+// release/webmail/assets/auth-gate.js). Without a gate,
+// the client would call /api/v1/webmail/* and render
+// Inbox/Compose before any auth check — the user sees the
+// mailbox UI even when every API call returns 401.
 //
 // The fix is an inline-ish gate: two files under
 // release/webmail/assets/ (auth-gate.css and auth-gate.js)

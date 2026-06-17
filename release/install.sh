@@ -206,7 +206,7 @@ HEADER
 	# URL block accordingly so the operator does not assume
 	# HTTPS is ready before it actually is.
 	local https_configured=0
-	if [ -f /etc/caddy/Caddyfile ] && grep -q "admin.${domain}" /etc/caddy/Caddyfile 2>/dev/null; then
+	if [ -f /etc/caddy/Caddyfile ] && grep -q "admin.${domain}" /etc/caddy/Caddyfile 2>/dev/null && grep -q "webmail.${domain}" /etc/caddy/Caddyfile 2>/dev/null; then
 		https_configured=1
 	fi
 
@@ -215,29 +215,30 @@ HEADER
 Product: Orvix Enterprise Mail / CoreMail
 Version: ${version}
 
-DNS required (set these with your DNS provider):
-  A admin.${domain} -> ${server_ip}
-  A mail.${domain} -> ${server_ip}
+  DNS required (set these with your DNS provider):
+    A admin.${domain} -> ${server_ip}
+    A webmail.${domain} -> ${server_ip}
+    A mail.${domain} -> ${server_ip}
 
-Mail Hostname: mail.${domain}
-SMTP: mail.${domain}:25
-IMAP: mail.${domain}:143
-POP3: mail.${domain}:110
+  Mail Hostname: mail.${domain}
+  SMTP: mail.${domain}:25
+  IMAP: mail.${domain}:143
+  POP3: mail.${domain}:110
 BODY
 
-	if [ "$https_configured" = "1" ]; then
-		cat <<BODY
-Production URLs (HTTPS, caddy reverse proxy):
-  Admin URL:   https://admin.${domain}/admin
-  Webmail URL: https://admin.${domain}/webmail
-  JMAP URL:    https://mail.${domain}/.well-known/jmap
+    if [ "$https_configured" = "1" ]; then
+        cat <<BODY
+  Production URLs (HTTPS, caddy reverse proxy):
+    Admin URL:   https://admin.${domain}/admin
+    Webmail URL: https://webmail.${domain}/
+    JMAP URL:    https://mail.${domain}/.well-known/jmap
 BODY
-	else
-		cat <<BODY
-TEMPORARY URLs (plain HTTP, no TLS â€” setup-https.sh has NOT been run):
-  Admin UI:    http://${server_ip}:8080/admin
-  Webmail UI:  http://${server_ip}:8080/webmail
-  JMAP:        http://${server_ip}:8081/.well-known/jmap
+    else
+        cat <<BODY
+  TEMPORARY URLs (plain HTTP, no TLS â€” setup-https.sh has NOT been run):
+    Admin UI:    http://${server_ip}:8080/admin
+    Webmail UI:  http://${server_ip}:8080/webmail
+    JMAP:        http://${server_ip}:8081/.well-known/jmap
 
 NOTE: admin.${domain} and mail.${domain} are NOT reachable until HTTPS
 is set up and DNS is configured. The TEMPORARY URLs above are bound
@@ -455,32 +456,52 @@ write_config() {
     local domain="$1"
     local hostname="mail.$domain"
     local admin_host="admin.$domain"
+    local webmail_host="webmail.$domain"
+    # Leading dot scopes the access_token + refresh_token
+    # + csrf_token cookies to admin.<domain> AND
+    # webmail.<domain> (single sign-on across subdomains).
+    # The browser requires SameSite=None + Secure + Domain
+    # to send a cookie to a different subdomain, and the
+    # Domain value MUST start with a leading dot for the
+    # parent-domain scope to apply.
+    local cookie_domain=".$domain"
 
     cat > "$ORVIX_CONFIG" <<YAML
-server:
-  host: "0.0.0.0"
-  port: 80
-  admin_port: 8080
-  admin_ui_dir: /usr/share/orvix/admin
-  webmail_ui_dir: /usr/share/orvix/webmail
-  read_timeout: 60s
-  write_timeout: 60s
-  idle_timeout: 120s
-  body_limit: 52428800
-  # The webmail SPA lives at admin.$domain but ships a module
-  # script tag with crossorigin. The browser therefore requires
-  # Access-Control-Allow-Origin on every /webmail/assets/* fetch
-  # to match the page's own origin. If admin.$domain is not in
-  # this list, the React bundle never loads and the page renders
-  # empty â€” the "webmail frontend is broken" production symptom.
-  # Both admin.$domain and mail.$domain must be present so the
-  # admin API and the JMAP server can talk to each other.
-  allowed_origins:
-    - "https://$admin_host"
-    - "http://$admin_host"
-    - "https://$hostname"
-    - "http://$hostname"
-  trusted_proxies: []
+  server:
+    host: "0.0.0.0"
+    port: 80
+    admin_port: 8080
+    admin_ui_dir: /usr/share/orvix/admin
+    webmail_ui_dir: /usr/share/orvix/webmail
+    read_timeout: 60s
+    write_timeout: 60s
+    idle_timeout: 120s
+    body_limit: 52428800
+    # Hostnames the operator points their DNS A records at.
+    # Used by the router for log line enrichment and by the
+    # login redirect URL builder. The webmail SPA lives at
+    # https://webmail.$domain (NOT https://admin.$domain/webmail);
+    # both hostnames must be in allowed_origins so the
+    # browser sends the access_token cookie to whichever
+    # origin the user is on, and so CORS preflight for the
+    # cross-subdomain fetch succeeds.
+    admin_host: "$admin_host"
+    webmail_host: "$webmail_host"
+    mail_host: "$hostname"
+    allowed_origins:
+      - "https://$admin_host"
+      - "http://$admin_host"
+      - "https://$webmail_host"
+      - "http://$webmail_host"
+      - "https://$hostname"
+      - "http://$hostname"
+    # Caddy sits on 127.0.0.1 / ::1 in front of orvix and
+    # forwards the real client IP in X-Forwarded-For. Without
+    # this list, the rate limiter and login-attempt gate see
+    # the loopback address and never trip.
+    trusted_proxies:
+      - "127.0.0.1"
+      - "::1"
 
 database:
   driver: sqlite
@@ -521,6 +542,14 @@ auth:
   argon2_threads: 4
   login_rate_limit: 5
   rate_window: 15m
+  # Domain attribute on every auth cookie. ".${domain}"
+  # (with leading dot) scopes the access_token /
+  # refresh_token / csrf_token cookies to admin.${domain}
+  # AND webmail.${domain} so single sign-on works across
+  # the two subdomains. SameSite=None on the access and
+  # refresh cookies is required for the browser to actually
+  # send them cross-subdomain.
+  cookie_domain: "$cookie_domain"
 
 logging:
   level: info
@@ -901,7 +930,7 @@ write_admin_login_file() {
 
     # Detect HTTPS so the file shows the right URLs.
     local https_configured=0
-    if [ -f /etc/caddy/Caddyfile ] && grep -q "admin.${primary_domain}" /etc/caddy/Caddyfile 2>/dev/null; then
+    if [ -f /etc/caddy/Caddyfile ] && grep -q "admin.${primary_domain}" /etc/caddy/Caddyfile 2>/dev/null && grep -q "webmail.${primary_domain}" /etc/caddy/Caddyfile 2>/dev/null; then
         https_configured=1
     fi
 
@@ -919,7 +948,7 @@ write_admin_login_file() {
         if [ "$https_configured" = "1" ]; then
             printf '%s\n' "URLs (HTTPS configured):"
             printf '%s\n' "  Admin URL:   https://admin.${primary_domain}/admin"
-            printf '%s\n' "  Webmail URL: https://admin.${primary_domain}/webmail"
+            printf '%s\n' "  Webmail URL: https://webmail.${primary_domain}/"
             printf '%s\n' "  JMAP URL:    https://mail.${primary_domain}/.well-known/jmap"
         else
             printf '%s\n' "URLs (HTTPS NOT configured - these are TEMPORARY):"

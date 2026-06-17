@@ -82,6 +82,27 @@ type ServerConfig struct {
 	WebmailUIDir   string        `mapstructure:"webmail_ui_dir"`
 	AllowedOrigins []string      `mapstructure:"allowed_origins"`
 	TrustedProxies []string      `mapstructure:"trusted_proxies"`
+	// Hostname the operator points their DNS A record at for
+	// the admin UI and admin API. Filled in by the installer
+	// as "admin.<primary_domain>". Used by the router to scope
+	// CORS allowlists and trusted redirect targets. Empty
+	// means "derive from the request Host header at runtime"
+	// which keeps a localhost / docker dev setup working
+	// without a real hostname.
+	AdminHost string `mapstructure:"admin_host"`
+	// Hostname the operator points their DNS A record at for
+	// the user-facing webmail. Filled in by the installer as
+	// "webmail.<primary_domain>". When empty, the router
+	// falls back to the request Host header. The webmail SPA
+	// must always be served under a stable hostname so the
+	// browser can scope the access_token cookie to a single
+	// origin.
+	WebmailHost string `mapstructure:"webmail_host"`
+	// Hostname used by the CoreMail runtime for SMTP/IMAP/
+	// POP3/JMAP listeners. Filled in by the installer as
+	// "mail.<primary_domain>". Also referenced in the TLS
+	// certificate SAN list.
+	MailHost string `mapstructure:"mail_host"`
 }
 
 // DatabaseConfig holds database connection settings.
@@ -120,9 +141,17 @@ type AuthConfig struct {
 	PasswordMinLen int           `mapstructure:"password_min_len"`
 	Argon2Time     uint32        `mapstructure:"argon2_time"`
 	Argon2Memory   uint32        `mapstructure:"argon2_memory"`
-	Argon2Threads  uint8         `mapstructure:"argon2_threads"`
+	Argon2Threads  uint8          `mapstructure:"argon2_threads"`
 	LoginRateLimit int           `mapstructure:"login_rate_limit"`
 	RateWindow     time.Duration `mapstructure:"rate_window"`
+	// Domain attribute set on every auth cookie. The installer
+	// writes ".parent.com" so the same access_token cookie is
+	// sent to admin.<parent> AND webmail.<parent> (single
+	// sign-on across subdomains). Empty means "do not set a
+	// Domain attribute" which is the right default for a
+	// localhost / docker dev setup where admin and webmail
+	// share a single hostname.
+	CookieDomain string `mapstructure:"cookie_domain"`
 }
 
 // LicenseConfig holds license validation settings.
@@ -222,6 +251,12 @@ func Defaults() *Config {
 			Argon2Threads:  4,
 			LoginRateLimit: 5,
 			RateWindow:     15 * time.Minute,
+			// CookieDomain is intentionally empty by default.
+			// The installer writes the parent domain (with
+			// leading dot) for production deployments so the
+			// access_token cookie is shared between
+			// admin.<parent> and webmail.<parent>.
+			CookieDomain: "",
 		},
 		Logging: LoggingConfig{
 			Level:  "info",

@@ -77,10 +77,10 @@ func TestListJobs(t *testing.T) {
 func TestGetJob(t *testing.T) {
 	svc := testService(t)
 	ctx := context.Background()
-	created, _ := svc.CreateJob(ctx, ImportStalwart, "st.alwart")
+	created, _ := svc.CreateJob(ctx, ImportIMAP, "imap.example.com")
 	got, err := svc.GetJob(ctx, created.ID)
 	if err != nil { t.Fatalf("get: %v", err) }
-	if got.SourceType != ImportStalwart { t.Fatalf("expected stalwart, got %s", got.SourceType) }
+	if got.SourceType != ImportIMAP { t.Fatalf("expected imap, got %s", got.SourceType) }
 }
 
 func TestCancelJob(t *testing.T) {
@@ -167,7 +167,7 @@ func TestMultipleSources(t *testing.T) {
 	svc := testService(t)
 	ctx := context.Background()
 
-	sources := []ImportSourceType{ImportMailcow, ImportStalwart, ImportModoboa, ImportExchange, ImportIMAP}
+	sources := []ImportSourceType{ImportMailcow, ImportModoboa, ImportExchange, ImportIMAP}
 	for _, s := range sources {
 		j, err := svc.CreateJob(ctx, s, "")
 		if err != nil { t.Fatalf("create %s: %v", s, err) }

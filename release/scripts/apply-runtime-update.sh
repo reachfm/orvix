@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Orvix CoreMail runtime update â€” binary + admin UI + webmail UI.
+# Orvix CoreMail runtime update — binary + admin UI + webmail UI.
 #
 # This script builds the Go binary from the current source tree,
 # installs it to /usr/local/bin/orvix, copies release/admin and
@@ -9,9 +9,17 @@
 #
 # Idempotency: each install step uses `install -m ...` or
 # `cp -r` which overwrites in place. Files that exist on disk
-# but not in the source tree are NOT removed â€” that is by
+# but not in the source tree are NOT removed — that is by
 # design. Removing unrelated files would risk deleting
 # operator-placed assets like custom CSS overrides.
+#
+# Exceptions: the Webmail Enterprise v1 migration removed the
+# Vite/React prototype bundle (index-CmhA8wNq.js,
+# vendor-xxE1au3H.js, index-BiLI_Nmd.css). Step 5 sweeps
+# those specific filenames before copy so a host updated
+# from a Pre-v1 release converges on the same assets the
+# fresh installer would produce. Operator-placed custom CSS
+# in the same directory is preserved.
 #
 # Permissions: binaries and directories are root-owned,
 # world-readable+executable where appropriate. The webmail
@@ -39,7 +47,7 @@ cd "$REPO_ROOT"
 echo "=== Orvix CoreMail Runtime Update ==="
 echo "Repository root: $REPO_ROOT"
 
-# â”€â”€ Step 1 of 7: Build binary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ─── Step 1 of 7: Build binary ──────────────────────────────────
 echo "[1/7] Building orvix binary..."
 GO_CMD=""
 if command -v go >/dev/null 2>&1; then
@@ -56,12 +64,12 @@ if [ ! -f /tmp/orvix-next ]; then
   exit 1
 fi
 
-# â”€â”€ Step 2 of 7: Install binary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ─── Step 2 of 7: Install binary ────────────────────────────────
 echo "[2/7] Installing binary to /usr/local/bin/orvix..."
 install -m 0755 /tmp/orvix-next /usr/local/bin/orvix
 rm -f /tmp/orvix-next
 
-# â”€â”€ Step 3 of 7: Set capabilities â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ─── Step 3 of 7: Set capabilities ─────────────────────────────
 echo "[3/7] Setting capabilities..."
 if command -v setcap >/dev/null 2>&1; then
   setcap cap_net_bind_service=+ep /usr/local/bin/orvix
@@ -70,9 +78,9 @@ else
   echo "  setcap not found, skipping capability setting."
 fi
 
-# â”€â”€ Step 4 of 7: Install admin UI â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ─── Step 4 of 7: Install admin UI ──────────────────────────────
 # Idempotent: overwrites in place. Does NOT recursively delete
-# /usr/share/orvix/admin first â€” that would risk wiping
+# /usr/share/orvix/admin first — that would risk wiping
 # operator-placed files. The fresh-install installer creates
 # the directory; this script only writes files.
 echo "[4/7] Installing admin UI to /usr/share/orvix/admin..."
@@ -93,7 +101,7 @@ if [ ! -f /usr/share/orvix/admin/index.html ] || [ ! -f /usr/share/orvix/admin/a
   exit 1
 fi
 
-# â”€â”€ Step 5 of 7: Install webmail UI â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ─── Step 5 of 7: Install webmail UI ────────────────────────────
 # Idempotent same way: overwrites files in place, does NOT
 # recursively delete the directory. The fresh-install
 # installer also writes here; the runtime update keeps the
@@ -106,15 +114,45 @@ if [ ! -d "$REPO_ROOT/release/webmail" ]; then
 fi
 mkdir -p /usr/share/orvix/webmail
 install -d -o root -g root -m 0755 /usr/share/orvix/webmail
+# One-shot cleanup of assets removed by the Webmail
+# Enterprise v1 migration. Targeted rm so operator-placed
+# custom CSS in the same directory is preserved. These
+# three filenames are the Vite/React prototype bundle
+# (Pre-Enterprise v1). Any host updated from a Pre-v1
+# release will have them on disk; this sweep brings the
+# runtime in line with the source tree.
+for stale in index-CmhA8wNq.js vendor-xxE1au3H.js index-BiLI_Nmd.css; do
+  if [ -f "/usr/share/orvix/webmail/assets/$stale" ]; then
+    rm -f "/usr/share/orvix/webmail/assets/$stale" || true
+    echo "  removed stale asset: $stale"
+  fi
+done
 cp -r "$REPO_ROOT/release/webmail/." /usr/share/orvix/webmail/
 find /usr/share/orvix/webmail -type d -exec chmod 0755 {} +
 find /usr/share/orvix/webmail -type f -exec chmod 0644 {} +
 chown -R root:root /usr/share/orvix/webmail
 
+# Defensive regression guard. The webmail v1 ships with
+# auth-gate.js + webmail.js. If any of the legacy Vite/
+# React bundle filenames reappear in the deployed assets
+# directory for any reason (manual file copy, broken
+# build, side-loaded prebuilt tarball), the runtime
+# update aborts loudly rather than serving the demo
+# bundle to operators. The legacy bundle calls
+# /api/v1/queue which is an admin-only endpoint and
+# would render admin queue data in the user-facing
+# webmail.
+for forbidden in index-CmhA8wNq.js vendor-xxE1au3H.js index-BiLI_Nmd.css; do
+  if [ -f "/usr/share/orvix/webmail/assets/$forbidden" ]; then
+    echo "ERROR: webmail UI ships the legacy demo React bundle ($forbidden); remove it and rebuild" >&2
+    exit 1
+  fi
+done
+
 # Verify the deployed webmail has the auth gate. A missing
 # gate means unauthenticated users would see the React mail
 # UI rendering into #root even though every API call
-# returns 401 â€” the exact production symptom this gate was
+# returns 401 — the exact production symptom this gate was
 # added to prevent.
 if [ ! -f /usr/share/orvix/webmail/index.html ]; then
   echo "ERROR: webmail UI deployment incomplete (index.html missing)." >&2
@@ -133,7 +171,7 @@ if ! grep -q 'auth-gate\.js' /usr/share/orvix/webmail/index.html; then
   exit 1
 fi
 
-# â”€â”€ Step 6 of 7: Restart service â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ─── Step 6 of 7: Restart service ──────────────────────────────
 echo "[6/7] Restarting orvix service..."
 if systemctl is-active --quiet orvix 2>/dev/null; then
   systemctl restart orvix
@@ -147,7 +185,7 @@ else
   echo "  orvix process killed (manual restart may be required)."
 fi
 
-# â”€â”€ Step 7 of 7: Verify installed version + health â”€â”€â”€â”€â”€â”€
+# ─── Step 7 of 7: Verify installed version + health ─────────────
 echo "[7/7] Verifying installed version + health..."
 SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 echo "  Installed git SHA: $SHA"
