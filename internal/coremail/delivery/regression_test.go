@@ -46,11 +46,17 @@ func regressionEnv(t *testing.T) (*sql.DB, *queue.QueueEngine, *storage.MailStor
 	ms, _ := storage.NewMailStore(db, filepath.Join(t.TempDir(), "msgs"))
 
 	fs := startFakeSMTP(t)
+	// Regression tests exercise the worker, queue
+	// and mailstore, not the TLS upgrade. Disable
+	// the fake server's STARTTLS requirement so the
+	// transport's plaintext MAIL FROM is accepted.
+	fs.requireStartTLS = false
+	fs.allowPlaintext = true
 	resolver := NewFakeResolver()
 	resolver.MXRecords["remote.test"] = []MXRecord{{Host: fs.addr, Priority: 10}}
 	resolver.Hosts[fs.addr] = []string{fs.addr}
 
-	transport := NewSMTPTransport(DefaultTransportConfig())
+	transport := NewSMTPTransport(testTransportConfig())
 	worker := NewDeliveryWorker(qe, ms, resolver, transport, "local.test", "reg-worker")
 	worker.History = NewAttemptHistorySQLRepo(db)
 	worker.Audit = NewAuditLogger()

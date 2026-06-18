@@ -95,10 +95,67 @@ async function downloadCSV(path, filename) {
 }
 
 async function getCSRFToken() {
-  const res = await fetch("/api/v1/csrf-token", { headers: authHeaders() });
+  // credentials: 'include' is required so the
+  // Set-Cookie header on the response is stored by
+  // the browser. Without it, the cookie is dropped
+  // silently and the next state-changing request
+  // fails with "CSRF token missing in cookie" even
+  // though the header matches. The browser's default
+  // same-origin behaviour is to send cookies on
+  // same-origin requests, but cross-subdomain
+  // requests (admin.<parent> -> api.<parent>) need
+  // explicit credentials: 'include' to attach the
+  // csrf_token cookie that was set on
+  // Domain=.orvix.email.
+  const res = await fetch("/api/v1/csrf-token", {
+    headers: authHeaders(),
+    credentials: "include"
+  });
   if (!res.ok) throw new Error("Failed to get CSRF token");
   const data = await res.json();
   return data.csrf_token;
+}
+
+// csrfFetch issues a state-changing request with a
+// fresh CSRF token and credentials: 'include'. If
+// the server returns 403 with a CSRF-specific error,
+// the helper fetches a fresh token and retries
+// exactly once. This guards against the race where
+// the operator opened two tabs and the second tab's
+// token was rotated by a different action — the first
+// 403 should not leave the operator's action
+// unfulfilled.
+//
+// The retry guard is single-shot on purpose: a
+// second 403 means there is a real configuration
+// problem (CSRF middleware broken, cookie not sent,
+// wrong header) and the operator should see the
+// error rather than loop forever.
+async function csrfFetch(url, init) {
+  const csrfToken = await getCSRFToken();
+  const doFetch = (token) => fetch(url, Object.assign({}, init, {
+    credentials: "include",
+    headers: Object.assign({}, init && init.headers, {
+      "X-CSRF-Token": token
+    })
+  }));
+  let res = await doFetch(csrfToken);
+  if (res.status === 403) {
+    // Inspect the body. CSRF middleware returns
+    // {"error": "CSRF token missing in cookie"} or
+    // {"error": "CSRF token mismatch"} or similar.
+    // On any of those, fetch a fresh token and
+    // retry once. Other 403s (e.g. admin role
+    // missing) are surfaced unchanged.
+    let body = null;
+    try { body = await res.json(); } catch (e) { body = null; }
+    const msg = (body && body.error) ? String(body.error) : "";
+    if (msg.indexOf("CSRF") >= 0) {
+      const fresh = await getCSRFToken();
+      res = await doFetch(fresh);
+    }
+  }
+  return res;
 }
 
 async function loadProfile() {
@@ -1088,11 +1145,19 @@ el("queue-table").addEventListener("click", async function(event) {
   if (!queueId) return;
   btn.disabled = true;
   try {
-    var csrfToken = await getCSRFToken();
     if (action === "retry") {
-      var res = await fetch("/api/v1/queue/" + queueId + "/retry", {
+      // Use csrfFetch (credentials: 'include' +
+      // fresh CSRF token + single retry on 403) so
+      // the Set-Cookie on the response is stored
+      // AND the cookie is sent on the next request.
+      // Without credentials: 'include' the browser
+      // drops the Set-Cookie header (the response
+      // is for a cross-site fetch in some operator
+      // topologies) and the next request 403s with
+      // "CSRF token missing in cookie".
+      var res = await csrfFetch("/api/v1/queue/" + queueId + "/retry", {
         method: "POST",
-        headers: { "Authorization": "Bearer " + state.token, "X-CSRF-Token": csrfToken }
+        headers: { "Authorization": "Bearer " + state.token }
       });
       if (!res.ok) {
         var errBody = await res.json().catch(function() { return {}; });
@@ -1101,9 +1166,9 @@ el("queue-table").addEventListener("click", async function(event) {
       showAlert("Queue item " + queueId + " queued for retry.");
     } else if (action === "delete") {
       if (!confirm("Delete queue item " + queueId + "? This action cannot be undone.")) { btn.disabled = false; return; }
-      var res = await fetch("/api/v1/queue/" + queueId, {
+      var res = await csrfFetch("/api/v1/queue/" + queueId, {
         method: "DELETE",
-        headers: { "Authorization": "Bearer " + state.token, "X-CSRF-Token": csrfToken }
+        headers: { "Authorization": "Bearer " + state.token }
       });
       if (!res.ok) {
         var errBody = await res.json().catch(function() { return {}; });

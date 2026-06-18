@@ -604,14 +604,19 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 
 	// Collect every recipient across To/Cc/Bcc. Each one
 	// gets its own QueueEntry — same message_id, same
-	// FromAddress (the authenticated mailbox), same
-	// delivery mode. DeliveryMode=remote_smtp lets the
-	// existing delivery worker handle it via SMTP MX
-	// resolution; local same-server deliveries use
-	// local, which is what inbound uses — we pick the
-	// same path as the SMTP receiver for outbound to
-	// remote domains and let the resolver/local-domain
-	// checker decide.
+	// FromAddress (the authenticated mailbox). The
+	// delivery mode is decided per-recipient:
+	//   - Local recipient (configured local domain AND
+	//     active mailbox): DeliveryMode=local, the
+	//     delivery worker copies the message from the
+	//     sender's Sent folder into the recipient's
+	//     INBOX. No MX lookup, no SMTP connection.
+	//   - Remote recipient: DeliveryMode=remote_smtp,
+	//     the delivery worker does MX + SMTP delivery
+	//     with the existing STARTTLS-aware transport.
+	// The classification runs on the same Domain +
+	// Mailbox lookups the SMTP receiver uses for
+	// inbound — there is no parallel "is-local" path.
 	allRecipients := make([]*mail.Address, 0, len(toList)+len(ccList)+len(bccList))
 	allRecipients = append(allRecipients, toList...)
 	allRecipients = append(allRecipients, ccList...)
@@ -619,19 +624,67 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 
 	mailboxID := ctx.Mailbox.ID
 	enqueueErrors := make([]string, 0, len(allRecipients))
+	queuedCount := 0
+	deliveredLocal := make([]string, 0, len(allRecipients))
 	for _, addr := range allRecipients {
 		bare := addr.Address
 		domain := extractRecipientDomain(bare)
+
+		// Classify the recipient. Local means:
+		//   1. The domain is configured locally and
+		//      active.
+		//   2. The mailbox row exists and is active.
+		// If either fails, fall back to remote_smtp —
+		// a misrouted local mailbox is still better
+		// than dropping the recipient, because the
+		// remote_smtp path will return a clean bounce
+		// (5.1.1 user unknown) if neither path applies.
+		// The cross-tenant guard is enforced by looking
+		// up the mailbox by the authenticated sender's
+		// tenant; a sender in tenant A cannot deliver
+		// to a mailbox in tenant B through the local
+		// path because the lookup is scoped to the
+		// same tenant the sender is in.
+		local, localMboxID, err := h.classifyLocalRecipient(
+			c.Context(),
+			ctx.Mailbox.TenantID,
+			bare,
+			domain,
+		)
+		if err != nil {
+			// Defensive: never let a classification
+			// error drop the recipient. Fall through
+			// to the remote_smtp path and log a
+			// warning so the operator can see the
+			// problem in the audit trail.
+			h.logger.Warn("webmail send: classify recipient failed, falling back to remote_smtp",
+				zap.String("to", bare),
+				zap.String("domain", domain),
+				zap.Error(err))
+			local = false
+		}
+
+		var deliveryMode queue.DeliveryMode
+		var entryMailboxID *uint
+		if local {
+			deliveryMode = queue.DeliveryLocal
+			idCopy := localMboxID
+			entryMailboxID = &idCopy
+		} else {
+			deliveryMode = queue.DeliveryRemoteSMTP
+			entryMailboxID = &mailboxID
+		}
+
 		entry := &queue.QueueEntry{
 			TenantID:        ctx.Mailbox.TenantID,
 			DomainID:        ctx.Mailbox.DomainID,
-			MailboxID:       &mailboxID,
+			MailboxID:       entryMailboxID,
 			MessageID:       messageID,
 			FromAddress:     ctx.Mailbox.Email,
 			ToAddress:       bare,
 			RecipientDomain: domain,
 			Direction:       queue.DirectionOutbound,
-			DeliveryMode:    queue.DeliveryRemoteSMTP,
+			DeliveryMode:    deliveryMode,
 			Status:          queue.StatusPending,
 			Priority:        0,
 		}
@@ -642,6 +695,11 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 				zap.Error(err),
 			)
 			enqueueErrors = append(enqueueErrors, fmt.Sprintf("%s: %v", bare, err))
+			continue
+		}
+		queuedCount++
+		if local {
+			deliveredLocal = append(deliveredLocal, bare)
 		}
 	}
 
@@ -656,11 +714,113 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 	}
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-		"id":           msg.ID,
-		"message_id":   msg.MessageID,
-		"status":       "queued",
-		"queued_count": len(allRecipients),
+		"id":                msg.ID,
+		"message_id":        msg.MessageID,
+		"status":            "queued",
+		"queued_count":      queuedCount,
+		"local_count":       len(deliveredLocal),
+		"remote_count":      queuedCount - len(deliveredLocal),
+		"local_recipients":  deliveredLocal,
 	})
+}
+
+// classifyLocalRecipient decides whether a recipient address
+// should be delivered through the local MailStore path
+// (no SMTP, no MX lookup) or through the remote_smtp path.
+//
+// Local means:
+//
+//   1. The recipient domain is a configured local
+//      coremail_domains row with status=active.
+//   2. The recipient address has an active coremail_mailboxes
+//      row in the SAME tenant as the sender.
+//
+// Both conditions are required. A recipient with a local
+// domain but no active mailbox row is treated as remote
+// (the remote_smtp path will return 5.1.1 from the receiver
+// if the address is not local there either). A recipient
+// with an active mailbox row in a different tenant is
+// also treated as remote — the cross-tenant local-delivery
+// guard is enforced by the tenant_id filter on the mailbox
+// lookup, so a sender in tenant A cannot route to a
+// mailbox in tenant B through the local path.
+//
+// The function is the only source of truth for "local vs
+// remote" in the webmail Send flow. Other code paths
+// (the SMTP receiver, the queue worker) use the same
+// coremail.Engine for their local-vs-remote decision, so
+// there is exactly one place to look if classification
+// diverges between inbound and outbound.
+func (h *Handler) classifyLocalRecipient(
+	ctx context.Context,
+	senderTenantID uint,
+	email string,
+	domain string,
+) (bool, uint, error) {
+	if email == "" || domain == "" {
+		return false, 0, nil
+	}
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return false, 0, fmt.Errorf("classify: get sql db: %w", err)
+	}
+
+	// Step 1: is the domain local + active? We scope
+	// the lookup to the sender's tenant to keep the
+	// local-delivery path tenant-scoped. A domain
+	// that is configured for tenant B but not tenant A
+	// does not count as local for a tenant-A sender.
+	var domainID uint
+	var domainStatus string
+	err = sqlDB.QueryRowContext(ctx,
+		`SELECT id, status FROM coremail_domains
+		 WHERE name = ? AND tenant_id = ? AND deleted_at IS NULL`,
+		domain, senderTenantID,
+	).Scan(&domainID, &domainStatus)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			// Domain is not configured for this
+			// tenant — treat as remote. This is
+			// the common case for outbound
+			// internet mail and the safe default
+			// for unrecognised local-looking
+			// domains.
+			return false, 0, nil
+		}
+		return false, 0, fmt.Errorf("classify: lookup domain: %w", err)
+	}
+	if domainStatus != "active" {
+		// Suspended / disabled domain — must NOT
+		// route via the local path. The remote_smtp
+		// path will surface a clean bounce.
+		return false, 0, nil
+	}
+
+	// Step 2: is the recipient mailbox local + active
+	// in this tenant? Use the same scope as the
+	// domain lookup so the cross-tenant guard is
+	// symmetric — a mailbox that belongs to another
+	// tenant cannot be reached through the local
+	// path even if its domain is somehow shared.
+	var mailboxID uint
+	var mailboxStatus string
+	err = sqlDB.QueryRowContext(ctx,
+		`SELECT id, status FROM coremail_mailboxes
+		 WHERE email = ? AND tenant_id = ? AND deleted_at IS NULL`,
+		email, senderTenantID,
+	).Scan(&mailboxID, &mailboxStatus)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return false, 0, nil
+		}
+		return false, 0, fmt.Errorf("classify: lookup mailbox: %w", err)
+	}
+	if mailboxStatus != "active" {
+		return false, 0, nil
+	}
+
+	// Local recipient, same tenant, active mailbox.
+	return true, mailboxID, nil
 }
 
 // extractRecipientDomain returns the domain part of an
