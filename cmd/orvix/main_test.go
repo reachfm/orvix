@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func TestAdminBootstrapInsertsUserAndLoginSucceeds(t *testing.T) {
@@ -39,6 +41,72 @@ func TestAdminBootstrapInstallerPasswordCasesLoginSucceeds(t *testing.T) {
 		t.Run(password, func(t *testing.T) {
 			testAdminBootstrapLogin(t, "admin@orvix.email", password, true)
 		})
+	}
+}
+
+func TestAdminBootstrapCreatesCoreMailFoldersOnFreshDatabase(t *testing.T) {
+	const (
+		email    = "admin@orvix.email"
+		password = "AdminPassword123!"
+	)
+	t.Setenv("ORVIX_ADMIN_EMAIL", email)
+	t.Setenv("ORVIX_ADMIN_PASSWORD_B64", base64.StdEncoding.EncodeToString([]byte(password)))
+	t.Setenv("ORVIX_ADMIN_PASSWORD", "wrong-plain-fallback")
+
+	observed, logs := observer.New(zap.WarnLevel)
+	logger := zap.New(observed)
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = t.TempDir() + "/orvix.db?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	if err := models.MigrateAllRaw(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	authenticator, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	seedAdminUser(db, authenticator, logger)
+	if logs.FilterMessage("failed to provision system folders for admin mailbox").Len() != 0 {
+		t.Fatal("admin bootstrap logged system folder provisioning failure")
+	}
+
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	defer sqlDB.Close()
+
+	var mailboxID int64
+	if err := sqlDB.QueryRow("SELECT id FROM coremail_mailboxes WHERE email = ? AND is_admin = 1", email).Scan(&mailboxID); err != nil {
+		t.Fatalf("admin mailbox not created: %v", err)
+	}
+
+	rows, err := sqlDB.Query("SELECT path FROM coremail_folders WHERE mailbox_id = ? ORDER BY path", mailboxID)
+	if err != nil {
+		t.Fatalf("query system folders: %v", err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			t.Fatalf("scan folder: %v", err)
+		}
+		got = append(got, path)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("folder rows: %v", err)
+	}
+	want := []string{"Archive", "Drafts", "INBOX", "Junk", "Sent", "Trash"}
+	sort.Strings(got)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("admin mailbox folders = %v, want %v", got, want)
 	}
 }
 

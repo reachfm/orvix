@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/smtp"
 	"time"
@@ -39,14 +40,14 @@ func (as *AlertSender) SendAlert(ctx context.Context, tenantID uint, event Alert
 	event.Timestamp = time.Now().Unix()
 
 	var cfg struct {
-		SMTPEnabled  bool
-		SMTPServer   string
-		SMTPPort     int
-		SMTPUsername string
-		SMTPPassword string
-		SMTPFrom     string
+		SMTPEnabled    bool
+		SMTPServer     string
+		SMTPPort       int
+		SMTPUsername   string
+		SMTPPassword   string
+		SMTPFrom       string
 		WebhookEnabled bool
-		WebhookURL   string
+		WebhookURL     string
 	}
 	as.db.Table("alert_configs").Where("tenant_id = ?", tenantID).First(&cfg)
 
@@ -65,16 +66,16 @@ func (as *AlertSender) SendAlert(ctx context.Context, tenantID uint, event Alert
 }
 
 func (as *AlertSender) sendSMTP(cfg struct {
-	SMTPEnabled  bool
-	SMTPServer   string
-	SMTPPort     int
-	SMTPUsername string
-	SMTPPassword string
-	SMTPFrom     string
+	SMTPEnabled    bool
+	SMTPServer     string
+	SMTPPort       int
+	SMTPUsername   string
+	SMTPPassword   string
+	SMTPFrom       string
 	WebhookEnabled bool
-	WebhookURL   string
+	WebhookURL     string
 }, event AlertEvent) {
-	addr := fmt.Sprintf("%s:%d", cfg.SMTPServer, cfg.SMTPPort)
+	addr := net.JoinHostPort(cfg.SMTPServer, fmt.Sprintf("%d", cfg.SMTPPort))
 	subject := fmt.Sprintf("[Orvix Alert] %s - %s", event.Severity, event.Type)
 	body := fmt.Sprintf("Subject: %s\r\n\r\nAlert: %s\r\nSeverity: %s\r\nIP: %s\r\nEmail: %s\r\nTime: %d",
 		subject, event.Message, event.Severity, event.IP, event.Email, event.Timestamp)

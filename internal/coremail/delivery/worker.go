@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,18 +27,18 @@ type DeliveryWorker struct {
 	LocalDomain string
 
 	// Reliability integrations.
-	RetryPolicy    RetryPolicy
-	History        AttemptHistoryRepository
-	Audit          *AuditLogger
-	Policy         *PolicyEnforcer
-	LoopDetector   *LoopDetector
-	Metrics        *ReliabilityMetrics
-	Recovery       *WorkerCrashRecovery
-	Shutdown       *ShutdownManager
+	RetryPolicy  RetryPolicy
+	History      AttemptHistoryRepository
+	Audit        *AuditLogger
+	Policy       *PolicyEnforcer
+	LoopDetector *LoopDetector
+	Metrics      *ReliabilityMetrics
+	Recovery     *WorkerCrashRecovery
+	Shutdown     *ShutdownManager
 
 	// DKIM signing integration (optional).
-	DKIMSigner     *dkim.Signer
-	DKIMConfigs    dkim.Repository
+	DKIMSigner  *dkim.Signer
+	DKIMConfigs dkim.Repository
 
 	// Observability (optional).
 	Observability *observability.Observability
@@ -382,11 +384,11 @@ func (w *DeliveryWorker) recordDeliveryEvent(ctx context.Context, entry *queue.Q
 	w.Observability.Metrics.IncQueueDelivered()
 	_ = typ
 	fields := map[string]string{
-		"queue_id":    fmt.Sprintf("%d", entry.ID),
-		"message_id":  entry.MessageID,
-		"sender":      entry.FromAddress,
-		"recipient":   entry.ToAddress,
-		"domain":      entry.RecipientDomain,
+		"queue_id":   fmt.Sprintf("%d", entry.ID),
+		"message_id": entry.MessageID,
+		"sender":     entry.FromAddress,
+		"recipient":  entry.ToAddress,
+		"domain":     entry.RecipientDomain,
 	}
 	if result != nil {
 		fields["status"] = result.StatusMsg
@@ -470,31 +472,60 @@ func (w *DeliveryWorker) deliverRemote(ctx context.Context, entry *queue.QueueEn
 	// ── DKIM Signing (if configured) ──────────────────────
 	data = w.signWithDKIM(ctx, data, entry)
 
+	var lastTemp *DeliveryResult
 	for _, mx := range mxRecords {
 		host := strings.TrimSuffix(mx.Host, ".")
-		// Check if host already contains a port number.
-		if strings.Contains(host, ":") {
+		if hasExplicitPort(host) {
 			result := w.Transport.Deliver(ctx, host, false, entry.FromAddress, []string{entry.ToAddress}, data, w.HeloHost)
 			result.RemoteHost = host
 			result.RemoteIP = host
 			if result.Success || !result.TempFail {
 				return result
 			}
+			lastTemp = result
 			continue
 		}
 		addrs, err := w.Resolver.LookupHost(ctx, host)
 		if err != nil {
+			lastTemp = &DeliveryResult{
+				StatusMsg:  fmt.Sprintf("host lookup %s: %v", host, err),
+				TempFail:   true,
+				RemoteHost: host,
+			}
 			continue
 		}
 		for _, ip := range addrs {
-			addr := fmt.Sprintf("%s:25", ip)
+			addr := smtpDialAddress(ip, "25")
 			result := w.Transport.Deliver(ctx, addr, false, entry.FromAddress, []string{entry.ToAddress}, data, w.HeloHost)
 			result.RemoteHost = host
 			result.RemoteIP = ip
 			if result.Success || !result.TempFail {
 				return result
 			}
+			lastTemp = result
 		}
 	}
+	if lastTemp != nil {
+		return lastTemp
+	}
 	return &DeliveryResult{StatusMsg: fmt.Sprintf("all mx hosts failed for %s", domain), TempFail: true}
+}
+
+func smtpDialAddress(host, port string) string {
+	if hasExplicitPort(host) {
+		return host
+	}
+	return net.JoinHostPort(host, port)
+}
+
+func hasExplicitPort(host string) bool {
+	if _, _, err := net.SplitHostPort(host); err == nil {
+		return true
+	}
+	colon := strings.LastIndex(host, ":")
+	if colon <= 0 || strings.Count(host, ":") != 1 || colon == len(host)-1 {
+		return false
+	}
+	_, err := strconv.Atoi(host[colon+1:])
+	return err == nil
 }

@@ -30,6 +30,7 @@ type integEnv struct {
 	audit     *AuditLogger
 	metrics   *ReliabilityMetrics
 	policy    *PolicyEnforcer
+	resolver  *FakeResolver
 	fs        *fakeSMTPServer
 }
 
@@ -107,7 +108,7 @@ func newIntegEnv(t *testing.T) *integEnv {
 
 	return &integEnv{
 		db: db, queue: qe, mailstore: ms, worker: worker,
-		history: history, audit: audit, metrics: metrics, policy: policy, fs: fs,
+		history: history, audit: audit, metrics: metrics, policy: policy, resolver: resolver, fs: fs,
 	}
 }
 
@@ -154,8 +155,8 @@ func TestIntegSMTP250DeliveredAckAuditHistoryMetrics(t *testing.T) {
 
 	// Need to store the message in MailStore first (as SMTP receive would).
 	msg := &storage.Message{
-		MessageID:   entry.MessageID,
-		TenantID:    1, DomainID: 1, MailboxID: 1,
+		MessageID: entry.MessageID,
+		TenantID:  1, DomainID: 1, MailboxID: 1,
 		FromAddress: entry.FromAddress, ToAddresses: entry.ToAddress,
 	}
 	e.mailstore.StoreMessage(context.Background(), msg, []byte("Subject: Test\r\n\r\nHello"), nil)
@@ -234,6 +235,32 @@ func TestIntegSMTP450Deferred(t *testing.T) {
 	snap := e.metrics.Snapshot()
 	if snap.TotalDeferrals < 1 {
 		t.Fatal("expected deferral in metrics")
+	}
+}
+
+func TestIntegConnectFailureDeferredNotBounced(t *testing.T) {
+	e := newIntegEnv(t)
+	defer e.fs.ln.Close()
+
+	e.resolver.MXRecords["down.test"] = []MXRecord{{Host: "127.0.0.1:1", Priority: 10}}
+	entry := e.enqueue("down.test", "rcpt@down.test")
+	msg := &storage.Message{MessageID: entry.MessageID, TenantID: 1, DomainID: 1, MailboxID: 1, FromAddress: entry.FromAddress, ToAddresses: entry.ToAddress}
+	e.mailstore.StoreMessage(context.Background(), msg, []byte("data"), nil)
+
+	_, err := e.worker.ProcessOnce(context.Background())
+	if err != nil {
+		t.Fatalf("process once: %v", err)
+	}
+
+	got, _ := e.queue.Repo.Get(context.Background(), entry.ID, nil)
+	if got == nil || got.Status != queue.StatusDeferred {
+		t.Fatalf("expected transient connect failure to defer, got %v", got)
+	}
+	if got.AttemptCount != 1 {
+		t.Fatalf("expected one attempt after connect failure, got %d", got.AttemptCount)
+	}
+	if !strings.Contains(got.LastError, "connect failed") {
+		t.Fatalf("expected connect failure last_error, got %q", got.LastError)
 	}
 }
 
@@ -543,8 +570,8 @@ func TestAuthGateOutboundDKIMSigned(t *testing.T) {
 
 	entry := e.enqueue("remote.test", "rcpt@remote.test")
 	msg := &storage.Message{
-		MessageID:   entry.MessageID,
-		TenantID:    1, DomainID: 1, MailboxID: 1,
+		MessageID: entry.MessageID,
+		TenantID:  1, DomainID: 1, MailboxID: 1,
 		FromAddress: entry.FromAddress, ToAddresses: entry.ToAddress,
 	}
 	e.mailstore.StoreMessage(context.Background(), msg, []byte("Subject: DKIM Test\r\n\r\nHello World"), nil)
@@ -598,8 +625,8 @@ func TestAuthGateDKIMHeaderNotDuplicated(t *testing.T) {
 
 	// Store a message that already has a DKIM-Signature header.
 	msg := &storage.Message{
-		MessageID:   entry.MessageID,
-		TenantID:    1, DomainID: 1, MailboxID: 1,
+		MessageID: entry.MessageID,
+		TenantID:  1, DomainID: 1, MailboxID: 1,
 		FromAddress: entry.FromAddress, ToAddresses: entry.ToAddress,
 	}
 	existingData := []byte("DKIM-Signature: v=1; a=rsa-sha256; b=existing\r\nSubject: Already Signed\r\n\r\nBody")
@@ -632,8 +659,8 @@ func TestAuthGateMissingDKIMConfig(t *testing.T) {
 
 	entry := e.enqueue("remote.test", "rcpt@remote.test")
 	msg := &storage.Message{
-		MessageID:   entry.MessageID,
-		TenantID:    1, DomainID: 1, MailboxID: 1,
+		MessageID: entry.MessageID,
+		TenantID:  1, DomainID: 1, MailboxID: 1,
 		FromAddress: "sender@other.com", ToAddresses: entry.ToAddress,
 	}
 	e.mailstore.StoreMessage(context.Background(), msg, []byte("Subject: No DKIM\r\n\r\nBody"), nil)
@@ -679,8 +706,8 @@ func TestAuthGateDKIMDisabledDomainNotSigned(t *testing.T) {
 
 	entry := e.enqueue("remote.test", "rcpt@remote.test")
 	msg := &storage.Message{
-		MessageID:   entry.MessageID,
-		TenantID:    1, DomainID: 1, MailboxID: 1,
+		MessageID: entry.MessageID,
+		TenantID:  1, DomainID: 1, MailboxID: 1,
 		FromAddress: entry.FromAddress, ToAddresses: entry.ToAddress,
 	}
 	e.mailstore.StoreMessage(context.Background(), msg, []byte("Subject: Disabled\r\n\r\nBody"), nil)
@@ -729,8 +756,8 @@ func TestAuthGateDKIMOutboundPathPreservesDKIM(t *testing.T) {
 	// Store a message that already has auth headers from the receive path.
 	existingData := []byte("Authentication-Results: mx.test.com; spf=pass smtp.mailfrom=example.com; dmarc=pass header.from=example.com\r\nReceived-SPF: pass (sender matches) receiver=mx.test.com; identity=mailfrom; envelope-from=example.com; client-ip=192.0.2.1\r\nSubject: E2E Path\r\n\r\nFull message body")
 	msg := &storage.Message{
-		MessageID:   entry.MessageID,
-		TenantID:    1, DomainID: 1, MailboxID: 1,
+		MessageID: entry.MessageID,
+		TenantID:  1, DomainID: 1, MailboxID: 1,
 		FromAddress: entry.FromAddress, ToAddresses: entry.ToAddress,
 	}
 	e.mailstore.StoreMessage(context.Background(), msg, existingData, nil)

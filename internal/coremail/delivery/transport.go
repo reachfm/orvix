@@ -12,11 +12,11 @@ import (
 
 // TransportConfig holds SMTP transport settings.
 type TransportConfig struct {
-	ConnectTimeout   time.Duration
-	ReadTimeout      time.Duration
-	WriteTimeout     time.Duration
-	MaxLineLength    int
-	AttemptSTARTTLS  bool
+	ConnectTimeout  time.Duration
+	ReadTimeout     time.Duration
+	WriteTimeout    time.Duration
+	MaxLineLength   int
+	AttemptSTARTTLS bool
 }
 
 // DefaultTransportConfig returns default transport settings.
@@ -33,7 +33,7 @@ func DefaultTransportConfig() TransportConfig {
 // DeliveryResult holds the outcome of a single SMTP delivery attempt.
 type DeliveryResult struct {
 	Success      bool
-	StatusCode   int    // 0 if connection failed
+	StatusCode   int // 0 if connection failed
 	StatusMsg    string
 	EnhancedCode string // SMTP enhanced status code (e.g. "5.1.1")
 	TempFail     bool   // true = 4xx (retryable), false = 5xx (permanent)
@@ -73,6 +73,7 @@ func (t *SMTPTransport) Deliver(ctx context.Context, addr string, useTLS bool, f
 	}
 	if err != nil {
 		res.StatusMsg = fmt.Sprintf("connect failed: %v", err)
+		res.TempFail = true
 		return res
 	}
 	defer conn.Close()

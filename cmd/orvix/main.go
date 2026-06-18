@@ -23,6 +23,7 @@ import (
 	"github.com/orvix/orvix/internal/compose"
 	"github.com/orvix/orvix/internal/config"
 	coremailruntime "github.com/orvix/orvix/internal/coremail/runtime"
+	coremailstorage "github.com/orvix/orvix/internal/coremail/storage"
 	"github.com/orvix/orvix/internal/dns"
 	"github.com/orvix/orvix/internal/firewall"
 	"github.com/orvix/orvix/internal/guardian"
@@ -70,6 +71,9 @@ func main() {
 		logger.Fatal("failed to run migrations", zap.Error(err))
 	}
 	logger.Info("database migrations completed")
+	if err := ensureCoreMailBootstrapSchema(db); err != nil {
+		logger.Fatal("failed to run coremail bootstrap schema migrations", zap.Error(err))
+	}
 
 	seedFeatureFlags(db, logger)
 
@@ -185,6 +189,19 @@ func registerModules(r *modules.Registry, cfg *config.Config, db *gorm.DB, logge
 	r.Register(&intelligence.Module{})
 }
 
+func ensureCoreMailBootstrapSchema(db *gorm.DB) error {
+	sqlDB, err := db.DB()
+	if err != nil {
+		return err
+	}
+	for _, stmt := range append(coremailstorage.Tables(), coremailstorage.Indexes()...) {
+		if _, err := sqlDB.Exec(stmt); err != nil {
+			return fmt.Errorf("coremail bootstrap storage migration: %w", err)
+		}
+	}
+	return nil
+}
+
 func seedFeatureFlags(db *gorm.DB, logger *zap.Logger) {
 	flags := []struct {
 		Name          string
@@ -244,6 +261,10 @@ func seedAdminUser(db *gorm.DB, authenticator *auth.Authenticator, logger *zap.L
 	sqlDB, err := db.DB()
 	if err != nil {
 		logger.Warn("failed to access database for admin bootstrap", zap.Error(err))
+		return
+	}
+	if err := ensureCoreMailBootstrapSchema(db); err != nil {
+		logger.Warn("failed to prepare coremail storage schema for admin bootstrap", zap.Error(err))
 		return
 	}
 
