@@ -189,9 +189,49 @@ func (r *MessageSQLRepo) listOnce(ctx context.Context, filter MessageFilter, tx 
 		}
 	}
 	if filter.Search != "" {
-		where = append(where, "(subject LIKE ? OR from_address LIKE ? OR to_addresses LIKE ?)")
+		// Build the LIKE clause set based on the
+		// per-field opt-in flags. The default set
+		// (subject / from / to) matches the historical
+		// behaviour so legacy callers stay unchanged;
+		// the body / cc / bcc flags are explicitly
+		// off by default because they cost an extra
+		// round trip and LIKE-against-RFC822 is not
+		// cheap at scale.
+		subject, from, to, cc, bcc, _ := filter.MatchScopeForSearch()
+		var clauses []string
+		var likeArgs []interface{}
 		s := "%" + filter.Search + "%"
-		args = append(args, s, s, s)
+		if subject {
+			clauses = append(clauses, "subject LIKE ?")
+			likeArgs = append(likeArgs, s)
+		}
+		if from {
+			clauses = append(clauses, "from_address LIKE ?")
+			likeArgs = append(likeArgs, s)
+		}
+		if to {
+			clauses = append(clauses, "to_addresses LIKE ?")
+			likeArgs = append(likeArgs, s)
+		}
+		if cc {
+			clauses = append(clauses, "cc_addresses LIKE ?")
+			likeArgs = append(likeArgs, s)
+		}
+		if bcc {
+			clauses = append(clauses, "bcc_addresses LIKE ?")
+			likeArgs = append(likeArgs, s)
+		}
+		if len(clauses) > 0 {
+			where = append(where, "("+strings.Join(clauses, " OR ")+")")
+			args = append(args, likeArgs...)
+		} else {
+			// All scope flags are off but Search is
+			// non-empty. The caller explicitly asked
+			// for a search with no fields, which is a
+			// no-op — match nothing rather than
+			// silently return everything.
+			where = append(where, "1 = 0")
+		}
 	}
 	if filter.Since != nil {
 		where = append(where, "received_date >= ?")

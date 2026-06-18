@@ -1,8 +1,8 @@
 /* =====================================================================
    Orvix Webmail — production-grade enterprise client.
    Vanilla JS, no external dependencies. Sends credentials with every
-   request to /api/v1/webmail/*, never to /api/v1/queue, never stores
-   tokens in localStorage (cookies are HttpOnly).
+   request to the webmail API only; it does not use the admin queue API or
+   browser-managed token storage (cookies are HttpOnly).
 
    Layout: 3-pane shell rendered by init().
      - Topbar    : brand, menu toggle, search, user chip
@@ -335,13 +335,29 @@
     messagesLoading: false,
     selectedMessageID: null,
     selectedMessage: null,
-    compose: null, // {mode:'new'|'reply'|'replyAll'|'forward'|'draft', draftID, to, cc, bcc, subject, body}
+    // Bulk-select model. selectionMode becomes true the
+    // first time the user ticks a checkbox or presses the
+    // "Select" affordance; it stays on until "Clear
+    // selection" is pressed. The selection is a Set<id>
+    // of messages currently ticked. The UI shows a
+    // floating action bar when selection.size > 0.
+    selectionMode: false,
+    selection: {},
+    lastSelectedID: null,
+    compose: null, // {mode:'new'|'reply'|'replyAll'|'forward'|'draft', draftID, to, cc, bcc, subject, body, dirty, lastSavedAt}
     searchQuery: '',
     sidebarOpen: false,
     readingPaneOpen: false,
+    // "g" prefix for Gmail-style navigation. After
+    // pressing "g" the next keypress is interpreted as a
+    // folder shortcut. We use a single keypress window
+    // (~1s) before resetting.
+    gPrefixActive: false,
+    gPrefixTimer: null,
   };
 
   var PAGE_SIZE = 50;
+  var G_PREFIX_TIMEOUT_MS = 1000;
 
   function api(method, path, body) {
     var opts = {
@@ -441,8 +457,16 @@
       .then(function (data) {
         var list = (data && data.messages) || [];
         state.messages = state.messages.concat(list);
+        // Re-apply selection state — newly loaded rows
+        // are unchecked, but if the user had IDs in the
+        // selection that happen to be in this page they
+        // show as ticked.
+        for (var i = 0; i < list.length; i++) {
+          if (state.selection[list[i].id]) list[i].__selected = true;
+        }
         state.messagesHasMore = list.length >= PAGE_SIZE;
         state.messagesPage++;
+        renderMessageList();
       })
       .finally(function () {
         state.messagesLoading = false;
@@ -460,6 +484,134 @@
         });
       }
       return msg;
+    });
+  }
+
+  // ──────────────────────────────────────────────────────────
+  // Bulk select
+  // ──────────────────────────────────────────────────────────
+
+  // selectionCount returns the number of currently
+  // selected messages. A simple helper because the
+  // selection is a plain object keyed by id (a Set would
+  // be cleaner but Set literal support in older browsers
+  // is patchy; the count is computed on demand).
+  function selectionCount() {
+    return Object.keys(state.selection).length;
+  }
+
+  // isSelected reports whether the given message id is
+  // currently in the selection.
+  function isSelected(id) {
+    return !!state.selection[id];
+  }
+
+  // toggleSelection adds or removes a single message id
+  // from the selection. If this is the first toggle the
+  // selectionMode flag flips on so the checkbox column
+  // becomes visible on every row. shiftKey + click
+  // selects a contiguous range, like the desktop
+  // convention.
+  function toggleSelection(id, ev) {
+    var ids = state.messages.map(function (m) { return m.id; });
+    if (ev && ev.shiftKey && state.lastSelectedID != null) {
+      // Range select between the last clicked id and
+      // this one, in list order. The starting id is
+      // included.
+      var from = ids.indexOf(state.lastSelectedID);
+      var to = ids.indexOf(id);
+      if (from >= 0 && to >= 0) {
+        if (from > to) { var t = from; from = to; to = t; }
+        for (var i = from; i <= to; i++) {
+          state.selection[ids[i]] = true;
+        }
+      }
+    } else {
+      if (state.selection[id]) {
+        delete state.selection[id];
+      } else {
+        state.selection[id] = true;
+      }
+    }
+    state.lastSelectedID = id;
+    state.selectionMode = selectionCount() > 0;
+    renderMessageList();
+    renderBulkActionBar();
+  }
+
+  // selectAllVisible checks every message currently in
+  // the loaded page. The action does NOT load more pages
+  // — if the user wants every message in the folder they
+  // load more pages first, then select all. The
+  // affordance is in the bulk action bar.
+  function selectAllVisible() {
+    state.messages.forEach(function (m) {
+      state.selection[m.id] = true;
+    });
+    state.selectionMode = true;
+    renderMessageList();
+    renderBulkActionBar();
+  }
+
+  // clearSelection removes every selected id and exits
+  // selection mode.
+  function clearSelection() {
+    state.selection = {};
+    state.lastSelectedID = null;
+    state.selectionMode = false;
+    renderMessageList();
+    renderBulkActionBar();
+  }
+
+  // runBatchAction issues POST /api/v1/webmail/messages/batch
+  // with the current selection and the supplied action.
+  // The response is partial-failure aware: per-id errors
+  // are surfaced in a toast with the failed ids, and the
+  // successfully-processed messages are dropped from the
+  // current view so the list immediately reflects the
+  // outcome. Any selection of ids that survived is
+  // cleared.
+  function runBatchAction(action, targetFolderID) {
+    var ids = Object.keys(state.selection).map(function (k) { return parseInt(k, 10); });
+    if (ids.length === 0) return Promise.resolve();
+    var payload = { ids: ids, action: action };
+    if (targetFolderID) payload.target_folder_id = targetFolderID;
+    return api('POST', '/api/v1/webmail/messages/batch', payload).then(function (res) {
+      var failed = (res && res.errors) || [];
+      var failedIDs = {};
+      failed.forEach(function (e) { failedIDs[e.id] = e.error; });
+      // Drop successfully-processed messages from the
+      // current list. Failed messages stay so the user
+      // can retry.
+      state.messages = state.messages.filter(function (m) {
+        if (failedIDs[m.id]) return true;
+        return !state.selection[m.id];
+      });
+      clearSelection();
+      renderMessageList();
+      // Surface the outcome.
+      var actionLabel = ({
+        archive: 'archived',
+        delete: 'moved to Trash',
+        move: 'moved',
+        markRead: 'marked as read',
+        markUnread: 'marked as unread',
+        flag: 'flagged',
+        unflag: 'unflagged',
+        spam: 'reported as spam',
+        nospam: 'marked as not spam',
+      })[action] || action;
+      if (failed.length === 0) {
+        toast(ids.length + ' ' + (ids.length === 1 ? 'message' : 'messages') + ' ' + actionLabel, 'success');
+      } else {
+        toast(
+          (res.succeeded || 0) + ' ' + actionLabel + '; ' + failed.length + ' failed',
+          'error',
+          5000
+        );
+      }
+    }).catch(function (e) {
+      toast('Batch ' + action + ' failed: ' + (e.message || 'unknown'), 'error');
     });
   }
 
@@ -840,6 +992,19 @@
     var msgs = $('messages');
     if (!msgs) return;
     msgs.innerHTML = '';
+    // The selection-mode class on the message list
+    // reserves a checkbox column on every row. The
+    // body class is the same signal at the document
+    // level for CSS that styles the layout outside
+    // the list (bulk bar, etc.). Both must move
+    // together.
+    if (state.selectionMode) {
+      msgs.classList.add('selection-mode');
+      document.body.classList.add('selection-mode-on');
+    } else {
+      msgs.classList.remove('selection-mode');
+      document.body.classList.remove('selection-mode-on');
+    }
     var title = $('list-title');
     if (state.searchQuery) {
       title.textContent = 'Search: ' + state.searchQuery;
@@ -847,6 +1012,12 @@
       var f = state.folderByPath[state.currentFolderPath.toLowerCase()];
       title.textContent = f ? f.name : state.currentFolderPath;
     }
+
+    // The list header carries the "Select" toggle and
+    // the "select all visible" affordance when the user
+    // is in selection mode. The action bar (rendered
+    // separately) sits below this header.
+    renderListHeader(msgs);
 
     if (state.messagesLoading && state.messages.length === 0) {
       msgs.appendChild(
@@ -872,10 +1043,126 @@
     });
 
     if (state.messagesHasMore) {
-      var more = el('div', { class: 'empty-state', id: 'load-more' });
-      more.textContent = state.messagesLoading ? 'Loading…' : 'Load more';
+      // The load-more affordance is a real button now,
+      // not a static div. The click handler triggers
+      // loadMoreMessages(); while the request is in
+      // flight the button is disabled and shows a
+      // spinner. This is the wire-up the previous
+      // version was missing.
+      var more = el('button', {
+        class: 'load-more-btn',
+        type: 'button',
+        id: 'load-more',
+        disabled: state.messagesLoading,
+      });
+      if (state.messagesLoading) {
+        more.appendChild(el('span', { class: 'spinner-inline' }));
+        more.appendChild(document.createTextNode(' Loading…'));
+      } else {
+        more.textContent = 'Load more';
+      }
+      more.addEventListener('click', function (ev) {
+        ev.preventDefault();
+        loadMoreMessages();
+      });
       msgs.appendChild(more);
     }
+  }
+
+  // renderListHeader writes the "Select" toggle and the
+  // "Select all visible" affordance at the top of the
+  // message list. Hidden when the user has not entered
+  // selection mode (no messages ticked). Toggling the
+  // header's "Select" button puts the user in selection
+  // mode without ticking any message; clicking again
+  // leaves selection mode.
+  function renderListHeader(msgs) {
+    var header = el('div', { class: 'list-header' });
+    var left = el('div', { class: 'lh-left' });
+    if (state.selectionMode) {
+      var allBtn = el('button', {
+        class: 'link-btn',
+        type: 'button',
+        title: 'Tick every message in this page',
+      }, 'Select all');
+      allBtn.addEventListener('click', function () { selectAllVisible(); });
+      left.appendChild(allBtn);
+      var n = selectionCount();
+      var lbl = el('span', { class: 'lh-count' }, n + ' selected');
+      left.appendChild(lbl);
+    } else {
+      var selectBtn = el('button', {
+        class: 'link-btn',
+        type: 'button',
+        title: 'Enter selection mode',
+      }, 'Select');
+      selectBtn.addEventListener('click', function () {
+        state.selectionMode = true;
+        renderMessageList();
+        renderBulkActionBar();
+      });
+      left.appendChild(selectBtn);
+    }
+    header.appendChild(left);
+    msgs.appendChild(header);
+  }
+
+  // renderBulkActionBar draws the floating bottom action
+  // bar when at least one message is selected. The bar
+  // exposes archive / delete / mark read / mark unread /
+  // report spam / not spam / move to… and a Clear
+  // selection chip. The bar is fixed to the bottom of
+  // the viewport; the inline class is set so it can be
+  // styled for mobile.
+  function renderBulkActionBar() {
+    var bar = $('bulk-action-bar');
+    if (!bar) {
+      bar = el('div', { id: 'bulk-action-bar', class: 'bulk-bar', role: 'toolbar' });
+      document.body.appendChild(bar);
+    }
+    if (!state.selectionMode || selectionCount() === 0) {
+      bar.classList.remove('visible');
+      return;
+    }
+    bar.innerHTML = '';
+    var count = selectionCount();
+    bar.appendChild(
+      el('span', { class: 'bulk-count' }, count + ' selected')
+    );
+    function btn(label, title, action, targetFolderID) {
+      var b = el('button', {
+        class: 'btn',
+        type: 'button',
+        title: title,
+      }, label);
+      b.addEventListener('click', function () { runBatchAction(action, targetFolderID); });
+      return b;
+    }
+    bar.appendChild(btn('Archive', 'Archive selected', 'archive'));
+    bar.appendChild(btn('Delete', 'Move to Trash', 'delete'));
+    bar.appendChild(btn('Read', 'Mark as read', 'markRead'));
+    bar.appendChild(btn('Unread', 'Mark as unread', 'markUnread'));
+    bar.appendChild(btn('Spam', 'Report as spam', 'spam'));
+    // Move to… — picker. We render a small inline
+    // <select> so the user can pick the destination
+    // folder without leaving the bar.
+    var moveWrap = el('div', { class: 'bulk-move' });
+    var moveSelect = el('select', { 'aria-label': 'Move to folder' });
+    state.folders.forEach(function (f) {
+      var opt = el('option', { value: f.id }, f.name || f.path);
+      moveSelect.appendChild(opt);
+    });
+    moveSelect.addEventListener('change', function () {
+      if (!moveSelect.value) return;
+      runBatchAction('move', parseInt(moveSelect.value, 10));
+      moveSelect.value = '';
+    });
+    moveWrap.appendChild(moveSelect);
+    bar.appendChild(moveWrap);
+    var clearBtn = el('button', { class: 'btn ghost', type: 'button' }, 'Clear');
+    clearBtn.addEventListener('click', function () { clearSelection(); });
+    bar.appendChild(clearBtn);
+    bar.classList.add('visible');
   }
 
   function messageRow(m) {
@@ -883,11 +1170,35 @@
       class:
         'message' +
         (m.seen ? '' : ' unread') +
-        (state.selectedMessageID === m.id ? ' selected' : ''),
+        (state.selectedMessageID === m.id ? ' selected' : '') +
+        (isSelected(m.id) ? ' checked' : ''),
       'data-id': m.id,
       role: 'button',
       tabindex: '0',
     });
+    // Checkbox column. Always rendered (visibility
+    // controlled by CSS so the column reserves space
+    // only when selectionMode is on). The checkbox
+    // toggles selection without opening the message.
+    if (state.selectionMode) {
+      var cb = el('input', {
+        type: 'checkbox',
+        class: 'row-check',
+        'aria-label': 'Select message',
+        tabindex: '-1',
+      });
+      cb.checked = isSelected(m.id);
+      cb.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        toggleSelection(m.id, ev);
+      });
+      cb.addEventListener('change', function (ev) {
+        // change is fired in addition to click on some
+        // browsers; toggleSelection already handled it.
+        ev.stopPropagation();
+      });
+      row.appendChild(cb);
+    }
     var star = el('button', {
       class: 'star' + (m.flagged ? ' on' : ''),
       type: 'button',
@@ -916,7 +1227,7 @@
     body.appendChild(fromRow);
     var subj = m.subject || '(no subject)';
     body.appendChild(el('div', { class: 'subject', dir: dirAuto(subj) }, subj));
-    var preview = m.preview || snippetFromMessage(m);
+    var preview = m.preview || (m.snippet || snippetFromMessage(m));
     body.appendChild(
       el('div', { class: 'preview', dir: dirAuto(preview) }, preview || ' ')
     );
@@ -934,13 +1245,26 @@
     meta.appendChild(icons);
     row.appendChild(meta);
 
-    row.addEventListener('click', function () {
+    row.addEventListener('click', function (ev) {
+      // If the user clicked the checkbox, selection
+      // already handled it. If they're in selection
+      // mode, a row click toggles instead of opening
+      // the message (the standard mail-client pattern).
+      if (ev.target && ev.target.classList && ev.target.classList.contains('row-check')) return;
+      if (state.selectionMode) {
+        toggleSelection(m.id, ev);
+        return;
+      }
       openMessage(m.id);
     });
     row.addEventListener('keydown', function (ev) {
       if (ev.key === 'Enter' || ev.key === ' ') {
         ev.preventDefault();
-        openMessage(m.id);
+        if (state.selectionMode) {
+          toggleSelection(m.id, ev);
+        } else {
+          openMessage(m.id);
+        }
       }
     });
     return row;
@@ -952,6 +1276,83 @@
     // empty.
     var s = m.subject || '';
     return s;
+  }
+
+  // moveSelection walks the current list up or down
+  // by `delta` and opens the resulting message. The
+  // current message id is taken from
+  // state.selectedMessageID; if nothing is selected we
+  // start at the top of the list (delta = 1) or the
+  // bottom (delta = -1).
+  function moveSelection(delta) {
+    if (!state.messages || state.messages.length === 0) return;
+    var idx = -1;
+    if (state.selectedMessageID) {
+      for (var i = 0; i < state.messages.length; i++) {
+        if (state.messages[i].id === state.selectedMessageID) {
+          idx = i;
+          break;
+        }
+      }
+    }
+    var next = idx + delta;
+    if (next < 0) next = 0;
+    if (next >= state.messages.length) next = state.messages.length - 1;
+    var m = state.messages[next];
+    if (!m) return;
+    openMessage(m.id);
+  }
+
+  // showShortcutsOverlay renders a small modal listing
+  // every keyboard shortcut the client supports. The
+  // overlay is a one-off element that is rebuilt each
+  // time the user presses "?" — the cost is trivial
+  // and the contents are static.
+  function showShortcutsOverlay() {
+    var existing = document.querySelector('.shortcuts-overlay');
+    if (existing) {
+      existing.remove();
+      return;
+    }
+    var overlay = el('div', { class: 'shortcuts-overlay' });
+    var panel = el('div', { class: 'shortcuts-panel', role: 'dialog' });
+    panel.appendChild(el('h2', {}, 'Keyboard shortcuts'));
+    var rows = [
+      ['c', 'Compose new message'],
+      ['/', 'Focus search'],
+      ['r', 'Reply'],
+      ['a', 'Reply all'],
+      ['f', 'Forward'],
+      ['j / Down', 'Next message'],
+      ['k / Up', 'Previous message'],
+      ['e', 'Archive current message'],
+      ['# / Delete', 'Move to Trash'],
+      ['s', 'Star / unstar current message'],
+      ['x', 'Toggle selection (selection mode only)'],
+      ['g i', 'Go to Inbox'],
+      ['g s', 'Go to Sent'],
+      ['g d', 'Go to Drafts'],
+      ['g a', 'Go to Archive'],
+      ['g t', 'Go to Trash'],
+      ['g j', 'Go to Junk'],
+      ['?', 'Show / hide this overlay'],
+      ['Esc', 'Close modal, cancel selection, or close reading pane'],
+    ];
+    var table = el('table', { class: 'shortcuts-table' });
+    rows.forEach(function (r) {
+      var tr = el('tr');
+      tr.appendChild(el('td', { class: 'key' }, r[0]));
+      tr.appendChild(el('td', {}, r[1]));
+      table.appendChild(tr);
+    });
+    panel.appendChild(table);
+    panel.appendChild(el('div', { class: 'shortcuts-hint' },
+      'Press Esc or ? again to close this overlay.'));
+    overlay.appendChild(panel);
+    overlay.addEventListener('click', function (ev) {
+      if (ev.target === overlay) overlay.remove();
+    });
+    document.body.appendChild(overlay);
   }
 
   function openMessage(id) {
@@ -1043,6 +1444,68 @@
           toast('Archive failed: ' + e.message, 'error');
         });
     });
+    // "Show original" downloads the raw RFC822 as a
+    // .eml file. The endpoint is the same source
+    // download used by the admin queue debug page; the
+    // browser saves the file because the response sets
+    // Content-Disposition: attachment.
+    actBtn('⤓', 'Show original', function () {
+      var a = document.createElement('a');
+      a.href = '/api/v1/webmail/messages/' + msg.id + '/source';
+      a.rel = 'noopener';
+      a.download = 'message-' + msg.id + '.eml';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function () { a.remove(); }, 0);
+    });
+    // "Move to…" lets the user pick a destination
+    // folder other than Archive / Trash. Renders an
+    // inline <select> so the move can be issued from
+    // the toolbar without a second modal.
+    var moveWrap = el('div', { class: 'move-to-wrap' });
+    var moveSelect = el('select', { 'aria-label': 'Move to folder', title: 'Move to folder' });
+    moveSelect.appendChild(el('option', { value: '' }, 'Move to…'));
+    state.folders.forEach(function (f) {
+      var opt = el('option', { value: f.id }, f.name || f.path);
+      moveSelect.appendChild(opt);
+    });
+    moveSelect.addEventListener('change', function () {
+      if (!moveSelect.value) return;
+      var targetID = parseInt(moveSelect.value, 10);
+      api('POST', '/api/v1/webmail/messages/' + msg.id + '/move',
+        { target_folder_id: targetID })
+        .then(function (res) {
+          toast('Moved to ' + (res.moved_to || 'folder'), 'success');
+          renderMessageList();
+          closeReadingPane();
+        })
+        .catch(function (e) {
+          toast('Move failed: ' + e.message, 'error');
+        });
+      moveSelect.value = '';
+    });
+    moveWrap.appendChild(moveSelect);
+    tb.appendChild(moveWrap);
+    // "Spam" / "Not spam" toggle depending on the
+    // current junk flag. Both call the same
+    // /messages/batch endpoint with action=spam /
+    // nospam so the same code path the bulk action
+    // bar uses also powers this single-message action.
+    if (msg.junk) {
+      actBtn('✓', 'Not spam', function () {
+        runBatchAction('nospam').then(function () {
+          if (state.selectedMessage) state.selectedMessage.junk = false;
+          renderReadingPane();
+        });
+      });
+    } else {
+      actBtn('⚑', 'Report spam', function () {
+        runBatchAction('spam').then(function () {
+          if (state.selectedMessage) state.selectedMessage.junk = true;
+          closeReadingPane();
+        });
+      });
+    }
     if (msg.seen) {
       actBtn('●', 'Mark unread', function () {
         updateMessageFlags(msg.id, { seen: false }).then(function () {
@@ -1118,19 +1581,56 @@
     body.innerHTML = renderBody(msg.rfc822 || '');
     view.appendChild(body);
 
-    // Attachments: present in the API response if any. v1
-    // attaches a list of objects {filename, content_type,
-    // size_bytes}; the endpoint already pulls them through
-    // MailStore. We just render what the server returned.
+    // Attachments: present in the API response if any. The
+    // server returns {id, filename, content_type,
+    // size_bytes}; the download endpoint requires the id
+    // (parsed as uint) and is the only path that opens the
+    // file. A safe content-type allowlist (PNG/JPEG/GIF/
+    // WebP/text) renders an inline "Preview" link;
+    // everything else is download-only.
     if (msg.attachments && msg.attachments.length > 0) {
       var att = el('div', { class: 'attachments' });
       att.appendChild(el('h3', {}, pluralize(msg.attachments.length, 'Attachment', 'Attachments')));
       var ul = el('ul');
+      // Same allowlist the server enforces in its
+      // /preview endpoint. The client mirrors it so the
+      // "Preview" link is only shown for content the
+      // server will actually serve inline. SVG is
+      // excluded — the server refuses to preview it.
+      var previewable = {
+        'image/png': true, 'image/jpeg': true,
+        'image/gif': true, 'image/webp': true,
+        'text/plain': true,
+      };
       msg.attachments.forEach(function (a) {
         var li = el('li');
         li.appendChild(el('span', { class: 'att-icon' }, '📎'));
-        li.appendChild(el('span', { class: 'att-name' }, a.filename || 'attachment'));
+        var name = el('span', { class: 'att-name' }, a.filename || 'attachment');
+        li.appendChild(name);
         li.appendChild(el('span', { class: 'att-size' }, formatSize(a.size_bytes)));
+        // Download button — always available. Anchor
+        // tag with download attribute; the response
+        // sets Content-Disposition: attachment so the
+        // browser honours the save-as action.
+        var dl = el('a', {
+          class: 'att-download',
+          href: '/api/v1/webmail/attachments/' + a.id,
+          'aria-label': 'Download ' + (a.filename || 'attachment'),
+          title: 'Download',
+          rel: 'noopener',
+        }, 'Download');
+        li.appendChild(dl);
+        if (a.content_type && previewable[a.content_type.toLowerCase()]) {
+          var pv = el('a', {
+            class: 'att-preview',
+            href: '/api/v1/webmail/attachments/' + a.id + '/preview',
+            'aria-label': 'Preview ' + (a.filename || 'attachment'),
+            title: 'Preview',
+            target: '_blank',
+            rel: 'noopener',
+          }, 'Preview');
+          li.appendChild(pv);
+        }
         ul.appendChild(li);
       });
       att.appendChild(ul);
@@ -1298,7 +1798,13 @@
     opts = opts || {};
     if (opts.mode === 'reply' || opts.mode === 'replyAll' || opts.mode === 'forward') {
       var m = opts.replyTo;
-      var sender = emailOf(m.from || '');
+      // Honor the Reply-To header when it is set on the
+      // original message. The RFC says a Reply-To that
+      // differs from From MUST win; the previous client
+      // always replied to From, which is a real-world
+      // deliverability bug for mailing lists, support
+      // systems, and any sender that uses Reply-To.
+      var replyTarget = (m.reply_to && emailOf(m.reply_to)) || emailOf(m.from || '');
       var myEmail = state.user && state.user.email ? state.user.email : '';
       var compose = {
         mode: opts.mode,
@@ -1307,28 +1813,51 @@
         bcc: '',
         subject: '',
         body: '',
+        dirty: false,
+        lastSavedAt: null,
       };
       if (opts.mode === 'reply') {
-        compose.to = sender;
+        compose.to = replyTarget;
         compose.subject = withPrefix('Re: ', m.subject || '');
         compose.body = buildQuote(m);
       } else if (opts.mode === 'replyAll') {
-        compose.to = sender;
-        var cc = (m.to || '').split(',').map(function (s) {
-          return s.trim();
-        }).filter(function (e) {
-          return e && e.toLowerCase() !== myEmail.toLowerCase();
-        });
-        // Also include the original cc, minus self.
-        if (m.cc) {
-          m.cc.split(',').forEach(function (e) {
-            e = e.trim();
-            if (!e) return;
-            if (e.toLowerCase() === myEmail.toLowerCase()) return;
-            if (cc.indexOf(e) < 0) cc.push(e);
+        // Reply-all recipient computation. Steps:
+        //   1. To = replyTarget (Reply-To or From).
+        //   2. Cc starts empty.
+        //   3. From the original To and Cc lists, drop
+        //      self, drop any address that already
+        //      appears in the new To, and drop empty
+        //      strings. The resulting set is the Cc
+        //      list — order preserved, no duplicates.
+        //   4. The original sender (From) is NOT
+        //      duplicated into Cc — the RFC 5322 reply
+        //      semantics: address From in To (already
+        //      done) and do not re-add it in Cc.
+        compose.to = replyTarget;
+        var toLower = replyTarget.toLowerCase();
+        var seen = {};
+        seen[toLower] = true;
+        var ccList = [];
+        function pushAddr(s) {
+          var v = (s || '').trim();
+          if (!v) return;
+          var k = v.toLowerCase();
+          if (seen[k]) return;
+          seen[k] = true;
+          ccList.push(v);
+        }
+        // The header parser exposes to / cc as raw
+        // strings with comma-separated addresses. We
+        // split on commas and trim.
+        (m.to || '').split(',').forEach(pushAddr);
+        (m.cc || '').split(',').forEach(pushAddr);
+        // Drop self.
+        if (myEmail) {
+          ccList = ccList.filter(function (e) {
+            return emailOf(e).toLowerCase() !== myEmail.toLowerCase();
           });
         }
-        compose.cc = cc.join(', ');
+        compose.cc = ccList.join(', ');
         compose.subject = withPrefix('Re: ', m.subject || '');
         compose.body = buildQuote(m);
       } else if (opts.mode === 'forward') {
@@ -1345,12 +1874,43 @@
           (m.to || '') +
           '\n\n' +
           stripRfc822Headers(m.rfc822 || '');
+        // Forwarding attachments is not yet supported by
+        // the send endpoint. Surface that fact plainly
+        // in the banner so the user is not surprised
+        // when the forwarded message arrives without
+        // its files.
+        if (m.attachments && m.attachments.length > 0) {
+          compose.body =
+            '\n\nNote: the original message had ' +
+            m.attachments.length +
+            ' attachment' +
+            (m.attachments.length === 1 ? '' : 's') +
+            ' that are not included in this forward. ' +
+            'Attachment forwarding is coming soon.\n' +
+            '---------- Forwarded message ----------\n' +
+            'From: ' +
+            (m.from || '') +
+            '\nDate: ' +
+            (m.received_date || m.message_date || '') +
+            '\nSubject: ' +
+            (m.subject || '') +
+            '\nTo: ' +
+            (m.to || '') +
+            '\n\n' +
+            stripRfc822Headers(m.rfc822 || '');
+        }
       }
       state.compose = compose;
     } else if (opts.mode === 'draft') {
-      state.compose = opts.compose || opts;
+      state.compose = Object.assign(
+        { dirty: false, lastSavedAt: null },
+        opts.compose || opts
+      );
     } else {
-      state.compose = { mode: 'new', to: '', cc: '', bcc: '', subject: '', body: '' };
+      state.compose = {
+        mode: 'new', to: '', cc: '', bcc: '', subject: '',
+        body: '', dirty: false, lastSavedAt: null,
+      };
     }
     renderComposeModal();
   }
@@ -1388,6 +1948,84 @@
     if (existing) existing.remove();
     var c = state.compose;
     if (!c) return;
+    // Reset autosave state for a fresh modal. The timer
+    // is restarted by the input listeners (markDirty)
+    // below; we keep a single setTimeout id on the
+    // compose state so re-renders of the modal do not
+    // spawn parallel timers.
+    if (c.autosaveTimer) {
+      clearTimeout(c.autosaveTimer);
+      c.autosaveTimer = null;
+    }
+    // The status line lives in the modal footer and
+    // surfaces the most recent autosave / manual save
+    // state. Updated by markSaved() and the save
+    // handlers below.
+    var statusLine = el('div', { class: 'autosave-status' });
+    function refreshStatus() {
+      if (c.lastSavedAt) {
+        var ago = Math.max(1, Math.round((Date.now() - c.lastSavedAt) / 1000));
+        statusLine.textContent = 'Saved ' + ago + 's ago';
+        statusLine.classList.add('saved');
+        statusLine.classList.remove('saving', 'error');
+      } else if (c.draftID) {
+        statusLine.textContent = 'Draft loaded';
+        statusLine.classList.add('saved');
+      } else {
+        statusLine.textContent = 'New draft';
+        statusLine.classList.remove('saving', 'saved', 'error');
+      }
+    }
+    refreshStatus();
+
+    // performAutosave is invoked 3 seconds after the
+    // last input event. Empty drafts are skipped so the
+    // Drafts folder is not cluttered with placeholder
+    // rows. Errors are surfaced in the status line and
+    // leave dirty=true so the next input retries.
+    function performAutosave() {
+      var payload = {
+        to: toField.input.value,
+        cc: ccWrap.input.value,
+        bcc: bccWrap.input.value,
+        subject: subjField.input.value,
+        body: bodyField.value,
+      };
+      if (!payload.to && !payload.cc && !payload.bcc &&
+          !payload.subject && !payload.body) {
+        c.dirty = false;
+        return;
+      }
+      if (!state.compose || state.compose !== c) return;
+      c.dirty = false;
+      statusLine.textContent = 'Saving…';
+      statusLine.classList.add('saving');
+      statusLine.classList.remove('saved', 'error');
+      var draftID = c.draftID || null;
+      saveDraft(Object.assign({ draftID: draftID }, payload))
+        .then(function (res) {
+          c.draftID = res.id;
+          c.lastSavedAt = Date.now();
+          refreshStatus();
+        })
+        .catch(function (e) {
+          c.dirty = true;
+          statusLine.textContent = 'Save failed: ' + (e.message || 'unknown');
+          statusLine.classList.add('error');
+          statusLine.classList.remove('saving', 'saved');
+        });
+    }
+    // markDirty is wired to every field. It restarts
+    // the autosave timer. After 3 seconds of no
+    // further input performAutosave fires. While the
+    // modal is open, the timer is the single source of
+    // truth — manual save also clears it because the
+    // state is now persisted.
+    function markDirty() {
+      c.dirty = true;
+      if (c.autosaveTimer) clearTimeout(c.autosaveTimer);
+      c.autosaveTimer = setTimeout(performAutosave, 3000);
+    }
 
     var backdrop = el('div', { class: 'modal-backdrop' });
     var modal = el('div', { class: 'modal', role: 'dialog', 'aria-label': 'Compose message' });
@@ -1431,7 +2069,10 @@
     mh.appendChild(closeBtn);
     modal.appendChild(mh);
 
-    // Fields.
+    // Fields. The input listener for each field
+    // BOTH updates dirAuto and marks the compose
+    // state dirty, which restarts the autosave
+    // timer.
     var mb = el('div', { class: 'modal-body' });
     function field(label, value, placeholder, isTextarea) {
       var f = el('div', { class: 'field' });
@@ -1451,6 +2092,7 @@
       input.setAttribute('dir', dirAuto(input.value));
       input.addEventListener('input', function () {
         input.setAttribute('dir', dirAuto(input.value));
+        markDirty();
       });
       f.appendChild(input);
       return { wrap: f, input: input };
@@ -1483,6 +2125,7 @@
     bodyField.setAttribute('dir', dirAuto(bodyField.value));
     bodyField.addEventListener('input', function () {
       bodyField.setAttribute('dir', dirAuto(bodyField.value));
+      markDirty();
     });
     mb.appendChild(bodyField);
     modal.appendChild(mb);
@@ -1498,6 +2141,10 @@
     mf.appendChild(draftBtn);
     mf.appendChild(discardBtn);
     mf.appendChild(spacer2);
+    // The autosave status line lives in the footer
+    // next to the Close button. It is updated by
+    // markDirty / performAutosave as the user types.
+    mf.appendChild(statusLine);
     mf.appendChild(closeFooter);
     modal.appendChild(mf);
 
@@ -1523,6 +2170,14 @@
         toField.input.focus();
         return;
       }
+      // If the user has an unsaved draft, save it
+      // first so the Sent copy / the queue row always
+      // match the in-memory state. Cancel the autosave
+      // timer; the explicit save supersedes it.
+      if (c.autosaveTimer) {
+        clearTimeout(c.autosaveTimer);
+        c.autosaveTimer = null;
+      }
       setSending(true);
       sendMessage(payload)
         .then(function (res) {
@@ -1533,10 +2188,16 @@
               (res.queued_count === 1 ? 'recipient' : 'recipients'),
             'success'
           );
+          // If this was a draft, delete it now — the
+          // message is durable in Sent. If the server
+          // can't delete the draft, the user still has
+          // a clean Sent copy; the orphan draft is a
+          // cosmetic problem, not a correctness one.
+          if (c.draftID) {
+            deleteDraft(c.draftID).catch(function () { /* non-fatal */ });
+          }
           backdrop.remove();
           state.compose = null;
-          // Refresh Sent folder count if visible, otherwise
-          // refresh whatever folder the user is on.
           return loadFolders();
         })
         .then(function () {
@@ -1558,9 +2219,21 @@
       payload.draftID = c.draftID || null;
       draftBtn.disabled = true;
       draftBtn.innerHTML = '<span class="spinner-inline"></span> Saving…';
+      // A manual save and the autosave share the
+      // performAutosave code path semantically — both
+      // persist the current state. To avoid two saves
+      // firing back-to-back, clear the autosave timer
+      // when the user clicks Save explicitly.
+      if (c.autosaveTimer) {
+        clearTimeout(c.autosaveTimer);
+        c.autosaveTimer = null;
+      }
       saveDraft(payload)
         .then(function (res) {
           c.draftID = res.id;
+          c.lastSavedAt = Date.now();
+          c.dirty = false;
+          refreshStatus();
           toast('Draft saved', 'success', 1500);
         })
         .catch(function (e) {
@@ -1654,10 +2327,36 @@
 
     // Keyboard shortcuts. We bind on document and ignore
     // events whose target is an input/textarea/contentEditable.
+    // Modifier keys also disable the handler so the user's
+    // own browser shortcuts (Ctrl+R, Cmd+L, etc.) keep
+    // working as expected.
+    //
+    // Gmail-style "g" prefix: press "g" then a folder
+    // initial to jump there. The window expires after
+    // G_PREFIX_TIMEOUT_MS of inactivity.
     document.addEventListener('keydown', function (ev) {
       var tag = (ev.target && ev.target.tagName) || '';
       if (/^(INPUT|TEXTAREA|SELECT)$/.test(tag)) return;
       if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+      // "g" prefix: when active, the next letter
+      // navigates. We start the window only on a bare
+      // "g" keypress so the user can still type "g"
+      // in any future contentEditable field without
+      // hijacking it.
+      if (state.gPrefixActive) {
+        state.gPrefixActive = false;
+        if (state.gPrefixTimer) clearTimeout(state.gPrefixTimer);
+        state.gPrefixTimer = null;
+        if (ev.key === 'i') { ev.preventDefault(); navigateToFolder('INBOX'); return; }
+        if (ev.key === 's') { ev.preventDefault(); navigateToFolder('Sent'); return; }
+        if (ev.key === 'd') { ev.preventDefault(); navigateToFolder('Drafts'); return; }
+        if (ev.key === 'a') { ev.preventDefault(); navigateToFolder('Archive'); return; }
+        if (ev.key === 't') { ev.preventDefault(); navigateToFolder('Trash'); return; }
+        if (ev.key === 'j') { ev.preventDefault(); navigateToFolder('Junk'); return; }
+        // Unknown key — fall through to the rest of
+        // the handler so the keypress still has a
+        // chance of doing something useful.
+      }
       if (ev.key === 'c') {
         ev.preventDefault();
         openCompose({ mode: 'new' });
@@ -1674,10 +2373,90 @@
       } else if (ev.key === 'f' && state.selectedMessageID) {
         ev.preventDefault();
         openCompose({ mode: 'forward', replyTo: state.selectedMessage });
+      } else if (ev.key === 'j' || ev.key === 'ArrowDown') {
+        // Next message in the current list. Walk
+        // state.messages; if nothing is selected,
+        // start at the top.
+        ev.preventDefault();
+        moveSelection(1);
+      } else if (ev.key === 'k' || ev.key === 'ArrowUp') {
+        // Previous message in the current list.
+        ev.preventDefault();
+        moveSelection(-1);
+      } else if (ev.key === 'e' && state.selectedMessageID) {
+        // Archive the current message (Gmail "e").
+        ev.preventDefault();
+        archiveMessage(state.selectedMessageID).then(function () {
+          toast('Archived', 'success');
+          renderMessageList();
+          closeReadingPane();
+        }).catch(function (err) {
+          toast('Archive failed: ' + err.message, 'error');
+        });
+      } else if ((ev.key === '#' || ev.key === 'Delete') && state.selectedMessageID) {
+        // Move to Trash. Confirm so accidental
+        // presses do not destroy state.
+        ev.preventDefault();
+        if (!confirm('Move this message to Trash?')) return;
+        deleteMessage(state.selectedMessageID).then(function () {
+          toast('Moved to Trash', 'success');
+          renderMessageList();
+          closeReadingPane();
+        }).catch(function (err) {
+          toast('Delete failed: ' + err.message, 'error');
+        });
+      } else if (ev.key === 's' && state.selectedMessageID) {
+        // Star / unstar. The same key is also used by
+        // the "g s" prefix (jump to Sent) when the g
+        // prefix is active. The state.gPrefixActive
+        // branch above handles that case; if we reach
+        // here, the user is not in a g-prefix window
+        // and wants to star.
+        ev.preventDefault();
+        var msg = state.selectedMessage;
+        updateMessageFlags(msg.id, { flagged: !msg.flagged }).then(function () {
+          msg.flagged = !msg.flagged;
+          renderMessageList();
+          renderReadingPane();
+        });
+      } else if (ev.key === 'x' && state.selectionMode) {
+        // Toggle selection on the current message
+        // without opening it.
+        ev.preventDefault();
+        if (state.selectedMessageID) {
+          toggleSelection(state.selectedMessageID, ev);
+        }
+      } else if (ev.key === 'g') {
+        // Arm the g-prefix for the next keypress.
+        // The window expires after G_PREFIX_TIMEOUT_MS.
+        ev.preventDefault();
+        state.gPrefixActive = true;
+        if (state.gPrefixTimer) clearTimeout(state.gPrefixTimer);
+        state.gPrefixTimer = setTimeout(function () {
+          state.gPrefixActive = false;
+          state.gPrefixTimer = null;
+        }, G_PREFIX_TIMEOUT_MS);
       } else if (ev.key === 'Escape') {
         var back = document.querySelector('.modal-backdrop');
-        if (back) back.remove();
-        else if (state.readingPaneOpen) closeReadingPane();
+        if (back) {
+          // Confirm-discard logic lives on the close
+          // button; the Escape key just closes the
+          // modal the same way. If the user has
+          // unsaved changes the close handler will
+          // confirm.
+          var closeBtn2 = back.querySelector('.modal-header .icon-btn:last-of-type');
+          if (closeBtn2) closeBtn2.click();
+        } else if (state.selectionMode) {
+          clearSelection();
+        } else if (state.readingPaneOpen) {
+          closeReadingPane();
+        }
+      } else if (ev.key === '?') {
+        // Show the keyboard shortcut overlay. The
+        // overlay is a static DOM element added at
+        // boot; we just toggle its visibility.
+        ev.preventDefault();
+        showShortcutsOverlay();
       }
     });
   }

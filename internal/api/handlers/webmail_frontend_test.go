@@ -261,6 +261,144 @@ func TestWebmailNoQueueAPICallsInWebmailAsset(t *testing.T) {
 	}
 }
 
+// TestWebmailNoLocalStorageInWebmailAssets is the regression
+// guard for the "no tokens in localStorage" rule. Both
+// auth-gate.js and webmail.js are scanned; neither may
+// reference localStorage or sessionStorage under any name.
+// The only allowed cookie access is `credentials: 'include'`
+// (HttpOnly cookies set by the server).
+func TestWebmailNoLocalStorageInWebmailAssets(t *testing.T) {
+	root := webmailRepoRoot(t)
+	for _, rel := range []string{
+		"release/webmail/assets/webmail.js",
+		"release/webmail/assets/auth-gate.js",
+	} {
+		src := readFile(t, root, rel)
+		stripped := stripJSCommentsAndStrings(src)
+		for _, banned := range []string{
+			"localStorage",
+			"sessionStorage",
+			"document.cookie =",
+			"document.cookie=",
+		} {
+			if strings.Contains(stripped, banned) {
+				t.Errorf("%s contains banned storage API %q — webmail must rely on HttpOnly cookies only", rel, banned)
+			}
+		}
+	}
+}
+
+// TestWebmailCSSHasReducedMotion confirms webmail.css
+// honours the OS-level prefers-reduced-motion media
+// query. This is the user-explicit accessibility
+// requirement: every animation must be suppressible
+// from the OS.
+func TestWebmailCSSHasReducedMotion(t *testing.T) {
+	root := webmailRepoRoot(t)
+	src := readFile(t, root, "release/webmail/assets/webmail.css")
+	if !strings.Contains(src, "prefers-reduced-motion") {
+		t.Errorf("webmail.css must contain a prefers-reduced-motion media query for OS-level motion suppression")
+	}
+}
+
+// TestWebmailCSSHasResponsiveBreakpoints confirms the
+// stylesheet has the four named breakpoints the brief
+// requires: 1440, 1024, 768, 390. (The existing 1100
+// and 860 are kept for the legacy laptop / drawer
+// thresholds.)
+func TestWebmailCSSHasResponsiveBreakpoints(t *testing.T) {
+	root := webmailRepoRoot(t)
+	src := readFile(t, root, "release/webmail/assets/webmail.css")
+	for _, px := range []string{"1440px", "1024px", "768px", "390px"} {
+		if !strings.Contains(src, px) {
+			t.Errorf("webmail.css missing responsive breakpoint for %s", px)
+		}
+	}
+}
+
+// TestWebmailCSSLogicalProperties confirms the
+// stylesheet uses logical properties (margin-inline-*,
+// padding-inline-*, inset-inline-*, border-inline-*)
+// instead of physical padding-left/right and friends.
+// This is the Arabic/RTL correctness requirement.
+func TestWebmailCSSLogicalProperties(t *testing.T) {
+	root := webmailRepoRoot(t)
+	src := readFile(t, root, "release/webmail/assets/webmail.css")
+	// Count the number of logical-property usages.
+	// A non-trivial count confirms the sweep happened.
+	logicalCount := 0
+	for _, prop := range []string{
+		"margin-inline-start", "margin-inline-end",
+		"padding-inline-start", "padding-inline-end",
+		"inset-inline-start", "inset-inline-end",
+		"border-inline-start", "border-inline-end",
+	} {
+		logicalCount += strings.Count(src, prop)
+	}
+	if logicalCount < 8 {
+		t.Errorf("webmail.css has %d logical-property usages, want >= 8 (RTL sweep incomplete)", logicalCount)
+	}
+}
+
+// TestWebmailJSHasKeyboardShortcuts confirms the
+// client-side keyboard handler is wired up with the
+// shortcuts the brief requires. We scan the source
+// for the expected key codes in their original
+// quoted form (the no-queue / no-localStorage tests
+// strip strings; this one does not, because we want
+// to verify the actual key strings).
+func TestWebmailJSHasKeyboardShortcuts(t *testing.T) {
+	root := webmailRepoRoot(t)
+	src := readFile(t, root, "release/webmail/assets/webmail.js")
+	// Each key is searched as it appears in the
+	// handler. The handler writes "if (ev.key === 'c')"
+	// etc., so the unstripped file already has the
+	// quoted literal we want.
+	expected := []string{
+		"ev.key === 'c'",
+		"ev.key === '/'",
+		"ev.key === 'r'",
+		"ev.key === 'a'",
+		"ev.key === 'f'",
+		"ev.key === 'j'",
+		"ev.key === 'k'",
+		"ev.key === 'e'",
+		"ev.key === 'Delete'",
+		"ev.key === 'x'",
+		"ev.key === '?'",
+		"ev.key === 'Escape'",
+	}
+	for _, want := range expected {
+		if !strings.Contains(src, want) {
+			t.Errorf("webmail.js missing keyboard handler for %s", want)
+		}
+	}
+}
+
+// TestWebmailJSCallsNewEndpoints confirms the
+// client-side code calls the new backend endpoints
+// the feature pack adds. This is a smoke test: the
+// new endpoint URLs must be present in the asset.
+func TestWebmailJSCallsNewEndpoints(t *testing.T) {
+	root := webmailRepoRoot(t)
+	src := readFile(t, root, "release/webmail/assets/webmail.js")
+	for _, endpoint := range []string{
+		"/api/v1/webmail/messages/",
+		"/api/v1/webmail/attachments/",
+		"/api/v1/webmail/messages/batch",
+		"/api/v1/webmail/messages/",
+	} {
+		if !strings.Contains(src, endpoint) {
+			t.Errorf("webmail.js missing endpoint reference %q", endpoint)
+		}
+	}
+	// The /source endpoint must be referenced as part
+	// of the show-original anchor.
+	if !strings.Contains(src, "/source") {
+		t.Errorf("webmail.js missing /source endpoint reference for show-original action")
+	}
+}
+
 // stripJSCommentsAndStrings is provided by webmail_user_test.go;
 // this file reuses it so the no-queue grep test has the same
 // stripping behaviour as the existing TestWebmailAPINoQueueUsage.
