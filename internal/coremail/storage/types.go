@@ -48,6 +48,26 @@ const (
 var nowFn = time.Now
 
 // MessageFilter defines search/filter criteria for listing messages.
+//
+// SearchScope controls which fields participate in the LIKE
+// match when Search is non-empty:
+//
+//   - SearchSubject (default true) — matches against subject.
+//   - SearchFrom (default true)    — matches against from_address.
+//   - SearchTo (default true)      — matches against to_addresses.
+//   - SearchCc (default false)     — matches against cc_addresses
+//     when true. Off by default
+//     because cc is rarely searched and the LIKE clause adds
+//     measurable cost on big mailboxes.
+//   - SearchBcc (default false)    — matches against bcc_addresses.
+//   - SearchBody (default false)   — matches against the
+//     RFC822 body loaded from disk. Off by default for the
+//     same reason; callers that enable it must be willing
+//     to pay the per-message read cost.
+//
+// When ALL bools are left at their zero value, the filter
+// uses the legacy "subject / from / to" match — keeping
+// existing callers unchanged.
 type MessageFilter struct {
 	MailboxID uint
 	FolderID  *uint
@@ -58,11 +78,38 @@ type MessageFilter struct {
 		Deleted  *bool
 		Junk     *bool
 	}
-	Search   string
-	Since    *time.Time
-	Before   *time.Time
-	Limit    int
-	Offset   int
+	Search       string
+	SearchSubject bool
+	SearchFrom    bool
+	SearchTo      bool
+	SearchCc      bool
+	SearchBcc     bool
+	SearchBody    bool
+	Since         *time.Time
+	Before        *time.Time
+	Limit         int
+	Offset        int
+}
+
+// MatchScopeForSearch returns the Search* flags wired up
+// for the supplied Search string. The legacy zero-config
+// callers get the same subject/from/to match they have
+// always had; webmail callers can enable cc/bcc/body by
+// setting the fields directly.
+func (f *MessageFilter) MatchScopeForSearch() (subject, from, to, cc, bcc, body bool) {
+	if f.Search == "" {
+		return false, false, false, false, false, false
+	}
+	// If the caller did not opt in to any specific field
+	// (all flags are the zero value), fall back to the
+	// historical subject/from/to behaviour. This is the
+	// common case for legacy storage callers.
+	anySet := f.SearchSubject || f.SearchFrom || f.SearchTo ||
+		f.SearchCc || f.SearchBcc || f.SearchBody
+	if !anySet {
+		return true, true, true, false, false, false
+	}
+	return f.SearchSubject, f.SearchFrom, f.SearchTo, f.SearchCc, f.SearchBcc, f.SearchBody
 }
 
 // Pagination constants.

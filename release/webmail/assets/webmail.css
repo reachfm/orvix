@@ -980,11 +980,383 @@ a:hover {
   margin-inline-end: 4px;
 }
 
-/* ── Responsive ──────────────────────────────────────────── */
-@media (max-width: 1100px) {
+/* ── Responsive — the existing 1100 / 860 rules are
+     folded into the new Enterprise 2 section below.
+     .back-btn stays where it is so the new rules can
+     reuse it. ────────────────────────────────────────────── */
+
+.back-btn {
+  display: none;
+}
+
+/* ── RTL support ─────────────────────────────────────────── */
+html[dir="rtl"] body {
+  /* font stack already covers Arabic via Noto Sans Arabic */
+}
+html[dir="rtl"] .message-view .details .row,
+html[dir="rtl"] .message-view .header .meta-row,
+html[dir="rtl"] .field {
+  direction: rtl;
+}
+html[dir="rtl"] .topbar .search .icon {
+  left: auto;
+  right: 12px;
+}
+html[dir="rtl"] .topbar .search input {
+  padding: 8px 36px 8px 12px;
+}
+html[dir="rtl"] .topbar .search .clear {
+  right: auto;
+  left: 8px;
+}
+html[dir="rtl"] .modal {
+  direction: rtl;
+}
+
+/* ── High-contrast focus rings (accessibility) ───────────── */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* =====================================================================
+   Webmail Enterprise 2 additions
+   ===================================================================== */
+
+/* ── Reduced-motion preference ──────────────────────────────
+   The base stylesheet uses transitions on the sidebar
+   drawer, the toast slide-in, and the modal fade.
+   When the user has prefers-reduced-motion: reduce
+   set in their OS, we kill every transition /
+   animation in the document. This is the only global
+   override needed because every animatable property
+   in the codebase uses the `transition` shorthand or
+   a keyframe defined in this file. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ── Bulk action bar ──────────────────────────────────────
+   A floating toolbar at the bottom of the viewport
+   that appears when the user has at least one
+   message ticked. The bar is fixed; its content is
+   rendered dynamically by renderBulkActionBar(). On
+   mobile the bar stretches to the full width of the
+   viewport with reduced padding so the buttons are
+   reachable by thumb. */
+.bulk-bar {
+  position: fixed;
+  inset-inline: 16px;
+  bottom: 16px;
+  display: none;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: var(--bg-3);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-3);
+  box-shadow: var(--shadow-3);
+  z-index: 30;
+  flex-wrap: wrap;
+}
+.bulk-bar.visible {
+  display: flex;
+}
+.bulk-bar .bulk-count {
+  font-weight: 600;
+  margin-inline-end: 6px;
+}
+.bulk-bar select {
+  background: var(--bg-1);
+  color: var(--text-0);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-1);
+  padding: 6px 8px;
+  font: inherit;
+}
+@media (max-width: 768px) {
+  .bulk-bar {
+    inset-inline: 8px;
+    bottom: 8px;
+    padding: 8px 10px;
+  }
+}
+
+/* ── List header (Select / Select all) ───────────────────
+   The header sits at the top of the message list and
+   shows either a "Select" toggle (when the user is
+   not yet in selection mode) or a "Select all"
+   affordance plus the current selection count. */
+.list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border-1);
+  background: var(--bg-1);
+}
+.list-header .lh-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.list-header .lh-count {
+  color: var(--text-2);
+  font-size: 13px;
+}
+.link-btn {
+  background: none;
+  border: 0;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+  text-decoration: none;
+}
+.link-btn:hover { text-decoration: underline; }
+.link-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* ── Row checkbox column ─────────────────────────────────
+   The checkbox is rendered alongside the star; the
+   row gets a slightly indented layout when the
+   selection column is visible so the checkbox is
+   comfortably reachable. */
+.message {
+  display: grid;
+  grid-template-columns: 32px 1fr auto;
+  align-items: start;
+  gap: 4px 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-1);
+  cursor: pointer;
+  position: relative;
+}
+.message .row-check {
+  display: none;
+  margin-top: 4px;
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+/* When selection mode is on, the row gains a
+   checkbox column and a check-state highlight. The
+   32px column for the star is replaced by a
+   checkbox+star flex container so the checkbox sits
+   at the leading edge. */
+.selection-mode-on .message,
+.message-list.selection-mode .message {
+  grid-template-columns: 24px 32px 1fr auto;
+}
+.selection-mode-on .message .row-check,
+.message-list.selection-mode .message .row-check {
+  display: inline-block;
+}
+.message.checked {
+  background: var(--bg-selected-soft);
+}
+.message.checked .subject,
+.message.checked .from {
+  color: var(--text-0);
+}
+
+/* ── Load-more button ─────────────────────────────────────
+   Real button instead of a static div so the user
+   gets a clear affordance and keyboard focus. The
+   button is full-width within the list pane. */
+.load-more-btn {
+  display: block;
+  width: 100%;
+  margin: 8px 0;
+  padding: 10px 0;
+  background: var(--bg-2);
+  color: var(--accent);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-2);
+  cursor: pointer;
+  font: inherit;
+}
+.load-more-btn:hover { background: var(--bg-hover); }
+.load-more-btn:disabled { opacity: 0.6; cursor: progress; }
+
+/* ── Attachments ─────────────────────────────────────────
+   The attachment list now renders a Download and (for
+   safe content types) a Preview link per row. The
+   styling matches the rest of the dark theme. */
+.attachments ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.attachments li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-1);
+}
+.attachments li:last-child { border-bottom: 0; }
+.attachments .att-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-0);
+}
+.attachments .att-size {
+  color: var(--text-2);
+  font-size: 12px;
+}
+.attachments .att-download,
+.attachments .att-preview {
+  color: var(--accent);
+  text-decoration: none;
+  padding: 4px 8px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-1);
+  font-size: 13px;
+}
+.attachments .att-download:hover,
+.attachments .att-preview:hover {
+  background: var(--bg-hover);
+  text-decoration: none;
+}
+
+/* ── Move-to inline select in the reading pane ─────────── */
+.move-to-wrap select {
+  background: var(--bg-2);
+  color: var(--text-0);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-1);
+  padding: 6px 8px;
+  font: inherit;
+  margin-inline-start: 6px;
+}
+
+/* ── Autosave status line in the compose modal ─────────── */
+.autosave-status {
+  font-size: 12px;
+  color: var(--text-3);
+  margin-inline: auto 12px;
+  align-self: center;
+}
+.autosave-status.saving { color: var(--warn); }
+.autosave-status.saved { color: var(--success); }
+.autosave-status.error { color: var(--danger); }
+
+/* ── Skeleton loaders for the reading pane ────────────────
+   Pure CSS pulse — no external assets, no animation
+   when prefers-reduced-motion is set. */
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--bg-2) 0%,
+    var(--bg-3) 50%,
+    var(--bg-2) 100%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-pulse 1.4s ease-in-out infinite;
+  border-radius: var(--radius-1);
+}
+@keyframes skeleton-pulse {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ── Keyboard shortcuts overlay ─────────────────────────── */
+.shortcuts-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.shortcuts-panel {
+  background: var(--bg-2);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-3);
+  padding: 24px 28px;
+  max-width: 560px;
+  width: calc(100% - 32px);
+  max-height: 80vh;
+  overflow: auto;
+  box-shadow: var(--shadow-3);
+}
+.shortcuts-panel h2 {
+  margin: 0 0 14px;
+  font-size: 18px;
+  color: var(--text-0);
+}
+.shortcuts-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.shortcuts-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-1);
+  color: var(--text-1);
+  font-size: 14px;
+}
+.shortcuts-table td.key {
+  font-family: var(--font-mono);
+  color: var(--accent);
+  white-space: nowrap;
+  width: 30%;
+}
+.shortcuts-hint {
+  margin-top: 12px;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+/* =====================================================================
+   Webmail Enterprise 2 — responsive breakpoints
+   The previous build only had 1100 / 860. The new
+   breakpoints are 1440 (large), 1024 (small laptop),
+   768 (tablet), and 390 (compact phone). They are
+   ordered from largest to smallest so the rules
+   cascade correctly: a tablet @ 768 matches both the
+   1100 and 860 rules, but the more specific 768
+   rule wins by source order.
+   ===================================================================== */
+@media (min-width: 1440px) {
+  :root {
+    --list-w: 420px;
+    --sidebar-w: 260px;
+  }
+  .compose-body,
+  .field input,
+  .field textarea { font-size: 15px; }
+}
+
+@media (max-width: 1100px) and (min-width: 861px) {
   :root {
     --list-w: 340px;
   }
+}
+
+@media (max-width: 1024px) {
+  /* Small laptop — three panes still visible but
+     tighter. The reading pane gets extra padding so
+     long body lines wrap naturally. */
+  .reading-pane {
+    padding: 16px 24px;
+  }
+  .compose-body { min-height: 220px; }
 }
 
 @media (max-width: 860px) {
@@ -1028,36 +1400,64 @@ a:hover {
   }
 }
 
-.back-btn {
-  display: none;
+@media (max-width: 768px) {
+  /* Tablet — 2 panes: folder sidebar collapses into
+     a drawer (already done at 860), but we tighten
+     the toolbar so action buttons fit. The compose
+     modal becomes near full-screen so the editor
+     is comfortable with a soft keyboard. */
+  .topbar { padding: 0 8px; }
+  .topbar .search input { font-size: 14px; }
+  .modal {
+    width: 100% !important;
+    max-width: 100% !important;
+    height: 100% !important;
+    max-height: 100% !important;
+    border-radius: 0 !important;
+  }
+  .modal-body { padding: 12px !important; }
+  .toolbar { gap: 4px; flex-wrap: wrap; }
+  .toolbar .icon-btn { padding: 6px 8px; }
 }
 
-/* ── RTL support ─────────────────────────────────────────── */
-html[dir="rtl"] body {
-  /* font stack already covers Arabic via Noto Sans Arabic */
-}
-html[dir="rtl"] .message-view .details .row,
-html[dir="rtl"] .message-view .header .meta-row,
-html[dir="rtl"] .field {
-  direction: rtl;
-}
-html[dir="rtl"] .topbar .search .icon {
-  left: auto;
-  right: 12px;
-}
-html[dir="rtl"] .topbar .search input {
-  padding: 8px 36px 8px 12px;
-}
-html[dir="rtl"] .topbar .search .clear {
-  right: auto;
-  left: 8px;
-}
-html[dir="rtl"] .modal {
-  direction: rtl;
+@media (max-width: 390px) {
+  /* Compact phone — single pane at a time. The
+     bulk action bar becomes a single row with
+     smaller buttons so the whole toolbar fits. The
+     list row layout collapses its columns so the
+     subject still gets the lion's share of the
+     width. */
+  .topbar { padding: 0 6px; }
+  .topbar .menu-btn { margin-inline-end: 4px; }
+  .topbar .brand { font-size: 14px; }
+  .topbar .user-chip { padding: 0 6px; }
+  .list-pane { width: 100%; }
+  .message {
+    grid-template-columns: 24px 1fr auto;
+    padding: 8px 6px;
+  }
+  .message .from,
+  .message .subject,
+  .message .preview {
+    font-size: 13px;
+  }
+  .bulk-bar .btn { padding: 6px 8px; font-size: 13px; }
+  .modal-header { padding: 10px 12px; }
+  .field input,
+  .field textarea { font-size: 16px; /* iOS no-zoom */ }
 }
 
-/* ── High-contrast focus rings (accessibility) ───────────── */
-:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+/* Selection mode: the message list container gets a
+   class when any messages are ticked, so the
+   checkbox column is reserved. The body of the
+   document also gets the class so the keyboard
+   shortcut handler can detect it without walking the
+   DOM. The client toggles this class in
+   renderMessageList. */
+.message-list.selection-mode .row-check,
+body.selection-mode-on .message .row-check {
+  display: inline-block;
+}
+body.selection-mode-on .message {
+  grid-template-columns: 24px 32px 1fr auto;
 }

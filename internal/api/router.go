@@ -233,6 +233,23 @@ func (r *Router) setupRoutes() {
 	protected.Patch("/webmail/messages/:id", r.h.WebmailUpdateMessage)
 	protected.Post("/webmail/messages/:id/archive", r.h.WebmailArchive)
 	protected.Post("/webmail/messages/:id/delete", r.h.WebmailDelete)
+	// New in Webmail Enterprise 2: per-message source
+	// download, single-message move, multi-message batch
+	// operations. All behind the same protected group as
+	// the other state-changing webmail endpoints, so the
+	// auth middleware rejects missing/invalid cookies
+	// with 401 before the handler runs.
+	protected.Get("/webmail/messages/:id/source", r.h.WebmailMessageSource)
+	protected.Post("/webmail/messages/:id/move", r.h.WebmailMoveMessage)
+	protected.Post("/webmail/messages/batch", r.h.WebmailMessageBatch)
+	// Attachment download / preview. The :id is parsed
+	// with parseMessageID (digits only) and the
+	// handler confirms the attachment's parent message
+	// belongs to the caller's mailbox before opening
+	// the file. Returns 404 to non-owners so the
+	// response shape does not leak existence.
+	protected.Get("/webmail/attachments/:id", r.h.WebmailAttachmentDownload)
+	protected.Get("/webmail/attachments/:id/preview", r.h.WebmailAttachmentPreview)
 	protected.Post("/webmail/folders/:id/read-all", r.h.WebmailMarkFolderRead)
 	protected.Post("/webmail/send", r.h.WebmailSend)
 	// Drafts — minimal CRUD. Drafts are Message rows

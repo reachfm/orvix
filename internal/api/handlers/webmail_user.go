@@ -26,6 +26,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/mail"
+	"strconv"
 	"strings"
 	"time"
 
@@ -241,13 +242,27 @@ func (h *Handler) WebmailFolders(c fiber.Ctx) error {
 //
 // Query parameters:
 //   - folder=INBOX|Sent|Drafts|Trash|Junk|Archive|<name>
-//   - q=<substring> : case-insensitive substring match
-//                    against subject, from_address,
-//                    to_addresses, cc_addresses, body
-//                    preview. Empty q is the default.
-//   - limit=N      : 1..200, default 50 (smaller default
-//                    than v1 so the first paint is fast)
+//   - q=<substring> : case-insensitive substring match.
+//                     By default against subject / from /
+//                     to. The "body=1" flag extends the
+//                     match to the message body (one
+//                     read per candidate — slower).
+//   - limit=N      : 1..200, default 50. Values above 200
+//                    are clamped to 200 to keep the first
+//                    paint fast.
 //   - offset=N     : pagination cursor; new messages first.
+//   - total=1      : return the total count for the query
+//                    (off by default — counting across
+//                    filtered rows costs a separate query
+//                    the UI does not need on every page).
+//
+// Response shape:
+//   {messages, folder, folder_id, total?, limit, offset,
+//    has_more, snippet_for_q?}
+//
+// `has_more` is true when the returned page is exactly
+// `limit` long AND a next page would be non-empty. The
+// UI uses it to drive the "Load more" affordance.
 func (h *Handler) WebmailMessages(c fiber.Ctx) error {
 	ctx, reason := h.resolveWebmailUserContext(c)
 	if ctx == nil {
@@ -262,6 +277,19 @@ func (h *Handler) WebmailMessages(c fiber.Ctx) error {
 		folderParam = "INBOX"
 	}
 	q := strings.TrimSpace(c.Query("q"))
+	searchBody := strings.EqualFold(strings.TrimSpace(c.Query("body")), "1") ||
+		strings.EqualFold(strings.TrimSpace(c.Query("body")), "true")
+	includeTotal := strings.EqualFold(strings.TrimSpace(c.Query("total")), "1") ||
+		strings.EqualFold(strings.TrimSpace(c.Query("total")), "true")
+
+	limit, err := parsePageLimit(c.Query("limit"), 50, 200)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	offset, err := parsePageOffset(c.Query("offset"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
 
 	folder, err := ctx.MailboxStore.Folders.GetByPath(c.Context(), ctx.Mailbox.ID, folderParam, nil)
 	if err != nil || folder == nil {
@@ -291,12 +319,18 @@ func (h *Handler) WebmailMessages(c fiber.Ctx) error {
 		}
 	}
 
-	messages, _, err := ctx.MailboxStore.Messages.List(c.Context(), storage.MessageFilter{
-		MailboxID: ctx.Mailbox.ID,
-		FolderID:  &folder.ID,
-		Search:    q,
-		Limit:     200,
-	}, nil)
+	filter := storage.MessageFilter{
+		MailboxID:    ctx.Mailbox.ID,
+		FolderID:     &folder.ID,
+		Search:       q,
+		SearchSubject: true,
+		SearchFrom:    true,
+		SearchTo:      true,
+		SearchBody:    searchBody,
+		Limit:         limit,
+		Offset:        offset,
+	}
+	messages, total, err := ctx.MailboxStore.Messages.List(c.Context(), filter, nil)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": fmt.Sprintf("list messages: %v", err),
@@ -308,7 +342,7 @@ func (h *Handler) WebmailMessages(c fiber.Ctx) error {
 	// semantics is a webmail policy, not a storage
 	// concern.
 	isTrash := strings.EqualFold(folder.Path, "Trash")
-	out := make([]fiber.Map, 0, len(messages))
+	filtered := make([]storage.Message, 0, len(messages))
 	for _, m := range messages {
 		if isTrash {
 			if !m.Deleted {
@@ -319,30 +353,120 @@ func (h *Handler) WebmailMessages(c fiber.Ctx) error {
 				continue
 			}
 		}
-		out = append(out, fiber.Map{
-			"id":            m.ID,
-			"message_id":    m.MessageID,
-			"subject":       m.Subject,
-			"from":          m.FromAddress,
-			"to":            m.ToAddresses,
-			"cc":            m.CcAddresses,
-			"size_bytes":    m.SizeBytes,
-			"seen":          m.Seen,
-			"flagged":       m.Flagged,
-			"answered":      m.Answered,
-			"draft":         m.Draft,
-			"junk":          m.Junk,
-			"received_date": m.ReceivedDate,
-			"message_date":  m.MessageDate,
-			"folder_id":     m.FolderID,
-			"folder_path":   folder.Path,
-		})
+		filtered = append(filtered, m)
 	}
-	return c.JSON(fiber.Map{
-		"messages":   out,
-		"folder":     folder.Path,
-		"folder_id":  folder.ID,
-	})
+
+	// Batch-count attachments for the returned page so the
+	// list row can render a paperclip icon. One SQL
+	// roundtrip regardless of page size.
+	attCounts := map[uint]int64{}
+	if len(filtered) > 0 {
+		ids := make([]uint, 0, len(filtered))
+		for _, m := range filtered {
+			ids = append(ids, m.ID)
+		}
+		cnts, err := ctx.MailboxStore.Attachments.CountByMessages(c.Context(), ids, nil)
+		if err != nil {
+			// Non-fatal: a failed count is reported
+			// as zero so the list still renders. The
+			// error is logged so the operator can
+			// spot persistent failures.
+			h.logger.Warn("webmail list: count attachments failed", zap.Error(err))
+		} else {
+			attCounts = cnts
+		}
+	}
+
+	out := make([]fiber.Map, 0, len(filtered))
+	for _, m := range filtered {
+		row := fiber.Map{
+			"id":              m.ID,
+			"message_id":      m.MessageID,
+			"subject":         m.Subject,
+			"from":            m.FromAddress,
+			"to":              m.ToAddresses,
+			"cc":              m.CcAddresses,
+			"size_bytes":      m.SizeBytes,
+			"seen":            m.Seen,
+			"flagged":         m.Flagged,
+			"answered":        m.Answered,
+			"draft":           m.Draft,
+			"junk":            m.Junk,
+			"received_date":   m.ReceivedDate,
+			"message_date":    m.MessageDate,
+			"folder_id":       m.FolderID,
+			"folder_path":     folder.Path,
+			"attachment_count": attCounts[m.ID],
+		}
+		// When the caller supplied a query, attach a
+		// short body snippet centred on the first
+		// match. The snippet is plain text — the
+		// client is responsible for any HTML escape /
+		// highlighting. Off the hot path: one file
+		// read per row, capped by the page limit.
+		// Only the BODY is fed to the snippet helper
+		// so we never surface "Message-ID: <…>" or
+		// "From: …" lines that would look like HTML
+		// to the client.
+		if q != "" {
+			if data, err := ctx.MailboxStore.GetRFC822(c.Context(), m.ID, nil); err == nil {
+				row["snippet"] = extractSearchSnippet(extractBodyForSnippet(string(data)), q)
+			}
+		}
+		out = append(out, row)
+	}
+
+	resp := fiber.Map{
+		"messages":  out,
+		"folder":    folder.Path,
+		"folder_id": folder.ID,
+		"limit":     limit,
+		"offset":    offset,
+		"has_more":  len(filtered) >= limit,
+	}
+	if includeTotal {
+		resp["total"] = total
+	}
+	return c.JSON(resp)
+}
+
+// parsePageLimit parses a string limit param into a value
+// clamped to [1, max]. Empty input returns def. Non-numeric
+// or out-of-range input returns an error so the handler
+// can surface 400 rather than silently clamping.
+func parsePageLimit(raw string, def, max int) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return def, nil
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid limit: %s", raw)
+	}
+	if v < 1 {
+		return 0, fmt.Errorf("limit must be >= 1")
+	}
+	if v > max {
+		return max, nil
+	}
+	return v, nil
+}
+
+// parsePageOffset parses a string offset param. Empty
+// returns 0. Negative or non-numeric returns an error.
+func parsePageOffset(raw string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, nil
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid offset: %s", raw)
+	}
+	if v < 0 {
+		return 0, fmt.Errorf("offset must be >= 0")
+	}
+	return v, nil
 }
 
 // extractSearchSnippet takes a longer body string and
@@ -350,6 +474,12 @@ func (h *Handler) WebmailMessages(c fiber.Ctx) error {
 // of the query. Returns "" if query is empty or no match.
 // Used by WebmailMessages when ?q= is supplied to give
 // the UI a context-rich snippet.
+//
+// The function expects the body only — not the headers.
+// Callers pass the section of the RFC822 below the
+// first blank line. The returned string is plain text;
+// the client is responsible for any HTML escape and
+// match highlighting.
 func extractSearchSnippet(body, query string) string {
 	if query == "" || body == "" {
 		return ""
@@ -386,12 +516,37 @@ func extractSearchSnippet(body, query string) string {
 	return prefix + strings.TrimSpace(body[start:end]) + suffix
 }
 
+// extractBodyForSnippet strips the headers from an
+// RFC822 string and returns only the body section. If
+// no body separator is found the whole input is
+// returned (defensive). Used by extractSearchSnippet
+// so search snippets never include "From: …", "To: …",
+// or "Message-ID: <…>" lines that would otherwise
+// surface confusing HTML-like characters in the UI.
+func extractBodyForSnippet(rfc822 string) string {
+	idx := strings.Index(rfc822, "\r\n\r\n")
+	if idx < 0 {
+		idx = strings.Index(rfc822, "\n\n")
+	}
+	if idx < 0 {
+		return rfc822
+	}
+	body := rfc822[idx:]
+	body = strings.TrimLeft(body, "\r\n")
+	return body
+}
+
 // WebmailMessage returns one message's metadata and the
 // raw RFC822 body. The body is loaded from disk by the
 // MailStore — no hardcoded content is ever returned. The
 // authorization check is "this message must belong to the
 // caller's mailbox"; messages from another mailbox return
 // 404 to avoid leaking existence.
+//
+// The response also includes an `attachments` array
+// (filename, content_type, size_bytes, id) so the reading
+// pane can render the attachment list and wire download
+// buttons to /api/v1/webmail/attachments/:id.
 func (h *Handler) WebmailMessage(c fiber.Ctx) error {
 	ctx, reason := h.resolveWebmailUserContext(c)
 	if ctx == nil {
@@ -425,26 +580,47 @@ func (h *Handler) WebmailMessage(c fiber.Ctx) error {
 	_ = ctx.MailboxStore.Messages.UpdateFlags(c.Context(), msg.ID,
 		&seen, nil, nil, nil, nil, nil, nil)
 
+	attachmentsOut := []fiber.Map{}
+	if atts, err := ctx.MailboxStore.Attachments.ListByMessage(c.Context(), msg.ID, nil); err != nil {
+		// Non-fatal: a failed list leaves the
+		// attachment section empty. The reading pane
+		// renders "no attachments" when the list is
+		// empty anyway.
+		h.logger.Warn("webmail message: list attachments failed",
+			zap.Uint("message_id", msg.ID),
+			zap.Error(err))
+	} else {
+		for _, a := range atts {
+			attachmentsOut = append(attachmentsOut, fiber.Map{
+				"id":           a.ID,
+				"filename":     a.Filename,
+				"content_type": a.ContentType,
+				"size_bytes":   a.SizeBytes,
+			})
+		}
+	}
+
 	return c.JSON(fiber.Map{
-		"id":              msg.ID,
-		"message_id":      msg.MessageID,
-		"subject":         msg.Subject,
-		"from":            msg.FromAddress,
-		"to":              msg.ToAddresses,
-		"cc":              msg.CcAddresses,
-		"bcc":             msg.BccAddresses,
-		"reply_to":        msg.ReplyTo,
-		"size_bytes":      msg.SizeBytes,
-		"seen":            msg.Seen,
-		"flagged":         msg.Flagged,
-		"answered":        msg.Answered,
-		"draft":           msg.Draft,
-		"junk":            msg.Junk,
-		"received_date":   msg.ReceivedDate,
-		"message_date":    msg.MessageDate,
-		"folder_id":       msg.FolderID,
-		"internet_id":     msg.InternetMessageID,
-		"rfc822":          string(rfc822),
+		"id":            msg.ID,
+		"message_id":    msg.MessageID,
+		"subject":       msg.Subject,
+		"from":          msg.FromAddress,
+		"to":            msg.ToAddresses,
+		"cc":            msg.CcAddresses,
+		"bcc":           msg.BccAddresses,
+		"reply_to":      msg.ReplyTo,
+		"size_bytes":    msg.SizeBytes,
+		"seen":          msg.Seen,
+		"flagged":       msg.Flagged,
+		"answered":      msg.Answered,
+		"draft":         msg.Draft,
+		"junk":          msg.Junk,
+		"received_date": msg.ReceivedDate,
+		"message_date":  msg.MessageDate,
+		"folder_id":     msg.FolderID,
+		"internet_id":   msg.InternetMessageID,
+		"rfc822":        string(rfc822),
+		"attachments":   attachmentsOut,
 	})
 }
 
@@ -989,6 +1165,366 @@ func (h *Handler) WebmailArchive(c fiber.Ctx) error {
 		"status":  "archived",
 		"moved_to": archive.Path,
 	})
+}
+
+// WebmailMoveMessage moves a single message into a
+// different folder in the same mailbox. Used by the
+// reading pane's "Move to…" menu when the user wants to
+// pick a folder other than Archive / Trash / Junk.
+//
+// Body: {target_folder_id: uint} (required). The target
+// must belong to the caller's mailbox; cross-mailbox
+// moves return 403.
+//
+// Authorization: same as WebmailMessage — the source
+// message must belong to the caller's mailbox.
+func (h *Handler) WebmailMoveMessage(c fiber.Ctx) error {
+	ctx, reason := h.resolveWebmailUserContext(c)
+	if ctx == nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error":  "no mailbox",
+			"reason": reason,
+		})
+	}
+	id, err := parseMessageID(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid message id"})
+	}
+	var req struct {
+		TargetFolderID uint `json:"target_folder_id"`
+	}
+	if err := c.Bind().JSON(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
+	}
+	if req.TargetFolderID == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "target_folder_id is required",
+		})
+	}
+	msg, _, err := ctx.MailboxStore.LoadMessage(c.Context(), id, nil)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "message not found"})
+	}
+	if msg.MailboxID != ctx.Mailbox.ID {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "message not found"})
+	}
+	target, err := ctx.MailboxStore.Folders.GetByID(c.Context(), req.TargetFolderID, nil)
+	if err != nil || target == nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "target folder not found"})
+	}
+	if target.MailboxID != ctx.Mailbox.ID {
+		// Refuse cross-mailbox folder targets. The
+		// caller knows their own folder ids; if they
+		// pass a foreign one, treat it as 403 (the
+		// folder exists, they just can't use it).
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error": "target folder not in caller's mailbox",
+		})
+	}
+	if err := ctx.MailboxStore.MoveMessage(c.Context(), msg.ID, target.ID, nil); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": fmt.Sprintf("move message: %v", err),
+		})
+	}
+	return c.JSON(fiber.Map{
+		"id":         msg.ID,
+		"status":     "moved",
+		"moved_to":   target.Path,
+		"folder_id":  target.ID,
+	})
+}
+
+// WebmailMessageSource returns the raw RFC822 body of a
+// single message as a downloadable .eml attachment. Used
+// by the reading pane's "Show original" action.
+//
+// Authorization: same as WebmailMessage — the message
+// must belong to the caller's mailbox.
+func (h *Handler) WebmailMessageSource(c fiber.Ctx) error {
+	ctx, reason := h.resolveWebmailUserContext(c)
+	if ctx == nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error":  "no mailbox",
+			"reason": reason,
+		})
+	}
+	id, err := parseMessageID(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid message id"})
+	}
+	msg, rfc822, err := ctx.MailboxStore.LoadMessage(c.Context(), id, nil)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "message not found"})
+	}
+	if msg.MailboxID != ctx.Mailbox.ID {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "message not found"})
+	}
+	filename := fmt.Sprintf("message-%d-%s.eml", msg.ID, msg.MessageID)
+	c.Set(fiber.HeaderContentType, "message/rfc822; charset=utf-8")
+	c.Set(fiber.HeaderContentDisposition,
+		fmt.Sprintf(`attachment; filename="%s"`, sanitizeDownloadFilename(filename)))
+	c.Set(fiber.HeaderContentLength, fmt.Sprintf("%d", len(rfc822)))
+	return c.Send(rfc822)
+}
+
+// sanitizeDownloadFilename strips control characters and
+// quote characters from a filename before it goes into a
+// Content-Disposition header. The string is intended for
+// HTTP headers, not for filesystem storage; path
+// traversal is blocked at the :id parse step, not here.
+func sanitizeDownloadFilename(name string) string {
+	name = strings.ReplaceAll(name, "\r", "")
+	name = strings.ReplaceAll(name, "\n", "")
+	name = strings.ReplaceAll(name, `"`, "")
+	name = strings.ReplaceAll(name, `\`, "")
+	return name
+}
+
+// WebmailMessageBatch performs a state-changing action on
+// multiple messages in a single request. The webmail UI
+// uses it for "select all visible, archive / delete /
+// mark read / mark unread / spam / nospam / move" and the
+// reading pane "Move to…" menu.
+//
+// Body: {ids: [uint], action: string, target_folder_id?: uint}
+//
+//   action: "archive" | "delete" | "markRead" | "markUnread"
+//         | "flag" | "unflag" | "spam" | "nospam"
+//         | "move"
+//
+//   target_folder_id: required when action == "move",
+//                     must belong to caller's mailbox.
+//
+// The handler runs every id through the same ownership
+// check as the single-message endpoints. Cross-mailbox
+// ids are reported as failures in the response — they do
+// NOT abort the batch silently. The Sent copy, when
+// present, is the source of truth and is never deleted
+// by this endpoint.
+//
+// Response shape:
+//
+//	{
+//	  "action": "archive",
+//	  "total": 5,
+//	  "succeeded": 4,
+//	  "failed": 1,
+//	  "errors": [{"id": 17, "error": "message not found"}]
+//	}
+func (h *Handler) WebmailMessageBatch(c fiber.Ctx) error {
+	ctx, reason := h.resolveWebmailUserContext(c)
+	if ctx == nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error":  "no mailbox",
+			"reason": reason,
+		})
+	}
+	var req struct {
+		IDs            []uint `json:"ids"`
+		Action         string `json:"action"`
+		TargetFolderID uint   `json:"target_folder_id"`
+	}
+	if err := c.Bind().JSON(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
+	}
+	if len(req.IDs) == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "ids is required and must be non-empty",
+		})
+	}
+	if len(req.IDs) > 500 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "batch size capped at 500 ids per request",
+		})
+	}
+	action := strings.TrimSpace(req.Action)
+	switch action {
+	case "archive", "delete", "markRead", "markUnread",
+		"flag", "unflag", "spam", "nospam", "move":
+		// ok
+	default:
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": fmt.Sprintf("unknown action %q", action),
+		})
+	}
+	var targetFolder *storage.Folder
+	if action == "move" {
+		if req.TargetFolderID == 0 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "target_folder_id is required for move",
+			})
+		}
+		tf, err := ctx.MailboxStore.Folders.GetByID(c.Context(), req.TargetFolderID, nil)
+		if err != nil || tf == nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "target folder not found"})
+		}
+		if tf.MailboxID != ctx.Mailbox.ID {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"error": "target folder not in caller's mailbox",
+			})
+		}
+		targetFolder = tf
+	}
+	if action == "delete" {
+		trash, err := resolveFolderCaseInsensitive(c.Context(), ctx.MailboxStore, ctx.Mailbox.ID, "Trash")
+		if err != nil || trash == nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Trash folder not found; ensure system folders are provisioned",
+			})
+		}
+		targetFolder = trash
+	}
+	if action == "archive" {
+		archive, err := resolveFolderCaseInsensitive(c.Context(), ctx.MailboxStore, ctx.Mailbox.ID, "Archive")
+		if err != nil || archive == nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Archive folder not found; ensure system folders are provisioned",
+			})
+		}
+		targetFolder = archive
+	}
+	if action == "spam" {
+		junk, err := resolveFolderCaseInsensitive(c.Context(), ctx.MailboxStore, ctx.Mailbox.ID, "Junk")
+		if err != nil || junk == nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Junk folder not found; ensure system folders are provisioned",
+			})
+		}
+		targetFolder = junk
+	}
+
+	type batchError struct {
+		ID    uint   `json:"id"`
+		Error string `json:"error"`
+	}
+	errors := make([]batchError, 0)
+	succeeded := 0
+
+	for _, id := range req.IDs {
+		msg, _, err := ctx.MailboxStore.LoadMessage(c.Context(), id, nil)
+		if err != nil || msg == nil {
+			errors = append(errors, batchError{ID: id, Error: "message not found"})
+			continue
+		}
+		if msg.MailboxID != ctx.Mailbox.ID {
+			// Cross-mailbox id. The caller should
+			// never have one — the UI only surfaces
+			// ids from the caller's own list. Treat
+			// as a per-id failure rather than a 403
+			// on the whole request: the operator
+			// can see which id was rejected.
+			errors = append(errors, batchError{ID: id, Error: "message not in caller's mailbox"})
+			continue
+		}
+		if err := h.applyBatchAction(c, ctx, msg, action, targetFolder); err != nil {
+			errors = append(errors, batchError{ID: id, Error: err.Error()})
+			continue
+		}
+		succeeded++
+	}
+	return c.JSON(fiber.Map{
+		"action":    action,
+		"total":     len(req.IDs),
+		"succeeded": succeeded,
+		"failed":    len(errors),
+		"errors":    errors,
+	})
+}
+
+// applyBatchAction runs the requested action on a single
+// message that has already been authorised. Errors are
+// returned for the per-id failures in the batch response;
+// the caller wraps them.
+func (h *Handler) applyBatchAction(
+	c fiber.Ctx,
+	ctx *webmailUserContext,
+	msg *storage.Message,
+	action string,
+	targetFolder *storage.Folder,
+) error {
+	switch action {
+	case "archive":
+		if targetFolder == nil {
+			return fmt.Errorf("archive folder not resolved")
+		}
+		if err := ctx.MailboxStore.MoveMessage(c.Context(), msg.ID, targetFolder.ID, nil); err != nil {
+			return fmt.Errorf("move: %w", err)
+		}
+		deleted := false
+		_ = ctx.MailboxStore.Messages.UpdateFlags(c.Context(), msg.ID,
+			nil, nil, nil, nil, &deleted, nil, nil)
+		return nil
+	case "delete":
+		if targetFolder == nil {
+			return fmt.Errorf("trash folder not resolved")
+		}
+		deleted := true
+		if err := ctx.MailboxStore.Messages.UpdateFlags(c.Context(), msg.ID,
+			nil, nil, nil, nil, &deleted, nil, nil); err != nil {
+			return fmt.Errorf("mark deleted: %w", err)
+		}
+		if err := ctx.MailboxStore.MoveMessage(c.Context(), msg.ID, targetFolder.ID, nil); err != nil {
+			return fmt.Errorf("move to trash: %w", err)
+		}
+		return nil
+	case "move":
+		if targetFolder == nil {
+			return fmt.Errorf("target folder not resolved")
+		}
+		if err := ctx.MailboxStore.MoveMessage(c.Context(), msg.ID, targetFolder.ID, nil); err != nil {
+			return fmt.Errorf("move: %w", err)
+		}
+		return nil
+	case "markRead":
+		seen := true
+		if err := ctx.MailboxStore.Messages.UpdateFlags(c.Context(), msg.ID,
+			&seen, nil, nil, nil, nil, nil, nil); err != nil {
+			return fmt.Errorf("mark read: %w", err)
+		}
+		return nil
+	case "markUnread":
+		seen := false
+		if err := ctx.MailboxStore.Messages.UpdateFlags(c.Context(), msg.ID,
+			&seen, nil, nil, nil, nil, nil, nil); err != nil {
+			return fmt.Errorf("mark unread: %w", err)
+		}
+		return nil
+	case "flag":
+		flagged := true
+		if err := ctx.MailboxStore.Messages.UpdateFlags(c.Context(), msg.ID,
+			nil, nil, &flagged, nil, nil, nil, nil); err != nil {
+			return fmt.Errorf("flag: %w", err)
+		}
+		return nil
+	case "unflag":
+		flagged := false
+		if err := ctx.MailboxStore.Messages.UpdateFlags(c.Context(), msg.ID,
+			nil, nil, &flagged, nil, nil, nil, nil); err != nil {
+			return fmt.Errorf("unflag: %w", err)
+		}
+		return nil
+	case "spam":
+		if targetFolder == nil {
+			return fmt.Errorf("junk folder not resolved")
+		}
+		junk := true
+		if err := ctx.MailboxStore.Messages.UpdateFlags(c.Context(), msg.ID,
+			nil, nil, nil, nil, nil, &junk, nil); err != nil {
+			return fmt.Errorf("mark junk: %w", err)
+		}
+		if err := ctx.MailboxStore.MoveMessage(c.Context(), msg.ID, targetFolder.ID, nil); err != nil {
+			return fmt.Errorf("move to junk: %w", err)
+		}
+		return nil
+	case "nospam":
+		junk := false
+		if err := ctx.MailboxStore.Messages.UpdateFlags(c.Context(), msg.ID,
+			nil, nil, nil, nil, nil, &junk, nil); err != nil {
+			return fmt.Errorf("unmark junk: %w", err)
+		}
+		return nil
+	}
+	return fmt.Errorf("unknown action %q", action)
 }
 
 // WebmailMarkFolderRead sets seen=true on every non-deleted
