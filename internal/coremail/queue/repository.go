@@ -29,11 +29,33 @@ type Repository interface {
 	// Defer reschedules a job for retry with exponential backoff.
 	Defer(ctx context.Context, id uint, nextAttemptAt time.Time, lastError string, tx interface{}) error
 
+	// DeferWithDiagnostics is the preferred entry
+	// point for the delivery worker. It records
+	// the full remote SMTP diagnostic set
+	// (status code, enhanced code, host, IP, TLS
+	// state) on the queue row so the admin queue
+	// UI shows the exact defer reason without log
+	// scraping. The legacy Defer() method remains
+	// for callers that have no remote diagnostics.
+	DeferWithDiagnostics(ctx context.Context, id uint, nextAttemptAt time.Time, diag DeliveryDiagnostics, tx interface{}) error
+
 	// Bounce marks a job as permanently bounced (hard failure).
 	Bounce(ctx context.Context, id uint, lastError string, tx interface{}) error
 
+	// BounceWithDiagnostics is the preferred
+	// entry point for permanent recipient
+	// rejections. The iCloud bounce from
+	// production (queue id=3, status=bounced)
+	// is now diagnosable from the admin queue UI.
+	BounceWithDiagnostics(ctx context.Context, id uint, diag DeliveryDiagnostics, tx interface{}) error
+
 	// DeadLetter moves a job to the dead letter queue.
 	DeadLetter(ctx context.Context, id uint, lastError string, tx interface{}) error
+
+	// DeadLetterWithDiagnostics is the preferred
+	// entry point for the dead-letter path. Same
+	// diagnostic fields as BounceWithDiagnostics.
+	DeadLetterWithDiagnostics(ctx context.Context, id uint, diag DeliveryDiagnostics, tx interface{}) error
 
 	// Cancel marks a job as cancelled.
 	Cancel(ctx context.Context, id uint, tx interface{}) error
@@ -94,7 +116,7 @@ func (r *SQLRepo) exec(tx interface{}) interface {
 const queueCols = `id, tenant_id, domain_id, mailbox_id, message_id, from_address, to_address,
 	recipient_domain, direction, status, priority, attempt_count, max_attempts,
 	next_attempt_at, last_attempt_at, last_error, delivery_mode,
-	remote_host, remote_ip, tls_used,
+	remote_host, remote_ip, tls_used, last_status_code, last_enhanced_code,
 	lease_owner, lease_expires_at,
 	created_at, updated_at, completed_at, dead_letter_at, deleted_at`
 
@@ -306,6 +328,29 @@ func (r *SQLRepo) Defer(ctx context.Context, id uint, nextAttemptAt time.Time, l
 	return err
 }
 
+// DeferWithDiagnostics records a defer with the
+// full remote SMTP diagnostic set so the operator
+// can see the exact reason in the admin UI
+// without grepping the worker log. The legacy
+// Defer() method remains for callers that have no
+// diagnostics to record (e.g. local delivery
+// failures with no remote host).
+func (r *SQLRepo) DeferWithDiagnostics(ctx context.Context, id uint, nextAttemptAt time.Time, diag DeliveryDiagnostics, tx interface{}) error {
+	now := nowFn()
+	e := r.exec(tx)
+	_, err := e.ExecContext(ctx, `UPDATE coremail_queue SET
+			status=?, next_attempt_at=?, last_attempt_at=?,
+			last_error=?, last_status_code=?, last_enhanced_code=?,
+			remote_host=?, remote_ip=?, tls_used=?,
+			updated_at=?
+		WHERE id=? AND deleted_at IS NULL`,
+		string(StatusDeferred), nextAttemptAt, now,
+		diag.LastError, diag.StatusCode, diag.EnhancedCode,
+		diag.RemoteHost, diag.RemoteIP, boolToInt(diag.TLSUsed),
+		now, id)
+	return err
+}
+
 func (r *SQLRepo) Bounce(ctx context.Context, id uint, lastError string, tx interface{}) error {
 	now := nowFn()
 	e := r.exec(tx)
@@ -314,11 +359,62 @@ func (r *SQLRepo) Bounce(ctx context.Context, id uint, lastError string, tx inte
 	return err
 }
 
+// BounceWithDiagnostics records a permanent
+// recipient rejection with the full remote SMTP
+// diagnostic set. The iCloud bounce case from
+// production (queue id=3, status=bounced,
+// attempt_count=1) was previously stored with
+// only last_error — the operator had to cross-
+// reference logs to see the SMTP code, the remote
+// MX, and the TLS state. This method stores the
+// full set so the admin queue UI can show
+// "550 5.1.1 from mx-in-001.icloud.com (17.57.x.x,
+// TLS) — invalid recipient" without any log
+// scraping.
+func (r *SQLRepo) BounceWithDiagnostics(ctx context.Context, id uint, diag DeliveryDiagnostics, tx interface{}) error {
+	now := nowFn()
+	e := r.exec(tx)
+	_, err := e.ExecContext(ctx, `UPDATE coremail_queue SET
+			status=?, completed_at=?, last_error=?,
+			last_status_code=?, last_enhanced_code=?,
+			remote_host=?, remote_ip=?, tls_used=?,
+			updated_at=?
+		WHERE id=? AND deleted_at IS NULL`,
+		string(StatusBounced), now,
+		diag.LastError, diag.StatusCode, diag.EnhancedCode,
+		diag.RemoteHost, diag.RemoteIP, boolToInt(diag.TLSUsed),
+		now, id)
+	return err
+}
+
 func (r *SQLRepo) DeadLetter(ctx context.Context, id uint, lastError string, tx interface{}) error {
 	now := nowFn()
 	e := r.exec(tx)
 	_, err := e.ExecContext(ctx, `UPDATE coremail_queue SET status=?, dead_letter_at=?, last_error=?, updated_at=? WHERE id=? AND deleted_at IS NULL`,
 		string(StatusDeadLetter), now, lastError, now, id)
+	return err
+}
+
+// DeadLetterWithDiagnostics records a permanent
+// dead-letter with the full remote SMTP
+// diagnostic set. The diagnostics are the same
+// fields as BounceWithDiagnostics — we keep a
+// separate method so the dead-letter path can be
+// distinguished from the bounce path in the
+// admin UI without parsing the status code.
+func (r *SQLRepo) DeadLetterWithDiagnostics(ctx context.Context, id uint, diag DeliveryDiagnostics, tx interface{}) error {
+	now := nowFn()
+	e := r.exec(tx)
+	_, err := e.ExecContext(ctx, `UPDATE coremail_queue SET
+			status=?, dead_letter_at=?, last_error=?,
+			last_status_code=?, last_enhanced_code=?,
+			remote_host=?, remote_ip=?, tls_used=?,
+			updated_at=?
+		WHERE id=? AND deleted_at IS NULL`,
+		string(StatusDeadLetter), now,
+		diag.LastError, diag.StatusCode, diag.EnhancedCode,
+		diag.RemoteHost, diag.RemoteIP, boolToInt(diag.TLSUsed),
+		now, id)
 	return err
 }
 
@@ -336,6 +432,50 @@ func (r *SQLRepo) RetryNow(ctx context.Context, id uint, tx interface{}) error {
 	_, err := e.ExecContext(ctx, `UPDATE coremail_queue SET status=?, next_attempt_at=?, attempt_count=0, dead_letter_at=NULL, last_error='', updated_at=? WHERE id=? AND deleted_at IS NULL`,
 		string(StatusPending), now, now, id)
 	return err
+}
+
+// DeliveryDiagnostics is the structured set of
+// fields the delivery worker captures when a
+// remote SMTP attempt completes. The fields are
+// the operator's "why was this row deferred /
+// bounced" answer: the exact SMTP code, the
+// enhanced status code, the remote host, the IP,
+// and the TLS state. The Admin queue UI surfaces
+// these verbatim so the operator can diagnose
+// deliverability issues without grepping the
+// worker log.
+//
+// DeliveryDiagnostics is intentionally separate
+// from delivery.DeliveryResult — the queue
+// package must not import the delivery package
+// (it would create an import cycle since delivery
+// imports queue). The conversion is done in
+// delivery.worker.deliver.
+type DeliveryDiagnostics struct {
+	LastError    string
+	StatusCode   int
+	EnhancedCode string
+	RemoteHost   string
+	RemoteIP     string
+	TLSUsed      bool
+}
+
+// DeliveryDiagnosticsFromResult is a convenience
+// constructor for the conversion. Defined in
+// the delivery package to avoid the import
+// cycle.
+
+// boolToInt converts a Go bool to the 0/1 form
+// SQLite stores in INTEGER columns. We could use
+// a bool column directly (modernc.org/sqlite
+// supports it), but every other boolean column
+// in coremail_queue uses 0/1 — keeping the
+// convention.
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func (r *SQLRepo) ReleaseExpiredLeases(ctx context.Context, tx interface{}) (int64, error) {
@@ -464,6 +604,7 @@ func scanEntry(row interface{ Scan(dest ...interface{}) error }) (*QueueEntry, e
 		&e.RecipientDomain, &direction, &status, &e.Priority, &e.AttemptCount, &e.MaxAttempts,
 		&e.NextAttemptAt, &e.LastAttemptAt, &e.LastError, &deliveryMode,
 		&e.RemoteHost, &e.RemoteIP, &tlsUsed,
+		&e.LastStatusCode, &e.LastEnhancedCode,
 		&e.LeaseOwner, &e.LeaseExpiresAt,
 		&e.CreatedAt, &e.UpdatedAt, &e.CompletedAt, &e.DeadLetterAt, &e.DeletedAt,
 	)

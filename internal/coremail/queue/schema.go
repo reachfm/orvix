@@ -24,6 +24,14 @@ func Tables() []string {
 			remote_host TEXT NOT NULL DEFAULT '',
 			remote_ip TEXT NOT NULL DEFAULT '',
 			tls_used INTEGER NOT NULL DEFAULT 0,
+			-- Remote SMTP diagnostics. Populated by
+			-- the delivery worker when the entry
+			-- transitions to deferred / bounced /
+			-- dead_letter. The admin queue UI
+			-- shows these verbatim — they are the
+			-- "why" of the row's terminal state.
+			last_status_code INTEGER NOT NULL DEFAULT 0,
+			last_enhanced_code TEXT NOT NULL DEFAULT '',
 			lease_owner TEXT NOT NULL DEFAULT '',
 			lease_expires_at DATETIME,
 			created_at DATETIME NOT NULL,

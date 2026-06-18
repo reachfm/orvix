@@ -3,7 +3,15 @@ package delivery
 import (
 	"bufio"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"net"
 	"strings"
 	"sync"
@@ -17,30 +25,169 @@ type fakeSMTPServer struct {
 	t            *testing.T
 	ln           net.Listener
 	addr         string
+	tlsLn        net.Listener
+	tlsAddr      string
 	mu           sync.Mutex
 	receivedFrom string
 	receivedRcpt []string
 	receivedData []byte
 	heloHost     string
+	// heloHostPost is the helo received AFTER STARTTLS.
+	// Used by the STARTTLS-re-EHLO test to assert the
+	// transport followed RFC 3207 §4.2 and re-issued
+	// EHLO after the upgrade.
+	heloHostPost string
+	// postStartTLS is set to true by the handle() loop
+	// when STARTTLS was issued on the current
+	// connection. The MAIL FROM handler checks this
+	// before accepting a plaintext MAIL FROM. The
+	// field is on the per-connection state, NOT on
+	// the server — two concurrent connections on the
+	// same listener track STARTTLS independently.
 	greetingCode int
 	greetingMsg  string
 	ehloResponse func(string) (int, string)
 	rcptResponse func(string) (int, string)
 	dataResponse func() (int, string)
+	// requireStartTLS makes the server reject MAIL
+	// FROM with "530 5.7.0 Must issue STARTTLS first"
+	// when the connection has not completed STARTTLS.
+	// This mirrors the behaviour of every modern SMTP
+	// provider that enforces TLS (Postfix
+	// smtpd_tls_security_level=encrypt, Gmail, iCloud,
+	// Outlook). The default is true; tests that
+	// exercise the plaintext path set this to false.
+	requireStartTLS bool
+	// allowPlaintext, when true, lets the server
+	// accept MAIL FROM without STARTTLS even when
+	// requireStartTLS is true. Used by the unit tests
+	// that exercise the "server refused STARTTLS"
+	// branch of the transport — we want the test to
+	// proceed past MAIL FROM so the rest of the
+	// pipeline (RCPT TO, DATA) is exercised, while
+	// the production-correct path is still tested by
+	// the requireStartTLS=true tests.
+	allowPlaintext bool
+	// startTLSSeen reports whether the server ever
+	// received a STARTTLS command on this listener
+	// (across all connections). Used by the
+	// integration test that asserts the transport
+	// actually issued STARTTLS rather than skipping
+	// it.
+	startTLSSeen bool
+	// startTLSTemporaryFailure, when true, makes
+	// handle() reply 454 "TLS not available right
+	// now" to the STARTTLS command. This breaks the
+	// STARTTLS upgrade on the transport side, which
+	// the transport must classify as TempFail.
+	// Production Postfix / Exim issue exactly this
+	// reply when the TLS subsystem is restarting
+	// (cert reload, key rotation). The test pins the
+	// "transport must defer, not fall back to
+	// plaintext" contract that prevents
+	// bidirectional STARTTLS-down + plaintext-MAIL
+	// FROM bugs.
+	startTLSTemporaryFailure bool
+	// startTLSHandshakeFailure, when true, makes
+	// handle() return 220 to STARTTLS but then
+	// close the connection instead of completing
+	// the TLS handshake. The client sees a TLS
+	// handshake error and must defer the queue row.
+	startTLSHandshakeFailure bool
+	// cachedTLSConfig is the *tls.Config used by
+	// handle() when wrapping the conn in a TLS
+	// server side after STARTTLS. It is generated
+	// lazily by tlsConfig() and shared across all
+	// connections on the listener.
+	cachedTLSConfig *tls.Config
 }
 
-func startFakeSMTP(t *testing.T) *fakeSMTPServer {
+func startFakeSMTPServerOpts(t *testing.T, requireStartTLS bool) *fakeSMTPServer {
 	t.Helper()
-	fs := &fakeSMTPServer{t: t, greetingCode: 220, greetingMsg: "Fake SMTP Server"}
+	fs := &fakeSMTPServer{
+		t:               t,
+		greetingCode:    220,
+		greetingMsg:     "Fake SMTP Server",
+		requireStartTLS: requireStartTLS,
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	fs.ln = ln
 	fs.addr = ln.Addr().String()
+
+	// Also start a TLS listener on a separate port.
+	tlsLn, err := startFakeSMTPTLS(t)
+	if err != nil {
+		t.Fatalf("tls listen: %v", err)
+	}
+	fs.tlsLn = tlsLn
+	fs.tlsAddr = tlsLn.Addr().String()
+
 	go fs.serve()
-	t.Cleanup(func() { ln.Close() })
+	go fs.serveTLS()
+	t.Cleanup(func() {
+		ln.Close()
+		tlsLn.Close()
+	})
 	return fs
+}
+
+func startFakeSMTP(t *testing.T) *fakeSMTPServer {
+	t.Helper()
+	return startFakeSMTPServerOpts(t, false)
+}
+
+func startFakeSMTPServerRequiringStartTLS(t *testing.T) *fakeSMTPServer {
+	t.Helper()
+	return startFakeSMTPServerOpts(t, true)
+}
+
+// startFakeSMTPTLS generates a self-signed ECDSA
+// certificate and brings up a TLS listener on a random
+// port. The cert is local-only (CN=127.0.0.1) and
+// only used inside the test harness; the transport
+// under test uses InsecureSkipVerify so it does not
+// care about the chain.
+func startFakeSMTPTLS(t *testing.T) (net.Listener, error) {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("tls keygen: %w", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "127.0.0.1"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
+		DNSNames:     []string{"localhost"},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		return nil, fmt.Errorf("tls certgen: %w", err)
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyDER, err := x509.MarshalECPrivateKey(priv)
+	if err != nil {
+		return nil, fmt.Errorf("tls key marshal: %w", err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("tls keypair: %w", err)
+	}
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("tls listen: %w", err)
+	}
+	return ln, nil
 }
 
 func (fs *fakeSMTPServer) serve() {
@@ -49,16 +196,56 @@ func (fs *fakeSMTPServer) serve() {
 		if err != nil {
 			return
 		}
-		go fs.handle(conn)
+		go fs.handle(conn, false)
 	}
 }
 
-func (fs *fakeSMTPServer) handle(conn net.Conn) {
+func (fs *fakeSMTPServer) serveTLS() {
+	for {
+		conn, err := fs.tlsLn.Accept()
+		if err != nil {
+			return
+		}
+		go fs.handle(conn, true)
+	}
+}
+
+// postStartTLSEHLO returns the helo host the server
+// received AFTER a STARTTLS upgrade. The fake server
+// tracks the pre- and post-TLS hosts separately so the
+// STARTTLS-re-EHLO test can verify the transport
+// followed RFC 3207 §4.2 and re-issued EHLO after the
+// upgrade. Returns "" if no post-STARTTLS EHLO has
+// been received.
+func (fs *fakeSMTPServer) postStartTLSEHLO() string {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	return fs.heloHostPost
+}
+
+func (fs *fakeSMTPServer) handle(conn net.Conn, tlsActive bool) {
 	defer conn.Close()
+	// reader/writer track the active transport. They
+	// are reassigned when the client issues STARTTLS
+	// so the rest of the loop reads/writes through the
+	// TLS layer.
 	reader := bufio.NewReader(conn)
 	writer := bufio.NewWriter(conn)
 	fmt.Fprintf(writer, "%d %s\r\n", fs.greetingCode, fs.greetingMsg)
 	writer.Flush()
+
+	// Track STARTTLS state for THIS connection. The
+	// requireStartTLS check at MAIL FROM compares
+	// against this — without it, a transport that
+	// skipped STARTTLS could send plaintext MAIL
+	// FROM and the server would happily accept.
+	startTLSDone := tlsActive
+
+	// currentConn is the conn to wrap in TLS if the
+	// client sends STARTTLS. It is reassigned to the
+	// TLS conn after the upgrade so subsequent reads
+	// go through TLS.
+	currentConn := conn
 
 	for {
 		line, err := reader.ReadString('\n')
@@ -76,18 +263,41 @@ func (fs *fakeSMTPServer) handle(conn net.Conn) {
 		switch cmd {
 		case "EHLO":
 			fs.mu.Lock()
-			fs.heloHost = args
+			if startTLSDone {
+				fs.heloHostPost = args
+			} else {
+				fs.heloHost = args
+			}
 			fs.mu.Unlock()
 			fmt.Fprintf(writer, "250-%s\r\n", args)
 			fmt.Fprintf(writer, "250-PIPELINING\r\n")
-			fmt.Fprintf(writer, "250-STARTTLS\r\n")
-			fmt.Fprintf(writer, "250 8BITMIME\r\n")
+			fmt.Fprintf(writer, "250-SIZE 10240000\r\n")
+			if fs.requireStartTLS {
+				fmt.Fprintf(writer, "250-STARTTLS\r\n")
+			}
+			fmt.Fprintf(writer, "250-ENHANCEDSTATUSCODES\r\n")
+			fmt.Fprintf(writer, "250-8BITMIME\r\n")
+			fmt.Fprintf(writer, "250 SMTPUTF8\r\n")
 		case "HELO":
 			fs.mu.Lock()
 			fs.heloHost = args
 			fs.mu.Unlock()
 			fmt.Fprintf(writer, "250 %s\r\n", args)
 		case "MAIL":
+			if fs.requireStartTLS && !startTLSDone && !fs.allowPlaintext {
+				// 530 with the canonical "Must
+				// issue STARTTLS first" text.
+				// This is the reply that the
+				// production server returned
+				// to the buggy transport. The
+				// fix in the transport is to
+				// recognise this and defer
+				// the queue row rather than
+				// bounce it.
+				fmt.Fprintf(writer, "530 5.7.0 Must issue STARTTLS first\r\n")
+				writer.Flush()
+				continue
+			}
 			fs.mu.Lock()
 			fs.receivedFrom = args
 			fs.mu.Unlock()
@@ -130,12 +340,133 @@ func (fs *fakeSMTPServer) handle(conn net.Conn) {
 			writer.Flush()
 			return
 		case "STARTTLS":
-			fmt.Fprintf(writer, "500 TLS not available\r\n")
+			fs.mu.Lock()
+			fs.startTLSSeen = true
+			fs.mu.Unlock()
+			if !fs.requireStartTLS {
+				fmt.Fprintf(writer, "500 TLS not available\r\n")
+				writer.Flush()
+				continue
+			}
+			// Some servers say "STARTTLS
+			// advertised" in EHLO but then
+			// refuse the upgrade with 454
+			// while the TLS subsystem is
+			// restarting. We simulate that
+			// here so the transport's
+			// "STARTTLS refused → defer"
+			// branch is exercised.
+			if fs.startTLSTemporaryFailure {
+				fmt.Fprintf(writer, "454 4.7.0 TLS not available right now\r\n")
+				writer.Flush()
+				return
+			}
+			// Some servers say 220 but then
+			// immediately close the socket
+			// (mid-handshake failure — bad
+			// cert, key mismatch, etc).
+			// The transport must classify
+			// that as a transient failure
+			// too.
+			if fs.startTLSHandshakeFailure {
+				fmt.Fprintf(writer, "220 2.0.0 Ready to start TLS\r\n")
+				writer.Flush()
+				conn.Close()
+				return
+			}
+			// 220 — "service ready" — and the
+			// server then waits for the
+			// client to begin TLS on the
+			// same socket. We then wrap
+			// the underlying conn in a TLS
+			// server side and switch the
+			// reader/writer to that. From
+			// here on, every byte that
+			// passes through the conn is
+			// inside a TLS record.
+			fmt.Fprintf(writer, "220 2.0.0 Ready to start TLS\r\n")
+			writer.Flush()
+			// Re-derive a self-signed cert
+			// matching the one in the
+			// dedicated TLS listener so the
+			// client can verify against
+			// the same root. We reuse the
+			// same key generation function
+			// the dedicated TLS listener
+			// uses; the cert is short-lived
+			// and used only for the test
+			// harness.
+			tlsCfg := fs.tlsConfig()
+			tlsConn := tls.Server(currentConn, tlsCfg)
+			if err := tlsConn.Handshake(); err != nil {
+				// TLS handshake failed on
+				// the server side. From the
+				// client's perspective this
+				// surfaces as a handshake
+				// failure — the transport
+				// defers the queue row.
+				tlsConn.Close()
+				return
+			}
+			currentConn = tlsConn
+			reader = bufio.NewReader(tlsConn)
+			writer = bufio.NewWriter(tlsConn)
+			startTLSDone = true
 		default:
 			fmt.Fprintf(writer, "500 Unrecognized\r\n")
 		}
 		writer.Flush()
 	}
+}
+
+// tlsConfig returns a *tls.Config built from the same
+// self-signed ECDSA cert the dedicated TLS listener
+// uses. The fake SMTP handler calls this from the
+// STARTTLS upgrade path so the post-STARTTLS socket
+// is wrapped in a TLS server side. The cert is a
+// throwaway — the client uses InsecureSkipVerify.
+func (fs *fakeSMTPServer) tlsConfig() *tls.Config {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if fs.cachedTLSConfig != nil {
+		return fs.cachedTLSConfig
+	}
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		// tests that hit this path will fail
+		// elsewhere; surface the error at
+		// handshake time, not at config
+		// construction time.
+		return &tls.Config{}
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "127.0.0.1"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		return &tls.Config{}
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyDER, err := x509.MarshalECPrivateKey(priv)
+	if err != nil {
+		return &tls.Config{}
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return &tls.Config{}
+	}
+	fs.cachedTLSConfig = &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}
+	return fs.cachedTLSConfig
 }
 
 // ── Resolver Tests ───────────────────────────────────────────
@@ -230,7 +561,7 @@ func TestMXRecordsSortedByPriority(t *testing.T) {
 
 func TestTransportDeliverSuccess(t *testing.T) {
 	fs := startFakeSMTP(t)
-	transport := NewSMTPTransport(DefaultTransportConfig())
+	transport := NewSMTPTransport(testTransportConfig())
 	result := transport.Deliver(context.Background(), fs.addr, false, "sender@test.com", []string{"rcpt@test.com"}, []byte("Subject: Test\r\n\r\nBody"), "test.orvix.local")
 	if !result.Success {
 		t.Fatalf("expected success, got: %s", result.StatusMsg)
@@ -253,7 +584,7 @@ func TestTransportBadGreeting(t *testing.T) {
 	fs := startFakeSMTP(t)
 	fs.greetingCode = 554
 	fs.greetingMsg = "No SMTP here"
-	transport := NewSMTPTransport(DefaultTransportConfig())
+	transport := NewSMTPTransport(testTransportConfig())
 	result := transport.Deliver(context.Background(), fs.addr, false, "sender@test.com", []string{"rcpt@test.com"}, []byte("data"), "test.orvix.local")
 	if result.Success {
 		t.Fatal("expected failure for bad greeting")
@@ -263,7 +594,7 @@ func TestTransportBadGreeting(t *testing.T) {
 func TestTransportEHLOFallback(t *testing.T) {
 	fs := startFakeSMTP(t)
 	fs.ehloResponse = func(host string) (int, string) { return 500, "Not recognized" }
-	transport := NewSMTPTransport(DefaultTransportConfig())
+	transport := NewSMTPTransport(testTransportConfig())
 	result := transport.Deliver(context.Background(), fs.addr, false, "sender@test.com", []string{"rcpt@test.com"}, []byte("Subject: Test\r\n\r\nBody"), "test.orvix.local")
 	if !result.Success {
 		t.Fatalf("expected success via HELO fallback, got: %s", result.StatusMsg)
@@ -273,7 +604,7 @@ func TestTransportEHLOFallback(t *testing.T) {
 func TestTransportRCPTRejected(t *testing.T) {
 	fs := startFakeSMTP(t)
 	fs.rcptResponse = func(rcpt string) (int, string) { return 550, "User unknown" }
-	transport := NewSMTPTransport(DefaultTransportConfig())
+	transport := NewSMTPTransport(testTransportConfig())
 	result := transport.Deliver(context.Background(), fs.addr, false, "sender@test.com", []string{"unknown@test.com"}, []byte("data"), "test.orvix.local")
 	if result.Success {
 		t.Fatal("expected failure for RCPT rejection")
@@ -283,7 +614,7 @@ func TestTransportRCPTRejected(t *testing.T) {
 func TestTransportDATARejected(t *testing.T) {
 	fs := startFakeSMTP(t)
 	fs.dataResponse = func() (int, string) { return 552, "Message too large" }
-	transport := NewSMTPTransport(DefaultTransportConfig())
+	transport := NewSMTPTransport(testTransportConfig())
 	result := transport.Deliver(context.Background(), fs.addr, false, "sender@test.com", []string{"rcpt@test.com"}, []byte("big data"), "test.orvix.local")
 	if result.Success {
 		t.Fatal("expected failure for DATA rejection")
@@ -302,25 +633,258 @@ func TestTransportConnectionTimeout(t *testing.T) {
 
 func TestTransportQUITHandling(t *testing.T) {
 	fs := startFakeSMTP(t)
-	transport := NewSMTPTransport(DefaultTransportConfig())
+	transport := NewSMTPTransport(testTransportConfig())
 	result := transport.Deliver(context.Background(), fs.addr, false, "sender@test.com", []string{"rcpt@test.com"}, []byte("Subject: Test\r\n\r\nBody"), "test.orvix.local")
 	if !result.Success {
 		t.Fatalf("expected success: %s", result.StatusMsg)
 	}
 }
 
-func TestTransportSTARTTLSAdvertised(t *testing.T) {
+// ── STARTTLS Transport Tests ──────────────────────────────────
+//
+// These tests pin the contract the production server
+// required: STARTTLS is mandatory for outbound delivery
+// when the remote server advertises it, the transport
+// must:
+//   - parse EHLO capabilities and detect STARTTLS
+//   - issue STARTTLS, run a TLS handshake, and re-EHLO
+//   - re-send EHLO after the TLS upgrade (RFC 3207 §4.2)
+//   - defer (not bounce) when the server requires STARTTLS
+//     but the connection did not negotiate it
+//   - defer (not bounce) when the TLS handshake fails
+//   - defer (not bounce) for 4xx
+//   - bounce only for permanent 5xx recipient errors
+
+// TestTransportSTARTTLSAdvertisedButServerRefuses is the
+// regression test for the production bug. The remote
+// server advertises STARTTLS in EHLO but then refuses
+// MAIL FROM with 5.7.0 when the client does not
+// negotiate TLS. The transport MUST defer the queue
+// row (so the operator can see the configuration
+// problem) rather than bouncing it as a recipient
+// error.
+//
+// We use a stripped-down server that advertises
+// STARTTLS in EHLO but replies "454 TLS not available
+// right now" to the STARTTLS command. This is the
+// production failure mode: the server says it wants
+// TLS, then refuses it for a few minutes, then
+// accepts it again. The transport must defer the
+// attempt rather than fall back to plaintext.
+func TestTransportSTARTTLSAdvertisedButServerRefuses(t *testing.T) {
 	fs := startFakeSMTP(t)
+	fs.requireStartTLS = true
+	// Force the STARTTLS response to be 454 — the
+	// canonical "transiently not available" reply.
+	// This breaks the STARTTLS upgrade path on the
+	// transport side and exercises the deferral
+	// branch.
+	fs.startTLSTemporaryFailure = true
 	transport := NewSMTPTransport(DefaultTransportConfig())
 	result := transport.Deliver(context.Background(), fs.addr, false, "sender@test.com", []string{"rcpt@test.com"}, []byte("data"), "test.orvix.local")
-	_ = result
-	// STARTTLS is attempted but the fake server doesn't implement it.
-	// This tests that the transport doesn't crash when STARTTLS is attempted.
+
+	if result.Success {
+		t.Fatalf("expected failure, got success: %s", result.StatusMsg)
+	}
+	if !result.TempFail {
+		t.Errorf("STARTTLS refused (454) must be TempFail so the queue retries, got TempFail=false status=%q", result.StatusMsg)
+	}
+	if !strings.Contains(strings.ToLower(result.StatusMsg), "starttls") {
+		t.Errorf("status must mention STARTTLS, got %q", result.StatusMsg)
+	}
+	// The transport must NOT report the message as
+	// permanently bounced.
+	if result.StatusCode >= 500 && result.StatusCode < 600 && !result.TempFail {
+		t.Errorf("server-returned 5xx must not be classified as bounce when caused by STARTTLS refusal")
+	}
+}
+
+// TestTransportSTARTTLSSuccess runs the full STARTTLS
+// upgrade against a real TLS listener and asserts the
+// transport successfully negotiates, re-EHLOs, and
+// delivers a 250 success. This is the happy path for
+// every modern SMTP provider.
+func TestTransportSTARTTLSSuccess(t *testing.T) {
+	fs := startFakeSMTPServerRequiringStartTLS(t)
+	transport := NewSMTPTransport(DefaultTransportConfig())
+	result := transport.Deliver(context.Background(), fs.addr, false, "sender@test.com", []string{"rcpt@test.com"}, []byte("Subject: TLS\r\n\r\nBody"), "test.orvix.local")
+
+	if !result.Success {
+		t.Fatalf("expected success via STARTTLS, got: %s (status=%d, tempfail=%v)", result.StatusMsg, result.StatusCode, result.TempFail)
+	}
+	if !result.TLSUsed {
+		t.Error("expected TLSUsed=true after STARTTLS upgrade")
+	}
+	if !result.TLSHandshake {
+		t.Error("expected TLSHandshake=true after STARTTLS upgrade")
+	}
+	if !result.MailFromOK || !result.RcptOK || !result.DataOK {
+		t.Errorf("expected full SMTP flow success, got: helo=%v mail=%v rcpt=%v data=%v",
+			result.HeloOK, result.MailFromOK, result.RcptOK, result.DataOK)
+	}
+}
+
+// TestTransportSTARTTLSReEHLOLogsHost pins RFC 3207
+// §4.2: the client MUST discard pre-TLS knowledge
+// and re-EHLO after the upgrade. We verify the
+// post-TLS helo host is recorded by the fake server.
+func TestTransportSTARTTLSReEHLOLogsHost(t *testing.T) {
+	fs := startFakeSMTPServerRequiringStartTLS(t)
+	transport := NewSMTPTransport(DefaultTransportConfig())
+	_ = transport.Deliver(context.Background(), fs.addr, false, "sender@test.com", []string{"rcpt@test.com"}, []byte("data"), "mail.orvix.email")
+
+	postHelo := fs.postStartTLSEHLO()
+	if postHelo == "" {
+		t.Fatal("expected EHLO after STARTTLS to be recorded by the fake server")
+	}
+	if !strings.Contains(postHelo, "mail.orvix.email") {
+		t.Errorf("post-STARTTLS EHLO host must be the configured mail hostname, got %q", postHelo)
+	}
+}
+
+// TestTransportSTARTTLSHandshakeFailureDeferred asserts
+// that a failed TLS handshake is deferred (TempFail=true)
+// rather than bounced. The fake server returns 220 to
+// STARTTLS but then closes the socket mid-handshake —
+// a realistic failure mode (cert reload, key mismatch).
+// The transport must classify that as a transient
+// failure so the queue retries; a permanent bounce
+// here would require manual re-queueing for every TLS
+// hiccup.
+func TestTransportSTARTTLSHandshakeFailureDeferred(t *testing.T) {
+	fs := startFakeSMTPServerRequiringStartTLS(t)
+	fs.startTLSHandshakeFailure = true
+	transport := NewSMTPTransport(DefaultTransportConfig())
+	result := transport.Deliver(context.Background(), fs.addr, false, "sender@test.com", []string{"rcpt@test.com"}, []byte("data"), "test.orvix.local")
+
+	if result.Success {
+		t.Fatalf("expected failure, got success")
+	}
+	if !result.TempFail {
+		t.Errorf("TLS handshake failure must be TempFail, got TempFail=false status=%q", result.StatusMsg)
+	}
+	if !strings.Contains(result.StatusMsg, "starttls") && !strings.Contains(result.StatusMsg, "handshake") {
+		t.Errorf("status must mention starttls or handshake, got %q", result.StatusMsg)
+	}
+}
+
+// TestTransportSTARTTLSCapabilitiesCaptured asserts the
+// transport records the post-STARTTLS EHLO capability
+// list on the result. This is what the queue worker
+// writes to the attempt history so the operator can
+// see what the remote server offered.
+func TestTransportSTARTTLSCapabilitiesCaptured(t *testing.T) {
+	fs := startFakeSMTPServerRequiringStartTLS(t)
+	transport := NewSMTPTransport(DefaultTransportConfig())
+	result := transport.Deliver(context.Background(), fs.addr, false, "sender@test.com", []string{"rcpt@test.com"}, []byte("data"), "test.orvix.local")
+
+	if !result.Success {
+		t.Fatalf("expected success, got: %s", result.StatusMsg)
+	}
+	// The post-STARTTLS EHLO must include the
+	// capabilities. We do not check the exact list
+	// (it changes per server) but verify that at
+	// least one capability was recorded and that
+	// the SIZE/8BITMIME/SMTPUTF8 keywords are
+	// present (the fake server advertises all of
+	// them).
+	if len(result.Capabilities) == 0 {
+		t.Fatal("expected non-empty capabilities after STARTTLS")
+	}
+	joined := strings.Join(result.Capabilities, " ")
+	for _, want := range []string{"SIZE", "8BITMIME"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("post-STARTTLS capabilities missing %q: %v", want, result.Capabilities)
+		}
+	}
+}
+
+// TestTransportSTARTTLSNotAdvertisedButRequired pins the
+// configuration contract: if the operator sets
+// RequireSTARTTLS=true but the server does not advertise
+// it, the transport fails fast with a clear diagnostic.
+// This catches the "misconfigured server" case before
+// the queue burns attempts on a server that will never
+// accept plaintext.
+func TestTransportSTARTTLSNotAdvertisedButRequired(t *testing.T) {
+	fs := startFakeSMTPServerOpts(t, false) // does NOT advertise STARTTLS
+	transport := NewSMTPTransport(DefaultTransportConfig())
+	result := transport.Deliver(context.Background(), fs.addr, false, "sender@test.com", []string{"rcpt@test.com"}, []byte("data"), "test.orvix.local")
+
+	if result.Success {
+		t.Fatalf("expected failure (no STARTTLS, required), got success")
+	}
+	if !result.TempFail {
+		t.Errorf("expected TempFail when STARTTLS required but not advertised, got %q", result.StatusMsg)
+	}
+	if !strings.Contains(result.StatusMsg, "starttls") {
+		t.Errorf("status must mention starttls, got %q", result.StatusMsg)
+	}
+}
+
+// TestTransport4xxRemainsDeferred pins the contract
+// that 4xx SMTP responses are deferred. This was
+// already exercised but is explicit here as a
+// regression test for the "transient vs permanent"
+// classification.
+func TestTransport4xxRemainsDeferred(t *testing.T) {
+	fs := startFakeSMTP(t)
+	fs.dataResponse = func() (int, string) { return 450, "4.2.1 Mailbox busy, try later" }
+	transport := NewSMTPTransport(testTransportConfig())
+	result := transport.Deliver(context.Background(), fs.addr, false, "sender@test.com", []string{"rcpt@test.com"}, []byte("data"), "test.orvix.local")
+
+	if result.Success {
+		t.Fatal("expected failure")
+	}
+	if !result.TempFail {
+		t.Errorf("4xx must be TempFail, got %q", result.StatusMsg)
+	}
+	if result.StatusCode != 450 {
+		t.Errorf("expected status 450, got %d", result.StatusCode)
+	}
+}
+
+// TestTransport5xxRecipientRemainsBounce pins the
+// contract that permanent 5xx recipient rejections
+// (550 user unknown, 554 relay denied, etc.) are
+// bounced, not deferred.
+func TestTransport5xxRecipientRemainsBounce(t *testing.T) {
+	fs := startFakeSMTP(t)
+	fs.rcptResponse = func(rcpt string) (int, string) { return 550, "5.1.1 User unknown" }
+	transport := NewSMTPTransport(testTransportConfig())
+	result := transport.Deliver(context.Background(), fs.addr, false, "sender@test.com", []string{"unknown@bad.test"}, []byte("data"), "test.orvix.local")
+
+	if result.Success {
+		t.Fatal("expected failure")
+	}
+	if result.TempFail {
+		t.Errorf("5.1.1 must be permanent (bounce), got TempFail=true")
+	}
+	if result.StatusCode != 550 {
+		t.Errorf("expected status 550, got %d", result.StatusCode)
+	}
+}
+
+// TestTransportRemoteIPAndHostRecorded asserts the
+// transport records the remote host and IP on the
+// result so the queue worker can log them to the
+// attempt history. The "delivered" path records the
+// host (the address we connected to) — IP is recorded
+// separately by the queue worker after the worker
+// resolves the MX record.
+func TestTransportRemoteIPAndHostRecorded(t *testing.T) {
+	fs := startFakeSMTPServerRequiringStartTLS(t)
+	transport := NewSMTPTransport(DefaultTransportConfig())
+	result := transport.Deliver(context.Background(), fs.addr, false, "sender@test.com", []string{"rcpt@test.com"}, []byte("data"), "test.orvix.local")
+
+	if result.RemoteHost != fs.addr {
+		t.Errorf("expected remote host %q, got %q", fs.addr, result.RemoteHost)
+	}
 }
 
 func TestTransportMultipleRCPT(t *testing.T) {
 	fs := startFakeSMTP(t)
-	transport := NewSMTPTransport(DefaultTransportConfig())
+	transport := NewSMTPTransport(testTransportConfig())
 	result := transport.Deliver(context.Background(), fs.addr, false, "sender@test.com", []string{"rcpt1@test.com", "rcpt2@test.com"}, []byte("Subject: Multi\r\n\r\nBody"), "test.orvix.local")
 	if !result.Success {
 		t.Fatalf("expected success for multiple rcpt, got: %s", result.StatusMsg)
@@ -329,7 +893,7 @@ func TestTransportMultipleRCPT(t *testing.T) {
 
 func TestTransportNullSender(t *testing.T) {
 	fs := startFakeSMTP(t)
-	transport := NewSMTPTransport(DefaultTransportConfig())
+	transport := NewSMTPTransport(testTransportConfig())
 	result := transport.Deliver(context.Background(), fs.addr, false, "", []string{"rcpt@test.com"}, []byte("Subject: Null\r\n\r\nSender"), "test.orvix.local")
 	if !result.Success {
 		t.Fatalf("expected success for null sender (bounce): %s", result.StatusMsg)
@@ -409,7 +973,7 @@ func TestBounceEventStruct(t *testing.T) {
 
 func TestNewDeliveryWorker(t *testing.T) {
 	resolver := NewFakeResolver()
-	transport := NewSMTPTransport(DefaultTransportConfig())
+	transport := NewSMTPTransport(testTransportConfig())
 	w := NewDeliveryWorker(nil, nil, resolver, transport, "local.test", "worker-1")
 	if w == nil {
 		t.Fatal("worker should not be nil")
@@ -431,7 +995,7 @@ func TestFakeSMTPConcurrentSessions(t *testing.T) {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			transport := NewSMTPTransport(DefaultTransportConfig())
+			transport := NewSMTPTransport(testTransportConfig())
 			result := transport.Deliver(context.Background(), fs.addr, false,
 				fmt.Sprintf("sender%d@test.com", id),
 				[]string{fmt.Sprintf("rcpt%d@test.com", id)},
@@ -519,7 +1083,7 @@ func TestDNSResolverInterface(t *testing.T) {
 func TestTransport4xxDefer(t *testing.T) {
 	fs := startFakeSMTP(t)
 	fs.dataResponse = func() (int, string) { return 450, "4.7.1 Try again later" }
-	transport := NewSMTPTransport(DefaultTransportConfig())
+	transport := NewSMTPTransport(testTransportConfig())
 	result := transport.Deliver(context.Background(), fs.addr, false, "sender@test.com", []string{"rcpt@test.com"}, []byte("data"), "test.orvix.local")
 	if result.Success {
 		t.Fatal("expected failure for 4xx")
@@ -532,7 +1096,7 @@ func TestTransport4xxDefer(t *testing.T) {
 func TestTransport5xxPermFail(t *testing.T) {
 	fs := startFakeSMTP(t)
 	fs.rcptResponse = func(rcpt string) (int, string) { return 550, "5.1.1 User unknown" }
-	transport := NewSMTPTransport(DefaultTransportConfig())
+	transport := NewSMTPTransport(testTransportConfig())
 	result := transport.Deliver(context.Background(), fs.addr, false, "sender@test.com", []string{"bad@test.com"}, []byte("data"), "test.orvix.local")
 	if result.Success {
 		t.Fatal("expected failure for 5xx")
@@ -545,7 +1109,7 @@ func TestTransport5xxPermFail(t *testing.T) {
 func TestTransportResponseCodeSet(t *testing.T) {
 	fs := startFakeSMTP(t)
 	fs.rcptResponse = func(rcpt string) (int, string) { return 550, "User unknown" }
-	transport := NewSMTPTransport(DefaultTransportConfig())
+	transport := NewSMTPTransport(testTransportConfig())
 	result := transport.Deliver(context.Background(), fs.addr, false, "sender@test.com", []string{"bad@test.com"}, []byte("data"), "test.orvix.local")
 	if result.StatusCode != 550 {
 		t.Fatalf("expected status code 550, got %d", result.StatusCode)
@@ -812,7 +1376,7 @@ func TestFormatEnhancedCode(t *testing.T) {
 func TestTransportCapturesEnhancedCode(t *testing.T) {
 	fs := startFakeSMTP(t)
 	fs.rcptResponse = func(rcpt string) (int, string) { return 550, "5.1.1 User unknown" }
-	transport := NewSMTPTransport(DefaultTransportConfig())
+	transport := NewSMTPTransport(testTransportConfig())
 	result := transport.Deliver(context.Background(), fs.addr, false, "sender@test.com", []string{"bad@test.com"}, []byte("data"), "test.orvix.local")
 	if result.EnhancedCode != "5.1.1" {
 		t.Fatalf("expected enhanced code 5.1.1, got %q", result.EnhancedCode)
@@ -822,7 +1386,7 @@ func TestTransportCapturesEnhancedCode(t *testing.T) {
 func TestTransportStoresLastRemoteResponse(t *testing.T) {
 	fs := startFakeSMTP(t)
 	fs.rcptResponse = func(rcpt string) (int, string) { return 550, "5.7.1 Relay denied" }
-	transport := NewSMTPTransport(DefaultTransportConfig())
+	transport := NewSMTPTransport(testTransportConfig())
 	result := transport.Deliver(context.Background(), fs.addr, false, "sender@test.com", []string{"bad@test.com"}, []byte("data"), "test.orvix.local")
 	if result.StatusCode != 550 {
 		t.Fatalf("expected status code 550, got %d", result.StatusCode)
@@ -838,7 +1402,7 @@ func TestTransport421Defer(t *testing.T) {
 	fs := startFakeSMTP(t)
 	fs.greetingCode = 421
 	fs.greetingMsg = "4.2.1 Service unavailable"
-	transport := NewSMTPTransport(DefaultTransportConfig())
+	transport := NewSMTPTransport(testTransportConfig())
 	result := transport.Deliver(context.Background(), fs.addr, false, "sender@test.com", []string{"rcpt@test.com"}, []byte("data"), "test.orvix.local")
 	if result.Success {
 		t.Fatal("expected failure for 421")
@@ -851,7 +1415,7 @@ func TestTransport421Defer(t *testing.T) {
 func TestTransport450Defer(t *testing.T) {
 	fs := startFakeSMTP(t)
 	fs.dataResponse = func() (int, string) { return 450, "4.2.1 Mailbox busy" }
-	transport := NewSMTPTransport(DefaultTransportConfig())
+	transport := NewSMTPTransport(testTransportConfig())
 	result := transport.Deliver(context.Background(), fs.addr, false, "sender@test.com", []string{"rcpt@test.com"}, []byte("data"), "test.orvix.local")
 	if result.Success {
 		t.Fatal("expected failure for 450")
@@ -867,7 +1431,7 @@ func TestTransport450Defer(t *testing.T) {
 func TestTransport550Bounce(t *testing.T) {
 	fs := startFakeSMTP(t)
 	fs.rcptResponse = func(rcpt string) (int, string) { return 550, "5.1.1 User unknown" }
-	transport := NewSMTPTransport(DefaultTransportConfig())
+	transport := NewSMTPTransport(testTransportConfig())
 	result := transport.Deliver(context.Background(), fs.addr, false, "sender@test.com", []string{"bad@test.com"}, []byte("data"), "test.orvix.local")
 	if result.Success {
 		t.Fatal("expected failure for 550")
@@ -879,7 +1443,7 @@ func TestTransport550Bounce(t *testing.T) {
 
 func TestTransportRemoteHostStored(t *testing.T) {
 	fs := startFakeSMTP(t)
-	transport := NewSMTPTransport(DefaultTransportConfig())
+	transport := NewSMTPTransport(testTransportConfig())
 	result := transport.Deliver(context.Background(), fs.addr, false, "sender@test.com", []string{"rcpt@test.com"}, []byte("data"), "test.orvix.local")
 	if result.RemoteHost != fs.addr {
 		t.Fatalf("expected remote host %s, got %s", fs.addr, result.RemoteHost)
@@ -888,7 +1452,7 @@ func TestTransportRemoteHostStored(t *testing.T) {
 
 func TestTransportDurationMsSet(t *testing.T) {
 	fs := startFakeSMTP(t)
-	transport := NewSMTPTransport(DefaultTransportConfig())
+	transport := NewSMTPTransport(testTransportConfig())
 	result := transport.Deliver(context.Background(), fs.addr, false, "sender@test.com", []string{"rcpt@test.com"}, []byte("data"), "test.orvix.local")
 	_ = result.DurationMs // field exists; may be 0 on very fast local connections
 }
@@ -922,6 +1486,18 @@ func TestDeliveryEventTypes(t *testing.T) {
 }
 
 // ── Helpers ──────────────────────────────────────────────────
+
+// testTransportConfig returns a TransportConfig that is
+// safe for the existing unit tests: STARTTLS is
+// advertised in EHLO but the transport is not required
+// to negotiate it. The dedicated STARTTLS tests use
+// DefaultTransportConfig() and the requireStartTLS
+// path on the fake server.
+func testTransportConfig() TransportConfig {
+	cfg := DefaultTransportConfig()
+	cfg.RequireSTARTTLS = false
+	return cfg
+}
 
 func uintPtr(u uint) *uint { return &u }
 

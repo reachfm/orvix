@@ -192,7 +192,16 @@ func (w *DeliveryWorker) deliver(ctx context.Context, entry *queue.QueueEntry) e
 		w.Metrics.RecordDeferral()
 		w.Metrics.RecordRetry(attemptNumber)
 		w.recordDeliveryEvent(ctx, entry, observability.EventQueueDeferred, result)
-		return w.Queue.Repo.Defer(ctx, entry.ID, nextAttempt, result.StatusMsg, nil)
+		// Store the full remote SMTP diagnostics
+		// (host, IP, TLS, status code, enhanced
+		// code) on the queue row so the admin queue
+		// UI shows the exact "why" of the defer
+		// without log scraping. The legacy
+		// Defer() method is retained for callers
+		// that have no remote diagnostics (e.g.
+		// local delivery failures).
+		diag := diagnosticsFromResult(result)
+		return w.Queue.Repo.DeferWithDiagnostics(ctx, entry.ID, nextAttempt, diag, nil)
 
 	case DecisionDeadLetter:
 		maxAllowed := w.RetryPolicy.MaxAttempts
@@ -203,15 +212,46 @@ func (w *DeliveryWorker) deliver(ctx context.Context, entry *queue.QueueEntry) e
 			w.emitAudit(ctx, entry, EventBounced, result)
 			w.Metrics.RecordBounce()
 			w.recordDeliveryEvent(ctx, entry, observability.EventQueueBounced, result)
-			return w.Queue.Repo.Bounce(ctx, entry.ID, result.StatusMsg, nil)
+			// BounceWithDiagnostics stores the
+			// full remote SMTP response (status
+			// code, enhanced code, host, IP, TLS)
+			// on the queue row. The iCloud bounce
+			// from production (queue id=3,
+			// status=bounced) is now diagnosable
+			// from the admin queue UI without
+			// grepping logs.
+			diag := diagnosticsFromResult(result)
+			return w.Queue.Repo.BounceWithDiagnostics(ctx, entry.ID, diag, nil)
 		}
 		w.emitAudit(ctx, entry, EventDeadLetter, result)
 		w.Metrics.RecordDeadLetter()
 		w.recordDeliveryEvent(ctx, entry, observability.EventQueueDeadLetter, result)
-		return w.Queue.Repo.DeadLetter(ctx, entry.ID, result.StatusMsg, nil)
+		diag := diagnosticsFromResult(result)
+		return w.Queue.Repo.DeadLetterWithDiagnostics(ctx, entry.ID, diag, nil)
 	}
 
 	return nil
+}
+
+// diagnosticsFromResult converts a *DeliveryResult
+// into the queue.DeliveryDiagnostics shape. The
+// conversion is local to the delivery package
+// because queue cannot import delivery (import
+// cycle), and the queue package's
+// DeliveryDiagnostics type is what the new
+// schema columns understand.
+func diagnosticsFromResult(result *DeliveryResult) queue.DeliveryDiagnostics {
+	if result == nil {
+		return queue.DeliveryDiagnostics{}
+	}
+	return queue.DeliveryDiagnostics{
+		LastError:    result.StatusMsg,
+		StatusCode:   result.StatusCode,
+		EnhancedCode: result.EnhancedCode,
+		RemoteHost:   result.RemoteHost,
+		RemoteIP:     result.RemoteIP,
+		TLSUsed:      result.TLSUsed,
+	}
 }
 
 // checkPolicy runs all policy checks. On failure, it audits, records history, and updates the queue.

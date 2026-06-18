@@ -59,6 +59,23 @@ type QueueEntry struct {
 	RemoteHost      string        `json:"remote_host,omitempty"`
 	RemoteIP        string        `json:"remote_ip,omitempty"`
 	TLSUsed         bool          `json:"tls_used"`
+	// LastStatusCode is the SMTP status code from
+	// the most recent attempt (e.g. 550, 450, 421).
+	// Populated by DeferWithDiagnostics /
+	// BounceWithDiagnostics / DeadLetterWithDiagnostics.
+	// The Admin queue UI surfaces this verbatim so
+	// the operator can distinguish a permanent
+	// 5.1.1 from a transient 4.7.1 without log
+	// scraping.
+	LastStatusCode int `json:"last_status_code"`
+	// LastEnhancedCode is the SMTP enhanced
+	// status code (e.g. "5.1.1", "4.7.1",
+	// "5.7.0"). The enhanced code is the
+	// canonical "why" for bounces and defers —
+	// it tells the operator whether the remote
+	// rejected the recipient, the message, the
+	// transport, the policy, or the security.
+	LastEnhancedCode string `json:"last_enhanced_code,omitempty"`
 	// Leasing fields for worker safety.
 	LeaseOwner    string     `json:"lease_owner,omitempty"`
 	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
