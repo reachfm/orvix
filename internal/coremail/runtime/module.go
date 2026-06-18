@@ -10,8 +10,6 @@ import (
 
 	"github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/config"
-	"github.com/orvix/orvix/internal/licensing"
-	"github.com/orvix/orvix/internal/licensingauthority"
 	"github.com/orvix/orvix/internal/coremail"
 	"github.com/orvix/orvix/internal/coremail/antispam"
 	"github.com/orvix/orvix/internal/coremail/delivery"
@@ -21,6 +19,8 @@ import (
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/smtp"
 	"github.com/orvix/orvix/internal/coremail/storage"
+	"github.com/orvix/orvix/internal/licensing"
+	"github.com/orvix/orvix/internal/licensingauthority"
 	"github.com/orvix/orvix/internal/observability"
 	"github.com/orvix/orvix/internal/policy"
 	"github.com/orvix/orvix/internal/trust"
@@ -34,13 +34,13 @@ type Module struct {
 	cfg    *config.Config
 	db     *sql.DB
 
-	engine       *coremail.Engine
-	store        *storage.MailStore
-	queue        *queue.QueueEngine
-	obs          *observability.Observability
-	policyEngine *policy.Engine
-	trustEngine  *trust.Engine
-	auditStore   *audit.Store
+	engine           *coremail.Engine
+	store            *storage.MailStore
+	queue            *queue.QueueEngine
+	obs              *observability.Observability
+	policyEngine     *policy.Engine
+	trustEngine      *trust.Engine
+	auditStore       *audit.Store
 	licenseSvc       *licensing.Service
 	authorityService *licensingauthority.AuthorityService
 
@@ -228,6 +228,7 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 			fmt.Sprintf("coremail-worker-%d", i+1),
 		)
 		worker.Observability = m.obs
+		worker.PreferIPv4 = cfg.Outbound.PreferIPv4
 		m.workers = append(m.workers, worker)
 	}
 

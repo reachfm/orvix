@@ -140,6 +140,34 @@ func TestRuntimeAllProtocolsStart(t *testing.T) {
 	t.Log("JMAP listener: OK")
 }
 
+func TestRuntimeWiresOutboundPreferIPv4ToWorkers(t *testing.T) {
+	dir := t.TempDir()
+	sqlDB := testRuntimeDB(t, dir)
+	t.Cleanup(func() { sqlDB.Close() })
+
+	cfg := config.Defaults()
+	cfg.CoreMail.Enabled = true
+	cfg.CoreMail.Hostname = "test.orvix.local"
+	cfg.CoreMail.MailStorePath = filepath.Join(dir, "msgs")
+	cfg.CoreMail.QueueWorkers = 2
+	cfg.Outbound.PreferIPv4 = true
+
+	mod := New(zap.NewNop())
+	mod.cfg = cfg
+	mod.db = sqlDB
+	if err := mod.initCore(cfg, sqlDB); err != nil {
+		t.Fatalf("init core: %v", err)
+	}
+	if len(mod.workers) != 2 {
+		t.Fatalf("workers = %d, want 2", len(mod.workers))
+	}
+	for i, worker := range mod.workers {
+		if !worker.PreferIPv4 {
+			t.Fatalf("worker %d PreferIPv4=false, want true", i)
+		}
+	}
+}
+
 func TestRuntimeHealthRegistered(t *testing.T) {
 	dir := t.TempDir()
 	sqlDB := testRuntimeDB(t, dir)

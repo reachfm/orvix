@@ -28,6 +28,33 @@ func TestSMTPDialAddressUsesJoinHostPort(t *testing.T) {
 	}
 }
 
+func TestOrderResolvedAddressesPreferIPv4(t *testing.T) {
+	addrs := []string{
+		"2607:f8b0:4023:1013::1a",
+		"142.250.102.27",
+		"2607:f8b0:4023:1013::1b",
+		"74.125.200.27",
+	}
+	got := orderResolvedAddresses(addrs, true)
+	want := []string{
+		"142.250.102.27",
+		"74.125.200.27",
+		"2607:f8b0:4023:1013::1a",
+		"2607:f8b0:4023:1013::1b",
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("ordered addresses = %v, want %v", got, want)
+	}
+}
+
+func TestOrderResolvedAddressesPreservesResolverOrderWhenDisabled(t *testing.T) {
+	addrs := []string{"2607:f8b0:4023:1013::1a", "142.250.102.27"}
+	got := orderResolvedAddresses(addrs, false)
+	if strings.Join(got, ",") != strings.Join(addrs, ",") {
+		t.Fatalf("ordered addresses = %v, want original %v", got, addrs)
+	}
+}
+
 func TestTransportConnectFailureIsTemporary(t *testing.T) {
 	transport := NewSMTPTransport(TransportConfig{ConnectTimeout: 50 * time.Millisecond})
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)

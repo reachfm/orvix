@@ -513,6 +513,13 @@ redis:
   port: 6379
   db: 0
 
+outbound:
+  # Prefer IPv4 for outbound SMTP delivery. IPv6 remains
+  # enabled as fallback after temporary IPv4 network
+  # failures, but many VPS networks lack the IPv6 PTR and
+  # authentication posture required by large receivers.
+  prefer_ipv4: true
+
 coremail:
   enabled: true
   hostname: $hostname

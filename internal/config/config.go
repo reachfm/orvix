@@ -24,6 +24,7 @@ type Config struct {
 	ClamAV   ClamAVConfig   `mapstructure:"clamav"`
 	Backup   BackupConfig   `mapstructure:"backup"`
 	CoreMail CoreMailConfig `mapstructure:"coremail"`
+	Outbound OutboundConfig `mapstructure:"outbound"`
 }
 
 // CoreMailConfig controls the native CoreMail protocol runtime.
@@ -56,6 +57,11 @@ type CoreMailConfig struct {
 type ClamAVConfig struct {
 	Host string `mapstructure:"host"`
 	Port int    `mapstructure:"port"`
+}
+
+// OutboundConfig controls outbound SMTP delivery behavior.
+type OutboundConfig struct {
+	PreferIPv4 bool `mapstructure:"prefer_ipv4"`
 }
 
 // BackupConfig holds backup settings.
@@ -141,7 +147,7 @@ type AuthConfig struct {
 	PasswordMinLen int           `mapstructure:"password_min_len"`
 	Argon2Time     uint32        `mapstructure:"argon2_time"`
 	Argon2Memory   uint32        `mapstructure:"argon2_memory"`
-	Argon2Threads  uint8          `mapstructure:"argon2_threads"`
+	Argon2Threads  uint8         `mapstructure:"argon2_threads"`
 	LoginRateLimit int           `mapstructure:"login_rate_limit"`
 	RateWindow     time.Duration `mapstructure:"rate_window"`
 	// Domain attribute set on every auth cookie. The installer
@@ -288,6 +294,9 @@ func Defaults() *Config {
 		},
 		Backup: BackupConfig{
 			Dir: "/var/lib/orvix/backups",
+		},
+		Outbound: OutboundConfig{
+			PreferIPv4: false,
 		},
 		CoreMail: CoreMailConfig{
 			Enabled:           false,

@@ -76,6 +76,8 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"admin_ui_dir: /usr/share/orvix/admin",
 		"webmail_ui_dir: /usr/share/orvix/webmail",
 		"coremail:",
+		"outbound:",
+		"prefer_ipv4: true",
 		"enabled: true",
 		"host: 127.0.0.1",
 		"admin_port: 8080",
@@ -513,6 +515,8 @@ func TestExampleConfigEnablesCoreMail(t *testing.T) {
 		"license_file_path: /etc/orvix/license.json",
 		"license_authority_cache_path: /var/lib/orvix/license-cache.json",
 		"webmail_ui_dir: /usr/share/orvix/webmail",
+		"outbound:",
+		"prefer_ipv4: true",
 	} {
 		if !strings.Contains(example, item) {
 			t.Fatalf("example config missing %q", item)

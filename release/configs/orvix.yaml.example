@@ -49,6 +49,11 @@ redis:
   host: 127.0.0.1
   port: 6379
 
+outbound:
+  # Prefer IPv4 for outbound SMTP while preserving IPv6 as
+  # fallback after temporary IPv4 network failures.
+  prefer_ipv4: true
+
 coremail:
   enabled: true
   hostname: mail.example.com

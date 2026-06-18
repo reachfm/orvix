@@ -25,6 +25,7 @@ type DeliveryWorker struct {
 	HeloHost    string
 	WorkerID    string
 	LocalDomain string
+	PreferIPv4  bool
 
 	// Reliability integrations.
 	RetryPolicy  RetryPolicy
@@ -534,7 +535,7 @@ func (w *DeliveryWorker) deliverRemote(ctx context.Context, entry *queue.QueueEn
 			}
 			continue
 		}
-		for _, ip := range addrs {
+		for _, ip := range orderResolvedAddresses(addrs, w.PreferIPv4) {
 			addr := smtpDialAddress(ip, "25")
 			result := w.Transport.Deliver(ctx, addr, false, entry.FromAddress, []string{entry.ToAddress}, data, w.HeloHost)
 			result.RemoteHost = host
@@ -556,6 +557,27 @@ func smtpDialAddress(host, port string) string {
 		return host
 	}
 	return net.JoinHostPort(host, port)
+}
+
+func orderResolvedAddresses(addrs []string, preferIPv4 bool) []string {
+	if !preferIPv4 || len(addrs) < 2 {
+		return addrs
+	}
+	ordered := make([]string, 0, len(addrs))
+	var ipv6 []string
+	for _, addr := range addrs {
+		if isIPv4Address(addr) {
+			ordered = append(ordered, addr)
+			continue
+		}
+		ipv6 = append(ipv6, addr)
+	}
+	return append(ordered, ipv6...)
+}
+
+func isIPv4Address(addr string) bool {
+	ip := net.ParseIP(addr)
+	return ip != nil && ip.To4() != nil
 }
 
 func hasExplicitPort(host string) bool {
