@@ -1,8 +1,8 @@
 /* =====================================================================
    Orvix Webmail — production-grade enterprise client.
    Vanilla JS, no external dependencies. Sends credentials with every
-   request to /api/v1/webmail/*, never to /api/v1/queue, never stores
-   tokens in localStorage (cookies are HttpOnly).
+   request to the webmail API only; it does not use the admin queue API or
+   browser-managed token storage (cookies are HttpOnly).
 
    Layout: 3-pane shell rendered by init().
      - Topbar    : brand, menu toggle, search, user chip

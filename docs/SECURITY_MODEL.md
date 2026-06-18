@@ -86,23 +86,27 @@ Threats in scope:
 
 ## 3. CSRF posture
 
-The current model relies on the **SameSite=None+Secure**
-cookie attribute as the primary CSRF defence for the
-webmail state-changing endpoints:
+The current cookie model uses **SameSite=None+Secure**
+for secure cross-subdomain operation between
+`admin.<domain>` and `webmail.<domain>`. This is
+required for the deployed SSO shape, but it is not a
+CSRF defence by itself. `SameSite=None` explicitly
+allows cross-site cookie attachment when the cookie is
+also marked `Secure`.
 
-- `archive` / `delete` / `move` / `markRead` /
-  `markUnread` / `flag` / `unflag` / `spam` / `nospam`
-  / `markFolderRead` / `send` / `sendDraft` /
-  `saveDraft` are all `POST` / `PATCH` / `PUT`
-  requests; the browser will not attach the session
-  cookie to a third-party-initiated request.
-- `SameSite=None` is paired with `Secure` (HTTPS
-  only), so the cookie is sent only on the same
-  site, never on a third-party origin.
-- The auth-gate integration is the second layer: the
-  webmail SPA never exposes its session token to
-  JS, so an attacker who manages to XSS a third-party
-  page cannot lift a token to replay.
+Current CSRF resistance for webmail JSON APIs relies on
+the combination of:
+
+- HTTPS-only `Secure` cookies.
+- Authentication middleware on every webmail endpoint.
+- JSON-only request parsing for state-changing handlers.
+- Browser CORS preflight for cross-origin JSON requests.
+- Strict allowlisted origins; non-allowlisted origins
+  cannot complete credentialed JSON requests.
+- No form-compatible state-changing webmail endpoints.
+- The auth-gate integration: the webmail SPA never
+  exposes its session token to JavaScript, so a token
+  cannot be lifted from browser storage.
 
 A subset of endpoints — the ones that change
 authentication state — are explicitly CSRF-protected
@@ -119,15 +123,12 @@ against their will, or a password is changed). The
 CSRF token is bound to the session id and verified on
 every request.
 
-For all other webmail state changes the design
-**relies on SameSite=None+Secure** and the absence
-of any GET-with-side-effects in the API. Adding
-explicit CSRF tokens to every webmail endpoint is a
-deliberate non-goal of Webmail Enterprise 2 — it
-would force the SPA to fetch a token on every
-request and replay it, with no security gain as long
-as the deployment is HTTPS-only and the cookies are
-HttpOnly.
+Explicit CSRF tokens are currently used only where
+they are already implemented. Future hardening can add
+per-request CSRF token validation, or a required custom
+header on every webmail state-changing endpoint, if the
+deployment model changes or if webmail is exposed to a
+broader cross-origin threat model.
 
 ## 4. Authorisation
 
