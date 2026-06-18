@@ -375,6 +375,190 @@ func TestWebmailJSHasKeyboardShortcuts(t *testing.T) {
 	}
 }
 
+// TestWebmailCSSHasLightTheme confirms the stylesheet
+// defines a `:root.theme-light` block so embedders can
+// force the light skin. WEBMAIL-UI-POLISH-3 adds this
+// as the premium polish layer; the dark theme remains
+// the default via `:root` (no class needed).
+func TestWebmailCSSHasLightTheme(t *testing.T) {
+	root := webmailRepoRoot(t)
+	src := readFile(t, root, "release/webmail/assets/webmail.css")
+	if !strings.Contains(src, ":root.theme-light") {
+		t.Errorf("webmail.css missing :root.theme-light block — light theme not exposed")
+	}
+	// The light theme must re-tokenize at least the
+	// text colour, the surface, and the accent. We
+	// assert by name rather than by hex so the test
+	// stays robust against future palette tweaks.
+	requiredVars := []string{
+		"--bg-canvas",
+		"--text-0",
+		"--accent",
+	}
+	for _, v := range requiredVars {
+		// Count occurrences: must be at least 2 — one
+		// in :root (dark default) and one in
+		// :root.theme-light (light override).
+		if c := strings.Count(src, v); c < 2 {
+			t.Errorf("webmail.css theme variable %s appears %d times, want >= 2 (dark + light)", v, c)
+		}
+	}
+}
+
+// TestWebmailCSSHasDesignSystemTokens confirms the
+// stylesheet uses the WEBMAIL-UI-POLISH-3 design
+// tokens (semantic background tiers, shadow tiers,
+// motion timings). These tokens are what give the
+// shell its premium layered feel.
+func TestWebmailCSSHasDesignSystemTokens(t *testing.T) {
+	root := webmailRepoRoot(t)
+	src := readFile(t, root, "release/webmail/assets/webmail.css")
+	required := []string{
+		"--bg-canvas", "--bg-surface", "--bg-elevated",
+		"--bg-raised", "--bg-hover", "--bg-active",
+		"--shadow-sm", "--shadow-md", "--shadow-lg",
+		"--motion-fast", "--motion-med",
+		"--r-md", "--r-lg", "--r-pill",
+		"--sp-4", "--sp-5", "--sp-6",
+	}
+	missing := []string{}
+	for _, v := range required {
+		if !strings.Contains(src, v) {
+			missing = append(missing, v)
+		}
+	}
+	if len(missing) > 0 {
+		t.Errorf("webmail.css missing design tokens: %v", missing)
+	}
+}
+
+// TestWebmailCSSHasPremiumComponents confirms the
+// stylesheet styles every premium component the polish
+// pack adds (skeleton loaders, rich empty states,
+// premium toasts, polished active folder row).
+func TestWebmailCSSHasPremiumComponents(t *testing.T) {
+	root := webmailRepoRoot(t)
+	src := readFile(t, root, "release/webmail/assets/webmail.css")
+	required := []string{
+		".skeleton",        // skeleton loader base
+		".skeleton-line",   // line variant
+		".skeleton-circle", // circle variant
+		".reading-skeleton",
+		".empty-illustration",
+		".empty-title",
+		".field-expander",
+		".toast.warning", // new toast type
+		"--grad-brand",   // brand gradient token
+		"--grad-active",  // active row gradient token
+		".folder.active::before", // active row accent bar
+		":root.theme-light",
+		"backdrop-filter", // modal backdrop blur
+	}
+	missing := []string{}
+	for _, sel := range required {
+		if !strings.Contains(src, sel) {
+			missing = append(missing, sel)
+		}
+	}
+	if len(missing) > 0 {
+		t.Errorf("webmail.css missing premium component selectors: %v", missing)
+	}
+}
+
+// TestWebmailJSSkeletonRendering confirms the client
+// renders skeleton placeholder rows while the message
+// list is loading. The function name and the class
+// "skeleton" must both appear in the JS source.
+func TestWebmailJSSkeletonRendering(t *testing.T) {
+	root := webmailRepoRoot(t)
+	src := readFile(t, root, "release/webmail/assets/webmail.js")
+	if !strings.Contains(src, "skeletonMessageRow") {
+		t.Errorf("webmail.js missing skeletonMessageRow helper")
+	}
+	if !strings.Contains(src, "renderEmptyState") {
+		t.Errorf("webmail.js missing renderEmptyState helper")
+	}
+	if !strings.Contains(src, "renderReadingPaneEmpty") {
+		t.Errorf("webmail.js missing renderReadingPaneEmpty helper")
+	}
+}
+
+// TestWebmailJSRichEmptyStates confirms the per-folder
+// empty-state copy is present in the JS source. Each
+// folder key must have its own title so the user
+// receives context-appropriate copy rather than a
+// generic "empty" message.
+func TestWebmailJSRichEmptyStates(t *testing.T) {
+	root := webmailRepoRoot(t)
+	src := readFile(t, root, "release/webmail/assets/webmail.js")
+	required := []string{
+		"Inbox zero",
+		"Nothing sent yet",
+		"No drafts",
+		"Trash is empty",
+		"No archived messages",
+		"No matches",
+	}
+	for _, want := range required {
+		if !strings.Contains(src, want) {
+			t.Errorf("webmail.js missing rich empty-state copy for %q", want)
+		}
+	}
+}
+
+// TestWebmailJSAriaLabelPatterns confirms icon-only
+// buttons in the webmail UI carry aria-label attributes
+// for screen-reader accessibility. This is the
+// WEBMAIL-UI-POLISH-3 accessibility bar — every new
+// icon button must be labelled.
+//
+// The webmail client uses two equivalent JS styles for
+// aria-label: as a quoted attribute key in the el()
+// opts object ('aria-label': '...') and as a setAttribute
+// call. We accept both forms in the test.
+func TestWebmailJSAriaLabelPatterns(t *testing.T) {
+	root := webmailRepoRoot(t)
+	src := readFile(t, root, "release/webmail/assets/webmail.js")
+	required := []string{
+		"Refresh",
+		"Mark all as read",
+		"Toggle folder sidebar",
+		"Back to list",
+		"Minimize",
+		"Show Cc and Bcc fields",
+	}
+	// For each required label, look for it being passed
+	// to aria-label in either quoted form.
+	for _, want := range required {
+		needle1 := "'aria-label': '" + want + "'"
+		needle2 := "aria-label: '" + want + "'"
+		if !strings.Contains(src, needle1) && !strings.Contains(src, needle2) {
+			t.Errorf("webmail.js missing aria-label pattern for %q (looked for %q or %q)", want, needle1, needle2)
+		}
+	}
+	// "Close" is used by multiple elements. At least one
+	// Close aria-label must be present.
+	if !strings.Contains(src, "aria-label': 'Close'") && !strings.Contains(src, "aria-label: 'Close'") {
+		t.Errorf("webmail.js missing aria-label pattern for Close button")
+	}
+}
+
+// TestWebmailJSRespectsColorScheme confirms the
+// client honours the OS-level prefers-color-scheme
+// media query for the light theme opt-in. The CSS
+// defines `:root.theme-light`; the JS sets the class
+// when matchMedia indicates the user prefers light.
+func TestWebmailJSRespectsColorScheme(t *testing.T) {
+	root := webmailRepoRoot(t)
+	src := readFile(t, root, "release/webmail/assets/webmail.js")
+	if !strings.Contains(src, "prefers-color-scheme") {
+		t.Errorf("webmail.js missing prefers-color-scheme detection — light theme opt-in not wired up")
+	}
+	if !strings.Contains(src, "theme-light") {
+		t.Errorf("webmail.js missing theme-light class application")
+	}
+}
+
 // TestWebmailJSCallsNewEndpoints confirms the
 // client-side code calls the new backend endpoints
 // the feature pack adds. This is a smoke test: the
