@@ -86,10 +86,31 @@
     return node;
   }
 
+  // brandMark prepends the Orvix logo + wordmark to a
+  // card so every gate state (loading, login, error)
+  // carries the same brand cue. Pure DOM, no innerHTML.
+  function brandMark() {
+    var wrap = el('div', { className: 'orvix-gate-brand' });
+    var logo = el('span', {
+      className: 'orvix-gate-logo',
+      'aria-hidden': 'true',
+    }, 'O');
+    wrap.appendChild(logo);
+    wrap.appendChild(document.createTextNode('Orvix Mail'));
+    return wrap;
+  }
+
+  // cardFooter appends the build/version line that
+  // marks the bottom of every card.
+  function cardFooter() {
+    return el('div', { className: 'orvix-gate-footer' }, 'Secure webmail · v1');
+  }
+
   // ── card renderers ────────────────────────────────────────
 
   function loadingCard() {
     var card = el('div', { className: 'orvix-gate-card' });
+    card.appendChild(brandMark());
     var title = el('h1', { className: 'orvix-gate-title' }, 'Orvix Webmail');
     var text = el('p', { className: 'orvix-gate-text' });
     var spinner = el('span', { className: 'orvix-gate-spinner', 'aria-hidden': 'true' });
@@ -97,6 +118,7 @@
     text.appendChild(document.createTextNode('Checking your session…'));
     card.appendChild(title);
     card.appendChild(text);
+    card.appendChild(cardFooter());
     return card;
   }
 
@@ -107,9 +129,10 @@
   // updated.
   function loginCard() {
     var card = el('div', { className: 'orvix-gate-card' });
-    card.appendChild(el('h1', { className: 'orvix-gate-title' }, 'Orvix Webmail'));
+    card.appendChild(brandMark());
+    card.appendChild(el('h1', { className: 'orvix-gate-title' }, 'Sign in to Orvix'));
     card.appendChild(el('p', { className: 'orvix-gate-text' },
-      'Sign in with your mailbox email and password.'));
+      'Use your mailbox email and password to continue.'));
 
     var form = el('form', { className: 'orvix-gate-form', autocomplete: 'on' });
     form.setAttribute('novalidate', 'novalidate');
@@ -160,11 +183,13 @@
     form.appendChild(errLine);
 
     card.appendChild(form);
+    card.appendChild(cardFooter());
     return card;
   }
 
   function noMailboxCard(email) {
     var card = el('div', { className: 'orvix-gate-card' });
+    card.appendChild(brandMark());
     card.appendChild(el('h1', { className: 'orvix-gate-title' }, 'No mailbox configured'));
     var msg = 'You are signed in';
     if (email) msg += ' as ' + email;
@@ -177,11 +202,13 @@
     signOut.addEventListener('click', onSignOut);
     actions.appendChild(signOut);
     card.appendChild(actions);
+    card.appendChild(cardFooter());
     return card;
   }
 
   function errorCard(status) {
     var card = el('div', { className: 'orvix-gate-card' });
+    card.appendChild(brandMark());
     card.appendChild(el('h1', { className: 'orvix-gate-title' }, 'Webmail unavailable'));
     var msg = 'The webmail service returned an unexpected response (HTTP ' +
       (status || 'unknown') + '). Please try again in a moment.';
@@ -189,6 +216,7 @@
     var retry = el('button', { className: 'orvix-gate-button', type: 'button' }, 'Retry');
     retry.addEventListener('click', function () { location.reload(); });
     card.appendChild(retry);
+    card.appendChild(cardFooter());
     return card;
   }
 

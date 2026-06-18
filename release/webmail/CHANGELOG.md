@@ -1,3 +1,310 @@
+# Webmail UI Polish 3 — Changelog
+
+Branch: `feature/webmail-ui-polish-3`
+Base: `08e380b` ("Merge Webmail Enterprise Feature Pack 2")
+
+## What's new
+
+A premium UI polish pack layered on top of Feature
+Pack 2. No backend behavior changes, no new endpoints,
+no removal of existing features. Every change is
+visible-only: a denser, more refined design system;
+richer empty / loading / error states; a polished
+compose modal; an opt-in light theme; and a
+consistent focus-ring system across the entire shell.
+
+### A. Design system
+
+- **Design tokens** — every visible color, radius,
+  shadow, spacing, and motion timing is a CSS custom
+  property on `:root`. Components reference the tokens,
+  not raw hex. This makes the dark and light themes a
+  one-class swap.
+- **Semantic background tiers** — `bg-app`,
+  `bg-canvas`, `bg-surface`, `bg-elevated`,
+  `bg-raised`, `bg-hover`, `bg-active`,
+  `bg-selected`, `bg-selected-2`. The layered
+  surfaces give the shell real depth instead of a
+  flat dark slab.
+- **Multi-tier shadows** — `shadow-xs`, `shadow-sm`,
+  `shadow-md`, `shadow-lg`, `shadow-xl`,
+  `shadow-focus`. The shadow that lifts a modal is
+  distinct from the shadow on a hovered message row,
+  so the elevation hierarchy reads at a glance.
+- **Spacing scale** — `sp-1` … `sp-10` (4 px → 56 px).
+  Every padding, margin, and gap resolves to a token
+  so vertical rhythm stays consistent across the app.
+- **Radius scale** — `r-sm`, `r-md`, `r-lg`, `r-xl`,
+  `r-pill`. The compose modal is the largest radius;
+  the chips are pill; everything else lives in
+  between.
+- **Motion timings** — `motion-fast` (120 ms),
+  `motion-med` (200 ms), `motion-slow` (320 ms) with
+  a single shared easing curve. The reduced-motion
+  media query zeroes every animation in one block.
+
+### B. Light theme (opt-in)
+
+- `:root.theme-light` overrides the design tokens to
+  a clean professional light palette: cool-white
+  canvas, blue accent, proper contrast for body text.
+- The webmail client detects `prefers-color-scheme:
+  light` and applies the `theme-light` class on
+  `<html>` automatically. Embedders that want a
+  forced skin can apply the class on the embedding
+  page before webmail.js loads.
+- The webmail UI never writes to localStorage or
+  sessionStorage — the OS preference is the single
+  source of truth, so there is no per-user toggle to
+  persist.
+- The auth gate adopts the same theme tokens so the
+  login screen transitions seamlessly into the shell.
+
+### C. Sidebar polish
+
+- **Subtle radial gradient** on the body backdrop
+  (top-anchored accent glow) so the dark theme feels
+  like a SaaS product, not a flat color slab.
+- **Active folder row** now carries a left-side
+  accent bar, a gradient background, and a
+  pill-shaped count badge in the accent color.
+- **Hover state** is more refined — proper transition
+  timing, no jarring color jumps.
+- **Footer "dot"** indicator for connection status
+  (green pulse) replaced the bare version text.
+- **Compose button** has a stronger elevation
+  (shadow + inset highlight) and a more prominent
+  treatment.
+
+### D. Top bar polish
+
+- **Search field** is now a true pill with a
+  generous icon gutter, focus glow, and hover state.
+- **User chip** uses the brand gradient avatar with
+  inset highlight.
+- **Brand mark** uses the same gradient the auth
+  gate uses, so the two screens feel like one
+  product.
+
+### E. Message list polish
+
+- **Premium row hover** — message rows have a
+  subtle transition into a slightly elevated
+  surface tone.
+- **Stronger selected state** — the selected row
+  carries an inset accent bar on the leading edge
+  (logical property; mirrors correctly in RTL).
+- **Star button** has a hover scale-up and warning-
+  tinted background.
+- **Attachment indicator** uses a paperclip glyph
+  with refined spacing.
+- **Checked (bulk-selected)** rows have the same
+  inset accent treatment as the single-selected row.
+
+### F. Reading pane polish
+
+- **Larger avatar** with brand gradient + inset
+  highlight.
+- **Subject heading** is 22 px (24 px on > 1440 px
+  displays) with negative letter-spacing for a
+  typographic feel.
+- **From block** uses two-line layout (name + email)
+  with `direction: ltr` / `unicode-bidi: isolate` on
+  the email so it never breaks inside an Arabic
+  paragraph.
+- **Details rows** use uppercase 11 px labels with
+  tabular numeric spacing.
+- **Body** uses a max-width (880 px) so long lines
+  stay readable.
+- **Blockquote** uses a logical border-inline-start
+  with a subtle background.
+- **Attachment cards** have their own row, icon
+  block, name, size, and download/preview actions
+  styled with the design tokens.
+- **Empty state** — when no message is selected the
+  pane now shows a circular illustration, an
+  inviting title, and a helpful subtitle instead of
+  bare "Select a message" text.
+- **Error state** — a real error illustration with
+  a Retry button instead of a red text string.
+- **Skeleton loader** — while a message loads the
+  header and body are replaced with shimmering
+  placeholders that match the real proportions, so
+  the layout does not jump.
+
+### G. Compose modal polish
+
+- **Premium header** — bold title with a refined
+  icon-only close / minimize cluster.
+- **Backdrop blur** — the modal backdrop uses a
+  semi-transparent overlay plus a CSS
+  `backdrop-filter: blur` so the shell behind feels
+  present without competing.
+- **Animated entrance** — the modal scales in from
+  0.98 with a fade; respects reduced-motion.
+- **Field expander** — the "Cc / Bcc" toggle is now
+  a styled text button (not an icon-only button)
+  with `aria-expanded` for screen readers.
+- **Compose body** is now 14.5 px / 1.65 line-height
+  (16 px on 390 px to defeat iOS auto-zoom) with a
+  generous 18 px padding.
+- **Autosave status line** — the indicator dot is
+  animated (pulse on saving), and the success/error
+  states have small badge icons for instant
+  recognition.
+- **Toasts** — toasts now have circular status
+  badges (✓, !, etc.) and gradient-tinted
+  backgrounds so success / error / warning / info
+  are immediately distinguishable.
+
+### H. Empty, loading, and error states
+
+- **Per-folder empty states** — Inbox / Sent /
+  Drafts / Trash / Archive / Junk each have their
+  own illustration glyph, title, and helpful
+  subtitle. Search-no-results has its own "No
+  matches" copy.
+- **Skeleton loaders** — the message list shows
+  six skeleton rows (with checkbox, star, from,
+  subject, preview, and meta placeholders) while
+  the first page loads. The reading pane shows a
+  skeleton header + body while a single message
+  loads. The reduced-motion media query disables
+  the shimmer animation.
+- **Error states** — the reading pane error has a
+  real illustration, an "Retry" button that
+  re-issues the same request without a full reload,
+  and avoids raw stack traces.
+
+### I. Bulk action bar
+
+- **Floating pill** — the bulk bar is now a
+  floating pill, not a flat bar at the bottom of
+  the viewport. Backdrop-blurred so it reads as
+  elevated.
+- **Animated entrance** — slides up from below on
+  first appearance.
+- **Centered** at large viewports; pinned to the
+  edges with a smaller radius at 768 px and below.
+
+### J. Auth gate
+
+- **Brand mark** on every card (loading, login,
+  no-mailbox, error) so the user always knows
+  which product they are looking at.
+- **Footer line** marks the build / version.
+- **Animated card entrance** — fade + translate,
+  respects reduced-motion.
+- **Refined inputs** — the email and password
+  fields now have focus glows that match the
+  shell's accent.
+- **Light theme** — the gate adopts the same
+  theme tokens as the shell.
+
+### K. Accessibility
+
+- **Consistent focus rings** — every focusable
+  element uses a 2 px accent outline + a 3 px glow
+  on form inputs. Defined once via `:focus-visible`,
+  extended by component rules where needed.
+- **Reduced motion** — `prefers-reduced-motion:
+  reduce` zeroes every transition / animation in
+  one block (already present in Feature Pack 2;
+  reaffirmed here).
+- **Aria-label coverage** — every icon-only button
+  in the new polish layer carries an `aria-label`
+  (refresh, mark-all-read, toggle sidebar, back,
+  minimize, close, show-cc-bcc).
+- **Aria-expanded** — the Cc/Bcc toggle exposes
+  its state for screen-reader users.
+- **Logical properties** — `margin-inline-*`,
+  `padding-inline-*`, `inset-inline-*`,
+  `border-inline-*` are used in the new code paths
+  so the Arabic / Hebrew experience is correct by
+  construction.
+
+### L. RTL / Arabic
+
+- **No new physical-property regressions** —
+  every new component uses logical properties.
+- **Direction = auto on dynamic text** — preserved
+  from Feature Pack 2.
+- **Email addresses in Arabic context** —
+  `direction: ltr` + `unicode-bidi: isolate` on
+  email fields so they never wrap inside an
+  Arabic paragraph.
+
+### M. Tests and release verification
+
+The existing static-analysis suite (no
+localStorage / sessionStorage, no
+/api/v1/queue usage, prefers-reduced-motion
+media query, 1440 / 1024 / 768 / 390
+breakpoints, logical-property sweep, keyboard
+shortcuts) still passes. New tests added:
+
+- `TestWebmailCSSHasLightTheme` — the stylesheet
+  defines `:root.theme-light` and re-tokenizes
+  the core semantic variables.
+- `TestWebmailCSSHasDesignSystemTokens` —
+  verifies the design token namespace
+  (`--bg-canvas`, `--shadow-md`, `--motion-fast`,
+  etc.) is present.
+- `TestWebmailCSSHasPremiumComponents` — verifies
+  the premium components (`skeleton`,
+  `empty-illustration`, `field-expander`,
+  `toast.warning`, gradient tokens, etc.) are
+  styled.
+- `TestWebmailJSSkeletonRendering` — confirms the
+  `skeletonMessageRow` / `renderEmptyState` /
+  `renderReadingPaneEmpty` helpers exist in
+  webmail.js.
+- `TestWebmailJSRichEmptyStates` — confirms the
+  per-folder empty-state copy is in the JS.
+- `TestWebmailJSAriaLabelPatterns` — confirms
+  every icon-only button carries an aria-label.
+- `TestWebmailJSRespectsColorScheme` — confirms
+  the JS detects `prefers-color-scheme: light`
+  and applies the `theme-light` class.
+
+## Files changed
+
+### Frontend
+- `release/webmail/assets/webmail.css` — full
+  design-system overhaul, premium polish layer,
+  light-theme tokens, skeleton loaders, premium
+  toasts, premium modal backdrop.
+- `release/webmail/assets/webmail.js` — skeleton
+  loader rendering, per-folder empty states,
+  reading-pane empty / error states with retry,
+  theme-light detection, brand-aware field
+  expander.
+- `release/webmail/assets/auth-gate.css` — premium
+  theme tokens matching the shell, brand mark,
+  focus glow on inputs, animated card entrance.
+- `release/webmail/assets/auth-gate.js` — brand
+  mark + footer on every card.
+
+### Tests
+- `internal/api/handlers/webmail_frontend_test.go`
+  — 7 new static-analysis tests for the polish
+  pack; existing tests still pass.
+
+## Known limitations
+
+- **No per-user theme toggle** — the light theme is
+  opt-in via `prefers-color-scheme: light` or via
+  the `theme-light` class on `<html>`. The webmail
+  UI does not write to localStorage / sessionStorage
+  by project rule, so we cannot persist a per-user
+  preference across reloads.
+- **No light-theme preview in this build** — the
+  dark theme remains the Orvix default. The light
+  tokens are defined and ready; flipping the theme
+  is a one-class swap.
+
+---
+
 # Webmail Enterprise Feature Pack 2 — Changelog
 
 Branch: `feature/webmail-enterprise-2`

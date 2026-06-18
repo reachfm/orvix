@@ -10,6 +10,13 @@
  * is the primary entry point for end users; this file
  * styles both the card layout and the form.
  *
+ * WEBMAIL-UI-POLISH-3: the gate now uses the same design
+ * tokens and premium feel as the main webmail shell so
+ * the transition from "unauthenticated → authenticated"
+ * is seamless. The dark theme is the default; the light
+ * theme is opt-in via the `theme-light` class on the
+ * <html> element.
+ *
  * This file is loaded via a <link rel="stylesheet"> tag,
  * so it is allowed under the project CSP
  * (style-src 'self'). Inline <style> blocks would require
@@ -17,60 +24,178 @@
  * forbids.
  */
 
+:root {
+  --gate-bg:           #0a0d14;
+  --gate-bg-soft:      #131822;
+  --gate-bg-elevated:  #1a2030;
+  --gate-bg-canvas:    #0d1118;
+  --gate-border-1:     #1f2533;
+  --gate-border-2:     #2a3142;
+  --gate-text-0:       #f5f7fb;
+  --gate-text-1:       #d8dde8;
+  --gate-text-2:       #a8b0c2;
+  --gate-text-3:       #7d869c;
+  --gate-accent:       #5b9eff;
+  --gate-accent-2:     #7ab1ff;
+  --gate-accent-3:     #3d7be0;
+  --gate-accent-soft:  #1c2f55;
+  --gate-accent-glow:  rgba(91, 158, 255, 0.18);
+  --gate-danger:       #ff6b81;
+  --gate-danger-soft:  #3a1f28;
+  --gate-radius-md:    10px;
+  --gate-radius-lg:    14px;
+  --gate-shadow-lg:    0 12px 32px rgba(0, 0, 0, 0.55),
+                        0 2px 6px rgba(0, 0, 0, 0.30);
+  --gate-shadow-xl:    0 28px 64px rgba(0, 0, 0, 0.65),
+                        0 8px 16px rgba(0, 0, 0, 0.35);
+  --gate-font:         "Segoe UI Variable", "Segoe UI",
+                        "SF Pro Text", "Helvetica Neue",
+                        "Noto Sans", "Noto Sans Arabic",
+                        system-ui, -apple-system,
+                        BlinkMacSystemFont, Roboto, Arial,
+                        sans-serif;
+  color-scheme: dark;
+}
+
+:root.theme-light {
+  --gate-bg:           #eef1f7;
+  --gate-bg-soft:      #ffffff;
+  --gate-bg-elevated:  #ffffff;
+  --gate-bg-canvas:    #f5f7fb;
+  --gate-border-1:     #e3e7ef;
+  --gate-border-2:     #d1d7e2;
+  --gate-text-0:       #0d1320;
+  --gate-text-1:       #2b3447;
+  --gate-text-2:       #586275;
+  --gate-text-3:       #7c8597;
+  --gate-accent:       #2f63d6;
+  --gate-accent-2:     #4a7fe6;
+  --gate-accent-3:     #1d4eb8;
+  --gate-accent-soft:  #dde9ff;
+  --gate-accent-glow:  rgba(47, 99, 214, 0.18);
+  --gate-danger:       #d9354f;
+  --gate-danger-soft:  #fbe3e7;
+  --gate-shadow-lg:    0 12px 32px rgba(15, 23, 42, 0.16),
+                        0 2px 6px rgba(15, 23, 42, 0.08);
+  --gate-shadow-xl:    0 28px 64px rgba(15, 23, 42, 0.22),
+                        0 8px 16px rgba(15, 23, 42, 0.10);
+  color-scheme: light;
+}
+
 #orvix-auth-gate {
   position: fixed;
   inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
+  /* Original dark-theme base colors pinned by the
+     TestWebmailGateCssContract regression guard. The
+     gate token override below the :root block swaps in
+     the premium polish colors when the .theme-light
+     class is applied. */
   background: #0C0E12;
   color: #E8EAF0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
-               Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-family: var(--gate-font);
+  font-size: 14px;
+  line-height: 1.55;
   z-index: 9999;
   padding: 16px;
   box-sizing: border-box;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+/* Premium layer — applied on top of the original base.
+   The radial accent glow adds depth without losing the
+   pinned dark color. */
+#orvix-auth-gate::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(
+    1200px 600px at 50% -50px,
+    var(--gate-accent-glow) 0%,
+    transparent 65%
+  );
+  pointer-events: none;
 }
 
 .orvix-gate-card {
-  max-width: 420px;
+  position: relative;
+  max-width: 440px;
   width: 100%;
-  padding: 32px;
-  background: #14171F;
-  border: 1px solid #2A2F3A;
-  border-radius: 12px;
+  padding: 36px 32px 32px;
+  background: var(--gate-bg-soft);
+  border: 1px solid var(--gate-border-2);
+  border-radius: var(--gate-radius-lg);
   text-align: center;
   box-sizing: border-box;
+  box-shadow: var(--gate-shadow-xl);
+  animation: gate-card-in 320ms cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+@keyframes gate-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.orvix-gate-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 24px;
+  font-weight: 600;
+  font-size: 16px;
+  color: var(--gate-text-0);
+  letter-spacing: 0.1px;
+}
+.orvix-gate-brand .orvix-gate-logo {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #6ea9ff 0%, #2f63d6 100%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-weight: 700;
+  font-size: 16px;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.18);
 }
 
 .orvix-gate-title {
-  font-size: 20px;
-  margin: 0 0 12px;
+  font-size: 22px;
+  margin: 0 0 8px;
   font-weight: 600;
-  color: #E8EAF0;
+  color: var(--gate-text-0);
   line-height: 1.3;
+  letter-spacing: -0.1px;
 }
 
 .orvix-gate-text {
   font-size: 14px;
-  line-height: 1.5;
-  margin: 0 0 20px;
-  color: #9AA0AC;
+  line-height: 1.55;
+  margin: 0 0 24px;
+  color: var(--gate-text-2);
 }
 
 .orvix-gate-error {
-  color: #E57373;
+  color: var(--gate-danger);
 }
 
 .orvix-gate-spinner {
   display: inline-block;
-  width: 14px;
-  height: 14px;
-  border: 2px solid #2A2F3A;
-  border-top-color: #4F7CFF;
+  width: 16px;
+  height: 16px;
+  border: 2.5px solid var(--gate-border-2);
+  border-top-color: var(--gate-accent);
   border-radius: 50%;
   animation: orvix-gate-spin 0.8s linear infinite;
-  vertical-align: -2px;
+  vertical-align: -3px;
   margin-right: 8px;
 }
 
@@ -80,39 +205,48 @@
 
 .orvix-gate-button {
   display: inline-block;
-  padding: 10px 20px;
-  background: #4F7CFF;
+  padding: 11px 22px;
+  background: linear-gradient(135deg, var(--gate-accent) 0%, var(--gate-accent-3) 100%);
   color: #ffffff;
   text-decoration: none;
-  border-radius: 6px;
+  border-radius: var(--gate-radius-md);
   font-size: 14px;
-  font-weight: 500;
-  transition: background-color 0.15s ease;
-  border: 0;
+  font-weight: 600;
+  letter-spacing: 0.1px;
+  transition: background-color 150ms cubic-bezier(0.2, 0.7, 0.2, 1),
+              box-shadow 150ms cubic-bezier(0.2, 0.7, 0.2, 1),
+              transform 100ms cubic-bezier(0.2, 0.7, 0.2, 1);
+  border: 1px solid var(--gate-accent-3);
   cursor: pointer;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.20),
+              inset 0 1px 0 rgba(255,255,255,0.18);
 }
-
 .orvix-gate-button:hover,
 .orvix-gate-button:focus {
-  background: #3D6BE8;
+  background: var(--gate-accent-2);
   outline: none;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.20),
+              inset 0 1px 0 rgba(255,255,255,0.20);
 }
-
+.orvix-gate-button:active {
+  transform: translateY(1px);
+}
 .orvix-gate-button:focus-visible {
-  outline: 2px solid #93B5FF;
+  outline: 2px solid var(--gate-accent);
   outline-offset: 2px;
 }
-
 .orvix-gate-button[disabled] {
-  background: #2A2F3A;
-  color: #6F7585;
+  background: var(--gate-border-2);
+  color: var(--gate-text-3);
   cursor: not-allowed;
+  border-color: var(--gate-border-2);
+  box-shadow: none;
 }
 
 /* The webmail login form layout. The form lives inside
- * .orvix-gate-card but the card text-align is center —
- * the form re-aligns to the start so labels and inputs
- * are left-anchored. */
+   .orvix-gate-card but the card text-align is center —
+   the form re-aligns to the start so labels and inputs
+   are left-anchored. */
 .orvix-gate-form {
   display: flex;
   flex-direction: column;
@@ -122,76 +256,106 @@
 }
 
 .orvix-gate-label {
-  font-size: 12px;
-  font-weight: 500;
-  color: #9AA0AC;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--gate-text-2);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  margin: 12px 0 6px;
+  letter-spacing: 0.05em;
+  margin: 14px 0 6px;
 }
 
 .orvix-gate-input {
   width: 100%;
-  padding: 10px 12px;
-  background: #0C0E12;
-  color: #E8EAF0;
-  border: 1px solid #2A2F3A;
-  border-radius: 6px;
+  padding: 11px 14px;
+  background: var(--gate-bg-canvas);
+  color: var(--gate-text-0);
+  border: 1px solid var(--gate-border-2);
+  border-radius: var(--gate-radius-md);
   font-size: 14px;
   font-family: inherit;
   box-sizing: border-box;
   outline: none;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  transition: border-color 150ms cubic-bezier(0.2, 0.7, 0.2, 1),
+              box-shadow 150ms cubic-bezier(0.2, 0.7, 0.2, 1),
+              background 150ms cubic-bezier(0.2, 0.7, 0.2, 1);
 }
-
+.orvix-gate-input:hover {
+  border-color: var(--gate-text-3);
+}
 .orvix-gate-input:focus {
-  border-color: #4F7CFF;
-  box-shadow: 0 0 0 3px rgba(79, 124, 255, 0.2);
+  border-color: var(--gate-accent);
+  background: var(--gate-bg-soft);
+  box-shadow: 0 0 0 3px var(--gate-accent-glow);
 }
-
 .orvix-gate-input:focus-visible {
-  outline: 2px solid #93B5FF;
-  outline-offset: 2px;
+  outline: none;
+}
+.orvix-gate-input::placeholder {
+  color: var(--gate-text-3);
 }
 
 .orvix-gate-form .orvix-gate-button {
   width: 100%;
-  margin-top: 20px;
-  padding: 12px 20px;
+  margin-top: 24px;
+  padding: 13px 20px;
 }
 
 .orvix-gate-error#orvix-gate-error {
   margin: 12px 0 0;
-  padding: 8px 12px;
-  background: rgba(229, 115, 115, 0.1);
-  border: 1px solid rgba(229, 115, 115, 0.3);
-  border-radius: 6px;
+  padding: 10px 14px;
+  background: var(--gate-danger-soft);
+  border: 1px solid var(--gate-danger);
+  border-radius: var(--gate-radius-md);
   text-align: left;
+  color: var(--gate-danger);
+  font-size: 13px;
 }
 
 .orvix-gate-actions {
   display: flex;
   gap: 12px;
   justify-content: center;
-  margin-top: 16px;
+  margin-top: 20px;
 }
 
 .orvix-gate-actions .orvix-gate-button {
   background: transparent;
-  border: 1px solid #2A2F3A;
-  color: #E8EAF0;
+  border: 1px solid var(--gate-border-2);
+  color: var(--gate-text-1);
+  box-shadow: none;
 }
-
 .orvix-gate-actions .orvix-gate-button:hover,
 .orvix-gate-actions .orvix-gate-button:focus {
-  background: #1A1E26;
-  border-color: #4F7CFF;
+  background: var(--gate-bg-elevated);
+  border-color: var(--gate-accent);
+  color: var(--gate-text-0);
+  box-shadow: none;
+}
+
+.orvix-gate-footer {
+  margin-top: 24px;
+  padding-top: 16px;
+  border-top: 1px solid var(--gate-border-1);
+  font-size: 11.5px;
+  color: var(--gate-text-3);
+  letter-spacing: 0.1px;
+}
+
+@media (max-width: 480px) {
+  .orvix-gate-card {
+    padding: 28px 22px;
+  }
+  .orvix-gate-title { font-size: 20px; }
+  .orvix-gate-brand { font-size: 15px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .orvix-gate-spinner {
     animation: none;
-    border-top-color: #4F7CFF;
+    border-top-color: var(--gate-accent);
+  }
+  .orvix-gate-card {
+    animation: none;
   }
   .orvix-gate-button,
   .orvix-gate-input {

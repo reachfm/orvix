@@ -1020,21 +1020,17 @@
     renderListHeader(msgs);
 
     if (state.messagesLoading && state.messages.length === 0) {
-      msgs.appendChild(
-        el('div', { class: 'loading-state' }, '<span class="spinner"></span> Loading…')
-      );
+      // Render a skeleton list — three ghost rows so
+      // the pane has visible structure during load. The
+      // skeleton-pulse CSS handles the animation; the
+      // reduced-motion media query disables it.
+      for (var i = 0; i < 6; i++) {
+        msgs.appendChild(skeletonMessageRow());
+      }
       return;
     }
     if (state.messages.length === 0) {
-      msgs.appendChild(
-        el(
-          'div',
-          { class: 'empty-state' },
-          state.searchQuery
-            ? 'No messages match your search.'
-            : 'This folder is empty.'
-        )
-      );
+      msgs.appendChild(renderEmptyState());
       return;
     }
 
@@ -1278,6 +1274,103 @@
     return s;
   }
 
+  // skeletonMessageRow returns a placeholder row that
+  // mimics the shape of a real message row — checkbox
+  // column (reserved), star, from, subject, preview,
+  // meta. Every visible element is a .skeleton bar
+  // animated by the skeleton-pulse keyframes.
+  function skeletonMessageRow() {
+    var row = el('div', { class: 'message', 'aria-hidden': 'true' });
+    var cbSpacer = el('div', { class: 'skeleton', style: 'width:16px;height:16px;border-radius:3px;margin-top:4px;display:none;' });
+    row.appendChild(cbSpacer);
+    var star = el('div', { class: 'skeleton', style: 'width:18px;height:18px;border-radius:50%;margin-top:2px;' });
+    row.appendChild(star);
+    var body = el('div', { class: 'body' });
+    body.appendChild(el('div', { class: 'skeleton skeleton-line medium', style: 'margin-top:0;' }));
+    body.appendChild(el('div', { class: 'skeleton skeleton-line long' }));
+    body.appendChild(el('div', { class: 'skeleton skeleton-line long' }));
+    body.appendChild(el('div', { class: 'skeleton skeleton-line short' }));
+    row.appendChild(body);
+    var meta = el('div', { class: 'meta' });
+    meta.appendChild(el('div', { class: 'skeleton skeleton-line', style: 'width:48px;height:10px;' }));
+    meta.appendChild(el('div', { class: 'skeleton skeleton-line', style: 'width:36px;height:10px;' }));
+    row.appendChild(meta);
+    return row;
+  }
+
+  // renderEmptyState returns a richer empty-state node
+  // with a circular illustration, a short title, and a
+  // helpful subtitle. The copy varies by folder so the
+  // user is not left guessing.
+  function renderEmptyState() {
+    var wrap = el('div', { class: 'empty-state' });
+    wrap.appendChild(el('div', { class: 'empty-illustration', 'aria-hidden': 'true' }, emptyIcon()));
+    var f = state.searchQuery
+      ? null
+      : state.folderByPath[(state.currentFolderPath || '').toLowerCase()];
+    var folderKey = f ? (f.path || f.name || '').toLowerCase() : '';
+    var title, subtitle;
+    if (state.searchQuery) {
+      title = 'No matches';
+      subtitle = 'No messages match "' + state.searchQuery + '".';
+    } else if (folderKey === 'inbox') {
+      title = 'Inbox zero';
+      subtitle = "You're all caught up. New mail will land here.";
+    } else if (folderKey === 'sent') {
+      title = 'Nothing sent yet';
+      subtitle = 'Messages you send will appear here.';
+    } else if (folderKey === 'drafts') {
+      title = 'No drafts';
+      subtitle = 'Drafts you save will appear here.';
+    } else if (folderKey === 'trash') {
+      title = 'Trash is empty';
+      subtitle = 'Deleted messages stay here until you empty it.';
+    } else if (folderKey === 'archive') {
+      title = 'No archived messages';
+      subtitle = 'Messages you archive will appear here.';
+    } else if (folderKey === 'junk' || folderKey === 'spam') {
+      title = 'No junk mail';
+      subtitle = "Good news — nothing in junk right now.";
+    } else {
+      title = 'Nothing here';
+      subtitle = 'This folder is empty.';
+    }
+    wrap.appendChild(el('div', { class: 'empty-title' }, title));
+    wrap.appendChild(el('div', {}, subtitle));
+    return wrap;
+  }
+
+  // emptyIcon picks a glyph that matches the current
+  // context — search magnifier, folder, trash — so the
+  // illustration is meaningful rather than decorative.
+  function emptyIcon() {
+    if (state.searchQuery) return '🔍';
+    var k = (state.currentFolderPath || '').toLowerCase();
+    if (k === 'inbox') return '📥';
+    if (k === 'sent') return '📤';
+    if (k === 'drafts') return '📝';
+    if (k === 'trash') return '🗑';
+    if (k === 'archive') return '🗄';
+    if (k === 'junk' || k === 'spam') return '🚫';
+    return '📭';
+  }
+
+  // renderReadingPaneEmpty returns the polished empty
+  // state for the reading pane — replaces the bare
+  // "Select a message to read." copy with an illustration
+  // + inviting title + helpful subtitle.
+  function renderReadingPaneEmpty() {
+    var wrap = el('div', { class: 'empty-state' });
+    wrap.appendChild(el('div', { class: 'empty-illustration', 'aria-hidden': 'true' }, '📨'));
+    wrap.appendChild(el('div', { class: 'empty-title' }, 'Select a message'));
+    wrap.appendChild(el(
+      'div',
+      {},
+      'Choose a message from the list to read it here. Reply, forward, and search are just a keystroke away.'
+    ));
+    return wrap;
+  }
+
   // moveSelection walks the current list up or down
   // by `delta` and opens the resulting message. The
   // current message id is taken from
@@ -1373,7 +1466,31 @@
   function renderReadingPaneLoading() {
     var view = $('message-view');
     if (!view) return;
-    view.innerHTML = '<div class="loading-state"><span class="spinner"></span> Loading…</div>';
+    view.innerHTML = '';
+    // Skeleton header + body so the pane keeps its
+    // proportions while the request is in flight. The
+    // existing toolbar action buttons are still torn
+    // down because they would reference an unloaded
+    // message.
+    var wrap = el('div', { class: 'reading-skeleton', 'aria-hidden': 'true' });
+    var hdr = el('div', { class: 'header' });
+    hdr.appendChild(el('div', { class: 'skeleton skeleton-line', style: 'height:22px;width:60%;margin-bottom:18px;' }));
+    var meta = el('div', { class: 'meta-row' });
+    meta.appendChild(el('div', { class: 'skeleton skeleton-circle' }));
+    var fromBlock = el('div', { class: 'from-block' });
+    fromBlock.appendChild(el('div', { class: 'skeleton skeleton-line medium', style: 'margin-top:0;' }));
+    fromBlock.appendChild(el('div', { class: 'skeleton skeleton-line short' }));
+    meta.appendChild(fromBlock);
+    meta.appendChild(el('div', { class: 'skeleton skeleton-line', style: 'width:90px;height:10px;align-self:center;' }));
+    hdr.appendChild(meta);
+    wrap.appendChild(hdr);
+    var body = el('div', { class: 'body' });
+    for (var i = 0; i < 8; i++) {
+      body.appendChild(el('div', { class: 'skeleton skeleton-line long' }));
+    }
+    body.appendChild(el('div', { class: 'skeleton skeleton-line medium' }));
+    wrap.appendChild(body);
+    view.appendChild(wrap);
     var tb = view.parentNode.querySelector('.toolbar');
     if (tb) tb.querySelectorAll('.action-btn').forEach(function (b) {
       b.remove();
@@ -1384,7 +1501,24 @@
     var view = $('message-view');
     if (!view) return;
     view.innerHTML = '';
-    view.appendChild(el('div', { class: 'error-state' }, 'Failed to load: ' + (err.message || 'unknown')));
+    var wrap = el('div', { class: 'error-state' });
+    wrap.appendChild(el('div', { class: 'empty-illustration', 'aria-hidden': 'true' }, '⚠'));
+    wrap.appendChild(el('div', { class: 'empty-title' }, "Couldn't load message"));
+    wrap.appendChild(el('div', {}, (err && err.message) || 'Unknown error'));
+    // The retry button re-issues the same request so
+    // transient network failures do not force a full
+    // reload.
+    var retry = el('button', { class: 'btn sm', type: 'button' }, 'Retry');
+    retry.addEventListener('click', function () {
+      if (state.selectedMessageID) {
+        renderReadingPaneLoading();
+        loadMessage(state.selectedMessageID)
+          .then(renderReadingPane)
+          .catch(renderReadingPaneError);
+      }
+    });
+    wrap.appendChild(retry);
+    view.appendChild(wrap);
   }
 
   function renderReadingPane() {
@@ -1393,7 +1527,7 @@
     var msg = state.selectedMessage;
     if (!msg) {
       view.innerHTML = '';
-      view.appendChild(el('div', { class: 'empty-state' }, 'Select a message to read.'));
+      view.appendChild(renderReadingPaneEmpty());
       return;
     }
 
@@ -2100,15 +2234,17 @@
     var toField = field('To', c.to, 'recipient@example.com');
     mb.appendChild(toField.wrap);
     var ccBccToggle = el('button', {
-      class: 'icon-btn',
+      class: 'field-expander',
       type: 'button',
-      title: 'Show Cc/Bcc',
-      style: 'align-self:flex-start;margin:4px 14px;',
+      title: 'Show Cc / Bcc',
+      'aria-label': 'Show Cc and Bcc fields',
+      'aria-expanded': 'false',
     }, 'Cc / Bcc');
     ccBccToggle.addEventListener('click', function () {
       var open = ccWrap.classList.toggle('open');
       bccWrap.classList.toggle('open', open);
       ccBccToggle.style.display = open ? 'none' : 'inline-flex';
+      ccBccToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
     });
     mb.appendChild(ccBccToggle);
     var ccWrap = field('Cc', c.cc, '');
@@ -2291,6 +2427,32 @@
   function init() {
     renderShell();
     els.readingPane = $('reading-pane');
+
+    // Theme: respect the user's OS-level color-scheme
+    // preference. The dark theme is the Orvix default;
+    // light is opt-in via `prefers-color-scheme: light`
+    // OR via the `theme-light` class on <html> (set by
+    // embedders that want a forced light skin).
+    //
+    // The Webmail UI never writes to localStorage /
+    // sessionStorage, so we cannot persist a per-user
+    // toggle across reloads; the OS preference is the
+    // single source of truth. Embedders that want a
+    // forced light / dark skin can apply the class on
+    // the embedding page before this script loads.
+    try {
+      var root = document.documentElement;
+      if (
+        root.classList.contains('theme-light') ||
+        (window.matchMedia &&
+          window.matchMedia('(prefers-color-scheme: light)').matches &&
+          !root.classList.contains('theme-dark'))
+      ) {
+        root.classList.add('theme-light');
+      }
+    } catch (e) {
+      /* matchMedia not available — keep dark default */
+    }
 
     // User chip.
     loadMe()
