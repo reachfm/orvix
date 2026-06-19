@@ -86,13 +86,24 @@ func (h *Handler) queueDeadLetterCount() (int64, error) {
 
 // databaseHealthy performs a quick Ping to confirm the DB is reachable.
 func (h *Handler) databaseHealthy() bool {
+	return h.dbPingErrorForTelemetry() == nil
+}
+
+// dbPingErrorForTelemetry is the error-returning variant used by
+// the runtime telemetry endpoint. It never panics and never
+// returns a non-nil error wrapping a secret; the only error it
+// surfaces is the Ping failure.
+func (h *Handler) dbPingErrorForTelemetry() error {
+	if h.db == nil {
+		return fmt.Errorf("database not configured")
+	}
 	sqlDB, err := h.db.DB()
 	if err != nil {
-		return false
+		return err
 	}
 	ctx, cancel := newShortContext()
 	defer cancel()
-	return sqlDB.PingContext(ctx) == nil
+	return sqlDB.PingContext(ctx)
 }
 
 // apiSelfPing performs a lightweight in-process check. The monitoring

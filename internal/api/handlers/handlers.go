@@ -4,10 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"database/sql"
 	"encoding/base64"
+	"encoding/pem"
 	"fmt"
+	"io"
 	"net/mail"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +24,7 @@ import (
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
+	"github.com/orvix/orvix/internal/runtime"
 	"github.com/orvix/orvix/internal/updater"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
@@ -74,6 +79,13 @@ type Handler struct {
 	// is called many times. The schema is a CREATE TABLE IF NOT
 	// EXISTS so it is idempotent; the Once is just an optimisation.
 	updateSvcOnce sync.Once
+
+	// processStartedAt is captured once via SetProcessStartedAt
+	// during router construction. The runtime telemetry endpoint
+	// reports it as uptime; the zero value means "not reported"
+	// and the response carries a telemetry_incomplete warning so
+	// the dashboard does not show fake numbers.
+	processStartedAt time.Time
 }
 
 // NewHandler creates a new Handler with dependencies.
@@ -81,11 +93,18 @@ func NewHandler(db *gorm.DB, authenticator *auth.Authenticator, apikeyMgr *auth.
 	logger *zap.Logger, cfg *config.Config, registry *modules.Registry,
 	ff *license.FeatureFlags, rateLimiter *auth.RedisRateLimiter) *Handler {
 	var auditStore *audit.Store
-	if sqlDB, err := db.DB(); err == nil {
-		auditStore = audit.NewStore(sqlDB)
-		if err := auditStore.EnsureTable(context.Background()); err != nil {
-			logger.Error("failed to ensure audit store", zap.Error(err))
+	if db != nil {
+		if sqlDB, err := db.DB(); err == nil {
+			auditStore = audit.NewStore(sqlDB)
+			if err := auditStore.EnsureTable(context.Background()); err != nil {
+				logger.Error("failed to ensure audit store", zap.Error(err))
+			}
 		}
+	}
+	// SecurityMonitor needs a non-nil DB; pass nil when DB is nil.
+	var secMonitor *auth.SecurityMonitor
+	if db != nil {
+		secMonitor = auth.NewSecurityMonitor(db, logger)
 	}
 	return &Handler{
 		db:          db,
@@ -95,10 +114,20 @@ func NewHandler(db *gorm.DB, authenticator *auth.Authenticator, apikeyMgr *auth.
 		cfg:         cfg,
 		registry:    registry,
 		features:    ff,
-		security:    auth.NewSecurityMonitor(db, logger),
+		security:    secMonitor,
 		rateLimiter: rateLimiter,
 		auditStore:  auditStore,
 	}
+}
+
+// SetProcessStartedAt records the moment the process started. It is
+// called once during router construction (api.NewRouter). The
+// runtime telemetry endpoint reads this value to compute uptime.
+// A zero value means "not reported" and the response carries a
+// telemetry_incomplete warning so the dashboard does not display
+// fake numbers.
+func (h *Handler) SetProcessStartedAt(t time.Time) {
+	h.processStartedAt = t
 }
 
 // Health returns server health status.
@@ -2052,4 +2081,219 @@ func parseUint(s string) (int64, error) {
 		n = n*10 + int64(c-'0')
 	}
 	return n, nil
+}
+
+// ----------------------------------------------------------------------
+// Admin Runtime Telemetry (ADMIN-RUNTIME-TELEMETRY-2B)
+//
+// The admin dashboard needs honest read-only telemetry to stop
+// showing fake "Online" / "Not available" values when the server
+// has real data. The endpoint is admin-protected, GET-only, and
+// carries no secrets: no env, no private keys, no tokens, no
+// cookies, no full config dump. All values are safe primitives
+// or short safe labels. See internal/runtime for the security
+// contract.
+// ----------------------------------------------------------------------
+
+// GetAdminRuntime serves GET /api/v1/admin/runtime.
+//
+// Response shape is documented in docs/admin-runtime-telemetry.md
+// (deferred to a later commit) and exercised by
+// internal/api/handlers/admin_runtime_test.go. The handler is
+// admin-only by virtue of being mounted on the admin group in
+// router.go (RequireAnyRole(RoleAdmin, RoleSuperAdmin)). It is
+// safe to call repeatedly; it does not mutate any state.
+func (h *Handler) GetAdminRuntime(c fiber.Ctx) error {
+	wm := config.GetWatermark()
+	// Guard nil config so the endpoint never panics when the
+	// operator starts without a config. All ports default to 0,
+	// which the runtime package treats as "unknown".
+	var smtpPort, imapPort, pop3Port, jmapPort int
+	if h.cfg != nil {
+		smtpPort = h.cfg.CoreMail.SMTPPort
+		imapPort = h.cfg.CoreMail.IMAPPort
+		pop3Port = h.cfg.CoreMail.POP3Port
+		jmapPort = h.cfg.CoreMail.JMAPPort
+	}
+	tel := runtime.NewTelemetry(runtime.Inputs{
+		Version:   wm.Version,
+		Commit:    config.GetBuildCommit(),
+		BuildTime: wm.BuildTime,
+		GoVersion: wm.GoVersion,
+		Arch:      wm.Arch,
+		StartedAt: h.processStartedAt,
+		DataPath:  h.dataPathForTelemetry(),
+		DBPing:    h.dbPingErrorForTelemetry,
+		QueueCounts: h.queueCountsForTelemetry(c.Context()),
+		License:   h.licensePostureForTelemetry(c.Context()),
+		SMHTTPPort:  smtpPort,
+		IMAPPort:    imapPort,
+		POP3Port:    pop3Port,
+		JMAPPort:    jmapPort,
+	})
+	return c.JSON(tel)
+}
+
+// dataPathForTelemetry returns the data path used to stat the disk.
+// We prefer CoreMail.MailStorePath because that is where the
+// runtime writes user data; falling back to the data_path
+// config, then empty (the runtime layer maps that to "Not
+// reported" via the disk label).
+func (h *Handler) dataPathForTelemetry() string {
+	if h.cfg == nil {
+		return ""
+	}
+	if h.cfg.CoreMail.MailStorePath != "" {
+		return h.cfg.CoreMail.MailStorePath
+	}
+	if h.cfg.CoreMail.DataPath != "" {
+		return h.cfg.CoreMail.DataPath
+	}
+	if h.cfg.Database.SQLitePath != "" {
+		return h.cfg.Database.SQLitePath
+	}
+	return ""
+}
+
+// queueCountsForTelemetry returns a safe snapshot of the queue
+// counts. Pending / deferred / bounced come from the same
+// coremail_queue table the dashboard already trusts; delivered
+// is reported as 0 because the existing queue schema does not
+// track lifetime delivered (out of scope for this endpoint).
+func (h *Handler) queueCountsForTelemetry(ctx context.Context) runtime.QueueCounts {
+	qc := runtime.QueueCounts{}
+	if h.db == nil {
+		return qc
+	}
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return qc
+	}
+	// Pending + leased (counted as "still trying").
+	row := sqlDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND status IN ('pending','leased')`)
+	if n, scanErr := scanInt64(row); scanErr == nil {
+		qc.Pending = n
+	}
+	// Deferred (will retry later).
+	row = sqlDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND status = 'deferred'`)
+	if n, scanErr := scanInt64(row); scanErr == nil {
+		qc.Deferred = n
+	}
+	// Bounced / dead-letter (permanent failure).
+	row = sqlDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND status = 'dead_letter'`)
+	if n, scanErr := scanInt64(row); scanErr == nil {
+		qc.Bounced = n
+	}
+	// Delivered (lifetime). The current schema does not have a
+	// permanent delivered row, so we report 0 and let the
+	// dashboard render it as "Not reported" rather than fabricate
+	// a number.
+	return qc
+}
+
+// scanInt64 is a tiny helper that runs row.Scan(&n) and returns
+// the result, swallowing the sql.ErrNoRows case (treated as 0).
+func scanInt64(row interface{ Scan(...interface{}) error }) (int64, error) {
+	var n int64
+	if err := row.Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// licensePostureForTelemetry assembles the safe license surface
+// for the runtime response. The function never returns private
+// key material, key hash, or any secret. The active license row
+// is optional — the operator can run without one (community
+// mode) and the dashboard will render the posture honestly.
+func (h *Handler) licensePostureForTelemetry(ctx context.Context) runtime.LicensePosture {
+	lp := runtime.LicensePosture{Mode: "unknown", Status: "unknown"}
+
+	if h.cfg != nil {
+		// Public key loaded = the configured path points to a
+		// regular file containing a parseable PEM public key.
+		// We verify by reading a bounded amount, decoding the
+		// PEM block, and parsing with crypto/x509. We never
+		// expose the file contents, key material, or path.
+		lp.PublicKeyLoaded = validatePublicKeyFile(h.cfg.License.PublicKeyPath)
+		if h.cfg.License.OfflineMode {
+			lp.Mode = "offline"
+		} else if lp.PublicKeyLoaded {
+			lp.Mode = "online"
+		} else {
+			lp.Mode = "missing"
+		}
+	}
+
+	// Tier + expiry from the most recent active license row,
+	// if one exists. The model is decrypted on AfterFind, so
+	// KeyHash is the decrypted form here; we MUST NOT echo it
+	// in the runtime response. We only read Tier / ExpiresAt.
+	if h.db != nil {
+		var lic models.License
+		if err := h.db.WithContext(ctx).Where("active = ?", true).Order("id DESC").First(&lic).Error; err == nil {
+			lp.Tier = lic.Tier
+			if !lic.ExpiresAt.IsZero() {
+				lp.ExpiresAt = lic.ExpiresAt.UTC().Format(time.RFC3339)
+			}
+		}
+	}
+
+	switch {
+	case lp.PublicKeyLoaded:
+		lp.Status = "ok"
+	case lp.Mode == "offline":
+		lp.Status = "offline"
+	default:
+		lp.Status = "missing"
+	}
+	return lp
+}
+
+// validatePublicKeyFile checks that the given path exists, is a
+// regular file, and contains a parseable PEM-encoded public key.
+// It never exposes the path, file contents, key material, or
+// parse errors. Returns true only when every check passes.
+func validatePublicKeyFile(path string) bool {
+	if path == "" {
+		return false
+	}
+	// 1. Stat the path — must exist and be a regular file.
+	fi, err := os.Stat(path)
+	if err != nil || fi.IsDir() || !fi.Mode().IsRegular() {
+		return false
+	}
+	// 2. Open and read a bounded amount (16 KB is ample for any
+	// public key PEM; typical RSA 4096 public key is under 1 KB).
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	buf := make([]byte, 16384)
+	n, err := f.Read(buf)
+	if err != nil && err != io.EOF {
+		return false
+	}
+	if n == 0 {
+		return false
+	}
+	buf = buf[:n]
+	// 3. Decode the PEM block.
+	block, _ := pem.Decode(buf)
+	if block == nil {
+		return false
+	}
+	// 4. Parse the DER bytes as a public key. Accept PKIX/SPKI
+	// (PUBLIC KEY) which handles RSA, ECDSA, Ed25519, and legacy
+	// PKCS1 RSA (RSA PUBLIC KEY).
+	switch block.Type {
+	case "PUBLIC KEY":
+		_, err = x509.ParsePKIXPublicKey(block.Bytes)
+	case "RSA PUBLIC KEY":
+		_, err = x509.ParsePKCS1PublicKey(block.Bytes)
+	default:
+		return false
+	}
+	return err == nil
 }

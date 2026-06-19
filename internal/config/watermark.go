@@ -20,6 +20,13 @@ type Watermark struct {
 var (
 	buildVersion = "1.0.0"
 	buildTime    = "development"
+	// buildCommit is injected at link time via -ldflags:
+	//
+	//	go build -ldflags "-X github.com/orvix/orvix/internal/config.buildCommit=$(git rev-parse HEAD)"
+	//
+	// When not injected, the runtime telemetry endpoint surfaces
+	// "not reported" rather than fabricating a SHA.
+	buildCommit = "not reported"
 )
 
 // GetWatermark returns embedded copyright and build information.
@@ -33,6 +40,16 @@ func GetWatermark() Watermark {
 		Arch:      runtime.GOOS + "/" + runtime.GOARCH,
 		License:   "Proprietary - License Required",
 	}
+}
+
+// GetBuildCommit returns the build commit SHA, or "not reported"
+// when the binary was not linked with one. Never returns an empty
+// string; the dashboard surfaces this verbatim.
+func GetBuildCommit() string {
+	if buildCommit == "" {
+		return "not reported"
+	}
+	return buildCommit
 }
 
 // CanaryToken returns an embedded canary string for watermarking.
