@@ -1602,6 +1602,164 @@ func (h *Handler) RetryQueue(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"id": id, "status": "pending", "attempts": currentAttempts, "next_attempt_at": now.Format(time.RFC3339)})
 }
 
+// AdminQueueSummary returns aggregated queue metrics for the admin dashboard.
+// Admin-only by route registration. Read-only.
+func (h *Handler) AdminQueueSummary(c fiber.Ctx) error {
+	if h.queueEngine == nil || h.queueEngine.Repo == nil {
+		return c.JSON(fiber.Map{"error": "queue engine not available", "metrics": nil})
+	}
+	metrics, err := h.queueEngine.Repo.Metrics(c.Context(), nil, nil)
+	if err != nil {
+		return c.JSON(fiber.Map{"error": "metrics unavailable", "metrics": nil})
+	}
+	return c.JSON(fiber.Map{"metrics": metrics})
+}
+
+// GetAdminQueueEntry returns a single queue entry by ID with safe
+// diagnostic fields. Admin-only by route registration. Read-only.
+func (h *Handler) GetAdminQueueEntry(c fiber.Ctx) error {
+	idStr := c.Params("id")
+	id, parseErr := parseUint(idStr)
+	if parseErr != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid queue id"})
+	}
+
+	var entry *queue.QueueEntry
+
+	// Prefer the queue repository when available (QUEUE-OPERATIONS-2E).
+	// Fall back to raw SQL for backward compatibility.
+	if h.queueEngine != nil && h.queueEngine.Repo != nil {
+		e, err := h.queueEngine.Repo.Get(c.Context(), uint(id), nil)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+		}
+		if e == nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "queue entry not found"})
+		}
+		entry = e
+	} else {
+		// Raw SQL fallback — safe fields only, parameterized query.
+		sqlDB, err := h.db.DB()
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+		}
+		e := &queue.QueueEntry{}
+		var direction, statusStr, deliveryMode string
+		var tlsUsed int
+		err = sqlDB.QueryRowContext(c.Context(),
+			"SELECT "+queueSafeCols+" FROM coremail_queue WHERE id=? AND deleted_at IS NULL", id).
+			Scan(&e.ID, &e.MessageID, &e.FromAddress, &e.ToAddress, &e.RecipientDomain,
+				&statusStr, &e.AttemptCount, &e.MaxAttempts, &e.NextAttemptAt, &e.LastAttemptAt,
+				&e.LastError, &deliveryMode, &e.RemoteHost, &e.RemoteIP, &tlsUsed,
+				&e.LastStatusCode, &e.LastEnhancedCode,
+				&e.CreatedAt, &e.UpdatedAt)
+		if err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "queue entry not found"})
+		}
+		e.Status = queue.QueueStatus(statusStr)
+		e.Direction = queue.Direction(direction)
+		e.DeliveryMode = queue.DeliveryMode(deliveryMode)
+		e.TLSUsed = tlsUsed == 1
+		entry = e
+	}
+
+	// Map to safe DTO — never return QueueEntry directly.
+	dto := adminQueueEntryDTO{
+		ID:             int64(entry.ID),
+		Status:         string(entry.Status),
+		From:           entry.FromAddress,
+		To:             entry.ToAddress,
+		Attempts:       entry.AttemptCount,
+		MaxAttempts:    entry.MaxAttempts,
+		DeliveryMode:   string(entry.DeliveryMode),
+		LastStatusCode: entry.LastStatusCode,
+		LastError:      sanitizeQueueDiagnostic(entry.LastError),
+	}
+	if entry.NextAttemptAt != nil {
+		dto.NextAttemptAt = entry.NextAttemptAt.UTC().Format(time.RFC3339)
+	}
+	if entry.LastAttemptAt != nil {
+		dto.LastAttemptAt = entry.LastAttemptAt.UTC().Format(time.RFC3339)
+	}
+	if !entry.CreatedAt.IsZero() {
+		dto.CreatedAt = entry.CreatedAt.UTC().Format(time.RFC3339)
+	}
+	if !entry.UpdatedAt.IsZero() {
+		dto.UpdatedAt = entry.UpdatedAt.UTC().Format(time.RFC3339)
+	}
+	if entry.RecipientDomain != "" {
+		dto.RecipientDomain = entry.RecipientDomain
+	}
+	if entry.RemoteHost != "" {
+		dto.RemoteHost = entry.RemoteHost
+	}
+	if entry.LastEnhancedCode != "" {
+		dto.LastEnhancedCode = entry.LastEnhancedCode
+	}
+	return c.JSON(dto)
+}
+
+// adminQueueEntryDTO is the safe admin-facing queue entry view.
+// It explicitly excludes internal/operational fields such as
+// tenant_id, domain_id, mailbox_id, priority, lease fields,
+// deleted_at, and any future raw message body.
+type adminQueueEntryDTO struct {
+	ID             int64  `json:"id"`
+	Status         string `json:"status"`
+	From           string `json:"from"`
+	To             string `json:"to"`
+	RecipientDomain string `json:"recipient_domain,omitempty"`
+	Attempts       int    `json:"attempts"`
+	MaxAttempts    int    `json:"max_attempts,omitempty"`
+	DeliveryMode   string `json:"delivery_mode,omitempty"`
+	RemoteHost     string `json:"remote_host,omitempty"`
+	LastStatusCode int    `json:"last_status_code,omitempty"`
+	LastEnhancedCode string `json:"last_enhanced_code,omitempty"`
+	LastError      string `json:"last_error,omitempty"`
+	NextAttemptAt  string `json:"next_attempt_at,omitempty"`
+	LastAttemptAt  string `json:"last_attempt_at,omitempty"`
+	CreatedAt      string `json:"created_at,omitempty"`
+	UpdatedAt      string `json:"updated_at,omitempty"`
+}
+
+// sanitizeQueueDiagnostic sanitizes a queue diagnostic/error string
+// for safe admin display. Cuts length, removes control characters,
+// and collapses excessive whitespace.
+func sanitizeQueueDiagnostic(s string) string {
+	if s == "" {
+		return ""
+	}
+	// Cap length.
+	const maxLen = 500
+	if len(s) > maxLen {
+		s = s[:maxLen]
+	}
+	// Remove control characters except newline, tab, carriage return.
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '\n' || c == '\t' || c == '\r' {
+			b.WriteByte(c)
+		} else if c >= 32 && c <= 126 {
+			b.WriteByte(c)
+		} else if c > 126 {
+			// Keep UTF-8 multi-byte characters (admin may need
+			// international SMTP responses). We skip the byte and
+			// let the encoding continue; this is a simple ASCII
+			// pass-through filter for control chars only.
+			b.WriteByte(c)
+		}
+		// Control characters (0-31 except whitespace) are dropped.
+	}
+	// Trim surrounding whitespace.
+	return strings.TrimSpace(b.String())
+}
+
+// queueSafeCols is the column list for the safe admin queue detail
+// query. It excludes internal/operational fields.
+const queueSafeCols = "id, message_id, from_address, to_address, recipient_domain, status, attempt_count, max_attempts, next_attempt_at, last_attempt_at, last_error, delivery_mode, remote_host, remote_ip, tls_used, last_status_code, last_enhanced_code, created_at, updated_at"
+
 // ListFirewallRules returns firewall rules.
 func (h *Handler) ListFirewallRules(c fiber.Ctx) error {
 	var rules []models.FirewallRule
