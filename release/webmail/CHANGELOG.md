@@ -3,6 +3,85 @@
 Branch: `feature/webmail-ui-polish-3`
 Base: `08e380b` ("Merge Webmail Enterprise Feature Pack 2")
 
+# Webmail Live Stabilization 3A — Changelog
+
+Branch: `fix/webmail-live-stabilization-3a`
+Base: `58c2e1b` ("WEBMAIL-UI-POLISH-3: premium enterprise webmail UI")
+
+A small live stabilization pass on top of UI Polish 3. No
+new features. No backend changes. No endpoint changes.
+Scope is a single live-UI regression: the reading-pane
+toolbar was rendering a duplicate "Move to…" control after
+every in-pane action (star toggle, mark read / unread,
+spam toggle). The teardown only matched `.action-btn` and
+missed the `.move-to-wrap` wrapper around the move-to
+`<select>`, so each re-render appended a fresh "Move to…"
+instead of replacing it. The same teardown bug lived in
+`renderReadingPaneLoading`, so stale wrappers also
+survived the loading skeleton when navigating between
+messages.
+
+## Fixed
+
+- **Duplicate "Move to…" in reading-pane toolbar.** The
+  reading-pane toolbar teardown now removes both
+  `.action-btn` and `.move-to-wrap` so every dynamic
+  toolbar child is wiped before re-rendering. One wrapper
+  in, one wrapper out — no compounding.
+- **Cross-message stale wrapper.** `renderReadingPaneLoading`
+  applies the same teardown so a stale `.move-to-wrap`
+  from the previous message cannot leak into the loading
+  skeleton of the next one.
+- **Reading-pane toolbar overflow at 390 px.** The
+  `.move-to-wrap` flex item now has `min-width: 0` and
+  `flex-shrink: 1` and its inner `<select>` has
+  `max-width: 100%` and `min-width: 0`. The toolbar is
+  already `flex-wrap: wrap`, so the move-to control now
+  cleanly wraps to a second row on the narrowest viewports
+  instead of forcing horizontal scroll. No visual change at
+  desktop / 1024 / 768.
+
+## Tests added
+
+- `TestWebmailReadingToolbarTeardownRemovesMoveToWrap` —
+  asserts the teardown selector names both `.action-btn`
+  and `.move-to-wrap` and that the wrapper is created in
+  exactly one place per render. Whitespace-tolerant.
+- `TestWebmailReadingToolbarMoveToSelectIsSingleSource` —
+  asserts the literal `'Move to…'` placeholder string is
+  defined exactly once in `webmail.js` so a future
+  copy-paste cannot reintroduce the duplicate even if the
+  teardown were correct.
+
+## Out of scope
+
+No backend / SMTP / IMAP / POP3 / JMAP / Queue / Delivery
+touches. No admin UI touches. No installer touches. No
+auth / session / CSRF / CSP / cookie model touches. No new
+endpoints. No new attachments flow. No new keyboard
+shortcuts. No new themes. Pure UI teardown correctness +
+one narrow-viewport flex shrink rule.
+
+## VPS verification checklist
+
+1. Hard-refresh webmail (Cmd-Shift-R / Ctrl-Shift-R).
+2. Open a Sent message.
+3. Confirm the reading-pane toolbar shows exactly **one**
+   "Move to…" control.
+4. Click Star a few times. Confirm the toolbar still
+   shows exactly one "Move to…" control and one star
+   button.
+5. Click Mark unread / Mark read a few times. Confirm
+   the same.
+6. Click Report spam / Not spam. Confirm the same.
+7. Open the compose modal. Confirm it opens, the send
+   button is wired, and closing it leaves the reading
+   pane toolbar with one "Move to…" control.
+8. Navigate between messages (Inbox → Sent → Drafts →
+   back). Confirm the toolbar still shows one "Move to…".
+9. Open browser DevTools console. Confirm zero JS errors.
+
+
 ## What's new
 
 A premium UI polish pack layered on top of Feature
