@@ -2327,7 +2327,11 @@ func validatePublicKeyFile(path string) string {
 	if fi.IsDir() || !fi.Mode().IsRegular() {
 		return "invalid"
 	}
-	// 2. Open and read a bounded amount (16 KB).
+	// 2. Reject empty and oversized files before reading.
+	if fi.Size() <= 0 || fi.Size() > 16*1024 {
+		return "invalid"
+	}
+	// 3. Open and read the bounded content.
 	f, err := os.Open(path)
 	if err != nil {
 		return "invalid"

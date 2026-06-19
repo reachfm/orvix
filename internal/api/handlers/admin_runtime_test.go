@@ -748,6 +748,99 @@ func TestAdminRuntimeLicenseFileInvalidContent(t *testing.T) {
 	}
 }
 
+// TestAdminRuntimeLicenseFileOversized confirms that a valid public
+// key PEM padded beyond 16KB is rejected (size check before parse).
+func TestAdminRuntimeLicenseFileOversized(t *testing.T) {
+	logger := zap.NewNop()
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(dir, "test.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+
+	// Generate a valid RSA public key PEM that fits within 16KB.
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	pubDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal public key: %v", err)
+	}
+	pemBlock := &pem.Block{Type: "PUBLIC KEY", Bytes: pubDER}
+	pemData := pem.EncodeToMemory(pemBlock)
+
+	// Pad the file with trailing garbage until it exceeds 16KB.
+	// A valid PEM prefix should NOT be accepted if the total file
+	// is oversized.
+	padding := make([]byte, 17000-len(pemData))
+	for i := range padding {
+		padding[i] = ' '
+	}
+	oversized := append(pemData, padding...)
+
+	keyPath := filepath.Join(dir, "oversized.pub")
+	if err := os.WriteFile(keyPath, oversized, 0644); err != nil {
+		t.Fatalf("write oversized key: %v", err)
+	}
+	cfg.License.PublicKeyPath = keyPath
+	cfg.License.OfflineMode = false
+
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, _ := db.DB()
+	defer sqlDB.Close()
+
+	authn, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	adminTok, _ := authn.GenerateAccessToken(1, auth.RoleAdmin)
+
+	h := handlers.NewHandler(db, authn, nil, logger, cfg, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
+	h.SetProcessStartedAt(time.Now().Add(-time.Hour))
+
+	app := fiber.New()
+	app.Get("/api/v1/admin/runtime", func(c fiber.Ctx) error {
+		c.Locals("user_id", uint(1))
+		c.Locals("role", auth.RoleAdmin)
+		return h.GetAdminRuntime(c)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/runtime", nil)
+	req.Header.Set("Authorization", "Bearer "+adminTok)
+	res, err := app.Test(req, fiber.TestConfig{Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	var resp runtime.Telemetry
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("response must be valid JSON: %v", err)
+	}
+	if resp.License.PublicKeyLoaded {
+		t.Errorf("public_key_loaded must be false for oversized file; got %+v", resp.License)
+	}
+	if resp.License.PublicKeyState != "invalid" {
+		t.Errorf("public_key_state must be 'invalid' for oversized file; got %q", resp.License.PublicKeyState)
+	}
+	if resp.License.Mode == "online" {
+		t.Errorf("license mode must not be 'online' for oversized file; got %q", resp.License.Mode)
+	}
+	// The license_public_key_invalid warning must be present.
+	seen := false
+	for _, w := range resp.Warnings {
+		if w.Code == "license_public_key_invalid" {
+			seen = true
+		}
+	}
+	if !seen {
+		t.Errorf("expected license_public_key_invalid warning for oversized file; got %+v", resp.Warnings)
+	}
+}
+
 // TestAdminRuntimeLicenseFileValidKey confirms that a valid PEM-encoded
 // RSA public key file reports public_key_loaded=true.
 func TestAdminRuntimeLicenseFileValidKey(t *testing.T) {
