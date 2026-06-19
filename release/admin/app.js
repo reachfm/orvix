@@ -1043,9 +1043,22 @@
     var jmapCard = listenerCard('JMAP', 'jmap', 'JSON Meta Application Protocol');
     var dbCard = listenerCard('Database', 'database', 'Postgres / GORM');
     var queueCard = listenerCard('Redis / Queue', 'queue', 'Delivery queue state');
-    var licenseInfo = state.license || (rt && rt.license) || null;
+    var licenseInfo = (rt && rt.license) || state.license || null;
     var licLabel, licNote, licKind;
     if (licenseInfo) {
+      // Helper to detect Go zero time or ISO zero-date string.
+      function isZeroDate(v) {
+        if (v == null) return true;
+        if (v === '0001-01-01T00:00:00Z') return true;
+        if (v === '0001-01-01') return true;
+        if (typeof v === 'string' && v.indexOf('0001') === 0) return true;
+        return false;
+      }
+      var safeNote = function (fallback) {
+        var d = licenseInfo.expires_at || licenseInfo.expiresAt || '';
+        if (!isZeroDate(d)) return d;
+        return fallback || '';
+      };
       var lp = licenseInfo;
       // Prefer public_key_state from the runtime endpoint
       // (LICENSE-POSTURE-2D). Falls back to the older
@@ -1055,7 +1068,7 @@
         var vs = lp.validation_state;
         if (vs === 'valid') {
           licLabel = 'Valid';
-          licNote = lp.expires_at || lp.tier || 'License validated';
+          licNote = safeNote('License validated');
           licKind = 'good';
         } else {
           // Loaded key without real validation — never show
@@ -1074,7 +1087,7 @@
         licKind = 'bad';
       } else if (lp.mode === 'offline') {
         licLabel = 'Offline';
-        licNote = lp.expires_at || 'Public key loaded, validation offline';
+        licNote = safeNote('Public key loaded, validation offline');
         licKind = 'warn';
       } else {
         licLabel = 'Unknown';
