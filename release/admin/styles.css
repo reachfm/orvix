@@ -421,8 +421,16 @@ input, select, textarea, button { font: inherit; color: inherit; }
 .btn.primary:hover { background: var(--accent-strong); }
 .btn.ghost { background: transparent; border-color: var(--border-2); color: var(--text-1); }
 .btn.ghost:hover { background: var(--bg-hover); color: var(--text-0); }
-.btn.danger { background: var(--bad); color: #ffffff; border-color: var(--bad); }
-.btn.danger:hover { filter: brightness(0.94); }
+/* .btn.danger:not(.ghost) ensures a solid danger button (modal Confirm
+   button etc.) has a red background with white text. The :not(.ghost)
+   guard prevents the background from ALSO applying to ghost-danger
+   buttons (table action rows), where the old rule left the wrong red-on-red
+   colour cascade: .btn.danger set color:#ffffff, then .btn.ghost.danger
+   overrode it to var(--bad), making the label invisible against the
+   solid red background. With :not(.ghost) the solid rule only matches
+   when danger is not paired with ghost. */
+.btn.danger:not(.ghost) { background: var(--bad); color: #ffffff; border-color: var(--bad); }
+.btn.danger:not(.ghost):hover { filter: brightness(0.94); }
 .btn.ghost.danger { color: var(--bad); }
 .btn.ghost.danger:hover { background: var(--bad-soft); border-color: var(--bad); }
 
