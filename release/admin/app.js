@@ -917,9 +917,12 @@
       var s = svcs[name] || svcs[name.toLowerCase()];
       return s || { status: 'unknown' };
     }
+    var runtimeStatus = h.error ? 'Error' : (h.status || (svcs ? 'Online' : 'Not available'));
+    var runtimeNote = h.error ? h.error : (svcs ? 'SMTP, IMAP, POP3, JMAP and workers managed by CoreMail' : 'Health data not reported by API');
+    var runtimeKind = h.error ? 'bad' : (h.status ? statusKind(h.status) : (svcs ? 'good' : 'neutral'));
     var cards = [
       ['API Health',     h.error ? 'Error' : 'OK', h.error || ('Checked ' + new Date().toLocaleTimeString()), h.error ? 'bad' : 'good'],
-      ['CoreMail Runtime','Online',              'SMTP, IMAP, POP3, JMAP and workers managed by CoreMail', 'good'],
+      ['CoreMail Runtime',runtimeStatus,           runtimeNote,                                             runtimeKind],
       ['SMTP',           svc('SMTP').status || 'Unknown',  'Inbound + outbound on port 25', statusKind(svc('SMTP').status)],
       ['IMAP',           svc('IMAP').status || 'Unknown',  'Mailbox access on port 143',    statusKind(svc('IMAP').status)],
       ['POP3',           svc('POP3').status || 'Unknown',  'Legacy retrieval on port 110',  statusKind(svc('POP3').status)],
@@ -2210,10 +2213,19 @@
   }
 
   function runRetention() {
-    apiPost('/api/v1/backups/retention', {}).then(function () {
-      toast('Retention run', 'success');
-      loadBackups();
-    }).catch(function (e) { toast(e.message, 'error'); });
+    confirmDanger({
+      title: 'Run retention now?',
+      message: 'Retention permanently deletes old backup files according to the configured schedule and retention policy. This action cannot be undone.',
+      confirmLabel: 'Run retention',
+      requireText: 'retention',
+      dangerous: true
+    }).then(function (ok) {
+      if (!ok) return;
+      apiPost('/api/v1/backups/retention', {}).then(function () {
+        toast('Retention run', 'success');
+        loadBackups();
+      }).catch(function (e) { toast(e.message, 'error'); });
+    });
   }
 
   // ----- Updates ------------------------------------------------------

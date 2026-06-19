@@ -365,6 +365,54 @@ func TestAdminKeyboardShortcutsGPrefix(t *testing.T) {
 	}
 }
 
+// TestAdminNoHardcodedDashboardHealth confirms the CoreMail Runtime
+// dashboard card is NOT hard-coded to "Online" / "good". The value
+// must be derived from real /api/v1/health data using the svc()
+// helper or health top-level status. Hard-coding violates the
+// no-fake-health requirement.
+func TestAdminNoHardcodedDashboardHealth(t *testing.T) {
+	root := adminRepoRoot(t)
+	src := readFile(t, root, "release/admin/app.js")
+	// The old hard-coded literal must not appear.
+	if strings.Contains(src, "'CoreMail Runtime','Online'") || strings.Contains(src, "'CoreMail Runtime', 'Online'") || strings.Contains(src, "\"CoreMail Runtime\",\"Online\"") {
+		t.Errorf("CoreMail Runtime dashboard card must not be hard-coded to 'Online'; the status must come from real health API data")
+	}
+	// The card must reference dynamic variables derived from state.health.
+	if !strings.Contains(src, "runtimeStatus") || !strings.Contains(src, "runtimeNote") || !strings.Contains(src, "runtimeKind") {
+		t.Errorf("CoreMail Runtime dashboard card must use dynamic status/note/kind variables derived from state.health, not a static literal")
+	}
+	// The runtimeStatus must handle the "no health data" case.
+	if !strings.Contains(src, "'Not available'") {
+		t.Errorf("CoreMail Runtime dashboard card must handle the case where health data is not available by showing 'Not available'")
+	}
+}
+
+// TestAdminRetentionUsesConfirmDanger confirms runRetention() wraps
+// the apiPost call inside a confirmDanger() modal with typed
+// confirmation ("retention") so the operator cannot accidentally
+// delete old backup files.
+func TestAdminRetentionUsesConfirmDanger(t *testing.T) {
+	root := adminRepoRoot(t)
+	src := readFile(t, root, "release/admin/app.js")
+	// runRetention must call confirmDanger before apiPost.
+	if !strings.Contains(src, "function runRetention()") {
+		t.Errorf("admin app.js must define runRetention()")
+	}
+	// The body of runRetention must contain confirmDanger.
+	if !strings.Contains(src, "confirmDanger({") {
+		t.Errorf("runRetention() must call confirmDanger before apiPost to prevent accidental retention runs")
+	}
+	// The confirmation must require typed confirmation "retention".
+	if !strings.Contains(src, "requireText: 'retention'") && !strings.Contains(src, "requireText: \"retention\"") {
+		t.Errorf("runRetention() confirmation must require typed text 'retention' before proceeding")
+	}
+	// The apiPost call must NOT be at the top level of runRetention;
+	// it must be inside the confirmDanger success path.
+	if !strings.Contains(src, "if (!ok) return;") {
+		t.Errorf("runRetention() must check confirmDanger result before calling apiPost")
+	}
+}
+
 // TestAdminPageRenderersRegistered confirms every section listed in
 // the sidebar has a corresponding render function so the page does
 // not 404 into a placeholder.
