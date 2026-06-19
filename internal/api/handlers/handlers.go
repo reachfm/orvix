@@ -2225,22 +2225,34 @@ func scanInt64(row interface{ Scan(...interface{}) error }) (int64, error) {
 
 // licensePostureForTelemetry assembles the safe license surface
 // for the runtime response. The function never returns private
-// key material, key hash, or any secret. The active license row
-// is optional — the operator can run without one (community
-// mode) and the dashboard will render the posture honestly.
+// key material, key hash, or any secret.
+//
+// Truth model:
+//
+//   - public_key_state reflects the public key file on disk:
+//     "missing" (no file), "invalid" (exists but not valid PEM),
+//     "loaded" (valid PEM public key parsed)
+//
+//   - validation_state reflects whether real cryptographic license
+//     validation has succeeded. Without a durable validation result
+//     source (a persisted validated-license marker or an integrated
+//     Validator.Validate call), this remains "offline". An active
+//     license DB row alone does NOT prove validation — see blocker
+//     LICENSE-POSTURE-2D-TRUTHFUL-VALIDATION.
+//
+//   - mode is "offline" unless real validation proves otherwise.
+//     A loaded public key alone does not imply "online" mode —
+//     the key enables verification but does not prove a license is
+//     currently valid.
 func (h *Handler) licensePostureForTelemetry(ctx context.Context) runtime.LicensePosture {
 	lp := runtime.LicensePosture{
-		Mode:            "unknown",
-		Status:          "unknown",
+		Mode:            "offline",
+		Status:          "offline",
 		PublicKeyState:  "missing",
-		ValidationState: "unknown",
+		ValidationState: "offline",
 	}
 
 	if h.cfg != nil {
-		// Determine the effective public key path. Use the
-		// configured value when set; fall back to the canonical
-		// default so missing config does not leave the dashboard
-		// guessing.
 		pkPath := h.cfg.License.PublicKeyPath
 		if pkPath == "" {
 			pkPath = "/etc/orvix/license_public.pem"
@@ -2249,19 +2261,29 @@ func (h *Handler) licensePostureForTelemetry(ctx context.Context) runtime.Licens
 		lp.PublicKeyState = pkState
 		lp.PublicKeyLoaded = (pkState == "loaded")
 
+		// Mode is "offline" regardless of public key state.
+		// True "online" mode requires a real validation result
+		// that proves the license is currently valid. No such
+		// durable validation source exists in this build, so
+		// we never report "online".
+		// OfflineMode config forces offline regardless.
 		if h.cfg.License.OfflineMode {
 			lp.Mode = "offline"
-		} else if lp.PublicKeyLoaded {
-			lp.Mode = "online"
-		} else {
+		} else if pkState == "missing" {
 			lp.Mode = "missing"
 		}
+		// Otherwise mode stays "offline" — the default above.
 	}
 
 	// Tier + expiry from the most recent active license row,
 	// if one exists. The model is decrypted on AfterFind, so
 	// KeyHash is the decrypted form here; we MUST NOT echo it
 	// in the runtime response. We only read Tier / ExpiresAt.
+	//
+	// An active DB row does NOT set validation_state to "valid".
+	// Real validation requires cryptographic signature verification
+	// which is not yet wired into this endpoint (a future phase
+	// may integrate Validator.Validate and persist the result).
 	if h.db != nil {
 		var lic models.License
 		if err := h.db.WithContext(ctx).Where("active = ?", true).Order("id DESC").First(&lic).Error; err == nil {
@@ -2269,19 +2291,14 @@ func (h *Handler) licensePostureForTelemetry(ctx context.Context) runtime.Licens
 			if !lic.ExpiresAt.IsZero() {
 				lp.ExpiresAt = lic.ExpiresAt.UTC().Format(time.RFC3339)
 			}
-			// Validation state: an active license row exists.
-			if lp.PublicKeyLoaded {
-				lp.ValidationState = "valid"
-			} else {
-				lp.ValidationState = "offline"
-			}
-		} else if lp.PublicKeyLoaded {
-			// Public key loaded but no active license row.
-			lp.ValidationState = "offline"
 		}
-	} else if lp.PublicKeyLoaded {
-		lp.ValidationState = "offline"
 	}
+
+	// validation_state stays "offline" by default. "valid" would
+	// require a real cryptographic validation result. Since no
+	// durable validation result is persisted in this build, we
+	// never set validation_state="valid". A future phase should
+	// call license.Validator.Validate and store the outcome.
 
 	switch {
 	case lp.PublicKeyLoaded:

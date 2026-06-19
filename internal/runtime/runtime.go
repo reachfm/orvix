@@ -275,6 +275,9 @@ func buildWarnings(in Inputs, t Telemetry) []Warning {
 	} else if t.License.PublicKeyState == "invalid" {
 		out = append(out, Warning{Level: "warn", Code: "license_public_key_invalid", Message: "License public key invalid"})
 	}
+	if t.License.PublicKeyState == "loaded" && t.License.ValidationState != "valid" {
+		out = append(out, Warning{Level: "warn", Code: "license_validation_offline", Message: "License validation offline"})
+	}
 	if t.License.Mode == "missing" || t.License.PublicKeyState == "missing" {
 		out = append(out, Warning{Level: "warn", Code: "license_missing", Message: "License not configured"})
 	}

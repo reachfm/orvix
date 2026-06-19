@@ -814,8 +814,18 @@ func TestAdminRuntimeLicenseFileValidKey(t *testing.T) {
 	if !resp.License.PublicKeyLoaded {
 		t.Errorf("public_key_loaded must be true for a valid PEM public key file; got %+v", resp.License)
 	}
-	if resp.License.Mode != "online" {
-		t.Errorf("license mode should be 'online' with a valid public key; got %q", resp.License.Mode)
+	if resp.License.PublicKeyState != "loaded" {
+		t.Errorf("public_key_state must be 'loaded' for a valid PEM file; got %q", resp.License.PublicKeyState)
+	}
+	// Mode is "offline" because no real validation has succeeded.
+	// A loaded public key alone does not imply online mode.
+	if resp.License.Mode == "online" {
+		t.Errorf("license mode must NOT be 'online' without real validation; got %q", resp.License.Mode)
+	}
+	// Validation state is "offline" because no cryptographic
+	// validation has been performed (no durable validation source).
+	if resp.License.ValidationState == "valid" {
+		t.Errorf("validation_state must NOT be 'valid' without real validation; got %q", resp.License.ValidationState)
 	}
 	if resp.License.Status != "ok" {
 		t.Errorf("license status should be 'ok' with a valid public key; got %q", resp.License.Status)
