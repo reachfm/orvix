@@ -1996,6 +1996,12 @@
     ]);
     body.appendChild(filters);
 
+    // Queue summary cards (QUEUE-OPERATIONS-2E).
+    body.appendChild(el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [el('h3', null, 'Summary')]),
+      el('div', { class: 'panel-body', id: 'queue-summary-host' })
+    ]));
+
     body.appendChild(el('section', { class: 'panel' }, [
       el('header', { class: 'panel-head' }, [el('h3', null, 'Outbound queue')]),
       el('div', { class: 'panel-body', id: 'queue-table-host' }, [skeletonRows(5, 8)])
@@ -2028,6 +2034,29 @@
       host.innerHTML = '';
       host.appendChild(errorState(e));
     }
+    // Load queue summary from the admin endpoint.
+    try {
+      var sum = await apiGet('/api/v1/admin/queue/summary');
+      renderQueueSummary(sum && sum.metrics ? sum.metrics : null);
+    } catch (_) { /* summary not critical */ }
+  }
+
+  function renderQueueSummary(metrics) {
+    var host = $('queue-summary-host');
+    if (!host) return;
+    host.innerHTML = '';
+    if (!metrics) {
+      host.appendChild(el('div', { class: 'form-hint', text: 'Queue metrics not available.' }));
+      return;
+    }
+    var grid = el('div', { class: 'dashboard-grid' });
+    grid.appendChild(card({ label: 'Total',        value: String(metrics.total || 0), note: 'All entries', kind: 'neutral' }));
+    grid.appendChild(card({ label: 'Pending',      value: String(metrics.pending || 0), note: 'Awaiting delivery', kind: (metrics.pending > 100 ? 'warn' : 'neutral') }));
+    grid.appendChild(card({ label: 'Deferred',     value: String(metrics.deferred || 0), note: 'Will retry', kind: (metrics.deferred > 50 ? 'warn' : 'neutral') }));
+    grid.appendChild(card({ label: 'Bounced',      value: String(metrics.bounced || 0), note: 'Permanent failure', kind: (metrics.bounced > 0 ? 'bad' : 'neutral') }));
+    grid.appendChild(card({ label: 'Dead letter',  value: String(metrics.dead_letter || 0), note: 'DLQ', kind: (metrics.dead_letter > 0 ? 'bad' : 'neutral') }));
+    grid.appendChild(card({ label: 'Avg attempts', value: String(metrics.avg_attempts || 0), note: 'Per entry', kind: 'neutral' }));
+    host.appendChild(grid);
   }
 
   function renderQueueTable(rows) {

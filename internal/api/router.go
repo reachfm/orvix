@@ -326,6 +326,11 @@ func (r *Router) setupRoutes() {
 	admin.Get("/mailboxes/:id/audit", r.h.GetMailboxAudit)
 	admin.Get("/mailboxes/:id", r.h.GetMailbox)
 	admin.Get("/queue", r.h.ListQueue)
+	// Admin Queue Operations (QUEUE-OPERATIONS-2E): summary,
+	// single-entry detail, and safe retry/delete (already wired
+	// in the CSRF-protected men group below). All admin-only.
+	admin.Get("/queue/summary", r.h.AdminQueueSummary)
+	admin.Get("/queue/:id", r.h.GetAdminQueueEntry)
 	admin.Get("/backups", r.h.ListBackups)
 	admin.Get("/backups/schedule", r.h.GetBackupSchedule)
 	admin.Get("/backups/metrics", r.h.GetBackupMetrics)

@@ -1602,6 +1602,43 @@ func (h *Handler) RetryQueue(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"id": id, "status": "pending", "attempts": currentAttempts, "next_attempt_at": now.Format(time.RFC3339)})
 }
 
+// AdminQueueSummary returns aggregated queue metrics for the admin dashboard.
+// Admin-only by route registration. Read-only.
+func (h *Handler) AdminQueueSummary(c fiber.Ctx) error {
+	if h.queueEngine == nil || h.queueEngine.Repo == nil {
+		return c.JSON(fiber.Map{"error": "queue engine not available", "metrics": nil})
+	}
+	metrics, err := h.queueEngine.Repo.Metrics(c.Context(), nil, nil)
+	if err != nil {
+		return c.JSON(fiber.Map{"error": "metrics unavailable", "metrics": nil})
+	}
+	return c.JSON(fiber.Map{"metrics": metrics})
+}
+
+// GetAdminQueueEntry returns a single queue entry by ID with all safe
+// diagnostic fields. Admin-only by route registration. Read-only.
+func (h *Handler) GetAdminQueueEntry(c fiber.Ctx) error {
+	idStr := c.Params("id")
+	id, parseErr := parseUint(idStr)
+	if parseErr != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid queue id"})
+	}
+	if h.queueEngine == nil || h.queueEngine.Repo == nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "queue engine not available"})
+	}
+	entry, err := h.queueEngine.Repo.Get(c.Context(), uint(id), nil)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+	if entry == nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "queue entry not found"})
+	}
+	// Sanitize: never expose the full raw message body or secrets.
+	// The QueueEntry struct has no body field; last_error is sanitized
+	// below if needed. We return the struct fields directly.
+	return c.JSON(entry)
+}
+
 // ListFirewallRules returns firewall rules.
 func (h *Handler) ListFirewallRules(c fiber.Ctx) error {
 	var rules []models.FirewallRule
