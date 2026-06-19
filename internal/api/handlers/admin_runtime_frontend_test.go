@@ -265,3 +265,36 @@ func TestAdminRuntimePreservesPriorFixes(t *testing.T) {
 		t.Errorf("webmail assets must be present for this regression sweep")
 	}
 }
+
+// TestAdminLicenseUIZeroDateAbsent confirms the admin app.js
+// uses an isZeroDate helper to filter Go zero-time from display
+// values rather than rendering them as card details.
+func TestAdminLicenseUIZeroDateAbsent(t *testing.T) {
+	root := adminRepoRoot(t)
+	src := readFile(t, root, "release/admin/app.js")
+	// The helper function isZeroDate must exist to filter zero dates.
+	if !strings.Contains(src, "function isZeroDate") && !strings.Contains(src, "isZeroDate = function") {
+		t.Errorf("app.js must define isZeroDate helper to filter out Go zero-time values")
+	}
+	// The safeNote helper must be used for license expiry rendering.
+	if !strings.Contains(src, "safeNote(") {
+		t.Errorf("app.js must use safeNote() helper for license expiry to avoid zero-date display")
+	}
+	// The isZeroDate function must reference the zero date string.
+	if !strings.Contains(src, "0001-01-01T00:00:00Z") {
+		t.Errorf("app.js isZeroDate helper must detect Go zero-time string")
+	}
+}
+
+// TestAdminLicenseUIPreferRuntimeTelemetry confirms the license
+// card prefers rt.license (runtime telemetry) over state.license
+// (old /api/v1/license endpoint) so the new public_key_state and
+// validation_state fields are used when available.
+func TestAdminLicenseUIPreferRuntimeTelemetry(t *testing.T) {
+	root := adminRepoRoot(t)
+	src := readFile(t, root, "release/admin/app.js")
+	// The licenseInfo assignment must prefer rt.license first.
+	if !strings.Contains(src, "(rt && rt.license) || state.license") {
+		t.Errorf("app.js license card must prefer rt.license over state.license for runtime telemetry fields")
+	}
+}

@@ -1654,9 +1654,14 @@ func (h *Handler) GetLicense(c fiber.Ctx) error {
 	if err := h.db.Where("active = ?", true).Last(&lic).Error; err != nil {
 		return c.JSON(fiber.Map{"status": "no license", "tier": "community"})
 	}
+	// Never expose a zero Go time in the response.
+	expiry := ""
+	if !lic.ExpiresAt.IsZero() {
+		expiry = lic.ExpiresAt.UTC().Format(time.RFC3339)
+	}
 	return c.JSON(fiber.Map{
 		"tier":          lic.Tier,
-		"expires_at":    lic.ExpiresAt,
+		"expires_at":    expiry,
 		"max_domains":   lic.MaxDomains,
 		"max_mailboxes": lic.MaxMailboxes,
 	})
