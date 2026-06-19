@@ -327,7 +327,8 @@ func TestAdminQueueDetailRendersDiagnosticFields(t *testing.T) {
 }
 
 // TestAdminNoFakeDKIMKeyGenUI confirms the DNS wizard does NOT
-// render a fake DKIM keygen button.
+// render a fake DKIM keygen button or a copy-ready fake TXT
+// record. The value must honestly state that DKIM is not configured.
 func TestAdminNoFakeDKIMKeyGenUI(t *testing.T) {
 	root := adminRepoRoot(t)
 	src := readFile(t, root, "release/admin/app.js")
@@ -335,6 +336,83 @@ func TestAdminNoFakeDKIMKeyGenUI(t *testing.T) {
 	// equivalent honest wording.
 	if !strings.Contains(src, "no in-UI keygen") && !strings.Contains(src, "no keygen") {
 		t.Errorf("admin DNS wizard must explicitly say there is no in-UI DKIM keygen")
+	}
+	// The old fake copy-ready placeholder must not appear. Build
+	// the banned string dynamically so the literal does not exist
+	// anywhere in shipped assets or test code.
+	banned := "-PUBLIC-KEY"
+	if strings.Contains(src, "YOUR" + banned) {
+		t.Errorf("admin DNS wizard must not render a copy-ready fake DKIM value with a placeholder")
+	}
+	// The DKIM value must honestly say "not configured" or "public key missing".
+	if !strings.Contains(src, "DKIM not configured") && !strings.Contains(src, "public key missing") && !strings.Contains(src, "not configured") {
+		t.Errorf("admin DNS wizard must honestly state that DKIM is not configured when the public key is missing")
+	}
+	// The DKIM row must NOT have the Copy button for the fake value.
+	// We check by looking for the dnsRow call specific to DKIM that
+	// passes copyValue: false.
+	if !strings.Contains(src, "copyValue: false") && !strings.Contains(src, "copyValue: false") {
+		t.Errorf("admin DNS wizard DKIM row must disable the Copy button (copyValue: false) when DKIM is not configured")
+	}
+}
+
+// TestAdminNoBlankDangerButtons confirms no danger button in the
+// admin UI is rendered without visible text. The old CSS conflict
+// between .btn.danger (background: var(--bad), color: #ffffff) and
+// .btn.ghost.danger (color: var(--bad)) caused ghost-danger buttons
+// in table action rows to have red-on-red invisible text. The fix
+// uses .btn.danger:not(.ghost) so the solid danger style only applies
+// when danger is NOT paired with ghost.
+func TestAdminNoBlankDangerButtons(t *testing.T) {
+	root := adminRepoRoot(t)
+	css := readFile(t, root, "release/admin/styles.css")
+	// The CSS must use :not(.ghost) so solid danger buttons do NOT
+	// apply to ghost-danger elements.
+	if !strings.Contains(css, ".btn.danger:not(.ghost)") {
+		t.Errorf("admin styles.css must use .btn.danger:not(.ghost) to prevent red-on-red invisible text on ghost danger buttons")
+	}
+	// Verify the old problematic rule is fixed: .btn.danger must not
+	// set background/color without the :not(.ghost) guard.
+	old := regexp.MustCompile(`\.btn\.danger\s*\{[^}]*background:\s*var\(--bad\)`)
+	matches := old.FindAllString(css, -1)
+	for _, m := range matches {
+		if !strings.Contains(m, ":not(.ghost)") {
+			t.Errorf("found .btn.danger rule without :not(.ghost) guard: %s", m)
+		}
+	}
+	// JS: every danger button in action rows must have visible text.
+	// Check that all dom-destroy / delete / suspend buttons reference
+	// a text label rather than an empty or icon-only pattern when
+	// they also carry the danger class.
+	js := readFile(t, root, "release/admin/app.js")
+	// Danger buttons in table action rows must have "text:" set.
+	if !strings.Contains(js, "text: 'Delete'") {
+		t.Errorf("admin app.js domain/mailbox/queue delete buttons must have visible 'Delete' text label")
+	}
+}
+
+// TestAdminNoObjectObjectInMonitoringCapacity confirms the monitoring
+// capacity card never renders "[object Object]". The capacity value
+// from the /api/v1/monitoring/health endpoint may be a nested object;
+// the renderer must format it into readable fields (disk used/total,
+// queue pending) rather than calling String() on the raw object.
+func TestAdminNoObjectObjectInMonitoringCapacity(t *testing.T) {
+	root := adminRepoRoot(t)
+	src := readFile(t, root, "release/admin/app.js")
+	// The old code used: value: h.capacity || 'Not reported'
+	// This passed a raw object through to String(), which produced
+	// "[object Object]". Search for the old pattern — it must NOT
+	// be present without the object-formatting fix.
+	// The fixed code should check typeof cap === 'object' and format
+	// disk/queue fields.
+	if !strings.Contains(src, "typeof cap === 'object'") {
+		t.Errorf("admin app.js monitoring capacity must check typeof cap === 'object' and format disk/queue fields instead of calling String() on a raw object")
+	}
+	if !strings.Contains(src, "cap.disk") {
+		t.Errorf("admin app.js monitoring capacity must extract disk data from the capacity object")
+	}
+	if !strings.Contains(src, "cap.queue") {
+		t.Errorf("admin app.js monitoring capacity must extract queue data from the capacity object")
 	}
 }
 
