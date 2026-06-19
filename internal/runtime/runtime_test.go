@@ -364,3 +364,162 @@ func TestTelemetryJSONShape(t *testing.T) {
 		}
 	}
 }
+
+// TestListenerRegistryDefaults confirms a fresh registry returns
+// unknown for all listener kinds.
+func TestListenerRegistryDefaults(t *testing.T) {
+	r := NewListenerRegistry()
+	snap := r.Snapshot()
+	for _, kind := range allKinds {
+		s, ok := snap[kind]
+		if !ok {
+			t.Errorf("snapshot missing kind %s", kind)
+			continue
+		}
+		if s.Status != "unknown" {
+			t.Errorf("%s status must be unknown by default; got %q", kind, s.Status)
+		}
+		if s.Detail != "listener runtime state not reported" {
+			t.Errorf("%s detail must be default; got %q", kind, s.Detail)
+		}
+	}
+}
+
+// TestListenerRegistryOK confirms MarkOK sets the correct status.
+func TestListenerRegistryOK(t *testing.T) {
+	r := NewListenerRegistry()
+	r.MarkOK(ListenerSMTP, 25)
+	snap := r.Snapshot()
+	s := snap[ListenerSMTP]
+	if s.Status != "ok" {
+		t.Errorf("status must be ok; got %q", s.Status)
+	}
+	if s.Detail != "listening" {
+		t.Errorf("detail must be 'listening'; got %q", s.Detail)
+	}
+	if s.Port != 25 {
+		t.Errorf("port must be 25; got %d", s.Port)
+	}
+}
+
+// TestListenerRegistryFailed confirms MarkFailed sets fail status
+// with a safe error detail.
+func TestListenerRegistryFailed(t *testing.T) {
+	r := NewListenerRegistry()
+	r.MarkFailed(ListenerIMAP, 143, errors.New("bind: address already in use"))
+	snap := r.Snapshot()
+	s := snap[ListenerIMAP]
+	if s.Status != "fail" {
+		t.Errorf("status must be fail; got %q", s.Status)
+	}
+	if s.Detail != "bind failed: address already in use" {
+		t.Errorf("detail must be safe error; got %q", s.Detail)
+	}
+	// Original error must not appear verbatim.
+	if strings.Contains(s.Detail, "bind: address already in use") {
+		t.Errorf("detail must not contain raw error: %q", s.Detail)
+	}
+}
+
+// TestListenerRegistryDisabled confirms MarkDisabled sets disabled
+// status with the provided reason.
+func TestListenerRegistryDisabled(t *testing.T) {
+	r := NewListenerRegistry()
+	r.MarkDisabled(ListenerPOP3, 110, "disabled by config")
+	snap := r.Snapshot()
+	s := snap[ListenerPOP3]
+	if s.Status != "disabled" {
+		t.Errorf("status must be disabled; got %q", s.Status)
+	}
+	if s.Detail != "disabled by config" {
+		t.Errorf("detail must match; got %q", s.Detail)
+	}
+}
+
+// TestListenerRegistrySnapshotUseWithTelemetry confirms that when
+// the snapshot is wired into NewTelemetry, the services reflect
+// the real listener state instead of the fallback unknown.
+func TestListenerRegistrySnapshotUseWithTelemetry(t *testing.T) {
+	r := NewListenerRegistry()
+	r.MarkOK(ListenerSMTP, 25)
+	r.MarkFailed(ListenerIMAP, 143, errors.New("EADDRINUSE"))
+	r.MarkDisabled(ListenerPOP3, 110, "disabled by config")
+	// Leave JMAP unset — should remain unknown.
+
+	// Construct a telemetry with known queue / license so the
+	// overall Status is driven by listener state. Without a startedAt
+	// the telemetry will say "unknown", but the service entries must
+	// still show the registry values.
+	tel := NewTelemetry(Inputs{
+		Version:          "1.0.0",
+		StartedAt:        time.Now().Add(-time.Hour),
+		ListenerSnapshot: r.Snapshot(),
+	})
+
+	if tel.Services["smtp"].Status != "ok" {
+		t.Errorf("smtp status must be ok; got %q", tel.Services["smtp"].Status)
+	}
+	if tel.Services["imap"].Status != "fail" {
+		t.Errorf("imap status must be fail; got %q", tel.Services["imap"].Status)
+	}
+	if tel.Services["pop3"].Status != "disabled" {
+		t.Errorf("pop3 status must be disabled; got %q", tel.Services["pop3"].Status)
+	}
+	if tel.Services["jmap"].Status != "unknown" {
+		t.Errorf("jmap status must be unknown (unset); got %q", tel.Services["jmap"].Status)
+	}
+	if tel.Services["smtp"].Port != 25 {
+		t.Errorf("smtp port must be 25; got %d", tel.Services["smtp"].Port)
+	}
+	if tel.Services["smtp"].Detail != "listening" {
+		t.Errorf("smtp detail must be 'listening'; got %q", tel.Services["smtp"].Detail)
+	}
+}
+
+// TestListenerRegistrySnapshotNilFallback confirms that when the
+// ListenerSnapshot is nil, the pre-tracking fallback is used
+// (unknown + "listener runtime state not reported").
+func TestListenerRegistrySnapshotNilFallback(t *testing.T) {
+	tel := NewTelemetry(Inputs{
+		Version:          "1.0.0",
+		StartedAt:        time.Now().Add(-time.Hour),
+		ListenerSnapshot: nil,
+		SMHTTPPort:       25,
+		IMAPPort:         143,
+		POP3Port:         110,
+		JMAPPort:         8080,
+	})
+	for _, key := range []string{"smtp", "imap", "pop3", "jmap"} {
+		s := tel.Services[key]
+		if s.Status != "unknown" {
+			t.Errorf("%s status must be unknown (nil snapshot fallback); got %q", key, s.Status)
+		}
+		if s.Detail != "listener runtime state not reported" {
+			t.Errorf("%s detail must be fallback; got %q", key, s.Detail)
+		}
+	}
+}
+
+// TestListenerRegistryEmptySnapshotFallback confirms that an empty
+// snapshot (created but not populated) still falls through to the
+// default unknown entries for unset kinds.
+func TestListenerRegistryEmptySnapshotFallback(t *testing.T) {
+	r := NewListenerRegistry()
+	// Only set SMTP; IMAP/POP3/JMAP remain unset.
+	r.MarkOK(ListenerSMTP, 25)
+	snap := r.Snapshot()
+	tel := NewTelemetry(Inputs{
+		Version:          "1.0.0",
+		StartedAt:        time.Now().Add(-time.Hour),
+		ListenerSnapshot: snap,
+	})
+	if tel.Services["smtp"].Status != "ok" {
+		t.Errorf("smtp status must be ok; got %q", tel.Services["smtp"].Status)
+	}
+	for _, key := range []string{"imap", "pop3", "jmap"} {
+		s := tel.Services[key]
+		if s.Status != "unknown" {
+			t.Errorf("%s status must be unknown (unset); got %q", key, s.Status)
+		}
+	}
+}

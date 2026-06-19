@@ -21,6 +21,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -893,6 +894,97 @@ func TestAdminRuntimeLicenseResponseNoSecrets(t *testing.T) {
 		if strings.Contains(bodyStr, banned) {
 			t.Errorf("response must not contain %q field", banned)
 		}
+	}
+}
+
+// TestAdminRuntimeListenerRegistryIntegration confirms the
+// endpoint returns real listener status (ok, fail, disabled,
+// unknown) from the listener registry rather than the fallback
+// "listener runtime state not reported".
+func TestAdminRuntimeListenerRegistryIntegration(t *testing.T) {
+	logger := zap.NewNop()
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(dir, "test.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	cfg.License.PublicKeyPath = ""
+	cfg.License.OfflineMode = true
+	cfg.CoreMail.SMTPPort = 25
+	cfg.CoreMail.IMAPPort = 143
+	cfg.CoreMail.POP3Port = 110
+	cfg.CoreMail.JMAPPort = 8080
+
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, _ := db.DB()
+	defer sqlDB.Close()
+	_ = db.Exec(`CREATE TABLE IF NOT EXISTS licenses (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at DATETIME, updated_at DATETIME, deleted_at DATETIME, key_hash TEXT NOT NULL DEFAULT '', tier TEXT NOT NULL DEFAULT 'smb', issued_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, expires_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, max_domains INTEGER NOT NULL DEFAULT 10, max_mailboxes INTEGER NOT NULL DEFAULT 500, hardware_id TEXT NOT NULL DEFAULT '', metadata TEXT NOT NULL DEFAULT '', active INTEGER NOT NULL DEFAULT 1)`)
+
+	authn, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	adminTok, _ := authn.GenerateAccessToken(1, auth.RoleAdmin)
+
+	h := handlers.NewHandler(db, authn, nil, logger, cfg, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
+	h.SetProcessStartedAt(time.Now().Add(-time.Hour))
+
+	// Populate the listener registry with known states.
+	reg := runtime.NewListenerRegistry()
+	reg.MarkOK(runtime.ListenerSMTP, 25)
+	reg.MarkFailed(runtime.ListenerIMAP, 143, errors.New("EADDRINUSE"))
+	reg.MarkDisabled(runtime.ListenerPOP3, 110, "disabled by config")
+	// Leave JMAP unset — should be unknown.
+	h.SetListenerRegistry(reg)
+
+	app := fiber.New()
+	app.Get("/api/v1/admin/runtime", func(c fiber.Ctx) error {
+		c.Locals("user_id", uint(1))
+		c.Locals("role", auth.RoleAdmin)
+		return h.GetAdminRuntime(c)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/runtime", nil)
+	req.Header.Set("Authorization", "Bearer "+adminTok)
+	res, err := app.Test(req, fiber.TestConfig{Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	var resp runtime.Telemetry
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("response must be valid JSON: %v", err)
+	}
+
+	if resp.Services["smtp"].Status != "ok" {
+		t.Errorf("smtp status must be ok; got %q", resp.Services["smtp"].Status)
+	}
+	if resp.Services["smtp"].Detail != "listening" {
+		t.Errorf("smtp detail must be 'listening'; got %q", resp.Services["smtp"].Detail)
+	}
+	if resp.Services["smtp"].Port != 25 {
+		t.Errorf("smtp port must be 25; got %d", resp.Services["smtp"].Port)
+	}
+
+	if resp.Services["imap"].Status != "fail" {
+		t.Errorf("imap status must be fail; got %q", resp.Services["imap"].Status)
+	}
+	if resp.Services["imap"].Detail != "bind failed: address already in use" {
+		t.Errorf("imap detail must be safe error; got %q", resp.Services["imap"].Detail)
+	}
+
+	if resp.Services["pop3"].Status != "disabled" {
+		t.Errorf("pop3 status must be disabled; got %q", resp.Services["pop3"].Status)
+	}
+	if resp.Services["pop3"].Detail != "disabled by config" {
+		t.Errorf("pop3 detail must be 'disabled by config'; got %q", resp.Services["pop3"].Detail)
+	}
+
+	if resp.Services["jmap"].Status != "unknown" {
+		t.Errorf("jmap status must be unknown; got %q", resp.Services["jmap"].Status)
 	}
 }
 

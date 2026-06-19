@@ -86,6 +86,12 @@ type Handler struct {
 	// and the response carries a telemetry_incomplete warning so
 	// the dashboard does not show fake numbers.
 	processStartedAt time.Time
+
+	// listenerRegistry holds the live listener startup state
+	// for SMTP/IMAP/POP3/JMAP. Populated by the coremail
+	// runtime module during Start(). Passed to the admin
+	// runtime telemetry endpoint for the dashboard.
+	listenerRegistry *runtime.ListenerRegistry
 }
 
 // NewHandler creates a new Handler with dependencies.
@@ -128,6 +134,15 @@ func NewHandler(db *gorm.DB, authenticator *auth.Authenticator, apikeyMgr *auth.
 // fake numbers.
 func (h *Handler) SetProcessStartedAt(t time.Time) {
 	h.processStartedAt = t
+}
+
+// SetListenerRegistry wires the live listener state registry
+// into the handler so GetAdminRuntime can return the real
+// SMTP/IMAP/POP3/JMAP runtime status instead of "unknown".
+// The registry is populated by the coremail runtime module
+// during Start().
+func (h *Handler) SetListenerRegistry(r *runtime.ListenerRegistry) {
+	h.listenerRegistry = r
 }
 
 // Health returns server health status.
@@ -2115,6 +2130,12 @@ func (h *Handler) GetAdminRuntime(c fiber.Ctx) error {
 		pop3Port = h.cfg.CoreMail.POP3Port
 		jmapPort = h.cfg.CoreMail.JMAPPort
 	}
+	// Listener snapshot may be nil when the router has not
+	// wired the registry (tests, older builds).
+	var listenerSnapshot map[runtime.ListenerKind]runtime.ListenerStatus
+	if h.listenerRegistry != nil {
+		listenerSnapshot = h.listenerRegistry.Snapshot()
+	}
 	tel := runtime.NewTelemetry(runtime.Inputs{
 		Version:   wm.Version,
 		Commit:    config.GetBuildCommit(),
@@ -2126,6 +2147,7 @@ func (h *Handler) GetAdminRuntime(c fiber.Ctx) error {
 		DBPing:    h.dbPingErrorForTelemetry,
 		QueueCounts: h.queueCountsForTelemetry(c.Context()),
 		License:   h.licensePostureForTelemetry(c.Context()),
+		ListenerSnapshot: listenerSnapshot,
 		SMHTTPPort:  smtpPort,
 		IMAPPort:    imapPort,
 		POP3Port:    pop3Port,

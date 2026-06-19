@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -35,6 +36,15 @@ func (s *Server) SetAllowedOrigins(origins []string) {
 	s.AllowedOrigins = sanitizeAllowedOrigins(origins)
 }
 
+// SetListener assigns a pre-bound net.Listener to the server.
+// When set, ListenAndServe will use this listener instead of
+// creating a new one. This is infrastructure used by the admin
+// runtime telemetry so the listener registry can confirm a
+// successful bind before the server starts accepting connections.
+func (s *Server) SetListener(l net.Listener) {
+	s.customListener = l
+}
+
 func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/jmap/session", s.handleSession)
 	s.mux.HandleFunc("/.well-known/jmap", s.handleWellKnown)
@@ -47,6 +57,11 @@ func (s *Server) ListenAndServe(addr string) error {
 	s.srv = &http.Server{
 		Addr:    addr,
 		Handler: s.withMiddleware(s.mux),
+	}
+	// If a custom listener was pre-set via SetListener (admin
+	// runtime telemetry path), use it instead of binding again.
+	if s.customListener != nil {
+		return s.srv.Serve(s.customListener)
 	}
 	return s.srv.ListenAndServe()
 }

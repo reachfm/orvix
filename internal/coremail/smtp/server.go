@@ -46,11 +46,15 @@ func NewServer(cfg Config, handler *CommandHandler, receiver *Receiver) *Server 
 
 // ListenAndServe starts the SMTP server on the given address.
 func (s *Server) ListenAndServe(addr string) error {
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return fmt.Errorf("smtp listen: %w", err)
+	// If a listener was pre-set via SetListener (admin runtime
+	// telemetry path), use it instead of binding again.
+	if s.listener == nil {
+		listener, err := net.Listen("tcp", addr)
+		if err != nil {
+			return fmt.Errorf("smtp listen: %w", err)
+		}
+		s.listener = listener
 	}
-	s.listener = listener
 	return s.serve()
 }
 
@@ -104,6 +108,15 @@ func LoadTLSConfigWithCert(cert tls.Certificate) *tls.Config {
 // SetLocalDomainChecker sets the local domain checker for relay protection.
 func (s *Server) SetLocalDomainChecker(fn func(ctx context.Context, domain string) (bool, error)) {
 	s.localDomainChecker = fn
+}
+
+// SetListener assigns a pre-bound net.Listener to the server.
+// When set, ListenAndServe will use this listener instead of
+// creating a new one. This is infrastructure used by the admin
+// runtime telemetry so the listener registry can confirm a
+// successful bind before the server starts accepting connections.
+func (s *Server) SetListener(l net.Listener) {
+	s.listener = l
 }
 
 // Stop gracefully stops the SMTP server.

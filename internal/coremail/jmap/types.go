@@ -3,6 +3,7 @@ package jmap
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"sync"
 
@@ -76,6 +77,12 @@ type Server struct {
 	srv  *http.Server
 	mux  *http.ServeMux
 	done chan struct{}
+
+	// customListener, when set via SetListener, is used by
+	// ListenAndServe instead of binding a new listener. This
+	// allows the admin runtime telemetry to confirm a successful
+	// bind before the server starts accepting connections.
+	customListener net.Listener
 
 	queueEngine interface {
 		Enqueue(ctx context.Context, entry *queue.QueueEntry) error

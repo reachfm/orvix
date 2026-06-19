@@ -57,6 +57,11 @@ func NewServer(cfg Config, ms *storage.MailStore, auth *Authenticator) *Server {
 }
 
 func (s *Server) ListenAndServe(addr string) error {
+	// If a listener was pre-set via SetListener (admin runtime
+	// telemetry path), use it instead of binding again.
+	if s.listener != nil {
+		return s.serve()
+	}
 	var listener net.Listener
 	var err error
 
