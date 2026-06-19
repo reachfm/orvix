@@ -33,6 +33,7 @@ import (
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
 	"github.com/orvix/orvix/internal/provision"
+	orvixruntime "github.com/orvix/orvix/internal/runtime"
 	"github.com/orvix/orvix/internal/updater"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
@@ -79,6 +80,12 @@ func main() {
 
 	reg := modules.NewRegistry(logger)
 
+	// Create the shared listener state registry for admin
+	// runtime telemetry. The coremail runtime module populates
+	// it during Start(), and the router reads it for the
+	// /api/v1/admin/runtime endpoint.
+	listenerRegistry := orvixruntime.NewListenerRegistry()
+
 	_, _ = license.NewValidator("", db, logger)
 
 	featureFlags := license.NewFeatureFlags(logger)
@@ -91,7 +98,7 @@ func main() {
 
 	seedAdminUser(db, authenticator, logger)
 
-	registerModules(reg, cfg, db, logger, featureFlags)
+	registerModules(reg, cfg, db, logger, featureFlags, listenerRegistry)
 
 	if err := reg.InitAll(cfg, db); err != nil {
 		logger.Fatal("failed to initialize modules", zap.Error(err))
@@ -173,8 +180,10 @@ func main() {
 	logger.Info("orvix shutdown complete")
 }
 
-func registerModules(r *modules.Registry, cfg *config.Config, db *gorm.DB, logger *zap.Logger, ff *license.FeatureFlags) {
-	r.Register(coremailruntime.New(logger))
+func registerModules(r *modules.Registry, cfg *config.Config, db *gorm.DB, logger *zap.Logger, ff *license.FeatureFlags, listenerReg *orvixruntime.ListenerRegistry) {
+	cmModule := coremailruntime.New(logger)
+	cmModule.SetListenerRegistry(listenerReg)
+	r.Register(cmModule)
 	r.Register(&firewall.Module{})
 	r.Register(&autoheal.Module{})
 	r.Register(&dns.Module{})

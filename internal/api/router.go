@@ -19,6 +19,7 @@ import (
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/metrics"
 	"github.com/orvix/orvix/internal/modules"
+	orvixruntime "github.com/orvix/orvix/internal/runtime"
 	"github.com/orvix/orvix/internal/updater"
 	"github.com/orvix/orvix/internal/webmailmgmt"
 	"github.com/redis/go-redis/v9"
@@ -85,6 +86,27 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 	// is dominated by module init and DB migrations, and the
 	// endpoint never claims second-precision.
 	router.h.SetProcessStartedAt(time.Now().UTC())
+
+	// Wire the listener registry (created in main.go and
+	// populated by the coremail runtime module during Start())
+	// into the handler so GetAdminRuntime returns real listener
+	// status instead of "unknown".
+	//
+	// We retrieve the registry from Handler via a provider
+	// interface on the coremail module. If the module is not
+	// registered (custom builds, tests), the registry remains
+	// nil and the telemetry endpoint falls back to "unknown"
+	// (the pre-ADMIN-LISTENER-TRACKING-2C behaviour).
+	if mod, ok := registry.Get("coremail-runtime"); ok {
+		if lrProvider, ok := mod.(interface {
+			ListenerRegistry() *orvixruntime.ListenerRegistry
+		}); ok {
+			if lr := lrProvider.ListenerRegistry(); lr != nil {
+				router.h.SetListenerRegistry(lr)
+				logger.Info("listener registry wired for admin runtime telemetry")
+			}
+		}
+	}
 
 	// Propagate the cookie Domain to the CSRF manager. The
 	// installer writes cfg.Auth.CookieDomain (".parent.com")

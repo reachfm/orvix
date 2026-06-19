@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -35,6 +36,13 @@ func (s *Server) SetAllowedOrigins(origins []string) {
 	s.AllowedOrigins = sanitizeAllowedOrigins(origins)
 }
 
+// SetListenerCallback registers a callback that is invoked after
+// the server's listener is created (or fails to bind). The
+// callback receives the address string and any bind error.
+func (s *Server) SetListenerCallback(cb func(addr string, err error)) {
+	s.listenerCb = cb
+}
+
 func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/jmap/session", s.handleSession)
 	s.mux.HandleFunc("/.well-known/jmap", s.handleWellKnown)
@@ -48,7 +56,26 @@ func (s *Server) ListenAndServe(addr string) error {
 		Addr:    addr,
 		Handler: s.withMiddleware(s.mux),
 	}
-	return s.srv.ListenAndServe()
+	// Bind the listener synchronously so we can detect success
+	// immediately. JMAP runs on the admin port behind the Fiber
+	// router; TLS is handled at the Fiber layer, not here.
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		if s.listenerCb != nil {
+			s.listenerCb(addr, err)
+		}
+		return fmt.Errorf("jmap listen: %w", err)
+	}
+	if s.listenerCb != nil {
+		s.listenerCb(addr, nil)
+	}
+	return s.srv.Serve(listener)
+}
+
+// SetListener is a pre-existing test helper that pre-assigns a
+// listener. Not used in production startup.
+func (s *Server) SetListener(l net.Listener) {
+	s.customListener = l
 }
 
 func (s *Server) Stop() {

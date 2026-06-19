@@ -23,6 +23,7 @@ import (
 	"github.com/orvix/orvix/internal/licensingauthority"
 	"github.com/orvix/orvix/internal/observability"
 	"github.com/orvix/orvix/internal/policy"
+	orvixruntime "github.com/orvix/orvix/internal/runtime"
 	"github.com/orvix/orvix/internal/trust"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -50,6 +51,10 @@ type Module struct {
 	jmapServer *jmap.Server
 	workers    []*delivery.DeliveryWorker
 
+	// listenerReg records live listener startup state for the
+	// admin runtime telemetry endpoint. Populated by startServer.
+	listenerReg *orvixruntime.ListenerRegistry
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -64,6 +69,14 @@ func (m *Module) ID() string { return "coremail-runtime" }
 func (m *Module) Version() string { return "1.0.0" }
 
 func (m *Module) Requires() []string { return nil }
+
+// SetListenerRegistry wires the shared listener state registry
+// into the module so startServer can record bind success/failure
+// for the admin runtime telemetry endpoint. Must be called before
+// Start().
+func (m *Module) SetListenerRegistry(r *orvixruntime.ListenerRegistry) {
+	m.listenerReg = r
+}
 
 func (m *Module) Init(cfg *config.Config, db *gorm.DB) error {
 	m.cfg = cfg
@@ -266,14 +279,22 @@ func (m *Module) Migrate() error {
 }
 
 func (m *Module) Start() error {
+	m.ctx, m.cancel = context.WithCancel(context.Background())
 	if m.cfg == nil || !m.cfg.CoreMail.Enabled {
+		// Record all listeners as disabled so the admin
+		// dashboard shows "disabled" instead of "unknown".
+		if m.listenerReg != nil {
+			m.listenerReg.MarkDisabled(orvixruntime.ListenerSMTP, 0, "disabled by config")
+			m.listenerReg.MarkDisabled(orvixruntime.ListenerIMAP, 0, "disabled by config")
+			m.listenerReg.MarkDisabled(orvixruntime.ListenerPOP3, 0, "disabled by config")
+			m.listenerReg.MarkDisabled(orvixruntime.ListenerJMAP, 0, "disabled by config")
+		}
 		return nil
 	}
-	m.ctx, m.cancel = context.WithCancel(context.Background())
-	m.startServer("smtp", net.JoinHostPort(m.cfg.CoreMail.SMTPHost, fmt.Sprintf("%d", m.cfg.CoreMail.SMTPPort)), m.smtpServer.ListenAndServe)
-	m.startServer("imap", net.JoinHostPort(m.cfg.CoreMail.IMAPHost, fmt.Sprintf("%d", m.cfg.CoreMail.IMAPPort)), m.imapServer.ListenAndServe)
-	m.startServer("pop3", net.JoinHostPort(m.cfg.CoreMail.POP3Host, fmt.Sprintf("%d", m.cfg.CoreMail.POP3Port)), m.pop3Server.ListenAndServe)
-	m.startServer("jmap", net.JoinHostPort(m.cfg.CoreMail.JMAPHost, fmt.Sprintf("%d", m.cfg.CoreMail.JMAPPort)), m.jmapServer.ListenAndServe)
+	m.startServer(orvixruntime.ListenerSMTP, net.JoinHostPort(m.cfg.CoreMail.SMTPHost, fmt.Sprintf("%d", m.cfg.CoreMail.SMTPPort)), m.smtpServer.ListenAndServe)
+	m.startServer(orvixruntime.ListenerIMAP, net.JoinHostPort(m.cfg.CoreMail.IMAPHost, fmt.Sprintf("%d", m.cfg.CoreMail.IMAPPort)), m.imapServer.ListenAndServe)
+	m.startServer(orvixruntime.ListenerPOP3, net.JoinHostPort(m.cfg.CoreMail.POP3Host, fmt.Sprintf("%d", m.cfg.CoreMail.POP3Port)), m.pop3Server.ListenAndServe)
+	m.startServer(orvixruntime.ListenerJMAP, net.JoinHostPort(m.cfg.CoreMail.JMAPHost, fmt.Sprintf("%d", m.cfg.CoreMail.JMAPPort)), m.jmapServer.ListenAndServe)
 	for _, worker := range m.workers {
 		w := worker
 		m.wg.Add(1)
@@ -323,15 +344,45 @@ func (m *Module) recordQueueWorkerError(workerID string, err error) {
 	}
 }
 
-func (m *Module) startServer(name, addr string, fn func(string) error) {
+func (m *Module) startServer(kind orvixruntime.ListenerKind, addr string, fn func(string) error) {
+	// Extract port for the registry.
+	_, portStr, _ := net.SplitHostPort(addr)
+	port := 0
+	if portStr != "" {
+		fmt.Sscanf(portStr, "%d", &port)
+	}
+
+	// Register the listener callback so the server notifies us
+	// after its real listener is created (preserving TLS paths).
+	cb := func(addr2 string, err error) {
+		if m.listenerReg == nil {
+			return
+		}
+		if err != nil {
+			m.listenerReg.MarkFailed(kind, port, err)
+		} else {
+			m.listenerReg.MarkOK(kind, port)
+		}
+	}
+	switch kind {
+	case orvixruntime.ListenerSMTP:
+		m.smtpServer.SetListenerCallback(cb)
+	case orvixruntime.ListenerIMAP:
+		m.imapServer.SetListenerCallback(cb)
+	case orvixruntime.ListenerPOP3:
+		m.pop3Server.SetListenerCallback(cb)
+	case orvixruntime.ListenerJMAP:
+		m.jmapServer.SetListenerCallback(cb)
+	}
+
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
-		m.logger.Info("starting coremail "+name, zap.String("addr", addr))
+		m.logger.Info("starting coremail "+string(kind), zap.String("addr", addr))
 		if err := fn(addr); err != nil && m.ctx.Err() == nil {
-			m.logger.Error("coremail "+name+" stopped", zap.Error(err))
+			m.logger.Error("coremail "+string(kind)+" stopped", zap.Error(err))
 			if m.obs != nil {
-				m.obs.Health.NotReady(name, err.Error())
+				m.obs.Health.NotReady(string(kind), err.Error())
 			}
 		}
 	}()
@@ -339,6 +390,13 @@ func (m *Module) startServer(name, addr string, fn func(string) error) {
 
 func (m *Module) GetLicensingService() *licensing.Service {
 	return m.licenseSvc
+}
+
+// ListenerRegistry returns the shared listener state registry
+// used by the admin runtime telemetry endpoint. Returns nil when
+// SetListenerRegistry was not called (tests, legacy builds).
+func (m *Module) ListenerRegistry() *orvixruntime.ListenerRegistry {
+	return m.listenerReg
 }
 
 func (m *Module) GetAuthorityService() *licensingauthority.AuthorityService {

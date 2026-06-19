@@ -74,6 +74,11 @@ type Server struct {
 	listener net.Listener
 	done     chan struct{}
 	wg       sync.WaitGroup
+
+	// listenerCb is called after the real listener is created
+	// (with or without TLS) or on bind failure. Used by the
+	// admin runtime telemetry (ADMIN-LISTENER-TRACKING-2C).
+	listenerCb func(addr string, err error)
 }
 
 // NewServer creates an IMAP server.
@@ -87,6 +92,13 @@ func NewServer(cfg Config, ms *storage.MailStore, auth AuthBackend) *Server {
 	}
 }
 
+// SetListenerCallback registers a callback that is invoked after
+// the server's listener is created (or fails to bind). The
+// callback receives the address string and any bind error.
+func (s *Server) SetListenerCallback(cb func(addr string, err error)) {
+	s.listenerCb = cb
+}
+
 // ListenAndServe starts the IMAP server with optional TLS.
 func (s *Server) ListenAndServe(addr string) error {
 	var listener net.Listener
@@ -95,7 +107,11 @@ func (s *Server) ListenAndServe(addr string) error {
 	if s.Config.TLSCertFile != "" && s.Config.TLSKeyFile != "" {
 		cert, cerr := tls.LoadX509KeyPair(s.Config.TLSCertFile, s.Config.TLSKeyFile)
 		if cerr != nil {
-			return fmt.Errorf("load TLS cert: %w", cerr)
+			err = fmt.Errorf("IMAP TLS cert load: %w", cerr)
+			if s.listenerCb != nil {
+				s.listenerCb(addr, err)
+			}
+			return err
 		}
 		tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}}
 		listener, err = tls.Listen("tcp", addr, tlsCfg)
@@ -103,12 +119,21 @@ func (s *Server) ListenAndServe(addr string) error {
 		listener, err = net.Listen("tcp", addr)
 	}
 	if err != nil {
+		if s.listenerCb != nil {
+			s.listenerCb(addr, err)
+		}
 		return fmt.Errorf("imap listen: %w", err)
 	}
 	s.listener = listener
+	if s.listenerCb != nil {
+		s.listenerCb(addr, nil)
+	}
 	return s.serve()
 }
 
+// SetListener is a pre-existing test helper. Production startup
+// uses SetListenerCallback instead. ListenAndServe always binds
+// its own listener to preserve TLS configuration.
 func (s *Server) SetListener(l net.Listener) {
 	s.listener = l
 }

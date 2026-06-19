@@ -3,6 +3,7 @@ package jmap
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"sync"
 
@@ -76,6 +77,14 @@ type Server struct {
 	srv  *http.Server
 	mux  *http.ServeMux
 	done chan struct{}
+
+	// listenerCb is called after the real listener is created
+	// or on bind failure. Used by the admin runtime telemetry.
+	listenerCb func(addr string, err error)
+
+	// customListener is a pre-existing test helper. Production
+	// startup creates the listener inside ListenAndServe.
+	customListener net.Listener
 
 	queueEngine interface {
 		Enqueue(ctx context.Context, entry *queue.QueueEntry) error

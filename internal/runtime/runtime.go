@@ -119,10 +119,20 @@ type Inputs struct {
 	DBPing      func() error       // nil = unknown
 	QueueCounts QueueCounts        // zero = unknown
 	License     LicensePosture     // zero = unknown
-	SMHTTPPort  int
-	IMAPPort    int
-	POP3Port    int
-	JMAPPort    int
+	// ListenerSnapshot is the current state of protocol listeners,
+	// populated by the coremail runtime module at startup. When
+	// nil or empty, listeners are reported as "unknown" with the
+	// stable "listener runtime state not reported" detail (the
+	// pre-ADMIN-LISTENER-TRACKING-2C fallback). The snapshot is
+	// read-only and populated once; the map is not retained.
+	ListenerSnapshot map[ListenerKind]ListenerStatus
+	// DEPRECATED: ports are now carried inside ListenerSnapshot.
+	// Kept for backward compatibility during the transition — they
+	// are only used when ListenerSnapshot is nil.
+	SMHTTPPort int
+	IMAPPort   int
+	POP3Port   int
+	JMAPPort   int
 }
 
 // DiskUsageFn is the per-platform disk-usage lookup. Tests can
@@ -195,17 +205,16 @@ func NewTelemetry(in Inputs) Telemetry {
 	disk.Label = safeDiskLabel(in.DataPath, disk.Label)
 	t.Capacity.Disk = disk
 
-	// Services — listener runtime state is unknown today (no
-	// per-listener start tracking is in place). We report
-	// "unknown" with a stable detail string the dashboard can
-	// surface, never "ok" / "online". The API and database
-	// services use the live health callbacks when supplied.
+	// Services — prefer the live listener snapshot when the
+	// coremail runtime module has populated it (ADMIN-LISTENER-
+	// TRACKING-2C). When the snapshot is nil or empty we fall
+	// back to the pre-tracking "unknown" listener state.
 	t.Services = map[string]Service{
 		"api":      newAPIService(),
-		"smtp":     newListenerService(in.SMHTTPPort, "SMTP"),
-		"imap":     newListenerService(in.IMAPPort, "IMAP"),
-		"pop3":     newListenerService(in.POP3Port, "POP3"),
-		"jmap":     newJMAPService(in.JMAPPort),
+		"smtp":     listenerOrFallback(in.ListenerSnapshot, ListenerSMTP, in.SMHTTPPort, "SMTP"),
+		"imap":     listenerOrFallback(in.ListenerSnapshot, ListenerIMAP, in.IMAPPort, "IMAP"),
+		"pop3":     listenerOrFallback(in.ListenerSnapshot, ListenerPOP3, in.POP3Port, "POP3"),
+		"jmap":     listenerOrFallback(in.ListenerSnapshot, ListenerJMAP, in.JMAPPort, "JMAP"),
 		"database": newDatabaseService(in.DBPing),
 		"queue":    newQueueService(in.QueueCounts),
 	}
@@ -341,6 +350,19 @@ func newJMAPService(port int) Service {
 		Detail: "listener runtime state not reported",
 		Port:   port,
 	}
+}
+
+// listenerOrFallback returns the service entry from the live
+// listener snapshot when available, or the pre-tracking fallback
+// (unknown + "listener runtime state not reported") when the
+// snapshot is nil or the kind is missing from the snapshot.
+func listenerOrFallback(snapshot map[ListenerKind]ListenerStatus, kind ListenerKind, port int, _ string) Service {
+	if snapshot != nil {
+		if s, ok := snapshot[kind]; ok {
+			return Service{Status: s.Status, Detail: s.Detail, Port: s.Port}
+		}
+	}
+	return newListenerService(port, string(kind))
 }
 
 // newDatabaseService reports ok / fail / unknown based on the
