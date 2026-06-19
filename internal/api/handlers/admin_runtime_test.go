@@ -16,7 +16,11 @@ package handlers_test
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -607,6 +611,288 @@ func TestAdminRuntimeLicenseFileMissing(t *testing.T) {
 	}
 	if !seen {
 		t.Errorf("expected license_public_key_missing warning when public key path is set but file is missing; got %+v", resp.Warnings)
+	}
+}
+
+// TestAdminRuntimeLicenseFileIsDirectory confirms that a configured
+// path pointing to a directory (not a regular file) does NOT report
+// public_key_loaded=true.
+func TestAdminRuntimeLicenseFileIsDirectory(t *testing.T) {
+	logger := zap.NewNop()
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(dir, "test.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	// Point to a directory, not a file.
+	cfg.License.PublicKeyPath = dir
+	cfg.License.OfflineMode = false
+
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, _ := db.DB()
+	defer sqlDB.Close()
+
+	authn, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	adminTok, _ := authn.GenerateAccessToken(1, auth.RoleAdmin)
+
+	h := handlers.NewHandler(db, authn, nil, logger, cfg, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
+	h.SetProcessStartedAt(time.Now().Add(-time.Hour))
+
+	app := fiber.New()
+	app.Get("/api/v1/admin/runtime", func(c fiber.Ctx) error {
+		c.Locals("user_id", uint(1))
+		c.Locals("role", auth.RoleAdmin)
+		return h.GetAdminRuntime(c)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/runtime", nil)
+	req.Header.Set("Authorization", "Bearer "+adminTok)
+	res, err := app.Test(req, fiber.TestConfig{Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	var resp runtime.Telemetry
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("response must be valid JSON: %v", err)
+	}
+	if resp.License.PublicKeyLoaded {
+		t.Errorf("public_key_loaded must be false when path points to a directory; got %+v", resp.License)
+	}
+	if resp.License.Mode == "online" {
+		t.Errorf("license mode must not be 'online' for a directory path; got %q", resp.License.Mode)
+	}
+	// The license_public_key_missing warning must be present.
+	seen := false
+	for _, w := range resp.Warnings {
+		if w.Code == "license_public_key_missing" {
+			seen = true
+		}
+	}
+	if !seen {
+		t.Errorf("expected license_public_key_missing warning for directory path; got %+v", resp.Warnings)
+	}
+}
+
+// TestAdminRuntimeLicenseFileInvalidContent confirms that a file
+// with non-PEM content does NOT report public_key_loaded=true.
+func TestAdminRuntimeLicenseFileInvalidContent(t *testing.T) {
+	logger := zap.NewNop()
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(dir, "test.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	// Write a file with garbage content, not a PEM public key.
+	keyPath := filepath.Join(dir, "invalid.pub")
+	if err := os.WriteFile(keyPath, []byte("this is not a public key"), 0644); err != nil {
+		t.Fatalf("write invalid key: %v", err)
+	}
+	cfg.License.PublicKeyPath = keyPath
+	cfg.License.OfflineMode = false
+
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, _ := db.DB()
+	defer sqlDB.Close()
+
+	authn, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	adminTok, _ := authn.GenerateAccessToken(1, auth.RoleAdmin)
+
+	h := handlers.NewHandler(db, authn, nil, logger, cfg, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
+	h.SetProcessStartedAt(time.Now().Add(-time.Hour))
+
+	app := fiber.New()
+	app.Get("/api/v1/admin/runtime", func(c fiber.Ctx) error {
+		c.Locals("user_id", uint(1))
+		c.Locals("role", auth.RoleAdmin)
+		return h.GetAdminRuntime(c)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/runtime", nil)
+	req.Header.Set("Authorization", "Bearer "+adminTok)
+	res, err := app.Test(req, fiber.TestConfig{Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	var resp runtime.Telemetry
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("response must be valid JSON: %v", err)
+	}
+	if resp.License.PublicKeyLoaded {
+		t.Errorf("public_key_loaded must be false for invalid PEM content; got %+v", resp.License)
+	}
+	if resp.License.Mode == "online" {
+		t.Errorf("license mode must not be 'online' for invalid key content; got %q", resp.License.Mode)
+	}
+}
+
+// TestAdminRuntimeLicenseFileValidKey confirms that a valid PEM-encoded
+// RSA public key file reports public_key_loaded=true.
+func TestAdminRuntimeLicenseFileValidKey(t *testing.T) {
+	logger := zap.NewNop()
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(dir, "test.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+
+	// Generate a real RSA key pair and marshal the public key as PEM.
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	pubDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal public key: %v", err)
+	}
+	pemBlock := &pem.Block{Type: "PUBLIC KEY", Bytes: pubDER}
+	pemData := pem.EncodeToMemory(pemBlock)
+
+	keyPath := filepath.Join(dir, "valid.pub")
+	if err := os.WriteFile(keyPath, pemData, 0644); err != nil {
+		t.Fatalf("write public key: %v", err)
+	}
+	cfg.License.PublicKeyPath = keyPath
+	cfg.License.OfflineMode = false
+
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, _ := db.DB()
+	defer sqlDB.Close()
+
+	authn, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	adminTok, _ := authn.GenerateAccessToken(1, auth.RoleAdmin)
+
+	h := handlers.NewHandler(db, authn, nil, logger, cfg, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
+	h.SetProcessStartedAt(time.Now().Add(-time.Hour))
+
+	app := fiber.New()
+	app.Get("/api/v1/admin/runtime", func(c fiber.Ctx) error {
+		c.Locals("user_id", uint(1))
+		c.Locals("role", auth.RoleAdmin)
+		return h.GetAdminRuntime(c)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/runtime", nil)
+	req.Header.Set("Authorization", "Bearer "+adminTok)
+	res, err := app.Test(req, fiber.TestConfig{Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	var resp runtime.Telemetry
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("response must be valid JSON: %v", err)
+	}
+	if !resp.License.PublicKeyLoaded {
+		t.Errorf("public_key_loaded must be true for a valid PEM public key file; got %+v", resp.License)
+	}
+	if resp.License.Mode != "online" {
+		t.Errorf("license mode should be 'online' with a valid public key; got %q", resp.License.Mode)
+	}
+	if resp.License.Status != "ok" {
+		t.Errorf("license status should be 'ok' with a valid public key; got %q", resp.License.Status)
+	}
+	// The license_public_key_missing warning must NOT be present.
+	for _, w := range resp.Warnings {
+		if w.Code == "license_public_key_missing" {
+			t.Errorf("should not have license_public_key_missing warning with a valid key; got %+v", resp.Warnings)
+		}
+	}
+}
+
+// TestAdminRuntimeLicenseResponseNoSecrets confirms the response JSON
+// does NOT include public key contents, the configured path, key hash,
+// or any other secret-bearing fields.
+func TestAdminRuntimeLicenseResponseNoSecrets(t *testing.T) {
+	logger := zap.NewNop()
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(dir, "test.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+
+	// Write a valid PEM public key so the endpoint has a real key
+	// to work with. The response must still NOT expose the content.
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	pubDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal public key: %v", err)
+	}
+	pemBlock := &pem.Block{Type: "PUBLIC KEY", Bytes: pubDER}
+	pemData := pem.EncodeToMemory(pemBlock)
+	keyPath := filepath.Join(dir, "noscr.pub")
+	if err := os.WriteFile(keyPath, pemData, 0644); err != nil {
+		t.Fatalf("write public key: %v", err)
+	}
+	cfg.License.PublicKeyPath = keyPath
+	cfg.License.OfflineMode = false
+
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, _ := db.DB()
+	defer sqlDB.Close()
+
+	authn, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	adminTok, _ := authn.GenerateAccessToken(1, auth.RoleAdmin)
+
+	h := handlers.NewHandler(db, authn, nil, logger, cfg, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
+	h.SetProcessStartedAt(time.Now().Add(-time.Hour))
+
+	app := fiber.New()
+	app.Get("/api/v1/admin/runtime", func(c fiber.Ctx) error {
+		c.Locals("user_id", uint(1))
+		c.Locals("role", auth.RoleAdmin)
+		return h.GetAdminRuntime(c)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/runtime", nil)
+	req.Header.Set("Authorization", "Bearer "+adminTok)
+	res, err := app.Test(req, fiber.TestConfig{Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	bodyStr := string(body)
+	// The standard PEM header prefix must not appear in the response.
+	if strings.Contains(bodyStr, "BEGIN PUBLIC KEY") || strings.Contains(bodyStr, "BEGIN RSA PUBLIC KEY") {
+		t.Errorf("response must not contain PEM public key data")
+	}
+	// The configured path must not appear in the response.
+	if strings.Contains(bodyStr, keyPath) {
+		t.Errorf("response must not contain the configured public key path")
+	}
+	// Common secret-bearing field names must not appear.
+	for _, banned := range []string{"key_hash", "private_key", "secret", "path", "contents"} {
+		if strings.Contains(bodyStr, banned) {
+			t.Errorf("response must not contain %q field", banned)
+		}
 	}
 }
 

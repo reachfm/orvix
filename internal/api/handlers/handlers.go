@@ -4,9 +4,12 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"database/sql"
 	"encoding/base64"
+	"encoding/pem"
 	"fmt"
+	"io"
 	"net/mail"
 	"os"
 	"strings"
@@ -2207,18 +2210,12 @@ func (h *Handler) licensePostureForTelemetry(ctx context.Context) runtime.Licens
 	lp := runtime.LicensePosture{Mode: "unknown", Status: "unknown"}
 
 	if h.cfg != nil {
-		// Public key loaded = the operator provisioned a
-		// public-key file AND it exists on disk. We do NOT
-		// read the file contents or expose the path; we only
-		// confirm the file is present and readable. A non-empty
-		// path alone is NOT sufficient — the file may have been
-		// deleted or the path may be stale.
-		path := h.cfg.License.PublicKeyPath
-		if path != "" {
-			if _, err := os.Stat(path); err == nil {
-				lp.PublicKeyLoaded = true
-			}
-		}
+		// Public key loaded = the configured path points to a
+		// regular file containing a parseable PEM public key.
+		// We verify by reading a bounded amount, decoding the
+		// PEM block, and parsing with crypto/x509. We never
+		// expose the file contents, key material, or path.
+		lp.PublicKeyLoaded = validatePublicKeyFile(h.cfg.License.PublicKeyPath)
 		if h.cfg.License.OfflineMode {
 			lp.Mode = "offline"
 		} else if lp.PublicKeyLoaded {
@@ -2251,4 +2248,52 @@ func (h *Handler) licensePostureForTelemetry(ctx context.Context) runtime.Licens
 		lp.Status = "missing"
 	}
 	return lp
+}
+
+// validatePublicKeyFile checks that the given path exists, is a
+// regular file, and contains a parseable PEM-encoded public key.
+// It never exposes the path, file contents, key material, or
+// parse errors. Returns true only when every check passes.
+func validatePublicKeyFile(path string) bool {
+	if path == "" {
+		return false
+	}
+	// 1. Stat the path — must exist and be a regular file.
+	fi, err := os.Stat(path)
+	if err != nil || fi.IsDir() || !fi.Mode().IsRegular() {
+		return false
+	}
+	// 2. Open and read a bounded amount (16 KB is ample for any
+	// public key PEM; typical RSA 4096 public key is under 1 KB).
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	buf := make([]byte, 16384)
+	n, err := f.Read(buf)
+	if err != nil && err != io.EOF {
+		return false
+	}
+	if n == 0 {
+		return false
+	}
+	buf = buf[:n]
+	// 3. Decode the PEM block.
+	block, _ := pem.Decode(buf)
+	if block == nil {
+		return false
+	}
+	// 4. Parse the DER bytes as a public key. Accept PKIX/SPKI
+	// (PUBLIC KEY) which handles RSA, ECDSA, Ed25519, and legacy
+	// PKCS1 RSA (RSA PUBLIC KEY).
+	switch block.Type {
+	case "PUBLIC KEY":
+		_, err = x509.ParsePKIXPublicKey(block.Bytes)
+	case "RSA PUBLIC KEY":
+		_, err = x509.ParsePKCS1PublicKey(block.Bytes)
+	default:
+		return false
+	}
+	return err == nil
 }
