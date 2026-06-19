@@ -1718,6 +1718,12 @@ select:focus-visible {
   font: inherit;
   font-size: 13px;
   margin-inline-start: 6px;
+  max-width: 100%;
+  min-width: 0;
+}
+.move-to-wrap {
+  min-width: 0;
+  flex-shrink: 1;
 }
 .move-to-wrap select:focus-visible {
   border-color: var(--accent);

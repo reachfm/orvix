@@ -1492,7 +1492,7 @@
     wrap.appendChild(body);
     view.appendChild(wrap);
     var tb = view.parentNode.querySelector('.toolbar');
-    if (tb) tb.querySelectorAll('.action-btn').forEach(function (b) {
+    if (tb) tb.querySelectorAll('.action-btn, .move-to-wrap').forEach(function (b) {
       b.remove();
     });
   }
@@ -1534,7 +1534,15 @@
     // Toolbar actions.
     var readingPane = view.parentNode;
     var tb = readingPane.querySelector('.toolbar');
-    tb.querySelectorAll('.action-btn').forEach(function (b) {
+    // Teardown targets every dynamic toolbar child so a
+    // re-render never compounds the prior one. The
+    // .move-to-wrap div is the easy thing to forget — it
+    // is not an .action-btn, so omitting it from the
+    // selector leaks a fresh "Move to…" <select> into the
+    // toolbar on every in-pane action (star toggle, mark
+    // read/unread, spam toggle) and on every cross-message
+    // navigation that goes through the loading skeleton.
+    tb.querySelectorAll('.action-btn, .move-to-wrap').forEach(function (b) {
       b.remove();
     });
     function actBtn(label, title, fn) {

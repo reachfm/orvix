@@ -18,6 +18,7 @@ package handlers_test
 
 import (
 	"os/exec"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -580,6 +581,83 @@ func TestWebmailJSCallsNewEndpoints(t *testing.T) {
 	// of the show-original anchor.
 	if !strings.Contains(src, "/source") {
 		t.Errorf("webmail.js missing /source endpoint reference for show-original action")
+	}
+}
+
+// TestWebmailReadingToolbarTeardownRemovesMoveToWrap pins the
+// regression guard for the live "duplicate Move to…" bug fixed
+// in fix/webmail-live-stabilization-3a.
+//
+// The reading-pane toolbar (.reading-pane > .toolbar) has two
+// static children (the Back button and a spacer) and a dynamic
+// tail (action buttons + a .move-to-wrap <div> that hosts the
+// "Move to…" <select>). When the pane re-renders for the same
+// message — which happens on every star toggle, mark-read /
+// mark-unread, spam / not-spam toggle — the teardown MUST wipe
+// every dynamic child before appending the new ones. The earlier
+// code only wiped .action-btn, so the previous .move-to-wrap
+// <div> survived across re-renders and a fresh one was appended
+// each time. The user-visible result was N "Move to…" controls
+// in the reading-pane toolbar after N in-pane actions.
+//
+// The same teardown bug lived in renderReadingPaneLoading, so a
+// stale .move-to-wrap from message A would also survive the
+// loading skeleton of message B and compound when the real
+// render landed. Both teardowns now target both classes.
+//
+// We assert the teardown selector names both .action-btn AND
+// .move-to-wrap. The selector is a quoted string literal so the
+// regex below is precise about the names but tolerant to inner
+// whitespace and to either single or double quote styles.
+func TestWebmailReadingToolbarTeardownRemovesMoveToWrap(t *testing.T) {
+	root := webmailRepoRoot(t)
+	src := readFile(t, root, "release/webmail/assets/webmail.js")
+	// Selector pattern. Accepts single or double quotes and any
+	// amount of whitespace between the class names so the test
+	// does not become brittle to cosmetic edits.
+	pattern := regexp.MustCompile(`querySelectorAll\(\s*['"]\.action-btn\s*,\s*\.move-to-wrap\s*['"]`)
+	if !pattern.MatchString(src) {
+		t.Errorf("webmail.js reading-pane toolbar teardown must remove BOTH .action-btn and .move-to-wrap; otherwise in-pane re-renders (star toggle, mark read/unread, spam toggle) and cross-message navigation through renderReadingPaneLoading compound duplicate 'Move to...' controls in the toolbar")
+	}
+	// Also assert the move-to-wrap is only CREATED in one place
+	// per render. If a future change adds a second `class:
+	// 'move-to-wrap'` creation site, that would also reintroduce
+	// the duplicate. We tolerate whitespace inside the class
+	// string but require the literal substring `move-to-wrap`
+	// to appear as a class assignment.
+	classAssigns := regexp.MustCompile(`class\s*:\s*['"][^'"]*move-to-wrap[^'"]*['"]`)
+	matches := classAssigns.FindAllStringIndex(src, -1)
+	if len(matches) < 1 {
+		t.Errorf("webmail.js must create the .move-to-wrap wrapper at least once in the reading-pane toolbar")
+	}
+	if len(matches) > 1 {
+		t.Errorf("webmail.js creates .move-to-wrap in %d places — the reading-pane toolbar should only ever render one Move to... control", len(matches))
+	}
+}
+
+// TestWebmailReadingToolbarMoveToSelectIsSingleSource pins that
+// the placeholder option string used as the "Move to…" <select>
+// default in the reading-pane toolbar is created in exactly
+// one place. The actual literal in the source is the JS
+// single-quoted `'Move to…'` (Unicode horizontal ellipsis
+// U+2026, not three ASCII periods) — the option is appended
+// to the inline <select> inside renderReadingPane(). If a
+// future change adds a second placeholder creation (copy-
+// paste, stub, refactor that splits the function), the user
+// would see duplicate "Move to…" controls even if the
+// teardown were correct.
+//
+// We search the single-quoted form specifically because it
+// matches the JS string literal that becomes the rendered
+// <option> label. Double-quoted occurrences inside comments
+// are documentation and must not be counted.
+func TestWebmailReadingToolbarMoveToSelectIsSingleSource(t *testing.T) {
+	root := webmailRepoRoot(t)
+	src := readFile(t, root, "release/webmail/assets/webmail.js")
+	pattern := regexp.MustCompile(`'Move to…'`)
+	matches := pattern.FindAllStringIndex(src, -1)
+	if len(matches) != 1 {
+		t.Errorf("webmail.js must define the reading-pane 'Move to…' placeholder option exactly once, got %d", len(matches))
 	}
 }
 
