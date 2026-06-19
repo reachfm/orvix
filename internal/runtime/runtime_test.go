@@ -237,7 +237,7 @@ func TestWarningsRollup(t *testing.T) {
 	t.Run("public key missing", func(t *testing.T) {
 		tel := NewTelemetry(Inputs{
 			StartedAt: time.Now().Add(-time.Minute),
-			License:   LicensePosture{Mode: "offline", PublicKeyLoaded: false, Status: "offline"},
+			License:   LicensePosture{Mode: "offline", PublicKeyLoaded: false, PublicKeyState: "missing", Status: "offline"},
 		})
 		seen := false
 		for _, w := range tel.Warnings {
@@ -249,10 +249,25 @@ func TestWarningsRollup(t *testing.T) {
 			t.Errorf("expected license_public_key_missing warning; got %+v", tel.Warnings)
 		}
 	})
+	t.Run("public key invalid", func(t *testing.T) {
+		tel := NewTelemetry(Inputs{
+			StartedAt: time.Now().Add(-time.Minute),
+			License:   LicensePosture{Mode: "missing", PublicKeyLoaded: false, PublicKeyState: "invalid", Status: "missing"},
+		})
+		seen := false
+		for _, w := range tel.Warnings {
+			if w.Code == "license_public_key_invalid" {
+				seen = true
+			}
+		}
+		if !seen {
+			t.Errorf("expected license_public_key_invalid warning; got %+v", tel.Warnings)
+		}
+	})
 	t.Run("public key loaded skips warning", func(t *testing.T) {
 		tel := NewTelemetry(Inputs{
 			StartedAt: time.Now().Add(-time.Minute),
-			License:   LicensePosture{Mode: "offline", PublicKeyLoaded: true, Status: "ok"},
+			License:   LicensePosture{Mode: "offline", PublicKeyLoaded: true, PublicKeyState: "loaded", Status: "ok"},
 		})
 		for _, w := range tel.Warnings {
 			if w.Code == "license_public_key_missing" {

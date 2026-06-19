@@ -2229,15 +2229,26 @@ func scanInt64(row interface{ Scan(...interface{}) error }) (int64, error) {
 // is optional — the operator can run without one (community
 // mode) and the dashboard will render the posture honestly.
 func (h *Handler) licensePostureForTelemetry(ctx context.Context) runtime.LicensePosture {
-	lp := runtime.LicensePosture{Mode: "unknown", Status: "unknown"}
+	lp := runtime.LicensePosture{
+		Mode:            "unknown",
+		Status:          "unknown",
+		PublicKeyState:  "missing",
+		ValidationState: "unknown",
+	}
 
 	if h.cfg != nil {
-		// Public key loaded = the configured path points to a
-		// regular file containing a parseable PEM public key.
-		// We verify by reading a bounded amount, decoding the
-		// PEM block, and parsing with crypto/x509. We never
-		// expose the file contents, key material, or path.
-		lp.PublicKeyLoaded = validatePublicKeyFile(h.cfg.License.PublicKeyPath)
+		// Determine the effective public key path. Use the
+		// configured value when set; fall back to the canonical
+		// default so missing config does not leave the dashboard
+		// guessing.
+		pkPath := h.cfg.License.PublicKeyPath
+		if pkPath == "" {
+			pkPath = "/etc/orvix/license_public.pem"
+		}
+		pkState := validatePublicKeyFile(pkPath)
+		lp.PublicKeyState = pkState
+		lp.PublicKeyLoaded = (pkState == "loaded")
+
 		if h.cfg.License.OfflineMode {
 			lp.Mode = "offline"
 		} else if lp.PublicKeyLoaded {
@@ -2258,7 +2269,18 @@ func (h *Handler) licensePostureForTelemetry(ctx context.Context) runtime.Licens
 			if !lic.ExpiresAt.IsZero() {
 				lp.ExpiresAt = lic.ExpiresAt.UTC().Format(time.RFC3339)
 			}
+			// Validation state: an active license row exists.
+			if lp.PublicKeyLoaded {
+				lp.ValidationState = "valid"
+			} else {
+				lp.ValidationState = "offline"
+			}
+		} else if lp.PublicKeyLoaded {
+			// Public key loaded but no active license row.
+			lp.ValidationState = "offline"
 		}
+	} else if lp.PublicKeyLoaded {
+		lp.ValidationState = "offline"
 	}
 
 	switch {
@@ -2272,50 +2294,53 @@ func (h *Handler) licensePostureForTelemetry(ctx context.Context) runtime.Licens
 	return lp
 }
 
-// validatePublicKeyFile checks that the given path exists, is a
-// regular file, and contains a parseable PEM-encoded public key.
-// It never exposes the path, file contents, key material, or
-// parse errors. Returns true only when every check passes.
-func validatePublicKeyFile(path string) bool {
+// validatePublicKeyFile checks the path and returns a classification
+// string: "loaded" when the file is a valid PEM public key, "invalid"
+// when the file exists but is not valid, or "missing" when the path
+// is empty or no file exists.
+func validatePublicKeyFile(path string) string {
 	if path == "" {
-		return false
+		return "missing"
 	}
 	// 1. Stat the path — must exist and be a regular file.
 	fi, err := os.Stat(path)
-	if err != nil || fi.IsDir() || !fi.Mode().IsRegular() {
-		return false
+	if err != nil {
+		return "missing"
 	}
-	// 2. Open and read a bounded amount (16 KB is ample for any
-	// public key PEM; typical RSA 4096 public key is under 1 KB).
+	if fi.IsDir() || !fi.Mode().IsRegular() {
+		return "invalid"
+	}
+	// 2. Open and read a bounded amount (16 KB).
 	f, err := os.Open(path)
 	if err != nil {
-		return false
+		return "invalid"
 	}
 	defer f.Close()
 	buf := make([]byte, 16384)
 	n, err := f.Read(buf)
 	if err != nil && err != io.EOF {
-		return false
+		return "invalid"
 	}
 	if n == 0 {
-		return false
+		return "invalid"
 	}
 	buf = buf[:n]
 	// 3. Decode the PEM block.
 	block, _ := pem.Decode(buf)
 	if block == nil {
-		return false
+		return "invalid"
 	}
-	// 4. Parse the DER bytes as a public key. Accept PKIX/SPKI
-	// (PUBLIC KEY) which handles RSA, ECDSA, Ed25519, and legacy
-	// PKCS1 RSA (RSA PUBLIC KEY).
+	// 4. Parse the DER bytes as a public key.
 	switch block.Type {
 	case "PUBLIC KEY":
 		_, err = x509.ParsePKIXPublicKey(block.Bytes)
 	case "RSA PUBLIC KEY":
 		_, err = x509.ParsePKCS1PublicKey(block.Bytes)
 	default:
-		return false
+		return "invalid"
 	}
-	return err == nil
+	if err != nil {
+		return "invalid"
+	}
+	return "loaded"
 }
