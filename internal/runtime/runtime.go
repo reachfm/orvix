@@ -84,9 +84,24 @@ type QueueCounts struct {
 // LicensePosture is the safe license surface. No private key, no key
 // hash, no expiry token. The presence of public_key_loaded=true means
 // the operator has provisioned a public key file on disk.
+//
+// PublicKeyState is a stable classification:
+//
+//	"missing"  — no configured path or file does not exist
+//	"invalid"  — file exists but is not a valid PEM public key
+//	"loaded"   — valid PEM public key parsed successfully
+//
+// ValidationState is a stable classification:
+//
+//	"offline"  — public key loaded, no online validation
+//	"valid"    — a license row with active=true exists
+//	"invalid"  — license validation was attempted and failed
+//	"unknown"  — state cannot be determined
 type LicensePosture struct {
 	Mode             string `json:"mode"`               // "online" | "offline" | "missing"
 	PublicKeyLoaded  bool   `json:"public_key_loaded"`
+	PublicKeyState   string `json:"public_key_state"`   // "missing" | "invalid" | "loaded"
+	ValidationState  string `json:"validation_state"`   // "offline" | "valid" | "invalid" | "unknown"
 	Status           string `json:"status"`             // "ok" | "warn" | "missing"
 	Tier             string `json:"tier,omitempty"`     // tier from the most recent license row, if any
 	ExpiresAt        string `json:"expires_at,omitempty"`
@@ -255,10 +270,15 @@ func buildWarnings(in Inputs, t Telemetry) []Warning {
 	if in.StartedAt.IsZero() {
 		out = append(out, Warning{Level: "warn", Code: "telemetry_incomplete", Message: "Telemetry incomplete: process start time not reported"})
 	}
-	if !t.License.PublicKeyLoaded {
+	if t.License.PublicKeyState == "missing" {
 		out = append(out, Warning{Level: "warn", Code: "license_public_key_missing", Message: "License public key missing"})
+	} else if t.License.PublicKeyState == "invalid" {
+		out = append(out, Warning{Level: "warn", Code: "license_public_key_invalid", Message: "License public key invalid"})
 	}
-	if t.License.Mode == "missing" {
+	if t.License.PublicKeyState == "loaded" && t.License.ValidationState != "valid" {
+		out = append(out, Warning{Level: "warn", Code: "license_validation_offline", Message: "License validation offline"})
+	}
+	if t.License.Mode == "missing" || t.License.PublicKeyState == "missing" {
 		out = append(out, Warning{Level: "warn", Code: "license_missing", Message: "License not configured"})
 	}
 	if in.QueueCounts.Deferred > 0 {

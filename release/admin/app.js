@@ -1047,20 +1047,37 @@
     var licLabel, licNote, licKind;
     if (licenseInfo) {
       var lp = licenseInfo;
-      if (lp.public_key_loaded === true || lp.public_key === true) {
-        licLabel = (lp.mode && lp.mode !== 'unknown') ? (lp.mode.charAt(0).toUpperCase() + lp.mode.slice(1)) : 'Public-key verified';
-        licNote = lp.expires_at || 'Public-key loaded';
-        licKind = 'good';
+      // Prefer public_key_state from the runtime endpoint
+      // (LICENSE-POSTURE-2D). Falls back to the older
+      // public_key_loaded / mode fields for backward compat.
+      var pks = lp.public_key_state;
+      if (pks === 'loaded' || (pks == null && (lp.public_key_loaded === true || lp.public_key === true))) {
+        var vs = lp.validation_state;
+        if (vs === 'valid') {
+          licLabel = 'Valid';
+          licNote = lp.expires_at || lp.tier || 'License validated';
+          licKind = 'good';
+        } else {
+          // Loaded key without real validation — never show
+          // Online or good. Always show Offline / warn.
+          licLabel = 'Offline';
+          licNote = 'Public key loaded, license validation has not succeeded.';
+          licKind = 'warn';
+        }
+      } else if (pks === 'invalid') {
+        licLabel = 'Invalid key';
+        licNote = 'Replace the license public key with a valid Orvix public key and restart.';
+        licKind = 'bad';
+      } else if (pks === 'missing' || (pks == null && (lp.mode === 'missing' || lp.public_key_loaded === false))) {
+        licLabel = 'Missing key';
+        licNote = 'Install the Orvix license public key and restart the service.';
+        licKind = 'bad';
       } else if (lp.mode === 'offline') {
         licLabel = 'Offline';
-        licNote = lp.expires_at || 'Offline mode';
+        licNote = lp.expires_at || 'Public key loaded, validation offline';
         licKind = 'warn';
-      } else if (lp.mode === 'missing' || lp.public_key_loaded === false) {
-        licLabel = 'Missing';
-        licNote = 'Public key not loaded';
-        licKind = 'bad';
       } else {
-        licLabel = (lp.mode && lp.mode !== 'unknown') ? (lp.mode.charAt(0).toUpperCase() + lp.mode.slice(1)) : 'Unknown';
+        licLabel = 'Unknown';
         licNote = lp.expires_at || '';
         licKind = 'warn';
       }
@@ -1190,6 +1207,10 @@
         switch (warn.code) {
           case 'license_public_key_missing':
             hint = 'Operating in offline mode. Provision a public key to enable online license validation.'; break;
+          case 'license_public_key_invalid':
+            hint = 'The license public key file is invalid. Replace it with a valid Orvix public key and restart.'; break;
+          case 'license_validation_offline':
+            hint = 'Public key loaded, but online license validation has not succeeded. Validation requires a valid license key signed by the loaded public key.'; break;
           case 'license_missing':
             hint = 'License not configured. Operator is running in community mode.'; break;
           case 'queue_deferred':
