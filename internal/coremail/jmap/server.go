@@ -36,13 +36,11 @@ func (s *Server) SetAllowedOrigins(origins []string) {
 	s.AllowedOrigins = sanitizeAllowedOrigins(origins)
 }
 
-// SetListener assigns a pre-bound net.Listener to the server.
-// When set, ListenAndServe will use this listener instead of
-// creating a new one. This is infrastructure used by the admin
-// runtime telemetry so the listener registry can confirm a
-// successful bind before the server starts accepting connections.
-func (s *Server) SetListener(l net.Listener) {
-	s.customListener = l
+// SetListenerCallback registers a callback that is invoked after
+// the server's listener is created (or fails to bind). The
+// callback receives the address string and any bind error.
+func (s *Server) SetListenerCallback(cb func(addr string, err error)) {
+	s.listenerCb = cb
 }
 
 func (s *Server) registerRoutes() {
@@ -58,12 +56,26 @@ func (s *Server) ListenAndServe(addr string) error {
 		Addr:    addr,
 		Handler: s.withMiddleware(s.mux),
 	}
-	// If a custom listener was pre-set via SetListener (admin
-	// runtime telemetry path), use it instead of binding again.
-	if s.customListener != nil {
-		return s.srv.Serve(s.customListener)
+	// Bind the listener synchronously so we can detect success
+	// immediately. JMAP runs on the admin port behind the Fiber
+	// router; TLS is handled at the Fiber layer, not here.
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		if s.listenerCb != nil {
+			s.listenerCb(addr, err)
+		}
+		return fmt.Errorf("jmap listen: %w", err)
 	}
-	return s.srv.ListenAndServe()
+	if s.listenerCb != nil {
+		s.listenerCb(addr, nil)
+	}
+	return s.srv.Serve(listener)
+}
+
+// SetListener is a pre-existing test helper that pre-assigns a
+// listener. Not used in production startup.
+func (s *Server) SetListener(l net.Listener) {
+	s.customListener = l
 }
 
 func (s *Server) Stop() {

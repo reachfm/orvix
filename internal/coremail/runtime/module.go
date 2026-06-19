@@ -352,44 +352,35 @@ func (m *Module) startServer(kind orvixruntime.ListenerKind, addr string, fn fun
 		fmt.Sscanf(portStr, "%d", &port)
 	}
 
-	// Create and bind the listener synchronously so we know
-	// immediately whether bind succeeded or failed. The
-	// listener is then handed to the server so it never needs
-	// to bind itself.
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		m.logger.Error("coremail "+string(kind)+" bind failed", zap.Error(err))
-		if m.listenerReg != nil {
+	// Register the listener callback so the server notifies us
+	// after its real listener is created (preserving TLS paths).
+	cb := func(addr2 string, err error) {
+		if m.listenerReg == nil {
+			return
+		}
+		if err != nil {
 			m.listenerReg.MarkFailed(kind, port, err)
+		} else {
+			m.listenerReg.MarkOK(kind, port)
 		}
-		if m.obs != nil {
-			m.obs.Health.NotReady(string(kind), err.Error())
-		}
-		return
 	}
-	if m.listenerReg != nil {
-		m.listenerReg.MarkOK(kind, port)
-	}
-	m.logger.Info("coremail "+string(kind)+" listening", zap.String("addr", addr))
-
-	// Inject the listener into the server. Each server supports
-	// SetListener (added for SMTP/JMAP, pre-existing for IMAP/POP3).
 	switch kind {
 	case orvixruntime.ListenerSMTP:
-		m.smtpServer.SetListener(listener)
+		m.smtpServer.SetListenerCallback(cb)
 	case orvixruntime.ListenerIMAP:
-		m.imapServer.SetListener(listener)
+		m.imapServer.SetListenerCallback(cb)
 	case orvixruntime.ListenerPOP3:
-		m.pop3Server.SetListener(listener)
+		m.pop3Server.SetListenerCallback(cb)
 	case orvixruntime.ListenerJMAP:
-		m.jmapServer.SetListener(listener)
+		m.jmapServer.SetListenerCallback(cb)
 	}
 
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
+		m.logger.Info("starting coremail "+string(kind), zap.String("addr", addr))
 		if err := fn(addr); err != nil && m.ctx.Err() == nil {
-			m.logger.Error("coremail "+string(kind)+" serve error", zap.Error(err))
+			m.logger.Error("coremail "+string(kind)+" stopped", zap.Error(err))
 			if m.obs != nil {
 				m.obs.Health.NotReady(string(kind), err.Error())
 			}

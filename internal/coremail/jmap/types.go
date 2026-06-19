@@ -78,10 +78,12 @@ type Server struct {
 	mux  *http.ServeMux
 	done chan struct{}
 
-	// customListener, when set via SetListener, is used by
-	// ListenAndServe instead of binding a new listener. This
-	// allows the admin runtime telemetry to confirm a successful
-	// bind before the server starts accepting connections.
+	// listenerCb is called after the real listener is created
+	// or on bind failure. Used by the admin runtime telemetry.
+	listenerCb func(addr string, err error)
+
+	// customListener is a pre-existing test helper. Production
+	// startup creates the listener inside ListenAndServe.
 	customListener net.Listener
 
 	queueEngine interface {

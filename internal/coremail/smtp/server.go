@@ -29,8 +29,11 @@ type Server struct {
 	done       chan struct{}
 
 	localDomainChecker func(ctx context.Context, domain string) (bool, error)
-}
 
+	// listenerCb is called after the real listener is created
+	// or on bind failure. Used by the admin runtime telemetry.
+	listenerCb func(addr string, err error)
+}
 
 
 // NewServer creates a new SMTP server.
@@ -44,16 +47,24 @@ func NewServer(cfg Config, handler *CommandHandler, receiver *Receiver) *Server 
 	}
 }
 
+// SetListenerCallback registers a callback that is invoked after
+// the server's listener is created (or fails to bind).
+func (s *Server) SetListenerCallback(cb func(addr string, err error)) {
+	s.listenerCb = cb
+}
+
 // ListenAndServe starts the SMTP server on the given address.
 func (s *Server) ListenAndServe(addr string) error {
-	// If a listener was pre-set via SetListener (admin runtime
-	// telemetry path), use it instead of binding again.
-	if s.listener == nil {
-		listener, err := net.Listen("tcp", addr)
-		if err != nil {
-			return fmt.Errorf("smtp listen: %w", err)
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		if s.listenerCb != nil {
+			s.listenerCb(addr, err)
 		}
-		s.listener = listener
+		return fmt.Errorf("smtp listen: %w", err)
+	}
+	s.listener = listener
+	if s.listenerCb != nil {
+		s.listenerCb(addr, nil)
 	}
 	return s.serve()
 }
