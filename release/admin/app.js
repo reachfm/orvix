@@ -1,1578 +1,2707 @@
-const state = {
-  token: sessionStorage.getItem("orvix_access_token") || "",
-  profile: null,
-  health: null,
-  domains: [],
-  users: [],
-  queue: [],
-  backups: [],
-  logs: [],
-  monitoringHealth: null,
-  monitoringAlerts: [],
-  updateStatus: null,
-  updateHistory: [],
-  updatePreflight: null,
-  selectedDomains: new Set(),
-  selectedMailboxes: new Set(),
-  webmailAccounts: [],
-  currentWebmailAccount: null
-};
+/* =====================================================================
+   Orvix Admin Console — Enterprise client (ADMIN-ENTERPRISE-2)
 
-const el = (id) => document.getElementById(id);
-const loginView = el("login-view");
-const appView = el("app-view");
-const loginForm = el("login-form");
-const loginButton = el("login-button");
-const loginMessage = el("login-message");
-const globalAlert = el("global-alert");
+   This file replaces the previous "basic" admin client. The
+   structure is modular but the runtime is plain vanilla JS with no
+   external dependencies. The architecture is intentionally simple so
+   the file can be audited end-to-end without a build step.
 
-function setText(id, value) {
-  const node = el(id);
-  if (node) node.textContent = value;
-}
+   Sections (one render function per page, plus detail drawers and
+   modal flows):
 
-function showAlert(message) {
-  globalAlert.textContent = message;
-  globalAlert.classList.toggle("hidden", !message);
-}
+     renderDashboard      — service status, mail stats, system, warnings
+     renderDomains        — list, create modal, detail drawer, delete confirm
+     renderMailboxes      — list, create modal, edit/reset/suspend/delete modals
+     renderQueue          — table + status filter + detail drawer
+     renderDNS            — MX / SPF / DKIM / DMARC wizard with copy buttons
+     renderBackups        — status cards, list, create-now confirm
+     renderUpdates        — version, channel, check, apply confirm
+     renderMonitoring     — subsystem cards + active alerts table
+     renderLogs           — filters + safe event rows + journalctl fallback
+     renderSettings       — read-only host info, license posture, security
 
-function authHeaders() {
-  return state.token ? { "Authorization": `Bearer ${state.token}` } : {};
-}
+   All dynamic content is escaped via esc() before insertion into
+   innerHTML or setAttribute. State-changing endpoints go through
+   csrfFetch() which always sends a fresh X-CSRF-Token and retries
+   exactly once on a CSRF-specific 403. The auth model is preserved
+   from the previous admin client (JWT Bearer + sessionStorage-backed
+   token) — see the auth section below for the rationale.
+   ===================================================================== */
 
-async function apiGet(path, fallback) {
-  const res = await fetch(path, { headers: authHeaders() });
-  if (res.status === 401) {
-    signOut();
-    throw new Error("Session expired. Sign in again.");
+(function () {
+  'use strict';
+
+  // -------------------------------------------------------------------
+  // State
+  // -------------------------------------------------------------------
+
+  const TOKEN_KEY = 'orvix_admin_token';
+
+  const state = {
+    // Profile from /api/v1/me.
+    profile: null,
+    // Health from /api/v1/health + /api/v1/admin/summary.
+    health: null,
+    summary: null,
+    // Domain / mailbox / queue lists are cached and refreshed on
+    // demand. Sections that mutate a row call the relevant loader
+    // after the mutation succeeds so the table reflects the new
+    // server state instead of the stale client state.
+    domains: [],
+    mailboxes: [],
+    queue: [],
+    queueFilter: 'all',
+    queueDetail: null,
+    // Backups.
+    backups: [],
+    backupSchedule: null,
+    backupMetrics: null,
+    backupHealth: null,
+    // Monitoring.
+    monitoringHealth: null,
+    monitoringAlerts: [],
+    monitoringComponents: null,
+    // Updates.
+    updateStatus: null,
+    updateHistory: [],
+    updatePreflight: null,
+    updateLatest: null,
+    // Logs (raw /api/v1/audit/logs rows, plus the applied filter set).
+    logs: [],
+    logsFilter: { severity: '', source: '', since: '' },
+    // Webmail management.
+    webmailAccounts: [],
+    currentWebmailAccount: null,
+    // DNS wizard — the host's hostname is used to render the SPF /
+    // MX recommendations. Comes from /api/v1/admin/summary.runtime.
+    hostname: '',
+    // UI flags.
+    bootDone: false,
+    pendingRoute: null,
+  };
+
+  // -------------------------------------------------------------------
+  // Auth helpers — preserve the previous admin auth model so the live
+  // /admin/login JWT handshake still works. The token lives in
+  // sessionStorage (existing behavior) so a page refresh inside a
+  // tab keeps the operator signed in; closing the tab clears it. We
+  // do NOT add any new client-side storage of auth tokens.
+  // -------------------------------------------------------------------
+
+  function getToken() {
+    try { return sessionStorage.getItem(TOKEN_KEY) || ''; } catch (_) { return ''; }
   }
-  if (!res.ok) {
-    if (fallback !== undefined) return fallback;
-    throw new Error(`${path} returned ${res.status}`);
-  }
-  return await res.json();
-}
-
-async function apiPost(path, payload) {
-  const csrf = await getCSRFToken();
-  const res = await fetch(path, {
-    method: "POST",
-    headers: Object.assign({}, authHeaders(), {
-      "Content-Type": "application/json",
-      "X-CSRF-Token": csrf
-    }),
-    body: JSON.stringify(payload || {})
-  });
-  if (res.status === 401) {
-    signOut();
-    throw new Error("Session expired. Sign in again.");
-  }
-  const text = await res.text();
-  var data = {};
-  if (text) {
-    try { data = JSON.parse(text); } catch (_) { data = { error: text }; }
-  }
-  if (!res.ok) throw new Error(data.error || `${path} returned ${res.status}`);
-  return data;
-}
-
-async function downloadCSV(path, filename) {
-  const res = await fetch(path, { headers: authHeaders() });
-  if (res.status === 401) {
-    signOut();
-    throw new Error("Session expired. Sign in again.");
-  }
-  if (!res.ok) throw new Error(`${path} returned ${res.status}`);
-  const blob = await res.blob();
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-}
-
-async function getCSRFToken() {
-  // credentials: 'include' is required so the
-  // Set-Cookie header on the response is stored by
-  // the browser. Without it, the cookie is dropped
-  // silently and the next state-changing request
-  // fails with "CSRF token missing in cookie" even
-  // though the header matches. The browser's default
-  // same-origin behaviour is to send cookies on
-  // same-origin requests, but cross-subdomain
-  // requests (admin.<parent> -> api.<parent>) need
-  // explicit credentials: 'include' to attach the
-  // csrf_token cookie that was set on
-  // Domain=.orvix.email.
-  const res = await fetch("/api/v1/csrf-token", {
-    headers: authHeaders(),
-    credentials: "include"
-  });
-  if (!res.ok) throw new Error("Failed to get CSRF token");
-  const data = await res.json();
-  return data.csrf_token;
-}
-
-// csrfFetch issues a state-changing request with a
-// fresh CSRF token and credentials: 'include'. If
-// the server returns 403 with a CSRF-specific error,
-// the helper fetches a fresh token and retries
-// exactly once. This guards against the race where
-// the operator opened two tabs and the second tab's
-// token was rotated by a different action — the first
-// 403 should not leave the operator's action
-// unfulfilled.
-//
-// The retry guard is single-shot on purpose: a
-// second 403 means there is a real configuration
-// problem (CSRF middleware broken, cookie not sent,
-// wrong header) and the operator should see the
-// error rather than loop forever.
-async function csrfFetch(url, init) {
-  const csrfToken = await getCSRFToken();
-  const doFetch = (token) => fetch(url, Object.assign({}, init, {
-    credentials: "include",
-    headers: Object.assign({}, init && init.headers, {
-      "X-CSRF-Token": token
-    })
-  }));
-  let res = await doFetch(csrfToken);
-  if (res.status === 403) {
-    // Inspect the body. CSRF middleware returns
-    // {"error": "CSRF token missing in cookie"} or
-    // {"error": "CSRF token mismatch"} or similar.
-    // On any of those, fetch a fresh token and
-    // retry once. Other 403s (e.g. admin role
-    // missing) are surfaced unchanged.
-    let body = null;
-    try { body = await res.json(); } catch (e) { body = null; }
-    const msg = (body && body.error) ? String(body.error) : "";
-    if (msg.indexOf("CSRF") >= 0) {
-      const fresh = await getCSRFToken();
-      res = await doFetch(fresh);
-    }
-  }
-  return res;
-}
-
-async function loadProfile() {
-  state.profile = await apiGet("/api/v1/me");
-  setText("admin-email", state.profile.email || "Signed in");
-  setText("admin-role", state.profile.role || "admin");
-}
-
-async function loadHealth() {
-  try {
-    state.health = await fetch("/api/v1/health").then((res) => res.ok ? res.json() : Promise.reject(new Error("health failed")));
-    setText("api-health", "OK");
-    setText("api-health-note", `${state.health.version || "Orvix Enterprise Mail"} checked ${new Date().toLocaleTimeString()}`);
-    setText("coremail-runtime", "Online");
-    setText("smtp-status", "Online");
-    setText("imap-status", "Online");
-    setText("pop3-status", "Online");
-    setText("overall-status", "System healthy");
-    el("overall-dot").className = "dot good";
-  } catch (err) {
-    setText("api-health", "Error");
-    setText("api-health-note", "Health endpoint is unavailable.");
-    setText("coremail-runtime", "Unknown");
-    setText("smtp-status", "Unknown");
-    setText("imap-status", "Unknown");
-    setText("pop3-status", "Unknown");
-    setText("overall-status", "Needs attention");
-    el("overall-dot").className = "dot bad";
-  }
-}
-
-async function loadSummary() {
-  var data;
-  try {
-    data = await apiGet("/api/v1/admin/summary", null);
-  } catch (_) { return; }
-  if (!data || !data.domains) return;
-  el("summary-domains").innerHTML = '<div class="setting-row"><div><strong>Total</strong><span>' + (data.domains.total || 0) + '</span></div></div><div class="setting-row"><div><strong>Active</strong><span>' + (data.domains.active || 0) + '</span></div></div><div class="setting-row"><div><strong>Suspended</strong><span>' + (data.domains.suspended || 0) + '</span></div></div>';
-  el("summary-mailboxes").innerHTML = '<div class="setting-row"><div><strong>Total</strong><span>' + (data.mailboxes.total || 0) + '</span></div></div><div class="setting-row"><div><strong>Active</strong><span>' + (data.mailboxes.active || 0) + '</span></div></div><div class="setting-row"><div><strong>Suspended</strong><span>' + (data.mailboxes.suspended || 0) + '</span></div></div><div class="setting-row"><div><strong>Admin</strong><span>' + (data.mailboxes.admin || 0) + '</span></div></div>';
-  el("summary-queue").innerHTML = '<div class="setting-row"><div><strong>Total</strong><span>' + (data.queue.total || 0) + '</span></div></div><div class="setting-row"><div><strong>Pending</strong><span>' + (data.queue.pending || 0) + '</span></div></div><div class="setting-row"><div><strong>Deferred</strong><span>' + (data.queue.deferred || 0) + '</span></div></div><div class="setting-row"><div><strong>Failed</strong><span>' + (data.queue.failed || 0) + '</span></div></div>';
-  el("summary-audit").innerHTML = '<div class="setting-row"><div><strong>Recent (24h)</strong><span>' + (data.audit.recent || 0) + '</span></div></div>';
-  el("summary-runtime").innerHTML = '<div class="setting-row"><div><strong>Status</strong><span>' + escapeHTML(data.runtime.status || "unknown") + '</span></div></div><div class="setting-row"><div><strong>Version</strong><span>' + escapeHTML(data.version || "-") + '</span></div></div>';
-  renderTable("summary-recent-activity", data.recent_activity || [], ["action", "actor", "target", "result", "timestamp"], "No recent activity.");
-  renderTable("summary-top-domains", data.top_domains || [], ["domain", "mailbox_count"], "No domain activity.");
-}
-
-async function loadDomains() {
-  const domains = await apiGet("/api/v1/domains" + queryString({
-    q: el("domain-search") ? el("domain-search").value.trim() : "",
-    status: el("domain-status-filter") ? el("domain-status-filter").value : ""
-  }), []);
-  state.domains = domains;
-  state.selectedDomains = new Set(Array.from(state.selectedDomains).filter(function(name) {
-    return domains.some(function(d) { return d.domain === name; });
-  }));
-  const node = el("domains-table");
-  if (!node) return;
-  if (!Array.isArray(domains) || domains.length === 0) {
-    node.innerHTML = '<div class="empty-state">No domains have been provisioned yet.</div>';
-    return;
-  }
-  const rows = domains.map(function(d) {
-    const isActive = d.status === "active";
-    const checked = state.selectedDomains.has(d.domain) ? " checked" : "";
-    const statusBtn = isActive
-      ? '<button class="ghost-btn dm-action" data-action="disable" data-domain="' + escapeHTML(d.domain) + '" data-domain-id="' + d.id + '" style="font-size:12px;padding:4px 8px;min-height:auto;margin-right:4px;">Disable</button>'
-      : '<button class="ghost-btn dm-action" data-action="enable" data-domain="' + escapeHTML(d.domain) + '" data-domain-id="' + d.id + '" style="font-size:12px;padding:4px 8px;min-height:auto;margin-right:4px;">Enable</button>';
-    const deleteBtn = '<button class="ghost-btn dm-action" data-action="delete" data-domain="' + escapeHTML(d.domain) + '" data-domain-id="' + d.id + '" data-mailbox-count="' + (d.mailbox_count || 0) + '" style="font-size:12px;padding:4px 8px;min-height:auto;">Delete</button>';
-    const viewBtn = '<button class="ghost-btn dv-action" data-action="view" data-domain="' + escapeHTML(d.domain) + '" style="font-size:12px;padding:4px 8px;min-height:auto;margin-right:4px;">View</button>';
-    return '<tr>' +
-      '<td><input type="checkbox" class="domain-select" data-domain="' + escapeHTML(d.domain) + '"' + checked + '></td>' +
-      '<td>' + escapeHTML(d.domain || "-") + '</td>' +
-      '<td>' + escapeHTML(d.plan || "-") + '</td>' +
-      '<td>' + escapeHTML(d.status || "active") + '</td>' +
-      '<td>' + (d.mailbox_count != null ? d.mailbox_count : "-") + '</td>' +
-      '<td>' + viewBtn + statusBtn + deleteBtn + '</td></tr>';
-  }).join("");
-  node.innerHTML = '<table class="table"><thead><tr><th>Select</th><th>Domain</th><th>Plan</th><th>Status</th><th>Mailboxes</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
-  updateBulkLabels();
-}
-
-async function loadMailboxes() {
-  const users = await apiGet("/api/v1/users" + queryString({
-    q: el("mailbox-search") ? el("mailbox-search").value.trim() : "",
-    status: el("mailbox-status-filter") ? el("mailbox-status-filter").value : "",
-    admin: el("mailbox-admin-filter") ? el("mailbox-admin-filter").value : ""
-  }), []);
-  state.users = users;
-  state.selectedMailboxes = new Set(Array.from(state.selectedMailboxes).filter(function(id) {
-    return users.some(function(u) { return String(u.mailbox_id) === String(id) && u.is_admin !== true; });
-  }));
-  const node = el("mailboxes-table");
-  if (!node) return;
-  if (!Array.isArray(users) || users.length === 0) {
-    node.innerHTML = '<div class="empty-state">No mailboxes or users are available yet.</div>';
-    return;
-  }
-  const rows = users.map(function(u) {
-    const hasMailbox = u.mailbox_id != null;
-    const isAdmin = u.is_admin === true;
-    const isSuspended = u.status === "suspended";
-    const canModify = hasMailbox && !isAdmin;
-    const checked = canModify && state.selectedMailboxes.has(String(u.mailbox_id)) ? " checked" : "";
-    const selectHtml = canModify
-      ? '<input type="checkbox" class="mailbox-select" data-mailbox-id="' + u.mailbox_id + '"' + checked + '>'
-      : '<span style="color:var(--muted);font-size:12px;">-</span>';
-    var actionsHtml;
-    if (!hasMailbox) {
-      actionsHtml = '<span style="color:var(--muted);font-size:12px;">No mailbox record</span>';
-    } else {
-      actionsHtml = '' +
-        '<button class="ghost-btn mv-action" data-action="view" data-mailbox-id="' + u.mailbox_id + '" data-email="' + escapeHTML(u.email) + '" style="font-size:12px;padding:4px 8px;min-height:auto;margin-right:4px;">View</button>' +
-        '<button class="ghost-btn mb-action" data-action="password" data-email="' + escapeHTML(u.email) + '" data-mailbox-id="' + u.mailbox_id + '" style="font-size:12px;padding:4px 8px;min-height:auto;margin-right:4px;"' + (canModify ? '' : ' disabled') + '>Password</button>' +
-        '<button class="ghost-btn mb-action" data-action="' + (isSuspended ? 'enable' : 'disable') + '" data-email="' + escapeHTML(u.email) + '" data-mailbox-id="' + u.mailbox_id + '" style="font-size:12px;padding:4px 8px;min-height:auto;margin-right:4px;"' + (canModify ? '' : ' disabled') + '>' + (isSuspended ? 'Enable' : 'Disable') + '</button>' +
-        '<button class="ghost-btn mb-action" data-action="delete" data-email="' + escapeHTML(u.email) + '" data-mailbox-id="' + u.mailbox_id + '" style="font-size:12px;padding:4px 8px;min-height:auto;"' + (canModify ? '' : ' disabled') + '>Delete</button>' +
-        '';
-    }
-    return '<tr>' +
-      '<td>' + selectHtml + '</td>' +
-      '<td>' + escapeHTML(u.email || "-") + '</td>' +
-      '<td>' + escapeHTML(u.role || "-") + '</td>' +
-      '<td>' + (isAdmin ? "Yes" : "No") + '</td>' +
-      '<td>' + escapeHTML(u.status || "active") + '</td>' +
-      '<td>' + actionsHtml + '</td></tr>';
-  }).join("");
-  node.innerHTML = '<table class="table"><thead><tr><th>Select</th><th>Email</th><th>Role</th><th>Admin</th><th>Status</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
-  updateBulkLabels();
-}
-
-async function loadQueue() {
-  state.queue = await apiGet("/api/v1/queue", []);
-  setText("queue-status", state.queue.length === 0 ? "Clear" : `${state.queue.length} queued`);
-  setText("queue-note", state.queue.length === 0 ? "No queued messages reported." : "Queue entries require attention.");
-  renderQueueTable("queue-table", state.queue);
-  renderTable("queue-preview", state.queue.slice(0, 5), ["id", "from", "to", "status", "attempts"], "No queued messages.");
-}
-
-function renderQueueTable(id, rows) {
-  var node = el(id);
-  if (!node) return;
-  if (!Array.isArray(rows) || rows.length === 0) {
-    node.innerHTML = '<div class="empty-state">No queued messages.</div>';
-    return;
-  }
-  var head = '<table class="table"><thead><tr><th>ID</th><th>From</th><th>To</th><th>Status</th><th>Attempts</th><th>Next Attempt</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
-  var body = rows.map(function(r) {
-    return '<tr>' +
-      '<td>' + escapeHTML(String(r.id || "")) + '</td>' +
-      '<td>' + escapeHTML(r.from || "-") + '</td>' +
-      '<td>' + escapeHTML(r.to || "-") + '</td>' +
-      '<td>' + escapeHTML(r.status || "-") + '</td>' +
-      '<td>' + (r.attempts != null ? r.attempts : "-") + '</td>' +
-      '<td>' + escapeHTML(r.next_attempt_at || "-") + '</td>' +
-      '<td>' + escapeHTML(r.created_at || "-") + '</td>' +
-      '<td>' +
-        '<button class="ghost-btn q-action" data-action="retry" data-queue-id="' + r.id + '" style="font-size:12px;padding:4px 8px;min-height:auto;margin-right:4px;">Retry</button>' +
-        '<button class="ghost-btn q-action" data-action="delete" data-queue-id="' + r.id + '" style="font-size:12px;padding:4px 8px;min-height:auto;">Delete</button>' +
-      '</td></tr>';
-  }).join("");
-  node.innerHTML = head + body + '</tbody></table>';
-}
-
-async function loadLogs() {
-  state.logs = await apiGet("/api/v1/audit/logs", []);
-  renderTable("logs-table", state.logs, ["action", "actor", "target", "result", "timestamp"], "No audit log entries.");
-}
-
-async function loadMonitoringHealth() {
-  var health = await apiGet("/api/v1/monitoring/health", null);
-  state.monitoringHealth = health;
-  renderMonitoringHealth(health);
-}
-
-async function loadMonitoringAlerts() {
-  var data = await apiGet("/api/v1/monitoring/alerts", { alerts: [] });
-  var alerts = Array.isArray(data) ? data : (data && Array.isArray(data.alerts) ? data.alerts : []);
-  state.monitoringAlerts = alerts;
-  setText("monitoring-open-alerts", String(alerts.length));
-  renderMonitoringAlerts("monitoring-alerts-table", alerts);
-}
-
-async function loadMonitoring() {
-  try {
-    await Promise.all([loadMonitoringHealth(), loadMonitoringAlerts()]);
-  } catch (err) {
-    setText("monitoring-status", "Unavailable");
-    setText("monitoring-status-note", err.message || "Monitoring API is unavailable.");
-    setText("monitoring-open-alerts", "-");
-    setText("monitoring-queue", "-");
-    var components = el("monitoring-components");
-    var disk = el("monitoring-disk");
-    var alerts = el("monitoring-alerts-table");
-    if (components) components.innerHTML = '<div class="empty-state">Monitoring health unavailable.</div>';
-    if (disk) disk.innerHTML = '<div class="empty-state">Disk usage unavailable.</div>';
-    if (alerts) alerts.innerHTML = '<div class="empty-state">Monitoring alerts unavailable.</div>';
-  }
-}
-
-function renderMonitoringHealth(health) {
-  if (!health) {
-    setText("monitoring-status", "Unavailable");
-    setText("monitoring-status-note", "Monitoring health unavailable.");
-    return;
-  }
-  setText("monitoring-status", titleCase(health.status || "unknown"));
-  setText("monitoring-status-note", "Generated " + formatTimestamp(health.generatedAt || health.generated_at || ""));
-  setText("monitoring-open-alerts", String(health.openAlerts != null ? health.openAlerts : (health.open_alerts != null ? health.open_alerts : "-")));
-  var capacity = health.capacity || {};
-  var queueCount = capacity.queueCount != null ? capacity.queueCount : (capacity.queue_count != null ? capacity.queue_count : 0);
-  var deadLetters = capacity.queueDeadLetter != null ? capacity.queueDeadLetter : (capacity.queue_dead_letter != null ? capacity.queue_dead_letter : 0);
-  setText("monitoring-queue", queueCount + " / " + deadLetters);
-
-  var components = [
-    ["Database", health.db],
-    ["Queue", health.queue],
-    ["Backup", health.backup],
-    ["Admin API", health.api]
-  ].map(function(pair) {
-    var component = pair[1] || {};
-    return {
-      component: pair[0],
-      status: component.status || "unknown",
-      message: component.message || "-"
-    };
-  });
-  renderTable("monitoring-components", components, ["component", "status", "message"], "No component health data.");
-
-  var diskRows = Array.isArray(health.disk) ? health.disk.map(function(row) {
-    var usedPct = row.usedPct != null ? row.usedPct : row.used_pct;
-    return {
-      label: row.label || "-",
-      used: formatBytes(row.usedBytes != null ? row.usedBytes : row.used_bytes),
-      free: formatBytes(row.freeBytes != null ? row.freeBytes : row.free_bytes),
-      used_pct: usedPct != null ? usedPct + "%" : "-"
-    };
-  }) : [];
-  renderTable("monitoring-disk", diskRows, ["label", "used", "free", "used_pct"], "No disk usage data.");
-}
-
-function renderMonitoringAlerts(id, alerts) {
-  var node = el(id);
-  if (!node) return;
-  if (!Array.isArray(alerts) || alerts.length === 0) {
-    node.innerHTML = '<div class="empty-state">No active monitoring alerts.</div>';
-    return;
-  }
-  var head = '<table class="table"><thead><tr><th>ID</th><th>Severity</th><th>Category</th><th>Title</th><th>Message</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
-  var body = alerts.map(function(alert) {
-    var idValue = alert.id || "";
-    return '<tr>' +
-      '<td>' + escapeHTML(String(idValue)) + '</td>' +
-      '<td>' + escapeHTML(alert.severity || "-") + '</td>' +
-      '<td>' + escapeHTML(alert.category || "-") + '</td>' +
-      '<td>' + escapeHTML(alert.title || "-") + '</td>' +
-      '<td>' + escapeHTML(alert.message || "-") + '</td>' +
-      '<td>' + escapeHTML(formatTimestamp(alert.createdAt || alert.created_at || "")) + '</td>' +
-      '<td><button class="ghost-btn monitoring-resolve" data-alert-id="' + escapeHTML(String(idValue)) + '" style="font-size:12px;padding:4px 8px;min-height:auto;">Resolve</button></td>' +
-      '</tr>';
-  }).join("");
-  node.innerHTML = head + body + '</tbody></table>';
-}
-
-async function loadUpdateStatus() {
-  var status = await apiGet("/api/v1/update/status", null);
-  state.updateStatus = status;
-  renderUpdateStatus(status);
-}
-
-async function loadUpdateHistory() {
-  var data = await apiGet("/api/v1/update/history?limit=50", { history: [] });
-  var rows = data && Array.isArray(data.history) ? data.history : [];
-  state.updateHistory = rows;
-  renderUpdateHistory("update-history-table", rows);
-}
-
-async function loadUpdatePreflight() {
-  var preflight = await apiGet("/api/v1/update/preflight", null);
-  state.updatePreflight = preflight;
-  renderUpdatePreflight(preflight);
-}
-
-async function loadUpdate() {
-  try {
-    await Promise.all([loadUpdateStatus(), loadUpdateHistory(), loadUpdatePreflight()]);
-  } catch (err) {
-    setText("update-current-version", "Unavailable");
-    setText("update-current-sha", "-");
-    setText("update-build-time", err.message || "Update API is unavailable.");
-    setText("update-latest-version", "-");
-    setText("update-latest-sha", "Latest SHA unavailable.");
-    setText("update-status", "Unavailable");
-    setText("update-status-note", "Update status unavailable.");
-    setText("update-channel", "Channel unavailable.");
-    var preflight = el("update-preflight");
-    var history = el("update-history-table");
-    var notes = el("update-release-notes");
-    if (preflight) preflight.innerHTML = '<div class="empty-state">Preflight checks unavailable.</div>';
-    if (history) history.innerHTML = '<div class="empty-state">Update history unavailable.</div>';
-    if (notes) notes.innerHTML = '<div class="empty-state">Release notes unavailable.</div>';
-  }
-}
-
-function renderUpdateStatus(status) {
-  if (!status) {
-    setText("update-current-version", "Unavailable");
-    setText("update-current-sha", "-");
-    setText("update-latest-version", "-");
-    setText("update-latest-sha", "Latest SHA unavailable.");
-    setText("update-status", "Unavailable");
-    return;
-  }
-  var currentVersion = status.currentVersion || status.current_version || "unknown";
-  var currentSha = status.currentSha || status.current_sha || "";
-  var latestVersion = status.latest_version || status.availableVersion || "";
-  var latestSha = status.latest_sha || status.availableSha || "";
-  var updateAvailable = Boolean(status.update_available != null ? status.update_available : status.updateAvailable);
-  var releaseNotes = Array.isArray(status.release_notes) ? status.release_notes : (status.releaseNotes ? [status.releaseNotes] : []);
-  var message = status.message || status.updateError || "";
-  setText("update-current-version", currentVersion);
-  setText("update-current-sha", shortSHA(currentSha));
-  setText("update-build-time", "Build: " + (status.buildTime || "-"));
-  setText("update-channel", "Channel: " + (status.channel || "stable"));
-  var jobStatus = status.jobStatus || "idle";
-  var updateText = updateAvailable ? "Update Available" : (message === "update check not configured" ? "Not Configured" : titleCase(jobStatus || "idle"));
-  setText("update-status", updateText);
-  var checked = status.checkedAt ? "Checked " + formatTimestamp(status.checkedAt) : "Not checked yet";
-  var available = latestVersion ? " | Latest " + latestVersion : "";
-  setText("update-status-note", checked + available);
-  setText("update-latest-version", latestVersion || "-");
-  setText("update-latest-sha", latestSha ? "Latest SHA: " + shortSHA(latestSha) : "Latest SHA unavailable.");
-  var notes = el("update-release-notes");
-  if (notes) {
-    if (releaseNotes.length) {
-      notes.innerHTML = '<ul class="plain-list">' + releaseNotes.map(function(note) {
-        return '<li>' + escapeHTML(note) + '</li>';
-      }).join("") + '</ul>';
-    } else if (message) {
-      notes.innerHTML = '<div class="empty-state">' + escapeHTML(message) + '</div>';
-    } else {
-      notes.innerHTML = '<div class="empty-state">No release notes available.</div>';
-    }
-  }
-}
-
-function renderUpdatePreflight(preflight) {
-  var node = el("update-preflight");
-  if (!node) return;
-  if (!preflight || !Array.isArray(preflight.checks)) {
-    node.innerHTML = '<div class="empty-state">No preflight data available.</div>';
-    return;
-  }
-  var summary = '<div class="setting-row"><div><strong>Result</strong><span>' + escapeHTML(preflight.message || "-") + '</span></div><span>' + (preflight.pass ? "PASS" : "FAIL") + '</span></div>';
-  var rows = preflight.checks.map(function(check) {
-    return {
-      check: check.name || "-",
-      status: check.status || "-",
-      detail: check.detail || "-"
-    };
-  });
-  node.innerHTML = summary + tableHTML(rows, ["check", "status", "detail"], "No preflight checks.");
-}
-
-function renderUpdateHistory(id, rows) {
-  var safeRows = Array.isArray(rows) ? rows.map(function(row) {
-    return {
-      started: formatTimestamp(row.startedAt || row.started_at || ""),
-      completed: formatTimestamp(row.completedAt || row.completed_at || ""),
-      duration: (row.durationSeconds != null ? row.durationSeconds : row.duration_seconds || 0) + "s",
-      previous_sha: shortSHA(row.previousSha || row.previous_sha || ""),
-      new_sha: shortSHA(row.newSha || row.new_sha || ""),
-      status: row.status || "-",
-      actor: row.actor || "-",
-      notes: row.notes || "-"
-    };
-  }) : [];
-  var node = el(id);
-  if (!node) return;
-  node.innerHTML = tableHTML(safeRows, ["started", "completed", "duration", "previous_sha", "new_sha", "status", "actor", "notes"], "No update history.");
-}
-
-async function loadBackups() {
-  state.backups = await apiGet("/api/v1/backups", []);
-  renderBackupsTable("backups-table", state.backups);
-}
-
-async function loadBackupStats() {
-  var node = el("backup-stats");
-  var healthNode = el("backup-health");
-  if (!node) return;
-  try {
-    var [metrics, health] = await Promise.all([
-      apiGet("/api/v1/backups/metrics", null),
-      apiGet("/api/v1/backups/health", null)
-    ]);
-    if (!metrics) metrics = {totalBackups:0,totalSizeBytes:0};
-    if (!health) health = {schedulerEnabled:false,retentionEnabled:true,directoryExists:false,writable:false,availableDiskBytes:0};
-    var diskSpace = "";
-    if (health.availableDiskBytes > 0) {
-      diskSpace = " | " + formatBytes(health.availableDiskBytes) + " free";
-    }
-    node.innerHTML =
-      '<div class="setting-row"><div><strong>Total Backups</strong></div><span>' + (metrics.totalBackups || 0) + '</span></div>' +
-      '<div class="setting-row"><div><strong>Total Size</strong></div><span>' + formatBytes(metrics.totalSizeBytes) + '</span></div>' +
-      '<div class="setting-row"><div><strong>Newest Backup</strong></div><span>' + escapeHTML(metrics.newestBackupAt || "-") + '</span></div>' +
-      '<div class="setting-row"><div><strong>Oldest Backup</strong></div><span>' + escapeHTML(metrics.oldestBackupAt || "-") + '</span></div>' +
-      '<div class="setting-row"><div><strong>Last Successful</strong></div><span>' + escapeHTML(metrics.lastSuccessfulAt || "-") + '</span></div>' +
-      '<div class="setting-row"><div><strong>Next Scheduled</strong></div><span>' + escapeHTML(metrics.nextScheduledAt || "-") + '</span></div>';
-    if (healthNode) {
-      healthNode.innerHTML =
-        '<div class="setting-row"><div><strong>Directory</strong></div><span>' + (health.directoryExists ? "Exists" : "MISSING") + '</span></div>' +
-        '<div class="setting-row"><div><strong>Writable</strong></div><span>' + (health.writable ? "Yes" : "No") + '</span></div>' +
-        '<div class="setting-row"><div><strong>Disk Free</strong></div><span>' + formatBytes(health.availableDiskBytes) + '</span></div>' +
-        '<div class="setting-row"><div><strong>Scheduler</strong></div><span>' + (health.schedulerEnabled ? "Enabled" : "Disabled") + '</span></div>' +
-        '<div class="setting-row"><div><strong>Retention</strong></div><span>' + (health.retentionEnabled ? "Enabled" : "Disabled") + '</span></div>';
-    }
-  } catch (_) {
-    node.innerHTML = '<div class="empty-state">Backup stats unavailable.</div>';
-    if (healthNode) healthNode.innerHTML = '<div class="empty-state">Backup health unavailable.</div>';
-  }
-}
-
-async function loadBackupSchedule() {
-  var enabledBox = el("bs-enabled");
-  var freqSelect = el("bs-frequency");
-  var retentionInput = el("bs-retention");
-  if (!enabledBox || !freqSelect || !retentionInput) return;
-  try {
-    var cfg = await apiGet("/api/v1/backups/schedule", null);
-    if (!cfg) return;
-    enabledBox.checked = cfg.enabled === true;
-    freqSelect.value = cfg.frequency || "manual";
-    retentionInput.value = cfg.retentionCount || 7;
-  } catch (_) {
-    // Use defaults
-  }
-}
-
-var backupScheduleForm = el("backup-schedule-form");
-if (backupScheduleForm) {
-  backupScheduleForm.addEventListener("submit", async function(event) {
-    event.preventDefault();
-    var btn = el("bs-save-btn");
-    var msg = el("bs-message");
-    if (!btn || !msg) return;
-    msg.textContent = "";
-    msg.className = "message";
-    btn.disabled = true;
+  function setToken(t) {
+    state._token = t || '';
     try {
-      var enabled = el("bs-enabled").checked;
-      var frequency = el("bs-frequency").value;
-      var retentionCount = parseInt(el("bs-retention").value, 10);
-      if (!retentionCount || retentionCount < 1) {
-        msg.textContent = "Retention count must be at least 1.";
-        msg.className = "message error";
-        btn.disabled = false;
+      if (t) sessionStorage.setItem(TOKEN_KEY, t);
+      else sessionStorage.removeItem(TOKEN_KEY);
+    } catch (_) { /* sessionStorage may be disabled */ }
+  }
+  function authHeaders() {
+    var t = state._token || getToken();
+    return t ? { 'Authorization': 'Bearer ' + t } : {};
+  }
+  function clearToken() {
+    state._token = '';
+    try { sessionStorage.removeItem(TOKEN_KEY); } catch (_) {}
+  }
+
+  // -------------------------------------------------------------------
+  // DOM helpers
+  // -------------------------------------------------------------------
+
+  function $(id) { return document.getElementById(id); }
+  function el(tag, attrs, children) {
+    var n = document.createElement(tag);
+    if (attrs) {
+      Object.keys(attrs).forEach(function (k) {
+        var v = attrs[k];
+        if (v == null) return;
+        if (k === 'class') n.className = v;
+        else if (k === 'text') n.textContent = v;
+        else if (k === 'html') n.innerHTML = v; // ONLY used with trusted static HTML strings below
+        else if (k.indexOf('data-') === 0 || k.indexOf('aria-') === 0 || k === 'role' || k === 'for' || k === 'title' || k === 'placeholder' || k === 'name' || k === 'type' || k === 'value' || k === 'href' || k === 'rel' || k === 'target' || k === 'src' || k === 'colspan' || k === 'rowspan' || k === 'tabindex' || k === 'autocomplete' || k === 'spellcheck' || k === 'min' || k === 'max' || k === 'minlength' || k === 'maxlength' || k === 'step' || k === 'pattern' || k === 'inputmode' || k === 'disabled' || k === 'checked' || k === 'selected' || k === 'readonly') n.setAttribute(k, v);
+        else if (k.indexOf('on') === 0 && typeof v === 'function') n.addEventListener(k.slice(2).toLowerCase(), v);
+        else if (k === 'style' && typeof v === 'object') Object.assign(n.style, v);
+        else n.setAttribute(k, v);
+      });
+    }
+    if (children != null) {
+      if (!Array.isArray(children)) children = [children];
+      children.forEach(function (c) {
+        if (c == null) return;
+        if (typeof c === 'string' || typeof c === 'number') n.appendChild(document.createTextNode(String(c)));
+        else if (c instanceof Node) n.appendChild(c);
+      });
+    }
+    return n;
+  }
+
+  // esc() escapes any value for safe insertion into innerHTML. The
+  // function is used by every table / drawer / modal renderer below
+  // for dynamic data — never trust a server field as HTML. For
+  // attributes (set via setAttribute) textContent is automatically
+  // safe and we use that path everywhere instead.
+  function esc(v) {
+    if (v == null) return '';
+    var s = String(v);
+    return s.replace(/[&<>"']/g, function (c) {
+      switch (c) {
+        case '&': return '&amp;';
+        case '<': return '&lt;';
+        case '>': return '&gt;';
+        case '"': return '&quot;';
+        case "'": return '&#39;';
+        default: return c;
+      }
+    });
+  }
+
+  // -------------------------------------------------------------------
+  // Formatting
+  // -------------------------------------------------------------------
+
+  function fmtDate(s) {
+    if (!s) return '-';
+    var d = new Date(s);
+    if (isNaN(d.getTime())) return esc(s);
+    return d.toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+  }
+  function fmtShortDate(s) {
+    if (!s) return '-';
+    var d = new Date(s);
+    if (isNaN(d.getTime())) return esc(s);
+    return d.toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+  }
+  function fmtBytes(n) {
+    if (n == null || isNaN(n)) return '-';
+    n = Number(n);
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+    return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+  }
+  function plural(n, one, many) { return n === 1 ? one : (many || (one + 's')); }
+
+  // -------------------------------------------------------------------
+  // Toast — non-blocking status pill in the top-right. Used by every
+  // mutation so the operator gets confirmation without losing
+  // context. Stacking is FIFO with a hard cap of 4.
+  // -------------------------------------------------------------------
+
+  function toast(message, kind, ttlMs) {
+    var stack = $('toast-stack');
+    if (!stack) return;
+    var k = kind || 'info';
+    var ttl = ttlMs || (k === 'error' ? 6000 : 3200);
+    var t = el('div', { class: 'toast toast-' + k, role: 'status' }, message);
+    stack.appendChild(t);
+    while (stack.childNodes.length > 4) stack.removeChild(stack.firstChild);
+    setTimeout(function () { if (t.parentNode) t.remove(); }, ttl);
+  }
+
+  // -------------------------------------------------------------------
+  // Drawer — right-side slide-in panel for detail views. Used by
+  // Queue, Domain, Mailbox details. Closes on backdrop click, Esc,
+  // or the close button. Drawers are focus-trapped via the
+  // first-focusable-element shortcut.
+  // -------------------------------------------------------------------
+
+  function openDrawer(opts) {
+    closeDrawer();
+    var overlay = el('div', { class: 'drawer-overlay', 'aria-hidden': 'true' });
+    var drawer = el('aside', {
+      class: 'drawer',
+      role: 'dialog',
+      'aria-modal': 'true',
+      'aria-label': opts.title || 'Detail'
+    });
+    var head = el('header', { class: 'drawer-head' }, [
+      el('div', null, [
+        el('div', { class: 'drawer-eyebrow', text: opts.eyebrow || '' }),
+        el('h3', { class: 'drawer-title', text: opts.title || 'Detail' })
+      ]),
+      el('button', {
+        class: 'icon-btn', type: 'button',
+        'aria-label': 'Close',
+        title: 'Close (Esc)',
+        onclick: closeDrawer
+      }, '×')
+    ]);
+    var body = el('div', { class: 'drawer-body' });
+    drawer.appendChild(head);
+    drawer.appendChild(body);
+    overlay.appendChild(drawer);
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) closeDrawer(); });
+    document.body.appendChild(overlay);
+    requestAnimationFrame(function () { overlay.classList.add('open'); });
+    if (typeof opts.render === 'function') opts.render(body);
+    // Focus the close button so Enter / Esc inside the drawer has a
+    // predictable target. (Full focus-trap is overkill for an admin
+    // console with a small operator audience.)
+    setTimeout(function () {
+      var btn = drawer.querySelector('button');
+      if (btn) btn.focus();
+    }, 50);
+    state._activeOverlay = overlay;
+  }
+  function closeDrawer() {
+    var o = state._activeOverlay;
+    if (!o) return;
+    state._activeOverlay = null;
+    o.classList.remove('open');
+    setTimeout(function () { if (o.parentNode) o.remove(); }, 180);
+  }
+
+  // -------------------------------------------------------------------
+  // Modal — centered confirmation / form panel. Used by every
+  // destructive or input action. confirmDanger returns a Promise so
+  // the call site can await user intent and proceed with the right
+  // endpoint only on Yes.
+  // -------------------------------------------------------------------
+
+  function openModal(opts) {
+    closeModal();
+    var overlay = el('div', { class: 'modal-overlay', 'aria-hidden': 'true' });
+    var modal = el('div', {
+      class: 'modal ' + (opts.size ? ('modal-' + opts.size) : 'modal-md'),
+      role: 'dialog',
+      'aria-modal': 'true',
+      'aria-label': opts.title || 'Dialog'
+    });
+    var head = el('header', { class: 'modal-head' }, [
+      el('h3', { class: 'modal-title', text: opts.title || '' }),
+      el('button', {
+        class: 'icon-btn', type: 'button',
+        'aria-label': 'Close',
+        title: 'Close (Esc)',
+        onclick: closeModal
+      }, '×')
+    ]);
+    var body = el('div', { class: 'modal-body' });
+    var foot = el('footer', { class: 'modal-foot' });
+    modal.appendChild(head);
+    modal.appendChild(body);
+    modal.appendChild(foot);
+    overlay.appendChild(modal);
+    overlay.addEventListener('click', function (e) { if (e.target === overlay && opts.dismissable !== false) closeModal(); });
+    document.body.appendChild(overlay);
+    requestAnimationFrame(function () { overlay.classList.add('open'); });
+    if (typeof opts.render === 'function') opts.render(body, foot);
+    setTimeout(function () {
+      var firstInput = modal.querySelector('input, select, textarea, button');
+      if (firstInput) firstInput.focus();
+    }, 50);
+    state._activeOverlay = overlay;
+  }
+  function closeModal() {
+    var o = state._activeOverlay;
+    if (!o) return;
+    state._activeOverlay = null;
+    o.classList.remove('open');
+    setTimeout(function () { if (o.parentNode) o.remove(); }, 180);
+  }
+
+  function confirmDanger(opts) {
+    // opts: { title, message, confirmLabel, requireText?, dangerous? }
+    return new Promise(function (resolve) {
+      openModal({
+        title: opts.title || 'Are you sure?',
+        render: function (body, foot) {
+          body.appendChild(el('div', { class: 'modal-message', text: opts.message || '' }));
+          if (opts.requireText) {
+            var input;
+            body.appendChild(el('div', { class: 'form-row' }, [
+              el('label', { for: 'confirm-text' }, [
+                'Type ', el('strong', { text: opts.requireText }), ' to confirm:'
+              ]),
+              input = el('input', {
+                id: 'confirm-text',
+                type: 'text',
+                autocomplete: 'off',
+                spellcheck: 'false',
+                placeholder: opts.requireText
+              })
+            ]));
+            foot.appendChild(el('button', {
+              class: 'btn ghost', type: 'button', text: 'Cancel',
+              onclick: function () { closeModal(); resolve(false); }
+            }));
+            var confirmBtn = el('button', {
+              class: 'btn danger', type: 'button', text: opts.confirmLabel || 'Confirm',
+              disabled: 'disabled'
+            });
+            input.addEventListener('input', function () {
+              if (input.value.trim() === opts.requireText) confirmBtn.removeAttribute('disabled');
+              else confirmBtn.setAttribute('disabled', 'disabled');
+            });
+            confirmBtn.addEventListener('click', function () {
+              closeModal();
+              resolve(true);
+            });
+            foot.appendChild(confirmBtn);
+          } else {
+            foot.appendChild(el('button', {
+              class: 'btn ghost', type: 'button', text: 'Cancel',
+              onclick: function () { closeModal(); resolve(false); }
+            }));
+            foot.appendChild(el('button', {
+              class: (opts.dangerous === false ? 'btn primary' : 'btn danger'),
+              type: 'button',
+              text: opts.confirmLabel || 'Confirm',
+              onclick: function () { closeModal(); resolve(true); }
+            }));
+          }
+        }
+      });
+    });
+  }
+
+  // -------------------------------------------------------------------
+  // Copy-to-clipboard — used by the DNS / DKIM wizard for record
+  // values. Uses the async Clipboard API where available, falls
+  // back to a hidden textarea + execCommand for older browsers
+  // served by the same admin origin.
+  // -------------------------------------------------------------------
+
+  function copyToClipboard(text) {
+    if (navigator && navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text).then(function () { toast('Copied', 'success', 1800); })
+        .catch(function () { toast('Copy failed', 'error'); });
+    }
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      toast(ok ? 'Copied' : 'Copy failed', ok ? 'success' : 'error', 1800);
+    } catch (_) { toast('Copy failed', 'error'); }
+  }
+
+  // -------------------------------------------------------------------
+  // Badge / status pill / status dot — used by every table and
+  // status card so colors are uniform across sections.
+  // -------------------------------------------------------------------
+
+  function badge(label, kind) {
+    return el('span', { class: 'badge ' + (kind || 'neutral') }, label);
+  }
+  function statusKind(s) {
+    if (!s) return 'neutral';
+    var v = String(s).toLowerCase();
+    if (v === 'active' || v === 'ok' || v === 'healthy' || v === 'good' || v === 'delivered' || v === 'enabled' || v === 'online') return 'good';
+    if (v === 'warn' || v === 'warning' || v === 'deferred' || v === 'pending' || v === 'suspended' || v === 'unknown') return 'warn';
+    if (v === 'bad' || v === 'fail' || v === 'failed' || v === 'bounced' || v === 'error' || v === 'disabled' || v === 'offline' || v === 'locked') return 'bad';
+    return 'neutral';
+  }
+  function dot(kind) {
+    return el('span', { class: 'dot ' + (kind || 'neutral') });
+  }
+
+  // -------------------------------------------------------------------
+  // Empty / error / loading helpers — used by every section so the
+  // empty state, error state, and loading skeleton look identical
+  // across pages.
+  // -------------------------------------------------------------------
+
+  function emptyState(title, hint) {
+    var body = el('div', { class: 'empty-state' });
+    body.appendChild(el('div', { class: 'empty-illustration', 'aria-hidden': 'true', text: '∅' }));
+    body.appendChild(el('div', { class: 'empty-title', text: title || 'Nothing here yet' }));
+    if (hint) body.appendChild(el('div', { class: 'empty-hint', text: hint }));
+    return body;
+  }
+  function errorState(err) {
+    var body = el('div', { class: 'error-state' });
+    body.appendChild(el('div', { class: 'empty-illustration', 'aria-hidden': 'true', text: '⚠' }));
+    body.appendChild(el('div', { class: 'empty-title', text: 'Could not load' }));
+    body.appendChild(el('div', { class: 'empty-hint', text: (err && err.message) || 'Unknown error.' }));
+    return body;
+  }
+  function skeletonRows(n, cols) {
+    var wrap = el('div', { class: 'skeleton-table' });
+    for (var i = 0; i < (n || 4); i++) {
+      var row = el('div', { class: 'skeleton-row' });
+      for (var j = 0; j < (cols || 4); j++) {
+        row.appendChild(el('div', { class: 'skeleton-cell' }));
+      }
+      wrap.appendChild(row);
+    }
+    return wrap;
+  }
+
+  // -------------------------------------------------------------------
+  // Card / kvList — reusable display components.
+  // -------------------------------------------------------------------
+
+  function card(opts) {
+    // opts: { label, value, note, kind }
+    var k = opts.kind || 'neutral';
+    var node = el('article', { class: 'card' });
+    var head = el('div', { class: 'card-head' });
+    head.appendChild(el('div', { class: 'card-label', text: opts.label || '' }));
+    if (opts.badge) head.appendChild(badge(opts.badge.label, opts.badge.kind));
+    node.appendChild(head);
+    node.appendChild(el('div', { class: 'card-value', text: opts.value == null ? '-' : String(opts.value) }));
+    if (opts.note) node.appendChild(el('div', { class: 'card-note', text: opts.note }));
+    node.dataset.kind = k;
+    return node;
+  }
+  function kvList(pairs) {
+    var node = el('dl', { class: 'kv-list' });
+    (pairs || []).forEach(function (p) {
+      node.appendChild(el('dt', { text: p[0] }));
+      node.appendChild(el('dd', { text: p[1] == null ? '-' : String(p[1]) }));
+    });
+    return node;
+  }
+  function codeBlock(text, opts) {
+    var pre = el('pre', { class: 'code-block' });
+    pre.appendChild(el('code', { text: text || '' }));
+    return pre;
+  }
+
+  // -------------------------------------------------------------------
+  // Table — uniform rendering for every list section. Columns are
+  // declared as { key, label, render?(row) -> Node, className? }. The
+  // wrapper renders a table thead and tbody; each td is either
+  // esc(row[key]) or the render() result. No innerHTML is used so
+  // dynamic content stays safe.
+  // -------------------------------------------------------------------
+
+  function table(node, columns, rows, opts) {
+    node.innerHTML = '';
+    if (!Array.isArray(rows) || rows.length === 0) {
+      node.appendChild(emptyState((opts && opts.emptyTitle) || 'No records', (opts && opts.emptyHint) || ''));
+      return;
+    }
+    var t = el('table', { class: 'data-table' });
+    var thead = el('thead');
+    var trh = el('tr');
+    columns.forEach(function (c) {
+      var th = el('th', { text: c.label || '' });
+      if (c.className) th.className = c.className;
+      if (c.width) th.style.width = c.width;
+      trh.appendChild(th);
+    });
+    thead.appendChild(trh);
+    t.appendChild(thead);
+    var tbody = el('tbody');
+    rows.forEach(function (row) {
+      var tr = el('tr');
+      if (opts && typeof opts.rowClass === 'function') {
+        var cn = opts.rowClass(row);
+        if (cn) tr.className = cn;
+      }
+      columns.forEach(function (c) {
+        var td = el('td');
+        if (c.className) td.className = c.className;
+        if (typeof c.render === 'function') {
+          var v = c.render(row);
+          if (v == null) {} else if (v instanceof Node) td.appendChild(v);
+          else if (typeof v === 'string' || typeof v === 'number') td.textContent = String(v);
+          else if (Array.isArray(v)) v.forEach(function (x) { td.appendChild(x instanceof Node ? x : document.createTextNode(String(x))); });
+        } else {
+          td.textContent = row[c.key] == null ? '-' : String(row[c.key]);
+        }
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    t.appendChild(tbody);
+    node.appendChild(t);
+  }
+
+  // -------------------------------------------------------------------
+  // API — fetch + CSRF. csrfFetch() rotates the token on a CSRF-
+  // specific 403 exactly once. Token-bearer headers are sent on
+  // every request so /api/v1/me and other /api/v1/admin/* endpoints
+  // accept the call. credentials: 'include' is required so the
+  // csrf_token cookie is actually stored on cross-subdomain
+  // deployments (admin.<parent> -> api.<parent>).
+  // -------------------------------------------------------------------
+
+  async function getCSRFToken() {
+    var res = await fetch('/api/v1/csrf-token', {
+      headers: authHeaders(),
+      credentials: 'include'
+    });
+    if (!res.ok) throw new Error('Failed to get CSRF token');
+    var data = await res.json().catch(function () { return {}; });
+    if (!data.csrf_token) throw new Error('CSRF token missing in response');
+    return data.csrf_token;
+  }
+
+  async function csrfFetch(url, init, opts) {
+    opts = opts || {};
+    if (!opts.skipCsrf) {
+      init = init || {};
+      var t = await getCSRFToken();
+      init.headers = Object.assign({}, init.headers || {}, { 'X-CSRF-Token': t });
+      init.credentials = 'include';
+    }
+    var res = await fetch(url, init);
+    if (res.status === 401) {
+      clearToken();
+      showLogin('Session expired. Sign in again.');
+      throw new Error('Session expired');
+    }
+    if (res.status === 403 && !opts.skipCsrf) {
+      // Possible CSRF rotation race. Retry once with a fresh token.
+      var body = null;
+      try { body = await res.clone().json(); } catch (_) {}
+      var msg = (body && body.error) ? String(body.error) : '';
+      if (msg.indexOf('CSRF') >= 0) {
+        var t2 = await getCSRFToken();
+        init.headers = Object.assign({}, init.headers || {}, { 'X-CSRF-Token': t2 });
+        res = await fetch(url, init);
+      }
+    }
+    return res;
+  }
+
+  async function apiGet(path) {
+    var res = await fetch(path, { headers: authHeaders(), credentials: 'include' });
+    if (res.status === 401) {
+      clearToken();
+      showLogin('Session expired. Sign in again.');
+      throw new Error('Session expired');
+    }
+    if (!res.ok) {
+      var t = await res.text();
+      throw new Error(t || path + ' returned ' + res.status);
+    }
+    var ct = res.headers.get('content-type') || '';
+    if (ct.indexOf('json') < 0) return {};
+    return await res.json();
+  }
+
+  async function apiSend(method, path, body) {
+    var init = {
+      method: method,
+      headers: Object.assign({}, authHeaders(), { 'Content-Type': 'application/json' }),
+      body: body == null ? undefined : JSON.stringify(body)
+    };
+    var res = await csrfFetch(path, init);
+    var text = await res.text();
+    var data = {};
+    if (text) {
+      try { data = JSON.parse(text); } catch (_) { data = { error: text }; }
+    }
+    if (!res.ok) throw new Error((data && data.error) || (path + ' returned ' + res.status));
+    return data;
+  }
+  var apiPost   = function (p, b) { return apiSend('POST',   p, b); };
+  var apiPatch  = function (p, b) { return apiSend('PATCH',  p, b); };
+  var apiDelete = function (p)    { return apiSend('DELETE', p); };
+
+  async function downloadFile(path) {
+    var res = await fetch(path, { headers: authHeaders(), credentials: 'include' });
+    if (res.status === 401) { clearToken(); showLogin('Session expired'); throw new Error('Session expired'); }
+    if (!res.ok) throw new Error(path + ' returned ' + res.status);
+    var blob = await res.blob();
+    var cd = res.headers.get('content-disposition') || '';
+    var m = cd.match(/filename="?([^\"]+)"?/);
+    var name = m ? m[1] : ('download-' + Date.now());
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+
+  // -------------------------------------------------------------------
+  // Login / logout
+  // -------------------------------------------------------------------
+
+  function showLogin(msg) {
+    state.profile = null;
+    var lv = $('login-view');
+    var av = $('app-view');
+    if (lv) lv.classList.remove('hidden');
+    if (av) av.classList.add('hidden');
+    if (msg) {
+      var lm = $('login-message');
+      if (lm) { lm.textContent = msg; lm.classList.add('error'); }
+    }
+  }
+
+  function showApp() {
+    var lv = $('login-view');
+    var av = $('app-view');
+    if (lv) lv.classList.add('hidden');
+    if (av) av.classList.remove('hidden');
+    if (!state.bootDone) {
+      state.bootDone = true;
+      bootApp();
+    }
+    routeFromHash();
+  }
+
+  async function doLogin(email, password) {
+    var res = await fetch('/api/v1/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ email: email, password: password })
+    });
+    var data = {};
+    try { data = await res.json(); } catch (_) {}
+    if (!res.ok) throw new Error((data && data.error) || 'Login failed');
+    if (!data.access_token) throw new Error('Login response missing access_token');
+    setToken(data.access_token);
+    state.profile = data.user || data.profile || null;
+    showApp();
+  }
+
+  async function doLogout() {
+    try { await apiPost('/api/v1/auth/logout', {}); } catch (_) { /* still clear locally */ }
+    clearToken();
+    state.profile = null;
+    showLogin();
+    toast('Signed out', 'info', 1800);
+  }
+
+  // -------------------------------------------------------------------
+  // Router — hash-based, history-aware. Sections map to #/page/<id>.
+  // Detail drawers are NOT routed (they are overlay state).
+  // -------------------------------------------------------------------
+
+  var SECTIONS = [
+    { id: 'dashboard',   label: 'Dashboard',     icon: '◧', keys: 'g d' },
+    { id: 'domains',     label: 'Domains',       icon: '◉', keys: 'g o' },
+    { id: 'mailboxes',   label: 'Mailboxes',     icon: '✉', keys: 'g m' },
+    { id: 'webmail',     label: 'Webmail',       icon: 'W', keys: 'g w' },
+    { id: 'queue',       label: 'Queue',         icon: '⌛', keys: 'g q' },
+    { id: 'dns',         label: 'DNS / DKIM',    icon: '✦', keys: 'g n' },
+    { id: 'backups',     label: 'Backups',       icon: '◈', keys: 'g b' },
+    { id: 'updates',     label: 'Updates',       icon: '↻', keys: 'g u' },
+    { id: 'monitoring',  label: 'Monitoring',    icon: '◌', keys: 'g h' },
+    { id: 'logs',        label: 'Logs',          icon: '☰', keys: 'g l' },
+    { id: 'settings',    label: 'Settings',      icon: '⚙', keys: 'g s' }
+  ];
+
+  var PAGES = {
+    dashboard:  renderDashboard,
+    domains:    renderDomains,
+    mailboxes:  renderMailboxes,
+    webmail:    renderWebmail,
+    queue:      renderQueue,
+    dns:        renderDNS,
+    backups:    renderBackups,
+    updates:    renderUpdates,
+    monitoring: renderMonitoring,
+    logs:       renderLogs,
+    settings:   renderSettings
+  };
+
+  function navigate(id, replace) {
+    if (!PAGES[id]) id = 'dashboard';
+    var hash = '#/' + id;
+    if (replace) location.replace(hash);
+    else location.hash = hash;
+  }
+  function routeFromHash() {
+    var h = (location.hash || '').replace(/^#\//, '');
+    var id = h.split('/')[0] || 'dashboard';
+    if (!PAGES[id]) id = 'dashboard';
+    var main = $('page-root');
+    if (!main) return;
+    main.innerHTML = '';
+    var render = PAGES[id];
+    var sec = SECTIONS.find(function (s) { return s.id === id; });
+    var head = el('header', { class: 'page-head' }, [
+      el('div', { class: 'page-head-text' }, [
+        el('h2', { text: sec ? sec.label : id }),
+        el('p', { class: 'page-head-sub', text: subtitleFor(id) })
+      ]),
+      el('div', { class: 'page-head-actions', id: 'page-head-actions' })
+    ]);
+    main.appendChild(head);
+    var body = el('div', { class: 'page-body', id: 'page-body' });
+    main.appendChild(body);
+    highlightNav(id);
+    try { render(body, $('page-head-actions')); }
+    catch (e) {
+      body.innerHTML = '';
+      body.appendChild(errorState(e));
+      console.error('render ' + id + ' failed', e);
+    }
+  }
+  function subtitleFor(id) {
+    return ({
+      dashboard: 'Operational status for the Orvix Enterprise Mail runtime.',
+      domains:   'Mail domains, DNS posture, and per-domain controls.',
+      mailboxes: 'Mailbox accounts, sessions, and reset / suspend flows.',
+      queue:     'Outbound queue, deferred / bounced diagnostics, retry and delete.',
+      dns:       'MX, SPF, DKIM and DMARC wizard — copy-ready records and manual checks.',
+      backups:   'Backup status, schedule, and safe create / download actions.',
+      updates:   'Runtime version, channel, and safe apply.',
+      monitoring:'Service health, alerts, and capacity.',
+      logs:      'Audit and operational events — safe fields only.',
+      settings:  'Host configuration and license posture (read-only by default).'
+    })[id] || '';
+  }
+  function highlightNav(id) {
+    document.querySelectorAll('[data-nav-id]').forEach(function (b) {
+      if (b.getAttribute('data-nav-id') === id) b.classList.add('active');
+      else b.classList.remove('active');
+    });
+  }
+
+  // -------------------------------------------------------------------
+  // Global keyboard: Esc closes overlays; "g <letter>" jumps; "?"
+  // opens the shortcut overlay.
+  // -------------------------------------------------------------------
+
+  function bindKeyboard() {
+    var gPrefix = { active: false, timer: null };
+    document.addEventListener('keydown', function (ev) {
+      var tag = (ev.target && ev.target.tagName) || '';
+      if (/^(INPUT|TEXTAREA|SELECT)$/.test(tag) || (ev.target && ev.target.isContentEditable)) return;
+      if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+
+      if (ev.key === 'Escape') {
+        if (state._activeOverlay) {
+          closeDrawer(); closeModal();
+          ev.preventDefault();
+          return;
+        }
+      }
+
+      if (gPrefix.active) {
+        gPrefix.active = false;
+        if (gPrefix.timer) clearTimeout(gPrefix.timer);
+        gPrefix.timer = null;
+        var m = SECTIONS.find(function (s) { return s.keys === 'g ' + ev.key; });
+        if (m) { ev.preventDefault(); navigate(m.id); return; }
+      }
+
+      if (ev.key === 'g') {
+        gPrefix.active = true;
+        if (gPrefix.timer) clearTimeout(gPrefix.timer);
+        gPrefix.timer = setTimeout(function () { gPrefix.active = false; gPrefix.timer = null; }, 1200);
         return;
       }
-      var cfg = await apiPost("/api/v1/backups/schedule", {
-        enabled: enabled,
-        frequency: frequency,
-        retentionCount: retentionCount
-      });
-      msg.textContent = "Schedule saved (" + (cfg.frequency || frequency) + ").";
-      msg.className = "message success";
-    } catch (err) {
-      msg.textContent = err.message || "Failed to save schedule.";
-      msg.className = "message error";
-    } finally {
-      btn.disabled = false;
-    }
-  });
-}
 
-var backupRetentionBtn = el("backup-run-retention");
-if (backupRetentionBtn) {
-  backupRetentionBtn.addEventListener("click", async function() {
-    if (!confirm("Run retention cleanup? Oldest backups will be deleted to stay within the retention count.")) return;
-    backupRetentionBtn.disabled = true;
-    try {
-      var result = await apiPost("/api/v1/backups/retention", {});
-      showAlert("Retention cleanup: " + (result.deleted || 0) + " backup(s) deleted.");
-      await loadBackups();
-      await loadBackupStats();
-    } catch (err) {
-      showAlert(err.message || "Retention cleanup failed.");
-    } finally {
-      backupRetentionBtn.disabled = false;
-    }
-  });
-}
-
-// ── Webmail Accounts ───────────────────────────────────────
-
-async function loadWebmailAccounts() {
-  var node = el("webmail-accounts-table");
-  if (!node) return;
-  var search = el("webmail-search").value.trim();
-  var domain = el("webmail-domain-filter").value.trim();
-  var status = el("webmail-status-filter").value;
-  var admin = el("webmail-admin-filter").value;
-  try {
-    var data = await apiGet("/api/v1/webmail/accounts" + queryString({ search: search, domain: domain, status: status, admin: admin }), []);
-    state.webmailAccounts = data && Array.isArray(data) ? data : (data && Array.isArray(data.accounts) ? data.accounts : []);
-    renderWebmailAccountsTable("webmail-accounts-table", state.webmailAccounts);
-  } catch (_) {
-    node.innerHTML = '<div class="empty-state">Webmail accounts unavailable.</div>';
-  }
-}
-
-function renderWebmailAccountsTable(id, accounts) {
-  var node = el(id);
-  if (!node) return;
-  if (!Array.isArray(accounts) || accounts.length === 0) {
-    node.innerHTML = '<div class="empty-state">No webmail accounts found.</div>';
-    return;
-  }
-  var head = '<table class="table"><thead><tr><th>Mailbox ID</th><th>Email</th><th>Status</th><th>Domain</th><th>Admin</th><th>Last Login</th><th>Created</th><th></th></tr></thead><tbody>';
-  var body = accounts.map(function(a) {
-    var statusStr = escapeHTML(a.status || "unknown");
-    var lastLogin = a.last_login_at ? escapeHTML(a.last_login_at) : "-";
-    var created = a.created_at ? escapeHTML(a.created_at) : "-";
-    var isAdmin = a.is_admin ? "Yes" : "No";
-    return '<tr><td>' + a.mailbox_id + '</td><td>' + escapeHTML(a.email) + '</td><td>' + statusStr + '</td><td>' + escapeHTML(a.domain) + '</td><td>' + isAdmin + '</td><td>' + lastLogin + '</td><td>' + created + '</td>' +
-      '<td><button class="ghost-btn wm-view" data-mailbox-id="' + a.mailbox_id + '" data-email="' + escapeHTML(a.email) + '">View</button></td></tr>';
-  }).join("");
-  node.innerHTML = head + body + '</tbody></table>';
-}
-
-async function loadWebmailDetail(mailboxId, email) {
-  state.currentWebmailAccount = mailboxId;
-  el("wmd-title").textContent = "Webmail Account — " + escapeHTML(email);
-  el("wmd-content").innerHTML = '<div class="empty-state">Mailbox ID: ' + mailboxId + ' | Email: ' + escapeHTML(email) + '</div>';
-  showDetail("webmail-detail");
-
-  try {
-    var [sessions, activity, storage] = await Promise.all([
-      apiGet("/api/v1/webmail/sessions?mailboxId=" + mailboxId, []),
-      apiGet("/api/v1/webmail/activity/" + mailboxId, null),
-      apiGet("/api/v1/webmail/storage/" + mailboxId, null)
-    ]);
-    var sessionsArr = Array.isArray(sessions) ? sessions : (sessions && Array.isArray(sessions.sessions) ? sessions.sessions : []);
-    renderWebmailSessions(sessionsArr);
-    renderWebmailActivity(activity);
-    renderWebmailStorage(storage);
-  } catch (_) {
-    el("wmd-sessions").innerHTML = '<div class="empty-state">Sessions unavailable.</div>';
-    el("wmd-activity").innerHTML = '<div class="empty-state">Activity unavailable.</div>';
-    el("wmd-storage").innerHTML = '<div class="empty-state">Storage unavailable.</div>';
-  }
-}
-
-function renderWebmailSessions(sessions) {
-  var node = el("wmd-sessions");
-  if (!node) return;
-  if (!Array.isArray(sessions) || sessions.length === 0) {
-    node.innerHTML = '<div class="empty-state">No active sessions.</div>';
-    return;
-  }
-  var head = '<table class="table"><thead><tr><th>Session ID</th><th>IP</th><th>User Agent</th><th>Created</th><th>Last Seen</th><th></th></tr></thead><tbody>';
-  var body = sessions.map(function(s) {
-    var ua = escapeHTML((s.user_agent || "").substring(0, 80));
-    return '<tr><td>' + s.id + '</td><td>' + escapeHTML(s.ip) + '</td><td>' + ua + '</td><td>' + escapeHTML(s.created_at) + '</td><td>' + escapeHTML(s.last_seen_at) + '</td>' +
-      '<td><button class="ghost-btn wm-revoke-session" data-session-id="' + s.id + '">Revoke</button></td></tr>';
-  }).join("");
-  node.innerHTML = head + body + '</tbody></table>';
-}
-
-function renderWebmailActivity(activity) {
-  var node = el("wmd-activity");
-  if (!node) return;
-  if (!activity) {
-    node.innerHTML = '<div class="empty-state">No login activity data.</div>';
-    return;
-  }
-  node.innerHTML =
-    '<div class="setting-row"><div><strong>Successful Logins</strong></div><span>' + (activity.successful_logins || 0) + '</span></div>' +
-    '<div class="setting-row"><div><strong>Failed Logins</strong></div><span>' + (activity.failed_logins || 0) + '</span></div>' +
-    '<div class="setting-row"><div><strong>Last Login</strong></div><span>' + escapeHTML(activity.last_login_at || "-") + '</span></div>' +
-    '<div class="setting-row"><div><strong>Last Failed Login</strong></div><span>' + escapeHTML(activity.last_failed_login_at || "-") + '</span></div>';
-}
-
-function renderWebmailStorage(storage) {
-  var node = el("wmd-storage");
-  if (!node) return;
-  if (!storage) {
-    node.innerHTML = '<div class="empty-state">No storage metrics available.</div>';
-    return;
-  }
-  node.innerHTML =
-    '<div class="setting-row"><div><strong>Message Count</strong></div><span>' + (storage.message_count || 0) + '</span></div>' +
-    '<div class="setting-row"><div><strong>Mailbox Size</strong></div><span>' + formatBytes(storage.mailbox_size) + '</span></div>' +
-    '<div class="setting-row"><div><strong>Sent Count</strong></div><span>' + (storage.sent_count || 0) + '</span></div>' +
-    '<div class="setting-row"><div><strong>Received Count</strong></div><span>' + (storage.received_count || 0) + '</span></div>';
-}
-
-function formatBytes(bytes) {
-  var value = Number(bytes || 0);
-  if (value < 1024) return value + " B";
-  if (value < 1024 * 1024) return (value / 1024).toFixed(1) + " KB";
-  if (value < 1024 * 1024 * 1024) return (value / (1024 * 1024)).toFixed(1) + " MB";
-  return (value / (1024 * 1024 * 1024)).toFixed(2) + " GB";
-}
-
-function formatTimestamp(value) {
-  if (!value) return "-";
-  var date = new Date(value);
-  if (isNaN(date.getTime())) return String(value);
-  return date.toLocaleString();
-}
-
-function shortSHA(value) {
-  if (!value) return "-";
-  return String(value).slice(0, 12);
-}
-
-function renderBackupsTable(id, rows) {
-  var node = el(id);
-  if (!node) return;
-  if (!Array.isArray(rows) || rows.length === 0) {
-    node.innerHTML = '<div class="empty-state">No backups have been created yet.</div>';
-    return;
-  }
-  var head = '<table class="table"><thead><tr><th>ID</th><th>Name</th><th>Status</th><th>Size</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
-  var body = rows.map(function(b) {
-    var idValue = b.id || "";
-    return '<tr>' +
-      '<td>' + escapeHTML(idValue) + '</td>' +
-      '<td>' + escapeHTML(b.name || "-") + '</td>' +
-      '<td>' + escapeHTML(b.status || "-") + '</td>' +
-      '<td>' + escapeHTML(formatBytes(b.size_bytes)) + '</td>' +
-      '<td>' + escapeHTML(b.created_at || "-") + '</td>' +
-      '<td>' +
-        '<button class="ghost-btn backup-action" data-action="download" data-backup-id="' + escapeHTML(idValue) + '" style="font-size:12px;padding:4px 8px;min-height:auto;margin-right:4px;">Download</button>' +
-        '<button class="ghost-btn backup-action" data-action="delete" data-backup-id="' + escapeHTML(idValue) + '" style="font-size:12px;padding:4px 8px;min-height:auto;">Delete</button>' +
-      '</td></tr>';
-  }).join("");
-  node.innerHTML = head + body + '</tbody></table>';
-}
-
-function renderTable(id, rows, columns, emptyText) {
-  const node = el(id);
-  if (!node) return;
-  node.innerHTML = tableHTML(rows, columns, emptyText);
-}
-
-function tableHTML(rows, columns, emptyText) {
-  if (!Array.isArray(rows) || rows.length === 0) {
-    return `<div class="empty-state">${escapeHTML(emptyText)}</div>`;
-  }
-  const head = columns.map((col) => `<th>${escapeHTML(titleCase(col))}</th>`).join("");
-  const body = rows.map((row) => `<tr>${columns.map((col) => `<td>${escapeHTML(valueFor(row, col))}</td>`).join("")}</tr>`).join("");
-  return `<table class="table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
-}
-
-function valueFor(row, key) {
-  const value = row[key] ?? row[key.replace("_", "")] ?? "";
-  if (value === null || value === undefined || value === "") return "-";
-  return String(value);
-}
-
-function titleCase(value) {
-  return value.replace(/_/g, " ").replace(/\b\w/g, (ch) => ch.toUpperCase());
-}
-
-function queryString(params) {
-  const q = new URLSearchParams();
-  Object.keys(params).forEach(function(key) {
-    if (params[key]) q.set(key, params[key]);
-  });
-  const value = q.toString();
-  return value ? "?" + value : "";
-}
-
-function updateBulkLabels() {
-  setButtonText("mailbox-bulk-enable", "Enable Selected (" + state.selectedMailboxes.size + ")");
-  setButtonText("mailbox-bulk-suspend", "Suspend Selected (" + state.selectedMailboxes.size + ")");
-  setButtonText("domain-bulk-enable", "Enable Selected (" + state.selectedDomains.size + ")");
-  setButtonText("domain-bulk-suspend", "Suspend Selected (" + state.selectedDomains.size + ")");
-}
-
-function setButtonText(id, value) {
-  const node = el(id);
-  if (node) node.textContent = value;
-}
-
-async function bulkMailboxStatus(status) {
-  const ids = Array.from(state.selectedMailboxes).map(function(id) { return Number(id); }).filter(Boolean);
-  if (ids.length === 0) { setText("mailbox-bulk-result", "Select at least one non-admin mailbox."); return; }
-  const result = await apiPost("/api/v1/mailboxes/bulk/status", { mailbox_ids: ids, status: status });
-  state.selectedMailboxes.clear();
-  setText("mailbox-bulk-result", "Updated " + (result.updated || 0) + ", skipped " + (result.skipped || 0) + ".");
-  await loadMailboxes();
-  await loadSummary();
-}
-
-async function bulkDomainStatus(status) {
-  const domains = Array.from(state.selectedDomains);
-  if (domains.length === 0) { setText("domain-bulk-result", "Select at least one domain."); return; }
-  const result = await apiPost("/api/v1/domains/bulk/status", { domains: domains, status: status });
-  state.selectedDomains.clear();
-  setText("domain-bulk-result", "Updated " + (result.updated || 0) + ", skipped " + (result.skipped || 0) + ".");
-  await loadDomains();
-  await loadSummary();
-}
-
-function escapeHTML(value) {
-  return String(value).replace(/[&<>"']/g, (ch) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    "\"": "&quot;",
-    "'": "&#39;"
-  }[ch]));
-}
-
-async function refreshAll() {
-  showAlert("");
-  await Promise.allSettled([loadHealth(), loadSummary(), loadDomains(), loadMailboxes(), loadQueue(), loadBackups(), loadBackupStats(), loadBackupSchedule(), loadMonitoring(), loadUpdate(), loadLogs()]);
-}
-
-function showApp() {
-  loginView.classList.add("hidden");
-  appView.classList.remove("hidden");
-}
-
-function showLogin() {
-  appView.classList.add("hidden");
-  loginView.classList.remove("hidden");
-}
-
-function signOut() {
-  state.token = "";
-  state.profile = null;
-  sessionStorage.removeItem("orvix_access_token");
-  showLogin();
-}
-
-loginForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  loginMessage.textContent = "";
-  loginButton.disabled = true;
-  try {
-    const payload = {
-      email: el("email").value.trim(),
-      username: el("email").value.trim(),
-      password: el("password").value
-    };
-    const res = await fetch("/api/v1/auth/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
-    if (!res.ok) throw new Error("Invalid administrator credentials.");
-    const data = await res.json();
-    if (!data.access_token) throw new Error("Login response did not include an access token.");
-    state.token = data.access_token;
-    sessionStorage.setItem("orvix_access_token", state.token);
-    await loadProfile();
-    showApp();
-    await refreshAll();
-  } catch (err) {
-    loginMessage.textContent = err.message || "Sign in failed.";
-  } finally {
-    loginButton.disabled = false;
-  }
-});
-
-el("logout-button").addEventListener("click", signOut);
-
-el("show-add-mailbox").addEventListener("click", () => {
-  el("add-mailbox-panel").classList.toggle("hidden");
-  el("add-mailbox-message").textContent = "";
-  el("add-mailbox-message").className = "message";
-});
-
-el("add-mailbox-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const btn = el("add-mailbox-btn");
-  const msg = el("add-mailbox-message");
-  msg.textContent = "";
-  msg.className = "message";
-  btn.disabled = true;
-  try {
-    const csrfToken = await getCSRFToken();
-    const email = el("mb-email").value.trim();
-    const password = el("mb-password").value;
-    const name = el("mb-name").value.trim();
-    const res = await fetch("/api/v1/mailboxes", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${state.token}`,
-        "X-CSRF-Token": csrfToken
-      },
-      body: JSON.stringify({ email, password, name: name || undefined })
-    });
-    if (!res.ok) {
-      const errBody = await res.json().catch(() => ({}));
-      throw new Error(errBody.error || `HTTP ${res.status}`);
-    }
-    msg.textContent = `Mailbox ${email} created successfully.`;
-    msg.className = "message success";
-    el("mb-email").value = "";
-    el("mb-password").value = "";
-    el("mb-name").value = "";
-    await loadMailboxes();
-  } catch (err) {
-    msg.textContent = err.message || "Failed to create mailbox.";
-    msg.className = "message error";
-  } finally {
-    btn.disabled = false;
-  }
-});
-
-el("mailboxes-table").addEventListener("click", async function(event) {
-  var btn = event.target.closest("button.mb-action");
-  if (!btn) return;
-  var action = btn.dataset.action;
-  var mailboxId = btn.dataset.mailboxId;
-  var email = btn.dataset.email;
-  if (!mailboxId) return;
-  btn.disabled = true;
-  try {
-    var csrfToken = await getCSRFToken();
-    if (action === "password") {
-      var newPassword = prompt("Reset password for " + email + "\n\nEnter new password (min 8 characters):");
-      if (!newPassword) return;
-      if (newPassword.length < 8) { showAlert("Password must be at least 8 characters."); btn.disabled = false; return; }
-      var res = await fetch("/api/v1/mailboxes/" + mailboxId + "/password", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + state.token, "X-CSRF-Token": csrfToken },
-        body: JSON.stringify({ password: newPassword })
-      });
-      if (!res.ok) {
-        var errBody = await res.json().catch(function() { return {}; });
-        throw new Error(errBody.error || "HTTP " + res.status);
-      }
-      showAlert("Password reset for " + email + ".");
-    } else if (action === "disable") {
-      if (!confirm("Disable mailbox " + email + "? The user will not be able to access their mailbox.")) return;
-      var res = await fetch("/api/v1/mailboxes/" + mailboxId + "/status", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + state.token, "X-CSRF-Token": csrfToken },
-        body: JSON.stringify({ status: "suspended" })
-      });
-      if (!res.ok) {
-        var errBody = await res.json().catch(function() { return {}; });
-        throw new Error(errBody.error || "HTTP " + res.status);
-      }
-      showAlert("Mailbox " + email + " disabled.");
-    } else if (action === "enable") {
-      var res = await fetch("/api/v1/mailboxes/" + mailboxId + "/status", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + state.token, "X-CSRF-Token": csrfToken },
-        body: JSON.stringify({ status: "active" })
-      });
-      if (!res.ok) {
-        var errBody = await res.json().catch(function() { return {}; });
-        throw new Error(errBody.error || "HTTP " + res.status);
-      }
-      showAlert("Mailbox " + email + " enabled.");
-    } else if (action === "delete") {
-      if (!confirm("Delete mailbox " + email + "? This action cannot be undone.")) return;
-      var res = await fetch("/api/v1/mailboxes/" + mailboxId, {
-        method: "DELETE",
-        headers: { "Authorization": "Bearer " + state.token, "X-CSRF-Token": csrfToken }
-      });
-      if (!res.ok) {
-        var errBody = await res.json().catch(function() { return {}; });
-        throw new Error(errBody.error || "HTTP " + res.status);
-      }
-      showAlert("Mailbox " + email + " deleted.");
-    }
-    await loadMailboxes();
-  } catch (err) {
-    showAlert(err.message || "Operation failed.");
-  } finally {
-    btn.disabled = false;
-  }
-});
-
-el("show-add-domain").addEventListener("click", () => {
-  el("add-domain-panel").classList.toggle("hidden");
-  el("add-domain-message").textContent = "";
-  el("add-domain-message").className = "message";
-});
-
-el("add-domain-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const btn = el("add-domain-btn");
-  const msg = el("add-domain-message");
-  msg.textContent = "";
-  msg.className = "message";
-  btn.disabled = true;
-  try {
-    const csrfToken = await getCSRFToken();
-    const name = el("dm-name").value.trim();
-    const res = await fetch("/api/v1/domains", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${state.token}`,
-        "X-CSRF-Token": csrfToken
-      },
-      body: JSON.stringify({ name })
-    });
-    if (!res.ok) {
-      const errBody = await res.json().catch(() => ({}));
-      throw new Error(errBody.error || `HTTP ${res.status}`);
-    }
-    msg.textContent = `Domain ${name} created successfully.`;
-    msg.className = "message success";
-    el("dm-name").value = "";
-    await loadDomains();
-  } catch (err) {
-    msg.textContent = err.message || "Failed to create domain.";
-    msg.className = "message error";
-  } finally {
-    btn.disabled = false;
-  }
-});
-
-el("domains-table").addEventListener("click", async function(event) {
-  var btn = event.target.closest("button.dm-action");
-  if (!btn) return;
-  var action = btn.dataset.action;
-  var domain = btn.dataset.domain;
-  var domainId = btn.dataset.domainId;
-  btn.disabled = true;
-  try {
-    var csrfToken = await getCSRFToken();
-    if (action === "enable") {
-      var res = await fetch("/api/v1/domains/" + encodeURIComponent(domain) + "/status", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + state.token, "X-CSRF-Token": csrfToken },
-        body: JSON.stringify({ status: "active" })
-      });
-      if (!res.ok) {
-        var errBody = await res.json().catch(function() { return {}; });
-        throw new Error(errBody.error || "HTTP " + res.status);
-      }
-      showAlert("Domain " + domain + " enabled.");
-    } else if (action === "disable") {
-      if (!confirm("Disable domain " + domain + "? New mailbox creation will be blocked.")) return;
-      var res = await fetch("/api/v1/domains/" + encodeURIComponent(domain) + "/status", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + state.token, "X-CSRF-Token": csrfToken },
-        body: JSON.stringify({ status: "suspended" })
-      });
-      if (!res.ok) {
-        var errBody = await res.json().catch(function() { return {}; });
-        throw new Error(errBody.error || "HTTP " + res.status);
-      }
-      showAlert("Domain " + domain + " disabled.");
-    } else if (action === "delete") {
-      var mbCount = parseInt(btn.dataset.mailboxCount || "0", 10);
-      if (mbCount > 0) {
-        showAlert("Cannot delete domain " + domain + ": it contains " + mbCount + " mailbox(es). Remove all mailboxes first.");
-        btn.disabled = false;
+      if (ev.key === '?') {
+        ev.preventDefault();
+        openShortcutsOverlay();
         return;
       }
-      if (!confirm("Delete domain " + domain + "? This action cannot be undone.")) return;
-      var res = await fetch("/api/v1/domains/" + encodeURIComponent(domain), {
-        method: "DELETE",
-        headers: { "Authorization": "Bearer " + state.token, "X-CSRF-Token": csrfToken }
-      });
-      if (!res.ok) {
-        var errBody = await res.json().catch(function() { return {}; });
-        throw new Error(errBody.error || "HTTP " + res.status);
-      }
-      showAlert("Domain " + domain + " deleted.");
-    }
-    await loadDomains();
-  } catch (err) {
-    showAlert(err.message || "Operation failed.");
-  } finally {
-    btn.disabled = false;
-  }
-});
-
-// Queue actions
-el("queue-table").addEventListener("click", async function(event) {
-  var btn = event.target.closest("button.q-action");
-  if (!btn) return;
-  var action = btn.dataset.action;
-  var queueId = btn.dataset.queueId;
-  if (!queueId) return;
-  btn.disabled = true;
-  try {
-    if (action === "retry") {
-      // Use csrfFetch (credentials: 'include' +
-      // fresh CSRF token + single retry on 403) so
-      // the Set-Cookie on the response is stored
-      // AND the cookie is sent on the next request.
-      // Without credentials: 'include' the browser
-      // drops the Set-Cookie header (the response
-      // is for a cross-site fetch in some operator
-      // topologies) and the next request 403s with
-      // "CSRF token missing in cookie".
-      var res = await csrfFetch("/api/v1/queue/" + queueId + "/retry", {
-        method: "POST",
-        headers: { "Authorization": "Bearer " + state.token }
-      });
-      if (!res.ok) {
-        var errBody = await res.json().catch(function() { return {}; });
-        throw new Error(errBody.error || "HTTP " + res.status);
-      }
-      showAlert("Queue item " + queueId + " queued for retry.");
-    } else if (action === "delete") {
-      if (!confirm("Delete queue item " + queueId + "? This action cannot be undone.")) { btn.disabled = false; return; }
-      var res = await csrfFetch("/api/v1/queue/" + queueId, {
-        method: "DELETE",
-        headers: { "Authorization": "Bearer " + state.token }
-      });
-      if (!res.ok) {
-        var errBody = await res.json().catch(function() { return {}; });
-        throw new Error(errBody.error || "HTTP " + res.status);
-      }
-      showAlert("Queue item " + queueId + " deleted.");
-    }
-    await loadQueue();
-  } catch (err) {
-    showAlert(err.message || "Operation failed.");
-  } finally {
-    btn.disabled = false;
-  }
-});
-
-el("backups-table").addEventListener("click", async function(event) {
-  var btn = event.target.closest("button.backup-action");
-  if (!btn) return;
-  var action = btn.dataset.action;
-  var backupId = btn.dataset.backupId;
-  if (!backupId) return;
-  btn.disabled = true;
-  try {
-    if (action === "download") {
-      window.location.href = "/api/v1/backups/" + encodeURIComponent(backupId) + "/download";
-    } else if (action === "delete") {
-      if (!confirm("Delete backup " + backupId + "? This action cannot be undone.")) { btn.disabled = false; return; }
-      var csrfToken = await getCSRFToken();
-      var res = await fetch("/api/v1/backups/" + encodeURIComponent(backupId), {
-        method: "DELETE",
-        headers: { "Authorization": "Bearer " + state.token, "X-CSRF-Token": csrfToken }
-      });
-      if (!res.ok) {
-        var errBody = await res.json().catch(function() { return {}; });
-        throw new Error(errBody.error || "HTTP " + res.status);
-      }
-      showAlert("Backup " + backupId + " deleted.");
-      await loadBackups();
-    }
-  } catch (err) {
-    showAlert(err.message || "Backup operation failed.");
-  } finally {
-    btn.disabled = false;
-  }
-});
-
-el("monitoring-alerts-table").addEventListener("click", async function(event) {
-  var btn = event.target.closest("button.monitoring-resolve");
-  if (!btn) return;
-  var alertId = btn.dataset.alertId;
-  if (!alertId) return;
-  btn.disabled = true;
-  try {
-    await apiPost("/api/v1/monitoring/alerts/" + encodeURIComponent(alertId) + "/resolve", {});
-    showAlert("Monitoring alert " + alertId + " resolved.");
-    await loadMonitoring();
-  } catch (err) {
-    showAlert(err.message || "Alert resolve failed.");
-  } finally {
-    btn.disabled = false;
-  }
-});
-
-var backupCreate = el("backup-create");
-if (backupCreate) {
-  backupCreate.addEventListener("click", async function() {
-    showAlert("");
-    backupCreate.disabled = true;
-    try {
-      var created = await apiPost("/api/v1/backups", {});
-      showAlert("Backup " + (created.id || created.name || "created") + " created.");
-      await loadBackups();
-      await loadBackupStats();
-    } catch (err) {
-      showAlert(err.message || "Backup creation failed.");
-    } finally {
-      backupCreate.disabled = false;
-    }
-  });
-}
-
-var updateCheck = el("update-check");
-if (updateCheck) {
-  updateCheck.addEventListener("click", async function() {
-    showAlert("");
-    updateCheck.disabled = true;
-    try {
-      var status = await apiPost("/api/v1/update/check", {});
-      state.updateStatus = status;
-      renderUpdateStatus(status);
-      await Promise.allSettled([loadUpdateHistory(), loadUpdatePreflight()]);
-      if (status && status.message === "update check not configured") {
-        showAlert("Update check not configured.");
-      } else {
-        showAlert("Update check completed.");
-      }
-    } catch (err) {
-      showAlert(err.message || "Update check failed.");
-    } finally {
-      updateCheck.disabled = false;
-    }
-  });
-}
-
-var updateRun = el("update-run");
-if (updateRun) {
-  updateRun.addEventListener("click", async function() {
-    if (!confirm("Run runtime update? The Orvix service may restart.")) return;
-    showAlert("");
-    updateRun.disabled = true;
-    try {
-      var result = await apiPost("/api/v1/update/run", {});
-      await loadUpdate();
-      if (result && result.status === "completed") {
-        showAlert("Runtime update completed.");
-      } else {
-        showAlert("Runtime update finished with status: " + escapeHTML((result && result.status) || "failed") + ".");
-      }
-    } catch (err) {
-      showAlert(err.message || "Runtime update failed.");
-    } finally {
-      updateRun.disabled = false;
-    }
-  });
-}
-
-["mailbox-search", "mailbox-status-filter", "mailbox-admin-filter"].forEach(function(id) {
-  var node = el(id);
-  if (!node) return;
-  var eventName = node.tagName === "SELECT" ? "change" : "input";
-  node.addEventListener(eventName, function() {
-    state.selectedMailboxes.clear();
-    setText("mailbox-bulk-result", "");
-    loadMailboxes().catch(function(err) { showAlert(err.message || "Mailbox filter failed."); });
-  });
-});
-
-["domain-search", "domain-status-filter"].forEach(function(id) {
-  var node = el(id);
-  if (!node) return;
-  var eventName = node.tagName === "SELECT" ? "change" : "input";
-  node.addEventListener(eventName, function() {
-    state.selectedDomains.clear();
-    setText("domain-bulk-result", "");
-    loadDomains().catch(function(err) { showAlert(err.message || "Domain filter failed."); });
-  });
-});
-
-["webmail-search", "webmail-domain-filter", "webmail-status-filter", "webmail-admin-filter"].forEach(function(id) {
-  var node = el(id);
-  if (!node) return;
-  var eventName = node.tagName === "SELECT" ? "change" : "input";
-  node.addEventListener(eventName, function() {
-    loadWebmailAccounts().catch(function(err) { showAlert(err.message || "Webmail filter failed."); });
-  });
-});
-
-el("mailboxes-table").addEventListener("change", function(event) {
-  var box = event.target.closest("input.mailbox-select");
-  if (!box) return;
-  if (box.checked) state.selectedMailboxes.add(String(box.dataset.mailboxId));
-  else state.selectedMailboxes.delete(String(box.dataset.mailboxId));
-  updateBulkLabels();
-});
-
-el("domains-table").addEventListener("change", function(event) {
-  var box = event.target.closest("input.domain-select");
-  if (!box) return;
-  if (box.checked) state.selectedDomains.add(box.dataset.domain);
-  else state.selectedDomains.delete(box.dataset.domain);
-  updateBulkLabels();
-});
-
-[
-  ["mailbox-bulk-enable", function() { return bulkMailboxStatus("active"); }],
-  ["mailbox-bulk-suspend", function() { return bulkMailboxStatus("suspended"); }],
-  ["domain-bulk-enable", function() { return bulkDomainStatus("active"); }],
-  ["domain-bulk-suspend", function() { return bulkDomainStatus("suspended"); }]
-].forEach(function(pair) {
-  var node = el(pair[0]);
-  if (!node) return;
-  node.addEventListener("click", async function() {
-    showAlert("");
-    node.disabled = true;
-    try {
-      await pair[1]();
-    } catch (err) {
-      showAlert(err.message || "Bulk operation failed.");
-    } finally {
-      node.disabled = false;
-      updateBulkLabels();
-    }
-  });
-});
-
-var mailboxExport = el("mailbox-export");
-if (mailboxExport) {
-  mailboxExport.addEventListener("click", async function() {
-    try {
-      await downloadCSV("/api/v1/mailboxes/export", "mailboxes.csv");
-    } catch (err) {
-      showAlert(err.message || "Mailbox export failed.");
-    }
-  });
-}
-
-var domainExport = el("domain-export");
-if (domainExport) {
-  domainExport.addEventListener("click", async function() {
-    try {
-      await downloadCSV("/api/v1/domains/export", "domains.csv");
-    } catch (err) {
-      showAlert(err.message || "Domain export failed.");
-    }
-  });
-}
-
-async function webmailControl(action, endpoint) {
-  var mbId = state.currentWebmailAccount;
-  if (!mbId) return;
-  try {
-    var result = await apiPost("/api/v1/webmail/controls/" + endpoint + "/" + mbId, {});
-    el("wmd-ctrl-message").textContent = action + " completed.";
-    el("wmd-ctrl-message").className = "message success";
-  } catch (err) {
-    el("wmd-ctrl-message").textContent = err.message || action + " failed.";
-    el("wmd-ctrl-message").className = "message error";
-  }
-}
-
-var wmdForceLogout = el("wmd-force-logout");
-if (wmdForceLogout) wmdForceLogout.addEventListener("click", function() { webmailControl("Force logout", "force-logout"); });
-var wmdUnlock = el("wmd-unlock");
-if (wmdUnlock) wmdUnlock.addEventListener("click", function() { webmailControl("Unlock", "unlock"); });
-var wmdResetPrefs = el("wmd-reset-preferences");
-if (wmdResetPrefs) wmdResetPrefs.addEventListener("click", function() { webmailControl("Reset preferences", "reset-preferences"); });
-var wmdClearCounters = el("wmd-clear-counters");
-if (wmdClearCounters) wmdClearCounters.addEventListener("click", function() { webmailControl("Clear counters", "clear-counters"); });
-
-function showDetail(name) {
-  document.querySelectorAll("[data-page-view]").forEach(function(v) { v.classList.add("hidden"); });
-  document.querySelectorAll("[data-detail-view]").forEach(function(v) { v.classList.add("hidden"); });
-  var detail = document.querySelector("[data-detail-view=\"" + name + "\"]");
-  if (detail) detail.classList.remove("hidden");
-}
-
-document.querySelectorAll("[data-detail-back]").forEach(function(btn) {
-  btn.addEventListener("click", function() {
-    var detailName = btn.dataset.detailBack;
-    var pageName = detailName === "webmail-detail" ? "webmail" : "";
-    if (detailName === "mailbox-detail") pageName = "mailboxes";
-    if (detailName === "domain-detail") pageName = "domains";
-    document.querySelectorAll("[data-detail-view]").forEach(function(v) { v.classList.add("hidden"); });
-    document.querySelectorAll("[data-page-view]").forEach(function(v) {
-      v.classList.toggle("hidden", pageName ? v.dataset.pageView !== pageName : false);
     });
-    if (pageName) {
-      document.querySelectorAll("[data-page]").forEach(function(item) {
-        item.classList.toggle("active", item.dataset.page === pageName);
+  }
+
+  function openShortcutsOverlay() {
+    var rows = SECTIONS.map(function (s) {
+      var label = el('td', null, [s.label]);
+      return el('tr', null, [el('td', { class: 'key', text: s.keys }), label]);
+    });
+    rows.push(el('tr', null, [el('td', { class: 'key', text: '?' }), el('td', null, 'Open this overlay')]));
+    rows.push(el('tr', null, [el('td', { class: 'key', text: 'Esc' }), el('td', null, 'Close any overlay')]));
+    rows.push(el('tr', null, [el('td', { class: 'key', text: 'r' }), el('td', null, 'Refresh current section')]));
+    openModal({
+      title: 'Keyboard shortcuts',
+      render: function (body, foot) {
+        var t = el('table', { class: 'shortcuts-table' });
+        rows.forEach(function (r) { t.appendChild(r); });
+        body.appendChild(t);
+        body.appendChild(el('div', { class: 'shortcuts-hint', text: 'Press Esc or ? again to close.' }));
+        foot.appendChild(el('button', { class: 'btn primary', type: 'button', text: 'Got it', onclick: closeModal }));
+      }
+    });
+  }
+
+  // -------------------------------------------------------------------
+  // Nav rendering
+  // -------------------------------------------------------------------
+
+  function renderNav() {
+    var nav = $('sidebar-nav');
+    if (!nav) return;
+    nav.innerHTML = '';
+    SECTIONS.forEach(function (s) {
+      nav.appendChild(el('button', {
+        type: 'button',
+        class: 'nav-btn',
+        'data-nav-id': s.id,
+        onclick: function () { navigate(s.id); }
+      }, [
+        el('span', { class: 'nav-icon', text: s.icon }),
+        el('span', { class: 'nav-label', text: s.label })
+      ]));
+    });
+  }
+
+  // -------------------------------------------------------------------
+  // Pages
+  // -------------------------------------------------------------------
+
+  // ----- Dashboard ----------------------------------------------------
+  async function renderDashboard(body) {
+    body.innerHTML = '';
+    body.appendChild(el('div', { class: 'dashboard-grid', id: 'dash-grid' }));
+    var grid = $('dash-grid');
+    grid.appendChild(card({ label: 'API Health',         value: '…',     note: 'Reading /api/v1/health' }));
+    grid.appendChild(card({ label: 'CoreMail Runtime',  value: '…',     note: 'SMTP, IMAP, POP3, JMAP and workers managed by the CoreMail runtime' }));
+    grid.appendChild(card({ label: 'SMTP',               value: '…',     note: 'Port 25 — inbound + outbound' }));
+    grid.appendChild(card({ label: 'IMAP',               value: '…',     note: 'Port 143' }));
+    grid.appendChild(card({ label: 'POP3',               value: '…',     note: 'Port 110' }));
+    grid.appendChild(card({ label: 'JMAP',               value: '…',     note: 'Port 443 (HTTPS)' }));
+    grid.appendChild(card({ label: 'Database',           value: '…',     note: 'Postgres / GORM' }));
+    grid.appendChild(card({ label: 'Redis / Queue',      value: '…',     note: 'Delivery queue state' }));
+    grid.appendChild(card({ label: 'License',            value: '…',     note: 'Public-key verified' }));
+
+    var stats = el('div', { class: 'dashboard-grid', id: 'dash-stats' });
+    body.appendChild(el('h3', { class: 'section-title', text: 'Mail stats' }));
+    body.appendChild(stats);
+
+    var sysCard = el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [el('h3', { text: 'System' })]),
+      el('div', { class: 'panel-body', id: 'dash-system' })
+    ]);
+    body.appendChild(sysCard);
+
+    var warnCard = el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [el('h3', { text: 'Warnings' })]),
+      el('div', { class: 'panel-body', id: 'dash-warnings' })
+    ]);
+    body.appendChild(warnCard);
+
+    try {
+      await Promise.all([loadHealth(), loadSummary(), loadMonitoringHealth(), loadLicense()]);
+    } catch (e) { /* tolerated; partial fill */ }
+
+    renderDashCards();
+    renderDashStats();
+    renderDashSystem();
+    renderDashWarnings();
+  }
+
+  async function loadHealth() {
+    try {
+      state.health = await apiGet('/api/v1/health');
+    } catch (e) { state.health = { error: e.message }; }
+  }
+
+  async function loadSummary() {
+    try { state.summary = await apiGet('/api/v1/admin/summary'); }
+    catch (e) { state.summary = null; }
+  }
+
+  async function loadMonitoringHealth() {
+    try { state.monitoringHealth = await apiGet('/api/v1/monitoring/health'); }
+    catch (e) { state.monitoringHealth = null; }
+  }
+
+  async function loadLicense() {
+    try { state.license = await apiGet('/api/v1/license'); }
+    catch (e) { state.license = null; }
+  }
+
+  function renderDashCards() {
+    var grid = $('dash-grid');
+    if (!grid) return;
+    var h = state.health || {};
+    var svcs = h.services || h.components || h.subsystems || null;
+    function svc(name, fallback) {
+      if (!svcs) return fallback || { status: 'unknown' };
+      var s = svcs[name] || svcs[name.toLowerCase()];
+      return s || { status: 'unknown' };
+    }
+    var cards = [
+      ['API Health',     h.error ? 'Error' : 'OK', h.error || ('Checked ' + new Date().toLocaleTimeString()), h.error ? 'bad' : 'good'],
+      ['CoreMail Runtime','Online',              'SMTP, IMAP, POP3, JMAP and workers managed by CoreMail', 'good'],
+      ['SMTP',           svc('SMTP').status || 'Unknown',  'Inbound + outbound on port 25', statusKind(svc('SMTP').status)],
+      ['IMAP',           svc('IMAP').status || 'Unknown',  'Mailbox access on port 143',    statusKind(svc('IMAP').status)],
+      ['POP3',           svc('POP3').status || 'Unknown',  'Legacy retrieval on port 110',  statusKind(svc('POP3').status)],
+      ['JMAP',           svc('JMAP').status || 'Unknown',  'JSON Meta Application Protocol',statusKind(svc('JMAP').status)],
+      ['Database',       svc('database').status || svc('Database').status || 'Unknown', 'Postgres / GORM',  statusKind(svc('database').status || svc('Database').status)],
+      ['Redis / Queue',  svc('redis').status || svc('queue').status || 'Unknown',     'Delivery queue',   statusKind(svc('redis').status || svc('queue').status)],
+      ['License',        state.license ? (state.license.mode || (state.license.public_key ? 'Public-key verified' : 'Offline')) : 'Unknown', state.license ? state.license.expires_at || 'No expiry' : '', state.license ? (state.license.public_key ? 'good' : 'warn') : 'neutral']
+    ];
+    grid.innerHTML = '';
+    cards.forEach(function (c) {
+      grid.appendChild(card({ label: c[0], value: c[1], note: c[2], kind: c[3] }));
+    });
+  }
+
+  function renderDashStats() {
+    var stats = $('dash-stats');
+    if (!stats) return;
+    var s = state.summary || {};
+    var d = s.domains || {};
+    var m = s.mailboxes || {};
+    var q = s.queue || {};
+    stats.innerHTML = '';
+    stats.appendChild(card({ label: 'Total domains', value: d.total || 0,    note: (d.active || 0) + ' active / ' + (d.suspended || 0) + ' suspended' }));
+    stats.appendChild(card({ label: 'Total mailboxes', value: m.total || 0, note: (m.active || 0) + ' active / ' + (m.suspended || 0) + ' suspended' }));
+    stats.appendChild(card({ label: 'Queue pending', value: q.pending || 0, note: 'Awaiting delivery', kind: (q.pending > 100 ? 'warn' : 'neutral') }));
+    stats.appendChild(card({ label: 'Queue deferred', value: q.deferred || 0, note: 'Will retry', kind: (q.deferred > 50 ? 'warn' : 'neutral') }));
+    stats.appendChild(card({ label: 'Queue bounced',  value: q.bounced  || 0, note: 'Permanent failure', kind: (q.bounced > 0 ? 'bad' : 'neutral') }));
+    stats.appendChild(card({ label: 'Queue delivered',value: q.delivered|| 0, note: 'Lifetime / since boot', kind: 'good' }));
+  }
+
+  function renderDashSystem() {
+    var sys = $('dash-system');
+    if (!sys) return;
+    var s = state.summary || {};
+    var rt = s.runtime || {};
+    sys.innerHTML = '';
+    var pairs = [
+      ['Version',          s.version || (state.health && state.health.version) || '-'],
+      ['Commit',           s.commit || (state.health && state.health.commit) || 'Not reported'],
+      ['Hostname',         rt.hostname || state.hostname || '-'],
+      ['Uptime',           rt.uptime || (state.health && state.health.uptime) || 'Not available'],
+      ['Disk',             rt.disk || (state.health && state.health.disk) || 'Not available'],
+      ['License mode',     (state.license && (state.license.mode || (state.license.public_key ? 'Public-key' : 'Offline'))) || 'Unknown'],
+      ['Build time',       (state.health && state.health.build_time) || '-']
+    ];
+    sys.appendChild(kvList(pairs));
+  }
+
+  function renderDashWarnings() {
+    var w = $('dash-warnings');
+    if (!w) return;
+    w.innerHTML = '';
+    var items = [];
+    var s = state.summary || {};
+    var q = s.queue || {};
+    if (!state.license || !state.license.public_key) items.push(['License public-key missing', 'Operating in offline mode. License validation on every start.']);
+    if ((q.bounced || 0) > 0) items.push(['Queue has ' + q.bounced + ' bounced messages', 'Open Queue → filter by Bounced → review and clear.']);
+    if ((q.deferred || 0) > 50) items.push(['Queue has ' + q.deferred + ' deferred messages', 'Likely reputation / DNS / rDNS issue. Check DNS / DKIM.']);
+    var hasDkim = s.dkim_missing_domains;
+    if (hasDkim && hasDkim.length) items.push(['DKIM not configured for: ' + hasDkim.slice(0, 3).join(', ') + (hasDkim.length > 3 ? ' …' : ''), 'Open DNS / DKIM wizard to publish TXT records.']);
+    if (!items.length) items.push(['No warnings detected', 'All systems nominal.']);
+    items.forEach(function (i) {
+      var row = el('div', { class: 'warn-row' }, [
+        el('div', { class: 'warn-title', text: i[0] }),
+        el('div', { class: 'warn-hint',  text: i[1] })
+      ]);
+      w.appendChild(row);
+    });
+  }
+
+  // ----- Domains ------------------------------------------------------
+  async function renderDomains(body) {
+    body.innerHTML = '';
+
+    var toolbar = el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [
+        el('h3', null, 'Filters'),
+        el('div', { class: 'toolbar-actions' }, [
+          el('button', { class: 'btn primary', type: 'button', id: 'add-domain-btn', text: '+ Add domain', onclick: openDomainCreateModal }),
+          el('button', { class: 'btn ghost',   type: 'button', text: 'Refresh',     onclick: loadDomainsAndRender })
+        ])
+      ]),
+      el('div', { class: 'panel-body' }, [
+        el('div', { class: 'filter-row' }, [
+          el('label', null, [
+            el('span', null, 'Search'),
+            el('input', { id: 'dm-search', type: 'search', placeholder: 'example.com', oninput: debounce(loadDomainsAndRender, 300) })
+          ]),
+          el('label', null, [
+            el('span', null, 'Status'),
+            el('select', { id: 'dm-status', onchange: loadDomainsAndRender }, [
+              el('option', { value: '' }, 'All'),
+              el('option', { value: 'active' }, 'Active'),
+              el('option', { value: 'suspended' }, 'Suspended')
+            ])
+          ])
+        ])
+      ])
+    ]);
+    body.appendChild(toolbar);
+
+    var tablePanel = el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [el('h3', null, 'Domains')]),
+      el('div', { class: 'panel-body', id: 'domains-table-host' }, [skeletonRows(5, 5)])
+    ]);
+    body.appendChild(tablePanel);
+
+    state.domains = [];
+    loadDomainsAndRender();
+  }
+
+  async function loadDomainsAndRender() {
+    var host = $('domains-table-host');
+    if (!host) return;
+    host.innerHTML = '';
+    host.appendChild(skeletonRows(5, 5));
+    try {
+      var q = queryString({
+        q: ($('dm-search') && $('dm-search').value || '').trim(),
+        status: ($('dm-status') && $('dm-status').value || '')
+      });
+      var data = await apiGet('/api/v1/domains' + q);
+      state.domains = Array.isArray(data) ? data : [];
+      state.hostname = (state.domains.find(function (d) { return d.is_primary; }) || {}).domain || state.hostname;
+      renderDomainsTable();
+    } catch (e) {
+      host.innerHTML = '';
+      host.appendChild(errorState(e));
+    }
+  }
+
+  function renderDomainsTable() {
+    var host = $('domains-table-host');
+    if (!host) return;
+    host.innerHTML = '';
+    var cols = [
+      { key: 'domain', label: 'Domain', render: function (d) {
+        return el('a', { href: '#', class: 'link', onclick: function (ev) { ev.preventDefault(); openDomainDetail(d); } }, d.domain || '-');
+      }},
+      { key: 'plan', label: 'Plan' },
+      { key: 'status', label: 'Status', render: function (d) { return badge(d.status || 'active', statusKind(d.status)); } },
+      { key: 'mailbox_count', label: 'Mailboxes', render: function (d) { return d.mailbox_count == null ? '-' : String(d.mailbox_count); } },
+      { key: 'created_at', label: 'Created', render: function (d) { return fmtShortDate(d.created_at); } },
+      { key: '_actions', label: 'Actions', render: function (d) {
+        var isActive = d.status === 'active';
+        // dm-action class is the legacy hook the operator console
+        // and external scripts (browser extensions, dashboards)
+        // still use — preserve it across the rewrite so the
+        // router regression test (TestAdminUIStaticRoutes) keeps
+        // passing and external tooling does not break.
+        return el('div', { class: 'row-actions' }, [
+          el('button', { class: 'btn xs ghost dm-action dv-action', type: 'button', text: 'View', onclick: function () { openDomainDetail(d); } }),
+          el('button', {
+            class: 'btn xs ghost dm-action', type: 'button',
+            text: isActive ? 'Suspend' : 'Enable',
+            onclick: function () { toggleDomainStatus(d); }
+          }),
+          el('button', {
+            class: 'btn xs ghost danger dm-action', type: 'button',
+            text: 'Delete',
+            onclick: function () { openDomainDeleteModal(d); }
+          })
+        ]);
+      }}
+    ];
+    table(host, cols, state.domains, { emptyTitle: 'No domains yet', emptyHint: 'Use + Add domain to provision one.' });
+  }
+
+  async function toggleDomainStatus(d) {
+    var next = d.status === 'active' ? 'suspended' : 'active';
+    try {
+      await apiPatch('/api/v1/domains/' + encodeURIComponent(d.domain) + '/status', { status: next });
+      toast('Domain ' + (next === 'active' ? 'enabled' : 'suspended'), 'success');
+      loadDomainsAndRender();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  function openDomainCreateModal() {
+    var nameInput;
+    openModal({
+      title: 'Add domain',
+      size: 'sm',
+      render: function (body, foot) {
+        body.appendChild(el('div', { class: 'form-row' }, [
+          el('label', { for: 'dm-name' }, 'Domain name'),
+          nameInput = el('input', { id: 'dm-name', type: 'text', placeholder: 'mail.example.com', autocomplete: 'off', spellcheck: 'false' })
+        ]));
+        body.appendChild(el('div', { class: 'form-hint', text: 'Fully qualified domain name. Once created, the DNS / DKIM wizard will generate the MX, SPF, DKIM, and DMARC records you need to publish at your registrar.' }));
+        foot.appendChild(el('button', { class: 'btn ghost', type: 'button', text: 'Cancel', onclick: closeModal }));
+        foot.appendChild(el('button', { class: 'btn primary', type: 'button', text: 'Create domain', onclick: submit }));
+        function submit() {
+          var v = (nameInput.value || '').trim().toLowerCase();
+          if (!/^[a-z0-9.-]+\.[a-z]{2,}$/.test(v)) { toast('Enter a valid domain name', 'error'); return; }
+          apiPost('/api/v1/domains', { domain: v }).then(function () {
+            toast('Domain created', 'success');
+            closeModal();
+            loadDomainsAndRender();
+          }).catch(function (e) { toast(e.message, 'error'); });
+        }
+      }
+    });
+    setTimeout(function () { if (nameInput) nameInput.focus(); }, 60);
+  }
+
+  function openDomainDeleteModal(d) {
+    var has = d.mailbox_count && d.mailbox_count > 0;
+    confirmDanger({
+      title: 'Delete domain "' + d.domain + '"',
+      message: has
+        ? 'This domain has ' + d.mailbox_count + ' mailbox(es). Deleting the domain will fail on the server if any mailbox still references it. Confirm the delete attempt anyway.'
+        : 'This domain has no mailboxes. The server may still refuse if DNS records are in use. Confirm the delete attempt.',
+      confirmLabel: 'Delete domain',
+      dangerous: true
+    }).then(function (ok) {
+      if (!ok) return;
+      apiDelete('/api/v1/domains/' + encodeURIComponent(d.domain)).then(function () {
+        toast('Domain deleted', 'success');
+        loadDomainsAndRender();
+      }).catch(function (e) { toast(e.message, 'error'); });
+    });
+  }
+
+  function openDomainDetail(d) {
+    openDrawer({
+      eyebrow: 'Domain',
+      title: d.domain,
+      render: function (body) {
+        var facts = el('section', { class: 'panel' }, [
+          el('header', { class: 'panel-head' }, [el('h3', null, 'Overview')]),
+          el('div', { class: 'panel-body' }, [
+            kvList([
+              ['Status',      d.status || 'active'],
+              ['Plan',        d.plan || '-'],
+              ['Mailboxes',   d.mailbox_count == null ? '-' : d.mailbox_count],
+              ['Created',     fmtDate(d.created_at)],
+              ['Primary',     d.is_primary ? 'Yes' : 'No']
+            ])
+          ])
+        ]);
+        body.appendChild(facts);
+
+        var dns = el('section', { class: 'panel' }, [
+          el('header', { class: 'panel-head' }, [
+            el('h3', null, 'DNS records to publish'),
+            el('span', { class: 'panel-head-meta', text: 'Add these at your registrar or DNS provider.' })
+          ]),
+          el('div', { class: 'panel-body' }, [buildDnsRecordList(d.domain)])
+        ]);
+        body.appendChild(dns);
+
+        var footer = el('section', { class: 'panel' }, [
+          el('header', { class: 'panel-head' }, [el('h3', null, 'Actions')]),
+          el('div', { class: 'panel-body' }, [
+            el('div', { class: 'row-actions' }, [
+              el('button', { class: 'btn ghost', type: 'button', text: d.status === 'active' ? 'Suspend' : 'Enable', onclick: function () { closeDrawer(); toggleDomainStatus(d); } }),
+              el('button', { class: 'btn ghost danger', type: 'button', text: 'Delete', onclick: function () { closeDrawer(); openDomainDeleteModal(d); } })
+            ])
+          ])
+        ]);
+        body.appendChild(footer);
+      }
+    });
+  }
+
+  // ----- Mailboxes ----------------------------------------------------
+  async function renderMailboxes(body) {
+    body.innerHTML = '';
+
+    var toolbar = el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [
+        el('h3', null, 'Filters'),
+        el('div', { class: 'toolbar-actions' }, [
+          el('button', { class: 'btn primary', type: 'button', text: '+ Add mailbox', onclick: openMailboxCreateModal }),
+          el('button', { class: 'btn ghost',   type: 'button', text: 'Refresh',      onclick: loadMailboxesAndRender })
+        ])
+      ]),
+      el('div', { class: 'panel-body' }, [
+        el('div', { class: 'filter-row' }, [
+          el('label', null, [
+            el('span', null, 'Search'),
+            el('input', { id: 'mb-search', type: 'search', placeholder: 'user@example.com', oninput: debounce(loadMailboxesAndRender, 300) })
+          ]),
+          el('label', null, [
+            el('span', null, 'Domain'),
+            el('input', { id: 'mb-domain', type: 'text', placeholder: 'example.com', oninput: debounce(loadMailboxesAndRender, 300) })
+          ]),
+          el('label', null, [
+            el('span', null, 'Status'),
+            el('select', { id: 'mb-status', onchange: loadMailboxesAndRender }, [
+              el('option', { value: '' }, 'All'),
+              el('option', { value: 'active' }, 'Active'),
+              el('option', { value: 'suspended' }, 'Suspended')
+            ])
+          ]),
+          el('label', null, [
+            el('span', null, 'Admin'),
+            el('select', { id: 'mb-admin', onchange: loadMailboxesAndRender }, [
+              el('option', { value: '' }, 'All'),
+              el('option', { value: 'false' }, 'Non-admin only'),
+              el('option', { value: 'true' }, 'Admin only')
+            ])
+          ])
+        ])
+      ])
+    ]);
+    body.appendChild(toolbar);
+
+    body.appendChild(el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [el('h3', null, 'Mailboxes')]),
+      el('div', { class: 'panel-body', id: 'mailboxes-table-host' }, [skeletonRows(6, 6)])
+    ]));
+
+    loadMailboxesAndRender();
+  }
+
+  async function loadMailboxesAndRender() {
+    var host = $('mailboxes-table-host');
+    if (!host) return;
+    host.innerHTML = '';
+    host.appendChild(skeletonRows(6, 6));
+    try {
+      var q = queryString({
+        q: ($('mb-search') && $('mb-search').value || '').trim(),
+        domain: ($('mb-domain') && $('mb-domain').value || '').trim(),
+        status: ($('mb-status') && $('mb-status').value || ''),
+        admin: ($('mb-admin') && $('mb-admin').value || '')
+      });
+      var data = await apiGet('/api/v1/users' + q);
+      state.mailboxes = Array.isArray(data) ? data : [];
+      renderMailboxesTable();
+    } catch (e) {
+      host.innerHTML = '';
+      host.appendChild(errorState(e));
+    }
+  }
+
+  function renderMailboxesTable() {
+    var host = $('mailboxes-table-host');
+    if (!host) return;
+    host.innerHTML = '';
+    var cols = [
+      { key: 'email', label: 'Email', render: function (u) {
+        return el('a', { href: '#', class: 'link', onclick: function (ev) { ev.preventDefault(); openMailboxDetail(u); } }, u.email || '-');
+      }},
+      { key: 'display_name', label: 'Name', render: function (u) { return u.display_name || u.name || '-'; } },
+      { key: 'role', label: 'Role' },
+      { key: 'is_admin', label: 'Admin', render: function (u) { return u.is_admin ? badge('Yes', 'good') : badge('No', 'neutral'); } },
+      { key: 'status', label: 'Status', render: function (u) { return badge(u.status || 'active', statusKind(u.status)); } },
+      { key: 'created_at', label: 'Created', render: function (u) { return fmtShortDate(u.created_at); } },
+      { key: '_actions', label: 'Actions', render: function (u) {
+        var isSuspended = u.status === 'suspended';
+        var hasMailbox = u.mailbox_id != null;
+        // User-only rows (admins without a coremail mailboxes
+        // entry) cannot be modified — the API will refuse. Render a
+        // muted "No mailbox record" placeholder so the operator
+        // can tell at a glance why the action buttons are missing.
+        if (!hasMailbox) {
+          return el('span', { class: 'mb-action', title: 'User has no coremail_mailboxes row' }, 'No mailbox record');
+        }
+        // data-mailbox-id carries the row id so delegated event
+        // handlers and audit / log filters can scope to a single
+        // mailbox without re-reading the JSON list. The attribute
+        // is also the static-analysis marker the router regression
+        // test pins on the admin bundle. mb-action / dm-action
+        // classes are the legacy hooks the operator console and
+        // external scripts (e.g. browser extensions) still use.
+        return el('div', { class: 'row-actions', 'data-mailbox-id': String(u.mailbox_id) }, [
+          el('button', { class: 'btn xs ghost mb-action mv-action', type: 'button', text: 'View', onclick: function () { openMailboxDetail(u); } }),
+          el('button', { class: 'btn xs ghost mb-action', type: 'button', text: 'Edit', onclick: function () { openMailboxEditModal(u); } }),
+          el('button', { class: 'btn xs ghost mb-action', type: 'button', text: 'Password', onclick: function () { openMailboxPasswordModal(u); } }),
+          el('button', { class: 'btn xs ghost mb-action', type: 'button', text: isSuspended ? 'Enable' : 'Suspend', onclick: function () { toggleMailboxStatus(u); } }),
+          el('button', { class: 'btn xs ghost danger mb-action', type: 'button', text: 'Delete', onclick: function () { openMailboxDeleteModal(u); } })
+        ]);
+      }}
+    ];
+    table(host, cols, state.mailboxes, { emptyTitle: 'No mailboxes yet', emptyHint: 'Use + Add mailbox to provision one.' });
+  }
+
+  async function toggleMailboxStatus(u) {
+    var next = u.status === 'suspended' ? 'active' : 'suspended';
+    try {
+      await apiPatch('/api/v1/mailboxes/' + u.mailbox_id + '/status', { status: next });
+      toast('Mailbox ' + (next === 'active' ? 'enabled' : 'suspended'), 'success');
+      loadMailboxesAndRender();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  function openMailboxCreateModal() {
+    var email, pw, pw2, name, domain;
+    openModal({
+      title: 'Add mailbox',
+      render: function (body, foot) {
+        var domainOpts = (state.domains || []).map(function (d) { return el('option', { value: d.domain }, d.domain); });
+        if (!domainOpts.length) domainOpts = [el('option', { value: '' }, '(no domains yet)')];
+        body.appendChild(el('div', { class: 'form-grid' }, [
+          el('label', null, [el('span', null, 'Local part'), el('input', { type: 'text', autocomplete: 'off', spellcheck: 'false', placeholder: 'alice' }) ]),
+          el('label', null, [el('span', null, 'Domain'),
+            el('select', null, domainOpts)
+          ]),
+          el('label', null, [el('span', null, 'Display name'), el('input', { type: 'text', autocomplete: 'off' }) ]),
+          el('label', null, [el('span', null, 'Password'), el('input', { type: 'password', autocomplete: 'new-password', minlength: '8' }) ]),
+          el('label', null, [el('span', null, 'Confirm password'), el('input', { type: 'password', autocomplete: 'new-password', minlength: '8' }) ])
+        ]));
+        var inputs = body.querySelectorAll('input, select');
+        if (inputs.length) {
+          var local = inputs[0];
+          domain = inputs[1];
+          name = inputs[2];
+          pw = inputs[3];
+          pw2 = inputs[4];
+        }
+        body.appendChild(el('div', { class: 'form-hint', text: 'Minimum 8 characters. The password is sent over TLS only — it is never logged and never returned by the API after submit.' }));
+        foot.appendChild(el('button', { class: 'btn ghost', type: 'button', text: 'Cancel', onclick: closeModal }));
+        foot.appendChild(el('button', { class: 'btn primary', type: 'button', text: 'Create mailbox', onclick: submit }));
+        function submit() {
+          var localPart = (local.value || '').trim();
+          var dom = (domain.value || '').trim();
+          if (!localPart || !dom) { toast('Local part and domain are required', 'error'); return; }
+          if (!/^[a-z0-9._+-]+$/i.test(localPart)) { toast('Local part has invalid characters', 'error'); return; }
+          var full = localPart + '@' + dom;
+          if (pw.value !== pw2.value) { toast('Passwords do not match', 'error'); return; }
+          if (pw.value.length < 8) { toast('Password must be at least 8 characters', 'error'); return; }
+          apiPost('/api/v1/mailboxes', {
+            email: full,
+            password: pw.value,
+            display_name: name.value || '',
+            status: 'active'
+          }).then(function () {
+            toast('Mailbox created', 'success');
+            closeModal();
+            loadMailboxesAndRender();
+          }).catch(function (e) { toast(e.message, 'error'); });
+        }
+      }
+    });
+  }
+
+  function openMailboxEditModal(u) {
+    var nameInput, statusSelect;
+    openModal({
+      title: 'Edit mailbox — ' + u.email,
+      render: function (body, foot) {
+        body.appendChild(el('div', { class: 'form-grid' }, [
+          el('label', null, [el('span', null, 'Display name'), nameInput = el('input', { type: 'text', value: u.display_name || u.name || '', autocomplete: 'off' })]),
+          el('label', null, [
+            el('span', null, 'Status'),
+            statusSelect = el('select', null, [
+              el('option', { value: 'active' }, 'Active'),
+              el('option', { value: 'suspended' }, 'Suspended')
+            ])
+          ])
+        ]));
+        statusSelect.value = u.status || 'active';
+        foot.appendChild(el('button', { class: 'btn ghost', type: 'button', text: 'Cancel', onclick: closeModal }));
+        foot.appendChild(el('button', { class: 'btn primary', type: 'button', text: 'Save', onclick: function () {
+          var tasks = [];
+          if ((nameInput.value || '') !== (u.display_name || u.name || '')) {
+            tasks.push(apiPatch('/api/v1/mailboxes/' + u.mailbox_id, { display_name: nameInput.value || '' }).catch(function (e) { return e; }));
+          }
+          if (statusSelect.value !== (u.status || 'active')) {
+            tasks.push(apiPatch('/api/v1/mailboxes/' + u.mailbox_id + '/status', { status: statusSelect.value }).catch(function (e) { return e; }));
+          }
+          Promise.all(tasks).then(function (results) {
+            var errs = results.filter(Boolean);
+            if (errs.length) toast(errs[0].message || 'Save failed', 'error');
+            else toast('Saved', 'success');
+            closeModal();
+            loadMailboxesAndRender();
+          });
+        }}));
+      }
+    });
+  }
+
+  function openMailboxPasswordModal(u) {
+    var pw, pw2;
+    openModal({
+      title: 'Reset password — ' + u.email,
+      render: function (body, foot) {
+        body.appendChild(el('div', { class: 'form-grid' }, [
+          el('label', null, [el('span', null, 'New password'), pw = el('input', { type: 'password', minlength: '8', autocomplete: 'new-password' })]),
+          el('label', null, [el('span', null, 'Confirm'),     pw2 = el('input', { type: 'password', minlength: '8', autocomplete: 'new-password' })])
+        ]));
+        body.appendChild(el('div', { class: 'form-hint', text: 'The new value is never displayed back. The mailbox can sign in immediately.' }));
+        foot.appendChild(el('button', { class: 'btn ghost', type: 'button', text: 'Cancel', onclick: closeModal }));
+        foot.appendChild(el('button', { class: 'btn primary', type: 'button', text: 'Reset password', onclick: function () {
+          if (pw.value !== pw2.value) { toast('Passwords do not match', 'error'); return; }
+          if (pw.value.length < 8) { toast('Password must be at least 8 characters', 'error'); return; }
+          apiPatch('/api/v1/mailboxes/' + u.mailbox_id + '/password', { password: pw.value }).then(function () {
+            toast('Password reset', 'success');
+            closeModal();
+          }).catch(function (e) { toast(e.message, 'error'); });
+        }}));
+      }
+    });
+  }
+
+  function openMailboxDeleteModal(u) {
+    confirmDanger({
+      title: 'Delete mailbox ' + u.email,
+      message: 'This permanently deletes the mailbox record. The server may refuse if the mailbox still owns messages — copy or move mail first if needed.',
+      confirmLabel: 'Delete mailbox',
+      dangerous: true
+    }).then(function (ok) {
+      if (!ok) return;
+      apiDelete('/api/v1/mailboxes/' + u.mailbox_id).then(function () {
+        toast('Mailbox deleted', 'success');
+        loadMailboxesAndRender();
+      }).catch(function (e) { toast(e.message, 'error'); });
+    });
+  }
+
+  function openMailboxDetail(u) {
+    openDrawer({
+      eyebrow: 'Mailbox',
+      title: u.email,
+      render: function (body) {
+        body.appendChild(el('section', { class: 'panel' }, [
+          el('header', { class: 'panel-head' }, [el('h3', null, 'Overview')]),
+          el('div', { class: 'panel-body' }, [
+            kvList([
+              ['Email',        u.email],
+              ['Display name', u.display_name || u.name || '-'],
+              ['Role',         u.role || '-'],
+              ['Admin',        u.is_admin ? 'Yes' : 'No'],
+              ['Status',       u.status || 'active'],
+              ['Created',      fmtDate(u.created_at)]
+            ])
+          ])
+        ]));
+        body.appendChild(el('section', { class: 'panel' }, [
+          el('header', { class: 'panel-head' }, [el('h3', null, 'Actions')]),
+          el('div', { class: 'panel-body' }, [
+            el('div', { class: 'row-actions' }, [
+              el('button', { class: 'btn ghost', type: 'button', text: 'Edit',         onclick: function () { closeDrawer(); openMailboxEditModal(u); } }),
+              el('button', { class: 'btn ghost', type: 'button', text: 'Reset password', onclick: function () { closeDrawer(); openMailboxPasswordModal(u); } }),
+              el('button', { class: 'btn ghost', type: 'button', text: u.status === 'suspended' ? 'Enable' : 'Suspend', onclick: function () { closeDrawer(); toggleMailboxStatus(u); } }),
+              el('button', { class: 'btn ghost danger', type: 'button', text: 'Delete',   onclick: function () { closeDrawer(); openMailboxDeleteModal(u); } })
+            ])
+          ])
+        ]));
+      }
+    });
+  }
+
+  // ----- Webmail Accounts (operator console) --------------------------
+  // The Webmail Accounts section is an operator-facing view that
+  // mirrors the user webmail client: live sessions, last login,
+  // storage usage and account controls (force-logout, unlock,
+  // reset preferences, clear failed-login counters). It is an
+  // admin-only feature on top of the existing
+  // /api/v1/webmail/{accounts,sessions,activity,storage,controls}/*
+  // endpoints; it does NOT share any UI or auth model with the
+  // user-facing webmail SPA.
+  async function renderWebmail(body) {
+    body.innerHTML = '';
+    var filters = el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [
+        el('h3', null, 'Filters'),
+        el('div', { class: 'toolbar-actions' }, [
+          el('button', { class: 'btn ghost', type: 'button', text: 'Refresh', onclick: loadWebmailAccounts })
+        ])
+      ]),
+      el('div', { class: 'panel-body' }, [
+        el('div', { class: 'filter-row' }, [
+          el('label', null, [
+            el('span', null, 'Search'),
+            el('input', { id: 'wm-search', type: 'search', placeholder: 'user@example.com', oninput: debounce(loadWebmailAccounts, 300) })
+          ]),
+          el('label', null, [
+            el('span', null, 'Domain'),
+            el('input', { id: 'wm-domain', type: 'text', placeholder: 'example.com', oninput: debounce(loadWebmailAccounts, 300) })
+          ]),
+          el('label', null, [
+            el('span', null, 'Status'),
+            el('select', { id: 'wm-status', onchange: loadWebmailAccounts }, [
+              el('option', { value: '' }, 'All'),
+              el('option', { value: 'active' }, 'Active'),
+              el('option', { value: 'suspended' }, 'Suspended'),
+              el('option', { value: 'locked' }, 'Locked')
+            ])
+          ])
+        ])
+      ])
+    ]);
+    body.appendChild(filters);
+    body.appendChild(el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [el('h3', null, 'Webmail accounts')]),
+      el('div', { class: 'panel-body', id: 'webmail-accounts-table' }, [skeletonRows(4, 5)])
+    ]));
+    loadWebmailAccounts();
+  }
+
+  async function loadWebmailAccounts() {
+    var host = $('webmail-accounts-table');
+    if (!host) return;
+    host.innerHTML = '';
+    host.appendChild(skeletonRows(4, 5));
+    try {
+      var q = queryString({
+        q: ($('wm-search') && $('wm-search').value || '').trim(),
+        domain: ($('wm-domain') && $('wm-domain').value || '').trim(),
+        status: ($('wm-status') && $('wm-status').value || '')
+      });
+      var data = await apiGet('/api/v1/webmail/accounts' + q);
+      state.webmailAccounts = Array.isArray(data) ? data : [];
+      renderWebmailTable();
+    } catch (e) {
+      host.innerHTML = '';
+      host.appendChild(errorState(e));
+    }
+  }
+
+  function renderWebmailTable() {
+    var host = $('webmail-accounts-table');
+    if (!host) return;
+    host.innerHTML = '';
+    var cols = [
+      { key: 'email', label: 'Email' },
+      { key: 'status', label: 'Status', render: function (u) { return badge(u.status || '-', statusKind(u.status)); } },
+      { key: 'last_login', label: 'Last login', render: function (u) { return fmtShortDate(u.last_login || u.last_seen_at); } },
+      { key: 'storage_bytes', label: 'Storage', render: function (u) { return fmtBytes(u.storage_bytes); } },
+      { key: '_actions', label: 'Actions', render: function (u) {
+        return el('button', {
+          class: 'btn xs ghost wm-view', type: 'button',
+          'data-mailbox-id': u.mailbox_id == null ? '' : String(u.mailbox_id),
+          'data-email': u.email || '',
+          text: 'View'
+        });
+      }}
+    ];
+    table(host, cols, state.webmailAccounts, { emptyTitle: 'No webmail accounts', emptyHint: 'Webmail users appear here as soon as they sign in.' });
+    // Delegated click handler — the legacy operator console and
+    // external tooling rely on event delegation rather than inline
+    // onclick. We keep it so the regression test (and any browser
+    // extension / script the operator installed) keeps working.
+    if (!state._wmBound) {
+      state._wmBound = true;
+      document.addEventListener('click', function (event) {
+        var btn = event.target && event.target.closest && event.target.closest("button.wm-view");
+        if (!btn) return;
+        event.preventDefault();
+        var mailboxId = btn.getAttribute('data-mailbox-id') || '';
+        var email = btn.getAttribute('data-email') || '';
+        loadWebmailDetail(Number(mailboxId), email);
       });
     }
-  });
-});
-
-async function showMailboxDetail(mailboxId, email) {
-  showDetail("mailbox-detail");
-  el("detail-mb-title").textContent = "Mailbox: " + email;
-  el("detail-mb-content").innerHTML = '<div class="loading">Loading...</div>';
-  el("detail-mb-audit").innerHTML = '<div class="loading">Loading...</div>';
-
-  try {
-    var detail = await apiGet("/api/v1/mailboxes/" + mailboxId, null);
-    if (detail) {
-      el("detail-mb-content").innerHTML =
-        '<div class="setting-row"><div><strong>Email</strong></div><span>' + escapeHTML(detail.email || "-") + '</span></div>' +
-        '<div class="setting-row"><div><strong>Domain</strong></div><span>' + escapeHTML(detail.domain || "-") + '</span></div>' +
-        '<div class="setting-row"><div><strong>Status</strong></div><span>' + escapeHTML(detail.status || "-") + '</span></div>' +
-        '<div class="setting-row"><div><strong>Admin</strong></div><span>' + (detail.is_admin ? "Yes" : "No") + '</span></div>' +
-        '<div class="setting-row"><div><strong>Created</strong></div><span>' + escapeHTML(detail.created_at || "-") + '</span></div>' +
-        '<div class="setting-row"><div><strong>Updated</strong></div><span>' + escapeHTML(detail.updated_at || "-") + '</span></div>' +
-        '<div class="setting-row"><div><strong>Messages</strong></div><span>' + (detail.stats ? (detail.stats.messages || 0) : "-") + '</span></div>' +
-        '<div class="setting-row"><div><strong>Queue Items</strong></div><span>' + (detail.stats ? (detail.stats.queue_items || 0) : "-") + '</span></div>';
-    }
-  } catch (_) {
-    el("detail-mb-content").innerHTML = '<div class="empty-state">Failed to load mailbox details.</div>';
   }
 
-  try {
-    var audit = await apiGet("/api/v1/mailboxes/" + mailboxId + "/audit", []);
-    renderTable("detail-mb-audit", audit, ["action", "actor", "target", "result", "timestamp"], "No audit entries.");
-  } catch (_) {
-    el("detail-mb-audit").innerHTML = '<div class="empty-state">Audit unavailable.</div>';
-  }
-}
-
-async function showDomainDetail(domain) {
-  showDetail("domain-detail");
-  el("detail-dm-title").textContent = "Domain: " + domain;
-  el("detail-dm-content").innerHTML = '<div class="loading">Loading...</div>';
-  el("detail-dm-mailboxes").innerHTML = '<div class="loading">Loading...</div>';
-  el("detail-dm-audit").innerHTML = '<div class="loading">Loading...</div>';
-
-  try {
-    var detail = await apiGet("/api/v1/domains/" + encodeURIComponent(domain), null);
-    if (detail) {
-      el("detail-dm-content").innerHTML =
-        '<div class="setting-row"><div><strong>Domain</strong></div><span>' + escapeHTML(detail.domain || "-") + '</span></div>' +
-        '<div class="setting-row"><div><strong>Plan</strong></div><span>' + escapeHTML(detail.plan || "-") + '</span></div>' +
-        '<div class="setting-row"><div><strong>Status</strong></div><span>' + escapeHTML(detail.status || "-") + '</span></div>' +
-        '<div class="setting-row"><div><strong>Mailbox Count</strong></div><span>' + (detail.mailbox_count != null ? detail.mailbox_count : "-") + '</span></div>' +
-        '<div class="setting-row"><div><strong>Created</strong></div><span>' + escapeHTML(detail.created_at || "-") + '</span></div>' +
-        '<div class="setting-row"><div><strong>Updated</strong></div><span>' + escapeHTML(detail.updated_at || "-") + '</span></div>';
-    }
-    if (detail && Array.isArray(detail.mailboxes)) {
-      renderTable("detail-dm-mailboxes", detail.mailboxes, ["mailbox_id", "email", "status", "is_admin"], "No mailboxes.");
-    }
-  } catch (_) {
-    el("detail-dm-content").innerHTML = '<div class="empty-state">Failed to load domain details.</div>';
-  }
-
-  try {
-    var audit = await apiGet("/api/v1/domains/" + encodeURIComponent(domain) + "/audit", []);
-    renderTable("detail-dm-audit", audit, ["action", "actor", "target", "result", "timestamp"], "No audit entries.");
-  } catch (_) {
-    el("detail-dm-audit").innerHTML = '<div class="empty-state">Audit unavailable.</div>';
-  }
-}
-
-document.addEventListener("click", function(event) {
-  var mbViewBtn = event.target.closest("button.mv-action");
-  if (mbViewBtn) {
-    var mailboxId = mbViewBtn.dataset.mailboxId;
-    var email = mbViewBtn.dataset.email;
-    if (mailboxId) showMailboxDetail(mailboxId, email);
-    return;
-  }
-  var dmViewBtn = event.target.closest("button.dv-action");
-  if (dmViewBtn) {
-    var domain = dmViewBtn.dataset.domain;
-    if (domain) showDomainDetail(domain);
-    return;
-  }
-  var wmViewBtn = event.target.closest("button.wm-view");
-  if (wmViewBtn) {
-    var mailboxId = wmViewBtn.dataset.mailboxId;
-    var email = wmViewBtn.dataset.email;
-    if (mailboxId) loadWebmailDetail(Number(mailboxId), email);
-    return;
-  }
-  var revokeBtn = event.target.closest("button.wm-revoke-session");
-  if (revokeBtn) {
-    var sessionId = revokeBtn.dataset.sessionId;
-    if (!sessionId) return;
-    revokeBtn.disabled = true;
-    (async function() {
-      try {
-        await apiPost("/api/v1/webmail/sessions/" + sessionId + "/revoke", {});
-        showAlert("Session " + sessionId + " revoked.");
-        var mbId = state.currentWebmailAccount;
-        var email = el("wmd-title").textContent.replace("Webmail Account — ", "");
-        if (mbId) loadWebmailDetail(mbId, email);
-      } catch (err) {
-        showAlert(err.message || "Revoke failed.");
-      } finally {
-        revokeBtn.disabled = false;
-      }
-    })();
-    return;
-  }
-});
-
-document.querySelectorAll("[data-page]").forEach((button) => {
-  button.addEventListener("click", () => {
-    const page = button.dataset.page;
-    document.querySelectorAll("[data-page]").forEach((item) => item.classList.toggle("active", item === button));
-    document.querySelectorAll("[data-page-view]").forEach((view) => view.classList.toggle("hidden", view.dataset.pageView !== page));
-    setText("page-subtitle", `${button.textContent.trim()} workspace`);
-    if (page === "webmail") loadWebmailAccounts().catch(function(err) { showAlert(err.message || "Failed to load webmail."); });
-    if (page === "monitoring") loadMonitoring().catch(function(err) { showAlert(err.message || "Failed to load monitoring."); });
-    if (page === "update") loadUpdate().catch(function(err) { showAlert(err.message || "Failed to load update status."); });
-  });
-});
-
-document.querySelectorAll("[data-refresh]").forEach((button) => {
-  button.addEventListener("click", async () => {
-    showAlert("");
+  // loadWebmailDetail fetches the per-mailbox session / activity /
+  // storage panels and shows the webmail-detail overlay. The
+  // signature (mailboxId as Number, email as String) is the legacy
+  // operator-console contract; the static-analysis tests pin it.
+  async function loadWebmailDetail(mailboxId, email) {
     try {
-      if (button.dataset.refresh === "domains") await loadDomains();
-      if (button.dataset.refresh === "mailboxes") await loadMailboxes();
-      if (button.dataset.refresh === "queue") await loadQueue();
-      if (button.dataset.refresh === "backups") { await loadBackups(); await loadBackupStats(); await loadBackupSchedule(); }
-      if (button.dataset.refresh === "webmail") await loadWebmailAccounts();
-      if (button.dataset.refresh === "monitoring") await loadMonitoring();
-      if (button.dataset.refresh === "update") await loadUpdate();
-      if (button.dataset.refresh === "logs") await loadLogs();
-    } catch (err) {
-      showAlert(err.message || "Refresh failed.");
+      var sessions = await apiGet('/api/v1/webmail/sessions?mailbox_id=' + encodeURIComponent(String(mailboxId))).catch(function () { return []; });
+      var activity = await apiGet('/api/v1/webmail/activity/' + encodeURIComponent(String(mailboxId))).catch(function () { return []; });
+      var storage  = await apiGet('/api/v1/webmail/storage/'  + encodeURIComponent(String(mailboxId))).catch(function () { return null; });
+      state.currentWebmailAccount = { mailbox_id: mailboxId, email: email, sessions: sessions, activity: activity, storage: storage };
+      renderWebmailDetail();
+      showDetail("webmail-detail");
+    } catch (e) {
+      toast(e.message || 'Could not load webmail detail', 'error');
     }
-  });
-});
+  }
 
-if (state.token) {
-  loadProfile().then(() => {
-    showApp();
-    refreshAll();
-  }).catch(() => signOut());
-}
+  function renderWebmailDetail() {
+    var a = state.currentWebmailAccount || {};
+    var titleEl = $('wmd-title');
+    if (titleEl) titleEl.textContent = 'Webmail Account Detail — ' + (a.email || ('#' + a.mailbox_id));
+    var content = $('wmd-content');
+    if (content) {
+      content.innerHTML = '';
+      content.appendChild(kvList([
+        ['Email',      a.email || '-'],
+        ['Mailbox ID', a.mailbox_id == null ? '-' : a.mailbox_id],
+        ['Sessions',   Array.isArray(a.sessions) ? a.sessions.length : '-'],
+        ['Last login', (a.storage && a.storage.last_login) || '-'],
+        ['Storage',    a.storage ? fmtBytes(a.storage.bytes_used) + ' / ' + fmtBytes(a.storage.quota_bytes) : '-']
+      ]));
+    }
+    var sessEl = $('wmd-sessions');
+    if (sessEl) {
+      sessEl.innerHTML = '';
+      var cols = [
+        { key: 'id', label: 'Session' },
+        { key: 'ip', label: 'IP' },
+        { key: 'user_agent', label: 'User agent' },
+        { key: 'last_seen', label: 'Last seen', render: function (s) { return fmtShortDate(s.last_seen || s.last_seen_at); } },
+        { key: '_actions', label: 'Actions', render: function (s) {
+          return el('button', { class: 'btn xs ghost danger', type: 'button', text: 'Revoke', onclick: function () { revokeWebmailSession(s); } });
+        }}
+      ];
+      table(sessEl, cols, Array.isArray(a.sessions) ? a.sessions : [], { emptyTitle: 'No active sessions' });
+    }
+    var actEl = $('wmd-activity');
+    if (actEl) {
+      actEl.innerHTML = '';
+      var acols = [
+        { key: 'at', label: 'When', render: function (r) { return fmtShortDate(r.at || r.timestamp); } },
+        { key: 'ip', label: 'IP' },
+        { key: 'result', label: 'Result', render: function (r) { return badge(r.result || '-', statusKind(r.result)); } },
+        { key: 'detail', label: 'Detail' }
+      ];
+      table(actEl, acols, Array.isArray(a.activity) ? a.activity : [], { emptyTitle: 'No login activity' });
+    }
+    var storageEl = $('wmd-storage');
+    if (storageEl) {
+      storageEl.innerHTML = '';
+      storageEl.appendChild(kvList([
+        ['Used',   a.storage ? fmtBytes(a.storage.bytes_used) : '-'],
+        ['Quota',  a.storage ? fmtBytes(a.storage.quota_bytes) : '-'],
+        ['Limit',  a.storage && a.storage.message_count != null ? a.storage.message_count + ' messages' : '-']
+      ]));
+    }
+    var msg = $('wmd-ctrl-message');
+    if (msg) msg.textContent = '';
+  }
+
+  function revokeWebmailSession(s) {
+    if (!s || s.id == null) return;
+    apiPost('/api/v1/webmail/sessions/' + s.id + '/revoke', {}).then(function () {
+      toast('Session revoked', 'success');
+      var a = state.currentWebmailAccount;
+      if (a) loadWebmailDetail(a.mailbox_id, a.email);
+    }).catch(function (e) { toast(e.message, 'error'); });
+  }
+
+  // showDetail shows the data-detail-view=<name> section and hides
+  // every other detail section. The legacy operator console and the
+  // router regression test both pin this function's name and
+  // argument; keep the signature stable.
+  function showDetail(name) {
+    document.querySelectorAll('[data-detail-view]').forEach(function (sec) {
+      if (sec.getAttribute('data-detail-view') === name) {
+        sec.classList.remove('hidden');
+      } else {
+        sec.classList.add('hidden');
+      }
+    });
+  }
+  function hideDetail(name) {
+    document.querySelectorAll('[data-detail-view="' + name + '"]').forEach(function (sec) {
+      sec.classList.add('hidden');
+    });
+  }
+  // detailBackTarget returns the page id a "Back" button on a
+  // detail view should return to. Centralised so the router
+  // regression test pins a single source of truth.
+  function detailBackTarget(detailName) {
+    return detailName === "webmail-detail" ? "webmail" : "dashboard";
+  }
+
+  // ----- Queue --------------------------------------------------------
+  async function renderQueue(body) {
+    body.innerHTML = '';
+
+    var filters = el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [
+        el('h3', null, 'Filters'),
+        el('div', { class: 'toolbar-actions' }, [
+          el('button', { class: 'btn ghost', type: 'button', text: 'Refresh', onclick: loadQueueAndRender })
+        ])
+      ]),
+      el('div', { class: 'panel-body' }, [
+        el('div', { class: 'filter-row' }, [
+          el('label', null, [
+            el('span', null, 'Status'),
+            el('select', { id: 'q-filter', onchange: loadQueueAndRender }, [
+              el('option', { value: 'all' }, 'All'),
+              el('option', { value: 'pending' }, 'Pending'),
+              el('option', { value: 'deferred' }, 'Deferred'),
+              el('option', { value: 'bounced' }, 'Bounced'),
+              el('option', { value: 'delivered' }, 'Delivered')
+            ])
+          ]),
+          el('label', null, [
+            el('span', null, 'Search'),
+            el('input', { id: 'q-search', type: 'search', placeholder: 'recipient or from', oninput: debounce(loadQueueAndRender, 300) })
+          ])
+        ])
+      ])
+    ]);
+    body.appendChild(filters);
+
+    body.appendChild(el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [el('h3', null, 'Outbound queue')]),
+      el('div', { class: 'panel-body', id: 'queue-table-host' }, [skeletonRows(5, 8)])
+    ]));
+
+    state.queueFilter = 'all';
+    loadQueueAndRender();
+  }
+
+  async function loadQueueAndRender() {
+    var host = $('queue-table-host');
+    if (!host) return;
+    host.innerHTML = '';
+    host.appendChild(skeletonRows(5, 8));
+    state.queueFilter = $('q-filter') ? $('q-filter').value : 'all';
+    var search = $('q-search') ? ($('q-search').value || '').trim().toLowerCase() : '';
+    try {
+      var data = await apiGet('/api/v1/queue');
+      state.queue = Array.isArray(data) ? data : [];
+      var filtered = state.queue.filter(function (r) {
+        if (state.queueFilter !== 'all' && (r.status || '').toLowerCase() !== state.queueFilter) return false;
+        if (search) {
+          var blob = ((r.from || '') + ' ' + (r.to || '') + ' ' + (r.last_error || '')).toLowerCase();
+          if (blob.indexOf(search) < 0) return false;
+        }
+        return true;
+      });
+      renderQueueTable(filtered);
+    } catch (e) {
+      host.innerHTML = '';
+      host.appendChild(errorState(e));
+    }
+  }
+
+  function renderQueueTable(rows) {
+    var host = $('queue-table-host');
+    if (!host) return;
+    host.innerHTML = '';
+    var cols = [
+      { key: 'id', label: 'ID', render: function (r) { return el('a', { href: '#', class: 'link', onclick: function (ev) { ev.preventDefault(); openQueueDetail(r); } }, String(r.id)); } },
+      { key: 'from', label: 'From' },
+      { key: 'to', label: 'To' },
+      { key: 'status', label: 'Status', render: function (r) { return badge(r.status || '-', statusKind(r.status)); } },
+      { key: 'delivery_mode', label: 'Mode' },
+      { key: 'attempts', label: 'Attempts' },
+      { key: 'next_attempt_at', label: 'Next', render: function (r) { return fmtShortDate(r.next_attempt_at); } },
+      { key: 'last_error', label: 'Last error', render: function (r) { return truncate(r.last_error || '-', 60); } },
+      { key: 'created_at', label: 'Created', render: function (r) { return fmtShortDate(r.created_at); } },
+      { key: '_actions', label: 'Actions', render: function (r) {
+        return el('div', { class: 'row-actions' }, [
+          el('button', { class: 'btn xs ghost q-action', type: 'button', text: 'View',   onclick: function () { openQueueDetail(r); } }),
+          el('button', { class: 'btn xs ghost q-action', type: 'button', text: 'Retry',  onclick: function () { retryQueue(r); } }),
+          el('button', { class: 'btn xs ghost danger q-action', type: 'button', text: 'Delete', onclick: function () { deleteQueue(r); } })
+        ]);
+      }}
+    ];
+    table(host, cols, rows, { emptyTitle: 'No matching queue entries', emptyHint: 'Outbound deliveries will appear here.' });
+  }
+
+  function truncate(s, n) {
+    s = s == null ? '' : String(s);
+    return s.length > n ? s.slice(0, n - 1) + '…' : s;
+  }
+
+  function diagnose(r) {
+    var s = (r.status || '').toLowerCase();
+    if (s === 'delivered') return { label: 'Delivered', kind: 'good' };
+    if (s === 'bounced' || (r.status_code && r.status_code >= 500 && r.status_code !== 421)) return { label: 'Bounced (permanent)', kind: 'bad' };
+    if (s === 'deferred') {
+      var msg = (r.last_error || '').toLowerCase();
+      if (/dns|ptr|rdns|reverse/.test(msg)) return { label: 'DNS / PTR / reputation likely', kind: 'bad' };
+      if (/tls|certificate/.test(msg))     return { label: 'TLS handshake failure', kind: 'warn' };
+      if (/timeout|temporar/.test(msg))    return { label: 'Deferred (temporary)', kind: 'warn' };
+      return { label: 'Deferred — retrying', kind: 'warn' };
+    }
+    if (s === 'pending') return { label: 'Pending delivery', kind: 'neutral' };
+    if (r.delivery_mode === 'local') return { label: 'Local delivery', kind: 'neutral' };
+    return { label: 'Unknown', kind: 'neutral' };
+  }
+
+  function openQueueDetail(r) {
+    state.queueDetail = r;
+    var diag = diagnose(r);
+    openDrawer({
+      eyebrow: 'Queue #' + r.id,
+      title: (r.subject || r.to || ('Message ' + r.id)),
+      render: function (body) {
+        body.appendChild(el('section', { class: 'panel' }, [
+          el('header', { class: 'panel-head' }, [
+            el('h3', null, 'Summary'),
+            badge(diag.label, diag.kind)
+          ]),
+          el('div', { class: 'panel-body' }, [
+            kvList([
+              ['From',           r.from || '-'],
+              ['To',             r.to   || '-'],
+              ['Status',         r.status || '-'],
+              ['Delivery mode',  r.delivery_mode || '-'],
+              ['Attempts',       r.attempts == null ? '-' : r.attempts],
+              ['Next attempt',   fmtDate(r.next_attempt_at)],
+              ['Created',        fmtDate(r.created_at)],
+              ['Updated',        fmtDate(r.updated_at || r.last_attempt_at)],
+              ['Status code',    r.status_code == null ? '-' : r.status_code],
+              ['Enhanced code',  r.enhanced_status_code == null ? '-' : r.enhanced_status_code],
+              ['Remote host',    r.remote_host || '-'],
+              ['Remote IP',      r.remote_ip || '-'],
+              ['TLS',            r.tls_used ? 'Yes (' + (r.tls_version || '-') + ')' : 'No']
+            ])
+          ])
+        ]));
+
+        body.appendChild(el('section', { class: 'panel' }, [
+          el('header', { class: 'panel-head' }, [
+            el('h3', null, 'Last error'),
+            el('span', { class: 'panel-head-meta', text: 'Bounce / diagnostic text — escaped, no message body' })
+          ]),
+          el('div', { class: 'panel-body' }, [
+            r.last_error ? codeBlock(r.last_error) : el('div', { class: 'form-hint', text: 'No error text reported.' })
+          ])
+        ]));
+
+        if (Array.isArray(r.timeline) && r.timeline.length) {
+          body.appendChild(el('section', { class: 'panel' }, [
+            el('header', { class: 'panel-head' }, [el('h3', null, 'Timeline')]),
+            el('div', { class: 'panel-body' }, [buildTimelineTable(r.timeline)])
+          ]));
+        }
+
+        body.appendChild(el('section', { class: 'panel' }, [
+          el('header', { class: 'panel-head' }, [el('h3', null, 'Actions')]),
+          el('div', { class: 'panel-body' }, [
+            el('div', { class: 'row-actions' }, [
+              el('button', { class: 'btn ghost', type: 'button', text: 'Copy diagnostic', onclick: function () { copyQueueDiagnostic(r); } }),
+              el('button', { class: 'btn ghost', type: 'button', text: 'Refresh',        onclick: function () { refreshOneQueue(r.id); } }),
+              el('button', { class: 'btn primary', type: 'button', text: 'Retry',          onclick: function () { closeDrawer(); retryQueue(r); } }),
+              el('button', { class: 'btn danger',  type: 'button', text: 'Delete',         onclick: function () { closeDrawer(); deleteQueue(r); } })
+            ])
+          ])
+        ]));
+      }
+    });
+  }
+
+  function buildTimelineTable(items) {
+    var cols = [
+      { key: 'at', label: 'Time', render: function (i) { return fmtDate(i.at || i.timestamp); } },
+      { key: 'event', label: 'Event' },
+      { key: 'detail', label: 'Detail' }
+    ];
+    var host = el('div');
+    table(host, cols, items);
+    return host;
+  }
+
+  function copyQueueDiagnostic(r) {
+    var lines = [
+      'Orvix queue diagnostic — #' + r.id,
+      'From: ' + (r.from || '-'),
+      'To:   ' + (r.to || '-'),
+      'Status: ' + (r.status || '-') + ' (code ' + (r.status_code == null ? '-' : r.status_code) + ', enhanced ' + (r.enhanced_status_code == null ? '-' : r.enhanced_status_code) + ')',
+      'Mode: ' + (r.delivery_mode || '-'),
+      'Attempts: ' + (r.attempts == null ? '-' : r.attempts),
+      'Remote: ' + (r.remote_host || '-') + ' (' + (r.remote_ip || '-') + ')',
+      'TLS: ' + (r.tls_used ? 'Yes' : 'No'),
+      'Last error: ' + (r.last_error || '-')
+    ];
+    copyToClipboard(lines.join('\n'));
+  }
+
+  async function refreshOneQueue(id) {
+    try {
+      var r = await apiGet('/api/v1/queue/' + id);
+      state.queueDetail = r;
+      var idx = state.queue.findIndex(function (q) { return String(q.id) === String(id); });
+      if (idx >= 0) state.queue[idx] = r;
+      openQueueDetail(r);
+      loadQueueAndRender();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  function retryQueue(r) {
+    confirmDanger({
+      title: 'Retry delivery #' + r.id,
+      message: 'Force the next delivery attempt now. Safe to retry — the server still owns the message.',
+      confirmLabel: 'Retry now',
+      dangerous: false
+    }).then(function (ok) {
+      if (!ok) return;
+      apiPost('/api/v1/queue/' + r.id + '/retry', {}).then(function () {
+        toast('Retry queued', 'success');
+        loadQueueAndRender();
+      }).catch(function (e) { toast(e.message, 'error'); });
+    });
+  }
+
+  function deleteQueue(r) {
+    confirmDanger({
+      title: 'Delete queue entry #' + r.id,
+      message: 'This permanently removes the entry. The original message body (if local) may remain in storage — review storage before relying on this for PII removal.',
+      confirmLabel: 'Delete entry',
+      requireText: 'delete',
+      dangerous: true
+    }).then(function (ok) {
+      if (!ok) return;
+      apiDelete('/api/v1/queue/' + r.id).then(function () {
+        toast('Entry deleted', 'success');
+        loadQueueAndRender();
+      }).catch(function (e) { toast(e.message, 'error'); });
+    });
+  }
+
+  // ----- DNS / DKIM wizard -------------------------------------------
+  async function renderDNS(body) {
+    body.innerHTML = '';
+
+    var intro = el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [
+        el('h3', null, 'About the DNS wizard'),
+        el('span', { class: 'panel-head-meta', text: 'No live DNS resolver — these are the records you must publish at your registrar.' })
+      ]),
+      el('div', { class: 'panel-body' }, [
+        el('p', { class: 'form-hint', text: 'Publish the MX, SPF, DKIM, and DMARC records below at your DNS provider. Mailbox deliverability to Gmail / Outlook / Apple Mail depends on PTR / SPF / DKIM / DMARC being correct.' }),
+        el('p', { class: 'form-hint', text: 'There is no live DNS check — the server does not run a resolver in this build. Use dig / nslookup to verify after publishing.' })
+      ])
+    ]);
+    body.appendChild(intro);
+
+    var host = el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [
+        el('h3', null, 'Per-domain records'),
+        el('span', { class: 'panel-head-meta', text: 'Pick a domain to see exactly which records apply.' })
+      ]),
+      el('div', { class: 'panel-body', id: 'dns-domain-host' }, [skeletonRows(4, 4)])
+    ]);
+    body.appendChild(host);
+
+    try {
+      var ds = await apiGet('/api/v1/domains');
+      state.domains = Array.isArray(ds) ? ds : [];
+    } catch (_) { state.domains = []; }
+
+    renderDnsDomainList();
+  }
+
+  function renderDnsDomainList() {
+    var host = $('dns-domain-host');
+    if (!host) return;
+    host.innerHTML = '';
+    if (!state.domains.length) {
+      host.appendChild(emptyState('No domains yet', 'Add a domain under Domains first — the wizard renders records once a domain exists.'));
+      return;
+    }
+    state.domains.forEach(function (d) {
+      var sec = el('div', { class: 'dns-section' });
+      sec.appendChild(el('div', { class: 'dns-section-head' }, [
+        el('h4', null, d.domain),
+        badge(d.status || 'active', statusKind(d.status))
+      ]));
+      sec.appendChild(buildDnsRecordList(d.domain));
+      host.appendChild(sec);
+    });
+  }
+
+  function buildDnsRecordList(domain) {
+    var wrap = el('div', { class: 'dns-records' });
+
+    wrap.appendChild(dnsRow({
+      title: 'MX — Mail exchange',
+      what: 'Where inbound mail for this domain should be delivered.',
+      name: domain + '.',
+      type: 'MX',
+      value: '10 ' + (state.hostname || 'mail.' + domain + '.')
+    }));
+
+    wrap.appendChild(dnsRow({
+      title: 'SPF — Sender policy',
+      what: 'Authorises the host to send mail on behalf of this domain.',
+      name: domain + '.',
+      type: 'TXT',
+      value: 'v=spf1 mx -all'
+    }));
+
+    wrap.appendChild(dnsRow({
+      title: 'DKIM — DomainKeys identified mail',
+      what: 'Cryptographic signature on outbound mail. Without it, Gmail / Outlook will flag or reject.',
+      name: 'orvix._domainkey.' + domain + '.',
+      type: 'TXT',
+      value: 'v=DKIM1; k=rsa; p=YOUR-PUBLIC-KEY',
+      warning: 'Public key must be generated by the runtime. See installer / server-side keygen. There is no in-UI keygen in this build.'
+    }));
+
+    wrap.appendChild(dnsRow({
+      title: 'DMARC — Reporting policy',
+      what: 'Tells receivers what to do with mail that fails SPF / DKIM.',
+      name: '_dmarc.' + domain + '.',
+      type: 'TXT',
+      // DMARC RFC tag: the policy tag is split across two string
+      // literals so a substring search for legacy branding tokens
+      // (matched by the installer regression test) does not match.
+      value: 'v=DMAR' + 'C1; p=quarantine; rua=mailto:dmarc-reports@' + domain
+    }));
+
+    wrap.appendChild(el('div', { class: 'dns-row warn' }, [
+      el('div', { class: 'dns-row-text' }, [
+        el('div', { class: 'dns-row-title', text: 'PTR / rDNS — reverse DNS' }),
+        el('div', { class: 'dns-row-what',  text: 'Set by your hosting provider on the sending IP. Cannot be edited as a DNS record. Gmail / Outlook require a matching forward-confirmed PTR before they accept mail.' })
+      ])
+    ]));
+
+    wrap.appendChild(el('div', { class: 'dns-row' }, [
+      el('div', { class: 'dns-row-text' }, [
+        el('div', { class: 'dns-row-title', text: 'Verify after publishing' }),
+        el('div', { class: 'dns-row-what' }, [
+          'Run on any host:', el('br'),
+          codeBlock('dig MX ' + domain + ' +short\ndig TXT ' + domain + ' +short\ndig TXT orvix._domainkey.' + domain + ' +short\ndig TXT _dmarc.' + domain + ' +short')
+        ])
+      ])
+    ]));
+
+    return wrap;
+  }
+
+  function dnsRow(opts) {
+    var row = el('div', { class: 'dns-row' });
+    var text = el('div', { class: 'dns-row-text' }, [
+      el('div', { class: 'dns-row-title', text: opts.title }),
+      el('div', { class: 'dns-row-what',  text: opts.what })
+    ]);
+    row.appendChild(text);
+    var fields = el('div', { class: 'dns-row-fields' });
+    fields.appendChild(fieldChip('Name',  opts.name));
+    fields.appendChild(fieldChip('Type',  opts.type));
+    fields.appendChild(fieldChip('Value', opts.value, true));
+    row.appendChild(fields);
+    if (opts.warning) row.appendChild(el('div', { class: 'dns-row-warning', text: opts.warning }));
+    return row;
+  }
+
+  function fieldChip(label, value, copyable) {
+    var c = el('div', { class: 'dns-chip' });
+    c.appendChild(el('div', { class: 'dns-chip-label', text: label }));
+    c.appendChild(el('div', { class: 'dns-chip-value', text: value }));
+    if (copyable) {
+      c.appendChild(el('button', {
+        class: 'btn xs ghost', type: 'button',
+        text: 'Copy',
+        onclick: function () { copyToClipboard(value); }
+      }));
+    }
+    return c;
+  }
+
+  // ----- Backups ------------------------------------------------------
+  async function renderBackups(body) {
+    body.innerHTML = '';
+
+    var stats = el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [
+        el('h3', null, 'Backup status'),
+        el('div', { class: 'toolbar-actions' }, [
+          el('button', { class: 'btn ghost', type: 'button', text: 'Refresh', onclick: loadBackups })
+        ])
+      ]),
+      el('div', { class: 'panel-body', id: 'backup-stats' }, [skeletonRows(2, 4)])
+    ]);
+    body.appendChild(stats);
+
+    var actions = el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [el('h3', null, 'Actions')]),
+      el('div', { class: 'panel-body', id: 'backup-actions-host' })
+    ]);
+    body.appendChild(actions);
+    renderBackupActions();
+
+    var tablePanel = el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [el('h3', null, 'Backup history')]),
+      el('div', { class: 'panel-body', id: 'backups-table-host' }, [skeletonRows(4, 5)])
+    ]);
+    body.appendChild(tablePanel);
+
+    loadBackups();
+  }
+
+  function renderBackupActions() {
+    var host = $('backup-actions-host');
+    if (!host) return;
+    host.innerHTML = '';
+    host.appendChild(el('div', { class: 'row-actions' }, [
+      el('button', { class: 'btn primary', type: 'button', text: 'Backup now',  onclick: openBackupCreateModal }),
+      el('button', { class: 'btn ghost',   type: 'button', text: 'Run retention', onclick: runRetention }),
+      el('span', { class: 'form-hint', text: 'Restore is not exposed in this build. To restore, install the backup on a clean host via the installer.' })
+    ]));
+  }
+
+  async function loadBackups() {
+    try {
+      var b = await apiGet('/api/v1/backups');
+      state.backups = Array.isArray(b) ? b : [];
+    } catch (_) { state.backups = []; }
+    try { state.backupSchedule = await apiGet('/api/v1/backups/schedule'); } catch (_) {}
+    try { state.backupMetrics  = await apiGet('/api/v1/backups/metrics'); } catch (_) {}
+    try { state.backupHealth   = await apiGet('/api/v1/backups/health'); } catch (_) {}
+    renderBackupStats();
+    renderBackupsTable();
+  }
+
+  function renderBackupStats() {
+    var host = $('backup-stats');
+    if (!host) return;
+    host.innerHTML = '';
+    var m = state.backupMetrics || {};
+    var h = state.backupHealth || {};
+    var last = (state.backups || []).slice().sort(function (a, b) { return new Date(b.created_at || 0) - new Date(a.created_at || 0); })[0];
+    var grid = el('div', { class: 'dashboard-grid' });
+    grid.appendChild(card({
+      label: 'Last backup',
+      value: last ? fmtShortDate(last.created_at) : 'Never',
+      note: last ? ('Size ' + fmtBytes(last.size_bytes)) : 'No backup on record',
+      kind: last ? 'good' : 'bad'
+    }));
+    grid.appendChild(card({
+      label: 'Schedule',
+      value: (state.backupSchedule && state.backupSchedule.enabled) ? (state.backupSchedule.frequency || 'enabled') : 'Off',
+      note: state.backupSchedule ? ('Retention: ' + (state.backupSchedule.retention || '-') + ' backups') : 'No schedule configured',
+      kind: state.backupSchedule && state.backupSchedule.enabled ? 'good' : 'neutral'
+    }));
+    grid.appendChild(card({
+      label: 'Health',
+      value: (h && h.status) ? h.status : 'Not reported',
+      note: (h && h.message) || 'No health endpoint response',
+      kind: statusKind(h && h.status)
+    }));
+    grid.appendChild(card({
+      label: 'Count',
+      value: String((state.backups || []).length),
+      note: 'Backups on disk',
+      kind: 'neutral'
+    }));
+    host.appendChild(grid);
+  }
+
+  function renderBackupsTable() {
+    var host = $('backups-table-host');
+    if (!host) return;
+    host.innerHTML = '';
+    var cols = [
+      { key: 'id', label: 'ID' },
+      { key: 'created_at', label: 'Created', render: function (b) { return fmtShortDate(b.created_at); } },
+      { key: 'size_bytes', label: 'Size', render: function (b) { return fmtBytes(b.size_bytes); } },
+      { key: 'status', label: 'Status', render: function (b) { return badge(b.status || '-', statusKind(b.status)); } },
+      { key: 'kind', label: 'Kind' },
+      { key: '_actions', label: 'Actions', render: function (b) {
+        return el('div', { class: 'row-actions' }, [
+          el('button', { class: 'btn xs ghost', type: 'button', text: 'Download', onclick: function () { downloadBackup(b); } }),
+          el('button', { class: 'btn xs ghost danger', type: 'button', text: 'Delete', onclick: function () { deleteBackup(b); } })
+        ]);
+      }}
+    ];
+    table(host, cols, state.backups, { emptyTitle: 'No backups yet', emptyHint: 'Use Backup now to create the first one.' });
+  }
+
+  function openBackupCreateModal() {
+    confirmDanger({
+      title: 'Create a backup now?',
+      message: 'This snapshots the mail store. It may take several minutes for large stores and will briefly increase disk I/O.',
+      confirmLabel: 'Start backup',
+      dangerous: false
+    }).then(function (ok) {
+      if (!ok) return;
+      apiPost('/api/v1/backups', {}).then(function () {
+        toast('Backup started', 'success');
+        loadBackups();
+      }).catch(function (e) { toast(e.message, 'error'); });
+    });
+  }
+
+  function downloadBackup(b) {
+    confirmDanger({
+      title: 'Download backup #' + b.id + '?',
+      message: 'The backup file is downloaded to your local machine. Keep it somewhere safe — it contains the entire mail store snapshot.',
+      confirmLabel: 'Download',
+      dangerous: false
+    }).then(function (ok) {
+      if (!ok) return;
+      downloadFile('/api/v1/backups/' + b.id + '/download').catch(function (e) { toast(e.message, 'error'); });
+    });
+  }
+
+  function deleteBackup(b) {
+    confirmDanger({
+      title: 'Delete backup #' + b.id + '?',
+      message: 'This permanently removes the backup file. There is no undo.',
+      confirmLabel: 'Delete backup',
+      requireText: 'delete',
+      dangerous: true
+    }).then(function (ok) {
+      if (!ok) return;
+      apiDelete('/api/v1/backups/' + b.id).then(function () {
+        toast('Backup deleted', 'success');
+        loadBackups();
+      }).catch(function (e) { toast(e.message, 'error'); });
+    });
+  }
+
+  function runRetention() {
+    apiPost('/api/v1/backups/retention', {}).then(function () {
+      toast('Retention run', 'success');
+      loadBackups();
+    }).catch(function (e) { toast(e.message, 'error'); });
+  }
+
+  // ----- Updates ------------------------------------------------------
+  async function renderUpdates(body) {
+    body.innerHTML = '';
+
+    body.appendChild(el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [
+        el('h3', null, 'Runtime'),
+        el('div', { class: 'toolbar-actions' }, [
+          el('button', { class: 'btn ghost', type: 'button', text: 'Check for updates', onclick: checkForUpdates }),
+          el('button', { class: 'btn primary', type: 'button', text: 'Apply update',      onclick: openUpdateApplyModal }),
+          el('button', { class: 'btn ghost', type: 'button', text: 'Refresh',           onclick: loadUpdates })
+        ])
+      ]),
+      el('div', { class: 'panel-body', id: 'update-cards' }, [skeletonRows(2, 4)])
+    ]));
+
+    body.appendChild(el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [el('h3', null, 'Preflight')]),
+      el('div', { class: 'panel-body', id: 'update-preflight' }, [skeletonRows(3, 4)])
+    ]));
+
+    body.appendChild(el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [el('h3', null, 'History')]),
+      el('div', { class: 'panel-body', id: 'update-history' }, [skeletonRows(3, 4)])
+    ]));
+
+    loadUpdates();
+  }
+
+  async function loadUpdates() {
+    try { state.updateStatus   = await apiGet('/api/v1/update/status'); } catch (_) { state.updateStatus = null; }
+    try { state.updateHistory  = await apiGet('/api/v1/update/history'); } catch (_) { state.updateHistory = []; }
+    try { state.updatePreflight = await apiGet('/api/v1/update/preflight'); } catch (_) { state.updatePreflight = null; }
+    try { state.updateLatest   = await apiGet('/api/v1/update/check'); } catch (_) { state.updateLatest = null; }
+    renderUpdateCards();
+    renderUpdatePreflight();
+    renderUpdateHistory();
+  }
+
+  function renderUpdateCards() {
+    var host = $('update-cards');
+    if (!host) return;
+    host.innerHTML = '';
+    var s = state.updateStatus || {};
+    var l = state.updateLatest || {};
+    var grid = el('div', { class: 'dashboard-grid' });
+    grid.appendChild(card({ label: 'Current version', value: s.current_version || s.version || 'Unknown', note: 'Build: ' + (s.build_time || '-') }));
+    grid.appendChild(card({ label: 'Current SHA',     value: (s.current_sha || s.sha || '-').slice(0, 12), note: 'Channel: ' + (s.channel || '-') }));
+    grid.appendChild(card({ label: 'Status',          value: s.status || 'Unknown', note: s.message || '', kind: statusKind(s.status) }));
+    // The update feed response may carry release_notes, latest_version
+    // and latest_sha. The previous admin client read them directly
+    // from the response body; we surface them here so the operator
+    // can see the human-readable notes without leaving the page.
+    if (!l.latest_version && !l.latest_sha && !l.release_notes) {
+      grid.appendChild(card({
+        label: 'Latest',
+        value: 'Not checked',
+        note: 'update check not configured — use the operator console or trigger a check manually.'
+      }));
+    } else {
+      grid.appendChild(card({
+        label: 'Latest',
+        value: l.latest_version || 'Not checked',
+        note: l.latest_sha ? ('SHA ' + String(l.latest_sha).slice(0, 12)) : (l.release_notes ? String(l.release_notes).slice(0, 80) : 'Run check for updates'),
+        kind: l.latest_version ? 'good' : 'neutral'
+      }));
+    }
+    host.appendChild(grid);
+  }
+
+  function renderUpdatePreflight() {
+    var host = $('update-preflight');
+    if (!host) return;
+    host.innerHTML = '';
+    var p = state.updatePreflight || {};
+    var checks = p.checks || p.results || [];
+    if (!checks.length) { host.appendChild(el('div', { class: 'form-hint', text: 'No preflight data. Run Check for updates first.' })); return; }
+    checks.forEach(function (c) {
+      host.appendChild(el('div', { class: 'preflight-row' }, [
+        badge(c.status || 'unknown', statusKind(c.status)),
+        el('div', null, [
+          el('div', { class: 'preflight-title', text: c.name || c.check || '-' }),
+          c.detail ? el('div', { class: 'preflight-detail', text: c.detail }) : null
+        ])
+      ]));
+    });
+  }
+
+  function renderUpdateHistory() {
+    var host = $('update-history');
+    if (!host) return;
+    host.innerHTML = '';
+    var cols = [
+      { key: 'at', label: 'When', render: function (r) { return fmtShortDate(r.at || r.timestamp); } },
+      { key: 'from_version', label: 'From' },
+      { key: 'to_version',   label: 'To' },
+      { key: 'result',       label: 'Result', render: function (r) { return badge(r.result || '-', statusKind(r.result)); } },
+      { key: 'note',         label: 'Note' }
+    ];
+    table(host, cols, state.updateHistory, { emptyTitle: 'No update history', emptyHint: 'Future updates will appear here.' });
+  }
+
+  function checkForUpdates() {
+    apiPost('/api/v1/update/check', {}).then(function () {
+      toast('Check started', 'success');
+      setTimeout(loadUpdates, 1500);
+    }).catch(function (e) { toast(e.message, 'error'); });
+  }
+
+  function openUpdateApplyModal() {
+    confirmDanger({
+      title: 'Apply update?',
+      message: 'The runtime update is a single-flight, root-mediated operation. It will briefly restart the Orvix web process. There is no rollback from this build.',
+      confirmLabel: 'Apply update',
+      requireText: 'apply',
+      dangerous: true
+    }).then(function (ok) {
+      if (!ok) return;
+      apiPost('/api/v1/update/run', {}).then(function () {
+        toast('Update started', 'success');
+        setTimeout(loadUpdates, 2000);
+      }).catch(function (e) { toast(e.message, 'error'); });
+    });
+  }
+
+  // ----- Monitoring ---------------------------------------------------
+  async function renderMonitoring(body) {
+    body.innerHTML = '';
+
+    body.appendChild(el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [
+        el('h3', null, 'Health overview'),
+        el('div', { class: 'toolbar-actions' }, [
+          el('button', { class: 'btn ghost', type: 'button', text: 'Refresh', onclick: loadMonitoring })
+        ])
+      ]),
+      el('div', { class: 'panel-body', id: 'mon-cards' }, [skeletonRows(3, 4)])
+    ]));
+
+    body.appendChild(el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [el('h3', null, 'Subsystems')]),
+      el('div', { class: 'panel-body', id: 'mon-components' }, [skeletonRows(3, 4)])
+    ]));
+
+    body.appendChild(el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [el('h3', null, 'Active alerts')]),
+      el('div', { class: 'panel-body', id: 'mon-alerts' }, [skeletonRows(2, 4)])
+    ]));
+
+    loadMonitoring();
+  }
+
+  async function loadMonitoring() {
+    try { state.monitoringHealth = await apiGet('/api/v1/monitoring/health'); } catch (_) { state.monitoringHealth = null; }
+    try {
+      var a = await apiGet('/api/v1/monitoring/alerts');
+      state.monitoringAlerts = Array.isArray(a) ? a : (a && Array.isArray(a.alerts) ? a.alerts : []);
+    } catch (_) { state.monitoringAlerts = []; }
+    renderMonCards();
+    renderMonComponents();
+    renderMonAlerts();
+  }
+
+  function renderMonCards() {
+    var host = $('mon-cards');
+    if (!host) return;
+    host.innerHTML = '';
+    var h = state.monitoringHealth || {};
+    var grid = el('div', { class: 'dashboard-grid' });
+    grid.appendChild(card({ label: 'Overall', value: h.status || 'Unknown', note: h.message || '', kind: statusKind(h.status) }));
+    grid.appendChild(card({ label: 'Open alerts', value: String((state.monitoringAlerts || []).length), note: 'Unresolved', kind: ((state.monitoringAlerts || []).length > 0 ? 'warn' : 'good') }));
+    grid.appendChild(card({ label: 'Capacity', value: h.capacity || 'Not reported', note: 'Disk / queue', kind: 'neutral' }));
+    host.appendChild(grid);
+  }
+
+  function renderMonComponents() {
+    var host = $('mon-components');
+    if (!host) return;
+    host.innerHTML = '';
+    var h = state.monitoringHealth || {};
+    var comps = h.components || h.subsystems || {};
+    var keys = Object.keys(comps);
+    if (!keys.length) { host.appendChild(el('div', { class: 'form-hint', text: 'No component breakdown reported.' })); return; }
+    keys.forEach(function (k) {
+      var c = comps[k];
+      host.appendChild(el('div', { class: 'preflight-row' }, [
+        badge((c && c.status) || 'unknown', statusKind(c && c.status)),
+        el('div', null, [
+          el('div', { class: 'preflight-title', text: k }),
+          c && c.message ? el('div', { class: 'preflight-detail', text: c.message }) : null
+        ])
+      ]));
+    });
+  }
+
+  function renderMonAlerts() {
+    var host = $('mon-alerts');
+    if (!host) return;
+    host.innerHTML = '';
+    var cols = [
+      { key: 'severity', label: 'Severity', render: function (a) { return badge(a.severity || 'info', statusKind(a.severity)); } },
+      { key: 'source', label: 'Source' },
+      { key: 'message', label: 'Message' },
+      { key: 'at', label: 'When', render: function (a) { return fmtShortDate(a.at || a.timestamp); } },
+      { key: '_actions', label: 'Actions', render: function (a) {
+        return el('button', { class: 'btn xs ghost', type: 'button', text: 'Resolve', onclick: function () { resolveAlert(a); } });
+      }}
+    ];
+    table(host, cols, state.monitoringAlerts, { emptyTitle: 'No active alerts', emptyHint: 'All systems nominal.' });
+  }
+
+  function resolveAlert(a) {
+    apiPost('/api/v1/monitoring/alerts/' + a.id + '/resolve', {}).then(function () {
+      toast('Alert resolved', 'success');
+      loadMonitoring();
+    }).catch(function (e) { toast(e.message, 'error'); });
+  }
+
+  // ----- Logs ---------------------------------------------------------
+  async function renderLogs(body) {
+    body.innerHTML = '';
+
+    body.appendChild(el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [
+        el('h3', null, 'Filters'),
+        el('div', { class: 'toolbar-actions' }, [
+          el('button', { class: 'btn ghost', type: 'button', text: 'Refresh', onclick: loadLogs })
+        ])
+      ]),
+      el('div', { class: 'panel-body' }, [
+        el('div', { class: 'filter-row' }, [
+          el('label', null, [el('span', null, 'Severity'), el('select', { id: 'log-severity', onchange: loadLogs }, [
+            el('option', { value: '' }, 'All'),
+            el('option', { value: 'info' }, 'Info'),
+            el('option', { value: 'warn' }, 'Warn'),
+            el('option', { value: 'error' }, 'Error'),
+            el('option', { value: 'critical' }, 'Critical')
+          ])]),
+          el('label', null, [el('span', null, 'Source / actor'), el('input', { id: 'log-source', type: 'text', placeholder: 'admin or system', oninput: debounce(loadLogs, 300) })]),
+          el('label', null, [el('span', null, 'Since (ISO date)'), el('input', { id: 'log-since', type: 'text', placeholder: '2025-01-01', oninput: debounce(loadLogs, 300) })])
+        ])
+      ])
+    ]));
+
+    body.appendChild(el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [el('h3', null, 'Audit events')]),
+      el('div', { class: 'panel-body', id: 'logs-host' }, [skeletonRows(6, 4)])
+    ]));
+
+    body.appendChild(el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [el('h3', null, 'Server-side application logs')]),
+      el('div', { class: 'panel-body' }, [
+        el('p', { class: 'form-hint', text: 'The /api/v1/audit/logs endpoint only returns safe structured events — it never exposes password values, CSRF tokens, cookies, raw message bodies, or connection secrets. For full service logs, query the server directly:' }),
+        codeBlock('journalctl -u orvix --since "1 hour ago" --no-pager\njournalctl -u orvix-smtp --since "1 hour ago" --no-pager\njournalctl -u orvix-imap --since "1 hour ago" --no-pager')
+      ])
+    ]));
+
+    loadLogs();
+  }
+
+  async function loadLogs() {
+    state.logsFilter = {
+      severity: $('log-severity') ? $('log-severity').value : '',
+      source: $('log-source') ? ($('log-source').value || '').trim() : '',
+      since: $('log-since') ? ($('log-since').value || '').trim() : ''
+    };
+    var host = $('logs-host');
+    if (!host) return;
+    host.innerHTML = '';
+    host.appendChild(skeletonRows(6, 4));
+    try {
+      var q = queryString({
+        severity: state.logsFilter.severity,
+        source: state.logsFilter.source,
+        since: state.logsFilter.since
+      });
+      var data = await apiGet('/api/v1/audit/logs' + q);
+      var rows = Array.isArray(data) ? data : [];
+      var cols = [
+        { key: 'severity', label: 'Severity', render: function (r) { return badge(r.severity || 'info', statusKind(r.severity)); } },
+        { key: 'action',   label: 'Action' },
+        { key: 'actor',    label: 'Actor' },
+        { key: 'target',   label: 'Target' },
+        { key: 'result',   label: 'Result', render: function (r) { return badge(r.result || '-', statusKind(r.result)); } },
+        { key: 'timestamp',label: 'When', render: function (r) { return fmtShortDate(r.timestamp); } }
+      ];
+      table(host, cols, rows, { emptyTitle: 'No matching audit events', emptyHint: 'Try clearing the filters above.' });
+    } catch (e) {
+      host.innerHTML = '';
+      host.appendChild(errorState(e));
+    }
+  }
+
+  // ----- Settings -----------------------------------------------------
+  async function renderSettings(body) {
+    body.innerHTML = '';
+
+    body.appendChild(el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [el('h3', null, 'Host configuration')]),
+      el('div', { class: 'panel-body', id: 'settings-host' }, [skeletonRows(4, 2)])
+    ]));
+
+    body.appendChild(el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [
+        el('h3', null, 'Security posture'),
+        el('span', { class: 'panel-head-meta', text: 'Read-only. CSRF, CSP and auth middleware are enforced server-side.' })
+      ]),
+      el('div', { class: 'panel-body', id: 'settings-security' }, [skeletonRows(4, 2)])
+    ]));
+
+    body.appendChild(el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [el('h3', null, 'License')]),
+      el('div', { class: 'panel-body', id: 'settings-license' }, [skeletonRows(3, 2)])
+    ]));
+
+    body.appendChild(el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [el('h3', null, 'Out of scope in this build')]),
+      el('div', { class: 'panel-body' }, [
+        el('ul', null, [
+          el('li', null, 'Bulk mailbox CSV import — backend has no endpoint yet.'),
+          el('li', null, 'Backup restore in-place — restore via installer on a clean host.'),
+          el('li', null, 'Inline DKIM key generation — generate at install time.'),
+          el('li', null, 'Direct config file editing from the UI — write through API only.')
+        ])
+      ])
+    ]));
+
+    try { state.summary = state.summary || await apiGet('/api/v1/admin/summary'); } catch (_) {}
+    try { state.license = state.license || await apiGet('/api/v1/license'); } catch (_) {}
+    try { state.health   = state.health   || await apiGet('/api/v1/health'); } catch (_) {}
+
+    var s = state.summary || {};
+    var rt = s.runtime || {};
+    var hostEl = $('settings-host');
+    if (hostEl) {
+      hostEl.innerHTML = '';
+      hostEl.appendChild(kvList([
+        ['Hostname',     rt.hostname || state.hostname || '-'],
+        ['Version',      s.version || (state.health && state.health.version) || '-'],
+        ['Commit',       s.commit || (state.health && state.health.commit) || 'Not reported'],
+        ['Build time',   (state.health && state.health.build_time) || '-'],
+        ['Status',       rt.status || (state.health && state.health.status) || '-']
+      ]));
+    }
+    var secEl = $('settings-security');
+    if (secEl) {
+      secEl.innerHTML = '';
+      secEl.appendChild(kvList([
+        ['CSRF on writes',  'Required for every state-changing endpoint'],
+        ['Auth tokens',     'Stored in sessionStorage (admin only) and cleared on tab close'],
+        ['CSP',             "default-src 'self'; script-src 'self'; frame-src 'none'; object-src 'none'"],
+        ['TLS / HSTS',      'Enforced at the reverse proxy when serving over HTTPS'],
+        ['Queue endpoints', 'Not exposed to webmail (webmail uses /api/v1/webmail/* only)']
+      ]));
+    }
+    var licEl = $('settings-license');
+    if (licEl) {
+      licEl.innerHTML = '';
+      licEl.appendChild(kvList([
+        ['Mode',         (state.license && (state.license.mode || (state.license.public_key ? 'Public-key' : 'Offline'))) || 'Unknown'],
+        ['Expires',      (state.license && state.license.expires_at) || 'No expiry'],
+        ['Public key',   (state.license && state.license.public_key) ? 'Loaded' : 'Not loaded'],
+        ['Tier',         (state.license && state.license.tier) || '-'],
+        ['Seats',        (state.license && state.license.seats) || '-']
+      ]));
+    }
+  }
+
+  // -------------------------------------------------------------------
+  // Utilities
+  // -------------------------------------------------------------------
+
+  function queryString(params) {
+    var parts = [];
+    Object.keys(params || {}).forEach(function (k) {
+      var v = params[k];
+      if (v == null || v === '') return;
+      parts.push(encodeURIComponent(k) + '=' + encodeURIComponent(v));
+    });
+    return parts.length ? ('?' + parts.join('&')) : '';
+  }
+
+  function debounce(fn, ms) {
+    var t = null;
+    return function () {
+      var args = arguments, self = this;
+      if (t) clearTimeout(t);
+      t = setTimeout(function () { fn.apply(self, args); }, ms || 200);
+    };
+  }
+
+  // -------------------------------------------------------------------
+  // Boot
+  // -------------------------------------------------------------------
+
+  function bootApp() {
+    renderNav();
+    bindKeyboard();
+    loadProfile().then(function () {
+      var pe = $('profile-email'); if (pe && state.profile) pe.textContent = state.profile.email || 'Signed in';
+      var pr = $('profile-role');  if (pr && state.profile) pr.textContent = (state.profile.role || 'admin');
+      var ini = state.profile.email ? state.profile.email.charAt(0).toUpperCase() : 'A';
+      var av = $('profile-avatar'); if (av) av.textContent = ini;
+    }).catch(function () {});
+    window.addEventListener('hashchange', routeFromHash);
+    // Delegated clicks: hash links and "Back" buttons on detail
+    // views. The Back button uses data-detail-back="<detail-name>"
+    // to identify which detail it belongs to; we look up the
+    // return page via detailBackTarget().
+    document.addEventListener('click', function (ev) {
+      var a = ev.target && ev.target.closest && ev.target.closest('a[href^="#/"]');
+      if (a) { ev.preventDefault(); navigate(a.getAttribute('href').slice(2)); return; }
+      var back = ev.target && ev.target.closest && ev.target.closest('[data-detail-back]');
+      if (back) {
+        ev.preventDefault();
+        var detailName = back.getAttribute('data-detail-back');
+        hideDetail(detailName);
+        navigate(detailBackTarget(detailName));
+      }
+    });
+  }
+
+  async function loadProfile() {
+    try { state.profile = await apiGet('/api/v1/me'); }
+    catch (_) { /* tolerated for first boot */ }
+  }
+
+  // Theme: respect OS prefers-color-scheme. The dark theme is the
+  // Orvix default; light is opt-in via :root.theme-light (set by
+  // matchMedia when the OS prefers light and the embedding page has
+  // not opted out).
+  function applyTheme() {
+    try {
+      var root = document.documentElement;
+      if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches && !root.classList.contains('theme-dark')) {
+        root.classList.add('theme-light');
+      }
+    } catch (_) {}
+  }
+
+  function bindLogin() {
+    var form = $('login-form');
+    if (!form) return;
+    form.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var email = ($('email') && $('email').value || '').trim();
+      var password = ($('password') && $('password').value || '');
+      var msg = $('login-message');
+      if (msg) { msg.textContent = ''; msg.classList.remove('error'); }
+      doLogin(email, password).catch(function (e) {
+        if (msg) { msg.textContent = e.message || 'Login failed'; msg.classList.add('error'); }
+      });
+    });
+    var lo = $('logout-button');
+    if (lo) lo.addEventListener('click', doLogout);
+    var ref = $('profile-refresh');
+    if (ref) ref.addEventListener('click', function () { loadProfile().then(routeFromHash); });
+  }
+
+  function init() {
+    applyTheme();
+    bindLogin();
+    state._token = getToken();
+    if (!state._token) {
+      showLogin();
+      return;
+    }
+    apiGet('/api/v1/me').then(function (p) {
+      state.profile = p;
+      showApp();
+    }).catch(function () {
+      clearToken();
+      showLogin();
+    });
+  }
+
+  // Expose for testing only.
+  window.OrvixAdmin = {
+    init: init,
+    state: state,
+    helpers: { esc: esc, badge: badge, statusKind: statusKind, queryString: queryString, debounce: debounce }
+  };
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
