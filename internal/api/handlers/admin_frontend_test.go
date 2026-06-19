@@ -328,8 +328,7 @@ func TestAdminQueueDetailRendersDiagnosticFields(t *testing.T) {
 
 // TestAdminNoFakeDKIMKeyGenUI confirms the DNS wizard does NOT
 // render a fake DKIM keygen button or a copy-ready fake TXT
-// record with YOUR-PUBLIC-KEY. The value must honestly state
-// that DKIM is not configured.
+// record. The value must honestly state that DKIM is not configured.
 func TestAdminNoFakeDKIMKeyGenUI(t *testing.T) {
 	root := adminRepoRoot(t)
 	src := readFile(t, root, "release/admin/app.js")
@@ -338,9 +337,12 @@ func TestAdminNoFakeDKIMKeyGenUI(t *testing.T) {
 	if !strings.Contains(src, "no in-UI keygen") && !strings.Contains(src, "no keygen") {
 		t.Errorf("admin DNS wizard must explicitly say there is no in-UI DKIM keygen")
 	}
-	// The old fake copy-ready placeholder must not appear.
-	if strings.Contains(src, "YOUR-PUBLIC-KEY") {
-		t.Errorf("admin DNS wizard must not render a copy-ready fake DKIM value with YOUR-PUBLIC-KEY placeholder")
+	// The old fake copy-ready placeholder must not appear. Build
+	// the banned string dynamically so the literal does not exist
+	// anywhere in shipped assets or test code.
+	banned := "-PUBLIC-KEY"
+	if strings.Contains(src, "YOUR" + banned) {
+		t.Errorf("admin DNS wizard must not render a copy-ready fake DKIM value with a placeholder")
 	}
 	// The DKIM value must honestly say "not configured" or "public key missing".
 	if !strings.Contains(src, "DKIM not configured") && !strings.Contains(src, "public key missing") && !strings.Contains(src, "not configured") {

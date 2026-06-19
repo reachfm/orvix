@@ -89,9 +89,9 @@ client and the CoreMail engine are untouched.
 
 - Per-domain panel listing MX, SPF, DKIM and DMARC records to publish.
 - Copy buttons on each record value.
-- DKIM shows `v=DKIM1; k=rsa; p=YOUR-PUBLIC-KEY` placeholder with a
-  warning that public-key generation happens at install time — no
-  fake keygen UI.
+- DKIM row shows honest "DKIM not configured — public key missing"
+  message when no real key is present. The fake placeholder record
+  is removed and the value is not copy-ready. No fake keygen UI.
 - PTR / rDNS warning that it is provider-controlled.
 - Manual `dig MX / dig TXT` verification block.
 - DMARC record is generated with `p=quarantine` and a `rua=` report
