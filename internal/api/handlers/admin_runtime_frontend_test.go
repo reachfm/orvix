@@ -20,7 +20,7 @@ package handlers_test
 //     internal/runtime are sane (non-negative when reported)
 //   - the previously-shipped fixes survive this build
 //     (no blank danger buttons, no [object Object], no
-//     YOUR-PUBLIC-KEY, no fake DKIM copy-ready placeholder,
+//     placeholder, no fake DKIM copy-ready placeholder,
 //     no /api/v1/queue leak from webmail)
 
 import (
@@ -206,14 +206,14 @@ func TestAdminRuntimePreservesPriorFixes(t *testing.T) {
 		t.Errorf("admin app.js must keep the formatDisk helper for honest disk rendering")
 	}
 
-	// 3. YOUR-PUBLIC-KEY must not appear anywhere.
+	// 3. The old DKIM placeholder must not appear anywhere.
 	for _, asset := range []string{"release/admin/app.js", "release/admin/index.html", "release/admin/styles.css"} {
 		s := readFile(t, root, asset)
 		// Build the banned string dynamically so the literal
 		// does not appear in this test source either.
 		banned := "-PUBLIC-KEY"
 		if strings.Contains(s, "YOUR"+banned) {
-			t.Errorf("%s must not contain the YOUR-PUBLIC-KEY placeholder", asset)
+			t.Errorf("%s must not contain the old DKIM placeholder", asset)
 		}
 	}
 

@@ -33,6 +33,7 @@ import (
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/modules"
+	"github.com/orvix/orvix/internal/runtime"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
@@ -424,6 +425,188 @@ func TestAdminRuntimeNoStackTrace(t *testing.T) {
 		if strings.Contains(body, banned) {
 			t.Errorf("response must not contain %q; got %s", banned, body)
 		}
+	}
+}
+
+// TestAdminRuntimeNilConfig confirms the endpoint does not panic
+// when the handler has a nil config. All ports should default to 0
+// and the response must be valid JSON with unknown/default values.
+func TestAdminRuntimeNilConfig(t *testing.T) {
+	logger := zap.NewNop()
+	db, err := config.NewDatabase(&config.Defaults().Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, _ := db.DB()
+	defer sqlDB.Close()
+
+	authn, err := auth.NewAuthenticator(&config.Defaults().Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	adminTok, _ := authn.GenerateAccessToken(1, auth.RoleAdmin)
+
+	// Handler with nil cfg — this used to panic on h.cfg.CoreMail.
+	h := &handlers.Handler{}
+	h.SetProcessStartedAt(time.Now().Add(-time.Hour))
+
+	app := fiber.New()
+	app.Get("/api/v1/admin/runtime", func(c fiber.Ctx) error {
+		c.Locals("user_id", uint(1))
+		c.Locals("role", auth.RoleAdmin)
+		return h.GetAdminRuntime(c)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/runtime", nil)
+	req.Header.Set("Authorization", "Bearer "+adminTok)
+	res, err := app.Test(req, fiber.TestConfig{Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Errorf("nil config handler should return 200; got %d", res.StatusCode)
+	}
+	body, _ := io.ReadAll(res.Body)
+	var resp runtime.Telemetry
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("response must be valid JSON: %v", err)
+	}
+	// Services must show unknown (not online) because no ports
+	// were configured and no listener state exists.
+	if resp.Services == nil {
+		t.Errorf("services must not be nil")
+	} else {
+		for _, key := range []string{"smtp", "imap", "pop3", "jmap"} {
+			s := resp.Services[key]
+			if s.Status != "unknown" {
+				t.Errorf("service %q status must be 'unknown' with nil config; got %q", key, s.Status)
+			}
+		}
+	}
+	// Version/commit must be set to defaults (not zero values).
+	if resp.Version == "" {
+		t.Errorf("version must not be empty with nil config")
+	}
+}
+
+// TestAdminRuntimeNilDB confirms the endpoint does not panic when
+// the handler has a nil DB. Queue counts must be zero and queue
+// service must be unknown.
+func TestAdminRuntimeNilDB(t *testing.T) {
+	cfg := config.Defaults()
+	logger := zap.NewNop()
+	authn, err := auth.NewAuthenticator(&cfg.Auth, nil, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	adminTok, _ := authn.GenerateAccessToken(1, auth.RoleAdmin)
+
+	// Handler with nil db — queueCountsForTelemetry and
+	// dbPingErrorForTelemetry must not panic.
+	h := handlers.NewHandler(nil, authn, nil, logger, cfg, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
+	h.SetProcessStartedAt(time.Now().Add(-time.Hour))
+
+	app := fiber.New()
+	app.Get("/api/v1/admin/runtime", func(c fiber.Ctx) error {
+		c.Locals("user_id", uint(1))
+		c.Locals("role", auth.RoleAdmin)
+		return h.GetAdminRuntime(c)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/runtime", nil)
+	req.Header.Set("Authorization", "Bearer "+adminTok)
+	res, err := app.Test(req, fiber.TestConfig{Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Errorf("nil DB handler should return 200; got %d", res.StatusCode)
+	}
+	body, _ := io.ReadAll(res.Body)
+	var resp runtime.Telemetry
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("response must be valid JSON: %v", err)
+	}
+	// Queue counts must be zero (nil DB returns zero counts).
+	if resp.Queue.Pending != 0 || resp.Queue.Deferred != 0 || resp.Queue.Bounced != 0 {
+		t.Errorf("queue counts must be zero with nil DB; got %+v", resp.Queue)
+	}
+	// Queue service must show unknown (no counts to derive status).
+	if resp.Services == nil {
+		t.Errorf("services must not be nil")
+	} else if qs, ok := resp.Services["queue"]; ok {
+		if qs.Status != "unknown" {
+			t.Errorf("queue service status must be 'unknown' with nil DB; got %q", qs.Status)
+		}
+	}
+}
+
+// TestAdminRuntimeLicenseFileMissing confirms that a non-empty
+// PublicKeyPath pointing to a non-existent file does NOT report
+// public_key_loaded=true. The old code checked only path non-empty,
+// which was a false positive.
+func TestAdminRuntimeLicenseFileMissing(t *testing.T) {
+	logger := zap.NewNop()
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(dir, "test.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	// Set a non-existent public key path.
+	cfg.License.PublicKeyPath = filepath.Join(dir, "nonexistent.pub")
+	cfg.License.OfflineMode = false
+
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, _ := db.DB()
+	defer sqlDB.Close()
+
+	authn, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	adminTok, _ := authn.GenerateAccessToken(1, auth.RoleAdmin)
+
+	h := handlers.NewHandler(db, authn, nil, logger, cfg, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
+	h.SetProcessStartedAt(time.Now().Add(-time.Hour))
+
+	app := fiber.New()
+	app.Get("/api/v1/admin/runtime", func(c fiber.Ctx) error {
+		c.Locals("user_id", uint(1))
+		c.Locals("role", auth.RoleAdmin)
+		return h.GetAdminRuntime(c)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/runtime", nil)
+	req.Header.Set("Authorization", "Bearer "+adminTok)
+	res, err := app.Test(req, fiber.TestConfig{Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	var resp runtime.Telemetry
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("response must be valid JSON: %v", err)
+	}
+	if resp.License.PublicKeyLoaded {
+		t.Errorf("public_key_loaded must be false when the public key file does not exist; got %+v", resp.License)
+	}
+	if resp.License.Mode == "online" {
+		t.Errorf("license mode must not be 'online' when public key file is missing; got %q", resp.License.Mode)
+	}
+	// The license_public_key_missing warning must be present.
+	seen := false
+	for _, w := range resp.Warnings {
+		if w.Code == "license_public_key_missing" {
+			seen = true
+		}
+	}
+	if !seen {
+		t.Errorf("expected license_public_key_missing warning when public key path is set but file is missing; got %+v", resp.Warnings)
 	}
 }
 

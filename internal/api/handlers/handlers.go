@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/mail"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -89,11 +90,18 @@ func NewHandler(db *gorm.DB, authenticator *auth.Authenticator, apikeyMgr *auth.
 	logger *zap.Logger, cfg *config.Config, registry *modules.Registry,
 	ff *license.FeatureFlags, rateLimiter *auth.RedisRateLimiter) *Handler {
 	var auditStore *audit.Store
-	if sqlDB, err := db.DB(); err == nil {
-		auditStore = audit.NewStore(sqlDB)
-		if err := auditStore.EnsureTable(context.Background()); err != nil {
-			logger.Error("failed to ensure audit store", zap.Error(err))
+	if db != nil {
+		if sqlDB, err := db.DB(); err == nil {
+			auditStore = audit.NewStore(sqlDB)
+			if err := auditStore.EnsureTable(context.Background()); err != nil {
+				logger.Error("failed to ensure audit store", zap.Error(err))
+			}
 		}
+	}
+	// SecurityMonitor needs a non-nil DB; pass nil when DB is nil.
+	var secMonitor *auth.SecurityMonitor
+	if db != nil {
+		secMonitor = auth.NewSecurityMonitor(db, logger)
 	}
 	return &Handler{
 		db:          db,
@@ -103,7 +111,7 @@ func NewHandler(db *gorm.DB, authenticator *auth.Authenticator, apikeyMgr *auth.
 		cfg:         cfg,
 		registry:    registry,
 		features:    ff,
-		security:    auth.NewSecurityMonitor(db, logger),
+		security:    secMonitor,
 		rateLimiter: rateLimiter,
 		auditStore:  auditStore,
 	}
@@ -2094,6 +2102,16 @@ func parseUint(s string) (int64, error) {
 // safe to call repeatedly; it does not mutate any state.
 func (h *Handler) GetAdminRuntime(c fiber.Ctx) error {
 	wm := config.GetWatermark()
+	// Guard nil config so the endpoint never panics when the
+	// operator starts without a config. All ports default to 0,
+	// which the runtime package treats as "unknown".
+	var smtpPort, imapPort, pop3Port, jmapPort int
+	if h.cfg != nil {
+		smtpPort = h.cfg.CoreMail.SMTPPort
+		imapPort = h.cfg.CoreMail.IMAPPort
+		pop3Port = h.cfg.CoreMail.POP3Port
+		jmapPort = h.cfg.CoreMail.JMAPPort
+	}
 	tel := runtime.NewTelemetry(runtime.Inputs{
 		Version:   wm.Version,
 		Commit:    config.GetBuildCommit(),
@@ -2105,10 +2123,10 @@ func (h *Handler) GetAdminRuntime(c fiber.Ctx) error {
 		DBPing:    h.dbPingErrorForTelemetry,
 		QueueCounts: h.queueCountsForTelemetry(c.Context()),
 		License:   h.licensePostureForTelemetry(c.Context()),
-		SMHTTPPort:  h.cfg.CoreMail.SMTPPort,
-		IMAPPort:    h.cfg.CoreMail.IMAPPort,
-		POP3Port:    h.cfg.CoreMail.POP3Port,
-		JMAPPort:    h.cfg.CoreMail.JMAPPort,
+		SMHTTPPort:  smtpPort,
+		IMAPPort:    imapPort,
+		POP3Port:    pop3Port,
+		JMAPPort:    jmapPort,
 	})
 	return c.JSON(tel)
 }
@@ -2141,6 +2159,9 @@ func (h *Handler) dataPathForTelemetry() string {
 // track lifetime delivered (out of scope for this endpoint).
 func (h *Handler) queueCountsForTelemetry(ctx context.Context) runtime.QueueCounts {
 	qc := runtime.QueueCounts{}
+	if h.db == nil {
+		return qc
+	}
 	sqlDB, err := h.db.DB()
 	if err != nil {
 		return qc
@@ -2187,9 +2208,17 @@ func (h *Handler) licensePostureForTelemetry(ctx context.Context) runtime.Licens
 
 	if h.cfg != nil {
 		// Public key loaded = the operator provisioned a
-		// public-key file. We do NOT read the file or expose
-		// its contents; we only confirm presence.
-		lp.PublicKeyLoaded = h.cfg.License.PublicKeyPath != ""
+		// public-key file AND it exists on disk. We do NOT
+		// read the file contents or expose the path; we only
+		// confirm the file is present and readable. A non-empty
+		// path alone is NOT sufficient — the file may have been
+		// deleted or the path may be stale.
+		path := h.cfg.License.PublicKeyPath
+		if path != "" {
+			if _, err := os.Stat(path); err == nil {
+				lp.PublicKeyLoaded = true
+			}
+		}
 		if h.cfg.License.OfflineMode {
 			lp.Mode = "offline"
 		} else if lp.PublicKeyLoaded {

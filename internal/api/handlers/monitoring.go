@@ -94,6 +94,9 @@ func (h *Handler) databaseHealthy() bool {
 // returns a non-nil error wrapping a secret; the only error it
 // surfaces is the Ping failure.
 func (h *Handler) dbPingErrorForTelemetry() error {
+	if h.db == nil {
+		return fmt.Errorf("database not configured")
+	}
 	sqlDB, err := h.db.DB()
 	if err != nil {
 		return err
