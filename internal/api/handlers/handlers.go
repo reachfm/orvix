@@ -20,6 +20,7 @@ import (
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
+	"github.com/orvix/orvix/internal/runtime"
 	"github.com/orvix/orvix/internal/updater"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
@@ -74,6 +75,13 @@ type Handler struct {
 	// is called many times. The schema is a CREATE TABLE IF NOT
 	// EXISTS so it is idempotent; the Once is just an optimisation.
 	updateSvcOnce sync.Once
+
+	// processStartedAt is captured once via SetProcessStartedAt
+	// during router construction. The runtime telemetry endpoint
+	// reports it as uptime; the zero value means "not reported"
+	// and the response carries a telemetry_incomplete warning so
+	// the dashboard does not show fake numbers.
+	processStartedAt time.Time
 }
 
 // NewHandler creates a new Handler with dependencies.
@@ -99,6 +107,16 @@ func NewHandler(db *gorm.DB, authenticator *auth.Authenticator, apikeyMgr *auth.
 		rateLimiter: rateLimiter,
 		auditStore:  auditStore,
 	}
+}
+
+// SetProcessStartedAt records the moment the process started. It is
+// called once during router construction (api.NewRouter). The
+// runtime telemetry endpoint reads this value to compute uptime.
+// A zero value means "not reported" and the response carries a
+// telemetry_incomplete warning so the dashboard does not display
+// fake numbers.
+func (h *Handler) SetProcessStartedAt(t time.Time) {
+	h.processStartedAt = t
 }
 
 // Health returns server health status.
@@ -2052,4 +2070,156 @@ func parseUint(s string) (int64, error) {
 		n = n*10 + int64(c-'0')
 	}
 	return n, nil
+}
+
+// ----------------------------------------------------------------------
+// Admin Runtime Telemetry (ADMIN-RUNTIME-TELEMETRY-2B)
+//
+// The admin dashboard needs honest read-only telemetry to stop
+// showing fake "Online" / "Not available" values when the server
+// has real data. The endpoint is admin-protected, GET-only, and
+// carries no secrets: no env, no private keys, no tokens, no
+// cookies, no full config dump. All values are safe primitives
+// or short safe labels. See internal/runtime for the security
+// contract.
+// ----------------------------------------------------------------------
+
+// GetAdminRuntime serves GET /api/v1/admin/runtime.
+//
+// Response shape is documented in docs/admin-runtime-telemetry.md
+// (deferred to a later commit) and exercised by
+// internal/api/handlers/admin_runtime_test.go. The handler is
+// admin-only by virtue of being mounted on the admin group in
+// router.go (RequireAnyRole(RoleAdmin, RoleSuperAdmin)). It is
+// safe to call repeatedly; it does not mutate any state.
+func (h *Handler) GetAdminRuntime(c fiber.Ctx) error {
+	wm := config.GetWatermark()
+	tel := runtime.NewTelemetry(runtime.Inputs{
+		Version:   wm.Version,
+		Commit:    config.GetBuildCommit(),
+		BuildTime: wm.BuildTime,
+		GoVersion: wm.GoVersion,
+		Arch:      wm.Arch,
+		StartedAt: h.processStartedAt,
+		DataPath:  h.dataPathForTelemetry(),
+		DBPing:    h.dbPingErrorForTelemetry,
+		QueueCounts: h.queueCountsForTelemetry(c.Context()),
+		License:   h.licensePostureForTelemetry(c.Context()),
+		SMHTTPPort:  h.cfg.CoreMail.SMTPPort,
+		IMAPPort:    h.cfg.CoreMail.IMAPPort,
+		POP3Port:    h.cfg.CoreMail.POP3Port,
+		JMAPPort:    h.cfg.CoreMail.JMAPPort,
+	})
+	return c.JSON(tel)
+}
+
+// dataPathForTelemetry returns the data path used to stat the disk.
+// We prefer CoreMail.MailStorePath because that is where the
+// runtime writes user data; falling back to the data_path
+// config, then empty (the runtime layer maps that to "Not
+// reported" via the disk label).
+func (h *Handler) dataPathForTelemetry() string {
+	if h.cfg == nil {
+		return ""
+	}
+	if h.cfg.CoreMail.MailStorePath != "" {
+		return h.cfg.CoreMail.MailStorePath
+	}
+	if h.cfg.CoreMail.DataPath != "" {
+		return h.cfg.CoreMail.DataPath
+	}
+	if h.cfg.Database.SQLitePath != "" {
+		return h.cfg.Database.SQLitePath
+	}
+	return ""
+}
+
+// queueCountsForTelemetry returns a safe snapshot of the queue
+// counts. Pending / deferred / bounced come from the same
+// coremail_queue table the dashboard already trusts; delivered
+// is reported as 0 because the existing queue schema does not
+// track lifetime delivered (out of scope for this endpoint).
+func (h *Handler) queueCountsForTelemetry(ctx context.Context) runtime.QueueCounts {
+	qc := runtime.QueueCounts{}
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return qc
+	}
+	// Pending + leased (counted as "still trying").
+	row := sqlDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND status IN ('pending','leased')`)
+	if n, scanErr := scanInt64(row); scanErr == nil {
+		qc.Pending = n
+	}
+	// Deferred (will retry later).
+	row = sqlDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND status = 'deferred'`)
+	if n, scanErr := scanInt64(row); scanErr == nil {
+		qc.Deferred = n
+	}
+	// Bounced / dead-letter (permanent failure).
+	row = sqlDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND status = 'dead_letter'`)
+	if n, scanErr := scanInt64(row); scanErr == nil {
+		qc.Bounced = n
+	}
+	// Delivered (lifetime). The current schema does not have a
+	// permanent delivered row, so we report 0 and let the
+	// dashboard render it as "Not reported" rather than fabricate
+	// a number.
+	return qc
+}
+
+// scanInt64 is a tiny helper that runs row.Scan(&n) and returns
+// the result, swallowing the sql.ErrNoRows case (treated as 0).
+func scanInt64(row interface{ Scan(...interface{}) error }) (int64, error) {
+	var n int64
+	if err := row.Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// licensePostureForTelemetry assembles the safe license surface
+// for the runtime response. The function never returns private
+// key material, key hash, or any secret. The active license row
+// is optional — the operator can run without one (community
+// mode) and the dashboard will render the posture honestly.
+func (h *Handler) licensePostureForTelemetry(ctx context.Context) runtime.LicensePosture {
+	lp := runtime.LicensePosture{Mode: "unknown", Status: "unknown"}
+
+	if h.cfg != nil {
+		// Public key loaded = the operator provisioned a
+		// public-key file. We do NOT read the file or expose
+		// its contents; we only confirm presence.
+		lp.PublicKeyLoaded = h.cfg.License.PublicKeyPath != ""
+		if h.cfg.License.OfflineMode {
+			lp.Mode = "offline"
+		} else if lp.PublicKeyLoaded {
+			lp.Mode = "online"
+		} else {
+			lp.Mode = "missing"
+		}
+	}
+
+	// Tier + expiry from the most recent active license row,
+	// if one exists. The model is decrypted on AfterFind, so
+	// KeyHash is the decrypted form here; we MUST NOT echo it
+	// in the runtime response. We only read Tier / ExpiresAt.
+	if h.db != nil {
+		var lic models.License
+		if err := h.db.WithContext(ctx).Where("active = ?", true).Order("id DESC").First(&lic).Error; err == nil {
+			lp.Tier = lic.Tier
+			if !lic.ExpiresAt.IsZero() {
+				lp.ExpiresAt = lic.ExpiresAt.UTC().Format(time.RFC3339)
+			}
+		}
+	}
+
+	switch {
+	case lp.PublicKeyLoaded:
+		lp.Status = "ok"
+	case lp.Mode == "offline":
+		lp.Status = "offline"
+	default:
+		lp.Status = "missing"
+	}
+	return lp
 }

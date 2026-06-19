@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/cors"
@@ -76,6 +77,14 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		cfg:          cfg,
 		h:            handlers.NewHandler(db, authenticator, apikeyMgr, logger, cfg, registry, ff, rateLimiter),
 	}
+	// Record the moment the router was constructed. The runtime
+	// telemetry endpoint (/api/v1/admin/runtime) reads this to
+	// compute uptime. Capturing it here (rather than at process
+	// start) is close enough for an admin dashboard: the small
+	// difference between process start and router construction
+	// is dominated by module init and DB migrations, and the
+	// endpoint never claims second-precision.
+	router.h.SetProcessStartedAt(time.Now().UTC())
 
 	// Propagate the cookie Domain to the CSRF manager. The
 	// installer writes cfg.Auth.CookieDomain (".parent.com")
@@ -308,6 +317,9 @@ func (r *Router) setupRoutes() {
 	admin.Get("/feature-flags", r.h.ListFeatureFlags)
 	admin.Get("/api-keys", r.h.ListAPIKeys)
 	admin.Get("/admin/summary", r.h.AdminSummary)
+	// Admin Runtime Telemetry (ADMIN-RUNTIME-TELEMETRY-2B):
+	// read-only, admin-protected. No CSRF required (GET).
+	admin.Get("/admin/runtime", r.h.GetAdminRuntime)
 	// Monitoring v1: read-only health + alert endpoints (admin role).
 	admin.Get("/monitoring/health", r.h.GetMonitoringHealth)
 	admin.Get("/monitoring/alerts", r.h.GetMonitoringAlerts)

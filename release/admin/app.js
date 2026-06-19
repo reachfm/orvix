@@ -877,7 +877,7 @@
     body.appendChild(warnCard);
 
     try {
-      await Promise.all([loadHealth(), loadSummary(), loadMonitoringHealth(), loadLicense()]);
+      await Promise.all([loadHealth(), loadSummary(), loadMonitoringHealth(), loadLicense(), loadRuntime()]);
     } catch (e) { /* tolerated; partial fill */ }
 
     renderDashCards();
@@ -907,29 +907,176 @@
     catch (e) { state.license = null; }
   }
 
+  // loadRuntime pulls the honest read-only process + system snapshot
+  // from /api/v1/admin/runtime. The endpoint is admin-protected and
+  // returns services {api,smtp,imap,pop3,jmap,database,queue}, disk
+  // capacity, queue counts, license posture, and a warning list.
+  //
+  // We deliberately tolerate failures (older builds without the
+  // endpoint still render via the summary.runtime fallback below).
+  async function loadRuntime() {
+    try { state.runtime = await apiGet('/api/v1/admin/runtime'); }
+    catch (e) { state.runtime = null; }
+  }
+
+  // formatUptime renders an integer seconds value as "Nd Nh Nm"
+  // (drops the seconds). A negative or non-numeric value returns
+  // "Not reported". The runtime endpoint exposes uptime_seconds;
+  // the dashboard surface keeps it readable.
+  function formatUptime(seconds) {
+    if (seconds == null || isNaN(seconds) || seconds < 0) return 'Not reported';
+    var s = Math.floor(Number(seconds));
+    if (s < 60) return s + 's';
+    var d = Math.floor(s / 86400); s -= d * 86400;
+    var h = Math.floor(s / 3600);  s -= h * 3600;
+    var m = Math.floor(s / 60);
+    var parts = [];
+    if (d) parts.push(d + 'd');
+    if (h) parts.push(h + 'h');
+    parts.push(m + 'm');
+    return parts.join(' ');
+  }
+
+  // formatDiskBytes renders a byte count as a short human string
+  // (e.g. 4.0GB / 1.2TB). Used by the System card so the dashboard
+  // never displays an unformatted object literal or a raw byte integer.
+  function formatDiskBytes(n) {
+    if (n == null || isNaN(n) || n < 0) return null;
+    var units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+    var i = 0;
+    var v = Number(n);
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    if (i === 0) return v + units[i];
+    return (Math.round(v * 10) / 10) + units[i];
+  }
+
+  // formatDisk renders the runtime capacity.disk object as a single
+  // safe string. Falls back to "Not reported" when the runtime did
+  // not return a usable disk (Windows platform or statfs error).
+  function formatDisk(disk) {
+    if (!disk || typeof disk !== 'object') return 'Not reported';
+    var used = formatDiskBytes(disk.used_bytes);
+    var total = formatDiskBytes(disk.total_bytes);
+    var pct = (disk.used_percent != null && !isNaN(disk.used_percent)) ? (disk.used_percent + '%') : null;
+    var label = (disk.label && typeof disk.label === 'string') ? disk.label : 'data';
+    if (!used && !total && !pct) return 'Not reported';
+    if (used && total && pct) return label + ' — ' + used + ' used / ' + total + ' (' + pct + ')';
+    if (used && total) return label + ' — ' + used + ' used / ' + total;
+    if (pct) return label + ' — ' + pct + ' used';
+    return label + ' — Not reported';
+  }
+
   function renderDashCards() {
     var grid = $('dash-grid');
     if (!grid) return;
     var h = state.health || {};
-    var svcs = h.services || h.components || h.subsystems || null;
-    function svc(name, fallback) {
-      if (!svcs) return fallback || { status: 'unknown' };
-      var s = svcs[name] || svcs[name.toLowerCase()];
-      return s || { status: 'unknown' };
+    var rt = state.runtime || null;
+    var rtSvcs = (rt && rt.services && typeof rt.services === 'object') ? rt.services : null;
+    var hSvcs = h.services || h.components || h.subsystems || null;
+    // rtSvc resolves a service from the runtime telemetry endpoint
+    // first; it is the authoritative source for SMTP/IMAP/POP3/JMAP
+    // listener status (the runtime endpoint surfaces
+    // "listener runtime state not reported" rather than faking
+    // Online). Falls back to /api/v1/health only when the runtime
+    // endpoint did not respond (older builds).
+    function rtSvc(name, fallback) {
+      if (rtSvcs) {
+        var s = rtSvcs[name] || rtSvcs[name.toLowerCase()];
+        if (s) return s;
+      }
+      if (hSvcs) {
+        var hs = hSvcs[name] || hSvcs[name.toLowerCase()];
+        if (hs) return hs;
+      }
+      return fallback || { status: 'unknown' };
     }
-    var runtimeStatus = h.error ? 'Error' : (h.status || (svcs ? 'Online' : 'Not available'));
-    var runtimeNote = h.error ? h.error : (svcs ? 'SMTP, IMAP, POP3, JMAP and workers managed by CoreMail' : 'Health data not reported by API');
-    var runtimeKind = h.error ? 'bad' : (h.status ? statusKind(h.status) : (svcs ? 'good' : 'neutral'));
+    // The CoreMail Runtime top card reflects the runtime
+    // endpoint's top-level status. We do NOT hard-code "Online"
+    // — we use the real telemetry ("ok" / "degraded" /
+    // "unknown"). Listener entries stay "Unknown" until listener
+    // runtime tracking ships; the runtime package returns
+    // "listener runtime state not reported" as the detail.
+    // The variable names runtimeStatus / runtimeNote / runtimeKind
+    // are referenced by TestAdminNoHardcodedDashboardHealth so we
+    // keep them as the canonical names.
+    var runtimeStatus, runtimeNote, runtimeKind;
+    if (rt && rt.status) {
+      runtimeStatus = rt.status.charAt(0).toUpperCase() + rt.status.slice(1);
+      runtimeNote = 'Process + system telemetry from /api/v1/admin/runtime';
+      runtimeKind = statusKind(rt.status);
+    } else if (h.error) {
+      runtimeStatus = 'Error'; runtimeNote = h.error; runtimeKind = 'bad';
+    } else if (h.status) {
+      runtimeStatus = h.status.charAt(0).toUpperCase() + h.status.slice(1);
+      runtimeNote = 'Health data not reported by API';
+      runtimeKind = statusKind(h.status);
+    } else {
+      runtimeStatus = 'Not available';
+      runtimeNote = 'Telemetry not reported by API';
+      runtimeKind = 'neutral';
+    }
+    var apiHealthVal, apiHealthNote, apiHealthKind;
+    if (rtSvcs && rtSvcs.api) {
+      apiHealthVal = rtSvcs.api.status ? (rtSvcs.api.status.charAt(0).toUpperCase() + rtSvcs.api.status.slice(1)) : 'Unknown';
+      apiHealthNote = rtSvcs.api.detail || 'admin API responding';
+      apiHealthKind = statusKind(rtSvcs.api.status);
+    } else {
+      apiHealthVal = h.error ? 'Error' : 'OK';
+      apiHealthNote = h.error || ('Checked ' + new Date().toLocaleTimeString());
+      apiHealthKind = h.error ? 'bad' : 'good';
+    }
+    // Listener cards: never hard-coded Online. Use runtime
+    // telemetry; fall back to /api/v1/health if the runtime
+    // endpoint is not wired.
+    function listenerCard(label, key, portNote) {
+      var s = rtSvc(key, null);
+      var st = s && s.status ? s.status : 'unknown';
+      var detail = (s && s.detail) || portNote;
+      // Surface the explicit "listener runtime state not reported"
+      // detail so the operator understands the dashboard is not
+      // faking connectivity.
+      return [label, st.charAt(0).toUpperCase() + st.slice(1), detail, statusKind(st)];
+    }
+    var smtpCard = listenerCard('SMTP', 'smtp', 'Inbound + outbound on port 25');
+    var imapCard = listenerCard('IMAP', 'imap', 'Mailbox access on port 143');
+    var pop3Card = listenerCard('POP3', 'pop3', 'Legacy retrieval on port 110');
+    var jmapCard = listenerCard('JMAP', 'jmap', 'JSON Meta Application Protocol');
+    var dbCard = listenerCard('Database', 'database', 'Postgres / GORM');
+    var queueCard = listenerCard('Redis / Queue', 'queue', 'Delivery queue state');
+    var licenseInfo = state.license || (rt && rt.license) || null;
+    var licLabel, licNote, licKind;
+    if (licenseInfo) {
+      var lp = licenseInfo;
+      if (lp.public_key_loaded === true || lp.public_key === true) {
+        licLabel = (lp.mode && lp.mode !== 'unknown') ? (lp.mode.charAt(0).toUpperCase() + lp.mode.slice(1)) : 'Public-key verified';
+        licNote = lp.expires_at || 'Public-key loaded';
+        licKind = 'good';
+      } else if (lp.mode === 'offline') {
+        licLabel = 'Offline';
+        licNote = lp.expires_at || 'Offline mode';
+        licKind = 'warn';
+      } else if (lp.mode === 'missing' || lp.public_key_loaded === false) {
+        licLabel = 'Missing';
+        licNote = 'Public key not loaded';
+        licKind = 'bad';
+      } else {
+        licLabel = (lp.mode && lp.mode !== 'unknown') ? (lp.mode.charAt(0).toUpperCase() + lp.mode.slice(1)) : 'Unknown';
+        licNote = lp.expires_at || '';
+        licKind = 'warn';
+      }
+    } else {
+      licLabel = 'Unknown'; licNote = ''; licKind = 'neutral';
+    }
     var cards = [
-      ['API Health',     h.error ? 'Error' : 'OK', h.error || ('Checked ' + new Date().toLocaleTimeString()), h.error ? 'bad' : 'good'],
-      ['CoreMail Runtime',runtimeStatus,           runtimeNote,                                             runtimeKind],
-      ['SMTP',           svc('SMTP').status || 'Unknown',  'Inbound + outbound on port 25', statusKind(svc('SMTP').status)],
-      ['IMAP',           svc('IMAP').status || 'Unknown',  'Mailbox access on port 143',    statusKind(svc('IMAP').status)],
-      ['POP3',           svc('POP3').status || 'Unknown',  'Legacy retrieval on port 110',  statusKind(svc('POP3').status)],
-      ['JMAP',           svc('JMAP').status || 'Unknown',  'JSON Meta Application Protocol',statusKind(svc('JMAP').status)],
-      ['Database',       svc('database').status || svc('Database').status || 'Unknown', 'Postgres / GORM',  statusKind(svc('database').status || svc('Database').status)],
-      ['Redis / Queue',  svc('redis').status || svc('queue').status || 'Unknown',     'Delivery queue',   statusKind(svc('redis').status || svc('queue').status)],
-      ['License',        state.license ? (state.license.mode || (state.license.public_key ? 'Public-key verified' : 'Offline')) : 'Unknown', state.license ? state.license.expires_at || 'No expiry' : '', state.license ? (state.license.public_key ? 'good' : 'warn') : 'neutral']
+      ['API Health',     apiHealthVal, apiHealthNote, apiHealthKind],
+      ['CoreMail Runtime', runtimeStatus, runtimeNote, runtimeKind],
+      smtpCard,
+      imapCard,
+      pop3Card,
+      jmapCard,
+      dbCard,
+      queueCard,
+      ['License', licLabel, licNote, licKind]
     ];
     grid.innerHTML = '';
     cards.forEach(function (c) {
@@ -957,16 +1104,61 @@
     var sys = $('dash-system');
     if (!sys) return;
     var s = state.summary || {};
-    var rt = s.runtime || {};
+    // rtRuntime is the live /api/v1/admin/runtime payload; we
+    // prefer it over the older summary.runtime mirror because the
+    // runtime endpoint is the source of truth for version,
+    // commit, hostname, uptime, disk, license posture.
+    var rtRuntime = state.runtime || null;
+    var rtSummary = s.runtime || {};
     sys.innerHTML = '';
+    // Each helper falls back gracefully through:
+    //   runtime endpoint -> summary.runtime mirror -> state.health
+    //   -> state.hostname -> hard-coded honest placeholder.
+    // No value is ever fabricated; missing data is "Not reported".
+    var version = (rtRuntime && rtRuntime.version) || s.version || (state.health && state.health.version) || 'Not reported';
+    var commit = (rtRuntime && rtRuntime.commit) || s.commit || (state.health && state.health.commit) || 'Not reported';
+    var buildTime = (rtRuntime && rtRuntime.build_time) || s.build_time || (state.health && state.health.build_time) || 'Not reported';
+    var hostname = (rtRuntime && rtRuntime.hostname) || rtSummary.hostname || state.hostname || 'Not reported';
+    var uptimeVal;
+    if (rtRuntime && typeof rtRuntime.uptime_seconds === 'number') {
+      uptimeVal = formatUptime(rtRuntime.uptime_seconds);
+    } else if (rtSummary.uptime) {
+      uptimeVal = rtSummary.uptime;
+    } else if (state.health && state.health.uptime) {
+      uptimeVal = state.health.uptime;
+    } else {
+      uptimeVal = 'Not reported';
+    }
+    var diskVal;
+    if (rtRuntime && rtRuntime.capacity && rtRuntime.capacity.disk) {
+      diskVal = formatDisk(rtRuntime.capacity.disk);
+    } else if (rtSummary.disk) {
+      diskVal = rtSummary.disk;
+    } else if (state.health && state.health.disk) {
+      diskVal = state.health.disk;
+    } else {
+      diskVal = 'Not reported';
+    }
+    var licMode;
+    if (rtRuntime && rtRuntime.license && rtRuntime.license.mode && rtRuntime.license.mode !== 'unknown') {
+      licMode = rtRuntime.license.mode.charAt(0).toUpperCase() + rtRuntime.license.mode.slice(1);
+    } else if (state.license && state.license.mode) {
+      licMode = state.license.mode;
+    } else if (state.license && state.license.public_key) {
+      licMode = 'Public-key';
+    } else if (state.license && state.license.public_key === false) {
+      licMode = 'Offline';
+    } else {
+      licMode = 'Unknown';
+    }
     var pairs = [
-      ['Version',          s.version || (state.health && state.health.version) || '-'],
-      ['Commit',           s.commit || (state.health && state.health.commit) || 'Not reported'],
-      ['Hostname',         rt.hostname || state.hostname || '-'],
-      ['Uptime',           rt.uptime || (state.health && state.health.uptime) || 'Not available'],
-      ['Disk',             rt.disk || (state.health && state.health.disk) || 'Not available'],
-      ['License mode',     (state.license && (state.license.mode || (state.license.public_key ? 'Public-key' : 'Offline'))) || 'Unknown'],
-      ['Build time',       (state.health && state.health.build_time) || '-']
+      ['Version',      version],
+      ['Commit',       commit],
+      ['Build time',   buildTime],
+      ['Hostname',     hostname],
+      ['Uptime',       uptimeVal],
+      ['Disk',         diskVal],
+      ['License mode', licMode]
     ];
     sys.appendChild(kvList(pairs));
   }
@@ -976,13 +1168,75 @@
     if (!w) return;
     w.innerHTML = '';
     var items = [];
+    var rt = state.runtime || null;
     var s = state.summary || {};
-    var q = s.queue || {};
-    if (!state.license || !state.license.public_key) items.push(['License public-key missing', 'Operating in offline mode. License validation on every start.']);
-    if ((q.bounced || 0) > 0) items.push(['Queue has ' + q.bounced + ' bounced messages', 'Open Queue → filter by Bounced → review and clear.']);
-    if ((q.deferred || 0) > 50) items.push(['Queue has ' + q.deferred + ' deferred messages', 'Likely reputation / DNS / rDNS issue. Check DNS / DKIM.']);
+    var q = (rt && rt.queue) || s.queue || {};
+    // Prefer the runtime endpoint's curated warning list — it is
+    // built from the same inputs the dashboard would otherwise
+    // recompute (license public key, queue deferred/bounced, disk
+    // >= 85%). We surface the message verbatim and dedupe by code.
+    var seen = {};
+    function add(title, hint) {
+      var k = String(title || '').toLowerCase();
+      if (seen[k]) return;
+      seen[k] = true;
+      items.push([title, hint]);
+    }
+    if (rt && Array.isArray(rt.warnings)) {
+      rt.warnings.forEach(function (warn) {
+        if (!warn || !warn.message) return;
+        var msg = warn.message;
+        var hint = '';
+        switch (warn.code) {
+          case 'license_public_key_missing':
+            hint = 'Operating in offline mode. Provision a public key to enable online license validation.'; break;
+          case 'license_missing':
+            hint = 'License not configured. Operator is running in community mode.'; break;
+          case 'queue_deferred':
+            hint = 'Open Queue → filter by Deferred → review retry timing.'; break;
+          case 'queue_bounced':
+            hint = 'Open Queue → filter by Bounced → review permanent failures.'; break;
+          case 'disk_high':
+            hint = 'Disk usage is at or above 85%. Consider pruning old mail or expanding storage.'; break;
+          case 'telemetry_incomplete':
+            hint = 'Process start time was not reported; uptime is unknown.'; break;
+          default:
+            hint = '';
+        }
+        add(msg, hint);
+      });
+    }
+    // Listener failure — runtime.services.{smtp,imap,pop3,jmap}
+    // may report status=fail when listener runtime tracking is
+    // wired in. We surface each failure as its own row so the
+    // operator sees which listener is down.
+    if (rt && rt.services && typeof rt.services === 'object') {
+      ['smtp', 'imap', 'pop3', 'jmap'].forEach(function (key) {
+        var s2 = rt.services[key];
+        if (s2 && s2.status === 'fail') {
+          add((key.toUpperCase()) + ' listener failure', (s2.detail || ('Listener reported failure for ' + key.toUpperCase())));
+        }
+      });
+    }
+    // Fallback warnings derived from older endpoints — kept so
+    // the dashboard still surfaces risk when the runtime endpoint
+    // is not reachable. These never duplicate a runtime warning
+    // because `add()` dedupes by title.
+    if (!rt) {
+      if (!state.license || !state.license.public_key) {
+        add('License public-key missing', 'Operating in offline mode. License validation on every start.');
+      }
+      if ((q.bounced || 0) > 0) {
+        add('Queue has ' + q.bounced + ' bounced messages', 'Open Queue → filter by Bounced → review and clear.');
+      }
+      if ((q.deferred || 0) > 50) {
+        add('Queue has ' + q.deferred + ' deferred messages', 'Likely reputation / DNS / rDNS issue. Check DNS / DKIM.');
+      }
+    }
     var hasDkim = s.dkim_missing_domains;
-    if (hasDkim && hasDkim.length) items.push(['DKIM not configured for: ' + hasDkim.slice(0, 3).join(', ') + (hasDkim.length > 3 ? ' …' : ''), 'Open DNS / DKIM wizard to publish TXT records.']);
+    if (hasDkim && hasDkim.length) {
+      add('DKIM not configured for: ' + hasDkim.slice(0, 3).join(', ') + (hasDkim.length > 3 ? ' …' : ''), 'Open DNS / DKIM wizard to publish TXT records.');
+    }
     if (!items.length) items.push(['No warnings detected', 'All systems nominal.']);
     items.forEach(function (i) {
       var row = el('div', { class: 'warn-row' }, [
@@ -2585,18 +2839,22 @@
     try { state.summary = state.summary || await apiGet('/api/v1/admin/summary'); } catch (_) {}
     try { state.license = state.license || await apiGet('/api/v1/license'); } catch (_) {}
     try { state.health   = state.health   || await apiGet('/api/v1/health'); } catch (_) {}
+    try { state.runtime  = state.runtime  || await apiGet('/api/v1/admin/runtime'); } catch (_) {}
 
     var s = state.summary || {};
-    var rt = s.runtime || {};
+    // Prefer the live /api/v1/admin/runtime payload over the
+    // older summary.runtime mirror. Both fall through to
+    // /api/v1/health before falling back to "Not reported".
+    var rt = state.runtime || s.runtime || {};
     var hostEl = $('settings-host');
     if (hostEl) {
       hostEl.innerHTML = '';
       hostEl.appendChild(kvList([
-        ['Hostname',     rt.hostname || state.hostname || '-'],
-        ['Version',      s.version || (state.health && state.health.version) || '-'],
-        ['Commit',       s.commit || (state.health && state.health.commit) || 'Not reported'],
-        ['Build time',   (state.health && state.health.build_time) || '-'],
-        ['Status',       rt.status || (state.health && state.health.status) || '-']
+        ['Hostname',     rt.hostname || state.hostname || 'Not reported'],
+        ['Version',      rt.version || s.version || (state.health && state.health.version) || 'Not reported'],
+        ['Commit',       rt.commit || s.commit || (state.health && state.health.commit) || 'Not reported'],
+        ['Build time',   rt.build_time || s.build_time || (state.health && state.health.build_time) || 'Not reported'],
+        ['Status',       rt.status || (state.health && state.health.status) || 'Not reported']
       ]));
     }
     var secEl = $('settings-security');
