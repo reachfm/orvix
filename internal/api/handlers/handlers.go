@@ -1623,20 +1623,58 @@ func (h *Handler) GetAdminQueueEntry(c fiber.Ctx) error {
 	if parseErr != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid queue id"})
 	}
-	if h.queueEngine == nil || h.queueEngine.Repo == nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "queue engine not available"})
+
+	// Prefer the queue repository when available (QUEUE-OPERATIONS-2E).
+	// Fall back to raw SQL for backward compatibility (tests, legacy
+	// setups where the queue engine is not wired).
+	if h.queueEngine != nil && h.queueEngine.Repo != nil {
+		entry, err := h.queueEngine.Repo.Get(c.Context(), uint(id), nil)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+		}
+		if entry == nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "queue entry not found"})
+		}
+		return c.JSON(entry)
 	}
-	entry, err := h.queueEngine.Repo.Get(c.Context(), uint(id), nil)
+
+	// Raw SQL fallback — minimal safe fields.
+	sqlDB, err := h.db.DB()
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
 	}
-	if entry == nil {
+	var idR uint
+	var msgID, fromAddr, toAddr, statusStr, lastErr string
+	var attCount int
+	var nextAtt, lastAtt, createdAt, updatedAt sql.NullString
+	err = sqlDB.QueryRowContext(c.Context(),
+		"SELECT id, message_id, from_address, to_address, status, attempt_count, COALESCE(last_error,''), next_attempt_at, last_attempt_at, created_at, updated_at FROM coremail_queue WHERE id=? AND deleted_at IS NULL", id).
+		Scan(&idR, &msgID, &fromAddr, &toAddr, &statusStr, &attCount, &lastErr, &nextAtt, &lastAtt, &createdAt, &updatedAt)
+	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "queue entry not found"})
 	}
-	// Sanitize: never expose the full raw message body or secrets.
-	// The QueueEntry struct has no body field; last_error is sanitized
-	// below if needed. We return the struct fields directly.
-	return c.JSON(entry)
+	return c.JSON(fiber.Map{
+		"id":               idR,
+		"message_id":       msgID,
+		"from_address":     fromAddr,
+		"to_address":       toAddr,
+		"status":           statusStr,
+		"attempt_count":    attCount,
+		"last_error":       lastErr,
+		"next_attempt_at":  nullTimeStr(nextAtt),
+		"last_attempt_at":  nullTimeStr(lastAtt),
+		"created_at":       nullTimeStr(createdAt),
+		"updated_at":       nullTimeStr(updatedAt),
+	})
+}
+
+// nullTimeStr converts an sql.NullString timestamp to a string for
+// JSON output. Returns empty string when the value is not valid.
+func nullTimeStr(ns sql.NullString) string {
+	if ns.Valid {
+		return ns.String
+	}
+	return ""
 }
 
 // ListFirewallRules returns firewall rules.

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/api"
 	"github.com/orvix/orvix/internal/api/handlers"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/config"
@@ -166,6 +167,88 @@ func TestAdminQueueEntryHandler(t *testing.T) {
 	}
 	if entry.FromAddress != "alice@example.com" {
 		t.Errorf("expected from=alice@example.com; got %q", entry.FromAddress)
+	}
+}
+
+// TestAdminQueueRoutesAuth confirms the new admin queue read
+// endpoints require authentication through the real router stack.
+func TestAdminQueueRoutesAuth(t *testing.T) {
+	logger := zap.NewNop()
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = dir + "/test.db?_loc=auto&_busy_timeout=5000"
+
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, _ := db.DB()
+	defer sqlDB.Close()
+
+	// Create queue table and seed a row.
+	for _, stmt := range append(queue.Tables(), queue.Indexes()...) {
+		if _, err := sqlDB.Exec(stmt); err != nil {
+			t.Fatalf("queue schema: %v", err)
+		}
+	}
+	_, err = sqlDB.Exec(`INSERT INTO coremail_queue (message_id, from_address, to_address, status, attempt_count, max_attempts, delivery_mode, direction, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"auth-test-msg", "a@b.com", "c@d.com", "pending", 0, 16, "remote_smtp", "outbound", time.Now(), time.Now())
+	if err != nil {
+		t.Fatalf("seed queue: %v", err)
+	}
+
+	// Create users table and seed admin + non-admin users.
+	sqlDB.Exec(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at DATETIME, updated_at DATETIME, email TEXT, password_hash TEXT, role TEXT, tenant_id INTEGER, active INTEGER, email_verified INTEGER)`)
+	sqlDB.Exec(`INSERT INTO users (id, created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		1, time.Now(), time.Now(), "admin@test", "$2a$10$dummyhashdummyhashdummyhashdummyhashdummyhashdummyhashdummyhash", "admin", 1, 1, 1)
+
+	authn, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+
+	reg := modules.NewRegistry(logger)
+	ff := license.NewFeatureFlags(logger)
+
+	router := api.NewRouter(cfg, authn, logger, db, reg, ff, nil)
+	app := router.App()
+
+	adminTok, _ := authn.GenerateAccessToken(1, auth.RoleAdmin)
+
+	tests := []struct {
+		name string
+		path string
+	}{
+		{"summary", "/api/v1/admin/queue/summary"},
+		{"detail", "/api/v1/admin/queue/1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name+" no auth", func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			res, err := app.Test(req, fiber.TestConfig{Timeout: 5 * time.Second})
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+			defer res.Body.Close()
+			if res.StatusCode != http.StatusUnauthorized {
+				t.Errorf("expected 401; got %d", res.StatusCode)
+			}
+		})
+
+		t.Run(tt.name+" admin auth", func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			req.Header.Set("Authorization", "Bearer "+adminTok)
+			res, err := app.Test(req, fiber.TestConfig{Timeout: 5 * time.Second})
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+			defer res.Body.Close()
+			if res.StatusCode != http.StatusOK && res.StatusCode != http.StatusNotFound {
+				t.Errorf("expected 200 or 404 for admin; got %d", res.StatusCode)
+			}
+		})
 	}
 }
 

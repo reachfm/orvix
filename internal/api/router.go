@@ -329,8 +329,12 @@ func (r *Router) setupRoutes() {
 	// Admin Queue Operations (QUEUE-OPERATIONS-2E): summary,
 	// single-entry detail, and safe retry/delete (already wired
 	// in the CSRF-protected men group below). All admin-only.
-	admin.Get("/queue/summary", r.h.AdminQueueSummary)
-	admin.Get("/queue/:id", r.h.GetAdminQueueEntry)
+	// Note: the explicit /admin/ path segment distinguishes these
+	// admin-read endpoints from legacy /queue paths (list, retry,
+	// delete) which are mounted without the segment for backward
+	// compatibility.
+	admin.Get("/admin/queue/summary", r.h.AdminQueueSummary)
+	admin.Get("/admin/queue/:id", r.h.GetAdminQueueEntry)
 	admin.Get("/backups", r.h.ListBackups)
 	admin.Get("/backups/schedule", r.h.GetBackupSchedule)
 	admin.Get("/backups/metrics", r.h.GetBackupMetrics)

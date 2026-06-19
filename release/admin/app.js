@@ -2196,7 +2196,7 @@
 
   async function refreshOneQueue(id) {
     try {
-      var r = await apiGet('/api/v1/queue/' + id);
+      var r = await apiGet('/api/v1/admin/queue/' + id);
       state.queueDetail = r;
       var idx = state.queue.findIndex(function (q) { return String(q.id) === String(id); });
       if (idx >= 0) state.queue[idx] = r;
