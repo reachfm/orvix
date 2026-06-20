@@ -283,6 +283,7 @@ func (r *Router) setupRoutes() {
 	admin.Get("/backups/metrics", r.h.GetBackupMetrics)
 	admin.Get("/backups/health", r.h.GetBackupHealth)
 	admin.Get("/backups/:id/download", r.h.DownloadBackup)
+	admin.Get("/admin/backups/:id", r.h.GetBackup)
 	admin.Get("/firewall/rules", r.h.ListFirewallRules)
 	admin.Get("/firewall/logs", r.h.ListFirewallLogs)
 	admin.Get("/modules", r.h.ListModules)
@@ -389,6 +390,8 @@ func (r *Router) setupRoutes() {
 	men.Post("/backups", r.h.CreateBackup)
 	men.Post("/backups/schedule", r.h.SetBackupSchedule)
 	men.Post("/backups/retention", r.h.RunBackupRetention)
+	men.Post("/admin/backups/:id/validate", r.h.PostValidateBackup)
+	men.Post("/admin/backups/:id/restore", r.h.PostRestoreBackup)
 	men.Delete("/backups/:id", r.h.DeleteBackup)
 	// Monitoring v1: resolve an alert (CSRF-protected, admin role).
 	men.Post("/monitoring/alerts/:id/resolve", r.h.PostMonitoringAlertResolve)
@@ -520,5 +523,5 @@ func updateBackupDir(cfg *config.Config) string {
 	if cfg != nil && cfg.Backup.Dir != "" {
 		return cfg.Backup.Dir
 	}
-	return "/var/lib/orvix/backups"
+	return "/var/backups/orvix/"
 }

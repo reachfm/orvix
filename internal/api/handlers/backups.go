@@ -10,10 +10,11 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/backup"
+	"github.com/orvix/orvix/internal/updater"
 	"go.uber.org/zap"
 )
 
-const defaultBackupDir = "/var/lib/orvix/backups"
+const defaultBackupDir = "/var/backups/orvix/"
 
 type backupAPIEntry struct {
 	ID          string `json:"id"`
@@ -54,6 +55,8 @@ func (h *Handler) backupService() (*backup.Service, error) {
 	}
 	svc := backup.NewService(h.backupDir(), sqlDB, sqlDB, mailDir, attachDir)
 	svc.SetConfigPath("/etc/orvix/orvix.yaml")
+	bi := updater.ReadBuildInfo()
+	svc.SetBuildInfo(bi.Version, bi.SHA)
 	return svc, nil
 }
 
@@ -189,7 +192,7 @@ func (h *Handler) ensureBackupScheduleTable(sqlDB *sql.DB) error {
 		id INTEGER PRIMARY KEY DEFAULT 1,
 		enabled INTEGER NOT NULL DEFAULT 0,
 		frequency TEXT NOT NULL DEFAULT 'manual',
-		retention_count INTEGER NOT NULL DEFAULT 7,
+		retention_count INTEGER NOT NULL DEFAULT 10,
 		last_run_at DATETIME,
 		next_run_at DATETIME,
 		updated_at DATETIME NOT NULL
@@ -275,4 +278,69 @@ func (h *Handler) RunBackupRetention(c fiber.Ctx) error {
 	}
 	h.writeAuditLog(c, "backup.retention_cleanup", fmt.Sprintf("deleted:%d", deleted))
 	return c.JSON(fiber.Map{"deleted": deleted})
+}
+
+// GetBackup returns details for a single backup (no secrets).
+func (h *Handler) GetBackup(c fiber.Ctx) error {
+	id := c.Params("id")
+	if invalidBackupID(id) {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid backup id"})
+	}
+	svc, err := h.backupService()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "backup service unavailable"})
+	}
+	b, err := svc.GetBackup(c.Context(), id)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "backup not found"})
+	}
+	return c.JSON(backupToAPIEntry(*b))
+}
+
+// PostValidateBackup validates a backup archive (checksums, manifest, format version).
+func (h *Handler) PostValidateBackup(c fiber.Ctx) error {
+	id := c.Params("id")
+	if invalidBackupID(id) {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid backup id"})
+	}
+	svc, err := h.backupService()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "backup service unavailable"})
+	}
+	result, err := svc.ValidateArchive(c.Context(), id)
+	if err != nil {
+		h.logger.Error("backup validation failed", zap.String("backup_id", id), zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "backup validation failed"})
+	}
+	h.writeAuditLog(c, "backup.validate", fmt.Sprintf("backup_id:%s|valid:%v", id, result.Valid))
+	return c.JSON(result)
+}
+
+// PostRestoreBackup stages a backup for restore (Phase 2H: staged only, not live).
+// Requires typed confirmation "restore-orvix-backup".
+func (h *Handler) PostRestoreBackup(c fiber.Ctx) error {
+	id := c.Params("id")
+	if invalidBackupID(id) {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid backup id"})
+	}
+	var req struct {
+		Confirm string `json:"confirm"`
+	}
+	if err := c.Bind().JSON(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+	if req.Confirm != "restore-orvix-backup" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "restore requires typed confirmation: restore-orvix-backup"})
+	}
+	svc, err := h.backupService()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "backup service unavailable"})
+	}
+	result, err := svc.RestoreBackup(c.Context(), id)
+	if err != nil {
+		h.logger.Error("backup restore failed", zap.String("backup_id", id), zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	h.writeAuditLog(c, "backup.restore", fmt.Sprintf("backup_id:%s|status:%s", id, result.Status))
+	return c.JSON(result)
 }

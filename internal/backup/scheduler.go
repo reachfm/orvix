@@ -58,7 +58,7 @@ func defaultScheduleConfig() *ScheduleConfig {
 	return &ScheduleConfig{
 		Enabled:        false,
 		Frequency:      FrequencyManual,
-		RetentionCount: 7,
+		RetentionCount: 10,
 		UpdatedAt:      time.Now().UTC(),
 	}
 }

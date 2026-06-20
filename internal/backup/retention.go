@@ -21,7 +21,18 @@ func (s *Service) RunRetention(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 
+	// Never delete the most recent backup — the one just created.
 	toDelete := backups[cfg.RetentionCount:]
+	// If the most recent backup is in the "to delete" range, exclude it.
+	if len(backups) > 0 && len(toDelete) > 0 {
+		if toDelete[len(toDelete)-1].ID == backups[0].ID {
+			toDelete = toDelete[:len(toDelete)-1]
+		}
+	}
+	if len(toDelete) == 0 {
+		return 0, nil
+	}
+
 	for _, b := range toDelete {
 		if err := s.DeleteBackup(ctx, b.ID); err != nil {
 			return 0, fmt.Errorf("delete backup %s: %w", b.ID, err)

@@ -228,7 +228,7 @@ func TestBackupAPICreateListDownloadDelete(t *testing.T) {
 		t.Fatalf("unexpected content type %q", got)
 	}
 	names := readArchiveNames(t, archive)
-	for _, name := range []string{"var/lib/orvix/orvix.db", "BACKUP_INFO.txt"} {
+	for _, name := range []string{"var/lib/orvix/orvix.db", "backup.json", "RESTORE_INSTRUCTIONS.txt", "checksums.txt"} {
 		if !containsString(names, name) {
 			t.Fatalf("archive missing %s, got %v", name, names)
 		}
@@ -239,6 +239,27 @@ func TestBackupAPICreateListDownloadDelete(t *testing.T) {
 			if strings.Contains(lower, forbidden) {
 				t.Fatalf("archive contained forbidden path %q", name)
 			}
+		}
+	}
+
+	// Verify backup.json manifest contents.
+	if containsString(names, "backup.json") {
+		entry := extractArchiveEntry(t, archive, "backup.json")
+		if entry == "" {
+			t.Fatal("backup.json entry empty")
+		}
+		var am struct {
+			Product             string `json:"product"`
+			BackupFormatVersion int    `json:"backup_format_version"`
+		}
+		if err := json.Unmarshal([]byte(entry), &am); err != nil {
+			t.Fatalf("unmarshal backup.json: %v", err)
+		}
+		if am.Product != "Orvix Enterprise Mail" {
+			t.Fatalf("expected product 'Orvix Enterprise Mail', got %q", am.Product)
+		}
+		if am.BackupFormatVersion != 1 {
+			t.Fatalf("expected backup_format_version 1, got %d", am.BackupFormatVersion)
 		}
 	}
 
@@ -348,6 +369,33 @@ func readArchiveNames(t *testing.T, data []byte) []string {
 		names = append(names, header.Name)
 	}
 	return names
+}
+
+func extractArchiveEntry(t *testing.T, data []byte, target string) string {
+	t.Helper()
+	gr, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("gzip reader: %v", err)
+	}
+	defer gr.Close()
+	tr := tar.NewReader(gr)
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar reader: %v", err)
+		}
+		if header.Name == target {
+			body, err := io.ReadAll(tr)
+			if err != nil {
+				t.Fatalf("read %s: %v", target, err)
+			}
+			return string(body)
+		}
+	}
+	return ""
 }
 
 func containsString(items []string, want string) bool {

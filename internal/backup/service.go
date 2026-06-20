@@ -19,14 +19,22 @@ import (
 	"time"
 )
 
+// defaultStagingRoot is the directory under which restore staging
+// directories are created. The actual staging path is
+// <stagingRoot>/<backup_id>/.
+const defaultStagingRoot = "/var/lib/orvix/restore-staging"
+
 // Service provides backup and restore operations.
 type Service struct {
-	basePath    string
-	db          *sql.DB
-	mailStoreDB *sql.DB
-	mailDir     string
-	attachDir   string
-	configPath  string
+	basePath       string
+	stagingRoot    string
+	db             *sql.DB
+	mailStoreDB    *sql.DB
+	mailDir        string
+	attachDir      string
+	configPath     string
+	buildVersion   string
+	buildCommit    string
 
 	mu sync.Mutex
 }
@@ -35,6 +43,7 @@ type Service struct {
 func NewService(basePath string, db, mailStoreDB *sql.DB, mailDir, attachDir string) *Service {
 	return &Service{
 		basePath:    basePath,
+		stagingRoot: defaultStagingRoot,
 		db:          db,
 		mailStoreDB: mailStoreDB,
 		mailDir:     mailDir,
@@ -45,6 +54,12 @@ func NewService(basePath string, db, mailStoreDB *sql.DB, mailDir, attachDir str
 // SetConfigPath sets the path to the config file for backup archives.
 // Defaults to /etc/orvix/orvix.yaml in production.
 func (s *Service) SetConfigPath(path string) { s.configPath = path }
+
+// SetBuildInfo sets version and commit for the backup manifest.
+func (s *Service) SetBuildInfo(version, commit string) { s.buildVersion = version; s.buildCommit = commit }
+
+// SetStagingRoot sets the directory for restore staging.
+func (s *Service) SetStagingRoot(root string) { s.stagingRoot = root }
 
 func (s *Service) ensureBasePath() error { return os.MkdirAll(s.basePath, 0750) }
 
@@ -508,7 +523,9 @@ func redactSensitiveYAML(input []byte) []byte {
 // Archive contents:
 //   - var/lib/orvix/orvix.db          (database snapshot)
 //   - etc/orvix/orvix.yaml.redacted  (sanitized config, if available)
-//   - BACKUP_INFO.txt                (metadata)
+//   - backup.json                    (enterprise manifest — source of truth for 2H)
+//   - RESTORE_INSTRUCTIONS.txt       (restore guidance)
+//   - checksums.txt                  (sha256 per file)
 //
 // Sensitive files (.env, .key, .pem, .crt, .p12, .pfx, license, token files)
 // are NEVER included.
@@ -530,45 +547,492 @@ func (s *Service) CreateArchive(ctx context.Context, backupID string) (string, e
 	tw := tar.NewWriter(gw)
 	defer tw.Close()
 
-	// 1. Add database snapshot: var/lib/orvix/orvix.db
+	// Collect files with their sha256 for the manifest and checksums.txt.
+	type arcFile struct {
+		tarName string
+		data    []byte
+		mode    int64
+	}
+	var files []arcFile
+	var items []ManifestItem
+
+	// 1. Database snapshot
 	dbPath := filepath.Join(bp, "database.sqlite")
 	if data, err := os.ReadFile(dbPath); err == nil {
-		if err := writeTarEntry(tw, "var/lib/orvix/orvix.db", data, 0640); err != nil {
-			return "", fmt.Errorf("archive db: %w", err)
-		}
+		h := sha256.Sum256(data)
+		items = append(items, ManifestItem{Path: "var/lib/orvix/orvix.db", Size: int64(len(data)), SHA256: hex.EncodeToString(h[:])})
+		files = append(files, arcFile{tarName: "var/lib/orvix/orvix.db", data: data, mode: 0640})
 	}
 
-	// 2. Add redacted orvix.yaml: etc/orvix/orvix.yaml.redacted
-	configPath := s.configPath
-	if configPath == "" {
-		configPath = "/etc/orvix/orvix.yaml"
+	// 2. Redacted config
+	cfgPath := s.configPath
+	if cfgPath == "" {
+		cfgPath = "/etc/orvix/orvix.yaml"
 	}
-	if data, err := os.ReadFile(configPath); err == nil {
+	if data, err := os.ReadFile(cfgPath); err == nil {
 		redacted := redactSensitiveYAML(data)
-		if err := writeTarEntry(tw, "etc/orvix/orvix.yaml.redacted", redacted, 0640); err != nil {
-			return "", fmt.Errorf("archive config: %w", err)
+		h := sha256.Sum256(redacted)
+		items = append(items, ManifestItem{Path: "etc/orvix/orvix.yaml.redacted", Size: int64(len(redacted)), SHA256: hex.EncodeToString(h[:])})
+		files = append(files, arcFile{tarName: "etc/orvix/orvix.yaml.redacted", data: redacted, mode: 0640})
+	}
+
+	// 3. .env files if present (redacted) — redactSensitiveYAML also catches env lines
+	envDir := filepath.Dir(cfgPath)
+	envPattern := filepath.Join(envDir, "*.env")
+	if envMatches, err := filepath.Glob(envPattern); err == nil {
+		for _, envPath := range envMatches {
+			if data, err := os.ReadFile(envPath); err == nil {
+				redacted := redactSensitiveYAML(data)
+				relName := "etc/orvix/" + filepath.Base(envPath) + ".redacted"
+				h := sha256.Sum256(redacted)
+				items = append(items, ManifestItem{Path: relName, Size: int64(len(redacted)), SHA256: hex.EncodeToString(h[:])})
+				files = append(files, arcFile{tarName: relName, data: redacted, mode: 0640})
+			}
 		}
 	}
 
-	// 3. Add BACKUP_INFO.txt
-	info := fmt.Sprintf("Backup ID: %s\nCreated At: %s\n",
-		backupID, time.Now().UTC().Format(time.RFC3339))
-	// Try to read manifest for richer metadata.
-	if manifestData, err := os.ReadFile(filepath.Join(bp, "manifest.json")); err == nil {
-		var manifest BackupManifest
-		if json.Unmarshal(manifestData, &manifest) == nil {
-			info = fmt.Sprintf("Backup ID: %s\nName: %s\nCreated At: %s\nSize Bytes: %d\nSHA256: %s\nDomain Count: %d\nMailbox Count: %d\nMessage Count: %d\nAttachment Count: %d\n",
-				manifest.ID, manifest.Name, manifest.CreatedAt.Format(time.RFC3339),
-				manifest.SizeBytes, manifest.SHA256,
-				manifest.DomainCount, manifest.MailboxCount,
-				manifest.MessageCount, manifest.AttachmentCount)
-		}
+	// Build the enterprise manifest.
+	hostname, _ := os.Hostname()
+	manifest := BackupArchiveManifest{
+		BackupID:            backupID,
+		CreatedAt:           time.Now().UTC().Format(time.RFC3339),
+		Hostname:            hostname,
+		Product:             ProductName,
+		Version:             s.buildVersion,
+		BuildCommit:         s.buildCommit,
+		SchemaVersion:       1,
+		BackupFormatVersion: BackupFormatVersion,
+		IncludedItems:       items,
+		DatabasePath:        "/var/lib/orvix/orvix.db",
+		ConfigPath:          cfgPath,
+		ConfigSummaryRedacted: true,
 	}
-	if err := writeTarEntry(tw, "BACKUP_INFO.txt", []byte(info), 0640); err != nil {
-		return "", fmt.Errorf("archive info: %w", err)
+	manifestData, _ := json.MarshalIndent(manifest, "", "  ")
+	h := sha256.Sum256(manifestData)
+	manifest.ArchiveSHA256 = hex.EncodeToString(h[:])
+	// Rewrite with archive sha256 included.
+	manifestData, _ = json.MarshalIndent(manifest, "", "  ")
+	fileHash := sha256.Sum256(manifestData)
+	items = append(items, ManifestItem{Path: "backup.json", Size: int64(len(manifestData)), SHA256: hex.EncodeToString(fileHash[:])})
+
+	// 4. Write manifest
+	files = append(files, arcFile{tarName: "backup.json", data: manifestData, mode: 0640})
+
+	// 5. Write RESTORE_INSTRUCTIONS.txt
+	instructions := `Orvix Enterprise Mail — Restore Instructions
+
+This archive contains a backup of the Orvix Enterprise Mail system.
+
+What is included:
+  - SQLite database snapshot (var/lib/orvix/orvix.db)
+  - Server configuration (etc/orvix/orvix.yaml.redacted)
+  - Environment files, if present (etc/orvix/*.env.redacted)
+
+What is NOT included (for security):
+  - TLS private keys
+  - DKIM private keys
+  - Provider API tokens
+  - Raw secrets in plaintext
+
+Restore process (Phase 2H):
+  1. Upload this archive to the target server.
+  2. The admin panel's Restore flow will:
+     a. Validate the archive (checksums, manifest, format version)
+     b. Create a pre-restore safety backup of the current state
+     c. Stage the restore to /var/lib/orvix/restore-staging/<backup_id>/
+  3. After staging, the operator must restart the Orvix service
+     to apply the staged data.
+
+For a full disaster recovery, install Orvix on a clean host first,
+then use the admin panel to restore from this backup.
+`
+	h = sha256.Sum256([]byte(instructions))
+	items = append(items, ManifestItem{Path: "RESTORE_INSTRUCTIONS.txt", Size: int64(len(instructions)), SHA256: hex.EncodeToString(h[:])})
+	files = append(files, arcFile{tarName: "RESTORE_INSTRUCTIONS.txt", data: []byte(instructions), mode: 0640})
+
+	// 6. Write checksums.txt
+	var checksums strings.Builder
+	for _, it := range items {
+		checksums.WriteString(fmt.Sprintf("%s  %s\n", it.SHA256, it.Path))
+	}
+	checksumsData := checksums.String()
+	files = append(files, arcFile{tarName: "checksums.txt", data: []byte(checksumsData), mode: 0640})
+
+	// Write all archive entries.
+	for _, af := range files {
+		if err := writeTarEntry(tw, af.tarName, af.data, af.mode); err != nil {
+			return "", fmt.Errorf("archive entry %s: %w", af.tarName, err)
+		}
 	}
 
 	return archivePath, nil
+}
+
+// ValidateBackup validates the on-disk backup directory contents.
+// It checks:
+//   - Presence of database.sqlite and mailstore.tar.gz
+//   - Directory-level sha256 consistency
+func (s *Service) ValidateBackup(ctx context.Context, id string) (*VerifyResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	result := &VerifyResult{Valid: true}
+	bp, err := s.safeBackupPath(id)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(filepath.Join(bp, "manifest.json")); os.IsNotExist(err) {
+		result.Valid = false
+		result.Errors = append(result.Errors, "manifest.json not found")
+	}
+	if _, err := os.Stat(filepath.Join(bp, "database.sqlite")); os.IsNotExist(err) {
+		result.Valid = false
+		result.Errors = append(result.Errors, "database.sqlite not found")
+	}
+	if _, err := os.Stat(filepath.Join(bp, "mailstore.tar.gz")); os.IsNotExist(err) {
+		result.Valid = false
+		result.Errors = append(result.Errors, "mailstore.tar.gz not found")
+	}
+	if _, err := os.Stat(filepath.Join(bp, "attachments.tar.gz")); os.IsNotExist(err) {
+		result.Errors = append(result.Errors, "attachments.tar.gz not found")
+	}
+	var totalSize int64
+	filepath.Walk(bp, func(path string, info fs.FileInfo, err error) error {
+		if err == nil && !info.IsDir() {
+			totalSize += info.Size()
+		}
+		return nil
+	})
+	result.SizeBytes = totalSize
+	sha, _ := computeDirSHA256(bp)
+	result.SHA256 = sha
+	return result, nil
+}
+
+// ValidateArchive validates a backup archive (tar.gz) for integrity.
+// It checks:
+//   - Archive is valid gzip/tar
+//   - backup.json exists and has valid product/format version
+//   - checksums.txt matches file contents
+func (s *Service) ValidateArchive(ctx context.Context, id string) (*VerifyResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	result := &VerifyResult{Valid: true}
+	bp, err := s.safeBackupPath(id)
+	if err != nil {
+		return nil, err
+	}
+
+	archivePath := filepath.Join(bp, "backup-archive.tar.gz")
+	if _, err := os.Stat(archivePath); os.IsNotExist(err) {
+		result.Valid = false
+		result.Errors = append(result.Errors, "backup-archive.tar.gz not found")
+		return result, nil
+	}
+
+	f, err := os.Open(archivePath)
+	if err != nil {
+		result.Valid = false
+		result.Errors = append(result.Errors, fmt.Sprintf("cannot open archive: %v", err))
+		return result, nil
+	}
+	defer f.Close()
+
+	gr, err := gzip.NewReader(f)
+	if err != nil {
+		result.Valid = false
+		result.Errors = append(result.Errors, fmt.Sprintf("invalid gzip: %v", err))
+		return result, nil
+	}
+	defer gr.Close()
+
+	tr := tar.NewReader(gr)
+
+	// Read all entries and verify checksums.
+	type entryInfo struct {
+		name string
+		data []byte
+	}
+	var entries []entryInfo
+	var manifestFound bool
+
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			result.Valid = false
+			result.Errors = append(result.Errors, fmt.Sprintf("tar error: %v", err))
+			return result, nil
+		}
+		if header == nil {
+			continue
+		}
+		if header.Typeflag == tar.TypeDir {
+			continue
+		}
+		data, err := io.ReadAll(tr)
+		if err != nil {
+			result.Valid = false
+			result.Errors = append(result.Errors, fmt.Sprintf("read %s: %v", header.Name, err))
+			continue
+		}
+		cleanName := strings.TrimPrefix(header.Name, "./")
+		entries = append(entries, entryInfo{name: cleanName, data: data})
+
+		if cleanName == "backup.json" {
+			manifestFound = true
+			var am BackupArchiveManifest
+			if err := json.Unmarshal(data, &am); err != nil {
+				result.Valid = false
+				result.Errors = append(result.Errors, fmt.Sprintf("backup.json parse error: %v", err))
+			} else {
+				if am.Product != ProductName {
+					result.Valid = false
+					result.Errors = append(result.Errors, fmt.Sprintf("invalid product %q, expected %q", am.Product, ProductName))
+				}
+				if am.BackupFormatVersion != BackupFormatVersion {
+					result.Valid = false
+					result.Errors = append(result.Errors, fmt.Sprintf("unsupported backup format version %d, expected %d", am.BackupFormatVersion, BackupFormatVersion))
+				}
+			}
+		}
+	}
+
+	if !manifestFound {
+		result.Valid = false
+		result.Errors = append(result.Errors, "backup.json not found in archive")
+	}
+
+	// Verify checksums from checksums.txt.
+	var checksumMap map[string]string
+	for _, e := range entries {
+		if e.name == "checksums.txt" {
+			checksumMap = make(map[string]string)
+			lines := strings.Split(string(e.data), "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+				parts := strings.Fields(line)
+				if len(parts) >= 2 {
+					checksumMap[parts[1]] = parts[0]
+				}
+			}
+		}
+	}
+
+	if checksumMap != nil {
+		for _, e := range entries {
+			if e.name == "checksums.txt" {
+				continue
+			}
+			expectedSHA, ok := checksumMap[e.name]
+			if !ok {
+				continue
+			}
+			h := sha256.Sum256(e.data)
+			gotSHA := hex.EncodeToString(h[:])
+			if gotSHA != expectedSHA {
+				result.Valid = false
+				result.Errors = append(result.Errors, fmt.Sprintf("checksum mismatch for %s: got %s, expected %s", e.name, gotSHA, expectedSHA))
+			}
+		}
+	}
+
+	// Compute total size and archive sha256.
+	f.Seek(0, 0)
+	archiveData, _ := io.ReadAll(f)
+	result.SizeBytes = int64(len(archiveData))
+	h := sha256.Sum256(archiveData)
+	result.SHA256 = hex.EncodeToString(h[:])
+
+	return result, nil
+}
+
+// RestoreBackup validates the backup archive and stages it for restore.
+// Phase 2H: does NOT overwrite live data. Returns staged status.
+func (s *Service) RestoreBackup(ctx context.Context, id string) (*RestoreStageResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// 1. Validate the archive first.
+	vr, err := s.validateArchiveLocked(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("pre-restore validation: %w", err)
+	}
+	if !vr.Valid {
+		return &RestoreStageResult{
+			Status:  RestoreStatusFailed,
+			Message: "Archive validation failed: " + strings.Join(vr.Errors, "; "),
+		}, nil
+	}
+
+	// 2. Create a pre-restore safety backup.
+	safetyName := fmt.Sprintf("pre-restore-safety-%s-%s", id, time.Now().UTC().Format("20060102-150405"))
+	safetyBackup, err := s.createBackupLocked(ctx, safetyName)
+	if err != nil {
+		return nil, fmt.Errorf("pre-restore safety backup failed: %w", err)
+	}
+
+	// 3. Create staging directory.
+	bp, err := s.safeBackupPath(id)
+	if err != nil {
+		return nil, err
+	}
+
+	archivePath := filepath.Join(bp, "backup-archive.tar.gz")
+	stagingDir := filepath.Join(s.stagingRoot, id)
+	if err := os.MkdirAll(stagingDir, 0750); err != nil {
+		return nil, fmt.Errorf("create staging dir: %w", err)
+	}
+
+	// 4. Extract archive to staging directory.
+	if err := extractTarGz(archivePath, stagingDir); err != nil {
+		return nil, fmt.Errorf("extract to staging: %w", err)
+	}
+
+	return &RestoreStageResult{
+		Status:      RestoreStatusStaged,
+		Message:     RestoreStagedMessage,
+		BackupID:    safetyBackup.ID,
+		StagingPath: stagingDir,
+	}, nil
+}
+
+// validateArchiveLocked is the internal locked version used by RestoreBackup.
+func (s *Service) validateArchiveLocked(ctx context.Context, id string) (*VerifyResult, error) {
+	result := &VerifyResult{Valid: true}
+	bp, err := s.safeBackupPath(id)
+	if err != nil {
+		return nil, err
+	}
+
+	archivePath := filepath.Join(bp, "backup-archive.tar.gz")
+	if _, err := os.Stat(archivePath); os.IsNotExist(err) {
+		result.Valid = false
+		result.Errors = append(result.Errors, "backup-archive.tar.gz not found")
+		return result, nil
+	}
+
+	f, err := os.Open(archivePath)
+	if err != nil {
+		result.Valid = false
+		result.Errors = append(result.Errors, fmt.Sprintf("cannot open archive: %v", err))
+		return result, nil
+	}
+	defer f.Close()
+
+	gr, err := gzip.NewReader(f)
+	if err != nil {
+		result.Valid = false
+		result.Errors = append(result.Errors, fmt.Sprintf("invalid gzip: %v", err))
+		return result, nil
+	}
+	defer gr.Close()
+
+	tr := tar.NewReader(gr)
+
+	type entryInfo struct {
+		name string
+		data []byte
+	}
+	var entries []entryInfo
+	var manifestFound bool
+
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			result.Valid = false
+			result.Errors = append(result.Errors, fmt.Sprintf("tar error: %v", err))
+			return result, nil
+		}
+		if header == nil || header.Typeflag == tar.TypeDir {
+			continue
+		}
+		data, err := io.ReadAll(tr)
+		if err != nil {
+			result.Valid = false
+			result.Errors = append(result.Errors, fmt.Sprintf("read %s: %v", header.Name, err))
+			continue
+		}
+		cleanName := strings.TrimPrefix(header.Name, "./")
+		entries = append(entries, entryInfo{name: cleanName, data: data})
+
+		if cleanName == "backup.json" {
+			manifestFound = true
+			var am BackupArchiveManifest
+			if err := json.Unmarshal(data, &am); err != nil {
+				result.Valid = false
+				result.Errors = append(result.Errors, fmt.Sprintf("backup.json parse error: %v", err))
+			} else {
+				if am.Product != ProductName {
+					result.Valid = false
+					result.Errors = append(result.Errors, fmt.Sprintf("invalid product %q, expected %q", am.Product, ProductName))
+				}
+				if am.BackupFormatVersion != BackupFormatVersion {
+					result.Valid = false
+					result.Errors = append(result.Errors, fmt.Sprintf("unsupported format version %d, expected %d", am.BackupFormatVersion, BackupFormatVersion))
+				}
+			}
+		}
+	}
+
+	if !manifestFound {
+		result.Valid = false
+		result.Errors = append(result.Errors, "backup.json not found in archive")
+	}
+
+	// Verify checksums.
+	var checksumMap map[string]string
+	for _, e := range entries {
+		if e.name == "checksums.txt" {
+			checksumMap = make(map[string]string)
+			lines := strings.Split(string(e.data), "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+				parts := strings.Fields(line)
+				if len(parts) >= 2 {
+					checksumMap[parts[1]] = parts[0]
+				}
+			}
+		}
+	}
+
+	if checksumMap != nil {
+		for _, e := range entries {
+			if e.name == "checksums.txt" {
+				continue
+			}
+			expectedSHA, ok := checksumMap[e.name]
+			if !ok {
+				continue
+			}
+			h := sha256.Sum256(e.data)
+			gotSHA := hex.EncodeToString(h[:])
+			if gotSHA != expectedSHA {
+				result.Valid = false
+				result.Errors = append(result.Errors, fmt.Sprintf("checksum mismatch for %s: got %s, expected %s", e.name, gotSHA, expectedSHA))
+			}
+		}
+	}
+
+	f.Seek(0, 0)
+	archiveData, _ := io.ReadAll(f)
+	result.SizeBytes = int64(len(archiveData))
+	h := sha256.Sum256(archiveData)
+	result.SHA256 = hex.EncodeToString(h[:])
+
+	return result, nil
 }
 
 func writeTarEntry(tw *tar.Writer, name string, data []byte, mode int64) error {

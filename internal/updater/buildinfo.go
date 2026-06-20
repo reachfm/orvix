@@ -74,6 +74,10 @@ func readBuildInfo() BuildInfo {
 	}
 }
 
+// ReadBuildInfo returns the current build identity. Exported wrapper
+// around readBuildInfo for use by other packages (e.g. backup).
+func ReadBuildInfo() BuildInfo { return readBuildInfo() }
+
 var (
 	buildVersionDefault = ""
 	buildTimeDefault    = ""

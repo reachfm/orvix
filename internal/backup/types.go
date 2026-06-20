@@ -2,6 +2,12 @@ package backup
 
 import "time"
 
+// ProductName is the canonical product name embedded in backup manifests.
+const ProductName = "Orvix Enterprise Mail"
+
+// BackupFormatVersion is the version of the backup.json schema.
+const BackupFormatVersion = 1
+
 type Status string
 
 const (
@@ -23,6 +29,9 @@ type Backup struct {
 	CompletedAt *time.Time `json:"completedAt,omitempty"`
 }
 
+// BackupManifest is the on-disk per-backup manifest (manifest.json).
+// Legacy format preserved for backward compatibility; the canonical
+// enterprise manifest for archives is BackupArchiveManifest (backup.json).
 type BackupManifest struct {
 	ID              string     `json:"id"`
 	Name            string     `json:"name"`
@@ -35,6 +44,32 @@ type BackupManifest struct {
 	PolicyCount     int        `json:"policyCount"`
 	MessageCount    int64      `json:"messageCount"`
 	AttachmentCount int64      `json:"attachmentCount"`
+}
+
+// ManifestItem describes a single file in the backup archive.
+type ManifestItem struct {
+	Path   string `json:"path"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
+}
+
+// BackupArchiveManifest is the enterprise manifest stored as backup.json
+// inside the tar.gz archive. It is the source of truth for 2H.
+type BackupArchiveManifest struct {
+	BackupID            string         `json:"backup_id"`
+	CreatedAt           string         `json:"created_at"`
+	Hostname            string         `json:"hostname"`
+	Product             string         `json:"product"`
+	Version             string         `json:"version"`
+	BuildCommit         string         `json:"build_commit"`
+	SchemaVersion       int            `json:"schema_version"`
+	BackupFormatVersion int            `json:"backup_format_version"`
+	IncludedItems       []ManifestItem `json:"included_items"`
+	ArchiveSHA256       string         `json:"archive_sha256"`
+	DatabasePath        string         `json:"database_path"`
+	ConfigPath          string         `json:"config_path"`
+	Warnings            []string       `json:"warnings,omitempty"`
+	ConfigSummaryRedacted bool         `json:"config_summary_redacted"`
 }
 
 type VerifyResult struct {
@@ -52,6 +87,21 @@ type RestorePreview struct {
 	AttachmentCount int64 `json:"attachmentCount"`
 	SizeBytes       int64 `json:"sizeBytes"`
 }
+
+// RestoreStageResult is returned by RestoreBackup.
+// In Phase 2H the restore is staged (not applied live).
+type RestoreStageResult struct {
+	Status    string `json:"status"`
+	Message   string `json:"message"`
+	BackupID  string `json:"backup_id"`
+	StagingPath string `json:"staging_path,omitempty"`
+}
+
+const (
+	RestoreStatusStaged  = "staged"
+	RestoreStatusFailed  = "failed"
+	RestoreStagedMessage = "Validated and staged, restart/manual apply required"
+)
 
 type Frequency string
 
@@ -101,7 +151,7 @@ var tables = []string{
 		id INTEGER PRIMARY KEY DEFAULT 1,
 		enabled INTEGER NOT NULL DEFAULT 0,
 		frequency TEXT NOT NULL DEFAULT 'manual',
-		retention_count INTEGER NOT NULL DEFAULT 7,
+		retention_count INTEGER NOT NULL DEFAULT 10,
 		last_run_at DATETIME,
 		next_run_at DATETIME,
 		updated_at DATETIME NOT NULL

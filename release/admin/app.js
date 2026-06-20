@@ -789,6 +789,8 @@ function renderBackupsTable(id, rows) {
       '<td>' + escapeHTML(b.created_at || "-") + '</td>' +
       '<td>' +
         '<button class="ghost-btn backup-action" data-action="download" data-backup-id="' + escapeHTML(idValue) + '" style="font-size:12px;padding:4px 8px;min-height:auto;margin-right:4px;">Download</button>' +
+        '<button class="ghost-btn backup-action" data-action="validate" data-backup-id="' + escapeHTML(idValue) + '" style="font-size:12px;padding:4px 8px;min-height:auto;margin-right:4px;">Validate</button>' +
+        '<button class="ghost-btn backup-action" data-action="restore" data-backup-id="' + escapeHTML(idValue) + '" style="font-size:12px;padding:4px 8px;min-height:auto;margin-right:4px;">Restore</button>' +
         '<button class="ghost-btn backup-action" data-action="delete" data-backup-id="' + escapeHTML(idValue) + '" style="font-size:12px;padding:4px 8px;min-height:auto;">Delete</button>' +
       '</td></tr>';
   }).join("");
@@ -1194,8 +1196,47 @@ el("backups-table").addEventListener("click", async function(event) {
   try {
     if (action === "download") {
       window.location.href = "/api/v1/backups/" + encodeURIComponent(backupId) + "/download";
+    } else if (action === "validate") {
+      var csrfToken = await getCSRFToken();
+      var res = await fetch("/api/v1/admin/backups/" + encodeURIComponent(backupId) + "/validate", {
+        method: "POST",
+        headers: { "Authorization": "Bearer " + state.token, "X-CSRF-Token": csrfToken }
+      });
+      if (!res.ok) {
+        var errBody = await res.json().catch(function() { return {}; });
+        throw new Error(errBody.error || "HTTP " + res.status);
+      }
+      var vr = await res.json();
+      if (vr && vr.valid === true) {
+        showAlert("Backup " + backupId + " validation passed.");
+      } else {
+        var errs = (vr && vr.errors && Array.isArray(vr.errors)) ? vr.errors.join("; ") : "Validation failed";
+        showAlert("Backup " + backupId + " validation failed: " + errs);
+      }
+    } else if (action === "restore") {
+      var typedConfirm = prompt("Type 'restore-orvix-backup' to confirm restore of backup " + backupId + ":");
+      if (!typedConfirm) { btn.disabled = false; return; }
+      if (typedConfirm !== "restore-orvix-backup") { showAlert("Typed confirmation did not match."); btn.disabled = false; return; }
+      var csrfToken = await getCSRFToken();
+      var res = await fetch("/api/v1/admin/backups/" + encodeURIComponent(backupId) + "/restore", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + state.token, "X-CSRF-Token": csrfToken },
+        body: JSON.stringify({ confirm: "restore-orvix-backup" })
+      });
+      if (!res.ok) {
+        var errBody = await res.json().catch(function() { return {}; });
+        throw new Error(errBody.error || "HTTP " + res.status);
+      }
+      var rr = await res.json();
+      if (rr && rr.status === "staged") {
+        showAlert("Backup " + backupId + " validated and staged. Restart/manual apply required.");
+      } else {
+        showAlert("Restore failed for backup " + backupId + ": " + (rr ? rr.status : "unknown"));
+      }
     } else if (action === "delete") {
-      if (!confirm("Delete backup " + backupId + "? This action cannot be undone.")) { btn.disabled = false; return; }
+      var typedConfirm = prompt("Type 'delete-orvix-backup' to confirm deletion of backup " + backupId + ":");
+      if (!typedConfirm) { btn.disabled = false; return; }
+      if (typedConfirm !== "delete-orvix-backup") { showAlert("Typed confirmation did not match."); btn.disabled = false; return; }
       var csrfToken = await getCSRFToken();
       var res = await fetch("/api/v1/backups/" + encodeURIComponent(backupId), {
         method: "DELETE",
