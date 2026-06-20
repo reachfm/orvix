@@ -37,6 +37,11 @@ import (
 	"time"
 )
 
+// maxNamecheapResponseBytes caps the HTTP response body size
+// for Namecheap API calls. Namecheap returns small XML payloads
+// (typically < 64 KiB). We cap at 1 MiB to prevent memory abuse.
+const maxNamecheapResponseBytes = 1 << 20 // 1 MiB
+
 // NamecheapHost represents one host record as returned by the
 // Namecheap API. The wire format uses a numeric HostId for
 // update / delete; for read-merge-write the provider uses Name
@@ -143,9 +148,18 @@ func (c *NetNamecheapClient) GetHosts(ctx context.Context, sld, tld string) ([]N
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxNamecheapResponseBytes))
+	if err != nil {
+		return nil, fmt.Errorf("namecheap getHosts read error")
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("namecheap getHosts http %d", resp.StatusCode)
+	}
+	// Reject oversized responses. If LimitReader returned
+	// max bytes and the stream may contain more, unmarshal
+	// will likely fail; we reject pre-emptively.
+	if len(body) >= maxNamecheapResponseBytes {
+		return nil, fmt.Errorf("namecheap getHosts response too large")
 	}
 	var r namecheapHostsResponse
 	if err := xml.Unmarshal(body, &r); err != nil {
@@ -198,9 +212,15 @@ func (c *NetNamecheapClient) SetHosts(ctx context.Context, sld, tld string, host
 		return "", err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxNamecheapResponseBytes))
+	if err != nil {
+		return "", fmt.Errorf("namecheap setHosts read error")
+	}
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("namecheap setHosts http %d", resp.StatusCode)
+	}
+	if len(body) >= maxNamecheapResponseBytes {
+		return "", fmt.Errorf("namecheap setHosts response too large")
 	}
 	var r namecheapHostsResponse
 	if err := xml.Unmarshal(body, &r); err != nil {

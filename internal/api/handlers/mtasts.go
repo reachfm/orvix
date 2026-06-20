@@ -61,11 +61,8 @@ func (h *Handler) mtaStsPolicyBody(domain string) string {
 
 // domainHasMTASTSConfig reports whether the supplied domain
 // has any active coremail_domains row. The lookup is
-// case-insensitive and ignores soft-deleted rows. The
-// function uses context.Background() for the query so a
-// public-endpoint request never blocks on request
-// cancellation.
-func (h *Handler) domainHasMTASTSConfig(domain string) (bool, error) {
+// case-insensitive and ignores soft-deleted rows.
+func (h *Handler) domainHasMTASTSConfig(ctx context.Context, domain string) (bool, error) {
 	domain = strings.ToLower(strings.TrimSpace(domain))
 	if domain == "" {
 		return false, nil
@@ -75,7 +72,7 @@ func (h *Handler) domainHasMTASTSConfig(domain string) (bool, error) {
 		return false, err
 	}
 	var count int64
-	row := sqlDB.QueryRowContext(context.Background(),
+	row := sqlDB.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM coremail_domains WHERE LOWER(name) = ? AND deleted_at IS NULL`,
 		domain)
 	if err := row.Scan(&count); err != nil {
@@ -130,7 +127,7 @@ func (h *Handler) GetPublicMTASTS(c fiber.Ctx) error {
 	}
 	// Verify the domain is provisioned. The check is
 	// case-insensitive and ignores soft-deleted rows.
-	ok, err := h.domainHasMTASTSConfig(domain)
+	ok, err := h.domainHasMTASTSConfig(c.Context(), domain)
 	if err != nil {
 		// We do NOT echo the DB error to the public
 		// endpoint. A 503 with a generic note is the

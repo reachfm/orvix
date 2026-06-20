@@ -2710,22 +2710,37 @@
       host.appendChild(emptyState('No providers', 'Provider list unavailable.'));
       return;
     }
+    state.dnsProviderPlanConflicts = state.dnsProviderPlanConflicts || {};
     list.forEach(function (p) {
       var status = p.status || 'unknown';
       var card = el('div', { class: 'dns-provider-card' });
       var head = el('div', { class: 'dns-provider-head' }, [
         el('strong', null, p.name),
-        badge(status, status === 'manual' || status === 'configured' || status === 'ready' ? 'good' : status === 'dry_run_only' ? 'warn' : 'warn')
+        badge(status, status === 'manual' || status === 'configured' || status === 'ready' ? 'good' : 'warn')
       ]);
       card.appendChild(head);
       (p.notes || []).forEach(function (n) {
         card.appendChild(el('div', { class: 'form-hint', text: n }));
       });
+      // Apply button: disabled when provider not ready or plan has conflicts.
+      var planHasConflicts = state.dnsProviderPlanConflicts[p.name];
+      var applyDisabled = (status !== 'ready' && status !== 'manual') || planHasConflicts;
+      var applyBtn = el('button', {
+        class: 'btn danger', type: 'button', text: 'Apply',
+        disabled: applyDisabled ? 'disabled' : undefined,
+        onclick: function () { applyDnsProvider(p.name); }
+      });
       var actions = el('div', { class: 'dns-provider-actions' }, [
         el('button', { class: 'btn ghost', type: 'button', text: 'Dry-run plan', onclick: function () { loadDnsProviderPlan(p.name); } }),
-        el('button', { class: 'btn danger', type: 'button', text: 'Apply', onclick: function () { applyDnsProvider(p.name); } })
+        applyBtn
       ]);
       card.appendChild(actions);
+      if (applyDisabled && (status !== 'manual')) {
+        var hint = status === 'not_configured' ? 'Provider not configured — set credentials server-side first.' :
+                   planHasConflicts ? 'Resolve conflicts in the dry-run plan before applying.' :
+                   'Apply is disabled because the provider is not ready.';
+        card.appendChild(el('div', { class: 'form-hint', text: hint }));
+      }
       var outHost = el('div', { class: 'dns-provider-output', id: 'dns-provider-out-' + p.name });
       card.appendChild(outHost);
       host.appendChild(card);
@@ -2741,10 +2756,17 @@
       var resp = await apiPost('/api/v1/admin/dns/' + encodeURIComponent(d) + '/provider/plan?provider=' + encodeURIComponent(name), {});
       var cp = resp && resp.change_plan;
       state.dnsProviderPlan = cp;
+      // Track per-provider conflict state so the Apply button
+      // can be disabled when conflicts exist.
+      state.dnsProviderPlanConflicts = state.dnsProviderPlanConflicts || {};
+      state.dnsProviderPlanConflicts[name] = cp && cp.steps && cp.steps.some(function (s) { return s.action === 'conflict'; });
       if (out) {
         out.innerHTML = '';
         out.appendChild(renderChangePlan(cp));
       }
+      // Re-render the provider panel so the Apply button
+      // reflects the updated conflict state.
+      renderDnsProviderPanel();
     } catch (err) {
       if (out) { out.innerHTML = ''; out.appendChild(el('div', { class: 'dns-warning', text: err && err.message ? err.message : 'plan failed' })); }
     }

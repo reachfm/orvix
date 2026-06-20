@@ -481,6 +481,33 @@ func TestAdminDNSOpsNoExecDnsOutOfBand(t *testing.T) {
 	}
 }
 
+// TestAdminDNSOpsProviderApplyDisabledStates confirms the
+// Apply button is disabled when:
+//   - provider status is not_configured or dry_run_only
+//   - dry-run plan has conflicts
+//
+// And enabled only for ready/manual status without conflicts.
+func TestAdminDNSOpsProviderApplyDisabledStates(t *testing.T) {
+	src := readFile(t, adminRepoRoot(t), "release/admin/app.js")
+	// The Apply button must check provider status.
+	if !strings.Contains(src, "applyDisabled") {
+		t.Errorf("admin provider panel must track applyDisabled state")
+	}
+	// The disabled attribute must be set on the Apply button.
+	if !strings.Contains(src, "disabled: applyDisabled") && !strings.Contains(src, "'disabled' : applyDisabled") {
+		t.Errorf("apply button disabled attribute must depend on applyDisabled")
+	}
+	// The apply confirmation must use the literal apply-dns-changes.
+	if !strings.Contains(src, "apply-dns-changes") {
+		t.Errorf("admin provider apply must require 'apply-dns-changes' confirmation")
+	}
+	// No stale yes-i-confirm reference in the DNS ops section.
+	dns := adminDNSOpsSection(t)
+	if strings.Contains(dns, "yes-i-confirm") {
+		t.Errorf("admin DNS section must not contain stale 'yes-i-confirm'")
+	}
+}
+
 // silence unused-import warnings if the test build swaps out
 // the json import.
 var _ = json.Marshal

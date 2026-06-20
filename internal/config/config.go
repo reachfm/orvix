@@ -423,6 +423,21 @@ func applyEnvOverrides(v *viper.Viper, cfg *Config) {
 	if v.GetString("NAMECHEAP_ENABLE_APPLY") != "" {
 		cfg.DNS.NamecheapEnableApply = v.GetBool("NAMECHEAP_ENABLE_APPLY")
 	}
+	if v.GetString("NAMECHEAP_API_USER") != "" {
+		cfg.DNS.NamecheapAPIUser = v.GetString("NAMECHEAP_API_USER")
+	}
+	if v.GetString("NAMECHEAP_API_KEY") != "" {
+		cfg.DNS.NamecheapAPIKey = v.GetString("NAMECHEAP_API_KEY")
+	}
+	if v.GetString("NAMECHEAP_USERNAME") != "" {
+		cfg.DNS.NamecheapUsername = v.GetString("NAMECHEAP_USERNAME")
+	}
+	if v.GetString("NAMECHEAP_CLIENT_IP") != "" {
+		cfg.DNS.NamecheapClientIP = v.GetString("NAMECHEAP_CLIENT_IP")
+	}
+	if v.GetString("NAMECHEAP_SANDBOX") != "" {
+		cfg.DNS.NamecheapSandbox = v.GetBool("NAMECHEAP_SANDBOX")
+	}
 	if v.GetString("COREMAIL_ENABLED") != "" {
 		cfg.CoreMail.Enabled = v.GetBool("COREMAIL_ENABLED")
 	}

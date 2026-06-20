@@ -17,7 +17,7 @@ package handlers
 //     dnsops.Service.
 //   - Read-only verify path is safe to call repeatedly.
 //   - Provider plan and apply require explicit confirmation
-//     ("yes-i-confirm" or a per-domain confirm string).
+//     ("apply-dns-changes" or a per-domain confirm string).
 
 import (
 	"context"
@@ -506,7 +506,7 @@ func (h *Handler) PostAdminDNSProviderPlan(c fiber.Ctx) error {
 
 // PostAdminDNSProviderApply runs the provider Apply path. The
 // caller MUST supply an explicit confirmation string in the body
-// ({"confirm": "yes-i-confirm"}); providers reject empty input.
+// ({"confirm": "apply-dns-changes"}); providers reject empty input.
 //
 // Cloudflare / Namecheap Apply always refuses in this build (the
 // live API path is not audited yet). The manual provider returns

@@ -60,3 +60,63 @@ func TestReleaseExampleCoreMailConfigIsDeploymentReady(t *testing.T) {
 		t.Fatalf("auth.password_min_len must be 8 in deployment example, got %d", cfg.Auth.PasswordMinLen)
 	}
 }
+
+// TestNamecheapEnvOverridesWired checks that the Namecheap env
+// override function correctly maps flat env vars to config fields.
+func TestNamecheapEnvOverridesWired(t *testing.T) {
+	v := viper.New()
+	v.Set("NAMECHEAP_API_USER", "test-user")
+	v.Set("NAMECHEAP_API_KEY", "test-key-12345")
+	v.Set("NAMECHEAP_USERNAME", "test-username")
+	v.Set("NAMECHEAP_CLIENT_IP", "1.2.3.4")
+	v.Set("NAMECHEAP_SANDBOX", "true")
+	v.Set("NAMECHEAP_ENABLE_APPLY", "true")
+
+	cfg := Defaults()
+	applyEnvOverrides(v, cfg)
+
+	if cfg.DNS.NamecheapAPIUser != "test-user" {
+		t.Errorf("NamecheapAPIUser: got %q want %q", cfg.DNS.NamecheapAPIUser, "test-user")
+	}
+	if cfg.DNS.NamecheapAPIKey != "test-key-12345" {
+		t.Errorf("NamecheapAPIKey: got %q want %q", cfg.DNS.NamecheapAPIKey, "test-key-12345")
+	}
+	if cfg.DNS.NamecheapUsername != "test-username" {
+		t.Errorf("NamecheapUsername: got %q want %q", cfg.DNS.NamecheapUsername, "test-username")
+	}
+	if cfg.DNS.NamecheapClientIP != "1.2.3.4" {
+		t.Errorf("NamecheapClientIP: got %q want %q", cfg.DNS.NamecheapClientIP, "1.2.3.4")
+	}
+	if !cfg.DNS.NamecheapSandbox {
+		t.Errorf("NamecheapSandbox must be true")
+	}
+	if !cfg.DNS.NamecheapEnableApply {
+		t.Errorf("NamecheapEnableApply must be true")
+	}
+}
+
+// TestNamecheapEnvOverridesDefaults confirms that missing env vars
+// leave the default values (false for bools, empty for strings).
+func TestNamecheapEnvOverridesDefaults(t *testing.T) {
+	v := viper.New()
+	cfg := Defaults()
+	// Ensure the defaults are safe before applying overrides.
+	if cfg.DNS.NamecheapEnableApply {
+		t.Errorf("default NamecheapEnableApply must be false")
+	}
+	if cfg.DNS.NamecheapSandbox {
+		t.Errorf("default NamecheapSandbox must be false")
+	}
+	// Apply overrides with an empty viper (no env set).
+	applyEnvOverrides(v, cfg)
+	// Verify defaults are preserved after overrides.
+	if cfg.DNS.NamecheapEnableApply {
+		t.Errorf("NamecheapEnableApply must remain false when not set")
+	}
+	if cfg.DNS.NamecheapSandbox {
+		t.Errorf("NamecheapSandbox must remain false when not set")
+	}
+	if cfg.DNS.NamecheapAPIUser != "" {
+		t.Errorf("NamecheapAPIUser must remain empty when not set")
+	}
+}
