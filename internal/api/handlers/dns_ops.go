@@ -338,7 +338,8 @@ func (h *Handler) PostAdminDNSDKIM(c fiber.Ctx) error {
 		})
 	}
 	var req struct {
-		Selector string `json:"selector"`
+		Selector        string `json:"selector"`
+		ConfirmRotation string `json:"confirm_rotation"`
 	}
 	// Body is optional; default to "orvix" when absent.
 	_ = c.Bind().JSON(&req)
@@ -349,7 +350,33 @@ func (h *Handler) PostAdminDNSDKIM(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
-	// Generate the RSA 2048 key pair.
+	// Check for existing DKIM row. If one exists, require explicit
+	// destructive confirmation before overwriting.
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "db unavailable",
+		})
+	}
+	now := time.Now().UTC()
+	var existing int64
+	row := sqlDB.QueryRowContext(c.Context(),
+		`SELECT COUNT(*) FROM coremail_dkim_config WHERE domain = ?`, domain)
+	if err := row.Scan(&existing); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "dkim lookup: " + err.Error(),
+		})
+	}
+	if existing > 0 {
+		if req.ConfirmRotation != "rotate-dkim-key" {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+				"error": "DKIM key already exists; confirm rotation to replace it",
+			})
+		}
+	}
+	// Generate the RSA 2048 key pair. We generate AFTER the
+	// rotation check so we never waste keygen CPU on a rejected
+	// request.
 	privPEM, _, err := dkim.GenerateKeyPair(selector, domain)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -368,21 +395,6 @@ func (h *Handler) PostAdminDNSDKIM(c fiber.Ctx) error {
 	}
 	dnsName, dnsValue := dkim.GenerateDNSRecord(selector, domain, pubKey)
 	// Persist to coremail_dkim_config.
-	sqlDB, err := h.db.DB()
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "db unavailable",
-		})
-	}
-	now := time.Now().UTC()
-	var existing int64
-	row := sqlDB.QueryRowContext(c.Context(),
-		`SELECT COUNT(*) FROM coremail_dkim_config WHERE domain = ?`, domain)
-	if err := row.Scan(&existing); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "dkim lookup: " + err.Error(),
-		})
-	}
 	if existing > 0 {
 		if _, err := sqlDB.ExecContext(c.Context(),
 			`UPDATE coremail_dkim_config SET selector = ?, private_key_pem = ?, enabled = 1, updated_at = ? WHERE domain = ?`,

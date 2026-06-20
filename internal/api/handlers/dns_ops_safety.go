@@ -80,12 +80,31 @@ func isPublicUnicastIP(s string) (net.IP, error) {
 	if ip.IsMulticast() {
 		return nil, fmt.Errorf("public mail IP %s is a multicast address; DNS records must point at a real public IP", ip)
 	}
-	// net.IP.IsPrivate covers the IPv4 RFC1918 ranges and the
-	// IPv6 ULA range. We deliberately reject all of these in
-	// the production path; lab mode is out of scope for this
-	// build.
 	if ip.IsPrivate() {
 		return nil, fmt.Errorf("public mail IP %s is a private-range address; DNS records must point at a real public IP", ip)
+	}
+	// Reject RFC 5737 TEST-NET documentation ranges (192.0.2.0/24,
+	// 198.51.100.0/24, 203.0.113.0/24) and RFC 3849 documentation
+	// IPv6 range (2001:db8::/32). These are reserved for
+	// documentation and examples; they must never appear in
+	// production DNS records.
+	if ipv4 := ip.To4(); ipv4 != nil {
+		b := ipv4[0]
+		c := ipv4[1]
+		if b == 192 && c == 0 && ipv4[2] == 2 {
+			return nil, fmt.Errorf("public mail IP %s is in the TEST-NET-1 documentation range (192.0.2.0/24); set dns.public_ipv4 to the real mail server IP", ip)
+		}
+		if b == 198 && c == 51 && ipv4[2] == 100 {
+			return nil, fmt.Errorf("public mail IP %s is in the TEST-NET-2 documentation range (198.51.100.0/24); set dns.public_ipv4 to the real mail server IP", ip)
+		}
+		if b == 203 && c == 0 && ipv4[2] == 113 {
+			return nil, fmt.Errorf("public mail IP %s is in the TEST-NET-3 documentation range (203.0.113.0/24); set dns.public_ipv4 to the real mail server IP", ip)
+		}
+	} else if len(ip) == net.IPv6len {
+		// 2001:db8::/32 — first 4 bytes are 0x20 0x01 0x0d 0xb8.
+		if ip[0] == 0x20 && ip[1] == 0x01 && ip[2] == 0x0d && ip[3] == 0xb8 {
+			return nil, fmt.Errorf("public mail IP %s is in the RFC 3849 documentation range (2001:db8::/32); set dns.public_ipv6 to the real mail server IP", ip)
+		}
 	}
 	return ip, nil
 }

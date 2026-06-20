@@ -2423,11 +2423,24 @@
   async function generateDkimKey() {
     var d = state.dnsSelectedDomain;
     if (!d) { toast('Pick a domain first', 'warn'); return; }
-    var sel = window.prompt('DKIM selector (defaults to "default" if blank)', 'orvix');
+    var sel = window.prompt('DKIM selector (defaults to "orvix" if blank)', 'orvix');
     if (sel == null) return;
-    if (sel.trim() === '') sel = 'default';
+    if (sel.trim() === '') sel = 'orvix';
+    // Require typed destructive confirmation before rotating.
+    var confirmPhrase = window.prompt(
+      'Type "rotate-dkim-key" to confirm DKIM key generation or rotation.\n\n' +
+      'Rotating DKIM changes the private key. Publish the new TXT record ' +
+      'and wait for DNS TTL before relying on it.\n\n' +
+      'Enter the confirmation phrase to continue:',
+      ''
+    );
+    if (confirmPhrase == null) return;
+    if (confirmPhrase.trim() !== 'rotate-dkim-key') {
+      toast('Cancelled: typed confirmation did not match.', 'warn');
+      return;
+    }
     try {
-      var resp = await apiPost('/api/v1/admin/dns/' + encodeURIComponent(d) + '/dkim', { selector: sel.trim() });
+      var resp = await apiPost('/api/v1/admin/dns/' + encodeURIComponent(d) + '/dkim', { selector: sel.trim(), confirm_rotation: 'rotate-dkim-key' });
       if (!resp || !resp.public_dns_txt) {
         toast('DKIM generate returned no public TXT', 'bad');
         return;
@@ -2437,7 +2450,11 @@
       // the real value (not the "not generated" placeholder).
       await loadDnsPlan();
     } catch (err) {
-      toast('DKIM generate failed: ' + (err && err.message ? err.message : 'unknown'), 'bad');
+      if (err && err.status === 409) {
+        toast('DKIM key already exists; confirm rotation on next attempt.', 'warn');
+      } else {
+        toast('DKIM generate failed: ' + (err && err.message ? err.message : 'unknown'), 'bad');
+      }
     }
   }
 

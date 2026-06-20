@@ -3,7 +3,7 @@ package handlers_test
 // DNS Ops harness variants for the SAFETY-FIX test suite.
 //
 // newDNSOpsHarness (in dns_ops_test.go) is the default harness
-// with cfg.DNS.PublicIPv4 pinned to 203.0.113.10. The variants
+// with cfg.DNS.PublicIPv4 pinned to 8.8.8.8. The variants
 // here let each test pin the public IP explicitly:
 //
 //   - newDNSOpsHarnessNoPublicIP: PublicIPv4 is empty (so the

@@ -18,9 +18,11 @@ package handlers_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestDNSOpsPlanNoSMTPHostAsPublicIP is the core
@@ -31,7 +33,7 @@ import (
 func TestDNSOpsPlanNoSMTPHostAsPublicIP(t *testing.T) {
 	h := newDNSOpsHarness(t)
 	defer h.close()
-	// Strip the harness's default PublicIPv4 (203.0.113.10) so
+	// Strip the harness's default PublicIPv4 (8.8.8.8) so
 	// the test exercises the no-PublicIPv4 path. We do this
 	// AFTER newDNSOpsHarness returns; the harness has a
 	// pointer to the config via the handler.
@@ -80,7 +82,7 @@ func TestDNSOpsPlanWithDefaultSMTPHostZeroDoesNotFabricate(t *testing.T) {
 // address still 0.0.0.0), the A record uses the public IPv4
 // only, not 0.0.0.0.
 func TestDNSOpsPlanWithPublicIPv4GeneratesCorrectARecord(t *testing.T) {
-	h := newDNSOpsHarness(t) // harness sets PublicIPv4 = 203.0.113.10
+	h := newDNSOpsHarness(t) // harness sets PublicIPv4 = 8.8.8.8
 	defer h.close()
 	code, body := h.do(t, "GET", "/api/v1/admin/dns/example.com/plan", h.adminT, "")
 	if code != http.StatusOK {
@@ -100,8 +102,8 @@ func TestDNSOpsPlanWithPublicIPv4GeneratesCorrectARecord(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &resp); err != nil {
 		t.Fatalf("unmarshal: %v body=%s", err, body)
 	}
-	if resp.Plan.ServerIPv4 != "203.0.113.10" {
-		t.Errorf("plan.ServerIPv4: got %q want 203.0.113.10", resp.Plan.ServerIPv4)
+	if resp.Plan.ServerIPv4 != "8.8.8.8" {
+		t.Errorf("plan.ServerIPv4: got %q want 8.8.8.8", resp.Plan.ServerIPv4)
 	}
 	if strings.Contains(body, "0.0.0.0") {
 		t.Errorf("plan body must not mention 0.0.0.0; got %s", body)
@@ -110,8 +112,8 @@ func TestDNSOpsPlanWithPublicIPv4GeneratesCorrectARecord(t *testing.T) {
 	for _, r := range resp.Plan.Records {
 		if r.Purpose == "mail_a" {
 			sawA = true
-			if r.Value != "203.0.113.10" {
-				t.Errorf("A record value: got %q want 203.0.113.10", r.Value)
+			if r.Value != "8.8.8.8" {
+				t.Errorf("A record value: got %q want 8.8.8.8", r.Value)
 			}
 			if strings.Contains(r.Value, "0.0.0.0") {
 				t.Errorf("A record must not be 0.0.0.0; got %q", r.Value)
@@ -119,7 +121,7 @@ func TestDNSOpsPlanWithPublicIPv4GeneratesCorrectARecord(t *testing.T) {
 		}
 		if r.Purpose == "spf" {
 			sawSPF = true
-			if !strings.Contains(r.Value, "203.0.113.10") {
+			if !strings.Contains(r.Value, "8.8.8.8") {
 				t.Errorf("SPF must include the public IPv4; got %q", r.Value)
 			}
 			if strings.Contains(r.Value, "0.0.0.0") {
@@ -206,24 +208,98 @@ func TestDNSOpsDKIMRejectsUnsafeSelector(t *testing.T) {
 	}
 }
 
+// TestDNSOpsDKIMRotationConfirmationRequired confirms the
+// rotation confirmation enforcement through the full handler stack.
+func TestDNSOpsDKIMRotationConfirmationRequired(t *testing.T) {
+	h := newDNSOpsHarness(t)
+	defer h.close()
+	// First: create a DKIM key.
+	code, body := h.do(t, "POST", "/api/v1/admin/dns/example.com/dkim", h.adminT, `{"selector":"a"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("first generate must be 201; got %d body=%s", code, body)
+	}
+	// Second: try to rotate without confirmation — must be 409.
+	code2, body2 := h.do(t, "POST", "/api/v1/admin/dns/example.com/dkim", h.adminT, `{"selector":"b"}`)
+	if code2 != http.StatusConflict {
+		t.Errorf("rotation without confirmation must be 409; got %d body=%s", code2, body2)
+	}
+	if !strings.Contains(body2, "already exists") {
+		t.Errorf("409 body must explain; got %s", body2)
+	}
+	// Third: try with wrong confirmation — must be 409.
+	code3, body3 := h.do(t, "POST", "/api/v1/admin/dns/example.com/dkim", h.adminT,
+		`{"selector":"b","confirm_rotation":"wrong"}`)
+	if code3 != http.StatusConflict {
+		t.Errorf("wrong confirmation must be 409; got %d body=%s", code3, body3)
+	}
+	// Fourth: correct confirmation succeeds.
+	code4, body4 := h.do(t, "POST", "/api/v1/admin/dns/example.com/dkim", h.adminT,
+		`{"selector":"b","confirm_rotation":"rotate-dkim-key"}`)
+	if code4 != http.StatusCreated {
+		t.Errorf("correct confirmation must be 201; got %d body=%s", code4, body4)
+	}
+	// Private key must not appear in any response.
+	for _, banned := range []string{"PRIVATE KEY", "BEGIN PRIVATE"} {
+		if strings.Contains(strings.ToUpper(body4), banned) {
+			t.Errorf("response must not contain %q; got %s", banned, body4)
+		}
+	}
+}
+
+// TestDNSOpsDKIMFirstCreateIgnoresConfirmationField confirms that
+// the first DKIM creation for a domain does not require
+// confirm_rotation, but also does not reject it if present.
+func TestDNSOpsDKIMFirstCreateIgnoresConfirmationField(t *testing.T) {
+	h := newDNSOpsHarness(t)
+	defer h.close()
+	code, body := h.do(t, "POST", "/api/v1/admin/dns/example.com/dkim", h.adminT,
+		`{"selector":"orvix","confirm_rotation":"rotate-dkim-key"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("first create with confirm_rotation must be 201; got %d body=%s", code, body)
+	}
+	var count int
+	sqlDB, _ := h.db.DB()
+	_ = sqlDB.QueryRow(`SELECT COUNT(*) FROM coremail_dkim_config WHERE domain = ?`, "example.com").Scan(&count)
+	if count != 1 {
+		t.Errorf("DKIM row must be inserted; got %d rows", count)
+	}
+	// Second call without confirmation must still fail (existing key).
+	code2, _ := h.do(t, "POST", "/api/v1/admin/dns/example.com/dkim", h.adminT, `{"selector":"orvix"}`)
+	if code2 != http.StatusConflict {
+		t.Errorf("second call without confirmation must be 409; got %d", code2)
+	}
+}
+
 // TestDNSOpsDKIMAcceptsSafeSelectorAndEmptyDefault confirms
 // the happy path: safe selectors and empty default both work.
+// Each case uses a fresh domain so rotation confirmation is not
+// needed.
 func TestDNSOpsDKIMAcceptsSafeSelectorAndEmptyDefault(t *testing.T) {
 	h := newDNSOpsHarness(t)
 	defer h.close()
+	sqlDB, _ := h.db.DB()
 	cases := []struct {
-		body, wantSel string
+		name, body, wantSel string
 	}{
-		{`{"selector":"orvix"}`, "orvix"},
-		{`{"selector":"ORVIX"}`, "orvix"}, // uppercased -> lowercased
-		{`{"selector":"s1"}`, "s1"},
-		{`{}`, "orvix"},                  // empty -> default
-		{`{"selector":""}`, "orvix"},     // empty string -> default
+		{"explicit orvix", `{"selector":"orvix"}`, "orvix"},
+		{"uppercased", `{"selector":"ORVIX"}`, "orvix"},
+		{"short", `{"selector":"s1"}`, "s1"},
+		{"empty json", `{}`, "orvix"},
+		{"empty string", `{"selector":""}`, "orvix"},
 	}
 	for i, c := range cases {
-		code, body := h.do(t, "POST", "/api/v1/admin/dns/example.com/dkim", h.adminT, c.body)
+		dom := fmt.Sprintf("case%d.example.com", i)
+		if _, err := sqlDB.Exec(
+			`INSERT INTO coremail_domains (name, status, plan, description, max_mailboxes, max_aliases, max_quota_mb,
+			   dkim_enabled, dkim_selector, dmarc_enabled, mtasts_enabled, catchall_address, abuse_contact, labels,
+			   mailbox_count, created_at, updated_at)
+			 VALUES (?, 'active', 'smb', '', 100, 50, 1024, 0, '', 0, 0, '', '', '', 0, ?, ?)`,
+			dom, time.Now().UTC(), time.Now().UTC()); err != nil {
+			t.Fatalf("seed domain %s: %v", dom, err)
+		}
+		code, body := h.do(t, "POST", "/api/v1/admin/dns/"+dom+"/dkim", h.adminT, c.body)
 		if code != http.StatusCreated {
-			t.Errorf("case %d body=%s must be 201; got %d body=%s", i, c.body, code, body)
+			t.Errorf("case %d (%s) body=%s must be 201; got %d body=%s", i, c.name, c.body, code, body)
 			continue
 		}
 		var resp struct {
@@ -236,7 +312,7 @@ func TestDNSOpsDKIMAcceptsSafeSelectorAndEmptyDefault(t *testing.T) {
 		if resp.Selector != c.wantSel {
 			t.Errorf("case %d selector: got %q want %q", i, resp.Selector, c.wantSel)
 		}
-		wantRec := c.wantSel + "._domainkey.example.com"
+		wantRec := c.wantSel + "._domainkey." + dom
 		if resp.DNSRecordName != wantRec {
 			t.Errorf("case %d dns_record_name: got %q want %q", i, resp.DNSRecordName, wantRec)
 		}
@@ -298,5 +374,31 @@ func TestDNSOpsPlanWithLinkLocalPublicIPv4Rejected(t *testing.T) {
 	code, body := h.do(t, "GET", "/api/v1/admin/dns/example.com/plan", h.adminT, "")
 	if code != http.StatusUnprocessableEntity {
 		t.Errorf("plan with link-local public IPv4 must be 422; got %d body=%s", code, body)
+	}
+}
+
+func TestDNSOpsPlanWithTestNetIPv4Rejected(t *testing.T) {
+	for _, ip := range []string{"192.0.2.1", "198.51.100.1", "203.0.113.10"} {
+		h := newDNSOpsHarnessWithPublicIP(t, ip, "")
+		code, body := h.do(t, "GET", "/api/v1/admin/dns/example.com/plan", h.adminT, "")
+		if code != http.StatusUnprocessableEntity {
+			t.Errorf("plan with TEST-NET IPv4 %s must be 422; got %d body=%s", ip, code, body)
+		}
+		if !strings.Contains(body, "TEST-NET") {
+			t.Errorf("422 body must mention TEST-NET; got %s", body)
+		}
+		h.close()
+	}
+}
+
+func TestDNSOpsPlanWithDocumentationIPv6Rejected(t *testing.T) {
+	h := newDNSOpsHarnessWithPublicIP(t, "", "2001:db8::1")
+	defer h.close()
+	code, body := h.do(t, "GET", "/api/v1/admin/dns/example.com/plan", h.adminT, "")
+	if code != http.StatusUnprocessableEntity {
+		t.Errorf("plan with documentation IPv6 must be 422; got %d body=%s", code, body)
+	}
+	if !strings.Contains(body, "documentation") && !strings.Contains(body, "3849") {
+		t.Errorf("422 body must mention documentation range; got %s", body)
 	}
 }

@@ -346,6 +346,51 @@ func TestAdminDNSOpsVerifyAndPlanCallsRealEndpoints(t *testing.T) {
 	}
 }
 
+// TestAdminDNSOpsDKIMRotationConfirmationPresent confirms the
+// admin DNS page contains the typed confirmation phrase
+// "rotate-dkim-key" and the DNS TTL warning text.
+func TestAdminDNSOpsDKIMRotationConfirmationPresent(t *testing.T) {
+	root := adminRepoRoot(t)
+	src := readFile(t, root, "release/admin/app.js")
+	if !strings.Contains(src, "rotate-dkim-key") {
+		t.Errorf("admin DNS page must contain 'rotate-dkim-key' confirmation phrase")
+	}
+	if !strings.Contains(src, "DNS TTL") {
+		t.Errorf("admin DNS page warning must mention DNS TTL")
+	}
+	if !strings.Contains(src, "rotation") {
+		t.Errorf("admin DNS page must mention rotation in the warning")
+	}
+}
+
+// TestAdminDNSOpsDKIMRotationSendsConfirmField confirms the
+// generateDkimKey function sends confirm_rotation in the POST body.
+func TestAdminDNSOpsDKIMRotationSendsConfirmField(t *testing.T) {
+	root := adminRepoRoot(t)
+	src := readFile(t, root, "release/admin/app.js")
+	if !strings.Contains(src, "confirm_rotation") {
+		t.Errorf("admin generateDkimKey must send confirm_rotation field")
+	}
+	if !strings.Contains(src, "rotate-dkim-key'") && !strings.Contains(src, "'rotate-dkim-key'") {
+		t.Errorf("admin generateDkimKey must send 'rotate-dkim-key' as confirmation value")
+	}
+}
+
+// TestAdminDNSOpsDKIMNoPrivateKeyRendered confirms that no
+// PEM-encoded private key block appears in the admin JS.
+// English-language comments about "private key" are allowed;
+// actual key material would appear as a multi-line PEM block.
+func TestAdminDNSOpsDKIMNoPrivateKeyRendered(t *testing.T) {
+	root := adminRepoRoot(t)
+	src := readFile(t, root, "release/admin/app.js")
+	// Look for a PEM boundary which would indicate actual key
+	// material was baked into the asset. English phrases like
+	// "the private key is stored server-side" are fine.
+	if strings.Contains(src, "-----BEGIN") {
+		t.Errorf("admin app.js must not contain a PEM boundary (-----BEGIN)")
+	}
+}
+
 // TestAdminDNSOpsDoesNotRecommendSMTPHost is the
 // DNS-DKIM-OPERATIONS-2F-SAFETY-FIX guard against telling the
 // operator to set coremail.smtp_host as the public mail IP. The

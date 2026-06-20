@@ -102,27 +102,34 @@ func TestIsPublicUnicastIP_Multicast(t *testing.T) {
 	}
 }
 
-func TestIsPublicUnicastIP_AcceptsDocumentation(t *testing.T) {
-	// 203.0.113.0/24 is TEST-NET-3 (RFC 5737), a documentation
-	// range that is NOT loopback, NOT private, NOT
-	// unspecified. It is the canonical "looks like a public
-	// IP" value used by the rest of the test harness.
-	got, err := isPublicUnicastIP("203.0.113.10")
-	if err != nil {
-		t.Fatalf("203.0.113.10 must be accepted; got %v", err)
-	}
-	if !got.Equal(net.ParseIP("203.0.113.10")) {
-		t.Errorf("round-trip mismatch: %v vs %v", got, net.ParseIP("203.0.113.10"))
+func TestIsPublicUnicastIP_RejectsDocumentationRanges(t *testing.T) {
+	for _, ip := range []string{
+		"192.0.2.1",     // TEST-NET-1 (RFC 5737)
+		"198.51.100.1",  // TEST-NET-2 (RFC 5737)
+		"203.0.113.10",  // TEST-NET-3 (RFC 5737)
+		"2001:db8::1",   // Documentation IPv6 (RFC 3849)
+	} {
+		_, err := isPublicUnicastIP(ip)
+		if err == nil {
+			t.Errorf("documentation IP %q must be rejected", ip)
+		}
 	}
 }
 
-func TestIsPublicUnicastIP_AcceptsGlobalUnicastIPv6(t *testing.T) {
-	got, err := isPublicUnicastIP("2001:db8::1")
+func TestIsPublicUnicastIP_AcceptsGenuinelyPublic(t *testing.T) {
+	got, err := isPublicUnicastIP("8.8.8.8")
 	if err != nil {
-		t.Fatalf("2001:db8::1 must be accepted; got %v", err)
+		t.Fatalf("8.8.8.8 must be accepted; got %v", err)
 	}
-	if !got.Equal(net.ParseIP("2001:db8::1")) {
-		t.Errorf("round-trip mismatch: %v vs %v", got, net.ParseIP("2001:db8::1"))
+	if !got.Equal(net.ParseIP("8.8.8.8")) {
+		t.Errorf("round-trip mismatch: %v vs %v", got, net.ParseIP("8.8.8.8"))
+	}
+	got6, err6 := isPublicUnicastIP("2607:f8b0::1")
+	if err6 != nil {
+		t.Fatalf("2607:f8b0::1 must be accepted; got %v", err6)
+	}
+	if !got6.Equal(net.ParseIP("2607:f8b0::1")) {
+		t.Errorf("round-trip mismatch: %v vs %v", got6, net.ParseIP("2607:f8b0::1"))
 	}
 }
 

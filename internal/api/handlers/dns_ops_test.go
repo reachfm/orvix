@@ -76,7 +76,7 @@ func newDNSOpsHarness(t *testing.T) *dnsOpsHarness {
 	// address) so the plan generator has a value to emit; 0.0.0.0
 	// is explicitly forbidden by DNS-DKIM-OPERATIONS-2F-SAFETY-FIX
 	// and the listener bind host is a separate concern.
-	cfg.DNS.PublicIPv4 = "203.0.113.10"
+	cfg.DNS.PublicIPv4 = "8.8.8.8"
 	// Force the handler's MailHost fallback to "mail.<domain>"
 	// by clearing the default "mail.local" hostname.
 	cfg.CoreMail.Hostname = ""
@@ -301,8 +301,8 @@ func TestDNSOpsPlanReturnsAllRequiredRecords(t *testing.T) {
 	if resp.Plan.MailHost != "mail.example.com" {
 		t.Errorf("mail_host: got %q want mail.example.com", resp.Plan.MailHost)
 	}
-	if resp.Plan.ServerIPv4 != "203.0.113.10" {
-		t.Errorf("server_ipv4: got %q want 203.0.113.10", resp.Plan.ServerIPv4)
+	if resp.Plan.ServerIPv4 != "8.8.8.8" {
+		t.Errorf("server_ipv4: got %q want 8.8.8.8", resp.Plan.ServerIPv4)
 	}
 	if resp.Plan.MTAMode != "testing" {
 		t.Errorf("mta_sts_mode must default to testing; got %q", resp.Plan.MTAMode)
@@ -495,9 +495,23 @@ func TestDNSOpsDKIMGenerateStoresPrivateKeyAndReturnsPublicOnly(t *testing.T) {
 	}
 }
 
-// TestDNSOpsDKIMGenerateSecondCallRotates confirms a second call
-// overwrites the existing row with a fresh key.
-func TestDNSOpsDKIMGenerateSecondCallRotates(t *testing.T) {
+func TestDNSOpsDKIMGenerateFirstNoConfirmation(t *testing.T) {
+	h := newDNSOpsHarness(t)
+	defer h.close()
+	// First generation does NOT require rotation confirmation.
+	code, body := h.do(t, "POST", "/api/v1/admin/dns/example.com/dkim", h.adminT, `{"selector":"orvix"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("first generate must be 201; got %d body=%s", code, body)
+	}
+	if strings.Contains(body, "confirm_rotation") {
+		t.Errorf("first generate response must not mention confirm_rotation; got %s", body)
+	}
+}
+
+// TestDNSOpsDKIMGenerateWithoutConfirmationRotateNo is the second
+// blocker: a second call WITHOUT confirm_rotation must return 409
+// and NOT overwrite the existing key.
+func TestDNSOpsDKIMGenerateWithoutConfirmationReturns409(t *testing.T) {
 	h := newDNSOpsHarness(t)
 	defer h.close()
 	if c, _ := h.do(t, "POST", "/api/v1/admin/dns/example.com/dkim", h.adminT, `{"selector":"a"}`); c != http.StatusCreated {
@@ -506,9 +520,78 @@ func TestDNSOpsDKIMGenerateSecondCallRotates(t *testing.T) {
 	sqlDB, _ := h.db.DB()
 	var first string
 	_ = sqlDB.QueryRow(`SELECT private_key_pem FROM coremail_dkim_config WHERE domain = ?`, "example.com").Scan(&first)
-	if c, _ := h.do(t, "POST", "/api/v1/admin/dns/example.com/dkim", h.adminT, `{"selector":"b"}`); c != http.StatusCreated {
-		t.Fatalf("second generate failed")
+
+	// Second call WITHOUT confirm_rotation must be 409.
+	code, body := h.do(t, "POST", "/api/v1/admin/dns/example.com/dkim", h.adminT, `{"selector":"b"}`)
+	if code != http.StatusConflict {
+		t.Fatalf("second generate without confirmation must be 409; got %d body=%s", code, body)
 	}
+	if !strings.Contains(body, "already exists") {
+		t.Errorf("409 body must explain existing key; got %s", body)
+	}
+
+	// Existing key must NOT be overwritten.
+	var after string
+	_ = sqlDB.QueryRow(`SELECT private_key_pem FROM coremail_dkim_config WHERE domain = ?`, "example.com").Scan(&after)
+	if first != after {
+		t.Errorf("existing key must not be overwritten on failed rotation; first=%q after=%q", first, after)
+	}
+	var sel string
+	_ = sqlDB.QueryRow(`SELECT selector FROM coremail_dkim_config WHERE domain = ?`, "example.com").Scan(&sel)
+	if sel != "a" {
+		t.Errorf("selector must not change on failed rotation; got %q want a", sel)
+	}
+}
+
+// TestDNSOpsDKIMGenerateWrongConfirmationReturns409 confirms a
+// wrong confirm_rotation value returns 409 and does not overwrite.
+func TestDNSOpsDKIMGenerateWrongConfirmationReturns409(t *testing.T) {
+	h := newDNSOpsHarness(t)
+	defer h.close()
+	if c, _ := h.do(t, "POST", "/api/v1/admin/dns/example.com/dkim", h.adminT, `{"selector":"a"}`); c != http.StatusCreated {
+		t.Fatalf("first generate failed")
+	}
+	sqlDB, _ := h.db.DB()
+	var first string
+	_ = sqlDB.QueryRow(`SELECT private_key_pem FROM coremail_dkim_config WHERE domain = ?`, "example.com").Scan(&first)
+
+	// Second call with WRONG confirmation.
+	code, body := h.do(t, "POST", "/api/v1/admin/dns/example.com/dkim", h.adminT,
+		`{"selector":"b","confirm_rotation":"wrong-value"}`)
+	if code != http.StatusConflict {
+		t.Fatalf("wrong confirmation must be 409; got %d body=%s", code, body)
+	}
+	if !strings.Contains(body, "already exists") {
+		t.Errorf("409 body must explain existing key; got %s", body)
+	}
+
+	var after string
+	_ = sqlDB.QueryRow(`SELECT private_key_pem FROM coremail_dkim_config WHERE domain = ?`, "example.com").Scan(&after)
+	if first != after {
+		t.Errorf("existing key must not be overwritten on wrong confirmation")
+	}
+}
+
+// TestDNSOpsDKIMGenerateWithCorrectConfirmationRotates confirms
+// that providing the correct confirm_rotation string allows
+// rotation and produces a different key+selector.
+func TestDNSOpsDKIMGenerateWithCorrectConfirmationRotates(t *testing.T) {
+	h := newDNSOpsHarness(t)
+	defer h.close()
+	if c, _ := h.do(t, "POST", "/api/v1/admin/dns/example.com/dkim", h.adminT, `{"selector":"a"}`); c != http.StatusCreated {
+		t.Fatalf("first generate failed")
+	}
+	sqlDB, _ := h.db.DB()
+	var first string
+	_ = sqlDB.QueryRow(`SELECT private_key_pem FROM coremail_dkim_config WHERE domain = ?`, "example.com").Scan(&first)
+
+	// Second call WITH correct confirmation must succeed.
+	code, body := h.do(t, "POST", "/api/v1/admin/dns/example.com/dkim", h.adminT,
+		`{"selector":"b","confirm_rotation":"rotate-dkim-key"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("second generate with confirmation must be 201; got %d body=%s", code, body)
+	}
+
 	var second string
 	_ = sqlDB.QueryRow(`SELECT private_key_pem FROM coremail_dkim_config WHERE domain = ?`, "example.com").Scan(&second)
 	if first == second {
@@ -518,6 +601,12 @@ func TestDNSOpsDKIMGenerateSecondCallRotates(t *testing.T) {
 	_ = sqlDB.QueryRow(`SELECT selector FROM coremail_dkim_config WHERE domain = ?`, "example.com").Scan(&selector)
 	if selector != "b" {
 		t.Errorf("selector after rotation: got %q want b", selector)
+	}
+	// Private key must not appear in response.
+	for _, banned := range []string{"PRIVATE KEY", "BEGIN", "-----BEGIN"} {
+		if strings.Contains(strings.ToUpper(body), banned) {
+			t.Errorf("response must not contain %q; got %s", banned, body)
+		}
 	}
 }
 
@@ -733,10 +822,10 @@ func populateFixtureForDomain(h *dnsOpsHarness, domain, dkimSelector, mtaPolicyI
 	// Apex MX + SPF.
 	h.resolve.Set(domain, dnsops.FakeEntry{
 		MX:  []net.MX{{Host: "mail." + domain + ".", Pref: 10}},
-		TXT: []string{"v=spf1 mx ip4:203.0.113.10 -all"},
+		TXT: []string{"v=spf1 mx ip4:8.8.8.8 -all"},
 	})
 	h.resolve.Set("mail."+domain, dnsops.FakeEntry{
-		A: []net.IP{net.ParseIP("203.0.113.10")},
+		A: []net.IP{net.ParseIP("8.8.8.8")},
 	})
 	h.resolve.Set("_dmarc."+domain, dnsops.FakeEntry{
 		TXT: []string{"v=DMARC1; p=none; rua=mailto:dmarc@" + domain + "; adkim=s; aspf=s; pct=100"},
@@ -750,8 +839,8 @@ func populateFixtureForDomain(h *dnsOpsHarness, domain, dkimSelector, mtaPolicyI
 	h.resolve.Set(dkimSelector+"._domainkey."+domain, dnsops.FakeEntry{
 		TXT: []string{"v=DKIM1; k=rsa; p=" + pubBase64},
 	})
-	h.resolve.Set("203.0.113.10", dnsops.FakeEntry{
-		PTRFor: map[string][]string{"203.0.113.10": {"mail." + domain + "."}},
+	h.resolve.Set("8.8.8.8", dnsops.FakeEntry{
+		PTRFor: map[string][]string{"8.8.8.8": {"mail." + domain + "."}},
 	})
 }
 
