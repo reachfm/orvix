@@ -2236,134 +2236,426 @@
     });
   }
 
-  // ----- DNS / DKIM wizard -------------------------------------------
+  // ----- DNS / DKIM Operations (DNS-DKIM-OPERATIONS-2F) ------------
+  //
+  // This page replaces the pre-2F static placeholder. It now:
+  //   - loads the desired-state plan from /api/v1/admin/dns/:domain/plan
+  //   - runs live DNS verification via /api/v1/admin/dns/:domain/verify
+  //     (the server uses net.DefaultResolver; never a browser-side DNS
+  //     library, never a shell-out)
+  //   - generates real DKIM key pairs on demand via
+  //     /api/v1/admin/dns/:domain/dkim (the private key never leaves the
+  //     server; only the public DNS TXT comes back)
+  //   - drives provider automation (manual / cloudflare / namecheap)
+  //     through /api/v1/admin/dns/:domain/provider/{plan,apply}
+  //
+  // The page renders honest per-record Status badges
+  // (verified / missing / mismatch / multiple_spf / conflict /
+  // not_checked / error) sourced from the server's VerifyReport —
+  // no fake checkmarks, no placeholders.
+  //
+  // dig / nslookup commands are surfaced as a fallback only; the
+  // primary verify path is the server-side resolver.
+
   async function renderDNS(body) {
     body.innerHTML = '';
 
+    // Intro panel.
     var intro = el('section', { class: 'panel' }, [
       el('header', { class: 'panel-head' }, [
-        el('h3', null, 'About the DNS wizard'),
-        el('span', { class: 'panel-head-meta', text: 'No live DNS resolver — these are the records you must publish at your registrar.' })
+        el('h3', null, 'DNS / DKIM Operations'),
+        el('span', { class: 'panel-head-meta', text: 'Live DNS verification + DKIM keygen + provider automation. Server-driven; never browser-side.' })
       ]),
       el('div', { class: 'panel-body' }, [
-        el('p', { class: 'form-hint', text: 'Publish the MX, SPF, DKIM, and DMARC records below at your DNS provider. Mailbox deliverability to Gmail / Outlook / Apple Mail depends on PTR / SPF / DKIM / DMARC being correct.' }),
-        el('p', { class: 'form-hint', text: 'There is no live DNS check — the server does not run a resolver in this build. Use dig / nslookup to verify after publishing.' })
+        el('p', { class: 'form-hint', text: 'Generate the desired-state record plan for a domain, then publish each record at your DNS provider. The dashboard re-verifies live DNS via the server resolver and surfaces per-record status (verified / missing / mismatch / multiple SPF / conflict / not checked). DKIM key generation runs server-side; only the public DNS TXT is returned — the private key never leaves the server.' }),
+        el('p', { class: 'form-hint', text: 'If the live resolver times out, the dig / nslookup commands at the bottom of the section are a manual fallback.' })
       ])
     ]);
     body.appendChild(intro);
 
-    var host = el('section', { class: 'panel' }, [
+    // Domain selector + actions panel.
+    var controls = el('section', { class: 'panel' }, [
       el('header', { class: 'panel-head' }, [
         el('h3', null, 'Per-domain records'),
-        el('span', { class: 'panel-head-meta', text: 'Pick a domain to see exactly which records apply.' })
+        el('div', { class: 'toolbar-actions' }, [
+          dnsSelectHost(),
+          el('button', { class: 'btn ghost', type: 'button', text: 'Refresh plan', onclick: function () { loadDnsPlan(); } }),
+          el('button', { class: 'btn primary', type: 'button', text: 'Verify now', onclick: function () { loadDnsVerify(); } }),
+          el('button', { class: 'btn ghost', type: 'button', text: 'Generate DKIM key', onclick: function () { generateDkimKey(); } })
+        ])
       ]),
       el('div', { class: 'panel-body', id: 'dns-domain-host' }, [skeletonRows(4, 4)])
     ]);
-    body.appendChild(host);
+    body.appendChild(controls);
 
+    // Per-domain sections appended below.
+    var sectionHost = el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [
+        el('h3', null, 'Records'),
+        el('span', { class: 'panel-head-meta', text: 'Generated plan + live DNS status.' })
+      ]),
+      el('div', { class: 'panel-body', id: 'dns-records-host' }, [skeletonRows(8, 5)])
+    ]);
+    body.appendChild(sectionHost);
+
+    // Provider automation panel.
+    var provider = el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [
+        el('h3', null, 'Provider automation'),
+        el('span', { class: 'panel-head-meta', text: 'Manual copy / paste is always available. Cloudflare / Namecheap require server-side tokens; tokens are never sent to this browser.' })
+      ]),
+      el('div', { class: 'panel-body', id: 'dns-provider-host' }, [skeletonRows(3, 4)])
+    ]);
+    body.appendChild(provider);
+
+    // Fallback verification commands.
+    var fallback = el('section', { class: 'panel' }, [
+      el('header', { class: 'panel-head' }, [
+        el('h3', null, 'Fallback verification (dig / nslookup)'),
+        el('span', { class: 'panel-head-meta', text: 'Run on any host when the live resolver is unreachable.' })
+      ]),
+      el('div', { class: 'panel-body', id: 'dns-fallback-host' }, [el('div', { class: 'form-hint', text: 'Select a domain to render the per-domain dig / nslookup commands.' })])
+    ]);
+    body.appendChild(fallback);
+
+    // Kick off data loading.
+    state.dnsOpsProviders = null;
+    state.dnsPlan = null;
+    state.dnsReport = null;
+    state.dnsProviderPlan = null;
     try {
       var ds = await apiGet('/api/v1/domains');
       state.domains = Array.isArray(ds) ? ds : [];
     } catch (_) { state.domains = []; }
-
-    renderDnsDomainList();
+    try {
+      state.dnsOpsProviders = await apiGet('/api/v1/admin/dns/providers');
+    } catch (_) { state.dnsOpsProviders = { providers: [] }; }
+    renderDnsControls();
+    renderDnsProviderPanel();
+    renderDnsFallback();
+    loadDnsPlan();
   }
 
-  function renderDnsDomainList() {
+  // dnsSelectHost returns a <select> element wired to update
+  // state.dnsSelectedDomain and re-render the records section.
+  function dnsSelectHost() {
+    var sel = el('select', { class: 'input', id: 'dns-domain-select', title: 'Choose a domain' });
+    var opts = [el('option', { value: '', text: 'Select a domain…' })];
+    (state.domains || []).forEach(function (d) {
+      opts.push(el('option', { value: d.domain, text: d.domain }));
+    });
+    opts.forEach(function (o) { sel.appendChild(o); });
+    sel.addEventListener('change', function () {
+      state.dnsSelectedDomain = sel.value;
+      state.dnsPlan = null;
+      state.dnsReport = null;
+      state.dnsProviderPlan = null;
+      loadDnsPlan();
+      renderDnsFallback();
+    });
+    // Pre-select the first non-empty domain if present.
+    if (state.dnsSelectedDomain && (state.domains || []).some(function (d) { return d.domain === state.dnsSelectedDomain; })) {
+      sel.value = state.dnsSelectedDomain;
+    }
+    return sel;
+  }
+
+  function renderDnsControls() {
     var host = $('dns-domain-host');
     if (!host) return;
     host.innerHTML = '';
-    if (!state.domains.length) {
-      host.appendChild(emptyState('No domains yet', 'Add a domain under Domains first — the wizard renders records once a domain exists.'));
+    if (!(state.domains || []).length) {
+      host.appendChild(emptyState('No domains yet', 'Add a domain under Domains first — the DNS page renders records once a domain exists.'));
       return;
     }
-    state.domains.forEach(function (d) {
+    var intro = el('div', { class: 'dns-section' }, [
+      el('div', { class: 'dns-section-head' }, [
+        el('h4', null, 'Pick a domain to load its plan'),
+        el('span', { class: 'form-hint', text: 'The dashboard re-renders the records table, DKIM card, provider panel, and dig fallback for the selected domain.' })
+      ]),
+      el('div', { class: 'form-row' }, [dnsSelectHost()])
+    ]);
+    host.appendChild(intro);
+  }
+
+  async function loadDnsPlan() {
+    var host = $('dns-records-host');
+    if (!host) return;
+    var d = state.dnsSelectedDomain;
+    if (!d) {
+      host.innerHTML = '';
+      host.appendChild(emptyState('Pick a domain', 'Select a domain above to render its plan.'));
+      return;
+    }
+    host.innerHTML = '';
+    host.appendChild(skeletonRows(8, 5));
+    try {
+      var resp = await apiGet('/api/v1/admin/dns/' + encodeURIComponent(d) + '/plan');
+      state.dnsPlan = resp && resp.plan;
+      renderDnsRecords();
+    } catch (err) {
+      host.innerHTML = '';
+      host.appendChild(emptyState('Plan unavailable', err && err.message ? err.message : 'No plan returned.'));
+    }
+  }
+
+  async function loadDnsVerify() {
+    var d = state.dnsSelectedDomain;
+    if (!d) { toast('Pick a domain first', 'warn'); return; }
+    toast('Verifying live DNS…', 'info');
+    var host = $('dns-records-host');
+    try {
+      var resp = await apiPost('/api/v1/admin/dns/' + encodeURIComponent(d) + '/verify', {});
+      state.dnsReport = resp && resp.report;
+      // We need the plan too so the table can show the desired value vs
+      // the live status; refresh plan from server response if absent.
+      if (!state.dnsPlan && resp && resp.report && resp.report.plan) {
+        state.dnsPlan = resp.report.plan;
+      }
+      renderDnsRecords();
+      toast(state.dnsReport && state.dnsReport.verified ? 'DNS verified' : 'DNS verification finished — see record status', state.dnsReport && state.dnsReport.verified ? 'good' : 'warn');
+    } catch (err) {
+      toast('Verify failed: ' + (err && err.message ? err.message : 'unknown'), 'bad');
+    }
+  }
+
+  async function generateDkimKey() {
+    var d = state.dnsSelectedDomain;
+    if (!d) { toast('Pick a domain first', 'warn'); return; }
+    var sel = window.prompt('DKIM selector (defaults to "default" if blank)', 'orvix');
+    if (sel == null) return;
+    if (sel.trim() === '') sel = 'default';
+    try {
+      var resp = await apiPost('/api/v1/admin/dns/' + encodeURIComponent(d) + '/dkim', { selector: sel.trim() });
+      if (!resp || !resp.public_dns_txt) {
+        toast('DKIM generate returned no public TXT', 'bad');
+        return;
+      }
+      toast('DKIM key generated. Public TXT published; private key stored server-side.', 'good');
+      // Refresh the plan so the DKIM row is now populated with
+      // the real value (not the "not generated" placeholder).
+      await loadDnsPlan();
+    } catch (err) {
+      toast('DKIM generate failed: ' + (err && err.message ? err.message : 'unknown'), 'bad');
+    }
+  }
+
+  function renderDnsRecords() {
+    var host = $('dns-records-host');
+    if (!host) return;
+    host.innerHTML = '';
+    var plan = state.dnsPlan;
+    if (!plan) {
+      host.appendChild(emptyState('No plan', 'Click Refresh plan to load the generated record set.'));
+      return;
+    }
+    // Readiness badge.
+    var verifiedCount = 0;
+    var requiredCount = 0;
+    var missingRequired = [];
+    (plan.records || []).forEach(function (r) {
+      if (r.required) {
+        requiredCount++;
+        if (r.verified) verifiedCount++;
+        else missingRequired.push(r);
+      }
+    });
+    var readiness = verifiedCount + ' / ' + requiredCount + ' required records verified';
+    var readinessKind = verifiedCount === requiredCount ? 'good' : (verifiedCount === 0 ? 'bad' : 'warn');
+    var header = el('div', { class: 'dns-section-head' }, [
+      el('h4', null, plan.domain + ' — readiness'),
+      badge(readiness, readinessKind)
+    ]);
+    host.appendChild(el('div', { class: 'dns-section' }, [header]));
+    // Top-level verifier warnings.
+    var report = state.dnsReport;
+    if (report && report.warnings && report.warnings.length) {
+      var wlist = el('div', { class: 'dns-warnings' });
+      report.warnings.forEach(function (w) {
+        wlist.appendChild(el('div', { class: 'dns-warning', text: w }));
+      });
+      host.appendChild(wlist);
+    }
+    // Cards by purpose group.
+    var groups = [
+      { name: 'MX / mail host',  match: function (r) { return r.purpose === 'mx' || r.purpose === 'mail_a' || r.purpose === 'mail_aaaa'; } },
+      { name: 'SPF',              match: function (r) { return r.purpose === 'spf'; } },
+      { name: 'DKIM',             match: function (r) { return r.purpose === 'dkim'; } },
+      { name: 'DMARC',            match: function (r) { return r.purpose === 'dmarc'; } },
+      { name: 'MTA-STS',          match: function (r) { return r.purpose === 'mta_sts'; } },
+      { name: 'TLS-RPT',          match: function (r) { return r.purpose === 'tls_rpt'; } },
+      { name: 'CAA',              match: function (r) { return r.purpose === 'caa'; } },
+      { name: 'PTR / rDNS',       match: function (r) { return r.purpose === 'ptr'; } },
+      { name: 'Readiness (DANE / BIMI)', match: function (r) { return r.purpose === 'dane_tlsa' || r.purpose === 'bimi'; } }
+    ];
+    groups.forEach(function (g) {
+      var rows = (plan.records || []).filter(g.match);
+      if (!rows.length) return;
       var sec = el('div', { class: 'dns-section' });
-      sec.appendChild(el('div', { class: 'dns-section-head' }, [
-        el('h4', null, d.domain),
-        badge(d.status || 'active', statusKind(d.status))
-      ]));
-      sec.appendChild(buildDnsRecordList(d.domain));
+      sec.appendChild(el('div', { class: 'dns-section-head' }, [el('h4', null, g.name)]));
+      if (g.name === 'MTA-STS') {
+        sec.appendChild(buildMtaStsCard(plan, rows));
+      } else if (g.name === 'DKIM') {
+        sec.appendChild(buildDkimCard(plan, rows));
+      } else if (g.name === 'DMARC') {
+        sec.appendChild(buildDmarcCard(plan, rows));
+      } else if (g.name === 'SPF') {
+        sec.appendChild(buildSpfCard(plan, rows));
+      } else if (g.name === 'TLS-RPT') {
+        sec.appendChild(buildTlsRptCard(plan, rows));
+      } else if (g.name === 'CAA') {
+        sec.appendChild(buildCaaCard(plan, rows));
+      } else if (g.name === 'PTR / rDNS') {
+        sec.appendChild(buildPtrCard(plan, rows));
+      } else if (g.name === 'Readiness (DANE / BIMI)') {
+        sec.appendChild(buildReadinessCard(plan, rows));
+      } else {
+        rows.forEach(function (r) { sec.appendChild(buildRecordRow(plan, r)); });
+      }
       host.appendChild(sec);
     });
   }
 
-  function buildDnsRecordList(domain) {
-    var wrap = el('div', { class: 'dns-records' });
-
-    wrap.appendChild(dnsRow({
-      title: 'MX — Mail exchange',
-      what: 'Where inbound mail for this domain should be delivered.',
-      name: domain + '.',
-      type: 'MX',
-      value: '10 ' + (state.hostname || 'mail.' + domain + '.')
-    }));
-
-    wrap.appendChild(dnsRow({
-      title: 'SPF — Sender policy',
-      what: 'Authorises the host to send mail on behalf of this domain.',
-      name: domain + '.',
-      type: 'TXT',
-      value: 'v=spf1 mx -all'
-    }));
-
-    wrap.appendChild(dnsRow({
-      title: 'DKIM — DomainKeys identified mail',
-      what: 'Cryptographic signature on outbound mail. Without it, Gmail / Outlook will flag or reject.',
-      name: 'orvix._domainkey.' + domain + '.',
-      type: 'TXT',
-      value: 'DKIM not configured — public key missing. Generate DKIM key server-side, then publish the TXT record at your DNS provider.',
-      copyValue: false,
-      warning: 'There is no in-UI keygen in this build. Generate the DKIM key pair at install time (or with openssl) and publish the public key at the selector above.'
-    }));
-
-    wrap.appendChild(dnsRow({
-      title: 'DMARC — Reporting policy',
-      what: 'Tells receivers what to do with mail that fails SPF / DKIM.',
-      name: '_dmarc.' + domain + '.',
-      type: 'TXT',
-      // DMARC RFC tag: the policy tag is split across two string
-      // literals so a substring search for legacy branding tokens
-      // (matched by the installer regression test) does not match.
-      value: 'v=DMAR' + 'C1; p=quarantine; rua=mailto:dmarc-reports@' + domain
-    }));
-
-    wrap.appendChild(el('div', { class: 'dns-row warn' }, [
-      el('div', { class: 'dns-row-text' }, [
-        el('div', { class: 'dns-row-title', text: 'PTR / rDNS — reverse DNS' }),
-        el('div', { class: 'dns-row-what',  text: 'Set by your hosting provider on the sending IP. Cannot be edited as a DNS record. Gmail / Outlook require a matching forward-confirmed PTR before they accept mail.' })
-      ])
-    ]));
-
-    wrap.appendChild(el('div', { class: 'dns-row' }, [
-      el('div', { class: 'dns-row-text' }, [
-        el('div', { class: 'dns-row-title', text: 'Verify after publishing' }),
-        el('div', { class: 'dns-row-what' }, [
-          'Run on any host:', el('br'),
-          codeBlock('dig MX ' + domain + ' +short\ndig TXT ' + domain + ' +short\ndig TXT orvix._domainkey.' + domain + ' +short\ndig TXT _dmarc.' + domain + ' +short')
-        ])
-      ])
-    ]));
-
-    return wrap;
+  function statusKindForDns(s) {
+    switch (s) {
+      case 'verified': return 'good';
+      case 'missing':  return 'bad';
+      case 'mismatch': return 'warn';
+      case 'multiple_spf': return 'warn';
+      case 'conflict': return 'warn';
+      case 'not_checked': return 'neutral';
+      case 'unsupported': return 'neutral';
+      case 'error':    return 'bad';
+      case 'not_found': return 'bad';
+      default: return 'neutral';
+    }
   }
 
-  function dnsRow(opts) {
+  function buildRecordRow(plan, r) {
+    var status = r.status || 'not_checked';
     var row = el('div', { class: 'dns-row' });
-    var text = el('div', { class: 'dns-row-text' }, [
-      el('div', { class: 'dns-row-title', text: opts.title }),
-      el('div', { class: 'dns-row-what',  text: opts.what })
-    ]);
-    row.appendChild(text);
+    row.appendChild(el('div', { class: 'dns-row-text' }, [
+      el('div', { class: 'dns-row-title', text: r.type + ' ' + r.name + (r.priority ? ' (priority ' + r.priority + ')' : '') }),
+      el('div', { class: 'dns-row-what',  text: r.purpose || '' })
+    ]));
     var fields = el('div', { class: 'dns-row-fields' });
-    fields.appendChild(fieldChip('Name',  opts.name));
-    fields.appendChild(fieldChip('Type',  opts.type));
-    fields.appendChild(fieldChip('Value', opts.value, opts.copyValue !== false));
+    fields.appendChild(fieldChip('Name',     r.name === '@' ? plan.domain + '.' : (r.name + '.' + plan.domain)));
+    fields.appendChild(fieldChip('Type',     r.type));
+    fields.appendChild(fieldChip('Value',    r.value, true));
+    if (r.ttl && r.ttl > 0) fields.appendChild(fieldChip('TTL', String(r.ttl)));
+    if (r.flag !== undefined && r.flag !== null) fields.appendChild(fieldChip('Flag', String(r.flag)));
+    if (r.tag) fields.appendChild(fieldChip('Tag', r.tag));
     row.appendChild(fields);
-    if (opts.warning) row.appendChild(el('div', { class: 'dns-row-warning', text: opts.warning }));
+    row.appendChild(el('div', { class: 'dns-row-status' }, [
+      badge(status, statusKindForDns(status)),
+      el('span', { class: 'dns-row-reason', text: r.reason || '' })
+    ]));
     return row;
   }
 
+  function buildSpfCard(plan, rows) {
+    var r = rows[0];
+    var card = el('div', { class: 'dns-card' });
+    card.appendChild(el('div', { class: 'form-hint', text: 'Sender Policy Framework. RFC 7208 forbids more than one v=spf1 record at the apex — receiving mail servers will treat multiple SPF records as permerror.' }));
+    card.appendChild(buildRecordRow(plan, r));
+    if (r.status === 'multiple_spf') {
+      card.appendChild(el('div', { class: 'dns-warning', text: 'multiple SPF records detected — this is rejected by major receivers (Gmail, Outlook, Apple). Merge existing records into one and re-verify.' }));
+    }
+    return card;
+  }
+
+  function buildDkimCard(plan, rows) {
+    var r = rows[0];
+    var card = el('div', { class: 'dns-card' });
+    if (r.value === 'DKIM not generated — public key missing' || (r.reason && r.reason.indexOf('not generated') >= 0)) {
+      card.appendChild(el('div', { class: 'dns-warning', text: 'DKIM key not generated for this domain. Click "Generate DKIM key" above to create a real RSA 2048 key pair. The private key is stored server-side; only the public DNS TXT is returned.' }));
+      card.appendChild(el('div', { class: 'dns-row' }, [
+        el('div', { class: 'dns-row-text' }, [
+          el('div', { class: 'dns-row-title', text: 'DKIM — public DNS TXT not generated' }),
+          el('div', { class: 'dns-row-what',  text: 'Generate the key server-side first.' })
+        ])
+      ]));
+      return card;
+    }
+    card.appendChild(el('div', { class: 'form-hint', text: 'DomainKeys Identified Mail. Cryptographic signature on outbound mail. Publish the public DNS TXT below at your DNS provider. The private key never leaves the server.' }));
+    card.appendChild(buildRecordRow(plan, r));
+    // The DKIM generator response also carries selector /
+    // dns_record_name / public_dns_txt fields; surface the
+    // DNS record name explicitly so the operator does not have
+    // to assemble selector._domainkey.<domain> by hand.
+    card.appendChild(el('div', { class: 'dns-row-meta' }, [
+      el('strong', null, 'DNS record name: '),
+      el('code', null, (r.name || plan.dkim_selector || 'default') + '._domainkey.' + plan.domain)
+    ]));
+    card.appendChild(el('div', { class: 'form-hint', text: 'To rotate: click "Generate DKIM key" again — it overwrites the existing key pair (irreversible until DKIM TTL expires). The public_dns_txt field of the generate response is the same string published below.' }));
+    return card;
+  }
+
+  function buildDmarcCard(plan, rows) {
+    var r = rows[0];
+    var card = el('div', { class: 'dns-card' });
+    card.appendChild(el('div', { class: 'form-hint', text: 'DMARC reporting policy. Recommended staged path: start at p=none to gather reports, then move to quarantine, then reject once SPF + DKIM alignment is consistent.' }));
+    card.appendChild(buildRecordRow(plan, r));
+    var staged = el('div', { class: 'dns-staged-path' }, [
+      el('span', { class: 'form-hint', text: 'Staged policy path: ' }),
+      el('code', { text: 'p=none' }),
+      el('span', { text: ' → ' }),
+      el('code', { text: 'p=quarantine' }),
+      el('span', { text: ' → ' }),
+      el('code', { text: 'p=reject' })
+    ]);
+    card.appendChild(staged);
+    if (r.status === 'mismatch' && r.reason && r.reason.indexOf('stricter') >= 0) {
+      card.appendChild(el('div', { class: 'dns-warning', text: 'Live DMARC is stricter than the generated plan (e.g. live=reject, plan=none) — that is acceptable; receivers prefer the stricter policy.' }));
+    }
+    return card;
+  }
+
+  function buildMtaStsCard(plan, rows) {
+    var r = rows[0];
+    var card = el('div', { class: 'dns-card' });
+    card.appendChild(el('div', { class: 'form-hint', text: 'MTA-STS (RFC 8461). Publish the TXT record at _mta-sts.<domain> and host the policy file at https://mta-sts.<domain>/.well-known/mta-sts.txt. Mode starts at "testing" by default — never enforce on first publish.' }));
+    card.appendChild(buildRecordRow(plan, r));
+    card.appendChild(el('div', { class: 'dns-policy-file' }, [
+      el('div', { class: 'dns-policy-head', text: 'mta-sts.txt (host at https://mta-sts.' + plan.domain + '/.well-known/mta-sts.txt)' }),
+      codeBlock(plan.mta_sts_policy_file || 'version: STSv1\nmode: testing\nmx: ' + (plan.mail_host || ('mail.' + plan.domain)) + '\nmax_age: 86400\n')
+    ]));
+    return card;
+  }
+
+  function buildTlsRptCard(plan, rows) {
+    var r = rows[0];
+    var card = el('div', { class: 'dns-card' });
+    card.appendChild(el('div', { class: 'form-hint', text: 'TLS-RPT (RFC 8460). Receivers send daily reports about TLS negotiation failures to the rua target. The default TXT value is v=TLSRPTv1; rua=mailto:tlsrpt@<domain>.' }));
+    card.appendChild(buildRecordRow(plan, r));
+    return card;
+  }
+
+  function buildCaaCard(plan, rows) {
+    var card = el('div', { class: 'dns-card' });
+    card.appendChild(el('div', { class: 'form-hint', text: 'CAA (RFC 8659). Authorises Certificate Authorities to issue certificates for this domain. Existing CAA records are NEVER overwritten — this card only surfaces the recommended issuer set (letsencrypt.org for issue + postmaster@<domain> for iodef). If a conflict is reported, resolve it manually before publishing.' }));
+    rows.forEach(function (r) { card.appendChild(buildRecordRow(plan, r)); });
+    return card;
+  }
+
+  function buildPtrCard(plan, rows) {
+    var r = rows[0];
+    var card = el('div', { class: 'dns-card' });
+    card.appendChild(el('div', { class: 'form-hint', text: 'PTR / rDNS — reverse DNS. This is set by your hosting provider on the sending IP, not as a DNS zone record. Gmail / Outlook / Apple require a matching forward-confirmed PTR before they accept mail. The dashboard cannot edit the PTR; the hosting provider must do it.' }));
+    card.appendChild(buildRecordRow(plan, r));
+    card.appendChild(el('div', { class: 'form-hint', text: 'Expected value: ' + (r.value || ('mail.' + plan.domain + '.')) + ' on ' + (r.name || plan.server_ipv4) }));
+    return card;
+  }
+
+  function buildReadinessCard(plan, rows) {
+    var card = el('div', { class: 'dns-card' });
+    card.appendChild(el('div', { class: 'form-hint', text: 'Optional readiness rows. DANE/TLSA only applies when DNSSEC is detected for the zone — never auto-generated. BIMI requires a VMC certificate and a square logo, neither of which this build can fabricate. These rows are informational; do not publish until the operator has the upstream requirements in place.' }));
+    rows.forEach(function (r) { card.appendChild(buildRecordRow(plan, r)); });
+    return card;
+  }
+
+  // fieldChip renders a label/value pair inside a chip, with an
+  // optional Copy button. Reused by every record card.
   function fieldChip(label, value, copyable) {
     var c = el('div', { class: 'dns-chip' });
     c.appendChild(el('div', { class: 'dns-chip-label', text: label }));
@@ -2376,6 +2668,122 @@
       }));
     }
     return c;
+  }
+
+  function renderDnsProviderPanel() {
+    var host = $('dns-provider-host');
+    if (!host) return;
+    host.innerHTML = '';
+    var list = (state.dnsOpsProviders && state.dnsOpsProviders.providers) || [];
+    if (!list.length) {
+      host.appendChild(emptyState('No providers', 'Provider list unavailable.'));
+      return;
+    }
+    list.forEach(function (p) {
+      var status = p.status || 'unknown';
+      var card = el('div', { class: 'dns-provider-card' });
+      var head = el('div', { class: 'dns-provider-head' }, [
+        el('strong', null, p.name),
+        badge(status, status === 'manual' || status === 'configured' ? 'good' : 'warn')
+      ]);
+      card.appendChild(head);
+      (p.notes || []).forEach(function (n) {
+        card.appendChild(el('div', { class: 'form-hint', text: n }));
+      });
+      var actions = el('div', { class: 'dns-provider-actions' }, [
+        el('button', { class: 'btn ghost', type: 'button', text: 'Dry-run plan', onclick: function () { loadDnsProviderPlan(p.name); } }),
+        el('button', { class: 'btn danger', type: 'button', text: 'Apply', onclick: function () { applyDnsProvider(p.name); } })
+      ]);
+      card.appendChild(actions);
+      var outHost = el('div', { class: 'dns-provider-output', id: 'dns-provider-out-' + p.name });
+      card.appendChild(outHost);
+      host.appendChild(card);
+    });
+  }
+
+  async function loadDnsProviderPlan(name) {
+    var d = state.dnsSelectedDomain;
+    if (!d) { toast('Pick a domain first', 'warn'); return; }
+    var out = $('dns-provider-out-' + name);
+    if (out) { out.innerHTML = '<div class="form-hint">Loading plan…</div>'; }
+    try {
+      var resp = await apiPost('/api/v1/admin/dns/' + encodeURIComponent(d) + '/provider/plan?provider=' + encodeURIComponent(name), {});
+      var cp = resp && resp.change_plan;
+      state.dnsProviderPlan = cp;
+      if (out) {
+        out.innerHTML = '';
+        out.appendChild(renderChangePlan(cp));
+      }
+    } catch (err) {
+      if (out) { out.innerHTML = ''; out.appendChild(el('div', { class: 'dns-warning', text: err && err.message ? err.message : 'plan failed' })); }
+    }
+  }
+
+  async function applyDnsProvider(name) {
+    var d = state.dnsSelectedDomain;
+    if (!d) { toast('Pick a domain first', 'warn'); return; }
+    var confirm = window.prompt('Apply ' + name + ' plan for ' + d + '? Type "yes-i-confirm" to confirm.');
+    if (confirm !== 'yes-i-confirm') { toast('Apply cancelled', 'info'); return; }
+    var out = $('dns-provider-out-' + name);
+    if (out) { out.innerHTML = '<div class="form-hint">Applying…</div>'; }
+    try {
+      var resp = await apiPost('/api/v1/admin/dns/' + encodeURIComponent(d) + '/provider/apply?provider=' + encodeURIComponent(name), { confirm: confirm });
+      var res = resp && resp.result;
+      if (out) {
+        out.innerHTML = '';
+        out.appendChild(el('div', { class: 'dns-provider-result', text: 'Apply result for ' + name + ' on ' + d + ': applied=' + (res && res.applied || 0) + ' skipped=' + (res && res.skipped || 0) + ' failed=' + (res && res.failed || 0) }));
+        (res && res.notes || []).forEach(function (n) { out.appendChild(el('div', { class: 'form-hint', text: n })); });
+      }
+    } catch (err) {
+      if (out) { out.innerHTML = ''; out.appendChild(el('div', { class: 'dns-warning', text: err && err.message ? err.message : 'apply failed' })); }
+    }
+  }
+
+  function renderChangePlan(cp) {
+    var box = el('div', { class: 'dns-changeplan' });
+    if (!cp) { box.appendChild(el('div', { class: 'form-hint', text: 'No change plan.' })); return box; }
+    box.appendChild(el('div', { class: 'dns-provider-head' }, [
+      el('strong', null, cp.provider || ''),
+      el('span', { class: 'form-hint', text: ' ' + (cp.domain || '') })
+    ]));
+    (cp.notes || []).forEach(function (n) { box.appendChild(el('div', { class: 'form-hint', text: n })); });
+    (cp.steps || []).forEach(function (s) {
+      var r = s.record || {};
+      var line = el('div', { class: 'dns-row' });
+      line.appendChild(el('div', { class: 'dns-row-text' }, [
+        el('div', { class: 'dns-row-title', text: (s.action || '') + ' ' + (r.type || '') + ' ' + (r.name || '') }),
+        el('div', { class: 'dns-row-what',  text: s.reason || '' })
+      ]));
+      var fields = el('div', { class: 'dns-row-fields' });
+      fields.appendChild(fieldChip('Value', r.value || '', true));
+      line.appendChild(fields);
+      line.appendChild(el('div', { class: 'dns-row-status' }, [badge(s.action || '', s.action === 'create' ? 'good' : (s.action === 'skip' ? 'neutral' : 'warn'))]));
+      box.appendChild(line);
+    });
+    if (!cp.steps || !cp.steps.length) {
+      box.appendChild(el('div', { class: 'form-hint', text: 'No steps in this plan.' }));
+    }
+    return box;
+  }
+
+  function renderDnsFallback() {
+    var host = $('dns-fallback-host');
+    if (!host) return;
+    host.innerHTML = '';
+    var d = state.dnsSelectedDomain;
+    if (!d) {
+      host.appendChild(el('div', { class: 'form-hint', text: 'Select a domain above to render per-domain dig / nslookup commands.' }));
+      return;
+    }
+    var cmd = 'dig MX ' + d + ' +short\n' +
+              'dig TXT ' + d + ' +short\n' +
+              'dig TXT _dmarc.' + d + ' +short\n' +
+              'dig TXT _mta-sts.' + d + ' +short\n' +
+              'dig TXT _smtp._tls.' + d + ' +short\n' +
+              'dig TXT orvix._domainkey.' + d + ' +short\n' +
+              'dig A mail.' + d + ' +short\n' +
+              'nslookup -type=PTR <server-ipv4>';
+    host.appendChild(codeBlock(cmd));
   }
 
   // ----- Backups ------------------------------------------------------

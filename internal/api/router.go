@@ -16,6 +16,8 @@ import (
 	"github.com/orvix/orvix/internal/coremail"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
+	"github.com/orvix/orvix/internal/dnsops"
+	"github.com/orvix/orvix/internal/dnsops/providers"
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/metrics"
 	"github.com/orvix/orvix/internal/modules"
@@ -178,6 +180,33 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 	} else {
 		logger.Warn("update service not available: failed to get sql.DB", zap.Error(err))
 	}
+
+	// Wire DNS / DKIM operations service (DNS-DKIM-OPERATIONS-2F).
+	// The Service is built with the NetResolver so live DNS
+	// verification uses the operator's real resolver (no shell-
+	// out to dig/nslookup). Cloudflare / Namecheap providers are
+	// registered with the credentials from cfg.DNS — when the
+	// env config is missing, the provider's Plan() returns
+	// "not configured" and Apply() refuses. Tokens never reach
+	// any handler or response.
+	dnsResolver := dnsops.NewNetResolver()
+	dnsProviderList := []dnsops.Provider{
+		providers.NewCloudflareProvider(providers.CloudflareConfig{
+			APIToken: cfg.DNS.CloudflareAPIKey,
+			ZoneID:   cfg.DNS.CloudflareZoneID,
+		}, dnsResolver),
+		providers.NewNamecheapProvider(providers.NamecheapConfig{
+			APIUser:  cfg.DNS.NamecheapAPIUser,
+			APIKey:   cfg.DNS.NamecheapAPIKey,
+			Username: cfg.DNS.NamecheapUsername,
+			ClientIP: cfg.DNS.NamecheapClientIP,
+			Sandbox:  cfg.DNS.NamecheapSandbox,
+		}, dnsResolver),
+	}
+	dnsSvc := dnsops.NewService(dnsResolver, dnsProviderList...)
+	router.h.SetDNSOpsService(dnsSvc)
+	logger.Info("dns ops service wired",
+		zap.Strings("providers", dnsSvc.Providers()))
 
 	router.setupMiddleware()
 	router.setupRoutes()
@@ -368,9 +397,23 @@ func (r *Router) setupRoutes() {
 	admin.Post("/compose/complete", r.h.ComposeComplete)
 	admin.Post("/compose/stream", r.h.ComposeStream)
 
-	// DNS Automation
+	// DNS Automation — legacy endpoints (kept for backward compat
+	// with the pre-DNS-DKIM-OPERATIONS-2F UI). They now delegate
+	// to the new dnsops service when wired; they return 503 when
+	// the service is not available so the dashboard never sees a
+	// "pending" placeholder.
 	admin.Post("/dns/check/:domain", r.h.DNSCheck)
 	admin.Post("/dns/wizard/:domain", r.h.DNSWizard)
+
+	// DNS Operations (DNS-DKIM-OPERATIONS-2F): real DNS / DKIM
+	// operations for the admin UI. All admin-only, all read-only
+	// except for DKIM keygen (CSRF-protected below in `men`)
+	// and provider apply (also CSRF-protected).
+	admin.Get("/admin/dns/providers", r.h.GetAdminDNSProviders)
+	admin.Get("/admin/dns/:domain/plan", r.h.GetAdminDNSPlan)
+	admin.Post("/admin/dns/:domain/verify", r.h.PostAdminDNSVerify)
+	admin.Get("/admin/dns/:domain/wizard", r.h.GetAdminDNSWizard)
+	admin.Post("/admin/dns/:domain/provider/plan", r.h.PostAdminDNSProviderPlan)
 
 	// Migration
 	admin.Post("/migration/test", r.h.MigrationTest)
@@ -475,6 +518,14 @@ func (r *Router) setupRoutes() {
 	men.Post("/webmail/controls/unlock/:mailboxId", r.h.UnlockWebmailMailbox)
 	men.Post("/webmail/controls/reset-preferences/:mailboxId", r.h.ResetWebmailPreferences)
 	men.Post("/webmail/controls/clear-counters/:mailboxId", r.h.ClearFailedLoginCounters)
+	// DNS Operations (DNS-DKIM-OPERATIONS-2F): state-changing
+	// routes behind CSRF middleware. DKIM keygen rotates the
+	// server-side private key (irreversible — old signed mail
+	// still verifies until DKIM TTL expires); provider apply
+	// always returns a Failed result in this build because the
+	// live API path is intentionally disabled.
+	men.Post("/admin/dns/:domain/dkim", r.h.PostAdminDNSDKIM)
+	men.Post("/admin/dns/:domain/provider/apply", r.h.PostAdminDNSProviderApply)
 }
 
 func (r *Router) setupAdminUI() {
