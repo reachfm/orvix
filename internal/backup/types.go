@@ -55,6 +55,9 @@ type ManifestItem struct {
 
 // BackupArchiveManifest is the enterprise manifest stored as backup.json
 // inside the tar.gz archive. It is the source of truth for 2H.
+// archive_sha256 is intentionally NOT included here to avoid a self-
+// referential hash. Instead the final archive sha256 is stored in a
+// sidecar file: backup-archive.tar.gz.sha256.
 type BackupArchiveManifest struct {
 	BackupID            string         `json:"backup_id"`
 	CreatedAt           string         `json:"created_at"`
@@ -65,7 +68,6 @@ type BackupArchiveManifest struct {
 	SchemaVersion       int            `json:"schema_version"`
 	BackupFormatVersion int            `json:"backup_format_version"`
 	IncludedItems       []ManifestItem `json:"included_items"`
-	ArchiveSHA256       string         `json:"archive_sha256"`
 	DatabasePath        string         `json:"database_path"`
 	ConfigPath          string         `json:"config_path"`
 	Warnings            []string       `json:"warnings,omitempty"`

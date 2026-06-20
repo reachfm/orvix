@@ -537,7 +537,7 @@ function renderUpdateHistory(id, rows) {
 }
 
 async function loadBackups() {
-  state.backups = await apiGet("/api/v1/backups", []);
+  state.backups = await apiGet("/api/v1/admin/backups", []);
   renderBackupsTable("backups-table", state.backups);
 }
 
@@ -547,8 +547,8 @@ async function loadBackupStats() {
   if (!node) return;
   try {
     var [metrics, health] = await Promise.all([
-      apiGet("/api/v1/backups/metrics", null),
-      apiGet("/api/v1/backups/health", null)
+      apiGet("/api/v1/admin/backups/metrics", null),
+      apiGet("/api/v1/admin/backups/health", null)
     ]);
     if (!metrics) metrics = {totalBackups:0,totalSizeBytes:0};
     if (!health) health = {schedulerEnabled:false,retentionEnabled:true,directoryExists:false,writable:false,availableDiskBytes:0};
@@ -583,7 +583,7 @@ async function loadBackupSchedule() {
   var retentionInput = el("bs-retention");
   if (!enabledBox || !freqSelect || !retentionInput) return;
   try {
-    var cfg = await apiGet("/api/v1/backups/schedule", null);
+    var cfg = await apiGet("/api/v1/admin/backups/schedule", null);
     if (!cfg) return;
     enabledBox.checked = cfg.enabled === true;
     freqSelect.value = cfg.frequency || "manual";
@@ -613,7 +613,7 @@ if (backupScheduleForm) {
         btn.disabled = false;
         return;
       }
-      var cfg = await apiPost("/api/v1/backups/schedule", {
+      var cfg = await apiPost("/api/v1/admin/backups/schedule", {
         enabled: enabled,
         frequency: frequency,
         retentionCount: retentionCount
@@ -635,7 +635,7 @@ if (backupRetentionBtn) {
     if (!confirm("Run retention cleanup? Oldest backups will be deleted to stay within the retention count.")) return;
     backupRetentionBtn.disabled = true;
     try {
-      var result = await apiPost("/api/v1/backups/retention", {});
+      var result = await apiPost("/api/v1/admin/backups/retention", {});
       showAlert("Retention cleanup: " + (result.deleted || 0) + " backup(s) deleted.");
       await loadBackups();
       await loadBackupStats();
@@ -1195,7 +1195,7 @@ el("backups-table").addEventListener("click", async function(event) {
   btn.disabled = true;
   try {
     if (action === "download") {
-      window.location.href = "/api/v1/backups/" + encodeURIComponent(backupId) + "/download";
+      window.location.href = "/api/v1/admin/backups/" + encodeURIComponent(backupId) + "/download";
     } else if (action === "validate") {
       var csrfToken = await getCSRFToken();
       var res = await fetch("/api/v1/admin/backups/" + encodeURIComponent(backupId) + "/validate", {
@@ -1238,9 +1238,10 @@ el("backups-table").addEventListener("click", async function(event) {
       if (!typedConfirm) { btn.disabled = false; return; }
       if (typedConfirm !== "delete-orvix-backup") { showAlert("Typed confirmation did not match."); btn.disabled = false; return; }
       var csrfToken = await getCSRFToken();
-      var res = await fetch("/api/v1/backups/" + encodeURIComponent(backupId), {
+      var res = await fetch("/api/v1/admin/backups/" + encodeURIComponent(backupId), {
         method: "DELETE",
-        headers: { "Authorization": "Bearer " + state.token, "X-CSRF-Token": csrfToken }
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + state.token, "X-CSRF-Token": csrfToken },
+        body: JSON.stringify({ confirm: "delete-orvix-backup" })
       });
       if (!res.ok) {
         var errBody = await res.json().catch(function() { return {}; });
@@ -1279,7 +1280,7 @@ if (backupCreate) {
     showAlert("");
     backupCreate.disabled = true;
     try {
-      var created = await apiPost("/api/v1/backups", {});
+      var created = await apiPost("/api/v1/admin/backups", {});
       showAlert("Backup " + (created.id || created.name || "created") + " created.");
       await loadBackups();
       await loadBackupStats();

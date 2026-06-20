@@ -160,7 +160,7 @@ func backupRequest(t *testing.T, router *api.Router, method, path, body, token, 
 
 func createBackupViaAPI(t *testing.T, router *api.Router, token, csrf string) backupTestEntry {
 	t.Helper()
-	resp, body := backupRequest(t, router, "POST", "/api/v1/backups", `{}`, token, csrf)
+	resp, body := backupRequest(t, router, "POST", "/api/v1/admin/backups", `{}`, token, csrf)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create status %d: %s", resp.StatusCode, body)
 	}
@@ -182,7 +182,7 @@ func TestBackupAPIListEmptyReturnsArray(t *testing.T) {
 	defer router.App().Shutdown()
 	defer sqlDB.Close()
 
-	resp, body := backupRequest(t, router, "GET", "/api/v1/backups", "", token, "")
+	resp, body := backupRequest(t, router, "GET", "/api/v1/admin/backups", "", token, "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("list status %d: %s", resp.StatusCode, body)
 	}
@@ -208,7 +208,7 @@ func TestBackupAPICreateListDownloadDelete(t *testing.T) {
 		t.Fatalf("backup dir missing: %v", err)
 	}
 
-	resp, body := backupRequest(t, router, "GET", "/api/v1/backups", "", token, "")
+	resp, body := backupRequest(t, router, "GET", "/api/v1/admin/backups", "", token, "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("list status %d: %s", resp.StatusCode, body)
 	}
@@ -220,7 +220,7 @@ func TestBackupAPICreateListDownloadDelete(t *testing.T) {
 		t.Fatalf("unexpected list: %#v", list)
 	}
 
-	resp, archive := backupRequest(t, router, "GET", "/api/v1/backups/"+created.ID+"/download", "", token, "")
+	resp, archive := backupRequest(t, router, "GET", "/api/v1/admin/backups/"+created.ID+"/download", "", token, "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("download status %d: %s", resp.StatusCode, archive)
 	}
@@ -263,7 +263,7 @@ func TestBackupAPICreateListDownloadDelete(t *testing.T) {
 		}
 	}
 
-	resp, body = backupRequest(t, router, "DELETE", "/api/v1/backups/"+created.ID, "", token, csrf)
+	resp, body = backupRequest(t, router, "DELETE", "/api/v1/admin/backups/"+created.ID, `{"confirm":"delete-orvix-backup"}`, token, csrf)
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("delete status %d: %s", resp.StatusCode, body)
 	}
@@ -277,23 +277,23 @@ func TestBackupAPIWriteRequiresCSRF(t *testing.T) {
 	defer router.App().Shutdown()
 	defer sqlDB.Close()
 
-	resp, _ := backupRequest(t, router, "POST", "/api/v1/backups", `{}`, token, "")
+	resp, _ := backupRequest(t, router, "POST", "/api/v1/admin/backups", `{}`, token, "")
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("expected missing-CSRF create to be 403, got %d", resp.StatusCode)
 	}
 
 	created := createBackupViaAPI(t, router, token, csrf)
-	resp, _ = backupRequest(t, router, "DELETE", "/api/v1/backups/"+created.ID, "", token, "")
+	resp, _ = backupRequest(t, router, "DELETE", "/api/v1/admin/backups/"+created.ID, `{"confirm":"delete-orvix-backup"}`, token, "")
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("expected missing-CSRF delete to be 403, got %d", resp.StatusCode)
 	}
 
-	// POST /api/v1/backups/schedule must require CSRF
-	resp, _ = backupRequest(t, router, "POST", "/api/v1/backups/schedule", `{}`, token, "")
+	// POST /api/v1/admin/backups/schedule must require CSRF
+	resp, _ = backupRequest(t, router, "POST", "/api/v1/admin/backups/schedule", `{}`, token, "")
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("expected missing-CSRF schedule set to be 403, got %d", resp.StatusCode)
 	}
-	req := httptest.NewRequest("POST", "/api/v1/backups/schedule", strings.NewReader(`{"enabled":true,"frequency":"daily","retentionCount":7}`))
+	req := httptest.NewRequest("POST", "/api/v1/admin/backups/schedule", strings.NewReader(`{"enabled":true,"frequency":"daily","retentionCount":7}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Cookie", "csrf_token=invalid-cookie")
@@ -307,12 +307,12 @@ func TestBackupAPIWriteRequiresCSRF(t *testing.T) {
 		t.Fatalf("expected invalid-CSRF schedule set to be 403, got %d: %s", resp.StatusCode, body)
 	}
 
-	// POST /api/v1/backups/retention must require CSRF
-	resp, _ = backupRequest(t, router, "POST", "/api/v1/backups/retention", "", token, "")
+	// POST /api/v1/admin/backups/retention must require CSRF
+	resp, _ = backupRequest(t, router, "POST", "/api/v1/admin/backups/retention", "", token, "")
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("expected missing-CSRF retention to be 403, got %d", resp.StatusCode)
 	}
-	req = httptest.NewRequest("POST", "/api/v1/backups/retention", nil)
+	req = httptest.NewRequest("POST", "/api/v1/admin/backups/retention", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Cookie", "csrf_token=invalid-cookie")
 	req.Header.Set("X-CSRF-Token", "different-header")
@@ -332,7 +332,7 @@ func TestBackupAPIRejectsInvalidIDs(t *testing.T) {
 	defer sqlDB.Close()
 
 	for _, id := range []string{"..escape", "bad..name", "missing"} {
-		resp, _ := backupRequest(t, router, "GET", "/api/v1/backups/"+id+"/download", "", token, "")
+		resp, _ := backupRequest(t, router, "GET", "/api/v1/admin/backups/"+id+"/download", "", token, "")
 		if id == "missing" {
 			if resp.StatusCode != http.StatusNotFound {
 				t.Fatalf("missing backup should return 404, got %d", resp.StatusCode)
@@ -342,7 +342,7 @@ func TestBackupAPIRejectsInvalidIDs(t *testing.T) {
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("invalid id %q should return 400, got %d", id, resp.StatusCode)
 		}
-		resp, _ = backupRequest(t, router, "DELETE", "/api/v1/backups/"+id, "", token, csrf)
+		resp, _ = backupRequest(t, router, "DELETE", "/api/v1/admin/backups/"+id, `{"confirm":"delete-orvix-backup"}`, token, csrf)
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("invalid delete id %q should return 400, got %d", id, resp.StatusCode)
 		}

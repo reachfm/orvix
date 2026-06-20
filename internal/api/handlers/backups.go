@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -149,27 +150,42 @@ func (h *Handler) DownloadBackup(c fiber.Ctx) error {
 		h.logger.Error("backup archive failed", zap.String("backup_id", id), zap.Error(err))
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "backup archive failed"})
 	}
-	info, err := os.Stat(archivePath)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "archive unavailable"})
-	}
-	data, err := os.ReadFile(archivePath)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "archive unavailable"})
-	}
 	filename := "orvix-backup-" + id + ".tar.gz"
 	c.Set("Content-Type", "application/gzip")
 	c.Set("Content-Disposition", `attachment; filename="`+filename+`"`)
-	c.Set("Content-Length", fmt.Sprintf("%d", info.Size()))
 	h.writeAuditLog(c, "backup.download", fmt.Sprintf("backup_id:%s", id))
+	file, err := os.Open(archivePath)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "archive unavailable"})
+	}
+	defer file.Close()
+	stat, err := file.Stat()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "archive unavailable"})
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "archive unavailable"})
+	}
+	c.Set("Content-Length", fmt.Sprintf("%d", stat.Size()))
 	return c.Send(data)
 }
 
 // DeleteBackup deletes a backup through the hardened backup service.
+// Requires typed confirmation "delete-orvix-backup".
 func (h *Handler) DeleteBackup(c fiber.Ctx) error {
 	id := c.Params("id")
 	if invalidBackupID(id) {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid backup id"})
+	}
+	var req struct {
+		Confirm string `json:"confirm"`
+	}
+	if err := c.Bind().JSON(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "delete requires JSON body with confirm field"})
+	}
+	if req.Confirm != "delete-orvix-backup" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "delete requires typed confirmation: delete-orvix-backup"})
 	}
 	svc, err := h.backupService()
 	if err != nil {
@@ -278,6 +294,11 @@ func (h *Handler) RunBackupRetention(c fiber.Ctx) error {
 	}
 	h.writeAuditLog(c, "backup.retention_cleanup", fmt.Sprintf("deleted:%d", deleted))
 	return c.JSON(fiber.Map{"deleted": deleted})
+}
+
+// LegacyGone returns 410 for moved backup routes.
+func (h *Handler) LegacyGone(c fiber.Ctx) error {
+	return c.Status(fiber.StatusGone).JSON(fiber.Map{"error": "this endpoint has moved; use /api/v1/admin/backups"})
 }
 
 // GetBackup returns details for a single backup (no secrets).
