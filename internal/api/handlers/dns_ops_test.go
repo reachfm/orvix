@@ -72,9 +72,11 @@ func newDNSOpsHarness(t *testing.T) *dnsOpsHarness {
 	cfg.CoreMail.POP3Port = 110
 	cfg.CoreMail.JMAPPort = 8080
 	cfg.CoreMail.MailStorePath = dir
-	// Anchor the server IPv4 so the plan generator has a value to
-	// emit; without it, the handler returns 422.
-	cfg.CoreMail.SMTPHost = "203.0.113.10"
+	// Anchor the public mail IPv4 (NOT the SMTP listener bind
+	// address) so the plan generator has a value to emit; 0.0.0.0
+	// is explicitly forbidden by DNS-DKIM-OPERATIONS-2F-SAFETY-FIX
+	// and the listener bind host is a separate concern.
+	cfg.DNS.PublicIPv4 = "203.0.113.10"
 	// Force the handler's MailHost fallback to "mail.<domain>"
 	// by clearing the default "mail.local" hostname.
 	cfg.CoreMail.Hostname = ""
@@ -184,6 +186,19 @@ func newDNSOpsHarness(t *testing.T) *dnsOpsHarness {
 	mount("POST", "/admin/dns/:domain/provider/apply", h.PostAdminDNSProviderApply)
 	mount("POST", "/dns/check/:domain", h.DNSCheck)
 	mount("POST", "/dns/wizard/:domain", h.DNSWizard)
+
+	// Seed a provisioned domain so the DKIM keygen path
+	// (DNS-DKIM-OPERATIONS-2F-SAFETY-FIX) passes the
+	// domainExists check. Tests that need a missing-domain
+	// scenario seed nothing here and assert 404.
+	if _, err := sqlDB.Exec(
+		`INSERT INTO coremail_domains (name, status, plan, description, max_mailboxes, max_aliases, max_quota_mb,
+		   dkim_enabled, dkim_selector, dmarc_enabled, mtasts_enabled, catchall_address, abuse_contact, labels,
+		   mailbox_count, created_at, updated_at)
+		 VALUES ('example.com', 'active', 'smb', '', 100, 50, 1024, 0, '', 0, 0, '', '', '', 0, ?, ?)`,
+		time.Now().UTC(), time.Now().UTC()); err != nil {
+		t.Fatalf("seed coremail_domains: %v", err)
+	}
 
 	return &dnsOpsHarness{
 		app:     app,

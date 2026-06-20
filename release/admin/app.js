@@ -2268,6 +2268,7 @@
       ]),
       el('div', { class: 'panel-body' }, [
         el('p', { class: 'form-hint', text: 'Generate the desired-state record plan for a domain, then publish each record at your DNS provider. The dashboard re-verifies live DNS via the server resolver and surfaces per-record status (verified / missing / mismatch / multiple SPF / conflict / not checked). DKIM key generation runs server-side; only the public DNS TXT is returned — the private key never leaves the server.' }),
+        el('p', { class: 'form-hint', text: 'The public mail IPv4 / IPv6 used in the A / AAAA / SPF records comes from the dedicated server config fields dns.public_ipv4 and dns.public_ipv6. These are separate from the listener bind address (coremail.smtp_host, which defaults to 0.0.0.0) — the dashboard never recommends changing the listener bind address for DNS. If the public IP is not configured, the plan endpoint returns 422 with a clear reason.' }),
         el('p', { class: 'form-hint', text: 'If the live resolver times out, the dig / nslookup commands at the bottom of the section are a manual fallback.' })
       ])
     ]);

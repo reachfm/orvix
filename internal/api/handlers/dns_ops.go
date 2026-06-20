@@ -27,7 +27,6 @@ import (
 	"database/sql"
 	"encoding/pem"
 	"fmt"
-	"net"
 	"strings"
 	"time"
 
@@ -43,14 +42,17 @@ func (h *Handler) dnsOpsService() *dnsops.Service {
 
 // dnsOpsInputsForDomain resolves the inputs the dnsops.Generator
 // needs for a domain. It reads the coremail_dkim_config row (if
-// any) to obtain the active DKIM selector + public key, and the
-// coremail_domains row for the canonical domain name. The
-// server IPv4 is sourced from cfg.CoreMail; the IPv6 is left empty
-// because the operator's SPF/AAAA opt-in is a future build.
+// any) to obtain the active DKIM selector + public key. The
+// public mail IPv4 and IPv6 come from cfg.DNS.PublicIPv4 /
+// cfg.DNS.PublicIPv6 — NOT from cfg.CoreMail.SMTPHost, which is
+// the listener bind address and defaults to 0.0.0.0 (DNS-DKIM-
+// OPERATIONS-2F-SAFETY-FIX).
 //
-// Returns (inputs, statusCode, body) so the caller can short-
-// circuit with an HTTP error envelope when the domain or DKIM row
-// is missing.
+// Returns the inputs, or an error when the public IP is missing
+// / invalid. The caller surfaces the error as 422 with the
+// reason so the dashboard can render an honest "public mail IP
+// is not configured" message instead of generating 0.0.0.0
+// records.
 func (h *Handler) dnsOpsInputsForDomain(ctx context.Context, domain string) (dnsops.Inputs, error) {
 	domain = strings.ToLower(strings.TrimSpace(domain))
 	if domain == "" {
@@ -62,27 +64,36 @@ func (h *Handler) dnsOpsInputsForDomain(ctx context.Context, domain string) (dns
 	if mailHost == "" {
 		mailHost = "mail." + domain
 	}
-	// Server IPv4: prefer the configured core mail host's resolved
-	// address, else require the operator to publish one. We treat
-	// "0.0.0.0" as "not configured".
+	// Public mail IPv4 / IPv6 from the dedicated DNS config
+	// block. We MUST NOT use cfg.CoreMail.SMTPHost here — that
+	// is a listener bind address and defaults to 0.0.0.0. The
+	// isPublicUnicastIP helper rejects 0.0.0.0, ::, loopback,
+	// link-local, private (RFC1918 / ULA), and multicast so
+	// the generated A / SPF records always point at a real
+	// public mail IP. IPv6 is optional; the AAAA record is
+	// only emitted when a valid public IPv6 is configured.
 	serverIPv4 := ""
-	if h.cfg.CoreMail.SMTPHost != "" &&
-		h.cfg.CoreMail.SMTPHost != "0.0.0.0" &&
-		net.ParseIP(h.cfg.CoreMail.SMTPHost) != nil {
-		serverIPv4 = h.cfg.CoreMail.SMTPHost
+	if h.cfg.DNS.PublicIPv4 != "" {
+		if ip, err := isPublicUnicastIP(h.cfg.DNS.PublicIPv4); err != nil {
+			return dnsops.Inputs{}, err
+		} else {
+			serverIPv4 = ip.String()
+		}
 	}
-	if serverIPv4 == "" {
-		// Fall back to AdminHost's resolved IPv4 if available.
-		// We deliberately do not call LookupHost here — the
-		// operator's deployment script is the right place to
-		// anchor the A record. The empty IPv4 is surfaced as a
-		// "not configured" note in the response so the operator
-		// sees the missing input rather than a fake record.
-		serverIPv4 = ""
+	serverIPv6 := ""
+	if h.cfg.DNS.PublicIPv6 != "" {
+		if ip, err := isPublicUnicastIP(h.cfg.DNS.PublicIPv6); err != nil {
+			return dnsops.Inputs{}, err
+		} else {
+			serverIPv6 = ip.String()
+		}
 	}
 	// DKIM selector + public key (from coremail_dkim_config if a
-	// row exists for this domain).
-	selector := "default"
+	// row exists for this domain). The selector is normalised
+	// through validateDKIMSelector so we never store or echo a
+	// value that violates the strict rules. The "orvix" default
+	// passes the validator.
+	selector := "orvix"
 	pubKey := ""
 	if sqlDB, err := h.db.DB(); err == nil {
 		var s string
@@ -91,11 +102,16 @@ func (h *Handler) dnsOpsInputsForDomain(ctx context.Context, domain string) (dns
 			domain)
 		var priv string
 		if err := row.Scan(&s, &priv); err == nil {
-			if strings.TrimSpace(s) != "" {
-				selector = s
+			if normalised, err := validateDKIMSelector(s); err == nil {
+				selector = normalised
+			} else {
+				// Stored selector is unsafe (legacy row from
+				// before 2F-SAFETY-FIX). Fall back to the
+				// safe default rather than echoing the bad
+				// value. The operator can re-run Generate
+				// DKIM key to overwrite.
+				selector = "orvix"
 			}
-			// Derive the public key from the stored private key
-			// so we never store or echo the public key separately.
 			if pub, ok := deriveDKIMPublicKey(priv); ok {
 				pubKey = pub
 			}
@@ -110,6 +126,7 @@ func (h *Handler) dnsOpsInputsForDomain(ctx context.Context, domain string) (dns
 		Domain:        domain,
 		MailHost:      mailHost,
 		ServerIPv4:    serverIPv4,
+		ServerIPv6:    serverIPv6,
 		DKIMSelector:  selector,
 		DKIMPubKey:    pubKey,
 		ReportMailbox: report,
@@ -209,14 +226,20 @@ func (h *Handler) GetAdminDNSPlan(c fiber.Ctx) error {
 	domain := strings.ToLower(strings.TrimSpace(c.Params("domain")))
 	inputs, err := h.dnsOpsInputsForDomain(c.Context(), domain)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+		// dnsOpsInputsForDomain returns errors for "input not
+		// configured correctly" cases (missing public IP, IP
+		// rejected as private/loopback/link-local/unspecified,
+		// etc.). 422 is the honest "not configured" status for
+		// those; the operator must fix the server config, not
+		// the request.
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
 	}
 	if inputs.ServerIPv4 == "" {
-		// We can't build a plan without a server IPv4. Surface a
-		// 422 with the missing-input reason so the dashboard can
+		// We can't build a plan without a public mail IPv4. Surface
+		// a 422 with the missing-input reason so the dashboard can
 		// show it honestly rather than fabricating an A record.
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
-			"error": "server IPv4 not configured; set coremail.smtp_host to the public mail server IP",
+			"error": "public mail IPv4 is not configured; set dns.public_ipv4 in the server config (do NOT use coremail.smtp_host — that is a listener bind address)",
 		})
 	}
 	plan, err := svc.Generate(inputs)
@@ -248,11 +271,12 @@ func (h *Handler) PostAdminDNSVerify(c fiber.Ctx) error {
 	domain := strings.ToLower(strings.TrimSpace(c.Params("domain")))
 	inputs, err := h.dnsOpsInputsForDomain(c.Context(), domain)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+		// See GetAdminDNSPlan for the rationale on 422 vs 400.
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
 	}
 	if inputs.ServerIPv4 == "" {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
-			"error": "server IPv4 not configured",
+			"error": "public mail IPv4 is not configured; set dns.public_ipv4 in the server config (do NOT use coremail.smtp_host - that is a listener bind address)",
 		})
 	}
 	plan, err := svc.Generate(inputs)
@@ -282,19 +306,48 @@ func (h *Handler) PostAdminDNSVerify(c fiber.Ctx) error {
 // Response: { "domain": "...", "selector": "...", "public_dns_txt": "v=DKIM1; k=rsa; p=...",
 //            "dns_record_name": "<selector>._domainkey.<domain>",
 //            "stored": true }
+//
+// Safety guards (DNS-DKIM-OPERATIONS-2F-SAFETY-FIX):
+//
+//   - The domain MUST already exist in coremail_domains (active
+//     row, deleted_at IS NULL). Orphan DKIM rows for unprovisioned
+//     domains are not allowed. We return 404 with a structured
+//     error in that case.
+//   - The selector is run through validateDKIMSelector BEFORE
+//     keygen or storage. Unsafe selectors (dot, space, slash,
+//     underscore, unicode, wildcard, leading/trailing hyphen,
+//     longer than 63 chars) are rejected with 400. The default
+//     selector when the request omits it is "orvix" (which
+//     passes the validator).
 func (h *Handler) PostAdminDNSDKIM(c fiber.Ctx) error {
 	domain := strings.ToLower(strings.TrimSpace(c.Params("domain")))
 	if domain == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "domain is required"})
 	}
+	// Domain existence check: refuse orphan DKIM rows for
+	// domains Orvix has not provisioned.
+	exists, err := h.domainExists(c.Context(), domain)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "domain lookup failed",
+		})
+	}
+	if !exists {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"error": fmt.Sprintf("domain %q is not provisioned in Orvix; add the domain under Domains before generating a DKIM key", domain),
+		})
+	}
 	var req struct {
 		Selector string `json:"selector"`
 	}
-	// Body is optional; default to "default" when absent.
+	// Body is optional; default to "orvix" when absent.
 	_ = c.Bind().JSON(&req)
-	selector := strings.TrimSpace(req.Selector)
-	if selector == "" {
-		selector = "default"
+	// Strict selector validation. Empty input maps to the safe
+	// default "orvix"; unsafe values are rejected with 400
+	// BEFORE any keygen or DB write happens.
+	selector, err := validateDKIMSelector(req.Selector)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	// Generate the RSA 2048 key pair.
 	privPEM, _, err := dkim.GenerateKeyPair(selector, domain)
@@ -391,7 +444,7 @@ func (h *Handler) PostAdminDNSProviderPlan(c fiber.Ctx) error {
 	}
 	if inputs.ServerIPv4 == "" {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
-			"error": "server IPv4 not configured",
+			"error": "public mail IPv4 is not configured; set dns.public_ipv4 in the server config (do NOT use coremail.smtp_host - that is a listener bind address)",
 		})
 	}
 	plan, err := svc.Generate(inputs)
@@ -466,7 +519,7 @@ func (h *Handler) PostAdminDNSProviderApply(c fiber.Ctx) error {
 	}
 	if inputs.ServerIPv4 == "" {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
-			"error": "server IPv4 not configured",
+			"error": "public mail IPv4 is not configured; set dns.public_ipv4 in the server config (do NOT use coremail.smtp_host - that is a listener bind address)",
 		})
 	}
 	plan, err := svc.Generate(inputs)

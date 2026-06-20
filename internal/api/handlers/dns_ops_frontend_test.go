@@ -346,6 +346,40 @@ func TestAdminDNSOpsVerifyAndPlanCallsRealEndpoints(t *testing.T) {
 	}
 }
 
+// TestAdminDNSOpsDoesNotRecommendSMTPHost is the
+// DNS-DKIM-OPERATIONS-2F-SAFETY-FIX guard against telling the
+// operator to set coremail.smtp_host as the public mail IP. The
+// public mail IP comes from cfg.DNS.PublicIPv4 (a dedicated
+// config field); the SMTP listener bind host is a separate
+// concern and defaults to 0.0.0.0. The dashboard must never
+// tell the operator to mutate coremail.smtp_host for DNS.
+func TestAdminDNSOpsDoesNotRecommendSMTPHost(t *testing.T) {
+	root := adminRepoRoot(t)
+	_ = readFile(t, root, "release/admin/app.js")
+	// We scope the scan to the DNS page region. The legacy
+	// backup/queue/etc. panels may legitimately reference the
+	// smtp_host config field for unrelated reasons (listener
+	// bind), but the DNS page must not.
+	dns := adminDNSOpsSection(t)
+	for _, banned := range []string{
+		"set coremail.smtp_host",
+		"set smtp_host to the public",
+		"smtp_host as public",
+		"SMTPHost as public",
+		"set the public mail server IP",
+	} {
+		if strings.Contains(dns, banned) {
+			t.Errorf("admin DNS page must not recommend %q; point operators at dns.public_ipv4 instead", banned)
+		}
+	}
+	// And it must reference the dedicated config field name so
+	// the dashboard tells the operator where to set the public
+	// IP.
+	if !strings.Contains(dns, "public_ipv4") {
+		t.Errorf("admin DNS page must reference the dns.public_ipv4 config field name")
+	}
+}
+
 // TestAdminDNSOpsNoExecDnsOutOfBand: a regression guard confirming
 // the admin app.js does not import any browser-side DNS library
 // (which would mean we're trying to do provider automation in the
