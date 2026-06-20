@@ -17,7 +17,7 @@ package handlers
 //     dnsops.Service.
 //   - Read-only verify path is safe to call repeatedly.
 //   - Provider plan and apply require explicit confirmation
-//     ("yes-i-confirm" or a per-domain confirm string).
+//     ("apply-dns-changes" or a per-domain confirm string).
 
 import (
 	"context"
@@ -174,11 +174,20 @@ func deriveDKIMPublicKey(privPEM string) (string, bool) {
 }
 
 // GetAdminDNSProviders returns the list of known provider names
-// and whether each is configured server-side.
+// and the readiness status of each. The status field is one of:
 //
-// The response never carries a token value. "configured" is a
-// boolean; if the operator wants the raw config status they can
-// look at /api/v1/admin/summary or the audit log.
+//   - "manual"        — manual provider; always available
+//   - "not_configured" — credentials missing server-side
+//   - "dry_run_only"   — credentials present, but the
+//                         apply kill switch is off (Namecheap)
+//                         or live apply is intentionally
+//                         disabled (Cloudflare in this build)
+//   - "ready"         — credentials + apply enabled
+//
+// The response never carries a token value. Operators can read
+// the audit log or /api/v1/admin/summary for the high-level
+// status; the dashboard's provider panel uses the status field
+// to enable / disable the Apply button.
 func (h *Handler) GetAdminDNSProviders(c fiber.Ctx) error {
 	svc := h.dnsOpsService()
 	if svc == nil {
@@ -191,17 +200,38 @@ func (h *Handler) GetAdminDNSProviders(c fiber.Ctx) error {
 	for _, name := range providers {
 		status := "manual"
 		notes := []string{}
-		if name != "manual" {
-			// We never echo the token shape; we just say
-			// whether the env-style config has both required
-			// fields.
+		switch name {
+		case "manual":
+			status = "manual"
+		case "cloudflare":
+			if h.cfg.DNS.CloudflareAPIKey == "" || h.cfg.DNS.CloudflareZoneID == "" {
+				status = "not_configured"
+				notes = append(notes, "set dns.cloudflare_api_key and dns.cloudflare_zone_id in the server config to enable")
+			} else {
+				// Cloudflare live apply is intentionally
+				// disabled in this build.
+				status = "dry_run_only"
+				notes = append(notes, "cloudflare live apply is intentionally disabled in this build; dry-run plan only")
+			}
+		case "namecheap":
+			if h.cfg.DNS.NamecheapAPIUser == "" || h.cfg.DNS.NamecheapAPIKey == "" || h.cfg.DNS.NamecheapUsername == "" {
+				status = "not_configured"
+				notes = append(notes, "set dns.namecheap_api_user, dns.namecheap_api_key, and dns.namecheap_username in the server config to enable")
+			} else if !h.cfg.DNS.NamecheapEnableApply {
+				status = "dry_run_only"
+				notes = append(notes, "namecheap credentials present but dns.namecheap_enable_apply is false; set it to true (or set ORVIX_DNS_NAMECHEAP_ENABLE_APPLY=true) to enable live apply")
+			} else {
+				status = "ready"
+				notes = append(notes, "namecheap live apply is enabled server-side; the apply button is active when no conflicts are present in the dry-run plan")
+			}
+		default:
 			notes = append(notes, "configure server-side to enable; tokens are never returned to clients")
 		}
-		if name == "cloudflare" && (h.cfg.DNS.CloudflareAPIKey == "" || h.cfg.DNS.CloudflareZoneID == "") {
-			status = "not_configured"
-		}
-		if name == "namecheap" && (h.cfg.DNS.NamecheapAPIUser == "" || h.cfg.DNS.NamecheapAPIKey == "" || h.cfg.DNS.NamecheapUsername == "") {
-			status = "not_configured"
+		// Universal safety note — applies to every non-manual
+		// provider regardless of status. Ensures the operator
+		// never sees a token-shaped substring.
+		if name != "manual" {
+			notes = append(notes, "credentials are server-side only; the dashboard never receives the token value")
 		}
 		out = append(out, fiber.Map{
 			"name":     name,
@@ -476,7 +506,7 @@ func (h *Handler) PostAdminDNSProviderPlan(c fiber.Ctx) error {
 
 // PostAdminDNSProviderApply runs the provider Apply path. The
 // caller MUST supply an explicit confirmation string in the body
-// ({"confirm": "yes-i-confirm"}); providers reject empty input.
+// ({"confirm": "apply-dns-changes"}); providers reject empty input.
 //
 // Cloudflare / Namecheap Apply always refuses in this build (the
 // live API path is not audited yet). The manual provider returns
@@ -522,7 +552,17 @@ func (h *Handler) PostAdminDNSProviderApply(c fiber.Ctx) error {
 	}
 	if confirm == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "confirm field is required",
+			"error": "confirm field is required; the operator must type apply-dns-changes to authorise the write",
+		})
+	}
+	// The literal confirmation string is "apply-dns-changes"
+	// (DNS-AUTOMATION-2G). The provider layer enforces this
+	// exact value, so the handler surfaces a 400 for any other
+	// non-empty value rather than letting the provider refuse
+	// with a less specific error.
+	if confirm != "apply-dns-changes" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "confirmation must be the literal string apply-dns-changes",
 		})
 	}
 	inputs, err := h.dnsOpsInputsForDomain(c.Context(), domain)

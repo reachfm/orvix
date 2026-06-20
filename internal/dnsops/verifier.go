@@ -77,6 +77,8 @@ func (v *Verifier) Verify(ctx context.Context, plan *Plan) (*VerifyReport, error
 			v.checkDMARC(ctx, plan, r)
 		case PurposeMTASTS:
 			v.checkMTASTS(ctx, plan, r)
+		case PurposeMTASTSHost:
+			v.checkMTASTSHost(ctx, plan, r)
 		case PurposeTLSRPT:
 			v.checkTLSRPT(ctx, plan, r)
 		case PurposeCAA:
@@ -339,6 +341,34 @@ func (v *Verifier) checkMTASTS(ctx context.Context, plan *Plan, r *Record) {
 	}
 	r.Status = StatusMissing
 	r.Reason = "no v=STSv1 record found at " + name
+}
+
+// checkMTASTSHost verifies the A (and optional AAAA) record
+// at mta-sts.<domain>. The host must resolve to the same
+// public IPs as mail.<domain> so the public MTA-STS
+// endpoint at /.well-known/mta-sts.txt is reachable. We do
+// NOT verify the hosted policy file content here (the file
+// is served by Orvix directly; DNS verification of the
+// host record is what the Verifier checks).
+func (v *Verifier) checkMTASTSHost(ctx context.Context, plan *Plan, r *Record) {
+	name := "mta-sts." + plan.Domain
+	ips, err := v.resolver.LookupA(ctx, name)
+	if err != nil {
+		r.Status = statusFromDNSError(err)
+		r.Reason = "mta-sts A lookup failed: " + sanitizeDNSError(err)
+		return
+	}
+	want := strings.TrimSpace(plan.ServerIPv4)
+	for _, ip := range ips {
+		if ip.String() == want {
+			r.Status = StatusVerified
+			r.Verified = true
+			r.Reason = fmt.Sprintf("mta-sts A %s -> %s", name, want)
+			return
+		}
+	}
+	r.Status = StatusMismatch
+	r.Reason = fmt.Sprintf("mta-sts A records present but none match %s (got %s)", want, joinIPs(ips))
 }
 
 func (v *Verifier) checkTLSRPT(ctx context.Context, plan *Plan, r *Record) {

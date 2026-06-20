@@ -190,23 +190,35 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 	// "not configured" and Apply() refuses. Tokens never reach
 	// any handler or response.
 	dnsResolver := dnsops.NewNetResolver()
+	// Namecheap uses an HTTP client abstraction so tests can
+	// use a fake client; production wires a real
+	// NetNamecheapClient with the operator's credentials.
+	namecheapClient := providers.NewNetNamecheapClient(
+		cfg.DNS.NamecheapAPIUser,
+		cfg.DNS.NamecheapAPIKey,
+		cfg.DNS.NamecheapUsername,
+		cfg.DNS.NamecheapClientIP,
+		cfg.DNS.NamecheapSandbox,
+	)
 	dnsProviderList := []dnsops.Provider{
 		providers.NewCloudflareProvider(providers.CloudflareConfig{
 			APIToken: cfg.DNS.CloudflareAPIKey,
 			ZoneID:   cfg.DNS.CloudflareZoneID,
 		}, dnsResolver),
 		providers.NewNamecheapProvider(providers.NamecheapConfig{
-			APIUser:  cfg.DNS.NamecheapAPIUser,
-			APIKey:   cfg.DNS.NamecheapAPIKey,
-			Username: cfg.DNS.NamecheapUsername,
-			ClientIP: cfg.DNS.NamecheapClientIP,
-			Sandbox:  cfg.DNS.NamecheapSandbox,
-		}, dnsResolver),
+			APIUser:      cfg.DNS.NamecheapAPIUser,
+			APIKey:       cfg.DNS.NamecheapAPIKey,
+			Username:     cfg.DNS.NamecheapUsername,
+			ClientIP:     cfg.DNS.NamecheapClientIP,
+			Sandbox:      cfg.DNS.NamecheapSandbox,
+			EnableApply:  cfg.DNS.NamecheapEnableApply,
+		}, namecheapClient),
 	}
 	dnsSvc := dnsops.NewService(dnsResolver, dnsProviderList...)
 	router.h.SetDNSOpsService(dnsSvc)
 	logger.Info("dns ops service wired",
-		zap.Strings("providers", dnsSvc.Providers()))
+		zap.Strings("providers", dnsSvc.Providers()),
+		zap.Bool("namecheap_apply_enabled", cfg.DNS.NamecheapEnableApply))
 
 	router.setupMiddleware()
 	router.setupRoutes()
@@ -241,6 +253,15 @@ func (r *Router) setupMiddleware() {
 }
 
 func (r *Router) setupRoutes() {
+	// Public MTA-STS policy endpoint (DNS-AUTOMATION-2G).
+	// Served at the canonical RFC 8461 path; no auth, no CSRF.
+	// The handler returns the policy body for any host that
+	// resolves to a provisioned Orvix domain (mta-sts.<domain>)
+	// and 404 otherwise. Caddy is expected to route
+	// mta-sts.<domain> at the Orvix backend; the existing
+	// admin / webmail hostnames continue to work.
+	r.app.Get("/.well-known/mta-sts.txt", r.h.GetPublicMTASTS)
+
 	api := r.app.Group("/api/v1")
 	api.Get("/health", r.h.Health)
 

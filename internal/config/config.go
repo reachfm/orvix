@@ -232,11 +232,20 @@ type DNSConfig struct {
 	CloudflareZoneID string `mapstructure:"cloudflare_zone_id"`
 
 	// Namecheap
-	NamecheapAPIUser  string `mapstructure:"namecheap_api_user"`
-	NamecheapAPIKey   string `mapstructure:"namecheap_api_key"`
-	NamecheapUsername string `mapstructure:"namecheap_username"`
-	NamecheapClientIP string `mapstructure:"namecheap_client_ip"`
-	NamecheapSandbox  bool   `mapstructure:"namecheap_sandbox"`
+	NamecheapAPIUser      string `mapstructure:"namecheap_api_user"`
+	NamecheapAPIKey       string `mapstructure:"namecheap_api_key"`
+	NamecheapUsername     string `mapstructure:"namecheap_username"`
+	NamecheapClientIP     string `mapstructure:"namecheap_client_ip"`
+	NamecheapSandbox      bool   `mapstructure:"namecheap_sandbox"`
+	// NamecheapEnableApply is the kill switch for live Namecheap
+	// writes. The provider stays in dry-run mode until an operator
+	// explicitly flips this on. The value is read from
+	// dns.namecheap_enable_apply (YAML) or ORVIX_DNS_NAMECHEAP_ENABLE_APPLY
+	// (env). Default false. Even with credentials present, the
+	// provider's Apply() refuses when this is false. The UI surfaces
+	// the resulting state as "dry_run_only" so the operator can
+	// see why the Apply button is disabled.
+	NamecheapEnableApply  bool   `mapstructure:"namecheap_enable_apply"`
 
 	// AWS Route 53 (legacy stub; not used by the new DNS Ops build)
 	Route53AccessKey string `mapstructure:"route53_access_key"`
@@ -410,6 +419,42 @@ func applyEnvOverrides(v *viper.Viper, cfg *Config) {
 	}
 	if v.GetString("DNS_PUBLIC_IPV6") != "" {
 		cfg.DNS.PublicIPv6 = v.GetString("DNS_PUBLIC_IPV6")
+	}
+	// Namecheap env vars: support BOTH the documented nested form
+	// (ORVIX_DNS_NAMECHEAP_* → viper key "DNS_NAMECHEAP_*") and
+	// the flat alias form (ORVIX_NAMECHEAP_* → viper key
+	// "NAMECHEAP_*"). The nested form is the canonical documented
+	// env name; the flat alias is a convenience. The default is
+	// false for bools and empty for strings.
+	if s := v.GetString("DNS_NAMECHEAP_API_USER"); s != "" {
+		cfg.DNS.NamecheapAPIUser = s
+	} else if s := v.GetString("NAMECHEAP_API_USER"); s != "" {
+		cfg.DNS.NamecheapAPIUser = s
+	}
+	if s := v.GetString("DNS_NAMECHEAP_API_KEY"); s != "" {
+		cfg.DNS.NamecheapAPIKey = s
+	} else if s := v.GetString("NAMECHEAP_API_KEY"); s != "" {
+		cfg.DNS.NamecheapAPIKey = s
+	}
+	if s := v.GetString("DNS_NAMECHEAP_USERNAME"); s != "" {
+		cfg.DNS.NamecheapUsername = s
+	} else if s := v.GetString("NAMECHEAP_USERNAME"); s != "" {
+		cfg.DNS.NamecheapUsername = s
+	}
+	if s := v.GetString("DNS_NAMECHEAP_CLIENT_IP"); s != "" {
+		cfg.DNS.NamecheapClientIP = s
+	} else if s := v.GetString("NAMECHEAP_CLIENT_IP"); s != "" {
+		cfg.DNS.NamecheapClientIP = s
+	}
+	if v.GetString("DNS_NAMECHEAP_SANDBOX") != "" {
+		cfg.DNS.NamecheapSandbox = v.GetBool("DNS_NAMECHEAP_SANDBOX")
+	} else if v.GetString("NAMECHEAP_SANDBOX") != "" {
+		cfg.DNS.NamecheapSandbox = v.GetBool("NAMECHEAP_SANDBOX")
+	}
+	if v.GetString("DNS_NAMECHEAP_ENABLE_APPLY") != "" {
+		cfg.DNS.NamecheapEnableApply = v.GetBool("DNS_NAMECHEAP_ENABLE_APPLY")
+	} else if v.GetString("NAMECHEAP_ENABLE_APPLY") != "" {
+		cfg.DNS.NamecheapEnableApply = v.GetBool("NAMECHEAP_ENABLE_APPLY")
 	}
 	if v.GetString("COREMAIL_ENABLED") != "" {
 		cfg.CoreMail.Enabled = v.GetBool("COREMAIL_ENABLED")
