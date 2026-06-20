@@ -20,31 +20,27 @@ type migrationJobRow struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
-// DNSCheck runs DNS validation checks for a domain.
+// DNSCheck is the legacy endpoint that used to return hard-coded
+// "pending" stubs. It is preserved at the legacy path for backward
+// compatibility with the pre-DNS-DKIM-OPERATIONS-2F UI, and now
+// delegates to the real verifier (DNS-DKIM-OPERATIONS-2F).
+//
+// If the new dnsops service is not wired (custom builds, tests),
+// we return a 503 rather than fabricating data — the legacy
+// behaviour of returning "pending" placeholders is explicitly
+// disallowed by the new build.
 func (h *Handler) DNSCheck(c fiber.Ctx) error {
-	domain := c.Params("domain")
-	if domain == "" {
-		return c.Status(400).JSON(fiber.Map{"error": "domain required"})
-	}
-	return c.JSON(fiber.Map{
-		"domain": domain,
-		"mx":     "pending",
-		"spf":    "pending",
-		"dkim":   "pending",
-		"dmarc":  "pending",
-	})
+	return h.PostAdminDNSCheck(c)
 }
 
-// DNSWizard runs the full DNS setup wizard for a domain.
+// DNSWizard is the legacy endpoint that used to return a hard-
+// coded MX / SPF / DKIM / DMARC stub. It is preserved at the
+// legacy path for backward compatibility with the pre-DNS-DKIM-
+// OPERATIONS-2F UI, and now delegates to the real plan generator.
+//
+// Same 503-fallback contract as DNSCheck.
 func (h *Handler) DNSWizard(c fiber.Ctx) error {
-	domain := c.Params("domain")
-	return c.JSON(fiber.Map{
-		"domain":       domain,
-		"mx_record":    "mail." + domain,
-		"spf_record":   "v=spf1 mx include:" + domain + " ~all",
-		"dkim_record":  "v=DKIM1; p=",
-		"dmarc_record": "v=DMARC1; p=quarantine; rua=mailto:dmarc@" + domain,
-	})
+	return h.GetAdminDNSWizard(c)
 }
 
 // MigrationTest tests connectivity to a source IMAP server.

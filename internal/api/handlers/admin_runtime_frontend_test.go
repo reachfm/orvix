@@ -217,10 +217,15 @@ func TestAdminRuntimePreservesPriorFixes(t *testing.T) {
 		}
 	}
 
-	// 4. Fake DKIM copy-ready placeholder: the DNS wizard must
-	// explicitly say there is no in-UI keygen.
-	if !strings.Contains(js, "no in-UI keygen") && !strings.Contains(js, "no keygen") {
-		t.Errorf("admin DNS wizard must keep the 'no in-UI keygen' honest wording")
+	// 4. Fake DKIM copy-ready placeholder: the DNS page must not
+	// render a copy-ready fake TXT. After DNS-DKIM-OPERATIONS-2F
+	// the dashboard has a real Generate DKIM key action, so we
+	// only enforce the negative (no YOUR-PUBLIC-KEY) and the
+	// honest "DKIM not generated" wording when no key exists.
+	if !strings.Contains(js, "DKIM not generated") &&
+		!strings.Contains(js, "public key missing") &&
+		!strings.Contains(js, "not generated") {
+		t.Errorf("admin DNS page must keep the honest 'DKIM not generated' wording when no key exists")
 	}
 
 	// 5. /api/v1/queue must not leak from webmail assets.

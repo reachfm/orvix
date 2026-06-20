@@ -21,6 +21,7 @@ import (
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/coremail"
+	"github.com/orvix/orvix/internal/dnsops"
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
@@ -92,6 +93,16 @@ type Handler struct {
 	// runtime module during Start(). Passed to the admin
 	// runtime telemetry endpoint for the dashboard.
 	listenerRegistry *runtime.ListenerRegistry
+
+	// dnsOps is the DNS / DKIM operations service. Set once at
+	// router construction (api.NewRouter). The admin DNS Ops
+	// handlers (plan / verify / provider / DKIM keygen) read
+	// from this service; tests can pass a custom service with
+	// an in-memory Resolver so DNS lookups do not require
+	// internet. nil dnsOps means the handlers return 503 — the
+	// admin UI can still render but every action fails closed
+	// rather than fabricating data.
+	dnsOps *dnsops.Service
 }
 
 // NewHandler creates a new Handler with dependencies.
@@ -143,6 +154,16 @@ func (h *Handler) SetProcessStartedAt(t time.Time) {
 // during Start().
 func (h *Handler) SetListenerRegistry(r *runtime.ListenerRegistry) {
 	h.listenerRegistry = r
+}
+
+// SetDNSOpsService wires the DNS / DKIM operations service into
+// the handler. The admin DNS Ops endpoints read from this
+// service. The service is constructed in api.NewRouter so the
+// same Resolver / providers are shared with the rest of the admin
+// endpoints. Passing nil leaves the service unavailable — the
+// admin handlers will return 503 rather than fabricating data.
+func (h *Handler) SetDNSOpsService(s *dnsops.Service) {
+	h.dnsOps = s
 }
 
 // Health returns server health status.

@@ -204,12 +204,48 @@ type AIConfig struct {
 	UseOllama      bool   `mapstructure:"use_ollama"`
 }
 
-// DNSConfig holds DNS automation settings.
+// DNSConfig holds DNS automation settings. All tokens are
+// server-side only — the handlers in internal/api/handlers/dns_ops.go
+// never echo any field value to a client; the admin dashboard only
+// learns whether the field is set (boolean). Operators supply
+// these via env (ORVIX_DNS_CLOUDFLARE_API_KEY etc.) or config
+// file; installer scripts that write these fields run with root
+// privileges so the file is not world-readable.
 type DNSConfig struct {
+	// PublicIPv4 / PublicIPv6 are the public mail server IPs the
+	// DNS Ops plan generator emits in the A / AAAA / SPF records.
+	// They are intentionally SEPARATE from coremail.smtp_host
+	// (which is the listener bind address and defaults to
+	// 0.0.0.0). Using the listener bind address for the public
+	// DNS plan would either fabricate 0.0.0.0 records on a fresh
+	// install or coerce the operator to mutate listener bind
+	// behaviour — both unsafe. Operators configure PublicIPv4
+	// (and optionally PublicIPv6) once at install time via
+	// env (ORVIX_DNS_PUBLIC_IPV4) or the config file; the
+	// handler validates the value and refuses anything that is
+	// loopback, private, link-local, multicast, or unspecified.
+	PublicIPv4 string `mapstructure:"public_ipv4"`
+	PublicIPv6 string `mapstructure:"public_ipv6"`
+
+	// Cloudflare
 	CloudflareAPIKey string `mapstructure:"cloudflare_api_key"`
+	CloudflareZoneID string `mapstructure:"cloudflare_zone_id"`
+
+	// Namecheap
+	NamecheapAPIUser  string `mapstructure:"namecheap_api_user"`
+	NamecheapAPIKey   string `mapstructure:"namecheap_api_key"`
+	NamecheapUsername string `mapstructure:"namecheap_username"`
+	NamecheapClientIP string `mapstructure:"namecheap_client_ip"`
+	NamecheapSandbox  bool   `mapstructure:"namecheap_sandbox"`
+
+	// AWS Route 53 (legacy stub; not used by the new DNS Ops build)
 	Route53AccessKey string `mapstructure:"route53_access_key"`
 	Route53SecretKey string `mapstructure:"route53_secret_key"`
-	DefaultProvider  string `mapstructure:"default_provider"`
+
+	// DefaultProvider is the provider name the dashboard should
+	// preselect in the provider dropdown (manual / cloudflare /
+	// namecheap). Defaults to "manual" when unset.
+	DefaultProvider string `mapstructure:"default_provider"`
 }
 
 // Defaults returns a Config populated with secure defaults.
@@ -368,6 +404,12 @@ func applyEnvOverrides(v *viper.Viper, cfg *Config) {
 	}
 	if v.GetString("CLOUDFLARE_API_KEY") != "" {
 		cfg.DNS.CloudflareAPIKey = v.GetString("CLOUDFLARE_API_KEY")
+	}
+	if v.GetString("DNS_PUBLIC_IPV4") != "" {
+		cfg.DNS.PublicIPv4 = v.GetString("DNS_PUBLIC_IPV4")
+	}
+	if v.GetString("DNS_PUBLIC_IPV6") != "" {
+		cfg.DNS.PublicIPv6 = v.GetString("DNS_PUBLIC_IPV6")
 	}
 	if v.GetString("COREMAIL_ENABLED") != "" {
 		cfg.CoreMail.Enabled = v.GetBool("COREMAIL_ENABLED")
