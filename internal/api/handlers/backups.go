@@ -1,11 +1,9 @@
 package handlers
 
 import (
-	"bytes"
 	"database/sql"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -159,14 +157,13 @@ func (h *Handler) DownloadBackup(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "archive unavailable"})
 	}
-	var buf bytes.Buffer
-	written, err := io.Copy(&buf, file)
-	file.Close()
+	stat, err := file.Stat()
 	if err != nil {
+		file.Close()
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "archive unavailable"})
 	}
-	c.Set("Content-Length", fmt.Sprintf("%d", written))
-	return c.Send(buf.Bytes())
+	c.Set("Content-Length", fmt.Sprintf("%d", stat.Size()))
+	return c.SendStream(file, int(stat.Size()))
 }
 
 // DeleteBackup deletes a backup through the hardened backup service.

@@ -155,6 +155,7 @@ func backupRequest(t *testing.T, router *api.Router, method, path, body, token, 
 		t.Fatalf("request: %v", err)
 	}
 	data, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
 	return resp, data
 }
 
@@ -227,6 +228,9 @@ func TestBackupAPICreateListDownloadDelete(t *testing.T) {
 	if got := resp.Header.Get("Content-Type"); got != "application/gzip" {
 		t.Fatalf("unexpected content type %q", got)
 	}
+	if got := resp.Header.Get("Content-Disposition"); !strings.Contains(got, "attachment;") || !strings.Contains(got, "orvix-backup-"+created.ID+".tar.gz") {
+		t.Fatalf("unexpected content disposition %q", got)
+	}
 	names := readArchiveNames(t, archive)
 	for _, name := range []string{"var/lib/orvix/orvix.db", "backup.json", "RESTORE_INSTRUCTIONS.txt", "checksums.txt"} {
 		if !containsString(names, name) {
@@ -269,6 +273,36 @@ func TestBackupAPICreateListDownloadDelete(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(backupDir, created.ID)); !os.IsNotExist(err) {
 		t.Fatalf("backup dir should be deleted, err=%v", err)
+	}
+}
+
+func TestBackupDownloadStreamsArchiveWithoutFullBuffer(t *testing.T) {
+	source, err := os.ReadFile("backups.go")
+	if err != nil {
+		t.Fatalf("read backups.go: %v", err)
+	}
+	content := string(source)
+	start := strings.Index(content, "func (h *Handler) DownloadBackup")
+	if start < 0 {
+		t.Fatal("DownloadBackup function not found")
+	}
+	end := strings.Index(content[start:], "\n// DeleteBackup")
+	if end < 0 {
+		t.Fatal("DownloadBackup function end marker not found")
+	}
+	fn := content[start : start+end]
+	for _, forbidden := range []string{
+		"os.ReadFile",
+		"io.ReadAll",
+		"bytes.Buffer",
+		"c.Send(buf.Bytes())",
+	} {
+		if strings.Contains(fn, forbidden) {
+			t.Fatalf("DownloadBackup must stream archive without full buffering; found %s", forbidden)
+		}
+	}
+	if !strings.Contains(fn, "SendStream(file") {
+		t.Fatal("DownloadBackup must stream the contained archive file with SendStream")
 	}
 }
 
