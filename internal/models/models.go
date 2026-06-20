@@ -643,6 +643,15 @@ func MigrateAllRaw(db *gorm.DB) error {
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			deleted_at DATETIME
 		)`,
+		`CREATE TABLE IF NOT EXISTS coremail_dkim_config (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			domain TEXT UNIQUE NOT NULL,
+			selector TEXT NOT NULL DEFAULT 'default',
+			private_key_pem TEXT NOT NULL,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL
+		)`,
 	}
 
 	// Execute table creation statements
@@ -693,6 +702,7 @@ func MigrateAllRaw(db *gorm.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_coremail_mailboxes_email ON coremail_mailboxes(email)`,
 		`CREATE INDEX IF NOT EXISTS idx_coremail_aliases_domain_id ON coremail_aliases(domain_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_coremail_aliases_from ON coremail_aliases(from_addr)`,
+		`CREATE INDEX IF NOT EXISTS idx_dkim_domain ON coremail_dkim_config(domain)`,
 	}
 
 	// Execute index creation statements

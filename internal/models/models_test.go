@@ -64,6 +64,167 @@ func TestMigrateAllRawUpgradesOldCoremailMailboxesSchema(t *testing.T) {
 	}
 }
 
+func TestMigrateAllRawCreatesDKIMTable(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(t.TempDir(), "orvix.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	db, err := config.NewDatabase(&cfg.Database, zap.NewNop())
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	defer sqlDB.Close()
+
+	if err := MigrateAllRaw(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	var count int
+	if err := sqlDB.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='coremail_dkim_config'").Scan(&count); err != nil {
+		t.Fatalf("query sqlite_master: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("coremail_dkim_config table not created by MigrateAllRaw")
+	}
+}
+
+func TestMigrateAllRawUpgradesMissingDKIMTable(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(t.TempDir(), "orvix.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	db, err := config.NewDatabase(&cfg.Database, zap.NewNop())
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	defer sqlDB.Close()
+
+	// Create all coremail tables except coremail_dkim_config,
+	// simulating the pre-2F VPS state.
+	for _, stmt := range []string{
+		`CREATE TABLE IF NOT EXISTS coremail_audit (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			actor TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT '',
+			action TEXT NOT NULL DEFAULT '', target TEXT NOT NULL DEFAULT '',
+			result TEXT NOT NULL DEFAULT '', ip TEXT NOT NULL DEFAULT '',
+			user_agent TEXT NOT NULL DEFAULT '', timestamp DATETIME NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS coremail_domains (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL,
+			tenant_id INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'active',
+			plan TEXT NOT NULL DEFAULT 'smb', max_mailboxes INTEGER NOT NULL DEFAULT 0,
+			max_aliases INTEGER NOT NULL DEFAULT 0, max_quota_mb INTEGER NOT NULL DEFAULT 0,
+			mailbox_count INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS coremail_mailboxes (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, domain_id INTEGER NOT NULL,
+			local_part TEXT NOT NULL, email TEXT UNIQUE NOT NULL,
+			password_hash TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+			quota_mb INTEGER NOT NULL DEFAULT 0, is_admin INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS coremail_queue (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, status TEXT NOT NULL DEFAULT 'pending',
+			created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL
+		)`,
+	} {
+		if _, err := sqlDB.Exec(stmt); err != nil {
+			t.Fatalf("create table: %v", err)
+		}
+	}
+	// Confirm dkim table does not exist before migration.
+	var before int
+	sqlDB.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='coremail_dkim_config'").Scan(&before)
+	if before != 0 {
+		t.Fatalf("precondition failed: coremail_dkim_config should not exist before migration")
+	}
+
+	// Run the canonical migration.
+	if err := MigrateAllRaw(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	// Assert table now exists.
+	var after int
+	if err := sqlDB.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='coremail_dkim_config'").Scan(&after); err != nil {
+		t.Fatalf("query sqlite_master: %v", err)
+	}
+	if after != 1 {
+		t.Fatalf("coremail_dkim_config should exist after MigrateAllRaw")
+	}
+}
+
+func TestMigrateAllRawDKIMIdempotent(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(t.TempDir(), "orvix.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	db, err := config.NewDatabase(&cfg.Database, zap.NewNop())
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	defer sqlDB.Close()
+
+	if err := MigrateAllRaw(db); err != nil {
+		t.Fatalf("first migrate: %v", err)
+	}
+	// Second run must be safe.
+	if err := MigrateAllRaw(db); err != nil {
+		t.Fatalf("second migrate must not error: %v", err)
+	}
+	var count int
+	sqlDB.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='coremail_dkim_config'").Scan(&count)
+	if count != 1 {
+		t.Fatalf("coremail_dkim_config table missing after second migrate")
+	}
+}
+
+func TestMigrateAllRawDKIMSurvivesRerun(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(t.TempDir(), "orvix.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	db, err := config.NewDatabase(&cfg.Database, zap.NewNop())
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	defer sqlDB.Close()
+
+	if err := MigrateAllRaw(db); err != nil {
+		t.Fatalf("first migrate: %v", err)
+	}
+	// Insert a DKIM row.
+	_, err = sqlDB.Exec(`INSERT INTO coremail_dkim_config (domain, selector, private_key_pem, enabled, created_at, updated_at)
+		VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))`,
+		"example.com", "orvix", "pem-data")
+	if err != nil {
+		t.Fatalf("insert dkim config: %v", err)
+	}
+	// Second migrate must not delete the row.
+	if err := MigrateAllRaw(db); err != nil {
+		t.Fatalf("second migrate: %v", err)
+	}
+	var selector string
+	if err := sqlDB.QueryRow("SELECT selector FROM coremail_dkim_config WHERE domain = ?", "example.com").Scan(&selector); err != nil {
+		t.Fatalf("dkim config row lost after second migrate: %v", err)
+	}
+	if selector != "orvix" {
+		t.Fatalf("dkim selector corrupted after second migrate: got %q want orvix", selector)
+	}
+}
+
 func createOldCoremailMailboxesSchema(t *testing.T, db *sql.DB) {
 	t.Helper()
 	_, err := db.Exec(`CREATE TABLE coremail_mailboxes (
