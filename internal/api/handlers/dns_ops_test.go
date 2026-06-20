@@ -431,6 +431,226 @@ func TestDNSOpsVerifyNoFixtureIsUnverified(t *testing.T) {
 	}
 }
 
+// TestDNSOpsVerifyStatusesAndReadinessPropagation confirms that:
+//   - plan records carry zero-value status (empty string, false)
+//   - verify response records carry populated per-record status/verified/reason
+//   - matching MX/A/SPF/DKIM/DMARC/MTA-STS/TLS-RPT all become "verified"
+//   - report.Verified is true (all required records verified)
+//   - the readiness count equals total required record count
+func TestDNSOpsVerifyStatusesAndReadinessPropagation(t *testing.T) {
+	h := newDNSOpsHarness(t)
+	defer h.close()
+
+	// Seed a DKIM row so the plan includes a DKIM record with a real public key.
+	pubBase64, err := seedDKIMRow(t, h, "example.com", "orvix")
+	if err != nil {
+		t.Fatalf("seed dkim: %v", err)
+	}
+
+	// Read the plan first to discover the MTA-STS policy id and DKIM selector.
+	planCode, planBody := h.do(t, "GET", "/api/v1/admin/dns/example.com/plan", h.adminT, "")
+	if planCode != http.StatusOK {
+		t.Fatalf("plan must be 200; got %d", planCode)
+	}
+	var planResp struct {
+		Plan struct {
+			DKIMSelector string `json:"dkim_selector"`
+			MTAPolicyID  string `json:"mta_sts_policy_id"`
+			Records      []struct {
+				Type     string `json:"type"`
+				Name     string `json:"name"`
+				Purpose  string `json:"purpose"`
+				Required bool   `json:"required"`
+				Status   string `json:"status"`
+				Verified bool   `json:"verified"`
+				Reason   string `json:"reason"`
+			} `json:"records"`
+		} `json:"plan"`
+	}
+	if err := json.Unmarshal([]byte(planBody), &planResp); err != nil {
+		t.Fatalf("plan unmarshal: %v", err)
+	}
+
+	// Verify: plan records all have zero-value status/verified/reason.
+	for _, r := range planResp.Plan.Records {
+		if r.Required && r.Status != "" {
+			t.Errorf("plan record %s/%s must have zero-value status before verify; got %q", r.Purpose, r.Name, r.Status)
+		}
+		if r.Required && r.Verified {
+			t.Errorf("plan record %s/%s must have zero-value verified=false before verify; got true", r.Purpose, r.Name)
+		}
+	}
+
+	// Populate the fake resolver so every record matches the plan.
+	populateFixtureForDomain(h, "example.com", planResp.Plan.DKIMSelector, planResp.Plan.MTAPolicyID, pubBase64)
+
+	// Now verify.
+	code, body := h.do(t, "POST", "/api/v1/admin/dns/example.com/verify", h.adminT, "")
+	if code != http.StatusOK {
+		t.Fatalf("verify must be 200; got %d body=%s", code, body)
+	}
+	var verifyResp struct {
+		Report struct {
+			Verified  bool     `json:"verified"`
+			CheckedAt string   `json:"checked_at"`
+			Warnings  []string `json:"warnings"`
+			Plan      struct {
+				Domain  string `json:"domain"`
+				Records []struct {
+					Type     string `json:"type"`
+					Name     string `json:"name"`
+					Purpose  string `json:"purpose"`
+					Required bool   `json:"required"`
+					Status   string `json:"status"`
+					Verified bool   `json:"verified"`
+					Reason   string `json:"reason"`
+				} `json:"records"`
+			} `json:"plan"`
+		} `json:"report"`
+	}
+	if err := json.Unmarshal([]byte(body), &verifyResp); err != nil {
+		t.Fatalf("verify unmarshal: %v body=%s", err, body)
+	}
+
+	if !verifyResp.Report.Verified {
+		t.Errorf("verify report must be Verified=true with matching fixtures")
+	}
+	if verifyResp.Report.CheckedAt == "" {
+		t.Errorf("verify report must carry checked_at timestamp")
+	}
+
+	// Confirm per-record statuses are populated (non-empty) and matched records are verified.
+	requiredRecords := 0
+	verifiedRecords := 0
+	for _, r := range verifyResp.Report.Plan.Records {
+		if !r.Required {
+			continue
+		}
+		requiredRecords++
+		if r.Status == "" {
+			t.Errorf("verify record %s/%s must have non-empty status; got empty", r.Purpose, r.Name)
+		}
+		if r.Verified {
+			verifiedRecords++
+		}
+		// MX, A, SPF, DKIM, DMARC, MTA-STS, TLS-RPT should all be verified.
+		switch r.Purpose {
+		case "mx", "mail_a", "spf", "dkim", "dmarc", "mta_sts", "tls_rpt":
+			if r.Status != "verified" {
+				t.Errorf("verify record %s/%s must be 'verified' with matching fixture; got %q (reason: %s)", r.Purpose, r.Name, r.Status, r.Reason)
+			}
+		case "ptr":
+			// PTR is verified via the populateFixtureForDomain helper.
+		}
+	}
+	if requiredRecords == 0 {
+		t.Fatal("plan must contain at least one required record")
+	}
+	if verifiedRecords != requiredRecords {
+		t.Errorf("readiness: %d/%d required records verified; expected all %d", verifiedRecords, requiredRecords, requiredRecords)
+	}
+}
+
+// TestDNSOpsVerifyReadinessPartialWithMissingMTASTS confirms that
+// when one required record is missing (MTA-STS), the readiness count
+// is correctly less than the total, and report.Verified is false.
+func TestDNSOpsVerifyReadinessPartialWithMissingMTASTS(t *testing.T) {
+	h := newDNSOpsHarness(t)
+	defer h.close()
+
+	pubBase64, err := seedDKIMRow(t, h, "example.com", "orvix")
+	if err != nil {
+		t.Fatalf("seed dkim: %v", err)
+	}
+
+	// Read plan to get selector and policy id.
+	planCode, planBody := h.do(t, "GET", "/api/v1/admin/dns/example.com/plan", h.adminT, "")
+	if planCode != http.StatusOK {
+		t.Fatalf("plan must be 200; got %d", planCode)
+	}
+	var planResp struct {
+		Plan struct {
+			DKIMSelector string `json:"dkim_selector"`
+			MTAPolicyID  string `json:"mta_sts_policy_id"`
+		} `json:"plan"`
+	}
+	if err := json.Unmarshal([]byte(planBody), &planResp); err != nil {
+		t.Fatalf("plan unmarshal: %v", err)
+	}
+
+	// Populate ALL records EXCEPT MTA-STS and TLS-RPT.
+	h.resolve.Set("example.com", dnsops.FakeEntry{
+		MX:  []net.MX{{Host: "mail.example.com.", Pref: 10}},
+		TXT: []string{"v=spf1 mx ip4:8.8.8.8 -all"},
+	})
+	h.resolve.Set("mail.example.com", dnsops.FakeEntry{
+		A: []net.IP{net.ParseIP("8.8.8.8")},
+	})
+	h.resolve.Set("_dmarc.example.com", dnsops.FakeEntry{
+		TXT: []string{"v=DMARC1; p=none; rua=mailto:dmarc@example.com; adkim=s; aspf=s; pct=100"},
+	})
+	// SKIP MTA-STS — intentionally not set.
+	// SKIP TLS-RPT — intentionally not set.
+	h.resolve.Set(planResp.Plan.DKIMSelector+"._domainkey.example.com", dnsops.FakeEntry{
+		TXT: []string{"v=DKIM1; k=rsa; p=" + pubBase64},
+	})
+
+	code, body := h.do(t, "POST", "/api/v1/admin/dns/example.com/verify", h.adminT, "")
+	if code != http.StatusOK {
+		t.Fatalf("verify must be 200; got %d body=%s", code, body)
+	}
+	var verifyResp struct {
+		Report struct {
+			Verified bool `json:"verified"`
+			Plan     struct {
+				Domain  string `json:"domain"`
+				Records []struct {
+					Type     string `json:"type"`
+					Name     string `json:"name"`
+					Purpose  string `json:"purpose"`
+					Required bool   `json:"required"`
+					Status   string `json:"status"`
+					Verified bool   `json:"verified"`
+					Reason   string `json:"reason"`
+				} `json:"records"`
+			} `json:"plan"`
+		} `json:"report"`
+	}
+	if err := json.Unmarshal([]byte(body), &verifyResp); err != nil {
+		t.Fatalf("verify unmarshal: %v body=%s", err, body)
+	}
+
+	// Verify report must NOT be fully verified (MTA-STS and TLS-RPT are missing).
+	if verifyResp.Report.Verified {
+		t.Errorf("verify must NOT be Verified=true when MTA-STS and TLS-RPT are missing")
+	}
+
+	// Check per-record statuses.
+	var verifiedCount, requiredCount int
+	var missingPurposes []string
+	for _, r := range verifyResp.Report.Plan.Records {
+		if !r.Required {
+			continue
+		}
+		requiredCount++
+		if r.Verified {
+			verifiedCount++
+		} else {
+			missingPurposes = append(missingPurposes, r.Purpose+"("+r.Status+")")
+		}
+	}
+	if requiredCount == 0 {
+		t.Fatal("plan must contain at least one required record")
+	}
+	t.Logf("readiness: %d/%d; missing: %v", verifiedCount, requiredCount, missingPurposes)
+	if verifiedCount >= requiredCount {
+		t.Errorf("readiness must be less than %d with missing records; got %d/%d", requiredCount, verifiedCount, requiredCount)
+	}
+	if verifiedCount != requiredCount-2 {
+		t.Errorf("expected exactly 2 unverified records (MTA-STS + TLS-RPT); got %d verified out of %d required", verifiedCount, requiredCount)
+	}
+}
+
 // ── DKIM keygen ─────────────────────────────────────────────────
 
 // TestDNSOpsDKIMGenerateStoresPrivateKeyAndReturnsPublicOnly
