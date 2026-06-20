@@ -21,7 +21,7 @@ func buildVerifiedFixturePlan(t *testing.T) *Plan {
 	plan, err := g.Generate(Inputs{
 		Domain:        "example.com",
 		MailHost:      "mail.example.com",
-		ServerIPv4:    "203.0.113.10",
+		ServerIPv4:    "8.8.8.8",
 		DKIMSelector:  "orvix",
 		DKIMPubKey:    "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArealpubkey123",
 		ReportMailbox: "dmarc@example.com",
@@ -39,10 +39,10 @@ func populateResolverForFixture(f *FakeResolver, plan *Plan) {
 	pubKey := "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArealpubkey123"
 	f.Set("example.com", FakeEntry{
 		MX:  []net.MX{{Host: "mail.example.com.", Pref: 10}},
-		TXT: []string{"v=spf1 mx ip4:203.0.113.10 -all"},
+		TXT: []string{"v=spf1 mx ip4:8.8.8.8 -all"},
 	})
 	f.Set("mail.example.com", FakeEntry{
-		A: []net.IP{net.ParseIP("203.0.113.10")},
+		A: []net.IP{net.ParseIP("8.8.8.8")},
 	})
 	f.Set("_dmarc.example.com", FakeEntry{
 		TXT: []string{"v=DMARC1; p=none; rua=mailto:dmarc@example.com; adkim=s; aspf=s; pct=100"},
@@ -56,8 +56,8 @@ func populateResolverForFixture(f *FakeResolver, plan *Plan) {
 	f.Set("orvix._domainkey.example.com", FakeEntry{
 		TXT: []string{"v=DKIM1; k=rsa; p=" + pubKey},
 	})
-	f.Set("203.0.113.10", FakeEntry{
-		PTRFor: map[string][]string{"203.0.113.10": {"mail.example.com."}},
+	f.Set("8.8.8.8", FakeEntry{
+		PTRFor: map[string][]string{"8.8.8.8": {"mail.example.com."}},
 	})
 }
 
@@ -133,7 +133,7 @@ func TestVerifierMXMissing(t *testing.T) {
 func TestVerifierMailAIPv4Mismatch(t *testing.T) {
 	plan := buildVerifiedFixturePlan(t)
 	f := NewFakeResolver()
-	f.Set("mail.example.com", FakeEntry{A: []net.IP{net.ParseIP("198.51.100.10")}})
+	f.Set("mail.example.com", FakeEntry{A: []net.IP{net.ParseIP("1.1.1.1")}})
 	v := NewVerifier(f)
 	report, err := v.Verify(context.Background(), plan)
 	if err != nil {
@@ -156,7 +156,7 @@ func TestVerifierMultipleSPF(t *testing.T) {
 	f := NewFakeResolver()
 	f.Set("example.com", FakeEntry{
 		TXT: []string{
-			"v=spf1 mx ip4:203.0.113.10 -all",
+			"v=spf1 mx ip4:8.8.8.8 -all",
 			"v=spf1 include:_spf.google.com -all",
 		},
 	})
@@ -191,7 +191,7 @@ func TestVerifierSPFChunkedAcrossStrings(t *testing.T) {
 	plan := buildVerifiedFixturePlan(t)
 	f := NewFakeResolver()
 	f.Set("example.com", FakeEntry{
-		TXT: []string{"v=spf1 mx ", "ip4:203.0.113.10 -all"},
+		TXT: []string{"v=spf1 mx ", "ip4:8.8.8.8 -all"},
 	})
 	v := NewVerifier(f)
 	report, err := v.Verify(context.Background(), plan)
@@ -413,8 +413,8 @@ func TestVerifierCAAConflictNotOverwritten(t *testing.T) {
 func TestVerifierPTRMismatch(t *testing.T) {
 	plan := buildVerifiedFixturePlan(t)
 	f := NewFakeResolver()
-	f.Set("203.0.113.10", FakeEntry{
-		PTRFor: map[string][]string{"203.0.113.10": {"some-other-host.example.com."}},
+	f.Set("8.8.8.8", FakeEntry{
+		PTRFor: map[string][]string{"8.8.8.8": {"some-other-host.example.com."}},
 	})
 	v := NewVerifier(f)
 	report, err := v.Verify(context.Background(), plan)

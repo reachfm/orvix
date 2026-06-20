@@ -13,7 +13,7 @@ func fixturePlan(t *testing.T) *Plan {
 	g := NewGenerator()
 	plan, err := g.Generate(Inputs{
 		Domain: "example.com", MailHost: "mail.example.com",
-		ServerIPv4: "203.0.113.10", DKIMSelector: "orvix",
+		ServerIPv4: "8.8.8.8", DKIMSelector: "orvix",
 		DKIMPubKey: "PUBKEY",
 	})
 	if err != nil {

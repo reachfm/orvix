@@ -15,7 +15,7 @@ func TestGeneratorPlanCoversAllRequired(t *testing.T) {
 	plan, err := g.Generate(Inputs{
 		Domain:     "example.com",
 		MailHost:   "mail.example.com",
-		ServerIPv4: "203.0.113.10",
+		ServerIPv4: "8.8.8.8",
 	})
 	if err != nil {
 		t.Fatalf("generate: %v", err)
@@ -40,7 +40,7 @@ func TestGeneratorSPFContent(t *testing.T) {
 	g := NewGenerator()
 	plan, err := g.Generate(Inputs{
 		Domain: "example.com", MailHost: "mail.example.com",
-		ServerIPv4: "203.0.113.10",
+		ServerIPv4: "8.8.8.8",
 	})
 	if err != nil {
 		t.Fatalf("generate: %v", err)
@@ -55,7 +55,7 @@ func TestGeneratorSPFContent(t *testing.T) {
 		if !strings.Contains(r.Value, "mx") {
 			t.Errorf("SPF must contain mx; got %q", r.Value)
 		}
-		if !strings.Contains(r.Value, "203.0.113.10") {
+		if !strings.Contains(r.Value, "8.8.8.8") {
 			t.Errorf("SPF must contain server IPv4; got %q", r.Value)
 		}
 		if !strings.Contains(r.Value, "-all") {
@@ -75,7 +75,7 @@ func TestGeneratorDKIMUsesProvidedPubKey(t *testing.T) {
 	g := NewGenerator()
 	plan, err := g.Generate(Inputs{
 		Domain: "example.com", MailHost: "mail.example.com",
-		ServerIPv4: "203.0.113.10",
+		ServerIPv4: "8.8.8.8",
 		DKIMSelector: "orvix",
 		DKIMPubKey:   "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArealpubkey123",
 	})
@@ -116,7 +116,7 @@ func TestGeneratorDKIMMissingKeyHonest(t *testing.T) {
 	g := NewGenerator()
 	plan, err := g.Generate(Inputs{
 		Domain: "example.com", MailHost: "mail.example.com",
-		ServerIPv4: "203.0.113.10",
+		ServerIPv4: "8.8.8.8",
 	})
 	if err != nil {
 		t.Fatalf("generate: %v", err)
@@ -141,7 +141,7 @@ func TestGeneratorDMARCDefaultSafe(t *testing.T) {
 	g := NewGenerator()
 	plan, err := g.Generate(Inputs{
 		Domain: "example.com", MailHost: "mail.example.com",
-		ServerIPv4: "203.0.113.10", ReportMailbox: "dmarc@example.com",
+		ServerIPv4: "8.8.8.8", ReportMailbox: "dmarc@example.com",
 	})
 	if err != nil {
 		t.Fatalf("generate: %v", err)
@@ -177,7 +177,7 @@ func TestGeneratorMTASTSTestingDefault(t *testing.T) {
 	g := NewGenerator()
 	plan, err := g.Generate(Inputs{
 		Domain: "example.com", MailHost: "mail.example.com",
-		ServerIPv4: "203.0.113.10",
+		ServerIPv4: "8.8.8.8",
 	})
 	if err != nil {
 		t.Fatalf("generate: %v", err)
@@ -210,7 +210,7 @@ func TestGeneratorTLSRPTContent(t *testing.T) {
 	g := NewGenerator()
 	plan, err := g.Generate(Inputs{
 		Domain: "example.com", MailHost: "mail.example.com",
-		ServerIPv4: "203.0.113.10",
+		ServerIPv4: "8.8.8.8",
 	})
 	if err != nil {
 		t.Fatalf("generate: %v", err)
@@ -234,7 +234,7 @@ func TestGeneratorCAARecords(t *testing.T) {
 	g := NewGenerator()
 	plan, err := g.Generate(Inputs{
 		Domain: "example.com", MailHost: "mail.example.com",
-		ServerIPv4: "203.0.113.10",
+		ServerIPv4: "8.8.8.8",
 	})
 	if err != nil {
 		t.Fatalf("generate: %v", err)
@@ -265,7 +265,7 @@ func TestGeneratorIPv6Optional(t *testing.T) {
 	g := NewGenerator()
 	noV6, err := g.Generate(Inputs{
 		Domain: "example.com", MailHost: "mail.example.com",
-		ServerIPv4: "203.0.113.10",
+		ServerIPv4: "8.8.8.8",
 	})
 	if err != nil {
 		t.Fatalf("no-v6: %v", err)
@@ -277,14 +277,14 @@ func TestGeneratorIPv6Optional(t *testing.T) {
 	}
 	withV6, err := g.Generate(Inputs{
 		Domain: "example.com", MailHost: "mail.example.com",
-		ServerIPv4: "203.0.113.10", ServerIPv6: "2001:db8::1",
+		ServerIPv4: "8.8.8.8", ServerIPv6: "2607:f8b0::1",
 	})
 	if err != nil {
 		t.Fatalf("with-v6: %v", err)
 	}
 	found := false
 	for _, r := range withV6.Records {
-		if r.Type == RecordAAAA && r.Value == "2001:db8::1" {
+		if r.Type == RecordAAAA && r.Value == "2607:f8b0::1" {
 			found = true
 		}
 	}
@@ -299,7 +299,7 @@ func TestGeneratorPTRProviderSide(t *testing.T) {
 	g := NewGenerator()
 	plan, err := g.Generate(Inputs{
 		Domain: "example.com", MailHost: "mail.example.com",
-		ServerIPv4: "203.0.113.10",
+		ServerIPv4: "8.8.8.8",
 	})
 	if err != nil {
 		t.Fatalf("generate: %v", err)
@@ -326,7 +326,7 @@ func TestGeneratorDANETLSAReadinessOnly(t *testing.T) {
 	g := NewGenerator()
 	noDNSSEC, _ := g.Generate(Inputs{
 		Domain: "example.com", MailHost: "mail.example.com",
-		ServerIPv4: "203.0.113.10",
+		ServerIPv4: "8.8.8.8",
 	})
 	for _, r := range noDNSSEC.Records {
 		if r.Type == RecordTLSA {
@@ -335,7 +335,7 @@ func TestGeneratorDANETLSAReadinessOnly(t *testing.T) {
 	}
 	withDNSSEC, _ := g.Generate(Inputs{
 		Domain: "example.com", MailHost: "mail.example.com",
-		ServerIPv4: "203.0.113.10", DNSSECDetected: true,
+		ServerIPv4: "8.8.8.8", DNSSECDetected: true,
 	})
 	found := false
 	for _, r := range withDNSSEC.Records {
@@ -370,7 +370,7 @@ func TestGeneratorValidateRejectsInvalidDomain(t *testing.T) {
 	}
 	for _, bad := range cases {
 		if _, err := g.Generate(Inputs{
-			Domain: bad, MailHost: "mail.example.com", ServerIPv4: "203.0.113.10",
+			Domain: bad, MailHost: "mail.example.com", ServerIPv4: "8.8.8.8",
 		}); err == nil {
 			t.Errorf("domain %q should be rejected", bad)
 		}
@@ -383,7 +383,7 @@ func TestGeneratorBIMIReadinessOnly(t *testing.T) {
 	g := NewGenerator()
 	plan, _ := g.Generate(Inputs{
 		Domain: "example.com", MailHost: "mail.example.com",
-		ServerIPv4: "203.0.113.10",
+		ServerIPv4: "8.8.8.8",
 	})
 	for _, r := range plan.Records {
 		if r.Purpose != PurposeBIMI {
@@ -445,7 +445,7 @@ func TestGeneratorNoShellOut(t *testing.T) {
 	if _, err := r.LookupAAAA(context.Background(), "example.com"); err == nil {
 		t.Errorf("FakeResolver with no entries must return IsNotFound for AAAA")
 	}
-	if _, err := r.LookupPTR(context.Background(), "203.0.113.10"); err == nil {
+	if _, err := r.LookupPTR(context.Background(), "8.8.8.8"); err == nil {
 		t.Errorf("FakeResolver with no entries must return IsNotFound for PTR")
 	}
 	// NetResolver must construct without panicking.
@@ -455,10 +455,10 @@ func TestGeneratorNoShellOut(t *testing.T) {
 // TestFakeResolverLookupPTR matches a recorded PTR map.
 func TestFakeResolverLookupPTR(t *testing.T) {
 	f := NewFakeResolver()
-	f.Set("203.0.113.10", FakeEntry{
-		PTRFor: map[string][]string{"203.0.113.10": {"mail.example.com."}},
+	f.Set("8.8.8.8", FakeEntry{
+		PTRFor: map[string][]string{"8.8.8.8": {"mail.example.com."}},
 	})
-	hosts, err := f.LookupPTR(context.Background(), "203.0.113.10")
+	hosts, err := f.LookupPTR(context.Background(), "8.8.8.8")
 	if err != nil {
 		t.Fatalf("lookupPTR: %v", err)
 	}

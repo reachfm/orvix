@@ -16,7 +16,7 @@ func fixturePlan(t *testing.T) *dnsops.Plan {
 	g := dnsops.NewGenerator()
 	plan, err := g.Generate(dnsops.Inputs{
 		Domain: "example.com", MailHost: "mail.example.com",
-		ServerIPv4: "203.0.113.10", DKIMSelector: "orvix",
+		ServerIPv4: "8.8.8.8", DKIMSelector: "orvix",
 		DKIMPubKey: "PUBKEY",
 	})
 	if err != nil {
