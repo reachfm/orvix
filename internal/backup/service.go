@@ -558,12 +558,14 @@ func redactEnvFile(input []byte) []byte {
 
 // CreateArchive packages a completed backup into a single .tar.gz with explicit allowlist.
 // Archive contents:
-//   - var/lib/orvix/orvix.db          (database snapshot)
+//   - var/lib/orvix/orvix.db          (database snapshot, streamed)
 //   - etc/orvix/orvix.yaml.redacted  (sanitized config, if available)
 //   - backup.json                    (enterprise manifest — source of truth for 2H)
 //   - RESTORE_INSTRUCTIONS.txt       (restore guidance)
 //   - checksums.txt                  (sha256 per file)
 //
+// Large payloads (DB, mail store) are streamed through the tar writer
+// and hashed incrementally so the archive is never fully in memory.
 // Sensitive files (.env, .key, .pem, .crt, .p12, .pfx, license, token files)
 // are NEVER included.
 func (s *Service) CreateArchive(ctx context.Context, backupID string) (string, error) {
@@ -581,36 +583,65 @@ func (s *Service) CreateArchive(ctx context.Context, backupID string) (string, e
 	gw := gzip.NewWriter(f)
 	tw := tar.NewWriter(gw)
 
-	// Collect files with their sha256 for the manifest and checksums.txt.
-	type arcFile struct {
-		tarName string
-		data    []byte
-		mode    int64
-	}
-	var files []arcFile
+	// Collect file items with their sha256 for the manifest and checksums.txt.
 	var items []ManifestItem
 
-	// 1. Database snapshot
-	dbPath := filepath.Join(bp, "database.sqlite")
-	if data, err := os.ReadFile(dbPath); err == nil {
+	// Helper to write a file entry from a byte slice.
+	writeBufEntry := func(tarName string, data []byte) error {
 		h := sha256.Sum256(data)
-		items = append(items, ManifestItem{Path: "var/lib/orvix/orvix.db", Size: int64(len(data)), SHA256: hex.EncodeToString(h[:])})
-		files = append(files, arcFile{tarName: "var/lib/orvix/orvix.db", data: data, mode: 0640})
+		items = append(items, ManifestItem{Path: tarName, Size: int64(len(data)), SHA256: hex.EncodeToString(h[:])})
+		return writeTarEntry(tw, tarName, data, 0640)
 	}
 
-	// 2. Redacted config
+	// Helper to write a file entry by streaming from disk.
+	writeStreamEntry := func(tarName, srcPath string) error {
+		src, err := os.Open(srcPath)
+		if err != nil {
+			return err
+		}
+		defer src.Close()
+		stat, err := src.Stat()
+		if err != nil {
+			return err
+		}
+		if err := tw.WriteHeader(&tar.Header{
+			Name:     tarName,
+			Mode:     0640,
+			Size:     stat.Size(),
+			Typeflag: tar.TypeReg,
+		}); err != nil {
+			return fmt.Errorf("tar header %s: %w", tarName, err)
+		}
+		hasher := sha256.New()
+		written, err := io.Copy(tw, io.TeeReader(src, hasher))
+		if err != nil {
+			return fmt.Errorf("write %s: %w", tarName, err)
+		}
+		items = append(items, ManifestItem{Path: tarName, Size: written, SHA256: hex.EncodeToString(hasher.Sum(nil))})
+		return nil
+	}
+
+	// 1. Database snapshot (streamed, not loaded into memory)
+	dbPath := filepath.Join(bp, "database.sqlite")
+	if _, err := os.Stat(dbPath); err == nil {
+		if err := writeStreamEntry("var/lib/orvix/orvix.db", dbPath); err != nil {
+			return "", fmt.Errorf("archive db: %w", err)
+		}
+	}
+
+	// 2. Redacted config (small metadata, read into memory)
 	cfgPath := s.configPath
 	if cfgPath == "" {
 		cfgPath = "/etc/orvix/orvix.yaml"
 	}
 	if data, err := os.ReadFile(cfgPath); err == nil {
 		redacted := redactSensitiveYAML(data)
-		h := sha256.Sum256(redacted)
-		items = append(items, ManifestItem{Path: "etc/orvix/orvix.yaml.redacted", Size: int64(len(redacted)), SHA256: hex.EncodeToString(h[:])})
-		files = append(files, arcFile{tarName: "etc/orvix/orvix.yaml.redacted", data: redacted, mode: 0640})
+		if err := writeBufEntry("etc/orvix/orvix.yaml.redacted", redacted); err != nil {
+			return "", fmt.Errorf("archive config: %w", err)
+		}
 	}
 
-	// 3. .env files if present (redacted) — redactSensitiveYAML also catches env lines
+	// 3. .env files if present (redacted)
 	envDir := filepath.Dir(cfgPath)
 	envPattern := filepath.Join(envDir, "*.env")
 	if envMatches, err := filepath.Glob(envPattern); err == nil {
@@ -618,9 +649,9 @@ func (s *Service) CreateArchive(ctx context.Context, backupID string) (string, e
 			if data, err := os.ReadFile(envPath); err == nil {
 				redacted := redactSensitiveYAML(data)
 				relName := "etc/orvix/" + filepath.Base(envPath) + ".redacted"
-				h := sha256.Sum256(redacted)
-				items = append(items, ManifestItem{Path: relName, Size: int64(len(redacted)), SHA256: hex.EncodeToString(h[:])})
-				files = append(files, arcFile{tarName: relName, data: redacted, mode: 0640})
+				if err := writeBufEntry(relName, redacted); err != nil {
+					return "", fmt.Errorf("archive env: %w", err)
+				}
 			}
 		}
 	}
@@ -646,7 +677,9 @@ func (s *Service) CreateArchive(ctx context.Context, backupID string) (string, e
 	items = append(items, ManifestItem{Path: "backup.json", Size: int64(len(manifestData)), SHA256: hex.EncodeToString(fileHash[:])})
 
 	// 4. Write manifest
-	files = append(files, arcFile{tarName: "backup.json", data: manifestData, mode: 0640})
+	if err := writeBufEntry("backup.json", manifestData); err != nil {
+		return "", fmt.Errorf("archive manifest: %w", err)
+	}
 
 	// 5. Write RESTORE_INSTRUCTIONS.txt
 	instructions := `Orvix Enterprise Mail — Restore Instructions
@@ -676,34 +709,26 @@ Restore process (Phase 2H):
 For a full disaster recovery, install Orvix on a clean host first,
 then use the admin panel to restore from this backup.
 `
-	h := sha256.Sum256([]byte(instructions))
-	items = append(items, ManifestItem{Path: "RESTORE_INSTRUCTIONS.txt", Size: int64(len(instructions)), SHA256: hex.EncodeToString(h[:])})
-	files = append(files, arcFile{tarName: "RESTORE_INSTRUCTIONS.txt", data: []byte(instructions), mode: 0640})
+	if err := writeBufEntry("RESTORE_INSTRUCTIONS.txt", []byte(instructions)); err != nil {
+		return "", fmt.Errorf("archive instructions: %w", err)
+	}
 
 	// 6. Write checksums.txt
 	var checksums strings.Builder
 	for _, it := range items {
 		checksums.WriteString(fmt.Sprintf("%s  %s\n", it.SHA256, it.Path))
 	}
-	checksumsData := checksums.String()
-	files = append(files, arcFile{tarName: "checksums.txt", data: []byte(checksumsData), mode: 0640})
-
-	// Write all archive entries.
-	for _, af := range files {
-		if err := writeTarEntry(tw, af.tarName, af.data, af.mode); err != nil {
-			return "", fmt.Errorf("archive entry %s: %w", af.tarName, err)
-		}
+	if err := writeBufEntry("checksums.txt", []byte(checksums.String())); err != nil {
+		return "", fmt.Errorf("archive checksums: %w", err)
 	}
 
-	// Close tar and gzip writers explicitly so the final archive bytes
-	// are flushed before we compute the sidecar sha256.
+	// Close tar and gzip writers explicitly.
 	if err := tw.Close(); err != nil {
 		return "", fmt.Errorf("close tar: %w", err)
 	}
 	if err := gw.Close(); err != nil {
 		return "", fmt.Errorf("close gzip: %w", err)
 	}
-	// Sync and close the file so the bytes are on disk for the sidecar.
 	if err := f.Sync(); err != nil {
 		return "", fmt.Errorf("sync archive: %w", err)
 	}
@@ -711,14 +736,19 @@ then use the admin panel to restore from this backup.
 		return "", fmt.Errorf("close archive: %w", err)
 	}
 
-	// Compute final archive sha256 and write sidecar.
-	archiveBytes, err := os.ReadFile(archivePath)
-	if err != nil {
-		return "", fmt.Errorf("read archive for sidecar: %w", err)
-	}
-	archiveSHA := sha256.Sum256(archiveBytes)
+	// Compute final archive sha256 by streaming the file (not ReadFile).
 	sidecarPath := archivePath + ".sha256"
-	if err := os.WriteFile(sidecarPath, []byte(hex.EncodeToString(archiveSHA[:])+"  "+filepath.Base(archivePath)+"\n"), 0640); err != nil {
+	sidecarFile, err := os.Open(archivePath)
+	if err != nil {
+		return "", fmt.Errorf("open archive for sidecar: %w", err)
+	}
+	defer sidecarFile.Close()
+	sidecarHash := sha256.New()
+	if _, err := io.Copy(sidecarHash, sidecarFile); err != nil {
+		return "", fmt.Errorf("hash archive for sidecar: %w", err)
+	}
+	sidecarData := hex.EncodeToString(sidecarHash.Sum(nil)) + "  " + filepath.Base(archivePath) + "\n"
+	if err := os.WriteFile(sidecarPath, []byte(sidecarData), 0640); err != nil {
 		return "", fmt.Errorf("write sidecar: %w", err)
 	}
 

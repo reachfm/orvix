@@ -406,3 +406,82 @@ func containsString(items []string, want string) bool {
 	}
 	return false
 }
+
+// ── Delete confirmation tests ────────────────────────────
+
+func TestBackupDeleteNoBodyReturns400(t *testing.T) {
+	router, sqlDB, token, csrf, _ := buildBackupHarness(t)
+	defer router.App().Shutdown()
+	defer sqlDB.Close()
+	created := createBackupViaAPI(t, router, token, csrf)
+	resp, body := backupRequest(t, router, "DELETE", "/api/v1/admin/backups/"+created.ID, "", token, csrf)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for no body, got %d: %s", resp.StatusCode, body)
+	}
+}
+
+func TestBackupDeleteWrongConfirmReturns400(t *testing.T) {
+	router, sqlDB, token, csrf, _ := buildBackupHarness(t)
+	defer router.App().Shutdown()
+	defer sqlDB.Close()
+	created := createBackupViaAPI(t, router, token, csrf)
+	resp, body := backupRequest(t, router, "DELETE", "/api/v1/admin/backups/"+created.ID, `{"confirm":"wrong-value"}`, token, csrf)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for wrong confirm, got %d: %s", resp.StatusCode, body)
+	}
+}
+
+func TestBackupDeleteCorrectConfirmSucceeds(t *testing.T) {
+	router, sqlDB, token, csrf, backupDir := buildBackupHarness(t)
+	defer router.App().Shutdown()
+	defer sqlDB.Close()
+	created := createBackupViaAPI(t, router, token, csrf)
+	resp, body := backupRequest(t, router, "DELETE", "/api/v1/admin/backups/"+created.ID, `{"confirm":"delete-orvix-backup"}`, token, csrf)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected 204 for correct confirm, got %d: %s", resp.StatusCode, body)
+	}
+	if _, err := os.Stat(filepath.Join(backupDir, created.ID)); !os.IsNotExist(err) {
+		t.Fatalf("backup dir should be deleted, err=%v", err)
+	}
+}
+
+// ── Legacy route tests ───────────────────────────────────
+
+func TestBackupLegacyWriteRoutesReturn410(t *testing.T) {
+	router, sqlDB, token, csrf, _ := buildBackupHarness(t)
+	defer router.App().Shutdown()
+	defer sqlDB.Close()
+
+	for _, path := range []string{
+		"/api/v1/backups",
+		"/api/v1/backups/schedule",
+		"/api/v1/backups/retention",
+	} {
+		resp, body := backupRequest(t, router, "POST", path, `{}`, token, csrf)
+		if resp.StatusCode != http.StatusGone {
+			t.Fatalf("POST %s expected 410, got %d: %s", path, resp.StatusCode, body)
+		}
+	}
+
+	created := createBackupViaAPI(t, router, token, csrf)
+	resp, body := backupRequest(t, router, "DELETE", "/api/v1/backups/"+created.ID, `{"confirm":"delete-orvix-backup"}`, token, csrf)
+	if resp.StatusCode != http.StatusGone {
+		t.Fatalf("DELETE /api/v1/backups/:id expected 410, got %d: %s", resp.StatusCode, body)
+	}
+
+	for _, path := range []string{
+		"/api/v1/backups",
+		"/api/v1/backups/schedule",
+		"/api/v1/backups/metrics",
+		"/api/v1/backups/health",
+	} {
+		resp, body := backupRequest(t, router, "GET", path, "", token, "")
+		if resp.StatusCode != http.StatusGone {
+			t.Fatalf("GET %s expected 410, got %d: %s", path, resp.StatusCode, body)
+		}
+	}
+	resp, body = backupRequest(t, router, "GET", "/api/v1/backups/"+created.ID+"/download", "", token, "")
+	if resp.StatusCode != http.StatusGone {
+		t.Fatalf("GET /api/v1/backups/:id/download expected 410, got %d: %s", resp.StatusCode, body)
+	}
+}
