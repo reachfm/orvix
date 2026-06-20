@@ -75,6 +75,9 @@
     // DNS wizard — the host's hostname is used to render the SPF /
     // MX recommendations. Comes from /api/v1/admin/summary.runtime.
     hostname: '',
+    // Per-provider dry-run plan results, preserved across panel
+    // re-renders so the operator never loses the plan output.
+    dnsProviderPlans: {},
     // UI flags.
     bootDone: false,
     pendingRoute: null,
@@ -2324,6 +2327,8 @@
     state.dnsPlan = null;
     state.dnsReport = null;
     state.dnsProviderPlan = null;
+    state.dnsProviderPlans = {};
+    state.dnsProviderPlanConflicts = {};
     try {
       var ds = await apiGet('/api/v1/domains');
       state.domains = Array.isArray(ds) ? ds : [];
@@ -2743,6 +2748,11 @@
       }
       var outHost = el('div', { class: 'dns-provider-output', id: 'dns-provider-out-' + p.name });
       card.appendChild(outHost);
+      // Preserve any previously loaded dry-run plan output in state
+      // so it survives panel re-renders.
+      if (state.dnsProviderPlans && state.dnsProviderPlans[p.name]) {
+        outHost.appendChild(renderChangePlan(state.dnsProviderPlans[p.name]));
+      }
       host.appendChild(card);
     });
   }
@@ -2756,6 +2766,10 @@
       var resp = await apiPost('/api/v1/admin/dns/' + encodeURIComponent(d) + '/provider/plan?provider=' + encodeURIComponent(name), {});
       var cp = resp && resp.change_plan;
       state.dnsProviderPlan = cp;
+      // Store per-provider plan in state so renderDnsProviderPanel
+      // can preserve the output across re-renders.
+      state.dnsProviderPlans = state.dnsProviderPlans || {};
+      state.dnsProviderPlans[name] = cp;
       // Track per-provider conflict state so the Apply button
       // can be disabled when conflicts exist.
       state.dnsProviderPlanConflicts = state.dnsProviderPlanConflicts || {};
@@ -2765,7 +2779,8 @@
         out.appendChild(renderChangePlan(cp));
       }
       // Re-render the provider panel so the Apply button
-      // reflects the updated conflict state.
+      // reflects the updated conflict state. The plan output
+      // is re-rendered from state.dnsProviderPlans.
       renderDnsProviderPanel();
     } catch (err) {
       if (out) { out.innerHTML = ''; out.appendChild(el('div', { class: 'dns-warning', text: err && err.message ? err.message : 'plan failed' })); }

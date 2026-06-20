@@ -420,23 +420,41 @@ func applyEnvOverrides(v *viper.Viper, cfg *Config) {
 	if v.GetString("DNS_PUBLIC_IPV6") != "" {
 		cfg.DNS.PublicIPv6 = v.GetString("DNS_PUBLIC_IPV6")
 	}
-	if v.GetString("NAMECHEAP_ENABLE_APPLY") != "" {
-		cfg.DNS.NamecheapEnableApply = v.GetBool("NAMECHEAP_ENABLE_APPLY")
+	// Namecheap env vars: support BOTH the documented nested form
+	// (ORVIX_DNS_NAMECHEAP_* → viper key "DNS_NAMECHEAP_*") and
+	// the flat alias form (ORVIX_NAMECHEAP_* → viper key
+	// "NAMECHEAP_*"). The nested form is the canonical documented
+	// env name; the flat alias is a convenience. The default is
+	// false for bools and empty for strings.
+	if s := v.GetString("DNS_NAMECHEAP_API_USER"); s != "" {
+		cfg.DNS.NamecheapAPIUser = s
+	} else if s := v.GetString("NAMECHEAP_API_USER"); s != "" {
+		cfg.DNS.NamecheapAPIUser = s
 	}
-	if v.GetString("NAMECHEAP_API_USER") != "" {
-		cfg.DNS.NamecheapAPIUser = v.GetString("NAMECHEAP_API_USER")
+	if s := v.GetString("DNS_NAMECHEAP_API_KEY"); s != "" {
+		cfg.DNS.NamecheapAPIKey = s
+	} else if s := v.GetString("NAMECHEAP_API_KEY"); s != "" {
+		cfg.DNS.NamecheapAPIKey = s
 	}
-	if v.GetString("NAMECHEAP_API_KEY") != "" {
-		cfg.DNS.NamecheapAPIKey = v.GetString("NAMECHEAP_API_KEY")
+	if s := v.GetString("DNS_NAMECHEAP_USERNAME"); s != "" {
+		cfg.DNS.NamecheapUsername = s
+	} else if s := v.GetString("NAMECHEAP_USERNAME"); s != "" {
+		cfg.DNS.NamecheapUsername = s
 	}
-	if v.GetString("NAMECHEAP_USERNAME") != "" {
-		cfg.DNS.NamecheapUsername = v.GetString("NAMECHEAP_USERNAME")
+	if s := v.GetString("DNS_NAMECHEAP_CLIENT_IP"); s != "" {
+		cfg.DNS.NamecheapClientIP = s
+	} else if s := v.GetString("NAMECHEAP_CLIENT_IP"); s != "" {
+		cfg.DNS.NamecheapClientIP = s
 	}
-	if v.GetString("NAMECHEAP_CLIENT_IP") != "" {
-		cfg.DNS.NamecheapClientIP = v.GetString("NAMECHEAP_CLIENT_IP")
-	}
-	if v.GetString("NAMECHEAP_SANDBOX") != "" {
+	if v.GetString("DNS_NAMECHEAP_SANDBOX") != "" {
+		cfg.DNS.NamecheapSandbox = v.GetBool("DNS_NAMECHEAP_SANDBOX")
+	} else if v.GetString("NAMECHEAP_SANDBOX") != "" {
 		cfg.DNS.NamecheapSandbox = v.GetBool("NAMECHEAP_SANDBOX")
+	}
+	if v.GetString("DNS_NAMECHEAP_ENABLE_APPLY") != "" {
+		cfg.DNS.NamecheapEnableApply = v.GetBool("DNS_NAMECHEAP_ENABLE_APPLY")
+	} else if v.GetString("NAMECHEAP_ENABLE_APPLY") != "" {
+		cfg.DNS.NamecheapEnableApply = v.GetBool("NAMECHEAP_ENABLE_APPLY")
 	}
 	if v.GetString("COREMAIL_ENABLED") != "" {
 		cfg.CoreMail.Enabled = v.GetBool("COREMAIL_ENABLED")

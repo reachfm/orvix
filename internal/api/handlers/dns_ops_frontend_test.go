@@ -508,6 +508,29 @@ func TestAdminDNSOpsProviderApplyDisabledStates(t *testing.T) {
 	}
 }
 
+// TestAdminDNSOpsProviderPlanPreserved checks that the dry-run
+// plan output is stored in state and re-rendered in the provider
+// panel, surviving the re-render that the Apply button state
+// update triggers.
+func TestAdminDNSOpsProviderPlanPreserved(t *testing.T) {
+	src := readFile(t, adminRepoRoot(t), "release/admin/app.js")
+	// The state must track per-provider plans so the panel can
+	// re-render them after the apply button state update.
+	if !strings.Contains(src, "dnsProviderPlans") {
+		t.Errorf("state must track per-provider dry-run plans (dnsProviderPlans)")
+	}
+	// The renderDnsProviderPanel function must read from state
+	// and append the stored plan output to the card.
+	if !strings.Contains(src, "renderChangePlan(state.dnsProviderPlans[p.name])") {
+		t.Errorf("provider panel must render stored plan from state after re-render")
+	}
+	// The loadDnsProviderPlan function must store the plan in
+	// state before calling renderDnsProviderPanel.
+	if !strings.Contains(src, "state.dnsProviderPlans[name] = cp") {
+		t.Errorf("loadDnsProviderPlan must store plan in state before re-render")
+	}
+}
+
 // silence unused-import warnings if the test build swaps out
 // the json import.
 var _ = json.Marshal

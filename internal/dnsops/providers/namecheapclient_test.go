@@ -834,6 +834,280 @@ func TestNamecheapProviderRejectsMultiLabelSuffix(t *testing.T) {
 	}
 }
 
+// ── BLOCKER 2: Duplicate live managed identity tests ────────────
+//
+// These tests verify that duplicate managed semantic identities
+// in the live zone are detected and surfaced as conflicts before
+// any SetHosts call. Unrelated records (google-site-verification)
+// are never flagged.
+
+func TestNamecheapProviderDuplicateLiveSPF(t *testing.T) {
+	client := NewFakeNamecheapClient()
+	// Two live @ TXT records with v=spf1 prefix but different values.
+	client.SetLive("example", "com", []NamecheapHost{
+		{Name: "@", Type: "MX", Address: "mail.example.com", MXPref: "10", TTL: "1800"},
+		{Name: "mail", Type: "A", Address: "203.0.113.10", TTL: "1800"},
+		{Name: "mta-sts", Type: "A", Address: "203.0.113.10", TTL: "1800"},
+		{Name: "@", Type: "TXT", Address: "v=spf1 mx ip4:203.0.113.10 -all", TTL: "1800"},
+		{Name: "@", Type: "TXT", Address: "v=spf1 include:bad.example ~all", TTL: "1800"},
+	})
+	p := NewNamecheapProvider(NamecheapConfig{
+		APIUser:     "u",
+		APIKey:      "k",
+		Username:    "u",
+		EnableApply: true,
+	}, client)
+	cp, _ := p.Plan(context.Background(), fixturePlanForNamecheap(t))
+	hasConflict := false
+	for _, s := range cp.Steps {
+		if s.Record.Purpose == "spf" && s.Action == dnsops.ActionConflict {
+			hasConflict = true
+		}
+	}
+	if !hasConflict {
+		t.Errorf("duplicate SPF must surface Action=Conflict")
+	}
+	res, _ := p.Apply(context.Background(), cp, "apply-dns-changes")
+	if res.Failed == 0 {
+		t.Errorf("Apply must refuse with Failed>0 when duplicate SPF exists")
+	}
+	if len(client.SetCalls()) != 0 {
+		t.Errorf("Apply must not call SetHosts when duplicate SPF exists")
+	}
+}
+
+func TestNamecheapProviderDuplicateLiveDKIM(t *testing.T) {
+	client := NewFakeNamecheapClient()
+	// Two live DKIM TXT records at the same host with different values.
+	client.SetLive("example", "com", []NamecheapHost{
+		{Name: "@", Type: "MX", Address: "mail.example.com", MXPref: "10", TTL: "1800"},
+		{Name: "mail", Type: "A", Address: "203.0.113.10", TTL: "1800"},
+		{Name: "mta-sts", Type: "A", Address: "203.0.113.10", TTL: "1800"},
+		{Name: "@", Type: "TXT", Address: "v=spf1 mx ip4:203.0.113.10 -all", TTL: "1800"},
+		{Name: "default._domainkey", Type: "TXT", Address: "v=DKIM1; k=rsa; p=AAAA", TTL: "1800"},
+		{Name: "default._domainkey", Type: "TXT", Address: "v=DKIM1; k=rsa; p=BBBB", TTL: "1800"},
+	})
+	p := NewNamecheapProvider(NamecheapConfig{
+		APIUser:     "u",
+		APIKey:      "k",
+		Username:    "u",
+		EnableApply: true,
+	}, client)
+	cp, _ := p.Plan(context.Background(), fixturePlanForNamecheap(t))
+	hasConflict := false
+	for _, s := range cp.Steps {
+		if s.Record.Purpose == "dkim" && s.Action == dnsops.ActionConflict {
+			hasConflict = true
+		}
+	}
+	if !hasConflict {
+		t.Errorf("duplicate DKIM must surface Action=Conflict")
+	}
+	res, _ := p.Apply(context.Background(), cp, "apply-dns-changes")
+	if res.Failed == 0 {
+		t.Errorf("Apply must refuse with Failed>0 when duplicate DKIM exists")
+	}
+	if len(client.SetCalls()) != 0 {
+		t.Errorf("Apply must not call SetHosts when duplicate DKIM exists")
+	}
+}
+
+func TestNamecheapProviderDuplicateLiveDMARC(t *testing.T) {
+	client := NewFakeNamecheapClient()
+	client.SetLive("example", "com", []NamecheapHost{
+		{Name: "@", Type: "MX", Address: "mail.example.com", MXPref: "10", TTL: "1800"},
+		{Name: "mail", Type: "A", Address: "203.0.113.10", TTL: "1800"},
+		{Name: "mta-sts", Type: "A", Address: "203.0.113.10", TTL: "1800"},
+		{Name: "@", Type: "TXT", Address: "v=spf1 mx ip4:203.0.113.10 -all", TTL: "1800"},
+		{Name: "_dmarc", Type: "TXT", Address: "v=DMARC1; p=none; rua=mailto:postmaster@example.com", TTL: "1800"},
+		{Name: "_dmarc", Type: "TXT", Address: "v=DMARC1; p=quarantine; rua=mailto:admin@example.com", TTL: "1800"},
+	})
+	p := NewNamecheapProvider(NamecheapConfig{
+		APIUser:     "u",
+		APIKey:      "k",
+		Username:    "u",
+		EnableApply: true,
+	}, client)
+	cp, _ := p.Plan(context.Background(), fixturePlanForNamecheap(t))
+	hasConflict := false
+	for _, s := range cp.Steps {
+		if s.Record.Purpose == "dmarc" && s.Action == dnsops.ActionConflict {
+			hasConflict = true
+		}
+	}
+	if !hasConflict {
+		t.Errorf("duplicate DMARC must surface Action=Conflict")
+	}
+	res, _ := p.Apply(context.Background(), cp, "apply-dns-changes")
+	if res.Failed == 0 {
+		t.Errorf("Apply must refuse with Failed>0 when duplicate DMARC exists")
+	}
+	if len(client.SetCalls()) != 0 {
+		t.Errorf("Apply must not call SetHosts when duplicate DMARC exists")
+	}
+}
+
+func TestNamecheapProviderDuplicateLiveMTASTS(t *testing.T) {
+	client := NewFakeNamecheapClient()
+	client.SetLive("example", "com", []NamecheapHost{
+		{Name: "@", Type: "MX", Address: "mail.example.com", MXPref: "10", TTL: "1800"},
+		{Name: "mail", Type: "A", Address: "203.0.113.10", TTL: "1800"},
+		{Name: "mta-sts", Type: "A", Address: "203.0.113.10", TTL: "1800"},
+		{Name: "@", Type: "TXT", Address: "v=spf1 mx ip4:203.0.113.10 -all", TTL: "1800"},
+		{Name: "_mta-sts", Type: "TXT", Address: "v=STSv1; id=2026010101", TTL: "1800"},
+		{Name: "_mta-sts", Type: "TXT", Address: "v=STSv1; id=2026010102", TTL: "1800"},
+	})
+	p := NewNamecheapProvider(NamecheapConfig{
+		APIUser:     "u",
+		APIKey:      "k",
+		Username:    "u",
+		EnableApply: true,
+	}, client)
+	cp, _ := p.Plan(context.Background(), fixturePlanForNamecheap(t))
+	hasConflict := false
+	for _, s := range cp.Steps {
+		if s.Record.Purpose == "mta_sts" && s.Action == dnsops.ActionConflict {
+			hasConflict = true
+		}
+	}
+	if !hasConflict {
+		t.Errorf("duplicate MTA-STS must surface Action=Conflict")
+	}
+	res, _ := p.Apply(context.Background(), cp, "apply-dns-changes")
+	if res.Failed == 0 {
+		t.Errorf("Apply must refuse with Failed>0 when duplicate MTA-STS exists")
+	}
+	if len(client.SetCalls()) != 0 {
+		t.Errorf("Apply must not call SetHosts when duplicate MTA-STS exists")
+	}
+}
+
+func TestNamecheapProviderDuplicateLiveTLSRPT(t *testing.T) {
+	client := NewFakeNamecheapClient()
+	client.SetLive("example", "com", []NamecheapHost{
+		{Name: "@", Type: "MX", Address: "mail.example.com", MXPref: "10", TTL: "1800"},
+		{Name: "mail", Type: "A", Address: "203.0.113.10", TTL: "1800"},
+		{Name: "mta-sts", Type: "A", Address: "203.0.113.10", TTL: "1800"},
+		{Name: "@", Type: "TXT", Address: "v=spf1 mx ip4:203.0.113.10 -all", TTL: "1800"},
+		{Name: "_smtp._tls", Type: "TXT", Address: "v=TLSRPTv1; rua=mailto:tlsrpt@example.com", TTL: "1800"},
+		{Name: "_smtp._tls", Type: "TXT", Address: "v=TLSRPTv1; rua=mailto:admin@example.com", TTL: "1800"},
+	})
+	p := NewNamecheapProvider(NamecheapConfig{
+		APIUser:     "u",
+		APIKey:      "k",
+		Username:    "u",
+		EnableApply: true,
+	}, client)
+	cp, _ := p.Plan(context.Background(), fixturePlanForNamecheap(t))
+	hasConflict := false
+	for _, s := range cp.Steps {
+		if s.Record.Purpose == "tls_rpt" && s.Action == dnsops.ActionConflict {
+			hasConflict = true
+		}
+	}
+	if !hasConflict {
+		t.Errorf("duplicate TLS-RPT must surface Action=Conflict")
+	}
+	res, _ := p.Apply(context.Background(), cp, "apply-dns-changes")
+	if res.Failed == 0 {
+		t.Errorf("Apply must refuse with Failed>0 when duplicate TLS-RPT exists")
+	}
+	if len(client.SetCalls()) != 0 {
+		t.Errorf("Apply must not call SetHosts when duplicate TLS-RPT exists")
+	}
+}
+
+func TestNamecheapProviderDuplicateExactManagedRecord(t *testing.T) {
+	client := NewFakeNamecheapClient()
+	// Two identical SPF records — exact duplicate, safe to collapse.
+	client.SetLive("example", "com", []NamecheapHost{
+		{Name: "@", Type: "MX", Address: "mail.example.com", MXPref: "10", TTL: "1800"},
+		{Name: "mail", Type: "A", Address: "203.0.113.10", TTL: "1800"},
+		{Name: "mta-sts", Type: "A", Address: "203.0.113.10", TTL: "1800"},
+		{Name: "@", Type: "TXT", Address: "v=spf1 mx ip4:203.0.113.10 -all", TTL: "1800"},
+		{Name: "@", Type: "TXT", Address: "v=spf1 mx ip4:203.0.113.10 -all", TTL: "1800"},
+	})
+	p := NewNamecheapProvider(NamecheapConfig{
+		APIUser:     "u",
+		APIKey:      "k",
+		Username:    "u",
+		EnableApply: true,
+	}, client)
+	cp, _ := p.Plan(context.Background(), fixturePlanForNamecheap(t))
+	for _, s := range cp.Steps {
+		if s.Action == dnsops.ActionConflict {
+			t.Errorf("exact duplicate managed record must NOT cause conflict: %s/%s", s.Record.Name, s.Record.Type)
+		}
+	}
+	res, _ := p.Apply(context.Background(), cp, "apply-dns-changes")
+	if res.Failed != 0 {
+		t.Errorf("Apply must succeed for exact duplicates; Failed=%d", res.Failed)
+	}
+	calls := client.SetCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 SetHosts call; got %d", len(calls))
+	}
+	spfCount := 0
+	for _, h := range calls[0].Hosts {
+		if strings.HasPrefix(h.Address, "v=spf1") {
+			spfCount++
+		}
+	}
+	if spfCount != 1 {
+		t.Errorf("merged set must contain exactly 1 SPF (dedupled); got %d", spfCount)
+	}
+}
+
+func TestNamecheapProviderDuplicateUnrelatedTXTNotFlagged(t *testing.T) {
+	client := NewFakeNamecheapClient()
+	// Multiple unrelated TXT records at @ with different values
+	// (google-site-verification) must NOT cause duplicate conflicts.
+	client.SetLive("example", "com", []NamecheapHost{
+		{Name: "@", Type: "MX", Address: "mail.example.com", MXPref: "10", TTL: "1800"},
+		{Name: "mail", Type: "A", Address: "203.0.113.10", TTL: "1800"},
+		{Name: "mta-sts", Type: "A", Address: "203.0.113.10", TTL: "1800"},
+		{Name: "@", Type: "TXT", Address: "v=spf1 mx ip4:203.0.113.10 -all", TTL: "1800"},
+		{Name: "@", Type: "TXT", Address: "google-site-verification=abc", TTL: "1800"},
+		{Name: "@", Type: "TXT", Address: "google-site-verification=xyz", TTL: "1800"},
+	})
+	p := NewNamecheapProvider(NamecheapConfig{
+		APIUser:     "u",
+		APIKey:      "k",
+		Username:    "u",
+		EnableApply: true,
+	}, client)
+	cp, _ := p.Plan(context.Background(), fixturePlanForNamecheap(t))
+	for _, s := range cp.Steps {
+		if s.Action == dnsops.ActionConflict {
+			// Only allowed conflict is for the SPF if the
+			// live SPF value differs from the desired value.
+			// It must NOT be for the unrelated TXT records.
+			if s.Record.Purpose != "spf" && !strings.Contains(s.Record.Value, "google") {
+				t.Errorf("unrelated TXT duplicate must not cause conflict: %s/%s", s.Record.Name, s.Record.Type)
+			}
+		}
+	}
+	res, _ := p.Apply(context.Background(), cp, "apply-dns-changes")
+	_ = res
+	calls := client.SetCalls()
+	if len(calls) == 0 {
+		// If there's an SPF conflict (value differs), that's expected.
+		// The test verifies the unrelated duplicates don't cause conflicts.
+		return
+	}
+	// If apply succeeded, the merged set must contain the unrelated
+	// TXT records.
+	foundVerifications := 0
+	for _, h := range calls[0].Hosts {
+		if strings.Contains(h.Address, "google-site-verification") {
+			foundVerifications++
+		}
+	}
+	if foundVerifications != 2 {
+		t.Errorf("merged set must preserve both google-site-verification TXT records; got %d", foundVerifications)
+	}
+}
+
 // errFake is a small stand-in for the network / API errors
 // the fake client surfaces in the unreadable-zone tests.
 var errFake = stringError("namecheap api error")

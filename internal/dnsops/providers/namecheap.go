@@ -113,6 +113,13 @@ func orvixManagedIdentity(r dnsops.Record) string {
 		if p := txtPurposePrefix(r.Value); p != "" {
 			return r.Name + "|" + string(r.Type) + "|" + p
 		}
+		// If the value doesn't carry the prefix (e.g. DKIM not
+		// generated yet), use the purpose-based default so the
+		// identity matches what liveHostIdentity would produce
+		// for a live record with the real managed value.
+		if p := purposeToDefaultPrefix(r.Purpose); p != "" {
+			return r.Name + "|" + string(r.Type) + "|" + p
+		}
 		return r.Name + "|" + string(r.Type)
 	default:
 		return r.Name + "|" + string(r.Type)
@@ -137,6 +144,28 @@ func txtPurposePrefix(value string) string {
 		return "v=STSv1"
 	}
 	if strings.HasPrefix(v, "v=TLSRPTv1") {
+		return "v=TLSRPTv1"
+	}
+	return ""
+}
+
+// purposeToDefaultPrefix returns the semantic TXT prefix for a
+// known managed purpose, regardless of whether the current value
+// contains it. This ensures orvixManagedIdentity is consistent
+// with liveHostIdentity even when the plan's value is a
+// placeholder (e.g. "DKIM not generated — public key missing" for
+// a DKIM record that hasn't been generated yet).
+func purposeToDefaultPrefix(p dnsops.Purpose) string {
+	switch p {
+	case dnsops.PurposeSPF:
+		return "v=spf1"
+	case dnsops.PurposeDKIM:
+		return "v=DKIM1"
+	case dnsops.PurposeDMARC:
+		return "v=DMARC1"
+	case dnsops.PurposeMTASTS, dnsops.PurposeMTASTSValue:
+		return "v=STSv1"
+	case dnsops.PurposeTLSRPT:
 		return "v=TLSRPTv1"
 	}
 	return ""
@@ -364,6 +393,16 @@ func (p *NamecheapProvider) buildMergePlan(plan *dnsops.Plan, live []NamecheapHo
 		desiredByIdentity[orvixManagedIdentity(r)] = h
 	}
 
+	// Detect duplicate managed identities in the live zone
+	// BEFORE building the merged set. If two live records
+	// share the same managed identity (e.g. two SPF TXT
+	// records at @ with different values), the second one
+	// would be treated as "unrelated" and preserved
+	// alongside the managed record — creating a dangerous
+	// duplicate. We flag all such cases as conflicts
+	// (BLOCKER 2, DNS-AUTOMATION-2G-SAFETY-FIXES).
+	duplicateConflicts, allDuplicateKeys := detectDuplicateLiveIdentities(live, desiredByIdentity)
+
 	// Classify every live record using purpose-aware identity.
 	// A live record whose identity matches a desired record
 	// is either kept (same value) or flagged as a conflict
@@ -371,9 +410,29 @@ func (p *NamecheapProvider) buildMergePlan(plan *dnsops.Plan, live []NamecheapHo
 	// match any desired record is preserved as unrelated
 	// (this is where google-site-verification at @ survives).
 	conflicts := make(map[string]bool)
+	// Merge duplicate conflict IDs into the conflict map.
+	// Only add actual conflicts (different values); exact
+	// duplicates are safe to collapse.
+	for k, isConflict := range duplicateConflicts {
+		if isConflict {
+			conflicts[k] = true
+		}
+	}
 	merged := make([]NamecheapHost, 0, len(live))
+	seenIdentity := make(map[string]bool, len(live))
 	for _, h := range live {
 		key := liveHostIdentity(h)
+		// If this identity has duplicates (either conflicting or
+		// exact), collapse them — keep only the first occurrence.
+		if allDuplicateKeys[key] {
+			if seenIdentity[key] {
+				continue
+			}
+			seenIdentity[key] = true
+			merged = append(merged, h)
+			delete(desiredByIdentity, key)
+			continue
+		}
 		if desiredHost, ok := desiredByIdentity[key]; ok {
 			if sameHost(desiredHost, h) {
 				merged = append(merged, h)
@@ -519,8 +578,34 @@ func (p *NamecheapProvider) Apply(ctx context.Context, plan dnsops.ChangePlan, c
 	// when the Plan was computed), refuse before SetHosts.
 	merged := make([]NamecheapHost, 0, len(live)+len(desired))
 	conflicts := make(map[string]bool)
+	seenIdentity := make(map[string]bool, len(live))
+
+	// Duplicate live managed identity detection (BLOCKER 2).
+	// Must run before the merge loop so that duplicate records
+	// sharing the same semantic identity are flagged as conflicts.
+	dupConflicts, allDupKeys := detectDuplicateLiveIdentities(live, desiredByIdentity)
+	for k, isConflict := range dupConflicts {
+		if isConflict {
+			conflicts[k] = true
+		}
+	}
+
 	for _, h := range live {
 		key := liveHostIdentity(h)
+		// Skip duplicate managed identities that were already
+		// added to the merged set. Exact duplicates (same
+		// identity AND same value) are collapsed; duplicates
+		// with different values are already flagged as conflicts
+		// by detectDuplicateLiveIdentities above.
+		if allDupKeys[key] {
+			if seenIdentity[key] {
+				continue
+			}
+			seenIdentity[key] = true
+			merged = append(merged, h)
+			delete(desiredByIdentity, key)
+			continue
+		}
 		if d, ok := desiredByIdentity[key]; ok {
 			if sameHost(d, h) {
 				merged = append(merged, h)
@@ -630,6 +715,66 @@ func findLiveHost(live []NamecheapHost, key string) (NamecheapHost, bool) {
 		}
 	}
 	return NamecheapHost{}, false
+}
+
+// detectDuplicateLiveIdentities scans live hosts for duplicate
+// managed identities (BLOCKER 2, DNS-AUTOMATION-2G-SAFETY-FIXES).
+//
+// A managed identity is one that corresponds to an Orvix-managed
+// record type (SPF, DKIM, DMARC, MTA-STS, TLS-RPT, CAA).
+// Unrelated TXT records (google-site-verification, _acme-challenge)
+// are NOT managed and their duplicates are ignored.
+//
+// Returns a conflict map (identity → true if conflicting values,
+// false for exact duplicates) and a set of all duplicate identity
+// keys. The caller uses the conflict map to build ChangePlan
+// conflict steps and the all-keys set to collapse duplicate
+// records in the merged set.
+func detectDuplicateLiveIdentities(live []NamecheapHost, desiredByIdentity map[string]NamecheapHost) (conflictMap map[string]bool, allDupKeys map[string]bool) {
+	type counter struct {
+		count   int
+		address string
+	}
+	conflictMap = make(map[string]bool)
+	allDupKeys = make(map[string]bool)
+
+	identities := make(map[string]*counter, len(live))
+	for _, h := range live {
+		key := liveHostIdentity(h)
+		isManaged := false
+		if _, ok := desiredByIdentity[key]; ok {
+			isManaged = true
+		} else if strings.Contains(key, "v=spf1") || strings.Contains(key, "v=DKIM1") ||
+			strings.Contains(key, "v=DMARC1") || strings.Contains(key, "v=STSv1") ||
+			strings.Contains(key, "v=TLSRPTv1") || strings.Contains(key, "|CAA|") {
+			isManaged = true
+		}
+		if !isManaged {
+			continue
+		}
+		if _, ok := identities[key]; !ok {
+			identities[key] = &counter{address: h.Address}
+		}
+		identities[key].count++
+	}
+	// Any identity with count > 1 is a duplicate. The conflictMap
+	// entry is true if any occurrence has a different address
+	// (conflict), false if all are exact duplicates.
+	for key, c := range identities {
+		if c.count <= 1 {
+			continue
+		}
+		allDupKeys[key] = true
+		hasConflict := false
+		for _, h := range live {
+			if liveHostIdentity(h) == key && h.Address != c.address {
+				hasConflict = true
+				break
+			}
+		}
+		conflictMap[key] = hasConflict
+	}
+	return conflictMap, allDupKeys
 }
 
 // splitDomain splits "example.com" into ("example", "com").
