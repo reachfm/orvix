@@ -2408,9 +2408,14 @@
     try {
       var resp = await apiPost('/api/v1/admin/dns/' + encodeURIComponent(d) + '/verify', {});
       state.dnsReport = resp && resp.report;
-      // We need the plan too so the table can show the desired value vs
-      // the live status; refresh plan from server response if absent.
-      if (!state.dnsPlan && resp && resp.report && resp.report.plan) {
+      // Always update the plan from the verify response so the records
+      // table shows per-record status/verified/reason. The plan returned
+      // by the verify endpoint is identical to the generate-plan response
+      // but with populated Status/Verified/Reason fields from live DNS
+      // resolution. Overwriting state.dnsPlan ensures renderDnsRecords()
+      // reads the real verification outcome instead of stale zero-value
+      // statuses.
+      if (resp && resp.report && resp.report.plan) {
         state.dnsPlan = resp.report.plan;
       }
       renderDnsRecords();

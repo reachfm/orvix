@@ -425,6 +425,48 @@ func TestAdminDNSOpsDoesNotRecommendSMTPHost(t *testing.T) {
 	}
 }
 
+// TestAdminDNSOpsVerifyUpdatesPlanFromResponse confirms the
+// loadDnsVerify function always updates state.dnsPlan from the
+// verify response's report.plan (regression for the live bug where
+// the !state.dnsPlan guard prevented statuses from propagating).
+// The test asserts:
+//   - state.dnsPlan is assigned from resp.report.plan
+//   - the assignment is NOT guarded by !state.dnsPlan
+//   - renderDnsRecords() is called after the plan update
+func TestAdminDNSOpsVerifyUpdatesPlanFromResponse(t *testing.T) {
+	dnsRegion := adminDNSOpsSection(t)
+	// Confirmation: loadDnsVerify assigns state.dnsPlan from resp.report.plan.
+	if !strings.Contains(dnsRegion, "state.dnsPlan = resp.report.plan") {
+		t.Errorf("loadDnsVerify must assign state.dnsPlan from resp.report.plan")
+	}
+	// Confirmation: the assignment is NOT gated by !state.dnsPlan.
+	if strings.Contains(dnsRegion, "!state.dnsPlan") && strings.Contains(dnsRegion, "state.dnsPlan") && strings.Contains(dnsRegion, "resp.report.plan") {
+		t.Errorf("loadDnsVerify must NOT guard the plan update with !state.dnsPlan (that causes statuses to never propagate after initial plan load)")
+	}
+	// Confirmation: renderDnsRecords() is called after plan update.
+	if !strings.Contains(dnsRegion, "renderDnsRecords()") {
+		t.Errorf("loadDnsVerify must call renderDnsRecords() after updating state.dnsPlan")
+	}
+}
+
+// TestAdminDNSOpsVerifyResponseShape confirms the frontend
+// references the correct response fields from the verify endpoint.
+func TestAdminDNSOpsVerifyResponseShape(t *testing.T) {
+	src := readFile(t, adminRepoRoot(t), "release/admin/app.js")
+	for _, want := range []string{
+		"resp.report",
+		"report.plan",
+		"report.warnings",
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("admin app.js must reference verify response field %q", want)
+		}
+	}
+	if !strings.Contains(src, "report.verified") && !strings.Contains(src, "dnsReport.verified") {
+		t.Errorf("admin app.js must reference verify response field from report/dnsReport.verified")
+	}
+}
+
 // TestAdminDNSOpsNoExecDnsOutOfBand: a regression guard confirming
 // the admin app.js does not import any browser-side DNS library
 // (which would mean we're trying to do provider automation in the
