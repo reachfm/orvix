@@ -19,10 +19,23 @@ package handlers_test
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/api/handlers"
+	"github.com/orvix/orvix/internal/auth"
+	"github.com/orvix/orvix/internal/config"
+	"github.com/orvix/orvix/internal/dnsops"
+	"github.com/orvix/orvix/internal/license"
+	"github.com/orvix/orvix/internal/models"
+	"github.com/orvix/orvix/internal/modules"
+	"go.uber.org/zap"
 )
 
 // TestDNSOpsPlanNoSMTPHostAsPublicIP is the core
@@ -401,4 +414,121 @@ func TestDNSOpsPlanWithDocumentationIPv6Rejected(t *testing.T) {
 	if !strings.Contains(body, "documentation") && !strings.Contains(body, "3849") {
 		t.Errorf("422 body must mention documentation range; got %s", body)
 	}
+}
+// TestDNSOpsDKIMKeygenWorksAfterMigrateAllRaw is the regression
+// test for the live VPS blocker: a fresh DB initialized via the
+// canonical migration path (models.MigrateAllRaw) must have the
+// coremail_dkim_config table so that the DKIM keygen handler
+// does not fail with "no such table".
+func TestDNSOpsDKIMKeygenWorksAfterMigrateAllRaw(t *testing.T) {
+	dir := t.TempDir()
+	logger := zap.NewNop()
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(dir, "orvix.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	cfg.CoreMail.SMTPPort = 25
+	cfg.CoreMail.IMAPPort = 143
+	cfg.CoreMail.POP3Port = 110
+	cfg.CoreMail.JMAPPort = 8080
+	cfg.CoreMail.MailStorePath = dir
+	cfg.DNS.PublicIPv4 = "8.8.8.8"
+	cfg.CoreMail.Hostname = ""
+
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	// Close the DB handle before t.TempDir() cleanup runs.
+	defer sqlDB.Close()
+
+	// Run the REAL canonical migration — this is what main.go does.
+	if err := models.MigrateAllRaw(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	// Verify the DKIM table was created by MigrateAllRaw.
+	var tableCount int
+	if err := sqlDB.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='coremail_dkim_config'").Scan(&tableCount); err != nil {
+		t.Fatalf("query sqlite_master: %v", err)
+	}
+	if tableCount != 1 {
+		t.Fatalf("coremail_dkim_config must exist after MigrateAllRaw")
+	}
+	// Create remaining schema tables the handler test harness needs.
+	if _, err := sqlDB.Exec(`CREATE TABLE IF NOT EXISTS coremail_audit (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, actor TEXT NOT NULL DEFAULT '',
+		role TEXT NOT NULL DEFAULT '', action TEXT NOT NULL DEFAULT '',
+		target TEXT NOT NULL DEFAULT '', result TEXT NOT NULL DEFAULT '',
+		ip TEXT NOT NULL DEFAULT '', user_agent TEXT NOT NULL DEFAULT '',
+		timestamp DATETIME NOT NULL
+	)`); err != nil {
+		t.Fatalf("create coremail_audit: %v", err)
+	}
+
+	authn, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	ff := license.NewFeatureFlags(logger)
+	ff.SetTier(license.TierSMB)
+	h := handlers.NewHandler(db, authn, nil, logger, cfg, modules.NewRegistry(logger), ff, nil)
+	resolver := dnsops.NewFakeResolver()
+	svc := dnsops.NewService(resolver)
+	h.SetDNSOpsService(svc)
+
+	app := fiber.New()
+	adminTok, _ := authn.GenerateAccessToken(1, auth.RoleAdmin)
+	mount := func(method, path string, fn fiber.Handler) {
+		app.Add([]string{method}, path, func(c fiber.Ctx) error {
+			c.Locals("user_id", uint(1))
+			c.Locals("role", auth.RoleAdmin)
+			return fn(c)
+		})
+	}
+	mount("POST", "/admin/dns/:domain/dkim", h.PostAdminDNSDKIM)
+	// Seed a provisioned domain.
+	if _, err := sqlDB.Exec(
+		`INSERT INTO coremail_domains (name, status, plan, max_mailboxes, max_aliases, max_quota_mb,
+		   mailbox_count, created_at, updated_at)
+		 VALUES ('example.com', 'active', 'smb', 100, 50, 1024, 0, ?, ?)`,
+		time.Now().UTC(), time.Now().UTC()); err != nil {
+		t.Fatalf("seed domain: %v", err)
+	}
+
+	// This is the call that failed on the live VPS with "no such table".
+	code, body := dnsOpsHarnessDo(app, adminTok, "POST", "/admin/dns/example.com/dkim", `{"selector":"orvix"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("DKIM keygen must succeed after MigrateAllRaw; got %d body=%s", code, body)
+	}
+	// No private key in response.
+	for _, banned := range []string{"PRIVATE KEY", "BEGIN PRIVATE"} {
+		if strings.Contains(strings.ToUpper(body), banned) {
+			t.Errorf("response must not contain %q; got %s", banned, body)
+		}
+	}
+}
+
+// dnsOpsHarnessDo is a minimal request helper for the
+// VPS-regression test above.
+func dnsOpsHarnessDo(app *fiber.App, token, method, path, body string) (int, string) {
+	var bodyReader io.Reader
+	if body != "" {
+		bodyReader = strings.NewReader(body)
+	}
+	req := httptest.NewRequest(method, path, bodyReader)
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	res, _ := app.Test(req, fiber.TestConfig{Timeout: 5 * time.Second})
+	if res != nil {
+		defer res.Body.Close()
+		b, _ := io.ReadAll(res.Body)
+		return res.StatusCode, string(b)
+	}
+	return 0, ""
 }
