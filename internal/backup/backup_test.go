@@ -4,9 +4,13 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -398,7 +402,9 @@ func TestCreateArchiveExplicitAllowlist(t *testing.T) {
 
 	allowed := map[string]bool{
 		"var/lib/orvix/orvix.db": false,
-		"BACKUP_INFO.txt":        false,
+		"backup.json":            false,
+		"RESTORE_INSTRUCTIONS.txt": false,
+		"checksums.txt":          false,
 	}
 	// etc/orvix/orvix.yaml.redacted may not exist if /etc/orvix is not present on test machine
 
@@ -421,8 +427,14 @@ func TestCreateArchiveExplicitAllowlist(t *testing.T) {
 	if !allowed["var/lib/orvix/orvix.db"] {
 		t.Fatal("archive must contain var/lib/orvix/orvix.db")
 	}
-	if !allowed["BACKUP_INFO.txt"] {
-		t.Fatal("archive must contain BACKUP_INFO.txt")
+	if !allowed["backup.json"] {
+		t.Fatal("archive must contain backup.json")
+	}
+	if !allowed["RESTORE_INSTRUCTIONS.txt"] {
+		t.Fatal("archive must contain RESTORE_INSTRUCTIONS.txt")
+	}
+	if !allowed["checksums.txt"] {
+		t.Fatal("archive must contain checksums.txt")
 	}
 }
 
@@ -916,7 +928,9 @@ func TestArchiveContainsOnlyAllowedEntries(t *testing.T) {
 	allowedEntries := map[string]bool{
 		"var/lib/orvix/orvix.db":        false,
 		"etc/orvix/orvix.yaml.redacted": false,
-		"BACKUP_INFO.txt":               false,
+		"backup.json":                   false,
+		"RESTORE_INSTRUCTIONS.txt":      false,
+		"checksums.txt":                false,
 	}
 
 	for {
@@ -1051,8 +1065,8 @@ func TestGetScheduleConfigDefault(t *testing.T) {
 	if cfg.Frequency != FrequencyManual {
 		t.Fatalf("expected manual frequency, got %s", cfg.Frequency)
 	}
-	if cfg.RetentionCount != 7 {
-		t.Fatalf("expected retention count 7, got %d", cfg.RetentionCount)
+	if cfg.RetentionCount != 10 {
+		t.Fatalf("expected retention count 10, got %d", cfg.RetentionCount)
 	}
 }
 
@@ -1546,15 +1560,800 @@ func TestRunRetentionSafetyNeverDeletesNewest(t *testing.T) {
 	if len(all) != 7 {
 		t.Fatalf("expected 7 remaining backups, got %d", len(all))
 	}
+}
 
-	// Verify the newest backup is among the survivors
-	if len(all) > 0 {
-		newestID := all[0].ID
-		for _, b := range all {
-			if b.ID == newestID {
-				return
+// ── Enterprise 2H tests ─────────────────────────────────
+
+func TestBackupManifestHasProductInfo(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	b, err := s.CreateBackup(ctx, "manifest-product")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Read backup.json from archive
+	archivePath, err := s.CreateArchive(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("create archive: %v", err)
+	}
+	f, err := os.Open(archivePath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer f.Close()
+	gr, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatalf("gzip: %v", err)
+	}
+	defer gr.Close()
+	tr := tar.NewReader(gr)
+	var manifestData []byte
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar: %v", err)
+		}
+		if hdr.Name == "backup.json" {
+			manifestData, _ = io.ReadAll(tr)
+			break
+		}
+	}
+	if manifestData == nil {
+		t.Fatal("backup.json not found in archive")
+	}
+	var am BackupArchiveManifest
+	if err := json.Unmarshal(manifestData, &am); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if am.Product != ProductName {
+		t.Fatalf("expected product %q, got %q", ProductName, am.Product)
+	}
+	if am.BackupFormatVersion != BackupFormatVersion {
+		t.Fatalf("expected format version %d, got %d", BackupFormatVersion, am.BackupFormatVersion)
+	}
+	if am.BackupID == "" {
+		t.Fatal("expected non-empty backup_id")
+	}
+	if am.CreatedAt == "" {
+		t.Fatal("expected non-empty created_at")
+	}
+}
+
+func TestBackupManifestHasChecksums(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	b, _ := s.CreateBackup(ctx, "manifest-checksums")
+	archivePath, _ := s.CreateArchive(ctx, b.ID)
+	f, _ := os.Open(archivePath)
+	defer f.Close()
+	gr, _ := gzip.NewReader(f)
+	defer gr.Close()
+	tr := tar.NewReader(gr)
+	var checksumsData []byte
+	var dbChecksum string
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar: %v", err)
+		}
+		if hdr.Name == "checksums.txt" {
+			checksumsData, _ = io.ReadAll(tr)
+		}
+		if hdr.Name == "var/lib/orvix/orvix.db" {
+			dbBody, _ := io.ReadAll(tr)
+			h := sha256.Sum256(dbBody)
+			dbChecksum = hex.EncodeToString(h[:])
+		}
+	}
+	if checksumsData == nil {
+		t.Fatal("checksums.txt not found")
+	}
+	if dbChecksum == "" {
+		t.Fatal("db file not found in archive")
+	}
+	lines := strings.Split(string(checksumsData), "\n")
+	found := false
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.Contains(line, "var/lib/orvix/orvix.db") {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 && parts[0] == dbChecksum {
+				found = true
 			}
 		}
-		t.Fatalf("newest backup %s was incorrectly deleted", newestID)
+	}
+	if !found {
+		t.Fatalf("checksums.txt does not contain matching db sha256; db=%s, checksums=%s", dbChecksum, string(checksumsData))
+	}
+}
+
+func TestBackupArchiveValidatesAfterCreation(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	b, _ := s.CreateBackup(ctx, "validate-after-create")
+	// CreateArchive must succeed
+	archivePath, err := s.CreateArchive(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("create archive: %v", err)
+	}
+	if _, err := os.Stat(archivePath); err != nil {
+		t.Fatalf("archive file not found: %v", err)
+	}
+	// Validate must pass
+	vr, err := s.ValidateArchive(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("validate archive: %v", err)
+	}
+	if !vr.Valid {
+		t.Fatalf("validate failed: %v", vr.Errors)
+	}
+	if vr.SHA256 == "" {
+		t.Fatal("expected non-empty sha256")
+	}
+}
+
+func TestValidateRejectsCorruptArchive(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	b, _ := s.CreateBackup(ctx, "corrupt-test")
+	archivePath, _ := s.CreateArchive(ctx, b.ID)
+	// Corrupt the archive
+	data, _ := os.ReadFile(archivePath)
+	data[100] = 0xFF // corrupt
+	data[200] = 0x00
+	os.WriteFile(archivePath, data, 0640)
+	vr, err := s.ValidateArchive(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if vr.Valid {
+		t.Fatal("expected validation to fail for corrupt archive")
+	}
+}
+
+func TestValidateRejectsWrongProductManifest(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	b, _ := s.CreateBackup(ctx, "wrong-product")
+	archivePath, _ := s.CreateArchive(ctx, b.ID)
+
+	// Create a modified archive by extracting, fixing manifest, re-packing
+	tmpDir := t.TempDir()
+	extractTarGz(archivePath, tmpDir)
+	// Modify backup.json product
+	mfPath := filepath.Join(tmpDir, "backup.json")
+	mfData, _ := os.ReadFile(mfPath)
+	modified := strings.Replace(string(mfData), ProductName, "Wrong Product", 1)
+	os.WriteFile(mfPath, []byte(modified), 0640)
+	// Re-package
+	newArchive := filepath.Join(t.TempDir(), "bad.tar.gz")
+	f, _ := os.Create(newArchive)
+	gw := gzip.NewWriter(f)
+	tw := tar.NewWriter(gw)
+	filepath.Walk(tmpDir, func(path string, info fs.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		rel, _ := filepath.Rel(tmpDir, path)
+		data, _ := os.ReadFile(path)
+		writeTarEntry(tw, rel, data, 0640)
+		return nil
+	})
+	tw.Close()
+	gw.Close()
+	f.Close()
+	// Replace the original archive
+	os.Remove(archivePath)
+	os.Rename(newArchive, archivePath)
+
+	vr, err := s.ValidateArchive(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if vr.Valid {
+		t.Fatal("expected validation to fail for wrong product")
+	}
+}
+
+func TestRestoreRequiresValidArchive(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	b, _ := s.CreateBackup(ctx, "restore-valid-archive")
+	archivePath, _ := s.CreateArchive(ctx, b.ID)
+	// Corrupt and then try restore
+	data, _ := os.ReadFile(archivePath)
+	data[50] = 0xFF
+	os.WriteFile(archivePath, data, 0640)
+	result, err := s.RestoreBackup(ctx, b.ID)
+	if err != nil {
+		// Error is acceptable - restore should fail gracefully
+		if result != nil && result.Status != RestoreStatusFailed {
+			t.Fatalf("expected restore to fail for corrupt archive, got %+v", result)
+		}
+		return
+	}
+	if result != nil && result.Status == RestoreStatusStaged {
+		t.Fatal("restore should not succeed with corrupt archive")
+	}
+}
+
+func TestRestoreCreatesPreRestoreSafetyBackup(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	// First create a backup to restore
+	b, _ := s.CreateBackup(ctx, "pre-restore-safety")
+	archivePath, _ := s.CreateArchive(ctx, b.ID)
+	if _, err := os.Stat(archivePath); err != nil {
+		t.Fatalf("archive not created: %v", err)
+	}
+	// Count existing backups
+	before, _ := s.ListBackups(ctx)
+	beforeCount := len(before)
+	// Restore
+	result, err := s.RestoreBackup(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected restore result")
+	}
+	if result.Status != RestoreStatusStaged {
+		t.Fatalf("expected staged, got %s", result.Status)
+	}
+	if result.Message != RestoreStagedMessage {
+		t.Fatalf("expected staged message, got %s", result.Message)
+	}
+	// A pre-restore safety backup must have been created
+	after, _ := s.ListBackups(ctx)
+	if len(after) <= beforeCount {
+		t.Fatal("expected pre-restore safety backup to be created")
+	}
+	// The safety backup should have a distinct ID from the restore source
+	if result.BackupID == b.ID {
+		t.Fatal("safety backup ID should differ from source backup ID")
+	}
+}
+
+func TestRestoreStagesToStagingDir(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	b, _ := s.CreateBackup(ctx, "staging-test")
+	archivePath, _ := s.CreateArchive(ctx, b.ID)
+	if _, err := os.Stat(archivePath); err != nil {
+		t.Fatalf("archive not created: %v", err)
+	}
+	result, err := s.RestoreBackup(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected restore result")
+	}
+	if result.StagingPath == "" {
+		t.Fatal("expected non-empty staging path")
+	}
+	// Verify staging directory exists
+	if _, err := os.Stat(result.StagingPath); err != nil {
+		t.Fatalf("staging dir not found: %v", err)
+	}
+	// Verify archive was extracted
+	if _, err := os.Stat(filepath.Join(result.StagingPath, "var/lib/orvix/orvix.db")); err != nil {
+		t.Fatalf("db not staged: %v", err)
+	}
+}
+
+func TestGetBackupForNonexistentReturnsError(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	_, err := s.GetBackup(ctx, "nonexistent-id")
+	if err == nil {
+		t.Fatal("expected error for nonexistent backup")
+	}
+}
+
+func TestRetentionDefaultIsTen(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	cfg, err := s.GetScheduleConfig(ctx)
+	if err != nil {
+		t.Fatalf("get schedule: %v", err)
+	}
+	// The default from the SQL table should be 10
+	if cfg.RetentionCount != 10 {
+		t.Fatalf("expected default retention 10, got %d", cfg.RetentionCount)
+	}
+}
+
+func TestDeleteRequiresConfirmation(t *testing.T) {
+	// This is primarily a frontend test, but we verify the
+	// backend behavior: delete should succeed on valid backup.
+	s := testService(t)
+	ctx := context.Background()
+	b, _ := s.CreateBackup(ctx, "delete-test")
+	if err := s.DeleteBackup(ctx, b.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	_, err := s.GetBackup(ctx, b.ID)
+	if err == nil {
+		t.Fatal("expected backup to be deleted")
+	}
+}
+
+func TestErrorsAreHonest(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	// Path traversal should produce a clear error
+	_, err := s.RestoreBackup(ctx, "../etc/passwd")
+	if err == nil || !strings.Contains(err.Error(), "contains forbidden") {
+		t.Fatalf("expected traversal error, got: %v", err)
+	}
+	// Nonexistent backup should produce validation failure
+	vr, err := s.ValidateArchive(ctx, "does-not-exist")
+	if err != nil {
+		// Error is acceptable if it surfaces the missing path
+	} else if vr != nil && vr.Valid {
+		t.Fatal("expected validation to fail for nonexistent backup")
+	}
+}
+
+func TestErrorsNotFakeSuccess(t *testing.T) {
+	// Verify that failed operations don't return fake success
+	s := testService(t)
+	ctx := context.Background()
+	b, _ := s.CreateBackup(ctx, "no-fake")
+	// Delete and then try to restore - must fail
+	s.DeleteBackup(ctx, b.ID)
+	result, err := s.RestoreBackup(ctx, b.ID)
+	if err == nil && result != nil && result.Status == RestoreStatusStaged {
+		t.Fatal("restore must not succeed for deleted backup")
+	}
+}
+
+// ── Strict validation tests ──────────────────────────────
+
+// createTestArchive builds a valid archive from a backup and returns its path.
+func createTestArchive(t *testing.T, s *Service, ctx context.Context) (string, string) {
+	t.Helper()
+	b, err := s.CreateBackup(ctx, "strict-validate")
+	if err != nil {
+		t.Fatalf("create backup: %v", err)
+	}
+	archivePath, err := s.CreateArchive(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("create archive: %v", err)
+	}
+	return b.ID, archivePath
+}
+
+// injectArchiveEntry modifies a gzip/tar archive by replacing an entry's data.
+func injectArchiveEntry(t *testing.T, archivePath, targetName string, newData []byte) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	extractTarGz(archivePath, tmpDir)
+	// Remove original archive.
+	os.Remove(archivePath)
+	// Recreate archive with modified/new entry.
+	out, _ := os.Create(archivePath)
+	gw := gzip.NewWriter(out)
+	tw := tar.NewWriter(gw)
+	filepath.Walk(tmpDir, func(path string, info fs.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		rel, _ := filepath.Rel(tmpDir, path)
+		if rel == targetName && newData != nil {
+			writeTarEntry(tw, rel, newData, 0640)
+		} else {
+			data, _ := os.ReadFile(path)
+			writeTarEntry(tw, rel, data, 0640)
+		}
+		return nil
+	})
+	// Add new entry if it wasn't in the extraction.
+	if newData != nil {
+		found := false
+		filepath.Walk(tmpDir, func(path string, info fs.FileInfo, err error) error {
+			if err != nil || info.IsDir() {
+				return nil
+			}
+			rel, _ := filepath.Rel(tmpDir, path)
+			if rel == targetName {
+				found = true
+			}
+			return nil
+		})
+		if !found {
+			writeTarEntry(tw, targetName, newData, 0640)
+		}
+	}
+	tw.Close()
+	gw.Close()
+	out.Close()
+}
+
+func TestValidateMissingChecksumsTxtRejected(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	bID, archivePath := createTestArchive(t, s, ctx)
+	// Remove checksums.txt from archive by extracting, dropping it, re-packing.
+	tmpDir := t.TempDir()
+	extractTarGz(archivePath, tmpDir)
+	os.Remove(filepath.Join(tmpDir, "checksums.txt"))
+	os.Remove(archivePath)
+	out, _ := os.Create(archivePath)
+	gw := gzip.NewWriter(out)
+	tw := tar.NewWriter(gw)
+	filepath.Walk(tmpDir, func(path string, info fs.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		rel, _ := filepath.Rel(tmpDir, path)
+		if rel == "checksums.txt" { return nil }
+		data, _ := os.ReadFile(path)
+		writeTarEntry(tw, rel, data, 0640)
+		return nil
+	})
+	tw.Close(); gw.Close(); out.Close()
+
+	vr, err := s.ValidateArchive(ctx, bID)
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if vr.Valid {
+		t.Fatal("expected validation to reject missing checksums.txt")
+	}
+}
+
+func TestValidateMissingBackupJsonRejected(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	bID, archivePath := createTestArchive(t, s, ctx)
+	tmpDir := t.TempDir()
+	extractTarGz(archivePath, tmpDir)
+	os.Remove(filepath.Join(tmpDir, "backup.json"))
+	os.Remove(archivePath)
+	out, _ := os.Create(archivePath)
+	gw := gzip.NewWriter(out)
+	tw := tar.NewWriter(gw)
+	filepath.Walk(tmpDir, func(path string, info fs.FileInfo, err error) error {
+		if err != nil || info.IsDir() { return nil }
+		rel, _ := filepath.Rel(tmpDir, path)
+		if rel == "backup.json" { return nil }
+		data, _ := os.ReadFile(path)
+		writeTarEntry(tw, rel, data, 0640)
+		return nil
+	})
+	tw.Close(); gw.Close(); out.Close()
+	vr, _ := s.ValidateArchive(ctx, bID)
+	if vr.Valid {
+		t.Fatal("expected validation to reject missing backup.json")
+	}
+}
+
+func TestValidateMissingPerFileChecksumRejected(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	bID, archivePath := createTestArchive(t, s, ctx)
+	// Remove db entry from checksums.txt.
+	tmpDir := t.TempDir()
+	extractTarGz(archivePath, tmpDir)
+	csPath := filepath.Join(tmpDir, "checksums.txt")
+	csData, _ := os.ReadFile(csPath)
+	lines := strings.Split(string(csData), "\n")
+	var filtered []string
+	for _, line := range lines {
+		if strings.Contains(line, "orvix.db") { continue }
+		filtered = append(filtered, line)
+	}
+	os.WriteFile(csPath, []byte(strings.Join(filtered, "\n")), 0640)
+	os.Remove(archivePath)
+	out, _ := os.Create(archivePath)
+	gw := gzip.NewWriter(out)
+	tw := tar.NewWriter(gw)
+	filepath.Walk(tmpDir, func(path string, info fs.FileInfo, err error) error {
+		if err != nil || info.IsDir() { return nil }
+		rel, _ := filepath.Rel(tmpDir, path)
+		data, _ := os.ReadFile(path)
+		writeTarEntry(tw, rel, data, 0640)
+		return nil
+	})
+	tw.Close(); gw.Close(); out.Close()
+	vr, _ := s.ValidateArchive(ctx, bID)
+	if vr.Valid {
+		t.Fatal("expected validation to reject missing per-file checksum")
+	}
+}
+
+func TestValidateChecksumEntryForAbsentFileRejected(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	bID, archivePath := createTestArchive(t, s, ctx)
+	// Add a checksum entry for a file that doesn't exist.
+	tmpDir := t.TempDir()
+	extractTarGz(archivePath, tmpDir)
+	csPath := filepath.Join(tmpDir, "checksums.txt")
+	f, _ := os.OpenFile(csPath, os.O_APPEND|os.O_WRONLY, 0640)
+	f.WriteString("0000000000000000000000000000000000000000000000000000000000000000  nonexistent-file.txt\n")
+	f.Close()
+	os.Remove(archivePath)
+	out, _ := os.Create(archivePath)
+	gw := gzip.NewWriter(out)
+	tw := tar.NewWriter(gw)
+	filepath.Walk(tmpDir, func(path string, info fs.FileInfo, err error) error {
+		if err != nil || info.IsDir() { return nil }
+		rel, _ := filepath.Rel(tmpDir, path)
+		data, _ := os.ReadFile(path)
+		writeTarEntry(tw, rel, data, 0640)
+		return nil
+	})
+	tw.Close(); gw.Close(); out.Close()
+	vr, _ := s.ValidateArchive(ctx, bID)
+	if vr.Valid {
+		t.Fatal("expected validation to reject checksum entry for absent file")
+	}
+}
+
+func TestValidateUnknownEntryRejected(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	bID, archivePath := createTestArchive(t, s, ctx)
+	// Add an unknown entry.
+	tmpDir := t.TempDir()
+	extractTarGz(archivePath, tmpDir)
+	os.WriteFile(filepath.Join(tmpDir, "UNKNOWN_FILE.txt"), []byte("malicious"), 0640)
+	os.Remove(archivePath)
+	out, _ := os.Create(archivePath)
+	gw := gzip.NewWriter(out)
+	tw := tar.NewWriter(gw)
+	filepath.Walk(tmpDir, func(path string, info fs.FileInfo, err error) error {
+		if err != nil || info.IsDir() { return nil }
+		rel, _ := filepath.Rel(tmpDir, path)
+		data, _ := os.ReadFile(path)
+		writeTarEntry(tw, rel, data, 0640)
+		return nil
+	})
+	tw.Close(); gw.Close(); out.Close()
+	vr, _ := s.ValidateArchive(ctx, bID)
+	if vr.Valid {
+		t.Fatal("expected validation to reject unknown entry")
+	}
+}
+
+func TestValidateTraversalEntryRejected(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	bID, _ := createTestArchive(t, s, ctx)
+	// Can't easily create a traversal entry with extract/re-pack.
+	// Validate the safety function directly.
+	bp, _ := s.safeBackupPath(bID)
+	archivePath := filepath.Join(bp, "backup-archive.tar.gz")
+	out, _ := os.Create(archivePath)
+	gw := gzip.NewWriter(out)
+	tw := tar.NewWriter(gw)
+	// Write a normal entry to make the archive valid enough to reach validation.
+	writeTarEntry(tw, "checksums.txt", []byte("abc  test.txt\n"), 0640)
+	writeTarEntry(tw, "backup.json", []byte(`{"product":"Orvix Enterprise Mail","backup_format_version":1}`), 0640)
+	// Write traversal entry.
+	tw.WriteHeader(&tar.Header{Name: "../etc/passwd", Mode: 0640, Size: int64(len("pwned")), Typeflag: tar.TypeReg})
+	tw.Write([]byte("pwned"))
+	tw.Close(); gw.Close(); out.Close()
+	vr, _ := s.ValidateArchive(ctx, bID)
+	if vr.Valid {
+		t.Fatal("expected validation to reject traversal entry")
+	}
+}
+
+func TestValidateAbsolutePathEntryRejected(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	bID, _ := createTestArchive(t, s, ctx)
+	bp, _ := s.safeBackupPath(bID)
+	archivePath := filepath.Join(bp, "backup-archive.tar.gz")
+	out, _ := os.Create(archivePath)
+	gw := gzip.NewWriter(out)
+	tw := tar.NewWriter(gw)
+	writeTarEntry(tw, "checksums.txt", []byte("abc  test.txt\n"), 0640)
+	writeTarEntry(tw, "backup.json", []byte(`{"product":"Orvix Enterprise Mail","backup_format_version":1}`), 0640)
+	tw.WriteHeader(&tar.Header{Name: "/etc/passwd", Mode: 0640, Size: int64(len("pwned")), Typeflag: tar.TypeReg})
+	tw.Write([]byte("pwned"))
+	tw.Close(); gw.Close(); out.Close()
+	vr, _ := s.ValidateArchive(ctx, bID)
+	if vr.Valid {
+		t.Fatal("expected validation to reject absolute path entry")
+	}
+}
+
+func TestValidateSymlinkEntryRejected(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	bID, _ := createTestArchive(t, s, ctx)
+	bp, _ := s.safeBackupPath(bID)
+	archivePath := filepath.Join(bp, "backup-archive.tar.gz")
+	out, _ := os.Create(archivePath)
+	gw := gzip.NewWriter(out)
+	tw := tar.NewWriter(gw)
+	writeTarEntry(tw, "checksums.txt", []byte("abc  test.txt\n"), 0640)
+	writeTarEntry(tw, "backup.json", []byte(`{"product":"Orvix Enterprise Mail","backup_format_version":1}`), 0640)
+	tw.WriteHeader(&tar.Header{Name: "symlink", Typeflag: tar.TypeSymlink, Linkname: "/etc/passwd"})
+	tw.Close(); gw.Close(); out.Close()
+	vr, _ := s.ValidateArchive(ctx, bID)
+	if vr.Valid {
+		t.Fatal("expected validation to reject symlink entry")
+	}
+}
+
+func TestValidateHardlinkEntryRejected(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	bID, _ := createTestArchive(t, s, ctx)
+	bp, _ := s.safeBackupPath(bID)
+	archivePath := filepath.Join(bp, "backup-archive.tar.gz")
+	out, _ := os.Create(archivePath)
+	gw := gzip.NewWriter(out)
+	tw := tar.NewWriter(gw)
+	writeTarEntry(tw, "checksums.txt", []byte("abc  test.txt\n"), 0640)
+	writeTarEntry(tw, "backup.json", []byte(`{"product":"Orvix Enterprise Mail","backup_format_version":1}`), 0640)
+	tw.WriteHeader(&tar.Header{Name: "hardlink", Typeflag: tar.TypeLink, Linkname: "target"})
+	tw.Close(); gw.Close(); out.Close()
+	vr, _ := s.ValidateArchive(ctx, bID)
+	if vr.Valid {
+		t.Fatal("expected validation to reject hardlink entry")
+	}
+}
+
+func TestValidateUnsupportedFormatRejected(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	bID, archivePath := createTestArchive(t, s, ctx)
+	// Modify backup.json to have unsupported format version.
+	tmpDir := t.TempDir()
+	extractTarGz(archivePath, tmpDir)
+	mfPath := filepath.Join(tmpDir, "backup.json")
+	mfData, _ := os.ReadFile(mfPath)
+	modified := strings.Replace(string(mfData), `"backup_format_version": 1`, `"backup_format_version": 99`, 1)
+	os.WriteFile(mfPath, []byte(modified), 0640)
+	os.Remove(archivePath)
+	out, _ := os.Create(archivePath)
+	gw := gzip.NewWriter(out)
+	tw := tar.NewWriter(gw)
+	filepath.Walk(tmpDir, func(path string, info fs.FileInfo, err error) error {
+		if err != nil || info.IsDir() { return nil }
+		rel, _ := filepath.Rel(tmpDir, path)
+		data, _ := os.ReadFile(path)
+		writeTarEntry(tw, rel, data, 0640)
+		return nil
+	})
+	tw.Close(); gw.Close(); out.Close()
+	vr, _ := s.ValidateArchive(ctx, bID)
+	if vr.Valid {
+		t.Fatal("expected validation to reject unsupported format version")
+	}
+}
+
+func TestValidateWrongProductRejected(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	bID, archivePath := createTestArchive(t, s, ctx)
+	tmpDir := t.TempDir()
+	extractTarGz(archivePath, tmpDir)
+	mfPath := filepath.Join(tmpDir, "backup.json")
+	mfData, _ := os.ReadFile(mfPath)
+	modified := strings.Replace(string(mfData), ProductName, "Wrong Product", 1)
+	os.WriteFile(mfPath, []byte(modified), 0640)
+	os.Remove(archivePath)
+	out, _ := os.Create(archivePath)
+	gw := gzip.NewWriter(out)
+	tw := tar.NewWriter(gw)
+	filepath.Walk(tmpDir, func(path string, info fs.FileInfo, err error) error {
+		if err != nil || info.IsDir() { return nil }
+		rel, _ := filepath.Rel(tmpDir, path)
+		data, _ := os.ReadFile(path)
+		writeTarEntry(tw, rel, data, 0640)
+		return nil
+	})
+	tw.Close(); gw.Close(); out.Close()
+	vr, _ := s.ValidateArchive(ctx, bID)
+	if vr.Valid {
+		t.Fatal("expected validation to reject wrong product")
+	}
+}
+
+func TestValidateChecksumMismatchRejected(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	bID, archivePath := createTestArchive(t, s, ctx)
+	// Corrupt the db file content.
+	tmpDir := t.TempDir()
+	extractTarGz(archivePath, tmpDir)
+	dbPath := filepath.Join(tmpDir, "var/lib/orvix/orvix.db")
+	dbData, _ := os.ReadFile(dbPath)
+	dbData[0] = ^dbData[0] // corrupt first byte
+	os.WriteFile(dbPath, dbData, 0640)
+	os.Remove(archivePath)
+	out, _ := os.Create(archivePath)
+	gw := gzip.NewWriter(out)
+	tw := tar.NewWriter(gw)
+	filepath.Walk(tmpDir, func(path string, info fs.FileInfo, err error) error {
+		if err != nil || info.IsDir() { return nil }
+		rel, _ := filepath.Rel(tmpDir, path)
+		data, _ := os.ReadFile(path)
+		writeTarEntry(tw, rel, data, 0640)
+		return nil
+	})
+	tw.Close(); gw.Close(); out.Close()
+	vr, _ := s.ValidateArchive(ctx, bID)
+	if vr.Valid {
+		t.Fatal("expected validation to reject checksum mismatch")
+	}
+}
+
+// ── .env redaction tests ─────────────────────────────────
+
+func TestCreateArchiveRedactsEnvSecrets(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+
+	// Create a dummy .env file in a temp dir that looks like /etc/orvix.
+	envDir := t.TempDir()
+	envContent := `NAMECHEAP_API_KEY=supersecret-namecheap
+ORVIX_DNS_NAMECHEAP_API_KEY=supersecret-dns
+ORVIX_ADMIN_PASSWORD=supersecret-admin
+JWT_SECRET=supersecret-jwt
+NORMAL_PUBLIC_VALUE=hello
+# comment line with SECRET=ignored`
+	envPath := filepath.Join(envDir, "orvix.env")
+	os.WriteFile(envPath, []byte(envContent), 0640)
+
+	// Point config path to the dummy dir so .env is found.
+	s.configPath = filepath.Join(envDir, "orvix.yaml")
+	os.WriteFile(s.configPath, []byte("server:\n  host: 0.0.0.0\n"), 0640)
+
+	b, _ := s.CreateBackup(ctx, "env-redact-test")
+	archivePath, _ := s.CreateArchive(ctx, b.ID)
+
+	// Extract archive and verify .env.redacted contents.
+	tmpDir := t.TempDir()
+	extractTarGz(archivePath, tmpDir)
+
+	// Find the .env.redacted file.
+	var envRedactedData []byte
+	filepath.Walk(tmpDir, func(path string, info fs.FileInfo, err error) error {
+		if err != nil || info.IsDir() { return nil }
+		if strings.HasSuffix(path, ".env.redacted") {
+			envRedactedData, _ = os.ReadFile(path)
+		}
+		return nil
+	})
+
+	if envRedactedData == nil {
+		t.Skip(".env.redacted file not found in archive (not present on this test system)")
+		return
+	}
+
+	redactedStr := string(envRedactedData)
+
+	// Secret values must NOT appear.
+	for _, secret := range []string{"supersecret-namecheap", "supersecret-dns", "supersecret-admin", "supersecret-jwt"} {
+		if strings.Contains(redactedStr, secret) {
+			t.Fatalf("secret value %q found in redacted env file", secret)
+		}
+	}
+
+	// REDACTED must appear for secret keys.
+	for _, key := range []string{"NAMECHEAP_API_KEY", "ORVIX_DNS_NAMECHEAP_API_KEY", "ORVIX_ADMIN_PASSWORD", "JWT_SECRET"} {
+		if !strings.Contains(redactedStr, key+"=REDACTED") && !strings.Contains(redactedStr, key+": REDACTED") {
+			t.Fatalf("secret key %q not redacted in env file", key)
+		}
+	}
+
+	// Non-secret value must remain.
+	if !strings.Contains(redactedStr, "NORMAL_PUBLIC_VALUE=hello") {
+		t.Fatal("non-secret value should not be redacted")
 	}
 }

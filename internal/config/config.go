@@ -66,7 +66,8 @@ type OutboundConfig struct {
 
 // BackupConfig holds backup settings.
 type BackupConfig struct {
-	Dir string `mapstructure:"dir"`
+	Dir            string `mapstructure:"dir"`
+	RetentionCount int    `mapstructure:"retention_count"`
 }
 
 // ServerConfig holds HTTP server settings.
@@ -338,7 +339,8 @@ func Defaults() *Config {
 			Port: 3310,
 		},
 		Backup: BackupConfig{
-			Dir: "/var/lib/orvix/backups",
+			Dir:            "/var/backups/orvix/",
+			RetentionCount: 10,
 		},
 		Outbound: OutboundConfig{
 			PreferIPv4: false,
@@ -458,6 +460,9 @@ func applyEnvOverrides(v *viper.Viper, cfg *Config) {
 	}
 	if v.GetString("COREMAIL_ENABLED") != "" {
 		cfg.CoreMail.Enabled = v.GetBool("COREMAIL_ENABLED")
+	}
+	if v.GetString("BACKUP_RETENTION_COUNT") != "" {
+		cfg.Backup.RetentionCount = v.GetInt("BACKUP_RETENTION_COUNT")
 	}
 }
 

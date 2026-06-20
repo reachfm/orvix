@@ -2898,12 +2898,12 @@
 
   async function loadBackups() {
     try {
-      var b = await apiGet('/api/v1/backups');
+      var b = await apiGet('/api/v1/admin/backups');
       state.backups = Array.isArray(b) ? b : [];
     } catch (_) { state.backups = []; }
-    try { state.backupSchedule = await apiGet('/api/v1/backups/schedule'); } catch (_) {}
-    try { state.backupMetrics  = await apiGet('/api/v1/backups/metrics'); } catch (_) {}
-    try { state.backupHealth   = await apiGet('/api/v1/backups/health'); } catch (_) {}
+    try { state.backupSchedule = await apiGet('/api/v1/admin/backups/schedule'); } catch (_) {}
+    try { state.backupMetrics  = await apiGet('/api/v1/admin/backups/metrics'); } catch (_) {}
+    try { state.backupHealth   = await apiGet('/api/v1/admin/backups/health'); } catch (_) {}
     renderBackupStats();
     renderBackupsTable();
   }
@@ -2956,6 +2956,8 @@
       { key: '_actions', label: 'Actions', render: function (b) {
         return el('div', { class: 'row-actions' }, [
           el('button', { class: 'btn xs ghost', type: 'button', text: 'Download', onclick: function () { downloadBackup(b); } }),
+          el('button', { class: 'btn xs ghost', type: 'button', text: 'Validate', onclick: function () { validateBackup(b); } }),
+          el('button', { class: 'btn xs ghost', type: 'button', text: 'Restore', onclick: function () { restoreBackup(b); } }),
           el('button', { class: 'btn xs ghost danger', type: 'button', text: 'Delete', onclick: function () { deleteBackup(b); } })
         ]);
       }}
@@ -2971,7 +2973,7 @@
       dangerous: false
     }).then(function (ok) {
       if (!ok) return;
-      apiPost('/api/v1/backups', {}).then(function () {
+      apiPost('/api/v1/admin/backups', {}).then(function () {
         toast('Backup started', 'success');
         loadBackups();
       }).catch(function (e) { toast(e.message, 'error'); });
@@ -2986,24 +2988,18 @@
       dangerous: false
     }).then(function (ok) {
       if (!ok) return;
-      downloadFile('/api/v1/backups/' + b.id + '/download').catch(function (e) { toast(e.message, 'error'); });
+      downloadFile('/api/v1/admin/backups/' + b.id + '/download').catch(function (e) { toast(e.message, 'error'); });
     });
   }
 
   function deleteBackup(b) {
-    confirmDanger({
-      title: 'Delete backup #' + b.id + '?',
-      message: 'This permanently removes the backup file. There is no undo.',
-      confirmLabel: 'Delete backup',
-      requireText: 'delete',
-      dangerous: true
-    }).then(function (ok) {
-      if (!ok) return;
-      apiDelete('/api/v1/backups/' + b.id).then(function () {
-        toast('Backup deleted', 'success');
-        loadBackups();
-      }).catch(function (e) { toast(e.message, 'error'); });
-    });
+    var typedConfirm = prompt("Type 'delete-orvix-backup' to confirm deletion of backup " + b.id + ":");
+    if (!typedConfirm) return;
+    if (typedConfirm !== "delete-orvix-backup") { toast("Typed confirmation did not match.", "error"); return; }
+    apiDelete('/api/v1/admin/backups/' + b.id, { confirm: "delete-orvix-backup" }).then(function () {
+      toast('Backup deleted', 'success');
+      loadBackups();
+    }).catch(function (e) { toast(e.message, 'error'); });
   }
 
   function runRetention() {
@@ -3015,11 +3011,35 @@
       dangerous: true
     }).then(function (ok) {
       if (!ok) return;
-      apiPost('/api/v1/backups/retention', {}).then(function () {
+      apiPost('/api/v1/admin/backups/retention', {}).then(function () {
         toast('Retention run', 'success');
         loadBackups();
       }).catch(function (e) { toast(e.message, 'error'); });
     });
+  }
+
+  function validateBackup(b) {
+    apiPost('/api/v1/admin/backups/' + b.id + '/validate', {}).then(function (vr) {
+      if (vr && vr.valid === true) {
+        toast('Backup ' + b.id + ' validation passed.', 'success');
+      } else {
+        var errs = (vr && vr.errors && Array.isArray(vr.errors)) ? vr.errors.join('; ') : 'Validation failed';
+        toast('Backup ' + b.id + ' validation failed: ' + errs, 'error');
+      }
+    }).catch(function (e) { toast(e.message, 'error'); });
+  }
+
+  function restoreBackup(b) {
+    var typedConfirm = prompt("Type 'restore-orvix-backup' to confirm restore of backup " + b.id + ":");
+    if (!typedConfirm) return;
+    if (typedConfirm !== 'restore-orvix-backup') { toast('Typed confirmation did not match.', 'error'); return; }
+    apiPost('/api/v1/admin/backups/' + b.id + '/restore', { confirm: 'restore-orvix-backup' }).then(function (rr) {
+      if (rr && rr.status === 'staged') {
+        toast('Backup ' + b.id + ' validated and staged. Restart/manual apply required.', 'success');
+      } else {
+        toast('Restore failed for backup ' + b.id + ': ' + (rr ? rr.status : 'unknown'), 'error');
+      }
+    }).catch(function (e) { toast(e.message, 'error'); });
   }
 
   // ----- Updates ------------------------------------------------------

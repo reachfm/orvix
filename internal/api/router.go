@@ -385,11 +385,20 @@ func (r *Router) setupRoutes() {
 	// compatibility.
 	admin.Get("/admin/queue/summary", r.h.AdminQueueSummary)
 	admin.Get("/admin/queue/:id", r.h.GetAdminQueueEntry)
-	admin.Get("/backups", r.h.ListBackups)
-	admin.Get("/backups/schedule", r.h.GetBackupSchedule)
-	admin.Get("/backups/metrics", r.h.GetBackupMetrics)
-	admin.Get("/backups/health", r.h.GetBackupHealth)
-	admin.Get("/backups/:id/download", r.h.DownloadBackup)
+	admin.Get("/admin/backups", r.h.ListBackups)
+	admin.Get("/admin/backups/schedule", r.h.GetBackupSchedule)
+	admin.Get("/admin/backups/metrics", r.h.GetBackupMetrics)
+	admin.Get("/admin/backups/health", r.h.GetBackupHealth)
+	admin.Get("/admin/backups/:id/download", r.h.DownloadBackup)
+	admin.Get("/admin/backups/:id", r.h.GetBackup)
+	// Legacy /backups routes — return 410 Gone so the frontend
+	// can safely discover the new path without accidentally
+	// performing destructive operations on the old one.
+	admin.Get("/backups", r.h.LegacyGone)
+	admin.Get("/backups/schedule", r.h.LegacyGone)
+	admin.Get("/backups/metrics", r.h.LegacyGone)
+	admin.Get("/backups/health", r.h.LegacyGone)
+	admin.Get("/backups/:id/download", r.h.LegacyGone)
 	admin.Get("/firewall/rules", r.h.ListFirewallRules)
 	admin.Get("/firewall/logs", r.h.ListFirewallLogs)
 	admin.Get("/modules", r.h.ListModules)
@@ -510,10 +519,17 @@ func (r *Router) setupRoutes() {
 	men.Delete("/users/:id", r.h.DeleteUser)
 	men.Delete("/queue/:id", r.h.DeleteQueue)
 	men.Post("/queue/:id/retry", r.h.RetryQueue)
-	men.Post("/backups", r.h.CreateBackup)
-	men.Post("/backups/schedule", r.h.SetBackupSchedule)
-	men.Post("/backups/retention", r.h.RunBackupRetention)
-	men.Delete("/backups/:id", r.h.DeleteBackup)
+	men.Post("/admin/backups", r.h.CreateBackup)
+	men.Post("/admin/backups/schedule", r.h.SetBackupSchedule)
+	men.Post("/admin/backups/retention", r.h.RunBackupRetention)
+	men.Post("/admin/backups/:id/validate", r.h.PostValidateBackup)
+	men.Post("/admin/backups/:id/restore", r.h.PostRestoreBackup)
+	men.Delete("/admin/backups/:id", r.h.DeleteBackup)
+	// Legacy write routes return 410 Gone.
+	men.Post("/backups", r.h.LegacyGone)
+	men.Post("/backups/schedule", r.h.LegacyGone)
+	men.Post("/backups/retention", r.h.LegacyGone)
+	men.Delete("/backups/:id", r.h.LegacyGone)
 	// Monitoring v1: resolve an alert (CSRF-protected, admin role).
 	men.Post("/monitoring/alerts/:id/resolve", r.h.PostMonitoringAlertResolve)
 	// Update Management v1: trigger a check or a runtime update
@@ -652,5 +668,5 @@ func updateBackupDir(cfg *config.Config) string {
 	if cfg != nil && cfg.Backup.Dir != "" {
 		return cfg.Backup.Dir
 	}
-	return "/var/lib/orvix/backups"
+	return "/var/backups/orvix/"
 }

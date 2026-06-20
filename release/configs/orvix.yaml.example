@@ -105,4 +105,5 @@ clamav:
   port: 3310
 
 backup:
-  dir: /var/lib/orvix/backups
+  dir: /var/backups/orvix/
+  retention_count: 10

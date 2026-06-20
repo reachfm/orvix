@@ -155,12 +155,13 @@ func backupRequest(t *testing.T, router *api.Router, method, path, body, token, 
 		t.Fatalf("request: %v", err)
 	}
 	data, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
 	return resp, data
 }
 
 func createBackupViaAPI(t *testing.T, router *api.Router, token, csrf string) backupTestEntry {
 	t.Helper()
-	resp, body := backupRequest(t, router, "POST", "/api/v1/backups", `{}`, token, csrf)
+	resp, body := backupRequest(t, router, "POST", "/api/v1/admin/backups", `{}`, token, csrf)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create status %d: %s", resp.StatusCode, body)
 	}
@@ -182,7 +183,7 @@ func TestBackupAPIListEmptyReturnsArray(t *testing.T) {
 	defer router.App().Shutdown()
 	defer sqlDB.Close()
 
-	resp, body := backupRequest(t, router, "GET", "/api/v1/backups", "", token, "")
+	resp, body := backupRequest(t, router, "GET", "/api/v1/admin/backups", "", token, "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("list status %d: %s", resp.StatusCode, body)
 	}
@@ -208,7 +209,7 @@ func TestBackupAPICreateListDownloadDelete(t *testing.T) {
 		t.Fatalf("backup dir missing: %v", err)
 	}
 
-	resp, body := backupRequest(t, router, "GET", "/api/v1/backups", "", token, "")
+	resp, body := backupRequest(t, router, "GET", "/api/v1/admin/backups", "", token, "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("list status %d: %s", resp.StatusCode, body)
 	}
@@ -220,15 +221,18 @@ func TestBackupAPICreateListDownloadDelete(t *testing.T) {
 		t.Fatalf("unexpected list: %#v", list)
 	}
 
-	resp, archive := backupRequest(t, router, "GET", "/api/v1/backups/"+created.ID+"/download", "", token, "")
+	resp, archive := backupRequest(t, router, "GET", "/api/v1/admin/backups/"+created.ID+"/download", "", token, "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("download status %d: %s", resp.StatusCode, archive)
 	}
 	if got := resp.Header.Get("Content-Type"); got != "application/gzip" {
 		t.Fatalf("unexpected content type %q", got)
 	}
+	if got := resp.Header.Get("Content-Disposition"); !strings.Contains(got, "attachment;") || !strings.Contains(got, "orvix-backup-"+created.ID+".tar.gz") {
+		t.Fatalf("unexpected content disposition %q", got)
+	}
 	names := readArchiveNames(t, archive)
-	for _, name := range []string{"var/lib/orvix/orvix.db", "BACKUP_INFO.txt"} {
+	for _, name := range []string{"var/lib/orvix/orvix.db", "backup.json", "RESTORE_INSTRUCTIONS.txt", "checksums.txt"} {
 		if !containsString(names, name) {
 			t.Fatalf("archive missing %s, got %v", name, names)
 		}
@@ -242,7 +246,28 @@ func TestBackupAPICreateListDownloadDelete(t *testing.T) {
 		}
 	}
 
-	resp, body = backupRequest(t, router, "DELETE", "/api/v1/backups/"+created.ID, "", token, csrf)
+	// Verify backup.json manifest contents.
+	if containsString(names, "backup.json") {
+		entry := extractArchiveEntry(t, archive, "backup.json")
+		if entry == "" {
+			t.Fatal("backup.json entry empty")
+		}
+		var am struct {
+			Product             string `json:"product"`
+			BackupFormatVersion int    `json:"backup_format_version"`
+		}
+		if err := json.Unmarshal([]byte(entry), &am); err != nil {
+			t.Fatalf("unmarshal backup.json: %v", err)
+		}
+		if am.Product != "Orvix Enterprise Mail" {
+			t.Fatalf("expected product 'Orvix Enterprise Mail', got %q", am.Product)
+		}
+		if am.BackupFormatVersion != 1 {
+			t.Fatalf("expected backup_format_version 1, got %d", am.BackupFormatVersion)
+		}
+	}
+
+	resp, body = backupRequest(t, router, "DELETE", "/api/v1/admin/backups/"+created.ID, `{"confirm":"delete-orvix-backup"}`, token, csrf)
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("delete status %d: %s", resp.StatusCode, body)
 	}
@@ -251,28 +276,58 @@ func TestBackupAPICreateListDownloadDelete(t *testing.T) {
 	}
 }
 
+func TestBackupDownloadStreamsArchiveWithoutFullBuffer(t *testing.T) {
+	source, err := os.ReadFile("backups.go")
+	if err != nil {
+		t.Fatalf("read backups.go: %v", err)
+	}
+	content := string(source)
+	start := strings.Index(content, "func (h *Handler) DownloadBackup")
+	if start < 0 {
+		t.Fatal("DownloadBackup function not found")
+	}
+	end := strings.Index(content[start:], "\n// DeleteBackup")
+	if end < 0 {
+		t.Fatal("DownloadBackup function end marker not found")
+	}
+	fn := content[start : start+end]
+	for _, forbidden := range []string{
+		"os.ReadFile",
+		"io.ReadAll",
+		"bytes.Buffer",
+		"c.Send(buf.Bytes())",
+	} {
+		if strings.Contains(fn, forbidden) {
+			t.Fatalf("DownloadBackup must stream archive without full buffering; found %s", forbidden)
+		}
+	}
+	if !strings.Contains(fn, "SendStream(file") {
+		t.Fatal("DownloadBackup must stream the contained archive file with SendStream")
+	}
+}
+
 func TestBackupAPIWriteRequiresCSRF(t *testing.T) {
 	router, sqlDB, token, csrf, _ := buildBackupHarness(t)
 	defer router.App().Shutdown()
 	defer sqlDB.Close()
 
-	resp, _ := backupRequest(t, router, "POST", "/api/v1/backups", `{}`, token, "")
+	resp, _ := backupRequest(t, router, "POST", "/api/v1/admin/backups", `{}`, token, "")
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("expected missing-CSRF create to be 403, got %d", resp.StatusCode)
 	}
 
 	created := createBackupViaAPI(t, router, token, csrf)
-	resp, _ = backupRequest(t, router, "DELETE", "/api/v1/backups/"+created.ID, "", token, "")
+	resp, _ = backupRequest(t, router, "DELETE", "/api/v1/admin/backups/"+created.ID, `{"confirm":"delete-orvix-backup"}`, token, "")
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("expected missing-CSRF delete to be 403, got %d", resp.StatusCode)
 	}
 
-	// POST /api/v1/backups/schedule must require CSRF
-	resp, _ = backupRequest(t, router, "POST", "/api/v1/backups/schedule", `{}`, token, "")
+	// POST /api/v1/admin/backups/schedule must require CSRF
+	resp, _ = backupRequest(t, router, "POST", "/api/v1/admin/backups/schedule", `{}`, token, "")
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("expected missing-CSRF schedule set to be 403, got %d", resp.StatusCode)
 	}
-	req := httptest.NewRequest("POST", "/api/v1/backups/schedule", strings.NewReader(`{"enabled":true,"frequency":"daily","retentionCount":7}`))
+	req := httptest.NewRequest("POST", "/api/v1/admin/backups/schedule", strings.NewReader(`{"enabled":true,"frequency":"daily","retentionCount":7}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Cookie", "csrf_token=invalid-cookie")
@@ -286,12 +341,12 @@ func TestBackupAPIWriteRequiresCSRF(t *testing.T) {
 		t.Fatalf("expected invalid-CSRF schedule set to be 403, got %d: %s", resp.StatusCode, body)
 	}
 
-	// POST /api/v1/backups/retention must require CSRF
-	resp, _ = backupRequest(t, router, "POST", "/api/v1/backups/retention", "", token, "")
+	// POST /api/v1/admin/backups/retention must require CSRF
+	resp, _ = backupRequest(t, router, "POST", "/api/v1/admin/backups/retention", "", token, "")
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("expected missing-CSRF retention to be 403, got %d", resp.StatusCode)
 	}
-	req = httptest.NewRequest("POST", "/api/v1/backups/retention", nil)
+	req = httptest.NewRequest("POST", "/api/v1/admin/backups/retention", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Cookie", "csrf_token=invalid-cookie")
 	req.Header.Set("X-CSRF-Token", "different-header")
@@ -311,7 +366,7 @@ func TestBackupAPIRejectsInvalidIDs(t *testing.T) {
 	defer sqlDB.Close()
 
 	for _, id := range []string{"..escape", "bad..name", "missing"} {
-		resp, _ := backupRequest(t, router, "GET", "/api/v1/backups/"+id+"/download", "", token, "")
+		resp, _ := backupRequest(t, router, "GET", "/api/v1/admin/backups/"+id+"/download", "", token, "")
 		if id == "missing" {
 			if resp.StatusCode != http.StatusNotFound {
 				t.Fatalf("missing backup should return 404, got %d", resp.StatusCode)
@@ -321,7 +376,7 @@ func TestBackupAPIRejectsInvalidIDs(t *testing.T) {
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("invalid id %q should return 400, got %d", id, resp.StatusCode)
 		}
-		resp, _ = backupRequest(t, router, "DELETE", "/api/v1/backups/"+id, "", token, csrf)
+		resp, _ = backupRequest(t, router, "DELETE", "/api/v1/admin/backups/"+id, `{"confirm":"delete-orvix-backup"}`, token, csrf)
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("invalid delete id %q should return 400, got %d", id, resp.StatusCode)
 		}
@@ -350,6 +405,33 @@ func readArchiveNames(t *testing.T, data []byte) []string {
 	return names
 }
 
+func extractArchiveEntry(t *testing.T, data []byte, target string) string {
+	t.Helper()
+	gr, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("gzip reader: %v", err)
+	}
+	defer gr.Close()
+	tr := tar.NewReader(gr)
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar reader: %v", err)
+		}
+		if header.Name == target {
+			body, err := io.ReadAll(tr)
+			if err != nil {
+				t.Fatalf("read %s: %v", target, err)
+			}
+			return string(body)
+		}
+	}
+	return ""
+}
+
 func containsString(items []string, want string) bool {
 	for _, item := range items {
 		if item == want {
@@ -357,4 +439,83 @@ func containsString(items []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// ── Delete confirmation tests ────────────────────────────
+
+func TestBackupDeleteNoBodyReturns400(t *testing.T) {
+	router, sqlDB, token, csrf, _ := buildBackupHarness(t)
+	defer router.App().Shutdown()
+	defer sqlDB.Close()
+	created := createBackupViaAPI(t, router, token, csrf)
+	resp, body := backupRequest(t, router, "DELETE", "/api/v1/admin/backups/"+created.ID, "", token, csrf)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for no body, got %d: %s", resp.StatusCode, body)
+	}
+}
+
+func TestBackupDeleteWrongConfirmReturns400(t *testing.T) {
+	router, sqlDB, token, csrf, _ := buildBackupHarness(t)
+	defer router.App().Shutdown()
+	defer sqlDB.Close()
+	created := createBackupViaAPI(t, router, token, csrf)
+	resp, body := backupRequest(t, router, "DELETE", "/api/v1/admin/backups/"+created.ID, `{"confirm":"wrong-value"}`, token, csrf)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for wrong confirm, got %d: %s", resp.StatusCode, body)
+	}
+}
+
+func TestBackupDeleteCorrectConfirmSucceeds(t *testing.T) {
+	router, sqlDB, token, csrf, backupDir := buildBackupHarness(t)
+	defer router.App().Shutdown()
+	defer sqlDB.Close()
+	created := createBackupViaAPI(t, router, token, csrf)
+	resp, body := backupRequest(t, router, "DELETE", "/api/v1/admin/backups/"+created.ID, `{"confirm":"delete-orvix-backup"}`, token, csrf)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected 204 for correct confirm, got %d: %s", resp.StatusCode, body)
+	}
+	if _, err := os.Stat(filepath.Join(backupDir, created.ID)); !os.IsNotExist(err) {
+		t.Fatalf("backup dir should be deleted, err=%v", err)
+	}
+}
+
+// ── Legacy route tests ───────────────────────────────────
+
+func TestBackupLegacyWriteRoutesReturn410(t *testing.T) {
+	router, sqlDB, token, csrf, _ := buildBackupHarness(t)
+	defer router.App().Shutdown()
+	defer sqlDB.Close()
+
+	for _, path := range []string{
+		"/api/v1/backups",
+		"/api/v1/backups/schedule",
+		"/api/v1/backups/retention",
+	} {
+		resp, body := backupRequest(t, router, "POST", path, `{}`, token, csrf)
+		if resp.StatusCode != http.StatusGone {
+			t.Fatalf("POST %s expected 410, got %d: %s", path, resp.StatusCode, body)
+		}
+	}
+
+	created := createBackupViaAPI(t, router, token, csrf)
+	resp, body := backupRequest(t, router, "DELETE", "/api/v1/backups/"+created.ID, `{"confirm":"delete-orvix-backup"}`, token, csrf)
+	if resp.StatusCode != http.StatusGone {
+		t.Fatalf("DELETE /api/v1/backups/:id expected 410, got %d: %s", resp.StatusCode, body)
+	}
+
+	for _, path := range []string{
+		"/api/v1/backups",
+		"/api/v1/backups/schedule",
+		"/api/v1/backups/metrics",
+		"/api/v1/backups/health",
+	} {
+		resp, body := backupRequest(t, router, "GET", path, "", token, "")
+		if resp.StatusCode != http.StatusGone {
+			t.Fatalf("GET %s expected 410, got %d: %s", path, resp.StatusCode, body)
+		}
+	}
+	resp, body = backupRequest(t, router, "GET", "/api/v1/backups/"+created.ID+"/download", "", token, "")
+	if resp.StatusCode != http.StatusGone {
+		t.Fatalf("GET /api/v1/backups/:id/download expected 410, got %d: %s", resp.StatusCode, body)
+	}
 }
