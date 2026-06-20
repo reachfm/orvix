@@ -53,11 +53,22 @@ const (
 	PurposeDKIM      Purpose = "dkim"
 	PurposeDMARC     Purpose = "dmarc"
 	PurposeMTASTS    Purpose = "mta_sts"
-	PurposeTLSRPT    Purpose = "tls_rpt"
-	PurposeCAA       Purpose = "caa"
-	PurposePTR       Purpose = "ptr"
-	PurposeBIMI      Purpose = "bimi"
-	PurposeDANETLSA  Purpose = "dane_tlsa"
+	// PurposeMTASTSValue carries the TXT portion of the mta-sts
+	// policy descriptor (_mta-sts TXT, v=STSv1; id=...). When
+	// the operator wants to read both records as one logical
+	// block we still keep them separate in the Records list.
+	PurposeMTASTSValue Purpose = "mta_sts_value"
+	// PurposeMTASTSHost is the public host record (mta-sts.<domain>
+	// A / AAAA) that points to the mail server so the public
+	// policy endpoint at https://mta-sts.<domain>/.well-known/mta-sts.txt
+	// is reachable. The endpoint itself is served by Orvix; the
+	// A / AAAA record is what makes the hostname resolve.
+	PurposeMTASTSHost   Purpose = "mta_sts_host"
+	PurposeTLSRPT       Purpose = "tls_rpt"
+	PurposeCAA          Purpose = "caa"
+	PurposePTR          Purpose = "ptr"
+	PurposeBIMI         Purpose = "bimi"
+	PurposeDANETLSA     Purpose = "dane_tlsa"
 )
 
 // Status is the verification outcome of a record.
@@ -129,6 +140,16 @@ type Plan struct {
 	// public TXT is also embedded in Records[] above.
 	MTAPolicyFile string `json:"mta_sts_policy_file,omitempty"` // mta-sts.txt body
 	PTRHint       string `json:"ptr_hint,omitempty"`            // expected PTR value
+
+	// MTAStsHostName is the public hostname that the operator
+	// must publish an A / AAAA record for so the public MTA-STS
+	// policy endpoint at /.well-known/mta-sts.txt is reachable.
+	// Format: "mta-sts.<domain>". Empty when the domain is empty.
+	MTAStsHostName string `json:"mta_sts_hostname,omitempty"`
+	// MTAPolicyURL is the absolute URL where the policy file is
+	// served. Built from cfg.DNS (scheme) when the public MTA-STS
+	// host is configured; falls back to "https://" + MTAStsHostName.
+	MTAPolicyURL   string `json:"mta_sts_policy_url,omitempty"`
 }
 
 // IsComplete returns true if every Required record is verified. Used

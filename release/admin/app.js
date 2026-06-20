@@ -2505,7 +2505,7 @@
       { name: 'SPF',              match: function (r) { return r.purpose === 'spf'; } },
       { name: 'DKIM',             match: function (r) { return r.purpose === 'dkim'; } },
       { name: 'DMARC',            match: function (r) { return r.purpose === 'dmarc'; } },
-      { name: 'MTA-STS',          match: function (r) { return r.purpose === 'mta_sts'; } },
+      { name: 'MTA-STS',          match: function (r) { return r.purpose === 'mta_sts' || r.purpose === 'mta_sts_host' || r.purpose === 'mta_sts_value'; } },
       { name: 'TLS-RPT',          match: function (r) { return r.purpose === 'tls_rpt'; } },
       { name: 'CAA',              match: function (r) { return r.purpose === 'caa'; } },
       { name: 'PTR / rDNS',       match: function (r) { return r.purpose === 'ptr'; } },
@@ -2635,12 +2635,20 @@
   }
 
   function buildMtaStsCard(plan, rows) {
-    var r = rows[0];
     var card = el('div', { class: 'dns-card' });
-    card.appendChild(el('div', { class: 'form-hint', text: 'MTA-STS (RFC 8461). Publish the TXT record at _mta-sts.<domain> and host the policy file at https://mta-sts.<domain>/.well-known/mta-sts.txt. Mode starts at "testing" by default — never enforce on first publish.' }));
-    card.appendChild(buildRecordRow(plan, r));
+    card.appendChild(el('div', { class: 'form-hint', text: 'MTA-STS (RFC 8461). The policy is served by Orvix at the URL below. Publish the TXT record at _mta-sts.<domain> and the A record for mta-sts.<domain> so the endpoint is reachable. Mode starts at "testing" by default — never enforce on first publish.' }));
+    // Render each row (mta-sts host A/AAAA + _mta-sts TXT).
+    rows.forEach(function (r) { card.appendChild(buildRecordRow(plan, r)); });
+    // Policy URL.
+    if (plan.mta_sts_policy_url) {
+      card.appendChild(el('div', { class: 'dns-row-meta' }, [
+        el('strong', null, 'Policy URL: '),
+        el('code', { text: plan.mta_sts_policy_url })
+      ]));
+    }
+    // Policy body.
     card.appendChild(el('div', { class: 'dns-policy-file' }, [
-      el('div', { class: 'dns-policy-head', text: 'mta-sts.txt (host at https://mta-sts.' + plan.domain + '/.well-known/mta-sts.txt)' }),
+      el('div', { class: 'dns-policy-head', text: 'mta-sts.txt' }),
       codeBlock(plan.mta_sts_policy_file || 'version: STSv1\nmode: testing\nmx: ' + (plan.mail_host || ('mail.' + plan.domain)) + '\nmax_age: 86400\n')
     ]));
     return card;
@@ -2707,7 +2715,7 @@
       var card = el('div', { class: 'dns-provider-card' });
       var head = el('div', { class: 'dns-provider-head' }, [
         el('strong', null, p.name),
-        badge(status, status === 'manual' || status === 'configured' ? 'good' : 'warn')
+        badge(status, status === 'manual' || status === 'configured' || status === 'ready' ? 'good' : status === 'dry_run_only' ? 'warn' : 'warn')
       ]);
       card.appendChild(head);
       (p.notes || []).forEach(function (n) {
@@ -2745,8 +2753,8 @@
   async function applyDnsProvider(name) {
     var d = state.dnsSelectedDomain;
     if (!d) { toast('Pick a domain first', 'warn'); return; }
-    var confirm = window.prompt('Apply ' + name + ' plan for ' + d + '? Type "yes-i-confirm" to confirm.');
-    if (confirm !== 'yes-i-confirm') { toast('Apply cancelled', 'info'); return; }
+    var confirm = window.prompt('Apply ' + name + ' plan for ' + d + '? Type "apply-dns-changes" to confirm.');
+    if (confirm !== 'apply-dns-changes') { toast('Apply cancelled', 'info'); return; }
     var out = $('dns-provider-out-' + name);
     if (out) { out.innerHTML = '<div class="form-hint">Applying…</div>'; }
     try {

@@ -104,7 +104,7 @@ func TestCloudflareProviderApplyWithoutCredentials(t *testing.T) {
 // TestNamecheapProviderNoCredentialsReturnsNotConfigured: same
 // shape as cloudflare.
 func TestNamecheapProviderNoCredentialsReturnsNotConfigured(t *testing.T) {
-	p := NewNamecheapProvider(NamecheapConfig{}, dnsops.NewFakeResolver())
+	p := NewNamecheapProvider(NamecheapConfig{}, NewFakeNamecheapClient())
 	cp, err := p.Plan(context.Background(), fixturePlan(t))
 	if err != nil {
 		t.Fatalf("plan: %v", err)
@@ -118,13 +118,17 @@ func TestNamecheapProviderNoCredentialsReturnsNotConfigured(t *testing.T) {
 }
 
 // TestNamecheapProviderWithCredentialsDryRun: tokens never appear
-// in the change plan; Apply still fails.
+// in the change plan; Apply succeeds against the fake client (no
+// real HTTP), and the SetCalls log shows the merged set was
+// submitted with the Orvix-managed records.
 func TestNamecheapProviderWithCredentialsDryRun(t *testing.T) {
+	client := NewFakeNamecheapClient()
 	p := NewNamecheapProvider(NamecheapConfig{
-		APIUser:  "user-secret-do-not-leak",
-		APIKey:   "key-secret-do-not-leak",
-		Username: "u",
-	}, dnsops.NewFakeResolver())
+		APIUser:      "user-secret-do-not-leak",
+		APIKey:       "key-secret-do-not-leak",
+		Username:     "u",
+		EnableApply:  true,
+	}, client)
 	cp, err := p.Plan(context.Background(), fixturePlan(t))
 	if err != nil {
 		t.Fatalf("plan: %v", err)
@@ -146,18 +150,33 @@ func TestNamecheapProviderWithCredentialsDryRun(t *testing.T) {
 			}
 		}
 	}
-	res, err := p.Apply(context.Background(), cp, "confirm")
+	res, err := p.Apply(context.Background(), cp, "apply-dns-changes")
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	if res.Failed == 0 {
-		t.Errorf("namecheap apply must mark all steps failed (no HTTP in this build)")
+	// Apply should succeed against the fake client; the
+	// real assertion is that no token-shaped substring
+	// leaks into the response and that the fake client
+	// recorded exactly one SetHosts call.
+	if res.Failed != 0 {
+		t.Errorf("namecheap apply against fake client must not fail; got %d failed", res.Failed)
+	}
+	calls := client.SetCalls()
+	if len(calls) != 1 {
+		t.Errorf("namecheap apply should call SetHosts exactly once; got %d", len(calls))
+	}
+	if len(calls) > 0 {
+		for _, h := range calls[0].Hosts {
+			if strings.Contains(h.Address, "user-secret") || strings.Contains(h.Address, "key-secret") {
+				t.Errorf("token leaked into SetHosts address: %q", h.Address)
+			}
+		}
 	}
 }
 
 // TestNamecheapProviderRequiresConfirmation: empty confirm errors.
 func TestNamecheapProviderRequiresConfirmation(t *testing.T) {
-	p := NewNamecheapProvider(NamecheapConfig{APIUser: "u", APIKey: "k", Username: "u"}, dnsops.NewFakeResolver())
+	p := NewNamecheapProvider(NamecheapConfig{APIUser: "u", APIKey: "k", Username: "u"}, NewFakeNamecheapClient())
 	if _, err := p.Apply(context.Background(), dnsops.ChangePlan{}, ""); err == nil {
 		t.Errorf("namecheap apply with empty confirm must error")
 	}

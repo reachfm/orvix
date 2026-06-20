@@ -232,11 +232,20 @@ type DNSConfig struct {
 	CloudflareZoneID string `mapstructure:"cloudflare_zone_id"`
 
 	// Namecheap
-	NamecheapAPIUser  string `mapstructure:"namecheap_api_user"`
-	NamecheapAPIKey   string `mapstructure:"namecheap_api_key"`
-	NamecheapUsername string `mapstructure:"namecheap_username"`
-	NamecheapClientIP string `mapstructure:"namecheap_client_ip"`
-	NamecheapSandbox  bool   `mapstructure:"namecheap_sandbox"`
+	NamecheapAPIUser      string `mapstructure:"namecheap_api_user"`
+	NamecheapAPIKey       string `mapstructure:"namecheap_api_key"`
+	NamecheapUsername     string `mapstructure:"namecheap_username"`
+	NamecheapClientIP     string `mapstructure:"namecheap_client_ip"`
+	NamecheapSandbox      bool   `mapstructure:"namecheap_sandbox"`
+	// NamecheapEnableApply is the kill switch for live Namecheap
+	// writes. The provider stays in dry-run mode until an operator
+	// explicitly flips this on. The value is read from
+	// dns.namecheap_enable_apply (YAML) or ORVIX_DNS_NAMECHEAP_ENABLE_APPLY
+	// (env). Default false. Even with credentials present, the
+	// provider's Apply() refuses when this is false. The UI surfaces
+	// the resulting state as "dry_run_only" so the operator can
+	// see why the Apply button is disabled.
+	NamecheapEnableApply  bool   `mapstructure:"namecheap_enable_apply"`
 
 	// AWS Route 53 (legacy stub; not used by the new DNS Ops build)
 	Route53AccessKey string `mapstructure:"route53_access_key"`
@@ -410,6 +419,9 @@ func applyEnvOverrides(v *viper.Viper, cfg *Config) {
 	}
 	if v.GetString("DNS_PUBLIC_IPV6") != "" {
 		cfg.DNS.PublicIPv6 = v.GetString("DNS_PUBLIC_IPV6")
+	}
+	if v.GetString("NAMECHEAP_ENABLE_APPLY") != "" {
+		cfg.DNS.NamecheapEnableApply = v.GetBool("NAMECHEAP_ENABLE_APPLY")
 	}
 	if v.GetString("COREMAIL_ENABLED") != "" {
 		cfg.CoreMail.Enabled = v.GetBool("COREMAIL_ENABLED")

@@ -154,6 +154,33 @@ func (g *Generator) Generate(in Inputs) (*Plan, error) {
 		})
 	}
 
+	// mta-sts host (A / AAAA) — points the mta-sts.<domain>
+	// hostname at the same public IPs as mail.<domain>. Required
+	// so the public MTA-STS policy endpoint at
+	// https://mta-sts.<domain>/.well-known/mta-sts.txt is
+	// reachable. The Plan carries the policy URL / body so the
+	// dashboard can render them.
+	p.MTAStsHostName = "mta-sts." + p.Domain
+	p.MTAPolicyURL = "https://" + p.MTAStsHostName + "/.well-known/mta-sts.txt"
+	p.Records = append(p.Records, Record{
+		Name:     "mta-sts",
+		Type:     RecordA,
+		Value:    p.ServerIPv4,
+		TTL:      3600,
+		Required: true,
+		Purpose:  PurposeMTASTSHost,
+	})
+	if p.ServerIPv6 != "" {
+		p.Records = append(p.Records, Record{
+			Name:     "mta-sts",
+			Type:     RecordAAAA,
+			Value:    p.ServerIPv6,
+			TTL:      3600,
+			Required: false,
+			Purpose:  PurposeMTASTSHost,
+		})
+	}
+
 	// SPF — required. v=spf1 mx ip4:<ipv4> [-all|~all].
 	// We use -all for the strict default; an operator can soften it.
 	spf := fmt.Sprintf("v=spf1 mx ip4:%s -all", p.ServerIPv4)

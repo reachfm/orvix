@@ -23,6 +23,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/orvix/orvix/internal/dnsops/providers"
+
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/api/handlers"
 	"github.com/orvix/orvix/internal/auth"
@@ -152,7 +154,20 @@ func newDNSOpsHarness(t *testing.T) *dnsOpsHarness {
 
 	h := handlers.NewHandler(db, authn, nil, logger, cfg, modules.NewRegistry(logger), ff, nil)
 	resolver := dnsops.NewFakeResolver()
-	svc := dnsops.NewService(resolver)
+	svc := dnsops.NewService(resolver,
+		providers.NewCloudflareProvider(providers.CloudflareConfig{
+			APIToken: cfg.DNS.CloudflareAPIKey,
+			ZoneID:   cfg.DNS.CloudflareZoneID,
+		}, resolver),
+		providers.NewNamecheapProvider(providers.NamecheapConfig{
+			APIUser:     cfg.DNS.NamecheapAPIUser,
+			APIKey:      cfg.DNS.NamecheapAPIKey,
+			Username:    cfg.DNS.NamecheapUsername,
+			ClientIP:    cfg.DNS.NamecheapClientIP,
+			Sandbox:     cfg.DNS.NamecheapSandbox,
+			EnableApply: cfg.DNS.NamecheapEnableApply,
+		}, providers.NewFakeNamecheapClient()),
+	)
 	h.SetDNSOpsService(svc)
 
 	app := fiber.New()
@@ -646,8 +661,13 @@ func TestDNSOpsVerifyReadinessPartialWithMissingMTASTS(t *testing.T) {
 	if verifiedCount >= requiredCount {
 		t.Errorf("readiness must be less than %d with missing records; got %d/%d", requiredCount, verifiedCount, requiredCount)
 	}
-	if verifiedCount != requiredCount-2 {
-		t.Errorf("expected exactly 2 unverified records (MTA-STS + TLS-RPT); got %d verified out of %d required", verifiedCount, requiredCount)
+	if verifiedCount != requiredCount-3 {
+		// In 2G, the mta-sts.<domain> A record is also a
+		// required readiness record (the public policy
+		// endpoint must be reachable). So a fully-MTA-STS-
+		// missing fixture has THREE missing required
+		// records: mta-sts A, _mta-sts TXT, _smtp._tls TXT.
+		t.Errorf("expected exactly 3 unverified records (mta-sts A + MTA-STS TXT + TLS-RPT); got %d verified out of %d required", verifiedCount, requiredCount)
 	}
 }
 
@@ -877,13 +897,14 @@ func TestDNSOpsProviderApplyRequiresConfirmation(t *testing.T) {
 	}
 }
 
-// TestDNSOpsProviderApplyManualFailsSafely: with confirmation,
-// the manual provider returns a Failed result (not a fake success).
+// TestDNSOpsProviderApplyManualFailsSafely: with the 2G
+// confirmation string, the manual provider returns a Failed
+// result (not a fake success).
 func TestDNSOpsProviderApplyManualFailsSafely(t *testing.T) {
 	h := newDNSOpsHarness(t)
 	defer h.close()
 	code, body := h.do(t, "POST", "/api/v1/admin/dns/example.com/provider/apply?provider=manual", h.adminT,
-		`{"confirm":"yes-i-confirm"}`)
+		`{"confirm":"apply-dns-changes"}`)
 	if code != http.StatusOK {
 		t.Fatalf("apply must be 200; got %d body=%s", code, body)
 	}
@@ -931,8 +952,17 @@ func TestDNSOpsProviderListReturnsManualAlways(t *testing.T) {
 	if !names["manual"] {
 		t.Errorf("providers list must include manual; got %v", resp.Providers)
 	}
-	// No tokens leak through.
-	for _, banned := range []string{"api_key", "secret", "password"} {
+	// No tokens leak through. We use a token-shape scan:
+	// 32+ contiguous chars from the base64/hex alphabet.
+	// The config field NAMES (e.g. dns.cloudflare_api_key)
+	// are still allowed — those are public keys an
+	// operator sets; only the values are secret.
+	if hasTokenShape(body) {
+		t.Errorf("providers list contains a token-shaped substring; got %s", body)
+	}
+	// Banned words that should never appear in any form
+	// (config name or value): secret, password.
+	for _, banned := range []string{"secret", "password"} {
 		if strings.Contains(strings.ToLower(body), banned) {
 			t.Errorf("providers list must not contain %q; got %s", banned, body)
 		}
@@ -1045,6 +1075,12 @@ func populateFixtureForDomain(h *dnsOpsHarness, domain, dkimSelector, mtaPolicyI
 		TXT: []string{"v=spf1 mx ip4:8.8.8.8 -all"},
 	})
 	h.resolve.Set("mail."+domain, dnsops.FakeEntry{
+		A: []net.IP{net.ParseIP("8.8.8.8")},
+	})
+	// mta-sts.<domain> A record (new in 2G) — must point
+	// at the public mail IPv4 so the policy endpoint at
+	// /.well-known/mta-sts.txt is reachable.
+	h.resolve.Set("mta-sts."+domain, dnsops.FakeEntry{
 		A: []net.IP{net.ParseIP("8.8.8.8")},
 	})
 	h.resolve.Set("_dmarc."+domain, dnsops.FakeEntry{

@@ -44,6 +44,9 @@ func populateResolverForFixture(f *FakeResolver, plan *Plan) {
 	f.Set("mail.example.com", FakeEntry{
 		A: []net.IP{net.ParseIP("8.8.8.8")},
 	})
+	f.Set("mta-sts.example.com", FakeEntry{
+		A: []net.IP{net.ParseIP("8.8.8.8")},
+	})
 	f.Set("_dmarc.example.com", FakeEntry{
 		TXT: []string{"v=DMARC1; p=none; rua=mailto:dmarc@example.com; adkim=s; aspf=s; pct=100"},
 	})
