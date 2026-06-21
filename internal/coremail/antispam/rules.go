@@ -173,6 +173,9 @@ func (r *senderNoMXRule) Evaluate(ctx *RuleContext) *RuleResult {
 	if ctx.MailFromDomain == "" {
 		return &RuleResult{Name: r.name, Score: 0, Match: false}
 	}
+	if ctx.Reputation == nil {
+		return &RuleResult{Name: r.name, Score: 0, Match: false}
+	}
 	rep := ctx.Reputation.SenderDomainReputation(ctx.MailFromDomain)
 	if rep.KnownGood {
 		return &RuleResult{Name: r.name, Score: 0, Match: false}

@@ -231,8 +231,17 @@ func (s *Server) handleConn(conn net.Conn) {
 			session.DataBuffer = data
 
 			if s.Receiver != nil {
-				if err := s.Receiver.AcceptMessage(context.Background(), session); err != nil {
-					writeResponse(writer, responsef(StatusTLSFailed, "4.3.0 %s", err.Error()))
+				var acceptErr error
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							acceptErr = fmt.Errorf("internal accept error")
+						}
+					}()
+					acceptErr = s.Receiver.AcceptMessage(context.Background(), session)
+				}()
+				if acceptErr != nil {
+					writeResponse(writer, responsef(StatusMailboxUnavailable, "4.3.0 internal error - try again later"))
 					session.State = StateGreeted
 					session.ResetTransaction()
 					writer.Flush()
