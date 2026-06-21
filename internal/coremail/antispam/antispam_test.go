@@ -327,3 +327,76 @@ func ruleMatched(a *SpamAssessment, name string) bool {
 }
 
 var _ = strings.Contains
+
+// ── INBOUND-RECEIVE-3A Regression Tests ───────────────────
+
+func TestEngineAssessWithNilReputationNoPanic(t *testing.T) {
+	// Engine created with nil ReputationProvider, matching
+	// production NewEngine(nil) in the CoreMail runtime module.
+	// The nil reputation must never cause a panic during
+	// assessment — it must be safely handled.
+	e := NewEngine(nil)
+	ctx := &RuleContext{
+		RemoteIP:       net.ParseIP("203.0.113.1"),
+		HELODomain:     "mail.gmail.com",
+		MailFromDomain: "gmail.com",
+		SPFResult:      "pass",
+		DKIMResult:     "pass",
+		DMARCResult:    "pass",
+		RecipientCount: 1,
+		HasReverseDNS:  true,
+		Reputation:     nil, // nil reputation — must not panic
+	}
+	a := e.Assess(ctx)
+	if a.Verdict != VerdictAccept {
+		t.Fatalf("expected accept with nil reputation, got %s (score=%.1f)", a.Verdict, a.Score)
+	}
+}
+
+func TestSenderNoMXRuleNilReputationNoPanic(t *testing.T) {
+	rule := &senderNoMXRule{ruleBase{name: RuleSenderNoMX, weight: 2.0, enabled: true}}
+	ctx := &RuleContext{
+		MailFromDomain: "gmail.com",
+		Reputation:     nil, // nil — must not panic
+	}
+	result := rule.Evaluate(ctx)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.Match {
+		t.Fatal("expected no match when reputation is nil")
+	}
+	if result.Score != 0 {
+		t.Fatal("expected score 0 when reputation is nil")
+	}
+}
+
+func TestBadIPRuleNilReputationNoPanic(t *testing.T) {
+	rule := &badIPRule{ruleBase{name: RuleBadIP, weight: 8.0, enabled: true}}
+	ctx := &RuleContext{
+		RemoteIP:   net.ParseIP("10.0.0.1"),
+		Reputation: nil, // nil — must not panic
+	}
+	result := rule.Evaluate(ctx)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.Match {
+		t.Fatal("expected no match when reputation is nil")
+	}
+}
+
+func TestAllowedIPRuleNilReputationNoPanic(t *testing.T) {
+	rule := &allowedIPRule{ruleBase{name: RuleAllowedIP, weight: -5.0, enabled: true}}
+	ctx := &RuleContext{
+		RemoteIP:   net.ParseIP("192.168.1.1"),
+		Reputation: nil, // nil — must not panic
+	}
+	result := rule.Evaluate(ctx)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.Match {
+		t.Fatal("expected no match when reputation is nil")
+	}
+}

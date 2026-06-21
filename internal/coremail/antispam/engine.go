@@ -50,19 +50,19 @@ func (e *Engine) Assess(ctx *RuleContext) *SpamAssessment {
 	if ctx == nil {
 		return &SpamAssessment{Verdict: VerdictAccept}
 	}
-	if ctx.Reputation == nil {
+	if ctx.Reputation == nil && e.reputation != nil {
 		ctx.Reputation = e.reputation
 	}
 
 	assessment := &SpamAssessment{
-		RemoteIP:      ctx.RemoteIP,
-		SenderDomain:  ctx.MailFromDomain,
-		HELODomain:    ctx.HELODomain,
-		SPFResult:     ctx.SPFResult,
-		DKIMResult:    ctx.DKIMResult,
-		DMARCResult:   ctx.DMARCResult,
+		RemoteIP:       ctx.RemoteIP,
+		SenderDomain:   ctx.MailFromDomain,
+		HELODomain:     ctx.HELODomain,
+		SPFResult:      ctx.SPFResult,
+		DKIMResult:     ctx.DKIMResult,
+		DMARCResult:    ctx.DMARCResult,
 		RecipientCount: ctx.RecipientCount,
-		Verdict:       VerdictAccept,
+		Verdict:        VerdictAccept,
 	}
 
 	var totalScore float64

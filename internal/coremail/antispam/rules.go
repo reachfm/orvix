@@ -8,16 +8,16 @@ import (
 
 // Built-in rule names.
 const (
-	RuleSPFFail         = "SPF_FAIL"
-	RuleDMARCReject     = "DMARC_REJECT"
+	RuleSPFFail           = "SPF_FAIL"
+	RuleDMARCReject       = "DMARC_REJECT"
 	RuleMissingReverseDNS = "MISSING_REVERSE_DNS"
-	RuleHELOMismatch    = "HELO_MISMATCH"
-	RuleHELOSuspicious  = "HELO_SUSPICIOUS"
-	RuleSenderNoMX      = "SENDER_NO_MX"
+	RuleHELOMismatch      = "HELO_MISMATCH"
+	RuleHELOSuspicious    = "HELO_SUSPICIOUS"
+	RuleSenderNoMX        = "SENDER_NO_MX"
 	RuleTooManyRecipients = "TOO_MANY_RECIPIENTS"
-	RuleEmptyMailFrom   = "EMPTY_MAIL_FROM"
-	RuleBadIP           = "BAD_IP"
-	RuleAllowedIP       = "ALLOWED_IP"
+	RuleEmptyMailFrom     = "EMPTY_MAIL_FROM"
+	RuleBadIP             = "BAD_IP"
+	RuleAllowedIP         = "ALLOWED_IP"
 )
 
 // ruleBase provides common Rule fields.
@@ -27,9 +27,9 @@ type ruleBase struct {
 	enabled bool
 }
 
-func (r *ruleBase) Name() string     { return r.name }
-func (r *ruleBase) Weight() float64  { return r.weight }
-func (r *ruleBase) Enabled() bool    { return r.enabled }
+func (r *ruleBase) Name() string    { return r.name }
+func (r *ruleBase) Weight() float64 { return r.weight }
+func (r *ruleBase) Enabled() bool   { return r.enabled }
 
 // ── SPF Fail Rule ───────────────────────────────────────
 
@@ -171,6 +171,9 @@ func newSenderNoMXRule() Rule {
 
 func (r *senderNoMXRule) Evaluate(ctx *RuleContext) *RuleResult {
 	if ctx.MailFromDomain == "" {
+		return &RuleResult{Name: r.name, Score: 0, Match: false}
+	}
+	if ctx.Reputation == nil {
 		return &RuleResult{Name: r.name, Score: 0, Match: false}
 	}
 	rep := ctx.Reputation.SenderDomainReputation(ctx.MailFromDomain)

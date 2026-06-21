@@ -16,17 +16,17 @@ import (
 
 // Server represents an SMTP server instance.
 type Server struct {
-	Config            Config
-	TLSConfig         *tls.Config
-	Handler           *CommandHandler
-	Receiver          *Receiver
+	Config             Config
+	TLSConfig          *tls.Config
+	Handler            *CommandHandler
+	Receiver           *Receiver
 	RecipientValidator RecipientValidator
-	Observability     *observability.Observability
+	Observability      *observability.Observability
 
-	mu         sync.Mutex
-	sessions   map[string]*Session
-	listener   net.Listener
-	done       chan struct{}
+	mu       sync.Mutex
+	sessions map[string]*Session
+	listener net.Listener
+	done     chan struct{}
 
 	localDomainChecker func(ctx context.Context, domain string) (bool, error)
 
@@ -34,7 +34,6 @@ type Server struct {
 	// or on bind failure. Used by the admin runtime telemetry.
 	listenerCb func(addr string, err error)
 }
-
 
 // NewServer creates a new SMTP server.
 func NewServer(cfg Config, handler *CommandHandler, receiver *Receiver) *Server {
@@ -255,8 +254,17 @@ func (s *Server) handleConn(conn net.Conn) {
 			session.DataBuffer = data
 
 			if s.Receiver != nil {
-				if err := s.Receiver.AcceptMessage(context.Background(), session); err != nil {
-					writeResponse(writer, responsef(StatusTLSFailed, "4.3.0 %s", err.Error()))
+				var acceptErr error
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							acceptErr = fmt.Errorf("internal accept error")
+						}
+					}()
+					acceptErr = s.Receiver.AcceptMessage(context.Background(), session)
+				}()
+				if acceptErr != nil {
+					writeResponse(writer, responsef(StatusMailboxUnavailable, "4.3.0 internal error - try again later"))
 					session.State = StateGreeted
 					session.ResetTransaction()
 					writer.Flush()
