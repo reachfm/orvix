@@ -3109,4 +3109,148 @@ func hasObservedEvent(obs *observability.Observability, typ observability.EventT
 	return false
 }
 
+// ── INBOUND-RECEIVE-3A Regression Tests ───────────────────
+
+func TestSMTPInboundDATANilAntiSpamReputationNoPanic(t *testing.T) {
+	// Production code creates the anti-spam engine with
+	// antispam.NewEngine(nil) — a nil ReputationProvider.
+	// This caused a nil-pointer panic in senderNoMXRule.Evaluate
+	// after DATA was received.  This regression test proves
+	// the fix: a full inbound SMTP session with nil anti-spam
+	// completes 250 after DATA.
+	eng, ms, qe, rcv := testIntegrationEnv(t)
+	// Explicitly set nil anti-spam engine, matching production wire-up.
+	rcv.AntiSpamEngine = antispam.NewEngine(nil)
+
+	cfg := DefaultConfig()
+	cfg.RequireAuthForSubmission = false
+	cfg.SpamMode = SpamModeEnforcement // enforcement must not crash
+
+	verify := func(ctx context.Context, username, password string) (string, bool) {
+		return username, false
+	}
+	auth := NewAuthenticator(NewFuncAuthBackend(verify))
+	handler := NewCommandHandler(cfg, auth, NewSession("", nil, cfg))
+	srv := NewServer(cfg, handler, rcv)
+	srv.SetLocalDomainChecker(func(ctx context.Context, domain string) (bool, error) {
+		dom, err := eng.Domains.GetByName(ctx, domain, nil)
+		return dom != nil && dom.Status == coremail.DomainActive, err
+	})
+	srv.RecipientValidator = func(ctx context.Context, address string) (bool, error) {
+		targets, err := eng.Auth.ResolveAddress(ctx, address)
+		if err != nil || len(targets) == 0 {
+			return false, err
+		}
+		return true, nil
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := listener.Addr().String()
+	go func() {
+		srv.listener = listener
+		srv.serve()
+	}()
+	defer listener.Close()
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+
+	// Read greeting (220).
+	resp, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("greeting: %v", err)
+	}
+	if !strings.HasPrefix(resp, "220") {
+		t.Fatalf("expected 220 greeting, got: %s", resp)
+	}
+
+	// Full inbound session: HELO -> MAIL FROM -> RCPT TO -> DATA.
+	sendCmd(conn, reader, "HELO mail.gmail.com")
+	sendCmd(conn, reader, "MAIL FROM:<sender@gmail.com>")
+	resp = sendCmd(conn, reader, "RCPT TO:<user@test.com>")
+	if !strings.HasPrefix(resp, "250") {
+		t.Fatalf("RCPT TO: expected 250 for local, got: %s", resp)
+	}
+	resp = sendCmd(conn, reader, "DATA")
+	if !strings.HasPrefix(resp, "354") {
+		t.Fatalf("DATA: expected 354, got: %s", resp)
+	}
+	conn.Write([]byte("Subject: Test\r\n\r\nHello\r\n.\r\n"))
+	resp = readResponse(reader)
+	if !strings.HasPrefix(resp, "250") {
+		t.Fatalf("DATA completion: expected 250, got: %s", resp)
+	}
+
+	// Verify message was stored in the mailbox.
+	ctx := context.Background()
+	count, err := ms.Messages.CountByMailbox(ctx, 1, nil)
+	if err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if count < 1 {
+		t.Fatal("expected at least 1 message in MailStore after inbound DATA")
+	}
+	t.Logf("MailStore message count: %d", count)
+
+	// Verify no leftover state (unused vars — silence compiler).
+	_ = qe
+}
+
+func TestSMTPInboundOpenRelayStillDeniedAfterFix(t *testing.T) {
+	// Prove that the anti-spam panic fix did not weaken relay
+	// protection.  An unauthenticated sender delivering to a
+	// non-local domain must still be rejected with 550.
+	eng, _, _, rcv := testIntegrationEnv(t)
+	rcv.AntiSpamEngine = antispam.NewEngine(nil)
+
+	cfg := DefaultConfig()
+	cfg.RequireAuthForSubmission = false
+
+	verify := func(ctx context.Context, username, password string) (string, bool) {
+		return username, false
+	}
+	auth := NewAuthenticator(NewFuncAuthBackend(verify))
+	handler := NewCommandHandler(cfg, auth, NewSession("", nil, cfg))
+	srv := NewServer(cfg, handler, rcv)
+	srv.SetLocalDomainChecker(func(ctx context.Context, domain string) (bool, error) {
+		dom, err := eng.Domains.GetByName(ctx, domain, nil)
+		return dom != nil && dom.Status == coremail.DomainActive, err
+	})
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := listener.Addr().String()
+	go func() {
+		srv.listener = listener
+		srv.serve()
+	}()
+	defer listener.Close()
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	readResponse(reader) // greeting
+	sendCmd(conn, reader, "HELO test.com")
+	sendCmd(conn, reader, "MAIL FROM:<spammer@gmail.com>")
+	resp := sendCmd(conn, reader, "RCPT TO:<victim@gmail.com>")
+	if !strings.HasPrefix(resp, "550") {
+		t.Fatalf("open relay: expected 550 rejection, got: %s", resp)
+	}
+	if !strings.Contains(strings.ToLower(resp), "relay") {
+		t.Fatalf("expected relay rejection message, got: %s", resp)
+	}
+}
+
 
