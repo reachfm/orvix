@@ -4024,6 +4024,148 @@ func TestSubmissionRealSTARTTLSFlow(t *testing.T) {
 	plainConn.Close()
 }
 
+// TestSubmissionRealSTARTTLSLocalDelivery complements the external
+// recipient test above with a LOCAL recipient. The authenticated
+// sender delivers to user@test.com (a local mailbox provisioned by
+// testIntegrationEnv) and the message must be stored locally with
+// an inbound/local queue entry — proving that 587 STARTTLS works
+// for local delivery, not only outbound relay.
+func TestSubmissionRealSTARTTLSLocalDelivery(t *testing.T) {
+	cert := generateTestCert(t)
+	tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}}
+
+	eng, _, qe, rcv := testIntegrationEnv(t)
+	cfg := SubmissionConfig()
+
+	verify := func(ctx context.Context, username, password string) (string, bool) {
+		mbox, err := eng.Auth.AuthenticateMailbox(ctx, username, password)
+		if err != nil || mbox == nil {
+			return "", false
+		}
+		return username, true
+	}
+	auth := NewAuthenticator(NewFuncAuthBackend(verify))
+	handler := NewCommandHandler(cfg, auth, NewSession("", tlsCfg, cfg))
+	srv := NewServer(cfg, handler, rcv)
+	srv.TLSConfig = tlsCfg
+	srv.SetLocalDomainChecker(func(ctx context.Context, domain string) (bool, error) {
+		dom, err := eng.Domains.GetByName(ctx, domain, nil)
+		return dom != nil && dom.Status == coremail.DomainActive, err
+	})
+	srv.SenderValidator = func(ctx context.Context, identity *AuthIdentity, fromAddress string) (bool, error) {
+		return identity != nil && identity.Username == fromAddress, nil
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := listener.Addr().String()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go srv.handleConn(conn)
+		}
+	}()
+	defer listener.Close()
+
+	// Plain TCP, EHLO, STARTTLS, AUTH.
+	plainConn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer plainConn.Close()
+	reader := bufio.NewReader(plainConn)
+
+	readResponse(reader) // greeting
+	plainConn.Write([]byte("EHLO test.com\r\n"))
+	readEHLO(reader)
+
+	plainConn.Write([]byte("STARTTLS\r\n"))
+	if !strings.HasPrefix(readResponse(reader), "220") {
+		t.Fatal("STARTTLS must succeed before AUTH on submission")
+	}
+
+	tlsClientConn := tls.Client(plainConn, &tls.Config{InsecureSkipVerify: true})
+	if err := tlsClientConn.Handshake(); err != nil {
+		t.Fatalf("TLS handshake: %v", err)
+	}
+	tlsReader := bufio.NewReader(tlsClientConn)
+	readResponse(tlsReader) // post-STARTTLS greeting
+
+	tlsClientConn.Write([]byte("EHLO test.com\r\n"))
+	readEHLO(tlsReader)
+
+	tlsClientConn.Write([]byte("AUTH PLAIN " + CreateAuthPlainResponse("user@test.com", "pass") + "\r\n"))
+	if !strings.HasPrefix(readResponse(tlsReader), "235") {
+		t.Fatal("AUTH must succeed after STARTTLS")
+	}
+
+	// MAIL FROM own address → accepted.
+	tlsClientConn.Write([]byte("MAIL FROM:<user@test.com>\r\n"))
+	if !strings.HasPrefix(readResponse(tlsReader), "250") {
+		t.Fatal("MAIL FROM own address must succeed")
+	}
+
+	// RCPT TO local recipient → accepted (after AUTH, local recipient
+	// is just a normal delivery, not a relay attempt).
+	tlsClientConn.Write([]byte("RCPT TO:<user@test.com>\r\n"))
+	if !strings.HasPrefix(readResponse(tlsReader), "250") {
+		t.Fatal("RCPT TO local recipient must succeed after AUTH")
+	}
+
+	tlsClientConn.Write([]byte("DATA\r\n"))
+	if !strings.HasPrefix(readResponse(tlsReader), "354") {
+		t.Fatal("DATA must be accepted after AUTH + RCPT")
+	}
+	tlsClientConn.Write([]byte("Subject: Local STARTTLS Delivery\r\n\r\nBody for local mailbox\r\n.\r\n"))
+	if !strings.HasPrefix(readResponse(tlsReader), "250") {
+		t.Fatal("DATA termination must succeed")
+	}
+
+	// Verify local queue entry: direction=inbound, mode=local, pending.
+	ctx := context.Background()
+	in := queue.DirectionInbound
+	local := queue.DeliveryLocal
+	pending := queue.StatusPending
+	entries, _, err := qe.Repo.List(ctx, queue.QueueFilter{
+		Direction:    &in,
+		DeliveryMode: &local,
+		Status:       &pending,
+	}, nil)
+	if err != nil {
+		t.Fatalf("list queue: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("no inbound/local queue entry found for STARTTLS local recipient")
+	}
+	entry := entries[0]
+	if entry.ToAddress != "user@test.com" {
+		t.Errorf("to_address: expected user@test.com, got %s", entry.ToAddress)
+	}
+	if entry.RecipientDomain != "test.com" {
+		t.Errorf("recipient_domain: expected test.com, got %s", entry.RecipientDomain)
+	}
+	if entry.FromAddress != "user@test.com" {
+		t.Errorf("from_address: expected user@test.com, got %s", entry.FromAddress)
+	}
+	if entry.Direction != queue.DirectionInbound {
+		t.Errorf("direction: expected inbound, got %s", entry.Direction)
+	}
+	if entry.DeliveryMode != queue.DeliveryLocal {
+		t.Errorf("delivery_mode: expected local, got %s", entry.DeliveryMode)
+	}
+	if entry.Status != queue.StatusPending {
+		t.Errorf("status: expected pending, got %s", entry.Status)
+	}
+	if entry.MessageID == "" {
+		t.Error("message_id must not be empty")
+	}
+}
+
 func generateTestCert(t *testing.T) tls.Certificate {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)

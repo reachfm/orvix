@@ -61,8 +61,14 @@ coremail:
   smtp_host: 0.0.0.0
   smtp_port: 25
   # Submission (port 587) for authenticated mail client submission.
-  # Requires tls_cert_file and tls_key_file to be configured.
-  # For production, enable and configure the TLS certificate first.
+  # STARTTLS is advertised and REQUIRED before AUTH. Do not enable
+  # submission until tls_cert_file and tls_key_file point at a real
+  # PEM-encoded certificate and private key (paths are operator-
+  # supplied — the installer does not assume Caddy/Let's Encrypt).
+  # If submission_enabled=true but the cert/key is missing or fails
+  # to load, the listener stays DOWN and the admin dashboard shows
+  # "disabled: TLS certificate/key not configured" or "disabled:
+  # TLS certificate/key failed to load (<reason>)".
   submission_enabled: false
   submission_host: 0.0.0.0
   submission_port: 587
@@ -77,6 +83,13 @@ coremail:
   pop3_port: 110
   jmap_host: 0.0.0.0
   jmap_port: 8081
+  # SMTP TLS certificate / key. Used for STARTTLS on port 25
+  # (optional) and REQUIRED for port 587 submission. Provide
+  # absolute paths to PEM-encoded files. The runtime never starts
+  # an unusable plaintext submission listener — if these are set
+  # but invalid, the listener is skipped with a clear log message.
+  tls_cert_file: ""
+  tls_key_file: ""
   require_tls_for_auth: true
   license_file_path: /etc/orvix/license.json
   license_authority_cache_path: /var/lib/orvix/license-cache.json
