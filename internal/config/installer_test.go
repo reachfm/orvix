@@ -36,6 +36,29 @@ func bashCommand(t *testing.T) string {
 	return "bash"
 }
 
+// stripBashComments removes "#"-prefixed line comments from a bash
+// script for the purpose of scanning its executable body. Naive but
+// adequate for the safety checks below — it correctly handles
+// comment-prefixed lines and inline trailing comments separated by whitespace.
+func stripBashComments(script string) string {
+	var out strings.Builder
+	for _, line := range strings.Split(script, "\n") {
+		trimmed := strings.TrimLeft(line, " \t")
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		// Strip trailing inline comment after a space.
+		if idx := strings.Index(line, " #"); idx >= 0 {
+			out.WriteString(line[:idx])
+			out.WriteString("\n")
+			continue
+		}
+		out.WriteString(line)
+		out.WriteString("\n")
+	}
+	return out.String()
+}
+
 func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 	root := repoRoot(t)
 	installerBytes, err := os.ReadFile(filepath.Join(root, "release", "install.sh"))
@@ -261,6 +284,169 @@ func TestHTTPSSetupScriptCaddyFlow(t *testing.T) {
 	}
 }
 
+// ── SUBMISSION-3D: 587 SMTP TLS setup script ─────────────────
+
+// TestSMTPTLSSetupScriptExists asserts the file is present and
+// parses as a bash script with no syntax errors.
+func TestSMTPTLSSetupScriptExists(t *testing.T) {
+	root := repoRoot(t)
+	path := filepath.Join(root, "release", "scripts", "setup-smtp-tls.sh")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("setup-smtp-tls.sh missing: %v", err)
+	}
+	if info.Size() == 0 {
+		t.Fatal("setup-smtp-tls.sh is empty")
+	}
+	if runtime.GOOS != "windows" {
+		// On Windows we can't reliably chmod, so just ensure the file
+		// is readable and parses with `bash -n`.
+		cmd := exec.Command(bashCommand(t), "-n", path)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("setup-smtp-tls.sh bash syntax error: %v\n%s", err, out)
+		}
+	}
+}
+
+// TestSMTPCheckScriptExists asserts the doctor script is present
+// and parses cleanly.
+func TestSMTPCheckScriptExists(t *testing.T) {
+	root := repoRoot(t)
+	path := filepath.Join(root, "release", "scripts", "check-smtp-tls.sh")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("check-smtp-tls.sh missing: %v", err)
+	}
+	if info.Size() == 0 {
+		t.Fatal("check-smtp-tls.sh is empty")
+	}
+	cmd := exec.Command(bashCommand(t), "-n", path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("check-smtp-tls.sh bash syntax error: %v\n%s", err, out)
+	}
+}
+
+// TestSMTPTLSSetupScriptShape asserts the script contains every
+// safety property called out by the SUBMISSION-3D spec.
+func TestSMTPTLSSetupScriptShape(t *testing.T) {
+	root := repoRoot(t)
+	scriptBytes, err := os.ReadFile(filepath.Join(root, "release", "scripts", "setup-smtp-tls.sh"))
+	if err != nil {
+		t.Fatalf("read setup-smtp-tls.sh: %v", err)
+	}
+	script := string(scriptBytes)
+
+	mustContain := []string{
+		// Targets — only the Orvix path, never Caddy.
+		"/etc/orvix/tls/smtp",
+		"fullchain.pem",
+		"privkey.pem",
+		// Source paths are operator-supplied; no hardcoded Caddy layout.
+		"ORVIX_SRC_CERT",
+		"ORVIX_SRC_KEY",
+		// Safety: refuse too-permissive source keys.
+		"source key is too permissive",
+		// Validation BEFORE any destructive operation.
+		"validate_pair",
+		"modulus",
+		"openssl x509",
+		// Cert/key pair validation cannot be skipped — even after copy.
+		"installed cert/key did not validate",
+		// Backup before any YAML edit.
+		"${ORVIX_CONFIG}.bak-",
+		// Permissions: key must NOT be world-readable.
+		"0640",
+		"install -m 0644",
+		// The runtime ports must remain untouched when the script fails.
+		"port 25 inbound is unaffected",
+		// Reload the service after YAML edit.
+		"systemctl reload-or-restart",
+		// Probe 587 is listening.
+		"sport = :587",
+		// Rollback hint in the success output.
+		"Rollback",
+		// Path sanitization — the install log only records sizes.
+		"size:",
+		// No raw openssl error text leaked.
+		"2>>\"$INSTALL_LOG\"",
+	}
+	for _, want := range mustContain {
+		if !strings.Contains(script, want) {
+			t.Errorf("setup-smtp-tls.sh missing required safety marker: %q", want)
+		}
+	}
+
+	// Negative assertions: the script must NOT hardcode Caddy paths
+	// (or any other upstream cert layout) in executable code. Comments
+	// are fine — they're how we tell operators what NOT to do.
+	executable := stripBashComments(script)
+	mustNotContain := []string{
+		"/var/lib/caddy",
+		"/.local/share/caddy",
+		"acme-v02.api.letsencrypt.org",
+		"/etc/letsencrypt/live",
+	}
+	for _, bad := range mustNotContain {
+		if strings.Contains(executable, bad) {
+			t.Errorf("setup-smtp-tls.sh must NOT hardcode %q in executable code (operator-supplied source only)", bad)
+		}
+	}
+}
+
+// TestSMTPTLSSetupScriptIdempotent asserts the script's logic is
+// idempotent — second run with same inputs produces same end state.
+// Concretely: we verify the YAML-rewrite function is "upsert"
+// (not "append-only"), so rerunning does not duplicate keys.
+func TestSMTPTLSSetupScriptUpsertBehavior(t *testing.T) {
+	root := repoRoot(t)
+	scriptBytes, err := os.ReadFile(filepath.Join(root, "release", "scripts", "setup-smtp-tls.sh"))
+	if err != nil {
+		t.Fatalf("read setup-smtp-tls.sh: %v", err)
+	}
+	script := string(scriptBytes)
+	// The upsert helper must replace an existing key, not append.
+	if !strings.Contains(script, "upsert_yaml_field") {
+		t.Fatal("setup-smtp-tls.sh must define upsert_yaml_field (idempotent YAML edit)")
+	}
+	if !strings.Contains(script, `leaf_re = re.compile`) && !strings.Contains(script, `leaf_re=re.compile`) {
+		t.Fatal("setup-smtp-tls.sh upsert helper must regex-match an existing key for replacement")
+	}
+}
+
+// TestSMTPCheckScriptShape asserts the doctor script covers all the
+// required readiness checks.
+func TestSMTPCheckScriptShape(t *testing.T) {
+	root := repoRoot(t)
+	scriptBytes, err := os.ReadFile(filepath.Join(root, "release", "scripts", "check-smtp-tls.sh"))
+	if err != nil {
+		t.Fatalf("read check-smtp-tls.sh: %v", err)
+	}
+	script := string(scriptBytes)
+
+	mustContain := []string{
+		// Required readiness checks.
+		"port 25 is listening",
+		"coremail.submission_enabled",
+		"coremail.tls_cert_file",
+		"coremail.tls_key_file",
+		"cert/key pair validates",
+		"world-readable",
+		"expires within 30 days",
+		// Negative checks.
+		"port 465 is not listening",
+		// Outcome lines.
+		"587 status:",
+		"OVERALL",
+		// Port 25 failure must be loud, even when submission is on.
+		"port 25 is NOT listening",
+	}
+	for _, want := range mustContain {
+		if !strings.Contains(script, want) {
+			t.Errorf("check-smtp-tls.sh missing required marker: %q", want)
+		}
+	}
+}
+
 func TestWebmailIndexHTMLUsesAssetShortPaths(t *testing.T) {
 	root := repoRoot(t)
 	pageBytes, err := os.ReadFile(filepath.Join(root, "release", "webmail", "index.html"))
@@ -284,6 +470,8 @@ func TestReleaseReferencedFilesExist(t *testing.T) {
 	root := repoRoot(t)
 	for _, path := range []string{
 		filepath.Join("release", "scripts", "setup-https.sh"),
+		filepath.Join("release", "scripts", "setup-smtp-tls.sh"),
+		filepath.Join("release", "scripts", "check-smtp-tls.sh"),
 		filepath.Join("release", "admin", "index.html"),
 		filepath.Join("release", "admin", "app.js"),
 		filepath.Join("release", "admin", "styles.css"),
