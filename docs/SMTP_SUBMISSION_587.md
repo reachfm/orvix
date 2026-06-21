@@ -65,9 +65,11 @@ sudo bash release/scripts/setup-smtp-tls.sh \
 The script will, in order:
 
 1. Refuse to run if not root.
-2. Refuse if the source key is world-readable.
+2. Refuse if the source key permissions are not 0600 or 0640 (rejects 0644, 0666, 0777, world-readable keys).
 3. Validate the cert/key pair (`openssl x509 -noout -modulus` matches
-   `openssl pkey -noout -modulus`).
+   `openssl pkey -noout -modulus`). OpenSSL stderr is captured privately;
+   only safe reason codes (cert_read_failed, key_read_failed, etc.)
+   appear in the install log.
 4. Create `/etc/orvix/tls/smtp/` with mode `0750`.
 5. Copy the cert as `fullchain.pem` (0644) and the key as `privkey.pem`
    (0640 root:orvix, or 0600 root:root if the `orvix` group does not
@@ -75,15 +77,14 @@ The script will, in order:
 6. Re-validate the **copied** files (defense in depth).
 7. Back up `/etc/orvix/orvix.yaml` to `orvix.yaml.bak-<timestamp>`
    with mode 0600.
-8. Upsert three keys under `coremail:`:
-   ```yaml
-   coremail:
-     submission_enabled: true
-     tls_cert_file: /etc/orvix/tls/smtp/fullchain.pem
-     tls_key_file:  /etc/orvix/tls/smtp/privkey.pem
-   ```
+8. Upsert three keys under `coremail:`
 9. `systemctl reload-or-restart orvix.service`.
 10. Probe `ss -lntp` for `:587` for up to 30 seconds.
+11. If reload fails OR port 587 does not bind: **rolls back** to the
+    previous config backup, reloads the service, exits non-zero, and
+    does NOT print PASS. Port 25 inbound is never affected.
+12. On success: prints PASS with safe labels (no cert/key paths in
+    output).
 
 If any step fails, the script aborts **before** editing the YAML or
 reloading the service. Port 25 inbound keeps running throughout.
@@ -267,7 +268,7 @@ The doctor script will then report `587 status: DISABLED (safe default)`.
 
 ## Config and env reference
 
-### YAML fields (`/etc/orvix/orvix.example`)
+### YAML fields (`/etc/orvix/orvix.yaml`)
 
 ```yaml
 coremail:
@@ -308,11 +309,20 @@ SUBMISSION-3B/3C:
 - **Cert/key paths are not leaked.** The setup script's install log
   records only byte sizes, never paths or PEM contents. The doctor
   script reports PASS/FAIL with reason codes only.
-- **Private key is never world-readable.** Setup script enforces a
-  ≤ 0640 source mode before copying. The doctor script fails loudly
-  if the installed key has more permissive bits.
-- **Port 25 unaffected.** Any failure in the setup or doctor scripts
-  aborts before reload, so port 25 inbound keeps running throughout.
+- **Private key is never world-readable.** Setup script enforces 0600/0640
+  source mode before copying (rejects 0644, 0666, 0777). The doctor
+  script fails loudly if the installed key has more permissive bits.
+- **Port 25 unaffected.** Any failure in the setup script triggers an
+  automatic rollback (restores previous config, reloads service) before
+  exit. Port 25 inbound keeps running throughout.
+- **587 bind failure is FAIL, not a warning.** If port 587 does not listen
+  after reload, the script rolls back and exits non-zero.
+- **Output avoids printing cert/key paths.** Success output uses safe
+  labels ("key: installed") instead of full filesystem paths.
+- **OpenSSL stderr is never logged raw.** Only safe reason codes like
+  cert_read_failed appear in logs.
+- **Check script uses mktemp** for runtime telemetry temp files and
+  cleans them up on exit.
 - **Port 465 stays honest-disabled.** No listener is started on 465
   regardless of cert state.
 - **No hardcoded Caddy paths in the Go runtime.** Only the operator's

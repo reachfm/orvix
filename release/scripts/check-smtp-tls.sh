@@ -26,7 +26,7 @@ failures=0
 
 RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'; NC=$'\033[0m'
 
-log_verbose() { $VERBOSE && printf '  · %s\n' "$*" >&2; }
+log_verbose() { $VERBOSE && printf '  \302\267 %s\n' "$*" >&2; }
 ok()   { printf '%b\n' "  ${GREEN}PASS${NC}  $*"; }
 warn() { printf '%b\n' "  ${YELLOW}WARN${NC}  $*"; failures=$((failures + 1)); }
 fail() { printf '%b\n' "  ${RED}FAIL${NC}  $*"; failures=$((failures + 1)); }
@@ -59,23 +59,22 @@ else:
 PYEOF
 }
 
-# yaml_present returns 0 if the key is present in YAML (even if empty).
-yaml_present() {
-	local key="$1"
-	python3 - "$ORVIX_CONFIG" "$key" <<'PYEOF'
-import sys, re, pathlib
-cfg_path, key = sys.argv[1], sys.argv[2]
-p = pathlib.Path(cfg_path)
-text = p.read_text() if p.exists() else ""
-if "." in key:
-    section, leaf = key.split(".", 1)
-    sec = re.search(rf'(?ms)^{re.escape(section)}:\s*\n(.*?)(?=^\S|\Z)', text)
-    if not sec:
-        sys.exit(1)
-    sys.exit(0 if re.search(rf'(?m)^\s*{re.escape(leaf)}:', sec.group(1)) else 1)
-else:
-    sys.exit(0 if re.search(rf'(?m)^{re.escape(key)}:', text) else 1)
-PYEOF
+# validate_key_perms verifies a private key file has safe permissions.
+# Accepted: 0600, 0640.  Rejected: anything with world bits, 0644, 0666, 0777.
+validate_key_perms() {
+	local file="$1" label="$2"
+	local mode
+	mode=$(stat -c '%a' "$file" 2>/dev/null || stat -f '%Lp' "$file" 2>/dev/null || echo "")
+	local trimmed="${mode##0}"
+	trimmed="${trimmed##0}"
+	case "${trimmed:-0}" in
+		600|640)
+			ok "key file $label permissions OK (mode ${mode})"
+			;;
+		*)
+			fail "key file $label has unsafe permissions (mode ${mode}); chmod 0600 or 0640"
+			;;
+	esac
 }
 
 printf 'Orvix SMTP TLS readiness check (%s)\n' "$ORVIX_CONFIG"
@@ -155,17 +154,8 @@ fi
 ok "cert file exists"
 ok "key file exists"
 
-# ── 5. Key permissions — must not be world-readable. ──
-KEY_MODE=$(stat -c '%a' "$KEY_FILE" 2>/dev/null || stat -f '%Lp' "$KEY_FILE" 2>/dev/null || echo "")
-case "$KEY_MODE" in
-	[0-6][0-4]0|[0-6][0-3]0|[0-6][0-2]0|[0-5][0-9][0-9])
-		# 0XYZ where Y < 4 means group has no read, Z < 4 means world has no read.
-		ok "key file mode $KEY_MODE (not world-readable)"
-		;;
-	*)
-		fail "key file mode $KEY_MODE is world-readable; chmod 0640 or 0600"
-		;;
-esac
+# ── 5. Key permissions (using numeric octal validation). ──
+validate_key_perms "$KEY_FILE" "privkey"
 
 # ── 6. Cert/key pair validates. ──
 CERT_MOD=$(openssl x509 -noout -modulus -in "$CERT_FILE" 2>/dev/null || true)
@@ -202,10 +192,13 @@ else
 	ok "port 465 is not listening (SMTPS honest-disabled)"
 fi
 
-# ── 10. Orvix runtime telemetry (best effort). ──
-if curl -fsSL --connect-timeout 3 --max-time 5 "http://127.0.0.1:8080/api/v1/admin/runtime/listeners" >/tmp/orvix-listeners.json 2>/dev/null; then
-	if grep -q '"smtp-submission"' /tmp/orvix-listeners.json 2>/dev/null; then
-		if grep -A2 '"smtp-submission"' /tmp/orvix-listeners.json | grep -q '"status":"ok"'; then
+# ── 10. Orvix runtime telemetry (best effort, safe temp file). ──
+local listeners_temp
+listeners_temp=$(mktemp /tmp/orvix-listeners.XXXXXX)
+trap 'rm -f "$listeners_temp"' EXIT
+if curl -fsSL --connect-timeout 3 --max-time 5 "http://127.0.0.1:8080/api/v1/admin/runtime/listeners" >"$listeners_temp" 2>/dev/null; then
+	if grep -q '"smtp-submission"' "$listeners_temp" 2>/dev/null; then
+		if grep -A2 '"smtp-submission"' "$listeners_temp" | grep -q '"status":"ok"'; then
 			ok "admin runtime telemetry reports smtp-submission=ok"
 		else
 			warn "admin runtime telemetry reports smtp-submission not ok — see /api/v1/admin/runtime/listeners"
@@ -216,6 +209,7 @@ if curl -fsSL --connect-timeout 3 --max-time 5 "http://127.0.0.1:8080/api/v1/adm
 else
 	log_verbose "could not reach /api/v1/admin/runtime/listeners (admin API not exposed or auth required)"
 fi
+rm -f "$listeners_temp"
 
 printf '\n587 status: '
 if [ "$failures" -eq 0 ]; then

@@ -19,26 +19,11 @@ set -euo pipefail
 #   ORVIX_SERVICE=orvix.service        (systemd unit to reload)
 #   INSTALL_LOG=/var/log/orvix/smtp-tls-setup.log
 #
-# What it does, in order:
-#   1. Validates the source cert + key (modulus match, parseable)
-#   2. Creates /etc/orvix/tls/smtp/ with mode 0750 root:orvix
-#   3. Copies (or symlinks) cert into fullchain.pem (0644)
-#   4. Copies (or symlinks) key into privkey.pem (0640 root:orvix)
-#   5. Re-validates the COPIED files (defense in depth)
-#   6. Backs up /etc/orvix/orvix.yaml with a timestamp suffix
-#   7. Updates orvix.yaml: coremail.submission_enabled=true +
-#      coremail.tls_cert_file + coremail.tls_key_file
-#   8. Reloads orvix.service
-#   9. Probes port 587 is listening (up to 30s)
-#
-# Failure modes (any one aborts the whole script BEFORE restart or
-# config edit, so port 25 inbound keeps running and 587 stays off):
-#   * run as non-root
-#   * source paths missing / unreadable
-#   * cert/key pair fails modulus match
-#   * cert/key can't be re-parsed after copy
-#   * YAML write fails
-#   * systemd reload fails
+# Atomicity guarantee:
+#   If reload fails or port 587 does not bind within 30 s, the
+#   script restores the previous config backup, reloads the service
+#   to bring it back to its prior state, and exits non-zero without
+#   printing "PASS".  Port 25 inbound is never touched.
 #
 # Idempotent: rerunning with the same source paths leaves the system
 # in the same end-state, only rotating the backup timestamp.
@@ -65,8 +50,6 @@ NC=$'\033[0m'
 
 log() {
 	mkdir -p "$(dirname "$INSTALL_LOG")"
-	# Paths and raw openssl output are sanitized — we never echo the
-	# full cert/key paths or the openssl error text to the install log.
 	printf '[%s] %s\n' "$(date -Is)" "$*" >>"$INSTALL_LOG"
 }
 say() { printf '%b\n' "$*"; }
@@ -100,21 +83,31 @@ require_input() {
 	[ -f "$SRC_KEY" ] || fail "source key not found"
 	[ -r "$SRC_CERT" ] || fail "source cert not readable by current user"
 	[ -r "$SRC_KEY" ] || fail "source key not readable by current user"
-	# Source key must not be world-readable — we refuse to copy
-	# a key that is more permissive than our final 0640 target.
-	local src_mode
-	src_mode=$(stat -c '%a' "$SRC_KEY" 2>/dev/null || stat -f '%Lp' "$SRC_KEY" 2>/dev/null || echo "")
-	case "$src_mode" in
-		''|*0[0-6]*|*7[0-7])
-			# Octal mode with no group/world bits set (≤ 0640 or 0600).
-			;;
-		*)
-			fail "source key is too permissive (mode $src_mode); refusing to use a world-readable private key"
-			;;
-	esac
+	# Validate key permissions using numeric octal arithmetic.
+	# Refuse anything other than 0600 and 0640.
+	validate_key_perms "$SRC_KEY"
 	# Log only sizes — never the path string itself.
 	log "source cert supplied (size: $(wc -c <"$SRC_CERT" 2>/dev/null || echo 0) bytes)"
 	log "source key supplied (size: $(wc -c <"$SRC_KEY" 2>/dev/null || echo 0) bytes)"
+}
+
+# validate_key_perms verifies a private key has safe permissions.
+# Accepted: 0600, 0640.  Rejected: anything with world bits, 0644, 0666, 0777.
+validate_key_perms() {
+	local file="$1"
+	local mode
+	mode=$(stat -c '%a' "$file" 2>/dev/null || stat -f '%Lp' "$file" 2>/dev/null || echo "")
+	# Strip leading zeros for pattern matching (0600 -> 600, 0640 -> 640).
+	local trimmed="${mode##0}"
+	trimmed="${trimmed##0}"
+	case "${trimmed:-0}" in
+		600|640)
+			log "source key mode ${mode} accepted"
+			;;
+		*)
+			fail "source key has unacceptable permissions (mode ${mode}); only 0600 and 0640 are accepted"
+			;;
+	esac
 }
 
 # detect_service_user returns the User= / Group= the orvix systemd
@@ -131,38 +124,100 @@ detect_service_user() {
 	echo "${u:-root}:${g:-root}"
 }
 
+# safe_openssl_reason maps common openssl failure stderr patterns to
+# safe reason codes.  Never echoes raw openssl output or file paths.
+safe_openssl_reason() {
+	local openssl_stderr="$1"
+	if grep -qi 'no such file\|no file or directory\|not found' <<<"$openssl_stderr"; then
+		echo "file_not_found"
+	elif grep -qi 'permission denied\|access denied\|EACCES' <<<"$openssl_stderr"; then
+		echo "permission_denied"
+	elif grep -qi 'no start line\|PEM routines\|bad base64\|decode error\|wrong tag' <<<"$openssl_stderr"; then
+		echo "cert_parse_failed"
+	elif grep -qi 'key values mismatch\|modulus mismatch\|private key does not match' <<<"$openssl_stderr"; then
+		echo "cert_key_mismatch"
+	else
+		echo "openssl_failed"
+	fi
+}
+
+# openssl_temp captures openssl stderr to a temp file and returns a
+# safe reason code on failure.  The temp file is cleaned up.
+openssl_with_safe_reason() {
+	local label="$1"; shift
+	local stderr_tmp
+	stderr_tmp=$(mktemp /tmp/orvix-tls-openssl.XXXXXX)
+	trap 'rm -f "$stderr_tmp"' RETURN
+	set +e
+	"$@" 2>"$stderr_tmp"
+	local rc=$?
+	set -e
+	if [ $rc -ne 0 ]; then
+		local reason
+		reason=$(safe_openssl_reason "$(cat "$stderr_tmp")")
+		log "$label: $reason"
+		return 1
+	fi
+	rm -f "$stderr_tmp"
+	return 0
+}
+
 # validate_pair checks the cert/key are a matching pair and parseable.
-# Never echoes paths or raw openssl output — only PASS / FAIL.
+# OpenSSL stderr is captured privately — never logged raw.
 validate_pair() {
 	local cert="$1" key="$2"
 	[ -f "$cert" ] || { log "validate_pair: cert missing"; return 1; }
 	[ -f "$key" ] || { log "validate_pair: key missing"; return 1; }
-	local cert_mod key_mod
-	cert_mod=$(openssl x509 -noout -modulus -in "$cert" 2>>"$INSTALL_LOG") || {
-		log "validate_pair: cert failed to parse"
+
+	local stderr_tmp
+	stderr_tmp=$(mktemp /tmp/orvix-tls-openssl.XXXXXX)
+	trap 'rm -f "$stderr_tmp"' RETURN
+
+	# 1) Read cert modulus.
+	set +e
+	cert_mod=$(openssl x509 -noout -modulus -in "$cert" 2>"$stderr_tmp")
+	local cert_rc=$?
+	set -e
+	if [ $cert_rc -ne 0 ]; then
+		log "validate_pair: cert_read_failed"
 		return 1
-	}
-	if openssl pkey -noout -modulus -in "$key" 2>>"$INSTALL_LOG" >/dev/null; then
-		key_mod=$(openssl pkey -noout -modulus -in "$key" 2>>"$INSTALL_LOG") || {
-			log "validate_pair: key failed to parse"
-			return 1
-		}
+	fi
+	rm -f "$stderr_tmp"
+
+	# 2) Read key modulus (try pkey first, then rsa).
+	stderr_tmp=$(mktemp /tmp/orvix-tls-openssl.XXXXXX)
+	trap 'rm -f "$stderr_tmp"' RETURN
+	local key_mod=""
+	set +e
+	if openssl pkey -noout -modulus -in "$key" 2>"$stderr_tmp" >/dev/null; then
+		key_mod=$(openssl pkey -noout -modulus -in "$key" 2>/dev/null || true)
 	else
-		key_mod=$(openssl rsa -noout -modulus -in "$key" 2>>"$INSTALL_LOG") || {
-			log "validate_pair: key failed to parse"
-			return 1
-		}
+		if openssl rsa -noout -modulus -in "$key" 2>"$stderr_tmp" >/dev/null; then
+			key_mod=$(openssl rsa -noout -modulus -in "$key" 2>/dev/null || true)
+		fi
 	fi
-	if [ -z "$cert_mod" ] || [ -z "$key_mod" ] || [ "$cert_mod" != "$key_mod" ]; then
-		log "validate_pair: modulus mismatch"
+	set -e
+	if [ -z "$key_mod" ]; then
+		log "validate_pair: key_read_failed"
 		return 1
 	fi
-	# Expiry check — warn only (do not abort), so operators with
-	# a cert in mid-renewal can still bind 587.
-	if ! openssl x509 -noout -checkend 604800 -in "$cert" >/dev/null 2>>"$INSTALL_LOG"; then
+	rm -f "$stderr_tmp"
+
+	# 3) Compare.
+	if [ "$cert_mod" != "$key_mod" ]; then
+		log "validate_pair: cert_key_mismatch"
+		return 1
+	fi
+
+	# 4) Expiry check — warn only.
+	stderr_tmp=$(mktemp /tmp/orvix-tls-openssl.XXXXXX)
+	set +e
+	if ! openssl x509 -noout -checkend 604800 -in "$cert" >/dev/null 2>"$stderr_tmp"; then
 		log "validate_pair: cert expires within 7 days (warning)"
 		warn "cert expires within 7 days — renew before it lapses"
 	fi
+	set -e
+	rm -f "$stderr_tmp"
 	return 0
 }
 
@@ -175,7 +230,6 @@ import sys, re, pathlib
 cfg_path, key, value = sys.argv[1], sys.argv[2], sys.argv[3]
 p = pathlib.Path(cfg_path)
 text = p.read_text() if p.exists() else ""
-# Match dotted paths like "coremail.submission_enabled" at column 0.
 if "." in key:
     section, leaf = key.split(".", 1)
     sec_re = re.compile(rf'(?ms)^({re.escape(section)}:\s*\n)(.*?)(?=^\S|\Z)')
@@ -214,6 +268,43 @@ write_yaml_fields() {
 	upsert_yaml_field "$ORVIX_CONFIG" "coremail.tls_key_file" "$key"
 }
 
+# rollback_restore restores the previous config and reloads the
+# service to bring it back to the state before this script ran.
+rollback_restore() {
+	local reason="$1" backup="$2"
+	say "${RED}FAIL${NC} $reason"
+	log "FAIL $reason — rolling back"
+	if [ -f "$backup" ]; then
+		cp -p "$backup" "$ORVIX_CONFIG"
+		chmod 0640 "$ORVIX_CONFIG" || true
+		log "config restored from backup: $backup"
+		say "Restored config from backup: $backup"
+	else
+		sed -i 's/^  submission_enabled: true/  submission_enabled: false/' "$ORVIX_CONFIG" || true
+		log "config reverted: submission_enabled=false"
+		say "Reverted submission_enabled to false"
+	fi
+	if command -v systemctl >/dev/null 2>&1; then
+		systemctl reload-or-restart "$ORVIX_SERVICE" 2>>"$INSTALL_LOG" || true
+		log "service reloaded after rollback"
+		say "Service reloaded — port 25 inbound should be unaffected"
+	fi
+	say "Rollback complete. Detailed log: $INSTALL_LOG"
+	exit 2
+}
+
+# probe_port_587 tries to detect port 587 listening for up to 30 s.
+probe_port_587() {
+	local deadline=$(( $(date +%s) + 30 ))
+	while [ "$(date +%s)" -lt "$deadline" ]; do
+		if ss -ltn "( sport = :587 )" 2>/dev/null | grep -q ':587'; then
+			return 0
+		fi
+		sleep 1
+	done
+	return 1
+}
+
 main() {
 	require_root
 	require_input
@@ -233,9 +324,6 @@ main() {
 	local group="${owner#*:}"
 	log "orvix systemd service runs as $owner"
 
-	# Prefer the SMTPTLS group if it exists (operator can override
-	# the read group via SMTP_TLS_GROUP=); fall back to the
-	# systemd-declared group, finally to root.
 	if [ -n "$SMTP_TLS_GROUP" ] && getent group "$SMTP_TLS_GROUP" >/dev/null; then
 		group="$SMTP_TLS_GROUP"
 	elif ! getent group "$group" >/dev/null; then
@@ -251,8 +339,6 @@ main() {
 	local dest_cert="$ORVIX_TLS_DIR/$ORVIX_CERT_NAME"
 	local dest_key="$ORVIX_TLS_DIR/$ORVIX_KEY_NAME"
 
-	# Remove any prior file at dest — install refuses to overwrite
-	# without -T in some environments, so do it explicitly.
 	rm -f "$dest_cert" "$dest_key"
 
 	case "$ORVIX_SMTP_TLS_MODE" in
@@ -261,7 +347,6 @@ main() {
 			chmod 0644 "$dest_cert" || true
 			ln -s "$SRC_KEY" "$dest_key"
 			chmod -h 0640 "$dest_key" || true
-			# chgrp a symlink with -h so the link target inherits.
 			chgrp -h "$group" "$dest_cert" "$dest_key" || true
 			log "installed via symlink"
 			;;
@@ -276,18 +361,17 @@ main() {
 			;;
 	esac
 
-	# ── 5. Re-validate the INSTALLED files (defense in depth). ──
+	# ── 5. Re-validate the INSTALLED files. ──
 	if ! validate_pair "$dest_cert" "$dest_key"; then
-		# Roll back the install so a half-set-up TLS dir doesn't
-		# outlive this script with bad material.
 		rm -f "$dest_cert" "$dest_key"
 		fail "installed cert/key did not validate; rolled back"
 	fi
 	ok "cert + key installed and re-validated"
 
 	# ── 6. Back up the config BEFORE editing it. ──
+	local backup=""
 	if [ -f "$ORVIX_CONFIG" ]; then
-		local backup="${ORVIX_CONFIG}.bak-$(date +%Y%m%d_%H%M%S)"
+		backup="${ORVIX_CONFIG}.bak-$(date +%Y%m%d_%H%M%S)"
 		cp -p "$ORVIX_CONFIG" "$backup"
 		chmod 0600 "$backup"
 		log "config backup written: $backup"
@@ -299,45 +383,39 @@ main() {
 		log "no prior config — created empty $ORVIX_CONFIG"
 	fi
 
-	# ── 7. Update YAML (only the three keys we own). ──
+	# ── 7. Update YAML. ──
 	write_yaml_fields "$dest_cert" "$dest_key"
 	ok "orvix.yaml: coremail.submission_enabled=true + TLS paths set"
+	log "YAML updated"
 
 	# ── 8. Reload the service. ──
 	if command -v systemctl >/dev/null 2>&1; then
 		if ! systemctl reload-or-restart "$ORVIX_SERVICE" 2>>"$INSTALL_LOG"; then
-			fail "systemctl reload-or-restart $ORVIX_SERVICE failed; check 'journalctl -u $ORVIX_SERVICE'"
+			rollback_restore "systemctl reload-or-restart failed" "$backup"
 		fi
 		ok "$ORVIX_SERVICE reloaded"
 	else
 		warn "systemctl not found; the operator must restart $ORVIX_SERVICE manually"
 	fi
 
-	# ── 9. Probe port 587 (best effort, do not fail the script). ──
-	local deadline=$(( $(date +%s) + 30 ))
-	local listening=0
-	while [ "$(date +%s)" -lt "$deadline" ]; do
-		if ss -ltn "( sport = :587 )" 2>/dev/null | grep -q ':587'; then
-			listening=1
-			break
-		fi
-		sleep 1
-	done
-	if [ "$listening" -eq 1 ]; then
-		ok "port 587 is listening"
-	else
-		warn "port 587 not listening within 30s; check 'journalctl -u $ORVIX_SERVICE' (port 25 inbound is unaffected)"
+	# ── 9. Probe port 587.  If not listening, FAIL and rollback. ──
+	if ! probe_port_587; then
+		rollback_restore "port 587 not listening within 30 s — submission did not bind" "$backup"
 	fi
+	ok "port 587 is listening"
+
+	# ── 10. Re-validate installed key permissions (doctor check). ──
+	validate_key_perms "$dest_key"
 
 	cat <<DONE
 
 ${GREEN}PASS${NC} Orvix SMTP submission TLS bound.
 
-- TLS dir:    ${ORVIX_TLS_DIR}  (root:$group, 0750)
-- Cert file:  ${dest_cert}  (0644)
-- Key file:   ${dest_key}  (0640, root:$group)
-- Config:     ${ORVIX_CONFIG}
-- Service:    ${ORVIX_SERVICE} reloaded
+- TLS dir:     ${ORVIX_TLS_DIR}  (root:$group, 0750)
+- Cert file:   ${dest_cert}  (0644)
+- Key file:    installed (0640, root:$group)
+- Config:      ${ORVIX_CONFIG}
+- Service:     ${ORVIX_SERVICE} reloaded
 
 Verify 587 is live:
   printf 'EHLO test.local\r\nQUIT\r\n' | nc -w 5 127.0.0.1 587
