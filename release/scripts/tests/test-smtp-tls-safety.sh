@@ -219,8 +219,297 @@ if [ -f "$DOCS" ]; then
 		fail "docs missing mktemp mention"
 	fi
 else
-	warn "docs/SMTP_SUBMISSION_587.md not found"
+	true
 fi
+
+# ── Real execution tests (PATH stubs) ─────────────────────
+
+echo ""
+echo "=== Real execution tests (PATH stubs) ==="
+
+if ! command -v openssl >/dev/null 2>&1; then
+	pass "openssl not available — real execution tests skipped"
+else
+	REAL_TMPDIR=$(mktemp -d "/tmp/orvix-real-exec.XXXXXX")
+
+	# Generate real test cert/key pair.
+	openssl req -x509 -newkey rsa:2048 -keyout "$REAL_TMPDIR/key.pem" \
+		-out "$REAL_TMPDIR/cert.pem" -days 1 -nodes \
+		-subj "/CN=test.orvix.local" >/dev/null 2>&1
+
+	STUB_DIR="$REAL_TMPDIR/stubs"
+	mkdir -p "$STUB_DIR"
+
+	# ── id stub: always root ──
+	cat > "$STUB_DIR/id" <<'STUB'
+#!/bin/bash
+echo "0"
+exit 0
+STUB
+	chmod +x "$STUB_DIR/id"
+
+	# ── install stub: strip -o / -g ownership flags for non-root testing ──
+	cat > "$STUB_DIR/install" <<'STUB'
+#!/bin/bash
+args=(); skip=false
+for arg in "$@"; do
+	if $skip; then skip=false; continue; fi
+	case "$arg" in -o|-g) skip=true ;; *) args+=("$arg") ;; esac
+done
+exec /usr/bin/install "${args[@]}"
+STUB
+	chmod +x "$STUB_DIR/install"
+
+	# ── systemctl stub: controlled by RELOAD_FAIL env ──
+	cat > "$STUB_DIR/systemctl" <<'STUB'
+#!/bin/bash
+case "${RELOAD_FAIL:-0}" in 1) exit 1 ;; *) exit 0 ;; esac
+STUB
+	chmod +x "$STUB_DIR/systemctl"
+
+	# ── ss stub: controlled by SS_587_OK env ──
+	cat > "$STUB_DIR/ss" <<'STUB'
+#!/bin/bash
+case "${SS_587_OK:-0}" in
+	1) echo "LISTEN 0 128 0.0.0.0:587 users:((\"orvix\"))" ;;
+	*) exit 0 ;;
+esac
+STUB
+	chmod +x "$STUB_DIR/ss"
+
+	# ── curl stub: connection refused ──
+	cat > "$STUB_DIR/curl" <<'STUB'
+#!/bin/bash
+exit 7
+STUB
+	chmod +x "$STUB_DIR/curl"
+
+	# Common test env
+	TEST_CONFIG="$REAL_TMPDIR/orvix.yaml"
+	TEST_TLS_DIR="$REAL_TMPDIR/tls"
+	TEST_LOG="$REAL_TMPDIR/setup.log"
+	TEST_SERVICE="orvix-test.service"
+
+	run_setup() {
+		local reload_fail="${1:-0}" ss_587_ok="${2:-0}"
+		local cert_path="${3:-$REAL_TMPDIR/cert.pem}"
+		local key_path="${4:-$REAL_TMPDIR/key.pem}"
+		local rc_var
+		PATH="$STUB_DIR:$PATH" \
+			ORVIX_CONFIG="$TEST_CONFIG" \
+			ORVIX_TLS_DIR="$TEST_TLS_DIR" \
+			ORVIX_SERVICE="$TEST_SERVICE" \
+			INSTALL_LOG="$TEST_LOG" \
+			SMTP_TLS_GROUP="" \
+			RELOAD_FAIL="$reload_fail" \
+			SS_587_OK="$ss_587_ok" \
+			bash "$SETUP_SCRIPT" "$cert_path" "$key_path" 2>&1
+	}
+
+	cat > "$TEST_CONFIG" <<'YAML'
+coremail:
+  submission_enabled: false
+  hostname: mail.example.com
+YAML
+	touch "$TEST_LOG"
+
+	# ──────────────────────────────────────────────
+	# Test 1: Permission rejection (0644 key)
+	# ──────────────────────────────────────────────
+	chmod 0644 "$REAL_TMPDIR/key.pem"
+	SAVED_CONFIG=$(cat "$TEST_CONFIG")
+	set +e
+	output=$(run_setup 0 0 2>&1)
+	rc=$?
+	set -e
+
+	if echo "$output" | grep -q "source key is too permissive"; then
+		pass "perm-reject: correct error message"
+	else
+		fail "perm-reject: missing expected error"
+	fi
+	if [ "$rc" -ne 0 ]; then
+		pass "perm-reject: exit code $rc (non-zero)"
+	else
+		fail "perm-reject: exit code 0 (expected non-zero)"
+	fi
+	if ! echo "$output" | grep -q "PASS"; then
+		pass "perm-reject: no PASS printed"
+	else
+		fail "perm-reject: PASS printed despite failure"
+	fi
+	if grep -q "submission_enabled: true" "$TEST_CONFIG" 2>/dev/null; then
+		fail "perm-reject: config was modified despite failure"
+	else
+		pass "perm-reject: config unchanged"
+	fi
+
+	# ──────────────────────────────────────────────
+	# Test 2: Permission acceptance (0600 key)
+	# ──────────────────────────────────────────────
+	chmod 0600 "$REAL_TMPDIR/key.pem"
+	set +e
+	output=$(run_setup 0 1 2>&1)
+	rc=$?
+	set -e
+
+	if echo "$output" | grep -q "PASS.*Orvix SMTP submission TLS bound"; then
+		pass "perm-accept: 0600 key leads to SUCCESS"
+	else
+		fail "perm-accept: 0600 key did not produce SUCCESS output"
+	fi
+	if [ -d "$TEST_TLS_DIR" ] && [ -f "$TEST_TLS_DIR/fullchain.pem" ] && [ -f "$TEST_TLS_DIR/privkey.pem" ]; then
+		pass "perm-accept: cert+key installed to TLS dir"
+	else
+		fail "perm-accept: cert+key not found in TLS dir"
+	fi
+	if grep -q "submission_enabled: true" "$TEST_CONFIG" 2>/dev/null; then
+		pass "perm-accept: config updated with submission_enabled=true"
+	else
+		fail "perm-accept: config missing submission_enabled=true"
+	fi
+
+	# ──────────────────────────────────────────────
+	# Test 3: Reload failure rollback
+	# ──────────────────────────────────────────────
+	cat > "$TEST_CONFIG" <<'YAML'
+coremail:
+  submission_enabled: false
+  hostname: mail.example.com
+YAML
+	rm -f "$TEST_TLS_DIR"/fullchain.pem "$TEST_TLS_DIR"/privkey.pem 2>/dev/null || true
+	chmod 0600 "$REAL_TMPDIR/key.pem"
+	: > "$TEST_LOG"
+
+	set +e
+	output=$(run_setup 1 0 2>&1)
+	rc=$?
+	set -e
+
+	if ! echo "$output" | grep -q "PASS.*Orvix SMTP submission TLS bound"; then
+		pass "reload-fail: no SUCCESS printed"
+	else
+		fail "reload-fail: SUCCESS printed despite reload failure"
+	fi
+	if grep -q "submission_enabled: true" "$TEST_CONFIG" 2>/dev/null; then
+		fail "reload-fail: config has submission_enabled=true after rollback"
+	else
+		pass "reload-fail: config restored to submission_enabled=false"
+	fi
+
+	# ──────────────────────────────────────────────
+	# Test 4: 587 bind failure rollback
+	# ──────────────────────────────────────────────
+	cat > "$TEST_CONFIG" <<'YAML'
+coremail:
+  submission_enabled: false
+  hostname: mail.example.com
+YAML
+	rm -f "$TEST_TLS_DIR"/fullchain.pem "$TEST_TLS_DIR"/privkey.pem 2>/dev/null || true
+	chmod 0600 "$REAL_TMPDIR/key.pem"
+	: > "$TEST_LOG"
+
+	set +e
+	output=$(run_setup 0 0 2>&1)
+	rc=$?
+	set -e
+
+	if ! echo "$output" | grep -q "PASS.*Orvix SMTP submission TLS bound"; then
+		pass "bind-fail: no SUCCESS printed"
+	else
+		fail "bind-fail: SUCCESS printed despite 587 bind failure"
+	fi
+	if grep -q "submission_enabled: true" "$TEST_CONFIG" 2>/dev/null; then
+		fail "bind-fail: config has submission_enabled=true after rollback (should be false)"
+	else
+		pass "bind-fail: config restored to submission_enabled=false"
+	fi
+	if echo "$output" | grep -q "port 587 not listening"; then
+		pass "bind-fail: error message mentions port 587 not listening"
+	else
+		fail "bind-fail: missing error about 587 bind"
+	fi
+
+	# ──────────────────────────────────────────────
+	# Test 5: Output sanitization (no raw paths)
+	# ──────────────────────────────────────────────
+	cat > "$TEST_CONFIG" <<'YAML'
+coremail:
+  submission_enabled: false
+  hostname: mail.example.com
+YAML
+	rm -f "$TEST_TLS_DIR"/fullchain.pem "$TEST_TLS_DIR"/privkey.pem 2>/dev/null || true
+	chmod 0600 "$REAL_TMPDIR/key.pem"
+	: > "$TEST_LOG"
+
+	UNIQUE_CERT_MARKER="UNIQUE-CERT-MARKER-$(date +%s).pem"
+	UNIQUE_KEY_MARKER="UNIQUE-KEY-MARKER-$(date +%s).pem"
+
+	set +e
+	output=$(run_setup 0 1 2>&1)
+	rc=$?
+	set -e
+
+	if echo "$output" | grep -q "Key file:.*installed"; then
+		pass "sanitize: output uses safe 'Key file: installed' label"
+	else
+		fail "sanitize: missing expected safe label"
+	fi
+	if echo "$output" | grep -qF "$UNIQUE_CERT_MARKER"; then
+		fail "sanitize: output leaks cert path marker"
+	else
+		pass "sanitize: cert path not leaked"
+	fi
+	if echo "$output" | grep -qF "$UNIQUE_KEY_MARKER"; then
+		fail "sanitize: output leaks key path marker"
+	else
+		pass "sanitize: key path not leaked"
+	fi
+
+	# Clean up
+	rm -rf "$REAL_TMPDIR"
+fi
+
+# ── Doctor script execution test ──────────────────────────
+
+echo ""
+echo "=== Doctor script execution test ==="
+
+DOCTOR_TMPDIR=$(mktemp -d "/tmp/orvix-doctor-test.XXXXXX")
+DOCTOR_CONFIG="$DOCTOR_TMPDIR/orvix.yaml"
+cat > "$DOCTOR_CONFIG" <<'YAML'
+coremail:
+  submission_enabled: false
+  hostname: mail.example.com
+YAML
+
+set +e
+doc_output=$(ORVIX_CONFIG="$DOCTOR_CONFIG" \
+	ORVIX_TLS_DIR="$DOCTOR_TMPDIR/tls" \
+	bash "$CHECK_SCRIPT" 2>&1)
+doc_rc=$?
+set -e
+
+if ! echo "$doc_output" | grep -q "local: can only be used in a function"; then
+	pass "doctor: no 'local: can only be used in a function' error"
+else
+	fail "doctor: top-level local bug present"
+fi
+if echo "$doc_output" | grep -q "OVERALL:"; then
+	pass "doctor: script produced conclusion (OVERALL)"
+else
+	echo "  (debug: doctor output: $(echo "$doc_output" | tail -5))"
+	fail "doctor: missing OVERALL conclusion"
+fi
+# Verify temp files are cleaned up (no leftover /tmp/orvix-listeners.*)
+leftover=$(ls /tmp/orvix-listeners.* 2>/dev/null || true)
+if [ -z "$leftover" ]; then
+	pass "doctor: no leftover /tmp/orvix-listeners.* files"
+else
+	fail "doctor: leftover temp files found: $leftover"
+fi
+
+rm -rf "$DOCTOR_TMPDIR" /tmp/orvix-listeners.* 2>/dev/null || true
 
 # ── Summary ───────────────────────────────────────────────────
 

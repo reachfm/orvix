@@ -29,7 +29,7 @@ set -euo pipefail
 # in the same end-state, only rotating the backup timestamp.
 
 # ── Defaults ─────────────────────────────────────────────────
-ORVIX_TLS_DIR="/etc/orvix/tls/smtp"
+ORVIX_TLS_DIR="${ORVIX_TLS_DIR:-/etc/orvix/tls/smtp}"
 ORVIX_CERT_NAME="fullchain.pem"
 ORVIX_KEY_NAME="privkey.pem"
 ORVIX_CONFIG="${ORVIX_CONFIG:-/etc/orvix/orvix.yaml}"
@@ -68,7 +68,7 @@ fail() {
 	say "  - If the YAML was already edited, restore from the latest backup:" >&2
 	say "      ls -1t ${ORVIX_CONFIG}.bak-* 2>/dev/null | head -n 1 | xargs -r cp -p - ${ORVIX_CONFIG}" >&2
 	say "  - If the service was reloaded, ensure submission_enabled is false in ${ORVIX_CONFIG}" >&2
-	say "  - Port 25 inbound is unaffected by this script's failure" >&2
+	say "  - port 25 inbound is unaffected by this script's failure" >&2
 	exit 1
 }
 
@@ -105,7 +105,7 @@ validate_key_perms() {
 			log "source key mode ${mode} accepted"
 			;;
 		*)
-			fail "source key has unacceptable permissions (mode ${mode}); only 0600 and 0640 are accepted"
+			fail "source key is too permissive (mode ${mode}); only 0600 and 0640 are accepted"
 			;;
 	esac
 }
@@ -259,13 +259,13 @@ p.write_text(text)
 PYEOF
 }
 
-# write_yaml_fields updates only the three keys we own. Other
-# settings are left exactly as the operator had them.
+# write_yaml_fields updates only the three keys we own in a
+# given config file. The first argument is the target config path.
 write_yaml_fields() {
-	local cert="$1" key="$2"
-	upsert_yaml_field "$ORVIX_CONFIG" "coremail.submission_enabled" "true"
-	upsert_yaml_field "$ORVIX_CONFIG" "coremail.tls_cert_file" "$cert"
-	upsert_yaml_field "$ORVIX_CONFIG" "coremail.tls_key_file" "$key"
+	local config_path="$1" cert="$2" key="$3"
+	upsert_yaml_field "$config_path" "coremail.submission_enabled" "true"
+	upsert_yaml_field "$config_path" "coremail.tls_cert_file" "$cert"
+	upsert_yaml_field "$config_path" "coremail.tls_key_file" "$key"
 }
 
 # rollback_restore restores the previous config and reloads the
@@ -383,10 +383,28 @@ main() {
 		log "no prior config — created empty $ORVIX_CONFIG"
 	fi
 
-	# ── 7. Update YAML. ──
-	write_yaml_fields "$dest_cert" "$dest_key"
+	# ── 7. Create temp config, write YAML updates to it, then
+	#       atomically replace the active config. Never edit the
+	#       active config directly before reload succeeds. ──
+	TEMP_CONFIG="$(mktemp /tmp/orvix-config.XXXXXX)"
+	trap 'rm -f "$TEMP_CONFIG"' RETURN
+	if [ -f "$ORVIX_CONFIG" ]; then
+		cp -p "$ORVIX_CONFIG" "$TEMP_CONFIG"
+	else
+		touch "$TEMP_CONFIG"
+	fi
+	write_yaml_fields "$TEMP_CONFIG" "$dest_cert" "$dest_key"
+	# Validate that the temp config is parseable YAML before
+	# touching the active config.
+	if ! python3 -c "import yaml; yaml.safe_load(open('$TEMP_CONFIG'))" 2>>"$INSTALL_LOG"; then
+		rm -f "$TEMP_CONFIG"
+		fail "temp config failed YAML validation — refusing to replace active config"
+	fi
+	# Atomic replace: copy into place with safe mode.
+	install -m 0640 "$TEMP_CONFIG" "$ORVIX_CONFIG"
+	rm -f "$TEMP_CONFIG"
 	ok "orvix.yaml: coremail.submission_enabled=true + TLS paths set"
-	log "YAML updated"
+	log "YAML updated via atomic temp config"
 
 	# ── 8. Reload the service. ──
 	if command -v systemctl >/dev/null 2>&1; then

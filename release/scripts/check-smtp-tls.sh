@@ -26,7 +26,7 @@ failures=0
 
 RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'; NC=$'\033[0m'
 
-log_verbose() { $VERBOSE && printf '  \302\267 %s\n' "$*" >&2; }
+log_verbose() { if $VERBOSE; then printf '  \302\267 %s\n' "$*" >&2; fi; }
 ok()   { printf '%b\n' "  ${GREEN}PASS${NC}  $*"; }
 warn() { printf '%b\n' "  ${YELLOW}WARN${NC}  $*"; failures=$((failures + 1)); }
 fail() { printf '%b\n' "  ${RED}FAIL${NC}  $*"; failures=$((failures + 1)); }
@@ -72,7 +72,7 @@ validate_key_perms() {
 			ok "key file $label permissions OK (mode ${mode})"
 			;;
 		*)
-			fail "key file $label has unsafe permissions (mode ${mode}); chmod 0600 or 0640"
+			fail "key file $label is world-readable (mode ${mode}); chmod 0600 or 0640"
 			;;
 	esac
 }
@@ -193,7 +193,7 @@ else
 fi
 
 # ── 10. Orvix runtime telemetry (best effort, safe temp file). ──
-local listeners_temp
+listeners_temp
 listeners_temp=$(mktemp /tmp/orvix-listeners.XXXXXX)
 trap 'rm -f "$listeners_temp"' EXIT
 if curl -fsSL --connect-timeout 3 --max-time 5 "http://127.0.0.1:8080/api/v1/admin/runtime/listeners" >"$listeners_temp" 2>/dev/null; then
