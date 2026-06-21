@@ -110,7 +110,6 @@ func NewSession(remoteAddr string, tlsCfg *tls.Config, cfg Config) *Session {
 		"PIPELINING",
 		"8BITMIME",
 		"SMTPUTF8",
-		"CHUNKING",
 	}
 	if cfg.MaxMessageSizeBytes > 0 {
 		extensions = append(extensions, "SIZE "+formatInt64(cfg.MaxMessageSizeBytes))
