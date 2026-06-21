@@ -169,42 +169,7 @@ func TestRuntimeWiresOutboundPreferIPv4ToWorkers(t *testing.T) {
 }
 
 func TestRuntimeWiresCoreMailRequireAuthForSubmissionToSMTP(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		want bool
-	}{
-		{name: "inbound default allows unauthenticated mail from", want: false},
-		{name: "explicit submission auth override", want: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			sqlDB := testRuntimeDB(t, dir)
-			t.Cleanup(func() { sqlDB.Close() })
-
-			cfg := config.Defaults()
-			cfg.CoreMail.Enabled = true
-			cfg.CoreMail.Hostname = "test.orvix.local"
-			cfg.CoreMail.MailStorePath = filepath.Join(dir, "msgs")
-			cfg.CoreMail.QueueWorkers = 1
-			cfg.CoreMail.RequireAuthForSubmission = tc.want
-
-			mod := New(zap.NewNop())
-			mod.cfg = cfg
-			mod.db = sqlDB
-			if err := mod.initCore(cfg, sqlDB); err != nil {
-				t.Fatalf("init core: %v", err)
-			}
-			if mod.smtpServer == nil {
-				t.Fatal("smtp server not initialized")
-			}
-			if got := mod.smtpServer.Config.RequireAuthForSubmission; got != tc.want {
-				t.Fatalf("smtp RequireAuthForSubmission=%v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestRuntimeKeepsInboundMailFromCleartextWhenAuthRequiresTLS(t *testing.T) {
+	// Verify inbound (port 25) does NOT require auth; submission (port 587) DOES.
 	dir := t.TempDir()
 	sqlDB := testRuntimeDB(t, dir)
 	t.Cleanup(func() { sqlDB.Close() })
@@ -214,8 +179,7 @@ func TestRuntimeKeepsInboundMailFromCleartextWhenAuthRequiresTLS(t *testing.T) {
 	cfg.CoreMail.Hostname = "test.orvix.local"
 	cfg.CoreMail.MailStorePath = filepath.Join(dir, "msgs")
 	cfg.CoreMail.QueueWorkers = 1
-	cfg.CoreMail.RequireTLSForAuth = true
-	cfg.CoreMail.RequireAuthForSubmission = false
+	cfg.CoreMail.SubmissionEnabled = true
 
 	mod := New(zap.NewNop())
 	mod.cfg = cfg
@@ -224,18 +188,52 @@ func TestRuntimeKeepsInboundMailFromCleartextWhenAuthRequiresTLS(t *testing.T) {
 		t.Fatalf("init core: %v", err)
 	}
 	if mod.smtpServer == nil {
-		t.Fatal("smtp server not initialized")
-	}
-	if !mod.smtpServer.Config.RequireTLSForAuth {
-		t.Fatal("smtp RequireTLSForAuth=false, want true")
-	}
-	if mod.smtpServer.Config.RequireTLSForSubmission {
-		t.Fatal("smtp RequireTLSForSubmission must remain false for inbound port 25")
+		t.Fatal("inbound smtp server not initialized")
 	}
 	if mod.smtpServer.Config.RequireAuthForSubmission {
-		t.Fatal("smtp RequireAuthForSubmission must remain false for inbound port 25")
+		t.Fatal("inbound (port 25) must not require auth for submission")
+	}
+	if mod.submissionServer == nil {
+		t.Fatal("submission server not initialized")
+	}
+	if !mod.submissionServer.Config.RequireAuthForSubmission {
+		t.Fatal("submission (port 587) must require auth for submission")
 	}
 }
+
+func TestRuntimeKeepsInboundMailFromCleartextWhenAuthRequiresTLS(t *testing.T) {
+	// Inbound (port 25) must allow cleartext mail without TLS.
+	dir := t.TempDir()
+	sqlDB := testRuntimeDB(t, dir)
+	t.Cleanup(func() { sqlDB.Close() })
+
+	cfg := config.Defaults()
+	cfg.CoreMail.Enabled = true
+	cfg.CoreMail.Hostname = "test.orvix.local"
+	cfg.CoreMail.MailStorePath = filepath.Join(dir, "msgs")
+	cfg.CoreMail.QueueWorkers = 1
+	cfg.CoreMail.SubmissionEnabled = true
+
+	mod := New(zap.NewNop())
+	mod.cfg = cfg
+	mod.db = sqlDB
+	if err := mod.initCore(cfg, sqlDB); err != nil {
+		t.Fatalf("init core: %v", err)
+	}
+	if mod.smtpServer == nil {
+		t.Fatal("inbound smtp server not initialized")
+	}
+	if mod.smtpServer.Config.RequireTLSForAuth {
+		t.Fatal("inbound (port 25) must not require TLS for auth")
+	}
+	if mod.smtpServer.Config.RequireTLSForSubmission {
+		t.Fatal("inbound (port 25) must not require TLS for submission")
+	}
+	if mod.submissionServer != nil && !mod.submissionServer.Config.RequireTLSForAuth {
+		t.Fatal("submission (port 587) must require TLS for auth")
+	}
+}
+
 
 func TestRuntimeHealthRegistered(t *testing.T) {
 	dir := t.TempDir()
