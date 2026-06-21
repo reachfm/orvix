@@ -229,6 +229,7 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 			m.submissionServer = smtp.NewServer(subCfg, subHandler, receiver)
 			m.submissionServer.TLSConfig = tlsCfg
 			m.submissionServer.SetLocalDomainChecker(identity.IsLocalDomain)
+			m.submissionServer.SenderValidator = identity.ResolveSender
 			m.submissionServer.Observability = m.obs
 		}
 	}

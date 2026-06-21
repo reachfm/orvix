@@ -3418,9 +3418,9 @@ func testSubmissionHandler(t *testing.T, withTLS bool) (*CommandHandler, *Sessio
 	return h, session
 }
 
-func testSubmissionServer(t *testing.T) (string, *storage.MailStore, func()) {
+func testSubmissionServer(t *testing.T) (string, *storage.MailStore, *queue.QueueEngine, func()) {
 	t.Helper()
-	eng, ms, _, rcv := testIntegrationEnv(t)
+	eng, ms, qe, rcv := testIntegrationEnv(t)
 	cfg := SubmissionConfig()
 	cfg.AllowPlainAuthWithoutTLS = true
 	cfg.RequireTLSForAuth = false
@@ -3446,6 +3446,9 @@ func testSubmissionServer(t *testing.T) (string, *storage.MailStore, func()) {
 		}
 		return true, nil
 	}
+	srv.SenderValidator = func(ctx context.Context, identity *AuthIdentity, fromAddress string) (bool, error) {
+		return identity != nil && identity.Username == fromAddress, nil
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -3458,7 +3461,7 @@ func testSubmissionServer(t *testing.T) (string, *storage.MailStore, func()) {
 		}
 	}()
 	cleanup := func() { listener.Close() }
-	return addr, ms, cleanup
+	return addr, ms, qe, cleanup
 }
 
 func TestInboundEHLODoesNotAdvertiseAuth(t *testing.T) {
@@ -3573,7 +3576,7 @@ func TestSubmissionAuthInvalidCreds(t *testing.T) {
 
 func TestSubmissionAuthUserSendToLocalAccepted(t *testing.T) {
 	// Authenticated user on submission port can send to local domain.
-	addr, ms, cleanup := testSubmissionServer(t)
+	addr, ms, qe, cleanup := testSubmissionServer(t)
 	defer cleanup()
 
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
@@ -3613,11 +3616,12 @@ func TestSubmissionAuthUserSendToLocalAccepted(t *testing.T) {
 	if count < 1 {
 		t.Fatal("expected at least 1 message in MailStore")
 	}
+	_ = qe
 }
 
 func TestSubmissionAuthUserSendToExternalAccepted(t *testing.T) {
 	// Authenticated user on submission port can send to external domain (relay allowed after auth).
-	addr, ms, cleanup := testSubmissionServer(t)
+	addr, ms, qe, cleanup := testSubmissionServer(t)
 	defer cleanup()
 
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
@@ -3657,6 +3661,7 @@ func TestSubmissionAuthUserSendToExternalAccepted(t *testing.T) {
 	if count < 1 {
 		t.Fatal("expected at least 1 message in MailStore")
 	}
+	_ = qe
 }
 
 func TestSubmissionAuthUserSpoofingRejected(t *testing.T) {
@@ -3696,7 +3701,7 @@ func TestSMTPSListenerNotStartedByDefault(t *testing.T) {
 
 func TestSubmissionExternalRecipientAccepted(t *testing.T) {
 	// Authenticated user on submission port can send to external recipient (gmail.com).
-	addr, ms, cleanup := testSubmissionServer(t)
+	addr, ms, qe, cleanup := testSubmissionServer(t)
 	defer cleanup()
 
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
@@ -3717,7 +3722,6 @@ func TestSubmissionExternalRecipientAccepted(t *testing.T) {
 	}
 
 	sendCmd(conn, reader, "MAIL FROM:<user@test.com>")
-	// External recipient — must be accepted for authenticated user.
 	resp = sendCmd(conn, reader, "RCPT TO:<someone@gmail.com>")
 	if !strings.HasPrefix(resp, "250") {
 		t.Fatalf("RCPT external: expected 250 for authenticated external relay, got: %s", resp)
@@ -3731,12 +3735,85 @@ func TestSubmissionExternalRecipientAccepted(t *testing.T) {
 	if !strings.HasPrefix(resp, "250") {
 		t.Fatalf("message: expected 250, got: %s", resp)
 	}
+
+	// Verify queue entry shape for outbound external delivery.
+	ctx := context.Background()
+	out := queue.DirectionOutbound
+	remoteSMTP := queue.DeliveryRemoteSMTP
+	pending := queue.StatusPending
+	entries, _, err := qe.Repo.List(ctx, queue.QueueFilter{
+		Direction:    &out,
+		DeliveryMode: &remoteSMTP,
+		Status:       &pending,
+	}, nil)
+	if err != nil {
+		t.Fatalf("list queue: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("no outbound queue entry found for external recipient")
+	}
+	entry := entries[0]
+	if entry.ToAddress != "someone@gmail.com" {
+		t.Errorf("to_address: expected someone@gmail.com, got %s", entry.ToAddress)
+	}
+	if entry.RecipientDomain != "gmail.com" {
+		t.Errorf("recipient_domain: expected gmail.com, got %s", entry.RecipientDomain)
+	}
+	if entry.FromAddress != "user@test.com" {
+		t.Errorf("from_address: expected user@test.com, got %s", entry.FromAddress)
+	}
+	if entry.Direction != queue.DirectionOutbound {
+		t.Errorf("direction: expected outbound, got %s", entry.Direction)
+	}
+	if entry.DeliveryMode != queue.DeliveryRemoteSMTP {
+		t.Errorf("delivery_mode: expected remote_smtp, got %s", entry.DeliveryMode)
+	}
+	if entry.Status != queue.StatusPending {
+		t.Errorf("status: expected pending, got %s", entry.Status)
+	}
+	if entry.MessageID == "" {
+		t.Error("message_id must not be empty")
+	}
 	_ = ms
+}
+
+func TestSubmissionRealTCPRejectsSpoofing(t *testing.T) {
+	// Real TCP submission server must reject spoofed MAIL FROM
+	// after successful authentication as a different user.
+	addr, _, _, cleanup := testSubmissionServer(t)
+	defer cleanup()
+
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+
+	readResponse(reader) // greeting
+	sendCmd(conn, reader, "EHLO test.com")
+	readFullResponse(reader)
+
+	// Authenticate as user@test.com.
+	conn.Write([]byte("AUTH PLAIN " + CreateAuthPlainResponse("user@test.com", "pass") + "\r\n"))
+	resp := readResponse(reader)
+	if !strings.HasPrefix(resp, "235") {
+		t.Fatalf("AUTH: expected 235, got: %s", resp)
+	}
+
+	// Try to send as other@test.com — must be rejected by sender validator.
+	resp = sendCmd(conn, reader, "MAIL FROM:<other@test.com>")
+	if !strings.HasPrefix(resp, "550") {
+		t.Fatalf("expected 550 for spoofed sender, got: %s", resp)
+	}
+	if !strings.Contains(strings.ToLower(resp), "not authorized") {
+		t.Errorf("expected 'not authorized' in response, got: %s", resp)
+	}
 }
 
 func TestSubmissionUnauthenticatedExternalRejected(t *testing.T) {
 	// Unauthenticated user on submission port cannot send to external.
-	addr, _, cleanup := testSubmissionServer(t)
+	addr, _, _, cleanup := testSubmissionServer(t)
 	defer cleanup()
 
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
@@ -3764,7 +3841,7 @@ func TestSubmissionRealSTARTTLSFlow(t *testing.T) {
 	cert := generateTestCert(t)
 	tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}}
 
-	eng, _, _, rcv := testIntegrationEnv(t)
+	eng, _, qe, rcv := testIntegrationEnv(t)
 	cfg := SubmissionConfig()
 
 	verify := func(ctx context.Context, username, password string) (string, bool) {
@@ -3782,6 +3859,16 @@ func TestSubmissionRealSTARTTLSFlow(t *testing.T) {
 		dom, err := eng.Domains.GetByName(ctx, domain, nil)
 		return dom != nil && dom.Status == coremail.DomainActive, err
 	})
+	srv.RecipientValidator = func(ctx context.Context, address string) (bool, error) {
+		targets, err := eng.Auth.ResolveAddress(ctx, address)
+		if err != nil || len(targets) == 0 {
+			return false, err
+		}
+		return true, nil
+	}
+	srv.SenderValidator = func(ctx context.Context, identity *AuthIdentity, fromAddress string) (bool, error) {
+		return identity != nil && identity.Username == fromAddress, nil
+	}
 	srv.RecipientValidator = func(ctx context.Context, address string) (bool, error) {
 		targets, err := eng.Auth.ResolveAddress(ctx, address)
 		if err != nil || len(targets) == 0 {
@@ -3876,11 +3963,11 @@ func TestSubmissionRealSTARTTLSFlow(t *testing.T) {
 		t.Fatalf("MAIL FROM: expected 250, got: %s", resp)
 	}
 
-	// RCPT TO local (for receiver compatibility with custom TLS).
-	tlsClientConn.Write([]byte("RCPT TO:<user@test.com>\r\n"))
+	// RCPT TO external — authenticated submission should allow external relay.
+	tlsClientConn.Write([]byte("RCPT TO:<someone@gmail.com>\r\n"))
 	resp = readResponse(tlsReader)
 	if !strings.HasPrefix(resp, "250") {
-		t.Fatalf("RCPT TO: expected 250, got: %s", resp)
+		t.Fatalf("RCPT TO external: expected 250, got: %s", resp)
 	}
 
 	// DATA.
@@ -3893,6 +3980,45 @@ func TestSubmissionRealSTARTTLSFlow(t *testing.T) {
 	resp = readResponse(tlsReader)
 	if !strings.HasPrefix(resp, "250") {
 		t.Fatalf("message: expected 250, got: %s", resp)
+	}
+
+	// Verify outbound queue entry for external recipient.
+	ctx := context.Background()
+	out := queue.DirectionOutbound
+	remoteSMTP := queue.DeliveryRemoteSMTP
+	pending := queue.StatusPending
+	entries, _, err := qe.Repo.List(ctx, queue.QueueFilter{
+		Direction:    &out,
+		DeliveryMode: &remoteSMTP,
+		Status:       &pending,
+	}, nil)
+	if err != nil {
+		t.Fatalf("list queue: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("no outbound queue entry found for STARTTLS external recipient")
+	}
+	entry := entries[0]
+	if entry.ToAddress != "someone@gmail.com" {
+		t.Errorf("to_address: expected someone@gmail.com, got %s", entry.ToAddress)
+	}
+	if entry.RecipientDomain != "gmail.com" {
+		t.Errorf("recipient_domain: expected gmail.com, got %s", entry.RecipientDomain)
+	}
+	if entry.FromAddress != "user@test.com" {
+		t.Errorf("from_address: expected user@test.com, got %s", entry.FromAddress)
+	}
+	if entry.Direction != queue.DirectionOutbound {
+		t.Errorf("direction: expected outbound, got %s", entry.Direction)
+	}
+	if entry.DeliveryMode != queue.DeliveryRemoteSMTP {
+		t.Errorf("delivery_mode: expected remote_smtp, got %s", entry.DeliveryMode)
+	}
+	if entry.Status != queue.StatusPending {
+		t.Errorf("status: expected pending, got %s", entry.Status)
+	}
+	if entry.MessageID == "" {
+		t.Error("message_id must not be empty")
 	}
 
 	plainConn.Close()

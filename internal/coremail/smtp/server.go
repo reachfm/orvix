@@ -21,6 +21,7 @@ type Server struct {
 	Handler            *CommandHandler
 	Receiver           *Receiver
 	RecipientValidator RecipientValidator
+	SenderValidator    SenderValidator
 	Observability      *observability.Observability
 
 	mu       sync.Mutex
@@ -186,6 +187,9 @@ func (s *Server) handleConn(conn net.Conn) {
 	handler := NewCommandHandler(s.Config, s.Handler.auth, session)
 	if s.RecipientValidator != nil {
 		handler.SetRecipientValidator(s.RecipientValidator)
+	}
+	if s.SenderValidator != nil {
+		handler.SetSenderValidator(s.SenderValidator)
 	}
 	if s.localDomainChecker != nil {
 		handler.SetLocalDomainChecker(s.localDomainChecker)
