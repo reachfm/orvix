@@ -168,6 +168,42 @@ func TestRuntimeWiresOutboundPreferIPv4ToWorkers(t *testing.T) {
 	}
 }
 
+func TestRuntimeWiresCoreMailRequireAuthForSubmissionToSMTP(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{
+		{name: "inbound default allows unauthenticated mail from", want: false},
+		{name: "explicit submission auth override", want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			sqlDB := testRuntimeDB(t, dir)
+			t.Cleanup(func() { sqlDB.Close() })
+
+			cfg := config.Defaults()
+			cfg.CoreMail.Enabled = true
+			cfg.CoreMail.Hostname = "test.orvix.local"
+			cfg.CoreMail.MailStorePath = filepath.Join(dir, "msgs")
+			cfg.CoreMail.QueueWorkers = 1
+			cfg.CoreMail.RequireAuthForSubmission = tc.want
+
+			mod := New(zap.NewNop())
+			mod.cfg = cfg
+			mod.db = sqlDB
+			if err := mod.initCore(cfg, sqlDB); err != nil {
+				t.Fatalf("init core: %v", err)
+			}
+			if mod.smtpServer == nil {
+				t.Fatal("smtp server not initialized")
+			}
+			if got := mod.smtpServer.Config.RequireAuthForSubmission; got != tc.want {
+				t.Fatalf("smtp RequireAuthForSubmission=%v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRuntimeHealthRegistered(t *testing.T) {
 	dir := t.TempDir()
 	sqlDB := testRuntimeDB(t, dir)
