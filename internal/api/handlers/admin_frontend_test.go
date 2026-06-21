@@ -428,13 +428,33 @@ func TestAdminNoObjectObjectInMonitoringCapacity(t *testing.T) {
 	}
 }
 
-// TestAdminNoFakeRestoreUI confirms the backups page does NOT
-// render a fake restore button.
+// TestAdminNoFakeRestoreUI confirms the backups page exposes only
+// staged restore semantics. The UI must not claim restore is absent,
+// and it must not claim live production data was restored.
 func TestAdminNoFakeRestoreUI(t *testing.T) {
 	root := adminRepoRoot(t)
 	src := readFile(t, root, "release/admin/app.js")
-	if !strings.Contains(src, "Restore is not exposed") {
-		t.Errorf("admin backups page must explicitly say Restore is not exposed in this build")
+	if strings.Contains(src, "Restore is not exposed in this build") {
+		t.Errorf("admin backups page must not contain stale Restore is not exposed wording")
+	}
+	for _, want := range []string{
+		"restore-orvix-backup",
+		"stages the backup only",
+		"does not overwrite live data",
+		"Manual apply/restart is required",
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("admin backups page must document staged-only restore behavior; missing %q", want)
+		}
+	}
+	for _, banned := range []string{
+		"restored successfully",
+		"live restore completed",
+		"production data overwritten",
+	} {
+		if strings.Contains(src, banned) {
+			t.Errorf("admin backups page must not claim live restore success: found %q", banned)
+		}
 	}
 }
 
