@@ -798,6 +798,30 @@ func TestEHLO(t *testing.T) {
 	}
 }
 
+func TestSMTPDoesNotAdvertiseUnsupportedChunking(t *testing.T) {
+	h, s := testHandler(t)
+	resp := h.Handle(context.Background(), parse(t, "EHLO test.example.com"))
+	if resp.Code != 250 {
+		t.Fatalf("expected 250, got %d", resp.Code)
+	}
+	// Must advertise real supported capabilities.
+	for _, want := range []string{"PIPELINING", "8BITMIME", "SMTPUTF8"} {
+		if !strings.Contains(resp.Message, want) {
+			t.Errorf("EHLO must advertise %s, got:\n%s", want, resp.Message)
+		}
+	}
+	// Must NOT advertise CHUNKING (BDAT not implemented).
+	if strings.Contains(resp.Message, "CHUNKING") {
+		t.Errorf("EHLO must not advertise unsupported CHUNKING, got:\n%s", resp.Message)
+	}
+	// Verify at the session Extensions level too.
+	for _, ext := range s.Extensions {
+		if ext == "CHUNKING" {
+			t.Fatal("session.Extensions must not contain CHUNKING")
+		}
+	}
+}
+
 func TestHELO(t *testing.T) {
 	h, s := testHandler(t)
 	resp := h.Handle(context.Background(), parse(t, "HELO test.com"))
@@ -841,6 +865,15 @@ func TestUnknownCommand(t *testing.T) {
 	resp := h.Handle(context.Background(), parse(t, "BOGUS"))
 	if resp.Code != 500 {
 		t.Fatalf("expected 500, got %d", resp.Code)
+	}
+}
+
+func TestBDATRejectedWhenChunkingNotAdvertised(t *testing.T) {
+	h, _ := testHandler(t)
+	h.Handle(context.Background(), parse(t, "EHLO test.com"))
+	resp := h.Handle(context.Background(), parse(t, "BDAT 5 LAST"))
+	if resp.Code != 500 {
+		t.Fatalf("expected 500 for unsupported BDAT, got %d: %s", resp.Code, resp.Message)
 	}
 }
 
@@ -1579,6 +1612,52 @@ func TestLocalInboundStillAccepted(t *testing.T) {
 	resp := h.Handle(context.Background(), parse(t, "RCPT TO:<user@local.test>"))
 	if resp.Code != 250 {
 		t.Fatalf("expected 250 for local inbound, got %d: %s", resp.Code, resp.Message)
+	}
+}
+
+func TestSMTPDATAStillWorksWithChunkingRemoved(t *testing.T) {
+	// Prove that removing CHUNKING from EHLO does not break DATA delivery.
+	addr, ms, _, _, cleanup := testIntegrationServer(t, false)
+	defer cleanup()
+
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+
+	// Read greeting.
+	resp := readResponse(reader)
+	if !strings.HasPrefix(resp, "220") {
+		t.Fatalf("expected 220 greeting, got: %s", resp)
+	}
+
+	// Send EHLO and consume multi-line response.
+	conn.Write([]byte("EHLO test.example.com\r\n"))
+	readFullResponse(reader)
+
+	// Full DATA flow: MAIL FROM -> RCPT TO -> DATA -> body.
+	sendCmd(conn, reader, "MAIL FROM:<sender@example.com>")
+	sendCmd(conn, reader, "RCPT TO:<user@test.com>")
+	resp = sendCmd(conn, reader, "DATA")
+	if !strings.HasPrefix(resp, "354") {
+		t.Fatalf("DATA: expected 354, got: %s", resp)
+	}
+	conn.Write([]byte("Subject: Test\r\n\r\nBody\r\n.\r\n"))
+	resp = readResponse(reader)
+	if !strings.HasPrefix(resp, "250") {
+		t.Fatalf("DATA completion: expected 250, got: %s", resp)
+	}
+
+	// Verify message was stored in MailStore.
+	ctx := context.Background()
+	count, err := ms.Messages.CountByMailbox(ctx, 1, nil)
+	if err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if count < 1 {
+		t.Fatal("expected at least 1 message in MailStore")
 	}
 }
 
