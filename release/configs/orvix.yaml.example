@@ -60,6 +60,15 @@ coremail:
   data_path: /var/lib/orvix/coremail
   smtp_host: 0.0.0.0
   smtp_port: 25
+  # Submission (port 587) for authenticated mail client submission.
+  submission_enabled: true
+  submission_host: 0.0.0.0
+  submission_port: 587
+  # SMTPS (port 465, implicit TLS) — NOT YET IMPLEMENTED.
+  # Keep disabled until full SMTPS support is available.
+  smtps_enabled: false
+  smtps_host: 0.0.0.0
+  smtps_port: 465
   imap_host: 0.0.0.0
   imap_port: 143
   pop3_host: 0.0.0.0

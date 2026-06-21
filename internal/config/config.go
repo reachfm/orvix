@@ -40,6 +40,12 @@ type CoreMailConfig struct {
 	MailStorePath             string        `mapstructure:"mailstore_path"`
 	SMTPHost                  string        `mapstructure:"smtp_host"`
 	SMTPPort                  int           `mapstructure:"smtp_port"`
+	SubmissionEnabled         bool          `mapstructure:"submission_enabled"`
+	SubmissionHost            string        `mapstructure:"submission_host"`
+	SubmissionPort            int           `mapstructure:"submission_port"`
+	SMTPsEnabled              bool          `mapstructure:"smtps_enabled"`
+	SMTPsHost                 string        `mapstructure:"smtps_host"`
+	SMTPsPort                 int           `mapstructure:"smtps_port"`
 	IMAPHost                  string        `mapstructure:"imap_host"`
 	IMAPPort                  int           `mapstructure:"imap_port"`
 	POP3Host                  string        `mapstructure:"pop3_host"`
@@ -352,6 +358,12 @@ func Defaults() *Config {
 			MailStorePath:     "/var/lib/orvix/mailstore",
 			SMTPHost:          "0.0.0.0",
 			SMTPPort:          25,
+			SubmissionEnabled: true,
+			SubmissionHost:    "0.0.0.0",
+			SubmissionPort:    587,
+			SMTPsEnabled:      false,
+			SMTPsHost:         "0.0.0.0",
+			SMTPsPort:         465,
 			IMAPHost:          "0.0.0.0",
 			IMAPPort:          143,
 			POP3Host:          "0.0.0.0",

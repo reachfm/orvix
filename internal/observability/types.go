@@ -13,9 +13,10 @@ const (
 	EventSMTPAuthSuccess EventType = "smtp.auth.success"
 	EventSMTPAuthFailure EventType = "smtp.auth.failure"
 
-	// STARTTLS.
+	// STARTTLS / TLS.
 	EventSTARTTLSSuccess EventType = "smtp.starttls.success"
 	EventSTARTTLSFailure EventType = "smtp.starttls.failure"
+	EventTLSFailure      EventType = "smtp.tls.failure"
 
 	// Auth results.
 	EventSPFPass     EventType = "spf.pass"

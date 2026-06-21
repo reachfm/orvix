@@ -249,6 +249,10 @@ func (h *CommandHandler) handleQUIT(ctx context.Context, cmd *ParsedCommand) Res
 }
 
 func (h *CommandHandler) handleAUTH(ctx context.Context, cmd *ParsedCommand) Response {
+	// Auth disabled on this listener (e.g. inbound port 25).
+	if h.cfg.DisableAuth {
+		return ResponseCmdUnknown
+	}
 	// TLS policy: reject AUTH before TLS when required.
 	if h.cfg.RequireTLSForAuth && !h.session.TLSActive {
 		return responsef(StatusTLSNotAvailable, "5.7.0 Must issue STARTTLS first")
@@ -306,6 +310,10 @@ func (h *CommandHandler) handleAUTH(ctx context.Context, cmd *ParsedCommand) Res
 
 // HandleAuthLoginStep handles the next step of AUTH LOGIN.
 func (h *CommandHandler) HandleAuthLoginStep(ctx context.Context, data string) Response {
+	if h.cfg.DisableAuth {
+		h.authStep = 0
+		return ResponseCmdUnknown
+	}
 	switch h.authStep {
 	case 1:
 		// Received username, ask for password.
@@ -364,6 +372,9 @@ func (h *CommandHandler) HandleAuthLoginStep(ctx context.Context, data string) R
 func (h *CommandHandler) handleSTARTTLS(ctx context.Context, cmd *ParsedCommand) Response {
 	if h.session.TLSActive {
 		return ResponseBadSequence
+	}
+	if h.cfg.ImplicitTLS {
+		return responsef(StatusTLSNotAvailable, "5.7.0 TLS already active")
 	}
 	if h.session.TLSConfig == nil {
 		return responsef(StatusTLSNotAvailable, "5.7.0 TLS not available")

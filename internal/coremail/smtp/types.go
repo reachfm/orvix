@@ -65,9 +65,12 @@ type Config struct {
 	TLSCertFile             string `json:"tls_cert_file"`
 	TLSKeyFile              string `json:"tls_key_file"`
 	SpamMode                SpamEnforcementMode `json:"spam_mode"`
+	DisableAuth             bool   `json:"disable_auth"`
+	ImplicitTLS             bool   `json:"implicit_tls"`
+	ListenerName            string `json:"listener_name"`
 }
 
-// DefaultConfig returns a Config with safe defaults.
+// DefaultConfig returns a Config with safe defaults (inbound listener).
 func DefaultConfig() Config {
 	return Config{
 		Hostname:                  "mail.orvix.local",
@@ -82,7 +85,41 @@ func DefaultConfig() Config {
 		ReadTimeout:               5 * time.Minute,
 		WriteTimeout:              5 * time.Minute,
 		DataTimeout:               10 * time.Minute,
+		DisableAuth:               false,
+		ImplicitTLS:               false,
+		ListenerName:              "default",
 	}
+}
+
+// InboundConfig returns a Config suitable for inbound MX (port 25).
+func InboundConfig() Config {
+	cfg := DefaultConfig()
+	cfg.RequireAuthForSubmission = false
+	cfg.RequireTLSForAuth = false
+	cfg.RequireTLSForSubmission = false
+	cfg.DisableAuth = true
+	cfg.ListenerName = "inbound"
+	return cfg
+}
+
+// SubmissionConfig returns a Config suitable for submission (port 587).
+func SubmissionConfig() Config {
+	cfg := DefaultConfig()
+	cfg.RequireAuthForSubmission = true
+	cfg.RequireTLSForAuth = true
+	cfg.RequireTLSForSubmission = true
+	cfg.DisableAuth = false
+	cfg.AllowPlainAuthWithoutTLS = false
+	cfg.ListenerName = "submission"
+	return cfg
+}
+
+// SMTPSConfig returns a Config suitable for SMTPS (port 465, implicit TLS).
+func SMTPSConfig() Config {
+	cfg := SubmissionConfig()
+	cfg.ImplicitTLS = true
+	cfg.ListenerName = "smtps"
+	return cfg
 }
 
 // Session holds the state for a single SMTP connection.
@@ -114,11 +151,13 @@ func NewSession(remoteAddr string, tlsCfg *tls.Config, cfg Config) *Session {
 	if cfg.MaxMessageSizeBytes > 0 {
 		extensions = append(extensions, "SIZE "+formatInt64(cfg.MaxMessageSizeBytes))
 	}
-	// Advertise STARTTLS only when TLS config is available.
-	if tlsCfg != nil {
+	// Advertise STARTTLS only when TLS config is available and not implicit TLS.
+	if tlsCfg != nil && !cfg.ImplicitTLS {
 		extensions = append(extensions, "STARTTLS")
 	}
-	extensions = append(extensions, "AUTH PLAIN LOGIN")
+	if !cfg.DisableAuth {
+		extensions = append(extensions, "AUTH PLAIN LOGIN")
+	}
 
 	return &Session{
 		ID:         generateSessionID(),

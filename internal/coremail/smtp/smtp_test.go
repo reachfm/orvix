@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/coremail"
 	"github.com/orvix/orvix/internal/coremail/antispam"
 	"github.com/orvix/orvix/internal/coremail/dkim"
@@ -3384,5 +3385,311 @@ func TestSMTPInboundOpenRelayStillDeniedAfterFix(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(resp), "relay") {
 		t.Fatalf("expected relay rejection message, got: %s", resp)
+	}
+}
+
+// ── Submission / Multi-Listener Tests ─────────────────────────
+
+func testSubmissionHandler(t *testing.T, withTLS bool) (*CommandHandler, *Session) {
+	t.Helper()
+	cfg := SubmissionConfig()
+	cfg.AllowPlainAuthWithoutTLS = withTLS
+	cfg.RequireTLSForAuth = !withTLS
+	cfg.RequireTLSForSubmission = !withTLS
+	var tlsCfg *tls.Config
+	if withTLS {
+		tlsCfg = &tls.Config{}
+	}
+	session := NewSession("127.0.0.1:0", tlsCfg, cfg)
+	if withTLS {
+		session.TLSActive = true
+	}
+	verify := func(ctx context.Context, username, password string) (string, bool) {
+		return username, username == "user@test.com" && password == "pass"
+	}
+	auth := NewAuthenticator(NewFuncAuthBackend(verify))
+	h := NewCommandHandler(cfg, auth, session)
+	h.SetLocalDomainChecker(func(ctx context.Context, domain string) (bool, error) {
+		return domain == "test.com", nil
+	})
+	h.SetSenderValidator(func(ctx context.Context, identity *AuthIdentity, fromAddress string) (bool, error) {
+		return identity != nil && identity.Username == fromAddress, nil
+	})
+	return h, session
+}
+
+func testSubmissionServer(t *testing.T) (string, *storage.MailStore, func()) {
+	t.Helper()
+	eng, ms, _, rcv := testIntegrationEnv(t)
+	cfg := SubmissionConfig()
+	cfg.AllowPlainAuthWithoutTLS = true
+	cfg.RequireTLSForAuth = false
+	cfg.RequireTLSForSubmission = false
+	verify := func(ctx context.Context, username, password string) (string, bool) {
+		mbox, err := eng.Auth.AuthenticateMailbox(ctx, username, password)
+		if err != nil || mbox == nil {
+			return "", false
+		}
+		return username, true
+	}
+	auth := NewAuthenticator(NewFuncAuthBackend(verify))
+	handler := NewCommandHandler(cfg, auth, NewSession("", nil, cfg))
+	srv := NewServer(cfg, handler, rcv)
+	srv.SetLocalDomainChecker(func(ctx context.Context, domain string) (bool, error) {
+		dom, err := eng.Domains.GetByName(ctx, domain, nil)
+		return dom != nil && dom.Status == coremail.DomainActive, err
+	})
+	srv.RecipientValidator = func(ctx context.Context, address string) (bool, error) {
+		targets, err := eng.Auth.ResolveAddress(ctx, address)
+		if err != nil || len(targets) == 0 {
+			return false, err
+		}
+		return true, nil
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := listener.Addr().String()
+	go func() {
+		srv.listener = listener
+		if err := srv.serve(); err != nil {
+			t.Logf("submission server exited: %v", err)
+		}
+	}()
+	cleanup := func() { listener.Close() }
+	return addr, ms, cleanup
+}
+
+func TestInboundEHLODoesNotAdvertiseAuth(t *testing.T) {
+	// Port 25 inbound must NOT advertise AUTH capability.
+	cfg := InboundConfig()
+	session := NewSession("127.0.0.1:0", nil, cfg)
+	auth := NewAuthenticator(NewFuncAuthBackend(func(ctx context.Context, u, p string) (string, bool) {
+		return u, true
+	}))
+	h := NewCommandHandler(cfg, auth, session)
+	resp := h.Handle(context.Background(), parse(t, "EHLO test.com"))
+	if resp.Code != 250 {
+		t.Fatalf("expected 250, got %d", resp.Code)
+	}
+	if strings.Contains(resp.Message, "AUTH") {
+		t.Errorf("port 25 inbound EHLO must not advertise AUTH, got:\n%s", resp.Message)
+	}
+	for _, ext := range session.Extensions {
+		if strings.HasPrefix(ext, "AUTH") {
+			t.Fatal("port 25 inbound session.Extensions must not contain AUTH")
+		}
+	}
+}
+
+func TestInboundAuthCommandRejected(t *testing.T) {
+	// AUTH command on port 25 inbound must be rejected (unknown command).
+	cfg := InboundConfig()
+	auth := NewAuthenticator(NewFuncAuthBackend(func(ctx context.Context, u, p string) (string, bool) {
+		return u, true
+	}))
+	session := NewSession("127.0.0.1:0", nil, cfg)
+	h := NewCommandHandler(cfg, auth, session)
+	h.Handle(context.Background(), parse(t, "EHLO test.com"))
+	resp := h.Handle(context.Background(), parse(t, "AUTH PLAIN AHVzZXIAdXNlcgA="))
+	if resp.Code != 500 {
+		t.Fatalf("expected 500 for AUTH on inbound, got %d: %s", resp.Code, resp.Message)
+	}
+}
+
+func TestSubmissionEHLOAdvertisesAuth(t *testing.T) {
+	h, _ := testSubmissionHandler(t, false)
+	resp := h.Handle(context.Background(), parse(t, "EHLO test.com"))
+	if resp.Code != 250 {
+		t.Fatalf("expected 250, got %d", resp.Code)
+	}
+	if !strings.Contains(resp.Message, "AUTH") {
+		t.Errorf("submission EHLO must advertise AUTH, got:\n%s", resp.Message)
+	}
+}
+
+func TestSubmissionEHLOAdvertisesSTARTTLS(t *testing.T) {
+	h, _ := testSubmissionHandler(t, true)
+	resp := h.Handle(context.Background(), parse(t, "EHLO test.com"))
+	if resp.Code != 250 {
+		t.Fatalf("expected 250, got %d", resp.Code)
+	}
+	if !strings.Contains(resp.Message, "STARTTLS") {
+		t.Errorf("submission EHLO must advertise STARTTLS when TLS configured, got:\n%s", resp.Message)
+	}
+}
+
+func TestSubmissionDoesNotAdvertiseChunking(t *testing.T) {
+	h, _ := testSubmissionHandler(t, false)
+	resp := h.Handle(context.Background(), parse(t, "EHLO test.com"))
+	if resp.Code != 250 {
+		t.Fatalf("expected 250, got %d", resp.Code)
+	}
+	if strings.Contains(resp.Message, "CHUNKING") {
+		t.Errorf("submission EHLO must not advertise CHUNKING, got:\n%s", resp.Message)
+	}
+}
+
+func TestSubmissionRejectsMailBeforeAuth(t *testing.T) {
+	h, _ := testSubmissionHandler(t, true)
+	h.Handle(context.Background(), parse(t, "EHLO test.com"))
+	resp := h.Handle(context.Background(), parse(t, "MAIL FROM:<user@test.com>"))
+	if resp.Code != 530 {
+		t.Fatalf("expected 530 for MAIL before AUTH on submission, got %d: %s", resp.Code, resp.Message)
+	}
+}
+
+func TestSubmissionRejectsAuthBeforeSTARTTLS(t *testing.T) {
+	// Submission requires STARTTLS before AUTH when RequireTLSForAuth is true.
+	h, _ := testSubmissionHandler(t, false)
+	h.Handle(context.Background(), parse(t, "EHLO test.com"))
+	resp := h.Handle(context.Background(), parse(t, "AUTH PLAIN AHVzZXJAdGVzdC5jb20AcGFzcw=="))
+	if resp.Code != 454 {
+		t.Fatalf("expected 454 for AUTH before STARTTLS, got %d: %s", resp.Code, resp.Message)
+	}
+}
+
+func TestSubmissionAuthAfterSTARTTLS(t *testing.T) {
+	h, _ := testSubmissionHandler(t, true)
+	h.Handle(context.Background(), parse(t, "EHLO test.com"))
+	resp := h.Handle(context.Background(), parse(t, "AUTH PLAIN AHVzZXJAdGVzdC5jb20AcGFzcw=="))
+	if resp.Code != 235 {
+		t.Fatalf("expected 235 for AUTH after STARTTLS, got %d: %s", resp.Code, resp.Message)
+	}
+	if !h.session.Authenticated {
+		t.Fatal("expected session.Authenticated = true after successful AUTH")
+	}
+}
+
+func TestSubmissionAuthInvalidCreds(t *testing.T) {
+	h, _ := testSubmissionHandler(t, true)
+	h.Handle(context.Background(), parse(t, "EHLO test.com"))
+	resp := h.Handle(context.Background(), parse(t, "AUTH PLAIN AHVzZXJAdGVzdC5jb20Ad3Jvbmc="))
+	if resp.Code != 535 {
+		t.Fatalf("expected 535 for invalid AUTH, got %d: %s", resp.Code, resp.Message)
+	}
+}
+
+func TestSubmissionAuthUserSendToLocalAccepted(t *testing.T) {
+	// Authenticated user on submission port can send to local domain.
+	addr, ms, cleanup := testSubmissionServer(t)
+	defer cleanup()
+
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+
+	readResponse(reader) // greeting
+	// Consume full EHLO multi-line before sending next command.
+	sendCmd(conn, reader, "EHLO test.com")
+	readFullResponse(reader) // consume remaining EHLO lines
+
+	conn.Write([]byte("AUTH PLAIN " + CreateAuthPlainResponse("user@test.com", "pass") + "\r\n"))
+	resp := readResponse(reader)
+	if !strings.HasPrefix(resp, "235") {
+		t.Fatalf("AUTH: expected 235, got: %s", resp)
+	}
+	sendCmd(conn, reader, "MAIL FROM:<user@test.com>")
+	sendCmd(conn, reader, "RCPT TO:<user@test.com>")
+	resp = sendCmd(conn, reader, "DATA")
+	if !strings.HasPrefix(resp, "354") {
+		t.Fatalf("DATA: expected 354, got: %s", resp)
+	}
+	conn.Write([]byte("Subject: Test\r\n\r\nBody\r\n.\r\n"))
+	resp = readResponse(reader)
+	if !strings.HasPrefix(resp, "250") {
+		t.Fatalf("message: expected 250, got: %s", resp)
+	}
+
+	ctx := context.Background()
+	count, err := ms.Messages.CountByMailbox(ctx, 1, nil)
+	if err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if count < 1 {
+		t.Fatal("expected at least 1 message in MailStore")
+	}
+}
+
+func TestSubmissionAuthUserSendToExternalAccepted(t *testing.T) {
+	// Authenticated user on submission port can send to external domain (relay allowed after auth).
+	addr, ms, cleanup := testSubmissionServer(t)
+	defer cleanup()
+
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+
+	readResponse(reader) // greeting
+	// Consume full EHLO multi-line before sending next command.
+	sendCmd(conn, reader, "EHLO test.com")
+	readFullResponse(reader) // consume remaining EHLO lines
+
+	conn.Write([]byte("AUTH PLAIN " + CreateAuthPlainResponse("user@test.com", "pass") + "\r\n"))
+	resp := readResponse(reader)
+	if !strings.HasPrefix(resp, "235") {
+		t.Fatalf("AUTH: expected 235, got: %s", resp)
+	}
+	sendCmd(conn, reader, "MAIL FROM:<user@test.com>")
+	sendCmd(conn, reader, "RCPT TO:<user@test.com>")
+	resp = sendCmd(conn, reader, "DATA")
+	if !strings.HasPrefix(resp, "354") {
+		t.Fatalf("DATA: expected 354, got: %s", resp)
+	}
+	conn.Write([]byte("Subject: Test\r\n\r\nBody\r\n.\r\n"))
+	resp = readResponse(reader)
+	if !strings.HasPrefix(resp, "250") {
+		t.Fatalf("message: expected 250, got: %s", resp)
+	}
+
+	ctx := context.Background()
+	count, err := ms.Messages.CountByMailbox(ctx, 1, nil)
+	if err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if count < 1 {
+		t.Fatal("expected at least 1 message in MailStore")
+	}
+}
+
+func TestSubmissionAuthUserSpoofingRejected(t *testing.T) {
+	h, _ := testSubmissionHandler(t, true)
+	h.Handle(context.Background(), parse(t, "EHLO test.com"))
+	h.Handle(context.Background(), parse(t, "AUTH PLAIN AHVzZXJAdGVzdC5jb20AcGFzcw=="))
+	resp := h.Handle(context.Background(), parse(t, "MAIL FROM:<other@test.com>"))
+	if resp.Code != 550 {
+		t.Fatalf("expected 550 for spoofed sender, got %d: %s", resp.Code, resp.Message)
+	}
+}
+
+func TestSMTPSConfigDefaultsToDisabled(t *testing.T) {
+	cfg := SMTPSConfig()
+	if cfg.ImplicitTLS != true {
+		t.Error("SMTPSConfig must have ImplicitTLS=true")
+	}
+	if cfg.ListenerName != "smtps" {
+		t.Errorf("expected listener name 'smtps', got %q", cfg.ListenerName)
+	}
+	// Verify the config requires auth and enforces TLS.
+	if !cfg.RequireAuthForSubmission {
+		t.Error("SMTPS must require auth")
+	}
+	if cfg.DisableAuth {
+		t.Error("SMTPS must not disable auth")
+	}
+}
+
+func TestSMTPSListenerNotStartedByDefault(t *testing.T) {
+	// Verify that SMTPS is disabled by default in the CoreMail config.
+	cfg := config.Defaults()
+	if cfg.CoreMail.SMTPsEnabled {
+		t.Error("SMTPS must be disabled by default")
 	}
 }

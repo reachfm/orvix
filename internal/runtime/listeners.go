@@ -8,10 +8,12 @@ import (
 type ListenerKind string
 
 const (
-	ListenerSMTP ListenerKind = "smtp"
-	ListenerIMAP ListenerKind = "imap"
-	ListenerPOP3 ListenerKind = "pop3"
-	ListenerJMAP ListenerKind = "jmap"
+	ListenerSMTP        ListenerKind = "smtp"
+	ListenerSubmission  ListenerKind = "smtp-submission"
+	ListenerSMTPS       ListenerKind = "smtps"
+	ListenerIMAP        ListenerKind = "imap"
+	ListenerPOP3        ListenerKind = "pop3"
+	ListenerJMAP        ListenerKind = "jmap"
 )
 
 // ListenerStatus represents the runtime state of a single
@@ -119,7 +121,7 @@ func (r *ListenerRegistry) Snapshot() map[ListenerKind]ListenerStatus {
 	return out
 }
 
-var allKinds = []ListenerKind{ListenerSMTP, ListenerIMAP, ListenerPOP3, ListenerJMAP}
+var allKinds = []ListenerKind{ListenerSMTP, ListenerSubmission, ListenerSMTPS, ListenerIMAP, ListenerPOP3, ListenerJMAP}
 
 // safeListenError converts a listener bind error into a safe
 // detail string. The original error is never exposed verbatim

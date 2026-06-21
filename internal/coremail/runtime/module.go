@@ -45,10 +45,12 @@ type Module struct {
 	licenseSvc       *licensing.Service
 	authorityService *licensingauthority.AuthorityService
 
-	smtpServer *smtp.Server
-	imapServer *imap.Server
-	pop3Server *pop3.Server
-	jmapServer *jmap.Server
+	smtpServer      *smtp.Server
+	submissionServer *smtp.Server
+	smtpsServer     *smtp.Server
+	imapServer      *imap.Server
+	pop3Server      *pop3.Server
+	jmapServer      *jmap.Server
 	workers    []*delivery.DeliveryWorker
 
 	// listenerReg records live listener startup state for the
@@ -180,14 +182,11 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	m.obs.Health.Ready(observability.HealthCheckQueue)
 
 	identity := smtp.NewIdentityService(m.engine)
+	smtpAuth := smtp.NewAuthenticator(identity)
 	smtpCfg := smtp.DefaultConfig()
 	smtpCfg.Hostname = cfg.CoreMail.Hostname
 	smtpCfg.TLSCertFile = cfg.CoreMail.TLSCertFile
 	smtpCfg.TLSKeyFile = cfg.CoreMail.TLSKeyFile
-	smtpCfg.RequireTLSForAuth = cfg.CoreMail.RequireTLSForAuth
-	smtpCfg.RequireTLSForSubmission = false
-	smtpCfg.RequireAuthForSubmission = cfg.CoreMail.RequireAuthForSubmission
-	smtpAuth := smtp.NewAuthenticator(identity)
 	tlsCfg, err := smtp.LoadTLSConfig(smtpCfg)
 	if err != nil {
 		return err
@@ -195,8 +194,15 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	receiver := smtp.NewReceiver(m.engine, m.store, m.queue, smtpCfg)
 	receiver.AntiSpamEngine = antispam.NewEngine(nil)
 	receiver.Observability = m.obs
-	baseHandler := smtp.NewCommandHandler(smtpCfg, smtpAuth, smtp.NewSession("runtime-init", tlsCfg, smtpCfg))
-	m.smtpServer = smtp.NewServer(smtpCfg, baseHandler, receiver)
+
+	// ── Inbound SMTP (port 25, MX) ─────────────────────────
+	inboundCfg := smtp.InboundConfig()
+	inboundCfg.Hostname = cfg.CoreMail.Hostname
+	inboundCfg.TLSCertFile = cfg.CoreMail.TLSCertFile
+	inboundCfg.TLSKeyFile = cfg.CoreMail.TLSKeyFile
+	inboundCfg.SpamMode = smtpCfg.SpamMode
+	inboundHandler := smtp.NewCommandHandler(inboundCfg, smtpAuth, smtp.NewSession("runtime-init", tlsCfg, inboundCfg))
+	m.smtpServer = smtp.NewServer(inboundCfg, inboundHandler, receiver)
 	m.smtpServer.TLSConfig = tlsCfg
 	m.smtpServer.RecipientValidator = func(ctx context.Context, address string) (bool, error) {
 		_, err := m.engine.Auth.ResolveAddress(ctx, address)
@@ -204,6 +210,31 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	}
 	m.smtpServer.SetLocalDomainChecker(identity.IsLocalDomain)
 	m.smtpServer.Observability = m.obs
+
+	// ── Submission SMTP (port 587, STARTTLS) ───────────────
+	if cfg.CoreMail.SubmissionEnabled {
+		subCfg := smtp.SubmissionConfig()
+		subCfg.Hostname = cfg.CoreMail.Hostname
+		subCfg.TLSCertFile = cfg.CoreMail.TLSCertFile
+		subCfg.TLSKeyFile = cfg.CoreMail.TLSKeyFile
+		subHandler := smtp.NewCommandHandler(subCfg, smtpAuth, smtp.NewSession("runtime-init", tlsCfg, subCfg))
+		m.submissionServer = smtp.NewServer(subCfg, subHandler, receiver)
+		m.submissionServer.TLSConfig = tlsCfg
+		m.submissionServer.RecipientValidator = func(ctx context.Context, address string) (bool, error) {
+			_, err := m.engine.Auth.ResolveAddress(ctx, address)
+			return err == nil, err
+		}
+		m.submissionServer.SetLocalDomainChecker(identity.IsLocalDomain)
+		m.submissionServer.Observability = m.obs
+	}
+
+	// ── SMTPS (port 465, implicit TLS) — config exists but not implemented.
+	// The SMTPsEnabled flag defaults to false. When enabled, a warning is logged.
+	if cfg.CoreMail.SMTPsEnabled {
+		if m.logger != nil {
+			m.logger.Warn("SMTPS (port 465 implicit TLS) is not yet implemented; listener will not start")
+		}
+	}
 
 	imapCfg := imap.DefaultConfig()
 	imapCfg.Hostname = cfg.CoreMail.Hostname
@@ -286,6 +317,8 @@ func (m *Module) Start() error {
 		// dashboard shows "disabled" instead of "unknown".
 		if m.listenerReg != nil {
 			m.listenerReg.MarkDisabled(orvixruntime.ListenerSMTP, 0, "disabled by config")
+			m.listenerReg.MarkDisabled(orvixruntime.ListenerSubmission, 0, "disabled by config")
+			m.listenerReg.MarkDisabled(orvixruntime.ListenerSMTPS, 0, "disabled by config")
 			m.listenerReg.MarkDisabled(orvixruntime.ListenerIMAP, 0, "disabled by config")
 			m.listenerReg.MarkDisabled(orvixruntime.ListenerPOP3, 0, "disabled by config")
 			m.listenerReg.MarkDisabled(orvixruntime.ListenerJMAP, 0, "disabled by config")
@@ -293,6 +326,9 @@ func (m *Module) Start() error {
 		return nil
 	}
 	m.startServer(orvixruntime.ListenerSMTP, net.JoinHostPort(m.cfg.CoreMail.SMTPHost, fmt.Sprintf("%d", m.cfg.CoreMail.SMTPPort)), m.smtpServer.ListenAndServe)
+	if m.submissionServer != nil {
+		m.startServer(orvixruntime.ListenerSubmission, net.JoinHostPort(m.cfg.CoreMail.SubmissionHost, fmt.Sprintf("%d", m.cfg.CoreMail.SubmissionPort)), m.submissionServer.ListenAndServe)
+	}
 	m.startServer(orvixruntime.ListenerIMAP, net.JoinHostPort(m.cfg.CoreMail.IMAPHost, fmt.Sprintf("%d", m.cfg.CoreMail.IMAPPort)), m.imapServer.ListenAndServe)
 	m.startServer(orvixruntime.ListenerPOP3, net.JoinHostPort(m.cfg.CoreMail.POP3Host, fmt.Sprintf("%d", m.cfg.CoreMail.POP3Port)), m.pop3Server.ListenAndServe)
 	m.startServer(orvixruntime.ListenerJMAP, net.JoinHostPort(m.cfg.CoreMail.JMAPHost, fmt.Sprintf("%d", m.cfg.CoreMail.JMAPPort)), m.jmapServer.ListenAndServe)
@@ -368,6 +404,14 @@ func (m *Module) startServer(kind orvixruntime.ListenerKind, addr string, fn fun
 	switch kind {
 	case orvixruntime.ListenerSMTP:
 		m.smtpServer.SetListenerCallback(cb)
+	case orvixruntime.ListenerSubmission:
+		if m.submissionServer != nil {
+			m.submissionServer.SetListenerCallback(cb)
+		}
+	case orvixruntime.ListenerSMTPS:
+		if m.smtpsServer != nil {
+			m.smtpsServer.SetListenerCallback(cb)
+		}
 	case orvixruntime.ListenerIMAP:
 		m.imapServer.SetListenerCallback(cb)
 	case orvixruntime.ListenerPOP3:
@@ -431,6 +475,12 @@ func (m *Module) Stop() error {
 	}
 	if m.smtpServer != nil {
 		_ = m.smtpServer.Stop()
+	}
+	if m.submissionServer != nil {
+		_ = m.submissionServer.Stop()
+	}
+	if m.smtpsServer != nil {
+		_ = m.smtpsServer.Stop()
 	}
 	if m.imapServer != nil {
 		m.imapServer.Stop()
