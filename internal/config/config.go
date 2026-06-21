@@ -49,6 +49,7 @@ type CoreMailConfig struct {
 	TLSCertFile               string        `mapstructure:"tls_cert_file"`
 	TLSKeyFile                string        `mapstructure:"tls_key_file"`
 	RequireTLSForAuth         bool          `mapstructure:"require_tls_for_auth"`
+	RequireAuthForSubmission  bool          `mapstructure:"require_auth_for_submission"`
 	QueueWorkers              int           `mapstructure:"queue_workers"`
 	WorkerInterval            time.Duration `mapstructure:"worker_interval"`
 }
@@ -309,6 +310,7 @@ func Defaults() *Config {
 			POP3Host:          "0.0.0.0",
 			POP3Port:          110,
 			RequireTLSForAuth: true,
+			RequireAuthForSubmission: false,
 			QueueWorkers:      1,
 			WorkerInterval:    5 * time.Second,
 		},
