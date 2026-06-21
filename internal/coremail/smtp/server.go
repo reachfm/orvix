@@ -21,6 +21,7 @@ type Server struct {
 	Handler            *CommandHandler
 	Receiver           *Receiver
 	RecipientValidator RecipientValidator
+	SenderValidator    SenderValidator
 	Observability      *observability.Observability
 
 	mu       sync.Mutex
@@ -141,8 +142,24 @@ func (s *Server) Stop() error {
 func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
 
+	// SMTPS: immediate TLS handshake before any SMTP data.
+	if s.Config.ImplicitTLS && s.TLSConfig != nil {
+		tlsConn := tls.Server(conn, s.TLSConfig)
+		if err := tlsConn.Handshake(); err != nil {
+			if s.Observability != nil {
+				s.Observability.EventHistory.Record(observability.EventTLSFailure,
+					map[string]string{"remote_ip": conn.RemoteAddr().String(), "reason": "handshake"})
+			}
+			return
+		}
+		conn = tlsConn
+	}
+
 	remoteAddr := conn.RemoteAddr().String()
 	session := NewSession(remoteAddr, s.TLSConfig, s.Config)
+	if s.Config.ImplicitTLS {
+		session.TLSActive = true
+	}
 
 	s.mu.Lock()
 	s.sessions[session.ID] = session
@@ -170,6 +187,9 @@ func (s *Server) handleConn(conn net.Conn) {
 	handler := NewCommandHandler(s.Config, s.Handler.auth, session)
 	if s.RecipientValidator != nil {
 		handler.SetRecipientValidator(s.RecipientValidator)
+	}
+	if s.SenderValidator != nil {
+		handler.SetSenderValidator(s.SenderValidator)
 	}
 	if s.localDomainChecker != nil {
 		handler.SetLocalDomainChecker(s.localDomainChecker)

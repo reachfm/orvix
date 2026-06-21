@@ -1,12 +1,17 @@
 package runtime
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"database/sql"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -169,42 +174,7 @@ func TestRuntimeWiresOutboundPreferIPv4ToWorkers(t *testing.T) {
 }
 
 func TestRuntimeWiresCoreMailRequireAuthForSubmissionToSMTP(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		want bool
-	}{
-		{name: "inbound default allows unauthenticated mail from", want: false},
-		{name: "explicit submission auth override", want: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			sqlDB := testRuntimeDB(t, dir)
-			t.Cleanup(func() { sqlDB.Close() })
-
-			cfg := config.Defaults()
-			cfg.CoreMail.Enabled = true
-			cfg.CoreMail.Hostname = "test.orvix.local"
-			cfg.CoreMail.MailStorePath = filepath.Join(dir, "msgs")
-			cfg.CoreMail.QueueWorkers = 1
-			cfg.CoreMail.RequireAuthForSubmission = tc.want
-
-			mod := New(zap.NewNop())
-			mod.cfg = cfg
-			mod.db = sqlDB
-			if err := mod.initCore(cfg, sqlDB); err != nil {
-				t.Fatalf("init core: %v", err)
-			}
-			if mod.smtpServer == nil {
-				t.Fatal("smtp server not initialized")
-			}
-			if got := mod.smtpServer.Config.RequireAuthForSubmission; got != tc.want {
-				t.Fatalf("smtp RequireAuthForSubmission=%v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestRuntimeKeepsInboundMailFromCleartextWhenAuthRequiresTLS(t *testing.T) {
+	// Verify inbound (port 25) does NOT require auth; submission (port 587) requires TLS certificate.
 	dir := t.TempDir()
 	sqlDB := testRuntimeDB(t, dir)
 	t.Cleanup(func() { sqlDB.Close() })
@@ -214,8 +184,71 @@ func TestRuntimeKeepsInboundMailFromCleartextWhenAuthRequiresTLS(t *testing.T) {
 	cfg.CoreMail.Hostname = "test.orvix.local"
 	cfg.CoreMail.MailStorePath = filepath.Join(dir, "msgs")
 	cfg.CoreMail.QueueWorkers = 1
-	cfg.CoreMail.RequireTLSForAuth = true
-	cfg.CoreMail.RequireAuthForSubmission = false
+
+	// Without TLS cert, submission is disabled (safe default).
+	mod := New(zap.NewNop())
+	mod.cfg = cfg
+	mod.db = sqlDB
+	if err := mod.initCore(cfg, sqlDB); err != nil {
+		t.Fatalf("init core: %v", err)
+	}
+	if mod.smtpServer == nil {
+		t.Fatal("inbound smtp server not initialized")
+	}
+	if mod.smtpServer.Config.RequireAuthForSubmission {
+		t.Fatal("inbound (port 25) must not require auth for submission")
+	}
+	if mod.submissionServer != nil {
+		t.Fatal("submission server must be nil when TLS cert not configured")
+	}
+
+	// With TLS cert, submission server is created and requires auth.
+	certDir := t.TempDir()
+	certPEM, keyPEM := generateRuntimeTestCert(t)
+	certFile := filepath.Join(certDir, "cert.pem")
+	keyFile := filepath.Join(certDir, "key.pem")
+	if err := os.WriteFile(certFile, certPEM, 0600); err != nil {
+		t.Fatalf("write cert: %v", err)
+	}
+	if err := os.WriteFile(keyFile, keyPEM, 0600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	cfg2 := config.Defaults()
+	cfg2.CoreMail.Enabled = true
+	cfg2.CoreMail.Hostname = "test.orvix.local"
+	cfg2.CoreMail.MailStorePath = filepath.Join(dir, "msgs")
+	cfg2.CoreMail.QueueWorkers = 1
+	cfg2.CoreMail.SubmissionEnabled = true
+	cfg2.CoreMail.TLSCertFile = certFile
+	cfg2.CoreMail.TLSKeyFile = keyFile
+
+	mod2 := New(zap.NewNop())
+	mod2.cfg = cfg2
+	mod2.db = sqlDB
+	if err := mod2.initCore(cfg2, sqlDB); err != nil {
+		t.Fatalf("init core with TLS: %v", err)
+	}
+	if mod2.submissionServer == nil {
+		t.Fatal("submission server not initialized with TLS cert")
+	}
+	if !mod2.submissionServer.Config.RequireAuthForSubmission {
+		t.Fatal("submission (port 587) must require auth for submission")
+	}
+}
+
+func TestRuntimeKeepsInboundMailFromCleartextWhenAuthRequiresTLS(t *testing.T) {
+	// Inbound (port 25) must allow cleartext mail without TLS.
+	dir := t.TempDir()
+	sqlDB := testRuntimeDB(t, dir)
+	t.Cleanup(func() { sqlDB.Close() })
+
+	cfg := config.Defaults()
+	cfg.CoreMail.Enabled = true
+	cfg.CoreMail.Hostname = "test.orvix.local"
+	cfg.CoreMail.MailStorePath = filepath.Join(dir, "msgs")
+	cfg.CoreMail.QueueWorkers = 1
+	cfg.CoreMail.SubmissionEnabled = true
 
 	mod := New(zap.NewNop())
 	mod.cfg = cfg
@@ -224,18 +257,19 @@ func TestRuntimeKeepsInboundMailFromCleartextWhenAuthRequiresTLS(t *testing.T) {
 		t.Fatalf("init core: %v", err)
 	}
 	if mod.smtpServer == nil {
-		t.Fatal("smtp server not initialized")
+		t.Fatal("inbound smtp server not initialized")
 	}
-	if !mod.smtpServer.Config.RequireTLSForAuth {
-		t.Fatal("smtp RequireTLSForAuth=false, want true")
+	if mod.smtpServer.Config.RequireTLSForAuth {
+		t.Fatal("inbound (port 25) must not require TLS for auth")
 	}
 	if mod.smtpServer.Config.RequireTLSForSubmission {
-		t.Fatal("smtp RequireTLSForSubmission must remain false for inbound port 25")
+		t.Fatal("inbound (port 25) must not require TLS for submission")
 	}
-	if mod.smtpServer.Config.RequireAuthForSubmission {
-		t.Fatal("smtp RequireAuthForSubmission must remain false for inbound port 25")
+	if mod.submissionServer != nil && !mod.submissionServer.Config.RequireTLSForAuth {
+		t.Fatal("submission (port 587) must require TLS for auth")
 	}
 }
+
 
 func TestRuntimeHealthRegistered(t *testing.T) {
 	dir := t.TempDir()
@@ -450,3 +484,21 @@ func TestQueueWorkerHandlesProcessError(t *testing.T) {
 }
 
 var _ = observability.NewObservability
+
+func generateRuntimeTestCert(t *testing.T) (certPEM, keyPEM []byte) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		DNSNames:    []string{"localhost"},
+		IPAddresses: []net.IP{net.ParseIP("127.0.0.1")},
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create cert: %v", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}),
+		pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+}
