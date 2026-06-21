@@ -206,9 +206,7 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 		m.tlsLoadErr = tlsLoadErr
 		if m.logger != nil {
 			m.logger.Warn("SMTP TLS certificate/key failed to load — submission listener disabled; inbound STARTTLS disabled until fixed",
-				zap.String("cert_file", cfg.CoreMail.TLSCertFile),
-				zap.String("key_file", cfg.CoreMail.TLSKeyFile),
-				zap.Error(tlsLoadErr),
+				zap.String("reason", safeTLSLoadError(tlsLoadErr)),
 			)
 		}
 	}
@@ -251,7 +249,7 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 		case tlsLoadErr != nil:
 			if m.logger != nil {
 				m.logger.Warn("submission listener disabled: TLS certificate/key failed to load",
-					zap.Error(tlsLoadErr),
+					zap.String("reason", safeTLSLoadError(tlsLoadErr)),
 				)
 			}
 		default:

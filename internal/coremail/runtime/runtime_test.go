@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -27,6 +28,7 @@ import (
 	orvixruntime "github.com/orvix/orvix/internal/runtime"
 	"github.com/orvix/orvix/internal/trust"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	_ "modernc.org/sqlite"
 )
 
@@ -896,4 +898,82 @@ func TestRuntimeSafeTLSLoadErrorSummary(t *testing.T) {
 	if got := safeTLSLoadError(nil); got != "" {
 		t.Errorf("safeTLSLoadError(nil) = %q, want empty", got)
 	}
+}
+
+func TestRuntimeTLSLoadFailureDoesNotLeakPaths(t *testing.T) {
+	// Configure fake cert/key paths with unique markers, trigger
+	// TLS load failure during initCore, and assert the log output
+	// does not contain either path or raw error info.
+	dir := t.TempDir()
+	sqlDB := testRuntimeDB(t, dir)
+	t.Cleanup(func() { sqlDB.Close() })
+
+	certPath := "C:\\secret\\orvix\\submission-cert.pem"
+	keyPath := "C:\\secret\\orvix\\submission-key.pem"
+
+	cfg := config.Defaults()
+	cfg.CoreMail.Enabled = true
+	cfg.CoreMail.Hostname = "test.orvix.local"
+	cfg.CoreMail.MailStorePath = filepath.Join(dir, "msgs")
+	cfg.CoreMail.QueueWorkers = 1
+	cfg.CoreMail.SubmissionEnabled = true
+	cfg.CoreMail.TLSCertFile = certPath
+	cfg.CoreMail.TLSKeyFile = keyPath
+
+	// Capture log output into a buffer.
+	var buf bytes.Buffer
+	core := zapcore.NewCore(
+		zapcore.NewConsoleEncoder(zap.NewDevelopmentEncoderConfig()),
+		zapcore.AddSync(&buf),
+		zapcore.WarnLevel,
+	)
+	logger := zap.New(core)
+
+	mod := New(logger)
+	mod.cfg = cfg
+	mod.db = sqlDB
+	if err := mod.initCore(cfg, sqlDB); err != nil {
+		t.Fatalf("initCore: %v (TLS failure must not be fatal)", err)
+	}
+
+	// Flush logger.
+	logger.Sync()
+
+	output := buf.String()
+	t.Logf("log output (%d bytes):\n%s", len(output), output)
+
+	// Assert paths do not leak.
+	for _, frag := range []string{certPath, keyPath, "submission-cert", "submission-key"} {
+		if strings.Contains(output, frag) {
+			t.Errorf("log output must not contain %q", frag)
+		}
+	}
+
+	// Assert a sanitized reason is present.
+	if !strings.Contains(output, "TLS certificate/key failed") {
+		t.Error("log must mention TLS certificate/key failure")
+	}
+	hasReason := strings.Contains(output, "file not found") ||
+		strings.Contains(output, "load failed") ||
+		strings.Contains(output, "failed to load")
+	if !hasReason {
+		t.Error("log must include a sanitized reason string")
+	}
+
+	// Port 25 inbound must still be alive after TLS failure.
+	if mod.smtpServer == nil {
+		t.Fatal("inbound SMTP server must still be initialized after TLS load failure")
+	}
+	if mod.submissionServer != nil {
+		t.Fatal("submission server must NOT be created when TLS fails to load")
+	}
+	if mod.tlsLoadErr == nil {
+		t.Fatal("tlsLoadErr must be non-nil after TLS load failure")
+	}
+	// Telemetry reason must be sanitized (no path in reason).
+	telemetryReason := mod.submissionDisabledReason()
+	if strings.Contains(telemetryReason, certPath) || strings.Contains(telemetryReason, keyPath) {
+		t.Errorf("telemetry reason must not contain cert/key path: %s", telemetryReason)
+	}
+	t.Logf("telemetry reason: %s", telemetryReason)
 }
