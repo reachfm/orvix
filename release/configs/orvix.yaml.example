@@ -61,7 +61,9 @@ coremail:
   smtp_host: 0.0.0.0
   smtp_port: 25
   # Submission (port 587) for authenticated mail client submission.
-  submission_enabled: true
+  # Requires tls_cert_file and tls_key_file to be configured.
+  # For production, enable and configure the TLS certificate first.
+  submission_enabled: false
   submission_host: 0.0.0.0
   submission_port: 587
   # SMTPS (port 465, implicit TLS) — NOT YET IMPLEMENTED.

@@ -358,7 +358,7 @@ func Defaults() *Config {
 			MailStorePath:     "/var/lib/orvix/mailstore",
 			SMTPHost:          "0.0.0.0",
 			SMTPPort:          25,
-			SubmissionEnabled: true,
+			SubmissionEnabled: false,
 			SubmissionHost:    "0.0.0.0",
 			SubmissionPort:    587,
 			SMTPsEnabled:      false,

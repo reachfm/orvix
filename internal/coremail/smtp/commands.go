@@ -202,8 +202,9 @@ func (h *CommandHandler) handleRCPT(ctx context.Context, cmd *ParsedCommand) Res
 		}
 	}
 
-	// Validate recipient if a validator is configured.
-	if h.validateRcpt != nil {
+	// Validate recipient if a validator is configured and session is not
+	// authenticated (authenticated submission allows external recipients).
+	if h.validateRcpt != nil && !h.session.Authenticated {
 		valid, err := h.validateRcpt(ctx, address)
 		if err != nil || !valid {
 			if err != nil {

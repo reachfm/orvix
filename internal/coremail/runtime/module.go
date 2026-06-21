@@ -212,20 +212,25 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	m.smtpServer.Observability = m.obs
 
 	// ── Submission SMTP (port 587, STARTTLS) ───────────────
+	// Submission requires TLS (STARTTLS). If no TLS certificate is
+	// configured, the listener is not created and the admin dashboard
+	// shows "disabled" with a clear reason.
 	if cfg.CoreMail.SubmissionEnabled {
-		subCfg := smtp.SubmissionConfig()
-		subCfg.Hostname = cfg.CoreMail.Hostname
-		subCfg.TLSCertFile = cfg.CoreMail.TLSCertFile
-		subCfg.TLSKeyFile = cfg.CoreMail.TLSKeyFile
-		subHandler := smtp.NewCommandHandler(subCfg, smtpAuth, smtp.NewSession("runtime-init", tlsCfg, subCfg))
-		m.submissionServer = smtp.NewServer(subCfg, subHandler, receiver)
-		m.submissionServer.TLSConfig = tlsCfg
-		m.submissionServer.RecipientValidator = func(ctx context.Context, address string) (bool, error) {
-			_, err := m.engine.Auth.ResolveAddress(ctx, address)
-			return err == nil, err
+		if tlsCfg == nil {
+			if m.logger != nil {
+				m.logger.Warn("submission listener disabled: TLS certificate/key not configured")
+			}
+		} else {
+			subCfg := smtp.SubmissionConfig()
+			subCfg.Hostname = cfg.CoreMail.Hostname
+			subCfg.TLSCertFile = cfg.CoreMail.TLSCertFile
+			subCfg.TLSKeyFile = cfg.CoreMail.TLSKeyFile
+			subHandler := smtp.NewCommandHandler(subCfg, smtpAuth, smtp.NewSession("runtime-init", tlsCfg, subCfg))
+			m.submissionServer = smtp.NewServer(subCfg, subHandler, receiver)
+			m.submissionServer.TLSConfig = tlsCfg
+			m.submissionServer.SetLocalDomainChecker(identity.IsLocalDomain)
+			m.submissionServer.Observability = m.obs
 		}
-		m.submissionServer.SetLocalDomainChecker(identity.IsLocalDomain)
-		m.submissionServer.Observability = m.obs
 	}
 
 	// ── SMTPS (port 465, implicit TLS) — config exists but not implemented.
@@ -332,6 +337,17 @@ func (m *Module) Start() error {
 	m.startServer(orvixruntime.ListenerIMAP, net.JoinHostPort(m.cfg.CoreMail.IMAPHost, fmt.Sprintf("%d", m.cfg.CoreMail.IMAPPort)), m.imapServer.ListenAndServe)
 	m.startServer(orvixruntime.ListenerPOP3, net.JoinHostPort(m.cfg.CoreMail.POP3Host, fmt.Sprintf("%d", m.cfg.CoreMail.POP3Port)), m.pop3Server.ListenAndServe)
 	m.startServer(orvixruntime.ListenerJMAP, net.JoinHostPort(m.cfg.CoreMail.JMAPHost, fmt.Sprintf("%d", m.cfg.CoreMail.JMAPPort)), m.jmapServer.ListenAndServe)
+	// Telemetry: mark listeners that are config-disabled or not-yet-implemented.
+	if m.listenerReg != nil {
+		if m.submissionServer == nil && m.cfg.CoreMail.SubmissionEnabled {
+			m.listenerReg.MarkDisabled(orvixruntime.ListenerSubmission, m.cfg.CoreMail.SubmissionPort, "submission disabled: TLS certificate/key not configured")
+		}
+		if !m.cfg.CoreMail.SMTPsEnabled {
+			m.listenerReg.MarkDisabled(orvixruntime.ListenerSMTPS, m.cfg.CoreMail.SMTPsPort, "SMTPS disabled by config")
+		} else if m.smtpsServer == nil {
+			m.listenerReg.MarkDisabled(orvixruntime.ListenerSMTPS, m.cfg.CoreMail.SMTPsPort, "SMTPS not yet implemented")
+		}
+	}
 	for _, worker := range m.workers {
 		w := worker
 		m.wg.Add(1)

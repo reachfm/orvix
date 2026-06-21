@@ -268,7 +268,13 @@ func (r *Receiver) AcceptMessage(ctx context.Context, session *Session) error {
 		Domain    string
 	}
 
+	type externalRecipient struct {
+		Email  string
+		Domain string
+	}
+
 	var recipients []resolvedRecipient
+	var externalRecipients []externalRecipient
 	for _, rcpt := range session.Recipients {
 		domain := ExtractDomain(rcpt)
 		if domain == "" {
@@ -280,7 +286,11 @@ func (r *Receiver) AcceptMessage(ctx context.Context, session *Session) error {
 			return fmt.Errorf("lookup domain %s: %w", domain, err)
 		}
 		if dom == nil || dom.Status != coremail.DomainActive {
-			return fmt.Errorf("domain not hosted: %s", domain)
+			externalRecipients = append(externalRecipients, externalRecipient{
+				Email:  rcpt,
+				Domain: domain,
+			})
+			continue
 		}
 
 		targets, err := r.Engine.Auth.ResolveAddress(ctx, rcpt)
@@ -306,11 +316,20 @@ func (r *Receiver) AcceptMessage(ctx context.Context, session *Session) error {
 		}
 	}
 
-	if len(recipients) == 0 {
+	if len(recipients) == 0 && len(externalRecipients) == 0 {
 		return fmt.Errorf("no valid recipients")
 	}
 
-	// Store message in each recipient's mailbox.
+	// Store the message at least once even if only external recipients.
+	var firstMessageID string
+	var senderTenantID uint
+	var senderDomainID uint
+	if session.AuthIdentity != nil {
+		senderTenantID = session.AuthIdentity.TenantID
+		senderDomainID = session.AuthIdentity.DomainID
+	}
+
+	// Store message in each local recipient's mailbox.
 	for _, rcpt := range recipients {
 		inbox, err := r.MailStore.Folders.GetByPath(ctx, rcpt.MailboxID, "INBOX", nil)
 		if err != nil {
@@ -335,6 +354,9 @@ func (r *Receiver) AcceptMessage(ctx context.Context, session *Session) error {
 		if err := r.MailStore.StoreMessage(ctx, msg, rfc822Data, nil); err != nil {
 			return fmt.Errorf("store message for %s: %w", rcpt.Email, err)
 		}
+		if firstMessageID == "" {
+			firstMessageID = msg.MessageID
+		}
 
 		qEntry := &queue.QueueEntry{
 			TenantID:        rcpt.TenantID,
@@ -358,7 +380,47 @@ func (r *Receiver) AcceptMessage(ctx context.Context, session *Session) error {
 		}
 	}
 
-	// Observability: SMTP accepted.
+	// ── External recipients (outbound relay) ────────────────
+	for _, ext := range externalRecipients {
+		msgID := firstMessageID
+		if msgID == "" {
+			msgID = storage.GenerateMessageID()
+			firstMessageID = msgID
+			extMsg := &storage.Message{
+				MessageID:    msgID,
+				TenantID:     senderTenantID,
+				DomainID:     senderDomainID,
+				FromAddress:  session.MailFrom,
+				ToAddresses:  ext.Email,
+				Subject:      extractSubject(rfc822Data),
+				ReceivedDate: time.Now().UTC(),
+			}
+			if session.AuthIdentity != nil && session.AuthIdentity.MailboxID > 0 {
+				extMsg.MailboxID = session.AuthIdentity.MailboxID
+			}
+			if err := r.MailStore.StoreMessage(ctx, extMsg, rfc822Data, nil); err != nil {
+				return fmt.Errorf("store message for external %s: %w", ext.Email, err)
+			}
+		}
+
+		qEntry := &queue.QueueEntry{
+			TenantID:        senderTenantID,
+			DomainID:        senderDomainID,
+			MessageID:       msgID,
+			FromAddress:     session.MailFrom,
+			ToAddress:       ext.Email,
+			RecipientDomain: ext.Domain,
+			Direction:       queue.DirectionOutbound,
+			DeliveryMode:    queue.DeliveryRemoteSMTP,
+			Status:          queue.StatusPending,
+		}
+
+		if err := r.QueueEngine.Enqueue(ctx, qEntry); err != nil {
+			return fmt.Errorf("enqueue external %s: %w", ext.Email, err)
+		}
+	}
+
+	// ── Observability: SMTP accepted. ───────────────────────
 	if r.Observability != nil {
 		r.Observability.Metrics.IncSMTPAccepted()
 		r.Observability.EventHistory.Record(observability.EventSMTPAccepted, map[string]string{
