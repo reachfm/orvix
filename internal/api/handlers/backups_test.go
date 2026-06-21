@@ -519,3 +519,95 @@ func TestBackupLegacyWriteRoutesReturn410(t *testing.T) {
 		t.Fatalf("GET /api/v1/backups/:id/download expected 410, got %d: %s", resp.StatusCode, body)
 	}
 }
+
+// ── X-Orvix-Confirm header fallback tests ────────────────────────────
+//
+// DELETE intermediaries sometimes strip the request body. The admin UI
+// and any external admin client can still authorize delete by sending
+// X-Orvix-Confirm: delete-orvix-backup. CSRF + admin role are still
+// enforced by router middleware.
+
+// rawBackupRequest is a thin variant of backupRequest that allows extra
+// headers (used to test X-Orvix-Confirm).
+func rawBackupRequest(t *testing.T, router *api.Router, method, path, body, token, csrf string, extra map[string]string) (*http.Response, []byte) {
+	t.Helper()
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	}
+	req := httptest.NewRequest(method, path, reader)
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if csrf != "" {
+		req.Header.Set("Cookie", "csrf_token="+csrf)
+		req.Header.Set("X-CSRF-Token", csrf)
+	}
+	for k, v := range extra {
+		req.Header.Set(k, v)
+	}
+	resp, err := router.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	data, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	return resp, data
+}
+
+func TestBackupDeleteHeaderConfirmOnlySucceeds(t *testing.T) {
+	router, sqlDB, token, csrf, backupDir := buildBackupHarness(t)
+	defer router.App().Shutdown()
+	defer sqlDB.Close()
+	created := createBackupViaAPI(t, router, token, csrf)
+	// No body. Confirm only via X-Orvix-Confirm header.
+	resp, body := rawBackupRequest(t, router, "DELETE", "/api/v1/admin/backups/"+created.ID, "", token, csrf,
+		map[string]string{"X-Orvix-Confirm": "delete-orvix-backup"})
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected 204 for X-Orvix-Confirm header delete, got %d: %s", resp.StatusCode, body)
+	}
+	if _, err := os.Stat(filepath.Join(backupDir, created.ID)); !os.IsNotExist(err) {
+		t.Fatalf("backup dir should be deleted via header path, err=%v", err)
+	}
+}
+
+func TestBackupDeleteHeaderWrongConfirmReturns400(t *testing.T) {
+	router, sqlDB, token, csrf, _ := buildBackupHarness(t)
+	defer router.App().Shutdown()
+	defer sqlDB.Close()
+	created := createBackupViaAPI(t, router, token, csrf)
+	resp, body := rawBackupRequest(t, router, "DELETE", "/api/v1/admin/backups/"+created.ID, "", token, csrf,
+		map[string]string{"X-Orvix-Confirm": "nope"})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for wrong X-Orvix-Confirm header, got %d: %s", resp.StatusCode, body)
+	}
+}
+
+func TestBackupDeleteNoBodyNoHeaderReturns400(t *testing.T) {
+	router, sqlDB, token, csrf, _ := buildBackupHarness(t)
+	defer router.App().Shutdown()
+	defer sqlDB.Close()
+	created := createBackupViaAPI(t, router, token, csrf)
+	// Neither body nor X-Orvix-Confirm header.
+	resp, body := rawBackupRequest(t, router, "DELETE", "/api/v1/admin/backups/"+created.ID, "", token, csrf, nil)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for no body and no confirm header, got %d: %s", resp.StatusCode, body)
+	}
+}
+
+func TestBackupDeleteHeaderRequiresCSRF(t *testing.T) {
+	router, sqlDB, token, csrf, _ := buildBackupHarness(t)
+	defer router.App().Shutdown()
+	defer sqlDB.Close()
+	// Create with valid CSRF so a backup exists; then try to delete
+	// with admin auth + header confirm but no CSRF.
+	created := createBackupViaAPI(t, router, token, csrf)
+	resp, body := rawBackupRequest(t, router, "DELETE", "/api/v1/admin/backups/"+created.ID, "", token, "",
+		map[string]string{"X-Orvix-Confirm": "delete-orvix-backup"})
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 when CSRF missing on header-path delete, got %d: %s", resp.StatusCode, body)
+	}
+}

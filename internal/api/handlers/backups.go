@@ -166,21 +166,45 @@ func (h *Handler) DownloadBackup(c fiber.Ctx) error {
 	return c.SendStream(file, int(stat.Size()))
 }
 
+// backupDeleteConfirm is the typed-confirmation string required to
+// authorize a destructive backup delete. It is intentionally non-trivial
+// and must match exactly. Used by both the JSON body and the
+// X-Orvix-Confirm header fallback.
+const backupDeleteConfirm = "delete-orvix-backup"
+
 // DeleteBackup deletes a backup through the hardened backup service.
-// Requires typed confirmation "delete-orvix-backup".
+// Requires typed confirmation "delete-orvix-backup". The confirmation may
+// be supplied either via JSON body field {"confirm":"delete-orvix-backup"}
+// or via the X-Orvix-Confirm request header. Both paths require an
+// authenticated admin session and a valid CSRF token, which are enforced
+// by the router middleware (admin group + CSRF). Deleting without typed
+// confirmation is rejected.
 func (h *Handler) DeleteBackup(c fiber.Ctx) error {
 	id := c.Params("id")
 	if invalidBackupID(id) {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid backup id"})
 	}
+	// Typed confirmation: accept JSON body OR X-Orvix-Confirm header.
+	// Header fallback exists because some HTTP intermediaries strip bodies
+	// from DELETE requests; CSRF + admin role still gate this path.
+	confirm := strings.TrimSpace(c.Get("X-Orvix-Confirm"))
+	bodyParsed := false
 	var req struct {
 		Confirm string `json:"confirm"`
 	}
-	if err := c.Bind().JSON(&req); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "delete requires JSON body with confirm field"})
+	if err := c.Bind().JSON(&req); err == nil {
+		bodyParsed = true
+		if v := strings.TrimSpace(req.Confirm); v != "" {
+			confirm = v
+		}
 	}
-	if req.Confirm != "delete-orvix-backup" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "delete requires typed confirmation: delete-orvix-backup"})
+	if confirm != backupDeleteConfirm {
+		// Differentiate error messages to aid debugging without weakening
+		// the typed-confirmation requirement.
+		if bodyParsed {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "delete requires typed confirmation: " + backupDeleteConfirm})
+		}
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "delete requires JSON body with confirm field or X-Orvix-Confirm header"})
 	}
 	svc, err := h.backupService()
 	if err != nil {

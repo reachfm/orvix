@@ -2892,7 +2892,7 @@
     host.appendChild(el('div', { class: 'row-actions' }, [
       el('button', { class: 'btn primary', type: 'button', text: 'Backup now',  onclick: openBackupCreateModal }),
       el('button', { class: 'btn ghost',   type: 'button', text: 'Run retention', onclick: runRetention }),
-      el('span', { class: 'form-hint', text: 'Restore is not exposed in this build. To restore, install the backup on a clean host via the installer.' })
+      el('span', { class: 'form-hint', text: 'Restore validates and stages only. Manual apply/restart is required; live data is not overwritten from the UI.' })
     ]));
   }
 
@@ -2993,10 +2993,22 @@
   }
 
   function deleteBackup(b) {
-    var typedConfirm = prompt("Type 'delete-orvix-backup' to confirm deletion of backup " + b.id + ":");
+    var typedConfirm = prompt("Type 'delete-orvix-backup' to confirm deletion of backup " + b.id + ":\n\nThis permanently removes the backup archive. This cannot be undone.");
     if (!typedConfirm) return;
     if (typedConfirm !== "delete-orvix-backup") { toast("Typed confirmation did not match.", "error"); return; }
-    apiDelete('/api/v1/admin/backups/' + b.id, { confirm: "delete-orvix-backup" }).then(function () {
+    csrfFetch('/api/v1/admin/backups/' + encodeURIComponent(b.id), {
+      method: 'DELETE',
+      headers: Object.assign({}, authHeaders(), {
+        'Content-Type': 'application/json',
+        'X-Orvix-Confirm': 'delete-orvix-backup'
+      }),
+      body: JSON.stringify({ confirm: 'delete-orvix-backup' })
+    }).then(function (res) {
+      if (!res.ok) {
+        return res.json().catch(function () { return {}; }).then(function (body) {
+          throw new Error('Delete failed for backup ' + b.id + ': ' + ((body && body.error) || ('HTTP ' + res.status)));
+        });
+      }
       toast('Backup deleted', 'success');
       loadBackups();
     }).catch(function (e) { toast(e.message, 'error'); });
@@ -3030,7 +3042,7 @@
   }
 
   function restoreBackup(b) {
-    var typedConfirm = prompt("Type 'restore-orvix-backup' to confirm restore of backup " + b.id + ":");
+    var typedConfirm = prompt("Type 'restore-orvix-backup' to confirm restore of backup " + b.id + ".\n\nRestore validates and stages the backup only. It does not overwrite live data. Manual apply/restart is required.");
     if (!typedConfirm) return;
     if (typedConfirm !== 'restore-orvix-backup') { toast('Typed confirmation did not match.', 'error'); return; }
     apiPost('/api/v1/admin/backups/' + b.id + '/restore', { confirm: 'restore-orvix-backup' }).then(function (rr) {
