@@ -193,7 +193,6 @@ else
 fi
 
 # ── 10. Orvix runtime telemetry (best effort, safe temp file). ──
-listeners_temp
 listeners_temp=$(mktemp /tmp/orvix-listeners.XXXXXX)
 trap 'rm -f "$listeners_temp"' EXIT
 if curl -fsSL --connect-timeout 3 --max-time 5 "http://127.0.0.1:8080/api/v1/admin/runtime/listeners" >"$listeners_temp" 2>/dev/null; then

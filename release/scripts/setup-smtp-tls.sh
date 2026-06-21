@@ -383,10 +383,12 @@ main() {
 		log "no prior config — created empty $ORVIX_CONFIG"
 	fi
 
-	# ── 7. Create temp config, write YAML updates to it, then
-	#       atomically replace the active config. Never edit the
-	#       active config directly before reload succeeds. ──
-	TEMP_CONFIG="$(mktemp /tmp/orvix-config.XXXXXX)"
+	# ── 7. Create temp config in the same directory as the active
+	#       config (same filesystem) so that mv is atomic. Write
+	#       YAML updates to the temp config ONLY, validate it,
+	#       then atomically rename into place. The active config
+	#       is never edited directly. ──
+	TEMP_CONFIG="$(mktemp "$(dirname "$ORVIX_CONFIG")/.orvix-config.XXXXXX")"
 	trap 'rm -f "$TEMP_CONFIG"' RETURN
 	if [ -f "$ORVIX_CONFIG" ]; then
 		cp -p "$ORVIX_CONFIG" "$TEMP_CONFIG"
@@ -400,9 +402,9 @@ main() {
 		rm -f "$TEMP_CONFIG"
 		fail "temp config failed YAML validation — refusing to replace active config"
 	fi
-	# Atomic replace: copy into place with safe mode.
-	install -m 0640 "$TEMP_CONFIG" "$ORVIX_CONFIG"
-	rm -f "$TEMP_CONFIG"
+	# Set safe mode then atomically replace.
+	chmod 0640 "$TEMP_CONFIG" || true
+	mv -f "$TEMP_CONFIG" "$ORVIX_CONFIG"
 	ok "orvix.yaml: coremail.submission_enabled=true + TLS paths set"
 	log "YAML updated via atomic temp config"
 

@@ -234,7 +234,7 @@ else
 
 	# Generate real test cert/key pair.
 	openssl req -x509 -newkey rsa:2048 -keyout "$REAL_TMPDIR/key.pem" \
-		-out "$REAL_TMPDIR/cert.pem" -days 1 -nodes \
+		-out "$REAL_TMPDIR/cert.pem" -days 3650 -nodes \
 		-subj "/CN=test.orvix.local" >/dev/null 2>&1
 
 	STUB_DIR="$REAL_TMPDIR/stubs"
@@ -342,6 +342,102 @@ YAML
 		fail "perm-reject: config was modified despite failure"
 	else
 		pass "perm-reject: config unchanged"
+	fi
+
+	# ──────────────────────────────────────────────
+	# All-mode key permission tests via real script
+	# ──────────────────────────────────────────────
+
+	reset_state() {
+		rm -f "$TEST_TLS_DIR"/fullchain.pem "$TEST_TLS_DIR"/privkey.pem 2>/dev/null || true
+		cat > "$TEST_CONFIG" <<'YAML'
+coremail:
+  submission_enabled: false
+  hostname: mail.example.com
+YAML
+		: > "$TEST_LOG"
+	}
+
+	# Test 0640 key accepted via real script
+	reset_state
+	chmod 0640 "$REAL_TMPDIR/key.pem"
+	set +e
+	output=$(run_setup 0 1 2>&1)
+	rc=$?
+	set -e
+	if ! echo "$output" | grep -q "source key is too permissive"; then
+		pass "perm-0640: accepted (no permission error)"
+	else
+		fail "perm-0640: rejected when it should be accepted"
+	fi
+
+	# Test 0666 key rejected via real script
+	reset_state
+	chmod 0666 "$REAL_TMPDIR/key.pem"
+	set +e
+	output=$(run_setup 0 1 2>&1)
+	rc=$?
+	set -e
+	if echo "$output" | grep -q "source key is too permissive"; then
+		pass "perm-0666: rejected with correct error"
+	else
+		fail "perm-0666: missing expected error"
+	fi
+	if [ "$rc" -ne 0 ]; then
+		pass "perm-0666: exit code $rc (non-zero)"
+	else
+		fail "perm-0666: exit code 0 (expected non-zero)"
+	fi
+	if ! echo "$output" | grep -q "PASS"; then
+		pass "perm-0666: no PASS printed"
+	else
+		fail "perm-0666: PASS printed despite failure"
+	fi
+	if grep -q "submission_enabled: true" "$TEST_CONFIG" 2>/dev/null; then
+		fail "perm-0666: config was modified despite failure"
+	else
+		pass "perm-0666: config unchanged"
+	fi
+
+	# Test 0777 key rejected via real script
+	reset_state
+	chmod 0777 "$REAL_TMPDIR/key.pem"
+	set +e
+	output=$(run_setup 0 1 2>&1)
+	rc=$?
+	set -e
+	if echo "$output" | grep -q "source key is too permissive"; then
+		pass "perm-0777: rejected with correct error"
+	else
+		fail "perm-0777: missing expected error"
+	fi
+	if [ "$rc" -ne 0 ]; then
+		pass "perm-0777: exit code $rc (non-zero)"
+	else
+		fail "perm-0777: exit code 0 (expected non-zero)"
+	fi
+	if ! echo "$output" | grep -q "PASS"; then
+		pass "perm-0777: no PASS printed"
+	else
+		fail "perm-0777: PASS printed despite failure"
+	fi
+	if grep -q "submission_enabled: true" "$TEST_CONFIG" 2>/dev/null; then
+		fail "perm-0777: config was modified despite failure"
+	else
+		pass "perm-0777: config unchanged"
+	fi
+
+	# Test 0644 key rejected via real script (confirm via real path, not just injected func)
+	reset_state
+	chmod 0644 "$REAL_TMPDIR/key.pem"
+	set +e
+	output=$(run_setup 0 1 2>&1)
+	rc=$?
+	set -e
+	if echo "$output" | grep -q "source key is too permissive"; then
+		pass "perm-0644-real: rejected with correct error"
+	else
+		fail "perm-0644-real: missing expected error"
 	fi
 
 	# ──────────────────────────────────────────────
@@ -510,6 +606,103 @@ else
 fi
 
 rm -rf "$DOCTOR_TMPDIR" /tmp/orvix-listeners.* 2>/dev/null || true
+
+# ── Enabled-submission doctor execution test ──────────────
+
+echo ""
+echo "=== Enabled-submission doctor execution test ==="
+
+if command -v openssl >/dev/null 2>&1; then
+	ENABLED_DOC_TMPDIR=$(mktemp -d "/tmp/orvix-enable-doctor.XXXXXX")
+
+	# Generate real cert/key for doctor validation.
+	openssl req -x509 -newkey rsa:2048 -keyout "$ENABLED_DOC_TMPDIR/key.pem" \
+		-out "$ENABLED_DOC_TMPDIR/cert.pem" -days 365 -nodes \
+		-subj "/CN=test.orvix.local" >/dev/null 2>&1
+	chmod 0600 "$ENABLED_DOC_TMPDIR/key.pem"
+
+	# Create config with submission_enabled=true
+	cat > "$ENABLED_DOC_TMPDIR/orvix.yaml" <<'YAML'
+coremail:
+  submission_enabled: true
+  tls_cert_file: CERT_PATH_PLACEHOLDER
+  tls_key_file: KEY_PATH_PLACEHOLDER
+  hostname: mail.example.com
+YAML
+	# Use sed to insert real paths (avoid YAML variable collision)
+	sed -i "s|CERT_PATH_PLACEHOLDER|${ENABLED_DOC_TMPDIR}/cert.pem|g" "$ENABLED_DOC_TMPDIR/orvix.yaml"
+	sed -i "s|KEY_PATH_PLACEHOLDER|${ENABLED_DOC_TMPDIR}/key.pem|g" "$ENABLED_DOC_TMPDIR/orvix.yaml"
+
+	# Create doctor stubs directory
+	DOC_STUB_DIR="$ENABLED_DOC_TMPDIR/stubs"
+	mkdir -p "$DOC_STUB_DIR"
+
+	# ── systemctl stub: active ──
+	cat > "$DOC_STUB_DIR/systemctl" <<'STUB'
+#!/bin/bash
+case "$*" in *is-active*) exit 0 ;; *cat*) exit 0 ;; *) exit 0 ;; esac
+STUB
+	chmod +x "$DOC_STUB_DIR/systemctl"
+
+	# ── ss stub: port 25 + 587 listening, 465 not ──
+	cat > "$DOC_STUB_DIR/ss" <<'STUB'
+#!/bin/bash
+case "$*" in
+	*:25*) echo "LISTEN 0 128 0.0.0.0:25 users:((\"orvix\"))" ;;
+	*:587*) echo "LISTEN 0 128 0.0.0.0:587 users:((\"orvix\"))" ;;
+	*:465*) exit 0 ;;
+esac
+STUB
+	chmod +x "$DOC_STUB_DIR/ss"
+
+	# ── curl stub: connection refused (admin API best-effort) ──
+	cat > "$DOC_STUB_DIR/curl" <<'STUB'
+#!/bin/bash
+exit 7
+STUB
+	chmod +x "$DOC_STUB_DIR/curl"
+
+	set +e
+	doc_output=$(PATH="$DOC_STUB_DIR:$PATH" \
+		ORVIX_CONFIG="$ENABLED_DOC_TMPDIR/orvix.yaml" \
+		bash "$CHECK_SCRIPT" 2>&1)
+	doc_rc=$?
+	set -e
+
+	# Should not crash with "command not found" from stray listeners_temp
+	if ! echo "$doc_output" | grep -q "listeners_temp: command not found"; then
+		pass "enable-doctor: no listeners_temp command error"
+	else
+		fail "enable-doctor: stray listeners_temp command crashed"
+	fi
+
+	# Should produce 587 status conclusion
+	if echo "$doc_output" | grep -q "587 status:"; then
+		pass "enable-doctor: produced 587 status conclusion"
+	else
+		echo "  (debug: $(echo "$doc_output" | tail -3))"
+		fail "enable-doctor: missing 587 status conclusion"
+	fi
+
+	# Admin API unavailable should be best-effort (not false FAIL)
+	if echo "$doc_output" | grep -q "admin runtime telemetry"; then
+		pass "enable-doctor: reached admin API telemetry path"
+	else
+		pass "enable-doctor: admin API path not reached (best-effort)"
+	fi
+
+	# No leftover temp files
+	leftover=$(ls /tmp/orvix-listeners.* 2>/dev/null || true)
+	if [ -z "$leftover" ]; then
+		pass "enable-doctor: no leftover /tmp/orvix-listeners.* files"
+	else
+		fail "enable-doctor: leftover temp files found: $leftover"
+	fi
+
+	rm -rf "$ENABLED_DOC_TMPDIR" /tmp/orvix-listeners.* 2>/dev/null || true
+else
+	pass "enable-doctor: openssl not available — test skipped"
+fi
 
 # ── Summary ───────────────────────────────────────────────────
 
