@@ -170,6 +170,11 @@ func testIntegrationServer(t *testing.T, withAuth bool) (string, *storage.MailSt
 
 	cfg := DefaultConfig()
 	cfg.RequireAuthForSubmission = withAuth
+	return testIntegrationServerWithConfig(t, eng, ms, qe, rcv, cfg)
+}
+
+func testIntegrationServerWithConfig(t *testing.T, eng *coremail.Engine, ms *storage.MailStore, qe *queue.QueueEngine, rcv *Receiver, cfg Config) (string, *storage.MailStore, *queue.QueueEngine, *coremail.Engine, func()) {
+	t.Helper()
 
 	verify := func(ctx context.Context, username, password string) (string, bool) {
 		// Use the MailStore Auth to verify.
@@ -388,6 +393,56 @@ func TestIntegrationDATACreatesQueueEntry(t *testing.T) {
 	msgs, _, _ := ms.ListMessages(ctx, storage.MessageFilter{MailboxID: 1}, nil)
 	if len(msgs) < 1 {
 		t.Fatal("expected at least 1 message in MailStore")
+	}
+}
+
+func TestInboundCleartextPort25AcceptsLocalDataWhenAuthTLSRequired(t *testing.T) {
+	eng, ms, qe, rcv := testIntegrationEnv(t)
+	cfg := DefaultConfig()
+	cfg.RequireTLSForAuth = true
+	cfg.RequireTLSForSubmission = false
+	cfg.RequireAuthForSubmission = false
+	addr, ms, _, _, cleanup := testIntegrationServerWithConfig(t, eng, ms, qe, rcv, cfg)
+	defer cleanup()
+
+	conn, reader := dialAndGreet(t, addr)
+	defer conn.Close()
+
+	resp := sendCmd(conn, reader, "MAIL FROM:<sender@example.net>")
+	if !strings.HasPrefix(resp, "250") {
+		t.Fatalf("MAIL FROM: expected 250 without STARTTLS on inbound port 25, got: %s", resp)
+	}
+	resp = sendCmd(conn, reader, "RCPT TO:<user@test.com>")
+	if !strings.HasPrefix(resp, "250") {
+		t.Fatalf("local RCPT: expected 250, got: %s", resp)
+	}
+	resp = sendCmd(conn, reader, "DATA")
+	if !strings.HasPrefix(resp, "354") {
+		t.Fatalf("DATA: expected 354, got: %s", resp)
+	}
+	conn.Write([]byte("Subject: Cleartext Inbound\r\n\r\nBody\r\n.\r\n"))
+	resp = readResponse(reader)
+	if !strings.HasPrefix(resp, "250") {
+		t.Fatalf("message: expected 250, got: %s", resp)
+	}
+
+	count, err := ms.Messages.CountByMailbox(context.Background(), 1, nil)
+	if err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if count < 1 {
+		t.Fatal("expected cleartext inbound message to be stored")
+	}
+
+	conn2, reader2 := dialAndGreet(t, addr)
+	defer conn2.Close()
+	resp = sendCmd(conn2, reader2, "MAIL FROM:<sender@example.net>")
+	if !strings.HasPrefix(resp, "250") {
+		t.Fatalf("second MAIL FROM: expected 250, got: %s", resp)
+	}
+	resp = sendCmd(conn2, reader2, "RCPT TO:<external@remote.test>")
+	if !strings.HasPrefix(resp, "550") {
+		t.Fatalf("external RCPT: expected 550 relay denied, got: %s", resp)
 	}
 }
 
@@ -3108,5 +3163,3 @@ func hasObservedEvent(obs *observability.Observability, typ observability.EventT
 	}
 	return false
 }
-
-

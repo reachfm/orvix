@@ -185,7 +185,7 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	smtpCfg.TLSCertFile = cfg.CoreMail.TLSCertFile
 	smtpCfg.TLSKeyFile = cfg.CoreMail.TLSKeyFile
 	smtpCfg.RequireTLSForAuth = cfg.CoreMail.RequireTLSForAuth
-	smtpCfg.RequireTLSForSubmission = cfg.CoreMail.RequireTLSForAuth
+	smtpCfg.RequireTLSForSubmission = false
 	smtpCfg.RequireAuthForSubmission = cfg.CoreMail.RequireAuthForSubmission
 	smtpAuth := smtp.NewAuthenticator(identity)
 	tlsCfg, err := smtp.LoadTLSConfig(smtpCfg)
