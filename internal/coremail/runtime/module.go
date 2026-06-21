@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,6 +53,13 @@ type Module struct {
 	pop3Server      *pop3.Server
 	jmapServer      *jmap.Server
 	workers    []*delivery.DeliveryWorker
+
+	// tlsLoadErr is non-nil when the SMTP TLS cert/key were configured
+	// but failed to load. The runtime does NOT abort initCore on this
+	// failure — instead the submission listener is skipped and the
+	// listener registry reports the specific reason so the operator can
+	// fix it without taking the whole mail server down.
+	tlsLoadErr error
 
 	// listenerReg records live listener startup state for the
 	// admin runtime telemetry endpoint. Populated by startServer.
@@ -187,9 +195,22 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	smtpCfg.Hostname = cfg.CoreMail.Hostname
 	smtpCfg.TLSCertFile = cfg.CoreMail.TLSCertFile
 	smtpCfg.TLSKeyFile = cfg.CoreMail.TLSKeyFile
-	tlsCfg, err := smtp.LoadTLSConfig(smtpCfg)
-	if err != nil {
-		return err
+	// LoadTLSConfig is tolerant of "no cert configured" (returns nil, nil)
+	// but a real cert-load failure (bad path, malformed PEM, etc.) is
+	// treated as a soft warning rather than a fatal initCore error. This
+	// keeps port 25 inbound alive even if the operator's submission TLS
+	// setup is broken, and surfaces the specific reason via listener
+	// telemetry so the admin dashboard shows "disabled: <reason>".
+	tlsCfg, tlsLoadErr := smtp.LoadTLSConfig(smtpCfg)
+	if tlsLoadErr != nil {
+		m.tlsLoadErr = tlsLoadErr
+		if m.logger != nil {
+			m.logger.Warn("SMTP TLS certificate/key failed to load — submission listener disabled; inbound STARTTLS disabled until fixed",
+				zap.String("cert_file", cfg.CoreMail.TLSCertFile),
+				zap.String("key_file", cfg.CoreMail.TLSKeyFile),
+				zap.Error(tlsLoadErr),
+			)
+		}
 	}
 	receiver := smtp.NewReceiver(m.engine, m.store, m.queue, smtpCfg)
 	receiver.AntiSpamEngine = antispam.NewEngine(nil)
@@ -212,15 +233,28 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	m.smtpServer.Observability = m.obs
 
 	// ── Submission SMTP (port 587, STARTTLS) ───────────────
-	// Submission requires TLS (STARTTLS). If no TLS certificate is
-	// configured, the listener is not created and the admin dashboard
-	// shows "disabled" with a clear reason.
+	// Submission requires a valid TLS cert/key pair. The listener is
+	// only created when:
+	//   * submission_enabled=true
+	//   * TLS cert file is configured
+	//   * TLS key file is configured
+	//   * cert/key load successfully (no tlsLoadErr)
+	// If any of these fail, the listener is NOT created — no plaintext
+	// AUTH is exposed — and the listener registry records the exact
+	// reason ("disabled by config" vs "TLS missing" vs "TLS invalid").
 	if cfg.CoreMail.SubmissionEnabled {
-		if tlsCfg == nil {
+		switch {
+		case cfg.CoreMail.TLSCertFile == "" || cfg.CoreMail.TLSKeyFile == "":
 			if m.logger != nil {
 				m.logger.Warn("submission listener disabled: TLS certificate/key not configured")
 			}
-		} else {
+		case tlsLoadErr != nil:
+			if m.logger != nil {
+				m.logger.Warn("submission listener disabled: TLS certificate/key failed to load",
+					zap.Error(tlsLoadErr),
+				)
+			}
+		default:
 			subCfg := smtp.SubmissionConfig()
 			subCfg.Hostname = cfg.CoreMail.Hostname
 			subCfg.TLSCertFile = cfg.CoreMail.TLSCertFile
@@ -341,7 +375,8 @@ func (m *Module) Start() error {
 	// Telemetry: mark listeners that are config-disabled or not-yet-implemented.
 	if m.listenerReg != nil {
 		if m.submissionServer == nil && m.cfg.CoreMail.SubmissionEnabled {
-			m.listenerReg.MarkDisabled(orvixruntime.ListenerSubmission, m.cfg.CoreMail.SubmissionPort, "submission disabled: TLS certificate/key not configured")
+			reason := m.submissionDisabledReason()
+			m.listenerReg.MarkDisabled(orvixruntime.ListenerSubmission, m.cfg.CoreMail.SubmissionPort, reason)
 		}
 		if !m.cfg.CoreMail.SMTPsEnabled {
 			m.listenerReg.MarkDisabled(orvixruntime.ListenerSMTPS, m.cfg.CoreMail.SMTPsPort, "SMTPS disabled by config")
@@ -525,4 +560,48 @@ func (a *mailboxAuth) Authenticate(username, password string) (uint, bool) {
 		return 0, false
 	}
 	return mbox.ID, true
+}
+
+// submissionDisabledReason returns the specific reason why the
+// submission listener was not started, in a format safe to surface
+// in the admin dashboard. Order matters: the most actionable
+// reason is preferred. The error path itself is never echoed raw
+// — only a short stable summary, so the dashboard does not leak
+// file paths or PEM contents.
+func (m *Module) submissionDisabledReason() string {
+	if m.cfg == nil || !m.cfg.CoreMail.SubmissionEnabled {
+		return "submission disabled by config"
+	}
+	if m.cfg.CoreMail.TLSCertFile == "" || m.cfg.CoreMail.TLSKeyFile == "" {
+		return "submission disabled: TLS certificate/key not configured"
+	}
+	if m.tlsLoadErr != nil {
+		return "submission disabled: TLS certificate/key failed to load (" + safeTLSLoadError(m.tlsLoadErr) + ")"
+	}
+	return "submission disabled: not initialized"
+}
+
+// safeTLSLoadError converts a tls.LoadX509KeyPair error into a
+// short, safe summary. The original error from the Go stdlib can
+// contain the file path; we strip that to keep secrets out of the
+// admin runtime telemetry endpoint.
+func safeTLSLoadError(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := err.Error()
+	switch {
+	case strings.Contains(s, "no such file"):
+		return "file not found"
+	case strings.Contains(s, "permission denied"):
+		return "permission denied"
+	case strings.Contains(s, "tls: failed to find any PEM data"):
+		return "missing or malformed PEM"
+	case strings.Contains(s, "tls: failed to parse"):
+		return "malformed certificate or key"
+	case strings.Contains(s, "private key does not match"):
+		return "cert/key mismatch"
+	default:
+		return "load failed"
+	}
 }

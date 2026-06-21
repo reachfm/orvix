@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -87,6 +88,34 @@ func TestReleaseExampleCoreMailConfigIsDeploymentReady(t *testing.T) {
 	}
 	if cfg.CoreMail.RequireAuthForSubmission {
 		t.Fatal("deployment example must keep coremail.require_auth_for_submission false for inbound port 25")
+	}
+	// SUBMISSION-3C: submission defaults must be safe (disabled by default,
+	// port 587) and the example must declare the TLS cert/key fields so an
+	// operator cannot enable submission without seeing the gating config.
+	if cfg.CoreMail.SubmissionEnabled {
+		t.Fatal("deployment example must keep coremail.submission_enabled false (requires TLS)")
+	}
+	if cfg.CoreMail.SubmissionPort != 587 {
+		t.Fatalf("deployment example submission_port must be 587, got %d", cfg.CoreMail.SubmissionPort)
+	}
+	if cfg.CoreMail.SubmissionHost != "0.0.0.0" {
+		t.Fatalf("deployment example submission_host must be 0.0.0.0, got %q", cfg.CoreMail.SubmissionHost)
+	}
+	// SMTPS still disabled/honest.
+	if cfg.CoreMail.SMTPsEnabled {
+		t.Fatal("deployment example must keep coremail.smtps_enabled false (SMTPS not implemented)")
+	}
+	// Raw example must declare the TLS fields so an operator sees them
+	// when flipping submission_enabled=true.
+	raw, err := os.ReadFile(filepath.Join("..", "..", "release", "configs", "orvix.yaml.example"))
+	if err != nil {
+		t.Fatalf("read raw example: %v", err)
+	}
+	example := string(raw)
+	for _, want := range []string{"tls_cert_file", "tls_key_file", "submission_enabled", "submission_host", "submission_port", "smtps_enabled"} {
+		if !strings.Contains(example, want) {
+			t.Errorf("example config must declare %q so operators can see the TLS gating fields", want)
+		}
 	}
 }
 
