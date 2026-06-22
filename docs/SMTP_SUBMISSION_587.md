@@ -66,10 +66,12 @@ The script will, in order:
 
 1. Refuse to run if not root.
 2. Refuse if the source key permissions are not 0600 or 0640 (rejects 0644, 0666, 0777, world-readable keys).
-3. Validate the cert/key pair (`openssl x509 -noout -modulus` matches
-   `openssl pkey -noout -modulus`). OpenSSL stderr is captured privately;
-   only safe reason codes (cert_read_failed, key_read_failed, etc.)
-   appear in the install log.
+3. Validate the cert/key pair using algorithm-neutral public key hash
+   comparison (works for RSA and EC/ECDSA, including Caddy P-256 certs):
+   `openssl x509 -pubkey -noout` + `openssl pkey -pubout -outform DER` +
+   `openssl sha256`. OpenSSL stderr is captured privately; only safe
+   reason codes (cert_read_failed, key_read_failed, etc.) appear in the
+   install log. Do not use modulus-only validation for EC keys.
 4. Create `/etc/orvix/tls/smtp/` with mode `0750`.
 5. Copy the cert as `fullchain.pem` (0644) and the key as `privkey.pem`
    (0640 root:orvix, or 0600 root:root if the `orvix` group does not
@@ -106,7 +108,7 @@ Orvix SMTP TLS readiness check (/etc/orvix/orvix.yaml)
   PASS  cert file exists
   PASS  key file exists
   PASS  key file mode 0640 (not world-readable)
-  PASS  cert/key pair validates (modulus match)
+  PASS  cert/key pair validates (public key match)
   PASS  cert is valid for at least 30 more days
   PASS  port 587 is listening (TLS active)
   PASS  port 465 is not listening (SMTPS honest-disabled)
@@ -334,6 +336,29 @@ SUBMISSION-3B/3C:
 |---|---|---|
 | `port 587 is NOT listening` after restart | `coremail.tls_cert_file` empty / wrong path | Run `bash release/scripts/check-smtp-tls.sh --verbose` and inspect `/var/log/orvix/orvix.log` (path sanitization in logs — look for `submission disabled:` markers) |
 | `key file mode 0644` (FAIL) | Symlink inherited source mode | Re-run `setup-smtp-tls.sh` in copy mode (`ORVIX_SMTP_TLS_MODE=copy`, default) |
-| `cert/key pair modulus does not match` | Cert and key from different domains/renewals | Re-fetch both files from the same ACME source |
+| `cert/key pair public key mismatch` | Cert and key from different domains/renewals; one may be EC and the other RSA | Re-fetch both files from the same ACME source; verify with `CERT_KEY_MATCH=YES` check described below |
 | `cert expires within 30 days` (WARN) | Renewal due | Trigger ACME renewal upstream, then re-run `setup-smtp-tls.sh` |
 | `550 Sender not authorized` on local test | Authenticated mailbox different from `MAIL FROM` | Use the same address for `--auth-user` and `--from` |
+| `cert/key pair public key mismatch` after EC/P-256 cert install | Cert/key pair validation uses modulus-only commands that fail for EC keys | Run the public-key DER hash check below to verify |
+
+## Manual cert/key pair verification (public-key DER hash)
+
+Use these commands **before** running `setup-smtp-tls.sh` to verify the
+source cert and key match. This method is algorithm-neutral — it works
+for both RSA and EC/ECDSA (P-256) certificates:
+
+```bash
+CERT_PUB="$(openssl x509 -in "$CERT" -pubkey -noout | openssl pkey -pubin -outform DER | openssl sha256)"
+KEY_PUB="$(openssl pkey -in "$KEY" -pubout -outform DER | openssl sha256)"
+echo "cert=$CERT_PUB"
+echo "key =$KEY_PUB"
+test "$CERT_PUB" = "$KEY_PUB" && echo "CERT_KEY_MATCH=YES" || echo "CERT_KEY_MATCH=NO"
+```
+
+- `CERT_KEY_MATCH=YES` is required before running the setup script.
+- This works for RSA 2048/4096 and EC P-256/384 keys — any algorithm
+  supported by OpenSSL.
+- Caddy (Let's Encrypt) may issue EC/P-256 private keys by default.
+  Do not use modulus-only validation (`openssl x509 -noout -modulus`)
+  for EC keys — it will fail or silently produce a match that the
+  runtime rejects.

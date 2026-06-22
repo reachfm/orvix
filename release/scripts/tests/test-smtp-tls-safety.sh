@@ -849,13 +849,13 @@ STUB
 	ec_doc_rc=$?
 	set -e
 
-	if echo "$ec_doc_output" | grep -q "587 status: READY"; then
+	if echo "$ec_doc_output" | sed 's/\x1b\[[0-9;]*m//g' | grep -q "587 status: READY"; then
 		pass "ec-doctor: EC P-256 cert/key reports 587 READY"
 	else
 		echo "  (debug: $(echo "$ec_doc_output" | tail -3))"
 		fail "ec-doctor: EC P-256 cert/key 587 not READY"
 	fi
-	if echo "$ec_doc_output" | grep -q "public key match"; then
+	if echo "$ec_doc_output" | sed 's/\x1b\[[0-9;]*m//g' | grep -q "public key match"; then
 		pass "ec-doctor: EC P-256 cert/key pair validates (public key match)"
 	else
 		fail "ec-doctor: EC cert/key validation not found in output"
