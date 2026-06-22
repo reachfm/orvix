@@ -134,7 +134,7 @@ safe_openssl_reason() {
 		echo "permission_denied"
 	elif grep -qi 'no start line\|PEM routines\|bad base64\|decode error\|wrong tag' <<<"$openssl_stderr"; then
 		echo "cert_parse_failed"
-	elif grep -qi 'key values mismatch\|modulus mismatch\|private key does not match' <<<"$openssl_stderr"; then
+	elif grep -qi 'key values mismatch\|private key does not match' <<<"$openssl_stderr"; then
 		echo "cert_key_mismatch"
 	else
 		echo "openssl_failed"
@@ -163,54 +163,67 @@ openssl_with_safe_reason() {
 }
 
 # validate_pair checks the cert/key are a matching pair and parseable.
+# Uses algorithm-neutral public key hash comparison (works for RSA and EC).
 # OpenSSL stderr is captured privately — never logged raw.
 validate_pair() {
 	local cert="$1" key="$2"
 	[ -f "$cert" ] || { log "validate_pair: cert missing"; return 1; }
 	[ -f "$key" ] || { log "validate_pair: key missing"; return 1; }
 
-	local stderr_tmp
+	local stderr_tmp cert_pubkey cert_hash key_hash
 	stderr_tmp=$(mktemp /tmp/orvix-tls-openssl.XXXXXX)
 	trap 'rm -f "$stderr_tmp"' RETURN
 
-	# 1) Read cert modulus.
+	# 1) Extract public key hash from certificate.
 	set +e
-	cert_mod=$(openssl x509 -noout -modulus -in "$cert" 2>"$stderr_tmp")
-	local cert_rc=$?
+	cert_pubkey=$(openssl x509 -in "$cert" -pubkey -noout 2>"$stderr_tmp")
+	local cert_pubkey_rc=$?
 	set -e
-	if [ $cert_rc -ne 0 ]; then
-		log "validate_pair: cert_read_failed"
+	if [ $cert_pubkey_rc -ne 0 ] || [ -z "$cert_pubkey" ]; then
+		local reason
+		reason=$(safe_openssl_reason "$(cat "$stderr_tmp")")
+		log "validate_pair: cert_read_failed ($reason)"
 		return 1
 	fi
 	rm -f "$stderr_tmp"
 
-	# 2) Read key modulus (try pkey first, then rsa).
+	# Convert cert public key to DER and hash.
 	stderr_tmp=$(mktemp /tmp/orvix-tls-openssl.XXXXXX)
 	trap 'rm -f "$stderr_tmp"' RETURN
-	local key_mod=""
 	set +e
-	if openssl pkey -noout -modulus -in "$key" 2>"$stderr_tmp" >/dev/null; then
-		key_mod=$(openssl pkey -noout -modulus -in "$key" 2>/dev/null || true)
-	else
-		if openssl rsa -noout -modulus -in "$key" 2>"$stderr_tmp" >/dev/null; then
-			key_mod=$(openssl rsa -noout -modulus -in "$key" 2>/dev/null || true)
-		fi
-	fi
+	cert_hash=$(echo "$cert_pubkey" | openssl pkey -pubin -outform DER 2>"$stderr_tmp" | openssl sha256 2>/dev/null | awk '{print $2}')
+	local cert_hash_rc=$?
 	set -e
-	if [ -z "$key_mod" ]; then
-		log "validate_pair: key_read_failed"
+	if [ $cert_hash_rc -ne 0 ] || [ -z "$cert_hash" ]; then
+		reason=$(safe_openssl_reason "$(cat "$stderr_tmp")")
+		log "validate_pair: cert_parse_failed ($reason)"
 		return 1
 	fi
 	rm -f "$stderr_tmp"
 
-	# 3) Compare.
-	if [ "$cert_mod" != "$key_mod" ]; then
+	# 2) Extract public key hash from private key.
+	stderr_tmp=$(mktemp /tmp/orvix-tls-openssl.XXXXXX)
+	trap 'rm -f "$stderr_tmp"' RETURN
+	set +e
+	key_hash=$(openssl pkey -in "$key" -pubout -outform DER 2>"$stderr_tmp" | openssl sha256 2>/dev/null | awk '{print $2}')
+	local key_hash_rc=$?
+	set -e
+	if [ $key_hash_rc -ne 0 ] || [ -z "$key_hash" ]; then
+		reason=$(safe_openssl_reason "$(cat "$stderr_tmp")")
+		log "validate_pair: key_read_failed ($reason)"
+		return 1
+	fi
+	rm -f "$stderr_tmp"
+
+	# 3) Compare public key hashes.
+	if [ "$cert_hash" != "$key_hash" ]; then
 		log "validate_pair: cert_key_mismatch"
 		return 1
 	fi
 
 	# 4) Expiry check — warn only.
 	stderr_tmp=$(mktemp /tmp/orvix-tls-openssl.XXXXXX)
+	trap 'rm -f "$stderr_tmp"' RETURN
 	set +e
 	if ! openssl x509 -noout -checkend 604800 -in "$cert" >/dev/null 2>"$stderr_tmp"; then
 		log "validate_pair: cert expires within 7 days (warning)"
@@ -314,7 +327,7 @@ main() {
 
 	# ── 1. Validate source pair BEFORE touching anything. ──
 	if ! validate_pair "$SRC_CERT" "$SRC_KEY"; then
-		fail "source cert/key pair did not validate (modulus mismatch or unparseable); refusing to install"
+		fail "source cert/key pair did not validate (public key mismatch or unparseable); refusing to install"
 	fi
 	ok "source cert/key pair validates"
 
