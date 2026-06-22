@@ -475,6 +475,26 @@ func applyEnvOverrides(v *viper.Viper, cfg *Config) {
 	if v.GetString("COREMAIL_ENABLED") != "" {
 		cfg.CoreMail.Enabled = v.GetBool("COREMAIL_ENABLED")
 	}
+	// SUBMISSION-3D: env overrides for port 587 submission + SMTP TLS
+	// binding. These let the installer / setup-smtp-tls.sh turn on
+	// submission by exporting the cert/key paths and the enable
+	// flag, without rewriting /etc/orvix/orvix.yaml by hand. Empty
+	// env vars leave the YAML/default values untouched.
+	if v.GetString("COREMAIL_SUBMISSION_ENABLED") != "" {
+		cfg.CoreMail.SubmissionEnabled = v.GetBool("COREMAIL_SUBMISSION_ENABLED")
+	}
+	if s := v.GetString("COREMAIL_TLS_CERT_FILE"); s != "" {
+		cfg.CoreMail.TLSCertFile = s
+	}
+	if s := v.GetString("COREMAIL_TLS_KEY_FILE"); s != "" {
+		cfg.CoreMail.TLSKeyFile = s
+	}
+	// SMTPS is still disabled-by-default and not implemented; this
+	// override exists so the operator can keep it pinned-off via env
+	// if a misconfigured YAML ever flips it on.
+	if v.GetString("COREMAIL_SMTPS_ENABLED") != "" {
+		cfg.CoreMail.SMTPsEnabled = v.GetBool("COREMAIL_SMTPS_ENABLED")
+	}
 	if v.GetString("BACKUP_RETENTION_COUNT") != "" {
 		cfg.Backup.RetentionCount = v.GetInt("BACKUP_RETENTION_COUNT")
 	}

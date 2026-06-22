@@ -229,3 +229,84 @@ func TestNamecheapEnvOverridesDefaults(t *testing.T) {
 		t.Errorf("NamecheapAPIUser must remain empty when not set")
 	}
 }
+
+// ── SUBMISSION-3D: env overrides for SMTP submission + TLS binding ──
+
+// TestCoreMailSubmissionEnvOverrideEnable verifies the installer
+// can flip submission on via env without rewriting orvix.yaml.
+func TestCoreMailSubmissionEnvOverrideEnable(t *testing.T) {
+	v := viper.New()
+	v.Set("COREMAIL_SUBMISSION_ENABLED", "true")
+	v.Set("COREMAIL_TLS_CERT_FILE", "/etc/orvix/tls/smtp/fullchain.pem")
+	v.Set("COREMAIL_TLS_KEY_FILE", "/etc/orvix/tls/smtp/privkey.pem")
+
+	cfg := Defaults()
+	applyEnvOverrides(v, cfg)
+
+	if !cfg.CoreMail.SubmissionEnabled {
+		t.Error("COREMAIL_SUBMISSION_ENABLED=true must flip CoreMail.SubmissionEnabled")
+	}
+	if cfg.CoreMail.TLSCertFile != "/etc/orvix/tls/smtp/fullchain.pem" {
+		t.Errorf("COREMAIL_TLS_CERT_FILE did not override, got %q", cfg.CoreMail.TLSCertFile)
+	}
+	if cfg.CoreMail.TLSKeyFile != "/etc/orvix/tls/smtp/privkey.pem" {
+		t.Errorf("COREMAIL_TLS_KEY_FILE did not override, got %q", cfg.CoreMail.TLSKeyFile)
+	}
+}
+
+// TestCoreMailSubmissionEnvOverrideDisable verifies a malformed
+// "false" env keeps submission off even if YAML flipped it on
+// (the override is the canonical truth from the installer).
+func TestCoreMailSubmissionEnvOverrideDisable(t *testing.T) {
+	v := viper.New()
+	v.Set("COREMAIL_SUBMISSION_ENABLED", "false")
+
+	cfg := Defaults()
+	// Simulate a misconfigured YAML that flipped the flag on.
+	cfg.CoreMail.SubmissionEnabled = true
+	applyEnvOverrides(v, cfg)
+
+	if cfg.CoreMail.SubmissionEnabled {
+		t.Error("COREMAIL_SUBMISSION_ENABLED=false must force submission off")
+	}
+}
+
+// TestCoreMailSubmissionEnvOverrideDefaults verifies missing env
+// vars do NOT clobber the safe defaults.
+func TestCoreMailSubmissionEnvOverrideDefaults(t *testing.T) {
+	v := viper.New()
+
+	cfg := Defaults()
+	if cfg.CoreMail.SubmissionEnabled {
+		t.Fatal("default CoreMail.SubmissionEnabled must be false")
+	}
+	if cfg.CoreMail.TLSCertFile != "" {
+		t.Fatal("default CoreMail.TLSCertFile must be empty")
+	}
+	if cfg.CoreMail.TLSKeyFile != "" {
+		t.Fatal("default CoreMail.TLSKeyFile must be empty")
+	}
+
+	applyEnvOverrides(v, cfg)
+
+	if cfg.CoreMail.SubmissionEnabled {
+		t.Error("missing COREMAIL_SUBMISSION_ENABLED must not flip submission on")
+	}
+	if cfg.CoreMail.TLSCertFile != "" {
+		t.Error("missing COREMAIL_TLS_CERT_FILE must not set a cert path")
+	}
+	if cfg.CoreMail.TLSKeyFile != "" {
+		t.Error("missing COREMAIL_TLS_KEY_FILE must not set a key path")
+	}
+}
+
+// TestCoreMailSMTPSEnvOverrideDefaults verifies SMTPS still defaults
+// off even when the env override function runs with no env set.
+func TestCoreMailSMTPSEnvOverrideDefaults(t *testing.T) {
+	v := viper.New()
+	cfg := Defaults()
+	applyEnvOverrides(v, cfg)
+	if cfg.CoreMail.SMTPsEnabled {
+		t.Error("SMTPS must remain disabled by default; env override must not enable it")
+	}
+}
