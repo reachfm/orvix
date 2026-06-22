@@ -158,18 +158,18 @@ ok "key file exists"
 validate_key_perms "$KEY_FILE" "privkey"
 
 # ── 6. Cert/key pair validates. ──
-CERT_MOD=$(openssl x509 -noout -modulus -in "$CERT_FILE" 2>/dev/null || true)
-if openssl pkey -noout -modulus -in "$KEY_FILE" >/dev/null 2>&1; then
-	KEY_MOD=$(openssl pkey -noout -modulus -in "$KEY_FILE" 2>/dev/null || true)
-else
-	KEY_MOD=$(openssl rsa -noout -modulus -in "$KEY_FILE" 2>/dev/null || true)
+CERT_PUBKEY=$(openssl x509 -in "$CERT_FILE" -pubkey -noout 2>/dev/null || true)
+CERT_HASH=""
+if [ -n "$CERT_PUBKEY" ]; then
+	CERT_HASH=$(echo "$CERT_PUBKEY" | openssl pkey -pubin -outform DER 2>/dev/null | openssl sha256 2>/dev/null | awk '{print $2}')
 fi
-if [ -z "$CERT_MOD" ] || [ -z "$KEY_MOD" ] || [ "$CERT_MOD" != "$KEY_MOD" ]; then
-	fail "cert/key pair modulus does not match"
+KEY_HASH=$(openssl pkey -in "$KEY_FILE" -pubout -outform DER 2>/dev/null | openssl sha256 2>/dev/null | awk '{print $2}')
+if [ -z "$CERT_HASH" ] || [ -z "$KEY_HASH" ] || [ "$CERT_HASH" != "$KEY_HASH" ]; then
+	fail "certificate/private-key public key mismatch or unparseable"
 	printf '\n587 status: BROKEN (cert/key mismatch)\n'
 	exit 2
 fi
-ok "cert/key pair validates (modulus match)"
+ok "cert/key pair validates (public key match)"
 
 # ── 7. Cert expiry. ──
 if openssl x509 -noout -checkend 2592000 -in "$CERT_FILE" >/dev/null 2>&1; then

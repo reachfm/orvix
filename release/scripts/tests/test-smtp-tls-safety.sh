@@ -232,10 +232,21 @@ if ! command -v openssl >/dev/null 2>&1; then
 else
 	REAL_TMPDIR=$(mktemp -d "/tmp/orvix-real-exec.XXXXXX")
 
-	# Generate real test cert/key pair.
+	# Generate real test RSA cert/key pair.
 	openssl req -x509 -newkey rsa:2048 -keyout "$REAL_TMPDIR/key.pem" \
 		-out "$REAL_TMPDIR/cert.pem" -days 3650 -nodes \
 		-subj "/CN=test.orvix.local" >/dev/null 2>&1
+
+	# Generate real test EC P-256 cert/key pair.
+	openssl ecparam -genkey -name prime256v1 -out "$REAL_TMPDIR/ec-key.pem" >/dev/null 2>&1
+	openssl req -x509 -new -key "$REAL_TMPDIR/ec-key.pem" \
+		-out "$REAL_TMPDIR/ec-cert.pem" -days 3650 -nodes \
+		-subj "/CN=ec-test.orvix.local" >/dev/null 2>&1
+
+	# Generate separate mismatched key (RSA) for mismatch tests.
+	openssl req -x509 -newkey rsa:2048 -keyout "$REAL_TMPDIR/mismatch-key.pem" \
+		-out "$REAL_TMPDIR/mismatch-cert.pem" -days 3650 -nodes \
+		-subj "/CN=mismatch.orvix.local" >/dev/null 2>&1
 
 	STUB_DIR="$REAL_TMPDIR/stubs"
 	mkdir -p "$STUB_DIR"
@@ -562,6 +573,92 @@ YAML
 		pass "sanitize: key path not leaked"
 	fi
 
+	# ──────────────────────────────────────────────
+	# EC P-256 cert/key pair validation
+	# ──────────────────────────────────────────────
+	reset_state
+	chmod 0600 "$REAL_TMPDIR/ec-key.pem"
+	set +e
+	output=$(run_setup 0 1 "$REAL_TMPDIR/ec-cert.pem" "$REAL_TMPDIR/ec-key.pem" 2>&1)
+	rc=$?
+	set -e
+	if echo "$output" | grep -q "PASS.*Orvix SMTP submission TLS bound"; then
+		pass "ec-validate: EC P-256 cert/key accepted by setup"
+	else
+		echo "  (debug: $(echo "$output" | tail -3))"
+		fail "ec-validate: EC P-256 cert/key rejected by setup"
+	fi
+
+	# ──────────────────────────────────────────────
+	# Mismatched cert/key validation (EC cert + RSA key)
+	# ──────────────────────────────────────────────
+	reset_state
+	chmod 0600 "$REAL_TMPDIR/mismatch-key.pem"
+	set +e
+	output=$(run_setup 0 0 "$REAL_TMPDIR/ec-cert.pem" "$REAL_TMPDIR/mismatch-key.pem" 2>&1)
+	rc=$?
+	set -e
+	if echo "$output" | grep -q "public key mismatch or unparseable"; then
+		pass "ec-rsa-mismatch: EC cert + RSA key rejected (correct error)"
+	else
+		fail "ec-rsa-mismatch: EC cert + RSA key not rejected as expected"
+	fi
+	if [ "$rc" -ne 0 ]; then
+		pass "ec-rsa-mismatch: exit code $rc (non-zero)"
+	else
+		fail "ec-rsa-mismatch: exit code 0 (expected non-zero)"
+	fi
+	if grep -q "submission_enabled: true" "$TEST_CONFIG" 2>/dev/null; then
+		fail "ec-rsa-mismatch: config was modified despite failure"
+	else
+		pass "ec-rsa-mismatch: config unchanged"
+	fi
+
+	# ──────────────────────────────────────────────
+	# Mismatched cert/key validation (RSA cert + EC key)
+	# ──────────────────────────────────────────────
+	reset_state
+	chmod 0600 "$REAL_TMPDIR/ec-key.pem"
+	set +e
+	output=$(run_setup 0 0 "$REAL_TMPDIR/mismatch-cert.pem" "$REAL_TMPDIR/ec-key.pem" 2>&1)
+	rc=$?
+	set -e
+	if echo "$output" | grep -q "public key mismatch or unparseable"; then
+		pass "rsa-ec-mismatch: RSA cert + EC key rejected (correct error)"
+	else
+		fail "rsa-ec-mismatch: RSA cert + EC key not rejected as expected"
+	fi
+	if [ "$rc" -ne 0 ]; then
+		pass "rsa-ec-mismatch: exit code $rc (non-zero)"
+	else
+		fail "rsa-ec-mismatch: exit code 0 (expected non-zero)"
+	fi
+	if grep -q "submission_enabled: true" "$TEST_CONFIG" 2>/dev/null; then
+		fail "rsa-ec-mismatch: config was modified despite failure"
+	else
+		pass "rsa-ec-mismatch: config unchanged"
+	fi
+
+	# ──────────────────────────────────────────────
+	# RSA mismatched pair (RSA cert + different RSA key)
+	# ──────────────────────────────────────────────
+	reset_state
+	chmod 0600 "$REAL_TMPDIR/mismatch-key.pem"
+	set +e
+	output=$(run_setup 0 0 "$REAL_TMPDIR/cert.pem" "$REAL_TMPDIR/mismatch-key.pem" 2>&1)
+	rc=$?
+	set -e
+	if echo "$output" | grep -q "public key mismatch or unparseable"; then
+		pass "rsa-rsa-mismatch: RSA cert + different RSA key rejected (correct error)"
+	else
+		fail "rsa-rsa-mismatch: RSA cert + different RSA key not rejected"
+	fi
+	if [ "$rc" -ne 0 ]; then
+		pass "rsa-rsa-mismatch: exit code $rc (non-zero)"
+	else
+		fail "rsa-rsa-mismatch: exit code 0 (expected non-zero)"
+	fi
+
 	# Clean up
 	rm -rf "$REAL_TMPDIR"
 fi
@@ -700,6 +797,71 @@ STUB
 	fi
 
 	rm -rf "$ENABLED_DOC_TMPDIR" /tmp/orvix-listeners.* 2>/dev/null || true
+
+	# ──────────────────────────────────────────────
+	# Enabled-submission doctor with EC P-256 cert/key
+	# ──────────────────────────────────────────────
+	EC_DOC_TMPDIR=$(mktemp -d "/tmp/orvix-ec-doctor.XXXXXX")
+
+	openssl ecparam -genkey -name prime256v1 -out "$EC_DOC_TMPDIR/key.pem" >/dev/null 2>&1
+	openssl req -x509 -new -key "$EC_DOC_TMPDIR/key.pem" \
+		-out "$EC_DOC_TMPDIR/cert.pem" -days 365 -nodes \
+		-subj "/CN=ec-test.orvix.local" >/dev/null 2>&1
+	chmod 0600 "$EC_DOC_TMPDIR/key.pem"
+
+	cat > "$EC_DOC_TMPDIR/orvix.yaml" <<'YAML'
+coremail:
+  submission_enabled: true
+  tls_cert_file: CERT_PATH_PLACEHOLDER
+  tls_key_file: KEY_PATH_PLACEHOLDER
+  hostname: mail.example.com
+YAML
+	sed -i "s|CERT_PATH_PLACEHOLDER|${EC_DOC_TMPDIR}/cert.pem|g" "$EC_DOC_TMPDIR/orvix.yaml"
+	sed -i "s|KEY_PATH_PLACEHOLDER|${EC_DOC_TMPDIR}/key.pem|g" "$EC_DOC_TMPDIR/orvix.yaml"
+
+	mkdir -p "$EC_DOC_TMPDIR/stubs"
+	cat > "$EC_DOC_TMPDIR/stubs/systemctl" <<'STUB'
+#!/bin/bash
+case "$*" in *is-active*) exit 0 ;; *cat*) exit 0 ;; *) exit 0 ;; esac
+STUB
+	chmod +x "$EC_DOC_TMPDIR/stubs/systemctl"
+
+	cat > "$EC_DOC_TMPDIR/stubs/ss" <<'STUB'
+#!/bin/bash
+case "$*" in
+	*:25*) echo "LISTEN 0 128 0.0.0.0:25 users:((\"orvix\"))" ;;
+	*:587*) echo "LISTEN 0 128 0.0.0.0:587 users:((\"orvix\"))" ;;
+	*:465*) exit 0 ;;
+esac
+STUB
+	chmod +x "$EC_DOC_TMPDIR/stubs/ss"
+
+	cat > "$EC_DOC_TMPDIR/stubs/curl" <<'STUB'
+#!/bin/bash
+exit 7
+STUB
+	chmod +x "$EC_DOC_TMPDIR/stubs/curl"
+
+	set +e
+	ec_doc_output=$(PATH="$EC_DOC_TMPDIR/stubs:$PATH" \
+		ORVIX_CONFIG="$EC_DOC_TMPDIR/orvix.yaml" \
+		bash "$CHECK_SCRIPT" 2>&1)
+	ec_doc_rc=$?
+	set -e
+
+	if echo "$ec_doc_output" | sed 's/\x1b\[[0-9;]*m//g' | grep -q "587 status: READY"; then
+		pass "ec-doctor: EC P-256 cert/key reports 587 READY"
+	else
+		echo "  (debug: $(echo "$ec_doc_output" | tail -3))"
+		fail "ec-doctor: EC P-256 cert/key 587 not READY"
+	fi
+	if echo "$ec_doc_output" | sed 's/\x1b\[[0-9;]*m//g' | grep -q "public key match"; then
+		pass "ec-doctor: EC P-256 cert/key pair validates (public key match)"
+	else
+		fail "ec-doctor: EC cert/key validation not found in output"
+	fi
+
+	rm -rf "$EC_DOC_TMPDIR" /tmp/orvix-listeners.* 2>/dev/null || true
 else
 	pass "enable-doctor: openssl not available — test skipped"
 fi

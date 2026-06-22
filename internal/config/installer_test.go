@@ -348,7 +348,7 @@ func TestSMTPTLSSetupScriptShape(t *testing.T) {
 		"source key is too permissive",
 		// Validation BEFORE any destructive operation.
 		"validate_pair",
-		"modulus",
+		"-pubkey",
 		"openssl x509",
 		// Cert/key pair validation cannot be skipped — even after copy.
 		"installed cert/key did not validate",
