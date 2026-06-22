@@ -747,6 +747,28 @@ YAML
 	rm -rf "$REAL_TMPDIR"
 fi
 
+# ── Port 25 detection pattern tests (wildcard/ss compatibility) ──
+
+echo ""
+echo "=== Port 25 detection pattern tests ==="
+
+test_port25_grep() {
+	local label="$1" ss_output="$2" expected="$3"
+	local result
+	result=$(echo "$ss_output" | grep -qE ':25[^0-9]' && echo "found" || echo "notfound")
+	if [ "$result" = "$expected" ]; then
+		pass "port25-detect: $label (expected=$expected)"
+	else
+		fail "port25-detect: $label (expected=$expected, got=$result)"
+	fi
+}
+
+test_port25_grep "*:25 wildcard" "LISTEN 0 128 *:25 users:((\"orvix\"))" found
+test_port25_grep "0.0.0.0:25" "LISTEN 0 128 0.0.0.0:25 users:((\"orvix\"))" found
+test_port25_grep "[::]:25 IPv6" "LISTEN 0 128 [::]:25 users:((\"orvix\"))" found
+test_port25_grep "port 25 absent" "LISTEN 0 128 0.0.0.0:587 users:((\"orvix\"))" notfound
+test_port25_grep "port 2525 not confused" "LISTEN 0 128 0.0.0.0:2525 users:((\"orvix\"))" notfound
+
 # ── Doctor script execution test ──────────────────────────
 
 echo ""
@@ -828,11 +850,11 @@ STUB
 	# ── ss stub: port 25 + 587 listening, 465 not ──
 	cat > "$DOC_STUB_DIR/ss" <<'STUB'
 #!/bin/bash
-case "$*" in
-	*:25*) echo "LISTEN 0 128 0.0.0.0:25 users:((\"orvix\"))" ;;
-	*:587*) echo "LISTEN 0 128 0.0.0.0:587 users:((\"orvix\"))" ;;
-	*:465*) exit 0 ;;
-esac
+# port 25 always listening
+echo "LISTEN 0 128 0.0.0.0:25 users:((\"orvix\"))"
+# port 587 always listening (enabled-submission test)
+echo "LISTEN 0 128 0.0.0.0:587 users:((\"orvix\"))"
+# port 465 deliberately not emitted (honest-disabled)
 STUB
 	chmod +x "$DOC_STUB_DIR/ss"
 
@@ -912,11 +934,11 @@ STUB
 
 	cat > "$EC_DOC_TMPDIR/stubs/ss" <<'STUB'
 #!/bin/bash
-case "$*" in
-	*:25*) echo "LISTEN 0 128 0.0.0.0:25 users:((\"orvix\"))" ;;
-	*:587*) echo "LISTEN 0 128 0.0.0.0:587 users:((\"orvix\"))" ;;
-	*:465*) exit 0 ;;
-esac
+# port 25 always listening
+echo "LISTEN 0 128 0.0.0.0:25 users:((\"orvix\"))"
+# port 587 always listening (EC doctor test)
+echo "LISTEN 0 128 0.0.0.0:587 users:((\"orvix\"))"
+# port 465 deliberately not emitted (honest-disabled)
 STUB
 	chmod +x "$EC_DOC_TMPDIR/stubs/ss"
 

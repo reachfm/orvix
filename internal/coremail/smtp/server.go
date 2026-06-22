@@ -250,13 +250,16 @@ func (s *Server) handleConn(conn net.Conn) {
 			session.Authenticated = false
 			session.AuthUser = ""
 			session.AuthIdentity = nil
+			handler.authStep = 0
 			if s.Observability != nil {
 				s.Observability.Metrics.IncTLSUpgrade()
 				s.Observability.EventHistory.Record(observability.EventSTARTTLSSuccess,
 					map[string]string{"remote_ip": session.RemoteAddr})
 			}
-			writeResponse(writer, ResponseReady)
-			writer.Flush()
+			// Per RFC 3207, after TLS handshake the server MUST NOT send any
+			// further responses until receiving a client command (no 220
+			// greeting). The session state is reset above; the next client
+			// command (normally EHLO) will receive a 250 response.
 			continue
 		}
 

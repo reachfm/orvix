@@ -91,7 +91,7 @@ else
 fi
 
 # ── 2. Port 25 must always be listening. ──
-if ss -ltn "( sport = :25 )" 2>/dev/null | grep -q ':25'; then
+if ss -lntp 2>/dev/null | grep -qE ':25[^0-9]'; then
 	ok "port 25 is listening (inbound MX)"
 else
 	fail "port 25 is NOT listening — inbound mail is broken"
@@ -179,14 +179,14 @@ else
 fi
 
 # ── 8. Port 587 listener state. ──
-if ss -ltn "( sport = :587 )" 2>/dev/null | grep -q ':587'; then
+if ss -lntp 2>/dev/null | grep -qE ':587[^0-9]'; then
 	ok "port 587 is listening (TLS active)"
 else
 	fail "port 587 is NOT listening — runtime did not start the submission listener; check 'journalctl -u $ORVIX_SERVICE'"
 fi
 
 # ── 9. Port 465 still disabled (honest only). ──
-if ss -ltn "( sport = :465 )" 2>/dev/null | grep -q ':465'; then
+if ss -lntp 2>/dev/null | grep -qE ':465[^0-9]'; then
 	warn "port 465 is listening — SMTPS is not implemented in this build; review whether that is intended"
 else
 	ok "port 465 is not listening (SMTPS honest-disabled)"
