@@ -334,19 +334,26 @@ main() {
 	# ── 2. Detect service user/group from systemd. ──
 	local owner
 	owner=$(detect_service_user)
+	local service_user="${owner%%:*}"
 	local group="${owner#*:}"
 	log "orvix systemd service runs as $owner"
 
-	if [ -n "$SMTP_TLS_GROUP" ] && getent group "$SMTP_TLS_GROUP" >/dev/null; then
-		group="$SMTP_TLS_GROUP"
+	if [ -n "$SMTP_TLS_GROUP" ]; then
+		if getent group "$SMTP_TLS_GROUP" >/dev/null; then
+			group="$SMTP_TLS_GROUP"
+		else
+			fail "SMTP_TLS_GROUP '$SMTP_TLS_GROUP' group does not exist on this system"
+		fi
+	elif [ "$group" = "root" ]; then
+		fail "cannot detect orvix service group — set SMTP_TLS_GROUP or configure User=/Group= in $ORVIX_SERVICE"
 	elif ! getent group "$group" >/dev/null; then
-		group="root"
+		fail "detected service group '$group' does not exist on this system"
 	fi
-	log "key will be owned by root:$group"
+	log "service user=$service_user, key group=$group"
 
-	# ── 3. Create TLS dir. ──
-	install -d -m 0750 -o root -g root "$ORVIX_TLS_DIR"
-	log "tls dir prepared"
+	# ── 3. Create TLS dir with service group (so Orvix can traverse it). ──
+	install -d -m 0750 -o root -g "$group" "$ORVIX_TLS_DIR"
+	log "tls dir prepared (root:$group 0750)"
 
 	# ── 4. Install cert + key. ──
 	local dest_cert="$ORVIX_TLS_DIR/$ORVIX_CERT_NAME"
@@ -381,7 +388,28 @@ main() {
 	fi
 	ok "cert + key installed and re-validated"
 
-	# ── 6. Back up the config BEFORE editing it. ──
+	# ── 6. Verify service user can read the installed files. ──
+	local read_cmd=""
+	if command -v runuser >/dev/null 2>&1; then
+		read_cmd="runuser -u $service_user --"
+	elif command -v sudo >/dev/null 2>&1; then
+		read_cmd="sudo -u $service_user --"
+	else
+		rm -f "$dest_cert" "$dest_key"
+		fail "cannot verify file readability — neither runuser nor sudo is available"
+	fi
+	log "using $read_cmd for readability check"
+	if ! $read_cmd test -r "$dest_cert" 2>/dev/null; then
+		rm -f "$dest_cert" "$dest_key"
+		fail "installed cert is not readable by service user '$service_user'"
+	fi
+	if ! $read_cmd test -r "$dest_key" 2>/dev/null; then
+		rm -f "$dest_cert" "$dest_key"
+		fail "installed key is not readable by service user '$service_user'"
+	fi
+	ok "installed files readable by service user '$service_user'"
+
+	# ── 7. Back up the config BEFORE editing it. ──
 	local backup=""
 	if [ -f "$ORVIX_CONFIG" ]; then
 		backup="${ORVIX_CONFIG}.bak-$(date +%Y%m%d_%H%M%S)"
@@ -396,7 +424,7 @@ main() {
 		log "no prior config — created empty $ORVIX_CONFIG"
 	fi
 
-	# ── 7. Create temp config in the same directory as the active
+	# ── 8. Create temp config in the same directory as the active
 	#       config (same filesystem) so that mv is atomic. Write
 	#       YAML updates to the temp config ONLY, validate it,
 	#       then atomically rename into place. The active config
@@ -421,7 +449,7 @@ main() {
 	ok "orvix.yaml: coremail.submission_enabled=true + TLS paths set"
 	log "YAML updated via atomic temp config"
 
-	# ── 8. Reload the service. ──
+	# ── 9. Reload the service. ──
 	if command -v systemctl >/dev/null 2>&1; then
 		if ! systemctl reload-or-restart "$ORVIX_SERVICE" 2>>"$INSTALL_LOG"; then
 			rollback_restore "systemctl reload-or-restart failed" "$backup"
@@ -431,13 +459,13 @@ main() {
 		warn "systemctl not found; the operator must restart $ORVIX_SERVICE manually"
 	fi
 
-	# ── 9. Probe port 587.  If not listening, FAIL and rollback. ──
+	# ── 10. Probe port 587.  If not listening, FAIL and rollback. ──
 	if ! probe_port_587; then
 		rollback_restore "port 587 not listening within 30 s — submission did not bind" "$backup"
 	fi
 	ok "port 587 is listening"
 
-	# ── 10. Re-validate installed key permissions (doctor check). ──
+	# ── 11. Re-validate installed key permissions (doctor check). ──
 	validate_key_perms "$dest_key"
 
 	cat <<DONE

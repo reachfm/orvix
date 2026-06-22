@@ -295,6 +295,36 @@ exit 7
 STUB
 	chmod +x "$STUB_DIR/curl"
 
+	# ── getent stub: orvix group exists, fallback to real getent ──
+	cat > "$STUB_DIR/getent" <<'STUB'
+#!/bin/bash
+case "$1" in group) case "$2" in orvix) exit 0 ;; *) /usr/bin/getent "$@" 2>/dev/null; exit $? ;; esac ;; *) /usr/bin/getent "$@" 2>/dev/null; exit $? ;; esac
+STUB
+	chmod +x "$STUB_DIR/getent"
+
+	# ── sudo stub: strip -u <user> --, execute command; READ_FAIL=1 simulates permission denial ──
+	cat > "$STUB_DIR/sudo" <<'STUB'
+#!/bin/bash
+if [ "${READ_FAIL:-0}" = "1" ]; then exit 1; fi
+while [ $# -gt 0 ]; do
+	case "$1" in -u) shift 2 ;; --) shift; break ;; *) shift ;; esac
+done
+exec "$@"
+STUB
+	chmod +x "$STUB_DIR/sudo"
+
+	# ── runuser stub (used when sudo not available): same interface ──
+	cat > "$STUB_DIR/runuser" <<'STUB'
+#!/bin/bash
+if [ "${READ_FAIL:-0}" = "1" ]; then exit 1; fi
+# runuser -u <user> -- <command> ...  → exec <command> ...
+while [ $# -gt 0 ]; do
+	case "$1" in -u) shift 2 ;; --) shift; break ;; *) shift ;; esac
+done
+exec "$@"
+STUB
+	chmod +x "$STUB_DIR/runuser"
+
 	# Common test env
 	TEST_CONFIG="$REAL_TMPDIR/orvix.yaml"
 	TEST_TLS_DIR="$REAL_TMPDIR/tls"
@@ -302,18 +332,19 @@ STUB
 	TEST_SERVICE="orvix-test.service"
 
 	run_setup() {
-		local reload_fail="${1:-0}" ss_587_ok="${2:-0}"
-		local cert_path="${3:-$REAL_TMPDIR/cert.pem}"
-		local key_path="${4:-$REAL_TMPDIR/key.pem}"
+		local reload_fail="${1:-0}" ss_587_ok="${2:-0}" read_fail="${3:-0}"
+		local cert_path="${4:-$REAL_TMPDIR/cert.pem}"
+		local key_path="${5:-$REAL_TMPDIR/key.pem}"
 		local rc_var
 		PATH="$STUB_DIR:$PATH" \
 			ORVIX_CONFIG="$TEST_CONFIG" \
 			ORVIX_TLS_DIR="$TEST_TLS_DIR" \
 			ORVIX_SERVICE="$TEST_SERVICE" \
 			INSTALL_LOG="$TEST_LOG" \
-			SMTP_TLS_GROUP="" \
+			SMTP_TLS_GROUP="orvix" \
 			RELOAD_FAIL="$reload_fail" \
 			SS_587_OK="$ss_587_ok" \
+			READ_FAIL="$read_fail" \
 			bash "$SETUP_SCRIPT" "$cert_path" "$key_path" 2>&1
 	}
 
@@ -579,7 +610,7 @@ YAML
 	reset_state
 	chmod 0600 "$REAL_TMPDIR/ec-key.pem"
 	set +e
-	output=$(run_setup 0 1 "$REAL_TMPDIR/ec-cert.pem" "$REAL_TMPDIR/ec-key.pem" 2>&1)
+	output=$(run_setup 0 1 0 "$REAL_TMPDIR/ec-cert.pem" "$REAL_TMPDIR/ec-key.pem" 2>&1)
 	rc=$?
 	set -e
 	if echo "$output" | grep -q "PASS.*Orvix SMTP submission TLS bound"; then
@@ -595,7 +626,7 @@ YAML
 	reset_state
 	chmod 0600 "$REAL_TMPDIR/mismatch-key.pem"
 	set +e
-	output=$(run_setup 0 0 "$REAL_TMPDIR/ec-cert.pem" "$REAL_TMPDIR/mismatch-key.pem" 2>&1)
+	output=$(run_setup 0 0 0 "$REAL_TMPDIR/ec-cert.pem" "$REAL_TMPDIR/mismatch-key.pem" 2>&1)
 	rc=$?
 	set -e
 	if echo "$output" | grep -q "public key mismatch or unparseable"; then
@@ -620,7 +651,7 @@ YAML
 	reset_state
 	chmod 0600 "$REAL_TMPDIR/ec-key.pem"
 	set +e
-	output=$(run_setup 0 0 "$REAL_TMPDIR/mismatch-cert.pem" "$REAL_TMPDIR/ec-key.pem" 2>&1)
+	output=$(run_setup 0 0 0 "$REAL_TMPDIR/mismatch-cert.pem" "$REAL_TMPDIR/ec-key.pem" 2>&1)
 	rc=$?
 	set -e
 	if echo "$output" | grep -q "public key mismatch or unparseable"; then
@@ -645,7 +676,7 @@ YAML
 	reset_state
 	chmod 0600 "$REAL_TMPDIR/mismatch-key.pem"
 	set +e
-	output=$(run_setup 0 0 "$REAL_TMPDIR/cert.pem" "$REAL_TMPDIR/mismatch-key.pem" 2>&1)
+	output=$(run_setup 0 0 0 "$REAL_TMPDIR/cert.pem" "$REAL_TMPDIR/mismatch-key.pem" 2>&1)
 	rc=$?
 	set -e
 	if echo "$output" | grep -q "public key mismatch or unparseable"; then
@@ -657,6 +688,59 @@ YAML
 		pass "rsa-rsa-mismatch: exit code $rc (non-zero)"
 	else
 		fail "rsa-rsa-mismatch: exit code 0 (expected non-zero)"
+	fi
+
+	# ──────────────────────────────────────────────
+	# TLS directory ownership test (group is orvix)
+	# ──────────────────────────────────────────────
+	reset_state
+	chmod 0600 "$REAL_TMPDIR/key.pem"
+	set +e
+	output=$(run_setup 0 1 0 2>&1)
+	rc=$?
+	set -e
+
+	if echo "$output" | grep -q "root:orvix.*0750"; then
+		pass "tls-dir-owner: TLS dir reports group orvix with mode 0750"
+	else
+		echo "  (debug: $(echo "$output" | grep "TLS dir" || true))"
+		fail "tls-dir-owner: TLS dir group not orvix or mode not 0750"
+	fi
+	if echo "$output" | grep -q "readable by service user"; then
+		pass "tls-dir-owner: readability check passed for service user"
+	else
+		fail "tls-dir-owner: readability check not found in output"
+	fi
+
+	# ──────────────────────────────────────────────
+	# Readability failure test (READ_FAIL=1)
+	# ──────────────────────────────────────────────
+	reset_state
+	chmod 0600 "$REAL_TMPDIR/key.pem"
+	set +e
+	output=$(run_setup 0 0 1 2>&1)
+	rc=$?
+	set -e
+
+	if echo "$output" | grep -q "not readable by service user"; then
+		pass "read-fail: readability failure correctly detected"
+	else
+		fail "read-fail: readability failure not detected"
+	fi
+	if [ "$rc" -ne 0 ]; then
+		pass "read-fail: exit code $rc (non-zero)"
+	else
+		fail "read-fail: exit code 0 (expected non-zero)"
+	fi
+	if grep -q "submission_enabled: true" "$TEST_CONFIG" 2>/dev/null; then
+		fail "read-fail: config was modified despite readability failure"
+	else
+		pass "read-fail: config unchanged"
+	fi
+	if ! echo "$output" | grep -q "PASS.*Orvix SMTP submission TLS bound"; then
+		pass "read-fail: no PASS printed"
+	else
+		fail "read-fail: PASS printed despite readability failure"
 	fi
 
 	# Clean up
