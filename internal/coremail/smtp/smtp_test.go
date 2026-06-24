@@ -23,6 +23,7 @@ import (
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/coremail"
 	"github.com/orvix/orvix/internal/coremail/antispam"
+	"github.com/orvix/orvix/internal/coremail/delivery"
 	"github.com/orvix/orvix/internal/coremail/dkim"
 	"github.com/orvix/orvix/internal/coremail/dmarc"
 	"github.com/orvix/orvix/internal/coremail/queue"
@@ -4280,5 +4281,438 @@ func TestSubmissionDefaultsToDisabledWithoutTLS(t *testing.T) {
 	cfg := config.Defaults()
 	if cfg.CoreMail.SubmissionEnabled {
 		t.Error("submission must be disabled by default (requires TLS certificate)")
+	}
+}
+
+func TestSubmissionSTARTTLSDeliversSingleLocalCopy(t *testing.T) {
+	cert := generateTestCert(t)
+	tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}}
+
+	eng, ms, qe, rcv := testIntegrationEnv(t)
+	cfg := SubmissionConfig()
+
+	ctx := context.Background()
+
+	mbox, err := eng.Mailboxes.GetByEmail(ctx, "user@test.com", nil)
+	if err != nil || mbox == nil {
+		t.Fatalf("get mailbox: %v", err)
+	}
+
+	inbox, err := ms.Folders.GetByPath(ctx, mbox.ID, "INBOX", nil)
+	if err != nil || inbox == nil {
+		t.Fatalf("get inbox: %v", err)
+	}
+
+	verify := func(ctx context.Context, username, password string) (string, bool) {
+		authMbox, authErr := eng.Auth.AuthenticateMailbox(ctx, username, password)
+		if authErr != nil || authMbox == nil {
+			return "", false
+		}
+		return username, true
+	}
+	auth := NewAuthenticator(NewFuncAuthBackend(verify))
+	handler := NewCommandHandler(cfg, auth, NewSession("", tlsCfg, cfg))
+	srv := NewServer(cfg, handler, rcv)
+	srv.TLSConfig = tlsCfg
+	srv.SetLocalDomainChecker(func(ctx context.Context, domain string) (bool, error) {
+		dom, err := eng.Domains.GetByName(ctx, domain, nil)
+		return dom != nil && dom.Status == coremail.DomainActive, err
+	})
+	srv.RecipientValidator = func(ctx context.Context, address string) (bool, error) {
+		targets, err := eng.Auth.ResolveAddress(ctx, address)
+		if err != nil || len(targets) == 0 {
+			return false, err
+		}
+		return true, nil
+	}
+	srv.SenderValidator = func(ctx context.Context, identity *AuthIdentity, fromAddress string) (bool, error) {
+		return identity != nil && identity.Username == fromAddress, nil
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := listener.Addr().String()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go srv.handleConn(conn)
+		}
+	}()
+	defer listener.Close()
+
+	plainConn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer plainConn.Close()
+	reader := bufio.NewReader(plainConn)
+
+	readResponse(reader)
+	plainConn.Write([]byte("EHLO test.com\r\n"))
+	readEHLO(reader)
+
+	plainConn.Write([]byte("STARTTLS\r\n"))
+	if !strings.HasPrefix(readResponse(reader), "220") {
+		t.Fatal("STARTTLS must succeed")
+	}
+
+	tlsClientConn := tls.Client(plainConn, &tls.Config{InsecureSkipVerify: true})
+	if err := tlsClientConn.Handshake(); err != nil {
+		t.Fatalf("TLS handshake: %v", err)
+	}
+	tlsReader := bufio.NewReader(tlsClientConn)
+
+	tlsClientConn.Write([]byte("EHLO test.com\r\n"))
+	readEHLO(tlsReader)
+
+	tlsClientConn.Write([]byte("AUTH PLAIN " + CreateAuthPlainResponse("user@test.com", "pass") + "\r\n"))
+	if !strings.HasPrefix(readResponse(tlsReader), "235") {
+		t.Fatal("AUTH must succeed")
+	}
+
+	tlsClientConn.Write([]byte("MAIL FROM:<user@test.com>\r\n"))
+	if !strings.HasPrefix(readResponse(tlsReader), "250") {
+		t.Fatal("MAIL FROM must succeed")
+	}
+
+	tlsClientConn.Write([]byte("RCPT TO:<user@test.com>\r\n"))
+	if !strings.HasPrefix(readResponse(tlsReader), "250") {
+		t.Fatal("RCPT TO must succeed")
+	}
+
+	tlsClientConn.Write([]byte("DATA\r\n"))
+	if !strings.HasPrefix(readResponse(tlsReader), "354") {
+		t.Fatal("DATA must be accepted")
+	}
+	tlsClientConn.Write([]byte("Subject: Self-send Single Copy\r\n\r\nbody\r\n.\r\n"))
+	if !strings.HasPrefix(readResponse(tlsReader), "250") {
+		t.Fatal("DATA termination must succeed")
+	}
+
+	dw := delivery.NewDeliveryWorker(qe, ms, nil, nil, "test.com", "test-worker")
+	processed, err := dw.ProcessAll(ctx)
+	if err != nil {
+		t.Fatalf("process queue: %v", err)
+	}
+	if processed != 1 {
+		t.Fatalf("expected 1 queue entry processed, got %d", processed)
+	}
+
+	count, err := ms.Messages.CountByFolder(ctx, inbox.ID, nil)
+	if err != nil {
+		t.Fatalf("count by folder: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly 1 stored message in INBOX, got %d", count)
+	}
+}
+
+func TestSubmissionSTARTTLSDedupDuplicateRCPT(t *testing.T) {
+	cert := generateTestCert(t)
+	tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}}
+
+	eng, ms, qe, rcv := testIntegrationEnv(t)
+	cfg := SubmissionConfig()
+
+	ctx := context.Background()
+
+	mbox, err := eng.Mailboxes.GetByEmail(ctx, "user@test.com", nil)
+	if err != nil || mbox == nil {
+		t.Fatalf("get mailbox: %v", err)
+	}
+
+	inbox, err := ms.Folders.GetByPath(ctx, mbox.ID, "INBOX", nil)
+	if err != nil || inbox == nil {
+		t.Fatalf("get inbox: %v", err)
+	}
+
+	verify := func(ctx context.Context, username, password string) (string, bool) {
+		authMbox, authErr := eng.Auth.AuthenticateMailbox(ctx, username, password)
+		if authErr != nil || authMbox == nil {
+			return "", false
+		}
+		return username, true
+	}
+	auth := NewAuthenticator(NewFuncAuthBackend(verify))
+	handler := NewCommandHandler(cfg, auth, NewSession("", tlsCfg, cfg))
+	srv := NewServer(cfg, handler, rcv)
+	srv.TLSConfig = tlsCfg
+	srv.SetLocalDomainChecker(func(ctx context.Context, domain string) (bool, error) {
+		dom, err := eng.Domains.GetByName(ctx, domain, nil)
+		return dom != nil && dom.Status == coremail.DomainActive, err
+	})
+	srv.RecipientValidator = func(ctx context.Context, address string) (bool, error) {
+		targets, err := eng.Auth.ResolveAddress(ctx, address)
+		if err != nil || len(targets) == 0 {
+			return false, err
+		}
+		return true, nil
+	}
+	srv.SenderValidator = func(ctx context.Context, identity *AuthIdentity, fromAddress string) (bool, error) {
+		return identity != nil && identity.Username == fromAddress, nil
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := listener.Addr().String()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go srv.handleConn(conn)
+		}
+	}()
+	defer listener.Close()
+
+	plainConn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer plainConn.Close()
+	reader := bufio.NewReader(plainConn)
+
+	readResponse(reader)
+	plainConn.Write([]byte("EHLO test.com\r\n"))
+	readEHLO(reader)
+
+	plainConn.Write([]byte("STARTTLS\r\n"))
+	if !strings.HasPrefix(readResponse(reader), "220") {
+		t.Fatal("STARTTLS must succeed")
+	}
+
+	tlsClientConn := tls.Client(plainConn, &tls.Config{InsecureSkipVerify: true})
+	if err := tlsClientConn.Handshake(); err != nil {
+		t.Fatalf("TLS handshake: %v", err)
+	}
+	tlsReader := bufio.NewReader(tlsClientConn)
+
+	tlsClientConn.Write([]byte("EHLO test.com\r\n"))
+	readEHLO(tlsReader)
+
+	tlsClientConn.Write([]byte("AUTH PLAIN " + CreateAuthPlainResponse("user@test.com", "pass") + "\r\n"))
+	if !strings.HasPrefix(readResponse(tlsReader), "235") {
+		t.Fatal("AUTH must succeed")
+	}
+
+	tlsClientConn.Write([]byte("MAIL FROM:<user@test.com>\r\n"))
+	if !strings.HasPrefix(readResponse(tlsReader), "250") {
+		t.Fatal("MAIL FROM must succeed")
+	}
+
+	tlsClientConn.Write([]byte("RCPT TO:<user@test.com>\r\n"))
+	if !strings.HasPrefix(readResponse(tlsReader), "250") {
+		t.Fatal("first RCPT TO must succeed")
+	}
+
+	tlsClientConn.Write([]byte("RCPT TO:<user@test.com>\r\n"))
+	if !strings.HasPrefix(readResponse(tlsReader), "250") {
+		t.Fatal("duplicate RCPT TO must also return 250")
+	}
+
+	tlsClientConn.Write([]byte("DATA\r\n"))
+	if !strings.HasPrefix(readResponse(tlsReader), "354") {
+		t.Fatal("DATA must be accepted")
+	}
+	tlsClientConn.Write([]byte("Subject: Duplicate RCPT Dedup\r\n\r\nbody\r\n.\r\n"))
+	if !strings.HasPrefix(readResponse(tlsReader), "250") {
+		t.Fatal("DATA termination must succeed")
+	}
+
+	dw := delivery.NewDeliveryWorker(qe, ms, nil, nil, "test.com", "test-worker")
+	processed, err := dw.ProcessAll(ctx)
+	if err != nil {
+		t.Fatalf("process queue: %v", err)
+	}
+	if processed != 1 {
+		t.Fatalf("expected 1 queue entry processed (deduped from 2 RCPT), got %d", processed)
+	}
+
+	count, err := ms.Messages.CountByFolder(ctx, inbox.ID, nil)
+	if err != nil {
+		t.Fatalf("count by folder: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly 1 stored message in INBOX after duplicate RCPT dedup, got %d", count)
+	}
+}
+
+func TestSubmissionSTARTTLSDifferentLocalRecipients(t *testing.T) {
+	cert := generateTestCert(t)
+	tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}}
+
+	eng, ms, qe, rcv := testIntegrationEnv(t)
+	cfg := SubmissionConfig()
+
+	ctx := context.Background()
+
+	mbox, err := eng.Mailboxes.GetByEmail(ctx, "user@test.com", nil)
+	if err != nil || mbox == nil {
+		t.Fatalf("get mailbox: %v", err)
+	}
+
+	inbox1, err := ms.Folders.GetByPath(ctx, mbox.ID, "INBOX", nil)
+	if err != nil || inbox1 == nil {
+		t.Fatalf("get inbox: %v", err)
+	}
+
+	dom, err := eng.Domains.GetByName(ctx, "test.com", nil)
+	if err != nil || dom == nil {
+		t.Fatalf("get domain: %v", err)
+	}
+
+	hash, err := eng.Auth.HashPassword("pass2")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	mbox2 := &coremail.Mailbox{
+		DomainID:     dom.ID,
+		TenantID:     1,
+		LocalPart:    "user2",
+		Email:        "user2@test.com",
+		Name:         "User Two",
+		PasswordHash: hash,
+		Status:       coremail.MailboxActive,
+		QuotaMB:      1024,
+	}
+	if err := eng.Mailboxes.Create(ctx, mbox2, nil); err != nil {
+		t.Fatalf("create mailbox2: %v", err)
+	}
+	if err := ms.EnsureMailboxStorage(ctx, mbox2.ID, 1, dom.ID, nil); err != nil {
+		t.Fatalf("ensure mailbox2 storage: %v", err)
+	}
+
+	inbox2, err := ms.Folders.GetByPath(ctx, mbox2.ID, "INBOX", nil)
+	if err != nil || inbox2 == nil {
+		t.Fatalf("get inbox2: %v", err)
+	}
+
+	verify := func(ctx context.Context, username, password string) (string, bool) {
+		authMbox, authErr := eng.Auth.AuthenticateMailbox(ctx, username, password)
+		if authErr != nil || authMbox == nil {
+			return "", false
+		}
+		return username, true
+	}
+	auth := NewAuthenticator(NewFuncAuthBackend(verify))
+	handler := NewCommandHandler(cfg, auth, NewSession("", tlsCfg, cfg))
+	srv := NewServer(cfg, handler, rcv)
+	srv.TLSConfig = tlsCfg
+	srv.SetLocalDomainChecker(func(ctx context.Context, domain string) (bool, error) {
+		dom, err := eng.Domains.GetByName(ctx, domain, nil)
+		return dom != nil && dom.Status == coremail.DomainActive, err
+	})
+	srv.RecipientValidator = func(ctx context.Context, address string) (bool, error) {
+		targets, err := eng.Auth.ResolveAddress(ctx, address)
+		if err != nil || len(targets) == 0 {
+			return false, err
+		}
+		return true, nil
+	}
+	srv.SenderValidator = func(ctx context.Context, identity *AuthIdentity, fromAddress string) (bool, error) {
+		return identity != nil && identity.Username == fromAddress, nil
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := listener.Addr().String()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go srv.handleConn(conn)
+		}
+	}()
+	defer listener.Close()
+
+	plainConn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer plainConn.Close()
+	reader := bufio.NewReader(plainConn)
+
+	readResponse(reader)
+	plainConn.Write([]byte("EHLO test.com\r\n"))
+	readEHLO(reader)
+
+	plainConn.Write([]byte("STARTTLS\r\n"))
+	if !strings.HasPrefix(readResponse(reader), "220") {
+		t.Fatal("STARTTLS must succeed")
+	}
+
+	tlsClientConn := tls.Client(plainConn, &tls.Config{InsecureSkipVerify: true})
+	if err := tlsClientConn.Handshake(); err != nil {
+		t.Fatalf("TLS handshake: %v", err)
+	}
+	tlsReader := bufio.NewReader(tlsClientConn)
+
+	tlsClientConn.Write([]byte("EHLO test.com\r\n"))
+	readEHLO(tlsReader)
+
+	tlsClientConn.Write([]byte("AUTH PLAIN " + CreateAuthPlainResponse("user@test.com", "pass") + "\r\n"))
+	if !strings.HasPrefix(readResponse(tlsReader), "235") {
+		t.Fatal("AUTH must succeed")
+	}
+
+	tlsClientConn.Write([]byte("MAIL FROM:<user@test.com>\r\n"))
+	if !strings.HasPrefix(readResponse(tlsReader), "250") {
+		t.Fatal("MAIL FROM must succeed")
+	}
+
+	tlsClientConn.Write([]byte("RCPT TO:<user@test.com>\r\n"))
+	if !strings.HasPrefix(readResponse(tlsReader), "250") {
+		t.Fatal("first RCPT TO must succeed")
+	}
+
+	tlsClientConn.Write([]byte("RCPT TO:<user2@test.com>\r\n"))
+	if !strings.HasPrefix(readResponse(tlsReader), "250") {
+		t.Fatal("second RCPT TO must succeed")
+	}
+
+	tlsClientConn.Write([]byte("DATA\r\n"))
+	if !strings.HasPrefix(readResponse(tlsReader), "354") {
+		t.Fatal("DATA must be accepted")
+	}
+	tlsClientConn.Write([]byte("Subject: Two Local Recipients\r\n\r\nbody\r\n.\r\n"))
+	if !strings.HasPrefix(readResponse(tlsReader), "250") {
+		t.Fatal("DATA termination must succeed")
+	}
+
+	dw := delivery.NewDeliveryWorker(qe, ms, nil, nil, "test.com", "test-worker")
+	processed, err := dw.ProcessAll(ctx)
+	if err != nil {
+		t.Fatalf("process queue: %v", err)
+	}
+	if processed != 2 {
+		t.Fatalf("expected 2 queue entries processed (one per recipient), got %d", processed)
+	}
+
+	count1, err := ms.Messages.CountByFolder(ctx, inbox1.ID, nil)
+	if err != nil {
+		t.Fatalf("count inbox1: %v", err)
+	}
+	if count1 != 1 {
+		t.Fatalf("expected exactly 1 stored message in user1 INBOX, got %d", count1)
+	}
+
+	count2, err := ms.Messages.CountByFolder(ctx, inbox2.ID, nil)
+	if err != nil {
+		t.Fatalf("count inbox2: %v", err)
+	}
+	if count2 != 1 {
+		t.Fatalf("expected exactly 1 stored message in user2 INBOX, got %d", count2)
 	}
 }

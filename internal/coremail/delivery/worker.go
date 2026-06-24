@@ -483,6 +483,9 @@ func (w *DeliveryWorker) deliverLocal(ctx context.Context, entry *queue.QueueEnt
 	if msg == nil {
 		return &DeliveryResult{StatusMsg: "message not found", TempFail: false}
 	}
+	if msg.MailboxID == *mboxID && msg.FolderID == folder.ID {
+		return &DeliveryResult{Success: true}
+	}
 	newMsg := *msg
 	newMsg.ID = 0
 	newMsg.MessageID = storage.GenerateMessageID()

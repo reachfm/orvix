@@ -43,6 +43,19 @@ func NewReceiver(eng *coremail.Engine, ms *storage.MailStore, qe *queue.QueueEng
 	}
 }
 
+type resolvedRecipient struct {
+	Email     string
+	MailboxID uint
+	DomainID  uint
+	TenantID  uint
+	Domain    string
+}
+
+type externalRecipient struct {
+	Email  string
+	Domain string
+}
+
 // AcceptMessage processes a completed DATA transfer.
 // Steps:
 // 1. Evaluate SPF (if configured)
@@ -260,19 +273,6 @@ func (r *Receiver) AcceptMessage(ctx context.Context, session *Session) error {
 	}
 
 	// ── Recipient resolution ───────────────────────────────
-	type resolvedRecipient struct {
-		Email     string
-		MailboxID uint
-		DomainID  uint
-		TenantID  uint
-		Domain    string
-	}
-
-	type externalRecipient struct {
-		Email  string
-		Domain string
-	}
-
 	var recipients []resolvedRecipient
 	var externalRecipients []externalRecipient
 	for _, rcpt := range session.Recipients {
@@ -315,6 +315,11 @@ func (r *Receiver) AcceptMessage(ctx context.Context, session *Session) error {
 			})
 		}
 	}
+
+	// Deduplicate local recipients by MailboxID. If the same address appears
+	// in multiple RCPT TO commands, or an alias resolves to the same mailbox,
+	// deliver exactly one copy.
+	recipients = dedupRecipients(recipients)
 
 	if len(recipients) == 0 && len(externalRecipients) == 0 {
 		return fmt.Errorf("no valid recipients")
@@ -470,6 +475,19 @@ func extractRemoteIP(addr string) net.IP {
 		return nil
 	}
 	return net.ParseIP(host)
+}
+
+func dedupRecipients(recipients []resolvedRecipient) []resolvedRecipient {
+	seen := make(map[uint]bool)
+	result := make([]resolvedRecipient, 0, len(recipients))
+	for _, r := range recipients {
+		if seen[r.MailboxID] {
+			continue
+		}
+		seen[r.MailboxID] = true
+		result = append(result, r)
+	}
+	return result
 }
 
 func convertSPFAuthResult(ar *spf.AuthResult) *dmarc.AuthResult {
