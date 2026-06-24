@@ -3939,13 +3939,7 @@ func TestSubmissionRealSTARTTLSFlow(t *testing.T) {
 	}
 	tlsReader := bufio.NewReader(tlsClientConn)
 
-	// Post-STARTTLS greeting.
-	resp = readResponse(tlsReader)
-	if !strings.HasPrefix(resp, "220") {
-		t.Fatalf("post-STARTTLS greeting: expected 220, got: %s", resp)
-	}
-
-	// EHLO after TLS.
+	// EHLO after TLS (server must NOT send greeting — client initiates).
 	tlsClientConn.Write([]byte("EHLO test.com\r\n"))
 	readEHLO(tlsReader)
 
@@ -4094,7 +4088,6 @@ func TestSubmissionRealSTARTTLSLocalDelivery(t *testing.T) {
 		t.Fatalf("TLS handshake: %v", err)
 	}
 	tlsReader := bufio.NewReader(tlsClientConn)
-	readResponse(tlsReader) // post-STARTTLS greeting
 
 	tlsClientConn.Write([]byte("EHLO test.com\r\n"))
 	readEHLO(tlsReader)
@@ -4163,6 +4156,100 @@ func TestSubmissionRealSTARTTLSLocalDelivery(t *testing.T) {
 	}
 	if entry.MessageID == "" {
 		t.Error("message_id must not be empty")
+	}
+}
+
+func TestSubmissionRealSTARTTLSWrongPassword(t *testing.T) {
+	// After STARTTLS upgrade, AUTH with wrong password must reach the auth
+	// backend and return 535 (invalid credentials), not 454 (STARTTLS required).
+	cert := generateTestCert(t)
+	tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}}
+
+	eng, _, _, rcv := testIntegrationEnv(t)
+	cfg := SubmissionConfig()
+
+	verify := func(ctx context.Context, username, password string) (string, bool) {
+		mbox, err := eng.Auth.AuthenticateMailbox(ctx, username, password)
+		if err != nil || mbox == nil {
+			return "", false
+		}
+		return username, true
+	}
+	auth := NewAuthenticator(NewFuncAuthBackend(verify))
+	handler := NewCommandHandler(cfg, auth, NewSession("", tlsCfg, cfg))
+	srv := NewServer(cfg, handler, rcv)
+	srv.TLSConfig = tlsCfg
+	srv.SetLocalDomainChecker(func(ctx context.Context, domain string) (bool, error) {
+		dom, err := eng.Domains.GetByName(ctx, domain, nil)
+		return dom != nil && dom.Status == coremail.DomainActive, err
+	})
+	srv.RecipientValidator = func(ctx context.Context, address string) (bool, error) {
+		targets, err := eng.Auth.ResolveAddress(ctx, address)
+		if err != nil || len(targets) == 0 {
+			return false, err
+		}
+		return true, nil
+	}
+	srv.SenderValidator = func(ctx context.Context, identity *AuthIdentity, fromAddress string) (bool, error) {
+		return identity != nil && identity.Username == fromAddress, nil
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := listener.Addr().String()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go srv.handleConn(conn)
+		}
+	}()
+	defer listener.Close()
+
+	plainConn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	reader := bufio.NewReader(plainConn)
+
+	// 220 greeting.
+	resp := readResponse(reader)
+	if !strings.HasPrefix(resp, "220") {
+		t.Fatalf("greeting: expected 220, got: %s", resp)
+	}
+
+	// EHLO.
+	plainConn.Write([]byte("EHLO test.com\r\n"))
+	readEHLO(reader)
+
+	// STARTTLS.
+	plainConn.Write([]byte("STARTTLS\r\n"))
+	resp = readResponse(reader)
+	if !strings.HasPrefix(resp, "220") {
+		t.Fatalf("STARTTLS: expected 220, got: %s", resp)
+	}
+
+	// TLS handshake.
+	tlsClientConn := tls.Client(plainConn, &tls.Config{InsecureSkipVerify: true})
+	if err := tlsClientConn.Handshake(); err != nil {
+		t.Fatalf("TLS handshake: %v", err)
+	}
+	tlsReader := bufio.NewReader(tlsClientConn)
+
+	// EHLO after TLS (server must NOT send greeting — client initiates).
+	tlsClientConn.Write([]byte("EHLO test.com\r\n"))
+	readEHLO(tlsReader)
+
+	// AUTH PLAIN with wrong password after TLS must return 535,
+	// NOT 454 "Must issue STARTTLS first".
+	tlsClientConn.Write([]byte("AUTH PLAIN " + CreateAuthPlainResponse("user@test.com", "wrong") + "\r\n"))
+	resp = readResponse(tlsReader)
+	if !strings.HasPrefix(resp, "535") {
+		t.Fatalf("AUTH wrong password after STARTTLS: expected 535, got: %s", resp)
 	}
 }
 
