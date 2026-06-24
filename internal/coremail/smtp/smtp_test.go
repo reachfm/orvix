@@ -4716,3 +4716,266 @@ func TestSubmissionSTARTTLSDifferentLocalRecipients(t *testing.T) {
 		t.Fatalf("expected exactly 1 stored message in user2 INBOX, got %d", count2)
 	}
 }
+
+func TestSubmissionSTARTTLSRepeatedDistinctTransactionsStoredSeparately(t *testing.T) {
+	cert := generateTestCert(t)
+	tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}}
+
+	eng, ms, qe, rcv := testIntegrationEnv(t)
+	cfg := SubmissionConfig()
+	ctx := context.Background()
+
+	mbox, err := eng.Mailboxes.GetByEmail(ctx, "user@test.com", nil)
+	if err != nil || mbox == nil {
+		t.Fatalf("get mailbox: %v", err)
+	}
+	inbox, err := ms.Folders.GetByPath(ctx, mbox.ID, "INBOX", nil)
+	if err != nil || inbox == nil {
+		t.Fatalf("get inbox: %v", err)
+	}
+
+	verify := func(ctx context.Context, username, password string) (string, bool) {
+		authMbox, authErr := eng.Auth.AuthenticateMailbox(ctx, username, password)
+		return username, authErr == nil && authMbox != nil
+	}
+	auth := NewAuthenticator(NewFuncAuthBackend(verify))
+	handler := NewCommandHandler(cfg, auth, NewSession("", tlsCfg, cfg))
+	srv := NewServer(cfg, handler, rcv)
+	srv.TLSConfig = tlsCfg
+	srv.SetLocalDomainChecker(func(ctx context.Context, domain string) (bool, error) {
+		dom, err := eng.Domains.GetByName(ctx, domain, nil)
+		return dom != nil && dom.Status == coremail.DomainActive, err
+	})
+	srv.RecipientValidator = func(ctx context.Context, address string) (bool, error) {
+		targets, err := eng.Auth.ResolveAddress(ctx, address)
+		return len(targets) > 0, err
+	}
+	srv.SenderValidator = func(ctx context.Context, identity *AuthIdentity, fromAddress string) (bool, error) {
+		return identity != nil && identity.Username == fromAddress, nil
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := listener.Addr().String()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go srv.handleConn(conn)
+		}
+	}()
+	defer listener.Close()
+
+	plainConn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer plainConn.Close()
+	reader := bufio.NewReader(plainConn)
+	readResponse(reader)
+	plainConn.Write([]byte("EHLO test.com\r\n"))
+	readEHLO(reader)
+	plainConn.Write([]byte("STARTTLS\r\n"))
+	readResponse(reader)
+	tlsClientConn := tls.Client(plainConn, &tls.Config{InsecureSkipVerify: true})
+	if err := tlsClientConn.Handshake(); err != nil {
+		t.Fatalf("TLS handshake: %v", err)
+	}
+	tlsReader := bufio.NewReader(tlsClientConn)
+	tlsClientConn.Write([]byte("EHLO test.com\r\n"))
+	readEHLO(tlsReader)
+	tlsClientConn.Write([]byte("AUTH PLAIN " + CreateAuthPlainResponse("user@test.com", "pass") + "\r\n"))
+	if !strings.HasPrefix(readResponse(tlsReader), "235") {
+		t.Fatal("AUTH must succeed")
+	}
+
+	sendMsg := func(txNum int) {
+		tlsClientConn.Write([]byte("MAIL FROM:<user@test.com>\r\n"))
+		if !strings.HasPrefix(readResponse(tlsReader), "250") {
+			t.Fatalf("tx %d: MAIL FROM failed", txNum)
+		}
+		tlsClientConn.Write([]byte("RCPT TO:<user@test.com>\r\n"))
+		if !strings.HasPrefix(readResponse(tlsReader), "250") {
+			t.Fatalf("tx %d: RCPT TO failed", txNum)
+		}
+		tlsClientConn.Write([]byte("DATA\r\n"))
+		if !strings.HasPrefix(readResponse(tlsReader), "354") {
+			t.Fatalf("tx %d: DATA failed", txNum)
+		}
+		tlsClientConn.Write([]byte("Subject: Identical Subject\r\n\r\nIdentical body\r\n.\r\n"))
+		if !strings.HasPrefix(readResponse(tlsReader), "250") {
+			t.Fatalf("tx %d: DATA end failed", txNum)
+		}
+	}
+
+	sendMsg(1)
+	sendMsg(2)
+
+	dw := delivery.NewDeliveryWorker(qe, ms, nil, nil, "test.com", "test-worker")
+	processed, err := dw.ProcessAll(ctx)
+	if err != nil {
+		t.Fatalf("process queue: %v", err)
+	}
+	if processed != 2 {
+		t.Fatalf("expected 2 queue entries processed (one per transaction), got %d", processed)
+	}
+
+	count, err := ms.Messages.CountByFolder(ctx, inbox.ID, nil)
+	if err != nil {
+		t.Fatalf("count by folder: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected exactly 2 stored messages in INBOX (two separate transactions, same content), got %d", count)
+	}
+}
+
+func TestWebmailSelfSendStoresOneSentAndOneInboxCopy(t *testing.T) {
+	eng, ms, qe, _ := testIntegrationEnv(t)
+	ctx := context.Background()
+
+	mbox, err := eng.Mailboxes.GetByEmail(ctx, "user@test.com", nil)
+	if err != nil || mbox == nil {
+		t.Fatalf("get mailbox: %v", err)
+	}
+
+	inbox, err := ms.Folders.GetByPath(ctx, mbox.ID, "INBOX", nil)
+	if err != nil || inbox == nil {
+		t.Fatalf("get inbox: %v", err)
+	}
+
+	sent, err := ms.Folders.GetByPath(ctx, mbox.ID, "Sent", nil)
+	if err != nil || sent == nil {
+		t.Fatalf("get sent folder: %v", err)
+	}
+
+	draft := &storage.Message{
+		MessageID:    storage.GenerateMessageID(),
+		TenantID:     1,
+		DomainID:     mbox.DomainID,
+		MailboxID:    mbox.ID,
+		FolderID:     sent.ID,
+		FromAddress:  "user@test.com",
+		ToAddresses:  "user@test.com",
+		Subject:      "Webmail Self-Send",
+		ReceivedDate: time.Now().UTC(),
+	}
+	if err := ms.StoreMessage(ctx, draft, []byte("Subject: Webmail Self-Send\r\n\r\nbody\r\n.\r\n"), nil); err != nil {
+		t.Fatalf("store draft in Sent: %v", err)
+	}
+
+	entry := &queue.QueueEntry{
+		TenantID:        1,
+		DomainID:        mbox.DomainID,
+		MailboxID:       &mbox.ID,
+		MessageID:       draft.MessageID,
+		FromAddress:     "user@test.com",
+		ToAddress:       "user@test.com",
+		RecipientDomain: "test.com",
+		Direction:       queue.DirectionOutbound,
+		DeliveryMode:    queue.DeliveryLocal,
+		Status:          queue.StatusPending,
+	}
+	if err := qe.Enqueue(ctx, entry); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	dw := delivery.NewDeliveryWorker(qe, ms, nil, nil, "test.com", "test-worker")
+	processed, err := dw.ProcessAll(ctx)
+	if err != nil {
+		t.Fatalf("process queue: %v", err)
+	}
+	if processed != 1 {
+		t.Fatalf("expected 1 queue entry processed, got %d", processed)
+	}
+
+	sentCount, err := ms.Messages.CountByFolder(ctx, sent.ID, nil)
+	if err != nil {
+		t.Fatalf("sent count: %v", err)
+	}
+	if sentCount != 1 {
+		t.Fatalf("expected exactly 1 message in Sent folder (original draft), got %d", sentCount)
+	}
+
+	inboxCount, err := ms.Messages.CountByFolder(ctx, inbox.ID, nil)
+	if err != nil {
+		t.Fatalf("inbox count: %v", err)
+	}
+	if inboxCount != 1 {
+		t.Fatalf("expected exactly 1 message in Inbox folder (recipient delivery), got %d", inboxCount)
+	}
+}
+
+func TestDeliveryWorkerSkipsAlreadyStoredInboxWithoutDuplicate(t *testing.T) {
+	eng, ms, qe, _ := testIntegrationEnv(t)
+	ctx := context.Background()
+
+	mbox, err := eng.Mailboxes.GetByEmail(ctx, "user@test.com", nil)
+	if err != nil || mbox == nil {
+		t.Fatalf("get mailbox: %v", err)
+	}
+
+	inbox, err := ms.Folders.GetByPath(ctx, mbox.ID, "INBOX", nil)
+	if err != nil || inbox == nil {
+		t.Fatalf("get inbox: %v", err)
+	}
+
+	msg := &storage.Message{
+		MessageID:    storage.GenerateMessageID(),
+		TenantID:     1,
+		DomainID:     mbox.DomainID,
+		MailboxID:    mbox.ID,
+		FolderID:     inbox.ID,
+		FromAddress:  "user@test.com",
+		ToAddresses:  "user@test.com",
+		Subject:      "Already Stored",
+		ReceivedDate: time.Now().UTC(),
+	}
+	if err := ms.StoreMessage(ctx, msg, []byte("Subject: Already Stored\r\n\r\nbody\r\n.\r\n"), nil); err != nil {
+		t.Fatalf("store message in INBOX: %v", err)
+	}
+
+	countBefore, err := ms.Messages.CountByFolder(ctx, inbox.ID, nil)
+	if err != nil {
+		t.Fatalf("count before: %v", err)
+	}
+	if countBefore != 1 {
+		t.Fatalf("expected 1 message in INBOX before processing, got %d", countBefore)
+	}
+
+	entry := &queue.QueueEntry{
+		TenantID:        1,
+		DomainID:        mbox.DomainID,
+		MailboxID:       &mbox.ID,
+		MessageID:       msg.MessageID,
+		FromAddress:     "user@test.com",
+		ToAddress:       "user@test.com",
+		RecipientDomain: "test.com",
+		Direction:       queue.DirectionInbound,
+		DeliveryMode:    queue.DeliveryLocal,
+		Status:          queue.StatusPending,
+	}
+	if err := qe.Enqueue(ctx, entry); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	dw := delivery.NewDeliveryWorker(qe, ms, nil, nil, "test.com", "test-worker")
+	processed, err := dw.ProcessAll(ctx)
+	if err != nil {
+		t.Fatalf("process queue: %v", err)
+	}
+	if processed != 1 {
+		t.Fatalf("expected 1 entry processed, got %d", processed)
+	}
+
+	countAfter, err := ms.Messages.CountByFolder(ctx, inbox.ID, nil)
+	if err != nil {
+		t.Fatalf("count after: %v", err)
+	}
+	if countAfter != 1 {
+		t.Fatalf("delivery worker created duplicate: INBOX count=%d (expected 1)", countAfter)
+	}
+}
