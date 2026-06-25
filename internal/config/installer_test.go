@@ -240,7 +240,8 @@ func TestHTTPSSetupScriptCaddyFlow(t *testing.T) {
 	for _, item := range []string{
 		"admin.<domain>   -> 127.0.0.1:8080",
 		"webmail.<domain> -> 127.0.0.1:8080   (path-rewritten to /webmail/*)",
-		"mail.<domain>    -> 127.0.0.1:8081",
+		"mail.<domain>    -> 127.0.0.1:8080   (/api/* paths)",
+		"mail.<domain>    -> 127.0.0.1:8081   (everything else:",
 		"ADMIN_DOMAIN=\"${ADMIN_DOMAIN:-admin.$PRIMARY_DOMAIN}\"",
 		"WEBMAIL_DOMAIN=\"${WEBMAIL_DOMAIN:-webmail.$PRIMARY_DOMAIN}\"",
 		"MAIL_DOMAIN=\"${MAIL_DOMAIN:-mail.$PRIMARY_DOMAIN}\"",
@@ -281,6 +282,9 @@ func TestHTTPSSetupScriptCaddyFlow(t *testing.T) {
 	}
 	if strings.Contains(script, "check_https \"https://$ADMIN_DOMAIN/api/v1/health\" HEAD") {
 		t.Fatal("admin health smoke must use GET because the API route is GET-only")
+	}
+	if !strings.Contains(script, "$MAIL_DOMAIN {\n\t@api path /api/*\n\thandle @api {\n\t\treverse_proxy 127.0.0.1:8080\n\t}\n\n\thandle {\n\t\treverse_proxy 127.0.0.1:8081\n\t}\n}") {
+		t.Fatal("mail domain Caddy block must route /api/* to 8080 and everything else to 8081")
 	}
 }
 

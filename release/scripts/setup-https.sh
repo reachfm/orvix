@@ -5,7 +5,8 @@ set -euo pipefail
 # This configures Caddy for:
 #   admin.<domain>   -> 127.0.0.1:8080
 #   webmail.<domain> -> 127.0.0.1:8080   (path-rewritten to /webmail/*)
-#   mail.<domain>    -> 127.0.0.1:8081
+#   mail.<domain>    -> 127.0.0.1:8080   (/api/* paths)
+#   mail.<domain>    -> 127.0.0.1:8081   (everything else: JMAP/SMTP submission web/IMAP/POP3)
 
 PRIMARY_DOMAIN="${1:-${ORVIX_PRIMARY_DOMAIN:-}}"
 SERVER_IP="${2:-${ORVIX_SERVER_IP:-}}"
@@ -117,7 +118,14 @@ $WEBMAIL_DOMAIN {
 }
 
 $MAIL_DOMAIN {
-	reverse_proxy 127.0.0.1:8081
+	@api path /api/*
+	handle @api {
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:8081
+	}
 }
 CADDY
 	chown root:caddy /etc/caddy/Caddyfile 2>/dev/null || chown root:root /etc/caddy/Caddyfile
