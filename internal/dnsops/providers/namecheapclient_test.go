@@ -948,14 +948,15 @@ func TestNamecheapProviderDuplicateLiveDMARC(t *testing.T) {
 }
 
 func TestNamecheapProviderDuplicateLiveMTASTS(t *testing.T) {
+	plan := fixturePlanForNamecheap(t)
 	client := NewFakeNamecheapClient()
 	client.SetLive("example", "com", []NamecheapHost{
 		{Name: "@", Type: "MX", Address: "mail.example.com", MXPref: "10", TTL: "1800"},
 		{Name: "mail", Type: "A", Address: "203.0.113.10", TTL: "1800"},
 		{Name: "mta-sts", Type: "A", Address: "203.0.113.10", TTL: "1800"},
 		{Name: "@", Type: "TXT", Address: "v=spf1 mx ip4:203.0.113.10 -all", TTL: "1800"},
-		{Name: "_mta-sts", Type: "TXT", Address: "v=STSv1; id=2026010101", TTL: "1800"},
-		{Name: "_mta-sts", Type: "TXT", Address: "v=STSv1; id=2026010102", TTL: "1800"},
+		{Name: "_mta-sts", Type: "TXT", Address: "v=STSv1; id=" + plan.MTAPolicyID, TTL: "1800"},
+		{Name: "_mta-sts", Type: "TXT", Address: "v=STSv1; id=otherid", TTL: "1800"},
 	})
 	p := NewNamecheapProvider(NamecheapConfig{
 		APIUser:     "u",
@@ -963,7 +964,7 @@ func TestNamecheapProviderDuplicateLiveMTASTS(t *testing.T) {
 		Username:    "u",
 		EnableApply: true,
 	}, client)
-	cp, _ := p.Plan(context.Background(), fixturePlanForNamecheap(t))
+	cp, _ := p.Plan(context.Background(), plan)
 	hasConflict := false
 	for _, s := range cp.Steps {
 		if s.Record.Purpose == "mta_sts" && s.Action == dnsops.ActionConflict {

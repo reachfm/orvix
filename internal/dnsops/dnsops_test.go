@@ -5,6 +5,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestGeneratorPlanCoversAllRequired confirms the generated plan
@@ -469,4 +470,121 @@ func TestFakeResolverLookupPTR(t *testing.T) {
 	// is intentionally NOT exercised — we don't want this test
 	// to need internet. FakeResolver is enough.
 	_ = net.IPv4
+}
+
+func TestGeneratorMTASTSPolicyIDStableAcrossRuns(t *testing.T) {
+	g := NewGenerator()
+	in := Inputs{
+		Domain: "example.com", MailHost: "mail.example.com",
+		ServerIPv4: "8.8.8.8", MTAMode: "testing",
+	}
+	plan1, err := g.Generate(in)
+	if err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	plan2, err := g.Generate(in)
+	if err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+	if plan1.MTAPolicyID != plan2.MTAPolicyID {
+		t.Fatalf("same inputs must yield same MTAPolicyID; run1=%s run2=%s", plan1.MTAPolicyID, plan2.MTAPolicyID)
+	}
+	if plan1.MTAPolicyID == "" {
+		t.Fatal("MTAPolicyID must not be empty")
+	}
+}
+
+func TestGeneratorMTASTSPolicyIDStableAcrossDates(t *testing.T) {
+	in := Inputs{
+		Domain: "example.com", MailHost: "mail.example.com",
+		ServerIPv4: "8.8.8.8", MTAMode: "testing",
+	}
+	g1 := NewGenerator()
+	g1.NowFunc = func() time.Time { return time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC) }
+	plan1, err := g1.Generate(in)
+	if err != nil {
+		t.Fatalf("date 1: %v", err)
+	}
+	g2 := NewGenerator()
+	g2.NowFunc = func() time.Time { return time.Date(2027, 12, 31, 0, 0, 0, 0, time.UTC) }
+	plan2, err := g2.Generate(in)
+	if err != nil {
+		t.Fatalf("date 2: %v", err)
+	}
+	if plan1.MTAPolicyID != plan2.MTAPolicyID {
+		t.Fatalf("different dates / same policy must yield same MTAPolicyID; date1=%s date2=%s", plan1.MTAPolicyID, plan2.MTAPolicyID)
+	}
+}
+
+func TestGeneratorMTASTSPolicyIDChangesOnContentChange(t *testing.T) {
+	g := NewGenerator()
+	base := Inputs{
+		Domain: "example.com", MailHost: "mail.example.com",
+		ServerIPv4: "8.8.8.8", MTAMode: "testing",
+	}
+	plan1, err := g.Generate(base)
+	if err != nil {
+		t.Fatalf("base: %v", err)
+	}
+
+	enforce := base
+	enforce.MTAMode = "enforce"
+	plan2, err := g.Generate(enforce)
+	if err != nil {
+		t.Fatalf("enforce: %v", err)
+	}
+	if plan1.MTAPolicyID == plan2.MTAPolicyID {
+		t.Errorf("mode change testing->enforce must change MTAPolicyID; both=%s", plan1.MTAPolicyID)
+	}
+
+	differentMX := base
+	differentMX.MailHost = "mx2.example.com"
+	plan3, err := g.Generate(differentMX)
+	if err != nil {
+		t.Fatalf("different MX: %v", err)
+	}
+	if plan1.MTAPolicyID == plan3.MTAPolicyID {
+		t.Errorf("MX change must change MTAPolicyID; both=%s", plan1.MTAPolicyID)
+	}
+}
+
+func TestGeneratorMTASTSTXTContainsPolicyID(t *testing.T) {
+	g := NewGenerator()
+	plan, err := g.Generate(Inputs{
+		Domain: "example.com", MailHost: "mail.example.com",
+		ServerIPv4: "8.8.8.8", MTAMode: "testing",
+	})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	var txtValue string
+	for _, r := range plan.Records {
+		if r.Purpose == PurposeMTASTS {
+			txtValue = r.Value
+			break
+		}
+	}
+	if txtValue == "" {
+		t.Fatal("MTA-STS TXT record not found in plan")
+	}
+	expectedTXT := "v=STSv1; id=" + plan.MTAPolicyID
+	if txtValue != expectedTXT {
+		t.Fatalf("MTA-STS TXT must be %q, got %q", expectedTXT, txtValue)
+	}
+}
+
+func TestGeneratorMTASTSPolicyIDDerivedFromPolicyFile(t *testing.T) {
+	g := NewGenerator()
+	plan, err := g.Generate(Inputs{
+		Domain: "example.com", MailHost: "mail.example.com",
+		ServerIPv4: "8.8.8.8", MTAMode: "testing",
+	})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	expected := mtaStsPolicyID(plan.MTAPolicyFile)
+	if plan.MTAPolicyID != expected {
+		t.Fatalf("MTAPolicyID must be sha256(policy file); got=%s expected=%s file:\n%s",
+			plan.MTAPolicyID, expected, plan.MTAPolicyFile)
+	}
 }
