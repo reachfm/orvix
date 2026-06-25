@@ -12,16 +12,16 @@ import (
 // domain. The generator does NOT call out to DNS — that is the
 // Verifier's job. The generator's contract is:
 //
-//   - Same input always yields the same plan (modulo the date-based
-//     MTA-STS policy id, which is computed from the current UTC date).
+//   - Same canonical MTA-STS policy body always yields the same policy id;
+//     changing the policy body yields a new id.
 //   - No records use placeholder DKIM material. If dkimPubKey is empty,
 //     the DKIM row is still emitted but with a "not generated" reason;
 //     callers (admin UI) must surface that as a "Generate DKIM key"
 //     action rather than rendering a fake public key.
 //   - No record carries a private key, provider token, or any secret.
 type Generator struct {
-	// NowFunc is overridable in tests so the MTA-STS policy id
-	// stays stable across runs. Defaults to time.Now().UTC.
+	// NowFunc is overridable in tests for future time-sensitive fields.
+	// It must not affect MTAPolicyID, which is derived from policy content.
 	NowFunc func() time.Time
 }
 
