@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/orvix/orvix/internal/coremail/dkim"
+	"github.com/orvix/orvix/internal/coremail/push"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
 	"github.com/orvix/orvix/internal/observability"
@@ -43,6 +44,9 @@ type DeliveryWorker struct {
 
 	// Observability (optional).
 	Observability *observability.Observability
+
+	// PushNotifier dispatches browser push notifications after local delivery.
+	PushNotifier *push.PushNotifier
 }
 
 // NewDeliveryWorker creates a delivery worker with optional reliability integrations.
@@ -186,6 +190,9 @@ func (w *DeliveryWorker) deliver(ctx context.Context, entry *queue.QueueEntry) e
 		w.emitAudit(ctx, entry, EventDelivered, result)
 		w.Metrics.RecordDelivery(result.DurationMs)
 		w.recordDeliveryEvent(ctx, entry, observability.EventQueueDelivered, result)
+		if isLocal && w.PushNotifier != nil && entry.MailboxID != nil && result.Success {
+			w.PushNotifier.NotifyMailboxMessage(ctx, *entry.MailboxID, entry.MessageID, entry.FromAddress, "")
+		}
 		return w.Queue.AckDelivered(ctx, entry.ID)
 
 	case DecisionRetry:

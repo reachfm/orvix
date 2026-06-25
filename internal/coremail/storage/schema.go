@@ -77,6 +77,19 @@ func Tables() []string {
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS push_subscriptions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			mailbox_id INTEGER NOT NULL,
+			endpoint TEXT NOT NULL,
+			p256dh_key TEXT NOT NULL,
+			auth_key TEXT NOT NULL,
+			user_agent TEXT NOT NULL DEFAULT '',
+			disabled_at DATETIME,
+			last_seen_at DATETIME,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			FOREIGN KEY (mailbox_id) REFERENCES coremail_mailboxes(id)
+		)`,
 	}
 }
 
@@ -95,6 +108,8 @@ func Indexes() []string {
 		`CREATE INDEX IF NOT EXISTS idx_coremail_folders_parent ON coremail_folders(parent_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_coremail_attachments_message ON coremail_attachments(message_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_coremail_attachments_sha256 ON coremail_attachments(sha256)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_push_subscriptions_endpoint ON push_subscriptions(endpoint)`,
+		`CREATE INDEX IF NOT EXISTS idx_push_subscriptions_mailbox ON push_subscriptions(mailbox_id)`,
 	}
 }
 

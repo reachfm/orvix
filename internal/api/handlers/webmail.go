@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/coremail/push"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
 	"github.com/orvix/orvix/internal/webmailmgmt"
@@ -27,6 +28,10 @@ func (h *Handler) SetMailStore(ms *storage.MailStore) {
 // receiver and the delivery pipeline, not a separate one.
 func (h *Handler) SetQueueEngine(qe *queue.QueueEngine) {
 	h.queueEngine = qe
+}
+
+func (h *Handler) SetPushNotifier(pn *push.PushNotifier) {
+	h.pushNotifier = pn
 }
 
 func (h *Handler) webmailService() *webmailmgmt.Service {

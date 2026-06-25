@@ -341,6 +341,11 @@ func (r *Router) setupRoutes() {
 	protected.Get("/webmail/drafts/:id", r.h.WebmailGetDraft)
 	protected.Put("/webmail/drafts/:id", r.h.WebmailSaveDraft)
 	protected.Delete("/webmail/drafts/:id", r.h.WebmailDeleteDraft)
+	// Push notification subscription management.
+	protected.Post("/webmail/push/subscribe", r.h.PushSubscribe)
+	protected.Post("/webmail/push/unsubscribe", r.h.PushUnsubscribe)
+	protected.Get("/webmail/push/status", r.h.PushStatus)
+	protected.Post("/webmail/push/test", r.h.PushTest)
 
 	protected.Get("/csrf-token", func(c fiber.Ctx) error {
 		userID, _ := c.Locals("user_id").(uint)

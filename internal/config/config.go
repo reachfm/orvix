@@ -58,6 +58,9 @@ type CoreMailConfig struct {
 	RequireAuthForSubmission  bool          `mapstructure:"require_auth_for_submission"`
 	QueueWorkers              int           `mapstructure:"queue_workers"`
 	WorkerInterval            time.Duration `mapstructure:"worker_interval"`
+	VAPIDPublicKey            string        `mapstructure:"vapid_public_key"`
+	VAPIDPrivateKey           string        `mapstructure:"vapid_private_key"`
+	VAPIDSubject              string        `mapstructure:"vapid_subject"`
 }
 
 // ClamAVConfig holds ClamAV antivirus scanner settings.
