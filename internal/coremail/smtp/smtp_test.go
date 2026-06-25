@@ -4277,6 +4277,90 @@ func generateTestCert(t *testing.T) tls.Certificate {
 	return cert
 }
 
+func TestSubmissionPostTLSEHLODoesNotAdvertiseSTARTTLS(t *testing.T) {
+	cert := generateTestCert(t)
+	tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}}
+
+	eng, _, _, rcv := testIntegrationEnv(t)
+	cfg := SubmissionConfig()
+
+	verify := func(ctx context.Context, username, password string) (string, bool) {
+		authMbox, authErr := eng.Auth.AuthenticateMailbox(ctx, username, password)
+		return username, authErr == nil && authMbox != nil
+	}
+	auth := NewAuthenticator(NewFuncAuthBackend(verify))
+	handler := NewCommandHandler(cfg, auth, NewSession("", tlsCfg, cfg))
+	srv := NewServer(cfg, handler, rcv)
+	srv.TLSConfig = tlsCfg
+	srv.SetLocalDomainChecker(func(ctx context.Context, domain string) (bool, error) {
+		dom, err := eng.Domains.GetByName(ctx, domain, nil)
+		return dom != nil && dom.Status == coremail.DomainActive, err
+	})
+	srv.RecipientValidator = func(ctx context.Context, address string) (bool, error) {
+		targets, err := eng.Auth.ResolveAddress(ctx, address)
+		return len(targets) > 0, err
+	}
+	srv.SenderValidator = func(ctx context.Context, identity *AuthIdentity, fromAddress string) (bool, error) {
+		return identity != nil && identity.Username == fromAddress, nil
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := listener.Addr().String()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go srv.handleConn(conn)
+		}
+	}()
+	defer listener.Close()
+
+	plainConn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer plainConn.Close()
+	reader := bufio.NewReader(plainConn)
+
+	readResponse(reader) // greeting
+
+	plainConn.Write([]byte("EHLO test.com\r\n"))
+	preResp := readFullResponse(reader)
+	if !strings.Contains(preResp, "STARTTLS") {
+		t.Fatalf("pre-TLS EHLO must advertise STARTTLS, got:\n%s", preResp)
+	}
+
+	plainConn.Write([]byte("STARTTLS\r\n"))
+	if !strings.HasPrefix(readResponse(reader), "220") {
+		t.Fatal("STARTTLS must succeed")
+	}
+
+	tlsClientConn := tls.Client(plainConn, &tls.Config{InsecureSkipVerify: true})
+	if err := tlsClientConn.Handshake(); err != nil {
+		t.Fatalf("TLS handshake: %v", err)
+	}
+	tlsReader := bufio.NewReader(tlsClientConn)
+
+	tlsClientConn.Write([]byte("EHLO test.com\r\n"))
+	postResp := readFullResponse(tlsReader)
+	if strings.Contains(postResp, "STARTTLS") {
+		t.Fatalf("post-TLS EHLO must NOT advertise STARTTLS, got:\n%s", postResp)
+	}
+	if !strings.Contains(postResp, "AUTH") {
+		t.Fatalf("post-TLS EHLO must still advertise AUTH, got:\n%s", postResp)
+	}
+
+	tlsClientConn.Write([]byte("AUTH PLAIN " + CreateAuthPlainResponse("user@test.com", "pass") + "\r\n"))
+	if !strings.HasPrefix(readResponse(tlsReader), "235") {
+		t.Fatal("AUTH after TLS must still succeed")
+	}
+}
+
 func TestSubmissionDefaultsToDisabledWithoutTLS(t *testing.T) {
 	cfg := config.Defaults()
 	if cfg.CoreMail.SubmissionEnabled {
