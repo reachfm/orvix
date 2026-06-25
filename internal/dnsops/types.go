@@ -131,7 +131,7 @@ type Plan struct {
 	DKIMSelector string   `json:"dkim_selector"` // e.g. "orvix" or "default"
 	DKIMKeyID    string   `json:"dkim_key_id,omitempty"` // opaque key id for the active pair
 	ReportMailbox string  `json:"report_mailbox"` // e.g. "dmarc@orvix.email"
-	MTAPolicyID  string   `json:"mta_sts_policy_id"` // stable policy id (date-based)
+	MTAPolicyID  string   `json:"mta_sts_policy_id"` // content-derived policy id; same policy body => same id
 	MTAMode      string   `json:"mta_sts_mode"`       // "testing" or "enforce"
 	Records      []Record `json:"records"`
 

@@ -5,7 +5,6 @@ import (
 	"net"
 	"strings"
 	"testing"
-	"time"
 )
 
 // buildVerifiedFixturePlan returns a Plan whose required records
@@ -15,9 +14,6 @@ import (
 func buildVerifiedFixturePlan(t *testing.T) *Plan {
 	t.Helper()
 	g := NewGenerator()
-	g.NowFunc = func() time.Time {
-		return time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)
-	}
 	plan, err := g.Generate(Inputs{
 		Domain:        "example.com",
 		MailHost:      "mail.example.com",
