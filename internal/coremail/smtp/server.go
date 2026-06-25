@@ -246,6 +246,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			reader = bufio.NewReader(conn)
 			writer = bufio.NewWriter(conn)
 			session.TLSActive = true
+			session.Extensions = removeExtension(session.Extensions, "STARTTLS")
 			session.State = StateNew
 			session.Authenticated = false
 			session.AuthUser = ""

@@ -216,3 +216,12 @@ func (s *Session) ResetTransaction() {
 		s.State = StateGreeted
 	}
 }
+
+func removeExtension(exts []string, target string) []string {
+	for i, ext := range exts {
+		if ext == target {
+			return append(exts[:i], exts[i+1:]...)
+		}
+	}
+	return exts
+}
