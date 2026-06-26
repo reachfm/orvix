@@ -55,7 +55,7 @@
         else node.setAttribute(k, attrs[k]);
       });
     }
-    if (text != null && !attrs) node.textContent = text;
+    if (text != null) node.textContent = text;
     return node;
   }
 
@@ -561,4 +561,11 @@
     openSettings: openSettings,
     closeSettings: closeSettings,
   };
+
+  // webmail.js can finish auth-gated boot before this deferred module
+  // loads. If the SPA shell already exists, attach the push UI now;
+  // otherwise the parent onInit hook above will call init() later.
+  if (document.querySelector('.sidebar .footer')) {
+    try { init(); } catch (e) { /* push must never block webmail */ }
+  }
 })();
