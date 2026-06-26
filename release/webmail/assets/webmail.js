@@ -2629,9 +2629,8 @@
         showShortcutsOverlay();
       }
     });
-  }
 
-  // Push notifications: if the bundled webmail-push.js module
+    // Push notifications: if the bundled webmail-push.js module
     // is present, give it a chance to register the service worker
     // and render its banner / settings entry. The module is a
     // no-op on browsers without Web Push support, so this is safe

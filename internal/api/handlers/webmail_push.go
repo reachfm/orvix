@@ -25,6 +25,9 @@ func (h *Handler) PushSubscribe(c fiber.Ctx) error {
 	if req.Endpoint == "" || req.Keys.P256DH == "" || req.Keys.Auth == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "endpoint, p256dh, and auth are required"})
 	}
+	if err := push.ValidatePushEndpoint(req.Endpoint); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
 	if h.pushNotifier == nil || !h.pushNotifier.IsEnabled() {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "push notifications not available"})
 	}
@@ -81,6 +84,10 @@ func (h *Handler) PushUnsubscribe(c fiber.Ctx) error {
 		return c.JSON(fiber.Map{"status": "unsubscribed"})
 	}
 	if req.ID != nil {
+		sub, err := h.pushNotifier.Repo.GetByID(c.Context(), *req.ID)
+		if err != nil || sub == nil || sub.MailboxID != ctx.Mailbox.ID {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "subscription not found"})
+		}
 		if err := h.pushNotifier.Repo.Disable(c.Context(), *req.ID); err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to unsubscribe"})
 		}
@@ -132,6 +139,9 @@ func (h *Handler) PushTest(c fiber.Ctx) error {
 	}
 	if err := c.Bind().JSON(&req); err != nil || req.Endpoint == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "endpoint required"})
+	}
+	if err := push.ValidatePushEndpoint(req.Endpoint); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	sub, err := h.pushNotifier.Repo.GetByEndpoint(c.Context(), req.Endpoint)
 	if err != nil || sub == nil || sub.MailboxID != ctx.Mailbox.ID {

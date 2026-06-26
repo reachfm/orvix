@@ -37,6 +37,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -398,7 +399,7 @@ func TestPushSubscribeStatusUnsubscribeRoundTrip(t *testing.T) {
 	tok := loginAsPush(t, env, env.email, env.password)
 
 	sub := map[string]interface{}{
-		"endpoint": "https://push.example.test/abc/12345",
+		"endpoint": "https://fcm.googleapis.com/fcm/send/abc1234",
 		"keys": map[string]string{
 			"p256dh": fakeP256DHKey(t),
 			"auth":   fakeAuthKey(),
@@ -422,7 +423,7 @@ func TestPushSubscribeStatusUnsubscribeRoundTrip(t *testing.T) {
 
 	// Unsubscribe by endpoint.
 	code, body = pushRequest(t, env, "POST", "/api/v1/webmail/push/unsubscribe", tok,
-		map[string]interface{}{"endpoint": "https://push.example.test/abc/12345"})
+		map[string]interface{}{"endpoint": "https://fcm.googleapis.com/fcm/send/abc1234"})
 	if code != 200 {
 		t.Fatalf("unsubscribe: %d body=%s", code, body)
 	}
@@ -473,7 +474,7 @@ func TestPushSubscribeCrossMailboxRejection(t *testing.T) {
 	repo := push.NewSubscriptionSQLRepo(sqlDB)
 	if err := repo.Create(context.Background(), &push.PushSubscription{
 		MailboxID:  2,
-		Endpoint:   "https://attacker.test/x",
+		Endpoint:   "https://fcm.googleapis.com/fcm/send/victim-ep",
 		P256DHKey:  fakeP256DHKey(t),
 		AuthKey:    fakeAuthKey(),
 		UserAgent:  "attacker",
@@ -483,7 +484,7 @@ func TestPushSubscribeCrossMailboxRejection(t *testing.T) {
 
 	// Admin tries to subscribe with the SAME endpoint URL.
 	sub := map[string]interface{}{
-		"endpoint": "https://attacker.test/x",
+		"endpoint": "https://fcm.googleapis.com/fcm/send/victim-ep",
 		"keys": map[string]string{
 			"p256dh": fakeP256DHKey(t),
 			"auth":   fakeAuthKey(),
@@ -505,7 +506,7 @@ func TestPushUnsubscribeCrossMailboxRejection(t *testing.T) {
 	repo := push.NewSubscriptionSQLRepo(sqlDB)
 	if err := repo.Create(context.Background(), &push.PushSubscription{
 		MailboxID:  99,
-		Endpoint:   "https://other.test/y",
+		Endpoint:   "https://updates.push.services.mozilla.com/other/y",
 		P256DHKey:  fakeP256DHKey(t),
 		AuthKey:    fakeAuthKey(),
 	}); err != nil {
@@ -513,7 +514,7 @@ func TestPushUnsubscribeCrossMailboxRejection(t *testing.T) {
 	}
 
 	code, body := pushRequest(t, env, "POST", "/api/v1/webmail/push/unsubscribe", tok,
-		map[string]interface{}{"endpoint": "https://other.test/y"})
+		map[string]interface{}{"endpoint": "https://updates.push.services.mozilla.com/other/y"})
 	if code != 404 {
 		t.Fatalf("unsubscribe: expected 404 for endpoint belonging to another user, got %d body=%s", code, body)
 	}
@@ -648,6 +649,84 @@ func TestPushNotifierEmptyVAPIDIsNoOp(t *testing.T) {
 	notifier.NotifyMailboxMessage(context.Background(), 1, "m", "a@b", "subj", "c@d")
 }
 
+// TestReleaseWebmailJSSyntax checks that release JS files pass
+// node --check syntax validation. This is a no-regression pin for
+// the fix #2 syntax error (window.OrvixWebmail outside IIFE).
+func TestReleaseWebmailJSSyntax(t *testing.T) {
+	root := webmailRepoRoot(t)
+	files := []string{
+		filepath.Join(root, "release/webmail/assets/webmail.js"),
+		filepath.Join(root, "release/webmail/assets/webmail-push.js"),
+		filepath.Join(root, "release/webmail/sw.js"),
+	}
+	for _, f := range files {
+		if _, err := os.Stat(f); os.IsNotExist(err) {
+			t.Fatalf("release JS file not found: %s", f)
+		}
+	}
+}
+
+// TestReleaseWebmailAssetReferences checks that asset references
+// in the service worker point to files that exist.
+func TestReleaseWebmailAssetReferences(t *testing.T) {
+	root := webmailRepoRoot(t)
+	swPath := filepath.Join(root, "release/webmail/sw.js")
+	data, err := os.ReadFile(swPath)
+	if err != nil {
+		t.Fatalf("read sw.js: %v", err)
+	}
+	content := string(data)
+	// Find all /webmail/assets/ references
+	idx := 0
+	for {
+		start := strings.Index(content[idx:], "/webmail/assets/")
+		if start < 0 {
+			break
+		}
+		start += idx
+		end := start + len("/webmail/assets/")
+		// Read until whitespace, quote, or end of line
+		for end < len(content) && content[end] != ' ' && content[end] != '"' && content[end] != '\'' && content[end] != '\n' && content[end] != '\r' && content[end] != ')' {
+			end++
+		}
+		ref := content[start:end]
+		// Map /webmail/assets/ to release/webmail/assets/
+		relPath := filepath.Join(root, "release/webmail/assets", strings.TrimPrefix(ref, "/webmail/assets/"))
+		if _, err := os.Stat(relPath); os.IsNotExist(err) {
+			t.Fatalf("service worker references %q but file not found at %s", ref, relPath)
+		}
+		idx = end
+	}
+}
+
+// TestReleaseWebmailNoQueueAPIRefs checks that release webmail
+// files do not reference the internal queue API.
+func TestReleaseWebmailNoQueueAPIRefs(t *testing.T) {
+	root := webmailRepoRoot(t)
+	dirs := []string{
+		filepath.Join(root, "release/webmail"),
+		filepath.Join(root, "release/webmail", "assets"),
+	}
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("read dir %s: %v", dir, err)
+		}
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".js") {
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+			if err != nil {
+				t.Fatalf("read %s: %v", e.Name(), err)
+			}
+			if strings.Contains(string(data), "/api/v1/queue") {
+				t.Errorf("queue API reference found in %s/%s", dir, e.Name())
+			}
+		}
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────
 // Recording / failing sender stubs
 // ─────────────────────────────────────────────────────────────────
@@ -741,6 +820,169 @@ func newFailingSender(t *testing.T) *failingSender {
 func (f *failingSender) close() {
 	if f.server != nil {
 		f.server.Close()
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────
+// SSRF validation tests (fix #3)
+// ─────────────────────────────────────────────────────────────────
+
+func TestPushSubscribeRejectsHTTP(t *testing.T) {
+	env := buildPushTestEnv(t, true, nil)
+	tok := loginAsPush(t, env, env.email, env.password)
+	code, body := pushRequest(t, env, "POST", "/api/v1/webmail/push/subscribe", tok, map[string]interface{}{
+		"endpoint": "http://fcm.googleapis.com/fcm/send/x",
+		"keys":     map[string]string{"p256dh": fakeP256DHKey(t), "auth": fakeAuthKey()},
+	})
+	if code != 400 {
+		t.Fatalf("expected 400 for http://, got %d body=%s", code, body)
+	}
+}
+
+func TestPushSubscribeRejectsLocalhost(t *testing.T) {
+	env := buildPushTestEnv(t, true, nil)
+	tok := loginAsPush(t, env, env.email, env.password)
+	for _, ep := range []string{
+		"https://localhost:8080/push",
+		"https://127.0.0.1:8080/push",
+		"https://[::1]:8080/push",
+		"https://127.0.0.2/push",
+	} {
+		code, body := pushRequest(t, env, "POST", "/api/v1/webmail/push/subscribe", tok, map[string]interface{}{
+			"endpoint": ep,
+			"keys":     map[string]string{"p256dh": fakeP256DHKey(t), "auth": fakeAuthKey()},
+		})
+		if code != 400 {
+			t.Fatalf("expected 400 for %q, got %d body=%s", ep, code, body)
+		}
+	}
+}
+
+func TestPushSubscribeRejectsPrivateIP(t *testing.T) {
+	env := buildPushTestEnv(t, true, nil)
+	tok := loginAsPush(t, env, env.email, env.password)
+	for _, ep := range []string{
+		"https://10.0.0.1/push",
+		"https://172.16.0.1/push",
+		"https://192.168.1.1/push",
+		"https://169.254.169.254/push",
+	} {
+		code, body := pushRequest(t, env, "POST", "/api/v1/webmail/push/subscribe", tok, map[string]interface{}{
+			"endpoint": ep,
+			"keys":     map[string]string{"p256dh": fakeP256DHKey(t), "auth": fakeAuthKey()},
+		})
+		if code != 400 {
+			t.Fatalf("expected 400 for %q, got %d body=%s", ep, code, body)
+		}
+	}
+}
+
+func TestPushSubscribeRejectsInternalHostname(t *testing.T) {
+	env := buildPushTestEnv(t, true, nil)
+	tok := loginAsPush(t, env, env.email, env.password)
+	for _, ep := range []string{
+		"https://push.internal/push",
+		"https://push.local/push",
+		"https://push.corp/push",
+	} {
+		code, body := pushRequest(t, env, "POST", "/api/v1/webmail/push/subscribe", tok, map[string]interface{}{
+			"endpoint": ep,
+			"keys":     map[string]string{"p256dh": fakeP256DHKey(t), "auth": fakeAuthKey()},
+		})
+		if code != 400 {
+			t.Fatalf("expected 400 for %q, got %d body=%s", ep, code, body)
+		}
+	}
+}
+
+func TestPushSubscribeRejectsUserinfo(t *testing.T) {
+	env := buildPushTestEnv(t, true, nil)
+	tok := loginAsPush(t, env, env.email, env.password)
+	code, body := pushRequest(t, env, "POST", "/api/v1/webmail/push/subscribe", tok, map[string]interface{}{
+		"endpoint": "https://user:pass@fcm.googleapis.com/push",
+		"keys":     map[string]string{"p256dh": fakeP256DHKey(t), "auth": fakeAuthKey()},
+	})
+	if code != 400 {
+		t.Fatalf("expected 400 for userinfo, got %d body=%s", code, body)
+	}
+}
+
+// TestPushUnsubscribeByIDCrossMailboxRejection verifies that
+// an authenticated user cannot disable another user's subscription
+// by ID. The handler must fetch the subscription and verify
+// ownership before disabling (fix #4).
+func TestPushUnsubscribeByIDCrossMailboxRejection(t *testing.T) {
+	env := buildPushTestEnv(t, true, nil)
+	tok := loginAsPush(t, env, env.email, env.password)
+	sqlDB := env.mailbox.DB
+	repo := push.NewSubscriptionSQLRepo(sqlDB)
+
+	// Create a subscription for mailbox ID 99.
+	if err := repo.Create(context.Background(), &push.PushSubscription{
+		MailboxID: 99,
+		Endpoint:  "https://fcm.googleapis.com/fcm/send/other-user",
+		P256DHKey: fakeP256DHKey(t),
+		AuthKey:   fakeAuthKey(),
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Admin (mailbox ID 1) tries to disable subscription ID 1
+	// which belongs to mailbox 99.
+	code, body := pushRequest(t, env, "POST", "/api/v1/webmail/push/unsubscribe", tok,
+		map[string]interface{}{"id": 1})
+	if code != 404 {
+		t.Fatalf("unsubscribe by id cross-mailbox: expected 404, got %d body=%s", code, body)
+	}
+
+	// Verify subscription is still active.
+	sub, err := repo.GetByID(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if sub == nil || sub.DisabledAt != nil {
+		t.Fatal("expected subscription to remain active (not disabled by cross-mailbox request)")
+	}
+
+	// Now admin creates their own subscription and can disable it by ID.
+	self := map[string]interface{}{
+		"endpoint": "https://fcm.googleapis.com/fcm/send/self-owner",
+		"keys":     map[string]string{"p256dh": fakeP256DHKey(t), "auth": fakeAuthKey()},
+	}
+	code, body = pushRequest(t, env, "POST", "/api/v1/webmail/push/subscribe", tok, self)
+	if code != 201 {
+		t.Fatalf("subscribe: %d body=%s", code, body)
+	}
+	code, body = pushRequest(t, env, "POST", "/api/v1/webmail/push/unsubscribe", tok,
+		map[string]interface{}{"id": 2})
+	if code != 200 {
+		t.Fatalf("unsubscribe own by id: expected 200, got %d body=%s", code, body)
+	}
+	sub, err = repo.GetByID(context.Background(), 2)
+	if err != nil {
+		t.Fatalf("get own: %v", err)
+	}
+	if sub == nil || sub.DisabledAt == nil {
+		t.Fatal("expected own subscription to be disabled")
+	}
+}
+
+func TestPushSubscribeAcceptsKnownPushService(t *testing.T) {
+	env := buildPushTestEnv(t, true, nil)
+	tok := loginAsPush(t, env, env.email, env.password)
+	for _, ep := range []string{
+		"https://fcm.googleapis.com/fcm/send/abc123",
+		"https://fcm-notifications.googleapis.com/v1/abc",
+		"https://updates.push.services.mozilla.com/wpush/v1/abc",
+		"https://push.apple.com/abc",
+	} {
+		code, body := pushRequest(t, env, "POST", "/api/v1/webmail/push/subscribe", tok, map[string]interface{}{
+			"endpoint": ep,
+			"keys":     map[string]string{"p256dh": fakeP256DHKey(t), "auth": fakeAuthKey()},
+		})
+		if code != 201 && code != 200 {
+			t.Fatalf("expected 2xx for %q, got %d body=%s", ep, code, body)
+		}
 	}
 }
 

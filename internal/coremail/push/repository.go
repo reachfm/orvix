@@ -10,6 +10,7 @@ import (
 type SubscriptionRepository interface {
 	Create(ctx context.Context, sub *PushSubscription) error
 	GetByEndpoint(ctx context.Context, endpoint string) (*PushSubscription, error)
+	GetByID(ctx context.Context, id uint) (*PushSubscription, error)
 	ListByMailbox(ctx context.Context, mailboxID uint, filter *PushSubscriptionFilter) ([]PushSubscription, error)
 	UpdateLastSeen(ctx context.Context, id uint, t time.Time) error
 	Update(ctx context.Context, sub *PushSubscription) error
@@ -64,6 +65,14 @@ func (r *SubscriptionSQLRepo) GetByEndpoint(ctx context.Context, endpoint string
 	row := e.QueryRowContext(ctx,
 		`SELECT id, mailbox_id, endpoint, p256dh_key, auth_key, user_agent, disabled_at, last_seen_at, created_at, updated_at
 		 FROM push_subscriptions WHERE endpoint = ?`, endpoint)
+	return scanSubscription(row)
+}
+
+func (r *SubscriptionSQLRepo) GetByID(ctx context.Context, id uint) (*PushSubscription, error) {
+	e := r.exec(nil)
+	row := e.QueryRowContext(ctx,
+		`SELECT id, mailbox_id, endpoint, p256dh_key, auth_key, user_agent, disabled_at, last_seen_at, created_at, updated_at
+		 FROM push_subscriptions WHERE id = ?`, id)
 	return scanSubscription(row)
 }
 

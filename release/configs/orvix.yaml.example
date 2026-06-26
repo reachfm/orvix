@@ -124,7 +124,13 @@ coremail:
   # default of "mailto:admin@<webmail_host>" if you do not
   # customise it.
   vapid_public_key: ""
+  # Path to a file containing the VAPID private key (URL-safe base64,
+  # no padding, exactly 43 characters). The file should be owned by
+  # root:root with mode 0600. When this is set and vapid_private_key
+  # is empty, the server reads the key value from this file at boot.
+  # The env override ORVIX_COREMAIL_VAPID_PRIVATE_KEY_FILE also works.
   vapid_private_key: ""
+  vapid_private_key_file: ""
   vapid_subject: "mailto:admin@example.com"
 
 auth:

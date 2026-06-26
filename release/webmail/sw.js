@@ -7,13 +7,11 @@
  *   https://webmail.<domain>/webmail/  (dedicated hostname)
  *   https://admin.<domain>/webmail/    (admin hostname serving webmail SPA)
  *
- * The icon + badge paths use absolute paths so the browser
- * fetches them from the same origin regardless of scope. The
- * /assets/ prefix is rewritten to /webmail/assets/ by the SPA
- * wildcard route at the backend — see internal/api/router.go
- * serveSPA — so the file resolves to release/webmail/assets/icon-192.png
- * in both cases. The bundled webmail-push.js publishes
- * /webmail/assets/icon-192.png alongside /webmail/assets/webmail.js.
+ * Notification icons: the browser shows the notification without
+ * an icon/badge by default. Operators who want a branded icon
+ * should place icon-192.png and icon-512.png under
+ * release/webmail/assets/ and add the icon/badge properties to
+ * the showNotification call above.
  */
 
 self.addEventListener("push", event => {
@@ -25,8 +23,6 @@ self.addEventListener("push", event => {
   } catch (_) { }
   const promise = self.registration.showNotification(data.title || "New mail received", {
     body: data.body || "You have a new message.",
-    icon: "/webmail/assets/icon-192.png",
-    badge: "/webmail/assets/icon-192.png",
     data: {
       // The notification click handler routes the user into the
       // SPA. The hash route /#inbox is honoured by the

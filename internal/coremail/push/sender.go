@@ -14,9 +14,24 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
+)
+
+// SSRF-safe push endpoint validation error messages. Exported as
+// constants so the HTTP handler can return the same string to the
+// caller without hardcoding.
+const (
+	ErrEndpointScheme     = "push endpoint must use HTTPS"
+	ErrEndpointUserinfo   = "push endpoint must not contain userinfo"
+	ErrEndpointLocalhost  = "push endpoint must not target localhost"
+	ErrEndpointPrivateIP  = "push endpoint must not target a private IP range"
+	ErrEndpointUnsafePort = "push endpoint port is not allowed"
+	ErrEndpointNoDNS      = "push endpoint hostname does not resolve to a public IP"
+	ErrEndpointRedirect   = "push endpoint must not redirect"
 )
 
 type WebPushSender struct {
@@ -24,10 +39,24 @@ type WebPushSender struct {
 	client *http.Client
 }
 
+func defaultPushClient() *http.Client {
+	return &http.Client{
+		Timeout: 15 * time.Second,
+		// Prevent redirect-based SSRF: push services do not redirect
+		// push POST requests to a different endpoint; the endpoint URL
+		// is the final delivery point. Disabling redirects ensures a
+		// malicious or compromised endpoint cannot chain a redirect
+		// to an internal address.
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
 func NewWebPushSender(vapid VAPIDConfig) *WebPushSender {
 	return &WebPushSender{
 		vapid:  vapid,
-		client: &http.Client{Timeout: 15 * time.Second},
+		client: defaultPushClient(),
 	}
 }
 
@@ -52,6 +81,186 @@ type vapidClaims struct {
 	Aud string `json:"aud"`
 	Exp int64  `json:"exp"`
 	Sub string `json:"sub"`
+}
+
+// ValidatePushEndpoint checks that a push endpoint URL is safe to
+// POST to. It enforces:
+//   - scheme MUST be https
+//   - no userinfo (embedded credentials)
+//   - host MUST NOT be localhost or a loopback IP
+//   - host MUST NOT be a private / RFC1918 / RFC6598 / link-local /
+//     unique-local / metadata IP range
+//   - hostname MUST resolve to at least one public IPv4 address
+//     (or be a known push service domain)
+//   - port MUST NOT be a well-known non-HTTPS unsafe port
+//     (< 1024 except 443), unless the port is explicitly allowed
+//     by the allowlist.
+//   - known push service domains (FCM, Mozilla, Apple) bypass
+//     DNS resolution for reliability (they already use public IPs).
+//
+// The check is conservative: if there is any doubt about the safety
+// of the endpoint, the endpoint is rejected.
+func ValidatePushEndpoint(endpoint string) error {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("invalid endpoint URL: %w", err)
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf(ErrEndpointScheme)
+	}
+	if u.User != nil && u.User.String() != "" {
+		return fmt.Errorf(ErrEndpointUserinfo)
+	}
+	host := u.Hostname()
+	port := u.Port()
+
+	// Reject bare IPs that are private.
+	if ip := net.ParseIP(host); ip != nil {
+		if isPrivateIP(ip) {
+			return fmt.Errorf(ErrEndpointPrivateIP)
+		}
+		return nil
+	}
+
+	// Reject localhost hostnames.
+	lowerHost := strings.ToLower(host)
+	if lowerHost == "localhost" || strings.HasPrefix(lowerHost, "localhost.") {
+		return fmt.Errorf(ErrEndpointLocalhost)
+	}
+
+	// Reject non-public TLDs / internal suffixes.
+	if isInternalHostname(lowerHost) {
+		return fmt.Errorf("push endpoint hostname %q appears to be internal", host)
+	}
+
+	// Reject known-bad ports (< 1024 and not 443, not common
+	// push-service ports). Known push services use 443 or 8443;
+	// we also allow 8443 for Mozilla autopush.
+	unsafePort := false
+	switch port {
+	case "":
+		// default HTTPS port — safe
+	case "443", "8443":
+		// allowed
+	default:
+		p := port
+		if n := len(p); n > 0 && p[0] >= '1' && p[0] <= '9' {
+			unsafePort = true
+		}
+	}
+	if unsafePort {
+		return fmt.Errorf(ErrEndpointUnsafePort)
+	}
+
+	// Known push services bypass DNS resolution.
+	if isKnownPushService(lowerHost) {
+		return nil
+	}
+
+	// DNS resolution: verify the host resolves to at least one
+	// public IPv4 address.
+	addrs, err := net.DefaultResolver.LookupHost(context.Background(), host)
+	if err != nil || len(addrs) == 0 {
+		return fmt.Errorf(ErrEndpointNoDNS)
+	}
+	hasPublic := false
+	for _, addr := range addrs {
+		ip := net.ParseIP(addr)
+		if ip == nil {
+			continue
+		}
+		if !isPrivateIP(ip) {
+			hasPublic = true
+			break
+		}
+	}
+	if !hasPublic {
+		return fmt.Errorf(ErrEndpointPrivateIP)
+	}
+	return nil
+}
+
+// isPrivateIP returns true if ip belongs to a private, loopback,
+// link-local, unique-local, or metadata IP range.
+func isPrivateIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if ip.IsLoopback() {
+		return true
+	}
+	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+	if ip.IsPrivate() {
+		return true
+	}
+	if ip.IsUnspecified() {
+		return true
+	}
+	// RFC 6598 — Carrier-grade NAT (100.64.0.0/10)
+	if ip4 := ip.To4(); ip4 != nil {
+		if ip4[0] == 100 && ip4[1]&0xC0 == 64 {
+			return true
+		}
+		// 169.254.0.0/16 — link-local (already covered by IsLinkLocalUnicast
+		// for IPv4 but check explicitly for the metadata IP 169.254.169.254)
+		if ip4[0] == 169 && ip4[1] == 254 {
+			return true
+		}
+	}
+	// Unique-local IPv6 (fc00::/7)
+	if ip4 := ip.To16(); ip4 != nil && len(ip4) == 16 {
+		if ip4[0]&0xFE == 0xFC {
+			return true
+		}
+	}
+	return false
+}
+
+// isInternalHostname returns true if the hostname looks like it
+// belongs to a private/internal network.
+func isInternalHostname(host string) bool {
+	parts := strings.Split(host, ".")
+	if len(parts) < 2 {
+		return true // bare hostname with no dot
+	}
+	suffix := parts[len(parts)-1]
+	switch suffix {
+	case "local", "internal", "corp", "home", "lan", "intranet",
+		"private", "test", "example", "invalid", "localhost":
+		return true
+	}
+	// .arpa is used for reverse DNS — never a valid push endpoint.
+	if suffix == "arpa" {
+		return true
+	}
+	return false
+}
+
+// isKnownPushService returns true for well-known browser push
+// service hostnames. These are always public and bypass DNS
+// resolution for reliability.
+func isKnownPushService(host string) bool {
+	switch {
+	case strings.HasSuffix(host, ".fcm.googleapis.com"),
+		strings.HasSuffix(host, ".fcm-notifications.googleapis.com"),
+		host == "fcm.googleapis.com",
+		host == "fcm-notifications.googleapis.com":
+		return true
+	case strings.HasSuffix(host, ".updates.push.services.mozilla.com"),
+		strings.HasSuffix(host, ".push.mozilla.com"),
+		host == "updates.push.services.mozilla.com",
+		host == "push.mozilla.com":
+		return true
+	case strings.HasSuffix(host, ".push.apple.com"),
+		strings.HasSuffix(host, ".web.push.apple.com"),
+		host == "push.apple.com",
+		host == "web.push.apple.com":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *WebPushSender) Send(ctx context.Context, sub *PushSubscription, payload []byte) error {

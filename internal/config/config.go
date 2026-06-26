@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/viper"
@@ -60,6 +62,7 @@ type CoreMailConfig struct {
 	WorkerInterval            time.Duration `mapstructure:"worker_interval"`
 	VAPIDPublicKey            string        `mapstructure:"vapid_public_key"`
 	VAPIDPrivateKey           string        `mapstructure:"vapid_private_key"`
+	VAPIDPrivateKeyFile       string        `mapstructure:"vapid_private_key_file"`
 	VAPIDSubject              string        `mapstructure:"vapid_subject"`
 }
 
@@ -416,6 +419,17 @@ func Load(logger *zap.Logger) (*Config, error) {
 
 	applyEnvOverrides(v, cfg)
 
+	// After env overrides, if vapid_private_key_file is set and the
+	// direct value is still empty, read the key from the file.
+	if cfg.CoreMail.VAPIDPrivateKey == "" && cfg.CoreMail.VAPIDPrivateKeyFile != "" {
+		if data, err := os.ReadFile(cfg.CoreMail.VAPIDPrivateKeyFile); err == nil {
+			trimmed := strings.TrimSpace(string(data))
+			if trimmed != "" {
+				cfg.CoreMail.VAPIDPrivateKey = trimmed
+			}
+		}
+	}
+
 	cfg.validate()
 
 	logger.Info("configuration loaded",
@@ -502,6 +516,9 @@ func applyEnvOverrides(v *viper.Viper, cfg *Config) {
 	}
 	if s := v.GetString("COREMAIL_VAPID_PRIVATE_KEY"); s != "" {
 		cfg.CoreMail.VAPIDPrivateKey = s
+	}
+	if s := v.GetString("COREMAIL_VAPID_PRIVATE_KEY_FILE"); s != "" {
+		cfg.CoreMail.VAPIDPrivateKeyFile = s
 	}
 	if s := v.GetString("COREMAIL_VAPID_SUBJECT"); s != "" {
 		cfg.CoreMail.VAPIDSubject = s

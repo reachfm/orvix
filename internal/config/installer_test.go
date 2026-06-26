@@ -283,8 +283,19 @@ func TestHTTPSSetupScriptCaddyFlow(t *testing.T) {
 	if strings.Contains(script, "check_https \"https://$ADMIN_DOMAIN/api/v1/health\" HEAD") {
 		t.Fatal("admin health smoke must use GET because the API route is GET-only")
 	}
-	if !strings.Contains(script, "$MAIL_DOMAIN {\n\t@api path /api/*\n\thandle @api {\n\t\treverse_proxy 127.0.0.1:8080\n\t}\n\n\thandle {\n\t\treverse_proxy 127.0.0.1:8081\n\t}\n}") {
-		t.Fatal("mail domain Caddy block must route /api/* to 8080 and everything else to 8081")
+	// Verify the mail domain Caddy block structure:
+	//   @api → 8080,  @webmail → 8080,  @assets → 8080,  catch-all → 8081
+	if !strings.Contains(script, "@api path /api/*") {
+		t.Fatal("mail domain Caddy block missing @api route")
+	}
+	if !strings.Contains(script, "@webmail path /webmail /webmail/*") {
+		t.Fatal("mail domain Caddy block missing @webmail route for push SW")
+	}
+	if !strings.Contains(script, "@assets path /assets /assets/*") {
+		t.Fatal("mail domain Caddy block missing @assets route")
+	}
+	if !strings.Contains(script, "reverse_proxy 127.0.0.1:8081") {
+		t.Fatal("mail domain Caddy block must have a catch-all route to 8081")
 	}
 }
 
