@@ -538,6 +538,10 @@ coremail:
   worker_interval: 5s
   license_file_path: /etc/orvix/license.json
   license_authority_cache_path: /var/lib/orvix/license-cache.json
+  vapid_public_key: ""
+  vapid_private_key: ""
+  vapid_private_key_file: ""
+  vapid_subject: ""
 
 auth:
   jwt_key_path: /var/lib/orvix/jwt_key.pem
@@ -578,6 +582,36 @@ backup:
 YAML
     chown orvix:orvix "$ORVIX_CONFIG"
     chmod 0640 "$ORVIX_CONFIG"
+}
+
+install_release_scripts() {
+    run_quiet install -d -o root -g root -m 0755 /usr/share/orvix/scripts
+    if [ -f "$ORVIX_SOURCE_DIR/release/scripts/generate-vapid-keys.sh" ]; then
+        run_quiet install -m 0755 -o root -g root "$ORVIX_SOURCE_DIR/release/scripts/generate-vapid-keys.sh" /usr/share/orvix/scripts/generate-vapid-keys.sh
+    fi
+}
+
+provision_vapid_keys() {
+    local admin_email="$1"
+    local helper="/usr/share/orvix/scripts/generate-vapid-keys.sh"
+    if [ ! -x "$helper" ]; then
+        fail "VAPID generator missing at $helper"
+    fi
+    if [ -s /etc/orvix/vapid_private.key ]; then
+        log_detail "VAPID private key already exists; preserving existing key"
+        return 0
+    fi
+    run_quiet "$helper" --write --subject "mailto:$admin_email"
+    [ -s /etc/orvix/vapid_public.key ] || fail "VAPID public key was not created"
+    [ -s /etc/orvix/vapid_private.key ] || fail "VAPID private key was not created"
+    local priv_owner priv_mode
+    priv_owner="$(stat -c '%U:%G' /etc/orvix/vapid_private.key 2>/dev/null || true)"
+    priv_mode="$(stat -c '%a' /etc/orvix/vapid_private.key 2>/dev/null || true)"
+    [ "$priv_owner" = "root:orvix" ] || fail "VAPID private key owner must be root:orvix"
+    [ "$priv_mode" = "640" ] || fail "VAPID private key mode must be 0640"
+    grep -q 'vapid_public_key:' "$ORVIX_CONFIG" || fail "config missing coremail.vapid_public_key"
+    grep -q 'vapid_private_key_file: "/etc/orvix/vapid_private.key"' "$ORVIX_CONFIG" || fail "config missing coremail.vapid_private_key_file"
+    grep -q "vapid_subject: \"mailto:$admin_email\"" "$ORVIX_CONFIG" || fail "config missing coremail.vapid_subject"
 }
 
 write_service() {
@@ -1412,7 +1446,7 @@ main() {
 	run_quiet apt-get install -y -qq \
 		-o Dpkg::Options::=--force-confdef \
 		-o Dpkg::Options::=--force-confold \
-		ca-certificates curl jq sqlite3 openssl tar gzip redis-server libcap2-bin iproute2 ufw
+		ca-certificates curl jq sqlite3 openssl python3 tar gzip redis-server libcap2-bin iproute2 ufw
 	run_quiet systemctl enable --now redis-server
 
     set_step "user" "Service identity" 35
@@ -1423,6 +1457,7 @@ main() {
     run_quiet install -d -o orvix -g orvix -m 0750 /etc/orvix /var/lib/orvix /var/lib/orvix/coremail /var/lib/orvix/backups /var/log/orvix
     run_quiet install -d -o root -g root -m 0755 /usr/share/orvix/admin
     run_quiet install -d -o root -g root -m 0755 /usr/share/orvix/webmail
+    run_quiet install -d -o root -g root -m 0755 /usr/share/orvix/scripts
     # Validate and self-heal runtime directories.
     validate_directory /opt/orvix root:root 0755
     validate_directory /usr/share/orvix/admin root:root 0755
@@ -1446,6 +1481,8 @@ main() {
     set_step "configuration" "Configuration provisioning" 75
     write_config "$primary_domain"
     write_bootstrap_env "$admin_email" "$admin_password"
+    install_release_scripts
+    provision_vapid_keys "$admin_email"
     run_quiet cp -R "$ORVIX_SOURCE_DIR"/release/admin/. /usr/share/orvix/admin/
     run_quiet cp -R "$ORVIX_SOURCE_DIR"/release/webmail/. /usr/share/orvix/webmail/
     run_quiet chown -R root:root /usr/share/orvix/admin

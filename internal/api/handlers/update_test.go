@@ -1078,8 +1078,13 @@ func TestInstallScript_SafetyNoSecrets(t *testing.T) {
 			t.Error("install.sh must not echo auth tokens")
 		}
 	}
-	// Never print private keys.
-	if strings.Contains(content, "PRIVATE KEY") || strings.Contains(content, "private_key") {
-		t.Error("install.sh must not echo private keys")
+	// Never print private-key values. Config field names such as
+	// coremail.vapid_private_key_file are safe and required, but
+	// echo/printf/log lines must not disclose key material.
+	for _, line := range strings.Split(content, "\n") {
+		if (strings.Contains(line, "echo") || strings.Contains(line, "printf") || strings.Contains(line, "log_detail")) &&
+			(strings.Contains(line, "$PRIVATE_KEY") || strings.Contains(line, "PRIVATE KEY")) {
+			t.Errorf("install.sh must not echo private keys: %s", line)
+		}
 	}
 }

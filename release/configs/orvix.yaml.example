@@ -115,8 +115,9 @@ coremail:
   # --write (the default safe behaviour) does NOT print the
   # private key to the terminal. Instead it:
   #
-  #   * writes /etc/orvix/vapid_private.key with mode 0600
-  #     owned by root:root,
+  #   * writes /etc/orvix/vapid_private.key with mode 0640
+  #     owned by root:orvix so the non-root orvix service can
+  #     read it without exposing it to other users,
   #   * writes the public key into coremail.vapid_public_key
   #     in /etc/orvix/orvix.yaml,
   #   * records the file path in
@@ -144,7 +145,7 @@ coremail:
   #                                       empty AND the operator
   #                                       explicitly opts into an
   #                                       inline setup.
-  #   coremail.vapid_private_key_file  — path to a 0600 root-owned
+  #   coremail.vapid_private_key_file  — path to a 0640 root:orvix
   #                                       file containing the private
   #                                       key. Preferred.
   #   coremail.vapid_subject           — contact URL (mailto: or
