@@ -2631,6 +2631,20 @@
     });
   }
 
+  // Push notifications: if the bundled webmail-push.js module
+    // is present, give it a chance to register the service worker
+    // and render its banner / settings entry. The module is a
+    // no-op on browsers without Web Push support, so this is safe
+    // even when the module is not loaded.
+    try {
+      if (window.OrvixWebmailPush && typeof window.OrvixWebmailPush.onInit === 'function') {
+        window.OrvixWebmailPush.onInit();
+      }
+    } catch (e) {
+      /* push is optional — never block the SPA on it */
+    }
+  }
+
   // Public exports (for tests and the auth gate integration).
   // The auth-gate.js calls window.OrvixWebmail.init() once
   // /api/v1/me has confirmed a live session. We do NOT

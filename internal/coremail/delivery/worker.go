@@ -191,7 +191,32 @@ func (w *DeliveryWorker) deliver(ctx context.Context, entry *queue.QueueEntry) e
 		w.Metrics.RecordDelivery(result.DurationMs)
 		w.recordDeliveryEvent(ctx, entry, observability.EventQueueDelivered, result)
 		if isLocal && w.PushNotifier != nil && entry.MailboxID != nil && result.Success {
-			w.PushNotifier.NotifyMailboxMessage(ctx, *entry.MailboxID, entry.MessageID, entry.FromAddress, "")
+			// Local INBOX delivery: notify the recipient mailbox,
+			// but ONLY if the message came from a different sender.
+			//
+			// Self-send filter: for a single-recipient local
+			// delivery, entry.ToAddress IS the recipient's email
+			// address (queue rows are split per-recipient). When
+			// from == to, the message is a self-send (the user
+			// mailed themselves from webmail). The PushNotifier
+			// itself enforces the filter (case-insensitive) so the
+			// worker doesn't have to pre-check.
+			//
+			// Sent-only copies go through a separate queue entry
+			// that writes to the Sent folder, not INBOX — that
+			// path never reaches this branch because the Sent-copy
+			// worker is a different queue row with DeliveryMode
+			// indicating a Sent-folder write, not INBOX delivery.
+			//
+			// msg was loaded at the top of deliver(); pass its
+			// subject through so the push payload can carry a
+			// useful preview (≤100 chars after truncation).
+			subject := ""
+			if msg != nil {
+				subject = msg.Subject
+			}
+			recipientEmail := strings.TrimSpace(entry.ToAddress)
+			w.PushNotifier.NotifyMailboxMessage(ctx, *entry.MailboxID, entry.MessageID, entry.FromAddress, subject, recipientEmail)
 		}
 		return w.Queue.AckDelivered(ctx, entry.ID)
 

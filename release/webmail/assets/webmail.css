@@ -2169,3 +2169,163 @@ html[dir="rtl"] .message.selected,
 html[dir="rtl"] .message.checked {
   box-shadow: inset -3px 0 0 var(--accent);
 }
+
+/* =====================================================================
+   Web Push notifications — banner + sidebar link + settings modal
+   (WEBMAIL-ENTERPRISE-PUSH-NOTIFICATIONS)
+
+   The banner sits below the topbar; it appears only when push
+   is unsupported / blocked / not yet enabled on this device.
+   The sidebar link opens a settings modal that lets the user
+   enable / disable / test push without leaving the webmail UI.
+   ===================================================================== */
+
+.orvix-push-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 10px 18px;
+  margin: 0;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border-2);
+  color: var(--text-1);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.orvix-push-banner[hidden] {
+  display: none;
+}
+.orvix-push-banner-warn {
+  background: var(--warning-bg, rgba(217, 119, 6, 0.15));
+  color: var(--warning-text, #f7c97a);
+  border-bottom-color: var(--warning);
+}
+
+/* Sidebar entry that opens the push settings modal. */
+.sidebar-link {
+  display: block;
+  width: calc(100% - 16px);
+  margin: 4px 8px;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-1);
+  font: inherit;
+  font-size: 13px;
+  text-align: start;
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease),
+              color var(--motion-fast) var(--ease);
+}
+.sidebar-link:hover,
+.sidebar-link:focus-visible {
+  background: var(--bg-hover);
+  color: var(--text-0);
+  outline: none;
+}
+
+/* Push settings modal body. Re-uses the existing .modal /
+   .modal-card / .modal-header / .modal-body primitives so we
+   do not introduce a parallel modal system. */
+.push-settings-body {
+  padding: 22px 26px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+.push-settings-lede {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 13.5px;
+  line-height: 1.55;
+  max-width: 56ch;
+}
+.push-settings-row {
+  margin: 0;
+  display: flex;
+  gap: var(--sp-2);
+  align-items: baseline;
+  color: var(--text-1);
+  font-size: 13.5px;
+}
+.push-settings-row strong {
+  color: var(--text-2);
+  font-weight: 500;
+  font-size: 12.5px;
+  letter-spacing: 0.2px;
+}
+.push-settings-row-count {
+  padding-block: 4px;
+  border-block-end: 1px solid var(--border-1);
+}
+.push-settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  margin-block: var(--sp-2);
+}
+.push-settings-actions .btn {
+  min-width: 160px;
+  font-weight: 500;
+}
+.push-settings-note {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-1);
+  border-radius: var(--r-md);
+  color: var(--text-2);
+  font-size: 12.5px;
+  line-height: 1.5;
+  word-break: break-all;
+  font-family: var(--font-mono);
+}
+.push-settings-warn {
+  border-color: var(--warning);
+  color: var(--warning-text, #f7c97a);
+  background: var(--warning-bg, rgba(217, 119, 6, 0.08));
+  font-family: var(--font-sans);
+}
+.push-settings-error {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: var(--danger-bg, rgba(220, 38, 38, 0.08));
+  font-family: var(--font-sans);
+}
+.push-settings-list {
+  list-style: none;
+  margin: var(--sp-2) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.push-settings-list li {
+  font-size: 12px;
+  color: var(--text-2);
+  padding: 6px 10px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-1);
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+.push-settings-list strong {
+  font-family: var(--font-sans);
+  text-transform: uppercase;
+  font-size: 10.5px;
+  letter-spacing: 0.6px;
+  color: var(--accent);
+  margin-inline-end: 6px;
+}
+html[dir="rtl"] .orvix-push-banner {
+  /* RTL: keep the icon on the trailing edge so the line reads
+     naturally in Arabic / Hebrew. */
+  flex-direction: row-reverse;
+}
+html[dir="rtl"] .push-settings-lede,
+html[dir="rtl"] .push-settings-row,
+html[dir="rtl"] .push-settings-note {
+  text-align: right;
+}

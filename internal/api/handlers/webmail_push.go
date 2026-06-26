@@ -95,20 +95,26 @@ func (h *Handler) PushStatus(c fiber.Ctx) error {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": reason})
 	}
 	enabled := h.pushNotifier != nil && h.pushNotifier.IsEnabled()
-	resp := fiber.Map{
-		"enabled":           enabled,
-		"active_count":      0,
-		"subscriptions":     []push.PushSubscription{},
-		"permission_status": c.Get("X-Push-Permission", "unknown"),
-	}
-	if enabled {
-		resp["vapid_public_key"] = h.pushNotifier.VAPID.PublicKey
+	views := []push.PushSubscriptionView{}
+	activeCount := 0
+	if enabled && h.pushNotifier.Repo != nil {
 		disabled := false
 		subs, err := h.pushNotifier.Repo.ListByMailbox(c.Context(), ctx.Mailbox.ID, &push.PushSubscriptionFilter{Disabled: &disabled})
 		if err == nil {
-			resp["active_count"] = len(subs)
-			resp["subscriptions"] = subs
+			activeCount = len(subs)
+			for _, sub := range subs {
+				views = append(views, sub.SanitizedView())
+			}
 		}
+	}
+	resp := fiber.Map{
+		"enabled":           enabled,
+		"active_count":      activeCount,
+		"subscriptions":     views,
+		"permission_status": "unknown",
+	}
+	if enabled {
+		resp["vapid_public_key"] = h.pushNotifier.VAPID.PublicKey
 	}
 	return c.JSON(resp)
 }
@@ -131,6 +137,10 @@ func (h *Handler) PushTest(c fiber.Ctx) error {
 	if err != nil || sub == nil || sub.MailboxID != ctx.Mailbox.ID {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "subscription not found"})
 	}
-	h.pushNotifier.NotifyMailboxMessage(c.Context(), ctx.Mailbox.ID, "test-"+time.Now().UTC().Format("20060102150405"), ctx.Mailbox.Email, "Orvix Push Test")
+	// Test notifications bypass the self-send filter because the
+	// operator's test inbox is intentionally the same mailbox.
+	// We pass recipientEmail="" so NotifyMailboxMessage does not
+	// short-circuit on from == recipient.
+	h.pushNotifier.NotifyMailboxMessage(c.Context(), ctx.Mailbox.ID, "test-"+time.Now().UTC().Format("20060102150405"), ctx.Mailbox.Email, "Orvix Push Test", "")
 	return c.JSON(fiber.Map{"status": "sent"})
 }

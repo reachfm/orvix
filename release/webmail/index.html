@@ -27,8 +27,13 @@
   </noscript>
   <!-- The auth-gate overlays its UI on top of <body> if the
        session check fails. webmail.js replaces the shell itself
-       (innerHTML on body) once init() runs. -->
+       (innerHTML on body) once init() runs. webmail-push.js
+       is loaded after webmail.js so it can hook init() via
+       window.OrvixWebmailPush.onInit(). The push module is a
+       no-op on browsers without Web Push support, so it is safe
+       to ship unconditionally. -->
   <script defer src="/assets/auth-gate.js"></script>
   <script defer src="/assets/webmail.js"></script>
+  <script defer src="/assets/webmail-push.js"></script>
 </body>
 </html>

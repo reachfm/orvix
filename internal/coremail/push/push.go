@@ -10,22 +10,118 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"strings"
 	"time"
 
 	"github.com/orvix/orvix/internal/coremail/storage"
 )
 
+// PushSubscription is the row model stored in push_subscriptions.
+//
+// IMPORTANT: P256DHKey and AuthKey are the per-subscriber encryption
+// secrets. They MUST NEVER cross the HTTP boundary. The JSON tags below
+// set `json:"-"` so even an accidental marshalling (e.g. via the JSON
+// debug endpoint, admin tooling, or a future handler that forgets to
+// use a view type) cannot leak them. Handlers that need to expose the
+// subscription to the API surface must use SanitizedView (see below).
+//
+// Endpoint and UserAgent are NOT crypto secrets. Endpoint reveals the
+// push service (FCM/Mozilla/Apple); UserAgent is non-sensitive. They
+// are safe to surface but should be paired with a short fingerprint
+// for UI purposes (see PushSubscriptionView.EndpointFingerprint).
 type PushSubscription struct {
 	ID         uint       `json:"id"`
 	MailboxID  uint       `json:"mailbox_id"`
-	Endpoint   string     `json:"endpoint"`
-	P256DHKey  string     `json:"p256dh_key"`
-	AuthKey    string     `json:"auth_key"`
-	UserAgent  string     `json:"user_agent"`
+	Endpoint   string     `json:"-"`
+	P256DHKey  string     `json:"-"`
+	AuthKey    string     `json:"-"`
+	UserAgent  string     `json:"-"`
 	DisabledAt *time.Time `json:"disabled_at,omitempty"`
 	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
 	UpdatedAt  time.Time  `json:"updated_at"`
+}
+
+// PushSubscriptionView is the safe HTTP response shape. It omits
+// every crypto secret and replaces the raw endpoint with a short
+// fingerprint (host + last 8 chars of the path) so the UI can show
+// "subscribed on FCM/Mozilla/Apple" without leaking the full URL.
+// UserAgent is also redacted — exact browser / OS versions are an
+// information disclosure and the UI does not need them.
+type PushSubscriptionView struct {
+	ID                  uint       `json:"id"`
+	MailboxID           uint       `json:"mailbox_id"`
+	EndpointFingerprint string     `json:"endpoint_fingerprint"`
+	EndpointKind        string     `json:"endpoint_kind"`
+	DisabledAt          *time.Time `json:"disabled_at,omitempty"`
+	LastSeenAt          *time.Time `json:"last_seen_at,omitempty"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
+}
+
+// SanitizedView converts a PushSubscription row into its safe HTTP
+// counterpart. The full endpoint, the per-subscriber encryption
+// secrets, and the UserAgent never leave the server.
+func (s *PushSubscription) SanitizedView() PushSubscriptionView {
+	return PushSubscriptionView{
+		ID:                  s.ID,
+		MailboxID:           s.MailboxID,
+		EndpointFingerprint: endpointFingerprint(s.Endpoint),
+		EndpointKind:        endpointKind(s.Endpoint),
+		DisabledAt:          s.DisabledAt,
+		LastSeenAt:          s.LastSeenAt,
+		CreatedAt:           s.CreatedAt,
+		UpdatedAt:           s.UpdatedAt,
+	}
+}
+
+// endpointKind classifies the push service from the endpoint URL.
+// FCM (Google), Mozilla (autopush), Apple (Safari). Anything unknown
+// returns "other" so the UI never crashes on a brand new vendor.
+func endpointKind(endpoint string) string {
+	lower := strings.ToLower(endpoint)
+	switch {
+	case strings.Contains(lower, "fcm.googleapis.com"), strings.Contains(lower, "fcm-notifications.googleapis.com"):
+		return "fcm"
+	case strings.Contains(lower, "updates.push.services.mozilla.com"), strings.Contains(lower, "push.mozilla.com"):
+		return "mozilla"
+	case strings.Contains(lower, "push.apple.com"), strings.Contains(lower, "web.push.apple.com"):
+		return "apple"
+	case strings.Contains(lower, "wns.windows.com"):
+		return "wns"
+	default:
+		return "other"
+	}
+}
+
+// endpointFingerprint returns a stable, non-reversible summary of the
+// endpoint suitable for display in the UI: "<host>…<last8>" where
+// <last8> is the trailing 8 characters of the endpoint path. The full
+// endpoint URL is never returned to clients.
+func endpointFingerprint(endpoint string) string {
+	if endpoint == "" {
+		return ""
+	}
+	scheme := ""
+	rest := endpoint
+	if idx := strings.Index(rest, "://"); idx > 0 {
+		scheme = rest[:idx+3]
+		rest = rest[idx+3:]
+	}
+	host := rest
+	path := ""
+	if slash := strings.IndexByte(rest, '/'); slash > 0 {
+		host = rest[:slash]
+		path = rest[slash+1:]
+	}
+	tail := path
+	if len(tail) > 8 {
+		tail = tail[len(tail)-8:]
+	}
+	if tail == "" {
+		return scheme + host
+	}
+	return scheme + host + "…" + tail
 }
 
 type PushSubscriptionFilter struct {
@@ -56,6 +152,12 @@ func NewPushNotifier(ms *storage.MailStore, repo SubscriptionRepository, vapid V
 	}
 }
 
+// GenerateVAPIDKeys returns a fresh ECDSA P-256 VAPID keypair
+// encoded as RFC 7515 / RFC 8292 raw-point + raw-scalar. The
+// public key is the elliptic.Marshal of (X, Y) on P-256; the
+// private key is the 32-byte big-endian scalar. Both are URL-safe
+// base64 (no padding) so they can be pasted straight into YAML /
+// env without escaping.
 func GenerateVAPIDKeys() (publicKey, privateKey string, err error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -63,18 +165,43 @@ func GenerateVAPIDKeys() (publicKey, privateKey string, err error) {
 	}
 	pub := elliptic.Marshal(key.Curve, key.X, key.Y)
 	priv := make([]byte, 32)
-	key.D.Bytes()
-	if n := len(key.D.Bytes()); n <= 32 {
-		copy(priv[32-n:], key.D.Bytes())
+	dBytes := key.D.Bytes()
+	if n := len(dBytes); n <= 32 {
+		copy(priv[32-n:], dBytes)
 	} else {
-		copy(priv, key.D.Bytes()[:32])
+		copy(priv, dBytes[:32])
 	}
 	return base64.RawURLEncoding.EncodeToString(pub),
 		base64.RawURLEncoding.EncodeToString(priv), nil
 }
 
-func (pn *PushNotifier) NotifyMailboxMessage(ctx context.Context, mailboxID uint, messageID string, fromAddr string, subject string) {
+// NotifyMailboxMessage dispatches a push notification to every
+// active subscription of the given mailbox.
+//
+// Self-send filter: when recipientEmail is non-empty and matches
+// fromAddr (case-insensitive), the notification is suppressed. The
+// caller passes recipientEmail = the mailbox owner's primary
+// address. This is the canonical fix for "I sent mail to myself from
+// my own webmail session and got a notification on the device that
+// sent it." Sender-equality is enforced here, NOT in the worker,
+// because the worker does not always know the recipient's address
+// at notify-time — only the mailbox ID — so we look it up here.
+//
+// subject is the message subject (≤100 chars after truncation). It
+// is encrypted to each subscriber per RFC 8291 before the request
+// is sent, so it is only visible to the recipient's browser.
+//
+// Failed sends with a 410 Gone status (or any "endpoint
+// permanently removed" signal) mark the subscription as disabled
+// so subsequent messages do not retry the dead endpoint.
+func (pn *PushNotifier) NotifyMailboxMessage(ctx context.Context, mailboxID uint, messageID string, fromAddr string, subject string, recipientEmail string) {
 	if pn.VAPID.PrivateKey == "" || pn.VAPID.PublicKey == "" {
+		return
+	}
+	if pn.Repo == nil {
+		return
+	}
+	if recipientEmail != "" && fromAddr != "" && strings.EqualFold(strings.TrimSpace(recipientEmail), strings.TrimSpace(fromAddr)) {
 		return
 	}
 	subs, err := pn.Repo.ListByMailbox(ctx, mailboxID, &PushSubscriptionFilter{Disabled: boolPtr(false)})
@@ -82,14 +209,14 @@ func (pn *PushNotifier) NotifyMailboxMessage(ctx context.Context, mailboxID uint
 		return
 	}
 	payload := map[string]interface{}{
-		"message_id":  messageID,
-		"mailbox_id":  mailboxID,
-		"from":        fromAddr,
-		"subject":     subject,
-		"title":       "New mail received",
-		"body":        truncateSubject(subject),
-		"folder":      "INBOX",
-		"timestamp":   time.Now().UTC().Format(time.RFC3339),
+		"message_id": messageID,
+		"mailbox_id": mailboxID,
+		"from":       fromAddr,
+		"subject":    subject,
+		"title":      "New mail received",
+		"body":       truncateSubject(subject),
+		"folder":     "INBOX",
+		"timestamp":  time.Now().UTC().Format(time.RFC3339),
 	}
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
@@ -156,22 +283,25 @@ func signVAPID(header, claims string, privateKey string) (string, error) {
 	return token + "." + base64.RawURLEncoding.EncodeToString(sig), nil
 }
 
+// isGoneError returns true when the push service has told us the
+// subscription is permanently dead. We treat 410 Gone (the standard
+// "remove this endpoint" reply), 404 Not Found (the endpoint was
+// already cleaned up server-side), and a small set of well-known
+// service strings as terminal. Other errors are transient and the
+// subscription stays active.
 func isGoneError(err error) bool {
 	if err == nil {
 		return false
 	}
-	return containsAny(err.Error(), "410", "404 Not Found", "unsubscribed", "expired")
-}
-
-func containsAny(s string, substrs ...string) bool {
-	for _, sub := range substrs {
-		if len(s) >= len(sub) {
-			for i := 0; i <= len(s)-len(sub); i++ {
-				if s[i:i+len(sub)] == sub {
-					return true
-				}
-			}
-		}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "410") {
+		return true
+	}
+	if strings.Contains(msg, "404 not found") || strings.Contains(msg, "404 gone") {
+		return true
+	}
+	if strings.Contains(msg, "unsubscribed") || strings.Contains(msg, "subscription") && strings.Contains(msg, "expired") {
+		return true
 	}
 	return false
 }

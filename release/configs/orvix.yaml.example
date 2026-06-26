@@ -94,6 +94,39 @@ coremail:
   license_file_path: /etc/orvix/license.json
   license_authority_cache_path: /var/lib/orvix/license-cache.json
 
+  # Web Push (RFC 8030 / RFC 8291) VAPID keys.
+  #
+  # VAPID is the "Voluntary Application Server Identification"
+  # scheme that lets a browser push service (FCM, Mozilla autopush,
+  # Apple Safari) verify that push notifications for a given
+  # application genuinely come from the operator's server.
+  #
+  # Generate a fresh pair with:
+  #
+  #     sudo /usr/share/orvix/scripts/generate-vapid-keys.sh
+  #
+  # The script prints a public + private key in URL-safe base64
+  # (no padding) — paste each value into the corresponding field
+  # below (or set ORVIX_COREMAIL_VAPID_PUBLIC_KEY /
+  # ORVIX_COREMAIL_VAPID_PRIVATE_KEY in the systemd unit). The
+  # private key NEVER crosses the wire; it only signs the JWT
+  # the runtime attaches to outbound push requests.
+  #
+  # When either field is empty, browser push is disabled and the
+  # webmail Settings → Notifications panel shows "Push is
+  # disabled by the server operator". The delivery worker
+  # silently skips push calls in that state.
+  #
+  # The subject is a contact URL (mailto:admin@example.com or
+  # https://example.com/contact) the push service can use to
+  # reach the operator if abuse is reported. It is required by
+  # RFC 8292; the installer / generate script writes a sane
+  # default of "mailto:admin@<webmail_host>" if you do not
+  # customise it.
+  vapid_public_key: ""
+  vapid_private_key: ""
+  vapid_subject: "mailto:admin@example.com"
+
 auth:
   jwt_access_ttl: 15m
   jwt_refresh_ttl: 720h

@@ -20,8 +20,8 @@ import (
 )
 
 type WebPushSender struct {
-	vapid     VAPIDConfig
-	client    *http.Client
+	vapid  VAPIDConfig
+	client *http.Client
 }
 
 func NewWebPushSender(vapid VAPIDConfig) *WebPushSender {
@@ -29,6 +29,18 @@ func NewWebPushSender(vapid VAPIDConfig) *WebPushSender {
 		vapid:  vapid,
 		client: &http.Client{Timeout: 15 * time.Second},
 	}
+}
+
+// NewWebPushSenderWithClient is the test seam: it lets the
+// caller swap in a custom http.Client (typically wrapping an
+// httptest.Server's transport) so the encryption / signing
+// pipeline can be exercised without hitting a real push
+// service. Production code uses NewWebPushSender.
+func NewWebPushSenderWithClient(vapid VAPIDConfig, client *http.Client) *WebPushSender {
+	if client == nil {
+		return NewWebPushSender(vapid)
+	}
+	return &WebPushSender{vapid: vapid, client: client}
 }
 
 type vapidHeader struct {

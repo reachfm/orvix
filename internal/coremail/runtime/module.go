@@ -17,6 +17,7 @@ import (
 	"github.com/orvix/orvix/internal/coremail/imap"
 	"github.com/orvix/orvix/internal/coremail/jmap"
 	"github.com/orvix/orvix/internal/coremail/pop3"
+	"github.com/orvix/orvix/internal/coremail/push"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/smtp"
 	"github.com/orvix/orvix/internal/coremail/storage"
@@ -53,6 +54,17 @@ type Module struct {
 	pop3Server      *pop3.Server
 	jmapServer      *jmap.Server
 	workers    []*delivery.DeliveryWorker
+
+	// pushNotifier is the Web Push (RFC 8030 / RFC 8291) dispatcher.
+	// It is constructed in initCore from cfg.CoreMail.VAPIDPublicKey
+	// / VAPIDPrivateKey / VAPIDSubject. When both keys are present
+	// the notifier is enabled; when either key is missing, a
+	// disabled notifier (with nil repo is fine; IsEnabled returns
+	// false) is still attached so worker.PushNotifier != nil but
+	// NotifyMailboxMessage is a no-op. The /api/v1/webmail/push/*
+	// endpoints read h.pushNotifier.IsEnabled() to decide whether
+	// to serve 503 or the real status.
+	pushNotifier *push.PushNotifier
 
 	// tlsLoadErr is non-nil when the SMTP TLS cert/key were configured
 	// but failed to load. The runtime does NOT abort initCore on this
@@ -315,6 +327,39 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 		m.workers = append(m.workers, worker)
 	}
 
+	// Wire Web Push (RFC 8030) notifier. The notifier is built
+	// even when VAPID keys are missing — IsEnabled() simply
+	// returns false in that case so NotifyMailboxMessage is a
+	// no-op. The /api/v1/webmail/push/status endpoint reads
+	// IsEnabled() to decide whether to expose the VAPID public
+	// key + active subscription list, or to return a
+	// "disabled" status. Either way, the worker never crashes
+	// on a missing subscription row.
+	//
+	// The repository is wired against the same *sql.DB the rest
+	// of the runtime uses. The push_subscriptions table is
+	// created by storage.Migrate().
+	vapid := push.VAPIDConfig{
+		PublicKey:  cfg.CoreMail.VAPIDPublicKey,
+		PrivateKey: cfg.CoreMail.VAPIDPrivateKey,
+		Subject:    cfg.CoreMail.VAPIDSubject,
+	}
+	repo := push.NewSubscriptionSQLRepo(sqlDB)
+	m.pushNotifier = push.NewPushNotifier(m.store, repo, vapid)
+	for _, worker := range m.workers {
+		worker.PushNotifier = m.pushNotifier
+	}
+	if m.logger != nil {
+		if m.pushNotifier.IsEnabled() {
+			m.logger.Info("web push notifier enabled",
+				zap.String("vapid_subject", vapid.Subject),
+				zap.Int("worker_count", workerCount),
+			)
+		} else {
+			m.logger.Info("web push notifier disabled (VAPID keys not configured)")
+		}
+	}
+
 	return nil
 }
 
@@ -517,6 +562,19 @@ func (m *Module) MailStore() *storage.MailStore {
 // the runtime was not booted.
 func (m *Module) QueueEngine() *queue.QueueEngine {
 	return m.queue
+}
+
+// PushNotifier returns the Web Push (RFC 8030) dispatcher
+// constructed from cfg.CoreMail.VAPIDPublicKey /
+// VAPIDPrivateKey / VAPIDSubject. The router wires this
+// into the user-facing webmail handler so
+// /api/v1/webmail/push/* can subscribe / unsubscribe /
+// status / test. Returns nil when the module has not been
+// initialized. The notifier itself returns IsEnabled()=false
+// when VAPID keys are missing, so callers should always
+// check IsEnabled() before issuing push requests.
+func (m *Module) PushNotifier() *push.PushNotifier {
+	return m.pushNotifier
 }
 
 func (m *Module) Stop() error {
