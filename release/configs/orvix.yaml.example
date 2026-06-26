@@ -97,38 +97,114 @@ coremail:
   # Web Push (RFC 8030 / RFC 8291) VAPID keys.
   #
   # VAPID is the "Voluntary Application Server Identification"
-  # scheme that lets a browser push service (FCM, Mozilla autopush,
-  # Apple Safari) verify that push notifications for a given
-  # application genuinely come from the operator's server.
+  # scheme that lets a browser push service (FCM, Mozilla
+  # autopush, Apple Safari) verify that push notifications for
+  # a given application genuinely come from the operator's
+  # server. The runtime signs a short-lived JWT with the VAPID
+  # private key on every push request; the public key is sent
+  # to the browser so the push service can verify the signature.
   #
-  # Generate a fresh pair with:
+  # ────────────────────────────────────────────────────────────
+  # Recommended production path (preferred)
+  # ────────────────────────────────────────────────────────────
   #
-  #     sudo /usr/share/orvix/scripts/generate-vapid-keys.sh
+  #   sudo /usr/share/orvix/scripts/generate-vapid-keys.sh \
+  #       --write --subject mailto:admin@<primary-domain>
+  #   sudo systemctl restart orvix
   #
-  # The script prints a public + private key in URL-safe base64
-  # (no padding) — paste each value into the corresponding field
-  # below (or set ORVIX_COREMAIL_VAPID_PUBLIC_KEY /
-  # ORVIX_COREMAIL_VAPID_PRIVATE_KEY in the systemd unit). The
-  # private key NEVER crosses the wire; it only signs the JWT
-  # the runtime attaches to outbound push requests.
+  # --write (the default safe behaviour) does NOT print the
+  # private key to the terminal. Instead it:
   #
-  # When either field is empty, browser push is disabled and the
-  # webmail Settings → Notifications panel shows "Push is
-  # disabled by the server operator". The delivery worker
-  # silently skips push calls in that state.
+  #   * writes /etc/orvix/vapid_private.key with mode 0600
+  #     owned by root:root,
+  #   * writes the public key into coremail.vapid_public_key
+  #     in /etc/orvix/orvix.yaml,
+  #   * records the file path in
+  #     coremail.vapid_private_key_file, and
+  #   * removes any pre-existing inline
+  #     coremail.vapid_private_key value (avoids the
+  #     "which value wins?" trap).
   #
-  # The subject is a contact URL (mailto:admin@example.com or
-  # https://example.com/contact) the push service can use to
-  # reach the operator if abuse is reported. It is required by
-  # RFC 8292; the installer / generate script writes a sane
-  # default of "mailto:admin@<webmail_host>" if you do not
-  # customise it.
+  # The runtime reads the private key from the file at boot.
+  # The key content never appears in the YAML, the systemd
+  # unit EnvironmentFile, the process environment, or logs.
+  #
+  # ────────────────────────────────────────────────────────────
+  # Field reference (these names match the config loader in
+  # internal/config/config.go exactly)
+  # ────────────────────────────────────────────────────────────
+  #
+  #   coremail.vapid_public_key        — required for push to
+  #                                       function. URL-safe base64
+  #                                       (no padding), 86 chars.
+  #   coremail.vapid_private_key       — inline private key.
+  #                                       PREFER vapid_private_key_file
+  #                                       instead. Used only when
+  #                                       vapid_private_key_file is
+  #                                       empty AND the operator
+  #                                       explicitly opts into an
+  #                                       inline setup.
+  #   coremail.vapid_private_key_file  — path to a 0600 root-owned
+  #                                       file containing the private
+  #                                       key. Preferred.
+  #   coremail.vapid_subject           — contact URL (mailto: or
+  #                                       https:) the push service
+  #                                       uses to reach the operator
+  #                                       on abuse reports. Required
+  #                                       by RFC 8292. Defaults to
+  #                                       "mailto:admin@<webmail_host>"
+  #                                       when empty.
+  #
+  # ────────────────────────────────────────────────────────────
+  # Environment-variable overrides (containers / CI)
+  # ────────────────────────────────────────────────────────────
+  #
+  # The viper loader reads these after the YAML file so they
+  # win. Use them for container / systemd drop-in overrides;
+  # the installer / setup-https.sh workflow above is the
+  # recommended path for a bare-metal install.
+  #
+  #   ORVIX_COREMAIL_VAPID_PUBLIC_KEY
+  #   ORVIX_COREMAIL_VAPID_PRIVATE_KEY
+  #   ORVIX_COREMAIL_VAPID_PRIVATE_KEY_FILE
+  #   ORVIX_COREMAIL_VAPID_SUBJECT
+  #
+  # ────────────────────────────────────────────────────────────
+  # When push is disabled
+  # ────────────────────────────────────────────────────────────
+  #
+  # If vapid_public_key OR vapid_private_key is empty, browser
+  # push is disabled and the webmail Settings → Notifications
+  # panel shows "Push is disabled by the server operator".
+  # The delivery worker silently skips push calls in that
+  # state, so leaving the fields empty is safe — no startup
+  # failure, no delivery disruption.
+  #
+  # ────────────────────────────────────────────────────────────
+  # Manual one-time capture (--print-private-key)
+  # ────────────────────────────────────────────────────────────
+  #
+  #   sudo /usr/share/orvix/scripts/generate-vapid-keys.sh \
+  #       --print-private-key
+  #
+  # This prints the private key to stdout exactly once. It is
+  # the only operator path that exposes the private key to a
+  # terminal. Use it ONLY when:
+  #
+  #   * you need to paste the key into a managed secret
+  #     store (Vault, AWS Secrets Manager, GCP Secret Manager),
+  #     OR
+  #   * you are migrating from an inline
+  #     coremail.vapid_private_key to the file-based path
+  #     and need to capture the existing value before
+  #     deleting it from YAML.
+  #
+  # Do NOT use --print-private-key on a shared terminal,
+  # inside `script(1)`, or with output piped to a file that
+  # is not itself 0600 root-owned. The script will refuse
+  # the flag when --write is also set, so accidental
+  # disclosure during a normal install is impossible.
   vapid_public_key: ""
-  # Path to a file containing the VAPID private key (URL-safe base64,
-  # no padding, exactly 43 characters). The file should be owned by
-  # root:root with mode 0600. When this is set and vapid_private_key
-  # is empty, the server reads the key value from this file at boot.
-  # The env override ORVIX_COREMAIL_VAPID_PRIVATE_KEY_FILE also works.
   vapid_private_key: ""
   vapid_private_key_file: ""
   vapid_subject: "mailto:admin@example.com"
