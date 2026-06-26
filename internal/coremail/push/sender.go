@@ -32,11 +32,84 @@ const (
 	ErrEndpointUnsafePort = "push endpoint port is not allowed"
 	ErrEndpointNoDNS      = "push endpoint hostname does not resolve to a public IP"
 	ErrEndpointRedirect   = "push endpoint must not redirect"
+	ErrEndpointInternal   = "push endpoint hostname appears to be internal"
+	ErrEndpointBadLabel   = "push endpoint hostname contains a forbidden label"
+	ErrEndpointIPFragment = "push endpoint hostname contains an IP-fragment label"
 )
+
+// blockedHostnameLabels is the per-label blocklist. ANY occurrence of
+// one of these strings as a hostname label (case-insensitive) causes
+// the endpoint to be rejected. The list covers the labels that
+// commonly appear in private/internal deployments, RFC 6762 mDNS
+// names, documentation placeholders, and the well-known metadata IP
+// fragment "169.254.169.254" (cloud-provider metadata service).
+//
+// Critically, this list is checked BEFORE any "known push service"
+// allowlist short-circuit so that hostnames like
+//
+//	https://127.0.0.1.fcm.googleapis.com/push
+//	https://internal.fcm.googleapis.com/push
+//	https://localhost.fcm.googleapis.com/push
+//	https://169.254.169.254.web.push.apple.com/push
+//
+// are all rejected — the per-label check runs unconditionally.
+var blockedHostnameLabels = map[string]struct{}{
+	"localhost":     {},
+	"internal":      {},
+	"corp":          {},
+	"home":          {},
+	"lan":           {},
+	"intranet":      {},
+	"private":       {},
+	"test":          {},
+	"example":       {},
+	"examplecom":    {}, // split-form defense
+	"invalid":       {},
+	"local":         {},
+	"loopback":      {},
+	"host":          {},
+	"broadcasthost": {},
+}
+
+// knownPushServices is the strict allowlist of push service
+// hostnames the runtime will accept without DNS resolution. Every
+// entry is an exact hostname (case-insensitive). No suffix
+// matching, no wildcard subdomains — the per-label blocklist runs
+// first, so the suffix-vs-strict-distinction no longer matters for
+// safety; we keep strict matching so that future sub-push-service
+// subdomains (e.g. operators who front FCM through their own
+// reverse proxy) can register themselves explicitly via
+// push.AllowedPushServices (not implemented yet) without breaking
+// the safety invariant.
+//
+// Keep this list short. Each entry is a hostname the operator has
+// independently confirmed terminates at a public push service.
+var knownPushServices = map[string]struct{}{
+	// Google Firebase Cloud Messaging — exact apex only. Real
+	// subscription endpoints always use the apex; the SDK never
+	// issues subdomains like "*.fcm.googleapis.com" to the
+	// application server (the path component carries the
+	// sub-stream identifier, not the hostname).
+	"fcm.googleapis.com":              {},
+	"fcm-notifications.googleapis.com": {},
+	// Mozilla autopush.
+	"updates.push.services.mozilla.com": {},
+	"push.services.mozilla.com":         {},
+	// Apple Safari Push (WebKit).
+	"push.apple.com":     {},
+	"web.push.apple.com": {},
+}
 
 type WebPushSender struct {
 	vapid  VAPIDConfig
 	client *http.Client
+	// skipValidate disables the runtime re-validation in Send.
+	// Production code leaves this false; tests that inject a
+	// local httptest server endpoint (which is not on the strict
+	// known-push-service allowlist) flip it on via the test seam
+	// so the encryption + signing pipeline runs end-to-end
+	// without the SSRF validator rejecting the test URL.
+	skipValidate bool
 }
 
 func defaultPushClient() *http.Client {
@@ -72,6 +145,16 @@ func NewWebPushSenderWithClient(vapid VAPIDConfig, client *http.Client) *WebPush
 	return &WebPushSender{vapid: vapid, client: client}
 }
 
+// SetSkipValidate toggles the runtime re-validation in Send.
+// Production code MUST leave it false; only tests that wire
+// a local httptest server URL into the subscription row need
+// to flip this on. The setter is unexported-by-convention —
+// it lives in the test seam and should not appear in
+// production call sites.
+func (s *WebPushSender) SetSkipValidate(skip bool) {
+	s.skipValidate = skip
+}
+
 type vapidHeader struct {
 	Typ string `json:"typ"`
 	Alg string `json:"alg"`
@@ -84,22 +167,33 @@ type vapidClaims struct {
 }
 
 // ValidatePushEndpoint checks that a push endpoint URL is safe to
-// POST to. It enforces:
-//   - scheme MUST be https
-//   - no userinfo (embedded credentials)
-//   - host MUST NOT be localhost or a loopback IP
-//   - host MUST NOT be a private / RFC1918 / RFC6598 / link-local /
-//     unique-local / metadata IP range
-//   - hostname MUST resolve to at least one public IPv4 address
-//     (or be a known push service domain)
-//   - port MUST NOT be a well-known non-HTTPS unsafe port
-//     (< 1024 except 443), unless the port is explicitly allowed
-//     by the allowlist.
-//   - known push service domains (FCM, Mozilla, Apple) bypass
-//     DNS resolution for reliability (they already use public IPs).
+// POST to. The check is layered — every layer runs before the
+// next can short-circuit, so an attacker cannot bypass a layer by
+// piggy-backing on a later allowlist:
 //
-// The check is conservative: if there is any doubt about the safety
-// of the endpoint, the endpoint is rejected.
+//  1. scheme MUST be https (cleartext POSTs leak VAPID JWTs).
+//  2. no userinfo (embedded credentials).
+//  3. host MUST NOT be localhost.
+//  4. host MUST resolve to a valid hostname (no bare IPs in DNS,
+//     no dotted-quad fragments embedded in the leftmost labels).
+//  5. EVERY label of the hostname MUST NOT appear in
+//     blockedHostnameLabels — covers internal-sounding labels
+//     like "localhost", "internal", "corp", "lan", etc. This runs
+//     BEFORE the known-push-service allowlist so that
+//     `127.0.0.1.fcm.googleapis.com`, `internal.fcm.googleapis.com`,
+//     and `localhost.fcm.googleapis.com` are all rejected.
+//  6. The host MUST NOT contain dotted-quad IPv4 fragments in its
+//     leftmost labels (e.g. `127.0.0.1.fcm.googleapis.com`).
+//  7. port MUST be one of the allowed push-service ports.
+//  8. The host MUST be a member of the strict knownPushServices
+//     allowlist (exact match, case-insensitive). We DO NOT bypass
+//     DNS resolution for known services anymore: every endpoint is
+//     resolved, and the resolved IPs are checked against the
+//     private-IP blocklist. This costs one DNS lookup per
+//     subscription but closes the SSRF gap definitively.
+//
+// If any check fails, the endpoint is rejected. There is no
+// "trust the suffix" fallback.
 func ValidatePushEndpoint(endpoint string) error {
 	u, err := url.Parse(endpoint)
 	if err != nil {
@@ -113,52 +207,64 @@ func ValidatePushEndpoint(endpoint string) error {
 	}
 	host := u.Hostname()
 	port := u.Port()
-
-	// Reject bare IPs that are private.
-	if ip := net.ParseIP(host); ip != nil {
-		if isPrivateIP(ip) {
-			return fmt.Errorf(ErrEndpointPrivateIP)
-		}
-		return nil
+	if host == "" {
+		return fmt.Errorf("push endpoint must include a hostname")
 	}
-
-	// Reject localhost hostnames.
 	lowerHost := strings.ToLower(host)
-	if lowerHost == "localhost" || strings.HasPrefix(lowerHost, "localhost.") {
+
+	// Layer 3 — bare localhost literal. Bare IP literals are
+	// handled by the per-label IP-fragment check below.
+	if lowerHost == "localhost" {
 		return fmt.Errorf(ErrEndpointLocalhost)
 	}
 
-	// Reject non-public TLDs / internal suffixes.
-	if isInternalHostname(lowerHost) {
-		return fmt.Errorf("push endpoint hostname %q appears to be internal", host)
+	// Layer 4 — host must look like a real DNS name. Bare IPs are
+	// allowed (and routed to layer 5/8), but anything that does not
+	// contain a dot is suspicious.
+	if !strings.Contains(lowerHost, ".") {
+		return fmt.Errorf("push endpoint hostname %q must contain a dot", host)
 	}
 
-	// Reject known-bad ports (< 1024 and not 443, not common
-	// push-service ports). Known push services use 443 or 8443;
-	// we also allow 8443 for Mozilla autopush.
-	unsafePort := false
-	switch port {
-	case "":
-		// default HTTPS port — safe
-	case "443", "8443":
-		// allowed
-	default:
-		p := port
-		if n := len(p); n > 0 && p[0] >= '1' && p[0] <= '9' {
-			unsafePort = true
+	// Layer 5 — per-label blocklist. Split the hostname on every
+	// dot and reject any label that appears in blockedHostnameLabels.
+	labels := strings.Split(lowerHost, ".")
+	for _, label := range labels {
+		if label == "" {
+			return fmt.Errorf("push endpoint hostname %q has an empty label", host)
+		}
+		if _, bad := blockedHostnameLabels[label]; bad {
+			return fmt.Errorf("%s: %s", ErrEndpointBadLabel, label)
 		}
 	}
-	if unsafePort {
+
+	// Layer 6 — IP-fragment detection. Reject hostnames whose
+	// leftmost labels look like a dotted-quad IPv4 address. This
+	// catches `127.0.0.1.fcm.googleapis.com`, `10.0.0.1.push.mozilla.com`,
+	// `169.254.169.254.web.push.apple.com` etc. We require at
+	// least two leading numeric labels — a single label like
+	// "127" alone is a valid DNS label.
+	if hasIPv4PrefixLabels(lowerHost) {
+		return fmt.Errorf(ErrEndpointIPFragment)
+	}
+
+	// Layer 7 — port allowlist.
+	if !isAllowedPort(port) {
 		return fmt.Errorf(ErrEndpointUnsafePort)
 	}
 
-	// Known push services bypass DNS resolution.
-	if isKnownPushService(lowerHost) {
-		return nil
+	// Layer 8 — strict known-push-service allowlist. The host
+	// must EXACTLY match one of the entries in knownPushServices
+	// (case-insensitive). Subdomains are NOT accepted: real push
+	// subscription endpoints always target the apex hostname
+	// (the path component carries the per-subscription identifier).
+	if _, ok := knownPushServices[lowerHost]; !ok {
+		return fmt.Errorf("push endpoint hostname %q is not a known push service", host)
 	}
 
-	// DNS resolution: verify the host resolves to at least one
-	// public IPv4 address.
+	// Layer 9 — DNS resolution against the resolved IPs. We
+	// always resolve, even for known services, so that an operator
+	// who mistakenly lists a private IP in DNS (or whose DNS is
+	// hijacked) cannot exfiltrate payloads to internal hosts.
 	addrs, err := net.DefaultResolver.LookupHost(context.Background(), host)
 	if err != nil || len(addrs) == 0 {
 		return fmt.Errorf(ErrEndpointNoDNS)
@@ -169,15 +275,80 @@ func ValidatePushEndpoint(endpoint string) error {
 		if ip == nil {
 			continue
 		}
-		if !isPrivateIP(ip) {
-			hasPublic = true
-			break
+		if isPrivateIP(ip) {
+			continue
 		}
+		hasPublic = true
+		break
 	}
 	if !hasPublic {
 		return fmt.Errorf(ErrEndpointPrivateIP)
 	}
 	return nil
+}
+
+// isAllowedPort returns true for the ports push services are known
+// to listen on. Default HTTPS (443) and Mozilla autopush's 8443.
+// Anything else is rejected so a hostile endpoint cannot lure the
+// server into POSTing to a database port, an internal admin port,
+// or any random high port the attacker happens to control.
+func isAllowedPort(port string) bool {
+	switch port {
+	case "":
+		return true // default HTTPS port
+	case "443", "8443":
+		return true
+	}
+	return false
+}
+
+// hasIPv4PrefixLabels reports whether the host's leftmost labels
+// spell out a dotted-quad IPv4 address. We treat any hostname whose
+// first N labels (for N in {2,3,4}) are all numeric AND the first
+// label is a plausible IPv4 first octet (1..223) as suspicious.
+//
+// Examples caught:
+//   - "127.0.0.1.fcm.googleapis.com"
+//   - "10.0.0.1.push.services.mozilla.com"
+//   - "169.254.169.254.web.push.apple.com"
+//
+// Examples NOT caught (legit hostname that happens to start with a
+// number):
+//   - "8.8.8.8.google.com"  — caught because "8.8.8.8" parses as an IP
+//     first, then the residual ".google.com" suffix is what fails.
+//   - "1.2.3.example" — caught because four consecutive numeric labels.
+//   - "3.example.com" — NOT caught (only one numeric label); this is
+//     a valid TLD-style hostname.
+func hasIPv4PrefixLabels(host string) bool {
+	labels := strings.Split(host, ".")
+	if len(labels) < 4 {
+		return false
+	}
+	// Try interpreting labels[0..N] as an IPv4 dotted quad for
+	// N in {2,3,4}. The longest match is preferred so that a
+	// hostname like "127.0.0.1.fcm.googleapis.com" is detected
+	// even when subsequent labels look like a valid domain.
+	for n := 4; n >= 2; n-- {
+		if len(labels) < n {
+			continue
+		}
+		candidate := strings.Join(labels[:n], ".")
+		if ip := net.ParseIP(candidate); ip != nil {
+			// Pure IPv4 only (no v4-in-v6 mixed notation).
+			if ip.To4() != nil && ip.Equal(ip.To4()) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ptrTime is a tiny helper that returns a pointer to t. Used by
+// the runtime-revalidation branch in Send so we can stamp the
+// subscription as disabled without dragging in the encoding/json
+// pointer-tick boilerplate.
+func ptrTime(t time.Time) *time.Time {
+	return &t
 }
 
 // isPrivateIP returns true if ip belongs to a private, loopback,
@@ -218,54 +389,25 @@ func isPrivateIP(ip net.IP) bool {
 	return false
 }
 
-// isInternalHostname returns true if the hostname looks like it
-// belongs to a private/internal network.
-func isInternalHostname(host string) bool {
-	parts := strings.Split(host, ".")
-	if len(parts) < 2 {
-		return true // bare hostname with no dot
-	}
-	suffix := parts[len(parts)-1]
-	switch suffix {
-	case "local", "internal", "corp", "home", "lan", "intranet",
-		"private", "test", "example", "invalid", "localhost":
-		return true
-	}
-	// .arpa is used for reverse DNS — never a valid push endpoint.
-	if suffix == "arpa" {
-		return true
-	}
-	return false
-}
-
-// isKnownPushService returns true for well-known browser push
-// service hostnames. These are always public and bypass DNS
-// resolution for reliability.
-func isKnownPushService(host string) bool {
-	switch {
-	case strings.HasSuffix(host, ".fcm.googleapis.com"),
-		strings.HasSuffix(host, ".fcm-notifications.googleapis.com"),
-		host == "fcm.googleapis.com",
-		host == "fcm-notifications.googleapis.com":
-		return true
-	case strings.HasSuffix(host, ".updates.push.services.mozilla.com"),
-		strings.HasSuffix(host, ".push.mozilla.com"),
-		host == "updates.push.services.mozilla.com",
-		host == "push.mozilla.com":
-		return true
-	case strings.HasSuffix(host, ".push.apple.com"),
-		strings.HasSuffix(host, ".web.push.apple.com"),
-		host == "push.apple.com",
-		host == "web.push.apple.com":
-		return true
-	default:
-		return false
-	}
-}
-
 func (s *WebPushSender) Send(ctx context.Context, sub *PushSubscription, payload []byte) error {
 	if sub.DisabledAt != nil || s.vapid.PrivateKey == "" {
 		return nil
+	}
+	// Defense-in-depth: re-validate the endpoint at send time.
+	// The handler validates on subscribe and on /push/test, but
+	// the stored row could have been mutated outside the API
+	// (database tampering, manual SQL, restored from backup with
+	// stale data). Skipping this check here would let a tampered
+	// row exfiltrate payloads to a hostile endpoint. The DNS
+	// lookup is cached by the resolver, so the per-send cost is
+	// small. Tests that inject a local httptest URL flip
+	// skipValidate on; production code must NEVER set it.
+	if !s.skipValidate {
+		if err := ValidatePushEndpoint(sub.Endpoint); err != nil {
+			// Disable the subscription so we don't retry forever.
+			sub.DisabledAt = ptrTime(time.Now().UTC())
+			return fmt.Errorf("endpoint failed runtime validation: %w", err)
+		}
 	}
 	p256dh, err := base64.RawURLEncoding.DecodeString(sub.P256DHKey)
 	if err != nil {

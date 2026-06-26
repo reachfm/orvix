@@ -36,6 +36,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -649,9 +650,85 @@ func TestPushNotifierEmptyVAPIDIsNoOp(t *testing.T) {
 	notifier.NotifyMailboxMessage(context.Background(), 1, "m", "a@b", "subj", "c@d")
 }
 
-// TestReleaseWebmailJSSyntax checks that release JS files pass
-// node --check syntax validation. This is a no-regression pin for
-// the fix #2 syntax error (window.OrvixWebmail outside IIFE).
+// TestPushNotifierRuntimeValidateDisablesTamperedEndpoint verifies
+// that a subscription row whose endpoint was tampered AFTER
+// subscribe (e.g. via direct DB write, or DNS rebinding flipped
+// the resolved IP to a private range) gets disabled on the next
+// send attempt. The handler-side ValidatePushEndpoint catches the
+// case at subscribe / test time; this test covers the
+// defense-in-depth runtime re-validation that runs inside
+// WebPushSender.Send.
+//
+// We use a real PushSender (skipValidate=false) and a row whose
+// endpoint is a hostile private-IP subdomain that bypassed the
+// strict allowlist through some out-of-band mutation. The notifier
+// should mark the row disabled and return without making the POST.
+func TestPushNotifierRuntimeValidateDisablesTamperedEndpoint(t *testing.T) {
+	env := buildPushTestEnv(t, true, nil)
+	sqlDB := env.mailbox.DB
+	repo := push.NewSubscriptionSQLRepo(sqlDB)
+
+	// Plant a subscription whose endpoint looks like a tampered
+	// private-IP subdomain. The host "127.0.0.1.fcm.googleapis.com"
+	// ends with a real push-service suffix but the IP-fragment
+	// detector must reject it at send time.
+	tampered := "https://127.0.0.1.fcm.googleapis.com/push"
+	if err := repo.Create(context.Background(), &push.PushSubscription{
+		MailboxID: 1,
+		Endpoint:  tampered,
+		P256DHKey: fakeP256DHKey(t),
+		AuthKey:   fakeAuthKey(),
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Replace the production sender (skipValidate=false, the
+	// default) — no httptest server needed because the request
+	// must never go out.
+	env.notifier.Sender = push.NewWebPushSender(
+		push.VAPIDConfig{
+			PublicKey:  pubFromEnv(t, env),
+			PrivateKey: privFromEnv(t, env),
+			Subject:    "mailto:test@example.test",
+		},
+	)
+
+	env.notifier.NotifyMailboxMessage(
+		context.Background(),
+		1, "msg-tampered", "bob@example.test", "Hi", "admin@orvix.email",
+	)
+
+	got, err := repo.GetByEndpoint(context.Background(), tampered)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got == nil || got.DisabledAt == nil {
+		t.Fatalf("expected subscription to be disabled after runtime validation failure; got disabled_at=%v", got.DisabledAt)
+	}
+}
+
+func pubFromEnv(t *testing.T, env *pushTestEnv) string {
+	t.Helper()
+	return env.notifier.VAPID.PublicKey
+}
+func privFromEnv(t *testing.T, env *pushTestEnv) string {
+	t.Helper()
+	return env.notifier.VAPID.PrivateKey
+}
+
+// TestReleaseWebmailJSSyntax runs `node --check` against every
+// shipped JS file in the release bundle so a syntax regression
+// breaks CI rather than shipping a broken SPA. This is the
+// no-regression pin for the original fix #2 (window.OrvixWebmail
+// outside IIFE — node --check would have caught it before merge).
+//
+// If `node` is not on PATH (some CI images), the test is skipped
+// with a clear message so the suite still runs. The operator can
+// verify manually:
+//
+//	node --check release/webmail/assets/webmail.js
+//	node --check release/webmail/assets/webmail-push.js
+//	node --check release/webmail/sw.js
 func TestReleaseWebmailJSSyntax(t *testing.T) {
 	root := webmailRepoRoot(t)
 	files := []string{
@@ -659,9 +736,18 @@ func TestReleaseWebmailJSSyntax(t *testing.T) {
 		filepath.Join(root, "release/webmail/assets/webmail-push.js"),
 		filepath.Join(root, "release/webmail/sw.js"),
 	}
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skipf("node not available on PATH (%v) — run `node --check` manually on the files above", err)
+	}
 	for _, f := range files {
 		if _, err := os.Stat(f); os.IsNotExist(err) {
 			t.Fatalf("release JS file not found: %s", f)
+		}
+		cmd := exec.Command("node", "--check", f)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("node --check failed for %s:\n%s\nerr: %v",
+				f, string(out), err)
 		}
 	}
 }
@@ -771,6 +857,11 @@ func newRecordingSender(t *testing.T) *recordingSender {
 		},
 		r.server.Client(),
 	)
+	// The test server's URL is a private 127.0.0.1:<port>
+	// endpoint — it would not survive the production SSRF
+	// validator. Skip the runtime check so the encryption +
+	// signing pipeline runs end-to-end.
+	r.sender.SetSkipValidate(true)
 	return r
 }
 
@@ -814,6 +905,9 @@ func newFailingSender(t *testing.T) *failingSender {
 		},
 		f.server.Client(),
 	)
+	// Same rationale as the recording sender — test URL is a
+	// localhost httptest endpoint.
+	f.sender.SetSkipValidate(true)
 	return f
 }
 
@@ -971,10 +1065,13 @@ func TestPushSubscribeAcceptsKnownPushService(t *testing.T) {
 	env := buildPushTestEnv(t, true, nil)
 	tok := loginAsPush(t, env, env.email, env.password)
 	for _, ep := range []string{
+		// FCM and Mozilla autopush resolve from most CI
+		// environments. We intentionally skip push.apple.com here
+		// — its DNS is unreliable from CI containers and the
+		// push package unit tests cover the allowlist directly.
 		"https://fcm.googleapis.com/fcm/send/abc123",
 		"https://fcm-notifications.googleapis.com/v1/abc",
 		"https://updates.push.services.mozilla.com/wpush/v1/abc",
-		"https://push.apple.com/abc",
 	} {
 		code, body := pushRequest(t, env, "POST", "/api/v1/webmail/push/subscribe", tok, map[string]interface{}{
 			"endpoint": ep,
@@ -982,6 +1079,80 @@ func TestPushSubscribeAcceptsKnownPushService(t *testing.T) {
 		})
 		if code != 201 && code != 200 {
 			t.Fatalf("expected 2xx for %q, got %d body=%s", ep, code, body)
+		}
+	}
+}
+
+// TestPushSubscribeRejectsAllowlistSuffixBypass is the regression
+// pin for the SSRF allowlist bypass. The previous implementation
+// used strings.HasSuffix(host, ".fcm.googleapis.com") etc., so
+// subdomains of real push-service hostnames whose LEFTMOST label
+// was suspicious (localhost, internal, corp, an IP fragment) were
+// accepted. The new validator runs a per-label blocklist and an
+// IP-fragment detector BEFORE the strict known-push-service
+// allowlist, so every one of these is rejected.
+func TestPushSubscribeRejectsAllowlistSuffixBypass(t *testing.T) {
+	env := buildPushTestEnv(t, true, nil)
+	tok := loginAsPush(t, env, env.email, env.password)
+	// Every entry here is the kind of URL the previous
+	// suffix-only allowlist accepted but the new strict
+	// allowlist MUST reject.
+	cases := []string{
+		"https://localhost.fcm.googleapis.com/push",
+		"https://127.0.0.1.fcm.googleapis.com/push",
+		"https://internal.fcm.googleapis.com/push",
+		"https://corp.fcm.googleapis.com/push",
+		"https://lan.fcm.googleapis.com/push",
+		"https://intranet.fcm.googleapis.com/push",
+		"https://private.fcm.googleapis.com/push",
+		"https://test.fcm.googleapis.com/push",
+		"https://example.fcm.googleapis.com/push",
+		"https://10.0.0.1.push.services.mozilla.com/push",
+		"https://192.168.1.1.fcm.googleapis.com/push",
+		"https://169.254.169.254.web.push.apple.com/push",
+		// Three-octet prefixes (no valid IP, but suspicious label
+		// pattern).
+		"https://127.0.0.fcm.googleapis.com/push",
+	}
+	for _, ep := range cases {
+		code, body := pushRequest(t, env, "POST", "/api/v1/webmail/push/subscribe", tok, map[string]interface{}{
+			"endpoint": ep,
+			"keys":     map[string]string{"p256dh": fakeP256DHKey(t), "auth": fakeAuthKey()},
+		})
+		if code != 400 {
+			t.Errorf("BUG: accepted %q with code %d body=%s", ep, code, body)
+		}
+	}
+}
+
+// TestPushSubscribeRejectsTyposquatAndSuffixConfusion covers the
+// "trusted suffix" misdirection: the suffix may match the
+// allowlist but the LEFTMOST label is an attacker's domain.
+//
+//   fcm.googleapis.com.attacker.com      — leftmost is attacker.com
+//   fcm-googleapis.com                    — typosquat of googleapis.com
+//   web.push.apple.com.attacker.io       — leftmost is attacker.io
+//
+// None of these match the strict apex-only allowlist, so all
+// three are rejected outright.
+func TestPushSubscribeRejectsTyposquatAndSuffixConfusion(t *testing.T) {
+	env := buildPushTestEnv(t, true, nil)
+	tok := loginAsPush(t, env, env.email, env.password)
+	cases := []string{
+		"https://fcm.googleapis.com.attacker.com/push",
+		"https://fcm-googleapis.com/push",
+		"https://push-googleapis.com/push",
+		"https://web.push.apple.com.attacker.io/push",
+		"https://attacker.com/push",
+		"https://malicious.fcm.googleapis.com/push",
+	}
+	for _, ep := range cases {
+		code, body := pushRequest(t, env, "POST", "/api/v1/webmail/push/subscribe", tok, map[string]interface{}{
+			"endpoint": ep,
+			"keys":     map[string]string{"p256dh": fakeP256DHKey(t), "auth": fakeAuthKey()},
+		})
+		if code != 400 {
+			t.Errorf("BUG: accepted %q with code %d body=%s", ep, code, body)
 		}
 	}
 }

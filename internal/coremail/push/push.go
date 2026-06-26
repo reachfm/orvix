@@ -228,7 +228,14 @@ func (pn *PushNotifier) NotifyMailboxMessage(ctx context.Context, mailboxID uint
 		}
 		err := pn.Sender.Send(ctx, &sub, payloadJSON)
 		if err != nil {
-			if isGoneError(err) {
+			if isPermanentSendError(err) {
+				// 410 Gone from the push service, OR a runtime
+				// validation failure (endpoint no longer matches
+				// the strict known-service allowlist, DNS rebinding
+				// flipped the resolved IP to a private range, etc).
+				// Either way, retrying will not succeed; mark the
+				// row as disabled so subsequent notifications do
+				// not waste cycles.
 				now := time.Now().UTC()
 				sub.DisabledAt = &now
 				_ = pn.Repo.Update(ctx, &sub)
@@ -304,4 +311,34 @@ func isGoneError(err error) bool {
 		return true
 	}
 	return false
+}
+
+// IsPermanentSendError reports whether an error from
+// WebPushSender.Send is permanent and should mark the subscription
+// as disabled. The set covers both push-service 4xx replies and
+// runtime SSRF-validation failures (endpoint tampered, DNS rebinding
+// to a private range, etc).
+//
+// Exported so the runtime module (or tests) can build its own
+// disable-on-failure policies without duplicating the heuristics.
+func IsPermanentSendError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isGoneError(err) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	// Runtime re-validation failures inside Send() are wrapped
+	// with the prefix added by the Send() handler:
+	//   "endpoint failed runtime validation: <ValidatePushEndpoint error>"
+	if strings.Contains(msg, "endpoint failed runtime validation") {
+		return true
+	}
+	return false
+}
+
+// isPermanentSendError is the internal alias used by this package.
+func isPermanentSendError(err error) bool {
+	return IsPermanentSendError(err)
 }
