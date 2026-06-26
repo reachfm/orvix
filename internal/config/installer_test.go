@@ -88,7 +88,7 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"tail -n 80 \"$INSTALL_LOG\"",
 		"run_quiet apt-get update -qq",
 		"apt-get install -y -qq",
-		"ca-certificates curl jq sqlite3 openssl tar gzip redis-server libcap2-bin iproute2 ufw",
+		"ca-certificates curl jq sqlite3 openssl python3 tar gzip redis-server libcap2-bin iproute2 ufw",
 		"-o Dpkg::Options::=--force-confdef",
 		"-o Dpkg::Options::=--force-confold",
 		"systemctl enable --now redis-server",
@@ -332,23 +332,23 @@ func extractCaddyBlock(script, name string) string {
 // This test extracts the mail vhost body and asserts every piece
 // of the required routing lives INSIDE that block:
 //
-//   $MAIL_DOMAIN {
-//     @api path /api/*                   → 8080  (admin + webmail API)
-//     handle @api { ... }
-//     @webmail path /webmail /webmail/*  → 8080  (webmail SPA + service worker)
-//     handle @webmail { ... }
-//     @assets path /assets /assets/*     → 8080  (rewrite to /webmail{uri})
-//     handle @assets { ... }
-//     handle {                           → 8081  (JMAP + everything else)
-//   }
+//	$MAIL_DOMAIN {
+//	  @api path /api/*                   → 8080  (admin + webmail API)
+//	  handle @api { ... }
+//	  @webmail path /webmail /webmail/*  → 8080  (webmail SPA + service worker)
+//	  handle @webmail { ... }
+//	  @assets path /assets /assets/*     → 8080  (rewrite to /webmail{uri})
+//	  handle @assets { ... }
+//	  handle {                           → 8081  (JMAP + everything else)
+//	}
 //
 // Failure modes this test catches:
-//   * `@webmail` block moved out of the mail vhost.
-//   * The mail vhost routes /api/* to 8081 instead of 8080.
-//   * The mail vhost routes /webmail/* to 8081 instead of 8080.
-//   * The catch-all 8081 route removed (regression of the
+//   - `@webmail` block moved out of the mail vhost.
+//   - The mail vhost routes /api/* to 8081 instead of 8080.
+//   - The mail vhost routes /webmail/* to 8081 instead of 8080.
+//   - The catch-all 8081 route removed (regression of the
 //     Caddy mail API split-routing fix).
-//   * The mail vhost accidentally re-uses the webmail vhost
+//   - The mail vhost accidentally re-uses the webmail vhost
 //     catch-all (reverse-proxying webmail traffic to 8081).
 func TestHTTPSSetupScriptMailDomainBlock(t *testing.T) {
 	root := repoRoot(t)
@@ -445,6 +445,53 @@ func TestHTTPSSetupScriptMailDomainBlock(t *testing.T) {
 	}
 	if strings.Contains(webmailBlock, "reverse_proxy 127.0.0.1:8081") {
 		t.Errorf("$WEBMAIL_DOMAIN block must not proxy to 8081: %s", webmailBlock)
+	}
+}
+
+func TestInstallerVAPIDProvisioningIsServiceReadable(t *testing.T) {
+	root := repoRoot(t)
+	installBytes, err := os.ReadFile(filepath.Join(root, "release", "install.sh"))
+	if err != nil {
+		t.Fatalf("read install script: %v", err)
+	}
+	installer := string(installBytes)
+
+	for _, want := range []string{
+		"install_release_scripts",
+		"provision_vapid_keys \"$admin_email\"",
+		"/usr/share/orvix/scripts/generate-vapid-keys.sh",
+		"vapid_public_key:",
+		"vapid_private_key_file:",
+		"vapid_subject:",
+		"root:orvix",
+		"640",
+	} {
+		if !strings.Contains(installer, want) {
+			t.Errorf("installer must contain VAPID provisioning marker %q", want)
+		}
+	}
+
+	generatorBytes, err := os.ReadFile(filepath.Join(root, "release", "scripts", "generate-vapid-keys.sh"))
+	if err != nil {
+		t.Fatalf("read VAPID generator: %v", err)
+	}
+	generator := string(generatorBytes)
+	for _, want := range []string{
+		"need_cmd openssl",
+		"need_cmd python3",
+		"install -m 0640 -o root -g \"$SERVICE_GROUP\"",
+		"install -m 0644 -o root -g root",
+		"vapid_private_key_file",
+		"vapid_subject",
+	} {
+		if !strings.Contains(generator, want) {
+			t.Errorf("VAPID generator missing safety marker %q", want)
+		}
+	}
+	for _, forbidden := range []string{"go run", "ORVIX_BIN", "node ", "npm ", "github.com/orvix/orvix/internal/coremail/push"} {
+		if strings.Contains(generator, forbidden) {
+			t.Errorf("VAPID generator must not depend on Go/Node/runtime source; found %q", forbidden)
+		}
 	}
 }
 

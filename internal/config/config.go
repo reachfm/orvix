@@ -422,12 +422,15 @@ func Load(logger *zap.Logger) (*Config, error) {
 	// After env overrides, if vapid_private_key_file is set and the
 	// direct value is still empty, read the key from the file.
 	if cfg.CoreMail.VAPIDPrivateKey == "" && cfg.CoreMail.VAPIDPrivateKeyFile != "" {
-		if data, err := os.ReadFile(cfg.CoreMail.VAPIDPrivateKeyFile); err == nil {
-			trimmed := strings.TrimSpace(string(data))
-			if trimmed != "" {
-				cfg.CoreMail.VAPIDPrivateKey = trimmed
-			}
+		data, err := os.ReadFile(cfg.CoreMail.VAPIDPrivateKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read coremail.vapid_private_key_file: %w", err)
 		}
+		trimmed := strings.TrimSpace(string(data))
+		if trimmed == "" {
+			return nil, fmt.Errorf("coremail.vapid_private_key_file is empty")
+		}
+		cfg.CoreMail.VAPIDPrivateKey = trimmed
 	}
 
 	cfg.validate()
