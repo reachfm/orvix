@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/viper"
@@ -58,6 +60,10 @@ type CoreMailConfig struct {
 	RequireAuthForSubmission  bool          `mapstructure:"require_auth_for_submission"`
 	QueueWorkers              int           `mapstructure:"queue_workers"`
 	WorkerInterval            time.Duration `mapstructure:"worker_interval"`
+	VAPIDPublicKey            string        `mapstructure:"vapid_public_key"`
+	VAPIDPrivateKey           string        `mapstructure:"vapid_private_key"`
+	VAPIDPrivateKeyFile       string        `mapstructure:"vapid_private_key_file"`
+	VAPIDSubject              string        `mapstructure:"vapid_subject"`
 }
 
 // ClamAVConfig holds ClamAV antivirus scanner settings.
@@ -372,6 +378,16 @@ func Defaults() *Config {
 			RequireAuthForSubmission: false,
 			QueueWorkers:      1,
 			WorkerInterval:    5 * time.Second,
+			// VAPID defaults: empty keys mean push notifications
+			// are disabled at boot. Operators populate these via
+			// release/scripts/generate-vapid-keys.sh. The Subject
+			// is the contact mailto: / https: URL the push service
+			// uses to reach the operator if abuse is reported; it
+			// is required by RFC 8292 but can be a placeholder
+			// until the operator customises it.
+			VAPIDPublicKey:  "",
+			VAPIDPrivateKey: "",
+			VAPIDSubject:    "mailto:admin@localhost",
 		},
 		License: LicenseConfig{
 			OfflineMode: true,
@@ -402,6 +418,17 @@ func Load(logger *zap.Logger) (*Config, error) {
 	}
 
 	applyEnvOverrides(v, cfg)
+
+	// After env overrides, if vapid_private_key_file is set and the
+	// direct value is still empty, read the key from the file.
+	if cfg.CoreMail.VAPIDPrivateKey == "" && cfg.CoreMail.VAPIDPrivateKeyFile != "" {
+		if data, err := os.ReadFile(cfg.CoreMail.VAPIDPrivateKeyFile); err == nil {
+			trimmed := strings.TrimSpace(string(data))
+			if trimmed != "" {
+				cfg.CoreMail.VAPIDPrivateKey = trimmed
+			}
+		}
+	}
 
 	cfg.validate()
 
@@ -474,6 +501,27 @@ func applyEnvOverrides(v *viper.Viper, cfg *Config) {
 	}
 	if v.GetString("COREMAIL_ENABLED") != "" {
 		cfg.CoreMail.Enabled = v.GetBool("COREMAIL_ENABLED")
+	}
+	// VAPID (Web Push / RFC 8030) overrides. The installer writes
+	// the public + private key into /etc/orvix/orvix.yaml under
+	// coremail.vapid_public_key / vapid_private_key when the
+	// operator runs release/scripts/generate-vapid-keys.sh. The
+	// env form lets containers and CI override the file-based
+	// values without rewriting the YAML. The private key is
+	// expected to be URL-safe base64 (no padding) — the installer
+	// prints both values in that form so the operator can paste
+	// them straight into the env / YAML without re-encoding.
+	if s := v.GetString("COREMAIL_VAPID_PUBLIC_KEY"); s != "" {
+		cfg.CoreMail.VAPIDPublicKey = s
+	}
+	if s := v.GetString("COREMAIL_VAPID_PRIVATE_KEY"); s != "" {
+		cfg.CoreMail.VAPIDPrivateKey = s
+	}
+	if s := v.GetString("COREMAIL_VAPID_PRIVATE_KEY_FILE"); s != "" {
+		cfg.CoreMail.VAPIDPrivateKeyFile = s
+	}
+	if s := v.GetString("COREMAIL_VAPID_SUBJECT"); s != "" {
+		cfg.CoreMail.VAPIDSubject = s
 	}
 	// SUBMISSION-3D: env overrides for port 587 submission + SMTP TLS
 	// binding. These let the installer / setup-smtp-tls.sh turn on

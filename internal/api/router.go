@@ -14,6 +14,7 @@ import (
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/coremail"
+	"github.com/orvix/orvix/internal/coremail/push"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
 	"github.com/orvix/orvix/internal/dnsops"
@@ -156,6 +157,29 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			if qe := qeProvider.QueueEngine(); qe != nil {
 				router.h.SetQueueEngine(qe)
 				logger.Info("queue engine wired for webmail send")
+			}
+		}
+		// Wire the Web Push (RFC 8030) notifier from the
+		// same runtime module. The webmail
+		// /api/v1/webmail/push/* endpoints
+		// (subscribe / unsubscribe / status / test) read
+		// from this notifier, and the delivery worker
+		// fires notifications from it on local INBOX
+		// delivery. When the runtime is disabled or has
+		// not been initialized, the notifier stays nil
+		// and the push endpoints return a clear 503
+		// "push notifications not available" — the webmail
+		// UI surfaces that as "disabled by config".
+		if pnProvider, ok := mod.(interface {
+			PushNotifier() *push.PushNotifier
+		}); ok {
+			if pn := pnProvider.PushNotifier(); pn != nil {
+				router.h.SetPushNotifier(pn)
+				if pn.IsEnabled() {
+					logger.Info("push notifier wired for webmail push endpoints")
+				} else {
+					logger.Info("push notifier wired but disabled (VAPID keys not configured)")
+				}
 			}
 		}
 	}
@@ -341,6 +365,11 @@ func (r *Router) setupRoutes() {
 	protected.Get("/webmail/drafts/:id", r.h.WebmailGetDraft)
 	protected.Put("/webmail/drafts/:id", r.h.WebmailSaveDraft)
 	protected.Delete("/webmail/drafts/:id", r.h.WebmailDeleteDraft)
+	// Push notification subscription management.
+	protected.Post("/webmail/push/subscribe", r.h.PushSubscribe)
+	protected.Post("/webmail/push/unsubscribe", r.h.PushUnsubscribe)
+	protected.Get("/webmail/push/status", r.h.PushStatus)
+	protected.Post("/webmail/push/test", r.h.PushTest)
 
 	protected.Get("/csrf-token", func(c fiber.Ctx) error {
 		userID, _ := c.Locals("user_id").(uint)

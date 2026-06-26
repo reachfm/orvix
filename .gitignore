@@ -37,3 +37,4 @@ release/*.tar.gz
 AUDIT_REPORTS_*
 AUDIT_REPORTS/
 DEPLOYMENT_CERTIFICATION*
+.worktrees/

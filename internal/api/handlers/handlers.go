@@ -28,6 +28,7 @@ import (
 	"github.com/orvix/orvix/internal/runtime"
 	"github.com/orvix/orvix/internal/updater"
 	"github.com/orvix/orvix/internal/coremail/queue"
+	"github.com/orvix/orvix/internal/coremail/push"
 	"github.com/orvix/orvix/internal/coremail/storage"
 	"github.com/orvix/orvix/internal/webmailmgmt"
 	"go.uber.org/zap"
@@ -87,6 +88,9 @@ type Handler struct {
 	// and the response carries a telemetry_incomplete warning so
 	// the dashboard does not show fake numbers.
 	processStartedAt time.Time
+
+	// pushNotifier handles browser push notification dispatching.
+	pushNotifier *push.PushNotifier
 
 	// listenerRegistry holds the live listener startup state
 	// for SMTP/IMAP/POP3/JMAP. Populated by the coremail

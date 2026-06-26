@@ -283,8 +283,168 @@ func TestHTTPSSetupScriptCaddyFlow(t *testing.T) {
 	if strings.Contains(script, "check_https \"https://$ADMIN_DOMAIN/api/v1/health\" HEAD") {
 		t.Fatal("admin health smoke must use GET because the API route is GET-only")
 	}
-	if !strings.Contains(script, "$MAIL_DOMAIN {\n\t@api path /api/*\n\thandle @api {\n\t\treverse_proxy 127.0.0.1:8080\n\t}\n\n\thandle {\n\t\treverse_proxy 127.0.0.1:8081\n\t}\n}") {
-		t.Fatal("mail domain Caddy block must route /api/* to 8080 and everything else to 8081")
+}
+
+// extractCaddyBlock pulls the body of a top-level `$NAME { ... }`
+// Caddy vhost block out of a heredoc. The closing brace is matched
+// at column 0 — i.e. a line that starts with `}` and no leading
+// whitespace, the convention Caddyfile uses for top-level vhost
+// blocks. Returns "" if the block is not present or unbalanced.
+//
+// The block body is the text BETWEEN the opening `{` and the
+// matching column-0 `}` — exactly what we want to assert
+// structure against.
+func extractCaddyBlock(script, name string) string {
+	header := name + " {"
+	start := strings.Index(script, header)
+	if start < 0 {
+		return ""
+	}
+	bodyStart := start + len(header)
+	lines := strings.Split(script[bodyStart:], "\n")
+	consumed := 0
+	for i, line := range lines {
+		// i == 0 is the header's own rest-of-line (e.g. the
+		// opening `{` followed by a comment) — skip it.
+		if i == 0 {
+			consumed += len(line) + 1
+			continue
+		}
+		// Column-0 closer: a `}` with NO leading whitespace.
+		// A tab-indented `}` (e.g. inside `handle @api { ... }`)
+		// must NOT match — otherwise we close the vhost
+		// prematurely on the first nested handle.
+		if line == "}" {
+			return strings.TrimRight(script[bodyStart:bodyStart+consumed], "\n")
+		}
+		consumed += len(line) + 1
+	}
+	return ""
+}
+
+// TestHTTPSSetupScriptMailDomainBlock pins the structure of the
+// `$MAIL_DOMAIN { ... }` Caddy vhost block. The previous test only
+// grepped the whole script for "@webmail" / "@assets" /
+// "reverse_proxy 127.0.0.1:8081" — too weak, because a regression
+// could move those markers into the `$WEBMAIL_DOMAIN` block (or
+// anywhere else) and the assertion would still pass.
+//
+// This test extracts the mail vhost body and asserts every piece
+// of the required routing lives INSIDE that block:
+//
+//   $MAIL_DOMAIN {
+//     @api path /api/*                   → 8080  (admin + webmail API)
+//     handle @api { ... }
+//     @webmail path /webmail /webmail/*  → 8080  (webmail SPA + service worker)
+//     handle @webmail { ... }
+//     @assets path /assets /assets/*     → 8080  (rewrite to /webmail{uri})
+//     handle @assets { ... }
+//     handle {                           → 8081  (JMAP + everything else)
+//   }
+//
+// Failure modes this test catches:
+//   * `@webmail` block moved out of the mail vhost.
+//   * The mail vhost routes /api/* to 8081 instead of 8080.
+//   * The mail vhost routes /webmail/* to 8081 instead of 8080.
+//   * The catch-all 8081 route removed (regression of the
+//     Caddy mail API split-routing fix).
+//   * The mail vhost accidentally re-uses the webmail vhost
+//     catch-all (reverse-proxying webmail traffic to 8081).
+func TestHTTPSSetupScriptMailDomainBlock(t *testing.T) {
+	root := repoRoot(t)
+	scriptBytes, err := os.ReadFile(filepath.Join(root, "release", "scripts", "setup-https.sh"))
+	if err != nil {
+		t.Fatalf("read https setup script: %v", err)
+	}
+	script := string(scriptBytes)
+
+	mailBlock := extractCaddyBlock(script, "$MAIL_DOMAIN")
+	if mailBlock == "" {
+		t.Fatal("could not locate $MAIL_DOMAIN { ... } Caddy vhost block in setup-https.sh")
+	}
+
+	// Structural assertions: every required piece MUST appear
+	// inside the mail block body. extractCaddyBlock already
+	// confirmed the "$MAIL_DOMAIN {" header exists in the
+	// script — the body it returns starts AT the opening `{`
+	// and ends at the matching column-0 `}`. We do NOT
+	// re-assert the header inside the body because it sits
+	// outside the captured range.
+	requiredInMailBlock := []string{
+		// @api route → 8080.
+		"@api path /api/*",
+		"handle @api",
+		// 8080 must appear inside the @api handle so the test
+		// catches a future regression that splits the API to
+		// 8081 instead.
+		"reverse_proxy 127.0.0.1:8080",
+
+		// @webmail route → 8080. This is the service worker
+		// path — required for browser push to work on the
+		// mail host.
+		"@webmail path /webmail /webmail/*",
+		"handle @webmail",
+
+		// @assets route → 8080 (with rewrite to /webmail{uri}).
+		"@assets path /assets /assets/*",
+		"handle @assets",
+		"rewrite * /webmail{uri}",
+
+		// Catch-all → 8081. This is the JMAP / SMTP-submission-web
+		// / IMAP / POP3 path that the upstream runtime serves
+		// from the second listener. Regression of the
+		// "Caddy mail API split-routing" fix.
+		"handle {",
+		"reverse_proxy 127.0.0.1:8081",
+	}
+	for _, item := range requiredInMailBlock {
+		if !strings.Contains(mailBlock, item) {
+			t.Errorf("$MAIL_DOMAIN Caddy block missing %q\n--- mail block ---\n%s", item, mailBlock)
+		}
+	}
+
+	// Negative assertions: the mail block must NOT proxy any
+	// of these targets to 8081 — that would route admin /
+	// webmail / API traffic into the JMAP listener and break
+	// the host. The 8081 catch-all must be reserved for
+	// "everything else" only.
+	badRoutes := []string{
+		// No 8081 should appear in any @api / @webmail / @assets
+		// handle inside the mail block.
+		"handle @api {\n\t\treverse_proxy 127.0.0.1:8081",
+		"handle @webmail {\n\t\treverse_proxy 127.0.0.1:8081",
+		"handle @assets {\n\t\treverse_proxy 127.0.0.1:8081",
+	}
+	for _, bad := range badRoutes {
+		if strings.Contains(mailBlock, bad) {
+			t.Errorf("$MAIL_DOMAIN block must not route to 8081: %q", bad)
+		}
+	}
+
+	// Sanity: the mail block must contain at least one
+	// 8080 reverse-proxy AND at least one 8081 reverse-proxy.
+	// If a refactor deletes one of them entirely, the
+	// per-item assertions above would catch it, but this
+	// catches a more subtle "the block has only 8081" bug
+	// caused by a global replace gone wrong.
+	if !strings.Contains(mailBlock, "reverse_proxy 127.0.0.1:8080") {
+		t.Errorf("$MAIL_DOMAIN block has no 8080 reverse-proxy: %s", mailBlock)
+	}
+	if !strings.Contains(mailBlock, "reverse_proxy 127.0.0.1:8081") {
+		t.Errorf("$MAIL_DOMAIN block has no 8081 reverse-proxy: %s", mailBlock)
+	}
+
+	// Cross-check: the $WEBMAIL_DOMAIN block must NOT have
+	// a 8081 catch-all — that would break the webmail vhost
+	// by proxying every unknown path to the JMAP listener.
+	// The current setup-https.sh design uses 8080 for the
+	// webmail catch-all (rewrite * /webmail{uri} → 8080).
+	webmailBlock := extractCaddyBlock(script, "$WEBMAIL_DOMAIN")
+	if webmailBlock == "" {
+		t.Fatal("could not locate $WEBMAIL_DOMAIN { ... } Caddy vhost block in setup-https.sh")
+	}
+	if strings.Contains(webmailBlock, "reverse_proxy 127.0.0.1:8081") {
+		t.Errorf("$WEBMAIL_DOMAIN block must not proxy to 8081: %s", webmailBlock)
 	}
 }
 

@@ -118,11 +118,31 @@ $WEBMAIL_DOMAIN {
 }
 
 $MAIL_DOMAIN {
+	# API requests hit the Go binary at 8080.
 	@api path /api/*
 	handle @api {
 		reverse_proxy 127.0.0.1:8080
 	}
 
+	# Webmail static assets and service worker: the Go backend
+	# serves /webmail/assets/* and /webmail/sw.js with correct
+	# MIME types so the Caddy reverse-proxy does not double-
+	# prefix paths. This route is required for the push
+	# service worker to be reachable on mail.<domain>.
+	@webmail path /webmail /webmail/*
+	handle @webmail {
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	# Shorthand /assets/* paths — rewrite to /webmail/assets/*
+	@assets path /assets /assets/*
+	handle @assets {
+		rewrite * /webmail{uri}
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	# Everything else (JMAP, SMTP submission web, IMAP, POP3)
+	# goes to the outbound proxy at 8081.
 	handle {
 		reverse_proxy 127.0.0.1:8081
 	}
