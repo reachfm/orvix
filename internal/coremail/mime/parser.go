@@ -82,7 +82,7 @@ func singlePart(headers textproto.MIMEHeader, body []byte) []*Part {
 		filename = ctParams["name"]
 	}
 	if filename == "" {
-		filename = sanitizeFilename(headers.Get("Content-Description"))
+		filename = SanitizeFilename(headers.Get("Content-Description"))
 	}
 
 	return []*Part{{
@@ -125,7 +125,7 @@ func extractMultipart(body []byte, boundary string) ([]*Part, error) {
 		if filename == "" {
 			filename = p.FileName()
 		}
-		filename = sanitizeFilename(filename)
+		filename = SanitizeFilename(filename)
 
 		// If this part is itself multipart, recurse.
 		if strings.HasPrefix(mediaType, "multipart/") {
@@ -161,7 +161,7 @@ func extractBoundary(contentType string) string {
 	return params["boundary"]
 }
 
-func sanitizeFilename(name string) string {
+func SanitizeFilename(name string) string {
 	if name == "" {
 		return ""
 	}
@@ -309,7 +309,7 @@ func BuildMultipartRFC822(from, to, cc, bcc, subject, body, messageID string, at
 	for _, att := range attachments {
 		buf.WriteString(fmt.Sprintf("--%s\r\n", boundary))
 		buf.WriteString(fmt.Sprintf("Content-Type: %s\r\n", att.ContentType))
-		buf.WriteString(fmt.Sprintf("Content-Disposition: attachment; filename=\"%s\"\r\n", sanitizeFilename(att.Filename)))
+		buf.WriteString(fmt.Sprintf("Content-Disposition: attachment; filename=\"%s\"\r\n", SanitizeFilename(att.Filename)))
 		buf.WriteString("Content-Transfer-Encoding: base64\r\n")
 		if att.ContentID != "" {
 			buf.WriteString(fmt.Sprintf("Content-ID: %s\r\n", att.ContentID))

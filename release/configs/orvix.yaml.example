@@ -210,6 +210,20 @@ coremail:
   vapid_private_key_file: ""
   vapid_subject: "mailto:admin@example.com"
 
+  # ────────────────────────────────────────────────────────────
+  # Attachments
+  # ────────────────────────────────────────────────────────────
+  #
+  # max_attachment_size_mb (default 25) — max size per file in
+  # megabytes. Affects webmail compose attachment uploads.
+  # max_attachments_per_message (default 20) — max number of
+  # files per message. The delivery worker enforces a 25 MB
+  # total message size limit; the per-file limit below applies
+  # at upload time so the server never stores a file that
+  # cannot be delivered.
+  max_attachment_size_mb: 25
+  max_attachments_per_message: 20
+
 auth:
   jwt_access_ttl: 15m
   jwt_refresh_ttl: 720h

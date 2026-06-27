@@ -678,7 +678,6 @@
   }
 
   function sendMessage(payload) {
-    // Strip fields the API does not accept.
     var body = {
       to: payload.to || '',
       cc: payload.cc || '',
@@ -688,9 +687,39 @@
     };
     return api('POST', '/api/v1/webmail/send', body).then(function (res) {
       if (res.status !== 'queued') {
-        // Defensive: WEBMAIL-3 contract says non-queued means
-        // error. We've already checked HTTP status in api();
-        // this is for the case where status=stored leaks through.
+        throw new Error('Send returned status=' + (res.status || 'unknown'));
+      }
+      return res;
+    });
+  }
+
+  function sendMessageWithAttachments(payload, files) {
+    var fd = new FormData();
+    fd.append('to', payload.to || '');
+    fd.append('cc', payload.cc || '');
+    fd.append('bcc', payload.bcc || '');
+    fd.append('subject', payload.subject || '');
+    fd.append('body', payload.body || '');
+    files.forEach(function (f, i) {
+      fd.append('attachment', f.file || f, f.name);
+    });
+    return fetch('/api/v1/webmail/send', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { Accept: 'application/json' },
+      body: fd,
+    }).then(function (res) {
+      return res.json().then(function (data) {
+        if (!res.ok) {
+          var err = new Error((data && data.error) || ('HTTP ' + res.status));
+          err.status = res.status;
+          err.body = data;
+          throw err;
+        }
+        return data;
+      });
+    }).then(function (res) {
+      if (res.status !== 'queued') {
         throw new Error('Send returned status=' + (res.status || 'unknown'));
       }
       return res;
@@ -1957,6 +1986,8 @@
         body: '',
         dirty: false,
         lastSavedAt: null,
+        pendingAttachments: [],
+        lastSavedSnapshot: null,
       };
       if (opts.mode === 'reply') {
         compose.to = replyTarget;
@@ -2045,13 +2076,14 @@
       state.compose = compose;
     } else if (opts.mode === 'draft') {
       state.compose = Object.assign(
-        { dirty: false, lastSavedAt: null },
+        { dirty: false, lastSavedAt: null, pendingAttachments: [], lastSavedSnapshot: null },
         opts.compose || opts
       );
     } else {
       state.compose = {
         mode: 'new', to: '', cc: '', bcc: '', subject: '',
         body: '', dirty: false, lastSavedAt: null,
+        pendingAttachments: [], lastSavedSnapshot: null,
       };
     }
     renderComposeModal();
@@ -2139,7 +2171,14 @@
         return;
       }
       if (!state.compose || state.compose !== c) return;
+      // Skip save if content has not changed since last save.
+      var snapshot = getCurrentSnapshot();
+      if (c.lastSavedSnapshot === snapshot) {
+        c.dirty = false;
+        return;
+      }
       c.dirty = false;
+      c.lastSavedSnapshot = snapshot;
       statusLine.textContent = 'Saving…';
       statusLine.classList.add('saving');
       statusLine.classList.remove('saved', 'error');
@@ -2272,7 +2311,37 @@
       markDirty();
     });
     mb.appendChild(bodyField);
-    modal.appendChild(mb);
+
+    // Attachment list — rendered between the body and the footer.
+    // Shows files selected for sending. Each file shows its name,
+    // size, and a remove button.
+    var attachmentsArea = el('div', { class: 'compose-attachments' });
+    function renderComposeAttachments() {
+      while (attachmentsArea.firstChild) attachmentsArea.removeChild(attachmentsArea.firstChild);
+      (c.pendingAttachments || []).forEach(function (att, idx) {
+        var row = el('div', { class: 'compose-attachment' });
+        var icon = el('span', { class: 'att-icon' });
+        icon.textContent = '📎';
+        row.appendChild(icon);
+        row.appendChild(el('span', { class: 'att-name' }, att.name));
+        row.appendChild(el('span', { class: 'att-size' }, formatSize(att.size)));
+        var removeBtn = el('button', {
+          class: 'btn-remove-att',
+          type: 'button',
+          title: 'Remove ' + att.name,
+          'aria-label': 'Remove ' + att.name,
+        }, '×');
+        removeBtn.addEventListener('click', function () {
+          c.pendingAttachments.splice(idx, 1);
+          renderComposeAttachments();
+          markDirty();
+        });
+        row.appendChild(removeBtn);
+        attachmentsArea.appendChild(row);
+      });
+      attachmentsArea.hidden = !c.pendingAttachments || c.pendingAttachments.length === 0;
+    }
+    modal.appendChild(attachmentsArea);
 
     // Footer.
     var mf = el('div', { class: 'modal-footer' });
@@ -2284,6 +2353,33 @@
     mf.appendChild(sendBtn);
     mf.appendChild(draftBtn);
     mf.appendChild(discardBtn);
+    // Attach files button with hidden file input.
+    var attachWrap = el('div', { class: 'attach-btn-wrap' });
+    var attachInput = el('input', {
+      type: 'file',
+      id: 'orvix-attach-input',
+      multiple: 'multiple',
+      title: 'Attach files',
+      'aria-label': 'Attach files',
+    });
+    attachInput.addEventListener('change', function () {
+      var files = attachInput.files;
+      if (!files || files.length === 0) return;
+      if (!c.pendingAttachments) c.pendingAttachments = [];
+      for (var i = 0; i < files.length; i++) {
+        var f = files[i];
+        c.pendingAttachments.push({ file: f, name: f.name, size: f.size });
+      }
+      renderComposeAttachments();
+      markDirty();
+      // Reset so the same file can be selected again.
+      attachInput.value = '';
+    });
+    attachWrap.appendChild(attachInput);
+    var attachLabel = el('button', { class: 'btn ghost', type: 'button' }, 'Attach');
+    attachLabel.addEventListener('click', function () { attachInput.click(); });
+    attachWrap.appendChild(attachLabel);
+    mf.appendChild(attachWrap);
     mf.appendChild(spacer2);
     // The autosave status line lives in the footer
     // next to the Close button. It is updated by
@@ -2301,10 +2397,21 @@
         body: bodyField.value,
       };
     }
+    function getCurrentSnapshot() {
+      return JSON.stringify(gather());
+    }
     function setSending(b) {
       sendBtn.disabled = b;
       draftBtn.disabled = b;
       sendBtn.innerHTML = b ? '<span class="spinner-inline"></span> Sending…' : 'Send';
+    }
+
+    function doSend(payload) {
+      var files = c.pendingAttachments || [];
+      if (files.length > 0) {
+        return sendMessageWithAttachments(payload, files);
+      }
+      return sendMessage(payload);
     }
 
     sendBtn.addEventListener('click', function () {
@@ -2314,16 +2421,12 @@
         toField.input.focus();
         return;
       }
-      // If the user has an unsaved draft, save it
-      // first so the Sent copy / the queue row always
-      // match the in-memory state. Cancel the autosave
-      // timer; the explicit save supersedes it.
       if (c.autosaveTimer) {
         clearTimeout(c.autosaveTimer);
         c.autosaveTimer = null;
       }
       setSending(true);
-      sendMessage(payload)
+      doSend(payload)
         .then(function (res) {
           toast(
             'Sent — queued ' +
@@ -2332,11 +2435,6 @@
               (res.queued_count === 1 ? 'recipient' : 'recipients'),
             'success'
           );
-          // If this was a draft, delete it now — the
-          // message is durable in Sent. If the server
-          // can't delete the draft, the user still has
-          // a clean Sent copy; the orphan draft is a
-          // cosmetic problem, not a correctness one.
           if (c.draftID) {
             deleteDraft(c.draftID).catch(function () { /* non-fatal */ });
           }
