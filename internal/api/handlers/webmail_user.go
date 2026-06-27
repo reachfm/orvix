@@ -248,22 +248,23 @@ func (h *Handler) WebmailFolders(c fiber.Ctx) error {
 // Query parameters:
 //   - folder=INBOX|Sent|Drafts|Trash|Junk|Archive|<name>
 //   - q=<substring> : case-insensitive substring match.
-//                     By default against subject / from /
-//                     to. The "body=1" flag extends the
-//                     match to the message body (one
-//                     read per candidate — slower).
+//     By default against subject / from /
+//     to. The "body=1" flag extends the
+//     match to the message body (one
+//     read per candidate — slower).
 //   - limit=N      : 1..200, default 50. Values above 200
-//                    are clamped to 200 to keep the first
-//                    paint fast.
+//     are clamped to 200 to keep the first
+//     paint fast.
 //   - offset=N     : pagination cursor; new messages first.
 //   - total=1      : return the total count for the query
-//                    (off by default — counting across
-//                    filtered rows costs a separate query
-//                    the UI does not need on every page).
+//     (off by default — counting across
+//     filtered rows costs a separate query
+//     the UI does not need on every page).
 //
 // Response shape:
-//   {messages, folder, folder_id, total?, limit, offset,
-//    has_more, snippet_for_q?}
+//
+//	{messages, folder, folder_id, total?, limit, offset,
+//	 has_more, snippet_for_q?}
 //
 // `has_more` is true when the returned page is exactly
 // `limit` long AND a next page would be non-empty. The
@@ -637,22 +638,22 @@ func (h *Handler) WebmailMessage(c fiber.Ctx) error {
 // mail — no parallel pipeline, no SMTP redesign.
 //
 // Behavior:
-//   1. Authenticate via the standard auth middleware.
-//   2. Resolve the caller's mailbox (the sender).
-//   3. Parse To/Cc/Bcc safely with mail.ParseAddressList —
-//      malformed addresses are rejected with 400 BEFORE we
-//      touch disk or queue.
-//   4. Look up the Sent folder for the mailbox. If missing,
-//      return 500 — system folders must be provisioned first.
-//   5. Store the RFC822 message body in the Sent folder
-//      (the source of truth for "what the user sent").
-//   6. Enqueue one queue.QueueEntry per recipient, all
-//      pointing at the same message_id, all
-//      direction=outbound / delivery_mode=remote_smtp /
-//      status=pending so the existing delivery worker picks
-//      them up. The sender is the authenticated mailbox,
-//      not anything the client supplies.
-//   7. Return 201 Created with status="queued".
+//  1. Authenticate via the standard auth middleware.
+//  2. Resolve the caller's mailbox (the sender).
+//  3. Parse To/Cc/Bcc safely with mail.ParseAddressList —
+//     malformed addresses are rejected with 400 BEFORE we
+//     touch disk or queue.
+//  4. Look up the Sent folder for the mailbox. If missing,
+//     return 500 — system folders must be provisioned first.
+//  5. Store the RFC822 message body in the Sent folder
+//     (the source of truth for "what the user sent").
+//  6. Enqueue one queue.QueueEntry per recipient, all
+//     pointing at the same message_id, all
+//     direction=outbound / delivery_mode=remote_smtp /
+//     status=pending so the existing delivery worker picks
+//     them up. The sender is the authenticated mailbox,
+//     not anything the client supplies.
+//  7. Return 201 Created with status="queued".
 //
 // If queueing fails for every recipient, the Sent copy is
 // kept (it is the user's record of the message) and the
@@ -1006,9 +1007,6 @@ func detectMIMEType(filename string, data []byte) string {
 			return ct
 		}
 	}
-	// No registered type, but we can try to detect
-	// common types by magic bytes on large samples.
-	// Security-first: default to generic binary.
 	return "application/octet-stream"
 }
 
@@ -1040,7 +1038,7 @@ func buildMultipartRFC822ForWebmail(fromName, fromEmail, to, cc, bcc, subject, b
 	// text/plain part.
 	fmt.Fprintf(&b, "--%s\r\n", boundary)
 	b.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
-	b.WriteString("Content-Transfer-Encoding: 7bit\r\n")
+	b.WriteString("Content-Transfer-Encoding: 8bit\r\n")
 	b.WriteString("\r\n")
 	b.WriteString(body)
 	if !strings.HasSuffix(body, "\n") {
@@ -1078,10 +1076,10 @@ func buildMultipartRFC822ForWebmail(fromName, fromEmail, to, cc, bcc, subject, b
 //
 // Local means:
 //
-//   1. The recipient domain is a configured local
-//      coremail_domains row with status=active.
-//   2. The recipient address has an active coremail_mailboxes
-//      row in the SAME tenant as the sender.
+//  1. The recipient domain is a configured local
+//     coremail_domains row with status=active.
+//  2. The recipient address has an active coremail_mailboxes
+//     row in the SAME tenant as the sender.
 //
 // Both conditions are required. A recipient with a local
 // domain but no active mailbox row is treated as remote
@@ -1460,12 +1458,12 @@ func sanitizeDownloadFilename(name string) string {
 //
 // Body: {ids: [uint], action: string, target_folder_id?: uint}
 //
-//   action: "archive" | "delete" | "markRead" | "markUnread"
-//         | "flag" | "unflag" | "spam" | "nospam"
-//         | "move"
+//	action: "archive" | "delete" | "markRead" | "markUnread"
+//	      | "flag" | "unflag" | "spam" | "nospam"
+//	      | "move"
 //
-//   target_folder_id: required when action == "move",
-//                     must belong to caller's mailbox.
+//	target_folder_id: required when action == "move",
+//	                  must belong to caller's mailbox.
 //
 // The handler runs every id through the same ownership
 // check as the single-message endpoints. Cross-mailbox
@@ -1754,7 +1752,7 @@ func (h *Handler) WebmailMarkFolderRead(c fiber.Ctx) error {
 // Body: {id?: uint, to?, cc?, bcc?, subject?, body?}
 //   - id absent  -> create new draft
 //   - id present -> update existing draft (must belong
-//                   to the caller's mailbox)
+//     to the caller's mailbox)
 //
 // The "to/cc/bcc/subject/body" fields are stored verbatim
 // in the message and the RFC822 body on disk. Sending a

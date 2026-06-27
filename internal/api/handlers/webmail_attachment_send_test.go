@@ -226,7 +226,7 @@ func TestWebmailSendRejectsOversizedAttachment(t *testing.T) {
 	}
 }
 
-func TestWebmailSendRejectsDangerousFilename(t *testing.T) {
+func TestWebmailSendSanitizesDangerousFilename(t *testing.T) {
 	e := buildWebmailTestEnv(t)
 	if err := e.mailbox.Folders.EnsureSystemFolders(t.Context(), mustMailboxIDForTest(t, e, e.email), nil); err != nil {
 		t.Fatalf("ensure system folders: %v", err)
