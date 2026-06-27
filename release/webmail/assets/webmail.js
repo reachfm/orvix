@@ -273,6 +273,28 @@
     return fromHeader.trim();
   }
 
+  // formatSender formats the sender string for the message list /
+  // reading pane according to the user-configured `sender_display`
+  // setting. Allowed values: 'name' | 'email' | 'name_email'.
+  // Anything else falls back to 'name'. Empty / missing inputs are
+  // rendered as '(unknown)' so the UI never shows a blank cell.
+  function formatSender(fromHeader) {
+    var pref = (state.settings && state.settings.sender_display) || 'name';
+    var name = displayName(fromHeader);
+    var email = emailOf(fromHeader);
+    if (pref === 'email') {
+      return email || name || '(unknown)';
+    }
+    if (pref === 'name_email') {
+      if (name && email && email.toLowerCase() !== name.toLowerCase()) {
+        return name + ' <' + email + '>';
+      }
+      return name || email || '(unknown)';
+    }
+    // Default 'name'.
+    return name || email || '(unknown)';
+  }
+
   function pluralize(n, singular, plural) {
     return n + ' ' + (n === 1 ? singular : plural || singular + 's');
   }
@@ -348,6 +370,22 @@
     searchQuery: '',
     sidebarOpen: false,
     readingPaneOpen: false,
+    // Per-mailbox settings (profile / appearance / compose / mail
+    // behavior / notifications). Loaded once on app boot. The PUT
+    // endpoint returns the post-update row, which we replace in
+    // place. Null means "not loaded yet" — the UI gracefully shows
+    // defaults until loadSettings() resolves.
+    settings: null,
+    settingsLoaded: false,
+    // settingsLoadFailed is set when the initial GET returned an
+    // error. The UI keeps working with the in-memory defaults, but
+    // surfaces a clear non-fatal warning so the user is not misled
+    // into thinking their saved values were loaded from the server.
+    settingsLoadFailed: false,
+    // settingsLoadFailureMessage carries the human-readable reason
+    // for the failed load; rendered inside the Settings modal.
+    settingsLoadFailureMessage: '',
+    pushStatus: null, // {available, permission, enabled, reason}
     // "g" prefix for Gmail-style navigation. After
     // pressing "g" the next keypress is interpreted as a
     // folder shortcut. We use a single keypress window
@@ -387,6 +425,38 @@
         }
         return data;
       });
+    });
+  }
+
+  // csrfFetch fetches the CSRF token (cached) and attaches it to a
+  // state-changing request as the X-CSRF-Token header. The backend
+  // enforces CSRF on a small set of high-trust auth routes
+  // (/api/v1/auth/logout, /api/v1/auth/logout-all,
+  // /api/v1/auth/change-password, /api/v1/webmail/logout). Other
+  // webmail endpoints (send, drafts, settings, push) sit on the
+  // auth-protected group WITHOUT CSRF, so the api() helper does
+  // not need to fetch the token on every call. csrfFetch is the
+  // single source of truth for CSRF-aware requests in the SPA.
+  var csrfTokenCache = null;
+  function getCsrfToken() {
+    if (csrfTokenCache) return Promise.resolve(csrfTokenCache);
+    return api('GET', '/api/v1/csrf-token').then(function (r) {
+      var tok = r && r.csrf_token;
+      if (!tok) {
+        throw new Error('CSRF token endpoint returned no token');
+      }
+      csrfTokenCache = tok;
+      return tok;
+    });
+  }
+  function csrfFetch(url, opts) {
+    opts = opts || {};
+    opts.method = opts.method || 'POST';
+    opts.credentials = 'include';
+    opts.headers = Object.assign({}, opts.headers || {}, { Accept: 'application/json' });
+    return getCsrfToken().then(function (token) {
+      opts.headers['X-CSRF-Token'] = token;
+      return fetch(url, opts);
     });
   }
 
@@ -473,15 +543,80 @@
       });
   }
 
+  // pendingMarkReadTimer holds the setTimeout id of the next
+  // mark-as-read PATCH so a quick succession of opens (or a
+  // navigation away before the delay elapses) cancels the
+  // previous attempt. Single-flight invariant: at most one
+  // pending mark-read PATCH at a time.
+  var pendingMarkReadTimer = null;
+  var pendingMarkReadID = null;
+
+  function cancelPendingMarkRead() {
+    if (pendingMarkReadTimer) {
+      clearTimeout(pendingMarkReadTimer);
+      pendingMarkReadTimer = null;
+      pendingMarkReadID = null;
+    }
+  }
+
+  function scheduleMarkRead(id) {
+    cancelPendingMarkRead();
+    var s = state.settings || {};
+    var delayMs = (typeof s.mark_read_delay_seconds === 'number')
+      ? Math.max(0, Math.min(60, s.mark_read_delay_seconds)) * 1000
+      : 0;
+    // delay == 0 means "mark immediately" — matches the documented
+    // default. We do NOT use setTimeout(0) because that fires after
+    // the current microtask queue and the user might still navigate
+    // away; a synchronous fire is the closest match to the legacy
+    // behaviour for delay=0.
+    var fire = function () {
+      pendingMarkReadTimer = null;
+      pendingMarkReadID = null;
+      updateMessageFlags(id, { seen: true }).catch(function () {
+        /* non-fatal */
+      });
+    };
+    if (delayMs <= 0) {
+      fire();
+    } else {
+      pendingMarkReadID = id;
+      pendingMarkReadTimer = setTimeout(fire, delayMs);
+    }
+  }
+
   function loadMessage(id) {
-    return api('GET', '/api/v1/webmail/messages/' + id).then(function (msg) {
+    // The backend opt-out query param ?auto_seen=0 is only sent when
+    // the user's setting is positive. delay=0 keeps the legacy
+    // behaviour (server marks as seen on read AND the client also
+    // patches — idempotent, no harm). delay>0 forces the client
+    // into the driver seat so the backend does NOT mark-as-read on
+    // the GET and the JS can honour the configured delay.
+    cancelPendingMarkRead();
+    var s0 = state.settings || {};
+    var delay0 = (typeof s0.mark_read_delay_seconds === 'number')
+      ? Math.max(0, Math.min(60, s0.mark_read_delay_seconds))
+      : 0;
+    var url = '/api/v1/webmail/messages/' + id;
+    if (delay0 > 0) {
+      url += '?auto_seen=0';
+    }
+    return api('GET', url).then(function (msg) {
       state.selectedMessage = msg;
       state.selectedMessageID = msg.id;
       // Mark as seen if not already.
       if (!msg.seen) {
-        updateMessageFlags(id, { seen: true }).catch(function () {
-          /* non-fatal */
-        });
+        if (delay0 > 0) {
+          scheduleMarkRead(id);
+        } else {
+          // delay=0 path: server already marked-as-read on the GET,
+          // so no client-side action is needed. We still patch to
+          // defend against a future backend change that drops the
+          // implicit mark; the patch is idempotent.
+          updateMessageFlags(id, { seen: true }).catch(function () {
+            /* non-fatal */
+          });
+        }
       }
       return msg;
     });
@@ -799,7 +934,15 @@
     top.appendChild(search);
 
     var actions = el('div', { class: 'actions' });
-    var userChip = el('div', { class: 'user-chip', id: 'user-chip' });
+    var settingsBtn = el('button', {
+      class: 'icon-btn',
+      id: 'settings-btn',
+      type: 'button',
+      title: 'Settings',
+      'aria-label': 'Open settings',
+    }, '⚙');
+    actions.appendChild(settingsBtn);
+    var userChip = el('div', { class: 'user-chip', id: 'user-chip', tabindex: '0', role: 'button', 'aria-label': 'Open settings menu' });
     userChip.appendChild(el('span', { class: 'avatar', id: 'user-avatar' }, '?'));
     userChip.appendChild(el('span', { id: 'user-email' }, ''));
     actions.appendChild(userChip);
@@ -881,6 +1024,14 @@
     $('menu-btn').addEventListener('click', toggleSidebar);
     $('compose-btn').addEventListener('click', function () {
       openCompose({ mode: 'new' });
+    });
+    $('settings-btn').addEventListener('click', openSettingsModal);
+    $('user-chip').addEventListener('click', openSettingsModal);
+    $('user-chip').addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        openSettingsModal();
+      }
     });
     $('refresh-btn').addEventListener('click', function () {
       var folder = state.currentFolderPath;
@@ -1242,12 +1393,25 @@
     var body = el('div', { class: 'body' });
     var fromName = displayName(m.from);
     var fromEmail = emailOf(m.from);
-    var fromRow = el('div', { class: 'from', dir: dirAuto(fromName + ' ' + fromEmail) });
-    fromRow.appendChild(el('span', { class: 'name' }, fromName || fromEmail || '(unknown)'));
-    if (fromEmail && fromName && fromEmail.indexOf(fromName) < 0) {
-      fromRow.appendChild(
-        el('span', { class: 'badge', dir: 'ltr' }, fromEmail)
-      );
+    // sender_display is the user-configurable preference for how
+    // the sender cell is rendered in the list. formatSender
+    // encapsulates the name / email / name_email logic so the
+    // list row, the reading pane, and the reply-quote header can
+    // all stay consistent. The .badge email appendage is kept for
+    // 'name' mode (the historical layout) and suppressed for
+    // 'email' / 'name_email' because the email is already in the
+    // primary cell.
+    var senderPref = (state.settings && state.settings.sender_display) || 'name';
+    var fromRow = el('div', { class: 'from', dir: dirAuto(formatSender(m.from)) });
+    if (senderPref === 'name') {
+      fromRow.appendChild(el('span', { class: 'name' }, fromName || fromEmail || '(unknown)'));
+      if (fromEmail && fromName && fromEmail.indexOf(fromName) < 0) {
+        fromRow.appendChild(
+          el('span', { class: 'badge', dir: 'ltr' }, fromEmail)
+        );
+      }
+    } else {
+      fromRow.appendChild(el('span', { class: 'name' }, formatSender(m.from)));
     }
     body.appendChild(fromRow);
     var subj = m.subject || '(no subject)';
@@ -1713,15 +1877,32 @@
     var avatar = el('div', { class: 'avatar-lg' }, initials(displayName(msg.from), emailOf(msg.from)));
     meta.appendChild(avatar);
     var fromBlock = el('div', { class: 'from-block' });
+    // sender_display drives the reading pane header in the same
+    // way as the list row. 'name' shows the display name + the
+    // email address as a smaller line below; 'email' shows just
+    // the email; 'name_email' shows "Name <email>" in one line.
+    var pref = (state.settings && state.settings.sender_display) || 'name';
     var fromNameText = displayName(msg.from) || emailOf(msg.from) || '(unknown sender)';
-    fromBlock.appendChild(
-      el('div', { class: 'from-name', dir: dirAuto(fromNameText) }, fromNameText)
-    );
     var fromEmailText = emailOf(msg.from);
-    if (fromEmailText && fromEmailText !== fromNameText) {
+    if (pref === 'email') {
       fromBlock.appendChild(
-        el('div', { class: 'from-email', dir: 'ltr' }, fromEmailText)
+        el('div', { class: 'from-name', dir: dirAuto(fromEmailText || '(unknown)') },
+          fromEmailText || '(unknown)')
       );
+    } else if (pref === 'name_email') {
+      fromBlock.appendChild(
+        el('div', { class: 'from-name', dir: dirAuto(formatSender(msg.from)) },
+          formatSender(msg.from))
+      );
+    } else {
+      fromBlock.appendChild(
+        el('div', { class: 'from-name', dir: dirAuto(fromNameText) }, fromNameText)
+      );
+      if (fromEmailText && fromEmailText !== fromNameText) {
+        fromBlock.appendChild(
+          el('div', { class: 'from-email', dir: 'ltr' }, fromEmailText)
+        );
+      }
     }
     meta.appendChild(fromBlock);
     var dateText = formatFullDate(msg.received_date || msg.message_date);
@@ -1962,6 +2143,533 @@
   }, 250);
 
   // ──────────────────────────────────────────────────────────
+  // Settings
+  // ──────────────────────────────────────────────────────────
+
+  // applyAppearanceSettings writes theme + density + text-direction
+  // onto the document immediately. Called on initial load (after
+  // loadSettings resolves) and after every successful PUT. Theme
+  // values: 'dark' | 'light' | 'system'. The 'system' choice reads
+  // prefers-color-scheme at apply time and does NOT install a media
+  // listener — a full system-listener hookup is a follow-up patch.
+  function applyAppearanceSettings(s) {
+    if (!s) return;
+    var html = document.documentElement;
+    var theme = s.theme || 'dark';
+    if (theme === 'light') {
+      html.classList.add('theme-light');
+      html.classList.remove('theme-dark');
+    } else if (theme === 'dark') {
+      html.classList.add('theme-dark');
+      html.classList.remove('theme-light');
+    } else {
+      // 'system' — match OS preference once at boot; do not listen for
+      // OS changes (not a registered feature; UI surfaces the choice).
+      var sysDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+      if (sysDark) {
+        html.classList.add('theme-dark');
+        html.classList.remove('theme-light');
+      } else {
+        html.classList.add('theme-light');
+        html.classList.remove('theme-dark');
+      }
+    }
+    var density = s.density || 'comfortable';
+    html.classList.toggle('density-compact', density === 'compact');
+    var dir = s.text_direction || 'auto';
+    html.setAttribute('dir', dir === 'auto' ? 'auto' : dir);
+    html.setAttribute('lang', s.language || 'en');
+    // preview_lines controls the message list preview-line clamp.
+    // 0 hides the preview entirely (display:none). 1..6 sets a CSS
+    // class that the stylesheet maps to -webkit-line-clamp.
+    var previewLines = (typeof s.preview_lines === 'number')
+      ? Math.max(0, Math.min(6, s.preview_lines))
+      : 2;
+    var msgs = document.getElementById('messages');
+    if (msgs) {
+      // Strip any prior preview-lines-N class so re-applying does
+      // not accumulate stale classes.
+      var cls = msgs.className.split(/\s+/).filter(function (c) {
+        return c && c.indexOf('preview-lines-') !== 0;
+      });
+      cls.push('preview-lines-' + previewLines);
+      msgs.className = cls.join(' ');
+    }
+  }
+
+  function loadSettings() {
+    return api('GET', '/api/v1/webmail/settings').then(function (s) {
+      state.settings = s;
+      state.settingsLoaded = true;
+      state.settingsLoadFailed = false;
+      state.settingsLoadFailureMessage = '';
+      applyAppearanceSettings(s);
+      return s;
+    }).catch(function (err) {
+      // Settings are non-essential for the shell to work, but the
+      // user must NOT be misled into thinking their saved values
+      // were loaded from the server. We:
+      //   1. Apply hard-coded fallbacks so the UI keeps working.
+      //   2. Set settingsLoadFailed = true so the Settings modal
+      //      surfaces a clear "failed to load" notice.
+      //   3. Toast a non-fatal warning so the user sees the
+      //      problem even if they never open Settings.
+      //   4. Record the reason so the in-modal banner can quote
+      //      it (useful when the cause is a transient 5xx).
+      var reason = (err && err.message) || 'Unknown error';
+      state.settings = state.settings || {
+        theme: 'dark', density: 'comfortable', text_direction: 'auto',
+        language: 'en', preview_lines: 2, reading_pane: 'right',
+        signature_enabled: false, signature_text: '',
+        signature_in_replies: true, default_reply_mode: 'reply',
+        autosave_seconds: 3, confirm_before_discard: true,
+        warn_on_empty_subject: false, default_folder: 'INBOX',
+        mark_read_delay_seconds: 0, sender_display: 'name',
+        notify_inapp: true, notify_push: true,
+      };
+      state.settingsLoaded = true;
+      state.settingsLoadFailed = true;
+      state.settingsLoadFailureMessage = reason;
+      applyAppearanceSettings(state.settings);
+      toast(
+        'Settings failed to load — using temporary defaults. ' +
+          'Open Settings for details or refresh to retry.',
+        'error',
+        6000
+      );
+    });
+  }
+
+  function loadPushStatusBestEffort() {
+    // The push endpoint may 404 if push is disabled at the server.
+    // We treat that as "not configured" and keep the UI honest.
+    return fetch('/api/v1/webmail/push/status', { credentials: 'include', headers: { Accept: 'application/json' } })
+      .then(function (r) { return r.json().catch(function () { return null; }); })
+      .then(function (data) { state.pushStatus = data; })
+      .catch(function () { state.pushStatus = null; });
+  }
+
+  function openSettingsModal() {
+    // If the modal is already open, focus it instead of stacking.
+    var existing = document.querySelector('.modal-backdrop.settings-modal');
+    if (existing) {
+      var firstInput = existing.querySelector('input, select, textarea, button');
+      if (firstInput) firstInput.focus();
+      return;
+    }
+    var s = state.settings || {};
+    var backdrop = el('div', { class: 'modal-backdrop settings-modal' });
+    var modal = el('div', { class: 'modal settings-modal-card', role: 'dialog', 'aria-label': 'Settings' });
+
+    var header = el('div', { class: 'modal-header' });
+    header.appendChild(el('div', { class: 'title' }, 'Settings'));
+    var closeBtn = el('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Close settings', title: 'Close' }, '×');
+    closeBtn.addEventListener('click', closeSettingsModal);
+    header.appendChild(closeBtn);
+    modal.appendChild(header);
+
+    var body = el('div', { class: 'modal-body settings-modal-body' });
+    var tabs = el('div', { class: 'settings-tabs', role: 'tablist' });
+    var content = el('div', { class: 'settings-content', role: 'tabpanel' });
+
+    function makeTab(key, label) {
+      var t = el('button', { class: 'settings-tab', type: 'button', role: 'tab', 'aria-selected': 'false', 'data-tab': key }, label);
+      t.addEventListener('click', function () { activateTab(key); });
+      return t;
+    }
+    function activateTab(key) {
+      Array.prototype.forEach.call(tabs.children, function (child) {
+        var on = child.getAttribute('data-tab') === key;
+        child.classList.toggle('active', on);
+        child.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+      while (content.firstChild) content.removeChild(content.firstChild);
+      renderSettingsTab(key, content, s);
+    }
+    tabs.appendChild(makeTab('profile', 'Profile'));
+    tabs.appendChild(makeTab('appearance', 'Appearance'));
+    tabs.appendChild(makeTab('compose', 'Compose'));
+    tabs.appendChild(makeTab('mail', 'Mail'));
+    tabs.appendChild(makeTab('notifications', 'Notifications'));
+    tabs.appendChild(makeTab('security', 'Security'));
+    tabs.appendChild(makeTab('deferred', 'Coming later'));
+    body.appendChild(tabs);
+    body.appendChild(content);
+    modal.appendChild(body);
+
+    backdrop.appendChild(modal);
+    backdrop.addEventListener('click', function (e) {
+      if (e.target === backdrop) closeSettingsModal();
+    });
+    document.addEventListener('keydown', escCloseSettings);
+    document.body.appendChild(backdrop);
+    activateTab('profile');
+  }
+
+  function escCloseSettings(e) {
+    if (e.key === 'Escape') closeSettingsModal();
+  }
+  function closeSettingsModal() {
+    var m = document.querySelector('.modal-backdrop.settings-modal');
+    if (m) m.remove();
+    document.removeEventListener('keydown', escCloseSettings);
+  }
+
+  // Helper: build a labeled form row.
+  function settingsRow(label, control, hint) {
+    var row = el('div', { class: 'settings-row' });
+    if (label) row.appendChild(el('label', { class: 'settings-label' }, label));
+    row.appendChild(control);
+    if (hint) row.appendChild(el('div', { class: 'settings-hint' }, hint));
+    return row;
+  }
+  function settingsText(key, label, hint, max) {
+    var v = state.settings && state.settings[key] != null ? String(state.settings[key]) : '';
+    var i = el('input', { type: 'text', class: 'settings-input', 'data-key': key, value: v, maxlength: max || 200 });
+    return settingsRow(label, i, hint);
+  }
+  function settingsTextarea(key, label, hint, max) {
+    var v = state.settings && state.settings[key] != null ? String(state.settings[key]) : '';
+    var i = el('textarea', { class: 'settings-input settings-textarea', 'data-key': key, rows: '4' });
+    if (max) i.setAttribute('maxlength', String(max));
+    i.value = v;
+    return settingsRow(label, i, hint);
+  }
+  function settingsSelect(key, label, hint, options, current) {
+    var cur = current != null ? current : (state.settings && state.settings[key]);
+    var sel = el('select', { class: 'settings-input', 'data-key': key });
+    options.forEach(function (opt) {
+      var o = el('option', { value: opt.value }, opt.label);
+      if (opt.value === cur) o.setAttribute('selected', 'selected');
+      sel.appendChild(o);
+    });
+    return settingsRow(label, sel, hint);
+  }
+  function settingsNumber(key, label, hint, min, max) {
+    var v = state.settings && state.settings[key] != null ? Number(state.settings[key]) : 0;
+    var i = el('input', { type: 'number', class: 'settings-input', 'data-key': key, min: String(min), max: String(max), value: String(v) });
+    return settingsRow(label, i, hint);
+  }
+  function settingsBool(key, label, hint) {
+    var v = !!(state.settings && state.settings[key]);
+    var wrap = el('label', { class: 'settings-toggle' });
+    var i = el('input', { type: 'checkbox', 'data-key': key });
+    if (v) i.setAttribute('checked', 'checked');
+    var box = el('span', { class: 'settings-toggle-box' });
+    wrap.appendChild(i);
+    wrap.appendChild(box);
+    wrap.appendChild(el('span', { class: 'settings-toggle-text' }, label));
+    if (hint) wrap.appendChild(el('span', { class: 'settings-hint' }, hint));
+    return wrap;
+  }
+  function settingsSection(title, rows) {
+    var s = el('div', { class: 'settings-section' });
+    if (title) s.appendChild(el('h3', { class: 'settings-section-title' }, title));
+    rows.forEach(function (r) { s.appendChild(r); });
+    return s;
+  }
+
+  // collectSettingsPatch walks the visible settings-content children
+  // and reads data-key from each input/select/textarea. Returns an
+  // object suitable for PUT /api/v1/webmail/settings.
+  function collectSettingsPatch() {
+    var patch = {};
+    var inputs = document.querySelectorAll('.settings-content [data-key]');
+    Array.prototype.forEach.call(inputs, function (el) {
+      var k = el.getAttribute('data-key');
+      if (!k) return;
+      if (el.tagName === 'INPUT' && el.type === 'checkbox') {
+        patch[k] = !!el.checked;
+      } else if (el.tagName === 'INPUT' && el.type === 'number') {
+        var n = parseInt(el.value, 10);
+        if (!isNaN(n)) patch[k] = n;
+      } else {
+        patch[k] = el.value;
+      }
+    });
+    return patch;
+  }
+
+  function saveSettings(onDone) {
+    var btn = document.querySelector('.settings-modal .settings-save-btn');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Saving…';
+    }
+    var patch = collectSettingsPatch();
+    api('PUT', '/api/v1/webmail/settings', patch)
+      .then(function (s) {
+        state.settings = s;
+        state.settingsLoaded = true;
+        applyAppearanceSettings(s);
+        toast('Settings saved', 'success', 1800);
+        if (typeof onDone === 'function') onDone(s);
+      })
+      .catch(function (e) {
+        toast('Save failed: ' + e.message, 'error', 4500);
+      })
+      .then(function () {
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = 'Save';
+        }
+      });
+  }
+
+  function renderSettingsTab(key, host, s) {
+    // If the initial GET failed, surface a clear, non-fatal banner
+    // at the top of every tab. The banner explains that the values
+    // shown are TEMPORARY DEFAULTS (not the user's saved settings)
+    // and offers an explicit retry path. Saving a partial patch on
+    // top of these defaults will overwrite whatever the server has —
+    // the banner calls that out so the user does not do it by
+    // accident.
+    if (state.settingsLoadFailed) {
+      var reason = state.settingsLoadFailureMessage || 'Unknown error';
+      var banner = el('div', { class: 'settings-load-failed-banner', role: 'alert' });
+      banner.appendChild(el('div', { class: 'settings-load-failed-title' },
+        '⚠ Settings failed to load from the server'));
+      banner.appendChild(el('div', { class: 'settings-load-failed-body' },
+        'Reason: ' + reason + '. The values below are temporary defaults, NOT your saved settings. Saving now will overwrite your real settings on the server.'));
+      var retryBtn = el('button', { class: 'btn sm', type: 'button' }, 'Retry loading');
+      retryBtn.addEventListener('click', function () {
+        loadSettings().then(function () { closeSettingsModal(); openSettingsModal(); });
+      });
+      var reloadBtn = el('button', { class: 'btn ghost sm', type: 'button' }, 'Refresh page');
+      reloadBtn.addEventListener('click', function () {
+        if (typeof window !== 'undefined' && window.location) {
+          window.location.reload();
+        }
+      });
+      var actions = el('div', { class: 'settings-load-failed-actions' });
+      actions.appendChild(retryBtn);
+      actions.appendChild(reloadBtn);
+      banner.appendChild(actions);
+      host.appendChild(banner);
+    }
+    if (key === 'profile') {
+      host.appendChild(settingsSection('Identity', [
+        settingsText('display_name', 'Display name', 'Optional — shown on messages you send (depends on recipient support).', 200),
+      ]));
+      host.appendChild(settingsSection('Locale', [
+        settingsSelect('timezone', 'Timezone', 'Currently display-only; used for date/time labels.', [
+          { value: '', label: 'Browser default' },
+          { value: 'UTC', label: 'UTC' },
+          { value: 'Asia/Dubai', label: 'Asia/Dubai (UTC+4)' },
+          { value: 'Asia/Riyadh', label: 'Asia/Riyadh (UTC+3)' },
+          { value: 'Africa/Cairo', label: 'Africa/Cairo (UTC+2)' },
+          { value: 'Europe/London', label: 'Europe/London' },
+          { value: 'Europe/Berlin', label: 'Europe/Berlin' },
+          { value: 'America/New_York', label: 'America/New York' },
+          { value: 'America/Los_Angeles', label: 'America/Los Angeles' },
+        ], (s.timezone || '')),
+        settingsSelect('language', 'Language', 'Currently display-only — UI strings ship in English. Bundled translations land in a follow-up.', [
+          { value: 'en', label: 'English' },
+          { value: 'ar', label: 'العربية (Arabic)' },
+          { value: 'fr', label: 'Français (French)' },
+          { value: 'de', label: 'Deutsch (German)' },
+          { value: 'es', label: 'Español (Spanish)' },
+        ]),
+        settingsSelect('date_format', 'Date format', null, [
+          { value: 'locale', label: 'Match browser locale' },
+          { value: 'iso', label: 'ISO 8601 — 2026-06-27' },
+          { value: 'us', label: 'US — 06/27/2026' },
+          { value: 'eu', label: 'European — 27/06/2026' },
+        ]),
+        settingsSelect('time_format', 'Time format', null, [
+          { value: 'locale', label: 'Match browser locale' },
+          { value: '24h', label: '24-hour' },
+          { value: '12h', label: '12-hour (AM/PM)' },
+        ]),
+        settingsSelect('text_direction', 'Text direction', 'Sets <html dir>. "Auto" lets the browser decide per element.', [
+          { value: 'auto', label: 'Auto (per element)' },
+          { value: 'ltr', label: 'Left-to-right' },
+          { value: 'rtl', label: 'Right-to-left' },
+        ]),
+      ]));
+    } else if (key === 'appearance') {
+      host.appendChild(settingsSection('Theme', [
+        settingsSelect('theme', 'Theme', null, [
+          { value: 'dark', label: 'Dark' },
+          { value: 'light', label: 'Light' },
+          { value: 'system', label: 'Match system' },
+        ]),
+        settingsSelect('density', 'Density', 'Compact mode tightens paddings and font sizes across the shell.', [
+          { value: 'comfortable', label: 'Comfortable' },
+          { value: 'compact', label: 'Compact' },
+        ]),
+      ]));
+      host.appendChild(settingsSection('Message list', [
+        settingsNumber('preview_lines', 'Preview lines', '0 hides the preview line in the list. 1–6.', 0, 6),
+      ]));
+      // Reading pane position is demoted to "Coming later" — the
+      // existing right-pane layout is the only mode the shell
+      // currently renders, and adding the bottom / hidden modes
+      // would require non-trivial layout work that is out of
+      // scope for this pass. Exposing a working-looking select
+      // that does nothing on save would violate the
+      // "no fake enterprise claims" rule. The storage column is
+      // left in place (read-only server-side) so future work can
+      // resurrect the control without a schema change.
+      host.appendChild(settingsSection('Reading pane', [
+        el('div', { class: 'settings-notice' },
+          'Reading-pane position (right / bottom / hidden) is coming later. The shell currently renders the pane to the right of the list. Switching this setting now would have no visible effect.'),
+      ]));
+    } else if (key === 'compose') {
+      host.appendChild(settingsSection('Signature', [
+        settingsBool('signature_enabled', 'Append signature to new messages', null),
+        settingsTextarea('signature_text', 'Signature text', 'Plain text. Up to 4096 characters. Newlines preserved.', 4096),
+        settingsBool('signature_in_replies', 'Also append to replies and forwards', null),
+      ]));
+      host.appendChild(settingsSection('Reply behaviour', [
+        settingsSelect('default_reply_mode', 'Default when clicking Reply', null, [
+          { value: 'reply', label: 'Reply (only sender)' },
+          { value: 'replyAll', label: 'Reply-all (sender + other recipients)' },
+        ]),
+      ]));
+      host.appendChild(settingsSection('Drafts', [
+        settingsNumber('autosave_seconds', 'Autosave interval (seconds)', '0 disables autosave.', 0, 60),
+        settingsBool('confirm_before_discard', 'Ask before discarding a draft', null),
+      ]));
+      host.appendChild(settingsSection('Sending warnings', [
+        settingsBool('warn_on_empty_subject', 'Warn when sending with empty subject or body', null),
+      ]));
+      host.appendChild(settingsSection('Draft attachments', [
+        el('div', { class: 'settings-notice' },
+          'Attachments are not saved in drafts yet. If you attach files and refresh the page, they must be re-selected before sending. The Sent copy of a sent message keeps its attachments.'),
+      ]));
+    } else if (key === 'mail') {
+      host.appendChild(settingsSection('Folders', [
+        settingsSelect('default_folder', 'Folder to open after login', null, [
+          { value: 'INBOX', label: 'Inbox' },
+          { value: 'Archive', label: 'Archive' },
+          { value: 'Drafts', label: 'Drafts' },
+          { value: 'Sent', label: 'Sent' },
+        ]),
+      ]));
+      host.appendChild(settingsSection('Reading', [
+        settingsNumber('mark_read_delay_seconds', 'Mark-as-read delay (seconds)', '0 marks as read immediately on open.', 0, 60),
+      ]));
+      host.appendChild(settingsSection('Sender display', [
+        settingsSelect('sender_display', 'How senders appear in the list', null, [
+          { value: 'name', label: 'Display name (e.g. "Alice Smith")' },
+          { value: 'email', label: 'Email only' },
+          { value: 'name_email', label: 'Name + email (e.g. "Alice Smith <alice@example.com>")' },
+        ]),
+      ]));
+    } else if (key === 'notifications') {
+      var ps = state.pushStatus || {};
+      var statusText = 'Unknown';
+      if (ps && ps.available) {
+        statusText = ps.permission === 'denied' ? 'Permission denied' :
+                     ps.enabled ? 'Enabled' :
+                     'Not subscribed';
+      } else if (ps && !ps.available) {
+        statusText = 'Not configured by the server operator';
+      }
+      host.appendChild(settingsSection('In-app', [
+        settingsBool('notify_inapp', 'Show desktop / tab notifications while the app is open', null),
+      ]));
+      host.appendChild(settingsSection('Web Push (browser)', [
+        settingsBool('notify_push', 'Allow push notifications when the tab is closed', null),
+        el('div', { class: 'settings-notice' }, 'Current status: ' + statusText + '. Open Settings → Notifications in the side panel to manage subscriptions.'),
+      ]));
+    } else if (key === 'security') {
+      var me = state.user || {};
+      var email = me.email || '(unknown)';
+      host.appendChild(settingsSection('Signed in as', [
+        el('div', { class: 'settings-notice' }, 'Mailbox: ' + email),
+      ]));
+      host.appendChild(settingsSection('Session', [
+        (function () {
+          var row = el('div', { class: 'settings-row settings-actions' });
+          var logout = el('button', { class: 'btn', type: 'button' }, 'Log out of this session');
+          logout.addEventListener('click', function () {
+            if (!confirm('Log out of this session? You will need to log in again.')) return;
+            csrfFetch('/api/v1/auth/logout', { method: 'POST' })
+              .then(function (r) {
+                if (r && !r.ok) {
+                  throw new Error('HTTP ' + r.status);
+                }
+                window.location.href = '/webmail/login';
+              })
+              .catch(function (e) { toast('Logout failed: ' + e.message, 'error'); });
+          });
+          row.appendChild(logout);
+
+          var logoutAll = el('button', { class: 'btn ghost', type: 'button' }, 'Log out of all sessions');
+          logoutAll.addEventListener('click', function () {
+            if (!confirm('Log out of every session for this user?')) return;
+            csrfFetch('/api/v1/auth/logout-all', { method: 'POST' })
+              .then(function (r) {
+                if (r && !r.ok) {
+                  throw new Error('HTTP ' + r.status);
+                }
+                window.location.href = '/webmail/login';
+              })
+              .catch(function (e) { toast('Logout-all failed: ' + e.message, 'error'); });
+          });
+          row.appendChild(logoutAll);
+          return row;
+        })(),
+      ]));
+      host.appendChild(settingsSection('Two-factor authentication', [
+        el('div', { class: 'settings-notice' }, 'TOTP / app-passwords UI is not enabled in this build. Backend support ships in a follow-up release — your administrator will announce availability.'),
+      ]));
+    } else if (key === 'deferred') {
+      host.appendChild(settingsSection('Available in a future release', [
+        el('div', { class: 'settings-notice' },
+          'The features below require changes to the mail delivery pipeline (Sieve-style rules, vacation auto-reply hooks, server-side forwarding) that are out of scope for this pass. They are listed here so the UI surfaces the gap honestly rather than offering controls that do nothing.'),
+        el('ul', { class: 'settings-deferred-list' }, ''),
+      ]));
+      var list = host.querySelector('.settings-deferred-list');
+      [
+        'Reading-pane position (bottom / hidden modes) — shell currently only renders the right-of-list layout',
+        'Vacation / out-of-office auto-reply',
+        'Server-side mail filters (Sieve-style rules)',
+        'Forwarding to another address',
+        'Conversation / threaded view',
+        'External image loading preference for HTML messages',
+        'Two-factor authentication (TOTP)',
+        'App-specific passwords',
+        'Per-device session list with selective revoke',
+      ].forEach(function (item) {
+        var li = el('li', {}, item);
+        list.appendChild(li);
+      });
+    }
+
+    // Footer with Save / Cancel — every tab gets one so the user
+    // never has to hunt for the button after switching tabs.
+    var footer = el('div', { class: 'modal-footer settings-footer' });
+    var cancelBtn = el('button', { class: 'btn ghost', type: 'button' }, 'Cancel');
+    cancelBtn.addEventListener('click', closeSettingsModal);
+    var saveBtn = el('button', { class: 'btn primary settings-save-btn', type: 'button' }, 'Save');
+    saveBtn.addEventListener('click', function () { saveSettings(); });
+    footer.appendChild(cancelBtn);
+    footer.appendChild(saveBtn);
+    host.appendChild(footer);
+  }
+
+  // applySignatureToCompose prepends/appends the user's signature to
+  // the compose body if signature_enabled is true. Signature-in-replies
+  // controls whether replies/forwards also get it (new messages always
+  // get it when enabled).
+  function applySignatureToCompose(body, mode) {
+    var s = state.settings;
+    if (!s || !s.signature_enabled || !s.signature_text) return body;
+    if ((mode === 'reply' || mode === 'replyAll' || mode === 'forward') && !s.signature_in_replies) {
+      return body;
+    }
+    var sig = s.signature_text;
+    // If the body already contains the signature verbatim at the end,
+    // do not double-append (this happens when the user opens the same
+    // draft after a settings change).
+    if (body && body.indexOf(sig) !== -1) return body;
+    return (body || '') + '\n\n' + sig + '\n';
+  }
+
+  // ──────────────────────────────────────────────────────────
   // Compose modal
   // ──────────────────────────────────────────────────────────
 
@@ -1992,7 +2700,7 @@
       if (opts.mode === 'reply') {
         compose.to = replyTarget;
         compose.subject = withPrefix('Re: ', m.subject || '');
-        compose.body = buildQuote(m);
+        compose.body = applySignatureToCompose(buildQuote(m), 'reply');
       } else if (opts.mode === 'replyAll') {
         // Reply-all recipient computation. Steps:
         //   1. To = replyTarget (Reply-To or From).
@@ -2032,10 +2740,10 @@
         }
         compose.cc = ccList.join(', ');
         compose.subject = withPrefix('Re: ', m.subject || '');
-        compose.body = buildQuote(m);
+        compose.body = applySignatureToCompose(buildQuote(m), 'replyAll');
       } else if (opts.mode === 'forward') {
         compose.subject = withPrefix('Fwd: ', m.subject || '');
-        compose.body =
+        var fwdBody =
           '\n\n---------- Forwarded message ----------\n' +
           'From: ' +
           (m.from || '') +
@@ -2053,7 +2761,7 @@
         // when the forwarded message arrives without
         // its files.
         if (m.attachments && m.attachments.length > 0) {
-          compose.body =
+          fwdBody =
             '\n\nNote: the original message had ' +
             m.attachments.length +
             ' attachment' +
@@ -2072,6 +2780,13 @@
             '\n\n' +
             stripRfc822Headers(m.rfc822 || '');
         }
+        compose.body = applySignatureToCompose(fwdBody, 'forward');
+      } else if (opts.mode === 'new') {
+        // For new messages, body starts empty; signature_in_replies
+        // does not apply. The signature is the seed body so the user
+        // starts typing above it. applySignatureToCompose handles the
+        // enabled check + the duplicate-prevention guard.
+        compose.body = applySignatureToCompose('', 'new');
       }
       state.compose = compose;
     } else if (opts.mode === 'draft') {
@@ -2079,10 +2794,11 @@
         { dirty: false, lastSavedAt: null, pendingAttachments: [], lastSavedSnapshot: null },
         opts.compose || opts
       );
-    } else {
+} else {
       state.compose = {
         mode: 'new', to: '', cc: '', bcc: '', subject: '',
-        body: '', dirty: false, lastSavedAt: null,
+        body: applySignatureToCompose('', 'new'),
+        dirty: false, lastSavedAt: null,
         pendingAttachments: [], lastSavedSnapshot: null,
       };
     }
@@ -2097,12 +2813,17 @@
 
   function buildQuote(m) {
     var date = m.received_date || m.message_date || '';
+    // The reply-quote header uses the same sender formatting as the
+    // list row / reading pane so the user sees one consistent sender
+    // string everywhere. If settings have not loaded yet the helper
+    // falls back to the display name (the historical behaviour).
+    var senderForQuote = formatSender(m.from || '');
     return (
       '\n\n' +
       'On ' +
       date +
       ', ' +
-      (m.from || '') +
+      senderForQuote +
       ' wrote:\n' +
       '> ' +
       stripRfc822Headers(m.rfc822 || '').split('\n').join('\n> ')
@@ -2197,15 +2918,29 @@
         });
     }
     // markDirty is wired to every field. It restarts
-    // the autosave timer. After 3 seconds of no
-    // further input performAutosave fires. While the
-    // modal is open, the timer is the single source of
-    // truth — manual save also clears it because the
-    // state is now persisted.
+    // the autosave timer. The interval is read from
+    // state.settings.autosave_seconds (clamped to the
+    // 0..60 range the API accepts). 0 disables autosave
+    // entirely — the user must hit Save draft manually.
+    // The default is 3 seconds, matching the legacy
+    // hard-coded value.
     function markDirty() {
       c.dirty = true;
-      if (c.autosaveTimer) clearTimeout(c.autosaveTimer);
-      c.autosaveTimer = setTimeout(performAutosave, 3000);
+      if (c.autosaveTimer) {
+        clearTimeout(c.autosaveTimer);
+        c.autosaveTimer = null;
+      }
+      var s = state.settings || {};
+      var seconds = (typeof s.autosave_seconds === 'number')
+        ? Math.max(0, Math.min(60, s.autosave_seconds))
+        : 3;
+      if (seconds <= 0) {
+        // Autosave disabled — keep dirty=true so the status
+        // line shows "unsaved" and the user is reminded to
+        // hit Save draft manually before closing.
+        return;
+      }
+      c.autosaveTimer = setTimeout(performAutosave, seconds * 1000);
     }
 
     var backdrop = el('div', { class: 'modal-backdrop' });
@@ -2342,6 +3077,20 @@
       });
       attachmentsArea.hidden = !c.pendingAttachments || c.pendingAttachments.length === 0;
     }
+    // Notice that surfaces when at least one attachment is selected.
+    // Drafts persist the body but not the file blobs (the file picker
+    // hands File objects straight to the FormData sender); if the user
+    // refreshes / closes the tab they will need to re-pick the files.
+    var attNotice = el('div', { class: 'compose-attachment-notice', hidden: true });
+    attNotice.textContent =
+      'Attachments are not saved in drafts yet — if you close or refresh the page, ' +
+      'you will need to re-select the files before sending.';
+    attachmentsArea.appendChild(attNotice);
+    var _renderOrig = renderComposeAttachments;
+    renderComposeAttachments = function () {
+      _renderOrig();
+      attNotice.hidden = !(c.pendingAttachments && c.pendingAttachments.length > 0);
+    };
     modal.appendChild(attachmentsArea);
 
     // Footer.
@@ -2407,6 +3156,34 @@
       sendBtn.innerHTML = b ? '<span class="spinner-inline"></span> Sending…' : 'Send';
     }
 
+    // Default per-file / per-message limits. The server is the source of
+    // truth — the values here match the API defaults (25 MB / 20 files)
+    // so the user sees the same error before or after hitting Send. If
+    // the operator changes coremail.max_attachment_size_mb the UI
+    // surfaces the next attachment > 25 MB immediately.
+    var CLIENT_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+    var CLIENT_MAX_ATTACHMENTS = 20;
+
+    function preflightAttachments() {
+      var files = c.pendingAttachments || [];
+      if (files.length > CLIENT_MAX_ATTACHMENTS) {
+        return 'You can attach at most ' + CLIENT_MAX_ATTACHMENTS +
+               ' files. Remove ' + (files.length - CLIENT_MAX_ATTACHMENTS) +
+               ' before sending.';
+      }
+      for (var i = 0; i < files.length; i++) {
+        var f = files[i];
+        var size = f && f.size != null ? f.size : (f && f.file ? f.file.size : 0);
+        if (size > CLIENT_MAX_ATTACHMENT_BYTES) {
+          var mb = Math.round(size / 1024 / 1024);
+          return 'Attachment "' + (f.name || ('file ' + (i + 1))) +
+                 '" is ' + mb + ' MB. The maximum is ' +
+                 (CLIENT_MAX_ATTACHMENT_BYTES / 1024 / 1024) + ' MB.';
+        }
+      }
+      return null;
+    }
+
     function doSend(payload) {
       var files = c.pendingAttachments || [];
       if (files.length > 0) {
@@ -2421,6 +3198,28 @@
         toast('At least one recipient is required', 'error');
         toField.input.focus();
         return;
+      }
+      // Pre-send attachment validation — surfaces a clear error before
+      // the network round-trip. Server is still the source of truth;
+      // these are the same limits as the API defaults.
+      var attErr = preflightAttachments();
+      if (attErr) {
+        toast(attErr, 'error', 4500);
+        return;
+      }
+      // Warn-on-empty-subject/body — respects the user's setting.
+      var s = state.settings || {};
+      if (s.warn_on_empty_subject) {
+        var subjEmpty = !(payload.subject || '').trim() || payload.subject === '(no subject)';
+        var bodyEmpty = !(payload.body || '').trim();
+        if (subjEmpty || bodyEmpty) {
+          var parts = [];
+          if (subjEmpty) parts.push('empty subject');
+          if (bodyEmpty) parts.push('empty body');
+          if (!confirm('You are sending with ' + parts.join(' and ') + '. Send anyway?')) {
+            return;
+          }
+        }
       }
       if (c.autosaveTimer) {
         clearTimeout(c.autosaveTimer);
@@ -2489,8 +3288,17 @@
     });
 
     discardBtn.addEventListener('click', function () {
+      var s = state.settings || {};
+      // Confirm before discard — respects the user setting.
+      if (c.dirty || c.draftID) {
+        var msg = c.draftID
+          ? 'Discard this draft permanently?'
+          : 'Discard this unsent message?';
+        if (s.confirm_before_discard !== false && !confirm(msg)) {
+          return;
+        }
+      }
       if (c.draftID) {
-        if (!confirm('Discard this draft permanently?')) return;
         deleteDraft(c.draftID).catch(function () {
           /* non-fatal */
         });
@@ -2581,18 +3389,93 @@
         }
       });
 
-    // Folders then route.
-    loadFolders()
-      .then(function () {
-        routeFromHash();
-      })
-      .catch(function (e) {
-        if (e.status === 401) {
-          // Auth gate will redirect; nothing to do.
-          return;
+    // Settings + push status — best-effort, non-blocking. loadSettings
+    // resolves to defaults on failure so the rest of the app keeps
+    // working without per-mailbox prefs. loadPushStatusBestEffort
+    // is independent — even if push is disabled server-side, the
+    // Notifications tab in Settings still renders the current status.
+    //
+    // The repo has no JS test runner, so the wire-up of each
+    // persisted setting is verified manually (see the "Manual
+    // verification" section in the branch's final report). To
+    // catch obvious regressions without a JS test runner,
+    // assertSettingsApplied is a runtime smoke test that runs once
+    // after loadSettings resolves. It reads the DOM the wired
+    // hooks are supposed to touch and console.warns if the state
+    // and the DOM disagree. It never throws — the SPA stays
+    // usable and the dev sees the gap in the console.
+    function assertSettingsApplied() {
+      try {
+        var s = state.settings || {};
+        var html = document.documentElement;
+        var msgs = document.getElementById('messages');
+        var problems = [];
+
+        // theme: html must carry a theme-* class.
+        var hasThemeClass = html.classList.contains('theme-dark') ||
+                            html.classList.contains('theme-light');
+        if (s.theme && !hasThemeClass) {
+          problems.push('theme: no .theme-light/.theme-dark class on <html>');
         }
-        toast('Failed to load folders: ' + e.message, 'error');
-      });
+        // density: must match s.density.
+        var wantsCompact = s.density === 'compact';
+        if (wantsCompact !== html.classList.contains('density-compact')) {
+          problems.push('density: html class out of sync (wants=' + wantsCompact +
+                        ', has=' + html.classList.contains('density-compact') + ')');
+        }
+        // text_direction: html[dir] must be set.
+        var wantDir = (s.text_direction === 'auto' || !s.text_direction)
+                      ? 'auto' : s.text_direction;
+        if (html.getAttribute('dir') !== wantDir) {
+          problems.push('text_direction: html[dir] out of sync (wants=' + wantDir +
+                        ', has=' + html.getAttribute('dir') + ')');
+        }
+        // preview_lines: #messages must carry the matching class.
+        var n = (typeof s.preview_lines === 'number') ? s.preview_lines : 2;
+        if (msgs && msgs.className.indexOf('preview-lines-' + n) === -1) {
+          problems.push('preview_lines: #messages missing .preview-lines-' + n);
+        }
+        if (problems.length) {
+          console.warn('[orvix] settings wire-up gaps: ' + problems.join('; '));
+        }
+      } catch (e) {
+        // Defensive: never block boot on a probe failure.
+      }
+    }
+    loadSettings().then(assertSettingsApplied);
+    //
+    // loadSettings is awaited before the folder boot so the
+    // user-configured default_folder can be applied on first load.
+    // If loadSettings fails (offline / 5xx / etc.) it falls back
+    // to in-memory defaults AND sets state.settingsLoadFailed so
+    // the Settings modal surfaces a clear "failed to load" notice.
+    loadPushStatusBestEffort();
+    loadSettings().then(function () {
+      return loadFolders();
+    }).then(function () {
+      // Apply the user-configured default_folder when the hash is
+      // empty (first load). Existing hash routes still win — the
+      // user can deep-link to any folder. The lookup is
+      // case-insensitive via state.folderByPath which is populated
+      // by loadFolders().
+      try {
+        if (!location.hash || location.hash === '#' || location.hash === '#/') {
+          var def = state.settings && state.settings.default_folder;
+          if (def && state.folderByPath && state.folderByPath[def.toLowerCase()]) {
+            state.currentFolderPath = def;
+          }
+        }
+      } catch (e) {
+        // Non-fatal — keep going with whatever the hash/default is.
+      }
+      routeFromHash();
+    }).catch(function (e) {
+      if (e.status === 401) {
+        // Auth gate will redirect; nothing to do.
+        return;
+      }
+      toast('Failed to load folders: ' + e.message, 'error');
+    });
 
     // Keyboard shortcuts. We bind on document and ignore
     // events whose target is an input/textarea/contentEditable.

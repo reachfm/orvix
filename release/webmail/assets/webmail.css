@@ -2418,3 +2418,347 @@ html[dir="rtl"] .push-settings-note {
 .attach-btn-wrap input[type="file"]:disabled {
   cursor: default;
 }
+
+/* ═══════════════════════════════════════════════════════════
+   Settings modal — Enterprise polish
+   ═══════════════════════════════════════════════════════════ */
+
+.settings-modal-card {
+  width: min(960px, 100%);
+  max-height: calc(100vh - 64px);
+}
+
+.settings-modal-body {
+  display: flex;
+  min-height: 0;
+}
+
+.settings-tabs {
+  width: 200px;
+  flex-shrink: 0;
+  background: var(--bg-canvas);
+  border-inline-end: 1px solid var(--border-1);
+  padding: var(--sp-3) var(--sp-2);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+}
+
+.settings-tab {
+  display: block;
+  width: 100%;
+  text-align: start;
+  background: transparent;
+  border: 0;
+  padding: 9px 12px;
+  border-radius: var(--r-md);
+  color: var(--text-2);
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease),
+              color var(--motion-fast) var(--ease);
+}
+
+.settings-tab:hover {
+  background: var(--bg-hover);
+  color: var(--text-0);
+}
+
+.settings-tab.active {
+  background: var(--accent-soft);
+  color: var(--text-0);
+  font-weight: 600;
+}
+
+.settings-content {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: var(--sp-5) var(--sp-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+}
+
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding-bottom: var(--sp-4);
+  border-bottom: 1px solid var(--border-1);
+}
+
+.settings-section:last-of-type {
+  border-bottom: 0;
+}
+
+.settings-section-title {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--text-3);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+
+.settings-label {
+  flex: 0 0 200px;
+  font-size: 13px;
+  color: var(--text-1);
+  font-weight: 500;
+}
+
+.settings-input {
+  flex: 1;
+  min-width: 200px;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-sm);
+  padding: 7px 10px;
+  color: var(--text-0);
+  font: inherit;
+  font-size: 13.5px;
+  outline: none;
+  transition: border-color var(--motion-fast) var(--ease),
+              box-shadow var(--motion-fast) var(--ease);
+}
+
+.settings-input:focus {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-focus);
+}
+
+.settings-textarea {
+  resize: vertical;
+  min-height: 90px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+.settings-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  cursor: pointer;
+  font-size: 13.5px;
+  color: var(--text-1);
+  user-select: none;
+}
+
+.settings-toggle input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.settings-toggle-box {
+  width: 36px;
+  height: 20px;
+  background: var(--border-3);
+  border-radius: var(--r-pill);
+  position: relative;
+  transition: background var(--motion-fast) var(--ease);
+  flex-shrink: 0;
+}
+
+.settings-toggle-box::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  inset-inline-start: 2px;
+  width: 16px;
+  height: 16px;
+  background: var(--text-on-accent);
+  border-radius: 50%;
+  transition: transform var(--motion-fast) var(--ease);
+}
+
+.settings-toggle input[type="checkbox"]:checked + .settings-toggle-box {
+  background: var(--accent);
+}
+
+[dir="rtl"] .settings-toggle input[type="checkbox"]:checked + .settings-toggle-box::after,
+.settings-toggle input[type="checkbox"]:checked + .settings-toggle-box::after {
+  transform: translateX(16px);
+}
+
+[dir="rtl"] .settings-toggle input[type="checkbox"]:checked + .settings-toggle-box::after {
+  transform: translateX(-16px);
+}
+
+.settings-toggle-text {
+  font-weight: 500;
+}
+
+.settings-hint {
+  font-size: 12px;
+  color: var(--text-3);
+  line-height: 1.45;
+  width: 100%;
+}
+
+.settings-notice {
+  font-size: 12.5px;
+  color: var(--text-2);
+  line-height: 1.55;
+  padding: var(--sp-3);
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-1);
+  border-radius: var(--r-sm);
+}
+
+.settings-deferred-list {
+  margin: 0;
+  padding-inline-start: var(--sp-5);
+  font-size: 13px;
+  color: var(--text-2);
+  line-height: 1.7;
+}
+
+.settings-actions {
+  flex-wrap: wrap;
+}
+
+.settings-footer {
+  margin-top: auto;
+}
+
+@media (max-width: 768px) {
+  .settings-modal-card {
+    width: 100%;
+    height: 100vh;
+    max-height: 100vh;
+  }
+  .settings-modal-body {
+    flex-direction: column;
+  }
+  .settings-tabs {
+    width: 100%;
+    flex-direction: row;
+    overflow-x: auto;
+    border-inline-end: 0;
+    border-bottom: 1px solid var(--border-1);
+  }
+  .settings-tab {
+    flex-shrink: 0;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Density — compact
+   ═══════════════════════════════════════════════════════════ */
+
+:root.density-compact .message {
+  padding: 7px 12px;
+}
+
+:root.density-compact .topbar {
+  height: 52px;
+}
+
+:root.density-compact .field {
+  padding: 8px 14px;
+}
+
+:root.density-compact .modal-header {
+  padding: 11px 16px;
+}
+
+:root.density-compact .modal-footer {
+  padding: 9px 16px;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Explicit dark-theme opt-in marker.
+   The dark tokens are the default (declared on :root), but
+   some browsers / extensions flip the colour-scheme and a
+     class="theme-dark" hook makes the choice unambiguous.
+   ═══════════════════════════════════════════════════════════ */
+
+:root.theme-dark {
+  color-scheme: dark;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Preview lines — driven by the per-mailbox `preview_lines`
+   setting. The JS adds `preview-lines-N` (0..6) to the
+   `#messages` container; this CSS clamps the .preview block
+   accordingly. 0 hides the preview entirely (display:none),
+   matching the documented behaviour in the Settings modal.
+   ═══════════════════════════════════════════════════════════ */
+
+#messages.preview-lines-0 .message .preview {
+  display: none;
+}
+
+#messages.preview-lines-1 .message .preview {
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+#messages.preview-lines-2 .message .preview,
+#messages.preview-lines-3 .message .preview,
+#messages.preview-lines-4 .message .preview,
+#messages.preview-lines-5 .message .preview,
+#messages.preview-lines-6 .message .preview {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+#messages.preview-lines-2 .message .preview { -webkit-line-clamp: 2; }
+#messages.preview-lines-3 .message .preview { -webkit-line-clamp: 3; }
+#messages.preview-lines-4 .message .preview { -webkit-line-clamp: 4; }
+#messages.preview-lines-5 .message .preview { -webkit-line-clamp: 5; }
+#messages.preview-lines-6 .message .preview { -webkit-line-clamp: 6; }
+
+/* ═══════════════════════════════════════════════════════════
+   Settings — load-failure banner.
+   Surfaces a clear, non-fatal warning at the top of every
+   tab when the initial GET /api/v1/webmail/settings failed.
+   The defaults below are intentionally loud enough that the
+   user cannot miss them while looking at the saved-values
+   form fields, which would otherwise mislead them.
+   ═══════════════════════════════════════════════════════════ */
+
+.settings-load-failed-banner {
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--danger-soft);
+  border: 1px solid var(--danger);
+  border-radius: var(--r-md);
+  color: var(--text-0);
+  font-size: 13px;
+  line-height: 1.55;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.settings-load-failed-title {
+  font-weight: 600;
+  color: var(--danger-2);
+  font-size: 13.5px;
+}
+
+.settings-load-failed-body {
+  color: var(--text-1);
+}
+
+.settings-load-failed-actions {
+  display: flex;
+  gap: var(--sp-2);
+  margin-top: var(--sp-1);
+  flex-wrap: wrap;
+}

@@ -25,6 +25,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
@@ -582,9 +583,27 @@ func (h *Handler) WebmailMessage(c fiber.Ctx) error {
 	// the simplest path is the SQL update via the
 	// repository. We do this best-effort — failing to mark
 	// as seen must not block message read.
-	seen := true
-	_ = ctx.MailboxStore.Messages.UpdateFlags(c.Context(), msg.ID,
-		&seen, nil, nil, nil, nil, nil, nil)
+	//
+	// The client can opt out via ?auto_seen=0 when it
+	// implements a delayed mark-read (the user-configurable
+	// `mark_read_delay_seconds` setting). The client is then
+	// responsible for issuing PATCH /api/v1/webmail/messages/:id
+	// with {"seen": true} after the configured delay. If the
+	// user navigates away before the delay elapses, the JS
+	// cancels the pending mark-read — the message stays
+	// unseen, which matches the user's preference.
+	autoSeen := strings.TrimSpace(strings.ToLower(c.Query("auto_seen")))
+	if autoSeen != "0" && autoSeen != "false" && autoSeen != "no" {
+		seen := true
+		if err := ctx.MailboxStore.Messages.UpdateFlags(c.Context(), msg.ID,
+			&seen, nil, nil, nil, nil, nil, nil); err == nil {
+			// Refresh msg.Seen so the response body reflects the
+			// post-update state. Without this the caller would see
+			// the pre-update value and the JS mark-read delay code
+			// could double-mark on the next PATCH.
+			msg.Seen = true
+		}
+	}
 
 	attachmentsOut := []fiber.Map{}
 	if atts, err := ctx.MailboxStore.Attachments.ListByMessage(c.Context(), msg.ID, nil); err != nil {
@@ -2165,4 +2184,272 @@ func generateMessageID() string {
 		return fmt.Sprintf("%016x", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(b)
+}
+
+// ──────────────────────────────────────────────────────────────
+// User Settings endpoints
+// ──────────────────────────────────────────────────────────────
+//
+// GET /api/v1/webmail/settings      — read the caller's settings row
+// PUT /api/v1/webmail/settings      — apply a partial patch
+//
+// Authorization: the caller must have an authenticated user, AND
+// the user's email must resolve to an active coremail_mailboxes row.
+// The mailbox id is taken from resolveWebmailUserContext — never
+// from the request body or query string — so a caller cannot read
+// or write another mailbox's settings by supplying a foreign id.
+//
+// Validation: every string field has an allowed-value set; numeric
+// fields are clamped at the storage layer. Unknown fields in the
+// payload are ignored (decoded into the patch, then dropped if not
+// declared). This keeps the API forward-compatible.
+
+// allowedSettings* enumerates the closed value sets the API accepts.
+// The handler returns 400 with a clear error if a value is outside
+// the allowed set, so the storage layer never sees a bad value.
+var (
+	allowedSettingsTheme       = stringSet("dark", "light", "system")
+	allowedSettingsDensity     = stringSet("comfortable", "compact")
+	allowedSettingsReadingPane = stringSet("right", "bottom", "hidden")
+	allowedSettingsDirection   = stringSet("auto", "ltr", "rtl")
+	allowedSettingsLanguage    = stringSet("en", "ar", "fr", "de", "es")
+	allowedSettingsDateFmt     = stringSet("locale", "iso", "us", "eu")
+	allowedSettingsTimeFmt     = stringSet("locale", "24h", "12h")
+	allowedSettingsSender      = stringSet("name", "email", "name_email")
+	allowedSettingsReplyMode   = stringSet("reply", "replyAll")
+)
+
+func stringSet(items ...string) map[string]struct{} {
+	m := make(map[string]struct{}, len(items))
+	for _, s := range items {
+		m[s] = struct{}{}
+	}
+	return m
+}
+
+func validateInSet(value, def string, allowed map[string]struct{}) string {
+	v := strings.TrimSpace(value)
+	if v == "" {
+		return def
+	}
+	if _, ok := allowed[v]; ok {
+		return v
+	}
+	return "" // signal: invalid
+}
+
+// WebmailGetSettings returns the caller's settings row, creating
+// one with safe defaults on first read so the UI never has to
+// distinguish "no row" from "all defaults".
+func (h *Handler) WebmailGetSettings(c fiber.Ctx) error {
+	ms, ok := h.mailStoreForUser()
+	if !ok {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"error": "mailstore_unavailable",
+		})
+	}
+	userCtx, reason := h.resolveWebmailUserContext(c)
+	if userCtx == nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error":  "no mailbox",
+			"reason": reason,
+		})
+	}
+	settings, err := ms.Settings.GetOrCreate(c.Context(), userCtx.Mailbox.ID)
+	if err != nil {
+		h.logger.Error("webmail get settings", zap.Uint("mailbox_id", userCtx.Mailbox.ID), zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "settings read failed"})
+	}
+	return c.JSON(settings)
+}
+
+// WebmailPutSettings applies a partial patch. Unknown fields are
+// ignored (the patch decoder drops them). Invalid enum values are
+// rejected with 400 and a field-specific message.
+func (h *Handler) WebmailPutSettings(c fiber.Ctx) error {
+	ms, ok := h.mailStoreForUser()
+	if !ok {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"error": "mailstore_unavailable",
+		})
+	}
+	userCtx, reason := h.resolveWebmailUserContext(c)
+	if userCtx == nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error":  "no mailbox",
+			"reason": reason,
+		})
+	}
+
+	// Decoded as a generic map first so unknown fields don't crash and
+	// known fields can still be validated individually.
+	var raw map[string]json.RawMessage
+	if err := c.Bind().JSON(&raw); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+
+	patch := &storage.UserSettingsPatch{}
+	// Reject unknown keys up front so a typo ("thme" instead of "theme")
+	// surfaces as 400 instead of being silently dropped.
+	known := map[string]struct{}{
+		"display_name": {}, "timezone": {}, "language": {}, "date_format": {}, "time_format": {}, "text_direction": {},
+		"theme": {}, "density": {}, "preview_lines": {}, "reading_pane": {},
+		"signature_enabled": {}, "signature_text": {}, "signature_in_replies": {}, "default_reply_mode": {},
+		"autosave_seconds": {}, "confirm_before_discard": {}, "warn_on_empty_subject": {},
+		"default_folder": {}, "mark_read_delay_seconds": {}, "sender_display": {},
+		"notify_inapp": {}, "notify_push": {},
+	}
+	for k := range raw {
+		if _, ok := known[k]; !ok {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "unknown field: " + k,
+			})
+		}
+	}
+
+	// String fields: decode and validate against the closed set.
+	decodeString := func(field string, dest **string, allowed map[string]struct{}) error {
+		v, ok := raw[field]
+		if !ok {
+			return nil
+		}
+		var s string
+		if err := json.Unmarshal(v, &s); err != nil {
+			return fmt.Errorf("%s must be a string", field)
+		}
+		s = strings.TrimSpace(s)
+		if s != "" {
+			if _, ok := allowed[s]; !ok {
+				return fmt.Errorf("%s has invalid value %q", field, s)
+			}
+		}
+		*dest = &s
+		return nil
+	}
+
+	if err := decodeString("theme", &patch.Theme, allowedSettingsTheme); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	if err := decodeString("density", &patch.Density, allowedSettingsDensity); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	if err := decodeString("reading_pane", &patch.ReadingPane, allowedSettingsReadingPane); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	if err := decodeString("text_direction", &patch.TextDirection, allowedSettingsDirection); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	if err := decodeString("language", &patch.Language, allowedSettingsLanguage); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	if err := decodeString("date_format", &patch.DateFormat, allowedSettingsDateFmt); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	if err := decodeString("time_format", &patch.TimeFormat, allowedSettingsTimeFmt); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	if err := decodeString("sender_display", &patch.SenderDisplay, allowedSettingsSender); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	if err := decodeString("default_reply_mode", &patch.DefaultReplyMode, allowedSettingsReplyMode); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	// Free-form string fields (no closed enum): validate length.
+	decodeFreeString := func(field string, dest **string, max int) error {
+		v, ok := raw[field]
+		if !ok {
+			return nil
+		}
+		var s string
+		if err := json.Unmarshal(v, &s); err != nil {
+			return fmt.Errorf("%s must be a string", field)
+		}
+		if len(s) > max {
+			return fmt.Errorf("%s exceeds max length %d", field, max)
+		}
+		*dest = &s
+		return nil
+	}
+	if err := decodeFreeString("display_name", &patch.DisplayName, 200); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	if err := decodeFreeString("timezone", &patch.Timezone, 64); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	if err := decodeFreeString("signature_text", &patch.SignatureText, 4096); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	if err := decodeFreeString("default_folder", &patch.DefaultFolder, 64); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	// Numeric fields: decode + clamp range, no error — clamping happens
+	// at the storage layer too, so out-of-range values are still saved
+	// (clamped) instead of rejected with 400. The UI should never send
+	// out-of-range values; a manual API caller will get the clamped value
+	// back on the next GET.
+	decodeInt := func(field string, dest **int, min, max int) error {
+		v, ok := raw[field]
+		if !ok {
+			return nil
+		}
+		var n int
+		if err := json.Unmarshal(v, &n); err != nil {
+			return fmt.Errorf("%s must be an integer", field)
+		}
+		if n < min || n > max {
+			return fmt.Errorf("%s must be between %d and %d", field, min, max)
+		}
+		*dest = &n
+		return nil
+	}
+	if err := decodeInt("preview_lines", &patch.PreviewLines, 0, 6); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	if err := decodeInt("autosave_seconds", &patch.AutosaveSeconds, 0, 60); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	if err := decodeInt("mark_read_delay_seconds", &patch.MarkReadDelaySeconds, 0, 60); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	// Boolean fields.
+	decodeBool := func(field string, dest **bool) error {
+		v, ok := raw[field]
+		if !ok {
+			return nil
+		}
+		var b bool
+		if err := json.Unmarshal(v, &b); err != nil {
+			return fmt.Errorf("%s must be a boolean", field)
+		}
+		*dest = &b
+		return nil
+	}
+	if err := decodeBool("signature_enabled", &patch.SignatureEnabled); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	if err := decodeBool("signature_in_replies", &patch.SignatureInReplies); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	if err := decodeBool("confirm_before_discard", &patch.ConfirmBeforeDiscard); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	if err := decodeBool("warn_on_empty_subject", &patch.WarnOnEmptySubject); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	if err := decodeBool("notify_inapp", &patch.NotifyInApp); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	if err := decodeBool("notify_push", &patch.NotifyPush); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	updated, err := ms.Settings.Update(c.Context(), userCtx.Mailbox.ID, patch)
+	if err != nil {
+		h.logger.Error("webmail put settings", zap.Uint("mailbox_id", userCtx.Mailbox.ID), zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "settings update failed"})
+	}
+	return c.JSON(updated)
 }

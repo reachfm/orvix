@@ -1296,13 +1296,29 @@ func TestWebmailAPIPatchMessageFlags(t *testing.T) {
 	tok := e.loginAdmin(t)
 	id := e.injectMessage(t, "Patch test", "Body of patch test")
 
-	// Confirm the row starts as unseen, unflagged.
+	// Confirm the row starts as unseen, unflagged by reading
+	// the raw row (the GET endpoint itself flips seen=true as
+	// a side effect — that contract is pinned by
+	// TestWebmailMessageAutoSeenDefault).
+	var storedSeen, storedFlagged int
+	if err := e.mailbox.DB.QueryRow(
+		"SELECT seen, flagged FROM coremail_messages WHERE id = ?", id,
+	).Scan(&storedSeen, &storedFlagged); err != nil {
+		t.Fatalf("setup raw read: %v", err)
+	}
+	if storedSeen != 0 || storedFlagged != 0 {
+		t.Fatalf("setup: row should start unseen, unflagged (seen=%d flagged=%d)", storedSeen, storedFlagged)
+	}
+
+	// GET /messages/:id marks the row seen as a side effect;
+	// the response body now reflects the post-mark state
+	// (this contract is pinned by TestWebmailMessageAutoSeenDefault).
 	status, msg := e.webmailRequest(t, "GET", fmt.Sprintf("/api/v1/webmail/messages/%d", id), tok, nil)
 	if status != 200 {
 		t.Fatalf("setup GET: %d %v", status, msg)
 	}
-	if msg["seen"] != false || msg["flagged"] != false {
-		t.Fatalf("setup: row should start unseen, unflagged: %v", msg)
+	if msg["seen"] != true || msg["flagged"] != false {
+		t.Fatalf("setup: after GET, seen must be true and flagged still false: %v", msg)
 	}
 
 	// PATCH seen=true.
