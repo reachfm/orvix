@@ -23,15 +23,20 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"io"
+	"mime"
 	"net/mail"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/coremail"
+	coremailmime "github.com/orvix/orvix/internal/coremail/mime"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
 	"go.uber.org/zap"
@@ -54,10 +59,10 @@ import (
 // to the operator in the response body, replacing the demo
 // UI's silent failure mode.
 type webmailUserContext struct {
-	Mailbox  *coremail.Mailbox
-	Email    string
-	UserID   uint
-	Role     string
+	Mailbox      *coremail.Mailbox
+	Email        string
+	UserID       uint
+	Role         string
 	MailboxStore *storage.MailStore
 }
 
@@ -243,22 +248,23 @@ func (h *Handler) WebmailFolders(c fiber.Ctx) error {
 // Query parameters:
 //   - folder=INBOX|Sent|Drafts|Trash|Junk|Archive|<name>
 //   - q=<substring> : case-insensitive substring match.
-//                     By default against subject / from /
-//                     to. The "body=1" flag extends the
-//                     match to the message body (one
-//                     read per candidate — slower).
+//     By default against subject / from /
+//     to. The "body=1" flag extends the
+//     match to the message body (one
+//     read per candidate — slower).
 //   - limit=N      : 1..200, default 50. Values above 200
-//                    are clamped to 200 to keep the first
-//                    paint fast.
+//     are clamped to 200 to keep the first
+//     paint fast.
 //   - offset=N     : pagination cursor; new messages first.
 //   - total=1      : return the total count for the query
-//                    (off by default — counting across
-//                    filtered rows costs a separate query
-//                    the UI does not need on every page).
+//     (off by default — counting across
+//     filtered rows costs a separate query
+//     the UI does not need on every page).
 //
 // Response shape:
-//   {messages, folder, folder_id, total?, limit, offset,
-//    has_more, snippet_for_q?}
+//
+//	{messages, folder, folder_id, total?, limit, offset,
+//	 has_more, snippet_for_q?}
 //
 // `has_more` is true when the returned page is exactly
 // `limit` long AND a next page would be non-empty. The
@@ -320,9 +326,9 @@ func (h *Handler) WebmailMessages(c fiber.Ctx) error {
 	}
 
 	filter := storage.MessageFilter{
-		MailboxID:    ctx.Mailbox.ID,
-		FolderID:     &folder.ID,
-		Search:       q,
+		MailboxID:     ctx.Mailbox.ID,
+		FolderID:      &folder.ID,
+		Search:        q,
 		SearchSubject: true,
 		SearchFrom:    true,
 		SearchTo:      true,
@@ -380,22 +386,22 @@ func (h *Handler) WebmailMessages(c fiber.Ctx) error {
 	out := make([]fiber.Map, 0, len(filtered))
 	for _, m := range filtered {
 		row := fiber.Map{
-			"id":              m.ID,
-			"message_id":      m.MessageID,
-			"subject":         m.Subject,
-			"from":            m.FromAddress,
-			"to":              m.ToAddresses,
-			"cc":              m.CcAddresses,
-			"size_bytes":      m.SizeBytes,
-			"seen":            m.Seen,
-			"flagged":         m.Flagged,
-			"answered":        m.Answered,
-			"draft":           m.Draft,
-			"junk":            m.Junk,
-			"received_date":   m.ReceivedDate,
-			"message_date":    m.MessageDate,
-			"folder_id":       m.FolderID,
-			"folder_path":     folder.Path,
+			"id":               m.ID,
+			"message_id":       m.MessageID,
+			"subject":          m.Subject,
+			"from":             m.FromAddress,
+			"to":               m.ToAddresses,
+			"cc":               m.CcAddresses,
+			"size_bytes":       m.SizeBytes,
+			"seen":             m.Seen,
+			"flagged":          m.Flagged,
+			"answered":         m.Answered,
+			"draft":            m.Draft,
+			"junk":             m.Junk,
+			"received_date":    m.ReceivedDate,
+			"message_date":     m.MessageDate,
+			"folder_id":        m.FolderID,
+			"folder_path":      folder.Path,
 			"attachment_count": attCounts[m.ID],
 		}
 		// When the caller supplied a query, attach a
@@ -632,22 +638,22 @@ func (h *Handler) WebmailMessage(c fiber.Ctx) error {
 // mail — no parallel pipeline, no SMTP redesign.
 //
 // Behavior:
-//   1. Authenticate via the standard auth middleware.
-//   2. Resolve the caller's mailbox (the sender).
-//   3. Parse To/Cc/Bcc safely with mail.ParseAddressList —
-//      malformed addresses are rejected with 400 BEFORE we
-//      touch disk or queue.
-//   4. Look up the Sent folder for the mailbox. If missing,
-//      return 500 — system folders must be provisioned first.
-//   5. Store the RFC822 message body in the Sent folder
-//      (the source of truth for "what the user sent").
-//   6. Enqueue one queue.QueueEntry per recipient, all
-//      pointing at the same message_id, all
-//      direction=outbound / delivery_mode=remote_smtp /
-//      status=pending so the existing delivery worker picks
-//      them up. The sender is the authenticated mailbox,
-//      not anything the client supplies.
-//   7. Return 201 Created with status="queued".
+//  1. Authenticate via the standard auth middleware.
+//  2. Resolve the caller's mailbox (the sender).
+//  3. Parse To/Cc/Bcc safely with mail.ParseAddressList —
+//     malformed addresses are rejected with 400 BEFORE we
+//     touch disk or queue.
+//  4. Look up the Sent folder for the mailbox. If missing,
+//     return 500 — system folders must be provisioned first.
+//  5. Store the RFC822 message body in the Sent folder
+//     (the source of truth for "what the user sent").
+//  6. Enqueue one queue.QueueEntry per recipient, all
+//     pointing at the same message_id, all
+//     direction=outbound / delivery_mode=remote_smtp /
+//     status=pending so the existing delivery worker picks
+//     them up. The sender is the authenticated mailbox,
+//     not anything the client supplies.
+//  7. Return 201 Created with status="queued".
 //
 // If queueing fails for every recipient, the Sent copy is
 // kept (it is the user's record of the message) and the
@@ -667,20 +673,44 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 	}
 
 	var req struct {
-		To      string `json:"to"`
-		Cc      string `json:"cc"`
-		Bcc     string `json:"bcc"`
-		Subject string `json:"subject"`
-		Body    string `json:"body"`
+		To      string
+		Cc      string
+		Bcc     string
+		Subject string
+		Body    string
 	}
-	if err := c.Bind().JSON(&req); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
-	}
-	if strings.TrimSpace(req.To) == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "to is required"})
-	}
-	if strings.TrimSpace(req.Subject) == "" {
-		req.Subject = "(no subject)"
+	var rfc822 []byte
+	messageID := generateMessageID()
+	now := time.Now().UTC()
+
+	contentType := c.Get("Content-Type")
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		var err error
+		rfc822, req, err = h.webmailParseMultipartSend(c, ctx, messageID, now)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+		}
+	} else {
+		if err := c.Bind().JSON(&req); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
+		}
+		if strings.TrimSpace(req.To) == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "to is required"})
+		}
+		if strings.TrimSpace(req.Subject) == "" {
+			req.Subject = "(no subject)"
+		}
+		rfc822 = []byte(buildRFC822(rfc822Params{
+			From:      ctx.Mailbox.Email,
+			To:        req.To,
+			Cc:        req.Cc,
+			Bcc:       req.Bcc,
+			Subject:   req.Subject,
+			Body:      req.Body,
+			MessageID: messageID,
+			Date:      now,
+			FromName:  ctx.Mailbox.Name,
+		}))
 	}
 
 	// Parse all three recipient lists with the standard
@@ -721,23 +751,6 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		})
 	}
 
-	// Build the RFC822 message body. The body is plain
-	// text by default; HTML is out of scope for this
-	// endpoint (no redesign rule).
-	messageID := generateMessageID()
-	now := time.Now().UTC()
-	rfc822 := buildRFC822(rfc822Params{
-		From:      ctx.Mailbox.Email,
-		To:        req.To,
-		Cc:        req.Cc,
-		Bcc:       req.Bcc,
-		Subject:   req.Subject,
-		Body:      req.Body,
-		MessageID: messageID,
-		Date:      now,
-		FromName:  ctx.Mailbox.Name,
-	})
-
 	msg := &storage.Message{
 		MessageID:         messageID,
 		InternetMessageID: fmt.Sprintf("<%s@orvix.local>", messageID),
@@ -756,7 +769,7 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		Seen:              true,
 	}
 
-	if err := ctx.MailboxStore.StoreMessage(c.Context(), msg, []byte(rfc822), nil); err != nil {
+	if err := ctx.MailboxStore.StoreMessage(c.Context(), msg, rfc822, nil); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": fmt.Sprintf("store message: %v", err),
 		})
@@ -806,21 +819,6 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		bare := addr.Address
 		domain := extractRecipientDomain(bare)
 
-		// Classify the recipient. Local means:
-		//   1. The domain is configured locally and
-		//      active.
-		//   2. The mailbox row exists and is active.
-		// If either fails, fall back to remote_smtp —
-		// a misrouted local mailbox is still better
-		// than dropping the recipient, because the
-		// remote_smtp path will return a clean bounce
-		// (5.1.1 user unknown) if neither path applies.
-		// The cross-tenant guard is enforced by looking
-		// up the mailbox by the authenticated sender's
-		// tenant; a sender in tenant A cannot deliver
-		// to a mailbox in tenant B through the local
-		// path because the lookup is scoped to the
-		// same tenant the sender is in.
 		local, localMboxID, err := h.classifyLocalRecipient(
 			c.Context(),
 			ctx.Mailbox.TenantID,
@@ -828,11 +826,6 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 			domain,
 		)
 		if err != nil {
-			// Defensive: never let a classification
-			// error drop the recipient. Fall through
-			// to the remote_smtp path and log a
-			// warning so the operator can see the
-			// problem in the audit trail.
 			h.logger.Warn("webmail send: classify recipient failed, falling back to remote_smtp",
 				zap.String("to", bare),
 				zap.String("domain", domain),
@@ -890,14 +883,191 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 	}
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-		"id":                msg.ID,
-		"message_id":        msg.MessageID,
-		"status":            "queued",
-		"queued_count":      queuedCount,
-		"local_count":       len(deliveredLocal),
-		"remote_count":      queuedCount - len(deliveredLocal),
-		"local_recipients":  deliveredLocal,
+		"id":               msg.ID,
+		"message_id":       msg.MessageID,
+		"status":           "queued",
+		"queued_count":     queuedCount,
+		"local_count":      len(deliveredLocal),
+		"remote_count":     queuedCount - len(deliveredLocal),
+		"local_recipients": deliveredLocal,
 	})
+}
+
+// webmailParseMultipartSend parses a multipart/form-data request
+// for the WebmailSend endpoint. It extracts form fields (to, cc,
+// bcc, subject, body) and file uploads, validates sizes and
+// filenames, detects MIME types server-side, and builds a
+// multipart/mixed RFC822 message with base64-encoded attachments.
+func (h *Handler) webmailParseMultipartSend(c fiber.Ctx, ctx *webmailUserContext, messageID string, now time.Time) ([]byte, struct {
+	To, Cc, Bcc, Subject, Body string
+}, error) {
+	var empty struct{ To, Cc, Bcc, Subject, Body string }
+
+	form, err := c.MultipartForm()
+	if err != nil {
+		return nil, empty, fmt.Errorf("invalid multipart form: %v", err)
+	}
+
+	getVal := func(key string) string {
+		vals := form.Value[key]
+		if len(vals) == 0 {
+			return ""
+		}
+		return vals[0]
+	}
+
+	req := struct{ To, Cc, Bcc, Subject, Body string }{
+		To:      getVal("to"),
+		Cc:      getVal("cc"),
+		Bcc:     getVal("bcc"),
+		Subject: getVal("subject"),
+		Body:    getVal("body"),
+	}
+
+	if strings.TrimSpace(req.To) == "" {
+		return nil, empty, fmt.Errorf("to is required")
+	}
+	if strings.TrimSpace(req.Subject) == "" {
+		req.Subject = "(no subject)"
+	}
+
+	// Get max attachment limits from config.
+	maxSize := h.cfg.CoreMail.MaxAttachmentSizeMB
+	if maxSize <= 0 {
+		maxSize = 25
+	}
+	maxAttachments := h.cfg.CoreMail.MaxAttachmentsPerMessage
+	if maxAttachments <= 0 {
+		maxAttachments = 20
+	}
+	maxBytes := int64(maxSize) * 1024 * 1024
+
+	// Process uploaded files.
+	uploadedFiles := form.File["attachment"]
+	if len(uploadedFiles) > maxAttachments {
+		return nil, empty, fmt.Errorf("too many attachments: max %d", maxAttachments)
+	}
+
+	attachments := make([]coremailmime.AttachmentData, 0, len(uploadedFiles))
+	for _, fh := range uploadedFiles {
+		if fh.Size > maxBytes {
+			return nil, empty, fmt.Errorf("attachment %q exceeds max size of %d MB", fh.Filename, maxSize)
+		}
+
+		// Sanitize filename to prevent path traversal.
+		safeName := coremailmime.SanitizeFilename(fh.Filename)
+		if safeName == "" {
+			return nil, empty, fmt.Errorf("invalid attachment filename: %q", fh.Filename)
+		}
+
+		// Reject filenames that were sanitized away
+		// (e.g. only dots, slashes, null bytes).
+		if len(safeName) == 0 || safeName == "." || safeName == ".." {
+			return nil, empty, fmt.Errorf("invalid attachment filename: %q", fh.Filename)
+		}
+
+		file, err := fh.Open()
+		if err != nil {
+			return nil, empty, fmt.Errorf("cannot read attachment %q: %v", fh.Filename, err)
+		}
+		data, err := io.ReadAll(file)
+		file.Close()
+		if err != nil {
+			return nil, empty, fmt.Errorf("cannot read attachment %q: %v", fh.Filename, err)
+		}
+
+		// Detect MIME type server-side; do not trust client.
+		ct := detectMIMEType(safeName, data)
+
+		attachments = append(attachments, coremailmime.AttachmentData{
+			Filename:    safeName,
+			ContentType: ct,
+			Data:        data,
+		})
+	}
+
+	rfc822 := buildMultipartRFC822ForWebmail(ctx.Mailbox.Name, ctx.Mailbox.Email,
+		req.To, req.Cc, req.Bcc, req.Subject, req.Body, messageID, now, attachments)
+
+	return rfc822, req, nil
+}
+
+// detectMIMEType determines the MIME content type for an attachment
+// using the file extension. Falls back to application/octet-stream.
+// Never trusts the client-provided Content-Type.
+func detectMIMEType(filename string, data []byte) string {
+	ext := filepath.Ext(filename)
+	if ext != "" {
+		ct := mime.TypeByExtension(ext)
+		if ct != "" {
+			// Strip any parameters (e.g. charset).
+			if idx := strings.IndexByte(ct, ';'); idx > 0 {
+				ct = strings.TrimSpace(ct[:idx])
+			}
+			return ct
+		}
+	}
+	return "application/octet-stream"
+}
+
+// buildMultipartRFC822ForWebmail constructs a multipart/mixed RFC 5322
+// message with a text/plain body and base64-encoded attachments.
+func buildMultipartRFC822ForWebmail(fromName, fromEmail, to, cc, bcc, subject, body, messageID string, date time.Time, attachments []coremailmime.AttachmentData) []byte {
+	boundary := fmt.Sprintf("orvix-mixed-%d", date.UnixNano())
+
+	var b strings.Builder
+	if fromName != "" {
+		fmt.Fprintf(&b, "From: %s <%s>\r\n", escapeHeader(fromName), fromEmail)
+	} else {
+		fmt.Fprintf(&b, "From: %s\r\n", fromEmail)
+	}
+	fmt.Fprintf(&b, "To: %s\r\n", sanitizeCRLF(to))
+	if cc != "" {
+		fmt.Fprintf(&b, "Cc: %s\r\n", sanitizeCRLF(cc))
+	}
+	if bcc != "" {
+		fmt.Fprintf(&b, "Bcc: %s\r\n", sanitizeCRLF(bcc))
+	}
+	fmt.Fprintf(&b, "Subject: %s\r\n", escapeHeader(subject))
+	fmt.Fprintf(&b, "Date: %s\r\n", date.Format(time.RFC1123Z))
+	fmt.Fprintf(&b, "Message-ID: <%s@orvix.local>\r\n", messageID)
+	fmt.Fprintf(&b, "MIME-Version: 1.0\r\n")
+	fmt.Fprintf(&b, "Content-Type: multipart/mixed; boundary=\"%s\"\r\n", boundary)
+	b.WriteString("\r\n")
+
+	// text/plain part.
+	fmt.Fprintf(&b, "--%s\r\n", boundary)
+	b.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
+	b.WriteString("Content-Transfer-Encoding: 8bit\r\n")
+	b.WriteString("\r\n")
+	b.WriteString(body)
+	if !strings.HasSuffix(body, "\n") {
+		b.WriteString("\r\n")
+	}
+
+	// Attachment parts (base64).
+	for _, att := range attachments {
+		fmt.Fprintf(&b, "--%s\r\n", boundary)
+		fmt.Fprintf(&b, "Content-Type: %s\r\n", att.ContentType)
+		fmt.Fprintf(&b, "Content-Disposition: attachment; filename=\"%s\"\r\n", att.Filename)
+		b.WriteString("Content-Transfer-Encoding: base64\r\n")
+		if att.ContentID != "" {
+			fmt.Fprintf(&b, "Content-ID: %s\r\n", att.ContentID)
+		}
+		b.WriteString("\r\n")
+		encoded := base64.StdEncoding.EncodeToString(att.Data)
+		for i := 0; i < len(encoded); i += 76 {
+			end := i + 76
+			if end > len(encoded) {
+				end = len(encoded)
+			}
+			b.WriteString(encoded[i:end])
+			b.WriteString("\r\n")
+		}
+	}
+
+	fmt.Fprintf(&b, "--%s--\r\n", boundary)
+	return []byte(b.String())
 }
 
 // classifyLocalRecipient decides whether a recipient address
@@ -906,10 +1076,10 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 //
 // Local means:
 //
-//   1. The recipient domain is a configured local
-//      coremail_domains row with status=active.
-//   2. The recipient address has an active coremail_mailboxes
-//      row in the SAME tenant as the sender.
+//  1. The recipient domain is a configured local
+//     coremail_domains row with status=active.
+//  2. The recipient address has an active coremail_mailboxes
+//     row in the SAME tenant as the sender.
 //
 // Both conditions are required. A recipient with a local
 // domain but no active mailbox row is treated as remote
@@ -1059,8 +1229,8 @@ func (h *Handler) WebmailDelete(c fiber.Ctx) error {
 		})
 	}
 	return c.JSON(fiber.Map{
-		"id":      msg.ID,
-		"status":  "deleted",
+		"id":       msg.ID,
+		"status":   "deleted",
 		"moved_to": trash.Path,
 	})
 }
@@ -1161,8 +1331,8 @@ func (h *Handler) WebmailArchive(c fiber.Ctx) error {
 	_ = ctx.MailboxStore.Messages.UpdateFlags(c.Context(), msg.ID,
 		nil, nil, nil, nil, &deleted, nil, nil)
 	return c.JSON(fiber.Map{
-		"id":      msg.ID,
-		"status":  "archived",
+		"id":       msg.ID,
+		"status":   "archived",
 		"moved_to": archive.Path,
 	})
 }
@@ -1227,10 +1397,10 @@ func (h *Handler) WebmailMoveMessage(c fiber.Ctx) error {
 		})
 	}
 	return c.JSON(fiber.Map{
-		"id":         msg.ID,
-		"status":     "moved",
-		"moved_to":   target.Path,
-		"folder_id":  target.ID,
+		"id":        msg.ID,
+		"status":    "moved",
+		"moved_to":  target.Path,
+		"folder_id": target.ID,
 	})
 }
 
@@ -1288,12 +1458,12 @@ func sanitizeDownloadFilename(name string) string {
 //
 // Body: {ids: [uint], action: string, target_folder_id?: uint}
 //
-//   action: "archive" | "delete" | "markRead" | "markUnread"
-//         | "flag" | "unflag" | "spam" | "nospam"
-//         | "move"
+//	action: "archive" | "delete" | "markRead" | "markUnread"
+//	      | "flag" | "unflag" | "spam" | "nospam"
+//	      | "move"
 //
-//   target_folder_id: required when action == "move",
-//                     must belong to caller's mailbox.
+//	target_folder_id: required when action == "move",
+//	                  must belong to caller's mailbox.
 //
 // The handler runs every id through the same ownership
 // check as the single-message endpoints. Cross-mailbox
@@ -1582,7 +1752,7 @@ func (h *Handler) WebmailMarkFolderRead(c fiber.Ctx) error {
 // Body: {id?: uint, to?, cc?, bcc?, subject?, body?}
 //   - id absent  -> create new draft
 //   - id present -> update existing draft (must belong
-//                   to the caller's mailbox)
+//     to the caller's mailbox)
 //
 // The "to/cc/bcc/subject/body" fields are stored verbatim
 // in the message and the RFC822 body on disk. Sending a
@@ -1745,14 +1915,14 @@ func (h *Handler) WebmailGetDraft(c fiber.Ctx) error {
 	}
 	body := extractBodyPreview(string(rfc822), 100000)
 	return c.JSON(fiber.Map{
-		"id":       msg.ID,
-		"subject":  msg.Subject,
-		"to":       msg.ToAddresses,
-		"cc":       msg.CcAddresses,
-		"bcc":      msg.BccAddresses,
-		"body":     body,
-		"rfc822":   string(rfc822),
-		"status":   "draft",
+		"id":      msg.ID,
+		"subject": msg.Subject,
+		"to":      msg.ToAddresses,
+		"cc":      msg.CcAddresses,
+		"bcc":     msg.BccAddresses,
+		"body":    body,
+		"rfc822":  string(rfc822),
+		"status":  "draft",
 	})
 }
 

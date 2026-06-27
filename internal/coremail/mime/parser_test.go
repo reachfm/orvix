@@ -279,9 +279,9 @@ func TestSanitizeFilename(t *testing.T) {
 		{"file\x00name.txt", "filename.txt"},
 	}
 	for _, tt := range tests {
-		got := sanitizeFilename(tt.input)
+		got := SanitizeFilename(tt.input)
 		if got != tt.expected {
-			t.Errorf("sanitizeFilename(%q) = %q, want %q", tt.input, got, tt.expected)
+			t.Errorf("SanitizeFilename(%q) = %q, want %q", tt.input, got, tt.expected)
 		}
 	}
 }

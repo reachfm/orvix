@@ -64,6 +64,8 @@ type CoreMailConfig struct {
 	VAPIDPrivateKey           string        `mapstructure:"vapid_private_key"`
 	VAPIDPrivateKeyFile       string        `mapstructure:"vapid_private_key_file"`
 	VAPIDSubject              string        `mapstructure:"vapid_subject"`
+	MaxAttachmentSizeMB       int           `mapstructure:"max_attachment_size_mb"`
+	MaxAttachmentsPerMessage  int           `mapstructure:"max_attachments_per_message"`
 }
 
 // ClamAVConfig holds ClamAV antivirus scanner settings.
@@ -246,11 +248,11 @@ type DNSConfig struct {
 	CloudflareZoneID string `mapstructure:"cloudflare_zone_id"`
 
 	// Namecheap
-	NamecheapAPIUser      string `mapstructure:"namecheap_api_user"`
-	NamecheapAPIKey       string `mapstructure:"namecheap_api_key"`
-	NamecheapUsername     string `mapstructure:"namecheap_username"`
-	NamecheapClientIP     string `mapstructure:"namecheap_client_ip"`
-	NamecheapSandbox      bool   `mapstructure:"namecheap_sandbox"`
+	NamecheapAPIUser  string `mapstructure:"namecheap_api_user"`
+	NamecheapAPIKey   string `mapstructure:"namecheap_api_key"`
+	NamecheapUsername string `mapstructure:"namecheap_username"`
+	NamecheapClientIP string `mapstructure:"namecheap_client_ip"`
+	NamecheapSandbox  bool   `mapstructure:"namecheap_sandbox"`
 	// NamecheapEnableApply is the kill switch for live Namecheap
 	// writes. The provider stays in dry-run mode until an operator
 	// explicitly flips this on. The value is read from
@@ -259,7 +261,7 @@ type DNSConfig struct {
 	// provider's Apply() refuses when this is false. The UI surfaces
 	// the resulting state as "dry_run_only" so the operator can
 	// see why the Apply button is disabled.
-	NamecheapEnableApply  bool   `mapstructure:"namecheap_enable_apply"`
+	NamecheapEnableApply bool `mapstructure:"namecheap_enable_apply"`
 
 	// AWS Route 53 (legacy stub; not used by the new DNS Ops build)
 	Route53AccessKey string `mapstructure:"route53_access_key"`
@@ -359,25 +361,25 @@ func Defaults() *Config {
 			PreferIPv4: false,
 		},
 		CoreMail: CoreMailConfig{
-			Enabled:           false,
-			Hostname:          "mail.local",
-			MailStorePath:     "/var/lib/orvix/mailstore",
-			SMTPHost:          "0.0.0.0",
-			SMTPPort:          25,
-			SubmissionEnabled: false,
-			SubmissionHost:    "0.0.0.0",
-			SubmissionPort:    587,
-			SMTPsEnabled:      false,
-			SMTPsHost:         "0.0.0.0",
-			SMTPsPort:         465,
-			IMAPHost:          "0.0.0.0",
-			IMAPPort:          143,
-			POP3Host:          "0.0.0.0",
-			POP3Port:          110,
-			RequireTLSForAuth: true,
+			Enabled:                  false,
+			Hostname:                 "mail.local",
+			MailStorePath:            "/var/lib/orvix/mailstore",
+			SMTPHost:                 "0.0.0.0",
+			SMTPPort:                 25,
+			SubmissionEnabled:        false,
+			SubmissionHost:           "0.0.0.0",
+			SubmissionPort:           587,
+			SMTPsEnabled:             false,
+			SMTPsHost:                "0.0.0.0",
+			SMTPsPort:                465,
+			IMAPHost:                 "0.0.0.0",
+			IMAPPort:                 143,
+			POP3Host:                 "0.0.0.0",
+			POP3Port:                 110,
+			RequireTLSForAuth:        true,
 			RequireAuthForSubmission: false,
-			QueueWorkers:      1,
-			WorkerInterval:    5 * time.Second,
+			QueueWorkers:             1,
+			WorkerInterval:           5 * time.Second,
 			// VAPID defaults: empty keys mean push notifications
 			// are disabled at boot. Operators populate these via
 			// release/scripts/generate-vapid-keys.sh. The Subject
@@ -385,9 +387,11 @@ func Defaults() *Config {
 			// uses to reach the operator if abuse is reported; it
 			// is required by RFC 8292 but can be a placeholder
 			// until the operator customises it.
-			VAPIDPublicKey:  "",
-			VAPIDPrivateKey: "",
-			VAPIDSubject:    "mailto:admin@localhost",
+			VAPIDPublicKey:           "",
+			VAPIDPrivateKey:          "",
+			VAPIDSubject:             "mailto:admin@localhost",
+			MaxAttachmentSizeMB:      25,
+			MaxAttachmentsPerMessage: 20,
 		},
 		License: LicenseConfig{
 			OfflineMode: true,

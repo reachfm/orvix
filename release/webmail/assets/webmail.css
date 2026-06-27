@@ -2329,3 +2329,92 @@ html[dir="rtl"] .push-settings-row,
 html[dir="rtl"] .push-settings-note {
   text-align: right;
 }
+
+/* ═══════════════════════════════════════════════════════════
+   Compose — Attachment UI
+   ═══════════════════════════════════════════════════════════ */
+.compose-attachments {
+  border-top: 1px solid var(--border-1);
+  padding: 8px 18px;
+  max-height: 180px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.compose-attachment {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border: 1px solid var(--border-1);
+  border-radius: var(--r-sm);
+  background: var(--bg-surface);
+  font-size: 12.5px;
+  transition: background var(--motion-fast) var(--ease);
+}
+
+.compose-attachment:hover {
+  background: var(--bg-hover);
+}
+
+.compose-attachment .att-icon {
+  font-size: 14px;
+  line-height: 1;
+  flex-shrink: 0;
+  width: 24px;
+  text-align: center;
+}
+
+.compose-attachment .att-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-0);
+}
+
+.compose-attachment .att-size {
+  flex-shrink: 0;
+  font-size: 11.5px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  min-width: 56px;
+  text-align: end;
+}
+
+.compose-attachment .btn-remove-att {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 4px;
+  color: var(--text-3);
+  cursor: pointer;
+  border-radius: var(--r-sm);
+  transition: color var(--motion-fast) var(--ease), background var(--motion-fast) var(--ease);
+}
+
+.compose-attachment .btn-remove-att:hover {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
+.attach-btn-wrap {
+  display: inline-flex;
+  position: relative;
+}
+
+.attach-btn-wrap input[type="file"] {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+  z-index: 1;
+}
+
+.attach-btn-wrap input[type="file"]:disabled {
+  cursor: default;
+}
