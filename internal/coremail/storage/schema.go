@@ -90,6 +90,47 @@ func Tables() []string {
 			updated_at DATETIME NOT NULL,
 			FOREIGN KEY (mailbox_id) REFERENCES coremail_mailboxes(id)
 		)`,
+		// Per-mailbox user preferences (profile / appearance / compose / mail behavior / notifications).
+		// One row per mailbox. UNIQUE(mailbox_id) makes GetOrCreate a single-row read or insert.
+		// All fields have safe defaults so a freshly provisioned mailbox reads sensible values
+		// without the user having to touch Settings. Updated_at is bumped on every PUT.
+		`CREATE TABLE IF NOT EXISTS coremail_user_settings (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			mailbox_id INTEGER NOT NULL UNIQUE,
+			-- Profile
+			display_name TEXT NOT NULL DEFAULT '',
+			timezone TEXT NOT NULL DEFAULT '',
+			language TEXT NOT NULL DEFAULT 'en',
+			date_format TEXT NOT NULL DEFAULT 'locale',
+			time_format TEXT NOT NULL DEFAULT 'locale',
+			text_direction TEXT NOT NULL DEFAULT 'auto',
+			-- Appearance
+			theme TEXT NOT NULL DEFAULT 'dark',
+			density TEXT NOT NULL DEFAULT 'comfortable',
+			preview_lines INTEGER NOT NULL DEFAULT 2,
+			reading_pane TEXT NOT NULL DEFAULT 'right',
+			-- Compose
+			signature_enabled INTEGER NOT NULL DEFAULT 0,
+			signature_text TEXT NOT NULL DEFAULT '',
+			signature_in_replies INTEGER NOT NULL DEFAULT 1,
+			default_reply_mode TEXT NOT NULL DEFAULT 'reply',
+			autosave_seconds INTEGER NOT NULL DEFAULT 3,
+			confirm_before_discard INTEGER NOT NULL DEFAULT 1,
+			warn_on_empty_subject INTEGER NOT NULL DEFAULT 0,
+			-- Mail behavior
+			default_folder TEXT NOT NULL DEFAULT 'INBOX',
+			mark_read_delay_seconds INTEGER NOT NULL DEFAULT 0,
+			sender_display TEXT NOT NULL DEFAULT 'name',
+			-- Notifications (Web Push state is owned by push_subscriptions; this
+			-- only records the user's notification preference, not the wire-level
+			-- subscription. The settings endpoint reflects the live push state
+			-- by joining /api/v1/webmail/push/status at read time.)
+			notify_inapp INTEGER NOT NULL DEFAULT 1,
+			notify_push INTEGER NOT NULL DEFAULT 1,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			FOREIGN KEY (mailbox_id) REFERENCES coremail_mailboxes(id)
+		)`,
 	}
 }
 
@@ -110,6 +151,7 @@ func Indexes() []string {
 		`CREATE INDEX IF NOT EXISTS idx_coremail_attachments_sha256 ON coremail_attachments(sha256)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_push_subscriptions_endpoint ON push_subscriptions(endpoint)`,
 		`CREATE INDEX IF NOT EXISTS idx_push_subscriptions_mailbox ON push_subscriptions(mailbox_id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_coremail_user_settings_mailbox ON coremail_user_settings(mailbox_id)`,
 	}
 }
 

@@ -230,12 +230,12 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			ZoneID:   cfg.DNS.CloudflareZoneID,
 		}, dnsResolver),
 		providers.NewNamecheapProvider(providers.NamecheapConfig{
-			APIUser:      cfg.DNS.NamecheapAPIUser,
-			APIKey:       cfg.DNS.NamecheapAPIKey,
-			Username:     cfg.DNS.NamecheapUsername,
-			ClientIP:     cfg.DNS.NamecheapClientIP,
-			Sandbox:      cfg.DNS.NamecheapSandbox,
-			EnableApply:  cfg.DNS.NamecheapEnableApply,
+			APIUser:     cfg.DNS.NamecheapAPIUser,
+			APIKey:      cfg.DNS.NamecheapAPIKey,
+			Username:    cfg.DNS.NamecheapUsername,
+			ClientIP:    cfg.DNS.NamecheapClientIP,
+			Sandbox:     cfg.DNS.NamecheapSandbox,
+			EnableApply: cfg.DNS.NamecheapEnableApply,
 		}, namecheapClient),
 	}
 	dnsSvc := dnsops.NewService(dnsResolver, dnsProviderList...)
@@ -370,6 +370,13 @@ func (r *Router) setupRoutes() {
 	protected.Post("/webmail/push/unsubscribe", r.h.PushUnsubscribe)
 	protected.Get("/webmail/push/status", r.h.PushStatus)
 	protected.Post("/webmail/push/test", r.h.PushTest)
+
+	// User settings — per-mailbox profile / appearance / compose /
+	// mail behavior / notification preferences. Auth + mailbox
+	// ownership enforced by resolveWebmailUserContext inside the
+	// handlers; no id is taken from the request body.
+	protected.Get("/webmail/settings", r.h.WebmailGetSettings)
+	protected.Put("/webmail/settings", r.h.WebmailPutSettings)
 
 	protected.Get("/csrf-token", func(c fiber.Ctx) error {
 		userID, _ := c.Locals("user_id").(uint)

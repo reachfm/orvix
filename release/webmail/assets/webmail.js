@@ -348,6 +348,14 @@
     searchQuery: '',
     sidebarOpen: false,
     readingPaneOpen: false,
+    // Per-mailbox settings (profile / appearance / compose / mail
+    // behavior / notifications). Loaded once on app boot. The PUT
+    // endpoint returns the post-update row, which we replace in
+    // place. Null means "not loaded yet" — the UI gracefully shows
+    // defaults until loadSettings() resolves.
+    settings: null,
+    settingsLoaded: false,
+    pushStatus: null, // {available, permission, enabled, reason}
     // "g" prefix for Gmail-style navigation. After
     // pressing "g" the next keypress is interpreted as a
     // folder shortcut. We use a single keypress window
@@ -799,7 +807,15 @@
     top.appendChild(search);
 
     var actions = el('div', { class: 'actions' });
-    var userChip = el('div', { class: 'user-chip', id: 'user-chip' });
+    var settingsBtn = el('button', {
+      class: 'icon-btn',
+      id: 'settings-btn',
+      type: 'button',
+      title: 'Settings',
+      'aria-label': 'Open settings',
+    }, '⚙');
+    actions.appendChild(settingsBtn);
+    var userChip = el('div', { class: 'user-chip', id: 'user-chip', tabindex: '0', role: 'button', 'aria-label': 'Open settings menu' });
     userChip.appendChild(el('span', { class: 'avatar', id: 'user-avatar' }, '?'));
     userChip.appendChild(el('span', { id: 'user-email' }, ''));
     actions.appendChild(userChip);
@@ -881,6 +897,14 @@
     $('menu-btn').addEventListener('click', toggleSidebar);
     $('compose-btn').addEventListener('click', function () {
       openCompose({ mode: 'new' });
+    });
+    $('settings-btn').addEventListener('click', openSettingsModal);
+    $('user-chip').addEventListener('click', openSettingsModal);
+    $('user-chip').addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        openSettingsModal();
+      }
     });
     $('refresh-btn').addEventListener('click', function () {
       var folder = state.currentFolderPath;
@@ -1962,6 +1986,450 @@
   }, 250);
 
   // ──────────────────────────────────────────────────────────
+  // Settings
+  // ──────────────────────────────────────────────────────────
+
+  // applyAppearanceSettings writes theme + density + text-direction
+  // onto the document immediately. Called on initial load (after
+  // loadSettings resolves) and after every successful PUT. Theme
+  // values: 'dark' | 'light' | 'system'. The 'system' choice reads
+  // prefers-color-scheme at apply time and does NOT install a media
+  // listener — a full system-listener hookup is a follow-up patch.
+  function applyAppearanceSettings(s) {
+    if (!s) return;
+    var html = document.documentElement;
+    var theme = s.theme || 'dark';
+    if (theme === 'light') {
+      html.classList.add('theme-light');
+      html.classList.remove('theme-dark');
+    } else if (theme === 'dark') {
+      html.classList.add('theme-dark');
+      html.classList.remove('theme-light');
+    } else {
+      // 'system' — match OS preference once at boot; do not listen for
+      // OS changes (not a registered feature; UI surfaces the choice).
+      var sysDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+      if (sysDark) {
+        html.classList.add('theme-dark');
+        html.classList.remove('theme-light');
+      } else {
+        html.classList.add('theme-light');
+        html.classList.remove('theme-dark');
+      }
+    }
+    var density = s.density || 'comfortable';
+    html.classList.toggle('density-compact', density === 'compact');
+    var dir = s.text_direction || 'auto';
+    html.setAttribute('dir', dir === 'auto' ? 'auto' : dir);
+    html.setAttribute('lang', s.language || 'en');
+  }
+
+  function loadSettings() {
+    return api('GET', '/api/v1/webmail/settings').then(function (s) {
+      state.settings = s;
+      state.settingsLoaded = true;
+      applyAppearanceSettings(s);
+      return s;
+    }).catch(function () {
+      // Settings are non-essential; degrade to defaults if the API
+      // fails. The UI keeps working without a settings row.
+      state.settings = state.settings || {
+        theme: 'dark', density: 'comfortable', text_direction: 'auto',
+        language: 'en', preview_lines: 2, reading_pane: 'right',
+        signature_enabled: false, signature_text: '',
+        signature_in_replies: true, default_reply_mode: 'reply',
+        autosave_seconds: 3, confirm_before_discard: true,
+        warn_on_empty_subject: false, default_folder: 'INBOX',
+        mark_read_delay_seconds: 0, sender_display: 'name',
+        notify_inapp: true, notify_push: true,
+      };
+      state.settingsLoaded = true;
+    });
+  }
+
+  function loadPushStatusBestEffort() {
+    // The push endpoint may 404 if push is disabled at the server.
+    // We treat that as "not configured" and keep the UI honest.
+    return fetch('/api/v1/webmail/push/status', { credentials: 'include', headers: { Accept: 'application/json' } })
+      .then(function (r) { return r.json().catch(function () { return null; }); })
+      .then(function (data) { state.pushStatus = data; })
+      .catch(function () { state.pushStatus = null; });
+  }
+
+  function openSettingsModal() {
+    // If the modal is already open, focus it instead of stacking.
+    var existing = document.querySelector('.modal-backdrop.settings-modal');
+    if (existing) {
+      var firstInput = existing.querySelector('input, select, textarea, button');
+      if (firstInput) firstInput.focus();
+      return;
+    }
+    var s = state.settings || {};
+    var backdrop = el('div', { class: 'modal-backdrop settings-modal' });
+    var modal = el('div', { class: 'modal settings-modal-card', role: 'dialog', 'aria-label': 'Settings' });
+
+    var header = el('div', { class: 'modal-header' });
+    header.appendChild(el('div', { class: 'title' }, 'Settings'));
+    var closeBtn = el('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Close settings', title: 'Close' }, '×');
+    closeBtn.addEventListener('click', closeSettingsModal);
+    header.appendChild(closeBtn);
+    modal.appendChild(header);
+
+    var body = el('div', { class: 'modal-body settings-modal-body' });
+    var tabs = el('div', { class: 'settings-tabs', role: 'tablist' });
+    var content = el('div', { class: 'settings-content', role: 'tabpanel' });
+
+    function makeTab(key, label) {
+      var t = el('button', { class: 'settings-tab', type: 'button', role: 'tab', 'aria-selected': 'false', 'data-tab': key }, label);
+      t.addEventListener('click', function () { activateTab(key); });
+      return t;
+    }
+    function activateTab(key) {
+      Array.prototype.forEach.call(tabs.children, function (child) {
+        var on = child.getAttribute('data-tab') === key;
+        child.classList.toggle('active', on);
+        child.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+      while (content.firstChild) content.removeChild(content.firstChild);
+      renderSettingsTab(key, content, s);
+    }
+    tabs.appendChild(makeTab('profile', 'Profile'));
+    tabs.appendChild(makeTab('appearance', 'Appearance'));
+    tabs.appendChild(makeTab('compose', 'Compose'));
+    tabs.appendChild(makeTab('mail', 'Mail'));
+    tabs.appendChild(makeTab('notifications', 'Notifications'));
+    tabs.appendChild(makeTab('security', 'Security'));
+    tabs.appendChild(makeTab('deferred', 'Coming later'));
+    body.appendChild(tabs);
+    body.appendChild(content);
+    modal.appendChild(body);
+
+    backdrop.appendChild(modal);
+    backdrop.addEventListener('click', function (e) {
+      if (e.target === backdrop) closeSettingsModal();
+    });
+    document.addEventListener('keydown', escCloseSettings);
+    document.body.appendChild(backdrop);
+    activateTab('profile');
+  }
+
+  function escCloseSettings(e) {
+    if (e.key === 'Escape') closeSettingsModal();
+  }
+  function closeSettingsModal() {
+    var m = document.querySelector('.modal-backdrop.settings-modal');
+    if (m) m.remove();
+    document.removeEventListener('keydown', escCloseSettings);
+  }
+
+  // Helper: build a labeled form row.
+  function settingsRow(label, control, hint) {
+    var row = el('div', { class: 'settings-row' });
+    if (label) row.appendChild(el('label', { class: 'settings-label' }, label));
+    row.appendChild(control);
+    if (hint) row.appendChild(el('div', { class: 'settings-hint' }, hint));
+    return row;
+  }
+  function settingsText(key, label, hint, max) {
+    var v = state.settings && state.settings[key] != null ? String(state.settings[key]) : '';
+    var i = el('input', { type: 'text', class: 'settings-input', 'data-key': key, value: v, maxlength: max || 200 });
+    return settingsRow(label, i, hint);
+  }
+  function settingsTextarea(key, label, hint, max) {
+    var v = state.settings && state.settings[key] != null ? String(state.settings[key]) : '';
+    var i = el('textarea', { class: 'settings-input settings-textarea', 'data-key': key, rows: '4' });
+    if (max) i.setAttribute('maxlength', String(max));
+    i.value = v;
+    return settingsRow(label, i, hint);
+  }
+  function settingsSelect(key, label, hint, options, current) {
+    var cur = current != null ? current : (state.settings && state.settings[key]);
+    var sel = el('select', { class: 'settings-input', 'data-key': key });
+    options.forEach(function (opt) {
+      var o = el('option', { value: opt.value }, opt.label);
+      if (opt.value === cur) o.setAttribute('selected', 'selected');
+      sel.appendChild(o);
+    });
+    return settingsRow(label, sel, hint);
+  }
+  function settingsNumber(key, label, hint, min, max) {
+    var v = state.settings && state.settings[key] != null ? Number(state.settings[key]) : 0;
+    var i = el('input', { type: 'number', class: 'settings-input', 'data-key': key, min: String(min), max: String(max), value: String(v) });
+    return settingsRow(label, i, hint);
+  }
+  function settingsBool(key, label, hint) {
+    var v = !!(state.settings && state.settings[key]);
+    var wrap = el('label', { class: 'settings-toggle' });
+    var i = el('input', { type: 'checkbox', 'data-key': key });
+    if (v) i.setAttribute('checked', 'checked');
+    var box = el('span', { class: 'settings-toggle-box' });
+    wrap.appendChild(i);
+    wrap.appendChild(box);
+    wrap.appendChild(el('span', { class: 'settings-toggle-text' }, label));
+    if (hint) wrap.appendChild(el('span', { class: 'settings-hint' }, hint));
+    return wrap;
+  }
+  function settingsSection(title, rows) {
+    var s = el('div', { class: 'settings-section' });
+    if (title) s.appendChild(el('h3', { class: 'settings-section-title' }, title));
+    rows.forEach(function (r) { s.appendChild(r); });
+    return s;
+  }
+
+  // collectSettingsPatch walks the visible settings-content children
+  // and reads data-key from each input/select/textarea. Returns an
+  // object suitable for PUT /api/v1/webmail/settings.
+  function collectSettingsPatch() {
+    var patch = {};
+    var inputs = document.querySelectorAll('.settings-content [data-key]');
+    Array.prototype.forEach.call(inputs, function (el) {
+      var k = el.getAttribute('data-key');
+      if (!k) return;
+      if (el.tagName === 'INPUT' && el.type === 'checkbox') {
+        patch[k] = !!el.checked;
+      } else if (el.tagName === 'INPUT' && el.type === 'number') {
+        var n = parseInt(el.value, 10);
+        if (!isNaN(n)) patch[k] = n;
+      } else {
+        patch[k] = el.value;
+      }
+    });
+    return patch;
+  }
+
+  function saveSettings(onDone) {
+    var btn = document.querySelector('.settings-modal .settings-save-btn');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Saving…';
+    }
+    var patch = collectSettingsPatch();
+    api('PUT', '/api/v1/webmail/settings', patch)
+      .then(function (s) {
+        state.settings = s;
+        state.settingsLoaded = true;
+        applyAppearanceSettings(s);
+        toast('Settings saved', 'success', 1800);
+        if (typeof onDone === 'function') onDone(s);
+      })
+      .catch(function (e) {
+        toast('Save failed: ' + e.message, 'error', 4500);
+      })
+      .then(function () {
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = 'Save';
+        }
+      });
+  }
+
+  function renderSettingsTab(key, host, s) {
+    if (key === 'profile') {
+      host.appendChild(settingsSection('Identity', [
+        settingsText('display_name', 'Display name', 'Optional — shown on messages you send (depends on recipient support).', 200),
+      ]));
+      host.appendChild(settingsSection('Locale', [
+        settingsSelect('timezone', 'Timezone', 'Currently display-only; used for date/time labels.', [
+          { value: '', label: 'Browser default' },
+          { value: 'UTC', label: 'UTC' },
+          { value: 'Asia/Dubai', label: 'Asia/Dubai (UTC+4)' },
+          { value: 'Asia/Riyadh', label: 'Asia/Riyadh (UTC+3)' },
+          { value: 'Africa/Cairo', label: 'Africa/Cairo (UTC+2)' },
+          { value: 'Europe/London', label: 'Europe/London' },
+          { value: 'Europe/Berlin', label: 'Europe/Berlin' },
+          { value: 'America/New_York', label: 'America/New York' },
+          { value: 'America/Los_Angeles', label: 'America/Los Angeles' },
+        ], (s.timezone || '')),
+        settingsSelect('language', 'Language', 'Currently display-only — UI strings ship in English. Bundled translations land in a follow-up.', [
+          { value: 'en', label: 'English' },
+          { value: 'ar', label: 'العربية (Arabic)' },
+          { value: 'fr', label: 'Français (French)' },
+          { value: 'de', label: 'Deutsch (German)' },
+          { value: 'es', label: 'Español (Spanish)' },
+        ]),
+        settingsSelect('date_format', 'Date format', null, [
+          { value: 'locale', label: 'Match browser locale' },
+          { value: 'iso', label: 'ISO 8601 — 2026-06-27' },
+          { value: 'us', label: 'US — 06/27/2026' },
+          { value: 'eu', label: 'European — 27/06/2026' },
+        ]),
+        settingsSelect('time_format', 'Time format', null, [
+          { value: 'locale', label: 'Match browser locale' },
+          { value: '24h', label: '24-hour' },
+          { value: '12h', label: '12-hour (AM/PM)' },
+        ]),
+        settingsSelect('text_direction', 'Text direction', 'Sets <html dir>. "Auto" lets the browser decide per element.', [
+          { value: 'auto', label: 'Auto (per element)' },
+          { value: 'ltr', label: 'Left-to-right' },
+          { value: 'rtl', label: 'Right-to-left' },
+        ]),
+      ]));
+    } else if (key === 'appearance') {
+      host.appendChild(settingsSection('Theme', [
+        settingsSelect('theme', 'Theme', null, [
+          { value: 'dark', label: 'Dark' },
+          { value: 'light', label: 'Light' },
+          { value: 'system', label: 'Match system' },
+        ]),
+        settingsSelect('density', 'Density', 'Compact mode tightens paddings and font sizes across the shell.', [
+          { value: 'comfortable', label: 'Comfortable' },
+          { value: 'compact', label: 'Compact' },
+        ]),
+      ]));
+      host.appendChild(settingsSection('Message list', [
+        settingsNumber('preview_lines', 'Preview lines', '0 hides the preview line in the list. 1–6.', 0, 6),
+      ]));
+      host.appendChild(settingsSection('Reading pane', [
+        settingsSelect('reading_pane', 'Position', null, [
+          { value: 'right', label: 'Right of the list' },
+          { value: 'bottom', label: 'Below the list' },
+          { value: 'hidden', label: 'Hidden (open in full screen)' },
+        ]),
+      ]));
+    } else if (key === 'compose') {
+      host.appendChild(settingsSection('Signature', [
+        settingsBool('signature_enabled', 'Append signature to new messages', null),
+        settingsTextarea('signature_text', 'Signature text', 'Plain text. Up to 4096 characters. Newlines preserved.', 4096),
+        settingsBool('signature_in_replies', 'Also append to replies and forwards', null),
+      ]));
+      host.appendChild(settingsSection('Reply behaviour', [
+        settingsSelect('default_reply_mode', 'Default when clicking Reply', null, [
+          { value: 'reply', label: 'Reply (only sender)' },
+          { value: 'replyAll', label: 'Reply-all (sender + other recipients)' },
+        ]),
+      ]));
+      host.appendChild(settingsSection('Drafts', [
+        settingsNumber('autosave_seconds', 'Autosave interval (seconds)', '0 disables autosave.', 0, 60),
+        settingsBool('confirm_before_discard', 'Ask before discarding a draft', null),
+      ]));
+      host.appendChild(settingsSection('Sending warnings', [
+        settingsBool('warn_on_empty_subject', 'Warn when sending with empty subject or body', null),
+      ]));
+      host.appendChild(settingsSection('Draft attachments', [
+        el('div', { class: 'settings-notice' },
+          'Attachments are not saved in drafts yet. If you attach files and refresh the page, they must be re-selected before sending. The Sent copy of a sent message keeps its attachments.'),
+      ]));
+    } else if (key === 'mail') {
+      host.appendChild(settingsSection('Folders', [
+        settingsSelect('default_folder', 'Folder to open after login', null, [
+          { value: 'INBOX', label: 'Inbox' },
+          { value: 'Archive', label: 'Archive' },
+          { value: 'Drafts', label: 'Drafts' },
+          { value: 'Sent', label: 'Sent' },
+        ]),
+      ]));
+      host.appendChild(settingsSection('Reading', [
+        settingsNumber('mark_read_delay_seconds', 'Mark-as-read delay (seconds)', '0 marks as read immediately on open.', 0, 60),
+      ]));
+      host.appendChild(settingsSection('Sender display', [
+        settingsSelect('sender_display', 'How senders appear in the list', null, [
+          { value: 'name', label: 'Display name (e.g. "Alice Smith")' },
+          { value: 'email', label: 'Email only' },
+          { value: 'name_email', label: 'Name + email (e.g. "Alice Smith <alice@example.com>")' },
+        ]),
+      ]));
+    } else if (key === 'notifications') {
+      var ps = state.pushStatus || {};
+      var statusText = 'Unknown';
+      if (ps && ps.available) {
+        statusText = ps.permission === 'denied' ? 'Permission denied' :
+                     ps.enabled ? 'Enabled' :
+                     'Not subscribed';
+      } else if (ps && !ps.available) {
+        statusText = 'Not configured by the server operator';
+      }
+      host.appendChild(settingsSection('In-app', [
+        settingsBool('notify_inapp', 'Show desktop / tab notifications while the app is open', null),
+      ]));
+      host.appendChild(settingsSection('Web Push (browser)', [
+        settingsBool('notify_push', 'Allow push notifications when the tab is closed', null),
+        el('div', { class: 'settings-notice' }, 'Current status: ' + statusText + '. Open Settings → Notifications in the side panel to manage subscriptions.'),
+      ]));
+    } else if (key === 'security') {
+      var me = state.user || {};
+      var email = me.email || '(unknown)';
+      host.appendChild(settingsSection('Signed in as', [
+        el('div', { class: 'settings-notice' }, 'Mailbox: ' + email),
+      ]));
+      host.appendChild(settingsSection('Session', [
+        (function () {
+          var row = el('div', { class: 'settings-row settings-actions' });
+          var logout = el('button', { class: 'btn', type: 'button' }, 'Log out of this session');
+          logout.addEventListener('click', function () {
+            if (!confirm('Log out of this session? You will need to log in again.')) return;
+            fetch('/api/v1/auth/logout', { method: 'POST', credentials: 'include' })
+              .then(function () { window.location.href = '/webmail/login'; })
+              .catch(function (e) { toast('Logout failed: ' + e.message, 'error'); });
+          });
+          row.appendChild(logout);
+
+          var logoutAll = el('button', { class: 'btn ghost', type: 'button' }, 'Log out of all sessions');
+          logoutAll.addEventListener('click', function () {
+            if (!confirm('Log out of every session for this user?')) return;
+            fetch('/api/v1/auth/logout-all', { method: 'POST', credentials: 'include' })
+              .then(function () { window.location.href = '/webmail/login'; })
+              .catch(function (e) { toast('Logout-all failed: ' + e.message, 'error'); });
+          });
+          row.appendChild(logoutAll);
+          return row;
+        })(),
+      ]));
+      host.appendChild(settingsSection('Two-factor authentication', [
+        el('div', { class: 'settings-notice' }, 'TOTP / app-passwords UI is not enabled in this build. Backend support ships in a follow-up release — your administrator will announce availability.'),
+      ]));
+    } else if (key === 'deferred') {
+      host.appendChild(settingsSection('Available in a future release', [
+        el('div', { class: 'settings-notice' },
+          'The features below require changes to the mail delivery pipeline (Sieve-style rules, vacation auto-reply hooks, server-side forwarding) that are out of scope for this pass. They are listed here so the UI surfaces the gap honestly rather than offering controls that do nothing.'),
+        el('ul', { class: 'settings-deferred-list' }, ''),
+      ]));
+      var list = host.querySelector('.settings-deferred-list');
+      [
+        'Vacation / out-of-office auto-reply',
+        'Server-side mail filters (Sieve-style rules)',
+        'Forwarding to another address',
+        'Conversation / threaded view',
+        'External image loading preference for HTML messages',
+        'Two-factor authentication (TOTP)',
+        'App-specific passwords',
+        'Per-device session list with selective revoke',
+      ].forEach(function (item) {
+        var li = el('li', {}, item);
+        list.appendChild(li);
+      });
+    }
+
+    // Footer with Save / Cancel — every tab gets one so the user
+    // never has to hunt for the button after switching tabs.
+    var footer = el('div', { class: 'modal-footer settings-footer' });
+    var cancelBtn = el('button', { class: 'btn ghost', type: 'button' }, 'Cancel');
+    cancelBtn.addEventListener('click', closeSettingsModal);
+    var saveBtn = el('button', { class: 'btn primary settings-save-btn', type: 'button' }, 'Save');
+    saveBtn.addEventListener('click', function () { saveSettings(); });
+    footer.appendChild(cancelBtn);
+    footer.appendChild(saveBtn);
+    host.appendChild(footer);
+  }
+
+  // applySignatureToCompose prepends/appends the user's signature to
+  // the compose body if signature_enabled is true. Signature-in-replies
+  // controls whether replies/forwards also get it (new messages always
+  // get it when enabled).
+  function applySignatureToCompose(body, mode) {
+    var s = state.settings;
+    if (!s || !s.signature_enabled || !s.signature_text) return body;
+    if ((mode === 'reply' || mode === 'replyAll' || mode === 'forward') && !s.signature_in_replies) {
+      return body;
+    }
+    var sig = s.signature_text;
+    // If the body already contains the signature verbatim at the end,
+    // do not double-append (this happens when the user opens the same
+    // draft after a settings change).
+    if (body && body.indexOf(sig) !== -1) return body;
+    return (body || '') + '\n\n' + sig + '\n';
+  }
+
+  // ──────────────────────────────────────────────────────────
   // Compose modal
   // ──────────────────────────────────────────────────────────
 
@@ -1992,7 +2460,7 @@
       if (opts.mode === 'reply') {
         compose.to = replyTarget;
         compose.subject = withPrefix('Re: ', m.subject || '');
-        compose.body = buildQuote(m);
+        compose.body = applySignatureToCompose(buildQuote(m), 'reply');
       } else if (opts.mode === 'replyAll') {
         // Reply-all recipient computation. Steps:
         //   1. To = replyTarget (Reply-To or From).
@@ -2032,10 +2500,10 @@
         }
         compose.cc = ccList.join(', ');
         compose.subject = withPrefix('Re: ', m.subject || '');
-        compose.body = buildQuote(m);
+        compose.body = applySignatureToCompose(buildQuote(m), 'replyAll');
       } else if (opts.mode === 'forward') {
         compose.subject = withPrefix('Fwd: ', m.subject || '');
-        compose.body =
+        var fwdBody =
           '\n\n---------- Forwarded message ----------\n' +
           'From: ' +
           (m.from || '') +
@@ -2053,7 +2521,7 @@
         // when the forwarded message arrives without
         // its files.
         if (m.attachments && m.attachments.length > 0) {
-          compose.body =
+          fwdBody =
             '\n\nNote: the original message had ' +
             m.attachments.length +
             ' attachment' +
@@ -2072,6 +2540,13 @@
             '\n\n' +
             stripRfc822Headers(m.rfc822 || '');
         }
+        compose.body = applySignatureToCompose(fwdBody, 'forward');
+      } else if (opts.mode === 'new') {
+        // For new messages, body starts empty; signature_in_replies
+        // does not apply. The signature is the seed body so the user
+        // starts typing above it. applySignatureToCompose handles the
+        // enabled check + the duplicate-prevention guard.
+        compose.body = applySignatureToCompose('', 'new');
       }
       state.compose = compose;
     } else if (opts.mode === 'draft') {
@@ -2079,10 +2554,11 @@
         { dirty: false, lastSavedAt: null, pendingAttachments: [], lastSavedSnapshot: null },
         opts.compose || opts
       );
-    } else {
+} else {
       state.compose = {
         mode: 'new', to: '', cc: '', bcc: '', subject: '',
-        body: '', dirty: false, lastSavedAt: null,
+        body: applySignatureToCompose('', 'new'),
+        dirty: false, lastSavedAt: null,
         pendingAttachments: [], lastSavedSnapshot: null,
       };
     }
@@ -2342,6 +2818,20 @@
       });
       attachmentsArea.hidden = !c.pendingAttachments || c.pendingAttachments.length === 0;
     }
+    // Notice that surfaces when at least one attachment is selected.
+    // Drafts persist the body but not the file blobs (the file picker
+    // hands File objects straight to the FormData sender); if the user
+    // refreshes / closes the tab they will need to re-pick the files.
+    var attNotice = el('div', { class: 'compose-attachment-notice', hidden: true });
+    attNotice.textContent =
+      'Attachments are not saved in drafts yet — if you close or refresh the page, ' +
+      'you will need to re-select the files before sending.';
+    attachmentsArea.appendChild(attNotice);
+    var _renderOrig = renderComposeAttachments;
+    renderComposeAttachments = function () {
+      _renderOrig();
+      attNotice.hidden = !(c.pendingAttachments && c.pendingAttachments.length > 0);
+    };
     modal.appendChild(attachmentsArea);
 
     // Footer.
@@ -2407,6 +2897,34 @@
       sendBtn.innerHTML = b ? '<span class="spinner-inline"></span> Sending…' : 'Send';
     }
 
+    // Default per-file / per-message limits. The server is the source of
+    // truth — the values here match the API defaults (25 MB / 20 files)
+    // so the user sees the same error before or after hitting Send. If
+    // the operator changes coremail.max_attachment_size_mb the UI
+    // surfaces the next attachment > 25 MB immediately.
+    var CLIENT_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+    var CLIENT_MAX_ATTACHMENTS = 20;
+
+    function preflightAttachments() {
+      var files = c.pendingAttachments || [];
+      if (files.length > CLIENT_MAX_ATTACHMENTS) {
+        return 'You can attach at most ' + CLIENT_MAX_ATTACHMENTS +
+               ' files. Remove ' + (files.length - CLIENT_MAX_ATTACHMENTS) +
+               ' before sending.';
+      }
+      for (var i = 0; i < files.length; i++) {
+        var f = files[i];
+        var size = f && f.size != null ? f.size : (f && f.file ? f.file.size : 0);
+        if (size > CLIENT_MAX_ATTACHMENT_BYTES) {
+          var mb = Math.round(size / 1024 / 1024);
+          return 'Attachment "' + (f.name || ('file ' + (i + 1))) +
+                 '" is ' + mb + ' MB. The maximum is ' +
+                 (CLIENT_MAX_ATTACHMENT_BYTES / 1024 / 1024) + ' MB.';
+        }
+      }
+      return null;
+    }
+
     function doSend(payload) {
       var files = c.pendingAttachments || [];
       if (files.length > 0) {
@@ -2421,6 +2939,28 @@
         toast('At least one recipient is required', 'error');
         toField.input.focus();
         return;
+      }
+      // Pre-send attachment validation — surfaces a clear error before
+      // the network round-trip. Server is still the source of truth;
+      // these are the same limits as the API defaults.
+      var attErr = preflightAttachments();
+      if (attErr) {
+        toast(attErr, 'error', 4500);
+        return;
+      }
+      // Warn-on-empty-subject/body — respects the user's setting.
+      var s = state.settings || {};
+      if (s.warn_on_empty_subject) {
+        var subjEmpty = !(payload.subject || '').trim() || payload.subject === '(no subject)';
+        var bodyEmpty = !(payload.body || '').trim();
+        if (subjEmpty || bodyEmpty) {
+          var parts = [];
+          if (subjEmpty) parts.push('empty subject');
+          if (bodyEmpty) parts.push('empty body');
+          if (!confirm('You are sending with ' + parts.join(' and ') + '. Send anyway?')) {
+            return;
+          }
+        }
       }
       if (c.autosaveTimer) {
         clearTimeout(c.autosaveTimer);
@@ -2489,8 +3029,17 @@
     });
 
     discardBtn.addEventListener('click', function () {
+      var s = state.settings || {};
+      // Confirm before discard — respects the user setting.
+      if (c.dirty || c.draftID) {
+        var msg = c.draftID
+          ? 'Discard this draft permanently?'
+          : 'Discard this unsent message?';
+        if (s.confirm_before_discard !== false && !confirm(msg)) {
+          return;
+        }
+      }
       if (c.draftID) {
-        if (!confirm('Discard this draft permanently?')) return;
         deleteDraft(c.draftID).catch(function () {
           /* non-fatal */
         });
@@ -2580,6 +3129,14 @@
           toast('Failed to load profile: ' + e.message, 'error');
         }
       });
+
+    // Settings + push status — best-effort, non-blocking. loadSettings
+    // resolves to defaults on failure so the rest of the app keeps
+    // working without per-mailbox prefs. loadPushStatusBestEffort
+    // is independent — even if push is disabled server-side, the
+    // Notifications tab in Settings still renders the current status.
+    loadSettings();
+    loadPushStatusBestEffort();
 
     // Folders then route.
     loadFolders()
