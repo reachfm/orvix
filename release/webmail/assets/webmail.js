@@ -2311,6 +2311,7 @@
       markDirty();
     });
     mb.appendChild(bodyField);
+    modal.appendChild(mb);
 
     // Attachment list — rendered between the body and the footer.
     // Shows files selected for sending. Each file shows its name,
