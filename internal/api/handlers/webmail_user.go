@@ -583,9 +583,27 @@ func (h *Handler) WebmailMessage(c fiber.Ctx) error {
 	// the simplest path is the SQL update via the
 	// repository. We do this best-effort — failing to mark
 	// as seen must not block message read.
-	seen := true
-	_ = ctx.MailboxStore.Messages.UpdateFlags(c.Context(), msg.ID,
-		&seen, nil, nil, nil, nil, nil, nil)
+	//
+	// The client can opt out via ?auto_seen=0 when it
+	// implements a delayed mark-read (the user-configurable
+	// `mark_read_delay_seconds` setting). The client is then
+	// responsible for issuing PATCH /api/v1/webmail/messages/:id
+	// with {"seen": true} after the configured delay. If the
+	// user navigates away before the delay elapses, the JS
+	// cancels the pending mark-read — the message stays
+	// unseen, which matches the user's preference.
+	autoSeen := strings.TrimSpace(strings.ToLower(c.Query("auto_seen")))
+	if autoSeen != "0" && autoSeen != "false" && autoSeen != "no" {
+		seen := true
+		if err := ctx.MailboxStore.Messages.UpdateFlags(c.Context(), msg.ID,
+			&seen, nil, nil, nil, nil, nil, nil); err == nil {
+			// Refresh msg.Seen so the response body reflects the
+			// post-update state. Without this the caller would see
+			// the pre-update value and the JS mark-read delay code
+			// could double-mark on the next PATCH.
+			msg.Seen = true
+		}
+	}
 
 	attachmentsOut := []fiber.Map{}
 	if atts, err := ctx.MailboxStore.Attachments.ListByMessage(c.Context(), msg.ID, nil); err != nil {

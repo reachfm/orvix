@@ -273,6 +273,28 @@
     return fromHeader.trim();
   }
 
+  // formatSender formats the sender string for the message list /
+  // reading pane according to the user-configured `sender_display`
+  // setting. Allowed values: 'name' | 'email' | 'name_email'.
+  // Anything else falls back to 'name'. Empty / missing inputs are
+  // rendered as '(unknown)' so the UI never shows a blank cell.
+  function formatSender(fromHeader) {
+    var pref = (state.settings && state.settings.sender_display) || 'name';
+    var name = displayName(fromHeader);
+    var email = emailOf(fromHeader);
+    if (pref === 'email') {
+      return email || name || '(unknown)';
+    }
+    if (pref === 'name_email') {
+      if (name && email && email.toLowerCase() !== name.toLowerCase()) {
+        return name + ' <' + email + '>';
+      }
+      return name || email || '(unknown)';
+    }
+    // Default 'name'.
+    return name || email || '(unknown)';
+  }
+
   function pluralize(n, singular, plural) {
     return n + ' ' + (n === 1 ? singular : plural || singular + 's');
   }
@@ -355,6 +377,14 @@
     // defaults until loadSettings() resolves.
     settings: null,
     settingsLoaded: false,
+    // settingsLoadFailed is set when the initial GET returned an
+    // error. The UI keeps working with the in-memory defaults, but
+    // surfaces a clear non-fatal warning so the user is not misled
+    // into thinking their saved values were loaded from the server.
+    settingsLoadFailed: false,
+    // settingsLoadFailureMessage carries the human-readable reason
+    // for the failed load; rendered inside the Settings modal.
+    settingsLoadFailureMessage: '',
     pushStatus: null, // {available, permission, enabled, reason}
     // "g" prefix for Gmail-style navigation. After
     // pressing "g" the next keypress is interpreted as a
@@ -395,6 +425,38 @@
         }
         return data;
       });
+    });
+  }
+
+  // csrfFetch fetches the CSRF token (cached) and attaches it to a
+  // state-changing request as the X-CSRF-Token header. The backend
+  // enforces CSRF on a small set of high-trust auth routes
+  // (/api/v1/auth/logout, /api/v1/auth/logout-all,
+  // /api/v1/auth/change-password, /api/v1/webmail/logout). Other
+  // webmail endpoints (send, drafts, settings, push) sit on the
+  // auth-protected group WITHOUT CSRF, so the api() helper does
+  // not need to fetch the token on every call. csrfFetch is the
+  // single source of truth for CSRF-aware requests in the SPA.
+  var csrfTokenCache = null;
+  function getCsrfToken() {
+    if (csrfTokenCache) return Promise.resolve(csrfTokenCache);
+    return api('GET', '/api/v1/csrf-token').then(function (r) {
+      var tok = r && r.csrf_token;
+      if (!tok) {
+        throw new Error('CSRF token endpoint returned no token');
+      }
+      csrfTokenCache = tok;
+      return tok;
+    });
+  }
+  function csrfFetch(url, opts) {
+    opts = opts || {};
+    opts.method = opts.method || 'POST';
+    opts.credentials = 'include';
+    opts.headers = Object.assign({}, opts.headers || {}, { Accept: 'application/json' });
+    return getCsrfToken().then(function (token) {
+      opts.headers['X-CSRF-Token'] = token;
+      return fetch(url, opts);
     });
   }
 
@@ -481,15 +543,80 @@
       });
   }
 
+  // pendingMarkReadTimer holds the setTimeout id of the next
+  // mark-as-read PATCH so a quick succession of opens (or a
+  // navigation away before the delay elapses) cancels the
+  // previous attempt. Single-flight invariant: at most one
+  // pending mark-read PATCH at a time.
+  var pendingMarkReadTimer = null;
+  var pendingMarkReadID = null;
+
+  function cancelPendingMarkRead() {
+    if (pendingMarkReadTimer) {
+      clearTimeout(pendingMarkReadTimer);
+      pendingMarkReadTimer = null;
+      pendingMarkReadID = null;
+    }
+  }
+
+  function scheduleMarkRead(id) {
+    cancelPendingMarkRead();
+    var s = state.settings || {};
+    var delayMs = (typeof s.mark_read_delay_seconds === 'number')
+      ? Math.max(0, Math.min(60, s.mark_read_delay_seconds)) * 1000
+      : 0;
+    // delay == 0 means "mark immediately" — matches the documented
+    // default. We do NOT use setTimeout(0) because that fires after
+    // the current microtask queue and the user might still navigate
+    // away; a synchronous fire is the closest match to the legacy
+    // behaviour for delay=0.
+    var fire = function () {
+      pendingMarkReadTimer = null;
+      pendingMarkReadID = null;
+      updateMessageFlags(id, { seen: true }).catch(function () {
+        /* non-fatal */
+      });
+    };
+    if (delayMs <= 0) {
+      fire();
+    } else {
+      pendingMarkReadID = id;
+      pendingMarkReadTimer = setTimeout(fire, delayMs);
+    }
+  }
+
   function loadMessage(id) {
-    return api('GET', '/api/v1/webmail/messages/' + id).then(function (msg) {
+    // The backend opt-out query param ?auto_seen=0 is only sent when
+    // the user's setting is positive. delay=0 keeps the legacy
+    // behaviour (server marks as seen on read AND the client also
+    // patches — idempotent, no harm). delay>0 forces the client
+    // into the driver seat so the backend does NOT mark-as-read on
+    // the GET and the JS can honour the configured delay.
+    cancelPendingMarkRead();
+    var s0 = state.settings || {};
+    var delay0 = (typeof s0.mark_read_delay_seconds === 'number')
+      ? Math.max(0, Math.min(60, s0.mark_read_delay_seconds))
+      : 0;
+    var url = '/api/v1/webmail/messages/' + id;
+    if (delay0 > 0) {
+      url += '?auto_seen=0';
+    }
+    return api('GET', url).then(function (msg) {
       state.selectedMessage = msg;
       state.selectedMessageID = msg.id;
       // Mark as seen if not already.
       if (!msg.seen) {
-        updateMessageFlags(id, { seen: true }).catch(function () {
-          /* non-fatal */
-        });
+        if (delay0 > 0) {
+          scheduleMarkRead(id);
+        } else {
+          // delay=0 path: server already marked-as-read on the GET,
+          // so no client-side action is needed. We still patch to
+          // defend against a future backend change that drops the
+          // implicit mark; the patch is idempotent.
+          updateMessageFlags(id, { seen: true }).catch(function () {
+            /* non-fatal */
+          });
+        }
       }
       return msg;
     });
@@ -1266,12 +1393,25 @@
     var body = el('div', { class: 'body' });
     var fromName = displayName(m.from);
     var fromEmail = emailOf(m.from);
-    var fromRow = el('div', { class: 'from', dir: dirAuto(fromName + ' ' + fromEmail) });
-    fromRow.appendChild(el('span', { class: 'name' }, fromName || fromEmail || '(unknown)'));
-    if (fromEmail && fromName && fromEmail.indexOf(fromName) < 0) {
-      fromRow.appendChild(
-        el('span', { class: 'badge', dir: 'ltr' }, fromEmail)
-      );
+    // sender_display is the user-configurable preference for how
+    // the sender cell is rendered in the list. formatSender
+    // encapsulates the name / email / name_email logic so the
+    // list row, the reading pane, and the reply-quote header can
+    // all stay consistent. The .badge email appendage is kept for
+    // 'name' mode (the historical layout) and suppressed for
+    // 'email' / 'name_email' because the email is already in the
+    // primary cell.
+    var senderPref = (state.settings && state.settings.sender_display) || 'name';
+    var fromRow = el('div', { class: 'from', dir: dirAuto(formatSender(m.from)) });
+    if (senderPref === 'name') {
+      fromRow.appendChild(el('span', { class: 'name' }, fromName || fromEmail || '(unknown)'));
+      if (fromEmail && fromName && fromEmail.indexOf(fromName) < 0) {
+        fromRow.appendChild(
+          el('span', { class: 'badge', dir: 'ltr' }, fromEmail)
+        );
+      }
+    } else {
+      fromRow.appendChild(el('span', { class: 'name' }, formatSender(m.from)));
     }
     body.appendChild(fromRow);
     var subj = m.subject || '(no subject)';
@@ -1737,15 +1877,32 @@
     var avatar = el('div', { class: 'avatar-lg' }, initials(displayName(msg.from), emailOf(msg.from)));
     meta.appendChild(avatar);
     var fromBlock = el('div', { class: 'from-block' });
+    // sender_display drives the reading pane header in the same
+    // way as the list row. 'name' shows the display name + the
+    // email address as a smaller line below; 'email' shows just
+    // the email; 'name_email' shows "Name <email>" in one line.
+    var pref = (state.settings && state.settings.sender_display) || 'name';
     var fromNameText = displayName(msg.from) || emailOf(msg.from) || '(unknown sender)';
-    fromBlock.appendChild(
-      el('div', { class: 'from-name', dir: dirAuto(fromNameText) }, fromNameText)
-    );
     var fromEmailText = emailOf(msg.from);
-    if (fromEmailText && fromEmailText !== fromNameText) {
+    if (pref === 'email') {
       fromBlock.appendChild(
-        el('div', { class: 'from-email', dir: 'ltr' }, fromEmailText)
+        el('div', { class: 'from-name', dir: dirAuto(fromEmailText || '(unknown)') },
+          fromEmailText || '(unknown)')
       );
+    } else if (pref === 'name_email') {
+      fromBlock.appendChild(
+        el('div', { class: 'from-name', dir: dirAuto(formatSender(msg.from)) },
+          formatSender(msg.from))
+      );
+    } else {
+      fromBlock.appendChild(
+        el('div', { class: 'from-name', dir: dirAuto(fromNameText) }, fromNameText)
+      );
+      if (fromEmailText && fromEmailText !== fromNameText) {
+        fromBlock.appendChild(
+          el('div', { class: 'from-email', dir: 'ltr' }, fromEmailText)
+        );
+      }
     }
     meta.appendChild(fromBlock);
     var dateText = formatFullDate(msg.received_date || msg.message_date);
@@ -2022,17 +2179,44 @@
     var dir = s.text_direction || 'auto';
     html.setAttribute('dir', dir === 'auto' ? 'auto' : dir);
     html.setAttribute('lang', s.language || 'en');
+    // preview_lines controls the message list preview-line clamp.
+    // 0 hides the preview entirely (display:none). 1..6 sets a CSS
+    // class that the stylesheet maps to -webkit-line-clamp.
+    var previewLines = (typeof s.preview_lines === 'number')
+      ? Math.max(0, Math.min(6, s.preview_lines))
+      : 2;
+    var msgs = document.getElementById('messages');
+    if (msgs) {
+      // Strip any prior preview-lines-N class so re-applying does
+      // not accumulate stale classes.
+      var cls = msgs.className.split(/\s+/).filter(function (c) {
+        return c && c.indexOf('preview-lines-') !== 0;
+      });
+      cls.push('preview-lines-' + previewLines);
+      msgs.className = cls.join(' ');
+    }
   }
 
   function loadSettings() {
     return api('GET', '/api/v1/webmail/settings').then(function (s) {
       state.settings = s;
       state.settingsLoaded = true;
+      state.settingsLoadFailed = false;
+      state.settingsLoadFailureMessage = '';
       applyAppearanceSettings(s);
       return s;
-    }).catch(function () {
-      // Settings are non-essential; degrade to defaults if the API
-      // fails. The UI keeps working without a settings row.
+    }).catch(function (err) {
+      // Settings are non-essential for the shell to work, but the
+      // user must NOT be misled into thinking their saved values
+      // were loaded from the server. We:
+      //   1. Apply hard-coded fallbacks so the UI keeps working.
+      //   2. Set settingsLoadFailed = true so the Settings modal
+      //      surfaces a clear "failed to load" notice.
+      //   3. Toast a non-fatal warning so the user sees the
+      //      problem even if they never open Settings.
+      //   4. Record the reason so the in-modal banner can quote
+      //      it (useful when the cause is a transient 5xx).
+      var reason = (err && err.message) || 'Unknown error';
       state.settings = state.settings || {
         theme: 'dark', density: 'comfortable', text_direction: 'auto',
         language: 'en', preview_lines: 2, reading_pane: 'right',
@@ -2044,6 +2228,15 @@
         notify_inapp: true, notify_push: true,
       };
       state.settingsLoaded = true;
+      state.settingsLoadFailed = true;
+      state.settingsLoadFailureMessage = reason;
+      applyAppearanceSettings(state.settings);
+      toast(
+        'Settings failed to load — using temporary defaults. ' +
+          'Open Settings for details or refresh to retry.',
+        'error',
+        6000
+      );
     });
   }
 
@@ -2224,6 +2417,36 @@
   }
 
   function renderSettingsTab(key, host, s) {
+    // If the initial GET failed, surface a clear, non-fatal banner
+    // at the top of every tab. The banner explains that the values
+    // shown are TEMPORARY DEFAULTS (not the user's saved settings)
+    // and offers an explicit retry path. Saving a partial patch on
+    // top of these defaults will overwrite whatever the server has —
+    // the banner calls that out so the user does not do it by
+    // accident.
+    if (state.settingsLoadFailed) {
+      var reason = state.settingsLoadFailureMessage || 'Unknown error';
+      var banner = el('div', { class: 'settings-load-failed-banner', role: 'alert' });
+      banner.appendChild(el('div', { class: 'settings-load-failed-title' },
+        '⚠ Settings failed to load from the server'));
+      banner.appendChild(el('div', { class: 'settings-load-failed-body' },
+        'Reason: ' + reason + '. The values below are temporary defaults, NOT your saved settings. Saving now will overwrite your real settings on the server.'));
+      var retryBtn = el('button', { class: 'btn sm', type: 'button' }, 'Retry loading');
+      retryBtn.addEventListener('click', function () {
+        loadSettings().then(function () { closeSettingsModal(); openSettingsModal(); });
+      });
+      var reloadBtn = el('button', { class: 'btn ghost sm', type: 'button' }, 'Refresh page');
+      reloadBtn.addEventListener('click', function () {
+        if (typeof window !== 'undefined' && window.location) {
+          window.location.reload();
+        }
+      });
+      var actions = el('div', { class: 'settings-load-failed-actions' });
+      actions.appendChild(retryBtn);
+      actions.appendChild(reloadBtn);
+      banner.appendChild(actions);
+      host.appendChild(banner);
+    }
     if (key === 'profile') {
       host.appendChild(settingsSection('Identity', [
         settingsText('display_name', 'Display name', 'Optional — shown on messages you send (depends on recipient support).', 200),
@@ -2279,12 +2502,18 @@
       host.appendChild(settingsSection('Message list', [
         settingsNumber('preview_lines', 'Preview lines', '0 hides the preview line in the list. 1–6.', 0, 6),
       ]));
+      // Reading pane position is demoted to "Coming later" — the
+      // existing right-pane layout is the only mode the shell
+      // currently renders, and adding the bottom / hidden modes
+      // would require non-trivial layout work that is out of
+      // scope for this pass. Exposing a working-looking select
+      // that does nothing on save would violate the
+      // "no fake enterprise claims" rule. The storage column is
+      // left in place (read-only server-side) so future work can
+      // resurrect the control without a schema change.
       host.appendChild(settingsSection('Reading pane', [
-        settingsSelect('reading_pane', 'Position', null, [
-          { value: 'right', label: 'Right of the list' },
-          { value: 'bottom', label: 'Below the list' },
-          { value: 'hidden', label: 'Hidden (open in full screen)' },
-        ]),
+        el('div', { class: 'settings-notice' },
+          'Reading-pane position (right / bottom / hidden) is coming later. The shell currently renders the pane to the right of the list. Switching this setting now would have no visible effect.'),
       ]));
     } else if (key === 'compose') {
       host.appendChild(settingsSection('Signature', [
@@ -2357,8 +2586,13 @@
           var logout = el('button', { class: 'btn', type: 'button' }, 'Log out of this session');
           logout.addEventListener('click', function () {
             if (!confirm('Log out of this session? You will need to log in again.')) return;
-            fetch('/api/v1/auth/logout', { method: 'POST', credentials: 'include' })
-              .then(function () { window.location.href = '/webmail/login'; })
+            csrfFetch('/api/v1/auth/logout', { method: 'POST' })
+              .then(function (r) {
+                if (r && !r.ok) {
+                  throw new Error('HTTP ' + r.status);
+                }
+                window.location.href = '/webmail/login';
+              })
               .catch(function (e) { toast('Logout failed: ' + e.message, 'error'); });
           });
           row.appendChild(logout);
@@ -2366,8 +2600,13 @@
           var logoutAll = el('button', { class: 'btn ghost', type: 'button' }, 'Log out of all sessions');
           logoutAll.addEventListener('click', function () {
             if (!confirm('Log out of every session for this user?')) return;
-            fetch('/api/v1/auth/logout-all', { method: 'POST', credentials: 'include' })
-              .then(function () { window.location.href = '/webmail/login'; })
+            csrfFetch('/api/v1/auth/logout-all', { method: 'POST' })
+              .then(function (r) {
+                if (r && !r.ok) {
+                  throw new Error('HTTP ' + r.status);
+                }
+                window.location.href = '/webmail/login';
+              })
               .catch(function (e) { toast('Logout-all failed: ' + e.message, 'error'); });
           });
           row.appendChild(logoutAll);
@@ -2385,6 +2624,7 @@
       ]));
       var list = host.querySelector('.settings-deferred-list');
       [
+        'Reading-pane position (bottom / hidden modes) — shell currently only renders the right-of-list layout',
         'Vacation / out-of-office auto-reply',
         'Server-side mail filters (Sieve-style rules)',
         'Forwarding to another address',
@@ -2573,12 +2813,17 @@
 
   function buildQuote(m) {
     var date = m.received_date || m.message_date || '';
+    // The reply-quote header uses the same sender formatting as the
+    // list row / reading pane so the user sees one consistent sender
+    // string everywhere. If settings have not loaded yet the helper
+    // falls back to the display name (the historical behaviour).
+    var senderForQuote = formatSender(m.from || '');
     return (
       '\n\n' +
       'On ' +
       date +
       ', ' +
-      (m.from || '') +
+      senderForQuote +
       ' wrote:\n' +
       '> ' +
       stripRfc822Headers(m.rfc822 || '').split('\n').join('\n> ')
@@ -2673,15 +2918,29 @@
         });
     }
     // markDirty is wired to every field. It restarts
-    // the autosave timer. After 3 seconds of no
-    // further input performAutosave fires. While the
-    // modal is open, the timer is the single source of
-    // truth — manual save also clears it because the
-    // state is now persisted.
+    // the autosave timer. The interval is read from
+    // state.settings.autosave_seconds (clamped to the
+    // 0..60 range the API accepts). 0 disables autosave
+    // entirely — the user must hit Save draft manually.
+    // The default is 3 seconds, matching the legacy
+    // hard-coded value.
     function markDirty() {
       c.dirty = true;
-      if (c.autosaveTimer) clearTimeout(c.autosaveTimer);
-      c.autosaveTimer = setTimeout(performAutosave, 3000);
+      if (c.autosaveTimer) {
+        clearTimeout(c.autosaveTimer);
+        c.autosaveTimer = null;
+      }
+      var s = state.settings || {};
+      var seconds = (typeof s.autosave_seconds === 'number')
+        ? Math.max(0, Math.min(60, s.autosave_seconds))
+        : 3;
+      if (seconds <= 0) {
+        // Autosave disabled — keep dirty=true so the status
+        // line shows "unsaved" and the user is reminded to
+        // hit Save draft manually before closing.
+        return;
+      }
+      c.autosaveTimer = setTimeout(performAutosave, seconds * 1000);
     }
 
     var backdrop = el('div', { class: 'modal-backdrop' });
@@ -3135,21 +3394,88 @@
     // working without per-mailbox prefs. loadPushStatusBestEffort
     // is independent — even if push is disabled server-side, the
     // Notifications tab in Settings still renders the current status.
-    loadSettings();
-    loadPushStatusBestEffort();
+    //
+    // The repo has no JS test runner, so the wire-up of each
+    // persisted setting is verified manually (see the "Manual
+    // verification" section in the branch's final report). To
+    // catch obvious regressions without a JS test runner,
+    // assertSettingsApplied is a runtime smoke test that runs once
+    // after loadSettings resolves. It reads the DOM the wired
+    // hooks are supposed to touch and console.warns if the state
+    // and the DOM disagree. It never throws — the SPA stays
+    // usable and the dev sees the gap in the console.
+    function assertSettingsApplied() {
+      try {
+        var s = state.settings || {};
+        var html = document.documentElement;
+        var msgs = document.getElementById('messages');
+        var problems = [];
 
-    // Folders then route.
-    loadFolders()
-      .then(function () {
-        routeFromHash();
-      })
-      .catch(function (e) {
-        if (e.status === 401) {
-          // Auth gate will redirect; nothing to do.
-          return;
+        // theme: html must carry a theme-* class.
+        var hasThemeClass = html.classList.contains('theme-dark') ||
+                            html.classList.contains('theme-light');
+        if (s.theme && !hasThemeClass) {
+          problems.push('theme: no .theme-light/.theme-dark class on <html>');
         }
-        toast('Failed to load folders: ' + e.message, 'error');
-      });
+        // density: must match s.density.
+        var wantsCompact = s.density === 'compact';
+        if (wantsCompact !== html.classList.contains('density-compact')) {
+          problems.push('density: html class out of sync (wants=' + wantsCompact +
+                        ', has=' + html.classList.contains('density-compact') + ')');
+        }
+        // text_direction: html[dir] must be set.
+        var wantDir = (s.text_direction === 'auto' || !s.text_direction)
+                      ? 'auto' : s.text_direction;
+        if (html.getAttribute('dir') !== wantDir) {
+          problems.push('text_direction: html[dir] out of sync (wants=' + wantDir +
+                        ', has=' + html.getAttribute('dir') + ')');
+        }
+        // preview_lines: #messages must carry the matching class.
+        var n = (typeof s.preview_lines === 'number') ? s.preview_lines : 2;
+        if (msgs && msgs.className.indexOf('preview-lines-' + n) === -1) {
+          problems.push('preview_lines: #messages missing .preview-lines-' + n);
+        }
+        if (problems.length) {
+          console.warn('[orvix] settings wire-up gaps: ' + problems.join('; '));
+        }
+      } catch (e) {
+        // Defensive: never block boot on a probe failure.
+      }
+    }
+    loadSettings().then(assertSettingsApplied);
+    //
+    // loadSettings is awaited before the folder boot so the
+    // user-configured default_folder can be applied on first load.
+    // If loadSettings fails (offline / 5xx / etc.) it falls back
+    // to in-memory defaults AND sets state.settingsLoadFailed so
+    // the Settings modal surfaces a clear "failed to load" notice.
+    loadPushStatusBestEffort();
+    loadSettings().then(function () {
+      return loadFolders();
+    }).then(function () {
+      // Apply the user-configured default_folder when the hash is
+      // empty (first load). Existing hash routes still win — the
+      // user can deep-link to any folder. The lookup is
+      // case-insensitive via state.folderByPath which is populated
+      // by loadFolders().
+      try {
+        if (!location.hash || location.hash === '#' || location.hash === '#/') {
+          var def = state.settings && state.settings.default_folder;
+          if (def && state.folderByPath && state.folderByPath[def.toLowerCase()]) {
+            state.currentFolderPath = def;
+          }
+        }
+      } catch (e) {
+        // Non-fatal — keep going with whatever the hash/default is.
+      }
+      routeFromHash();
+    }).catch(function (e) {
+      if (e.status === 401) {
+        // Auth gate will redirect; nothing to do.
+        return;
+      }
+      toast('Failed to load folders: ' + e.message, 'error');
+    });
 
     // Keyboard shortcuts. We bind on document and ignore
     // events whose target is an input/textarea/contentEditable.

@@ -2688,3 +2688,77 @@ html[dir="rtl"] .push-settings-note {
 :root.theme-dark {
   color-scheme: dark;
 }
+
+/* ═══════════════════════════════════════════════════════════
+   Preview lines — driven by the per-mailbox `preview_lines`
+   setting. The JS adds `preview-lines-N` (0..6) to the
+   `#messages` container; this CSS clamps the .preview block
+   accordingly. 0 hides the preview entirely (display:none),
+   matching the documented behaviour in the Settings modal.
+   ═══════════════════════════════════════════════════════════ */
+
+#messages.preview-lines-0 .message .preview {
+  display: none;
+}
+
+#messages.preview-lines-1 .message .preview {
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+#messages.preview-lines-2 .message .preview,
+#messages.preview-lines-3 .message .preview,
+#messages.preview-lines-4 .message .preview,
+#messages.preview-lines-5 .message .preview,
+#messages.preview-lines-6 .message .preview {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+#messages.preview-lines-2 .message .preview { -webkit-line-clamp: 2; }
+#messages.preview-lines-3 .message .preview { -webkit-line-clamp: 3; }
+#messages.preview-lines-4 .message .preview { -webkit-line-clamp: 4; }
+#messages.preview-lines-5 .message .preview { -webkit-line-clamp: 5; }
+#messages.preview-lines-6 .message .preview { -webkit-line-clamp: 6; }
+
+/* ═══════════════════════════════════════════════════════════
+   Settings — load-failure banner.
+   Surfaces a clear, non-fatal warning at the top of every
+   tab when the initial GET /api/v1/webmail/settings failed.
+   The defaults below are intentionally loud enough that the
+   user cannot miss them while looking at the saved-values
+   form fields, which would otherwise mislead them.
+   ═══════════════════════════════════════════════════════════ */
+
+.settings-load-failed-banner {
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--danger-soft);
+  border: 1px solid var(--danger);
+  border-radius: var(--r-md);
+  color: var(--text-0);
+  font-size: 13px;
+  line-height: 1.55;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.settings-load-failed-title {
+  font-weight: 600;
+  color: var(--danger-2);
+  font-size: 13.5px;
+}
+
+.settings-load-failed-body {
+  color: var(--text-1);
+}
+
+.settings-load-failed-actions {
+  display: flex;
+  gap: var(--sp-2);
+  margin-top: var(--sp-1);
+  flex-wrap: wrap;
+}
