@@ -2818,7 +2818,12 @@
         });
       var body = {
         name: (nameInput.value || '').trim(),
-        enabled: true,
+        // Preserve the rule's existing enabled state. The
+        // editor does not expose its own toggle — the row
+        // toggle in the Filters list is the source of truth
+        // for enabled/disabled — so an edit save must not
+        // silently flip a disabled rule back on.
+        enabled: rule ? !!rule.enabled : true,
         sort_order: rule ? (rule.sort_order || 0) : (state.rules ? state.rules.length : 0),
         stop_processing: !!stopInput.checked,
         conditions_json: JSON.stringify(cleanedConds),
@@ -3586,11 +3591,6 @@
         'Two-factor authentication (TOTP)',
         'App-specific passwords',
         'Per-device session list with selective revoke',
-        'Conversation / threaded view',
-        'External image loading preference for HTML messages',
-        'Two-factor authentication (TOTP)',
-        'App-specific passwords',
-        'Per-device session list with selective revoke',
       ].forEach(function (item) {
         var li = el('li', {}, item);
         list.appendChild(li);
@@ -4271,6 +4271,12 @@
       state.compose = null;
     });
     closeFooter.addEventListener('click', function () {
+      // Match the X button behaviour: confirm before
+      // discarding a draft with body content. Without this
+      // guard the footer Close button silently dropped a
+      // non-empty draft while the X button asked first —
+      // inconsistent and a real footgun.
+      if (!confirmDiscardDraft()) return;
       backdrop.remove();
       // Don't null state.compose — user might reopen via drafts.
     });
@@ -4406,15 +4412,19 @@
         // Defensive: never block boot on a probe failure.
       }
     }
-    loadSettings().then(assertSettingsApplied);
     //
     // loadSettings is awaited before the folder boot so the
     // user-configured default_folder can be applied on first load.
     // If loadSettings fails (offline / 5xx / etc.) it falls back
     // to in-memory defaults AND sets state.settingsLoadFailed so
     // the Settings modal surfaces a clear "failed to load" notice.
+    //
+    // The assertion probe and the folder-boot flow share the
+    // SAME loadSettings promise — running two in parallel would
+    // double the API call on every page load for no benefit.
     loadPushStatusBestEffort();
     loadSettings().then(function () {
+      assertSettingsApplied();
       return loadFolders();
     }).then(function () {
       // Apply the user-configured default_folder when the hash is
