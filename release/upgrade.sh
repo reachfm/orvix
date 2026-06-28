@@ -45,13 +45,16 @@ HEALTH_INTERVAL="${HEALTH_INTERVAL:-2}"
 DRY_RUN=0
 FROM_URL=""
 CHECKSUM_FILE=""
+ALLOW_UNSIGNED_LOCAL=0
 
 usage() {
     cat <<USAGE
 Usage:
   bash upgrade.sh [--dry-run] [binary-path]
-  bash upgrade.sh --from-url <download-url> [--checksum-file <sha256-file>]
-                   [--checksum <sha256-hex>] [--dry-run]
+  bash upgrade.sh --from-url <download-url> --checksum <sha256-hex>
+                   [--checksum-file <sha256-file>] [--dry-run]
+  bash upgrade.sh --from-url <download-url> --checksum-file <sha256-file>
+                   [--dry-run]
 
 Environment overrides:
   ORVIX_BIN          target binary path          (default /usr/local/bin/orvix)
@@ -61,15 +64,35 @@ Environment overrides:
   HEALTH_URL         health endpoint URL         (default http://127.0.0.1:8080/api/v1/health)
 
 Behaviour:
-  --dry-run               print the plan + create the backup, but do not
-                          restart the service and do not overwrite the binary.
-  --from-url <url>        download the binary from <url> instead of using a
-                          local file. The binary's SHA256 is verified when
-                          --checksum / --checksum-file is supplied.
-  --checksum <sha256>     expected SHA256 of the downloaded binary.
-  --checksum-file <path>  path to a sha256sum-format file containing the
-                          expected hash. The file's first matching line
-                          is used; comments and blank lines are ignored.
+  --dry-run                         print the plan + create the backup, but do
+                                    not restart the service and do not overwrite
+                                    the binary.
+
+  --from-url <url>                  download the binary from <url>. REQUIRES a
+                                    --checksum or --checksum-file flag. Without
+                                    one of them, the upgrade fails closed before
+                                    any state on the running host is mutated.
+
+  --checksum <sha256-hex>           expected SHA256 of the new binary (64 lowercase
+                                    hex chars). REQUIRED for --from-url upgrades.
+
+  --checksum-file <sha256-file>     sha256sum-format file containing the expected
+                                    hash. The file's first matching line is used;
+                                    comments and blank lines are ignored.
+
+  --allow-unsigned-local-artifact   DANGEROUS: skip checksum verification when
+                                    using a LOCAL binary (no --from-url). This
+                                    is for air-gapped dev workstations ONLY. The
+                                    flag is refused for --from-url upgrades. The
+                                    upgrade prints a loud red warning when this
+                                    flag is set so production operators cannot
+                                    accidentally use it.
+
+Production-readiness gate BLOCKER 5: checksum verification is
+FAIL-CLOSED. The script refuses to install a binary whose SHA256
+does not match the operator-supplied expected hash, AND refuses to
+install any binary (URL or local) whose expected hash is missing
+unless --allow-unsigned-local-artifact is set.
 USAGE
 }
 
@@ -91,34 +114,73 @@ sha256_of_file() {
     sha256sum "$1" | awk '{print $1}'
 }
 
-# verify_checksum compares $1 against an expected SHA256, where
-# the expected value is sourced from either --checksum=<hex>
-# or a sha256sum-format file at $2. Returns 0 if matched, 1
-# otherwise. Refuses to silently downgrade on mismatch.
-verify_checksum() {
+# resolve_expected_sha returns the expected SHA256 hex string for
+# the given file path, sourced from --checksum or --checksum-file.
+# Echoes the empty string if no expected value is available.
+resolve_expected_sha() {
     local file="$1"
-    local expected=""
     if [ -n "$EXPECTED_SHA" ]; then
-        expected="$EXPECTED_SHA"
-    elif [ -n "$CHECKSUM_FILE" ] && [ -f "$CHECKSUM_FILE" ]; then
-        expected="$(awk -v target="$(basename "$file")" \
-            '$2 == target { print $1; exit }' \
-            "$CHECKSUM_FILE" 2>/dev/null || true)"
-    fi
-    if [ -z "$expected" ]; then
-        log "WARN: no checksum supplied; skipping integrity verification of $file"
+        printf '%s' "$EXPECTED_SHA"
         return 0
     fi
+    if [ -n "$CHECKSUM_FILE" ] && [ -f "$CHECKSUM_FILE" ]; then
+        awk -v target="$(basename "$file")" \
+            '$2 == target { print $1; exit }' \
+            "$CHECKSUM_FILE" 2>/dev/null || true
+        return 0
+    fi
+    return 0
+}
+
+# verify_checksum_fail_closed is the production-readiness gate
+# BLOCKER 5 enforcement. Returns 0 only when:
+#   - an expected sha256 was supplied (via --checksum / --checksum-file), AND
+#   - the sha256 of $1 matches it byte-for-byte.
+# Returns non-zero (and prints a loud failure) when:
+#   - no expected sha256 is supplied AND the source is --from-url
+#     (always fail closed for downloaded artifacts),
+#   - no expected sha256 is supplied AND the source is a LOCAL
+#     file AND --allow-unsigned-local-artifact was NOT set,
+#   - the sha256 mismatches.
+# Note: --allow-unsigned-local-artifact is ignored when --from-url
+# is set. URL downloads are always fail-closed.
+verify_checksum_fail_closed() {
+    local file="$1"
+    local expected
+    expected="$(resolve_expected_sha "$file")"
     local actual
     actual="$(sha256_of_file "$file")"
-    if [ "$actual" != "$expected" ]; then
-        printf '%bFAIL%b sha256 mismatch for %s\n' "$RED" "$NC" "$file" >&2
-        printf '  expected: %s\n' "$expected" >&2
-        printf '  actual:   %s\n' "$actual" >&2
+
+    if [ -n "$expected" ]; then
+        if [ "$actual" != "$expected" ]; then
+            printf '%bFAIL%b sha256 mismatch for %s\n' "$RED" "$NC" "$file" >&2
+            printf '  expected: %s\n' "$expected" >&2
+            printf '  actual:   %s\n' "$actual" >&2
+            return 1
+        fi
+        printf '%bOK%b sha256 %s verified for %s\n' "$GREEN" "$NC" "$actual" "$file" >&2
+        return 0
+    fi
+
+    # No expected sha256 was supplied.
+    if [ -n "$FROM_URL" ]; then
+        printf '%bFAIL%b missing checksum for downloaded artifact %s\n' "$RED" "$NC" "$file" >&2
+        printf '  --from-url upgrades REQUIRE --checksum or --checksum-file.\n' >&2
+        printf '  refusing to install an unverified downloaded binary.\n' >&2
         return 1
     fi
-    printf '%bOK%b sha256 %s verified for %s\n' "$GREEN" "$NC" "$actual" "$file" >&2
-    return 0
+
+    if [ "$ALLOW_UNSIGNED_LOCAL" = "1" ]; then
+        printf '%bWARN%b installing UNVERIFIED local artifact %s (sha256 %s)\n' "$YELLOW" "$NC" "$file" "$actual" >&2
+        printf '  --allow-unsigned-local-artifact is DANGEROUS. Do not use on production.\n' >&2
+        return 0
+    fi
+
+    printf '%bFAIL%b missing checksum for %s\n' "$RED" "$NC" "$file" >&2
+    printf '  refusing to install a binary without integrity verification.\n' >&2
+    printf '  Pass --checksum <sha256-hex> or --checksum-file <sha256-file>,\n' >&2
+    printf '  or --allow-unsigned-local-artifact for air-gapped dev only.\n' >&2
+    return 1
 }
 
 # verify_health polls the health endpoint until it returns 200
@@ -222,8 +284,19 @@ resolve_input() {
 }
 
 install_and_restart() {
-    log "verifying checksum"
-    verify_checksum "$NEW_BIN" || fail "checksum verification failed"
+    # Production-readiness gate BLOCKER 5: checksum is verified
+    # BEFORE any production state is mutated. We do this AFTER
+    # preflight_backup so a missing/bad checksum aborts with a
+    # rollback dir already in place, and BEFORE the dry-run exit
+    # so a --dry-run with no checksum reports what would have
+    # been required (loud red message).
+    log "verifying checksum (fail-closed)"
+    if ! verify_checksum_fail_closed "$NEW_BIN"; then
+        if [ "$DRY_RUN" = "1" ]; then
+            log "DRY-RUN: checksum verification would fail; the upgrade would be aborted here"
+        fi
+        fail "checksum verification failed (fail-closed)"
+    fi
 
     if [ "$DRY_RUN" = "1" ]; then
         log "DRY-RUN: would replace $ORVIX_BIN with $NEW_BIN"
@@ -302,6 +375,14 @@ main() {
                 CHECKSUM_FILE="$2"
                 shift 2
                 ;;
+            --allow-unsigned-local-artifact)
+                # Production-readiness gate BLOCKER 5: this flag is
+                # the ONLY way to skip checksum verification, and
+                # it only works for LOCAL artifacts (no --from-url).
+                # Refuse it loudly if combined with --from-url.
+                ALLOW_UNSIGNED_LOCAL=1
+                shift
+                ;;
             -h|--help)
                 usage
                 exit 0
@@ -321,11 +402,23 @@ main() {
         esac
     done
 
+    # Production-readiness gate BLOCKER 5 enforcement:
+    # --allow-unsigned-local-artifact is refused for URL upgrades.
+    if [ -n "$FROM_URL" ] && [ "$ALLOW_UNSIGNED_LOCAL" = "1" ]; then
+        fail "--allow-unsigned-local-artifact is refused for --from-url upgrades (URL downloads are always fail-closed)"
+    fi
+
     log "Orvix upgrade starting"
     log "binary target: $ORVIX_BIN"
     log "config: $ORVIX_CONFIG"
     log "data dir: $ORVIX_DATA_DIR"
     log "dry-run: $DRY_RUN"
+    log "from-url: ${FROM_URL:-<none, local file>}"
+    log "checksum: ${EXPECTED_SHA:-<none>}"
+    log "checksum-file: ${CHECKSUM_FILE:-<none>}"
+    if [ "$ALLOW_UNSIGNED_LOCAL" = "1" ]; then
+        log "WARNING: --allow-unsigned-local-artifact set; checksum verification will be SKIPPED for the local artifact. Production-readiness gate BLOCKER 5 disables this for downloaded artifacts."
+    fi
 
     preflight_backup
     resolve_input "${POSITIONAL[0]:-}"

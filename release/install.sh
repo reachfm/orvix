@@ -625,43 +625,37 @@ provision_vapid_keys() {
 }
 
 write_service() {
-    cat > /etc/systemd/system/orvix.service <<'UNIT'
-[Unit]
-Description=Orvix Enterprise Mail Server
-Documentation=https://github.com/reachfm/orvix
-After=network-online.target redis-server.service
-Wants=network-online.target redis-server.service
-
-[Service]
-Type=simple
-User=orvix
-Group=orvix
-WorkingDirectory=/var/lib/orvix
-ExecStart=/usr/local/bin/orvix serve
-ExecReload=/bin/kill -HUP $MAINPID
-Restart=always
-RestartSec=5
-
-Environment=ORVIX_CONFIG=/etc/orvix/orvix.yaml
-Environment=ORVIX_LOG_DIR=/var/log/orvix
-EnvironmentFile=-/etc/orvix/bootstrap.env
-
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-NoNewPrivileges=true
-ProtectSystem=full
-ProtectHome=true
-PrivateTmp=true
-ReadWritePaths=/var/lib/orvix /var/log/orvix /etc/orvix
-LimitNOFILE=65536
-
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=orvix
-
-[Install]
-WantedBy=multi-user.target
-UNIT
+    # Production-readiness gate BLOCKER 1: do NOT inline a
+    # divergent copy of the systemd unit. Copy the same unit
+    # that ships in release/systemd/orvix.service, byte-for-
+    # byte, so every fresh install gets the same hardening the
+    # reviewer audited. The shipped unit is the single source
+    # of truth; install.sh only knows how to copy it.
+    local src="$ORVIX_SOURCE_DIR/release/systemd/orvix.service"
+    if [ ! -f "$src" ]; then
+        fail "shipped systemd unit not found at $src (cannot install orvix.service)"
+    fi
+    # Sanity-check the shipped unit before installing it. We
+    # don't want a fresh VPS to silently boot a service whose
+    # unit lacks Requires=redis (the previous inline copy
+    # diverged from the shipped unit in exactly this way).
+    local must_have=(
+        'Requires=redis-server.service'
+        'AmbientCapabilities=CAP_NET_BIND_SERVICE'
+        'NoNewPrivileges=true'
+        'ProtectSystem=full'
+        'ReadWritePaths=/var/lib/orvix /var/log/orvix /etc/orvix'
+        '[Install]'
+        'WantedBy=multi-user.target'
+    )
+    local needle
+    for needle in "${must_have[@]}"; do
+        if ! grep -qF "$needle" "$src"; then
+            fail "shipped systemd unit $src is missing required directive: $needle (refusing to install a non-reviewed unit)"
+        fi
+    done
+    install -m 0644 -o root -g root "$src" /etc/systemd/system/orvix.service
+    log_detail "installed /etc/systemd/system/orvix.service from $src (0644 root:root)"
 }
 
 write_bootstrap_env() {
@@ -751,7 +745,15 @@ validate_systemd() {
     if [ ! -f "/etc/systemd/system/orvix-update.service" ]; then
         fail "systemd unit orvix-update.service not found at /etc/systemd/system/orvix-update.service"
     fi
-    log_detail "VALIDATE systemd orvix-update.service: unit present"
+    # Production-readiness gate BLOCKER 2: orvix-update.service
+    # must NEVER be enabled at boot. The unit is operator-only.
+    # If a future refactor adds [Install] WantedBy=multi-user.target
+    # AND install.sh accidentally calls `systemctl enable`, this
+    # guard rejects the install before the operator reboots.
+    if systemctl is-enabled --quiet orvix-update.service 2>/dev/null; then
+        fail "orvix-update.service is enabled (operator-only; must never auto-start). disable it with: systemctl disable orvix-update.service"
+    fi
+    log_detail "VALIDATE systemd orvix-update.service: unit present, NOT enabled (operator-only)"
 }
 
 # validate_sudoers verifies the sudoers drop-in ownership and
@@ -1509,7 +1511,16 @@ main() {
     install_update_helper
     run_quiet systemctl daemon-reload
     run_quiet systemctl enable orvix
-    run_quiet systemctl enable orvix-update.service
+    # Production-readiness gate BLOCKER 2: orvix-update.service
+    # is operator-triggered ONLY. The unit file intentionally
+    # has no [Install] section so `systemctl enable` would
+    # refuse — but we ALSO must not call `enable` here, even
+    # if a future refactor re-adds the [Install] section. The
+    # operator triggers the update via:
+    #   sudo systemctl start orvix-update.service
+    # which the web process drives through the bounded sudoers
+    # rule /etc/sudoers.d/orvix-update. See docs/PRODUCTION_READINESS_GATE.md
+    # §3.2 for the operator-only contract.
     run_quiet systemctl restart orvix
     validate_systemd
     validate_sudoers

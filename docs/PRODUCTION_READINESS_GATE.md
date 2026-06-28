@@ -328,10 +328,18 @@ sudo bash release/install.sh
 sudo bash release/scripts/setup-https.sh <your-domain> <server-ip>
 
 # ─── 7. Harden the firewall ─────────────────────────────────────────
+# ufw rejects multi-port syntax (`ufw allow 22/tcp 25/tcp ...` is
+# NOT valid). Each port needs its own `ufw allow <port>/tcp` line.
+# The loop below is the production-safe form. Skip any port that
+# does not apply to your deployment (e.g. 587 if submission is
+# disabled; 465 if SMTPS is not implemented; 4190 for ManageSieve).
 sudo ufw default deny incoming
-sudo ufw allow 22/tcp 25/tcp 80/tcp 110/tcp 143/tcp 443/tcp \
-                465/tcp 587/tcp 993/tcp 995/tcp
-sudo ufw deny 8080/tcp 8081/tcp
+for port in 22 25 80 110 143 443 465 587 993 995 4190; do
+    sudo ufw allow "${port}/tcp"
+done
+for port in 8080 8081; do
+    sudo ufw deny "${port}/tcp"
+done
 sudo ufw enable
 
 # ─── 8. Run smoke tests ─────────────────────────────────────────────

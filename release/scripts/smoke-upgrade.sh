@@ -67,6 +67,10 @@ required_safety=(
     'verify_health'
     'rolling back'
     '--dry-run'
+    # Production-readiness gate BLOCKER 5: fail-closed checksum.
+    'verify_checksum_fail_closed'
+    '--allow-unsigned-local-artifact'
+    'refusing to install an unverified downloaded binary'
 )
 
 for needle in "${required_safety[@]}"; do
@@ -76,6 +80,20 @@ for needle in "${required_safety[@]}"; do
         fail "upgrade.sh is MISSING the safety property '$needle'"
     fi
 done
+
+# BLOCKER 5: the OLD warning-only verify_checksum function
+# must NOT exist anymore. If it does, the fail-closed
+# enforcement was reverted.
+if grep -qE 'verify_checksum\(\)' "$UPGRADE_SH" && ! grep -qE 'verify_checksum_fail_closed\(\)' "$UPGRADE_SH"; then
+    fail "upgrade.sh still has the OLD warning-only verify_checksum and is missing fail-closed enforcement"
+fi
+
+# BLOCKER 5: --allow-unsigned-local-artifact must be REFUSED
+# for --from-url upgrades. The check is implemented as a
+# string match in main() — pin it here.
+if ! grep -qE 'allow-unsigned-local-artifact.*refused for --from-url|FAIL.*--allow-unsigned-local-artifact is refused' "$UPGRADE_SH"; then
+    fail "upgrade.sh does not refuse --allow-unsigned-local-artifact for --from-url (BLOCKER 5)"
+fi
 
 # ─── 3. upgrade.sh does NOT contain the unsafe patterns ─────────
 # Specifically, the old version used BOLD='\033[1m' (single
