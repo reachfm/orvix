@@ -139,12 +139,30 @@ func (r *Receiver) applyRulesRunner(ctx context.Context, rcpt resolvedRecipient,
 	}
 
 	// Apply MoveToFolder first. If Move fails we still
-	// proceed to flags — a partial application is better
-	// than nothing, and the user can always move the
-	// message manually if the engine could not.
+	// proceed to flags and copy — a partial application is
+	// better than nothing, and the user can always move
+	// the message manually if the engine could not.
 	if out.MoveToFolder != "" {
 		if err := r.applyMove(runCtx, rcpt.MailboxID, msg, out.MoveToFolder); err != nil {
 			r.logRulesRunnerFailure(rcpt, msg, "move_failed", err)
+		}
+	}
+
+	// Apply CopyToFolder. Copy is independent of move:
+	// MailStore.CopyMessage inserts a NEW Message row in
+	// the target folder (with a fresh MessageID and a
+	// hardlink to the RFC822 file) and leaves the
+	// original row untouched. A copy rule does NOT move
+	// the original.
+	//
+	// Earlier revisions of this code aliased CopyTo onto
+	// MoveTo in the runner, so a configured "Copy to
+	// Junk" actually relocated the message. The runner
+	// now emits CopyToFolder as a separate field; this
+	// block is the only place that performs the copy.
+	if out.CopyToFolder != "" {
+		if err := r.applyCopy(runCtx, rcpt.MailboxID, msg, out.CopyToFolder); err != nil {
+			r.logRulesRunnerFailure(rcpt, msg, "copy_failed", err)
 		}
 	}
 
@@ -191,6 +209,30 @@ func (r *Receiver) applyMove(ctx context.Context, mailboxID uint, msg *storage.M
 	return r.MailStore.MoveMessage(ctx, msg.ID, folder.ID, nil)
 }
 
+// applyCopy duplicates the message into the named folder
+// in the recipient's mailbox. The original row stays
+// where it is — CopyMessage inserts a new DB row with a
+// fresh MessageID and hardlinks the RFC822 file so the
+// body bytes are shared on disk.
+//
+// Copy does NOT delete the original. A copy failure is
+// logged but never propagated to the SMTP accept: the
+// message remains in the source folder and the user can
+// retry the rule by re-saving it.
+func (r *Receiver) applyCopy(ctx context.Context, mailboxID uint, msg *storage.Message, folderPath string) error {
+	folder, err := resolveFolderCaseInsensitiveFromStore(ctx, r.MailStore, mailboxID, folderPath)
+	if err != nil {
+		return fmt.Errorf("resolve folder %q: %w", folderPath, err)
+	}
+	if folder == nil {
+		return fmt.Errorf("folder %q not found", folderPath)
+	}
+	if _, err := r.MailStore.CopyMessage(ctx, msg.ID, mailboxID, folder.ID, nil); err != nil {
+		return fmt.Errorf("copy to folder %q: %w", folderPath, err)
+	}
+	return nil
+}
+
 // applyFlags flips only the flags the engine set. nil
 // pointers in the SetFlagValue mean "leave unchanged".
 func (r *Receiver) applyFlags(ctx context.Context, messageID uint, flags *storage.SetFlagValue) error {
@@ -213,6 +255,7 @@ func (r *Receiver) auditRulesRunnerOutcome(rcpt resolvedRecipient, msg *storage.
 		"mailbox_id":    fmt.Sprintf("%d", rcpt.MailboxID),
 		"message_id":    msg.MessageID,
 		"moved_to":      out.MoveToFolder,
+		"copied_to":     out.CopyToFolder,
 		"forwarded_to":  out.ForwardedTo,
 		"keep_copy":     boolYesNo(out.ForwardKeepCopy),
 		"vacation_sent": boolYesNo(out.VacationReply != nil),

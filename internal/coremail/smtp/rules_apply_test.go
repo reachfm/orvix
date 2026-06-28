@@ -331,3 +331,120 @@ func TestApplyRulesRunner_NilRunnerIsSafe(t *testing.T) {
 		t.Fatalf("expected message in INBOX with nil runner, got %d", got)
 	}
 }
+
+// ── Test: CopyToFolder duplicates the durable row, leaves the
+// original in place. The original message in INBOX MUST
+// stay; a second copy MUST appear in the target folder.
+// This pins the contract that the SMTP caller performs a
+// real copy via MailStore.CopyMessage rather than the
+// previous bug where CopyToFolder was aliased to
+// MoveToFolder (the message was relocated instead of
+// duplicated).
+//
+// The caller first writes the inbound message to INBOX
+// (mirroring what AcceptMessage does after StoreMessage),
+// then invokes applyRulesRunner with a runner that emits
+// CopyToFolder = "Archive". After the call there must be
+// exactly one row in INBOX (the original) and one row in
+// Archive (the copy), with two distinct MessageIDs.
+
+func TestApplyRulesRunner_CopyKeepsOriginalAndCreatesSecondCopy(t *testing.T) {
+	recv, store, db := buildTestReceiver(t, func(ctx context.Context, in rules.RunInput) (*rules.RunOutput, error) {
+		return &rules.RunOutput{CopyToFolder: "Receipts"}, nil
+	})
+
+	msg, rfc822 := storeInboundMessage(t, store, 1, 1, 1,
+		"alice@example.com", "Carol <carol@external.test>")
+	rcpt := resolvedRecipient{Email: "alice@example.com", MailboxID: 1, DomainID: 1, TenantID: 1, Domain: "example.com"}
+
+	// Provision the destination folder (Receipts is
+	// not a system folder; production mailbox
+	// provisioning would create it). Use 'custom' as
+	// the folder_type.
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO coremail_folders
+		 (mailbox_id, name, path, parent_id, folder_type, message_count, unread_count, total_size, created_at, updated_at)
+		 VALUES (1, 'Receipts', 'Receipts', NULL, 'custom', 0, 0, 0, ?, ?)`,
+		time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("create Receipts folder: %v", err)
+	}
+
+	recv.applyRulesRunner(context.Background(), rcpt, msg, rfc822)
+
+	// Original MUST still be in INBOX.
+	if got := countMessagesInFolder(t, db, msg.MessageID, "INBOX"); got != 1 {
+		t.Fatalf("expected original message in INBOX after copy, got count=%d", got)
+	}
+	// A copy MUST exist in Receipts. The two rows must
+	// have distinct MessageIDs (CopyMessage assigns a
+	// fresh one) and the copy's MailboxID must be the
+	// recipient's mailbox (not a stray cross-mailbox leak).
+	var (
+		copyCount     int
+		copyMailboxID int
+		copyMessageID string
+	)
+	row := db.QueryRow(`
+		SELECT COUNT(*), MAX(m.mailbox_id), MAX(m.message_id)
+		FROM coremail_messages m
+		JOIN coremail_folders f ON f.id = m.folder_id
+		WHERE f.path = 'Receipts' AND m.deleted = 0`)
+	if err := row.Scan(&copyCount, &copyMailboxID, &copyMessageID); err != nil {
+		t.Fatalf("count receipts: %v", err)
+	}
+	if copyCount != 1 {
+		t.Fatalf("expected exactly 1 copy in Receipts, got %d", copyCount)
+	}
+	if copyMessageID == msg.MessageID {
+		t.Fatalf("copy's message_id (%q) must differ from original (%q)", copyMessageID, msg.MessageID)
+	}
+	if copyMailboxID != int(rcpt.MailboxID) {
+		t.Fatalf("copy landed in mailbox %d, want %d", copyMailboxID, rcpt.MailboxID)
+	}
+}
+
+// ── Test: MoveToFolder relocates — does NOT leave a copy
+// behind. Companion test to TestApplyRulesRunner_CopyKeepsOriginalAndCreatesSecondCopy.
+// Pinning both directions prevents the historical
+// "copy == move" alias from sneaking back in.
+
+func TestApplyRulesRunner_MoveRelocatesOriginal_DoesNotCopy(t *testing.T) {
+	recv, store, db := buildTestReceiver(t, func(ctx context.Context, in rules.RunInput) (*rules.RunOutput, error) {
+		return &rules.RunOutput{MoveToFolder: "Important"}, nil
+	})
+
+	msg, rfc822 := storeInboundMessage(t, store, 1, 1, 1,
+		"alice@example.com", "Carol <carol@external.test>")
+	rcpt := resolvedRecipient{Email: "alice@example.com", MailboxID: 1, DomainID: 1, TenantID: 1, Domain: "example.com"}
+
+	// Provision the destination folder (Important is not
+	// a system folder).
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO coremail_folders
+		 (mailbox_id, name, path, parent_id, folder_type, message_count, unread_count, total_size, created_at, updated_at)
+		 VALUES (1, 'Important', 'Important', NULL, 'custom', 0, 0, 0, ?, ?)`,
+		time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("create Important folder: %v", err)
+	}
+
+	recv.applyRulesRunner(context.Background(), rcpt, msg, rfc822)
+
+	if got := countMessagesInFolder(t, db, msg.MessageID, "INBOX"); got != 0 {
+		t.Fatalf("expected INBOX empty after move, got %d", got)
+	}
+	if got := countMessagesInFolder(t, db, msg.MessageID, "Important"); got != 1 {
+		t.Fatalf("expected message moved to Important, got %d", got)
+	}
+}
+
+// ── Test: rules-side-effect helper inputs validate header fields ─
+//
+// BLOCKER 3 regression tests for the runner's defence-in-depth
+// header validator. The storage layer already rejects CR/LF
+// in vacation subjects; this test pins the runner-level
+// guard so a future caller that bypasses the storage layer
+// (e.g. an admin import path) still cannot emit a forged
+// header. These tests live next to the helpers they
+// exercise (in the rules package) — see runner_test.go for
+// TestValidateHeaderField_*, TestSanitizeBody_*, and
+// TestBuildVacationRfc822_*.

@@ -332,6 +332,17 @@ func (r *vacationSQLRepo) Update(ctx context.Context, mailboxID uint, patch *Vac
 		add("enabled", boolToInt(*patch.Enabled))
 	}
 	if patch.Subject != nil {
+		// Defence against header injection: the subject is
+		// written verbatim into "Subject:" by the runner's
+		// buildVacationRfc822. A CR, LF, or NUL inside the
+		// user-supplied subject would let an attacker forge
+		// additional headers in the auto-reply. Reject the
+		// patch instead of clamping — the user needs to see
+		// the error rather than have us silently truncate
+		// the message body of their reply.
+		if err := validateVacationSubject(*patch.Subject); err != nil {
+			return nil, err
+		}
 		add("subject", clampString(*patch.Subject, 256))
 	}
 	if patch.Body != nil {
@@ -557,4 +568,33 @@ func joinCommas(parts []string) string {
 		out += ", " + parts[i]
 	}
 	return out
+}
+
+// validateVacationSubject rejects subjects that could be
+// used to inject extra RFC 5322 headers into a vacation
+// auto-reply. The runner writes the subject verbatim into
+// "Subject: <subject>\r\n"; a CR, LF, or NUL inside the
+// value would let an attacker forge arbitrary headers.
+//
+// We also reject ASCII control characters in the C0 range
+// (other than tab, which is unlikely in a subject) so the
+// reply is well-formed even after folding. Unicode is
+// permitted (subjects are decoded as UTF-8 bytes).
+func validateVacationSubject(s string) error {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '\r':
+			return fmt.Errorf("vacation subject contains CR (position %d): header injection", i)
+		case c == '\n':
+			return fmt.Errorf("vacation subject contains LF (position %d): header injection", i)
+		case c == 0:
+			return fmt.Errorf("vacation subject contains NUL (position %d): header injection", i)
+		case c < 0x20 && c != '\t':
+			return fmt.Errorf("vacation subject contains control byte 0x%02X (position %d)", c, i)
+		case c == 0x7f:
+			return fmt.Errorf("vacation subject contains DEL (position %d)", i)
+		}
+	}
+	return nil
 }

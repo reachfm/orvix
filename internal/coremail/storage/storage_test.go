@@ -895,6 +895,119 @@ func TestRetentionPolicyCreateAndList(t *testing.T) {
 
 // ── Edge Cases ───────────────────────────────────────────────
 
+// TestValidateVacationSubject_RejectsHeaderInjection pins
+// BLOCKER 3 at the storage boundary. The VacationPatch
+// validator MUST reject CR / LF / NUL / control bytes in
+// the subject so an attacker cannot forge extra headers
+// in the auto-reply the runner emits.
+
+func TestValidateVacationSubject_RejectsHeaderInjection(t *testing.T) {
+	cases := []struct {
+		name      string
+		subject   string
+		wantError bool
+	}{
+		{"plain ASCII", "Out of office", false},
+		{"unicode emoji", "OOO 🏖️", false},
+		{"CRLF injection", "Hi\r\nBcc: attacker@evil.test", true},
+		{"LF alone", "Hi\nBcc: attacker", true},
+		{"CR alone", "Hi\rBcc: attacker", true},
+		{"NUL byte", "Hi\x00Bcc", true},
+		{"DEL byte", "Hi\x7f", true},
+		{"SOH byte", "Hi\x01", true},
+		{"empty subject", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateVacationSubject(tc.subject)
+			gotErr := err != nil
+			if gotErr != tc.wantError {
+				t.Fatalf("validateVacationSubject(%q) error = %v, wantError=%v", tc.subject, err, tc.wantError)
+			}
+		})
+	}
+}
+
+// TestVacationUpdate_RejectsInjectedSubject pins BLOCKER 3
+// end-to-end at the storage API. A user PUT that supplies
+// a CRLF subject MUST be rejected by Vacation.Update and
+// MUST NOT touch the stored row. The previous behaviour
+// (clampString with no validation) silently accepted the
+// payload and let the runner emit a forged-header reply.
+
+func TestVacationUpdate_RejectsInjectedSubject(t *testing.T) {
+	db := testDB(t)
+	store, err := NewMailStore(db, t.TempDir())
+	if err != nil {
+		t.Fatalf("new mailstore: %v", err)
+	}
+	ctx := context.Background()
+
+	// Provision mailbox + system folders so the foreign
+	// key on coremail_vacation.mailbox_id is satisfied.
+	if err := store.Folders.EnsureSystemFolders(ctx, 1, nil); err != nil {
+		t.Fatalf("ensure folders: %v", err)
+	}
+
+	// Materialise the row first.
+	if _, err := store.Vacation.GetOrCreate(ctx, 1); err != nil {
+		t.Fatalf("materialise vacation: %v", err)
+	}
+
+	// Try to inject CRLF via Update.
+	bad := "Hi\r\nBcc: attacker@evil.test"
+	patch := &VacationPatch{Subject: strPtr(bad)}
+	if _, err := store.Vacation.Update(ctx, 1, patch); err == nil {
+		t.Fatal("Vacation.Update accepted CRLF subject; want rejection")
+	}
+
+	// The stored row MUST NOT carry the injection —
+	// re-read it and verify the subject is still empty
+	// (the GetOrCreate default).
+	v, err := store.Vacation.GetOrCreate(ctx, 1)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if strings.Contains(v.Subject, "\r") || strings.Contains(v.Subject, "\n") {
+		t.Fatalf("vacation subject on disk contains CR/LF after rejected update: %q", v.Subject)
+	}
+}
+
+// TestVacationUpdate_AcceptsUnicodeSubject is the positive
+// control for BLOCKER 3 — if a future revision regresses
+// the validator to ASCII-only, this test fails.
+
+func TestVacationUpdate_AcceptsUnicodeSubject(t *testing.T) {
+	db := testDB(t)
+	store, err := NewMailStore(db, t.TempDir())
+	if err != nil {
+		t.Fatalf("new mailstore: %v", err)
+	}
+	ctx := context.Background()
+	if err := store.Folders.EnsureSystemFolders(ctx, 1, nil); err != nil {
+		t.Fatalf("ensure folders: %v", err)
+	}
+	if _, err := store.Vacation.GetOrCreate(ctx, 1); err != nil {
+		t.Fatalf("materialise: %v", err)
+	}
+
+	good := "Отпуск 🏖️"
+	patch := &VacationPatch{Subject: strPtr(good)}
+	if _, err := store.Vacation.Update(ctx, 1, patch); err != nil {
+		t.Fatalf("Vacation.Update rejected unicode subject: %v", err)
+	}
+	v, err := store.Vacation.GetOrCreate(ctx, 1)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if v.Subject != good {
+		t.Fatalf("subject on disk = %q, want %q", v.Subject, good)
+	}
+}
+
+// strPtr is a tiny helper for the BLOCKER 3 tests.
+func strPtr(s string) *string { return &s }
+
 func TestStoreEmptyMessage(t *testing.T) {
 	_, store := testStore(t)
 	ctx := context.Background()

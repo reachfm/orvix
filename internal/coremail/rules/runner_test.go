@@ -783,3 +783,241 @@ func TestRunnerSmokeCompileOnly(t *testing.T) {
 		t.Fatal("deps nil")
 	}
 }
+
+// ── Test 10: copy action emits CopyToFolder, not MoveToFolder ─
+//
+// BLOCKER 1 regression test. An earlier revision of the
+// runner aliased ActionCopyToFolder into RunOutput.MoveToFolder
+// ("copy == move for now"), so a user-configured copy rule
+// silently moved the original out of INBOX. The fix splits
+// the two fields; this test pins that:
+//
+//   - A rule whose only action is "copy_to_folder" MUST
+//     produce RunOutput with CopyToFolder set and
+//     MoveToFolder empty.
+//   - The runner MUST NOT also flag SetFlag or ForwardedTo
+//     when the rule only copies.
+
+func TestRunner_CopyActionKeepsOriginalAndCreatesCopyIntent(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	f.createMailbox(ctx, 1, 1, 1, "alice@example.com")
+
+	// Rule: any message whose Subject contains "invoice" → copy to Receipts.
+	f.createRuleRow(ctx, 1, "copy invoices",
+		`[{"type":"subject_contains","value":"invoice"}]`,
+		`[{"type":"copy_to_folder","folder_path":"Receipts"}]`,
+		true, 0, false,
+	)
+
+	// Make sure the destination folder exists; the SMTP
+	// caller would have created it as part of mailbox
+	// provisioning, but the rules package tests do not
+	// provision user folders. Create a "Receipts" folder
+	// row directly so the test reflects the production
+	// precondition.
+	if _, err := f.db.ExecContext(ctx,
+		`INSERT INTO coremail_folders
+		 (mailbox_id, name, path, parent_id, folder_type, message_count, unread_count, total_size, created_at, updated_at)
+		 VALUES (?, 'Receipts', 'Receipts', NULL, 'custom', 0, 0, 0, ?, ?)`,
+		1, time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("create Receipts folder: %v", err)
+	}
+
+	rfc822 := makeInboundRFC822("Vendor <vendor@external.test>", "alice@example.com",
+		"invoice #1234", "please pay")
+	in := f.inboundInput(1, 1, 1, "alice@example.com", "Vendor <vendor@external.test>", rfc822)
+
+	out, err := f.runner.Run(ctx, in)
+	if err != nil {
+		t.Fatalf("runner.Run: %v", err)
+	}
+	if out.MoveToFolder != "" {
+		t.Fatalf("Copy rule must NOT emit MoveToFolder; got %q", out.MoveToFolder)
+	}
+	if out.CopyToFolder != "Receipts" {
+		t.Fatalf("CopyToFolder = %q, want %q", out.CopyToFolder, "Receipts")
+	}
+	if out.SetFlag != nil {
+		t.Fatalf("Copy-only rule must not set flags, got %+v", out.SetFlag)
+	}
+	if out.ForwardedTo != "" {
+		t.Fatalf("Copy-only rule must not forward, got %q", out.ForwardedTo)
+	}
+	if out.VacationReply != nil {
+		t.Fatalf("Copy-only rule must not trigger vacation, got %+v", out.VacationReply)
+	}
+}
+
+// ── Test 11: copy and move are independent in one rule ───────
+//
+// A single rule can legitimately have both a move and a
+// copy. The runner MUST emit both fields in that case —
+// not collapse them into one. (The caller applies move
+// first, then copy.)
+
+func TestRunner_CopyAndMoveAreIndependent(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	f.createMailbox(ctx, 1, 1, 1, "alice@example.com")
+
+	f.createRuleRow(ctx, 1, "important + receipt",
+		`[{"type":"from_contains","value":"vendor"}]`,
+		`[{"type":"move_to_folder","folder_path":"Important"},{"type":"copy_to_folder","folder_path":"Receipts"}]`,
+		true, 0, false,
+	)
+
+	// Provision both target folders (Important and
+	// Receipts are not in DefaultSystemFolders, so we
+	// must insert them ourselves).
+	for _, path := range []string{"Important", "Receipts"} {
+		if _, err := f.db.ExecContext(ctx,
+			`INSERT INTO coremail_folders
+			 (mailbox_id, name, path, parent_id, folder_type, message_count, unread_count, total_size, created_at, updated_at)
+			 VALUES (?, ?, ?, NULL, 'custom', 0, 0, 0, ?, ?)`,
+			1, path, path, time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339)); err != nil {
+			t.Fatalf("create folder %s: %v", path, err)
+		}
+	}
+
+	rfc822 := makeInboundRFC822("Vendor <vendor@external.test>", "alice@example.com",
+		"invoice", "pay me")
+	in := f.inboundInput(1, 1, 1, "alice@example.com", "Vendor <vendor@external.test>", rfc822)
+
+	out, err := f.runner.Run(ctx, in)
+	if err != nil {
+		t.Fatalf("runner.Run: %v", err)
+	}
+	if out.MoveToFolder != "Important" {
+		t.Fatalf("MoveToFolder = %q, want %q", out.MoveToFolder, "Important")
+	}
+	if out.CopyToFolder != "Receipts" {
+		t.Fatalf("CopyToFolder = %q, want %q", out.CopyToFolder, "Receipts")
+	}
+}
+
+// ── Test 12: BLOCKER 3 — header field validator rejects
+// header-injection vectors and accepts unicode / UTF-8
+// subjects. Pinning both directions so a future regression
+// to ASCII-only validation breaks a positive control.
+
+func TestValidateHeaderField_RejectsCRLFAndControlChars(t *testing.T) {
+	cases := []struct {
+		name      string
+		value     string
+		wantError bool
+	}{
+		{"plain ASCII", "Hello", false},
+		{"unicode Cyrillic", "Здравствуй, мир", false},
+		{"unicode emoji", "Out of office 🏖️", false},
+		{"tab is allowed", "Tab\there", false},
+		{"CR alone", "broken\rSubject", true},
+		{"LF alone", "broken\nSubject", true},
+		{"CRLF injects Bcc", "broken\r\nBcc: attacker@evil.test", true},
+		{"NUL byte", "broken\x00", true},
+		{"DEL", "broken\x7f", true},
+		{"SOH control byte", "broken\x01", true},
+		{"BEL control byte", "broken\x07", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateHeaderField("Subject", tc.value)
+			gotErr := err != nil
+			if gotErr != tc.wantError {
+				t.Fatalf("validateHeaderField(%q) error = %v, wantError=%v", tc.value, err, tc.wantError)
+			}
+		})
+	}
+}
+
+// ── Test 13: BLOCKER 3 — sanitizeBody strips leading-dot
+// stuffing that downstream SMTP DATA would otherwise
+// interpret as end-of-data. Inline "." characters are
+// preserved.
+
+func TestSanitizeBody_StripsLeadingDots(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain", "hello world", "hello world"},
+		{"CRLF preserved", "line1\r\nline2", "line1\r\nline2"},
+		{"leading dot stripped", ".\r\nhello", "\r\nhello"},
+		{"inline dot preserved", "hello.world", "hello.world"},
+		{"leading dot per line", "..\r\n.\r\nfoo", ".\r\n\r\nfoo"},
+		{"empty", "", ""},
+		{"only leading dot", ".", ""},
+		{"body with leading dot but no CRLF", ".hello", "hello"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeBody(tc.in)
+			if got != tc.want {
+				t.Fatalf("sanitizeBody(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// ── Test 14: BLOCKER 3 — buildVacationRfc822 rejects
+// header-injection attempts in the subject. The storage
+// layer already rejects these, but the runner MUST be
+// robust on its own: a future caller (admin import,
+// migration script) that bypasses the storage layer
+// must still not emit a forged-header outbound message.
+
+func TestBuildVacationRfc822_RejectsHeaderInjectionInSubject(t *testing.T) {
+	in := RunInput{
+		MailboxID:    1,
+		MailboxEmail: "alice@example.com",
+		FromHeader:   "Carol <carol@external.test>",
+		Subject:      "inbound",
+		ReceivedAt:   time.Now().UTC(),
+	}
+	cases := []struct {
+		name    string
+		subject string
+	}{
+		{"CRLF injects Bcc", "Hi\r\nBcc: attacker@evil.test"},
+		{"LF injects Reply-To", "Hi\nReply-To: attacker@evil.test"},
+		{"NUL truncates header", "Hi\x00Bcc: attacker@evil.test"},
+		{"CR alone injects subject-2", "Hi\rSubject-2: forged"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := buildVacationRfc822(in, tc.subject, "body")
+			if err == nil {
+				t.Fatalf("buildVacationRfc822 accepted injection subject %q; want error", tc.subject)
+			}
+			if !strings.Contains(err.Error(), "Subject") {
+				t.Fatalf("error %q must mention Subject header name", err.Error())
+			}
+		})
+	}
+}
+
+// ── Test 15: BLOCKER 3 — positive control for unicode
+// subjects. If the validator regressed to ASCII-only,
+// legitimate subjects like "OOO 🏖️" would be rejected.
+
+func TestBuildVacationRfc822_AllowsUnicodeSubjectAndBody(t *testing.T) {
+	in := RunInput{
+		MailboxID:    1,
+		MailboxEmail: "alice@example.com",
+		FromHeader:   "Carol <carol@external.test>",
+		ReceivedAt:   time.Now().UTC(),
+	}
+	out, err := buildVacationRfc822(in, "Отпуск 🏖️", "Я в отпуске")
+	if err != nil {
+		t.Fatalf("unicode subject rejected: %v", err)
+	}
+	if !strings.Contains(string(out), "Отпуск") {
+		t.Fatalf("unicode subject missing from RFC822: %q", string(out))
+	}
+	if !strings.Contains(string(out), "Я в отпуске") {
+		t.Fatalf("unicode body missing from RFC822: %q", string(out))
+	}
+}

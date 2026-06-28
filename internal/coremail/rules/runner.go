@@ -49,8 +49,25 @@ type RunInput struct {
 // RunOutput tells the caller what side-effects to apply.
 type RunOutput struct {
 	// MoveToFolder is non-empty when the engine decided the
-	// message should land in a different folder.
+	// message should be relocated to a different folder. The
+	// caller MUST physically move the durable row — a move
+	// leaves the message in exactly one folder.
 	MoveToFolder string
+	// CopyToFolder is non-empty when the engine decided the
+	// message should ALSO land in another folder. The caller
+	// MUST duplicate the durable row into the target folder
+	// without deleting the original — a copy leaves the
+	// message in TWO folders (the original + the copy).
+	//
+	// Copy and move are independent. A single rule can
+	// emit both: e.g. "move to Archive AND copy to Receipts".
+	// The caller applies move first, then copy.
+	//
+	// Earlier revisions of this struct aliased CopyTo onto
+	// MoveTo, which silently turned user-configured copies
+	// into moves. Do not re-introduce that alias — the SMTP
+	// tests pin the new contract.
+	CopyToFolder string
 	// SetFlag is non-nil when the engine decided to flip flags.
 	SetFlag *storage.SetFlagValue
 	// ForwardedTo is the address to forward to. Empty when
@@ -197,7 +214,11 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunOutput, error) {
 	// Apply the engine result. The runner emits at most one
 	// Forward and one Vacation per inbound message — the
 	// engine enforces "first forward wins" via the
-	// ForwardedAlready flag it returns.
+	// ForwardedAlready flag it returns. Move and Copy are
+	// independent: a single rule may emit both, and the
+	// runner tracks them in separate fields so the SMTP
+	// caller can do "move first, then duplicate" instead
+	// of aliasing copy into move.
 	for _, a := range result.Actions {
 		switch {
 		case a.MoveTo != "":
@@ -206,17 +227,16 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunOutput, error) {
 				out.MoveToFolder = a.MoveTo
 			}
 		case a.CopyTo != "":
-			// Copy semantics: append after move. Caller
-			// implements copy as a separate StoreMessage
-			// against the target folder. The runner does
-			// not track multiple copies here — the caller
-			// reads out.CopyToFolder (last-write-wins)
-			// when implementing. For now we emit the last
-			// one; the UI prevents creating two copy
-			// actions in the same rule, and the engine
-			// does not let a single rule have duplicate
-			// action kinds because that is wasteful.
-			out.MoveToFolder = a.CopyTo // copy == move for now (caller stores a second copy)
+			// Copy semantics: the caller (SMTP receiver)
+			// calls MailStore.CopyMessage so the durable
+			// row is duplicated into the target folder
+			// while the original row stays put. Do NOT
+			// alias CopyTo onto MoveToFolder — that was
+			// the bug fixed in this revision; see the
+			// RunOutput.CopyToFolder doc.
+			if out.CopyToFolder == "" {
+				out.CopyToFolder = a.CopyTo
+			}
 		case a.SetFlag != nil:
 			out.SetFlag = a.SetFlag
 		case a.ForwardTo != "":
@@ -604,6 +624,12 @@ func buildForwardedRfc822(in RunInput, recipient string) ([]byte, error) {
 // Subject defaults to "Out of office" when the config leaves
 // it blank. Body defaults to a one-line "I am out of the
 // office" message so the engine never sends an empty reply.
+//
+// Subject is validated for header-injection (CR/LF/NUL/control
+// bytes). The storage layer already rejects these on the
+// write path; this is defence in depth so a future caller
+// that bypasses the storage layer still cannot inject
+// extra headers into outbound auto-replies.
 func buildVacationRfc822(in RunInput, subject, body string) ([]byte, error) {
 	id := newMessageID()
 	to := extractBareAddress(in.FromHeader)
@@ -616,6 +642,9 @@ func buildVacationRfc822(in RunInput, subject, body string) ([]byte, error) {
 	}
 	if subject == "" {
 		subject = "Out of office"
+	}
+	if err := validateHeaderField("Subject", subject); err != nil {
+		return nil, err
 	}
 	if body == "" {
 		body = "I am out of the office and will reply when I return."
@@ -643,7 +672,7 @@ func buildVacationRfc822(in RunInput, subject, body string) ([]byte, error) {
 	b.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
 	b.WriteString("Content-Transfer-Encoding: 8bit\r\n")
 	b.WriteString("\r\n")
-	b.WriteString(body)
+	b.WriteString(sanitizeBody(body))
 	b.WriteString("\r\n")
 	return []byte(b.String()), nil
 }
@@ -662,4 +691,83 @@ func newMessageID() string {
 		return fmt.Sprintf("%016x", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(b)
+}
+
+// validateHeaderField rejects values that would let the
+// caller inject extra headers into an auto-generated RFC822
+// message. Used by buildVacationRfc822 (and any future
+// outbound builder) as a defence-in-depth check on top of
+// the storage-layer validators.
+//
+// The "name" parameter is the header name (Subject, From,
+// etc.) and only exists so error messages can quote it.
+//
+// Rejects:
+//   - CR (0x0D) and LF (0x0A): would break out of the
+//     current header line into a new one.
+//   - NUL (0x00): forbidden by RFC 5322.
+//   - Other C0 control bytes (0x01–0x1F) except HTAB (0x09).
+//   - DEL (0x7F).
+//
+// Unicode bytes (0x80+) are permitted; mail clients decode
+// Subject and From as UTF-8 and modern MTAs carry UTF-8
+// mail on the wire.
+func validateHeaderField(name, value string) error {
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		switch {
+		case c == '\r':
+			return fmt.Errorf("%s contains CR (position %d): header injection", name, i)
+		case c == '\n':
+			return fmt.Errorf("%s contains LF (position %d): header injection", name, i)
+		case c == 0:
+			return fmt.Errorf("%s contains NUL (position %d): forbidden by RFC 5322", name, i)
+		case c < 0x20 && c != '\t':
+			return fmt.Errorf("%s contains control byte 0x%02X (position %d)", name, c, i)
+		case c == 0x7f:
+			return fmt.Errorf("%s contains DEL (position %d)", name, i)
+		}
+	}
+	return nil
+}
+
+// sanitizeBody strips the leading dot-stuffing sequence
+// from the body. SMTP DATA requires every line starting
+// with a literal "." to be escaped to ".." so the receiving
+// MTA does not interpret the lone dot as end-of-data. The
+// runner writes the auto-reply into a fresh Message row
+// (not raw to the wire), but the queue worker that
+// delivers it later will relay it through SMTP DATA —
+// failing to strip a leading-dot line here would cause the
+// downstream MTA to truncate the body.
+//
+// We only strip "." at the start of a line. Inline "."
+// characters are preserved.
+//
+// The body is otherwise passed through verbatim — body
+// content is allowed to contain CR/LF; only HEADER values
+// are restricted. The blank-line header/body separator is
+// written by the caller, not by this function.
+func sanitizeBody(body string) string {
+	var b strings.Builder
+	b.Grow(len(body))
+	atLineStart := true
+	for i := 0; i < len(body); i++ {
+		c := body[i]
+		if atLineStart {
+			if c == '.' {
+				// Skip the dot. The line itself
+				// remains valid; downstream MTA
+				// sees the un-escaped form.
+				atLineStart = false
+				continue
+			}
+			atLineStart = false
+		}
+		b.WriteByte(c)
+		if c == '\n' {
+			atLineStart = true
+		}
+	}
+	return b.String()
 }
