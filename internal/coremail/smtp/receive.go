@@ -13,6 +13,7 @@ import (
 	"github.com/orvix/orvix/internal/coremail/dkim"
 	"github.com/orvix/orvix/internal/coremail/dmarc"
 	"github.com/orvix/orvix/internal/coremail/queue"
+	"github.com/orvix/orvix/internal/coremail/rules"
 	"github.com/orvix/orvix/internal/coremail/spf"
 	"github.com/orvix/orvix/internal/coremail/storage"
 	"github.com/orvix/orvix/internal/observability"
@@ -31,6 +32,22 @@ type Receiver struct {
 	AntiSpamEngine  *antispam.Engine
 	DKIMVerifier    *dkim.Verifier
 	Observability   *observability.Observability
+	// RulesRunner is the optional rules engine runner. When
+	// non-nil, every local-delivery message is fed through it
+	// AFTER the message is durably stored in the recipient's
+	// mailbox. The runner never mutates the inbound message
+	// itself; the receiver applies the runner's MoveTo /
+	// SetFlag outputs to MailStore.Move + MailStore.UpdateFlags.
+	// If the runner is nil the receiver falls back to the
+	// legacy direct-to-INBOX behaviour, which keeps the
+	// existing tests in the smtp package green even before
+	// the operator enables the rules engine.
+	//
+	// Typed as an interface so tests can substitute a
+	// panic-throwing runner to verify the "rules runner
+	// failure does not lose the original" guarantee. The
+	// production code always assigns a *rules.Runner.
+	RulesRunner rules.RulesRunner
 }
 
 // NewReceiver creates a message receiver.
@@ -363,6 +380,17 @@ func (r *Receiver) AcceptMessage(ctx context.Context, session *Session) error {
 			firstMessageID = msg.MessageID
 		}
 
+		// Run the rules engine for this local recipient. The
+		// runner is best-effort: a panic / DB error inside the
+		// runner must not abort the delivery because the
+		// message is already durable in the recipient's
+		// mailbox. Apply the runner's outputs (move / flag)
+		// defensively — each application is wrapped so a
+		// failure on one rule does not block the next.
+		if r.RulesRunner != nil {
+			r.applyRulesRunner(ctx, rcpt, msg, rfc822Data)
+		}
+
 		qEntry := &queue.QueueEntry{
 			TenantID:        rcpt.TenantID,
 			DomainID:        rcpt.DomainID,
@@ -457,6 +485,35 @@ func extractSubject(rfc822 []byte) string {
 		}
 	}
 	return ""
+}
+
+// extractHeaderValue pulls the value of a single top-level
+// RFC822 header (case-insensitive name). The function is
+// header-section only — it does NOT walk into MIME parts. Used
+// by the rules runner to pull From / To / Cc without paying
+// for a full MIME parse.
+func extractHeaderValue(rfc822 []byte, name string) string {
+	prefix := []byte(strings.ToLower(name) + ":")
+	lines := bytes.Split(rfc822, []byte("\n"))
+	for _, line := range lines {
+		trimmed := bytes.TrimSpace(line)
+		if bytes.HasPrefix(bytes.ToLower(trimmed), prefix) {
+			return strings.TrimSpace(string(trimmed[len(prefix):]))
+		}
+	}
+	return ""
+}
+
+// hasAttachmentHint inspects the MIME structure cheaply for
+// any multipart/mixed or attachment-shaped part. The rules
+// runner uses this to drive has_attachment conditions without
+// invoking the MIME extractor (which would be overkill for a
+// boolean predicate).
+func hasAttachmentHint(rfc822 []byte) bool {
+	s := string(rfc822)
+	return strings.Contains(strings.ToLower(s), "content-disposition: attachment") ||
+		strings.Contains(strings.ToLower(s), "content-type: multipart/mixed") ||
+		strings.Contains(strings.ToLower(s), "content-type: multipart/related")
 }
 
 func extractHeloDomain(session *Session) string {

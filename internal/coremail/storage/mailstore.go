@@ -31,6 +31,9 @@ type MailStore struct {
 	Folders     FolderRepository
 	Attachments AttachmentRepository
 	Settings    UserSettingsRepository
+	Rules       RulesRepository
+	Vacation    VacationRepository
+	Forwarding  ForwardingRepository
 	BasePath    string // root directory for RFC822 message files
 }
 
@@ -49,6 +52,9 @@ func NewMailStore(db *sql.DB, basePath string) (*MailStore, error) {
 		Folders:     NewFolderSQLRepo(db),
 		Attachments: NewAttachmentSQLRepo(db),
 		Settings:    NewUserSettingsRepo(db),
+		Rules:       NewRulesRepo(db),
+		Vacation:    NewVacationRepo(db),
+		Forwarding:  NewForwardingRepo(db),
 		BasePath:    basePath,
 	}, nil
 }

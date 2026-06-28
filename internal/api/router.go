@@ -378,6 +378,25 @@ func (r *Router) setupRoutes() {
 	protected.Get("/webmail/settings", r.h.WebmailGetSettings)
 	protected.Put("/webmail/settings", r.h.WebmailPutSettings)
 
+	// Per-mailbox rules engine API. The handlers resolve
+	// the caller's mailbox from the JWT identity via
+	// resolveWebmailUserContext — there is no mailbox id
+	// in the URL, so the caller can never read or write
+	// another user's rules / vacation / forwarding row.
+	// The repository WHERE mailbox_id = ? predicate is the
+	// second line of defence against guessing rule ids.
+	// All endpoints are mounted behind the auth middleware
+	// so missing / invalid cookies get 401 before any
+	// mailbox lookup runs.
+	protected.Get("/webmail/rules", r.h.WebmailListRules)
+	protected.Post("/webmail/rules", r.h.WebmailCreateRule)
+	protected.Put("/webmail/rules/:id", r.h.WebmailUpdateRule)
+	protected.Delete("/webmail/rules/:id", r.h.WebmailDeleteRule)
+	protected.Get("/webmail/vacation", r.h.WebmailGetVacation)
+	protected.Put("/webmail/vacation", r.h.WebmailPutVacation)
+	protected.Get("/webmail/forwarding", r.h.WebmailGetForwarding)
+	protected.Put("/webmail/forwarding", r.h.WebmailPutForwarding)
+
 	protected.Get("/csrf-token", func(c fiber.Ctx) error {
 		userID, _ := c.Locals("user_id").(uint)
 		token, err := r.csrf.GenerateToken(c, userID)
