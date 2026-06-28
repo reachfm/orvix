@@ -271,10 +271,22 @@ func TestHTTPSSetupScriptCaddyFlow(t *testing.T) {
 		"check_content_type \"https://$WEBMAIL_DOMAIN/webmail/assets/webmail.css\" \"text/css\"",
 		"check_content_type \"https://$WEBMAIL_DOMAIN/\" \"text/html\"",
 		"curl -fsS --connect-timeout 5 --max-time 10 \"$url\"",
-		"restrict external access to TCP 8080 and 8081",
-		"keep mail protocol ports 25, 110, and 143 unchanged",
+		// Production-readiness gate #2: setup-https.sh must
+		// open the mail listener ports (SMTP/IMAP/POP3 + their
+		// TLS variants) AND emit a post-https hardening block
+		// that tells the operator to deny external access to
+		// the internal admin + JMAP ports.
+		"ufw allow 25/tcp",
+		"ufw allow 110/tcp",
+		"ufw allow 143/tcp",
+		"ufw allow 587/tcp",
+		"ufw allow 465/tcp",
+		"ufw allow 993/tcp",
+		"ufw allow 995/tcp",
+		"post_https_firewall_hardening",
 		"sudo ufw deny 8080/tcp",
 		"sudo ufw deny 8081/tcp",
+		"Recommended firewall posture after HTTPS",
 	} {
 		if !strings.Contains(script, item) {
 			t.Fatalf("https setup script missing %q", item)

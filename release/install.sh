@@ -589,6 +589,16 @@ install_release_scripts() {
     if [ -f "$ORVIX_SOURCE_DIR/release/scripts/generate-vapid-keys.sh" ]; then
         run_quiet install -m 0755 -o root -g root "$ORVIX_SOURCE_DIR/release/scripts/generate-vapid-keys.sh" /usr/share/orvix/scripts/generate-vapid-keys.sh
     fi
+    # Apply-runtime-update.sh is invoked by the operator-initiated
+    # systemd oneshot unit (release/systemd/orvix-update.service).
+    # Earlier releases referenced
+    # /opt/orvix/release/scripts/apply-runtime-update.sh which was
+    # never copied by install.sh, leaving the oneshot unit pointing
+    # at a non-existent file. Install it here so the unit's
+    # ExecStart resolves.
+    if [ -f "$ORVIX_SOURCE_DIR/release/scripts/apply-runtime-update.sh" ]; then
+        run_quiet install -m 0755 -o root -g root "$ORVIX_SOURCE_DIR/release/scripts/apply-runtime-update.sh" /usr/share/orvix/scripts/apply-runtime-update.sh
+    fi
 }
 
 provision_vapid_keys() {

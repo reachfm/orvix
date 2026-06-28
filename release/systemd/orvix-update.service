@@ -1,16 +1,29 @@
 [Unit]
-Description=Orvix Runtime Update
-Documentation=https://opencode.ai
+Description=Orvix Runtime Update (operator-initiated)
+Documentation=https://github.com/reachfm/orvix
+# This unit is intentionally NOT pulled in by multi-user.target
+# (no [Install] section). It exists so an operator can `sudo
+# systemctl start orvix-update.service` after pulling a new
+# source tree to /opt/orvix; it is NEVER auto-started by the
+# boot sequence. The web process uses a separate NOPASSWD sudoers
+# rule (release/sudoers.d/orvix-update) limited to `systemctl
+# start orvix-update.service` only.
+#
+# The script lives at /usr/share/orvix/scripts/apply-runtime-update.sh
+# after the fresh installer runs (release/install.sh line ~592
+# installs it). Earlier releases referenced
+# /opt/orvix/release/scripts/apply-runtime-update.sh, which was
+# never copied by install.sh — that path is removed.
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=oneshot
 User=root
-ExecStart=/opt/orvix/release/scripts/apply-runtime-update.sh
+ExecStart=/usr/share/orvix/scripts/apply-runtime-update.sh
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/opt/orvix /usr/local/bin /usr/share/orvix /tmp
+ReadWritePaths=/opt/orvix /usr/local/bin /usr/share/orvix /usr/share/orvix/scripts /tmp /var/lib/orvix /var/log/orvix
 ProtectHome=true
 PrivateTmp=true
 CapabilityBoundingSet=
@@ -20,8 +33,12 @@ ProtectKernelTunables=true
 ProtectKernelLogs=true
 ProtectControlGroups=true
 RestrictRealtime=true
+RestrictSUIDSGID=true
 SystemCallArchitectures=native
 RemoveIPC=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 Environment=ORVIX_UPDATE=1
 
 [Install]

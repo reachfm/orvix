@@ -153,10 +153,79 @@ CADDY
 }
 
 open_firewall() {
+	# Open the ports required for a working mail server. The
+	# fresh install installs the ufw package but does NOT enable
+	# the firewall (the operator is expected to enable it once
+	# they are happy with the rules below). On hosts where ufw
+	# is already active, these `allow` rules are required or the
+	# VPS will silently reject every SMTP/IMAP/POP3 connection.
+	#
+	# 25/tcp   — SMTP MX (inbound + outbound delivery)
+	# 110/tcp  — POP3 (insecure; advisory only when TLS is on)
+	# 143/tcp  — IMAP
+	# 587/tcp  — SMTP submission (STARTTLS); only opened when
+	#            coremail.submission_enabled is true in config
+	# 465/tcp  — SMTP over implicit TLS; only opened when
+	#            coremail.smtps_enabled is true in config
+	# 993/tcp  — IMAPS (TLS-wrapped IMAP)
+	# 995/tcp  — POP3S (TLS-wrapped POP3)
+	# 80/tcp   — Caddy HTTP (ACME challenge + redirect)
+	# 443/tcp  — Caddy HTTPS
+	#
+	# 8080/tcp + 8081/tcp (admin + JMAP internal) are NOT opened
+	# here. They are bound to 0.0.0.0 by default so a fresh VPS
+	# can hit them via the server IP, but they MUST be firewalled
+	# off externally as soon as setup-https.sh runs. The
+	# `post_https_firewall_hardening` block at the bottom of
+	# this script emits the deny commands for the operator to
+	# apply manually.
 	if command -v ufw >/dev/null 2>&1; then
+		run_quiet ufw allow 25/tcp
+		run_quiet ufw allow 110/tcp
+		run_quiet ufw allow 143/tcp
+		run_quiet ufw allow 587/tcp
+		run_quiet ufw allow 465/tcp
+		run_quiet ufw allow 993/tcp
+		run_quiet ufw allow 995/tcp
 		run_quiet ufw allow 80/tcp
 		run_quiet ufw allow 443/tcp
 	fi
+}
+
+# post_https_firewall_hardening prints the deny commands the
+# operator should run as soon as setup-https.sh has verified
+# the public HTTPS endpoints are reachable. It does NOT run them
+# automatically — that would lock an operator out of a host whose
+# Caddyfile has a typo. The commands are emitted in the success
+# banner so they are impossible to miss.
+post_https_firewall_hardening() {
+	cat <<HARDEN
+
+Post-HTTPS firewall hardening (run as soon as the URLs above
+are reachable from a remote browser):
+
+  sudo ufw deny 8080/tcp     # admin + webmail (internal only)
+  sudo ufw deny 8081/tcp     # JMAP (internal only)
+
+These deny rules do NOT affect HTTPS — Caddy terminates on
+127.0.0.1:8080 and 127.0.0.1:8081, so blocking external access
+to those ports breaks nothing the public hostname depends on,
+but it stops a misconfigured admin UI from being reachable on
+the bare server IP.
+
+Recommended firewall posture after HTTPS:
+  sudo ufw default deny incoming
+  sudo ufw allow 22/tcp          # SSH (if not already)
+  sudo ufw allow 25/tcp          # SMTP MX
+  sudo ufw allow 110/tcp         # POP3 (advisory)
+  sudo ufw allow 143/tcp         # IMAP
+  sudo ufw allow 587/tcp         # submission (if enabled)
+  sudo ufw allow 465/tcp         # SMTPS (if enabled)
+  sudo ufw allow 993/tcp         # IMAPS
+  sudo ufw allow 995/tcp         # POP3S
+  sudo ufw allow 80/tcp          # Caddy HTTP (ACME + redirect)
+  sudo ufw allow 443/tcp         # Caddy HTTPS
+HARDEN
 }
 
 resolve_ipv4() {
@@ -278,17 +347,10 @@ Admin UI:    https://$ADMIN_DOMAIN/admin
 Webmail UI:  https://$WEBMAIL_DOMAIN/
 JMAP:        https://$MAIL_DOMAIN/.well-known/jmap
 
-Recommended after HTTPS passes:
-- restrict external access to TCP 8080 and 8081
-- keep mail protocol ports 25, 110, and 143 unchanged
-- keep TCP 80 and 443 open for Caddy and ACME renewal
-
-Firewall hardening commands:
-sudo ufw deny 8080/tcp
-sudo ufw deny 8081/tcp
-
 Detailed log: $INSTALL_LOG
 DONE
+
+	post_https_firewall_hardening
 }
 
 main "$@"
