@@ -2485,6 +2485,17 @@
     });
     actions.appendChild(refreshBtn);
     host.appendChild(actions);
+
+    // Replace the default settings Save/Cancel footer with one
+    // that only has Close — filter rules are persisted via the
+    // row toggle, edit modal, and delete button. The default
+    // footer would PUT /api/v1/webmail/settings with an empty
+    // patch, which is a no-op but misleading.
+    var footer = el('div', { class: 'modal-footer settings-footer' });
+    var closeBtn = el('button', { class: 'btn ghost', type: 'button' }, 'Close');
+    closeBtn.addEventListener('click', closeSettingsModal);
+    footer.appendChild(closeBtn);
+    host.appendChild(footer);
   }
 
   function renderRuleRow(rule, idx) {
@@ -3587,15 +3598,21 @@
     }
 
     // Footer with Save / Cancel — every tab gets one so the user
-    // never has to hunt for the button after switching tabs.
-    var footer = el('div', { class: 'modal-footer settings-footer' });
-    var cancelBtn = el('button', { class: 'btn ghost', type: 'button' }, 'Cancel');
-    cancelBtn.addEventListener('click', closeSettingsModal);
-    var saveBtn = el('button', { class: 'btn primary settings-save-btn', type: 'button' }, 'Save');
-    saveBtn.addEventListener('click', function () { saveSettings(); });
-    footer.appendChild(cancelBtn);
-    footer.appendChild(saveBtn);
-    host.appendChild(footer);
+    // never has to hunt for the button after switching tabs. The
+    // Filters / Vacation / Forwarding tabs render their OWN
+    // footers (different save endpoint, different copy) — if
+    // one is already in the host, skip the default footer so
+    // we don't end up with two Save buttons.
+    if (!host.querySelector('.settings-footer')) {
+      var footer = el('div', { class: 'modal-footer settings-footer' });
+      var cancelBtn = el('button', { class: 'btn ghost', type: 'button' }, 'Cancel');
+      cancelBtn.addEventListener('click', closeSettingsModal);
+      var saveBtn = el('button', { class: 'btn primary settings-save-btn', type: 'button' }, 'Save');
+      saveBtn.addEventListener('click', function () { saveSettings(); });
+      footer.appendChild(cancelBtn);
+      footer.appendChild(saveBtn);
+      host.appendChild(footer);
+    }
   }
 
   // applySignatureToCompose prepends/appends the user's signature to
