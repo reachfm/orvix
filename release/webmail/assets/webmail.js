@@ -1,4 +1,4 @@
-/* =====================================================================
+﻿/* =====================================================================
    Orvix Webmail — production-grade enterprise client.
    Vanilla JS, no external dependencies. Sends credentials with every
    request to the webmail API only; it does not use the admin queue API or
@@ -386,6 +386,36 @@
     // for the failed load; rendered inside the Settings modal.
     settingsLoadFailureMessage: '',
     pushStatus: null, // {available, permission, enabled, reason}
+    // Server-side filters / rules. Each rule is the raw
+    // shape returned by GET /api/v1/webmail/rules:
+    // { id, mailbox_id, name, enabled, sort_order,
+    //   stop_processing, conditions_json, actions_json,
+    //   created_at, updated_at }. conditions_json /
+    // actions_json are stringified JSON blobs the rules
+    // engine validates on every PUT/POST.
+    rules: [],
+    rulesLoaded: false,
+    rulesLoadFailed: false,
+    rulesLoadFailureMessage: '',
+    // Vacation / out-of-office configuration. See
+    // GET /api/v1/webmail/vacation — the row may not
+    // exist yet, in which case the backend returns
+    // { enabled: false, subject: '', body: '', … } via
+    // GetOrCreate. The values the user sees in the form
+    // are always the latest PUT response, so the UI is
+    // guaranteed to match the server after a successful
+    // save.
+    vacation: null,
+    vacationLoaded: false,
+    vacationLoadFailed: false,
+    vacationLoadFailureMessage: '',
+    // Forwarding configuration. Same GetOrCreate
+    // semantics as vacation. keep_copy defaults true on
+    // the backend when a new row is created.
+    forwarding: null,
+    forwardingLoaded: false,
+    forwardingLoadFailed: false,
+    forwardingLoadFailureMessage: '',
     // "g" prefix for Gmail-style navigation. After
     // pressing "g" the next keypress is interpreted as a
     // folder shortcut. We use a single keypress window
@@ -2249,6 +2279,881 @@
       .catch(function () { state.pushStatus = null; });
   }
 
+  // ──────────────────────────────────────────────────────────
+  // Rules / vacation / forwarding loaders
+  // ──────────────────────────────────────────────────────────
+  //
+  // Each loader mirrors loadSettings' shape:
+  //   - On success: state.X = response, state.XLoadFailed = false.
+  //   - On failure: state.XLoadFailed = true with a
+  //     human-readable reason the in-tab banner can quote.
+  //     State.X is left untouched (rules: keep last known
+  //     list; vacation / forwarding: keep null so the UI
+  //     can show a fresh "no data yet" state).
+  //
+  // The list endpoint, vacation GET and forwarding GET all
+  // sit on the auth-protected group. They do NOT need
+  // CSRF — only the auth/logout + change-password routes
+  // do. api() handles the credentials and JSON parsing.
+
+  function loadRules() {
+    return api('GET', '/api/v1/webmail/rules').then(function (resp) {
+      // Backend wraps the list under {rules: [...]} — keep
+      // a defensive fallback for an alternative shape so a
+      // server change does not silently leave the list empty.
+      var list = (resp && Array.isArray(resp.rules)) ? resp.rules :
+                 (Array.isArray(resp) ? resp : []);
+      state.rules = list;
+      state.rulesLoaded = true;
+      state.rulesLoadFailed = false;
+      state.rulesLoadFailureMessage = '';
+      return list;
+    }).catch(function (err) {
+      state.rules = state.rules || [];
+      state.rulesLoaded = true;
+      state.rulesLoadFailed = true;
+      state.rulesLoadFailureMessage = (err && err.message) || 'Unknown error';
+      toast('Filters failed to load: ' + state.rulesLoadFailureMessage, 'error', 4500);
+    });
+  }
+
+  function loadVacation() {
+    return api('GET', '/api/v1/webmail/vacation').then(function (resp) {
+      state.vacation = resp || {
+        enabled: false, subject: '', body: '',
+        reply_interval_seconds: 86400,
+      };
+      state.vacationLoaded = true;
+      state.vacationLoadFailed = false;
+      state.vacationLoadFailureMessage = '';
+      return state.vacation;
+    }).catch(function (err) {
+      state.vacation = state.vacation || {
+        enabled: false, subject: '', body: '',
+        reply_interval_seconds: 86400,
+      };
+      state.vacationLoaded = true;
+      state.vacationLoadFailed = true;
+      state.vacationLoadFailureMessage = (err && err.message) || 'Unknown error';
+      toast('Vacation failed to load: ' + state.vacationLoadFailureMessage, 'error', 4500);
+    });
+  }
+
+  function loadForwarding() {
+    return api('GET', '/api/v1/webmail/forwarding').then(function (resp) {
+      state.forwarding = resp || {
+        enabled: false, forward_to: '', keep_copy: true,
+      };
+      state.forwardingLoaded = true;
+      state.forwardingLoadFailed = false;
+      state.forwardingLoadFailureMessage = '';
+      return state.forwarding;
+    }).catch(function (err) {
+      state.forwarding = state.forwarding || {
+        enabled: false, forward_to: '', keep_copy: true,
+      };
+      state.forwardingLoaded = true;
+      state.forwardingLoadFailed = true;
+      state.forwardingLoadFailureMessage = (err && err.message) || 'Unknown error';
+      toast('Forwarding failed to load: ' + state.forwardingLoadFailureMessage, 'error', 4500);
+    });
+  }
+
+  // ──────────────────────────────────────────────────────────
+  // Filters / Vacation / Forwarding renderers
+  // ──────────────────────────────────────────────────────────
+  //
+  // These are kept at module scope so the Settings modal
+  // can re-render after async loads. Each renderer is
+  // idempotent: it wipes `host` is NOT its job (the caller
+  // already cleared it via activateTab). The renderer just
+  // appends children.
+  //
+  // The supported match types and action types are hard-coded
+  // to mirror rules.ValidateConditionsJSON /
+  // rules.ValidateActionsJSON in the Go backend. Adding a new
+  // type requires a backend change first; the UI must never
+  // claim to support a type that the server will reject.
+
+  var FILTER_MATCH_TYPES = [
+    { value: 'from_equals',       label: 'From equals (exact)',     needsValue: true },
+    { value: 'from_contains',     label: 'From contains',           needsValue: true },
+    { value: 'to_contains',       label: 'To contains',             needsValue: true },
+    { value: 'subject_contains',  label: 'Subject contains',        needsValue: true },
+    { value: 'body_contains',     label: 'Body contains',           needsValue: true },
+    { value: 'has_attachment',    label: 'Has attachment',          needsValue: true, valueKind: 'boolean' },
+  ];
+
+  var FILTER_ACTION_TYPES = [
+    { value: 'move_to_folder', label: 'Move to folder',  needsFolder: true },
+    { value: 'copy_to_folder', label: 'Copy to folder',  needsFolder: true },
+    { value: 'set_flag',       label: 'Set flag',        needsFlag: true },
+    { value: 'forward',        label: 'Forward to',      needsForward: true },
+  ];
+
+  function safeParseJSON(raw, fallback) {
+    if (raw == null || raw === '') {
+      return { ok: true, value: fallback };
+    }
+    try {
+      return { ok: true, value: JSON.parse(raw) };
+    } catch (e) {
+      return { ok: false, error: e && e.message ? e.message : 'invalid JSON' };
+    }
+  }
+
+  function describeConditions(conds) {
+    if (!conds || !conds.length) return 'no conditions';
+    return conds.map(function (c) {
+      var def = FILTER_MATCH_TYPES.find(function (t) { return t.value === c.type; });
+      var label = def ? def.label : ('(unknown: ' + c.type + ')');
+      if (c.type === 'has_attachment') {
+        return label + ' = ' + (String(c.value).toLowerCase() === 'true' ? 'yes' : 'no');
+      }
+      return label + ' "' + (c.value || '') + '"';
+    }).join(' AND ');
+  }
+
+  function describeActions(acts) {
+    if (!acts || !acts.length) return 'no actions';
+    return acts.map(function (a) {
+      switch (a.type) {
+        case 'move_to_folder': return 'move → ' + (a.folder_path || '?');
+        case 'copy_to_folder': return 'copy → ' + (a.folder_path || '?');
+        case 'set_flag': {
+          var flags = [];
+          if (a.set_flag && a.set_flag.seen === true) flags.push('seen');
+          if (a.set_flag && a.set_flag.seen === false) flags.push('unseen');
+          if (a.set_flag && a.set_flag.flagged === true) flags.push('flagged');
+          if (a.set_flag && a.set_flag.flagged === false) flags.push('unflagged');
+          return 'flag (' + (flags.join(', ') || '?') + ')';
+        }
+        case 'forward': return 'forward → ' + (a.forward_to || '?');
+        default: return '(unknown: ' + a.type + ')';
+      }
+    }).join(' + ');
+  }
+
+  // ── Filters tab ─────────────────────────────────────────────
+
+  function renderFiltersTab(host) {
+    if (state.rulesLoadFailed) {
+      var banner = el('div', { class: 'settings-load-failed-banner', role: 'alert' });
+      banner.appendChild(el('div', { class: 'settings-load-failed-title' },
+        '⚠ Filters failed to load from the server'));
+      banner.appendChild(el('div', { class: 'settings-load-failed-body' },
+        'Reason: ' + state.rulesLoadFailureMessage + '. The list below may be stale or empty. Retry loading, or close and reopen this tab.'));
+      var retryBtn = el('button', { class: 'btn sm', type: 'button' }, 'Retry');
+      retryBtn.addEventListener('click', function () {
+        loadRules().then(function () { rerenderActiveTab('filters'); });
+      });
+      var actions = el('div', { class: 'settings-load-failed-actions' });
+      actions.appendChild(retryBtn);
+      banner.appendChild(actions);
+      host.appendChild(banner);
+    }
+
+    host.appendChild(settingsSection('How filters work', [
+      el('div', { class: 'settings-notice' },
+        'Filters run server-side on inbound mail in the order shown below. Rules with the highest priority (lowest order number) run first. A rule with "stop processing" checked will skip every later rule when it matches. The original message is always stored — a filter that fails does not lose mail.'),
+    ]));
+
+    var list = state.rules || [];
+    var listWrap = el('div', { class: 'rules-list' });
+
+    if (list.length === 0) {
+      listWrap.appendChild(el('div', { class: 'rules-empty' },
+        state.rulesLoadFailed
+          ? 'No rules could be loaded — see the error above.'
+          : 'No filters yet. Click "New rule" below to add one.'));
+    } else {
+      list.forEach(function (rule, idx) {
+        listWrap.appendChild(renderRuleRow(rule, idx));
+      });
+    }
+    host.appendChild(listWrap);
+
+    var actions = el('div', { class: 'settings-row settings-actions' });
+    var newBtn = el('button', { class: 'btn primary', type: 'button' }, '+ New rule');
+    newBtn.addEventListener('click', function () {
+      openRuleEditor(null);
+    });
+    actions.appendChild(newBtn);
+    var refreshBtn = el('button', { class: 'btn ghost', type: 'button' }, 'Reload list');
+    refreshBtn.addEventListener('click', function () {
+      loadRules().then(function () { rerenderActiveTab('filters'); });
+    });
+    actions.appendChild(refreshBtn);
+    host.appendChild(actions);
+  }
+
+  function renderRuleRow(rule, idx) {
+    var condsParsed = safeParseJSON(rule.conditions_json, []);
+    var actsParsed  = safeParseJSON(rule.actions_json, []);
+    var row = el('div', { class: 'rule-row' });
+
+    var head = el('div', { class: 'rule-row-head' });
+    var enabledWrap = el('label', { class: 'settings-toggle rule-enabled-toggle' });
+    var enabledBox = el('input', { type: 'checkbox' });
+    if (rule.enabled) enabledBox.setAttribute('checked', 'checked');
+    enabledBox.addEventListener('change', function () {
+      var want = !!enabledBox.checked;
+      var patch = { enabled: want };
+      api('PUT', '/api/v1/webmail/rules/' + rule.id, patch).then(function (updated) {
+        // Splice the updated rule back into state.rules
+        for (var i = 0; i < state.rules.length; i++) {
+          if (state.rules[i].id === rule.id) { state.rules[i] = updated; break; }
+        }
+        toast('Rule ' + (want ? 'enabled' : 'disabled'), 'success', 1800);
+      }).catch(function (err) {
+        enabledBox.checked = !!rule.enabled; // revert
+        toast('Toggle failed: ' + (err && err.message ? err.message : 'Unknown error'), 'error', 4500);
+      });
+    });
+    enabledWrap.appendChild(enabledBox);
+    enabledWrap.appendChild(el('span', { class: 'settings-toggle-box' }));
+    enabledWrap.appendChild(el('span', { class: 'settings-toggle-text' },
+      rule.name && rule.name.trim() ? rule.name : ('(unnamed rule #' + rule.id + ')')));
+    head.appendChild(enabledWrap);
+
+    var meta = el('div', { class: 'rule-row-meta' });
+    meta.appendChild(el('span', { class: 'rule-order' }, '#' + (idx + 1)));
+    if (rule.stop_processing) {
+      meta.appendChild(el('span', { class: 'rule-tag' }, 'stops further rules'));
+    }
+    if (!condsParsed.ok) {
+      meta.appendChild(el('span', { class: 'rule-tag rule-tag-error' },
+        'conditions JSON invalid: ' + condsParsed.error));
+    }
+    if (!actsParsed.ok) {
+      meta.appendChild(el('span', { class: 'rule-tag rule-tag-error' },
+        'actions JSON invalid: ' + actsParsed.error));
+    }
+    head.appendChild(meta);
+
+    var rowActions = el('div', { class: 'rule-row-actions' });
+    var editBtn = el('button', { class: 'btn ghost sm', type: 'button' }, 'Edit');
+    editBtn.addEventListener('click', function () {
+      openRuleEditor(rule);
+    });
+    rowActions.appendChild(editBtn);
+    var delBtn = el('button', { class: 'btn ghost sm rule-delete-btn', type: 'button' }, 'Delete');
+    delBtn.addEventListener('click', function () {
+      var label = rule.name && rule.name.trim() ? rule.name : ('rule #' + rule.id);
+      if (!confirm('Delete ' + label + '? This cannot be undone.')) return;
+      api('DELETE', '/api/v1/webmail/rules/' + rule.id).then(function () {
+        toast('Rule deleted', 'success', 1800);
+        return loadRules();
+      }).then(function () { rerenderActiveTab('filters'); })
+        .catch(function (err) {
+          toast('Delete failed: ' + (err && err.message ? err.message : 'Unknown error'), 'error', 4500);
+        });
+    });
+    rowActions.appendChild(delBtn);
+    head.appendChild(rowActions);
+    row.appendChild(head);
+
+    var desc = el('div', { class: 'rule-row-desc' });
+    desc.appendChild(el('div', {}, 'When: ' + (condsParsed.ok ? describeConditions(condsParsed.value) : '—')));
+    desc.appendChild(el('div', {}, 'Then: ' + (actsParsed.ok ? describeActions(actsParsed.value) : '—')));
+    row.appendChild(desc);
+
+    return row;
+  }
+
+  function rerenderActiveTab(key) {
+    var host = document.querySelector('.settings-modal .settings-content');
+    if (!host) return;
+    while (host.firstChild) host.removeChild(host.firstChild);
+    renderSettingsTab(key, host, state.settings || {});
+  }
+
+  function openRuleEditor(rule) {
+    // rule === null → create new
+    var isNew = !rule;
+    var backdrop = el('div', { class: 'modal-backdrop rule-editor-modal' });
+    var modal = el('div', { class: 'modal rule-editor-card', role: 'dialog', 'aria-label': isNew ? 'New rule' : 'Edit rule' });
+    var header = el('div', { class: 'modal-header' });
+    header.appendChild(el('div', { class: 'title' }, isNew ? 'New rule' : 'Edit rule'));
+    var closeBtn = el('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Close', title: 'Close' }, '×');
+    closeBtn.addEventListener('click', function () { backdrop.remove(); });
+    header.appendChild(closeBtn);
+    modal.appendChild(header);
+
+    var body = el('div', { class: 'modal-body' });
+
+    var nameInput = el('input', { type: 'text', class: 'settings-input', value: rule && rule.name ? rule.name : '', maxlength: '200', placeholder: 'Optional label (e.g. "Move invoices to Receipts")' });
+    body.appendChild(settingsSection('Name', [settingsRow(null, nameInput, 'Helps you remember why this rule exists.')]));
+
+    var stopInput = el('input', { type: 'checkbox', class: 'settings-toggle-input' });
+    if (rule && rule.stop_processing) stopInput.setAttribute('checked', 'checked');
+    var stopWrap = el('label', { class: 'settings-toggle' });
+    stopWrap.appendChild(stopInput);
+    stopWrap.appendChild(el('span', { class: 'settings-toggle-box' }));
+    stopWrap.appendChild(el('span', { class: 'settings-toggle-text' }, 'Stop processing further rules when this one matches'));
+    stopWrap.appendChild(el('span', { class: 'settings-hint' },
+      'When checked, rules below this one are skipped for matching mail.'));
+    body.appendChild(settingsSection('Run order', [stopWrap]));
+
+    // Conditions
+    var conditionsHost = el('div', { class: 'rule-conditions' });
+    var condsInit = [];
+    if (rule && rule.conditions_json) {
+      var p = safeParseJSON(rule.conditions_json, []);
+      if (p.ok && Array.isArray(p.value)) condsInit = p.value;
+    }
+    var conditions = condsInit.length
+      ? condsInit.map(function (c) { return { type: c.type || 'from_contains', value: c.value == null ? '' : String(c.value) }; })
+      : [{ type: 'from_contains', value: '' }];
+    function renderConditionRow(c, idx) {
+      var row = el('div', { class: 'rule-condition-row' });
+      var typeSel = el('select', { class: 'settings-input rule-condition-type' });
+      FILTER_MATCH_TYPES.forEach(function (t) {
+        var o = el('option', { value: t.value }, t.label);
+        if (t.value === c.type) o.setAttribute('selected', 'selected');
+        typeSel.appendChild(o);
+      });
+      typeSel.addEventListener('change', function () {
+        c.type = typeSel.value;
+        rebuildValueField();
+      });
+      row.appendChild(typeSel);
+
+      var valWrap = el('div', { class: 'rule-condition-value' });
+      function rebuildValueField() {
+        while (valWrap.firstChild) valWrap.removeChild(valWrap.firstChild);
+        var def = FILTER_MATCH_TYPES.find(function (t) { return t.value === c.type; });
+        if (def && def.valueKind === 'boolean') {
+          var bs = el('select', { class: 'settings-input' });
+          [['true', 'Yes'], ['false', 'No']].forEach(function (kv) {
+            var o = el('option', { value: kv[0] }, kv[1]);
+            if (String(c.value).toLowerCase() === kv[0]) o.setAttribute('selected', 'selected');
+            bs.appendChild(o);
+          });
+          bs.addEventListener('change', function () { c.value = bs.value; });
+          valWrap.appendChild(bs);
+        } else {
+          var ti = el('input', { type: 'text', class: 'settings-input', value: c.value || '', placeholder: 'Match text' });
+          ti.addEventListener('input', function () { c.value = ti.value; });
+          valWrap.appendChild(ti);
+        }
+      }
+      rebuildValueField();
+      row.appendChild(valWrap);
+
+      var delBtn = el('button', { class: 'btn ghost sm', type: 'button' }, 'Remove');
+      delBtn.addEventListener('click', function () {
+        conditions.splice(idx, 1);
+        rerenderConditions();
+      });
+      row.appendChild(delBtn);
+      return row;
+    }
+    function rerenderConditions() {
+      while (conditionsHost.firstChild) conditionsHost.removeChild(conditionsHost.firstChild);
+      conditions.forEach(function (c, i) { conditionsHost.appendChild(renderConditionRow(c, i)); });
+      var addBtn = el('button', { class: 'btn ghost sm', type: 'button' }, '+ Add condition (AND)');
+      addBtn.addEventListener('click', function () {
+        conditions.push({ type: 'from_contains', value: '' });
+        rerenderConditions();
+      });
+      conditionsHost.appendChild(addBtn);
+    }
+    rerenderConditions();
+    body.appendChild(settingsSection('Conditions (all must match)', [conditionsHost]));
+
+    // Actions
+    var actionsHost = el('div', { class: 'rule-actions' });
+    var actsInit = [];
+    if (rule && rule.actions_json) {
+      var ap = safeParseJSON(rule.actions_json, []);
+      if (ap.ok && Array.isArray(ap.value)) actsInit = ap.value;
+    }
+    var actions = actsInit.length ? actsInit.map(plainAction) : [plainAction({ type: 'move_to_folder' })];
+    function plainAction(a) {
+      // Deep-copy so editing doesn't mutate the original.
+      return JSON.parse(JSON.stringify(a));
+    }
+    function renderActionRow(a, idx) {
+      var row = el('div', { class: 'rule-action-row' });
+      var typeSel = el('select', { class: 'settings-input rule-action-type' });
+      FILTER_ACTION_TYPES.forEach(function (t) {
+        var o = el('option', { value: t.value }, t.label);
+        if (t.value === a.type) o.setAttribute('selected', 'selected');
+        typeSel.appendChild(o);
+      });
+      typeSel.addEventListener('change', function () {
+        // Switch type — reset the type-specific payload to safe defaults.
+        var prev = JSON.parse(JSON.stringify(a));
+        a.type = typeSel.value;
+        a.folder_path = a.folder_path || '';
+        a.forward_to = a.forward_to || '';
+        if (!a.set_flag) a.set_flag = {};
+        // When switching away from a type, drop the irrelevant field so
+        // the payload stays clean for the backend.
+        if (a.type !== 'move_to_folder' && a.type !== 'copy_to_folder') a.folder_path = '';
+        if (a.type !== 'forward') a.forward_to = '';
+        if (a.type !== 'set_flag') a.set_flag = undefined;
+        rerenderActions();
+      });
+      row.appendChild(typeSel);
+
+      var payloadWrap = el('div', { class: 'rule-action-payload' });
+      function rebuildPayload() {
+        while (payloadWrap.firstChild) payloadWrap.removeChild(payloadWrap.firstChild);
+        if (a.type === 'move_to_folder' || a.type === 'copy_to_folder') {
+          var fi = el('input', { type: 'text', class: 'settings-input', value: a.folder_path || '', placeholder: 'Folder name (e.g. Receipts)' });
+          fi.addEventListener('input', function () { a.folder_path = fi.value; });
+          payloadWrap.appendChild(fi);
+        } else if (a.type === 'set_flag') {
+          if (!a.set_flag) a.set_flag = {};
+          var wrap = el('div', { class: 'rule-flag-grid' });
+          function flagCell(label, key) {
+            var tri = el('select', { class: 'settings-input' });
+            [['leave', 'Leave unchanged'], ['true', 'On'], ['false', 'Off']].forEach(function (kv) {
+              var o = el('option', { value: kv[0] }, kv[1]);
+              var cur = a.set_flag && a.set_flag[key] === true ? 'true' :
+                        a.set_flag && a.set_flag[key] === false ? 'false' : 'leave';
+              if (cur === kv[0]) o.setAttribute('selected', 'selected');
+              tri.appendChild(o);
+            });
+            tri.addEventListener('change', function () {
+              if (!a.set_flag) a.set_flag = {};
+              if (tri.value === 'leave') {
+                delete a.set_flag[key];
+              } else if (tri.value === 'true') {
+                a.set_flag[key] = true;
+              } else {
+                a.set_flag[key] = false;
+              }
+            });
+            var cell = el('label', { class: 'rule-flag-cell' });
+            cell.appendChild(el('span', {}, label));
+            cell.appendChild(tri);
+            return cell;
+          }
+          wrap.appendChild(flagCell('Seen', 'seen'));
+          wrap.appendChild(flagCell('Flagged', 'flagged'));
+          payloadWrap.appendChild(wrap);
+        } else if (a.type === 'forward') {
+          var ei = el('input', { type: 'email', class: 'settings-input', value: a.forward_to || '', placeholder: 'someone@example.com' });
+          ei.addEventListener('input', function () { a.forward_to = ei.value; });
+          payloadWrap.appendChild(ei);
+        }
+      }
+      rebuildPayload();
+      row.appendChild(payloadWrap);
+
+      var delBtn = el('button', { class: 'btn ghost sm', type: 'button' }, 'Remove');
+      delBtn.addEventListener('click', function () {
+        actions.splice(idx, 1);
+        rerenderActions();
+      });
+      row.appendChild(delBtn);
+      return row;
+    }
+    function rerenderActions() {
+      while (actionsHost.firstChild) actionsHost.removeChild(actionsHost.firstChild);
+      actions.forEach(function (a, i) { actionsHost.appendChild(renderActionRow(a, i)); });
+      var addBtn = el('button', { class: 'btn ghost sm', type: 'button' }, '+ Add action');
+      addBtn.addEventListener('click', function () {
+        actions.push({ type: 'move_to_folder', folder_path: '' });
+        rerenderActions();
+      });
+      actionsHost.appendChild(addBtn);
+    }
+    rerenderActions();
+    body.appendChild(settingsSection('Actions (all run in order)', [actionsHost]));
+
+    var errBox = el('div', { class: 'settings-notice settings-notice-error', role: 'alert', style: 'display:none;' });
+    body.appendChild(errBox);
+
+    var footer = el('div', { class: 'modal-footer settings-footer' });
+    var cancelBtn = el('button', { class: 'btn ghost', type: 'button' }, 'Cancel');
+    cancelBtn.addEventListener('click', function () { backdrop.remove(); });
+    var saveBtn = el('button', { class: 'btn primary', type: 'button' }, isNew ? 'Create rule' : 'Save changes');
+    saveBtn.addEventListener('click', function () {
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Saving…';
+      errBox.style.display = 'none';
+      // Strip empty values that the backend would reject.
+      var cleanedConds = conditions
+        .filter(function (c) { return c && c.type; })
+        .map(function (c) {
+          var out = { type: c.type };
+          if (c.type === 'has_attachment') {
+            out.value = (String(c.value).toLowerCase() === 'true') ? 'true' : 'false';
+          } else {
+            out.value = (c.value || '').trim();
+          }
+          return out;
+        });
+      var cleanedActs = actions
+        .filter(function (a) { return a && a.type; })
+        .map(function (a) {
+          var out = { type: a.type };
+          if (a.type === 'move_to_folder' || a.type === 'copy_to_folder') {
+            out.folder_path = (a.folder_path || '').trim();
+          } else if (a.type === 'set_flag') {
+            var sf = a.set_flag || {};
+            var sfClean = {};
+            if (sf.seen === true || sf.seen === false) sfClean.seen = sf.seen;
+            if (sf.flagged === true || sf.flagged === false) sfClean.flagged = sf.flagged;
+            out.set_flag = sfClean;
+          } else if (a.type === 'forward') {
+            out.forward_to = (a.forward_to || '').trim();
+          }
+          return out;
+        });
+      var body = {
+        name: (nameInput.value || '').trim(),
+        enabled: true,
+        sort_order: rule ? (rule.sort_order || 0) : (state.rules ? state.rules.length : 0),
+        stop_processing: !!stopInput.checked,
+        conditions_json: JSON.stringify(cleanedConds),
+        actions_json: JSON.stringify(cleanedActs),
+      };
+      var p = isNew
+        ? api('POST', '/api/v1/webmail/rules', body)
+        : api('PUT', '/api/v1/webmail/rules/' + rule.id, body);
+      p.then(function () {
+        toast(isNew ? 'Rule created' : 'Rule saved', 'success', 1800);
+        backdrop.remove();
+        return loadRules();
+      }).then(function () { rerenderActiveTab('filters'); })
+        .catch(function (err) {
+          var msg = (err && err.body && err.body.error) || (err && err.message) || 'Unknown error';
+          errBox.textContent = 'Save failed: ' + msg;
+          errBox.style.display = '';
+        })
+        .then(function () {
+          saveBtn.disabled = false;
+          saveBtn.textContent = isNew ? 'Create rule' : 'Save changes';
+        });
+    });
+    footer.appendChild(cancelBtn);
+    footer.appendChild(saveBtn);
+    modal.appendChild(body);
+    modal.appendChild(footer);
+    backdrop.appendChild(modal);
+    backdrop.addEventListener('click', function (e) {
+      if (e.target === backdrop) backdrop.remove();
+    });
+    document.body.appendChild(backdrop);
+    setTimeout(function () { nameInput.focus(); }, 30);
+  }
+
+  // ── Vacation tab ───────────────────────────────────────────
+
+  function renderVacationTab(host) {
+    if (state.vacationLoadFailed) {
+      var banner = el('div', { class: 'settings-load-failed-banner', role: 'alert' });
+      banner.appendChild(el('div', { class: 'settings-load-failed-title' },
+        '⚠ Vacation failed to load from the server'));
+      banner.appendChild(el('div', { class: 'settings-load-failed-body' },
+        'Reason: ' + state.vacationLoadFailureMessage + '. Saving now would overwrite whatever the server has — click Retry first.'));
+      var actions = el('div', { class: 'settings-load-failed-actions' });
+      var retry = el('button', { class: 'btn sm', type: 'button' }, 'Retry');
+      retry.addEventListener('click', function () { loadVacation().then(function () { rerenderActiveTab('vacation'); }); });
+      actions.appendChild(retry);
+      banner.appendChild(actions);
+      host.appendChild(banner);
+    }
+
+    var v = state.vacation || { enabled: false, subject: '', body: '', reply_interval_seconds: 86400 };
+    host.appendChild(settingsSection('Auto-reply', [
+      settingsBool('vacation_enabled', 'Send automatic replies while I am away', null),
+    ]));
+    // The settingsBool helper reads state.settings.* — for
+    // vacation we need to bind to state.vacation.* instead.
+    // Re-render the row we just added so the checkbox
+    // reflects state.vacation.enabled.
+    var enabledRow = host.querySelector('[data-key="vacation_enabled"]');
+    if (enabledRow) {
+      enabledRow.checked = !!v.enabled;
+    }
+
+    host.appendChild(settingsSection('Message', [
+      settingsText('vacation_subject', 'Subject', 'Up to 256 characters.', 256),
+      settingsTextarea('vacation_body', 'Body', 'Up to 4096 characters. Plain text — newlines preserved.', 4096),
+    ]));
+    // Re-bind inputs to vacation fields.
+    var subjInput = host.querySelector('[data-key="vacation_subject"]');
+    if (subjInput) subjInput.value = v.subject || '';
+    var bodyArea  = host.querySelector('[data-key="vacation_body"]');
+    if (bodyArea)  bodyArea.value  = v.body || '';
+
+    host.appendChild(settingsSection('Rate limit', [
+      (function () {
+        var row = el('div', { class: 'settings-row' });
+        var label = el('label', { class: 'settings-label' }, 'Reply interval (seconds)');
+        var input = el('input', { type: 'number', class: 'settings-input', min: '60', max: String(30 * 86400),
+          value: String(v.reply_interval_seconds || 86400) });
+        input.setAttribute('data-key', 'vacation_reply_interval');
+        row.appendChild(label);
+        row.appendChild(input);
+        row.appendChild(el('div', { class: 'settings-hint' },
+          'Each sender gets at most one auto-reply per interval. ' +
+          'Minimum 60 seconds (1 minute). Maximum ' + (30 * 86400) + ' seconds (30 days). ' +
+          'Default 86400 (1 day).'));
+        return row;
+      })(),
+    ]));
+
+    host.appendChild(settingsSection('Window (optional)', [
+      (function () {
+        // Backend supports start_at / end_at as RFC3339
+        // strings or null. Use datetime-local input and
+        // convert on save. Empty input ⇒ clear the bound.
+        function datetimeLocalFor(iso) {
+          if (!iso) return '';
+          // The server returns RFC3339; <input type=datetime-local>
+          // wants "YYYY-MM-DDTHH:MM" without zone. Strip the zone.
+          var m = String(iso).match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})/);
+          return m ? m[1] : '';
+        }
+        var startVal = datetimeLocalFor(v.start_at);
+        var endVal   = datetimeLocalFor(v.end_at);
+        var start = el('input', { type: 'datetime-local', class: 'settings-input', value: startVal });
+        start.setAttribute('data-key', 'vacation_start_at');
+        var end = el('input', { type: 'datetime-local', class: 'settings-input', value: endVal });
+        end.setAttribute('data-key', 'vacation_end_at');
+        var clearStart = el('button', { class: 'btn ghost sm', type: 'button' }, 'Clear start');
+        clearStart.addEventListener('click', function () { start.value = ''; });
+        var clearEnd = el('button', { class: 'btn ghost sm', type: 'button' }, 'Clear end');
+        clearEnd.addEventListener('click', function () { end.value = ''; });
+        var row = el('div', { class: 'settings-row' });
+        row.appendChild(el('label', { class: 'settings-label' }, 'Start'));
+        row.appendChild(start);
+        row.appendChild(clearStart);
+        row.appendChild(el('div', { class: 'settings-hint', style: 'width:100%' },
+          'Optional. If set, auto-replies only begin after this moment.'));
+        return row;
+      })(),
+      (function () {
+        var end = el('input', { type: 'datetime-local', class: 'settings-input',
+          value: (function (iso) {
+            if (!iso) return '';
+            var m = String(iso).match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})/);
+            return m ? m[1] : '';
+          })(v.end_at) });
+        end.setAttribute('data-key', 'vacation_end_at');
+        var clearEnd = el('button', { class: 'btn ghost sm', type: 'button' }, 'Clear end');
+        clearEnd.addEventListener('click', function () { end.value = ''; });
+        var row = el('div', { class: 'settings-row' });
+        row.appendChild(el('label', { class: 'settings-label' }, 'End'));
+        row.appendChild(end);
+        row.appendChild(clearEnd);
+        row.appendChild(el('div', { class: 'settings-hint', style: 'width:100%' },
+          'Optional. If set, auto-replies stop after this moment.'));
+        return row;
+      })(),
+    ]));
+
+    host.appendChild(settingsSection('How vacation replies work', [
+      el('div', { class: 'settings-notice' },
+        '• Auto-replies are sent only to real human senders. Messages that carry an ' +
+        '"Auto-Submitted" header (RFC 8058) or look like bulk mail (Precedence: bulk / ' +
+        'Precedence: junk, List-Unsubscribe / List-Id, mailing-list headers) are skipped — ' +
+        'this prevents vacation loops with autoresponders and mailing lists.'),
+      el('div', { class: 'settings-notice', style: 'margin-top:var(--sp-2)' },
+        '• Each sender gets at most one auto-reply per "Reply interval". The first message ' +
+        'from a sender triggers a reply; further messages inside the window do not.'),
+      el('div', { class: 'settings-notice', style: 'margin-top:var(--sp-2)' },
+        '• The original message is always delivered to your inbox — vacation never moves, ' +
+        'copies, or deletes it.'),
+    ]));
+
+    // Override the default footer so we have a single
+    // Save button that reads from the vacation-specific
+    // fields. Replace any footer already in the host.
+    var existing = host.querySelector('.settings-footer');
+    if (existing) existing.remove();
+    var errBox = el('div', { class: 'settings-notice settings-notice-error', role: 'alert', style: 'display:none;' });
+    host.appendChild(errBox);
+    var footer = el('div', { class: 'modal-footer settings-footer' });
+    var cancelBtn = el('button', { class: 'btn ghost', type: 'button' }, 'Close');
+    cancelBtn.addEventListener('click', closeSettingsModal);
+    var saveBtn = el('button', { class: 'btn primary', type: 'button' }, 'Save vacation');
+    saveBtn.addEventListener('click', function () {
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Saving…';
+      errBox.style.display = 'none';
+
+      function val(k) {
+        var e = host.querySelector('[data-key="' + k + '"]');
+        return e ? e.value : '';
+      }
+      function checked(k) {
+        var e = host.querySelector('[data-key="' + k + '"]');
+        return !!(e && e.checked);
+      }
+      function datetimeLocalToRFC3339(s) {
+        if (!s) return '';
+        // Browsers don't put a zone on datetime-local.
+        // Treat it as the user's local zone — send an
+        // explicit +00:00 suffix only if the user
+        // already typed one. Most installs keep server
+        // time in UTC, so we encode what the user typed
+        // verbatim with a local-zone marker (no zone).
+        // The Go side stores the string opaquely and the
+        // engine compares it as text — a future pass
+        // can replace this with a proper timezone picker.
+        return s;
+      }
+
+      var intervalRaw = parseInt(val('vacation_reply_interval'), 10);
+      var interval = isNaN(intervalRaw) ? 86400 : intervalRaw;
+      if (interval < 60) interval = 60;
+      if (interval > 30 * 86400) interval = 30 * 86400;
+
+      var payload = {
+        enabled: checked('vacation_enabled'),
+        subject: val('vacation_subject').slice(0, 256),
+        body: val('vacation_body').slice(0, 4096),
+        reply_interval_seconds: interval,
+        start_at: datetimeLocalToRFC3339(val('vacation_start_at')),
+        end_at:   datetimeLocalToRFC3339(val('vacation_end_at')),
+      };
+      api('PUT', '/api/v1/webmail/vacation', payload).then(function (saved) {
+        state.vacation = saved;
+        state.vacationLoadFailed = false;
+        toast('Vacation saved', 'success', 1800);
+        rerenderActiveTab('vacation');
+      }).catch(function (err) {
+        var msg = (err && err.body && err.body.error) || (err && err.message) || 'Unknown error';
+        errBox.textContent = 'Save failed: ' + msg;
+        errBox.style.display = '';
+      }).then(function () {
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Save vacation';
+      });
+    });
+    footer.appendChild(cancelBtn);
+    footer.appendChild(saveBtn);
+    host.appendChild(footer);
+  }
+
+  // ── Forwarding tab ─────────────────────────────────────────
+
+  function renderForwardingTab(host) {
+    if (state.forwardingLoadFailed) {
+      var banner = el('div', { class: 'settings-load-failed-banner', role: 'alert' });
+      banner.appendChild(el('div', { class: 'settings-load-failed-title' },
+        '⚠ Forwarding failed to load from the server'));
+      banner.appendChild(el('div', { class: 'settings-load-failed-body' },
+        'Reason: ' + state.forwardingLoadFailureMessage + '. Saving now would overwrite whatever the server has — click Retry first.'));
+      var actions = el('div', { class: 'settings-load-failed-actions' });
+      var retry = el('button', { class: 'btn sm', type: 'button' }, 'Retry');
+      retry.addEventListener('click', function () { loadForwarding().then(function () { rerenderActiveTab('forwarding'); }); });
+      actions.appendChild(retry);
+      banner.appendChild(actions);
+      host.appendChild(banner);
+    }
+
+    var f = state.forwarding || { enabled: false, forward_to: '', keep_copy: true };
+    host.appendChild(settingsSection('Forwarding', [
+      settingsBool('fwd_enabled', 'Forward incoming mail to another address', null),
+    ]));
+    var enabledBox = host.querySelector('[data-key="fwd_enabled"]');
+    if (enabledBox) enabledBox.checked = !!f.enabled;
+
+    host.appendChild(settingsSection('Destination', [
+      settingsText('fwd_to', 'Forward to (email address)', 'Must be a valid RFC 5322 address. The server rejects malformed values.', 254),
+    ]));
+    var toInput = host.querySelector('[data-key="fwd_to"]');
+    if (toInput) toInput.value = f.forward_to || '';
+
+    host.appendChild(settingsSection('Local copy', [
+      settingsBool('fwd_keep_copy', 'Also keep a copy in my inbox', null),
+    ]));
+    var keepBox = host.querySelector('[data-key="fwd_keep_copy"]');
+    if (keepBox) keepBox.checked = !!f.keep_copy;
+
+    host.appendChild(settingsSection('How forwarding works', [
+      el('div', { class: 'settings-notice' },
+        '• The server forwards a copy of every incoming message to the address above. ' +
+        'The forwarded copy carries an "X-Orvix-Forwarded-For" header so replies to it ' +
+        'cannot bounce back into the loop — this matches the de-facto behaviour of ' +
+        'major providers and prevents the most common vacation-loop / auto-responder ' +
+        'storm.'),
+      el('div', { class: 'settings-notice', style: 'margin-top:var(--sp-2)' },
+        '• "Keep a copy" controls whether the original message is also stored in your ' +
+        'inbox. Turning it off means the only place the message lives is the forwarded ' +
+        'address — if that address bounces, the message is lost from both sides.'),
+      el('div', { class: 'settings-notice settings-notice-warn', style: 'margin-top:var(--sp-2)' },
+        '⚠ Forwarding to an address you do not control is a privacy and security risk: ' +
+        'the destination can read every message you receive. Disable forwarding before ' +
+        'sharing screen, lending access, or moving jobs.'),
+    ]));
+
+    var existing = host.querySelector('.settings-footer');
+    if (existing) existing.remove();
+    var errBox = el('div', { class: 'settings-notice settings-notice-error', role: 'alert', style: 'display:none;' });
+    host.appendChild(errBox);
+    var footer = el('div', { class: 'modal-footer settings-footer' });
+    var cancelBtn = el('button', { class: 'btn ghost', type: 'button' }, 'Close');
+    cancelBtn.addEventListener('click', closeSettingsModal);
+    var saveBtn = el('button', { class: 'btn primary', type: 'button' }, 'Save forwarding');
+    saveBtn.addEventListener('click', function () {
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Saving…';
+      errBox.style.display = 'none';
+
+      function val(k) {
+        var e = host.querySelector('[data-key="' + k + '"]');
+        return e ? e.value : '';
+      }
+      function checked(k) {
+        var e = host.querySelector('[data-key="' + k + '"]');
+        return !!(e && e.checked);
+      }
+
+      var wantEnabled = checked('fwd_enabled');
+      var forwardTo = val('fwd_to').trim();
+
+      // Client-side mirror of the Go side's mail.ParseAddress
+      // check — gives instant feedback without a round trip.
+      // The server still re-validates; this is purely UX.
+      if (wantEnabled && forwardTo === '') {
+        errBox.textContent = 'Save failed: forward_to is required when forwarding is enabled.';
+        errBox.style.display = '';
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Save forwarding';
+        return;
+      }
+      if (forwardTo !== '' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(forwardTo)) {
+        errBox.textContent = 'Save failed: forward_to does not look like a valid email address. The server will also reject this.';
+        errBox.style.display = '';
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Save forwarding';
+        return;
+      }
+
+      var payload = {
+        enabled: wantEnabled,
+        forward_to: forwardTo,
+        keep_copy: checked('fwd_keep_copy'),
+      };
+      api('PUT', '/api/v1/webmail/forwarding', payload).then(function (saved) {
+        state.forwarding = saved;
+        state.forwardingLoadFailed = false;
+        toast('Forwarding saved', 'success', 1800);
+        rerenderActiveTab('forwarding');
+      }).catch(function (err) {
+        var msg = (err && err.body && err.body.error) || (err && err.message) || 'Unknown error';
+        errBox.textContent = 'Save failed: ' + msg;
+        errBox.style.display = '';
+      }).then(function () {
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Save forwarding';
+      });
+    });
+    footer.appendChild(cancelBtn);
+    footer.appendChild(saveBtn);
+    host.appendChild(footer);
+  }
+
   function openSettingsModal() {
     // If the modal is already open, focus it instead of stacking.
     var existing = document.querySelector('.modal-backdrop.settings-modal');
@@ -2286,10 +3191,44 @@
       while (content.firstChild) content.removeChild(content.firstChild);
       renderSettingsTab(key, content, s);
     }
+    // For tabs whose data comes from a dedicated endpoint,
+    // refresh from the server on each activation so the user
+    // always sees the latest persisted state. The first
+    // paint still works because the GET is awaited before
+    // the tab body is rendered.
+    function renderAfterRefresh(key) {
+      while (content.firstChild) content.removeChild(content.firstChild);
+      renderSettingsTab(key, content, s);
+    }
+    function activateWithLoad(key, loader) {
+      activateTab(key);
+      loader().then(function () { renderAfterRefresh(key); });
+    }
     tabs.appendChild(makeTab('profile', 'Profile'));
     tabs.appendChild(makeTab('appearance', 'Appearance'));
     tabs.appendChild(makeTab('compose', 'Compose'));
     tabs.appendChild(makeTab('mail', 'Mail'));
+    // Filters / Vacation / Forwarding each own a separate
+    // endpoint and must be re-fetched on every activation
+    // so the user always sees the latest persisted state
+    // (a background runner may have moved a rule, the
+    // forward-to address may have been edited elsewhere,
+    // etc.).
+    (function () {
+      var f = el('button', { class: 'settings-tab', type: 'button', role: 'tab', 'aria-selected': 'false', 'data-tab': 'filters' }, 'Filters');
+      f.addEventListener('click', function () { activateWithLoad('filters', loadRules); });
+      tabs.appendChild(f);
+    })();
+    (function () {
+      var v = el('button', { class: 'settings-tab', type: 'button', role: 'tab', 'aria-selected': 'false', 'data-tab': 'vacation' }, 'Vacation');
+      v.addEventListener('click', function () { activateWithLoad('vacation', loadVacation); });
+      tabs.appendChild(v);
+    })();
+    (function () {
+      var fw = el('button', { class: 'settings-tab', type: 'button', role: 'tab', 'aria-selected': 'false', 'data-tab': 'forwarding' }, 'Forwarding');
+      fw.addEventListener('click', function () { activateWithLoad('forwarding', loadForwarding); });
+      tabs.appendChild(fw);
+    })();
     tabs.appendChild(makeTab('notifications', 'Notifications'));
     tabs.appendChild(makeTab('security', 'Security'));
     tabs.appendChild(makeTab('deferred', 'Coming later'));
@@ -2616,18 +3555,26 @@
       host.appendChild(settingsSection('Two-factor authentication', [
         el('div', { class: 'settings-notice' }, 'TOTP / app-passwords UI is not enabled in this build. Backend support ships in a follow-up release — your administrator will announce availability.'),
       ]));
+    } else if (key === 'filters') {
+      renderFiltersTab(host);
+    } else if (key === 'vacation') {
+      renderVacationTab(host);
+    } else if (key === 'forwarding') {
+      renderForwardingTab(host);
     } else if (key === 'deferred') {
       host.appendChild(settingsSection('Available in a future release', [
         el('div', { class: 'settings-notice' },
-          'The features below require changes to the mail delivery pipeline (Sieve-style rules, vacation auto-reply hooks, server-side forwarding) that are out of scope for this pass. They are listed here so the UI surfaces the gap honestly rather than offering controls that do nothing.'),
+          'The features below are not implemented yet in this build. Filters, vacation, and forwarding have their own tabs now — anything still listed here is genuinely not shipped.'),
         el('ul', { class: 'settings-deferred-list' }, ''),
       ]));
       var list = host.querySelector('.settings-deferred-list');
       [
         'Reading-pane position (bottom / hidden modes) — shell currently only renders the right-of-list layout',
-        'Vacation / out-of-office auto-reply',
-        'Server-side mail filters (Sieve-style rules)',
-        'Forwarding to another address',
+        'Conversation / threaded view',
+        'External image loading preference for HTML messages',
+        'Two-factor authentication (TOTP)',
+        'App-specific passwords',
+        'Per-device session list with selective revoke',
         'Conversation / threaded view',
         'External image loading preference for HTML messages',
         'Two-factor authentication (TOTP)',
