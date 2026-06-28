@@ -750,8 +750,29 @@ validate_systemd() {
     # If a future refactor adds [Install] WantedBy=multi-user.target
     # AND install.sh accidentally calls `systemctl enable`, this
     # guard rejects the install before the operator reboots.
-    if systemctl is-enabled --quiet orvix-update.service 2>/dev/null; then
-        fail "orvix-update.service is enabled (operator-only; must never auto-start). disable it with: systemctl disable orvix-update.service"
+    #
+    # We capture the exact state because `systemctl is-enabled
+    # --quiet` returns success for both "enabled" AND "static" on
+    # some systemd versions. Static units are safe (no [Install]
+    # section, no auto-start), but enabled/enabled-runtime are not.
+    local update_state
+    update_state="$(systemctl is-enabled orvix-update.service 2>/dev/null || true)"
+    case "$update_state" in
+        static|disabled|"")
+            log_detail "VALIDATE systemd orvix-update.service: state=$update_state (safe, operator-only)"
+            ;;
+        enabled|enabled-runtime)
+            fail "orvix-update.service is $update_state (operator-only; must never auto-start). disable it with: systemctl disable orvix-update.service"
+            ;;
+        *)
+            fail "orvix-update.service has unexpected systemd state: $update_state"
+            ;;
+    esac
+    # Double-check: reject if a wants symlink somehow exists despite
+    # the state check (e.g. manually created symlink).
+    if [ -L "/etc/systemd/system/multi-user.target.wants/orvix-update.service" ] || \
+       [ -L "/etc/systemd/system/default.target.wants/orvix-update.service" ]; then
+        fail "orvix-update.service has wants symlink (operator-only; remove it)"
     fi
     log_detail "VALIDATE systemd orvix-update.service: unit present, NOT enabled (operator-only)"
 }

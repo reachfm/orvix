@@ -848,6 +848,27 @@ func TestInstallScript_HasValidateSystemd(t *testing.T) {
 	if !strings.Contains(content, "systemctl is-active") {
 		t.Error("validate_systemd must verify service is active")
 	}
+	// BLOCKER 2: orvix-update.service check must NOT use --quiet
+	// (which returns success for both "enabled" and "static").
+	// Instead it must capture the exact state string.
+	if strings.Contains(content, "is-enabled --quiet orvix-update.service") {
+		t.Error("validate_systemd must NOT use --quiet for orvix-update.service (static returns success)")
+	}
+	if !strings.Contains(content, "systemctl is-enabled orvix-update.service") {
+		t.Error("validate_systemd must capture state of orvix-update.service via systemctl is-enabled")
+	}
+	// Must accept static as a safe state.
+	if !strings.Contains(content, "static") {
+		t.Error("validate_systemd must accept 'static' for orvix-update.service (operator-only, no [Install])")
+	}
+	// Must reject enabled and enabled-runtime.
+	if !strings.Contains(content, "enabled-runtime") {
+		t.Error("validate_systemd must reject enabled-runtime for orvix-update.service")
+	}
+	// Must check for wants symlinks as a defence-in-depth measure.
+	if !strings.Contains(content, "multi-user.target.wants/orvix-update.service") {
+		t.Error("validate_systemd must check for wants symlink in multi-user.target.wants")
+	}
 }
 
 // TestInstallScript_HasValidateSudoers verifies that install.sh
