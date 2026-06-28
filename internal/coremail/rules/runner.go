@@ -294,7 +294,14 @@ func (r *Runner) Run(ctx context.Context, in RunInput) (*RunOutput, error) {
 			r.deps.Logger.Error("rules: vacation enqueue failed",
 				zap.String("message_id", in.MessageID),
 				zap.Error(err))
-			out.SkipReason = "vacation enqueue failed"
+			// Preserve any SkipReason the inner helper
+			// already set (BLOCKER 4: persistence failure
+			// is the more specific signal). Only fall
+			// back to the generic message when the inner
+			// helper did not record one of its own.
+			if out.SkipReason == "" {
+				out.SkipReason = "vacation enqueue failed"
+			}
 		}
 	}
 
@@ -438,36 +445,76 @@ func (r *Runner) enqueueForward(ctx context.Context, in RunInput, out *RunOutput
 	return nil
 }
 
-// enqueueVacation builds the auto-reply RFC822 and enqueues
-// it. The reply is recorded in the rate-limit history only
-// after a successful enqueue.
+// enqueueVacation builds the auto-reply RFC822, persists
+// the rate-limit history, and enqueues the outbound reply.
+//
+// Order matters (BLOCKER 4 fix). The rate-limit record MUST
+// be persisted BEFORE we enqueue the outbound message:
+//
+//   1. RecordReply (atomic UPSERT against
+//      UNIQUE(mailbox_id, sender_email))
+//   2. Enqueue outbound Message + QueueEntry
+//
+// If RecordReply fails, we MUST NOT enqueue. The previous
+// implementation logged RecordReply errors and continued
+// regardless — a transient DB error would let the same
+// sender trigger a fresh vacation reply on every subsequent
+// inbound until the rate window finally expired, a
+// textbook reply-storm bug.
+//
+// The trade-off for the new ordering: if the enqueue step
+// fails after RecordReply succeeded, we have spent one
+// rate-limit slot without delivering the reply. The next
+// inbound from the same sender will hit LastRepliedAt and
+// be skipped. That is the correct side to err on — the
+// alternative (allow duplicate replies on enqueue failure)
+// is much worse than (allow a single missed reply on a
+// transient enqueue failure).
 func (r *Runner) enqueueVacation(ctx context.Context, in RunInput, out *RunOutput) error {
 	reply := out.VacationReply
 	if reply == nil {
 		return nil
 	}
+	sender := extractBareAddress(in.FromHeader)
+	if sender == "" {
+		return fmt.Errorf("vacation reply: empty sender")
+	}
+	// Fail-closed: persist the rate-limit row FIRST. If
+	// this fails we refuse to enqueue the reply — the
+	// LastRepliedAt check that gates the next inbound
+	// must not be allowed to drift open.
+	if err := r.deps.MailStore.Vacation.RecordReply(ctx, in.MailboxID, sender); err != nil {
+		r.deps.Logger.Error("rules: vacation record-reply failed — refusing to enqueue reply to prevent storm",
+			zap.Uint64("mailbox_id", uint64(in.MailboxID)),
+			zap.String("sender", sender),
+			zap.Error(err))
+		out.SkipReason = "vacation rate-limit persistence failed"
+		// Clear VacationReply so callers iterating the
+		// output cannot be misled — the engine decided
+		// to send a reply, but the persistence failure
+		// vetoed it. The audit event (skip_reason) is
+		// the source of truth for what actually happened.
+		out.VacationReply = nil
+		return fmt.Errorf("vacation rate-limit persistence: %w", err)
+	}
 	replyRfc, err := buildVacationRfc822(in, reply.Subject, reply.Body)
 	if err != nil {
 		return fmt.Errorf("build vacation: %w", err)
 	}
-	if err := r.enqueueOutbound(ctx, in, replyRfc, extractBareAddress(in.FromHeader)); err != nil {
+	if err := r.enqueueOutbound(ctx, in, replyRfc, sender); err != nil {
+		// enqueue failed but the rate-limit row IS
+		// already persisted. Log loudly so the operator
+		// can replay manually if needed, but do NOT
+		// return a nil error here because the reply
+		// was not actually sent. The rate-limit window
+		// has consumed one slot; the next inbound will
+		// be suppressed. That is the intended
+		// trade-off — see the BLOCKER 4 comment above.
+		r.deps.Logger.Error("rules: vacation enqueue failed after rate-limit persisted",
+			zap.Uint64("mailbox_id", uint64(in.MailboxID)),
+			zap.String("sender", sender),
+			zap.Error(err))
 		return err
-	}
-	// Best-effort rate-limit record. Failures here do not
-	// reverse the queue entry — the caller can retry on
-	// the next inbound — but a silent warn is not enough
-	// because the rate-limit history is the only thing
-	// standing between a misconfigured vacation rule and
-	// a reply-storm to a mailing list. We log at Error
-	// level so the operator's monitoring catches it.
-	sender := extractBareAddress(in.FromHeader)
-	if sender != "" {
-		if err := r.deps.MailStore.Vacation.RecordReply(ctx, in.MailboxID, sender); err != nil {
-			r.deps.Logger.Error("rules: vacation record-reply failed — rate-limit may be bypassed",
-				zap.Uint64("mailbox_id", uint64(in.MailboxID)),
-				zap.String("sender", sender),
-				zap.Error(err))
-		}
 	}
 	return nil
 }

@@ -33,6 +33,7 @@ import (
 	"io"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -494,6 +495,141 @@ func TestRulesAPI_RejectsInvalidJSON(t *testing.T) {
 				t.Fatalf("expected 400, got %d", status)
 			}
 		})
+	}
+}
+
+// ── Test: BLOCKER 6 — strict JSON decoding ─────────────────────
+//
+// c.Bind().JSON() silently ignores unknown keys, so a
+// buggy client could POST {"name": ..., "enabled": ...,
+// "evil": "..."} and never see the typo. The handler
+// now uses json.NewDecoder(...).DisallowUnknownFields()
+// and returns a 400 with the offending field name.
+
+func TestRulesAPI_StrictJSON_RejectsUnknownField_CreateRule(t *testing.T) {
+	e := buildRulesOwnershipEnv(t)
+
+	status, body := doJSON(t, e.router, "POST", "/api/v1/webmail/rules", e.aliceToken, map[string]interface{}{
+		"name":            "test",
+		"enabled":         true,
+		"sort_order":      0,
+		"stop_processing": false,
+		"conditions_json": `[{"type":"subject_contains","value":"x"}]`,
+		"actions_json":    `[{"type":"set_flag","set_flag":{"flagged":true}}]`,
+		"evil_field":      "should be rejected",
+	})
+	if status != fiber.StatusBadRequest {
+		t.Fatalf("unknown field on create rule: expected 400, got %d, body=%v", status, body)
+	}
+	if errMsg, _ := body["error"].(string); !strings.Contains(errMsg, "evil_field") {
+		t.Fatalf("error message must mention 'evil_field', got: %q", errMsg)
+	}
+}
+
+func TestRulesAPI_StrictJSON_RejectsUnknownField_UpdateRule(t *testing.T) {
+	e := buildRulesOwnershipEnv(t)
+
+	// Create a baseline rule.
+	status, body := doJSON(t, e.router, "POST", "/api/v1/webmail/rules", e.aliceToken, map[string]interface{}{
+		"name":            "baseline",
+		"enabled":         true,
+		"sort_order":      0,
+		"stop_processing": false,
+		"conditions_json": `[{"type":"subject_contains","value":"x"}]`,
+		"actions_json":    `[{"type":"set_flag","set_flag":{"flagged":true}}]`,
+	})
+	if status != fiber.StatusCreated {
+		t.Fatalf("baseline create: %d, %v", status, body)
+	}
+	idFloat, _ := body["id"].(float64)
+	ruleID := uint(idFloat)
+	path := "/api/v1/webmail/rules/" + uintToStr(ruleID)
+
+	status, body = doJSON(t, e.router, "PUT", path, e.aliceToken, map[string]interface{}{
+		"name":        "renamed",
+		"bogus_field": 42,
+	})
+	if status != fiber.StatusBadRequest {
+		t.Fatalf("unknown field on update rule: expected 400, got %d, body=%v", status, body)
+	}
+	if errMsg, _ := body["error"].(string); !strings.Contains(errMsg, "bogus_field") {
+		t.Fatalf("error message must mention 'bogus_field', got: %q", errMsg)
+	}
+}
+
+func TestVacationAPI_StrictJSON_RejectsUnknownField_PutVacation(t *testing.T) {
+	e := buildRulesOwnershipEnv(t)
+
+	status, body := doJSON(t, e.router, "PUT", "/api/v1/webmail/vacation", e.aliceToken, map[string]interface{}{
+		"enabled":   true,
+		"subject":   "Out of office",
+		"body":      "I am out",
+		"typoField": "should be rejected",
+	})
+	if status != fiber.StatusBadRequest {
+		t.Fatalf("unknown field on vacation: expected 400, got %d, body=%v", status, body)
+	}
+	if errMsg, _ := body["error"].(string); !strings.Contains(errMsg, "typoField") {
+		t.Fatalf("error message must mention 'typoField', got: %q", errMsg)
+	}
+}
+
+func TestForwardingAPI_StrictJSON_RejectsUnknownField_PutForwarding(t *testing.T) {
+	e := buildRulesOwnershipEnv(t)
+
+	status, body := doJSON(t, e.router, "PUT", "/api/v1/webmail/forwarding", e.aliceToken, map[string]interface{}{
+		"enabled":     true,
+		"forward_to":  "fwd@elsewhere.test",
+		"keep_copy":   true,
+		"surpriseKey": "should be rejected",
+	})
+	if status != fiber.StatusBadRequest {
+		t.Fatalf("unknown field on forwarding: expected 400, got %d, body=%v", status, body)
+	}
+	if errMsg, _ := body["error"].(string); !strings.Contains(errMsg, "surpriseKey") {
+		t.Fatalf("error message must mention 'surpriseKey', got: %q", errMsg)
+	}
+}
+
+// TestRulesAPI_StrictJSON_ValidRequestStillPasses is the
+// positive control — strict decoding must not reject a
+// well-formed payload.
+
+func TestRulesAPI_StrictJSON_ValidRequestStillPasses(t *testing.T) {
+	e := buildRulesOwnershipEnv(t)
+
+	// Create rule (no unknown fields).
+	status, body := doJSON(t, e.router, "POST", "/api/v1/webmail/rules", e.aliceToken, map[string]interface{}{
+		"name":            "valid",
+		"enabled":         true,
+		"sort_order":      0,
+		"stop_processing": false,
+		"conditions_json": `[{"type":"subject_contains","value":"x"}]`,
+		"actions_json":    `[{"type":"set_flag","set_flag":{"flagged":true}}]`,
+	})
+	if status != fiber.StatusCreated {
+		t.Fatalf("valid create rule: expected 201, got %d, body=%v", status, body)
+	}
+
+	// Valid vacation PUT.
+	status, body = doJSON(t, e.router, "PUT", "/api/v1/webmail/vacation", e.aliceToken, map[string]interface{}{
+		"enabled":               true,
+		"subject":               "Out of office",
+		"body":                  "I am out",
+		"reply_interval_seconds": 3600,
+	})
+	if status != fiber.StatusOK {
+		t.Fatalf("valid vacation PUT: expected 200, got %d, body=%v", status, body)
+	}
+
+	// Valid forwarding PUT.
+	status, body = doJSON(t, e.router, "PUT", "/api/v1/webmail/forwarding", e.aliceToken, map[string]interface{}{
+		"enabled":    true,
+		"forward_to": "fwd@elsewhere.test",
+		"keep_copy":  true,
+	})
+	if status != fiber.StatusOK {
+		t.Fatalf("valid forwarding PUT: expected 200, got %d, body=%v", status, body)
 	}
 }
 

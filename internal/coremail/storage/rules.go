@@ -407,27 +407,47 @@ func (r *vacationSQLRepo) LastRepliedAt(ctx context.Context, mailboxID uint, sen
 }
 
 func (r *vacationSQLRepo) RecordReply(ctx context.Context, mailboxID uint, senderEmail string) error {
-	// We delete-then-insert rather than upsert. The
-	// (mailbox_id, sender_email) pair is the natural
-	// primary key for this rate-limit table but the
-	// schema declares it as a regular index only — ON
-	// CONFLICT would error out. Doing it in two
-	// statements also lets us avoid the silent
-	// failure mode where the original implementation
-	// logged a warning on every reply and never
-	// actually persisted the timestamp.
-	now := time.Now().UTC().Format(time.RFC3339)
+	return r.recordReplyAt(ctx, mailboxID, senderEmail, time.Now().UTC().Format(time.RFC3339))
+}
+
+// recordReplyAt is the same as RecordReply but with a
+// caller-supplied timestamp. It exists so tests can pin a
+// specific last_replied_at value when checking the UPSERT
+// behaviour. Production callers go through RecordReply,
+// which always uses time.Now().
+
+func (r *vacationSQLRepo) recordReplyAt(ctx context.Context, mailboxID uint, senderEmail string, lastRepliedAt string) error {
+	// Atomic upsert against the UNIQUE(mailbox_id,
+	// sender_email) index. This replaces the previous
+	// delete-then-insert pair which was racy: two
+	// concurrent inbound messages from the same sender
+	// could both pass LastRepliedAt, both reach
+	// RecordReply, and each would delete-then-insert a
+	// row of its own — the second INSERT could land in
+	// a window where the first was already committed,
+	// but the runner had no way to observe it because
+	// LastRepliedAt ran before any of this. The net
+	// effect was that the rate limit was bypassed for
+	// one out of every concurrent pair, and the recipient
+	// could receive duplicate vacation replies.
+	//
+	// The new contract:
+	//   - INSERT a new row if (mailbox, sender) is unseen.
+	//   - UPDATE last_replied_at if the row already
+	//     exists. The LastRepliedAt check BEFORE this
+	//     call is what enforces the rate window; this
+	//     call is the side that "wins" the race.
+	//   - The whole operation is one statement, so
+	//     concurrent calls cannot interleave.
 	if _, err := r.db.ExecContext(ctx,
-		`DELETE FROM coremail_vacation_history WHERE mailbox_id = ? AND sender_email = ?`,
-		mailboxID, senderEmail,
+		`INSERT INTO coremail_vacation_history
+		   (mailbox_id, sender_email, last_replied_at)
+		 VALUES (?, ?, ?)
+		 ON CONFLICT(mailbox_id, sender_email) DO UPDATE
+		   SET last_replied_at = excluded.last_replied_at`,
+		mailboxID, senderEmail, lastRepliedAt,
 	); err != nil {
-		return fmt.Errorf("vacation record (delete): %w", err)
-	}
-	if _, err := r.db.ExecContext(ctx,
-		`INSERT INTO coremail_vacation_history (mailbox_id, sender_email, last_replied_at) VALUES (?, ?, ?)`,
-		mailboxID, senderEmail, now,
-	); err != nil {
-		return fmt.Errorf("vacation record (insert): %w", err)
+		return fmt.Errorf("vacation record (upsert): %w", err)
 	}
 	return nil
 }

@@ -1021,3 +1021,177 @@ func TestBuildVacationRfc822_AllowsUnicodeSubjectAndBody(t *testing.T) {
 		t.Fatalf("unicode body missing from RFC822: %q", string(out))
 	}
 }
+
+// ── Test 16: BLOCKER 4 — RecordReply failure prevents the
+// vacation enqueue. The runner MUST fail closed: if the
+// rate-limit row cannot be persisted, the outbound queue
+// entry MUST NOT be created. The previous code enqueued
+// first and logged RecordReply errors, which meant a
+// transient DB failure let the rate limit drift open
+// for one sender and any subsequent inbound would
+// produce a fresh reply — a textbook reply-storm bug.
+//
+// We test this by injecting a VacationRepository whose
+// RecordReply returns an error.
+
+type failingVacationRepo struct {
+	inner storage.VacationRepository
+	err   error
+}
+
+func (r *failingVacationRepo) GetOrCreate(ctx context.Context, mailboxID uint) (*storage.VacationConfig, error) {
+	return r.inner.GetOrCreate(ctx, mailboxID)
+}
+func (r *failingVacationRepo) Update(ctx context.Context, mailboxID uint, patch *storage.VacationPatch) (*storage.VacationConfig, error) {
+	return r.inner.Update(ctx, mailboxID, patch)
+}
+func (r *failingVacationRepo) LastRepliedAt(ctx context.Context, mailboxID uint, senderEmail string) (string, error) {
+	return r.inner.LastRepliedAt(ctx, mailboxID, senderEmail)
+}
+func (r *failingVacationRepo) RecordReply(ctx context.Context, mailboxID uint, senderEmail string) error {
+	return r.err
+}
+
+func TestRunner_RecordReplyFailure_PreventsVacationEnqueue(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	f.createMailbox(ctx, 1, 1, 1, "alice@example.com")
+	f.createVacationRow(ctx, 1, "OOO", "I am out", 86400)
+
+	// Replace the runner's Vacation repo with one that
+	// fails RecordReply but otherwise works. This is
+	// the worst-case scenario for BLOCKER 4: the
+	// engine successfully evaluates the message,
+	// sets out.VacationReply, and then the rate-limit
+	// row write fails.
+	//
+	// The runner calls r.deps.MailStore.Vacation.RecordReply
+	// (not r.deps.Vacation.RecordReply) — the helper
+	// field on Dependencies is vestigial. We therefore
+	// patch the MailStore's Vacation repo directly.
+	f.store.Vacation = &failingVacationRepo{
+		inner: f.store.Vacation,
+		err:   fmt.Errorf("simulated DB outage"),
+	}
+
+	rfc822 := makeInboundRFC822("Carol <carol@external.test>", "alice@example.com",
+		"hi", "hello")
+	in := f.inboundInput(1, 1, 1, "alice@example.com", "Carol <carol@external.test>", rfc822)
+
+	out, err := f.runner.Run(ctx, in)
+	// The runner's documented contract: Run returns
+	// (out, nil) even on side-effect failures — the
+	// failure surfaces via out.SkipReason so the
+	// caller (SMTP receiver / audit log) can react.
+	// The previous failure mode returned nil but had
+	// already enqueued the reply, which is exactly
+	// what BLOCKER 4 is about.
+	if err != nil {
+		t.Fatalf("runner.Run returned err: %v", err)
+	}
+	if out == nil {
+		t.Fatal("runner.Run returned nil output")
+	}
+	if out.VacationReply != nil {
+		t.Fatalf("expected VacationReply=nil on persistence failure, got %+v", out.VacationReply)
+	}
+	if out.SkipReason != "vacation rate-limit persistence failed" {
+		t.Fatalf("SkipReason = %q, want %q", out.SkipReason, "vacation rate-limit persistence failed")
+	}
+	// The headline contract: NO queue entry was
+	// enqueued for the sender.
+	if got := f.countQueueEntriesForRecipient("carol@external.test"); got != 0 {
+		t.Fatalf("RecordReply failure must NOT enqueue; got %d queue entries", got)
+	}
+}
+
+// TestRunner_RecordReplySuccess_AllowsOneVacationEnqueue
+// is the positive control for BLOCKER 4 — when RecordReply
+// succeeds, exactly one vacation reply is enqueued. (This
+// pins the happy path; existing TestRunner_VacationEnqueuesOnce
+// covers the same behaviour end-to-end, but it predates
+// the reorder and was implicitly relying on the
+// best-effort-after-enqueue path. This test pins the new
+// persist-before-enqueue path explicitly.)
+
+func TestRunner_RecordReplySuccess_AllowsOneVacationEnqueue(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	f.createMailbox(ctx, 1, 1, 1, "alice@example.com")
+	f.createVacationRow(ctx, 1, "OOO", "I am out", 86400)
+
+	rfc822 := makeInboundRFC822("Carol <carol@external.test>", "alice@example.com",
+		"hi", "hello")
+	in := f.inboundInput(1, 1, 1, "alice@example.com", "Carol <carol@external.test>", rfc822)
+
+	out, err := f.runner.Run(ctx, in)
+	if err != nil {
+		t.Fatalf("runner.Run: %v", err)
+	}
+	if out.VacationReply == nil {
+		t.Fatal("expected VacationReply, got nil")
+	}
+
+	// One queue entry.
+	if got := f.countQueueEntriesForRecipient("carol@external.test"); got != 1 {
+		t.Fatalf("expected exactly 1 queue entry, got %d", got)
+	}
+	// AND the rate-limit row was persisted (this is
+	// the new contract — RecordReply must run before
+	// enqueue).
+	last, err := f.store.Vacation.LastRepliedAt(ctx, 1, "carol@external.test")
+	if err != nil {
+		t.Fatalf("LastRepliedAt: %v", err)
+	}
+	if last == "" {
+		t.Fatal("expected rate-limit row to be persisted before enqueue; LastRepliedAt returned empty")
+	}
+}
+
+// TestRunner_NoRepeatedVacationReplies_WhenHistoryPersisted
+// pins BLOCKER 4's invariant: once RecordReply persists
+// the rate-limit row, the NEXT inbound from the same
+// sender within the window MUST be suppressed, even if
+// the previous enqueue itself never delivered. This
+// guards against a regression where the rate-limit row
+// could "drift" out of sync with the queue state.
+
+func TestRunner_NoRepeatedVacationReplies_WhenHistoryPersisted(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	f.createMailbox(ctx, 1, 1, 1, "alice@example.com")
+	f.createVacationRow(ctx, 1, "OOO", "I am out", 86400)
+
+	// First message — should reply.
+	rfc822a := makeInboundRFC822("Carol <carol@external.test>", "alice@example.com",
+		"first", "hello")
+	inA := f.inboundInput(1, 1, 1, "alice@example.com", "Carol <carol@external.test>", rfc822a)
+	if _, err := f.runner.Run(ctx, inA); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	if got := f.countQueueEntriesForRecipient("carol@external.test"); got != 1 {
+		t.Fatalf("after first: expected 1 entry, got %d", got)
+	}
+
+	// Second message, immediately after. Rate window
+	// is 24h; should be suppressed.
+	rfc822b := makeInboundRFC822("Carol <carol@external.test>", "alice@example.com",
+		"second", "hello again")
+	inB := f.inboundInput(1, 1, 1, "alice@example.com", "Carol <carol@external.test>", rfc822b)
+	outB, err := f.runner.Run(ctx, inB)
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if outB.VacationReply != nil {
+		t.Fatalf("expected VacationReply=nil on second run, got %+v", outB.VacationReply)
+	}
+	if outB.SkipReason != "vacation rate limited" {
+		t.Fatalf("SkipReason = %q, want %q", outB.SkipReason, "vacation rate limited")
+	}
+	if got := f.countQueueEntriesForRecipient("carol@external.test"); got != 1 {
+		t.Fatalf("after second: expected 1 entry (rate limited), got %d", got)
+	}
+}

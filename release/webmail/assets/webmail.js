@@ -3084,7 +3084,7 @@
     host.appendChild(settingsSection('How forwarding works', [
       el('div', { class: 'settings-notice' },
         '• The server forwards a copy of every incoming message to the address above. ' +
-        'The forwarded copy carries an "X-Orvix-Forwarded-For" header so replies to it ' +
+        'The forwarded copy carries an "X-Orvix-Forwarded" header so replies to it ' +
         'cannot bounce back into the loop — this matches the de-facto behaviour of ' +
         'major providers and prevents the most common vacation-loop / auto-responder ' +
         'storm.'),

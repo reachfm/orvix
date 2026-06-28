@@ -226,7 +226,15 @@ func Indexes() []string {
 		`CREATE INDEX IF NOT EXISTS idx_push_subscriptions_mailbox ON push_subscriptions(mailbox_id)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_coremail_user_settings_mailbox ON coremail_user_settings(mailbox_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_coremail_rules_mailbox_order ON coremail_rules(mailbox_id, sort_order)`,
-		`CREATE INDEX IF NOT EXISTS idx_coremail_vacation_history_mailbox_sender ON coremail_vacation_history(mailbox_id, sender_email)`,
+		// UNIQUE (mailbox_id, sender_email) is what makes the
+		// rate-limit history race-safe: two concurrent inbound
+		// messages from the same sender cannot both create a row,
+		// so the runner's RecordReply UPSERT will hit exactly
+		// one row regardless of goroutine interleaving. Earlier
+		// revisions used a non-unique index + delete-then-insert,
+		// which let a race pass the LastRepliedAt check on both
+		// messages and emit duplicate vacation replies.
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_coremail_vacation_history_mailbox_sender ON coremail_vacation_history(mailbox_id, sender_email)`,
 	}
 }
 

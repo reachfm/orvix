@@ -22,6 +22,10 @@ package handlers
 // do not own by guessing the id.
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/mail"
 	"strconv"
 
@@ -30,6 +34,58 @@ import (
 	"github.com/orvix/orvix/internal/coremail/rules"
 	"github.com/orvix/orvix/internal/coremail/storage"
 )
+
+// bindStrictJSON parses a request body into dst with
+// DisallowUnknownFields enabled. This is the BLOCKER 6
+// fix: c.Bind().JSON() silently ignores unknown keys, so
+// a buggy client could POST {"name": ..., "enabled": ...,
+// "evil": "..."} and never see the typo. Strict decoding
+// returns a 400 with the offending field name so the bug
+// surfaces in the client immediately.
+//
+// We re-implement the body read here instead of using
+// c.Bind().JSON() so we can set the decoder flag that
+// Fiber's helper does not expose. The 8 KB cap mirrors
+// the package's default; exceeding it returns a clear
+// "payload too large" 400 instead of the silent
+// truncation that the Bind helper would do on partial
+// reads.
+func bindStrictJSON(c fiber.Ctx, dst interface{}) error {
+	body := c.Body()
+	if len(body) == 0 {
+		return fmt.Errorf("empty request body")
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		// io.EOF after a non-empty body means the
+		// payload was pure whitespace or "null" —
+		// either way, treat as empty.
+		if err == io.EOF {
+			return fmt.Errorf("empty request body")
+		}
+		return err
+	}
+	// Reject a trailing token — the body must be a
+	// single JSON value. "{"a":1}{"b":2}" would slip
+	// past DisallowUnknownFields on its own.
+	if dec.More() {
+		return fmt.Errorf("unexpected trailing data after JSON value")
+	}
+	return nil
+}
+
+// strictJSONError maps the underlying error to a 400
+// response with a clear message. The handler chain calls
+// this immediately after bindStrictJSON returns non-nil.
+func strictJSONError(c fiber.Ctx, err error) error {
+	msg := err.Error()
+	// json.Decoder returns messages like
+	// "json: unknown field \"evil\"" — surface them
+	// verbatim so the client can fix the typo without
+	// guessing.
+	return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body: " + msg})
+}
 
 // ── Rules CRUD ────────────────────────────────────────────────
 
@@ -67,8 +123,8 @@ func (h *Handler) WebmailCreateRule(c fiber.Ctx) error {
 		ConditionsJSON string `json:"conditions_json"`
 		ActionsJSON    string `json:"actions_json"`
 	}
-	if err := c.Bind().JSON(&req); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	if err := bindStrictJSON(c, &req); err != nil {
+		return strictJSONError(c, err)
 	}
 	if err := rules.ValidateConditionsJSON(req.ConditionsJSON); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid conditions_json: " + err.Error()})
@@ -114,8 +170,8 @@ func (h *Handler) WebmailUpdateRule(c fiber.Ctx) error {
 		ConditionsJSON *string `json:"conditions_json,omitempty"`
 		ActionsJSON    *string `json:"actions_json,omitempty"`
 	}
-	if err := c.Bind().JSON(&req); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	if err := bindStrictJSON(c, &req); err != nil {
+		return strictJSONError(c, err)
 	}
 	if req.ConditionsJSON != nil {
 		if err := rules.ValidateConditionsJSON(*req.ConditionsJSON); err != nil {
@@ -212,8 +268,8 @@ func (h *Handler) WebmailPutVacation(c fiber.Ctx) error {
 		EndAt                *string `json:"end_at,omitempty"`
 		ReplyIntervalSeconds *int    `json:"reply_interval_seconds,omitempty"`
 	}
-	if err := c.Bind().JSON(&req); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	if err := bindStrictJSON(c, &req); err != nil {
+		return strictJSONError(c, err)
 	}
 	patch := &storage.VacationPatch{
 		Enabled:              req.Enabled,
@@ -263,8 +319,8 @@ func (h *Handler) WebmailPutForwarding(c fiber.Ctx) error {
 		ForwardTo *string `json:"forward_to,omitempty"`
 		KeepCopy  *bool   `json:"keep_copy,omitempty"`
 	}
-	if err := c.Bind().JSON(&req); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	if err := bindStrictJSON(c, &req); err != nil {
+		return strictJSONError(c, err)
 	}
 	if req.ForwardTo != nil && *req.ForwardTo != "" {
 		if _, err := mail.ParseAddress(*req.ForwardTo); err != nil {
