@@ -449,8 +449,9 @@ func TestOrvixUpdateServiceOperatorOnly(t *testing.T) {
 	}
 	// install.sh must actively ASSERT the update unit is not enabled
 	// after install, so a future refactor that re-enables it fails
-	// the install loudly.
-	if !strings.Contains(installer, "is-enabled --quiet orvix-update.service") {
+	// the install loudly. The check must capture the exact state
+	// string (not --quiet, which would treat "static" as enabled).
+	if !strings.Contains(installer, "systemctl is-enabled orvix-update.service") {
 		t.Error("install.sh must guard against orvix-update.service being enabled (BLOCKER 2)")
 	}
 }
