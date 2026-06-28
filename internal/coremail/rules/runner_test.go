@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1051,8 +1052,11 @@ func (r *failingVacationRepo) LastRepliedAt(ctx context.Context, mailboxID uint,
 func (r *failingVacationRepo) RecordReply(ctx context.Context, mailboxID uint, senderEmail string) error {
 	return r.err
 }
+func (r *failingVacationRepo) ClaimVacationReply(ctx context.Context, mailboxID uint, senderEmail string, now time.Time, interval time.Duration) (bool, error) {
+	return false, r.err
+}
 
-func TestRunner_RecordReplyFailure_PreventsVacationEnqueue(t *testing.T) {
+func TestRunner_ClaimFailure_PreventsVacationEnqueue(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 
@@ -1060,16 +1064,9 @@ func TestRunner_RecordReplyFailure_PreventsVacationEnqueue(t *testing.T) {
 	f.createVacationRow(ctx, 1, "OOO", "I am out", 86400)
 
 	// Replace the runner's Vacation repo with one that
-	// fails RecordReply but otherwise works. This is
-	// the worst-case scenario for BLOCKER 4: the
-	// engine successfully evaluates the message,
-	// sets out.VacationReply, and then the rate-limit
-	// row write fails.
-	//
-	// The runner calls r.deps.MailStore.Vacation.RecordReply
-	// (not r.deps.Vacation.RecordReply) — the helper
-	// field on Dependencies is vestigial. We therefore
-	// patch the MailStore's Vacation repo directly.
+	// fails ClaimVacationReply. This simulates a DB outage
+	// during the atomic claim. The engine must NOT enqueue
+	// a reply — the claim (check+write) is the single gate.
 	f.store.Vacation = &failingVacationRepo{
 		inner: f.store.Vacation,
 		err:   fmt.Errorf("simulated DB outage"),
@@ -1080,13 +1077,6 @@ func TestRunner_RecordReplyFailure_PreventsVacationEnqueue(t *testing.T) {
 	in := f.inboundInput(1, 1, 1, "alice@example.com", "Carol <carol@external.test>", rfc822)
 
 	out, err := f.runner.Run(ctx, in)
-	// The runner's documented contract: Run returns
-	// (out, nil) even on side-effect failures — the
-	// failure surfaces via out.SkipReason so the
-	// caller (SMTP receiver / audit log) can react.
-	// The previous failure mode returned nil but had
-	// already enqueued the reply, which is exactly
-	// what BLOCKER 4 is about.
 	if err != nil {
 		t.Fatalf("runner.Run returned err: %v", err)
 	}
@@ -1094,59 +1084,112 @@ func TestRunner_RecordReplyFailure_PreventsVacationEnqueue(t *testing.T) {
 		t.Fatal("runner.Run returned nil output")
 	}
 	if out.VacationReply != nil {
-		t.Fatalf("expected VacationReply=nil on persistence failure, got %+v", out.VacationReply)
+		t.Fatalf("expected VacationReply=nil on claim failure, got %+v", out.VacationReply)
 	}
-	if out.SkipReason != "vacation rate-limit persistence failed" {
-		t.Fatalf("SkipReason = %q, want %q", out.SkipReason, "vacation rate-limit persistence failed")
+	if out.SkipReason != "vacation rate-limit lookup failed" {
+		t.Fatalf("SkipReason = %q, want %q", out.SkipReason, "vacation rate-limit lookup failed")
 	}
-	// The headline contract: NO queue entry was
-	// enqueued for the sender.
+	// NO queue entry was enqueued for the sender.
 	if got := f.countQueueEntriesForRecipient("carol@external.test"); got != 0 {
-		t.Fatalf("RecordReply failure must NOT enqueue; got %d queue entries", got)
+		t.Fatalf("claim failure must NOT enqueue; got %d queue entries", got)
 	}
 }
 
-// TestRunner_RecordReplySuccess_AllowsOneVacationEnqueue
-// is the positive control for BLOCKER 4 — when RecordReply
-// succeeds, exactly one vacation reply is enqueued. (This
-// pins the happy path; existing TestRunner_VacationEnqueuesOnce
-// covers the same behaviour end-to-end, but it predates
-// the reorder and was implicitly relying on the
-// best-effort-after-enqueue path. This test pins the new
-// persist-before-enqueue path explicitly.)
+// TestRunner_VacationConcurrency_OneWinner asserts that when
+// N concurrent inbound messages from the same sender arrive
+// at the same time, exactly ONE goroutine wins the claim and
+// enqueues a vacation reply. The others are suppressed. This
+// pins the TOCTOU fix: the old LastRepliedAt+RecordReply pair
+// could let two goroutines both pass the check and both enqueue;
+// the atomic ClaimVacationReply prevents that.
 
-func TestRunner_RecordReplySuccess_AllowsOneVacationEnqueue(t *testing.T) {
+func TestRunner_VacationConcurrency_OneWinner(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 
 	f.createMailbox(ctx, 1, 1, 1, "alice@example.com")
 	f.createVacationRow(ctx, 1, "OOO", "I am out", 86400)
 
-	rfc822 := makeInboundRFC822("Carol <carol@external.test>", "alice@example.com",
-		"hi", "hello")
-	in := f.inboundInput(1, 1, 1, "alice@example.com", "Carol <carol@external.test>", rfc822)
+	const workers = 10
+	var wg sync.WaitGroup
 
-	out, err := f.runner.Run(ctx, in)
-	if err != nil {
-		t.Fatalf("runner.Run: %v", err)
+	// Each worker receives the same message from the same sender.
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rfc := makeInboundRFC822("Carol <carol@external.test>", "alice@example.com",
+				"concurrent", "hello")
+			inp := f.inboundInput(1, 1, 1, "alice@example.com", "Carol <carol@external.test>", rfc)
+			f.runner.Run(ctx, inp)
+		}()
 	}
-	if out.VacationReply == nil {
-		t.Fatal("expected VacationReply, got nil")
-	}
+	wg.Wait()
 
-	// One queue entry.
+	// Exactly one queue entry was created for this sender.
 	if got := f.countQueueEntriesForRecipient("carol@external.test"); got != 1 {
-		t.Fatalf("expected exactly 1 queue entry, got %d", got)
+		t.Fatalf("expected exactly 1 queue entry under concurrency, got %d", got)
 	}
-	// AND the rate-limit row was persisted (this is
-	// the new contract — RecordReply must run before
-	// enqueue).
-	last, err := f.store.Vacation.LastRepliedAt(ctx, 1, "carol@external.test")
+	// Exactly one history row exists (unique constraint ensures it).
+	var historyRows int
+	if err := f.db.QueryRow("SELECT COUNT(*) FROM coremail_vacation_history WHERE mailbox_id = 1 AND sender_email = ?", "carol@external.test").Scan(&historyRows); err != nil {
+		t.Fatalf("count history: %v", err)
+	}
+	if historyRows != 1 {
+		t.Fatalf("expected exactly 1 history row, got %d", historyRows)
+	}
+}
+
+// TestRunner_VacationExpiredInterval_ClaimsAgain asserts that
+// when the rate-limit interval has elapsed, a second inbound
+// from the same sender wins a fresh claim and enqueues another
+// reply. This verifies the conditional UPDATE path in
+// ClaimVacationReply.
+
+func TestRunner_VacationExpiredInterval_ClaimsAgain(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	f.createMailbox(ctx, 1, 1, 1, "alice@example.com")
+	// Use minimum clamped interval (60s). The Update function
+	// clamps values <60 to 60, so vac.ReplyIntervalSeconds = 60.
+	f.createVacationRow(ctx, 1, "OOO", "I am out", 60)
+
+	sender := "carol@external.test"
+
+	// First run — wins the claim and enqueues.
+	rfc1 := makeInboundRFC822("Carol <"+sender+">", "alice@example.com", "first", "hello")
+	in1 := f.inboundInput(1, 1, 1, "alice@example.com", "Carol <"+sender+">", rfc1)
+	out1, err := f.runner.Run(ctx, in1)
 	if err != nil {
-		t.Fatalf("LastRepliedAt: %v", err)
+		t.Fatalf("first run: %v", err)
 	}
-	if last == "" {
-		t.Fatal("expected rate-limit row to be persisted before enqueue; LastRepliedAt returned empty")
+	if out1.VacationReply == nil {
+		t.Fatal("expected VacationReply on first run")
+	}
+	if got := f.countQueueEntriesForRecipient(sender); got != 1 {
+		t.Fatalf("after first run: expected 1 queue entry, got %d", got)
+	}
+
+	// Backdate the history row to well outside the 60s interval.
+	if _, err := f.db.Exec(
+		`UPDATE coremail_vacation_history SET last_replied_at = ? WHERE mailbox_id = 1 AND sender_email = ?`,
+		time.Now().UTC().Add(-120*time.Second).Format(time.RFC3339), sender); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+
+	// Second run — interval expired (backdated 120s), claims again.
+	rfc2 := makeInboundRFC822("Carol <"+sender+">", "alice@example.com", "second", "hello again")
+	in2 := f.inboundInput(1, 1, 1, "alice@example.com", "Carol <"+sender+">", rfc2)
+	out2, err := f.runner.Run(ctx, in2)
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if out2.VacationReply == nil {
+		t.Fatalf("expected VacationReply on second run after interval expired, got SkipReason=%q", out2.SkipReason)
+	}
+	if got := f.countQueueEntriesForRecipient(sender); got != 2 {
+		t.Fatalf("after second run: expected 2 queue entries, got %d", got)
 	}
 }
 

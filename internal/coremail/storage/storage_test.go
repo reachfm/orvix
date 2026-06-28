@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1207,6 +1208,174 @@ func TestVacationRecordReply_ConcurrentSameSender_AtMostOneRow(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("expected 1 row after %d concurrent upserts, got %d", goroutines, n)
+	}
+}
+
+// insertClaimMailbox inserts a bare-bones mailbox for claim tests.
+func insertClaimMailbox(t *testing.T, db *sql.DB, id uint) {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := db.Exec(`INSERT INTO coremail_mailboxes
+		(id, domain_id, tenant_id, local_part, email, password_hash, auth_scheme, status, quota_mb, created_at, updated_at)
+		VALUES (?, 1, 1, 'alice', 'alice@example.com', '', 'argon2id', 'active', 1024, ?, ?)`,
+		id, now, now); err != nil {
+		t.Fatalf("insert mailbox: %v", err)
+	}
+}
+
+func TestVacationClaimReply_FirstCallClaims(t *testing.T) {
+	db := testDB(t)
+	ensureMailboxTable(t, db)
+	store, err := NewMailStore(db, t.TempDir())
+	if err != nil {
+		t.Fatalf("new mailstore: %v", err)
+	}
+	ctx := context.Background()
+	if err := store.Folders.EnsureSystemFolders(ctx, 1, nil); err != nil {
+		t.Fatalf("ensure folders: %v", err)
+	}
+	insertClaimMailbox(t, db, 1)
+	mailboxID := uint(1)
+	sender := "carol@external.test"
+
+	// First call — no history row exists, should claim.
+	claimed, err := store.Vacation.ClaimVacationReply(ctx, mailboxID, sender, time.Now().UTC(), time.Hour)
+	if err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("expected first claim to succeed")
+	}
+	// Verify exactly one row exists.
+	var n int
+	db.QueryRow("SELECT COUNT(*) FROM coremail_vacation_history WHERE mailbox_id = ? AND sender_email = ?", mailboxID, sender).Scan(&n)
+	if n != 1 {
+		t.Fatalf("expected 1 history row after first claim, got %d", n)
+	}
+}
+
+func TestVacationClaimReply_SecondCallWithinIntervalRejected(t *testing.T) {
+	db := testDB(t)
+	ensureMailboxTable(t, db)
+	store, err := NewMailStore(db, t.TempDir())
+	if err != nil {
+		t.Fatalf("new mailstore: %v", err)
+	}
+	ctx := context.Background()
+	if err := store.Folders.EnsureSystemFolders(ctx, 1, nil); err != nil {
+		t.Fatalf("ensure folders: %v", err)
+	}
+	insertClaimMailbox(t, db, 1)
+	mailboxID := uint(1)
+	sender := "carol@external.test"
+
+	now := time.Now().UTC()
+
+	// First call — claims.
+	claimed, err := store.Vacation.ClaimVacationReply(ctx, mailboxID, sender, now, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("expected first claim to succeed")
+	}
+
+	// Second call, same time — within interval, should NOT claim.
+	claimed, err = store.Vacation.ClaimVacationReply(ctx, mailboxID, sender, now, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("second claim: %v", err)
+	}
+	if claimed {
+		t.Fatal("expected second call within interval to be rejected")
+	}
+	var n int
+	db.QueryRow("SELECT COUNT(*) FROM coremail_vacation_history WHERE mailbox_id = ? AND sender_email = ?", mailboxID, sender).Scan(&n)
+	if n != 1 {
+		t.Fatalf("expected still 1 history row, got %d", n)
+	}
+}
+
+func TestVacationClaimReply_ExpiredIntervalClaimsAgain(t *testing.T) {
+	db := testDB(t)
+	ensureMailboxTable(t, db)
+	store, err := NewMailStore(db, t.TempDir())
+	if err != nil {
+		t.Fatalf("new mailstore: %v", err)
+	}
+	ctx := context.Background()
+	if err := store.Folders.EnsureSystemFolders(ctx, 1, nil); err != nil {
+		t.Fatalf("ensure folders: %v", err)
+	}
+	insertClaimMailbox(t, db, 1)
+	mailboxID := uint(1)
+	sender := "carol@external.test"
+
+	// Seed a row with an old timestamp.
+	if err := store.Vacation.RecordReply(ctx, mailboxID, sender); err != nil {
+		t.Fatalf("seed RecordReply: %v", err)
+	}
+	// Manually backdate it to 10 minutes ago.
+	old := time.Now().UTC().Add(-10 * time.Minute)
+	if _, err := db.Exec("UPDATE coremail_vacation_history SET last_replied_at = ? WHERE mailbox_id = ? AND sender_email = ?",
+		old.Format(time.RFC3339), mailboxID, sender); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+
+	// Claim with a short interval — the backdated row is outside
+	// the interval, so the UPDATE should match.
+	claimed, err := store.Vacation.ClaimVacationReply(ctx, mailboxID, sender, time.Now().UTC(), 1*time.Minute)
+	if err != nil {
+		t.Fatalf("claim after expiry: %v", err)
+	}
+	if !claimed {
+		t.Fatal("expected claim to succeed after interval expired")
+	}
+	var n int
+	db.QueryRow("SELECT COUNT(*) FROM coremail_vacation_history WHERE mailbox_id = ? AND sender_email = ?", mailboxID, sender).Scan(&n)
+	if n != 1 {
+		t.Fatalf("expected still 1 history row, got %d", n)
+	}
+}
+
+func TestVacationClaimReply_ConcurrentSameSender_OneWinner(t *testing.T) {
+	db := testDB(t)
+	ensureMailboxTable(t, db)
+	store, err := NewMailStore(db, t.TempDir())
+	if err != nil {
+		t.Fatalf("new mailstore: %v", err)
+	}
+	ctx := context.Background()
+	if err := store.Folders.EnsureSystemFolders(ctx, 1, nil); err != nil {
+		t.Fatalf("ensure folders: %v", err)
+	}
+	insertClaimMailbox(t, db, 1)
+
+	const goroutines = 10
+	winners := int32(0)
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			claimed, err := store.Vacation.ClaimVacationReply(ctx, 1, "carol@external.test", time.Now().UTC(), time.Hour)
+			if err != nil {
+				t.Errorf("claim error: %v", err)
+				return
+			}
+			if claimed {
+				atomic.AddInt32(&winners, 1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if winners != 1 {
+		t.Fatalf("expected exactly 1 winner, got %d", winners)
+	}
+	var n int
+	db.QueryRow("SELECT COUNT(*) FROM coremail_vacation_history WHERE mailbox_id = 1 AND sender_email = ?", "carol@external.test").Scan(&n)
+	if n != 1 {
+		t.Fatalf("expected exactly 1 history row, got %d", n)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -93,12 +94,31 @@ type VacationRepository interface {
 	Update(ctx context.Context, mailboxID uint, patch *VacationPatch) (*VacationConfig, error)
 	// LastRepliedAt returns the last_replied_at timestamp for
 	// (mailboxID, senderEmail), or "" if no reply has been sent.
+	// Deprecated: use ClaimVacationReply for production paths.
 	LastRepliedAt(ctx context.Context, mailboxID uint, senderEmail string) (string, error)
 	// RecordReply inserts or updates the (mailboxID, senderEmail)
 	// timestamp to "now". Idempotent — repeated calls within the
 	// rate-limit window do not produce duplicate replies because
 	// the engine checks LastRepliedAt before calling RecordReply.
+	// Deprecated: use ClaimVacationReply for production paths to
+	// eliminate the TOCTOU race between check and write.
 	RecordReply(ctx context.Context, mailboxID uint, senderEmail string) error
+	// ClaimVacationReply atomically checks whether a vacation
+	// reply may be sent to (senderEmail) for the given mailbox,
+	// and if so records the current timestamp. Returns claimed=true
+	// when the caller won the right to send a reply.
+	//
+	// Semantics:
+	//   - If no history row exists for (mailboxID, senderEmail),
+	//     insert one and return claimed=true.
+	//   - If a row exists and last_replied_at <= now - interval,
+	//     update it to now and return claimed=true.
+	//   - If a row exists and it is still inside the interval,
+	//     do not update and return claimed=false.
+	//   - On DB error, returns false and the error (fail-closed).
+	//   - Concurrent callers from the same (mailboxID, senderEmail)
+	//     are serialised by the unique index: at most one wins.
+	ClaimVacationReply(ctx context.Context, mailboxID uint, senderEmail string, now time.Time, interval time.Duration) (bool, error)
 }
 
 // VacationPatch is the partial-update payload for vacation
@@ -417,28 +437,6 @@ func (r *vacationSQLRepo) RecordReply(ctx context.Context, mailboxID uint, sende
 // which always uses time.Now().
 
 func (r *vacationSQLRepo) recordReplyAt(ctx context.Context, mailboxID uint, senderEmail string, lastRepliedAt string) error {
-	// Atomic upsert against the UNIQUE(mailbox_id,
-	// sender_email) index. This replaces the previous
-	// delete-then-insert pair which was racy: two
-	// concurrent inbound messages from the same sender
-	// could both pass LastRepliedAt, both reach
-	// RecordReply, and each would delete-then-insert a
-	// row of its own — the second INSERT could land in
-	// a window where the first was already committed,
-	// but the runner had no way to observe it because
-	// LastRepliedAt ran before any of this. The net
-	// effect was that the rate limit was bypassed for
-	// one out of every concurrent pair, and the recipient
-	// could receive duplicate vacation replies.
-	//
-	// The new contract:
-	//   - INSERT a new row if (mailbox, sender) is unseen.
-	//   - UPDATE last_replied_at if the row already
-	//     exists. The LastRepliedAt check BEFORE this
-	//     call is what enforces the rate window; this
-	//     call is the side that "wins" the race.
-	//   - The whole operation is one statement, so
-	//     concurrent calls cannot interleave.
 	if _, err := r.db.ExecContext(ctx,
 		`INSERT INTO coremail_vacation_history
 		   (mailbox_id, sender_email, last_replied_at)
@@ -450,6 +448,54 @@ func (r *vacationSQLRepo) recordReplyAt(ctx context.Context, mailboxID uint, sen
 		return fmt.Errorf("vacation record (upsert): %w", err)
 	}
 	return nil
+}
+
+func (r *vacationSQLRepo) ClaimVacationReply(ctx context.Context, mailboxID uint, senderEmail string, now time.Time, interval time.Duration) (bool, error) {
+	nowStr := now.Format(time.RFC3339)
+	cutoff := now.Add(-interval).Format(time.RFC3339)
+
+	// Step 1: Try conditional UPDATE — only claims the row
+	// when the existing history is outside the rate window.
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE coremail_vacation_history
+		 SET last_replied_at = ?
+		 WHERE mailbox_id = ? AND sender_email = ? AND last_replied_at <= ?`,
+		nowStr, mailboxID, senderEmail, cutoff,
+	)
+	if err != nil {
+		return false, fmt.Errorf("vacation claim update: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows > 0 {
+		return true, nil
+	}
+
+	// Step 2: No existing expired row. Try INSERT — succeeds
+	// only if no row exists for (mailboxID, senderEmail).
+	_, err = r.db.ExecContext(ctx,
+		`INSERT INTO coremail_vacation_history (mailbox_id, sender_email, last_replied_at)
+		 VALUES (?, ?, ?)`,
+		mailboxID, senderEmail, nowStr,
+	)
+	if err != nil {
+		if isUniqueConstraintError(err) {
+			// Another goroutine inserted first, or the row exists
+			// within the interval (UPDATE in step 1 hit 0 rows).
+			return false, nil
+		}
+		return false, fmt.Errorf("vacation claim insert: %w", err)
+	}
+	// INSERT succeeded — first-ever reply for this sender.
+	return true, nil
+}
+
+// isUniqueConstraintError returns true when the error is a SQLite
+// UNIQUE constraint violation (SQLITE_CONSTRAINT_UNIQUE, code 2067).
+func isUniqueConstraintError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "UNIQUE constraint failed")
 }
 
 func scanVacationRow(s scanner) (*VacationConfig, error) {
