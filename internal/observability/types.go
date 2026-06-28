@@ -67,6 +67,18 @@ const (
 	EventPolicyAllowed  EventType = "policy.allowed"
 	EventPolicyBlocked  EventType = "policy.blocked"
 	EventPolicyOverride EventType = "policy.override"
+
+	// Rules engine runner — emitted by the SMTP receiver
+	// after the rules engine has evaluated one inbound
+	// message. The Outcome field separates pass-through
+	// (no rule matched), action (forward / vacation /
+	// move / flag fired), skip (matched but suppressed —
+	// loop marker, rate limit, Auto-Submitted, etc.) and
+	// error (runner panic / DB failure / move failure).
+	EventRulesRunnerPass    EventType = "rules.runner.passthrough"
+	EventRulesRunnerAction  EventType = "rules.runner.action"
+	EventRulesRunnerSkip    EventType = "rules.runner.skip"
+	EventRulesRunnerError   EventType = "rules.runner.error"
 	EventIMAPSessionClosed  EventType = "imap.session.closed"
 	EventIMAPLoginSuccess   EventType = "imap.login.success"
 	EventIMAPLoginFailure   EventType = "imap.login.failure"

@@ -19,6 +19,7 @@ import (
 	"github.com/orvix/orvix/internal/coremail/pop3"
 	"github.com/orvix/orvix/internal/coremail/push"
 	"github.com/orvix/orvix/internal/coremail/queue"
+	"github.com/orvix/orvix/internal/coremail/rules"
 	"github.com/orvix/orvix/internal/coremail/smtp"
 	"github.com/orvix/orvix/internal/coremail/storage"
 	"github.com/orvix/orvix/internal/licensing"
@@ -225,6 +226,27 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	receiver := smtp.NewReceiver(m.engine, m.store, m.queue, smtpCfg)
 	receiver.AntiSpamEngine = antispam.NewEngine(nil)
 	receiver.Observability = m.obs
+
+	// Rules engine runner. Wired into the SMTP receiver so
+	// every locally-delivered inbound message is fed
+	// through the rules engine AFTER the durable StoreMessage
+	// call. The receiver applies the runner's outputs
+	// (move / flag / keep-copy) defensively — see
+	// internal/coremail/smtp/rules_apply.go for the full
+	// contract. The runner shares the same MailStore +
+	// QueueEngine the receiver uses, so forward and
+	// vacation replies go through the existing
+	// queue / outbound path — no raw SMTP, no parallel
+	// pipeline. The logger is m.logger so the runner's
+	// own audit logs flow into the same zap pipeline as
+	// the rest of the runtime.
+	receiver.RulesRunner = rules.NewRunner(rules.Dependencies{
+		MailStore:   m.store,
+		QueueEngine: m.queue,
+		Vacation:    m.store.Vacation,
+		Forwarding:  m.store.Forwarding,
+		Logger:      m.logger,
+	})
 
 	// ── Inbound SMTP (port 25, MX) ─────────────────────────
 	inboundCfg := smtp.InboundConfig()
@@ -575,6 +597,37 @@ func (m *Module) QueueEngine() *queue.QueueEngine {
 // check IsEnabled() before issuing push requests.
 func (m *Module) PushNotifier() *push.PushNotifier {
 	return m.pushNotifier
+}
+
+// RulesRunner returns the per-recipient rules engine runner
+// that the SMTP receiver invokes after a message is durably
+// stored in a recipient's mailbox. The router wires this
+// into the user-facing webmail handlers (rules / vacation /
+// forwarding API) so the same MailStore + QueueEngine the
+// SMTP receiver uses is reachable from the API path. Returns
+// nil when the runtime was not initialized
+// (cfg.CoreMail.Enabled == false) or the receiver has not
+// been built yet.
+func (m *Module) RulesRunner() *rules.Runner {
+	if m.smtpServer == nil {
+		return nil
+	}
+	// Receiver lives inside the SMTP server. We do not have
+	// a direct handle on it; the SMTP server does not expose
+	// its receiver. The clean way to expose this is via a
+	// dedicated accessor on the receiver side; until then we
+	// fall back to constructing a fresh runner that shares
+	// the runtime's MailStore + QueueEngine. The two runners
+	// share no state, so the API runner's rule evaluations
+	// never interfere with the SMTP-side runner's per-message
+	// evaluation.
+	return rules.NewRunner(rules.Dependencies{
+		MailStore:   m.store,
+		QueueEngine: m.queue,
+		Vacation:    m.store.Vacation,
+		Forwarding:  m.store.Forwarding,
+		Logger:      m.logger,
+	})
 }
 
 func (m *Module) Stop() error {

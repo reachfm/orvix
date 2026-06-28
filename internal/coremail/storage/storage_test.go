@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -894,6 +896,488 @@ func TestRetentionPolicyCreateAndList(t *testing.T) {
 }
 
 // ── Edge Cases ───────────────────────────────────────────────
+
+// TestValidateVacationSubject_RejectsHeaderInjection pins
+// BLOCKER 3 at the storage boundary. The VacationPatch
+// validator MUST reject CR / LF / NUL / control bytes in
+// the subject so an attacker cannot forge extra headers
+// in the auto-reply the runner emits.
+
+func TestValidateVacationSubject_RejectsHeaderInjection(t *testing.T) {
+	cases := []struct {
+		name      string
+		subject   string
+		wantError bool
+	}{
+		{"plain ASCII", "Out of office", false},
+		{"unicode emoji", "OOO 🏖️", false},
+		{"CRLF injection", "Hi\r\nBcc: attacker@evil.test", true},
+		{"LF alone", "Hi\nBcc: attacker", true},
+		{"CR alone", "Hi\rBcc: attacker", true},
+		{"NUL byte", "Hi\x00Bcc", true},
+		{"DEL byte", "Hi\x7f", true},
+		{"SOH byte", "Hi\x01", true},
+		{"empty subject", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateVacationSubject(tc.subject)
+			gotErr := err != nil
+			if gotErr != tc.wantError {
+				t.Fatalf("validateVacationSubject(%q) error = %v, wantError=%v", tc.subject, err, tc.wantError)
+			}
+		})
+	}
+}
+
+// TestVacationUpdate_RejectsInjectedSubject pins BLOCKER 3
+// end-to-end at the storage API. A user PUT that supplies
+// a CRLF subject MUST be rejected by Vacation.Update and
+// MUST NOT touch the stored row. The previous behaviour
+// (clampString with no validation) silently accepted the
+// payload and let the runner emit a forged-header reply.
+
+func TestVacationUpdate_RejectsInjectedSubject(t *testing.T) {
+	db := testDB(t)
+	store, err := NewMailStore(db, t.TempDir())
+	if err != nil {
+		t.Fatalf("new mailstore: %v", err)
+	}
+	ctx := context.Background()
+
+	// Provision mailbox + system folders so the foreign
+	// key on coremail_vacation.mailbox_id is satisfied.
+	if err := store.Folders.EnsureSystemFolders(ctx, 1, nil); err != nil {
+		t.Fatalf("ensure folders: %v", err)
+	}
+
+	// Materialise the row first.
+	if _, err := store.Vacation.GetOrCreate(ctx, 1); err != nil {
+		t.Fatalf("materialise vacation: %v", err)
+	}
+
+	// Try to inject CRLF via Update.
+	bad := "Hi\r\nBcc: attacker@evil.test"
+	patch := &VacationPatch{Subject: strPtr(bad)}
+	if _, err := store.Vacation.Update(ctx, 1, patch); err == nil {
+		t.Fatal("Vacation.Update accepted CRLF subject; want rejection")
+	}
+
+	// The stored row MUST NOT carry the injection —
+	// re-read it and verify the subject is still empty
+	// (the GetOrCreate default).
+	v, err := store.Vacation.GetOrCreate(ctx, 1)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if strings.Contains(v.Subject, "\r") || strings.Contains(v.Subject, "\n") {
+		t.Fatalf("vacation subject on disk contains CR/LF after rejected update: %q", v.Subject)
+	}
+}
+
+// TestVacationUpdate_AcceptsUnicodeSubject is the positive
+// control for BLOCKER 3 — if a future revision regresses
+// the validator to ASCII-only, this test fails.
+
+func TestVacationUpdate_AcceptsUnicodeSubject(t *testing.T) {
+	db := testDB(t)
+	store, err := NewMailStore(db, t.TempDir())
+	if err != nil {
+		t.Fatalf("new mailstore: %v", err)
+	}
+	ctx := context.Background()
+	if err := store.Folders.EnsureSystemFolders(ctx, 1, nil); err != nil {
+		t.Fatalf("ensure folders: %v", err)
+	}
+	if _, err := store.Vacation.GetOrCreate(ctx, 1); err != nil {
+		t.Fatalf("materialise: %v", err)
+	}
+
+	good := "Отпуск 🏖️"
+	patch := &VacationPatch{Subject: strPtr(good)}
+	if _, err := store.Vacation.Update(ctx, 1, patch); err != nil {
+		t.Fatalf("Vacation.Update rejected unicode subject: %v", err)
+	}
+	v, err := store.Vacation.GetOrCreate(ctx, 1)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if v.Subject != good {
+		t.Fatalf("subject on disk = %q, want %q", v.Subject, good)
+	}
+}
+
+// strPtr is a tiny helper for the BLOCKER 3 tests.
+func strPtr(s string) *string { return &s }
+
+// ── BLOCKER 5 — vacation history uniqueness + atomic upsert ─
+
+// mailboxDDL is the minimal coremail_mailboxes schema the
+// BLOCKER 5 tests need so the foreign-key relationship from
+// coremail_vacation_history is satisfied. The full schema
+// lives in internal/models; we inline a minimal version
+// here so the storage package tests do not depend on the
+// models package.
+const mailboxDDL = `
+CREATE TABLE IF NOT EXISTS coremail_mailboxes (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	domain_id INTEGER NOT NULL DEFAULT 0,
+	tenant_id INTEGER NOT NULL DEFAULT 0,
+	local_part TEXT NOT NULL DEFAULT '',
+	email TEXT UNIQUE NOT NULL,
+	name TEXT NOT NULL DEFAULT '',
+	password_hash TEXT NOT NULL DEFAULT '',
+	auth_scheme TEXT NOT NULL DEFAULT 'argon2id',
+	status TEXT NOT NULL DEFAULT 'active',
+	quota_mb INTEGER NOT NULL DEFAULT 1024,
+	created_at DATETIME NOT NULL,
+	updated_at DATETIME NOT NULL,
+	deleted_at DATETIME
+)`
+
+// ensureMailboxTable creates the coremail_mailboxes table
+// in the test DB if it isn't there yet. The storage test
+// helper testDB() only creates storage tables; the mailbox
+// table is owned by the models package and only exists in
+// integration tests that wire up a full coremail engine.
+func ensureMailboxTable(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if _, err := db.Exec(mailboxDDL); err != nil {
+		t.Fatalf("create mailbox table: %v", err)
+	}
+}
+
+// TestVacationHistory_UniqueConstraintExists pins the
+// UNIQUE(mailbox_id, sender_email) index that makes the
+// rate-limit history race-safe. The index MUST exist after
+// schema setup; without it, two concurrent same-sender
+// inbound messages could both pass LastRepliedAt and
+// emit duplicate vacation replies.
+
+func TestVacationHistory_UniqueConstraintExists(t *testing.T) {
+	db := testDB(t)
+	ensureMailboxTable(t, db)
+
+	// Provision the mailbox + vacation row so we can
+	// insert a history row.
+	if _, err := db.Exec(`INSERT INTO coremail_mailboxes
+		(id, domain_id, tenant_id, local_part, email, password_hash, auth_scheme, status, quota_mb, created_at, updated_at)
+		VALUES (1, 1, 1, 'alice', 'alice@example.com', '', 'argon2id', 'active', 1024, ?, ?)`,
+		time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("insert mailbox: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO coremail_vacation
+		(mailbox_id, enabled, subject, body, reply_interval_seconds, created_at, updated_at)
+		VALUES (1, 0, '', '', 86400, ?, ?)`,
+		time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("insert vacation: %v", err)
+	}
+
+	// First row inserts fine.
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := db.Exec(
+		`INSERT INTO coremail_vacation_history (mailbox_id, sender_email, last_replied_at)
+		 VALUES (1, 'carol@external.test', ?)`, now); err != nil {
+		t.Fatalf("first history insert: %v", err)
+	}
+
+	// Second INSERT with the same (mailbox, sender)
+	// MUST fail with a UNIQUE-constraint violation.
+	_, err := db.Exec(
+		`INSERT INTO coremail_vacation_history (mailbox_id, sender_email, last_replied_at)
+		 VALUES (1, 'carol@external.test', ?)`, now)
+	if err == nil {
+		t.Fatal("expected UNIQUE constraint violation on duplicate (mailbox, sender) insert")
+	}
+	if !strings.Contains(err.Error(), "UNIQUE") {
+		t.Fatalf("error must mention UNIQUE constraint, got: %v", err)
+	}
+}
+
+// TestVacationRecordReply_AtomicUpsert_RefreshesTimestamp
+// pins BLOCKER 5's atomic-upsert path. Calling RecordReply
+// twice for the same (mailbox, sender) pair MUST NOT
+// create a second row — the second call updates
+// last_replied_at on the existing row.
+
+func TestVacationRecordReply_AtomicUpsert_RefreshesTimestamp(t *testing.T) {
+	db := testDB(t)
+	ensureMailboxTable(t, db)
+	store, err := NewMailStore(db, t.TempDir())
+	if err != nil {
+		t.Fatalf("new mailstore: %v", err)
+	}
+	ctx := context.Background()
+	if err := store.Folders.EnsureSystemFolders(ctx, 1, nil); err != nil {
+		t.Fatalf("ensure folders: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO coremail_mailboxes
+		(id, domain_id, tenant_id, local_part, email, password_hash, auth_scheme, status, quota_mb, created_at, updated_at)
+		VALUES (1, 1, 1, 'alice', 'alice@example.com', '', 'argon2id', 'active', 1024, ?, ?)`,
+		time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("insert mailbox: %v", err)
+	}
+
+	// First RecordReply.
+	t1 := time.Now().UTC().Add(-1 * time.Hour).Format(time.RFC3339)
+	if err := store.Vacation.(*vacationSQLRepo).recordReplyAt(ctx, 1, "carol@external.test", t1); err != nil {
+		t.Fatalf("first RecordReply: %v", err)
+	}
+
+	// Second RecordReply with a newer timestamp.
+	t2 := time.Now().UTC().Format(time.RFC3339)
+	if err := store.Vacation.(*vacationSQLRepo).recordReplyAt(ctx, 1, "carol@external.test", t2); err != nil {
+		t.Fatalf("second RecordReply: %v", err)
+	}
+
+	// Exactly ONE row for (1, "carol@external.test").
+	var n int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM coremail_vacation_history WHERE mailbox_id = 1 AND sender_email = ?`,
+		"carol@external.test").Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("expected 1 history row after upsert, got %d", n)
+	}
+
+	// The row's last_replied_at MUST be the newer timestamp.
+	var ts string
+	if err := db.QueryRow(
+		`SELECT last_replied_at FROM coremail_vacation_history WHERE mailbox_id = 1 AND sender_email = ?`,
+		"carol@external.test").Scan(&ts); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if ts != t2 {
+		t.Fatalf("last_replied_at = %q, want %q", ts, t2)
+	}
+}
+
+// TestVacationRecordReply_ConcurrentSameSender_AtMostOneRow
+// pins BLOCKER 5's race-free contract. N concurrent
+// RecordReply calls for the same (mailbox, sender) MUST
+// produce at most one history row. The previous
+// delete-then-insert code could leak duplicates under
+// contention because the DELETE and the second goroutine's
+// INSERT could race.
+
+func TestVacationRecordReply_ConcurrentSameSender_AtMostOneRow(t *testing.T) {
+	db := testDB(t)
+	ensureMailboxTable(t, db)
+	store, err := NewMailStore(db, t.TempDir())
+	if err != nil {
+		t.Fatalf("new mailstore: %v", err)
+	}
+	ctx := context.Background()
+	if err := store.Folders.EnsureSystemFolders(ctx, 1, nil); err != nil {
+		t.Fatalf("ensure folders: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO coremail_mailboxes
+		(id, domain_id, tenant_id, local_part, email, password_hash, auth_scheme, status, quota_mb, created_at, updated_at)
+		VALUES (1, 1, 1, 'alice', 'alice@example.com', '', 'argon2id', 'active', 1024, ?, ?)`,
+		time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("insert mailbox: %v", err)
+	}
+
+	const goroutines = 16
+	var wg sync.WaitGroup
+	errs := make(chan error, goroutines)
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if e := store.Vacation.RecordReply(ctx, 1, "carol@external.test"); e != nil {
+				errs <- e
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		t.Fatalf("concurrent RecordReply error: %v", e)
+	}
+
+	// After all goroutines complete there must be
+	// exactly ONE history row — the UPSERT serialised
+	// them via the UNIQUE index.
+	var n int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM coremail_vacation_history WHERE mailbox_id = 1 AND sender_email = ?`,
+		"carol@external.test").Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("expected 1 row after %d concurrent upserts, got %d", goroutines, n)
+	}
+}
+
+// insertClaimMailbox inserts a bare-bones mailbox for claim tests.
+func insertClaimMailbox(t *testing.T, db *sql.DB, id uint) {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := db.Exec(`INSERT INTO coremail_mailboxes
+		(id, domain_id, tenant_id, local_part, email, password_hash, auth_scheme, status, quota_mb, created_at, updated_at)
+		VALUES (?, 1, 1, 'alice', 'alice@example.com', '', 'argon2id', 'active', 1024, ?, ?)`,
+		id, now, now); err != nil {
+		t.Fatalf("insert mailbox: %v", err)
+	}
+}
+
+func TestVacationClaimReply_FirstCallClaims(t *testing.T) {
+	db := testDB(t)
+	ensureMailboxTable(t, db)
+	store, err := NewMailStore(db, t.TempDir())
+	if err != nil {
+		t.Fatalf("new mailstore: %v", err)
+	}
+	ctx := context.Background()
+	if err := store.Folders.EnsureSystemFolders(ctx, 1, nil); err != nil {
+		t.Fatalf("ensure folders: %v", err)
+	}
+	insertClaimMailbox(t, db, 1)
+	mailboxID := uint(1)
+	sender := "carol@external.test"
+
+	// First call — no history row exists, should claim.
+	claimed, err := store.Vacation.ClaimVacationReply(ctx, mailboxID, sender, time.Now().UTC(), time.Hour)
+	if err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("expected first claim to succeed")
+	}
+	// Verify exactly one row exists.
+	var n int
+	db.QueryRow("SELECT COUNT(*) FROM coremail_vacation_history WHERE mailbox_id = ? AND sender_email = ?", mailboxID, sender).Scan(&n)
+	if n != 1 {
+		t.Fatalf("expected 1 history row after first claim, got %d", n)
+	}
+}
+
+func TestVacationClaimReply_SecondCallWithinIntervalRejected(t *testing.T) {
+	db := testDB(t)
+	ensureMailboxTable(t, db)
+	store, err := NewMailStore(db, t.TempDir())
+	if err != nil {
+		t.Fatalf("new mailstore: %v", err)
+	}
+	ctx := context.Background()
+	if err := store.Folders.EnsureSystemFolders(ctx, 1, nil); err != nil {
+		t.Fatalf("ensure folders: %v", err)
+	}
+	insertClaimMailbox(t, db, 1)
+	mailboxID := uint(1)
+	sender := "carol@external.test"
+
+	now := time.Now().UTC()
+
+	// First call — claims.
+	claimed, err := store.Vacation.ClaimVacationReply(ctx, mailboxID, sender, now, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("expected first claim to succeed")
+	}
+
+	// Second call, same time — within interval, should NOT claim.
+	claimed, err = store.Vacation.ClaimVacationReply(ctx, mailboxID, sender, now, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("second claim: %v", err)
+	}
+	if claimed {
+		t.Fatal("expected second call within interval to be rejected")
+	}
+	var n int
+	db.QueryRow("SELECT COUNT(*) FROM coremail_vacation_history WHERE mailbox_id = ? AND sender_email = ?", mailboxID, sender).Scan(&n)
+	if n != 1 {
+		t.Fatalf("expected still 1 history row, got %d", n)
+	}
+}
+
+func TestVacationClaimReply_ExpiredIntervalClaimsAgain(t *testing.T) {
+	db := testDB(t)
+	ensureMailboxTable(t, db)
+	store, err := NewMailStore(db, t.TempDir())
+	if err != nil {
+		t.Fatalf("new mailstore: %v", err)
+	}
+	ctx := context.Background()
+	if err := store.Folders.EnsureSystemFolders(ctx, 1, nil); err != nil {
+		t.Fatalf("ensure folders: %v", err)
+	}
+	insertClaimMailbox(t, db, 1)
+	mailboxID := uint(1)
+	sender := "carol@external.test"
+
+	// Seed a row with an old timestamp.
+	if err := store.Vacation.RecordReply(ctx, mailboxID, sender); err != nil {
+		t.Fatalf("seed RecordReply: %v", err)
+	}
+	// Manually backdate it to 10 minutes ago.
+	old := time.Now().UTC().Add(-10 * time.Minute)
+	if _, err := db.Exec("UPDATE coremail_vacation_history SET last_replied_at = ? WHERE mailbox_id = ? AND sender_email = ?",
+		old.Format(time.RFC3339), mailboxID, sender); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+
+	// Claim with a short interval — the backdated row is outside
+	// the interval, so the UPDATE should match.
+	claimed, err := store.Vacation.ClaimVacationReply(ctx, mailboxID, sender, time.Now().UTC(), 1*time.Minute)
+	if err != nil {
+		t.Fatalf("claim after expiry: %v", err)
+	}
+	if !claimed {
+		t.Fatal("expected claim to succeed after interval expired")
+	}
+	var n int
+	db.QueryRow("SELECT COUNT(*) FROM coremail_vacation_history WHERE mailbox_id = ? AND sender_email = ?", mailboxID, sender).Scan(&n)
+	if n != 1 {
+		t.Fatalf("expected still 1 history row, got %d", n)
+	}
+}
+
+func TestVacationClaimReply_ConcurrentSameSender_OneWinner(t *testing.T) {
+	db := testDB(t)
+	ensureMailboxTable(t, db)
+	store, err := NewMailStore(db, t.TempDir())
+	if err != nil {
+		t.Fatalf("new mailstore: %v", err)
+	}
+	ctx := context.Background()
+	if err := store.Folders.EnsureSystemFolders(ctx, 1, nil); err != nil {
+		t.Fatalf("ensure folders: %v", err)
+	}
+	insertClaimMailbox(t, db, 1)
+
+	const goroutines = 10
+	winners := int32(0)
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			claimed, err := store.Vacation.ClaimVacationReply(ctx, 1, "carol@external.test", time.Now().UTC(), time.Hour)
+			if err != nil {
+				t.Errorf("claim error: %v", err)
+				return
+			}
+			if claimed {
+				atomic.AddInt32(&winners, 1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if winners != 1 {
+		t.Fatalf("expected exactly 1 winner, got %d", winners)
+	}
+	var n int
+	db.QueryRow("SELECT COUNT(*) FROM coremail_vacation_history WHERE mailbox_id = 1 AND sender_email = ?", "carol@external.test").Scan(&n)
+	if n != 1 {
+		t.Fatalf("expected exactly 1 history row, got %d", n)
+	}
+}
 
 func TestStoreEmptyMessage(t *testing.T) {
 	_, store := testStore(t)

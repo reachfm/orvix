@@ -131,6 +131,79 @@ func Tables() []string {
 			updated_at DATETIME NOT NULL,
 			FOREIGN KEY (mailbox_id) REFERENCES coremail_mailboxes(id)
 		)`,
+
+		// Rules engine — per-mailbox filter rules evaluated when an
+		// inbound message lands in this mailbox. Conditions and
+		// actions are stored as JSON blobs to keep the schema
+		// flexible while still being indexable by mailbox_id +
+		// sort_order. The storage layer is the only place that
+		// touches the JSON shape; the rules package owns the
+		// schema + validator.
+		`CREATE TABLE IF NOT EXISTS coremail_rules (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			mailbox_id INTEGER NOT NULL,
+			name TEXT NOT NULL DEFAULT '',
+			enabled INTEGER NOT NULL DEFAULT 1,
+			sort_order INTEGER NOT NULL DEFAULT 0,
+			stop_processing INTEGER NOT NULL DEFAULT 0,
+			conditions_json TEXT NOT NULL DEFAULT '[]',
+			actions_json TEXT NOT NULL DEFAULT '[]',
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			FOREIGN KEY (mailbox_id) REFERENCES coremail_mailboxes(id)
+		)`,
+
+		// Vacation / out-of-office auto-reply. One row per mailbox.
+		// UNIQUE(mailbox_id) makes GetOrCreate a single-row read.
+		// subject + body are the auto-reply text; the engine never
+		// sends a vacation reply that already contains the
+		// Orvix-Vacation marker, so loops are prevented at the
+		// engine boundary.
+		`CREATE TABLE IF NOT EXISTS coremail_vacation (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			mailbox_id INTEGER NOT NULL UNIQUE,
+			enabled INTEGER NOT NULL DEFAULT 0,
+			subject TEXT NOT NULL DEFAULT '',
+			body TEXT NOT NULL DEFAULT '',
+			start_at DATETIME,
+			end_at DATETIME,
+			reply_interval_seconds INTEGER NOT NULL DEFAULT 86400,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			FOREIGN KEY (mailbox_id) REFERENCES coremail_mailboxes(id)
+		)`,
+
+		// Per-(mailbox, sender) rate-limit record. The vacation
+		// engine uses this to enforce "once per sender per N
+		// seconds" — the UI exposes N (default 24h) via the
+		// vacation endpoint.
+		`CREATE TABLE IF NOT EXISTS coremail_vacation_history (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			mailbox_id INTEGER NOT NULL,
+			sender_email TEXT NOT NULL,
+			last_replied_at DATETIME NOT NULL,
+			FOREIGN KEY (mailbox_id) REFERENCES coremail_mailboxes(id)
+		)`,
+
+		// Per-mailbox forwarding rule. Separate from coremail_rules
+		// because the UI surfaces forwarding on its own panel and
+		// the engine has its own well-defined row-level contract
+		// for it. A row in coremail_forwarding is mutually exclusive
+		// with a 'forward' action in coremail_rules for the same
+		// mailbox — the engine enforces that the forwarding row is
+		// evaluated exactly once per inbound message, and rules
+		// only fire if the user did NOT enable the dedicated
+		// forwarding row.
+		`CREATE TABLE IF NOT EXISTS coremail_forwarding (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			mailbox_id INTEGER NOT NULL UNIQUE,
+			enabled INTEGER NOT NULL DEFAULT 0,
+			forward_to TEXT NOT NULL DEFAULT '',
+			keep_copy INTEGER NOT NULL DEFAULT 1,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			FOREIGN KEY (mailbox_id) REFERENCES coremail_mailboxes(id)
+		)`,
 	}
 }
 
@@ -152,6 +225,16 @@ func Indexes() []string {
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_push_subscriptions_endpoint ON push_subscriptions(endpoint)`,
 		`CREATE INDEX IF NOT EXISTS idx_push_subscriptions_mailbox ON push_subscriptions(mailbox_id)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_coremail_user_settings_mailbox ON coremail_user_settings(mailbox_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_coremail_rules_mailbox_order ON coremail_rules(mailbox_id, sort_order)`,
+		// UNIQUE (mailbox_id, sender_email) is what makes the
+		// rate-limit history race-safe: two concurrent inbound
+		// messages from the same sender cannot both create a row,
+		// so the runner's RecordReply UPSERT will hit exactly
+		// one row regardless of goroutine interleaving. Earlier
+		// revisions used a non-unique index + delete-then-insert,
+		// which let a race pass the LastRepliedAt check on both
+		// messages and emit duplicate vacation replies.
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_coremail_vacation_history_mailbox_sender ON coremail_vacation_history(mailbox_id, sender_email)`,
 	}
 }
 

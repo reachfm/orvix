@@ -13,6 +13,7 @@ import (
 	"github.com/orvix/orvix/internal/coremail/dkim"
 	"github.com/orvix/orvix/internal/coremail/dmarc"
 	"github.com/orvix/orvix/internal/coremail/queue"
+	"github.com/orvix/orvix/internal/coremail/rules"
 	"github.com/orvix/orvix/internal/coremail/spf"
 	"github.com/orvix/orvix/internal/coremail/storage"
 	"github.com/orvix/orvix/internal/observability"
@@ -31,6 +32,22 @@ type Receiver struct {
 	AntiSpamEngine  *antispam.Engine
 	DKIMVerifier    *dkim.Verifier
 	Observability   *observability.Observability
+	// RulesRunner is the optional rules engine runner. When
+	// non-nil, every local-delivery message is fed through it
+	// AFTER the message is durably stored in the recipient's
+	// mailbox. The runner never mutates the inbound message
+	// itself; the receiver applies the runner's MoveTo /
+	// SetFlag outputs to MailStore.Move + MailStore.UpdateFlags.
+	// If the runner is nil the receiver falls back to the
+	// legacy direct-to-INBOX behaviour, which keeps the
+	// existing tests in the smtp package green even before
+	// the operator enables the rules engine.
+	//
+	// Typed as an interface so tests can substitute a
+	// panic-throwing runner to verify the "rules runner
+	// failure does not lose the original" guarantee. The
+	// production code always assigns a *rules.Runner.
+	RulesRunner rules.RulesRunner
 }
 
 // NewReceiver creates a message receiver.
@@ -67,7 +84,14 @@ type externalRecipient struct {
 // 7. Parse the destination domain(s)
 // 8. Validate recipients exist locally
 // 9. Store message in each recipient's MailStore
-// 10. Enqueue for local delivery
+// 10. Enqueue for local delivery (BEFORE any rule side effects)
+// 11. Apply rules engine runner (forward / vacation / move /
+//     copy / flag). The runner may enqueue outbound work but
+//     ONLY AFTER local delivery is durably enqueued. If the
+//     local enqueue in step 10 fails the runner NEVER runs
+//     for that recipient — no forwarding, no vacation reply,
+//     no auto-copy can leak into the queue ahead of the
+//     original local delivery being accepted.
 func (r *Receiver) AcceptMessage(ctx context.Context, session *Session) error {
 	rfc822Data := session.DataBuffer
 
@@ -363,6 +387,16 @@ func (r *Receiver) AcceptMessage(ctx context.Context, session *Session) error {
 			firstMessageID = msg.MessageID
 		}
 
+		// Enqueue the LOCAL delivery BEFORE running the rules
+		// runner. The runner may emit forwarding / vacation
+		// side effects (queue entries of its own); those are
+		// allowed to land only once the original local copy
+		// is durably on the queue. If this local enqueue
+		// fails we MUST purge the stored row and return the
+		// error WITHOUT invoking the runner — otherwise a
+		// transient queue outage could leave the recipient
+		// with no local copy while auto-forwarded / vacation
+		// replies already went out to third parties.
 		qEntry := &queue.QueueEntry{
 			TenantID:        rcpt.TenantID,
 			DomainID:        rcpt.DomainID,
@@ -377,11 +411,29 @@ func (r *Receiver) AcceptMessage(ctx context.Context, session *Session) error {
 		}
 
 		if err := r.QueueEngine.Enqueue(ctx, qEntry); err != nil {
-			if purgeErr := r.MailStore.PurgeMessage(ctx, msg.ID, nil); purgeErr != nil {
-				return fmt.Errorf("store succeeded but queue failed (%v) AND purge failed (%v): %v",
-					err, purgeErr, err)
+			// Local delivery failed. Purge the stored row
+			// so we do not leak an orphan message, then
+			// return the error WITHOUT invoking the rules
+			// runner — no forward / vacation / copy can
+			// leak ahead of a failed local accept.
+			purgeErr := r.MailStore.PurgeMessage(ctx, msg.ID, nil)
+			if purgeErr != nil {
+				return fmt.Errorf("enqueue for %s: %w (and purge failed: %v)", rcpt.Email, err, purgeErr)
 			}
 			return fmt.Errorf("enqueue for %s: %w", rcpt.Email, err)
+		}
+
+		// Local delivery is now durably enqueued. Apply
+		// the rules runner for forwarding / vacation /
+		// move / copy / flag. The runner is best-effort:
+		// a panic / DB error inside the runner must not
+		// abort the SMTP accept because the original is
+		// already on the queue (and therefore the local
+		// inbox will be populated by the queue worker).
+		// applyRulesRunner's own defer-recover ensures
+		// that contract.
+		if r.RulesRunner != nil {
+			r.applyRulesRunner(ctx, rcpt, msg, rfc822Data)
 		}
 	}
 
@@ -457,6 +509,35 @@ func extractSubject(rfc822 []byte) string {
 		}
 	}
 	return ""
+}
+
+// extractHeaderValue pulls the value of a single top-level
+// RFC822 header (case-insensitive name). The function is
+// header-section only — it does NOT walk into MIME parts. Used
+// by the rules runner to pull From / To / Cc without paying
+// for a full MIME parse.
+func extractHeaderValue(rfc822 []byte, name string) string {
+	prefix := []byte(strings.ToLower(name) + ":")
+	lines := bytes.Split(rfc822, []byte("\n"))
+	for _, line := range lines {
+		trimmed := bytes.TrimSpace(line)
+		if bytes.HasPrefix(bytes.ToLower(trimmed), prefix) {
+			return strings.TrimSpace(string(trimmed[len(prefix):]))
+		}
+	}
+	return ""
+}
+
+// hasAttachmentHint inspects the MIME structure cheaply for
+// any multipart/mixed or attachment-shaped part. The rules
+// runner uses this to drive has_attachment conditions without
+// invoking the MIME extractor (which would be overkill for a
+// boolean predicate).
+func hasAttachmentHint(rfc822 []byte) bool {
+	s := string(rfc822)
+	return strings.Contains(strings.ToLower(s), "content-disposition: attachment") ||
+		strings.Contains(strings.ToLower(s), "content-type: multipart/mixed") ||
+		strings.Contains(strings.ToLower(s), "content-type: multipart/related")
 }
 
 func extractHeloDomain(session *Session) string {
