@@ -1,28 +1,61 @@
 [Unit]
-Description=Orvix Runtime Update
-Documentation=https://opencode.ai
+Description=Orvix Runtime Update (operator-initiated)
+Documentation=https://github.com/reachfm/orvix
+# Production-readiness gate BLOCKER 2: this unit is operator-
+# triggered ONLY. There is NO [Install] section — `systemctl
+# enable` will refuse to enable it, and even if a future refactor
+# re-adds an [Install] block, release/install.sh never calls
+# `systemctl enable orvix-update.service`. Operators trigger
+# an update explicitly with:
+#
+#   sudo systemctl start orvix-update.service
+#
+# (or via the admin UI's "Apply Update" button, which exec's
+# `systemctl start orvix-update.service` through the bounded
+# NOPASSWD sudoers rule at /etc/sudoers.d/orvix-update).
+#
+# The unit MUST NOT be active at boot. If it is, an unattended
+# server reboot would run the update oneshot before any
+# operator intent, which could overwrite the running binary
+# from a tree that has not been validated.
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=oneshot
 User=root
-ExecStart=/opt/orvix/release/scripts/apply-runtime-update.sh
+ExecStart=/usr/share/orvix/scripts/apply-runtime-update.sh
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/opt/orvix /usr/local/bin /usr/share/orvix /tmp
+ReadWritePaths=/opt/orvix /usr/local/bin /usr/share/orvix /usr/share/orvix/scripts /tmp /var/lib/orvix /var/log/orvix
 ProtectHome=true
 PrivateTmp=true
-CapabilityBoundingSet=
-AmbientCapabilities=
+# Production-readiness gate BLOCKER 4: apply-runtime-update.sh
+# runs `setcap cap_net_bind_service=+ep` on /usr/local/bin/orvix,
+# which requires CAP_SETFCAP. Granting only that one
+# capability keeps the unit's capability surface bounded; we
+# do NOT grant CAP_SYS_ADMIN, CAP_DAC_OVERRIDE, or anything
+# else. Both AmbientCapabilities AND CapabilityBoundingSet
+# MUST include CAP_SETFCAP or setcap fails silently with
+# "Operation not permitted" and the running binary loses its
+# low-port bind capability on next restart.
+CapabilityBoundingSet=CAP_SETFCAP
+AmbientCapabilities=CAP_SETFCAP
 ProtectClock=true
 ProtectKernelTunables=true
 ProtectKernelLogs=true
 ProtectControlGroups=true
 RestrictRealtime=true
+RestrictSUIDSGID=true
 SystemCallArchitectures=native
 RemoveIPC=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# Production-readiness gate BLOCKER 3: the script derives the
+# repo root from ORVIX_REPO_DIR, NOT from its own install path.
+# /usr/share/orvix/scripts is not a git worktree, so the script
+# would otherwise fail git rev-parse. Operators point this at
+# their source tree (default /opt/orvix).
 Environment=ORVIX_UPDATE=1
-
-[Install]
-WantedBy=multi-user.target
+Environment=ORVIX_REPO_DIR=/opt/orvix

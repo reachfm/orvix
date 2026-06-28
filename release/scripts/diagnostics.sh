@@ -63,7 +63,7 @@ OUTPUT_FILE="${1:-orvix-diagnostics-$(date +%Y%m%d_%H%M%S).txt}"
 
     # Binary status
     echo "## Binary Status"
-    for bin in /usr/local/bin/orvix /usr/local/bin/stalwart; do
+    for bin in /usr/local/bin/orvix; do
         if [ -f "$bin" ]; then
             echo "$bin: exists ($(stat -c '%a %U:%G' "$bin" 2>/dev/null), $(wc -c < "$bin") bytes)"
         else
@@ -72,9 +72,11 @@ OUTPUT_FILE="${1:-orvix-diagnostics-$(date +%Y%m%d_%H%M%S).txt}"
     done
     echo ""
 
-    # Port status
+    # Port status — covers admin, webmail, JMAP, mail listeners,
+    # HTTPS proxy and Redis. Anything missing here is a useful
+    # signal when triaging a "service won't start" ticket.
     echo "## Port Status"
-    for port in 8080 18080 80 443 25 143 993; do
+    for port in 80 443 25 110 143 465 587 993 995 4190 6379 8080 8081; do
         STATUS=$(ss -tlnp "sport = :$port" 2>/dev/null | head -1 || echo "")
         if [ -n "$STATUS" ]; then
             echo "Port $port: LISTENING"

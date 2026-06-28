@@ -29,6 +29,16 @@
 #
 # Service restart: prefer systemctl if active; fall back to
 # init.d; otherwise pkill and let the operator restart.
+#
+# Production-readiness gate BLOCKER 3: this script is INSTALLED
+# to /usr/share/orvix/scripts/apply-runtime-update.sh and runs
+# from there. /usr/share/orvix/scripts is NOT a git worktree,
+# so `git rev-parse --show-toplevel` from this script's own
+# directory would fail. The script now reads ORVIX_REPO_DIR
+# from the environment (the systemd unit at
+# release/systemd/orvix-update.service sets it to /opt/orvix).
+# Operators can override by exporting ORVIX_REPO_DIR=/path/to/repo
+# before running the script manually.
 set -euo pipefail
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -36,12 +46,36 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && git rev-parse --show-toplevel 2>/dev/null || echo "")"
-if [ -z "$REPO_ROOT" ]; then
-  echo "ERROR: Cannot detect repository root. Run this script from the repo or a subdirectory." >&2
+# Resolve repo root from ORVIX_REPO_DIR, NOT from $0. The
+# systemd oneshot unit exports ORVIX_REPO_DIR=/opt/orvix; this
+# is also the default when the script is run manually.
+REPO_ROOT="${ORVIX_REPO_DIR:-/opt/orvix}"
+if [ ! -d "$REPO_ROOT" ]; then
+  echo "ERROR: ORVIX_REPO_DIR does not exist: $REPO_ROOT" >&2
+  echo "Set ORVIX_REPO_DIR to your orvix source tree (e.g. /opt/orvix)" >&2
+  echo "or clone the repo:" >&2
+  echo "    sudo git clone https://github.com/reachfm/orvix.git /opt/orvix" >&2
+  exit 1
+fi
+if [ ! -d "$REPO_ROOT/.git" ] && [ ! -f "$REPO_ROOT/.git" ]; then
+  echo "ERROR: ORVIX_REPO_DIR is not a git worktree: $REPO_ROOT" >&2
+  echo "Expected a .git directory (or .git file for worktrees) inside the repo." >&2
+  echo "Either:" >&2
+  echo "  (a) clone the repo fresh:" >&2
+  echo "        sudo git clone https://github.com/reachfm/orvix.git $REPO_ROOT" >&2
+  echo "  (b) point ORVIX_REPO_DIR at an existing clone:" >&2
+  echo "        sudo ORVIX_REPO_DIR=/path/to/existing/clone systemctl start orvix-update.service" >&2
   exit 1
 fi
 
+# Production-readiness gate BLOCKER 4: setcap needs CAP_SETFCAP.
+# The systemd oneshot unit grants that capability; if the
+# operator runs this script OUTSIDE the unit (e.g. from a
+# shell as root), the kernel still grants CAP_SETFCAP to UID 0,
+# so setcap works. We deliberately do NOT skip setcap — it is
+# required to restore the low-port bind capability on the new
+# binary after `install -m 0755` strips it.
+REPO_ROOT="$(cd "$REPO_ROOT" && git rev-parse --show-toplevel 2>/dev/null || echo "$REPO_ROOT")"
 cd "$REPO_ROOT"
 
 echo "=== Orvix CoreMail Runtime Update ==="

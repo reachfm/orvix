@@ -6,6 +6,7 @@ set -euo pipefail
 # Usage: bash healthcheck.sh [--verbose]
 
 ORVIX_URL="${ORVIX_URL:-http://localhost:8080}"
+JMAP_URL="${JMAP_URL:-http://localhost:8081}"
 VERBOSE=false
 
 if [ "${1:-}" = "--verbose" ] || [ "${1:-}" = "-v" ]; then
@@ -50,19 +51,36 @@ if command -v redis-cli &>/dev/null; then
     fi
 fi
 
-# 4. Check Stalwart (if installed)
-if command -v stalwart &>/dev/null; then
-    log "Checking Stalwart..."
-    STALWART_CHECK=$(curl -fsSL -o /dev/null -w "%{http_code}" "http://localhost:18080/health" 2>/dev/null || echo "failed")
-    if [ "$STALWART_CHECK" = "200" ]; then
-        log "  ✓ Stalwart is responding"
+# 4. Check JMAP endpoint reachability (advisory; may be on
+#    a separate port, may be proxied through Caddy).
+if command -v curl &>/dev/null; then
+    log "Checking JMAP endpoint at $JMAP_URL..."
+    JMAP_HEALTH=$(curl -fsSL -o /dev/null -w "%{http_code}" "${JMAP_URL}/.well-known/jmap" 2>/dev/null || echo "failed")
+    if [ "$JMAP_HEALTH" = "200" ]; then
+        log "  ✓ JMAP is reachable"
     else
-        echo "  ⚠ Stalwart health check failed (HTTP $STALWART_CHECK)"
-        # Non-fatal — Stalwart may not be running yet
+        # Non-fatal — JMAP may not be enabled in this build, or
+        # the port may be firewalled.
+        log "  ⚠ JMAP probe returned HTTP $JMAP_HEALTH (advisory)"
     fi
 fi
 
-# 5. Check disk space
+# 5. Check SMTP/IMAP/POP3 listener reachability (advisory).
+for spec in "25|smtp" "110|pop3" "143|imap"; do
+    port="${spec%%|*}"
+    name="${spec##*|}"
+    log "Checking $name on tcp/$port..."
+    if command -v bash &>/dev/null && [ -e /dev/tcp/localhost/"$port" ]; then
+        log "  ✓ $name is listening on tcp/$port"
+    elif command -v ss &>/dev/null && ss -ltn "( sport = :$port )" 2>/dev/null | grep -q ":$port"; then
+        log "  ✓ $name is listening on tcp/$port"
+    else
+        # Non-fatal — listener may be intentionally down.
+        log "  ⚠ $name is not listening on tcp/$port (advisory)"
+    fi
+done
+
+# 6. Check disk space
 log "Checking disk space..."
 DISK_USAGE=$(df /var/lib/orvix 2>/dev/null | awk 'NR==2 {print $5}' | sed 's/%//' || echo "0")
 if [ "${DISK_USAGE:-0}" -gt 90 ]; then

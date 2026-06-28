@@ -757,7 +757,7 @@ func TestUpdateV1_HelperUnitHasReadWritePaths(t *testing.T) {
 
 // TestUpdateV1_HelperUnitNoEnvironmentFile verifies the update
 // helper unit does NOT load any external environment file. The
-// unit runs as root with ExecStart=/opt/orvix/release/scripts/...
+// unit runs as root with ExecStart=...apply-runtime-update.sh
 // and must NOT source /etc/orvix/update.env because that file
 // lives under a directory owned by the non-root orvix user.
 // An attacker who controls update.env would control environment
@@ -767,6 +767,13 @@ func TestUpdateV1_HelperUnitHasReadWritePaths(t *testing.T) {
 // ORVIX_UPDATE=1 (set via the Environment directive, which is
 // part of the root-owned unit file and cannot be modified by
 // the orvix user).
+//
+// ExecStart path note: the original release referenced
+// /opt/orvix/release/scripts/apply-runtime-update.sh, but that
+// path was NEVER copied by install.sh (the script lives at
+// /usr/share/orvix/scripts/apply-runtime-update.sh post-install).
+// The unit now points at the installer-managed path so the
+// oneshot unit does not silently fail on every fresh VPS.
 func TestUpdateV1_HelperUnitNoEnvironmentFile(t *testing.T) {
 	root := workspaceRoot(t)
 	unitPath := filepath.Join(root, "release", "systemd", "orvix-update.service")
@@ -780,16 +787,30 @@ func TestUpdateV1_HelperUnitNoEnvironmentFile(t *testing.T) {
 	if strings.Contains(content, "EnvironmentFile") {
 		t.Error("unit must NOT contain EnvironmentFile (injection vector)")
 	}
-	// Must NOT reference /etc/orvix/update.env.
-	if strings.Contains(content, "update.env") {
-		t.Error("unit must NOT reference update.env")
+	// Must NOT reference update.env in any executable context.
+	// Comments explaining the historical /etc/orvix/update.env
+	// design are fine.
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || trimmed == "" {
+			continue
+		}
+		if strings.Contains(line, "update.env") {
+			t.Errorf("unit executable line references update.env: %s", line)
+		}
+		if strings.HasPrefix(trimmed, "Environment=") && strings.Contains(trimmed, "/etc/orvix") {
+			t.Errorf("Environment directive references /etc/orvix (injection vector): %s", line)
+		}
 	}
-	if strings.Contains(content, "/etc/orvix") {
-		t.Error("unit must NOT reference /etc/orvix")
+	// ExecStart must point at the installer-managed path. The
+	// previous /opt/orvix/release/scripts/... path was a
+	// regression — install.sh never copied the script there, so
+	// the oneshot silently failed on every fresh VPS install.
+	if !strings.Contains(content, "ExecStart=/usr/share/orvix/scripts/apply-runtime-update.sh") {
+		t.Error("unit must have ExecStart=/usr/share/orvix/scripts/apply-runtime-update.sh (installer-managed path)")
 	}
-	// ExecStart must be the hardcoded canonical path.
-	if !strings.Contains(content, "ExecStart=/opt/orvix/release/scripts/apply-runtime-update.sh") {
-		t.Error("unit must have hardcoded ExecStart=/opt/orvix/release/scripts/apply-runtime-update.sh")
+	if strings.Contains(content, "ExecStart=/opt/orvix/release/scripts/apply-runtime-update.sh") {
+		t.Error("unit still references the /opt/orvix/... ExecStart path that install.sh never copies (release-blocker regression)")
 	}
 }
 

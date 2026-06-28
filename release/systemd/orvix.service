@@ -1,8 +1,15 @@
 [Unit]
-Description=Orvix RC1 Mail Server
+Description=Orvix Enterprise Mail Server
 Documentation=https://github.com/reachfm/orvix
+# Redis is a HARD dependency: every request goes through
+# redis-backed rate limiting + session cache, and the CoreMail
+# queue worker uses Redis pub/sub. Without Redis, orvix will
+# refuse to start, so we Require= (not just Wants=) and let
+# systemd fail fast instead of producing partial-failure boot
+# logs.
 After=network-online.target redis-server.service
-Wants=network-online.target redis-server.service
+Wants=network-online.target
+Requires=redis-server.service
 
 [Service]
 Type=simple
@@ -13,19 +20,49 @@ ExecStart=/usr/local/bin/orvix serve
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=5
+TimeoutStopSec=30s
 
 Environment=ORVIX_CONFIG=/etc/orvix/orvix.yaml
 Environment=ORVIX_LOG_DIR=/var/log/orvix
 EnvironmentFile=-/etc/orvix/bootstrap.env
 
+# CAP_NET_BIND_SERVICE is required to bind port 80/443 without
+# running the binary as root. Bounding the capability set to
+# ONLY this single cap means a binary compromise cannot
+# re-acquire sysadmin-level capabilities at runtime.
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=true
 PrivateTmp=true
+# ReadWritePaths: every directory the binary writes at runtime.
+# /var/lib/orvix          — SQLite DB, JWT key, mailstore, backups
+# /var/log/orvix          — structured JSON logs
+# /etc/orvix              — runtime config reload + VAPID key
+# ProtectSystem=full makes every other path read-only or
+# invisible, which is what blocks a vulnerability from
+# rewriting /usr/bin, /etc/passwd, or /var/lib/systemd.
 ReadWritePaths=/var/lib/orvix /var/log/orvix /etc/orvix
 LimitNOFILE=65536
+
+# Hardening — every option below restricts what a compromised
+# process can do at the kernel boundary. None of these affect
+# the happy path; they only matter when the binary has already
+# been compromised and is trying to escape its sandbox.
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+# Network namespace only. AF_UNIX is required by gorm/sqlite
+# and the journald socket; AF_INET / AF_INET6 cover SMTP/IMAP/
+# POP3/JMAP/HTTP listeners.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
 StandardOutput=journal
 StandardError=journal
