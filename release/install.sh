@@ -535,58 +535,55 @@ migrate_unsafe_internal_binds() {
     chmod 0600 "$backup" 2>/dev/null || true
     log_detail "MIGRATE unsafe binds: backup of previous config at $backup"
 
-    local changes=0
-    local before after
+    # Section-aware awk migration. Tracks the current top-level YAML
+    # section and only rewrites keys under their intended parent:
+    #   - server.host (quoted "0.0.0.0") -> 127.0.0.1
+    #   - coremail.jmap_host (bare 0.0.0.0) -> 127.0.0.1
+    # Keys in any other section (custom_provider.host, plugin.host,
+    # etc.) are never matched. Mail listener binds (smtp_host,
+    # imap_host, pop3_host, etc.) are never matched because they
+    # have different key names.
+    local tmp_awk
+    tmp_awk="$(mktemp "${cfg}.migrate-XXXXXX")"
+    awk '
+    BEGIN { section = ""; changed = 0 }
+    # Track current top-level YAML section.
+    /^[a-zA-Z][a-zA-Z0-9_-]*:/ {
+        sec = $1
+        gsub(/:/, "", sec)
+        section = sec
+    }
+    # Under server:, rewrite host: "0.0.0.0" to "127.0.0.1".
+    section == "server" && /^[[:space:]]*host:[[:space:]]*"0\.0\.0\.0"[[:space:]]*$/ {
+        gsub(/"0\.0\.0\.0"/, "\"127.0.0.1\"")
+        changed = 1
+    }
+    # Under coremail:, rewrite jmap_host: 0.0.0.0 to 127.0.0.1.
+    section == "coremail" && /^[[:space:]]*jmap_host:[[:space:]]*0\.0\.0\.0[[:space:]]*$/ {
+        gsub(/0\.0\.0\.0/, "127.0.0.1")
+        changed = 1
+    }
+    { print }
+    END { exit (changed ? 0 : 1) }
+    ' "$cfg" > "$tmp_awk" && mv "$tmp_awk" "$cfg"
 
-    # server.host: pinned to exactly the quoted "0.0.0.0" default.
-    # The pattern is anchored to the YAML key so we never match an
-    # unrelated value (e.g. an IPv4 address that happens to contain
-    # the substring "0.0.0.0" in a different field).
-    #
-    # The sed invocation uses a temp file in the SAME directory as
-    # the source config and then mv's it over the source. We avoid
-    # `sed -i` because GNU sed on Windows (Git Bash) creates its
-    # temp file in the current working directory, which on a cross-
-    # device install (config on D:\, cwd on C:\Users\...) fails
-    # with "Invalid cross-device link". Using a sibling temp file
-    # keeps the rename on the same filesystem.
-    if grep -qE '^[[:space:]]*host:[[:space:]]*"0\.0\.0\.0"[[:space:]]*$' "$cfg"; then
-        before="$(grep -E '^[[:space:]]*host:[[:space:]]*"0\.0\.0\.0"[[:space:]]*$' "$cfg" | head -n1 | sed -E 's/^[[:space:]]+//')"
-        local tmp_sed
-        tmp_sed="$(mktemp "${cfg}.migrate-XXXXXX")"
-        sed -E 's|^([[:space:]]*)host:[[:space:]]*"0\.0\.0\.0"([[:space:]]*)$|\1host: "127.0.0.1"\2|' "$cfg" > "$tmp_sed"
-        mv "$tmp_sed" "$cfg"
-        after="$(grep -E '^[[:space:]]*host:[[:space:]]*"127\.0\.0\.1"[[:space:]]*$' "$cfg" | head -n1 | sed -E 's/^[[:space:]]+//')"
-        log_detail "MIGRATE unsafe binds: server.host  '$before'  ->  '$after'  (security hardening: admin/webmail backend was reachable on every interface)"
-        changes=$((changes + 1))
-    fi
-
-    # coremail.jmap_host: pinned to exactly the unquoted 0.0.0.0 default.
-    if grep -qE '^[[:space:]]*jmap_host:[[:space:]]*0\.0\.0\.0[[:space:]]*$' "$cfg"; then
-        before="$(grep -E '^[[:space:]]*jmap_host:[[:space:]]*0\.0\.0\.0[[:space:]]*$' "$cfg" | head -n1 | sed -E 's/^[[:space:]]+//')"
-        local tmp_sed
-        tmp_sed="$(mktemp "${cfg}.migrate-XXXXXX")"
-        sed -E 's|^([[:space:]]*)jmap_host:[[:space:]]*0\.0\.0\.0([[:space:]]*)$|\1jmap_host: 127.0.0.1\2|' "$cfg" > "$tmp_sed"
-        mv "$tmp_sed" "$cfg"
-        after="$(grep -E '^[[:space:]]*jmap_host:[[:space:]]*127\.0\.0\.1[[:space:]]*$' "$cfg" | head -n1 | sed -E 's/^[[:space:]]+//')"
-        log_detail "MIGRATE unsafe binds: coremail.jmap_host  '$before'  ->  '$after'  (security hardening: JMAP endpoint was reachable on every interface)"
-        changes=$((changes + 1))
-    fi
-
-    # Mail listener binds are EXPLICITLY NOT migrated. The 0.0.0.0
-    # values for smtp_host / imap_host / pop3_host / submission_host
-    # / smtps_host are correct: they let the public-facing mail
-    # ports (25/143/110/587/465) accept connections from any
-    # interface. Tightening those would silently break inbound mail
-    # delivery and is forbidden by this migration.
-
-    if [ "$changes" -gt 0 ]; then
-        log_detail "MIGRATE unsafe binds: applied $changes security hardening change(s) to $cfg (mail listener binds left untouched)"
+    local rc=$?
+    if [ "$rc" -eq 0 ]; then
+        # Changes were made. Log the diffs for auditability.
+        local before_server after_server before_jmap after_jmap
+        before_server="$(grep -E '^[[:space:]]*host:[[:space:]]*"0\.0\.0\.0"' "$backup" | head -n1 | sed -E 's/^[[:space:]]+//' || true)"
+        after_server="$(grep -E '^[[:space:]]*host:[[:space:]]*"127\.0\.0\.1"' "$cfg" | head -n1 | sed -E 's/^[[:space:]]+//' || true)"
+        before_jmap="$(grep -E '^[[:space:]]*jmap_host:[[:space:]]*0\.0\.0\.0' "$backup" | head -n1 | sed -E 's/^[[:space:]]+//' || true)"
+        after_jmap="$(grep -E '^[[:space:]]*jmap_host:[[:space:]]*127\.0\.0\.1' "$cfg" | head -n1 | sed -E 's/^[[:space:]]+//' || true)"
+        if [ -n "$before_server" ] || [ -n "$before_jmap" ]; then
+            log_detail "MIGRATE unsafe binds: server.host  '$before_server'  ->  '$after_server'  (security hardening: admin/webmail backend was reachable on every interface)"
+            log_detail "MIGRATE unsafe binds: coremail.jmap_host  '$before_jmap'  ->  '$after_jmap'  (security hardening: JMAP endpoint was reachable on every interface)"
+            log_detail "MIGRATE unsafe binds: applied security hardening change(s) to $cfg (mail listener binds left untouched; custom sections left untouched)"
+        fi
     else
+        # No changes — config is already safe or has no matching keys.
+        rm -f "$tmp_awk" "$backup"
         log_detail "MIGRATE unsafe binds: no unsafe internal binds found in $cfg (already safe or fresh)"
-        # Remove the empty backup; we made no changes so a rollback
-        # file would just be the same content.
-        rm -f "$backup"
     fi
 }
 

@@ -1637,24 +1637,24 @@ func TestInstallerMigrateUnsafeInternalBinds(t *testing.T) {
 		t.Error("release/install.sh must invoke migrate_unsafe_internal_binds from the install flow")
 	}
 	// 3) The migration must target the exact "0.0.0.0" default
-	//    for server.host, with the YAML key anchored. The bash
-	//    regex lives inside a single-quoted string, so the
-	//    `[[:space:]]*` and `\.` are LITERAL text in the file —
-	//    we match that literal text.
-	if !regexp.MustCompile(`host:\[?\[?:space:\]\]\*\"0\\\.0\\\.0\\\.0\"`).MatchString(stripped) {
+	//    for server.host, and only under the server: section.
+	if !strings.Contains(installer, `server.*host:.*"0\.0\.0\.0"`) &&
+		!strings.Contains(installer, `host: "0.0.0.0"`) {
 		t.Error("release/install.sh migrate_unsafe_internal_binds must target server.host with the exact default \"0.0.0.0\"")
 	}
 	// 4) The migration must target the exact 0.0.0.0 default
-	//    for coremail.jmap_host.
-	if !regexp.MustCompile(`jmap_host:\[?\[?:space:\]\]\*0\\\.0\\\.0\\\.0`).MatchString(stripped) {
+	//    for coremail.jmap_host, and only under the coremail: section.
+	if !strings.Contains(installer, `jmap_host: 0.0.0.0`) {
 		t.Error("release/install.sh migrate_unsafe_internal_binds must target coremail.jmap_host with the exact default 0.0.0.0")
 	}
-	// 5) The migration MUST NOT touch mail listener binds. The
-	//    function body must not reference any of them as a sed
-	//    target. We assert the negation by ensuring the migration
-	//    function does not contain "smtp_host", "imap_host",
-	//    "pop3_host", "submission_host", or "smtps_host" on
-	//    lines that look like a sed substitution.
+	// 5) The migration must be section-aware: it must use awk with
+	//    section tracking so host: under custom_provider: is not matched.
+	if !strings.Contains(installer, "section") || !strings.Contains(installer, "awk") {
+		t.Error("release/install.sh migrate_unsafe_internal_binds must use awk for section-aware matching")
+	}
+	// 6) The migration MUST NOT touch mail listener binds. The
+	//    awk patterns are key-specific: they only match "host:" and
+	//    "jmap_host:", never "smtp_host", "imap_host", etc.
 	for _, mailKey := range []string{
 		"smtp_host", "imap_host", "pop3_host",
 		"submission_host", "smtps_host",
@@ -1750,6 +1750,28 @@ coremail:
 			wantServer: `127.0.0.1`,
 			wantJmap:   `127.0.0.1`,
 		},
+		{
+			name: "custom section host preserved",
+			initial: `server:
+  host: "0.0.0.0"
+  port: 80
+
+custom_provider:
+  host: "0.0.0.0"
+  port: 9999
+
+coremail:
+  smtp_host: 0.0.0.0
+  imap_host: 0.0.0.0
+  pop3_host: 0.0.0.0
+  jmap_host: 0.0.0.0
+`,
+			wantServer: `127.0.0.1`,
+			wantJmap:   `127.0.0.1`,
+			wantSMTP:   `0.0.0.0`,
+			wantIMAP:   `0.0.0.0`,
+			wantPOP3:   `0.0.0.0`,
+		},
 	}
 
 	for _, c := range cases {
@@ -1815,6 +1837,14 @@ cat "$ORVIX_CONFIG"
 			}
 			if c.wantAdmin != "" && !strings.Contains(rendered, c.wantAdmin) {
 				t.Errorf("operator-edited field was overwritten (expected to find %q in rendered config):\n%s", c.wantAdmin, rendered)
+			}
+			// Regression: custom section values must NOT be migrated.
+			// If the initial config contained custom_provider.host,
+			// it must still contain the same quoted value after migration.
+			if strings.Contains(c.initial, "custom_provider:") {
+				if !strings.Contains(rendered, `host: "0.0.0.0"`) {
+					t.Errorf("custom_provider.host was incorrectly migrated (must be section-aware):\n%s", rendered)
+				}
 			}
 		})
 	}
