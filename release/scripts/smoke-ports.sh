@@ -14,7 +14,10 @@
 #   - HTTPS proxy ports (80, 443) are open.
 #   - Internal ports (8080 admin/webmail, 8081 JMAP) are bound
 #     but ONLY allowed on 127.0.0.1 (post-setup-https hardening).
-#   - Redis (6379) is bound on 127.0.0.1 only.
+#   - Redis (6379) is bound on 127.0.0.1 (IPv4 loopback) and/or
+#     [::1] (IPv6 loopback) only. Redis listening on either
+#     loopback family is safe and MUST NOT be flagged as public
+#     exposure.
 #
 # Exit codes:
 #   0  all expected ports in expected state
@@ -61,6 +64,36 @@ listening_on() {
         }' \
         | sed -E 's/\[?::ffff:([0-9.]+)\]?/\1/g' \
         | sort -u
+}
+
+# is_loopback_bind <addr> — return 0 if the bound address is a
+# local loopback, 1 if it is public-facing.
+#
+# Accepted loopback forms:
+#   127.0.0.1:<port>      IPv4 loopback
+#   [::1]:<port>          IPv6 loopback (bracketed, ss -H default form)
+#   ::1:<port>            IPv6 loopback (some ss/netstat versions drop the brackets)
+#   127.<rest>:<port>     entire 127.0.0.0/8 IPv4 loopback block
+#
+# REJECTED (treated as public exposure):
+#   0.0.0.0:<port>        "any" IPv4
+#   [::]:<port>           IPv6 "any"
+#   *:<port>              wildcard
+#   any non-loopback interface address
+#
+# IMPORTANT: the case patterns below are QUOTED. Without quotes,
+# bash interprets [::1] as the character class [:1] (matching `:`
+# or `1`), which silently mis-matches and treats [::1]:6379 as
+# public. This bug originally regressed smoke-ports.sh and was
+# fixed 2026-06-29. Do NOT remove the quotes.
+is_loopback_bind() {
+    local addr="$1"
+    case "$addr" in
+        "127.0.0.1:"*|"127."*) return 0 ;;
+        "[::1]:"*)             return 0 ;;
+        "::1:"*)               return 0 ;;
+        *)                     return 1 ;;
+    esac
 }
 
 # firewall_allows <port>/<tcp|udp> — prints "yes" if ufw has an
@@ -151,21 +184,31 @@ for spec in "${specs[@]}"; do
     # Check bind posture.
     bad=""
     for addr in $addrs; do
-        case "$scope:$addr" in
-            public:127.0.0.1:*|public:[::1]:*)
+        if is_loopback_bind "$addr"; then
+            # Loopback is the correct posture for internal ports
+            # (Redis, admin/webmail, JMAP) and INCORRECT posture
+            # for public ports (mail, http/https) — a public port
+            # that is bound only to loopback is unreachable from
+            # the network and is therefore a misconfiguration.
+            if [ "$scope" = "public" ]; then
                 bad="$bad $addr"
-                ;;
-            public:*)
-                : # listening on a non-loopback address — fine
-                ;;
-            internal:127.0.0.1:*|internal:[::1]:*)
-                : # listening on loopback — fine for internal ports
-                ;;
-            internal:*)
+            fi
+        else
+            # Non-loopback bind is the correct posture for public
+            # ports and INCORRECT for internal ports (would expose
+            # the admin UI / JMAP / Redis to the network).
+            if [ "$scope" = "internal" ]; then
                 bad="$bad $addr"
-                ;;
-        esac
+            fi
+        fi
     done
+
+    # Surface a friendly note for the Redis dual-stack loopback
+    # case so operators don't see "POSTURE WRONG" when actually
+    # both bind families are the correct loopback posture.
+    if [ -z "$bad" ] && [ "$label" = "redis" ]; then
+        log "port $port (redis) bound on loopback (IPv4/IPv6) — OK"
+    fi
 
     fw_label="$fw"
     if [ -n "$bad" ]; then
