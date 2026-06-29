@@ -1648,26 +1648,77 @@ verify_install() {
     # Verify listener interface posture: internal services
     # must be on loopback; mail ports must be public.
     local bind_check_failed=0
+
+    # Helper: read a boolean YAML value from the config file.
+    # Returns "true" or "false".
+    yaml_bool() {
+        local key="$1"
+        grep -qE '^[[:space:]]*'"$key"':[[:space:]]*true[[:space:]]*$' "$ORVIX_CONFIG" 2>/dev/null && echo "true" || echo "false"
+    }
+
+    # Internal ports (8080, 8081) must be loopback-only: every
+    # bound address must be 127.x.x.x or [::1]. Reject if port
+    # is also exposed on 0.0.0.0, *, [::], or a public IP.
     for port in 8080 8081; do
-        local addrs
-        addrs="$(ss -ltnH "( sport = :$port )" 2>/dev/null | awk '{print $4}' | tr '\n' ' ' || true)"
-        if echo "$addrs" | grep -qE '^(127\.0\.0\.1|\[::1\]|::1)'; then
+        local addrs all_loopback has_loopback addr
+        addrs="$(ss -ltnH "( sport = :$port )" 2>/dev/null | awk '{print $4}' || true)"
+        all_loopback=true
+        has_loopback=false
+        for addr in $addrs; do
+            # Strip port suffix (e.g. "127.0.0.1:8080" -> "127.0.0.1")
+            local ip="${addr%:*}"
+            case "$ip" in
+                127.*|127.0.0.1)
+                    has_loopback=true ;;
+                \[::1\]|::1)
+                    has_loopback=true ;;
+                *)
+                    all_loopback=false
+                    echo "ERROR: port $port has non-loopback bind: $addr" >&2 ;;
+            esac
+        done
+        if [ "$has_loopback" = false ]; then
+            echo "ERROR: port $port has no loopback bind (found: $addrs)" >&2
+            bind_check_failed=1
+        elif [ "$all_loopback" = false ]; then
+            echo "ERROR: port $port is exposed on non-loopback addresses in addition to loopback" >&2
+            bind_check_failed=1
+        else
             log_detail "VERIFY bind port $port: loopback-only (pass)"
-        else
-            echo "ERROR: port $port is not bound to loopback (found: $addrs)" >&2
-            bind_check_failed=1
         fi
     done
-    for port in 25 110 143 587 465; do
+
+    # Public mail ports must be bound to 0.0.0.0 or * or [::].
+    # Mandatory: 25 (SMTP), 110 (POP3), 143 (IMAP).
+    # Conditional: 587 (Submission) when enabled, 465 (SMTPS) when enabled.
+    check_public_port() {
+        local port="$1" name="$2"
         local addrs
-        addrs="$(ss -ltnH "( sport = :$port )" 2>/dev/null | awk '{print $4}' | tr '\n' ' ' || true)"
+        addrs="$(ss -ltnH "( sport = :$port )" 2>/dev/null | awk '{print $4}' || true)"
         if echo "$addrs" | grep -qE '^(\*|0\.0\.0\.0|\[::\]|::)'; then
-            log_detail "VERIFY bind port $port: public (pass)"
+            log_detail "VERIFY bind port $port ($name): public (pass)"
         else
-            echo "ERROR: mail port $port is not bound publicly (found: $addrs)" >&2
+            echo "ERROR: mail port $port ($name) is not bound publicly (found: $addrs)" >&2
             bind_check_failed=1
         fi
-    done
+    }
+
+    check_public_port 25 "SMTP"
+    check_public_port 110 "POP3"
+    check_public_port 143 "IMAP"
+
+    if [ "$(yaml_bool submission_enabled)" = "true" ]; then
+        check_public_port 587 "Submission"
+    else
+        log_detail "SKIP bind port 587 (Submission): submission_enabled=false"
+    fi
+
+    if [ "$(yaml_bool smtps_enabled)" = "true" ]; then
+        check_public_port 465 "SMTPS"
+    else
+        log_detail "SKIP bind port 465 (SMTPS): smtps_enabled=false"
+    fi
+
     if [ "$bind_check_failed" -ne 0 ]; then
         fail "listener interface bind posture check failed"
     fi

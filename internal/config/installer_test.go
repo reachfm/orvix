@@ -1615,6 +1615,78 @@ func TestInstallerSummaryOutputUsesDomainNotPublicIP(t *testing.T) {
 	}
 }
 
+// TestInstallerBindPostureSkipsDisabledOptionalPorts verifies that
+// the verify_install() bind posture check does NOT unconditionally
+// require ports 587 (Submission) and 465 (SMTPS). These ports are
+// disabled by default and must only be validated when the config
+// explicitly enables them.
+func TestInstallerBindPostureSkipsDisabledOptionalPorts(t *testing.T) {
+	installer := mustRead(t, filepath.Join(repoRoot(t), "release", "install.sh"))
+
+	// The installer must check the config before requiring 587/465.
+	if !strings.Contains(installer, `submission_enabled` ) {
+		t.Error("verify_install must check coremail.submission_enabled before requiring port 587")
+	}
+	if !strings.Contains(installer, `smtps_enabled` ) {
+		t.Error("verify_install must check coremail.smtps_enabled before requiring port 465")
+	}
+	// The mandatory public ports (25, 110, 143) must still be checked.
+	if !strings.Contains(installer, `check_public_port 25` ) {
+		t.Error("verify_install must require port 25 (SMTP)")
+	}
+	if !strings.Contains(installer, `check_public_port 110` ) {
+		t.Error("verify_install must require port 110 (POP3)")
+	}
+	if !strings.Contains(installer, `check_public_port 143` ) {
+		t.Error("verify_install must require port 143 (IMAP)")
+	}
+	// 587 and 465 must NOT be unconditionally checked.
+	for _, port := range []string{"587", "465"} {
+		if strings.Contains(installer, `for port in 25 110 143 `+port) {
+			t.Errorf("verify_install must NOT unconditionally iterate port %s in the mail ports loop", port)
+		}
+	}
+}
+
+// TestInstallerBindPostureAllBindsLoopback verifies that the
+// 8080/8081 loopback check validates ALL bound addresses, not
+// just the first one. If a port is bound to both loopback AND
+// a public address, the check must fail.
+func TestInstallerBindPostureAllBindsLoopback(t *testing.T) {
+	installer := mustRead(t, filepath.Join(repoRoot(t), "release", "install.sh"))
+
+	// Must iterate every bound address for each internal port.
+	if !strings.Contains(installer, `for addr in $addrs` ) {
+		t.Error("verify_install must iterate all bound addresses for 8080/8081")
+	}
+	// Must track has_loopback AND all_loopback flags.
+	if !strings.Contains(installer, `all_loopback` ) {
+		t.Error("verify_install must track all_loopback flag for 8080/8081")
+	}
+	if !strings.Contains(installer, `has_loopback` ) {
+		t.Error("verify_install must track has_loopback flag for 8080/8081")
+	}
+	// Must reject when has_loopback is true but all_loopback is false
+	// (mixed loopback + public bind).
+	if !strings.Contains(installer, `is exposed on non-loopback` ) {
+		t.Error("verify_install must reject mixed loopback+public binds for 8080/8081")
+	}
+	// Must reject when no loopback bind exists.
+	if !strings.Contains(installer, `has no loopback bind` ) {
+		t.Error("verify_install must reject when no loopback bind exists for 8080/8081")
+	}
+}
+
+// TestInstallerBindPostureYamlBoolHelper verifies the yaml_bool
+// helper function is used to read boolean config values.
+func TestInstallerBindPostureYamlBoolHelper(t *testing.T) {
+	installer := mustRead(t, filepath.Join(repoRoot(t), "release", "install.sh"))
+
+	if !strings.Contains(installer, `yaml_bool()` ) {
+		t.Error("verify_install must define yaml_bool() helper to read config values")
+	}
+}
+
 // TestInstallerMigrateUnsafeInternalBinds pins that release/install.sh
 // defines a migrate_unsafe_internal_binds() function that:
 //   - is present in the script (static string check)
