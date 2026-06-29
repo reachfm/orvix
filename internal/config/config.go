@@ -402,14 +402,30 @@ func Defaults() *Config {
 // Load reads configuration from file, ENV, and defaults.
 func Load(logger *zap.Logger) (*Config, error) {
 	v := viper.New()
-	v.SetConfigName("orvix")
 	v.SetConfigType("yaml")
 
-	v.AddConfigPath("/etc/orvix")
-	v.AddConfigPath(".")
-	v.AddConfigPath("./config")
-
-	_ = v.ReadInConfig()
+	cfgPath := os.Getenv("ORVIX_CONFIG")
+	if cfgPath != "" {
+		v.SetConfigFile(cfgPath)
+		if err := v.ReadInConfig(); err != nil {
+			return nil, fmt.Errorf("failed to read config from ORVIX_CONFIG=%s: %w", cfgPath, err)
+		}
+		logger.Info("configuration file",
+			zap.String("path", v.ConfigFileUsed()),
+			zap.String("source", "ORVIX_CONFIG env var"))
+	} else {
+		v.SetConfigName("orvix")
+		v.AddConfigPath("/etc/orvix")
+		v.AddConfigPath(".")
+		v.AddConfigPath("./config")
+		if err := v.ReadInConfig(); err == nil {
+			logger.Info("configuration file",
+				zap.String("path", v.ConfigFileUsed()),
+				zap.String("source", "search path"))
+		} else {
+			logger.Info("no configuration file found, using defaults and environment variables")
+		}
+	}
 
 	v.SetEnvPrefix("ORVIX")
 	v.AutomaticEnv()
@@ -438,12 +454,6 @@ func Load(logger *zap.Logger) (*Config, error) {
 	}
 
 	cfg.validate()
-
-	logger.Info("configuration loaded",
-		zap.String("driver", cfg.Database.Driver),
-		zap.String("server", fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)),
-		zap.String("log_level", cfg.Logging.Level),
-	)
 
 	return cfg, nil
 }

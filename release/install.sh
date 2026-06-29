@@ -1619,6 +1619,59 @@ verify_install() {
     # the typed credentials twice, so removing the env file
     # cannot strand a working install.
     run_quiet rm -f "$BOOTSTRAP_ENV"
+
+    # Restart orvix so the live process no longer has
+    # ORVIX_ADMIN_PASSWORD_B64 in its environment. The
+    # config is already loaded correctly from orvix.yaml
+    # and the admin user is durable in the database.
+    systemctl restart orvix 2>/dev/null || true
+    local restart_wait
+    for restart_wait in 1 2 3 4 5 6 7 8 9 10; do
+        if systemctl is-active --quiet orvix 2>/dev/null; then
+            break
+        fi
+        sleep 1
+    done
+    systemctl is-active --quiet orvix || fail "orvix failed to restart after bootstrap env cleanup"
+
+    # Verify the restarted process has no bootstrap password
+    # material in its environment.
+    local orvix_pid
+    orvix_pid="$(pidof orvix 2>/dev/null || true)"
+    if [ -n "$orvix_pid" ]; then
+        if tr '\0' '\n' < "/proc/$orvix_pid/environ" 2>/dev/null | grep -qiE 'ORVIX_ADMIN_PASSWORD|ORVIX_ADMIN_PASSWORD_B64'; then
+            fail "bootstrap password material persists in orvix process environment after cleanup"
+        fi
+        log_detail "VERIFY orvix process environment: no bootstrap password material found"
+    fi
+
+    # Verify listener interface posture: internal services
+    # must be on loopback; mail ports must be public.
+    local bind_check_failed=0
+    for port in 8080 8081; do
+        local addrs
+        addrs="$(ss -ltnH "( sport = :$port )" 2>/dev/null | awk '{print $4}' | tr '\n' ' ' || true)"
+        if echo "$addrs" | grep -qE '^(127\.0\.0\.1|\[::1\]|::1)'; then
+            log_detail "VERIFY bind port $port: loopback-only (pass)"
+        else
+            echo "ERROR: port $port is not bound to loopback (found: $addrs)" >&2
+            bind_check_failed=1
+        fi
+    done
+    for port in 25 110 143 587 465; do
+        local addrs
+        addrs="$(ss -ltnH "( sport = :$port )" 2>/dev/null | awk '{print $4}' | tr '\n' ' ' || true)"
+        if echo "$addrs" | grep -qE '^(\*|0\.0\.0\.0|\[::\]|::)'; then
+            log_detail "VERIFY bind port $port: public (pass)"
+        else
+            echo "ERROR: mail port $port is not bound publicly (found: $addrs)" >&2
+            bind_check_failed=1
+        fi
+    done
+    if [ "$bind_check_failed" -ne 0 ]; then
+        fail "listener interface bind posture check failed"
+    fi
+
     echo "INSTALLATION VERIFICATION PASSED"
 }
 
