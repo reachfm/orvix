@@ -1635,25 +1635,38 @@ verify_install() {
     systemctl is-active --quiet orvix || fail "orvix failed to restart after bootstrap env cleanup"
 
     # Verify the restarted process has no bootstrap password
-    # material in its environment.
+    # material in its environment. Uses systemd MainPID (not
+    # pidof) so we always inspect the correct process.
     local orvix_pid
-    orvix_pid="$(pidof orvix 2>/dev/null || true)"
-    if [ -n "$orvix_pid" ]; then
-        if tr '\0' '\n' < "/proc/$orvix_pid/environ" 2>/dev/null | grep -qiE 'ORVIX_ADMIN_PASSWORD|ORVIX_ADMIN_PASSWORD_B64'; then
-            fail "bootstrap password material persists in orvix process environment after cleanup"
-        fi
-        log_detail "VERIFY orvix process environment: no bootstrap password material found"
+    orvix_pid="$(systemctl show -p MainPID --value orvix 2>/dev/null || true)"
+    if [ -z "$orvix_pid" ] || [ "$orvix_pid" = "0" ]; then
+        fail "cannot determine orvix MainPID after restart"
     fi
+    log_detail "VERIFY orvix process environment: MainPID=$orvix_pid"
+    if tr '\0' '\n' < "/proc/$orvix_pid/environ" 2>/dev/null | grep -qiE 'ORVIX_ADMIN_PASSWORD|ORVIX_ADMIN_PASSWORD_B64'; then
+        fail "bootstrap password material persists in orvix process environment after cleanup (MainPID=$orvix_pid)"
+    fi
+    log_detail "VERIFY orvix process environment: no bootstrap password material found"
 
     # Verify listener interface posture: internal services
     # must be on loopback; mail ports must be public.
     local bind_check_failed=0
 
-    # Helper: read a boolean YAML value from the config file.
-    # Returns "true" or "false".
-    yaml_bool() {
+    # Section-aware boolean reader for the coremail: section.
+    # Uses awk to track the current top-level YAML section so
+    # that unrelated sections (e.g. custom_provider.submission_enabled)
+    # never trigger optional port validation.
+    coremail_bool() {
         local key="$1"
-        grep -qE '^[[:space:]]*'"$key"':[[:space:]]*true[[:space:]]*$' "$ORVIX_CONFIG" 2>/dev/null && echo "true" || echo "false"
+        awk '
+        BEGIN { in_coremail = 0; result = 0 }
+        /^[a-zA-Z][a-zA-Z0-9_-]*:/ {
+            sec = $1; sub(/:$/, "", sec)
+            in_coremail = (sec == "coremail" ? 1 : 0)
+        }
+        in_coremail && /^[[:space:]]*'"$key"':[[:space:]]*true[[:space:]]*$/ { result = 1 }
+        END { exit (result ? 0 : 1) }
+        ' "$ORVIX_CONFIG" 2>/dev/null && echo "true" || echo "false"
     }
 
     # Internal ports (8080, 8081) must be loopback-only: every
@@ -1665,7 +1678,6 @@ verify_install() {
         all_loopback=true
         has_loopback=false
         for addr in $addrs; do
-            # Strip port suffix (e.g. "127.0.0.1:8080" -> "127.0.0.1")
             local ip="${addr%:*}"
             case "$ip" in
                 127.*|127.0.0.1)
@@ -1688,14 +1700,24 @@ verify_install() {
         fi
     done
 
-    # Public mail ports must be bound to 0.0.0.0 or * or [::].
+    # Public mail ports must have at least one non-loopback bind.
     # Mandatory: 25 (SMTP), 110 (POP3), 143 (IMAP).
     # Conditional: 587 (Submission) when enabled, 465 (SMTPS) when enabled.
     check_public_port() {
         local port="$1" name="$2"
-        local addrs
+        local addrs has_public addr
         addrs="$(ss -ltnH "( sport = :$port )" 2>/dev/null | awk '{print $4}' || true)"
-        if echo "$addrs" | grep -qE '^(\*|0\.0\.0\.0|\[::\]|::)'; then
+        has_public=false
+        for addr in $addrs; do
+            local ip="${addr%:*}"
+            case "$ip" in
+                127.*|127.0.0.1|\[::1\]|::1)
+                    ;; # loopback, skip
+                *)
+                    has_public=true ;;
+            esac
+        done
+        if [ "$has_public" = true ]; then
             log_detail "VERIFY bind port $port ($name): public (pass)"
         else
             echo "ERROR: mail port $port ($name) is not bound publicly (found: $addrs)" >&2
@@ -1707,13 +1729,13 @@ verify_install() {
     check_public_port 110 "POP3"
     check_public_port 143 "IMAP"
 
-    if [ "$(yaml_bool submission_enabled)" = "true" ]; then
+    if [ "$(coremail_bool submission_enabled)" = "true" ]; then
         check_public_port 587 "Submission"
     else
         log_detail "SKIP bind port 587 (Submission): submission_enabled=false"
     fi
 
-    if [ "$(yaml_bool smtps_enabled)" = "true" ]; then
+    if [ "$(coremail_bool smtps_enabled)" = "true" ]; then
         check_public_port 465 "SMTPS"
     else
         log_detail "SKIP bind port 465 (SMTPS): smtps_enabled=false"

@@ -1677,13 +1677,47 @@ func TestInstallerBindPostureAllBindsLoopback(t *testing.T) {
 	}
 }
 
-// TestInstallerBindPostureYamlBoolHelper verifies the yaml_bool
-// helper function is used to read boolean config values.
-func TestInstallerBindPostureYamlBoolHelper(t *testing.T) {
+// TestInstallerBindPostureCoremailBoolHelper verifies the coremail_bool
+// helper function is used to read boolean config values scoped to the
+// coremail: section.
+func TestInstallerBindPostureCoremailBoolHelper(t *testing.T) {
 	installer := mustRead(t, filepath.Join(repoRoot(t), "release", "install.sh"))
 
-	if !strings.Contains(installer, `yaml_bool()` ) {
-		t.Error("verify_install must define yaml_bool() helper to read config values")
+	if !strings.Contains(installer, `coremail_bool()` ) {
+		t.Error("verify_install must define coremail_bool() helper to read config values scoped to coremail section")
+	}
+	// Must use awk for section-aware tracking, not global grep.
+	if !strings.Contains(installer, `in_coremail = (sec == "coremail"` ) {
+		t.Error("coremail_bool() must use section-aware awk to scope matching to coremail: section")
+	}
+}
+
+// TestInstallerBindPostureMainPID verifies the bootstrap env process
+// check uses systemctl MainPID instead of pidof.
+func TestInstallerBindPostureMainPID(t *testing.T) {
+	installer := mustRead(t, filepath.Join(repoRoot(t), "release", "install.sh"))
+
+	if !strings.Contains(installer, `systemctl show -p MainPID --value orvix` ) {
+		t.Error("verify_install must use systemctl show -p MainPID --value orvix to find the process")
+	}
+	if strings.Contains(installer, `pidof orvix` ) {
+		t.Error("verify_install must NOT use pidof orvix (may return multiple PIDs)")
+	}
+}
+
+// TestInstallerBindPosturePublicMailPortAcceptsSpecificIP verifies
+// the public mail-port check accepts a specific non-loopback IP
+// (e.g. 203.0.113.5), not only wildcard 0.0.0.0/*/[::].
+func TestInstallerBindPosturePublicMailPortAcceptsSpecificIP(t *testing.T) {
+	installer := mustRead(t, filepath.Join(repoRoot(t), "release", "install.sh"))
+
+	// The check_public_port function must check for at least one
+	// non-loopback address, not only wildcard patterns.
+	if !strings.Contains(installer, `has_public=true` ) {
+		t.Error("check_public_port must detect any non-loopback bind as public")
+	}
+	if !strings.Contains(installer, `127.*|127.0.0.1|\[::1\]|::1` ) {
+		t.Error("check_public_port must skip all loopback addresses and accept specific IPs")
 	}
 }
 
