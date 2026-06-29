@@ -9,6 +9,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -573,4 +574,174 @@ func TestDocsRejectInvalidUFWMultiPort(t *testing.T) {
 	if !strings.Contains(doc, `for port in`) || !strings.Contains(doc, `sudo ufw allow "${port}/tcp"`) {
 		t.Error("docs/PRODUCTION_READINESS_GATE.md must demonstrate the per-port ufw loop form (BLOCKER 6)")
 	}
+}
+
+// TestSmokePortsAcceptsRedisIPv6Loopback pins the 2026-06-29
+// smoke-ports.sh hotfix: Redis bound on IPv6 loopback [::1]:6379
+// (and the unbracketed ss/netstat variant ::1:6379) MUST be
+// classified as a loopback bind, not as public exposure.
+//
+// The bug it guards against: bash case patterns interpret [::1]
+// as a character class (matching `:` or `1`), so a pattern like
+// `internal:[::1]:*` silently mis-matches the bracketed form and
+// the script flags Redis as POSTURE WRONG. The fix is to extract
+// a `is_loopback_bind` helper with QUOTED case patterns so the
+// brackets stay literal. This test pins:
+//   - the script defines is_loopback_bind
+//   - the case patterns are quoted (the brackets are escaped)
+//   - the function classifies the documented loopback forms as
+//     loopback
+//   - the function REJECTS the documented public-exposure forms
+//   - 127.0.0.0/8 is also accepted (entire IPv4 loopback block)
+//   - the bind-posture loop in the main script USES the helper
+func TestSmokePortsAcceptsRedisIPv6Loopback(t *testing.T) {
+	root := repoRoot(t)
+	script := mustRead(t, filepath.Join(root, "release", "scripts", "smoke-ports.sh"))
+	bash := bashPath(t)
+
+	// 1) Static pin: helper exists and uses quoted patterns.
+	if !strings.Contains(script, "is_loopback_bind()") {
+		t.Fatal("smoke-ports.sh must define is_loopback_bind helper (2026-06-29 hotfix)")
+	}
+	// The case patterns must keep the IPv6 brackets literal. The
+	// pattern `"[::1]:"*` (with quotes) escapes the brackets;
+	// the unquoted pattern `[::1]:*` would be interpreted as a
+	// character class by bash.
+	for _, needle := range []string{
+		`"[::1]:"*`,
+		`"::1:"*`,
+		`"127.0.0.1:"*`,
+	} {
+		if !strings.Contains(script, needle) {
+			t.Errorf("smoke-ports.sh is_loopback_bind is missing quoted loopback pattern %q (without quotes, bash interprets [::1] as a character class)", needle)
+		}
+	}
+	// The bind-posture loop in the main script must call the
+	// helper, not a buggy inline case statement.
+	if !strings.Contains(script, "is_loopback_bind \"$addr\"") {
+		t.Error("smoke-ports.sh bind-posture loop must call is_loopback_bind on each address")
+	}
+	// The OLD buggy pattern `internal:[::1]:*` (unquoted) must
+	// not appear in the executable part of the script.
+	stripped := stripBashComments(script)
+	if strings.Contains(stripped, "internal:[::1]:*") ||
+		strings.Contains(stripped, "public:[::1]:*") {
+		t.Error("smoke-ports.sh still contains an unquoted `[::1]:*` case pattern (would be silently mis-matched as a bash character class)")
+	}
+
+	// 2) Behavioural pin: extract is_loopback_bind from the
+	//    shipped script and run it under bash against the
+	//    documented accept/reject table.
+	function, err := extractBashFunction(script, "is_loopback_bind")
+	if err != nil {
+		t.Fatalf("extract is_loopback_bind from script: %v", err)
+	}
+	cases := []struct {
+		addr     string
+		accepted bool
+		why      string
+	}{
+		// ACCEPTED — loopback binds.
+		{"127.0.0.1:6379", true, "IPv4 loopback, ss default form"},
+		{"[::1]:6379", true, "IPv6 loopback, bracketed ss default form"},
+		{"::1:6379", true, "IPv6 loopback, unbracketed ss/netstat variant"},
+		{"127.0.0.2:6379", true, "127/8 IPv4 loopback block (on principle)"},
+		{"127.255.255.254:6379", true, "127/8 IPv4 loopback block, upper end"},
+
+		// REJECTED — public exposure.
+		{"0.0.0.0:6379", false, "IPv4 any (wildcard)"},
+		{"[::]:6379", false, "IPv6 any (wildcard)"},
+		{"*:6379", false, "explicit wildcard"},
+		{"10.0.0.5:6379", false, "private RFC1918 address"},
+		{"192.0.2.1:6379", false, "TEST-NET-1 documentation address"},
+		{"198.51.100.7:6379", false, "TEST-NET-2 documentation address"},
+		{"203.0.113.42:6379", false, "TEST-NET-3 documentation address"},
+	}
+	for _, c := range cases {
+		// Build a small bash program that defines the function
+		// (extracted from the shipped script) and then prints
+		// "yes" if the function says it's loopback, else "no".
+		program := function + "\nif is_loopback_bind " + shellQuote(c.addr) + "; then echo yes; else echo no; fi\n"
+		cmd := exec.Command(bash, "-c", program)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("is_loopback_bind %s: bash error: %v\n%s", c.addr, err, out)
+		}
+		got := strings.TrimSpace(string(out)) == "yes"
+		if got != c.accepted {
+			t.Errorf("is_loopback_bind(%q) = %v, want %v — %s", c.addr, got, c.accepted, c.why)
+		}
+	}
+}
+
+// TestSmokePortsRedisWording pins that smoke-ports.sh explains
+// the IPv4/IPv6 loopback posture is OK for Redis, so operators
+// reading the --verbose output see why [::1] is not flagged.
+func TestSmokePortsRedisWording(t *testing.T) {
+	root := repoRoot(t)
+	script := mustRead(t, filepath.Join(root, "release", "scripts", "smoke-ports.sh"))
+	for _, needle := range []string{
+		"redis",
+		"loopback (IPv4/IPv6)",
+		"is_loopback_bind",
+	} {
+		if !strings.Contains(script, needle) {
+			t.Errorf("smoke-ports.sh missing Redis IPv4/IPv6 wording marker %q", needle)
+		}
+	}
+}
+
+// stripBashComments is defined in installer_test.go (same package).
+// We re-use it here to scan smoke-ports.sh for unquoted IPv6
+// patterns that would silently regress to a bash character class.
+
+// extractBashFunction returns the body of <name>() { ... } from
+// a bash script (single-function extraction, no nested-function
+// support — sufficient for smoke-ports.sh's flat helper layout).
+func extractBashFunction(script, name string) (string, error) {
+	lines := strings.Split(script, "\n")
+	var b strings.Builder
+	inFn := false
+	depth := 0
+	header := name + "()"
+	for _, line := range lines {
+		if !inFn {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, header) {
+				// Find the `{` on this line (or the next).
+				if !strings.Contains(line, "{") {
+					continue
+				}
+				inFn = true
+				depth = 1
+				b.WriteString(line)
+				b.WriteString("\n")
+				continue
+			}
+			continue
+		}
+		// Inside the function: count braces, ignore those inside
+		// quotes. Best-effort: count both `{` and `}` regardless.
+		for _, ch := range line {
+			switch ch {
+			case '{':
+				depth++
+			case '}':
+				depth--
+			}
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+		if depth == 0 {
+			return b.String(), nil
+		}
+	}
+	return "", fmt.Errorf("function %q not found or unterminated", name)
+}
+
+// shellQuote single-quotes a string for safe use as a single
+// argument to bash -c. Used by the loopback test to inject the
+// test address into the bash program.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
