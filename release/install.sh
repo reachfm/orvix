@@ -235,17 +235,30 @@ BODY
 BODY
     else
         cat <<BODY
-  TEMPORARY URLs (plain HTTP, no TLS â€” setup-https.sh has NOT been run):
-    Admin UI:    http://${server_ip}:8080/admin
-    Webmail UI:  http://${server_ip}:8080/webmail
-    JMAP:        http://${server_ip}:8081/.well-known/jmap
+  INTENDED production URLs (HTTPS via caddy, NOT YET REACHABLE):
+    Admin URL:   https://admin.${domain}/admin
+    Webmail URL: https://webmail.${domain}/
+    JMAP URL:    https://mail.${domain}/.well-known/jmap
 
-NOTE: admin.${domain} and mail.${domain} are NOT reachable until HTTPS
-is set up and DNS is configured. The TEMPORARY URLs above are bound
-directly to the server IP on the listening port.
+  ${YELLOW}! HTTPS + DNS are required before any browser sign-in works.${NC}
+  Until then the URLs above will not resolve.
 
-To get production HTTPS URLs (REQUIRED before users can sign in):
-  sudo $ORVIX_SOURCE_DIR/release/scripts/setup-https.sh ${domain} ${server_ip}
+  Local validation URLs (loopback only, from inside the VPS):
+    Admin UI:    http://127.0.0.1:8080/admin
+    Webmail UI:  http://127.0.0.1:8080/webmail
+    JMAP:        http://127.0.0.1:8081/.well-known/jmap
+    Health:      http://127.0.0.1:8080/api/v1/health
+
+  ${YELLOW}! 8080 and 8081 are bound to 127.0.0.1 only and are${NC}
+  ${YELLOW}  NOT reachable from the public internet. Never expose them.${NC}
+
+  If you need to reach the admin UI from a remote workstation
+  before DNS + HTTPS are ready, use an SSH tunnel (NOT public HTTP):
+    ssh -L 8080:127.0.0.1:8080 -L 8081:127.0.0.1:8081 root@${server_ip}
+  then open http://127.0.0.1:8080/admin in your local browser.
+
+  To get production HTTPS URLs (REQUIRED before users can sign in):
+    sudo $ORVIX_SOURCE_DIR/release/scripts/setup-https.sh ${domain} ${server_ip}
 BODY
 	fi
 
@@ -452,6 +465,128 @@ install_binary() {
 	log_detail "built Orvix from source"
 }
 
+# provision_config is the install-time entry point for writing
+# /etc/orvix/orvix.yaml. It is split into two paths so a re-install
+# does NOT clobber operator-managed config:
+#
+#   * Fresh install (no $ORVIX_CONFIG): write_config() runs and
+#     emits the full config with the safe defaults
+#     (server.host: 127.0.0.1, jmap_host: 127.0.0.1, public mail
+#     listener binds at 0.0.0.0).
+#
+#   * Re-run ($ORVIX_CONFIG already exists): write_config() is
+#     NOT called. Only idempotent, surgical migrations run —
+#     currently migrate_unsafe_internal_binds() which fixes the
+#     two known unsafe defaults (server.host and jmap_host set
+#     to exactly 0.0.0.0). All other operator-managed fields
+#     (admin_host, webmail_host, mail_host, cookie_domain, vapid
+#     keys, rate limits, etc.) are preserved untouched.
+#
+# The decision is logged clearly so a re-running operator can
+# see in $INSTALL_LOG whether the installer rewrote their config
+# or only hardened the unsafe defaults.
+provision_config() {
+    local domain="$1"
+    if [ ! -f "$ORVIX_CONFIG" ]; then
+        log_detail "CONFIG provisioning: fresh install, writing $ORVIX_CONFIG with safe defaults (server.host=127.0.0.1, jmap_host=127.0.0.1, public mail listener binds at 0.0.0.0)"
+        write_config "$domain"
+    else
+        log_detail "CONFIG provisioning: re-run detected, existing $ORVIX_CONFIG will be PRESERVED (operator-managed fields untouched)"
+        log_detail "CONFIG provisioning: applying only surgical / idempotent migrations"
+        migrate_unsafe_internal_binds
+        # Reaffirm in the log that the existing config was not
+        # overwritten. A re-running operator can grep their
+        # install log for this line to confirm the contract.
+        log_detail "CONFIG provisioning: existing config preserved; only safety-critical bind migrations applied"
+    fi
+}
+
+# migrate_unsafe_internal_binds hardens an existing /etc/orvix/orvix.yaml
+# that was written by a previous installer version which defaulted
+# the admin/webmail HTTP backend and the JMAP listener to 0.0.0.0.
+# Exposing those ports on the public interface without TLS is a
+# regression (admin login + webmail SPA + JMAP endpoint reachable
+# on the bare server IP). This migration:
+#
+#   - changes `server.host: "0.0.0.0"`     -> `server.host: "127.0.0.1"`
+#   - changes `coremail.jmap_host: 0.0.0.0` -> `coremail.jmap_host: 127.0.0.1`
+#   - matches the EXACT value `0.0.0.0` only; operator-set public IPs
+#     (e.g. `192.0.2.5`) are preserved untouched
+#   - never touches the mail listener binds
+#     (`coremail.smtp_host` / `imap_host` / `pop3_host` /
+#     `submission_host` / `smtps_host` MUST stay public on 0.0.0.0)
+#   - is a no-op on a fresh install (no $ORVIX_CONFIG yet)
+#   - is a no-op on a re-run where the binds are already safe
+#   - logs every change with the BEFORE and AFTER values so the
+#     migration is auditable in the install log
+#
+# This is intentionally a sed-based surgical edit so unrelated
+# operator config (Caddyfile hostnames, custom rate limits, etc.)
+# is preserved across re-runs. The install flow in main() runs
+# write_config() ONLY when $ORVIX_CONFIG does not exist; on a
+# re-run the migration is the ONLY config-side action and every
+# operator-managed field is preserved.
+migrate_unsafe_internal_binds() {
+    local cfg="$ORVIX_CONFIG"
+    [ -f "$cfg" ] || { log_detail "MIGRATE unsafe binds: no existing $cfg (fresh install, no migration needed)"; return 0; }
+
+    local backup="${cfg}.pre-bind-migration.$$"
+    run_quiet cp -p "$cfg" "$backup"
+    chmod 0600 "$backup" 2>/dev/null || true
+    log_detail "MIGRATE unsafe binds: backup of previous config at $backup"
+
+    # Section-aware awk migration. Tracks the current top-level YAML
+    # section and only rewrites keys under their intended parent:
+    #   - server.host (quoted "0.0.0.0") -> 127.0.0.1
+    #   - coremail.jmap_host (bare 0.0.0.0) -> 127.0.0.1
+    # Keys in any other section (custom_provider.host, plugin.host,
+    # etc.) are never matched. Mail listener binds (smtp_host,
+    # imap_host, pop3_host, etc.) are never matched because they
+    # have different key names.
+    local tmp_awk
+    tmp_awk="$(mktemp "${cfg}.migrate-XXXXXX")"
+    awk '
+    BEGIN { section = ""; changed = 0 }
+    # Track current top-level YAML section.
+    /^[a-zA-Z][a-zA-Z0-9_-]*:/ {
+        sec = $1
+        gsub(/:/, "", sec)
+        section = sec
+    }
+    # Under server:, rewrite host: "0.0.0.0" to "127.0.0.1".
+    section == "server" && /^[[:space:]]*host:[[:space:]]*"0\.0\.0\.0"[[:space:]]*$/ {
+        gsub(/"0\.0\.0\.0"/, "\"127.0.0.1\"")
+        changed = 1
+    }
+    # Under coremail:, rewrite jmap_host: 0.0.0.0 to 127.0.0.1.
+    section == "coremail" && /^[[:space:]]*jmap_host:[[:space:]]*0\.0\.0\.0[[:space:]]*$/ {
+        gsub(/0\.0\.0\.0/, "127.0.0.1")
+        changed = 1
+    }
+    { print }
+    END { exit (changed ? 0 : 1) }
+    ' "$cfg" > "$tmp_awk" && mv "$tmp_awk" "$cfg"
+
+    local rc=$?
+    if [ "$rc" -eq 0 ]; then
+        # Changes were made. Log the diffs for auditability.
+        local before_server after_server before_jmap after_jmap
+        before_server="$(grep -E '^[[:space:]]*host:[[:space:]]*"0\.0\.0\.0"' "$backup" | head -n1 | sed -E 's/^[[:space:]]+//' || true)"
+        after_server="$(grep -E '^[[:space:]]*host:[[:space:]]*"127\.0\.0\.1"' "$cfg" | head -n1 | sed -E 's/^[[:space:]]+//' || true)"
+        before_jmap="$(grep -E '^[[:space:]]*jmap_host:[[:space:]]*0\.0\.0\.0' "$backup" | head -n1 | sed -E 's/^[[:space:]]+//' || true)"
+        after_jmap="$(grep -E '^[[:space:]]*jmap_host:[[:space:]]*127\.0\.0\.1' "$cfg" | head -n1 | sed -E 's/^[[:space:]]+//' || true)"
+        if [ -n "$before_server" ] || [ -n "$before_jmap" ]; then
+            log_detail "MIGRATE unsafe binds: server.host  '$before_server'  ->  '$after_server'  (security hardening: admin/webmail backend was reachable on every interface)"
+            log_detail "MIGRATE unsafe binds: coremail.jmap_host  '$before_jmap'  ->  '$after_jmap'  (security hardening: JMAP endpoint was reachable on every interface)"
+            log_detail "MIGRATE unsafe binds: applied security hardening change(s) to $cfg (mail listener binds left untouched; custom sections left untouched)"
+        fi
+    else
+        # No changes — config is already safe or has no matching keys.
+        rm -f "$tmp_awk" "$backup"
+        log_detail "MIGRATE unsafe binds: no unsafe internal binds found in $cfg (already safe or fresh)"
+    fi
+}
+
 write_config() {
     local domain="$1"
     local hostname="mail.$domain"
@@ -468,7 +603,14 @@ write_config() {
 
     cat > "$ORVIX_CONFIG" <<YAML
 server:
-  host: "0.0.0.0"
+  # The admin/webmail HTTP backend is intentionally bound to the
+  # loopback interface. Public browser access MUST go through the
+  # Caddy reverse proxy (set up by release/scripts/setup-https.sh)
+  # which terminates TLS on the public interface and forwards to
+  # 127.0.0.1:8080 over the trusted-proxy link. Binding 0.0.0.0
+  # would expose the admin login page and the unauthenticated
+  # /webmail SPA on the server's bare IP and is a regression.
+  host: "127.0.0.1"
   port: 80
   admin_port: 8080
   admin_ui_dir: /usr/share/orvix/admin
@@ -531,7 +673,11 @@ coremail:
   imap_port: 143
   pop3_host: 0.0.0.0
   pop3_port: 110
-  jmap_host: 0.0.0.0
+  # JMAP is bound to loopback by default — Caddy reverse-proxies
+  # /.well-known/jmap on mail.<domain> to 127.0.0.1:8081. Binding
+  # 0.0.0.0 here would expose the JMAP endpoint on the bare
+  # server IP without TLS, which is a regression.
+  jmap_host: 127.0.0.1
   jmap_port: 8081
   require_tls_for_auth: true
   queue_workers: 1
@@ -1026,10 +1172,20 @@ write_admin_login_file() {
             printf '%s\n' "  Webmail URL: https://webmail.${primary_domain}/"
             printf '%s\n' "  JMAP URL:    https://mail.${primary_domain}/.well-known/jmap"
         else
-            printf '%s\n' "URLs (HTTPS NOT configured - these are TEMPORARY):"
-            printf '%s\n' "  Admin UI:    http://${server_ip}:8080/admin"
-            printf '%s\n' "  Webmail UI:  http://${server_ip}:8080/webmail"
-            printf '%s\n' "  JMAP:        http://${server_ip}:8081/.well-known/jmap"
+            printf '%s\n' "Intended production URLs (HTTPS via caddy, NOT YET REACHABLE):"
+            printf '%s\n' "  Admin URL:   https://admin.${primary_domain}/admin"
+            printf '%s\n' "  Webmail URL: https://webmail.${primary_domain}/"
+            printf '%s\n' "  JMAP URL:    https://mail.${primary_domain}/.well-known/jmap"
+            printf '\n'
+            printf '%s\n' "Local validation URLs (loopback only, run from inside the VPS):"
+            printf '%s\n' "  Admin UI:    http://127.0.0.1:8080/admin"
+            printf '%s\n' "  Webmail UI:  http://127.0.0.1:8080/webmail"
+            printf '%s\n' "  JMAP:        http://127.0.0.1:8081/.well-known/jmap"
+            printf '\n'
+            printf '%s\n' "8080/8081 are bound to 127.0.0.1 and are NOT reachable from"
+            printf '%s\n' "the public internet. To reach them from a remote workstation"
+            printf '%s\n' "before DNS + HTTPS are ready, use an SSH tunnel:"
+            printf '%s\n' "  ssh -L 8080:127.0.0.1:8080 -L 8081:127.0.0.1:8081 root@${server_ip}"
             printf '\n'
             printf '%s\n' "To get production HTTPS URLs, run setup-https.sh."
         fi
@@ -1512,7 +1668,7 @@ main() {
     validate_binary
 
     set_step "configuration" "Configuration provisioning" 75
-    write_config "$primary_domain"
+    provision_config "$primary_domain"
     write_bootstrap_env "$admin_email" "$admin_password"
     install_release_scripts
     provision_vapid_keys "$admin_email"

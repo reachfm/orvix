@@ -173,12 +173,12 @@ open_firewall() {
 	# 443/tcp  — Caddy HTTPS
 	#
 	# 8080/tcp + 8081/tcp (admin + JMAP internal) are NOT opened
-	# here. They are bound to 0.0.0.0 by default so a fresh VPS
-	# can hit them via the server IP, but they MUST be firewalled
-	# off externally as soon as setup-https.sh runs. The
-	# `post_https_firewall_hardening` block at the bottom of
-	# this script emits the deny commands for the operator to
-	# apply manually.
+	# here. They are bound to 127.0.0.1 only by default so they
+	# are unreachable from the public internet regardless of ufw
+	# state, and the `post_https_firewall_hardening` block at the
+	# bottom of this script emits the explicit deny rules as a
+	# belt-and-braces measure for hosts that previously had the
+	# old unsafe 0.0.0.0 defaults.
 	if command -v ufw >/dev/null 2>&1; then
 		run_quiet ufw allow 25/tcp
 		run_quiet ufw allow 110/tcp

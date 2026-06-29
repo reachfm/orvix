@@ -2,7 +2,14 @@
 # Edit this file after installation to customize settings
 
 server:
-  host: "0.0.0.0"
+  # The admin/webmail HTTP backend is intentionally bound to the
+  # loopback interface. Public browser access MUST go through the
+  # Caddy reverse proxy (set up by release/scripts/setup-https.sh)
+  # which terminates TLS on the public interface and forwards to
+  # 127.0.0.1:8080 over the trusted-proxy link. Binding 0.0.0.0
+  # would expose the admin login page and the unauthenticated
+  # /webmail SPA on the server bare IP and is a regression.
+  host: "127.0.0.1"
   port: 80
   admin_port: 8080
   admin_ui_dir: /usr/share/orvix/admin
@@ -81,7 +88,11 @@ coremail:
   imap_port: 143
   pop3_host: 0.0.0.0
   pop3_port: 110
-  jmap_host: 0.0.0.0
+  # JMAP is bound to loopback by default - Caddy reverse-proxies
+  # /.well-known/jmap on mail.<domain> to 127.0.0.1:8081. Binding
+  # 0.0.0.0 here would expose the JMAP endpoint on the bare
+  # server IP without TLS, which is a regression.
+  jmap_host: 127.0.0.1
   jmap_port: 8081
   # SMTP TLS certificate / key. Used for STARTTLS on port 25
   # (optional) and REQUIRED for port 587 submission. Provide
