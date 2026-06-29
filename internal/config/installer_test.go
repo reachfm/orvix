@@ -1820,7 +1820,343 @@ cat "$ORVIX_CONFIG"
 	}
 }
 
-// TestSetupHttpsReverseProxiesToLoopback pins that the Caddyfile
+// TestProvisionConfigFreshInstallWritesSafeDefaults pins the
+// 2026-06-29 (re-review) hotfix: when $ORVIX_CONFIG does not
+// exist, provision_config() MUST call write_config() so the
+// fresh install gets the safe defaults (server.host=127.0.0.1,
+// jmap_host=127.0.0.1, public mail listener binds at 0.0.0.0).
+// This is the same expectation as the previous
+// TestInstallerWriteConfigBindsInternalToLoopback but driven
+// through the real provision_config() entry point so a future
+// refactor that wires a different code path here is caught.
+func TestProvisionConfigFreshInstallWritesSafeDefaults(t *testing.T) {
+	root := repoRoot(t)
+	installer := mustRead(t, filepath.Join(root, "release", "install.sh"))
+
+	// Harness: do NOT pre-create $ORVIX_CONFIG. The install flow
+	// should detect "no config yet" and run write_config().
+	// We point INSTALL_LOG at a file inside the harness dir so
+	// log_detail() does not try to write to /var/log/orvix (which
+	// does not exist on the test host).
+	const domain = "example.com"
+	harness := strings.Replace(installer,
+		`main "$@"`,
+		fmt.Sprintf(`chown() { :; }; chmod() { :; }; ORVIX_CONFIG="$1"; INSTALL_LOG="%s/install.log"; touch "$INSTALL_LOG"; provision_config "%s"; cat "$ORVIX_CONFIG"`, "$2", domain),
+		1,
+	)
+	harnessDir := t.TempDir()
+	harnessPath := filepath.Join(harnessDir, "render-config.sh")
+	configPath := filepath.Join(harnessDir, "orvix.yaml")
+	if err := os.WriteFile(harnessPath, []byte(harness), 0o755); err != nil {
+		t.Fatalf("write harness: %v", err)
+	}
+
+	cmd := exec.Command(bashCommand(t), "render-config.sh", configPath, harnessDir)
+	cmd.Dir = harnessDir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("render installer config (fresh install path): %v: %s", err, string(out))
+	}
+	rendered := string(out)
+
+	v := viper.New()
+	v.SetConfigType("yaml")
+	if err := v.ReadConfig(strings.NewReader(rendered)); err != nil {
+		t.Fatalf("installer config is not valid YAML: %v\n--- rendered YAML ---\n%s", err, rendered)
+	}
+	settings := v.AllSettings()
+
+	// Must be the safe loopback defaults.
+	if got := readNestedString(settings, "server.host"); got != "127.0.0.1" {
+		t.Errorf("fresh install: server.host got %q, want 127.0.0.1", got)
+	}
+	if got := readNestedString(settings, "coremail.jmap_host"); got != "127.0.0.1" {
+		t.Errorf("fresh install: coremail.jmap_host got %q, want 127.0.0.1", got)
+	}
+	// Mail listener binds MUST be public.
+	for _, key := range []string{
+		"coremail.smtp_host",
+		"coremail.imap_host",
+		"coremail.pop3_host",
+	} {
+		if got := readNestedString(settings, key); got != "0.0.0.0" {
+			t.Errorf("fresh install: %s got %q, want 0.0.0.0 (public)", key, got)
+		}
+	}
+}
+
+// TestProvisionConfigReRunPreservesOperatorConfig is the load-
+// bearing test for the 2026-06-29 (re-review) hotfix. When
+// $ORVIX_CONFIG already exists, provision_config() MUST NOT
+// call write_config(). Operator-managed fields are preserved
+// untouched; only the two surgical migrations (server.host and
+// jmap_host) are applied if the unsafe defaults are present.
+func TestProvisionConfigReRunPreservesOperatorConfig(t *testing.T) {
+	root := repoRoot(t)
+	installer := mustRead(t, filepath.Join(root, "release", "install.sh"))
+
+	cases := []struct {
+		name             string
+		initial          string
+		wantServer       string
+		wantJmap         string
+		wantSMTP         string
+		wantIMAP         string
+		wantPOP3         string
+		wantAdminHost    string // operator-edited, must be preserved
+		wantCookieDomain string // operator-edited, must be preserved
+		wantVapidSubj    string // operator-edited, must be preserved
+	}{
+		{
+			name: "re-run with unsafe defaults -> migrated, operator edits preserved",
+			initial: `server:
+  host: "0.0.0.0"
+  port: 80
+  admin_port: 8080
+  admin_host: "admin.acme.example"
+  webmail_host: "webmail.acme.example"
+  mail_host: "mail.acme.example"
+
+database:
+  driver: sqlite
+
+coremail:
+  enabled: true
+  smtp_host: 0.0.0.0
+  smtp_port: 25
+  imap_host: 0.0.0.0
+  imap_port: 143
+  pop3_host: 0.0.0.0
+  pop3_port: 110
+  jmap_host: 0.0.0.0
+  jmap_port: 8081
+  vapid_subject: "mailto:ops@acme.example"
+
+auth:
+  cookie_domain: ".acme.example"
+`,
+			wantServer:       "127.0.0.1",
+			wantJmap:         "127.0.0.1",
+			wantSMTP:         "0.0.0.0",
+			wantIMAP:         "0.0.0.0",
+			wantPOP3:         "0.0.0.0",
+			wantAdminHost:    "admin.acme.example",
+			wantCookieDomain: ".acme.example",
+			wantVapidSubj:    "mailto:ops@acme.example",
+		},
+		{
+			name: "re-run with operator-set custom IPs -> not touched, mail listeners preserved",
+			initial: `server:
+  host: "192.0.2.10"
+  port: 80
+  admin_host: "admin.acme.example"
+
+coremail:
+  smtp_host: 0.0.0.0
+  imap_host: 0.0.0.0
+  pop3_host: 0.0.0.0
+  jmap_host: 192.0.2.11
+
+auth:
+  cookie_domain: ".acme.example"
+`,
+			wantServer:       "192.0.2.10",
+			wantJmap:         "192.0.2.11",
+			wantSMTP:         "0.0.0.0",
+			wantIMAP:         "0.0.0.0",
+			wantPOP3:         "0.0.0.0",
+			wantAdminHost:    "admin.acme.example",
+			wantCookieDomain: ".acme.example",
+		},
+		{
+			name: "re-run with already-safe values -> no migration, full config preserved",
+			initial: `server:
+  host: "127.0.0.1"
+  port: 80
+  admin_host: "admin.acme.example"
+
+coremail:
+  smtp_host: 0.0.0.0
+  imap_host: 0.0.0.0
+  pop3_host: 0.0.0.0
+  jmap_host: 127.0.0.1
+
+auth:
+  cookie_domain: ".acme.example"
+`,
+			wantServer:       "127.0.0.1",
+			wantJmap:         "127.0.0.1",
+			wantSMTP:         "0.0.0.0",
+			wantIMAP:         "0.0.0.0",
+			wantPOP3:         "0.0.0.0",
+			wantAdminHost:    "admin.acme.example",
+			wantCookieDomain: ".acme.example",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			// Pre-create the config file so provision_config()
+			// sees "re-run, not fresh" and skips write_config().
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "orvix.yaml")
+			if err := os.WriteFile(configPath, []byte(c.initial), 0o600); err != nil {
+				t.Fatalf("write pre-existing config: %v", err)
+			}
+
+			// Harness: stub chown/chmod so we don't need root,
+			// call provision_config (which is the real install
+			// entry), then cat the result. We point INSTALL_LOG
+			// at a file inside the harness dir so log_detail()
+			// does not try to write to /var/log/orvix.
+			const domain = "example.com"
+			harness := strings.Replace(installer,
+				`main "$@"`,
+				fmt.Sprintf(`chown() { :; }; chmod() { :; }; ORVIX_CONFIG="$1"; INSTALL_LOG="%s/install.log"; touch "$INSTALL_LOG"; provision_config "%s"; cat "$ORVIX_CONFIG"`, "$2", domain),
+				1,
+			)
+			harnessPath := filepath.Join(dir, "rerun.sh")
+			if err := os.WriteFile(harnessPath, []byte(harness), 0o755); err != nil {
+				t.Fatalf("write harness: %v", err)
+			}
+
+			cmd := exec.Command(bashCommand(t), "rerun.sh", configPath, dir)
+			cmd.Dir = dir
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("run provision_config (re-run path): %v\n%s", err, out)
+			}
+			rendered := string(out)
+
+			// Parse and check the binds.
+			v := viper.New()
+			v.SetConfigType("yaml")
+			if err := v.ReadConfig(strings.NewReader(rendered)); err != nil {
+				t.Fatalf("re-run config is not valid YAML: %v\n--- rendered YAML ---\n%s", err, rendered)
+			}
+			_ = v.AllSettings() // parsed; checks below use raw string contains
+
+			checks := []struct {
+				key, want string
+			}{
+				{"server.host", c.wantServer},
+				{"coremail.jmap_host", c.wantJmap},
+			}
+			if c.wantSMTP != "" {
+				checks = append(checks, struct{ key, want string }{"coremail.smtp_host", c.wantSMTP})
+			}
+			if c.wantIMAP != "" {
+				checks = append(checks, struct{ key, want string }{"coremail.imap_host", c.wantIMAP})
+			}
+			if c.wantPOP3 != "" {
+				checks = append(checks, struct{ key, want string }{"coremail.pop3_host", c.wantPOP3})
+			}
+			for _, ch := range checks {
+				leaf := strings.TrimSpace(strings.SplitN(ch.key, ".", 2)[1])
+				// Accept both quoted (`host: "127.0.0.1"`) and
+				// unquoted (`jmap_host: 127.0.0.1`) YAML forms.
+				needleQuoted := leaf + ": \"" + ch.want + "\""
+				needleBare := leaf + ": " + ch.want
+				if !strings.Contains(rendered, needleQuoted) && !strings.Contains(rendered, needleBare) {
+					t.Errorf("re-run: expected %q = %q, rendered config:\n%s", ch.key, ch.want, rendered)
+				}
+			}
+
+			// Operator-edited fields MUST be preserved verbatim.
+			for _, needle := range []string{
+				c.wantAdminHost,
+				c.wantCookieDomain,
+				c.wantVapidSubj,
+			} {
+				if needle == "" {
+					continue
+				}
+				if !strings.Contains(rendered, needle) {
+					t.Errorf("re-run: operator-edited field %q was overwritten, rendered config:\n%s", needle, rendered)
+				}
+			}
+		})
+	}
+}
+
+// TestProvisionConfigReRunDoesNotOverwriteOperatorFields is the
+// negative control: a re-run MUST NOT introduce any of the keys
+// the operator did not already have in their config. The fresh
+// write_config heredoc emits a long list of fields (auth.*,
+// coremail.vapid_*, coremail.max_attachment_size_mb, etc.) and
+// if write_config were called on a re-run, those would clobber
+// the operator's version. This test pre-creates a minimal config
+// and asserts the re-run output does NOT grow new sections.
+func TestProvisionConfigReRunDoesNotOverwriteOperatorFields(t *testing.T) {
+	root := repoRoot(t)
+	installer := mustRead(t, filepath.Join(root, "release", "install.sh"))
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "orvix.yaml")
+	// Minimal pre-existing config. Note: deliberately missing
+	// `auth:`, `coremail.vapid_*`, `metrics:`, `update:` — if
+	// write_config runs, it would inject all of these.
+	initial := `server:
+  host: "0.0.0.0"
+  port: 80
+  admin_host: "admin.acme.example"
+
+coremail:
+  jmap_host: 0.0.0.0
+`
+	if err := os.WriteFile(configPath, []byte(initial), 0o600); err != nil {
+		t.Fatalf("write pre-existing config: %v", err)
+	}
+
+	harness := strings.Replace(installer,
+		`main "$@"`,
+		fmt.Sprintf(`chown() { :; }; chmod() { :; }; ORVIX_CONFIG="$1"; INSTALL_LOG="%s/install.log"; touch "$INSTALL_LOG"; provision_config "example.com"; cat "$ORVIX_CONFIG"`, "$2"),
+		1,
+	)
+	harnessPath := filepath.Join(dir, "rerun.sh")
+	if err := os.WriteFile(harnessPath, []byte(harness), 0o755); err != nil {
+		t.Fatalf("write harness: %v", err)
+	}
+
+	cmd := exec.Command(bashCommand(t), "rerun.sh", configPath, dir)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run re-run path: %v\n%s", err, out)
+	}
+	rendered := string(out)
+
+	// Binds MUST be migrated to loopback (the surgical fix).
+	if !strings.Contains(rendered, `host: "127.0.0.1"`) {
+		t.Errorf("re-run did not migrate server.host to 127.0.0.1; rendered:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, `jmap_host: 127.0.0.1`) {
+		t.Errorf("re-run did not migrate jmap_host to 127.0.0.1; rendered:\n%s", rendered)
+	}
+	// Operator-edited admin_host MUST be preserved.
+	if !strings.Contains(rendered, `admin.acme.example`) {
+		t.Errorf("re-run overwrote operator admin_host; rendered:\n%s", rendered)
+	}
+	// Sections that were NOT in the pre-existing config MUST NOT
+	// be injected by the re-run path. If write_config ran, it
+	// would have written `auth:`, `metrics:`, `update:`,
+	// `backup:`, `logging:`, etc. None of these are present in
+	// the initial config and none are created by migration.
+	for _, forbidden := range []string{
+		"auth:",
+		"metrics:",
+		"update:",
+		"backup:",
+		"logging:",
+		"database:",
+		"redis:",
+		"outbound:",
+	} {
+		if strings.Contains(rendered, forbidden) {
+			t.Errorf("re-run injected %q (write_config must not run on re-run); rendered:\n%s", forbidden, rendered)
+		}
+	}
+}
 // generated by release/scripts/setup-https.sh proxies every
 // public hostname to 127.0.0.1 (NOT to 0.0.0.0 or any public IP).
 // This is the load-bearing assumption that allows the admin and

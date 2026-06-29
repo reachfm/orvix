@@ -465,6 +465,42 @@ install_binary() {
 	log_detail "built Orvix from source"
 }
 
+# provision_config is the install-time entry point for writing
+# /etc/orvix/orvix.yaml. It is split into two paths so a re-install
+# does NOT clobber operator-managed config:
+#
+#   * Fresh install (no $ORVIX_CONFIG): write_config() runs and
+#     emits the full config with the safe defaults
+#     (server.host: 127.0.0.1, jmap_host: 127.0.0.1, public mail
+#     listener binds at 0.0.0.0).
+#
+#   * Re-run ($ORVIX_CONFIG already exists): write_config() is
+#     NOT called. Only idempotent, surgical migrations run —
+#     currently migrate_unsafe_internal_binds() which fixes the
+#     two known unsafe defaults (server.host and jmap_host set
+#     to exactly 0.0.0.0). All other operator-managed fields
+#     (admin_host, webmail_host, mail_host, cookie_domain, vapid
+#     keys, rate limits, etc.) are preserved untouched.
+#
+# The decision is logged clearly so a re-running operator can
+# see in $INSTALL_LOG whether the installer rewrote their config
+# or only hardened the unsafe defaults.
+provision_config() {
+    local domain="$1"
+    if [ ! -f "$ORVIX_CONFIG" ]; then
+        log_detail "CONFIG provisioning: fresh install, writing $ORVIX_CONFIG with safe defaults (server.host=127.0.0.1, jmap_host=127.0.0.1, public mail listener binds at 0.0.0.0)"
+        write_config "$domain"
+    else
+        log_detail "CONFIG provisioning: re-run detected, existing $ORVIX_CONFIG will be PRESERVED (operator-managed fields untouched)"
+        log_detail "CONFIG provisioning: applying only surgical / idempotent migrations"
+        migrate_unsafe_internal_binds
+        # Reaffirm in the log that the existing config was not
+        # overwritten. A re-running operator can grep their
+        # install log for this line to confirm the contract.
+        log_detail "CONFIG provisioning: existing config preserved; only safety-critical bind migrations applied"
+    fi
+}
+
 # migrate_unsafe_internal_binds hardens an existing /etc/orvix/orvix.yaml
 # that was written by a previous installer version which defaulted
 # the admin/webmail HTTP backend and the JMAP listener to 0.0.0.0.
@@ -486,9 +522,10 @@ install_binary() {
 #
 # This is intentionally a sed-based surgical edit so unrelated
 # operator config (Caddyfile hostnames, custom rate limits, etc.)
-# is preserved across re-runs. write_config() will overwrite the
-# file on a full reinstall, but the migration log is still emitted
-# for audit purposes.
+# is preserved across re-runs. The install flow in main() runs
+# write_config() ONLY when $ORVIX_CONFIG does not exist; on a
+# re-run the migration is the ONLY config-side action and every
+# operator-managed field is preserved.
 migrate_unsafe_internal_binds() {
     local cfg="$ORVIX_CONFIG"
     [ -f "$cfg" ] || { log_detail "MIGRATE unsafe binds: no existing $cfg (fresh install, no migration needed)"; return 0; }
@@ -1634,15 +1671,7 @@ main() {
     validate_binary
 
     set_step "configuration" "Configuration provisioning" 75
-    # Security hardening migration: if a previous installer version
-    # left $ORVIX_CONFIG with the unsafe defaults
-    # (server.host: "0.0.0.0" and/or coremail.jmap_host: 0.0.0.0),
-    # this pass rewrites those two lines to the loopback equivalents
-    # and logs the change. write_config() runs after this and
-    # overwrites the file with the new safe defaults — the migration
-    # log is preserved as an audit trail in $INSTALL_LOG.
-    migrate_unsafe_internal_binds
-    write_config "$primary_domain"
+    provision_config "$primary_domain"
     write_bootstrap_env "$admin_email" "$admin_password"
     install_release_scripts
     provision_vapid_keys "$admin_email"
