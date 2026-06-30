@@ -122,11 +122,18 @@ func (h *Handler) dnsOpsInputsForDomain(ctx context.Context, domain string) (dns
 	// MTA mode: always testing on first publish. Enforce is opt-in
 	// via a later operation; this build only emits mode=testing.
 	mtaMode := "testing"
+	// Listener bind host (coremail.smtp_host) is INFORMATIONAL ONLY
+	// — it is echoed in Plan.ListenerBind so the dashboard can show
+	// it next to ServerIPv4 / ServerIPv6 as a separate concept. A /
+	// SPF / AAAA records MUST use ServerIPv4 / ServerIPv6, never
+	// this value (which defaults to 0.0.0.0 on a fresh install).
+	listenerBind := strings.TrimSpace(h.cfg.CoreMail.SMTPHost)
 	return dnsops.Inputs{
 		Domain:        domain,
 		MailHost:      mailHost,
 		ServerIPv4:    serverIPv4,
 		ServerIPv6:    serverIPv6,
+		ListenerBind:  listenerBind,
 		DKIMSelector:  selector,
 		DKIMPubKey:    pubKey,
 		ReportMailbox: report,

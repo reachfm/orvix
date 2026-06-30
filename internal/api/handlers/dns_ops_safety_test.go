@@ -1,4 +1,4 @@
-package handlers
+﻿package handlers
 
 // Safety-fix tests for DNS-DKIM-OPERATIONS-2F-SAFETY-FIX.
 //
@@ -29,7 +29,7 @@ import (
 	"testing"
 )
 
-// ── isPublicUnicastIP ──────────────────────────────────────────
+// â”€â”€ isPublicUnicastIP â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 func TestIsPublicUnicastIP_Empty(t *testing.T) {
 	_, err := isPublicUnicastIP("")
@@ -116,6 +116,55 @@ func TestIsPublicUnicastIP_RejectsDocumentationRanges(t *testing.T) {
 	}
 }
 
+func TestIsPublicUnicastIP_RejectsCarrierGradeNAT(t *testing.T) {
+	for _, ip := range []string{"100.64.0.1", "100.127.255.255", "100.64.255.255"} {
+		_, err := isPublicUnicastIP(ip)
+		if err == nil {
+			t.Errorf("carrier-grade NAT %q must be rejected", ip)
+		}
+		if !strings.Contains(err.Error(), "carrier-grade NAT") && !strings.Contains(err.Error(), "6598") {
+			t.Errorf("error for %q must mention carrier-grade NAT; got %q", ip, err.Error())
+		}
+	}
+}
+
+func TestIsPublicUnicastIP_RejectsBenchmarkingRange(t *testing.T) {
+	for _, ip := range []string{"198.18.0.1", "198.19.255.255"} {
+		_, err := isPublicUnicastIP(ip)
+		if err == nil {
+			t.Errorf("benchmarking range %q must be rejected", ip)
+		}
+		if !strings.Contains(err.Error(), "benchmark") && !strings.Contains(err.Error(), "2544") {
+			t.Errorf("error for %q must mention benchmark; got %q", ip, err.Error())
+		}
+	}
+}
+
+func TestIsPublicUnicastIP_RejectsSpecialUse192_0_0_0(t *testing.T) {
+	for _, ip := range []string{"192.0.0.1", "192.0.0.255"} {
+		_, err := isPublicUnicastIP(ip)
+		if err == nil {
+			t.Errorf("special-use 192.0.0.0/24 %q must be rejected", ip)
+		}
+		if !strings.Contains(err.Error(), "special-use") {
+			t.Errorf("error for %q must mention special-use; got %q", ip, err.Error())
+		}
+	}
+}
+
+func TestIsPublicUnicastIP_AcceptsEdgeOutsideNewRanges(t *testing.T) {
+	for _, ip := range []string{"100.128.0.1", "198.17.255.255", "198.20.0.1", "192.0.3.0"} {
+		got, err := isPublicUnicastIP(ip)
+		if err != nil {
+			t.Errorf("%q must be accepted; got %v", ip, err)
+			continue
+		}
+		if !got.Equal(net.ParseIP(ip)) {
+			t.Errorf("round-trip mismatch for %q: %v", ip, got)
+		}
+	}
+}
+
 func TestIsPublicUnicastIP_AcceptsGenuinelyPublic(t *testing.T) {
 	got, err := isPublicUnicastIP("8.8.8.8")
 	if err != nil {
@@ -133,7 +182,7 @@ func TestIsPublicUnicastIP_AcceptsGenuinelyPublic(t *testing.T) {
 	}
 }
 
-// ── validateDKIMSelector ───────────────────────────────────────
+// â”€â”€ validateDKIMSelector â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 func TestValidateDKIMSelector_EmptyDefaultsToOrvix(t *testing.T) {
 	got, err := validateDKIMSelector("")
@@ -223,7 +272,7 @@ func TestValidateDKIMSelector_RejectsQuote(t *testing.T) {
 
 func TestValidateDKIMSelector_RejectsUnicode(t *testing.T) {
 	// Greek alpha, Chinese char, em-dash, etc.
-	for _, in := range []string{"α", "邮", "ém", "x—y"} {
+	for _, in := range []string{"Î±", "é‚®", "Ã©m", "xâ€”y"} {
 		if _, err := validateDKIMSelector(in); err == nil {
 			t.Errorf("selector %q with unicode must be rejected", in)
 		}

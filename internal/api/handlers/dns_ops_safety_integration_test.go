@@ -118,9 +118,13 @@ func TestDNSOpsPlanWithPublicIPv4GeneratesCorrectARecord(t *testing.T) {
 	if resp.Plan.ServerIPv4 != "8.8.8.8" {
 		t.Errorf("plan.ServerIPv4: got %q want 8.8.8.8", resp.Plan.ServerIPv4)
 	}
-	if strings.Contains(body, "0.0.0.0") {
-		t.Errorf("plan body must not mention 0.0.0.0; got %s", body)
-	}
+	// The body MAY contain "0.0.0.0" in the informational
+	// `listener_bind` field (which echoes coremail.smtp_host
+	// separately from the public DNS plan). What MUST NOT
+	// contain 0.0.0.0 are the actual A / AAAA / SPF / MX
+	// record values — those are the records that would be
+	// published at the DNS provider. We assert per-record
+	// below.
 	var sawA, sawSPF bool
 	for _, r := range resp.Plan.Records {
 		if r.Purpose == "mail_a" {
@@ -139,6 +143,15 @@ func TestDNSOpsPlanWithPublicIPv4GeneratesCorrectARecord(t *testing.T) {
 			}
 			if strings.Contains(r.Value, "0.0.0.0") {
 				t.Errorf("SPF must not include 0.0.0.0; got %q", r.Value)
+			}
+		}
+		// No record value (A / AAAA / MX / SPF / DKIM / DMARC)
+		// may be 0.0.0.0. listener_bind is a Plan-level field
+		// checked separately.
+		switch r.Type {
+		case "A", "AAAA", "MX", "SPF", "TXT", "CNAME", "CAA":
+			if r.Value == "0.0.0.0" {
+				t.Errorf("%s record %q must not be 0.0.0.0; purpose=%s", r.Type, r.Value, r.Purpose)
 			}
 		}
 	}
@@ -413,6 +426,48 @@ func TestDNSOpsPlanWithDocumentationIPv6Rejected(t *testing.T) {
 	}
 	if !strings.Contains(body, "documentation") && !strings.Contains(body, "3849") {
 		t.Errorf("422 body must mention documentation range; got %s", body)
+	}
+}
+
+func TestDNSOpsPlanWithCarrierGradeNATRejected(t *testing.T) {
+	for _, ip := range []string{"100.64.0.1", "100.127.255.255"} {
+		h := newDNSOpsHarnessWithPublicIP(t, ip, "")
+		code, body := h.do(t, "GET", "/api/v1/admin/dns/example.com/plan", h.adminT, "")
+		if code != http.StatusUnprocessableEntity {
+			t.Errorf("plan with CGNAT IPv4 %s must be 422; got %d body=%s", ip, code, body)
+		}
+		if !strings.Contains(body, "carrier-grade") && !strings.Contains(body, "6598") {
+			t.Errorf("422 body must mention carrier-grade NAT; got %s", body)
+		}
+		h.close()
+	}
+}
+
+func TestDNSOpsPlanWithBenchmarkingRangeRejected(t *testing.T) {
+	for _, ip := range []string{"198.18.0.1", "198.19.255.255"} {
+		h := newDNSOpsHarnessWithPublicIP(t, ip, "")
+		code, body := h.do(t, "GET", "/api/v1/admin/dns/example.com/plan", h.adminT, "")
+		if code != http.StatusUnprocessableEntity {
+			t.Errorf("plan with benchmark IPv4 %s must be 422; got %d body=%s", ip, code, body)
+		}
+		if !strings.Contains(body, "benchmark") && !strings.Contains(body, "2544") {
+			t.Errorf("422 body must mention benchmark range; got %s", body)
+		}
+		h.close()
+	}
+}
+
+func TestDNSOpsPlanWithSpecialUse192Rejected(t *testing.T) {
+	for _, ip := range []string{"192.0.0.1", "192.0.0.255"} {
+		h := newDNSOpsHarnessWithPublicIP(t, ip, "")
+		code, body := h.do(t, "GET", "/api/v1/admin/dns/example.com/plan", h.adminT, "")
+		if code != http.StatusUnprocessableEntity {
+			t.Errorf("plan with special-use 192.0.0.0/24 IPv4 %s must be 422; got %d body=%s", ip, code, body)
+		}
+		if !strings.Contains(body, "special-use") {
+			t.Errorf("422 body must mention special-use; got %s", body)
+		}
+		h.close()
 	}
 }
 // TestDNSOpsDKIMKeygenWorksAfterMigrateAllRaw is the regression

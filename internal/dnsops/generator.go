@@ -36,6 +36,14 @@ type Inputs struct {
 	MailHost      string // e.g. "mail.orvix.email"
 	ServerIPv4    string // canonical dotted IPv4, e.g. "65.75.203.74"
 	ServerIPv6    string // canonical IPv6, "" if not configured
+	// ListenerBind is the SMTP / POP3 / IMAP listener bind host
+	// from coremail.smtp_host. It is INFORMATIONAL ONLY and is
+	// echoed in Plan.ListenerBind so the dashboard can show the
+	// two concepts (public DNS vs listener bind) side by side.
+	// A / AAAA / SPF records MUST use ServerIPv4 / ServerIPv6,
+	// NOT ListenerBind (the listener bind host defaults to
+	// 0.0.0.0 and has nothing to do with the public DNS plan).
+	ListenerBind  string
 	DKIMSelector  string // e.g. "orvix"; default "default" when empty
 	DKIMKeyID     string // opaque key id (returned in Plan.DKIMKeyID)
 	DKIMPubKey    string // base64 DER public key, no PEM headers (empty → "not generated")
@@ -118,6 +126,7 @@ func (g *Generator) Generate(in Inputs) (*Plan, error) {
 		MailHost:      strings.ToLower(strings.TrimSpace(in.MailHost)),
 		ServerIPv4:    strings.TrimSpace(in.ServerIPv4),
 		ServerIPv6:    strings.TrimSpace(in.ServerIPv6),
+		ListenerBind:  strings.TrimSpace(in.ListenerBind),
 		DKIMSelector:  selector,
 		DKIMKeyID:     in.DKIMKeyID,
 		ReportMailbox: report,

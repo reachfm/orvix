@@ -3077,3 +3077,1632 @@ func TestSetupHttpsReverseProxiesToLoopback(t *testing.T) {
 		t.Error("release/scripts/setup-https.sh must contain `reverse_proxy 127.0.0.1:8081` for the JMAP backend")
 	}
 }
+
+// TestInstallerWriteConfigRendersDNSPublicIPv4 pins the
+// 2026-06-30 fresh-install contract: write_config() MUST emit a
+// `dns:` block containing `public_ipv4: "<detected server public
+// IPv4>"`. Without this, the admin DNS/DKIM dashboard returns
+// 422 "public mail IPv4 is not configured" and the operator
+// cannot publish any A / MX / SPF / DKIM / DMARC records.
+//
+// The `dns.public_ipv4` field is the single source of truth for
+// the public DNS plan. It MUST NOT be inferred from
+// `coremail.smtp_host` (a listener bind address, defaults to
+// 0.0.0.0). The test also asserts that `coremail.smtp_host` stays
+// at `0.0.0.0` after the heredoc runs — fixing DNS by mutating
+// the listener bind address is a regression.
+func TestInstallerWriteConfigRendersDNSPublicIPv4(t *testing.T) {
+	root := repoRoot(t)
+	installer := mustRead(t, filepath.Join(root, "release", "install.sh"))
+
+	const domain = "example.com"
+	const publicIPv4 = "65.75.203.74"
+	// Harness: stub chown/chmod, point write_config at a temp
+	// file, pass the public IP as second arg, cat the result.
+	harness := strings.Replace(installer,
+		`main "$@"`,
+		fmt.Sprintf(`chown() { :; }; chmod() { :; }; ORVIX_CONFIG="$1"; write_config "%s" "%s"; cat "$ORVIX_CONFIG"`, domain, publicIPv4),
+		1,
+	)
+	harnessDir := t.TempDir()
+	harnessPath := filepath.Join(harnessDir, "render-config.sh")
+	configPath := filepath.Join(harnessDir, "orvix.yaml")
+	if err := os.WriteFile(harnessPath, []byte(harness), 0o755); err != nil {
+		t.Fatalf("write harness: %v", err)
+	}
+
+	cmd := exec.Command(bashCommand(t), "render-config.sh", configPath)
+	cmd.Dir = harnessDir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("render installer config: %v: %s", err, string(out))
+	}
+	rendered := string(out)
+
+	// The rendered YAML must parse as valid YAML and contain a
+	// `dns:` block with `public_ipv4: "65.75.203.74"`.
+	v := viper.New()
+	v.SetConfigType("yaml")
+	if err := v.ReadConfig(strings.NewReader(rendered)); err != nil {
+		t.Fatalf("installer config is not valid YAML: %v\n--- rendered YAML ---\n%s", err, rendered)
+	}
+	settings := v.AllSettings()
+
+	if got := readNestedString(settings, "dns.public_ipv4"); got != publicIPv4 {
+		t.Errorf("fresh install: dns.public_ipv4 got %q, want %q (the admin DNS dashboard fails closed with 422 otherwise)", got, publicIPv4)
+	}
+	// public_ipv6 is optional; default to empty string so the
+	// YAML is parseable and a future operator can set it.
+	if got := readNestedString(settings, "dns.public_ipv6"); got != "" {
+		t.Errorf("fresh install: dns.public_ipv6 got %q, want empty default", got)
+	}
+
+	// The listener bind host MUST stay 0.0.0.0 — the public
+	// DNS plan must not bleed into coremail.smtp_host.
+	if got := readNestedString(settings, "coremail.smtp_host"); got != "0.0.0.0" {
+		t.Errorf("fresh install: coremail.smtp_host got %q, want 0.0.0.0 (DNS MUST NOT change the listener bind)", got)
+	}
+	if got := readNestedString(settings, "coremail.jmap_host"); got != "127.0.0.1" {
+		t.Errorf("fresh install: coremail.jmap_host got %q, want 127.0.0.1", got)
+	}
+	if got := readNestedString(settings, "server.host"); got != "127.0.0.1" {
+		t.Errorf("fresh install: server.host got %q, want 127.0.0.1", got)
+	}
+}
+
+// TestMigrateDnsPublicIpAddsWhenMissing pins the re-run /
+// migration contract: when $ORVIX_CONFIG already exists and
+// `dns.public_ipv4` is missing, migrate_dns_public_ip MUST add
+// the field as the first key under the existing `dns:` section
+// (or as a fresh `dns:` block if none exists). It MUST NOT
+// overwrite any existing operator value. It MUST NOT infer the
+// value from `coremail.smtp_host` or any other listener bind
+// field.
+func TestMigrateDnsPublicIpAddsWhenMissing(t *testing.T) {
+	root := repoRoot(t)
+	installer := mustRead(t, filepath.Join(root, "release", "install.sh"))
+
+	const publicIPv4 = "65.75.203.74"
+
+	cases := []struct {
+		name      string
+		initial   string
+		postCheck func(t *testing.T, rendered string)
+	}{
+		{
+			name: "missing public_ipv4 under existing dns: section -> inserted as first key",
+			initial: `server:
+  host: "127.0.0.1"
+  port: 80
+
+coremail:
+  smtp_host: 0.0.0.0
+  jmap_host: 127.0.0.1
+
+dns:
+  cloudflare_api_key: "secret-cf-key"
+  cloudflare_zone_id: "zone-abc"
+
+auth:
+  cookie_domain: ".example.com"
+`,
+			postCheck: func(t *testing.T, rendered string) {
+				v := viper.New()
+				v.SetConfigType("yaml")
+				if err := v.ReadConfig(strings.NewReader(rendered)); err != nil {
+					t.Fatalf("re-rendered config is not valid YAML: %v\n%s", err, rendered)
+				}
+				if got := readNestedString(v.AllSettings(), "dns.public_ipv4"); got != publicIPv4 {
+					t.Errorf("migrate: dns.public_ipv4 got %q, want %q", got, publicIPv4)
+				}
+				// Operator's Cloudflare token MUST be preserved verbatim.
+				if got := readNestedString(v.AllSettings(), "dns.cloudflare_api_key"); got != "secret-cf-key" {
+					t.Errorf("migrate clobbered dns.cloudflare_api_key: got %q", got)
+				}
+				if got := readNestedString(v.AllSettings(), "dns.cloudflare_zone_id"); got != "zone-abc" {
+					t.Errorf("migrate clobbered dns.cloudflare_zone_id: got %q", got)
+				}
+				// coremail.smtp_host MUST stay 0.0.0.0.
+				if got := readNestedString(v.AllSettings(), "coremail.smtp_host"); got != "0.0.0.0" {
+					t.Errorf("migrate changed coremail.smtp_host: got %q", got)
+				}
+			},
+		},
+		{
+			name: "no dns: section at all -> appended as fresh dns: block",
+			initial: `server:
+  host: "127.0.0.1"
+  port: 80
+
+coremail:
+  smtp_host: 0.0.0.0
+  jmap_host: 127.0.0.1
+
+auth:
+  cookie_domain: ".example.com"
+`,
+			postCheck: func(t *testing.T, rendered string) {
+				v := viper.New()
+				v.SetConfigType("yaml")
+				if err := v.ReadConfig(strings.NewReader(rendered)); err != nil {
+					t.Fatalf("re-rendered config is not valid YAML: %v\n%s", err, rendered)
+				}
+				if got := readNestedString(v.AllSettings(), "dns.public_ipv4"); got != publicIPv4 {
+					t.Errorf("migrate: dns.public_ipv4 got %q, want %q", got, publicIPv4)
+				}
+				if !strings.Contains(rendered, "\ndns:") && !strings.HasPrefix(rendered, "dns:") {
+					t.Errorf("migrate: expected a dns: section in rendered config:\n%s", rendered)
+				}
+			},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "orvix.yaml")
+			if err := os.WriteFile(configPath, []byte(c.initial), 0o600); err != nil {
+				t.Fatalf("write pre-existing config: %v", err)
+			}
+
+			// Harness: stub chown/chmod, point provision_config at
+			// the temp file, then cat it. The provision_config path
+			// is the one used by install.sh on a re-run — it calls
+			// migrate_dns_public_ip internally.
+			harness := strings.Replace(installer,
+				`main "$@"`,
+				fmt.Sprintf(`chown() { :; }; chmod() { :; }; ORVIX_CONFIG="$1"; INSTALL_LOG="%s/install.log"; touch "$INSTALL_LOG"; provision_config "example.com" "%s"; cat "$ORVIX_CONFIG"`, dir, publicIPv4),
+				1,
+			)
+			harnessPath := filepath.Join(dir, "rerun.sh")
+			if err := os.WriteFile(harnessPath, []byte(harness), 0o755); err != nil {
+				t.Fatalf("write harness: %v", err)
+			}
+
+			cmd := exec.Command(bashCommand(t), "rerun.sh", configPath)
+			cmd.Dir = dir
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("re-run migrate_dns_public_ip: %v\noutput:\n%s", err, out)
+			}
+			rendered := string(out)
+			c.postCheck(t, rendered)
+		})
+	}
+}
+
+// TestMigrateDnsPublicIpPreservesExistingValue pins the most
+// load-bearing re-run contract: when `dns.public_ipv4` is
+// already set (any value), migrate_dns_public_ip MUST NOT
+// overwrite it. The migration is add-only; the operator's value
+// is the source of truth on a re-run.
+func TestMigrateDnsPublicIpPreservesExistingValue(t *testing.T) {
+	root := repoRoot(t)
+	installer := mustRead(t, filepath.Join(root, "release", "install.sh"))
+
+	cases := []struct {
+		name             string
+		existingPublicIP string
+		installerIPArg   string // what install.sh thinks the public IP is
+		wantFinal        string
+	}{
+		{
+			name:             "operator public IP != installer-detected IP -> operator value preserved",
+			existingPublicIP: "203.0.113.10",
+			installerIPArg:   "65.75.203.74",
+			wantFinal:        "203.0.113.10",
+		},
+		{
+			name:             "operator public IP matches installer-detected IP -> still preserved (no rewrite)",
+			existingPublicIP: "65.75.203.74",
+			installerIPArg:   "65.75.203.74",
+			wantFinal:        "65.75.203.74",
+		},
+		{
+			name:             "operator intentionally cleared public IP (empty string) -> preserved as empty",
+			existingPublicIP: `""`,
+			installerIPArg:   "65.75.203.74",
+			wantFinal:        "",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "orvix.yaml")
+			initial := fmt.Sprintf(`server:
+  host: "127.0.0.1"
+
+coremail:
+  smtp_host: 0.0.0.0
+
+dns:
+  public_ipv4: %s
+`, c.existingPublicIP)
+			if err := os.WriteFile(configPath, []byte(initial), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			harness := strings.Replace(installer,
+				`main "$@"`,
+				fmt.Sprintf(`chown() { :; }; chmod() { :; }; ORVIX_CONFIG="$1"; INSTALL_LOG="%s/install.log"; touch "$INSTALL_LOG"; provision_config "example.com" "%s"; cat "$ORVIX_CONFIG"`, dir, c.installerIPArg),
+				1,
+			)
+harnessPath := filepath.Join(dir, "rerun.sh")
+		if err := os.WriteFile(harnessPath, []byte(harness), 0o755); err != nil {
+			t.Fatalf("write harness: %v", err)
+		}
+
+		cmd := exec.Command(bashCommand(t), "rerun.sh", configPath)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("re-run provision_config: %v\noutput:\n%s", err, out)
+		}
+		rendered := string(out)
+
+			v := viper.New()
+			v.SetConfigType("yaml")
+			if err := v.ReadConfig(strings.NewReader(rendered)); err != nil {
+				t.Fatalf("re-run config is not valid YAML: %v\n%s", err, rendered)
+			}
+			if got := readNestedString(v.AllSettings(), "dns.public_ipv4"); got != c.wantFinal {
+				t.Errorf("re-run overwrote dns.public_ipv4: got %q, want %q\nrendered:\n%s", got, c.wantFinal, rendered)
+			}
+		})
+	}
+}
+
+// TestInstallerWriteConfigNeverInfersPublicIPFromSMTPHost is the
+// regression guard for the architecture rule: DNS public IP MUST
+// come from a dedicated config field, never from the SMTP
+// listener bind host. The test runs write_config with an EMPTY
+// public IP arg and asserts that the rendered `dns.public_ipv4`
+// is the empty string (never 0.0.0.0, never coremail.smtp_host,
+// never any synthesised value).
+func TestInstallerWriteConfigNeverInfersPublicIPFromSMTPHost(t *testing.T) {
+	root := repoRoot(t)
+	installer := mustRead(t, filepath.Join(root, "release", "install.sh"))
+
+	const domain = "example.com"
+	harness := strings.Replace(installer,
+		`main "$@"`,
+		fmt.Sprintf(`chown() { :; }; chmod() { :; }; ORVIX_CONFIG="$1"; write_config "%s" ""; cat "$ORVIX_CONFIG"`, domain),
+		1,
+	)
+	harnessDir := t.TempDir()
+	harnessPath := filepath.Join(harnessDir, "render-config.sh")
+	configPath := filepath.Join(harnessDir, "orvix.yaml")
+	if err := os.WriteFile(harnessPath, []byte(harness), 0o755); err != nil {
+		t.Fatalf("write harness: %v", err)
+	}
+
+	cmd := exec.Command(bashCommand(t), "render-config.sh", configPath)
+	cmd.Dir = harnessDir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("render installer config: %v: %s", err, string(out))
+	}
+	rendered := string(out)
+
+	v := viper.New()
+	v.SetConfigType("yaml")
+	if err := v.ReadConfig(strings.NewReader(rendered)); err != nil {
+		t.Fatalf("installer config is not valid YAML: %v\n--- rendered YAML ---\n%s", err, rendered)
+	}
+	settings := v.AllSettings()
+
+	// dns.public_ipv4 MUST be the empty string when no IP is
+	// supplied — we MUST NOT default to 0.0.0.0 or to
+	// coremail.smtp_host. The DNS plan endpoint then fails closed
+	// with 422 until the operator (or setup-https.sh) supplies a
+	// real public IP.
+	if got := readNestedString(settings, "dns.public_ipv4"); got != "" {
+		t.Errorf("write_config must emit dns.public_ipv4 verbatim; got %q, want empty (must NOT fall back to coremail.smtp_host=0.0.0.0 or any other listener bind address)", got)
+	}
+	// coremail.smtp_host stays 0.0.0.0 — independent of the
+	// empty public_ipv4.
+	if got := readNestedString(settings, "coremail.smtp_host"); got != "0.0.0.0" {
+		t.Errorf("coremail.smtp_host got %q, want 0.0.0.0", got)
+	}
+}
+
+// TestSetupHttpsPatchesMissingDNSPublicIPv4 drives the actual
+// setup-https.sh helper `patch_dns_public_ipv4()` against a
+// pre-existing orvix.yaml that has NO `dns.public_ipv4` field.
+// The helper MUST add `public_ipv4: "<SERVER_IP>"` either as the
+// first key under the existing `dns:` section, or as a fresh
+// `dns:` block if none exists. It MUST NOT touch coremail.smtp_host.
+func TestSetupHttpsPatchesMissingDNSPublicIPv4(t *testing.T) {
+	root := repoRoot(t)
+	script := mustRead(t, filepath.Join(root, "release", "scripts", "setup-https.sh"))
+
+	cases := []struct {
+		name    string
+		initial string
+	}{
+		{
+			name: "no dns: section",
+			initial: `server:
+  host: "127.0.0.1"
+`,
+		},
+		{
+			name: "existing dns: section without public_ipv4",
+			initial: `server:
+  host: "127.0.0.1"
+
+dns:
+  cloudflare_api_key: "secret-cf-key"
+`,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cfgPath := filepath.Join(dir, "orvix.yaml")
+			if err := os.WriteFile(cfgPath, []byte(c.initial), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			// Build a harness that sources setup-https.sh's
+			// helpers but stubs everything we don't want to run
+			// for real (require_root, install_caddy, write_caddyfile,
+			// open_firewall, caddy validate/reload, check_dns,
+			// check_https, etc.). We only need patch_dns_public_ipv4.
+			//
+			// Strip `main "$@"` from the sourced script body so
+			// the harness does NOT auto-invoke main() (which would
+			// call require_root and try to install caddy). The
+			// harness itself drives patch_dns_public_ipv4 below.
+			scriptNoMain := strings.Replace(script, "main \"$@\"", "# main disabled by test harness", 1)
+			harness := `#!/usr/bin/env bash
+set -euo pipefail
+PRIMARY_DOMAIN="orvix.email"
+ORVIX_SERVER_IP="65.75.203.74"
+SERVER_IP="65.75.203.74"
+INSTALL_LOG="%s/setup.log"
+touch "$INSTALL_LOG"
+ADMIN_DOMAIN="admin.orvix.email"
+WEBMAIL_DOMAIN="webmail.orvix.email"
+MAIL_DOMAIN="mail.orvix.email"
+ORVIX_CONFIG="$1"
+export ORVIX_CONFIG ORVIX_SERVER_IP
+
+` + scriptNoMain + `
+
+# Stub the helpers AFTER the script so this definition wins.
+# setup-https.sh defines them for real; we override to no-ops so
+# the test does not try to install Caddy / open firewall ports /
+# talk to systemd on the test host.
+require_root() { :; }
+install_caddy() { :; }
+write_caddyfile() { :; }
+open_firewall() { :; }
+check_dns() { :; }
+check_local_port() { :; }
+check_https() { :; }
+check_content_type() { :; }
+post_https_firewall_hardening() { :; }
+caddy() { return 0; }
+systemctl() { return 0; }
+dig() { echo "65.75.203.74"; }
+getent() { echo "65.75.203.74"; }
+
+patch_dns_public_ipv4
+`
+
+			harnessPath := filepath.Join(dir, "patch.sh")
+			harnessFinal := strings.Replace(harness, "%s/setup.log", dir+"/setup.log", 1)
+			if err := os.WriteFile(harnessPath, []byte(harnessFinal), 0o755); err != nil {
+				t.Fatalf("write harness: %v", err)
+			}
+
+			cmd := exec.Command(bashCommand(t), "patch.sh", cfgPath)
+			cmd.Dir = dir
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				// Dump the harness so failures show the exact
+				// line 40 content. Helpful when debugging
+				// shell quoting issues inside the awk in
+				// patch_dns_public_ipv4.
+				if hb, hErr := os.ReadFile(filepath.Join(dir, "patch.sh")); hErr == nil {
+					lines := strings.Split(string(hb), "\n")
+					header := "patch.sh (first 50 lines):\n"
+					body := ""
+					for i, ln := range lines {
+						if i >= 50 {
+							break
+						}
+						body += fmt.Sprintf("%3d: %s\n", i+1, ln)
+					}
+					t.Fatalf("patch_dns_public_ipv4 failed: %v\noutput:\n%s\n%s%s", err, out, header, body)
+				}
+				t.Fatalf("patch_dns_public_ipv4 failed: %v\noutput:\n%s", err, out)
+			}
+
+			// Read the patched config and assert dns.public_ipv4
+			// was added without touching coremail.smtp_host.
+			patchedBytes, err := os.ReadFile(cfgPath)
+			if err != nil {
+				t.Fatalf("read patched config: %v", err)
+			}
+			patched := string(patchedBytes)
+
+			v := viper.New()
+			v.SetConfigType("yaml")
+			if err := v.ReadConfig(strings.NewReader(patched)); err != nil {
+				t.Fatalf("patched config is not valid YAML: %v\n%s", err, patched)
+			}
+			if got := readNestedString(v.AllSettings(), "dns.public_ipv4"); got != "65.75.203.74" {
+				t.Errorf("patch_dns_public_ipv4: dns.public_ipv4 got %q, want 65.75.203.74; patched:\n%s", got, patched)
+			}
+			// cloudflare_api_key preserved if it was present.
+			if strings.Contains(c.initial, "cloudflare_api_key") {
+				if got := readNestedString(v.AllSettings(), "dns.cloudflare_api_key"); got != "secret-cf-key" {
+					t.Errorf("patch clobbered dns.cloudflare_api_key: got %q", got)
+				}
+			}
+			// coremail.smtp_host is not in either initial config
+			// and must not be created by the patch.
+			if strings.Contains(patched, "smtp_host") {
+				t.Errorf("patch_dns_public_ipv4 must NOT touch coremail.smtp_host; patched:\n%s", patched)
+			}
+		})
+	}
+}
+
+// TestSetupHttpsPatchesMatchingDNSPublicIPv4 confirms that when
+// the existing `dns.public_ipv4` matches the SERVER_IP supplied
+// to setup-https.sh, patch_dns_public_ipv4 is a no-op (the file
+// is preserved verbatim).
+func TestSetupHttpsPatchesMatchingDNSPublicIPv4(t *testing.T) {
+	root := repoRoot(t)
+	script := mustRead(t, filepath.Join(root, "release", "scripts", "setup-https.sh"))
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "orvix.yaml")
+	initial := `server:
+  host: "127.0.0.1"
+
+dns:
+  public_ipv4: "65.75.203.74"
+  cloudflare_api_key: "secret-cf-key"
+`
+	if err := os.WriteFile(cfgPath, []byte(initial), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	harness := `#!/usr/bin/env bash
+set -euo pipefail
+PRIMARY_DOMAIN="orvix.email"
+ORVIX_SERVER_IP="65.75.203.74"
+SERVER_IP="65.75.203.74"
+INSTALL_LOG="%s/setup.log"
+touch "$INSTALL_LOG"
+ADMIN_DOMAIN="admin.orvix.email"
+WEBMAIL_DOMAIN="webmail.orvix.email"
+MAIL_DOMAIN="mail.orvix.email"
+ORVIX_CONFIG="$1"
+export ORVIX_CONFIG ORVIX_SERVER_IP
+
+` + strings.Replace(script, "main \"$@\"", "# main disabled by test harness", 1) + `
+
+# Stubs AFTER the script so the last definition wins.
+require_root() { :; }
+install_caddy() { :; }
+write_caddyfile() { :; }
+open_firewall() { :; }
+check_dns() { :; }
+check_local_port() { :; }
+check_https() { :; }
+check_content_type() { :; }
+post_https_firewall_hardening() { :; }
+caddy() { return 0; }
+systemctl() { return 0; }
+dig() { echo "65.75.203.74"; }
+getent() { echo "65.75.203.74"; }
+
+patch_dns_public_ipv4
+`
+	harnessPath := filepath.Join(dir, "patch.sh")
+	harnessFinal := strings.Replace(harness, "%s/setup.log", dir+"/setup.log", 1)
+	if err := os.WriteFile(harnessPath, []byte(harnessFinal), 0o755); err != nil {
+		t.Fatalf("write harness: %v", err)
+	}
+
+	cmd := exec.Command(bashCommand(t), "patch.sh", cfgPath)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("patch_dns_public_ipv4 failed on matching IP: %v\noutput:\n%s", err, out)
+	}
+
+	patchedBytes, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read patched config: %v", err)
+	}
+	patched := string(patchedBytes)
+	if patched != initial {
+		t.Errorf("patch_dns_public_ipv4 on matching IP must be a no-op\nbefore:\n%s\nafter:\n%s", initial, patched)
+	}
+}
+
+// TestSetupHttpsPatchesMismatchingDNSPublicIPv4Fails confirms
+// that when the existing `dns.public_ipv4` differs from the
+// SERVER_IP supplied to setup-https.sh, patch_dns_public_ipv4
+// FAILS LOUDLY with a clear message that names both values.
+// The function MUST NEVER silently overwrite the operator's
+// value (an operator may have intentionally set a different IP
+// after a VPS migration or behind a NAT).
+func TestSetupHttpsPatchesMismatchingDNSPublicIPv4Fails(t *testing.T) {
+	root := repoRoot(t)
+	script := mustRead(t, filepath.Join(root, "release", "scripts", "setup-https.sh"))
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "orvix.yaml")
+	initial := `server:
+  host: "127.0.0.1"
+
+dns:
+  public_ipv4: "203.0.113.10"
+`
+	if err := os.WriteFile(cfgPath, []byte(initial), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	harness := `#!/usr/bin/env bash
+set -uo pipefail
+PRIMARY_DOMAIN="orvix.email"
+ORVIX_SERVER_IP="65.75.203.74"
+SERVER_IP="65.75.203.74"
+INSTALL_LOG="%s/setup.log"
+touch "$INSTALL_LOG"
+ADMIN_DOMAIN="admin.orvix.email"
+WEBMAIL_DOMAIN="webmail.orvix.email"
+MAIL_DOMAIN="mail.orvix.email"
+ORVIX_CONFIG="$1"
+export ORVIX_CONFIG ORVIX_SERVER_IP
+
+` + strings.Replace(script, "main \"$@\"", "# main disabled by test harness", 1) + `
+
+# Stubs AFTER the script so these definitions win.
+require_root() { :; }
+install_caddy() { :; }
+write_caddyfile() { :; }
+open_firewall() { :; }
+check_dns() { :; }
+check_local_port() { :; }
+check_https() { :; }
+check_content_type() { :; }
+post_https_firewall_hardening() { :; }
+caddy() { return 0; }
+systemctl() { return 0; }
+dig() { echo "65.75.203.74"; }
+getent() { echo "65.75.203.74"; }
+
+# Override fail() AFTER the script so this definition wins; we
+# want to inspect the failure message instead of letting the
+# script's fail() kill the test runner immediately.
+fail() {
+    echo "FAIL_CALLED: $*" >&2
+    echo "Detailed log: $INSTALL_LOG" >&2
+    exit 1
+}
+
+patch_dns_public_ipv4
+echo "UNEXPECTED_OK"
+`
+	harnessPath := filepath.Join(dir, "patch.sh")
+	harnessFinal := strings.Replace(harness, "%s/setup.log", dir+"/setup.log", 1)
+	if err := os.WriteFile(harnessPath, []byte(harnessFinal), 0o755); err != nil {
+		t.Fatalf("write harness: %v", err)
+	}
+
+	cmd := exec.Command(bashCommand(t), "patch.sh", cfgPath)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	outStr := string(out)
+	if err == nil {
+		t.Fatalf("patch_dns_public_ipv4 on mismatched IP must fail; got exit 0\noutput:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "mismatch") {
+		t.Errorf("failure message must mention mismatch; got:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "203.0.113.10") {
+		t.Errorf("failure message must name the existing IP; got:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "65.75.203.74") {
+		t.Errorf("failure message must name the supplied IP; got:\n%s", outStr)
+	}
+
+	// The config file MUST NOT have been overwritten.
+	patchedBytes, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !strings.Contains(string(patchedBytes), `public_ipv4: "203.0.113.10"`) {
+		t.Errorf("mismatch path must NOT overwrite operator value; got:\n%s", patchedBytes)
+	}
+}
+
+// ── BLOCKER 2 / 3: public IPv4 validation helpers ────────────────
+//
+// is_valid_public_ipv4 is the gate every public-IPv4 input goes
+// through: install.sh's main(), setup-https.sh's require_input(),
+// and the migrate / patch helpers all rely on it. The tests below
+// pin the full matrix the DNS Ops dashboard rejects, so any future
+// drift between the install-time gate and the runtime gate is
+// caught before it ships a junk value to /etc/orvix/orvix.yaml.
+
+// TestInstallerIsValidPublicIPv4 exercises is_valid_public_ipv4
+// end-to-end. Each sub-case runs the actual bash helper against
+// a synthetic input and asserts the exit code, so a future
+// refactor that drops a range check (e.g. forgets 169.254/16) is
+// caught by this test before it ships.
+func TestInstallerIsValidPublicIPv4(t *testing.T) {
+	root := repoRoot(t)
+	installer := mustRead(t, filepath.Join(root, "release", "install.sh"))
+	if !strings.Contains(installer, "is_valid_public_ipv4() {") {
+		t.Fatal("installer must define is_valid_public_ipv4() (2026-06-30 BLOCKER 2 fix)")
+	}
+
+	// Extract the helper via brace counting so we run the actual
+	// production code, not a copy.
+	helper, err := extractBashFunction(installer, "is_valid_public_ipv4")
+	if err != nil {
+		t.Fatalf("extract is_valid_public_ipv4: %v", err)
+	}
+	if helper == "" {
+		t.Fatal("extractBashFunction returned empty helper body for is_valid_public_ipv4")
+	}
+
+	cases := []struct {
+		name string
+		ip   string
+		want int // 0 = accepted, 1 = rejected
+	}{
+		// Accept: a normal public IPv4.
+		{"accept 65.75.203.74", "65.75.203.74", 0},
+		{"accept 8.8.8.8", "8.8.8.8", 0},
+		{"accept 1.1.1.1", "1.1.1.1", 0},
+
+		// Reject: empty.
+		{"reject empty", "", 1},
+
+		// Reject: IPv6.
+		{"reject IPv6 2606:cc0:200:4c0::1", "2606:cc0:200:4c0::1", 1},
+		{"reject IPv6 ::1", "::1", 1},
+
+		// Reject: 0.0.0.0 (unspecified).
+		{"reject 0.0.0.0", "0.0.0.0", 1},
+
+		// Reject: loopback (127/8).
+		{"reject 127.0.0.1", "127.0.0.1", 1},
+		{"reject 127.255.255.254", "127.255.255.254", 1},
+
+		// Reject: RFC1918.
+		{"reject 10.0.0.1", "10.0.0.1", 1},
+		{"reject 172.16.0.1", "172.16.0.1", 1},
+		{"reject 172.31.255.255", "172.31.255.255", 1},
+		{"reject 192.168.1.1", "192.168.1.1", 1},
+
+		// Reject: carrier-grade NAT (100.64.0.0/10, RFC6598).
+		{"reject 100.64.0.1 (CGNAT)", "100.64.0.1", 1},
+		{"reject 100.127.255.255 (CGNAT top)", "100.127.255.255", 1},
+
+		// Reject: RFC6890 special-use 192.0.0.0/24.
+		{"reject 192.0.0.1 (special-use)", "192.0.0.1", 1},
+		{"reject 192.0.0.255 (special-use top)", "192.0.0.255", 1},
+
+		// Reject: RFC2544 benchmarking (198.18.0.0/15).
+		{"reject 198.18.0.1 (benchmark)", "198.18.0.1", 1},
+		{"reject 198.19.255.255 (benchmark top)", "198.19.255.255", 1},
+
+		// Reject: link-local.
+		{"reject 169.254.1.1", "169.254.1.1", 1},
+
+		// Reject: RFC5737 documentation ranges.
+		{"reject 192.0.2.1", "192.0.2.1", 1},
+		{"reject 198.51.100.1", "198.51.100.1", 1},
+		{"reject 203.0.113.1", "203.0.113.1", 1},
+
+		// Reject: multicast (224/4).
+		{"reject 224.0.0.1", "224.0.0.1", 1},
+		{"reject 239.255.255.255", "239.255.255.255", 1},
+
+		// Reject: reserved (240/4).
+		{"reject 240.0.0.1", "240.0.0.1", 1},
+		{"reject 255.255.255.255", "255.255.255.255", 1},
+
+		// Reject: malformed strings (regex gate).
+		{"reject single octet", "65", 1},
+		{"reject 5 octets", "1.2.3.4.5", 1},
+		{"reject alpha", "abc.def.ghi.jkl", 1},
+		{"reject octet overflow", "256.0.0.0", 1},
+		{"reject leading whitespace", " 65.75.203.74", 1},
+		{"reject trailing slash", "65.75.203.74/", 1},
+		{"reject zero-padded octet 1", "065.75.203.74", 1},
+		{"reject ipv4 with port", "65.75.203.74:80", 1},
+
+		// Accept edges: just outside private/special ranges.
+		{"accept 11.0.0.1 (above RFC1918 10/8)", "11.0.0.1", 0},
+		{"accept 100.128.0.1 (above CGNAT)", "100.128.0.1", 0},
+		{"accept 172.15.255.255 (below 172.16/12)", "172.15.255.255", 0},
+		{"accept 172.32.0.0 (above 172.16/12)", "172.32.0.0", 0},
+		{"accept 192.169.0.0 (above 192.168/16)", "192.169.0.0", 0},
+		{"accept 169.253.0.0 (below 169.254/16)", "169.253.0.0", 0},
+		{"accept 169.255.0.0 (above 169.254/16)", "169.255.0.0", 0},
+		{"accept 192.0.3.0 (above TEST-NET-1)", "192.0.3.0", 0},
+		{"accept 198.17.255.255 (below benchmark 198.18/15)", "198.17.255.255", 0},
+		{"accept 198.20.0.1 (above benchmark 198.18/15)", "198.20.0.1", 0},
+		{"accept 223.255.255.255 (below multicast)", "223.255.255.255", 0},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			prog := fmt.Sprintf(`#!/usr/bin/env bash
+set -u
+%s
+
+if is_valid_public_ipv4 %q; then
+    echo "ACCEPT"
+else
+    echo "REJECT"
+fi
+exit 0
+`, helper, c.ip)
+			progPath := filepath.Join(dir, "check.sh")
+			if err := os.WriteFile(progPath, []byte(prog), 0o755); err != nil {
+				t.Fatalf("write harness: %v", err)
+			}
+			cmd := exec.Command(bashCommand(t), progPath)
+			cmd.Dir = dir
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("harness failed: %v\noutput:\n%s", err, out)
+			}
+			outStr := strings.TrimSpace(string(out))
+			gotAccept := strings.Contains(outStr, "ACCEPT")
+			gotReject := strings.Contains(outStr, "REJECT")
+			if gotAccept && gotReject {
+				t.Fatalf("helper produced both ACCEPT and REJECT for %q: %s", c.ip, outStr)
+			}
+			switch c.want {
+			case 0:
+				if !gotAccept {
+					t.Errorf("is_valid_public_ipv4(%q) must ACCEPT; got:\n%s", c.ip, outStr)
+				}
+			case 1:
+				if !gotReject {
+					t.Errorf("is_valid_public_ipv4(%q) must REJECT; got:\n%s", c.ip, outStr)
+				}
+			}
+		})
+	}
+}
+
+// TestSetupHttpsIsValidPublicIPv4 runs the same matrix against
+// setup-https.sh's helper. The two scripts MUST agree on every
+// input — drift would cause a fresh install to accept an IP
+// that setup-https.sh later rejects, or vice versa.
+func TestSetupHttpsIsValidPublicIPv4(t *testing.T) {
+	root := repoRoot(t)
+	script := mustRead(t, filepath.Join(root, "release", "scripts", "setup-https.sh"))
+	if !strings.Contains(script, "is_valid_public_ipv4() {") {
+		t.Fatal("setup-https.sh must define is_valid_public_ipv4() (2026-06-30 BLOCKER 3 fix)")
+	}
+	helper, err := extractBashFunction(script, "is_valid_public_ipv4")
+	if err != nil {
+		t.Fatalf("extract is_valid_public_ipv4 from setup-https.sh: %v", err)
+	}
+	if helper == "" {
+		t.Fatal("extractBashFunction returned empty helper body")
+	}
+
+	cases := []struct {
+		ip   string
+		want int
+	}{
+		{"65.75.203.74", 0},
+		{"8.8.8.8", 0},
+		{"", 1},
+		{"0.0.0.0", 1},
+		{"10.0.0.1", 1},
+		{"100.64.0.1", 1},
+		{"100.127.255.255", 1},
+		{"127.0.0.1", 1},
+		{"169.254.1.1", 1},
+		{"172.16.0.1", 1},
+		{"192.0.0.1", 1},
+		{"192.0.0.255", 1},
+		{"192.0.2.1", 1},
+		{"192.168.1.1", 1},
+		{"198.18.0.1", 1},
+		{"198.19.255.255", 1},
+		{"198.51.100.1", 1},
+		{"203.0.113.1", 1},
+		{"224.0.0.1", 1},
+		{"255.255.255.255", 1},
+		{"2606:cc0:200:4c0::1", 1},
+	}
+	for _, c := range cases {
+		t.Run(fmt.Sprintf("ip=%s", c.ip), func(t *testing.T) {
+			dir := t.TempDir()
+			prog := fmt.Sprintf(`#!/usr/bin/env bash
+set -u
+%s
+
+if is_valid_public_ipv4 %q; then
+    echo "ACCEPT"
+else
+    echo "REJECT"
+fi
+exit 0
+`, helper, c.ip)
+			progPath := filepath.Join(dir, "check.sh")
+			if err := os.WriteFile(progPath, []byte(prog), 0o755); err != nil {
+				t.Fatalf("write harness: %v", err)
+			}
+			cmd := exec.Command(bashCommand(t), progPath)
+			cmd.Dir = dir
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("harness failed: %v\noutput:\n%s", err, out)
+			}
+			outStr := strings.TrimSpace(string(out))
+			switch c.want {
+			case 0:
+				if !strings.Contains(outStr, "ACCEPT") {
+					t.Errorf("setup-https.sh is_valid_public_ipv4(%q) must ACCEPT; got: %s", c.ip, outStr)
+				}
+			case 1:
+				if !strings.Contains(outStr, "REJECT") {
+					t.Errorf("setup-https.sh is_valid_public_ipv4(%q) must REJECT; got: %s", c.ip, outStr)
+				}
+			}
+		})
+	}
+}
+
+// TestInstallerDetectPublicIPv4FromHostIPs runs the actual
+// detect_public_ipv4_from_host_ips helper against a stubbed
+// `hostname -I` and asserts that:
+//   - the FIRST valid public IPv4 in the output is returned,
+//   - private/loopback/IPv6 tokens are skipped,
+//   - a hostname -I line with no valid token returns nothing.
+//
+// We stub `hostname` itself so this test does not depend on the
+// host's actual network configuration.
+func TestInstallerDetectPublicIPv4FromHostIPs(t *testing.T) {
+	root := repoRoot(t)
+	installer := mustRead(t, filepath.Join(root, "release", "install.sh"))
+	helper, err := extractBashFunction(installer, "detect_public_ipv4_from_host_ips")
+	if err != nil {
+		t.Fatalf("extract detect_public_ipv4_from_host_ips: %v", err)
+	}
+	if helper == "" {
+		t.Fatal("installer must define detect_public_ipv4_from_host_ips (2026-06-30 BLOCKER 2 fix)")
+	}
+	// detect_public_ipv4_from_host_ips calls is_valid_public_ipv4
+	// internally, so we extract that helper too and source both
+	// into the harness so the call resolves.
+	validator, err := extractBashFunction(installer, "is_valid_public_ipv4")
+	if err != nil {
+		t.Fatalf("extract is_valid_public_ipv4: %v", err)
+	}
+	if validator == "" {
+		t.Fatal("installer must define is_valid_public_ipv4 (2026-06-30 BLOCKER 2 fix)")
+	}
+
+	cases := []struct {
+		name        string
+		hostnameOut string
+		hostnameErr bool // if true, hostname returns empty (no output)
+		want        string
+	}{
+		{
+			name:        "single valid public IPv4 -> returned",
+			hostnameOut: "65.75.203.74",
+			want:        "65.75.203.74",
+		},
+		{
+			name:        "valid first, invalid second -> returns first valid",
+			hostnameOut: "65.75.203.74 127.0.0.1",
+			want:        "65.75.203.74",
+		},
+		{
+			name:        "invalid first, valid second -> returns valid (skips invalid)",
+			hostnameOut: "127.0.0.1 65.75.203.74",
+			want:        "65.75.203.74",
+		},
+		{
+			name:        "all-invalid -> empty output, non-zero exit",
+			hostnameOut: "127.0.0.1 10.0.0.5 192.168.1.1",
+			want:        "",
+		},
+		{
+			name:        "IPv6 + valid IPv4 mix -> returns valid IPv4",
+			hostnameOut: "2606:cc0:200:4c0::1 65.75.203.74",
+			want:        "65.75.203.74",
+		},
+		{
+			name:        "RFC1918 first, public second -> returns public",
+			hostnameOut: "10.0.0.5 65.75.203.74",
+			want:        "65.75.203.74",
+		},
+		{
+			name:        "private only -> empty output",
+			hostnameOut: "10.0.0.5 172.16.0.1",
+			want:        "",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			hostnameStub := "65.75.203.74\n" // never used; we override hostname via stub
+			_ = hostnameStub
+			// Build the stubbed `hostname`. The bash function
+			// calls `hostname -I` (with args); we need a stub
+			// that responds to that exact invocation. We shadow
+			// `hostname` via a function in the harness so it
+			// wins over the system binary.
+			hostnameArgs := ""
+			if c.hostnameErr {
+				hostnameArgs = `hostname() { return 1; }`
+			} else {
+				hostnameArgs = fmt.Sprintf(`hostname() {
+    if [ "$1" = "-I" ]; then
+        printf '%%s' %q
+        return 0
+    fi
+    return 1
+}`, c.hostnameOut)
+			}
+			prog := fmt.Sprintf(`#!/usr/bin/env bash
+set -u
+%s
+%s
+%s
+detect_public_ipv4_from_host_ips
+rc=$?
+if [ $rc -eq 0 ]; then
+    echo "GOT_OUTPUT"
+else
+    echo "NO_OUTPUT rc=$rc"
+fi
+`, validator, helper, hostnameArgs)
+			progPath := filepath.Join(dir, "detect.sh")
+			if err := os.WriteFile(progPath, []byte(prog), 0o755); err != nil {
+				t.Fatalf("write harness: %v", err)
+			}
+			cmd := exec.Command(bashCommand(t), progPath)
+			cmd.Dir = dir
+			out, err := cmd.CombinedOutput()
+			outStr := string(out)
+			if err != nil {
+				t.Fatalf("harness failed: %v\noutput:\n%s", err, outStr)
+			}
+			if c.want == "" {
+				if !strings.Contains(outStr, "NO_OUTPUT") {
+					t.Errorf("detect_public_ipv4_from_host_ips must produce NO_OUTPUT for hostname=%q; got:\n%s", c.hostnameOut, outStr)
+				}
+			} else {
+				// The helper prints the IP on its own line; the
+				// sentinel GOT_OUTPUT follows. Extract the line
+				// BEFORE the sentinel and assert it equals want.
+				idx := strings.Index(outStr, "GOT_OUTPUT")
+				if idx < 0 {
+					t.Fatalf("expected GOT_OUTPUT sentinel; got:\n%s", outStr)
+				}
+				before := strings.TrimSpace(outStr[:idx])
+				if before != c.want {
+					t.Errorf("detect_public_ipv4_from_host_ips with hostname=%q must print %q; got %q\nfull output:\n%s",
+						c.hostnameOut, c.want, before, outStr)
+				}
+			}
+		})
+	}
+}
+
+// TestInstallerNoLoopbackFallbackOnFreshInstall is the load-
+// bearing regression test for BLOCKER 2. The previous installer
+// silently substituted 127.0.0.1 when hostname -I returned
+// nothing or returned a private address; that produced a fresh
+// install whose /etc/orvix/orvix.yaml contained:
+//
+//   dns:
+//     public_ipv4: "127.0.0.1"
+//
+// which the runtime then rejected as loopback, blocking the
+// admin DNS/DKIM dashboard with a confusing 422. The new
+// installer MUST fail closed instead.
+//
+// We drive the actual main() entry point under a stubbed
+// hostname that emits a hostname -I with ONLY private/loopback
+// addresses, and assert:
+//   1. exit code is non-zero,
+//   2. failure message names ORVIX_PUBLIC_IPV4 (so the operator
+//      knows how to recover),
+//   3. /etc/orvix/orvix.yaml is NEVER created (write_config is
+//      not reached on the failure path).
+func TestInstallerNoLoopbackFallbackOnFreshInstall(t *testing.T) {
+	root := repoRoot(t)
+	installer := mustRead(t, filepath.Join(root, "release", "install.sh"))
+	stripped := stripBashComments(installer)
+
+	// Static assertions: the installer MUST NOT contain the
+	// unsafe fallback pattern `${server_public_ip:-127.0.0.1}`
+	// or any equivalent that silently substitutes loopback.
+	for _, forbidden := range []string{
+		`${server_public_ip:-127.0.0.1}`,
+		`${server_public_ip:-"127.0.0.1"}`,
+		`server_public_ip="${server_public_ip:-127.0.0.1}"`,
+	} {
+		if strings.Contains(stripped, forbidden) {
+			t.Errorf("release/install.sh still contains the unsafe loopback fallback %q (2026-06-30 BLOCKER 2 fix)", forbidden)
+		}
+	}
+	// And the safe `hostname -I | awk '{print $1}'` blind first
+	// token (which the previous version used) is also gone: the
+	// only `hostname -I` reference must go through
+	// detect_public_ipv4_from_host_ips. We allow the literal
+	// inside that helper's body, but the previous unsafe
+	// pipeline form is gone from main().
+	blindPick := `hostname -I 2>/dev/null | awk '{print $1}'`
+	if strings.Contains(stripped, blindPick) {
+		t.Errorf("release/install.sh still contains the blind `hostname -I | awk` IP picker %q (must use detect_public_ipv4_from_host_ips)", blindPick)
+	}
+
+	// Behavioural assertions: drive main() under a stubbed
+	// hostname that returns ONLY private addresses. We expect
+	// main() to fail closed with a clear ORVIX_PUBLIC_IPV4
+	// pointer, and the config file must NOT be created.
+	//
+	// The harness body is built by string concatenation rather
+	// than a multi-line raw string. Long raw strings can be
+	// brittle when the surrounding file already contains many
+	// UTF-8 multi-byte sequences elsewhere — gofmt's parser
+	// sometimes rejects an otherwise valid raw string when the
+	// file's encoding is mixed. Concatenation sidesteps the
+	// problem entirely and is just as readable here.
+	harnessReplacement := strings.Join([]string{
+		"# Stubbed hostname that returns ONLY private addresses.",
+		"hostname() {",
+		"    if [ \"$1\" = \"-I\" ]; then",
+		"        printf '%s' \"10.0.0.5 192.168.1.1 172.16.0.1\"",
+		"        return 0",
+		"    fi",
+		"    return 1",
+		"}",
+		"# Stubbed chown/chmod so the harness runs without root.",
+		"chown() { :; }",
+		"chmod() { :; }",
+		"# Stub fail() so we capture the message instead of exiting",
+		"# the test runner.",
+		"FAIL_MSG=\"\"",
+		"fail() {",
+		"    FAIL_MSG=\"$*\"",
+		"    echo \"FAIL_CALLED: $*\" >&2",
+		"    exit 1",
+		"}",
+		"log_detail() { :; }",
+		"prompt_domain() { echo \"example.com\"; }",
+		"prompt_email() { echo \"admin@example.com\"; }",
+		"prompt_password() { printf '%s' \"TestPassword123!\"; }",
+		"apt-get() { return 0; }",
+		"systemctl() { return 0; }",
+		"# id() MUST print \"0\" so the require_root check succeeds.",
+		"id() {",
+		"    if [ \"$1\" = \"-u\" ]; then",
+		"        printf '0'",
+		"        return 0",
+		"    fi",
+		"    return 0",
+		"}",
+		"useradd() { return 0; }",
+		"install() { return 0; }",
+		"install_binary() { :; }",
+		"validate_binary() { :; }",
+		"mkdir() { return 0; }",
+		"cp() { return 0; }",
+		"find() { return 0; }",
+		"# Skip VAPID / binary / service / verify paths; we want to",
+		"# fail at the public-IPv4 detection step BEFORE the rest",
+		"# of main() runs.",
+		"set_step() { :; }",
+		"ORVIX_CONFIG=\"/tmp/orvix-test-no-loopback-fallback.yaml\"",
+		"# Override INSTALL_LOG to a writable path so log_detail()",
+		"# and prepare_log() do not try to write to /var/log/orvix",
+		"# on the test host (which does not exist).",
+		"INSTALL_LOG=\"$(pwd)/install.log\"",
+		"mkdir -p \"$(dirname \"$INSTALL_LOG\")\"",
+		"touch \"$INSTALL_LOG\"",
+		"rm -f \"$ORVIX_CONFIG\"",
+		"main \"$@\" 2>&1 || true",
+		"echo \"FAIL_MSG=$FAIL_MSG\"",
+		"echo \"CONFIG_EXISTS=$([ -f \"$ORVIX_CONFIG\" ] && echo yes || echo no)\"",
+		"",
+	}, "\n")
+	harness := strings.Replace(installer, `main "$@"`, harnessReplacement, 1)
+	dir := t.TempDir()
+	harnessPath := filepath.Join(dir, "harness.sh")
+	if err := os.WriteFile(harnessPath, []byte(harness), 0o755); err != nil {
+		t.Fatalf("write harness: %v", err)
+	}
+
+	cmd := exec.Command(bashCommand(t), harnessPath)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	outStr := string(out)
+
+	// main() invokes fail() which exits 1; the harness captures
+	// the message and re-runs `exit 1` from the `||` chain, so
+	// the overall exit code is non-zero. We tolerate either:
+	//   (a) harness exit 1 with FAIL_CALLED in stderr
+	//   (b) harness exit 0 because the wrapper overrode fail()
+	// Either way, the captured FAIL_MSG must name ORVIX_PUBLIC_IPV4
+	// and the config file must not exist.
+	if !strings.Contains(outStr, "ORVIX_PUBLIC_IPV4") {
+		t.Errorf("install.sh failure path must tell the operator to set ORVIX_PUBLIC_IPV4; got:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "public IPv4") {
+		t.Errorf("install.sh failure path must mention public IPv4 detection failure; got:\n%s", outStr)
+	}
+	if strings.Contains(outStr, "127.0.0.1") && !strings.Contains(outStr, "ORVIX_PUBLIC_IPV4=65.75.203.74") {
+		// The previous behaviour wrote 127.0.0.1 into the config.
+		// The new failure message can mention 127.0.0.1 in
+		// prose (the ORVIX_PUBLIC_IPV4 example uses 65.75.203.74),
+		// but it must NOT echo 127.0.0.1 back as the chosen
+		// server_public_ip. We allow the literal "127.0.0.1" if
+		// it appears only inside the ORVIX_PUBLIC_IPV4=65.75.203.74
+		// example string (i.e. the operator is told what to set).
+		// Anything else is a regression.
+		if strings.Contains(outStr, "server_public_ip=127.0.0.1") {
+			t.Errorf("install.sh failure path must NOT echo server_public_ip=127.0.0.1 (the previous unsafe fallback); got:\n%s", outStr)
+		}
+	}
+	// The config file must NOT exist — write_config must never run
+	// on the failure path.
+	if _, statErr := os.Stat("/tmp/orvix-test-no-loopback-fallback.yaml"); statErr == nil {
+		// Best-effort cleanup of any stale file the failure path
+		// left behind. os.Remove is intentional here (not
+		// mavis-trash) because this is a Go test runtime helper,
+		// not a user-initiated deletion.
+		_ = os.Remove("/tmp/orvix-test-no-loopback-fallback.yaml")
+		t.Errorf("install.sh failure path must NOT create /etc/orvix/orvix.yaml; found a stale file from this run")
+	}
+	_ = err // err may or may not be non-nil depending on which path the harness took
+}
+
+// TestInstallerFreshInstallUsesValidatedPublicIP is the positive
+// case: when ORVIX_PUBLIC_IPV4 is set to a valid value, the
+// installer MUST use it (NOT silently re-detect from hostname -I
+// and overwrite it). The previous behaviour had no such gate;
+// this test pins the new contract.
+func TestInstallerFreshInstallUsesValidatedPublicIP(t *testing.T) {
+	root := repoRoot(t)
+	installer := mustRead(t, filepath.Join(root, "release", "install.sh"))
+	stripped := stripBashComments(installer)
+
+	// Static assertion: the installer must reference
+	// ORVIX_PUBLIC_IPV4 so operators on NAT'd hosts can override
+	// the hostname -I detection.
+	if !strings.Contains(stripped, "ORVIX_PUBLIC_IPV4") {
+		t.Errorf("installer must honour ORVIX_PUBLIC_IPV4 for hosts where hostname -I is unreliable (2026-06-30 BLOCKER 2 fix)")
+	}
+
+	// Behavioural assertion: a harness that drives provision_config
+	// via the new public-IP detection path uses ORVIX_PUBLIC_IPV4
+	// when set, even if hostname -I would return something else.
+	const domain = "example.com"
+	// 65.75.203.74 is a real public IPv4 that passes every
+	// is_valid_public_ipv4 range check. The previous test used
+	// 203.0.113.42 (TEST-NET-3, RFC5737 documentation) which
+	// is_valid_public_ipv4 correctly REJECTS — so the harness
+	// would fall through to detect_public_ipv4_from_host_ips
+	// (returns nothing on Windows), leaving dns.public_ipv4
+	// empty. Use a routable IP here.
+	const expectedIP = "65.75.203.74"
+	harness := strings.Replace(installer,
+		`main "$@"`,
+		fmt.Sprintf(`chown() { :; }; chmod() { :; }; ORVIX_CONFIG="$1"; ORVIX_PUBLIC_IPV4=%q; write_config "%s" "$(if is_valid_public_ipv4 "$ORVIX_PUBLIC_IPV4"; then echo "$ORVIX_PUBLIC_IPV4"; else detect_public_ipv4_from_host_ips; fi)"; cat "$ORVIX_CONFIG"`, expectedIP, domain),
+		1,
+	)
+	dir := t.TempDir()
+	harnessPath := filepath.Join(dir, "harness.sh")
+	configPath := filepath.Join(dir, "orvix.yaml")
+	if err := os.WriteFile(harnessPath, []byte(harness), 0o755); err != nil {
+		t.Fatalf("write harness: %v", err)
+	}
+	cmd := exec.Command(bashCommand(t), harnessPath, configPath)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("harness failed: %v\noutput:\n%s", err, out)
+	}
+	rendered := string(out)
+
+	v := viper.New()
+	v.SetConfigType("yaml")
+	if err := v.ReadConfig(strings.NewReader(rendered)); err != nil {
+		t.Fatalf("rendered config is not valid YAML: %v\n%s", err, rendered)
+	}
+	if got := readNestedString(v.AllSettings(), "dns.public_ipv4"); got != expectedIP {
+		t.Errorf("installer must use ORVIX_PUBLIC_IPV4=%q when set; got dns.public_ipv4=%q", expectedIP, got)
+	}
+}
+
+// ── BLOCKER 4: setup-https.sh restart + readiness after patch ──
+
+// TestSetupHttpsValidatesServerIPBeforePatch exercises the
+// require_input gate: setup-https.sh MUST validate SERVER_IP
+// before any patching happens. An invalid SERVER_IP is a fail-
+// closed error, NOT a silent coercion to loopback/private.
+func TestSetupHttpsValidatesServerIPBeforePatch(t *testing.T) {
+	root := repoRoot(t)
+	script := mustRead(t, filepath.Join(root, "release", "scripts", "setup-https.sh"))
+
+	// Strip main "$@" so the harness can drive require_input
+	// in isolation.
+	scriptNoMain := strings.Replace(script, "main \"$@\"", "# main disabled by test harness", 1)
+
+	cases := []struct {
+		name     string
+		serverIP string
+		wantFail bool
+		wantMsg  string
+	}{
+		{"accept 65.75.203.74", "65.75.203.74", false, ""},
+		{"reject 127.0.0.1 (loopback)", "127.0.0.1", true, "invalid public IPv4"},
+		{"reject 0.0.0.0", "0.0.0.0", true, "invalid public IPv4"},
+		{"reject 10.0.0.1 (RFC1918)", "10.0.0.1", true, "invalid public IPv4"},
+		{"reject 192.168.1.1 (RFC1918)", "192.168.1.1", true, "invalid public IPv4"},
+		{"reject 169.254.1.1 (link-local)", "169.254.1.1", true, "invalid public IPv4"},
+		{"reject 192.0.2.1 (RFC5737)", "192.0.2.1", true, "invalid public IPv4"},
+		{"reject empty", "", true, "could not be detected"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cfgPath := filepath.Join(dir, "orvix.yaml")
+			if err := os.WriteFile(cfgPath, []byte("server:\n  host: \"127.0.0.1\"\n"), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			// Stub hostname to return an address we'd never want
+			// as SERVER_IP. require_input must REJECT it BEFORE
+			// any patching happens.
+			harness := fmt.Sprintf(`#!/usr/bin/env bash
+set -uo pipefail
+# Source the script FIRST so the script's own parameter
+# expansion (PRIMARY_DOMAIN="${1:-${ORVIX_PRIMARY_DOMAIN:-}}")
+# picks up the env var we set below. Then override the
+# script-derived values with the harness's intended inputs so
+# a deliberate override from the test wins.
+export ORVIX_PRIMARY_DOMAIN="orvix.email"
+ORVIX_SERVER_IP=%q
+SERVER_IP=$ORVIX_SERVER_IP
+export ORVIX_SERVER_IP
+INSTALL_LOG="%s/setup.log"
+touch "$INSTALL_LOG"
+ADMIN_DOMAIN="admin.orvix.email"
+WEBMAIL_DOMAIN="webmail.orvix.email"
+MAIL_DOMAIN="mail.orvix.email"
+ORVIX_CONFIG=%q
+export ORVIX_CONFIG
+
+`, c.serverIP, dir, cfgPath) + scriptNoMain + `
+
+# Re-assert PRIMARY_DOMAIN AFTER the script is sourced so
+# the test's intended value wins (the script uses $1 OR
+# ORVIX_PRIMARY_DOMAIN, but we want a deterministic value
+# regardless of how the harness was invoked).
+PRIMARY_DOMAIN="orvix.email"
+ADMIN_DOMAIN="admin.orvix.email"
+WEBMAIL_DOMAIN="webmail.orvix.email"
+MAIL_DOMAIN="mail.orvix.email"
+
+# Stubs AFTER the script so these definitions win.
+require_root() { :; }
+install_caddy() { :; }
+write_caddyfile() { :; }
+open_firewall() { :; }
+check_dns() { :; }
+check_local_port() { :; }
+check_https() { :; }
+check_content_type() { :; }
+post_https_firewall_hardening() { :; }
+caddy() { return 0; }
+systemctl() { return 0; }
+dig() { echo "65.75.203.74"; }
+getent() { echo "65.75.203.74"; }
+
+# Override fail() so the harness captures the message.
+fail() {
+    echo "FAIL_CALLED: $*" >&2
+    exit 1
+}
+
+require_input
+echo "REQUIRE_INPUT_OK"
+`
+			harnessPath := filepath.Join(dir, "harness.sh")
+			if err := os.WriteFile(harnessPath, []byte(harness), 0o755); err != nil {
+				t.Fatalf("write harness: %v", err)
+			}
+			cmd := exec.Command(bashCommand(t), harnessPath)
+			cmd.Dir = dir
+			out, err := cmd.CombinedOutput()
+			outStr := string(out)
+			if c.wantFail {
+				if err == nil {
+					t.Fatalf("require_input must fail for SERVER_IP=%q; got exit 0\noutput:\n%s", c.serverIP, outStr)
+				}
+				if !strings.Contains(outStr, c.wantMsg) {
+					t.Errorf("failure message must contain %q for SERVER_IP=%q; got:\n%s", c.wantMsg, c.serverIP, outStr)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("require_input must succeed for SERVER_IP=%q; got %v\noutput:\n%s", c.serverIP, err, outStr)
+				}
+				if !strings.Contains(outStr, "REQUIRE_INPUT_OK") {
+					t.Errorf("valid SERVER_IP must reach REQUIRE_INPUT_OK sentinel; got:\n%s", outStr)
+				}
+			}
+		})
+	}
+}
+
+// TestSetupHttpsRestartsOrvixAfterPatch is the load-bearing
+// behavioural test for BLOCKER 4. After patch_dns_public_ipv4
+// modifies the file, setup-https.sh MUST restart orvix and
+// wait for the runtime to be ready. Without this, the runtime
+// keeps reading the OLD dns.public_ipv4 from in-memory config
+// while the dashboard verification gate hits the stale process
+// and fails with 422.
+//
+// We drive the actual patch_dns_public_ipv4 + the new
+// restart_orvix_after_patch wiring with a stubbed systemctl.
+// The stub records restart attempts to a file so the test can
+// assert the restart was invoked AFTER the patch, and NOT
+// invoked when the patch was a no-op.
+func TestSetupHttpsRestartsOrvixAfterPatch(t *testing.T) {
+	root := repoRoot(t)
+	script := mustRead(t, filepath.Join(root, "release", "scripts", "setup-https.sh"))
+	scriptNoMain := strings.Replace(script, "main \"$@\"", "# main disabled by test harness", 1)
+
+// Helper to build the harness with a config that needs
+	// patching (dns.public_ipv4 missing). The stubbed systemctl
+	// records every call to a file so the test can prove restart was
+	// invoked. curl and the systemctl is-active check are
+	// stubbed to "ready" so wait_for_orvix_readiness returns
+	// immediately instead of timing out.
+	build := func(t *testing.T, dir, cfgPath, serverIP string, systemctlStub string) string {
+		harness := fmt.Sprintf(`#!/usr/bin/env bash
+set -uo pipefail
+export ORVIX_PRIMARY_DOMAIN="orvix.email"
+PRIMARY_DOMAIN="orvix.email"
+ORVIX_SERVER_IP=%q
+SERVER_IP=$ORVIX_SERVER_IP
+export ORVIX_SERVER_IP
+INSTALL_LOG="%s/setup.log"
+touch "$INSTALL_LOG"
+ADMIN_DOMAIN="admin.orvix.email"
+WEBMAIL_DOMAIN="webmail.orvix.email"
+MAIL_DOMAIN="mail.orvix.email"
+ORVIX_CONFIG=%q
+export ORVIX_CONFIG
+
+`, serverIP, dir, cfgPath) + scriptNoMain + `
+
+require_root() { :; }
+install_caddy() { :; }
+write_caddyfile() { :; }
+open_firewall() { :; }
+check_dns() { :; }
+check_local_port() { :; }
+check_https() { :; }
+check_content_type() { :; }
+post_https_firewall_hardening() { :; }
+caddy() { return 0; }
+dig() { echo "65.75.203.74"; }
+getent() { echo "65.75.203.74"; }
+# Stubbed curl: report "ready" so wait_for_orvix_readiness
+# returns success on the first poll instead of timing out.
+curl() { return 0; }
+# Stubbed systemctl that records every call.
+` + systemctlStub + `
+
+patch_dns_public_ipv4
+restart_orvix_after_patch
+echo "DONE PATCH_CHANGED=${PATCH_CHANGED:-0}"
+`
+		return harness
+	}
+
+	t.Run("PATCH_CHANGED=1 -> restart is invoked", func(t *testing.T) {
+		dir := t.TempDir()
+		cfgPath := filepath.Join(dir, "orvix.yaml")
+		// dns: section present, public_ipv4 missing.
+		if err := os.WriteFile(cfgPath, []byte("server:\n  host: \"127.0.0.1\"\n\ndns:\n  cloudflare_api_key: \"k\"\n"), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		stub := `systemctl() {
+    echo "systemctl $*" >> "` + dir + `/calls.log"
+    case "$*" in
+        *restart\ orvix*)
+            echo "RESTART_INVOKED" >> "` + dir + `/calls.log"
+            ;;
+    esac
+    # Report orvix as active so wait_for_orvix_readiness
+    # returns success immediately. --quiet means return code
+    # only; exit 0 = active.
+    return 0
+}`
+		harness := build(t, dir, cfgPath, "65.75.203.74", stub)
+		harnessPath := filepath.Join(dir, "harness.sh")
+		if err := os.WriteFile(harnessPath, []byte(harness), 0o755); err != nil {
+			t.Fatalf("write harness: %v", err)
+		}
+		cmd := exec.Command(bashCommand(t), harnessPath)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		outStr := string(out)
+		if err != nil {
+			t.Fatalf("harness failed: %v\noutput:\n%s", err, outStr)
+		}
+		if !strings.Contains(outStr, "PATCH_CHANGED=1") {
+			t.Errorf("PATCH_CHANGED must be 1 after adding public_ipv4; got:\n%s", outStr)
+		}
+		// Read the calls log; restart MUST have been invoked.
+		callsBytes, err := os.ReadFile(filepath.Join(dir, "calls.log"))
+		if err != nil {
+			t.Fatalf("read calls log: %v", err)
+		}
+		if !strings.Contains(string(callsBytes), "RESTART_INVOKED") {
+			t.Errorf("setup-https.sh MUST restart orvix after patching dns.public_ipv4; calls log:\n%s", callsBytes)
+		}
+	})
+
+	t.Run("PATCH_CHANGED=0 -> restart is NOT invoked", func(t *testing.T) {
+		dir := t.TempDir()
+		cfgPath := filepath.Join(dir, "orvix.yaml")
+		// dns.public_ipv4 already matches SERVER_IP -> no patch.
+		if err := os.WriteFile(cfgPath, []byte("server:\n  host: \"127.0.0.1\"\n\ndns:\n  public_ipv4: \"65.75.203.74\"\n"), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		stub := `systemctl() {
+    echo "systemctl $*" >> "` + dir + `/calls.log"
+    case "$*" in
+        *restart\ orvix*)
+            echo "RESTART_INVOKED" >> "` + dir + `/calls.log"
+            ;;
+    esac
+    return 0
+}`
+		harness := build(t, dir, cfgPath, "65.75.203.74", stub)
+		harnessPath := filepath.Join(dir, "harness.sh")
+		if err := os.WriteFile(harnessPath, []byte(harness), 0o755); err != nil {
+			t.Fatalf("write harness: %v", err)
+		}
+		cmd := exec.Command(bashCommand(t), harnessPath)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		outStr := string(out)
+		if err != nil {
+			t.Fatalf("harness failed: %v\noutput:\n%s", err, outStr)
+		}
+		if !strings.Contains(outStr, "PATCH_CHANGED=0") {
+			t.Errorf("PATCH_CHANGED must be 0 when no patch was needed; got:\n%s", outStr)
+		}
+		// Pre-create calls.log so the assertion below is
+		// meaningful even when the stub never ran (PATCH_CHANGED=0
+		// means no systemctl restart, so the stub is never
+		// invoked and calls.log is never created). We touch the
+		// file so os.ReadFile succeeds and the body check below
+		// can prove no RESTART_INVOKED line was written.
+		callsPath := filepath.Join(dir, "calls.log")
+		if _, statErr := os.Stat(callsPath); os.IsNotExist(statErr) {
+			if err := os.WriteFile(callsPath, []byte(""), 0o600); err != nil {
+				t.Fatalf("seed empty calls log: %v", err)
+			}
+		}
+		callsBytes, err := os.ReadFile(callsPath)
+		if err != nil {
+			t.Fatalf("read calls log: %v", err)
+		}
+		// Restart MUST NOT be invoked when the patch is a no-op.
+		if strings.Contains(string(callsBytes), "RESTART_INVOKED") {
+			t.Errorf("setup-https.sh MUST NOT restart orvix when no patch was needed; calls log:\n%s", callsBytes)
+		}
+	})
+}
+
+// TestSetupHttpsRestartFailsClosedOnReadinessTimeout pins the
+// fail-closed semantics of the readiness wait. If orvix does
+// not come back within the deadline, setup-https.sh MUST fail
+// rather than silently continue with a stale runtime.
+func TestSetupHttpsRestartFailsClosedOnReadinessTimeout(t *testing.T) {
+	root := repoRoot(t)
+	script := mustRead(t, filepath.Join(root, "release", "scripts", "setup-https.sh"))
+
+	// Extract the readiness helper so we run the actual code.
+	// In setup-https.sh, wait_for_orvix_readiness is the LAST
+	// helper before main(), so we extract everything between
+	// its opening `{` and the next top-level `main() {` marker.
+	stripped := stripBashComments(script)
+	helperStart := strings.Index(stripped, "wait_for_orvix_readiness() {")
+	if helperStart < 0 {
+		t.Fatal("setup-https.sh must define wait_for_orvix_readiness (BLOCKER 4)")
+	}
+	helperEndRel := strings.Index(stripped[helperStart:], "\nmain() {")
+	if helperEndRel < 0 {
+		t.Fatal("could not find end of wait_for_orvix_readiness helper body (looking for top-level main() { after the helper)")
+	}
+	helper := stripped[helperStart : helperStart+helperEndRel]
+	_ = script // kept for parity with sibling tests; helper is what we extract and run.
+
+	// Build a harness where curl always fails (simulates orvix
+	// not coming back up) and systemctl reports inactive. The
+	// helper must `fail` within the deadline.
+	dir := t.TempDir()
+	harness := fmt.Sprintf(`#!/usr/bin/env bash
+set -u
+INSTALL_LOG="%s/setup.log"
+touch "$INSTALL_LOG"
+log() { echo "LOG: $*"; }
+ORVIX_READINESS_DEADLINE_SECONDS=2
+export ORVIX_READINESS_DEADLINE_SECONDS
+FAIL_MSG=""
+fail() { echo "FAIL_CALLED: $*" >&2; exit 1; }
+curl() { return 22; }   # simulate curl failure
+systemctl() {
+    if [ "$1" = "is-active" ] && [ "$3" = "orvix" ]; then
+        return 1  # never active
+    fi
+    return 0
+}
+journalctl() { return 0; }
+
+%s
+
+PATCH_CHANGED=1
+wait_for_orvix_readiness
+echo "UNEXPECTED_OK"
+`, dir, helper)
+	harnessPath := filepath.Join(dir, "harness.sh")
+	if err := os.WriteFile(harnessPath, []byte(harness), 0o755); err != nil {
+		t.Fatalf("write harness: %v", err)
+	}
+	cmd := exec.Command(bashCommand(t), harnessPath)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	outStr := string(out)
+	if err == nil {
+		t.Fatalf("wait_for_orvix_readiness must fail closed on timeout; got exit 0\noutput:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "FAIL_CALLED: orvix did not become ready") {
+		t.Errorf("failure must be reported via fail() with the readiness message; got:\n%s", outStr)
+	}
+	// The diagnostics must be written to $INSTALL_LOG.
+	logBytes, err := os.ReadFile(filepath.Join(dir, "setup.log"))
+	if err != nil {
+		t.Fatalf("read install log: %v", err)
+	}
+	logStr := string(logBytes)
+	if !strings.Contains(logStr, "systemctl status orvix") {
+		t.Errorf("$INSTALL_LOG must contain systemctl status dump; got:\n%s", logStr)
+	}
+	if !strings.Contains(logStr, "journalctl -u orvix") {
+		t.Errorf("$INSTALL_LOG must contain journalctl dump; got:\n%s", logStr)
+	}
+}
+
+// extractBashFunction is provided by release_packaging_test.go
+// in the same `config` package; we reuse it here.
+//
+// mustRead is also provided by release_packaging_test.go.

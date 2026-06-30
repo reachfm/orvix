@@ -1,4 +1,4 @@
-package handlers
+﻿package handlers
 
 // DNS Ops safety helpers (DNS-DKIM-OPERATIONS-2F-SAFETY-FIX).
 //
@@ -10,7 +10,7 @@ package handlers
 //
 // The three helpers cover the three Codex blockers:
 //
-//   1. Public mail IP — separate from the listener bind host
+//   1. Public mail IP â€” separate from the listener bind host
 //      (coremail.smtp_host). A fresh install defaults the
 //      listener to 0.0.0.0; we must NEVER generate A / SPF
 //      records from 0.0.0.0 or from a private / loopback /
@@ -18,7 +18,7 @@ package handlers
 //      cfg.DNS.PublicIPv4 (and optionally PublicIPv6) and
 //      must pass isPublicUnicastIP.
 //
-//   2. DKIM selector — must be strict DNS-label safe:
+//   2. DKIM selector â€” must be strict DNS-label safe:
 //      lowercase, [a-z0-9-], 1..63 chars, no leading / trailing
 //      hyphen, no dots, no spaces, no slashes, no underscores,
 //      no quotes, no unicode, no wildcard, no double-dot. The
@@ -26,7 +26,7 @@ package handlers
 //      deterministic form. Empty input returns the safe default
 //      "orvix".
 //
-//   3. Domain existence — Orvix must already know the domain
+//   3. Domain existence â€” Orvix must already know the domain
 //      (coremail_domains row, deleted_at IS NULL) before we
 //      generate a DKIM key pair for it. The function returns
 //      (true, nil) when a row exists, (false, nil) when it
@@ -51,6 +51,9 @@ import (
 //     (fe80::/10)
 //   - IPv4 private (10/8, 172.16/12, 192.168/16) and IPv6
 //     unique-local (fc00::/7)
+//   - IPv4 carrier-grade NAT (100.64.0.0/10)
+//   - IPv4 benchmarking (198.18.0.0/15)
+//   - IPv4 special-use (192.0.0.0/24)
 //   - IPv4 / IPv6 multicast
 //   - IPv4 / IPv6 unspecified / broadcast-like
 //
@@ -83,14 +86,28 @@ func isPublicUnicastIP(s string) (net.IP, error) {
 	if ip.IsPrivate() {
 		return nil, fmt.Errorf("public mail IP %s is a private-range address; DNS records must point at a real public IP", ip)
 	}
-	// Reject RFC 5737 TEST-NET documentation ranges (192.0.2.0/24,
-	// 198.51.100.0/24, 203.0.113.0/24) and RFC 3849 documentation
-	// IPv6 range (2001:db8::/32). These are reserved for
-	// documentation and examples; they must never appear in
-	// production DNS records.
+	// Reject RFC 6598 carrier-grade NAT / shared address space
+	// (100.64.0.0/10), RFC 2544 benchmarking range (198.18.0.0/15),
+	// RFC 6890 special-use 192.0.0.0/24, RFC 5737 TEST-NET
+	// documentation ranges (192.0.2.0/24, 198.51.100.0/24,
+	// 203.0.113.0/24), and RFC 3849 documentation IPv6 range
+	// (2001:db8::/32). These are reserved for special purposes
+	// and must never appear in production DNS records.
 	if ipv4 := ip.To4(); ipv4 != nil {
 		b := ipv4[0]
 		c := ipv4[1]
+		// 100.64.0.0/10 â€” carrier-grade NAT (RFC6598)
+		if b == 100 && c >= 64 && c <= 127 {
+			return nil, fmt.Errorf("public mail IP %s is in the carrier-grade NAT range (100.64.0.0/10); set dns.public_ipv4 to a real public mail server IP", ip)
+		}
+		// 198.18.0.0/15 â€” benchmarking (RFC2544)
+		if b == 198 && (c == 18 || c == 19) {
+			return nil, fmt.Errorf("public mail IP %s is in the benchmarking range (198.18.0.0/15); set dns.public_ipv4 to a real public mail server IP", ip)
+		}
+		// 192.0.0.0/24 â€” special-use (RFC6890)
+		if b == 192 && c == 0 && ipv4[2] == 0 {
+			return nil, fmt.Errorf("public mail IP %s is in the special-use range (192.0.0.0/24); set dns.public_ipv4 to a real public mail server IP", ip)
+		}
 		if b == 192 && c == 0 && ipv4[2] == 2 {
 			return nil, fmt.Errorf("public mail IP %s is in the TEST-NET-1 documentation range (192.0.2.0/24); set dns.public_ipv4 to the real mail server IP", ip)
 		}
@@ -101,7 +118,7 @@ func isPublicUnicastIP(s string) (net.IP, error) {
 			return nil, fmt.Errorf("public mail IP %s is in the TEST-NET-3 documentation range (203.0.113.0/24); set dns.public_ipv4 to the real mail server IP", ip)
 		}
 	} else if len(ip) == net.IPv6len {
-		// 2001:db8::/32 — first 4 bytes are 0x20 0x01 0x0d 0xb8.
+		// 2001:db8::/32 â€” first 4 bytes are 0x20 0x01 0x0d 0xb8.
 		if ip[0] == 0x20 && ip[1] == 0x01 && ip[2] == 0x0d && ip[3] == 0xb8 {
 			return nil, fmt.Errorf("public mail IP %s is in the RFC 3849 documentation range (2001:db8::/32); set dns.public_ipv6 to the real mail server IP", ip)
 		}
@@ -110,7 +127,7 @@ func isPublicUnicastIP(s string) (net.IP, error) {
 }
 
 // validateDKIMSelector applies the strict DKIM selector rules
-// from RFC 6376 §3.1 (selector tag = 1*<domain-label> with
+// from RFC 6376 Â§3.1 (selector tag = 1*<domain-label> with
 // additional safety guards). The function lowercases the input
 // before validating and returns the normalised selector on
 // success.
