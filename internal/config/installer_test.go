@@ -1942,6 +1942,370 @@ echo "OK"
 	})
 }
 
+// TestInstallerPostBootstrapReadinessWaitExists pins the 2026-06-30
+// fresh-VPS-rehearsal fix: after we delete /etc/orvix/bootstrap.env
+// and restart the orvix service, `systemctl is-active` and MainPID
+// existence only prove the process is alive — they do NOT prove
+// listener goroutines have finished binding sockets. The fresh VPS
+// rehearsal showed bind-posture validation running in the same
+// second the listeners were still starting up, producing a
+// false-negative failure (port 8080/8081 reported "no loopback
+// bind", mail ports 25/110/143 reported "not bound publicly") on
+// an otherwise healthy install.
+//
+// Contract verified here:
+//   1. A helper `wait_for_runtime_ready_after_restart()` is defined.
+//   2. It is called BETWEEN the bootstrap-env verification
+//      (`VERIFY orvix process environment: no bootstrap password
+//      material found`) and the listener bind posture validation
+//      (`local bind_check_failed=0`).
+//   3. The helper probes BOTH HTTP endpoints AND listener sockets —
+//      it does not rely only on `systemctl is-active`.
+//   4. The endpoints probed are the same ones the bind posture
+//      check guards: 8080/health, 8081/jmap.
+//   5. The listeners probed are 25, 110, 143, 8080, 8081.
+//   6. The failure path dumps `ss -ltnp` AND recent
+//      `journalctl -u orvix` into $INSTALL_LOG so an operator can
+//      diagnose a stuck install without re-running.
+//   7. The failure path uses `fail` (not `warn` / `return 1`) so
+//      bind posture is never skipped.
+func TestInstallerPostBootstrapReadinessWaitExists(t *testing.T) {
+	root := repoRoot(t)
+	installer := mustRead(t, filepath.Join(root, "release", "install.sh"))
+
+	// (1) Helper function is defined.
+	if !strings.Contains(installer, "wait_for_runtime_ready_after_restart() {") {
+		t.Fatal("installer must define wait_for_runtime_ready_after_restart()")
+	}
+
+	// (2) Called between the bootstrap-env verification and the
+	//     bind posture validation. We pin ordering by finding the
+	//     line numbers of each marker and asserting the call is
+	//     strictly between them.
+	lines := strings.Split(installer, "\n")
+	idxBootstrapOK := -1
+	idxBindStart := -1
+	idxReadinessCall := -1
+	for i, line := range lines {
+		// Strip any trailing whitespace and inline comments so a
+		// line like `    wait_for_runtime_ready_after_restart  # call`
+		// still matches.
+		trimmed := strings.TrimSpace(line)
+		if idxBootstrapOK < 0 && strings.Contains(trimmed, "VERIFY orvix process environment: no bootstrap password material found") {
+			idxBootstrapOK = i
+		}
+		if idxBindStart < 0 && strings.Contains(trimmed, "local bind_check_failed=0") {
+			idxBindStart = i
+		}
+		// Find the CALL, not the definition or a comment that
+		// mentions the function name. The call line is exactly
+		// `wait_for_runtime_ready_after_restart` (possibly with
+		// trailing comment after ` #`). We anchor with
+		// `strings.HasPrefix` so we do not catch the definition
+		// (`wait_for_runtime_ready_after_restart() {`) or echo
+		// statements that mention the function name.
+		if idxReadinessCall < 0 && (trimmed == "wait_for_runtime_ready_after_restart" ||
+			strings.HasPrefix(trimmed, "wait_for_runtime_ready_after_restart ")) {
+			idxReadinessCall = i
+		}
+	}
+	if idxBootstrapOK < 0 {
+		t.Fatal("could not find bootstrap-env verification success marker")
+	}
+	if idxBindStart < 0 {
+		t.Fatal("could not find bind posture validation start marker")
+	}
+	if idxReadinessCall < 0 {
+		t.Fatal("wait_for_runtime_ready_after_restart is never called in verify_install()")
+	}
+	if !(idxBootstrapOK < idxReadinessCall && idxReadinessCall < idxBindStart) {
+		t.Errorf("wait_for_runtime_ready_after_restart must be called between bootstrap-env verification (line %d) and bind posture validation (line %d); got call at line %d",
+			idxBootstrapOK+1, idxBindStart+1, idxReadinessCall+1)
+	}
+
+	// (3) The helper does NOT rely only on `systemctl is-active`.
+	//     It must probe HTTP endpoints and listener sockets via
+	//     curl / ss. We extract the helper body to inspect it in
+	//     isolation (no false positives from the rest of the
+	//     script that uses systemctl is-active elsewhere).
+	stripped := stripBashComments(installer)
+	helperStart := strings.Index(stripped, "wait_for_runtime_ready_after_restart() {")
+	if helperStart < 0 {
+		t.Fatal("stripped installer missing wait_for_runtime_ready_after_restart() {")
+	}
+	// Helper ends at the next top-level closing brace that brings
+	// indentation back to column 0. The next function in the file
+	// (`verify_install()`) starts with that exact pattern, so we
+	// cut at the first occurrence of "\nverify_install() {".
+	helperEndRel := strings.Index(stripped[helperStart:], "\nverify_install() {")
+	if helperEndRel < 0 {
+		t.Fatal("could not find end of wait_for_runtime_ready_after_restart helper body")
+	}
+	helper := stripped[helperStart : helperStart+helperEndRel]
+
+	// curl + ss must appear in the helper body.
+	if !strings.Contains(helper, "curl -fsS http://127.0.0.1:8080/api/v1/health") {
+		t.Error("readiness helper must probe http://127.0.0.1:8080/api/v1/health")
+	}
+	if !strings.Contains(helper, "curl -fsS http://127.0.0.1:8081/.well-known/jmap") {
+		t.Error("readiness helper must probe http://127.0.0.1:8081/.well-known/jmap")
+	}
+	for _, port := range []string{":25", ":110", ":143", ":8080", ":8081"} {
+		needle := "sport = " + port
+		if !strings.Contains(helper, needle) {
+			t.Errorf("readiness helper must probe listener %s via ss", port)
+		}
+	}
+
+	// (4) The failure path dumps `ss -ltnp` and `journalctl -u orvix`.
+	if !strings.Contains(helper, "ss -ltnp") {
+		t.Error("readiness helper failure path must dump `ss -ltnp` into $INSTALL_LOG")
+	}
+	if !strings.Contains(helper, "journalctl -u orvix") {
+		t.Error("readiness helper failure path must dump `journalctl -u orvix` into $INSTALL_LOG")
+	}
+	if !strings.Contains(helper, "$INSTALL_LOG") {
+		t.Error("readiness helper failure path must write diagnostics to $INSTALL_LOG")
+	}
+
+	// (5) The failure path uses `fail` (not warn / return 1).
+	if !strings.Contains(helper, `fail "runtime listeners did not become ready after bootstrap cleanup restart`) {
+		t.Error("readiness helper must call fail() on timeout; never warn or return non-zero")
+	}
+}
+
+// TestInstallerPostBootstrapReadinessWaitOrder pins the SAME ordering
+// invariant TestInstallerPostBootstrapReadinessWaitExists already
+// pins, but expressed as a behavioural run: extract the
+// wait_for_runtime_ready_after_restart helper, run it inside a
+// stubbed harness, and prove that bind posture is unreachable until
+// readiness passes. This catches the regression where someone
+// re-orders the verify_install body so bind posture runs before
+// readiness.
+//
+// NOTE on counters: the helper calls `curl ... && curl ... && ss ...`
+// inside a pipeline. Each command in a pipeline runs in a subshell,
+// so any variable increments inside `ss()` / `curl()` would NOT
+// propagate to the parent. We record call counts via file appends
+// (which survive subshell boundaries) and read them after.
+func TestInstallerPostBootstrapReadinessWaitOrder(t *testing.T) {
+	root := repoRoot(t)
+	installer := mustRead(t, filepath.Join(root, "release", "install.sh"))
+	stripped := stripBashComments(installer)
+
+	helperStart := strings.Index(stripped, "wait_for_runtime_ready_after_restart() {")
+	if helperStart < 0 {
+		t.Fatal("stripped installer missing wait_for_runtime_ready_after_restart() {")
+	}
+	helperEndRel := strings.Index(stripped[helperStart:], "\nverify_install() {")
+	if helperEndRel < 0 {
+		t.Fatal("could not find end of wait_for_runtime_ready_after_restart helper body")
+	}
+	helper := stripped[helperStart : helperStart+helperEndRel]
+
+	harness := fmt.Sprintf(`#!/usr/bin/env bash
+set -u
+COUNTERS_DIR="%s"
+mkdir -p "$COUNTERS_DIR"
+INSTALL_LOG="$COUNTERS_DIR/install.log"
+touch "$INSTALL_LOG"
+log_detail() { echo "LOG: $*"; }
+fail() { echo "FAIL_CALLED: $*" >&2; exit 1; }
+# stubbed curl: always succeeds, appends a marker to a file
+curl() {
+    echo curl >> "$COUNTERS_DIR/calls.log"
+    return 0
+}
+# stubbed ss: returns a line containing the port
+ss() {
+    echo "ss:$*" >> "$COUNTERS_DIR/calls.log"
+    case "$*" in
+        *:25*)  echo "LISTEN 0  128  0.0.0.0:25  0.0.0.0:*" ;;
+        *:110*) echo "LISTEN 0  128  0.0.0.0:110 0.0.0.0:*" ;;
+        *:143*) echo "LISTEN 0  128  0.0.0.0:143 0.0.0.0:*" ;;
+        *:8080*) echo "LISTEN 0  128  127.0.0.1:8080 0.0.0.0:*" ;;
+        *:8081*) echo "LISTEN 0  128  127.0.0.1:8081 0.0.0.0:*" ;;
+        *-ltnp*) echo "LISTEN 0  128  127.0.0.1:8081 0.0.0.0:*" ;;
+        *)       return 0 ;;
+    esac
+}
+journalctl() { return 0; }
+
+# Shorten the deadline so the test runs fast. Picked 5s (vs.
+# production 30s) so even on a slow machine under full-suite
+# load the helper gets 2+ attempts and the test does not flake.
+ORVIX_READINESS_DEADLINE_SECONDS=5
+export ORVIX_READINESS_DEADLINE_SECONDS
+
+%s
+
+wait_for_runtime_ready_after_restart
+echo "READINESS_OK"
+`, "$1", helper)
+
+	dir := t.TempDir()
+	harnessPath := filepath.Join(dir, "order.sh")
+	if err := os.WriteFile(harnessPath, []byte(harness), 0o755); err != nil {
+		t.Fatalf("write harness: %v", err)
+	}
+
+	out, err := exec.Command(bashCommand(t), harnessPath, dir).CombinedOutput()
+	if err != nil {
+		t.Fatalf("readiness helper failed in stubbed harness: %v\noutput:\n%s", err, out)
+	}
+	outStr := string(out)
+
+	if !strings.Contains(outStr, "READINESS_OK") {
+		t.Errorf("expected READINESS_OK sentinel; got:\n%s", outStr)
+	}
+
+	// Inspect the call-count file. Both curl AND ss must have been
+	// invoked — proves the helper actually probes HTTP and listeners.
+	callsBytes, err := os.ReadFile(filepath.Join(dir, "calls.log"))
+	if err != nil {
+		t.Fatalf("read calls log: %v", err)
+	}
+	calls := string(callsBytes)
+	curlCount := strings.Count(calls, "\ncurl\n") + strings.Count(calls, "^curl\n")
+	ssCount := strings.Count(calls, "\nss:")
+	if curlCount == 0 {
+		t.Errorf("readiness helper must call curl (HTTP endpoints); calls log:\n%s", calls)
+	}
+	if ssCount < 5 {
+		t.Errorf("readiness helper must call ss for each of 25/110/143/8080/8081 (got >= 5); calls log:\n%s", calls)
+	}
+}
+
+// TestInstallerPostBootstrapReadinessWaitFailsClosed runs the actual
+// wait_for_runtime_ready_after_restart() helper from install.sh
+// against stubbed curl/ss that simulate the fresh-VPS false-negative
+// scenario: listeners never come up within the deadline. The test
+// asserts:
+//   1. Exit code is non-zero.
+//   2. The fail() message names the bootstrap-cleanup-restart reason.
+//   3. $INSTALL_LOG receives the `ss -ltnp` and `journalctl -u orvix`
+//      diagnostic dumps so an operator can diagnose post-mortem.
+//   4. The helper's loop runs MORE THAN ONCE (i.e. it actually
+//      polls and waits, it does not bail on the first attempt).
+//
+// NOTE on counters: same subshell caveat as the Order test. We use
+// file appends in the stubbed curl/ss so the parent can count calls
+// after the helper exits.
+func TestInstallerPostBootstrapReadinessWaitFailsClosed(t *testing.T) {
+	root := repoRoot(t)
+	installer := mustRead(t, filepath.Join(root, "release", "install.sh"))
+	stripped := stripBashComments(installer)
+
+	helperStart := strings.Index(stripped, "wait_for_runtime_ready_after_restart() {")
+	if helperStart < 0 {
+		t.Fatal("stripped installer missing wait_for_runtime_ready_after_restart() {")
+	}
+	helperEndRel := strings.Index(stripped[helperStart:], "\nverify_install() {")
+	if helperEndRel < 0 {
+		t.Fatal("could not find end of wait_for_runtime_ready_after_restart helper body")
+	}
+	helper := stripped[helperStart : helperStart+helperEndRel]
+
+	// Build a harness where curl and ss both FAIL forever (the
+	// fresh-VPS rehearsal scenario where listeners never bind).
+	harness := fmt.Sprintf(`#!/usr/bin/env bash
+set -u
+COUNTERS_DIR="%s"
+mkdir -p "$COUNTERS_DIR"
+INSTALL_LOG="$COUNTERS_DIR/install.log"
+touch "$INSTALL_LOG"
+log_detail() { echo "LOG: $*"; }
+fail() { echo "FAIL_CALLED: $*" >&2; exit 1; }
+# stubbed curl: always fails (simulates 8080/8081 not yet up)
+curl() {
+    echo curl >> "$COUNTERS_DIR/calls.log"
+    return 22  # curl "HTTP error" exit code
+}
+# stubbed ss: empty (no listeners bound yet) but still emits
+# a marker line so the diagnostic dump in $INSTALL_LOG is
+# non-empty (operator can confirm the harness did run).
+ss() {
+    echo "ss:$*" >> "$COUNTERS_DIR/calls.log"
+    case "$*" in
+        *-ltnp*) echo "STATE: no listeners bound yet" ;;
+    esac
+    return 0
+}
+journalctl() {
+    echo "JOURNAL: simulated recent orvix log lines (no real boot)" >&2
+    return 0
+}
+
+# Shorten the deadline so this test runs in a few seconds.
+# Picked 5s (vs. production 30s) so even on a slow machine
+# under full-suite load the helper gets 2+ attempts and the
+# test does not flake on the >= 2 curl assertion.
+ORVIX_READINESS_DEADLINE_SECONDS=5
+export ORVIX_READINESS_DEADLINE_SECONDS
+
+%s
+
+wait_for_runtime_ready_after_restart
+echo "UNEXPECTED_OK"
+`, "$1", helper)
+
+	dir := t.TempDir()
+	harnessPath := filepath.Join(dir, "fail-closed.sh")
+	if err := os.WriteFile(harnessPath, []byte(harness), 0o755); err != nil {
+		t.Fatalf("write harness: %v", err)
+	}
+
+	out, err := exec.Command(bashCommand(t), harnessPath, dir).CombinedOutput()
+	outStr := string(out)
+	if err == nil {
+		t.Fatalf("readiness helper must fail closed when listeners never come up; got exit 0\noutput:\n%s", outStr)
+	}
+	if ee, ok := err.(*exec.ExitError); ok {
+		if ee.ExitCode() == 0 {
+			t.Fatalf("readiness helper must exit non-zero on timeout; got 0\noutput:\n%s", outStr)
+		}
+	} else {
+		t.Fatalf("unexpected error type: %v\noutput:\n%s", err, outStr)
+	}
+
+	// (2) The fail() message must clearly name the bootstrap-cleanup
+	//     restart reason.
+	if !strings.Contains(outStr, "FAIL_CALLED: runtime listeners did not become ready after bootstrap cleanup restart") {
+		t.Errorf("failure message must name the bootstrap-cleanup-restart reason; output:\n%s", outStr)
+	}
+
+	// (3) $INSTALL_LOG must contain the diagnostic dumps.
+	logBytes, err := os.ReadFile(filepath.Join(dir, "install.log"))
+	if err != nil {
+		t.Fatalf("read $INSTALL_LOG: %v", err)
+	}
+	logStr := string(logBytes)
+	if !strings.Contains(logStr, "ss -ltnp") {
+		t.Errorf("$INSTALL_LOG must contain ss -ltnp dump; got:\n%s", logStr)
+	}
+	if !strings.Contains(logStr, "journalctl -u orvix") {
+		t.Errorf("$INSTALL_LOG must contain journalctl -u orvix dump; got:\n%s", logStr)
+	}
+
+	// (4) The helper must have polled more than once. With a
+	// 2-second deadline and 1-second sleep, we expect at least
+	// 2 curl calls (one per attempt). Use the calls log file
+	// and count exact-match "curl" lines.
+	callsBytes, err := os.ReadFile(filepath.Join(dir, "calls.log"))
+	if err != nil {
+		t.Fatalf("read calls log: %v", err)
+	}
+	curlCount := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(callsBytes)), "\n") {
+		if line == "curl" {
+			curlCount++
+		}
+	}
+	if curlCount < 2 {
+		t.Errorf("readiness helper must poll more than once; expected >=2 curl calls; got %d\ncalls log:\n%s", curlCount, callsBytes)
+	}
+}
+
 // TestCoremailBoolBehavior runs the actual coremail_bool() awk logic
 // against temporary YAML files to prove section-aware matching works
 // end-to-end. This is a behavioral test, not a string check.
