@@ -33,17 +33,21 @@ type Backup struct {
 // Legacy format preserved for backward compatibility; the canonical
 // enterprise manifest for archives is BackupArchiveManifest (backup.json).
 type BackupManifest struct {
-	ID              string     `json:"id"`
-	Name            string     `json:"name"`
-	CreatedAt       time.Time  `json:"createdAt"`
-	CompletedAt     *time.Time `json:"completedAt,omitempty"`
-	SizeBytes       int64      `json:"sizeBytes"`
-	SHA256          string     `json:"sha256"`
-	DomainCount     int        `json:"domainCount"`
-	MailboxCount    int        `json:"mailboxCount"`
-	PolicyCount     int        `json:"policyCount"`
-	MessageCount    int64      `json:"messageCount"`
-	AttachmentCount int64      `json:"attachmentCount"`
+	ID              string            `json:"id"`
+	Name            string            `json:"name"`
+	CreatedAt       time.Time         `json:"createdAt"`
+	CompletedAt     *time.Time        `json:"completedAt,omitempty"`
+	SizeBytes       int64             `json:"sizeBytes"`
+	SHA256          string            `json:"sha256"`
+	DomainCount     int               `json:"domainCount"`
+	MailboxCount    int               `json:"mailboxCount"`
+	PolicyCount     int               `json:"policyCount"`
+	MessageCount    int64             `json:"messageCount"`
+	AttachmentCount int64             `json:"attachmentCount"`
+	Version         string            `json:"version,omitempty"`
+	BuildCommit     string            `json:"buildCommit,omitempty"`
+	Hostname        string            `json:"hostname,omitempty"`
+	Files           map[string]string `json:"files,omitempty"`
 }
 
 // ManifestItem describes a single file in the backup archive.
@@ -132,11 +136,15 @@ type BackupMetrics struct {
 }
 
 type BackupHealth struct {
-	SchedulerEnabled   bool  `json:"schedulerEnabled"`
-	RetentionEnabled   bool  `json:"retentionEnabled"`
-	DirectoryExists    bool  `json:"directoryExists"`
-	Writable           bool  `json:"writable"`
-	AvailableDiskBytes int64 `json:"availableDiskBytes"`
+	SchedulerEnabled      bool    `json:"schedulerEnabled"`
+	RetentionEnabled      bool    `json:"retentionEnabled"`
+	DirectoryExists       bool    `json:"directoryExists"`
+	Writable              bool    `json:"writable"`
+	AvailableDiskBytes    int64   `json:"availableDiskBytes"`
+	LastBackupAgeHours    float64 `json:"lastBackupAgeHours"`
+	LastBackupAgeWarning  bool    `json:"lastBackupAgeWarning"`
+	LastBackupAgeCritical bool    `json:"lastBackupAgeCritical"`
+	Status                string  `json:"status"`
 }
 
 var tables = []string{

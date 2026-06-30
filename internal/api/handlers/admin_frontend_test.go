@@ -72,13 +72,12 @@ func TestAdminNoExternalCDNImports(t *testing.T) {
 
 // TestAdminNoUnsafeQueueExposureToWebmail is the regression guard for
 // the rule "do not expose queue endpoints to webmail". The admin
-// client may legitimately call /api/v1/queue (it is an admin tool);
-// the webmail assets must not.
+// client may legitimately call /api/v1/admin/queue/messages (it is an
+// admin tool); the webmail assets must not.
 //
-// We scan both asset trees separately: webmail MUST have zero
-// /api/v1/queue hits; admin MAY have them but they must be behind
-// the admin auth middleware (we cannot test middleware here, but
-// the static hit-count is what the brief grep enforces).
+// In Enterprise Sustainability v1, the admin UI Queue page was updated
+// to use the new /api/v1/admin/queue/messages paths. The webmail
+// assets must never reference any /api/v1/queue path.
 func TestAdminNoUnsafeQueueExposureToWebmail(t *testing.T) {
 	root := adminRepoRoot(t)
 	for _, rel := range []string{
@@ -91,13 +90,15 @@ func TestAdminNoUnsafeQueueExposureToWebmail(t *testing.T) {
 			t.Errorf("%s must not reference /api/v1/queue — webmail is the user-facing client", rel)
 		}
 	}
-	// The admin assets MAY call /api/v1/queue (admins need to see
-	// the queue). We just confirm the reference is present in the
-	// admin JS so the regression that would BREAK the admin Queue
-	// page is caught too.
+	// The admin assets MUST call the new /api/v1/admin/queue/messages
+	// path. The old /api/v1/queue path is deprecated.
 	src := readFile(t, root, "release/admin/app.js")
-	if !strings.Contains(src, "/api/v1/queue") {
-		t.Errorf("release/admin/app.js should reference /api/v1/queue for the Queue page")
+	if !strings.Contains(src, "/api/v1/admin/queue/messages") {
+		t.Errorf("release/admin/app.js should reference /api/v1/admin/queue/messages for the Queue page (not /api/v1/queue)")
+	}
+	// The old path must not be used for queue data anymore.
+	if strings.Contains(src, "apiGet('/api/v1/queue')") || strings.Contains(src, "apiPost('/api/v1/queue/") || strings.Contains(src, "apiDelete('/api/v1/queue/") {
+		t.Errorf("release/admin/app.js should not call legacy /api/v1/queue paths — use /api/v1/admin/queue/messages instead")
 	}
 }
 

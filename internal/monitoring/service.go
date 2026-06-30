@@ -49,6 +49,10 @@ type DataSources struct {
 	DiskPathLabels       map[string]string // map absolute path -> safe label (e.g. cfg.Backup.Dir -> "backup")
 	MemoryUsage          func() (usedBytes, totalBytes int64) // explicit memory; if nil, computed from runtime.MemStats
 	CPULoad              func() (load1, load5, load15 float64, err error) // explicit load; if nil, computed on POSIX only
+	DNSHealthy           func() bool // DNS resolver health; nil = unknown
+
+	// Alert thresholds — if nil, sensible defaults are used.
+	Thresholds *AlertThresholds
 }
 
 // Service provides monitoring and alerting.
@@ -108,20 +112,26 @@ func (s *Service) GetHealth(ctx context.Context) *Health {
 		OpenAlerts:    0,
 	}
 
+	t := s.thresholds()
+
 	if h.DB.Status == "critical" || h.Queue.Status == "critical" || h.Backup.Status == "critical" || h.API.Status == "critical" {
 		h.Status = "down"
 	} else if h.DB.Status == "warning" || h.Queue.Status == "warning" || h.Backup.Status == "warning" || h.API.Status == "warning" {
 		h.Status = "degraded"
 	}
-	// Disk high is a global condition.
 	for _, d := range h.Disk {
-		if d.UsedPct >= 90 {
+		if d.UsedPct >= t.DiskUsageCriticalPct {
 			if h.Status == "ok" {
 				h.Status = "degraded"
 			}
 		}
-		if d.UsedPct >= 95 {
+		if d.UsedPct >= t.DiskUsageCriticalPct+5 {
 			h.Status = "down"
+		}
+		if d.UsedPct >= t.DiskUsageWarningPct {
+			if h.Status == "ok" {
+				h.Status = "degraded"
+			}
 		}
 	}
 
@@ -131,11 +141,103 @@ func (s *Service) GetHealth(ctx context.Context) *Health {
 	return h
 }
 
+// GetSnapshot returns a comprehensive snapshot of all health indicators
+// in a single JSON response. Includes service status, disk usage, queue
+// depth, DB health, backup freshness, cert expiry, DNS readiness, and more.
+func (s *Service) GetSnapshot(ctx context.Context) *MonitoringSnapshot {
+	t := s.thresholds()
+	snapshot := &MonitoringSnapshot{
+		GeneratedAt:    time.Now().UTC(),
+		ServiceStatus:  "ok",
+		UptimeSeconds:  int64(time.Since(s.uptimeFrom()).Seconds()),
+		Disk:           s.collectDisk(),
+		DBHealth:       s.collectDBHealth(ctx),
+		QueueHealth:    s.collectQueueHealth(),
+		BackupHealth:   s.collectBackupHealth(),
+		APIHealth:      s.collectAPIHealth(),
+		CertExpiry:     CertExpiryStatus{Status: "ok"},
+		DNSReadiness:   ComponentHealth{Status: "unknown", Message: "DNS readiness not configured"},
+		Capacity:       s.collectCapacityShim(ctx),
+		MemoryUsedBytes: 0,
+		MemoryTotalBytes: 0,
+	}
+
+	used, total := s.MemoryBytes()
+	snapshot.MemoryUsedBytes = used
+	snapshot.MemoryTotalBytes = total
+
+	// Cert expiry status.
+	if s.src.TLSCerts != nil {
+		exp30, exp7, err := s.src.TLSCerts()
+		if err == nil {
+			snapshot.CertExpiry.ExpiringWithin7 = exp7
+			snapshot.CertExpiry.ExpiringWithin30 = exp30
+			if exp7 > 0 {
+				snapshot.CertExpiry.Status = "critical"
+			} else if exp30 > 0 {
+				snapshot.CertExpiry.Status = "warning"
+			}
+		}
+	}
+
+	// DNS readiness from configured source.
+	if s.src.DNSHealthy != nil {
+		if s.src.DNSHealthy() {
+			snapshot.DNSReadiness = ComponentHealth{Status: "ok", Message: "DNS resolver responsive"}
+		} else {
+			snapshot.DNSReadiness = ComponentHealth{Status: "warning", Message: "DNS resolver not responding"}
+		}
+	}
+
+	// Determine overall service status.
+	if snapshot.DBHealth.Status == "critical" || snapshot.QueueHealth.Status == "critical" ||
+		snapshot.BackupHealth.Status == "critical" || snapshot.APIHealth.Status == "critical" {
+		snapshot.ServiceStatus = "down"
+	} else if snapshot.DBHealth.Status == "warning" || snapshot.QueueHealth.Status == "warning" ||
+		snapshot.BackupHealth.Status == "warning" || snapshot.APIHealth.Status == "warning" {
+		snapshot.ServiceStatus = "degraded"
+	}
+
+	for _, d := range snapshot.Disk {
+		if d.UsedPct >= t.DiskUsageCriticalPct {
+			if snapshot.ServiceStatus == "ok" {
+				snapshot.ServiceStatus = "degraded"
+			}
+		}
+		if d.UsedPct >= t.DiskUsageWarningPct {
+			if snapshot.ServiceStatus == "ok" {
+				snapshot.ServiceStatus = "degraded"
+			}
+		}
+	}
+
+	if snapshot.CertExpiry.Status == "critical" {
+		snapshot.ServiceStatus = "degraded"
+	}
+
+	if active, err := s.ListActiveAlerts(ctx); err == nil {
+		snapshot.OpenAlerts = len(active)
+	}
+
+	return snapshot
+}
+
 func (s *Service) uptimeFrom() time.Time {
 	if !s.src.ServiceStartedAt.IsZero() {
 		return s.src.ServiceStartedAt
 	}
 	return s.startTime
+}
+
+func (s *Service) thresholds() AlertThresholds {
+	if s.src != nil && s.src.Thresholds != nil {
+		t := *s.src.Thresholds
+		t.ApplyDefaults()
+		return t
+	}
+	t := AlertThresholds{}
+	t.ApplyDefaults()
+	return t
 }
 
 // collectDisk returns disk usage for the configured safe labels.
@@ -199,8 +301,7 @@ func (s *Service) collectDBHealth(ctx context.Context) ComponentHealth {
 }
 
 func (s *Service) collectQueueHealth() ComponentHealth {
-	// Dead-letter is the canary; if any message has been parked in the
-	// dead-letter queue we report at least a warning.
+	t := s.thresholds()
 	if s.src.QueueDeadLetter != nil {
 		if n, err := s.src.QueueDeadLetter(); err == nil && n > 0 {
 			return ComponentHealth{
@@ -212,12 +313,12 @@ func (s *Service) collectQueueHealth() ComponentHealth {
 	if s.src.QueuePending != nil {
 		if n, err := s.src.QueuePending(); err == nil {
 			switch {
-			case n > 1000:
+			case n > t.QueueDepthCritical:
 				return ComponentHealth{
 					Status:  "critical",
 					Message: fmt.Sprintf("%d pending messages", n),
 				}
-			case n > 100:
+			case n > t.QueueDepthWarning:
 				return ComponentHealth{
 					Status:  "warning",
 					Message: fmt.Sprintf("%d pending messages", n),
@@ -229,12 +330,12 @@ func (s *Service) collectQueueHealth() ComponentHealth {
 }
 
 func (s *Service) collectBackupHealth() ComponentHealth {
+	t := s.thresholds()
 	if s.src.BackupDirWritable != nil {
 		if !s.src.BackupDirWritable() {
 			return ComponentHealth{Status: "critical", Message: "backup directory not writable"}
 		}
 	} else if s.src.BackupDir != "" {
-		// Default check: try to create and remove a temp file.
 		probe := filepath.Join(s.src.BackupDir, ".orvix-write-probe")
 		f, err := os.Create(probe)
 		if err != nil {
@@ -246,17 +347,17 @@ func (s *Service) collectBackupHealth() ComponentHealth {
 	if s.src.LatestBackup != nil {
 		latest, err := s.src.LatestBackup()
 		if err == nil {
-			days := int(time.Since(latest).Hours() / 24)
-			if days > 30 {
+			hours := time.Since(latest).Hours()
+			if hours > t.BackupAgeCriticalHours {
 				return ComponentHealth{
 					Status:  "critical",
-					Message: fmt.Sprintf("no backup in %d days", days),
+					Message: fmt.Sprintf("no backup in %.0f hours", hours),
 				}
 			}
-			if days > 7 {
+			if hours > t.BackupAgeWarningHours {
 				return ComponentHealth{
 					Status:  "warning",
-					Message: fmt.Sprintf("last backup %d days ago", days),
+					Message: fmt.Sprintf("last backup %.0f hours ago", hours),
 				}
 			}
 		}
@@ -359,6 +460,7 @@ func (s *Service) EvaluateAlerts(ctx context.Context) ([]Alert, error) {
 	s.alertMu.Lock()
 	defer s.alertMu.Unlock()
 
+	t := s.thresholds()
 	var alerts []Alert
 
 	// Resolve previous alerts before re-evaluating.
@@ -375,9 +477,9 @@ func (s *Service) EvaluateAlerts(ctx context.Context) ([]Alert, error) {
 	// Queue pending (existing rule).
 	if s.src.QueuePending != nil {
 		if count, err := s.src.QueuePending(); err == nil {
-			if count > 1000 {
+			if count > t.QueueDepthCritical {
 				alerts = append(alerts, s.newAlert(CatQueue, SeverityCritical, "Queue growth critical", fmt.Sprintf("%d pending messages", count)))
-			} else if count > 100 {
+			} else if count > t.QueueDepthWarning {
 				alerts = append(alerts, s.newAlert(CatQueue, SeverityWarning, "Queue growth warning", fmt.Sprintf("%d pending messages", count)))
 			}
 		}
@@ -387,10 +489,10 @@ func (s *Service) EvaluateAlerts(ctx context.Context) ([]Alert, error) {
 	if s.src.TLSCerts != nil {
 		if exp30, exp7, err := s.src.TLSCerts(); err == nil {
 			if exp7 > 0 {
-				alerts = append(alerts, s.newAlert(CatTLS, SeverityCritical, "TLS certificates expiring soon", fmt.Sprintf("%d certificates expire within 7 days", exp7)))
+				alerts = append(alerts, s.newAlert(CatTLS, SeverityCritical, "TLS certificates expiring soon", fmt.Sprintf("%d certificates expire within %d days", exp7, t.CertExpiryCriticalDays)))
 			}
 			if exp30 > 0 {
-				alerts = append(alerts, s.newAlert(CatTLS, SeverityWarning, "TLS certificates expiring", fmt.Sprintf("%d certificates expire within 30 days", exp30)))
+				alerts = append(alerts, s.newAlert(CatTLS, SeverityWarning, "TLS certificates expiring", fmt.Sprintf("%d certificates expire within %d days", exp30, t.CertExpiryWarningDays)))
 			}
 		}
 	}
@@ -398,11 +500,11 @@ func (s *Service) EvaluateAlerts(ctx context.Context) ([]Alert, error) {
 	// Backup freshness (existing rule).
 	if s.src.LatestBackup != nil {
 		if latest, err := s.src.LatestBackup(); err == nil {
-			days := int(time.Since(latest).Hours() / 24)
-			if days > 30 {
-				alerts = append(alerts, s.newAlert(CatBackup, SeverityCritical, "No recent backup", fmt.Sprintf("Last backup was %d days ago", days)))
-			} else if days > 7 {
-				alerts = append(alerts, s.newAlert(CatBackup, SeverityWarning, "Backup is aging", fmt.Sprintf("Last backup was %d days ago", days)))
+			hours := time.Since(latest).Hours()
+			if hours > t.BackupAgeCriticalHours {
+				alerts = append(alerts, s.newAlert(CatBackup, SeverityCritical, "No recent backup", fmt.Sprintf("Last backup was %.0f hours ago", hours)))
+			} else if hours > t.BackupAgeWarningHours {
+				alerts = append(alerts, s.newAlert(CatBackup, SeverityWarning, "Backup is aging", fmt.Sprintf("Last backup was %.0f hours ago", hours)))
 			}
 		}
 	}
@@ -434,8 +536,6 @@ func (s *Service) EvaluateAlerts(ctx context.Context) ([]Alert, error) {
 	// this rule fires only when the backup subsystem as a whole is in
 	// a critical state.
 	if s.collectBackupHealth().Status == "critical" {
-		// We only emit this if no backup-specific alert already exists
-		// for the same condition.
 		hasBackupAlert := false
 		for _, a := range alerts {
 			if a.Category == CatBackup && a.Active {
@@ -452,10 +552,10 @@ func (s *Service) EvaluateAlerts(ctx context.Context) ([]Alert, error) {
 	// Disk usage (Monitoring v1 rule).
 	for _, d := range s.collectDisk() {
 		switch {
-		case d.UsedPct >= 95:
+		case d.UsedPct >= t.DiskUsageCriticalPct:
 			alerts = append(alerts, s.newAlert(CatStorage, SeverityCritical,
 				"Disk usage critical", fmt.Sprintf("%s disk at %d%%", d.Label, d.UsedPct)))
-		case d.UsedPct >= 85:
+		case d.UsedPct >= t.DiskUsageWarningPct:
 			alerts = append(alerts, s.newAlert(CatStorage, SeverityWarning,
 				"Disk usage high", fmt.Sprintf("%s disk at %d%%", d.Label, d.UsedPct)))
 		}

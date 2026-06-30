@@ -57,11 +57,11 @@ func TestDiskHighAlertWarning(t *testing.T) {
 	// the contract; the integration is exercised by the handler test
 	// (TestMonitoringV1_HealthReturnsSafeFields) which checks the safe
 	// shape of the disk block.
-	if !strings.Contains(mustRead(t, "service.go"), "d.UsedPct >= 95") {
-		t.Fatalf("expected 'd.UsedPct >= 95' threshold in service.go")
+	if !strings.Contains(mustRead(t, "service.go"), "DiskUsageCriticalPct") {
+		t.Fatalf("expected 'DiskUsageCriticalPct' threshold reference in service.go")
 	}
-	if !strings.Contains(mustRead(t, "service.go"), "d.UsedPct >= 85") {
-		t.Fatalf("expected 'd.UsedPct >= 85' threshold in service.go")
+	if !strings.Contains(mustRead(t, "service.go"), "DiskUsageWarningPct") {
+		t.Fatalf("expected 'DiskUsageWarningPct' threshold reference in service.go")
 	}
 	_ = svc
 }

@@ -37,6 +37,26 @@ func (h *Handler) monitoringService() (*monitoring.Service, error) {
 	if start := processStartedAt(); !start.IsZero() {
 		ds.ServiceStartedAt = start
 	}
+
+	// Wire alert thresholds from monitoring config.
+	if h.cfg != nil {
+		mc := h.cfg.Monitoring
+		ds.Thresholds = &monitoring.AlertThresholds{
+			DiskUsageWarningPct:    mc.DiskUsageWarningPct,
+			DiskUsageCriticalPct:   mc.DiskUsageCriticalPct,
+			QueueDepthWarning:      int64(mc.QueueDepthWarning),
+			QueueDepthCritical:     int64(mc.QueueDepthCritical),
+			BackupAgeWarningHours:  float64(mc.BackupAgeWarningHours),
+			BackupAgeCriticalHours: float64(mc.BackupAgeCriticalHours),
+			CertExpiryWarningDays:  mc.CertExpiryWarningDays,
+			CertExpiryCriticalDays: mc.CertExpiryCriticalDays,
+		}
+		ds.Thresholds.ApplyDefaults()
+	} else {
+		ds.Thresholds = &monitoring.AlertThresholds{}
+		ds.Thresholds.ApplyDefaults()
+	}
+
 	return monitoring.NewService(sqlDB, ds), nil
 }
 
@@ -215,4 +235,22 @@ func (h *Handler) PostMonitoringAlertResolve(c fiber.Ctx) error {
 	}
 	h.writeAuditLog(c, "monitoring.alert.resolve", fmt.Sprintf("alert_id:%d", id))
 	return c.JSON(fiber.Map{"status": "resolved", "id": id})
+}
+
+// GetMonitoringSnapshot serves GET /api/v1/monitoring/snapshot.
+//
+// Returns a comprehensive snapshot of all health indicators in one call:
+// service status, disk usage, queue depth, DB health, backup freshness,
+// cert expiry, DNS readiness. Safe labels only; no secrets, no paths.
+func (h *Handler) GetMonitoringSnapshot(c fiber.Ctx) error {
+	svc, err := h.monitoringService()
+	if err != nil {
+		h.logger.Error("monitoring service init", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "monitoring unavailable"})
+	}
+	if _, err := svc.EvaluateAlerts(c.Context()); err != nil {
+		h.logger.Warn("monitoring evaluate", zap.Error(err))
+	}
+	snapshot := svc.GetSnapshot(c.Context())
+	return c.JSON(snapshot)
 }

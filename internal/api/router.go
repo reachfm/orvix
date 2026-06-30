@@ -251,6 +251,12 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 	return router
 }
 
+// SetQueueEngine wires a queue engine into the handler for test setups
+// where the coremail runtime module is not available.
+func (r *Router) SetQueueEngine(qe *queue.QueueEngine) {
+	r.h.SetQueueEngine(qe)
+}
+
 func (r *Router) App() *fiber.App { return r.app }
 
 func (r *Router) setupMiddleware() {
@@ -296,6 +302,12 @@ func (r *Router) setupRoutes() {
 		loginGroup.Post("/login", limiter.New(limiter.Config{Max: 5, Expiration: 15 * 60 * 1000}), r.h.Login)
 	}
 	loginGroup.Post("/refresh", r.h.Refresh)
+
+	// MFA login verification (public — no auth middleware).
+	// Exchanges a password-based MFA challenge token + TOTP/recovery code
+	// for real access/refresh tokens. Mounted on the public login group
+	// so MFA-enabled users can complete login without being authenticated.
+	loginGroup.Post("/mfa/verify", r.h.MFALoginVerify)
 	r.app.Post("/admin/login", r.h.Login)
 
 	// Webmail authentication (public — no auth middleware).
@@ -439,6 +451,8 @@ func (r *Router) setupRoutes() {
 	// delete) which are mounted without the segment for backward
 	// compatibility.
 	admin.Get("/admin/queue/summary", r.h.AdminQueueSummary)
+	admin.Get("/admin/queue/messages", r.h.AdminQueueList)
+	admin.Get("/admin/queue/messages/:id", r.h.AdminQueueDetail)
 	admin.Get("/admin/queue/:id", r.h.GetAdminQueueEntry)
 	admin.Get("/admin/backups", r.h.ListBackups)
 	admin.Get("/admin/backups/schedule", r.h.GetBackupSchedule)
@@ -469,6 +483,7 @@ func (r *Router) setupRoutes() {
 	admin.Get("/monitoring/health", r.h.GetMonitoringHealth)
 	admin.Get("/monitoring/alerts", r.h.GetMonitoringAlerts)
 	admin.Get("/monitoring/capacity", r.h.GetMonitoringCapacity)
+	admin.Get("/monitoring/snapshot", r.h.GetMonitoringSnapshot)
 
 	// Auto-Heal
 	admin.Get("/heal/history", r.h.ListHealHistory)
@@ -489,6 +504,10 @@ func (r *Router) setupRoutes() {
 	// "pending" placeholder.
 	admin.Post("/dns/check/:domain", r.h.DNSCheck)
 	admin.Post("/dns/wizard/:domain", r.h.DNSWizard)
+
+	// Admin Settings (ENTERPRISE-SETTINGS-2H): read-only GET, write is CSRF-protected
+	admin.Get("/admin/mfa/status", r.h.MFAStatusGet)
+	admin.Get("/admin/settings", r.h.AdminSettingsGet)
 
 	// DNS Operations (DNS-DKIM-OPERATIONS-2F): real DNS / DKIM
 	// operations for the admin UI. All admin-only, all read-only
@@ -574,7 +593,11 @@ func (r *Router) setupRoutes() {
 	men.Delete("/users/:id", r.h.DeleteUser)
 	men.Delete("/queue/:id", r.h.DeleteQueue)
 	men.Post("/queue/:id/retry", r.h.RetryQueue)
+	men.Post("/admin/queue/messages/:id/retry", r.h.AdminQueueRetryNow)
+	men.Post("/admin/queue/messages/:id/bounce", r.h.AdminQueueBounce)
+	men.Post("/admin/queue/messages/:id/cancel", r.h.AdminQueueCancel)
 	men.Post("/admin/backups", r.h.CreateBackup)
+	men.Post("/admin/backups/now", r.h.PostBackupNow)
 	men.Post("/admin/backups/schedule", r.h.SetBackupSchedule)
 	men.Post("/admin/backups/retention", r.h.RunBackupRetention)
 	men.Post("/admin/backups/:id/validate", r.h.PostValidateBackup)
@@ -618,6 +641,14 @@ func (r *Router) setupRoutes() {
 	// live API path is intentionally disabled.
 	men.Post("/admin/dns/:domain/dkim", r.h.PostAdminDNSDKIM)
 	men.Post("/admin/dns/:domain/provider/apply", r.h.PostAdminDNSProviderApply)
+
+	// Admin MFA (CSRF-protected)
+	men.Post("/admin/mfa/setup/begin", r.h.MFASetupBegin)
+	men.Post("/admin/mfa/setup/verify", r.h.MFASetupVerify)
+	men.Post("/admin/mfa/disable", r.h.MFADisable)
+
+	// Admin Settings write (CSRF-protected)
+	men.Patch("/admin/settings", r.h.AdminSettingsPatch)
 }
 
 func (r *Router) setupAdminUI() {

@@ -52,7 +52,9 @@ type Module struct {
 	submissionServer *smtp.Server
 	smtpsServer     *smtp.Server
 	imapServer      *imap.Server
+	imapsServer     *imap.Server
 	pop3Server      *pop3.Server
+	pop3sServer     *pop3.Server
 	jmapServer      *jmap.Server
 	workers    []*delivery.DeliveryWorker
 
@@ -324,6 +326,54 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	m.pop3Server = pop3.NewServer(pop3Cfg, m.store, pop3.NewAuthenticator(&mailboxAuth{auth: m.engine.Auth}))
 	m.pop3Server.Observability = m.obs
 
+	// ── IMAPS (port 993, implicit TLS) ──────────────────────
+	if cfg.CoreMail.IMAPsEnabled {
+		switch {
+		case cfg.CoreMail.TLSCertFile == "" || cfg.CoreMail.TLSKeyFile == "":
+			if m.logger != nil {
+				m.logger.Warn("IMAPS listener disabled: TLS certificate/key not configured")
+			}
+		case tlsLoadErr != nil:
+			if m.logger != nil {
+				m.logger.Warn("IMAPS listener disabled: TLS certificate/key failed to load",
+					zap.String("reason", safeTLSLoadError(tlsLoadErr)),
+				)
+			}
+		default:
+			imapsCfg := imap.DefaultConfig()
+			imapsCfg.Hostname = cfg.CoreMail.Hostname
+			imapsCfg.TLSCertFile = cfg.CoreMail.TLSCertFile
+			imapsCfg.TLSKeyFile = cfg.CoreMail.TLSKeyFile
+			imapsCfg.RequireTLSForAuth = cfg.CoreMail.RequireTLSForAuth
+			m.imapsServer = imap.NewServer(imapsCfg, m.store, &mailboxAuth{auth: m.engine.Auth})
+			m.imapsServer.Observability = m.obs
+		}
+	}
+
+	// ── POP3S (port 995, implicit TLS) ─────────────────────
+	if cfg.CoreMail.POP3sEnabled {
+		switch {
+		case cfg.CoreMail.TLSCertFile == "" || cfg.CoreMail.TLSKeyFile == "":
+			if m.logger != nil {
+				m.logger.Warn("POP3S listener disabled: TLS certificate/key not configured")
+			}
+		case tlsLoadErr != nil:
+			if m.logger != nil {
+				m.logger.Warn("POP3S listener disabled: TLS certificate/key failed to load",
+					zap.String("reason", safeTLSLoadError(tlsLoadErr)),
+				)
+			}
+		default:
+			pop3sCfg := pop3.DefaultConfig()
+			pop3sCfg.Hostname = cfg.CoreMail.Hostname
+			pop3sCfg.TLSCertFile = cfg.CoreMail.TLSCertFile
+			pop3sCfg.TLSKeyFile = cfg.CoreMail.TLSKeyFile
+			pop3sCfg.RequireTLSForAuth = cfg.CoreMail.RequireTLSForAuth
+			m.pop3sServer = pop3.NewServer(pop3sCfg, m.store, pop3.NewAuthenticator(&mailboxAuth{auth: m.engine.Auth}))
+			m.pop3sServer.Observability = m.obs
+		}
+	}
+
 	// JMAP
 	m.jmapServer = jmap.NewServer(m.engine)
 	m.jmapServer.Hostname = cfg.CoreMail.Hostname
@@ -425,7 +475,9 @@ func (m *Module) Start() error {
 			m.listenerReg.MarkDisabled(orvixruntime.ListenerSubmission, 0, "disabled by config")
 			m.listenerReg.MarkDisabled(orvixruntime.ListenerSMTPS, 0, "disabled by config")
 			m.listenerReg.MarkDisabled(orvixruntime.ListenerIMAP, 0, "disabled by config")
+			m.listenerReg.MarkDisabled(orvixruntime.ListenerIMAPS, 0, "disabled by config")
 			m.listenerReg.MarkDisabled(orvixruntime.ListenerPOP3, 0, "disabled by config")
+			m.listenerReg.MarkDisabled(orvixruntime.ListenerPOP3S, 0, "disabled by config")
 			m.listenerReg.MarkDisabled(orvixruntime.ListenerJMAP, 0, "disabled by config")
 		}
 		return nil
@@ -437,6 +489,12 @@ func (m *Module) Start() error {
 	m.startServer(orvixruntime.ListenerIMAP, net.JoinHostPort(m.cfg.CoreMail.IMAPHost, fmt.Sprintf("%d", m.cfg.CoreMail.IMAPPort)), m.imapServer.ListenAndServe)
 	m.startServer(orvixruntime.ListenerPOP3, net.JoinHostPort(m.cfg.CoreMail.POP3Host, fmt.Sprintf("%d", m.cfg.CoreMail.POP3Port)), m.pop3Server.ListenAndServe)
 	m.startServer(orvixruntime.ListenerJMAP, net.JoinHostPort(m.cfg.CoreMail.JMAPHost, fmt.Sprintf("%d", m.cfg.CoreMail.JMAPPort)), m.jmapServer.ListenAndServe)
+	if m.imapsServer != nil {
+		m.startServer(orvixruntime.ListenerIMAPS, net.JoinHostPort(m.cfg.CoreMail.IMAPsHost, fmt.Sprintf("%d", m.cfg.CoreMail.IMAPsPort)), m.imapsServer.ListenAndServe)
+	}
+	if m.pop3sServer != nil {
+		m.startServer(orvixruntime.ListenerPOP3S, net.JoinHostPort(m.cfg.CoreMail.POP3sHost, fmt.Sprintf("%d", m.cfg.CoreMail.POP3sPort)), m.pop3sServer.ListenAndServe)
+	}
 	// Telemetry: mark listeners that are config-disabled or not-yet-implemented.
 	if m.listenerReg != nil {
 		if m.submissionServer == nil && m.cfg.CoreMail.SubmissionEnabled {
@@ -447,6 +505,18 @@ func (m *Module) Start() error {
 			m.listenerReg.MarkDisabled(orvixruntime.ListenerSMTPS, m.cfg.CoreMail.SMTPsPort, "SMTPS disabled by config")
 		} else if m.smtpsServer == nil {
 			m.listenerReg.MarkDisabled(orvixruntime.ListenerSMTPS, m.cfg.CoreMail.SMTPsPort, "SMTPS not yet implemented")
+		}
+		if !m.cfg.CoreMail.IMAPsEnabled {
+			m.listenerReg.MarkDisabled(orvixruntime.ListenerIMAPS, m.cfg.CoreMail.IMAPsPort, "IMAPS disabled by config")
+		} else if m.imapsServer == nil {
+			reason := m.imapsDisabledReason()
+			m.listenerReg.MarkDisabled(orvixruntime.ListenerIMAPS, m.cfg.CoreMail.IMAPsPort, reason)
+		}
+		if !m.cfg.CoreMail.POP3sEnabled {
+			m.listenerReg.MarkDisabled(orvixruntime.ListenerPOP3S, m.cfg.CoreMail.POP3sPort, "POP3S disabled by config")
+		} else if m.pop3sServer == nil {
+			reason := m.pop3sDisabledReason()
+			m.listenerReg.MarkDisabled(orvixruntime.ListenerPOP3S, m.cfg.CoreMail.POP3sPort, reason)
 		}
 	}
 	for _, worker := range m.workers {
@@ -531,8 +601,16 @@ func (m *Module) startServer(kind orvixruntime.ListenerKind, addr string, fn fun
 		}
 	case orvixruntime.ListenerIMAP:
 		m.imapServer.SetListenerCallback(cb)
+	case orvixruntime.ListenerIMAPS:
+		if m.imapsServer != nil {
+			m.imapsServer.SetListenerCallback(cb)
+		}
 	case orvixruntime.ListenerPOP3:
 		m.pop3Server.SetListenerCallback(cb)
+	case orvixruntime.ListenerPOP3S:
+		if m.pop3sServer != nil {
+			m.pop3sServer.SetListenerCallback(cb)
+		}
 	case orvixruntime.ListenerJMAP:
 		m.jmapServer.SetListenerCallback(cb)
 	}
@@ -646,8 +724,14 @@ func (m *Module) Stop() error {
 	if m.imapServer != nil {
 		m.imapServer.Stop()
 	}
+	if m.imapsServer != nil {
+		m.imapsServer.Stop()
+	}
 	if m.pop3Server != nil {
 		m.pop3Server.Stop()
+	}
+	if m.pop3sServer != nil {
+		m.pop3sServer.Stop()
 	}
 	if m.jmapServer != nil {
 		m.jmapServer.Stop()
@@ -688,6 +772,36 @@ func (m *Module) submissionDisabledReason() string {
 		return "submission disabled: TLS certificate/key failed to load (" + safeTLSLoadError(m.tlsLoadErr) + ")"
 	}
 	return "submission disabled: not initialized"
+}
+
+// imapsDisabledReason returns the specific reason why the
+// IMAPS listener was not started.
+func (m *Module) imapsDisabledReason() string {
+	if m.cfg == nil || !m.cfg.CoreMail.IMAPsEnabled {
+		return "IMAPS disabled by config"
+	}
+	if m.cfg.CoreMail.TLSCertFile == "" || m.cfg.CoreMail.TLSKeyFile == "" {
+		return "IMAPS disabled: TLS certificate/key not configured"
+	}
+	if m.tlsLoadErr != nil {
+		return "IMAPS disabled: TLS certificate/key failed to load (" + safeTLSLoadError(m.tlsLoadErr) + ")"
+	}
+	return "IMAPS disabled: not initialized"
+}
+
+// pop3sDisabledReason returns the specific reason why the
+// POP3S listener was not started.
+func (m *Module) pop3sDisabledReason() string {
+	if m.cfg == nil || !m.cfg.CoreMail.POP3sEnabled {
+		return "POP3S disabled by config"
+	}
+	if m.cfg.CoreMail.TLSCertFile == "" || m.cfg.CoreMail.TLSKeyFile == "" {
+		return "POP3S disabled: TLS certificate/key not configured"
+	}
+	if m.tlsLoadErr != nil {
+		return "POP3S disabled: TLS certificate/key failed to load (" + safeTLSLoadError(m.tlsLoadErr) + ")"
+	}
+	return "POP3S disabled: not initialized"
 }
 
 // safeTLSLoadError converts a tls.LoadX509KeyPair error into a

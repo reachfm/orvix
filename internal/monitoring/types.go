@@ -98,6 +98,73 @@ type ComponentHealth struct {
 	Message string `json:"message"` // safe label, never a path/secret/env value
 }
 
+// AlertThresholds defines configurable alert trigger points.
+// All fields use sensible defaults when set to zero.
+type AlertThresholds struct {
+	DiskUsageWarningPct    int     `json:"diskUsageWarningPct"`
+	DiskUsageCriticalPct   int     `json:"diskUsageCriticalPct"`
+	QueueDepthWarning      int64   `json:"queueDepthWarning"`
+	QueueDepthCritical     int64   `json:"queueDepthCritical"`
+	BackupAgeWarningHours  float64 `json:"backupAgeWarningHours"`
+	BackupAgeCriticalHours float64 `json:"backupAgeCriticalHours"`
+	CertExpiryWarningDays  int     `json:"certExpiryWarningDays"`
+	CertExpiryCriticalDays int     `json:"certExpiryCriticalDays"`
+}
+
+// ApplyDefaults fills in zero values with sensible defaults.
+func (t *AlertThresholds) ApplyDefaults() {
+	if t.DiskUsageWarningPct <= 0 {
+		t.DiskUsageWarningPct = 85
+	}
+	if t.DiskUsageCriticalPct <= 0 {
+		t.DiskUsageCriticalPct = 95
+	}
+	if t.QueueDepthWarning <= 0 {
+		t.QueueDepthWarning = 100
+	}
+	if t.QueueDepthCritical <= 0 {
+		t.QueueDepthCritical = 500
+	}
+	if t.BackupAgeWarningHours <= 0 {
+		t.BackupAgeWarningHours = 24
+	}
+	if t.BackupAgeCriticalHours <= 0 {
+		t.BackupAgeCriticalHours = 72
+	}
+	if t.CertExpiryWarningDays <= 0 {
+		t.CertExpiryWarningDays = 30
+	}
+	if t.CertExpiryCriticalDays <= 0 {
+		t.CertExpiryCriticalDays = 7
+	}
+}
+
+// MonitoringSnapshot provides a comprehensive snapshot of all health indicators
+// in a single JSON response.
+type MonitoringSnapshot struct {
+	GeneratedAt    time.Time        `json:"generatedAt"`
+	ServiceStatus  string           `json:"serviceStatus"`
+	UptimeSeconds  int64            `json:"uptimeSeconds"`
+	Disk           []DiskUsage      `json:"disk"`
+	DBHealth       ComponentHealth  `json:"dbHealth"`
+	QueueHealth    ComponentHealth  `json:"queueHealth"`
+	BackupHealth   ComponentHealth  `json:"backupHealth"`
+	APIHealth      ComponentHealth  `json:"apiHealth"`
+	CertExpiry     CertExpiryStatus `json:"certExpiry"`
+	DNSReadiness   ComponentHealth  `json:"dnsReadiness"`
+	Capacity       Capacity         `json:"capacity"`
+	OpenAlerts     int              `json:"openAlerts"`
+	MemoryUsedBytes int64           `json:"memoryUsedBytes"`
+	MemoryTotalBytes int64          `json:"memoryTotalBytes"`
+}
+
+// CertExpiryStatus reports TLS certificate expiry status.
+type CertExpiryStatus struct {
+	Status          string `json:"status"`
+	ExpiringWithin7 int    `json:"expiringWithin7"`
+	ExpiringWithin30 int   `json:"expiringWithin30"`
+}
+
 var schema = []string{
 	`CREATE TABLE IF NOT EXISTS monitoring_alerts (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,

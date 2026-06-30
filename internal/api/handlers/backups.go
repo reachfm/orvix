@@ -57,6 +57,19 @@ func (h *Handler) backupService() (*backup.Service, error) {
 	svc.SetConfigPath("/etc/orvix/orvix.yaml")
 	bi := updater.ReadBuildInfo()
 	svc.SetBuildInfo(bi.Version, bi.SHA)
+
+	// Add key file paths from config to be included in backups.
+	if h.cfg != nil {
+		if h.cfg.Auth.JWTKeyPath != "" {
+			svc.AddKeyPath(h.cfg.Auth.JWTKeyPath)
+		}
+		if h.cfg.CoreMail.VAPIDPrivateKeyFile != "" {
+			svc.AddKeyPath(h.cfg.CoreMail.VAPIDPrivateKeyFile)
+		}
+		if h.cfg.CoreMail.VAPIDPrivateKey != "" {
+			svc.AddKeyPath(h.cfg.CoreMail.VAPIDPrivateKey)
+		}
+	}
 	return svc, nil
 }
 
@@ -356,8 +369,10 @@ func (h *Handler) PostValidateBackup(c fiber.Ctx) error {
 	return c.JSON(result)
 }
 
-// PostRestoreBackup stages a backup for restore (Phase 2H: staged only, not live).
-// Requires typed confirmation "restore-orvix-backup".
+// PostRestoreBackup validates and stages a backup for manual restore.
+// Phase 2H: stages the backup archive to a staging directory only.
+// Does NOT overwrite live data. The operator must manually stop the
+// service, swap files, and restart. This is a staged-only operation.
 func (h *Handler) PostRestoreBackup(c fiber.Ctx) error {
 	id := c.Params("id")
 	if invalidBackupID(id) {
@@ -378,9 +393,40 @@ func (h *Handler) PostRestoreBackup(c fiber.Ctx) error {
 	}
 	result, err := svc.RestoreBackup(c.Context(), id)
 	if err != nil {
-		h.logger.Error("backup restore failed", zap.String("backup_id", id), zap.Error(err))
+		h.logger.Error("backup restore staging failed", zap.String("backup_id", id), zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
-	h.writeAuditLog(c, "backup.restore", fmt.Sprintf("backup_id:%s|status:%s", id, result.Status))
+
+	// Health check runs but does not trigger automatic rollback —
+	// the restore is staged-only. The health result is informational.
+	health, healthErr := svc.GetBackupHealth(c.Context())
+	if healthErr == nil && health.Status == "critical" {
+		result.Message += " (Warning: backup health is critical after staging — manual intervention may be required)"
+	}
+	_ = health
+
+	h.writeAuditLog(c, "backup.restore_stage", fmt.Sprintf("backup_id:%s|status:%s", id, result.Status))
 	return c.JSON(result)
+}
+
+// PostBackupNow creates an immediate backup and returns the backup ID.
+// This is the explicit "backup now" endpoint for administrator-triggered backups.
+func (h *Handler) PostBackupNow(c fiber.Ctx) error {
+	svc, err := h.backupService()
+	if err != nil {
+		h.logger.Error("backup service unavailable", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "backup service unavailable"})
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	_ = c.Bind().JSON(&req)
+
+	b, err := svc.CreateBackup(c.Context(), req.Name)
+	if err != nil {
+		h.logger.Error("backup now failed", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "backup now failed"})
+	}
+	h.writeAuditLog(c, "backup.now", fmt.Sprintf("backup_id:%s|name:%s", b.ID, req.Name))
+	return c.Status(fiber.StatusCreated).JSON(backupToAPIEntry(*b))
 }

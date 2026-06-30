@@ -652,6 +652,13 @@ func MigrateAllRaw(db *gorm.DB) error {
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS mfa_recovery_codes (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			code_hash TEXT NOT NULL,
+			used_at DATETIME,
+			created_at DATETIME NOT NULL DEFAULT (datetime('now'))
+		)`,
 	}
 
 	// Execute table creation statements
@@ -663,6 +670,10 @@ func MigrateAllRaw(db *gorm.DB) error {
 	}
 
 	if err := migrateCoremailMailboxSchema(ctx, sqlDB); err != nil {
+		return err
+	}
+
+	if err := migrateUsersMFASchema(ctx, sqlDB); err != nil {
 		return err
 	}
 
@@ -778,6 +789,37 @@ func migrateCoremailMailboxSchema(ctx context.Context, db *sql.DB) error {
 		if _, err := db.ExecContext(ctx, "UPDATE coremail_mailboxes SET status = CASE WHEN active = 0 THEN 'suspended' ELSE 'active' END WHERE status = ''"); err != nil {
 			return fmt.Errorf("backfill coremail_mailboxes.status: %w", err)
 		}
+	}
+
+	return nil
+}
+
+func migrateUsersMFASchema(ctx context.Context, db *sql.DB) error {
+	columns, err := sqliteColumns(ctx, db, "users")
+	if err != nil {
+		return fmt.Errorf("inspect users schema: %w", err)
+	}
+
+	additions := []struct {
+		name string
+		sql  string
+	}{
+		{"mfa_enabled", "ALTER TABLE users ADD COLUMN mfa_enabled INTEGER NOT NULL DEFAULT 0"},
+		{"mfa_secret", "ALTER TABLE users ADD COLUMN mfa_secret TEXT NOT NULL DEFAULT ''"},
+		{"pending_mfa_secret", "ALTER TABLE users ADD COLUMN pending_mfa_secret TEXT NOT NULL DEFAULT ''"},
+		{"pending_mfa_secret_raw", "ALTER TABLE users ADD COLUMN pending_mfa_secret_raw TEXT NOT NULL DEFAULT ''"},
+		{"mfa_secret_raw", "ALTER TABLE users ADD COLUMN mfa_secret_raw TEXT NOT NULL DEFAULT ''"},
+		{"mfa_label", "ALTER TABLE users ADD COLUMN mfa_label TEXT NOT NULL DEFAULT ''"},
+	}
+
+	for _, addition := range additions {
+		if columns[addition.name] {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, addition.sql); err != nil {
+			return fmt.Errorf("add users.%s: %w", addition.name, err)
+		}
+		columns[addition.name] = true
 	}
 
 	return nil

@@ -84,6 +84,16 @@ coremail:
   smtps_enabled: false
   smtps_host: 0.0.0.0
   smtps_port: 465
+  # IMAPS (port 993, implicit TLS) for encrypted IMAP connections.
+  # Requires valid tls_cert_file and tls_key_file. Disabled by default.
+  imaps_enabled: false
+  imaps_host: 0.0.0.0
+  imaps_port: 993
+  # POP3S (port 995, implicit TLS) for encrypted POP3 connections.
+  # Requires valid tls_cert_file and tls_key_file. Disabled by default.
+  pop3s_enabled: false
+  pop3s_host: 0.0.0.0
+  pop3s_port: 995
   imap_host: 0.0.0.0
   imap_port: 143
   pop3_host: 0.0.0.0

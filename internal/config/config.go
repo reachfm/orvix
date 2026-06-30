@@ -24,9 +24,10 @@ type Config struct {
 	AI       AIConfig       `mapstructure:"ai"`
 	DNS      DNSConfig      `mapstructure:"dns"`
 	ClamAV   ClamAVConfig   `mapstructure:"clamav"`
-	Backup   BackupConfig   `mapstructure:"backup"`
-	CoreMail CoreMailConfig `mapstructure:"coremail"`
-	Outbound OutboundConfig `mapstructure:"outbound"`
+	Backup     BackupConfig     `mapstructure:"backup"`
+	Monitoring MonitoringConfig `mapstructure:"monitoring"`
+	CoreMail   CoreMailConfig   `mapstructure:"coremail"`
+	Outbound   OutboundConfig   `mapstructure:"outbound"`
 }
 
 // CoreMailConfig controls the native CoreMail protocol runtime.
@@ -48,6 +49,12 @@ type CoreMailConfig struct {
 	SMTPsEnabled              bool          `mapstructure:"smtps_enabled"`
 	SMTPsHost                 string        `mapstructure:"smtps_host"`
 	SMTPsPort                 int           `mapstructure:"smtps_port"`
+	IMAPsEnabled              bool          `mapstructure:"imaps_enabled"`
+	IMAPsHost                 string        `mapstructure:"imaps_host"`
+	IMAPsPort                 int           `mapstructure:"imaps_port"`
+	POP3sEnabled              bool          `mapstructure:"pop3s_enabled"`
+	POP3sHost                 string        `mapstructure:"pop3s_host"`
+	POP3sPort                 int           `mapstructure:"pop3s_port"`
 	IMAPHost                  string        `mapstructure:"imap_host"`
 	IMAPPort                  int           `mapstructure:"imap_port"`
 	POP3Host                  string        `mapstructure:"pop3_host"`
@@ -83,6 +90,83 @@ type OutboundConfig struct {
 type BackupConfig struct {
 	Dir            string `mapstructure:"dir"`
 	RetentionCount int    `mapstructure:"retention_count"`
+}
+
+// MonitoringConfig holds monitoring alert threshold settings.
+// All values have sensible defaults so a zero-value config is safe.
+type MonitoringConfig struct {
+	DiskUsageWarningPct    int `mapstructure:"disk_usage_warning_pct"`
+	DiskUsageCriticalPct   int `mapstructure:"disk_usage_critical_pct"`
+	QueueDepthWarning      int `mapstructure:"queue_depth_warning"`
+	QueueDepthCritical     int `mapstructure:"queue_depth_critical"`
+	BackupAgeWarningHours  int `mapstructure:"backup_age_warning_hours"`
+	BackupAgeCriticalHours int `mapstructure:"backup_age_critical_hours"`
+	CertExpiryWarningDays  int `mapstructure:"cert_expiry_warning_days"`
+	CertExpiryCriticalDays int `mapstructure:"cert_expiry_critical_days"`
+}
+
+// DiskUsageWarningPctVal returns the configured warning threshold or the default of 85.
+func (m *MonitoringConfig) DiskUsageWarningPctVal() int {
+	if m.DiskUsageWarningPct <= 0 {
+		return 85
+	}
+	return m.DiskUsageWarningPct
+}
+
+// DiskUsageCriticalPctVal returns the configured critical threshold or the default of 95.
+func (m *MonitoringConfig) DiskUsageCriticalPctVal() int {
+	if m.DiskUsageCriticalPct <= 0 {
+		return 95
+	}
+	return m.DiskUsageCriticalPct
+}
+
+// QueueDepthWarningVal returns the configured warning threshold or the default of 100.
+func (m *MonitoringConfig) QueueDepthWarningVal() int {
+	if m.QueueDepthWarning <= 0 {
+		return 100
+	}
+	return m.QueueDepthWarning
+}
+
+// QueueDepthCriticalVal returns the configured critical threshold or the default of 500.
+func (m *MonitoringConfig) QueueDepthCriticalVal() int {
+	if m.QueueDepthCritical <= 0 {
+		return 500
+	}
+	return m.QueueDepthCritical
+}
+
+// BackupAgeWarningHoursVal returns the configured warning threshold or the default of 24.
+func (m *MonitoringConfig) BackupAgeWarningHoursVal() int {
+	if m.BackupAgeWarningHours <= 0 {
+		return 24
+	}
+	return m.BackupAgeWarningHours
+}
+
+// BackupAgeCriticalHoursVal returns the configured critical threshold or the default of 72.
+func (m *MonitoringConfig) BackupAgeCriticalHoursVal() int {
+	if m.BackupAgeCriticalHours <= 0 {
+		return 72
+	}
+	return m.BackupAgeCriticalHours
+}
+
+// CertExpiryWarningDaysVal returns the configured warning threshold or the default of 30.
+func (m *MonitoringConfig) CertExpiryWarningDaysVal() int {
+	if m.CertExpiryWarningDays <= 0 {
+		return 30
+	}
+	return m.CertExpiryWarningDays
+}
+
+// CertExpiryCriticalDaysVal returns the configured critical threshold or the default of 7.
+func (m *MonitoringConfig) CertExpiryCriticalDaysVal() int {
+	if m.CertExpiryCriticalDays <= 0 {
+		return 7
+	}
+	return m.CertExpiryCriticalDays
 }
 
 // ServerConfig holds HTTP server settings.
@@ -372,12 +456,20 @@ func Defaults() *Config {
 			SMTPsEnabled:             false,
 			SMTPsHost:                "0.0.0.0",
 			SMTPsPort:                465,
+			IMAPsEnabled:             false,
+			IMAPsHost:                "0.0.0.0",
+			IMAPsPort:                993,
+			POP3sEnabled:             false,
+			POP3sHost:                "0.0.0.0",
+			POP3sPort:                995,
 			IMAPHost:                 "0.0.0.0",
 			IMAPPort:                 143,
 			POP3Host:                 "0.0.0.0",
 			POP3Port:                 110,
+			JMAPHost:                 "0.0.0.0",
+			JMAPPort:                 443,
 			RequireTLSForAuth:        true,
-			RequireAuthForSubmission: false,
+			RequireAuthForSubmission: true,
 			QueueWorkers:             1,
 			WorkerInterval:           5 * time.Second,
 			// VAPID defaults: empty keys mean push notifications
@@ -559,6 +651,12 @@ func applyEnvOverrides(v *viper.Viper, cfg *Config) {
 	// if a misconfigured YAML ever flips it on.
 	if v.GetString("COREMAIL_SMTPS_ENABLED") != "" {
 		cfg.CoreMail.SMTPsEnabled = v.GetBool("COREMAIL_SMTPS_ENABLED")
+	}
+	if v.GetString("COREMAIL_IMAPS_ENABLED") != "" {
+		cfg.CoreMail.IMAPsEnabled = v.GetBool("COREMAIL_IMAPS_ENABLED")
+	}
+	if v.GetString("COREMAIL_POP3S_ENABLED") != "" {
+		cfg.CoreMail.POP3sEnabled = v.GetBool("COREMAIL_POP3S_ENABLED")
 	}
 	if v.GetString("BACKUP_RETENTION_COUNT") != "" {
 		cfg.Backup.RetentionCount = v.GetInt("BACKUP_RETENTION_COUNT")

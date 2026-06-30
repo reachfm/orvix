@@ -225,13 +225,17 @@ func NewTelemetry(in Inputs) Telemetry {
 	// TRACKING-2C). When the snapshot is nil or empty we fall
 	// back to the pre-tracking "unknown" listener state.
 	t.Services = map[string]Service{
-		"api":      newAPIService(),
-		"smtp":     listenerOrFallback(in.ListenerSnapshot, ListenerSMTP, in.SMHTTPPort, "SMTP"),
-		"imap":     listenerOrFallback(in.ListenerSnapshot, ListenerIMAP, in.IMAPPort, "IMAP"),
-		"pop3":     listenerOrFallback(in.ListenerSnapshot, ListenerPOP3, in.POP3Port, "POP3"),
-		"jmap":     listenerOrFallback(in.ListenerSnapshot, ListenerJMAP, in.JMAPPort, "JMAP"),
-		"database": newDatabaseService(in.DBPing),
-		"queue":    newQueueService(in.QueueCounts),
+		"api":        newAPIService(),
+		"smtp":       listenerOrFallback(in.ListenerSnapshot, ListenerSMTP, in.SMHTTPPort, "SMTP"),
+		"submission": listenerOrFallback(in.ListenerSnapshot, ListenerSubmission, 0, "Submission"),
+		"smtps":      listenerOrFallback(in.ListenerSnapshot, ListenerSMTPS, 0, "SMTPS"),
+		"imap":       listenerOrFallback(in.ListenerSnapshot, ListenerIMAP, in.IMAPPort, "IMAP"),
+		"imaps":      listenerOrFallback(in.ListenerSnapshot, ListenerIMAPS, 0, "IMAPS"),
+		"pop3":       listenerOrFallback(in.ListenerSnapshot, ListenerPOP3, in.POP3Port, "POP3"),
+		"pop3s":      listenerOrFallback(in.ListenerSnapshot, ListenerPOP3S, 0, "POP3S"),
+		"jmap":       listenerOrFallback(in.ListenerSnapshot, ListenerJMAP, in.JMAPPort, "JMAP"),
+		"database":   newDatabaseService(in.DBPing),
+		"queue":      newQueueService(in.QueueCounts),
 	}
 
 	// Queue counts — pass through; zero values are honest when

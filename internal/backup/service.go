@@ -43,6 +43,7 @@ type Service struct {
 	configPath     string
 	buildVersion   string
 	buildCommit    string
+	keyPaths       []string
 
 	mu sync.Mutex
 }
@@ -68,6 +69,10 @@ func (s *Service) SetBuildInfo(version, commit string) { s.buildVersion = versio
 
 // SetStagingRoot sets the directory for restore staging.
 func (s *Service) SetStagingRoot(root string) { s.stagingRoot = root }
+
+// AddKeyPath adds a key file path to include in every backup.
+// Paths that do not exist are silently skipped during backup creation.
+func (s *Service) AddKeyPath(path string) { s.keyPaths = append(s.keyPaths, path) }
 
 func (s *Service) ensureBasePath() error { return os.MkdirAll(s.basePath, 0750) }
 
@@ -177,15 +182,23 @@ func (s *Service) createBackupLocked(ctx context.Context, name string) (*Backup,
 		return nil, fmt.Errorf("safe create dir: %w", err)
 	}
 	backup := &Backup{ID: id, Name: name, Status: StatusInProgress, CreatedAt: time.Now().UTC()}
-	manifest := BackupManifest{ID: id, Name: name, CreatedAt: backup.CreatedAt}
-	manifestBytes, _ := json.Marshal(manifest)
-	os.WriteFile(filepath.Join(bp, "manifest.json"), manifestBytes, 0640)
+
+	hostname, _ := os.Hostname()
+	manifest := BackupManifest{
+		ID: id, Name: name, CreatedAt: backup.CreatedAt,
+		Version:     s.buildVersion,
+		BuildCommit: s.buildCommit,
+		Hostname:    hostname,
+		Files:       make(map[string]string),
+	}
 
 	dbPath := filepath.Join(bp, "database.sqlite")
 	if err := s.snapshotDB(ctx, dbPath); err != nil {
 		os.RemoveAll(bp)
 		return nil, fmt.Errorf("snapshot db: %w", err)
 	}
+	manifest.Files["database.sqlite"] = fileSHA256(dbPath)
+
 	mailPath := filepath.Join(bp, "mailstore.tar.gz")
 	msgCount, err := archiveToTarGz(s.mailDir, mailPath, ".eml")
 	if err != nil {
@@ -193,6 +206,8 @@ func (s *Service) createBackupLocked(ctx context.Context, name string) (*Backup,
 		return nil, fmt.Errorf("mailstore archive: %w", err)
 	}
 	manifest.MessageCount = msgCount
+	manifest.Files["mailstore.tar.gz"] = fileSHA256(mailPath)
+
 	attPath := filepath.Join(bp, "attachments.tar.gz")
 	attCount, err := archiveToTarGz(s.attachDir, attPath, "")
 	if err != nil {
@@ -200,6 +215,32 @@ func (s *Service) createBackupLocked(ctx context.Context, name string) (*Backup,
 		return nil, fmt.Errorf("attachments archive: %w", err)
 	}
 	manifest.AttachmentCount = attCount
+	manifest.Files["attachments.tar.gz"] = fileSHA256(attPath)
+
+	// Copy orvix.yaml config file.
+	if s.configPath != "" {
+		if data, err := os.ReadFile(s.configPath); err == nil {
+			redacted := redactSensitiveYAML(data)
+			cfgDest := filepath.Join(bp, "orvix.yaml")
+			if err := os.WriteFile(cfgDest, redacted, 0640); err == nil {
+				manifest.Files["orvix.yaml"] = fileSHA256(cfgDest)
+			}
+		}
+	}
+
+	// Copy key files (DKIM, JWT, VAPID, etc.)
+	for _, kp := range s.keyPaths {
+		if kp == "" {
+			continue
+		}
+		if data, err := os.ReadFile(kp); err == nil {
+			baseName := filepath.Base(kp)
+			keyDest := filepath.Join(bp, baseName)
+			if err := os.WriteFile(keyDest, data, 0600); err == nil {
+				manifest.Files[baseName] = fileSHA256(keyDest)
+			}
+		}
+	}
 
 	var totalSize int64
 	filepath.Walk(bp, func(path string, info fs.FileInfo, err error) error {
@@ -212,16 +253,19 @@ func (s *Service) createBackupLocked(ctx context.Context, name string) (*Backup,
 	sha, _ := computeDirSHA256(bp)
 	backup.SHA256 = sha
 	manifest.SHA256 = sha
+	manifest.SizeBytes = totalSize
 
 	now := time.Now().UTC()
 	backup.CompletedAt = &now
 	backup.Status = StatusCompleted
 	manifest.CompletedAt = &now
-	manifest.SizeBytes = totalSize
-	manifestBytes, _ = json.Marshal(manifest)
+
+	manifestBytes, _ := json.Marshal(manifest)
 	os.WriteFile(filepath.Join(bp, "manifest.json"), manifestBytes, 0640)
+
 	s.saveToRegistry(ctx, backup)
 	s.populateManifestCounts(ctx, &manifest)
+
 	manifestBytes, _ = json.Marshal(manifest)
 	os.WriteFile(filepath.Join(bp, "manifest.json"), manifestBytes, 0640)
 	return backup, nil
@@ -473,7 +517,7 @@ func (s *Service) GetBackupHealth(ctx context.Context) (*BackupHealth, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	health := &BackupHealth{RetentionEnabled: true}
+	health := &BackupHealth{RetentionEnabled: true, Status: "ok"}
 	if s.db != nil {
 		row := s.db.QueryRowContext(ctx, `SELECT enabled FROM backup_schedule_config WHERE id = 1`)
 		var enabled int
@@ -494,7 +538,45 @@ func (s *Service) GetBackupHealth(ctx context.Context) (*BackupHealth, error) {
 		health.AvailableDiskBytes = diskFreeBytes(s.basePath)
 	}
 
+	lastBackupAt, err := s.lastCompletedBackupTime(ctx)
+	if err == nil && !lastBackupAt.IsZero() {
+		health.LastBackupAgeHours = time.Since(lastBackupAt).Hours()
+		if health.LastBackupAgeHours > 72 {
+			health.LastBackupAgeCritical = true
+			health.Status = "critical"
+		} else if health.LastBackupAgeHours > 24 {
+			health.LastBackupAgeWarning = true
+			if health.Status == "ok" {
+				health.Status = "warning"
+			}
+		}
+	} else {
+		health.LastBackupAgeHours = -1
+		health.LastBackupAgeCritical = true
+		health.Status = "critical"
+	}
+
+	if !health.DirectoryExists || !health.Writable {
+		health.Status = "critical"
+	}
+
 	return health, nil
+}
+
+func (s *Service) lastCompletedBackupTime(ctx context.Context) (time.Time, error) {
+	if s.db == nil {
+		return time.Time{}, nil
+	}
+	var t sql.NullString
+	row := s.db.QueryRowContext(ctx,
+		`SELECT MAX(completed_at) FROM backup_registry WHERE status = ?`, string(StatusCompleted))
+	if err := row.Scan(&t); err != nil {
+		return time.Time{}, err
+	}
+	if !t.Valid || t.String == "" {
+		return time.Time{}, nil
+	}
+	return time.Parse(time.RFC3339, t.String)
 }
 
 // ── Helpers ──────────────────────────────────────────────
@@ -1359,4 +1441,13 @@ func computeDirSHA256(dir string) (string, error) {
 		return nil
 	})
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func fileSHA256(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:])
 }

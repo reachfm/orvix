@@ -18,8 +18,10 @@ func TestDefaultsPasswordMinLengthIsInstallerPolicy(t *testing.T) {
 
 func TestDefaultsCoreMailInboundDoesNotRequireSubmissionAuth(t *testing.T) {
 	cfg := Defaults()
-	if cfg.CoreMail.RequireAuthForSubmission {
-		t.Fatal("coremail.require_auth_for_submission must default false so port 25 accepts unauthenticated inbound mail before RCPT relay checks")
+	// require_auth_for_submission controls port 587 submission only, not port 25 inbound.
+	// It must default true so submission never accepts unauthenticated relay.
+	if !cfg.CoreMail.RequireAuthForSubmission {
+		t.Fatal("coremail.require_auth_for_submission must default true so port 587 submission requires AUTH")
 	}
 }
 
@@ -86,8 +88,8 @@ func TestReleaseExampleCoreMailConfigIsDeploymentReady(t *testing.T) {
 	if cfg.Auth.PasswordMinLen != 8 {
 		t.Fatalf("auth.password_min_len must be 8 in deployment example, got %d", cfg.Auth.PasswordMinLen)
 	}
-	if cfg.CoreMail.RequireAuthForSubmission {
-		t.Fatal("deployment example must keep coremail.require_auth_for_submission false for inbound port 25")
+	if !cfg.CoreMail.RequireAuthForSubmission {
+		t.Fatal("deployment example must keep coremail.require_auth_for_submission true so submission requires AUTH")
 	}
 	// SUBMISSION-3C: submission defaults must be safe (disabled by default,
 	// port 587) and the example must declare the TLS cert/key fields so an
@@ -112,7 +114,7 @@ func TestReleaseExampleCoreMailConfigIsDeploymentReady(t *testing.T) {
 		t.Fatalf("read raw example: %v", err)
 	}
 	example := string(raw)
-	for _, want := range []string{"tls_cert_file", "tls_key_file", "submission_enabled", "submission_host", "submission_port", "smtps_enabled"} {
+	for _, want := range []string{"tls_cert_file", "tls_key_file", "submission_enabled", "submission_host", "submission_port", "smtps_enabled", "imaps_enabled", "pop3s_enabled"} {
 		if !strings.Contains(example, want) {
 			t.Errorf("example config must declare %q so operators can see the TLS gating fields", want)
 		}

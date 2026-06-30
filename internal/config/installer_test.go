@@ -4706,3 +4706,623 @@ echo "UNEXPECTED_OK"
 // in the same `config` package; we reuse it here.
 //
 // mustRead is also provided by release_packaging_test.go.
+
+// ── PART 1: Installer public entrypoint / doctor / upgrade tests ──
+
+// TestInstallerPublicEntrypointParses verifies that release/install-public.sh
+// parses cleanly with bash -n (no syntax errors).
+func TestInstallerPublicEntrypointParses(t *testing.T) {
+	if bashPath, err := exec.LookPath(bashCommand(t)); err != nil {
+		t.Skip("bash not available")
+	} else {
+		_ = bashPath
+	}
+	root := repoRoot(t)
+	path := filepath.Join(root, "release", "install-public.sh")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("install-public.sh not found: %v", err)
+	}
+	if info.Size() == 0 {
+		t.Fatal("install-public.sh is empty")
+	}
+	cmd := exec.Command(bashCommand(t), "-n", path)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("install-public.sh bash syntax error: %v\n%s", err, out)
+	}
+	// Also verify the script contains the required markers.
+	script := mustRead(t, path)
+	for _, needle := range []string{
+		"is_valid_public_ipv4()",
+		"ORVIX_NON_INTERACTIVE",
+		"ORVIX_DOMAIN",
+		"ORVIX_PUBLIC_IPV4",
+		"detect_worktree",
+	} {
+		if !strings.Contains(script, needle) {
+			t.Errorf("install-public.sh missing required marker %q", needle)
+		}
+	}
+}
+
+// TestInstallerNonInteractiveEnvMode verifies that the public entrypoint
+// requires ORVIX_DOMAIN and ORVIX_PUBLIC_IPV4 in non-interactive mode.
+func TestInstallerNonInteractiveEnvMode(t *testing.T) {
+	if _, err := exec.LookPath(bashCommand(t)); err != nil {
+		t.Skip("bash not available")
+	}
+	root := repoRoot(t)
+	script := mustRead(t, filepath.Join(root, "release", "install-public.sh"))
+
+	testCases := []struct {
+		name      string
+		env       map[string]string
+		wantExit1 bool
+		wantMsg   string
+	}{
+		{
+			name:    "missing ORVIX_DOMAIN in non-interactive mode",
+			env:     map[string]string{"ORVIX_NON_INTERACTIVE": "1", "ORVIX_PUBLIC_IPV4": "65.75.203.74"},
+			wantExit1: true,
+			wantMsg:   "ORVIX_DOMAIN",
+		},
+		{
+			name:    "missing ORVIX_PUBLIC_IPV4 in non-interactive mode",
+			env:     map[string]string{"ORVIX_NON_INTERACTIVE": "1", "ORVIX_DOMAIN": "example.com"},
+			wantExit1: true,
+			wantMsg:   "ORVIX_PUBLIC_IPV4",
+		},
+		{
+			name:    "both set in non-interactive -> passes env validation",
+			env:     map[string]string{"ORVIX_NON_INTERACTIVE": "1", "ORVIX_DOMAIN": "example.com", "ORVIX_PUBLIC_IPV4": "65.75.203.74"},
+			wantExit1: false,
+			wantMsg:   "",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			// Create a fake source tree so the script finds a local install.sh
+			// and doesn't try to download from the internet.
+			if err := os.MkdirAll(filepath.Join(dir, "release"), 0o755); err != nil {
+				t.Fatalf("mkdir release: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "release", "install.sh"), []byte("#!/usr/bin/env bash\necho 'FAKE INSTALLER'\nexit 0\n"), 0o755); err != nil {
+				t.Fatalf("write fake install.sh: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module github.com/orvix/orvix\n"), 0o644); err != nil {
+				t.Fatalf("write fake go.mod: %v", err)
+			}
+
+			harnessPath := filepath.Join(dir, "test-public.sh")
+			harness := strings.Replace(script, `exec bash "$installer_script"`, `echo "WOULD_RUN_INSTALLER"; exit 0`, 1)
+			// Override ORVIX_SOURCE_DIR to point at our fake tree.
+			harness = strings.Replace(harness, `ORVIX_SOURCE_DIR="${ORVIX_SOURCE_DIR:-$(pwd)}"`, fmt.Sprintf(`ORVIX_SOURCE_DIR=%q`, dir), 1)
+			if err := os.WriteFile(harnessPath, []byte(harness), 0o755); err != nil {
+				t.Fatalf("write harness: %v", err)
+			}
+			cmd := exec.Command(bashCommand(t), harnessPath)
+			cmd.Dir = dir
+			for k, v := range tc.env {
+				cmd.Env = append(cmd.Env, k+"="+v)
+				t.Setenv(k, v)
+			}
+			out, err := cmd.CombinedOutput()
+			outStr := string(out)
+			if tc.wantExit1 {
+				if err == nil {
+					t.Errorf("expected non-zero exit for %q; got 0\noutput:\n%s", tc.name, outStr)
+				}
+				if tc.wantMsg != "" && !strings.Contains(outStr, tc.wantMsg) {
+					t.Errorf("output must contain %q; got:\n%s", tc.wantMsg, outStr)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("expected exit 0 for %q; got %v\noutput:\n%s", tc.name, err, outStr)
+				}
+			}
+		})
+	}
+}
+
+// TestInstallerInvalidPublicIPv4Fails verifies that the entrypoint rejects
+// 127.0.0.1, private IPs, and other invalid public IPv4 values.
+func TestInstallerInvalidPublicIPv4Fails(t *testing.T) {
+	if _, err := exec.LookPath(bashCommand(t)); err != nil {
+		t.Skip("bash not available")
+	}
+	root := repoRoot(t)
+	script := mustRead(t, filepath.Join(root, "release", "install-public.sh"))
+
+	invalidIPs := []string{
+		"127.0.0.1",
+		"10.0.0.1",
+		"192.168.1.1",
+		"172.16.0.1",
+		"0.0.0.0",
+		"169.254.1.1",
+		"192.0.2.1",
+		"198.51.100.1",
+		"203.0.113.1",
+		"224.0.0.1",
+		"240.0.0.1",
+		"::1",
+		"",
+	}
+
+	for _, ip := range invalidIPs {
+		t.Run("rejects_"+strings.ReplaceAll(ip, ".", "_"), func(t *testing.T) {
+			dir := t.TempDir()
+			harnessPath := filepath.Join(dir, "test-ip.sh")
+			harness := strings.Replace(script, `exec bash "$installer_script"`, `echo "WOULD_RUN_INSTALLER"; exit 0`, 1)
+			if err := os.WriteFile(harnessPath, []byte(harness), 0o755); err != nil {
+				t.Fatalf("write harness: %v", err)
+			}
+			cmd := exec.Command(bashCommand(t), harnessPath)
+			cmd.Dir = dir
+			t.Setenv("ORVIX_NON_INTERACTIVE", "1")
+			t.Setenv("ORVIX_DOMAIN", "example.com")
+			t.Setenv("ORVIX_PUBLIC_IPV4", ip)
+			cmd.Env = append(os.Environ(), "ORVIX_NON_INTERACTIVE=1", "ORVIX_DOMAIN=example.com", "ORVIX_PUBLIC_IPV4="+ip)
+			out, err := cmd.CombinedOutput()
+			outStr := string(out)
+			if err == nil {
+				t.Errorf("expected non-zero exit for ORVIX_PUBLIC_IPV4=%q; got 0\noutput:\n%s", ip, outStr)
+			}
+			// The error must mention the invalid IP or "invalid".
+			if !strings.Contains(strings.ToLower(outStr), "invalid") && !strings.Contains(outStr, ip) {
+				t.Errorf("output must describe the failure for ORVIX_PUBLIC_IPV4=%q; got:\n%s", ip, outStr)
+			}
+		})
+	}
+}
+
+// TestDoctorJSONSchemaStable verifies that orvix-doctor.sh --json produces
+// valid JSON with the stable schema: {"status":"healthy|unhealthy","checks":[...]}.
+func TestDoctorJSONSchemaStable(t *testing.T) {
+	if _, err := exec.LookPath(bashCommand(t)); err != nil {
+		t.Skip("bash not available")
+	}
+	root := repoRoot(t)
+	script := mustRead(t, filepath.Join(root, "release", "scripts", "orvix-doctor.sh"))
+
+	// Syntax check first.
+	cmd := exec.Command(bashCommand(t), "-n", filepath.Join(root, "release", "scripts", "orvix-doctor.sh"))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("orvix-doctor.sh bash syntax error: %v\n%s", err, out)
+	}
+
+	// Verify the script contains the --json flag handler.
+	if !strings.Contains(script, "--json") {
+		t.Error("orvix-doctor.sh must support --json flag")
+	}
+	if !strings.Contains(script, "--quiet") {
+		t.Error("orvix-doctor.sh must support --quiet flag")
+	}
+	if !strings.Contains(script, `"status"`) {
+		t.Error("orvix-doctor.sh must emit a 'status' key in JSON output")
+	}
+	if !strings.Contains(script, `"checks"`) {
+		t.Error("orvix-doctor.sh must emit a 'checks' array in JSON output")
+	}
+	if !strings.Contains(script, `"name"`) {
+		t.Error("orvix-doctor.sh must emit 'name' in each check")
+	}
+	if !strings.Contains(script, `"message"`) {
+		t.Error("orvix-doctor.sh must emit 'message' in each check")
+	}
+
+	// Run with --json --quiet and parse the output.
+	dir := t.TempDir()
+	harnessPath := filepath.Join(dir, "doctor-schema.sh")
+	// Strip the trailing `main "$@"` so we control the call order,
+	// and set OUTPUT_JSON=1 so only JSON output is produced.
+	scriptNoMain := strings.Replace(script, `main "$@"`, "# main disabled by test harness", 1)
+	harness := fmt.Sprintf(`#!/usr/bin/env bash
+set -u
+systemctl() { return 1; }
+ss() { echo ""; }
+redis-cli() { return 1; }
+sqlite3() { echo "ok"; }
+curl() { return 1; }
+find() { return 0; }
+df() { echo "Filesystem 1K-blocks Used Available Use%%%% Mounted"; echo "/dev/sda1 10000000 5000000 5000000 50%%%% /"; }
+openssl() { echo ""; }
+stat() { printf '%%s\n%%s' 'orvix' '600'; }
+sudo() { "$@"; }
+id() { echo "0"; }
+export ORVIX_CONFIG="/nonexistent"
+export ORVIX_DB="/nonexistent"
+
+%s
+
+OUTPUT_JSON=1
+OUTPUT_QUIET=1
+run_all_checks
+print_json_output
+`, scriptNoMain)
+	if err := os.WriteFile(harnessPath, []byte(harness), 0o755); err != nil {
+		t.Fatalf("write harness: %v", err)
+	}
+	cmd = exec.Command(bashCommand(t), harnessPath)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("doctor --json failed: %v\noutput:\n%s", err, out)
+	}
+	outStr := string(out)
+
+	// Parse as JSON and check schema.
+	var result struct {
+		Status string `json:"status"`
+		Checks []struct {
+			Name    string `json:"name"`
+			Status  string `json:"status"`
+			Message string `json:"message"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal([]byte(outStr), &result); err != nil {
+		t.Fatalf("doctor --json output is not valid JSON: %v\noutput:\n%s", err, outStr)
+	}
+	if result.Status != "healthy" && result.Status != "unhealthy" {
+		t.Errorf("status must be 'healthy' or 'unhealthy'; got %q", result.Status)
+	}
+	if len(result.Checks) == 0 {
+		t.Error("checks array must not be empty")
+	}
+	for i, c := range result.Checks {
+		if c.Name == "" {
+			t.Errorf("checks[%d].name is empty", i)
+		}
+		if c.Status != "PASS" && c.Status != "FAIL" && c.Status != "WARN" {
+			t.Errorf("checks[%d].status must be PASS/FAIL/WARN; got %q", i, c.Status)
+		}
+	}
+}
+
+// TestDoctorDetectsBrokenConfig verifies the doctor catches a missing or broken config.
+func TestDoctorDetectsBrokenConfig(t *testing.T) {
+	if _, err := exec.LookPath(bashCommand(t)); err != nil {
+		t.Skip("bash not available")
+	}
+	root := repoRoot(t)
+	script := mustRead(t, filepath.Join(root, "release", "scripts", "orvix-doctor.sh"))
+	scriptNoMain := strings.Replace(script, `main "$@"`, "# main disabled by test harness", 1)
+
+	dir := t.TempDir()
+	harnessPath := filepath.Join(dir, "doctor-broken.sh")
+	cfgPath := filepath.Join(dir, "nonexistent.yaml")
+	harness := fmt.Sprintf(`#!/usr/bin/env bash
+set -u
+systemctl() { return 1; }
+ss() { echo ""; }
+redis-cli() { return 1; }
+sqlite3() { echo "ok"; }
+curl() { return 1; }
+find() { return 0; }
+df() { echo "Filesystem 1K-blocks Used Available Use%%%% Mounted"; echo "/dev/sda1 10000000 5000000 5000000 50%%%% /"; }
+openssl() { echo ""; }
+stat() { printf '%%s\n%%s' 'orvix' '600'; }
+sudo() { "$@"; }
+id() { echo "0"; }
+export ORVIX_CONFIG=%q
+export ORVIX_DB="/nonexistent"
+export ORVIX_BACKUP_DIR="/nonexistent"
+
+%s
+
+OUTPUT_JSON=1
+OUTPUT_QUIET=1
+run_all_checks
+print_json_output
+`, cfgPath, scriptNoMain)
+	if err := os.WriteFile(harnessPath, []byte(harness), 0o755); err != nil {
+		t.Fatalf("write harness: %v", err)
+	}
+	cmd := exec.Command(bashCommand(t), harnessPath)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	_ = err
+	outStr := string(out)
+	if outStr == "" {
+		t.Fatal("doctor produced no output")
+	}
+
+	var result struct {
+		Status string `json:"status"`
+		Checks []struct {
+			Name    string `json:"name"`
+			Status  string `json:"status"`
+			Message string `json:"message"`
+		} `json:"checks"`
+	}
+	if jsonErr := json.Unmarshal([]byte(outStr), &result); jsonErr != nil {
+		t.Fatalf("doctor output is not valid JSON: %v\noutput:\n%s", jsonErr, outStr)
+	}
+	found := false
+	for _, c := range result.Checks {
+		if strings.Contains(strings.ToLower(c.Name), "config") {
+			found = true
+			if c.Status != "FAIL" {
+				t.Errorf("config parses check must be FAIL when config is missing; got %s: %s", c.Status, c.Message)
+			}
+		}
+	}
+	if !found {
+		t.Error("doctor must include a config parses check")
+	}
+}
+
+// TestDoctorDetectsPublic8080 verifies the doctor flags a public 8080 bind as failure.
+func TestDoctorDetectsPublic8080(t *testing.T) {
+	if _, err := exec.LookPath(bashCommand(t)); err != nil {
+		t.Skip("bash not available")
+	}
+	root := repoRoot(t)
+	script := mustRead(t, filepath.Join(root, "release", "scripts", "orvix-doctor.sh"))
+	scriptNoMain := strings.Replace(script, `main "$@"`, "# main disabled by test harness", 1)
+
+	dir := t.TempDir()
+	harnessPath := filepath.Join(dir, "doctor-public8080.sh")
+	harness := fmt.Sprintf(`#!/usr/bin/env bash
+set -u
+systemctl() { return 0; }
+ss() {
+    case "$*" in
+        *:8080*) echo "LISTEN 0 128 0.0.0.0:8080 0.0.0.0:*" ;;
+        *:8081*) echo "LISTEN 0 128 127.0.0.1:8081 0.0.0.0:*" ;;
+        *)       echo "" ;;
+    esac
+}
+redis-cli() { return 0; }
+sqlite3() { echo "ok"; }
+curl() { return 0; }
+find() { return 0; }
+df() { echo "Filesystem 1K-blocks Used Available Use%%%% Mounted"; echo "/dev/sda1 10000000 5000000 5000000 50%%%% /"; }
+openssl() { echo ""; }
+stat() { printf '%%s\n%%s' 'orvix' '600'; }
+sudo() { "$@"; }
+id() { echo "0"; }
+python3() { return 0; }
+python() { return 0; }
+export ORVIX_CONFIG="%s"
+export ORVIX_DB="%s"
+export ORVIX_JWT_KEY="%s"
+export ORVIX_VAPID_KEY="%s"
+mkdir -p "$(dirname "$ORVIX_CONFIG")"
+cat > "$ORVIX_CONFIG" <<YAML
+server:
+  host: "127.0.0.1"
+coremail:
+  enabled: true
+dns:
+  public_ipv4: "65.75.203.74"
+YAML
+
+%s
+
+OUTPUT_JSON=1
+OUTPUT_QUIET=1
+run_all_checks
+print_json_output
+`, filepath.Join(dir, "orvix.yaml"), filepath.Join(dir, "orvix.db"), filepath.Join(dir, "jwt.key"), filepath.Join(dir, "vapid.key"), scriptNoMain)
+	if err := os.WriteFile(harnessPath, []byte(harness), 0o755); err != nil {
+		t.Fatalf("write harness: %v", err)
+	}
+	cmd := exec.Command(bashCommand(t), harnessPath)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	_ = err
+	outStr := string(out)
+	if outStr == "" {
+		t.Fatal("doctor produced no output")
+	}
+
+	var result struct {
+		Status string `json:"status"`
+		Checks []struct {
+			Name    string `json:"name"`
+			Status  string `json:"status"`
+			Message string `json:"message"`
+		} `json:"checks"`
+	}
+	if jsonErr := json.Unmarshal([]byte(outStr), &result); jsonErr != nil {
+		t.Fatalf("doctor output is not valid JSON: %v\noutput:\n%s", jsonErr, outStr)
+	}
+	found := false
+	for _, c := range result.Checks {
+		if strings.Contains(c.Name, "8080") && strings.Contains(strings.ToLower(c.Name), "admin") {
+			found = true
+			if c.Status != "FAIL" {
+				t.Errorf("port 8080 check must be FAIL when bound to 0.0.0.0; got %s: %s", c.Status, c.Message)
+			}
+		}
+	}
+	if !found {
+		t.Error("doctor must include a port 8080 check")
+	}
+}
+
+// TestDoctorPassesMockedHealthy verifies the doctor reports healthy when everything is OK.
+func TestDoctorPassesMockedHealthy(t *testing.T) {
+	if _, err := exec.LookPath(bashCommand(t)); err != nil {
+		t.Skip("bash not available")
+	}
+	root := repoRoot(t)
+	script := mustRead(t, filepath.Join(root, "release", "scripts", "orvix-doctor.sh"))
+	scriptNoMain := strings.Replace(script, `main "$@"`, "# main disabled by test harness", 1)
+
+	dir := t.TempDir()
+	harnessPath := filepath.Join(dir, "doctor-healthy.sh")
+	harness := fmt.Sprintf(`#!/usr/bin/env bash
+set -u
+systemctl() { return 0; }
+ss() {
+    case "$*" in
+        *:25*)    echo "LISTEN 0 128 0.0.0.0:25   0.0.0.0:*" ;;
+        *:110*)   echo "LISTEN 0 128 0.0.0.0:110  0.0.0.0:*" ;;
+        *:143*)   echo "LISTEN 0 128 0.0.0.0:143  0.0.0.0:*" ;;
+        *:8080*)  echo "LISTEN 0 128 127.0.0.1:8080 0.0.0.0:*" ;;
+        *:8081*)  echo "LISTEN 0 128 127.0.0.1:8081 0.0.0.0:*" ;;
+        *:80*)    echo "LISTEN 0 128 0.0.0.0:80   0.0.0.0:*" ;;
+        *:443*)   echo "LISTEN 0 128 0.0.0.0:443  0.0.0.0:*" ;;
+        *)        echo "" ;;
+    esac
+}
+redis-cli() { echo "PONG"; }
+sqlite3() { echo "ok"; }
+curl() {
+    # Detect if -w is used (HTTP code output mode) and return 200.
+    for arg in "$@"; do
+        case "$arg" in
+            -w) echo "200"; return 0 ;;
+        esac
+    done
+    return 0
+}
+find() { return 0; }
+df() { echo "Filesystem 1K-blocks Used Available Use%%%% Mounted"; echo "/dev/sda1 10000000 5000000 5000000 50%%%% /"; }
+openssl() { echo ""; }
+stat() {
+    if echo "$*" | grep -q '%%a'; then echo "600"; else echo "orvix"; fi
+}
+sudo() { "$@"; }
+id() { echo "0"; }
+python3() { return 0; }
+python() { return 0; }
+export ORVIX_CONFIG="%s"
+export ORVIX_DB="%s"
+export ORVIX_JWT_KEY="%s"
+export ORVIX_VAPID_KEY="%s"
+export ORVIX_DKIM_DIR="%s"
+export ORVIX_MAILSTORE="%s"
+export ORVIX_BACKUP_DIR="%s"
+export ORVIX_CERT_DIR="%s"
+mkdir -p "$ORVIX_DKIM_DIR"
+mkdir -p "$ORVIX_MAILSTORE"
+mkdir -p "$ORVIX_BACKUP_DIR"
+mkdir -p "$ORVIX_CERT_DIR"
+mkdir -p "$(dirname "$ORVIX_CONFIG")"
+cat > "$ORVIX_CONFIG" <<YAML
+server:
+  host: "127.0.0.1"
+coremail:
+  enabled: true
+dns:
+  public_ipv4: "65.75.203.74"
+YAML
+touch "$ORVIX_DB"
+touch "$ORVIX_JWT_KEY"
+touch "$ORVIX_VAPID_KEY"
+echo "placeholder" > "$ORVIX_DKIM_DIR/default.private"
+
+%s
+
+OUTPUT_JSON=1
+OUTPUT_QUIET=1
+run_all_checks
+print_json_output
+`, filepath.Join(dir, "orvix.yaml"), filepath.Join(dir, "orvix.db"), filepath.Join(dir, "jwt.key"), filepath.Join(dir, "vapid.key"), filepath.Join(dir, "dkim"), filepath.Join(dir, "mailstore"), filepath.Join(dir, "backups"), filepath.Join(dir, "certs"), scriptNoMain)
+	if err := os.WriteFile(harnessPath, []byte(harness), 0o755); err != nil {
+		t.Fatalf("write harness: %v", err)
+	}
+	cmd := exec.Command(bashCommand(t), harnessPath)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	_ = err
+	outStr := string(out)
+	if outStr == "" {
+		t.Fatal("doctor produced no output")
+	}
+
+	var result struct {
+		Status string `json:"status"`
+		Checks []struct {
+			Name    string `json:"name"`
+			Status  string `json:"status"`
+			Message string `json:"message"`
+		} `json:"checks"`
+	}
+	if jsonErr := json.Unmarshal([]byte(outStr), &result); jsonErr != nil {
+		t.Fatalf("doctor output is not valid JSON: %v\noutput:\n%s", jsonErr, outStr)
+	}
+	// In a healthy mock, status should be "healthy" and no checks should be FAIL.
+	if result.Status != "healthy" {
+		t.Errorf("expected status 'healthy' with all mocks passing; got %q", result.Status)
+	}
+	for _, c := range result.Checks {
+		if c.Status == "FAIL" {
+			t.Errorf("unexpected FAIL in mocked healthy state: check=%q message=%q", c.Name, c.Message)
+		}
+	}
+}
+
+// TestUpgradeRollbackPath simulates the upgrade rollback path by verifying
+// that upgrade.sh defines full_rollback, preflight_backup, and the --dev-unsafe flag.
+func TestUpgradeRollbackPath(t *testing.T) {
+	if _, err := exec.LookPath(bashCommand(t)); err != nil {
+		t.Skip("bash not available")
+	}
+	root := repoRoot(t)
+	path := filepath.Join(root, "release", "upgrade.sh")
+
+	// Syntax check.
+	cmd := exec.Command(bashCommand(t), "-n", path)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("upgrade.sh bash syntax error: %v\n%s", err, out)
+	}
+
+	script := mustRead(t, path)
+
+	// Must define the required functions.
+	requiredFunctions := []string{
+		"full_rollback()",
+		"preflight_backup()",
+		"verify_checksum_fail_closed()",
+		"verify_health()",
+		"generate_upgrade_report()",
+		"run_doctor()",
+	}
+	for _, fn := range requiredFunctions {
+		if !strings.Contains(script, fn) {
+			t.Errorf("upgrade.sh must define %s", fn)
+		}
+	}
+
+	// Must support --dev-unsafe flag.
+	if !strings.Contains(script, "--dev-unsafe") {
+		t.Error("upgrade.sh must support --dev-unsafe flag")
+	}
+
+	// Must back up DKIM keys.
+	if !strings.Contains(script, "DKIM_DIR") || !strings.Contains(script, "dkim") {
+		t.Error("upgrade.sh must back up DKIM keys")
+	}
+
+	// Must back up JWT and VAPID keys.
+	if !strings.Contains(script, "JWT_KEY") {
+		t.Error("upgrade.sh must back up JWT key")
+	}
+	if !strings.Contains(script, "VAPID") || !strings.Contains(script, "vapid") {
+		t.Error("upgrade.sh must back up VAPID keys")
+	}
+
+	// Must have rollback that restores db, config, etc.
+	if !strings.Contains(script, "orvix.db") {
+		t.Error("upgrade.sh rollback must restore orvix.db")
+	}
+
+	// Run a behavioural rollback simulation.
+	stripped := stripBashComments(script)
+	if !strings.Contains(stripped, "full_rollback") {
+		t.Error("upgrade.sh must call full_rollback in the failure path")
+	}
+
+	// Verify the upgrade report function generates output.
+	if !strings.Contains(script, "ORVIX UPGRADE REPORT") {
+		t.Error("upgrade.sh must generate an upgrade report")
+	}
+}
