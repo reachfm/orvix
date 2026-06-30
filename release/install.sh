@@ -465,6 +465,146 @@ install_binary() {
 	log_detail "built Orvix from source"
 }
 
+# is_valid_public_ipv4 returns 0 (success) iff $1 is a syntactically
+# valid, routable, public IPv4 address. The check rejects every
+# class of value that would either break the DNS Ops dashboard
+# (which refuses anything but a real public IPv4) or push junk
+# into /etc/orvix/orvix.yaml:
+#
+#   - empty string
+#   - any string containing ':' (IPv6)
+#   - 0.0.0.0 (unspecified — not a routable address)
+#   - 127.0.0.0/8 (loopback)
+#   - 10.0.0.0/8 (RFC1918 private)
+#   - 172.16.0.0/12 (RFC1918 private; covers 172.16.0.0–172.31.255.255)
+#   - 192.168.0.0/16 (RFC1918 private)
+#   - 169.254.0.0/16 (link-local)
+#   - 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24 (RFC5737 documentation)
+#   - 224.0.0.0/4 (multicast) and 240.0.0.0/4 (reserved)
+#   - any string not matching the strict dotted-quad regex
+#
+# Use this helper at every point where untrusted input flows into
+# the `dns.public_ipv4` config field. Never coerce the input
+# silently — fail closed with a clear message naming the value.
+is_valid_public_ipv4() {
+    local ip="${1:-}"
+    # Empty / unset is rejected outright.
+    [ -n "$ip" ] || return 1
+    # Strict dotted-quad: four octets in [0, 255], NO leading
+    # zeros (rejects `065.75.203.74` — non-canonical, ambiguous
+    # between octal and decimal interpretation), no extra
+    # whitespace, no IPv6 colon. The regex below matches each
+    # octet against:
+    #   25[0-5]      — 250..255
+    #   2[0-4][0-9]  — 200..249
+    #   1[0-9][0-9]  — 100..199
+    #   [1-9]?[0-9]  — 0..99  (single-digit or two-digit, no
+    #                   leading zero; covers 0 itself and 1..99)
+    if ! [[ "$ip" =~ ^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$ ]]; then
+        return 1
+    fi
+    # Split into octets so the range checks below compare
+    # numeric values, not regex backreferences. The regex gate
+    # above guarantees four valid octets separated by dots.
+    local o1 o2 o3 o4
+    IFS=. read -r o1 o2 o3 o4 <<< "$ip"
+    # Reject unspecified, loopback, private, link-local,
+    # documentation, multicast, and reserved ranges. The DNS Ops
+    # dashboard rejects these same ranges server-side; mirroring
+    # the rules here ensures a fresh install never writes a
+    # value the runtime will immediately reject.
+    if [ "$o1" -eq 0 ]; then
+        # 0.0.0.0/8 — "this network" / unspecified
+        return 1
+    fi
+    if [ "$o1" -eq 127 ]; then
+        # 127.0.0.0/8 — loopback
+        return 1
+    fi
+    if [ "$o1" -eq 10 ]; then
+        # 10.0.0.0/8 — RFC1918
+        return 1
+    fi
+    if [ "$o1" -eq 172 ] && [ "$o2" -ge 16 ] && [ "$o2" -le 31 ]; then
+        # 172.16.0.0/12 — RFC1918
+        return 1
+    fi
+    if [ "$o1" -eq 192 ] && [ "$o2" -eq 168 ]; then
+        # 192.168.0.0/16 — RFC1918
+        return 1
+    fi
+    if [ "$o1" -eq 169 ] && [ "$o2" -eq 254 ]; then
+        # 169.254.0.0/16 — link-local
+        return 1
+    fi
+    if [ "$o1" -eq 192 ] && [ "$o2" -eq 0 ] && [ "$o3" -eq 2 ]; then
+        # 192.0.2.0/24 — TEST-NET-1 (RFC5737 documentation)
+        return 1
+    fi
+    if [ "$o1" -eq 198 ] && [ "$o2" -eq 51 ] && [ "$o3" -eq 100 ]; then
+        # 198.51.100.0/24 — TEST-NET-2 (RFC5737 documentation)
+        return 1
+    fi
+    if [ "$o1" -eq 203 ] && [ "$o2" -eq 0 ] && [ "$o3" -eq 113 ]; then
+        # 203.0.113.0/24 — TEST-NET-3 (RFC5737 documentation)
+        return 1
+    fi
+    if [ "$o1" -ge 224 ] && [ "$o1" -le 239 ]; then
+        # 224.0.0.0/4 — multicast
+        return 1
+    fi
+    if [ "$o1" -ge 240 ]; then
+        # 240.0.0.0/4 — reserved for future use
+        return 1
+    fi
+    return 0
+}
+
+# detect_public_ipv4_from_host_ips scans the IPv4 addresses
+# reported by `hostname -I` and returns the first one that
+# passes `is_valid_public_ipv4`. Prints nothing (and exits
+# non-zero) when no address is acceptable.
+#
+# Why this exists: `hostname -I` may return a mix of addresses —
+# the primary IPv4 on the public interface, plus link-local,
+# loopback aliases, and (on some images) private RFC1918 fallbacks.
+# Taking the first token blindly produces a junk value on hosts
+# whose first address is private (e.g. a NAT'd cloud VM whose
+# `hostname -I` starts with the RFC1918 metadata address). We
+# filter to keep only valid public IPv4 addresses; if none are
+# found, the caller MUST prompt the operator — we never silently
+# substitute 127.0.0.1 (the previous behaviour was a regression:
+# a fresh install would write dns.public_ipv4: "127.0.0.1",
+# which the runtime then rejects as loopback, blocking the
+# admin DNS/DKIM dashboard with no clear error).
+detect_public_ipv4_from_host_ips() {
+    local line ip
+    line="$(hostname -I 2>/dev/null || true)"
+    [ -n "$line" ] || return 1
+    # Iterate space-separated tokens. `read -ra` would also work
+    # but a simple for-loop over the split-with-whitespace IFS
+    # is enough for this short-lived scan.
+    local -a candidates
+    # shellcheck disable=SC2206
+    candidates=( $line )
+    for ip in "${candidates[@]}"; do
+        # Skip empty tokens (defensive — `hostname -I` can emit
+        # double spaces if the helper output is unusual).
+        [ -n "$ip" ] || continue
+        # A token containing a colon is IPv6 — skip it. We never
+        # silently drop IPv6; we just do not pick it as the public
+        # IPv4 source of truth.
+        case "$ip" in
+            *:*) continue ;;
+        esac
+        if is_valid_public_ipv4 "$ip"; then
+            printf '%s' "$ip"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # provision_config is the install-time entry point for writing
 # /etc/orvix/orvix.yaml. It is split into two paths so a re-install
 # does NOT clobber operator-managed config:
@@ -2067,16 +2207,52 @@ main() {
     # The DNS plan endpoint refuses to generate A / MX / SPF / DKIM
     # / DMARC records unless dns.public_ipv4 is set, and
     # write_config() must write a real, validated public IP — not
-    # 0.0.0.0, not loopback. We use `hostname -I` (first token,
-    # which is the primary IPv4 on every VPS image we've shipped)
-    # and fall back to 127.0.0.1 ONLY as a defensive default; the
-    # setup-https.sh step that follows can repair a wrong default
-    # safely because dns.public_ipv4 is a dedicated field, separate
-    # from coremail.smtp_host (the listener bind address) and from
-    # server.host (the loopback backend).
-    local server_public_ip
-    server_public_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
-    server_public_ip="${server_public_ip:-127.0.0.1}"
+    # 0.0.0.0, not loopback, not RFC1918 private, not link-local,
+    # not a documentation range.
+    #
+    # Detection rules (is_valid_public_ipv4 + detect_public_ipv4_from_host_ips):
+    #   - iterate the IPv4 addresses reported by `hostname -I`
+    #   - skip IPv6 tokens (those with ':')
+    #   - pick the first token that passes the public-IPv4 check
+    #   - if NO token is acceptable, FAIL the install with a clear
+    #     message asking the operator to set ORVIX_PUBLIC_IPV4
+    #     explicitly. We NEVER silently fall back to 127.0.0.1:
+    #     a fresh install that wrote dns.public_ipv4: "127.0.0.1"
+    #     would have the runtime reject the value as loopback and
+    #     the admin DNS/DKIM dashboard would fail closed with a
+    #     confusing 422.
+    #
+    # Operators on NAT'd or otherwise unusual VPS images can
+    # bypass detection by exporting ORVIX_PUBLIC_IPV4=<ip>; the
+    # helper still validates it before accepting it.
+    local server_public_ip="${ORVIX_PUBLIC_IPV4:-}"
+    if [ -z "$server_public_ip" ]; then
+        server_public_ip="$(detect_public_ipv4_from_host_ips || true)"
+    fi
+    if ! is_valid_public_ipv4 "$server_public_ip"; then
+        cat <<IPFAIL >&2
+${RED}ERROR: could not detect a valid public IPv4 for dns.public_ipv4.${NC}
+
+hostname -I returned one or more addresses but none passed the
+public-IPv4 check (rejects loopback, RFC1918 private, link-local,
+documentation, multicast, reserved, 0.0.0.0, IPv6).
+
+Detected addresses:
+${ORVIX_DETECTED_IPS:-$(hostname -I 2>/dev/null || echo '<hostname -I failed>')}
+
+To proceed, export ORVIX_PUBLIC_IPV4=<your-public-ipv4> and rerun
+the installer. Example:
+
+    sudo ORVIX_PUBLIC_IPV4=65.75.203.74 bash $0
+
+We refuse to write a junk value (loopback, private, etc.) into
+dns.public_ipv4 because the DNS Ops dashboard will reject it and
+the operator will see no useful error message.
+IPFAIL
+        log_detail "CONFIG provisioning: no valid public IPv4 detected (tried hostname -I; refusing to fall back to loopback/private)"
+        fail "no valid public IPv4 detected; set ORVIX_PUBLIC_IPV4 and rerun"
+    fi
+    log_detail "CONFIG provisioning: detected public IPv4 = $server_public_ip (validated against is_valid_public_ipv4)"
 
     provision_config "$primary_domain" "$server_public_ip"
     write_bootstrap_env "$admin_email" "$admin_password"

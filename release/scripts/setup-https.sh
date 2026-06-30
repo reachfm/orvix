@@ -47,6 +47,64 @@ require_root() {
 	[ "$(id -u)" -eq 0 ] || fail "run as root or with sudo"
 }
 
+# is_valid_public_ipv4 mirrors release/install.sh. Returns 0 iff $1
+# is a syntactically valid, routable, public IPv4 address. Rejects
+# empty, IPv6 (':' present), 0.0.0.0, loopback (127/8), RFC1918
+# private (10/8, 172.16/12, 192.168/16), link-local (169.254/16),
+# RFC5737 documentation (192.0.2/24, 198.51.100/24, 203.0.113/24),
+# multicast (224/4), and reserved (240/4). See install.sh for the
+# full rationale — the runtime rejects every one of these in
+# dns.public_ipv4 and the dashboard surfaces a confusing 422 when
+# the install wrote junk.
+is_valid_public_ipv4() {
+	local ip="${1:-}"
+	[ -n "$ip" ] || return 1
+	# Strict dotted-quad with no leading zeros (rejects
+	# `065.75.203.74` as non-canonical). Each octet matches:
+	#   25[0-5] | 2[0-4][0-9] | 1[0-9][0-9] | [1-9]?[0-9]
+	if ! [[ "$ip" =~ ^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$ ]]; then
+		return 1
+	fi
+	local o1 o2 o3 o4
+	IFS=. read -r o1 o2 o3 o4 <<< "$ip"
+	[ "$o1" -eq 0 ] && return 1
+	[ "$o1" -eq 127 ] && return 1
+	[ "$o1" -eq 10 ] && return 1
+	[ "$o1" -eq 172 ] && [ "$o2" -ge 16 ] && [ "$o2" -le 31 ] && return 1
+	[ "$o1" -eq 192 ] && [ "$o2" -eq 168 ] && return 1
+	[ "$o1" -eq 169 ] && [ "$o2" -eq 254 ] && return 1
+	[ "$o1" -eq 192 ] && [ "$o2" -eq 0 ] && [ "$o3" -eq 2 ] && return 1
+	[ "$o1" -eq 198 ] && [ "$o2" -eq 51 ] && [ "$o3" -eq 100 ] && return 1
+	[ "$o1" -eq 203 ] && [ "$o2" -eq 0 ] && [ "$o3" -eq 113 ] && return 1
+	[ "$o1" -ge 224 ] && [ "$o1" -le 239 ] && return 1
+	[ "$o1" -ge 240 ] && return 1
+	return 0
+}
+
+# detect_public_ipv4_from_host_ips iterates the IPv4 addresses
+# reported by `hostname -I` and returns the first one that
+# passes `is_valid_public_ipv4`. Prints nothing (and exits
+# non-zero) when no address is acceptable. Mirrors install.sh.
+detect_public_ipv4_from_host_ips() {
+	local line ip
+	line="$(hostname -I 2>/dev/null || true)"
+	[ -n "$line" ] || return 1
+	local -a candidates
+	# shellcheck disable=SC2206
+	candidates=( $line )
+	for ip in "${candidates[@]}"; do
+		[ -n "$ip" ] || continue
+		case "$ip" in
+			*:*) continue ;;
+		esac
+		if is_valid_public_ipv4 "$ip"; then
+			printf '%s' "$ip"
+			return 0
+		fi
+	done
+	return 1
+}
+
 require_input() {
 	if [ -z "$PRIMARY_DOMAIN" ]; then
 		fail "usage: $0 <primary-domain> [server-ip]"
@@ -55,10 +113,23 @@ require_input() {
 	ADMIN_DOMAIN="${ADMIN_DOMAIN:-admin.$PRIMARY_DOMAIN}"
 	WEBMAIL_DOMAIN="${WEBMAIL_DOMAIN:-webmail.$PRIMARY_DOMAIN}"
 	MAIL_DOMAIN="${MAIL_DOMAIN:-mail.$PRIMARY_DOMAIN}"
+	# Detection: prefer the explicit second arg / ORVIX_SERVER_IP
+	# (operator-supplied wins). Fall back to scanning hostname -I
+	# for the first valid public IPv4. NEVER silently coerce to
+	# loopback/private — the previous behaviour would patch
+	# dns.public_ipv4 with junk that the runtime then rejects.
 	if [ -z "$SERVER_IP" ]; then
-		SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+		SERVER_IP="$(detect_public_ipv4_from_host_ips || true)"
 	fi
-	[ -n "$SERVER_IP" ] || fail "server IP could not be detected; pass it as second argument"
+	[ -n "$SERVER_IP" ] || fail "server IP could not be detected; pass it as second argument or export ORVIX_SERVER_IP=<ip>"
+	# Validate the supplied/detected SERVER_IP. We refuse to
+	# write junk into dns.public_ipv4 — the previous behaviour
+	# would have patched a private/loopback address, which the
+	# runtime then rejected, which the dashboard surfaced as a
+	# confusing 422.
+	if ! is_valid_public_ipv4 "$SERVER_IP"; then
+		fail "invalid public IPv4 for dns.public_ipv4: $SERVER_IP (rejects empty, IPv6, 0.0.0.0, loopback, RFC1918 private, link-local, RFC5737 documentation, multicast, reserved). Pass a real public IPv4 as the second argument or export ORVIX_SERVER_IP=<ip>."
+	fi
 }
 
 install_caddy() {
@@ -217,7 +288,9 @@ open_firewall() {
 #   dns.public_ipv4 missing         -> ADD `public_ipv4: "$SERVER_IP"`
 #                                       under the dns: section (or as a
 #                                       fresh dns: block if none exists)
+#                                       and return 0 with PATCH_CHANGED=1
 #   dns.public_ipv4 == SERVER_IP    -> no change (idempotent)
+#                                       and return 0 with PATCH_CHANGED=0
 #   dns.public_ipv4 != SERVER_IP    -> FAIL with a clear message
 #                                       telling the operator the two
 #                                       values differ; NEVER overwrite
@@ -228,7 +301,15 @@ open_firewall() {
 # We never infer the public IP from coremail.smtp_host. That is a
 # listener bind address (default 0.0.0.0) and has nothing to do
 # with the public DNS plan.
+#
+# On success, sets the global PATCH_CHANGED=1 when the config
+# file was modified, PATCH_CHANGED=0 otherwise. main() uses this
+# to decide whether to restart orvix (we MUST restart after a
+# patch so the runtime sees the new value before the dashboard
+# verification gate; we MUST NOT restart when the patch was a
+# no-op to avoid a needless runtime disruption).
 patch_dns_public_ipv4() {
+	PATCH_CHANGED=0
 	# ORVIX_CONFIG can override the production config path so
 	# the installer test harness can drive this function against
 	# a temporary file. Production callers (the operator running
@@ -296,11 +377,13 @@ patch_dns_public_ipv4() {
 		fi
 		chmod 0640 "$cfg" 2>/dev/null || true
 		log "patched dns.public_ipv4: ADDED $SERVER_IP to $cfg (was missing)"
+		PATCH_CHANGED=1
 		return 0
 	fi
 
 	if [ "$existing" = "$SERVER_IP" ]; then
 		log "patched dns.public_ipv4: $existing == $SERVER_IP (no change)"
+		PATCH_CHANGED=0
 		return 0
 	fi
 
@@ -311,6 +394,78 @@ patch_dns_public_ipv4() {
 	# discrepancy before the DNS Ops dashboard can publish
 	# records.
 	fail "dns.public_ipv4 mismatch: $cfg has $existing, but setup-https.sh was invoked with $SERVER_IP. Edit $cfg manually to set dns.public_ipv4 to the correct public mail IPv4, OR rerun setup-https.sh with the matching IP. The public DNS plan will not publish until this is resolved."
+}
+
+# restart_orvix_after_patch restarts the orvix systemd service so
+# the runtime process picks up the new dns.public_ipv4 value
+# before the dashboard verification gate runs. We only restart
+# when PATCH_CHANGED=1; an idempotent no-op (existing value
+# already matches) MUST NOT trigger a restart.
+#
+# Why restart instead of `systemctl reload`: the Go binary reads
+# dns.public_ipv4 from /etc/orvix/orvix.yaml at startup. We do
+# not implement a hot-reload for that field — restart is the
+# only safe path that guarantees the live process sees the new
+# value, and the previous "config-patch without restart" was
+# leaving the runtime on the stale value while the dashboard
+# verification gate failed with 422 ("public mail IPv4 is not
+# configured"). The previous symptom was a setup-https.sh that
+# patched the config, the dashboard returning 422, and the
+# operator concluding the hotfix did not work — when in fact
+# the runtime had never been told to re-read the config.
+#
+# Readiness is gated by `wait_for_orvix_readiness`, which polls
+# the same two endpoints install.sh uses (8080/health and
+# 8081/jmap) plus the listener sockets, so we never claim a
+# ready state while the listener goroutines are still binding
+# sockets. Any failure in restart OR readiness fails the whole
+# script — we never leave the operator with a "patched config,
+# runtime still down" half-state that the previous code shipped.
+restart_orvix_after_patch() {
+	if [ "${PATCH_CHANGED:-0}" -ne 1 ]; then
+		log "restart_orvix_after_patch: PATCH_CHANGED=0 (no patch applied) — skipping restart to avoid needless runtime disruption"
+		return 0
+	fi
+	log "restart_orvix_after_patch: PATCH_CHANGED=1 — restarting orvix so the runtime sees dns.public_ipv4"
+	if ! systemctl restart orvix 2>>"$INSTALL_LOG"; then
+		log "restart_orvix_after_patch: systemctl restart orvix FAILED (see journalctl -u orvix)"
+		fail "systemctl restart orvix failed after patching dns.public_ipv4; runtime config is stale. Check \`journalctl -u orvix --no-pager\` and rerun setup-https.sh once orvix is healthy."
+	fi
+	wait_for_orvix_readiness
+}
+
+# wait_for_orvix_readiness polls the same two HTTP endpoints and
+# listener sockets install.sh's
+# wait_for_runtime_ready_after_restart probes. We duplicate the
+# helper here so setup-https.sh has no install.sh dependency at
+# runtime — it must work on a host where install.sh was run by a
+# previous operator version and the file is gone, or where the
+# host's /etc/orvix is brand-new (recovery path). The deadline is
+# bounded by ORVIX_READINESS_DEADLINE_SECONDS (default 30) so a
+# truly stuck runtime surfaces a clear error within a minute.
+wait_for_orvix_readiness() {
+	local deadline_secs="${ORVIX_READINESS_DEADLINE_SECONDS:-30}"
+	local deadline=$((SECONDS + deadline_secs))
+	local attempt=0
+	while [ "$SECONDS" -lt "$deadline" ]; do
+		attempt=$((attempt + 1))
+		if curl -fsS http://127.0.0.1:8080/api/v1/health >/dev/null 2>&1 \
+			&& curl -fsS http://127.0.0.1:8081/.well-known/jmap >/dev/null 2>&1 \
+			&& systemctl is-active --quiet orvix 2>/dev/null; then
+			log "wait_for_orvix_readiness: orvix ready after $attempt attempt(s)"
+			return 0
+		fi
+		sleep 1
+	done
+	# Capture diagnostics into the install log and fail closed.
+	log "wait_for_orvix_readiness: TIMEOUT after ${deadline_secs}s (attempt=$attempt, PATCH_CHANGED=${PATCH_CHANGED:-0})"
+	{
+		echo "=== wait_for_orvix_readiness: systemctl status orvix ==="
+		systemctl status orvix 2>&1 || true
+		echo "=== wait_for_orvix_readiness: journalctl -u orvix --since '2 minutes ago' ==="
+		journalctl -u orvix --since "2 minutes ago" --no-pager 2>&1 || true
+	} >> "$INSTALL_LOG" 2>&1 || true
+	fail "orvix did not become ready within ${deadline_secs}s after setup-https.sh patched dns.public_ipv4. The runtime config may be stale; check \`systemctl status orvix\` and \`journalctl -u orvix --no-pager\`, then rerun setup-https.sh once orvix is healthy. See $INSTALL_LOG for the captured diagnostics."
 }
 
 post_https_firewall_hardening() {
@@ -429,10 +584,19 @@ main() {
 	# field to generate A / MX / SPF / DKIM / DMARC records; the
 	# function adds it if missing, no-ops on match, and fails
 	# loudly on mismatch (never silently overwrites operator-set
-	# values). The orvix runtime reloads config on the next
-	# `/api/v1/admin/reload` call or process restart, so the
-	# patch takes effect without a restart here.
+	# values).
+	#
+	# When the patch actually modified the file, the orvix
+	# runtime process still holds the OLD config in memory; we
+	# MUST restart it (and wait for readiness) BEFORE the
+	# dashboard verification gate runs, otherwise the dashboard
+	# hits the stale process and fails with "public mail IPv4 is
+	# not configured" — the exact symptom the previous version
+	# of setup-https.sh shipped. restart_orvix_after_patch is a
+	# no-op when PATCH_CHANGED=0, so an idempotent run never
+	# restarts the runtime unnecessarily.
 	patch_dns_public_ipv4
+	restart_orvix_after_patch
 
 	install_caddy
 	write_caddyfile
