@@ -1643,10 +1643,38 @@ verify_install() {
         fail "cannot determine orvix MainPID after restart"
     fi
     log_detail "VERIFY orvix process environment: MainPID=$orvix_pid"
-    if tr '\0' '\n' < "/proc/$orvix_pid/environ" 2>/dev/null | grep -qiE 'ORVIX_ADMIN_PASSWORD|ORVIX_ADMIN_PASSWORD_B64'; then
+
+    # Fail-closed read of /proc/$MainPID/environ. The naive
+    # `tr ... | grep -qiE` inside an `if` has a silent-success hole:
+    # if /proc/$MainPID/environ cannot be read, the pipeline emits no
+    # grep match and the installer logs success even though we never
+    # actually inspected the process environment. Combined with the
+    # missing `set -e` propagation through the `if`, that hole would
+    # let a re-install ship with bootstrap password material still
+    # present in the live orvix process. Split the read into a
+    # dedicated fail-closed step so any of these four failure modes
+    # terminates the installer instead of silently passing:
+    #   1. /proc/$MainPID/environ does not exist or is unreadable.
+    #   2. Reading the file returns an error from tr.
+    #   3. The captured environment is empty (defence in depth).
+    #   4. The captured environment contains bootstrap password material.
+    local env_file process_env
+    env_file="/proc/$orvix_pid/environ"
+    if [ ! -r "$env_file" ]; then
+        fail "cannot read orvix process environment for bootstrap secret verification (MainPID=$orvix_pid, env_file=$env_file)"
+    fi
+
+    process_env="$(tr '\0' '\n' < "$env_file")" || \
+        fail "failed to read orvix process environment for bootstrap secret verification (MainPID=$orvix_pid, env_file=$env_file)"
+
+    if [ -z "$process_env" ]; then
+        fail "orvix process environment is empty during bootstrap secret verification (MainPID=$orvix_pid, env_file=$env_file)"
+    fi
+
+    if printf '%s\n' "$process_env" | grep -qiE 'ORVIX_ADMIN_PASSWORD|ORVIX_ADMIN_PASSWORD_B64'; then
         fail "bootstrap password material persists in orvix process environment after cleanup (MainPID=$orvix_pid)"
     fi
-    log_detail "VERIFY orvix process environment: no bootstrap password material found"
+    log_detail "VERIFY orvix process environment: no bootstrap password material found (MainPID=$orvix_pid)"
 
     # Verify listener interface posture: internal services
     # must be on loopback; mail ports must be public.

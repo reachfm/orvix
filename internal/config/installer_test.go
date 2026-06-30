@@ -1705,6 +1705,243 @@ func TestInstallerBindPostureMainPID(t *testing.T) {
 	}
 }
 
+// TestInstallerBootstrapEnvReadFailsClosed pins the 2026-06-30
+// re-review blocker fix: the /proc/$MainPID/environ verification
+// must NOT rely solely on the old `tr ... | grep -qiE` pipeline
+// inside an `if` — if the procfs file is unreadable, that pipeline
+// produces no grep match and silently logs success even though the
+// process environment was never actually inspected. Combined with
+// the missing `set -e` propagation through the `if`, this leaves
+// the installer passing while bootstrap password material may still
+// be present in the live orvix process.
+//
+// The contract verified here is:
+//   1. The MainPID empty / zero check is still in place (existing).
+//   2. The /proc/$MainPID/environ file is checked for readability
+//      BEFORE it is read, and unreadable is a `fail`.
+//   3. The captured environment is loaded into a separate variable
+//      with a `|| fail` failure path so a read error does not
+//      silently succeed.
+//   4. The captured (not piped-from-disk) environment is what the
+//      grep step inspects — proving the read is fail-closed rather
+//      than silent-on-failure.
+//   5. The naive `tr ... | grep` pipe pattern is gone, so a future
+//      refactor cannot accidentally re-introduce the silent-success
+//      hole.
+func TestInstallerBootstrapEnvReadFailsClosed(t *testing.T) {
+	root := repoRoot(t)
+	installer := mustRead(t, filepath.Join(root, "release", "install.sh"))
+	stripped := stripBashComments(installer)
+
+	// (1) MainPID empty / zero check is still present.
+	if !strings.Contains(stripped, `if [ -z "$orvix_pid" ] || [ "$orvix_pid" = "0" ]; then`) {
+		t.Error("installer must still validate MainPID is non-empty and non-zero")
+	}
+	if !strings.Contains(stripped, `fail "cannot determine orvix MainPID after restart"`) {
+		t.Error("installer must fail when MainPID is empty or zero")
+	}
+
+	// (2) Readability check BEFORE reading the file. This is the
+	//     fail-closed gate the previous code lacked.
+	if !strings.Contains(stripped, `[ ! -r "$env_file" ]`) {
+		t.Error("installer must check `[ ! -r \"$env_file\" ]` before reading /proc/$MainPID/environ")
+	}
+	if !strings.Contains(stripped, `fail "cannot read orvix process environment for bootstrap secret verification`) {
+		t.Error("installer must `fail` when /proc/$MainPID/environ is unreadable (no silent success)")
+	}
+
+	// (3) The captured environment is loaded into a separate
+	//     variable with an explicit `|| fail` failure path.
+	if !strings.Contains(stripped, `process_env="$(tr '\0' '\n' < "$env_file")" || \`) {
+		t.Error("installer must capture process_env with `|| fail` so a read error does not silently succeed")
+	}
+	if !strings.Contains(stripped, `fail "failed to read orvix process environment for bootstrap secret verification`) {
+		t.Error("installer must `fail` if `tr < /proc/$MainPID/environ` itself errors")
+	}
+
+	// (4) Grep runs over the captured variable, NOT over a fresh
+	//     pipe from disk. This is the structural difference that
+	//     makes the read fail-closed.
+	if !strings.Contains(stripped, `printf '%s\n' "$process_env" | grep -qiE 'ORVIX_ADMIN_PASSWORD|ORVIX_ADMIN_PASSWORD_B64'`) {
+		t.Error("installer must grep the captured `$process_env` variable, not re-read /proc in the pipeline")
+	}
+
+	// (5) The naive unsafe pipeline must be gone — there must be
+	//     no surviving `tr '\0' '\n' < "/proc/$orvix_pid/environ" |
+	//     grep` form anywhere in the script body.
+	naive := `tr '\0' '\n' < "/proc/$orvix_pid/environ" 2>/dev/null | grep -qiE`
+	if strings.Contains(stripped, naive) {
+		t.Errorf("installer still contains the naive silent-success pattern %q; this would let unreadable /proc/$MainPID/environ pass without inspection", naive)
+	}
+	// Also reject the even-shorter unguarded form.
+	naiveBare := `tr '\0' '\n' < "/proc/$orvix_pid/environ"`
+	if strings.Contains(stripped, naiveBare) {
+		t.Errorf("installer still pipes /proc/$orvix_pid/environ directly through tr; this is the unsafe pattern the 2026-06-30 fix must remove")
+	}
+}
+
+// TestInstallerBootstrapEnvReadIsBehavioral runs the actual
+// fail-closed read block against a synthetic env_file path to prove
+// (a) an unreadable path causes the installer to exit non-zero,
+// (b) a readable path that does NOT contain the bootstrap secret
+// produces success, and (c) a readable path that DOES contain the
+// bootstrap secret is detected and reported as a failure. This is
+// the load-bearing behavioural test — string checks above confirm
+// the pattern is present, this one confirms it actually works.
+func TestInstallerBootstrapEnvReadIsBehavioral(t *testing.T) {
+	root := repoRoot(t)
+	installer := mustRead(t, filepath.Join(root, "release", "install.sh"))
+	stripped := stripBashComments(installer)
+
+	// Locate the boundary between the MainPID determination and the
+	// rest of verify_install. We extract just the bootstrap-secret
+	// read block: from the "VERIFY orvix process environment"
+	// `log_detail` line (whose start must be back-walked to the
+	// previous newline) up to (but not including) the post-comment
+	// listener-posture block, which we mark with the
+	// `local bind_check_failed=0` line because that survives
+	// stripBashComments.
+	startMarker := `log_detail "VERIFY orvix process environment: MainPID=$orvix_pid"`
+	endMarker := "local bind_check_failed=0"
+
+	startIdx := strings.Index(stripped, startMarker)
+	if startIdx < 0 {
+		t.Fatalf("could not find bootstrap-secret verification start marker %q in install.sh", startMarker)
+	}
+	// Walk back to the previous newline so the extracted block
+	// starts at the beginning of the `log_detail` line, not in the
+	// middle of it.
+	blockStart := startIdx
+	if nl := strings.LastIndex(stripped[:startIdx], "\n"); nl >= 0 {
+		blockStart = nl + 1
+	}
+
+	endIdx := strings.Index(stripped[startIdx:], endMarker)
+	if endIdx < 0 {
+		t.Fatalf("could not find end marker %q after bootstrap-secret block in install.sh", endMarker)
+	}
+	// Walk back to the previous newline so the extracted block ends
+	// at the previous line's newline (exclusive of the next block).
+	blockEnd := startIdx + endIdx
+	if nl := strings.LastIndex(stripped[:blockEnd], "\n"); nl >= 0 {
+		blockEnd = nl + 1
+	}
+
+	block := stripped[blockStart:blockEnd]
+
+	// The extracted block contains `env_file="/proc/$orvix_pid/environ"`
+	// which would override the test's chosen $env_file. Rewrite that
+	// line so the harness's `HARNESS_ENV_FILE` global takes precedence
+	// when set; otherwise the install.sh default applies.
+	blockLines := strings.Split(block, "\n")
+	cleaned := make([]string, 0, len(blockLines))
+	for _, ln := range blockLines {
+		trimmed := strings.TrimSpace(ln)
+		if strings.HasPrefix(trimmed, `env_file="/proc/`) {
+			cleaned = append(cleaned, `    env_file="${HARNESS_ENV_FILE:-/proc/$orvix_pid/environ}"`)
+			continue
+		}
+		cleaned = append(cleaned, ln)
+	}
+	block = strings.Join(cleaned, "\n")
+
+	// Wrap the extracted block in a runnable harness. The harness:
+	//   - defines a `fail()` that records the error message and exits 1,
+	//   - wraps the extracted block in a function so the `local`
+	//     declarations inside it are valid bash,
+	//   - accepts env_file / pid via positional args,
+	//   - binds the variables the extracted block expects.
+	harness := fmt.Sprintf(`#!/usr/bin/env bash
+set -u
+FAIL_MSG=""
+fail() {
+    FAIL_MSG="$*"
+    echo "FAIL_CALLED: $*" >&2
+    exit 1
+}
+log_detail() { echo "LOG: $*" >&2; }
+
+orvix_pid="$1"
+HARNESS_ENV_FILE="$2"
+
+verify_bootstrap_env() {
+%s
+}
+
+verify_bootstrap_env
+
+log_detail "VERIFY orvix process environment: no bootstrap password material found (MainPID=$orvix_pid)"
+echo "OK"
+`, block)
+
+	run := func(t *testing.T, label, envFile string) (exitCode int, stdout string) {
+		t.Helper()
+		dir := t.TempDir()
+		harnessPath := filepath.Join(dir, "env-read.sh")
+		if err := os.WriteFile(harnessPath, []byte(harness), 0o755); err != nil {
+			t.Fatalf("%s: write harness: %v", label, err)
+		}
+		// Use a synthetic PID; the harness never inspects /proc/$PID
+		// directly because we override env_file via positional arg.
+		cmd := exec.Command(bashCommand(t), harnessPath, "1234", envFile)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		stdout = string(out)
+		if err != nil {
+			if ee, ok := err.(*exec.ExitError); ok {
+				exitCode = ee.ExitCode()
+			} else {
+				exitCode = -1
+			}
+		}
+		return exitCode, stdout
+	}
+
+	t.Run("unreadable env_file exits non-zero and reports fail", func(t *testing.T) {
+		// A path that does not exist is definitely not readable.
+		missing := filepath.Join(t.TempDir(), "no-such-environ")
+		exitCode, out := run(t, "unreadable", missing)
+		if exitCode == 0 {
+			t.Errorf("unreadable env_file must cause non-zero exit; got 0\noutput: %s", out)
+		}
+		if !strings.Contains(out, "cannot read orvix process environment for bootstrap secret verification") {
+			t.Errorf("unreadable env_file must surface fail() message; output:\n%s", out)
+		}
+	})
+
+	t.Run("readable env_file with no secret succeeds", func(t *testing.T) {
+		dir := t.TempDir()
+		clean := filepath.Join(dir, "environ")
+		if err := os.WriteFile(clean, []byte("PATH=/usr/bin\nHOME=/root\nLANG=C\n"), 0o600); err != nil {
+			t.Fatalf("write clean env: %v", err)
+		}
+		exitCode, out := run(t, "clean", clean)
+		if exitCode != 0 {
+			t.Errorf("clean env_file must produce exit 0; got %d\noutput: %s", exitCode, out)
+		}
+		if !strings.Contains(out, "OK") {
+			t.Errorf("clean env_file must reach OK sentinel; output:\n%s", out)
+		}
+	})
+
+	t.Run("readable env_file containing bootstrap secret fails closed", func(t *testing.T) {
+		dir := t.TempDir()
+		dirty := filepath.Join(dir, "environ")
+		// Embed the bootstrap secret exactly as orvix.service would.
+		contents := "PATH=/usr/bin\nORVIX_ADMIN_PASSWORD_B64=c2VjcmV0\nHOME=/root\n"
+		if err := os.WriteFile(dirty, []byte(contents), 0o600); err != nil {
+			t.Fatalf("write dirty env: %v", err)
+		}
+		exitCode, out := run(t, "dirty", dirty)
+		if exitCode == 0 {
+			t.Errorf("env_file containing bootstrap secret must cause non-zero exit; got 0\noutput: %s", out)
+		}
+		if !strings.Contains(out, "bootstrap password material persists in orvix process environment") {
+			t.Errorf("dirty env_file must surface the persistence fail() message; output:\n%s", out)
+		}
+	})
+}
+
 // TestCoremailBoolBehavior runs the actual coremail_bool() awk logic
 // against temporary YAML files to prove section-aware matching works
 // end-to-end. This is a behavioral test, not a string check.
