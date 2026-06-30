@@ -3787,6 +3787,18 @@ func TestInstallerIsValidPublicIPv4(t *testing.T) {
 		{"reject 172.31.255.255", "172.31.255.255", 1},
 		{"reject 192.168.1.1", "192.168.1.1", 1},
 
+		// Reject: carrier-grade NAT (100.64.0.0/10, RFC6598).
+		{"reject 100.64.0.1 (CGNAT)", "100.64.0.1", 1},
+		{"reject 100.127.255.255 (CGNAT top)", "100.127.255.255", 1},
+
+		// Reject: RFC6890 special-use 192.0.0.0/24.
+		{"reject 192.0.0.1 (special-use)", "192.0.0.1", 1},
+		{"reject 192.0.0.255 (special-use top)", "192.0.0.255", 1},
+
+		// Reject: RFC2544 benchmarking (198.18.0.0/15).
+		{"reject 198.18.0.1 (benchmark)", "198.18.0.1", 1},
+		{"reject 198.19.255.255 (benchmark top)", "198.19.255.255", 1},
+
 		// Reject: link-local.
 		{"reject 169.254.1.1", "169.254.1.1", 1},
 
@@ -3813,14 +3825,17 @@ func TestInstallerIsValidPublicIPv4(t *testing.T) {
 		{"reject zero-padded octet 1", "065.75.203.74", 1},
 		{"reject ipv4 with port", "65.75.203.74:80", 1},
 
-		// Accept edges: just outside private ranges.
+		// Accept edges: just outside private/special ranges.
 		{"accept 11.0.0.1 (above RFC1918 10/8)", "11.0.0.1", 0},
+		{"accept 100.128.0.1 (above CGNAT)", "100.128.0.1", 0},
 		{"accept 172.15.255.255 (below 172.16/12)", "172.15.255.255", 0},
 		{"accept 172.32.0.0 (above 172.16/12)", "172.32.0.0", 0},
 		{"accept 192.169.0.0 (above 192.168/16)", "192.169.0.0", 0},
 		{"accept 169.253.0.0 (below 169.254/16)", "169.253.0.0", 0},
 		{"accept 169.255.0.0 (above 169.254/16)", "169.255.0.0", 0},
 		{"accept 192.0.3.0 (above TEST-NET-1)", "192.0.3.0", 0},
+		{"accept 198.17.255.255 (below benchmark 198.18/15)", "198.17.255.255", 0},
+		{"accept 198.20.0.1 (above benchmark 198.18/15)", "198.20.0.1", 0},
 		{"accept 223.255.255.255 (below multicast)", "223.255.255.255", 0},
 	}
 
@@ -3894,12 +3909,18 @@ func TestSetupHttpsIsValidPublicIPv4(t *testing.T) {
 		{"8.8.8.8", 0},
 		{"", 1},
 		{"0.0.0.0", 1},
-		{"127.0.0.1", 1},
 		{"10.0.0.1", 1},
-		{"172.16.0.1", 1},
-		{"192.168.1.1", 1},
+		{"100.64.0.1", 1},
+		{"100.127.255.255", 1},
+		{"127.0.0.1", 1},
 		{"169.254.1.1", 1},
+		{"172.16.0.1", 1},
+		{"192.0.0.1", 1},
+		{"192.0.0.255", 1},
 		{"192.0.2.1", 1},
+		{"192.168.1.1", 1},
+		{"198.18.0.1", 1},
+		{"198.19.255.255", 1},
 		{"198.51.100.1", 1},
 		{"203.0.113.1", 1},
 		{"224.0.0.1", 1},

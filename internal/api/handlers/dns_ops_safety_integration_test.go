@@ -428,6 +428,48 @@ func TestDNSOpsPlanWithDocumentationIPv6Rejected(t *testing.T) {
 		t.Errorf("422 body must mention documentation range; got %s", body)
 	}
 }
+
+func TestDNSOpsPlanWithCarrierGradeNATRejected(t *testing.T) {
+	for _, ip := range []string{"100.64.0.1", "100.127.255.255"} {
+		h := newDNSOpsHarnessWithPublicIP(t, ip, "")
+		code, body := h.do(t, "GET", "/api/v1/admin/dns/example.com/plan", h.adminT, "")
+		if code != http.StatusUnprocessableEntity {
+			t.Errorf("plan with CGNAT IPv4 %s must be 422; got %d body=%s", ip, code, body)
+		}
+		if !strings.Contains(body, "carrier-grade") && !strings.Contains(body, "6598") {
+			t.Errorf("422 body must mention carrier-grade NAT; got %s", body)
+		}
+		h.close()
+	}
+}
+
+func TestDNSOpsPlanWithBenchmarkingRangeRejected(t *testing.T) {
+	for _, ip := range []string{"198.18.0.1", "198.19.255.255"} {
+		h := newDNSOpsHarnessWithPublicIP(t, ip, "")
+		code, body := h.do(t, "GET", "/api/v1/admin/dns/example.com/plan", h.adminT, "")
+		if code != http.StatusUnprocessableEntity {
+			t.Errorf("plan with benchmark IPv4 %s must be 422; got %d body=%s", ip, code, body)
+		}
+		if !strings.Contains(body, "benchmark") && !strings.Contains(body, "2544") {
+			t.Errorf("422 body must mention benchmark range; got %s", body)
+		}
+		h.close()
+	}
+}
+
+func TestDNSOpsPlanWithSpecialUse192Rejected(t *testing.T) {
+	for _, ip := range []string{"192.0.0.1", "192.0.0.255"} {
+		h := newDNSOpsHarnessWithPublicIP(t, ip, "")
+		code, body := h.do(t, "GET", "/api/v1/admin/dns/example.com/plan", h.adminT, "")
+		if code != http.StatusUnprocessableEntity {
+			t.Errorf("plan with special-use 192.0.0.0/24 IPv4 %s must be 422; got %d body=%s", ip, code, body)
+		}
+		if !strings.Contains(body, "special-use") {
+			t.Errorf("422 body must mention special-use; got %s", body)
+		}
+		h.close()
+	}
+}
 // TestDNSOpsDKIMKeygenWorksAfterMigrateAllRaw is the regression
 // test for the live VPS blocker: a fresh DB initialized via the
 // canonical migration path (models.MigrateAllRaw) must have the

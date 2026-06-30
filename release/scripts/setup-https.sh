@@ -68,12 +68,15 @@ is_valid_public_ipv4() {
 	local o1 o2 o3 o4
 	IFS=. read -r o1 o2 o3 o4 <<< "$ip"
 	[ "$o1" -eq 0 ] && return 1
-	[ "$o1" -eq 127 ] && return 1
 	[ "$o1" -eq 10 ] && return 1
-	[ "$o1" -eq 172 ] && [ "$o2" -ge 16 ] && [ "$o2" -le 31 ] && return 1
-	[ "$o1" -eq 192 ] && [ "$o2" -eq 168 ] && return 1
+	[ "$o1" -eq 100 ] && [ "$o2" -ge 64 ] && [ "$o2" -le 127 ] && return 1
+	[ "$o1" -eq 127 ] && return 1
 	[ "$o1" -eq 169 ] && [ "$o2" -eq 254 ] && return 1
+	[ "$o1" -eq 172 ] && [ "$o2" -ge 16 ] && [ "$o2" -le 31 ] && return 1
+	[ "$o1" -eq 192 ] && [ "$o2" -eq 0 ] && [ "$o3" -eq 0 ] && return 1
 	[ "$o1" -eq 192 ] && [ "$o2" -eq 0 ] && [ "$o3" -eq 2 ] && return 1
+	[ "$o1" -eq 192 ] && [ "$o2" -eq 168 ] && return 1
+	[ "$o1" -eq 198 ] && { [ "$o2" -eq 18 ] || [ "$o2" -eq 19 ]; } && return 1
 	[ "$o1" -eq 198 ] && [ "$o2" -eq 51 ] && [ "$o3" -eq 100 ] && return 1
 	[ "$o1" -eq 203 ] && [ "$o2" -eq 0 ] && [ "$o3" -eq 113 ] && return 1
 	[ "$o1" -ge 224 ] && [ "$o1" -le 239 ] && return 1

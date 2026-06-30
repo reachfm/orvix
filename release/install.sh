@@ -476,10 +476,14 @@ install_binary() {
 #   - 0.0.0.0 (unspecified — not a routable address)
 #   - 127.0.0.0/8 (loopback)
 #   - 10.0.0.0/8 (RFC1918 private)
-#   - 172.16.0.0/12 (RFC1918 private; covers 172.16.0.0–172.31.255.255)
-#   - 192.168.0.0/16 (RFC1918 private)
+#   - 100.64.0.0/10 (carrier-grade NAT / shared address space, RFC6598)
+#   - 127.0.0.0/8 (loopback)
 #   - 169.254.0.0/16 (link-local)
+#   - 172.16.0.0/12 (RFC1918 private; covers 172.16.0.0–172.31.255.255)
+#   - 192.0.0.0/24 (special-use, RFC6890)
 #   - 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24 (RFC5737 documentation)
+#   - 192.168.0.0/16 (RFC1918 private)
+#   - 198.18.0.0/15 (benchmarking, RFC2544)
 #   - 224.0.0.0/4 (multicast) and 240.0.0.0/4 (reserved)
 #   - any string not matching the strict dotted-quad regex
 #
@@ -508,37 +512,49 @@ is_valid_public_ipv4() {
     # above guarantees four valid octets separated by dots.
     local o1 o2 o3 o4
     IFS=. read -r o1 o2 o3 o4 <<< "$ip"
-    # Reject unspecified, loopback, private, link-local,
-    # documentation, multicast, and reserved ranges. The DNS Ops
-    # dashboard rejects these same ranges server-side; mirroring
-    # the rules here ensures a fresh install never writes a
-    # value the runtime will immediately reject.
+    # Reject unspecified, loopback, private, CGNAT, link-local,
+    # documentation, benchmark, multicast, and reserved ranges.
+    # The DNS Ops dashboard rejects these same ranges server-side;
+    # mirroring the rules here ensures a fresh install never writes
+    # a value the runtime will immediately reject.
     if [ "$o1" -eq 0 ]; then
         # 0.0.0.0/8 — "this network" / unspecified
-        return 1
-    fi
-    if [ "$o1" -eq 127 ]; then
-        # 127.0.0.0/8 — loopback
         return 1
     fi
     if [ "$o1" -eq 10 ]; then
         # 10.0.0.0/8 — RFC1918
         return 1
     fi
-    if [ "$o1" -eq 172 ] && [ "$o2" -ge 16 ] && [ "$o2" -le 31 ]; then
-        # 172.16.0.0/12 — RFC1918
+    if [ "$o1" -eq 100 ] && [ "$o2" -ge 64 ] && [ "$o2" -le 127 ]; then
+        # 100.64.0.0/10 — carrier-grade NAT / shared address space (RFC6598)
         return 1
     fi
-    if [ "$o1" -eq 192 ] && [ "$o2" -eq 168 ]; then
-        # 192.168.0.0/16 — RFC1918
+    if [ "$o1" -eq 127 ]; then
+        # 127.0.0.0/8 — loopback
         return 1
     fi
     if [ "$o1" -eq 169 ] && [ "$o2" -eq 254 ]; then
         # 169.254.0.0/16 — link-local
         return 1
     fi
+    if [ "$o1" -eq 172 ] && [ "$o2" -ge 16 ] && [ "$o2" -le 31 ]; then
+        # 172.16.0.0/12 — RFC1918
+        return 1
+    fi
+    if [ "$o1" -eq 192 ] && [ "$o2" -eq 0 ] && [ "$o3" -eq 0 ]; then
+        # 192.0.0.0/24 — special-use (RFC6890)
+        return 1
+    fi
     if [ "$o1" -eq 192 ] && [ "$o2" -eq 0 ] && [ "$o3" -eq 2 ]; then
         # 192.0.2.0/24 — TEST-NET-1 (RFC5737 documentation)
+        return 1
+    fi
+    if [ "$o1" -eq 192 ] && [ "$o2" -eq 168 ]; then
+        # 192.168.0.0/16 — RFC1918
+        return 1
+    fi
+    if [ "$o1" -eq 198 ] && { [ "$o2" -eq 18 ] || [ "$o2" -eq 19 ]; }; then
+        # 198.18.0.0/15 — benchmarking (RFC2544)
         return 1
     fi
     if [ "$o1" -eq 198 ] && [ "$o2" -eq 51 ] && [ "$o3" -eq 100 ]; then
@@ -554,7 +570,7 @@ is_valid_public_ipv4() {
         return 1
     fi
     if [ "$o1" -ge 240 ]; then
-        # 240.0.0.0/4 — reserved for future use
+        # 240.0.0.0/4 — reserved for future use (includes 255.255.255.255/32 limited broadcast)
         return 1
     fi
     return 0
