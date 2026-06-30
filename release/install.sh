@@ -1619,6 +1619,160 @@ verify_install() {
     # the typed credentials twice, so removing the env file
     # cannot strand a working install.
     run_quiet rm -f "$BOOTSTRAP_ENV"
+
+    # Restart orvix so the live process no longer has
+    # ORVIX_ADMIN_PASSWORD_B64 in its environment. The
+    # config is already loaded correctly from orvix.yaml
+    # and the admin user is durable in the database.
+    systemctl restart orvix 2>/dev/null || true
+    local restart_wait
+    for restart_wait in 1 2 3 4 5 6 7 8 9 10; do
+        if systemctl is-active --quiet orvix 2>/dev/null; then
+            break
+        fi
+        sleep 1
+    done
+    systemctl is-active --quiet orvix || fail "orvix failed to restart after bootstrap env cleanup"
+
+    # Verify the restarted process has no bootstrap password
+    # material in its environment. Uses systemd MainPID (not
+    # pidof) so we always inspect the correct process.
+    local orvix_pid
+    orvix_pid="$(systemctl show -p MainPID --value orvix 2>/dev/null || true)"
+    if [ -z "$orvix_pid" ] || [ "$orvix_pid" = "0" ]; then
+        fail "cannot determine orvix MainPID after restart"
+    fi
+    log_detail "VERIFY orvix process environment: MainPID=$orvix_pid"
+
+    # Fail-closed read of /proc/$MainPID/environ. The naive
+    # `tr ... | grep -qiE` inside an `if` has a silent-success hole:
+    # if /proc/$MainPID/environ cannot be read, the pipeline emits no
+    # grep match and the installer logs success even though we never
+    # actually inspected the process environment. Combined with the
+    # missing `set -e` propagation through the `if`, that hole would
+    # let a re-install ship with bootstrap password material still
+    # present in the live orvix process. Split the read into a
+    # dedicated fail-closed step so any of these four failure modes
+    # terminates the installer instead of silently passing:
+    #   1. /proc/$MainPID/environ does not exist or is unreadable.
+    #   2. Reading the file returns an error from tr.
+    #   3. The captured environment is empty (defence in depth).
+    #   4. The captured environment contains bootstrap password material.
+    local env_file process_env
+    env_file="/proc/$orvix_pid/environ"
+    if [ ! -r "$env_file" ]; then
+        fail "cannot read orvix process environment for bootstrap secret verification (MainPID=$orvix_pid, env_file=$env_file)"
+    fi
+
+    process_env="$(tr '\0' '\n' < "$env_file")" || \
+        fail "failed to read orvix process environment for bootstrap secret verification (MainPID=$orvix_pid, env_file=$env_file)"
+
+    if [ -z "$process_env" ]; then
+        fail "orvix process environment is empty during bootstrap secret verification (MainPID=$orvix_pid, env_file=$env_file)"
+    fi
+
+    if printf '%s\n' "$process_env" | grep -qiE 'ORVIX_ADMIN_PASSWORD|ORVIX_ADMIN_PASSWORD_B64'; then
+        fail "bootstrap password material persists in orvix process environment after cleanup (MainPID=$orvix_pid)"
+    fi
+    log_detail "VERIFY orvix process environment: no bootstrap password material found (MainPID=$orvix_pid)"
+
+    # Verify listener interface posture: internal services
+    # must be on loopback; mail ports must be public.
+    local bind_check_failed=0
+
+    # Section-aware boolean reader for the coremail: section.
+    # Uses awk to track the current top-level YAML section so
+    # that unrelated sections (e.g. custom_provider.submission_enabled)
+    # never trigger optional port validation.
+    coremail_bool() {
+        local key="$1"
+        awk '
+        BEGIN { in_coremail = 0; result = 0 }
+        /^[a-zA-Z][a-zA-Z0-9_-]*:/ {
+            sec = $1; sub(/:$/, "", sec)
+            in_coremail = (sec == "coremail" ? 1 : 0)
+        }
+        in_coremail && /^[[:space:]]*'"$key"':[[:space:]]*true[[:space:]]*$/ { result = 1 }
+        END { exit (result ? 0 : 1) }
+        ' "$ORVIX_CONFIG" 2>/dev/null && echo "true" || echo "false"
+    }
+
+    # Internal ports (8080, 8081) must be loopback-only: every
+    # bound address must be 127.x.x.x or [::1]. Reject if port
+    # is also exposed on 0.0.0.0, *, [::], or a public IP.
+    for port in 8080 8081; do
+        local addrs all_loopback has_loopback addr
+        addrs="$(ss -ltnH "( sport = :$port )" 2>/dev/null | awk '{print $4}' || true)"
+        all_loopback=true
+        has_loopback=false
+        for addr in $addrs; do
+            local ip="${addr%:*}"
+            case "$ip" in
+                127.*|127.0.0.1)
+                    has_loopback=true ;;
+                \[::1\]|::1)
+                    has_loopback=true ;;
+                *)
+                    all_loopback=false
+                    echo "ERROR: port $port has non-loopback bind: $addr" >&2 ;;
+            esac
+        done
+        if [ "$has_loopback" = false ]; then
+            echo "ERROR: port $port has no loopback bind (found: $addrs)" >&2
+            bind_check_failed=1
+        elif [ "$all_loopback" = false ]; then
+            echo "ERROR: port $port is exposed on non-loopback addresses in addition to loopback" >&2
+            bind_check_failed=1
+        else
+            log_detail "VERIFY bind port $port: loopback-only (pass)"
+        fi
+    done
+
+    # Public mail ports must have at least one non-loopback bind.
+    # Mandatory: 25 (SMTP), 110 (POP3), 143 (IMAP).
+    # Conditional: 587 (Submission) when enabled, 465 (SMTPS) when enabled.
+    check_public_port() {
+        local port="$1" name="$2"
+        local addrs has_public addr
+        addrs="$(ss -ltnH "( sport = :$port )" 2>/dev/null | awk '{print $4}' || true)"
+        has_public=false
+        for addr in $addrs; do
+            local ip="${addr%:*}"
+            case "$ip" in
+                127.*|127.0.0.1|\[::1\]|::1)
+                    ;; # loopback, skip
+                *)
+                    has_public=true ;;
+            esac
+        done
+        if [ "$has_public" = true ]; then
+            log_detail "VERIFY bind port $port ($name): public (pass)"
+        else
+            echo "ERROR: mail port $port ($name) is not bound publicly (found: $addrs)" >&2
+            bind_check_failed=1
+        fi
+    }
+
+    check_public_port 25 "SMTP"
+    check_public_port 110 "POP3"
+    check_public_port 143 "IMAP"
+
+    if [ "$(coremail_bool submission_enabled)" = "true" ]; then
+        check_public_port 587 "Submission"
+    else
+        log_detail "SKIP bind port 587 (Submission): submission_enabled=false"
+    fi
+
+    if [ "$(coremail_bool smtps_enabled)" = "true" ]; then
+        check_public_port 465 "SMTPS"
+    else
+        log_detail "SKIP bind port 465 (SMTPS): smtps_enabled=false"
+    fi
+
+    if [ "$bind_check_failed" -ne 0 ]; then
+        fail "listener interface bind posture check failed"
+    fi
+
     echo "INSTALLATION VERIFICATION PASSED"
 }
 

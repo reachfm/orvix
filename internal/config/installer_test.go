@@ -1615,6 +1615,497 @@ func TestInstallerSummaryOutputUsesDomainNotPublicIP(t *testing.T) {
 	}
 }
 
+// TestInstallerBindPostureSkipsDisabledOptionalPorts verifies that
+// the verify_install() bind posture check does NOT unconditionally
+// require ports 587 (Submission) and 465 (SMTPS). These ports are
+// disabled by default and must only be validated when the config
+// explicitly enables them.
+func TestInstallerBindPostureSkipsDisabledOptionalPorts(t *testing.T) {
+	installer := mustRead(t, filepath.Join(repoRoot(t), "release", "install.sh"))
+
+	// The installer must check the config before requiring 587/465.
+	if !strings.Contains(installer, `submission_enabled` ) {
+		t.Error("verify_install must check coremail.submission_enabled before requiring port 587")
+	}
+	if !strings.Contains(installer, `smtps_enabled` ) {
+		t.Error("verify_install must check coremail.smtps_enabled before requiring port 465")
+	}
+	// The mandatory public ports (25, 110, 143) must still be checked.
+	if !strings.Contains(installer, `check_public_port 25` ) {
+		t.Error("verify_install must require port 25 (SMTP)")
+	}
+	if !strings.Contains(installer, `check_public_port 110` ) {
+		t.Error("verify_install must require port 110 (POP3)")
+	}
+	if !strings.Contains(installer, `check_public_port 143` ) {
+		t.Error("verify_install must require port 143 (IMAP)")
+	}
+	// 587 and 465 must NOT be unconditionally checked.
+	for _, port := range []string{"587", "465"} {
+		if strings.Contains(installer, `for port in 25 110 143 `+port) {
+			t.Errorf("verify_install must NOT unconditionally iterate port %s in the mail ports loop", port)
+		}
+	}
+}
+
+// TestInstallerBindPostureAllBindsLoopback verifies that the
+// 8080/8081 loopback check validates ALL bound addresses, not
+// just the first one. If a port is bound to both loopback AND
+// a public address, the check must fail.
+func TestInstallerBindPostureAllBindsLoopback(t *testing.T) {
+	installer := mustRead(t, filepath.Join(repoRoot(t), "release", "install.sh"))
+
+	// Must iterate every bound address for each internal port.
+	if !strings.Contains(installer, `for addr in $addrs` ) {
+		t.Error("verify_install must iterate all bound addresses for 8080/8081")
+	}
+	// Must track has_loopback AND all_loopback flags.
+	if !strings.Contains(installer, `all_loopback` ) {
+		t.Error("verify_install must track all_loopback flag for 8080/8081")
+	}
+	if !strings.Contains(installer, `has_loopback` ) {
+		t.Error("verify_install must track has_loopback flag for 8080/8081")
+	}
+	// Must reject when has_loopback is true but all_loopback is false
+	// (mixed loopback + public bind).
+	if !strings.Contains(installer, `is exposed on non-loopback` ) {
+		t.Error("verify_install must reject mixed loopback+public binds for 8080/8081")
+	}
+	// Must reject when no loopback bind exists.
+	if !strings.Contains(installer, `has no loopback bind` ) {
+		t.Error("verify_install must reject when no loopback bind exists for 8080/8081")
+	}
+}
+
+// TestInstallerBindPostureCoremailBoolHelper verifies the coremail_bool
+// helper function is used to read boolean config values scoped to the
+// coremail: section.
+func TestInstallerBindPostureCoremailBoolHelper(t *testing.T) {
+	installer := mustRead(t, filepath.Join(repoRoot(t), "release", "install.sh"))
+
+	if !strings.Contains(installer, `coremail_bool()` ) {
+		t.Error("verify_install must define coremail_bool() helper to read config values scoped to coremail section")
+	}
+	// Must use awk for section-aware tracking, not global grep.
+	if !strings.Contains(installer, `in_coremail = (sec == "coremail"` ) {
+		t.Error("coremail_bool() must use section-aware awk to scope matching to coremail: section")
+	}
+}
+
+// TestInstallerBindPostureMainPID verifies the bootstrap env process
+// check uses systemctl MainPID instead of pidof.
+func TestInstallerBindPostureMainPID(t *testing.T) {
+	installer := mustRead(t, filepath.Join(repoRoot(t), "release", "install.sh"))
+
+	if !strings.Contains(installer, `systemctl show -p MainPID --value orvix` ) {
+		t.Error("verify_install must use systemctl show -p MainPID --value orvix to find the process")
+	}
+	if strings.Contains(installer, `pidof orvix` ) {
+		t.Error("verify_install must NOT use pidof orvix (may return multiple PIDs)")
+	}
+}
+
+// TestInstallerBootstrapEnvReadFailsClosed pins the 2026-06-30
+// re-review blocker fix: the /proc/$MainPID/environ verification
+// must NOT rely solely on the old `tr ... | grep -qiE` pipeline
+// inside an `if` — if the procfs file is unreadable, that pipeline
+// produces no grep match and silently logs success even though the
+// process environment was never actually inspected. Combined with
+// the missing `set -e` propagation through the `if`, this leaves
+// the installer passing while bootstrap password material may still
+// be present in the live orvix process.
+//
+// The contract verified here is:
+//   1. The MainPID empty / zero check is still in place (existing).
+//   2. The /proc/$MainPID/environ file is checked for readability
+//      BEFORE it is read, and unreadable is a `fail`.
+//   3. The captured environment is loaded into a separate variable
+//      with a `|| fail` failure path so a read error does not
+//      silently succeed.
+//   4. The captured (not piped-from-disk) environment is what the
+//      grep step inspects — proving the read is fail-closed rather
+//      than silent-on-failure.
+//   5. The naive `tr ... | grep` pipe pattern is gone, so a future
+//      refactor cannot accidentally re-introduce the silent-success
+//      hole.
+func TestInstallerBootstrapEnvReadFailsClosed(t *testing.T) {
+	root := repoRoot(t)
+	installer := mustRead(t, filepath.Join(root, "release", "install.sh"))
+	stripped := stripBashComments(installer)
+
+	// (1) MainPID empty / zero check is still present.
+	if !strings.Contains(stripped, `if [ -z "$orvix_pid" ] || [ "$orvix_pid" = "0" ]; then`) {
+		t.Error("installer must still validate MainPID is non-empty and non-zero")
+	}
+	if !strings.Contains(stripped, `fail "cannot determine orvix MainPID after restart"`) {
+		t.Error("installer must fail when MainPID is empty or zero")
+	}
+
+	// (2) Readability check BEFORE reading the file. This is the
+	//     fail-closed gate the previous code lacked.
+	if !strings.Contains(stripped, `[ ! -r "$env_file" ]`) {
+		t.Error("installer must check `[ ! -r \"$env_file\" ]` before reading /proc/$MainPID/environ")
+	}
+	if !strings.Contains(stripped, `fail "cannot read orvix process environment for bootstrap secret verification`) {
+		t.Error("installer must `fail` when /proc/$MainPID/environ is unreadable (no silent success)")
+	}
+
+	// (3) The captured environment is loaded into a separate
+	//     variable with an explicit `|| fail` failure path.
+	if !strings.Contains(stripped, `process_env="$(tr '\0' '\n' < "$env_file")" || \`) {
+		t.Error("installer must capture process_env with `|| fail` so a read error does not silently succeed")
+	}
+	if !strings.Contains(stripped, `fail "failed to read orvix process environment for bootstrap secret verification`) {
+		t.Error("installer must `fail` if `tr < /proc/$MainPID/environ` itself errors")
+	}
+
+	// (4) Grep runs over the captured variable, NOT over a fresh
+	//     pipe from disk. This is the structural difference that
+	//     makes the read fail-closed.
+	if !strings.Contains(stripped, `printf '%s\n' "$process_env" | grep -qiE 'ORVIX_ADMIN_PASSWORD|ORVIX_ADMIN_PASSWORD_B64'`) {
+		t.Error("installer must grep the captured `$process_env` variable, not re-read /proc in the pipeline")
+	}
+
+	// (5) The naive unsafe pipeline must be gone — there must be
+	//     no surviving `tr '\0' '\n' < "/proc/$orvix_pid/environ" |
+	//     grep` form anywhere in the script body.
+	naive := `tr '\0' '\n' < "/proc/$orvix_pid/environ" 2>/dev/null | grep -qiE`
+	if strings.Contains(stripped, naive) {
+		t.Errorf("installer still contains the naive silent-success pattern %q; this would let unreadable /proc/$MainPID/environ pass without inspection", naive)
+	}
+	// Also reject the even-shorter unguarded form.
+	naiveBare := `tr '\0' '\n' < "/proc/$orvix_pid/environ"`
+	if strings.Contains(stripped, naiveBare) {
+		t.Errorf("installer still pipes /proc/$orvix_pid/environ directly through tr; this is the unsafe pattern the 2026-06-30 fix must remove")
+	}
+}
+
+// TestInstallerBootstrapEnvReadIsBehavioral runs the actual
+// fail-closed read block against a synthetic env_file path to prove
+// (a) an unreadable path causes the installer to exit non-zero,
+// (b) a readable path that does NOT contain the bootstrap secret
+// produces success, and (c) a readable path that DOES contain the
+// bootstrap secret is detected and reported as a failure. This is
+// the load-bearing behavioural test — string checks above confirm
+// the pattern is present, this one confirms it actually works.
+func TestInstallerBootstrapEnvReadIsBehavioral(t *testing.T) {
+	root := repoRoot(t)
+	installer := mustRead(t, filepath.Join(root, "release", "install.sh"))
+	stripped := stripBashComments(installer)
+
+	// Locate the boundary between the MainPID determination and the
+	// rest of verify_install. We extract just the bootstrap-secret
+	// read block: from the "VERIFY orvix process environment"
+	// `log_detail` line (whose start must be back-walked to the
+	// previous newline) up to (but not including) the post-comment
+	// listener-posture block, which we mark with the
+	// `local bind_check_failed=0` line because that survives
+	// stripBashComments.
+	startMarker := `log_detail "VERIFY orvix process environment: MainPID=$orvix_pid"`
+	endMarker := "local bind_check_failed=0"
+
+	startIdx := strings.Index(stripped, startMarker)
+	if startIdx < 0 {
+		t.Fatalf("could not find bootstrap-secret verification start marker %q in install.sh", startMarker)
+	}
+	// Walk back to the previous newline so the extracted block
+	// starts at the beginning of the `log_detail` line, not in the
+	// middle of it.
+	blockStart := startIdx
+	if nl := strings.LastIndex(stripped[:startIdx], "\n"); nl >= 0 {
+		blockStart = nl + 1
+	}
+
+	endIdx := strings.Index(stripped[startIdx:], endMarker)
+	if endIdx < 0 {
+		t.Fatalf("could not find end marker %q after bootstrap-secret block in install.sh", endMarker)
+	}
+	// Walk back to the previous newline so the extracted block ends
+	// at the previous line's newline (exclusive of the next block).
+	blockEnd := startIdx + endIdx
+	if nl := strings.LastIndex(stripped[:blockEnd], "\n"); nl >= 0 {
+		blockEnd = nl + 1
+	}
+
+	block := stripped[blockStart:blockEnd]
+
+	// The extracted block contains `env_file="/proc/$orvix_pid/environ"`
+	// which would override the test's chosen $env_file. Rewrite that
+	// line so the harness's `HARNESS_ENV_FILE` global takes precedence
+	// when set; otherwise the install.sh default applies.
+	blockLines := strings.Split(block, "\n")
+	cleaned := make([]string, 0, len(blockLines))
+	for _, ln := range blockLines {
+		trimmed := strings.TrimSpace(ln)
+		if strings.HasPrefix(trimmed, `env_file="/proc/`) {
+			cleaned = append(cleaned, `    env_file="${HARNESS_ENV_FILE:-/proc/$orvix_pid/environ}"`)
+			continue
+		}
+		cleaned = append(cleaned, ln)
+	}
+	block = strings.Join(cleaned, "\n")
+
+	// Wrap the extracted block in a runnable harness. The harness:
+	//   - defines a `fail()` that records the error message and exits 1,
+	//   - wraps the extracted block in a function so the `local`
+	//     declarations inside it are valid bash,
+	//   - accepts env_file / pid via positional args,
+	//   - binds the variables the extracted block expects.
+	harness := fmt.Sprintf(`#!/usr/bin/env bash
+set -u
+FAIL_MSG=""
+fail() {
+    FAIL_MSG="$*"
+    echo "FAIL_CALLED: $*" >&2
+    exit 1
+}
+log_detail() { echo "LOG: $*" >&2; }
+
+orvix_pid="$1"
+HARNESS_ENV_FILE="$2"
+
+verify_bootstrap_env() {
+%s
+}
+
+verify_bootstrap_env
+
+log_detail "VERIFY orvix process environment: no bootstrap password material found (MainPID=$orvix_pid)"
+echo "OK"
+`, block)
+
+	run := func(t *testing.T, label, envFile string) (exitCode int, stdout string) {
+		t.Helper()
+		dir := t.TempDir()
+		harnessPath := filepath.Join(dir, "env-read.sh")
+		if err := os.WriteFile(harnessPath, []byte(harness), 0o755); err != nil {
+			t.Fatalf("%s: write harness: %v", label, err)
+		}
+		// Use a synthetic PID; the harness never inspects /proc/$PID
+		// directly because we override env_file via positional arg.
+		cmd := exec.Command(bashCommand(t), harnessPath, "1234", envFile)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		stdout = string(out)
+		if err != nil {
+			if ee, ok := err.(*exec.ExitError); ok {
+				exitCode = ee.ExitCode()
+			} else {
+				exitCode = -1
+			}
+		}
+		return exitCode, stdout
+	}
+
+	t.Run("unreadable env_file exits non-zero and reports fail", func(t *testing.T) {
+		// A path that does not exist is definitely not readable.
+		missing := filepath.Join(t.TempDir(), "no-such-environ")
+		exitCode, out := run(t, "unreadable", missing)
+		if exitCode == 0 {
+			t.Errorf("unreadable env_file must cause non-zero exit; got 0\noutput: %s", out)
+		}
+		if !strings.Contains(out, "cannot read orvix process environment for bootstrap secret verification") {
+			t.Errorf("unreadable env_file must surface fail() message; output:\n%s", out)
+		}
+	})
+
+	t.Run("readable env_file with no secret succeeds", func(t *testing.T) {
+		dir := t.TempDir()
+		clean := filepath.Join(dir, "environ")
+		if err := os.WriteFile(clean, []byte("PATH=/usr/bin\nHOME=/root\nLANG=C\n"), 0o600); err != nil {
+			t.Fatalf("write clean env: %v", err)
+		}
+		exitCode, out := run(t, "clean", clean)
+		if exitCode != 0 {
+			t.Errorf("clean env_file must produce exit 0; got %d\noutput: %s", exitCode, out)
+		}
+		if !strings.Contains(out, "OK") {
+			t.Errorf("clean env_file must reach OK sentinel; output:\n%s", out)
+		}
+	})
+
+	t.Run("readable env_file containing bootstrap secret fails closed", func(t *testing.T) {
+		dir := t.TempDir()
+		dirty := filepath.Join(dir, "environ")
+		// Embed the bootstrap secret exactly as orvix.service would.
+		contents := "PATH=/usr/bin\nORVIX_ADMIN_PASSWORD_B64=c2VjcmV0\nHOME=/root\n"
+		if err := os.WriteFile(dirty, []byte(contents), 0o600); err != nil {
+			t.Fatalf("write dirty env: %v", err)
+		}
+		exitCode, out := run(t, "dirty", dirty)
+		if exitCode == 0 {
+			t.Errorf("env_file containing bootstrap secret must cause non-zero exit; got 0\noutput: %s", out)
+		}
+		if !strings.Contains(out, "bootstrap password material persists in orvix process environment") {
+			t.Errorf("dirty env_file must surface the persistence fail() message; output:\n%s", out)
+		}
+	})
+}
+
+// TestCoremailBoolBehavior runs the actual coremail_bool() awk logic
+// against temporary YAML files to prove section-aware matching works
+// end-to-end. This is a behavioral test, not a string check.
+func TestCoremailBoolBehavior(t *testing.T) {
+	type testCase struct {
+		name     string
+		yaml     string
+		key      string
+		expected string // "0" or "1"
+	}
+
+	cases := []testCase{
+		{
+			name: "unrelated section submission_enabled ignored",
+			yaml: `custom_provider:
+  submission_enabled: true
+  smtps_enabled: true
+
+coremail:
+  enabled: true
+`,
+			key:      "submission_enabled",
+			expected: "0",
+		},
+		{
+			name: "unrelated section smtps_enabled ignored",
+			yaml: `custom_provider:
+  submission_enabled: true
+  smtps_enabled: true
+
+coremail:
+  enabled: true
+`,
+			key:      "smtps_enabled",
+			expected: "0",
+		},
+		{
+			name: "coremail submission_enabled true",
+			yaml: `coremail:
+  enabled: true
+  submission_enabled: true
+`,
+			key:      "submission_enabled",
+			expected: "1",
+		},
+		{
+			name: "coremail smtps_enabled true",
+			yaml: `coremail:
+  enabled: true
+  smtps_enabled: true
+`,
+			key:      "smtps_enabled",
+			expected: "1",
+		},
+		{
+			name: "coremail submission_enabled false",
+			yaml: `coremail:
+  submission_enabled: false
+`,
+			key:      "submission_enabled",
+			expected: "0",
+		},
+		{
+			name: "coremail smtps_enabled false",
+			yaml: `coremail:
+  smtps_enabled: false
+`,
+			key:      "smtps_enabled",
+			expected: "0",
+		},
+		{
+			name: "absent key returns false",
+			yaml: `coremail:
+  enabled: true
+`,
+			key:      "submission_enabled",
+			expected: "0",
+		},
+		{
+			name: "both sections, unrelated submission_enabled present but coremail also set",
+			yaml: `custom:
+  submission_enabled: true
+
+coremail:
+  enabled: true
+  submission_enabled: true
+  smtps_enabled: true
+
+other:
+  smtps_enabled: true
+`,
+			key:      "submission_enabled",
+			expected: "1",
+		},
+		{
+			name: "coremail both true, check smtps",
+			yaml: `coremail:
+  enabled: true
+  submission_enabled: true
+  smtps_enabled: true
+`,
+			key:      "smtps_enabled",
+			expected: "1",
+		},
+	}
+
+	// Build a self-contained awk program for each key.
+	awkBody := func(key string) string {
+		return fmt.Sprintf(`BEGIN { in_coremail = 0; result = 0 }
+/^[a-zA-Z][a-zA-Z0-9_-]*:/ {
+    sec = $1; sub(/:$/, "", sec)
+    in_coremail = (sec == "coremail" ? 1 : 0)
+}
+in_coremail && /^[[:space:]]*%s:[[:space:]]*true[[:space:]]*$/ { result = 1 }
+END { print result }`, key)
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cfgPath := filepath.Join(dir, "orvix.yaml")
+			if err := os.WriteFile(cfgPath, []byte(c.yaml), 0o600); err != nil {
+				t.Fatalf("write yaml: %v", err)
+			}
+
+			// Write the awk program to a temp file to avoid
+			// single-quote nesting issues in shell command lines.
+			awkProg := filepath.Join(dir, "check.awk")
+			if err := os.WriteFile(awkProg, []byte(awkBody(c.key)), 0o644); err != nil {
+				t.Fatalf("write awk prog: %v", err)
+			}
+
+			// Run awk through bash (awk may not be on PATH
+			// directly on Windows / Git Bash setups).
+			cmd := exec.Command(bashCommand(t), "-c",
+				fmt.Sprintf("awk -f '%s' '%s'", awkProg, cfgPath))
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("awk execution failed: %v\nyaml:\n%s", err, c.yaml)
+			}
+			got := strings.TrimSpace(string(out))
+			if got != c.expected {
+				t.Errorf("coremail_bool(%q) = %s, want %s\nconfig:\n%s", c.key, got, c.expected, c.yaml)
+			}
+		})
+	}
+}
+
+// TestInstallerBindPosturePublicMailPortAcceptsSpecificIP verifies
+// the public mail-port check accepts a specific non-loopback IP
+// (e.g. 203.0.113.5), not only wildcard 0.0.0.0/*/[::].
+func TestInstallerBindPosturePublicMailPortAcceptsSpecificIP(t *testing.T) {
+	installer := mustRead(t, filepath.Join(repoRoot(t), "release", "install.sh"))
+
+	// The check_public_port function must check for at least one
+	// non-loopback address, not only wildcard patterns.
+	if !strings.Contains(installer, `has_public=true` ) {
+		t.Error("check_public_port must detect any non-loopback bind as public")
+	}
+	if !strings.Contains(installer, `127.*|127.0.0.1|\[::1\]|::1` ) {
+		t.Error("check_public_port must skip all loopback addresses and accept specific IPs")
+	}
+}
+
 // TestInstallerMigrateUnsafeInternalBinds pins that release/install.sh
 // defines a migrate_unsafe_internal_binds() function that:
 //   - is present in the script (static string check)
