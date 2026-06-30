@@ -1577,6 +1577,68 @@ verify_install_password_login() {
     return 0
 }
 
+# Wait until the post-restart runtime is actually serving traffic
+# on every endpoint the bind-posture validation will inspect.
+#
+# Why this exists: after we delete bootstrap.env and restart the
+# orvix service, `systemctl is-active --quiet orvix` and the
+# MainPID check only prove the process exists. They do NOT prove
+# that the listener goroutines have finished binding sockets. On
+# a fresh VPS rehearsal this produced a false-negative failure:
+# the bind posture check ran in the same second the listeners
+# were still starting up, reported "no loopback bind" / "not
+# bound publicly" for ports 25 / 110 / 143 / 8080 / 8081, and
+# aborted an otherwise healthy install. One second later the
+# runtime was correct.
+#
+# Contract:
+#   * Poll until every endpoint AND every required listener is up,
+#     OR the deadline expires.
+#   * Endpoints probed:
+#       - http://127.0.0.1:8080/api/v1/health
+#       - http://127.0.0.1:8081/.well-known/jmap
+#   * Listeners probed (any bind is enough to confirm liveness;
+#     strict bind posture validation runs AFTER this returns):
+#       - 25 (SMTP), 110 (POP3), 143 (IMAP),
+#       - 8080 (admin/webmail), 8081 (JMAP)
+#   * Fail closed on timeout: dump `ss -ltnp` and recent
+#     `journalctl -u orvix` into $INSTALL_LOG so the operator can
+#     diagnose, then `fail` the install. We never weaken bind
+#     posture validation, never convert bind failures into
+#     warnings, and never relax 8080/8081 loopback-only posture.
+wait_for_runtime_ready_after_restart() {
+    local deadline_secs="${ORVIX_READINESS_DEADLINE_SECONDS:-30}"
+    local deadline=$((SECONDS + deadline_secs))
+    local attempt=0
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        attempt=$((attempt + 1))
+        if curl -fsS http://127.0.0.1:8080/api/v1/health >/dev/null 2>&1 \
+            && curl -fsS http://127.0.0.1:8081/.well-known/jmap >/dev/null 2>&1 \
+            && ss -ltnH "( sport = :25 )"  | grep -q ':25' \
+            && ss -ltnH "( sport = :110 )" | grep -q ':110' \
+            && ss -ltnH "( sport = :143 )" | grep -q ':143' \
+            && ss -ltnH "( sport = :8080 )" | grep -q ':8080' \
+            && ss -ltnH "( sport = :8081 )" | grep -q ':8081'; then
+            log_detail "VERIFY runtime readiness after bootstrap cleanup restart: ready (attempt $attempt)"
+            return 0
+        fi
+        sleep 1
+    done
+
+    # Deadline reached. Capture diagnostics into the install log
+    # so an operator can see what state the runtime was in, then
+    # fail closed. We never relax bind posture validation; we only
+    # fail here when listeners genuinely never came up.
+    log_detail "VERIFY runtime readiness after bootstrap cleanup restart: TIMEOUT after ${deadline_secs}s (last attempt=$attempt)"
+    {
+        echo "=== wait_for_runtime_ready_after_restart: ss -ltnp dump ==="
+        ss -ltnp 2>&1 || true
+        echo "=== wait_for_runtime_ready_after_restart: journalctl -u orvix --since '2 minutes ago' dump ==="
+        journalctl -u orvix --since "2 minutes ago" --no-pager 2>&1 || true
+    } >> "$INSTALL_LOG" 2>&1 || true
+    fail "runtime listeners did not become ready after bootstrap cleanup restart (waited ${deadline_secs}s; see $INSTALL_LOG for ss / journalctl dumps)"
+}
+
 verify_install() {
 	local email="$1"
 	local password="$2"
@@ -1675,6 +1737,20 @@ verify_install() {
         fail "bootstrap password material persists in orvix process environment after cleanup (MainPID=$orvix_pid)"
     fi
     log_detail "VERIFY orvix process environment: no bootstrap password material found (MainPID=$orvix_pid)"
+
+    # Wait for the runtime to actually be ready before we run
+    # bind posture validation. `systemctl is-active` and MainPID
+    # existence only prove the process is alive — they do NOT
+    # prove that listener goroutines have finished binding
+    # sockets. On a fresh VPS rehearsal the bind posture check
+    # ran in the same second the listeners were still starting
+    # up and produced a false-negative failure (port 8080/8081
+    # reported "no loopback bind", mail ports 25/110/143 reported
+    # "not bound publicly"), aborting an otherwise healthy
+    # install. The readiness helper above polls each endpoint and
+    # listener with a 30-second deadline; only after it returns
+    # does strict bind posture validation run below.
+    wait_for_runtime_ready_after_restart
 
     # Verify listener interface posture: internal services
     # must be on loopback; mail ports must be public.
