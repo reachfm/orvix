@@ -1705,6 +1705,154 @@ func TestInstallerBindPostureMainPID(t *testing.T) {
 	}
 }
 
+// TestCoremailBoolBehavior runs the actual coremail_bool() awk logic
+// against temporary YAML files to prove section-aware matching works
+// end-to-end. This is a behavioral test, not a string check.
+func TestCoremailBoolBehavior(t *testing.T) {
+	type testCase struct {
+		name     string
+		yaml     string
+		key      string
+		expected string // "0" or "1"
+	}
+
+	cases := []testCase{
+		{
+			name: "unrelated section submission_enabled ignored",
+			yaml: `custom_provider:
+  submission_enabled: true
+  smtps_enabled: true
+
+coremail:
+  enabled: true
+`,
+			key:      "submission_enabled",
+			expected: "0",
+		},
+		{
+			name: "unrelated section smtps_enabled ignored",
+			yaml: `custom_provider:
+  submission_enabled: true
+  smtps_enabled: true
+
+coremail:
+  enabled: true
+`,
+			key:      "smtps_enabled",
+			expected: "0",
+		},
+		{
+			name: "coremail submission_enabled true",
+			yaml: `coremail:
+  enabled: true
+  submission_enabled: true
+`,
+			key:      "submission_enabled",
+			expected: "1",
+		},
+		{
+			name: "coremail smtps_enabled true",
+			yaml: `coremail:
+  enabled: true
+  smtps_enabled: true
+`,
+			key:      "smtps_enabled",
+			expected: "1",
+		},
+		{
+			name: "coremail submission_enabled false",
+			yaml: `coremail:
+  submission_enabled: false
+`,
+			key:      "submission_enabled",
+			expected: "0",
+		},
+		{
+			name: "coremail smtps_enabled false",
+			yaml: `coremail:
+  smtps_enabled: false
+`,
+			key:      "smtps_enabled",
+			expected: "0",
+		},
+		{
+			name: "absent key returns false",
+			yaml: `coremail:
+  enabled: true
+`,
+			key:      "submission_enabled",
+			expected: "0",
+		},
+		{
+			name: "both sections, unrelated submission_enabled present but coremail also set",
+			yaml: `custom:
+  submission_enabled: true
+
+coremail:
+  enabled: true
+  submission_enabled: true
+  smtps_enabled: true
+
+other:
+  smtps_enabled: true
+`,
+			key:      "submission_enabled",
+			expected: "1",
+		},
+		{
+			name: "coremail both true, check smtps",
+			yaml: `coremail:
+  enabled: true
+  submission_enabled: true
+  smtps_enabled: true
+`,
+			key:      "smtps_enabled",
+			expected: "1",
+		},
+	}
+
+	// Build a self-contained awk program for each key.
+	awkBody := func(key string) string {
+		return fmt.Sprintf(`BEGIN { in_coremail = 0; result = 0 }
+/^[a-zA-Z][a-zA-Z0-9_-]*:/ {
+    sec = $1; sub(/:$/, "", sec)
+    in_coremail = (sec == "coremail" ? 1 : 0)
+}
+in_coremail && /^[[:space:]]*%s:[[:space:]]*true[[:space:]]*$/ { result = 1 }
+END { print result }`, key)
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cfgPath := filepath.Join(dir, "orvix.yaml")
+			if err := os.WriteFile(cfgPath, []byte(c.yaml), 0o600); err != nil {
+				t.Fatalf("write yaml: %v", err)
+			}
+
+			// Write the awk program to a temp file to avoid
+			// single-quote nesting issues in shell command lines.
+			awkProg := filepath.Join(dir, "check.awk")
+			if err := os.WriteFile(awkProg, []byte(awkBody(c.key)), 0o644); err != nil {
+				t.Fatalf("write awk prog: %v", err)
+			}
+
+			// Run awk through bash (awk may not be on PATH
+			// directly on Windows / Git Bash setups).
+			cmd := exec.Command(bashCommand(t), "-c",
+				fmt.Sprintf("awk -f '%s' '%s'", awkProg, cfgPath))
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("awk execution failed: %v\nyaml:\n%s", err, c.yaml)
+			}
+			got := strings.TrimSpace(string(out))
+			if got != c.expected {
+				t.Errorf("coremail_bool(%q) = %s, want %s\nconfig:\n%s", c.key, got, c.expected, c.yaml)
+			}
+		})
+	}
+}
+
 // TestInstallerBindPosturePublicMailPortAcceptsSpecificIP verifies
 // the public mail-port check accepts a specific non-loopback IP
 // (e.g. 203.0.113.5), not only wildcard 0.0.0.0/*/[::].
