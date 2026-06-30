@@ -198,6 +198,121 @@ open_firewall() {
 # automatically — that would lock an operator out of a host whose
 # Caddyfile has a typo. The commands are emitted in the success
 # banner so they are impossible to miss.
+# patch_dns_public_ipv4 ensures /etc/orvix/orvix.yaml has a
+# `dns.public_ipv4:` field set to $SERVER_IP. This is required by
+# the admin DNS/DKIM dashboard, which refuses to generate A / MX
+# / SPF / DKIM / DMARC records unless the public mail IPv4 is
+# configured. The install.sh write_config() heredoc already writes
+# this on a fresh install; this function is the recovery path for
+# hosts where:
+#
+#   - the installer wrote the config BEFORE server_public_ip was
+#     known (legacy installs), OR
+#   - the operator re-ran setup-https.sh with a different public IP
+#     (e.g. after a VPS migration or IP reassignment).
+#
+# Behaviour matrix (mirrors release/install.sh:
+# migrate_dns_public_ip()):
+#
+#   dns.public_ipv4 missing         -> ADD `public_ipv4: "$SERVER_IP"`
+#                                       under the dns: section (or as a
+#                                       fresh dns: block if none exists)
+#   dns.public_ipv4 == SERVER_IP    -> no change (idempotent)
+#   dns.public_ipv4 != SERVER_IP    -> FAIL with a clear message
+#                                       telling the operator the two
+#                                       values differ; NEVER overwrite
+#                                       silently (operator's intent)
+#   /etc/orvix/orvix.yaml missing   -> FAIL with a clear message;
+#                                       install.sh must run first.
+#
+# We never infer the public IP from coremail.smtp_host. That is a
+# listener bind address (default 0.0.0.0) and has nothing to do
+# with the public DNS plan.
+patch_dns_public_ipv4() {
+	# ORVIX_CONFIG can override the production config path so
+	# the installer test harness can drive this function against
+	# a temporary file. Production callers (the operator running
+	# setup-https.sh directly) leave ORVIX_CONFIG unset, so the
+	# default /etc/orvix/orvix.yaml applies.
+	local cfg="${ORVIX_CONFIG:-/etc/orvix/orvix.yaml}"
+	if [ ! -f "$cfg" ]; then
+		fail "$cfg does not exist; run install.sh before setup-https.sh (the public DNS plan requires dns.public_ipv4 written by install.sh)"
+	fi
+	if ! [ -r "$cfg" ]; then
+		fail "$cfg is not readable; rerun setup-https.sh as root"
+	fi
+
+	# Locate the dns: section and read the existing public_ipv4
+	# value (if any). We use awk with section tracking so we
+	# never read a `public_ipv4` key from an unrelated section.
+	local existing
+	existing="$(awk '
+		BEGIN { in_dns = 0 }
+		/^dns:/ { in_dns = 1; next }
+		in_dns && /^[a-zA-Z][a-zA-Z0-9_-]*:/ { in_dns = 0 }
+		in_dns && /^[[:space:]]+public_ipv4:[[:space:]]*/ {
+			# Strip the leading `  public_ipv4:` and any
+			# surrounding quotes / whitespace.
+			val = $0
+			sub(/^[[:space:]]+public_ipv4:[[:space:]]*/, "", val)
+			gsub(/^"|"$/, "", val)
+			gsub(/^'\''|'\''$/, "", val)
+			print val
+			exit 0
+		}
+		END { exit 0 }
+	' "$cfg" 2>/dev/null || true)"
+
+	if [ -z "$existing" ]; then
+		# Missing — ADD it. We refuse to silently fabricate
+		# `127.0.0.1` because the DNS plan generator would
+		# then refuse to publish; better to fail loudly.
+		local has_dns=0
+		if grep -qE '^dns:' "$cfg"; then
+			has_dns=1
+		fi
+		if [ "$has_dns" = "1" ]; then
+			# Insert as the first key under dns:.
+			local tmp
+			tmp="$(mktemp "${cfg}.dns-patch-XXXXXX")"
+			awk -v ip="$SERVER_IP" '
+			BEGIN { in_dns = 0; inserted = 0 }
+			/^dns:/ { print; in_dns = 1; next }
+			in_dns && !inserted && /^[[:space:]]+[a-zA-Z_][a-zA-Z0-9_-]*:/ {
+				print "  public_ipv4: \"" ip "\""
+				inserted = 1
+				in_dns = 0
+			}
+			{ print }
+			END { if (in_dns && !inserted) print "  public_ipv4: \"" ip "\"" }
+			' "$cfg" > "$tmp" && mv "$tmp" "$cfg"
+		else
+			# No dns: section at all — append a fresh one.
+			{
+				echo ""
+				echo "dns:"
+				echo "  public_ipv4: \"$SERVER_IP\""
+			} >> "$cfg"
+		fi
+		chmod 0640 "$cfg" 2>/dev/null || true
+		log "patched dns.public_ipv4: ADDED $SERVER_IP to $cfg (was missing)"
+		return 0
+	fi
+
+	if [ "$existing" = "$SERVER_IP" ]; then
+		log "patched dns.public_ipv4: $existing == $SERVER_IP (no change)"
+		return 0
+	fi
+
+	# Mismatch — fail loudly. We never silently overwrite a
+	# value the operator may have intentionally set to a
+	# different public IP (for example, behind a NAT or on a
+	# multi-homed host). The operator must resolve the
+	# discrepancy before the DNS Ops dashboard can publish
+	# records.
+	fail "dns.public_ipv4 mismatch: $cfg has $existing, but setup-https.sh was invoked with $SERVER_IP. Edit $cfg manually to set dns.public_ipv4 to the correct public mail IPv4, OR rerun setup-https.sh with the matching IP. The public DNS plan will not publish until this is resolved."
+}
+
 post_https_firewall_hardening() {
 	cat <<HARDEN
 
@@ -308,6 +423,16 @@ main() {
 	require_root
 	require_input
 	log "Orvix HTTPS setup started for $PRIMARY_DOMAIN ($SERVER_IP)"
+
+	# Patch dns.public_ipv4 BEFORE we hand control to Caddy and
+	# the DNS verifier. The admin DNS/DKIM dashboard needs this
+	# field to generate A / MX / SPF / DKIM / DMARC records; the
+	# function adds it if missing, no-ops on match, and fails
+	# loudly on mismatch (never silently overwrites operator-set
+	# values). The orvix runtime reloads config on the next
+	# `/api/v1/admin/reload` call or process restart, so the
+	# patch takes effect without a restart here.
+	patch_dns_public_ipv4
 
 	install_caddy
 	write_caddyfile

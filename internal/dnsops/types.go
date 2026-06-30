@@ -128,6 +128,14 @@ type Plan struct {
 	MailHost     string   `json:"mail_host"`     // e.g. "mail.orvix.email"
 	ServerIPv4   string   `json:"server_ipv4"`   // canonical IPv4 string; "" if unknown
 	ServerIPv6   string   `json:"server_ipv6"`   // canonical IPv6 string; "" if not configured
+	// ListenerBind is the SMTP/POP3/IMAP listener bind host from
+	// coremail.smtp_host. It is INFORMATIONAL ONLY — the dashboard
+	// surfaces it alongside ServerIPv4 so the operator can see the
+	// two concepts separately, but A / SPF / AAAA records MUST
+	// use ServerIPv4 / ServerIPv6, NEVER ListenerBind (which is
+	// a bind address, not a public DNS value, and typically
+	// 0.0.0.0 on production installs).
+	ListenerBind string   `json:"listener_bind,omitempty"`
 	DKIMSelector string   `json:"dkim_selector"` // e.g. "orvix" or "default"
 	DKIMKeyID    string   `json:"dkim_key_id,omitempty"` // opaque key id for the active pair
 	ReportMailbox string  `json:"report_mailbox"` // e.g. "dmarc@orvix.email"

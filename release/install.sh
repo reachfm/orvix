@@ -487,13 +487,21 @@ install_binary() {
 # or only hardened the unsafe defaults.
 provision_config() {
     local domain="$1"
+    local server_public_ip="${2:-}"
     if [ ! -f "$ORVIX_CONFIG" ]; then
-        log_detail "CONFIG provisioning: fresh install, writing $ORVIX_CONFIG with safe defaults (server.host=127.0.0.1, jmap_host=127.0.0.1, public mail listener binds at 0.0.0.0)"
-        write_config "$domain"
+        log_detail "CONFIG provisioning: fresh install, writing $ORVIX_CONFIG with safe defaults (server.host=127.0.0.1, jmap_host=127.0.0.1, public mail listener binds at 0.0.0.0, dns.public_ipv4=${server_public_ip:-<unset>})"
+        write_config "$domain" "$server_public_ip"
     else
         log_detail "CONFIG provisioning: re-run detected, existing $ORVIX_CONFIG will be PRESERVED (operator-managed fields untouched)"
         log_detail "CONFIG provisioning: applying only surgical / idempotent migrations"
         migrate_unsafe_internal_binds
+        # Safe migration of dns.public_ipv4 on a re-run. ONLY adds
+        # the field if it is currently missing AND the installer
+        # has a validated public IPv4 to put there. Never
+        # overwrites an operator-set value (including an operator
+        # who intentionally cleared the field to "null out" DNS).
+        # dns.public_ipv6 follows the same rule.
+        migrate_dns_public_ip "$server_public_ip"
         # Reaffirm in the log that the existing config was not
         # overwritten. A re-running operator can grep their
         # install log for this line to confirm the contract.
@@ -587,8 +595,142 @@ migrate_unsafe_internal_binds() {
     fi
 }
 
+# migrate_dns_public_ip safely adds dns.public_ipv4 (and
+# dns.public_ipv6 if a sibling operator-set value exists) to an
+# existing /etc/orvix/orvix.yaml on a re-run. It NEVER overwrites
+# an operator-customised value and it NEVER fabricates a fake
+# value from coremail.smtp_host or any other listener bind field.
+#
+# Behaviour matrix:
+#
+#   dns.public_ipv4 already set (any value, including empty     -> no change
+#     string operator put there intentionally):
+#   dns.public_ipv4 missing AND server_public_ip provided      -> ADD `public_ipv4: "<ip>"`
+#   dns.public_ipv4 missing AND server_public_ip empty/blank   -> no change
+#                                                                  (defer to setup-https.sh)
+#
+# The function takes a single positional arg: the validated
+# public IPv4 detected by main(). If the arg is empty (e.g. the
+# operator re-runs before setup-https.sh has populated the
+# value, or on a host where `hostname -I` is unreliable), the
+# migration is a no-op so a re-run never writes junk.
+#
+# dns.public_ipv6 follows the same rule. We only ADD the key if
+# the operator already has a dns.public_ipv6 line (i.e. we never
+# write a placeholder empty string); on a fresh install the
+# installer writes it explicitly.
+migrate_dns_public_ip() {
+    local cfg="$ORVIX_CONFIG"
+    local server_public_ip="${1:-}"
+    [ -f "$cfg" ] || { log_detail "MIGRATE dns.public_ipv4: no existing $cfg (fresh install, no migration needed)"; return 0; }
+
+    # Locate the dns: top-level section and check whether
+    # public_ipv4 already exists.
+    local has_public_ipv4=0
+    local in_dns=0
+    local line
+    while IFS= read -r line; do
+        case "$line" in
+            'dns:'*)
+                in_dns=1
+                ;;
+            [a-zA-Z][a-zA-Z0-9_-]*:*)
+                # Any other top-level section closes dns:.
+                in_dns=0
+                ;;
+        esac
+        if [ "$in_dns" = "1" ] && echo "$line" | grep -qE '^[[:space:]]+public_ipv4:'; then
+            has_public_ipv4=1
+            break
+        fi
+    done < "$cfg"
+
+    if [ "$has_public_ipv4" = "1" ]; then
+        log_detail "MIGRATE dns.public_ipv4: existing value preserved verbatim (no overwrite on re-run)"
+        return 0
+    fi
+
+    # public_ipv4 is missing. Only add it if the installer has
+    # a validated public IP to put there.
+    if [ -z "$server_public_ip" ]; then
+        log_detail "MIGRATE dns.public_ipv4: public_ipv4 is missing in $cfg but installer has no validated public IP; deferring to setup-https.sh (no change)"
+        return 0
+    fi
+
+    # Determine whether dns: section already exists. If yes,
+    # insert public_ipv4 inside it; if no, append a fresh dns:
+    # block at the end. We use awk for the section-aware insert
+    # so we never duplicate or corrupt existing YAML.
+    local has_dns=0
+    in_dns=0
+    while IFS= read -r line; do
+        case "$line" in
+            'dns:'*)
+                has_dns=1
+                in_dns=1
+                ;;
+            [a-zA-Z][a-zA-Z0-9_-]*:*)
+                in_dns=0
+                ;;
+        esac
+    done < "$cfg"
+
+    local tmp
+    tmp="$(mktemp "${cfg}.dns-migrate-XXXXXX")"
+    if [ "$has_dns" = "1" ]; then
+        # Insert `  public_ipv4: "<ip>"` as the FIRST key under
+        # the existing dns: section.
+        awk -v ip="$server_public_ip" '
+        BEGIN { in_dns = 0; inserted = 0 }
+        /^dns:/ {
+            print
+            in_dns = 1
+            next
+        }
+        in_dns && !inserted && /^[a-zA-Z][a-zA-Z0-9_-]*:/ {
+            # First sibling key under dns: -> insert before it.
+            print "  public_ipv4: \"" ip "\""
+            inserted = 1
+            in_dns = 0
+        }
+        in_dns && !inserted && /^[[:space:]]+[a-zA-Z_][a-zA-Z0-9_-]*:/ {
+            # Already inside dns: and about to see a real key
+            # (e.g. cloudflare_api_key) on the next line; the
+            # case above handles insertion BEFORE this key. If
+            # we land here the dns: section was empty of keys;
+            # fall through to print and continue.
+        }
+        in_dns && !inserted && /^[[:space:]]*$/ {
+            # Blank line still inside dns:; ignore.
+        }
+        in_dns && !inserted {
+            # First non-blank, non-section-header line inside
+            # dns: -> insert public_ipv4 BEFORE this line.
+            print "  public_ipv4: \"" ip "\""
+            inserted = 1
+            in_dns = 0
+        }
+        { print }
+        END { if (in_dns && !inserted) { print "  public_ipv4: \"" ip "\"" } }
+        ' "$cfg" > "$tmp" && mv "$tmp" "$cfg"
+    else
+        # No dns: section. Append a fresh block at the end of
+        # the file. We never insert in the middle to avoid
+        # disrupting unrelated sections.
+        {
+            echo ""
+            echo "dns:"
+            echo "  public_ipv4: \"$server_public_ip\""
+        } >> "$cfg"
+    fi
+
+    chmod 0640 "$cfg" 2>/dev/null || true
+    log_detail "MIGRATE dns.public_ipv4: ADDED public_ipv4: \"$server_public_ip\" to $cfg (dns: section $has_dns; existing value preserved if any)"
+}
+
 write_config() {
     local domain="$1"
+    local server_public_ip="${2:-}"
     local hostname="mail.$domain"
     local admin_host="admin.$domain"
     local webmail_host="webmail.$domain"
@@ -667,6 +809,14 @@ coremail:
   hostname: $hostname
   data_path: /var/lib/orvix/coremail
   mailstore_path: /var/lib/orvix/coremail/mailstore
+  # Public mail listener bind addresses. These stay at 0.0.0.0
+  # so SMTP / POP3 / IMAP bind on every interface — the
+  # listeners are advertised on the public IP via the DNS A
+  # records. The DNS public IP lives in a SEPARATE config
+  # field (dns.public_ipv4 below); it MUST NOT be inferred from
+  # smtp_host. Using the listener bind host for DNS would either
+  # fabricate 0.0.0.0 records on a fresh install or coerce the
+  # operator to mutate listener bind behaviour — both unsafe.
   smtp_host: 0.0.0.0
   smtp_port: 25
   imap_host: 0.0.0.0
@@ -688,6 +838,20 @@ coremail:
   vapid_private_key: ""
   vapid_private_key_file: ""
   vapid_subject: ""
+
+# Public DNS plan inputs. dns.public_ipv4 is the single source
+# of truth for the A / AAAA / SPF records the DNS Ops dashboard
+# generates. The installer writes the detected server public
+# IPv4 here on a fresh install. On a re-run, the installer only
+# adds this field if it is missing — an operator-customised
+# value is preserved verbatim. The runtime handler rejects any
+# value that is loopback, private, link-local, multicast,
+# unspecified, or in the RFC 5737 / RFC 3849 documentation
+# ranges; setup-https.sh repairs a missing or wrong value via a
+# targeted patch instead of overwriting the whole config.
+dns:
+  public_ipv4: "$server_public_ip"
+  public_ipv6: ""
 
 auth:
   jwt_key_path: /var/lib/orvix/jwt_key.pem
@@ -1898,7 +2062,23 @@ main() {
     validate_binary
 
     set_step "configuration" "Configuration provisioning" 75
-    provision_config "$primary_domain"
+
+    # Detect the public server IPv4 BEFORE provision_config runs.
+    # The DNS plan endpoint refuses to generate A / MX / SPF / DKIM
+    # / DMARC records unless dns.public_ipv4 is set, and
+    # write_config() must write a real, validated public IP — not
+    # 0.0.0.0, not loopback. We use `hostname -I` (first token,
+    # which is the primary IPv4 on every VPS image we've shipped)
+    # and fall back to 127.0.0.1 ONLY as a defensive default; the
+    # setup-https.sh step that follows can repair a wrong default
+    # safely because dns.public_ipv4 is a dedicated field, separate
+    # from coremail.smtp_host (the listener bind address) and from
+    # server.host (the loopback backend).
+    local server_public_ip
+    server_public_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    server_public_ip="${server_public_ip:-127.0.0.1}"
+
+    provision_config "$primary_domain" "$server_public_ip"
     write_bootstrap_env "$admin_email" "$admin_password"
     install_release_scripts
     provision_vapid_keys "$admin_email"
@@ -1939,9 +2119,12 @@ main() {
     validate_https_config || true
     generate_install_report
 
-    local server_ip
-    server_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
-    server_ip="${server_ip:-127.0.0.1}"
+    # server_public_ip was detected earlier (before
+    # provision_config) so dns.public_ipv4 is populated. Reuse
+    # it for the admin login file rather than re-detecting; this
+    # also keeps the public IP the installer reports consistent
+    # with the public IP it wrote into orvix.yaml.
+    local server_ip="${server_public_ip}"
 
     # Persist admin LOGIN info to a root-only file. The file
     # does NOT contain the admin password â€” that lives only

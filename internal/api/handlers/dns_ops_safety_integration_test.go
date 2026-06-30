@@ -118,9 +118,13 @@ func TestDNSOpsPlanWithPublicIPv4GeneratesCorrectARecord(t *testing.T) {
 	if resp.Plan.ServerIPv4 != "8.8.8.8" {
 		t.Errorf("plan.ServerIPv4: got %q want 8.8.8.8", resp.Plan.ServerIPv4)
 	}
-	if strings.Contains(body, "0.0.0.0") {
-		t.Errorf("plan body must not mention 0.0.0.0; got %s", body)
-	}
+	// The body MAY contain "0.0.0.0" in the informational
+	// `listener_bind` field (which echoes coremail.smtp_host
+	// separately from the public DNS plan). What MUST NOT
+	// contain 0.0.0.0 are the actual A / AAAA / SPF / MX
+	// record values — those are the records that would be
+	// published at the DNS provider. We assert per-record
+	// below.
 	var sawA, sawSPF bool
 	for _, r := range resp.Plan.Records {
 		if r.Purpose == "mail_a" {
@@ -139,6 +143,15 @@ func TestDNSOpsPlanWithPublicIPv4GeneratesCorrectARecord(t *testing.T) {
 			}
 			if strings.Contains(r.Value, "0.0.0.0") {
 				t.Errorf("SPF must not include 0.0.0.0; got %q", r.Value)
+			}
+		}
+		// No record value (A / AAAA / MX / SPF / DKIM / DMARC)
+		// may be 0.0.0.0. listener_bind is a Plan-level field
+		// checked separately.
+		switch r.Type {
+		case "A", "AAAA", "MX", "SPF", "TXT", "CNAME", "CAA":
+			if r.Value == "0.0.0.0" {
+				t.Errorf("%s record %q must not be 0.0.0.0; purpose=%s", r.Type, r.Value, r.Purpose)
 			}
 		}
 	}

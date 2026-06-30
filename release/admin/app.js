@@ -2495,6 +2495,48 @@
       badge(readiness, readinessKind)
     ]);
     host.appendChild(el('div', { class: 'dns-section' }, [header]));
+    // Source-of-truth panel: the dashboard surfaces the public
+    // mail IPv4 vs the listener bind host as separate concepts so
+    // an operator never confuses the two. The plan's A / SPF /
+    // AAAA records derive from plan.server_ipv4 (which comes from
+    // dns.public_ipv4 / dns.public_ipv6); the listener bind host
+    // (coremail.smtp_host, defaults to 0.0.0.0) is shown only as
+    // informational, never as something the dashboard tells the
+    // operator to change for DNS reasons.
+    if (plan && (plan.server_ipv4 || plan.server_ipv6 || plan.listener_bind)) {
+      var sourceRows = [];
+      if (plan.server_ipv4) {
+        sourceRows.push([
+          'Public mail IPv4 (source: dns.public_ipv4)',
+          plan.server_ipv4
+        ]);
+      }
+      if (plan.server_ipv6) {
+        sourceRows.push([
+          'Public mail IPv6 (source: dns.public_ipv6)',
+          plan.server_ipv6
+        ]);
+      }
+      if (plan.listener_bind) {
+        sourceRows.push([
+          'Listener bind (source: coremail.smtp_host — DO NOT change for DNS)',
+          plan.listener_bind
+        ]);
+      }
+      var sourceTable = el('table', { class: 'dns-source-table' });
+      sourceRows.forEach(function (row) {
+        var tr = el('tr', null, [
+          el('td', { class: 'dns-source-key', text: row[0] }),
+          el('td', { class: 'dns-source-val', text: row[1] })
+        ]);
+        sourceTable.appendChild(tr);
+      });
+      host.appendChild(el('div', { class: 'dns-source-panel' }, [
+        el('div', { class: 'dns-section-head' }, [el('h4', null, 'Source of truth')]),
+        sourceTable,
+        el('p', { class: 'form-hint', text: 'A / AAAA / SPF records use dns.public_ipv4 / dns.public_ipv6. The listener bind host (coremail.smtp_host) defaults to 0.0.0.0 so the SMTP / POP3 / IMAP listeners bind on every interface; that field must NOT be mutated to fix DNS.' })
+      ]));
+    }
     // Top-level verifier warnings.
     var report = state.dnsReport;
     if (report && report.warnings && report.warnings.length) {
