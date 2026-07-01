@@ -333,3 +333,71 @@ func RequireAnyRole(roles ...Role) fiber.Handler {
 		})
 	}
 }
+
+// MFAChallengeTTL is the lifetime of an MFA challenge token.
+const MFAChallengeTTL = 5 * time.Minute
+
+// MFAChallengeClaim is the JWT claim name used to distinguish
+// MFA challenge tokens from real access tokens. Access tokens
+// carry "role"; challenge tokens carry "mfa_challenge" instead.
+const MFAChallengeClaim = "mfa_challenge"
+
+var mfaChallengeNow = time.Now
+
+// SetMFAChallengeClockForTest overrides the MFA challenge clock and returns a
+// restore function. It is intended for expiry tests only.
+func SetMFAChallengeClockForTest(now func() time.Time) func() {
+	prev := mfaChallengeNow
+	mfaChallengeNow = now
+	return func() { mfaChallengeNow = prev }
+}
+
+// GenerateMFAChallengeToken creates a short-lived token that proves
+// the caller passed password authentication but has not yet completed
+// MFA. The token MUST NOT be accepted by any protected endpoint.
+// It is only usable with the MFA verify endpoint.
+func (a *Authenticator) GenerateMFAChallengeToken(userID uint) (string, error) {
+	now := mfaChallengeNow()
+	claims := jwt.MapClaims{
+		"sub":             fmt.Sprintf("%d", userID),
+		MFAChallengeClaim: true,
+		"iat":             now.Unix(),
+		"exp":             now.Add(MFAChallengeTTL).Unix(),
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	tokenString, err := token.SignedString(a.privateKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to sign MFA challenge token: %w", err)
+	}
+	return tokenString, nil
+}
+
+// ValidateMFAChallengeToken validates an MFA challenge token and
+// returns the user ID. Returns an error if the token is invalid,
+// expired, or is not an MFA challenge token.
+func (a *Authenticator) ValidateMFAChallengeToken(tokenString string) (uint, error) {
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return a.publicKey, nil
+	})
+	if err != nil || !token.Valid {
+		return 0, ErrTokenInvalid
+	}
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return 0, ErrTokenInvalid
+	}
+	// Must carry the MFA challenge claim.
+	if val, _ := claims[MFAChallengeClaim].(bool); !val {
+		return 0, fmt.Errorf("not an MFA challenge token")
+	}
+	exp, ok := claims["exp"].(float64)
+	if ok && mfaChallengeNow().Unix() > int64(exp) {
+		return 0, ErrTokenExpired
+	}
+	var userID uint
+	fmt.Sscanf(claims["sub"].(string), "%d", &userID)
+	return userID, nil
+}

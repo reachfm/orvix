@@ -430,6 +430,70 @@ func TestRetryNow(t *testing.T) {
 
 // ── Expired Lease Tests ──────────────────────────────────────
 
+func TestAdminQueueTransitionsRejectLeasedEntries(t *testing.T) {
+	_, qe := testQE(t)
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name   string
+		action func(uint) error
+	}{
+		{"retry", func(id uint) error { return qe.Repo.AdminRetryNow(ctx, id, nil) }},
+		{"cancel", func(id uint) error { return qe.Repo.AdminCancel(ctx, id, nil) }},
+		{"dead_letter", func(id uint) error { return qe.Repo.AdminDeadLetter(ctx, id, "operator action", nil) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entry := makeEntry(tc.name+"-leased@test.com", "test.com")
+			if err := qe.Enqueue(ctx, entry); err != nil {
+				t.Fatalf("enqueue: %v", err)
+			}
+			leased, err := qe.LeaseNext(ctx, "worker-"+tc.name)
+			if err != nil {
+				t.Fatalf("lease: %v", err)
+			}
+			if leased == nil || leased.Status != StatusLeased {
+				t.Fatalf("expected leased entry, got %#v", leased)
+			}
+			if err := tc.action(entry.ID); err == nil {
+				t.Fatalf("%s unexpectedly allowed leased queue entry", tc.name)
+			}
+			got, err := qe.Repo.Get(ctx, entry.ID, nil)
+			if err != nil {
+				t.Fatalf("get: %v", err)
+			}
+			if got.Status != StatusLeased {
+				t.Fatalf("status changed after rejected %s: got %s", tc.name, got.Status)
+			}
+		})
+	}
+}
+
+func TestAdminQueueTransitionRejectsChangedStatus(t *testing.T) {
+	_, qe := testQE(t)
+	ctx := context.Background()
+
+	entry := makeEntry("changed-status@test.com", "test.com")
+	if err := qe.Enqueue(ctx, entry); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if err := qe.DeadLetter(ctx, entry.ID, "first failure"); err != nil {
+		t.Fatalf("dead letter: %v", err)
+	}
+	if _, err := qe.DB.ExecContext(ctx, `UPDATE coremail_queue SET status=? WHERE id=?`, string(StatusLeased), entry.ID); err != nil {
+		t.Fatalf("force changed status: %v", err)
+	}
+	if err := qe.Repo.AdminRetryNow(ctx, entry.ID, nil); err == nil {
+		t.Fatal("admin retry unexpectedly allowed row after status changed to leased")
+	}
+	got, err := qe.Repo.Get(ctx, entry.ID, nil)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Status != StatusLeased {
+		t.Fatalf("status changed after rejected retry: got %s", got.Status)
+	}
+}
+
 func TestReleaseExpiredLeases(t *testing.T) {
 	_, qe := testQE(t)
 	ctx := context.Background()
@@ -545,11 +609,11 @@ func TestComputeNextAttempt(t *testing.T) {
 		maxDelay int // minutes
 	}{
 		{0, 0, 0},
-		{1, 0, 3},     // ~1 minute + jitter
-		{2, 4, 8},     // ~5 minutes + jitter
-		{3, 13, 20},   // ~15 minutes + jitter
-		{4, 55, 80},   // ~1 hour + jitter
-		{5, 230, 280}, // ~4 hours + jitter
+		{1, 0, 3},       // ~1 minute + jitter
+		{2, 4, 8},       // ~5 minutes + jitter
+		{3, 13, 20},     // ~15 minutes + jitter
+		{4, 55, 80},     // ~1 hour + jitter
+		{5, 230, 280},   // ~4 hours + jitter
 		{6, 1380, 1600}, // ~24 hours + jitter
 	}
 

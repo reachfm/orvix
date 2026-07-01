@@ -205,6 +205,7 @@ func (h *Handler) Login(c fiber.Ctx) error {
 	var userID uint
 	var passwordHash string
 	var userRole string
+	var mfaEnabled int
 
 	sqlDB, err := h.db.DB()
 	if err != nil {
@@ -212,7 +213,7 @@ func (h *Handler) Login(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
 	}
 
-	err = sqlDB.QueryRow("SELECT id, password_hash, role FROM users WHERE email = ?", loginEmail).Scan(&userID, &passwordHash, &userRole)
+	err = sqlDB.QueryRow("SELECT id, password_hash, role, COALESCE(mfa_enabled, 0) FROM users WHERE email = ?", loginEmail).Scan(&userID, &passwordHash, &userRole, &mfaEnabled)
 	if err != nil {
 		h.logger.Warn("user not found during login", zap.String("email", loginEmail), zap.Error(err))
 		h.security.RecordFailedLogin(c.Context(), c.IP(), loginEmail)
@@ -234,6 +235,23 @@ func (h *Handler) Login(c fiber.Ctx) error {
 
 	if h.rateLimiter != nil {
 		h.rateLimiter.ResetLoginLimit(c.IP())
+	}
+
+	// MFA enforcement: if MFA is enabled, do NOT issue access/refresh tokens.
+	// Instead return an MFA challenge token that can only be exchanged at
+	// the /auth/mfa/verify endpoint.
+	if mfaEnabled != 0 {
+		challengeToken, err := h.auth.GenerateMFAChallengeToken(userID)
+		if err != nil {
+			h.logger.Error("failed to generate MFA challenge token", zap.Error(err))
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authentication failed"})
+		}
+		h.logger.Info("MFA challenge issued", zap.Uint("user_id", userID))
+		return c.JSON(fiber.Map{
+			"mfa_required":    true,
+			"mfa_challenge":   challengeToken,
+			"mfa_expires_in":  300,
+		})
 	}
 
 	accessToken, err := h.auth.GenerateAccessToken(userID, auth.Role(userRole))

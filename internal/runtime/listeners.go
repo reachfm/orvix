@@ -12,7 +12,9 @@ const (
 	ListenerSubmission  ListenerKind = "smtp-submission"
 	ListenerSMTPS       ListenerKind = "smtps"
 	ListenerIMAP        ListenerKind = "imap"
+	ListenerIMAPS       ListenerKind = "imaps"
 	ListenerPOP3        ListenerKind = "pop3"
+	ListenerPOP3S       ListenerKind = "pop3s"
 	ListenerJMAP        ListenerKind = "jmap"
 )
 
@@ -121,7 +123,7 @@ func (r *ListenerRegistry) Snapshot() map[ListenerKind]ListenerStatus {
 	return out
 }
 
-var allKinds = []ListenerKind{ListenerSMTP, ListenerSubmission, ListenerSMTPS, ListenerIMAP, ListenerPOP3, ListenerJMAP}
+var allKinds = []ListenerKind{ListenerSMTP, ListenerSubmission, ListenerSMTPS, ListenerIMAP, ListenerIMAPS, ListenerPOP3, ListenerPOP3S, ListenerJMAP}
 
 // safeListenError converts a listener bind error into a safe
 // detail string. The original error is never exposed verbatim

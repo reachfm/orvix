@@ -2022,7 +2022,8 @@
     state.queueFilter = $('q-filter') ? $('q-filter').value : 'all';
     var search = $('q-search') ? ($('q-search').value || '').trim().toLowerCase() : '';
     try {
-      var data = await apiGet('/api/v1/queue');
+      var resp = await apiGet('/api/v1/admin/queue/messages');
+      var data = Array.isArray(resp.messages) ? resp.messages : (Array.isArray(resp) ? resp : []);
       state.queue = Array.isArray(data) ? data : [];
       var filtered = state.queue.filter(function (r) {
         if (state.queueFilter !== 'all' && (r.status || '').toLowerCase() !== state.queueFilter) return false;
@@ -2199,7 +2200,7 @@
 
   async function refreshOneQueue(id) {
     try {
-      var r = await apiGet('/api/v1/admin/queue/' + id);
+      var r = await apiGet('/api/v1/admin/queue/messages/' + id);
       state.queueDetail = r;
       var idx = state.queue.findIndex(function (q) { return String(q.id) === String(id); });
       if (idx >= 0) state.queue[idx] = r;
@@ -2216,7 +2217,7 @@
       dangerous: false
     }).then(function (ok) {
       if (!ok) return;
-      apiPost('/api/v1/queue/' + r.id + '/retry', {}).then(function () {
+      apiPost('/api/v1/admin/queue/messages/' + r.id + '/retry', {}).then(function () {
         toast('Retry queued', 'success');
         loadQueueAndRender();
       }).catch(function (e) { toast(e.message, 'error'); });
@@ -2232,7 +2233,7 @@
       dangerous: true
     }).then(function (ok) {
       if (!ok) return;
-      apiDelete('/api/v1/queue/' + r.id).then(function () {
+      apiPost('/api/v1/admin/queue/messages/' + r.id + '/cancel', {}).then(function () {
         toast('Entry deleted', 'success');
         loadQueueAndRender();
       }).catch(function (e) { toast(e.message, 'error'); });

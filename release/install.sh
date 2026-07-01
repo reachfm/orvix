@@ -975,6 +975,18 @@ coremail:
   # operator to mutate listener bind behaviour — both unsafe.
   smtp_host: 0.0.0.0
   smtp_port: 25
+  submission_enabled: false
+  submission_host: "0.0.0.0"
+  submission_port: 587
+  smtps_enabled: false
+  smtps_host: "0.0.0.0"
+  smtps_port: 465
+  imaps_enabled: false
+  imaps_host: "0.0.0.0"
+  imaps_port: 993
+  pop3s_enabled: false
+  pop3s_host: "0.0.0.0"
+  pop3s_port: 995
   imap_host: 0.0.0.0
   imap_port: 143
   pop3_host: 0.0.0.0
@@ -2163,6 +2175,18 @@ verify_install() {
         check_public_port 465 "SMTPS"
     else
         log_detail "SKIP bind port 465 (SMTPS): smtps_enabled=false"
+    fi
+
+    if [ "$(coremail_bool imaps_enabled)" = "true" ]; then
+        check_public_port 993 "IMAPS"
+    else
+        log_detail "SKIP bind port 993 (IMAPS): imaps_enabled=false"
+    fi
+
+    if [ "$(coremail_bool pop3s_enabled)" = "true" ]; then
+        check_public_port 995 "POP3S"
+    else
+        log_detail "SKIP bind port 995 (POP3S): pop3s_enabled=false"
     fi
 
     if [ "$bind_check_failed" -ne 0 ]; then
