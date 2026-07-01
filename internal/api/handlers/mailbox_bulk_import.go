@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/coremail"
 )
 
 // BulkImportRow is one parsed CSV row. Fields are raw — the validator
@@ -288,19 +289,30 @@ func (h *Handler) importMailboxes(c fiber.Ctx, dryRun bool) error {
 			continue
 		}
 		mboxID, _ := res.LastInsertId()
-		// System folders (INBOX, Sent, …) are provisioned on the
-		// first webmail login via the same safety net the single
-		// CreateMailbox handler relies on. Doing it inside the bulk
-		// tx would require either (a) running the provision on a
-		// different connection (which can deadlock with SQLite's
-		// _txlock=immediate setups used in production-style DSNs)
-		// or (b) extending EnsureMailboxSystemFolders to accept a
-		// *sql.Tx. Both are larger than the bulk-import contract
-		// warrants; the webmail-login re-provision is documented
-		// to backfill any mailbox created without folders, and the
-		// single-row CreateMailbox path already uses it as the
-		// primary failure-recovery mechanism.
-		_ = mboxID
+		// Provision the canonical system folders (INBOX, Sent,
+		// Drafts, Trash, Junk, Archive) inside the same
+		// transaction as the mailbox insert. If folder
+		// provisioning fails for this row, the whole tx rolls
+		// back when allow_partial is false (the all-or-nothing
+		// contract) or the row is skipped when allow_partial is
+		// true. This guarantees an imported mailbox is never
+		// left in a partially-provisioned state where the
+		// webmail-login backfill is the only thing standing
+		// between the user and a usable inbox.
+		if ferr := coremail.EnsureMailboxSystemFoldersTx(c.Context(), tx, uint(mboxID)); ferr != nil {
+			insertErrs = append(insertErrs, BulkImportError{Line: row.Line, Email: row.Email, Error: "folder provisioning failed"})
+			if !allowPartial {
+				_ = tx.Rollback()
+				rolledBack = true
+				return c.Status(fiber.StatusInternalServerError).JSON(BulkImportResult{
+					DryRun:  false,
+					Created: 0,
+					Skipped: 0,
+					Errors:  append(rowErrs, insertErrs...),
+				})
+			}
+			continue
+		}
 		created++
 	}
 

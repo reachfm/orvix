@@ -60,11 +60,12 @@ ORVIX_WEBMAIL_UI_DIR="${ORVIX_WEBMAIL_UI_DIR:-/usr/share/orvix/webmail}"
 ORVIX_RELEASE_ADMIN_SRC="${ORVIX_RELEASE_ADMIN_SRC:-$ORVIX_SOURCE_DIR/release/admin}"
 ORVIX_RELEASE_WEBMAIL_SRC="${ORVIX_RELEASE_WEBMAIL_SRC:-$ORVIX_SOURCE_DIR/release/webmail}"
 
-# Source the asset-propagation library if present. The lib is
-# optional so an old operator who runs upgrade.sh from a checkout
-# that pre-dates the lib still works; missing lib is logged and
-# the upgrade continues (a warning, not a hard failure — but the
-# smoke-upgrade.sh test will fail loudly when the lib is missing).
+# Source the asset-propagation library. BLOCKER 3 (fail-closed):
+# the lib is REQUIRED — a backend upgrade MUST ship the matching
+# admin + webmail static assets. If the lib is missing from the
+# release tree we abort before any state is mutated, so the
+# operator never sees a green upgrade report on a half-propagated
+# host.
 LIB_ASSET_PROPAGATE=""
 for candidate in \
     "$ORVIX_SOURCE_DIR/release/scripts/lib-asset-propagate.sh" \
@@ -74,9 +75,19 @@ for candidate in \
         break
     fi
 done
-if [ -n "$LIB_ASSET_PROPAGATE" ]; then
-    # shellcheck disable=SC1090
-    . "$LIB_ASSET_PROPAGATE"
+if [ -z "$LIB_ASSET_PROPAGATE" ]; then
+    log "ERROR: lib-asset-propagate.sh not found in release tree (BLOCKER 3 fail-closed); refusing to upgrade."
+    fail "asset propagation library missing; refusing to upgrade"
+fi
+if ! bash -n "$LIB_ASSET_PROPAGATE" 2>/dev/null; then
+    log "ERROR: lib-asset-propagate.sh at $LIB_ASSET_PROPAGATE has a bash syntax error; refusing to upgrade."
+    fail "asset propagation library has a syntax error; refusing to upgrade"
+fi
+# shellcheck disable=SC1090
+. "$LIB_ASSET_PROPAGATE"
+if ! command -v asset_propagate >/dev/null 2>&1; then
+    log "ERROR: lib-asset-propagate.sh did not define asset_propagate(); refusing to upgrade."
+    fail "asset propagation library is malformed; refusing to upgrade"
 fi
 
 DRY_RUN=0
@@ -425,47 +436,59 @@ full_rollback() {
 # indirection exists so the smoke test can introspect the
 # propagation step and so a future refactor (e.g. parallel copy) is
 # local to one place.
+#
+# Fail-closed contract (BLOCKER 3): a missing propagation library or
+# a propagation failure is a HARD upgrade failure. The previous
+# "warn-but-continue" behaviour left the operator with a half-up
+# service (new binary, stale admin SPA) and a green-ish upgrade
+# report. We now refuse to call the new service healthy until BOTH
+# asset trees have been propagated successfully; if propagation
+# fails after the pre-copy backup has been taken, the asset lib
+# itself rolls the destination back from the backup.
 propagate_assets() {
 	if [ -z "$LIB_ASSET_PROPAGATE" ] || ! command -v asset_propagate >/dev/null 2>&1; then
-		# Lib missing. Log loudly but do not fail the upgrade — the
-		# binary is already in place and the operator can still
-		# reach the admin over an old SPA. The smoke test catches
-		# this regression.
-		log "WARN: lib-asset-propagate.sh not sourced; admin + webmail assets NOT propagated. Re-run upgrade after fixing the release tree."
-		report "yellow" "asset propagation library missing; admin/webmail assets not refreshed"
-		return 0
+		# Lib missing. This is a HARD failure: a backend upgrade
+		# MUST ship the matching admin + webmail static assets.
+		log "ERROR: lib-asset-propagate.sh not sourced; refusing to upgrade with stale admin/webmail assets."
+		report "red" "asset propagation library missing; refusing to upgrade (BLOCKER 3 fail-closed)"
+		return 1
 	fi
 	local ok=1
 	if [ -d "$ORVIX_RELEASE_ADMIN_SRC" ]; then
 		log "propagating admin assets: $ORVIX_RELEASE_ADMIN_SRC -> $ORVIX_ADMIN_UI_DIR"
 		# ASSET_BACKUP_PARENT is the same BACKUP_PARENT the upgrade
 		# uses so asset backups live next to the binary backup.
-		ASSET_BACKUP_PARENT="$BACKUP_PARENT/assets" \
+		if ! ASSET_BACKUP_PARENT="$BACKUP_PARENT/assets" \
 			ASSET_VERBOSE=1 \
-			asset_propagate "$ORVIX_RELEASE_ADMIN_SRC" "$ORVIX_ADMIN_UI_DIR" admin || {
-				log "ERROR: admin asset propagation failed"
-				report "red" "admin asset propagation failed"
-				ok=0
-			}
+			asset_propagate "$ORVIX_RELEASE_ADMIN_SRC" "$ORVIX_ADMIN_UI_DIR" admin; then
+			log "ERROR: admin asset propagation failed; rolled back from backup"
+			report "red" "admin asset propagation failed (rolled back from backup)"
+			ok=0
+		fi
 	else
-		log "skip admin propagation: source $ORVIX_RELEASE_ADMIN_SRC not present"
+		log "ERROR: admin asset source $ORVIX_RELEASE_ADMIN_SRC not present; refusing to upgrade (BLOCKER 3 fail-closed)"
+		report "red" "admin asset source missing; refusing to upgrade"
+		return 1
 	fi
 	if [ -d "$ORVIX_RELEASE_WEBMAIL_SRC" ]; then
 		log "propagating webmail assets: $ORVIX_RELEASE_WEBMAIL_SRC -> $ORVIX_WEBMAIL_UI_DIR"
-		ASSET_BACKUP_PARENT="$BACKUP_PARENT/assets" \
+		if ! ASSET_BACKUP_PARENT="$BACKUP_PARENT/assets" \
 			ASSET_VERBOSE=1 \
-			asset_propagate "$ORVIX_RELEASE_WEBMAIL_SRC" "$ORVIX_WEBMAIL_UI_DIR" webmail || {
-				log "ERROR: webmail asset propagation failed"
-				report "red" "webmail asset propagation failed"
-				ok=0
-			}
+			asset_propagate "$ORVIX_RELEASE_WEBMAIL_SRC" "$ORVIX_WEBMAIL_UI_DIR" webmail; then
+			log "ERROR: webmail asset propagation failed; rolled back from backup"
+			report "red" "webmail asset propagation failed (rolled back from backup)"
+			ok=0
+		fi
 	else
-		log "skip webmail propagation: source $ORVIX_RELEASE_WEBMAIL_SRC not present"
+		log "ERROR: webmail asset source $ORVIX_RELEASE_WEBMAIL_SRC not present; refusing to upgrade (BLOCKER 3 fail-closed)"
+		report "red" "webmail asset source missing; refusing to upgrade"
+		return 1
 	fi
 	if [ "$ok" = "1" ]; then
 		report "green" "admin + webmail assets propagated (backups under $BACKUP_PARENT/assets)"
+		return 0
 	fi
-	return 0
+	return 1
 }
 
 resolve_input() {    if [ -n "$FROM_URL" ]; then
@@ -528,8 +551,14 @@ install_and_restart() {
 	# ships the matching UI. Without this, an operator who upgrades
 	# to a backend with a new admin endpoint would see a stale admin
 	# SPA. The lib-asset-propagate.sh library handles per-file
-	# backup, hash verification, ownership, and perms.
-	propagate_assets
+	# backup, hash verification, ownership, perms, and rollback on
+	# failure. A failure here is HARD: the new binary would ship
+	# against a half-propagated UI and we refuse to start it.
+	if ! propagate_assets; then
+		report "red" "asset propagation failed (BLOCKER 3 fail-closed); rolling back binary to previous state"
+		full_rollback "$BACKUP_DIR"
+		fail "asset propagation failed; rolled back to previous binary"
+	fi
 
     report "" "--- Restart ---"
     log "restarting orvix.service"

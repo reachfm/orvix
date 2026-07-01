@@ -489,8 +489,16 @@ func Defaults() *Config {
 			IMAPPort:                 143,
 			POP3Host:                 "0.0.0.0",
 			POP3Port:                 110,
-			JMAPHost:                 "0.0.0.0",
-			JMAPPort:                 443,
+			// JMAP default bind is 127.0.0.1:8081, matching the
+			// installer's orvix.yaml. The previous default of
+			// 0.0.0.0:443 exposed the JMAP endpoint on the bare
+			// server IP without TLS, which was a security
+			// regression and a port-conflict landmine on any host
+			// that already runs an HTTPS server. Operators who
+			// need the old behaviour can set jmap_host: 0.0.0.0
+			// and jmap_port: 443 explicitly in orvix.yaml.
+			JMAPHost:                 "127.0.0.1",
+			JMAPPort:                 8081,
 			RequireTLSForAuth:        true,
 			RequireAuthForSubmission: true,
 			QueueWorkers:             1,

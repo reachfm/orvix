@@ -39,6 +39,29 @@ func buildBulkImportHarness(t *testing.T) (*api.Router, *sql.DB, string, string)
 	t.Helper()
 	router, sqlDB, token, csrf, _ := buildBackupHarness(t)
 
+	// Ensure coremail_folders exists. The default MigrateAllRaw does
+	// not include the coremail storage DDL (the MailStore creates
+	// it on demand), but the bulk-import endpoint now provisions
+	// system folders in-tx so the test schema must have the table.
+	if _, err := sqlDB.Exec(`
+		CREATE TABLE IF NOT EXISTS coremail_folders (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			mailbox_id INTEGER NOT NULL,
+			parent_id INTEGER,
+			name TEXT NOT NULL DEFAULT '',
+			path TEXT NOT NULL DEFAULT '',
+			folder_type TEXT NOT NULL DEFAULT '',
+			message_count INTEGER NOT NULL DEFAULT 0,
+			unread_count INTEGER NOT NULL DEFAULT 0,
+			total_size INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			FOREIGN KEY (parent_id) REFERENCES coremail_folders(id)
+		)`); err != nil {
+		t.Fatalf("create coremail_folders: %v", err)
+	}
+
 	// Seed a local, active domain. The schema is shared with the
 	// production mailbox code path (coremail_domains).
 	now := "2024-01-01 00:00:00"
@@ -462,5 +485,108 @@ func TestBulkImportCSVEncodingAcceptsQuoted(t *testing.T) {
 	}
 	if len(got.Planned) != 1 || got.Planned[0].Name != "Smith, Alice" {
 		t.Errorf("planned=%+v, want name='Smith, Alice'", got.Planned)
+	}
+}
+
+// TestBulkImportCreatesSystemFolders proves that a successful bulk
+// import creates the canonical system folders (INBOX, Sent, Drafts,
+// Trash, Junk, Archive) for every imported mailbox IN THE SAME
+// TRANSACTION. This is the high-risk fix for the partial-provisioning
+// failure mode where imported mailboxes had to wait for a webmail
+// login before they were usable.
+func TestBulkImportCreatesSystemFolders(t *testing.T) {
+	router, sqlDB, token, csrf := buildBulkImportHarness(t)
+	defer router.App().Shutdown()
+	defer sqlDB.Close()
+
+	csv := "email,password,name,quota_mb\n" +
+		csvRow("alice@example.com", "Password1", "Alice", 512) + "\n" +
+		csvRow("bob@example.com", "Password2", "Bob", 1024) + "\n"
+
+	resp, body := postImport(t, router, "/api/v1/mailboxes/import", csv, token, csrf)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status=%d, want 201: %s", resp.StatusCode, body)
+	}
+
+	wantFolders := []string{"INBOX", "Sent", "Drafts", "Trash", "Junk", "Archive"}
+	for _, email := range []string{"alice@example.com", "bob@example.com"} {
+		var mailboxID int64
+		if err := sqlDB.QueryRow(
+			`SELECT id FROM coremail_mailboxes WHERE email = ?`, email,
+		).Scan(&mailboxID); err != nil {
+			t.Fatalf("lookup mailbox %s: %v", email, err)
+		}
+		rows, err := sqlDB.Query(
+			`SELECT path FROM coremail_folders WHERE mailbox_id = ? ORDER BY path`, mailboxID,
+		)
+		if err != nil {
+			t.Fatalf("list folders for %s: %v", email, err)
+		}
+		defer rows.Close()
+		gotFolders := []string{}
+		for rows.Next() {
+			var p string
+			_ = rows.Scan(&p)
+			gotFolders = append(gotFolders, p)
+		}
+		if len(gotFolders) != len(wantFolders) {
+			t.Fatalf("mailbox %s: got %d folders %v, want %d %v",
+				email, len(gotFolders), gotFolders, len(wantFolders), wantFolders)
+		}
+		for _, w := range wantFolders {
+			found := false
+			for _, g := range gotFolders {
+				if g == w {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("mailbox %s: missing folder %q (got %v)", email, w, gotFolders)
+			}
+		}
+	}
+}
+
+// TestBulkImportRollsBackWhenFolderProvisioningFails proves that when
+// folder provisioning fails mid-import, the entire transaction is
+// rolled back so no mailbox is left in a partially-provisioned state.
+// We trigger the failure by deleting the coremail_folders table from
+// underneath the import — the FK lookup inside EnsureMailboxSystemFolders
+// then errors, the tx rolls back, and no mailbox rows remain.
+func TestBulkImportRollsBackWhenFolderProvisioningFails(t *testing.T) {
+	router, sqlDB, token, csrf := buildBulkImportHarness(t)
+	defer router.App().Shutdown()
+	defer sqlDB.Close()
+
+	// Sabotage: rename the folders table so folder provisioning fails.
+	// After the test we restore it so the rest of the suite is clean.
+	if _, err := sqlDB.Exec(`ALTER TABLE coremail_folders RENAME TO coremail_folders_sabotaged`); err != nil {
+		t.Fatalf("rename folders table: %v", err)
+	}
+	defer func() {
+		_, _ = sqlDB.Exec(`ALTER TABLE coremail_folders_sabotaged RENAME TO coremail_folders`)
+	}()
+
+	csv := "email,password,name,quota_mb\n" +
+		csvRow("alice@example.com", "Password1", "Alice", 512) + "\n" +
+		csvRow("bob@example.com", "Password2", "Bob", 1024) + "\n"
+
+	resp, body := postImport(t, router, "/api/v1/mailboxes/import", csv, token, csrf)
+	// All-or-nothing must reject with 500: a folder-provisioning failure
+	// is a hard error that must roll back the whole batch.
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status=%d, want 500 (folder-provisioning failure): %s", resp.StatusCode, body)
+	}
+
+	// No mailbox rows must remain.
+	var n int
+	if err := sqlDB.QueryRow(
+		`SELECT COUNT(*) FROM coremail_mailboxes WHERE email LIKE '%@example.com'`,
+	).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("import left %d mailboxes after folder-provisioning failure; want 0", n)
 	}
 }
