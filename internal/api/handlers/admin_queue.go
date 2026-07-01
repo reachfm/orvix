@@ -9,7 +9,6 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/auth"
-	"github.com/orvix/orvix/internal/coremail/queue"
 	"go.uber.org/zap"
 )
 
@@ -23,28 +22,6 @@ func (h *Handler) queueAdminGate(c fiber.Ctx) bool {
 		return false
 	}
 	return role == auth.RoleAdmin || role == auth.RoleSuperAdmin
-}
-
-// queueActionSafe reads the current queue entry status, validates the
-// transition against allowed states, and runs the action function only
-// when the transition is valid. Returns a user-facing error on invalid
-// transitions.
-func (h *Handler) queueActionSafe(id uint, action string, allowedStatuses []string, actionFn func() error) error {
-	sqlDB, err := h.db.DB()
-	if err != nil {
-		return fmt.Errorf("database unavailable")
-	}
-	var status string
-	err = sqlDB.QueryRow("SELECT status FROM coremail_queue WHERE id = ? AND deleted_at IS NULL", id).Scan(&status)
-	if err != nil {
-		return fmt.Errorf("queue entry %d not found", id)
-	}
-	for _, s := range allowedStatuses {
-		if status == s {
-			return actionFn()
-		}
-	}
-	return fmt.Errorf("cannot %s queue entry %d in status %q; allowed statuses: %v", action, id, status, allowedStatuses)
 }
 
 // QueueMessage represents a queue entry in the API response
@@ -256,16 +233,11 @@ func (h *Handler) AdminQueueRetryNow(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"error": "invalid id"})
 	}
 
-	if err := h.queueActionSafe(uint(id), "retry",
-		[]string{"failed", "deferred", "bounced", "dead_letter"},
-		func() error {
-			return queue.NewSQLRepo(h.queueEngine.DB).RetryNow(context.Background(), uint(id), nil)
-		}); err != nil {
-		code := 400
-		if strings.Contains(err.Error(), "not found") {
-			code = 404
-		}
-		return c.Status(code).JSON(fiber.Map{"error": err.Error()})
+	if h.queueEngine == nil || h.queueEngine.Repo == nil {
+		return c.Status(503).JSON(fiber.Map{"error": "queue engine unavailable"})
+	}
+	if err := h.queueEngine.Repo.AdminRetryNow(context.Background(), uint(id), nil); err != nil {
+		return queueActionError(c, err)
 	}
 
 	h.writeAuditLog(c, "queue.retry", fmt.Sprintf("id:%d", id))
@@ -294,16 +266,11 @@ func (h *Handler) AdminQueueBounce(c fiber.Ctx) error {
 		reason = req.Reason
 	}
 
-	if err := h.queueActionSafe(uint(id), "bounce",
-		[]string{"pending", "deferred", "leased", "failed"},
-		func() error {
-			return queue.NewSQLRepo(h.queueEngine.DB).DeadLetter(context.Background(), uint(id), reason, nil)
-		}); err != nil {
-		code := 400
-		if strings.Contains(err.Error(), "not found") {
-			code = 404
-		}
-		return c.Status(code).JSON(fiber.Map{"error": err.Error()})
+	if h.queueEngine == nil || h.queueEngine.Repo == nil {
+		return c.Status(503).JSON(fiber.Map{"error": "queue engine unavailable"})
+	}
+	if err := h.queueEngine.Repo.AdminDeadLetter(context.Background(), uint(id), reason, nil); err != nil {
+		return queueActionError(c, err)
 	}
 
 	h.writeAuditLog(c, "queue.bounce", fmt.Sprintf("id:%d reason:%s", id, reason))
@@ -322,18 +289,21 @@ func (h *Handler) AdminQueueCancel(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"error": "invalid id"})
 	}
 
-	if err := h.queueActionSafe(uint(id), "cancel",
-		[]string{"pending", "deferred"},
-		func() error {
-			return queue.NewSQLRepo(h.queueEngine.DB).Cancel(context.Background(), uint(id), nil)
-		}); err != nil {
-		code := 400
-		if strings.Contains(err.Error(), "not found") {
-			code = 404
-		}
-		return c.Status(code).JSON(fiber.Map{"error": err.Error()})
+	if h.queueEngine == nil || h.queueEngine.Repo == nil {
+		return c.Status(503).JSON(fiber.Map{"error": "queue engine unavailable"})
+	}
+	if err := h.queueEngine.Repo.AdminCancel(context.Background(), uint(id), nil); err != nil {
+		return queueActionError(c, err)
 	}
 
 	h.writeAuditLog(c, "queue.cancel", fmt.Sprintf("id:%d", id))
 	return c.JSON(fiber.Map{"status": "cancelled", "id": id})
+}
+
+func queueActionError(c fiber.Ctx, err error) error {
+	code := 400
+	if strings.Contains(err.Error(), "not found") {
+		code = 404
+	}
+	return c.Status(code).JSON(fiber.Map{"error": err.Error()})
 }

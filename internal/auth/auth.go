@@ -342,12 +342,22 @@ const MFAChallengeTTL = 5 * time.Minute
 // carry "role"; challenge tokens carry "mfa_challenge" instead.
 const MFAChallengeClaim = "mfa_challenge"
 
+var mfaChallengeNow = time.Now
+
+// SetMFAChallengeClockForTest overrides the MFA challenge clock and returns a
+// restore function. It is intended for expiry tests only.
+func SetMFAChallengeClockForTest(now func() time.Time) func() {
+	prev := mfaChallengeNow
+	mfaChallengeNow = now
+	return func() { mfaChallengeNow = prev }
+}
+
 // GenerateMFAChallengeToken creates a short-lived token that proves
 // the caller passed password authentication but has not yet completed
 // MFA. The token MUST NOT be accepted by any protected endpoint.
 // It is only usable with the MFA verify endpoint.
 func (a *Authenticator) GenerateMFAChallengeToken(userID uint) (string, error) {
-	now := time.Now()
+	now := mfaChallengeNow()
 	claims := jwt.MapClaims{
 		"sub":             fmt.Sprintf("%d", userID),
 		MFAChallengeClaim: true,
@@ -384,7 +394,7 @@ func (a *Authenticator) ValidateMFAChallengeToken(tokenString string) (uint, err
 		return 0, fmt.Errorf("not an MFA challenge token")
 	}
 	exp, ok := claims["exp"].(float64)
-	if ok && time.Now().Unix() > int64(exp) {
+	if ok && mfaChallengeNow().Unix() > int64(exp) {
 		return 0, ErrTokenExpired
 	}
 	var userID uint

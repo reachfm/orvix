@@ -349,7 +349,7 @@ func TestAdminQueueDetail(t *testing.T) {
 		t.Fatalf("detail: expected 200, got %d: %s", resp.StatusCode, string(body))
 	}
 	var result struct {
-		Message  map[string]interface{} `json:"message"`
+		Message  map[string]interface{}   `json:"message"`
 		Attempts []map[string]interface{} `json:"attempts"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
@@ -497,6 +497,38 @@ func TestAdminQueueCancel(t *testing.T) {
 	resp2, _ := queueRequest(t, e, "POST", "/api/v1/admin/queue/messages/"+strconv.FormatUint(uint64(id2), 10)+"/cancel", "", e.adminToken, "")
 	if resp2.StatusCode != 403 {
 		t.Errorf("no-csrf cancel: expected 403, got %d", resp2.StatusCode)
+	}
+}
+
+func TestAdminQueueActionsRejectLeasedEntries(t *testing.T) {
+	e := buildQueueTestEnv(t)
+
+	tests := []struct {
+		name   string
+		action string
+		body   string
+	}{
+		{"retry", "retry", ""},
+		{"bounce", "bounce", `{"reason":"operator bounce"}`},
+		{"cancel", "cancel", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			id := seedQueueEntry(t, e, "leased", tt.name+"@test.com", tt.name+"-to@test.com")
+			resp, body := queueRequest(t, e, "POST",
+				"/api/v1/admin/queue/messages/"+strconv.FormatUint(uint64(id), 10)+"/"+tt.action,
+				tt.body, e.adminToken, e.csrfToken)
+			if resp.StatusCode != 400 {
+				t.Fatalf("%s leased: expected 400, got %d: %s", tt.action, resp.StatusCode, string(body))
+			}
+			var dbStatus string
+			if err := e.sqlDB.QueryRow("SELECT status FROM coremail_queue WHERE id = ?", id).Scan(&dbStatus); err != nil {
+				t.Fatalf("status lookup: %v", err)
+			}
+			if dbStatus != "leased" {
+				t.Fatalf("%s changed leased row status to %s", tt.action, dbStatus)
+			}
+		})
 	}
 }
 

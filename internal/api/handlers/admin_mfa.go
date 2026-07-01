@@ -331,9 +331,22 @@ func (h *Handler) MFALoginVerify(c fiber.Ctx) error {
 				zap.Uint("user_id", userID))
 			return c.Status(401).JSON(fiber.Map{"error": "invalid recovery code"})
 		}
-		// Mark recovery code as used (one-time use).
-		if _, err := sqlDB.Exec(`UPDATE mfa_recovery_codes SET used_at = datetime('now') WHERE id = ?`, recoveryID); err != nil {
+		// Mark recovery code as used (one-time use). The used_at predicate
+		// keeps concurrent redemption attempts from reusing the same code.
+		res, err := sqlDB.Exec(`UPDATE mfa_recovery_codes SET used_at = datetime('now') WHERE id = ? AND used_at IS NULL`, recoveryID)
+		if err != nil {
 			h.logger.Error("failed to mark recovery code used", zap.Error(err))
+			return c.Status(500).JSON(fiber.Map{"error": "failed to redeem recovery code"})
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			h.logger.Error("failed to verify recovery code redemption", zap.Error(err))
+			return c.Status(500).JSON(fiber.Map{"error": "failed to redeem recovery code"})
+		}
+		if affected != 1 {
+			h.logger.Warn("mfa login: recovery code was already redeemed concurrently",
+				zap.Uint("user_id", userID))
+			return c.Status(401).JSON(fiber.Map{"error": "invalid recovery code"})
 		}
 		h.writeAuditLog(c, "mfa.login.recovery_code", fmt.Sprintf("user_id:%d recovery_id:%d", userID, recoveryID))
 	} else {

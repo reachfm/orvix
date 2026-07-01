@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha1"
+	"database/sql"
 	"encoding/base32"
 	"encoding/binary"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,6 +30,8 @@ import (
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
 )
+
+var mfaLoginIPCounter int64
 
 // mfaComputeTOTP computes a 6-digit TOTP value for the given base32 secret.
 // Uses HMAC-SHA1 per RFC 6238 (matching the server-side computeTOTP).
@@ -50,9 +54,12 @@ func mfaComputeTOTP(secretBase32 string, t time.Time) string {
 // mfaTestEnv holds the test harness for MFA endpoints.
 type mfaTestEnv struct {
 	router     *api.Router
+	sqlDB      *sql.DB
 	adminToken string
 	csrfToken  string
 	userToken  string
+	adminEmail string
+	adminPass  string
 }
 
 func buildMFATestEnv(t *testing.T) *mfaTestEnv {
@@ -149,9 +156,12 @@ func buildMFATestEnv(t *testing.T) *mfaTestEnv {
 
 	return &mfaTestEnv{
 		router:     router,
+		sqlDB:      sqlDB,
 		adminToken: adminToken,
 		csrfToken:  csrfToken,
 		userToken:  userToken,
+		adminEmail: adminEmail,
+		adminPass:  adminPass,
 	}
 }
 
@@ -234,6 +244,86 @@ func mfaRequest(t *testing.T, e *mfaTestEnv, method, path, bearer, csrfCookie st
 		_ = json.Unmarshal(respBody, &out)
 	}
 	return resp.StatusCode, out
+}
+
+func mfaPostLogin(t *testing.T, e *mfaTestEnv, email, password string) (int, map[string]interface{}, []*http.Cookie) {
+	t.Helper()
+	payload, _ := json.Marshal(map[string]string{"email": email, "password": password})
+	req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = fmt.Sprintf("127.0.0.%d:12345", 10+atomic.AddInt64(&mfaLoginIPCounter, 1))
+	resp, err := e.router.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	out := map[string]interface{}{}
+	if len(body) > 0 {
+		_ = json.Unmarshal(body, &out)
+	}
+	return resp.StatusCode, out, resp.Cookies()
+}
+
+func mfaPostVerify(t *testing.T, e *mfaTestEnv, body map[string]string) (int, map[string]interface{}, []*http.Cookie) {
+	t.Helper()
+	payload, _ := json.Marshal(body)
+	req := httptest.NewRequest("POST", "/api/v1/auth/mfa/verify", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := e.router.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("mfa verify: %v", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	out := map[string]interface{}{}
+	if len(respBody) > 0 {
+		_ = json.Unmarshal(respBody, &out)
+	}
+	return resp.StatusCode, out, resp.Cookies()
+}
+
+func mfaCookieValue(cookies []*http.Cookie, name string) string {
+	for _, c := range cookies {
+		if c.Name == name {
+			return c.Value
+		}
+	}
+	return ""
+}
+
+func mfaEnableAdmin(t *testing.T, e *mfaTestEnv) (string, []string) {
+	t.Helper()
+	status, resp := mfaRequest(t, e, "POST", "/api/v1/admin/mfa/setup/begin", e.adminToken, e.csrfToken, map[string]interface{}{
+		"current_password": e.adminPass,
+	})
+	if status != 200 {
+		t.Fatalf("setup begin: expected 200, got %d: %v", status, resp)
+	}
+	secret, _ := resp["secret"].(string)
+	if secret == "" {
+		t.Fatalf("setup begin returned no secret: %v", resp)
+	}
+	code := mfaComputeTOTP(secret, time.Now().UTC())
+	status, resp = mfaRequest(t, e, "POST", "/api/v1/admin/mfa/setup/verify", e.adminToken, e.csrfToken, map[string]interface{}{
+		"code": code,
+	})
+	if status != 200 {
+		t.Fatalf("setup verify: expected 200, got %d: %v", status, resp)
+	}
+	rawCodes, ok := resp["recovery_codes"].([]interface{})
+	if !ok || len(rawCodes) == 0 {
+		t.Fatalf("setup verify returned no recovery codes: %v", resp)
+	}
+	codes := make([]string, 0, len(rawCodes))
+	for _, raw := range rawCodes {
+		code, ok := raw.(string)
+		if !ok || code == "" {
+			t.Fatalf("invalid recovery code in response: %v", rawCodes)
+		}
+		codes = append(codes, code)
+	}
+	return secret, codes
 }
 
 // ────────────────────────────────────────────────────────────
@@ -333,6 +423,162 @@ func TestMFASetupFlow(t *testing.T) {
 	}
 	if !resp["enabled"].(bool) {
 		t.Errorf("MFA should be enabled after setup, got %v", resp["enabled"])
+	}
+}
+
+func TestMFALoginFlowEnforcesChallengeAndRecoveryCodes(t *testing.T) {
+	e := buildMFATestEnv(t)
+
+	// MFA-disabled users receive normal tokens after password authentication.
+	status, body, cookies := mfaPostLogin(t, e, e.adminEmail, e.adminPass)
+	if status != 200 {
+		t.Fatalf("MFA-disabled login: expected 200, got %d: %v", status, body)
+	}
+	if mfaCookieValue(cookies, "access_token") == "" || mfaCookieValue(cookies, "refresh_token") == "" {
+		t.Fatalf("MFA-disabled login did not issue access/refresh cookies: %v", cookies)
+	}
+	if body["access_token"] == "" {
+		t.Fatalf("MFA-disabled login body missing access token: %v", body)
+	}
+
+	secret, recoveryCodes := mfaEnableAdmin(t, e)
+
+	// MFA-enabled password login returns only challenge fields and no real tokens.
+	status, body, cookies = mfaPostLogin(t, e, e.adminEmail, e.adminPass)
+	if status != 200 {
+		t.Fatalf("MFA-enabled password login: expected 200 challenge, got %d: %v", status, body)
+	}
+	challenge, _ := body["mfa_challenge"].(string)
+	if body["mfa_required"] != true || challenge == "" {
+		t.Fatalf("MFA-enabled login did not return challenge fields only: %v", body)
+	}
+	if body["access_token"] != nil || mfaCookieValue(cookies, "access_token") != "" || mfaCookieValue(cookies, "refresh_token") != "" {
+		t.Fatalf("MFA challenge response issued real tokens: body=%v cookies=%v", body, cookies)
+	}
+
+	// MFA challenge tokens are not access tokens and must not authorize protected APIs.
+	req := httptest.NewRequest("GET", "/api/v1/admin/mfa/status", nil)
+	req.Header.Set("Authorization", "Bearer "+challenge)
+	resp, err := e.router.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("protected request with challenge: %v", err)
+	}
+	if resp.StatusCode == 200 {
+		t.Fatal("MFA challenge token accessed a protected API")
+	}
+
+	// Invalid TOTP does not issue tokens.
+	status, body, cookies = mfaPostVerify(t, e, map[string]string{
+		"mfa_challenge": challenge,
+		"code":          "000000",
+	})
+	if status != 401 {
+		t.Fatalf("invalid TOTP: expected 401, got %d: %v", status, body)
+	}
+	if mfaCookieValue(cookies, "access_token") != "" {
+		t.Fatalf("invalid TOTP issued access token cookie")
+	}
+
+	// Invalid challenge does not issue tokens.
+	status, body, cookies = mfaPostVerify(t, e, map[string]string{
+		"mfa_challenge": "not-a-real-challenge",
+		"code":          mfaComputeTOTP(secret, time.Now().UTC()),
+	})
+	if status != 401 {
+		t.Fatalf("invalid challenge: expected 401, got %d: %v", status, body)
+	}
+	if mfaCookieValue(cookies, "access_token") != "" {
+		t.Fatalf("invalid challenge issued access token cookie")
+	}
+
+	// Expired challenge does not issue tokens.
+	restoreClock := auth.SetMFAChallengeClockForTest(func() time.Time {
+		return time.Now().Add(-10 * time.Minute)
+	})
+	status, body, _ = mfaPostLogin(t, e, e.adminEmail, e.adminPass)
+	restoreClock()
+	if status != 200 {
+		t.Fatalf("expired-challenge setup login: expected 200, got %d: %v", status, body)
+	}
+	expiredChallenge, _ := body["mfa_challenge"].(string)
+	status, body, cookies = mfaPostVerify(t, e, map[string]string{
+		"mfa_challenge": expiredChallenge,
+		"code":          mfaComputeTOTP(secret, time.Now().UTC()),
+	})
+	if status != 401 {
+		t.Fatalf("expired challenge: expected 401, got %d: %v", status, body)
+	}
+	if mfaCookieValue(cookies, "access_token") != "" {
+		t.Fatalf("expired challenge issued access token cookie")
+	}
+
+	// Valid TOTP completes login and issues tokens.
+	status, body, cookies = mfaPostVerify(t, e, map[string]string{
+		"mfa_challenge": challenge,
+		"code":          mfaComputeTOTP(secret, time.Now().UTC()),
+	})
+	if status != 200 {
+		t.Fatalf("valid TOTP: expected 200, got %d: %v", status, body)
+	}
+	if body["access_token"] == "" || mfaCookieValue(cookies, "access_token") == "" || mfaCookieValue(cookies, "refresh_token") == "" {
+		t.Fatalf("valid TOTP did not issue tokens: body=%v cookies=%v", body, cookies)
+	}
+
+	// Recovery code cannot be used without a valid challenge.
+	status, body, cookies = mfaPostVerify(t, e, map[string]string{
+		"recovery_code": recoveryCodes[0],
+	})
+	if status != 400 {
+		t.Fatalf("recovery without challenge: expected 400, got %d: %v", status, body)
+	}
+	if mfaCookieValue(cookies, "access_token") != "" {
+		t.Fatalf("recovery without challenge issued access token cookie")
+	}
+
+	status, body, cookies = mfaPostVerify(t, e, map[string]string{
+		"mfa_challenge": "not-a-real-challenge",
+		"recovery_code": recoveryCodes[0],
+	})
+	if status != 401 {
+		t.Fatalf("recovery with invalid challenge: expected 401, got %d: %v", status, body)
+	}
+	if mfaCookieValue(cookies, "access_token") != "" {
+		t.Fatalf("recovery with invalid challenge issued access token cookie")
+	}
+
+	// Valid recovery code completes login, but cannot be reused.
+	status, body, cookies = mfaPostVerify(t, e, map[string]string{
+		"mfa_challenge": challenge,
+		"recovery_code": recoveryCodes[0],
+	})
+	if status != 200 {
+		t.Fatalf("valid recovery code: expected 200, got %d: %v", status, body)
+	}
+	if body["access_token"] == "" || mfaCookieValue(cookies, "access_token") == "" {
+		t.Fatalf("valid recovery code did not issue tokens: body=%v cookies=%v", body, cookies)
+	}
+
+	status, body, cookies = mfaPostVerify(t, e, map[string]string{
+		"mfa_challenge": challenge,
+		"recovery_code": recoveryCodes[0],
+	})
+	if status != 401 {
+		t.Fatalf("reused recovery code: expected 401, got %d: %v", status, body)
+	}
+	if mfaCookieValue(cookies, "access_token") != "" {
+		t.Fatalf("reused recovery code issued access token cookie")
+	}
+
+	// Invalid recovery code does not issue tokens.
+	status, body, cookies = mfaPostVerify(t, e, map[string]string{
+		"mfa_challenge": challenge,
+		"recovery_code": "not-a-valid-recovery-code",
+	})
+	if status != 401 {
+		t.Fatalf("invalid recovery code: expected 401, got %d: %v", status, body)
+	}
+	if mfaCookieValue(cookies, "access_token") != "" {
+		t.Fatalf("invalid recovery code issued access token cookie")
 	}
 }
 

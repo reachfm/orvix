@@ -63,6 +63,18 @@ type Repository interface {
 	// RetryNow resets a dead-lettered or bounced job to pending for immediate retry.
 	RetryNow(ctx context.Context, id uint, tx interface{}) error
 
+	// AdminRetryNow performs an operator-triggered retry with a conditional
+	// status transition. It must not alter leased/in-flight jobs.
+	AdminRetryNow(ctx context.Context, id uint, tx interface{}) error
+
+	// AdminDeadLetter performs an operator-triggered dead-letter transition
+	// with a conditional status transition. It must not alter leased/in-flight jobs.
+	AdminDeadLetter(ctx context.Context, id uint, lastError string, tx interface{}) error
+
+	// AdminCancel performs an operator-triggered cancellation with a conditional
+	// status transition. It must not alter leased/in-flight jobs.
+	AdminCancel(ctx context.Context, id uint, tx interface{}) error
+
 	// ReleaseExpiredLeases finds jobs with expired leases and returns them to pending.
 	ReleaseExpiredLeases(ctx context.Context, tx interface{}) (int64, error)
 
@@ -434,6 +446,53 @@ func (r *SQLRepo) RetryNow(ctx context.Context, id uint, tx interface{}) error {
 	return err
 }
 
+func (r *SQLRepo) AdminRetryNow(ctx context.Context, id uint, tx interface{}) error {
+	now := nowFn()
+	return r.transitionStatus(ctx, id, []QueueStatus{StatusDeferred, StatusBounced, StatusDeadLetter}, tx,
+		`UPDATE coremail_queue SET status=?, next_attempt_at=?, attempt_count=0, dead_letter_at=NULL, last_error='', updated_at=?
+		 WHERE id=? AND deleted_at IS NULL AND status IN (?, ?, ?)`,
+		string(StatusPending), now, now, id,
+		string(StatusDeferred), string(StatusBounced), string(StatusDeadLetter))
+}
+
+func (r *SQLRepo) AdminDeadLetter(ctx context.Context, id uint, lastError string, tx interface{}) error {
+	now := nowFn()
+	return r.transitionStatus(ctx, id, []QueueStatus{StatusPending, StatusDeferred, StatusBounced}, tx,
+		`UPDATE coremail_queue SET status=?, dead_letter_at=?, last_error=?, updated_at=?
+		 WHERE id=? AND deleted_at IS NULL AND status IN (?, ?, ?)`,
+		string(StatusDeadLetter), now, lastError, now, id,
+		string(StatusPending), string(StatusDeferred), string(StatusBounced))
+}
+
+func (r *SQLRepo) AdminCancel(ctx context.Context, id uint, tx interface{}) error {
+	now := nowFn()
+	return r.transitionStatus(ctx, id, []QueueStatus{StatusPending, StatusDeferred}, tx,
+		`UPDATE coremail_queue SET status=?, completed_at=?, updated_at=?
+		 WHERE id=? AND deleted_at IS NULL AND status IN (?, ?)`,
+		string(StatusCancelled), now, now, id,
+		string(StatusPending), string(StatusDeferred))
+}
+
+func (r *SQLRepo) transitionStatus(ctx context.Context, id uint, allowed []QueueStatus, tx interface{}, query string, args ...interface{}) error {
+	e := r.exec(tx)
+	res, err := e.ExecContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 1 {
+		return nil
+	}
+	var current string
+	if err := e.QueryRowContext(ctx, `SELECT status FROM coremail_queue WHERE id=? AND deleted_at IS NULL`, id).Scan(&current); err != nil {
+		return fmt.Errorf("queue entry %d not found", id)
+	}
+	return fmt.Errorf("queue entry %d is in status %q; allowed statuses: %v", id, current, allowed)
+}
+
 // DeliveryDiagnostics is the structured set of
 // fields the delivery worker captures when a
 // remote SMTP attempt completes. The fields are
@@ -595,7 +654,9 @@ func statusPtr(s QueueStatus) *QueueStatus {
 	return &s
 }
 
-func scanEntry(row interface{ Scan(dest ...interface{}) error }) (*QueueEntry, error) {
+func scanEntry(row interface {
+	Scan(dest ...interface{}) error
+}) (*QueueEntry, error) {
 	var e QueueEntry
 	var direction, status, deliveryMode string
 	var tlsUsed int
