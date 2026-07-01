@@ -17,6 +17,7 @@ import (
 	"github.com/orvix/orvix/internal/api"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/autoheal"
+	"github.com/orvix/orvix/internal/buildinfo"
 	"github.com/orvix/orvix/internal/calendar"
 	"github.com/orvix/orvix/internal/collaboration"
 	"github.com/orvix/orvix/internal/compliance"
@@ -42,7 +43,87 @@ import (
 	"gorm.io/gorm"
 )
 
+// handleMetadataArgs returns (handled, exitCode) for the small set of
+// CLI args that must short-circuit before any runtime bootstrap. Any
+// other argument causes the function to return (false, 0) and main()
+// proceeds with normal startup.
+//
+// The set is intentionally narrow:
+//
+//	-h, --help    Print usage and exit 0.
+//	-v, --version Print short version summary and exit 0.
+//	version       Print short version summary and exit 0.
+//	version --full / version -v  Print long version detail and exit 0.
+//
+// Adding new short-circuit args here is fine; promoting to flag.Parse
+// is fine if the list grows past a handful of flags.
+func handleMetadataArgs(args []string) (bool, int) {
+	if len(args) == 0 {
+		return false, 0
+	}
+	first := args[0]
+	switch first {
+	case "-h", "--help", "help":
+		printHelp()
+		return true, 0
+	case "-v", "--version":
+		fmt.Println(buildinfo.Short())
+		return true, 0
+	case "version":
+		// `orvix version`         → short
+		// `orvix version --full`  → long
+		// `orvix version -v`      → long
+		if len(args) > 1 && (args[1] == "--full" || args[1] == "-v" || args[1] == "-V") {
+			fmt.Print(buildinfo.Long())
+		} else {
+			fmt.Println(buildinfo.Short())
+		}
+		return true, 0
+	}
+	return false, 0
+}
+
+func printHelp() {
+	fmt.Println(`orvix — Orvix Email Server Platform
+
+Usage:
+  orvix [flags]
+  orvix <command> [args]
+
+Commands:
+  serve              Start the Orvix runtime (default if no command is given).
+  version [--full]   Print version metadata and exit. Does not touch config,
+                     database, migrations, modules, or listeners.
+  help, -h, --help   Print this help and exit. Same fast-path as version.
+
+Flags:
+  -h, --help         Print this help and exit.
+  -v, --version      Print version summary and exit.
+
+Notes:
+  • All metadata commands exit before loading config or connecting to
+    the database, so they are safe to run in CI, recovery shells, and
+    upgrade dry-runs where the service may not be healthy.
+  • The runtime is started by running ` + "`orvix`" + ` with no metadata flag.
+
+Build metadata (visible via ` + "`orvix version --full`" + `):
+  version, commit, tag, build_time, channel, go_version, os/arch.`)
+}
+
 func main() {
+	// This guarantees `orvix --help` and `orvix version` exit quickly
+	// without touching config, DB, migrations, modules, or listeners —
+	// which is the documented behavior for the CLI metadata commands.
+	//
+	// See ENTERPRISE-BACKEND-COMPLETION item 12: "orvix --help
+	// unexpectedly booted config, DB, migrations, modules, runtime".
+	//
+	// If a future flag set grows beyond a couple of help/version flags,
+	// promote this to flag.Parse or a small subcommand multiplexer.
+	if handled, exit := handleMetadataArgs(os.Args[1:]); handled {
+		os.Exit(exit)
+	}
+
 	logger, err := config.NewLogger(&config.LoggingConfig{
 		Level:  "info",
 		Format: "console",

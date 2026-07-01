@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	dbmode "github.com/orvix/orvix/internal/database/mode"
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
 )
@@ -212,19 +213,33 @@ type ServerConfig struct {
 }
 
 // DatabaseConfig holds database connection settings.
+//
+// DeploymentMode is the authoritative flag that decides whether the
+// runtime treats the database as "production" or "dev/smoke". A
+// production deployment MUST use Postgres; SQLite in production is
+// rejected at boot. The check lives in
+// internal/database/mode.ValidateProductionSafety and is wired into
+// config.Load.
 type DatabaseConfig struct {
-	Driver      string `mapstructure:"driver"`
-	DSN         string `mapstructure:"dsn"`
-	Host        string `mapstructure:"host"`
-	Port        int    `mapstructure:"port"`
-	User        string `mapstructure:"user"`
-	Password    string `mapstructure:"password"`
-	DBName      string `mapstructure:"dbname"`
-	SSLMode     string `mapstructure:"sslmode"`
-	MaxOpen     int    `mapstructure:"max_open"`
-	MaxIdle     int    `mapstructure:"max_idle"`
-	MaxLifetime int    `mapstructure:"max_lifetime"`
-	SQLitePath  string `mapstructure:"sqlite_path"`
+	Driver          string `mapstructure:"driver"`
+	DSN             string `mapstructure:"dsn"`
+	Host            string `mapstructure:"host"`
+	Port            int    `mapstructure:"port"`
+	User            string `mapstructure:"user"`
+	Password        string `mapstructure:"password"`
+	DBName          string `mapstructure:"dbname"`
+	SSLMode         string `mapstructure:"sslmode"`
+	MaxOpen         int    `mapstructure:"max_open"`
+	MaxIdle         int    `mapstructure:"max_idle"`
+	MaxLifetime     int    `mapstructure:"max_lifetime"`
+	SQLitePath      string `mapstructure:"sqlite_path"`
+	DeploymentMode  string `mapstructure:"deployment_mode"` // "dev" (default) or "production"
+}
+
+// IsProduction reports whether the deployment mode is "production".
+// Used by the mode package to refuse SQLite in production.
+func (c DatabaseConfig) IsProduction() bool {
+	return strings.EqualFold(strings.TrimSpace(c.DeploymentMode), "production")
 }
 
 // RedisConfig holds Redis connection settings.
@@ -547,6 +562,15 @@ func Load(logger *zap.Logger) (*Config, error) {
 
 	cfg.validate()
 
+	// Enforce database-mode production safety. This refuses to boot
+	// when deployment_mode=production is paired with driver=sqlite.
+	// Lives here (not in cmd/orvix/main.go) so all callers of
+	// config.Load get the same fail-closed behavior, including tests
+	// that exercise Load directly.
+	if err := dbmode.ValidateDriverDSN(cfg.Database.Driver, cfg.Database.DSN, cfg.Database.IsProduction()); err != nil {
+		return nil, fmt.Errorf("database mode validation failed: %w", err)
+	}
+
 	return cfg, nil
 }
 
@@ -685,6 +709,20 @@ func (c *Config) validate() {
 				c.Database.DBName, c.Database.Password, c.Database.SSLMode)
 		case "sqlite":
 			c.Database.DSN = c.Database.SQLitePath
+		}
+	}
+	// Apply safe defaults for pool settings.
+	if c.Database.MaxOpen <= 0 {
+		switch c.Database.Driver {
+		case "postgres":
+			c.Database.MaxOpen = 25
+			c.Database.MaxIdle = 5
+			c.Database.MaxLifetime = 300
+		default:
+			// SQLite is single-writer; keep the existing 1/1 default.
+			c.Database.MaxOpen = 1
+			c.Database.MaxIdle = 1
+			c.Database.MaxLifetime = 0
 		}
 	}
 }

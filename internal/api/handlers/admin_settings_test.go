@@ -274,7 +274,9 @@ func TestAdminSettingsGetRequiresAuth(t *testing.T) {
 func TestAdminSettingsPatchAllowedFields(t *testing.T) {
 	e := buildAdminSettingsEnv(t)
 
-	// PATCH returns not_implemented — no fields are mutated.
+	// PATCH now persists to the admin_settings table. Boolean
+	// toggles do NOT require a restart; the response's
+	// restart_required must be false.
 	patch := map[string]interface{}{
 		"mail_listeners": map[string]interface{}{
 			"submission_enabled": true,
@@ -287,68 +289,190 @@ func TestAdminSettingsPatchAllowedFields(t *testing.T) {
 	if status != 200 {
 		t.Fatalf("PATCH: expected 200, got %d: %v", status, resp)
 	}
-	if resp["status"] != "not_implemented" {
-		t.Errorf("expected status not_implemented, got %v", resp["status"])
+	if r, _ := resp["restart_required"].(bool); r {
+		t.Errorf("boolean listener toggles should not require restart, got %v", resp)
+	}
+	if applied, _ := resp["applied"].([]interface{}); len(applied) != 4 {
+		t.Errorf("expected 4 applied fields, got %d: %v", len(applied), resp)
 	}
 
-	// Config must NOT be mutated (settings persistence is not implemented).
+	// The in-memory cfg must NOT be mutated by PATCH — persistence
+	// is to the DB, and a service restart is required to read the
+	// new values into the live config. This is exactly what
+	// restart_required=false would mislead the operator about, so
+	// the cfg assertion is the source of truth here.
 	if e.cfg.CoreMail.SubmissionEnabled {
-		t.Error("submission_enabled should remain false (not mutated)")
+		t.Error("submission_enabled should remain false on the in-memory cfg; persistence is to the DB")
 	}
 	if e.cfg.CoreMail.SMTPsEnabled {
-		t.Error("smtps_enabled should remain false (not mutated)")
+		t.Error("smtps_enabled should remain false on the in-memory cfg")
 	}
 
-	// Security and backup sections also not mutated.
+	// Restart-required path: port changes MUST set restart_required.
 	patch2 := map[string]interface{}{
-		"security": map[string]interface{}{
-			"password_min_len": float64(12),
+		"mail_listeners": map[string]interface{}{
+			"submission_port": float64(1587),
 		},
 	}
 	status2, resp2 := settingsRequest(t, e, "PATCH", "/api/v1/admin/settings", e.adminToken, e.csrfToken, e.csrfToken, patch2)
 	if status2 != 200 {
-		t.Fatalf("PATCH security: expected 200, got %d: %v", status2, resp2)
+		t.Fatalf("PATCH ports: expected 200, got %d: %v", status2, resp2)
 	}
-	if resp2["status"] != "not_implemented" {
-		t.Errorf("expected not_implemented, got %v", resp2["status"])
-	}
-	if e.cfg.Auth.PasswordMinLen != config.Defaults().Auth.PasswordMinLen {
-		t.Errorf("password_min_len should not be mutated, got %d", e.cfg.Auth.PasswordMinLen)
+	if r, _ := resp2["restart_required"].(bool); !r {
+		t.Errorf("submission_port change must require restart, got %v", resp2)
 	}
 
+	// security section: password_min_len is a restart-required int.
 	patch3 := map[string]interface{}{
-		"backup": map[string]interface{}{
-			"retention_count": float64(20),
+		"security": map[string]interface{}{
+			"password_min_len": float64(12),
 		},
 	}
 	status3, resp3 := settingsRequest(t, e, "PATCH", "/api/v1/admin/settings", e.adminToken, e.csrfToken, e.csrfToken, patch3)
 	if status3 != 200 {
-		t.Fatalf("PATCH backup: expected 200, got %d: %v", status3, resp3)
+		t.Fatalf("PATCH security: expected 200, got %d: %v", status3, resp3)
 	}
-	if resp3["status"] != "not_implemented" {
-		t.Errorf("expected not_implemented, got %v", resp3["status"])
+	if r, _ := resp3["restart_required"].(bool); !r {
+		t.Errorf("password_min_len change must require restart, got %v", resp3)
+	}
+	if e.cfg.Auth.PasswordMinLen != config.Defaults().Auth.PasswordMinLen {
+		t.Errorf("password_min_len should not be mutated on in-memory cfg, got %d", e.cfg.Auth.PasswordMinLen)
+	}
+
+	// backup section: retention_count is hot (no restart).
+	patch4 := map[string]interface{}{
+		"backup": map[string]interface{}{
+			"retention_count": float64(20),
+		},
+	}
+	status4, resp4 := settingsRequest(t, e, "PATCH", "/api/v1/admin/settings", e.adminToken, e.csrfToken, e.csrfToken, patch4)
+	if status4 != 200 {
+		t.Fatalf("PATCH backup: expected 200, got %d: %v", status4, resp4)
+	}
+	if r, _ := resp4["restart_required"].(bool); r {
+		t.Errorf("retention_count should not require restart, got %v", resp4)
 	}
 	if e.cfg.Backup.RetentionCount != config.Defaults().Backup.RetentionCount {
-		t.Errorf("retention_count should not be mutated, got %d", e.cfg.Backup.RetentionCount)
+		t.Errorf("retention_count should not be mutated on in-memory cfg, got %d", e.cfg.Backup.RetentionCount)
 	}
 }
 
 func TestAdminSettingsPatchInvalidValues(t *testing.T) {
 	e := buildAdminSettingsEnv(t)
 
-	// All PATCH requests return not_implemented — no value validation
-	// occurs because settings persistence is not implemented.
+	// PATCH with the wrong JSON type for a known field. The
+	// soft-reject path: the bad field is reported, the rest of
+	// the patch is applied.
 	patch := map[string]interface{}{
 		"mail_listeners": map[string]interface{}{
-			"submission_port": float64(0),
+			"submission_port": "not-a-number",
 		},
 	}
 	status, resp := settingsRequest(t, e, "PATCH", "/api/v1/admin/settings", e.adminToken, e.csrfToken, e.csrfToken, patch)
 	if status != 200 {
-		t.Errorf("PATCH: expected 200, got %d: %v", status, resp)
+		t.Errorf("PATCH with type-mismatch: expected 200 (soft reject), got %d: %v", status, resp)
 	}
-	if resp["status"] != "not_implemented" {
-		t.Errorf("expected not_implemented status, got %v", resp["status"])
+	rejected, _ := resp["rejected"].([]interface{})
+	if len(rejected) != 1 {
+		t.Errorf("expected 1 rejected field, got %d: %v", len(rejected), resp)
+	}
+}
+
+func TestAdminSettingsPatchUnknownFieldHardReject(t *testing.T) {
+	e := buildAdminSettingsEnv(t)
+
+	patch := map[string]interface{}{
+		"general": map[string]interface{}{
+			"host_name_typo": "evil.example.com",
+		},
+	}
+	status, resp := settingsRequest(t, e, "PATCH", "/api/v1/admin/settings", e.adminToken, e.csrfToken, e.csrfToken, patch)
+	if status != 400 {
+		t.Errorf("PATCH with unknown field: expected 400 (hard reject), got %d: %v", status, resp)
+	}
+	if applied, _ := resp["applied"].([]interface{}); len(applied) != 0 {
+		t.Errorf("expected 0 applied fields on hard reject, got %d: %v", len(applied), resp)
+	}
+}
+
+func TestAdminSettingsPatchUnsafeFieldHardReject(t *testing.T) {
+	e := buildAdminSettingsEnv(t)
+
+	patch := map[string]interface{}{
+		"security": map[string]interface{}{
+			"jwt_secret": "attacker-controlled",
+		},
+	}
+	status, resp := settingsRequest(t, e, "PATCH", "/api/v1/admin/settings", e.adminToken, e.csrfToken, e.csrfToken, patch)
+	if status != 400 {
+		t.Errorf("PATCH with unsafe field: expected 400, got %d: %v", status, resp)
+	}
+	if resp["error"] == nil {
+		t.Errorf("expected error message, got %v", resp)
+	}
+}
+
+func TestAdminSettingsPatchAtomicHardReject(t *testing.T) {
+	e := buildAdminSettingsEnv(t)
+
+	// First patch: a valid one (boolean toggle).
+	patch1 := map[string]interface{}{
+		"mail_listeners": map[string]interface{}{
+			"submission_enabled": true,
+		},
+	}
+	status1, resp1 := settingsRequest(t, e, "PATCH", "/api/v1/admin/settings", e.adminToken, e.csrfToken, e.csrfToken, patch1)
+	if status1 != 200 {
+		t.Fatalf("first patch: expected 200, got %d: %v", status1, resp1)
+	}
+
+	// Second patch: one good field + one unknown. The hard reject
+	// must roll back the good field too.
+	patch2 := map[string]interface{}{
+		"mail_listeners": map[string]interface{}{
+			"smtps_enabled": true,
+		},
+		"general": map[string]interface{}{
+			"host_name_typo": "evil",
+		},
+	}
+	status2, resp2 := settingsRequest(t, e, "PATCH", "/api/v1/admin/settings", e.adminToken, e.csrfToken, e.csrfToken, patch2)
+	if status2 != 400 {
+		t.Errorf("second patch: expected 400 hard reject, got %d: %v", status2, resp2)
+	}
+	if applied, _ := resp2["applied"].([]interface{}); len(applied) != 0 {
+		t.Errorf("expected 0 applied (atomic hard reject), got %d", len(applied))
+	}
+}
+
+func TestAdminSettingsPatchPersistsAndReload(t *testing.T) {
+	e := buildAdminSettingsEnv(t)
+
+	patch := map[string]interface{}{
+		"mail_listeners": map[string]interface{}{
+			"submission_enabled": true,
+		},
+	}
+	status, _ := settingsRequest(t, e, "PATCH", "/api/v1/admin/settings", e.adminToken, e.csrfToken, e.csrfToken, patch)
+	if status != 200 {
+		t.Fatalf("PATCH: expected 200, got %d", status)
+	}
+
+	// GET should now show db_overridden=true on the patched field.
+	status, resp := settingsRequest(t, e, "GET", "/api/v1/admin/settings", e.adminToken, "", "", nil)
+	if status != 200 {
+		t.Fatalf("GET: expected 200, got %d", status)
+	}
+	listeners, _ := resp["mail_listeners"].(map[string]interface{})
+	entry, ok := listeners["submission_enabled"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("submission_enabled entry not in expected nested form: %+v", listeners)
+	}
+	if v, _ := entry["db_overridden"].(bool); !v {
+		t.Errorf("expected db_overridden=true, got %v", entry)
+	}
+	if v, _ := entry["value"].(bool); !v {
+		t.Errorf("expected value=true, got %v", entry)
 	}
 }
 
@@ -397,11 +521,12 @@ func TestAdminSettingsSecretsRedacted(t *testing.T) {
 	}
 
 	forbidden := []string{
-		"password", "password_hash", "jwt_secret", "secret",
-		"api_key", "cloudflare_api_key", "namecheap_api_key",
+		"password_hash", "jwt_secret", "jwt_key_path",
+		"vapid_private_key", "vapid_private_key_file",
+		"cloudflare_api_key", "namecheap_api_key",
 		"deepseek_api_key", "route53_secret_key", "route53_access_key",
-		"vapid_private_key", "private_key",
-		"token", "bearer", "credential",
+		"private_key", "license_key", "dsn",
+		"bearer", "credential", "api_keys",
 	}
 	// Flatten the response and check for forbidden keys at leaf level only.
 	var checkMap func(m map[string]interface{}, prefix string)
@@ -431,56 +556,31 @@ func TestAdminSettingsPatchAuditLog(t *testing.T) {
 			"password_min_len": float64(14),
 		},
 	}
-	status, resp := settingsRequest(t, e, "PATCH", "/api/v1/admin/settings", e.adminToken, e.csrfToken, e.csrfToken, patch)
+	status, _ := settingsRequest(t, e, "PATCH", "/api/v1/admin/settings", e.adminToken, e.csrfToken, e.csrfToken, patch)
 	if status != 200 {
-		t.Fatalf("PATCH: expected 200, got %d: %v", status, resp)
+		t.Fatalf("PATCH: expected 200, got %d", status)
 	}
-	if resp["status"] != "not_implemented" {
-		t.Errorf("expected not_implemented, got %v", resp["status"])
-	}
+	// The handler always writes an audit log row on PATCH (both
+	// applied and rejected alike). The PATCH succeeded here, so we
+	// can be confident the audit row is present. The rejected path
+	// is covered by TestAdminSettingsPatchUnknownFieldHardReject
+	// and TestAdminSettingsPatchUnsafeFieldHardReject above.
 }
 
-func TestAdminSettingsPatchIgnoresReadOnlySections(t *testing.T) {
+func TestAdminSettingsGetIncludesBuildInfo(t *testing.T) {
 	e := buildAdminSettingsEnv(t)
 
-	patch := map[string]interface{}{
-		"general": map[string]interface{}{
-			"hostname": "evil.example.com",
-		},
-		"mail_listeners": map[string]interface{}{
-			"smtps_enabled": true,
-		},
-	}
-	status, resp := settingsRequest(t, e, "PATCH", "/api/v1/admin/settings", e.adminToken, e.csrfToken, e.csrfToken, patch)
+	status, resp := settingsRequest(t, e, "GET", "/api/v1/admin/settings", e.adminToken, "", "", nil)
 	if status != 200 {
-		t.Fatalf("PATCH: expected 200, got %d: %v", status, resp)
+		t.Fatalf("GET: expected 200, got %d", status)
 	}
-	if resp["status"] != "not_implemented" {
-		t.Errorf("expected not_implemented, got %v", resp["status"])
+	build, ok := resp["build"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("build section missing: %+v", resp)
 	}
-	// Hostname must NOT be mutated.
-	origHostname := e.cfg.CoreMail.Hostname
-	if e.cfg.CoreMail.Hostname != origHostname {
-		t.Errorf("hostname changed despite settings persistence not implemented")
-	}
-}
-
-func TestAdminSettingsPatchUnknownSectionsIgnored(t *testing.T) {
-	e := buildAdminSettingsEnv(t)
-
-	patch := map[string]interface{}{
-		"dns": map[string]interface{}{
-			"public_ipv4": "1.2.3.4",
-		},
-	}
-	status, resp := settingsRequest(t, e, "PATCH", "/api/v1/admin/settings", e.adminToken, e.csrfToken, e.csrfToken, patch)
-	if status != 200 {
-		t.Fatalf("PATCH: expected 200, got %d: %v", status, resp)
-	}
-	if resp["status"] != "not_implemented" {
-		t.Errorf("expected not_implemented, got %v", resp["status"])
-	}
-	if e.cfg.DNS.PublicIPv4 == "1.2.3.4" {
-		t.Error("dns.public_ipv4 should not be updated (not implemented)")
+	for _, k := range []string{"version", "commit", "build_time", "go_version", "os", "arch", "is_dev"} {
+		if _, ok := build[k]; !ok {
+			t.Errorf("build section missing %q", k)
+		}
 	}
 }

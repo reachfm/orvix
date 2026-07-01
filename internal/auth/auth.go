@@ -33,9 +33,29 @@ var (
 type Role string
 
 const (
+	// RoleSuperAdmin has every permission, including license
+	// management and system-wide destructive operations.
 	RoleSuperAdmin Role = "superadmin"
-	RoleAdmin      Role = "admin"
-	RoleUser       Role = "user"
+
+	// RoleAdmin has every permission EXCEPT license.write. A
+	// license change is reserved for super_admin because it can
+	// affect feature flags and tier enforcement. The
+	// permission matrix lives in internal/auth/rbac.
+	RoleAdmin Role = "admin"
+
+	// RoleOperator is a helpdesk persona: read everything, act
+	// on queue and users, but cannot modify settings, backups,
+	// or license.
+	RoleOperator Role = "operator"
+
+	// RoleReadOnly is an auditor / observer. Read everything,
+	// write nothing.
+	RoleReadOnly Role = "readonly"
+
+	// RoleUser is the per-mailbox end-user role (webmail).
+	// It does NOT have admin permissions; it is here for
+	// legacy callers that distinguish "admin or not" only.
+	RoleUser Role = "user"
 )
 
 // Authenticator handles JWT-based authentication with Argon2id password hashing.

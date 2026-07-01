@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/api/handlers/settings"
 	"github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/config"
@@ -107,6 +108,21 @@ type Handler struct {
 	// admin UI can still render but every action fails closed
 	// rather than fabricating data.
 	dnsOps *dnsops.Service
+
+	// settingsStore is the DB-backed admin settings persistence
+	// layer (see internal/api/handlers/settings). Set once at
+	// router construction. PATCH /api/v1/admin/settings writes
+	// to it; GET /api/v1/admin/settings merges its entries with
+	// the config defaults to build the response.
+	settingsStore *settings.Store
+
+	// licenseValidator is the structured license validator
+	// from internal/license. The admin GET /api/v1/license
+	// endpoint returns its Status() report, which separates
+	// public_key_missing / license_missing / expired / valid.
+	// Wired in api.NewRouter; nil only in tests that pre-date
+	// the completion work.
+	licenseValidator *license.Validator
 }
 
 // NewHandler creates a new Handler with dependencies.
@@ -168,6 +184,24 @@ func (h *Handler) SetListenerRegistry(r *runtime.ListenerRegistry) {
 // admin handlers will return 503 rather than fabricating data.
 func (h *Handler) SetDNSOpsService(s *dnsops.Service) {
 	h.dnsOps = s
+}
+
+// SetSettingsStore wires the admin settings persistence layer.
+// Without it, PATCH /api/v1/admin/settings continues to return
+// the "not_implemented" stub from the previous release; with it,
+// patches are validated, persisted to admin_settings, and audited.
+// The store is created in api.NewRouter.
+func (h *Handler) SetSettingsStore(s *settings.Store) {
+	h.settingsStore = s
+}
+
+// SetLicenseValidator wires the structured license validator.
+// Without it, GET /api/v1/license falls back to a generic
+// "license validator not wired" offline status. The validator
+// is shared with the license-gated feature checks in the
+// coremail / DNS / provisioning code paths.
+func (h *Handler) SetLicenseValidator(v *license.Validator) {
+	h.licenseValidator = v
 }
 
 // Health returns server health status.
@@ -1849,23 +1883,32 @@ func (h *Handler) ListModules(c fiber.Ctx) error {
 	return c.JSON(modules)
 }
 
-// GetLicense returns current license info.
+// GetLicense returns the current license status.
+//
+// The response shape is the structured StatusReport from
+// internal/license.Validator.Status(). The previous release
+// returned a flat map with "status: no license" /
+// "tier: community", which conflated several distinct states
+// (no public key, no license, expired, invalid). The new
+// response separates:
+//
+//   - status_public_key_missing — public key not configured
+//   - status_license_missing     — no license row in DB
+//   - status_expired             — license row present, past expiry
+//   - status_invalid             — license row present, signature bad
+//   - status_valid               — license row present, signed, not expired
+//   - status_offline             — runtime cannot reach license authority
+//
+// The endpoint NEVER returns the license key, the key hash, the
+// public key, or any other secret.
 func (h *Handler) GetLicense(c fiber.Ctx) error {
-	var lic models.License
-	if err := h.db.Where("active = ?", true).Last(&lic).Error; err != nil {
-		return c.JSON(fiber.Map{"status": "no license", "tier": "community"})
+	if h.licenseValidator == nil {
+		return c.JSON(license.StatusReport{
+			Status: license.StatusOffline,
+			Reason: "license validator not wired in this build",
+		})
 	}
-	// Never expose a zero Go time in the response.
-	expiry := ""
-	if !lic.ExpiresAt.IsZero() {
-		expiry = lic.ExpiresAt.UTC().Format(time.RFC3339)
-	}
-	return c.JSON(fiber.Map{
-		"tier":          lic.Tier,
-		"expires_at":    expiry,
-		"max_domains":   lic.MaxDomains,
-		"max_mailboxes": lic.MaxMailboxes,
-	})
+	return c.JSON(h.licenseValidator.Status())
 }
 
 // ValidateLicense validates a license key.

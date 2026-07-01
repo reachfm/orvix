@@ -11,6 +11,7 @@ import (
 	"github.com/gofiber/fiber/v3/middleware/limiter"
 	"github.com/gofiber/fiber/v3/middleware/recover"
 	"github.com/orvix/orvix/internal/api/handlers"
+	"github.com/orvix/orvix/internal/api/handlers/settings"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/coremail"
@@ -243,6 +244,18 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 	logger.Info("dns ops service wired",
 		zap.Strings("providers", dnsSvc.Providers()),
 		zap.Bool("namecheap_apply_enabled", cfg.DNS.NamecheapEnableApply))
+
+	// Wire the admin settings persistence store. PATCH
+	// /api/v1/admin/settings writes through this store; GET merges
+	// its rows with the config defaults to build the response. The
+	// store manages its own table (admin_settings) and indexes on
+	// first use; we do not need a separate migration step here.
+	if sqlDB, err := db.DB(); err == nil {
+		router.h.SetSettingsStore(settings.NewStore(sqlDB))
+		logger.Info("admin settings store wired")
+	} else {
+		logger.Warn("admin settings store unavailable: failed to get sql.DB", zap.Error(err))
+	}
 
 	router.setupMiddleware()
 	router.setupRoutes()
