@@ -17,9 +17,9 @@
 #     file is replaced, so a rollback is a single cp -a
 #   * fixes ownership to root:root and perms to 0755/0644 (dirs/files)
 #   * verifies the deployed file hash against the source hash; a
-#     mismatch is reported loudly but does not abort (the verification
-#     is for the operator, the install/upgrade has already replaced
-#     the file)
+#     mismatch aborts the propagation (return 77), the destination
+#     is rolled back from the pre-copy backup, and the install /
+#     upgrade fails closed
 #   * never follows symlinks in the source tree (symlinks in the
 #     release tarball are a security smell; an operator who needs a
 #     symlink can install it themselves)

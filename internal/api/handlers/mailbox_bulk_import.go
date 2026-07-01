@@ -231,9 +231,11 @@ func (h *Handler) importMailboxes(c fiber.Ctx, dryRun bool) error {
 	now := time.Now().UTC()
 	created := 0
 	insertErrs := make([]BulkImportError, 0)
-	for _, row := range valid {
+	for i, row := range valid {
 		hash, herr := hashPasswordArgon2id(row.Password)
 		if herr != nil {
+			// No savepoint needed — no DB writes have happened yet
+			// for this row, the password hash lives only in memory.
 			insertErrs = append(insertErrs, BulkImportError{Line: row.Line, Email: row.Email, Error: "password hashing failed"})
 			if !allowPartial {
 				_ = tx.Rollback()
@@ -253,6 +255,8 @@ func (h *Handler) importMailboxes(c fiber.Ctx, dryRun bool) error {
 			`SELECT id, tenant_id FROM coremail_domains WHERE name = ? AND deleted_at IS NULL AND status = 'active'`,
 			parts[1]).Scan(&domainID, &tenantID)
 		if err != nil {
+			// No savepoint needed — the domain lookup is read-only,
+			// so no per-row write has been issued yet.
 			insertErrs = append(insertErrs, BulkImportError{Line: row.Line, Email: row.Email, Error: "domain not found or inactive"})
 			if !allowPartial {
 				_ = tx.Rollback()
@@ -270,40 +274,102 @@ func (h *Handler) importMailboxes(c fiber.Ctx, dryRun bool) error {
 		if quota <= 0 {
 			quota = bulkImportDefaultQuota
 		}
+
+		// Per-row savepoint (BLOCKER fix): in allow_partial=true
+		// mode the handler must NOT commit a partially-provisioned
+		// mailbox. We open a SAVEPOINT before the mailbox INSERT
+		// and the folder provisioning, then ROLLBACK TO SAVEPOINT
+		// on any failure so neither the mailbox row nor any
+		// partially-provisioned folders leak into the outer
+		// commit. The savepoint name is built from a safe
+		// integer counter (NOT from user input — there is no
+		// SQL injection surface), and SAVEPOINT/RELEASE failures
+		// fail closed by rolling back the whole tx.
+		//
+		// In all-or-nothing mode a single failure rolls back the
+		// entire tx, so the per-row savepoint is unnecessary
+		// overhead and we skip it.
+		spName := ""
+		if allowPartial {
+			// Safe integer counter — fmt produces only [0-9_]
+			// characters, never user-controlled bytes.
+			spName = fmt.Sprintf("import_row_%d", i)
+			if _, serr := tx.ExecContext(c.Context(), "SAVEPOINT "+spName); serr != nil {
+				// Savepoint open itself failed — fail closed.
+				_ = tx.Rollback()
+				rolledBack = true
+				insertErrs = append(insertErrs, BulkImportError{Line: row.Line, Email: row.Email, Error: "savepoint open failed"})
+				return c.Status(fiber.StatusInternalServerError).JSON(BulkImportResult{
+					DryRun:  false,
+					Created: 0,
+					Skipped: 0,
+					Errors:  append(rowErrs, insertErrs...),
+				})
+			}
+		}
+
 		res, ierr := tx.ExecContext(c.Context(),
 			`INSERT INTO coremail_mailboxes (domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme, status, quota_mb, is_admin, created_at, updated_at)
 			 VALUES (?, ?, ?, ?, ?, ?, 'argon2id', 'active', ?, 0, ?, ?)`,
 			domainID, tenantID, parts[0], row.Email, row.Name, hash, quota, now, now)
 		if ierr != nil {
-			insertErrs = append(insertErrs, BulkImportError{Line: row.Line, Email: row.Email, Error: "insert failed"})
-			if !allowPartial {
-				_ = tx.Rollback()
-				rolledBack = true
-				return c.Status(fiber.StatusInternalServerError).JSON(BulkImportResult{
-					DryRun:  false,
-					Created: 0,
-					Skipped: 0,
-					Errors:  append(rowErrs, insertErrs...),
-				})
+			if allowPartial {
+				// ROLLBACK TO SAVEPOINT undoes the failed INSERT
+				// (and any side-effects from the savepoint open);
+				// RELEASE SAVEPOINT drops the marker so the
+				// outer tx state is clean for the next row.
+				_, _ = tx.ExecContext(c.Context(), "ROLLBACK TO SAVEPOINT "+spName)
+				_, _ = tx.ExecContext(c.Context(), "RELEASE SAVEPOINT "+spName)
+				insertErrs = append(insertErrs, BulkImportError{Line: row.Line, Email: row.Email, Error: "insert failed"})
+				continue
 			}
-			continue
+			_ = tx.Rollback()
+			rolledBack = true
+			return c.Status(fiber.StatusInternalServerError).JSON(BulkImportResult{
+				DryRun:  false,
+				Created: 0,
+				Skipped: 0,
+				Errors:  append(rowErrs, insertErrs...),
+			})
 		}
 		mboxID, _ := res.LastInsertId()
 		// Provision the canonical system folders (INBOX, Sent,
 		// Drafts, Trash, Junk, Archive) inside the same
 		// transaction as the mailbox insert. If folder
-		// provisioning fails for this row, the whole tx rolls
-		// back when allow_partial is false (the all-or-nothing
-		// contract) or the row is skipped when allow_partial is
-		// true. This guarantees an imported mailbox is never
-		// left in a partially-provisioned state where the
-		// webmail-login backfill is the only thing standing
-		// between the user and a usable inbox.
+		// provisioning fails for this row:
+		//   * allow_partial=false: roll back the whole tx
+		//     (all-or-nothing contract).
+		//   * allow_partial=true:  ROLLBACK TO SAVEPOINT so the
+		//     mailbox row AND any partially-provisioned folders
+		//     are undone, then continue with the next row.
+		// Either way the operator never sees a half-provisioned
+		// mailbox committed to the database.
 		if ferr := coremail.EnsureMailboxSystemFoldersTx(c.Context(), tx, uint(mboxID)); ferr != nil {
-			insertErrs = append(insertErrs, BulkImportError{Line: row.Line, Email: row.Email, Error: "folder provisioning failed"})
-			if !allowPartial {
+			if allowPartial {
+				_, _ = tx.ExecContext(c.Context(), "ROLLBACK TO SAVEPOINT "+spName)
+				_, _ = tx.ExecContext(c.Context(), "RELEASE SAVEPOINT "+spName)
+				insertErrs = append(insertErrs, BulkImportError{Line: row.Line, Email: row.Email, Error: "folder provisioning failed"})
+				continue
+			}
+			_ = tx.Rollback()
+			rolledBack = true
+			return c.Status(fiber.StatusInternalServerError).JSON(BulkImportResult{
+				DryRun:  false,
+				Created: 0,
+				Skipped: 0,
+				Errors:  append(rowErrs, insertErrs...),
+			})
+		}
+		if allowPartial {
+			// Release the savepoint so the writes are now part of
+			// the outer tx. If RELEASE itself errors we fail
+			// closed — better to abort the whole batch than
+			// commit something whose tx state we cannot reason
+			// about.
+			if _, rerr := tx.ExecContext(c.Context(), "RELEASE SAVEPOINT "+spName); rerr != nil {
 				_ = tx.Rollback()
 				rolledBack = true
+				insertErrs = append(insertErrs, BulkImportError{Line: row.Line, Email: row.Email, Error: "savepoint release failed"})
 				return c.Status(fiber.StatusInternalServerError).JSON(BulkImportResult{
 					DryRun:  false,
 					Created: 0,
@@ -311,7 +377,6 @@ func (h *Handler) importMailboxes(c fiber.Ctx, dryRun bool) error {
 					Errors:  append(rowErrs, insertErrs...),
 				})
 			}
-			continue
 		}
 		created++
 	}
