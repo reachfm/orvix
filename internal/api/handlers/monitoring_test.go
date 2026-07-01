@@ -262,6 +262,57 @@ func TestMonitoringV1_ResolveInvalidIDRejected(t *testing.T) {
 	}
 }
 
+// TestMonitoringAlertProvidersReportsHonestly verifies the
+// /monitoring/alert-providers endpoint reports the configured delivery
+// providers honestly and never leaks a secret. The default backup
+// harness configures no webhook, so only the always-on in-app provider
+// is present.
+func TestMonitoringAlertProvidersReportsHonestly(t *testing.T) {
+	router, sqlDB, token, _, _ := buildBackupHarness(t)
+	defer router.App().Shutdown()
+	defer sqlDB.Close()
+
+	resp, body := monitoringRequest(t, router, "GET", "/api/v1/monitoring/alert-providers", "", token, "", false)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("alert-providers: %d %s", resp.StatusCode, body)
+	}
+
+	var payload struct {
+		Providers []struct {
+			Name      string `json:"name"`
+			Enabled   bool   `json:"enabled"`
+			Target    string `json:"target"`
+			HasSecret bool   `json:"hasSecret"`
+		} `json:"providers"`
+		Deliveries []map[string]interface{} `json:"deliveries"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("decode: %v: %s", err, body)
+	}
+
+	var haveInApp bool
+	for _, p := range payload.Providers {
+		if p.Name == "inapp" {
+			haveInApp = true
+			if !p.Enabled {
+				t.Errorf("inapp provider must be enabled")
+			}
+		}
+		if strings.Contains(p.Target, "http://") || strings.Contains(p.Target, "https://") {
+			t.Fatalf("provider %q leaked a URL in target: %q", p.Name, p.Target)
+		}
+	}
+	if !haveInApp {
+		t.Fatalf("expected the always-on inapp provider, got %s", body)
+	}
+
+	for _, b := range []string{"Bearer ", "Authorization", "-----BEGIN", "PRIVATE KEY"} {
+		if strings.Contains(string(body), b) {
+			t.Fatalf("alert-providers response leaked %q: %s", b, body)
+		}
+	}
+}
+
 // itoa is a small helper so the test file does not pull in strconv
 // for a single conversion.
 func itoa(n int64) string {

@@ -104,6 +104,14 @@ type MonitoringConfig struct {
 	BackupAgeCriticalHours int `mapstructure:"backup_age_critical_hours"`
 	CertExpiryWarningDays  int `mapstructure:"cert_expiry_warning_days"`
 	CertExpiryCriticalDays int `mapstructure:"cert_expiry_critical_days"`
+
+	// Alert delivery. The in-app provider is always on. The webhook
+	// provider is opt-in and only active when both AlertWebhookEnabled
+	// is true and AlertWebhookURL is non-empty. The URL and token are
+	// secrets: they are never logged or returned by the status API.
+	AlertWebhookEnabled bool   `mapstructure:"alert_webhook_enabled"`
+	AlertWebhookURL     string `mapstructure:"alert_webhook_url"`
+	AlertWebhookToken   string `mapstructure:"alert_webhook_token"`
 }
 
 // DiskUsageWarningPctVal returns the configured warning threshold or the default of 85.

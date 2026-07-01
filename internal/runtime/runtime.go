@@ -51,7 +51,8 @@ type Telemetry struct {
 // dashboard can show the listening port alongside the status without
 // any client-side mapping table.
 type Service struct {
-	Status string `json:"status"`  // "ok" | "warn" | "fail" | "unknown"
+	Status string `json:"status"` // "ok" | "warn" | "fail" | "unknown"
+	State  string `json:"state,omitempty"`  // normalized listener state: active|skipped|degraded|failed|unknown
 	Detail string `json:"detail"`
 	Port   int    `json:"port,omitempty"`
 }
@@ -383,7 +384,7 @@ func newJMAPService(port int) Service {
 func listenerOrFallback(snapshot map[ListenerKind]ListenerStatus, kind ListenerKind, port int, _ string) Service {
 	if snapshot != nil {
 		if s, ok := snapshot[kind]; ok {
-			return Service{Status: s.Status, Detail: s.Detail, Port: s.Port}
+			return Service{Status: s.Status, State: s.State, Detail: s.Detail, Port: s.Port}
 		}
 	}
 	return newListenerService(port, string(kind))

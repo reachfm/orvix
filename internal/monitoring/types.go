@@ -177,6 +177,21 @@ var schema = []string{
 		created_at DATETIME NOT NULL,
 		resolved_at DATETIME
 	)`,
+	// monitoring_alert_deliveries records the outcome of every attempt
+	// to deliver an alert through a configured provider (in-app,
+	// webhook, …). The detail column is a SAFE label only: it MUST
+	// NEVER contain a webhook URL, token, Authorization header, or any
+	// other secret. See delivery.go for the redaction contract.
+	`CREATE TABLE IF NOT EXISTS monitoring_alert_deliveries (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		alert_title TEXT NOT NULL DEFAULT '',
+		alert_severity TEXT NOT NULL DEFAULT '',
+		alert_category TEXT NOT NULL DEFAULT '',
+		provider TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT '',
+		detail TEXT NOT NULL DEFAULT '',
+		created_at DATETIME NOT NULL
+	)`,
 }
 
 // Schema returns the SQL DDL statements the monitoring service needs.

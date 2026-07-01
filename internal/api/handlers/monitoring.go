@@ -57,7 +57,41 @@ func (h *Handler) monitoringService() (*monitoring.Service, error) {
 		ds.Thresholds.ApplyDefaults()
 	}
 
-	return monitoring.NewService(sqlDB, ds), nil
+	svc := monitoring.NewService(sqlDB, ds)
+	svc.SetDispatcher(h.alertDispatcher(sqlDB))
+	return svc, nil
+}
+
+// alertDispatcher builds the alert-delivery dispatcher from monitoring
+// config. The in-app provider is always present; the webhook provider
+// is added only when configured. The webhook URL/token are secrets and
+// are never logged — the dispatcher logger only receives sanitized,
+// secret-free provider errors.
+func (h *Handler) alertDispatcher(sqlDB *sql.DB) *monitoring.Dispatcher {
+	providers := []monitoring.DeliveryProvider{monitoring.NewInAppProvider()}
+	if h.cfg != nil {
+		mc := h.cfg.Monitoring
+		if mc.AlertWebhookEnabled || mc.AlertWebhookURL != "" {
+			providers = append(providers, monitoring.NewWebhookProvider(monitoring.WebhookConfig{
+				Enabled: mc.AlertWebhookEnabled,
+				URL:     mc.AlertWebhookURL,
+				Token:   mc.AlertWebhookToken,
+			}))
+		}
+	}
+	return monitoring.NewDispatcher(sqlDB, zapDeliveryLogger{h.logger}, providers...)
+}
+
+// zapDeliveryLogger adapts a *zap.Logger to monitoring.DeliveryLogger.
+// It only ever receives sanitized, secret-free strings from the
+// dispatcher.
+type zapDeliveryLogger struct{ l *zap.Logger }
+
+func (z zapDeliveryLogger) Printf(format string, v ...any) {
+	if z.l == nil {
+		return
+	}
+	z.l.Warn(fmt.Sprintf(format, v...))
 }
 
 // ensureMonitoringSchema is idempotent and safe to call on every
@@ -253,4 +287,36 @@ func (h *Handler) GetMonitoringSnapshot(c fiber.Ctx) error {
 	}
 	snapshot := svc.GetSnapshot(c.Context())
 	return c.JSON(snapshot)
+}
+
+// GetMonitoringProviders serves GET /api/v1/monitoring/alert-providers.
+//
+// It honestly reports the configured alert-delivery providers and their
+// enabled/disabled state. The response is redacted: it NEVER contains
+// the webhook URL, token, or any other secret — only the provider name,
+// whether it is enabled, whether a secret is configured, and a safe
+// human-readable note. It also returns the most recent delivery
+// outcomes so an operator can confirm delivery is actually happening.
+func (h *Handler) GetMonitoringProviders(c fiber.Ctx) error {
+	svc, err := h.monitoringService()
+	if err != nil {
+		h.logger.Error("monitoring service init", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "monitoring unavailable"})
+	}
+	dispatcher := svc.Dispatcher()
+	providers := dispatcher.Providers()
+	if providers == nil {
+		providers = []monitoring.ProviderStatus{}
+	}
+	deliveries, err := dispatcher.ListDeliveries(c.Context(), 50)
+	if err != nil {
+		h.logger.Warn("list alert deliveries", zap.Error(err))
+	}
+	if deliveries == nil {
+		deliveries = []monitoring.DeliveryRecord{}
+	}
+	return c.JSON(fiber.Map{
+		"providers":  providers,
+		"deliveries": deliveries,
+	})
 }

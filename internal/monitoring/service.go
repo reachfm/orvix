@@ -67,6 +67,23 @@ type Service struct {
 	// alertMu serializes EvaluateAlerts / saveAlert / resolveAll so two
 	// concurrent evaluations cannot interleave alert rows.
 	alertMu sync.Mutex
+
+	// dispatcher fans newly-raised alerts out to the configured
+	// delivery providers (in-app, webhook, …). Optional; when nil,
+	// alerts are still persisted and listed, they are just not pushed
+	// to external channels.
+	dispatcher *Dispatcher
+}
+
+// SetDispatcher attaches an alert delivery dispatcher. Safe to call
+// with nil to disable external delivery.
+func (s *Service) SetDispatcher(d *Dispatcher) {
+	s.dispatcher = d
+}
+
+// Dispatcher returns the configured delivery dispatcher (may be nil).
+func (s *Service) Dispatcher() *Dispatcher {
+	return s.dispatcher
 }
 
 // NewService creates a monitoring service.
@@ -581,6 +598,15 @@ func (s *Service) EvaluateAlerts(ctx context.Context) ([]Alert, error) {
 	// Persist alerts.
 	for i := range alerts {
 		s.saveAlert(ctx, &alerts[i])
+	}
+
+	// Deliver newly-raised alerts through the configured providers.
+	// Delivery is best-effort and isolated: a failing webhook never
+	// aborts evaluation or crashes monitoring.
+	if s.dispatcher != nil {
+		for i := range alerts {
+			s.dispatcher.Dispatch(ctx, alerts[i])
+		}
 	}
 
 	return s.ListActiveAlerts(ctx)

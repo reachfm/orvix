@@ -49,6 +49,36 @@ ORVIX_DKIM_DIR="${ORVIX_DKIM_DIR:-/var/lib/orvix/dkim}"
 ORVIX_DOCTOR_SCRIPT="${ORVIX_DOCTOR_SCRIPT:-/usr/share/orvix/scripts/orvix-doctor.sh}"
 ORVIX_SOURCE_DIR="${ORVIX_SOURCE_DIR:-$(pwd)}"
 
+# Admin + webmail UI deployment targets. The upgrade path MUST
+# propagate both trees, not just the binary; otherwise a fresh
+# backend can ship against a stale admin SPA. See
+# release/scripts/lib-asset-propagate.sh for the contract and the
+# smoke tests in release/scripts/tests/test-asset-propagation.sh
+# for the assertions.
+ORVIX_ADMIN_UI_DIR="${ORVIX_ADMIN_UI_DIR:-/usr/share/orvix/admin}"
+ORVIX_WEBMAIL_UI_DIR="${ORVIX_WEBMAIL_UI_DIR:-/usr/share/orvix/webmail}"
+ORVIX_RELEASE_ADMIN_SRC="${ORVIX_RELEASE_ADMIN_SRC:-$ORVIX_SOURCE_DIR/release/admin}"
+ORVIX_RELEASE_WEBMAIL_SRC="${ORVIX_RELEASE_WEBMAIL_SRC:-$ORVIX_SOURCE_DIR/release/webmail}"
+
+# Source the asset-propagation library if present. The lib is
+# optional so an old operator who runs upgrade.sh from a checkout
+# that pre-dates the lib still works; missing lib is logged and
+# the upgrade continues (a warning, not a hard failure — but the
+# smoke-upgrade.sh test will fail loudly when the lib is missing).
+LIB_ASSET_PROPAGATE=""
+for candidate in \
+    "$ORVIX_SOURCE_DIR/release/scripts/lib-asset-propagate.sh" \
+    "/usr/share/orvix/scripts/lib-asset-propagate.sh"; do
+    if [ -f "$candidate" ]; then
+        LIB_ASSET_PROPAGATE="$candidate"
+        break
+    fi
+done
+if [ -n "$LIB_ASSET_PROPAGATE" ]; then
+    # shellcheck disable=SC1090
+    . "$LIB_ASSET_PROPAGATE"
+fi
+
 DRY_RUN=0
 FROM_URL=""
 CHECKSUM_FILE=""
@@ -357,6 +387,27 @@ full_rollback() {
         rolled=$((rolled + 1))
     fi
 
+    # Roll back admin + webmail assets too. The asset-propagation
+    # library writes backups to $BACKUP_PARENT/assets/<ts>-<label>
+    # right before overwriting; restore the most recent one for
+    # each label. If a rollback snapshot is missing (e.g. this is
+    # the first upgrade on a fresh install), the roll-back skips
+    # the label with a warning rather than failing the operator.
+    for sub in "$ORVIX_ADMIN_UI_DIR" "$ORVIX_WEBMAIL_UI_DIR"; do
+        local label
+        label="$(basename "$sub")"
+        local latest_asset_backup
+        latest_asset_backup="$(ls -1d "$BACKUP_PARENT/assets"/*-"$label" 2>/dev/null | sort | tail -n 1 || true)"
+        if [ -n "$latest_asset_backup" ] && [ -d "$latest_asset_backup" ]; then
+            mkdir -p "$sub"
+            cp -a "$latest_asset_backup"/. "$sub/" 2>/dev/null || true
+            log "  rolled back $sub from $latest_asset_backup"
+            rolled=$((rolled + 1))
+        else
+            log "  no asset backup for $label; skipping (may be a fresh install)"
+        fi
+    done
+
     log "rollback restored $rolled item(s) from $backup_dir"
 
     systemctl restart orvix.service 2>/dev/null || true
@@ -368,8 +419,56 @@ full_rollback() {
     fi
 }
 
-resolve_input() {
-    if [ -n "$FROM_URL" ]; then
+# propagate_assets copies admin + webmail static assets from the
+# release tree into their installed paths. The function is a thin
+# wrapper around asset_propagate from lib-asset-propagate.sh; the
+# indirection exists so the smoke test can introspect the
+# propagation step and so a future refactor (e.g. parallel copy) is
+# local to one place.
+propagate_assets() {
+	if [ -z "$LIB_ASSET_PROPAGATE" ] || ! command -v asset_propagate >/dev/null 2>&1; then
+		# Lib missing. Log loudly but do not fail the upgrade — the
+		# binary is already in place and the operator can still
+		# reach the admin over an old SPA. The smoke test catches
+		# this regression.
+		log "WARN: lib-asset-propagate.sh not sourced; admin + webmail assets NOT propagated. Re-run upgrade after fixing the release tree."
+		report "yellow" "asset propagation library missing; admin/webmail assets not refreshed"
+		return 0
+	fi
+	local ok=1
+	if [ -d "$ORVIX_RELEASE_ADMIN_SRC" ]; then
+		log "propagating admin assets: $ORVIX_RELEASE_ADMIN_SRC -> $ORVIX_ADMIN_UI_DIR"
+		# ASSET_BACKUP_PARENT is the same BACKUP_PARENT the upgrade
+		# uses so asset backups live next to the binary backup.
+		ASSET_BACKUP_PARENT="$BACKUP_PARENT/assets" \
+			ASSET_VERBOSE=1 \
+			asset_propagate "$ORVIX_RELEASE_ADMIN_SRC" "$ORVIX_ADMIN_UI_DIR" admin || {
+				log "ERROR: admin asset propagation failed"
+				report "red" "admin asset propagation failed"
+				ok=0
+			}
+	else
+		log "skip admin propagation: source $ORVIX_RELEASE_ADMIN_SRC not present"
+	fi
+	if [ -d "$ORVIX_RELEASE_WEBMAIL_SRC" ]; then
+		log "propagating webmail assets: $ORVIX_RELEASE_WEBMAIL_SRC -> $ORVIX_WEBMAIL_UI_DIR"
+		ASSET_BACKUP_PARENT="$BACKUP_PARENT/assets" \
+			ASSET_VERBOSE=1 \
+			asset_propagate "$ORVIX_RELEASE_WEBMAIL_SRC" "$ORVIX_WEBMAIL_UI_DIR" webmail || {
+				log "ERROR: webmail asset propagation failed"
+				report "red" "webmail asset propagation failed"
+				ok=0
+			}
+	else
+		log "skip webmail propagation: source $ORVIX_RELEASE_WEBMAIL_SRC not present"
+	fi
+	if [ "$ok" = "1" ]; then
+		report "green" "admin + webmail assets propagated (backups under $BACKUP_PARENT/assets)"
+	fi
+	return 0
+}
+
+resolve_input() {    if [ -n "$FROM_URL" ]; then
         local tmp
         tmp="$(mktemp /tmp/orvix-upgrade.XXXXXX)"
         log "downloading $FROM_URL -> $tmp"
@@ -417,12 +516,20 @@ install_and_restart() {
     fi
 
     report "" "--- Installation ---"
-    log "installing $NEW_BIN -> $ORVIX_BIN"
-    install -m 0755 "$NEW_BIN" "$ORVIX_BIN"
-    if [ -n "${FROM_URL:-}" ]; then
-        rm -f "$NEW_BIN"
-    fi
-    report "green" "new binary installed at $ORVIX_BIN"
+	log "installing $NEW_BIN -> $ORVIX_BIN"
+	install -m 0755 "$NEW_BIN" "$ORVIX_BIN"
+	if [ -n "${FROM_URL:-}" ]; then
+		rm -f "$NEW_BIN"
+	fi
+	report "green" "new binary installed at $ORVIX_BIN"
+
+	report "" "--- Asset Propagation ---"
+	# Propagate admin + webmail static assets so a backend upgrade
+	# ships the matching UI. Without this, an operator who upgrades
+	# to a backend with a new admin endpoint would see a stale admin
+	# SPA. The lib-asset-propagate.sh library handles per-file
+	# backup, hash verification, ownership, and perms.
+	propagate_assets
 
     report "" "--- Restart ---"
     log "restarting orvix.service"

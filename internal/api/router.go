@@ -497,6 +497,7 @@ func (r *Router) setupRoutes() {
 	admin.Get("/monitoring/alerts", r.h.GetMonitoringAlerts)
 	admin.Get("/monitoring/capacity", r.h.GetMonitoringCapacity)
 	admin.Get("/monitoring/snapshot", r.h.GetMonitoringSnapshot)
+	admin.Get("/monitoring/alert-providers", r.h.GetMonitoringProviders)
 
 	// Auto-Heal
 	admin.Get("/heal/history", r.h.ListHealHistory)
@@ -601,6 +602,8 @@ func (r *Router) setupRoutes() {
 	men.Patch("/mailboxes/:id/status", r.h.UpdateMailboxStatus)
 	// Bulk status operations (CSRF-protected).
 	men.Post("/mailboxes/bulk/status", r.h.BulkMailboxStatus)
+	men.Post("/mailboxes/import", r.h.ImportMailboxesCSV)
+	men.Post("/mailboxes/import/dry-run", r.h.ImportMailboxesDryRun)
 	men.Post("/domains/bulk/status", r.h.BulkDomainStatus)
 	men.Delete("/mailboxes/:id", r.h.DeleteMailbox)
 	men.Delete("/users/:id", r.h.DeleteUser)

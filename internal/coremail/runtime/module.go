@@ -576,6 +576,14 @@ func (m *Module) startServer(kind orvixruntime.ListenerKind, addr string, fn fun
 		fmt.Sscanf(portStr, "%d", &port)
 	}
 
+	// Record that this listener is starting so the admin surface does
+	// not show "unknown" during the brief window before the bind
+	// callback fires. The callback below overwrites this with the
+	// actual bind result (active on success, failed on error).
+	if m.listenerReg != nil {
+		m.listenerReg.MarkStarting(kind, port)
+	}
+
 	// Register the listener callback so the server notifies us
 	// after its real listener is created (preserving TLS paths).
 	cb := func(addr2 string, err error) {

@@ -1077,6 +1077,13 @@ install_release_scripts() {
     if [ -f "$ORVIX_SOURCE_DIR/release/scripts/apply-runtime-update.sh" ]; then
         run_quiet install -m 0755 -o root -g root "$ORVIX_SOURCE_DIR/release/scripts/apply-runtime-update.sh" /usr/share/orvix/scripts/apply-runtime-update.sh
     fi
+    # The asset-propagation library is the single source of truth
+    # for the install + upgrade asset copy contract. Install it
+    # alongside the other scripts so upgrade.sh can source it from
+    # /usr/share/orvix/scripts on a hardened production host.
+    if [ -f "$ORVIX_SOURCE_DIR/release/scripts/lib-asset-propagate.sh" ]; then
+        run_quiet install -m 0644 -o root -g root "$ORVIX_SOURCE_DIR/release/scripts/lib-asset-propagate.sh" /usr/share/orvix/scripts/lib-asset-propagate.sh
+    fi
 }
 
 provision_vapid_keys() {
@@ -2298,14 +2305,33 @@ IPFAIL
     write_bootstrap_env "$admin_email" "$admin_password"
     install_release_scripts
     provision_vapid_keys "$admin_email"
-    run_quiet cp -R "$ORVIX_SOURCE_DIR"/release/admin/. /usr/share/orvix/admin/
-    run_quiet cp -R "$ORVIX_SOURCE_DIR"/release/webmail/. /usr/share/orvix/webmail/
-    run_quiet chown -R root:root /usr/share/orvix/admin
-    run_quiet chown -R root:root /usr/share/orvix/webmail
-    run_quiet find /usr/share/orvix/admin -type d -exec chmod 0755 {} +
-    run_quiet find /usr/share/orvix/admin -type f -exec chmod 0644 {} +
-    run_quiet find /usr/share/orvix/webmail -type d -exec chmod 0755 {} +
-    run_quiet find /usr/share/orvix/webmail -type f -exec chmod 0644 {} +
+    # Propagate admin + webmail static assets via the shared
+    # lib-asset-propagate.sh library. The lib is the single source
+    # of truth for the copy + backup + hash-verify + permission
+    # contract; upgrade.sh uses the same function so a re-install
+    # and an upgrade have identical side effects on /usr/share/orvix.
+    if [ -f "$ORVIX_SOURCE_DIR/release/scripts/lib-asset-propagate.sh" ]; then
+        # shellcheck disable=SC1091
+        . "$ORVIX_SOURCE_DIR/release/scripts/lib-asset-propagate.sh"
+        asset_propagate "$ORVIX_SOURCE_DIR/release/admin" /usr/share/orvix/admin admin || \
+            fail "admin asset propagation failed during install"
+        asset_propagate "$ORVIX_SOURCE_DIR/release/webmail" /usr/share/orvix/webmail webmail || \
+            fail "webmail asset propagation failed during install"
+    else
+        # Fallback to the inline copy for very old checkouts that
+        # pre-date the lib. The smoke test still requires the lib to
+        # be present in the repo; this branch only exists for the
+        # rare case where the operator has a tarball that bundles a
+        # full install.sh without the lib.
+        run_quiet cp -R "$ORVIX_SOURCE_DIR"/release/admin/. /usr/share/orvix/admin/
+        run_quiet cp -R "$ORVIX_SOURCE_DIR"/release/webmail/. /usr/share/orvix/webmail/
+        run_quiet chown -R root:root /usr/share/orvix/admin
+        run_quiet chown -R root:root /usr/share/orvix/webmail
+        run_quiet find /usr/share/orvix/admin -type d -exec chmod 0755 {} +
+        run_quiet find /usr/share/orvix/admin -type f -exec chmod 0644 {} +
+        run_quiet find /usr/share/orvix/webmail -type d -exec chmod 0755 {} +
+        run_quiet find /usr/share/orvix/webmail -type f -exec chmod 0644 {} +
+    fi
     validate_admin_ui
     validate_webmail_ui
 
