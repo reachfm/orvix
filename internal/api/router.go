@@ -519,6 +519,19 @@ func (r *Router) setupRoutes() {
 	admin.Get("/modules", r.h.ListModules)
 	admin.Get("/license", r.h.GetLicense)
 	admin.Get("/audit/logs", r.h.ListAuditLogs)
+	// Admin Enterprise v2 — RBAC + account classes + groups +
+	// lists + public folders + quarantine + ACL + log rules.
+	admin.Get("/admin/account-classes", r.h.ListAccountClasses)
+	admin.Get("/admin/domain-groups", r.h.ListDomainGroups)
+	admin.Get("/admin/mailing-lists", r.h.ListMailingLists)
+	admin.Get("/admin/public-folders", r.h.ListPublicFolders)
+	admin.Get("/admin/admin-groups", r.h.ListAdminGroups)
+	admin.Get("/admin/quarantine", r.h.ListQuarantine)
+	admin.Get("/admin/audit-logs", r.h.ListAdminAuditLogs)
+	admin.Get("/admin/acl-rules", r.h.ListACLRules)
+	admin.Get("/admin/log-rules", r.h.ListLogRules)
+	admin.Get("/admin/mailing-lists/:id/members", r.h.ListMailingListMembers)
+	admin.Get("/admin/admin-groups/:id/members", r.h.ListAdminGroupMembers)
 	admin.Get("/feature-flags", r.h.ListFeatureFlags)
 	admin.Get("/api-keys", r.h.ListAPIKeys)
 	admin.Get("/admin/summary", r.h.AdminSummary)
@@ -698,6 +711,34 @@ func (r *Router) setupRoutes() {
 
 	// Admin Settings write (CSRF-protected)
 	men.Patch("/admin/settings", r.h.AdminSettingsPatch)
+
+	// Admin Enterprise v2 mutations (CSRF-protected, admin
+	// role). Every mutation writes an entry to coremail_audit
+	// (action="<resource>.<verb>", target=<identifier>,
+	// result="ok"). Refusal paths return 4xx with a stable
+	// error JSON; never fabricate success.
+	men.Post("/admin/account-classes", r.h.CreateAccountClass)
+	men.Patch("/admin/account-classes/:id", r.h.UpdateAccountClass)
+	men.Delete("/admin/account-classes/:id", r.h.DeleteAccountClass)
+	men.Post("/admin/domain-groups", r.h.CreateDomainGroup)
+	men.Put("/admin/domain-groups/:id/members", r.h.UpdateDomainGroupMembers)
+	men.Delete("/admin/domain-groups/:id", r.h.DeleteDomainGroup)
+	men.Post("/admin/mailing-lists", r.h.CreateMailingList)
+	men.Delete("/admin/mailing-lists/:id", r.h.DeleteMailingList)
+	men.Post("/admin/mailing-lists/:id/members", r.h.AddMailingListMember)
+	men.Delete("/admin/mailing-lists/:id/members/:memberId", r.h.RemoveMailingListMember)
+	men.Post("/admin/public-folders", r.h.CreatePublicFolder)
+	men.Delete("/admin/public-folders/:id", r.h.DeletePublicFolder)
+	men.Post("/admin/admin-groups", r.h.CreateAdminGroup)
+	men.Patch("/admin/admin-groups/:id", r.h.UpdateAdminGroup)
+	men.Delete("/admin/admin-groups/:id", r.h.DeleteAdminGroup)
+	men.Post("/admin/admin-groups/:id/members", r.h.AddAdminGroupMember)
+	men.Delete("/admin/admin-groups/:id/members/:userId", r.h.RemoveAdminGroupMember)
+	men.Post("/admin/quarantine/:id/resolve", r.h.ResolveQuarantine)
+	men.Post("/admin/acl-rules", r.h.CreateACLRule)
+	men.Delete("/admin/acl-rules/:id", r.h.DeleteACLRule)
+	men.Post("/admin/log-rules", r.h.CreateLogRule)
+	men.Delete("/admin/log-rules/:id", r.h.DeleteLogRule)
 }
 
 func (r *Router) setupAdminUI() {

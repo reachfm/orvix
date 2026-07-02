@@ -643,6 +643,205 @@ func MigrateAllRaw(db *gorm.DB) error {
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			deleted_at DATETIME
 		)`,
+		// Admin enterprise v2 — Account Classes (mailbox
+		// service classes: standard / shared / room /
+		// equipment / distribution-list). Used by the
+		// admin UI to assign a service class to a
+		// mailbox and to derive quotas / send limits /
+		// feature gates from the class.
+		`CREATE TABLE IF NOT EXISTS coremail_account_classes (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			name TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			default_quota_mb INTEGER NOT NULL DEFAULT 1024,
+			max_quota_mb INTEGER NOT NULL DEFAULT 5120,
+			max_send_per_hour INTEGER NOT NULL DEFAULT 500,
+			max_recv_per_hour INTEGER NOT NULL DEFAULT 5000,
+			allow_external_forwarding INTEGER NOT NULL DEFAULT 1,
+			allow_imap INTEGER NOT NULL DEFAULT 1,
+			allow_pop3 INTEGER NOT NULL DEFAULT 1,
+			allow_jmap INTEGER NOT NULL DEFAULT 1,
+			allow_webmail INTEGER NOT NULL DEFAULT 1,
+			is_admin_class INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			UNIQUE(tenant_id, name)
+		)`,
+		// Admin enterprise v2 — Domain Groups (groups of
+		// domains for bulk operations). The group holds a
+		// label and a list of member domain ids. Admin
+		// UI exposes the group for batch mailbox / DNS /
+		// backup operations.
+		`CREATE TABLE IF NOT EXISTS coremail_domain_groups (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			name TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			color TEXT NOT NULL DEFAULT '#1f6feb',
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			UNIQUE(tenant_id, name)
+		)`,
+		`CREATE TABLE IF NOT EXISTS coremail_domain_group_members (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			group_id INTEGER NOT NULL,
+			domain_id INTEGER NOT NULL,
+			created_at DATETIME NOT NULL,
+			UNIQUE(group_id, domain_id)
+		)`,
+		// Admin enterprise v2 — Mailing Lists (a list is
+		// an address that fans out to N subscribers).
+		// Different from a static alias because the
+		// subscriber list is editable through the admin
+		// UI and supports moderation / archives /
+		// subscription policy flags. The address lives
+		// in coremail_aliases; the subscriber set lives
+		// here.
+		`CREATE TABLE IF NOT EXISTS coremail_mailing_lists (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			domain_id INTEGER NOT NULL,
+			address TEXT NOT NULL,
+			display_name TEXT NOT NULL DEFAULT '',
+			description TEXT NOT NULL DEFAULT '',
+			moderation_required INTEGER NOT NULL DEFAULT 0,
+			archive_enabled INTEGER NOT NULL DEFAULT 0,
+			subscription_policy TEXT NOT NULL DEFAULT 'closed',
+			max_members INTEGER NOT NULL DEFAULT 0,
+			status TEXT NOT NULL DEFAULT 'active',
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			UNIQUE(domain_id, address)
+		)`,
+		`CREATE TABLE IF NOT EXISTS coremail_mailing_list_members (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			list_id INTEGER NOT NULL,
+			address TEXT NOT NULL,
+			display_name TEXT NOT NULL DEFAULT '',
+			role TEXT NOT NULL DEFAULT 'subscriber',
+			created_at DATETIME NOT NULL,
+			UNIQUE(list_id, address)
+		)`,
+		// Admin enterprise v2 — Public Folders (a folder
+		// on a shared mailbox that other mailboxes can
+		// subscribe to via IMAP). `owner_mailbox_id` is
+		// the source mailbox; members are joined through
+		// coremail_public_folder_members.
+		`CREATE TABLE IF NOT EXISTS coremail_public_folders (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			owner_mailbox_id INTEGER NOT NULL,
+			folder_path TEXT NOT NULL,
+			display_name TEXT NOT NULL DEFAULT '',
+			description TEXT NOT NULL DEFAULT '',
+			read_only INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			UNIQUE(owner_mailbox_id, folder_path)
+		)`,
+		`CREATE TABLE IF NOT EXISTS coremail_public_folder_members (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			folder_id INTEGER NOT NULL,
+			mailbox_id INTEGER NOT NULL,
+			permission TEXT NOT NULL DEFAULT 'readonly',
+			created_at DATETIME NOT NULL,
+			UNIQUE(folder_id, mailbox_id)
+		)`,
+		// Admin enterprise v2 — Admin Groups (RBAC).
+		// Distinct from coremail_domain_groups; admin
+		// groups govern which admin actions an admin
+		// user is allowed to perform. Membership is in
+		// coremail_admin_group_members. The grant list
+		// for a group is a comma-separated list of
+		// permission tokens (e.g. "domains.read",
+		// "domains.write", "backups.delete",
+		// "admin.users.write"). The enforcement layer
+		// in handlers reads the comma list from
+		// coremail_admin_groups and rejects requests
+		// whose action is not in the union of grants for
+		// the caller's groups.
+		`CREATE TABLE IF NOT EXISTS coremail_admin_groups (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			name TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			grants TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			UNIQUE(tenant_id, name)
+		)`,
+		`CREATE TABLE IF NOT EXISTS coremail_admin_group_members (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			group_id INTEGER NOT NULL,
+			user_id INTEGER NOT NULL,
+			created_at DATETIME NOT NULL,
+			UNIQUE(group_id, user_id)
+		)`,
+		// Admin enterprise v2 — ACL Rules. Per-mailbox
+		// access control: which IPs / networks may reach
+		// the mailbox for IMAP / POP3 / SMTP submission,
+		// and which IPs are explicitly denied. The UI
+		// exposes a list; enforcement happens in the
+		// SMTP / IMAP / POP3 listener gates.
+		`CREATE TABLE IF NOT EXISTS coremail_acl_rules (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			scope TEXT NOT NULL DEFAULT 'global',
+			scope_target TEXT NOT NULL DEFAULT '',
+			action TEXT NOT NULL DEFAULT 'allow',
+			protocol TEXT NOT NULL DEFAULT 'all',
+			source TEXT NOT NULL DEFAULT '',
+			priority INTEGER NOT NULL DEFAULT 100,
+			note TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME
+		)`,
+		// Admin enterprise v2 — Log Collection Rules.
+		// Drives what gets shipped from the local syslog
+		// / journald to the centralised log server (and
+		// to which one). The run-time collector reads
+		// this table on a 30s tick.
+		`CREATE TABLE IF NOT EXISTS coremail_log_rules (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			name TEXT NOT NULL,
+			source TEXT NOT NULL DEFAULT 'journald',
+			severity TEXT NOT NULL DEFAULT 'info',
+			match_pattern TEXT NOT NULL DEFAULT '',
+			destination TEXT NOT NULL DEFAULT '',
+			enabled INTEGER NOT NULL DEFAULT 1,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME
+		)`,
+		// Admin enterprise v2 — Quarantine. Quarantined
+		// messages are kept here for review by the admin.
+		// The compliance package already defines
+		// coremail_quarantine; we extend it via a
+		// separate `coremail_quarantine_index` table
+		// that stores the message-id, recipient,
+		// reason, severity, and admin actions.
+		`CREATE TABLE IF NOT EXISTS coremail_quarantine_index (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			message_id TEXT NOT NULL,
+			recipient TEXT NOT NULL DEFAULT '',
+			sender TEXT NOT NULL DEFAULT '',
+			subject TEXT NOT NULL DEFAULT '',
+			reason TEXT NOT NULL DEFAULT '',
+			severity TEXT NOT NULL DEFAULT 'low',
+			status TEXT NOT NULL DEFAULT 'held',
+			resolved_at DATETIME,
+			resolved_by TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS coremail_dkim_config (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			domain TEXT UNIQUE NOT NULL,
@@ -713,6 +912,20 @@ func MigrateAllRaw(db *gorm.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_coremail_mailboxes_email ON coremail_mailboxes(email)`,
 		`CREATE INDEX IF NOT EXISTS idx_coremail_aliases_domain_id ON coremail_aliases(domain_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_coremail_aliases_from ON coremail_aliases(from_addr)`,
+		// Admin enterprise v2 indexes
+		`CREATE INDEX IF NOT EXISTS idx_account_classes_tenant ON coremail_account_classes(tenant_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_domain_groups_tenant ON coremail_domain_groups(tenant_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_domain_group_members_group ON coremail_domain_group_members(group_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_mailing_lists_domain ON coremail_mailing_lists(domain_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_mailing_list_members_list ON coremail_mailing_list_members(list_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_public_folders_owner ON coremail_public_folders(owner_mailbox_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_public_folder_members_folder ON coremail_public_folder_members(folder_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_admin_groups_tenant ON coremail_admin_groups(tenant_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_admin_group_members_group ON coremail_admin_group_members(group_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_acl_rules_tenant ON coremail_acl_rules(tenant_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_log_rules_tenant ON coremail_log_rules(tenant_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_quarantine_index_tenant ON coremail_quarantine_index(tenant_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_quarantine_index_status ON coremail_quarantine_index(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_dkim_domain ON coremail_dkim_config(domain)`,
 	}
 
@@ -768,6 +981,7 @@ func migrateCoremailMailboxSchema(ctx context.Context, db *sql.DB) error {
 		{"last_login", "ALTER TABLE coremail_mailboxes ADD COLUMN last_login DATETIME"},
 		{"last_ip", "ALTER TABLE coremail_mailboxes ADD COLUMN last_ip TEXT NOT NULL DEFAULT ''"},
 		{"deleted_at", "ALTER TABLE coremail_mailboxes ADD COLUMN deleted_at DATETIME"},
+		{"class_id", "ALTER TABLE coremail_mailboxes ADD COLUMN class_id INTEGER NOT NULL DEFAULT 0"},
 	}
 
 	for _, addition := range additions {
