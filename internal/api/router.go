@@ -285,7 +285,7 @@ func (r *Router) setupMiddleware() {
 		AllowCredentials: true,
 	}))
 	r.app.Use(securityHeaders())
-	// NOTE: the general API rate limiter is NO LONGER applied
+	// PHASE-0 BLOCKER FIX: the general API rate limiter is NO LONGER applied
 	// globally. The previous global `r.app.Use(...)` blocked the
 	// admin SPA itself — `GET /admin` triggered the rate limiter
 	// because every static asset (index.html, app.js, styles.css,

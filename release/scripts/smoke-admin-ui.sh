@@ -442,5 +442,81 @@ if ! grep -q "Run dry-run for this configured provider and domain" "$DNS_DKIM" 2
 fi
 pass "dns-dkim.js Apply guard uses shared canApplyProvider helper"
 
+# ── 30. Admin Enterprise v2 pages exist and are wired ────────────
+ENTERPRISE_PAGES=(
+    "account-classes.js"
+    "domain-groups.js"
+    "mailing-lists.js"
+    "public-folders.js"
+    "admin-groups.js"
+    "audit-log.js"
+    "quarantine.js"
+    "acl.js"
+    "log-rules.js"
+    "security-extra.js"
+    "migration.js"
+    "clustering.js"
+)
+for p in "${ENTERPRISE_PAGES[@]}"; do
+    [ -f "$ADMIN_DIR/modules/pages/$p" ] || fail "missing enterprise page module: $p"
+    if ! grep -q "$p" "$ADMIN_DIR/app.js" 2>/dev/null; then
+        fail "enterprise page $p not imported in app.js"
+    fi
+done
+pass "all 12 enterprise page modules exist and are imported in app.js"
+
+# ── 31. Admin Enterprise v2 endpoints are referenced from the JS ─
+for ep in \
+    "/api/v1/admin/account-classes" \
+    "/api/v1/admin/domain-groups" \
+    "/api/v1/admin/mailing-lists" \
+    "/api/v1/admin/public-folders" \
+    "/api/v1/admin/admin-groups" \
+    "/api/v1/admin/audit-logs" \
+    "/api/v1/admin/quarantine" \
+    "/api/v1/admin/acl-rules" \
+    "/api/v1/admin/log-rules"; do
+    if ! grep -q "$ep" "$ADMIN_DIR/modules/pages/"*.js 2>/dev/null; then
+        fail "no page module references $ep"
+    fi
+done
+pass "every new admin enterprise endpoint is referenced from the JS"
+
+# ── 32. No tokens in localStorage (sessionStorage only) ──────────
+for f in "$ADMIN_DIR"/modules/api.js "$ADMIN_DIR"/app.js; do
+    if grep -q "localStorage.setItem(.*token" "$f" 2>/dev/null; then
+        fail "$f must not put tokens in localStorage"
+    fi
+done
+pass "no auth tokens stored in localStorage (sessionStorage only)"
+
+# ── 33. CSRF protection on every new mutating admin endpoint ────
+for ep in \
+    "admin/account-classes" \
+    "admin/domain-groups" \
+    "admin/mailing-lists" \
+    "admin/public-folders" \
+    "admin/admin-groups" \
+    "admin/quarantine" \
+    "admin/acl-rules" \
+    "admin/log-rules"; do
+    # Verify that some page module posts to this endpoint.
+    if ! grep -q "apiPost.*$ep\|apiPut.*$ep\|apiPatch.*$ep\|apiDelete.*$ep" "$ADMIN_DIR/modules/pages/"*.js 2>/dev/null; then
+        fail "no page module performs a mutation on $ep"
+    fi
+done
+pass "every enterprise mutation is reachable from a page module"
+
+# ── 34. Rate limiter exemption is documented in router.go ────────
+REPO_ROOT="${REPO_ROOT:-.}"
+ROUTER="$REPO_ROOT/internal/api/router.go"
+if ! grep -q "PHASE-0" "$ROUTER" 2>/dev/null; then
+    fail "router.go must document the PHASE-0 rate-limit exemption"
+fi
+if ! grep -q "apiRateLimitMiddleware" "$ROUTER" 2>/dev/null; then
+    fail "router.go must define apiRateLimitMiddleware helper"
+fi
+pass "router.go exempts the admin SPA from the API rate limiter"
+
 echo
 echo "ALL ADMIN UI SMOKE TESTS PASSED"

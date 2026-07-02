@@ -37,21 +37,21 @@ const GROUPS = [
   { id: 'domainsAccounts', labelKey: 'sidebar.group.domainsAccounts', items: [
     { route: 'domains',       labelKey: 'sidebar.item.domains'        },
     { route: 'accounts',      labelKey: 'sidebar.item.accounts'       },
-    { route: 'domains/groups', labelKey: 'sidebar.item.groups',         planned: true },
-    { route: 'domains/lists',  labelKey: 'sidebar.item.mailingLists',   planned: true },
-    { route: 'domains/public', labelKey: 'sidebar.item.publicFolders', planned: true },
-    { route: 'accounts/classes', labelKey: 'sidebar.item.accountClasses', planned: true },
+    { route: 'domains/groups', labelKey: 'sidebar.item.groups'         },
+    { route: 'domains/lists',  labelKey: 'sidebar.item.mailingLists'   },
+    { route: 'domains/public', labelKey: 'sidebar.item.publicFolders' },
+    { route: 'accounts/classes', labelKey: 'sidebar.item.accountClasses' },
     { route: 'bulk-import',   labelKey: 'sidebar.item.bulkImport'     },
     { route: 'dns',           labelKey: 'sidebar.item.dnsDkim'        },
   ]},
 
   { id: 'security', labelKey: 'sidebar.group.security', items: [
-    { route: 'security/ssl',      labelKey: 'sidebar.item.sslCerts',       planned: true },
-    { route: 'security/antispam', labelKey: 'sidebar.item.antivirus',     planned: true },
-    { route: 'security/spam',     labelKey: 'sidebar.item.spamControl',   planned: true },
-    { route: 'security/routing',  labelKey: 'sidebar.item.routing',        planned: true },
-    { route: 'security/rules',    labelKey: 'sidebar.item.incomingRules', planned: true },
-    { route: 'security/quarantine', labelKey: 'sidebar.item.quarantine',  planned: true },
+    { route: 'security/ssl',      labelKey: 'sidebar.item.sslCerts'       },
+    { route: 'security/antispam', labelKey: 'sidebar.item.antivirus'     },
+    { route: 'security/spam',     labelKey: 'sidebar.item.spamControl'   },
+    { route: 'security/routing',  labelKey: 'sidebar.item.routing'        },
+    { route: 'security/rules',    labelKey: 'sidebar.item.incomingRules' },
+    { route: 'security/quarantine', labelKey: 'sidebar.item.quarantine'  },
   ]},
 
   { id: 'updates', labelKey: 'sidebar.group.updates', items: [
@@ -66,41 +66,41 @@ const GROUPS = [
 
   { id: 'status', labelKey: 'sidebar.group.status', items: [
     { route: 'monitoring',          labelKey: 'sidebar.item.reporting' },
-    { route: 'monitoring/capacity', labelKey: 'sidebar.item.charts',    planned: true },
-    { route: 'monitoring/storage',  labelKey: 'sidebar.item.storageCharts', planned: true },
+    { route: 'monitoring/capacity', labelKey: 'sidebar.item.charts'    },
+    { route: 'monitoring/storage',  labelKey: 'sidebar.item.storageCharts' },
     { route: 'monitoring/alert-providers', labelKey: 'sidebar.item.alertProviders' },
   ]},
 
   { id: 'logging', labelKey: 'sidebar.group.logging', items: [
     { route: 'logs',           labelKey: 'sidebar.item.localLogs' },
-    { route: 'logs/rules',     labelKey: 'sidebar.item.logRules', planned: true },
-    { route: 'logs/files',     labelKey: 'sidebar.item.viewLogFiles', planned: true },
-    { route: 'logs/server',    labelKey: 'sidebar.item.logServer', planned: true },
+    { route: 'logs/rules',     labelKey: 'sidebar.item.logRules' },
+    { route: 'logs/files',     labelKey: 'sidebar.item.viewLogFiles' },
+    { route: 'logs/server',    labelKey: 'sidebar.item.logServer' },
   ]},
 
   { id: 'backup', labelKey: 'sidebar.group.backup', items: [
     { route: 'backups',           labelKey: 'sidebar.item.backupStatus' },
-    { route: 'backups/history',   labelKey: 'sidebar.item.backupHistory', planned: true },
-    { route: 'backups/ftp',       labelKey: 'sidebar.item.ftpBackup', planned: true },
-    { route: 'backups/fs',        labelKey: 'sidebar.item.fsAccess', planned: true },
+    { route: 'backups/history',   labelKey: 'sidebar.item.backupHistory' },
+    { route: 'backups/ftp',       labelKey: 'sidebar.item.ftpBackup' },
+    { route: 'backups/fs',        labelKey: 'sidebar.item.fsAccess' },
   ]},
 
   { id: 'migration', labelKey: 'sidebar.group.migration', items: [
-    { route: 'migration',         labelKey: 'sidebar.item.migrationJobs', planned: true },
-    { route: 'migration/sources', labelKey: 'sidebar.item.sourceServers', planned: true },
+    { route: 'migration',         labelKey: 'sidebar.item.migrationJobs' },
+    { route: 'migration/sources', labelKey: 'sidebar.item.sourceServers' },
   ]},
 
   { id: 'clustering', labelKey: 'sidebar.group.clustering', items: [
-    { route: 'clustering',         labelKey: 'sidebar.item.clusterSetup', planned: true },
-    { route: 'clustering/imap',    labelKey: 'sidebar.item.imapProxy',    planned: true },
-    { route: 'clustering/pop3',    labelKey: 'sidebar.item.pop3Proxy',    planned: true },
-    { route: 'clustering/webmail', labelKey: 'sidebar.item.webmailProxy', planned: true },
+    { route: 'clustering',         labelKey: 'sidebar.item.clusterSetup' },
+    { route: 'clustering/imap',    labelKey: 'sidebar.item.imapProxy'    },
+    { route: 'clustering/pop3',    labelKey: 'sidebar.item.pop3Proxy'    },
+    { route: 'clustering/webmail', labelKey: 'sidebar.item.webmailProxy' },
   ]},
 
   { id: 'admin', labelKey: 'sidebar.group.adminRights', items: [
-    { route: 'admin/groups',     labelKey: 'sidebar.item.adminGroups',       planned: true },
-    { route: 'admin/users',      labelKey: 'sidebar.item.adminUsers',        planned: true },
-    { route: 'admin/limits',     labelKey: 'sidebar.item.domainAdminLimits', planned: true },
+    { route: 'admin/groups',     labelKey: 'sidebar.item.adminGroups'       },
+    { route: 'admin/users',      labelKey: 'sidebar.item.adminUsers'        },
+    { route: 'admin/limits',     labelKey: 'sidebar.item.domainAdminLimits' },
   ]},
 ];
 
