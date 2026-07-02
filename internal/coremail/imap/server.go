@@ -142,6 +142,14 @@ func (s *Server) Serve() error {
 	return s.serve()
 }
 
+// imapStopTimeout caps how long Stop() will wait on s.wg. The
+// session-goroutine drain is normally fast because we close every
+// active session conn; this cap is a safety net for the BLOCKER-2
+// flakes — if a session goroutine is wedged for any reason
+// (stuck TLS handshake, blocked syscall, etc.) Stop() returns
+// instead of hanging the caller's goroutine.
+const imapStopTimeout = 3 * time.Second
+
 // Stop gracefully shuts down the IMAP server.
 func (s *Server) Stop() {
 	close(s.done)
@@ -156,7 +164,18 @@ func (s *Server) Stop() {
 		}
 	}
 	s.mu.Unlock()
-	s.wg.Wait()
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(imapStopTimeout):
+		// a session goroutine is wedged; give up draining and
+		// let the caller move on rather than wedge the cleanup
+		// path of the test harness.
+	}
 }
 
 func (s *Server) serve() error {

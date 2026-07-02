@@ -67,6 +67,23 @@ type Service struct {
 	// alertMu serializes EvaluateAlerts / saveAlert / resolveAll so two
 	// concurrent evaluations cannot interleave alert rows.
 	alertMu sync.Mutex
+
+	// dispatcher fans newly-raised alerts out to the configured
+	// delivery providers (in-app, webhook, …). Optional; when nil,
+	// alerts are still persisted and listed, they are just not pushed
+	// to external channels.
+	dispatcher *Dispatcher
+}
+
+// SetDispatcher attaches an alert delivery dispatcher. Safe to call
+// with nil to disable external delivery.
+func (s *Service) SetDispatcher(d *Dispatcher) {
+	s.dispatcher = d
+}
+
+// Dispatcher returns the configured delivery dispatcher (may be nil).
+func (s *Service) Dispatcher() *Dispatcher {
+	return s.dispatcher
 }
 
 // NewService creates a monitoring service.
@@ -456,12 +473,27 @@ func (s *Service) CPULoad() (load1, load5, load15 float64, err error) {
 
 // EvaluateAlerts re-evaluates all alert rules. The function is
 // safe to call concurrently; an internal mutex serializes writes.
+//
+// Delivery contract: only newly-raised alerts (i.e. alerts whose stable
+// identity key was NOT already present in the previously-active set)
+// are dispatched through the configured providers. A repeated
+// evaluation of the same still-active condition — which happens on
+// every read endpoint that calls EvaluateAlerts — does not re-deliver
+// to webhook/in-app channels. An alert that was resolved (manually or
+// by the condition clearing) and then re-fires IS delivered again,
+// because its key is no longer in the previously-active set.
 func (s *Service) EvaluateAlerts(ctx context.Context) ([]Alert, error) {
 	s.alertMu.Lock()
 	defer s.alertMu.Unlock()
 
 	t := s.thresholds()
 	var alerts []Alert
+
+	// Snapshot the previously-active alert identities BEFORE resolving.
+	// Only alerts whose key is NOT in this set will be dispatched,
+	// which prevents repeated evaluations of the same still-active
+	// condition from spamming webhook/in-app delivery.
+	previousKeys := s.activeAlertKeys(ctx)
 
 	// Resolve previous alerts before re-evaluating.
 	s.resolveAll(ctx)
@@ -583,7 +615,59 @@ func (s *Service) EvaluateAlerts(ctx context.Context) ([]Alert, error) {
 		s.saveAlert(ctx, &alerts[i])
 	}
 
+	// Deliver only newly-raised alerts. Delivery is best-effort and
+	// isolated: a failing webhook never aborts evaluation or crashes
+	// monitoring. The previousKeys snapshot was captured BEFORE
+	// resolveAll, so an alert that was active in the prior evaluation
+	// and is still active now is treated as "not new" and is NOT
+	// re-delivered. An alert that resolves and then re-fires IS
+	// delivered, because its key is no longer in previousKeys.
+	if s.dispatcher != nil {
+		for i := range alerts {
+			k := alertKey(alerts[i])
+			if previousKeys[k] {
+				continue
+			}
+			s.dispatcher.Dispatch(ctx, alerts[i])
+		}
+	}
+
 	return s.ListActiveAlerts(ctx)
+}
+
+// alertKey is the stable identity of an alert used to decide whether
+// the alert is "newly raised" or "still active from a prior evaluation".
+// It intentionally excludes the message field (which can change as
+// counts drift) and uses category + severity + title, matching the
+// dashboard's grouping and the operator's mental model of "this is the
+// same alert I already saw".
+func alertKey(a Alert) string {
+	return string(a.Category) + "|" + string(a.Severity) + "|" + a.Title
+}
+
+// activeAlertKeys returns the set of alertKey values for every alert
+// currently in the active state. It is captured at the top of
+// EvaluateAlerts (before resolveAll) so the dispatch decision can be
+// made against the "previously active" set.
+func (s *Service) activeAlertKeys(ctx context.Context) map[string]bool {
+	keys := make(map[string]bool)
+	if s.db == nil {
+		return keys
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT category, severity, title FROM monitoring_alerts WHERE active=1`)
+	if err != nil {
+		return keys
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cat, sev, title string
+		if err := rows.Scan(&cat, &sev, &title); err != nil {
+			continue
+		}
+		keys[cat+"|"+sev+"|"+title] = true
+	}
+	return keys
 }
 
 func (s *Service) newAlert(cat Category, sev Severity, title, msg string) Alert {

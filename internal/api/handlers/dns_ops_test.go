@@ -865,6 +865,145 @@ func TestDNSOpsDKIMGenerateNoPrivateKeyInResponse(t *testing.T) {
 	}
 }
 
+// TestDNSOpsDKIMGenerateAuditEventCreated proves a successful
+// generation writes an audit row with the expected action and target.
+// The audit pipeline is the only durable record of who created the
+// key and when, so this contract matters for security review.
+func TestDNSOpsDKIMGenerateAuditEventCreated(t *testing.T) {
+	h := newDNSOpsHarness(t)
+	defer h.close()
+	code, body := h.do(t, "POST", "/api/v1/admin/dns/example.com/dkim", h.adminT, `{"selector":"orvix"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("dkim generate status %d: %s", code, body)
+	}
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		t.Fatalf("db: %v", err)
+	}
+	var action, target string
+	row := sqlDB.QueryRow(`SELECT action, target FROM coremail_audit WHERE action = 'dns.dkim.generate' ORDER BY id DESC LIMIT 1`)
+	if err := row.Scan(&action, &target); err != nil {
+		t.Fatalf("no audit row for dns.dkim.generate; err=%v", err)
+	}
+	if action != "dns.dkim.generate" {
+		t.Errorf("audit action = %q, want dns.dkim.generate", action)
+	}
+	if !strings.Contains(target, "domain:example.com") || !strings.Contains(target, "selector:orvix") {
+		t.Errorf("audit target must include domain and selector; got %q", target)
+	}
+	if strings.Contains(target, "BEGIN") || strings.Contains(target, "PRIVATE KEY") {
+		t.Fatalf("audit target leaked the private key: %q", target)
+	}
+}
+
+// TestDNSOpsDKIMPrivateKeyNotLogged proves the audit pipeline (the
+// only durable channel for handler-emitted strings) does not contain
+// the private key. This is a second-line check on top of the
+// response-body scan: every line written to the audit log is checked
+// for a PEM leak.
+func TestDNSOpsDKIMPrivateKeyNotLogged(t *testing.T) {
+	h := newDNSOpsHarness(t)
+	defer h.close()
+	_, _ = h.do(t, "POST", "/api/v1/admin/dns/example.com/dkim", h.adminT, `{"selector":"orvix"}`)
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		t.Fatalf("db: %v", err)
+	}
+	rows, err := sqlDB.Query(`SELECT target, COALESCE(actor,'') || '|' || COALESCE(action,'') || '|' || COALESCE(result,'') FROM coremail_audit`)
+	if err != nil {
+		t.Fatalf("query audit: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var t1, t2 string
+		_ = rows.Scan(&t1, &t2)
+		combined := t1 + "|" + t2
+		if strings.Contains(combined, "BEGIN") || strings.Contains(combined, "PRIVATE KEY") {
+			t.Errorf("audit row leaked the private key: %s | %s", t1, t2)
+		}
+	}
+}
+
+// TestDNSOpsDKIMForceOverwriteAllowed proves the documented rotation
+// flow: a second POST with confirm_rotation=rotate-dkim-key overwrites
+// the stored key, and the new key differs from the old one. Without
+// the confirm, the second POST is rejected with 409 (the "no force"
+// path is the safety default).
+func TestDNSOpsDKIMForceOverwriteAllowed(t *testing.T) {
+	h := newDNSOpsHarness(t)
+	defer h.close()
+
+	code, _ := h.do(t, "POST", "/api/v1/admin/dns/example.com/dkim", h.adminT, `{"selector":"orvix"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("first generate status %d", code)
+	}
+	sqlDB, _ := h.db.DB()
+	var firstPEM string
+	_ = sqlDB.QueryRow(`SELECT private_key_pem FROM coremail_dkim_config WHERE domain = 'example.com'`).Scan(&firstPEM)
+
+	code, _ = h.do(t, "POST", "/api/v1/admin/dns/example.com/dkim", h.adminT, `{"selector":"orvix"}`)
+	if code != http.StatusConflict {
+		t.Fatalf("second generate without confirm must be 409; got %d", code)
+	}
+
+	code, _ = h.do(t, "POST", "/api/v1/admin/dns/example.com/dkim", h.adminT, `{"selector":"orvix","confirm_rotation":"rotate-dkim-key"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("rotate generate must be 201; got %d", code)
+	}
+	var secondPEM string
+	_ = sqlDB.QueryRow(`SELECT private_key_pem FROM coremail_dkim_config WHERE domain = 'example.com'`).Scan(&secondPEM)
+	if firstPEM == secondPEM {
+		t.Errorf("rotation must produce a new key; got identical PEM")
+	}
+	if !strings.HasPrefix(secondPEM, "-----BEGIN PRIVATE KEY-----") {
+		t.Errorf("stored PEM must be a PKCS#8 private key; got prefix %q", secondPEM[:40])
+	}
+}
+
+// TestDNSOpsDKIMDNSRecordFormatValid proves the dns_record_name and
+// public_dns_txt fields are well-formed per RFC 6376, and the stored
+// PEM parses as a PKCS#8 RSA key.
+func TestDNSOpsDKIMDNSRecordFormatValid(t *testing.T) {
+	h := newDNSOpsHarness(t)
+	defer h.close()
+	code, body := h.do(t, "POST", "/api/v1/admin/dns/example.com/dkim", h.adminT, `{"selector":"mail"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("dkim generate status %d body=%s", code, body)
+	}
+	var resp struct {
+		DNSRecordName string `json:"dns_record_name"`
+		PublicDNSTXT  string `json:"public_dns_txt"`
+	}
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.DNSRecordName != "mail._domainkey.example.com" {
+		t.Errorf("dns_record_name = %q, want mail._domainkey.example.com", resp.DNSRecordName)
+	}
+	if !strings.HasPrefix(resp.PublicDNSTXT, "v=DKIM1; k=rsa; p=") {
+		t.Errorf("public_dns_txt must start with v=DKIM1; k=rsa; p=; got %q", resp.PublicDNSTXT)
+	}
+	parts := strings.SplitN(resp.PublicDNSTXT, "p=", 2)
+	if len(parts) != 2 || strings.ContainsAny(parts[1], " \t\r\n") {
+		t.Errorf("p= value must be a contiguous base64 blob; got %q", resp.PublicDNSTXT)
+	}
+	sqlDB, _ := h.db.DB()
+	var storedPEM string
+	_ = sqlDB.QueryRow(`SELECT private_key_pem FROM coremail_dkim_config WHERE domain = 'example.com'`).Scan(&storedPEM)
+	if !strings.HasPrefix(storedPEM, "-----BEGIN PRIVATE KEY-----") {
+		t.Errorf("stored PEM must be a PKCS#8 private key; got prefix %q", storedPEM[:40])
+	}
+	// Round-trip: parse the stored PEM and re-encode through
+	// GenerateKeyPair-style logic to confirm the format is valid.
+	block, _ := pem.Decode([]byte(storedPEM))
+	if block == nil {
+		t.Fatal("stored PEM did not decode")
+	}
+	if _, err := x509.ParsePKCS8PrivateKey(block.Bytes); err != nil {
+		t.Errorf("stored PEM is not a valid PKCS#8 key: %v", err)
+	}
+}
+
 // ── Provider plan / apply ───────────────────────────────────────
 
 // TestDNSOpsProviderPlanManual: the manual provider always returns

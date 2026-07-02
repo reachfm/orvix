@@ -513,11 +513,40 @@ func (s *Service) GetBackupMetrics(ctx context.Context) (*BackupMetrics, error) 
 
 // ── Backup Health ────────────────────────────────────────
 
+// GetBackupHealth returns the live backup system health status.
+//
+// The status string is one of:
+//
+//	"ok"                  — at least one backup exists, fresh
+//	                        (≤24h old), and the directory is writable.
+//	"warning"             — most recent backup is between 24h and 72h
+//	                        old, OR the scheduler is disabled but
+//	                        manual backups exist.
+//	"critical"            — most recent backup is older than 72h,
+//	                        OR the directory is missing/unwritable.
+//	"no_backups"          — the install has never produced a backup.
+//	                        The previous release conflated this with
+//	                        "critical" which produced misleading
+//	                        alerts on fresh installs. Operators now
+//	                        see a distinct "no_backups" state with
+//	                        the NoBackups field set, so the dashboard
+//	                        can render a "first backup pending" message
+//	                        instead of a critical incident badge.
+//	"directory_missing"   — the configured backup directory does
+//	                        not exist. Investigate filesystem / mount.
+//	"directory_not_writable" — the directory exists but cannot be
+//	                        written to. Investigate permissions.
+//	"scheduler_disabled"  — scheduler is explicitly disabled and
+//	                        there is no recent manual backup.
+//
+// The function is best-effort: it never returns an error from the
+// database query for `last_completed_backup_at` — a missing row is
+// a normal "no backups yet" case, not a failure.
 func (s *Service) GetBackupHealth(ctx context.Context) (*BackupHealth, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	health := &BackupHealth{RetentionEnabled: true, Status: "ok"}
+	health := &BackupHealth{RetentionEnabled: true, Status: HealthStatusOK}
 	if s.db != nil {
 		row := s.db.QueryRowContext(ctx, `SELECT enabled FROM backup_schedule_config WHERE id = 1`)
 		var enabled int
@@ -526,8 +555,8 @@ func (s *Service) GetBackupHealth(ctx context.Context) (*BackupHealth, error) {
 		}
 	}
 
-	_, err := os.Stat(s.basePath)
-	health.DirectoryExists = err == nil
+	_, statErr := os.Stat(s.basePath)
+	health.DirectoryExists = statErr == nil
 
 	if health.DirectoryExists {
 		testFile := filepath.Join(s.basePath, ".writetest")
@@ -538,26 +567,56 @@ func (s *Service) GetBackupHealth(ctx context.Context) (*BackupHealth, error) {
 		health.AvailableDiskBytes = diskFreeBytes(s.basePath)
 	}
 
+	// Determine the freshness of the most recent completed backup.
+	// lastBackupAt is the zero time when there are no completed
+	// backups; that case is now a distinct "no_backups" state
+	// rather than a "critical" one.
 	lastBackupAt, err := s.lastCompletedBackupTime(ctx)
 	if err == nil && !lastBackupAt.IsZero() {
 		health.LastBackupAgeHours = time.Since(lastBackupAt).Hours()
-		if health.LastBackupAgeHours > 72 {
+		switch {
+		case health.LastBackupAgeHours > 72:
 			health.LastBackupAgeCritical = true
-			health.Status = "critical"
-		} else if health.LastBackupAgeHours > 24 {
+			health.Status = HealthStatusCritical
+			health.Reason = fmt.Sprintf("no backups in %.0fh", health.LastBackupAgeHours)
+		case health.LastBackupAgeHours > 24:
 			health.LastBackupAgeWarning = true
-			if health.Status == "ok" {
-				health.Status = "warning"
-			}
+			health.Status = HealthStatusWarning
+			health.Reason = fmt.Sprintf("no backups in %.0fh", health.LastBackupAgeHours)
 		}
 	} else {
+		// No completed backups ever. This is normal for a fresh
+		// install; do not flag it as critical.
 		health.LastBackupAgeHours = -1
-		health.LastBackupAgeCritical = true
-		health.Status = "critical"
+		health.NoBackups = true
+		health.Status = HealthStatusNoBackups
+		health.Reason = "no backups yet — first run pending"
+		// Even on a fresh install, a missing or unwritable
+		// directory is a real problem.
+		if !health.DirectoryExists {
+			health.Status = HealthStatusDirMissing
+			health.Reason = "backup directory does not exist"
+		} else if !health.Writable {
+			health.Status = HealthStatusDirNotWritable
+			health.Reason = "backup directory is not writable"
+		}
 	}
 
-	if !health.DirectoryExists || !health.Writable {
-		health.Status = "critical"
+	// Directory / writability override any other status; an
+	// unwritable directory is always critical, even if recent
+	// backups exist (the next backup will fail).
+	if !health.DirectoryExists {
+		health.Status = HealthStatusDirMissing
+		health.Reason = "backup directory does not exist"
+	} else if !health.Writable {
+		health.Status = HealthStatusDirNotWritable
+		health.Reason = "backup directory is not writable"
+	}
+
+	// Scheduler disabled + stale manual backup → warning, not critical.
+	if !health.SchedulerEnabled && health.Status == HealthStatusOK && health.LastBackupAgeHours > 24 {
+		health.Status = HealthStatusDisabled
+		health.Reason = "scheduler disabled; manual backups older than 24h"
 	}
 
 	return health, nil
@@ -576,7 +635,76 @@ func (s *Service) lastCompletedBackupTime(ctx context.Context) (time.Time, error
 	if !t.Valid || t.String == "" {
 		return time.Time{}, nil
 	}
-	return time.Parse(time.RFC3339, t.String)
+	return parseStoredTime(t.String)
+}
+
+// parseStoredTime accepts the multiple textual representations
+// SQLite / modernc.org/sqlite may return for a DATETIME column:
+//
+//	"2026-07-01T18:00:00Z"            RFC3339 (no nanos)
+//	"2026-07-01T18:00:00.123456Z"     RFC3339Nano
+//	"2026-07-01 18:00:00.000000000+00:00"   space separator
+//	"2026-07-01 18:00:00+00:00"       space separator, no nanos
+//	"2026-07-01 18:00:47.7650625 +0000 UTC"  MAX(time.Time) value
+//
+// Returns the zero time on any failure so the caller treats it as
+// "no completed backup" rather than a parse error.
+func parseStoredTime(s string) (time.Time, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, nil
+	}
+	// Try the standard layouts in order of strictness.
+	layouts := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02 15:04:05.999999999Z07:00",
+		"2006-01-02 15:04:05-07:00",
+		"2006-01-02 15:04:05Z07:00",
+		"2006-01-02 15:04:05",
+	}
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, nil
+		}
+	}
+	// Go's time.Time.String() format used by MAX(time.Time) aggregates:
+	// "2006-01-02 15:04:05.999999999 +0000 UTC" or without nanos.
+	goStringLayouts := []string{
+		"2006-01-02 15:04:05.999999999 -0700 MST",
+		"2006-01-02 15:04:05 -0700 MST",
+	}
+	for _, layout := range goStringLayouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("backup time: unparseable stored value %q", s)
+}
+
+// debugParse is a debug-only helper that returns the first
+// matching layout for a stored time string. It is intentionally
+// separate from parseStoredTime so production code paths remain
+// unchanged. Used by the test suite to diagnose failures when
+// the stored format changes between SQLite versions.
+func debugParse(s string) string {
+	s = strings.TrimSpace(s)
+	layouts := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02 15:04:05.999999999Z07:00",
+		"2006-01-02 15:04:05-07:00",
+		"2006-01-02 15:04:05Z07:00",
+		"2006-01-02 15:04:05",
+	}
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return layout + " -> " + t.Format(time.RFC3339)
+		}
+	}
+	return "no match"
 }
 
 // ── Helpers ──────────────────────────────────────────────

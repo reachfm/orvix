@@ -86,6 +86,16 @@ type Server struct {
 	// startup creates the listener inside ListenAndServe.
 	customListener net.Listener
 
+	// listener is the listener created during the most recent
+	// ListenAndServe call (or assigned via SetListener). It is
+	// stored as a field so Stop() can close it directly; relying
+	// solely on http.Server.Close() is unreliable on Windows
+	// where the goroutine running s.srv.Serve(listener) can stay
+	// blocked in Accept() long enough to hang upstream waiters
+	// such as the runtime module's wg.Wait().
+	listener   net.Listener
+	listenerMu sync.Mutex
+
 	queueEngine interface {
 		Enqueue(ctx context.Context, entry *queue.QueueEntry) error
 	}

@@ -89,6 +89,30 @@ type MessageFilter struct {
 	Before        *time.Time
 	Limit         int
 	Offset        int
+
+	// Cursor pagination (scale-ready).
+	//
+	// When BeforeID is non-zero, the list query uses
+	//   WHERE id < BeforeID
+	// instead of OFFSET. This is the only safe way to paginate
+	// a billion-row table: OFFSET requires the database to
+	// scan and discard every preceding row, so page 1000 of
+	// 100-row pages forces a 100,000-row scan. Cursor pagination
+	// is constant-cost per page regardless of depth.
+	//
+	// The cursor is opaque to the caller; webmail encodes the
+	// last-seen message id as a base64 string and passes it
+	// back on the next request. Id is monotonic and immutable
+	// per row, so the cursor remains stable across inserts and
+	// deletes within the same mailbox.
+	BeforeID uint
+	// AfterID, when non-zero, returns messages with id > AfterID.
+	// Used by the webmail "new messages" poll.
+	AfterID uint
+	// UseCursor is the explicit opt-in: if false, the legacy
+	// OFFSET path runs. New callers should set UseCursor=true
+	// and supply BeforeID or AfterID.
+	UseCursor bool
 }
 
 // MatchScopeForSearch returns the Search* flags wired up

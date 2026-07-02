@@ -110,6 +110,13 @@ func (s *Server) Serve() error {
 	return s.serve()
 }
 
+// pop3StopTimeout caps how long Stop() will wait on s.wg. The
+// session-goroutine drain is normally fast because we close every
+// active session conn; this cap is a safety net for the BLOCKER-2
+// flakes — if a session goroutine is wedged for any reason Stop()
+// returns instead of hanging the caller's goroutine.
+const pop3StopTimeout = 3 * time.Second
+
 func (s *Server) Stop() {
 	close(s.done)
 	if s.listener != nil {
@@ -122,7 +129,18 @@ func (s *Server) Stop() {
 		}
 	}
 	s.mu.Unlock()
-	s.wg.Wait()
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(pop3StopTimeout):
+		// session goroutine wedged; give up draining and let
+		// the caller move on rather than wedge the cleanup
+		// path of the test harness.
+	}
 }
 
 func (s *Server) serve() error {

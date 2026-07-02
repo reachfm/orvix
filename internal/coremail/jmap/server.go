@@ -59,6 +59,16 @@ func (s *Server) ListenAndServe(addr string) error {
 	// Bind the listener synchronously so we can detect success
 	// immediately. JMAP runs on the admin port behind the Fiber
 	// router; TLS is handled at the Fiber layer, not here.
+	//
+	// We assign the listener to s.listener as a field as well so
+	// Stop() can close it directly. Relying solely on
+	// http.Server.Close() is unreliable on Windows: the
+	// underlying accept() goroutine can stay blocked on the
+	// closed handle for an extended time, which in turn hangs
+	// every caller that waits on the listener goroutine to exit
+	// (e.g. the runtime module's m.wg.Wait()). Holding the
+	// listener as a struct field gives Stop() a deterministic
+	// close path.
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		if s.listenerCb != nil {
@@ -66,6 +76,9 @@ func (s *Server) ListenAndServe(addr string) error {
 		}
 		return fmt.Errorf("jmap listen: %w", err)
 	}
+	s.listenerMu.Lock()
+	s.listener = listener
+	s.listenerMu.Unlock()
 	if s.listenerCb != nil {
 		s.listenerCb(addr, nil)
 	}
@@ -75,11 +88,36 @@ func (s *Server) ListenAndServe(addr string) error {
 // SetListener is a pre-existing test helper that pre-assigns a
 // listener. Not used in production startup.
 func (s *Server) SetListener(l net.Listener) {
+	s.listenerMu.Lock()
 	s.customListener = l
+	s.listenerMu.Unlock()
 }
 
+// Stop gracefully shuts down the JMAP server. The bound listener
+// is closed first (deterministically, regardless of what
+// http.Server.Close does on this platform), then http.Server.Close
+// is invoked to drain any in-flight requests. The order matters:
+// closing the listener unblocks Accept() so the goroutine running
+// s.srv.Serve(listener) can return; http.Server.Close alone does
+// not always do that on Windows and was the root cause of the
+// runtime test hang in the BLOCKER-2 review.
 func (s *Server) Stop() {
-	close(s.done)
+	select {
+	case <-s.done:
+		// already stopped
+	default:
+		close(s.done)
+	}
+	// Close the listener directly FIRST, so the goroutine in
+	// ListenAndServe running s.srv.Serve(listener) can exit even
+	// if http.Server.Close() leaves Accept() blocked on Windows.
+	s.listenerMu.Lock()
+	ln := s.listener
+	s.listener = nil
+	s.listenerMu.Unlock()
+	if ln != nil {
+		_ = ln.Close()
+	}
 	if s.srv != nil {
 		s.srv.Close()
 	}

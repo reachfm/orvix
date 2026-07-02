@@ -25,6 +25,15 @@ import (
 	"time"
 )
 
+// folderExec is the minimal interface satisfied by both *sql.DB
+// and *sql.Tx. EnsureMailboxSystemFolders / EnsureMailboxSystemFoldersTx
+// share the implementation by accepting this interface, so the
+// DB-bound and tx-bound versions stay in lock-step.
+type folderExec interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
 // System folder path constants. These match the paths
 // the storage layer writes when DefaultSystemFolders
 // builds the seed list. Any change here MUST be
@@ -57,7 +66,36 @@ func EnsureMailboxSystemFolders(ctx context.Context, db *sql.DB, mailboxID uint)
 	if mailboxID == 0 {
 		return fmt.Errorf("ensure system folders: invalid mailbox id")
 	}
+	return ensureMailboxSystemFolders(ctx, db, mailboxID)
+}
 
+// EnsureMailboxSystemFoldersTx is the transaction-bound
+// counterpart of EnsureMailboxSystemFolders. It is used by
+// bulk-import / admin flows that create a mailbox and
+// provision its folders in the SAME transaction, so a
+// folder-provisioning failure rolls back the mailbox insert
+// (and vice-versa). Single-row CreateMailbox and the
+// webmail-login re-provision path can keep using the
+// *sql.DB variant; both versions share the same internal
+// helper so the canonical folder list stays in lock-step.
+func EnsureMailboxSystemFoldersTx(ctx context.Context, tx *sql.Tx, mailboxID uint) error {
+	if tx == nil {
+		return fmt.Errorf("ensure system folders: nil transaction handle")
+	}
+	if mailboxID == 0 {
+		return fmt.Errorf("ensure system folders: invalid mailbox id")
+	}
+	return ensureMailboxSystemFolders(ctx, tx, mailboxID)
+}
+
+// ensureMailboxSystemFolders is the shared implementation
+// for EnsureMailboxSystemFolders and EnsureMailboxSystemFoldersTx.
+// Both accept the folderExec interface so a single code
+// path drives the DB-bound and tx-bound callers. Keep
+// behaviour IDENTICAL across the two callers: any change
+// here MUST be exercised by both the *sql.DB tests in
+// system_folders_test.go AND a tx-bound test.
+func ensureMailboxSystemFolders(ctx context.Context, ex folderExec, mailboxID uint) error {
 	// Confirm the mailbox row exists. The coremail_folders
 	// table has a foreign-key relationship to
 	// coremail_mailboxes; inserting a folder for a
@@ -65,7 +103,7 @@ func EnsureMailboxSystemFolders(ctx context.Context, db *sql.DB, mailboxID uint)
 	// confusing constraint error. Fail fast with a clear
 	// message instead.
 	var exists int
-	if err := db.QueryRowContext(ctx,
+	if err := ex.QueryRowContext(ctx,
 		"SELECT 1 FROM coremail_mailboxes WHERE id = ? AND deleted_at IS NULL",
 		mailboxID,
 	).Scan(&exists); err != nil {
@@ -96,7 +134,7 @@ func EnsureMailboxSystemFolders(ctx context.Context, db *sql.DB, mailboxID uint)
 		// races with a parallel EnsureMailboxSystemFolders
 		// call.
 		var existingID uint
-		err := db.QueryRowContext(ctx,
+		err := ex.QueryRowContext(ctx,
 			"SELECT id FROM coremail_folders WHERE mailbox_id = ? AND path = ?",
 			mailboxID, f.path,
 		).Scan(&existingID)
@@ -109,7 +147,7 @@ func EnsureMailboxSystemFolders(ctx context.Context, db *sql.DB, mailboxID uint)
 			return fmt.Errorf("ensure system folders: check %s: %w", f.path, err)
 		}
 
-		if _, err := db.ExecContext(ctx, `
+		if _, err := ex.ExecContext(ctx, `
 			INSERT INTO coremail_folders
 				(mailbox_id, parent_id, name, path, folder_type,
 				 message_count, unread_count, total_size,

@@ -145,7 +145,31 @@ type BackupHealth struct {
 	LastBackupAgeWarning  bool    `json:"lastBackupAgeWarning"`
 	LastBackupAgeCritical bool    `json:"lastBackupAgeCritical"`
 	Status                string  `json:"status"`
+	// Reason is a human-readable explanation of the Status, e.g.
+	// "no backups yet — first run pending" or "no backups in 96h".
+	// It is empty when Status is "ok".
+	Reason string `json:"reason,omitempty"`
+	// NoBackups is true when the system has never produced a backup
+	// in this install. The previous release conflated this with
+	// "critical", which produced misleading dashboard alerts on
+	// fresh installs. With NoBackups, the operator sees a
+	// distinct state and can dismiss it without worrying about
+	// missing an actual incident.
+	NoBackups bool `json:"no_backups,omitempty"`
 }
+
+// Status values returned by GetBackupHealth. Exposed as constants
+// so the API handlers and tests can match on them without using
+// string literals.
+const (
+	HealthStatusOK            = "ok"
+	HealthStatusWarning       = "warning"
+	HealthStatusCritical      = "critical"
+	HealthStatusNoBackups     = "no_backups"
+	HealthStatusDirMissing    = "directory_missing"
+	HealthStatusDirNotWritable = "directory_not_writable"
+	HealthStatusDisabled      = "scheduler_disabled"
+)
 
 var tables = []string{
 	`CREATE TABLE IF NOT EXISTS backup_registry (

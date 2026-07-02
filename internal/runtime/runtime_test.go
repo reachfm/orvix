@@ -3,6 +3,7 @@ package runtime
 import (
 	"encoding/json"
 	"errors"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -536,5 +537,140 @@ func TestListenerRegistryEmptySnapshotFallback(t *testing.T) {
 		if s.Status != "unknown" {
 			t.Errorf("%s status must be unknown (unset); got %q", key, s.Status)
 		}
+	}
+}
+
+
+// ── Normalized state taxonomy (active|skipped|degraded|failed) ──
+
+// TestListenerRegistryStateActive confirms MarkOK maps to the
+// normalized "active" state.
+func TestListenerRegistryStateActive(t *testing.T) {
+	r := NewListenerRegistry()
+	r.MarkOK(ListenerSMTP, 25)
+	s := r.Snapshot()[ListenerSMTP]
+	if s.State != StateActive {
+		t.Errorf("MarkOK must yield state=active; got %q", s.State)
+	}
+}
+
+// TestListenerRegistryStateSkipped confirms MarkDisabled maps to the
+// normalized "skipped" state — a config-disabled listener is skipped,
+// never fake-active.
+func TestListenerRegistryStateSkipped(t *testing.T) {
+	r := NewListenerRegistry()
+	r.MarkDisabled(ListenerIMAPS, 993, "IMAPS disabled: TLS cert not configured")
+	s := r.Snapshot()[ListenerIMAPS]
+	if s.State != StateSkipped {
+		t.Errorf("MarkDisabled must yield state=skipped; got %q", s.State)
+	}
+	if s.Status != "disabled" {
+		t.Errorf("legacy Status must remain 'disabled'; got %q", s.Status)
+	}
+}
+
+// TestListenerRegistryStateFailed confirms MarkFailed maps to the
+// normalized "failed" state (used for port conflicts).
+func TestListenerRegistryStateFailed(t *testing.T) {
+	r := NewListenerRegistry()
+	r.MarkFailed(ListenerSMTP, 25, errors.New("listen tcp :25: bind: address already in use"))
+	s := r.Snapshot()[ListenerSMTP]
+	if s.State != StateFailed {
+		t.Errorf("MarkFailed must yield state=failed; got %q", s.State)
+	}
+	if s.Detail != "bind failed: address already in use" {
+		t.Errorf("failed detail must be the safe port-conflict summary; got %q", s.Detail)
+	}
+}
+
+// TestListenerRegistryStateDegraded confirms MarkDegraded maps to the
+// normalized "degraded" state while keeping the listener reachable.
+func TestListenerRegistryStateDegraded(t *testing.T) {
+	r := NewListenerRegistry()
+	r.MarkDegraded(ListenerSMTP, 25, "STARTTLS unavailable: certificate failed to load")
+	s := r.Snapshot()[ListenerSMTP]
+	if s.State != StateDegraded {
+		t.Errorf("MarkDegraded must yield state=degraded; got %q", s.State)
+	}
+	// Degraded listeners are still reachable, so legacy Status is "ok".
+	if s.Status != "ok" {
+		t.Errorf("degraded listener legacy Status must stay 'ok'; got %q", s.Status)
+	}
+}
+
+// TestListenerRegistryStateDefaultsUnknown confirms unset listeners
+// report the normalized "unknown" state, never a fabricated "active".
+func TestListenerRegistryStateDefaultsUnknown(t *testing.T) {
+	r := NewListenerRegistry()
+	for _, kind := range allKinds {
+		s := r.Snapshot()[kind]
+		if s.State != StateUnknown {
+			t.Errorf("%s default state must be unknown; got %q", kind, s.State)
+		}
+	}
+}
+
+// TestListenerRegistryStatePortConflict simulates two listeners
+// competing for the same port: the loser is recorded as failed with a
+// safe address-in-use detail, and the registry state matches the actual
+// (failed) bind result rather than a config-derived value.
+func TestListenerRegistryStatePortConflict(t *testing.T) {
+	// Bind a real socket so the second attempt genuinely conflicts.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	_, err = net.Listen("tcp", ln.Addr().String())
+	if err == nil {
+		t.Fatal("expected the second bind on the same port to fail")
+	}
+
+	r := NewListenerRegistry()
+	r.MarkStarting(ListenerSMTP, port)
+	// The bind failed for real → the runtime records failed, matching
+	// the actual result.
+	r.MarkFailed(ListenerSMTP, port, err)
+	s := r.Snapshot()[ListenerSMTP]
+	if s.State != StateFailed {
+		t.Fatalf("port conflict must yield state=failed; got %q (%q)", s.State, s.Detail)
+	}
+	if s.Port != port {
+		t.Errorf("failed listener must retain its port; got %d want %d", s.Port, port)
+	}
+}
+
+// TestListenerRegistryStateInTelemetry confirms the normalized state is
+// carried through into the admin runtime telemetry Service entries so
+// the admin endpoint reports actual listener state.
+func TestListenerRegistryStateInTelemetry(t *testing.T) {
+	r := NewListenerRegistry()
+	r.MarkOK(ListenerSMTP, 25)
+	r.MarkDisabled(ListenerIMAPS, 993, "IMAPS disabled by config")
+	r.MarkFailed(ListenerIMAP, 143, errors.New("bind: address already in use"))
+	r.MarkDegraded(ListenerPOP3, 110, "STARTTLS unavailable")
+
+	tel := NewTelemetry(Inputs{
+		Version:          "1.0.0",
+		StartedAt:        time.Now().Add(-time.Hour),
+		ListenerSnapshot: r.Snapshot(),
+	})
+
+	cases := map[string]string{
+		"smtp":  StateActive,
+		"imaps": StateSkipped,
+		"imap":  StateFailed,
+		"pop3":  StateDegraded,
+	}
+	for svc, want := range cases {
+		if got := tel.Services[svc].State; got != want {
+			t.Errorf("telemetry %s state = %q, want %q", svc, got, want)
+		}
+	}
+	// Unset listeners must report unknown, never active.
+	if tel.Services["jmap"].State != StateUnknown {
+		t.Errorf("jmap (unset) state must be unknown; got %q", tel.Services["jmap"].State)
 	}
 }

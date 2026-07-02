@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	dbmode "github.com/orvix/orvix/internal/database/mode"
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
 )
@@ -103,6 +104,14 @@ type MonitoringConfig struct {
 	BackupAgeCriticalHours int `mapstructure:"backup_age_critical_hours"`
 	CertExpiryWarningDays  int `mapstructure:"cert_expiry_warning_days"`
 	CertExpiryCriticalDays int `mapstructure:"cert_expiry_critical_days"`
+
+	// Alert delivery. The in-app provider is always on. The webhook
+	// provider is opt-in and only active when both AlertWebhookEnabled
+	// is true and AlertWebhookURL is non-empty. The URL and token are
+	// secrets: they are never logged or returned by the status API.
+	AlertWebhookEnabled bool   `mapstructure:"alert_webhook_enabled"`
+	AlertWebhookURL     string `mapstructure:"alert_webhook_url"`
+	AlertWebhookToken   string `mapstructure:"alert_webhook_token"`
 }
 
 // DiskUsageWarningPctVal returns the configured warning threshold or the default of 85.
@@ -212,19 +221,33 @@ type ServerConfig struct {
 }
 
 // DatabaseConfig holds database connection settings.
+//
+// DeploymentMode is the authoritative flag that decides whether the
+// runtime treats the database as "production" or "dev/smoke". A
+// production deployment MUST use Postgres; SQLite in production is
+// rejected at boot. The check lives in
+// internal/database/mode.ValidateProductionSafety and is wired into
+// config.Load.
 type DatabaseConfig struct {
-	Driver      string `mapstructure:"driver"`
-	DSN         string `mapstructure:"dsn"`
-	Host        string `mapstructure:"host"`
-	Port        int    `mapstructure:"port"`
-	User        string `mapstructure:"user"`
-	Password    string `mapstructure:"password"`
-	DBName      string `mapstructure:"dbname"`
-	SSLMode     string `mapstructure:"sslmode"`
-	MaxOpen     int    `mapstructure:"max_open"`
-	MaxIdle     int    `mapstructure:"max_idle"`
-	MaxLifetime int    `mapstructure:"max_lifetime"`
-	SQLitePath  string `mapstructure:"sqlite_path"`
+	Driver          string `mapstructure:"driver"`
+	DSN             string `mapstructure:"dsn"`
+	Host            string `mapstructure:"host"`
+	Port            int    `mapstructure:"port"`
+	User            string `mapstructure:"user"`
+	Password        string `mapstructure:"password"`
+	DBName          string `mapstructure:"dbname"`
+	SSLMode         string `mapstructure:"sslmode"`
+	MaxOpen         int    `mapstructure:"max_open"`
+	MaxIdle         int    `mapstructure:"max_idle"`
+	MaxLifetime     int    `mapstructure:"max_lifetime"`
+	SQLitePath      string `mapstructure:"sqlite_path"`
+	DeploymentMode  string `mapstructure:"deployment_mode"` // "dev" (default) or "production"
+}
+
+// IsProduction reports whether the deployment mode is "production".
+// Used by the mode package to refuse SQLite in production.
+func (c DatabaseConfig) IsProduction() bool {
+	return strings.EqualFold(strings.TrimSpace(c.DeploymentMode), "production")
 }
 
 // RedisConfig holds Redis connection settings.
@@ -466,8 +489,16 @@ func Defaults() *Config {
 			IMAPPort:                 143,
 			POP3Host:                 "0.0.0.0",
 			POP3Port:                 110,
-			JMAPHost:                 "0.0.0.0",
-			JMAPPort:                 443,
+			// JMAP default bind is 127.0.0.1:8081, matching the
+			// installer's orvix.yaml. The previous default of
+			// 0.0.0.0:443 exposed the JMAP endpoint on the bare
+			// server IP without TLS, which was a security
+			// regression and a port-conflict landmine on any host
+			// that already runs an HTTPS server. Operators who
+			// need the old behaviour can set jmap_host: 0.0.0.0
+			// and jmap_port: 443 explicitly in orvix.yaml.
+			JMAPHost:                 "127.0.0.1",
+			JMAPPort:                 8081,
 			RequireTLSForAuth:        true,
 			RequireAuthForSubmission: true,
 			QueueWorkers:             1,
@@ -546,6 +577,15 @@ func Load(logger *zap.Logger) (*Config, error) {
 	}
 
 	cfg.validate()
+
+	// Enforce database-mode production safety. This refuses to boot
+	// when deployment_mode=production is paired with driver=sqlite.
+	// Lives here (not in cmd/orvix/main.go) so all callers of
+	// config.Load get the same fail-closed behavior, including tests
+	// that exercise Load directly.
+	if err := dbmode.ValidateDriverDSN(cfg.Database.Driver, cfg.Database.DSN, cfg.Database.IsProduction()); err != nil {
+		return nil, fmt.Errorf("database mode validation failed: %w", err)
+	}
 
 	return cfg, nil
 }
@@ -685,6 +725,20 @@ func (c *Config) validate() {
 				c.Database.DBName, c.Database.Password, c.Database.SSLMode)
 		case "sqlite":
 			c.Database.DSN = c.Database.SQLitePath
+		}
+	}
+	// Apply safe defaults for pool settings.
+	if c.Database.MaxOpen <= 0 {
+		switch c.Database.Driver {
+		case "postgres":
+			c.Database.MaxOpen = 25
+			c.Database.MaxIdle = 5
+			c.Database.MaxLifetime = 300
+		default:
+			// SQLite is single-writer; keep the existing 1/1 default.
+			c.Database.MaxOpen = 1
+			c.Database.MaxIdle = 1
+			c.Database.MaxLifetime = 0
 		}
 	}
 }

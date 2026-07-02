@@ -1353,6 +1353,142 @@ func TestGetBackupHealth(t *testing.T) {
 	}
 }
 
+// TestGetBackupHealth_NoBackupsIsDistinct covers the regression
+// fixed in ENTERPRISE-BACKEND-COMPLETION item 7: a fresh install
+// with no completed backups must report a distinct "no_backups"
+// state, not "critical".
+func TestGetBackupHealth_NoBackupsIsDistinct(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	if err := os.MkdirAll(s.basePath, 0750); err != nil {
+		t.Fatalf("mkdir base: %v", err)
+	}
+
+	health, err := s.GetBackupHealth(ctx)
+	if err != nil {
+		t.Fatalf("get health: %v", err)
+	}
+	if health.Status != HealthStatusNoBackups {
+		t.Errorf("Status = %q, want %q (no backups must NOT be critical)", health.Status, HealthStatusNoBackups)
+	}
+	if !health.NoBackups {
+		t.Errorf("NoBackups flag should be true on fresh install")
+	}
+	if health.LastBackupAgeCritical {
+		t.Errorf("LastBackupAgeCritical should be false on fresh install")
+	}
+	if health.Reason == "" {
+		t.Errorf("Reason must explain the state to the operator")
+	}
+}
+
+// TestGetBackupHealth_FreshBackupIsOK verifies the happy path:
+// a recent (≤24h) successful backup returns status=ok.
+func TestGetBackupHealth_FreshBackupIsOK(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	if err := os.MkdirAll(s.basePath, 0750); err != nil {
+		t.Fatalf("mkdir base: %v", err)
+	}
+	b, err := s.CreateBackup(ctx, "fresh")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Debug: read what sqlite actually stored AND what the parser
+	// produces for the value. The parse failure we are debugging
+	// is path-dependent: the value in the row can be parsed
+	// directly, but the health query returns NULL or something
+	// different.
+	var stored sql.NullString
+	if err := s.db.QueryRow(`SELECT completed_at FROM backup_registry WHERE id = ?`, b.ID).Scan(&stored); err == nil {
+		t.Logf("direct read: stored = %q, valid=%v", stored.String, stored.Valid)
+	}
+	var maxV sql.NullString
+	if err := s.db.QueryRow(`SELECT MAX(completed_at) FROM backup_registry WHERE status = 'completed'`).Scan(&maxV); err == nil {
+		t.Logf("MAX read: max = %q, valid=%v", maxV.String, maxV.Valid)
+		if maxV.Valid {
+			t.Logf("debug parse: %s", debugParse(maxV.String))
+		}
+	}
+	health, err := s.GetBackupHealth(ctx)
+	if err != nil {
+		t.Fatalf("get health: %v", err)
+	}
+	if health.Status != HealthStatusOK {
+		t.Errorf("Status = %q, want ok (backup %s is fresh); debug stored=%v max=%v", health.Status, b.ID, stored, maxV)
+	}
+	if health.NoBackups {
+		t.Errorf("NoBackups must be false when a backup exists")
+	}
+	if health.LastBackupAgeHours > 1 {
+		t.Errorf("LastBackupAgeHours = %v, want < 1h for a fresh backup", health.LastBackupAgeHours)
+	}
+}
+
+// TestGetBackupHealth_DirectoryMissing ensures the directory_missing
+// status is reported when the configured backup dir does not exist.
+func TestGetBackupHealth_DirectoryMissing(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	// Do not create the directory. basePath is a fresh t.TempDir() path
+	// that has not been MkdirAll'd.
+	health, err := s.GetBackupHealth(ctx)
+	if err != nil {
+		t.Fatalf("get health: %v", err)
+	}
+	if health.DirectoryExists {
+		t.Fatalf("precondition: basePath %q should NOT exist", s.basePath)
+	}
+	if health.Status != HealthStatusDirMissing {
+		t.Errorf("Status = %q, want %q", health.Status, HealthStatusDirMissing)
+	}
+	if health.Reason == "" {
+		t.Errorf("Reason must be set when status is non-ok")
+	}
+}
+
+// TestGetBackupHealth_AllStatusStringsValid ensures every status
+// returned by GetBackupHealth is one of the documented constants.
+// This catches the case where a future change accidentally
+// reintroduces a misleading status string.
+func TestGetBackupHealth_AllStatusStringsValid(t *testing.T) {
+	allowed := map[string]bool{
+		HealthStatusOK:             true,
+		HealthStatusWarning:        true,
+		HealthStatusCritical:       true,
+		HealthStatusNoBackups:      true,
+		HealthStatusDirMissing:     true,
+		HealthStatusDirNotWritable: true,
+		HealthStatusDisabled:       true,
+	}
+	s := testService(t)
+	ctx := context.Background()
+	// 1. No backups + missing dir.
+	if err := os.RemoveAll(s.basePath); err != nil {
+		t.Fatalf("remove base: %v", err)
+	}
+	health, _ := s.GetBackupHealth(ctx)
+	if !allowed[health.Status] {
+		t.Errorf("Status %q is not in the allowlist", health.Status)
+	}
+	// 2. No backups + present dir.
+	if err := os.MkdirAll(s.basePath, 0750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	health, _ = s.GetBackupHealth(ctx)
+	if !allowed[health.Status] {
+		t.Errorf("Status %q is not in the allowlist", health.Status)
+	}
+	// 3. With a backup.
+	if _, err := s.CreateBackup(ctx, "x"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	health, _ = s.GetBackupHealth(ctx)
+	if !allowed[health.Status] {
+		t.Errorf("Status %q is not in the allowlist", health.Status)
+	}
+}
+
 // ── Backup v2: Retention Tests ───────────────────────────
 
 func TestRunRetentionNoDeletion(t *testing.T) {
