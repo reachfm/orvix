@@ -70,7 +70,7 @@ export async function renderLicensePage(root) {
   // The dashboard's license card surfaces rt.license values when
   // available and falls back to the dedicated endpoint.
   const rt = (typeof getRuntime === 'function' && getRuntime()) || null;
-  const l = (rt && rt.license) || state.license || data || {};
+  const l = (rt && rt.license) || data || {};
   card.querySelector('.panel-head span').replaceWith(badge(stateLabel(l), stateKind(l)));
 
   const dl = el('dl', { class: 'kv' });

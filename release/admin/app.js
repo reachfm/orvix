@@ -28,7 +28,7 @@ import { setBanner, getProfile } from './modules/state.js';
 import { initLocaleFromURL, t, getLocale } from './modules/i18n.js';
 import { register, setNotFound, setBeforeEach, startRouter, go } from './modules/router.js';
 import { apiGet, csrfFetch } from './modules/api.js';
-import { bindToast } from './modules/components.js';
+import { bindToast, openModal, el } from './modules/components.js';
 import { toast } from './modules/toast.js';
 import { detectRtlFromURL, setDocDirection } from './modules/rtl.js';
 

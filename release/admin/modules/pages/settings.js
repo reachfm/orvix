@@ -52,6 +52,10 @@ export async function renderSettingsPage(root) {
       ]));
       return;
     }
+    // Show read-only warning when /settings endpoint is unavailable.
+    wrap.appendChild(el('div', { class: 'banner banner-warn' }, [
+      el('span', { class: 'banner-text', text: 'Settings API unreachable. Displaying read-only summary — changes cannot be saved.' }),
+    ]));
   }
   setSettings(data || {});
   setRuntime(data && data.runtime ? data.runtime : (getRuntime() || null));

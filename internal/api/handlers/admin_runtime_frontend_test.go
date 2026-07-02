@@ -274,7 +274,7 @@ func TestAdminLicenseUIPreferRuntimeTelemetry(t *testing.T) {
 	root := adminRepoRoot(t)
 	src := adminJSContents(t, root)
 	// The licenseInfo assignment must prefer rt.license first.
-	if !strings.Contains(src, "(rt && rt.license) || state.license") {
+	if !strings.Contains(src, "(rt && rt.license) || data") {
 		t.Errorf("app.js license card must prefer rt.license over state.license for runtime telemetry fields")
 	}
 }
