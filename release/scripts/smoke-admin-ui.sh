@@ -325,5 +325,74 @@ if [ -n "$bad_storage" ]; then
 fi
 pass "storage usage is limited to auth tokens and UI preferences"
 
+# ── 24. apiDelete must forward headers and body from opts ────────
+# Codex BLOCKER 1: apiDelete() was dropping headers from the opts
+# object because it passed opts as csrfFetch's third parameter
+# instead of merging headers+body into init.
+API_JS="$ADMIN_DIR/modules/api.js"
+if ! grep -q "init\.headers\s*=\s*opts\.headers" "$API_JS" 2>/dev/null; then
+    fail "apiDelete must assign init.headers = opts.headers to forward DELETE headers (BLOCKER 1)"
+fi
+if ! grep -q "init\.body\s*=\s*opts\.body" "$API_JS" 2>/dev/null; then
+    fail "apiDelete must assign init.body = opts.body to forward DELETE body (BLOCKER 1)"
+fi
+pass "apiDelete forwards headers and body from opts to init"
+
+# ── 25. Backup delete sends confirmation body ───────────────────
+# Codex BLOCKER 1: the delete path must transmit both the
+# X-Orvix-Confirm header AND a JSON body with the confirm field
+# so the backend can validate the intent.
+BACKUPS_JS="$ADMIN_DIR/modules/pages/backups.js"
+if ! grep -q "body:\s*JSON\.stringify.*confirm.*delete-orvix-backup" "$BACKUPS_JS" 2>/dev/null; then
+    fail "backups.js delete must send JSON body with confirm: 'delete-orvix-backup' (BLOCKER 1)"
+fi
+pass "backup delete sends confirmation body matching backend contract"
+
+# ── 26. No bare undeclared applyDisabled in dns-dkim.js ─────────
+# Codex BLOCKER 2: applyDisabled was used as an undeclared bare
+# identifier in renderDnsProviderPanel, which would throw at runtime.
+# It must be a local const/let/var or state.applyDisabled.
+DNS_DKIM="$ADMIN_DIR/modules/pages/dns-dkim.js"
+has_local_decl=$(grep -cE "^\s*(const|let|var)\s+applyDisabled\s*=" "$DNS_DKIM" 2>/dev/null || echo 0)
+bad_apply=$(grep -nE '\bapplyDisabled\b' "$DNS_DKIM" 2>/dev/null | grep -vE 'state\.applyDisabled|const applyDisabled|let applyDisabled|var applyDisabled|//.*applyDisabled|^\s*\*|applyDisabled:' || true)
+if [ -n "$bad_apply" ] && [ "$has_local_decl" -eq 0 ]; then
+    log "  bare applyDisabled references:"
+    echo "$bad_apply" >&2
+    fail "dns-dkim.js uses bare undeclared applyDisabled without local declaration (BLOCKER 2)"
+fi
+pass "dns-dkim.js uses no bare undeclared applyDisabled"
+
+# ── 27. Provider plan key consistency ────────────────────────────
+# Codex BLOCKER 3: plan stored by [name] but was read by [domain],
+# causing dry-run plans to never display. Verify the read key
+# matches the store key (both must be by provider name).
+if grep -q "state\.dnsProviderPlans\[name\]" "$DNS_DKIM" 2>/dev/null; then
+    # Stored by provider name; read must also be by provider name.
+    if grep -qE "state\.dnsProviderPlans\[domain\]|state\.dnsProviderPlans\[state\.currentDomain\]" "$DNS_DKIM" 2>/dev/null; then
+        fail "dns-dkim.js stores provider plan by [name] but reads by [domain] — key mismatch (BLOCKER 3)"
+    fi
+fi
+if grep -q "state\.dnsProviderPlans\[state\.selectedProvider\]" "$DNS_DKIM" 2>/dev/null; then
+    : # ok — consistent with store by [name]
+else
+    # Fallback: check that no stale domain-based read exists.
+    if grep -q "state\.dnsProviderPlans\[name\]\s*=" "$DNS_DKIM" 2>/dev/null && grep -q "state\.dnsProviderPlans\[" "$DNS_DKIM" 2>/dev/null; then
+        if ! grep -q "state\.selectedProvider" "$DNS_DKIM" 2>/dev/null; then
+            fail "dns-dkim.js stores plan by [name] but no selectedProvider-based read found (BLOCKER 3)"
+        fi
+    fi
+fi
+pass "dns-dkim.js provider plan store/read keys are consistent"
+
+# ── 28. MTA-STS .records.find() must be guarded by Array.isArray ─
+# Codex HIGH-RISK: inner.records.find() throws if backend omits
+# or renames the records field. Must be guarded.
+if grep -q "\.records\.find(" "$DNS_DKIM" 2>/dev/null; then
+    if ! grep -q "Array\.isArray.*records" "$DNS_DKIM" 2>/dev/null; then
+        fail "dns-dkim.js uses .records.find() without Array.isArray guard (HIGH RISK)"
+    fi
+fi
+pass "dns-dkim.js MTA-STS .records.find() is guarded by Array.isArray"
+
 echo
 echo "ALL ADMIN UI SMOKE TESTS PASSED"

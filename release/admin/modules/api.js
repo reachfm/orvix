@@ -170,7 +170,14 @@ export function apiPut(url, body, opts) {
 export function apiPatch(url, body, opts) {
   return csrfFetch(url, { method: 'PATCH', body: typeof body === 'string' ? body : JSON.stringify(body || {}) }, opts);
 }
-export function apiDelete(url, opts) { return csrfFetch(url, { method: 'DELETE' }, opts); }
+export function apiDelete(url, opts) {
+  const init = { method: 'DELETE' };
+  if (opts) {
+    if (opts.headers) init.headers = opts.headers;
+    if (opts.body) init.body = opts.body;
+  }
+  return csrfFetch(url, init, opts);
+}
 
 // ---------- login / logout (auth boundaries) ---------------------
 export async function login(email, password, mfaCode) {

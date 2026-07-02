@@ -169,7 +169,10 @@ async function doDelete(id) {
   const ok = await confirmDanger({ title: 'Delete backup', message: 'Type "delete-orvix-backup" to confirm permanent deletion.', confirmLabel: 'Delete', requireText: 'delete-orvix-backup' });
   if (!ok) return;
   try {
-    await apiDelete('/api/v1/admin/backups/' + encodeURIComponent(id), { headers: { 'X-Orvix-Confirm': 'delete-orvix-backup' } });
+    await apiDelete('/api/v1/admin/backups/' + encodeURIComponent(id), {
+      headers: { 'X-Orvix-Confirm': 'delete-orvix-backup' },
+      body: JSON.stringify({ confirm: 'delete-orvix-backup' })
+    });
     toast('Backup deleted', 'success', 1800);
     setTimeout(() => location.reload(), 400);
   } catch (err) {
