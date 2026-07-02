@@ -26,6 +26,7 @@ type Server struct {
 
 	mu       sync.Mutex
 	sessions map[string]*Session
+	conns    map[net.Conn]struct{} // active per-connection handles, closed during Stop
 	listener net.Listener
 	done     chan struct{}
 
@@ -43,6 +44,7 @@ func NewServer(cfg Config, handler *CommandHandler, receiver *Receiver) *Server 
 		Handler:  handler,
 		Receiver: receiver,
 		sessions: make(map[string]*Session),
+		conns:    make(map[net.Conn]struct{}),
 		done:     make(chan struct{}),
 	}
 }
@@ -130,17 +132,37 @@ func (s *Server) SetListener(l net.Listener) {
 	s.listener = l
 }
 
-// Stop gracefully stops the SMTP server.
+// Stop gracefully stops the SMTP server. It closes the listener
+// (so no new connections are accepted) and then closes every
+// active per-connection handle so the handleConn goroutines can
+// exit promptly. Without the per-connection close, orphaned
+// handleConn goroutines would leak past Stop(), accumulating
+// across test runs and exhausting file descriptors (which in turn
+// causes subsequent tests to fail with bind errors). This is the
+// BLOCKER-2 hang-prevention contract for the SMTP server.
 func (s *Server) Stop() error {
 	close(s.done)
 	if s.listener != nil {
-		return s.listener.Close()
+		_ = s.listener.Close()
 	}
+	s.mu.Lock()
+	for c := range s.conns {
+		_ = c.Close()
+	}
+	s.mu.Unlock()
 	return nil
 }
 
 func (s *Server) handleConn(conn net.Conn) {
-	defer conn.Close()
+	s.mu.Lock()
+	s.conns[conn] = struct{}{}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.conns, conn)
+		s.mu.Unlock()
+		conn.Close()
+	}()
 
 	// SMTPS: immediate TLS handshake before any SMTP data.
 	if s.Config.ImplicitTLS && s.TLSConfig != nil {

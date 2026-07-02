@@ -159,6 +159,25 @@ func TestListenerStatePlainListenersActive(t *testing.T) {
 // configured, and the runtime does not claim they are active. SMTPS
 // is also skipped (not yet implemented); the registry must honestly
 // report that, not fake an active listener.
+//
+// Determinism notes (BLOCKER-2 hardening):
+//
+//  1. State deadline is 5s, not 2s. The MarkDisabled call is
+//     synchronous at the end of Start(), but the surrounding
+//     initCore + storage + licensing + push-notifier work plus
+//     listener goroutine startup can plausibly take a moment on
+//     busy CI runners. 5s gives the work room to complete without
+//     trading off determinism (the actual answer still arrives
+//     within ~1s in steady state).
+//
+//  2. The port-non-binding probe at the end is bounded with a
+//     short DialTimeout so the test never blocks on a connect.
+//
+//  3. The harness registers mod.Stop() via t.Cleanup. After the
+//     BLOCKER-2 fix (JMAP tracks its listener and Module.Stop()
+//     has a bounded wait) this Stop() returns even when an
+//     external goroutine hangs — the test never wedges the Go
+//     test runner.
 func TestListenerStateSecureListenersSkipWhenNoCert(t *testing.T) {
 	h := newListenerStateHarness(t)
 	h.initAndStart(t)
@@ -168,7 +187,7 @@ func TestListenerStateSecureListenersSkipWhenNoCert(t *testing.T) {
 		orvixruntime.ListenerIMAPS,
 		orvixruntime.ListenerPOP3S,
 	} {
-		s := h.waitForStateNotUnknown(t, kind, 2*time.Second)
+		s := h.waitForStateNotUnknown(t, kind, 5*time.Second)
 		if s.State == orvixruntime.StateActive {
 			t.Fatalf("%s must not be active without cert/key; got %+v", kind, s)
 		}

@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/csv"
 	"encoding/json"
@@ -318,8 +319,23 @@ func (h *Handler) importMailboxes(c fiber.Ctx, dryRun bool) error {
 				// (and any side-effects from the savepoint open);
 				// RELEASE SAVEPOINT drops the marker so the
 				// outer tx state is clean for the next row.
-				_, _ = tx.ExecContext(c.Context(), "ROLLBACK TO SAVEPOINT "+spName)
-				_, _ = tx.ExecContext(c.Context(), "RELEASE SAVEPOINT "+spName)
+				//
+				// Both statements MUST succeed: if the ROLLBACK
+				// itself fails, the tx state is unknown and we
+				// cannot safely continue with the next row. Fail
+				// closed by rolling back the outer tx — never
+				// commit a row whose rollback we cannot prove.
+				if sErr := rollbackAndReleaseSavepoint(c.Context(), tx, spName); sErr != nil {
+					_ = tx.Rollback()
+					rolledBack = true
+					insertErrs = append(insertErrs, BulkImportError{Line: row.Line, Email: row.Email, Error: "savepoint rollback failed"})
+					return c.Status(fiber.StatusInternalServerError).JSON(BulkImportResult{
+						DryRun:  false,
+						Created: 0,
+						Skipped: 0,
+						Errors:  append(rowErrs, insertErrs...),
+					})
+				}
 				insertErrs = append(insertErrs, BulkImportError{Line: row.Line, Email: row.Email, Error: "insert failed"})
 				continue
 			}
@@ -346,8 +362,22 @@ func (h *Handler) importMailboxes(c fiber.Ctx, dryRun bool) error {
 		// mailbox committed to the database.
 		if ferr := coremail.EnsureMailboxSystemFoldersTx(c.Context(), tx, uint(mboxID)); ferr != nil {
 			if allowPartial {
-				_, _ = tx.ExecContext(c.Context(), "ROLLBACK TO SAVEPOINT "+spName)
-				_, _ = tx.ExecContext(c.Context(), "RELEASE SAVEPOINT "+spName)
+				// Same fail-closed contract as the insert
+				// failure path: prove the rollback before we
+				// continue. A failed rollback on a partially-
+				// provisioned mailbox is exactly the situation
+				// that the BLOCKER fix exists to prevent.
+				if sErr := rollbackAndReleaseSavepoint(c.Context(), tx, spName); sErr != nil {
+					_ = tx.Rollback()
+					rolledBack = true
+					insertErrs = append(insertErrs, BulkImportError{Line: row.Line, Email: row.Email, Error: "savepoint rollback failed"})
+					return c.Status(fiber.StatusInternalServerError).JSON(BulkImportResult{
+						DryRun:  false,
+						Created: 0,
+						Skipped: 0,
+						Errors:  append(rowErrs, insertErrs...),
+					})
+				}
 				insertErrs = append(insertErrs, BulkImportError{Line: row.Line, Email: row.Email, Error: "folder provisioning failed"})
 				continue
 			}
@@ -403,6 +433,49 @@ func (h *Handler) importMailboxes(c fiber.Ctx, dryRun bool) error {
 func parseBulkBool(s string) bool {
 	b, _ := strconv.ParseBool(s)
 	return b
+}
+
+// savepointExec is the small subset of *sql.Tx that the
+// savepoint cleanup helper needs. It exists so the helper can be
+// unit-tested against a fake executor that returns forced errors —
+// the BLOCKER-1 review requires the helper to provably fail closed
+// when the rollback or release step cannot be proven. *sql.Tx
+// satisfies this interface natively.
+type savepointExec interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// rollbackAndReleaseSavepoint undoes a per-row savepoint and drops
+// the savepoint marker from the outer transaction.
+//
+// This is the BLOCKER-1 fail-closed helper: both statements MUST
+// succeed before the handler is allowed to continue. If either the
+// ROLLBACK TO SAVEPOINT or the subsequent RELEASE SAVEPOINT fails,
+// the outer transaction's state is unknown (writes may or may not
+// be present, the marker may still exist), and the only safe
+// response is to fail closed by rolling back the entire outer tx —
+// never commit a row whose rollback we cannot prove.
+//
+// The savepoint name MUST be built from a Go-controlled integer
+// (see fmt.Sprintf("import_row_%d", i)) so there is no SQL
+// injection surface; this helper intentionally takes the name as a
+// single argument and concatenates with a literal " " separator.
+//
+// Returns nil on success, or a non-nil error describing which
+// step failed (rollback or release). The caller MUST treat any
+// non-nil return as a hard failure and abort the batch.
+func rollbackAndReleaseSavepoint(ctx context.Context, tx savepointExec, name string) error {
+	if _, err := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT "+name); err != nil {
+		return fmt.Errorf("rollback savepoint %s: %w", name, err)
+	}
+	if _, err := tx.ExecContext(ctx, "RELEASE SAVEPOINT "+name); err != nil {
+		// The rollback succeeded but the release did not.
+		// The savepoint marker may still be on the outer tx,
+		// which is itself a tx-state violation. Surface the
+		// error so the caller can fail closed.
+		return fmt.Errorf("release savepoint %s after rollback: %w", name, err)
+	}
+	return nil
 }
 
 // parseBulkImportCSV parses a CSV body into rows. It enforces the
