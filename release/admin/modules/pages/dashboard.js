@@ -124,8 +124,9 @@ async function loadSystem(card) {
       kv(dl, 'Started', started);
       kv(dl, 'Uptime', uptime);
       kv(dl, 'Version', version);
-      if (rtRuntime.disk) {
-        kv(dl, 'Disk', formatDisk(rtRuntime.disk));
+      const diskObj = rtRuntime && rtRuntime.capacity && rtRuntime.capacity.disk;
+      if (diskObj) {
+        kv(dl, 'Disk', formatDisk(diskObj));
       }
     } else if (health) {
       kv(dl, 'Status', health.status || '-');
@@ -159,8 +160,8 @@ export function formatUptime(s) {
 export function formatDisk(d) {
   if (d == null) return '-';
   if (typeof d === 'object') {
-    if (typeof d.free === 'number') return 'free: ' + fmtBytes(d.free) + (d.total ? ' / ' + fmtBytes(d.total) : '');
-    if (typeof d.used === 'number') return 'used: ' + fmtBytes(d.used) + (d.total ? ' / ' + fmtBytes(d.total) : '');
+    if (typeof d.free_bytes === 'number') return 'free: ' + fmtBytes(d.free_bytes) + (d.total_bytes ? ' / ' + fmtBytes(d.total_bytes) : '');
+    if (typeof d.used_bytes === 'number') return 'used: ' + fmtBytes(d.used_bytes) + (d.total_bytes ? ' / ' + fmtBytes(d.total_bytes) : '');
     return '-';
   }
   return fmtBytes(d);
@@ -194,7 +195,7 @@ async function loadServices(card) {
     const rt = await loadRuntime();
     body.innerHTML = '';
     const list = el('ul', { class: 'service-list' });
-    const rtSvcs = (rt && (rt.services || rtSvcs)) || (rt && rt.listeners) || [];
+    const rtSvcs = (rt && (rt.services || rt.listeners)) || [];
     if (rtSvcs.length === 0) {
       body.appendChild(el('div', { class: 'empty', text: t('common.empty') }));
       return;

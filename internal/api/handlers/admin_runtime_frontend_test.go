@@ -24,7 +24,6 @@
 //     no /api/v1/queue leak from webmail)
 
 import (
-	"encoding/json"
 	"regexp"
 	"strings"
 	"testing"
@@ -136,44 +135,20 @@ func TestAdminDashboardWarningsHandleRuntimeCodes(t *testing.T) {
 	}
 }
 
-// TestAdminRuntimeDiskCapacitySane confirms the runtime
-// telemetry package's disk capacity values are sane. The
-// endpoint may report zero (Windows or statfs error); when it
-// does report numbers, they must be non-negative. This is a
-// package-level guard that the JS dashboard and the Go
-// formatter agree on what "sane" means.
+// TestAdminRuntimeDiskCapacitySane confirms the dashboard
+// JS references the same disk field names that the Go runtime
+// telemetry serialises, so the frontend can render real data.
 func TestAdminRuntimeDiskCapacitySane(t *testing.T) {
-	// Re-run the runtime package's TestNewTelemetryDisk
-	// assertions through a JSON round-trip so the dashboard
-	// formatter and the Go formatter cannot drift.
-	// The runtime package is imported indirectly; we construct
-	// the canonical JSON shape here and assert.
-	canonical := map[string]any{
-		"label":        "data",
-		"total_bytes":  int64(100),
-		"used_bytes":   int64(40),
-		"free_bytes":   int64(60),
-		"used_percent": 40,
+	root := adminRepoRoot(t)
+	js := adminJSContents(t, root)
+	diskFieldRefs := []string{"free_bytes", "used_bytes", "total_bytes"}
+	for _, f := range diskFieldRefs {
+		if !strings.Contains(js, f) {
+			t.Errorf("admin JS bundle must reference disk field %q so the dashboard can render runtime telemetry", f)
+		}
 	}
-	b, err := json.Marshal(canonical)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	var got map[string]any
-	if err := json.Unmarshal(b, &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if total, _ := got["total_bytes"].(float64); total < 0 {
-		t.Errorf("disk total_bytes must be non-negative; got %v", total)
-	}
-	if used, _ := got["used_bytes"].(float64); used < 0 {
-		t.Errorf("disk used_bytes must be non-negative; got %v", used)
-	}
-	if free, _ := got["free_bytes"].(float64); free < 0 {
-		t.Errorf("disk free_bytes must be non-negative; got %v", free)
-	}
-	if pct, _ := got["used_percent"].(float64); pct < 0 || pct > 100 {
-		t.Errorf("disk used_percent must be 0..100; got %v", pct)
+	if !strings.Contains(js, "rtRuntime.capacity.disk") {
+		t.Errorf("dashboard must access disk via rtRuntime.capacity.disk to match the Go runtime Telemetry struct")
 	}
 }
 

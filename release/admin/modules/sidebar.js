@@ -42,6 +42,7 @@ const GROUPS = [
     { route: 'domains/public', labelKey: 'sidebar.item.publicFolders', planned: true },
     { route: 'accounts/classes', labelKey: 'sidebar.item.accountClasses', planned: true },
     { route: 'bulk-import',   labelKey: 'sidebar.item.bulkImport'     },
+    { route: 'dns',           labelKey: 'sidebar.item.dnsDkim'        },
   ]},
 
   { id: 'security', labelKey: 'sidebar.group.security', items: [
@@ -68,7 +69,6 @@ const GROUPS = [
     { route: 'monitoring/capacity', labelKey: 'sidebar.item.charts',    planned: true },
     { route: 'monitoring/storage',  labelKey: 'sidebar.item.storageCharts', planned: true },
     { route: 'monitoring/alert-providers', labelKey: 'sidebar.item.alertProviders' },
-    { route: 'runtime-listeners',   labelKey: 'sidebar.item.runtimeListeners2' },
   ]},
 
   { id: 'logging', labelKey: 'sidebar.group.logging', items: [
@@ -124,7 +124,9 @@ export function renderSidebar(root) {
         'data-toggle': group.id,
       });
       head.appendChild(el('span', { class: 'sidebar-section-label', text: t(group.labelKey) }));
-      head.appendChild(el('span', { class: 'sidebar-section-caret', text: collapsed[group.id] ? '\u25b8' : '\u25be' }));
+      const caret = el('span', { class: 'sidebar-section-caret' });
+      caret.textContent = collapsed[group.id] ? '\u25b8' : '\u25be';
+      head.appendChild(caret);
       head.addEventListener('click', () => toggleGroup(group.id));
       head.addEventListener('keydown', (ev) => {
         if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); toggleGroup(group.id); }

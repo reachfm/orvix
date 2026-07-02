@@ -26,7 +26,6 @@ const STATE_KIND = {
   active:    'good',
   skipped:   'bad',
   failed:    'bad',
-  failed:    'bad',
   unknown:   'neutral',
   degraded:  'warn',
   starting:  'warn',

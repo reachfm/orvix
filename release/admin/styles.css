@@ -966,7 +966,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { border-color
 .icon-btn:hover { color: var(--text-0); }
 
 /* Toast */
-.toast-stack { position: fixed; top: 18px; right: 18px; display: flex; flex-direction: column; gap: 8px; z-index: 9999; pointer-events: none; }
+.toast-stack { position: fixed; top: 18px; inset-inline-end: 18px; display: flex; flex-direction: column; gap: 8px; z-index: 9999; pointer-events: none; }
 .toast {
   background: var(--bg-raised); color: var(--text-0);
   border: 1px solid var(--border-2); border-radius: var(--r-md);
@@ -978,7 +978,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { border-color
 .toast-error   { border-color: var(--bad); }
 .toast-warn    { border-color: var(--warn); }
 .toast-info    { border-color: var(--accent); }
-@keyframes toastIn { from { transform: translateX(20px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+@keyframes toastIn { from { transform: translateY(-6px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 
 /* Modal & drawer */
 .modal-overlay, .drawer-overlay { position: fixed; inset: 0; background: rgba(8, 14, 24, 0.55); display: grid; place-items: center; z-index: 1000; opacity: 0; transition: opacity 180ms var(--ease); padding: 24px; }
@@ -997,6 +997,8 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { border-color
 
 .drawer { background: var(--bg-surface); border-inline-start: 1px solid var(--border-2); width: 480px; max-width: 90vw; height: 100vh; box-shadow: var(--shadow-lg); transform: translateX(8px); transition: transform 180ms var(--ease); overflow: auto; }
 .drawer-overlay.open .drawer { transform: translateX(0); }
+[dir="rtl"] .drawer { transform: translateX(-8px); }
+[dir="rtl"] .drawer-overlay.open .drawer { transform: translateX(0); }
 .drawer-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--border-1); }
 .drawer-eyebrow { color: var(--text-3); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
 .drawer-title { margin: 4px 0 0; font-size: 16px; color: var(--text-0); }
@@ -1005,6 +1007,8 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { border-color
 /* Sidebar */
 .sidebar { display: flex; flex-direction: column; background: linear-gradient(180deg, var(--bg-canvas), var(--bg-app)); border-inline-end: 1px solid var(--border-1); }
 .sidebar-nav { flex: 1; padding: 12px 8px; overflow-y: auto; }
+[dir="rtl"] .sidebar-section-caret { transform: scaleX(-1); }
+
 .sidebar-section-head {
   display: flex; align-items: center; justify-content: space-between;
   padding: 12px 12px 6px; color: var(--text-3); font-size: 11px;

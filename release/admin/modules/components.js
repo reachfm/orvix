@@ -17,6 +17,8 @@
    modular refactor.
    ===================================================================== */
 
+import { t } from './i18n.js';
+
 // ---------- tiny DOM helpers ------------------------------------
 export function $(id) { return document.getElementById(id); }
 
@@ -352,7 +354,7 @@ export async function copyToClipboard(text) {
   if (navigator && navigator.clipboard && navigator.clipboard.writeText) {
     try {
       await navigator.clipboard.writeText(text);
-      if (_toastFn) _toastFn('Copied', 'success', 1800);
+      if (_toastFn) _toastFn(t('common.copied'), 'success', 1800);
       return true;
     } catch (_) { /* fall through */ }
   }
@@ -365,10 +367,10 @@ export async function copyToClipboard(text) {
     ta.select();
     const ok = document.execCommand('copy');
     document.body.removeChild(ta);
-    if (_toastFn) _toastFn(ok ? 'Copied' : 'Copy failed', ok ? 'success' : 'error', 1800);
+    if (_toastFn) _toastFn(ok ? t('common.copied') : t('common.copyFailed'), ok ? 'success' : 'error', 1800);
     return ok;
   } catch (_) {
-    if (_toastFn) _toastFn('Copy failed', 'error', 1800);
+    if (_toastFn) _toastFn(t('common.copyFailed'), 'error', 1800);
     return false;
   }
 }

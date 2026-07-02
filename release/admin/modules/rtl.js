@@ -49,10 +49,8 @@ export function directionForText(s) {
 export function withAutoDir(root) {
   if (!root) return;
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, null);
-  const seen = new Set();
   let n = root;
   while (n) {
-    seen.add(n);
     if (n.nodeType === 1 && n.childNodes.length && !n.matches('input, textarea, script, style')) {
       n.setAttribute('dir', n.getAttribute('dir') || 'auto');
     }
