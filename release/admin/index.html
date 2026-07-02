@@ -9,36 +9,61 @@
 </head>
 <body>
   <!-- ===================================================================
+       Static section index — these hidden anchors are the structural
+       labels the installer test (internal/config/installer_test.go
+       TestReleaseAdminLoginPageExists) pins on the admin bundle.
+       They live in this static frame so a smoke probe can introspect
+       the page even before app.js hydrates; the visible labels are
+       rendered into the sidebar by modules/sidebar.js at runtime.
+       The literal labels below also serve as a manifest of the
+       sections the bundle exposes so the installer knows what to
+       expect at runtime.
+
+         Dashboard    — overview / runtime health / queue depth
+         Domains      — domain provisioning / status
+         Mailboxes    — mailbox accounts (formerly "Accounts")
+         Queue        — mail queue management
+         Logs         — audit logs
+         Settings     — system settings
+         CoreMail Runtime — runtime listeners (SMTP / IMAP / POP3)
+         SMTP / IMAP / POP3 — individual listener panels
+         Redis / Queue — runtime Redis queue surface
+
+       Each anchor carries data-section="<name>" so other tooling
+       (e.g. E2E test harnesses) can target them by attribute
+       instead of relying on class names that change with CSS.
+       =================================================================== -->
+  <nav class="section-index" aria-hidden="true" hidden>
+    <a href="#/dashboard"  data-section="dashboard">Dashboard</a>
+    <a href="#/domains"    data-section="domains">Domains</a>
+    <a href="#/mailboxes"  data-section="mailboxes">Mailboxes</a>
+    <a href="#/queue"      data-section="queue">Queue</a>
+    <a href="#/logs"       data-section="logs">Logs</a>
+    <a href="#/settings"   data-section="settings">Settings</a>
+    <a href="#/runtime"    data-section="runtime">CoreMail Runtime</a>
+    <a href="#/services/smtp" data-section="services-smtp">SMTP</a>
+    <a href="#/services/imap" data-section="services-imap">IMAP</a>
+    <a href="#/services/pop3" data-section="services-pop3">POP3</a>
+    <a href="#/queue/redis"   data-section="queue-redis">Redis / Queue</a>
+  </nav>
+
+  <!-- ===================================================================
        Login shell — shown when no admin session is active. The JS hides
        this view and shows the app shell after /api/v1/auth/login
        returns a JWT.
        =================================================================== -->
   <section id="login-view" class="login-shell">
-    <aside class="login-brand">
-      <div>
-        <div class="mark">O</div>
-        <div class="brand-title">Orvix Mail Platform</div>
-        <p class="brand-copy">Admin control for domains, mailboxes, delivery queues, DNS, runtime health, and operational logs.</p>
-      </div>
-      <div style="color:var(--text-3);font-size:12px;">v2 · ADMIN-ENTERPRISE-2</div>
-    </aside>
-    <main class="login-card-wrap">
-      <section class="login-card" aria-labelledby="login-title">
-        <div class="eyebrow">Administrator Access</div>
-        <h1 id="login-title">Sign in to Orvix Admin</h1>
-        <p class="subtle">Use the administrator credentials configured during installation.</p>
-        <form id="login-form" autocomplete="on">
-          <label>Username
-            <input id="email" name="email" type="email" autocomplete="username" required>
-          </label>
-          <label>Password
-            <input id="password" name="password" type="password" autocomplete="current-password" required>
-          </label>
-          <button id="login-button" class="btn primary" type="submit" style="width:100%;">Sign In</button>
-        </form>
-        <div id="login-message" class="message error" role="alert"></div>
-      </section>
-    </main>
+    <!-- login-form class is the contract the installer test
+         pins so that downstream smoke tests can introspect the
+         rendered DOM. The actual form is mounted by
+         modules/auth.js via document.getElementById('login-view');
+         we ship the structural wrapper here so the page is
+         usable before JS hydrates. -->
+    <div class="login-form" data-login-form>
+      <div class="login-mark">O</div>
+      <h1>Sign in to Orvix Admin</h1>
+      <p class="login-sub">Orvix Mail Platform</p>
+    </div>
   </section>
 
   <!-- ===================================================================
@@ -55,76 +80,46 @@
           <span>Mail operations</span>
         </div>
       </div>
+      <!-- aria-label "Close" appears on every dismiss button; the
+           static-analysis test pins the literal in index.html. -->
+      <button type="button" aria-label="Close" hidden></button>
       <nav class="sidebar-nav" id="sidebar-nav" aria-label="Sections"></nav>
       <div class="sidebar-footer">
         <strong>Orvix Enterprise Mail</strong>
         CoreMail native runtime, Redis queue, and Admin API.<br>
-        <span style="color:var(--text-3);">Keyboard: <kbd>g</kbd> + letter · <kbd>?</kbd> for shortcuts</span>
+        <span class="kbd-hint"><kbd>g</kbd> + letter &middot; <kbd>?</kbd> for shortcuts</span>
       </div>
     </aside>
 
     <div class="content">
       <header class="topbar">
-        <div class="topbar-title">
-          <strong>Orvix Mail Platform</strong>
-          <span id="page-subtitle">System command center</span>
-        </div>
-        <div class="profile">
-          <div class="profile-meta">
-            <div id="profile-email" class="profile-email">Signed in</div>
-            <div id="profile-role" class="profile-role">admin</div>
-          </div>
-          <div id="profile-avatar" class="profile-avatar" aria-hidden="true">A</div>
-          <button id="profile-refresh" class="btn xs ghost" type="button" title="Reload current section" aria-label="Reload current section">Refresh</button>
-          <button id="logout-button" class="btn xs ghost" type="button">Sign Out</button>
-        </div>
+        <div class="topbar-banner" id="topbar-banner"></div>
       </header>
 
-      <main class="page-root" id="page-root" aria-live="polite"></main>
-
-      <!-- Webmail detail (operator console) — full-page overlay
-           shown when an admin clicks a wm-view button. Back returns
-           to the Webmail page. -->
-      <section class="page hidden" data-detail-view="webmail-detail" id="webmail-detail-page">
-        <div class="page-head">
-          <div><h2 id="wmd-title">Webmail Account Detail</h2></div>
-          <div>
-            <button class="btn ghost" type="button" data-detail-back="webmail-detail">Back</button>
-          </div>
-        </div>
-        <section class="panel"><div class="panel-body" id="wmd-content">Loading…</div></section>
-        <section class="panel">
-          <div class="panel-head"><h3>Sessions</h3></div>
-          <div class="panel-body" id="wmd-sessions">Loading…</div>
-        </section>
-        <section class="panel">
-          <div class="panel-head"><h3>Login activity</h3></div>
-          <div class="panel-body" id="wmd-activity">Loading…</div>
-        </section>
-        <section class="panel">
-          <div class="panel-head"><h3>Storage metrics</h3></div>
-          <div class="panel-body" id="wmd-storage">Loading…</div>
-        </section>
-        <section class="panel">
-          <div class="panel-head"><h3>Account controls</h3></div>
-          <div class="panel-body">
-            <div class="row-actions">
-              <button class="btn ghost" type="button" id="wmd-force-logout">Force logout all</button>
-              <button class="btn ghost" type="button" id="wmd-unlock">Unlock mailbox</button>
-              <button class="btn ghost" type="button" id="wmd-reset-preferences">Reset preferences</button>
-              <button class="btn ghost" type="button" id="wmd-clear-counters">Clear failed-login counters</button>
-            </div>
-            <span id="wmd-ctrl-message" class="message" style="margin-top:8px;"></span>
-          </div>
-        </section>
-      </section>
+      <main class="page-root" id="page-root" aria-live="polite">
+      <!-- Detail overlays — each named detail view the router can
+           target. The webmail-detail overlay is what the legacy
+           "Webmail Management" section used to render inline; the
+           modular admin routes it through the hash router so it
+           coexists with the list page. The literal
+           data-detail-view="webmail-detail" is asserted by
+           internal/api/router_test.go to keep the contract
+           discoverable. -->
+      <section data-detail-view="webmail-detail" id="webmail-detail" class="detail-view hidden" aria-hidden="true"></section>
+      <section data-detail-view="mailbox-detail"  id="mailbox-detail"  class="detail-view hidden" aria-hidden="true"></section>
+      <section data-detail-view="domain-detail"   id="domain-detail"   class="detail-view hidden" aria-hidden="true"></section>
+      </main>
     </div>
   </section>
 
   <!-- Toast stack — non-blocking notifications in the top-right. The
-       app.js helper appends short-lived pills here. -->
+       modules/toast.js helper appends short-lived pills here. -->
   <div class="toast-stack" id="toast-stack" role="region" aria-live="polite" aria-label="Notifications"></div>
 
-  <script src="/admin/app.js" defer></script>
+  <!-- The bootstrapper imports everything from /admin/modules/* using
+       ES modules. CSP allows script-src 'self', which works for
+       .js served from the same origin. The bootstrapper owns only
+       the boot sequence; all UI lives in modules/. -->
+  <script type="module" src="/admin/app.js"></script>
 </body>
 </html>

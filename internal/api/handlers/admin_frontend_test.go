@@ -1,7 +1,7 @@
-package handlers_test
+﻿package handlers_test
 
 // Static-analysis tests for the admin client. The admin assets are
-// not loaded into a headless browser — they are inspected as text to
+// not loaded into a headless browser â€” they are inspected as text to
 // confirm security and structural invariants:
 //   - no localStorage / sessionStorage *added* by this build
 //     (pre-existing usage is acknowledged in the brief)
@@ -28,14 +28,42 @@ func adminPath(t *testing.T, rel string) string {
 	return root + "/" + rel
 }
 
+// adminJSContents returns the concatenation of every JS file under
+// release/admin/. Use this when a test asserts a string is present
+// anywhere in the admin client (e.g. "admin UI references X
+// endpoint"); the modular refactor in ADMIN-ENTERPRISE-CONSOLE-V1
+// moved many of these strings out of app.js into per-page modules.
+func adminJSContents(t *testing.T, root string) string {
+	t.Helper()
+	return aggregateAdminJS(t, root)
+}
+
 // TestAdminFrontendAssetsPresent pins the three tracked admin asset
 // files exist on disk. If any of them goes missing the admin UI will
 // fail to render and the operator cannot sign in.
 func TestAdminFrontendAssetsPresent(t *testing.T) {
+	// The three admin asset roots that must exist on disk. The
+	// modular refactor in ADMIN-ENTERPRISE-CONSOLE-V1 keeps the
+	// top-level entry points (index.html, app.js, styles.css) AND
+	// adds release/admin/modules/* + release/admin/modules/pages/*.
 	for _, rel := range []string{
 		"release/admin/index.html",
-		"release/admin/styles.css",
 		"release/admin/app.js",
+		"release/admin/styles.css",
+		"release/admin/modules/api.js",
+		"release/admin/modules/auth.js",
+		"release/admin/modules/components.js",
+		"release/admin/modules/i18n.js",
+		"release/admin/modules/layout.js",
+		"release/admin/modules/rtl.js",
+		"release/admin/modules/router.js",
+		"release/admin/modules/sidebar.js",
+		"release/admin/modules/state.js",
+		"release/admin/modules/toast.js",
+		"release/admin/modules/pages/dashboard.js",
+		"release/admin/modules/pages/bulk-import.js",
+		"release/admin/modules/pages/dns-dkim.js",
+		"release/admin/modules/pages/runtime-listeners.js",
 	} {
 		src := readFile(t, adminRepoRoot(t), rel)
 		if len(src) == 0 {
@@ -87,18 +115,18 @@ func TestAdminNoUnsafeQueueExposureToWebmail(t *testing.T) {
 		src := readFile(t, root, rel)
 		stripped := stripJSCommentsAndStrings(src)
 		if strings.Contains(stripped, "/api/v1/queue") {
-			t.Errorf("%s must not reference /api/v1/queue — webmail is the user-facing client", rel)
+			t.Errorf("%s must not reference /api/v1/queue â€” webmail is the user-facing client", rel)
 		}
 	}
 	// The admin assets MUST call the new /api/v1/admin/queue/messages
 	// path. The old /api/v1/queue path is deprecated.
-	src := readFile(t, root, "release/admin/app.js")
+	src := adminJSContents(t, root)
 	if !strings.Contains(src, "/api/v1/admin/queue/messages") {
-		t.Errorf("release/admin/app.js should reference /api/v1/admin/queue/messages for the Queue page (not /api/v1/queue)")
+		t.Errorf("release/admin/modules/AGGREGATE.js should reference /api/v1/admin/queue/messages for the Queue page (not /api/v1/queue)")
 	}
 	// The old path must not be used for queue data anymore.
 	if strings.Contains(src, "apiGet('/api/v1/queue')") || strings.Contains(src, "apiPost('/api/v1/queue/") || strings.Contains(src, "apiDelete('/api/v1/queue/") {
-		t.Errorf("release/admin/app.js should not call legacy /api/v1/queue paths — use /api/v1/admin/queue/messages instead")
+		t.Errorf("release/admin/modules/AGGREGATE.js should not call legacy /api/v1/queue paths â€” use /api/v1/admin/queue/messages instead")
 	}
 }
 
@@ -215,7 +243,7 @@ func TestAdminHasAriaLabels(t *testing.T) {
 // (b) calls esc() / table() / buildDnsRecordList() / similar.
 func TestAdminNoUnsafeInnerHTMLForDynamicData(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := adminJSContents(t, root)
 	// Collect every line that contains innerHTML.
 	var unsafe []string
 	for _, line := range strings.Split(src, "\n") {
@@ -226,7 +254,7 @@ func TestAdminNoUnsafeInnerHTMLForDynamicData(t *testing.T) {
 		// Safe: static literal containing only HTML we author.
 		// We accept the 'html' option in el() and pre-built constants.
 		if strings.HasPrefix(trimmed, "//") { continue; }
-		// Everything else is a finding — print so the operator
+		// Everything else is a finding â€” print so the operator
 		// can review manually.
 		unsafe = append(unsafe, trimmed)
 	}
@@ -234,10 +262,10 @@ func TestAdminNoUnsafeInnerHTMLForDynamicData(t *testing.T) {
 	// for every dynamic value. Any innerHTML write to a server-derived
 	// value must be flagged.
 	// We tolerate a small number of safe patterns (renders of static
-	// skeletons and empty-state authors) — we expect fewer than 12
+	// skeletons and empty-state authors) â€” we expect fewer than 12
 	// non-empty innerHTML writes.
 	if len(unsafe) > 12 {
-		t.Errorf("admin app.js has %d non-empty innerHTML writes — review manually for XSS surface", len(unsafe))
+		t.Errorf("admin app.js has %d non-empty innerHTML writes â€” review manually for XSS surface", len(unsafe))
 		for _, u := range unsafe { t.Logf("  %s", u) }
 	}
 }
@@ -246,7 +274,7 @@ func TestAdminNoUnsafeInnerHTMLForDynamicData(t *testing.T) {
 // referenced by the table / drawer / modal renderers.
 func TestAdminHasEscHelper(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := adminJSContents(t, root)
 	if !regexp.MustCompile(`function esc\s*\(`).MatchString(src) {
 		t.Errorf("admin app.js must define an esc() helper for HTML escaping")
 	}
@@ -257,10 +285,10 @@ func TestAdminHasEscHelper(t *testing.T) {
 }
 
 // TestAdminHasCSRFOnStateChanges confirms csrfFetch() is the only
-// write path — every POST/PATCH/PUT/DELETE goes through it.
+// write path â€” every POST/PATCH/PUT/DELETE goes through it.
 func TestAdminHasCSRFOnStateChanges(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := adminJSContents(t, root)
 	if !regexp.MustCompile(`function csrfFetch\s*\(`).MatchString(src) {
 		t.Errorf("admin app.js must define csrfFetch() for CSRF-protected state changes")
 	}
@@ -275,7 +303,7 @@ func TestAdminHasCSRFOnStateChanges(t *testing.T) {
 // overlay primitives are all defined and reachable.
 func TestAdminHasDrawerModalToastPrimitives(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := adminJSContents(t, root)
 	for _, fn := range []string{
 		"function openDrawer",
 		"function closeDrawer",
@@ -294,7 +322,7 @@ func TestAdminHasDrawerModalToastPrimitives(t *testing.T) {
 // renders MX, SPF, DKIM and DMARC records.
 func TestAdminDnsWizardRendersAllFourRecords(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := adminJSContents(t, root)
 	for _, want := range []string{"MX", "SPF", "DKIM", "DMARC"} {
 		if !strings.Contains(src, want) {
 			t.Errorf("admin DNS wizard must reference %q record type", want)
@@ -312,7 +340,7 @@ func TestAdminDnsWizardRendersAllFourRecords(t *testing.T) {
 // host / IP, and TLS version.
 func TestAdminQueueDetailRendersDiagnosticFields(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := adminJSContents(t, root)
 	for _, want := range []string{
 		"Status code",
 		"Enhanced code",
@@ -342,7 +370,7 @@ func TestAdminQueueDetailRendersDiagnosticFields(t *testing.T) {
 //     the real public TXT from the server response
 func TestAdminNoFakeDKIMKeyGenUI(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := adminJSContents(t, root)
 	// The old fake copy-ready placeholder must not appear. Build
 	// the banned string dynamically so the literal does not exist
 	// anywhere in shipped assets or test code.
@@ -352,7 +380,7 @@ func TestAdminNoFakeDKIMKeyGenUI(t *testing.T) {
 	}
 	// The DKIM value must honestly say "not generated" / "public
 	// key missing" when no key exists. The plan generator emits
-	// "DKIM not generated — public key missing" verbatim; the
+	// "DKIM not generated â€” public key missing" verbatim; the
 	// dashboard must surface this exact wording in the DKIM card.
 	if !strings.Contains(src, "DKIM not generated") && !strings.Contains(src, "public key missing") && !strings.Contains(src, "not generated") {
 		t.Errorf("admin DNS page must honestly state that DKIM is not generated when the public key is missing")
@@ -397,7 +425,7 @@ func TestAdminNoBlankDangerButtons(t *testing.T) {
 	// Check that all dom-destroy / delete / suspend buttons reference
 	// a text label rather than an empty or icon-only pattern when
 	// they also carry the danger class.
-	js := readFile(t, root, "release/admin/app.js")
+	js := adminJSContents(t, root)
 	// Danger buttons in table action rows must have "text:" set.
 	if !strings.Contains(js, "text: 'Delete'") {
 		t.Errorf("admin app.js domain/mailbox/queue delete buttons must have visible 'Delete' text label")
@@ -411,10 +439,10 @@ func TestAdminNoBlankDangerButtons(t *testing.T) {
 // queue pending) rather than calling String() on the raw object.
 func TestAdminNoObjectObjectInMonitoringCapacity(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := adminJSContents(t, root)
 	// The old code used: value: h.capacity || 'Not reported'
 	// This passed a raw object through to String(), which produced
-	// "[object Object]". Search for the old pattern — it must NOT
+	// "[object Object]". Search for the old pattern â€” it must NOT
 	// be present without the object-formatting fix.
 	// The fixed code should check typeof cap === 'object' and format
 	// disk/queue fields.
@@ -434,7 +462,7 @@ func TestAdminNoObjectObjectInMonitoringCapacity(t *testing.T) {
 // and it must not claim live production data was restored.
 func TestAdminNoFakeRestoreUI(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := adminJSContents(t, root)
 	if strings.Contains(src, "Restore is not exposed in this build") {
 		t.Errorf("admin backups page must not contain stale Restore is not exposed wording")
 	}
@@ -463,7 +491,7 @@ func TestAdminNoFakeRestoreUI(t *testing.T) {
 // implements Gmail-style g-prefix navigation.
 func TestAdminKeyboardShortcutsGPrefix(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := adminJSContents(t, root)
 	for _, want := range []string{
 		"function bindKeyboard",
 		"gPrefix.active",
@@ -483,7 +511,7 @@ func TestAdminKeyboardShortcutsGPrefix(t *testing.T) {
 // no-fake-health requirement.
 func TestAdminNoHardcodedDashboardHealth(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := adminJSContents(t, root)
 	// The old hard-coded literal must not appear.
 	if strings.Contains(src, "'CoreMail Runtime','Online'") || strings.Contains(src, "'CoreMail Runtime', 'Online'") || strings.Contains(src, "\"CoreMail Runtime\",\"Online\"") {
 		t.Errorf("CoreMail Runtime dashboard card must not be hard-coded to 'Online'; the status must come from real health API data")
@@ -504,7 +532,7 @@ func TestAdminNoHardcodedDashboardHealth(t *testing.T) {
 // delete old backup files.
 func TestAdminRetentionUsesConfirmDanger(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := adminJSContents(t, root)
 	// runRetention must call confirmDanger before apiPost.
 	if !strings.Contains(src, "function runRetention()") {
 		t.Errorf("admin app.js must define runRetention()")
@@ -529,33 +557,47 @@ func TestAdminRetentionUsesConfirmDanger(t *testing.T) {
 // not 404 into a placeholder.
 func TestAdminPageRenderersRegistered(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := adminJSContents(t, root)
 	sections := []string{
 		"dashboard", "domains", "mailboxes", "queue", "dns",
 		"backups", "updates", "monitoring", "logs", "settings",
 	}
-	// Function-name variants. The router maps "dns" to renderDNS;
-	// everything else follows the lower-camel pattern renderXxx.
+	// Function-name variants. The modular refactor uses
+	// module-suffixed names (renderXxxPage) so the file location
+	// is visible in stack traces; the legacy names (renderXxx) are
+	// also kept as fallbacks.
 	candidates := map[string][]string{
-		"dns":        {"renderDNS"},
+		"dns":        {"renderDnsDkimPage", "renderDNS"},
 		"dashboard":  {"renderDashboard"},
-		"domains":    {"renderDomains"},
-		"mailboxes":  {"renderMailboxes"},
-		"queue":      {"renderQueue"},
-		"backups":    {"renderBackups"},
-		"updates":    {"renderUpdates"},
-		"monitoring": {"renderMonitoring"},
-		"logs":       {"renderLogs"},
-		"settings":   {"renderSettings"},
+		"domains":    {"renderDomainsPage", "renderDomains"},
+		"mailboxes":  {"renderAccountsPage", "renderMailboxes"},
+		"queue":      {"renderQueuePage", "renderQueue"},
+		"backups":    {"renderBackupsPage", "renderBackups"},
+		"updates":    {"renderUpdatesPage", "renderUpdates"},
+		"monitoring": {"renderMonitoringPage", "renderMonitoring"},
+		"logs":       {"renderLogsPage", "renderLogs"},
+		"settings":   {"renderSettingsPage", "renderSettings"},
 	}
 	for _, s := range sections {
+		// The ADMIN-ENTERPRISE-CONSOLE-V1 refactor moved page
+		// renderers out of app.js into modules/pages/*.js. The
+		// PAGES map is no longer in app.js — the router now uses
+		// register(route, handler) calls. We accept either
+		// pattern here.
+		registeredPattern := regexp.MustCompile(`register\(\s*'` + s + `'\s*,`)
 		keyInPages := regexp.MustCompile(`\b` + s + `\s*:\s*render`).MatchString(src)
-		if !keyInPages {
-			t.Errorf("admin app.js PAGES map missing key %q", s)
+		if !keyInPages && !registeredPattern.MatchString(src) {
+			t.Errorf("admin app.js missing route registration for section %q (no PAGES map key and no register() call)", s)
 		}
 		found := false
 		for _, fn := range candidates[s] {
-			if strings.Contains(src, "function " + fn + "(") {
+			// Accept either the legacy "function renderXxx(" form
+			// or the ES module "export ... function renderXxx(" /
+			// "export const renderXxx =" form.
+			if strings.Contains(src, "function " + fn + "(") ||
+				strings.Contains(src, "function " + fn + " (") ||
+				strings.Contains(src, "export async function " + fn + "(") ||
+				strings.Contains(src, "export function " + fn + "(") {
 				found = true; break;
 			}
 		}
@@ -563,4 +605,52 @@ func TestAdminPageRenderersRegistered(t *testing.T) {
 			t.Errorf("admin app.js missing render function for section %q (tried %v)", s, candidates[s])
 		}
 	}
+}
+
+// aggregateAdminJS returns the concatenation of every JS file
+// under release/admin/ (app.js + modules/*.js + modules/pages/*.js).
+// The admin UI was refactored to a modular ES-module layout in
+// ADMIN-ENTERPRISE-CONSOLE-V1; tests that need to assert a string
+// is present in the admin UI should use this helper rather than
+// reading app.js alone, otherwise modular moves will silently
+// break the contract.
+func aggregateAdminJS(t *testing.T, root string) string {
+	t.Helper()
+	paths := []string{
+		"release/admin/app.js",
+		"release/admin/modules/api.js",
+		"release/admin/modules/auth.js",
+		"release/admin/modules/components.js",
+		"release/admin/modules/i18n.js",
+		"release/admin/modules/layout.js",
+		"release/admin/modules/rtl.js",
+		"release/admin/modules/router.js",
+		"release/admin/modules/sidebar.js",
+		"release/admin/modules/state.js",
+		"release/admin/modules/toast.js",
+		"release/admin/modules/pages/_planned.js",
+		"release/admin/modules/pages/accounts.js",
+		"release/admin/modules/pages/administration-rights.js",
+		"release/admin/modules/pages/alert-providers.js",
+		"release/admin/modules/pages/backups.js",
+		"release/admin/modules/pages/bulk-import.js",
+		"release/admin/modules/pages/dashboard.js",
+		"release/admin/modules/pages/dns-dkim.js",
+		"release/admin/modules/pages/domains.js",
+		"release/admin/modules/pages/license.js",
+		"release/admin/modules/pages/logs.js",
+		"release/admin/modules/pages/monitoring.js",
+		"release/admin/modules/pages/queue.js",
+		"release/admin/modules/pages/runtime-listeners.js",
+		"release/admin/modules/pages/security.js",
+		"release/admin/modules/pages/services.js",
+		"release/admin/modules/pages/settings.js",
+		"release/admin/modules/pages/updates.js",
+	}
+	var b strings.Builder
+	for _, p := range paths {
+		b.WriteString(readFile(t, root, p))
+		b.WriteString("\n")
+	}
+	return b.String()
 }

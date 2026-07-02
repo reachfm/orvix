@@ -1,4 +1,4 @@
-package handlers_test
+﻿package handlers_test
 
 // Static-analysis tests for ADMIN-RUNTIME-TELEMETRY-2B. The
 // admin app.js is inspected as text (no headless browser) so the
@@ -38,7 +38,7 @@ import (
 // honest read-only snapshot.
 func TestAdminDashboardWiresLoadRuntime(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := adminJSContents(t, root)
 	if !regexp.MustCompile(`function\s+loadRuntime\s*\(`).MatchString(src) {
 		t.Errorf("admin app.js must define loadRuntime()")
 	}
@@ -61,7 +61,7 @@ func TestAdminDashboardWiresLoadRuntime(t *testing.T) {
 // renderDashCards.
 func TestAdminDashboardUsesRuntimeServices(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := adminJSContents(t, root)
 	if !strings.Contains(src, "state.runtime") {
 		t.Errorf("admin app.js must reference state.runtime to feed dashboard cards from /api/v1/admin/runtime")
 	}
@@ -77,7 +77,7 @@ func TestAdminDashboardUsesRuntimeServices(t *testing.T) {
 // detail until listener runtime tracking ships.
 func TestAdminDashboardNoHardcodedListenerOnline(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := adminJSContents(t, root)
 	for _, banned := range []string{
 		"'SMTP','Online'",
 		"'IMAP','Online'",
@@ -89,7 +89,7 @@ func TestAdminDashboardNoHardcodedListenerOnline(t *testing.T) {
 		"\"JMAP\",\"Online\"",
 	} {
 		if strings.Contains(src, banned) {
-			t.Errorf("admin app.js must not hard-code listener status %q — derive from runtime telemetry", banned)
+			t.Errorf("admin app.js must not hard-code listener status %q â€” derive from runtime telemetry", banned)
 		}
 	}
 }
@@ -101,7 +101,7 @@ func TestAdminDashboardNoHardcodedListenerOnline(t *testing.T) {
 // rt.uptime_seconds / rt.capacity.disk in renderDashSystem.
 func TestAdminDashboardSystemUsesRuntimeFields(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := adminJSContents(t, root)
 	required := []string{
 		"rtRuntime", "uptime_seconds", "capacity", "formatDisk", "formatUptime",
 	}
@@ -117,7 +117,7 @@ func TestAdminDashboardSystemUsesRuntimeFields(t *testing.T) {
 // the runtime package emits, plus listener failures.
 func TestAdminDashboardWarningsHandleRuntimeCodes(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := adminJSContents(t, root)
 	for _, code := range []string{
 		"license_public_key_missing",
 		"queue_deferred",
@@ -183,7 +183,7 @@ func TestAdminRuntimeDiskCapacitySane(t *testing.T) {
 func TestAdminRuntimePreservesPriorFixes(t *testing.T) {
 	root := adminRepoRoot(t)
 	css := readFile(t, root, "release/admin/styles.css")
-	js := readFile(t, root, "release/admin/app.js")
+	js := adminJSContents(t, root)
 	webmail := readFile(t, root, "release/webmail/assets/webmail.js")
 	authGate := readFile(t, root, "release/webmail/assets/auth-gate.js")
 
@@ -276,7 +276,7 @@ func TestAdminRuntimePreservesPriorFixes(t *testing.T) {
 // values rather than rendering them as card details.
 func TestAdminLicenseUIZeroDateAbsent(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := adminJSContents(t, root)
 	// The helper function isZeroDate must exist to filter zero dates.
 	if !strings.Contains(src, "function isZeroDate") && !strings.Contains(src, "isZeroDate = function") {
 		t.Errorf("app.js must define isZeroDate helper to filter out Go zero-time values")
@@ -297,7 +297,7 @@ func TestAdminLicenseUIZeroDateAbsent(t *testing.T) {
 // validation_state fields are used when available.
 func TestAdminLicenseUIPreferRuntimeTelemetry(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := adminJSContents(t, root)
 	// The licenseInfo assignment must prefer rt.license first.
 	if !strings.Contains(src, "(rt && rt.license) || state.license") {
 		t.Errorf("app.js license card must prefer rt.license over state.license for runtime telemetry fields")

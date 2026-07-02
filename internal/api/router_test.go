@@ -345,6 +345,15 @@ func TestAdminUIStaticRoutes(t *testing.T) {
 		}
 	}
 	adminJSBody := func() []byte {
+		// Read every JS file under release/admin/ (app.js +
+		// modules/*.js + modules/pages/*.js). The static-analysis
+		// contract below is "the admin bundle" — the
+		// ADMIN-ENTERPRISE-CONSOLE-V1 modular refactor moved page
+		// logic out of app.js into per-page modules. We also
+		// include the served /admin/app.js body (sourced via the
+		// router) so the literal `function closeDrawer` /
+		// `/api/v1/auth/login` checks keep matching.
+		var b []byte
 		req := httptest.NewRequest("GET", "/admin/app.js", nil)
 		resp, err := router.App().Test(req)
 		if err != nil {
@@ -354,7 +363,52 @@ func TestAdminUIStaticRoutes(t *testing.T) {
 			t.Fatalf("admin/app.js expected 200, got %d", resp.StatusCode)
 		}
 		body, _ := io.ReadAll(resp.Body)
-		return body
+		b = append(b, body...)
+		// Append every module file. The admin path is
+		// ../../release/admin (set by the test setup).
+		mod := []string{
+			"app.js", // also re-read for completeness
+			"modules/api.js",
+			"modules/auth.js",
+			"modules/components.js",
+			"modules/i18n.js",
+			"modules/layout.js",
+			"modules/rtl.js",
+			"modules/router.js",
+			"modules/sidebar.js",
+			"modules/state.js",
+			"modules/toast.js",
+			"modules/pages/_planned.js",
+			"modules/pages/accounts.js",
+			"modules/pages/administration-rights.js",
+			"modules/pages/alert-providers.js",
+			"modules/pages/backups.js",
+			"modules/pages/bulk-import.js",
+			"modules/pages/dashboard.js",
+			"modules/pages/dns-dkim.js",
+			"modules/pages/domains.js",
+			"modules/pages/license.js",
+			"modules/pages/logs.js",
+			"modules/pages/monitoring.js",
+			"modules/pages/queue.js",
+			"modules/pages/runtime-listeners.js",
+			"modules/pages/security.js",
+			"modules/pages/services.js",
+			"modules/pages/settings.js",
+			"modules/pages/updates.js",
+			"modules/pages/webmail.js",
+		}
+		adminRoot := filepath.Join("..", "..", "release", "admin")
+		for _, m := range mod {
+			p := filepath.Join(adminRoot, m)
+			data, err := os.ReadFile(p)
+			if err != nil {
+				continue // tolerate: page module may not exist
+			}
+			b = append(b, '\n')
+			b = append(b, data...)
+		}
+		return b
 	}
 	for _, tc := range []struct {
 		path string
@@ -378,6 +432,11 @@ func TestAdminUIStaticRoutes(t *testing.T) {
 			t.Fatalf("%s missing %q", tc.path, tc.want)
 		}
 	}
+	// Read every admin JS file (not just app.js) — the
+	// ADMIN-ENTERPRISE-CONSOLE-V1 modular refactor moved page
+	// logic out of app.js into modules/pages/*.js. The static
+	// analysis below pins contracts that apply to the whole
+	// admin bundle, not just the top-level bootstrapper.
 	jsBody := adminJSBody()
 	if !strings.Contains(string(jsBody), "mailbox_id") {
 		t.Fatalf("admin app.js must contain mailbox_id")

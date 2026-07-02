@@ -288,7 +288,17 @@ func TestListenerStatePortConflictFails(t *testing.T) {
 func TestListenerStateReachesRuntimeTelemetry(t *testing.T) {
 	h := newListenerStateHarness(t)
 	h.initAndStart(t)
-	_ = h.waitForState(t, orvixruntime.ListenerSMTP, orvixruntime.StateActive, 3*time.Second)
+	// Wait for every plain listener to actually reach active before
+	// snapshotting. The previous form only waited for SMTP, which
+	// made the IMAP/POP3 assertions race against listener goroutine
+	// startup — on slow CI runners those two reported "unknown".
+	for _, kind := range []orvixruntime.ListenerKind{
+		orvixruntime.ListenerSMTP,
+		orvixruntime.ListenerIMAP,
+		orvixruntime.ListenerPOP3,
+	} {
+		_ = h.waitForState(t, kind, orvixruntime.StateActive, 5*time.Second)
+	}
 
 	snap := h.reg.Snapshot()
 	tel := orvixruntime.NewTelemetry(orvixruntime.Inputs{

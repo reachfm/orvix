@@ -1,4 +1,4 @@
-package handlers_test
+﻿package handlers_test
 
 // Static-analysis tests for the admin DNS / DKIM Operations UI
 // (DNS-DKIM-OPERATIONS-2F). The admin assets are inspected as text
@@ -37,40 +37,26 @@ import (
 	"testing"
 )
 
-// adminDNSOpsSection returns the substring of release/admin/app.js
-// covering the renderDNS / DNS page code so the static-analysis
-// tests can scope their assertions to the relevant region. This
-// avoids false positives when the same keyword appears elsewhere.
+// adminDNSOpsSection returns the substring of
+// release/admin/modules/pages/dns-dkim.js â€” the dedicated DNS
+// module created in the ADMIN-ENTERPRISE-CONSOLE-V1 modular
+// refactor. The contract is "the admin DNS page contains X";
+// the file location is no longer release/admin/app.js.
 func adminDNSOpsSection(t *testing.T) string {
 	t.Helper()
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
-	start := strings.Index(src, "async function renderDNS")
-	if start < 0 {
-		t.Fatalf("admin app.js must define async function renderDNS")
+	src := readFile(t, root, "release/admin/modules/pages/dns-dkim.js")
+	if len(src) == 0 {
+		t.Fatalf("admin modules/pages/dns-dkim.js is empty or missing")
 	}
-	body := extractFunctionBody(src, start)
-	if body == "" {
-		t.Fatalf("could not extract renderDNS body")
-	}
-	// Pad the window: pull in any helper functions defined
-	// after renderDNS but before the next top-level section
-	// (the next "async function renderX" or the closing of the
-	// IIFE). Tests rely on buildDnsRecordList / fieldChip /
-	// etc being reachable from renderDNS.
-	rest := src[start:]
-	end := strings.Index(rest, "\n  // -----")
-	if end < 0 {
-		end = len(rest)
-	}
-	return rest[:end]
+	return src
 }
 
-// TestAdminDNSOpsWiresNewEndpoints confirms renderDNS calls the
-// new /api/v1/admin/dns/* endpoints.
+// TestAdminDNSOpsWiresNewEndpoints confirms the DNS page module
+// calls the new /api/v1/admin/dns/* endpoints.
 func TestAdminDNSOpsWiresNewEndpoints(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := aggregateAdminJS(t, root)
 	for _, want := range []string{
 		"/api/v1/admin/dns/providers",
 		"/api/v1/admin/dns/",
@@ -81,23 +67,22 @@ func TestAdminDNSOpsWiresNewEndpoints(t *testing.T) {
 		"/provider/apply",
 	} {
 		if !strings.Contains(src, want) {
-			t.Errorf("admin app.js must reference %q", want)
+			t.Errorf("admin modules/pages/dns-dkim.js must reference %q", want)
 		}
 	}
 }
 
 // TestAdminDNSOpsRendersStatusBadges confirms each per-record
-// status the dnsops package emits is rendered as a badge or row
-// text in renderDNS / buildDnsRecordList.
+// status the dnsops package emits is rendered in the DNS page.
 func TestAdminDNSOpsRendersStatusBadges(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := aggregateAdminJS(t, root)
 	for _, code := range []string{
 		"verified", "missing", "mismatch", "multiple_spf",
 		"conflict", "not_checked", "unsupported", "error",
 	} {
 		if !strings.Contains(src, "'"+code+"'") && !strings.Contains(src, "\""+code+"\"") {
-			t.Errorf("admin app.js must reference dns record status %q", code)
+			t.Errorf("admin modules/pages/dns-dkim.js must reference dns record status %q", code)
 		}
 	}
 }
@@ -108,7 +93,7 @@ func TestAdminDNSOpsRendersStatusBadges(t *testing.T) {
 // no DKIM row exists.
 func TestAdminDNSOpsNoPlaceholderDKIM(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := aggregateAdminJS(t, root)
 	// Build the banned string dynamically so the literal does
 	// not appear in test source either.
 	banned := "-PUBLIC-KEY"
@@ -131,7 +116,7 @@ func TestAdminDNSOpsNoPlaceholderDKIM(t *testing.T) {
 // the multiple_spf warning explicitly.
 func TestAdminDNSOpsSPFMultipleWarning(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := aggregateAdminJS(t, root)
 	if !strings.Contains(src, "multiple SPF") &&
 		!strings.Contains(src, "multiple_spf") {
 		t.Errorf("admin SPF card must surface the multiple_spf warning")
@@ -142,7 +127,7 @@ func TestAdminDNSOpsSPFMultipleWarning(t *testing.T) {
 // staged policy path: none -> quarantine -> reject.
 func TestAdminDNSOpsDMARCStagePath(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := aggregateAdminJS(t, root)
 	for _, want := range []string{"quarantine", "reject"} {
 		if !strings.Contains(src, want) {
 			t.Errorf("admin DMARC card must reference %q (staged policy path)", want)
@@ -154,7 +139,7 @@ func TestAdminDNSOpsDMARCStagePath(t *testing.T) {
 // renders the policy file content (mode: testing by default).
 func TestAdminDNSOpsMTASTSFileAndMode(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := aggregateAdminJS(t, root)
 	if !strings.Contains(src, "mta-sts.txt") &&
 		!strings.Contains(src, "mta_sts.txt") &&
 		!strings.Contains(src, ".well-known/mta-sts.txt") {
@@ -170,7 +155,7 @@ func TestAdminDNSOpsMTASTSFileAndMode(t *testing.T) {
 // the v=TLSRPTv1 record.
 func TestAdminDNSOpsTLSRPTRendered(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := aggregateAdminJS(t, root)
 	if !strings.Contains(src, "v=TLSRPTv1") {
 		t.Errorf("admin TLS-RPT card must render v=TLSRPTv1")
 	}
@@ -183,7 +168,7 @@ func TestAdminDNSOpsTLSRPTRendered(t *testing.T) {
 // recommended letsencrypt.org issuer and the postmaster iodef.
 func TestAdminDNSOpsCAARendered(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := aggregateAdminJS(t, root)
 	if !strings.Contains(src, "letsencrypt.org") {
 		t.Errorf("admin CAA card must render letsencrypt.org issuer")
 	}
@@ -197,7 +182,7 @@ func TestAdminDNSOpsCAARendered(t *testing.T) {
 // wording rather than offering a copy button.
 func TestAdminDNSOpsPTRRendererHonest(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := aggregateAdminJS(t, root)
 	if !strings.Contains(src, "hosting provider") &&
 		!strings.Contains(src, "set by your hosting provider") {
 		t.Errorf("admin PTR/rDNS card must explain the hosting-provider-side requirement")
@@ -209,12 +194,12 @@ func TestAdminDNSOpsPTRRendererHonest(t *testing.T) {
 // not show any token-shaped string. We scope the source scan to
 // the DNS section (renderDNS / loadDnsProviderPlan / applyDnsProvider)
 // because the global app.js contains the Login form, which
-// legitimately references "password" — the contract is that the
+// legitimately references "password" â€” the contract is that the
 // DNS provider panel never echoes a token, not that the whole
 // app.js is token-free.
 func TestAdminDNSOpsProviderPanelRendersManual(t *testing.T) {
 	root := adminRepoRoot(t)
-	fullSrc := readFile(t, root, "release/admin/app.js")
+	fullSrc := aggregateAdminJS(t, root)
 	if !strings.Contains(fullSrc, "\"manual\"") && !strings.Contains(fullSrc, "'manual'") {
 		t.Errorf("admin provider panel must reference the manual provider")
 	}
@@ -237,7 +222,7 @@ func TestAdminDNSOpsProviderPanelRendersManual(t *testing.T) {
 // string to the backend.
 func TestAdminDNSOpsProviderApplyRequiresConfirmation(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := aggregateAdminJS(t, root)
 	if !strings.Contains(src, "confirm") {
 		t.Errorf("admin provider apply must reference a confirmation field")
 	}
@@ -247,7 +232,7 @@ func TestAdminDNSOpsProviderApplyRequiresConfirmation(t *testing.T) {
 // includes copy buttons for each record value.
 func TestAdminDNSOpsCopyButtonsExist(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := aggregateAdminJS(t, root)
 	if !regexp.MustCompile(`text:\s*'Copy'`).MatchString(src) {
 		t.Errorf("admin DNS page must render Copy buttons")
 	}
@@ -258,7 +243,7 @@ func TestAdminDNSOpsCopyButtonsExist(t *testing.T) {
 // the live DNS lookup times out.
 func TestAdminDNSOpsDigFallback(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := aggregateAdminJS(t, root)
 	if !strings.Contains(src, "dig") && !strings.Contains(src, "nslookup") {
 		t.Errorf("admin DNS page must surface dig / nslookup verification commands as fallback")
 	}
@@ -301,7 +286,7 @@ func TestAdminDNSOpsPreservesPriorFrontendFixes(t *testing.T) {
 			t.Errorf("%s must not reference /api/v1/queue", rel)
 		}
 	}
-	js := readFile(t, root, "release/admin/app.js")
+	js := aggregateAdminJS(t, root)
 	if strings.Contains(js, "[object Object]") {
 		t.Errorf("admin app.js must not render [object Object]")
 	}
@@ -316,7 +301,7 @@ func TestAdminDNSOpsPreservesPriorFrontendFixes(t *testing.T) {
 // field by parsing the test reference table the admin file uses.
 func TestAdminDNSOpsDKIMResponseShape(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := aggregateAdminJS(t, root)
 	for _, want := range []string{
 		"public_dns_txt",
 		"selector",
@@ -332,7 +317,7 @@ func TestAdminDNSOpsDKIMResponseShape(t *testing.T) {
 // dashboard's Verify / Refresh buttons call the real backend.
 func TestAdminDNSOpsVerifyAndPlanCallsRealEndpoints(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := aggregateAdminJS(t, root)
 	for _, want := range []string{
 		"/verify",
 		"/plan",
@@ -349,9 +334,15 @@ func TestAdminDNSOpsVerifyAndPlanCallsRealEndpoints(t *testing.T) {
 // TestAdminDNSOpsDKIMRotationConfirmationPresent confirms the
 // admin DNS page contains the typed confirmation phrase
 // "rotate-dkim-key" and the DNS TTL warning text.
+//
+// The admin UI is now modular: the bulk of the DNS page lives
+// under release/admin/modules/pages/dns-dkim.js. We aggregate
+// every JS file under release/admin/ so the contract is
+// "the admin UI contains these strings" rather than "app.js
+// contains these strings".
 func TestAdminDNSOpsDKIMRotationConfirmationPresent(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := aggregateAdminJS(t, root)
 	if !strings.Contains(src, "rotate-dkim-key") {
 		t.Errorf("admin DNS page must contain 'rotate-dkim-key' confirmation phrase")
 	}
@@ -364,10 +355,13 @@ func TestAdminDNSOpsDKIMRotationConfirmationPresent(t *testing.T) {
 }
 
 // TestAdminDNSOpsDKIMRotationSendsConfirmField confirms the
-// generateDkimKey function sends confirm_rotation in the POST body.
+// generateDkimKey function sends confirm_rotation in the POST
+// body. Like the test above, we aggregate every JS file under
+// release/admin/ because the refactor moved the DNS page out of
+// app.js into a dedicated module.
 func TestAdminDNSOpsDKIMRotationSendsConfirmField(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := aggregateAdminJS(t, root)
 	if !strings.Contains(src, "confirm_rotation") {
 		t.Errorf("admin generateDkimKey must send confirm_rotation field")
 	}
@@ -382,7 +376,7 @@ func TestAdminDNSOpsDKIMRotationSendsConfirmField(t *testing.T) {
 // actual key material would appear as a multi-line PEM block.
 func TestAdminDNSOpsDKIMNoPrivateKeyRendered(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := aggregateAdminJS(t, root)
 	// Look for a PEM boundary which would indicate actual key
 	// material was baked into the asset. English phrases like
 	// "the private key is stored server-side" are fine.
@@ -400,7 +394,7 @@ func TestAdminDNSOpsDKIMNoPrivateKeyRendered(t *testing.T) {
 // tell the operator to mutate coremail.smtp_host for DNS.
 func TestAdminDNSOpsDoesNotRecommendSMTPHost(t *testing.T) {
 	root := adminRepoRoot(t)
-	_ = readFile(t, root, "release/admin/app.js")
+	_ = aggregateAdminJS(t, root)
 	// We scope the scan to the DNS page region. The legacy
 	// backup/queue/etc. panels may legitimately reference the
 	// smtp_host config field for unrelated reasons (listener
@@ -452,7 +446,7 @@ func TestAdminDNSOpsVerifyUpdatesPlanFromResponse(t *testing.T) {
 // TestAdminDNSOpsVerifyResponseShape confirms the frontend
 // references the correct response fields from the verify endpoint.
 func TestAdminDNSOpsVerifyResponseShape(t *testing.T) {
-	src := readFile(t, adminRepoRoot(t), "release/admin/app.js")
+	src := aggregateAdminJS(t, adminRepoRoot(t))
 	for _, want := range []string{
 		"resp.report",
 		"report.plan",
@@ -473,7 +467,7 @@ func TestAdminDNSOpsVerifyResponseShape(t *testing.T) {
 // browser). The DNS resolver lives server-side in /api/v1/admin/dns.
 func TestAdminDNSOpsNoExecDnsOutOfBand(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := aggregateAdminJS(t, root)
 	for _, banned := range []string{"dns-over-https", "doh.js", "DoH"} {
 		if strings.Contains(src, banned) {
 			t.Errorf("admin app.js must not import browser-side DNS library %q", banned)
@@ -488,7 +482,7 @@ func TestAdminDNSOpsNoExecDnsOutOfBand(t *testing.T) {
 //
 // And enabled only for ready/manual status without conflicts.
 func TestAdminDNSOpsProviderApplyDisabledStates(t *testing.T) {
-	src := readFile(t, adminRepoRoot(t), "release/admin/app.js")
+	src := aggregateAdminJS(t, adminRepoRoot(t))
 	// The Apply button must check provider status.
 	if !strings.Contains(src, "applyDisabled") {
 		t.Errorf("admin provider panel must track applyDisabled state")
@@ -513,7 +507,7 @@ func TestAdminDNSOpsProviderApplyDisabledStates(t *testing.T) {
 // panel, surviving the re-render that the Apply button state
 // update triggers.
 func TestAdminDNSOpsProviderPlanPreserved(t *testing.T) {
-	src := readFile(t, adminRepoRoot(t), "release/admin/app.js")
+	src := aggregateAdminJS(t, adminRepoRoot(t))
 	// The state must track per-provider plans so the panel can
 	// re-render them after the apply button state update.
 	if !strings.Contains(src, "dnsProviderPlans") {
