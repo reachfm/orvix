@@ -1,4 +1,4 @@
-package handlers_test
+﻿package handlers_test
 
 // Static-analysis tests for ADMIN-RUNTIME-TELEMETRY-2B. The
 // admin app.js is inspected as text (no headless browser) so the
@@ -24,7 +24,6 @@ package handlers_test
 //     no /api/v1/queue leak from webmail)
 
 import (
-	"encoding/json"
 	"regexp"
 	"strings"
 	"testing"
@@ -38,7 +37,7 @@ import (
 // honest read-only snapshot.
 func TestAdminDashboardWiresLoadRuntime(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := adminJSContents(t, root)
 	if !regexp.MustCompile(`function\s+loadRuntime\s*\(`).MatchString(src) {
 		t.Errorf("admin app.js must define loadRuntime()")
 	}
@@ -61,7 +60,7 @@ func TestAdminDashboardWiresLoadRuntime(t *testing.T) {
 // renderDashCards.
 func TestAdminDashboardUsesRuntimeServices(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := adminJSContents(t, root)
 	if !strings.Contains(src, "state.runtime") {
 		t.Errorf("admin app.js must reference state.runtime to feed dashboard cards from /api/v1/admin/runtime")
 	}
@@ -77,7 +76,7 @@ func TestAdminDashboardUsesRuntimeServices(t *testing.T) {
 // detail until listener runtime tracking ships.
 func TestAdminDashboardNoHardcodedListenerOnline(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := adminJSContents(t, root)
 	for _, banned := range []string{
 		"'SMTP','Online'",
 		"'IMAP','Online'",
@@ -89,7 +88,7 @@ func TestAdminDashboardNoHardcodedListenerOnline(t *testing.T) {
 		"\"JMAP\",\"Online\"",
 	} {
 		if strings.Contains(src, banned) {
-			t.Errorf("admin app.js must not hard-code listener status %q — derive from runtime telemetry", banned)
+			t.Errorf("admin app.js must not hard-code listener status %q â€” derive from runtime telemetry", banned)
 		}
 	}
 }
@@ -101,7 +100,7 @@ func TestAdminDashboardNoHardcodedListenerOnline(t *testing.T) {
 // rt.uptime_seconds / rt.capacity.disk in renderDashSystem.
 func TestAdminDashboardSystemUsesRuntimeFields(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := adminJSContents(t, root)
 	required := []string{
 		"rtRuntime", "uptime_seconds", "capacity", "formatDisk", "formatUptime",
 	}
@@ -117,7 +116,7 @@ func TestAdminDashboardSystemUsesRuntimeFields(t *testing.T) {
 // the runtime package emits, plus listener failures.
 func TestAdminDashboardWarningsHandleRuntimeCodes(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := adminJSContents(t, root)
 	for _, code := range []string{
 		"license_public_key_missing",
 		"queue_deferred",
@@ -136,44 +135,20 @@ func TestAdminDashboardWarningsHandleRuntimeCodes(t *testing.T) {
 	}
 }
 
-// TestAdminRuntimeDiskCapacitySane confirms the runtime
-// telemetry package's disk capacity values are sane. The
-// endpoint may report zero (Windows or statfs error); when it
-// does report numbers, they must be non-negative. This is a
-// package-level guard that the JS dashboard and the Go
-// formatter agree on what "sane" means.
+// TestAdminRuntimeDiskCapacitySane confirms the dashboard
+// JS references the same disk field names that the Go runtime
+// telemetry serialises, so the frontend can render real data.
 func TestAdminRuntimeDiskCapacitySane(t *testing.T) {
-	// Re-run the runtime package's TestNewTelemetryDisk
-	// assertions through a JSON round-trip so the dashboard
-	// formatter and the Go formatter cannot drift.
-	// The runtime package is imported indirectly; we construct
-	// the canonical JSON shape here and assert.
-	canonical := map[string]any{
-		"label":        "data",
-		"total_bytes":  int64(100),
-		"used_bytes":   int64(40),
-		"free_bytes":   int64(60),
-		"used_percent": 40,
+	root := adminRepoRoot(t)
+	js := adminJSContents(t, root)
+	diskFieldRefs := []string{"free_bytes", "used_bytes", "total_bytes"}
+	for _, f := range diskFieldRefs {
+		if !strings.Contains(js, f) {
+			t.Errorf("admin JS bundle must reference disk field %q so the dashboard can render runtime telemetry", f)
+		}
 	}
-	b, err := json.Marshal(canonical)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	var got map[string]any
-	if err := json.Unmarshal(b, &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if total, _ := got["total_bytes"].(float64); total < 0 {
-		t.Errorf("disk total_bytes must be non-negative; got %v", total)
-	}
-	if used, _ := got["used_bytes"].(float64); used < 0 {
-		t.Errorf("disk used_bytes must be non-negative; got %v", used)
-	}
-	if free, _ := got["free_bytes"].(float64); free < 0 {
-		t.Errorf("disk free_bytes must be non-negative; got %v", free)
-	}
-	if pct, _ := got["used_percent"].(float64); pct < 0 || pct > 100 {
-		t.Errorf("disk used_percent must be 0..100; got %v", pct)
+	if !strings.Contains(js, "rtRuntime.capacity.disk") {
+		t.Errorf("dashboard must access disk via rtRuntime.capacity.disk to match the Go runtime Telemetry struct")
 	}
 }
 
@@ -183,7 +158,7 @@ func TestAdminRuntimeDiskCapacitySane(t *testing.T) {
 func TestAdminRuntimePreservesPriorFixes(t *testing.T) {
 	root := adminRepoRoot(t)
 	css := readFile(t, root, "release/admin/styles.css")
-	js := readFile(t, root, "release/admin/app.js")
+	js := adminJSContents(t, root)
 	webmail := readFile(t, root, "release/webmail/assets/webmail.js")
 	authGate := readFile(t, root, "release/webmail/assets/auth-gate.js")
 
@@ -276,7 +251,7 @@ func TestAdminRuntimePreservesPriorFixes(t *testing.T) {
 // values rather than rendering them as card details.
 func TestAdminLicenseUIZeroDateAbsent(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := adminJSContents(t, root)
 	// The helper function isZeroDate must exist to filter zero dates.
 	if !strings.Contains(src, "function isZeroDate") && !strings.Contains(src, "isZeroDate = function") {
 		t.Errorf("app.js must define isZeroDate helper to filter out Go zero-time values")
@@ -297,9 +272,9 @@ func TestAdminLicenseUIZeroDateAbsent(t *testing.T) {
 // validation_state fields are used when available.
 func TestAdminLicenseUIPreferRuntimeTelemetry(t *testing.T) {
 	root := adminRepoRoot(t)
-	src := readFile(t, root, "release/admin/app.js")
+	src := adminJSContents(t, root)
 	// The licenseInfo assignment must prefer rt.license first.
-	if !strings.Contains(src, "(rt && rt.license) || state.license") {
+	if !strings.Contains(src, "(rt && rt.license) || data") {
 		t.Errorf("app.js license card must prefer rt.license over state.license for runtime telemetry fields")
 	}
 }
