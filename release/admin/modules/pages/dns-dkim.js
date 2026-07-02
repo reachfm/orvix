@@ -472,6 +472,42 @@ function getProviderPlan(providerName, domain) {
   return state.dnsProviderPlans[providerKey(providerName, domain)] || null;
 }
 
+function getProviderByName(name) {
+  const backendProviders = state._backendProviders || [];
+  const fallbackList = [
+    { name: 'manual',     label: 'manual',     status: 'ready',          plan_supported: true,  plan_needed: true  },
+    { name: 'cloudflare', label: 'Cloudflare',  status: 'not_configured', plan_supported: false, plan_needed: false },
+    { name: 'namecheap',  label: 'Namecheap',   status: 'not_configured', plan_supported: false, plan_needed: false },
+  ];
+  const fb = fallbackList.find((p) => p.name === name);
+  if (!fb) return null;
+  const bp = backendProviders.find((p) => p.name === name);
+  if (bp) {
+    return { ...fb, status: bp.available ? 'ready' : 'not_configured', plan_supported: !!bp.available, plan_needed: !!bp.available };
+  }
+  return fb;
+}
+
+function planHasApplyableWork(plan) {
+  if (!plan) return false;
+  if (plan.can_apply === true || plan.apply_allowed === true) return true;
+  if (plan.can_apply === false || plan.apply_allowed === false) return false;
+  return (Array.isArray(plan.changes) && plan.changes.length > 0)
+    || (Array.isArray(plan.items) && plan.items.length > 0)
+    || (Array.isArray(plan.records) && plan.records.length > 0);
+}
+
+function canApplyProvider(name, domain) {
+  if (!domain) return false;
+  const provider = getProviderByName(name);
+  if (!provider) return false;
+  if (provider.name === 'manual') return false;
+  if (provider.status !== 'ready') return false;
+  const plan = getProviderPlan(name, domain);
+  if (!plan) return false;
+  return planHasApplyableWork(plan);
+}
+
 function renderDnsProviderPanel(host, domain) {
   host.innerHTML = '';
   // Merge backend provider availability into the display list.
@@ -506,22 +542,11 @@ function renderDnsProviderPanel(host, domain) {
       { name: 'plan', label: 'Plan', render: (p) => p.plan_supported ? el('button', { class: 'btn xs ghost', type: 'button', text: t('dns.wizard'),
         onclick: () => loadDnsProviderPlan(p.name) }) : el('span', { class: 'subtle', text: 'not configured' }) },
       { name: 'a', label: 'Apply', render: (p) => {
-        const plan = getProviderPlan(p.name, domain);
-        const hasApplyableWork = plan && (
-          plan.can_apply === true
-          || (Array.isArray(plan.changes) && plan.changes.length > 0)
-          || (Array.isArray(plan.items) && plan.items.length > 0)
-          || (Array.isArray(plan.records) && plan.records.length > 0)
-        );
-        const disabled = !domain
-          || p.name === 'manual'
-          || p.status !== 'ready'
-          || !plan
-          || !hasApplyableWork;
+        const canApply = canApplyProvider(p.name, domain);
         return el('button', {
           class: 'btn xs primary', type: 'button',
           text: t('dns.apply'),
-          disabled: disabled,
+          disabled: !canApply,
           onclick: () => applyDnsProvider(p.name),
         });
       } },
@@ -556,11 +581,12 @@ async function loadDnsProviderPlan(name) {
 // phrase "apply-dns-changes" before the live API is called.
 async function applyDnsProvider(name) {
   const domain = state.currentDomain;
-  const plan = getProviderPlan(name, domain);
-  if (!domain || !plan || name === 'manual') {
-    toast('Run dry-run for this domain first', 'error', 6000);
+  if (!canApplyProvider(name, domain)) {
+    toast('Run dry-run for this configured provider and domain before applying DNS changes.', 'error', 6000);
     return;
   }
+  const plan = getProviderPlan(name, domain);
+  if (!plan) return;
   const ok = await confirmDanger({
     title: 'Apply DNS provider plan',
     message: 'This will write the DNS records to the upstream provider. Type apply-dns-changes to confirm.',

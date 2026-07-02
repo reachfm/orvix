@@ -397,42 +397,50 @@ if grep -q "\.records\.find(" "$DNS_DKIM" 2>/dev/null; then
 fi
 pass "dns-dkim.js MTA-STS .records.find() is guarded by Array.isArray"
 
-# ── 29. Apply button uses per-provider disabled logic ────────────
-# Codex BLOCKER 4: Apply was enabled for ALL providers because a
-# single global applyDisabled was always false (manual provider
-# always present in fallback list). Apply must be per-provider:
-#   - disabled when no domain selected
-#   - disabled for manual provider
-#   - disabled when provider status is not 'ready'
-#   - disabled when no provider plan is loaded
-#   - disabled when plan has no applyable changes
+# ── 29. Apply guard uses shared canApplyProvider helper ────────────
+# Codex BLOCKER 4 + CROSS-DOMAIN: Both the render button and the
+# apply handler must use the same canApplyProvider() helper so the
+# two paths cannot diverge.  canApplyProvider in turn calls
+# getProviderByName, getProviderPlan, and planHasApplyableWork —
+# any one of them returning false prevents Apply.
 #
 # 29a. Apply button must not use a global applyDisabled variable.
 if grep -qE "disabled:\s*\bapplyDisabled\b" "$DNS_DKIM" 2>/dev/null; then
     fail "dns-dkim.js Apply button uses global applyDisabled — must be per-provider (BLOCKER 4)"
 fi
-# 29b. Apply button render must gate on domain, provider, plan, and changes.
-if ! grep -qE "getProviderPlan|hasApplyableWork|canApplyProvider" "$DNS_DKIM" 2>/dev/null; then
-    fail "dns-dkim.js Apply button lacks per-provider gating on domain/provider/plan/changes (BLOCKER 4)"
+# 29b. Apply button render must use canApplyProvider.
+if ! grep -q "canApplyProvider(p\.name, domain)" "$DNS_DKIM" 2>/dev/null; then
+    fail "dns-dkim.js Apply button must use canApplyProvider(p.name, domain) (BLOCKER 4)"
 fi
-# 29c. Manual provider must be excluded from Apply.
-if ! grep -qE "name.*===.*'manual'|name.*===.*\"manual\"|p\.name.*manual" "$DNS_DKIM" 2>/dev/null; then
-    fail "dns-dkim.js manual provider Apply button must be disabled (BLOCKER 4)"
+# 29c. applyDnsProvider must call canApplyProvider before POST.
+if ! grep -q "canApplyProvider(name, domain)" "$DNS_DKIM" 2>/dev/null; then
+    fail "dns-dkim.js applyDnsProvider must call canApplyProvider(name, domain) before POST (CROSS-DOMAIN)"
 fi
-# 29d. Plans must have applyable changes or can_apply for Apply to be enabled.
-if ! grep -qE "plan\.can_apply|plan\.changes.*length|Array\.isArray.*changes" "$DNS_DKIM" 2>/dev/null; then
-    fail "dns-dkim.js Apply button must check plan has applyable changes or can_apply flag (BLOCKER 4)"
+# 29d. canApplyProvider must call getProviderPlan.
+if ! grep -q "getProviderPlan(name, domain)" "$DNS_DKIM" 2>/dev/null; then
+    fail "dns-dkim.js canApplyProvider must call getProviderPlan(name, domain)"
 fi
-# 29e. applyDnsProvider must call getProviderPlan before POST to
-#      prevent stale cross-domain plan reuse.
-if ! grep -q "getProviderPlan(name" "$DNS_DKIM" 2>/dev/null; then
-    fail "dns-dkim.js applyDnsProvider must call getProviderPlan to verify plan before POST (CROSS-DOMAIN)"
+# 29e. canApplyProvider must check planHasApplyableWork.
+if ! grep -q "planHasApplyableWork(plan)" "$DNS_DKIM" 2>/dev/null; then
+    fail "dns-dkim.js canApplyProvider must check planHasApplyableWork(plan)"
 fi
-# 29f. applyDnsProvider must gate on plan existence.
-if ! grep -q "Run dry-run for this domain first" "$DNS_DKIM" 2>/dev/null; then
-    fail "dns-dkim.js applyDnsProvider must show error when no plan exists for current domain (CROSS-DOMAIN)"
+# 29f. canApplyProvider must check provider readiness.
+if ! grep -q "provider.status !== 'ready'" "$DNS_DKIM" 2>/dev/null; then
+    fail "dns-dkim.js canApplyProvider must check provider.status === 'ready'"
 fi
-pass "dns-dkim.js Apply button uses per-provider disabled logic"
+# 29g. planHasApplyableWork checks can_apply / apply_allowed / changes.
+if ! grep -qE "plan\.can_apply|plan\.apply_allowed" "$DNS_DKIM" 2>/dev/null; then
+    fail "dns-dkim.js planHasApplyableWork must check plan.can_apply / plan.apply_allowed"
+fi
+# 29h. getProviderByName is called by canApplyProvider.
+if ! grep -q "getProviderByName(name)" "$DNS_DKIM" 2>/dev/null; then
+    fail "dns-dkim.js canApplyProvider must call getProviderByName(name)"
+fi
+# 29i. applyDnsProvider error toast matches full guard wording.
+if ! grep -q "Run dry-run for this configured provider and domain" "$DNS_DKIM" 2>/dev/null; then
+    fail "dns-dkim.js applyDnsProvider must show error when canApplyProvider is false"
+fi
+pass "dns-dkim.js Apply guard uses shared canApplyProvider helper"
 
 echo
 echo "ALL ADMIN UI SMOKE TESTS PASSED"

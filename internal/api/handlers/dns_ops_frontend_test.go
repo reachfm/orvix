@@ -486,30 +486,37 @@ func TestAdminDNSOpsNoExecDnsOutOfBand(t *testing.T) {
 // plan that has applyable changes.
 func TestAdminDNSOpsProviderApplyDisabledStates(t *testing.T) {
 	src := aggregateAdminJS(t, adminRepoRoot(t))
-	// The Apply button must use per-provider gating via getProviderPlan.
-	if !strings.Contains(src, "getProviderPlan") {
-		t.Errorf("admin provider panel must use getProviderPlan for per-provider Apply gating")
+	// The Apply button must use canApplyProvider for per-provider gating.
+	if !strings.Contains(src, "canApplyProvider") {
+		t.Errorf("admin provider panel must use canApplyProvider for per-provider Apply gating")
 	}
-	// The disabled attribute must be computed per-provider (not a global applyDisabled).
-	if !strings.Contains(src, "disabled: disabled") && !strings.Contains(src, "'disabled': disabled") {
-		t.Errorf("apply button disabled attribute must be computed per-provider")
+	// applyDnsProvider must call canApplyProvider before POST.
+	if !strings.Contains(src, "canApplyProvider(name, domain)") {
+		t.Errorf("applyDnsProvider must call canApplyProvider(name, domain) before POST")
 	}
-	// The provider plan must have applyable changes checked.
-	if !strings.Contains(src, "hasApplyableWork") {
-		t.Errorf("apply button must check plan has applyable changes via hasApplyableWork")
+	// canApplyProvider must call getProviderPlan.
+	if !strings.Contains(src, "getProviderPlan(name, domain)") {
+		t.Errorf("canApplyProvider must call getProviderPlan(name, domain)")
 	}
-	// The apply confirmation must use the literal apply-dns-changes.
-	if !strings.Contains(src, "apply-dns-changes") {
-		t.Errorf("admin provider apply must require 'apply-dns-changes' confirmation")
+	// canApplyProvider must check planHasApplyableWork.
+	if !strings.Contains(src, "planHasApplyableWork(plan)") {
+		t.Errorf("canApplyProvider must check planHasApplyableWork(plan)")
 	}
-	// applyDnsProvider must call getProviderPlan before POST to prevent
-	// stale cross-domain plan reuse.
-	if !strings.Contains(src, "getProviderPlan(name") {
-		t.Errorf("applyDnsProvider must call getProviderPlan(name, currentDomain) before POST")
+	// planHasApplyableWork must check can_apply / apply_allowed.
+	if !strings.Contains(src, "plan.can_apply") && !strings.Contains(src, "plan.apply_allowed") {
+		t.Errorf("planHasApplyableWork must check plan.can_apply / plan.apply_allowed")
+	}
+	// canApplyProvider must call getProviderByName.
+	if !strings.Contains(src, "getProviderByName(name)") {
+		t.Errorf("canApplyProvider must call getProviderByName(name)")
 	}
 	// getProviderPlan must NOT fall back to provider-only key.
 	if strings.Contains(src, "state.dnsProviderPlans[providerName]") {
 		t.Errorf("getProviderPlan must NOT fall back to bare providerName key — composite key only")
+	}
+	// The apply confirmation must use the literal apply-dns-changes.
+	if !strings.Contains(src, "apply-dns-changes") {
+		t.Errorf("admin provider apply must require 'apply-dns-changes' confirmation")
 	}
 	// No stale yes-i-confirm reference in the DNS ops section.
 	dns := adminDNSOpsSection(t)
