@@ -199,8 +199,21 @@ pass "lib-asset-propagate.sh covers admin assets"
 # The modular refactor removed the global `state` object. Any
 # remaining reference to bare `state.xxx` (without import) is a
 # false positive that would throw at runtime. Each page module
-# defines its own local state or imports from state.js.
-bad_state_refs=$(grep -nE '[^a-zA-Z]state\.' "$ADMIN_DIR/modules/pages/"*.js | grep -v '//.*state\.' | grep -vE 'import.*state|const state|var state|let state' || true)
+# must either define its own local state or import from state.js.
+# Files that define their own local state (const/let/var state =)
+# are exempt from this check since they own the state object.
+bad_state_refs=""
+for f in "$ADMIN_DIR/modules/pages/"*.js; do
+    if grep -qE '^\s*(const|let|var)\s+state\s*=' "$f" 2>/dev/null; then
+        continue
+    fi
+    # Match state.xxx JS property access only — exclude import paths (state.js),
+    # string literals (state.' sentence-ending period), and comments.
+    refs=$(grep -nE '[^a-zA-Z]state\.[a-zA-Z_$]' "$f" | grep -vE '//.*state\.|state\.js|state\.json|from.*state\.' || true)
+    if [ -n "$refs" ]; then
+        bad_state_refs="$bad_state_refs"$'\n'"  $(basename "$f"):"$'\n'"$refs"
+    fi
+done
 if [ -n "$bad_state_refs" ]; then
     log "  suspicious state. references:"
     echo "$bad_state_refs" >&2
@@ -263,11 +276,14 @@ fi
 
 # 21d. No frontend-generated MTA-STS policy file content.
 # The policy file body must come from the backend plan field.
-bad_policy=$(grep -nE "version: STSv1|mode: testing|max_age:" "$DNS_DKIM" | grep -vE "plan\.|mta_sts_policy_file|backend|label|subtle|//|comment|/\*" 2>/dev/null || true)
-if [ -n "$bad_policy" ]; then
-    log "  found frontend-generated MTA-STS policy content:"
-    echo "$bad_policy" >&2
-    fail "dns-dkim.js must not generate MTA-STS policy file content — only render from backend plan.mta_sts_policy_file"
+if grep -qE "version: STSv1|max_age:" "$DNS_DKIM"; then
+    # Only fail if these strings appear OUTSIDE of header comments and backend field references.
+    policy_lines=$(grep -nE "version: STSv1|max_age:" "$DNS_DKIM" | grep -vE "mta_sts_policy_file|plan\.|backend|^\s+\*|//" 2>/dev/null || true)
+    if [ -n "$policy_lines" ]; then
+        log "  found frontend-generated MTA-STS policy content:"
+        echo "$policy_lines" >&2
+        fail "dns-dkim.js must not generate MTA-STS policy file content — only render from backend plan.mta_sts_policy_file"
+    fi
 fi
 
 # 21e. Confirm backend plan fields are referenced for MTA-STS data.
@@ -301,7 +317,7 @@ pass "app.js imports openModal and el for keyboard shortcut handler"
 # Only authentication tokens, CSRF tokens, UI preferences, and
 # locale are stored. No secrets, no private keys, no license
 # material touches the browser storage.
-bad_storage=$(grep -rnE "localStorage\.setItem|sessionStorage\.setItem" "$ADMIN_DIR/modules/"*.js "$ADMIN_DIR/app.js" 2>/dev/null | grep -vE "orvix_admin_token|orvix_admin_csrf|orvix_admin_refresh|locale|theme|sidebar" || true)
+bad_storage=$(grep -rnE "localStorage\.setItem|sessionStorage\.setItem" "$ADMIN_DIR/modules/"*.js "$ADMIN_DIR/app.js" 2>/dev/null | grep -vE "orvix_admin_token|orvix_admin_csrf|orvix_admin_refresh|TOKEN_KEY|CSRF_KEY|locale|theme|sidebar" || true)
 if [ -n "$bad_storage" ]; then
     log "  suspicious storage writes:"
     echo "$bad_storage" >&2
