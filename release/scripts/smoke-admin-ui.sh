@@ -352,6 +352,8 @@ pass "backup delete sends confirmation body matching backend contract"
 # Codex BLOCKER 2: applyDisabled was used as an undeclared bare
 # identifier in renderDnsProviderPanel, which would throw at runtime.
 # It must be a local const/let/var or state.applyDisabled.
+# After BLOCKER 4 fix this identifier should not exist as a local
+# variable — the Apply button uses per-provider disabled logic.
 DNS_DKIM="$ADMIN_DIR/modules/pages/dns-dkim.js"
 has_local_decl=$(grep -cE "^\s*(const|let|var)\s+applyDisabled\s*=" "$DNS_DKIM" 2>/dev/null || echo 0)
 bad_apply=$(grep -nE '\bapplyDisabled\b' "$DNS_DKIM" 2>/dev/null | grep -vE 'state\.applyDisabled|const applyDisabled|let applyDisabled|var applyDisabled|//.*applyDisabled|^\s*\*|applyDisabled:' || true)
@@ -393,6 +395,34 @@ if grep -q "\.records\.find(" "$DNS_DKIM" 2>/dev/null; then
     fi
 fi
 pass "dns-dkim.js MTA-STS .records.find() is guarded by Array.isArray"
+
+# ── 29. Apply button uses per-provider disabled logic ────────────
+# Codex BLOCKER 4: Apply was enabled for ALL providers because a
+# single global applyDisabled was always false (manual provider
+# always present in fallback list). Apply must be per-provider:
+#   - disabled when no domain selected
+#   - disabled for manual provider
+#   - disabled when provider status is not 'ready'
+#   - disabled when no provider plan is loaded
+#   - disabled when plan has no applyable changes
+#
+# 29a. Apply button must not use a global applyDisabled variable.
+if grep -qE "disabled:\s*\bapplyDisabled\b" "$DNS_DKIM" 2>/dev/null; then
+    fail "dns-dkim.js Apply button uses global applyDisabled — must be per-provider (BLOCKER 4)"
+fi
+# 29b. Apply button render must gate on domain, provider, plan, and changes.
+if ! grep -qE "getProviderPlan|hasApplyableWork|canApplyProvider" "$DNS_DKIM" 2>/dev/null; then
+    fail "dns-dkim.js Apply button lacks per-provider gating on domain/provider/plan/changes (BLOCKER 4)"
+fi
+# 29c. Manual provider must be excluded from Apply.
+if ! grep -qE "name.*===.*'manual'|name.*===.*\"manual\"|p\.name.*manual" "$DNS_DKIM" 2>/dev/null; then
+    fail "dns-dkim.js manual provider Apply button must be disabled (BLOCKER 4)"
+fi
+# 29d. Plans must have applyable changes or can_apply for Apply to be enabled.
+if ! grep -qE "plan\.can_apply|plan\.changes.*length|Array\.isArray.*changes" "$DNS_DKIM" 2>/dev/null; then
+    fail "dns-dkim.js Apply button must check plan has applyable changes or can_apply flag (BLOCKER 4)"
+fi
+pass "dns-dkim.js Apply button uses per-provider disabled logic"
 
 echo
 echo "ALL ADMIN UI SMOKE TESTS PASSED"

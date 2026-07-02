@@ -476,20 +476,27 @@ func TestAdminDNSOpsNoExecDnsOutOfBand(t *testing.T) {
 }
 
 // TestAdminDNSOpsProviderApplyDisabledStates confirms the
-// Apply button is disabled when:
+// Apply button is disabled per-provider when:
+//   - no domain is selected
+//   - provider is manual (no live API)
 //   - provider status is not_configured or dry_run_only
-//   - dry-run plan has conflicts
+//   - no provider plan is loaded or plan has no applyable changes
 //
-// And enabled only for ready/manual status without conflicts.
+// And enabled only for configured non-manual providers with a loaded
+// plan that has applyable changes.
 func TestAdminDNSOpsProviderApplyDisabledStates(t *testing.T) {
 	src := aggregateAdminJS(t, adminRepoRoot(t))
-	// The Apply button must check provider status.
-	if !strings.Contains(src, "applyDisabled") {
-		t.Errorf("admin provider panel must track applyDisabled state")
+	// The Apply button must use per-provider gating via getProviderPlan.
+	if !strings.Contains(src, "getProviderPlan") {
+		t.Errorf("admin provider panel must use getProviderPlan for per-provider Apply gating")
 	}
-	// The disabled attribute must be set on the Apply button.
-	if !strings.Contains(src, "disabled: applyDisabled") && !strings.Contains(src, "'disabled' : applyDisabled") {
-		t.Errorf("apply button disabled attribute must depend on applyDisabled")
+	// The disabled attribute must be computed per-provider (not a global applyDisabled).
+	if !strings.Contains(src, "disabled: disabled") && !strings.Contains(src, "'disabled': disabled") {
+		t.Errorf("apply button disabled attribute must be computed per-provider")
+	}
+	// The provider plan must have applyable changes checked.
+	if !strings.Contains(src, "hasApplyableWork") {
+		t.Errorf("apply button must check plan has applyable changes via hasApplyableWork")
 	}
 	// The apply confirmation must use the literal apply-dns-changes.
 	if !strings.Contains(src, "apply-dns-changes") {
@@ -514,9 +521,9 @@ func TestAdminDNSOpsProviderPlanPreserved(t *testing.T) {
 		t.Errorf("state must track per-provider dry-run plans (dnsProviderPlans)")
 	}
 	// The renderDnsProviderPanel function must read from state
-	// and append the stored plan output to the card.
-	if !strings.Contains(src, "renderChangePlan(state.dnsProviderPlans[p.name])") {
-		t.Errorf("provider panel must render stored plan from state after re-render")
+	// via getProviderPlan and append the stored plan output to the card.
+	if !strings.Contains(src, "renderChangePlan(cp)") {
+		t.Errorf("provider panel must render stored plan from state via getProviderPlan after re-render")
 	}
 	// The loadDnsProviderPlan function must store the plan in
 	// state before calling renderDnsProviderPanel.

@@ -461,6 +461,16 @@ function renderPtrCard(host, domain) {
 // -------------------------------------------------------------------
 // Provider automation card.
 // -------------------------------------------------------------------
+
+function providerKey(providerName, domain) {
+  return providerName + '::' + (domain || '');
+}
+
+function getProviderPlan(providerName, domain) {
+  const composite = state.dnsProviderPlans[providerKey(providerName, domain)];
+  return composite || state.dnsProviderPlans[providerName] || null;
+}
+
 function renderDnsProviderPanel(host, domain) {
   host.innerHTML = '';
   // Merge backend provider availability into the display list.
@@ -488,9 +498,6 @@ function renderDnsProviderPanel(host, domain) {
     const k = s === 'ready' ? 'good' : (s === 'not_configured' || s === 'dry_run_only' ? 'bad' : 'warn');
     return badge(s, k);
   };
-  const applyDisabled = !(providers.find((p) => p.name === 'manual'));
-  state.applyDisabled = applyDisabled;
-
   const tbl = table({
     columns: [
       { name: 'p', label: 'Provider', render: (p) => p.label || p.name },
@@ -498,10 +505,22 @@ function renderDnsProviderPanel(host, domain) {
       { name: 'plan', label: 'Plan', render: (p) => p.plan_supported ? el('button', { class: 'btn xs ghost', type: 'button', text: t('dns.wizard'),
         onclick: () => loadDnsProviderPlan(p.name) }) : el('span', { class: 'subtle', text: 'not configured' }) },
       { name: 'a', label: 'Apply', render: (p) => {
+        const plan = getProviderPlan(p.name, domain);
+        const hasApplyableWork = plan && (
+          plan.can_apply === true
+          || (Array.isArray(plan.changes) && plan.changes.length > 0)
+          || (Array.isArray(plan.items) && plan.items.length > 0)
+          || (Array.isArray(plan.records) && plan.records.length > 0)
+        );
+        const disabled = !domain
+          || p.name === 'manual'
+          || p.status !== 'ready'
+          || !plan
+          || !hasApplyableWork;
         return el('button', {
           class: 'btn xs primary', type: 'button',
           text: t('dns.apply'),
-          disabled: applyDisabled,
+          disabled: disabled,
           onclick: () => applyDnsProvider(p.name),
         });
       } },
@@ -511,8 +530,9 @@ function renderDnsProviderPanel(host, domain) {
   host.appendChild(tbl);
 
   // Render the plan for the most recently selected provider.
-  if (state.selectedProvider && state.dnsProviderPlans[state.selectedProvider]) {
-    host.appendChild(renderChangePlan(state.dnsProviderPlans[state.selectedProvider]));
+  if (state.selectedProvider) {
+    const cp = getProviderPlan(state.selectedProvider, domain);
+    if (cp) host.appendChild(renderChangePlan(cp));
   }
 }
 
@@ -523,6 +543,7 @@ async function loadDnsProviderPlan(name) {
   try {
     const cp = await apiPost('/api/v1/admin/dns/' + encodeURIComponent(state.currentDomain || '') + '/provider/plan', { provider: name });
     state.selectedProvider = name;
+    state.dnsProviderPlans[providerKey(name, state.currentDomain)] = cp;
     state.dnsProviderPlans[name] = cp;
     renderDnsProviderPanel(document.querySelector('.page-inner .panel:nth-last-of-type(3) .panel-body'), state.currentDomain);
     toast('Provider plan loaded', 'success', 1800);
