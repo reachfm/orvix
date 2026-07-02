@@ -100,6 +100,7 @@ export async function renderDnsDkimPage(root) {
   state.domains.forEach((d) => sel.appendChild(el('option', { value: d.name }, d.name || d.domain || '-')));
   sel.addEventListener('change', () => {
     state.currentDomain = sel.value;
+    state.selectedProvider = '';
     if (sel.value) loadPlan(sel.value);
   });
   body.appendChild(el('div', { class: 'form-row' }, [
@@ -467,8 +468,8 @@ function providerKey(providerName, domain) {
 }
 
 function getProviderPlan(providerName, domain) {
-  const composite = state.dnsProviderPlans[providerKey(providerName, domain)];
-  return composite || state.dnsProviderPlans[providerName] || null;
+  if (!providerName || !domain) return null;
+  return state.dnsProviderPlans[providerKey(providerName, domain)] || null;
 }
 
 function renderDnsProviderPanel(host, domain) {
@@ -538,13 +539,12 @@ function renderDnsProviderPanel(host, domain) {
 
 // loadDnsProviderPlan must store the plan in state BEFORE the
 // re-render so the static-analysis test (which looks for
-// `state.dnsProviderPlans[name] = cp`) can pass.
+// `state.dnsProviderPlans[providerKey(name, state.currentDomain)] = cp`) can pass.
 async function loadDnsProviderPlan(name) {
   try {
     const cp = await apiPost('/api/v1/admin/dns/' + encodeURIComponent(state.currentDomain || '') + '/provider/plan', { provider: name });
     state.selectedProvider = name;
     state.dnsProviderPlans[providerKey(name, state.currentDomain)] = cp;
-    state.dnsProviderPlans[name] = cp;
     renderDnsProviderPanel(document.querySelector('.page-inner .panel:nth-last-of-type(3) .panel-body'), state.currentDomain);
     toast('Provider plan loaded', 'success', 1800);
   } catch (e) {
@@ -555,6 +555,12 @@ async function loadDnsProviderPlan(name) {
 // applyDnsProvider: requires the operator to type the literal
 // phrase "apply-dns-changes" before the live API is called.
 async function applyDnsProvider(name) {
+  const domain = state.currentDomain;
+  const plan = getProviderPlan(name, domain);
+  if (!domain || !plan || name === 'manual') {
+    toast('Run dry-run for this domain first', 'error', 6000);
+    return;
+  }
   const ok = await confirmDanger({
     title: 'Apply DNS provider plan',
     message: 'This will write the DNS records to the upstream provider. Type apply-dns-changes to confirm.',
@@ -563,7 +569,7 @@ async function applyDnsProvider(name) {
   });
   if (!ok) return;
   try {
-    await apiPost('/api/v1/admin/dns/' + encodeURIComponent(state.currentDomain || '') + '/provider/apply', {
+    await apiPost('/api/v1/admin/dns/' + encodeURIComponent(domain) + '/provider/apply', {
       provider: name,
       confirm: 'apply-dns-changes',
     });
@@ -574,8 +580,8 @@ async function applyDnsProvider(name) {
 }
 
 // renderChangePlan is the helper that renders a per-provider
-// dry-run plan. The static-analysis test asserts the exact
-// call site `renderChangePlan(state.dnsProviderPlans[p.name])`.
+// dry-run plan. The panel calls renderChangePlan with the result
+// of getProviderPlan for the selected provider.
 function renderChangePlan(cp) {
   const card = el('div', { class: 'panel panel-inner' });
   card.appendChild(el('header', { class: 'panel-head' }, el('h4', { text: 'Dry-run plan' })));

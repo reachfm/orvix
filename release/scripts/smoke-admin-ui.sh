@@ -364,27 +364,28 @@ if [ -n "$bad_apply" ] && [ "$has_local_decl" -eq 0 ]; then
 fi
 pass "dns-dkim.js uses no bare undeclared applyDisabled"
 
-# ── 27. Provider plan key consistency ────────────────────────────
-# Codex BLOCKER 3: plan stored by [name] but was read by [domain],
-# causing dry-run plans to never display. Verify the read key
-# matches the store key (both must be by provider name).
-if grep -q "state\.dnsProviderPlans\[name\]" "$DNS_DKIM" 2>/dev/null; then
-    # Stored by provider name; read must also be by provider name.
-    if grep -qE "state\.dnsProviderPlans\[domain\]|state\.dnsProviderPlans\[state\.currentDomain\]" "$DNS_DKIM" 2>/dev/null; then
-        fail "dns-dkim.js stores provider plan by [name] but reads by [domain] — key mismatch (BLOCKER 3)"
-    fi
+# ── 27. Provider plan uses composite key only (no bare-name fallback) ─
+# Codex CROSS-DOMAIN: plans must be stored by composite key
+# providerName::domain and retrieved with the same key.  Bare-name
+# storage or fallback allows stale cross-domain plan reuse.
+# 27a. getProviderPlan must use composite key (providerKey), not fall
+#      back to bare providerName.
+if grep -q "state\.dnsProviderPlans\[providerName\]" "$DNS_DKIM" 2>/dev/null; then
+    fail "dns-dkim.js getProviderPlan must NOT fall back to bare providerName key — composite key only (CROSS-DOMAIN)"
 fi
-if grep -q "state\.dnsProviderPlans\[state\.selectedProvider\]" "$DNS_DKIM" 2>/dev/null; then
-    : # ok — consistent with store by [name]
-else
-    # Fallback: check that no stale domain-based read exists.
-    if grep -q "state\.dnsProviderPlans\[name\]\s*=" "$DNS_DKIM" 2>/dev/null && grep -q "state\.dnsProviderPlans\[" "$DNS_DKIM" 2>/dev/null; then
-        if ! grep -q "state\.selectedProvider" "$DNS_DKIM" 2>/dev/null; then
-            fail "dns-dkim.js stores plan by [name] but no selectedProvider-based read found (BLOCKER 3)"
-        fi
-    fi
+# 27b. getProviderPlan must reference providerKey for lookup.
+if ! grep -q "providerKey(providerName, domain)" "$DNS_DKIM" 2>/dev/null; then
+    fail "dns-dkim.js getProviderPlan must use providerKey(providerName, domain) composite lookup (CROSS-DOMAIN)"
 fi
-pass "dns-dkim.js provider plan store/read keys are consistent"
+# 27c. loadDnsProviderPlan must store by composite key, not bare [name].
+if grep -qE "state\.dnsProviderPlans\[name\]\s*=" "$DNS_DKIM" 2>/dev/null; then
+    fail "dns-dkim.js must NOT store plan by bare [name] — use composite key only (CROSS-DOMAIN)"
+fi
+# 27d. loadDnsProviderPlan must use providerKey for storage.
+if ! grep -q "providerKey(name, state\.currentDomain)" "$DNS_DKIM" 2>/dev/null; then
+    fail "dns-dkim.js loadDnsProviderPlan must use providerKey(name, currentDomain) composite key (CROSS-DOMAIN)"
+fi
+pass "dns-dkim.js provider plan uses composite key only"
 
 # ── 28. MTA-STS .records.find() must be guarded by Array.isArray ─
 # Codex HIGH-RISK: inner.records.find() throws if backend omits
@@ -421,6 +422,15 @@ fi
 # 29d. Plans must have applyable changes or can_apply for Apply to be enabled.
 if ! grep -qE "plan\.can_apply|plan\.changes.*length|Array\.isArray.*changes" "$DNS_DKIM" 2>/dev/null; then
     fail "dns-dkim.js Apply button must check plan has applyable changes or can_apply flag (BLOCKER 4)"
+fi
+# 29e. applyDnsProvider must call getProviderPlan before POST to
+#      prevent stale cross-domain plan reuse.
+if ! grep -q "getProviderPlan(name" "$DNS_DKIM" 2>/dev/null; then
+    fail "dns-dkim.js applyDnsProvider must call getProviderPlan to verify plan before POST (CROSS-DOMAIN)"
+fi
+# 29f. applyDnsProvider must gate on plan existence.
+if ! grep -q "Run dry-run for this domain first" "$DNS_DKIM" 2>/dev/null; then
+    fail "dns-dkim.js applyDnsProvider must show error when no plan exists for current domain (CROSS-DOMAIN)"
 fi
 pass "dns-dkim.js Apply button uses per-provider disabled logic"
 

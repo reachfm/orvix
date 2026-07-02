@@ -502,6 +502,15 @@ func TestAdminDNSOpsProviderApplyDisabledStates(t *testing.T) {
 	if !strings.Contains(src, "apply-dns-changes") {
 		t.Errorf("admin provider apply must require 'apply-dns-changes' confirmation")
 	}
+	// applyDnsProvider must call getProviderPlan before POST to prevent
+	// stale cross-domain plan reuse.
+	if !strings.Contains(src, "getProviderPlan(name") {
+		t.Errorf("applyDnsProvider must call getProviderPlan(name, currentDomain) before POST")
+	}
+	// getProviderPlan must NOT fall back to provider-only key.
+	if strings.Contains(src, "state.dnsProviderPlans[providerName]") {
+		t.Errorf("getProviderPlan must NOT fall back to bare providerName key — composite key only")
+	}
 	// No stale yes-i-confirm reference in the DNS ops section.
 	dns := adminDNSOpsSection(t)
 	if strings.Contains(dns, "yes-i-confirm") {
@@ -525,10 +534,14 @@ func TestAdminDNSOpsProviderPlanPreserved(t *testing.T) {
 	if !strings.Contains(src, "renderChangePlan(cp)") {
 		t.Errorf("provider panel must render stored plan from state via getProviderPlan after re-render")
 	}
-	// The loadDnsProviderPlan function must store the plan in
-	// state before calling renderDnsProviderPanel.
-	if !strings.Contains(src, "state.dnsProviderPlans[name] = cp") {
-		t.Errorf("loadDnsProviderPlan must store plan in state before re-render")
+	// The loadDnsProviderPlan function must store the plan with a
+	// composite key (providerName + '::' + domain), not bare name.
+	if !strings.Contains(src, "providerKey(name, state.currentDomain)") {
+		t.Errorf("loadDnsProviderPlan must store plan by composite key providerKey(name, currentDomain)")
+	}
+	// Bare name-only storage is forbidden — it allows stale cross-domain reuse.
+	if strings.Contains(src, "state.dnsProviderPlans[name] = cp") {
+		t.Errorf("loadDnsProviderPlan must NOT store plan by bare [name] — use composite key only")
 	}
 }
 
