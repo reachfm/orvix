@@ -46,6 +46,154 @@ func TestCSPHeader(t *testing.T) {
 	}
 }
 
+// TestAdminSPAExemptFromRateLimit is the regression test for the
+// PHASE-0 blocker where `GET /admin` returned a JSON 429 because
+// the rate limiter was registered globally and every static SPA
+// asset (index.html + app.js + styles.css + ~30 module files)
+// counted against the per-IP API budget.
+//
+// Expected behaviour after PHASE-0 fix:
+//   - /admin and /admin/* return 200 indefinitely, no 429
+//   - /api/v1/* DOES honour the per-IP limit (Redis default
+//     100/min; in-memory fallback 100/min when redis is nil)
+//   - login endpoints still have the dedicated login limiter
+func TestAdminSPAExemptFromRateLimit(t *testing.T) {
+	adminDir := filepath.Join("..", "..", "release", "admin")
+	webmailDir := filepath.Join("..", "..", "release", "webmail")
+	logger := zap.NewNop()
+	cfg := config.Defaults()
+	cfg.Server.AdminUIDir = adminDir
+	cfg.Server.WebmailUIDir = webmailDir
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(t.TempDir(), "orvix.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	defer sqlDB.Close()
+	if err := models.MigrateAllRaw(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	authenticator, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	router := NewRouter(cfg, authenticator, logger, db, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
+	defer router.App().Shutdown()
+
+	// Hit /admin 250 times. With the previous global limiter
+	// (100/min) request #101 was a JSON 429. After the fix the
+	// limiter is scoped to /api/v1/* only, so the SPA must
+	// return 200 indefinitely.
+	spaPaths := []string{"/admin", "/admin/", "/admin/index.html", "/admin/app.js", "/admin/styles.css"}
+	const totalHits = 250
+	for i := 0; i < totalHits; i++ {
+		path := spaPaths[i%len(spaPaths)]
+		resp, err := router.App().Test(httptest.NewRequest("GET", path, nil))
+		if err != nil {
+			t.Fatalf("hit %d (%s) request: %v", i, path, err)
+		}
+		if resp.StatusCode == fiber.StatusTooManyRequests {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("admin SPA hit %d (%s) must NOT be rate-limited (PHASE-0 BLOCKER): status=%d body=%s", i, path, resp.StatusCode, body)
+		}
+		if resp.StatusCode != 200 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("admin SPA hit %d (%s) expected 200, got %d: %s", i, path, resp.StatusCode, body)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if strings.Contains(string(body), "rate limit exceeded") {
+			t.Fatalf("admin SPA hit %d (%s) returned rate-limit JSON: %s", i, path, body)
+		}
+	}
+
+	// Sanity check: /api/v1/* IS still rate-limited. We
+	// deliberately stay well under the in-memory limit (100/min
+	// by default) and then deliberately exceed it to prove the
+	// limiter is alive on the API group.
+	for i := 0; i < 100; i++ {
+		resp, err := router.App().Test(httptest.NewRequest("GET", "/api/v1/health", nil))
+		if err != nil {
+			t.Fatalf("health %d: %v", i, err)
+		}
+		if resp.StatusCode != 200 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("health %d expected 200, got %d: %s", i, resp.StatusCode, body)
+		}
+	}
+	resp, err := router.App().Test(httptest.NewRequest("GET", "/api/v1/health", nil))
+	if err != nil {
+		t.Fatalf("health over-limit: %v", err)
+	}
+	if resp.StatusCode != fiber.StatusTooManyRequests {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("API rate limiter must still trigger after 101 hits on /api/v1/health; got %d: %s", resp.StatusCode, body)
+	}
+}
+
+// TestAdminModulesLoadAfterRateLimitHit proves that hitting the
+// API rate limit does NOT cascade into the admin SPA. The
+// previous implementation mounted the limiter globally so a
+// 429 from /api/v1/* was indistinguishable from a 429 on
+// /admin/*. After the fix, the SPA stays reachable while the
+// API limit is exhausted.
+func TestAdminModulesLoadAfterRateLimitHit(t *testing.T) {
+	adminDir := filepath.Join("..", "..", "release", "admin")
+	webmailDir := filepath.Join("..", "..", "release", "webmail")
+	logger := zap.NewNop()
+	cfg := config.Defaults()
+	cfg.Server.AdminUIDir = adminDir
+	cfg.Server.WebmailUIDir = webmailDir
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(t.TempDir(), "orvix.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	defer sqlDB.Close()
+	if err := models.MigrateAllRaw(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	authenticator, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	router := NewRouter(cfg, authenticator, logger, db, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
+	defer router.App().Shutdown()
+
+	// Exhaust the API limiter.
+	for i := 0; i < 105; i++ {
+		resp, _ := router.App().Test(httptest.NewRequest("GET", "/api/v1/health", nil))
+		_ = resp
+	}
+
+	// /admin must still be reachable while the API limiter is
+	// exhausted — the SPA and the API budget are independent
+	// after the PHASE-0 fix.
+	for _, path := range []string{"/admin", "/admin/app.js", "/admin/styles.css", "/admin/modules/api.js", "/admin/modules/pages/dashboard.js"} {
+		resp, err := router.App().Test(httptest.NewRequest("GET", path, nil))
+		if err != nil {
+			t.Fatalf("%s after limiter exhausted: %v", path, err)
+		}
+		if resp.StatusCode == fiber.StatusTooManyRequests {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("admin SPA %s must remain reachable after API limit exhausted: %d %s", path, resp.StatusCode, body)
+		}
+		if resp.StatusCode != 200 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("admin SPA %s expected 200, got %d: %s", path, resp.StatusCode, body)
+		}
+	}
+}
+
 func TestWebmailServiceWired(t *testing.T) {
 	logger := zap.NewNop()
 	cfg := config.Defaults()

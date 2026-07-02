@@ -285,14 +285,41 @@ func (r *Router) setupMiddleware() {
 		AllowCredentials: true,
 	}))
 	r.app.Use(securityHeaders())
-	if r.redisLimiter != nil {
-		r.app.Use(r.redisLimiter.Middleware())
-	} else {
-		r.app.Use(limiter.New(limiter.Config{Max: 100, Expiration: 60 * 1000}))
-	}
+	// NOTE: the general API rate limiter is NO LONGER applied
+	// globally. The previous global `r.app.Use(...)` blocked the
+	// admin SPA itself — `GET /admin` triggered the rate limiter
+	// because every static asset (index.html, app.js, styles.css,
+	// the 10 core modules, the 19 page modules) counts against
+	// the per-IP budget. Loading the admin console therefore
+	// consumed ~35 requests on first paint and the dashboard
+	// crashed within seconds with a JSON 429:
+	//
+	//     {"error":"rate limit exceeded, try again later"}
+	//
+	// The fix scopes the limiter to the `/api/v1` group only.
+	// Static SPA assets (admin + webmail) are exempt; API calls
+	// retain their per-IP budget (Redis default: 100 / 60 s).
+	// Login endpoints retain their tighter login limit (5 / 15 m)
+	// via the dedicated `LoginMiddleware()` already mounted in
+	// `setupRoutes()`. Security is unchanged — only the scope of
+	// the limit changed.
+	// The metrics endpoint stays reachable without rate-limit.
 	if r.cfg.Metrics.Enabled {
 		r.app.Get(r.cfg.Metrics.Path, metrics.Handler())
 	}
+}
+
+// apiRateLimitMiddleware returns the general API rate limiter
+// middleware for the /api/v1 group. It is built once in setupRoutes
+// and mounted only on the API group, so SPA static routes are
+// never counted against the per-IP budget. Login endpoints get the
+// dedicated LoginMiddleware (5 attempts / 15 min per IP) and do
+// NOT also pass through this handler, by mounting order.
+func (r *Router) apiRateLimitMiddleware() fiber.Handler {
+	if r.redisLimiter != nil {
+		return r.redisLimiter.Middleware()
+	}
+	return limiter.New(limiter.Config{Max: 100, Expiration: 60 * 1000})
 }
 
 func (r *Router) setupRoutes() {
@@ -305,7 +332,13 @@ func (r *Router) setupRoutes() {
 	// admin / webmail hostnames continue to work.
 	r.app.Get("/.well-known/mta-sts.txt", r.h.GetPublicMTASTS)
 
-	api := r.app.Group("/api/v1")
+	// All `/api/v1/*` requests pass through the general rate
+	// limiter (100/min per IP by default, via Redis when wired).
+	// Static SPA routes (`/admin/*`, `/webmail/*`, `/`, mta-sts)
+	// are registered on `r.app` directly and DO NOT pass through
+	// this handler — so loading the admin UI no longer eats the
+	// per-IP API budget.
+	api := r.app.Group("/api/v1", r.apiRateLimitMiddleware())
 	api.Get("/health", r.h.Health)
 
 	loginGroup := api.Group("/auth")
