@@ -4420,6 +4420,7 @@ caddy() { return 0; }
 systemctl() { return 0; }
 dig() { echo "65.75.203.74"; }
 getent() { echo "65.75.203.74"; }
+detect_public_ipv4_from_host_ips() { return 1; }
 
 # Override fail() so the harness captures the message.
 fail() {

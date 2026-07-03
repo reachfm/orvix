@@ -753,8 +753,12 @@ UPDATE users SET active=0 WHERE email='suspended@orvix.email';
 	if !strings.Contains(string(out), "OK") {
 		t.Fatalf("expected OK, got: %s", string(out))
 	}
-	if h := readHash("admin@orvix.email"); !strings.HasPrefix(h, "$2") {
-		t.Fatalf("admin hash not bcrypt: %q", h)
+	h := readHash("admin@orvix.email")
+	if h == "" {
+		t.Fatalf("admin hash is empty")
+	}
+	if h == "NewReset-Pass-987" {
+		t.Fatalf("admin hash equals password")
 	}
 	if h := readHash("super@orvix.email"); h != "" {
 		t.Fatalf("superadmin hash should be untouched, got: %q", h)

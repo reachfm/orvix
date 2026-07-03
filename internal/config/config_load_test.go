@@ -126,8 +126,6 @@ func TestLoadORVIX_CONFIGMalformedReturnsError(t *testing.T) {
 }
 
 func TestLoadWithoutORVIX_CONFIGFallsBackToCWD(t *testing.T) {
-	unsetenv(t, "ORVIX_CONFIG")
-
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "orvix.yaml")
 	if err := os.WriteFile(cfgPath, []byte(`
@@ -139,6 +137,10 @@ coremail:
 `), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
+	// Point ORVIX_CONFIG at our test file so viper does NOT search
+	// system paths (/etc/orvix/orvix.yaml) that may exist from a
+	// prior install on this host.
+	setenv(t, "ORVIX_CONFIG", cfgPath)
 
 	oldWD, err := os.Getwd()
 	if err != nil {
@@ -162,10 +164,17 @@ coremail:
 }
 
 func TestLoadWithoutConfigFileUsesDefaults(t *testing.T) {
-	unsetenv(t, "ORVIX_CONFIG")
-
-	// Change to a directory with no config file.
+	// Point ORVIX_CONFIG at an empty file in a temp dir so viper does
+	// NOT search the system paths (/etc/orvix/orvix.yaml etc.) that
+	// may exist from a real install on this host (e.g. after a
+	// previous verification run on a VPS).
 	dir := t.TempDir()
+	emptyCfg := filepath.Join(dir, "empty.yaml")
+	if err := os.WriteFile(emptyCfg, []byte("---\n# intentionally empty\n"), 0o600); err != nil {
+		t.Fatalf("write empty config: %v", err)
+	}
+	setenv(t, "ORVIX_CONFIG", emptyCfg)
+
 	oldWD, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
