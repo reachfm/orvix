@@ -131,8 +131,7 @@ export async function renderAcceptancePage(root) {
     form.appendChild(textField('Sender pattern (substring or *glob*)', 'sender_pattern', r.sender_pattern || ''));
     form.appendChild(textField('Recipient pattern', 'recipient_pattern', r.recipient_pattern || ''));
     form.appendChild(textField('Source IP CIDR (optional)', 'source_ip_cidr', r.source_ip_cidr || ''));
-    form.appendChild(select('Action', 'action', r.action || 'accept', ['accept', 'reject', 'redirect', 'hold']));
-    form.appendChild(textField('Redirect-to (required when action=redirect)', 'redirect_to', r.redirect_to || ''));
+    form.appendChild(select('Action', 'action', r.action || 'accept', ['accept', 'reject', 'quarantine']));
     form.appendChild(checkField('Enabled', 'enabled', r.enabled !== false));
     form.appendChild(textArea('Note', 'note', r.note || '', 3));
     modal({
@@ -153,7 +152,6 @@ export async function renderAcceptancePage(root) {
           recipient_pattern: readField(form, 'recipient_pattern'),
           source_ip_cidr: readField(form, 'source_ip_cidr'),
           action: readField(form, 'action'),
-          redirect_to: readField(form, 'redirect_to'),
           enabled: readCheck(form, 'enabled'),
           note: readField(form, 'note'),
         };
@@ -218,7 +216,7 @@ function paint(body, list) {
       el('td', { text: String(r.priority) }),
       el('td', { text: r.name }),
       el('td', { text: r.scope + (r.scope_target ? ' (' + r.scope_target + ')' : '') }),
-      el('td', { text: r.action + (r.redirect_to ? ' → ' + r.redirect_to : '') }),
+      el('td', { text: r.action }),
       el('td', { text: patterns.join('; ') || '-' }),
       el('td', { class: 'kv-v', text: r.enabled ? 'yes' : 'no' }),
       el('td', null, [

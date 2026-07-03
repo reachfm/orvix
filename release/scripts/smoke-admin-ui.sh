@@ -465,6 +465,80 @@ for p in "${ENTERPRISE_PAGES[@]}"; do
 done
 pass "all 12 enterprise page modules exist and are imported in app.js"
 
+# ── 35. CTO BLOCKER 3 — Acceptance UI offers only runtime-truthful actions ──
+# The runtime (internal/coremail/smtp/receive.go) accepts only
+# {accept, reject, quarantine}. The frontend must NOT expose
+# {redirect, hold} in the action <select> option list. We
+# anchor the check on the select() call for the action field
+# so false positives from CSS classes or unrelated strings
+# cannot pass the gate.
+ACCEPTANCE_JS="$ADMIN_DIR/modules/pages/acceptance.js"
+acceptance_action_block=$(grep -nA 1 -E "select\(\s*'Action'\s*," "$ACCEPTANCE_JS" | head -n 2 || true)
+if [ -z "$acceptance_action_block" ]; then
+    fail "acceptance.js is missing the action <select> declaration (BLOCKER 3)"
+fi
+for bad in redirect hold; do
+    if echo "$acceptance_action_block" | grep -qE "'$bad'"; then
+        fail "acceptance.js action <select> offers unsupported action '$bad' (BLOCKER 3)"
+    fi
+done
+# 35c. No redirect_to UI field — this one is grepped over
+# the whole file because the field name must not appear at all.
+if grep -qE "redirect_to|redirect-to" "$ACCEPTANCE_JS"; then
+    fail "acceptance.js UI exposes 'redirect_to' field (BLOCKER 3)"
+fi
+# 35d. Action options list must include accept / reject / quarantine.
+for need in accept reject quarantine; do
+    if ! echo "$acceptance_action_block" | grep -qE "'$need'"; then
+        fail "acceptance.js action <select> is missing runtime-supported action '$need' (BLOCKER 3)"
+    fi
+done
+pass "acceptance.js action <select> exposes only runtime-supported actions {accept, reject, quarantine} (BLOCKER 3)"
+
+# ── 36. CTO BLOCKER 4 — Incoming UI offers only runtime-truthful actions ──
+# The runtime (internal/coremail/smtp/receive.go) accepts only
+# {reject, quarantine, tag}. The frontend must NOT expose
+# {move, label, forward, discard, hold}. We grep the action-
+# select line specifically rather than the whole file, because
+# the words "label" and "forward" appear legitimately elsewhere
+# (CSS classes, modal button labels, helper text). We anchor on
+# the select() call for the action field and pull in up to 2
+# lines so the options array on the continuation line is in
+# scope.
+INCOMING_JS="$ADMIN_DIR/modules/pages/incoming-rules.js"
+incoming_action_block=$(grep -nA 1 -E "select\(\s*'Action'\s*," "$INCOMING_JS" | head -n 2 || true)
+if [ -z "$incoming_action_block" ]; then
+    fail "incoming-rules.js is missing the action <select> declaration (BLOCKER 4)"
+fi
+for bad in move label forward discard hold; do
+    if echo "$incoming_action_block" | grep -qE "'$bad'"; then
+        fail "incoming-rules.js action <select> offers unsupported action '$bad' (BLOCKER 4)"
+    fi
+done
+for need in reject quarantine tag; do
+    if ! echo "$incoming_action_block" | grep -qE "'$need'"; then
+        fail "incoming-rules.js action <select> is missing runtime-supported action '$need' (BLOCKER 4)"
+    fi
+done
+pass "incoming-rules.js action <select> exposes only runtime-supported actions {reject, quarantine, tag} (BLOCKER 4)"
+
+# ── 37. CTO BLOCKER 2 — No SFTP askpass secret-on-disk pattern ─────
+# The runtime must never write a decrypted SFTP password to a
+# shell script (no SSH_ASKPASS=... helper file containing the
+# cleartext). The CTO's preferred path is pure Go SFTP, which
+# has its own guard in internal/backup/targets/uploader_test.go.
+TARGETS_GO="$REPO_ROOT/internal/backup/targets/uploader.go"
+[ -f "$TARGETS_GO" ] || fail "internal/backup/targets/uploader.go is missing"
+if grep -qE "writeAskpassHelper|SSH_ASKPASS_REQUIRE=force" "$TARGETS_GO"; then
+    fail "internal/backup/targets/uploader.go still references writeAskpassHelper or SSH_ASKPASS_REQUIRE=force (BLOCKER 2)"
+fi
+# Defence in depth: nothing under internal/backup/targets/ may
+# reference the askpass helper by name.
+if grep -rn "writeAskpassHelper" "$REPO_ROOT/internal/backup/" 2>/dev/null; then
+    fail "internal/backup/ still references the forbidden writeAskpassHelper helper (BLOCKER 2)"
+fi
+pass "internal/backup/targets/uploader.go has no SSH_ASKPASS secret-on-disk pattern (BLOCKER 2)"
+
 # ── 31. Admin Enterprise v2 endpoints are referenced from the JS ─
 for ep in \
     "/api/v1/admin/account-classes" \

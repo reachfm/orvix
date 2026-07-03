@@ -768,8 +768,8 @@ func (h *Handler) TestAcceptanceRule(c fiber.Ctx) error {
 	defer rows.Close()
 
 	type rule struct {
-		ID, Priority, Action                          int64
-		Name, Scope, ScopeTarget, SenderPat, RecipientPat, SourceCIDR string
+		ID, Priority                                int64
+		Name, Scope, ScopeTarget, SenderPat, RecipientPat, SourceCIDR, Action string
 	}
 	var rules []rule
 	for rows.Next() {
@@ -808,7 +808,7 @@ func (h *Handler) TestAcceptanceRule(c fiber.Ctx) error {
 			"matched_rule_name": r.Name,
 			"priority":          r.Priority,
 			"action":            r.Action,
-			"action_label":      acceptanceActionLabel(r.Action),
+			"action_label":      r.Action,
 			"sender":            body.Sender,
 			"recipient":         body.Recipient,
 			"source_ip":         body.SourceIP,
@@ -818,7 +818,7 @@ func (h *Handler) TestAcceptanceRule(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"matched_rule_id": nil,
 		"action":          "accept",
-		"action_label":    "default: accept (no rule matched)",
+		"action_label":    "accept",
 		"rules_walked":    len(rules),
 		"sender":          body.Sender,
 		"recipient":       body.Recipient,
@@ -826,20 +826,18 @@ func (h *Handler) TestAcceptanceRule(c fiber.Ctx) error {
 	})
 }
 
-// acceptanceActionLabel maps the integer action code to a
-// human-readable label for the UI.
-func acceptanceActionLabel(action int64) string {
+// acceptanceActionLabel is preserved as a thin wrapper
+// around the runtime-supported action enum so callers
+// that still pass a string value can produce the same
+// label as the DB-backed response. The label is now
+// always the canonical action string itself — runtime
+// action contract matches DB row exactly.
+func acceptanceActionLabel(action string) string {
 	switch action {
-	case 1:
-		return "accept"
-	case 2:
-		return "reject"
-	case 3:
-		return "redirect"
-	case 4:
-		return "hold"
+	case "accept", "reject", "quarantine":
+		return action
 	}
-	return "accept"
+	return ""
 }
 
 // acceptanceRulePayload is the wire-format payload accepted by
@@ -858,26 +856,58 @@ type acceptanceRulePayload struct {
 	Note             string `json:"note"`
 }
 
-// validateAcceptanceRule does input validation + maps the
-// UI string action back to an integer stored in the DB.
+// acceptanceActions is the runtime-truthful enum of
+// actions the SMTP acceptance engine actually executes.
+// The values are stored verbatim in the
+// coremail_acceptance_rules.action TEXT column and
+// returned to the runtime through EvaluateAcceptance,
+// which switches on the same set in
+// internal/coremail/smtp/receive.go.
+//
+// Adding an action here requires three things to land
+// in the same change:
+//   1. an extension to the runtime switch in
+//      internal/coremail/smtp/receive.go (or
+//      internal/coremail/smtp/commands.go for the
+//      MAIL FROM / RCPT TO path),
+//   2. a documented matching handler in
+//      receive.go that explains how the action is
+//      applied to the inbound message,
+//   3. a unit test in
+//      internal/coremail/smtp/runtime_integration_test.go
+//      that exercises the action against a fixture
+//      envelope.
+//
+// Until all three exist, the action MUST NOT appear in
+// this map; otherwise the API would accept a rule that
+// the runtime silently drops to "accept" (no match).
+var acceptanceActions = map[string]bool{
+	"accept":     true,
+	"reject":     true,
+	"quarantine": true,
+}
+
+// validateAcceptanceRule does input validation for the
+// acceptance-rule payload. The action is restricted to
+// the runtime-supported set declared in
+// acceptanceActions above — anything else is rejected
+// with a clear error so the admin UI cannot store an
+// inert rule.
 func validateAcceptanceRule(p acceptanceRulePayload) error {
 	if strings.TrimSpace(p.Name) == "" {
 		return errors.New("name is required")
 	}
-	switch p.Action {
-	case "accept", "":
-		p.Action = "1"
-	case "reject":
-		p.Action = "2"
-	case "redirect":
-		p.Action = "3"
-	case "hold":
-		p.Action = "4"
-	default:
-		return fmt.Errorf("unknown action %q", p.Action)
+	if !acceptanceActions[p.Action] {
+		return fmt.Errorf("action %q is not supported; allowed actions: accept, reject, quarantine", p.Action)
 	}
-	if p.Action == "3" && strings.TrimSpace(p.RedirectTo) == "" {
-		return errors.New("redirect_to is required when action=redirect")
+	// Redirect/hold payloads are not just renamed to a
+	// supported action: their semantic is fundamentally
+	// different (forward / queue + admin review). If the
+	// payload still carries redirect_to or note saying
+	// "hold", reject loudly instead of silently dropping
+	// the field.
+	if strings.TrimSpace(p.RedirectTo) != "" {
+		return errors.New("redirect_to is not supported; the action=redirect contract has been removed from the runtime. Use a per-recipient routing rule outside this page if you need forwarding.")
 	}
 	if p.SourceIPCIDR != "" {
 		if _, _, err := net.ParseCIDR(p.SourceIPCIDR); err != nil {
@@ -1104,8 +1134,18 @@ var (
 	allowedIncomingOps = map[string]bool{
 		"contains": true, "equals": true, "starts_with": true, "ends_with": true, "matches": true, "gt": true, "lt": true,
 	}
+	// allowedIncomingActions is the runtime-truthful
+	// enum of incoming-rule actions. The runtime in
+	// internal/coremail/smtp/receive.go switches on
+	// exactly these three strings after the antivirus
+	// scan; every other legacy action (move / label /
+	// forward / discard / hold) is rejected with a clear
+	// 400 by the API so the UI cannot persist a rule
+	// that the runtime silently drops to "no decision".
 	allowedIncomingActions = map[string]bool{
-		"move": true, "label": true, "forward": true, "discard": true, "hold": true, "reject": true,
+		"reject":     true,
+		"quarantine": true,
+		"tag":        true,
 	}
 	allowedApplyTo = map[string]bool{"all": true, "incoming_only": true, "outgoing_only": true}
 )
@@ -1121,7 +1161,7 @@ func validateIncomingMsgRule(p incomingMsgRulePayload) error {
 		return fmt.Errorf("operator %q is not supported", p.Operator)
 	}
 	if !allowedIncomingActions[p.Action] {
-		return fmt.Errorf("action %q is not supported", p.Action)
+		return fmt.Errorf("action %q is not supported; allowed actions: reject, quarantine, tag", p.Action)
 	}
 	if p.ApplyTo == "" {
 		p.ApplyTo = "all"
@@ -1129,8 +1169,14 @@ func validateIncomingMsgRule(p incomingMsgRulePayload) error {
 	if !allowedApplyTo[p.ApplyTo] {
 		return fmt.Errorf("apply_to %q is not supported", p.ApplyTo)
 	}
-	if p.Action == "move" && strings.TrimSpace(p.ActionTarget) == "" {
-		return errors.New("action_target is required when action=move")
+	// tag and quarantine accept an optional
+	// action_target (header label / quarantine reason).
+	// We require it to be a non-empty, low-cardinality
+	// string when present, but we do not require it
+	// unconditionally — the runtime treats a missing
+	// action_target as "use the rule name".
+	if p.ActionTarget != "" && len(p.ActionTarget) > 200 {
+		return errors.New("action_target too long; max 200 characters")
 	}
 	return nil
 }

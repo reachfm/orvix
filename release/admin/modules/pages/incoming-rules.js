@@ -78,8 +78,8 @@ async function openForm(body, list, id) {
   form.appendChild(select('Operator', 'operator', r.operator || 'contains',
     ['contains', 'equals', 'starts_with', 'ends_with', 'matches', 'gt', 'lt']));
   form.appendChild(textField('Value', 'value', r.value || ''));
-  form.appendChild(select('Action', 'action', r.action || 'move',
-    ['move', 'label', 'forward', 'discard', 'hold', 'reject']));
+  form.appendChild(select('Action', 'action', r.action || 'reject',
+    ['reject', 'quarantine', 'tag']));
   form.appendChild(textField('Action target (folder / label / forward address)', 'action_target', r.action_target || ''));
   form.appendChild(select('Apply to', 'apply_to', r.apply_to || 'all',
     ['all', 'incoming_only', 'outgoing_only']));
