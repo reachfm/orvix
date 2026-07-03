@@ -21,8 +21,7 @@ set -euo pipefail
 #      extracted bundle.
 #
 # Usage:
-#   curl -fsSL https://releases.orvix.email/install-public.sh | bash
-#   curl -fsSL https://releases.orvix.email/install-public.sh | bash -s -- --help
+#   curl -fsSL https://raw.githubusercontent.com/reachfm/orvix/main/release/install-public.sh | sudo bash
 #
 # Resolution order (first wins):
 #   1. --bundle-url <url>            explicit tarball (escape hatch for air-gap)
@@ -31,9 +30,9 @@ set -euo pipefail
 #                                    archives the matching tag/branch/commit
 #                                    via codeload tarball
 #   4. --version / ORVIX_VERSION     downloads from
-#      https://releases.orvix.email/orvix-enterprise-mail-<ver>-linux-amd64.tar.gz
-#   5. (default)                     installs the latest stable release
-#      https://releases.orvix.email/orvix-enterprise-mail-stable-linux-amd64.tar.gz
+#      ${ORVIX_RELEASES_BASE}/orvix-enterprise-mail-<ver>-linux-amd64.tar.gz
+#   5. (default)                     installs the latest stable release from
+#                                    GitHub Releases (reachfm/orvix)
 #
 # The installer prefers bundles over GitHub archives because:
 #   * A bundle is the audited artifact (sha256 in checksums.txt).
@@ -72,7 +71,7 @@ set -euo pipefail
 #
 
 ORVIX_DOCS_URL="${ORVIX_DOCS_URL:-https://docs.orvix.email}"
-ORVIX_RELEASES_BASE="${ORVIX_RELEASES_BASE:-https://releases.orvix.email}"
+ORVIX_RELEASES_BASE="${ORVIX_RELEASES_BASE:-https://github.com/reachfm/orvix/releases/latest/download}"
 ORVIX_GITHUB_REPO="${ORVIX_GITHUB_REPO:-orvix/orvix}"
 ORVIX_GITHUB_BASE="${ORVIX_GITHUB_BASE:-https://codeload.github.com}"
 ORVIX_CHANNEL="${ORVIX_CHANNEL:-stable}"
@@ -93,8 +92,7 @@ usage() {
 Orvix Enterprise Mail — public installer entrypoint
 
 Usage:
-  curl -fsSL ${ORVIX_RELEASES_BASE}/install-public.sh | bash
-  curl -fsSL ${ORVIX_RELEASES_BASE}/install-public.sh | bash -s -- --help
+  curl -fsSL https://raw.githubusercontent.com/reachfm/orvix/main/release/install-public.sh | sudo bash
 
 Resolution modes (first match wins):
   --bundle-url <url>            Install from a specific bundle tarball URL
@@ -255,6 +253,28 @@ verify_bundle_sha256() {
         fail "bundle sha256 mismatch (expected $expected, got $actual)"
     fi
     info "bundle sha256 verified: $actual"
+}
+
+# try_download_sha256 attempts to download a .sha256 sidecar for the
+# given bundle URL. On success it prints the sha256 hash and returns 0.
+# On failure (missing sidecar, network error) it returns 1 silently.
+try_download_sha256() {
+    local bundle_url="$1"
+    local sha_url="${bundle_url}.sha256"
+    local tmp
+    tmp="$(mktemp /tmp/orvix-sha256.XXXXXX)"
+    if curl -fsSL --max-time 15 -o "$tmp" "$sha_url" 2>/dev/null; then
+        local hash
+        hash="$(awk '{print $1}' "$tmp" 2>/dev/null || true)"
+        rm -f "$tmp"
+        if [ -n "$hash" ]; then
+            printf '%s' "$hash"
+            return 0
+        fi
+    else
+        rm -f "$tmp"
+    fi
+    return 1
 }
 
 # validate_bundle_layout enforces that the extracted bundle at $1
@@ -447,6 +467,21 @@ ERR
         local bundle_sha_used=""
         bundle_sha_used="${ORVIX_RESOLVED_SHA:-}"
         [ -n "$bundle_sha" ] && bundle_sha_used="$bundle_sha"
+
+        # When no explicit sha256 is provided, try to download the
+        # .sha256 sidecar from the same base URL (GitHub Releases
+        # workflow). If the sidecar is unavailable we warn and
+        # continue without verification.
+        if [ -z "$bundle_sha_used" ] && [ -z "$ORVIX_SKIP_BUNDLE_VERIFY" ]; then
+            local auto_sha
+            auto_sha="$(try_download_sha256 "$bundle_url" || true)"
+            if [ -n "$auto_sha" ]; then
+                bundle_sha_used="$auto_sha"
+                info "auto-resolved bundle sha256: $bundle_sha_used"
+            else
+                warn "could not download .sha256 sidecar for bundle (install will proceed without verification)"
+            fi
+        fi
 
         if [ -z "$ORVIX_SKIP_BUNDLE_VERIFY" ] && [ -n "$bundle_sha_used" ]; then
             info "expected bundle sha256: $bundle_sha_used"

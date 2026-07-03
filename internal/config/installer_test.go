@@ -4747,6 +4747,46 @@ func TestInstallerPublicEntrypointParses(t *testing.T) {
 	}
 }
 
+// TestInstallerPublicEntrypointDefaultURLIsGitHub verifies that the
+// default bundle URL is GitHub Releases (not releases.orvix.email).
+func TestInstallerPublicEntrypointDefaultURLIsGitHub(t *testing.T) {
+	root := repoRoot(t)
+	script := mustRead(t, filepath.Join(root, "release", "install-public.sh"))
+
+	// No hardcoded releases.orvix.email in executable code.
+	for _, line := range strings.Split(script, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(trimmed, "releases.orvix.email") {
+			t.Errorf("install-public.sh hardcodes releases.orvix.email in executable code: %s", trimmed)
+		}
+	}
+
+	// Default ORVIX_RELEASES_BASE must point to GitHub Releases.
+	if !strings.Contains(script, `ORVIX_RELEASES_BASE="${ORVIX_RELEASES_BASE:-https://github.com/reachfm/orvix/releases/`) {
+		t.Error("install-public.sh default ORVIX_RELEASES_BASE must point to GitHub Releases (reachfm/orvix)")
+	}
+
+	// Must define resolve_bundle_url for URL resolution.
+	if !strings.Contains(script, "resolve_bundle_url()") {
+		t.Error("install-public.sh must define resolve_bundle_url")
+	}
+
+	// Must define try_download_sha256 for auto-verification.
+	if !strings.Contains(script, "try_download_sha256()") {
+		t.Error("install-public.sh must define try_download_sha256 for auto-verification")
+	}
+
+	// Must NOT require --bundle-url or env vars for the default path.
+	if strings.Contains(script, `ORVIX_BUNDLE_URL=""`) {
+		if !strings.Contains(script, `ORVIX_BUNDLE_URL="${ORVIX_BUNDLE_URL:-}"`) {
+			t.Error("install-public.sh must allow empty ORVIX_BUNDLE_URL (default to GitHub)")
+		}
+	}
+}
+
 // TestInstallerNonInteractiveEnvMode verifies that the public entrypoint
 // requires ORVIX_DOMAIN and ORVIX_PUBLIC_IPV4 in non-interactive mode.
 func TestInstallerNonInteractiveEnvMode(t *testing.T) {
