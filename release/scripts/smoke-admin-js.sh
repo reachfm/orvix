@@ -5,18 +5,36 @@
 #   1. release/admin/app.js
 #   2. every release/admin/modules/**/*.js
 #
-# Node is required. This script intentionally does NOT shell out to
-# `xargs node --check` because on Windows / Git Bash that pipeline
-# produces the failure mode "xargs: node: No such file or directory"
-# when node is on PATH but not under the alias `xargs` reaches.
-# Instead, this script:
+# This script is intentionally defensive about finding Node.js. The
+# original gate ran
 #
-#   - locates node via `command -v`, `which`, and on Windows also
-#     `where.exe node` (the where.exe path is honoured so Git Bash on
-#     Windows picks up the standard Node install at C:\Program Files\nodejs),
-#   - falls back to `command -v nodejs`,
-#   - fails closed with a clear message when Node is missing,
-#   - invokes `node --check <file>` once per file.
+#     find release/admin/modules -name "*.js" -print0 | xargs -0 -n1 node --check
+#
+# which failed on Git Bash for Windows with
+# "xargs: node: No such file or directory" because the Cygwin build of
+# xargs does not see the Windows PATH (node.exe lives at
+# C:\Program Files\nodejs and is invisible to xargs). We do NOT pipe
+# through xargs here: we call `node --check <file>` once per file from
+# bash itself, with the discovered Node binary, so the spawn happens
+# in the same process tree that already sees the Windows PATH.
+#
+# Node discovery, in order:
+#   1. $NODE env var if set (CI override)
+#   2. command -v node
+#   3. command -v nodejs
+#   4. /c/Program Files/nodejs/node.exe       (Git Bash Windows path)
+#   5. /c/Program Files (x86)/nodejs/node.exe
+#   6. /mnt/c/Program Files/nodejs/node.exe   (WSL path)
+#   7. /mnt/c/Program Files (x86)/nodejs/node.exe
+#   8. where.exe node                         (Windows CMD probe)
+#   9. where.exe nodejs
+#  10. powershell.exe -NoProfile -Command "..."  (last-resort Windows probe)
+#
+# Every Windows probe is normalised: trailing \r and \n are stripped,
+# surrounding whitespace is removed, only the first matching line is
+# kept, and the path must exist and be executable. If every probe
+# fails the script fails closed with a clear message; a fake PASS
+# is never produced.
 #
 # Usage:
 #   bash release/scripts/smoke-admin-js.sh [--verbose]
@@ -48,64 +66,151 @@ pass "release/admin structure exists"
 
 # ── 2. Locate Node.js (portable) ─────────────────────────────────
 #
-# We try four probes in order:
-#   (a) `command -v node`        — POSIX, works on Linux + macOS + Git Bash.
-#   (b) `command -v nodejs`      — Debian/Ubuntu symlink alias.
-#   (c) `which node`             — legacy fallback (some Git Bash releases).
-#   (d) `where.exe node`         — Windows CMD / PowerShell — only available
-#                                  when running under a shell that exposes
-#                                  the Windows PATH (Git Bash + WSL).
-# We prefer `command -v` because it prints a clean absolute path without
-# any trailing CRLF that some Windows shells append.
+# probe_node PATH_VAR <candidate...> — sets PATH_VAR to the first
+# candidate that resolves to an executable file. Returns 0 on
+# success, 1 on miss. The function deliberately does not echo
+# anything; the caller decides how to format the success path.
 #
-# Whatever path we discover is captured into NODE_BIN. We never use
-# `xargs node` because that pathway on Git Bash historically resolves
-# `xargs` to the Cygwin build that does not see Windows PATH.
+# CRLF normalisation: Windows tools (where.exe, powershell.exe,
+# cmd.exe) tend to emit trailing \r on each line. We strip CR
+# globally before any "is this path usable" check. A path that
+# still contains a CR after the strip is rejected.
+probe_node() {
+    local __var="$1"; shift
+    for candidate in "$@"; do
+        # Skip empty / whitespace-only entries.
+        if [ -z "$candidate" ] || [ "$candidate" = " " ]; then
+            continue
+        fi
+        # Strip CR (Windows) and surrounding whitespace.
+        candidate="${candidate%$'\r'}"
+        candidate="$(printf '%s' "$candidate" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
+        [ -n "$candidate" ] || continue
+        # Reject any path that still has CR after the strip —
+        # that means the upstream tool fed us something exotic.
+        case "$candidate" in *$'\r'*) continue ;; esac
+        if [ -x "$candidate" ]; then
+            printf '%s' "$candidate" | tee /dev/null > /dev/null
+            # shellcheck disable=SC2086
+            set -- $candidate
+            # Above dance is so we propagate the value cleanly.
+            eval "$__var=\"\$candidate\""
+            return 0
+        fi
+    done
+    return 1
+}
 
 NODE_BIN=""
-if command -v node >/dev/null 2>&1; then
-    NODE_BIN="$(command -v node)"
-elif command -v nodejs >/dev/null 2>&1; then
-    NODE_BIN="$(command -v nodejs)"
-elif which node >/dev/null 2>&1; then
-    NODE_BIN="$(which node)"
-elif which nodejs >/dev/null 2>&1; then
-    NODE_BIN="$(which nodejs)"
-elif command -v where.exe >/dev/null 2>&1; then
-    # Windows-only probe. `where.exe` exits 0 when the binary is on
-    # PATH and prints its absolute path. We strip CR + read the first
-    # matching line.
-    NODE_WIN="$(where.exe node 2>/dev/null | tr -d '\r' | head -n 1 || true)"
-    if [ -n "$NODE_WIN" ] && [ -x "$NODE_WIN" ]; then
-        NODE_BIN="$NODE_WIN"
+
+# Probe 1 — explicit $NODE override.
+if [ -n "${NODE:-}" ]; then
+    if probe_node NODE_BIN "$NODE"; then
+        pass "located node via \$NODE override: $NODE_BIN"
+    else
+        printf 'WARN  \$NODE=%s set but not executable; falling through to PATH probes\n' "$NODE" >&2
     fi
-    if [ -z "$NODE_BIN" ]; then
-        NODE_WIN="$(where.exe nodejs 2>/dev/null | tr -d '\r' | head -n 1 || true)"
-        if [ -n "$NODE_WIN" ] && [ -x "$NODE_WIN" ]; then
-            NODE_BIN="$NODE_WIN"
-        fi
+fi
+
+# Probe 2 — command -v node.
+if [ -z "$NODE_BIN" ] && command -v node >/dev/null 2>&1; then
+    NODE_BIN="$(command -v node)"
+    pass "located node via command -v: $NODE_BIN"
+fi
+
+# Probe 3 — command -v nodejs (Debian / Ubuntu symlink alias).
+if [ -z "$NODE_BIN" ] && command -v nodejs >/dev/null 2>&1; then
+    NODE_BIN="$(command -v nodejs)"
+    pass "located nodejs via command -v: $NODE_BIN"
+fi
+
+# Probe 4..7 — hard-coded common Windows install locations. We try
+# both the Git Bash (/c/...) and WSL (/mnt/c/...) spellings because
+# either shell may be the one running this script.
+if [ -z "$NODE_BIN" ]; then
+    WIN_CANDIDATES=(
+        "/c/Program Files/nodejs/node.exe"
+        "/c/Program Files (x86)/nodejs/node.exe"
+        "/mnt/c/Program Files/nodejs/node.exe"
+        "/mnt/c/Program Files (x86)/nodejs/node.exe"
+        "C:/Program Files/nodejs/node.exe"
+        "C:/Program Files (x86)/nodejs/node.exe"
+    )
+    if probe_node NODE_BIN "${WIN_CANDIDATES[@]}"; then
+        pass "located node via Windows common path: $NODE_BIN"
+    fi
+fi
+
+# Probe 8..9 — where.exe node / nodejs. where.exe is only present
+# when running under a shell that exposes the Windows PATH
+# (Git Bash + WSL). CRLF is stripped via probe_node.
+if [ -z "$NODE_BIN" ] && command -v where.exe >/dev/null 2>&1; then
+    WIN_CANDIDATES=()
+    while IFS= read -r line; do
+        WIN_CANDIDATES+=("$line")
+    done < <(where.exe node 2>/dev/null | tr -d '\r')
+    if probe_node NODE_BIN "${WIN_CANDIDATES[@]}"; then
+        pass "located node via where.exe: $NODE_BIN"
+    fi
+fi
+if [ -z "$NODE_BIN" ] && command -v where.exe >/dev/null 2>&1; then
+    WIN_CANDIDATES=()
+    while IFS= read -r line; do
+        WIN_CANDIDATES+=("$line")
+    done < <(where.exe nodejs 2>/dev/null | tr -d '\r')
+    if probe_node NODE_BIN "${WIN_CANDIDATES[@]}"; then
+        pass "located nodejs via where.exe: $NODE_BIN"
+    fi
+fi
+
+# Probe 10..11 — powershell.exe. We invoke Get-Command which
+# respects the user's PATH the same way PowerShell does, which is
+# strictly more permissive than Git Bash's Cygwin-derived PATH.
+# CRLF is stripped. We swallow stderr because PS noise about
+# non-zero exit codes pollutes the log; the probe succeeds or
+# fails on stdout alone.
+if [ -z "$NODE_BIN" ] && command -v powershell.exe >/dev/null 2>&1; then
+    PS_CANDIDATES=()
+    while IFS= read -r line; do
+        PS_CANDIDATES+=("$line")
+    done < <(powershell.exe -NoProfile -Command \
+        "(Get-Command node -ErrorAction SilentlyContinue).Source" \
+        2>/dev/null | tr -d '\r')
+    if probe_node NODE_BIN "${PS_CANDIDATES[@]}"; then
+        pass "located node via powershell Get-Command: $NODE_BIN"
+    fi
+fi
+if [ -z "$NODE_BIN" ] && command -v powershell.exe >/dev/null 2>&1; then
+    PS_CANDIDATES=()
+    while IFS= read -r line; do
+        PS_CANDIDATES+=("$line")
+    done < <(powershell.exe -NoProfile -Command \
+        "(Get-Command nodejs -ErrorAction SilentlyContinue).Source" \
+        2>/dev/null | tr -d '\r')
+    if probe_node NODE_BIN "${PS_CANDIDATES[@]}"; then
+        pass "located nodejs via powershell Get-Command: $NODE_BIN"
     fi
 fi
 
 if [ -z "$NODE_BIN" ]; then
-    fail "node (or nodejs) is not installed; install Node.js 18+ from https://nodejs.org and retry"
+    fail "node (or nodejs) is not installed and could not be located on this system; install Node.js 18+ from https://nodejs.org and retry"
 fi
 
-# Verify the discovered binary actually runs. A path on disk that fails
-# to execute is worse than a clear "missing" error.
+# Verify the discovered binary actually runs. A path on disk that
+# fails to execute is worse than a clear "missing" error.
 if ! "$NODE_BIN" --version >/dev/null 2>&1; then
     fail "discovered node binary at '$NODE_BIN' but it does not execute; check the Node install"
 fi
 
 NODE_VERSION="$("$NODE_BIN" --version 2>&1 | tr -d '\r\n' || true)"
-pass "located node: $NODE_BIN ($NODE_VERSION)"
+pass "using node: $NODE_BIN ($NODE_VERSION)"
 
 # ── 3. Enumerate JS files ───────────────────────────────────────
 #
 # We collect both `release/admin/app.js` and every .js under
-# `release/admin/modules/`. Globbing is portable to Git Bash and Linux
-# without relying on `find -print0 | xargs -0`, which is what the
-# previous gate tripped over on Windows.
+# `release/admin/modules/`. Globbing is portable to Git Bash and
+# Linux without relying on `find -print0 | xargs -0`, which is what
+# the previous gate tripped over on Windows.
 
 JS_FILES=()
 if [ -f "$ADMIN_DIR/app.js" ]; then
@@ -177,7 +282,7 @@ if [ "$FAIL_COUNT" -ne 0 ]; then
     fail "$FAIL_COUNT JS file(s) failed syntax check (see diagnostics above)"
 fi
 
-pass "all ${#JS_FILES[@]} JS file(s) parse cleanly under Node $NODE_VERSION"
+pass "all ${#JS_FILES[@]} JS file(s) parse cleanly under Node $NODE_VERSION (via $NODE_BIN)"
 
 printf '\nALL ADMIN JS SYNTAX TESTS PASSED\n' >&2
 exit 0
