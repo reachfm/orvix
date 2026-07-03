@@ -231,7 +231,43 @@ GOOS="$TARGET_OS" GOARCH="$TARGET_ARCH" CGO_ENABLED=0 \
     -o "$BIN_OUT" ./cmd/orvix \
     || fail "go build failed" 2
 
-[ -x "$BIN_OUT" ] || true
+# On Windows, Go always appends .exe to the binary name (even for
+# Linux cross-compilation targets) so the resulting binary can be
+# inspected by `go tool objdump`.  We normalise the binary path
+# early so the rest of the script always references the real file.
+BIN_REAL="$BIN_OUT"
+if [ ! -f "$BIN_REAL" ] && [ -f "$BIN_OUT.exe" ]; then
+    BIN_REAL="$BIN_OUT.exe"
+fi
+# Also check common alternate locations in case Go uses a
+# different path convention.
+for alt in "$BIN_OUT.exe" "$BIN_OUT" "$(dirname "$BIN_OUT")/orvix.exe"; do
+    if [ -f "$alt" ]; then BIN_REAL="$alt"; break; fi
+done
+
+# Binary sanity checks before ELF verification.  Every failure
+# here includes GOOS/GOARCH so the operator can correlate the
+# build environment with the binary.
+if [ ! -f "$BIN_REAL" ]; then
+    fail "built binary not found at $BIN_REAL (go build succeeded but output file is missing; GOOS=$TARGET_OS GOARCH=$TARGET_ARCH)" 2
+fi
+bin_size="$(wc -c < "$BIN_REAL" 2>/dev/null || echo 0)"
+if [ "$bin_size" -eq 0 ]; then
+    fail "built binary at $BIN_REAL is empty (0 bytes; GOOS=$TARGET_OS GOARCH=$TARGET_ARCH)" 2
+fi
+if [ "$bin_size" -lt 1024 ]; then
+    fail "built binary at $BIN_REAL is suspiciously small ($bin_size bytes; expected > 1KB; GOOS=$TARGET_OS GOARCH=$TARGET_ARCH)" 2
+fi
+info "built binary: $BIN_REAL ($bin_size bytes, GOOS=$TARGET_OS, GOARCH=$TARGET_ARCH)"
+if command -v file >/dev/null 2>&1; then
+    info "binary file type: $(file -b "$BIN_REAL" 2>/dev/null || echo 'unknown')"
+fi
+# If Go produced a .exe variant, normalise to the expected name.
+if [ "$BIN_REAL" != "$BIN_OUT" ]; then
+    mv "$BIN_REAL" "$BIN_OUT" || fail "could not rename $BIN_REAL -> $BIN_OUT" 2
+    BIN_REAL="$BIN_OUT"
+fi
+
 # Cross-compiled Linux ELF binaries are not flagged as
 # executable by Git Bash on Windows. We verify the binary via
 # the ELF magic bytes (7f 45 4c 46 = "\x7fELF"). Bash is portable
@@ -260,17 +296,26 @@ read_elf_magic_hex() {
         python -c "import sys; sys.stdout.write(open(sys.argv[1],'rb').read(4).hex())" "$file" 2>/dev/null
         return
     fi
-    # Final fallback — shell loop over the first 4 bytes. Slow
-    # but works without any extra tool.
-    local out="" i
-    while IFS= read -r -n1 c <&3 && [ "${#out}" -lt 8 ]; do
-        out="${out}$(printf '%02x' "'$c")"
-    done 3< "$file"
-    printf '%s' "$out"
+    # perl handles raw binary with binmode + unpack; available
+    # on Git Bash, macOS, and most Linux deployments.
+    if command -v perl >/dev/null 2>&1; then
+        perl -e 'open(my $fh,"<:raw",$ARGV[0]) or exit 1; read($fh,my $b,4); print unpack("H*",$b)' "$file" 2>/dev/null
+        return
+    fi
+    # Final fallback — dd + shell printf.  dd reads raw bytes
+    # portably; we convert them character by character (safe for
+    # ELF magic which has no null bytes in the first four).
+    local raw
+    raw="$(dd if="$file" bs=1 count=4 2>/dev/null)"
+    if [ -n "$raw" ]; then
+        printf '%02x%02x%02x%02x' "'${raw:0:1}" "'${raw:1:1}" "'${raw:2:1}" "'${raw:3:1}"
+        return
+    fi
+    printf ''
 }
 magic_bytes="$(read_elf_magic_hex "$BIN_OUT")"
 [ "$magic_bytes" = "7f454c46" ] \
-    || fail "built binary at $BIN_OUT is not a Linux ELF (got magic=$magic_bytes, expected 7f454c46)" 2
+    || fail "built binary at $BIN_OUT is not a Linux ELF (size=$bin_size bytes, GOOS=$TARGET_OS GOARCH=$TARGET_ARCH, got magic=$magic_bytes, expected 7f454c46)" 2
 
 # ── 3. Verify embedded metadata ───────────────────────────────────
 EMBEDDED_VERSION="$("$BIN_OUT" version | awk '{print $2}' || true)"
