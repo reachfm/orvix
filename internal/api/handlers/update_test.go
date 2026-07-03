@@ -19,6 +19,7 @@ import (
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
+	"github.com/orvix/orvix/internal/updater"
 	"go.uber.org/zap"
 )
 
@@ -404,6 +405,15 @@ func TestUpdateV1_PreflightDoesNotExecScript(t *testing.T) {
 // in test/CI). This confirms the preflight gate is wired to the
 // systemd-only design.
 func TestUpdateV1_PreflightReportsMissingHelperUnit(t *testing.T) {
+	// The preflight checks whether the systemd helper unit is installed
+	// by looking at fixed system paths. In test/CI these paths may or may
+	// not exist (e.g. on a VPS where a previous verification smoke left
+	// the unit file). We isolate the test by overriding the check to
+	// always report "not installed", which is the correct test fixture:
+	// the unit was never installed by this test process.
+	restore := updater.SetHelperUnitCheck(func() bool { return false })
+	defer restore()
+
 	router, sqlDB, token, _, _ := buildUpdateHarness(t, false)
 	defer router.App().Shutdown()
 	defer sqlDB.Close()
