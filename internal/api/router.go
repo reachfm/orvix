@@ -14,6 +14,7 @@ import (
 	"github.com/orvix/orvix/internal/antivirus"
 	"github.com/orvix/orvix/internal/api/handlers"
 	"github.com/orvix/orvix/internal/api/handlers/settings"
+	settingsbridge "github.com/orvix/orvix/internal/settings/bridge"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/coremail"
@@ -45,6 +46,8 @@ type Router struct {
 	logger       *zap.Logger
 	cfg          *config.Config
 	h            *handlers.Handler
+	appCtx       context.Context
+	cancel       context.CancelFunc
 }
 
 func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *zap.Logger,
@@ -77,6 +80,7 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		rateLimiter = auth.NewRedisRateLimiter(redisClient, logger)
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
 	router := &Router{
 		app:          app,
 		auth:         authenticator,
@@ -85,6 +89,8 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		redisLimiter: rateLimiter,
 		logger:       logger,
 		cfg:          cfg,
+		appCtx:       ctx,
+		cancel:       cancel,
 		h:            handlers.NewHandler(db, authenticator, apikeyMgr, logger, cfg, registry, ff, rateLimiter),
 	}
 	// Record the moment the router was constructed. The runtime
@@ -260,6 +266,27 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		logger.Info("admin settings store wired")
 	} else {
 		logger.Warn("admin settings store unavailable: failed to get sql.DB", zap.Error(err))
+	}
+
+	// Boot-time bridge: load persisted protocol settings
+	// from admin_settings into the live cfg. Restart-
+	// required keys are recorded on the bridge's
+	// pending list so the admin UI can show "needs
+	// restart" honestly. The bridge reads the same
+	// admin_settings table the PATCH endpoint writes,
+	// so it is always consistent with operator intent.
+	if sqlDB, sErr := db.DB(); sErr == nil {
+		br := settingsbridge.New(router.cfg, sqlDB, logger)
+		if sm, aErr := br.Apply(router.appCtx); aErr != nil {
+			logger.Warn("settings bridge: initial apply failed", zap.Error(aErr))
+		} else {
+			logger.Info("settings bridge loaded",
+				zap.Int("applied", sm.Applied),
+				zap.Int("pending", sm.Pending))
+		}
+		router.h.SetSettingsBridge(br)
+	} else {
+		logger.Warn("settings bridge unavailable: failed to get sql.DB", zap.Error(sErr))
 	}
 
 	// Wire the admin TLS / certificate manager. The service

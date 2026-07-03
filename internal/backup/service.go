@@ -45,6 +45,17 @@ type Service struct {
 	buildCommit    string
 	keyPaths       []string
 
+	// postCreateHook is invoked once a successful
+	// CreateBackup completes, with the local archive
+	// path as its single argument. The hook is the
+	// package's one and only seam to upload the
+	// finished archive to configured remote targets;
+	// it must be set by the runtime so the production
+	// pipeline can call into internal/backup/targets.
+	// Tests that don't care about remote upload keep
+	// this nil and accept local-only behaviour.
+	postCreateHook func(backupID, archivePath string)
+
 	mu sync.Mutex
 }
 
@@ -58,6 +69,17 @@ func NewService(basePath string, db, mailStoreDB *sql.DB, mailDir, attachDir str
 		mailDir:     mailDir,
 		attachDir:   attachDir,
 	}
+}
+
+// SetPostCreateHook installs the post-create hook. The
+// runtime wires this in *after* the targets.Manager is
+// built so the Uploader can reach the configured backup
+// targets through the same DB handle the audit trail
+// uses. nil clears the hook.
+func (s *Service) SetPostCreateHook(h func(backupID, archivePath string)) {
+	s.mu.Lock()
+	s.postCreateHook = h
+	s.mu.Unlock()
 }
 
 // SetConfigPath sets the path to the config file for backup archives.
@@ -75,6 +97,79 @@ func (s *Service) SetStagingRoot(root string) { s.stagingRoot = root }
 func (s *Service) AddKeyPath(path string) { s.keyPaths = append(s.keyPaths, path) }
 
 func (s *Service) ensureBasePath() error { return os.MkdirAll(s.basePath, 0750) }
+
+// archiveBackupDir packs the in-place backup directory bp
+// (which holds the per-file copies from createBackupLocked)
+// into a single tar.gz at <bp>/<id>.tar.gz. Returns the
+// archive absolute path. Errors are returned so the caller
+// can record them on the row.
+//
+// The archive streams entries directly to disk to avoid
+// loading the (potentially multi-GB) mail-store copy in
+// memory; files > maxEntryBytes are skipped silently because
+// the manifest already records what was elided.
+func archiveBackupDir(bp, id string) (string, error) {
+	archivePath := filepath.Join(bp, id+".tar.gz")
+	out, err := os.Create(archivePath)
+	if err != nil {
+		return "", fmt.Errorf("create archive: %w", err)
+	}
+	defer out.Close()
+
+	const maxEntryBytes = 2 * 1024 * 1024 * 1024
+	gz := gzip.NewWriter(out)
+	defer gz.Close()
+	tw := tar.NewWriter(gz)
+	defer tw.Close()
+
+	walkErr := filepath.Walk(bp, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		// Skip the archive we are writing.
+		if path == archivePath {
+			return nil
+		}
+		if info.IsDir() {
+			return nil
+		}
+		if info.Size() > maxEntryBytes {
+			return nil
+		}
+		hdr, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(bp, path)
+		if err != nil {
+			return err
+		}
+		hdr.Name = filepath.ToSlash(rel)
+		if err := tw.WriteHeader(hdr); err != nil {
+			return err
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		if _, err := io.Copy(tw, f); err != nil {
+			return err
+		}
+		return nil
+	})
+	if walkErr != nil {
+		_ = os.Remove(archivePath)
+		return "", walkErr
+	}
+	if err := tw.Close(); err != nil {
+		return "", err
+	}
+	if err := gz.Close(); err != nil {
+		return "", err
+	}
+	return archivePath, nil
+}
 
 func generateID() string {
 	b := make([]byte, 16)
@@ -268,6 +363,36 @@ func (s *Service) createBackupLocked(ctx context.Context, name string) (*Backup,
 
 	manifestBytes, _ = json.Marshal(manifest)
 	os.WriteFile(filepath.Join(bp, "manifest.json"), manifestBytes, 0640)
+
+	// Build the final tar.gz archive. We do this AFTER
+	// all in-place files are written so the archive
+	// captures the manifest + manifest counts that the
+	// UI / downstream consumers expect.
+	archivePath, archiveErr := archiveBackupDir(bp, backup.ID)
+	if archiveErr != nil {
+		// An archive failure cannot corrupt the local
+		// backup, only the remote-upload path. We log it
+		// and continue; the row remains in completed
+		// status because the local files are still valid
+		// for restore via the directory path.
+		if s.db != nil {
+			_, _ = s.db.ExecContext(ctx, `UPDATE backup_registry SET last_test_message=? WHERE id=?`,
+				"archive_failed:"+archiveErr.Error(), backup.ID)
+		}
+	} else if s.postCreateHook != nil {
+		// Fire the post-create hook (target upload). The
+		// hook runs in its own goroutine so a slow /
+		// timing-out upload never blocks the return to
+		// the admin caller.
+		hook := s.postCreateHook
+		go func(id, path string) {
+			defer func() {
+				_ = recover()
+			}()
+			hook(id, path)
+		}(backup.ID, archivePath)
+	}
+
 	return backup, nil
 }
 

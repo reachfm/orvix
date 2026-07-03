@@ -203,8 +203,9 @@ var protocolDefs = map[string]protocolDef{
 // Returns the canonical key list for the protocol and the
 // current effective values (live config fall-through to
 // persisted DB overrides), with a per-field
-// requires_restart flag. Secrets are not stored under any of
-// these keys; the keys below are configuration knobs only.
+// requires_restart flag. The response also carries the
+// settings-bridge summary so the admin UI can show
+// "applied vs needs restart" honestly.
 func (h *Handler) ListProtocolSettings(c fiber.Ctx) error {
 	if h.cfg == nil {
 		return fiber.NewError(fiber.StatusServiceUnavailable, "config not ready")
@@ -224,8 +225,6 @@ func (h *Handler) ListProtocolSettings(c fiber.Ctx) error {
 			"restart_required": k.RestartRequired,
 			"default":          k.Default,
 		}
-		// Resolve effective value. Priority: persisted override >
-		// live config > built-in default.
 		if h.settingsStore != nil {
 			if entry, err := h.settingsStore.Get(c.Context(), k.Key); err == nil && entry != nil && !entry.Redacted {
 				row["value"] = entry.Value
@@ -239,12 +238,16 @@ func (h *Handler) ListProtocolSettings(c fiber.Ctx) error {
 		row["persisted"] = false
 		keys = append(keys, row)
 	}
-	return c.JSON(fiber.Map{
-		"protocol":       def.ID,
-		"title":          def.Title,
-		"description":    def.Description,
-		"keys":           keys,
-	})
+	out := fiber.Map{
+		"protocol":    def.ID,
+		"title":       def.Title,
+		"description": def.Description,
+		"keys":        keys,
+	}
+	if h.settingsBridge != nil {
+		out["bridge"] = h.settingsBridge.Snapshot()
+	}
+	return c.JSON(out)
 }
 
 // PatchProtocolSettings serves PATCH

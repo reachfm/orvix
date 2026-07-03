@@ -63,6 +63,10 @@ const (
 	EventIncomingRuleRejected EventType = "incoming_rule.rejected"
 	EventIncomingRuleTagged   EventType = "incoming_rule.tagged"
 
+	// Backup target upload events.
+	EventBackupTargetUploadSuccess EventType = "backup_target.upload.success"
+	EventBackupTargetUploadFailure EventType = "backup_target.upload.failure"
+
 	// Queue delivery.
 	EventQueueLeased      EventType = "queue.leased"
 	EventQueueDelivered   EventType = "queue.delivered"

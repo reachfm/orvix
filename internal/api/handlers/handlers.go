@@ -35,6 +35,7 @@ import (
 	"github.com/orvix/orvix/internal/coremail/push"
 	"github.com/orvix/orvix/internal/coremail/storage"
 	"github.com/orvix/orvix/internal/observability"
+	settingsbridge "github.com/orvix/orvix/internal/settings/bridge"
 	"github.com/orvix/orvix/internal/webmailmgmt"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/argon2"
@@ -150,6 +151,12 @@ type Handler struct {
 	// fail_closed) without re-reading the metrics
 	// package.
 	observability *observability.Observability
+
+	// settingsBridge is the boot-time loader that
+	// applies persisted protocol settings to the
+	// live cfg. The admin /settings/protocol/:protocol
+	// endpoint reads through this handle.
+	settingsBridge *settingsbridge.Bridge
 }
 
 // NewHandler creates a new Handler with dependencies.
@@ -260,6 +267,13 @@ func (h *Handler) SetRulerService(s *ruler.Engine) {
 // counters without re-reading the metrics package.
 func (h *Handler) SetObservability(o *observability.Observability) {
 	h.observability = o
+}
+
+// SetSettingsBridge wires the boot-time settings
+// loader so the /settings/protocol/:protocol endpoint
+// can surface applied vs pending-restart keys.
+func (h *Handler) SetSettingsBridge(b *settingsbridge.Bridge) {
+	h.settingsBridge = b
 }
 
 // Health returns server health status.
