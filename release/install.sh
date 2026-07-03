@@ -272,7 +272,24 @@ ${GREEN}=========================================================${NC}
 BODY
 }
 
+# install_version prints a one-line version string for the install
+# report banner. The order is intentional and matters for the
+# public-installer flow:
+#   1. bundle BUILDINFO — the auditable truth (works on every
+#      bundle install where there is no git tree on disk).
+#   2. git HEAD — works on dev worktrees that include .git/.
+#   3. installed binary `orvix version` — last resort.
+#   4. fallback string for the rare case nothing is available.
 install_version() {
+	if [ -f "$ORVIX_SOURCE_DIR/BUILDINFO" ]; then
+		awk -F= '/^version=/ {v=$2} /^short_commit=/ {c=$2} /^channel=/ {ch=$2} END {if (v) {if (c) printf "%s (commit: %s, channel: %s)", v, c, ch; else printf "%s", v; exit}}' "$ORVIX_SOURCE_DIR/BUILDINFO"
+		return
+	fi
+	if [ -f "$ORVIX_SOURCE_DIR/VERSION" ]; then
+		local v
+		v="$(awk 'NF && $1 !~ /^#/ {print; exit}' "$ORVIX_SOURCE_DIR/VERSION" | tr -d '[:space:]')"
+		if [ -n "$v" ]; then printf '%s' "$v"; return; fi
+	fi
 	if command -v git >/dev/null 2>&1 && git -C "$ORVIX_SOURCE_DIR" rev-parse --short HEAD >/dev/null 2>&1; then
 		git -C "$ORVIX_SOURCE_DIR" rev-parse --short HEAD
 		return
@@ -282,6 +299,92 @@ install_version() {
 		return
 	fi
 	printf 'installed build'
+}
+
+# expected_buildinfo echoes the (version, commit, channel) tuple the
+# caller wants the installed binary to satisfy. Sources, in order:
+#   1. bundle BUILDINFO sidecar — the auditable source.
+#   2. explicit ORVIX_VERSION / ORVIX_COMMIT / ORVIX_CHANNEL env vars
+#      (used by GitHub archive installs and CI test rigs).
+#   3. empty strings (the caller treats empty as "do not enforce").
+expected_buildinfo() {
+	local version="" commit="" channel="" build_time=""
+	if [ -f "$ORVIX_SOURCE_DIR/BUILDINFO" ]; then
+		version="$(awk -F= '/^version=/{print $2; exit}' "$ORVIX_SOURCE_DIR/BUILDINFO" || true)"
+		commit="$(awk -F= '/^commit=/{print $2; exit}' "$ORVIX_SOURCE_DIR/BUILDINFO" || true)"
+		channel="$(awk -F= '/^channel=/{print $2; exit}' "$ORVIX_SOURCE_DIR/BUILDINFO" || true)"
+		build_time="$(awk -F= '/^build_time=/{print $2; exit}' "$ORVIX_SOURCE_DIR/BUILDINFO" || true)"
+	fi
+	[ -n "$version" ] || version="${ORVIX_VERSION:-}"
+	[ -n "$commit" ]  || commit="${ORVIX_COMMIT:-}"
+	[ -n "$channel" ] || channel="${ORVIX_CHANNEL:-stable}"
+	[ -n "$build_time" ] || build_time="${ORVIX_BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+	printf '%s\t%s\t%s\t%s\n' "$version" "$commit" "$channel" "$build_time"
+}
+
+# verify_installed_binary_metadata runs $ORVIX_BIN version --full,
+# parses out Version / Commit / Channel, and compares against the
+# values reported by expected_buildinfo(). Fails the install on any
+# mismatch so an operator never accidentally serves traffic from a
+# binary whose embedded commit does not match the bundle they
+# thought they installed.
+#
+# Trimming: each field is trimmed of CR (Windows CRLF on a copied
+# bundle) and surrounding whitespace before comparison; binary
+# output is newline-terminated so the last field gets a stray LF.
+verify_installed_binary_metadata() {
+	local bin="$ORVIX_BIN"
+	[ -x "$bin" ] || fail "binary $bin is not executable; cannot verify embedded metadata"
+	local out
+	if ! out="$("$bin" version --full 2>/dev/null)"; then
+		fail "could not execute $bin version --full to verify embedded metadata"
+	fi
+	# Parse "orvix <ver>\n  tag: <...>\n  commit: <sha>\n  channel: <chan>"
+	#   build_time: <ts>\n  go_version: <...>\n  ...
+	local got_version got_commit got_channel
+	got_version="$(printf '%s\n' "$out" | awk '/^orvix / {print $2; exit}')"
+	got_commit="$(printf '%s\n' "$out" | awk -F': *' '/^[[:space:]]*commit:/{print $2; exit}')"
+	got_channel="$(printf '%s\n' "$out" | awk -F': *' '/^[[:space:]]*channel:/{print $2; exit}')"
+	# Strip CR/whitespace defensively (covers bundles unzipped on
+	# Windows + copied across shells).
+	got_version="${got_version//[$'\r\n ']/}"
+	got_commit="${got_commit//[$'\r\n ']/}"
+	got_channel="${got_channel//[$'\r\n ']/}"
+	[ -n "$got_version" ] || fail "binary $bin reports no version metadata (unsafe build; refusing to ship)"
+	[ -n "$got_commit" ]  || fail "binary $bin reports no commit metadata (unsafe build; refusing to ship)"
+	[ -n "$got_channel" ] || fail "binary $bin reports no channel metadata (unsafe build; refusing to ship)"
+
+	local exp_version exp_commit exp_channel exp_build_time
+	local line
+	line="$(expected_buildinfo)"
+	exp_version="${line%%	*}"; rest="${line#*	}"
+	exp_commit="${rest%%	*}"; rest="${rest#*	}"
+	exp_channel="${rest%%	*}"; rest="${rest#*	}"
+	exp_build_time="$rest"
+
+	log_detail "VERIFY binary metadata actual: version=$got_version commit=$got_commit channel=$got_channel"
+	log_detail "VERIFY binary metadata expected: version=$exp_version commit=$exp_commit channel=$exp_channel build_time=$exp_build_time"
+
+	# Always enforce channel — the release channel is a
+	# production-readiness contract.
+	if [ -n "$exp_channel" ] && [ "$got_channel" != "$exp_channel" ]; then
+		fail "installed binary channel mismatch: got=$got_channel expected=$exp_channel (refusing to ship the wrong channel)"
+	fi
+	# When the caller pins a commit (bundle metadata always does),
+	# enforce it byte-for-byte. Otherwise we have NO way to know
+	# that the running binary matches the bundle the operator
+	# thought they installed.
+	if [ -n "$exp_commit" ] && [ "$got_commit" != "$exp_commit" ]; then
+		fail "installed binary commit mismatch: got=$got_commit expected=$exp_commit (refusing to ship a stale binary; rebuild or re-fetch the bundle)"
+	fi
+	# Version mismatch is reported but not fatal UNLESS we have an
+	# explicit version pin. Versions can be repointed via -ldflags
+	# without rebuilding; the commit + channel contract is the
+	# binding identity.
+	if [ -n "$exp_version" ] && [ "$got_version" != "$exp_version" ]; then
+		log_detail "WARN: installed binary version differs: got=$got_version expected=$exp_version (commit+channel match; continuing)"
+	fi
+	log_detail "VERIFY binary metadata: PASS (version=$got_version commit=${got_commit:0:12} channel=$got_channel)"
 }
 
 prepare_log() {
@@ -440,9 +543,56 @@ install_go_toolchain() {
 	go version >>"$INSTALL_LOG" 2>&1
 }
 
+# install_binary installs the Orvix binary at $ORVIX_BIN.
+#
+# Resolution order (production-readiness: stale-binary guard):
+#
+#   1. Bundle prebuilt at $ORVIX_SOURCE_DIR/bin/orvix
+#      (the path build-release-bundle.sh seals into the bundle).
+#   2. Historical prebuilt at $ORVIX_SOURCE_DIR/release/orvix-linux-amd64
+#      (legacy dev release tree, still recognised).
+#   3. Loose prebuilt at $ORVIX_SOURCE_DIR/orvix-linux-amd64 or
+#      $ORVIX_SOURCE_DIR/orvix (operator-supplied override; never
+#      from the public installer flow).
+#
+# When any prebuilt is found we:
+#   - If $ORVIX_USE_PREBUILT=1 is explicitly set, accept it.
+#   - If $ORVIX_COMMIT is set AND we can run `orvix version`, we
+#     compare embedded commit against expected. ANY mismatch
+#     FAILS the install; we never silently fall through to a
+#     build-from-source path that could swap the binary anyway.
+#     (The point is to surface the discrepancy so the operator
+#     can re-fetch the bundle rather than ship something whose
+#     identity they cannot prove.)
+#   - Otherwise we accept the prebuilt but log loudly so a
+#     stale-binary regression shows up in $INSTALL_LOG.
+#
+# When no prebuilt is found we build from source — but ONLY when a
+# real Go source tree is present (go.mod). A bundle does NOT ship
+# go.mod, so a bundle install with no prebuilt and no source tree
+# fails closed with a clear error: "no prebuilt binary AND no Go
+# source tree at $ORVIX_SOURCE_DIR — re-fetch the bundle".
+#
+# Source build path:
+#   - Installs the pinned Go toolchain if needed.
+#   - Compiles ./cmd/orvix into $ORVIX_BIN (does NOT use the
+#     install -m 0755 chmod-on-prebuilt path; the binary is set
+#     executable after build).
+#   - Injects buildinfo Version/Commit/BuildTime/Channel via
+#     -ldflags using the values expected_buildinfo() resolves
+#     (bundle BUILDINFO takes priority; explicit ORVIX_*
+#     env vars override).
+#
+# After install, the caller MUST run verify_installed_binary_metadata
+# to fail closed on any embedded-metadata mismatch — install_binary
+# itself runs the same check synchronously to keep the failure mode
+# local.
 install_binary() {
     local local_bin=""
+    # Bundle path first. build-release-bundle.sh seals the binary
+    # at bin/orvix relative to the bundle root.
     for candidate in \
+        "$ORVIX_SOURCE_DIR/bin/orvix" \
         "$ORVIX_SOURCE_DIR/release/orvix-linux-amd64" \
         "$ORVIX_SOURCE_DIR/orvix-linux-amd64" \
         "$ORVIX_SOURCE_DIR/orvix"; do
@@ -452,17 +602,101 @@ install_binary() {
         fi
     done
 
-	if [ -n "$local_bin" ]; then
-		run_quiet install -m 0755 "$local_bin" "$ORVIX_BIN"
-		log_detail "installed prebuilt binary from $local_bin"
-		return
-	fi
+    local expect_line exp_version="" exp_commit="" exp_channel="" exp_build_time=""
+    if [ -n "${ORVIX_VERSION:-}${ORVIX_COMMIT:-}${ORVIX_CHANNEL:-}" ] \
+        || [ -f "$ORVIX_SOURCE_DIR/BUILDINFO" ]; then
+        expect_line="$(expected_buildinfo)"
+        exp_version="${expect_line%%	*}"; rest="${expect_line#*	}"
+        exp_commit="${rest%%	*}"; rest="${rest#*	}"
+        exp_channel="${rest%%	*}"; rest="${rest#*	}"
+        exp_build_time="$rest"
+    fi
 
-	[ -f "$ORVIX_SOURCE_DIR/go.mod" ] || fail "no prebuilt binary found and no Go source tree at $ORVIX_SOURCE_DIR"
-	install_go_toolchain
-	(cd "$ORVIX_SOURCE_DIR" && go build -o "$ORVIX_BIN" ./cmd/orvix) >>"$INSTALL_LOG" 2>&1
-	run_quiet chmod 0755 "$ORVIX_BIN"
-	log_detail "built Orvix from source"
+    if [ -n "$local_bin" ]; then
+        # Verify the prebuilt's embedded commit matches the bundle's
+        # BUILDINFO (or the operator's ORVIX_COMMIT pin) before we
+        # touch $ORVIX_BIN. This is the production-readiness
+        # BLOCKER: a stale release/orvix-linux-amd64 sitting in the
+        # source tree MUST NOT silently overwrite the current
+        # binary — silently re-installing an old binary is the
+        # exact regression the build-bundle shipyard exists to
+        # prevent.
+        if [ -n "$exp_commit" ]; then
+            local prebuilt_out prebuilt_commit
+            if prebuilt_out="$("$local_bin" version --full 2>/dev/null)"; then
+                prebuilt_commit="$(printf '%s\n' "$prebuilt_out" | awk -F': *' '/^[[:space:]]*commit:/{print $2; exit}')"
+                prebuilt_commit="${prebuilt_commit//[$'\r\n ']/}"
+                if [ -n "$prebuilt_commit" ] && [ "$prebuilt_commit" != "$exp_commit" ]; then
+                    if [ -n "${ORVIX_USE_PREBUILT:-}" ]; then
+                        fail "prebuilt binary at $local_bin embeds commit=$prebuilt_commit but expected=$exp_commit (ORVIX_USE_PREBUILT=1 forces accept; remove ORVIX_USE_PREBUILT or refresh the prebuilt)"
+                    fi
+                    # We CANNOT silently install a stale binary, and
+                    # we CANNOT silently fall back to source build
+                    # on a one-command install (no source tree).
+                    # Fail closed with the operator-facing message.
+                    if [ ! -f "$ORVIX_SOURCE_DIR/go.mod" ]; then
+                        fail "prebuilt binary at $local_bin embeds commit=$prebuilt_commit but expected=$exp_commit (stale prebuilt; re-fetch the bundle or set ORVIX_USE_PREBUILT=1 to force-accept)"
+                    fi
+                    # Source tree is present (dev/CI). Log the
+                    # mismatch loudly and rebuild from source so the
+                    # installed binary matches HEAD.
+                    log_detail "STALE prebuilt at $local_bin (commit=$prebuilt_commit expected=$exp_commit); rebuilding from source"
+                else
+                    log_detail "PREBUILT commit OK: $prebuilt_commit matches expected"
+                fi
+            else
+                # Prebuilt does not respond to `version --full`. It
+                # is either a non-Orvix file someone renamed, or a
+                # corrupted binary. Reject.
+                log_detail "PREBUILT at $local_bin does not implement `version --full`; treating as corrupt"
+            fi
+        fi
+        # If ORVIX_USE_PREBUILT is unset AND a source tree exists,
+        # the operator probably wants the source build (developer
+        # install path). Bundle installs have no go.mod, so they
+        # always go through this branch.
+        if [ -z "${ORVIX_USE_PREBUILT:-}" ] && [ -f "$ORVIX_SOURCE_DIR/go.mod" ]; then
+            log_detail "ORVIX_USE_PREBUILT not set and source tree available; building from source instead of using prebuilt at $local_bin"
+        else
+            run_quiet install -m 0755 "$local_bin" "$ORVIX_BIN"
+            log_detail "installed prebuilt binary from $local_bin"
+            verify_installed_binary_metadata
+            return
+        fi
+    fi
+
+    # Build from source (only path: prebuilt absent or rejected).
+    [ -f "$ORVIX_SOURCE_DIR/go.mod" ] || fail "no prebuilt binary found AND no Go source tree at $ORVIX_SOURCE_DIR (re-fetch the bundle or supply ORVIX_USE_PREBUILT=1 with a verified binary)"
+    install_go_toolchain
+
+    # Resolve buildinfo from expected_buildinfo() — ORVIX_*
+    # overrides > bundle BUILDINFO > safe fallbacks.
+    local line ver commit ch ts
+    line="$(expected_buildinfo)"
+    ver="${line%%	*}"; rest="${line#*	}"
+    commit="${rest%%	*}"; rest="${rest#*	}"
+    ch="${rest%%	*}"; rest="${rest#*	}"
+    ts="$rest"
+    [ -n "$ver" ]    || ver="0.0.0-dev-from-source"
+    [ -n "$commit" ] || commit="not reported"
+    [ -n "$ch" ]     || ch="stable"
+    [ -n "$ts" ]     || ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    local ldflags=(
+        "-s"
+        "-w"
+        "-X github.com/orvix/orvix/internal/buildinfo.Version=$ver"
+        "-X github.com/orvix/orvix/internal/buildinfo.Commit=$commit"
+        "-X github.com/orvix/orvix/internal/buildinfo.BuildTime=$ts"
+        "-X github.com/orvix/orvix/internal/buildinfo.Channel=$ch"
+    )
+
+    log_detail "BUILD go build -ldflags=\"${ldflags[*]}\" from $ORVIX_SOURCE_DIR"
+    (cd "$ORVIX_SOURCE_DIR" && go build -trimpath -ldflags "$(IFS=' '; echo "${ldflags[*]}")" -o "$ORVIX_BIN" ./cmd/orvix) >>"$INSTALL_LOG" 2>&1 \
+        || fail "go build failed (see $INSTALL_LOG for the compiler error)"
+    run_quiet chmod 0755 "$ORVIX_BIN"
+    log_detail "built Orvix from source (version=$ver commit=$commit channel=$ch)"
+    verify_installed_binary_metadata
 }
 
 # is_valid_public_ipv4 returns 0 (success) iff $1 is a syntactically
