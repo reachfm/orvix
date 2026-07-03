@@ -280,8 +280,30 @@ fi
 
 # ── 4. Done ─────────────────────────────────────────────────────
 echo ""
-echo "================================================================"
-echo "Orvix install bundle smoke: $CHECKS_PASSED / $CHECKS_TOTAL checks passed"
+
+BUILDER_EXERCISED=0
+if [ "$MODE" = "build" ]; then
+    BUILDER_EXERCISED=1
+elif [ -n "$BUNDLE_PATH" ]; then
+    BUILDER_EXERCISED=1
+fi
+
+if [ "$BUILDER_EXERCISED" = "1" ]; then
+    echo "================================================================"
+    echo "Orvix install bundle smoke (FULL — builder exercised): $CHECKS_PASSED / $CHECKS_TOTAL checks passed"
+else
+    echo "================================================================"
+    echo "Orvix install bundle smoke (STATIC — real builder NOT exercised): $CHECKS_PASSED / $CHECKS_TOTAL checks passed"
+    echo ""
+    echo "WARNING: static mode only checks release-tree fixtures and script"
+    echo "syntax. It does NOT exercise build-release-bundle.sh.  For a full"
+    echo "bundle-build gate, run with --build."
+    echo ""
+    echo "This smoke is INCONCLUSIVE for the real builder path."
+    echo "================================================================"
+    exit 0
+fi
+
 [ "$CHECKS_PASSED" = "$CHECKS_TOTAL" ] || fail "$((CHECKS_TOTAL - CHECKS_PASSED)) check(s) failed"
 echo "================================================================"
 exit 0
