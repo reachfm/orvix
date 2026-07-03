@@ -304,11 +304,12 @@ validate_bundle_layout() {
         [ -e "$root/$rel" ] || missing+=("$rel")
     done <<REQUIRED
 bin/orvix
+VERSION
+BUILDINFO
 release/install.sh
 release/install-public.sh
 release/upgrade.sh
 release/uninstall.sh
-release/VERSION
 release/systemd/orvix.service
 release/systemd/orvix-update.service
 release/sudoers.d/orvix-update

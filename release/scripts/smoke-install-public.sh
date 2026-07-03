@@ -174,10 +174,6 @@ exit 42
 INSTALL_EOF
     chmod +x "$BUNDLE_STAGING/release/install.sh"
     echo "1.0.3-rc5" > "$BUNDLE_STAGING/VERSION"
-    # The public installer explicitly checks for release/VERSION
-    # (not just /VERSION) so the bundle fixture must mirror that.
-    mkdir -p "$BUNDLE_STAGING/release"
-    cp "$BUNDLE_STAGING/VERSION" "$BUNDLE_STAGING/release/VERSION"
 
     cat > "$BUNDLE_STAGING/BUILDINFO" <<BUILDINFO_EOF
 version=1.0.3-rc5

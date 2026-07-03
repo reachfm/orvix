@@ -133,6 +133,46 @@ func TestInstallScriptInstallsApplyRuntimeUpdate(t *testing.T) {
 	}
 }
 
+// TestPublicInstallerMatchesReleaseBundleLayout pins the
+// build-release-bundle.sh contract consumed by install-public.sh:
+// VERSION and BUILDINFO live at the bundle root beside bin/orvix,
+// while install.sh and runtime assets live under release/.
+func TestPublicInstallerMatchesReleaseBundleLayout(t *testing.T) {
+	root := repoRoot(t)
+	publicInstaller := mustRead(t, filepath.Join(root, "release", "install-public.sh"))
+	bundleBuilder := mustRead(t, filepath.Join(root, "release", "scripts", "build-release-bundle.sh"))
+
+	validateStart := strings.Index(publicInstaller, "validate_bundle_layout()")
+	if validateStart < 0 {
+		t.Fatal("install-public.sh must define validate_bundle_layout")
+	}
+	validateEnd := strings.Index(publicInstaller[validateStart:], "\n}\n")
+	if validateEnd < 0 {
+		t.Fatal("could not isolate validate_bundle_layout body")
+	}
+	validateBody := publicInstaller[validateStart : validateStart+validateEnd]
+
+	for _, required := range []string{
+		"bin/orvix",
+		"VERSION",
+		"BUILDINFO",
+		"release/install.sh",
+		"release/admin/index.html",
+		"release/webmail/index.html",
+		"release/systemd/orvix.service",
+	} {
+		if !strings.Contains(validateBody, required) {
+			t.Fatalf("install-public.sh validate_bundle_layout missing bundle path %q", required)
+		}
+		if !strings.Contains(bundleBuilder, required) {
+			t.Fatalf("build-release-bundle.sh missing matching bundle path %q", required)
+		}
+	}
+	if strings.Contains(validateBody, "release/VERSION") {
+		t.Fatal("install-public.sh must not require release/VERSION; builder places VERSION at bundle root")
+	}
+}
+
 // TestOrvixUpdateServiceExecPath pins the production-readiness
 // gate finding #1: the unit's ExecStart must resolve to a path
 // the installer copies into place, not /opt/orvix/...
