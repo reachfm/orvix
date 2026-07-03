@@ -4800,11 +4800,19 @@ func TestInstallerNonInteractiveEnvMode(t *testing.T) {
 			harness := strings.Replace(script, `exec bash "$installer_script"`, `echo "WOULD_RUN_INSTALLER"; exit 0`, 1)
 			// Override ORVIX_SOURCE_DIR to point at our fake tree.
 			harness = strings.Replace(harness, `ORVIX_SOURCE_DIR="${ORVIX_SOURCE_DIR:-$(pwd)}"`, fmt.Sprintf(`ORVIX_SOURCE_DIR=%q`, dir), 1)
+			// Short-circuit after non-interactive env validation.
+			// The harness replaces the entire 5-line validation block
+			// with a version that exits 0 when both env vars are set.
+			harness = strings.Replace(harness,
+				"    # Non-interactive mode requires domain + IP\n    if [ -n \"$non_interactive\" ]; then\n        if [ -z \"$domain\" ]; then fail \"ORVIX_DOMAIN is required in non-interactive mode\"; fi\n        if [ -z \"$public_ipv4\" ]; then fail \"ORVIX_PUBLIC_IPV4 is required in non-interactive mode\"; fi\n    fi",
+				"    if [ -n \"$non_interactive\" ]; then\n        if [ -z \"$domain\" ]; then fail \"ORVIX_DOMAIN is required in non-interactive mode\"; fi\n        if [ -z \"$public_ipv4\" ]; then fail \"ORVIX_PUBLIC_IPV4 is required in non-interactive mode\"; fi\n        echo VALIDATION_OK; exit 0\n    fi",
+				1)
 			if err := os.WriteFile(harnessPath, []byte(harness), 0o755); err != nil {
 				t.Fatalf("write harness: %v", err)
 			}
 			cmd := exec.Command(bashCommand(t), harnessPath)
 			cmd.Dir = dir
+			cmd.Env = os.Environ()
 			for k, v := range tc.env {
 				cmd.Env = append(cmd.Env, k+"="+v)
 				t.Setenv(k, v)
