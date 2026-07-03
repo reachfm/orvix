@@ -5,7 +5,8 @@
 // tables and apply decisions at the SMTP receive path.
 //
 // The package is wired into the SMTP receiver through
-// the smtp.RuleEvaluator interface. Each engine ships a
+// the rulertypes.RuleEngine interface (alias
+// smtp.RuleEvaluator). Each engine ships a
 // MarkEnforced() that the runtime calls once the engine
 // is installed in the receiver — this is what the admin
 // status endpoints observe to decide whether the rule
@@ -27,8 +28,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	smtp "github.com/orvix/orvix/internal/coremail/smtp"
 	"github.com/orvix/orvix/internal/observability"
+	"github.com/orvix/orvix/internal/rulertypes"
 	"go.uber.org/zap"
 )
 
@@ -235,12 +236,13 @@ func (e *Engine) Invalidate() {
 // DATA checks through a single interface if desired; in
 // practice each command-handler hook calls the type-
 // specific helper directly. We keep the shape required
-// by internal/coremail/smtp.RuleEvaluator.
+// by internal/rulertypes.RuleEngine (alias
+// internal/coremail/smtp.RuleEvaluator).
 //
 // The boolean returned as `matched` indicates whether any
 // rule hit; the receiver must continue default behaviour
 // when matched=false.
-func (e *Engine) Evaluate(ctx context.Context, q smtp.RuleQuery) (matched bool, action string, reason string) {
+func (e *Engine) Evaluate(ctx context.Context, q rulertypes.Query) (matched bool, action string, reason string) {
 	// The receiver forwards both acceptance and incoming
 	// queries through this single entrypoint; we
 	// dispatch based on a hint the SMTP layer sets on
@@ -254,7 +256,7 @@ func (e *Engine) Evaluate(ctx context.Context, q smtp.RuleQuery) (matched bool, 
 
 // EvaluateAcceptance walks enabled acceptance rules in
 // priority order and returns the matching decision.
-func (e *Engine) EvaluateAcceptance(ctx context.Context, q smtp.RuleQuery) (bool, string, string) {
+func (e *Engine) EvaluateAcceptance(ctx context.Context, q rulertypes.Query) (bool, string, string) {
 	rules, err := e.acceptRules(ctx)
 	if err != nil {
 		if e.logger != nil {
@@ -293,7 +295,7 @@ func (e *Engine) EvaluateAcceptance(ctx context.Context, q smtp.RuleQuery) (bool
 
 // EvaluateIncoming walks enabled incoming rule rows in
 // priority order and returns the matching decision.
-func (e *Engine) EvaluateIncoming(ctx context.Context, q smtp.RuleQuery) (bool, string, string) {
+func (e *Engine) EvaluateIncoming(ctx context.Context, q rulertypes.Query) (bool, string, string) {
 	rules, err := e.incomingRules(ctx)
 	if err != nil {
 		if e.logger != nil {
@@ -376,7 +378,7 @@ func (e *Engine) incomingRules(ctx context.Context) ([]incomingRule, error) {
 //
 // All conditions AND together. A rule with NO pattern
 // fields matches every envelope.
-func matchesAcceptance(r acceptanceRule, q smtp.RuleQuery) bool {
+func matchesAcceptance(r acceptanceRule, q rulertypes.Query) bool {
 	switch r.Scope {
 	case "domain":
 		if r.ScopeTarget == "" {
@@ -412,7 +414,7 @@ func matchesAcceptance(r acceptanceRule, q smtp.RuleQuery) bool {
 // supplied query. The engine understands a small set of
 // field names and operators that map cleanly to common
 // filter constructs.
-func matchesIncoming(r incomingRule, q smtp.RuleQuery) bool {
+func matchesIncoming(r incomingRule, q rulertypes.Query) bool {
 	fieldValue := resolveIncomingField(r.Field, q)
 	if fieldValue == "" && r.Field != "size" {
 		// A field the engine cannot resolve produces a
@@ -434,7 +436,7 @@ func matchesIncoming(r incomingRule, q smtp.RuleQuery) bool {
 // resolveIncomingField looks up the named field against
 // the query. We accept the admin-supplied enum subset
 // from internal/api/handlers/enterprise_admin_v3.go.
-func resolveIncomingField(name string, q smtp.RuleQuery) string {
+func resolveIncomingField(name string, q rulertypes.Query) string {
 	switch name {
 	case "subject":
 		return q.Subject

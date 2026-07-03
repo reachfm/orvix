@@ -19,6 +19,7 @@ import (
 	"github.com/orvix/orvix/internal/coremail/spf"
 	"github.com/orvix/orvix/internal/coremail/storage"
 	"github.com/orvix/orvix/internal/observability"
+	"github.com/orvix/orvix/internal/rulertypes"
 )
 
 // Receiver handles message acceptance, MailStore persistence, and Queue enqueue.
@@ -65,12 +66,12 @@ type Receiver struct {
 	// rules; AcceptMessage and the command handler skip
 	// the engine with no side effects. The runtime
 	// package owns the wiring.
-	AcceptanceEngine RuleEvaluator
+	AcceptanceEngine rulertypes.RuleEngine
 	// IncomingRuleEngine applies admin-scoped incoming
 	// message rules AFTER authentication + BEFORE final
 	// storage. nil means "no admin rules configured" and
 	// the receive path skips with no side effects.
-	IncomingRuleEngine RuleEvaluator
+	IncomingRuleEngine rulertypes.RuleEngine
 	// DB is supplied by the runtime so the antivirus and
 	// acceptance engines can persist quarantine rows.
 	// DB is supplied by the runtime so the antivirus
@@ -86,34 +87,22 @@ type Receiver struct {
 // internal/ruler package satisfies it. Tests may use a
 // stub implementation to verify the receiver's branching
 // without standing up the full Ruler.
-type RuleEvaluator interface {
-	// Evaluate returns the matching decision for the
-	// envelope / message data. Returning ok=false means
-	// "no decision" — the caller continues with the
-	// default behaviour. The action string is one of
-	// "accept", "reject", "quarantine". Note is an
-	// optional reason surfaced in the audit log.
-	Evaluate(ctx context.Context, q RuleQuery) (ok bool, action string, reason string)
-	// MarkEnforced is called by the receiver init
-	// process to flip the engine's runtime_enforced
-	// flag so the admin status endpoint stops claiming
-	// "storage-only" for this engine.
-	MarkEnforced()
-}
+//
+// The alias is kept so existing receiver code reads
+// naturally; the canonical definition lives in
+// internal/rulertypes.
+type RuleEvaluator = rulertypes.RuleEngine
 
-// RuleQuery carries the envelope + message context the
-// rule engines consume. Keeping this narrow means engines
-// can be tested independently of the SMTP machinery.
-type RuleQuery struct {
-	Sender    string
-	Recipient string
-	SourceIP  string
-	Subject   string
-	TenantID  uint
-	Domain    string
-	Headers    map[string]string
-	MessageID string
-}
+// RuleQuery is the local alias for rulertypes.Query.
+// Keeping the alias makes the receiver code read in
+// terms of "what the SMTP layer sees", not "what
+// internal/ruler passes in". The two are bit-identical.
+type RuleQuery = rulertypes.Query
+
+// The MarkEnforced contract is satisfied by the same
+// interface — kept here as an explicit type for clarity
+// rather than for dispatch.
+type MarkEnforcedFunc = rulertypes.SetEnforcedFunc
 
 // NewReceiver creates a message receiver.
 func NewReceiver(eng *coremail.Engine, ms *storage.MailStore, qe *queue.QueueEngine, cfg Config) *Receiver {

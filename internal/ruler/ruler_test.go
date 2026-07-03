@@ -9,8 +9,8 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	smtp "github.com/orvix/orvix/internal/coremail/smtp"
 	"github.com/orvix/orvix/internal/observability"
+	"github.com/orvix/orvix/internal/rulertypes"
 	"go.uber.org/zap"
 )
 
@@ -118,7 +118,7 @@ func TestAcceptanceRejectsBySenderPattern(t *testing.T) {
 	e := newEngine(t, db)
 	e.MarkAcceptanceEnforced()
 
-	matched, action, reason := e.EvaluateAcceptance(context.Background(), smtp.RuleQuery{
+	matched, action, reason := e.EvaluateAcceptance(context.Background(), rulertypes.Query{
 		Sender: "u@spam.example", Recipient: "inbox@x.local", SourceIP: "192.0.2.1",
 	})
 	if !matched {
@@ -142,7 +142,7 @@ func TestAcceptanceHigherPriorityWins(t *testing.T) {
 	e := newEngine(t, db)
 	e.MarkAcceptanceEnforced()
 
-	matched, action, _ := e.EvaluateAcceptance(context.Background(), smtp.RuleQuery{
+	matched, action, _ := e.EvaluateAcceptance(context.Background(), rulertypes.Query{
 		Sender: "x@x.local", Recipient: "y@y.local",
 	})
 	if !matched {
@@ -159,7 +159,7 @@ func TestAcceptanceDisabledRuleIgnored(t *testing.T) {
 	e := newEngine(t, db)
 	e.MarkAcceptanceEnforced()
 
-	matched, _, _ := e.EvaluateAcceptance(context.Background(), smtp.RuleQuery{
+	matched, _, _ := e.EvaluateAcceptance(context.Background(), rulertypes.Query{
 		Sender: "u@spam.example", Recipient: "inbox@x.local",
 	})
 	if matched {
@@ -182,13 +182,13 @@ func TestAcceptanceTenantIsolation(t *testing.T) {
 	e := newEngine(t, db)
 	e.MarkAcceptanceEnforced()
 
-	matched, _, _ := e.EvaluateAcceptance(context.Background(), smtp.RuleQuery{
+	matched, _, _ := e.EvaluateAcceptance(context.Background(), rulertypes.Query{
 		Sender: "u@spam.example", Recipient: "inbox@x.local", TenantID: 0,
 	})
 	if matched {
 		t.Fatalf("tenant-1 rule must not match query with tenant=0")
 	}
-	matched, act, _ := e.EvaluateAcceptance(context.Background(), smtp.RuleQuery{
+	matched, act, _ := e.EvaluateAcceptance(context.Background(), rulertypes.Query{
 		Sender: "u@spam.example", Recipient: "inbox@x.local", TenantID: 1,
 	})
 	if !matched || act != "reject" {
@@ -203,7 +203,7 @@ func TestAcceptanceAllowOverrideAccept(t *testing.T) {
 	e := newEngine(t, db)
 	e.MarkAcceptanceEnforced()
 
-	matched, action, _ := e.EvaluateAcceptance(context.Background(), smtp.RuleQuery{
+	matched, action, _ := e.EvaluateAcceptance(context.Background(), rulertypes.Query{
 		Sender: "ceo@vip.local", Recipient: "inbox@x.local",
 	})
 	if !matched || action != "accept" {
@@ -217,13 +217,13 @@ func TestAcceptanceIPCIDR(t *testing.T) {
 	e := newEngine(t, db)
 	e.MarkAcceptanceEnforced()
 
-	matched, action, _ := e.EvaluateAcceptance(context.Background(), smtp.RuleQuery{
+	matched, action, _ := e.EvaluateAcceptance(context.Background(), rulertypes.Query{
 		Sender: "x@x.local", Recipient: "y@y.local", SourceIP: "203.0.113.42:1234",
 	})
 	if !matched || action != "reject" {
 		t.Fatalf("CIDR match must fire")
 	}
-	matched, _, _ = e.EvaluateAcceptance(context.Background(), smtp.RuleQuery{
+	matched, _, _ = e.EvaluateAcceptance(context.Background(), rulertypes.Query{
 		Sender: "x@x.local", Recipient: "y@y.local", SourceIP: "198.51.100.10:1234",
 	})
 	if matched {
@@ -237,7 +237,7 @@ func TestIncomingSubjectReject(t *testing.T) {
 	e := newEngine(t, db)
 	e.MarkIncomingEnforced()
 
-	matched, action, _ := e.EvaluateIncoming(context.Background(), smtp.RuleQuery{
+	matched, action, _ := e.EvaluateIncoming(context.Background(), rulertypes.Query{
 		Sender: "x@x.local", Recipient: "y@y.local", Subject: "URGENT verify your account",
 	})
 	if !matched || action != "reject" {
@@ -250,7 +250,7 @@ func TestIncomingNoMatchDefaultsTrueNoDecision(t *testing.T) {
 	seedIncoming(t, db, "block_phish", 50, true, "subject", "contains", "phish", "reject", "", "all")
 	e := newEngine(t, db)
 	e.MarkIncomingEnforced()
-	matched, _, _ := e.EvaluateIncoming(context.Background(), smtp.RuleQuery{
+	matched, _, _ := e.EvaluateIncoming(context.Background(), rulertypes.Query{
 		Subject: "Hello friend",
 	})
 	if matched {
@@ -263,7 +263,7 @@ func TestIncomingTagAction(t *testing.T) {
 	seedIncoming(t, db, "tag_newsletter", 50, true, "subject", "contains", "newsletter", "tag", "Newsletter", "all")
 	e := newEngine(t, db)
 	e.MarkIncomingEnforced()
-	matched, action, _ := e.EvaluateIncoming(context.Background(), smtp.RuleQuery{
+	matched, action, _ := e.EvaluateIncoming(context.Background(), rulertypes.Query{
 		Subject: "Weekly newsletter from X",
 	})
 	if !matched || action != "tag" {
@@ -277,7 +277,7 @@ func TestIncomingPriorityOrder(t *testing.T) {
 	seedIncoming(t, db, "keep", 10, true, "subject", "contains", "spam", "label", "Marketing", "all")
 	e := newEngine(t, db)
 	e.MarkIncomingEnforced()
-	matched, action, _ := e.EvaluateIncoming(context.Background(), smtp.RuleQuery{
+	matched, action, _ := e.EvaluateIncoming(context.Background(), rulertypes.Query{
 		Subject: "this is spam",
 	})
 	if !matched || action != "label" {
@@ -296,13 +296,13 @@ func TestIncomingTenantIsolation(t *testing.T) {
 	}
 	e := newEngine(t, db)
 	e.MarkIncomingEnforced()
-	matched, _, _ := e.EvaluateIncoming(context.Background(), smtp.RuleQuery{
+	matched, _, _ := e.EvaluateIncoming(context.Background(), rulertypes.Query{
 		Subject: "X", TenantID: 0,
 	})
 	if matched {
 		t.Fatalf("tenant-7 rule must not match tenant-0 query")
 	}
-	matched, action, _ := e.EvaluateIncoming(context.Background(), smtp.RuleQuery{
+	matched, action, _ := e.EvaluateIncoming(context.Background(), rulertypes.Query{
 		Subject: "X", TenantID: 7,
 	})
 	if !matched || action != "reject" {
@@ -315,7 +315,7 @@ func TestReloadInvalidatesCache(t *testing.T) {
 	e := newEngine(t, db)
 	e.MarkAcceptanceEnforced()
 	// First eval: nothing seeded, must NOT match.
-	matched, _, _ := e.EvaluateAcceptance(context.Background(), smtp.RuleQuery{
+	matched, _, _ := e.EvaluateAcceptance(context.Background(), rulertypes.Query{
 		Sender: "x@x.local", Recipient: "y@y.local",
 	})
 	if matched {
@@ -323,7 +323,7 @@ func TestReloadInvalidatesCache(t *testing.T) {
 	}
 	seedAcceptance(t, db, "new_rule", 50, true, "global", "", "*@spammer.local", "", "", "reject")
 	// Cache is now stale. Evaluate must NOT match.
-	matched, _, _ = e.EvaluateAcceptance(context.Background(), smtp.RuleQuery{
+	matched, _, _ = e.EvaluateAcceptance(context.Background(), rulertypes.Query{
 		Sender: "u@spammer.local", Recipient: "inbox@x.local",
 	})
 	if matched {
@@ -331,7 +331,7 @@ func TestReloadInvalidatesCache(t *testing.T) {
 	}
 	// Reload, then eval must match.
 	e.Reload(context.Background())
-	matched, action, _ := e.EvaluateAcceptance(context.Background(), smtp.RuleQuery{
+	matched, action, _ := e.EvaluateAcceptance(context.Background(), rulertypes.Query{
 		Sender: "u@spammer.local", Recipient: "inbox@x.local",
 	})
 	if !matched || action != "reject" {
@@ -352,7 +352,7 @@ func TestAcceptanceEnvelopeLevelMatchesRPC(t *testing.T) {
 	e2 := newEngine(t, db) // pretend the dry-run endpoint
 	e2.MarkAcceptanceEnforced()
 
-	q := smtp.RuleQuery{
+	q := rulertypes.Query{
 		Sender: "u@spam.example", Recipient: "inbox@x.local",
 		SourceIP: "192.0.2.1",
 	}

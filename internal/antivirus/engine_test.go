@@ -53,15 +53,44 @@ func (m *mockClamd) serve() {
 			return
 		}
 		m.streams.Add(1)
-		// Crude mock: read the request, write the canned
-		// response, close. The matching of the request
-		// bytes is irrelevant — the engine ALWAYS issues
-		// zINSTREAM so any "stream: ...\000" sequence is
-		// answered with the canned reply.
+		// Crude mock: drain the request then write the
+		// canned response, close. The matching of the
+		// request bytes is irrelevant — the engine ALWAYS
+		// issues zINSTREAM so any "stream: ...\000"
+		// sequence is answered with the canned reply.
+		//
+		// Drain semantics: the scanner writes
+		// "zINSTREAM\0", then 4-byte-sized chunks, then a
+		// 4-zero-byte terminator. We read until we see
+		// the terminator OR a 500ms idle gap (no bytes
+		// for 500ms implies the scanner is also idle and
+		// about to issue its ReadString). The idle-gap
+		// approach is more portable than a fixed
+		// deadline — it works on Windows where the
+		// kernel may not flush the scanner's write
+		// buffer into our Read in a single call.
 		go func(c net.Conn) {
 			defer c.Close()
+			c.SetDeadline(time.Now().Add(2 * time.Second))
 			buf := make([]byte, 4096)
-			c.Read(buf) // drain
+			collected := make([]byte, 0, 8192)
+			for {
+				n, err := c.Read(buf)
+				if n > 0 {
+					collected = append(collected, buf[:n]...)
+					// INSTREAM terminator = four zero bytes.
+					if len(collected) >= 4 {
+						tail := collected[len(collected)-4:]
+						if tail[0] == 0 && tail[1] == 0 && tail[2] == 0 && tail[3] == 0 {
+							break
+						}
+					}
+					continue
+				}
+				if err != nil {
+					break
+				}
+			}
 			c.Write([]byte(m.response + "\000"))
 		}(conn)
 	}
