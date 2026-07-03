@@ -858,6 +858,179 @@ func MigrateAllRaw(db *gorm.DB) error {
 			used_at DATETIME,
 			created_at DATETIME NOT NULL DEFAULT (datetime('now'))
 		)`,
+		// Admin Enterprise v2 — Acceptance & Routing
+		// rules. Distinct from coremail_acl_rules (which is
+		// the per-mailbox access list at the protocol layer);
+		// these are admin-scoped "what should I do when this
+		// sender sends to this recipient" decisions. Each
+		// rule has a priority (lower number = applied first)
+		// and an action (accept / reject / redirect /
+		// hold). The runtime engine (when wired) walks the
+		// rules in priority order for every incoming
+		// message. Until that engine exists, the table is
+		// the source of truth and the admin UI exposes
+		// list/create/update/delete + an audit trail.
+		`CREATE TABLE IF NOT EXISTS coremail_acceptance_rules (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			name TEXT NOT NULL DEFAULT '',
+			priority INTEGER NOT NULL DEFAULT 100,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			scope TEXT NOT NULL DEFAULT 'global',
+			scope_target TEXT NOT NULL DEFAULT '',
+			sender_pattern TEXT NOT NULL DEFAULT '',
+			recipient_pattern TEXT NOT NULL DEFAULT '',
+			source_ip_cidr TEXT NOT NULL DEFAULT '',
+			action TEXT NOT NULL DEFAULT 'accept',
+			redirect_to TEXT NOT NULL DEFAULT '',
+			note TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME
+		)`,
+		// Admin Enterprise v2 — admin-scoped Incoming
+		// Message Rules. Distinct from per-mailbox webmail
+		// rules at /api/v1/webmail/rules: these are
+		// tenant-level filter rules applied before
+		// per-mailbox rules. Each rule moves / labels /
+		// forwards / discards a message based on field
+		// patterns. The runtime engine (when wired) walks
+		// the table once per incoming message after
+		// acceptance & routing. Until then, the table is
+		// the source of truth and the admin UI exposes
+		// list/create/update/delete + an audit trail.
+		`CREATE TABLE IF NOT EXISTS coremail_incoming_msg_rules (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			name TEXT NOT NULL DEFAULT '',
+			priority INTEGER NOT NULL DEFAULT 100,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			field TEXT NOT NULL DEFAULT 'subject',
+			operator TEXT NOT NULL DEFAULT 'contains',
+			value TEXT NOT NULL DEFAULT '',
+			action TEXT NOT NULL DEFAULT 'move',
+			action_target TEXT NOT NULL DEFAULT '',
+			apply_to TEXT NOT NULL DEFAULT 'all',
+			stop_processing INTEGER NOT NULL DEFAULT 0,
+			note TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME
+		)`,
+		// Admin Enterprise v2 — Migration Sources.
+		// Describes an external IMAP / POP3 / JMAP server
+		// to migrate mailboxes from. The migration engine
+		// (internal/migration) reads this table when
+		// starting a new job and uses the credentials to
+		// authenticate. Passwords live in
+		// coremail_migration_source_passwords (separate
+		// table) so the source listing never echoes the
+		// secret.
+		`CREATE TABLE IF NOT EXISTS coremail_migration_sources (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			name TEXT NOT NULL,
+			kind TEXT NOT NULL DEFAULT 'imap',
+			host TEXT NOT NULL DEFAULT '',
+			port INTEGER NOT NULL DEFAULT 993,
+			username TEXT NOT NULL DEFAULT '',
+			use_tls INTEGER NOT NULL DEFAULT 1,
+			allow_insecure INTEGER NOT NULL DEFAULT 0,
+			default_base_folder TEXT NOT NULL DEFAULT 'INBOX',
+			verify_hostname TEXT NOT NULL DEFAULT '',
+			note TEXT NOT NULL DEFAULT '',
+			has_secret INTEGER NOT NULL DEFAULT 0,
+			last_test_status TEXT NOT NULL DEFAULT '',
+			last_test_at DATETIME,
+			last_test_message TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			UNIQUE(tenant_id, name)
+		)`,
+		// Migration source credentials — stored separately
+		// so the list/GET endpoint never returns them. The
+		// secret is encrypted at rest using the same helper
+		// (config.EncryptString) used for license keys and
+		// other sensitive material. The migration engine
+		// reads this table on job start.
+		`CREATE TABLE IF NOT EXISTS coremail_migration_source_secrets (
+			source_id INTEGER PRIMARY KEY,
+			password_enc TEXT NOT NULL DEFAULT '',
+			updated_at DATETIME NOT NULL
+		)`,
+		// Admin Enterprise v2 — FTP / SFTP backup target
+		// configuration. Setting `enabled = 1` instructs the
+		// backup post-processor to mirror finished archives
+		// to the configured remote. Passwords are stored
+		// separately in coremail_backup_target_secrets; the
+		// listing endpoint never returns the password
+		// itself, only a "configured" boolean. The runtime
+		// transfer path is left honestly unwired until a
+		// release that includes a tested FTP / SFTP client;
+		// the table and the admin UI exist so operators can
+		// store their target now and have it picked up when
+		// the runtime lands.
+		`CREATE TABLE IF NOT EXISTS coremail_backup_targets (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			name TEXT NOT NULL,
+			kind TEXT NOT NULL DEFAULT 'ftp',
+			host TEXT NOT NULL DEFAULT '',
+			port INTEGER NOT NULL DEFAULT 21,
+			username TEXT NOT NULL DEFAULT '',
+			path TEXT NOT NULL DEFAULT '/',
+			enabled INTEGER NOT NULL DEFAULT 0,
+			verify_hostname INTEGER NOT NULL DEFAULT 1,
+			has_secret INTEGER NOT NULL DEFAULT 0,
+			last_test_status TEXT NOT NULL DEFAULT '',
+			last_test_at DATETIME,
+			last_test_message TEXT NOT NULL DEFAULT '',
+			note TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			UNIQUE(tenant_id, name)
+		)`,
+		// Encrypted password / key material for FTP / SFTP
+		// backup targets. The secret column is the encrypted
+		// blob; the listing endpoint never returns the
+		// stored value.
+		`CREATE TABLE IF NOT EXISTS coremail_backup_target_secrets (
+			target_id INTEGER PRIMARY KEY,
+			password_enc TEXT NOT NULL DEFAULT '',
+			private_key_path TEXT NOT NULL DEFAULT '',
+			updated_at DATETIME NOT NULL
+		)`,
+		// Admin Enterprise v2 — uploaded / imported TLS
+		// certificates. The runtime loads its cert from
+		// cfg.CoreMail.TLSCertFile (live config). The import
+		// action writes the operator-supplied PEMs to disk
+		// (path: a per-host dir under /etc/orvix/tls/admin),
+		// inserts a row here, and surfaces it in the admin
+		// UI. The reload action triggers a ListenerRegistry
+		// re-bind if the active listener uses the same
+		// file.
+		`CREATE TABLE IF NOT EXISTS coremail_uploaded_certificates (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			name TEXT NOT NULL,
+			cert_path TEXT NOT NULL DEFAULT '',
+			key_path TEXT NOT NULL DEFAULT '',
+			common_name TEXT NOT NULL DEFAULT '',
+			sans TEXT NOT NULL DEFAULT '',
+			issuer TEXT NOT NULL DEFAULT '',
+			serial_number TEXT NOT NULL DEFAULT '',
+			not_before DATETIME,
+			not_after DATETIME,
+			fingerprint_sha256 TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'unknown',
+			created_by INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			UNIQUE(tenant_id, name)
+		)`,
 	}
 
 	// Execute table creation statements
@@ -927,6 +1100,14 @@ func MigrateAllRaw(db *gorm.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_quarantine_index_tenant ON coremail_quarantine_index(tenant_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_quarantine_index_status ON coremail_quarantine_index(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_dkim_domain ON coremail_dkim_config(domain)`,
+		// Admin Enterprise v2 indexes — v2 follow-up.
+		`CREATE INDEX IF NOT EXISTS idx_acceptance_rules_tenant ON coremail_acceptance_rules(tenant_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_acceptance_rules_priority ON coremail_acceptance_rules(priority)`,
+		`CREATE INDEX IF NOT EXISTS idx_incoming_msg_rules_tenant ON coremail_incoming_msg_rules(tenant_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_incoming_msg_rules_priority ON coremail_incoming_msg_rules(priority)`,
+		`CREATE INDEX IF NOT EXISTS idx_migration_sources_tenant ON coremail_migration_sources(tenant_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_backup_targets_tenant ON coremail_backup_targets(tenant_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_uploaded_certs_tenant ON coremail_uploaded_certificates(tenant_id)`,
 	}
 
 	// Execute index creation statements

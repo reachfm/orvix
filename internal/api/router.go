@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"github.com/orvix/orvix/internal/metrics"
 	"github.com/orvix/orvix/internal/modules"
 	orvixruntime "github.com/orvix/orvix/internal/runtime"
+	"github.com/orvix/orvix/internal/tlsmgmt"
 	"github.com/orvix/orvix/internal/updater"
 	"github.com/orvix/orvix/internal/webmailmgmt"
 	"github.com/redis/go-redis/v9"
@@ -255,6 +257,18 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		logger.Info("admin settings store wired")
 	} else {
 		logger.Warn("admin settings store unavailable: failed to get sql.DB", zap.Error(err))
+	}
+
+	// Wire the admin TLS / certificate manager. The service
+	// is optional — when nil the SSL admin endpoints return
+	// 503 instead of fabricating cert metadata.
+	if sqlDB, err := db.DB(); err == nil {
+		tlsSvc := tlsmgmt.NewService(sqlDB, &tlsConfigAdapter{cfg: router.cfg})
+		if err := tlsSvc.EnsureUploadedCertSchema(context.Background()); err != nil {
+			logger.Warn("ensure uploaded cert schema failed", zap.Error(err))
+		}
+		router.h.SetTLSService(tlsSvc)
+		logger.Info("admin TLS service wired")
 	}
 
 	router.setupMiddleware()
@@ -527,9 +541,30 @@ func (r *Router) setupRoutes() {
 	admin.Get("/admin/public-folders", r.h.ListPublicFolders)
 	admin.Get("/admin/admin-groups", r.h.ListAdminGroups)
 	admin.Get("/admin/quarantine", r.h.ListQuarantine)
-	admin.Get("/admin/audit-logs", r.h.ListAdminAuditLogs)
-	admin.Get("/admin/acl-rules", r.h.ListACLRules)
-	admin.Get("/admin/log-rules", r.h.ListLogRules)
+admin.Get("/admin/audit-logs", r.h.ListAdminAuditLogs)
+admin.Get("/admin/acl-rules", r.h.ListACLRules)
+admin.Get("/admin/log-rules", r.h.ListLogRules)
+// Enterprise v3 — SSL, acceptance rules, incoming message
+// rules, FTP backup targets, file system browser,
+// migration sources, clustering, antivirus, settings
+// protocol splits.
+admin.Get("/admin/ssl/certificates", r.h.AdminSslListCertificates)
+admin.Get("/admin/ssl/certificates/reload", r.h.AdminSslReloadCertificates)
+admin.Get("/admin/ssl/expiry-warnings", r.h.AdminSslExpiryWarnings)
+admin.Get("/admin/ssl/acme/status", r.h.AdminSslAcmeStatus)
+admin.Get("/admin/acceptance-rules", r.h.ListAcceptanceRules)
+admin.Get("/admin/incoming-msg-rules", r.h.ListIncomingMsgRules)
+admin.Get("/admin/migration-sources", r.h.ListMigrationSources)
+admin.Get("/admin/backup-targets", r.h.ListBackupTargets)
+admin.Get("/admin/backup-targets/:id/test", r.h.TestBackupTarget)
+admin.Get("/admin/migration-sources/:id/test", r.h.TestMigrationSource)
+admin.Get("/admin/fs/browse", r.h.AdminFsBrowse)
+admin.Get("/admin/fs/read", r.h.AdminFsRead)
+admin.Get("/admin/cluster/status", r.h.AdminClusteringStatus)
+admin.Get("/admin/security/antivirus", r.h.AdminAntivirusStatus)
+// Per-protocol settings sub-pages. The :protocol path
+// parameter is one of the IDs in the protocolDefs map.
+admin.Get("/admin/settings/protocol/:protocol", r.h.ListProtocolSettings)
 	admin.Get("/admin/mailing-lists/:id/members", r.h.ListMailingListMembers)
 	admin.Get("/admin/admin-groups/:id/members", r.h.ListAdminGroupMembers)
 	admin.Get("/feature-flags", r.h.ListFeatureFlags)
@@ -737,8 +772,32 @@ func (r *Router) setupRoutes() {
 	men.Post("/admin/quarantine/:id/resolve", r.h.ResolveQuarantine)
 	men.Post("/admin/acl-rules", r.h.CreateACLRule)
 	men.Delete("/admin/acl-rules/:id", r.h.DeleteACLRule)
-	men.Post("/admin/log-rules", r.h.CreateLogRule)
-	men.Delete("/admin/log-rules/:id", r.h.DeleteLogRule)
+men.Post("/admin/log-rules", r.h.CreateLogRule)
+men.Delete("/admin/log-rules/:id", r.h.DeleteLogRule)
+// Enterprise v3 — CSRF-protected mutations for the new
+// sections. Each one is mounted inside `men` so the
+// X-CSRF-Token check runs before the handler. All
+// handlers in enterprise_admin_v3.go + ssl.go write to
+// the audit table via h.appendAudit.
+men.Post("/admin/ssl/certificates", r.h.AdminSslUploadCertificate)
+men.Post("/admin/ssl/certificates/reload", r.h.AdminSslReloadCertificates)
+men.Delete("/admin/ssl/certificates/:id", r.h.AdminSslDeleteCertificate)
+men.Post("/admin/acceptance-rules", r.h.CreateAcceptanceRule)
+men.Patch("/admin/acceptance-rules/:id", r.h.UpdateAcceptanceRule)
+men.Post("/admin/acceptance-rules/test", r.h.TestAcceptanceRule)
+men.Delete("/admin/acceptance-rules/:id", r.h.DeleteAcceptanceRule)
+men.Post("/admin/incoming-msg-rules", r.h.CreateIncomingMsgRule)
+men.Patch("/admin/incoming-msg-rules/:id", r.h.UpdateIncomingMsgRule)
+men.Delete("/admin/incoming-msg-rules/:id", r.h.DeleteIncomingMsgRule)
+men.Post("/admin/migration-sources", r.h.CreateMigrationSource)
+men.Patch("/admin/migration-sources/:id", r.h.UpdateMigrationSource)
+men.Delete("/admin/migration-sources/:id", r.h.DeleteMigrationSource)
+men.Post("/admin/migration-sources/:id/test", r.h.TestMigrationSource)
+men.Post("/admin/backup-targets", r.h.CreateBackupTarget)
+men.Patch("/admin/backup-targets/:id", r.h.UpdateBackupTarget)
+men.Delete("/admin/backup-targets/:id", r.h.DeleteBackupTarget)
+men.Post("/admin/backup-targets/:id/test", r.h.TestBackupTarget)
+men.Patch("/admin/settings/protocol/:protocol", r.h.PatchProtocolSettings)
 }
 
 func (r *Router) setupAdminUI() {

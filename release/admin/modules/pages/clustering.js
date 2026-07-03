@@ -1,22 +1,26 @@
 /* =====================================================================
-   pages/clustering.js — Honest "needs backend" page for
-   clustering / proxy support. The current Orvix build is a
-   single-node deployment. Clustering / IMAP / POP3 / WebMail
-   proxies are NOT implemented; the page renders an honest
-   status so operators are not misled.
+   pages/clustering.js — Honest clustering + proxy status page.
+
+   Wires:
+     GET /api/v1/admin/cluster/status  → node list + proxy slots
+
+   The current build is a single-node deployment. The
+   page renders the truthful status: deployment_mode,
+   peer nodes, every proxy slot, and an honest note
+   that clustering + proxy replication are not
+   implemented in this build.
+
+   The page uses real runtime telemetry where it
+   exists (listener ports, mail hosts, TLS). Operators
+   can read this to confirm there is no fabricated
+   "active" state on top of an absent engine.
    ===================================================================== */
 
 import { el } from '../components.js';
+import { apiGet } from '../api.js';
 import { applyAutoDir } from '../rtl.js';
 
-const FEATURES = [
-  { title: 'Clustering setup', body: 'Multi-node consensus / quorum is not implemented in this build. The runtime is single-node.' },
-  { title: 'IMAP proxy', body: 'IMAP proxy with sticky sessions is not implemented. Clients connect directly to the local IMAP listener.' },
-  { title: 'POP3 proxy', body: 'POP3 proxy is not implemented. Same direct-connect behaviour as IMAP.' },
-  { title: 'WebMail proxy', body: 'WebMail proxy is not implemented. Each node serves its own webmail host.' },
-];
-
-export function renderClusteringPage(root, opts) {
+export async function renderClusteringPage(root, opts) {
   root.innerHTML = '';
   opts = opts || {};
   const wrap = el('div', { class: 'page-inner' });
@@ -27,28 +31,105 @@ export function renderClusteringPage(root, opts) {
         text: 'Honest status of clustering / proxy support in this build.' }),
     ]),
   ]));
-
-  const card = el('section', { class: 'panel panel-placeholder' });
-  card.appendChild(el('header', { class: 'panel-head' }, [
-    el('h3', { text: 'Single-node deployment' }),
-    el('span', { class: 'badge tag danger', text: 'Not implemented' }),
-  ]));
-  card.appendChild(el('div', { class: 'panel-body' }, [
-    el('p', { text: 'Orvix Enterprise currently runs as a single-node deployment. Clustering, IMAP / POP3 / WebMail proxies, and automatic failover are not implemented in this build. The runtime telemetry shows the listeners you have configured locally; there is no replication layer.' }),
-    el('p', { text: 'For high availability, deploy Orvix on a single hardened host and use a load balancer for HTTP / IMAP / POP3 / SMTP frontends; the storage layer is already designed for snapshot / restore via the backups module.' }),
-  ]));
-  wrap.appendChild(card);
-
-  FEATURES.forEach((f) => {
-    const p = el('section', { class: 'panel' });
-    p.appendChild(el('header', { class: 'panel-head' }, [
-      el('h3', { text: f.title }),
-      el('span', { class: 'badge tag', text: 'planned' }),
-    ]));
-    p.appendChild(el('div', { class: 'panel-body', text: f.body }));
-    wrap.appendChild(p);
-  });
-
   root.appendChild(wrap);
+
+  const stateCard = el('section', { class: 'panel panel-placeholder' });
+  stateCard.appendChild(el('header', { class: 'panel-head' }, [
+    el('h3', { text: 'Deployment mode' }),
+    el('span', { class: 'badge tag', text: 'single-node' }),
+  ]));
+  const stateBody = el('div', { class: 'panel-body', text: 'Loading...' });
+  stateCard.appendChild(stateBody);
+  wrap.appendChild(stateCard);
+
+  const proxyCard = el('section', { class: 'panel' });
+  proxyCard.appendChild(el('header', { class: 'panel-head' },
+    el('h3', { text: 'Proxy slots' })));
+  const proxyBody = el('div', { class: 'panel-body', text: 'Loading...' });
+  proxyCard.appendChild(proxyBody);
+  wrap.appendChild(proxyCard);
+
+  const nodesCard = el('section', { class: 'panel' });
+  nodesCard.appendChild(el('header', { class: 'panel-head' },
+    el('h3', { text: 'Peer nodes' })));
+  const nodesBody = el('div', { class: 'panel-body' });
+  nodesCard.appendChild(nodesBody);
+  wrap.appendChild(nodesCard);
+
+  try {
+    const r = await apiGet('/api/v1/admin/cluster/status');
+    paint(stateCard, proxyCard, nodesCard, r);
+  } catch (e) {
+    stateBody.innerHTML = '';
+    stateBody.appendChild(el('div', { class: 'error', text: 'Failed to load: ' + (e.message || e) }));
+  }
   applyAutoDir(wrap);
+}
+
+function paint(stateCard, proxyCard, nodesCard, r) {
+  const stateBody = stateCard.querySelector('.panel-body');
+  stateBody.innerHTML = '';
+  stateBody.appendChild(kvTable([
+    ['Deployment mode', r.deployment_mode],
+    ['Current nodes', r.current_nodes],
+    ['Max nodes', r.max_nodes],
+    ['Consensus', r.consensus],
+  ]));
+  stateBody.appendChild(el('p', { class: 'subtle',
+    text: r.honest_note || 'clustering / proxy replication is not implemented in this build.' }));
+
+  const proxyBody = proxyCard.querySelector('.panel-body');
+  proxyBody.innerHTML = '';
+  const proxies = r.proxies || [];
+  if (!proxies.length) {
+    proxyBody.appendChild(el('div', { class: 'empty', text: 'No proxy slots configured.' }));
+  } else {
+    const tbl = el('table', { class: 'data-table' });
+    tbl.appendChild(el('thead', null, el('tr', null, [
+      el('th', { text: 'Slot' }),
+      el('th', { text: 'Kind' }),
+      el('th', { text: 'Configured' }),
+      el('th', { text: 'Runtime state' }),
+      el('th', { text: 'Detail' }),
+    ])));
+    const tb = el('tbody');
+    proxies.forEach((p) => {
+      tb.appendChild(el('tr', null, [
+        el('td', { text: p.name }),
+        el('td', { text: p.kind }),
+        el('td', { text: p.configured ? 'yes' : 'no' }),
+        el('td', { class: 'kv-v', text: p.runtime_state }),
+        el('td', { class: 'kv-v', text: p.detail }),
+      ]));
+    });
+    tbl.appendChild(tb);
+    proxyBody.appendChild(tbl);
+  }
+
+  const nodesBody = nodesCard.querySelector('.panel-body');
+  nodesBody.innerHTML = '';
+  const peers = r.peer_nodes || [];
+  if (!peers.length) {
+    nodesBody.appendChild(el('div', { class: 'empty', text: 'Single-node deployment — no peer nodes.' }));
+  } else {
+    const tbl = el('table', { class: 'data-table' });
+    peers.forEach((p) => {
+      tbl.appendChild(el('tr', null, [
+        el('td', { text: p.id || p.name || '-' }),
+        el('td', { class: 'kv-v', text: p.state || '-' }),
+      ]));
+    });
+    nodesBody.appendChild(tbl);
+  }
+}
+
+function kvTable(rows) {
+  const tbl = el('table', { class: 'kv-table' });
+  rows.forEach(([k, v]) => {
+    tbl.appendChild(el('tr', null, [
+      el('th', { text: k }),
+      el('td', { class: 'kv-v', text: String(v == null ? '-' : v) }),
+    ]));
+  });
+  return tbl;
 }

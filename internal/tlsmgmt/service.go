@@ -51,6 +51,219 @@ func (s *Service) ensureSchema(ctx context.Context) error {
 	return nil
 }
 
+// EnsureUploadedCertSchema installs the coremail_uploaded_certificates
+// table used by the admin enterprise v2 / v3 SSL page. The table is
+// declared in internal/models/models.go (it's idempotent), so this
+// function is a defensive belt-and-suspenders that no-ops when the
+// table is already there.
+func (s *Service) EnsureUploadedCertSchema(ctx context.Context) error {
+	if s.db == nil {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS coremail_uploaded_certificates (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		tenant_id INTEGER NOT NULL DEFAULT 0,
+		name TEXT NOT NULL DEFAULT '',
+		cert_path TEXT NOT NULL DEFAULT '',
+		key_path TEXT NOT NULL DEFAULT '',
+		common_name TEXT NOT NULL DEFAULT '',
+		sans TEXT NOT NULL DEFAULT '',
+		issuer TEXT NOT NULL DEFAULT '',
+		serial_number TEXT NOT NULL DEFAULT '',
+		not_before DATETIME,
+		not_after DATETIME,
+		fingerprint_sha256 TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT 'unknown',
+		created_by INTEGER NOT NULL DEFAULT 0,
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL,
+		deleted_at DATETIME,
+		UNIQUE(tenant_id, name)
+	)`)
+	return err
+}
+
+// ImportCertificate PEM-decodes the supplied cert/key bytes, writes
+// them to disk under the supplied directory (the admin handlers pass
+// /etc/orvix/tls/admin so the operator owns where the files land),
+// persists a row in coremail_uploaded_certificates, and returns the
+// parsed TLSCertificate. The private key is written with mode 0600
+// and the cert with 0644 to match the conventions in
+// release/scripts/setup-smtp-tls.sh.
+//
+// The function intentionally does NOT return the private key bytes
+// in any form — the audit-safe contract: once a key is imported, the
+// only on-disk copy lives in key_path. The fingerprint + metadata
+// row is what the admin UI ever displays.
+func (s *Service) ImportCertificate(ctx context.Context, name string, certPEM, keyPEM []byte, targetDir string, tenantID, createdBy int64) (*TLSCertificate, string, error) {
+	if s.db == nil {
+		return nil, "", fmt.Errorf("tls service: no db")
+	}
+	if name = strings.TrimSpace(name); name == "" {
+		return nil, "", fmt.Errorf("name is required")
+	}
+	if len(certPEM) == 0 || len(keyPEM) == 0 {
+		return nil, "", fmt.Errorf("cert and key are required")
+	}
+	if targetDir == "" {
+		targetDir = "/etc/orvix/tls/admin"
+	}
+	if err := os.MkdirAll(targetDir, 0o700); err != nil {
+		return nil, "", fmt.Errorf("create target dir: %w", err)
+	}
+
+	// Save cert + key to per-row files under the target dir.
+	safeName := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(name)), " ", "_")
+	certPath := targetDir + "/" + safeName + ".crt.pem"
+	keyPath := targetDir + "/" + safeName + ".key.pem"
+
+	// Parse cert (and cross-check the key) before persisting so the
+	// DB row never carries invalid material.
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		return nil, "", fmt.Errorf("failed to decode cert PEM")
+	}
+	x509Cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, "", fmt.Errorf("parse cert: %w", err)
+	}
+	keyBlock, _ := pem.Decode(keyPEM)
+	if keyBlock == nil {
+		return nil, "", fmt.Errorf("failed to decode key PEM")
+	}
+	var key interface{}
+	if k, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes); err == nil {
+		key = k
+	} else if k, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes); err == nil {
+		key = k
+	} else {
+		return nil, "", fmt.Errorf("parse private key: unsupported format (need PKCS1 / PKCS8)")
+	}
+	if !certKeyMatch(x509Cert, key) {
+		return nil, "", fmt.Errorf("certificate and private key do not match")
+	}
+
+	if err := os.WriteFile(certPath, certPEM, 0o644); err != nil {
+		return nil, "", fmt.Errorf("write cert file: %w", err)
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		_ = os.Remove(certPath)
+		return nil, "", fmt.Errorf("write key file: %w", err)
+	}
+
+	fingerprint := sha256.Sum256(block.Bytes)
+	fingerprintHex := hex.EncodeToString(fingerprint[:])
+
+	notBefore := x509Cert.NotBefore
+	notAfter := x509Cert.NotAfter
+	status := CertActive
+	switch {
+	case time.Now().After(notAfter):
+		status = CertExpired
+	case daysUntil(notAfter) <= 30:
+		status = CertWarning
+	}
+
+	sans := append([]string{}, x509Cert.DNSNames...)
+	sans = append(sans, x509Cert.EmailAddresses...)
+	sansCSV := strings.Join(sans, ",")
+
+	now := time.Now().UTC()
+
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO coremail_uploaded_certificates
+			(tenant_id, name, cert_path, key_path, common_name, sans, issuer, serial_number,
+			 not_before, not_after, fingerprint_sha256, status, created_by, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(tenant_id, name) DO UPDATE SET
+			cert_path=excluded.cert_path,
+			key_path=excluded.key_path,
+			common_name=excluded.common_name,
+			sans=excluded.sans,
+			issuer=excluded.issuer,
+			serial_number=excluded.serial_number,
+			not_before=excluded.not_before,
+			not_after=excluded.not_after,
+			fingerprint_sha256=excluded.fingerprint_sha256,
+			status=excluded.status,
+			updated_at=excluded.updated_at,
+			deleted_at=NULL`,
+		tenantID, name, certPath, keyPath, x509Cert.Subject.CommonName, sansCSV,
+		x509Cert.Issuer.CommonName, formatSerial(x509Cert.SerialNumber),
+		notBefore, notAfter, fingerprintHex, string(status), createdBy, now, now,
+	); err != nil {
+		_ = os.Remove(certPath)
+		_ = os.Remove(keyPath)
+		return nil, "", fmt.Errorf("persist certificate metadata: %w", err)
+	}
+
+	return &TLSCertificate{
+		ID:                "uploaded:" + name,
+		Name:              name,
+		Path:              certPath,
+		CommonName:        x509Cert.Subject.CommonName,
+		SANs:              sans,
+		Issuer:            x509Cert.Issuer.CommonName,
+		SerialNumber:      formatSerial(x509Cert.SerialNumber),
+		NotBefore:         notBefore,
+		NotAfter:          notAfter,
+		DaysRemaining:     daysUntil(notAfter),
+		FingerprintSHA256: fingerprintHex,
+		Status:            status,
+	}, fingerprintHex, nil
+}
+
+// ListUploadedCertificates returns all non-deleted rows in
+// coremail_uploaded_certificates for the supplied tenant. The
+// caller (admin handlers) gets a per-tenant view that respects
+// RBAC. The key path is returned so the admin UI can show "cert
+// is at /path" but the secret bytes are never returned.
+func (s *Service) ListUploadedCertificates(ctx context.Context, tenantID int64) ([]TLSCertificate, error) {
+	if s.db == nil {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, name, cert_path, key_path, common_name, sans,
+		       issuer, serial_number, not_before, not_after, fingerprint_sha256, status, created_at, updated_at
+		FROM coremail_uploaded_certificates
+		WHERE tenant_id = ? AND deleted_at IS NULL
+		ORDER BY name ASC`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TLSCertificate
+	for rows.Next() {
+		var c TLSCertificate
+		var sans string
+		var notBefore, notAfter *time.Time
+		var status string
+		var createdAt, updatedAt time.Time
+		var keyPath string
+		if err := rows.Scan(&c.ID, &c.Name, &c.Path, &keyPath, &c.CommonName, &sans,
+			&c.Issuer, &c.SerialNumber, &notBefore, &notAfter, &c.FingerprintSHA256,
+			&status, &createdAt, &updatedAt); err != nil {
+			return nil, err
+		}
+		c.KeyPath = keyPath
+		if notBefore != nil {
+			c.NotBefore = *notBefore
+		}
+		if notAfter != nil {
+			c.NotAfter = *notAfter
+		}
+		c.Status = CertStatus(status)
+		if sans != "" {
+			c.SANs = strings.Split(sans, ",")
+		}
+		c.DaysRemaining = daysUntil(c.NotAfter)
+		c.CreatedAt = &createdAt
+		c.UpdatedAt = &updatedAt
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 // ── Certificate Inventory ─────────────────────────────────
 
 func (s *Service) LoadCertificates(ctx context.Context) ([]TLSCertificate, error) {

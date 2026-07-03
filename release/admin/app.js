@@ -83,6 +83,14 @@ import * as logRules       from './modules/pages/log-rules.js';
 import * as securityExtra  from './modules/pages/security-extra.js';
 import * as migration      from './modules/pages/migration.js';
 import * as clustering     from './modules/pages/clustering.js';
+import * as sslPage        from './modules/pages/ssl.js';
+import * as antivirusPage  from './modules/pages/antivirus.js';
+import * as acceptancePage from './modules/pages/acceptance.js';
+import * as incomingRulesPage from './modules/pages/incoming-rules.js';
+import * as ftpBackupPage  from './modules/pages/ftp-backup.js';
+import * as fsAccessPage   from './modules/pages/fs-access.js';
+import * as migrationSourcesPage from './modules/pages/migration-sources.js';
+import * as settingsProtocolPage from './modules/pages/settings-protocol.js';
 import { renderPlannedPage } from './modules/pages/_planned.js';
 
 register('dashboard',                dashboard.renderDashboard);
@@ -111,55 +119,49 @@ register('updates',                  updates.renderUpdatesPage);
 register('updates/checks',           updates.renderUpdatesPage);
 register('license',                  license.renderLicensePage);
 register('security',                 security.renderSecurityPage);
-register('security/ssl',             securityExtra.renderSslPage);
-register('security/antispam',        (root) => securityExtra.renderSecurityExtraPage(root, {
-  title: 'Antivirus / anti-spam', subtitle: 'Per-domain antivirus settings.',
-  feature: 'Antivirus / anti-spam', endpoint: 'GET /api/v1/admin/antivirus (not yet)',
-}));
+register('security/ssl',             sslPage.renderSslPage);
+register('security/antispam',        antivirusPage.renderAntivirusPage);
 register('security/spam',            acl.renderACLPage);  // global spam control maps to ACL page in this build
-register('security/routing',         (root) => securityExtra.renderSecurityExtraPage(root, {
-  title: 'Acceptance & routing', subtitle: 'Per-domain routing rules.',
-  feature: 'Acceptance & routing', endpoint: 'GET /api/v1/admin/routing (not yet)',
-}));
-register('security/rules',           (root) => securityExtra.renderSecurityExtraPage(root, {
-  title: 'Incoming message rules', subtitle: 'Per-mailbox rules (auto-reply, forward, etc.).',
-  feature: 'Incoming message rules', endpoint: 'uses coremail_rules via /api/v1/webmail/rules (mailbox-scoped)',
-}));
+register('security/routing',         acceptancePage.renderAcceptancePage);
+register('security/rules',           incomingRulesPage.renderIncomingRulesPage);
 register('security/quarantine',      quarantine.renderQuarantinePage);
 register('admin/groups',             adminGroups.renderAdminGroupsPage);
 register('admin/users',              auditLog.renderAuditLogPage);
-register('admin/limits',             (root) => securityExtra.renderSecurityExtraPage(root, {
-  title: 'Domain admin limits', subtitle: 'Per-domain-administrator quotas and feature gates.',
-  feature: 'Domain admin limits', endpoint: 'uses coremail_account_classes — see /domains/groups or /accounts/classes',
-}));
+register('admin/limits',             accountClasses.renderAccountClassesPage);
 register('domains/groups',           domainGroups.renderDomainGroupsPage);
 register('domains/lists',            mailingLists.renderMailingListsPage);
 register('domains/public',           publicFolders.renderPublicFoldersPage);
 register('accounts/classes',         accountClasses.renderAccountClassesPage);
 register('backups/history',          backups.renderBackupsPage);  // re-use real backups page
-register('backups/ftp',              (root) => securityExtra.renderSecurityExtraPage(root, {
-  title: 'FTP backup & restore', subtitle: 'Off-host FTP target for nightly snapshots.',
-  feature: 'FTP backup', endpoint: 'uses cfg.Backup.Dir — see release/install.sh',
-}));
-register('backups/fs',               (root) => securityExtra.renderSecurityExtraPage(root, {
-  title: 'File system access', subtitle: 'Browse the local file system from the admin UI.',
-  feature: 'File system access', endpoint: 'GET /api/v1/admin/fs (not yet)',
-}));
+register('backups/ftp',              ftpBackupPage.renderFtpBackupPage);
+register('backups/fs',               fsAccessPage.renderFsAccessPage);
 register('migration',                migration.renderMigrationPage);
-register('migration/sources',        (root) => securityExtra.renderSecurityExtraPage(root, {
-  title: 'Source servers', subtitle: 'IMAP / Exchange sources available for migration.',
-  feature: 'Source servers', endpoint: 'uses internal/migration — see /migration for jobs',
-}));
+register('migration/sources',        migrationSourcesPage.renderMigrationSourcesPage);
 register('clustering',               (root) => clustering.renderClusteringPage(root, { title: 'Clustering setup' }));
 register('clustering/imap',          (root) => clustering.renderClusteringPage(root, { title: 'IMAP proxy' }));
 register('clustering/pop3',          (root) => clustering.renderClusteringPage(root, { title: 'POP3 proxy' }));
-register('clustering/webmail',       (root) => clustering.renderClusteringPage(root, { title: 'WebMail proxy' }));
+register('clustering/webmail',       (root) => clustering.renderClusteringPage(root, { title: 'WebMail / JMAP proxy' }));
 register('logs/rules',               logRules.renderLogRulesPage);
 register('logs/files',               logs.renderLogsPage);  // re-use logs page
-register('logs/server',              (root) => securityExtra.renderSecurityExtraPage(root, {
-  title: 'Log server settings', subtitle: 'Central log server destination.',
-  feature: 'Log server settings', endpoint: 'configure via /logs/rules destination field',
-}));
+register('logs/server',              logRules.renderLogRulesPage);  // log server destination = log rule with destination field
+
+// Settings split — 10 protocol sub-pages. Each route
+// reads its protocol id from the URL segment and queries
+// the matching backend sub-page.
+function protocolRouteHandler(root) {
+  const route = (location.hash || '').replace(/^#\//, '').replace(/^settings\/protocol\//, '').replace(/\?.*$/, '');
+  return settingsProtocolPage.renderSettingsProtocolPage(root, route || 'smtp_recv');
+}
+register('settings/protocol/smtp_recv', protocolRouteHandler);
+register('settings/protocol/smtp_tx',   protocolRouteHandler);
+register('settings/protocol/imap',      protocolRouteHandler);
+register('settings/protocol/pop3',      protocolRouteHandler);
+register('settings/protocol/webmail',   protocolRouteHandler);
+register('settings/protocol/webadmin',  protocolRouteHandler);
+register('settings/protocol/dns',       protocolRouteHandler);
+register('settings/protocol/remote_pop',protocolRouteHandler);
+register('settings/protocol/jmap',      protocolRouteHandler);
+register('settings/protocol/mobility',  protocolRouteHandler);
 
 setNotFound((root, route) => {
   renderPlannedPage(root, { feature: route, endpoint: '' });

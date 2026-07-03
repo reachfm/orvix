@@ -27,6 +27,7 @@ import (
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
 	"github.com/orvix/orvix/internal/runtime"
+	"github.com/orvix/orvix/internal/tlsmgmt"
 	"github.com/orvix/orvix/internal/updater"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/push"
@@ -123,6 +124,12 @@ type Handler struct {
 	// Wired in api.NewRouter; nil only in tests that pre-date
 	// the completion work.
 	licenseValidator *license.Validator
+
+	// tlsService is the admin-facing TLS / certificate manager
+	// (internal/tlsmgmt). Set once via SetTLSService. nil
+	// disables the SSL admin endpoints with a 503 rather than
+	// fabricating cert metadata.
+	tlsService *tlsmgmt.Service
 }
 
 // NewHandler creates a new Handler with dependencies.
@@ -202,6 +209,13 @@ func (h *Handler) SetSettingsStore(s *settings.Store) {
 // coremail / DNS / provisioning code paths.
 func (h *Handler) SetLicenseValidator(v *license.Validator) {
 	h.licenseValidator = v
+}
+
+// SetTLSService wires the admin TLS / certificate manager.
+// Optional (nil means the SSL endpoints return 503 instead
+// of fabricating metadata).
+func (h *Handler) SetTLSService(s *tlsmgmt.Service) {
+	h.tlsService = s
 }
 
 // Health returns server health status.
@@ -1090,12 +1104,23 @@ func (h *Handler) CreateUser(c fiber.Ctx) error {
 }
 
 // CreateMailbox creates a new CoreMail mailbox.
+//
+// The optional `class_id` field assigns the mailbox to an
+// existing account class (mailbox service class). When set,
+// the class's `default_quota_mb` / `max_quota_mb` /
+// `max_send_per_hour` / `max_recv_per_hour` are applied as
+// the defaults — the operator's per-request values still
+// win when supplied. The handler refuses to assign a
+// class_id that doesn't belong to the same tenant.
 func (h *Handler) CreateMailbox(c fiber.Ctx) error {
 	var req struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
-		Name     string `json:"name"`
-		QuotaMB  int64  `json:"quota_mb"`
+		Email         string `json:"email"`
+		Password      string `json:"password"`
+		Name          string `json:"name"`
+		QuotaMB       int64  `json:"quota_mb"`
+		ClassID       int64  `json:"class_id"`
+		SendLimitHour int64  `json:"send_limit_per_hour"`
+		RecvLimitHour int64  `json:"recv_limit_per_hour"`
 	}
 	if err := c.Bind().JSON(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
@@ -1146,6 +1171,40 @@ func (h *Handler) CreateMailbox(c fiber.Ctx) error {
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "mailbox already exists: " + req.Email})
 	}
 
+	// Resolve account class. The lookup returns 400 if the
+	// class doesn't exist OR doesn't belong to the same
+	// tenant. class_id == 0 leaves the mailbox unclassed.
+	var (
+		classDefaultQuota int64
+		classMaxQuota     int64
+		classSendPerHr    int64
+		classRecvPerHr    int64
+	)
+	if req.ClassID > 0 {
+		var (
+			dq, mq, msh, mrh int
+		)
+		classErr := sqlDB.QueryRow(`
+			SELECT default_quota_mb, max_quota_mb, max_send_per_hour, max_recv_per_hour
+			FROM coremail_account_classes
+			WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
+			req.ClassID, tenantID).Scan(&dq, &mq, &msh, &mrh)
+		if classErr == sql.ErrNoRows {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("account class %d not found in tenant %d", req.ClassID, tenantID)})
+		}
+		if classErr != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "class lookup failed"})
+		}
+		classDefaultQuota = int64(dq)
+		classMaxQuota = int64(mq)
+		classSendPerHr = int64(msh)
+		classRecvPerHr = int64(mrh)
+		// Per-class override: cap the operator-supplied quota at the class max.
+		if req.QuotaMB > classMaxQuota && classMaxQuota > 0 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("quota_mb %d exceeds class max %d", req.QuotaMB, classMaxQuota)})
+		}
+	}
+
 	argon2Hash, err := hashPasswordArgon2id(req.Password)
 	if err != nil {
 		h.logger.Error("failed to hash mailbox password", zap.Error(err))
@@ -1158,13 +1217,27 @@ func (h *Handler) CreateMailbox(c fiber.Ctx) error {
 	}
 	quotaMB := req.QuotaMB
 	if quotaMB <= 0 {
+		quotaMB = classDefaultQuota
+	}
+	if quotaMB <= 0 {
 		quotaMB = 1024
+	}
+	sendPerHr := req.SendLimitHour
+	if sendPerHr <= 0 {
+		sendPerHr = classSendPerHr
+	}
+	recvPerHr := req.RecvLimitHour
+	if recvPerHr <= 0 {
+		recvPerHr = classRecvPerHr
 	}
 
 	result, err := sqlDB.Exec(
-		`INSERT INTO coremail_mailboxes (domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme, status, quota_mb, is_admin, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, 'argon2id', 'active', ?, 0, ?, ?)`,
-		domainID, tenantID, localPart, req.Email, displayName, argon2Hash, quotaMB, time.Now().UTC(), time.Now().UTC(),
+		`INSERT INTO coremail_mailboxes
+		   (domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme, status,
+		    quota_mb, is_admin, send_limit_per_hour, recv_limit_per_hour, class_id, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, 'argon2id', 'active', ?, 0, ?, ?, ?, ?, ?)`,
+		domainID, tenantID, localPart, req.Email, displayName, argon2Hash, quotaMB,
+		sendPerHr, recvPerHr, req.ClassID, time.Now().UTC(), time.Now().UTC(),
 	)
 	if err != nil {
 		h.logger.Error("failed to create mailbox", zap.Error(err))

@@ -29,6 +29,22 @@ const GROUPS = [
     { route: 'settings/build',    labelKey: 'sidebar.item.buildInfo'        },
   ]},
 
+  // Settings split — 10 protocol sub-pages. The
+  // backend exposes one endpoint per protocol under
+  // /api/v1/admin/settings/protocol/:protocol.
+  { id: 'protocolSettings', labelKey: 'sidebar.group.protocolSettings', items: [
+    { route: 'settings/protocol/smtp_recv', labelKey: 'sidebar.item.smtpRecv'   },
+    { route: 'settings/protocol/smtp_tx',   labelKey: 'sidebar.item.smtpTx'     },
+    { route: 'settings/protocol/imap',      labelKey: 'sidebar.item.imap'       },
+    { route: 'settings/protocol/pop3',      labelKey: 'sidebar.item.pop3'       },
+    { route: 'settings/protocol/webmail',   labelKey: 'sidebar.item.webmailS'   },
+    { route: 'settings/protocol/webadmin',  labelKey: 'sidebar.item.webadminS'  },
+    { route: 'settings/protocol/dns',       labelKey: 'sidebar.item.dnsProto'   },
+    { route: 'settings/protocol/remote_pop',labelKey: 'sidebar.item.remotePop'  },
+    { route: 'settings/protocol/jmap',      labelKey: 'sidebar.item.jmap'       },
+    { route: 'settings/protocol/mobility',  labelKey: 'sidebar.item.mobility'   },
+  ]},
+
   { id: 'services', labelKey: 'sidebar.group.services', items: [
     { route: 'services',          labelKey: 'sidebar.item.services'         },
     { route: 'runtime-listeners', labelKey: 'sidebar.item.runtimeListeners' },
