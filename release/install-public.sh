@@ -468,18 +468,23 @@ ERR
         bundle_sha_used="${ORVIX_RESOLVED_SHA:-}"
         [ -n "$bundle_sha" ] && bundle_sha_used="$bundle_sha"
 
-        # When no explicit sha256 is provided, try to download the
-        # .sha256 sidecar from the same base URL (GitHub Releases
-        # workflow). If the sidecar is unavailable we warn and
-        # continue without verification.
-        if [ -z "$bundle_sha_used" ] && [ -z "$ORVIX_SKIP_BUNDLE_VERIFY" ]; then
-            local auto_sha
-            auto_sha="$(try_download_sha256 "$bundle_url" || true)"
-            if [ -n "$auto_sha" ]; then
-                bundle_sha_used="$auto_sha"
-                info "auto-resolved bundle sha256: $bundle_sha_used"
+        # When no explicit sha256 is provided, download the .sha256
+        # sidecar from the same base URL (GitHub Releases workflow).
+        # The sidecar MUST be present — remote bundles are never
+        # accepted without checksum verification. Only local developer
+        # artifacts (--skip-bundle-verify) may bypass this gate.
+        if [ -z "$bundle_sha_used" ]; then
+            if [ -n "$ORVIX_SKIP_BUNDLE_VERIFY" ]; then
+                warn "bundle sha256 verification SKIPPED (--skip-bundle-verify). Only use this for local development."
             else
-                warn "could not download .sha256 sidecar for bundle (install will proceed without verification)"
+                local auto_sha
+                auto_sha="$(try_download_sha256 "$bundle_url" || true)"
+                if [ -n "$auto_sha" ]; then
+                    bundle_sha_used="$auto_sha"
+                    info "auto-resolved bundle sha256: $bundle_sha_used"
+                else
+                    fail "cannot verify bundle integrity: .sha256 sidecar not found at ${bundle_url}.sha256 (use --skip-bundle-verify to bypass)"
+                fi
             fi
         fi
 

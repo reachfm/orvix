@@ -424,6 +424,15 @@ tar -C "$WORK_DIR" -czf "$ARCHIVE" orvix \
 sha256sum "$ARCHIVE" | awk -v a="$ARCHIVE" '{printf "%s  %s\n", $1, a}' > "$ARCHIVE.sha256"
 info "sha256: $(awk '{print $1}' "$ARCHIVE.sha256")  $ARCHIVE"
 
+# Also create stable-channel copies so the public installer can
+# resolve the bundle from a predictable GitHub Releases URL:
+#   orvix-enterprise-mail-stable-linux-amd64.tar.gz
+#   orvix-enterprise-mail-stable-linux-amd64.tar.gz.sha256
+STABLE_ARCHIVE="$OUTPUT_DIR/orvix-enterprise-mail-${RESOLVED_CHANNEL}-${TARGET_OS}-${TARGET_ARCH}.tar.gz"
+cp "$ARCHIVE" "$STABLE_ARCHIVE"
+sha256sum "$STABLE_ARCHIVE" | awk -v a="$STABLE_ARCHIVE" '{printf "%s  %s\n", $1, a}' > "$STABLE_ARCHIVE.sha256"
+info "stable alias: $STABLE_ARCHIVE"
+
 # Pull the binary out of the tarball and re-run version to be 100%
 # sure the sealed binary is the same one we built (catches a corrupt
 # tar boundary on architectures with padding edge cases).
