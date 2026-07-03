@@ -522,6 +522,20 @@ for need in reject quarantine tag; do
 done
 pass "incoming-rules.js action <select> exposes only runtime-supported actions {reject, quarantine, tag} (BLOCKER 4)"
 
+# ── 36b. CTO FIX 4 — incoming action_target helper text must be runtime-truthful ──
+# The legacy "folder / label / forward address" wording refers to
+# actions (move / label / forward) the runtime no longer executes.
+# The active actions are reject / quarantine / tag, so the helper
+# text must describe the new contract. We assert that the legacy
+# wording is gone and that the new wording is present.
+if grep -qE "folder / label / forward|folder / label|forward address" "$INCOMING_JS"; then
+    fail "incoming-rules.js still references legacy 'folder / label / forward' / 'forward address' wording (FIX 4)"
+fi
+if ! grep -qE "Action value" "$INCOMING_JS"; then
+    fail "incoming-rules.js is missing the runtime-truthful 'Action value' field label (FIX 4)"
+fi
+pass "incoming-rules.js action_target helper text describes the runtime contract (FIX 4)"
+
 # ── 37. CTO BLOCKER 2 — No SFTP askpass secret-on-disk pattern ─────
 # The runtime must never write a decrypted SFTP password to a
 # shell script (no SSH_ASKPASS=... helper file containing the

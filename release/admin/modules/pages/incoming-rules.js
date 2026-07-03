@@ -80,7 +80,7 @@ async function openForm(body, list, id) {
   form.appendChild(textField('Value', 'value', r.value || ''));
   form.appendChild(select('Action', 'action', r.action || 'reject',
     ['reject', 'quarantine', 'tag']));
-  form.appendChild(textField('Action target (folder / label / forward address)', 'action_target', r.action_target || ''));
+  form.appendChild(textField('Action value (tag/header label or quarantine reason)', 'action_target', r.action_target || ''));
   form.appendChild(select('Apply to', 'apply_to', r.apply_to || 'all',
     ['all', 'incoming_only', 'outgoing_only']));
   form.appendChild(checkField('Stop processing further rules', 'stop_processing', r.stop_processing === true));
