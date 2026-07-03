@@ -425,9 +425,10 @@ require_root() {
 }
 
 prompt_domain() {
-    local domain="${ORVIX_PRIMARY_DOMAIN:-}"
+    local domain="${ORVIX_PRIMARY_DOMAIN:-${ORVIX_DOMAIN:-}}"
     while [ -z "$domain" ]; do
-        read -rp "Primary email domain (example.com): " domain
+        read_prompt_line domain "Primary email domain (example.com): " \
+            "primary domain is required; rerun with ORVIX_PRIMARY_DOMAIN=example.com or ORVIX_DOMAIN=example.com"
     done
     [[ "$domain" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z]{2,}$ ]] || fail "invalid domain: $domain"
     echo "$domain"
@@ -436,10 +437,50 @@ prompt_domain() {
 prompt_email() {
     local email="${ORVIX_ADMIN_EMAIL:-}"
     while [ -z "$email" ]; do
-        read -rp "Admin email address: " email
+        read_prompt_line email "Admin email address: " \
+            "admin email is required; rerun with ORVIX_ADMIN_EMAIL=admin@example.com"
     done
     [[ "$email" =~ ^[^@]+@[^@]+\.[^@]+$ ]] || fail "invalid email: $email"
     echo "$email"
+}
+
+prompt_input_path() {
+    if [ -n "${ORVIX_PROMPT_INPUT_FD:-}" ]; then
+        printf '/dev/fd/%s\n' "$ORVIX_PROMPT_INPUT_FD"
+        return 0
+    fi
+    if [ -r /dev/tty ]; then
+        printf '/dev/tty\n'
+        return 0
+    fi
+    return 1
+}
+
+read_prompt_line() {
+    local __var="$1"
+    local prompt="$2"
+    local error_message="$3"
+    local input_dev
+    if ! input_dev="$(prompt_input_path)"; then
+        fail "$error_message (no interactive terminal is available; curl-pipe installs cannot read prompts from stdin)"
+    fi
+    printf '%s' "$prompt" >&2
+    local value=""
+    if ! IFS= read -r value <"$input_dev"; then
+        fail "$error_message (input ended before a value was provided)"
+    fi
+    printf -v "$__var" '%s' "$value"
+}
+
+decode_admin_password_b64() {
+    local encoded="${ORVIX_ADMIN_PASSWORD_B64:-}"
+    [ -n "$encoded" ] || return 1
+    local decoded
+    if ! decoded="$(printf '%s' "$encoded" | base64 -d 2>/dev/null)"; then
+        fail "ORVIX_ADMIN_PASSWORD_B64 is not valid base64"
+    fi
+    [ -n "$decoded" ] || fail "ORVIX_ADMIN_PASSWORD_B64 decoded to an empty password"
+    printf '%s' "$decoded"
 }
 
 prompt_password() {
@@ -466,19 +507,39 @@ prompt_password() {
     # always read from /dev/tty (the controlling terminal).
     # Tests set ORVIX_PROMPT_INPUT_FD=0 to feed a password
     # through the script's stdin without needing a real TTY.
-    local input_dev="/dev/tty"
-    if [ -n "${ORVIX_PROMPT_INPUT_FD:-}" ]; then
-        input_dev="/dev/fd/${ORVIX_PROMPT_INPUT_FD}"
-    fi
-
     local password="${ORVIX_ADMIN_PASSWORD:-}"
+    if [ -z "$password" ] && [ -n "${ORVIX_ADMIN_PASSWORD_B64:-}" ]; then
+        password="$(decode_admin_password_b64)"
+    fi
     local confirm
     while [ -z "$password" ]; do
+        local input_dev="/dev/tty"
+        if [ -n "${ORVIX_PROMPT_INPUT_FD:-}" ]; then
+            input_dev="/dev/fd/${ORVIX_PROMPT_INPUT_FD}"
+        elif [ ! -r "$input_dev" ]; then
+            fail "admin password is required; rerun with ORVIX_ADMIN_PASSWORD or ORVIX_ADMIN_PASSWORD_B64 (no interactive terminal is available; curl-pipe installs cannot read prompts from stdin)"
+        fi
         printf 'Admin password (8-72 bytes, hidden): ' >&2
-        IFS= read -r -s password <"$input_dev" 2>/dev/null || password=""
+        if [ -n "${ORVIX_PROMPT_INPUT_FD:-}" ]; then
+            IFS= read -r -s -u "$ORVIX_PROMPT_INPUT_FD" password 2>/dev/null || {
+                printf '\n' >&2
+                fail "admin password is required; input ended before a password was provided"
+            }
+        elif ! IFS= read -r -s password <"$input_dev" 2>/dev/null; then
+            printf '\n' >&2
+            fail "admin password is required; input ended before a password was provided"
+        fi
         printf '\n' >&2
         printf 'Confirm admin password: ' >&2
-        IFS= read -r -s confirm <"$input_dev" 2>/dev/null || confirm=""
+        if [ -n "${ORVIX_PROMPT_INPUT_FD:-}" ]; then
+            IFS= read -r -s -u "$ORVIX_PROMPT_INPUT_FD" confirm 2>/dev/null || {
+                printf '\n' >&2
+                fail "admin password confirmation is required; input ended before confirmation was provided"
+            }
+        elif ! IFS= read -r -s confirm <"$input_dev" 2>/dev/null; then
+            printf '\n' >&2
+            fail "admin password confirmation is required; input ended before confirmation was provided"
+        fi
         printf '\n' >&2
         if [ "$password" != "$confirm" ]; then
             printf 'Passwords do not match\n' >&2

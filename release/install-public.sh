@@ -43,10 +43,13 @@ set -euo pipefail
 #     the install path never needs and which adds a few MB.
 #
 # Environment variables (full list):
-#   ORVIX_DOMAIN            Primary mail domain
+#   ORVIX_PRIMARY_DOMAIN    Primary mail domain
+#   ORVIX_DOMAIN            Backward-compatible primary mail domain alias
 #   ORVIX_PUBLIC_IPV4       Public IPv4 of this host
 #   ORVIX_ADMIN_EMAIL       Admin email address
 #   ORVIX_ADMIN_PASSWORD    Admin password (8-72 bytes)
+#   ORVIX_ADMIN_PASSWORD_B64
+#                           Base64 admin password alternative
 #   ORVIX_SETUP_HTTPS       If set, invoke setup-https.sh after install
 #   ORVIX_HARDEN_FIREWALL   If set, run firewall hardening after install
 #   ORVIX_NON_INTERACTIVE   If set, require ORVIX_DOMAIN + ORVIX_PUBLIC_IPV4
@@ -94,6 +97,12 @@ Orvix Enterprise Mail — public installer entrypoint
 Usage:
   curl -fsSL https://raw.githubusercontent.com/reachfm/orvix/main/release/install-public.sh | sudo bash
 
+Non-interactive:
+  ORVIX_PRIMARY_DOMAIN=example.com \
+  ORVIX_ADMIN_EMAIL=admin@example.com \
+  ORVIX_ADMIN_PASSWORD='strong-password' \
+  curl -fsSL https://raw.githubusercontent.com/reachfm/orvix/main/release/install-public.sh | sudo -E bash
+
 Resolution modes (first match wins):
   --bundle-url <url>            Install from a specific bundle tarball URL
                                 (escape hatch for air-gapped prod).
@@ -106,10 +115,12 @@ Resolution modes (first match wins):
                                 --version is supplied (default: stable).
 
 Environment variables:
-  ORVIX_DOMAIN                  Primary mail domain (required in non-interactive mode)
+  ORVIX_PRIMARY_DOMAIN          Primary mail domain (required in non-interactive mode)
+  ORVIX_DOMAIN                  Backward-compatible primary mail domain alias
   ORVIX_PUBLIC_IPV4              Public IPv4 (required in non-interactive mode)
   ORVIX_ADMIN_EMAIL              Admin email (optional; prompted if unset)
   ORVIX_ADMIN_PASSWORD           Admin password (optional; prompted if unset)
+  ORVIX_ADMIN_PASSWORD_B64       Base64 admin password alternative
   ORVIX_SETUP_HTTPS              Run HTTPS setup after install
   ORVIX_HARDEN_FIREWALL          Run firewall hardening after install
   ORVIX_NON_INTERACTIVE          Non-interactive mode
@@ -347,7 +358,7 @@ REQUIRED
 
 main() {
     local non_interactive="${ORVIX_NON_INTERACTIVE:-}"
-    local domain="${ORVIX_DOMAIN:-}"
+    local domain="${ORVIX_PRIMARY_DOMAIN:-${ORVIX_DOMAIN:-}}"
     local public_ipv4="${ORVIX_PUBLIC_IPV4:-}"
     local admin_email="${ORVIX_ADMIN_EMAIL:-}"
     local admin_password="${ORVIX_ADMIN_PASSWORD:-}"
@@ -542,6 +553,7 @@ ERR
     info "  public IPv4  : ${public_ipv4:-<auto or interactive prompt>}"
 
     # ── Export env vars install.sh expects ──
+    export ORVIX_PRIMARY_DOMAIN="$domain"
     export ORVIX_DOMAIN="$domain"
     export ORVIX_PUBLIC_IPV4="$public_ipv4"
     export ORVIX_ADMIN_EMAIL="$admin_email"

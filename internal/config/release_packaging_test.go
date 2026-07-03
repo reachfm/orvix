@@ -9,6 +9,7 @@
 package config
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,6 +18,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // bashPath returns the bash interpreter to use for `bash -n`
@@ -170,6 +172,121 @@ func TestPublicInstallerMatchesReleaseBundleLayout(t *testing.T) {
 	}
 	if strings.Contains(validateBody, "release/VERSION") {
 		t.Fatal("install-public.sh must not require release/VERSION; builder places VERSION at bundle root")
+	}
+}
+
+func runInstallPromptHarness(t *testing.T, mode string, env map[string]string) (int, string) {
+	t.Helper()
+	root := repoRoot(t)
+	installer := mustRead(t, filepath.Join(root, "release", "install.sh"))
+	installer = strings.Replace(installer, "\nmain \"$@\"\n", "\n# main disabled by test harness\n", 1)
+
+	dir := t.TempDir()
+	harness := filepath.Join(dir, "prompt-harness.sh")
+	body := installer + `
+fail() { printf 'ERROR:%s\n' "$*" >&2; exit 1; }
+log_detail() { :; }
+render_failure() { :; }
+CURRENT_STEP="prompt-test"
+if [ -n "${TEST_INPUT_FILE:-}" ]; then
+	exec 3<"$TEST_INPUT_FILE"
+	export ORVIX_PROMPT_INPUT_FD=3
+fi
+case "${1:-}" in
+	domain) prompt_domain ;;
+	email) prompt_email ;;
+	password) prompt_password ;;
+	*) printf 'unknown mode\n' >&2; exit 2 ;;
+esac
+`
+	if err := os.WriteFile(harness, []byte(body), 0o700); err != nil {
+		t.Fatalf("write harness: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bashPath(t), harness, mode)
+	cmd.Stdin = strings.NewReader("")
+	cmd.Env = append(os.Environ(), "ORVIX_PROMPT_INPUT_FD=3")
+	for k, v := range env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("prompt harness timed out; possible infinite prompt loop\n%s", out)
+	}
+	if err == nil {
+		return 0, string(out)
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		return exitErr.ExitCode(), string(out)
+	}
+	t.Fatalf("run harness: %v\n%s", err, out)
+	return 1, string(out)
+}
+
+func TestInstallPromptsFailClosedOnCurlPipeEOF(t *testing.T) {
+	for _, mode := range []string{"domain", "email", "password"} {
+		t.Run(mode, func(t *testing.T) {
+			code, out := runInstallPromptHarness(t, mode, nil)
+			if code == 0 {
+				t.Fatalf("%s prompt must fail on EOF/no prompt input; output:\n%s", mode, out)
+			}
+			if !strings.Contains(out, "input ended") && !strings.Contains(out, "required") {
+				t.Fatalf("%s prompt failure must be clear, got:\n%s", mode, out)
+			}
+		})
+	}
+}
+
+func TestInstallPromptsSupportEnvNonInteractive(t *testing.T) {
+	cases := []struct {
+		mode string
+		env  map[string]string
+		want string
+	}{
+		{"domain", map[string]string{"ORVIX_PRIMARY_DOMAIN": "example.com"}, "example.com"},
+		{"domain", map[string]string{"ORVIX_DOMAIN": "example.org"}, "example.org"},
+		{"email", map[string]string{"ORVIX_ADMIN_EMAIL": "admin@example.com"}, "admin@example.com"},
+		{"password", map[string]string{"ORVIX_ADMIN_PASSWORD": "StrongPass123!"}, "StrongPass123!"},
+		{"password", map[string]string{"ORVIX_ADMIN_PASSWORD_B64": "U3Ryb25nUGFzczEyMyE="}, "StrongPass123!"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.mode+"_"+tc.want, func(t *testing.T) {
+			code, out := runInstallPromptHarness(t, tc.mode, tc.env)
+			if code != 0 {
+				t.Fatalf("expected success, got exit %d\n%s", code, out)
+			}
+			if strings.TrimSpace(out) != tc.want {
+				t.Fatalf("unexpected output: got %q want %q", strings.TrimSpace(out), tc.want)
+			}
+		})
+	}
+}
+
+func TestInstallPasswordPromptReadsPromptFDAndDoesNotSpinOnConfirmationEOF(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "prompt-input")
+	if err := os.WriteFile(input, []byte("StrongPass123!\nStrongPass123!\n"), 0o600); err != nil {
+		t.Fatalf("write input: %v", err)
+	}
+	code, out := runInstallPromptHarness(t, "password", map[string]string{"TEST_INPUT_FILE": input})
+	if code != 0 {
+		t.Fatalf("expected prompt fd success, got exit %d\n%s", code, out)
+	}
+	if !strings.Contains(out, "StrongPass123!") {
+		t.Fatalf("password output missing from harness output: %q", strings.TrimSpace(out))
+	}
+
+	eofInput := filepath.Join(dir, "eof-input")
+	if err := os.WriteFile(eofInput, []byte("StrongPass123!\n"), 0o600); err != nil {
+		t.Fatalf("write eof input: %v", err)
+	}
+	code, out = runInstallPromptHarness(t, "password", map[string]string{"TEST_INPUT_FILE": eofInput})
+	if code == 0 {
+		t.Fatalf("confirmation EOF must fail, got success\n%s", out)
+	}
+	if !strings.Contains(out, "confirmation is required") {
+		t.Fatalf("confirmation EOF failure must be clear, got:\n%s", out)
 	}
 }
 
