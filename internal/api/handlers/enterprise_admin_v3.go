@@ -683,6 +683,14 @@ func (h *Handler) UpdateAcceptanceRule(c fiber.Ctx) error {
 	if err := json.Unmarshal(c.Body(), &body); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid JSON body")
 	}
+	// PATCH must run the same runtime-truthful action
+	// contract as POST. Without this call, an operator
+	// could PATCH an existing rule with action=redirect
+	// or action=hold and the row would silently store an
+	// inert value the SMTP receiver never executes.
+	if err := validateAcceptanceRule(body); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
 	now := time.Now().UTC()
 	res, err := h.sqlDB().ExecContext(c.Context(), `
 		UPDATE coremail_acceptance_rules SET

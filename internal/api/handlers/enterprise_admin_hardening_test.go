@@ -290,3 +290,191 @@ func TestIncomingActionCanonicalisedAfterInsert(t *testing.T) {
 		t.Fatalf("list response still contains legacy action=move: %s", resp.body)
 	}
 }
+
+// =====================================================================
+// FIX 1 — UpdateAcceptanceRule must validate actions
+// =====================================================================
+
+// acceptanceIDFromCreateBody extracts the rule id from
+// a POST /api/v1/admin/acceptance-rules 201 response
+// body. The enterprise admin handler returns
+//   {"id":<int>,"name":...}
+// on create; we parse it back as JSON so each PATCH test
+// can target the row it just created. The helper lives
+// here (not next to postJSON) because it is only used by
+// the PATCH regression suite.
+func acceptanceIDFromCreateBody(t *testing.T, body string) int64 {
+	t.Helper()
+	var resp struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("parse create response %q: %v", body, err)
+	}
+	if resp.ID == 0 {
+		t.Fatalf("create response has id=0: %s", body)
+	}
+	return resp.ID
+}
+
+// TestAcceptancePatchRejectsUnsupportedActions pins the
+// runtime-truthful contract on the PATCH path. The CTO
+// review found that UpdateAcceptanceRule did not call
+// validateAcceptanceRule, so a rule created with a valid
+// action could be silently mutated into an inert value
+// via PATCH. This test seeds an accept rule and tries to
+// PATCH the action to redirect / hold; both must 400.
+func TestAcceptancePatchRejectsUnsupportedActions(t *testing.T) {
+	router, _ := newEnterpriseRouter(t)
+	token := enterpriseLoginForTest(t, router, "admin@test.local", "TestPassword123!")
+	csrf := enterpriseCSRFForTest(t, router, token)
+
+	create := postJSON(t, router,
+		"/api/v1/admin/acceptance-rules",
+		token, csrf,
+		`{"name":"seed","priority":50,"enabled":true,"scope":"global","action":"accept"}`)
+	if create.status != http.StatusCreated {
+		t.Fatalf("seed create: want 201, got %d %s", create.status, create.body)
+	}
+	id := acceptanceIDFromCreateBody(t, create.body)
+
+	for _, badAction := range []string{"redirect", "hold", "bogus", ""} {
+		t.Run("action="+badAction, func(t *testing.T) {
+			body := fmt.Sprintf(
+				`{"name":"seed","priority":50,"enabled":true,"scope":"global","action":"%s"}`,
+				badAction,
+			)
+			resp := patchJSON(t, router,
+				fmt.Sprintf("/api/v1/admin/acceptance-rules/%d", id),
+				token, csrf, body)
+			if resp.status == http.StatusOK {
+				t.Fatalf("PATCH accepted unsupported action=%q; body=%s", badAction, resp.body)
+			}
+			if resp.status != http.StatusBadRequest {
+				t.Fatalf("PATCH action=%q: want 400, got %d body=%s", badAction, resp.status, resp.body)
+			}
+		})
+	}
+}
+
+// TestAcceptancePatchRejectsRedirectToEvenWithSupportedAction
+// catches the regression where a PATCH carrying a
+// redirect_to field on a supported action would silently
+// drop the field. With the redirect contract removed the
+// payload must be rejected outright, even on accept.
+func TestAcceptancePatchRejectsRedirectToEvenWithSupportedAction(t *testing.T) {
+	router, _ := newEnterpriseRouter(t)
+	token := enterpriseLoginForTest(t, router, "admin@test.local", "TestPassword123!")
+	csrf := enterpriseCSRFForTest(t, router, token)
+
+	create := postJSON(t, router,
+		"/api/v1/admin/acceptance-rules",
+		token, csrf,
+		`{"name":"seed","priority":50,"enabled":true,"scope":"global","action":"accept"}`)
+	if create.status != http.StatusCreated {
+		t.Fatalf("seed create: want 201, got %d %s", create.status, create.body)
+	}
+	id := acceptanceIDFromCreateBody(t, create.body)
+
+	for _, goodAction := range []string{"accept", "reject", "quarantine"} {
+		t.Run("action="+goodAction, func(t *testing.T) {
+			body := fmt.Sprintf(
+				`{"name":"seed","priority":50,"enabled":true,"scope":"global","action":"%s","redirect_to":"forward@example.com"}`,
+				goodAction,
+			)
+			resp := patchJSON(t, router,
+				fmt.Sprintf("/api/v1/admin/acceptance-rules/%d", id),
+				token, csrf, body)
+			if resp.status == http.StatusOK {
+				t.Fatalf("PATCH action=%q + redirect_to was accepted; body=%s", goodAction, resp.body)
+			}
+			if resp.status != http.StatusBadRequest {
+				t.Fatalf("PATCH action=%q + redirect_to: want 400, got %d body=%s",
+					goodAction, resp.status, resp.body)
+			}
+			if !strings.Contains(resp.body, "redirect_to") {
+				t.Fatalf("expected error mentioning redirect_to, got %s", resp.body)
+			}
+		})
+	}
+}
+
+// TestAcceptancePatchAcceptsAllRuntimeActions confirms the
+// PATCH path is fully wired into the validator — every
+// runtime-supported action must round-trip through
+// PATCH.
+func TestAcceptancePatchAcceptsAllRuntimeActions(t *testing.T) {
+	router, _ := newEnterpriseRouter(t)
+	token := enterpriseLoginForTest(t, router, "admin@test.local", "TestPassword123!")
+	csrf := enterpriseCSRFForTest(t, router, token)
+
+	create := postJSON(t, router,
+		"/api/v1/admin/acceptance-rules",
+		token, csrf,
+		`{"name":"seed","priority":50,"enabled":true,"scope":"global","action":"accept"}`)
+	if create.status != http.StatusCreated {
+		t.Fatalf("seed create: want 201, got %d %s", create.status, create.body)
+	}
+	id := acceptanceIDFromCreateBody(t, create.body)
+
+	for _, action := range []string{"accept", "reject", "quarantine"} {
+		t.Run(action, func(t *testing.T) {
+			body := fmt.Sprintf(
+				`{"name":"seed","priority":50,"enabled":true,"scope":"global","action":"%s"}`,
+				action,
+			)
+			resp := patchJSON(t, router,
+				fmt.Sprintf("/api/v1/admin/acceptance-rules/%d", id),
+				token, csrf, body)
+			if resp.status != http.StatusOK {
+				t.Fatalf("PATCH action=%q: want 200, got %d body=%s", action, resp.status, resp.body)
+			}
+		})
+	}
+}
+
+// TestAcceptancePatchPersistsCanonicalAction makes sure
+// the value stored on the row after PATCH is exactly the
+// runtime-supported canonical string. This catches a
+// regression where validateAcceptanceRule returned nil
+// but the SQL writer persisted the raw payload (e.g.
+// "REDIRECT" uppercased or with trailing whitespace).
+func TestAcceptancePatchPersistsCanonicalAction(t *testing.T) {
+	router, _ := newEnterpriseRouter(t)
+	token := enterpriseLoginForTest(t, router, "admin@test.local", "TestPassword123!")
+	csrf := enterpriseCSRFForTest(t, router, token)
+
+	create := postJSON(t, router,
+		"/api/v1/admin/acceptance-rules",
+		token, csrf,
+		`{"name":"seed","priority":50,"enabled":true,"scope":"global","action":"accept"}`)
+	if create.status != http.StatusCreated {
+		t.Fatalf("seed create: want 201, got %d %s", create.status, create.body)
+	}
+	id := acceptanceIDFromCreateBody(t, create.body)
+
+	patch := patchJSON(t, router,
+		fmt.Sprintf("/api/v1/admin/acceptance-rules/%d", id),
+		token, csrf,
+		`{"name":"seed","priority":50,"enabled":true,"scope":"global","action":"quarantine"}`)
+	if patch.status != http.StatusOK {
+		t.Fatalf("PATCH: want 200, got %d %s", patch.status, patch.body)
+	}
+
+	// Re-list and check that the action string is
+	// exactly "quarantine" — never the legacy
+	// "redirect" / "hold" / integer code / mixed-case.
+	listResp := getJSON(t, router,
+		"/api/v1/admin/acceptance-rules", token)
+	if listResp.status != http.StatusOK {
+		t.Fatalf("list: want 200, got %d %s", listResp.status, listResp.body)
+	}
+	if !strings.Contains(listResp.body, `"action":"quarantine"`) {
+		t.Fatalf("expected action=quarantine after PATCH, got %s", listResp.body)
+	}
+	for _, bad := range []string{`"action":"redirect"`, `"action":"hold"`, `"action":"REDIRECT"`} {
+		if strings.Contains(listResp.body, bad) {
+			t.Fatalf("PATCH left unsupported action in DB: %s in body %s", bad, listResp.body)
+		}
+	}
+}
