@@ -244,14 +244,24 @@ if [ "$MODE" = "build" ]; then
         fi
         pass "sealed binary version matches bundle: $EMBED_VERSION"
 
-        # Embedded commit must come back when asked
-        "$BDIR/orvix/bin/orvix" version --full | grep -E '^[[:space:]]*commit:[[:space:]]*[0-9a-f]{12,}' >/dev/null \
-            || fail "sealed binary does not report a commit in version --full"
-        pass "sealed binary reports a commit"
+        # Embedded commit must match git HEAD (robust parse,
+        # not fragile grep against aligned pretty-print output).
+        BIN_FULL="$("$BDIR/orvix/bin/orvix" version --full)"
+        EMBEDDED_COMMIT="$(echo "$BIN_FULL" | awk '/^[[:space:]]*commit:[[:space:]]*/ {sub(/^[[:space:]]*commit:[[:space:]]*/, ""); print; exit}')"
+        [ -n "$EMBEDDED_COMMIT" ] || fail "sealed binary does not report a commit"
+        GIT_HEAD="$(git rev-parse HEAD)"
+        GIT_SHORT="$(git rev-parse --short HEAD)"
+        if [ "$EMBEDDED_COMMIT" != "$GIT_HEAD" ]; then
+            case "$EMBEDDED_COMMIT" in
+                "$GIT_SHORT"*) ;;
+                *) fail "sealed binary commit $EMBEDDED_COMMIT does not match git HEAD $GIT_HEAD" ;;
+            esac
+        fi
+        pass "sealed binary commit matches git HEAD: $EMBEDDED_COMMIT"
 
-        "$BDIR/orvix/bin/orvix" version --full | grep -E '^[[:space:]]*channel:[[:space:]]*[a-z]+' >/dev/null \
-            || fail "sealed binary does not report a channel in version --full"
-        pass "sealed binary reports a channel"
+        EMBEDDED_CHANNEL="$(echo "$BIN_FULL" | awk '/^[[:space:]]*channel:[[:space:]]*/ {sub(/^[[:space:]]*channel:[[:space:]]*/, ""); print; exit}')"
+        [ -n "$EMBEDDED_CHANNEL" ] || fail "sealed binary does not report a channel"
+        pass "sealed binary reports channel: $EMBEDDED_CHANNEL"
     else
         warn "sealed binary at $BDIR/orvix/bin/orvix is not executable; skipping metadata check (smoke ran without --build)"
     fi

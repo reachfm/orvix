@@ -320,16 +320,32 @@ magic_bytes="$(read_elf_magic_hex "$BIN_OUT")"
 # ── 3. Verify embedded metadata ───────────────────────────────────
 EMBEDDED_VERSION="$("$BIN_OUT" version | awk '{print $2}' || true)"
 EMBEDDED_FULL="$("$BIN_OUT" version --full || true)"
-case "$EMBEDDED_FULL" in
-    *"commit: $GIT_SHORT_COMMIT"*) ;;
-    *) printf 'expected commit %s in:\n%s\n' "$GIT_SHORT_COMMIT" "$EMBEDDED_FULL" >&2; fail "embedded commit mismatch" 3 ;;
-esac
-case "$EMBEDDED_FULL" in
-    *"channel: $RESOLVED_CHANNEL"*) ;;
-    *) printf 'expected channel %s in:\n%s\n' "$RESOLVED_CHANNEL" "$EMBEDDED_FULL" >&2; fail "embedded channel mismatch" 3 ;;
-esac
+
+# Parse embedded commit robustly — find line with optional whitespace
+# + "commit:", strip prefix, trim whitespace, extract the SHA only.
+# This handles any alignment/whitespace the pretty-printer uses.
+EMBEDDED_COMMIT="$(echo "$EMBEDDED_FULL" | awk '/^[[:space:]]*commit:[[:space:]]*/ {sub(/^[[:space:]]*commit:[[:space:]]*/, ""); print; exit}')"
+if [ -z "$EMBEDDED_COMMIT" ]; then
+    printf 'could not parse commit from:\n%s\n' "$EMBEDDED_FULL" >&2
+    fail "embedded commit not found" 3
+fi
+
+# Accept exact full match or prefix match (short commit).
+if [ "$EMBEDDED_COMMIT" != "$GIT_COMMIT" ]; then
+    case "$EMBEDDED_COMMIT" in
+        "$GIT_SHORT_COMMIT"*) ;;
+        *) printf 'expected commit %s (or short %s) but binary reports: %s\n' "$GIT_COMMIT" "$GIT_SHORT_COMMIT" "$EMBEDDED_COMMIT" >&2
+           fail "embedded commit mismatch" 3 ;;
+    esac
+fi
+
+# Parse embedded channel robustly.
+EMBEDDED_CHANNEL="$(echo "$EMBEDDED_FULL" | awk '/^[[:space:]]*channel:[[:space:]]*/ {sub(/^[[:space:]]*channel:[[:space:]]*/, ""); print; exit}')"
+[ "$EMBEDDED_CHANNEL" = "$RESOLVED_CHANNEL" ] \
+    || fail "expected channel $RESOLVED_CHANNEL but binary reports: $EMBEDDED_CHANNEL" 3
+
 [ -n "$EMBEDDED_VERSION" ] || fail "binary reports empty version" 3
-info "embedded version OK: $EMBEDDED_VERSION commit=$GIT_SHORT_COMMIT channel=$RESOLVED_CHANNEL"
+info "embedded metadata OK: version=$EMBEDDED_VERSION commit=$EMBEDDED_COMMIT channel=$EMBEDDED_CHANNEL"
 
 # ── 4. Copy release tree ──────────────────────────────────────────
 cp release/install.sh "$BUNDLE_ROOT/release/install.sh"
