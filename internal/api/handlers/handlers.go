@@ -26,12 +26,15 @@ import (
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
+	"github.com/orvix/orvix/internal/antivirus"
 	"github.com/orvix/orvix/internal/runtime"
+	"github.com/orvix/orvix/internal/ruler"
 	"github.com/orvix/orvix/internal/tlsmgmt"
 	"github.com/orvix/orvix/internal/updater"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/push"
 	"github.com/orvix/orvix/internal/coremail/storage"
+	"github.com/orvix/orvix/internal/observability"
 	"github.com/orvix/orvix/internal/webmailmgmt"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/argon2"
@@ -127,9 +130,26 @@ type Handler struct {
 
 	// tlsService is the admin-facing TLS / certificate manager
 	// (internal/tlsmgmt). Set once via SetTLSService. nil
-	// disables the SSL admin endpoints with a 503 rather than
-	// fabricating cert metadata.
+	// disables the SSL admin endpoints with a 503 rather
+	// than fabricating cert metadata.
 	tlsService *tlsmgmt.Service
+
+	// antivirusService is the wired-in ClamAV engine
+	// (internal/antivirus). Optional: nil disables the
+	// runtime_enforced assertion in /admin/security/antivirus.
+	antivirusService *antivirus.Engine
+
+	// rulerService is the wired-in rule engine
+	// (internal/ruler). Optional: nil disables the
+	// runtime_enforced assertion in /admin/security/{routing,rules}.
+	rulerService *ruler.Engine
+
+	// observability is wired by the runtime so the
+	// admin endpoints can surface per-policy counters
+	// (rejected / quarantined / tagged / fail_open /
+	// fail_closed) without re-reading the metrics
+	// package.
+	observability *observability.Observability
 }
 
 // NewHandler creates a new Handler with dependencies.
@@ -216,6 +236,30 @@ func (h *Handler) SetLicenseValidator(v *license.Validator) {
 // of fabricating metadata).
 func (h *Handler) SetTLSService(s *tlsmgmt.Service) {
 	h.tlsService = s
+}
+
+// SetAntivirusService wires the runtime antivirus engine
+// into the admin handler so /admin/security/antivirus can
+// report the engine's own snapshot (runtime_enforced,
+// last_error, per-policy counters) instead of a
+// reachability-only probe.
+func (h *Handler) SetAntivirusService(s *antivirus.Engine) {
+	h.antivirusService = s
+}
+
+// SetRulerService wires the runtime rule engine into the
+// admin handler. /admin/security/{routing,rules} read
+// the per-engine runtime_enforced flag from this handle.
+func (h *Handler) SetRulerService(s *ruler.Engine) {
+	h.rulerService = s
+}
+
+// SetObservability wires the runtime observability
+// pipeline into the admin handler. The antivirus and
+// settings endpoints use it to surface per-policy
+// counters without re-reading the metrics package.
+func (h *Handler) SetObservability(o *observability.Observability) {
+	h.observability = o
 }
 
 // Health returns server health status.

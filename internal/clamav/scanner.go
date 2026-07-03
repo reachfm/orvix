@@ -90,9 +90,19 @@ func (s *Scanner) ScanBytes(ctx context.Context, data []byte, filename string) (
 
 	if strings.Contains(resp, "FOUND") {
 		result.Infected = true
-		parts := strings.Split(resp, ": ")
-		if len(parts) > 2 {
-			result.Virus = strings.TrimSpace(parts[2])
+		// Clamd INSTREAM response shape:
+		//   "stream: <VIRUS_NAME> FOUND\000"
+		// We split on the first ': ' so the virus name
+		// lives between the colon and the trailing
+		// ' FOUND'. Earlier revisions split on parts[2]
+		// which silently dropped the name when the
+		// response did not contain three colon groups
+		// (which is the common case).
+		idx := strings.Index(resp, ": ")
+		if idx >= 0 {
+			rest := strings.TrimSpace(resp[idx+2:])
+			rest = strings.TrimSuffix(rest, "FOUND")
+			result.Virus = strings.TrimSpace(rest)
 		}
 	}
 

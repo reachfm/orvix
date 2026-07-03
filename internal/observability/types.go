@@ -38,6 +38,31 @@ const (
 	EventSpamSuspicious  EventType = "spam.verdict.suspicious"
 	EventSpamRejected    EventType = "spam.verdict.reject"
 
+	// Antivirus runtime events. Recorded by the
+	// internal/antivirus engine on every scan decision.
+	EventAntivirusScanned      EventType = "antivirus.scanned"
+	EventAntivirusInfected     EventType = "antivirus.infected"
+	EventAntivirusRejected     EventType = "antivirus.rejected"
+	EventAntivirusQuarantined  EventType = "antivirus.quarantined"
+	EventAntivirusTagged       EventType = "antivirus.tagged"
+
+	// Quarantine events recorded whenever a message is
+	// held for inspection — these come from antivirus
+	// and acceptance-rule engines alike.
+	EventQuarantineHeld     EventType = "quarantine.held"
+	EventQuarantineResolved EventType = "quarantine.resolved"
+
+	EventAcceptanceRuleMatched  EventType = "acceptance_rule.matched"
+	EventAcceptanceRuleRejected EventType = "acceptance_rule.rejected"
+	EventAntivirusScannerError EventType = "antivirus.scanner_error"
+	EventAntivirusFailOpen     EventType = "antivirus.fail_open"
+	EventAntivirusFailClosed   EventType = "antivirus.fail_closed"
+
+	// Admin-scoped incoming rule events.
+	EventIncomingRuleApplied  EventType = "incoming_rule.applied"
+	EventIncomingRuleRejected EventType = "incoming_rule.rejected"
+	EventIncomingRuleTagged   EventType = "incoming_rule.tagged"
+
 	// Queue delivery.
 	EventQueueLeased      EventType = "queue.leased"
 	EventQueueDelivered   EventType = "queue.delivered"
@@ -199,6 +224,25 @@ type Metrics struct {
 	// TLS.
 	TLSCertificates      int64 `json:"tls_certificates"`
 	TLSExpiredCerts      int64 `json:"tls_expired_certificates"`
+
+	// Antivirus runtime counters. Bumped by the
+	// internal/antivirus package from the SMTP receive
+	// path; surfaced through AdminAntivirusStatus.
+	AntivirusScanned       int64 `json:"antivirus_scanned"`
+	AntivirusInfected      int64 `json:"antivirus_infected"`
+	AntivirusRejected      int64 `json:"antivirus_rejected"`
+	AntivirusQuarantined   int64 `json:"antivirus_quarantined"`
+	AntivirusTagged        int64 `json:"antivirus_tagged"`
+	AntivirusScannerErrors int64 `json:"antivirus_scanner_errors"`
+	AntivirusFailOpen      int64 `json:"antivirus_fail_open"`
+	AntivirusFailClosed    int64 `json:"antivirus_fail_closed"`
+
+	// Backup target upload counters. Bumped by the
+	// internal/backup/targets package after backup
+	// creation; surfaced through /api/v1/admin/backup-targets.
+	BackupTargetUploadsAttempt int64 `json:"backup_target_uploads_attempt"`
+	BackupTargetUploadsSuccess int64 `json:"backup_target_uploads_success"`
+	BackupTargetUploadsFailure int64 `json:"backup_target_uploads_failure"`
 	TLSWarningCerts      int64 `json:"tls_warning_certificates"`
 	TLSReloads           int64 `json:"tls_reloads"`
 	TLSReloadFailures    int64 `json:"tls_reload_failures"`

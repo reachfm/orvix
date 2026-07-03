@@ -11,6 +11,7 @@ import (
 	"github.com/gofiber/fiber/v3/middleware/cors"
 	"github.com/gofiber/fiber/v3/middleware/limiter"
 	"github.com/gofiber/fiber/v3/middleware/recover"
+	"github.com/orvix/orvix/internal/antivirus"
 	"github.com/orvix/orvix/internal/api/handlers"
 	"github.com/orvix/orvix/internal/api/handlers/settings"
 	"github.com/orvix/orvix/internal/auth"
@@ -24,7 +25,9 @@ import (
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/metrics"
 	"github.com/orvix/orvix/internal/modules"
+	"github.com/orvix/orvix/internal/observability"
 	orvixruntime "github.com/orvix/orvix/internal/runtime"
+	"github.com/orvix/orvix/internal/ruler"
 	"github.com/orvix/orvix/internal/tlsmgmt"
 	"github.com/orvix/orvix/internal/updater"
 	"github.com/orvix/orvix/internal/webmailmgmt"
@@ -269,6 +272,30 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		}
 		router.h.SetTLSService(tlsSvc)
 		logger.Info("admin TLS service wired")
+	}
+
+	// Wire the runtime's antivirus engine + rule engine
+	// into the admin handler. Look them up via the module
+	// registry — the runtime registers itself during Init.
+	if mod, ok := registry.Get("coremail-runtime"); ok {
+		if rmod, ok := mod.(interface {
+			AntivirusEngine() *antivirus.Engine
+			RuleEngine() *ruler.Engine
+			Observability() *observability.Observability
+		}); ok {
+			if eng := rmod.AntivirusEngine(); eng != nil {
+				router.h.SetAntivirusService(eng)
+				logger.Info("admin antivirus service wired from runtime")
+			}
+			if eng := rmod.RuleEngine(); eng != nil {
+				router.h.SetRulerService(eng)
+				logger.Info("admin ruler service wired from runtime")
+			}
+			if obs := rmod.Observability(); obs != nil {
+				router.h.SetObservability(obs)
+				logger.Info("admin observability wired from runtime")
+			}
+		}
 	}
 
 	router.setupMiddleware()

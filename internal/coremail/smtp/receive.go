@@ -3,11 +3,13 @@ package smtp
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"fmt"
 	"net"
 	"strings"
 	"time"
 
+	"github.com/orvix/orvix/internal/antivirus"
 	"github.com/orvix/orvix/internal/coremail"
 	"github.com/orvix/orvix/internal/coremail/antispam"
 	"github.com/orvix/orvix/internal/coremail/dkim"
@@ -48,6 +50,69 @@ type Receiver struct {
 	// failure does not lose the original" guarantee. The
 	// production code always assigns a *rules.Runner.
 	RulesRunner rules.RulesRunner
+	// AntivirusEngine, when non-nil, scans every accepted
+	// message body BEFORE durable storage / queue enqueue.
+	// Wired by the runtime module during initCore so the
+	// admin panel can claim "antivirus active" only when
+	// the runtime has actually called MarkEnforced on the
+	// engine. nil means the runtime did not configure
+	// antivirus; AcceptMessage skips the scan with no
+	// side effects (this is the test-friendly default).
+	AntivirusEngine *antivirus.Engine
+	// AcceptanceEngine applies admin-scoped acceptance &
+	// routing rules at MAIL FROM, RCPT TO, and DATA.
+	// nil means the runtime did not configure acceptance
+	// rules; AcceptMessage and the command handler skip
+	// the engine with no side effects. The runtime
+	// package owns the wiring.
+	AcceptanceEngine RuleEvaluator
+	// IncomingRuleEngine applies admin-scoped incoming
+	// message rules AFTER authentication + BEFORE final
+	// storage. nil means "no admin rules configured" and
+	// the receive path skips with no side effects.
+	IncomingRuleEngine RuleEvaluator
+	// DB is supplied by the runtime so the antivirus and
+	// acceptance engines can persist quarantine rows.
+	// DB is supplied by the runtime so the antivirus
+	// engine can persist quarantine rows. nil means
+	// quarantine persistence is disabled (the engine
+	// still decides reject / tag / quarantine, but
+	// quarantine rows are not durable).
+	DB *sql.DB
+}
+
+// RuleEvaluator is the minimal interface any rule engine
+// must expose to be wired into the SMTP receiver. The
+// internal/ruler package satisfies it. Tests may use a
+// stub implementation to verify the receiver's branching
+// without standing up the full Ruler.
+type RuleEvaluator interface {
+	// Evaluate returns the matching decision for the
+	// envelope / message data. Returning ok=false means
+	// "no decision" — the caller continues with the
+	// default behaviour. The action string is one of
+	// "accept", "reject", "quarantine". Note is an
+	// optional reason surfaced in the audit log.
+	Evaluate(ctx context.Context, q RuleQuery) (ok bool, action string, reason string)
+	// MarkEnforced is called by the receiver init
+	// process to flip the engine's runtime_enforced
+	// flag so the admin status endpoint stops claiming
+	// "storage-only" for this engine.
+	MarkEnforced()
+}
+
+// RuleQuery carries the envelope + message context the
+// rule engines consume. Keeping this narrow means engines
+// can be tested independently of the SMTP machinery.
+type RuleQuery struct {
+	Sender    string
+	Recipient string
+	SourceIP  string
+	Subject   string
+	TenantID  uint
+	Domain    string
+	Headers    map[string]string
+	MessageID string
 }
 
 // NewReceiver creates a message receiver.
@@ -101,6 +166,109 @@ func (r *Receiver) AcceptMessage(ctx context.Context, session *Session) error {
 
 	if int64(len(rfc822Data)) > r.Config.MaxMessageSizeBytes {
 		return fmt.Errorf("message too large: %d > %d", len(rfc822Data), r.Config.MaxMessageSizeBytes)
+	}
+
+	// ── Acceptance & routing rules at DATA level ────────
+	// The engine was already applied at MAIL FROM and
+	// RCPT TO (in commands.go) for sender / recipient /
+	// IP scopes. The DATA-stage evaluation also checks
+	// subject-based patterns the command handler has no
+	// access to.
+	if r.AcceptanceEngine != nil {
+		var firstLocal string
+		for _, rcpt := range session.Recipients {
+			dom := ExtractDomain(rcpt)
+			if dom != "" {
+				firstLocal = rcpt
+				break
+			}
+		}
+		ok, action, reason := r.AcceptanceEngine.Evaluate(ctx, RuleQuery{
+			Sender:    session.MailFrom,
+			Recipient: firstLocal,
+			SourceIP:  session.RemoteAddr,
+			Subject:   extractSubject(rfc822Data),
+			MessageID: session.ID,
+			Headers: map[string]string{
+				"From":    session.MailFrom,
+				"To":      strings.Join(session.Recipients, ","),
+				"Subject": extractSubject(rfc822Data),
+			},
+		})
+		if ok {
+			switch action {
+			case "reject":
+				if r.Observability != nil {
+					r.Observability.Metrics.IncSMTPRejected()
+					r.Observability.EventHistory.Record(observability.EventAcceptanceRuleRejected, map[string]string{
+						"sender":    session.MailFrom,
+						"recipient": strings.Join(session.Recipients, ","),
+						"reason":    reason,
+					})
+				}
+				return fmt.Errorf("5.7.1 message rejected by acceptance rule: %s", reason)
+			case "quarantine":
+				// The acceptance-rule quarantine flow is
+				// routed through the same StoreMessage +
+				// quarantine_index path the antivirus
+				// quarantine uses, but for acceptance
+				// quarantine there is no antivirus
+				// signature — the row is marked
+				// reason="acceptance_rule:<note>".
+				return r.acceptanceQuarantine(ctx, session, rfc822Data, reason)
+			}
+			// accept: continue to antivirus scan below.
+		}
+	}
+
+	// ── Antivirus scan ───────────────────────────────────
+	// The engine, when wired, scans every accepted message
+	// body. The decision branch — accept / reject /
+	// quarantine / tag — is configured by the operator
+	// via the admin antivirus page and applies per the
+	// engine.Policy() configured at boot. A nil engine
+	// skips the scan entirely (no-op), which is the
+	// test-friendly default.
+	if r.AntivirusEngine != nil {
+		dec := r.AntivirusEngine.Scan(ctx, rfc822Data, session.ID)
+		switch dec.Action {
+		case antivirus.ActionAccept:
+			// Note: a tag decision still resolves to
+			// ActionTag, not ActionAccept. Tag is
+			// applied below by injecting the header.
+		case antivirus.ActionReject:
+			if r.Observability != nil {
+				r.Observability.Metrics.IncSMTPRejected()
+			}
+			return fmt.Errorf("5.7.1 message rejected by antivirus: %s", dec.Reason)
+		case antivirus.ActionQuarantine:
+			if r.DB != nil {
+				if _, err := r.AntivirusEngine.Quarantine(ctx, r.DB, "", session.ID,
+					session.MailFrom, strings.Join(session.Recipients, ","),
+					extractSubject(rfc822Data), dec.Virus, rfc822Data); err != nil {
+					if r.Observability != nil {
+						r.Observability.Metrics.IncAntivirusFailClosed()
+					}
+					return fmt.Errorf("5.7.1 antivirus quarantine failed: %v", err)
+				}
+			}
+			// Return a temp-failure so the sender retries.
+			// The message was stored to disk for the
+			// admin to review; do NOT deliver to the
+			// recipient.
+			if r.Observability != nil {
+				r.Observability.Metrics.IncSMTPRejected()
+			}
+			return fmt.Errorf("4.7.1 message quarantined by antivirus: %s", dec.Reason)
+		case antivirus.ActionTag:
+			// Inject X-Orvix-AV-Verdict:infected so the
+			// downstream message-store path tags the
+			// message as suspicious. The verdict header
+			// is appended ahead of the existing
+			// auth / spam headers below.
+			verdictHeader := []byte("X-Orvix-AV-Verdict: infected (" + dec.Virus + ")\r\n")
+			rfc822Data = append(verdictHeader, rfc822Data...)
+		}
 	}
 
 	// ── Authentication evaluation ──────────────────────────
@@ -296,6 +464,85 @@ func (r *Receiver) AcceptMessage(ctx context.Context, session *Session) error {
 		rfc822Data = append(authHeaders, rfc822Data...)
 	}
 
+	// ── Incoming message rules (admin-scoped) ────────────
+	// Walks each enabled rule in priority order and
+	// applies the action it returns. The engine is
+	// permitted to add an X-Orvix-Incoming-Rule header
+	// on accept decisions so the receiver path's
+	// branches are observable.
+	if r.IncomingRuleEngine != nil {
+		var firstLocal string
+		for _, rcpt := range session.Recipients {
+			dom := ExtractDomain(rcpt)
+			if dom != "" {
+				firstLocal = rcpt
+				break
+			}
+		}
+		ok, action, reason := r.IncomingRuleEngine.Evaluate(ctx, RuleQuery{
+			Sender:    session.MailFrom,
+			Recipient: firstLocal,
+			SourceIP:  session.RemoteAddr,
+			Subject:   extractSubject(rfc822Data),
+			MessageID: session.ID,
+			Headers: map[string]string{
+				"From":    session.MailFrom,
+				"To":      strings.Join(session.Recipients, ","),
+				"Subject": extractSubject(rfc822Data),
+			},
+		})
+		if ok {
+			switch action {
+			case "reject":
+				if r.Observability != nil {
+					r.Observability.Metrics.IncSMTPRejected()
+					r.Observability.EventHistory.Record(observability.EventIncomingRuleApplied, map[string]string{
+						"sender":    session.MailFrom,
+						"recipient": strings.Join(session.Recipients, ","),
+						"reason":    "reject: " + reason,
+					})
+				}
+				return fmt.Errorf("5.7.1 message rejected by incoming rule: %s", reason)
+			case "quarantine":
+				// Same path as acceptance-rule quarantine:
+				// persist a coremail_quarantine_index row and
+				// return a temp-failure.
+				_, qerr := r.DB.ExecContext(ctx, `INSERT INTO coremail_quarantine_index
+					(tenant_id, message_id, recipient, sender, subject, reason, severity, status, created_at)
+					VALUES (?, ?, ?, ?, ?, ?, 'high', 'held', ?)`,
+					0, session.ID,
+					strings.Join(session.Recipients, ","),
+					session.MailFrom, extractSubject(rfc822Data), "incoming_rule:"+reason,
+					time.Now().UTC())
+				if qerr != nil && r.Observability != nil {
+					r.Observability.Metrics.IncSMTPRejected()
+					return fmt.Errorf("4.7.1 incoming rule quarantine failed: %v", qerr)
+				}
+				if r.Observability != nil {
+					r.Observability.EventHistory.Record(observability.EventQuarantineHeld, map[string]string{
+						"sender":    session.MailFrom,
+						"recipient": strings.Join(session.Recipients, ","),
+						"reason":    "incoming_rule:" + reason,
+					})
+				}
+				return fmt.Errorf("4.7.1 message held by incoming rule: %s", reason)
+			case "tag":
+				// Add a header documenting the rule that
+				// fired. The downstream message-store path
+				// keeps the header through delivery.
+				tagHeader := []byte("X-Orvix-Incoming-Rule: " + reason + "\r\n")
+				rfc822Data = append(tagHeader, rfc822Data...)
+				if r.Observability != nil {
+					r.Observability.EventHistory.Record(observability.EventIncomingRuleApplied, map[string]string{
+						"sender":    session.MailFrom,
+						"recipient": strings.Join(session.Recipients, ","),
+						"reason":    "tag: " + reason,
+					})
+				}
+			}
+		}
+	}
+
 	// ── Recipient resolution ───────────────────────────────
 	var recipients []resolvedRecipient
 	var externalRecipients []externalRecipient
@@ -488,6 +735,45 @@ func (r *Receiver) AcceptMessage(ctx context.Context, session *Session) error {
 	}
 
 	return nil
+}
+
+// acceptanceQuarantine handles the "quarantine" action
+// returned by the acceptance-rule engine. The receiver
+// persists the message to disk via the same path the
+// antivirus quarantine uses, then returns a temp-failure
+// to the sender so the message is retried later (after
+// the operator inspects the quarantine).
+func (r *Receiver) acceptanceQuarantine(ctx context.Context, session *Session, rfc822 []byte, reason string) error {
+	if r.DB == nil {
+		// Without a DB we cannot persist the quarantine
+		// row. Fall back to reject so the message does
+		// not flow through silently.
+		if r.Observability != nil {
+			r.Observability.Metrics.IncSMTPRejected()
+		}
+		return fmt.Errorf("5.7.1 acceptance rule action=quarantine requires DB; rejected: %s", reason)
+	}
+	if _, err := r.DB.ExecContext(ctx, `INSERT INTO coremail_quarantine_index
+		(tenant_id, message_id, recipient, sender, subject, reason, severity, status, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, 'high', 'held', ?)`,
+		0, session.ID,
+		strings.Join(session.Recipients, ","),
+		session.MailFrom, extractSubject(rfc822), "acceptance_rule:"+reason,
+		time.Now().UTC()); err != nil {
+		if r.Observability != nil {
+			r.Observability.Metrics.IncSMTPRejected()
+		}
+		return fmt.Errorf("4.7.1 acceptance rule quarantine failed: %v", err)
+	}
+	if r.Observability != nil {
+		r.Observability.Metrics.IncSMTPRejected()
+		r.Observability.EventHistory.Record(observability.EventQuarantineHeld, map[string]string{
+			"sender":    session.MailFrom,
+			"recipient": strings.Join(session.Recipients, ","),
+			"reason":    "acceptance_rule:" + reason,
+		})
+	}
+	return fmt.Errorf("4.7.1 message held by acceptance rule: %s", reason)
 }
 
 func (r *Receiver) recordAuthError(event observability.EventType, domain string, err error) {

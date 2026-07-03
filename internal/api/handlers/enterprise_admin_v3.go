@@ -450,17 +450,25 @@ func coerceForType(raw json.RawMessage, want string) (any, error) {
 // ClamAV daemon on ClamAVConfig.Host:ClamAVConfig.Port and
 // returns a strict status. The endpoint is read-only; we
 // never claim scanning is enabled unless (a) the local
-// daemon responds to PING, AND (b) the data signature is
-// recent (clamav --version check is left to the runtime;
-// for this endpoint we only confirm the daemon is
-// reachable). If neither is true the response says so
-// plainly.
+// daemon responds to PING, AND (b) the runtime has wired
+// the engine into the SMTP receive path (the engine
+// flips its runtime_enforced flag after the SMTP
+// receiver init attaches it; the admin handler reads
+// the same flag and reports it back to the operator).
 func (h *Handler) AdminAntivirusStatus(c fiber.Ctx) error {
 	host := "localhost"
 	port := 3310
 	clamavConfigured := false
 	clamavReachable := false
 	clamavPing := ""
+	runtimeEnforced := false
+	policyOnInfected := "reject"
+	policyOnScannerUnavailable := "fail_closed"
+	lastErr := ""
+	scanned, infected := int64(0), int64(0)
+	rejCount, quarCount, tagCount := int64(0), int64(0), int64(0)
+	failOpen, failClosed := int64(0), int64(0)
+
 	if h.cfg != nil {
 		if h.cfg.ClamAV.Host != "" {
 			host = h.cfg.ClamAV.Host
@@ -489,26 +497,83 @@ func (h *Handler) AdminAntivirusStatus(c fiber.Ctx) error {
 			conn.Close()
 		}
 	}
+
+	// Use the wired engine snapshot when available.
+	// Engine snapshot is the source of truth for
+	// runtime_enforced, last_error, and per-policy
+	// counters; the probe above is the reachability
+	// check the dashboard renders as a green / red dot.
+	if h.antivirusService != nil {
+		snap := h.antivirusService.Snapshot(c.Context())
+		runtimeEnforced = snap.RuntimeEnforced
+		policyOnInfected = snap.PolicyOnInfected
+		policyOnScannerUnavailable = snap.PolicyOnUnavailable
+		lastErr = snap.LastError
+		scanned, infected = snap.Scanned, snap.Infected
+		if h.antivirusService.RuntimeEnforced() && h.observability != nil {
+			mSnap := h.observability.Metrics.Snapshot()
+			rejCount = mSnap.AntivirusRejected
+			quarCount = mSnap.AntivirusQuarantined
+			tagCount = mSnap.AntivirusTagged
+			failOpen = mSnap.AntivirusFailOpen
+			failClosed = mSnap.AntivirusFailClosed
+		}
+	}
+
+	// Honest policy defaults — any feature the runtime
+	// has NOT wired continues to read as stored-only / not
+	// enforced. The operator reads runtime_enforced to
+	// know what is live today.
+	routingActive := h.rulerService != nil && h.rulerEngineActive()
+	incomingActive := h.rulerService != nil && h.rulerEngineActive()
+	antispamActive := false // policy not advertised in this build
+
 	return c.JSON(fiber.Map{
-		"engine":             "clamav",
-		"engine_configured":  clamavConfigured,
-		"engine_reachable":   clamavReachable,
-		"engine_active":      clamavConfigured && clamavReachable,
-		"clamav_host":        host,
-		"clamav_port":        port,
-		"clamav_response":    clamavPing,
-		"antispam_engine":    "rspamd_not_wired",
-		"antispam_active":    false,
-		"routing_engine":     "policy_routing_not_wired",
-		"routing_active":     false,
-		"incoming_msg_rules": "stored_only_runtime_not_wired",
-		"incoming_msg_active": false,
+		"engine":               "clamav",
+		"engine_configured":    clamavConfigured,
+		"engine_reachable":     clamavReachable,
+		"engine_active":        clamavConfigured && clamavReachable,
+		"runtime_enforced":     runtimeEnforced,
+		"clamav_host":          host,
+		"clamav_port":          port,
+		"clamav_response":      clamavPing,
+		"policy_on_infected":   policyOnInfected,
+		"policy_on_scanner_unavailable": policyOnScannerUnavailable,
+		"last_error":           lastErr,
+		"counts": fiber.Map{
+			"scanned":        scanned,
+			"infected":       infected,
+			"rejected":       rejCount,
+			"quarantined":    quarCount,
+			"tagged":         tagCount,
+			"fail_open":      failOpen,
+			"fail_closed":    failClosed,
+		},
+		"antispam_engine": "rspamd_not_wired",
+		"antispam_active": antispamActive,
+		"routing_engine":  "internal_ruler",
+		"routing_active":  routingActive,
+		"incoming_msg_engine": "internal_ruler",
+		"incoming_msg_active": incomingActive,
 		"honest_notes": []string{
-			"engine_active is true only when the local ClamAV daemon responds with PONG",
-			"antispam and policy routing are not yet wired in the admin UI",
-			"no scanning is performed unless the runtime is configured to forward scans",
+			"runtime_enforced is true only when the SMTP receiver is calling the engine on every AcceptMessage call",
+			"engine_active (clamav daemon reachable) is independent of runtime_enforced (operator may have disabled the daemon)",
+			"routing and incoming rules use the internal/ruler engine; runtime_enforced requires the SMTP receiver to call it",
 		},
 	})
+}
+
+// rulerEngineActive reports whether either the
+// acceptance-rule engine or the incoming-rule engine has
+// been installed. The runtime installs both simultaneously
+// so this is a single boolean; it remains split into two
+// per-engine MarkEnforced calls so the admin status
+// endpoint can report them separately in the future.
+func (h *Handler) rulerEngineActive() bool {
+	if h.rulerService == nil {
+		return false
+	}
+	return h.rulerService.AcceptanceEnforced() || h.rulerService.IncomingEnforced()
 }
 
 // =====================================================================
@@ -594,6 +659,9 @@ func (h *Handler) CreateAcceptanceRule(c fiber.Ctx) error {
 	}
 	id, _ := res.LastInsertId()
 	h.appendAudit(c, "acceptance_rule.create", body.Name, "ok")
+	if h.rulerService != nil {
+		h.rulerService.Invalidate()
+	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": id, "name": body.Name})
 }
 
@@ -630,6 +698,9 @@ func (h *Handler) UpdateAcceptanceRule(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusNotFound, "rule not found in this tenant")
 	}
 	h.appendAudit(c, "acceptance_rule.update", fmt.Sprintf("rule:%d", id), "ok")
+	if h.rulerService != nil {
+		h.rulerService.Invalidate()
+	}
 	return c.JSON(fiber.Map{"id": id, "updated": true})
 }
 
@@ -657,6 +728,9 @@ func (h *Handler) DeleteAcceptanceRule(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusNotFound, "rule not found in this tenant")
 	}
 	h.appendAudit(c, "acceptance_rule.delete", fmt.Sprintf("rule:%d", id), "ok")
+	if h.rulerService != nil {
+		h.rulerService.Invalidate()
+	}
 	return c.JSON(fiber.Map{"id": id, "deleted": true})
 }
 
@@ -927,6 +1001,9 @@ func (h *Handler) CreateIncomingMsgRule(c fiber.Ctx) error {
 	}
 	id, _ := res.LastInsertId()
 	h.appendAudit(c, "incoming_msg_rule.create", body.Name, "ok")
+	if h.rulerService != nil {
+		h.rulerService.Invalidate()
+	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": id, "name": body.Name})
 }
 
@@ -966,6 +1043,9 @@ func (h *Handler) UpdateIncomingMsgRule(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusNotFound, "rule not found in this tenant")
 	}
 	h.appendAudit(c, "incoming_msg_rule.update", fmt.Sprintf("rule:%d", id), "ok")
+	if h.rulerService != nil {
+		h.rulerService.Invalidate()
+	}
 	return c.JSON(fiber.Map{"id": id, "updated": true})
 }
 
@@ -993,6 +1073,9 @@ func (h *Handler) DeleteIncomingMsgRule(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusNotFound, "rule not found in this tenant")
 	}
 	h.appendAudit(c, "incoming_msg_rule.delete", fmt.Sprintf("rule:%d", id), "ok")
+	if h.rulerService != nil {
+		h.rulerService.Invalidate()
+	}
 	return c.JSON(fiber.Map{"id": id, "deleted": true})
 }
 

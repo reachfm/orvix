@@ -27,6 +27,13 @@ type CommandHandler struct {
 	validateSender SenderValidator
 	isLocalDomain  func(ctx context.Context, domain string) (bool, error)
 	onAuthEvent    func(eventType string, identity string, detail string)
+	// acceptanceEngine applies admin acceptance rules at
+	// MAIL FROM + RCPT TO. nil means "no rules configured"
+	// and the handler falls back to legacy direct-accept
+	// behaviour. The runtime module wires the engine in
+	// during initCore so the operator's admin PATCHes
+	// take effect on the very next SMTP command.
+	acceptanceEngine RuleEvaluator
 	Observability *observability.Observability
 }
 
@@ -41,6 +48,12 @@ func NewCommandHandler(cfg Config, auth *Authenticator, session *Session) *Comma
 			return false, nil
 		},
 	}
+}
+
+// SetAcceptanceEngine wires the optional acceptance &
+// routing rule engine. nil clears it.
+func (h *CommandHandler) SetAcceptanceEngine(e RuleEvaluator) {
+	h.acceptanceEngine = e
 }
 
 // SetRecipientValidator sets a function to validate RCPT TO addresses.
@@ -164,6 +177,36 @@ func (h *CommandHandler) handleMAIL(ctx context.Context, cmd *ParsedCommand) Res
 	}
 
 	h.session.MailFrom = address
+
+	// ── Acceptance rules at MAIL FROM ──────────────────
+	// The runtime wires the acceptance engine when
+	// coremail_acceptance_rules rows exist. We call it
+	// AFTER parsing but BEFORE accepting the sender,
+	// so a tenant-scoped "reject"* rule short-circuits
+	// the rest of the SMTP transaction.
+	if h.acceptanceEngine != nil {
+		ok, action, reason := h.acceptanceEngine.Evaluate(ctx, RuleQuery{
+			Sender:    address,
+			SourceIP:  h.session.RemoteAddr,
+			MessageID: h.session.ID,
+		})
+		if ok {
+			switch action {
+			case "reject":
+				if h.Observability != nil {
+					h.Observability.Metrics.IncSMTPRejected()
+					h.Observability.EventHistory.Record(observability.EventAcceptanceRuleRejected, map[string]string{
+						"sender":    address,
+						"recipient": "",
+						"reason":    reason,
+					})
+				}
+				h.session.ResetTransaction()
+				return responsef(StatusMailboxNotFound, "5.7.1 acceptance rule rejected sender: %s", reason)
+			}
+		}
+	}
+
 	h.session.State = StateMail
 	return ResponseOK
 }
@@ -211,6 +254,33 @@ func (h *CommandHandler) handleRCPT(ctx context.Context, cmd *ParsedCommand) Res
 				return responsef(StatusMailboxNotFound, "5.1.1 %s: %v", address, err)
 			}
 			return responsef(StatusMailboxNotFound, "5.1.1 %s: User unknown", address)
+		}
+	}
+
+	// ── Acceptance rules at RCPT TO ─────────────────────
+	// Run the acceptance engine against each RCPT TO so
+	// per-recipient rules can reject without aborting the
+	// whole transaction. The Match engine returns
+	// "accept" / "reject" / "quarantine" — only reject
+	// and quarantine short-circuit; accept allows the
+	// RCPT TO to succeed.
+	if h.acceptanceEngine != nil {
+		ok, action, reason := h.acceptanceEngine.Evaluate(ctx, RuleQuery{
+			Sender:    h.session.MailFrom,
+			Recipient: address,
+			SourceIP:  h.session.RemoteAddr,
+			MessageID: h.session.ID,
+		})
+		if ok && (action == "reject" || action == "quarantine") {
+			if h.Observability != nil {
+				h.Observability.Metrics.IncSMTPRejected()
+				h.Observability.EventHistory.Record(observability.EventAcceptanceRuleRejected, map[string]string{
+					"sender":    h.session.MailFrom,
+					"recipient": address,
+					"reason":    reason,
+				})
+			}
+			return responsef(StatusMailboxNotFound, "5.7.1 acceptance rule rejected recipient: %s", reason)
 		}
 	}
 

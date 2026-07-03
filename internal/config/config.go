@@ -78,8 +78,17 @@ type CoreMailConfig struct {
 
 // ClamAVConfig holds ClamAV antivirus scanner settings.
 type ClamAVConfig struct {
-	Host string `mapstructure:"host"`
-	Port int    `mapstructure:"port"`
+	Host    string `mapstructure:"host"`
+	Port    int    `mapstructure:"port"`
+	Enabled bool   `mapstructure:"enabled"`
+	// Mode controls what the antivirus engine does on
+	// each event. Allowed values:
+	//   - "reject"      — infected messages are 5.7.1
+	//   - "quarantine"  — infected messages are held for review
+	//   - "tag"         — infected messages pass with X-Orvix-AV-Verdict
+	//   - "fail_open"   — scanner unavailable: accept + audit
+	//   - "fail_closed" — scanner unavailable: reject + audit (default)
+	Mode string `mapstructure:"mode"`
 }
 
 // OutboundConfig controls outbound SMTP delivery behavior.
@@ -457,8 +466,10 @@ func Defaults() *Config {
 			DefaultProvider: "cloudflare",
 		},
 		ClamAV: ClamAVConfig{
-			Host: "localhost",
-			Port: 3310,
+			Host:    "localhost",
+			Port:    3310,
+			Enabled: false,
+			Mode:    "fail_closed",
 		},
 		Backup: BackupConfig{
 			Dir:            "/var/backups/orvix/",
