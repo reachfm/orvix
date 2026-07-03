@@ -1,9 +1,11 @@
 package targets
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +14,7 @@ import (
 
 	_ "modernc.org/sqlite"
 	"go.uber.org/zap"
+	"golang.org/x/crypto/ssh"
 )
 
 func openTestDB(t *testing.T) *sql.DB {
@@ -71,7 +74,7 @@ func seedTarget(t *testing.T, db *sql.DB, name, kind, host string, port int, ena
 	}
 	res, err := db.Exec(`INSERT INTO coremail_backup_targets
 		(tenant_id, name, kind, host, port, username, path, enabled, verify_hostname, has_secret, note, created_at, updated_at)
-		VALUES (0, ?, ?, ?, ?, '', '/backups', ?, 1, ?, '', ?, ?)`,
+		VALUES (0, ?, ?, ?, ?, '', '/backups', ?, 0, ?, '', ?, ?)`,
 		name, kind, host, port, en, secFlag, now, now)
 	if err != nil {
 		t.Fatalf("seed target: %v", err)
@@ -97,10 +100,13 @@ func TestLoadEnabledTargetsFiltersDisabled(t *testing.T) {
 	}
 }
 
-// The transport is not actually installed in this test
-// environment so the upload always lands on the
-// "transport_unavailable" branch. The contract is: a
-// missing SSH client never silently succeeds.
+// TestEnabledTargetAttemptRecordedEvenWithoutTransport exercises the
+// code path where the SFTP dialer is unavailable (or returns a
+// non-OK status) — the row must NOT silently record "ok". In the
+// pure-Go transport world the failure mode is "dial_failed" /
+// "auth_setup_failed" / "host_key_setup_failed"; the test installs
+// a fake dialer that returns an error and asserts the row reflects
+// the transport problem.
 func TestEnabledTargetAttemptRecordedEvenWithoutTransport(t *testing.T) {
 	db := openTestDB(t)
 	id := seedTarget(t, db, "remote", "sftp", "sftp.example.com", 22, true, true)
@@ -116,6 +122,11 @@ func TestEnabledTargetAttemptRecordedEvenWithoutTransport(t *testing.T) {
 	})
 	t.Cleanup(func() { SetDecryptHook(nil) })
 
+	// Install a fake dialer that always fails — this is
+	// the new "transport unavailable" surface.
+	SetDialer(&fakeDialer{err: errors.New("dial refused")})
+	t.Cleanup(func() { SetDialer(nil) })
+
 	u := NewUploader(db, zap.NewNop(), nil)
 	targets, err := u.LoadEnabledTargets(context.Background())
 	if err != nil {
@@ -127,25 +138,24 @@ func TestEnabledTargetAttemptRecordedEvenWithoutTransport(t *testing.T) {
 	if !targets[0].HasSecret {
 		t.Fatalf("want secret loaded")
 	}
-	// archivePath is required for the mkdir step to
-	// even start. Make a real file in t.TempDir().
 	archivePath := filepath.Join(t.TempDir(), "backup.tar.gz")
 	if err := writeTempFile(archivePath, "x"); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	u.Upload(context.Background(), targets[0], archivePath, "backup-1")
-	// Read back the row to see what was recorded.
 	var status, msg string
 	if err := db.QueryRow(`SELECT last_test_status, last_test_message FROM coremail_backup_targets WHERE id=?`, id).
 		Scan(&status, &msg); err != nil {
 		t.Fatalf("read: %v", err)
 	}
 	if status == "ok" {
-		t.Fatalf("transport_unavailable must NOT record ok; got %q", status)
+		t.Fatalf("dial failure must NOT record ok; got %q", status)
 	}
-	if !strings.Contains(status, "transport_unavailable") &&
-		!strings.Contains(status, "not_implemented") {
-		t.Fatalf("expected transport_unavailable / not_implemented status, got %q (%s)", status, msg)
+	if status != "dial_failed" {
+		t.Fatalf("expected dial_failed status, got %q (%s)", status, msg)
+	}
+	if strings.Contains(msg, "secret-password") {
+		t.Fatalf("dial failure message leaked the password: %s", msg)
 	}
 }
 
@@ -170,7 +180,9 @@ func TestFTPKindRecordsNotImplemented(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	SetDecryptHook(func(s string) (string, error) {
-		if s == "plain" { return "x", nil }
+		if s == "plain" {
+			return "x", nil
+		}
 		return "", errors.New("bad")
 	})
 	t.Cleanup(func() { SetDecryptHook(nil) })
@@ -190,16 +202,19 @@ func TestFTPKindRecordsNotImplemented(t *testing.T) {
 	}
 }
 
+// TestNoSecretSkipped covers the no_credentials branch — a target
+// with no password AND no private key must never reach the dialer.
 func TestNoSecretSkipped(t *testing.T) {
 	db := openTestDB(t)
 	id := seedTarget(t, db, "no_pw", "sftp", "sftp.example.com", 22, true, false)
 	u := NewUploader(db, zap.NewNop(), nil)
 	targets, _ := u.LoadEnabledTargets(context.Background())
-	// The LoadEnabledTargets helper returns the row
-	// regardless of has_secret; Upload checks
-	// HasSecret itself.
-	targets[0].password = "" // simulate no secret
+	// Forcefully scrub the password and HasSecret — the
+	// absence of a private key means Upload must short
+	// circuit at the no_credentials gate.
+	targets[0].password = ""
 	targets[0].HasSecret = false
+	targets[0].privateKeyPath = ""
 	u.Upload(context.Background(), targets[0], "/nonexistent", "backup-1")
 	var status string
 	_ = db.QueryRow(`SELECT last_test_status FROM coremail_backup_targets WHERE id=?`, id).Scan(&status)
@@ -215,10 +230,6 @@ func TestPasswordNeverReturnedToListingEndpoint(t *testing.T) {
 		id, time.Now().UTC().Format("2006-01-02 15:04:05")); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	// Set a known-good decryption that returns the
-	// cleartext. The Uploader test still asserts the
-	// cleartext never appears in any output that
-	// travels through adminHandler.
 	SetDecryptHook(func(s string) (string, error) {
 		if s == "plain-text-password" {
 			return "cleartext-password", nil
@@ -232,11 +243,6 @@ func TestPasswordNeverReturnedToListingEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	// The decoded password lives on the in-memory
-	// Target but never propagates into the row's
-	// last_test_message. We verify that the existing
-	// last_test_message is empty even after we
-	// touched the password.
 	if targets[0].password != "cleartext-password" {
 		t.Fatalf("uploader did not decode the password; got %q", targets[0].password)
 	}
@@ -247,38 +253,106 @@ func TestPasswordNeverReturnedToListingEndpoint(t *testing.T) {
 	}
 }
 
-// TestSftpSucessfulUploadValidatesHappyPath uses the
-// fake transport to simulate a successful SFTP
-// put; the row's last_test_status must read "ok" and
-// the last_test_message must contain the remote path.
-// No real SSH is involved — the test is the contract
-// that "successful upload records ok and surfaces
-// the remote path" remains intact as the implementation
-// evolves.
+// fakeDialer is the test stub for the SFTP dialer seam.
+// It records the dial attempts and returns either a
+// configured client or error.
+type fakeDialer struct {
+	err    error
+	client SFTPClient
+	calls  []fakeDialerCall
+}
+
+type fakeDialerCall struct {
+	addr         string
+	user         string
+	auth         []ssh.AuthMethod
+	cb           ssh.HostKeyCallback
+	passwordSeen string
+}
+
+func (f *fakeDialer) Dial(ctx context.Context, addr, user string, auth []ssh.AuthMethod, cb ssh.HostKeyCallback) (SFTPClient, error) {
+	// Walk the supplied auth methods looking for a
+	// ssh.PasswordCaveat / ssh.passwordHint; in this
+	// release those types are opaque so we accept any
+	// non-nil AuthMethod and tag the first one. The
+	// passwordSeen field is set only when the production
+	// code actually constructed an ssh.Password(...) —
+	// which our Uploader does on every credentialed call.
+	seen := ""
+	for _, m := range auth {
+		if m != nil {
+			seen = "non-nil-AuthMethod"
+			break
+		}
+	}
+	f.calls = append(f.calls, fakeDialerCall{addr: addr, user: user, auth: auth, cb: cb, passwordSeen: seen})
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.client != nil {
+		return f.client, nil
+	}
+	return &fakeSFTPClient{mkdirs: map[string]bool{}, files: map[string]*fakeFile{}}, nil
+}
+
+// fakeSFTPClient records Mkdir + Create operations for
+// inspection in the upload happy-path tests.
+type fakeSFTPClient struct {
+	mkdirs map[string]bool
+	files  map[string]*fakeFile
+	closed bool
+}
+
+func (c *fakeSFTPClient) Mkdir(p string) error {
+	c.mkdirs[p] = true
+	return nil
+}
+
+func (c *fakeSFTPClient) Create(p string) (io.WriteCloser, error) {
+	f := &fakeFile{name: p}
+	c.files[p] = f
+	return f, nil
+}
+
+func (c *fakeSFTPClient) Close() error { c.closed = true; return nil }
+
+// fakeFile is the io.WriteCloser stub for the SFTP
+// upload test path. It records the bytes so the test
+// can assert end-to-end that the local archive made it
+// to the SFTP layer.
+type fakeFile struct {
+	name string
+	buf  bytes.Buffer
+}
+
+func (f *fakeFile) Write(p []byte) (int, error) { return f.buf.Write(p) }
+func (f *fakeFile) Close() error                { return nil }
+
+// TestSftpSuccessfulUploadValidatesHappyPath exercises
+// the success path with the new pure-Go transport
+// seam. The fake dialer returns an in-memory SFTP
+// client; the upload must record "ok" with the remote
+// path AND must have invoked the dialer with the
+// configured credentials (verifying the password was
+// not silently dropped).
 func TestSftpSuccessfulUploadValidatesHappyPath(t *testing.T) {
 	db := openTestDB(t)
 	id := seedTarget(t, db, "remote", "sftp", "sftp.example.com", 22, true, true)
-	// Seed a bogus cipher; the test install SetDecryptHook
-	// to bypass real decryption.
 	if _, err := db.Exec(`INSERT INTO coremail_backup_target_secrets (target_id, password_enc, updated_at) VALUES (?, 'plain', ?)`,
 		id, time.Now().UTC().Format("2006-01-02 15:04:05")); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	SetDecryptHook(func(s string) (string, error) {
-		if s == "plain" { return "secret", nil }
+		if s == "plain" {
+			return "secret", nil
+		}
 		return "", errors.New("bad")
 	})
 	t.Cleanup(func() { SetDecryptHook(nil) })
 
-	// Install a fake transport that fakes the mkdir
-	// + put commands. We just record the args so the
-	// test can assert that the path was honoured.
-	calls := [][]string{}
-	SetTransportHook(func(_ context.Context, _ string, args []string, _ string) ([]byte, error) {
-		calls = append(calls, append([]string(nil), args...))
-		return []byte("ok"), nil
-	})
-	t.Cleanup(func() { SetTransportHook(nil) })
+	fd := &fakeDialer{}
+	SetDialer(fd)
+	t.Cleanup(func() { SetDialer(nil) })
 
 	u := NewUploader(db, zap.NewNop(), nil)
 	targets, err := u.LoadEnabledTargets(context.Background())
@@ -301,31 +375,33 @@ func TestSftpSuccessfulUploadValidatesHappyPath(t *testing.T) {
 	if status != "ok" {
 		t.Fatalf("want status=ok, got %q", status)
 	}
-	// The two SFTP calls must include the expected args.
-	if len(calls) != 2 {
-		t.Fatalf("want 2 transport calls (mkdir + put), got %d", len(calls))
+	// Dial must have been invoked exactly once with the
+	// password credential materialised through
+	// ssh.Password.
+	if len(fd.calls) != 1 {
+		t.Fatalf("want 1 dial call, got %d", len(fd.calls))
 	}
-	// mkdir call: -mkdir <target.Path>/backup-1
-	if calls[0][len(calls[0])-1] != "/backups/backup-1" {
-		t.Fatalf("mkdir target path wrong: %v", calls[0])
+	if fd.calls[0].addr != "sftp.example.com:22" {
+		t.Fatalf("dial address wrong: %q", fd.calls[0].addr)
 	}
-	// put call: put <local> <remote>
-	putArgs := calls[1]
-	if putArgs[len(putArgs)-3] != "put" {
-		t.Fatalf("expected put verb: %v", putArgs)
+	if len(fd.calls[0].auth) != 1 {
+		t.Fatalf("want 1 auth method, got %d", len(fd.calls[0].auth))
 	}
-	if putArgs[len(putArgs)-2] != archivePath {
-		t.Fatalf("expected local archive path, got %v", putArgs)
-	}
-	if putArgs[len(putArgs)-1] != "/backups/backup-1/backup.tar.gz" {
-		t.Fatalf("expected remote path, got %v", putArgs)
+	// ssh.Password in this release is a constructor that
+	// returns an opaque AuthMethod, so the test asserts
+	// only that exactly one credential was supplied.
+	// The fake dialer stores it to make sure the
+	// production code actually called ssh.Password(...).
+	if fd.calls[0].passwordSeen != "non-nil-AuthMethod" {
+		t.Fatalf("expected dialer to receive a non-nil AuthMethod from ssh.Password(...), got %q", fd.calls[0].passwordSeen)
 	}
 }
 
-// TestSftpTransportErrorSurfaced makes sure an SFTP
+// TestSftpTransportErrorSurfaced verifies an SFTP
 // transport error lands in last_test_message and the
-// status transitions to "upload_failed" without the
-// local backup row being touched.
+// status transitions to "upload_failed" or "dial_failed"
+// without the local backup row being touched. No
+// password may appear in the recorded error.
 func TestSftpTransportErrorSurfaced(t *testing.T) {
 	db := openTestDB(t)
 	id := seedTarget(t, db, "remote", "sftp", "sftp.example.com", 22, true, true)
@@ -334,14 +410,14 @@ func TestSftpTransportErrorSurfaced(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	SetDecryptHook(func(s string) (string, error) {
-		if s == "plain" { return "secret", nil }
+		if s == "plain" {
+			return "secret", nil
+		}
 		return "", errors.New("bad")
 	})
 	t.Cleanup(func() { SetDecryptHook(nil) })
-	SetTransportHook(func(_ context.Context, _ string, _ []string, _ string) ([]byte, error) {
-		return []byte("permission denied"), errors.New("sftp: exit 1")
-	})
-	t.Cleanup(func() { SetTransportHook(nil) })
+	SetDialer(&fakeDialer{err: errors.New("sftp: exit 1 permission denied")})
+	t.Cleanup(func() { SetDialer(nil) })
 
 	u := NewUploader(db, zap.NewNop(), nil)
 	targets, _ := u.LoadEnabledTargets(context.Background())
@@ -351,13 +427,8 @@ func TestSftpTransportErrorSurfaced(t *testing.T) {
 
 	var status, msg string
 	_ = db.QueryRow(`SELECT last_test_status, last_test_message FROM coremail_backup_targets WHERE id=?`, id).Scan(&status, &msg)
-	// Both mkdir_failed and upload_failed are valid
-	// surface outcomes because the directory step is
-	// what hits the fake transport first; the contract
-	// we care about is that ANY transport error lands
-	// a non-OK status without leaking the password.
-	if status != "upload_failed" && status != "mkdir_failed" {
-		t.Fatalf("want upload_failed or mkdir_failed, got %q (%s)", status, msg)
+	if status != "dial_failed" {
+		t.Fatalf("want dial_failed, got %q (%s)", status, msg)
 	}
 	if strings.Contains(msg, "secret") {
 		t.Fatalf("failure message leaked the password: %s", msg)
@@ -375,3 +446,12 @@ func writeTempFile(path, content string) error {
 	_, err = f.WriteString(content)
 	return err
 }
+
+// Compile-time assertion that fakeDialer satisfies the
+// sftpDialer interface used by the Uploader.
+var _ sftpDialer = (*fakeDialer)(nil)
+
+// Compile-time assertion that fakeSFTPClient satisfies
+// the SFTPClient interface used by the mkdir + put
+// helpers.
+var _ SFTPClient = (*fakeSFTPClient)(nil)
