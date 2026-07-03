@@ -84,13 +84,15 @@ The Makefile injects `buildVersion` and `buildTime` at link time; the runtime re
 | 443 | HTTPS (Caddy) | Caddy | public | allow |
 | 4190 | ManageSieve | (not yet implemented) | public | reserved |
 | 6379 | Redis | redis-server | internal (127.0.0.1) | never allow external |
-| 8080 | admin + webmail SPA + API | orvix | **internal** by default (0.0.0.0); MUST be `ufw deny 8080/tcp` after setup-https.sh | deny externally |
-| 8081 | JMAP + SMTP submission web + outbound proxy | orvix | **internal** by default; MUST be `ufw deny 8081/tcp` after setup-https.sh | deny externally |
+| 8080 | admin + webmail SPA + API | orvix | **loopback-only** by default (`127.0.0.1`); the installer's `verify_install` listener-posture check rejects any non-loopback bind. Public access MUST go through the Caddy reverse proxy on 443; the operator is told in the success banner to run `sudo ufw deny 8080/tcp` after setup-https.sh. | deny externally (any non-loopback listener bind on 8080 fails the install) |
+| 8081 | JMAP + SMTP submission web + outbound proxy | orvix | **loopback-only** by default (`127.0.0.1`); the installer's `verify_install` listener-posture check rejects any non-loopback bind. Public access MUST go through the Caddy reverse proxy on 443; the operator is told in the success banner to run `sudo ufw deny 8081/tcp` after setup-https.sh. | deny externally (any non-loopback listener bind on 8081 fails the install) |
 
 ### 2.1 Pre-HTTPS posture (fresh VPS)
 
-- `orvix` binds 80 (admin API + HTTP fallback), 8080 (admin + webmail SPA + API), 8081 (JMAP), 25/110/143 (mail). The installer prints a **TEMPORARY URL** block (`http://<server_ip>:8080/admin` etc.) so the operator can verify before DNS / Caddy are wired up. It is **explicitly labelled as plain HTTP** and is bound to the server IP only — not to `admin.<domain>` (which is unreachable without HTTPS + DNS).
-- After `setup-https.sh`, the operator is told in the success banner to run `sudo ufw deny 8080/tcp && sudo ufw deny 8081/tcp`. This is manual today (intentional — automatic lockdown would brick an operator with a typo in the Caddyfile).
+- `orvix` binds 25 / 110 / 143 on `0.0.0.0` so external mail clients can reach the bare server IP. The admin backend (8080) and the JMAP endpoint (8081) bind **only on `127.0.0.1`** by default — never on `0.0.0.0`. The installer enforces this contract: `verify_install` walks every listener on 8080 and 8081 and fails the install if any non-loopback bind is present. See [`release/install.sh` `verify_install`](../release/install.sh) for the strict bind-posture check.
+- The installer prints a **LOOPBACK-ONLY URL** block (`http://127.0.0.1:8080/admin` etc.) so the operator can verify from the VPS console before DNS / Caddy are wired up. These URLs are bound to loopback only and are **NOT** reachable from the public internet — even before HTTPS. They are labelled as INTERNAL/loopback so the operator never assumes the production URLs work yet.
+- A second documented path is an SSH tunnel from the operator's workstation (`ssh -L 8080:127.0.0.1:8080 -L 8081:127.0.0.1:8081 root@<server_ip>`) for pre-DNS, pre-HTTPS remote verification.
+- After `setup-https.sh`, the operator is told in the success banner to run `sudo ufw deny 8080/tcp && sudo ufw deny 8081/tcp`. The default-deny firewall matches the loopback-only listener posture so there is no exposed surface even if the operator forgets the deny rules. This is manual today (intentional — automatic lockdown would brick an operator with a typo in the Caddyfile).
 
 ### 2.2 Post-HTTPS posture
 
