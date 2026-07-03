@@ -237,7 +237,11 @@ if [ "$MODE" = "build" ]; then
 
     # The sealed binary's metadata must match the bundle metadata.
     if [ -x "$BDIR/orvix/bin/orvix" ]; then
-        EMBED_VERSION="$("$BDIR/orvix/bin/orvix" version | awk '{print $2}' || true)"
+        # Run version --full once and parse all fields from it.
+        BIN_FULL="$("$BDIR/orvix/bin/orvix" version --full)"
+
+        # Parse version from first line: "orvix <version>" — version is field 2.
+        EMBED_VERSION="$(echo "$BIN_FULL" | awk 'NR==1 && $1=="orvix" {print $2}')"
         [ -n "$EMBED_VERSION" ] || fail "sealed binary reports no version"
         if [ -n "$EXPECTED_VERSION" ] && [ "$EMBED_VERSION" != "$EXPECTED_VERSION" ]; then
             fail "sealed binary reports version=$EMBED_VERSION but bundle expected version=$EXPECTED_VERSION"
@@ -246,7 +250,6 @@ if [ "$MODE" = "build" ]; then
 
         # Embedded commit must match git HEAD (robust parse,
         # not fragile grep against aligned pretty-print output).
-        BIN_FULL="$("$BDIR/orvix/bin/orvix" version --full)"
         EMBEDDED_COMMIT="$(echo "$BIN_FULL" | awk '/^[[:space:]]*commit:[[:space:]]*/ {sub(/^[[:space:]]*commit:[[:space:]]*/, ""); print; exit}')"
         [ -n "$EMBEDDED_COMMIT" ] || fail "sealed binary does not report a commit"
         GIT_HEAD="$(git rev-parse HEAD)"

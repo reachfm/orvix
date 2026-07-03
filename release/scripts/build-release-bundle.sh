@@ -318,8 +318,10 @@ magic_bytes="$(read_elf_magic_hex "$BIN_OUT")"
     || fail "built binary at $BIN_OUT is not a Linux ELF (size=$bin_size bytes, GOOS=$TARGET_OS GOARCH=$TARGET_ARCH, got magic=$magic_bytes, expected 7f454c46)" 2
 
 # ── 3. Verify embedded metadata ───────────────────────────────────
-EMBEDDED_VERSION="$("$BIN_OUT" version | awk '{print $2}' || true)"
 EMBEDDED_FULL="$("$BIN_OUT" version --full || true)"
+
+# Parse version from first line: "orvix <version>" — version is field 2.
+EMBEDDED_VERSION="$(echo "$EMBEDDED_FULL" | awk 'NR==1 && $1=="orvix" {print $2}')"
 
 # Parse embedded commit robustly — find line with optional whitespace
 # + "commit:", strip prefix, trim whitespace, extract the SHA only.
@@ -430,7 +432,8 @@ trap 'rm -rf "$WORK_DIR" "$VERIFY_DIR"' EXIT
 tar -C "$VERIFY_DIR" -xzf "$ARCHIVE" orvix/bin/orvix orvix/BUILDINFO \
     || fail "could not re-extract binary for verification" 4
 
-VERIFY_VERSION="$("$VERIFY_DIR/orvix/bin/orvix" version | awk '{print $2}' || true)"
+VERIFY_FULL="$("$VERIFY_DIR/orvix/bin/orvix" version --full || true)"
+VERIFY_VERSION="$(echo "$VERIFY_FULL" | awk 'NR==1 && $1=="orvix" {print $2}')"
 [ "$VERIFY_VERSION" = "$EMBEDDED_VERSION" ] \
     || fail "sealed binary reports $VERIFY_VERSION but build produced $EMBEDDED_VERSION" 4
 
@@ -441,6 +444,7 @@ case "$VERIFY_BUILDINFO" in
 esac
 
 # ── 9. Done ───────────────────────────────────────────────────────
+BUNDLE_BASE_COUNT="$(find "$BUNDLE_ROOT" -type f | wc -l)"
 info "bundle sealed: $ARCHIVE ($(du -h "$ARCHIVE" | cut -f1))"
 info "contents: $BUNDLE_BASE_COUNT files, $RESOLVED_VERSION ($GIT_SHORT_COMMIT, $RESOLVED_CHANNEL, $TARGET_OS/$TARGET_ARCH)"
 
