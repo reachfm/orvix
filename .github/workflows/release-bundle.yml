@@ -130,12 +130,28 @@ jobs:
           set -euo pipefail
           trap 'echo "FAILED_STEP=Go test all packages" >> "$GITHUB_ENV"' ERR
           log="$(mktemp)"
-          if ! go test ./... -count=1 -timeout 900s -p 4 2>&1 | tee "$log"; then
+          # `-v` so a failing test name (and its FAIL/ERROR
+          # block) is captured; `tee` so the GHA step log
+          # mirrors the same content. On failure we re-grep
+          # FAIL/ERROR/PANIC tokens and dump a wider window
+          # around each failure into the GitHub step summary
+          # so the operator can see WHICH test failed without
+          # waiting for the workflow owner to dig into the
+          # job log zip.
+          if ! go test ./... -count=1 -timeout 900s -p 4 -v 2>&1 | tee "$log"; then
             {
               echo "## Failed step: Go test all packages"
               echo
+              echo "### Last 250 lines of test output (raw)"
+              echo
               echo '```text'
-              tail -n 160 "$log"
+              tail -n 250 "$log"
+              echo '```'
+              echo
+              echo "### Per-failure snippet"
+              echo
+              echo '```text'
+              grep -B 2 -A 30 -E '^--- FAIL|^FAIL\s|panic:|Error Trace:|Error:|^=== RUN.*FAIL|^--- FAIL:|^FAIL\s+github\.com' "$log" | head -n 400 || true
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
             exit 1
