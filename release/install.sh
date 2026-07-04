@@ -10,6 +10,7 @@ ORVIX_BIN="${ORVIX_BIN:-/usr/local/bin/orvix}"
 ORVIX_CONFIG="${ORVIX_CONFIG:-/etc/orvix/orvix.yaml}"
 INSTALL_LOG="${INSTALL_LOG:-/var/log/orvix/install.log}"
 BOOTSTRAP_ENV="${BOOTSTRAP_ENV:-/etc/orvix/bootstrap.env}"
+INSTALL_RUN_ID=""
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
@@ -159,7 +160,7 @@ $INSTALL_LOG
 Last 80 log lines:
 HEADER
 	if [ -f "$INSTALL_LOG" ]; then
-		tail -n 80 "$INSTALL_LOG" || true
+		print_current_run_log_tail || true
 	fi
 	cat <<FOOTER
 
@@ -395,10 +396,35 @@ prepare_log() {
 	mkdir -p "$(dirname "$INSTALL_LOG")"
 	touch "$INSTALL_LOG"
 	chmod 0640 "$INSTALL_LOG"
+	INSTALL_RUN_ID="${INSTALL_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+	log_detail "INSTALL_RUN_START id=$INSTALL_RUN_ID"
 }
 
 log_detail() {
 	printf '[%s] %s\n' "$(date -Is)" "$*" >>"$INSTALL_LOG"
+}
+
+print_current_run_log_tail() {
+    if [ -n "${INSTALL_RUN_ID:-}" ]; then
+        awk -v marker="INSTALL_RUN_START id=$INSTALL_RUN_ID" '
+            index($0, marker) { seen = 1; buf = ""; count = 0 }
+            seen {
+                lines[count % 80] = $0
+                count++
+            }
+            END {
+                if (!seen) {
+                    exit 1
+                }
+                start = count > 80 ? count - 80 : 0
+                for (i = start; i < count; i++) {
+                    print lines[i % 80]
+                }
+            }
+        ' "$INSTALL_LOG" || tail -n 80 "$INSTALL_LOG"
+        return
+    fi
+    tail -n 80 "$INSTALL_LOG"
 }
 
 run_quiet() {
@@ -1506,6 +1532,126 @@ ENV
     chmod 0640 "$BOOTSTRAP_ENV"
 }
 
+is_truthy() {
+    case "${1:-}" in
+        1|true|TRUE|yes|YES|y|Y|on|ON) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+active_admin_count() {
+    [ -f /var/lib/orvix/orvix.db ] || { printf '0'; return 0; }
+    sqlite3 /var/lib/orvix/orvix.db "SELECT COUNT(*) FROM users WHERE role IN ('admin','superadmin','super_admin') AND active = 1;" 2>/dev/null || printf '0'
+}
+
+first_active_admin_email() {
+    [ -f /var/lib/orvix/orvix.db ] || return 1
+    sqlite3 /var/lib/orvix/orvix.db "SELECT email FROM users WHERE role IN ('admin','superadmin','super_admin') AND active = 1 ORDER BY id LIMIT 1;" 2>/dev/null || true
+}
+
+admin_user_exists() {
+    local email="$1"
+    local sql_email count
+    [ -f /var/lib/orvix/orvix.db ] || return 1
+    sql_email="$(sqlite_escape "$email")"
+    count="$(sqlite3 /var/lib/orvix/orvix.db "SELECT COUNT(*) FROM users WHERE email = '$sql_email' AND role IN ('admin','superadmin','super_admin') AND active = 1;" 2>/dev/null || true)"
+    [ "$count" = "1" ]
+}
+
+clear_bootstrap_env_for_existing_admin() {
+    local mode="$1"
+    if [ -f "$BOOTSTRAP_ENV" ]; then
+        run_quiet rm -f "$BOOTSTRAP_ENV"
+        log_detail "BOOTSTRAP env removed before service restart for existing-admin $mode mode; credentials are preserved in DB"
+    else
+        log_detail "BOOTSTRAP env already absent for existing-admin $mode mode"
+    fi
+}
+
+reset_existing_admin_password() {
+    local email="$1"
+    local password="$2"
+    local helper err
+    [ -f /var/lib/orvix/orvix.db ] || fail "cannot reset admin password: database missing at /var/lib/orvix/orvix.db"
+    command -v python3 >/dev/null 2>&1 || fail "cannot reset admin password: python3 is not installed"
+    admin_user_exists "$email" || fail "cannot reset admin password: no active admin user exists for $email"
+
+    helper="$(mktemp)"
+    err="$(mktemp)"
+    chmod 0700 "$helper"
+    chmod 0600 "$err"
+    cat >"$helper" <<'PY'
+#!/usr/bin/env python3
+import base64
+import crypt
+import os
+import re
+import secrets
+import sqlite3
+import sys
+
+EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+
+def die(msg):
+    print("FAIL: " + msg, file=sys.stderr)
+    sys.exit(1)
+
+if len(sys.argv) != 3:
+    die("usage: reset-helper EMAIL DB_PATH")
+
+email = sys.argv[1]
+db_path = sys.argv[2]
+raw = sys.stdin.buffer.readline()
+if not raw:
+    die("no password on stdin")
+try:
+    password = raw.decode("utf-8").rstrip("\r\n")
+except UnicodeDecodeError:
+    die("password must be utf-8")
+
+if not EMAIL_RE.match(email) or len(email) > 254:
+    die("invalid email")
+if not os.path.isfile(db_path):
+    die("database missing")
+if len(password) < 8:
+    die("password too short")
+if len(password) > 72:
+    die("password exceeds bcrypt limit")
+
+raw_salt = secrets.token_bytes(16)
+b64_salt = base64.b64encode(raw_salt).decode("ascii").rstrip("=")
+salt = "$2b$10$" + b64_salt[:22]
+hash_value = crypt.crypt(password, salt)
+if not isinstance(hash_value, str) or not hash_value.startswith("$2"):
+    die("bcrypt hash generation failed")
+
+conn = sqlite3.connect(db_path)
+try:
+    conn.execute("PRAGMA busy_timeout = 5000")
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET password_hash = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+        "WHERE email = ? AND role IN ('admin','superadmin','super_admin') AND active = 1",
+        (hash_value, email),
+    )
+    if cur.rowcount != 1:
+        conn.rollback()
+        die("admin row update count was not exactly one")
+    conn.commit()
+finally:
+    conn.close()
+PY
+
+    if ! printf '%s\n' "$password" | python3 "$helper" "$email" /var/lib/orvix/orvix.db >/dev/null 2>"$err"; then
+        local msg
+        msg="$(cat "$err" 2>/dev/null || true)"
+        rm -f "$helper" "$err"
+        fail "admin password reset failed: ${msg:-unknown helper failure}"
+    fi
+    rm -f "$helper" "$err"
+    log_detail "ADMIN password rotated for $email via explicit ORVIX_RESET_ADMIN_PASSWORD=1 path (hash/password not logged)"
+}
+
 install_update_helper() {
     # Install the runtime update systemd oneshot unit.
     local unit_src="${ORVIX_SOURCE_DIR}/release/systemd/orvix-update.service"
@@ -2018,6 +2164,7 @@ smoke_jmap_session() {
 smoke_tests() {
     local email="$1"
     local password="$2"
+    local mode="${3:-fresh}"
     local failures=0
     local base="http://127.0.0.1:8080"
     local jmap_base="http://127.0.0.1:8081"
@@ -2077,7 +2224,11 @@ smoke_tests() {
     # works) to ensure subsequent logins also work. This is
     # the runtime guard against the "first login succeeds,
     # subsequent fail" inconsistency.
-    smoke_login_admin_attempts "$email" "$password"
+    if [ "$mode" = "preserve" ]; then
+        log_detail "SMOKE login: SKIP because existing admin user was preserved; use /usr/share/orvix/scripts/reset-admin-password.sh $email to rotate credentials"
+    else
+        smoke_login_admin_attempts "$email" "$password"
+    fi
 
     # Webmail assets are validated after the page itself
     # passes â€” a HEAD on /webmail says nothing about whether
@@ -2308,9 +2459,37 @@ wait_for_runtime_ready_after_restart() {
     fail "runtime listeners did not become ready after bootstrap cleanup restart (waited ${deadline_secs}s; see $INSTALL_LOG for ss / journalctl dumps)"
 }
 
+verify_orvix_process_env_no_bootstrap() {
+    local orvix_pid
+    orvix_pid="$(systemctl show -p MainPID --value orvix 2>/dev/null || true)"
+    if [ -z "$orvix_pid" ] || [ "$orvix_pid" = "0" ]; then
+        fail "cannot determine orvix MainPID after restart"
+    fi
+    log_detail "VERIFY orvix process environment: MainPID=$orvix_pid"
+
+    local env_file process_env
+    env_file="/proc/$orvix_pid/environ"
+    if [ ! -r "$env_file" ]; then
+        fail "cannot read orvix process environment for bootstrap secret verification (MainPID=$orvix_pid, env_file=$env_file)"
+    fi
+
+    process_env="$(tr '\0' '\n' < "$env_file")" || \
+        fail "failed to read orvix process environment for bootstrap secret verification (MainPID=$orvix_pid, env_file=$env_file)"
+
+    if [ -z "$process_env" ]; then
+        fail "orvix process environment is empty during bootstrap secret verification (MainPID=$orvix_pid, env_file=$env_file)"
+    fi
+
+    if printf '%s\n' "$process_env" | grep -qiE 'ORVIX_ADMIN_PASSWORD|ORVIX_ADMIN_PASSWORD_B64'; then
+        fail "bootstrap password material persists in orvix process environment after cleanup (MainPID=$orvix_pid)"
+    fi
+    log_detail "VERIFY orvix process environment: no bootstrap password material found (MainPID=$orvix_pid)"
+}
+
 verify_install() {
 	local email="$1"
 	local password="$2"
+    local mode="${3:-fresh}"
 	local users_count mailbox_count sql_email
 	sql_email="$(sqlite_escape "$email")"
 
@@ -2332,80 +2511,43 @@ verify_install() {
         ss -ltn "( sport = :$port )" | grep -q ":$port" || fail "port $port is not listening"
 	done
 
-    # Dual-login password-chain proof. Replaces the old
-    # single-login loop that was the source of the
-    # "INSTALLATION VERIFICATION PASSED but later login fails"
-    # silent-bootstrap-failure mode. Bootstrap.env is only
-    # removed AFTER both logins return 200, so any failure
-    # leaves the file in place for diagnosis.
-    if ! verify_install_password_login "$email" "$password"; then
-        echo -e "${RED}Admin API login verification failed${NC}" >&2
-        echo "Recent Orvix journal:" >&2
-        journalctl -u orvix.service -n 80 --no-pager >&2 || true
-        fail "admin API dual-login verification failed"
-    fi
+    case "$mode" in
+        fresh|reset)
+            # Dual-login password-chain proof. Bootstrap.env is
+            # only removed after fresh credentials are proven. In
+            # reset mode the env is already absent, but the same
+            # login proof verifies the explicit password rotation.
+            if ! verify_install_password_login "$email" "$password"; then
+                echo -e "${RED}Admin API login verification failed${NC}" >&2
+                echo "Recent Orvix journal:" >&2
+                journalctl -u orvix.service -n 80 --no-pager >&2 || true
+                fail "admin API dual-login verification failed"
+            fi
 
-    # Only NOW is it safe to delete bootstrap.env. The
-    # dual-login has confirmed the runtime can authenticate
-    # the typed credentials twice, so removing the env file
-    # cannot strand a working install.
-    run_quiet rm -f "$BOOTSTRAP_ENV"
+            run_quiet rm -f "$BOOTSTRAP_ENV"
 
-    # Restart orvix so the live process no longer has
-    # ORVIX_ADMIN_PASSWORD_B64 in its environment. The
-    # config is already loaded correctly from orvix.yaml
-    # and the admin user is durable in the database.
-    systemctl restart orvix 2>/dev/null || true
-    local restart_wait
-    for restart_wait in 1 2 3 4 5 6 7 8 9 10; do
-        if systemctl is-active --quiet orvix 2>/dev/null; then
-            break
-        fi
-        sleep 1
-    done
-    systemctl is-active --quiet orvix || fail "orvix failed to restart after bootstrap env cleanup"
+            # Restart orvix so the live process no longer has
+            # ORVIX_ADMIN_PASSWORD_B64 in its environment.
+            systemctl restart orvix 2>/dev/null || true
+            local restart_wait
+            for restart_wait in 1 2 3 4 5 6 7 8 9 10; do
+                if systemctl is-active --quiet orvix 2>/dev/null; then
+                    break
+                fi
+                sleep 1
+            done
+            systemctl is-active --quiet orvix || fail "orvix failed to restart after bootstrap env cleanup"
+            ;;
+        preserve)
+            log_detail "VERIFY admin login: SKIP dual-login because existing admin credentials are preserved and plaintext is unknown"
+            run_quiet rm -f "$BOOTSTRAP_ENV"
+            ;;
+        *)
+            fail "internal installer bug: unknown admin verification mode $mode"
+            ;;
+    esac
 
-    # Verify the restarted process has no bootstrap password
-    # material in its environment. Uses systemd MainPID (not
-    # pidof) so we always inspect the correct process.
-    local orvix_pid
-    orvix_pid="$(systemctl show -p MainPID --value orvix 2>/dev/null || true)"
-    if [ -z "$orvix_pid" ] || [ "$orvix_pid" = "0" ]; then
-        fail "cannot determine orvix MainPID after restart"
-    fi
-    log_detail "VERIFY orvix process environment: MainPID=$orvix_pid"
-
-    # Fail-closed read of /proc/$MainPID/environ. The naive
-    # `tr ... | grep -qiE` inside an `if` has a silent-success hole:
-    # if /proc/$MainPID/environ cannot be read, the pipeline emits no
-    # grep match and the installer logs success even though we never
-    # actually inspected the process environment. Combined with the
-    # missing `set -e` propagation through the `if`, that hole would
-    # let a re-install ship with bootstrap password material still
-    # present in the live orvix process. Split the read into a
-    # dedicated fail-closed step so any of these four failure modes
-    # terminates the installer instead of silently passing:
-    #   1. /proc/$MainPID/environ does not exist or is unreadable.
-    #   2. Reading the file returns an error from tr.
-    #   3. The captured environment is empty (defence in depth).
-    #   4. The captured environment contains bootstrap password material.
-    local env_file process_env
-    env_file="/proc/$orvix_pid/environ"
-    if [ ! -r "$env_file" ]; then
-        fail "cannot read orvix process environment for bootstrap secret verification (MainPID=$orvix_pid, env_file=$env_file)"
-    fi
-
-    process_env="$(tr '\0' '\n' < "$env_file")" || \
-        fail "failed to read orvix process environment for bootstrap secret verification (MainPID=$orvix_pid, env_file=$env_file)"
-
-    if [ -z "$process_env" ]; then
-        fail "orvix process environment is empty during bootstrap secret verification (MainPID=$orvix_pid, env_file=$env_file)"
-    fi
-
-    if printf '%s\n' "$process_env" | grep -qiE 'ORVIX_ADMIN_PASSWORD|ORVIX_ADMIN_PASSWORD_B64'; then
-        fail "bootstrap password material persists in orvix process environment after cleanup (MainPID=$orvix_pid)"
-    fi
-    log_detail "VERIFY orvix process environment: no bootstrap password material found (MainPID=$orvix_pid)"
+    verify_orvix_process_env_no_bootstrap
 
     # Wait for the runtime to actually be ready before we run
     # bind posture validation. `systemctl is-active` and MainPID
@@ -2566,10 +2708,38 @@ main() {
     validate_directory /var/lib/orvix/backups orvix:orvix 0750
 
     set_step "configuration-input" "Administrator enrollment" 45
-    local primary_domain admin_email admin_password
+    local primary_domain admin_email admin_password admin_mode existing_admins existing_admin_email
     primary_domain="$(prompt_domain)"
     admin_email="$(prompt_email)"
-    admin_password="$(prompt_password)"
+    admin_password=""
+    admin_mode="fresh"
+    existing_admins="$(active_admin_count)"
+    existing_admin_email="$(first_active_admin_email || true)"
+
+    if [ "${existing_admins:-0}" -gt 0 ]; then
+        if is_truthy "${ORVIX_RESET_ADMIN_PASSWORD:-}"; then
+            admin_mode="reset"
+            admin_user_exists "$admin_email" || fail "ORVIX_RESET_ADMIN_PASSWORD=1 requested, but no active admin user exists for $admin_email; existing admin is ${existing_admin_email:-unknown}"
+            admin_password="$(prompt_password)"
+            printf 'Existing admin user %s will have its password rotated after service activation.\n' "$admin_email"
+            log_detail "ADMIN enrollment: explicit reset requested for existing admin $admin_email"
+        else
+            admin_mode="preserve"
+            if [ -n "${existing_admin_email:-}" ] && [ "$admin_email" != "$existing_admin_email" ]; then
+                printf 'Existing admin user preserved: %s (input email %s will not create or reset another admin).\n' "$existing_admin_email" "$admin_email"
+                log_detail "ADMIN enrollment: existing admin $existing_admin_email preserved; ignoring input email $admin_email for verification"
+                admin_email="$existing_admin_email"
+            else
+                printf 'Existing admin user preserved: %s.\n' "$admin_email"
+                log_detail "ADMIN enrollment: existing admin $admin_email preserved"
+            fi
+            printf 'To reset the password run: /usr/share/orvix/scripts/reset-admin-password.sh %s\n' "$admin_email"
+            printf 'Or rerun with ORVIX_RESET_ADMIN_PASSWORD=1 to rotate it during install.\n'
+        fi
+    else
+        admin_password="$(prompt_password)"
+        log_detail "ADMIN enrollment: no existing active admin found; fresh bootstrap will create $admin_email"
+    fi
 
     set_step "binary" "CoreMail binary deployment" 60
     install_binary
@@ -2632,7 +2802,17 @@ IPFAIL
     log_detail "CONFIG provisioning: detected public IPv4 = $server_public_ip (validated against is_valid_public_ipv4)"
 
     provision_config "$primary_domain" "$server_public_ip"
-    write_bootstrap_env "$admin_email" "$admin_password"
+    case "$admin_mode" in
+        fresh)
+            write_bootstrap_env "$admin_email" "$admin_password"
+            ;;
+        preserve|reset)
+            clear_bootstrap_env_for_existing_admin "$admin_mode"
+            ;;
+        *)
+            fail "internal installer bug: unknown admin mode $admin_mode"
+            ;;
+    esac
     install_release_scripts
     provision_vapid_keys "$admin_email"
     # Propagate admin + webmail static assets via the shared
@@ -2684,10 +2864,14 @@ IPFAIL
     validate_systemd
     validate_sudoers
 
+    if [ "$admin_mode" = "reset" ]; then
+        reset_existing_admin_password "$admin_email" "$admin_password"
+    fi
+
     set_step "verification" "Enterprise health verification" 95
     run_quiet sleep 5
-    verify_install "$admin_email" "$admin_password"
-    smoke_tests "$admin_email" "$admin_password"
+    verify_install "$admin_email" "$admin_password" "$admin_mode"
+    smoke_tests "$admin_email" "$admin_password" "$admin_mode"
     validate_https_config || true
     generate_install_report
 
