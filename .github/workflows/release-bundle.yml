@@ -28,7 +28,14 @@ permissions:
 jobs:
   build-and-upload:
     name: Build Linux bundle and upload release assets
-    runs-on: ubuntu-latest
+    # Pin to ubuntu-24.04 (ubuntu-latest is Ubuntu 24.04 today;
+    # ubuntu-26.04 is a public preview that drops Python 3.12's
+    # stdlib `crypt` module and would break the bcrypt reset
+    # helper test). When the upstream `ubuntu-latest` is GA'd
+    # on Ubuntu 26.04 (and the bcrypt test is rewritten to
+    # tolerate crypt=removed), this can flip back to
+    # `ubuntu-latest`.
+    runs-on: ubuntu-24.04
     env:
       TAG: ${{ github.event.inputs.tag || 'v1.0.3-rc4' }}
       CHANNEL: ${{ github.event.inputs.channel || 'stable' }}
@@ -49,6 +56,24 @@ jobs:
             echo "LOCAL_SHA="
             echo "REMOTE_SHA="
           } >> "$GITHUB_ENV"
+
+      - name: Install Go test deps
+        # ubuntu-24.04 ships sqlite3 in `apt.cmd_packages`, but
+        # the upstream image config can drift. Make the Go test
+        # step fail-closed by ensuring sqlite3 is on PATH before
+        # `go test ./internal/config` even runs — that suite
+        # exec's sqlite3 directly to build the bcrypt reset
+        # helper's behavioral fixture DB.
+        run: |
+          set -euo pipefail
+          trap 'echo "FAILED_STEP=Install Go test deps" >> "$GITHUB_ENV"' ERR
+          if ! command -v sqlite3 >/dev/null 2>&1; then
+            sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
+            sudo apt-get install -y --no-install-recommends sqlite3
+          fi
+          command -v sqlite3 >/dev/null 2>&1 || { echo "sqlite3 still missing after apt install" >&2; exit 1; }
+          sqlite3 --version
+          command -v python3 >/dev/null 2>&1 && python3 --version || true
 
       - name: Setup Go
         uses: actions/setup-go@v5
