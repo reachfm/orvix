@@ -41,31 +41,26 @@ verifies its layout, then delegates to the bundled
 `install.sh`. Everything below maps to one curl invocation.
 
 ```bash
-# Default: latest stable
-curl -fsSL https://releases.orvix.email/install-public.sh \
-    | sudo ORVIX_NON_INTERACTIVE=1 \
-         ORVIX_DOMAIN=mail.example.com \
-         ORVIX_PUBLIC_IPV4=<your.public.ipv4> \
-         bash -s --
+# Default: latest stable GitHub Release bundle
+ORVIX_PRIMARY_DOMAIN=example.com \
+ORVIX_ADMIN_EMAIL=admin@example.com \
+ORVIX_ADMIN_PASSWORD='STRONG_PASSWORD' \
+curl -fsSL https://raw.githubusercontent.com/reachfm/orvix/main/release/install-public.sh | sudo -E bash
 
-# Pinned to a specific version
-curl -fsSL https://releases.orvix.email/install-public.sh \
-    | sudo ORVIX_VERSION=1.0.3-rc5 \
-         ORVIX_COMMIT=53ecf240000... \
-         ORVIX_BUNDLE_SHA256=<expected sha256> \
-         ORVIX_NON_INTERACTIVE=1 \
-         ORVIX_DOMAIN=mail.example.com \
-         ORVIX_PUBLIC_IPV4=<your.public.ipv4> \
-         bash -s --
+# Explicit password rotation on an existing install/rerun
+ORVIX_PRIMARY_DOMAIN=example.com \
+ORVIX_ADMIN_EMAIL=admin@example.com \
+ORVIX_ADMIN_PASSWORD='NEW_STRONG_PASSWORD' \
+ORVIX_RESET_ADMIN_PASSWORD=1 \
+curl -fsSL https://raw.githubusercontent.com/reachfm/orvix/main/release/install-public.sh | sudo -E bash
 
 # Air-gapped: point the installer at an internally-hosted bundle
-curl -fsSL https://releases.orvix.email/install-public.sh \
-    | sudo ORVIX_BUNDLE_URL=https://internal.example.com/orvix-1.0.3-rc5-linux-amd64.tar.gz \
-         ORVIX_BUNDLE_SHA256=<expected sha256> \
-         ORVIX_NON_INTERACTIVE=1 \
-         ORVIX_DOMAIN=mail.example.com \
-         ORVIX_PUBLIC_IPV4=<your.public.ipv4> \
-         bash -s --
+ORVIX_BUNDLE_URL=https://internal.example.com/orvix-enterprise-mail-stable-linux-amd64.tar.gz \
+ORVIX_BUNDLE_SHA256=<expected sha256> \
+ORVIX_PRIMARY_DOMAIN=example.com \
+ORVIX_ADMIN_EMAIL=admin@example.com \
+ORVIX_ADMIN_PASSWORD='STRONG_PASSWORD' \
+curl -fsSL https://raw.githubusercontent.com/reachfm/orvix/main/release/install-public.sh | sudo -E bash
 ```
 
 The bundle pathway is fail-closed: if `install-public.sh`
@@ -73,6 +68,20 @@ cannot reach the bundle, the bundle is missing required files,
 or the bundled binary's embedded commit does not match
 `ORVIX_COMMIT`, the installer aborts before mutating any
 state on the host.
+
+By default, `install-public.sh` downloads
+`orvix-enterprise-mail-stable-linux-amd64.tar.gz` and its
+`.sha256` sidecar from the latest GitHub Release. Stable
+assets must be built on Linux by the `release-bundle.yml`
+GitHub Actions workflow; do not publish release bundles from
+Windows or from an ad hoc VPS SSH session.
+
+Installer reruns preserve existing admin credentials. The
+installer does not prompt for a replacement password unless
+`ORVIX_RESET_ADMIN_PASSWORD=1` is explicitly set; without that
+flag it prints the `reset-admin-password.sh` recovery command
+and verifies service/runtime health without pretending to know
+the preserved plaintext password.
 
 ### Manual install (download then run)
 

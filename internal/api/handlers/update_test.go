@@ -1161,9 +1161,14 @@ func TestInstallScript_SafetyNoSecrets(t *testing.T) {
 	if strings.Contains(content, "echo.*$password") {
 		t.Error("install.sh must not echo password values")
 	}
-	// Never print password hashes.
-	if strings.Contains(content, "password_hash") {
-		t.Error("install.sh must not echo password hashes")
+	// Never print password hashes. Column names in parameterized
+	// SQL are allowed; echo/printf/log output containing the hash
+	// column or hash variables is not.
+	for _, line := range strings.Split(content, "\n") {
+		if (strings.Contains(line, "echo") || strings.Contains(line, "printf") || strings.Contains(line, "log_detail")) &&
+			(strings.Contains(line, "password_hash") || strings.Contains(line, "hash_value")) {
+			t.Errorf("install.sh must not echo password hashes: %s", line)
+		}
 	}
 	// Never print JWT tokens.
 	if strings.Contains(content, "echo.*$token") || strings.Contains(content, "echo.*token") {

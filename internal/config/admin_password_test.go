@@ -313,12 +313,9 @@ func TestInstallerVerifyInstallCallsDualLoginBeforeDelete(t *testing.T) {
 	if callIndex < 0 {
 		t.Fatal("verify_install must call verify_install_password_login")
 	}
-	deleteIndex := strings.Index(installer, "rm -f \"$BOOTSTRAP_ENV\"")
+	deleteIndex := strings.Index(installer[callIndex:], "rm -f \"$BOOTSTRAP_ENV\"")
 	if deleteIndex < 0 {
 		t.Fatal("verify_install must delete bootstrap.env after success")
-	}
-	if deleteIndex < callIndex {
-		t.Fatal("verify_install must delete bootstrap.env AFTER verify_install_password_login")
 	}
 
 	dualIndex := strings.Index(installer, "verify_install_password_login() {")

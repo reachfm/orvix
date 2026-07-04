@@ -13,6 +13,28 @@ sudo bash release/scripts/verify-fresh-vps-one-command.sh
 
 (Or, on the operator's own machine, after SSHing into the VPS.)
 
+## Release asset contract
+
+The customer install command always fetches
+`release/install-public.sh` from `main`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/reachfm/orvix/main/release/install-public.sh | sudo bash
+```
+
+That public installer downloads the latest stable GitHub
+Release bundle (`orvix-enterprise-mail-stable-linux-amd64.tar.gz`)
+and verifies the `.sha256` sidecar before delegating to the
+bundled `release/install.sh`. The Linux bundle is built and
+published by the manual `release-bundle.yml` GitHub Actions
+workflow; release assets are not built from Windows and do
+not require SSH access to any VPS.
+
+Re-running the installer on an existing host preserves the
+existing admin user credentials. To intentionally rotate the
+admin password during a rerun, set `ORVIX_RESET_ADMIN_PASSWORD=1`
+along with `ORVIX_ADMIN_PASSWORD` or `ORVIX_ADMIN_PASSWORD_B64`.
+
 ## What the script proves
 
 The script runs the BLOCKER 1 / 6 / 7 / 8 / 9 acceptance list

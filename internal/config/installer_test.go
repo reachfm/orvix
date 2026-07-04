@@ -232,12 +232,12 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		t.Fatal("RC1 clean installer must not reference Stalwart")
 	}
 	verifyIndex := strings.Index(installer, "verify_install_password_login \"$email\" \"$password\"")
-	deleteIndex := strings.Index(installer, "rm -f \"$BOOTSTRAP_ENV\"")
-	if verifyIndex < 0 || deleteIndex < 0 {
-		t.Fatal("installer must check login response and delete bootstrap env after success")
+	if verifyIndex < 0 {
+		t.Fatal("installer must check login response")
 	}
-	if deleteIndex < verifyIndex {
-		t.Fatal("installer must not delete bootstrap.env before login verification succeeds")
+	deleteIndex := strings.Index(installer[verifyIndex:], "rm -f \"$BOOTSTRAP_ENV\"")
+	if deleteIndex < 0 {
+		t.Fatal("installer must check login response and delete bootstrap env after success")
 	}
 }
 
@@ -5378,5 +5378,76 @@ func TestUpgradeRollbackPath(t *testing.T) {
 	// Verify the upgrade report function generates output.
 	if !strings.Contains(script, "ORVIX UPGRADE REPORT") {
 		t.Error("upgrade.sh must generate an upgrade report")
+	}
+}
+
+func TestInstallerExistingAdminRerunPreservesCredentials(t *testing.T) {
+	installer := mustRead(t, filepath.Join(repoRoot(t), "release", "install.sh"))
+	stripped := stripBashComments(installer)
+
+	mustHave := []string{
+		"active_admin_count()",
+		"first_active_admin_email()",
+		"admin_mode=\"preserve\"",
+		"Existing admin user preserved:",
+		"To reset the password run: /usr/share/orvix/scripts/reset-admin-password.sh",
+		"clear_bootstrap_env_for_existing_admin \"$admin_mode\"",
+		"VERIFY admin login: SKIP dual-login because existing admin credentials are preserved",
+		"SMOKE login: SKIP because existing admin user was preserved",
+		"verify_install \"$admin_email\" \"$admin_password\" \"$admin_mode\"",
+		"smoke_tests \"$admin_email\" \"$admin_password\" \"$admin_mode\"",
+	}
+	for _, needle := range mustHave {
+		if !strings.Contains(installer, needle) {
+			t.Errorf("installer rerun-preserve flow missing %q", needle)
+		}
+	}
+
+	if strings.Contains(stripped, "admin_password=\"$(prompt_password)\"\n\n    set_step \"binary\"") {
+		t.Error("installer must not unconditionally prompt for an admin password before detecting existing admins")
+	}
+	if !strings.Contains(stripped, "admin_password=\"\"") {
+		t.Error("preserve mode must keep admin_password empty so a newly typed password is never falsely verified")
+	}
+}
+
+func TestInstallerExplicitAdminResetPath(t *testing.T) {
+	installer := mustRead(t, filepath.Join(repoRoot(t), "release", "install.sh"))
+
+	mustHave := []string{
+		"is_truthy \"${ORVIX_RESET_ADMIN_PASSWORD:-}\"",
+		"admin_mode=\"reset\"",
+		"admin_user_exists \"$admin_email\" || fail \"ORVIX_RESET_ADMIN_PASSWORD=1 requested",
+		"reset_existing_admin_password()",
+		"ADMIN password rotated for $email via explicit ORVIX_RESET_ADMIN_PASSWORD=1 path",
+		"reset_existing_admin_password \"$admin_email\" \"$admin_password\"",
+		"fresh|reset)",
+	}
+	for _, needle := range mustHave {
+		if !strings.Contains(installer, needle) {
+			t.Errorf("installer explicit admin reset flow missing %q", needle)
+		}
+	}
+	if strings.Contains(installer, "password_hash = $") || strings.Contains(installer, "echo \"$admin_password\"") {
+		t.Error("installer reset path must not interpolate or print the admin password/hash")
+	}
+}
+
+func TestInstallerFailureLogUsesCurrentRunOnly(t *testing.T) {
+	installer := mustRead(t, filepath.Join(repoRoot(t), "release", "install.sh"))
+
+	mustHave := []string{
+		"INSTALL_RUN_ID",
+		"INSTALL_RUN_START id=$INSTALL_RUN_ID",
+		"print_current_run_log_tail",
+		"awk -v marker=\"INSTALL_RUN_START id=$INSTALL_RUN_ID\"",
+	}
+	for _, needle := range mustHave {
+		if !strings.Contains(installer, needle) {
+			t.Errorf("installer current-run log rendering missing %q", needle)
+		}
+	}
+	if strings.Contains(installer, "tail -n 80 \"$INSTALL_LOG\" || true\n\tfi\n\tcat <<FOOTER") {
+		t.Error("render_failure must not blindly show the last 80 lines across previous install runs")
 	}
 }
