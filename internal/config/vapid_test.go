@@ -16,13 +16,18 @@ func TestLoadReadsVAPIDPrivateKeyFromFile(t *testing.T) {
 	if err := os.WriteFile(keyPath, []byte("  "+privateKey+"\n"), 0o640); err != nil {
 		t.Fatalf("write key file: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "orvix.yaml"), []byte(`
+	cfgPath := filepath.Join(dir, "orvix.yaml")
+	if err := os.WriteFile(cfgPath, []byte(`
 coremail:
   vapid_public_key: "public-key"
   vapid_private_key_file: "`+filepath.ToSlash(keyPath)+`"
 `), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
+	// Point ORVIX_CONFIG at our test file so viper does NOT search
+	// system paths (/etc/orvix/orvix.yaml) that may exist from a
+	// prior install on this host.
+	setenv(t, "ORVIX_CONFIG", cfgPath)
 
 	oldWD, err := os.Getwd()
 	if err != nil {
@@ -45,13 +50,18 @@ coremail:
 func TestLoadFailsWhenVAPIDPrivateKeyFileMissing(t *testing.T) {
 	dir := t.TempDir()
 	missing := filepath.Join(dir, "missing-vapid.key")
-	if err := os.WriteFile(filepath.Join(dir, "orvix.yaml"), []byte(`
+	cfgPath := filepath.Join(dir, "orvix.yaml")
+	if err := os.WriteFile(cfgPath, []byte(`
 coremail:
   vapid_public_key: "public-key"
   vapid_private_key_file: "`+filepath.ToSlash(missing)+`"
 `), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
+	// Point ORVIX_CONFIG at our test file so viper does NOT search
+	// system paths (/etc/orvix/orvix.yaml) that may exist from a
+	// prior install on this host.
+	setenv(t, "ORVIX_CONFIG", cfgPath)
 
 	oldWD, err := os.Getwd()
 	if err != nil {

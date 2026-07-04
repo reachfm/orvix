@@ -12,18 +12,21 @@ const (
 )
 
 type TLSCertificate struct {
-	ID              string     `json:"id"`
-	Name            string     `json:"name"`
-	Path            string     `json:"path"`
-	CommonName      string     `json:"commonName"`
-	SANs            []string   `json:"sans,omitempty"`
-	Issuer          string     `json:"issuer"`
-	SerialNumber    string     `json:"serialNumber"`
-	NotBefore       time.Time  `json:"notBefore"`
-	NotAfter        time.Time  `json:"notAfter"`
-	DaysRemaining   int        `json:"daysRemaining"`
-	FingerprintSHA256 string   `json:"fingerprintSHA256"`
-	Status          CertStatus `json:"status"`
+	ID                string     `json:"id"`
+	Name              string     `json:"name"`
+	Path              string     `json:"path"`
+	KeyPath           string     `json:"keyPath,omitempty"`
+	CommonName        string     `json:"commonName"`
+	SANs              []string   `json:"sans,omitempty"`
+	Issuer            string     `json:"issuer"`
+	SerialNumber      string     `json:"serialNumber"`
+	NotBefore         time.Time  `json:"notBefore"`
+	NotAfter          time.Time  `json:"notAfter"`
+	DaysRemaining     int        `json:"daysRemaining"`
+	FingerprintSHA256 string     `json:"fingerprintSHA256"`
+	Status            CertStatus `json:"status"`
+	CreatedAt         *time.Time `json:"createdAt,omitempty"`
+	UpdatedAt         *time.Time `json:"updatedAt,omitempty"`
 }
 
 type CertValidationResult struct {

@@ -19,6 +19,7 @@ import (
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
+	"github.com/orvix/orvix/internal/updater"
 	"go.uber.org/zap"
 )
 
@@ -404,6 +405,15 @@ func TestUpdateV1_PreflightDoesNotExecScript(t *testing.T) {
 // in test/CI). This confirms the preflight gate is wired to the
 // systemd-only design.
 func TestUpdateV1_PreflightReportsMissingHelperUnit(t *testing.T) {
+	// The preflight checks whether the systemd helper unit is installed
+	// by looking at fixed system paths. In test/CI these paths may or may
+	// not exist (e.g. on a VPS where a previous verification smoke left
+	// the unit file). We isolate the test by overriding the check to
+	// always report "not installed", which is the correct test fixture:
+	// the unit was never installed by this test process.
+	restore := updater.SetHelperUnitCheck(func() bool { return false })
+	defer restore()
+
 	router, sqlDB, token, _, _ := buildUpdateHarness(t, false)
 	defer router.App().Shutdown()
 	defer sqlDB.Close()
@@ -935,32 +945,75 @@ func TestInstallScript_HasValidateDirectory(t *testing.T) {
 	}
 }
 
+// extractBashFunctionBody extracts the body of a named bash
+// function from a script source.  It returns the text from the
+// opening brace through the matching closing brace.  If the
+// function is not found, it returns the empty string.
+func extractBashFunctionBody(src, name string) string {
+	lines := strings.Split(src, "\n")
+	inFunc := false
+	depth := 0
+	var buf []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !inFunc && strings.HasPrefix(trimmed, name+"()") {
+			inFunc = true
+		}
+		if inFunc {
+			buf = append(buf, line)
+			for _, ch := range line {
+				if ch == '{' {
+					depth++
+				}
+				if ch == '}' {
+					depth--
+				}
+			}
+			if depth > 0 || len(buf) <= 1 {
+				continue
+			}
+			break
+		}
+	}
+	if depth == 0 && len(buf) > 0 {
+		return strings.Join(buf, "\n")
+	}
+	return ""
+}
+
 // TestInstallScript_HasValidateBinary verifies that install.sh
 // defines validate_binary to check /usr/local/bin/orvix exists and
 // is executable. The binary is NEVER invoked; no --help or version
 // subcommand is called. Optional file/sha256sum checks are allowed.
+//
+// The body extraction is deliberate: verify_installed_binary_metadata
+// (a separate function) legitimately calls `"$bin" version --full`
+// to enforce the commit/channel contract.  The global-string check
+// would false-match that call against validate_binary's contract.
+// We extract only the validate_binary function body for the
+// no-invocation assertions.
 func TestInstallScript_HasValidateBinary(t *testing.T) {
 	content := installerScript(t)
 	if !strings.Contains(content, "validate_binary()") {
 		t.Error("install.sh must define validate_binary()")
 	}
-	if !strings.Contains(content, "ORVIX_BIN") {
+	body := extractBashFunctionBody(content, "validate_binary")
+	if body == "" {
+		t.Fatal("could not extract validate_binary function body")
+	}
+	if !strings.Contains(body, "ORVIX_BIN") {
 		t.Error("validate_binary must check ORVIX_BIN")
 	}
-	if !strings.Contains(content, "-x") {
+	if !strings.Contains(body, "-x") {
 		t.Error("validate_binary must check executable flag")
 	}
-	// Must NOT invoke the binary before config exists.
-	// Check that the validate_binary function body does not
-	// contain `"$bin" --help` or `"$bin" version`.
-	if strings.Contains(content, "\"$bin\" --help") {
+	if strings.Contains(body, "\"$bin\" --help") {
 		t.Error("validate_binary must NOT call --help on the binary")
 	}
-	if strings.Contains(content, "\"$bin\" version") {
+	if strings.Contains(body, "\"$bin\" version") {
 		t.Error("validate_binary must NOT call version on the binary")
 	}
-	// Optional integrity tools are acceptable.
-	if !strings.Contains(content, "file") && !strings.Contains(content, "sha256sum") {
+	if !strings.Contains(body, "file") && !strings.Contains(body, "sha256sum") {
 		t.Error("validate_binary should reference file or sha256sum for integrity")
 	}
 }

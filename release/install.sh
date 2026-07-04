@@ -258,7 +258,11 @@ BODY
   then open http://127.0.0.1:8080/admin in your local browser.
 
   To get production HTTPS URLs (REQUIRED before users can sign in):
-    sudo $ORVIX_SOURCE_DIR/release/scripts/setup-https.sh ${domain} ${server_ip}
+    sudo /usr/share/orvix/scripts/setup-https.sh ${domain} ${server_ip}
+
+  ${YELLOW}! setup-https.sh is installed permanently at the path above.${NC}
+  ${YELLOW}  \$ORVIX_SOURCE_DIR is the temp extraction directory of the${NC}
+  ${YELLOW}  curl-pipe install and is gone after the install completes.${NC}
 BODY
 	fi
 
@@ -272,7 +276,24 @@ ${GREEN}=========================================================${NC}
 BODY
 }
 
+# install_version prints a one-line version string for the install
+# report banner. The order is intentional and matters for the
+# public-installer flow:
+#   1. bundle BUILDINFO — the auditable truth (works on every
+#      bundle install where there is no git tree on disk).
+#   2. git HEAD — works on dev worktrees that include .git/.
+#   3. installed binary `orvix version` — last resort.
+#   4. fallback string for the rare case nothing is available.
 install_version() {
+	if [ -f "$ORVIX_SOURCE_DIR/BUILDINFO" ]; then
+		awk -F= '/^version=/ {v=$2} /^short_commit=/ {c=$2} /^channel=/ {ch=$2} END {if (v) {if (c) printf "%s (commit: %s, channel: %s)", v, c, ch; else printf "%s", v; exit}}' "$ORVIX_SOURCE_DIR/BUILDINFO"
+		return
+	fi
+	if [ -f "$ORVIX_SOURCE_DIR/VERSION" ]; then
+		local v
+		v="$(awk 'NF && $1 !~ /^#/ {print; exit}' "$ORVIX_SOURCE_DIR/VERSION" | tr -d '[:space:]')"
+		if [ -n "$v" ]; then printf '%s' "$v"; return; fi
+	fi
 	if command -v git >/dev/null 2>&1 && git -C "$ORVIX_SOURCE_DIR" rev-parse --short HEAD >/dev/null 2>&1; then
 		git -C "$ORVIX_SOURCE_DIR" rev-parse --short HEAD
 		return
@@ -282,6 +303,92 @@ install_version() {
 		return
 	fi
 	printf 'installed build'
+}
+
+# expected_buildinfo echoes the (version, commit, channel) tuple the
+# caller wants the installed binary to satisfy. Sources, in order:
+#   1. bundle BUILDINFO sidecar — the auditable source.
+#   2. explicit ORVIX_VERSION / ORVIX_COMMIT / ORVIX_CHANNEL env vars
+#      (used by GitHub archive installs and CI test rigs).
+#   3. empty strings (the caller treats empty as "do not enforce").
+expected_buildinfo() {
+	local version="" commit="" channel="" build_time=""
+	if [ -f "$ORVIX_SOURCE_DIR/BUILDINFO" ]; then
+		version="$(awk -F= '/^version=/{print $2; exit}' "$ORVIX_SOURCE_DIR/BUILDINFO" || true)"
+		commit="$(awk -F= '/^commit=/{print $2; exit}' "$ORVIX_SOURCE_DIR/BUILDINFO" || true)"
+		channel="$(awk -F= '/^channel=/{print $2; exit}' "$ORVIX_SOURCE_DIR/BUILDINFO" || true)"
+		build_time="$(awk -F= '/^build_time=/{print $2; exit}' "$ORVIX_SOURCE_DIR/BUILDINFO" || true)"
+	fi
+	[ -n "$version" ] || version="${ORVIX_VERSION:-}"
+	[ -n "$commit" ]  || commit="${ORVIX_COMMIT:-}"
+	[ -n "$channel" ] || channel="${ORVIX_CHANNEL:-stable}"
+	[ -n "$build_time" ] || build_time="${ORVIX_BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+	printf '%s\t%s\t%s\t%s\n' "$version" "$commit" "$channel" "$build_time"
+}
+
+# verify_installed_binary_metadata runs $ORVIX_BIN version --full,
+# parses out Version / Commit / Channel, and compares against the
+# values reported by expected_buildinfo(). Fails the install on any
+# mismatch so an operator never accidentally serves traffic from a
+# binary whose embedded commit does not match the bundle they
+# thought they installed.
+#
+# Trimming: each field is trimmed of CR (Windows CRLF on a copied
+# bundle) and surrounding whitespace before comparison; binary
+# output is newline-terminated so the last field gets a stray LF.
+verify_installed_binary_metadata() {
+	local bin="$ORVIX_BIN"
+	[ -x "$bin" ] || fail "binary $bin is not executable; cannot verify embedded metadata"
+	local out
+	if ! out="$("$bin" version --full 2>/dev/null)"; then
+		fail "could not execute $bin version --full to verify embedded metadata"
+	fi
+	# Parse "orvix <ver>\n  tag: <...>\n  commit: <sha>\n  channel: <chan>"
+	#   build_time: <ts>\n  go_version: <...>\n  ...
+	local got_version got_commit got_channel
+	got_version="$(printf '%s\n' "$out" | awk '/^orvix / {print $2; exit}')"
+	got_commit="$(printf '%s\n' "$out" | awk -F': *' '/^[[:space:]]*commit:/{print $2; exit}')"
+	got_channel="$(printf '%s\n' "$out" | awk -F': *' '/^[[:space:]]*channel:/{print $2; exit}')"
+	# Strip CR/whitespace defensively (covers bundles unzipped on
+	# Windows + copied across shells).
+	got_version="${got_version//[$'\r\n ']/}"
+	got_commit="${got_commit//[$'\r\n ']/}"
+	got_channel="${got_channel//[$'\r\n ']/}"
+	[ -n "$got_version" ] || fail "binary $bin reports no version metadata (unsafe build; refusing to ship)"
+	[ -n "$got_commit" ]  || fail "binary $bin reports no commit metadata (unsafe build; refusing to ship)"
+	[ -n "$got_channel" ] || fail "binary $bin reports no channel metadata (unsafe build; refusing to ship)"
+
+	local exp_version exp_commit exp_channel exp_build_time
+	local line
+	line="$(expected_buildinfo)"
+	exp_version="${line%%	*}"; rest="${line#*	}"
+	exp_commit="${rest%%	*}"; rest="${rest#*	}"
+	exp_channel="${rest%%	*}"; rest="${rest#*	}"
+	exp_build_time="$rest"
+
+	log_detail "VERIFY binary metadata actual: version=$got_version commit=$got_commit channel=$got_channel"
+	log_detail "VERIFY binary metadata expected: version=$exp_version commit=$exp_commit channel=$exp_channel build_time=$exp_build_time"
+
+	# Always enforce channel — the release channel is a
+	# production-readiness contract.
+	if [ -n "$exp_channel" ] && [ "$got_channel" != "$exp_channel" ]; then
+		fail "installed binary channel mismatch: got=$got_channel expected=$exp_channel (refusing to ship the wrong channel)"
+	fi
+	# When the caller pins a commit (bundle metadata always does),
+	# enforce it byte-for-byte. Otherwise we have NO way to know
+	# that the running binary matches the bundle the operator
+	# thought they installed.
+	if [ -n "$exp_commit" ] && [ "$got_commit" != "$exp_commit" ]; then
+		fail "installed binary commit mismatch: got=$got_commit expected=$exp_commit (refusing to ship a stale binary; rebuild or re-fetch the bundle)"
+	fi
+	# Version mismatch is reported but not fatal UNLESS we have an
+	# explicit version pin. Versions can be repointed via -ldflags
+	# without rebuilding; the commit + channel contract is the
+	# binding identity.
+	if [ -n "$exp_version" ] && [ "$got_version" != "$exp_version" ]; then
+		log_detail "WARN: installed binary version differs: got=$got_version expected=$exp_version (commit+channel match; continuing)"
+	fi
+	log_detail "VERIFY binary metadata: PASS (version=$got_version commit=${got_commit:0:12} channel=$got_channel)"
 }
 
 prepare_log() {
@@ -322,9 +429,10 @@ require_root() {
 }
 
 prompt_domain() {
-    local domain="${ORVIX_PRIMARY_DOMAIN:-}"
+    local domain="${ORVIX_PRIMARY_DOMAIN:-${ORVIX_DOMAIN:-}}"
     while [ -z "$domain" ]; do
-        read -rp "Primary email domain (example.com): " domain
+        read_prompt_line domain "Primary email domain (example.com): " \
+            "primary domain is required; rerun with ORVIX_PRIMARY_DOMAIN=example.com or ORVIX_DOMAIN=example.com"
     done
     [[ "$domain" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z]{2,}$ ]] || fail "invalid domain: $domain"
     echo "$domain"
@@ -333,10 +441,50 @@ prompt_domain() {
 prompt_email() {
     local email="${ORVIX_ADMIN_EMAIL:-}"
     while [ -z "$email" ]; do
-        read -rp "Admin email address: " email
+        read_prompt_line email "Admin email address: " \
+            "admin email is required; rerun with ORVIX_ADMIN_EMAIL=admin@example.com"
     done
     [[ "$email" =~ ^[^@]+@[^@]+\.[^@]+$ ]] || fail "invalid email: $email"
     echo "$email"
+}
+
+prompt_input_path() {
+    if [ -n "${ORVIX_PROMPT_INPUT_FD:-}" ]; then
+        printf '/dev/fd/%s\n' "$ORVIX_PROMPT_INPUT_FD"
+        return 0
+    fi
+    if [ -r /dev/tty ]; then
+        printf '/dev/tty\n'
+        return 0
+    fi
+    return 1
+}
+
+read_prompt_line() {
+    local __var="$1"
+    local prompt="$2"
+    local error_message="$3"
+    local input_dev
+    if ! input_dev="$(prompt_input_path)"; then
+        fail "$error_message (no interactive terminal is available; curl-pipe installs cannot read prompts from stdin)"
+    fi
+    printf '%s' "$prompt" >&2
+    local value=""
+    if ! IFS= read -r value <"$input_dev"; then
+        fail "$error_message (input ended before a value was provided)"
+    fi
+    printf -v "$__var" '%s' "$value"
+}
+
+decode_admin_password_b64() {
+    local encoded="${ORVIX_ADMIN_PASSWORD_B64:-}"
+    [ -n "$encoded" ] || return 1
+    local decoded
+    if ! decoded="$(printf '%s' "$encoded" | base64 -d 2>/dev/null)"; then
+        fail "ORVIX_ADMIN_PASSWORD_B64 is not valid base64"
+    fi
+    [ -n "$decoded" ] || fail "ORVIX_ADMIN_PASSWORD_B64 decoded to an empty password"
+    printf '%s' "$decoded"
 }
 
 prompt_password() {
@@ -363,19 +511,39 @@ prompt_password() {
     # always read from /dev/tty (the controlling terminal).
     # Tests set ORVIX_PROMPT_INPUT_FD=0 to feed a password
     # through the script's stdin without needing a real TTY.
-    local input_dev="/dev/tty"
-    if [ -n "${ORVIX_PROMPT_INPUT_FD:-}" ]; then
-        input_dev="/dev/fd/${ORVIX_PROMPT_INPUT_FD}"
-    fi
-
     local password="${ORVIX_ADMIN_PASSWORD:-}"
+    if [ -z "$password" ] && [ -n "${ORVIX_ADMIN_PASSWORD_B64:-}" ]; then
+        password="$(decode_admin_password_b64)"
+    fi
     local confirm
     while [ -z "$password" ]; do
+        local input_dev="/dev/tty"
+        if [ -n "${ORVIX_PROMPT_INPUT_FD:-}" ]; then
+            input_dev="/dev/fd/${ORVIX_PROMPT_INPUT_FD}"
+        elif [ ! -r "$input_dev" ]; then
+            fail "admin password is required; rerun with ORVIX_ADMIN_PASSWORD or ORVIX_ADMIN_PASSWORD_B64 (no interactive terminal is available; curl-pipe installs cannot read prompts from stdin)"
+        fi
         printf 'Admin password (8-72 bytes, hidden): ' >&2
-        IFS= read -r -s password <"$input_dev" 2>/dev/null || password=""
+        if [ -n "${ORVIX_PROMPT_INPUT_FD:-}" ]; then
+            IFS= read -r -s -u "$ORVIX_PROMPT_INPUT_FD" password 2>/dev/null || {
+                printf '\n' >&2
+                fail "admin password is required; input ended before a password was provided"
+            }
+        elif ! IFS= read -r -s password <"$input_dev" 2>/dev/null; then
+            printf '\n' >&2
+            fail "admin password is required; input ended before a password was provided"
+        fi
         printf '\n' >&2
         printf 'Confirm admin password: ' >&2
-        IFS= read -r -s confirm <"$input_dev" 2>/dev/null || confirm=""
+        if [ -n "${ORVIX_PROMPT_INPUT_FD:-}" ]; then
+            IFS= read -r -s -u "$ORVIX_PROMPT_INPUT_FD" confirm 2>/dev/null || {
+                printf '\n' >&2
+                fail "admin password confirmation is required; input ended before confirmation was provided"
+            }
+        elif ! IFS= read -r -s confirm <"$input_dev" 2>/dev/null; then
+            printf '\n' >&2
+            fail "admin password confirmation is required; input ended before confirmation was provided"
+        fi
         printf '\n' >&2
         if [ "$password" != "$confirm" ]; then
             printf 'Passwords do not match\n' >&2
@@ -440,9 +608,56 @@ install_go_toolchain() {
 	go version >>"$INSTALL_LOG" 2>&1
 }
 
+# install_binary installs the Orvix binary at $ORVIX_BIN.
+#
+# Resolution order (production-readiness: stale-binary guard):
+#
+#   1. Bundle prebuilt at $ORVIX_SOURCE_DIR/bin/orvix
+#      (the path build-release-bundle.sh seals into the bundle).
+#   2. Historical prebuilt at $ORVIX_SOURCE_DIR/release/orvix-linux-amd64
+#      (legacy dev release tree, still recognised).
+#   3. Loose prebuilt at $ORVIX_SOURCE_DIR/orvix-linux-amd64 or
+#      $ORVIX_SOURCE_DIR/orvix (operator-supplied override; never
+#      from the public installer flow).
+#
+# When any prebuilt is found we:
+#   - If $ORVIX_USE_PREBUILT=1 is explicitly set, accept it.
+#   - If $ORVIX_COMMIT is set AND we can run `orvix version`, we
+#     compare embedded commit against expected. ANY mismatch
+#     FAILS the install; we never silently fall through to a
+#     build-from-source path that could swap the binary anyway.
+#     (The point is to surface the discrepancy so the operator
+#     can re-fetch the bundle rather than ship something whose
+#     identity they cannot prove.)
+#   - Otherwise we accept the prebuilt but log loudly so a
+#     stale-binary regression shows up in $INSTALL_LOG.
+#
+# When no prebuilt is found we build from source — but ONLY when a
+# real Go source tree is present (go.mod). A bundle does NOT ship
+# go.mod, so a bundle install with no prebuilt and no source tree
+# fails closed with a clear error: "no prebuilt binary AND no Go
+# source tree at $ORVIX_SOURCE_DIR — re-fetch the bundle".
+#
+# Source build path:
+#   - Installs the pinned Go toolchain if needed.
+#   - Compiles ./cmd/orvix into $ORVIX_BIN (does NOT use the
+#     install -m 0755 chmod-on-prebuilt path; the binary is set
+#     executable after build).
+#   - Injects buildinfo Version/Commit/BuildTime/Channel via
+#     -ldflags using the values expected_buildinfo() resolves
+#     (bundle BUILDINFO takes priority; explicit ORVIX_*
+#     env vars override).
+#
+# After install, the caller MUST run verify_installed_binary_metadata
+# to fail closed on any embedded-metadata mismatch — install_binary
+# itself runs the same check synchronously to keep the failure mode
+# local.
 install_binary() {
     local local_bin=""
+    # Bundle path first. build-release-bundle.sh seals the binary
+    # at bin/orvix relative to the bundle root.
     for candidate in \
+        "$ORVIX_SOURCE_DIR/bin/orvix" \
         "$ORVIX_SOURCE_DIR/release/orvix-linux-amd64" \
         "$ORVIX_SOURCE_DIR/orvix-linux-amd64" \
         "$ORVIX_SOURCE_DIR/orvix"; do
@@ -452,17 +667,101 @@ install_binary() {
         fi
     done
 
-	if [ -n "$local_bin" ]; then
-		run_quiet install -m 0755 "$local_bin" "$ORVIX_BIN"
-		log_detail "installed prebuilt binary from $local_bin"
-		return
-	fi
+    local expect_line exp_version="" exp_commit="" exp_channel="" exp_build_time=""
+    if [ -n "${ORVIX_VERSION:-}${ORVIX_COMMIT:-}${ORVIX_CHANNEL:-}" ] \
+        || [ -f "$ORVIX_SOURCE_DIR/BUILDINFO" ]; then
+        expect_line="$(expected_buildinfo)"
+        exp_version="${expect_line%%	*}"; rest="${expect_line#*	}"
+        exp_commit="${rest%%	*}"; rest="${rest#*	}"
+        exp_channel="${rest%%	*}"; rest="${rest#*	}"
+        exp_build_time="$rest"
+    fi
 
-	[ -f "$ORVIX_SOURCE_DIR/go.mod" ] || fail "no prebuilt binary found and no Go source tree at $ORVIX_SOURCE_DIR"
-	install_go_toolchain
-	(cd "$ORVIX_SOURCE_DIR" && go build -o "$ORVIX_BIN" ./cmd/orvix) >>"$INSTALL_LOG" 2>&1
-	run_quiet chmod 0755 "$ORVIX_BIN"
-	log_detail "built Orvix from source"
+    if [ -n "$local_bin" ]; then
+        # Verify the prebuilt's embedded commit matches the bundle's
+        # BUILDINFO (or the operator's ORVIX_COMMIT pin) before we
+        # touch $ORVIX_BIN. This is the production-readiness
+        # BLOCKER: a stale release/orvix-linux-amd64 sitting in the
+        # source tree MUST NOT silently overwrite the current
+        # binary — silently re-installing an old binary is the
+        # exact regression the build-bundle shipyard exists to
+        # prevent.
+        if [ -n "$exp_commit" ]; then
+            local prebuilt_out prebuilt_commit
+            if prebuilt_out="$("$local_bin" version --full 2>/dev/null)"; then
+                prebuilt_commit="$(printf '%s\n' "$prebuilt_out" | awk -F': *' '/^[[:space:]]*commit:/{print $2; exit}')"
+                prebuilt_commit="${prebuilt_commit//[$'\r\n ']/}"
+                if [ -n "$prebuilt_commit" ] && [ "$prebuilt_commit" != "$exp_commit" ]; then
+                    if [ -n "${ORVIX_USE_PREBUILT:-}" ]; then
+                        fail "prebuilt binary at $local_bin embeds commit=$prebuilt_commit but expected=$exp_commit (ORVIX_USE_PREBUILT=1 forces accept; remove ORVIX_USE_PREBUILT or refresh the prebuilt)"
+                    fi
+                    # We CANNOT silently install a stale binary, and
+                    # we CANNOT silently fall back to source build
+                    # on a one-command install (no source tree).
+                    # Fail closed with the operator-facing message.
+                    if [ ! -f "$ORVIX_SOURCE_DIR/go.mod" ]; then
+                        fail "prebuilt binary at $local_bin embeds commit=$prebuilt_commit but expected=$exp_commit (stale prebuilt; re-fetch the bundle or set ORVIX_USE_PREBUILT=1 to force-accept)"
+                    fi
+                    # Source tree is present (dev/CI). Log the
+                    # mismatch loudly and rebuild from source so the
+                    # installed binary matches HEAD.
+                    log_detail "STALE prebuilt at $local_bin (commit=$prebuilt_commit expected=$exp_commit); rebuilding from source"
+                else
+                    log_detail "PREBUILT commit OK: $prebuilt_commit matches expected"
+                fi
+            else
+                # Prebuilt does not respond to `version --full`. It
+                # is either a non-Orvix file someone renamed, or a
+                # corrupted binary. Reject.
+                log_detail "PREBUILT at $local_bin does not implement `version --full`; treating as corrupt"
+            fi
+        fi
+        # If ORVIX_USE_PREBUILT is unset AND a source tree exists,
+        # the operator probably wants the source build (developer
+        # install path). Bundle installs have no go.mod, so they
+        # always go through this branch.
+        if [ -z "${ORVIX_USE_PREBUILT:-}" ] && [ -f "$ORVIX_SOURCE_DIR/go.mod" ]; then
+            log_detail "ORVIX_USE_PREBUILT not set and source tree available; building from source instead of using prebuilt at $local_bin"
+        else
+            run_quiet install -m 0755 "$local_bin" "$ORVIX_BIN"
+            log_detail "installed prebuilt binary from $local_bin"
+            verify_installed_binary_metadata
+            return
+        fi
+    fi
+
+    # Build from source (only path: prebuilt absent or rejected).
+    [ -f "$ORVIX_SOURCE_DIR/go.mod" ] || fail "no prebuilt binary found AND no Go source tree at $ORVIX_SOURCE_DIR (re-fetch the bundle or supply ORVIX_USE_PREBUILT=1 with a verified binary)"
+    install_go_toolchain
+
+    # Resolve buildinfo from expected_buildinfo() — ORVIX_*
+    # overrides > bundle BUILDINFO > safe fallbacks.
+    local line ver commit ch ts
+    line="$(expected_buildinfo)"
+    ver="${line%%	*}"; rest="${line#*	}"
+    commit="${rest%%	*}"; rest="${rest#*	}"
+    ch="${rest%%	*}"; rest="${rest#*	}"
+    ts="$rest"
+    [ -n "$ver" ]    || ver="0.0.0-dev-from-source"
+    [ -n "$commit" ] || commit="not reported"
+    [ -n "$ch" ]     || ch="stable"
+    [ -n "$ts" ]     || ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    local ldflags=(
+        "-s"
+        "-w"
+        "-X github.com/orvix/orvix/internal/buildinfo.Version=$ver"
+        "-X github.com/orvix/orvix/internal/buildinfo.Commit=$commit"
+        "-X github.com/orvix/orvix/internal/buildinfo.BuildTime=$ts"
+        "-X github.com/orvix/orvix/internal/buildinfo.Channel=$ch"
+    )
+
+    log_detail "BUILD go build -ldflags=\"${ldflags[*]}\" from $ORVIX_SOURCE_DIR"
+    (cd "$ORVIX_SOURCE_DIR" && go build -trimpath -ldflags "$(IFS=' '; echo "${ldflags[*]}")" -o "$ORVIX_BIN" ./cmd/orvix) >>"$INSTALL_LOG" 2>&1 \
+        || fail "go build failed (see $INSTALL_LOG for the compiler error)"
+    run_quiet chmod 0755 "$ORVIX_BIN"
+    log_detail "built Orvix from source (version=$ver commit=$commit channel=$ch)"
+    verify_installed_binary_metadata
 }
 
 # is_valid_public_ipv4 returns 0 (success) iff $1 is a syntactically
@@ -1077,6 +1376,36 @@ install_release_scripts() {
     if [ -f "$ORVIX_SOURCE_DIR/release/scripts/apply-runtime-update.sh" ]; then
         run_quiet install -m 0755 -o root -g root "$ORVIX_SOURCE_DIR/release/scripts/apply-runtime-update.sh" /usr/share/orvix/scripts/apply-runtime-update.sh
     fi
+    # setup-https.sh is the operator-facing post-install command for
+    # Caddy reverse-proxy + Let's Encrypt. We install it to the
+    # permanent /usr/share/orvix/scripts path so the install
+    # completion message can print a stable, post-reboot-survivable
+    # command (BLOCKER 6: previous message pointed at
+    # /tmp/orvix-install.XXX/... which is gone after reboot).
+    if [ -f "$ORVIX_SOURCE_DIR/release/scripts/setup-https.sh" ]; then
+        run_quiet install -m 0755 -o root -g root "$ORVIX_SOURCE_DIR/release/scripts/setup-https.sh" /usr/share/orvix/scripts/setup-https.sh
+    fi
+    # setup-smtp-tls.sh + check-smtp-tls.sh are companion scripts
+    # for STARTTLS certificate provisioning. Install them so the
+    # permanent scripts directory ships every operator helper.
+    if [ -f "$ORVIX_SOURCE_DIR/release/scripts/setup-smtp-tls.sh" ]; then
+        run_quiet install -m 0755 -o root -g root "$ORVIX_SOURCE_DIR/release/scripts/setup-smtp-tls.sh" /usr/share/orvix/scripts/setup-smtp-tls.sh
+    fi
+    if [ -f "$ORVIX_SOURCE_DIR/release/scripts/check-smtp-tls.sh" ]; then
+        run_quiet install -m 0755 -o root -g root "$ORVIX_SOURCE_DIR/release/scripts/check-smtp-tls.sh" /usr/share/orvix/scripts/check-smtp-tls.sh
+    fi
+    if [ -f "$ORVIX_SOURCE_DIR/release/scripts/reset-admin-password.sh" ]; then
+        run_quiet install -m 0755 -o root -g root "$ORVIX_SOURCE_DIR/release/scripts/reset-admin-password.sh" /usr/share/orvix/scripts/reset-admin-password.sh
+    fi
+    if [ -f "$ORVIX_SOURCE_DIR/release/scripts/orvix-doctor.sh" ]; then
+        run_quiet install -m 0755 -o root -g root "$ORVIX_SOURCE_DIR/release/scripts/orvix-doctor.sh" /usr/share/orvix/scripts/orvix-doctor.sh
+    fi
+    if [ -f "$ORVIX_SOURCE_DIR/release/scripts/healthcheck.sh" ]; then
+        run_quiet install -m 0755 -o root -g root "$ORVIX_SOURCE_DIR/release/scripts/healthcheck.sh" /usr/share/orvix/scripts/healthcheck.sh
+    fi
+    if [ -f "$ORVIX_SOURCE_DIR/release/scripts/diagnostics.sh" ]; then
+        run_quiet install -m 0755 -o root -g root "$ORVIX_SOURCE_DIR/release/scripts/diagnostics.sh" /usr/share/orvix/scripts/diagnostics.sh
+    fi
     # The asset-propagation library is the single source of truth
     # for the install + upgrade asset copy contract. Install it
     # alongside the other scripts so upgrade.sh can source it from
@@ -1526,7 +1855,8 @@ write_admin_login_file() {
             printf '%s\n' "before DNS + HTTPS are ready, use an SSH tunnel:"
             printf '%s\n' "  ssh -L 8080:127.0.0.1:8080 -L 8081:127.0.0.1:8081 root@${server_ip}"
             printf '\n'
-            printf '%s\n' "To get production HTTPS URLs, run setup-https.sh."
+            printf '%s\n' "To get production HTTPS URLs, run:"
+            printf '%s\n' "  sudo /usr/share/orvix/scripts/setup-https.sh ${primary_domain} ${server_ip}"
         fi
         printf '\n'
         printf '%s\n' "Admin email: ${admin_email}"

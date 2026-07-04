@@ -70,6 +70,19 @@ func (c *MetricsCollector) Snapshot() Metrics {
 		PolicyBlocked:  atomic.LoadInt64(&c.m.PolicyBlocked),
 		PolicyOverrides: atomic.LoadInt64(&c.m.PolicyOverrides),
 
+		AntivirusScanned:        atomic.LoadInt64(&c.m.AntivirusScanned),
+		AntivirusInfected:       atomic.LoadInt64(&c.m.AntivirusInfected),
+		AntivirusRejected:       atomic.LoadInt64(&c.m.AntivirusRejected),
+		AntivirusQuarantined:    atomic.LoadInt64(&c.m.AntivirusQuarantined),
+		AntivirusTagged:         atomic.LoadInt64(&c.m.AntivirusTagged),
+		AntivirusScannerErrors:  atomic.LoadInt64(&c.m.AntivirusScannerErrors),
+		AntivirusFailOpen:       atomic.LoadInt64(&c.m.AntivirusFailOpen),
+		AntivirusFailClosed:     atomic.LoadInt64(&c.m.AntivirusFailClosed),
+
+		BackupTargetUploadsAttempt: atomic.LoadInt64(&c.m.BackupTargetUploadsAttempt),
+		BackupTargetUploadsSuccess: atomic.LoadInt64(&c.m.BackupTargetUploadsSuccess),
+		BackupTargetUploadsFailure: atomic.LoadInt64(&c.m.BackupTargetUploadsFailure),
+
 		JMAPRequests:      atomic.LoadInt64(&c.m.JMAPRequests),
 		JMAPAuthSuccess:   atomic.LoadInt64(&c.m.JMAPAuthSuccess),
 		JMAPAuthFailure:   atomic.LoadInt64(&c.m.JMAPAuthFailure),
@@ -161,6 +174,25 @@ func (c *MetricsCollector) IncTLSExpiredCerts()    { atomic.AddInt64(&c.m.TLSExp
 func (c *MetricsCollector) IncTLSWarningCerts()    { atomic.AddInt64(&c.m.TLSWarningCerts, 1) }
 func (c *MetricsCollector) IncTLSReloads()         { atomic.AddInt64(&c.m.TLSReloads, 1) }
 func (c *MetricsCollector) IncTLSReloadFailures()  { atomic.AddInt64(&c.m.TLSReloadFailures, 1) }
+
+// Antivirus metrics. Every increment bumps both the per-call
+// counter AND is recorded by observability.EventHistory by the
+// caller (the antivirus engine). The counters are kept here so
+// the admin status endpoint can answer runtime questions
+// without forcing the engine to maintain its own stats.
+func (c *MetricsCollector) IncAntivirusScanned()        { atomic.AddInt64(&c.m.AntivirusScanned, 1) }
+func (c *MetricsCollector) IncAntivirusInfected()      { atomic.AddInt64(&c.m.AntivirusInfected, 1) }
+func (c *MetricsCollector) IncAntivirusRejected()      { atomic.AddInt64(&c.m.AntivirusRejected, 1) }
+func (c *MetricsCollector) IncAntivirusQuarantined()   { atomic.AddInt64(&c.m.AntivirusQuarantined, 1) }
+func (c *MetricsCollector) IncAntivirusTagged()        { atomic.AddInt64(&c.m.AntivirusTagged, 1) }
+func (c *MetricsCollector) IncAntivirusScannerErrors() { atomic.AddInt64(&c.m.AntivirusScannerErrors, 1) }
+func (c *MetricsCollector) IncAntivirusFailOpen()      { atomic.AddInt64(&c.m.AntivirusFailOpen, 1) }
+func (c *MetricsCollector) IncAntivirusFailClosed()    { atomic.AddInt64(&c.m.AntivirusFailClosed, 1) }
+
+// Backup target upload metrics.
+func (c *MetricsCollector) IncBackupTargetUploadAttempts() { atomic.AddInt64(&c.m.BackupTargetUploadsAttempt, 1) }
+func (c *MetricsCollector) IncBackupTargetUploadSuccess()  { atomic.AddInt64(&c.m.BackupTargetUploadsSuccess, 1) }
+func (c *MetricsCollector) IncBackupTargetUploadFailures() { atomic.AddInt64(&c.m.BackupTargetUploadsFailure, 1) }
 func (c *MetricsCollector) IncJMAPMailboxQuery()    { atomic.AddInt64(&c.m.JMAPMailboxQueries, 1) }
 func (c *MetricsCollector) IncJMAPMailboxChanges()  { atomic.AddInt64(&c.m.JMAPMailboxChanges, 1) }
 func (c *MetricsCollector) IncJMAPEmailChanges()    { atomic.AddInt64(&c.m.JMAPEmailChanges, 1) }

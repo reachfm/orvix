@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,8 +11,10 @@ import (
 	"github.com/gofiber/fiber/v3/middleware/cors"
 	"github.com/gofiber/fiber/v3/middleware/limiter"
 	"github.com/gofiber/fiber/v3/middleware/recover"
+	"github.com/orvix/orvix/internal/antivirus"
 	"github.com/orvix/orvix/internal/api/handlers"
 	"github.com/orvix/orvix/internal/api/handlers/settings"
+	settingsbridge "github.com/orvix/orvix/internal/settings/bridge"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/coremail"
@@ -23,7 +26,10 @@ import (
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/metrics"
 	"github.com/orvix/orvix/internal/modules"
+	"github.com/orvix/orvix/internal/observability"
 	orvixruntime "github.com/orvix/orvix/internal/runtime"
+	"github.com/orvix/orvix/internal/ruler"
+	"github.com/orvix/orvix/internal/tlsmgmt"
 	"github.com/orvix/orvix/internal/updater"
 	"github.com/orvix/orvix/internal/webmailmgmt"
 	"github.com/redis/go-redis/v9"
@@ -40,6 +46,8 @@ type Router struct {
 	logger       *zap.Logger
 	cfg          *config.Config
 	h            *handlers.Handler
+	appCtx       context.Context
+	cancel       context.CancelFunc
 }
 
 func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *zap.Logger,
@@ -72,6 +80,7 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		rateLimiter = auth.NewRedisRateLimiter(redisClient, logger)
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
 	router := &Router{
 		app:          app,
 		auth:         authenticator,
@@ -80,6 +89,8 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		redisLimiter: rateLimiter,
 		logger:       logger,
 		cfg:          cfg,
+		appCtx:       ctx,
+		cancel:       cancel,
 		h:            handlers.NewHandler(db, authenticator, apikeyMgr, logger, cfg, registry, ff, rateLimiter),
 	}
 	// Record the moment the router was constructed. The runtime
@@ -249,12 +260,78 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 	// /api/v1/admin/settings writes through this store; GET merges
 	// its rows with the config defaults to build the response. The
 	// store manages its own table (admin_settings) and indexes on
-	// first use; we do not need a separate migration step here.
+	// first use; we MUST call EnsureSchema() before the boot-time
+	// settings bridge runs, otherwise the bridge's first Apply()
+	// query against admin_settings fails with "no such table" on
+	// a brand-new VPS. The previous "lazy CREATE TABLE on first
+	// PATCH" approach left a scary journal warning on every fresh
+	// install — the BLOCKER 7 fresh-boot regression.
 	if sqlDB, err := db.DB(); err == nil {
-		router.h.SetSettingsStore(settings.NewStore(sqlDB))
+		store := settings.NewStore(sqlDB)
+		if err := store.EnsureSchema(router.appCtx); err != nil {
+			logger.Warn("admin settings store: ensure schema failed", zap.Error(err))
+		}
+		router.h.SetSettingsStore(store)
 		logger.Info("admin settings store wired")
 	} else {
 		logger.Warn("admin settings store unavailable: failed to get sql.DB", zap.Error(err))
+	}
+
+	// Boot-time bridge: load persisted protocol settings
+	// from admin_settings into the live cfg. Restart-
+	// required keys are recorded on the bridge's
+	// pending list so the admin UI can show "needs
+	// restart" honestly. The bridge reads the same
+	// admin_settings table the PATCH endpoint writes,
+	// so it is always consistent with operator intent.
+	if sqlDB, sErr := db.DB(); sErr == nil {
+		br := settingsbridge.New(router.cfg, sqlDB, logger)
+		if sm, aErr := br.Apply(router.appCtx); aErr != nil {
+			logger.Warn("settings bridge: initial apply failed", zap.Error(aErr))
+		} else {
+			logger.Info("settings bridge loaded",
+				zap.Int("applied", sm.Applied),
+				zap.Int("pending", sm.Pending))
+		}
+		router.h.SetSettingsBridge(br)
+	} else {
+		logger.Warn("settings bridge unavailable: failed to get sql.DB", zap.Error(sErr))
+	}
+
+	// Wire the admin TLS / certificate manager. The service
+	// is optional — when nil the SSL admin endpoints return
+	// 503 instead of fabricating cert metadata.
+	if sqlDB, err := db.DB(); err == nil {
+		tlsSvc := tlsmgmt.NewService(sqlDB, &tlsConfigAdapter{cfg: router.cfg})
+		if err := tlsSvc.EnsureUploadedCertSchema(context.Background()); err != nil {
+			logger.Warn("ensure uploaded cert schema failed", zap.Error(err))
+		}
+		router.h.SetTLSService(tlsSvc)
+		logger.Info("admin TLS service wired")
+	}
+
+	// Wire the runtime's antivirus engine + rule engine
+	// into the admin handler. Look them up via the module
+	// registry — the runtime registers itself during Init.
+	if mod, ok := registry.Get("coremail-runtime"); ok {
+		if rmod, ok := mod.(interface {
+			AntivirusEngine() *antivirus.Engine
+			RuleEngine() *ruler.Engine
+			Observability() *observability.Observability
+		}); ok {
+			if eng := rmod.AntivirusEngine(); eng != nil {
+				router.h.SetAntivirusService(eng)
+				logger.Info("admin antivirus service wired from runtime")
+			}
+			if eng := rmod.RuleEngine(); eng != nil {
+				router.h.SetRulerService(eng)
+				logger.Info("admin ruler service wired from runtime")
+			}
+			if obs := rmod.Observability(); obs != nil {
+				router.h.SetObservability(obs)
+				logger.Info("admin observability wired from runtime")
+			}
+		}
 	}
 
 	router.setupMiddleware()
@@ -285,14 +362,41 @@ func (r *Router) setupMiddleware() {
 		AllowCredentials: true,
 	}))
 	r.app.Use(securityHeaders())
-	if r.redisLimiter != nil {
-		r.app.Use(r.redisLimiter.Middleware())
-	} else {
-		r.app.Use(limiter.New(limiter.Config{Max: 100, Expiration: 60 * 1000}))
-	}
+	// PHASE-0 BLOCKER FIX: the general API rate limiter is NO LONGER applied
+	// globally. The previous global `r.app.Use(...)` blocked the
+	// admin SPA itself — `GET /admin` triggered the rate limiter
+	// because every static asset (index.html, app.js, styles.css,
+	// the 10 core modules, the 19 page modules) counts against
+	// the per-IP budget. Loading the admin console therefore
+	// consumed ~35 requests on first paint and the dashboard
+	// crashed within seconds with a JSON 429:
+	//
+	//     {"error":"rate limit exceeded, try again later"}
+	//
+	// The fix scopes the limiter to the `/api/v1` group only.
+	// Static SPA assets (admin + webmail) are exempt; API calls
+	// retain their per-IP budget (Redis default: 100 / 60 s).
+	// Login endpoints retain their tighter login limit (5 / 15 m)
+	// via the dedicated `LoginMiddleware()` already mounted in
+	// `setupRoutes()`. Security is unchanged — only the scope of
+	// the limit changed.
+	// The metrics endpoint stays reachable without rate-limit.
 	if r.cfg.Metrics.Enabled {
 		r.app.Get(r.cfg.Metrics.Path, metrics.Handler())
 	}
+}
+
+// apiRateLimitMiddleware returns the general API rate limiter
+// middleware for the /api/v1 group. It is built once in setupRoutes
+// and mounted only on the API group, so SPA static routes are
+// never counted against the per-IP budget. Login endpoints get the
+// dedicated LoginMiddleware (5 attempts / 15 min per IP) and do
+// NOT also pass through this handler, by mounting order.
+func (r *Router) apiRateLimitMiddleware() fiber.Handler {
+	if r.redisLimiter != nil {
+		return r.redisLimiter.Middleware()
+	}
+	return limiter.New(limiter.Config{Max: 100, Expiration: 60 * 1000})
 }
 
 func (r *Router) setupRoutes() {
@@ -305,7 +409,13 @@ func (r *Router) setupRoutes() {
 	// admin / webmail hostnames continue to work.
 	r.app.Get("/.well-known/mta-sts.txt", r.h.GetPublicMTASTS)
 
-	api := r.app.Group("/api/v1")
+	// All `/api/v1/*` requests pass through the general rate
+	// limiter (100/min per IP by default, via Redis when wired).
+	// Static SPA routes (`/admin/*`, `/webmail/*`, `/`, mta-sts)
+	// are registered on `r.app` directly and DO NOT pass through
+	// this handler — so loading the admin UI no longer eats the
+	// per-IP API budget.
+	api := r.app.Group("/api/v1", r.apiRateLimitMiddleware())
 	api.Get("/health", r.h.Health)
 
 	loginGroup := api.Group("/auth")
@@ -486,6 +596,40 @@ func (r *Router) setupRoutes() {
 	admin.Get("/modules", r.h.ListModules)
 	admin.Get("/license", r.h.GetLicense)
 	admin.Get("/audit/logs", r.h.ListAuditLogs)
+	// Admin Enterprise v2 — RBAC + account classes + groups +
+	// lists + public folders + quarantine + ACL + log rules.
+	admin.Get("/admin/account-classes", r.h.ListAccountClasses)
+	admin.Get("/admin/domain-groups", r.h.ListDomainGroups)
+	admin.Get("/admin/mailing-lists", r.h.ListMailingLists)
+	admin.Get("/admin/public-folders", r.h.ListPublicFolders)
+	admin.Get("/admin/admin-groups", r.h.ListAdminGroups)
+	admin.Get("/admin/quarantine", r.h.ListQuarantine)
+admin.Get("/admin/audit-logs", r.h.ListAdminAuditLogs)
+admin.Get("/admin/acl-rules", r.h.ListACLRules)
+admin.Get("/admin/log-rules", r.h.ListLogRules)
+// Enterprise v3 — SSL, acceptance rules, incoming message
+// rules, FTP backup targets, file system browser,
+// migration sources, clustering, antivirus, settings
+// protocol splits.
+admin.Get("/admin/ssl/certificates", r.h.AdminSslListCertificates)
+admin.Get("/admin/ssl/certificates/reload", r.h.AdminSslReloadCertificates)
+admin.Get("/admin/ssl/expiry-warnings", r.h.AdminSslExpiryWarnings)
+admin.Get("/admin/ssl/acme/status", r.h.AdminSslAcmeStatus)
+admin.Get("/admin/acceptance-rules", r.h.ListAcceptanceRules)
+admin.Get("/admin/incoming-msg-rules", r.h.ListIncomingMsgRules)
+admin.Get("/admin/migration-sources", r.h.ListMigrationSources)
+admin.Get("/admin/backup-targets", r.h.ListBackupTargets)
+admin.Get("/admin/backup-targets/:id/test", r.h.TestBackupTarget)
+admin.Get("/admin/migration-sources/:id/test", r.h.TestMigrationSource)
+admin.Get("/admin/fs/browse", r.h.AdminFsBrowse)
+admin.Get("/admin/fs/read", r.h.AdminFsRead)
+admin.Get("/admin/cluster/status", r.h.AdminClusteringStatus)
+admin.Get("/admin/security/antivirus", r.h.AdminAntivirusStatus)
+// Per-protocol settings sub-pages. The :protocol path
+// parameter is one of the IDs in the protocolDefs map.
+admin.Get("/admin/settings/protocol/:protocol", r.h.ListProtocolSettings)
+	admin.Get("/admin/mailing-lists/:id/members", r.h.ListMailingListMembers)
+	admin.Get("/admin/admin-groups/:id/members", r.h.ListAdminGroupMembers)
 	admin.Get("/feature-flags", r.h.ListFeatureFlags)
 	admin.Get("/api-keys", r.h.ListAPIKeys)
 	admin.Get("/admin/summary", r.h.AdminSummary)
@@ -665,6 +809,58 @@ func (r *Router) setupRoutes() {
 
 	// Admin Settings write (CSRF-protected)
 	men.Patch("/admin/settings", r.h.AdminSettingsPatch)
+
+	// Admin Enterprise v2 mutations (CSRF-protected, admin
+	// role). Every mutation writes an entry to coremail_audit
+	// (action="<resource>.<verb>", target=<identifier>,
+	// result="ok"). Refusal paths return 4xx with a stable
+	// error JSON; never fabricate success.
+	men.Post("/admin/account-classes", r.h.CreateAccountClass)
+	men.Patch("/admin/account-classes/:id", r.h.UpdateAccountClass)
+	men.Delete("/admin/account-classes/:id", r.h.DeleteAccountClass)
+	men.Post("/admin/domain-groups", r.h.CreateDomainGroup)
+	men.Put("/admin/domain-groups/:id/members", r.h.UpdateDomainGroupMembers)
+	men.Delete("/admin/domain-groups/:id", r.h.DeleteDomainGroup)
+	men.Post("/admin/mailing-lists", r.h.CreateMailingList)
+	men.Delete("/admin/mailing-lists/:id", r.h.DeleteMailingList)
+	men.Post("/admin/mailing-lists/:id/members", r.h.AddMailingListMember)
+	men.Delete("/admin/mailing-lists/:id/members/:memberId", r.h.RemoveMailingListMember)
+	men.Post("/admin/public-folders", r.h.CreatePublicFolder)
+	men.Delete("/admin/public-folders/:id", r.h.DeletePublicFolder)
+	men.Post("/admin/admin-groups", r.h.CreateAdminGroup)
+	men.Patch("/admin/admin-groups/:id", r.h.UpdateAdminGroup)
+	men.Delete("/admin/admin-groups/:id", r.h.DeleteAdminGroup)
+	men.Post("/admin/admin-groups/:id/members", r.h.AddAdminGroupMember)
+	men.Delete("/admin/admin-groups/:id/members/:userId", r.h.RemoveAdminGroupMember)
+	men.Post("/admin/quarantine/:id/resolve", r.h.ResolveQuarantine)
+	men.Post("/admin/acl-rules", r.h.CreateACLRule)
+	men.Delete("/admin/acl-rules/:id", r.h.DeleteACLRule)
+men.Post("/admin/log-rules", r.h.CreateLogRule)
+men.Delete("/admin/log-rules/:id", r.h.DeleteLogRule)
+// Enterprise v3 — CSRF-protected mutations for the new
+// sections. Each one is mounted inside `men` so the
+// X-CSRF-Token check runs before the handler. All
+// handlers in enterprise_admin_v3.go + ssl.go write to
+// the audit table via h.appendAudit.
+men.Post("/admin/ssl/certificates", r.h.AdminSslUploadCertificate)
+men.Post("/admin/ssl/certificates/reload", r.h.AdminSslReloadCertificates)
+men.Delete("/admin/ssl/certificates/:id", r.h.AdminSslDeleteCertificate)
+men.Post("/admin/acceptance-rules", r.h.CreateAcceptanceRule)
+men.Patch("/admin/acceptance-rules/:id", r.h.UpdateAcceptanceRule)
+men.Post("/admin/acceptance-rules/test", r.h.TestAcceptanceRule)
+men.Delete("/admin/acceptance-rules/:id", r.h.DeleteAcceptanceRule)
+men.Post("/admin/incoming-msg-rules", r.h.CreateIncomingMsgRule)
+men.Patch("/admin/incoming-msg-rules/:id", r.h.UpdateIncomingMsgRule)
+men.Delete("/admin/incoming-msg-rules/:id", r.h.DeleteIncomingMsgRule)
+men.Post("/admin/migration-sources", r.h.CreateMigrationSource)
+men.Patch("/admin/migration-sources/:id", r.h.UpdateMigrationSource)
+men.Delete("/admin/migration-sources/:id", r.h.DeleteMigrationSource)
+men.Post("/admin/migration-sources/:id/test", r.h.TestMigrationSource)
+men.Post("/admin/backup-targets", r.h.CreateBackupTarget)
+men.Patch("/admin/backup-targets/:id", r.h.UpdateBackupTarget)
+men.Delete("/admin/backup-targets/:id", r.h.DeleteBackupTarget)
+men.Post("/admin/backup-targets/:id/test", r.h.TestBackupTarget)
+men.Patch("/admin/settings/protocol/:protocol", r.h.PatchProtocolSettings)
 }
 
 func (r *Router) setupAdminUI() {

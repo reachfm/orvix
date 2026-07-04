@@ -238,29 +238,109 @@ func TestConcurrentBackupBlocked(t *testing.T) {
 	s := testService(t)
 	ctx := context.Background()
 
-	// Lock the mutex manually to simulate concurrent operation.
-	s.mu.Lock()
-	ch := make(chan bool)
+	// Step 1 — acquire s.mu in a dedicated goroutine and
+	// signal the test once it is held. We do not Lock
+	// from the test goroutine because the test goroutine
+	// is the one that has to issue Unlock; parking the
+	// critical section in its own goroutine lets us
+	// release the lock deterministically via a channel
+	// close. The lockHeld channel is closed (not sent on)
+	// so multiple readers cannot accidentally miss the
+	// signal.
+	lockHeld := make(chan struct{})
+	lockRelease := make(chan struct{})
+	holderDone := make(chan struct{})
 	go func() {
-		_, err := s.CreateBackup(ctx, "concurrent")
-		ch <- (err != nil)
+		defer close(holderDone)
+		s.mu.Lock()
+		close(lockHeld)
+		<-lockRelease
+		s.mu.Unlock()
 	}()
-	// The goroutine should be blocked. Give it time.
+
+	// Wait for the holder goroutine to actually own s.mu.
+	// Without this, the helper goroutine below could race
+	// ahead of the holder and acquire the mutex first,
+	// turning the test into a no-op assertion.
 	select {
-	case <-ch:
-		// Should not complete — mutex is held.
-	case <-time.After(100 * time.Millisecond):
-		// Expected: blocked.
+	case <-lockHeld:
+	case <-time.After(5 * time.Second):
+		t.Fatal("holder goroutine never acquired s.mu")
 	}
-	s.mu.Unlock()
-	// Now the backup should complete.
+
+	// Step 2 — start the helper goroutine. It signals
+	// "about to call CreateBackup" on blocked, then calls
+	// CreateBackup, then sends the result on result, then
+	// closes unblocked. result is buffered (cap=1) so a
+	// send never blocks, which lets the test probe it
+	// synchronously below.
+	blocked := make(chan struct{})
+	result := make(chan error, 1)
+	unblocked := make(chan struct{})
+	go func() {
+		defer close(unblocked)
+		close(blocked)
+		_, err := s.CreateBackup(ctx, "concurrent")
+		result <- err
+	}()
+
+	// Wait for the helper to reach CreateBackup before we
+	// probe result. If we polled before the helper started
+	// the call, we would observe "no result yet" but for
+	// the wrong reason (the goroutine had not yet tried
+	// to acquire s.mu). With <-blocked we know the helper
+	// is at minimum past the close(blocked) statement;
+	// s.mu.Lock() is the very next call inside
+	// CreateBackup.
 	select {
-	case blocked := <-ch:
-		if blocked {
-			t.Fatal("backup should have succeeded after mutex released")
+	case <-blocked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("helper goroutine never reached CreateBackup")
+	}
+
+	// Probe result synchronously — no sleep, no time.After.
+	// result is buffered, so the receive either succeeds
+	// (the helper finished) or yields the default branch
+	// (the helper is still blocked on s.mu.Lock). We
+	// expect the default branch; if it fires we have just
+	// proven that the second backup cannot enter the
+	// critical section while the holder owns s.mu.
+	select {
+	case err := <-result:
+		t.Fatalf("CreateBackup returned while s.mu was held (err=%v)", err)
+	default:
+		// Expected: helper is blocked at s.mu.Lock.
+	}
+
+	// Step 3 — release the lock and verify the helper
+	// completes with no error. We give it a generous
+	// bound only on the "wait for completion" side; the
+	// "blocked while held" assertion above is fully
+	// synchronous.
+	close(lockRelease)
+	select {
+	case <-holderDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("holder goroutine never released s.mu")
+	}
+
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("CreateBackup returned an error after s.mu was released: %v", err)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("backup should have completed after mutex release")
+	case <-time.After(30 * time.Second):
+		t.Fatal("CreateBackup did not complete after s.mu was released")
+	}
+
+	// Sanity: unblocked must also have fired. This is the
+	// strongest assertion that the helper goroutine
+	// actually exited CreateBackup (rather than the result
+	// being delivered by some other code path).
+	select {
+	case <-unblocked:
+	default:
+		t.Fatal("helper goroutine did not close unblocked after CreateBackup returned")
 	}
 }
 

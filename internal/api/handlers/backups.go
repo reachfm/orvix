@@ -1,15 +1,18 @@
 package handlers
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/backup"
+	"github.com/orvix/orvix/internal/backup/targets"
 	"github.com/orvix/orvix/internal/updater"
 	"go.uber.org/zap"
 )
@@ -57,6 +60,21 @@ func (h *Handler) backupService() (*backup.Service, error) {
 	svc.SetConfigPath("/etc/orvix/orvix.yaml")
 	bi := updater.ReadBuildInfo()
 	svc.SetBuildInfo(bi.Version, bi.SHA)
+
+	// Wire the post-create hook so enabled backup
+	// targets receive the finished archive. The hook
+	// is a closure that holds the DB handle so an
+	// admin writing new targets does not need a
+	// router restart to see them picked up.
+	mgr := targets.NewManager(h.cfg, sqlDB, h.logger, h.observability)
+	svc.SetPostCreateHook(func(backupID, archivePath string) {
+		// Use a fresh context per upload so the request
+		// that created the backup can return without
+		// waiting for slow remote targets.
+		bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		mgr.Run(bgCtx, archivePath, backupID)
+	})
 
 	// Add key file paths from config to be included in backups.
 	if h.cfg != nil {

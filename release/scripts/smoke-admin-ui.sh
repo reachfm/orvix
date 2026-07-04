@@ -442,5 +442,169 @@ if ! grep -q "Run dry-run for this configured provider and domain" "$DNS_DKIM" 2
 fi
 pass "dns-dkim.js Apply guard uses shared canApplyProvider helper"
 
+# ── 30. Admin Enterprise v2 pages exist and are wired ────────────
+ENTERPRISE_PAGES=(
+    "account-classes.js"
+    "domain-groups.js"
+    "mailing-lists.js"
+    "public-folders.js"
+    "admin-groups.js"
+    "audit-log.js"
+    "quarantine.js"
+    "acl.js"
+    "log-rules.js"
+    "security-extra.js"
+    "migration.js"
+    "clustering.js"
+)
+for p in "${ENTERPRISE_PAGES[@]}"; do
+    [ -f "$ADMIN_DIR/modules/pages/$p" ] || fail "missing enterprise page module: $p"
+    if ! grep -q "$p" "$ADMIN_DIR/app.js" 2>/dev/null; then
+        fail "enterprise page $p not imported in app.js"
+    fi
+done
+pass "all 12 enterprise page modules exist and are imported in app.js"
+
+# ── 35. CTO BLOCKER 3 — Acceptance UI offers only runtime-truthful actions ──
+# The runtime (internal/coremail/smtp/receive.go) accepts only
+# {accept, reject, quarantine}. The frontend must NOT expose
+# {redirect, hold} in the action <select> option list. We
+# anchor the check on the select() call for the action field
+# so false positives from CSS classes or unrelated strings
+# cannot pass the gate.
+ACCEPTANCE_JS="$ADMIN_DIR/modules/pages/acceptance.js"
+acceptance_action_block=$(grep -nA 1 -E "select\(\s*'Action'\s*," "$ACCEPTANCE_JS" | head -n 2 || true)
+if [ -z "$acceptance_action_block" ]; then
+    fail "acceptance.js is missing the action <select> declaration (BLOCKER 3)"
+fi
+for bad in redirect hold; do
+    if echo "$acceptance_action_block" | grep -qE "'$bad'"; then
+        fail "acceptance.js action <select> offers unsupported action '$bad' (BLOCKER 3)"
+    fi
+done
+# 35c. No redirect_to UI field — this one is grepped over
+# the whole file because the field name must not appear at all.
+if grep -qE "redirect_to|redirect-to" "$ACCEPTANCE_JS"; then
+    fail "acceptance.js UI exposes 'redirect_to' field (BLOCKER 3)"
+fi
+# 35d. Action options list must include accept / reject / quarantine.
+for need in accept reject quarantine; do
+    if ! echo "$acceptance_action_block" | grep -qE "'$need'"; then
+        fail "acceptance.js action <select> is missing runtime-supported action '$need' (BLOCKER 3)"
+    fi
+done
+pass "acceptance.js action <select> exposes only runtime-supported actions {accept, reject, quarantine} (BLOCKER 3)"
+
+# ── 36. CTO BLOCKER 4 — Incoming UI offers only runtime-truthful actions ──
+# The runtime (internal/coremail/smtp/receive.go) accepts only
+# {reject, quarantine, tag}. The frontend must NOT expose
+# {move, label, forward, discard, hold}. We grep the action-
+# select line specifically rather than the whole file, because
+# the words "label" and "forward" appear legitimately elsewhere
+# (CSS classes, modal button labels, helper text). We anchor on
+# the select() call for the action field and pull in up to 2
+# lines so the options array on the continuation line is in
+# scope.
+INCOMING_JS="$ADMIN_DIR/modules/pages/incoming-rules.js"
+incoming_action_block=$(grep -nA 1 -E "select\(\s*'Action'\s*," "$INCOMING_JS" | head -n 2 || true)
+if [ -z "$incoming_action_block" ]; then
+    fail "incoming-rules.js is missing the action <select> declaration (BLOCKER 4)"
+fi
+for bad in move label forward discard hold; do
+    if echo "$incoming_action_block" | grep -qE "'$bad'"; then
+        fail "incoming-rules.js action <select> offers unsupported action '$bad' (BLOCKER 4)"
+    fi
+done
+for need in reject quarantine tag; do
+    if ! echo "$incoming_action_block" | grep -qE "'$need'"; then
+        fail "incoming-rules.js action <select> is missing runtime-supported action '$need' (BLOCKER 4)"
+    fi
+done
+pass "incoming-rules.js action <select> exposes only runtime-supported actions {reject, quarantine, tag} (BLOCKER 4)"
+
+# ── 36b. CTO FIX 4 — incoming action_target helper text must be runtime-truthful ──
+# The legacy "folder / label / forward address" wording refers to
+# actions (move / label / forward) the runtime no longer executes.
+# The active actions are reject / quarantine / tag, so the helper
+# text must describe the new contract. We assert that the legacy
+# wording is gone and that the new wording is present.
+if grep -qE "folder / label / forward|folder / label|forward address" "$INCOMING_JS"; then
+    fail "incoming-rules.js still references legacy 'folder / label / forward' / 'forward address' wording (FIX 4)"
+fi
+if ! grep -qE "Action value" "$INCOMING_JS"; then
+    fail "incoming-rules.js is missing the runtime-truthful 'Action value' field label (FIX 4)"
+fi
+pass "incoming-rules.js action_target helper text describes the runtime contract (FIX 4)"
+
+# ── 37. CTO BLOCKER 2 — No SFTP askpass secret-on-disk pattern ─────
+# The runtime must never write a decrypted SFTP password to a
+# shell script (no SSH_ASKPASS=... helper file containing the
+# cleartext). The CTO's preferred path is pure Go SFTP, which
+# has its own guard in internal/backup/targets/uploader_test.go.
+TARGETS_GO="$REPO_ROOT/internal/backup/targets/uploader.go"
+[ -f "$TARGETS_GO" ] || fail "internal/backup/targets/uploader.go is missing"
+if grep -qE "writeAskpassHelper|SSH_ASKPASS_REQUIRE=force" "$TARGETS_GO"; then
+    fail "internal/backup/targets/uploader.go still references writeAskpassHelper or SSH_ASKPASS_REQUIRE=force (BLOCKER 2)"
+fi
+# Defence in depth: nothing under internal/backup/targets/ may
+# reference the askpass helper by name.
+if grep -rn "writeAskpassHelper" "$REPO_ROOT/internal/backup/" 2>/dev/null; then
+    fail "internal/backup/ still references the forbidden writeAskpassHelper helper (BLOCKER 2)"
+fi
+pass "internal/backup/targets/uploader.go has no SSH_ASKPASS secret-on-disk pattern (BLOCKER 2)"
+
+# ── 31. Admin Enterprise v2 endpoints are referenced from the JS ─
+for ep in \
+    "/api/v1/admin/account-classes" \
+    "/api/v1/admin/domain-groups" \
+    "/api/v1/admin/mailing-lists" \
+    "/api/v1/admin/public-folders" \
+    "/api/v1/admin/admin-groups" \
+    "/api/v1/admin/audit-logs" \
+    "/api/v1/admin/quarantine" \
+    "/api/v1/admin/acl-rules" \
+    "/api/v1/admin/log-rules"; do
+    if ! grep -q "$ep" "$ADMIN_DIR/modules/pages/"*.js 2>/dev/null; then
+        fail "no page module references $ep"
+    fi
+done
+pass "every new admin enterprise endpoint is referenced from the JS"
+
+# ── 32. No tokens in localStorage (sessionStorage only) ──────────
+for f in "$ADMIN_DIR"/modules/api.js "$ADMIN_DIR"/app.js; do
+    if grep -q "localStorage.setItem(.*token" "$f" 2>/dev/null; then
+        fail "$f must not put tokens in localStorage"
+    fi
+done
+pass "no auth tokens stored in localStorage (sessionStorage only)"
+
+# ── 33. CSRF protection on every new mutating admin endpoint ────
+for ep in \
+    "admin/account-classes" \
+    "admin/domain-groups" \
+    "admin/mailing-lists" \
+    "admin/public-folders" \
+    "admin/admin-groups" \
+    "admin/quarantine" \
+    "admin/acl-rules" \
+    "admin/log-rules"; do
+    # Verify that some page module posts to this endpoint.
+    if ! grep -q "apiPost.*$ep\|apiPut.*$ep\|apiPatch.*$ep\|apiDelete.*$ep" "$ADMIN_DIR/modules/pages/"*.js 2>/dev/null; then
+        fail "no page module performs a mutation on $ep"
+    fi
+done
+pass "every enterprise mutation is reachable from a page module"
+
+# ── 34. Rate limiter exemption is documented in router.go ────────
+REPO_ROOT="${REPO_ROOT:-.}"
+ROUTER="$REPO_ROOT/internal/api/router.go"
+if ! grep -q "PHASE-0" "$ROUTER" 2>/dev/null; then
+    fail "router.go must document the PHASE-0 rate-limit exemption"
+fi
+if ! grep -q "apiRateLimitMiddleware" "$ROUTER" 2>/dev/null; then
+    fail "router.go must define apiRateLimitMiddleware helper"
+fi
+pass "router.go exempts the admin SPA from the API rate limiter"
+
 echo
 echo "ALL ADMIN UI SMOKE TESTS PASSED"

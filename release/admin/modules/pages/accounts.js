@@ -86,17 +86,46 @@ function openCreate() {
       const email = el('input', { type: 'email', placeholder: 'user@example.com', required: 'required', autocomplete: 'off', spellcheck: 'false' });
       const name  = el('input', { type: 'text', placeholder: 'Display name' });
       const pw    = el('input', { type: 'password', placeholder: 'Initial password', required: 'required', autocomplete: 'new-password' });
-      const quota = el('input', { type: 'number', placeholder: 'Quota (MB)' });
+      const quota = el('input', { type: 'number', placeholder: 'Quota (MB) (optional — class default applied otherwise)' });
+      // Account class selector. When selected, the class's
+      // defaults (quota, send limits, feature gates) are
+      // applied to the mailbox unless overridden by the
+      // operator. The class must belong to the same tenant.
+      const classSelect = el('select', { id: 'mb_class_id' });
+      classSelect.appendChild(el('option', { value: '0' }, 'No class (defaults to 1024MB / no extra gates)'));
+      // Lazy-load classes; if the call fails the dropdown
+      // still has the "no class" option so the form is usable.
+      apiGet('/api/v1/admin/account-classes').then((r) => {
+        const classes = (r && r.classes) || [];
+        classes.forEach((c) => {
+          classSelect.appendChild(el('option', {
+            value: String(c.id),
+            title: 'max ' + c.max_quota_mb + 'MB; send ' + c.max_send_per_hour + '/h; recv ' + c.max_recv_per_hour + '/h',
+          }, c.name + (c.is_admin_class ? ' (built-in)' : '')));
+        });
+      }).catch(() => { /* leave defaults */ });
       body.appendChild(el('div', { class: 'form-row' }, [el('label', null, 'Email'), email]));
       body.appendChild(el('div', { class: 'form-row' }, [el('label', null, 'Name'), name]));
       body.appendChild(el('div', { class: 'form-row' }, [el('label', null, 'Password'), pw]));
       body.appendChild(el('div', { class: 'form-row' }, [el('label', null, 'Quota (MB)'), quota]));
+      body.appendChild(el('div', { class: 'form-row' }, [
+        el('label', { for: 'mb_class_id' }, 'Account class (optional)'),
+        classSelect,
+      ]));
+      body.appendChild(el('p', { class: 'subtle small',
+        text: 'Pick an account class to apply its quota / send-limit defaults. See /accounts/classes for the full list.' }));
       foot.appendChild(el('button', { class: 'btn ghost', type: 'button', text: t('common.cancel'),
         onclick: () => document.querySelector('.modal-overlay').remove() }));
       foot.appendChild(el('button', { class: 'btn primary', type: 'button', text: 'Create', onclick: async () => {
         if (!email.value || !pw.value) { toast('Email and password required', 'error'); return; }
         try {
-          await apiPost('/api/v1/mailboxes', { email: email.value, name: name.value, password: pw.value, quota_mb: Number(quota.value) || 1024 });
+          await apiPost('/api/v1/mailboxes', {
+            email: email.value,
+            name: name.value,
+            password: pw.value,
+            quota_mb: Number(quota.value) || 0,
+            class_id: Number(classSelect.value || 0) || 0,
+          });
           // Important: never echo the password back to the operator.
           pw.value = '';
           toast('Mailbox created', 'success', 1800);

@@ -30,16 +30,64 @@
 
 ## Installation
 
-### Fresh Install
+### Production one-command install (recommended)
+
+The supported path on a fresh Ubuntu VPS is to fetch the
+**release bundle**, which ships a verified `bin/orvix` plus
+the complete runtime tree (admin SPA, webmail SPA, systemd
+units, sudoers drop-in, scripts, configs). The public
+installer `release/install-public.sh` fetches the bundle,
+verifies its layout, then delegates to the bundled
+`install.sh`. Everything below maps to one curl invocation.
+
 ```bash
-curl -fsSL https://github.com/reachfm/orvix/releases/download/v1.0.3/install.sh | bash
+# Default: latest stable
+curl -fsSL https://releases.orvix.email/install-public.sh \
+    | sudo ORVIX_NON_INTERACTIVE=1 \
+         ORVIX_DOMAIN=mail.example.com \
+         ORVIX_PUBLIC_IPV4=<your.public.ipv4> \
+         bash -s --
+
+# Pinned to a specific version
+curl -fsSL https://releases.orvix.email/install-public.sh \
+    | sudo ORVIX_VERSION=1.0.3-rc5 \
+         ORVIX_COMMIT=53ecf240000... \
+         ORVIX_BUNDLE_SHA256=<expected sha256> \
+         ORVIX_NON_INTERACTIVE=1 \
+         ORVIX_DOMAIN=mail.example.com \
+         ORVIX_PUBLIC_IPV4=<your.public.ipv4> \
+         bash -s --
+
+# Air-gapped: point the installer at an internally-hosted bundle
+curl -fsSL https://releases.orvix.email/install-public.sh \
+    | sudo ORVIX_BUNDLE_URL=https://internal.example.com/orvix-1.0.3-rc5-linux-amd64.tar.gz \
+         ORVIX_BUNDLE_SHA256=<expected sha256> \
+         ORVIX_NON_INTERACTIVE=1 \
+         ORVIX_DOMAIN=mail.example.com \
+         ORVIX_PUBLIC_IPV4=<your.public.ipv4> \
+         bash -s --
 ```
 
-Or download and run manually:
+The bundle pathway is fail-closed: if `install-public.sh`
+cannot reach the bundle, the bundle is missing required files,
+or the bundled binary's embedded commit does not match
+`ORVIX_COMMIT`, the installer aborts before mutating any
+state on the host.
+
+### Manual install (download then run)
+
+If you prefer to download and run by hand:
+
 ```bash
-curl -fsSL https://github.com/reachfm/orvix/releases/download/v1.0.3/orvix-v1.0.3-linux-amd64.tar.gz -o orvix.tar.gz
+# 1) Pull the bundle the public installer would otherwise fetch.
+curl -fsSL https://releases.orvix.email/orvix-enterprise-mail-1.0.3-rc5-linux-amd64.tar.gz -o orvix.tar.gz
+curl -fsSL https://releases.orvix.email/orvix-enterprise-mail-1.0.3-rc5-linux-amd64.tar.gz.sha256 -o orvix.tar.gz.sha256
+sha256sum -c orvix.tar.gz.sha256
+
+# 2) Extract and run the bundled installer (NOT a developer worktree).
 tar -xzf orvix.tar.gz
-sudo ./install.sh
+cd orvix
+sudo bash release/install.sh
 ```
 
 The installer will prompt for:
@@ -48,6 +96,39 @@ The installer will prompt for:
 3. Admin password (minimum 8 characters)
 4. Confirm admin password
 
+### What ships in the bundle
+
+| Path | Purpose |
+|---|---|
+| `bin/orvix`              | The verified binary, built from the bundle's pinned commit and embedded Version/Commit/Channel |
+| `release/install.sh`     | The bundled installer — handles dependencies, systemd, sudoers, config, smoke tests |
+| `release/upgrade.sh`     | Operator-driven upgrade path |
+| `release/uninstall.sh`   | Operator-driven uninstall |
+| `release/install-public.sh` | The public installer entrypoint (re-run after future releases) |
+| `release/systemd/`       | `orvix.service` + `orvix-update.service` |
+| `release/sudoers.d/`     | `orvix-update` (systemctl start only, never auto-enabled) |
+| `release/scripts/`       | All operator scripts (diagnostics, doctor, vapid, https setup, smoke tests, asset lib) |
+| `release/admin/**`       | The admin SPA (must match the binary version) |
+| `release/webmail/**`     | The webmail SPA (must match the binary version) |
+| `VERSION`                | Single source of truth for the version string |
+| `BUILDINFO`              | version / commit / build_time / channel — read by install.sh for the stale-binary guard |
+| `checksums.txt`          | sha256 of every file in the bundle |
+
+### Bundling a release yourself
+
+```bash
+bash release/scripts/build-release-bundle.sh
+# → dist/orvix-enterprise-mail-<version>-linux-amd64.tar.gz
+# → dist/orvix-enterprise-mail-<version>-linux-amd64.tar.gz.sha256
+```
+
+The bundle script builds the current `HEAD`'s `bin/orvix`
+with `-ldflags` injecting `internal/buildinfo.Version`,
+`Commit`, `BuildTime`, and `Channel`, then re-runs
+`orvix version --full` on the just-built binary to prove
+the embedded metadata matches the bundle metadata before
+sealing the tarball.
+
 ### Upgrade from RC3
 ```bash
 sudo systemctl stop orvix
@@ -55,6 +136,57 @@ sudo tar -xzf orvix-v1.0.3-linux-amd64.tar.gz -C /tmp
 sudo cp /tmp/orvix-v1.0.3-linux-amd64 /usr/local/bin/orvix
 sudo systemctl start orvix
 ```
+
+## Fresh VPS Acceptance Gate
+
+The release ships `release/scripts/verify-fresh-vps-one-command.sh`,
+a one-shot gate that proves every BLOCKER contract is intact on
+a clean Ubuntu 22.04 VPS. Run it after the install + setup-https
+to get a single PASS/NEEDS FIX verdict. See
+`docs/FRESH_VPS_VERIFY.md` for the full contract.
+
+```bash
+sudo ORVIX_PRIMARY_DOMAIN=orvix.email ORVIX_PUBLIC_IPV4=65.75.203.74 \
+    bash release/scripts/verify-fresh-vps-one-command.sh
+```
+
+## Release Pipeline
+
+For maintainers releasing a new tag:
+
+```bash
+# 1. Build + publish the bundle + sha256 sidecar + stable alias.
+ORVIX_RELEASE_TAG=v1.0.3-rc5 ORVIX_GH_TOKEN=... \
+    bash release/scripts/publish-github-release.sh
+
+# 2. Verify the published assets are reachable + match.
+bash release/scripts/verify-github-release-assets.sh \
+    --repo reachfm/orvix --tag v1.0.3-rc5 --channel stable
+```
+
+`publish-github-release.sh` itself re-runs
+`verify-github-release-assets.sh` at the end, so the release is
+not "done" until the verify gate is green.
+
+## Admin Login Form Hydration — Regression Guard
+
+The previous CTO review caught a "static HTML / no form" failure
+mode where `release/admin/index.html` rendered the
+`#login-view` wrapper but the actual `#login-email` /
+`#login-password` / `#login-button` controls were never mounted
+by `modules/auth.js renderLogin()`. Root cause was a missing
+re-export (`app.js` imported `login` from `auth.js`, but
+`auth.js` only re-exported `logout`) and a missing alias
+(thirteen page modules imported `modal` from `components.js`,
+but `components.js` only exposed `openModal`). Both names now
+exist; the regression is pinned by `release/scripts/smoke-admin-browser.sh`
+which proves (a) every named import in the admin module graph
+resolves to a real export, (b) every module dynamic-imports
+under stubbed browser globals without throwing, and (c) the
+shipped `index.html` carries only the static wrapper, not the
+form fields, so the JS contract is the only way the form can
+appear. The new `verify-fresh-vps-one-command.sh` re-asserts
+the same contract on a live VPS install.
 
 ## Known Limitations
 

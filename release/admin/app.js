@@ -71,6 +71,26 @@ import * as updates   from './modules/pages/updates.js';
 import * as license   from './modules/pages/license.js';
 import * as security  from './modules/pages/security.js';
 import * as adminRights from './modules/pages/administration-rights.js';
+import * as accountClasses from './modules/pages/account-classes.js';
+import * as domainGroups   from './modules/pages/domain-groups.js';
+import * as mailingLists   from './modules/pages/mailing-lists.js';
+import * as publicFolders  from './modules/pages/public-folders.js';
+import * as adminGroups    from './modules/pages/admin-groups.js';
+import * as auditLog       from './modules/pages/audit-log.js';
+import * as quarantine     from './modules/pages/quarantine.js';
+import * as acl            from './modules/pages/acl.js';
+import * as logRules       from './modules/pages/log-rules.js';
+import * as securityExtra  from './modules/pages/security-extra.js';
+import * as migration      from './modules/pages/migration.js';
+import * as clustering     from './modules/pages/clustering.js';
+import * as sslPage        from './modules/pages/ssl.js';
+import * as antivirusPage  from './modules/pages/antivirus.js';
+import * as acceptancePage from './modules/pages/acceptance.js';
+import * as incomingRulesPage from './modules/pages/incoming-rules.js';
+import * as ftpBackupPage  from './modules/pages/ftp-backup.js';
+import * as fsAccessPage   from './modules/pages/fs-access.js';
+import * as migrationSourcesPage from './modules/pages/migration-sources.js';
+import * as settingsProtocolPage from './modules/pages/settings-protocol.js';
 import { renderPlannedPage } from './modules/pages/_planned.js';
 
 register('dashboard',                dashboard.renderDashboard);
@@ -99,31 +119,49 @@ register('updates',                  updates.renderUpdatesPage);
 register('updates/checks',           updates.renderUpdatesPage);
 register('license',                  license.renderLicensePage);
 register('security',                 security.renderSecurityPage);
-register('security/ssl',             (root) => renderPlannedPage(root, { feature: 'SSL certificates', endpoint: 'GET /api/v1/admin/ssl' }));
-register('security/antispam',        (root) => renderPlannedPage(root, { feature: 'Antivirus / anti-spam', endpoint: 'GET /api/v1/admin/antispam' }));
-register('security/spam',            (root) => renderPlannedPage(root, { feature: 'Global spam control', endpoint: 'GET /api/v1/admin/spam' }));
-register('security/routing',         (root) => renderPlannedPage(root, { feature: 'Acceptance & routing', endpoint: 'GET /api/v1/admin/routing' }));
-register('security/rules',           (root) => renderPlannedPage(root, { feature: 'Incoming message rules', endpoint: 'GET /api/v1/admin/rules' }));
-register('security/quarantine',      (root) => renderPlannedPage(root, { feature: 'View quarantine', endpoint: 'GET /api/v1/admin/quarantine' }));
-register('admin/groups',             (root) => renderPlannedPage(root, { feature: 'Administrative groups', endpoint: 'GET /api/v1/admin/admin-groups' }));
-register('admin/users',              (root) => renderPlannedPage(root, { feature: 'Administrative users', endpoint: 'GET /api/v1/admin/admin-users' }));
-register('admin/limits',             (root) => renderPlannedPage(root, { feature: 'Domain admin limits', endpoint: 'GET /api/v1/admin/domain-admin-limits' }));
-register('domains/groups',           (root) => renderPlannedPage(root, { feature: 'Groups', endpoint: 'GET /api/v1/domains/.../groups' }));
-register('domains/lists',            (root) => renderPlannedPage(root, { feature: 'Mailing lists', endpoint: 'GET /api/v1/domains/.../lists' }));
-register('domains/public',           (root) => renderPlannedPage(root, { feature: 'Public folders', endpoint: 'GET /api/v1/domains/.../public-folders' }));
-register('accounts/classes',         (root) => renderPlannedPage(root, { feature: 'Account classes', endpoint: 'GET /api/v1/account-classes' }));
-register('backups/history',          (root) => renderPlannedPage(root, { feature: 'Backup history', endpoint: 'GET /api/v1/admin/backups/history' }));
-register('backups/ftp',              (root) => renderPlannedPage(root, { feature: 'FTP backup & restore', endpoint: 'GET /api/v1/admin/ftp-backup' }));
-register('backups/fs',               (root) => renderPlannedPage(root, { feature: 'File system access', endpoint: 'GET /api/v1/admin/fs' }));
-register('migration',                (root) => renderPlannedPage(root, { feature: 'Migration jobs', endpoint: 'GET /api/v1/migration/jobs' }));
-register('migration/sources',        (root) => renderPlannedPage(root, { feature: 'Source servers', endpoint: 'GET /api/v1/migration/sources' }));
-register('clustering',               (root) => renderPlannedPage(root, { feature: 'Clustering setup', endpoint: 'GET /api/v1/cluster' }));
-register('clustering/imap',          (root) => renderPlannedPage(root, { feature: 'IMAP proxy', endpoint: 'GET /api/v1/cluster/imap' }));
-register('clustering/pop3',          (root) => renderPlannedPage(root, { feature: 'POP3 proxy', endpoint: 'GET /api/v1/cluster/pop3' }));
-register('clustering/webmail',       (root) => renderPlannedPage(root, { feature: 'Webmail proxy', endpoint: 'GET /api/v1/cluster/webmail' }));
-register('logs/rules',               (root) => renderPlannedPage(root, { feature: 'Log collection rules', endpoint: 'GET /api/v1/logs/rules' }));
-register('logs/files',               (root) => renderPlannedPage(root, { feature: 'View log files', endpoint: 'GET /api/v1/logs/files' }));
-register('logs/server',              (root) => renderPlannedPage(root, { feature: 'Log server settings', endpoint: 'GET /api/v1/logs/server' }));
+register('security/ssl',             sslPage.renderSslPage);
+register('security/antispam',        antivirusPage.renderAntivirusPage);
+register('security/spam',            acl.renderACLPage);  // global spam control maps to ACL page in this build
+register('security/routing',         acceptancePage.renderAcceptancePage);
+register('security/rules',           incomingRulesPage.renderIncomingRulesPage);
+register('security/quarantine',      quarantine.renderQuarantinePage);
+register('admin/groups',             adminGroups.renderAdminGroupsPage);
+register('admin/users',              auditLog.renderAuditLogPage);
+register('admin/limits',             accountClasses.renderAccountClassesPage);
+register('domains/groups',           domainGroups.renderDomainGroupsPage);
+register('domains/lists',            mailingLists.renderMailingListsPage);
+register('domains/public',           publicFolders.renderPublicFoldersPage);
+register('accounts/classes',         accountClasses.renderAccountClassesPage);
+register('backups/history',          backups.renderBackupsPage);  // re-use real backups page
+register('backups/ftp',              ftpBackupPage.renderFtpBackupPage);
+register('backups/fs',               fsAccessPage.renderFsAccessPage);
+register('migration',                migration.renderMigrationPage);
+register('migration/sources',        migrationSourcesPage.renderMigrationSourcesPage);
+register('clustering',               (root) => clustering.renderClusteringPage(root, { title: 'Clustering setup' }));
+register('clustering/imap',          (root) => clustering.renderClusteringPage(root, { title: 'IMAP proxy' }));
+register('clustering/pop3',          (root) => clustering.renderClusteringPage(root, { title: 'POP3 proxy' }));
+register('clustering/webmail',       (root) => clustering.renderClusteringPage(root, { title: 'WebMail / JMAP proxy' }));
+register('logs/rules',               logRules.renderLogRulesPage);
+register('logs/files',               logs.renderLogsPage);  // re-use logs page
+register('logs/server',              logRules.renderLogRulesPage);  // log server destination = log rule with destination field
+
+// Settings split — 10 protocol sub-pages. Each route
+// reads its protocol id from the URL segment and queries
+// the matching backend sub-page.
+function protocolRouteHandler(root) {
+  const route = (location.hash || '').replace(/^#\//, '').replace(/^settings\/protocol\//, '').replace(/\?.*$/, '');
+  return settingsProtocolPage.renderSettingsProtocolPage(root, route || 'smtp_recv');
+}
+register('settings/protocol/smtp_recv', protocolRouteHandler);
+register('settings/protocol/smtp_tx',   protocolRouteHandler);
+register('settings/protocol/imap',      protocolRouteHandler);
+register('settings/protocol/pop3',      protocolRouteHandler);
+register('settings/protocol/webmail',   protocolRouteHandler);
+register('settings/protocol/webadmin',  protocolRouteHandler);
+register('settings/protocol/dns',       protocolRouteHandler);
+register('settings/protocol/remote_pop',protocolRouteHandler);
+register('settings/protocol/jmap',      protocolRouteHandler);
+register('settings/protocol/mobility',  protocolRouteHandler);
 
 setNotFound((root, route) => {
   renderPlannedPage(root, { feature: route, endpoint: '' });

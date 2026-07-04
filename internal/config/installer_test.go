@@ -153,7 +153,12 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"DNS required (set these with your DNS provider)",
 		"A admin.${domain} -> ${server_ip}",
 		"A mail.${domain} -> ${server_ip}",
-		"release/scripts/setup-https.sh ${domain} ${server_ip}",
+		// BLOCKER 6 fix: setup-https.sh is now installed
+		// permanently to /usr/share/orvix/scripts/ so the
+		// completion message references the permanent path
+		// rather than $ORVIX_SOURCE_DIR/release/scripts/... (a
+		// /tmp path that is gone after reboot).
+		"/usr/share/orvix/scripts/setup-https.sh ${domain} ${server_ip}",
 		// Credential file UX.
 		"Admin login details saved to",
 		"write_admin_login_file",
@@ -4420,6 +4425,7 @@ caddy() { return 0; }
 systemctl() { return 0; }
 dig() { echo "65.75.203.74"; }
 getent() { echo "65.75.203.74"; }
+detect_public_ipv4_from_host_ips() { return 1; }
 
 # Override fail() so the harness captures the message.
 fail() {
@@ -4746,6 +4752,46 @@ func TestInstallerPublicEntrypointParses(t *testing.T) {
 	}
 }
 
+// TestInstallerPublicEntrypointDefaultURLIsGitHub verifies that the
+// default bundle URL is GitHub Releases (not releases.orvix.email).
+func TestInstallerPublicEntrypointDefaultURLIsGitHub(t *testing.T) {
+	root := repoRoot(t)
+	script := mustRead(t, filepath.Join(root, "release", "install-public.sh"))
+
+	// No hardcoded releases.orvix.email in executable code.
+	for _, line := range strings.Split(script, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(trimmed, "releases.orvix.email") {
+			t.Errorf("install-public.sh hardcodes releases.orvix.email in executable code: %s", trimmed)
+		}
+	}
+
+	// Default ORVIX_RELEASES_BASE must point to GitHub Releases.
+	if !strings.Contains(script, `ORVIX_RELEASES_BASE="${ORVIX_RELEASES_BASE:-https://github.com/reachfm/orvix/releases/`) {
+		t.Error("install-public.sh default ORVIX_RELEASES_BASE must point to GitHub Releases (reachfm/orvix)")
+	}
+
+	// Must define resolve_bundle_url for URL resolution.
+	if !strings.Contains(script, "resolve_bundle_url()") {
+		t.Error("install-public.sh must define resolve_bundle_url")
+	}
+
+	// Must define try_download_sha256 for auto-verification.
+	if !strings.Contains(script, "try_download_sha256()") {
+		t.Error("install-public.sh must define try_download_sha256 for auto-verification")
+	}
+
+	// Must NOT require --bundle-url or env vars for the default path.
+	if strings.Contains(script, `ORVIX_BUNDLE_URL=""`) {
+		if !strings.Contains(script, `ORVIX_BUNDLE_URL="${ORVIX_BUNDLE_URL:-}"`) {
+			t.Error("install-public.sh must allow empty ORVIX_BUNDLE_URL (default to GitHub)")
+		}
+	}
+}
+
 // TestInstallerNonInteractiveEnvMode verifies that the public entrypoint
 // requires ORVIX_DOMAIN and ORVIX_PUBLIC_IPV4 in non-interactive mode.
 func TestInstallerNonInteractiveEnvMode(t *testing.T) {
@@ -4800,11 +4846,19 @@ func TestInstallerNonInteractiveEnvMode(t *testing.T) {
 			harness := strings.Replace(script, `exec bash "$installer_script"`, `echo "WOULD_RUN_INSTALLER"; exit 0`, 1)
 			// Override ORVIX_SOURCE_DIR to point at our fake tree.
 			harness = strings.Replace(harness, `ORVIX_SOURCE_DIR="${ORVIX_SOURCE_DIR:-$(pwd)}"`, fmt.Sprintf(`ORVIX_SOURCE_DIR=%q`, dir), 1)
+			// Short-circuit after non-interactive env validation.
+			// The harness replaces the entire 5-line validation block
+			// with a version that exits 0 when both env vars are set.
+			harness = strings.Replace(harness,
+				"    # Non-interactive mode requires domain + IP\n    if [ -n \"$non_interactive\" ]; then\n        if [ -z \"$domain\" ]; then fail \"ORVIX_DOMAIN is required in non-interactive mode\"; fi\n        if [ -z \"$public_ipv4\" ]; then fail \"ORVIX_PUBLIC_IPV4 is required in non-interactive mode\"; fi\n    fi",
+				"    if [ -n \"$non_interactive\" ]; then\n        if [ -z \"$domain\" ]; then fail \"ORVIX_DOMAIN is required in non-interactive mode\"; fi\n        if [ -z \"$public_ipv4\" ]; then fail \"ORVIX_PUBLIC_IPV4 is required in non-interactive mode\"; fi\n        echo VALIDATION_OK; exit 0\n    fi",
+				1)
 			if err := os.WriteFile(harnessPath, []byte(harness), 0o755); err != nil {
 				t.Fatalf("write harness: %v", err)
 			}
 			cmd := exec.Command(bashCommand(t), harnessPath)
 			cmd.Dir = dir
+			cmd.Env = os.Environ()
 			for k, v := range tc.env {
 				cmd.Env = append(cmd.Env, k+"="+v)
 				t.Setenv(k, v)

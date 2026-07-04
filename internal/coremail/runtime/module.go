@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/orvix/orvix/internal/antivirus"
 	"github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/coremail"
@@ -27,6 +28,7 @@ import (
 	"github.com/orvix/orvix/internal/observability"
 	"github.com/orvix/orvix/internal/policy"
 	orvixruntime "github.com/orvix/orvix/internal/runtime"
+	"github.com/orvix/orvix/internal/ruler"
 	"github.com/orvix/orvix/internal/trust"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -47,6 +49,17 @@ type Module struct {
 	auditStore       *audit.Store
 	licenseSvc       *licensing.Service
 	authorityService *licensingauthority.AuthorityService
+	// avEngine is the wired antivirus scanner. Non-nil
+	// means the SMTP receiver is calling it on every
+	// accepted message — the admin endpoint reports
+	// runtime_enforced via avEngine.RuntimeEnforced().
+	avEngine *antivirus.Engine
+	// rulerEngine owns both acceptance and incoming
+	// message rule engines; the SMTP command handler
+	// and the SMTP receiver each call into it via the
+	// smtp.RuleEvaluator interface. Non-nil here means
+	// the rule tables are LIVE (not just stored).
+	rulerEngine *ruler.Engine
 
 	smtpServer      *smtp.Server
 	submissionServer *smtp.Server
@@ -250,6 +263,66 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 		Logger:      m.logger,
 	})
 
+	// ── Antivirus engine ───────────────────────────────────
+	// Wire the antivirus engine unconditionally so the
+	// runtime exposes the same shape as the admin
+	// expects. cfg.ClamAV.Enabled == false makes the
+	// engine accept-and-audit; cfg.ClamAV.Enabled == true
+	// makes the engine dial the daemon. The runtime
+	// ONLY flips MarkEnforced() when the wiring is
+	// real (calls exist in this file), so the admin
+	// status endpoint's runtime_enforced flag stays
+	// honest even if the operator disables the
+	// scanner at runtime via SetPolicy.
+	policy := antivirus.Policy{
+		OnInfected:           "reject",
+		OnScannerUnavailable: "fail_closed",
+		TimeoutMS:            30000,
+	}
+	switch strings.ToLower(cfg.ClamAV.Mode) {
+	case "quarantine":
+		policy.OnInfected = "quarantine"
+	case "tag":
+		policy.OnInfected = "tag"
+	case "fail_open":
+		policy.OnScannerUnavailable = "fail_open"
+	}
+	avEngine, avErr := antivirus.New(antivirus.Config{
+		Enabled: cfg.ClamAV.Enabled,
+		Host:    cfg.ClamAV.Host,
+		Port:    cfg.ClamAV.Port,
+	}, policy, m.logger, m.obs, m.auditStore)
+	if avErr != nil {
+		m.logger.Warn("antivirus: invalid policy, engine not wired",
+			zap.Error(avErr))
+	} else {
+		m.avEngine = avEngine
+		receiver.AntivirusEngine = avEngine
+		receiver.DB = sqlDB
+		avEngine.MarkEnforced()
+		if cfg.ClamAV.Enabled {
+			m.logger.Info("antivirus engine wired",
+				zap.String("host", cfg.ClamAV.Host),
+				zap.Int("port", cfg.ClamAV.Port),
+				zap.String("on_infected", policy.OnInfected),
+				zap.String("on_scanner_unavailable", policy.OnScannerUnavailable))
+		} else {
+			m.logger.Info("antivirus engine wired but disabled (cfg.ClamAV.Enabled=false) — runtime accepts every message")
+		}
+	}
+
+	// ── Acceptance & incoming rule engines ────────────────
+	// The runtime installs a single internal/ruler.Engine
+	// that exposes both evaluators through the
+	// smtp.RuleEvaluator interface. Each evaluator is
+	// marked enforced ONLY when wired into the receive
+	// path, which is unconditional here.
+	rulerEngine := ruler.New(sqlDB, m.logger, m.obs)
+	m.rulerEngine = rulerEngine
+	rulerEngine.MarkEnforced()
+	receiver.AcceptanceEngine = rulerEngine
+	receiver.IncomingRuleEngine = rulerEngine
+
 	// ── Inbound SMTP (port 25, MX) ─────────────────────────
 	inboundCfg := smtp.InboundConfig()
 	inboundCfg.Hostname = cfg.CoreMail.Hostname
@@ -257,6 +330,7 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	inboundCfg.TLSKeyFile = cfg.CoreMail.TLSKeyFile
 	inboundCfg.SpamMode = smtpCfg.SpamMode
 	inboundHandler := smtp.NewCommandHandler(inboundCfg, smtpAuth, smtp.NewSession("runtime-init", tlsCfg, inboundCfg))
+	inboundHandler.SetAcceptanceEngine(m.rulerEngine)
 	m.smtpServer = smtp.NewServer(inboundCfg, inboundHandler, receiver)
 	m.smtpServer.TLSConfig = tlsCfg
 	m.smtpServer.RecipientValidator = func(ctx context.Context, address string) (bool, error) {
@@ -294,6 +368,7 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 			subCfg.TLSCertFile = cfg.CoreMail.TLSCertFile
 			subCfg.TLSKeyFile = cfg.CoreMail.TLSKeyFile
 			subHandler := smtp.NewCommandHandler(subCfg, smtpAuth, smtp.NewSession("runtime-init", tlsCfg, subCfg))
+			subHandler.SetAcceptanceEngine(m.rulerEngine)
 			m.submissionServer = smtp.NewServer(subCfg, subHandler, receiver)
 			m.submissionServer.TLSConfig = tlsCfg
 			m.submissionServer.SetLocalDomainChecker(identity.IsLocalDomain)
@@ -699,6 +774,29 @@ func (m *Module) MailStore() *storage.MailStore {
 // the runtime was not booted.
 func (m *Module) QueueEngine() *queue.QueueEngine {
 	return m.queue
+}
+
+// AntivirusEngine returns the antivirus engine wired into
+// the SMTP receive path, or nil when the runtime has not
+// initialized one. The admin handler uses this to read
+// the engine's own snapshot for runtime_enforced, last
+// error, and per-policy counters.
+func (m *Module) AntivirusEngine() *antivirus.Engine {
+	return m.avEngine
+}
+
+// RuleEngine returns the bundled acceptance + incoming
+// rule engine. The admin endpoints use this to surface
+// runtime_enforced status without re-reading the rule
+// tables.
+func (m *Module) RuleEngine() *ruler.Engine {
+	return m.rulerEngine
+}
+
+// Observability returns the runtime observability pipeline
+// so the admin handler can surface per-policy counters.
+func (m *Module) Observability() *observability.Observability {
+	return m.obs
 }
 
 // PushNotifier returns the Web Push (RFC 8030) dispatcher

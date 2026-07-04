@@ -273,6 +273,20 @@ export function closeOverlay() { closeActiveOverlay(); }
 // dashboards that imported `closeModal` still work.
 export function closeModal() { closeActiveOverlay(); }
 
+// modal is an alias for openModal kept for the same reason.
+// Thirteen page modules import `modal` directly (matching the
+// legacy monolithic naming) and call `modal({ ... })`; the
+// static-analysis smoke (scripts/smoke-admin-import-graph.mjs)
+// asserts every imported name is exported by its target, and
+// the previous code only exposed `openModal`. Without this
+// alias the affected pages (acceptance / ssl / ftp-backup /
+// fs-access / migration-sources / incoming-rules / log-rules /
+// acl / admin-groups / public-folders / mailing-lists /
+// domain-groups / account-classes) failed their dynamic
+// import the first time the operator opened them, leaving the
+// page-root empty even though the route registered.
+export const modal = openModal;
+
 // closeDrawer is the public drawer-close alias. The static-
 // analysis test (TestAdminHasDrawerModalToastPrimitives) asserts
 // the literal "function closeDrawer" appears in the bundle, so

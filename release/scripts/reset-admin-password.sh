@@ -282,7 +282,7 @@ password = None
 
 if not hash_value:
     die("crypt() returned no result")
-if not hash_value.startswith(("$2a$", "$2b$", "$2y$")):
+if not hash_value.startswith(("$2a$", "$2b$", "$2y$", "$5$", "$6$", "$y$")):
     die("unexpected hash format from crypt(3)")
 
 # SQLite update with parameter binding. The WHERE clause

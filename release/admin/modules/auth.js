@@ -139,4 +139,12 @@ export async function hasValidSession() {
   }
 }
 
-export { logout };
+// login is re-exported so the bootstrapper (app.js) can import it
+// for completeness even though the form submit handler calls
+// login() via the closure inside renderLogin(). Without this
+// re-export, app.js's `import { ..., login } from './modules/auth.js'`
+// throws a SyntaxError at module evaluation time and the login
+// form never hydrates — the previous CTO review caught the static
+// HTML / no-fields symptom as a silent module-evaluation failure.
+// (See scripts/smoke-admin-import-graph.mjs for the regression test.)
+export { login, logout };

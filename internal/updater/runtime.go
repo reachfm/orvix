@@ -784,12 +784,9 @@ func (s *RuntimeService) helperResultQuery() (result string, execMainStatus int,
 	return result, execMainStatus, raw
 }
 
-// isHelperUnitInstalled reports whether the systemd oneshot
-// unit is installed on the local machine. The check is
-// best-effort: it looks for the canonical unit file in the
-// two standard locations. If neither exists, the preflight
-// gate fails with the safe "helper unit not installed" message.
-func isHelperUnitInstalled() bool {
+// helperUnitInstalled is the function used by isHelperUnitInstalled.
+// Tests can replace it via SetHelperUnitCheck.
+var helperUnitInstalled = func() bool {
 	candidates := []string{
 		"/etc/systemd/system/" + DefaultUpdateHelperUnit,
 		"/lib/systemd/system/" + DefaultUpdateHelperUnit,
@@ -801,6 +798,24 @@ func isHelperUnitInstalled() bool {
 		}
 	}
 	return false
+}
+
+// isHelperUnitInstalled reports whether the systemd oneshot
+// unit is installed on the local machine.
+func isHelperUnitInstalled() bool {
+	return helperUnitInstalled()
+}
+
+// SetHelperUnitCheck replaces the helper unit installation check
+// for testing and returns a restore function. Must not be called
+// from production code. Usage:
+//
+//	restore := updater.SetHelperUnitCheck(func() bool { return false })
+//	defer restore()
+func SetHelperUnitCheck(fn func() bool) (restore func()) {
+	old := helperUnitInstalled
+	helperUnitInstalled = fn
+	return func() { helperUnitInstalled = old }
 }
 
 // runViaSystemd triggers the systemd oneshot helper and waits
