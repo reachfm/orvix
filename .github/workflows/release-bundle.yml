@@ -28,9 +28,22 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Initialize release result
+        run: |
+          {
+            echo "FINAL_VERDICT=NEEDS FIX"
+            echo "FAILED_STEP=not completed"
+            echo "ASSETS_UPLOADED=NO"
+            echo "REMOTE_URLS_VERIFIED=NO"
+            echo "SHA_MATCH=NO"
+            echo "LOCAL_SHA="
+            echo "REMOTE_SHA="
+          } >> "$GITHUB_ENV"
+
       - name: Install system dependencies
         run: |
           set -euo pipefail
+          trap 'echo "FAILED_STEP=Install system dependencies" >> "$GITHUB_ENV"' ERR
           sudo apt-get update
           sudo apt-get install -y \
             ca-certificates \
@@ -58,6 +71,7 @@ jobs:
       - name: Verify scripts and smokes
         run: |
           set -euo pipefail
+          trap 'echo "FAILED_STEP=Verify scripts and smokes" >> "$GITHUB_ENV"' ERR
           bash -n release/install.sh
           bash -n release/install-public.sh
           bash -n release/scripts/*.sh
@@ -69,6 +83,7 @@ jobs:
       - name: Run Go verification
         run: |
           set -euo pipefail
+          trap 'echo "FAILED_STEP=Run Go verification" >> "$GITHUB_ENV"' ERR
           go test ./internal/config -count=1
           go test ./... -count=1 -timeout 900s -p 4
           go vet ./...
@@ -77,29 +92,103 @@ jobs:
       - name: Build release bundle
         run: |
           set -euo pipefail
+          trap 'echo "FAILED_STEP=Build release bundle" >> "$GITHUB_ENV"' ERR
           rm -rf dist
           bash release/scripts/build-release-bundle.sh --channel "$CHANNEL"
           test -f dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz
           test -f dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sha256
           sha256sum -c dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sha256
+          LOCAL_SHA="$(awk '{print $1}' dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sha256)"
+          echo "LOCAL_SHA=$LOCAL_SHA"
+          echo "LOCAL_SHA=$LOCAL_SHA" >> "$GITHUB_ENV"
 
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          trap 'echo "FAILED_STEP=Upload release assets" >> "$GITHUB_ENV"' ERR
           gh release upload "$TAG" \
             dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz \
             dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sha256 \
             --clobber
+          echo "ASSETS_UPLOADED=YES"
+          echo "ASSETS_UPLOADED=YES" >> "$GITHUB_ENV"
 
       - name: Verify remote release assets
         run: |
           set -euo pipefail
-          LOCAL_SHA="$(awk '{print $1}' dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sha256)"
+          trap 'echo "FAILED_STEP=Verify remote release assets" >> "$GITHUB_ENV"' ERR
+          LOCAL_SHA="${LOCAL_SHA:-$(awk '{print $1}' dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sha256)}"
           REMOTE_SHA="$(curl -fsSL https://github.com/reachfm/orvix/releases/latest/download/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sha256 | awk '{print $1}')"
           echo "LOCAL_SHA=$LOCAL_SHA"
           echo "REMOTE_SHA=$REMOTE_SHA"
+          echo "REMOTE_SHA=$REMOTE_SHA" >> "$GITHUB_ENV"
           test "$REMOTE_SHA" = "$LOCAL_SHA"
+          echo "SHA_MATCH=YES"
+          echo "SHA_MATCH=YES" >> "$GITHUB_ENV"
           curl -fIL https://github.com/reachfm/orvix/releases/latest/download/orvix-enterprise-mail-stable-linux-amd64.tar.gz
           curl -fIL https://github.com/reachfm/orvix/releases/latest/download/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sha256
+          echo "REMOTE_URLS_VERIFIED=YES"
+          echo "REMOTE_URLS_VERIFIED=YES" >> "$GITHUB_ENV"
+          echo "FINAL_VERDICT=PASS"
+          echo "FINAL_VERDICT=PASS" >> "$GITHUB_ENV"
+          echo "FAILED_STEP="
+          echo "FAILED_STEP=" >> "$GITHUB_ENV"
+          echo "ASSETS_UPLOADED=YES"
+          echo "REMOTE_URLS_VERIFIED=YES"
+          echo "FINAL_VERDICT=PASS"
+
+      - name: Write operator summary
+        if: always()
+        run: |
+          set -euo pipefail
+          VERDICT="${FINAL_VERDICT:-NEEDS FIX}"
+          FAILED="${FAILED_STEP:-unknown}"
+          {
+            echo "# Orvix Release Bundle Result"
+            echo
+            echo "Verdict: $VERDICT"
+            if [ "$VERDICT" != "PASS" ]; then
+              echo
+              echo "Failed step: $FAILED"
+            fi
+            echo
+            echo "Tag: $TAG"
+            echo "Channel: $CHANNEL"
+            echo "Commit: $GITHUB_SHA"
+            echo
+            echo "Assets:"
+            echo "- orvix-enterprise-mail-stable-linux-amd64.tar.gz"
+            echo "- orvix-enterprise-mail-stable-linux-amd64.tar.gz.sha256"
+            echo
+            echo "LOCAL_SHA:"
+            echo "${LOCAL_SHA:-}"
+            echo
+            echo "REMOTE_SHA:"
+            echo "${REMOTE_SHA:-}"
+            echo
+            echo "SHA_MATCH:"
+            echo "${SHA_MATCH:-NO}"
+            echo
+            echo "ASSETS_UPLOADED:"
+            echo "${ASSETS_UPLOADED:-NO}"
+            echo
+            echo "REMOTE_URLS_VERIFIED:"
+            echo "${REMOTE_URLS_VERIFIED:-NO}"
+            echo
+            echo "Customer install command:"
+            echo "curl -fsSL https://raw.githubusercontent.com/reachfm/orvix/main/release/install-public.sh | sudo bash"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "LOCAL_SHA=${LOCAL_SHA:-}"
+          echo "REMOTE_SHA=${REMOTE_SHA:-}"
+          echo "SHA_MATCH=${SHA_MATCH:-NO}"
+          echo "ASSETS_UPLOADED=${ASSETS_UPLOADED:-NO}"
+          echo "REMOTE_URLS_VERIFIED=${REMOTE_URLS_VERIFIED:-NO}"
+          echo "FINAL_VERDICT=$VERDICT"
+
+          if [ "$VERDICT" != "PASS" ]; then
+            echo "Release bundle workflow failed at: $FAILED" >&2
+            exit 1
+          fi
