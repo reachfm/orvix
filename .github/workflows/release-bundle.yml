@@ -50,36 +50,6 @@ jobs:
             echo "REMOTE_SHA="
           } >> "$GITHUB_ENV"
 
-      - name: Verify system dependencies
-        run: |
-          set -euo pipefail
-          trap 'echo "FAILED_STEP=Verify system dependencies" >> "$GITHUB_ENV"' ERR
-          required_tools=(
-            curl
-            file
-            git
-            gzip
-            jq
-            node
-            openssl
-            python3
-            sha256sum
-            tar
-          )
-          for tool in "${required_tools[@]}"; do
-            if ! command -v "$tool" >/dev/null 2>&1; then
-              {
-                echo "## Failed step: Verify system dependencies"
-                echo
-                echo "Missing required tool: $tool"
-              } >> "$GITHUB_STEP_SUMMARY"
-              exit 1
-            fi
-            echo "$tool=$(command -v "$tool")"
-          done
-          node --version
-          python3 --version
-
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
