@@ -374,6 +374,10 @@ for s in release/scripts/*.sh; do
     [ -f "$s" ] || continue
     cp "$s" "$BUNDLE_ROOT/release/scripts/$(basename "$s")"
 done
+for s in release/scripts/*.mjs; do
+    [ -f "$s" ] || continue
+    cp "$s" "$BUNDLE_ROOT/release/scripts/$(basename "$s")"
+done
 for s in release/scripts/tests/*.sh; do
     [ -f "$s" ] || continue
     cp "$s" "$BUNDLE_ROOT/release/scripts/tests/$(basename "$s")"

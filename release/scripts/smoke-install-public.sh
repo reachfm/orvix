@@ -115,6 +115,9 @@ check "validate_bundle_layout requires webmail assets" \
 check "validate_bundle_layout requires systemd + sudoers" \
     "sed -n '/^validate_bundle_layout/,/^}/p' release/install-public.sh | grep -qE 'orvix\\.service|orvix-update\\.service|orvix-update$'"
 
+check "validate_bundle_layout requires admin smoke modules" \
+    "sed -n '/^validate_bundle_layout/,/^}/p' release/install-public.sh | grep -q 'release/scripts/smoke-admin-import-graph.mjs'"
+
 # 5. install-public must refuse to delegate to install.sh when the
 #    bundle is incomplete.
 check "install-public.sh refuses a half-complete bundle" \
@@ -198,12 +201,22 @@ BIN_EOF
         release/systemd/orvix.service release/systemd/orvix-update.service \
         release/sudoers.d/orvix-update \
         release/scripts/smoke-admin-js.sh release/scripts/smoke-admin-ui.sh \
+        release/scripts/smoke-admin-browser.sh \
+        release/scripts/smoke-admin-import-graph.mjs \
+        release/scripts/smoke-admin-runtime.mjs \
+        release/scripts/smoke-install-bundle.sh \
+        release/scripts/smoke-install-public.sh \
         release/scripts/smoke-upgrade.sh release/scripts/orvix-doctor.sh \
         release/scripts/lib-asset-propagate.sh release/scripts/apply-runtime-update.sh \
         release/scripts/generate-vapid-keys.sh release/scripts/reset-admin-password.sh \
         release/scripts/setup-https.sh release/scripts/setup-smtp-tls.sh \
+        release/scripts/check-smtp-tls.sh \
+        release/scripts/publish-github-release.sh \
+        release/scripts/verify-github-release-assets.sh \
+        release/scripts/verify-fresh-vps-one-command.sh \
         release/scripts/healthcheck.sh release/scripts/diagnostics.sh \
         release/admin/index.html release/admin/app.js release/admin/styles.css \
+        release/admin/modules/auth.js release/admin/modules/components.js \
         release/webmail/index.html release/webmail/sw.js \
         release/webmail/assets/auth-gate.js release/webmail/assets/webmail.js; do
         mkdir -p "$BUNDLE_STAGING/$(dirname "$rel")"

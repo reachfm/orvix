@@ -175,6 +175,23 @@ func TestPublicInstallerMatchesReleaseBundleLayout(t *testing.T) {
 	}
 }
 
+func TestReleaseBundleCopiesAdminMjsSmokeScripts(t *testing.T) {
+	root := repoRoot(t)
+	bundleBuilder := mustRead(t, filepath.Join(root, "release", "scripts", "build-release-bundle.sh"))
+
+	for _, required := range []string{
+		"release/scripts/smoke-admin-import-graph.mjs",
+		"release/scripts/smoke-admin-runtime.mjs",
+	} {
+		if !strings.Contains(bundleBuilder, required) {
+			t.Fatalf("build-release-bundle.sh must require %s in the sealed bundle", required)
+		}
+	}
+	if !strings.Contains(bundleBuilder, "release/scripts/*.mjs") {
+		t.Fatal("build-release-bundle.sh must copy release/scripts/*.mjs into the bundle")
+	}
+}
+
 func runInstallPromptHarness(t *testing.T, mode string, env map[string]string) (int, string) {
 	t.Helper()
 	root := repoRoot(t)
