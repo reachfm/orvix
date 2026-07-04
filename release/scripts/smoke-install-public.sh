@@ -240,12 +240,21 @@ BIN_EOF
     cp "$FIX" "$SRV/orvix-enterprise-mail-stable-linux-amd64.tar.gz"
     sha="$(sha256sum "$FIX" | awk '{print $1}')"
     echo "$sha" > "$SRV/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sha256"
+    HTTP_PORT="$(
+        python3 - <<'PY'
+import socket
+
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+    s.bind(("127.0.0.1", 0))
+    print(s.getsockname()[1])
+PY
+    )"
     cd "$SRV"
-    python3 -m http.server 18733 >"$WORK/http.log" 2>&1 &
+    python3 -m http.server "$HTTP_PORT" --bind 127.0.0.1 >"$WORK/http.log" 2>&1 &
     HTTP_PID=$!
     cd "$REPO_ROOT"
     sleep 0.5
-    info "synthetic release server up on :18733 (pid $HTTP_PID)"
+    info "synthetic release server up on 127.0.0.1:$HTTP_PORT (pid $HTTP_PID)"
 
     cleanup() {
         if [ -n "${HTTP_PID:-}" ] && kill -0 "$HTTP_PID" 2>/dev/null; then
@@ -268,7 +277,7 @@ BIN_EOF
     # ── 1. Negative: incomplete bundle must fail closed ─────────
     info "negative test: incomplete bundle must fail with non-zero exit"
     set +e
-    ORVIX_BUNDLE_URL="http://127.0.0.1:18733/incomplete.tar.gz" \
+    ORVIX_BUNDLE_URL="http://127.0.0.1:${HTTP_PORT}/incomplete.tar.gz" \
     ORVIX_NON_INTERACTIVE=1 \
     ORVIX_DOMAIN="example.com" \
     ORVIX_PUBLIC_IPV4="65.75.203.74" \
@@ -285,7 +294,7 @@ BIN_EOF
     # ── 2. Positive: complete bundle must reach install.sh ──
     info "positive test: complete bundle must reach install.sh delegation"
     set +e
-    ORVIX_BUNDLE_URL="http://127.0.0.1:18733/orvix-enterprise-mail-stable-linux-amd64.tar.gz" \
+    ORVIX_BUNDLE_URL="http://127.0.0.1:${HTTP_PORT}/orvix-enterprise-mail-stable-linux-amd64.tar.gz" \
     ORVIX_BUNDLE_SHA256="$sha" \
     ORVIX_NON_INTERACTIVE=1 \
     ORVIX_DOMAIN="example.com" \

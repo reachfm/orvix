@@ -60,13 +60,29 @@ jobs:
         run: |
           set -euo pipefail
           trap 'echo "FAILED_STEP=Verify scripts and smokes" >> "$GITHUB_ENV"' ERR
+          run_smoke() {
+            local name="$1"
+            shift
+            local log
+            log="$(mktemp)"
+            if ! "$@" 2>&1 | tee "$log"; then
+              {
+                echo "## Failed smoke: $name"
+                echo
+                echo '```text'
+                tail -n 160 "$log"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+          }
           bash -n release/install.sh
           bash -n release/install-public.sh
           bash -n release/scripts/*.sh
-          bash release/scripts/smoke-admin-browser.sh
-          bash release/scripts/smoke-admin-js.sh
-          bash release/scripts/smoke-admin-ui.sh
-          bash release/scripts/smoke-install-public.sh --live
+          run_smoke smoke-admin-browser bash release/scripts/smoke-admin-browser.sh
+          run_smoke smoke-admin-js bash release/scripts/smoke-admin-js.sh
+          run_smoke smoke-admin-ui bash release/scripts/smoke-admin-ui.sh
+          run_smoke smoke-install-public bash release/scripts/smoke-install-public.sh --live
 
       - name: Go test internal/config
         run: |
