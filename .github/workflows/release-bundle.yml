@@ -8,9 +8,19 @@ on:
         required: true
         default: "v1.0.3-rc4"
       channel:
-        description: "Release channel embedded in the bundle"
+        description: "Release channel"
         required: true
         default: "stable"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/release-bundle.yml"
+      - "release/**"
+      - "internal/**"
+      - "cmd/**"
+      - "go.mod"
+      - "go.sum"
 
 permissions:
   contents: write
@@ -20,8 +30,8 @@ jobs:
     name: Build Linux bundle and upload release assets
     runs-on: ubuntu-latest
     env:
-      TAG: ${{ inputs.tag }}
-      CHANNEL: ${{ inputs.channel }}
+      TAG: ${{ github.event.inputs.tag || 'v1.0.3-rc4' }}
+      CHANNEL: ${{ github.event.inputs.channel || 'stable' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
