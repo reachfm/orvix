@@ -90,14 +90,69 @@ jobs:
           bash release/scripts/smoke-admin-ui.sh
           bash release/scripts/smoke-install-public.sh --live
 
-      - name: Run Go verification
+      - name: Go test internal/config
         run: |
           set -euo pipefail
-          trap 'echo "FAILED_STEP=Run Go verification" >> "$GITHUB_ENV"' ERR
-          go test ./internal/config -count=1
-          go test ./... -count=1 -timeout 900s -p 4
-          go vet ./...
-          go build ./...
+          trap 'echo "FAILED_STEP=Go test internal/config" >> "$GITHUB_ENV"' ERR
+          log="$(mktemp)"
+          if ! go test ./internal/config -count=1 2>&1 | tee "$log"; then
+            {
+              echo "## Failed step: Go test internal/config"
+              echo
+              echo '```text'
+              tail -n 120 "$log"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Go test all packages
+        run: |
+          set -euo pipefail
+          trap 'echo "FAILED_STEP=Go test all packages" >> "$GITHUB_ENV"' ERR
+          log="$(mktemp)"
+          if ! go test ./... -count=1 -timeout 900s -p 4 2>&1 | tee "$log"; then
+            {
+              echo "## Failed step: Go test all packages"
+              echo
+              echo '```text'
+              tail -n 160 "$log"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Go vet
+        run: |
+          set -euo pipefail
+          trap 'echo "FAILED_STEP=Go vet" >> "$GITHUB_ENV"' ERR
+          log="$(mktemp)"
+          if ! go vet ./... 2>&1 | tee "$log"; then
+            {
+              echo "## Failed step: Go vet"
+              echo
+              echo '```text'
+              tail -n 120 "$log"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Go build
+        run: |
+          set -euo pipefail
+          trap 'echo "FAILED_STEP=Go build" >> "$GITHUB_ENV"' ERR
+          log="$(mktemp)"
+          if ! go build ./... 2>&1 | tee "$log"; then
+            {
+              echo "## Failed step: Go build"
+              echo
+              echo '```text'
+              tail -n 120 "$log"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
 
       - name: Build release bundle
         run: |
