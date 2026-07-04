@@ -137,6 +137,57 @@ sudo cp /tmp/orvix-v1.0.3-linux-amd64 /usr/local/bin/orvix
 sudo systemctl start orvix
 ```
 
+## Fresh VPS Acceptance Gate
+
+The release ships `release/scripts/verify-fresh-vps-one-command.sh`,
+a one-shot gate that proves every BLOCKER contract is intact on
+a clean Ubuntu 22.04 VPS. Run it after the install + setup-https
+to get a single PASS/NEEDS FIX verdict. See
+`docs/FRESH_VPS_VERIFY.md` for the full contract.
+
+```bash
+sudo ORVIX_PRIMARY_DOMAIN=orvix.email ORVIX_PUBLIC_IPV4=65.75.203.74 \
+    bash release/scripts/verify-fresh-vps-one-command.sh
+```
+
+## Release Pipeline
+
+For maintainers releasing a new tag:
+
+```bash
+# 1. Build + publish the bundle + sha256 sidecar + stable alias.
+ORVIX_RELEASE_TAG=v1.0.3-rc5 ORVIX_GH_TOKEN=... \
+    bash release/scripts/publish-github-release.sh
+
+# 2. Verify the published assets are reachable + match.
+bash release/scripts/verify-github-release-assets.sh \
+    --repo reachfm/orvix --tag v1.0.3-rc5 --channel stable
+```
+
+`publish-github-release.sh` itself re-runs
+`verify-github-release-assets.sh` at the end, so the release is
+not "done" until the verify gate is green.
+
+## Admin Login Form Hydration — Regression Guard
+
+The previous CTO review caught a "static HTML / no form" failure
+mode where `release/admin/index.html` rendered the
+`#login-view` wrapper but the actual `#login-email` /
+`#login-password` / `#login-button` controls were never mounted
+by `modules/auth.js renderLogin()`. Root cause was a missing
+re-export (`app.js` imported `login` from `auth.js`, but
+`auth.js` only re-exported `logout`) and a missing alias
+(thirteen page modules imported `modal` from `components.js`,
+but `components.js` only exposed `openModal`). Both names now
+exist; the regression is pinned by `release/scripts/smoke-admin-browser.sh`
+which proves (a) every named import in the admin module graph
+resolves to a real export, (b) every module dynamic-imports
+under stubbed browser globals without throwing, and (c) the
+shipped `index.html` carries only the static wrapper, not the
+form fields, so the JS contract is the only way the form can
+appear. The new `verify-fresh-vps-one-command.sh` re-asserts
+the same contract on a live VPS install.
+
 ## Known Limitations
 
 ### Stalwart Mail Server
