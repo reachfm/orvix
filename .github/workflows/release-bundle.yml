@@ -54,23 +54,51 @@ jobs:
         run: |
           set -euo pipefail
           trap 'echo "FAILED_STEP=Install system dependencies" >> "$GITHUB_ENV"' ERR
-          sudo apt-get update
-          sudo apt-get install -y \
-            ca-certificates \
-            curl \
-            file \
-            git \
-            gzip \
-            iproute2 \
-            jq \
-            libcap2-bin \
-            nodejs \
-            openssl \
-            python3 \
-            redis-server \
-            sqlite3 \
-            tar \
+          log="$(mktemp)"
+          if ! sudo apt-get update -o Acquire::Retries=3 2>&1 | tee "$log"; then
+            {
+              echo "## Failed step: Install system dependencies"
+              echo
+              echo "apt-get update failed."
+              echo
+              echo '```text'
+              tail -n 120 "$log"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          packages=(
+            ca-certificates
+            curl
+            file
+            git
+            gzip
+            iproute2
+            jq
+            libcap2-bin
+            nodejs
+            openssl
+            python3
+            redis-server
+            sqlite3
+            tar
             ufw
+          )
+          for pkg in "${packages[@]}"; do
+            echo "Installing dependency: $pkg"
+            if ! sudo apt-get install -y --no-install-recommends "$pkg" 2>&1 | tee "$log"; then
+              {
+                echo "## Failed step: Install system dependencies"
+                echo
+                echo "Package failed: $pkg"
+                echo
+                echo '```text'
+                tail -n 120 "$log"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+          done
 
       - name: Setup Go
         uses: actions/setup-go@v5
