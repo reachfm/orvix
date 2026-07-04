@@ -1,0 +1,105 @@
+name: Release Bundle
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "GitHub Release tag to update"
+        required: true
+        default: "v1.0.3-rc4"
+      channel:
+        description: "Release channel embedded in the bundle"
+        required: true
+        default: "stable"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-upload:
+    name: Build Linux bundle and upload release assets
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag }}
+      CHANNEL: ${{ inputs.channel }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install system dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            ca-certificates \
+            curl \
+            file \
+            git \
+            gzip \
+            iproute2 \
+            jq \
+            libcap2-bin \
+            nodejs \
+            openssl \
+            python3 \
+            redis-server \
+            sqlite3 \
+            tar \
+            ufw
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify scripts and smokes
+        run: |
+          set -euo pipefail
+          bash -n release/install.sh
+          bash -n release/install-public.sh
+          bash -n release/scripts/*.sh
+          bash release/scripts/smoke-admin-browser.sh
+          bash release/scripts/smoke-admin-js.sh
+          bash release/scripts/smoke-admin-ui.sh
+          bash release/scripts/smoke-install-public.sh --live
+
+      - name: Run Go verification
+        run: |
+          set -euo pipefail
+          go test ./internal/config -count=1
+          go test ./... -count=1 -timeout 900s -p 4
+          go vet ./...
+          go build ./...
+
+      - name: Build release bundle
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          bash release/scripts/build-release-bundle.sh --channel "$CHANNEL"
+          test -f dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz
+          test -f dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sha256
+          sha256sum -c dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sha256
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" \
+            dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz \
+            dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sha256 \
+            --clobber
+
+      - name: Verify remote release assets
+        run: |
+          set -euo pipefail
+          LOCAL_SHA="$(awk '{print $1}' dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sha256)"
+          REMOTE_SHA="$(curl -fsSL https://github.com/reachfm/orvix/releases/latest/download/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sha256 | awk '{print $1}')"
+          echo "LOCAL_SHA=$LOCAL_SHA"
+          echo "REMOTE_SHA=$REMOTE_SHA"
+          test "$REMOTE_SHA" = "$LOCAL_SHA"
+          curl -fIL https://github.com/reachfm/orvix/releases/latest/download/orvix-enterprise-mail-stable-linux-amd64.tar.gz
+          curl -fIL https://github.com/reachfm/orvix/releases/latest/download/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sha256
