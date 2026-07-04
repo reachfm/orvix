@@ -153,7 +153,12 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"DNS required (set these with your DNS provider)",
 		"A admin.${domain} -> ${server_ip}",
 		"A mail.${domain} -> ${server_ip}",
-		"release/scripts/setup-https.sh ${domain} ${server_ip}",
+		// BLOCKER 6 fix: setup-https.sh is now installed
+		// permanently to /usr/share/orvix/scripts/ so the
+		// completion message references the permanent path
+		// rather than $ORVIX_SOURCE_DIR/release/scripts/... (a
+		// /tmp path that is gone after reboot).
+		"/usr/share/orvix/scripts/setup-https.sh ${domain} ${server_ip}",
 		// Credential file UX.
 		"Admin login details saved to",
 		"write_admin_login_file",

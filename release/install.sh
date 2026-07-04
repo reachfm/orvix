@@ -258,7 +258,11 @@ BODY
   then open http://127.0.0.1:8080/admin in your local browser.
 
   To get production HTTPS URLs (REQUIRED before users can sign in):
-    sudo $ORVIX_SOURCE_DIR/release/scripts/setup-https.sh ${domain} ${server_ip}
+    sudo /usr/share/orvix/scripts/setup-https.sh ${domain} ${server_ip}
+
+  ${YELLOW}! setup-https.sh is installed permanently at the path above.${NC}
+  ${YELLOW}  \$ORVIX_SOURCE_DIR is the temp extraction directory of the${NC}
+  ${YELLOW}  curl-pipe install and is gone after the install completes.${NC}
 BODY
 	fi
 
@@ -1372,6 +1376,36 @@ install_release_scripts() {
     if [ -f "$ORVIX_SOURCE_DIR/release/scripts/apply-runtime-update.sh" ]; then
         run_quiet install -m 0755 -o root -g root "$ORVIX_SOURCE_DIR/release/scripts/apply-runtime-update.sh" /usr/share/orvix/scripts/apply-runtime-update.sh
     fi
+    # setup-https.sh is the operator-facing post-install command for
+    # Caddy reverse-proxy + Let's Encrypt. We install it to the
+    # permanent /usr/share/orvix/scripts path so the install
+    # completion message can print a stable, post-reboot-survivable
+    # command (BLOCKER 6: previous message pointed at
+    # /tmp/orvix-install.XXX/... which is gone after reboot).
+    if [ -f "$ORVIX_SOURCE_DIR/release/scripts/setup-https.sh" ]; then
+        run_quiet install -m 0755 -o root -g root "$ORVIX_SOURCE_DIR/release/scripts/setup-https.sh" /usr/share/orvix/scripts/setup-https.sh
+    fi
+    # setup-smtp-tls.sh + check-smtp-tls.sh are companion scripts
+    # for STARTTLS certificate provisioning. Install them so the
+    # permanent scripts directory ships every operator helper.
+    if [ -f "$ORVIX_SOURCE_DIR/release/scripts/setup-smtp-tls.sh" ]; then
+        run_quiet install -m 0755 -o root -g root "$ORVIX_SOURCE_DIR/release/scripts/setup-smtp-tls.sh" /usr/share/orvix/scripts/setup-smtp-tls.sh
+    fi
+    if [ -f "$ORVIX_SOURCE_DIR/release/scripts/check-smtp-tls.sh" ]; then
+        run_quiet install -m 0755 -o root -g root "$ORVIX_SOURCE_DIR/release/scripts/check-smtp-tls.sh" /usr/share/orvix/scripts/check-smtp-tls.sh
+    fi
+    if [ -f "$ORVIX_SOURCE_DIR/release/scripts/reset-admin-password.sh" ]; then
+        run_quiet install -m 0755 -o root -g root "$ORVIX_SOURCE_DIR/release/scripts/reset-admin-password.sh" /usr/share/orvix/scripts/reset-admin-password.sh
+    fi
+    if [ -f "$ORVIX_SOURCE_DIR/release/scripts/orvix-doctor.sh" ]; then
+        run_quiet install -m 0755 -o root -g root "$ORVIX_SOURCE_DIR/release/scripts/orvix-doctor.sh" /usr/share/orvix/scripts/orvix-doctor.sh
+    fi
+    if [ -f "$ORVIX_SOURCE_DIR/release/scripts/healthcheck.sh" ]; then
+        run_quiet install -m 0755 -o root -g root "$ORVIX_SOURCE_DIR/release/scripts/healthcheck.sh" /usr/share/orvix/scripts/healthcheck.sh
+    fi
+    if [ -f "$ORVIX_SOURCE_DIR/release/scripts/diagnostics.sh" ]; then
+        run_quiet install -m 0755 -o root -g root "$ORVIX_SOURCE_DIR/release/scripts/diagnostics.sh" /usr/share/orvix/scripts/diagnostics.sh
+    fi
     # The asset-propagation library is the single source of truth
     # for the install + upgrade asset copy contract. Install it
     # alongside the other scripts so upgrade.sh can source it from
@@ -1821,7 +1855,8 @@ write_admin_login_file() {
             printf '%s\n' "before DNS + HTTPS are ready, use an SSH tunnel:"
             printf '%s\n' "  ssh -L 8080:127.0.0.1:8080 -L 8081:127.0.0.1:8081 root@${server_ip}"
             printf '\n'
-            printf '%s\n' "To get production HTTPS URLs, run setup-https.sh."
+            printf '%s\n' "To get production HTTPS URLs, run:"
+            printf '%s\n' "  sudo /usr/share/orvix/scripts/setup-https.sh ${primary_domain} ${server_ip}"
         fi
         printf '\n'
         printf '%s\n' "Admin email: ${admin_email}"

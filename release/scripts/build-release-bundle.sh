@@ -156,6 +156,11 @@ REQUIRED_FILES=(
     release/scripts/healthcheck.sh
     release/scripts/smoke-admin-js.sh
     release/scripts/smoke-admin-ui.sh
+    release/scripts/smoke-admin-browser.sh
+    release/scripts/smoke-admin-import-graph.mjs
+    release/scripts/smoke-admin-runtime.mjs
+    release/scripts/smoke-install-bundle.sh
+    release/scripts/smoke-install-public.sh
     release/scripts/smoke-upgrade.sh
     release/scripts/orvix-doctor.sh
     release/scripts/diagnostics.sh
@@ -165,9 +170,15 @@ REQUIRED_FILES=(
     release/scripts/reset-admin-password.sh
     release/scripts/setup-https.sh
     release/scripts/setup-smtp-tls.sh
+    release/scripts/check-smtp-tls.sh
+    release/scripts/publish-github-release.sh
+    release/scripts/verify-github-release-assets.sh
+    release/scripts/verify-fresh-vps-one-command.sh
     release/admin/app.js
     release/admin/index.html
     release/admin/styles.css
+    release/admin/modules/auth.js
+    release/admin/modules/components.js
     release/webmail/index.html
     release/webmail/sw.js
 )
@@ -400,7 +411,14 @@ BUNDLE_REQUIRED=(
     release/sudoers.d/orvix-update
     release/admin/app.js
     release/admin/index.html
+    release/admin/modules/auth.js
+    release/admin/modules/components.js
     release/webmail/index.html
+    release/scripts/setup-https.sh
+    release/scripts/smoke-admin-browser.sh
+    release/scripts/smoke-admin-import-graph.mjs
+    release/scripts/smoke-admin-runtime.mjs
+    release/scripts/verify-fresh-vps-one-command.sh
     VERSION
     BUILDINFO
 )

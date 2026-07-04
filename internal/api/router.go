@@ -260,9 +260,18 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 	// /api/v1/admin/settings writes through this store; GET merges
 	// its rows with the config defaults to build the response. The
 	// store manages its own table (admin_settings) and indexes on
-	// first use; we do not need a separate migration step here.
+	// first use; we MUST call EnsureSchema() before the boot-time
+	// settings bridge runs, otherwise the bridge's first Apply()
+	// query against admin_settings fails with "no such table" on
+	// a brand-new VPS. The previous "lazy CREATE TABLE on first
+	// PATCH" approach left a scary journal warning on every fresh
+	// install — the BLOCKER 7 fresh-boot regression.
 	if sqlDB, err := db.DB(); err == nil {
-		router.h.SetSettingsStore(settings.NewStore(sqlDB))
+		store := settings.NewStore(sqlDB)
+		if err := store.EnsureSchema(router.appCtx); err != nil {
+			logger.Warn("admin settings store: ensure schema failed", zap.Error(err))
+		}
+		router.h.SetSettingsStore(store)
 		logger.Info("admin settings store wired")
 	} else {
 		logger.Warn("admin settings store unavailable: failed to get sql.DB", zap.Error(err))
