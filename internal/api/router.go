@@ -409,6 +409,26 @@ func (r *Router) setupRoutes() {
 	// admin / webmail hostnames continue to work.
 	r.app.Get("/.well-known/mta-sts.txt", r.h.GetPublicMTASTS)
 
+	// Mail client setup — Outlook Autodiscover (WEBMAIL-CLIENT-SETUP-1A).
+	// Both the lowercase (`/autodiscover/autodiscover.xml`) and
+	// uppercase (`/Autodiscover/Autodiscover.xml`) paths are
+	// served; Outlook's hard-coded behaviour varies by build.
+	// Each path supports GET and POST. No auth, no CSRF — the
+	// caller is an email client that has not authenticated yet.
+	// Domain validation goes through `coremail_domains`. See
+	// internal/api/handlers/autodiscover.go for the full
+	// security model and schema references.
+	r.app.Get("/autodiscover/autodiscover.xml", r.h.OutlookAutodiscoverXML)
+	r.app.Post("/autodiscover/autodiscover.xml", r.h.OutlookAutodiscoverXML)
+	r.app.Get("/Autodiscover/Autodiscover.xml", r.h.OutlookAutodiscoverXMLUpper)
+	r.app.Post("/Autodiscover/Autodiscover.xml", r.h.OutlookAutodiscoverXMLUpper)
+	// Mozilla Thunderbird autoconfig — the canonical ISPDB path
+	// (`/.well-known/autoconfig/mail/config-v1.1.xml`) plus the
+	// secondary `/mail/config-v1.1.xml` fallback some clients
+	// probe.
+	r.app.Get("/.well-known/autoconfig/mail/config-v1.1.xml", r.h.MozillaAutoconfig)
+	r.app.Get("/mail/config-v1.1.xml", r.h.MozillaAutoconfigFallback)
+
 	// All `/api/v1/*` requests pass through the general rate
 	// limiter (100/min per IP by default, via Redis when wired).
 	// Static SPA routes (`/admin/*`, `/webmail/*`, `/`, mta-sts)
