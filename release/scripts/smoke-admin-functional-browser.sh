@@ -82,6 +82,7 @@ fi
 # The caller (CI workflow) MUST provide CHROME, or we auto-detect.
 # Only ORVIX_ALLOW_BROWSER_SMOKE_SKIP=1 may bypass (not used in CI).
 CHROME_BIN="${CHROME:-}"
+# 1. Linux native binaries
 if [ -z "$CHROME_BIN" ]; then
     for candidate in google-chrome google-chrome-stable chromium chromium-browser /snap/bin/chromium; do
         if command -v "$candidate" >/dev/null 2>&1; then
@@ -90,13 +91,35 @@ if [ -z "$CHROME_BIN" ]; then
         fi
     done
 fi
+# 2. Windows paths under Git Bash (/c/) or WSL (/mnt/c/)
 if [ -z "$CHROME_BIN" ]; then
-    for candidate in "/c/Program Files/Google/Chrome/Application/chrome.exe" "/c/Program Files (x86)/Google/Chrome/Application/chrome.exe"; do
-        if [ -x "$candidate" ]; then
-            CHROME_BIN="$candidate"
-            break
-        fi
+    for prefix in "" "/mnt"; do
+        for candidate in \
+            "$prefix/c/Program Files/Google/Chrome/Application/chrome.exe" \
+            "$prefix/c/Program Files (x86)/Google/Chrome/Application/chrome.exe" \
+            "$prefix/c/Program Files/Microsoft/Edge/Application/msedge.exe" \
+            "$prefix/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"; do
+            if [ -x "$candidate" ] 2>/dev/null || [ -f "$candidate" ] 2>/dev/null; then
+                CHROME_BIN="$candidate"
+                break 2
+            fi
+        done
     done
+fi
+# 3. Windows where.exe / powershell.exe probe (last resort)
+if [ -z "$CHROME_BIN" ] && command -v where.exe >/dev/null 2>&1; then
+    CHROME_BIN="$(where.exe chrome 2>/dev/null | tr -d '\r' | head -n1)" || true
+fi
+if [ -z "$CHROME_BIN" ] && command -v where.exe >/dev/null 2>&1; then
+    CHROME_BIN="$(where.exe msedge 2>/dev/null | tr -d '\r' | head -n1)" || true
+fi
+if [ -z "$CHROME_BIN" ] && command -v powershell.exe >/dev/null 2>&1; then
+    PS_PATH="$(powershell.exe -NoProfile -Command "(Get-Command chrome -ErrorAction SilentlyContinue).Source" 2>/dev/null | tr -d '\r' | head -n1)"
+    [ -n "$PS_PATH" ] && CHROME_BIN="$PS_PATH"
+fi
+if [ -z "$CHROME_BIN" ] && command -v powershell.exe >/dev/null 2>&1; then
+    PS_PATH="$(powershell.exe -NoProfile -Command "(Get-Command msedge -ErrorAction SilentlyContinue).Source" 2>/dev/null | tr -d '\r' | head -n1)"
+    [ -n "$PS_PATH" ] && CHROME_BIN="$PS_PATH"
 fi
 if [ -z "$CHROME_BIN" ]; then
     if [ "${ORVIX_ALLOW_BROWSER_SMOKE_SKIP:-}" = "1" ]; then
@@ -107,8 +130,9 @@ if [ -z "$CHROME_BIN" ]; then
     echo "Set CHROME=/path/to/chrome or install google-chrome/chromium." >&2
     exit 1
 fi
-if [ ! -x "$CHROME_BIN" ]; then
-    echo "FAIL smoke-admin-functional-browser: CHROME=$CHROME_BIN is not executable" >&2
+# Accept both -x (native binary) and -f (Windows .exe on WSL mount without +x)
+if [ ! -x "$CHROME_BIN" ] && [ ! -f "$CHROME_BIN" ]; then
+    echo "FAIL smoke-admin-functional-browser: CHROME=$CHROME_BIN does not exist" >&2
     exit 1
 fi
 

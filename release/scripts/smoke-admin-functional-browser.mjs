@@ -291,6 +291,28 @@ async function main() {
     await waitFor(() => evalJS(exists('#login-email')), '#login-email visible', 15000);
     await waitFor(() => evalJS(exists('#login-password')), '#login-password visible');
     await waitFor(() => evalJS(exists('#login-button')), '#login-button visible');
+
+    // Login card dimensions must be enterprise-ready
+    const cardWidth = await evalJS(`document.querySelector('.login-card')?.getBoundingClientRect()?.width || 0`);
+    if (cardWidth < 380) fail(`LOGIN_CARD_TOO_NARROW: login card is ${Math.round(cardWidth)}px wide (min 380px required)`);
+    console.error(`login card width: ${Math.round(cardWidth)}px`);
+
+    const inputWidth = await evalJS(`document.querySelector('#login-email')?.getBoundingClientRect()?.width || 0`);
+    const emailFull = await evalJS(`document.querySelector('#login-email')?.offsetWidth || 0`);
+    if (inputWidth < 300 && cardWidth > 400) fail(`LOGIN_INPUT_TOO_NARROW: email input is ${Math.round(inputWidth)}px wide on ${Math.round(cardWidth)}px card`);
+    console.error(`login email input width: ${Math.round(inputWidth)}px`);
+
+    const btnWidth = await evalJS(`document.querySelector('#login-button')?.getBoundingClientRect()?.width || 0`);
+    const btnFull = await evalJS(`document.querySelector('#login-button')?.offsetWidth || 0`);
+    if (btnWidth < inputWidth - 10) fail(`LOGIN_BUTTON_NOT_FULL_WIDTH: button is ${Math.round(btnWidth)}px, input is ${Math.round(inputWidth)}px`);
+    console.error(`login button width: ${Math.round(btnWidth)}px`);
+
+    // Set email value and verify it fits without clipping
+    await evalJS(`document.querySelector('#login-email').value = 'admin@orvix.email'`);
+    const emailScroll = await evalJS(`document.querySelector('#login-email')?.scrollWidth || 0`);
+    if (emailScroll > inputWidth + 5) fail(`LOGIN_EMAIL_CLIPPED: email scrollWidth ${Math.round(emailScroll)}px exceeds input ${Math.round(inputWidth)}px`);
+    console.error(`login email scrollWidth: ${Math.round(emailScroll)}px vs inputWidth: ${Math.round(inputWidth)}px`);
+
     const emptyErrorHidden = await evalJS(`!!document.querySelector('#login-message') && document.querySelector('#login-message').style.display === 'none'`);
     if (!emptyErrorHidden) fail('empty login error alert is visible before submit');
 
