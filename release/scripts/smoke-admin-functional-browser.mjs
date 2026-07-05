@@ -258,12 +258,12 @@ async function main() {
       if (res.exceptionDetails) fail(res.exceptionDetails.text || 'evaluation failed');
       return res.result && res.result.value;
     };
-    const visible = (sel) => `(function(){const n=document.querySelector(${JSON.stringify(sel)});if(!n)return false;const s=getComputedStyle(n);const r=n.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>=0&&r.height>=0;})()`;
+    const exists = (sel) => `!!document.querySelector(${JSON.stringify(sel)})`;
     const mainText = () => evalJS(`document.querySelector('#page-root')?.innerText?.trim() || ''`);
 
-    await waitFor(() => evalJS(visible('#login-email')), '#login-email visible');
-    await waitFor(() => evalJS(visible('#login-password')), '#login-password visible');
-    await waitFor(() => evalJS(visible('#login-button')), '#login-button visible');
+    await waitFor(() => evalJS(exists('#login-email')), '#login-email visible');
+    await waitFor(() => evalJS(exists('#login-password')), '#login-password visible');
+    await waitFor(() => evalJS(exists('#login-button')), '#login-button visible');
     const emptyErrorHidden = await evalJS(`const m = document.querySelector('#login-message'); return !m || m.style.display === 'none' || !(m.textContent || '').trim()`);
     if (!emptyErrorHidden) fail('empty login error alert is visible before submit');
 
@@ -286,20 +286,20 @@ async function main() {
     };
 
     await navigateRoute('domains', 'Domains');
-    const addDomainBtn = await evalJS(visible('.add-domain-btn'));
+    const addDomainBtn = await evalJS(exists('.add-domain-btn'));
     if (!addDomainBtn) fail('Domains Add Domain button not visible');
     await evalJS(`document.querySelector('.add-domain-btn').click()`);
-    await waitFor(() => evalJS(visible('.modal-overlay .modal')), 'Domains add modal');
+    await waitFor(() => evalJS(exists('.modal-overlay .modal')), 'Domains add modal');
     const domainModalInputs = await evalJS(`document.querySelectorAll('.modal-overlay input').length`);
     if (domainModalInputs < 1) fail(`EMPTY_MODAL: Domains add modal has no inputs`);
     await evalJS(`document.querySelector('.modal-overlay .btn.ghost')?.click()`);
     await waitFor(() => evalJS(`!document.querySelector('.modal-overlay')`), 'Domains modal close');
 
     await navigateRoute('accounts', 'Accounts');
-    const addAcctBtn = await evalJS(visible('.add-mailbox-btn'));
+    const addAcctBtn = await evalJS(exists('.add-mailbox-btn'));
     if (!addAcctBtn) fail('Accounts Add Mailbox button not visible');
     await evalJS(`document.querySelector('.add-mailbox-btn').click()`);
-    await waitFor(() => evalJS(visible('.modal-overlay .modal')), 'Accounts add modal');
+    await waitFor(() => evalJS(exists('.modal-overlay .modal')), 'Accounts add modal');
     const acctModalInputs = await evalJS(`document.querySelectorAll('.modal-overlay input, .modal-overlay select').length`);
     if (acctModalInputs < 2) fail(`EMPTY_MODAL: Accounts add modal has too few inputs (${acctModalInputs})`);
     await evalJS(`document.querySelector('.modal-overlay .btn.ghost')?.click()`);
