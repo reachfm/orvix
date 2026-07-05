@@ -35,6 +35,21 @@ import { detectRtlFromURL, setDocDirection } from './modules/rtl.js';
 // Bootstrap signal handlers.
 bindToast(toast);
 
+// Initialize theme before any rendering. Priority:
+//   1. saved preference (from previous session)
+//   2. prefers-color-scheme (system preference)
+//   3. dark (default)
+(function initTheme() {
+  const saved = (() => { try { return localStorage.getItem('orvix_theme'); } catch (_) { return null; } })();
+  if (saved === 'light') {
+    document.documentElement.classList.add('theme-light');
+  } else if (saved === 'dark') {
+    document.documentElement.classList.remove('theme-light');
+  } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
+    document.documentElement.classList.add('theme-light');
+  }
+})();
+
 // 1. Locale.
 initLocaleFromURL();
 detectRtlFromURL();

@@ -34,6 +34,25 @@ export function renderTopbar(root) {
   profile.appendChild(meta);
   profile.appendChild(el('div', { id: 'profile-avatar', class: 'profile-avatar', 'aria-hidden': 'true', text: 'A' }));
 
+  // Theme toggle — cycles light/dark. Persisted in localStorage.
+  const themeBtn = el('button', {
+    id: 'theme-toggle', class: 'btn xs ghost', type: 'button',
+    'aria-label': 'Toggle theme',
+    title: 'Toggle theme',
+  });
+  function paintThemeIcon() {
+    const isLight = document.documentElement.classList.contains('theme-light');
+    themeBtn.textContent = isLight ? '\u2600' : '\u263D';
+  }
+  paintThemeIcon();
+  themeBtn.addEventListener('click', () => {
+    document.documentElement.classList.toggle('theme-light');
+    const nowLight = document.documentElement.classList.contains('theme-light');
+    try { localStorage.setItem('orvix_theme', nowLight ? 'light' : 'dark'); } catch (_) {}
+    paintThemeIcon();
+  });
+  profile.appendChild(themeBtn);
+
   // Locale switcher
   const localeSel = el('select', { class: 'btn xs ghost', id: 'locale-select', 'aria-label': 'Language' }, [
     el('option', { value: 'en' }, 'English'),

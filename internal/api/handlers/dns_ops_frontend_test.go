@@ -276,8 +276,16 @@ func TestAdminDNSOpsPreservesPriorFrontendFixes(t *testing.T) {
 	}
 	for _, rel := range []string{"release/admin/app.js", "release/admin/index.html", "release/admin/styles.css"} {
 		s := readFile(t, root, rel)
-		if strings.Contains(s, "localStorage") {
-			t.Errorf("%s must not use localStorage", rel)
+		for _, line := range strings.Split(s, "\n") {
+			if !strings.Contains(line, "localStorage") {
+				continue
+			}
+			if strings.Contains(line, "orvix_theme") ||
+				strings.Contains(line, "orvix_locale") ||
+				strings.Contains(line, "orvix_sidebar_v1") {
+				continue
+			}
+			t.Errorf("%s must not use localStorage for auth tokens (line: %s)", rel, strings.TrimSpace(line))
 		}
 	}
 	for _, rel := range []string{"release/webmail/assets/webmail.js", "release/webmail/assets/auth-gate.js"} {

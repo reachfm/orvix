@@ -230,12 +230,22 @@ func TestAdminRuntimePreservesPriorFixes(t *testing.T) {
 		}
 	}
 
-	// 7. localStorage must not appear in admin assets (the
-	// sessionStorage-backed JWT is the documented storage).
+	// 7. localStorage must not appear in admin assets for auth
+	// tokens (the sessionStorage-backed JWT is the documented
+	// storage). UI preferences (theme, locale, sidebar) stored
+	// under orvix_* keys are allowed.
 	for _, asset := range []string{"release/admin/app.js", "release/admin/index.html", "release/admin/styles.css"} {
 		s := readFile(t, root, asset)
-		if strings.Contains(s, "localStorage") {
-			t.Errorf("%s must not use localStorage", asset)
+		for _, line := range strings.Split(s, "\n") {
+			if !strings.Contains(line, "localStorage") {
+				continue
+			}
+			if strings.Contains(line, "orvix_theme") ||
+				strings.Contains(line, "orvix_locale") ||
+				strings.Contains(line, "orvix_sidebar_v1") {
+				continue
+			}
+			t.Errorf("%s must not use localStorage for auth tokens (line: %s)", asset, strings.TrimSpace(line))
 		}
 	}
 

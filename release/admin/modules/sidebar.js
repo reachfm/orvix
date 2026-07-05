@@ -102,15 +102,15 @@ const GROUPS = [
   ]},
 
   { id: 'migration', labelKey: 'sidebar.group.migration', items: [
-    { route: 'migration',         labelKey: 'sidebar.item.migrationJobs' },
-    { route: 'migration/sources', labelKey: 'sidebar.item.sourceServers' },
+    { route: 'migration',         labelKey: 'sidebar.item.migrationJobs',  hide: true },
+    { route: 'migration/sources', labelKey: 'sidebar.item.sourceServers', hide: true },
   ]},
 
   { id: 'clustering', labelKey: 'sidebar.group.clustering', items: [
-    { route: 'clustering',         labelKey: 'sidebar.item.clusterSetup' },
-    { route: 'clustering/imap',    labelKey: 'sidebar.item.imapProxy'    },
-    { route: 'clustering/pop3',    labelKey: 'sidebar.item.pop3Proxy'    },
-    { route: 'clustering/webmail', labelKey: 'sidebar.item.webmailProxy' },
+    { route: 'clustering',         labelKey: 'sidebar.item.clusterSetup', hide: true },
+    { route: 'clustering/imap',    labelKey: 'sidebar.item.imapProxy',    hide: true },
+    { route: 'clustering/pop3',    labelKey: 'sidebar.item.pop3Proxy',    hide: true },
+    { route: 'clustering/webmail', labelKey: 'sidebar.item.webmailProxy', hide: true },
   ]},
 
   { id: 'admin', labelKey: 'sidebar.group.adminRights', items: [
@@ -132,6 +132,8 @@ export function renderSidebar(root) {
   root.innerHTML = '';
   const collapsed = loadCollapsed();
   GROUPS.forEach((group, gIdx) => {
+    const visibleItems = group.items.filter((it) => !it.hide);
+    if (!visibleItems.length) return;
     if (group.labelKey) {
       const head = el('div', {
         class: 'sidebar-section-head',
@@ -155,7 +157,7 @@ export function renderSidebar(root) {
       'data-group': group.id,
       style: collapsed[group.id] ? 'display:none;' : '',
     });
-    group.items.forEach((item) => {
+    visibleItems.forEach((item) => {
       const li = el('li', { class: 'sidebar-item' + (item.planned ? ' planned' : '') });
       const a = el('a', {
         href: '#/' + item.route,
@@ -213,7 +215,7 @@ function toggleGroup(id) {
  */
 export function firstActiveRoute() {
   for (const g of GROUPS) {
-    for (const it of g.items) if (!it.planned) return it.route;
+    for (const it of g.items) if (!it.planned && !it.hide) return it.route;
   }
   return 'dashboard';
 }
