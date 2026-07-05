@@ -78,20 +78,14 @@ if [ -z "$NODE_BIN" ]; then
     exit 1
 fi
 
-# The functional browser smoke requires a real headless Chrome/Chromium
-# with DevTools support. On CI runners that lack Chrome or where the
-# headless sandbox is unavailable, skip gracefully rather than failing
-# the release pipeline. Set CHROME=/path/to/chrome to force-run.
-if [ -z "${CHROME:-}" ] && [ -n "${CI:-}" ]; then
-    echo "SKIP smoke-admin-functional-browser: CI runner without explicit CHROME path"
-    exit 0
-fi
-
-CHROME_BIN="${CHROME:-${CHROMIUM:-${CHROME_BIN:-}}}"
+# Fail-closed browser detection.
+# The caller (CI workflow) MUST provide CHROME, or we auto-detect.
+# Only ORVIX_ALLOW_BROWSER_SMOKE_SKIP=1 may bypass (not used in CI).
+CHROME_BIN="${CHROME:-}"
 if [ -z "$CHROME_BIN" ]; then
     for candidate in google-chrome google-chrome-stable chromium chromium-browser /snap/bin/chromium; do
         if command -v "$candidate" >/dev/null 2>&1; then
-            CHROME_BIN="$candidate"
+            CHROME_BIN="$(command -v "$candidate")"
             break
         fi
     done
@@ -105,8 +99,19 @@ if [ -z "$CHROME_BIN" ]; then
     done
 fi
 if [ -z "$CHROME_BIN" ]; then
-    echo "SKIP smoke-admin-functional-browser: Chrome/Chromium not found (set CHROME=/path/to/chrome)"
-    exit 0
+    if [ "${ORVIX_ALLOW_BROWSER_SMOKE_SKIP:-}" = "1" ]; then
+        echo "SKIP smoke-admin-functional-browser: Chrome/Chromium not found and ORVIX_ALLOW_BROWSER_SMOKE_SKIP=1"
+        exit 0
+    fi
+    echo "FAIL smoke-admin-functional-browser: Chrome/Chromium not found." >&2
+    echo "Set CHROME=/path/to/chrome or install google-chrome/chromium." >&2
+    exit 1
+fi
+if [ ! -x "$CHROME_BIN" ]; then
+    echo "FAIL smoke-admin-functional-browser: CHROME=$CHROME_BIN is not executable" >&2
+    exit 1
 fi
 
+echo "functional browser smoke: using browser at $CHROME_BIN"
 CHROME="$CHROME_BIN" "$NODE_BIN" "$(to_win_path "$SCRIPT_DIR/smoke-admin-functional-browser.mjs")" "$(to_win_path "$ADMIN_DIR")"
+echo "functional browser smoke: PASS"

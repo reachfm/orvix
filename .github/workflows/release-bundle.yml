@@ -81,10 +81,32 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Install Chromium for browser smoke
+        run: |
+          set -euo pipefail
+          if command -v google-chrome >/dev/null 2>&1 || command -v google-chrome-stable >/dev/null 2>&1 \
+             || command -v chromium >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1; then
+            echo "Chrome/Chromium already available"
+            command -v google-chrome 2>/dev/null || command -v google-chrome-stable 2>/dev/null \
+              || command -v chromium 2>/dev/null || command -v chromium-browser 2>/dev/null
+            exit 0
+          fi
+          echo "Installing chromium-browser..."
+          sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
+          sudo apt-get install -y --no-install-recommends chromium-browser
+          which chromium-browser || { echo "chromium-browser not found after install" >&2; exit 1; }
+          chromium-browser --version
+
       - name: Verify scripts and smokes
+        env:
+          CHROME: "${{ steps.chrome-path.outputs.path || '' }}"
         run: |
           set -euo pipefail
           trap 'echo "FAILED_STEP=Verify scripts and smokes" >> "$GITHUB_ENV"' ERR
+          # Detect and set CHROME so the functional browser smoke is fail-closed
+          CHROME="$(command -v google-chrome 2>/dev/null || command -v google-chrome-stable 2>/dev/null || command -v chromium 2>/dev/null || command -v chromium-browser 2>/dev/null || echo '')"
+          export CHROME
+          echo "functional browser smoke: CHROME=$CHROME"
           run_smoke() {
             local name="$1"
             shift

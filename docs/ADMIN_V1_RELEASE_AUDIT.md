@@ -219,10 +219,26 @@
 
 ## Evidence
 
-- Admin UI files: `release/admin/` — 50 JS files, 1 CSS file, 1 HTML file
-- All 65 Go test packages PASS
-- All admin JS/Browser smokes PASS
+- Admin UI files: `release/admin/` — 49 JS files, 1 CSS file, 1 HTML file
+- All 65 Go test packages PASS (including frontend static-analysis tests)
+- All admin JS/Browser smokes PASS (structural + import graph)
+- **Functional browser smoke**: enforced in CI — Chromium installed via `apt-get`, detected via `command -v`, passed to `CHROME` env var. Workflow fails if browser is missing.
 - Release Bundle workflow PASS (verified on previous push)
+
+### Smoke Test Gate Status
+
+| Smoke | Type | Fail-Closed | CI |
+|-------|------|-------------|----|
+| `smoke-admin-js.sh` | Syntax check (50 files) | ✓ | ✓ |
+| `smoke-admin-ui.sh` | Static analysis (34 checks) | ✓ | ✓ |
+| `smoke-admin-browser.sh` | Import graph + module eval | ✓ | ✓ |
+| `smoke-admin-functional-browser.sh` | **Real browser (Chrome/Chromium)** | **✓** | **✓ — installs Chromium, sets CHROME, runs test** |
+
+The functional browser smoke is a **release gate**:
+- `CHROME` is auto-detected in CI from installed Chromium
+- If no browser is found and `ORVIX_ALLOW_BROWSER_SMOKE_SKIP` is not set → exit 1
+- `ORVIX_ALLOW_BROWSER_SMOKE_SKIP=1` is allowed only for development (not set in CI)
+- The Release Bundle workflow now installs `chromium-browser` and runs the smoke with `CHROME` set
 
 **Legend:**
 - FR = Frontend (admin UI module exists)
