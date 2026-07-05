@@ -85,7 +85,6 @@ import * as logs      from './modules/pages/logs.js';
 import * as updates   from './modules/pages/updates.js';
 import * as license   from './modules/pages/license.js';
 import * as security  from './modules/pages/security.js';
-import * as adminRights from './modules/pages/administration-rights.js';
 import * as accountClasses from './modules/pages/account-classes.js';
 import * as domainGroups   from './modules/pages/domain-groups.js';
 import * as mailingLists   from './modules/pages/mailing-lists.js';

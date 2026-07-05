@@ -83,18 +83,30 @@ function openCreate() {
   openModal({
     title: 'Create mailbox',
     render: (body, foot) => {
-      const email = el('input', { type: 'email', placeholder: 'user@example.com', required: 'required', autocomplete: 'off', spellcheck: 'false' });
+      const localPart = el('input', { type: 'text', placeholder: 'user', required: 'required', autocomplete: 'off', spellcheck: 'false', style: 'flex:1;' });
+      const domainSel = el('select', { style: 'flex:2;' });
+      domainSel.appendChild(el('option', { value: '', disabled: 'disabled', selected: 'selected' }, 'Loading domains...'));
+      // Fetch domains for the dropdown
+      apiGet('/api/v1/domains').then((r) => {
+        const domains = (r && (r.domains || r)) || [];
+        domainSel.innerHTML = '';
+        if (!domains.length) {
+          domainSel.appendChild(el('option', { value: '' }, 'No domains — create one first'));
+          return;
+        }
+        domains.forEach((d) => {
+          const dn = d.name || d.domain;
+          if (dn) domainSel.appendChild(el('option', { value: dn }, dn));
+        });
+      }).catch(() => {
+        domainSel.innerHTML = '';
+        domainSel.appendChild(el('option', { value: '' }, 'Failed to load domains'));
+      });
       const name  = el('input', { type: 'text', placeholder: 'Display name' });
       const pw    = el('input', { type: 'password', placeholder: 'Initial password', required: 'required', autocomplete: 'new-password' });
       const quota = el('input', { type: 'number', placeholder: 'Quota (MB) (optional — class default applied otherwise)' });
-      // Account class selector. When selected, the class's
-      // defaults (quota, send limits, feature gates) are
-      // applied to the mailbox unless overridden by the
-      // operator. The class must belong to the same tenant.
       const classSelect = el('select', { id: 'mb_class_id' });
       classSelect.appendChild(el('option', { value: '0' }, 'No class (defaults to 1024MB / no extra gates)'));
-      // Lazy-load classes; if the call fails the dropdown
-      // still has the "no class" option so the form is usable.
       apiGet('/api/v1/admin/account-classes').then((r) => {
         const classes = (r && r.classes) || [];
         classes.forEach((c) => {
@@ -104,7 +116,12 @@ function openCreate() {
           }, c.name + (c.is_admin_class ? ' (built-in)' : '')));
         });
       }).catch(() => { /* leave defaults */ });
-      body.appendChild(el('div', { class: 'form-row' }, [el('label', null, 'Email'), email]));
+      const emailRow = el('div', { class: 'form-row', style: 'display:flex;gap:8px;align-items:center;' });
+      emailRow.appendChild(el('label', null, 'Email'));
+      emailRow.appendChild(localPart);
+      emailRow.appendChild(el('span', { text: '@' }));
+      emailRow.appendChild(domainSel);
+      body.appendChild(emailRow);
       body.appendChild(el('div', { class: 'form-row' }, [el('label', null, 'Name'), name]));
       body.appendChild(el('div', { class: 'form-row' }, [el('label', null, 'Password'), pw]));
       body.appendChild(el('div', { class: 'form-row' }, [el('label', null, 'Quota (MB)'), quota]));
@@ -117,16 +134,17 @@ function openCreate() {
       foot.appendChild(el('button', { class: 'btn ghost', type: 'button', text: t('common.cancel'),
         onclick: () => document.querySelector('.modal-overlay').remove() }));
       foot.appendChild(el('button', { class: 'btn primary', type: 'button', text: 'Create', onclick: async () => {
-        if (!email.value || !pw.value) { toast('Email and password required', 'error'); return; }
+        const domain = domainSel.value;
+        if (!localPart.value || !domain || !pw.value) { toast('Local part, domain, and password required', 'error'); return; }
+        const email = localPart.value + '@' + domain;
         try {
           await apiPost('/api/v1/mailboxes', {
-            email: email.value,
+            email: email,
             name: name.value,
             password: pw.value,
             quota_mb: Number(quota.value) || 0,
             class_id: Number(classSelect.value || 0) || 0,
           });
-          // Important: never echo the password back to the operator.
           pw.value = '';
           toast('Mailbox created', 'success', 1800);
           location.reload();

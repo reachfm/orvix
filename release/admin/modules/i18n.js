@@ -112,7 +112,7 @@ const TABLE = {
     'sidebar.item.pop3Proxy':      'POP3 Proxy',
     'sidebar.item.webmailProxy':   'Webmail Proxy',
     'sidebar.item.adminGroups':    'Administrative Groups',
-    'sidebar.item.adminUsers':     'Administrative Users',
+    'sidebar.item.auditLog':       'Audit Log',
     'sidebar.item.domainAdminLimits': 'Domain Admin Limits',
 
     'topbar.subtitle':        'System command center',
@@ -327,7 +327,7 @@ const TABLE = {
     'sidebar.item.pop3Proxy':      'وكيل POP3',
     'sidebar.item.webmailProxy':   'وكيل الويب ميل',
     'sidebar.item.adminGroups':    'مجموعات الإدارة',
-    'sidebar.item.adminUsers':     'مستخدمو الإدارة',
+    'sidebar.item.auditLog':       'سجل التدقيق',
     'sidebar.item.domainAdminLimits': 'حدود مسؤولي النطاق',
 
     'topbar.subtitle':        'مركز قيادة النظام',

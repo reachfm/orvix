@@ -114,9 +114,8 @@ const GROUPS = [
   ]},
 
   { id: 'admin', labelKey: 'sidebar.group.adminRights', items: [
-    { route: 'admin/groups',     labelKey: 'sidebar.item.adminGroups'       },
-    { route: 'admin/users',      labelKey: 'sidebar.item.adminUsers'        },
-    { route: 'admin/limits',     labelKey: 'sidebar.item.domainAdminLimits' },
+    { route: 'admin/groups', labelKey: 'sidebar.item.adminGroups' },
+    { route: 'admin/users',  labelKey: 'sidebar.item.auditLog'    },
   ]},
 ];
 

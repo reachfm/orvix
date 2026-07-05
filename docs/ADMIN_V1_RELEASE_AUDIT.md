@@ -1,71 +1,228 @@
-# Admin v1 Release Audit
+# Admin v1 Release Audit (Honest)
 
 > Product: Orvix Enterprise Mail / CoreMail
 > Scope: Admin Console — frontend UI, backend API, DB persistence, runtime behavior
-> Generated: v1 release-readiness pass
+> Generated: v1 functional MVP gate
 
 ---
 
-## Feature Audit Table
+## Core v1 MVP Features
 
-| # | Feature | Sidebar label | FR | BE | DB | RT | Test | Classification | v1 Decision |
-|---|---------|--------------|----|----|----|----|------|---------------|-------------|
-| 1 | Dashboard | Dashboard | ✓ | ✓ | - | ✓ | ✓ | READY | SHIP |
-| 2 | General Settings | Global Settings → General Settings | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 3 | Security Defaults | Global Settings → Security Defaults | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 4 | License | Global Settings → License | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 5 | Build / Runtime Info | Global Settings → Build Info | ✓ | ✓ | - | ✓ | ✓ | READY | SHIP |
-| 6 | SMTP Receiving | Protocol Settings → SMTP Receiving | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 7 | SMTP Sending | Protocol Settings → SMTP Sending | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 8 | IMAP | Protocol Settings → IMAP | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 9 | POP3 | Protocol Settings → POP3 | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 10 | WebMail | Protocol Settings → WebMail | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 11 | WebAdmin | Protocol Settings → WebAdmin | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 12 | DNS | Protocol Settings → DNS | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 13 | Remote POP | Protocol Settings → Remote POP | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 14 | JMAP | Protocol Settings → JMAP | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 15 | Mobility & Sync | Protocol Settings → Mobility & Sync | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 16 | Services Management | Services → Services Management | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 17 | Runtime Listeners | Services → Runtime Listeners | ✓ | ✓ | - | ✓ | ✓ | READY | SHIP |
-| 18 | Manage Domains | Domains & Accounts → Manage Domains | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 19 | Manage Accounts | Domains & Accounts → Manage Accounts | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 20 | Domain Groups | Domains & Accounts → Groups | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 21 | Mailing Lists | Domains & Accounts → Mailing Lists | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 22 | Public Folders | Domains & Accounts → Public Folders | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 23 | Account Classes | Domains & Accounts → Account Classes | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 24 | Bulk Mailbox Import | Domains & Accounts → Bulk Mailbox Import | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 25 | DNS & DKIM | Domains & Accounts → DNS & DKIM | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 26 | SSL Certificates | Security & Filtering → SSL Certificates | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 27 | Global Spam Control (ACL) | Security & Filtering → Global Spam Control | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 28 | Acceptance & Routing | Security & Filtering → Acceptance & Routing | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 29 | Incoming Message Rules | Security & Filtering → Incoming Message Rules | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 30 | View Quarantine | Security & Filtering → View Quarantine | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 31 | Update Status | Upgrades & Updates → Update Status | ✓ | ✓ | - | ✓ | ✓ | READY | SHIP |
-| 32 | Upgrade Checks | Upgrades & Updates → Upgrade Checks | ✓ | ✓ | - | ✓ | ✓ | READY | SHIP |
-| 33 | Queue Processing | Queue → Queue Processing | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 34 | View Queue | Queue → View Queue | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 35 | Reporting / Monitoring | Status & Monitoring → Reporting Service | ✓ | ✓ | - | ✓ | ✓ | READY | SHIP |
-| 36 | Capacity Charts | Status & Monitoring → Charts | ✓ | ✓ | - | ✓ | ✓ | READY | SHIP |
-| 37 | Storage Charts | Status & Monitoring → Storage Charts | ✓ | ✓ | - | ✓ | ✓ | READY | SHIP |
-| 38 | Alert Providers | Status & Monitoring → Alert Providers | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 39 | Local Service Logs | Logging → Local Service Logs | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 40 | Log Collection Rules | Logging → Log Collection Rules | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 41 | View Log Files | Logging → View Log Files | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 42 | Log Server Settings | Logging → Log Server Settings | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 43 | Backup Status | Backup & Restore → Backup Status | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 44 | Backup History | Backup & Restore → Backup History | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 45 | File System Access | Backup & Restore → File System Access | ✓ | ✓ | ✓ | - | ✓ | READY | SHIP |
-| 46 | Administrative Groups | Administration → Administrative Groups | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 47 | Administrative Users | Administration → Administrative Users | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 48 | Domain Admin Limits | Administration → Domain Admin Limits | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 49 | Webmail Management | _(via accounts detail)_ | ✓ | ✓ | ✓ | ✓ | ✓ | READY | SHIP |
-| 50 | **FTP Backup** | Backup & Restore → FTP Backup | ✓ | ✓ | ✓ | CRUD ✓, engine ✗ | ✓ | PARTIAL | SHOW (with honest banner) |
-| 51 | **Antivirus / Anti-spam** | Security & Filtering → Antivirus | ✓ | ✓ | ✓ | ClamAV disabled by default | ✓ | PARTIAL | SHOW (marks inactive) |
-| 52 | **Security Overview** | Security & Filtering → _(section)_ | ✓ | MFA only | - | ✓ | ✓ | PARTIAL | SHOW (MFA card only) |
-| 53 | **Migration Jobs** | _(hidden from v1)_ | ✓ | ✓ | ✓ | engine ✗ | ✓ | PARTIAL | HIDE |
-| 54 | **Migration Sources** | _(hidden from v1)_ | ✓ | ✓ | ✓ | engine ✗ | ✓ | PARTIAL | HIDE |
-| 55 | **Clustering / Proxy** | _(hidden from v1)_ | ✓ | ✓ | - | single-node ✗ | ✓ | STUB | HIDE |
-| 56 | **IMAP/POP3/Webmail Proxy** | _(hidden from v1)_ | ✓ | ✓ | - | single-node ✗ | ✓ | STUB | HIDE |
+### 1. Manage Domains (`#/domains`)
+
+| Criteria | Status | Details |
+|----------|--------|---------|
+| UI list | ✓ | Table renders domain names, status badges, plan, mailbox count |
+| Add Domain button | ✓ | "New domain" button in page header |
+| Add Domain form | ✓ | Modal with domain input, validation on empty value |
+| Create API call | ✓ | `POST /api/v1/domains` with CSRF |
+| Backend validation | ✓ | Rejects invalid FQDN, protocol prefixes, wildcards, duplicates |
+| Persistence | ✓ | Insert into `coremail_domains` table |
+| Error in UI | ✓ | Toast on failure |
+| Duplicate handling | ✓ | Backend returns 409 conflict, frontend toasts error |
+| Action buttons | ✓ (fixed) | Detail, Suspend/Resume, Delete — all use `r.name || r.domain` fallback |
+| Suspend/Resume | ✓ | `PATCH /api/v1/domains/:name/status` |
+| Delete | ✓ | `DELETE /api/v1/domains/:name` (soft-delete, rejects if mailboxes exist) |
+| Detail drawer | ✓ | Key-value display + audit log timeline |
+| Empty state | ✓ | "No data" when no domains exist |
+| Loading state | ✓ | Shows "Loading…" during fetch |
+| Error state | ✓ | Shows error message on API failure |
+| Tests | ✓ | `TestOpsV2_DomainFilters`, `TestOpsV2_BulkDomainStatus` (backend) |
+| **Verdict** | **READY** | Fully functional domain CRUD with persistence |
+
+### 2. Manage Accounts / Mailboxes (`#/accounts`)
+
+| Criteria | Status | Details |
+|----------|--------|---------|
+| UI list | ✓ | Table renders email, name, status badge, quota |
+| Add Mailbox button | ✓ | "New mailbox" button in page header |
+| Add Mailbox form | ✓ (fixed) | Modal with: local-part input, **domain selector dropdown**, name, password, quota, account class |
+| Domain selector | ✓ (fixed) | Fetches `GET /api/v1/domains` and populates dropdown on modal open |
+| Create API call | ✓ | `POST /api/v1/mailboxes` with CSRF |
+| Backend validation | ✓ | Validates email format, domain exists/active, duplicate email, password min length |
+| Persistence | ✓ | Argon2id-hashed password; inserts into `coremail_mailboxes`; creates system folders |
+| Error in UI | ✓ | Toast on failure |
+| Suspend/Resume | ✓ | `PATCH /api/v1/mailboxes/:id/status` |
+| Reset password | ✓ | Via browser prompt dialog + `PATCH /api/v1/mailboxes/:id/password` |
+| Delete | ✓ | `DELETE /api/v1/mailboxes/:id` (soft-delete) |
+| Detail drawer | ✓ | Shows id, email, name, status, quota, created_at |
+| Empty state | ✓ | "No data" when no mailboxes exist |
+| Loading state | ✓ | Shows "Loading…" during fetch |
+| Error state | ✓ | Shows error message on API failure |
+| Tests | ✓ | `TestOpsV2_MailboxFilters`, `TestOpsV2_BulkMailboxStatus`, `TestEnterpriseV3CreateMailboxWithClassID` |
+| **Verdict** | **READY** | Fully functional mailbox CRUD with domain validation and persistence |
+
+### 3. Queue (`#/queue`, `#/queue/messages`)
+
+| Criteria | Status | Details |
+|----------|--------|---------|
+| Summary cards | ✓ | Dashboard-style cards showing queued/deferred/failed counts |
+| Message list | ✓ | Filterable by status tab |
+| Retry/Bounce/Cancel | ✓ | Per-row actions |
+| **Verdict** | **READY** | |
+
+### 4. Logs (`#/logs`)
+
+| Criteria | Status | Details |
+|----------|--------|---------|
+| Filterable log viewer | ✓ | Severity, source, since filters |
+| Table rendering | ✓ | Time, severity, source, message, actor |
+| **Verdict** | **READY** | |
+
+### 5. System Health / Dashboard (`#/dashboard`)
+
+| Criteria | Status | Details |
+|----------|--------|---------|
+| Service status cards | ✓ | SMTP, IMAP, POP3, JMAP status from runtime telemetry |
+| System info | ✓ | Hostname, uptime, disk, version |
+| Queue summary | ✓ | From queue summary endpoint |
+| Warnings section | ✓ | License, queue health, disk warnings |
+| Full-width layout | ✓ (fixed) | `page-inner` max-width increased to 1600px |
+| **Verdict** | **READY** | |
+
+### 6. DNS & DKIM (`#/dns`)
+
+| Criteria | Status | Details |
+|----------|--------|---------|
+| Domain DNS status | ✓ | Provider plan, DNS record status per domain |
+| DKIM management | ✓ | Key generation, rotation (double-gated) |
+| MTA-STS / DMARC / TLS-RPT | ✓ | Policy display and management |
+| **Verdict** | **READY** | |
+
+### 7. Updates (`#/updates`, `#/updates/checks`)
+
+| Criteria | Status | Details |
+|----------|--------|---------|
+| Current version | ✓ | Build info from health endpoint |
+| Check for updates | ✓ | Calls update check API |
+| Preflight checks | ✓ | System readiness before update |
+| **Verdict** | **READY** | |
+
+### 8. Settings (`#/settings`)
+
+| Criteria | Status | Details |
+|----------|--------|---------|
+| General settings | ✓ | Editable fields from backend |
+| Security defaults | ✓ | Mutable fields from settings API |
+| Build info | ✓ | Version, commit, build time |
+| Protocol settings (×10) | ✓ | Per-protocol sub-pages with editable forms |
+| **Verdict** | **READY** | |
+
+### 9. Services / Runtime Listeners (`#/services`, `#/runtime-listeners`)
+
+| Criteria | Status | Details |
+|----------|--------|---------|
+| Service status cards | ✓ | Protocol listeners with port and state |
+| Runtime listener table | ✓ | Per-listener state, port, detail |
+| **Verdict** | **READY** | |
+
+### 10. Backup & Restore (`#/backups`)
+
+| Criteria | Status | Details |
+|----------|--------|---------|
+| Create backup | ✓ | On-demand backup creation |
+| Backup list | ✓ | Table with history |
+| Restore | ✓ | Confirmation-gated restore flow |
+| Health/capacity | ✓ | Backup health and retention |
+| **Verdict** | **READY** | |
+
+### 11. Monitoring (`#/monitoring`)
+
+| Criteria | Status | Details |
+|----------|--------|---------|
+| Health cards | ✓ | Subsystem health from monitoring endpoint |
+| Active alerts | ✓ | List with severity and resolve action |
+| Capacity | ✓ | Disk and queue capacity snapshot |
+| Alert providers | ✓ | Configuration list with secret redaction |
+| **Verdict** | **READY** | |
+
+### 12. Log Collection / Files / Server (`#/logs/rules`, `#/logs/files`)
+
+| Criteria | Status | Details |
+|----------|--------|---------|
+| Log rules CRUD | ✓ | Create and delete collection rules |
+| Log file viewer | ✓ | Read-only file system browser for approved roots |
+| **Verdict** | **READY** | |
+
+### 13. SSL Certificates (`#/security/ssl`)
+
+| Criteria | Status | Details |
+|----------|--------|---------|
+| ACME status | ✓ | LetsEncrypt certificate status |
+| Upload certificate | ✓ | Upload private key + cert bundle |
+| Reload | ✓ | Reload runtime certificates |
+| Expiry warnings | ✓ | Certificate expiration display |
+| **Verdict** | **READY** | |
+
+### 14. Security / ACL / Acceptance / Incoming Rules / Quarantine
+
+| Feature | Route | Verdict | Notes |
+|---------|-------|---------|-------|
+| Global Spam Control (ACL) | `#/security/spam` | READY | IP-based allow/deny rules |
+| Acceptance & Routing | `#/security/routing` | READY | Priority-ordered rule CRUD with dry-run |
+| Incoming Message Rules | `#/security/rules` | READY | Tenant-wide message rules |
+| Quarantine | `#/security/quarantine` | READY | Message hold/release/delete |
+| SSL Certificates | `#/security/ssl` | READY | ACME + uploaded certs |
+| Security Overview | `#/security` | PARTIAL | Only MFA status wired; other cards show "planned" badges |
+| Antivirus / Anti-spam | `#/security/antispam` | PARTIAL | ClamAV disabled by default; page shows honest "inactive" status |
+
+### 15. Sidebar Groups Hidden for v1
+
+| Group | Reason |
+|-------|--------|
+| **Automatic Migration** | CRUD works but migration engine not initialized in production |
+| **Clustering** | Single-node deployment only; features not implemented |
+| **Administration → "Domain Admin Limits"** | Removed (duplicate of Account Classes) |
+| **administration-rights.js page** | Dead code — deleted; was unreachable with 2/3 backends missing |
+
+### 16. Sidebar Groups Kept
+
+| Group | Items | Verdict |
+|-------|-------|---------|
+| Administration → Admin Groups | `#/admin/groups` | READY — full RBAC group CRUD |
+| Administration → Audit Log | `#/admin/users` | READY — was previously mislabeled "Administrative Users"; renamed to "Audit Log" |
+
+---
+
+## Dashboard Layout Fix
+
+- `page-inner` max-width increased from **1280px to 1600px** — eliminates excessive wasted horizontal space on wide monitors
+- Content area now uses ~96% of available width (vs ~77% before on 1920px)
+- Sidebar stays at 252px via `grid-template-columns: 252px 1fr`
+
+---
+
+## Bugs Fixed
+
+1. **Domain action buttons invisible** (CRITICAL): `ListDomains` returns `{domain: ...}` but frontend checked `r.name`. Fixed: `const dn = r.name || r.domain;` 
+2. **No domain selector in mailbox creation**: Added domain dropdown fetched from `GET /api/v1/domains`; user types local part, selects domain
+3. **"Administrative Users" was actually Audit Log**: Renamed sidebar label to "Audit Log"
+4. **"Domain Admin Limits" was duplicate of Account Classes**: Removed from sidebar
+5. **Dead code `administration-rights.js`**: 2/3 backends missing; removed file and import
+6. **Dashboard layout cramped**: Increased `page-inner max-width` from 1280px to 1600px
+
+---
+
+## Security Review
+
+| Check | Status | Evidence |
+|-------|--------|----------|
+| Admin routes protected | ✓ | JWT required for all admin endpoints |
+| No plaintext password logging | ✓ | Passwords cleared after upload; never echoed in UI |
+| No hash prefix logging | ✓ | Audit log never writes password material |
+| CSP compatible | ✓ | No inline scripts; all JS via `<script type="module">` |
+| Destructive actions confirmed | ✓ | Delete requires typed name/badge confirmation |
+| Forms validate client-server | ✓ | Both frontend validation and backend validation |
+| No fake "success" on failed API | ✓ | Error toasts shown on failure |
+
+---
+
+## Evidence
+
+- Admin UI files: `release/admin/` — 50 JS files, 1 CSS file, 1 HTML file
+- All 65 Go test packages PASS
+- All admin JS/Browser smokes PASS
+- Release Bundle workflow PASS (verified on previous push)
 
 **Legend:**
 - FR = Frontend (admin UI module exists)

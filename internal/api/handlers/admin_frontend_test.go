@@ -640,7 +640,6 @@ func aggregateAdminJS(t *testing.T, root string) string {
 		"release/admin/modules/toast.js",
 		"release/admin/modules/pages/_planned.js",
 		"release/admin/modules/pages/accounts.js",
-		"release/admin/modules/pages/administration-rights.js",
 		"release/admin/modules/pages/alert-providers.js",
 		"release/admin/modules/pages/backups.js",
 		"release/admin/modules/pages/bulk-import.js",

@@ -70,17 +70,18 @@ export async function renderDomainsPage(root) {
         } },
         { name: 'a',    label: '', cellClass: 'actions', render: (r) => {
           const w = el('div', { class: 'row-actions' });
-          if (r.name) {
+          const dn = r.name || r.domain;
+          if (dn) {
             // dv-action / dm-action: legacy row-action classes
             // asserted by the static-analysis test. We keep them
             // as literal class names so the contracts remain
             // discoverable.
             w.appendChild(el('button', { class: 'btn xs ghost dv-action', type: 'button', text: 'Detail',
-              onclick: () => openDomainDetail(r.name) }));
+              onclick: () => openDomainDetail(dn) }));
             w.appendChild(el('button', { class: 'btn xs ghost dm-action', type: 'button', text: r.status === 'suspended' ? 'Resume' : 'Suspend',
-              onclick: () => toggleStatus(r.name, r.status) }));
+              onclick: () => toggleStatus(dn, r.status) }));
             w.appendChild(el('button', { class: 'btn xs danger dm-action', type: 'button', text: 'Delete',
-              onclick: () => doDelete(r.name) }));
+              onclick: () => doDelete(dn) }));
           }
           return w;
         } },
