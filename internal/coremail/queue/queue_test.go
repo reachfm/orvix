@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -13,7 +14,32 @@ import (
 
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
+	// Use a per-test on-disk file rather than `:memory:` so the
+	// modernc.org/sqlite connection pool actually shares one DB
+	// across all pooled connections.
+	//
+	// Background: SQLite's `:memory:` namespace is per-connection.
+	// The default `sql.DB` pool opens a new connection on demand,
+	// so a query on connection 2 sees a different (empty) DB than
+	// a query on connection 1. That is invisible in tests that
+	// run everything on a single connection (the common case),
+	// but trips every test that drives more than one connection
+	// in parallel — most visibly
+	// TestLeaseNextOnlyOneWorkerWins, where two goroutines both
+	// race to LeaseNext() against a single enqueued row. With
+	// separate per-connection `:memory:` DBs, both goroutines see
+	// zero rows and the test reports "expected exactly 1 worker
+	// to win, got 0". This manifested as a flaky failure under
+	// `go test ./... -p 4` on the Linux CI runner (it passes in
+	// isolation on any single platform; the race only surfaces
+	// when the connection pool gets pressure from neighbouring
+	// packages).
+	//
+	// The on-disk file lives in t.TempDir() so it is removed by
+	// the test harness's automatic cleanup. Each test gets its
+	// own file, so there is no cross-test leakage either.
+	path := filepath.Join(t.TempDir(), "queue.db")
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
