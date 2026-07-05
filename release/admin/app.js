@@ -221,7 +221,15 @@ setBeforeEach(async (route) => {
 // data-mailbox-id contract used by the action URL builder in
 // modules/pages/accounts.js; we restate it here so any future
 // refactor of the page modules keeps the contract visible.
+let _loginListenerBound = false;
+function bindLoginBootOnce() {
+  if (_loginListenerBound) return;
+  _loginListenerBound = true;
+  document.addEventListener('orvix:login', () => boot());
+}
+
 async function boot() {
+  bindLoginBootOnce();
   const ok = await hasValidSession();
   const loginView = document.getElementById('login-view');
   const appView   = document.getElementById('app-view');
@@ -236,7 +244,6 @@ async function boot() {
   if (appView)   { appView.classList.remove('hidden'); appView.removeAttribute('aria-hidden'); }
   renderSidebar(document.getElementById('sidebar-nav'));
   renderTopbar(document.querySelector('.topbar') || document.body);
-  document.addEventListener('orvix:login', () => boot());
   startRouter();
   bindKeyboard();
 }

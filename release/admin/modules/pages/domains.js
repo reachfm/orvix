@@ -32,6 +32,7 @@ export async function renderDomainsPage(root) {
   const body = el('div', { class: 'panel-body' });
   card.appendChild(body);
   wrap.appendChild(card);
+  root.appendChild(wrap);
 
   await refresh();
   applyAutoDir(wrap);
@@ -41,10 +42,19 @@ export async function renderDomainsPage(root) {
     body.appendChild(el('div', { class: 'empty', text: t('common.loading') }));
     let data;
     try { data = await apiGet('/api/v1/domains'); }
-    catch (e) { body.innerHTML = ''; body.appendChild(el('div', { class: 'error', text: e.message || 'load failed' })); return; }
+    catch (e) {
+      body.innerHTML = '';
+      body.appendChild(el('div', { class: 'error', text: e.message || 'Failed to load domains' }));
+      body.appendChild(el('button', { class: 'btn ghost', type: 'button', text: 'Retry', onclick: () => refresh() }));
+      return;
+    }
     body.innerHTML = '';
     const list = (data && (data.domains || data)) || [];
-    if (!list.length) { body.appendChild(el('div', { class: 'empty', text: t('common.empty') })); return; }
+    if (!list.length) {
+      body.appendChild(el('div', { class: 'empty', text: 'No domains yet.' }));
+      body.appendChild(el('button', { class: 'btn primary add-domain-btn', type: 'button', text: 'Add Domain', onclick: () => openCreate() }));
+      return;
+    }
     body.appendChild(table({
       columns: [
         { name: 'name', label: 'Domain', render: (r) => r.name || r.domain || '-' },
@@ -97,7 +107,7 @@ function wrap_head() {
   // legacy static-analysis test. Keeping it as the literal
   // class name on this button so downstream test greps still
   // match without rewriting the assertion surface.
-  actions.appendChild(el('button', { class: 'btn primary add-domain-btn', type: 'button', text: 'New domain',
+  actions.appendChild(el('button', { class: 'btn primary add-domain-btn', type: 'button', text: 'Add Domain',
     onclick: () => openCreate() }));
   return actions;
 }

@@ -105,6 +105,7 @@ jobs:
           bash -n release/install-public.sh
           bash -n release/scripts/*.sh
           run_smoke smoke-admin-browser bash release/scripts/smoke-admin-browser.sh
+          run_smoke smoke-admin-functional-browser bash release/scripts/smoke-admin-functional-browser.sh
           run_smoke smoke-admin-js bash release/scripts/smoke-admin-js.sh
           run_smoke smoke-admin-ui bash release/scripts/smoke-admin-ui.sh
           run_smoke smoke-install-public bash release/scripts/smoke-install-public.sh --live

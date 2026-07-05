@@ -27,7 +27,7 @@ export async function renderAccountsPage(root) {
   ]));
 
   const actions = el('div', { class: 'form-actions' });
-  actions.appendChild(el('button', { class: 'btn primary', type: 'button', text: 'New mailbox',
+  actions.appendChild(el('button', { class: 'btn primary add-mailbox-btn', type: 'button', text: 'Add Mailbox',
     onclick: () => openCreate() }));
   wrap.appendChild(actions);
 
@@ -36,6 +36,7 @@ export async function renderAccountsPage(root) {
   const body = el('div', { class: 'panel-body' });
   card.appendChild(body);
   wrap.appendChild(card);
+  root.appendChild(wrap);
 
   await refresh();
   applyAutoDir(wrap);
@@ -45,10 +46,19 @@ export async function renderAccountsPage(root) {
     body.appendChild(el('div', { class: 'empty', text: t('common.loading') }));
     let data;
     try { data = await apiGet('/api/v1/mailboxes'); }
-    catch (e) { body.innerHTML = ''; body.appendChild(el('div', { class: 'error', text: e.message || 'load failed' })); return; }
+    catch (e) {
+      body.innerHTML = '';
+      body.appendChild(el('div', { class: 'error', text: e.message || 'Failed to load mailboxes' }));
+      body.appendChild(el('button', { class: 'btn ghost', type: 'button', text: 'Retry', onclick: () => refresh() }));
+      return;
+    }
     body.innerHTML = '';
     const list = (data && (data.users || data.mailboxes || data)) || [];
-    if (!list.length) { body.appendChild(el('div', { class: 'empty', text: t('common.empty') })); return; }
+    if (!list.length) {
+      body.appendChild(el('div', { class: 'empty', text: 'No mailboxes yet.' }));
+      body.appendChild(el('button', { class: 'btn primary add-mailbox-btn', type: 'button', text: 'Add Mailbox', onclick: () => openCreate() }));
+      return;
+    }
     body.appendChild(table({
       columns: [
         { name: 'e',    label: 'Email', render: (r) => r.email || r.address || '-' },
@@ -92,6 +102,13 @@ function openCreate() {
         domainSel.innerHTML = '';
         if (!domains.length) {
           domainSel.appendChild(el('option', { value: '' }, 'No domains — create one first'));
+          body.appendChild(el('div', { class: 'form-row' }, [
+            el('button', { class: 'btn ghost', type: 'button', text: 'Create a domain first', onclick: () => {
+              const overlay = document.querySelector('.modal-overlay');
+              if (overlay) overlay.remove();
+              location.hash = '#/domains';
+            } }),
+          ]));
           return;
         }
         domains.forEach((d) => {
