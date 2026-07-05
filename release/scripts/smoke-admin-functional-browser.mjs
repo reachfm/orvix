@@ -207,14 +207,16 @@ async function main() {
     `--remote-debugging-port=${debugPort}`,
     `--user-data-dir=${profile}`,
     '--headless=new',
+    '--headless',
+    '--no-sandbox',
     '--disable-gpu',
     '--no-first-run',
     '--no-default-browser-check',
     '--disable-dev-shm-usage',
     '--disable-extensions',
+    '--disable-setuid-sandbox',
     'about:blank',
   ];
-  if (process.platform !== 'win32') chromeArgs.splice(3, 0, '--no-sandbox');
   const proc = spawn(chrome, chromeArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
   const cleanup = () => {
     try { proc.kill(); } catch {}

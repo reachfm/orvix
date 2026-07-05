@@ -84,29 +84,38 @@ jobs:
       - name: Install Chromium for browser smoke
         run: |
           set -euo pipefail
-          if command -v google-chrome >/dev/null 2>&1 || command -v google-chrome-stable >/dev/null 2>&1 \
-             || command -v chromium >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1; then
-            echo "Chrome/Chromium already available"
-            command -v google-chrome 2>/dev/null || command -v google-chrome-stable 2>/dev/null \
-              || command -v chromium 2>/dev/null || command -v chromium-browser 2>/dev/null
-            exit 0
-          fi
+          # ubuntu-24.04 ships google-chrome-stable; verify it's usable.
+          for candidate in google-chrome google-chrome-stable chromium chromium-browser; do
+            if command -v "$candidate" >/dev/null 2>&1; then
+              CHROME_PATH="$(command -v "$candidate")"
+              echo "Chrome/Chromium available at $CHROME_PATH"
+              "$CHROME_PATH" --version 2>&1 || true
+              echo "CHROME_PATH=$CHROME_PATH" >> "$GITHUB_ENV"
+              exit 0
+            fi
+          done
           echo "Installing chromium-browser..."
           sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
           sudo apt-get install -y --no-install-recommends chromium-browser
-          which chromium-browser || { echo "chromium-browser not found after install" >&2; exit 1; }
-          chromium-browser --version
+          CHROME_PATH="$(command -v chromium-browser)"
+          echo "CHROME_PATH=$CHROME_PATH" >> "$GITHUB_ENV"
+          "$CHROME_PATH" --version
 
       - name: Verify scripts and smokes
         env:
-          CHROME: "${{ steps.chrome-path.outputs.path || '' }}"
+          CHROME: "${{ env.CHROME_PATH }}"
         run: |
           set -euo pipefail
           trap 'echo "FAILED_STEP=Verify scripts and smokes" >> "$GITHUB_ENV"' ERR
-          # Detect and set CHROME so the functional browser smoke is fail-closed
-          CHROME="$(command -v google-chrome 2>/dev/null || command -v google-chrome-stable 2>/dev/null || command -v chromium 2>/dev/null || command -v chromium-browser 2>/dev/null || echo '')"
+          CHROME="${CHROME:-}"
+          if [ -z "$CHROME" ]; then
+            CHROME="$(command -v google-chrome 2>/dev/null || command -v google-chrome-stable 2>/dev/null || command -v chromium 2>/dev/null || command -v chromium-browser 2>/dev/null || echo '')"
+          fi
           export CHROME
           echo "functional browser smoke: CHROME=$CHROME"
+          if [ -n "$CHROME" ]; then
+            "$CHROME" --version 2>&1 || echo "chrome version check failed (non-fatal)"
+          fi
           run_smoke() {
             local name="$1"
             shift
