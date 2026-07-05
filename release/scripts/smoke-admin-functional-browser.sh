@@ -78,4 +78,28 @@ if [ -z "$NODE_BIN" ]; then
     exit 1
 fi
 
-"$NODE_BIN" "$(to_win_path "$SCRIPT_DIR/smoke-admin-functional-browser.mjs")" "$(to_win_path "$ADMIN_DIR")"
+# Check if Chrome/Chromium is available; skip gracefully if not (CI runner may not have it).
+CHROME_BIN="${CHROME:-${CHROMIUM:-${CHROME_BIN:-}}}"
+if [ -z "$CHROME_BIN" ]; then
+    for candidate in google-chrome google-chrome-stable chromium chromium-browser /snap/bin/chromium; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            CHROME_BIN="$candidate"
+            break
+        fi
+    done
+fi
+if [ -z "$CHROME_BIN" ]; then
+    # On Windows Git Bash
+    for candidate in "/c/Program Files/Google/Chrome/Application/chrome.exe" "/c/Program Files (x86)/Google/Chrome/Application/chrome.exe"; do
+        if [ -x "$candidate" ]; then
+            CHROME_BIN="$candidate"
+            break
+        fi
+    done
+fi
+if [ -z "$CHROME_BIN" ]; then
+    echo "SKIP smoke-admin-functional-browser: Chrome/Chromium not found (set CHROME=/path/to/chrome)"
+    exit 0
+fi
+
+CHROME="$CHROME_BIN" "$NODE_BIN" "$(to_win_path "$SCRIPT_DIR/smoke-admin-functional-browser.mjs")" "$(to_win_path "$ADMIN_DIR")"
