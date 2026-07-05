@@ -217,7 +217,10 @@ async function main() {
     '--disable-setuid-sandbox',
     'about:blank',
   ];
-  const proc = spawn(chrome, chromeArgs, { stdio: ['ignore', 'inherit', 'inherit'] });
+  const proc = spawn(chrome, chromeArgs, {
+    stdio: ['ignore', 'inherit', 'inherit'],
+    env: { ...process.env, DBUS_SESSION_BUS_ADDRESS: '/dev/null' },
+  });
   proc.on('exit', (code, signal) => {
     if (code !== 0 || signal) console.error(`Chrome exited: code=${code} signal=${signal}`);
   });
@@ -228,7 +231,7 @@ async function main() {
   };
   process.on('exit', cleanup);
   try {
-    await waitFor(() => fetchJSON(`http://127.0.0.1:${debugPort}/json/version`).catch(() => null), 'Chrome DevTools');
+    await waitFor(() => fetchJSON(`http://127.0.0.1:${debugPort}/json/version`).catch(() => null), 'Chrome DevTools', 30000);
     const targets = await waitFor(async () => {
       const list = await fetchJSON(`http://127.0.0.1:${debugPort}/json/list`).catch(() => []);
       return list.find((t) => t.type === 'page' && t.webSocketDebuggerUrl);
