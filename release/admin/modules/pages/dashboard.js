@@ -195,7 +195,8 @@ async function loadServices(card) {
     const rt = await loadRuntime();
     body.innerHTML = '';
     const list = el('ul', { class: 'service-list' });
-    const rtSvcs = (rt && (rt.services || rt.listeners)) || [];
+    const rtSvcsRaw = rt && (rt.services || rt.listeners);
+    const rtSvcs = Array.isArray(rtSvcsRaw) ? rtSvcsRaw : (rtSvcsRaw && typeof rtSvcsRaw === 'object' ? Object.values(rtSvcsRaw) : []);
     if (rtSvcs.length === 0) {
       body.appendChild(el('div', { class: 'empty', text: t('common.empty') }));
       return;

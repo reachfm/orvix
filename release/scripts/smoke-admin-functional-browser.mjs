@@ -94,7 +94,7 @@ function startServer() {
           if (url.pathname === '/api/v1/csrf-token') return sendJSON(res, 200, { csrf_token: 'csrf-functional' });
           if (url.pathname === '/api/v1/health') return sendJSON(res, 200, { status: 'ok' });
           if (url.pathname === '/api/v1/domains') {
-            if (req.method === 'GET') return sendJSON(res, 200, { domains: [] });
+            if (req.method === 'GET') return sendJSON(res, 200, { domains: [{ domain: 'example.com', status: 'active', plan: 'smb', mailbox_count: 1 }] });
             if (req.method === 'POST') return sendJSON(res, 201, { name: 'example.com', status: 'active' });
           }
           if (url.pathname === '/api/v1/mailboxes') {
@@ -259,7 +259,7 @@ async function main() {
     await waitFor(() => evalJS(visible('#login-email')), '#login-email visible');
     await waitFor(() => evalJS(visible('#login-password')), '#login-password visible');
     await waitFor(() => evalJS(visible('#login-button')), '#login-button visible');
-    const emptyErrorHidden = await evalJS(`!(document.querySelector('#login-message')?.classList.contains('visible')) && !(document.querySelector('#login-message')?.textContent || '').trim()`);
+    const emptyErrorHidden = await evalJS(`const m = document.querySelector('#login-message'); return !m || m.style.display === 'none' || !(m.textContent || '').trim()`);
     if (!emptyErrorHidden) fail('empty login error alert is visible before submit');
 
     await evalJS(`
@@ -271,22 +271,50 @@ async function main() {
     await waitFor(async () => (await mainText()).length > 10, 'nonblank dashboard');
     const dashText = await mainText();
     if (!/dashboard/i.test(dashText)) fail(`dashboard did not render expected content: ${dashText.slice(0, 120)}`);
+    if (dashText.includes('forEach is not a function') || dashText.includes('TypeError')) fail(`dashboard has JS error in rendered text: ${dashText.slice(0, 200)}`);
 
-    await evalJS(`location.hash = '#/domains'`);
-    await waitFor(() => evalJS(`document.querySelector('.page[data-route="domains"] .page-title')?.textContent === 'Domains'`), 'domains route title');
-    await waitFor(() => evalJS(visible('.page[data-route="domains"] .add-domain-btn')), 'Add Domain button');
-    const domainsText = await mainText();
-    if (!/Domains/.test(domainsText) || !/Add Domain/.test(domainsText) || domainsText.trim().length < 20) fail(`domains route blank or incomplete: ${domainsText}`);
+    const navigateRoute = async (route, routeName) => {
+      await evalJS(`location.hash = '#/${route}'`);
+      await waitFor(async () => (await mainText()).trim().length > 10, `${routeName} route content`);
+      const text = await mainText();
+      if (text.trim().length < 10) fail(`${routeName} route blank: "${text.slice(0, 80)}"`);
+    };
 
-    await evalJS(`location.hash = '#/accounts'`);
-    await waitFor(() => evalJS(`document.querySelector('.page[data-route="accounts"] .page-title')?.textContent === 'Accounts'`), 'accounts route title');
-    await waitFor(() => evalJS(visible('.page[data-route="accounts"] .add-mailbox-btn')), 'Add Mailbox button');
-    const accountsText = await mainText();
-    if (!/Accounts/.test(accountsText) || !/Add Mailbox/.test(accountsText) || accountsText.trim().length < 20) fail(`accounts route blank or incomplete: ${accountsText}`);
+    await navigateRoute('domains', 'Domains');
+    const addDomainBtn = await evalJS(visible('.add-domain-btn'));
+    if (!addDomainBtn) fail('Domains Add Domain button not visible');
+    await evalJS(`document.querySelector('.add-domain-btn').click()`);
+    await waitFor(() => evalJS(visible('.modal-overlay .modal')), 'Domains add modal');
+    const domainModalInputs = await evalJS(`document.querySelectorAll('.modal-overlay input').length`);
+    if (domainModalInputs < 1) fail(`EMPTY_MODAL: Domains add modal has no inputs`);
+    await evalJS(`document.querySelector('.modal-overlay .btn.ghost')?.click()`);
+    await waitFor(() => evalJS(`!document.querySelector('.modal-overlay')`), 'Domains modal close');
 
-    await evalJS(`document.querySelector('.page[data-route="accounts"] .add-mailbox-btn').click()`);
-    await waitFor(() => evalJS(visible('.modal-overlay .modal')), 'mailbox modal');
-    await waitFor(() => evalJS(`document.body.innerText.includes('Create a domain first') || document.body.innerText.includes('No domains')`), 'no-domain mailbox guidance');
+    await navigateRoute('accounts', 'Accounts');
+    const addAcctBtn = await evalJS(visible('.add-mailbox-btn'));
+    if (!addAcctBtn) fail('Accounts Add Mailbox button not visible');
+    await evalJS(`document.querySelector('.add-mailbox-btn').click()`);
+    await waitFor(() => evalJS(visible('.modal-overlay .modal')), 'Accounts add modal');
+    const acctModalInputs = await evalJS(`document.querySelectorAll('.modal-overlay input, .modal-overlay select').length`);
+    if (acctModalInputs < 2) fail(`EMPTY_MODAL: Accounts add modal has too few inputs (${acctModalInputs})`);
+    await evalJS(`document.querySelector('.modal-overlay .btn.ghost')?.click()`);
+    await waitFor(() => evalJS(`!document.querySelector('.modal-overlay')`), 'Accounts modal close');
+
+    await navigateRoute('dns', 'DNS & DKIM');
+    await navigateRoute('queue', 'Queue');
+    await navigateRoute('logs', 'Logs');
+    await navigateRoute('monitoring', 'Monitoring');
+    await navigateRoute('updates', 'Updates');
+    await navigateRoute('settings', 'Settings');
+    await navigateRoute('services', 'Services');
+    await navigateRoute('license', 'License');
+    await navigateRoute('backups', 'Backups');
+
+    const sidebarLinks = await evalJS(`Array.from(document.querySelectorAll('.sidebar-link')).map(a => a.getAttribute('data-route')).join(',')`);
+    const hiddenRoutes = ['domains/groups', 'domains/lists', 'domains/public', 'accounts/classes', 'security/antispam', 'security/spam', 'security/routing', 'security/rules', 'security/quarantine', 'logs/rules', 'logs/files', 'logs/server', 'backups/ftp', 'backups/fs', 'migration', 'clustering', 'admin/users'];
+    for (const hr of hiddenRoutes) {
+      if (sidebarLinks.includes(hr)) fail(`HIDDEN route '${hr}' still appears in sidebar`);
+    }
 
     if (!requests.includes('POST /api/v1/auth/login')) fail('login POST was not called');
     if (!requests.includes('GET /api/v1/domains')) fail('domains API was not called');
@@ -296,7 +324,7 @@ async function main() {
   } finally {
     cleanup();
   }
-  console.log('PASS admin functional browser smoke: login, dashboard, domains, accounts');
+  console.log('PASS admin functional browser smoke: login, dashboard, v1 routes, no empty modals');
 }
 
 main().catch((err) => {

@@ -92,12 +92,22 @@ export function renderLogin(root) {
 
   applyAutoDir(card);
 
+  function showError(msg) {
+    message.textContent = msg;
+    message.style.display = '';
+  }
+  function hideError() {
+    message.textContent = '';
+    message.style.display = 'none';
+  }
+  hideError();
+
   // Wire submit
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     submit.disabled = 'disabled';
-    message.classList.remove('visible');
-    message.textContent = '';
+    submit.textContent = 'Signing in\u2026';
+    hideError();
     const email = form.querySelector('#login-email').value.trim();
     const password = form.querySelector('#login-password').value;
     const mfa = (form.querySelector('#login-mfa') || {}).value || '';
@@ -109,8 +119,12 @@ export function renderLogin(root) {
       document.dispatchEvent(new CustomEvent('orvix:login'));
     } catch (err) {
       submit.removeAttribute('disabled');
-      message.classList.add('visible');
-      message.textContent = (err && err.message) || t('login.failed');
+      submit.textContent = t('login.signIn');
+      if (err && err.status === 0) {
+        showError('Unable to reach Orvix Admin. Please try again.');
+      } else {
+        showError((err && err.message) || t('login.failed'));
+      }
       if (err && err.code === 'mfa_required') {
         mfaWrap.classList.remove('hidden');
       }

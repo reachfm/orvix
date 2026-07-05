@@ -215,8 +215,9 @@ input, select, textarea, button { font: inherit; color: inherit; }
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
-.login-card .message { min-height: 22px; margin-top: 14px; font-size: 13px; line-height: 1.45; }
+.login-card .message { margin-top: 14px; font-size: 13px; line-height: 1.45; }
 .login-card .message.error { color: var(--bad); }
+.login-card .message:empty { display: none; }
 
 /* -------------------------------------------------------------------
    App shell — sidebar + topbar + content
