@@ -41,7 +41,9 @@ func testService(t *testing.T) *Service {
 	os.MkdirAll(attDir, 0750)
 	os.WriteFile(filepath.Join(attDir, "test.pdf"), []byte("%PDF"), 0640)
 
-	return NewService(filepath.Join(base, "backups"), db, db, mailDir, attDir)
+	s := NewService(filepath.Join(base, "backups"), db, db, mailDir, attDir)
+	s.SetStagingRoot(filepath.Join(base, "restore-staging"))
+	return s
 }
 
 func TestCreateBackup(t *testing.T) {

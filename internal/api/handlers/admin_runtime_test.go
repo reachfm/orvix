@@ -438,7 +438,9 @@ func TestAdminRuntimeNoStackTrace(t *testing.T) {
 // and the response must be valid JSON with unknown/default values.
 func TestAdminRuntimeNilConfig(t *testing.T) {
 	logger := zap.NewNop()
-	db, err := config.NewDatabase(&config.Defaults().Database, logger)
+	cfg := config.Defaults()
+	cfg.Database.DSN = filepath.Join(t.TempDir(), "test.db")
+	db, err := config.NewDatabase(&cfg.Database, logger)
 	if err != nil {
 		t.Fatalf("database: %v", err)
 	}

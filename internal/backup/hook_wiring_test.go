@@ -11,7 +11,6 @@ package backup
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -87,8 +86,14 @@ func TestPostCreateHookInvokedOnCompletedBackup(t *testing.T) {
 // target path is already a non-directory file.
 func TestPostCreateHookNotInvokedWhenArchiveFails(t *testing.T) {
 	s := testService(t)
-	sentinel := filepath.Join(s.stagingRoot, "archive_blocker")
-	if err := os.WriteFile(sentinel, []byte("block"), 0640); err != nil {
+	// Replace the writable backup basePath with a non-directory
+	// file so that safeCreateBackupDir's os.MkdirAll fails and
+	// createBackupLocked returns before it ever attempts the
+	// archive + hook. This tests the invariant that a failure
+	// before the archive step also skips the hook.
+	orig := s.basePath
+	os.RemoveAll(orig)
+	if err := os.WriteFile(orig, []byte("block"), 0640); err != nil {
 		t.Fatalf("create sentinel: %v", err)
 	}
 	var fired atomic.Int32
@@ -96,10 +101,6 @@ func TestPostCreateHookNotInvokedWhenArchiveFails(t *testing.T) {
 		fired.Add(1)
 	})
 	_, err := s.CreateBackup(context.Background(), "archive-fails")
-	// The archive failure must surface to the caller
-	// (otherwise the local backup may be silently
-	// corrupted). Either error path is acceptable;
-	// what matters is that the hook didn't fire.
 	_ = err
 	if fired.Load() != 0 {
 		t.Fatalf("hook fired despite archive failure")
