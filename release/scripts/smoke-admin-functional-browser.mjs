@@ -217,7 +217,10 @@ async function main() {
     '--disable-setuid-sandbox',
     'about:blank',
   ];
-  const proc = spawn(chrome, chromeArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+  const proc = spawn(chrome, chromeArgs, { stdio: ['ignore', 'inherit', 'inherit'] });
+  proc.on('exit', (code, signal) => {
+    if (code !== 0 || signal) console.error(`Chrome exited: code=${code} signal=${signal}`);
+  });
   const cleanup = () => {
     try { proc.kill(); } catch {}
     try { server.close(); } catch {}
@@ -330,8 +333,10 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error(`FAIL admin functional browser smoke: ${err && err.message || err}`);
-  if (failures.length) console.error(failures.join('\n'));
+  const msg = (err && err.message) || String(err) || 'unknown error';
+  console.error(`FAIL admin functional browser smoke: ${msg}`);
+  if (err && err.stack) console.error(err.stack.split('\n').slice(0, 5).join('\n'));
+  if (failures.length) console.error(`Browser failures:\n${failures.join('\n')}`);
   console.error(`Requests: ${requests.join(', ')}`);
   process.exit(1);
 });
