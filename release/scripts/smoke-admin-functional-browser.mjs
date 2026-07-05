@@ -206,15 +206,16 @@ async function main() {
   const chromeArgs = [
     `--remote-debugging-port=${debugPort}`,
     `--user-data-dir=${profile}`,
-    '--headless=new',
     '--headless',
     '--no-sandbox',
     '--disable-gpu',
+    '--disable-software-rasterizer',
     '--no-first-run',
     '--no-default-browser-check',
     '--disable-dev-shm-usage',
     '--disable-extensions',
     '--disable-setuid-sandbox',
+    '--disable-dbus',
     'about:blank',
   ];
   const proc = spawn(chrome, chromeArgs, {
@@ -253,21 +254,44 @@ async function main() {
     await cdp.send('Runtime.enable');
     await cdp.send('Page.enable');
     await cdp.send('Log.enable');
+    await cdp.send('Console.enable');
+    // Capture all console messages from the browser for diagnostics
+    cdp.on('Console.messageAdded', (p) => {
+      const msg = p.message || {};
+      if (msg.level === 'error' || msg.level === 'warning') {
+        console.error(`browser ${msg.level}: ${(msg.text || '')} ${(msg.url || '')}:${msg.line || 0}`);
+      }
+    });
     await cdp.send('Page.navigate', { url: `http://127.0.0.1:${port}/admin/` });
     await new Promise((resolve) => cdp.on('Page.loadEventFired', resolve));
+    // After load event, wait a moment for deferred module scripts to execute
+    await new Promise((r) => setTimeout(r, 500));
 
     const evalJS = async (expression) => {
       const res = await cdp.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
-      if (res.exceptionDetails) fail(res.exceptionDetails.text || 'evaluation failed');
+      if (res.exceptionDetails) {
+        const ed = res.exceptionDetails;
+        const errMsg = ed.text || ed.exception?.description || JSON.stringify(ed);
+        console.error(`CDP eval error for: ${expression.slice(0, 120)}`);
+        console.error(`  exceptionDetails: ${errMsg}`);
+        if (ed.stackTrace) console.error(`  stack: ${(ed.stackTrace.callFrames || []).map(f => `${f.url}:${f.lineNumber}:${f.columnNumber}`).join(' > ')}`);
+        fail(`evaluation failed: ${errMsg}`);
+      }
       return res.result && res.result.value;
     };
     const exists = (sel) => `!!document.querySelector(${JSON.stringify(sel)})`;
     const mainText = () => evalJS(`document.querySelector('#page-root')?.innerText?.trim() || ''`);
 
-    await waitFor(() => evalJS(exists('#login-email')), '#login-email visible');
+    // Verify CDP evaluation works at all
+    const docType = await evalJS(`typeof document`);
+    console.error(`bootstrap: typeof document = ${docType}`);
+    const loginView = await evalJS(`document.querySelector('#login-view')?.classList?.value || 'no-login-view'`);
+    console.error(`bootstrap: login-view classes = ${loginView}`);
+
+    await waitFor(() => evalJS(exists('#login-email')), '#login-email visible', 15000);
     await waitFor(() => evalJS(exists('#login-password')), '#login-password visible');
     await waitFor(() => evalJS(exists('#login-button')), '#login-button visible');
-    const emptyErrorHidden = await evalJS(`const m = document.querySelector('#login-message'); return !m || m.style.display === 'none' || !(m.textContent || '').trim()`);
+    const emptyErrorHidden = await evalJS(`!!document.querySelector('#login-message') && document.querySelector('#login-message').style.display === 'none'`);
     if (!emptyErrorHidden) fail('empty login error alert is visible before submit');
 
     await evalJS(`
