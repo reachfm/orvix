@@ -1085,3 +1085,24 @@ kbd { background: var(--bg-elevated); border: 1px solid var(--border-2); padding
 .missing-route { padding: 22px; color: var(--text-2); }
 
 .loading-row, .empty-row { text-align: center; color: var(--text-2); padding: 18px 0; }
+
+/* Sub-page card grid (Security & filtering landing, etc.) */
+.sub-page-grid {
+  display: grid; gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+}
+.sub-page-card {
+  display: block; padding: 14px 16px; text-decoration: none;
+  background: var(--bg-raised); border: 1px solid var(--border-2);
+  border-radius: var(--r-md); color: var(--text-0);
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.sub-page-card:hover { border-color: var(--accent); background: var(--bg-hover); text-decoration: none; }
+.sub-page-card h4 { margin: 0 0 4px; font-size: 13.5px; font-weight: 600; color: var(--text-0); }
+.sub-page-card p  { margin: 0; color: var(--text-2); font-size: 12px; line-height: 1.4; }
+
+/* Dashboard kpi subtitle */
+.panel-head-meta { display: block; margin-bottom: 2px; }
+
+/* Page actions (header right-side buttons) */
+.page-actions { display: flex; align-items: center; gap: 8px; }

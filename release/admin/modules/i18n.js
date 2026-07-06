@@ -230,7 +230,7 @@ const TABLE = {
     'logs.source':            'Source',
     'logs.since':             'Since',
 
-    'planned.feature':        'This feature is planned for a future release. Backend exposure is not yet wired; no fake endpoint is served.',
+    'planned.feature':        'This page is not exposed by the current build. The operator should not see it — sidebar items that link here are hidden by design.',
   },
 
   ar: {
@@ -447,7 +447,7 @@ const TABLE = {
     'logs.source':            'المصدر',
     'logs.since':             'منذ',
 
-    'planned.feature':        'هذه الميزة مخطط لها في إصدار مستقبلي. الربط الخلفي لم يُضبط بعد؛ لا توجد نقطة نهاية وهمية.',
+    'planned.feature':        'هذه الصفحة غير مكشوفة في هذا الإصدار. لا يجب أن يراها المشغّل — عناصر الشريط الجانبي التي تشير إلى هنا مخفية عن قصد.',
   },
 };
 

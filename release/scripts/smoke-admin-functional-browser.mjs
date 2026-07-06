@@ -102,6 +102,11 @@ function startServer() {
             if (req.method === 'POST') return sendJSON(res, 201, { id: 'mbox-1', email: 'admin@example.com' });
           }
           if (url.pathname === '/api/v1/admin/account-classes') return sendJSON(res, 200, { classes: [] });
+          if (url.pathname === '/api/v1/admin/users') return sendJSON(res, 200, { users: [] });
+          if (url.pathname === '/api/v1/admin/audit-logs') return sendJSON(res, 200, { logs: [] });
+          if (url.pathname === '/api/v1/admin/runtime') return sendJSON(res, 200, {
+            hostname: 'mock-host', version: '1.0.0', status: 'ok', listeners: [],
+          });
           return sendJSON(res, 200, {});
         }
         let rel = url.pathname;
@@ -363,6 +368,9 @@ async function main() {
     await navigateRoute('services', 'Services');
     await navigateRoute('license', 'License');
     await navigateRoute('backups', 'Backups');
+    await navigateRoute('admin/users', 'Admin Users');      // B-1 regression guard
+    await navigateRoute('admin/audit-log', 'Audit Log');   // audit-log accessible at its own route
+    await navigateRoute('runtime-listeners', 'Runtime Listeners');
 
     const sidebarLinks = await evalJS(`Array.from(document.querySelectorAll('.sidebar-link')).map(a => a.getAttribute('data-route')).join(',')`);
     const hiddenRoutes = ['migration', 'migration/sources', 'clustering', 'clustering/imap', 'clustering/pop3', 'clustering/webmail'];
@@ -374,6 +382,14 @@ async function main() {
     if (!requests.includes('GET /api/v1/domains')) fail('domains API was not called');
     if (!requests.includes('GET /api/v1/mailboxes')) fail('mailboxes API was not called');
     if (failures.length) fail(`browser errors:\n${failures.join('\n')}`);
+
+    // Banned-string DOM check: after login, scan rendered page text for
+    // placeholder strings that should never appear in production UI.
+    const BANNED_RE = /coming soon|future release|not implemented|will be added later|unavailable in this build|fake|mock/i;
+    const pageText = await evalJS(`document.body?.innerText || ''`);
+    if (BANNED_RE.test(pageText)) {
+      fail(`BANNED_STRING_IN_DOM: production UI rendered a forbidden placeholder string`);
+    }
     cdp.close();
   } finally {
     cleanup();

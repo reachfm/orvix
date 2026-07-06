@@ -144,7 +144,7 @@ register('security/quarantine',      quarantine.renderQuarantinePage);
 register('security/login-protection', loginProtectionPage.renderLoginProtectionPage);
 register('admin/groups',             adminGroups.renderAdminGroupsPage);
 register('admin/users',              adminUsersPage.renderAdminUsersPage);
-register('admin/users',              auditLog.renderAuditLogPage);
+register('admin/audit-log',          auditLog.renderAuditLogPage);    // accessible at /#/admin/audit-log
 register('admin/limits',             accountClasses.renderAccountClassesPage);
 register('domains/groups',           domainGroups.renderDomainGroupsPage);
 register('domains/lists',            mailingLists.renderMailingListsPage);

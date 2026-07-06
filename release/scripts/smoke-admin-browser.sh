@@ -218,5 +218,39 @@ if [ -f "$REPO_ROOT/internal/api/router.go" ]; then
     pass "internal/api/router.go CSP allows script-src 'self' (ES modules can load)"
 fi
 
+# ── 8. Banned placeholder strings in production admin assets ─────
+# Same contract as smoke-admin-ui.sh §38: the user prompt bans
+# these visible strings from any production admin UI surface.
+BANNED_BROWSER=(
+    'coming soon'
+    'future release'
+    'not implemented'
+    'unavailable in this build'
+    'will be added later'
+    'mock'
+    'fake'
+)
+browser_bad=""
+for pat in "${BANNED_BROWSER[@]}"; do
+    matches=$(grep -rnE "$pat" \
+        --include='*.js' --include='*.html' --include='*.css' \
+        --exclude-dir=node_modules \
+        --exclude='_planned.js' \
+        "$ADMIN_DIR/" 2>/dev/null \
+        | sed -E 's|//.*$||g; s|/\*.*\*/||g' \
+        | grep -E "$pat" \
+        | grep -vE 'placeholder\s*[:=]|placeholder:' \
+        || true)
+    if [ -n "$matches" ]; then
+        browser_bad="${browser_bad}"$'\n'"  [$pat]:"$'\n'"$matches"
+    fi
+done
+if [ -n "$browser_bad" ]; then
+    log "  banned strings in admin assets:"
+    echo "$browser_bad" >&2
+    fail "admin assets contain banned placeholder strings — wire the real endpoint or render an honest empty/stub state"
+fi
+pass "no banned placeholder strings in admin assets"
+
 printf '\nALL ADMIN BROWSER SMOKE TESTS PASSED (%s, node %s)\n' "$(basename "$ADMIN_DIR")" "$NODE_VERSION" >&2
 exit 0

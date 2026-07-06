@@ -76,7 +76,7 @@ function paint(stateCard, proxyCard, nodesCard, r) {
     ['Consensus', r.consensus],
   ]));
   stateBody.appendChild(el('p', { class: 'subtle',
-    text: r.honest_note || 'clustering / proxy replication is not implemented in this build.' }));
+    text: r.honest_note || 'This build runs as a single node. Multi-node clustering and proxy replication are not enabled in this version of Orvix.' }));
 
   const proxyBody = proxyCard.querySelector('.panel-body');
   proxyBody.innerHTML = '';

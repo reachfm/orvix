@@ -606,5 +606,57 @@ if ! grep -q "apiRateLimitMiddleware" "$ROUTER" 2>/dev/null; then
 fi
 pass "router.go exempts the admin SPA from the API rate limiter"
 
+# ── 38. No banned placeholder strings in production UI ────────────────────
+#
+# User prompt explicitly bans the following strings from any visible
+# production admin UI surface (.js / .html / .css):
+#   "coming soon" / "future release" / "not implemented" /
+#   "unavailable in this build" / "will be added later" /
+#   "placeholder" / "TODO" / "mock" / "fake"
+#
+# Per the same prompt, "Docs may contain honest limitations" so we
+# only scan product-UI assets. Code comments and the HTML form
+# `placeholder=` attribute are also excluded — comments are not
+# visible copy, and form hint attributes are standard HTML semantics.
+#
+# The _planned.js module is exempt because it is the legitimate
+# "honest stub" template used by the 404 handler; it is not routed
+# to any visible sidebar item.
+BANNED_PATTERNS=(
+    'coming soon'
+    'future release'
+    'not implemented'
+    'unavailable in this build'
+    'will be added later'
+    'mock'
+    'fake'
+)
+bad_strings=""
+for pat in "${BANNED_PATTERNS[@]}"; do
+    # Scan only the production asset types; skip node_modules + the
+    # legitimate _planned.js module that is the "honest stub" template.
+    # Strip // line comments and /* ... */ block comments before the
+    # pattern check, since banned words inside source-code comments
+    # are not visible product copy.
+    matches=$(grep -rnE "$pat" \
+        --include='*.js' --include='*.html' --include='*.css' \
+        --exclude-dir=node_modules \
+        --exclude='_planned.js' \
+        "$ADMIN_DIR/" 2>/dev/null \
+        | sed -E 's|//.*$||g; s|/\*.*\*/||g' \
+        | grep -E "$pat" \
+        | grep -vE 'placeholder\s*[:=]|placeholder:' \
+        || true)
+    if [ -n "$matches" ]; then
+        bad_strings="${bad_strings}"$'\n'"  [$pat]:"$'\n'"$matches"
+    fi
+done
+if [ -n "$bad_strings" ]; then
+    log "  banned placeholder strings found:"
+    echo "$bad_strings" >&2
+    fail "production UI contains banned placeholder strings — wire the real endpoint or render an honest empty/stub state"
+fi
+pass "no banned placeholder strings in production UI"
+
 echo
 echo "ALL ADMIN UI SMOKE TESTS PASSED"

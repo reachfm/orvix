@@ -9,7 +9,7 @@
      GET    /api/v1/admin/ssl/acme/status           → honest ACME view
      GET    /api/v1/admin/ssl/expiry-warnings       → fast badge poll
 
-   The page is honest: ACME issuance is not implemented
+   The page is honest: ACME issuance is not available
    in this build; the UI tells the operator which script
    and which endpoint to use, never fabricates automation.
 

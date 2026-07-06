@@ -284,5 +284,43 @@ fi
 
 pass "all ${#JS_FILES[@]} JS file(s) parse cleanly under Node $NODE_VERSION (via $NODE_BIN)"
 
+# ── 5. Banned placeholder strings in production admin JS ────────────
+#
+# Same contract as smoke-admin-ui.sh §38: the user prompt bans the
+# following visible strings from any production admin UI surface.
+# Code comments and HTML form `placeholder=` attributes are
+# excluded — comments are not visible copy, and form hint
+# attributes are standard HTML semantics.
+BANNED_PATTERNS_JS=(
+    'coming soon'
+    'future release'
+    'not implemented'
+    'unavailable in this build'
+    'will be added later'
+    'mock'
+    'fake'
+)
+js_bad=""
+for pat in "${BANNED_PATTERNS_JS[@]}"; do
+    # grep -n then strip // line comments and the body of /* */ block
+    # comments; re-grep for the pattern; skip form placeholder= attrs.
+    matches=$(grep -rnE "$pat" --include='*.js' --exclude-dir=node_modules \
+        --exclude='_planned.js' \
+        "$ADMIN_DIR/" 2>/dev/null \
+        | sed -E 's|//.*$||g; s|/\*.*\*/||g' \
+        | grep -E "$pat" \
+        | grep -vE 'placeholder\s*[:=]|placeholder:' \
+        || true)
+    if [ -n "$matches" ]; then
+        js_bad="${js_bad}"$'\n'"  [$pat]:"$'\n'"$matches"
+    fi
+done
+if [ -n "$js_bad" ]; then
+    log "  banned strings in admin JS:"
+    echo "$js_bad" >&2
+    fail "admin JS contains banned placeholder strings — wire the real endpoint or render an honest empty/stub state"
+fi
+pass "no banned placeholder strings in admin JS"
+
 printf '\nALL ADMIN JS SYNTAX TESTS PASSED\n' >&2
 exit 0
