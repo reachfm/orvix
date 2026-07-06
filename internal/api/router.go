@@ -604,6 +604,11 @@ func (r *Router) setupRoutes() {
 	// this endpoint also kills the admin session if the
 	// caller is the same browser.
 	authCSRF.Post("/webmail/logout", r.h.WebmailLogout)
+	// Webmail Change Password. Same CSRF + auth shape as
+	// logout. The handler ignores any id in the body
+	// and operates on the mailbox the JWT resolves to,
+	// so cross-mailbox password changes are impossible.
+	authCSRF.Post("/webmail/password/change", r.h.WebmailChangePassword)
 
 	admin := protected.Group("", auth.RequireAnyRole(auth.RoleAdmin, auth.RoleSuperAdmin))
 	admin.Get("/domains", r.h.ListDomains)

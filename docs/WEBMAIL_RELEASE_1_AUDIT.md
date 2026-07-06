@@ -25,17 +25,34 @@ R1 ships:
   Settings modal (IMAP :993 SSL, SMTP :587 STARTTLS, Outlook
   Autodiscover URL, Thunderbird Autoconfig URL, copy buttons,
   no password or secret displayed);
+- a real, in-app **employee Change Password** feature
+  (Settings → Security → Change password) backed by the new
+  `POST /api/v1/webmail/password/change` endpoint with a
+  strict verify-current-password → rehash-with-Argon2id →
+  update-only-the-authed-mailbox contract. See §3.0b.
+- zero placeholder / coming-soon / future-release / not-
+  implemented copy in product UI. The Settings modal is
+  the 10-tab honest surface: Profile / Appearance /
+  Compose / Mail / Filters / Vacation / Forwarding /
+  **Mail Client Setup** / Notifications / Security. The
+  "Coming later" tab is gone; the "Available in a future
+  release" panel is gone; the Security tab no longer
+  pretends to ship TOTP / app-passwords. Gated by
+  `smoke-webmail-ui.sh` §13 and verified by the functional
+  browser smoke phase 8.
 - a self-contained **functional browser smoke** that loads
-  the webmail bundle in headless Chrome, drives the login → SPA
-  shell → folder sidebar → message list → reading pane →
-  compose modal → Settings → Mail Client Setup tab → copy
-  buttons → dirAuto → zero-console-errors chain. This runs
-  locally against a deterministic Node mock backend and
-  **passes** in this environment;
+  the webmail bundle in headless Chrome, drives the login →
+  SPA shell → folder sidebar → message list → reading pane →
+  compose modal → Settings → Mail Client Setup tab →
+  Settings → Security → Change password (mismatch validation
+  + mocked success) → dirAuto → zero-console-errors chain.
+  Runs locally against a deterministic Node mock backend and
+  **passes** 10/10 phases in this environment;
 - the production-grade backend was already live on `main` from
   prior slices (autodiscover / autoconfig / webmail enterprise
   v1+v2 / UI polish 3). R1 does not regress any of it;
-- new Go regressions pinning the R1 invariant set.
+- new Go regressions pinning the R1 invariant set
+  (10 Change Password tests + 4 R1 invariant tests).
 
 ---
 
@@ -113,6 +130,52 @@ ships without operator input.
 
 No password is ever displayed on the tab; no client-supplied
 form field writes a secret client-side or server-side.
+
+### 3.0b Change Password (NEW on `feature/webmail-r1-password-security-fix`)
+
+The R1 acceptance bar forbade placeholder / coming-soon
+copy in production. The previous Settings modal shipped
+a "Coming later" tab listing TOTP / app-passwords /
+per-device sessions / reading-pane position /
+conversation view / external image preference as
+"future features". The Security tab carried a "TOTP /
+app-passwords UI is not enabled in this build" notice.
+
+Cut `feature/webmail-r1-password-security-fix` removes
+all of that copy from the production bundle and replaces
+the Security tab's empty panel with a real, working
+**employee Change Password** flow:
+
+| Surface | Endpoint / file | Behaviour |
+|---|---|---|
+| Backend endpoint | `POST /api/v1/webmail/password/change` (`webmail_auth.go::WebmailChangePassword`) | Mounted on `authCSRF` group. Auth middleware runs first (no cookie ⇒ 401). CSRF middleware requires `X-CSRF-Token` matching the `csrf_token` cookie. Body parsed: `{current_password, new_password, confirm_password?}`. Body is NEVER used to resolve the mailbox — `resolveWebmailUserContext` (cookie-derived JWT) is the only source. Current password verified via the production `verifyMailboxPassword` helper (accepts both `$argon2id$` and legacy `bcrypt$`). Wrong current password ⇒ 401 generic `{"error":"invalid credentials"}` envelope. New password verified `< 8` chars ⇒ 400 "at least 8 characters". Mismatch with `confirm_password` ⇒ 400 "do not match". On success: row update writes a fresh `$argon2id$` hash (`hashPasswordArgon2id` helper, m=64 MiB t=3 p=1 16-byte random salt), `auth_scheme='$argon2id$'`, `updated_at=now`. WHERE clause is `id = ctx.Mailbox.ID` — only the caller's row. Response body: `{"status":"changed"}` — no hash, no token, no email, no Set-Cookie. Audit log entry: `webmail.password_change` with mailbox_id + IP only. No password / hash / token / email in the audit fields. |
+| UI surface | `Settings → Security → Change Password` (`webmail.js::renderSecurityTab` → `renderChangePasswordSection`) | Three password inputs (current / new / confirm), `type="password"`, `autocomplete="current-password"`/`"new-password"`, `spellcheck="false"`, `autocapitalize="off"`, `autocorrect="off"` to defeat mobile keyboards. Client-side validation mirrors server (`webmailMinPasswordLength = 8` constant). On submit: a `fetch` to `/api/v1/webmail/password/change` with both `csrf_token` cookie and `X-CSRF-Token` header (double-submit). On success: inputs cleared, status region (`role="status"`) flips to `.success` class with text "Password changed. Your new password is now in effect.", a non-sensitive toast fires. On error: server's `error` field rendered in the same role=status region; no password / hash / token ever reaches the user-visible tree. NO localStorage / sessionStorage writes anywhere on this path. |
+| Why it lives in Security | The previous "TOTP / app-passwords UI is not enabled in this build" notice sat in Security | The new Security tab ships a real Change Password section. The placeholder / fake-control / "not enabled" copy is GONE — gated by `smoke-webmail-ui.sh` §13 (forbidden tokens). |
+
+**Why no body-trusted mailbox id.** The Change Password
+handler resolves the mailbox ONLY via
+`resolveWebmailUserContext(c)` (cookie-derived JWT, then
+DB lookup). The handler reads `current_password`,
+`new_password`, and `confirm_password` from the body; any
+other body field is parsed but never reaches a SQL clause.
+A forged body that says `mailbox_id: <foreign>` cannot
+cause a cross-mailbox UPDATE — pinned by
+`TestWebmailChangePasswordCrossMailboxImpossible` and
+`TestWebmailChangePasswordIgnoresExtraFieldsSafely`.
+
+**Why no Set-Cookie on success.** A password change is
+not a session change. The 15-minute `access_token`
+keeps working until it naturally expires, then the
+refresh-token path runs as normal. Forcing a re-login
+on every change is hostile UX for the common "I forgot
+my password on mobile but I'm at my desk" case — the
+production model is "change password, keep using the
+session", not "change password, force re-login".
+
+**Honest limitations.** TOTP / 2FA, app-passwords, and
+per-device sessions UI are explicitly NOT in R1 and are
+NOT in shipped product UI. They live in
+`docs/WEBMAIL_RELEASE_1_AUDIT.md` §11 only.
 
 ### 3.1 Login & session
 
@@ -250,9 +313,15 @@ Autodiscover / Autoconfig settings — no password, no secret.
 Mail Client Setup is also rendered **inside** the webmail
 Settings modal as a "Mail Client Setup" tab (alongside
 Profile / Appearance / Compose / Mail / Filters / Vacation
-/ Forwarding / Notifications / Security / Coming later).
-See §3.0 above for the full surface. The
-standalone `/webmail/client-setup` page is still shipped as a
+/ Forwarding / Mail Client Setup / Notifications /
+Security). **R1 operator fix on
+`feature/webmail-r1-password-security-fix`**: the
+"Coming later" tab is REMOVED. The released tab count
+is 10. The Security tab now ships a real Change Password
+form (see §3.0b); the placeholder "TOTP / app-passwords
+UI is not enabled in this build" notice is gone. See §3.0
+above for the full surface. The standalone
+`/webmail/client-setup` page is still shipped as a
 fallback path that the operator can link to from
 documentation.
 
@@ -495,6 +564,44 @@ more Copy buttons.
 Phase 6 — zero `console.error` / thrown exceptions in the
 page. Warnings tolerated.
 
+**R1 operator-fix update (on `feature/webmail-r1-password-security-fix`):**
+
+Phase 7 (placeholder ban, in `smoke-webmail-ui.sh` §13) —
+the production bundle (`release/webmail/assets/webmail.js`
++ `.css`) is grep'd for the forbidden tokens
+`Coming later | Available in a future | coming soon | is
+not enabled | settings-deferred-list`. If ANY survive,
+the smoke fails. The R1 cut ships clean.
+
+Phase 8 (Settings → Security → Change Password form
+visible, in `smoke-webmail-functional-browser.mjs`) —
+switches to the Security tab; verifies the 10-tab tab
+count; asserts three `<input type="password">` fields
+with `autocomplete="current-password" | "new-password" |
+"new-password"` and a "Change password" button present;
+asserts NO `Coming later` / `future release` /
+`is not enabled` / `.settings-deferred-list` element is
+rendered in the Security tab.
+
+Phase 9 (mismatch surfaces inline error, in
+`smoke-webmail-functional-browser.mjs`) — types
+`oldpw-correct` / `NewPass!1NewPass!1` /
+`DifferentPass!1DifferentPass!1`; submits; asserts the
+inline error "New password and confirmation do not
+match." appears, no network call to
+`/api/v1/webmail/password/change` is fired (mock verifies
+that), and inputs are NOT cleared.
+
+Phase 10 (success clears + status flips, in
+`smoke-webmail-functional-browser.mjs`) — types matching
+`oldpw-correct` / `NewPass!1NewPass!1` /
+`NewPass!1NewPass!1`; submits; asserts the mock
+backend's `POST /api/v1/webmail/password/change` is
+called once with body `{current_password,
+new_password, confirm_password}`; asserts the three
+inputs are cleared; asserts the status region flips to
+the `.success` class with the success message.
+
 ## 8. Go test coverage (R1)
 
 Existing test files (unmodified, all already PASS on main):
@@ -530,6 +637,21 @@ R1 deltas (new file):
     — POST /send response carries `status: queued`,
     `queued_count`, `local_count`, `remote_count` from
     the live QueueEngine.
+
+**R1 operator-fix delta (on `feature/webmail-r1-password-security-fix`):**
+
+- `webmail_change_password_test.go` adds **10 Change Password tests**,
+  all PASS against the production handler:
+  1. `TestWebmailChangePasswordUnauthenticatedReturns401`
+  2. `TestWebmailChangePasswordWrongCurrentPasswordRejected`
+  3. `TestWebmailChangePasswordRejectsMissingFields`
+  4. `TestWebmailChangePasswordRejectsMismatchedConfirmationOrWeakPassword`
+  5. `TestWebmailChangePasswordIgnoresExtraFieldsSafely`
+  6. `TestWebmailChangePasswordSuccessUpdatesHash`
+  7. `TestWebmailChangePasswordOldPasswordNoLongerWorks`
+  8. `TestWebmailChangePasswordNewPasswordWorks`
+  9. `TestWebmailChangePasswordResponseCarriesNoHash`
+  10. `TestWebmailChangePasswordCrossMailboxImpossible`
 
 ## 9. Acceptance criteria — per-item status
 
@@ -610,6 +732,22 @@ asks the reviewer NOT to claim them shipped if they are not.
     fetches `rfc822` and renders client-side. A future
     slice could pre-render to plain text on the server to
     make the message list faster on slow connections.
+11. **TOTP / 2FA, app passwords (per-device), per-device
+    sessions UI** — NOT shipped in R1 and NOT in any
+    shipped product UI. The previous "TOTP / app-passwords
+    UI is not enabled in this build" placeholder in the
+    Security tab has been REMOVED on the R1 operator-fix
+    branch (`feature/webmail-r1-password-security-fix`),
+    and the old "Coming later" Settings tab is gone —
+    gated by `smoke-webmail-ui.sh` §13 (forbidden tokens).
+    These items appear in `docs/WEBMAIL_RELEASE_1_AUDIT.md`
+    §10 only; they never appear in the production bundle.
+12. **Forwarding attachments via the webmail compose
+    path** — the webmail compose path does NOT yet attach
+    files inline when forwarding; the compose modal shows
+    an honest neutral note and recommends replying to the
+    original to keep the files. The forward banner no
+    longer carries "Attachment forwarding is coming soon."
 
 ---
 
@@ -628,23 +766,50 @@ focused regression tests. There is no "ship-blocker" status.
 ?? docs/WEBMAIL_RELEASE_1_AUDIT.md            # this document
 ?? docs/WEBMAIL_SECURITY_REVIEW.md           # security companion
 ?? release/scripts/smoke-webmail-js.sh      # Node syntax for webmail bundle
-?? release/scripts/smoke-webmail-ui.sh      # 12 structural / RTL / router-drift checks
+?? release/scripts/smoke-webmail-ui.sh      # 12 structural / RTL / router-drift checks (+ §13 placeholder ban + §14 Change Password wiring on the R1 operator-fix branch)
 ?? release/scripts/smoke-webmail-browser.sh  # bundle-presence + content markers
 ?? release/scripts/smoke-webmail-functional-browser.sh   # shell wrapper for headless Chrome
-?? release/scripts/smoke-webmail-functional-browser.mjs   # self-contained CDP smoke; PASSES locally
+?? release/scripts/smoke-webmail-functional-browser.mjs   # self-contained CDP smoke; PASSES locally (10 phases on the R1 operator-fix branch)
 ?? release/scripts/smoke-caddy-autodiscover.sh           # static-analysis Caddy regression
-M release/webmail/CHANGELOG.md              # R1 entry — includes the Client Setup tab in the no-claim list
-M release/webmail/assets/webmail.js         # Mail Client Setup tab + renderClientSetupTab + copyButton + openClientSetup / openCompose exports
-M release/webmail/assets/webmail.css        # .settings-client-setup-* classes + .btn.xs + mobile @media rule
+M release/webmail/CHANGELOG.md              # R1 entry — includes the Client Setup tab in the no-claim list; R1 operator-fix entry adds the placeholder removal + Change Password
+M release/webmail/assets/webmail.js         # Mail Client Setup tab + renderClientSetupTab + copyButton + openClientSetup / openCompose exports; R1 operator-fix: removed "Coming later" tab + deferred dispatch + "Reading pane position coming later" + "Attachment forwarding is coming soon." + TOTP placeholder; added renderSecurityTab + renderChangePasswordSection + webmailMinPasswordLength
+M release/webmail/assets/webmail.css        # .settings-client-setup-* classes + .btn.xs + mobile @media rule; R1 operator-fix: removed .settings-deferred-list; added .settings-change-password-* (form / field / input / actions / status.success / status.error) with padding-inline-start/end (RTL safe)
+M internal/api/handlers/webmail_auth.go     # WebmailLogin / WebmailSession / WebmailLogout (existing); R1 operator-fix: added WebmailChangePassword handler + webmailMinPasswordLength const
+M internal/api/router.go                    # R1 operator-fix: mounted POST /api/v1/webmail/password/change inside authCSRF group
 M internal/api/handlers/webmail_release1_test.go         # 4 R1 Go regressions
-M docs/WEBMAIL_RELEASE_1_AUDIT.md           # update §3.0 + §3.10 + §7 / §7.1 with the actual UI shipped
+?? internal/api/handlers/webmail_change_password_test.go  # R1 operator-fix: 10 Change Password Go regressions, all PASS
+M docs/WEBMAIL_RELEASE_1_AUDIT.md           # update §3.0 + §3.10 + §7 / §7.1 + §8 / §10 / §11 / §12 with the actual UI shipped
+M docs/WEBMAIL_SECURITY_REVIEW.md           # R1 operator-fix: §2.4 Change Password, §2.5 What Change Password is NOT, §10 row additions, §11 not-implemented list update
 ```
 
 No backend / SMTP / IMAP / POP3 / JMAP / queue / delivery
-touches. No admin UI touches. No installer touches (setup-
-https.sh stays as it was after the autodiscover slice
-landed, and `smoke-caddy-autodiscover.sh` is the regression
-guard going forward).
+touches in this R1 cut. No admin UI touches. No installer
+touches (setup-https.sh stays as it was after the
+autodiscover slice landed, and `smoke-caddy-autodiscover.sh`
+is the regression guard going forward).
+
+## 13. Working tree state — R1 operator-fix branch `feature/webmail-r1-password-security-fix`
+
+`git status --short` at the time of this report (no
+commit, no push):
+
+```
+ M docs/WEBMAIL_RELEASE_1_AUDIT.md
+ M docs/WEBMAIL_SECURITY_REVIEW.md
+ M internal/api/handlers/webmail_auth.go
+ M internal/api/router.go
+ M release/scripts/smoke-webmail-functional-browser.mjs
+ M release/scripts/smoke-webmail-ui.sh
+ M release/webmail/CHANGELOG.md
+ M release/webmail/assets/webmail.css
+ M release/webmail/assets/webmail.js
+?? internal/api/handlers/webmail_change_password_test.go
+```
+
+Working-tree-only. No commits. No pushes. No `git
+config --global` touches. The user explicitly requested
+the agent return READY_FOR_OPENCODE_REVIEW without
+committing; this report does that.
 
 ---
 

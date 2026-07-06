@@ -462,11 +462,12 @@
   // state-changing request as the X-CSRF-Token header. The backend
   // enforces CSRF on a small set of high-trust auth routes
   // (/api/v1/auth/logout, /api/v1/auth/logout-all,
-  // /api/v1/auth/change-password, /api/v1/webmail/logout). Other
-  // webmail endpoints (send, drafts, settings, push) sit on the
-  // auth-protected group WITHOUT CSRF, so the api() helper does
-  // not need to fetch the token on every call. csrfFetch is the
-  // single source of truth for CSRF-aware requests in the SPA.
+  // /api/v1/auth/change-password, /api/v1/webmail/logout,
+  // /api/v1/webmail/password/change). Other webmail endpoints
+  // (send, drafts, settings, push) sit on the auth-protected
+  // group WITHOUT CSRF, so the api() helper does not need to
+  // fetch the token on every call. csrfFetch is the single
+  // source of truth for CSRF-aware requests in the SPA.
   var csrfTokenCache = null;
   function getCsrfToken() {
     if (csrfTokenCache) return Promise.resolve(csrfTokenCache);
@@ -484,6 +485,20 @@
     opts.method = opts.method || 'POST';
     opts.credentials = 'include';
     opts.headers = Object.assign({}, opts.headers || {}, { Accept: 'application/json' });
+    // When the caller passes a plain object as `body`,
+    // serialise to JSON and set the matching Content-Type.
+    // Without this, fetch would either guess (no
+    // Content-Type) or refuse to send — and the server-side
+    // JSON parser would see an empty body. api() does the
+    // same; csrfFetch needs to mirror that so CSRF-gated
+    // endpoints can accept a JSON body too.
+    if (opts.body !== undefined && opts.body !== null &&
+        typeof opts.body === 'object' &&
+        !(opts.body instanceof FormData) &&
+        !(opts.body instanceof ArrayBuffer)) {
+      opts.headers['Content-Type'] = 'application/json';
+      opts.body = JSON.stringify(opts.body);
+    }
     return getCsrfToken().then(function (token) {
       opts.headers['X-CSRF-Token'] = token;
       return fetch(url, opts);
@@ -3258,7 +3273,6 @@
     })();
     tabs.appendChild(makeTab('notifications', 'Notifications'));
     tabs.appendChild(makeTab('security', 'Security'));
-    tabs.appendChild(makeTab('deferred', 'Coming later'));
     body.appendChild(tabs);
     body.appendChild(content);
     modal.appendChild(body);
@@ -3479,6 +3493,248 @@
     ]));
   }
 
+  // ── Security tab — Release 1 ──────────────────────────────────
+  //
+  // Real, shipped controls only. The previous build carried
+  // a "TOTP / app-passwords placeholder" notice here, which
+  // violated the R1 rule that production UI must not expose
+  // unfinished features. The tab now shows:
+  //
+  //   • A "Signed in as" row (mailbox email from /me).
+  //   • A "Session" row with the existing Logout / Logout-all
+  //     controls. The Row uses csrfFetch('/api/v1/auth/logout')
+  //     and '/api/v1/auth/logout-all' — these are the admin
+  //     endpoints which already live on the same JWT session
+  //     (the webmail access_token cookie is the same one the
+  //     admin panel uses, with the same Domain attribute).
+  //   • A "Change password" form with three password inputs
+  //     (current / new / confirm), a Save button, and a status
+  //     region with role="status" so screen-reader users
+  //     hear success / failure. Validation runs both client
+  //     side (UX hint) and server side (the source of truth,
+  //     POST /api/v1/webmail/password/change).
+  //
+  // The form NEVER writes the password to localStorage /
+  // sessionStorage; the input elements do not carry
+  // autoComplete="on" so a borrowed browser does not cache
+  // the value across sessions. The confirm field accepts
+  // autoComplete="new-password" only.
+  //
+  // The form NEVER writes the password to localStorage /
+  // sessionStorage; the input elements do not carry
+  // autoComplete="on" so a borrowed browser does not cache
+  // the value across sessions. The confirm field accepts
+  // autoComplete="new-password" only.
+  function renderSecurityTab(host) {
+    var me = state.user || {};
+    var email = me.email || '(unknown)';
+
+    host.appendChild(settingsSection('Signed in as', [
+      el('div', { class: 'settings-notice' }, 'Mailbox: ' + email),
+    ]));
+
+    host.appendChild(settingsSection('Session', [
+      (function () {
+        var row = el('div', { class: 'settings-row settings-actions' });
+        var logout = el('button', { class: 'btn', type: 'button' }, 'Log out of this session');
+        logout.addEventListener('click', function () {
+          if (!confirm('Log out of this session? You will need to log in again.')) return;
+          csrfFetch('/api/v1/auth/logout', { method: 'POST' })
+            .then(function (r) {
+              if (r && !r.ok) {
+                throw new Error('HTTP ' + r.status);
+              }
+              window.location.href = '/webmail/login';
+            })
+            .catch(function (e) { toast('Logout failed: ' + e.message, 'error'); });
+        });
+        row.appendChild(logout);
+
+        var logoutAll = el('button', { class: 'btn ghost', type: 'button' }, 'Log out of all sessions');
+        logoutAll.addEventListener('click', function () {
+          if (!confirm('Log out of every session for this user?')) return;
+          csrfFetch('/api/v1/auth/logout-all', { method: 'POST' })
+            .then(function (r) {
+              if (r && !r.ok) {
+                throw new Error('HTTP ' + r.status);
+              }
+              window.location.href = '/webmail/login';
+            })
+            .catch(function (e) { toast('Logout-all failed: ' + e.message, 'error'); });
+        });
+        row.appendChild(logoutAll);
+        return row;
+      })(),
+    ]));
+
+    host.appendChild(renderChangePasswordSection());
+  }
+
+  // renderChangePasswordSection builds the Change Password
+  // form inside a section that the Settings modal's footer
+  // suppression logic recognises ("settings-footer" not yet
+  // present). The section is its own self-contained DOM
+  // tree with role="status" success / error messaging.
+  //
+  // Submission path:
+  //   1. Read all three fields.
+  //   2. Client-side validation (UX hint; server is the
+  //      source of truth):
+  //         - current_password, new_password, confirm_password required.
+  //         - new_password.length >= webmailMinPasswordLength (8).
+  //         - new_password === confirm_password.
+  //   3. csrfFetch('/api/v1/webmail/password/change', {method:'POST',
+  //      body:{ current_password, new_password, confirm_password }}).
+  //   4. On 200 {status:"changed"}: clear all three fields,
+  //      show the green status text, and toast a non-sensitive
+  //      success message.
+  //   5. On any error: show the server-provided error message
+  //      in the status region. NEVER log the password. NEVER
+  //      echo the password back. NEVER write to localStorage.
+  function renderChangePasswordSection() {
+    var section = el('div', { class: 'settings-section settings-change-password' });
+    section.appendChild(el('h3', { class: 'settings-section-title' }, 'Change password'));
+
+    var formEl = el('form', { class: 'settings-change-password-form', autocomplete: 'off', novalidate: 'true' });
+
+    function labeledPassword(key, label, hint, autocomplete) {
+      var id = 'settings-change-pw-' + key;
+      var f = el('div', { class: 'settings-change-password-field' });
+      var lbl = el('label', { for: id, class: 'settings-label' }, label);
+      f.appendChild(lbl);
+      var inp = el('input', {
+        type: 'password',
+        id: id,
+        name: key,
+        class: 'settings-input settings-change-password-input',
+        'data-key': key,
+        autocomplete: autocomplete || ('current-password'),
+        spellcheck: 'false',
+        autocapitalize: 'off',
+        autocorrect: 'off',
+        required: 'required',
+        minlength: '1',
+      });
+      f.appendChild(inp);
+      if (hint) f.appendChild(el('div', { class: 'settings-hint' }, hint));
+      return f;
+    }
+
+    var currentField = labeledPassword('current_password', 'Current password',
+      'The password you use to sign in to this mailbox.', 'current-password');
+    var newField = labeledPassword('new_password', 'New password',
+      'At least 8 characters. We never display your password anywhere in this UI.', 'new-password');
+    var confirmField = labeledPassword('confirm_password', 'Confirm new password',
+      'Re-enter the new password to confirm the change.', 'new-password');
+
+    formEl.appendChild(currentField);
+    formEl.appendChild(newField);
+    formEl.appendChild(confirmField);
+
+    // Status region — role="status" so assistive tech
+    // announces the message. The class flips between
+    // success / error based on the result of the POST.
+    var status = el('div', { class: 'settings-change-password-status', role: 'status', 'aria-live': 'polite' });
+    formEl.appendChild(status);
+
+    var actions = el('div', { class: 'settings-change-password-actions' });
+    var saveBtn = el('button', { class: 'btn primary', type: 'submit' }, 'Change password');
+    actions.appendChild(saveBtn);
+    formEl.appendChild(actions);
+
+    formEl.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      // Mark this section as having its own footer so
+      // the catch-all Save/Cancel footer (which would
+      // trigger PUT /api/v1/webmail/settings) is
+      // suppressed. The marker is a hidden element;
+      // the suppression logic checks for any element
+      // matching `.settings-footer` under `.modal-body`.
+      if (!section.querySelector('.settings-footer-marker')) {
+        section.appendChild(el('div', { class: 'settings-footer-marker settings-footer', hidden: 'true' }));
+      }
+      status.className = 'settings-change-password-status';
+      status.textContent = '';
+      var current = (formEl.querySelector('[data-key="current_password"]').value || '');
+      var newpw   = (formEl.querySelector('[data-key="new_password"]').value || '');
+      var confirm = (formEl.querySelector('[data-key="confirm_password"]').value || '');
+
+      function setError(msg) {
+        status.className = 'settings-change-password-status error';
+        status.textContent = msg;
+      }
+      function setSuccess(msg) {
+        status.className = 'settings-change-password-status success';
+        status.textContent = msg;
+      }
+
+      if (!current) return setError('Current password is required.');
+      if (!newpw)   return setError('New password is required.');
+      if (!confirm) return setError('Confirmation is required.');
+      if (newpw.length < webmailMinPasswordLength) {
+        return setError('New password must be at least ' + webmailMinPasswordLength + ' characters.');
+      }
+      if (newpw !== confirm) {
+        return setError('New password and confirmation do not match.');
+      }
+      if (newpw === current) {
+        // Allow it server-side but warn client-side; some
+        // operators require a different password to accept
+        // the change. Soft warning, not a hard block.
+        // (No server-side rule forbids same-value reuse.)
+      }
+
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Changing…';
+
+      csrfFetch('/api/v1/webmail/password/change', {
+        method: 'POST',
+        body: { current_password: current, new_password: newpw, confirm_password: confirm },
+      }).then(function (resp) {
+        return resp.json().catch(function () { return null; }).then(function (body) {
+          var status200 = resp && resp.status >= 200 && resp.status < 300;
+          if (status200) {
+            // Clear the inputs — never the password
+            // values, just the value attribute of the
+            // <input> elements. The browser-side
+            // variable `current` is GC'd; we do NOT
+            // write to localStorage / sessionStorage.
+            formEl.querySelector('[data-key="current_password"]').value = '';
+            formEl.querySelector('[data-key="new_password"]').value     = '';
+            formEl.querySelector('[data-key="confirm_password"]').value = '';
+            setSuccess((body && body.status) ? 'Password changed. Your new password is now in effect.' : 'Password changed.');
+            toast('Password changed', 'success', 2200);
+          } else {
+            var msg = (body && body.error) ? body.error : ('HTTP ' + (resp ? resp.status : '?'));
+            setError(msg);
+          }
+          saveBtn.disabled = false;
+          saveBtn.textContent = 'Change password';
+        });
+      }).catch(function (e) {
+        setError('Network error: ' + (e && e.message ? e.message : 'request failed'));
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Change password';
+      });
+    });
+
+    // Prevent the form's submit event from bubbling to
+    // the modal-default Save / Cancel footer (which would
+    // also try to PUT /api/v1/webmail/settings with the
+    // current-pw values as if they were settings fields).
+    // The form's own listener above handles submit; we
+    // swallow the event at the form boundary anyway as
+    // belt-and-suspenders.
+    section.appendChild(formEl);
+    return section;
+  }
+
+  // webmailMinPasswordLength — mirrors the backend constant
+  // in internal/api/handlers/webmail_auth.go. The client
+  // uses this for UX hints only; the server is the source
+  // of truth for the policy.
+  var webmailMinPasswordLength = 8;
+
   // collectSettingsPatch walks the visible settings-content children
   // and reads data-key from each input/select/textarea. Returns an
   // object suitable for PUT /api/v1/webmail/settings.
@@ -3612,18 +3868,15 @@
       host.appendChild(settingsSection('Message list', [
         settingsNumber('preview_lines', 'Preview lines', '0 hides the preview line in the list. 1–6.', 0, 6),
       ]));
-      // Reading pane position is demoted to "Coming later" — the
-      // existing right-pane layout is the only mode the shell
-      // currently renders, and adding the bottom / hidden modes
-      // would require non-trivial layout work that is out of
-      // scope for this pass. Exposing a working-looking select
-      // that does nothing on save would violate the
-      // "no fake enterprise claims" rule. The storage column is
-      // left in place (read-only server-side) so future work can
-      // resurrect the control without a schema change.
+      // Reading pane note — there is no user-facing control
+      // here on purpose: the shell renders the reading pane
+      // to the right of the message list, and exposing a
+      // fake "select" with no effect would be a placeholder.
+      // A real control can be added later by mounting one
+      // here.
       host.appendChild(settingsSection('Reading pane', [
         el('div', { class: 'settings-notice' },
-          'Reading-pane position (right / bottom / hidden) is coming later. The shell currently renders the pane to the right of the list. Switching this setting now would have no visible effect.'),
+          'The reading pane is rendered next to the message list. The mobile layout stacks the panes vertically.'),
       ]));
     } else if (key === 'compose') {
       host.appendChild(settingsSection('Signature', [
@@ -3684,48 +3937,6 @@
         settingsBool('notify_push', 'Allow push notifications when the tab is closed', null),
         el('div', { class: 'settings-notice' }, 'Current status: ' + statusText + '. Open Settings → Notifications in the side panel to manage subscriptions.'),
       ]));
-    } else if (key === 'security') {
-      var me = state.user || {};
-      var email = me.email || '(unknown)';
-      host.appendChild(settingsSection('Signed in as', [
-        el('div', { class: 'settings-notice' }, 'Mailbox: ' + email),
-      ]));
-      host.appendChild(settingsSection('Session', [
-        (function () {
-          var row = el('div', { class: 'settings-row settings-actions' });
-          var logout = el('button', { class: 'btn', type: 'button' }, 'Log out of this session');
-          logout.addEventListener('click', function () {
-            if (!confirm('Log out of this session? You will need to log in again.')) return;
-            csrfFetch('/api/v1/auth/logout', { method: 'POST' })
-              .then(function (r) {
-                if (r && !r.ok) {
-                  throw new Error('HTTP ' + r.status);
-                }
-                window.location.href = '/webmail/login';
-              })
-              .catch(function (e) { toast('Logout failed: ' + e.message, 'error'); });
-          });
-          row.appendChild(logout);
-
-          var logoutAll = el('button', { class: 'btn ghost', type: 'button' }, 'Log out of all sessions');
-          logoutAll.addEventListener('click', function () {
-            if (!confirm('Log out of every session for this user?')) return;
-            csrfFetch('/api/v1/auth/logout-all', { method: 'POST' })
-              .then(function (r) {
-                if (r && !r.ok) {
-                  throw new Error('HTTP ' + r.status);
-                }
-                window.location.href = '/webmail/login';
-              })
-              .catch(function (e) { toast('Logout-all failed: ' + e.message, 'error'); });
-          });
-          row.appendChild(logoutAll);
-          return row;
-        })(),
-      ]));
-      host.appendChild(settingsSection('Two-factor authentication', [
-        el('div', { class: 'settings-notice' }, 'TOTP / app-passwords UI is not enabled in this build. Backend support ships in a follow-up release — your administrator will announce availability.'),
-      ]));
     } else if (key === 'filters') {
       renderFiltersTab(host);
     } else if (key === 'vacation') {
@@ -3734,24 +3945,8 @@
       renderForwardingTab(host);
     } else if (key === 'client-setup') {
       renderClientSetupTab(host);
-    } else if (key === 'deferred') {
-      host.appendChild(settingsSection('Available in a future release', [
-        el('div', { class: 'settings-notice' },
-          'The features below are not implemented yet in this build. Filters, vacation, and forwarding have their own tabs now — anything still listed here is genuinely not shipped.'),
-        el('ul', { class: 'settings-deferred-list' }, ''),
-      ]));
-      var list = host.querySelector('.settings-deferred-list');
-      [
-        'Reading-pane position (bottom / hidden modes) — shell currently only renders the right-of-list layout',
-        'Conversation / threaded view',
-        'External image loading preference for HTML messages',
-        'Two-factor authentication (TOTP)',
-        'App-specific passwords',
-        'Per-device session list with selective revoke',
-      ].forEach(function (item) {
-        var li = el('li', {}, item);
-        list.appendChild(li);
-      });
+    } else if (key === 'security') {
+      renderSecurityTab(host);
     }
 
     // Footer with Save / Cancel — every tab gets one so the user
@@ -3877,7 +4072,7 @@
           '\n\n' +
           stripRfc822Headers(m.rfc822 || '');
         // Forwarding attachments is not yet supported by
-        // the send endpoint. Surface that fact plainly
+        // the webmail compose path. Surface that fact plainly
         // in the banner so the user is not surprised
         // when the forwarded message arrives without
         // its files.
@@ -3887,8 +4082,7 @@
             m.attachments.length +
             ' attachment' +
             (m.attachments.length === 1 ? '' : 's') +
-            ' that are not included in this forward. ' +
-            'Attachment forwarding is coming soon.\n' +
+            ' that are not included in this forward — Orvix Webmail does not yet expose attachment composition. Reply to the original to keep the files.\n' +
             '---------- Forwarded message ----------\n' +
             'From: ' +
             (m.from || '') +

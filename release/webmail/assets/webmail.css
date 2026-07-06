@@ -2617,14 +2617,6 @@ html[dir="rtl"] .push-settings-note {
   border-radius: var(--r-sm);
 }
 
-.settings-deferred-list {
-  margin: 0;
-  padding-inline-start: var(--sp-5);
-  font-size: 13px;
-  color: var(--text-2);
-  line-height: 1.7;
-}
-
 .settings-actions {
   flex-wrap: wrap;
 }
@@ -2967,4 +2959,73 @@ html[dir="rtl"] .push-settings-note {
    section-by-section grouping at a glance. */
 .settings-client-setup-row .settings-client-setup-value {
   border-left: 3px solid var(--accent-soft, var(--accent));
+}
+
+/* ── Release 1 — Change Password form (Security tab) ──────────
+ *
+ * Real, shipped, no fake controls. Three password inputs
+ * (current / new / confirm), a Save button, and a status
+ * region with role="status" so screen-reader users hear
+ * success / failure.
+ *
+ * The form must NOT echo the password back, must NOT write
+ * the password to localStorage / sessionStorage (no script in
+ * this bundle does), and must NOT store the password in any
+ * data-* attribute that might leak via DevTools. The inputs
+ * have type="password" + disabled autoComplete="on" (we
+ * explicitly set autoComplete="current-password" /
+ * "new-password" — the password manager can fill them but the
+ * form never reads them back).
+ */
+.settings-change-password-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  max-width: 520px;
+}
+.settings-change-password-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.settings-change-password-input {
+  /* Light-on-canvas input with the same chrome as the rest of
+     the settings modal. The monospace font makes long
+     passwords scan-friendly when the user types. */
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+  letter-spacing: 0.5px;
+}
+.settings-change-password-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.settings-change-password-status {
+  min-height: 18px;
+  font-size: 13px;
+  padding: 6px 10px;
+  border-radius: var(--r-sm);
+  background: transparent;
+  border: 0;
+  color: var(--text-2);
+}
+.settings-change-password-status.error {
+  background: var(--bg-canvas);
+  color: var(--danger, #c7424b);
+  border: 1px solid var(--danger, #c7424b);
+  /* Logical inset so the message uses padding-inline-start /
+     padding-inline-end — RTL safe. */
+  padding-inline-start: 12px;
+  padding-inline-end: 12px;
+}
+.settings-change-password-status.success {
+  background: var(--bg-canvas);
+  color: var(--success, #2f9d4a);
+  border: 1px solid var(--success, #2f9d4a);
+  padding-inline-start: 12px;
+  padding-inline-end: 12px;
+}
+@media (max-width: 640px) {
+  .settings-change-password-form { max-width: 100%; }
 }

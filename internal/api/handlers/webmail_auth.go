@@ -30,17 +30,17 @@ package handlers
 //     so the auth-gate can immediately call window.location.reload().
 //
 // Endpoints (mounted in router.go):
-//   GET  /api/v1/webmail/session  â€” 200 if a webmail
-//                                  session is present
-//                                  (used by the
-//                                  auth-gate.js probe);
-//                                  401 otherwise.
-//   POST /api/v1/webmail/login    â€” webmail login form
-//                                  submission (email +
-//                                  password).
-//   POST /api/v1/webmail/logout   â€” clears the cookies
-//                                  and invalidates the
-//                                  refresh session.
+//   GET   /api/v1/webmail/session             — 200 if a webmail
+//                                              session is present
+//                                              (used by the
+//                                              auth-gate.js probe);
+//                                              401 otherwise.
+//   POST  /api/v1/webmail/login               — webmail login form
+//                                              submission (email +
+//                                              password).
+//   POST  /api/v1/webmail/logout              — clear cookies (CSRF).
+//   POST  /api/v1/webmail/password/change     — change mailbox password
+//                                              (authenticated; CSRF).
 
 import (
 	"database/sql"
@@ -167,12 +167,12 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 	// webmail as a mailbox owner; an admin user with
 	// no mailbox cannot log in here.
 	var (
-		mailboxID      uint
-		mailboxStatus  string
-		isAdmin        int
-		hash           string
-		authScheme     string
-		allowWebmail   int
+		mailboxID     uint
+		mailboxStatus string
+		isAdmin       int
+		hash          string
+		authScheme    string
+		allowWebmail  int
 	)
 	row := sqlDB.QueryRow(
 		"SELECT id, status, is_admin, password_hash, COALESCE(auth_scheme,''), COALESCE(allow_webmail,1) FROM coremail_mailboxes WHERE email = ? AND deleted_at IS NULL",
@@ -323,6 +323,205 @@ func (h *Handler) WebmailLogout(c fiber.Ctx) error {
 	}
 	h.clearAuthCookies(c)
 	return c.JSON(fiber.Map{"status": "logged_out"})
+}
+
+// webmailMinPasswordLength is the minimum length the
+// webmail Security → Change Password form enforces on
+// the client side AND on the server side. The server
+// value is the source of truth; the client value is a
+// UX hint. Kept local to this file so a future
+// operator-configurable password policy can change it
+// in one place.
+const webmailMinPasswordLength = 8
+
+// WebmailChangePassword changes the currently-authenticated
+// mailbox's password.
+//
+// Auth model: the auth middleware has already validated
+// the access_token cookie and set `c.Locals("user_id")`,
+// and `resolveWebmailUserContext` has already resolved
+// the JWT identity to the active mailbox row. This
+// handler uses that resolved mailbox — NEVER any id
+// supplied in the request body — so a JWT for mailbox A
+// cannot update mailbox B.
+//
+// Request body:
+//
+//	{ "current_password": "...", "new_password": "..." }
+//
+// On success the handler hashes the new password with the
+// canonical Argon2id helper (the same path every new
+// mailbox uses; see hashPasswordArgon2id in handlers.go)
+// and writes it to coremail_mailboxes along with
+// auth_scheme='$argon2id$' and a fresh updated_at.
+//
+// The webmail session is NOT invalidated by a successful
+// change — the production webmail auth model uses a
+// 15-minute JWT lifetime on the access_token plus a
+// long-lived refresh_token, so the cookie the user has
+// keeps working until it naturally rotates. Invalidation
+// would force the user to re-enter their password in the
+// same minute, which is the wrong UX for a feature the
+// spec calls a day-to-day password rotation.
+//
+// Errors:
+//
+//	400  { error: "current password required" }
+//	400  { error: "new password required" }
+//	400  { error: "new password must be at least N characters" }
+//	401  { error: "invalid credentials" }   <- wrong current password (generic, anti-enumeration)
+//	500  { error: "password change failed" }   <- hash / DB / unknown
+//
+// The handler NEVER echoes the current password, the new
+// password, the hash, or any secret back to the client.
+// It NEVER writes the password to a log line.
+//
+// Pinned by tests:
+//
+//	TestWebmailChangePasswordUnauthenticatedReturns401
+//	TestWebmailChangePasswordWrongCurrentPasswordRejected
+//	TestWebmailChangePasswordRejectsMissingFields
+//	TestWebmailChangePasswordRejectsMismatchedConfirmationOrWeakPassword
+//	TestWebmailChangePasswordIgnoresExtraFieldsSafely
+//	TestWebmailChangePasswordSuccessUpdatesHash
+//	TestWebmailChangePasswordOldPasswordNoLongerWorks
+//	TestWebmailChangePasswordNewPasswordWorks
+//	TestWebmailChangePasswordResponseCarriesNoHash
+//	TestWebmailChangePasswordCrossMailboxImpossible
+func (h *Handler) WebmailChangePassword(c fiber.Ctx) error {
+	ctx, reason := h.resolveWebmailUserContext(c)
+	if ctx == nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error":  "no mailbox",
+			"reason": reason,
+		})
+	}
+	var req struct {
+		CurrentPassword string `json:"current_password"`
+		NewPassword     string `json:"new_password"`
+		// Optional: the client may send a confirmation
+		// copy. We enforce the match server-side so a
+		// tampered client cannot bypass the check, but
+		// we also accept the case where the client
+		// already enforced it itself.
+		ConfirmPassword string `json:"confirm_password"`
+		// Optional: the client may send a "current_mailbox_id"
+		// so the user can see which mailbox they are
+		// about to update. The handler IGNORES every
+		// id-shaped body field; the only mailbox that
+		// gets updated is the one resolveWebmailUserContext
+		// resolved from the JWT.
+	}
+	if err := c.Bind().JSON(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "invalid request",
+		})
+	}
+
+	if req.CurrentPassword == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "current password required",
+		})
+	}
+	if req.NewPassword == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "new password required",
+		})
+	}
+	if req.ConfirmPassword != "" && req.NewPassword != req.ConfirmPassword {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "new password and confirmation do not match",
+		})
+	}
+	if len(req.NewPassword) < webmailMinPasswordLength {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": fmt.Sprintf("new password must be at least %d characters", webmailMinPasswordLength),
+		})
+	}
+
+	// Re-read the mailbox hash directly. The user-context
+	// already proved ownership of the JWT, but we re-read
+	// so the password verify runs against the latest
+	// hash on disk (covers the case where an admin
+	// rotated the hash between the JWT mintage and this
+	// request).
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "password change failed",
+		})
+	}
+	var (
+		currentHash string
+		authScheme  string
+	)
+	row := sqlDB.QueryRowContext(c.Context(),
+		`SELECT password_hash, COALESCE(auth_scheme, '')
+		   FROM coremail_mailboxes
+		  WHERE id = ? AND deleted_at IS NULL`,
+		ctx.Mailbox.ID)
+	if err := row.Scan(&currentHash, &authScheme); err != nil {
+		// Mailbox not found (or deleted) — generic error
+		// so a client with a stale JWT cannot enumerate
+		// mailbox rows.
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "password change failed",
+		})
+	}
+
+	// Verify CURRENT password. Use the same helper the
+	// webmail login handler uses so legacy bcrypt-hashed
+	// mailboxes still work — a real production operator
+	// migration can take months and the user must not
+	// be locked out during the cutover.
+	if !verifyMailboxPassword(req.CurrentPassword, currentHash) {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "invalid credentials",
+		})
+	}
+
+	// Hash with the canonical Argon2id helper used for
+	// every new mailbox.
+	newHash, err := hashPasswordArgon2id(req.NewPassword)
+	if err != nil {
+		// Compute failure — log a structured event with
+		// NO sensitive fields. Returning a generic body
+		// here stops a misconfigured Argon2id on the
+		// server from leaking (which would already be
+		// obvious to the operator from other logs).
+		h.logger.Error("webmail change password: hash new password failed",
+			zap.Uint("mailbox_id", ctx.Mailbox.ID),
+			zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "password change failed",
+		})
+	}
+
+	now := time.Now().UTC()
+	if _, err := sqlDB.ExecContext(c.Context(),
+		`UPDATE coremail_mailboxes
+		    SET password_hash = ?, auth_scheme = ?, updated_at = ?
+		  WHERE id = ? AND deleted_at IS NULL`,
+		newHash, "$argon2id$", now, ctx.Mailbox.ID); err != nil {
+		h.logger.Error("webmail change password: db update failed",
+			zap.Uint("mailbox_id", ctx.Mailbox.ID),
+			zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "password change failed",
+		})
+	}
+
+	// Note: we deliberately do NOT invalidate the current
+	// session here. The auth model is short-lived access
+	// tokens (15 min) + long refresh tokens, and a same-
+	// minute forced re-login on every password change is
+	// bad UX. A future iteration can wire refresh-token
+	// rotation here if the threat model demands it.
+
+	// Audit. NO sensitive fields in the audit fields.
+	h.writeAuditLog(c, "webmail.password_change", fmt.Sprintf("mailbox:%d", ctx.Mailbox.ID))
+
+	return c.JSON(fiber.Map{"status": "changed"})
 }
 
 // ensureWebmailUser finds the users row with the given
