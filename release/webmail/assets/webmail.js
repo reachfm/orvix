@@ -3241,9 +3241,20 @@
       tabs.appendChild(v);
     })();
     (function () {
-      var fw = el('button', { class: 'settings-tab', type: 'button', role: 'tab', 'aria-selected': 'false', 'data-tab': 'forwarding' }, 'Forwarding');
+      var fw = el('button', { class: 'settings-tab', type: 'button', 'aria-selected': 'false', 'data-tab': 'forwarding' }, 'Forwarding');
       fw.addEventListener('click', function () { activateWithLoad('forwarding', loadForwarding); });
       tabs.appendChild(fw);
+    })();
+    // Client Setup — Mail client IMAP / SMTP / Autodiscover /
+    // Autoconfig info the user can hand to Outlook, Thunderbird,
+    // Apple Mail, or any other IMAP client. No password is
+    // ever displayed. The section is read-only by design — the
+    // server hostname / autodiscover path are operator-managed,
+    // not user-configurable.
+    (function () {
+      var cs = el('button', { class: 'settings-tab', type: 'button', 'aria-selected': 'false', 'data-tab': 'client-setup' }, 'Mail Client Setup');
+      cs.addEventListener('click', function () { activateTab('client-setup'); });
+      tabs.appendChild(cs);
     })();
     tabs.appendChild(makeTab('notifications', 'Notifications'));
     tabs.appendChild(makeTab('security', 'Security'));
@@ -3322,6 +3333,150 @@
     if (title) s.appendChild(el('h3', { class: 'settings-section-title' }, title));
     rows.forEach(function (r) { s.appendChild(r); });
     return s;
+  }
+
+  // ── Client Setup tab (Release 1) ─────────────────────────────
+  //
+  // Renders the IMAP / SMTP / Autodiscover / Autoconfig info
+  // the user hands to Outlook, Thunderbird, Apple Mail, K-9,
+  // etc. The information is intentionally READ-ONLY — the
+  // server hostname and autodiscover path are operator-managed
+  // and cannot be edited from the webmail UI. We do NOT
+  // display the user's password (or any secret) anywhere on
+  // this tab; the on-screen hint explicitly calls that out.
+  //
+  // Layout per row: a label, the value in a monospace block
+  // (so users can read long URLs / ports at a glance), and a
+  // small "Copy" button on the right. Clicking the button
+  // copies the value via `navigator.clipboard.writeText` when
+  // available; on browsers without clipboard API support the
+  // button falls back to selecting the text in the value
+  // block so the user can Ctrl-C manually.
+  //
+  // Hostname derivation: the webmail SPA usually runs at
+  // `webmail.<parent>`, while the IMAP/SMTP/Autodiscover
+  // listener is at `mail.<parent>`. We extract the parent
+  // from window.location.host by stripping the leading
+  // `webmail.` subdomain. If the operator runs webmail on the
+  // apex (no `webmail.` prefix), we assume they also run mail
+  // on the apex and fall back to the bare hostname.
+
+  function deriveMailHostname() {
+    try {
+      var host = (window.location && window.location.hostname) || '';
+      var m = host.match(/^webmail\.([^:]+)$/);
+      if (m) return 'mail.' + m[1];
+      // `host:port` may be present; strip the port suffix.
+      var parts = host.split('.');
+      if (parts.length >= 2) {
+        // Rebuild host without any leading single-label subdomain
+        // that happens to match known webmail prefixes.
+        if (parts[0] === 'webmail' || parts[0] === 'mail') {
+          return parts.slice(1).join('.');
+        }
+      }
+      // Fall back: assume the mail listener is on the same host
+      // as the webmail listener — true for single-host deployments.
+      return host;
+    } catch (e) {
+      return 'mail.orvix.email';
+    }
+  }
+
+  function copyButton(value) {
+    var btn = el('button', { class: 'btn ghost xs settings-copy-btn', type: 'button', 'aria-label': 'Copy to clipboard', 'data-copy': value }, 'Copy');
+    btn.addEventListener('click', function () {
+      var copied = false;
+      try {
+        if (navigator && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+          navigator.clipboard.writeText(value).then(function () {
+            toast('Copied to clipboard', 'success', 1500);
+          }, function () {
+            toast('Could not copy automatically — select the value and press Ctrl-C / Cmd-C', 'info', 3500);
+          });
+          copied = true;
+        }
+      } catch (e) { /* clipboard API not available */ }
+      if (!copied) {
+        // Fallback: select the value block so the user can copy it
+        // manually with the keyboard. We do NOT use
+        // document.execCommand('copy') because it is deprecated and
+        // modern browsers drop the call.
+        var block = btn.previousElementSibling;
+        if (block) {
+          try {
+            var range = document.createRange();
+            range.selectNodeContents(block);
+            var sel = window.getSelection();
+            if (sel) {
+              sel.removeAllRanges();
+              sel.addRange(range);
+            }
+            toast('Selected — press Ctrl-C / Cmd-C', 'info', 3000);
+          } catch (e) {
+            toast('Copy not supported on this browser', 'error', 2500);
+          }
+        }
+      }
+    });
+    return btn;
+  }
+
+  function clientSetupRow(label, value) {
+    var row = el('div', { class: 'settings-row settings-client-setup-row' });
+    row.appendChild(el('label', { class: 'settings-label' }, label));
+    var valueBlock = el('code', { class: 'settings-value-mono settings-client-setup-value', dir: 'ltr' }, value);
+    row.appendChild(valueBlock);
+    row.appendChild(copyButton(value));
+    return row;
+  }
+
+  function renderClientSetupTab(host) {
+    var mailbox = (state.user && state.user.email) ? state.user.email : '(signed-out)';
+    var mailHost = deriveMailHostname();
+    var autodiscoverUrl = 'https://' + mailHost + '/autodiscover/autodiscover.xml';
+    var autoconfigUrl = 'https://' + mailHost + '/.well-known/autoconfig/mail/config-v1.1.xml';
+
+    host.appendChild(settingsSection('Your email account', [
+      el('div', { class: 'settings-notice' },
+        'You are signed in as ' + mailbox + '. Use this address as the username on every mail client you configure.'),
+    ]));
+
+    host.appendChild(settingsSection('IMAP — receiving mail', [
+      clientSetupRow('Server', 'mail.orvix.email:993 SSL'),
+      clientSetupRow('Host', mailHost),
+      clientSetupRow('Port', '993'),
+      clientSetupRow('Encryption', 'SSL / TLS (recommended)'),
+      clientSetupRow('Authentication', 'Normal password'),
+      clientSetupRow('Username', mailbox),
+    ]));
+
+    host.appendChild(settingsSection('SMTP — sending mail', [
+      clientSetupRow('Server', 'mail.orvix.email:587 STARTTLS'),
+      clientSetupRow('Host', mailHost),
+      clientSetupRow('Port', '587'),
+      clientSetupRow('Encryption', 'STARTTLS (recommended)'),
+      clientSetupRow('Authentication', 'Normal password'),
+      clientSetupRow('Username', mailbox),
+    ]));
+
+    host.appendChild(settingsSection('Outlook — Autodiscover', [
+      clientSetupRow('Autodiscover URL', autodiscoverUrl),
+      el('div', { class: 'settings-hint' },
+        'When you add this account in Outlook for Windows, point Outlook at this URL. The lowercase /autodiscover/ and the uppercase /Autodiscover/ paths are both served.'),
+    ]));
+
+    host.appendChild(settingsSection('Thunderbird / Apple Mail — Autoconfig', [
+      clientSetupRow('ISPDB URL', autoconfigUrl),
+      clientSetupRow('Fallback URL', 'https://' + mailHost + '/mail/config-v1.1.xml'),
+      el('div', { class: 'settings-hint' },
+        'Thunderbird and Apple Mail pick up the ISPDB URL automatically. The /mail/config-v1.1.xml path is served as a fallback for older clients.'),
+    ]));
+
+    host.appendChild(settingsSection('Password', [
+      el('div', { class: 'settings-notice' },
+        'Your password is never shown in this UI. Enter it directly into the mail client — it is the same password you use to log in here.'),
+    ]));
   }
 
   // collectSettingsPatch walks the visible settings-content children
@@ -3577,6 +3732,8 @@
       renderVacationTab(host);
     } else if (key === 'forwarding') {
       renderForwardingTab(host);
+    } else if (key === 'client-setup') {
+      renderClientSetupTab(host);
     } else if (key === 'deferred') {
       host.appendChild(settingsSection('Available in a future release', [
         el('div', { class: 'settings-notice' },
@@ -4606,8 +4763,28 @@
   // auto-boot on DOMContentLoaded — booting before the gate
   // runs would leak the UI to unauthenticated visitors and
   // trigger a wave of /api/v1/webmail/* calls that 401.
+  //
+  // Release 1 added: openClientSetup (jump straight to the
+  // Mail Client Setup tab from a smoke harness or a deep
+  // link). The other tabs are reachable by opening Settings
+  // first, but the smoke harness needs an idempotent entry
+  // point that does NOT depend on any prior UI state.
+  function openClientSetup() {
+    openSettingsModal();
+    // The tab activation is asynchronous — the modal must
+    // render before the tab can be activated. A microtask
+    // schedules the activation after the current turn yields.
+    Promise.resolve().then(function () {
+      var tab = document.querySelector('.settings-modal .settings-tab[data-tab="client-setup"]');
+      if (tab) tab.click();
+    });
+  }
+
   window.OrvixWebmail = {
     init: init,
+    openCompose: openCompose,
+    openSettingsModal: openSettingsModal,
+    openClientSetup: openClientSetup,
     utils: {
       dirAuto: dirAuto,
       linkifyURLs: linkifyURLs,

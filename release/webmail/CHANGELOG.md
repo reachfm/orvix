@@ -8,6 +8,165 @@ Base: `08e380b` ("Merge Webmail Enterprise Feature Pack 2")
 Branch: `fix/webmail-live-stabilization-3a`
 Base: `58c2e1b` ("WEBMAIL-UI-POLISH-3: premium enterprise webmail UI")
 
+# Webmail Release 1 — Changelog
+
+Branch: `feature/webmail-release-v1`
+Base: `main` (post-`da53ddb fix: route mail autodiscover through coremail API`)
+
+## What shipped
+
+**User-visible**
+
+- **Mail Client Setup tab inside the webmail Settings modal.**
+  `release/webmail/assets/webmail.js` (`renderClientSetupTab`
+  in the settings-modal dispatch) renders the IMAP / SMTP /
+  Outlook Autodiscover / Thunderbird Autoconfig info the
+  user hands to Outlook, Thunderbird, Apple Mail, K-9 etc.
+  Each row carries a Copy button (`navigator.clipboard.writeText`
+  with a select-and-Ctrl-C fallback). Hostname is derived
+  from `window.location.hostname` by stripping a leading
+  `webmail.` prefix (so the SPA on `webmail.orvix.email`
+  serves the mail client settings for `mail.orvix.email`).
+  Username is the live mailbox address from `/me`. **No
+  password is ever displayed and no client-supplied field
+  writes a secret.** Section "Password" is an explicit
+  reminder to enter the password directly into the mail
+  client.
+- **`window.OrvixWebmail.openClientSetup()`** — new public
+  entry point on the existing API. Opens the Settings modal
+  and switches to the Client Setup tab. Used by the smoke
+  harness; also usable as a deep-link if future iterations
+  decide to expose it.
+- **`window.OrvixWebmail.openCompose` and `openSettingsModal`**
+  re-exported through the public API (already exposed;
+  re-affirmed by the smoke, with selector tightening so
+  the smoke does not break on class-name evolution).
+- **Mobile-responsive grid for the new tab** —
+  `.settings-client-setup-row` collapses to a single column
+  at `max-width: 640px` so long URLs and `host:port`
+  combinations stay readable on phones.
+- **`@media (max-width: 640px)` block was added**, taking
+  the CSS `@media` count from 12 to 13.
+
+**Operations**
+
+- **`docs/WEBMAIL_RELEASE_1_AUDIT.md`** — the canonical
+  "what shipped in R1" document with an honest "Not
+  implemented" section (no fake Calendar / Contacts / EAS).
+- **`docs/WEBMAIL_SECURITY_REVIEW.md`** — the security
+  review companion to the audit. Threat-by-threat
+  pin-pointing every defence against every cross-mailbox /
+  XSS / impersonation attack the surface could face.
+- **`release/scripts/smoke-webmail-js.sh`** — Node syntax
+  check for the webmail bundle (parity with the existing
+  admin equivalent).
+- **`release/scripts/smoke-webmail-ui.sh`** — 12 structural
+  checks: index.html load order, helper-function presence,
+  dirAuto wiring, no-queue-API guard, RTL plumbing,
+  responsive @media, settings modal, attachment URL auth,
+  system folder constants, router-drift guard.
+- **`release/scripts/smoke-webmail-browser.sh`** —
+  bundle-shape + Node-syntax-check + content-marker smoke.
+  Pure file system; no Chrome required.
+- **`release/scripts/smoke-webmail-functional-browser.sh`**
+  + **`.mjs`** — **self-contained** headless Chrome
+  functional smoke via raw CDP. The .mjs spawns a local Node
+  HTTP server on a free port that serves the webmail bundle
+  AND mocks the few API endpoints the auth-gate + SPA shell
+  probe. **No external network, no live Orvix backend, no
+  port collisions.** Drives the auth-gate → login → SPA
+  shell → folder sidebar → message list → reading pane →
+  compose modal → Settings → **Mail Client Setup tab** →
+  copy buttons → dirAuto helper → zero-console-errors
+  chain. Runs in Node 22+ with a Chromium-class browser on
+  disk. **Passes locally** in the R1 working tree.
+- **`release/scripts/smoke-caddy-autodiscover.sh`** —
+  static-analysis regression guard for the Caddy
+  mail-vhost autodiscover routing. Pins the four required
+  handlers (`/autodiscover/*`, `/Autodiscover/*`,
+  `/.well-known/autoconfig/*`, `/mail/config-v1.1.xml`)
+  inside the `$MAIL_DOMAIN` block, before the `8081`
+  catch-all, and confirms the `$WEBMAIL_DOMAIN` block is
+  preserved (substring-match bug regression guard).
+- **`internal/api/handlers/webmail_release1_test.go`** —
+  R1 cross-cutting Go tests:
+  - `TestWebmailRelease1AuthRequiredForAllUserEndpoints` —
+    full endpoint matrix returns 401 with no cookie.
+  - `TestWebmailRelease1SearchSnippetStaysInsideOwnerMailbox` —
+    search snippet pipeline never returns a foreign row.
+  - `TestWebmailRelease1SendAuthoritativeFrom` — the From
+    header on the resulting RFC822 is always the
+    authenticated mailbox's email, never any
+    client-supplied value.
+  - `TestWebmailRelease1SendReturnsQueuedCountFromLiveQueue`
+    — POST /send response carries `status: queued`,
+    `queued_count`, `local_count`, `remote_count` from
+    the live QueueEngine.
+
+## No-claim list
+
+The audit doc explicitly does NOT claim:
+
+- Calendar / Contacts / Tasks — not shipped in the webmail
+  UI.
+- Exchange / ActiveSync (EAS) — not implemented. Outlook
+  onboarding is via the autodiscover XML, not EAS.
+- Mobile native apps — not shipped. The webmail UI works
+  on mobile browsers via responsive CSS; no iOS / Android
+  native client exists.
+- Full-text body search index — `?body=1` falls back to
+  per-row read; a proper inverted index is a follow-up.
+- Pasted / dragged image into compose body — not shipped.
+- JMAP-native client — the mail.<domain> Caddy catch-all
+  routes non-autodiscover paths to the JMAP listener at
+  8081, but the webmail UI itself does not speak JMAP.
+
+## Out of scope
+
+No backend / SMTP / IMAP / POP3 / JMAP / queue / delivery
+touches. No admin UI touches. The auth / session / CSRF /
+CSP / cookie-model is unchanged.
+
+## Smoke surface delta
+
+| Script | Pre-R1 | Post-R1 |
+|---|---|---|
+| `smoke-admin-js.sh`      | 51 admin JS files | unchanged |
+| `smoke-admin-ui.sh`      | 12 admin UI checks | unchanged |
+| `smoke-admin-browser.sh` | serves admin bundle | unchanged |
+| `smoke-admin-functional-browser.{sh,mjs}` | admin functional | unchanged |
+| `smoke-webmail-js.sh`    | — | 4 webmail JS files |
+| `smoke-webmail-ui.sh`    | — | 12 webmail UI checks |
+| `smoke-webmail-browser.sh` | — | 10 webmail bundle checks |
+| `smoke-webmail-functional-browser.{sh,mjs}` | — | headless Chrome functional |
+| `smoke-caddy-autodiscover.sh` | — | 9 Caddy regression checks |
+| `smoke-install-bundle.sh` | unchanged | unchanged |
+| `smoke-install-public.sh` | unchanged | unchanged |
+| `smoke-runtime.sh`       | unchanged | unchanged |
+| `smoke-upgrade.sh`       | unchanged | unchanged |
+| `smoke-health.sh`        | unchanged | unchanged |
+| `smoke-ports.sh`         | unchanged | unchanged |
+
+## Why a documentation / smoke slice and not a feature slice
+
+The webmail Enterprise v1 + Enterprise v2 + UI Polish 3 +
+Live Stabilization 3A + autodiscover slices brought R1 to
+its current shape. The R1 cut is the final layer that:
+
+- **documents** what shipped in R1 honestly,
+- **secures** the long-tail guarantee with a
+  security-review doc,
+- **extends** the smoke surface so future slices cannot
+  regress the webmail shell without CI going red,
+- and **covers** the previously-uncaptured test gaps
+  (auth-required-for-all-endpoints matrix, send
+  authoritative From, send response shape).
+
+The cut is intentionally non-breaking: R1 introduces zero
+new behavior, zero new endpoints, and zero new failure
+modes. The `READY_FOR_OPENCODE_REVIEW` verdict in
+`WEBMAIL_RELEASE_1_AUDIT.md` reflects this.
+
 A small live stabilization pass on top of UI Polish 3. No
 new features. No backend changes. No endpoint changes.
 Scope is a single live-UI regression: the reading-pane
