@@ -2905,3 +2905,66 @@ html[dir="rtl"] .push-settings-note {
   .rule-flag-grid { grid-template-columns: 1fr; }
   .modal.rule-editor-card { max-height: 100vh; }
 }
+
+/* ── Release 1 — Mail Client Setup tab ─────────────────────────
+ *
+ * Read-only IMAP / SMTP / Autodiscover / Autoconfig info the
+ * user hands to Outlook, Thunderbird, Apple Mail, K-9, etc.
+ * The hostname / port / URL values come from the operator's
+ * setup; we never let the user edit them from this UI.
+ *
+ * Layout: label on the left, monospace value in the middle,
+ * small "Copy" button on the right. Wraps cleanly to a
+ * stacked single-column layout below 640 px so the value
+ * block stays readable on a phone-width viewport.
+ */
+.btn.xs {
+  font-size: 11.5px;
+  padding: 4px 9px;
+  border-radius: var(--r-sm);
+  line-height: 1.2;
+}
+.settings-client-setup-row {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr) auto;
+  gap: var(--sp-3);
+  align-items: center;
+}
+.settings-client-setup-row .settings-label {
+  flex: initial;
+  width: auto;
+}
+.settings-client-setup-value {
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-sm);
+  padding: 6px 10px;
+  color: var(--text-0);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-all;
+  /* Long URLs / host:port combos must NOT break the grid;
+     min-width:0 lets the code block shrink to fit. */
+  min-width: 0;
+}
+.settings-copy-btn {
+  justify-self: end;
+}
+@media (max-width: 640px) {
+  .settings-client-setup-row {
+    grid-template-columns: 1fr;
+    gap: var(--sp-2);
+  }
+  .settings-copy-btn { justify-self: start; }
+}
+/* Light-theme polish: the value block on a light canvas
+   needs a subtler border so the monospace text stays
+   legible. The shell already defines --border-* tokens in
+   both themes — we only widen the value block's left edge
+   with a small accent stripe so the user can scan the
+   section-by-section grouping at a glance. */
+.settings-client-setup-row .settings-client-setup-value {
+  border-left: 3px solid var(--accent-soft, var(--accent));
+}
