@@ -215,6 +215,23 @@ $MAIL_DOMAIN {
 		reverse_proxy 127.0.0.1:8080
 	}
 
+	# Mail client autodiscover/autoconfig endpoints are public
+	# API routes served by the Go backend. Keep these before
+	# the JMAP catch-all so Outlook and Thunderbird do not get
+	# sent to the 8081 listener.
+	handle /autodiscover/* {
+		reverse_proxy 127.0.0.1:8080
+	}
+	handle /Autodiscover/* {
+		reverse_proxy 127.0.0.1:8080
+	}
+	handle /.well-known/autoconfig/* {
+		reverse_proxy 127.0.0.1:8080
+	}
+	handle /mail/config-v1.1.xml {
+		reverse_proxy 127.0.0.1:8080
+	}
+
 	# Everything else (JMAP, SMTP submission web, IMAP, POP3)
 	# goes to the outbound proxy at 8081.
 	handle {

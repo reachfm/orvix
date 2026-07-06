@@ -262,6 +262,10 @@ func TestHTTPSSetupScriptCaddyFlow(t *testing.T) {
 		"@webmail path /webmail /webmail/*",
 		"@assets path /assets /assets/*",
 		"rewrite * /webmail{uri}",
+		"handle /autodiscover/*",
+		"handle /Autodiscover/*",
+		"handle /.well-known/autoconfig/*",
+		"handle /mail/config-v1.1.xml",
 		"ufw allow 80/tcp",
 		"ufw allow 443/tcp",
 		"caddy validate --config /etc/caddy/Caddyfile",
@@ -441,6 +445,26 @@ func TestHTTPSSetupScriptMailDomainBlock(t *testing.T) {
 	for _, bad := range badRoutes {
 		if strings.Contains(mailBlock, bad) {
 			t.Errorf("$MAIL_DOMAIN block must not route to 8081: %q", bad)
+		}
+	}
+
+	catchAll := "handle {\n\t\treverse_proxy 127.0.0.1:8081"
+	catchAllAt := strings.LastIndex(mailBlock, catchAll)
+	if catchAllAt < 0 {
+		t.Fatalf("$MAIL_DOMAIN block missing final 8081 catch-all\n--- mail block ---\n%s", mailBlock)
+	}
+	for _, route := range []string{
+		"handle /autodiscover/*",
+		"handle /Autodiscover/*",
+		"handle /.well-known/autoconfig/*",
+		"handle /mail/config-v1.1.xml",
+	} {
+		routeAt := strings.Index(mailBlock, route)
+		if routeAt < 0 {
+			t.Fatalf("$MAIL_DOMAIN block missing autodiscover/autoconfig route %q\n--- mail block ---\n%s", route, mailBlock)
+		}
+		if routeAt > catchAllAt {
+			t.Errorf("$MAIL_DOMAIN route %q must appear before final 8081 catch-all\n--- mail block ---\n%s", route, mailBlock)
 		}
 	}
 
