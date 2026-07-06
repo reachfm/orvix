@@ -87,6 +87,80 @@ func newEnterpriseRouter(t *testing.T) (*api.Router, *sql.DB) {
 	return router, sqlDB
 }
 
+// newEnterpriseRouterWithMalformedLockouts creates a router on a
+// database where the coremail_lockouts table is deliberately
+// malformed (wrong columns). This forces the production LoadFromDB
+// code path inside api.NewRouter to fail, triggering the real
+// SetTrustPersistence(false, sanitizedMessage) branch. No manual
+// trust re-wire, no direct SetTrustPersistence call, no mutable
+// global seam — the failure is purely a DB schema mismatch.
+func newEnterpriseRouterWithMalformedLockouts(t *testing.T) (*api.Router, *sql.DB) {
+	t.Helper()
+	logger := zap.NewNop()
+	cfg := config.Defaults()
+	cfg.Server.AdminUIDir = "../../release/admin"
+	cfg.Server.WebmailUIDir = "../../release/webmail"
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = t.TempDir() + "/orvix.db?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	if err := models.MigrateAllRaw(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	authenticator, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+	hashedPw, err := authenticator.HashPassword("TestPassword123!")
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	if _, err := sqlDB.Exec(
+		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
+		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		now, now, hashedPw); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	if _, err := sqlDB.Exec(
+		`INSERT INTO coremail_domains (name, tenant_id, status, plan, created_at, updated_at)
+		 VALUES ('test.local', 1, 'active', 'enterprise', ?, ?)`, now, now); err != nil {
+		t.Fatalf("insert domain: %v", err)
+	}
+	if _, err := sqlDB.Exec(
+		`INSERT INTO coremail_mailboxes (domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme, status, quota_mb, is_admin, created_at, updated_at)
+		 VALUES (1, 1, 'admin', 'admin@test.local', 'Admin', 'hash', 'argon2id', 'active', 1024, 1, ?, ?)`,
+		now, now); err != nil {
+		t.Fatalf("insert mailbox: %v", err)
+	}
+
+	// Sabotage the coremail_lockouts table BEFORE router
+	// construction. MigrateAllRaw created it with the correct
+	// columns. We DROP it and CREATE a malformed version with
+	// only one wrong column. When api.NewRouter later runs
+	// trust.Tables() (CREATE TABLE IF NOT EXISTS) the table
+	// already exists with the wrong schema, so it stays.
+	// LoadFromDB's SELECT key, expires_at FROM coremail_lockouts
+	// then fails because the "key" column does not exist.
+	// This forces the real production error branch in
+	// router.go:273-275 without any test-only backdoor.
+	sqlDB.Exec("DROP TABLE IF EXISTS coremail_lockouts")
+	sqlDB.Exec(`CREATE TABLE coremail_lockouts (broken TEXT NOT NULL)`)
+
+	router := api.NewRouter(cfg, authenticator, logger, db, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
+	t.Cleanup(func() {
+		router.App().Shutdown()
+		sqlDB.Close()
+	})
+	return router, sqlDB
+}
+
 // runEnterprise tests the full lifecycle of every Admin
 // Enterprise v2 endpoint family. The intent is regression
 // coverage for the routes mounted in router.go — not exhaustive

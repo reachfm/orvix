@@ -30,6 +30,7 @@ import (
 	"github.com/orvix/orvix/internal/runtime"
 	"github.com/orvix/orvix/internal/ruler"
 	"github.com/orvix/orvix/internal/tlsmgmt"
+	"github.com/orvix/orvix/internal/trustmgmt"
 	"github.com/orvix/orvix/internal/updater"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/push"
@@ -103,6 +104,18 @@ type Handler struct {
 	// runtime module during Start(). Passed to the admin
 	// runtime telemetry endpoint for the dashboard.
 	listenerRegistry *runtime.ListenerRegistry
+
+	// trustService is the trust / lockout management service.
+	// Set once at router construction. nil trustService means
+	// the login protection endpoints return 503.
+	trustService *trustmgmt.Service
+
+	// trustPersistence tracks whether the trust engine's LoadFromDB
+	// succeeded. When false, lockouts are tracked in-memory only and
+	// the admin UI shows a degraded persistence warning.
+	trustPersistence      string // "db" or "in_memory"
+	trustPersistenceOK    bool
+	trustPersistenceError string // sanitized, never contains raw DB internals
 
 	// dnsOps is the DNS / DKIM operations service. Set once at
 	// router construction (api.NewRouter). The admin DNS Ops
@@ -274,6 +287,73 @@ func (h *Handler) SetObservability(o *observability.Observability) {
 // can surface applied vs pending-restart keys.
 func (h *Handler) SetSettingsBridge(b *settingsbridge.Bridge) {
 	h.settingsBridge = b
+}
+
+func (h *Handler) SetTrustService(s *trustmgmt.Service) {
+	h.trustService = s
+}
+
+// SetTrustPersistence sets the trust engine persistence state after
+// LoadFromDB. Call this from the router after wiring the trust service.
+func (h *Handler) SetTrustPersistence(ok bool, errMsg string) {
+	if ok {
+		h.trustPersistence = "db"
+		h.trustPersistenceOK = true
+		h.trustPersistenceError = ""
+	} else {
+		h.trustPersistence = "in_memory"
+		h.trustPersistenceOK = false
+		h.trustPersistenceError = errMsg
+	}
+}
+
+// LoginProtectionStatus returns the current state of login protection.
+func (h *Handler) LoginProtectionStatus(c fiber.Ctx) error {
+	status := fiber.Map{
+		"enabled":         h.trustService != nil,
+		"rate_limiter":    "active",
+		"rate_limit_desc": "100 req/min per IP, 5 login attempts per 15 min per IP",
+		"lockout_count":   0,
+		"persistence":     h.trustPersistence,
+		"persistence_ok":  h.trustPersistenceOK,
+	}
+	if h.trustPersistence == "" {
+		status["persistence"] = "in_memory"
+		status["persistence_ok"] = false
+	}
+	if h.trustPersistenceError != "" {
+		status["persistence_error"] = h.trustPersistenceError
+	}
+	if h.trustService != nil {
+		lockouts := h.trustService.ListLockouts(c.Context())
+		status["lockout_count"] = len(lockouts)
+	}
+	return c.JSON(status)
+}
+
+// ListLockouts returns current active lockouts from the trust engine.
+func (h *Handler) ListLockouts(c fiber.Ctx) error {
+	if h.trustService == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "trust engine not available"})
+	}
+	lockouts := h.trustService.ListLockouts(c.Context())
+	return c.JSON(fiber.Map{"lockouts": lockouts})
+}
+
+// ClearLockout removes a specific lockout by key.
+func (h *Handler) ClearLockout(c fiber.Ctx) error {
+	if h.trustService == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "trust engine not available"})
+	}
+	key := c.Params("key")
+	if key == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "lockout key is required"})
+	}
+	if err := h.trustService.ClearLockout(c.Context(), key); err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": err.Error()})
+	}
+	h.writeAuditLog(c, "lockout.clear", key)
+	return c.JSON(fiber.Map{"result": "cleared", "key": key})
 }
 
 // Health returns server health status.
@@ -947,10 +1027,12 @@ func (h *Handler) GetMailbox(c fiber.Ctx) error {
 	}
 
 	var email, domainName, status, createdAt, updatedAt string
-	var isAdmin int
-	err = sqlDB.QueryRow(`SELECT m.email, COALESCE(d.name, ''), m.status, m.is_admin, m.created_at, m.updated_at
+	var isAdmin, allowSMTP, allowIMAP, allowPOP3, allowJMAP, allowWebmail int
+	err = sqlDB.QueryRow(`SELECT m.email, COALESCE(d.name, ''), m.status, m.is_admin, m.created_at, m.updated_at,
+		COALESCE(m.allow_smtp,1), COALESCE(m.allow_imap,1), COALESCE(m.allow_pop3,1), COALESCE(m.allow_jmap,1), COALESCE(m.allow_webmail,1)
 		FROM coremail_mailboxes m LEFT JOIN coremail_domains d ON m.domain_id = d.id
-		WHERE m.id = ? AND m.deleted_at IS NULL`, id).Scan(&email, &domainName, &status, &isAdmin, &createdAt, &updatedAt)
+		WHERE m.id = ? AND m.deleted_at IS NULL`, id).Scan(&email, &domainName, &status, &isAdmin, &createdAt, &updatedAt,
+		&allowSMTP, &allowIMAP, &allowPOP3, &allowJMAP, &allowWebmail)
 	if err == sql.ErrNoRows {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "mailbox not found"})
 	}
@@ -973,6 +1055,11 @@ func (h *Handler) GetMailbox(c fiber.Ctx) error {
 		"created_at": createdAt,
 		"updated_at": updatedAt,
 		"deleted":    false,
+		"allow_smtp": allowSMTP == 1,
+		"allow_imap": allowIMAP == 1,
+		"allow_pop3": allowPOP3 == 1,
+		"allow_jmap": allowJMAP == 1,
+		"allow_webmail": allowWebmail == 1,
 		"stats": fiber.Map{
 			"messages":    messages,
 			"queue_items": queueItems,
@@ -1454,6 +1541,114 @@ func (h *Handler) UpdateMailboxStatus(c fiber.Ctx) error {
 
 	h.writeAuditLog(c, "mailbox.status_update", fmt.Sprintf("mailbox_id:%d|email:%s|status:%s", id, email, req.Status))
 	return c.JSON(fiber.Map{"result": "updated", "email": email, "status": req.Status})
+}
+
+// UpdateMailboxQuota updates the storage quota for a CoreMail mailbox.
+// Request: {"quota_mb": 2048}. Returns the updated quota.
+func (h *Handler) UpdateMailboxQuota(c fiber.Ctx) error {
+	idStr := c.Params("id")
+	var id uint
+	fmt.Sscanf(idStr, "%d", &id)
+	if id == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid mailbox id"})
+	}
+
+	var req struct {
+		QuotaMB int64 `json:"quota_mb"`
+	}
+	if err := c.Bind().JSON(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
+	}
+	if req.QuotaMB < 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "quota_mb must be >= 0"})
+	}
+
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	var email string
+	err = sqlDB.QueryRow("SELECT email FROM coremail_mailboxes WHERE id = ? AND deleted_at IS NULL", id).Scan(&email)
+	if err == sql.ErrNoRows {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "mailbox not found"})
+	}
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	_, err = sqlDB.Exec("UPDATE coremail_mailboxes SET quota_mb = ?, updated_at = ? WHERE id = ?", req.QuotaMB, time.Now().UTC(), id)
+	if err != nil {
+		h.logger.Error("failed to update mailbox quota", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "quota update failed"})
+	}
+
+	h.writeAuditLog(c, "mailbox.quota_update", fmt.Sprintf("mailbox_id:%d|email:%s|quota_mb:%d", id, email, req.QuotaMB))
+	return c.JSON(fiber.Map{"result": "updated", "email": email, "quota_mb": req.QuotaMB})
+}
+
+// UpdateMailboxProtocols updates per-protocol access flags for a mailbox.
+func (h *Handler) UpdateMailboxProtocols(c fiber.Ctx) error {
+	idStr := c.Params("id")
+	var id uint
+	fmt.Sscanf(idStr, "%d", &id)
+	if id == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid mailbox id"})
+	}
+
+	var req struct {
+		AllowSMTP    *bool `json:"allow_smtp"`
+		AllowIMAP    *bool `json:"allow_imap"`
+		AllowPOP3    *bool `json:"allow_pop3"`
+		AllowJMAP    *bool `json:"allow_jmap"`
+		AllowWebmail *bool `json:"allow_webmail"`
+	}
+	if err := c.Bind().JSON(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
+	}
+	if req.AllowSMTP == nil && req.AllowIMAP == nil && req.AllowPOP3 == nil && req.AllowJMAP == nil && req.AllowWebmail == nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "at least one protocol flag required"})
+	}
+
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	var email string
+	err = sqlDB.QueryRow("SELECT email FROM coremail_mailboxes WHERE id = ? AND deleted_at IS NULL", id).Scan(&email)
+	if err == sql.ErrNoRows {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "mailbox not found"})
+	}
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	now := time.Now().UTC()
+	var sets []string
+	var args []any
+	if req.AllowSMTP != nil { sets = append(sets, "allow_smtp = ?"); args = append(args, boolToInt(*req.AllowSMTP)) }
+	if req.AllowIMAP != nil { sets = append(sets, "allow_imap = ?"); args = append(args, boolToInt(*req.AllowIMAP)) }
+	if req.AllowPOP3 != nil { sets = append(sets, "allow_pop3 = ?"); args = append(args, boolToInt(*req.AllowPOP3)) }
+	if req.AllowJMAP != nil { sets = append(sets, "allow_jmap = ?"); args = append(args, boolToInt(*req.AllowJMAP)) }
+	if req.AllowWebmail != nil { sets = append(sets, "allow_webmail = ?"); args = append(args, boolToInt(*req.AllowWebmail)) }
+	sets = append(sets, "updated_at = ?")
+	args = append(args, now, id)
+
+	_, err = sqlDB.Exec(fmt.Sprintf("UPDATE coremail_mailboxes SET %s WHERE id = ?", strings.Join(sets, ", ")), args...)
+	if err != nil {
+		h.logger.Error("failed to update mailbox protocols", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "protocol update failed"})
+	}
+
+	h.writeAuditLog(c, "mailbox.protocols_update", fmt.Sprintf("mailbox_id:%d|email:%s", id, email))
+	// Return updated flags
+	var smtp, imap, pop3, jmap, wm int
+	sqlDB.QueryRow("SELECT allow_smtp, allow_imap, allow_pop3, allow_jmap, allow_webmail FROM coremail_mailboxes WHERE id = ?", id).Scan(&smtp, &imap, &pop3, &jmap, &wm)
+	return c.JSON(fiber.Map{"result": "updated", "protocols": fiber.Map{
+		"allow_smtp": smtp == 1, "allow_imap": imap == 1, "allow_pop3": pop3 == 1,
+		"allow_jmap": jmap == 1, "allow_webmail": wm == 1,
+	}})
 }
 
 // BulkMailboxStatus updates status for a set of mailboxes in a single admin call.

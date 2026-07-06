@@ -53,21 +53,22 @@ const GROUPS = [
   { id: 'domainsAccounts', labelKey: 'sidebar.group.domainsAccounts', items: [
     { route: 'domains',       labelKey: 'sidebar.item.domains'        },
     { route: 'accounts',      labelKey: 'sidebar.item.accounts'       },
-    { route: 'domains/groups', labelKey: 'sidebar.item.groups',        hide: true },
-    { route: 'domains/lists',  labelKey: 'sidebar.item.mailingLists',  hide: true },
-    { route: 'domains/public', labelKey: 'sidebar.item.publicFolders', hide: true },
-    { route: 'accounts/classes', labelKey: 'sidebar.item.accountClasses', hide: true },
+    { route: 'domains/groups', labelKey: 'sidebar.item.groups'        },
+    { route: 'domains/lists',  labelKey: 'sidebar.item.mailingLists'  },
+    { route: 'domains/public', labelKey: 'sidebar.item.publicFolders' },
+    { route: 'accounts/classes', labelKey: 'sidebar.item.accountClasses' },
     { route: 'bulk-import',   labelKey: 'sidebar.item.bulkImport'     },
     { route: 'dns',           labelKey: 'sidebar.item.dnsDkim'        },
   ]},
 
   { id: 'security', labelKey: 'sidebar.group.security', items: [
     { route: 'security/ssl',      labelKey: 'sidebar.item.sslCerts'   },
-    { route: 'security/antispam', labelKey: 'sidebar.item.antivirus',     hide: true },
-    { route: 'security/spam',     labelKey: 'sidebar.item.spamControl',   hide: true },
-    { route: 'security/routing',  labelKey: 'sidebar.item.routing',       hide: true },
-    { route: 'security/rules',    labelKey: 'sidebar.item.incomingRules', hide: true },
-    { route: 'security/quarantine', labelKey: 'sidebar.item.quarantine',  hide: true },
+    { route: 'security/antispam', labelKey: 'sidebar.item.antivirus'  },
+    { route: 'security/spam',     labelKey: 'sidebar.item.spamControl' },
+    { route: 'security/routing',  labelKey: 'sidebar.item.routing'    },
+    { route: 'security/rules',    labelKey: 'sidebar.item.incomingRules' },
+    { route: 'security/quarantine', labelKey: 'sidebar.item.quarantine' },
+    { route: 'security/login-protection', labelKey: 'sidebar.item.loginProtection' },
   ]},
 
   { id: 'updates', labelKey: 'sidebar.group.updates', items: [
@@ -89,16 +90,16 @@ const GROUPS = [
 
   { id: 'logging', labelKey: 'sidebar.group.logging', items: [
     { route: 'logs',           labelKey: 'sidebar.item.localLogs' },
-    { route: 'logs/rules',     labelKey: 'sidebar.item.logRules',   hide: true },
-    { route: 'logs/files',     labelKey: 'sidebar.item.viewLogFiles', hide: true },
-    { route: 'logs/server',    labelKey: 'sidebar.item.logServer',  hide: true },
+    { route: 'logs/rules',     labelKey: 'sidebar.item.logRules'  },
+    { route: 'logs/files',     labelKey: 'sidebar.item.viewLogFiles' },
+    { route: 'logs/server',    labelKey: 'sidebar.item.logServer' },
   ]},
 
   { id: 'backup', labelKey: 'sidebar.group.backup', items: [
     { route: 'backups',           labelKey: 'sidebar.item.backupStatus' },
     { route: 'backups/history',   labelKey: 'sidebar.item.backupHistory' },
-    { route: 'backups/ftp',       labelKey: 'sidebar.item.ftpBackup', hide: true },
-    { route: 'backups/fs',        labelKey: 'sidebar.item.fsAccess',  hide: true },
+    { route: 'backups/ftp',       labelKey: 'sidebar.item.ftpBackup' },
+    { route: 'backups/fs',        labelKey: 'sidebar.item.fsAccess' },
   ]},
 
   { id: 'migration', labelKey: 'sidebar.group.migration', items: [
@@ -115,7 +116,7 @@ const GROUPS = [
 
   { id: 'admin', labelKey: 'sidebar.group.adminRights', items: [
     { route: 'admin/groups', labelKey: 'sidebar.item.adminGroups' },
-    { route: 'admin/users',  labelKey: 'sidebar.item.auditLog', hide: true },
+    { route: 'admin/users',  labelKey: 'sidebar.item.adminUsers' },
   ]},
 ];
 

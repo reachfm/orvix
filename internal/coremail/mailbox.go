@@ -48,6 +48,13 @@ type Mailbox struct {
 	ForwardTo  string `json:"forward_to,omitempty"`
 	Labels     string `json:"labels,omitempty"`
 
+	// Protocol access.
+	AllowSMTP    bool `json:"allow_smtp"`
+	AllowIMAP    bool `json:"allow_imap"`
+	AllowPOP3    bool `json:"allow_pop3"`
+	AllowJMAP    bool `json:"allow_jmap"`
+	AllowWebmail bool `json:"allow_webmail"`
+
 	// Abuse prevention.
 	SendLimitPerHour  int `json:"send_limit_per_hour"`
 	RecvLimitPerHour  int `json:"recv_limit_per_hour"`
@@ -338,5 +345,53 @@ func scanMailbox(row interface {
 	m.MFAEnabled = intToBool(mfaEnabled)
 	m.IsAdmin = intToBool(isAdmin)
 	m.IsForwarder = intToBool(isForwarder)
+	// Default all protocols to allowed. The runtime can override
+	// via admin PATCH /mailboxes/:id/protocols when the DB columns
+	// exist. Callers that need protocol flags should use
+	// scanMailboxWithProtocols instead.
+	m.AllowSMTP = true
+	m.AllowIMAP = true
+	m.AllowPOP3 = true
+	m.AllowJMAP = true
+	m.AllowWebmail = true
+	return &m, nil
+}
+
+// scanMailboxWithProtocols is like scanMailbox but handles the 31-column
+// SELECT that includes the 5 protocol access columns (allow_smtp,
+// allow_imap, allow_pop3, allow_jmap, allow_webmail). The protocol
+// columns must be the last 5 columns in the SELECT.
+func scanMailboxWithProtocols(row interface {
+	Scan(dest ...interface{}) error
+}) (*Mailbox, error) {
+	var m Mailbox
+	var status, authScheme string
+	var mfaEnabled, isAdmin, isForwarder int
+	var allowSMTP, allowIMAP, allowPOP3, allowJMAP, allowWebmail int
+	err := row.Scan(
+		&m.ID, &m.DomainID, &m.TenantID, &m.LocalPart, &m.Email, &m.Name,
+		&m.PasswordHash, &authScheme, &mfaEnabled, &m.MFASecret, &m.AppPasswords,
+		&status, &m.QuotaMB, &m.UsedBytes, &m.MsgCount,
+		&isAdmin, &isForwarder, &m.ForwardTo, &m.Labels,
+		&m.SendLimitPerHour, &m.RecvLimitPerHour,
+		&m.LastLogin, &m.LastIP, &m.CreatedAt, &m.UpdatedAt, &m.DeletedAt,
+		&allowSMTP, &allowIMAP, &allowPOP3, &allowJMAP, &allowWebmail,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("scan mailbox: %w", err)
+	}
+	m.Status = MailboxStatus(status)
+	m.AuthScheme = AuthScheme(authScheme)
+	m.MFAEnabled = intToBool(mfaEnabled)
+	m.IsAdmin = intToBool(isAdmin)
+	m.IsForwarder = intToBool(isForwarder)
+	m.AllowSMTP = intToBool(allowSMTP)
+	m.AllowIMAP = intToBool(allowIMAP)
+	m.AllowPOP3 = intToBool(allowPOP3)
+	m.AllowJMAP = intToBool(allowJMAP)
+	m.AllowWebmail = intToBool(allowWebmail)
 	return &m, nil
 }

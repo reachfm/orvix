@@ -33,6 +33,9 @@ func (s *IdentityService) Authenticate(ctx context.Context, username, password s
 	if mbox.Status != coremail.MailboxActive {
 		return nil, nil
 	}
+	if !mbox.AllowSMTP {
+		return nil, nil
+	}
 
 	if password != "" {
 		if !s.engine.Auth.VerifyPassword(password, mbox.PasswordHash) {

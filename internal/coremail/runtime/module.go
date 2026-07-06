@@ -390,7 +390,7 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	imapCfg.TLSCertFile = cfg.CoreMail.TLSCertFile
 	imapCfg.TLSKeyFile = cfg.CoreMail.TLSKeyFile
 	imapCfg.RequireTLSForAuth = cfg.CoreMail.RequireTLSForAuth
-	m.imapServer = imap.NewServer(imapCfg, m.store, &mailboxAuth{auth: m.engine.Auth})
+	m.imapServer = imap.NewServer(imapCfg, m.store, &imapMailboxAuth{auth: m.engine.Auth})
 	m.imapServer.Observability = m.obs
 
 	pop3Cfg := pop3.DefaultConfig()
@@ -398,7 +398,7 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	pop3Cfg.TLSCertFile = cfg.CoreMail.TLSCertFile
 	pop3Cfg.TLSKeyFile = cfg.CoreMail.TLSKeyFile
 	pop3Cfg.RequireTLSForAuth = cfg.CoreMail.RequireTLSForAuth
-	m.pop3Server = pop3.NewServer(pop3Cfg, m.store, pop3.NewAuthenticator(&mailboxAuth{auth: m.engine.Auth}))
+	m.pop3Server = pop3.NewServer(pop3Cfg, m.store, pop3.NewAuthenticator(&pop3MailboxAuth{auth: m.engine.Auth}))
 	m.pop3Server.Observability = m.obs
 
 	// ── IMAPS (port 993, implicit TLS) ──────────────────────
@@ -420,7 +420,7 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 			imapsCfg.TLSCertFile = cfg.CoreMail.TLSCertFile
 			imapsCfg.TLSKeyFile = cfg.CoreMail.TLSKeyFile
 			imapsCfg.RequireTLSForAuth = cfg.CoreMail.RequireTLSForAuth
-			m.imapsServer = imap.NewServer(imapsCfg, m.store, &mailboxAuth{auth: m.engine.Auth})
+			m.imapsServer = imap.NewServer(imapsCfg, m.store, &imapMailboxAuth{auth: m.engine.Auth})
 			m.imapsServer.Observability = m.obs
 		}
 	}
@@ -444,7 +444,7 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 			pop3sCfg.TLSCertFile = cfg.CoreMail.TLSCertFile
 			pop3sCfg.TLSKeyFile = cfg.CoreMail.TLSKeyFile
 			pop3sCfg.RequireTLSForAuth = cfg.CoreMail.RequireTLSForAuth
-			m.pop3sServer = pop3.NewServer(pop3sCfg, m.store, pop3.NewAuthenticator(&mailboxAuth{auth: m.engine.Auth}))
+			m.pop3sServer = pop3.NewServer(pop3sCfg, m.store, pop3.NewAuthenticator(&pop3MailboxAuth{auth: m.engine.Auth}))
 			m.pop3sServer.Observability = m.obs
 		}
 	}
@@ -927,6 +927,37 @@ func (a *mailboxAuth) Authenticate(username, password string) (uint, bool) {
 	}
 	mbox, err := a.auth.AuthenticateMailbox(context.Background(), username, password)
 	if err != nil || mbox == nil {
+		return 0, false
+	}
+	return mbox.ID, true
+}
+
+type imapMailboxAuth struct{ auth *coremail.AuthService }
+type pop3MailboxAuth struct{ auth *coremail.AuthService }
+
+func (a *imapMailboxAuth) Authenticate(username, password string) (uint, bool) {
+	if a == nil || a.auth == nil {
+		return 0, false
+	}
+	mbox, err := a.auth.AuthenticateMailbox(context.Background(), username, password)
+	if err != nil || mbox == nil {
+		return 0, false
+	}
+	if !mbox.AllowIMAP {
+		return 0, false
+	}
+	return mbox.ID, true
+}
+
+func (a *pop3MailboxAuth) Authenticate(username, password string) (uint, bool) {
+	if a == nil || a.auth == nil {
+		return 0, false
+	}
+	mbox, err := a.auth.AuthenticateMailbox(context.Background(), username, password)
+	if err != nil || mbox == nil {
+		return 0, false
+	}
+	if !mbox.AllowPOP3 {
 		return 0, false
 	}
 	return mbox.ID, true

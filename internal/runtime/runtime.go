@@ -41,10 +41,22 @@ type Telemetry struct {
 	UptimeSeconds int64              `json:"uptime_seconds"`
 	StartedAt     string             `json:"started_at,omitempty"` // RFC3339
 	Services      map[string]Service `json:"services"`
+	Listeners     []ListenerEntry    `json:"listeners,omitempty"`   // stable listener array
 	Capacity      Capacity           `json:"capacity"`
 	Queue         QueueCounts        `json:"queue"`
 	License       LicensePosture     `json:"license"`
 	Warnings      []Warning          `json:"warnings"`
+}
+
+// ListenerEntry is a stable representation of a protocol listener
+// for the admin services and runtime pages.
+type ListenerEntry struct {
+	Protocol string `json:"protocol"`          // "smtp", "imap", "pop3", "jmap"
+	Kind     string `json:"kind"`              // listener kind from registry
+	Port     int    `json:"port"`
+	Status   string `json:"status"`            // "ok" | "warn" | "fail" | "unknown"
+	State    string `json:"state"`             // "active" | "skipped" | "degraded" | "failed" | "unknown"
+	Detail   string `json:"detail,omitempty"`
 }
 
 // Service is a single per-subsystem entry. Port is included so the
@@ -237,6 +249,34 @@ func NewTelemetry(in Inputs) Telemetry {
 		"jmap":       listenerOrFallback(in.ListenerSnapshot, ListenerJMAP, in.JMAPPort, "JMAP"),
 		"database":   newDatabaseService(in.DBPing),
 		"queue":      newQueueService(in.QueueCounts),
+	}
+
+	// Listeners — stable array format for frontend services/runtime pages.
+	type listenerSpec struct {
+		kind   ListenerKind
+		proto  string
+		svcKey string
+		port   int
+	}
+	for _, spec := range []listenerSpec{
+		{ListenerSMTP, "smtp", "smtp", in.SMHTTPPort},
+		{ListenerSubmission, "smtp", "submission", 587},
+		{ListenerSMTPS, "smtp", "smtps", 465},
+		{ListenerIMAP, "imap", "imap", in.IMAPPort},
+		{ListenerIMAPS, "imap", "imaps", 993},
+		{ListenerPOP3, "pop3", "pop3", in.POP3Port},
+		{ListenerPOP3S, "pop3", "pop3s", 995},
+		{ListenerJMAP, "jmap", "jmap", in.JMAPPort},
+	} {
+		svc := t.Services[spec.svcKey]
+		t.Listeners = append(t.Listeners, ListenerEntry{
+			Protocol: spec.proto,
+			Kind:     string(spec.kind),
+			Port:     spec.port,
+			Status:   svc.Status,
+			State:    svc.State,
+			Detail:   svc.Detail,
+		})
 	}
 
 	// Queue counts — pass through; zero values are honest when

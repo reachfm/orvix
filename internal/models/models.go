@@ -1163,6 +1163,11 @@ func migrateCoremailMailboxSchema(ctx context.Context, db *sql.DB) error {
 		{"last_ip", "ALTER TABLE coremail_mailboxes ADD COLUMN last_ip TEXT NOT NULL DEFAULT ''"},
 		{"deleted_at", "ALTER TABLE coremail_mailboxes ADD COLUMN deleted_at DATETIME"},
 		{"class_id", "ALTER TABLE coremail_mailboxes ADD COLUMN class_id INTEGER NOT NULL DEFAULT 0"},
+		{"allow_smtp", "ALTER TABLE coremail_mailboxes ADD COLUMN allow_smtp INTEGER NOT NULL DEFAULT 1"},
+		{"allow_imap", "ALTER TABLE coremail_mailboxes ADD COLUMN allow_imap INTEGER NOT NULL DEFAULT 1"},
+		{"allow_pop3", "ALTER TABLE coremail_mailboxes ADD COLUMN allow_pop3 INTEGER NOT NULL DEFAULT 1"},
+		{"allow_jmap", "ALTER TABLE coremail_mailboxes ADD COLUMN allow_jmap INTEGER NOT NULL DEFAULT 1"},
+		{"allow_webmail", "ALTER TABLE coremail_mailboxes ADD COLUMN allow_webmail INTEGER NOT NULL DEFAULT 1"},
 	}
 
 	for _, addition := range additions {

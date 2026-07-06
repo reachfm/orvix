@@ -19,7 +19,9 @@ package handlers_test
 // a missing CSRF token returns 403.
 
 import (
+	"encoding/json"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -331,5 +333,64 @@ func TestEnterpriseV3CreateMailboxClassIDNotFound(t *testing.T) {
 		`{"email":"user2@test.local","password":"TestPassword123!","class_id":1}`)
 	if resp.status != 400 && resp.status != 404 {
 		t.Fatalf("cross-tenant class_id: want 400/404, got %d %s", resp.status, resp.body)
+	}
+}
+
+// TestEnterpriseV3UpdateMailboxQuota verifies the mailbox quota update endpoint.
+func TestEnterpriseV3UpdateMailboxQuota(t *testing.T) {
+	router, sqlDB := newEnterpriseRouter(t)
+	token := enterpriseLoginForTest(t, router, "admin@test.local", "TestPassword123!")
+	csrf := enterpriseCSRFForTest(t, router, token)
+
+	// Create a mailbox first
+	resp := postJSON(t, router, "/api/v1/mailboxes", token, csrf,
+		`{"email":"quota-test@test.local","password":"TestPassword123!","quota_mb":512}`)
+	if resp.status != 201 {
+		t.Fatalf("create mailbox: want 201, got %d %s", resp.status, resp.body)
+	}
+	var created struct{ ID int64 `json:"id"` }
+	if err := json.Unmarshal(resp.bodyBytes, &created); err != nil || created.ID == 0 {
+		t.Fatalf("parse created id: %v, body=%s", err, resp.body)
+	}
+
+	// Update quota
+	resp2 := patchJSON(t, router, "/api/v1/mailboxes/"+strconv.FormatInt(created.ID, 10)+"/quota", token, csrf,
+		`{"quota_mb":2048}`)
+	if resp2.status != 200 {
+		t.Fatalf("update quota: want 200, got %d %s", resp2.status, resp2.body)
+	}
+
+	// Verify in DB
+	var quota int64
+	if err := sqlDB.QueryRow(`SELECT quota_mb FROM coremail_mailboxes WHERE id = ?`, created.ID).Scan(&quota); err != nil {
+		t.Fatalf("read quota: %v", err)
+	}
+	if quota != 2048 {
+		t.Fatalf("quota: want 2048, got %d", quota)
+	}
+
+	// Negative quota rejected
+	resp3 := patchJSON(t, router, "/api/v1/mailboxes/"+strconv.FormatInt(created.ID, 10)+"/quota", token, csrf,
+		`{"quota_mb":-1}`)
+	if resp3.status != 400 {
+		t.Fatalf("negative quota: want 400, got %d %s", resp3.status, resp3.body)
+	}
+
+	// Non-existent mailbox
+	resp4 := patchJSON(t, router, "/api/v1/mailboxes/99999/quota", token, csrf,
+		`{"quota_mb":1024}`)
+	if resp4.status != 404 {
+		t.Fatalf("not found: want 404, got %d %s", resp4.status, resp4.body)
+	}
+}
+
+// TestEnterpriseV3UpdateMailboxQuotaUnauthorized verifies quota update without auth is rejected.
+func TestEnterpriseV3UpdateMailboxQuotaUnauthorized(t *testing.T) {
+	router, _ := newEnterpriseRouter(t)
+	// No auth token — should fail
+	resp := patchJSON(t, router, "/api/v1/mailboxes/1/quota", "", "",
+		`{"quota_mb":1024}`)
+	if resp.status != 401 {
+		t.Fatalf("unauthorized: want 401, got %d %s", resp.status, resp.body)
 	}
 }

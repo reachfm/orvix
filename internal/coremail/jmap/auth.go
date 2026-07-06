@@ -54,6 +54,10 @@ func (s *Server) authenticate(r *http.Request) (string, uint, bool) {
 		return "", 0, false
 	}
 
+	if !mbox.AllowJMAP {
+		return "", 0, false
+	}
+
 	if s.Observability != nil {
 		s.Observability.Metrics.IncJMAPAuthSuccess()
 		s.Observability.EventHistory.Record(observability.EventJMAPAuthSuccess, map[string]string{

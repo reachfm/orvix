@@ -365,7 +365,7 @@ async function main() {
     await navigateRoute('backups', 'Backups');
 
     const sidebarLinks = await evalJS(`Array.from(document.querySelectorAll('.sidebar-link')).map(a => a.getAttribute('data-route')).join(',')`);
-    const hiddenRoutes = ['domains/groups', 'domains/lists', 'domains/public', 'accounts/classes', 'security/antispam', 'security/spam', 'security/routing', 'security/rules', 'security/quarantine', 'logs/rules', 'logs/files', 'logs/server', 'backups/ftp', 'backups/fs', 'migration', 'clustering', 'admin/users'];
+    const hiddenRoutes = ['migration', 'migration/sources', 'clustering', 'clustering/imap', 'clustering/pop3', 'clustering/webmail'];
     for (const hr of hiddenRoutes) {
       if (sidebarLinks.includes(hr)) fail(`HIDDEN route '${hr}' still appears in sidebar`);
     }

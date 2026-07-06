@@ -68,18 +68,21 @@ export async function renderAccountsPage(root) {
           return badge(s, s === 'active' ? 'good' : (s === 'suspended' || s === 'locked' ? 'bad' : 'neutral'));
         } },
         { name: 'q',    label: 'Quota (MB)', render: (r) => r.quota_mb != null ? String(r.quota_mb) : '-' },
-        { name: 'a',    label: '', cellClass: 'actions', render: (r) => {
+        { name: 'a',    label: 'Actions', cellClass: 'actions', render: (r) => {
           const w = el('div', { class: 'row-actions' });
-          if (r.id) {
+          const rid = r.mailbox_id || r.user_id || r.id;
+          if (rid) {
             // mv-action / mb-action: legacy row-action classes
             // asserted by the static-analysis test. We keep them
             // as literal class names so the contracts remain
             // discoverable.
-            w.appendChild(el('button', { class: 'btn xs ghost mv-action', type: 'button', text: 'Detail', onclick: () => openDetail(r.id) }));
+            w.appendChild(el('button', { class: 'btn xs ghost mv-action', type: 'button', text: 'Detail', onclick: () => openDetail(rid) }));
             w.appendChild(el('button', { class: 'btn xs ghost mb-action', type: 'button', text: r.status === 'suspended' ? 'Resume' : 'Suspend',
-              onclick: () => toggleStatus(r.id, r.status) }));
-            w.appendChild(el('button', { class: 'btn xs ghost mb-action', type: 'button', text: 'Reset password', onclick: () => doResetPw(r.id) }));
-            w.appendChild(el('button', { class: 'btn xs danger mb-action', type: 'button', text: 'Delete', onclick: () => doDelete(r.id) }));
+              onclick: () => toggleStatus(rid, r.status) }));
+            w.appendChild(el('button', { class: 'btn xs ghost mb-action', type: 'button', text: 'Reset password', onclick: () => doResetPw(rid) }));
+            w.appendChild(el('button', { class: 'btn xs ghost mb-action', type: 'button', text: 'Edit Quota', onclick: () => doEditQuota(rid, r.quota_mb) }));
+            w.appendChild(el('button', { class: 'btn xs ghost mb-action', type: 'button', text: 'Protocols', onclick: () => doEditProtocols(rid) }));
+            w.appendChild(el('button', { class: 'btn xs danger mb-action', type: 'button', text: 'Delete', onclick: () => doDelete(rid) }));
           }
           return w;
         } },
@@ -191,6 +194,74 @@ async function doDelete(id) {
   if (!ok) return;
   try { await apiDelete('/api/v1/mailboxes/' + encodeURIComponent(id)); toast('Mailbox deleted', 'success', 1800); setTimeout(() => location.reload(), 400); }
   catch (e) { toast((e && e.message) || 'delete failed', 'error'); }
+}
+
+async function doEditProtocols(id) {
+  openModal({
+    title: 'Protocol access',
+    render: (body, foot) => {
+      body.appendChild(el('div', { class: 'empty', text: t('common.loading') }));
+      apiGet('/api/v1/mailboxes/' + encodeURIComponent(id)).then((data) => {
+        body.innerHTML = '';
+        const makeToggle = (field, label) => {
+          const wrap = el('label', { style: 'display:flex;align-items:center;gap:8px;padding:6px 0;' });
+          const cb = el('input', { type: 'checkbox', name: field, checked: data[field] ? 'checked' : '' });
+          wrap.appendChild(cb);
+          wrap.appendChild(el('span', { text: label }));
+          return wrap;
+        };
+        body.appendChild(makeToggle('allow_smtp', 'SMTP'));
+        body.appendChild(makeToggle('allow_imap', 'IMAP'));
+        body.appendChild(makeToggle('allow_pop3', 'POP3'));
+        body.appendChild(makeToggle('allow_jmap', 'JMAP'));
+        body.appendChild(makeToggle('allow_webmail', 'Webmail'));
+      }).catch((e) => {
+        body.innerHTML = '';
+        body.appendChild(el('div', { class: 'error', text: (e && e.message) || 'load failed' }));
+      });
+      foot.appendChild(el('button', { class: 'btn ghost', type: 'button', text: t('common.cancel'),
+        onclick: () => document.querySelector('.modal-overlay').remove() }));
+      foot.appendChild(el('button', { class: 'btn primary', type: 'button', text: 'Save', onclick: async () => {
+        const getVal = (name) => {
+          const cb = document.querySelector(`.modal-overlay input[name="${name}"]`);
+          return cb ? cb.checked : false;
+        };
+        try {
+          await apiPatch('/api/v1/mailboxes/' + encodeURIComponent(id) + '/protocols', {
+            allow_smtp: getVal('allow_smtp'),
+            allow_imap: getVal('allow_imap'),
+            allow_pop3: getVal('allow_pop3'),
+            allow_jmap: getVal('allow_jmap'),
+            allow_webmail: getVal('allow_webmail'),
+          });
+          toast('Protocol access updated', 'success', 1800);
+          document.querySelector('.modal-overlay').remove();
+        } catch (e) { toast((e && e.message) || 'update failed', 'error'); }
+      } }));
+    },
+  });
+}
+
+async function doEditQuota(id, currentQuota) {
+  openModal({
+    title: 'Edit mailbox quota',
+    render: (body, foot) => {
+      const quota = el('input', { type: 'number', min: '0', value: currentQuota != null ? String(currentQuota) : '1024', required: 'required', autocomplete: 'off' });
+      body.appendChild(el('div', { class: 'form-row' }, [el('label', null, 'Quota (MB)'), quota]));
+      body.appendChild(el('p', { class: 'subtle small', text: 'Set to 0 for unlimited (subject to account class and system limits).' }));
+      foot.appendChild(el('button', { class: 'btn ghost', type: 'button', text: t('common.cancel'),
+        onclick: () => document.querySelector('.modal-overlay').remove() }));
+      foot.appendChild(el('button', { class: 'btn primary', type: 'button', text: t('common.save'), onclick: async () => {
+        const mb = Number(quota.value);
+        if (isNaN(mb) || mb < 0) { toast('Quota must be >= 0', 'error'); return; }
+        try {
+          await apiPatch('/api/v1/mailboxes/' + encodeURIComponent(id) + '/quota', { quota_mb: mb });
+          toast('Quota updated', 'success', 1800);
+          location.reload();
+        } catch (e) { toast((e && e.message) || 'update failed', 'error'); }
+      } }));
+    },
+  });
 }
 
 async function openDetail(id) {

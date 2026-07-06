@@ -16,16 +16,12 @@ const STATE_KIND = {
   active: 'good', skipped: 'bad', failed: 'bad', unknown: 'neutral', degraded: 'warn', starting: 'warn',
 };
 
-const SERVICES = [
-  { id: 'smtp',        label: 'SMTP 25 inbound',  kind: 'smtp' },
-  { id: 'smtp-submission', label: 'SMTP 587 submission', kind: 'smtp-submission' },
-  { id: 'smtps',       label: 'SMTPS 465',        kind: 'smtps' },
-  { id: 'imap',        label: 'IMAP 143',         kind: 'imap' },
-  { id: 'imaps',       label: 'IMAPS 993',        kind: 'imaps' },
-  { id: 'pop3',        label: 'POP3 110',         kind: 'pop3' },
-  { id: 'pop3s',       label: 'POP3S 995',        kind: 'pop3s' },
-  { id: 'jmap',        label: 'JMAP 8081',        kind: 'jmap' },
-];
+const SERVICE_LABELS = {
+  'smtp': 'SMTP 25 inbound', 'submission': 'SMTP 587 submission', 'smtps': 'SMTPS 465',
+  'imap': 'IMAP 143', 'imaps': 'IMAPS 993',
+  'pop3': 'POP3 110', 'pop3s': 'POP3S 995',
+  'jmap': 'JMAP 8081',
+};
 
 export async function renderServicesPage(root) {
   root.innerHTML = '';
@@ -43,20 +39,22 @@ export async function renderServicesPage(root) {
   let data;
   try { data = await apiGet('/api/v1/admin/runtime'); }
   catch (e) { grid.appendChild(el('div', { class: 'error', text: (e && e.message) || 'Could not load runtime.' })); applyAutoDir(wrap); return; }
-  const listeners = (data && data.listeners) || [];
-  const byKind = new Map();
-  listeners.forEach((l) => byKind.set((l.kind || '').toLowerCase(), l));
-  SERVICES.forEach((s) => {
-    const l = byKind.get(s.kind) || byKind.get(s.id);
-    const state = (l && l.state || 'unknown').toLowerCase();
-    const kind = STATE_KIND[state] || 'neutral';
+  const listeners = (data && data.listeners) || (data && data.services ? Object.entries(data.services).map(([k, v]) => ({ kind: k, status: v.status, state: v.state, detail: v.detail, port: v.port })).filter((l) => l.kind !== 'api' && l.kind !== 'database' && l.kind !== 'queue') : []);
+  if (!listeners.length) {
+    grid.appendChild(el('div', { class: 'empty', text: 'No listener data available.' }));
+    applyAutoDir(wrap); return;
+  }
+  listeners.forEach((l) => {
+    const kind = (l.kind || '').toLowerCase();
+    const state = (l.state || l.status || 'unknown').toLowerCase();
+    const label = SERVICE_LABELS[kind] || kind;
     const card = el('div', { class: 'service-card' }, [
       el('div', { class: 'service-card-head' }, [
-        el('span', { class: 'service-card-name', text: s.label }),
-        badge(state, kind),
+        el('span', { class: 'service-card-name', text: label }),
+        badge(state, STATE_KIND[state] || 'neutral'),
       ]),
-      el('div', { class: 'service-card-body', text: l && l.detail ? l.detail : 'No detail reported.' }),
-      el('div', { class: 'service-card-foot', text: l && l.port ? 'port ' + l.port : '—' }),
+      el('div', { class: 'service-card-body', text: l.detail || 'No detail reported.' }),
+      el('div', { class: 'service-card-foot', text: l.port ? 'port ' + l.port : '—' }),
     ]);
     grid.appendChild(card);
   });

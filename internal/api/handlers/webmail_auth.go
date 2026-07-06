@@ -9,7 +9,7 @@ package handlers
 // `access_token` cookie is set on the configured
 // cross-subdomain domain, so subsequent /api/v1/webmail/*
 // calls authenticate via the same JWT middleware the
-// admin panel uses — but the JWT was minted in the
+// admin panel uses â€” but the JWT was minted in the
 // webmail flow and the user only needs to own a
 // coremail_mailboxes row.
 //
@@ -20,7 +20,7 @@ package handlers
 //     own Argon2id hash;
 //   - finds or auto-provisions the matching `users` row
 //     (this is the common case for mailboxes created via
-//     the admin "Create mailbox" form — they get a
+//     the admin "Create mailbox" form â€” they get a
 //     coremail_mailboxes row but no users row);
 //   - mints an access_token JWT with the user's role
 //     (RoleUser for regular mailboxes, RoleAdmin if the
@@ -30,15 +30,15 @@ package handlers
 //     so the auth-gate can immediately call window.location.reload().
 //
 // Endpoints (mounted in router.go):
-//   GET  /api/v1/webmail/session  — 200 if a webmail
+//   GET  /api/v1/webmail/session  â€” 200 if a webmail
 //                                  session is present
 //                                  (used by the
 //                                  auth-gate.js probe);
 //                                  401 otherwise.
-//   POST /api/v1/webmail/login    — webmail login form
+//   POST /api/v1/webmail/login    â€” webmail login form
 //                                  submission (email +
 //                                  password).
-//   POST /api/v1/webmail/logout   — clears the cookies
+//   POST /api/v1/webmail/logout   â€” clears the cookies
 //                                  and invalidates the
 //                                  refresh session.
 
@@ -121,7 +121,7 @@ type WebmailLoginRequest struct {
 // mailboxes).
 //
 // The handler auto-provisions a `users` row if the
-// mailbox exists but no user row does — this is the case
+// mailbox exists but no user row does â€” this is the case
 // for every mailbox created through the admin
 // CreateMailbox endpoint in production today. The new
 // users row is given role="user" (or role="admin" if
@@ -167,17 +167,18 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 	// webmail as a mailbox owner; an admin user with
 	// no mailbox cannot log in here.
 	var (
-		mailboxID     uint
-		mailboxStatus string
-		isAdmin       int
-		hash          string
-		authScheme    string
+		mailboxID      uint
+		mailboxStatus  string
+		isAdmin        int
+		hash           string
+		authScheme     string
+		allowWebmail   int
 	)
 	row := sqlDB.QueryRow(
-		"SELECT id, status, is_admin, password_hash, COALESCE(auth_scheme,'') FROM coremail_mailboxes WHERE email = ? AND deleted_at IS NULL",
+		"SELECT id, status, is_admin, password_hash, COALESCE(auth_scheme,''), COALESCE(allow_webmail,1) FROM coremail_mailboxes WHERE email = ? AND deleted_at IS NULL",
 		loginEmail,
 	)
-	if err := row.Scan(&mailboxID, &mailboxStatus, &isAdmin, &hash, &authScheme); err != nil {
+	if err := row.Scan(&mailboxID, &mailboxStatus, &isAdmin, &hash, &authScheme, &allowWebmail); err != nil {
 		if err == sql.ErrNoRows {
 			h.security.RecordFailedLogin(c.Context(), c.IP(), loginEmail)
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
@@ -193,6 +194,11 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 		h.security.RecordFailedLogin(c.Context(), c.IP(), loginEmail)
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 			"error": "mailbox is not active",
+		})
+	}
+	if allowWebmail != 1 {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "invalid credentials",
 		})
 	}
 
@@ -232,7 +238,7 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 	// provisioned before the user can send.
 	if err := coremail.EnsureMailboxSystemFolders(c.Context(), sqlDB, mailboxID); err != nil {
 		// Do not fail login on folder provision
-		// failure — the UI will surface the error
+		// failure â€” the UI will surface the error
 		// when the user tries to send. Logging
 		// the error is enough.
 		h.logger.Warn("webmail login: ensure system folders",
@@ -353,7 +359,7 @@ func (h *Handler) ensureWebmailUser(sqlDB *sql.DB, email string, isAdmin bool) (
 		return 0, fmt.Errorf("query user: %w", err)
 	}
 
-	// No users row — create one tied to the same
+	// No users row â€” create one tied to the same
 	// tenant as the mailbox.
 	var tenantID uint
 	row = sqlDB.QueryRow(`
@@ -397,11 +403,11 @@ func (h *Handler) ensureWebmailUser(sqlDB *sql.DB, email string, isAdmin bool) (
 // verifyMailboxPassword handles the two hash formats
 // the mailbox table sees in production today:
 //
-//   - $argon2id$v=19$m=...$salt$hash  — the default
+//   - $argon2id$v=19$m=...$salt$hash  â€” the default
 //     format written by every code path that creates a
 //     mailbox today.
 //
-//   - bcrypt — legacy mailboxes written by older
+//   - bcrypt â€” legacy mailboxes written by older
 //     versions of the installer / migration tools.
 //
 // Plain-text "!" placeholder rows (the placeholder

@@ -16,7 +16,7 @@
    backend reports "skipped".
    ===================================================================== */
 
-import { el, badge, fmtShortDate } from '../components.js';
+import { el, badge, fmtShortDate, $ } from '../components.js';
 import { t } from '../i18n.js';
 import { apiGet } from '../api.js';
 import { setRuntime, getRuntime } from '../state.js';

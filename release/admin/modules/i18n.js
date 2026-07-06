@@ -77,6 +77,7 @@ const TABLE = {
     'sidebar.item.routing':        'Acceptance & Routing',
     'sidebar.item.incomingRules':  'Incoming Message Rules',
     'sidebar.item.quarantine':     'View Quarantine',
+    'sidebar.item.loginProtection':'Login Protection',
     'sidebar.group.protocolSettings': 'Protocol Settings',
     'sidebar.item.smtpRecv':        'SMTP Receiving',
     'sidebar.item.smtpTx':          'SMTP Sending',
@@ -112,6 +113,7 @@ const TABLE = {
     'sidebar.item.pop3Proxy':      'POP3 Proxy',
     'sidebar.item.webmailProxy':   'Webmail Proxy',
     'sidebar.item.adminGroups':    'Administrative Groups',
+    'sidebar.item.adminUsers':    'Administrative Users',
     'sidebar.item.auditLog':       'Audit Log',
     'sidebar.item.domainAdminLimits': 'Domain Admin Limits',
 
@@ -293,6 +295,7 @@ const TABLE = {
     'sidebar.item.routing':        'القبول والتوجيه',
     'sidebar.item.incomingRules':  'قواعد الرسائل الواردة',
     'sidebar.item.quarantine':     'عرض الحجر',
+    'sidebar.item.loginProtection':'حماية تسجيل الدخول',
     'sidebar.group.protocolSettings': 'إعدادات البروتوكول',
     'sidebar.item.smtpRecv':        'استقبال SMTP',
     'sidebar.item.smtpTx':          'إرسال SMTP',
@@ -327,6 +330,7 @@ const TABLE = {
     'sidebar.item.pop3Proxy':      'وكيل POP3',
     'sidebar.item.webmailProxy':   'وكيل الويب ميل',
     'sidebar.item.adminGroups':    'مجموعات الإدارة',
+    'sidebar.item.adminUsers':    'المستخدمون الإداريون',
     'sidebar.item.auditLog':       'سجل التدقيق',
     'sidebar.item.domainAdminLimits': 'حدود مسؤولي النطاق',
 

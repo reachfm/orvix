@@ -30,6 +30,8 @@ import (
 	orvixruntime "github.com/orvix/orvix/internal/runtime"
 	"github.com/orvix/orvix/internal/ruler"
 	"github.com/orvix/orvix/internal/tlsmgmt"
+	"github.com/orvix/orvix/internal/trust"
+	"github.com/orvix/orvix/internal/trustmgmt"
 	"github.com/orvix/orvix/internal/updater"
 	"github.com/orvix/orvix/internal/webmailmgmt"
 	"github.com/redis/go-redis/v9"
@@ -256,6 +258,27 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		zap.Strings("providers", dnsSvc.Providers()),
 		zap.Bool("namecheap_apply_enabled", cfg.DNS.NamecheapEnableApply))
 
+	// Wire the trust / login protection service.
+	if sqlDB, err := db.DB(); err == nil {
+		// Ensure the trust persistence tables exist before LoadFromDB.
+		for _, ddl := range trust.Tables() {
+			if _, err := sqlDB.ExecContext(context.Background(), ddl); err != nil {
+				logger.Warn("trust schema migration failed, falling back to in-memory", zap.Error(err))
+			}
+		}
+		trustRepo := trust.NewRepository(sqlDB)
+		trustEng := trust.NewEngineWithRepo(trustRepo)
+		trustSvc := trustmgmt.NewService(trustEng)
+		router.h.SetTrustService(trustSvc)
+		if err := trustEng.LoadFromDB(context.Background()); err != nil {
+			router.h.SetTrustPersistence(false, "Trust engine persistence load failed. Lockouts are tracked in-memory and reset on restart.")
+			logger.Warn("trust engine load from DB failed, using in-memory only", zap.Error(err))
+		} else {
+			router.h.SetTrustPersistence(true, "")
+		}
+		logger.Info("trust service wired")
+	}
+
 	// Wire the admin settings persistence store. PATCH
 	// /api/v1/admin/settings writes through this store; GET merges
 	// its rows with the config defaults to build the response. The
@@ -345,6 +368,16 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 // where the coremail runtime module is not available.
 func (r *Router) SetQueueEngine(qe *queue.QueueEngine) {
 	r.h.SetQueueEngine(qe)
+}
+
+// SetTrustService wires the trust/lockout service into the router's handler.
+func (r *Router) SetTrustService(s *trustmgmt.Service) {
+	r.h.SetTrustService(s)
+}
+
+// SetTrustPersistence sets the trust engine persistence state.
+func (r *Router) SetTrustPersistence(ok bool, errMsg string) {
+	r.h.SetTrustPersistence(ok, errMsg)
 }
 
 func (r *Router) App() *fiber.App { return r.app }
@@ -605,8 +638,12 @@ func (r *Router) setupRoutes() {
 	admin.Get("/admin/admin-groups", r.h.ListAdminGroups)
 	admin.Get("/admin/quarantine", r.h.ListQuarantine)
 admin.Get("/admin/audit-logs", r.h.ListAdminAuditLogs)
-admin.Get("/admin/acl-rules", r.h.ListACLRules)
-admin.Get("/admin/log-rules", r.h.ListLogRules)
+	admin.Get("/admin/acl-rules", r.h.ListACLRules)
+	admin.Get("/admin/login-protection/status", r.h.LoginProtectionStatus)
+	admin.Get("/admin/login-protection/lockouts", r.h.ListLockouts)
+	admin.Get("/admin/admin-users", r.h.ListAdminUsers)
+	admin.Get("/admin/admin-users/:id", r.h.GetAdminUser)
+	admin.Get("/admin/log-rules", r.h.ListLogRules)
 // Enterprise v3 — SSL, acceptance rules, incoming message
 // rules, FTP backup targets, file system browser,
 // migration sources, clustering, antivirus, settings
@@ -744,6 +781,8 @@ admin.Get("/admin/settings/protocol/:protocol", r.h.ListProtocolSettings)
 	men.Post("/mailboxes", r.h.CreateMailbox)
 	men.Patch("/mailboxes/:id/password", r.h.UpdateMailboxPassword)
 	men.Patch("/mailboxes/:id/status", r.h.UpdateMailboxStatus)
+	men.Patch("/mailboxes/:id/quota", r.h.UpdateMailboxQuota)
+	men.Patch("/mailboxes/:id/protocols", r.h.UpdateMailboxProtocols)
 	// Bulk status operations (CSRF-protected).
 	men.Post("/mailboxes/bulk/status", r.h.BulkMailboxStatus)
 	men.Post("/mailboxes/import", r.h.ImportMailboxesCSV)
@@ -835,6 +874,13 @@ admin.Get("/admin/settings/protocol/:protocol", r.h.ListProtocolSettings)
 	men.Post("/admin/quarantine/:id/resolve", r.h.ResolveQuarantine)
 	men.Post("/admin/acl-rules", r.h.CreateACLRule)
 	men.Delete("/admin/acl-rules/:id", r.h.DeleteACLRule)
+	men.Post("/admin/login-protection/lockouts/:key/clear", r.h.ClearLockout)
+	men.Post("/admin/admin-users", r.h.CreateAdminUser)
+	men.Patch("/admin/admin-users/:id", r.h.UpdateAdminUser)
+	men.Patch("/admin/admin-users/:id/password", r.h.UpdateAdminUserPassword)
+	men.Patch("/admin/admin-users/:id/status", r.h.UpdateAdminUserStatus)
+	men.Patch("/admin/admin-users/:id/groups", r.h.UpdateAdminUserGroups)
+	men.Delete("/admin/admin-users/:id", r.h.DeleteAdminUser)
 men.Post("/admin/log-rules", r.h.CreateLogRule)
 men.Delete("/admin/log-rules/:id", r.h.DeleteLogRule)
 // Enterprise v3 — CSRF-protected mutations for the new

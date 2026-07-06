@@ -39,7 +39,7 @@ func testDB(t *testing.T) *sql.DB {
 	// the test harness's automatic cleanup. Each test gets its
 	// own file, so there is no cross-test leakage either.
 	path := filepath.Join(t.TempDir(), "queue.db")
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", path+"?_busy_timeout=5000&_txlock=immediate&_pragma=journal_mode(WAL)")
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -294,26 +294,40 @@ func TestLeaseNextOnlyOneWorkerWins(t *testing.T) {
 
 	var wg sync.WaitGroup
 	results := make(chan *QueueEntry, 2)
+	errs := make(chan error, 2)
 
 	for i := 0; i < 2; i++ {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
 			leased, err := qe.LeaseNext(ctx, fmt.Sprintf("worker-%d", id))
-			if err == nil && leased != nil {
+			if err != nil {
+				errs <- err
+				return
+			}
+			if leased != nil {
 				results <- leased
 			}
 		}(i)
 	}
 	wg.Wait()
 	close(results)
+	close(errs)
 
+	var errList []error
+	for e := range errs {
+		errList = append(errList, e)
+	}
 	count := 0
 	for range results {
 		count++
 	}
 	if count != 1 {
-		t.Fatalf("expected exactly 1 worker to win, got %d", count)
+		errStr := ""
+		for _, e := range errList {
+			errStr += e.Error() + "; "
+		}
+		t.Fatalf("expected exactly 1 worker to win, got %d (errors: %s)", count, errStr)
 	}
 }
 
