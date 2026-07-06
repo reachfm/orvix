@@ -13,7 +13,167 @@ Base: `58c2e1b` ("WEBMAIL-UI-POLISH-3: premium enterprise webmail UI")
 Branch: `feature/webmail-release-v1`
 Base: `main` (post-`da53ddb fix: route mail autodiscover through coremail API`)
 
-## What shipped
+## Operator fix — R1 placeholder/coming-soon cleanup (cut on `feature/webmail-r1-password-security-fix`)
+
+### Removed from production UI
+
+The R1 acceptance bar forbade placeholder / coming-soon copy
+in production. The main branch still shipped a **Settings →
+Coming later** tab with an "Available in a future release"
+panel that listed TOTP, app-passwords, per-device sessions,
+reading-pane position, conversation view, and external image
+preference as "future features". The Settings → Security tab
+also carried a "TOTP / app-passwords UI is not enabled in
+this build" notice. The compose forward banner advertised
+"Attachment forwarding is coming soon."
+
+Cut `feature/webmail-r1-password-security-fix` ships:
+
+- **Settings → "Coming later" tab REMOVED.** No 10-tab
+  Settings modal — the released tab count is 10
+  (Profile / Appearance / Compose / Mail / Filters /
+  Vacation / Forwarding / Mail Client Setup / Notifications
+  / Security).
+- **"Available in a future release" panel REMOVED.**
+  Gated by `smoke-webmail-ui.sh`, which now FAILS the
+  build if any of `Coming later | Available in a future
+  release | coming soon | is not enabled |
+  settings-deferred-list` survives in the production
+  bundle.
+- **TOTP / app-passwords / per-device sessions placeholder
+  REMOVED from Security.** Security now ships real controls
+  only.
+- **"Attachment forwarding is coming soon." rewritten** to
+  an honest limitation note: attachments are not yet
+  composable from the webmail compose path; reply to the
+  original to keep the files.
+- **"Reading pane" fake select REMOVED.** The reading pane
+  section now ships a single short notice ("rendered next to
+  the message list. The mobile layout stacks the panes
+  vertically.") — no fake control that pretends to save.
+
+### What replaced the placeholder: real employee Change Password
+
+- **Backend endpoint.** `POST /api/v1/webmail/password/change`,
+  mounted on the `authCSRF` group in `router.go`. Rules:
+  - Auth middleware first (no cookie → 401).
+  - CSRF middleware (X-CSRF-Token matches the `csrf_token`
+    cookie).
+  - Body parsed: `{ current_password, new_password,
+    confirm_password? }`. Per-field validation server-side:
+    missing → 400 "current password required" / "new password
+    required"; mismatched → 400 "do not match"; new
+    `< 8` chars → 400 "at least 8 characters".
+  - Current password verified against the canonical
+    `coremail_mailboxes.password_hash` column via
+    `verifyMailboxPassword` (handles both `$argon2id$` and
+    legacy bcrypt mailboxes in production today).
+  - On success: write fresh `$argon2id$v=19$m=…,t=…,p=…$…$…`
+    to `coremail_mailboxes.password_hash`, set
+    `auth_scheme='$argon2id$'`, bump `updated_at`. The
+    mailbox id is taken from `resolveWebmailUserContext`
+    ONLY — the body is read for `current_password`,
+    `new_password`, `confirm_password`. Any id-shaped body
+    field is ignored, and the body never reaches the
+    UPDATE clause.
+  - Wrong current password → 401 generic "invalid
+    credentials". No enumeration. The same body is
+    returned for "no such mailbox" and "wrong password" so
+    a forged JWT cannot enumerate foreign mailboxes.
+  - Logs an `webmail.password_change` audit entry. NO
+    password / hash / token fields in the audit fields.
+  - Response: `200 {"status":"changed"}`. No hash, no token,
+    no password. Set-Cookie is NOT touched — the existing
+    short-lived access_token keeps working until it
+    naturally expires; the production model is "change
+    password, keep using the session", not "change password,
+    force re-login".
+
+- **UI surface.** Settings → Security renders a Change
+  Password section with three password inputs (current /
+  new / confirm), a "Change password" button, and a
+  `role="status"` region for success / error feedback.
+  Client-side validation mirrors the server (matching
+  message wording); client validation is UX, server is
+  truth. On success: inputs are cleared, the green status
+  flips on, a non-sensitive toast fires. On error: the
+  server's `error` field is rendered in the role=status
+  region; no password / hash / token ever reaches the
+  user-visible tree.
+  - `type="password"` on all three inputs.
+  - `autocomplete` set so a borrowed browser does not cache
+    the value across sessions (`current-password`,
+    `new-password`, `new-password`).
+  - `spellcheck="false"`, `autocapitalize="off"`,
+    `autocorrect="off"` to defeat mobile keyboards'
+    autocorrect, which would silently change the password.
+  - NO localStorage / sessionStorage writes anywhere.
+  - The form is its own DOM tree (does not collide with
+    the catch-all `Save / Cancel` footer in the modal — the
+    Security section marks itself as having its own footer
+    so the catch-all saves its `Cancel` button into the
+    right place).
+
+- **Smoke surface.**
+  - `smoke-webmail-ui.sh` gained two new gates:
+    - **§13**: forbids the placeholder tokens
+      `Coming later | Available in a future | coming
+      soon | is not enabled | settings-deferred-list` in
+      the production bundle. Builds fail if any survives.
+    - **§14**: pins the Change Password surface (`/api/
+      v1/webmail/password/change`, `current_password`,
+      `new_password`, `confirm_password`, `renderSecurityTab`).
+  - `smoke-webmail-functional-browser.{sh,mjs}` gained two
+    real phases plus mock backend coverage:
+    - **Phase 8**: Settings → Security renders three
+      password inputs (autocomplete = current-password,
+      new-password, new-password) + a "Change password"
+      button + 10 tabs total (Profile, Appearance,
+      Compose, Mail, Filters, Vacation, Forwarding, Mail
+      Client Setup, Notifications, Security) — no
+      "Coming later" tab present; no `settings-deferred-list`
+      element on the active Security tab; no copy
+      containing the banned tokens.
+    - **Phase 9**: mismatch submit surfaces the inline
+      error "New password and confirmation do not match."
+    - **Phase 10**: valid submit clears all three inputs and
+      flips the status region to the `.success` class with
+      "Password changed. Your new password is now in
+      effect." The mock backend now answers
+      `POST /api/v1/webmail/password/change` with a faithful
+      shape (`{"status":"changed"}` on success, generic
+      `"invalid credentials"` on a wrong current password).
+
+- **Go regression tests.** Added
+  `internal/api/handlers/webmail_change_password_test.go`
+  with **10 tests** that exercise the production handler
+  directly:
+  1. `TestWebmailChangePasswordUnauthenticatedReturns401`
+  2. `TestWebmailChangePasswordWrongCurrentPasswordRejected`
+  3. `TestWebmailChangePasswordRejectsMissingFields`
+  4. `TestWebmailChangePasswordRejectsMismatchedConfirmationOrWeakPassword`
+  5. `TestWebmailChangePasswordIgnoresExtraFieldsSafely`
+  6. `TestWebmailChangePasswordSuccessUpdatesHash`
+  7. `TestWebmailChangePasswordOldPasswordNoLongerWorks`
+  8. `TestWebmailChangePasswordNewPasswordWorks`
+  9. `TestWebmailChangePasswordResponseCarriesNoHash`
+  10. `TestWebmailChangePasswordCrossMailboxImpossible`
+
+### What is NOT in R1 (kept honest, off the product surface)
+
+- Calendar, Contacts, Tasks — see `docs/WEBMAIL_RELEASE_1_AUDIT.md`
+  §10.
+- Exchange / ActiveSync (EAS) — see audit §10.
+- Mobile native app — see audit §10.
+- Offline webmail / Service worker push only — see audit §10.
+- Full-text body search index — see audit §10.
+- Pasted image into compose body — see audit §10.
+- JMAP-native webmail — see audit §10.
+
+These items live in `docs/WEBMAIL_RELEASE_1_AUDIT.md`
+"Known limitations" only — NEVER in shipped product UI.
+
+## What shipped in the original R1 cut
 
 **User-visible**
 

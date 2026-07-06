@@ -256,5 +256,62 @@ if grep -q 'href.*attachment.*\.\(pdf\|doc\|png\|jpg\)' "$JS"; then
 fi
 pass "webmail.js routes attachment downloads through the auth-gated /api/v1/webmail/attachments/ endpoint"
 
+# ── 13. No placeholder / "coming soon" / future-release UI ─────
+#
+# Release 1 (and every production build going forward) must NOT
+# expose unfinished features as clickable settings tabs or
+# visible copy. Forbidden surface strings:
+#
+#   - "Coming later"            — the placeholder tab itself.
+#   - "Available in a future…"  — the renderSettingsTab('deferred')
+#                                 panel title.
+#   - "future release"           — the same panel body / other copy.
+#   - "coming soon" / "is not yet…enabled" — also forbidden.
+#   - ".settings-deferred-list"  — the CSS class that visualises
+#                                 the placeholder bullet list.
+#
+# We check the LIVE webmail bundle (release/webmail/assets/) and
+# FAIL the smoke if any of these tokens survive. The match is
+# case-insensitive because the developer who copy-pastes the
+# placeholder is unlikely to think about case.
+#
+# Allowed exceptions: the docs/ subtree — but a smoke of the
+# production bundle alone is sharper than a docs check. A
+# separate docs check would over-fire on previous changelogs
+# and inline docs comments that document the absence; we trust
+# the release audit doc for those.
+for forbidden in 'Coming later' 'Available in a future' 'settings-deferred-list' 'coming soon' 'is not enabled'; do
+    matches=$(grep -niE "${forbidden}" "$JS" "$CSS" 2>/dev/null || true)
+    if [ -n "$matches" ]; then
+        fail "production webmail bundle still contains placeholder text '$forbidden' (forbidden in R1): $matches"
+    fi
+done
+pass "production webmail bundle contains no placeholder / future-release / coming-soon copy"
+
+# ── 14. Change Password surface ────────────────────────────────
+#
+# R1 ships a real employee Change Password feature inside
+# Settings → Security. The form must expose three password
+# inputs (current / new / confirm) and a Save button. The
+# endpoint must be /api/v1/webmail/password/change on the
+# JS side (the route is the router.go wiring; this smoke
+# verifies the front-end is wired correctly).
+if ! grep -q '/api/v1/webmail/password/change' "$JS"; then
+    fail "webmail.js does not call /api/v1/webmail/password/change (Change Password feature not wired)"
+fi
+if ! grep -q 'current_password' "$JS"; then
+    fail "webmail.js does not reference 'current_password' (Change Password form fields missing)"
+fi
+if ! grep -q 'new_password' "$JS"; then
+    fail "webmail.js does not reference 'new_password' (Change Password form fields missing)"
+fi
+if ! grep -q 'confirm_password' "$JS"; then
+    fail "webmail.js does not reference 'confirm_password' (Change Password form fields missing)"
+fi
+if ! grep -q 'function renderSecurityTab' "$JS"; then
+    fail "webmail.js does not define renderSecurityTab (Settings → Security handler missing)"
+fi
+pass "Change Password UI + endpoint is wired (current/new/confirm + renderSecurityTab)"
+
 printf '\nALL WEBMAIL UI STRUCTURAL TESTS PASSED\n' >&2
 exit 0

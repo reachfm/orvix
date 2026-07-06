@@ -174,6 +174,54 @@ function mockFor(method, urlPath, body, req) {
             body: { status: 'logged_out' },
         };
     }
+    if (method === 'POST' && urlPath === '/api/v1/webmail/password/change') {
+        if (!hasAuthedCookie(req)) {
+            return { status: 401, body: { error: 'unauthenticated' } };
+        }
+        // Surface what we received as a structured payload so
+        // the functional smoke can distinguish parse-failure
+        // from validation-failure.
+        const debug = {
+            bodyType: typeof body,
+            bodyLen: typeof body === 'string' ? body.length : -1,
+            bodySample: typeof body === 'string' ? body.slice(0, 200) : null,
+        };
+        let parsed = null;
+        try { parsed = body ? JSON.parse(body) : null; } catch (e) { return { status: 400, body: { error: 'invalid request', _debug: debug, _err: e.message } }; }
+        if (!parsed || typeof parsed !== 'object') {
+            return { status: 400, body: { error: 'invalid request', _debug: debug, _parsedType: typeof parsed } };
+        }
+        if (!parsed || typeof parsed !== 'object') {
+            return { status: 400, body: { error: 'invalid request' } };
+        }
+        const cp = typeof parsed.current_password === 'string' ? parsed.current_password : '';
+        const np = typeof parsed.new_password === 'string' ? parsed.new_password : '';
+        if (!cp) return { status: 400, body: { error: 'current password required' } };
+        if (!np) return { status: 400, body: { error: 'new password required' } };
+        if (np.length < 8) {
+            return { status: 400, body: { error: 'new password must be at least 8 characters' } };
+        }
+        // The functional smoke's Phase 9 sends a mismatched
+        // confirm. The frontend's client-side validation
+        // catches the mismatch BEFORE the network call, so
+        // the mock never sees a mismatched payload. We still
+        // guard the server-side check for completeness.
+        if (typeof parsed.confirm_password === 'string' && parsed.confirm_password !== np) {
+            return { status: 400, body: { error: 'new password and confirmation do not match' } };
+        }
+        // "oldpw-not-checked" simulates a wrong current
+        // password; everything else simulates success.
+        if (cp === 'oldpw-not-checked') {
+            return { status: 401, body: { error: 'invalid credentials' } };
+        }
+        // "short" simulates a too-short new password (the
+        // frontend already filters this client-side, but the
+        // server's check is the source of truth).
+        if (np === 'short') {
+            return { status: 400, body: { error: 'new password must be at least 8 characters' } };
+        }
+        return { status: 200, body: { status: 'changed' } };
+    }
     // Cookie-gated endpoints — return 401 to non-owners to
     // match the router's protected-group middleware
     // behaviour. This is what the production stack does
@@ -222,6 +270,13 @@ function mockFor(method, urlPath, body, req) {
     }
     if (method === 'GET' && urlPath === '/api/v1/me') {
         return { status: 200, body: MOCK_USER };
+    }
+    if (method === 'GET' && urlPath === '/api/v1/csrf-token') {
+        // The webmail SPA's csrfFetch probes this endpoint on
+        // first mutating call (and caches). A real backend
+        // signs an HMAC bound to the session; the mock returns
+        // a stable opaque token.
+        return { status: 200, body: { csrf_token: 'mock-csrf-token-1234567890' } };
     }
     return { status: 404, body: { error: 'mocked 404 for ' + method + ' ' + urlPath } };
 }
@@ -311,7 +366,7 @@ const server = http.createServer(async (req, res) => {
     try {
         const url = new URL(req.url, 'http://127.0.0.1');
         const p = url.pathname;
-        if (p.startsWith('/api/v1/webmail/') || p === '/api/v1/me') {
+        if (p.startsWith('/api/v1/webmail/') || p === '/api/v1/me' || p === '/api/v1/csrf-token') {
             const body = await readBody(req);
             const m = mockFor(req.method, p, body, req);
             jsonResponse(res, m.status, m.body, m.headers);
@@ -712,7 +767,206 @@ if (fatal.length > 0) {
 const warns = consoleLog.filter((e) => e.type === 'warning' || e.type === 'warn').length;
 console.log(`PASS  phase 7 — zero browser-console errors (${warns} warning(s), ${consoleLog.length - warns - fatal.length} info/log message(s) ignored)`);
 
-// ── 12. Done ─────────────────────────────────────────────────
+// ── 12. Phase 8 — Security tab + Change Password form ────────
+//
+// Settings → Security must:
+//   • Have no "Coming later" tab.
+//   • Have no `.settings-deferred-list` element on the active
+//     Security tab.
+//   • Have no copy containing "future release" / "coming soon"
+//     / "not implemented" / "is not enabled".
+//   • Render the Change Password form with three password
+//     inputs (current / new / confirm) plus a Save button.
+//
+// We open the Settings modal via the public API
+// (window.OrvixWebmail.openSettingsModal), then click the
+// Security tab. If either step fails, the rest of the smoke
+// aborts.
+
+const security = await evalExpr(`
+(async () => {
+    const api = window.OrvixWebmail || window.orvixWebmail || null;
+    if (!api) return { ok: false, reason: 'OrvixWebmail API missing' };
+    // Open Settings and switch to the Security tab. The
+    // public API does not expose openSecurityTab; the
+    // dispatch is by clicking the matching tab button
+    // once the modal is up.
+    api.openSettingsModal && api.openSettingsModal();
+    const deadline1 = Date.now() + 4000;
+    let modal = null;
+    while (Date.now() < deadline1) {
+        modal = document.querySelector('.settings-modal');
+        if (modal) break;
+        await new Promise(r => setTimeout(r, 80));
+    }
+    if (!modal) return { ok: false, reason: 'settings modal did not mount' };
+    // Banned tab buttons.
+    const bannedTabs = Array.from(modal.querySelectorAll('.settings-tab')).filter((t) => {
+        const text = (t.textContent || '').toLowerCase();
+        return text.indexOf('coming later') >= 0 ||
+               text.indexOf('coming soon')  >= 0 ||
+               text.indexOf('future release') >= 0;
+    });
+    if (bannedTabs.length > 0) {
+        return { ok: false, reason: 'banned settings tab(s) present', tabs: bannedTabs.map((t) => t.textContent) };
+    }
+    // Click the Security tab.
+    const securityTab = modal.querySelector('.settings-tab[data-tab="security"]');
+    if (!securityTab) return { ok: false, reason: 'settings security tab not found' };
+    securityTab.click();
+    // Wait for the Security tab body to render.
+    const deadline2 = Date.now() + 4000;
+    let body = null;
+    while (Date.now() < deadline2) {
+        const content = modal.querySelector('.settings-content');
+        // Security tab renders a form with the change-password-input class.
+        if (content && content.querySelector('.settings-change-password-form')) { body = content; break; }
+        await new Promise(r => setTimeout(r, 80));
+    }
+    if (!body) return { ok: false, reason: 'Security tab body did not render' };
+    // Banned content strings inside the Settings modal.
+    const bannedWords = ['Coming later', 'Available in a future', 'coming soon', 'TOTP / app-passwords', 'is not enabled'];
+    const offenders = [];
+    const allText = (modal.textContent || '');
+    for (const w of bannedWords) {
+        if (allText.indexOf(w) >= 0) offenders.push(w);
+    }
+    if (offenders.length > 0) {
+        return { ok: false, reason: 'banned placeholder copy present', words: offenders };
+    }
+    // Banned CSS classes.
+    const bannedClasses = Array.from(modal.querySelectorAll('.settings-deferred-list'));
+    if (bannedClasses.length > 0) {
+        return { ok: false, reason: 'settings-deferred-list element rendered', count: bannedClasses.length };
+    }
+    // Required Change Password surface.
+    const inputs = body.querySelectorAll('.settings-change-password-input');
+    const submit = body.querySelector('.settings-change-password-form button[type="submit"]');
+    if (inputs.length < 3 || !submit) {
+        return { ok: false, reason: 'change-password form missing inputs or submit', inputs: inputs.length, hasSubmit: !!submit };
+    }
+    const labels = Array.from(inputs).map((i) => i.getAttribute('autocomplete') || '');
+    return {
+        ok: true,
+        tabs: Array.from(modal.querySelectorAll('.settings-tab')).map((t) => (t.textContent || '').trim()),
+        inputCount: inputs.length,
+        autocomplete: labels,
+        submitText: (submit.textContent || '').trim(),
+    };
+})()
+`, true);
+if (!security || !security.ok) {
+    console.error('FAIL phase 8 — Settings → Security tab missing real controls');
+    console.error('  diagnostics:', JSON.stringify(security));
+    chromeProc.kill('SIGKILL');
+    process.exit(1);
+}
+console.log(`PASS  phase 8 — Settings → Security renders Change Password (${security.inputCount} inputs, submit="${security.submitText}", autocompletes=[${security.autocomplete.join(',')}], tabs=[${security.tabs.join(', ')}])`);
+
+// ── 13. Phase 9 — mismatch validation surfaces inline error ───
+
+const mismatch = await evalExpr(`
+(async () => {
+    const form = document.querySelector('.settings-change-password-form');
+    if (!form) return { ok: false, reason: 'no form' };
+    const setVal = (k, v) => { var i = form.querySelector('[data-key="' + k + '"]'); if (i) { i.value = v; i.dispatchEvent(new Event('input', { bubbles: true })); } };
+    setVal('current_password', 'old-password-not-checked');
+    setVal('new_password',     'NewPassword123');
+    setVal('confirm_password', 'DIFFERENT-XYZ-999');
+    var btn = form.querySelector('button[type="submit"]');
+    if (!btn) return { ok: false, reason: 'no submit' };
+    btn.click();
+    // Wait for the inline status region to flip to error class.
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline) {
+        var status = form.querySelector('.settings-change-password-status');
+        if (status && (status.className || '').indexOf('error') >= 0 && status.textContent) {
+            return { ok: true, status: status.textContent };
+        }
+        await new Promise(r => setTimeout(r, 80));
+    }
+    return { ok: false, reason: 'no error status after mismatch submit' };
+})()
+`, true);
+if (!mismatch || !mismatch.ok) {
+    console.error('FAIL phase 9 — Change Password mismatch did not surface a visible error');
+    console.error('  diagnostics:', JSON.stringify(mismatch));
+    chromeProc.kill('SIGKILL');
+    process.exit(1);
+}
+console.log(`PASS  phase 9 — Change Password mismatch surfaces inline error: "${mismatch.status}"`);
+
+// ── 14. Phase 10 — successful change clears inputs + status ──
+//
+// The mock backend answers POST /api/v1/webmail/password/change
+// with 200 {status:"changed"} when the payload has a non-empty
+// current_password and new_password === confirm_password.
+// The form clears the three inputs and writes a success status.
+//
+// This phase PASSes when the status flips to the "success"
+// class and the three input value attributes are empty.
+
+const success = await evalExpr(`
+(async () => {
+    const form = document.querySelector('.settings-change-password-form');
+    if (!form) return { ok: false, reason: 'no form' };
+    const setVal = (k, v) => { var i = form.querySelector('[data-key="' + k + '"]'); if (i) { i.value = v; i.dispatchEvent(new Event('input', { bubbles: true })); } };
+    setVal('current_password', 'oldpw-correct');
+    setVal('new_password',     'BrandNewPw2026');
+    setVal('confirm_password', 'BrandNewPw2026');
+    var btn = form.querySelector('button[type="submit"]');
+    btn.click();
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+        var status = form.querySelector('.settings-change-password-status');
+        // The status flips to either 'success' or 'error' (NOT just empty).
+        // Capture whichever arrives first so the diagnostic is useful.
+        var klass = (status && status.className) || '';
+        if (klass.indexOf('success') >= 0 || klass.indexOf('error') >= 0) {
+            var cur = form.querySelector('[data-key="current_password"]').value;
+            var nw  = form.querySelector('[data-key="new_password"]').value;
+            var cf  = form.querySelector('[data-key="confirm_password"]').value;
+            return {
+                ok: klass.indexOf('success') >= 0,
+                cleared: (cur === '' && nw === '' && cf === ''),
+                statusText: (status.textContent || '').slice(0, 120),
+                statusClass: klass,
+                currentValue: cur,
+                newValue: nw,
+                confirmValue: cf,
+                submitBtn: btn.textContent,
+                submitDisabled: btn.disabled,
+            };
+        }
+        await new Promise(r => setTimeout(r, 100));
+    }
+    return {
+        ok: false,
+        reason: 'no status change within 8s',
+        cur: form.querySelector('[data-key="current_password"]').value,
+        nw:  form.querySelector('[data-key="new_password"]').value,
+        cf:  form.querySelector('[data-key="confirm_password"]').value,
+    };
+})()
+`, true);
+if (!success || !success.ok || !success.cleared) {
+    console.error('FAIL phase 10 — Change Password successful submit did not clear inputs / set success status');
+    console.error('  diagnostics:', JSON.stringify(success));
+    chromeProc.kill('SIGKILL');
+    process.exit(1);
+}
+console.log(`PASS  phase 10 — successful change cleared all three inputs (current="", new="", confirm="") with status "${success.statusText}"`);
+
+// Close the Settings modal.
+await evalExpr(`
+(function () {
+    var backdrop = document.querySelector('.modal-backdrop.settings-modal');
+    if (backdrop) backdrop.remove();
+})()
+`, false);
+await sleep(100);
+
+// ── 15. Done ─────────────────────────────────────────────────
 
 chromeProc.kill('SIGKILL');
 server.close();

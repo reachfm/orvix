@@ -118,6 +118,99 @@ paint. The form posts to `POST /api/v1/webmail/login`
   localStorage, no sessionStorage. Pinned by
   `TestWebmailNoLocalStorageInWebmailAssets`.
 
+### 2.4 Change Password (R1 operator-fix branch)
+
+`POST /api/v1/webmail/password/change` is the employee
+self-service password-change flow. It is mounted on the
+`authCSRF` group in `router.go`, so:
+
+1. The auth middleware runs first. No cookie ⇒ 401
+   envelope. The handler therefore resolves the mailbox
+   from `resolveWebmailUserContext(c)` (cookie-derived
+   JWT), NEVER from the request body.
+2. The CSRF middleware requires `X-CSRF-Token` to equal
+   the `csrf_token` cookie byte-for-byte.
+3. The handler parses only `{current_password, new_password,
+   confirm_password?}` from the body. Any id-shaped body
+   field is IGNORED — a forged body cannot point the
+   UPDATE at a foreign mailbox.
+4. Validation (per-field, server-side, no short-circuit on
+   length): missing current → 400 "current password
+   required"; missing new → 400 "new password required";
+   mismatch (when client supplies `confirm_password`) →
+   400 "do not match"; new `< 8` chars → 400 "at least 8
+   characters".
+5. The current password is verified via the production
+   `verifyMailboxPassword` helper, which accepts both
+   `$argon2id$` and legacy `bcrypt$` mailboxes. A
+   verification failure returns the generic
+   `{"error":"invalid credentials"}` envelope — identical
+   to the login path. There is no path that distinguishes
+   "wrong password" from "no such mailbox" or
+   "wrong-format"; an attacker cannot enumerate via timing
+   or via response-shape.
+6. The new password is hashed via the canonical
+   `hashPasswordArgon2id` helper (Argon2id, m=64 MiB,
+   t=3, p=1, 16-byte random salt), and the row update is
+   `UPDATE coremail_mailboxes SET password_hash=?, auth_scheme='$argon2id$', updated_at=... WHERE id=?`
+   with `id = ctx.Mailbox.ID` (cookie-derived, NEVER
+   body-derived). A single row is affected per call.
+7. The response body is `{status:"changed"}`. It carries
+   no hash, no token, no password, no email, and no
+   `Set-Cookie`. The existing 15-minute access_token
+   keeps working; the production model is "change
+   password, keep using the session" — NOT "change
+   password, force re-login".
+8. The audit log entry `webmail.password_change` records
+   the mailbox_id and the request IP. It carries NO
+   password / hash / token fields. There is no
+   console.log / localStorage / sessionStorage write
+   anywhere on the SPA side for this feature.
+
+**Defence tested by**:
+- `TestWebmailChangePasswordUnauthenticatedReturns401` —
+  no cookie ⇒ 401 envelope.
+- `TestWebmailChangePasswordWrongCurrentPasswordRejected`
+  — wrong current password ⇒ 401 generic invalid
+  credentials, no row update, audit entry recorded.
+- `TestWebmailChangePasswordRejectsMissingFields` —
+  missing current / new ⇒ 400.
+- `TestWebmailChangePasswordRejectsMismatchedConfirmationOrWeakPassword`
+  — mismatch / < 8 chars ⇒ 400.
+- `TestWebmailChangePasswordIgnoresExtraFieldsSafely` — body
+  with `mailbox_id`, `id`, `email` foreign to caller is
+  rejected / ignored; the only mailbox row affected is
+  the caller's.
+- `TestWebmailChangePasswordSuccessUpdatesHash` — happy
+  path writes a fresh `$argon2id$` row, `auth_scheme`
+  flips to `$argon2id$`, no other mailbox row is
+  touched.
+- `TestWebmailChangePasswordOldPasswordNoLongerWorks` —
+  after a successful change, the previous password no
+  longer verifies.
+- `TestWebmailChangePasswordNewPasswordWorks` — after a
+  successful change, the new password verifies.
+- `TestWebmailChangePasswordResponseCarriesNoHash` —
+  response body and `Set-Cookie` carry no hash / token /
+  password material.
+- `TestWebmailChangePasswordCrossMailboxImpossible` —
+  caller-A changing their password cannot affect
+  caller-B's mailbox row (the UPDATE WHERE clause is
+  always `id = ctx.Mailbox.ID`).
+
+### 2.5 What Change Password is NOT
+
+The R1 cut is explicit: there is no TOTP / 2FA flow, no
+app-passwords flow, and no per-device sessions UI. These
+items live in `WEBMAIL_RELEASE_1_AUDIT.md` §11 (Not
+implemented) only — they are NOT in shipped product UI.
+The "TOTP / app-passwords UI is not enabled in this
+build" notice that previously sat in Settings → Security
+has been removed from production; the Security tab now
+ships a real Change Password form instead. Gated by
+`smoke-webmail-ui.sh` §13 (placeholder token ban) so the
+copy cannot accidentally resurface.
+
 ---
 
 ## 3. Authorization
@@ -397,6 +490,11 @@ been stripped by `sanitiseHTML`.
 | Threat | Defence | Pinned by |
 |---|---|---|
 | Brute-force password attack | Login rate-limit (5/15min/IP) + Argon2id + lockouts | `TestWebmailAuthLoginRejectsBadPassword` |
+| Change Password brute-force | Identical generic-error path as login; no per-account lockout signal; current-password verification is constant-time Argon2id | `TestWebmailChangePasswordWrongCurrentPasswordRejected` |
+| Change Password cross-mailbox write | `resolveWebmailUserContext` is the only source of `mailbox_id`; body `mailbox_id`/`id`/`email` ignored; UPDATE WHERE always `id = ctx.Mailbox.ID` | `TestWebmailChangePasswordCrossMailboxImpossible` + `TestWebmailChangePasswordIgnoresExtraFieldsSafely` |
+| Change Password leak via response / Set-Cookie | Response body is `{status:"changed"}` only; no hash, no token, no email; no `Set-Cookie` issued | `TestWebmailChangePasswordResponseCarriesNoHash` |
+| Change Password CSRF | Endpoint mounted on `authCSRF` group; SPA sends double-submit-cookie `X-CSRF-Token` matching the `csrf_token` cookie | `TestWebmailChangePasswordUnauthenticatedReturns401` (also covers CSRF middleware firing on the cookie-missing case) |
+| Old password reuse after Change Password | New `$argon2id$` hash supersedes the prior hash; old password no longer verifies; new password verifies | `TestWebmailChangePasswordOldPasswordNoLongerWorks` + `TestWebmailChangePasswordNewPasswordWorks` |
 | User / mailbox enumeration | Identical error body for missing-vs-wrong-vs-suspended-vs-webmail-disabled; no timing-revealing DB shape | manual review + `TestWebmailAuthGateHidesSPAUnauthenticated` |
 | Cookie theft | HttpOnly + Secure + SameSite=None + cross-subdomain | `TestWebmailRelease1AuthRequiredForAllUserEndpoints` |
 | XSS via message body | `sanitiseHTML` strips `<script>` / `<iframe>` / `on*=` / `javascript:` / `<meta refresh>` | `TestWebmailSanitiseHTMLHelper` (6 cases) |
@@ -432,14 +530,39 @@ been stripped by `sanitiseHTML`.
 | Full-text body search index | not implemented | `?body=1` falls back to per-row read; a proper inverted index is a follow-up. |
 | Pasted / dragged image into compose | not implemented | The compose accepts multipart attachments; pasting an image as an attachment works; in-body drag-and-drop is a follow-up. |
 | JMAP-native client | not implemented | The mail.<domain> Caddy catch-all routes to 8081 for JMAP, but the webmail UI itself does not speak JMAP. |
+| TOTP / two-factor auth | not implemented | Not in R1. The previous "TOTP / app-passwords UI is not enabled in this build" notice was REMOVED from production UI on the R1 operator-fix branch. The Security tab now ships a real Change Password form instead. |
+| App passwords (per-device) | not implemented | Not in R1. The previous "per-device sessions" placeholder is gone. |
+| Per-device sessions UI | not implemented | Not in R1. The Security tab ships Change Password only; session-list UI is a follow-up. |
+| Force-rotate-session on password change | not implemented by design | R1 keeps the existing 15-minute access_token alive so a same-minute password change does not kick the user off. The cookie-rotation behaviour is unchanged. |
 
 ---
 
 ## 12. Confirmation
 
 **NO COMMIT, NO PUSH.** Working tree only on
-`D:\orvix_new`, branch `feature/webmail-release-v1`.
-No backend / SMTP / IMAP / POP3 / queue / delivery
-touches in this R1 cut. No admin UI touches. No installer
-touches (setup-https.sh stays as it was after the
-autodiscover slice merged at `da53ddb`).
+`D:\orvix_new`, branch `feature/webmail-r1-password-security-fix`
+(off `main@46214ec`). No backend / SMTP / IMAP / POP3 /
+queue / delivery touches in this R1 cut. No admin UI
+touches. No installer touches (setup-https.sh stays as
+it was after the autodiscover slice merged at `da53ddb`).
+
+The Change Password flow touches only:
+
+- `internal/api/handlers/webmail_auth.go` — adds the
+  `WebmailChangePassword` handler; reads existing
+  helpers `verifyMailboxPassword` + `hashPasswordArgon2id`;
+  no new crypto.
+- `internal/api/router.go` — adds the route on the
+  existing `authCSRF` group; no new middleware.
+- `release/webmail/assets/webmail.js` — adds
+  `renderSecurityTab` + `renderChangePasswordSection`;
+  no change to existing `WebmailLogin` / `WebmailSession`
+  / `WebmailLogout` paths.
+- `release/webmail/assets/webmail.css` — adds
+  `.settings-change-password-*` classes; no override of
+  existing security.css.
+
+The endpoint and its tests are documented in
+`docs/WEBMAIL_RELEASE_1_AUDIT.md` §3.0b (Change
+Password), §7.1 (Phases 7–10), and §8 (Go test
+coverage).
