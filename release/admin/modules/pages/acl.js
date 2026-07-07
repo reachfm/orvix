@@ -1,15 +1,53 @@
 /* =====================================================================
-   pages/acl.js — Global Access Control UI.
+   pages/acl.js — Global Access Control rules UI.
 
-   CRUD against /api/v1/admin/acl-rules. Each rule is
-   allow / deny per source CIDR (or single IP) per protocol.
-   Order is by priority ascending.
+   Built on the shared form builder (modules/form.js) so the
+   add/edit modals render with field grouping, inline validation,
+   keyboard submit, error banner, and submit-state spinner that
+   match every other admin modal.
    ===================================================================== */
 
-import { el, modal } from '../components.js';
+import { el, confirmDanger } from '../components.js';
 import { apiGet, apiPost, apiDelete } from '../api.js';
 import { toast } from '../toast.js';
 import { applyAutoDir } from '../rtl.js';
+import { openFormModal } from '../form.js';
+
+const PROTOCOL_OPTIONS = [
+  { value: 'all',     label: 'all protocols' },
+  { value: 'smtp',    label: 'smtp (25 / 587 / 465)' },
+  { value: 'imap',    label: 'imap (143 / 993)' },
+  { value: 'pop3',    label: 'pop3 (110 / 995)' },
+  { value: 'jmap',    label: 'jmap' },
+  { value: 'webmail', label: 'webmail (HTTP)' },
+];
+const ACTION_OPTIONS = [
+  { value: 'allow', label: 'allow', desc: 'Permit connections matching the rule' },
+  { value: 'deny',  label: 'deny',  desc: 'Reject connections matching the rule' },
+];
+
+// Light CIDR validator (IPv4 only — IPv6 allowlists are written
+// directly in the firewall module).
+function isValidCIDR(s) {
+  if (!s) return false;
+  if (s === '*' || s === 'any') return true;
+  // Single IP
+  if (/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(s)) {
+    const [a, b, c, d] = s.split('.').map(Number);
+    if ([a, b, c, d].some((n) => n < 0 || n > 255)) return false;
+    return true;
+  }
+  // CIDR
+  const m = s.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/);
+  if (!m) return false;
+  const [, a, b, c, d, mask] = m;
+  const octs = [a, b, c, d].map(Number);
+  if (octs.some((n) => n < 0 || n > 255)) return false;
+  const m2 = Number(mask);
+  return m2 >= 0 && m2 <= 32;
+}
+
+let _rules = [];
 
 export async function renderACLPage(root) {
   root.innerHTML = '';
@@ -18,51 +56,65 @@ export async function renderACLPage(root) {
     el('div', null, [
       el('h2', { class: 'page-title', text: 'Global access control' }),
       el('p', { class: 'page-subtitle subtle',
-        text: 'Allow / deny rules per source CIDR or IP, per protocol.' }),
+        text: 'Allow / deny rules per source CIDR or IP, per protocol. Lower priority runs first; the first match wins.' }),
     ]),
     el('div', { class: 'page-actions' }, [
-      el('button', { class: 'btn primary', 'data-acl-action': 'create',
-        text: 'Add rule' }),
+      el('button', { class: 'btn primary', 'data-acl-action': 'create', text: 'Add rule' }),
+      el('button', { class: 'btn ghost', text: 'Refresh',
+        onclick: () => renderACLPage(root) }),
     ]),
   ]));
-  const tbl = el('div', { class: 'panel' });
-  wrap.appendChild(tbl);
   root.appendChild(wrap);
 
-  let rules = [];
-  try {
-    const r = await apiGet('/api/v1/admin/acl-rules');
-    rules = (r && r.rules) || [];
-  } catch (e) {
-    toast('Failed to load ACL: ' + (e.message || e), 'error');
-  }
-  paint(tbl, rules);
+  const panel = el('section', { class: 'panel' });
+  panel.appendChild(el('header', { class: 'panel-head is-heavy' }, [
+    el('h3', { text: 'ACL rules (0)' }),
+    el('span', { class: 'subtle', text: 'Rules run in ascending priority order. First match wins.' }),
+  ]));
+  const panelBody = el('div', { class: 'panel-body', id: 'acl-table-host' });
+  panel.appendChild(panelBody);
+  wrap.appendChild(panel);
 
-  wrap.addEventListener('click', async (ev) => {
-    const tEl = ev.target.closest('[data-acl-action]');
-    if (!tEl) return;
-    const action = tEl.getAttribute('data-acl-action');
-    if (action === 'create') return openCreate(tbl, rules);
-    if (action === 'delete') return doDelete(tbl, rules, Number(tEl.getAttribute('data-id')));
+  await refresh();
+  wrap.addEventListener('click', (ev) => {
+    const t = ev.target.closest('[data-acl-action]');
+    if (!t) return;
+    if (t.getAttribute('data-acl-action') === 'create') openEditor();
+    if (t.getAttribute('data-acl-action') === 'delete') doDelete(Number(t.getAttribute('data-id')));
   });
-
   applyAutoDir(wrap);
 }
 
-function paint(panel, list) {
-  panel.innerHTML = '';
-  panel.appendChild(el('header', { class: 'panel-head' },
-    el('h3', { text: 'ACL rules (' + list.length + ')' })));
-  const body = el('div', { class: 'panel-body' });
-  panel.appendChild(body);
-  if (!list.length) {
-    body.appendChild(el('div', { class: 'empty',
-      text: 'No ACL rules. Default behaviour applies.' }));
+async function refresh() {
+  try {
+    const r = await apiGet('/api/v1/admin/acl-rules');
+    _rules = (r && r.rules) || [];
+  } catch (e) {
+    toast('Failed to load ACL: ' + (e.message || e), 'error');
+    _rules = [];
+  }
+  paint();
+}
+
+function paint() {
+  const body = document.getElementById('acl-table-host');
+  if (!body) return;
+  body.innerHTML = '';
+
+  if (!_rules || !_rules.length) {
+    body.appendChild(el('div', { class: 'empty-state-strong' }, [
+      el('h4', { text: 'No ACL rules defined' }),
+      el('p', { text: 'Without rules, the system falls back to the network-layer firewall + per-listener config. Add a rule above to override the default for a specific source.' }),
+      el('div', { class: 'actions' }, [
+        el('button', { class: 'btn primary', 'data-acl-action': 'create', text: 'Add your first rule' }),
+      ]),
+    ]));
     return;
   }
-  const tbl = el('table', { class: 'data-table' });
+
+  const tbl = el('table', { class: 'data-table dense-table' });
   tbl.appendChild(el('thead', null, el('tr', null, [
-    el('th', { text: 'Prio' }),
+    el('th', { text: '#' }),
     el('th', { text: 'Action' }),
     el('th', { text: 'Protocol' }),
     el('th', { text: 'Source' }),
@@ -70,15 +122,15 @@ function paint(panel, list) {
     el('th', { text: '' }),
   ])));
   const tb = el('tbody');
-  list.forEach((r) => {
+  _rules.forEach((r) => {
     tb.appendChild(el('tr', null, [
-      el('td', { text: String(r.priority) }),
-      el('td', { text: r.action }),
-      el('td', { text: r.protocol }),
-      el('td', { text: r.source }),
-      el('td', { text: r.note || '' }),
+      el('td', { class: 'kv-v', text: String(r.priority) }),
+      el('td', null, actionBadge(r.action)),
+      el('td', { class: 'kv-v', text: r.protocol || 'all' }),
+      el('td', { class: 'kv-v', text: r.source || '-' }),
+      el('td', { class: 'subtle', text: r.note || '-' }),
       el('td', { class: 'actions' }, [
-        el('button', { class: 'btn ghost danger', 'data-acl-action': 'delete',
+        el('button', { class: 'btn xs ghost danger', 'data-acl-action': 'delete',
           'data-id': String(r.id), text: 'Delete' }),
       ]),
     ]));
@@ -87,79 +139,86 @@ function paint(panel, list) {
   body.appendChild(tbl);
 }
 
-async function openCreate(panel, rules) {
-  const root = el('div', { class: 'form-stack' });
-  root.appendChild(inputField('Source (CIDR or IP)', 'source', ''));
-  root.appendChild(selectField('Action', 'action', [
-    { value: 'allow', label: 'allow' },
-    { value: 'deny', label: 'deny' },
-  ]));
-  root.appendChild(selectField('Protocol', 'protocol', [
-    { value: 'all', label: 'all' },
-    { value: 'smtp', label: 'smtp' },
-    { value: 'imap', label: 'imap' },
-    { value: 'pop3', label: 'pop3' },
-    { value: 'jmap', label: 'jmap' },
-    { value: 'webmail', label: 'webmail' },
-  ]));
-  root.appendChild(inputField('Priority (lower = first)', 'priority', '100'));
-  root.appendChild(inputField('Note', 'note', ''));
-  modal({
+function actionBadge(action) {
+  const a = String(action || '').toLowerCase();
+  if (a === 'allow') return el('span', { class: 'badge good', text: 'allow' });
+  if (a === 'deny')  return el('span', { class: 'badge bad',  text: 'deny' });
+  return el('span', { class: 'badge neutral', text: action || '-' });
+}
+
+async function openEditor() {
+  openFormModal({
     title: 'Add ACL rule',
-    body: root,
-    actions: [
-      { label: 'Cancel', kind: 'ghost', value: 'cancel' },
-      { label: 'Add', kind: 'primary', value: 'ok' },
+    size: 'lg',
+    groups: [
+      {
+        title: 'Match',
+        subtitle: 'Defines the source and protocol this rule applies to.',
+        layout: 'cols-2',
+        fields: [
+          { name: 'source', kind: 'text', label: 'Source', required: true,
+            placeholder: '203.0.113.0/24  |  198.51.100.42  |  *',
+            help: 'CIDR range, single IP, or "*" for any. Currently IPv4 only; IPv6 allowlists belong in the firewall module.',
+            validate: (v) => isValidCIDR(String(v)) ? null : { error: 'Use "any" or an IPv4 CIDR (e.g. 203.0.113.0/24) or IP.' } },
+          { name: 'protocol', kind: 'select', label: 'Protocol',
+            options: PROTOCOL_OPTIONS, default: 'all',
+            help: '"all" matches every listener protocol.' },
+        ],
+      },
+      {
+        title: 'Action',
+        subtitle: 'How connections matching the rule are handled, and where this rule sits in the priority order.',
+        layout: 'cols-2',
+        fields: [
+          { name: 'action', kind: 'select', label: 'Action', required: true,
+            options: ACTION_OPTIONS, default: 'allow' },
+          { name: 'priority', kind: 'number', label: 'Priority', min: 0, max: 9999,
+            default: 100, required: true,
+            help: 'Lower runs first. First match wins. Recommended bands: 10=blocklists, 100=greylist, 500=allowlists.' },
+        ],
+      },
+      {
+        title: 'Documentation',
+        fields: [
+          { name: 'note', kind: 'textarea', label: 'Note', rows: 2, maxLength: 256,
+            placeholder: 'Why this rule exists; ticket / contact',
+            help: 'Surface for the operator in the audit log.' },
+        ],
+      },
     ],
-    onAction: async (val) => {
-      if (val !== 'ok') return;
-      const payload = readForm(root);
-      if (!payload.source) { toast('Source required', 'warn'); return false; }
-      payload.priority = Number(payload.priority || 100);
+    submitLabel: 'Add rule',
+    successMessage: 'ACL rule added.',
+    onSubmit: async (values) => {
       try {
-        await apiPost('/api/v1/admin/acl-rules', payload);
-        toast('Rule added', 'success');
-        const r = await apiGet('/api/v1/admin/acl-rules');
-        rules = (r && r.rules) || [];
-        paint(panel, rules);
-        return true;
+        await apiPost('/api/v1/admin/acl-rules', {
+          source: String(values.source || '').trim(),
+          protocol: String(values.protocol || 'all'),
+          action: String(values.action || 'allow'),
+          priority: Number(values.priority || 100),
+          note: String(values.note || ''),
+        });
+        await refresh();
+        return { ok: true };
       } catch (e) {
-        toast('Add failed: ' + (e.message || e), 'error');
-        return false;
+        return { ok: false, error: (e && (e.detail || e.message)) || 'Save failed.' };
       }
     },
   });
 }
 
-async function doDelete(panel, rules, id) {
-  if (!confirm('Delete ACL rule #' + id + '?')) return;
+async function doDelete(id) {
+  const rule = _rules.find((r) => Number(r.id) === Number(id));
+  const desc = rule ? (rule.action + ' ' + (rule.protocol || 'all') + ' ' + (rule.source || '')) : ('rule #' + id);
+  const ok = await confirmDanger({
+    title: 'Delete ACL rule',
+    message: 'Delete "' + desc.trim() + '"? Future connections matching this pattern will fall through to the next rule.',
+    confirmLabel: 'Delete',
+    dangerous: true,
+  });
+  if (!ok) return;
   try {
     await apiDelete('/api/v1/admin/acl-rules/' + id);
-    toast('Rule deleted', 'success');
-    const r = await apiGet('/api/v1/admin/acl-rules');
-    rules = (r && r.rules) || [];
-    paint(panel, rules);
-  } catch (e) {
-    toast('Delete failed: ' + (e.message || e), 'error');
-  }
-}
-
-function inputField(label, name, val) {
-  return el('label', { class: 'field' }, [
-    el('span', { class: 'field-label', text: label }),
-    el('input', { class: 'input', name, type: 'text', value: val }),
-  ]);
-}
-function selectField(label, name, opts) {
-  const sel = el('select', { class: 'input', name });
-  opts.forEach((o) => sel.appendChild(el('option', { value: o.value, text: o.label })));
-  return el('label', { class: 'field' }, [
-    el('span', { class: 'field-label', text: label }), sel,
-  ]);
-}
-function readForm(root) {
-  const out = {};
-  root.querySelectorAll('input').forEach((inp) => { out[inp.name] = inp.value; });
-  root.querySelectorAll('select').forEach((s) => { out[s.name] = s.value; });
-  return out;
+    toast('Rule deleted', 'success', 1400);
+    await refresh();
+  } catch (e) { toast('Delete failed: ' + (e.message || e), 'error'); }
 }

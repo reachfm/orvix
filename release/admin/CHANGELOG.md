@@ -372,3 +372,118 @@ client and the CoreMail engine are untouched.
   tests mirroring the webmail test pattern (security guards, asset
   presence, no-queue-leak, no-unsafe-innerhtml patterns, responsive
   breakpoints, reduced motion, aria-label sweep).
+
+---
+
+## 2026 Sprint: Admin Console 2026 Control Panel — Premium Polish
+
+Branch: `feature/admin-2026-control-panel`
+Base: `4817388` (Phase 3 merged on main)
+Date: 2026-07-07
+
+This is a serious production-grade pass: every previously-near-empty modal
+is now a fully usable enterprise workflow, and the dashboard / runtime
+listeners / antivirus pages render as premium control-room views.
+
+### Design system
+
+- New shared form builder (`release/admin/modules/form.js`) — every
+  admin modal uses the same primitives: field groups with title +
+  subtitle, inline validation, error banner, switch / select / number /
+  email / textarea / code / kv-list / members / checkbox-grid /
+  switch / static field kinds, keyboard submit (Enter), Esc to close,
+  submit-state spinner, sticky foot with primary + cancel actions.
+- Premium dark control-room polish in `release/admin/styles.css`:
+  * `.kpi` hero strip with KPI label + value + trend chip (good /
+    bad / warn / flat).
+  * `.list-card-grid` + `.list-card` for RBAC groups, mailing
+    lists, and public folders (each card has title, tag row, meta,
+    action row; never a "blank" appearance).
+  * `.health-block` + `.health-grid` for premium card presentation
+    (Antivirus, Runtime Listeners, Security Posture) — each subsystem
+    gets its own health block with state pill, kv table, and hint.
+  * `.ops-section` page shell for premium pages.
+  * `.warning-empty` + `.empty-state-strong` for honest positive empty
+    states.
+  * `.modal.modal-lg` widened to 880px so wide forms never need
+    horizontal scroll.
+  * Sidebar 248px width with grouped sections.
+
+### Pages rebuilt
+
+- `pages/admin-groups.js` — list-card-grid render + new create / edit
+  modal with grouped sections (Identity / Grants / Custom grants), a
+  real checkbox-grid RBAC picker (organised by Domains / Mailboxes /
+  Queue / Backups / DNS-etc), inline description helper, members modal
+  with per-member remove + add-by-id flow.
+- `pages/acl.js` — premium runtime-table + form with action dropdown
+  (allow/deny), protocol dropdown (all/smtp/imap/pop3/jmap/webmail),
+  priority with recommended-band hint, IPv4 CIDR validator, note
+  textarea. Empty state offers a clear hint.
+- `pages/acceptance.js` — full rule builder: priority, scope
+  (global/domain/mailbox), scope_target, sender/recipient patterns,
+  source IP CIDR, action (accept/reject/quarantine — runtime-true),
+  enabled switch, note textarea. Keeps the dry-run match affordance.
+- `pages/incoming-rules.js` — full rule builder: priority, field
+  dropdown, operator dropdown, value, action
+  (reject/quarantine/tag, runtime-true), `Action value` (tag label or
+  quarantine reason), apply_to dropdown, stop_processing switch,
+  enabled switch, note.
+- `pages/mailing-lists.js` — list-card-grid + create / edit modal
+  (address + domain immutable, all other fields editable via PATCH).
+- `pages/public-folders.js` — list-card-grid + create / edit modal
+  (owner mailbox + folder path immutable, all other fields editable).
+- `pages/runtime-listeners.js` — premium health-block view: hero
+  KPI strip (active / skipped / failed / degraded / starting), one
+  card per listener with TLS marker, state pill, kv table, hint per
+  state ("skipped = intentionally not listening", etc.).
+- `pages/antivirus.js` — premium control room: KPI strip
+  (antivirus / probe / antispam / routing), one health block per
+  subsystem (ClamAV / antispam / acceptance / incoming message
+  rules), honest notes section, real probe response fields.
+- `pages/dashboard.js` — command center: KPI hero strip
+  (listeners / MFA / domains / mailboxes / queue / disk), Live runtime
+  band (4-up Health / Build / Storage / License), Operations band
+  (4-up Listeners / Queue / Mail stats / Security), Recent activity
+  (audit log) + Warnings (positive "no active warnings" empty
+  state). Real backend endpoints only — no fabricated data.
+
+### Backend additions
+
+| Verb | Path | Notes |
+|---|---|---|
+| `PATCH` | `/api/v1/admin/mailing-lists/:id` (new) | Allowlist of 7 mutable keys (display_name, description, subscription_policy, status, moderation_required, archive_enabled, max_members). Unknown keys hard-reject. Subscription policy enum enforced (open / closed / moderated / announce). Status enum enforced (active / suspended / archived). RBAC + CSRF + audit. Rejects negative max_members. |
+| `PATCH` | `/api/v1/admin/public-folders/:id` (new) | Allowlist of 3 mutable keys (display_name, description, read_only). Unknown keys hard-reject. Boolean validator on read_only. RBAC + CSRF + audit. |
+
+### Tests added
+
+- `internal/api/handlers/admin_domain_v2_test.go` (new, 6 cases):
+  - `TestAdminMailingListPatchAllowedFields` — all 7 editable keys
+    applied + re-fetch via GET shows the patch.
+  - `TestAdminMailingListPatchUnknownFieldHardReject` — unknown
+    key aborts the entire PATCH (atomic rollback).
+  - `TestAdminMailingListPatchRBACEnforced` — non-admin JWT cannot
+    PATCH a mailing list.
+  - `TestAdminPublicFolderPatchAllowedFields` — all 3 editable
+    keys applied + re-fetch.
+  - `TestAdminPublicFolderPatchUnknownFieldHardReject` — unknown
+    key aborts the PATCH.
+  - `TestAdminPublicFolderPatchReadOnlyValidator` — non-bool
+    `read_only` rejected with 400.
+
+### Smoke hardening
+
+- `smoke-admin-ui.sh` BLOCKER 3 + BLOCKER 4 checks extended to
+  accept either the legacy literal-source pattern OR the
+  form-builder's `value: '<action>'` array pattern, so the BLOCKER
+  contract is preserved across refactors.
+- `smoke-admin-functional-browser.mjs` now navigates and opens
+  every previously-empty modal (admin-groups, ACL, acceptance,
+  incoming-rules, mailing-lists, public-folders) and asserts each
+  modal exposes a non-trivial field count (>= 4 inputs minimum,
+  higher for rule builders). Runtime listeners page is asserted
+  to render the new `Listener overview` KPI strip and the
+  runtime-truthful state labels (active / skipped / not monitored /
+  failed).
+- Existing banned-string, RBAC, CSRF, MFA, and banned-placeholder
+  gates remain intact.

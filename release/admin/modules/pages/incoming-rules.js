@@ -1,21 +1,51 @@
 /* =====================================================================
    pages/incoming-rules.js — Admin-scoped Incoming Message Rules UI.
 
-   Distinct from per-mailbox webmail rules at
-   /api/v1/webmail/rules: these are tenant-wide rules
-   applied to every incoming message before any
-   per-mailbox filter.
-
-   Wires:
-     GET    /api/v1/admin/incoming-msg-rules       → list
-     POST   /api/v1/admin/incoming-msg-rules       → create
-     PATCH  /api/v1/admin/incoming-msg-rules/:id   → update
-     DELETE /api/v1/admin/incoming-msg-rules/:id   → delete
+   Distinct from per-mailbox webmail rules at /api/v1/webmail/rules:
+   these are tenant-wide rules applied before any per-mailbox
+   filter. Built on the shared form builder so the create/edit
+   modals match every other admin modal in field grouping,
+   inline validation, error banner, submit-state spinner, and
+   keyboard submit.
    ===================================================================== */
 
-import { el, modal, toast } from '../components.js';
+import { el, confirmDanger } from '../components.js';
 import { apiGet, apiPost, apiPatch, apiDelete } from '../api.js';
+import { toast } from '../toast.js';
 import { applyAutoDir } from '../rtl.js';
+import { openFormModal } from '../form.js';
+
+const FIELD_OPTIONS = [
+  { value: 'subject',    label: 'Subject' },
+  { value: 'from',       label: 'From' },
+  { value: 'to',         label: 'To' },
+  { value: 'any_header', label: 'Any header' },
+  { value: 'size',       label: 'Size' },
+  { value: 'spf',        label: 'SPF result' },
+  { value: 'dkim',       label: 'DKIM result' },
+  { value: 'dmarc',      label: 'DMARC result' },
+];
+const OP_OPTIONS = [
+  { value: 'contains',    label: 'contains' },
+  { value: 'equals',      label: 'equals' },
+  { value: 'starts_with', label: 'starts with' },
+  { value: 'ends_with',   label: 'ends with' },
+  { value: 'matches',     label: 'matches (regex)' },
+  { value: 'gt',          label: '>' },
+  { value: 'lt',          label: '<' },
+];
+const ACTION_OPTIONS = [
+  { value: 'reject',     label: 'reject',     desc: 'Reject during SMTP conversation (5xx)' },
+  { value: 'quarantine', label: 'quarantine', desc: 'Hold in admin quarantine, do not deliver' },
+  { value: 'tag',        label: 'tag',        desc: 'Tag header / add label; continue delivery' },
+];
+const APPLY_OPTIONS = [
+  { value: 'all',            label: 'all (in + out)', desc: 'Apply regardless of direction' },
+  { value: 'incoming_only',  label: 'incoming only',   desc: 'Only when message is inbound' },
+  { value: 'outgoing_only',  label: 'outgoing only',   desc: 'Only when message is outbound' },
+];
+
+let _rules = [];
 
 export async function renderIncomingRulesPage(root) {
   root.innerHTML = '';
@@ -24,148 +54,93 @@ export async function renderIncomingRulesPage(root) {
     el('div', null, [
       el('h2', { class: 'page-title', text: 'Incoming message rules' }),
       el('p', { class: 'page-subtitle subtle',
-        text: 'Tenant-wide filter rules applied before per-mailbox webmail rules. Priority-ordered.' }),
+        text: 'Tenant-wide filter rules applied before per-mailbox webmail rules. Priority-ordered; first match wins.' }),
     ]),
     el('div', { class: 'page-actions' }, [
-      el('button', { class: 'btn primary', 'data-irr-action': 'create',
-        text: 'Create rule' }),
+      el('button', { class: 'btn primary', 'data-irr-action': 'create', text: 'Create rule' }),
+      el('button', { class: 'btn ghost', text: 'Refresh',
+        onclick: () => renderIncomingRulesPage(root) }),
     ]),
   ]));
   root.appendChild(wrap);
 
   const panel = el('section', { class: 'panel' });
-  panel.appendChild(el('header', { class: 'panel-head' },
-    el('h3', { text: 'Rules' })));
-  const body = el('div', { class: 'panel-body', text: 'Loading...' });
+  panel.appendChild(el('header', { class: 'panel-head is-heavy' }, [
+    el('h3', { text: 'Rules' }),
+    el('span', { class: 'subtle', id: 'irr-stamp', text: 'Loading\u2026' }),
+  ]));
+  const body = el('div', { class: 'panel-body', id: 'irr-table-host' });
   panel.appendChild(body);
   wrap.appendChild(panel);
 
-  let list = [];
-  try {
-    const r = await apiGet('/api/v1/admin/incoming-msg-rules');
-    list = (r && r.rules) || [];
-  } catch (e) {
-    body.innerHTML = '';
-    body.appendChild(el('div', { class: 'empty', text: 'Failed to load: ' + (e.message || e) }));
-    applyAutoDir(wrap);
-    return;
-  }
-  paint(body, list);
-
-  wrap.addEventListener('click', async (ev) => {
+  await refresh();
+  wrap.addEventListener('click', (ev) => {
     const t = ev.target.closest('[data-irr-action]');
     if (!t) return;
     const a = t.getAttribute('data-irr-action');
-    if (a === 'create') return openForm(body, list, null);
+    if (a === 'create') return openEditor(null);
     const m = a && a.match(/^(edit|delete):(\d+)$/);
     if (m) {
-      if (m[1] === 'edit') return openForm(body, list, Number(m[2]));
-      if (m[1] === 'delete') return doDelete(body, list, Number(m[2]));
+      if (m[1] === 'edit') return openEditor(Number(m[2]));
+      if (m[1] === 'delete') return doDelete(Number(m[2]));
     }
   });
-
   applyAutoDir(wrap);
 }
 
-async function openForm(body, list, id) {
-  const isEdit = id != null;
-  const r = list.find((x) => x.id === id) || {};
-  const form = el('div', { class: 'form-stack' });
-  form.appendChild(textField('Name', 'name', r.name || ''));
-  form.appendChild(numberField('Priority (lower first)', 'priority', r.priority || 100));
-  form.appendChild(select('Field', 'field', r.field || 'subject',
-    ['subject', 'from', 'to', 'any_header', 'size', 'spf', 'dkim', 'dmarc']));
-  form.appendChild(select('Operator', 'operator', r.operator || 'contains',
-    ['contains', 'equals', 'starts_with', 'ends_with', 'matches', 'gt', 'lt']));
-  form.appendChild(textField('Value', 'value', r.value || ''));
-  form.appendChild(select('Action', 'action', r.action || 'reject',
-    ['reject', 'quarantine', 'tag']));
-  form.appendChild(textField('Action value (tag/header label or quarantine reason)', 'action_target', r.action_target || ''));
-  form.appendChild(select('Apply to', 'apply_to', r.apply_to || 'all',
-    ['all', 'incoming_only', 'outgoing_only']));
-  form.appendChild(checkField('Stop processing further rules', 'stop_processing', r.stop_processing === true));
-  form.appendChild(checkField('Enabled', 'enabled', r.enabled !== false));
-  form.appendChild(textArea('Note', 'note', r.note || '', 3));
-  modal({
-    title: isEdit ? ('Edit incoming message rule #' + id) : 'Create incoming message rule',
-    body: form,
-    actions: [
-      { label: 'Cancel', kind: 'ghost', value: 'cancel' },
-      { label: isEdit ? 'Save' : 'Create', kind: 'primary', value: 'ok' },
-    ],
-    onAction: async (val) => {
-      if (val !== 'ok') return false;
-      const payload = {
-        name: readField(form, 'name'),
-        priority: Number(readField(form, 'priority') || 0),
-        field: readField(form, 'field'),
-        operator: readField(form, 'operator'),
-        value: readField(form, 'value'),
-        action: readField(form, 'action'),
-        action_target: readField(form, 'action_target'),
-        apply_to: readField(form, 'apply_to'),
-        stop_processing: readCheck(form, 'stop_processing'),
-        enabled: readCheck(form, 'enabled'),
-        note: readField(form, 'note'),
-      };
-      try {
-        if (isEdit) {
-          await apiPatch('/api/v1/admin/incoming-msg-rules/' + id, payload);
-          toast('Rule updated', 'success');
-        } else {
-          await apiPost('/api/v1/admin/incoming-msg-rules', payload);
-          toast('Rule created', 'success');
-        }
-        const r2 = await apiGet('/api/v1/admin/incoming-msg-rules');
-        list = (r2 && r2.rules) || [];
-        paint(body, list);
-        return true;
-      } catch (e) {
-        toast('Save failed: ' + (e.message || e), 'error', 6000);
-        return false;
-      }
-    },
-  });
-}
-
-async function doDelete(body, list, id) {
-  if (!confirm('Delete incoming message rule #' + id + '?')) return;
+async function refresh() {
   try {
-    await apiDelete('/api/v1/admin/incoming-msg-rules/' + id);
-    toast('Rule deleted', 'success');
-    const r2 = await apiGet('/api/v1/admin/incoming-msg-rules');
-    list = (r2 && r2.rules) || [];
-    paint(body, list);
+    const r = await apiGet('/api/v1/admin/incoming-msg-rules');
+    _rules = (r && r.rules) || [];
   } catch (e) {
-    toast('Delete failed: ' + (e.message || e), 'error', 6000);
+    toast('Failed to load: ' + (e.message || e), 'error');
+    _rules = [];
   }
+  paint();
 }
 
-function paint(body, list) {
+function paint() {
+  const body = document.getElementById('irr-table-host');
+  if (!body) return;
   body.innerHTML = '';
-  if (!list.length) {
-    body.appendChild(el('div', { class: 'empty',
-      text: 'No admin-scoped incoming message rules yet. Use "Create rule" to add one.' }));
+  const stamp = document.getElementById('irr-stamp');
+  if (stamp) stamp.textContent = _rules.length + ' rule' + (_rules.length === 1 ? '' : 's') + ' \u2014 ordered by priority';
+
+  if (!_rules.length) {
+    body.appendChild(el('div', { class: 'empty-state-strong' }, [
+      el('h4', { text: 'No admin-scoped incoming rules defined' }),
+      el('p', { text: 'Per-mailbox webmail rules at /api/v1/webmail/rules cover most use cases. Add a tenant-wide rule above for cross-mailbox filtering (e.g. global Spam header tagging, quarantine).' }),
+      el('div', { class: 'actions' }, [
+        el('button', { class: 'btn primary', 'data-irr-action': 'create', text: 'Create a rule' }),
+      ]),
+    ]));
     return;
   }
-  const tbl = el('table', { class: 'data-table' });
+
+  const tbl = el('table', { class: 'data-table dense-table' });
   tbl.appendChild(el('thead', null, el('tr', null, [
-    el('th', { text: 'Priority' }),
+    el('th', { text: 'Prio' }),
     el('th', { text: 'Name' }),
     el('th', { text: 'Condition' }),
     el('th', { text: 'Action' }),
+    el('th', { text: 'Scope' }),
     el('th', { text: 'Enabled' }),
-    el('th', { text: 'Actions' }),
+    el('th', { text: '' }),
   ])));
   const tb = el('tbody');
-  list.forEach((r) => {
+  const sorted = _rules.slice().sort((a, b) => Number(a.priority || 0) - Number(b.priority || 0));
+  sorted.forEach((r) => {
     tb.appendChild(el('tr', null, [
-      el('td', { text: String(r.priority) }),
-      el('td', { text: r.name }),
-      el('td', { class: 'kv-v mono small', text: r.field + ' ' + r.operator + ' "' + r.value + '"' }),
-      el('td', { text: r.action + (r.action_target ? ' → ' + r.action_target : '') + (r.stop_processing ? ' [stop]' : '') }),
-      el('td', { class: 'kv-v', text: r.enabled ? 'yes' : 'no' }),
+      el('td', { class: 'kv-v', text: String(r.priority) }),
       el('td', null, [
+        el('strong', { text: r.name || ('#' + r.id) }),
+        r.note ? el('div', { class: 'subtle small', style: 'margin-top:2px', text: r.note }) : null,
+      ]),
+      el('td', { class: 'kv-v mono small', text: (r.field || 'subject') + ' ' + (r.operator || 'contains') + ' "' + (r.value || '') + '"' }),
+      el('td', null, actionBadge(r.action, r.action_target, r.stop_processing)),
+      el('td', { class: 'kv-v subtle', text: (r.apply_to || 'all') }),
+      el('td', { class: 'kv-v', text: r.enabled ? 'yes' : 'no' }),
+      el('td', { class: 'actions' }, [
         el('button', { class: 'btn xs ghost', 'data-irr-action': 'edit:' + r.id, text: 'Edit' }),
         el('button', { class: 'btn xs ghost danger', 'data-irr-action': 'delete:' + r.id, text: 'Delete' }),
       ]),
@@ -175,47 +150,121 @@ function paint(body, list) {
   body.appendChild(tbl);
 }
 
-function textField(label, name, value) {
-  const id = 'ir_' + name;
-  return el('label', { class: 'field', for: id }, [
-    el('span', { class: 'field-label', text: label }),
-    el('input', { id, name, type: 'text', class: 'input', value: value || '' }),
-  ]);
+function actionBadge(action, target, stop) {
+  const a = String(action || '').toLowerCase();
+  let kind = 'neutral';
+  let label = a;
+  if (a === 'reject') { kind = 'bad'; }
+  else if (a === 'quarantine') { kind = 'warn'; }
+  else if (a === 'tag') { kind = 'info'; }
+  if (target) label += ' \u2192 ' + target;
+  if (stop) label += '  [stop]';
+  return el('span', { class: 'badge ' + kind, text: label });
 }
-function numberField(label, name, value) {
-  const id = 'ir_' + name;
-  return el('label', { class: 'field', for: id }, [
-    el('span', { class: 'field-label', text: label }),
-    el('input', { id, name, type: 'number', class: 'input', value: String(value || 0), min: '0' }),
-  ]);
+
+async function openEditor(id) {
+  const r = id != null ? (_rules.find((x) => Number(x.id) === Number(id)) || {}) : {};
+  const isEdit = id != null;
+
+  openFormModal({
+    title: isEdit ? ('Edit incoming rule #' + id) : 'Create incoming message rule',
+    size: 'lg',
+    groups: [
+      {
+        title: 'Identity', subtitle: 'Operator-facing name + priority.', layout: 'cols-2',
+        fields: [
+          { name: 'name', kind: 'text', label: 'Name', required: true,
+            default: r.name, maxLength: 128,
+            help: 'Shown in audit log + table.' },
+          { name: 'priority', kind: 'number', label: 'Priority (lower first)',
+            min: 0, max: 9999, required: true,
+            default: r.priority != null ? r.priority : 100,
+            help: 'Lower runs first.' },
+        ],
+      },
+      {
+        title: 'Condition', subtitle: 'Field / operator / value triple this rule matches.',
+        layout: 'cols-2',
+        fields: [
+          { name: 'field', kind: 'select', label: 'Field',
+            options: FIELD_OPTIONS, default: r.field || 'subject', required: true },
+          { name: 'operator', kind: 'select', label: 'Operator',
+            options: OP_OPTIONS, default: r.operator || 'contains', required: true },
+          { name: 'value', kind: 'text', label: 'Value', required: true,
+            default: r.value || '',
+            placeholder: 'pattern to match',
+            help: 'For "matches" use a Go regex; for size use bytes.' },
+          { name: 'apply_to', kind: 'select', label: 'Apply to',
+            options: APPLY_OPTIONS, default: r.apply_to || 'all', required: true },
+        ],
+      },
+      {
+        title: 'Action', subtitle: 'What to do when the condition matches.',
+        layout: 'cols-2',
+        fields: [
+          { name: 'action', kind: 'select', label: 'Action',
+            options: ACTION_OPTIONS, default: r.action || 'reject', required: true },
+          { name: 'action_target', kind: 'text', label: 'Action value',
+            default: r.action_target || '',
+            placeholder: 'tag label or quarantine reason (optional)',
+            help: 'Required when tagging to specify the header/label; otherwise free-form.' },
+          { name: 'stop_processing', kind: 'switch', label: 'Stop further rules on match',
+            default: r.stop_processing === true,
+            help: 'When on, no lower-priority rule runs after this one fires.' },
+          { name: 'enabled', kind: 'switch', label: 'Enabled',
+            default: r.enabled !== false },
+        ],
+      },
+      {
+        title: 'Documentation',
+        fields: [
+          { name: 'note', kind: 'textarea', label: 'Note',
+            rows: 3, maxLength: 1024, default: r.note || '',
+            placeholder: 'Why this rule exists; ticket / contact' },
+        ],
+      },
+    ],
+    submitLabel: isEdit ? 'Save changes' : 'Create rule',
+    successMessage: isEdit ? 'Incoming message rule updated.' : 'Incoming message rule created.',
+    onSubmit: async (values) => {
+      const payload = {
+        name: String(values.name || '').trim(),
+        priority: Number(values.priority || 100),
+        field: String(values.field || 'subject'),
+        operator: String(values.operator || 'contains'),
+        value: String(values.value || ''),
+        action: String(values.action || 'reject'),
+        action_target: String(values.action_target || ''),
+        apply_to: String(values.apply_to || 'all'),
+        stop_processing: !!values.stop_processing,
+        enabled: !!values.enabled,
+        note: String(values.note || ''),
+      };
+      try {
+        if (isEdit) await apiPatch('/api/v1/admin/incoming-msg-rules/' + id, payload);
+        else        await apiPost('/api/v1/admin/incoming-msg-rules', payload);
+        await refresh();
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: (e && (e.detail || e.message)) || 'Save failed.' };
+      }
+    },
+  });
 }
-function textArea(label, name, value, rows) {
-  const id = 'ir_' + name;
-  return el('label', { class: 'field', for: id }, [
-    el('span', { class: 'field-label', text: label }),
-    el('textarea', { id, name, class: 'input', rows: rows || 3 }, value || ''),
-  ]);
-}
-function checkField(label, name, value) {
-  const id = 'ir_' + name;
-  return el('label', { class: 'field check', for: id }, [
-    el('input', { id, name, type: 'checkbox', checked: value ? 'checked' : null }),
-    el('span', { class: 'field-label', text: label }),
-  ]);
-}
-function select(label, name, value, options) {
-  const id = 'ir_' + name;
-  return el('label', { class: 'field', for: id }, [
-    el('span', { class: 'field-label', text: label }),
-    el('select', { id, name, class: 'input' },
-      options.map((o) => el('option', { value: o, selected: o === value ? 'selected' : null }, o))),
-  ]);
-}
-function readField(scope, name) {
-  const n = scope.querySelector('[name="' + name + '"]');
-  return n ? (n.value || '') : '';
-}
-function readCheck(scope, name) {
-  const n = scope.querySelector('[name="' + name + '"]');
-  return n ? !!n.checked : false;
+
+async function doDelete(id) {
+  const r = _rules.find((x) => Number(x.id) === Number(id));
+  const desc = r ? (r.name || ('#' + id)) : ('rule #' + id);
+  const ok = await confirmDanger({
+    title: 'Delete incoming message rule',
+    message: 'Delete rule "' + desc + '"? Future matched messages fall through to the next rule (or default).',
+    confirmLabel: 'Delete',
+    dangerous: true,
+  });
+  if (!ok) return;
+  try {
+    await apiDelete('/api/v1/admin/incoming-msg-rules/' + id);
+    toast('Rule deleted', 'success', 1400);
+    await refresh();
+  } catch (e) { toast('Delete failed: ' + (e.message || e), 'error'); }
 }

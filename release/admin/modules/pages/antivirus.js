@@ -1,13 +1,11 @@
 /* =====================================================================
-   pages/antivirus.js — Antivirus / AntiSpam status.
+   pages/antivirus.js — Antivirus / AntiSpam / Rule engine status.
 
-   Wires:
-     GET /api/v1/admin/security/antivirus  → engine status
-
-   The endpoint probes the configured ClamAV daemon.
-   engine_active is true only when the local daemon
-   responds with PONG. No scanning is claimed unless
-   that probe succeeds.
+   Premium 2-column health-block presentation. The ClamAV probe
+   reports engine_active=true ONLY when the daemon responds with
+   PONG; no scanning is claimed unless the probe actually ran.
+   Antispam / routing / incoming rule engines are honest about
+   their active state instead of synthesising "OK" badges.
    ===================================================================== */
 
 import { el } from '../components.js';
@@ -21,112 +19,132 @@ export async function renderAntivirusPage(root) {
     el('div', null, [
       el('h2', { class: 'page-title', text: 'Antivirus / anti-spam' }),
       el('p', { class: 'page-subtitle subtle',
-        text: 'Honest status of the local ClamAV daemon + policy / routing / incoming rule engines.' }),
+        text: 'Honest status of the local ClamAV daemon + the anti-spam, acceptance / routing, and incoming message rule engines. No engine is reported as active unless its presence probe succeeds.' }),
+    ]),
+    el('div', { class: 'page-actions' }, [
+      el('button', { class: 'btn ghost', text: 'Refresh',
+        onclick: () => renderAntivirusPage(root) }),
     ]),
   ]));
   root.appendChild(wrap);
 
-  try {
-    const r = await apiGet('/api/v1/admin/security/antivirus');
-    paintAV(wrap, r);
-  } catch (e) {
-    wrap.appendChild(el('div', { class: 'error', text: 'Failed to load status: ' + (e.message || e) }));
+  let r = null, err = null;
+  try { r = await apiGet('/api/v1/admin/security/antivirus'); }
+  catch (e) { err = e; }
+
+  if (err && !r) {
+    wrap.appendChild(el('div', { class: 'error',
+      text: 'Failed to load antivirus status: ' + (err && err.message || 'network error') }));
+    applyAutoDir(wrap);
+    return;
   }
+
+  wrap.appendChild(renderKpis(r || {}));
+  wrap.appendChild(renderSection('Antivirus engine (ClamAV)', [
+    ['Engine',                r.engine || '-'],
+    ['Configured',            r.engine_configured ? 'yes' : 'no'],
+    ['Reachable',             r.engine_reachable ? 'yes' : 'no'],
+    ['Active',                r.engine_active ? 'yes' : 'no'],
+    ['Host',                  r.clamav_host || '-'],
+    ['Port',                  r.clamav_port || '-'],
+    ['Last probe response',   r.clamav_response || '-'],
+    ['Last probe at',         r.last_probe_at || '-'],
+  ], {
+    state: r.engine_active ? 'good' : (r.engine_configured ? 'warn' : 'neutral'),
+    stateLabel: r.engine_active ? 'active' : (r.engine_configured ? 'configured / not active' : 'not configured'),
+    note: r.engine_active
+      ? 'Active means the configured ClamAV daemon responded with PONG at the last probe.'
+      : 'No active scanning is reported. To activate, run clamav-daemon on the configured host/port.',
+  }));
+
+  wrap.appendChild(renderSection('Anti-spam engine', [
+    ['Engine',           r.antispam_engine || '-'],
+    ['Active',           r.antispam_active ? 'yes' : 'no'],
+    ['Reachability',     r.antispam_reachable ? 'yes' : 'no'],
+    ['Last probe',       r.antispam_response || '-'],
+  ], {
+    state: r.antispam_active ? 'good' : 'neutral',
+    stateLabel: r.antispam_active ? 'active' : 'not wired',
+    note: 'Rspamd / SpamAssassin is not wired in this build. Use per-mailbox or per-domain spam controls via webmail Settings \u2192 Filters.',
+  }));
+
+  wrap.appendChild(renderSection('Acceptance & routing engine', [
+    ['Engine',           r.routing_engine || '-'],
+    ['Active',           r.routing_active ? 'yes' : 'no'],
+  ], {
+    state: r.routing_active ? 'good' : 'neutral',
+    stateLabel: r.routing_active ? 'active' : 'rules stored; walker on next integration',
+    note: 'Rules can be created + audited at Acceptance & routing. The runtime walker hooks them up once the engine integration lands.',
+  }));
+
+  wrap.appendChild(renderSection('Incoming message rules engine', [
+    ['Engine',           r.incoming_msg_rules || '-'],
+    ['Active',           r.incoming_msg_active ? 'yes' : 'no'],
+  ], {
+    state: r.incoming_msg_active ? 'good' : 'neutral',
+    stateLabel: r.incoming_msg_active ? 'active' : 'rules stored',
+    note: 'Rules can be created + audited at Incoming message rules. Per-mailbox webmail rules are the active per-mailbox filter pipeline in this build.',
+  }));
+
+  // Honest notes
+  if (Array.isArray(r.honest_notes) && r.honest_notes.length) {
+    const noteBlock = el('section', { class: 'ops-section' });
+    noteBlock.appendChild(el('header', null, el('h3', { text: 'Honest notes' })));
+    const nb = el('div', { class: 'panel-body' });
+    r.honest_notes.forEach((n) => nb.appendChild(el('p', { class: 'health-note', text: '\u2022 ' + n })));
+    noteBlock.appendChild(nb);
+    wrap.appendChild(noteBlock);
+  }
+
   applyAutoDir(wrap);
 }
 
-function paintAV(wrap, r) {
-  const avCard = el('section', { class: 'panel' });
-  avCard.appendChild(el('header', { class: 'panel-head' }, [
-    el('h3', { text: 'Antivirus engine (ClamAV)' }),
-    el('span', { class: 'badge tag ' + (r.engine_active ? 'good' : 'warn'),
-      text: r.engine_active ? 'active' : 'inactive / unknown' }),
-  ]));
-  const avBody = el('div', { class: 'panel-body' });
-  avBody.appendChild(kvTable([
-    ['Engine', r.engine],
-    ['Configured', r.engine_configured ? 'yes' : 'no'],
-    ['Reachable', r.engine_reachable ? 'yes' : 'no'],
-    ['Active', r.engine_active ? 'yes' : 'no'],
-    ['Host', r.clamav_host || '-'],
-    ['Port', r.clamav_port || '-'],
-    ['Last probe response', r.clamav_response || '-'],
-  ]));
-  if (r.engine_active) {
-    avBody.appendChild(el('p', { class: 'subtle',
-      text: 'Active means the configured ClamAV daemon responded with PONG.' }));
-  } else {
-    avBody.appendChild(el('div', { class: 'banner banner-warn' },
-      el('span', { class: 'banner-text',
-        text: 'No active scanning is reported. To activate, run clamav-daemon on the configured host/port.' })));
-  }
-  avCard.appendChild(avBody);
-  wrap.appendChild(avCard);
-
-  const asCard = el('section', { class: 'panel' });
-  asCard.appendChild(el('header', { class: 'panel-head' }, [
-    el('h3', { text: 'Anti-spam engine' }),
-    el('span', { class: 'badge tag ' + (r.antispam_active ? 'good' : 'warn'),
-      text: r.antispam_active ? 'active' : 'not wired' }),
-  ]));
-  const asBody = el('div', { class: 'panel-body' });
-  asBody.appendChild(kvTable([
-    ['Engine', r.antispam_engine],
-    ['Active', r.antispam_active ? 'yes' : 'no'],
-  ]));
-  asBody.appendChild(el('p', { class: 'subtle',
-    text: 'Rspamd is not wired in this build. Use per-mailbox / per-domain spam controls via webmail settings.' }));
-  asCard.appendChild(asBody);
-  wrap.appendChild(asCard);
-
-  const roCard = el('section', { class: 'panel' });
-  roCard.appendChild(el('header', { class: 'panel-head' }, [
-    el('h3', { text: 'Acceptance & routing engine' }),
-    el('span', { class: 'badge tag ' + (r.routing_active ? 'good' : 'warn'),
-      text: r.routing_active ? 'active' : 'not wired' }),
-  ]));
-  const roBody = el('div', { class: 'panel-body' });
-  roBody.appendChild(kvTable([
-    ['Engine', r.routing_engine],
-    ['Active', r.routing_active ? 'yes' : 'no'],
-  ]));
-  roBody.appendChild(el('p', { class: 'subtle',
-    text: 'Rules can be created and audited at /api/v1/admin/acceptance-rules. The runtime walker hooks them up once the engine integration lands.' }));
-  roCard.appendChild(roBody);
-  wrap.appendChild(roCard);
-
-  const irCard = el('section', { class: 'panel' });
-  irCard.appendChild(el('header', { class: 'panel-head' }, [
-    el('h3', { text: 'Incoming message rules engine' }),
-    el('span', { class: 'badge tag ' + (r.incoming_msg_active ? 'good' : 'warn'),
-      text: r.incoming_msg_active ? 'active' : 'stored only' }),
-  ]));
-  const irBody = el('div', { class: 'panel-body' });
-  irBody.appendChild(kvTable([
-    ['Engine', r.incoming_msg_rules],
-    ['Active', r.incoming_msg_active ? 'yes' : 'no'],
-  ]));
-  irBody.appendChild(el('p', { class: 'subtle',
-    text: 'Rules can be created and audited at /api/v1/admin/incoming-msg-rules. Per-mailbox webmail rules at /api/v1/webmail/rules are the active per-mailbox filter pipeline in this build.' }));
-  irCard.appendChild(irBody);
-  wrap.appendChild(irCard);
-
-  const honest = el('div', { class: 'panel' });
-  honest.appendChild(el('header', { class: 'panel-head' },
-    el('h3', { text: 'Honest notes' })));
-  const hb = el('div', { class: 'panel-body' });
-  (r.honest_notes || []).forEach((n) => hb.appendChild(el('p', { text: '• ' + n })));
-  honest.appendChild(hb);
-  wrap.appendChild(honest);
+function renderKpis(r) {
+  const k = el('div', { class: 'kpi-hero' });
+  k.appendChild(kpi('Antivirus engine',
+    r.engine_active ? 'active' : (r.engine_configured ? 'configured' : 'not configured'),
+    r.engine_active ? 'good' : (r.engine_configured ? 'warn' : 'neutral')));
+  k.appendChild(kpi('Antivirus probe',
+    r.last_probe_at ? formatTs(r.last_probe_at) : 'never', 'neutral'));
+  k.appendChild(kpi('Anti-spam',
+    r.antispam_active ? 'active' : 'not wired',
+    r.antispam_active ? 'good' : 'neutral'));
+  k.appendChild(kpi('Routing engine',
+    r.routing_active ? 'active' : 'rules stored',
+    r.routing_active ? 'good' : 'warn'));
+  return k;
 }
 
-function kvTable(rows) {
-  const tbl = el('table', { class: 'kv-table' });
+function kpi(label, value, kind) {
+  return el('article', { class: 'kpi', 'data-trend': kind }, [
+    el('div', { class: 'kpi-head' }, [el('span', { class: 'kpi-label', text: label })]),
+    el('div', { class: 'kpi-value', text: value }),
+  ]);
+}
+
+function renderSection(title, rows, opts) {
+  opts = opts || {};
+  const sec = el('section', { class: 'ops-section' });
+  sec.appendChild(el('header', null, [
+    el('h3', { text: title }),
+    el('span', { class: 'health-state ' + (opts.state || 'neutral'), text: opts.stateLabel || '\u2014' }),
+  ]));
+  const body = el('div', { class: 'panel-body' });
+  const dl = el('dl', { class: 'health-kv' });
   rows.forEach(([k, v]) => {
-    tbl.appendChild(el('tr', null, [
-      el('th', { text: k }),
-      el('td', { class: 'kv-v', text: String(v == null ? '-' : v) }),
-    ]));
+    dl.appendChild(el('dt', { class: 'k', text: k }));
+    dl.appendChild(el('dd', { class: 'v', text: String(v == null || v === '' ? '-' : v) }));
   });
-  return tbl;
+  body.appendChild(dl);
+  if (opts.note) body.appendChild(el('p', { class: 'health-note', text: opts.note }));
+  sec.appendChild(body);
+  return sec;
+}
+
+function formatTs(s) {
+  try {
+    const d = new Date(s);
+    if (isNaN(d.getTime())) return String(s);
+    return d.toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+  } catch (_) { return String(s); }
 }

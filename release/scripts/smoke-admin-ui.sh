@@ -469,16 +469,20 @@ pass "all 12 enterprise page modules exist and are imported in app.js"
 # The runtime (internal/coremail/smtp/receive.go) accepts only
 # {accept, reject, quarantine}. The frontend must NOT expose
 # {redirect, hold} in the action <select> option list. We
-# anchor the check on the select() call for the action field
-# so false positives from CSS classes or unrelated strings
-# cannot pass the gate.
+# accept either the legacy literal `select('Action', …)` call
+# pattern OR the form-builder's options-array pattern
+# (`value: '<action>'`) so pages that moved onto the shared
+# form builder still satisfy the BLOCKER.
 ACCEPTANCE_JS="$ADMIN_DIR/modules/pages/acceptance.js"
 acceptance_action_block=$(grep -nA 1 -E "select\(\s*'Action'\s*," "$ACCEPTANCE_JS" | head -n 2 || true)
-if [ -z "$acceptance_action_block" ]; then
+acceptance_action_block_builder=$(grep -nE "value:\s*'(accept|reject|quarantine|redirect|hold)'" "$ACCEPTANCE_JS" | head -n 4 || true)
+if [ -z "$acceptance_action_block$acceptance_action_block_builder" ]; then
     fail "acceptance.js is missing the action <select> declaration (BLOCKER 3)"
 fi
+# Use whichever block we found; combined block covers both shapes.
+combined=$(printf '%s\n%s\n' "$acceptance_action_block" "$acceptance_action_block_builder")
 for bad in redirect hold; do
-    if echo "$acceptance_action_block" | grep -qE "'$bad'"; then
+    if echo "$combined" | grep -qE "'$bad'\s*[,}]"; then
         fail "acceptance.js action <select> offers unsupported action '$bad' (BLOCKER 3)"
     fi
 done
@@ -489,7 +493,7 @@ if grep -qE "redirect_to|redirect-to" "$ACCEPTANCE_JS"; then
 fi
 # 35d. Action options list must include accept / reject / quarantine.
 for need in accept reject quarantine; do
-    if ! echo "$acceptance_action_block" | grep -qE "'$need'"; then
+    if ! echo "$combined" | grep -qE "(value:\s*)?'$need'"; then
         fail "acceptance.js action <select> is missing runtime-supported action '$need' (BLOCKER 3)"
     fi
 done
@@ -501,22 +505,23 @@ pass "acceptance.js action <select> exposes only runtime-supported actions {acce
 # {move, label, forward, discard, hold}. We grep the action-
 # select line specifically rather than the whole file, because
 # the words "label" and "forward" appear legitimately elsewhere
-# (CSS classes, modal button labels, helper text). We anchor on
-# the select() call for the action field and pull in up to 2
-# lines so the options array on the continuation line is in
-# scope.
+# (CSS classes, modal button labels, helper text). We accept
+# either the legacy `select('Action', …)` literal OR the
+# form-builder options-array pattern.
 INCOMING_JS="$ADMIN_DIR/modules/pages/incoming-rules.js"
 incoming_action_block=$(grep -nA 1 -E "select\(\s*'Action'\s*," "$INCOMING_JS" | head -n 2 || true)
-if [ -z "$incoming_action_block" ]; then
+incoming_action_block_builder=$(grep -nE "value:\s*'(reject|quarantine|tag|move|label|forward|discard|hold)'" "$INCOMING_JS" | head -n 4 || true)
+if [ -z "$incoming_action_block$incoming_action_block_builder" ]; then
     fail "incoming-rules.js is missing the action <select> declaration (BLOCKER 4)"
 fi
+combined_incoming=$(printf '%s\n%s\n' "$incoming_action_block" "$incoming_action_block_builder")
 for bad in move label forward discard hold; do
-    if echo "$incoming_action_block" | grep -qE "'$bad'"; then
+    if echo "$combined_incoming" | grep -qE "'$bad'\s*[,}]"; then
         fail "incoming-rules.js action <select> offers unsupported action '$bad' (BLOCKER 4)"
     fi
 done
 for need in reject quarantine tag; do
-    if ! echo "$incoming_action_block" | grep -qE "'$need'"; then
+    if ! echo "$combined_incoming" | grep -qE "(value:\s*)?'$need'"; then
         fail "incoming-rules.js action <select> is missing runtime-supported action '$need' (BLOCKER 4)"
     fi
 done
