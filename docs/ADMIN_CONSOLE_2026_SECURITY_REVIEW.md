@@ -1,8 +1,41 @@
 # Orvix Admin Console 2026 — Security Review
 
-Branch: `feature/admin-console-2026-productization`
-Date: 2026-07-06
+Branch: `feature/admin-final-domain-settings-polish`
+Date: 2026-07-07
 Scope: every change to admin-side code in this sprint.
+
+## Phase 3 — admin-final-domain-settings-polish (this branch)
+
+The Phase 3 sprint targets final production polish, not new
+attack surface. The security posture is therefore identical to
+Phase 2 except for the new domain write paths:
+
+| Change | Security implication |
+|---|---|
+| `POST /api/v1/domains` accepts 12 enterprise fields | New validators: DKIM selector must be a DNS label (no spaces/slashes); catch-all address must be on the same domain and parse as email; abuse contact parses as email; limits must be non-negative; plan must be from a small enum. All validators return structured JSON `error` instead of raw DB errors. |
+| `GET /api/v1/domains/:name` returns full shape | Read-only; new fields are safe primitives (booleans, ints, strings). Audit log is unchanged. |
+| `PATCH /api/v1/domains/:name` (new) | RBAC (admin only), CSRF, allowlist of 11 mutable keys. Unknown key aborts the entire patch. Audit-logged. Test coverage: `TestAdminDomainPatchAllowedFields`, `TestAdminDomainPatchUnknownFieldHardReject`, `TestAdminDomainPatchRBACEnforced`. |
+| Add Domain modal exposes advanced fields | No XSS risk: every value goes through `el('input', ..., { value: ... })` which uses `setAttribute` (escapes by default). |
+| Settings page rewritten as runtime overview | Save controls only render for keys in the backend allowlist. No fake mutable form. |
+| Security posture replaced `unknown` with explicit labels | Read-only re-presentation; no new sensitive data exposed. |
+
+The new test file `internal/api/handlers/admin_domain_advanced_test.go`
+covers the security guarantees on the new write paths:
+
+- `TestAdminDomainPatchRBACEnforced` — non-admin JWT cannot
+  patch a domain.
+- `TestAdminDomainPatchUnknownFieldHardReject` — unknown keys
+  cause the entire patch to be rolled back.
+- `TestAdminDomainCreateBadDkimSelector` — DNS-label validator
+  rejects spaces and slashes.
+- `TestAdminDomainCreateInvalidCatchall` — cross-domain catch-all
+  is rejected.
+- `TestAdminDomainCreateNegativeLimit` — limits cannot wrap.
+
+---
+
+(Sections 1–10 below are unchanged from Phase 2 and are kept
+verbatim so this document remains a complete security audit.)
 
 ---
 
@@ -195,4 +228,4 @@ copy:
 
 ---
 
-*Last updated: 2026-07-06 — Phase 2 security review*
+*Last updated: 2026-07-07 — Phase 3 final polish (domain create/patch advanced fields)*

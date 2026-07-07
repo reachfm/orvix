@@ -840,8 +840,8 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { border-color
   gap: 16px; padding: 6px 2px 18px; border-bottom: 1px solid var(--border-1);
   margin-bottom: 18px;
 }
-.page-title { margin: 0; font-size: 22px; color: var(--text-0); font-weight: 700; letter-spacing: -0.2px; }
-.page-subtitle { margin: 6px 0 0; color: var(--text-2); font-size: 13px; }
+.page-title { margin: 0; font-size: 24px; color: var(--text-0); font-weight: 700; letter-spacing: -0.2px; }
+.page-subtitle { margin: 6px 0 0; color: var(--text-2); font-size: 13.5px; }
 
 .panel { background: var(--bg-surface); border: 1px solid var(--border-2); border-radius: var(--r-lg); margin-bottom: 16px; overflow: hidden; }
 .panel-head {
@@ -849,9 +849,9 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { border-color
   padding: 14px 18px; border-bottom: 1px solid var(--border-1);
   background: linear-gradient(180deg, var(--bg-elevated), var(--bg-surface));
 }
-.panel-head h3 { margin: 0; font-size: 14px; color: var(--text-0); font-weight: 600; }
+.panel-head h3 { margin: 0; font-size: 14.5px; color: var(--text-0); font-weight: 600; }
 .panel-head-actions { display: flex; gap: 8px; }
-.panel-body { padding: 18px; }
+.panel-body { padding: 18px 20px; }
 .panel-foot {
   padding: 12px 18px; border-top: 1px solid var(--border-1);
   background: var(--bg-elevated);
@@ -863,12 +863,13 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { border-color
 .panel.error-panel { border-color: rgba(248,113,113,0.4); }
 
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; margin: 0; }
-.kv dt { color: var(--text-2); font-size: 12px; padding: 2px 0; }
-.kv dd { color: var(--text-0); font-size: 13px; padding: 2px 0; margin: 0; }
-.kv-v { font-family: var(--font-mono); font-size: 12px; color: var(--text-1); }
+.kv dt { color: var(--text-2); font-size: 12.5px; padding: 2px 0; }
+.kv dd { color: var(--text-0); font-size: 13.5px; padding: 2px 0; margin: 0; }
+.kv-v { font-family: var(--font-mono); font-size: 12.5px; color: var(--text-1); }
+.kv-hint { margin: 2px 0 6px; grid-column: 2; }
 
 .kv-cards {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
   gap: 12px; margin-bottom: 18px;
 }
 .kv-cell {
@@ -886,9 +887,63 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { border-color
 .kv-v { color: var(--text-1); font-size: 13px; }
 .kv-d { color: var(--text-2); font-size: 12px; }
 
+/* -------------------------------------------------------------------
+   Dashboard grid — 4-up on desktop, 2-up on tablets, 1-up on phones.
+   The previous build's 280px minimum produced narrow cramped cards
+   at 100% browser zoom on a 1440px wide display; bumping the
+   minimum to 320px keeps every card readable on standard desktops.
+   ------------------------------------------------------------------- */
 .dash-grid, .monitor-grid, .service-grid {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
   gap: 16px;
+}
+.dash-grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+@media (max-width: 1280px) {
+  .dash-grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 720px) {
+  .dash-grid-4 { grid-template-columns: 1fr; }
+}
+
+/* -------------------------------------------------------------------
+   Modal form layout — used by Domain Create / Edit / others.
+   ------------------------------------------------------------------- */
+.modal-form { display: block; }
+.modal-form-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 20px;
+  margin-top: 12px;
+}
+.modal-field-row { display: grid; grid-template-columns: 1fr; gap: 4px; padding: 8px 0; align-items: start; }
+.modal-field-row label { color: var(--text-2); font-size: 12.5px; font-weight: 600; display: flex; gap: 4px; align-items: center; }
+.modal-field-row .required-marker { color: var(--bad); font-weight: 700; }
+.modal-field-row input,
+.modal-field-row select,
+.modal-field-row textarea {
+  width: 100%;
+  background: var(--bg-canvas); border: 1px solid var(--border-2); color: var(--text-0);
+  padding: 7px 10px; border-radius: var(--r-sm); font: inherit;
+}
+.modal-field-row input:focus-visible,
+.modal-field-row select:focus-visible {
+  border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);
+  outline: none;
+}
+.field-help { margin: 4px 0 0; font-size: 12px; color: var(--text-3); }
+@media (max-width: 720px) {
+  .modal-form-grid { grid-template-columns: 1fr; }
+}
+
+/* -------------------------------------------------------------------
+   Sidebar — tighter so very long lists fit on standard screens
+   without making the sidebar huger than the content.
+   ------------------------------------------------------------------- */
+.sidebar { width: 240px; max-width: 26vw; }
+@media (max-width: 1024px) { .sidebar { width: 220px; } }
+@media (max-width: 720px) {
+  .sidebar { width: 100%; max-width: 100%; }
+  .sidebar-nav { padding: 8px 6px; }
+  .sidebar-link { padding: 5px 10px; font-size: 12.5px; }
 }
 
 .tabs { display: flex; gap: 4px; margin: 0 0 12px; border-bottom: 1px solid var(--border-1); }
@@ -1103,6 +1158,25 @@ kbd { background: var(--bg-elevated); border: 1px solid var(--border-2); padding
 
 /* Dashboard kpi subtitle */
 .panel-head-meta { display: block; margin-bottom: 2px; }
+
+/* -------------------------------------------------------------------
+   Warnings card — make the "no active warnings" empty state read as
+   a positive signal so the operator does not have to scan a table
+   to confirm the system is healthy.
+   ------------------------------------------------------------------- */
+.warning-empty {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  padding: 22px 12px;
+  border: 1px dashed rgba(52, 211, 153, 0.35); border-radius: var(--r-md);
+  background: rgba(52, 211, 153, 0.08);
+  text-align: center;
+}
+.warning-empty-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 36px; height: 36px; border-radius: 50%;
+  background: var(--good); color: #0c1424; font-size: 18px; font-weight: 700;
+}
+.warning-empty-title { color: var(--good); font-size: 15px; font-weight: 700; }
 
 /* Page actions (header right-side buttons) */
 .page-actions { display: flex; align-items: center; gap: 8px; }

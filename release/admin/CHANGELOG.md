@@ -50,14 +50,142 @@ Base: latest `main`
 - All sidebar routes are registered; no routes silently fall through to
   `renderPlannedPage`.
 - Clustering / migration pages are hidden from sidebar (`hide: true`) and render
-  honest single-node / no-jobs states â€” acceptable stubs, not broken features.
+  honest single-node / no-jobs states — acceptable stubs, not broken features.
+
+---
+
+## 2026 Final Polish — Domain + Settings + Asset Paths
+
+Branch: `feature/admin-final-domain-settings-polish`
+Base: `715db0d` (Phase 2 productization)
+Date: 2026-07-07
+
+This is the final practical admin polish sprint. No new attack
+surface; every change makes the existing surfaces more useful
+and verifiable.
+
+### Phase 3 — Final Polish
+
+#### Domain provisioning UI
+
+- `pages/domains.js` rewrites the "Add Domain" modal from a single
+  field to a 12-field enterprise modal: status (active/suspended),
+  plan (smb/enterprise/education/free), description, max_mailboxes,
+  max_aliases, max_quota_mb, dkim_enabled + dkim_selector,
+  dmarc_enabled, mtasts_enabled, catchall_address, abuse_contact.
+  Two-column responsive grid in the large modal.
+- Manage Domains table gains columns: Plan, Mailboxes used/max,
+  Quota MB, DKIM, Updated. Each domain row shows live state from
+  the backend (`/api/v1/domains`).
+- Domain Detail drawer renders summary panel (every persistent
+  property), Mailboxes table, DNS records panel with per-row
+  copy buttons + bulk "Copy all records", Audit trail, plus
+  Suspend / Edit limits / Delete actions.
+- New "Edit limits" modal targets the new `PATCH /api/v1/domains/:name`
+  endpoint so the operator can change catch-all, DKIM selector,
+  plan, and limits without losing the original domain.
+
+#### Settings page = polished runtime overview
+
+- `pages/settings.js` is rewritten. Old weak copy "Backend reports
+  no mutable settings in this build." is gone.
+- Always renders Build & runtime, Listener Bindings, Security Posture,
+  Protocol toggles, Mutable settings (only if allowlist keys exist),
+  Persistence footer.
+- Save controls only render for keys in the backend allowlist — no
+  fake mutable form.
+
+#### Security posture rewritten
+
+- `pages/security.js` "Posture" card uses Enabled / Disabled /
+  Not configured / Not monitored / Managed by Caddy instead of
+  unexplained "unknown" / "-".
+- `pages/dashboard.js` security card now reads MFA / CSRF / Login
+  protection / TLS posture with explicit labels and short hints.
+- Warnings empty state is a positive green check instead of an
+  empty row.
+
+#### Dashboard layout polish
+
+- New `.dash-grid-4`: 4-up on >1280px, 2-up on 720–1280px, 1-up on phones.
+- Card minimum bumped from 280px → 320px so every card stays readable
+  at 100% browser zoom.
+- Typography bumped (page-title 22→24px, panel-head h3 14→14.5px,
+  panel-body 18→20px).
+- Sidebar tighter (240px max).
+- Modal form grid responsive (2-up desktop, 1-up mobile).
+
+#### Asset verification
+
+- The previous verification flow probed `/assets/app.js` and
+  `/styles.css` at the proxy root, both of which 404 because
+  the admin SPA assets live under `/admin/*`. New
+  `release/scripts/smoke-admin-asset-paths.sh` parses the live
+  `/admin/` HTML, extracts every `<link>` and `<script>` URL,
+  asserts each returns 200, and probes the *non-admin* paths to
+  confirm they remain non-2xx (so the smoke is the canonical
+  verification surface).
+
+### Backend additions
+
+| Verb | Path | Notes |
+|---|---|---|
+| `POST` | `/api/v1/domains` (extended) | 12 fields. Validators: DKIM selector is a DNS label (no spaces/slashes); catch-all must be on same domain; limits are non-negative; plan must be from `{smb, enterprise, education, free}`. |
+| `GET` | `/api/v1/domains/:name` (extended) | Returns every persistent field, mailboxes, used counts. |
+| `PATCH` | `/api/v1/domains/:name` (new) | Allowlist of 11 mutable keys. RBAC + CSRF + audit. Unknown keys hard-reject (whole patch rolled back). |
+
+### Tests added
+
+- `internal/api/handlers/admin_domain_advanced_test.go`:
+  - `TestAdminDomainCreateAdvancedFields` — every field persists + round-trips.
+  - `TestAdminDomainCreateDefaultDkimSelector` — safe default when enabled with no selector.
+  - `TestAdminDomainCreateInvalidCatchall` — same-domain guard.
+  - `TestAdminDomainCreateBadDkimSelector` — DNS-label allowlist.
+  - `TestAdminDomainCreateNegativeLimit` — limits never wrap.
+  - `TestAdminDomainPatchAllowedFields` — every mutable field round-trips.
+  - `TestAdminDomainPatchUnknownFieldHardReject` — unknown keys abort the patch.
+  - `TestAdminDomainPatchRBACEnforced` — non-admin cannot patch.
+  - `TestAdminDomainGetReturnsAllFields` — full GET shape stable.
+
+### Files changed
+
+- `internal/api/handlers/handlers.go` (`CreateDomain`, `GetDomain`,
+  new `PatchDomain`).
+- `internal/api/router.go` — new `PATCH /api/v1/domains/:name` route.
+- `internal/api/handlers/admin_domain_advanced_test.go` — new.
+- `release/admin/modules/pages/domains.js` — rewrite.
+- `release/admin/modules/pages/settings.js` — rewrite.
+- `release/admin/modules/pages/security.js` — posture labels.
+- `release/admin/modules/pages/dashboard.js` — security card
+  labels, warnings empty state.
+- `release/admin/styles.css` — `dash-grid-4`, modal form grid,
+  warning-empty, sidebar polish.
+- `release/scripts/smoke-admin-asset-paths.sh` — new.
+- `release/scripts/smoke-admin-functional-browser.mjs` —
+  extended mock server (PATCH, GET single domain, DNS plan,
+  settings, summary, mfa/status, license), Add Domain
+  ≥6 inputs assertion, Settings overview copy assertion.
+- `release/admin/CHANGELOG.md` — this entry.
+- `docs/ADMIN_CONSOLE_2026_AUDIT.md` — Phase 3 delta.
+- `docs/ADMIN_CONSOLE_2026_SECURITY_REVIEW.md` — Phase 3 delta.
+
+### Honest known limitations
+
+Documented in the audit doc and the dashboard itself; no fake
+UI copy:
+
+| Limitation | Where it is documented |
+|---|---|
+| Some runtime settings are restart-required | Settings → Persistence footer |
+| DKIM private key server-side only | Settings page + Domain Detail drawer |
+| Catch-all must be on same domain | Domain modal help text + backend validator |
+| Live DNS resolver not run | Domain Detail drawer (DNS section) |
+| No real-time push / WebSocket | Audit doc |
+| Clustering / migration pages hidden | Sidebar `hide: true`, `clustering.js` honest "single-node" note |
 
 ---
 
 ## Enterprise 2
-
-Branch: `feature/admin-enterprise-2`
-Base: `a40ac9a` ("WEBMAIL-LIVE-STABILIZATION-3A: fix duplicate Move to... in reading pane toolbar")
 
 A focused enterprise upgrade of the Orvix Admin Console. No backend
 changes â€” every change is a frontend upgrade on top of the existing

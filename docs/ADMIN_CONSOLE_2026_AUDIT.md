@@ -217,7 +217,87 @@ These are acceptable — the copy is transparent about what is and isn't availab
 
 ---
 
-*Last updated: 2026-06-09 — Phase 1 audit*
+*Last updated: 2026-07-07 — Phase 3 final polish*
+
+---
+
+## Phase 3 — Admin Console Final Polish (2026-07-07)
+
+After the Phase 2 productization went to a fresh VPS, the operator
+took screenshots and identified the remaining gaps that weak
+production polish would surface in the demo. Phase 3 closes them.
+
+### Findings addressed
+
+| Finding | Resolution |
+|---|---|
+| **VPS assets verification used wrong paths** (`/assets/app.js`, `/styles.css` 404) | New `release/scripts/smoke-admin-asset-paths.sh` parses the live `/admin/` document, resolves every `href="*.css"` / `src="*.js"` URL, and asserts each returns 200. The script also probes the wrong paths explicitly and confirms they 404 — so the smoke is the canonical verification surface. |
+| **Add Domain modal was single-field** | Rewritten with every advanced field the backend persists: status (active/suspended), plan (smb/enterprise/education/free), description, max_mailboxes, max_aliases, max_quota_mb, dkim_enabled + dkim_selector, dmarc_enabled, mtasts_enabled, catchall_address, abuse_contact. Two-column responsive grid in the large modal. Functional browser smoke asserts ≥ 6 inputs. |
+| **Domain detail drawer was a key/value dump** | New drawer renders summary panel (status, plan, limits, DKIM/DMARC/MTA-STS, catch-all, abuse contact), Mailboxes table, DNS records panel with per-row copy + bulk "Copy all records", Audit trail. Edit limits modal opens from the drawer. Suspend/Resume/Delete buttons wired. |
+| **Domain detail edit controls** | New `PATCH /api/v1/domains/:name` accepts the same enterprise fields as create (allowlisted, unknown keys hard-reject). Domain Detail drawer exposes an "Edit limits" modal that calls this endpoint. |
+| **General Settings weak copy** | "Backend reports no mutable settings in this build" replaced with a polished runtime overview (Build & Runtime, Listener Bindings, Security Posture, Protocol Toggles, Mutable settings panel, Persistence footer). Save controls only render for keys in the backend allowlist. |
+| **Security posture unexplained `unknown`/`-`** | Every posture row rendered with an explicit value (Enabled / Disabled / Not configured / Not monitored / Managed by Caddy) + short hint. Tested in dashboard and security pages. |
+| **Dashboard layout cramped at 100% zoom** | New `.dash-grid-4` uses 4-up at >1280px, 2-up at 720–1280px, 1-up on phones. Card minimum bumped to 320px so titles and stats stay readable. Modal grids responsive (2-up desktop, 1-up mobile). Sidebar width tightened. Warnings card now has a positive "No active warnings" empty state with a green check, so a clean install reads as a healthy signal at a glance. |
+| **Static smoke banned-strings** | `smoke-admin-js.sh` §5, `smoke-admin-ui.sh` §38, `smoke-admin-browser.sh` §8 already cover JS/CSS/HTML. Phase 3 tightened the comment-stripping pipeline so multi-line block comments no longer leak banned words. The functional browser smoke adds a settings-page assertion: deprecated "no mutable settings in this build" copy must never render. |
+
+### Backend additions
+
+| Endpoint | Method | Notes |
+|---|---|---|
+| `POST /api/v1/domains` | extended | Adds status, plan, description, max_mailboxes, max_aliases, max_quota_mb, dkim_enabled, dkim_selector, dmarc_enabled, mtasts_enabled, catchall_address, abuse_contact. Validates catch-all is on the same domain, DKIM selector is a DNS label, limits are non-negative. |
+| `GET /api/v1/domains/:name` | extended | Returns every persistent field, mailboxes, used counts. |
+| `PATCH /api/v1/domains/:name` | **new** | Allowlist-editable enterprise fields; unknown keys hard-reject (whole patch rolled back); audit-logged; CSRF-protected. |
+
+### Backend tests added (in `internal/api/handlers/admin_domain_advanced_test.go`)
+
+| Test | Coverage |
+|---|---|
+| `TestAdminDomainCreateAdvancedFields` | Persists every advanced field and surfaces them in the response. |
+| `TestAdminDomainCreateDefaultDkimSelector` | DKIM enabled without selector → sensible default. |
+| `TestAdminDomainCreateInvalidCatchall` | Cross-field check rejects catch-all on a different domain. |
+| `TestAdminDomainCreateBadDkimSelector` | DNS-label allowlist (no spaces, slashes). |
+| `TestAdminDomainCreateNegativeLimit` | Negative max_* are hard-rejected. |
+| `TestAdminDomainPatchAllowedFields` | All mutable enterprise fields persist + re-fetch roundtrip. |
+| `TestAdminDomainPatchUnknownFieldHardReject` | Unknown key aborts the entire PATCH. |
+| `TestAdminDomainPatchRBACEnforced` | Non-admin JWT cannot patch a domain. |
+| `TestAdminDomainGetReturnsAllFields` | GET shape is stable for the Detail drawer. |
+
+### Frontend rebuilds
+
+| Page | Change |
+|---|---|
+| `pages/domains.js` | Rewritten. Modal exposes every enterprise field. Drawer renders summary/mailboxes/DNS records/audit with copy buttons. New `Edit limits` modal targets `PATCH /api/v1/domains/:name`. Manage table gains Plan, Mailboxes used/max, Quota, DKIM, Updated columns. |
+| `pages/settings.js` | Rewritten. Always renders a polished runtime overview (Build & runtime, Listener bindings, Security posture, Protocol toggles, Mutable settings panel, Persistence footer). Save controls only render for keys in the backend allowlist. |
+| `pages/security.js` | Posture table values now read Enabled / Disabled / Not configured / Not monitored / Managed by Caddy instead of unexplained "unknown". Every row carries a short hint. |
+| `pages/dashboard.js` | Unknown values replaced with explicit labels. `loadSecurity()` adds "CSRF on writes" / "Login protection" / "TLS posture" rows with hints. Warnings empty state is a positive green check. |
+| `styles.css` | New `.dash-grid-4` (4-up → 2-up → 1-up responsive grid). New `.modal-form-grid` + `.modal-field-row` + `.field-help` for the rich-domain modal. New `.warning-empty` for the dashboard no-warnings state. Bumped typography (page-title 22→24px, panel-head h3 14→14.5px, panel-body 18→20px). Sidebar tighter. |
+
+### Smoke changes
+
+| Script | Change |
+|---|---|
+| `release/scripts/smoke-admin-asset-paths.sh` | **new** — parses the live `/admin/` shell, extracts `href="*.css"` and `src="*.js"`, asserts each returns 200. Probes `/assets/app.js` and `/styles.css` to confirm those *non-admin* paths correctly return non-2xx (so the verification surface is the canonical one). |
+| `release/scripts/smoke-admin-functional-browser.mjs` | Mock server extended with `PATCH /api/v1/domains/:name`, `GET /api/v1/admin/dns/:domain/plan`, `GET /api/v1/admin/settings`, `/api/v1/admin/summary`, `/api/v1/admin/mfa/status`, `/api/v1/license`, `/api/v1/domains/:name/audit`. Test asserts the Add Domain modal has ≥ 6 inputs and that the Settings page renders a runtime overview without the deprecated weak copy. |
+
+### Verification (this sprint)
+
+Smoke + test outcome is recorded in the run output:
+- `bash release/scripts/smoke-admin-js.sh` — PASS (51 JS files parse, banned-string check passes)
+- `bash release/scripts/smoke-admin-ui.sh` — PASS (38+ structural checks, banned-string check passes)
+- `bash release/scripts/smoke-admin-browser.sh` — PASS (232 imports resolve, 51/51 modules eval, banned-string check passes)
+- `bash release/scripts/smoke-admin-functional-browser.sh` — PASS (login card 460px, Add Domain modal has 12 inputs, Settings page renders runtime overview, B-1 regression routes navigate, zero console errors)
+- `go test ./internal/api/handlers -run "Admin|Dashboard|MFA|AdminUser|Domain|Account|Queue|Runtime|Service|Security|Protocol|DNS|Webmail|Password|Autodiscover|Autoconfig" -count=1` — PASS (includes the 9 new `TestAdminDomain*` cases)
+
+### Honest known limitations (no fake UI)
+
+| Limitation | Where it is documented |
+|---|---|
+| Some runtime settings are restart-required | Settings → Persistence footer explains: "Runtime configuration is sourced from orvix.yaml; restart-required changes propagate on the next service start." |
+| DKIM private key never returned | Settings → Build / runtime + Domain Detail drawer. The actual key stays server-side. |
+| Catch-all cross-domain address is hard-rejected | Domain Create / Edit Limits — the same-domain guard is part of the create form's `catchall_address` help text and the validation runs on the backend too. |
+| Live DNS resolver not run | DNS / DKIM page says so explicitly; the Domain Detail drawer's DNS panel says "DNS plan not available from the backend — open the DNS / DKIM page to generate it." |
+| No real-time push / WebSocket | Documented in CHANGELOG. |
+| Hidden roadmap pages | `clustering`, `clustering/imap`, `clustering/pop3`, `clustering/webmail`, `migration`, `migration/sources` — `hide: true` in sidebar; not visible to operator. The clustering landing page says "Multi-node clustering and proxy replication are not enabled in this version of Orvix." |
 
 ---
 
