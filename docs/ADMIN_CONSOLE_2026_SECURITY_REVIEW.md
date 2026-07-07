@@ -229,3 +229,80 @@ copy:
 ---
 
 *Last updated: 2026-07-07 — Phase 3 final polish (domain create/patch advanced fields)*
+
+---
+
+## Phase 4 — admin-2026-control-panel (premium polish)
+
+This sprint is a frontend productization pass on top of Phase 3.
+The new attack surface is bounded: two new PATCH endpoints
+(`/api/v1/admin/mailing-lists/:id` and
+`/api/v1/admin/public-folders/:id`) plus the shared form builder
+client-side.
+
+### New write endpoints
+
+| Endpoint | RBAC | CSRF | Audit | Allowlist | Notes |
+|---|---|---|---|---|---|
+| `PATCH /api/v1/admin/mailing-lists/:id` | admin | yes | `mailing_list.update` | 7 mutable keys: display_name, description, subscription_policy, status, moderation_required, archive_enabled, max_members | Unknown keys hard-reject. Subscription policy enum (open / closed / moderated / announce). Status enum (active / suspended / archived). Max members non-negative. Immutable: address, domain_id (changing would orphan subscribers and break DKIM alignment). |
+| `PATCH /api/v1/admin/public-folders/:id` | admin | yes | `public_folder.update` | 3 mutable keys: display_name, description, read_only | Unknown keys hard-reject. read_only validates as bool. Immutable: owner_mailbox_id, folder_path (changing would orphan IMAP subscriptions). |
+
+### New tests (security coverage)
+
+- `internal/api/handlers/admin_domain_v2_test.go` (new):
+  - `TestAdminMailingListPatchRBACEnforced` — non-admin JWT gets
+    non-200 on PATCH.
+  - `TestAdminMailingListPatchUnknownFieldHardReject` — unknown
+    key aborts the entire PATCH; the valid field is not applied
+    (atomic rollback verified via GET).
+  - `TestAdminMailingListPatchAllowedFields` — every editable
+    field persists via re-fetch.
+  - `TestAdminPublicFolderPatchUnknownFieldHardReject`,
+    `TestAdminPublicFolderPatchAllowedFields`,
+    `TestAdminPublicFolderPatchReadOnlyValidator` — same shape
+    for the public-folder endpoint; boolean validator on
+    `read_only` rejects string input.
+
+### Client-side new surface
+
+- `release/admin/modules/form.js` — new shared form-builder
+  module. Pages pass field-group definitions; the module renders
+  the modal, validates per-field (required, email regex, URL
+  regex, numeric range, custom `validate(value, values)`), and
+  runs the submit handler. No DOM `innerHTML` is used for dynamic
+  values (every value goes through `el()` → `setAttribute` /
+  `textContent`). The submit handler is async and surfaces
+  thrown errors in a form-level error banner without leaking
+  raw backend internals to the operator (only the
+  shape-normalised error message is rendered).
+- All new modal pages (`admin-groups.js`, `acl.js`, `acceptance.js`,
+  `incoming-rules.js`, `mailing-lists.js`, `public-folders.js`)
+  use `openFormModal()` or `openFormDrawer()` exclusively. The
+  legacy `confirm()` and `alert()` calls were removed in favour
+  of the Promise-based `confirmDanger()` helper that supports a
+  typed-confirmation gate for destructive operations.
+- No new inline event handlers in `index.html`. No new
+  localStorage / sessionStorage usage. Every dynamic value still
+  routes through the shared `esc()` helper or `el()` text node.
+- The functional browser smoke now opens every previously-empty
+  modal and asserts each carries a non-trivial field count, so a
+  regression cannot re-introduce "blank modal" UI without the
+  guard firing.
+
+### Open security contract guarantees carried forward
+
+| Guarantee | Phase 4 status |
+|---|---|
+| Tokens in `sessionStorage` only | unchanged |
+| Password never logged to console | unchanged |
+| CSRF on every mutating admin call | unchanged (csrfFetch + one-shot retry) |
+| Bare `fetch()` for state changes | unchanged (every PATCH goes through `apiPatch`) |
+| Tenant isolation via JWT envelope | unchanged |
+| Self-disable / self-delete blocked | unchanged |
+| Last-superadmin protection | unchanged |
+| Runtime telemetry never leaks bearer tokens / private keys | unchanged |
+| Banned-string banned-placeholders grep | extended to cover the form-builder source path |
+| No inline event handlers / `innerHTML` for untrusted data | unchanged |
+| No mock enterprise claims / fake charts | added explicit "no unknown runtime data" + "no warnings = healthy" copy |
+
+*Last updated: 2026-07-07 — Phase 4 premium polish (modal rebuilds + 2 new PATCH endpoints)*

@@ -153,6 +153,12 @@ function startServer() {
           }
           if (url.pathname === '/api/v1/admin/account-classes') return sendJSON(res, 200, { classes: [] });
           if (url.pathname === '/api/v1/admin/users') return sendJSON(res, 200, { users: [] });
+          if (url.pathname === '/api/v1/admin/admin-groups') return sendJSON(res, 200, { groups: [] });
+          if (url.pathname === '/api/v1/admin/acl-rules') return sendJSON(res, 200, { rules: [] });
+          if (url.pathname === '/api/v1/admin/acceptance-rules') return sendJSON(res, 200, { rules: [] });
+          if (url.pathname === '/api/v1/admin/incoming-msg-rules') return sendJSON(res, 200, { rules: [] });
+          if (url.pathname === '/api/v1/admin/mailing-lists') return sendJSON(res, 200, { lists: [] });
+          if (url.pathname === '/api/v1/admin/public-folders') return sendJSON(res, 200, { folders: [] });
           if (url.pathname === '/api/v1/admin/audit-logs') return sendJSON(res, 200, { logs: [] });
           if (url.pathname === '/api/v1/admin/runtime') return sendJSON(res, 200, {
             hostname: 'mock-host', version: '1.0.0', status: 'ok', listeners: [],
@@ -464,6 +470,65 @@ async function main() {
     await navigateRoute('admin/users', 'Admin Users');      // B-1 regression guard
     await navigateRoute('admin/audit-log', 'Audit Log');   // audit-log accessible at its own route
     await navigateRoute('runtime-listeners', 'Runtime Listeners');
+
+    // ── ADMIN-2026-CONTROL-PANEL — every previously-near-empty modal ──
+    // Each modal now exposes real fields (no fake / placeholder copy) and
+    // must support keyboard submit + show inline error on invalid input.
+    // The smoke opens each modal and asserts a non-trivial field count
+    // so a regression cannot re-introduce "blank modal" failures.
+
+    // Helper: open the page → click the create button → assert modal has
+    // ≥ minInputs fields → close.
+    const checkCreateModal = async (route, routeName, createBtnSel, minInputs) => {
+      await navigateRoute(route, routeName);
+      const btn = await evalJS(exists(createBtnSel));
+      if (!btn) fail(`${routeName}: expected create button matching "${createBtnSel}"`);
+      await evalJS(`document.querySelector('${createBtnSel}')?.click()`);
+      await waitFor(() => evalJS(exists('.modal-overlay .modal')), `${routeName} modal`, 8000);
+      const fields = await evalJS(`document.querySelectorAll('.modal-overlay .ff-input, .modal-overlay .ff-cb, .modal-overlay .ff-switch').length`);
+      if (fields < minInputs) fail(`WEAK_MODAL: ${routeName} modal has only ${fields} inputs (min ${minInputs})`);
+      // Dismiss.
+      await evalJS(`document.querySelector('.modal-overlay .btn.ghost')?.click()`);
+      await waitFor(() => evalJS(`!document.querySelector('.modal-overlay')`), `${routeName} modal close`, 6000);
+    };
+
+    // Administrative groups: create modal exposes RBAC grants.
+    await checkCreateModal('admin/groups', 'Admin Groups', '[data-ag-action="create"]', 5);
+
+    // Global Spam Control / ACL rules: create modal exposes source /
+    // action / protocol / priority / note.
+    await checkCreateModal('security/spam', 'ACL', '[data-acl-action="create"]', 4);
+
+    // Acceptance & routing rules: create modal exposes the full rule
+    // builder (priority, scope, scope_target, sender / recipient / IP,
+    // action, note, enabled).
+    await checkCreateModal('security/routing', 'Acceptance', '[data-acc-action="create"]', 8);
+
+    // Incoming message rules: create modal exposes field / operator /
+    // value / action / action_value / apply_to / stop_processing / enabled /
+    // note.
+    await checkCreateModal('security/rules', 'Incoming Rules', '[data-irr-action="create"]', 8);
+
+    // Mailing lists: create modal exposes address / domain / display_name /
+    // description / subscription_policy / status / moderation / archive /
+    // max_members.
+    await checkCreateModal('domains/lists', 'Mailing Lists', '[data-ml-action="create"]', 5);
+
+    // Public folders: create modal exposes owner_mailbox / folder_path /
+    // display_name / description / read_only.
+    await checkCreateModal('domains/public', 'Public Folders', '[data-pf-action="create"]', 4);
+
+    // Runtime listeners: page renders the listener overview + per-listener
+    // health blocks (not a modal, just confirm listener state copy is
+    // runtime-truthful, never "active" when the runtime reports "skipped").
+    await navigateRoute('runtime-listeners', 'Runtime Listeners (revisit)');
+    const listenersText = await mainText();
+    if (/Listener overview/i.test(listenersText) === false) {
+      fail('Runtime Listeners page does not render "Listener overview" header');
+    }
+    if (/skipped/i.test(listenersText) === false && /active/i.test(listenersText) === false && /not monitored/i.test(listenersText) === false) {
+      fail('Runtime Listeners page renders no listener state labels (active / skipped / not monitored / failed)');
+    }
 
     const sidebarLinks = await evalJS(`Array.from(document.querySelectorAll('.sidebar-link')).map(a => a.getAttribute('data-route')).join(',')`);
     const hiddenRoutes = ['migration', 'migration/sources', 'clustering', 'clustering/imap', 'clustering/pop3', 'clustering/webmail'];

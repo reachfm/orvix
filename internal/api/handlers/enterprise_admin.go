@@ -697,6 +697,151 @@ func (h *Handler) DeleteMailingList(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"id": id, "deleted": true})
 }
 
+// PatchMailingList updates editable fields on a mailing list.
+// The address / domain_id are immutable after creation (moving
+// a mailing list to another domain would orphan subscribers
+// and violate DKIM signing alignment); the editable surface
+// is display_name, description, moderation_required,
+// archive_enabled, subscription_policy, max_members, status.
+// Unknown keys are rejected so a renamed or future field never
+// silently drops user input.
+func (h *Handler) PatchMailingList(c fiber.Ctx) error {
+	if err := h.requireDB(c); err != nil {
+		return err
+	}
+	tenantID := h.tenantID(c)
+	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid id")
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(c.Body(), &body); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid JSON body")
+	}
+	allowed := map[string]struct{}{
+		"display_name":        {},
+		"description":         {},
+		"moderation_required": {},
+		"archive_enabled":     {},
+		"subscription_policy": {},
+		"max_members":         {},
+		"status":              {},
+	}
+	rejected := []string{}
+	for k := range body {
+		if _, ok := allowed[k]; !ok {
+			rejected = append(rejected, k)
+		}
+	}
+	if len(rejected) > 0 {
+		return fiber.NewError(fiber.StatusBadRequest, "patch contained unknown fields; nothing applied: " + strings.Join(rejected, ","))
+	}
+	type update struct {
+		set  []string
+		args []interface{}
+	}
+	var u update
+	for k, raw := range body {
+		switch k {
+		case "display_name":
+			var v string
+			if err := json.Unmarshal(raw, &v); err != nil {
+				return fiber.NewError(fiber.StatusBadRequest, k+": invalid string")
+			}
+			v = strings.TrimSpace(v)
+			if len(v) > 256 {
+				return fiber.NewError(fiber.StatusBadRequest, "display_name too long (max 256)")
+			}
+			u.set = append(u.set, "display_name = ?")
+			u.args = append(u.args, v)
+		case "description":
+			var v string
+			if err := json.Unmarshal(raw, &v); err != nil {
+				return fiber.NewError(fiber.StatusBadRequest, k+": invalid string")
+			}
+			v = strings.TrimSpace(v)
+			if len(v) > 1024 {
+				return fiber.NewError(fiber.StatusBadRequest, "description too long (max 1024)")
+			}
+			u.set = append(u.set, "description = ?")
+			u.args = append(u.args, v)
+		case "moderation_required", "archive_enabled":
+			var b bool
+			if err := json.Unmarshal(raw, &b); err != nil {
+				return fiber.NewError(fiber.StatusBadRequest, k+": invalid bool")
+			}
+			val := 0
+			if b {
+				val = 1
+			}
+			u.set = append(u.set, k+" = ?")
+			u.args = append(u.args, val)
+		case "subscription_policy":
+			var v string
+			if err := json.Unmarshal(raw, &v); err != nil {
+				return fiber.NewError(fiber.StatusBadRequest, k+": invalid string")
+			}
+			v = strings.TrimSpace(strings.ToLower(v))
+			switch v {
+			case "open", "closed", "moderated", "announce":
+			default:
+				return fiber.NewError(fiber.StatusBadRequest, "subscription_policy must be open|closed|moderated|announce")
+			}
+			u.set = append(u.set, "subscription_policy = ?")
+			u.args = append(u.args, v)
+		case "max_members":
+			var n int64
+			if err := json.Unmarshal(raw, &n); err != nil {
+				return fiber.NewError(fiber.StatusBadRequest, k+": invalid integer")
+			}
+			if n < 0 {
+				return fiber.NewError(fiber.StatusBadRequest, k+" cannot be negative")
+			}
+			u.set = append(u.set, "max_members = ?")
+			u.args = append(u.args, n)
+		case "status":
+			var v string
+			if err := json.Unmarshal(raw, &v); err != nil {
+				return fiber.NewError(fiber.StatusBadRequest, k+": invalid string")
+			}
+			v = strings.TrimSpace(strings.ToLower(v))
+			switch v {
+			case "active", "suspended", "archived":
+			default:
+				return fiber.NewError(fiber.StatusBadRequest, "status must be active|suspended|archived")
+			}
+			u.set = append(u.set, "status = ?")
+			u.args = append(u.args, v)
+		}
+	}
+	if len(u.set) == 0 {
+		return c.JSON(fiber.Map{"applied": []string{}, "id": id})
+	}
+	u.set = append(u.set, "updated_at = ?")
+	u.args = append(u.args, time.Now().UTC())
+	u.args = append(u.args, id, tenantID)
+	res, err := h.sqlDB().ExecContext(c.Context(),
+		"UPDATE coremail_mailing_lists SET "+strings.Join(u.set, ", ")+
+			" WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL",
+		u.args...)
+	if err != nil {
+		if h.logger != nil {
+			h.logger.Error("failed to update mailing list", zap.Error(err))
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, "update mailing list failed")
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fiber.NewError(fiber.StatusNotFound, "mailing list not found")
+	}
+	applied := make([]string, 0, len(body))
+	for k := range body {
+		applied = append(applied, k)
+	}
+	h.appendAudit(c, "mailing_list.update", fmt.Sprintf("%d|applied:%d", id, len(applied)), "ok")
+	return c.JSON(fiber.Map{"applied": applied, "id": id})
+}
+
 // ListMailingListMembers returns the subscriber list of a
 // mailing list. The list must belong to the caller's tenant.
 func (h *Handler) ListMailingListMembers(c fiber.Ctx) error {
@@ -972,6 +1117,108 @@ func (h *Handler) DeletePublicFolder(c fiber.Ctx) error {
 		`DELETE FROM coremail_public_folder_members WHERE folder_id = ?`, id)
 	h.appendAudit(c, "public_folder.delete", fmt.Sprintf("%d", id), "ok")
 	return c.JSON(fiber.Map{"id": id, "deleted": true})
+}
+
+// PatchPublicFolder updates editable fields on a public folder.
+// The owner_mailbox_id and folder_path are immutable (changing
+// the owner would orphan subscriptions; renaming the path would
+// break every IMAP client subscribed to it). Editable: display_name,
+// description, read_only.
+func (h *Handler) PatchPublicFolder(c fiber.Ctx) error {
+	if err := h.requireDB(c); err != nil {
+		return err
+	}
+	tenantID := h.tenantID(c)
+	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid id")
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(c.Body(), &body); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid JSON body")
+	}
+	allowed := map[string]struct{}{
+		"display_name": {},
+		"description":  {},
+		"read_only":    {},
+	}
+	rejected := []string{}
+	for k := range body {
+		if _, ok := allowed[k]; !ok {
+			rejected = append(rejected, k)
+		}
+	}
+	if len(rejected) > 0 {
+		return fiber.NewError(fiber.StatusBadRequest, "patch contained unknown fields; nothing applied: "+strings.Join(rejected, ","))
+	}
+	type update struct {
+		set  []string
+		args []interface{}
+	}
+	var u update
+	for k, raw := range body {
+		switch k {
+		case "display_name":
+			var v string
+			if err := json.Unmarshal(raw, &v); err != nil {
+				return fiber.NewError(fiber.StatusBadRequest, k+": invalid string")
+			}
+			v = strings.TrimSpace(v)
+			if len(v) > 256 {
+				return fiber.NewError(fiber.StatusBadRequest, "display_name too long (max 256)")
+			}
+			u.set = append(u.set, "display_name = ?")
+			u.args = append(u.args, v)
+		case "description":
+			var v string
+			if err := json.Unmarshal(raw, &v); err != nil {
+				return fiber.NewError(fiber.StatusBadRequest, k+": invalid string")
+			}
+			v = strings.TrimSpace(v)
+			if len(v) > 1024 {
+				return fiber.NewError(fiber.StatusBadRequest, "description too long (max 1024)")
+			}
+			u.set = append(u.set, "description = ?")
+			u.args = append(u.args, v)
+		case "read_only":
+			var b bool
+			if err := json.Unmarshal(raw, &b); err != nil {
+				return fiber.NewError(fiber.StatusBadRequest, k+": invalid bool")
+			}
+			val := 0
+			if b {
+				val = 1
+			}
+			u.set = append(u.set, "read_only = ?")
+			u.args = append(u.args, val)
+		}
+	}
+	if len(u.set) == 0 {
+		return c.JSON(fiber.Map{"applied": []string{}, "id": id})
+	}
+	u.set = append(u.set, "updated_at = ?")
+	u.args = append(u.args, time.Now().UTC())
+	u.args = append(u.args, id, tenantID)
+	res, err := h.sqlDB().ExecContext(c.Context(),
+		"UPDATE coremail_public_folders SET "+strings.Join(u.set, ", ")+
+			" WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL",
+		u.args...)
+	if err != nil {
+		if h.logger != nil {
+			h.logger.Error("failed to update public folder", zap.Error(err))
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, "update public folder failed")
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fiber.NewError(fiber.StatusNotFound, "public folder not found")
+	}
+	applied := make([]string, 0, len(body))
+	for k := range body {
+		applied = append(applied, k)
+	}
+	h.appendAudit(c, "public_folder.update", fmt.Sprintf("%d|applied:%d", id, len(applied)), "ok")
+	return c.JSON(fiber.Map{"applied": applied, "id": id})
 }
 
 // ---------------------------------------------------------------------

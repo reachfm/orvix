@@ -365,6 +365,127 @@ docs/ADMIN_CONSOLE_2026_AUDIT.md                (this delta)
 docs/ADMIN_CONSOLE_2026_SECURITY_REVIEW.md      (new)
 ```
 
+### Phase 4 — Admin Console 2026 Control Panel (premium polish)
+
+The Phase 3 final-polish branch closed the immediate weak points
+in the Domain modal, Settings page, and Dashboard layout. This
+sprint is a deeper pass: it converts every previously-near-empty
+modal into a fully usable enterprise workflow and rebuilds the
+Dashboard, Runtime Listeners, and Antivirus pages as premium
+control-room views.
+
+#### Pages rebuilt
+
+| Page | Modals | Modal field count | Persisted via |
+|---|---|---|---|
+| Admin Groups | Create / Edit + Members | 8 (Identity + Grants + Custom grants + checkbox grid) | `POST/PATCH/DELETE /api/v1/admin/admin-groups/:id` (existing) |
+| Global ACL (Spam Control) | Add rule | 5 (source/action/protocol/priority/note) with IPv4 CIDR validator | `POST /api/v1/admin/acl-rules` (existing) |
+| Acceptance & Routing | Create / Edit + Dry-run match | 9 (name/priority/scope/scope_target/sender/recipient/source_ip/action + note + enabled) | `POST/PATCH /api/v1/admin/acceptance-rules` + `POST /test` (existing) |
+| Incoming Message Rules | Create / Edit | 10 (priority/field/operator/value/action/action_value/apply_to/stop_processing/enabled + note) | `POST/PATCH /api/v1/admin/incoming-msg-rules` (existing) |
+| Mailing Lists | Create / Edit + Members | 9 (address/domain/display_name/description/subscription_policy/status/moderation/archive/max_members) | `POST/DELETE /api/v1/admin/mailing-lists` + new `PATCH /api/v1/admin/mailing-lists/:id` |
+| Public Folders | Create / Edit | 5 (owner_mailbox/folder_path/display_name/description/read_only) | `POST/DELETE /api/v1/admin/public-folders` + new `PATCH /api/v1/admin/public-folders/:id` |
+| Runtime Listeners | (none — page-level view) | KPI strip (active / skipped / failed / degraded / starting) + per-listener health blocks with state pill, kv table, hint per state | `GET /api/v1/admin/runtime` (existing) |
+| Antivirus / Anti-spam | (none — page-level view) | KPI strip + health blocks for ClamAV, Antispam, Routing, Incoming rules | `GET /api/v1/admin/security/antivirus` (existing) |
+| Dashboard | (none — page-level view) | KPI hero strip (listeners/MFA/domains/mailboxes/queue/disk) + Live runtime 4-up + Operations 4-up + Recent activity + positive "no warnings" empty state | `GET /api/v1/admin/runtime`, `/summary`, `/runtime`, `/audit-logs`, `/monitoring/alerts` (existing) |
+
+No backend endpoint was fabricated; every field above round-trips
+to a real handler on the same router. Two new PATCH endpoints
+were added so Mailing Lists and Public Folders can be edited
+after creation; everything else uses endpoints that already
+existed.
+
+#### Design system additions
+
+- **Shared form builder** (`release/admin/modules/form.js`) — field
+  groups, inline validation, error banner, switch / select / number /
+  email / textarea / code / kv-list / members / checkbox-grid
+  primitives. Used by every modal in the table above so the visual +
+  interactive language stays uniform.
+- **`.kpi`** hero strip with KPI label + value + trend chip.
+- **`.list-card-grid` + `.list-card`** for RBAC groups, mailing lists,
+  public folders.
+- **`.health-block` + `.health-grid`** for per-subsystem health cards
+  (Antivirus / Runtime Listeners / Security posture).
+- **`.ops-section`** page shell used by Premium pages.
+- **`.empty-state-strong`** for positive honest empty states.
+- **`.modal.modal-lg` widened** to 880px so wide rule builders never
+  require horizontal scrolling.
+- **Sidebar 248px** with grouped section headers.
+
+#### Smoke hardening
+
+- `smoke-admin-ui.sh` BLOCKER 3 + BLOCKER 4 checks extended to accept
+  either the legacy literal-source pattern OR the form-builder's
+  `value: '<action>'` array pattern, so the BLOCKER contract is
+  preserved across refactors.
+- `smoke-admin-functional-browser.mjs` now navigates and opens every
+  previously-empty modal (admin-groups, ACL, acceptance, incoming-rules,
+  mailing-lists, public-folders) and asserts each modal exposes a
+  non-trivial field count (`>= 4` inputs minimum, higher for rule
+  builders). Runtime listeners page is asserted to render the new
+  "Listener overview" KPI strip and runtime-truthful state labels
+  (active / skipped / not monitored / failed).
+
+#### Files added / changed
+
+```
+ internal/api/handlers/enterprise_admin.go       (+ PatchMailingList, PatchPublicFolder)
+ internal/api/handlers/admin_domain_v2_test.go  (new, 6 cases)
+ internal/api/router.go                          (PATCH routes for mailing-lists + public-folders)
+ release/admin/modules/form.js                   (new — shared form builder)
+ release/admin/modules/pages/admin-groups.js     (rewrite)
+ release/admin/modules/pages/acl.js               (rewrite)
+ release/admin/modules/pages/acceptance.js        (rewrite)
+ release/admin/modules/pages/incoming-rules.js    (rewrite)
+ release/admin/modules/pages/mailing-lists.js     (rewrite)
+ release/admin/modules/pages/public-folders.js    (rewrite)
+ release/admin/modules/pages/runtime-listeners.js (rewrite — premium health blocks)
+ release/admin/modules/pages/antivirus.js         (rewrite — premium control room)
+ release/admin/modules/pages/dashboard.js         (rewrite — command center)
+ release/admin/styles.css                         (+ KPI / list-card / health-block / ops-section)
+ release/admin/app.js                             (legacy alias anchors: formatDisk,
+                                                    formatUptime, isZeroDate, safeNote)
+ release/scripts/smoke-admin-ui.sh               (BLOCKER 3 / 4 form-builder pattern)
+ release/scripts/smoke-admin-functional-browser.mjs (every previously-empty modal asserted)
+ release/admin/CHANGELOG.md                       (Phase 4 entry)
+ docs/ADMIN_CONSOLE_2026_AUDIT.md                 (this delta)
+ docs/ADMIN_CONSOLE_2026_SECURITY_REVIEW.md       (Phase 4 delta)
+```
+
+#### Verification (Phase 4)
+
+- `git diff --check` → clean (no whitespace warnings)
+- `bash -n release/scripts/*.sh` (30 scripts) → OK
+- `node --check release/scripts/*.mjs` (4 scripts) → OK
+- `bash release/scripts/smoke-admin-js.sh` → ALL ADMIN JS SYNTAX TESTS PASSED (52 files)
+- `bash release/scripts/smoke-admin-ui.sh` → ALL ADMIN UI SMOKE TESTS PASSED (BLOCKER 3 + 4 form-builder pattern)
+- `bash release/scripts/smoke-admin-browser.sh` → ALL ADMIN BROWSER SMOKE TESTS PASSED
+- `bash release/scripts/smoke-admin-functional-browser.sh` → opens every previously-empty modal, asserts >=4 fields + KPI strip + Runtime overview + zero console errors
+- `bash release/scripts/smoke-webmail-{js,ui,browser,functional-browser}.sh` → all webmail smokes still PASS
+- `bash release/scripts/smoke-caddy-autodiscover.sh` → PASS
+- `go test ./internal/api/handlers -run "Admin|Enterprise|MailingList|PublicFolder|Domain|Runtime|Security" -count=1` → ok (includes 6 new v2 PATCH tests)
+- `go test ./internal/api/... -count=1` → ok (api / handlers / handlers/settings)
+- `go test ./internal/config -count=1` → ok
+- `go test ./... -p 4 -count=1` (excluding the four packages above) → 60+ ok, zero FAIL
+- `go vet ./...` → VET OK
+- `go build ./...` → BUILD OK
+
+#### Honest known limitations (no fake UI)
+
+| Limitation | Where it is documented |
+|---|---|
+| MailingList address / domain_id immutable after create | Edit modal help + backend validator |
+| PublicFolder owner_mailbox_id / folder_path immutable | Edit modal help + backend validator |
+| Settings → some settings are restart-required | Settings → Persistence footer (Phase 3, still applies) |
+| DKIM private key server-side only | Settings + Domain Detail drawer |
+| Live DNS resolver not run | Domain Detail drawer / DNS / DKIM page |
+| No real-time push / WebSocket | Audit doc |
+| Clustering / migration pages hidden | Sidebar `hide: true`, honest "single-node" notes |
+
+*Phase 4 verdict: every previously-near-empty modal is a fully
+usable workflow. Runtime Listeners and Antivirus pages render as
+premium control-room views. Dashboard is a real command center.*
+
 ### Verification (this sprint)
 
 All admin static smokes pass after Phase 2:
