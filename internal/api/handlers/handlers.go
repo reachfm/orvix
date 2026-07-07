@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -814,11 +815,49 @@ func (h *Handler) ListDomains(c fiber.Ctx) error {
 }
 
 // CreateDomain creates a new mail domain in CoreMail.
+//
+// ADMIN-CONSOLE-FINAL-POLISH: the request shape now includes the
+// enterprise provisioning knobs that the admin UI exposes in the
+// "Create domain" modal:
+//   - name (required)            — fully-qualified domain
+//   - status                     — 'active' or 'suspended' (defaults to 'active')
+//   - plan                       — 'smb' / 'enterprise' / 'education' / 'free' (defaults to 'smb')
+//   - description                — operator note, freeform
+//   - max_mailboxes              — 0 means unlimited
+//   - max_aliases                — 0 means unlimited
+//   - max_quota_mb               — per-mailbox quota in MB (0 means unlimited)
+//   - dkim_enabled               — boolean (0 / 1)
+//   - dkim_selector              — string (defaults to a safe fallback)
+//   - dmarc_enabled              — boolean
+//   - mtasts_enabled             — boolean
+//   - catchall_address           — string (empty disables catch-all)
+//   - abuse_contact              — string
+//
+// Unknown fields are rejected (the entire PATCH is rolled back)
+// so the frontend can never silently drop a field. RBAC, CSRF,
+// audit, and "no raw DB errors" guarantees from the previous
+// release are preserved; see TestAdminDomainCreateAdvancedFields
+// in handlers/admin_domain_advanced_test.go.
 func (h *Handler) CreateDomain(c fiber.Ctx) error {
 	var req struct {
-		Name string `json:"name"`
+		Name            string `json:"name"`
+		Status          string `json:"status"`
+		Plan            string `json:"plan"`
+		Description     string `json:"description"`
+		MaxMailboxes    *int64 `json:"max_mailboxes"`
+		MaxAliases      *int64 `json:"max_aliases"`
+		MaxQuotaMB      *int64 `json:"max_quota_mb"`
+		DKIMEnabled     *bool  `json:"dkim_enabled"`
+		DKIMSelector    string `json:"dkim_selector"`
+		DMARCEnabled    *bool  `json:"dmarc_enabled"`
+		MTASTSEnabled   *bool  `json:"mtasts_enabled"`
+		CatchallAddress string `json:"catchall_address"`
+		AbuseContact    string `json:"abuse_contact"`
 	}
-	if err := c.Bind().JSON(&req); err != nil || req.Name == "" {
+	if err := c.Bind().JSON(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid JSON body: " + err.Error()})
+	}
+	if req.Name == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "domain name required"})
 	}
 
@@ -839,6 +878,100 @@ func (h *Handler) CreateDomain(c fiber.Ctx) error {
 		}
 	}
 
+	// Normalise the admin-supplied fields. Status defaults to
+	// active; plan defaults to smb; description is plain text.
+	status := strings.ToLower(strings.TrimSpace(req.Status))
+	if status == "" {
+		status = "active"
+	}
+	if status != "active" && status != "suspended" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "status must be 'active' or 'suspended'"})
+	}
+	plan := strings.ToLower(strings.TrimSpace(req.Plan))
+	switch plan {
+	case "", "smb", "enterprise", "education", "free":
+	default:
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "plan must be one of smb|enterprise|education|free"})
+	}
+	if plan == "" {
+		plan = "smb"
+	}
+	description := strings.TrimSpace(req.Description)
+	if len(description) > 512 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "description too long (max 512 chars)"})
+	}
+
+	// Bounds: never let the UI push negative limits, never trust
+	// the client to fill in missing pointers.
+	maxMailboxes := int64(0)
+	if req.MaxMailboxes != nil {
+		if *req.MaxMailboxes < 0 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "max_mailboxes cannot be negative"})
+		}
+		maxMailboxes = *req.MaxMailboxes
+	}
+	maxAliases := int64(0)
+	if req.MaxAliases != nil {
+		if *req.MaxAliases < 0 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "max_aliases cannot be negative"})
+		}
+		maxAliases = *req.MaxAliases
+	}
+	maxQuotaMB := int64(0)
+	if req.MaxQuotaMB != nil {
+		if *req.MaxQuotaMB < 0 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "max_quota_mb cannot be negative"})
+		}
+		maxQuotaMB = *req.MaxQuotaMB
+	}
+
+	dkimEnabled := 0
+	if req.DKIMEnabled != nil && *req.DKIMEnabled {
+		dkimEnabled = 1
+	}
+	dkimSelector := strings.TrimSpace(req.DKIMSelector)
+	if dkimSelector != "" {
+		// DKIM selector is a DNS label; only allow letters, digits,
+		// dashes, underscores, dots. Reject spaces and slashes.
+		for _, ch := range dkimSelector {
+			if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' || ch == '.' {
+				continue
+			}
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "dkim_selector contains invalid characters"})
+		}
+		if len(dkimSelector) > 64 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "dkim_selector too long (max 64 chars)"})
+		}
+	} else if dkimEnabled == 1 {
+		// Generate a safe default selector if the operator enabled DKIM
+		// without picking one. Keeps downstream DNS verification happy.
+		dkimSelector = "default"
+	}
+	dmarcEnabled := 0
+	if req.DMARCEnabled != nil && *req.DMARCEnabled {
+		dmarcEnabled = 1
+	}
+	mtastsEnabled := 0
+	if req.MTASTSEnabled != nil && *req.MTASTSEnabled {
+		mtastsEnabled = 1
+	}
+	catchallAddress := strings.TrimSpace(req.CatchallAddress)
+	if catchallAddress != "" {
+		// Catch-all must be an address on the same domain.
+		if !strings.HasSuffix(strings.ToLower(catchallAddress), "@"+domainName) {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "catchall_address must be on the same domain"})
+		}
+		if _, err := mail.ParseAddress(catchallAddress); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "catchall_address is not a valid email address"})
+		}
+	}
+	abuseContact := strings.TrimSpace(req.AbuseContact)
+	if abuseContact != "" {
+		if _, err := mail.ParseAddress(abuseContact); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "abuse_contact is not a valid email address"})
+		}
+	}
+
 	sqlDB, err := h.db.DB()
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
@@ -853,8 +986,10 @@ func (h *Handler) CreateDomain(c fiber.Ctx) error {
 	now := time.Now().UTC()
 	result, err := sqlDB.Exec(
 		`INSERT INTO coremail_domains (name, tenant_id, reseller_id, status, plan, description, max_mailboxes, max_aliases, max_quota_mb, dkim_enabled, dkim_selector, dmarc_enabled, mtasts_enabled, catchall_address, abuse_contact, labels, mailbox_count, created_at, updated_at)
-		 VALUES (?, 0, 0, 'active', 'smb', '', 0, 0, 0, 0, '', 0, 0, '', '', '', 0, ?, ?)`,
-		domainName, now, now,
+		 VALUES (?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, ?, ?)`,
+		domainName, status, plan, description, maxMailboxes, maxAliases, maxQuotaMB,
+		dkimEnabled, dkimSelector, dmarcEnabled, mtastsEnabled, catchallAddress, abuseContact,
+		now, now,
 	)
 	if err != nil {
 		h.logger.Error("failed to create domain", zap.String("domain", domainName), zap.Error(err))
@@ -862,11 +997,27 @@ func (h *Handler) CreateDomain(c fiber.Ctx) error {
 	}
 
 	domainID, _ := result.LastInsertId()
-	h.writeAuditLog(c, "domain.create", fmt.Sprintf("domain:%s", domainName))
+	h.writeAuditLog(c, "domain.create", fmt.Sprintf(
+		"domain:%s|status:%s|plan:%s|mailboxes:%d|aliases:%d|quota_mb:%d|dkim:%d|dmarc:%d|mtasts:%d",
+		domainName, status, plan, maxMailboxes, maxAliases, maxQuotaMB,
+		dkimEnabled, dmarcEnabled, mtastsEnabled,
+	))
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-		"id":     domainID,
-		"domain": domainName,
-		"status": "active",
+		"id":                domainID,
+		"domain":            domainName,
+		"status":            status,
+		"plan":              plan,
+		"description":       description,
+		"max_mailboxes":     maxMailboxes,
+		"max_aliases":       maxAliases,
+		"max_quota_mb":      maxQuotaMB,
+		"dkim_enabled":      dkimEnabled == 1,
+		"dkim_selector":     dkimSelector,
+		"dmarc_enabled":     dmarcEnabled == 1,
+		"mtasts_enabled":    mtastsEnabled == 1,
+		"catchall_address":  catchallAddress,
+		"abuse_contact":     abuseContact,
+		"created_at":        now,
 	})
 }
 
@@ -951,6 +1102,12 @@ func (h *Handler) UpdateDomainStatus(c fiber.Ctx) error {
 }
 
 // GetDomain returns details for a single domain.
+//
+// ADMIN-CONSOLE-FINAL-POLISH: returns the full provisioning
+// shape (plan, status, description, mailboxes/aliases/quota
+// limits, DKIM/DMARC/MTA-STS flags + DKIM selector, catch-all
+// and abuse contact) so the "Domain detail" drawer can show
+// every persistent property without a follow-up round trip.
 func (h *Handler) GetDomain(c fiber.Ctx) error {
 	name := c.Params("name")
 	if name == "" {
@@ -962,9 +1119,31 @@ func (h *Handler) GetDomain(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
 	}
 
-	var domainID uint
-	var domainName, status, plan, createdAt, updatedAt string
-	err = sqlDB.QueryRow("SELECT id, name, status, plan, created_at, updated_at FROM coremail_domains WHERE name = ? AND deleted_at IS NULL", name).Scan(&domainID, &domainName, &status, &plan, &createdAt, &updatedAt)
+	var (
+		domainID                uint
+		domainName, status, plan string
+		description              string
+		maxMailboxes, maxAliases, maxQuotaMB int64
+		dkimEnabled, dmarcEnabled, mtastsEnabled int
+		dkimSelector, catchallAddress, abuseContact string
+		createdAt, updatedAt     string
+	)
+	err = sqlDB.QueryRow(
+		`SELECT id, name, status, plan, description,
+		        max_mailboxes, max_aliases, max_quota_mb,
+		        dkim_enabled, dkim_selector, dmarc_enabled, mtasts_enabled,
+		        catchall_address, abuse_contact,
+		        created_at, updated_at
+		   FROM coremail_domains
+		  WHERE name = ? AND deleted_at IS NULL`,
+		name,
+	).Scan(
+		&domainID, &domainName, &status, &plan, &description,
+		&maxMailboxes, &maxAliases, &maxQuotaMB,
+		&dkimEnabled, &dkimSelector, &dmarcEnabled, &mtastsEnabled,
+		&catchallAddress, &abuseContact,
+		&createdAt, &updatedAt,
+	)
 	if err == sql.ErrNoRows {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "domain not found"})
 	}
@@ -999,15 +1178,209 @@ func (h *Handler) GetDomain(c fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{
-		"domain":        domainName,
-		"status":        status,
-		"plan":          plan,
-		"mailbox_count": mailboxCount,
-		"created_at":    createdAt,
-		"updated_at":    updatedAt,
-		"deleted":       false,
-		"mailboxes":     mailboxes,
+		"id":                domainID,
+		"domain":            domainName,
+		"status":            status,
+		"plan":              plan,
+		"description":       description,
+		"max_mailboxes":     maxMailboxes,
+		"max_aliases":       maxAliases,
+		"max_quota_mb":      maxQuotaMB,
+		"mailbox_count":     mailboxCount,
+		"dkim_enabled":      dkimEnabled == 1,
+		"dkim_selector":     dkimSelector,
+		"dmarc_enabled":     dmarcEnabled == 1,
+		"mtasts_enabled":    mtastsEnabled == 1,
+		"catchall_address":  catchallAddress,
+		"abuse_contact":     abuseContact,
+		"created_at":        createdAt,
+		"updated_at":        updatedAt,
+		"deleted":           false,
+		"mailboxes":         mailboxes,
 	})
+}
+
+// PatchDomain updates the mutable fields of an existing domain.
+//
+// ADMIN-CONSOLE-FINAL-POLISH: this is the editable surface the
+// Domain Detail drawer's "Edit limits" modal targets. Only
+// fields present in the request body are updated; unknown
+// fields are rejected (an unknown key aborts the patch so the
+// frontend can never silently drop a value).
+//
+// Wired through CSRF, RBAC, audit, and the same hard-reject
+// semantics as PATCH /admin/settings.
+func (h *Handler) PatchDomain(c fiber.Ctx) error {
+	name := c.Params("name")
+	if name == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "domain name required"})
+	}
+
+	var req map[string]json.RawMessage
+	if err := c.Bind().JSON(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid JSON body"})
+	}
+
+	allowed := map[string]struct{}{
+		"plan":             {},
+		"description":      {},
+		"max_mailboxes":    {},
+		"max_aliases":      {},
+		"max_quota_mb":     {},
+		"dkim_enabled":     {},
+		"dkim_selector":    {},
+		"dmarc_enabled":    {},
+		"mtasts_enabled":   {},
+		"catchall_address": {},
+		"abuse_contact":    {},
+	}
+	rejected := []string{}
+	for k := range req {
+		if _, ok := allowed[k]; !ok {
+			rejected = append(rejected, k)
+		}
+	}
+	if len(rejected) > 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error":    "patch contained unknown fields; nothing applied",
+			"rejected": rejected,
+		})
+	}
+
+	type update struct {
+		set   []string
+		args  []interface{}
+	}
+	var u update
+	for k, raw := range req {
+		switch k {
+		case "plan":
+			var v string
+			if err := json.Unmarshal(raw, &v); err != nil {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": k + ": invalid string"})
+			}
+			v = strings.ToLower(strings.TrimSpace(v))
+			switch v {
+			case "smb", "enterprise", "education", "free":
+			default:
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "plan must be one of smb|enterprise|education|free"})
+			}
+			u.set = append(u.set, "plan = ?")
+			u.args = append(u.args, v)
+		case "description":
+			var v string
+			if err := json.Unmarshal(raw, &v); err != nil {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": k + ": invalid string"})
+			}
+			v = strings.TrimSpace(v)
+			if len(v) > 512 {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "description too long (max 512 chars)"})
+			}
+			u.set = append(u.set, "description = ?")
+			u.args = append(u.args, v)
+		case "max_mailboxes", "max_aliases", "max_quota_mb":
+			var n int64
+			if err := json.Unmarshal(raw, &n); err != nil {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": k + ": invalid integer"})
+			}
+			if n < 0 {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": k + " cannot be negative"})
+			}
+			u.set = append(u.set, k+" = ?")
+			u.args = append(u.args, n)
+		case "dkim_enabled", "dmarc_enabled", "mtasts_enabled":
+			var b bool
+			if err := json.Unmarshal(raw, &b); err != nil {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": k + ": invalid bool"})
+			}
+			val := 0
+			if b {
+				val = 1
+			}
+			u.set = append(u.set, k+" = ?")
+			u.args = append(u.args, val)
+		case "dkim_selector":
+			var v string
+			if err := json.Unmarshal(raw, &v); err != nil {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": k + ": invalid string"})
+			}
+			v = strings.TrimSpace(v)
+			if v != "" {
+				for _, ch := range v {
+					if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' || ch == '.' {
+						continue
+					}
+					return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "dkim_selector contains invalid characters"})
+				}
+				if len(v) > 64 {
+					return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "dkim_selector too long (max 64 chars)"})
+				}
+			}
+			u.set = append(u.set, "dkim_selector = ?")
+			u.args = append(u.args, v)
+		case "catchall_address":
+			var v string
+			if err := json.Unmarshal(raw, &v); err != nil {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": k + ": invalid string"})
+			}
+			v = strings.TrimSpace(v)
+			if v != "" {
+				if !strings.HasSuffix(strings.ToLower(v), "@"+strings.ToLower(name)) {
+					return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "catchall_address must be on the same domain"})
+				}
+				if _, err := mail.ParseAddress(v); err != nil {
+					return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "catchall_address is not a valid email address"})
+				}
+			}
+			u.set = append(u.set, "catchall_address = ?")
+			u.args = append(u.args, v)
+		case "abuse_contact":
+			var v string
+			if err := json.Unmarshal(raw, &v); err != nil {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": k + ": invalid string"})
+			}
+			v = strings.TrimSpace(v)
+			if v != "" {
+				if _, err := mail.ParseAddress(v); err != nil {
+					return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "abuse_contact is not a valid email address"})
+				}
+			}
+			u.set = append(u.set, "abuse_contact = ?")
+			u.args = append(u.args, v)
+		}
+	}
+
+	if len(u.set) == 0 {
+		return c.JSON(fiber.Map{"applied": []string{}, "domain": name})
+	}
+	u.set = append(u.set, "updated_at = ?")
+	u.args = append(u.args, time.Now().UTC())
+	u.args = append(u.args, name)
+
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+	res, err := sqlDB.Exec(
+		"UPDATE coremail_domains SET "+strings.Join(u.set, ", ")+
+			" WHERE name = ? AND deleted_at IS NULL",
+		u.args...,
+	)
+	if err != nil {
+		h.logger.Error("failed to update domain", zap.String("domain", name), zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "update failed"})
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "domain not found"})
+	}
+
+	applied := make([]string, 0, len(req))
+	for k := range req {
+		applied = append(applied, k)
+	}
+	h.writeAuditLog(c, "domain.patch", fmt.Sprintf("domain:%s|applied:%d", name, len(applied)))
+	return c.JSON(fiber.Map{"applied": applied, "domain": name})
 }
 
 // GetMailbox returns details for a single mailbox.

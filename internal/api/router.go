@@ -800,6 +800,7 @@ admin.Get("/admin/settings/protocol/:protocol", r.h.ListProtocolSettings)
 
 	men := admin.Group("", r.csrf.Middleware())
 	men.Post("/domains", r.h.CreateDomain)
+	men.Patch("/domains/:name", r.h.PatchDomain)
 	men.Patch("/domains/:name/status", r.h.UpdateDomainStatus)
 	men.Delete("/domains/:name", r.h.DeleteDomain)
 	men.Post("/users", r.h.CreateUser)

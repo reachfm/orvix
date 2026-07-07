@@ -94,8 +94,58 @@ function startServer() {
           if (url.pathname === '/api/v1/csrf-token') return sendJSON(res, 200, { csrf_token: 'csrf-functional' });
           if (url.pathname === '/api/v1/health') return sendJSON(res, 200, { status: 'ok' });
           if (url.pathname === '/api/v1/domains') {
-            if (req.method === 'GET') return sendJSON(res, 200, { domains: [{ domain: 'example.com', status: 'active', plan: 'smb', mailbox_count: 1 }] });
-            if (req.method === 'POST') return sendJSON(res, 201, { name: 'example.com', status: 'active' });
+            if (req.method === 'GET') return sendJSON(res, 200, { domains: [{
+              domain: 'example.com', name: 'example.com',
+              status: 'active', plan: 'smb',
+              max_mailboxes: 50, max_aliases: 20, max_quota_mb: 1024,
+              dkim_enabled: true, dkim_selector: 'default',
+              dmarc_enabled: true, mtasts_enabled: false,
+              mailbox_count: 1, updated_at: '2026-01-01T00:00:00Z',
+            }] });
+            if (req.method === 'POST') {
+              const body = await readBody(req);
+              // Echo every advanced field the new modal sends so
+              // the modal can be honest about what it persisted.
+              return sendJSON(res, 201, {
+                domain: body.name || 'example.com',
+                name: body.name || 'example.com',
+                status: body.status || 'active',
+                plan: body.plan || 'smb',
+                description: body.description || '',
+                max_mailboxes: body.max_mailboxes || 0,
+                max_aliases: body.max_aliases || 0,
+                max_quota_mb: body.max_quota_mb || 0,
+                dkim_enabled: !!body.dkim_enabled,
+                dkim_selector: body.dkim_selector || '',
+                dmarc_enabled: !!body.dmarc_enabled,
+                mtasts_enabled: !!body.mtasts_enabled,
+                catchall_address: body.catchall_address || '',
+                abuse_contact: body.abuse_contact || '',
+                mailbox_count: 0,
+              });
+            }
+          }
+          if (url.pathname.startsWith('/api/v1/domains/')) {
+            const parts = url.pathname.split('/');
+            const dn = decodeURIComponent(parts[parts.length - 1] || 'example.com');
+            if (req.method === 'GET') return sendJSON(res, 200, {
+              domain: dn, name: dn,
+              status: 'active', plan: 'smb',
+              description: 'smoke test fixture',
+              max_mailboxes: 50, max_aliases: 20, max_quota_mb: 1024,
+              mailbox_count: 1,
+              dkim_enabled: true, dkim_selector: 'default',
+              dmarc_enabled: true, mtasts_enabled: false,
+              catchall_address: '', abuse_contact: '',
+              created_at: '2026-01-01T00:00:00Z',
+              updated_at: '2026-01-01T00:00:00Z',
+              mailboxes: [{ mailbox_id: 1, email: 'admin@example.com', status: 'active', is_admin: true }],
+            });
+            if (req.method === 'PATCH') {
+              const body = await readBody(req);
+              return sendJSON(res, 200, { applied: Object.keys(body || {}), domain: dn });
+            }
+            if (req.method === 'DELETE') return sendJSON(res, 204, '');
           }
           if (url.pathname === '/api/v1/mailboxes') {
             if (req.method === 'GET') return sendJSON(res, 200, { mailboxes: [] });
@@ -107,6 +157,33 @@ function startServer() {
           if (url.pathname === '/api/v1/admin/runtime') return sendJSON(res, 200, {
             hostname: 'mock-host', version: '1.0.0', status: 'ok', listeners: [],
           });
+          if (url.pathname === '/api/v1/admin/summary') return sendJSON(res, 200, {
+            mail: { domain_count: 1, mailbox_count: 1, active_count: 1, suspended_count: 0 },
+            status: 'ok', version: '1.0.0',
+          });
+          if (url.pathname === '/api/v1/admin/settings') return sendJSON(res, 200, {
+            general:   { hostname: 'mock-host', primary_domain: 'example.com', version: '1.0.0' },
+            build:     { version: '1.0.0', commit: 'mock-commit', channel: 'stable', go_version: 'go1.22' },
+            security:  { password_min_len: 8, session_ttl_seconds: 3600, refresh_ttl_seconds: 86400 },
+            backup:    { dir: '/var/backups/orvix/', retention_count: 7 },
+            dns:       { public_ipv4: '127.0.0.1', public_ipv6: '' },
+            mail_listeners: { smtp_port: 25, submission_port: 587, imap_port: 143 },
+            mutable_fields: [],
+            _settings_persistence: { enabled: false, note: 'mock' },
+          });
+          if (url.pathname === '/api/v1/admin/mfa/status') return sendJSON(res, 200, { enabled: false });
+          if (url.pathname === '/api/v1/license') return sendJSON(res, 200, {
+            mode: 'community', tier: 'community', public_key_present: true, valid: true, expired: false,
+          });
+          if (url.pathname.startsWith('/api/v1/admin/dns/') && url.pathname.endsWith('/plan')) {
+            return sendJSON(res, 200, { records: [
+              { type: 'MX', host: '@', value: '10 mail.example.com.', priority: 10 },
+              { type: 'TXT', host: '@', value: 'v=spf1 mx -all' },
+            ] });
+          }
+          if (url.pathname.startsWith('/api/v1/domains/') && url.pathname.endsWith('/audit')) {
+            return sendJSON(res, 200, { entries: [] });
+          }
           return sendJSON(res, 200, {});
         }
         let rel = url.pathname;
@@ -344,8 +421,14 @@ async function main() {
     if (!addDomainBtn) fail('Domains Add Domain button not visible');
     await evalJS(`document.querySelector('.add-domain-btn').click()`);
     await waitFor(() => evalJS(exists('.modal-overlay .modal')), 'Domains add modal');
-    const domainModalInputs = await evalJS(`document.querySelectorAll('.modal-overlay input').length`);
-    if (domainModalInputs < 1) fail(`EMPTY_MODAL: Domains add modal has no inputs`);
+    const domainModalInputs = await evalJS(`document.querySelectorAll('.modal-overlay input, .modal-overlay select').length`);
+    // ADMIN-CONSOLE-FINAL-POLISH: a "Domain only" modal with one
+    // input is no longer acceptable. The new modal wires every
+    // advanced field the backend persists: status, plan, description,
+    // max_mailboxes, max_aliases, max_quota_mb, dkim_enabled,
+    // dkim_selector, dmarc_enabled, mtasts_enabled, catchall_address,
+    // abuse_contact.
+    if (domainModalInputs < 6) fail(`WEAK_DOMAIN_MODAL: Domains add modal has only ${domainModalInputs} inputs — every advanced field must be exposed`);
     await evalJS(`document.querySelector('.modal-overlay .btn.ghost')?.click()`);
     await waitFor(() => evalJS(`!document.querySelector('.modal-overlay')`), 'Domains modal close');
 
@@ -365,6 +448,16 @@ async function main() {
     await navigateRoute('monitoring', 'Monitoring');
     await navigateRoute('updates', 'Updates');
     await navigateRoute('settings', 'Settings');
+    // ADMIN-CONSOLE-FINAL-POLISH: the Settings page now renders a
+    // polished runtime overview. Old weak copy
+    // ("no mutable settings in this build") must never render.
+    const settingsText = await mainText();
+    if (/no mutable settings in this build/i.test(settingsText)) {
+      fail('WEAK_SETTINGS_COPY: Settings page still renders the deprecated "no mutable settings in this build" copy');
+    }
+    if (!/Listener bindings|Runtime/i.test(settingsText)) {
+      fail('WEAK_SETTINGS_OVERVIEW: Settings page did not render a runtime overview (Listener bindings / Runtime)');
+    }
     await navigateRoute('services', 'Services');
     await navigateRoute('license', 'License');
     await navigateRoute('backups', 'Backups');
@@ -381,6 +474,8 @@ async function main() {
     if (!requests.includes('POST /api/v1/auth/login')) fail('login POST was not called');
     if (!requests.includes('GET /api/v1/domains')) fail('domains API was not called');
     if (!requests.includes('GET /api/v1/mailboxes')) fail('mailboxes API was not called');
+    if (!requests.includes('GET /api/v1/admin/settings')) fail('admin settings API was not called');
+    if (!requests.includes('GET /api/v1/admin/runtime')) fail('admin runtime API was not called');
     if (failures.length) fail(`browser errors:\n${failures.join('\n')}`);
 
     // Banned-string DOM check: after login, scan rendered page text for

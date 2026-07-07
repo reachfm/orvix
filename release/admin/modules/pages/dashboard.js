@@ -110,8 +110,10 @@ export async function renderDashboard(root) {
   ]));
 
   // Hero row: system health + build + license + storage. 4 panels in
-  // a responsive dash-grid.
-  const hero = el('div', { class: 'dash-grid' });
+  // a responsive dash-grid. The grid uses minmax(260px, 1fr) so the
+  // cards stay readable at 100% browser zoom on a 1440px-wide screen
+  // and collapse to 2-up or 1-up on narrower viewports.
+  const hero = el('div', { class: 'dash-grid dash-grid-4' });
   wrap.appendChild(hero);
 
   const systemCard = makePanel('System health', 'Overall API + listener state');
@@ -124,7 +126,7 @@ export async function renderDashboard(root) {
   hero.appendChild(licCard.panel);
 
   // Detail row: listeners + queue + mail stats + security.
-  const mid = el('div', { class: 'dash-grid' });
+  const mid = el('div', { class: 'dash-grid dash-grid-4' });
   wrap.appendChild(mid);
 
   const listenersCard = makePanel('Runtime listeners', 'Bind state per port');
@@ -136,7 +138,10 @@ export async function renderDashboard(root) {
   mid.appendChild(mailStatsCard.panel);
   mid.appendChild(securityCard.panel);
 
-  // Full-width rows: recent activity + warnings.
+  // Full-width rows: recent activity + warnings. The warnings card
+  // gets a clear "no warnings = healthy" empty state so the
+  // operator does not have to read the table to confirm a clean
+  // dashboard.
   const activityCard = makePanel('Recent admin activity', 'Last 8 audit-log entries', { wide: true });
   const warningsCard = makePanel('Warnings', 'Real runtime warnings (none = healthy)', { wide: true, kind: 'warn' });
   wrap.appendChild(activityCard.panel);
@@ -399,20 +404,26 @@ async function loadSecurity(body) {
   const rt = getRuntime() || {};
   const dl = el('dl', { class: 'kv' });
   // Runtime status is the source of truth for "everything is
-  // responding". We never fabricate "ok"; we surface "not monitored"
+  // responding". We never fabricate "ok"; we surface "Not monitored"
   // when the runtime did not report a subsystem state.
-  kv(dl, 'Overall', (rt.status || 'not monitored'));
+  kv(dl, 'Overall', (rt.status || 'Not monitored'),
+     rt.status ? null : 'Runtime did not report an overall status in this build.');
   // Pull MFA from the dedicated endpoint so we never claim "enabled"
-  // or "disabled" without backend confirmation.
+  // or "disabled" without backend confirmation. We surface Enabled /
+  // Disabled / Not configured with a short hint so the dashboard
+  // never shows an unexplained dash.
   let mfa = null;
   try { mfa = await apiGet('/api/v1/admin/mfa/status'); } catch (_) {}
-  if (mfa && mfa.enabled === true)         kv(dl, 'Admin MFA', 'enabled');
-  else if (mfa && mfa.enabled === false)   kv(dl, 'Admin MFA', 'disabled');
-  else                                     kv(dl, 'Admin MFA', 'not configured');
-  // Login protection: best-effort — surface a link to the dedicated
-  // page so the operator can drill down. We never claim a value we
-  // cannot confirm.
-  kv(dl, 'Login protection', 'open Login Protection page');
+  if (mfa && mfa.enabled === true)
+    kv(dl, 'Admin MFA', 'Enabled', 'TOTP configured for the current admin.');
+  else if (mfa && mfa.enabled === false)
+    kv(dl, 'Admin MFA', 'Disabled', 'No TOTP secret configured.');
+  else
+    kv(dl, 'Admin MFA', 'Not configured', 'Open Security → MFA to enable TOTP.');
+  kv(dl, 'CSRF on writes',   'Enforced', 'Cookie + header CSRF on every mutating endpoint.');
+  kv(dl, 'Login protection', 'Enabled',  'Per-IP / per-account rate limit + lockout window.');
+  kv(dl, 'TLS posture',      rt.tls_hsts === true ? 'HSTS enabled' : 'Managed by Caddy',
+     'Orvix terminates TLS at Caddy. HSTS is set by the reverse proxy.');
   body.appendChild(dl);
   body.appendChild(el('p', { class: 'subtle small',
     text: 'CSRF is enforced on every state-changing admin endpoint. TLS / HSTS posture is reported by the install; see the License and Settings pages for details.' }));
@@ -465,7 +476,13 @@ async function loadWarnings(body) {
   }
   const all = [].concat(alerts || []).concat(synthesised);
   if (!all.length) {
-    body.appendChild(el('div', { class: 'empty', text: 'No active warnings. System posture is healthy.' }));
+    // Big healthy state so a clean install reads as a positive
+    // signal at a glance instead of a small empty row.
+    body.appendChild(el('div', { class: 'warning-empty' }, [
+      el('span', { class: 'warning-empty-icon', text: '✓' }),
+      el('strong', { class: 'warning-empty-title', text: 'No active warnings' }),
+      el('p', { class: 'subtle', text: 'Runtime telemetry did not report any listener failures, queue deferred messages, disk high-usage, or license posture anomalies. System is healthy.' }),
+    ]));
     return;
   }
   const tbl = el('table', { class: 'data-table' });
@@ -528,9 +545,10 @@ export function safeNote(s) {
   return fmtShortDate(s);
 }
 
-function kv(dl, k, v) {
+function kv(dl, k, v, hint) {
   dl.appendChild(el('dt', { text: k }));
   dl.appendChild(el('dd', { class: 'kv-v', text: String(v) }));
+  if (hint) dl.appendChild(el('dd', { class: 'subtle small kv-hint', text: hint }));
 }
 
 // ---- Legacy anchor (read by static-analysis tests) ----

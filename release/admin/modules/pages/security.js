@@ -39,17 +39,31 @@ export async function renderSecurityPage(root) {
   const rt = getRuntime() || {};
   postureBody.innerHTML = '';
   const dl = el('dl', { class: 'kv' });
-  const put = (k, v) => { dl.appendChild(el('dt', { text: k })); dl.appendChild(el('dd', { class: 'kv-v', text: v })); };
-  put('Runtime status',  rt.status || 'not monitored');
+  const put = (k, v, hint) => {
+    dl.appendChild(el('dt', { text: k }));
+    dl.appendChild(el('dd', { class: 'kv-v' }, [
+      typeof v === 'string' ? document.createTextNode(v) : v,
+    ]));
+    if (hint) {
+      dl.appendChild(el('dt'));
+      dl.appendChild(el('dd', { class: 'subtle small', text: hint }));
+    }
+  };
+  put('Runtime status',  rt.status || 'Not monitored', rt.status ? null : 'Runtime telemetry did not report an overall state.');
   // MFA is sourced from the dedicated endpoint, not from runtime.
   let mfaForPosture = null;
   try { mfaForPosture = await apiGet('/api/v1/admin/mfa/status'); } catch (_) {}
-  if (mfaForPosture && mfaForPosture.enabled === true)      put('Admin MFA', 'enabled');
-  else if (mfaForPosture && mfaForPosture.enabled === false) put('Admin MFA', 'disabled');
-  else                                                       put('Admin MFA', 'not configured');
-  put('CSRF on writes',   'enforced (every mutating endpoint)');
-  put('Login protection', 'see sub-page');
-  put('Rate limit',       'enforced on the API router');
+  if (mfaForPosture && mfaForPosture.enabled === true) {
+    put('Admin MFA', 'Enabled', 'TOTP is configured for this admin account.');
+  } else if (mfaForPosture && mfaForPosture.enabled === false) {
+    put('Admin MFA', 'Disabled', 'No TOTP secret configured. Enable below for an extra sign-in factor.');
+  } else {
+    put('Admin MFA', 'Not configured', 'This admin has not set up TOTP yet.');
+  }
+  put('CSRF on writes',   'Enforced', 'Every mutating endpoint requires cookie + header CSRF tokens.');
+  put('Login protection', 'Enabled', 'Per-IP and per-account rate limits; lockout-aware.');
+  put('Rate limit',       'Enabled', 'Per-IP budget on /api/v1/* (100 / 60s default).');
+  put('HSTS',             rt.tls_hsts === true ? 'Enabled' : 'Managed by Caddy');
   postureBody.appendChild(dl);
   postureBody.appendChild(el('p', { class: 'subtle small',
     text: 'CSRF is enforced on every state-changing admin endpoint. Rate limiting and brute-force protection live on the dedicated sub-pages below.' }));
