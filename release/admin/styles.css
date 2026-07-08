@@ -236,6 +236,12 @@ input, select, textarea, button { font: inherit; color: inherit; }
   grid-template-columns: minmax(320px, 460px) 1fr;
   background: var(--bg-app);
 }
+#login-view.login-shell {
+  display: block;
+}
+#login-view.login-shell > .login-shell {
+  min-height: 100vh;
+}
 .login-brand {
   background:
     radial-gradient(800px 500px at 0% 100%, rgba(122, 168, 255, 0.08), transparent 70%),
@@ -2001,6 +2007,10 @@ input[type="checkbox"], input[type="radio"] {
   .topbar { padding: 0 20px; }
   .page-root { padding: 20px 20px 32px; }
   :root { --sidebar-w: 220px; }
+}
+@media (max-width: 960px) {
+  .login-shell { grid-template-columns: 1fr; }
+  .login-brand { display: none; }
 }
 @media (max-width: 768px) {
   .login-shell { grid-template-columns: 1fr; }

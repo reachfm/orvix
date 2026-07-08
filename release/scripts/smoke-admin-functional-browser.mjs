@@ -294,16 +294,23 @@ async function main() {
   const chromeArgs = [
     `--remote-debugging-port=${debugPort}`,
     `--user-data-dir=${profile}`,
-    '--headless',
+    '--headless=new',
+    '--window-size=1440,900',
     '--no-sandbox',
     '--disable-gpu',
     '--disable-software-rasterizer',
     '--no-first-run',
     '--no-default-browser-check',
+    '--disable-background-timer-throttling',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-features=TranslateUI',
+    '--force-prefers-color-scheme=dark',
+    '--enable-features=WebContentsForceDark',
     '--disable-dev-shm-usage',
     '--disable-extensions',
     '--disable-setuid-sandbox',
     '--disable-dbus',
+    '--remote-allow-origins=*',
     'about:blank',
   ];
   const proc = spawn(chrome, chromeArgs, {
@@ -382,6 +389,12 @@ async function main() {
 
     // Login card dimensions must be enterprise-ready
     const cardWidth = await evalJS(`document.querySelector('.login-card')?.getBoundingClientRect()?.width || 0`);
+    const viewportWidth = await evalJS(`window.innerWidth || 0`);
+    const shellWidth = await evalJS(`document.querySelector('.login-shell')?.getBoundingClientRect()?.width || 0`);
+    const wrapWidth = await evalJS(`document.querySelector('.login-card-wrap')?.getBoundingClientRect()?.width || 0`);
+    console.error(`login viewport width: ${Math.round(viewportWidth)}px`);
+    console.error(`login shell width: ${Math.round(shellWidth)}px`);
+    console.error(`login card wrap width: ${Math.round(wrapWidth)}px`);
     if (cardWidth < 380) fail(`LOGIN_CARD_TOO_NARROW: login card is ${Math.round(cardWidth)}px wide (min 380px required)`);
     console.error(`login card width: ${Math.round(cardWidth)}px`);
 
