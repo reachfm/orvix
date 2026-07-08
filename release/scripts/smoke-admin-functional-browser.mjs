@@ -481,10 +481,25 @@ async function main() {
     // ≥ minInputs fields → close.
     const checkCreateModal = async (route, routeName, createBtnSel, minInputs) => {
       await navigateRoute(route, routeName);
-      const btn = await evalJS(exists(createBtnSel));
+      const btn = await evalJS(`(() => {
+        return Array.from(document.querySelectorAll('${createBtnSel}')).some((el) => {
+          const r = el.getBoundingClientRect();
+          const cs = getComputedStyle(el);
+          return r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none' && !el.disabled;
+        });
+      })()`);
       if (!btn) fail(`${routeName}: expected create button matching "${createBtnSel}"`);
-      await evalJS(`document.querySelector('${createBtnSel}')?.click()`);
-      await waitFor(() => evalJS(exists('.modal-overlay .modal')), `${routeName} modal`, 8000);
+      await waitFor(() => evalJS(`(() => {
+        if (document.querySelector('.modal-overlay .modal')) return true;
+        const btn = Array.from(document.querySelectorAll('${createBtnSel}')).find((el) => {
+          const r = el.getBoundingClientRect();
+          const cs = getComputedStyle(el);
+          return r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none' && !el.disabled;
+        });
+        if (!btn) return false;
+        btn.click();
+        return !!document.querySelector('.modal-overlay .modal');
+      })()`), `${routeName} modal`, 8000);
       const fields = await evalJS(`document.querySelectorAll('.modal-overlay .ff-input, .modal-overlay .ff-cb, .modal-overlay .ff-switch').length`);
       if (fields < minInputs) fail(`WEAK_MODAL: ${routeName} modal has only ${fields} inputs (min ${minInputs})`);
       // Dismiss.

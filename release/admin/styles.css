@@ -291,7 +291,7 @@ input, select, textarea, button { font: inherit; color: inherit; }
   pointer-events: none;
 }
 .login-card {
-  width: min(480px, 100%);
+  width: min(540px, 100%);
   background: linear-gradient(180deg, var(--bg-surface), var(--bg-canvas));
   border: 1px solid var(--border-2);
   border-radius: var(--r-xl);
