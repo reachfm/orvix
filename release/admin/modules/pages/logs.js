@@ -12,7 +12,7 @@ import { applyAutoDir } from '../rtl.js';
 
 export async function renderLogsPage(root) {
   root.innerHTML = '';
-  const wrap = el('div', { class: 'page-inner' });
+  const wrap = el('div', { class: 'page-inner ops-page' });
   wrap.appendChild(el('div', { class: 'page-head' }, [
     el('div', null, [
       el('h2', { class: 'page-title', text: t('logs.heading') }),

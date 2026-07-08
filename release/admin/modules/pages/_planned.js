@@ -16,7 +16,7 @@ export function renderPlannedPage(root, opts) {
   const feature = opts.feature || t('sidebar.dashboard');
   const detail  = opts.detail  || t('planned.feature');
   const endpoint = opts.endpoint || '';
-  const wrap = el('div', { class: 'page-inner' });
+  const wrap = el('div', { class: 'page-inner ops-page' });
   wrap.appendChild(el('div', { class: 'page-head' }, [
     el('div', null, [
       el('h2', { class: 'page-title', text: feature }),

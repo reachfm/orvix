@@ -13,110 +13,111 @@
 
 import { el } from './components.js';
 import { t } from './i18n.js';
+import { i } from './icons.js';
 
 const STORAGE_KEY = 'orvix_sidebar_v1';
 
 const GROUPS = [
-  // group = { id, labelKey, items = [{ route, labelKey, planned?, badge? }] }
+  // group = { id, labelKey, icon, items = [{ route, labelKey, icon, planned?, badge? }] }
   { id: 'overview',  labelKey: null, items: [
-    { route: 'dashboard', labelKey: 'sidebar.dashboard' },
+    { route: 'dashboard', labelKey: 'sidebar.dashboard', icon: 'dashboard' },
   ]},
 
-  { id: 'globalSettings', labelKey: 'sidebar.group.globalSettings', items: [
-    { route: 'settings/general',  labelKey: 'sidebar.item.generalSettings'  },
-    { route: 'settings/security', labelKey: 'sidebar.item.securityDefaults' },
-    { route: 'license',           labelKey: 'sidebar.item.license'          },
-    { route: 'settings/build',    labelKey: 'sidebar.item.buildInfo'        },
+  { id: 'globalSettings', labelKey: 'sidebar.group.globalSettings', icon: 'settings', items: [
+    { route: 'settings/general',  labelKey: 'sidebar.item.generalSettings',  icon: 'settings' },
+    { route: 'settings/security', labelKey: 'sidebar.item.securityDefaults', icon: 'shield'   },
+    { route: 'license',           labelKey: 'sidebar.item.license',          icon: 'license'  },
+    { route: 'settings/build',    labelKey: 'sidebar.item.buildInfo',        icon: 'cpu'      },
   ]},
 
   // Settings split — 10 protocol sub-pages. The
   // backend exposes one endpoint per protocol under
   // /api/v1/admin/settings/protocol/:protocol.
-  { id: 'protocolSettings', labelKey: 'sidebar.group.protocolSettings', items: [
-    { route: 'settings/protocol/smtp_recv', labelKey: 'sidebar.item.smtpRecv'   },
-    { route: 'settings/protocol/smtp_tx',   labelKey: 'sidebar.item.smtpTx'     },
-    { route: 'settings/protocol/imap',      labelKey: 'sidebar.item.imap'       },
-    { route: 'settings/protocol/pop3',      labelKey: 'sidebar.item.pop3'       },
-    { route: 'settings/protocol/webmail',   labelKey: 'sidebar.item.webmailS'   },
-    { route: 'settings/protocol/webadmin',  labelKey: 'sidebar.item.webadminS'  },
-    { route: 'settings/protocol/dns',       labelKey: 'sidebar.item.dnsProto'   },
-    { route: 'settings/protocol/remote_pop',labelKey: 'sidebar.item.remotePop'  },
-    { route: 'settings/protocol/jmap',      labelKey: 'sidebar.item.jmap'       },
-    { route: 'settings/protocol/mobility',  labelKey: 'sidebar.item.mobility'   },
+  { id: 'protocolSettings', labelKey: 'sidebar.group.protocolSettings', icon: 'globe', items: [
+    { route: 'settings/protocol/smtp_recv', labelKey: 'sidebar.item.smtpRecv',   icon: 'smtp' },
+    { route: 'settings/protocol/smtp_tx',   labelKey: 'sidebar.item.smtpTx',     icon: 'smtp' },
+    { route: 'settings/protocol/imap',      labelKey: 'sidebar.item.imap',       icon: 'imap' },
+    { route: 'settings/protocol/pop3',      labelKey: 'sidebar.item.pop3',       icon: 'pop3' },
+    { route: 'settings/protocol/webmail',   labelKey: 'sidebar.item.webmailS',   icon: 'mail' },
+    { route: 'settings/protocol/webadmin',  labelKey: 'sidebar.item.webadminS',  icon: 'admin' },
+    { route: 'settings/protocol/dns',       labelKey: 'sidebar.item.dnsProto',   icon: 'dns' },
+    { route: 'settings/protocol/remote_pop',labelKey: 'sidebar.item.remotePop',  icon: 'pop3' },
+    { route: 'settings/protocol/jmap',      labelKey: 'sidebar.item.jmap',       icon: 'mail' },
+    { route: 'settings/protocol/mobility',  labelKey: 'sidebar.item.mobility',   icon: 'globe' },
   ]},
 
-  { id: 'services', labelKey: 'sidebar.group.services', items: [
-    { route: 'services',          labelKey: 'sidebar.item.services'         },
-    { route: 'runtime-listeners', labelKey: 'sidebar.item.runtimeListeners' },
+  { id: 'services', labelKey: 'sidebar.group.services', icon: 'cpu', items: [
+    { route: 'services',          labelKey: 'sidebar.item.services',         icon: 'services' },
+    { route: 'runtime-listeners', labelKey: 'sidebar.item.runtimeListeners', icon: 'monitoring' },
   ]},
 
-  { id: 'domainsAccounts', labelKey: 'sidebar.group.domainsAccounts', items: [
-    { route: 'domains',       labelKey: 'sidebar.item.domains'        },
-    { route: 'accounts',      labelKey: 'sidebar.item.accounts'       },
-    { route: 'domains/groups', labelKey: 'sidebar.item.groups'        },
-    { route: 'domains/lists',  labelKey: 'sidebar.item.mailingLists'  },
-    { route: 'domains/public', labelKey: 'sidebar.item.publicFolders' },
-    { route: 'accounts/classes', labelKey: 'sidebar.item.accountClasses' },
-    { route: 'bulk-import',   labelKey: 'sidebar.item.bulkImport'     },
-    { route: 'dns',           labelKey: 'sidebar.item.dnsDkim'        },
+  { id: 'domainsAccounts', labelKey: 'sidebar.group.domainsAccounts', icon: 'domain', items: [
+    { route: 'domains',       labelKey: 'sidebar.item.domains',        icon: 'domain'  },
+    { route: 'accounts',      labelKey: 'sidebar.item.accounts',       icon: 'mailbox' },
+    { route: 'domains/groups', labelKey: 'sidebar.item.groups',        icon: 'group'   },
+    { route: 'domains/lists',  labelKey: 'sidebar.item.mailingLists',  icon: 'list'    },
+    { route: 'domains/public', labelKey: 'sidebar.item.publicFolders', icon: 'folder'  },
+    { route: 'accounts/classes', labelKey: 'sidebar.item.accountClasses', icon: 'user' },
+    { route: 'bulk-import',   labelKey: 'sidebar.item.bulkImport',     icon: 'upload'  },
+    { route: 'dns',           labelKey: 'sidebar.item.dnsDkim',        icon: 'dns'     },
   ]},
 
-  { id: 'security', labelKey: 'sidebar.group.security', items: [
-    { route: 'security/ssl',      labelKey: 'sidebar.item.sslCerts'   },
-    { route: 'security/antispam', labelKey: 'sidebar.item.antivirus'  },
-    { route: 'security/spam',     labelKey: 'sidebar.item.spamControl' },
-    { route: 'security/routing',  labelKey: 'sidebar.item.routing'    },
-    { route: 'security/rules',    labelKey: 'sidebar.item.incomingRules' },
-    { route: 'security/quarantine', labelKey: 'sidebar.item.quarantine' },
-    { route: 'security/login-protection', labelKey: 'sidebar.item.loginProtection' },
+  { id: 'security', labelKey: 'sidebar.group.security', icon: 'shield', items: [
+    { route: 'security/ssl',      labelKey: 'sidebar.item.sslCerts',       icon: 'certificate' },
+    { route: 'security/antispam', labelKey: 'sidebar.item.antivirus',      icon: 'shield' },
+    { route: 'security/spam',     labelKey: 'sidebar.item.spamControl',    icon: 'spam'   },
+    { route: 'security/routing',  labelKey: 'sidebar.item.routing',        icon: 'routing'},
+    { route: 'security/rules',    labelKey: 'sidebar.item.incomingRules',  icon: 'rules'  },
+    { route: 'security/quarantine', labelKey: 'sidebar.item.quarantine',   icon: 'lock'   },
+    { route: 'security/login-protection', labelKey: 'sidebar.item.loginProtection', icon: 'key' },
   ]},
 
-  { id: 'updates', labelKey: 'sidebar.group.updates', items: [
-    { route: 'updates', labelKey: 'sidebar.item.updateStatus' },
-    { route: 'updates/checks', labelKey: 'sidebar.item.upgradeChecks' },
+  { id: 'updates', labelKey: 'sidebar.group.updates', icon: 'update', items: [
+    { route: 'updates', labelKey: 'sidebar.item.updateStatus',  icon: 'update' },
+    { route: 'updates/checks', labelKey: 'sidebar.item.upgradeChecks', icon: 'refresh' },
   ]},
 
-  { id: 'queue', labelKey: 'sidebar.group.queue', items: [
-    { route: 'queue',          labelKey: 'sidebar.item.queueProcessing' },
-    { route: 'queue/messages', labelKey: 'sidebar.item.queueView' },
+  { id: 'queue', labelKey: 'sidebar.group.queue', icon: 'queue', items: [
+    { route: 'queue',          labelKey: 'sidebar.item.queueProcessing', icon: 'queue' },
+    { route: 'queue/messages', labelKey: 'sidebar.item.queueView',       icon: 'mail'  },
   ]},
 
-  { id: 'status', labelKey: 'sidebar.group.status', items: [
-    { route: 'monitoring',          labelKey: 'sidebar.item.reporting' },
-    { route: 'monitoring/capacity', labelKey: 'sidebar.item.charts'    },
-    { route: 'monitoring/storage',  labelKey: 'sidebar.item.storageCharts' },
-    { route: 'monitoring/alert-providers', labelKey: 'sidebar.item.alertProviders' },
+  { id: 'status', labelKey: 'sidebar.group.status', icon: 'monitoring', items: [
+    { route: 'monitoring',          labelKey: 'sidebar.item.reporting',      icon: 'monitoring' },
+    { route: 'monitoring/capacity', labelKey: 'sidebar.item.charts',        icon: 'charts'     },
+    { route: 'monitoring/storage',  labelKey: 'sidebar.item.storageCharts', icon: 'storage'    },
+    { route: 'monitoring/alert-providers', labelKey: 'sidebar.item.alertProviders', icon: 'alert' },
   ]},
 
-  { id: 'logging', labelKey: 'sidebar.group.logging', items: [
-    { route: 'logs',           labelKey: 'sidebar.item.localLogs' },
-    { route: 'logs/rules',     labelKey: 'sidebar.item.logRules'  },
-    { route: 'logs/files',     labelKey: 'sidebar.item.viewLogFiles' },
-    { route: 'logs/server',    labelKey: 'sidebar.item.logServer' },
+  { id: 'logging', labelKey: 'sidebar.group.logging', icon: 'log', items: [
+    { route: 'logs',           labelKey: 'sidebar.item.localLogs',   icon: 'log'   },
+    { route: 'logs/rules',     labelKey: 'sidebar.item.logRules',   icon: 'rules' },
+    { route: 'logs/files',     labelKey: 'sidebar.item.viewLogFiles', icon: 'folder' },
+    { route: 'logs/server',    labelKey: 'sidebar.item.logServer',  icon: 'server' },
   ]},
 
-  { id: 'backup', labelKey: 'sidebar.group.backup', items: [
-    { route: 'backups',           labelKey: 'sidebar.item.backupStatus' },
-    { route: 'backups/history',   labelKey: 'sidebar.item.backupHistory' },
-    { route: 'backups/ftp',       labelKey: 'sidebar.item.ftpBackup' },
-    { route: 'backups/fs',        labelKey: 'sidebar.item.fsAccess' },
+  { id: 'backup', labelKey: 'sidebar.group.backup', icon: 'backup', items: [
+    { route: 'backups',           labelKey: 'sidebar.item.backupStatus',  icon: 'backup' },
+    { route: 'backups/history',   labelKey: 'sidebar.item.backupHistory', icon: 'log'    },
+    { route: 'backups/ftp',       labelKey: 'sidebar.item.ftpBackup',     icon: 'globe'  },
+    { route: 'backups/fs',        labelKey: 'sidebar.item.fsAccess',      icon: 'folder' },
   ]},
 
-  { id: 'migration', labelKey: 'sidebar.group.migration', items: [
-    { route: 'migration',         labelKey: 'sidebar.item.migrationJobs',  hide: true },
-    { route: 'migration/sources', labelKey: 'sidebar.item.sourceServers', hide: true },
+  { id: 'migration', labelKey: 'sidebar.group.migration', icon: 'migration', items: [
+    { route: 'migration',         labelKey: 'sidebar.item.migrationJobs',  hide: true, icon: 'migration' },
+    { route: 'migration/sources', labelKey: 'sidebar.item.sourceServers', hide: true, icon: 'server'    },
   ]},
 
-  { id: 'clustering', labelKey: 'sidebar.group.clustering', items: [
-    { route: 'clustering',         labelKey: 'sidebar.item.clusterSetup', hide: true },
-    { route: 'clustering/imap',    labelKey: 'sidebar.item.imapProxy',    hide: true },
-    { route: 'clustering/pop3',    labelKey: 'sidebar.item.pop3Proxy',    hide: true },
-    { route: 'clustering/webmail', labelKey: 'sidebar.item.webmailProxy', hide: true },
+  { id: 'clustering', labelKey: 'sidebar.group.clustering', icon: 'cluster', items: [
+    { route: 'clustering',         labelKey: 'sidebar.item.clusterSetup',   hide: true, icon: 'cluster' },
+    { route: 'clustering/imap',    labelKey: 'sidebar.item.imapProxy',      hide: true, icon: 'imap'    },
+    { route: 'clustering/pop3',    labelKey: 'sidebar.item.pop3Proxy',      hide: true, icon: 'pop3'    },
+    { route: 'clustering/webmail', labelKey: 'sidebar.item.webmailProxy',   hide: true, icon: 'mail'    },
   ]},
 
-  { id: 'admin', labelKey: 'sidebar.group.adminRights', items: [
-    { route: 'admin/groups', labelKey: 'sidebar.item.adminGroups' },
-    { route: 'admin/users',  labelKey: 'sidebar.item.adminUsers' },
+  { id: 'admin', labelKey: 'sidebar.group.adminRights', icon: 'admin', items: [
+    { route: 'admin/groups', labelKey: 'sidebar.item.adminGroups', icon: 'group' },
+    { route: 'admin/users',  labelKey: 'sidebar.item.adminUsers',  icon: 'user'  },
   ]},
 ];
 
@@ -125,6 +126,16 @@ function loadCollapsed() {
 }
 function saveCollapsed(state) {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (_) {}
+}
+
+// Render an inline SVG icon into a temporary container so we can adopt
+// the DOM node into the rest of the sidebar tree.
+function iconNode(name) {
+  const tmp = document.createElement('span');
+  tmp.className = 'nav-icon';
+  tmp.innerHTML = i(name || 'dashboard', { size: 15 });
+  // unwrap to keep the markup clean (the <span> wrapper is the icon container)
+  return tmp;
 }
 
 export function renderSidebar(root) {
@@ -141,7 +152,14 @@ export function renderSidebar(root) {
         tabindex: '0',
         'data-toggle': group.id,
       });
-      head.appendChild(el('span', { class: 'sidebar-section-label', text: t(group.labelKey) }));
+      const label = el('span', { class: 'sidebar-section-label' });
+      if (group.icon) {
+        const iconWrap = el('span', { class: 'nav-icon' });
+        iconWrap.innerHTML = i(group.icon, { size: 12 });
+        label.appendChild(iconWrap);
+      }
+      label.appendChild(document.createTextNode(t(group.labelKey)));
+      head.appendChild(label);
       const caret = el('span', { class: 'sidebar-section-caret' });
       caret.textContent = collapsed[group.id] ? '\u25b8' : '\u25be';
       head.appendChild(caret);
@@ -164,14 +182,21 @@ export function renderSidebar(root) {
         class: 'sidebar-link',
         'data-route': item.route,
         tabindex: item.planned ? '-1' : '0',
-      }, t(item.labelKey));
+      });
+      if (item.icon) {
+        const iconWrap = el('span', { class: 'nav-icon' });
+        iconWrap.innerHTML = i(item.icon, { size: 14 });
+        a.appendChild(iconWrap);
+      }
+      const span = el('span', { text: t(item.labelKey) });
+      a.appendChild(span);
       if (item.planned) {
         li.classList.add('disabled');
         a.addEventListener('click', (e) => e.preventDefault());
       }
       li.appendChild(a);
       if (item.planned) {
-        li.appendChild(el('span', { class: 'badge tag', title: t('common.planned'), text: t('common.planned') }));
+        li.appendChild(el('span', { class: 'badge tag no-dot', title: t('common.planned'), text: t('common.planned') }));
       }
       list.appendChild(li);
     });
