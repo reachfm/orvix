@@ -98,11 +98,10 @@ jobs:
           echo "CHROME_PATH=$path" >> "$GITHUB_ENV"
 
       - name: Verify scripts and smokes
-        env:
-          CHROME: "${{ env.CHROME_PATH }}"
         run: |
           set -euo pipefail
           trap 'echo "FAILED_STEP=Verify scripts and smokes" >> "$GITHUB_ENV"' ERR
+          export CHROME="${CHROME_PATH:-${CHROME:-}}"
           echo "functional browser smoke: CHROME=${CHROME:-}"
           run_smoke() {
             local name="$1"
