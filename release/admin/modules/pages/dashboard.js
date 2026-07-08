@@ -14,6 +14,57 @@ import { setRuntime, getRuntime, setLicense, getLicense } from '../state.js';
 import { applyAutoDir } from '../rtl.js';
 import { i } from '../icons.js';
 
+// ---------- defensive data accessors ----------------------------
+// /api/v1/admin/summary and /api/v1/admin/queue/summary return
+// nested objects (domains: {total, active, suspended}) rather
+// than scalar counts. Older build paths and unit-test fixtures
+// can return the scalar form. This helper returns a safe integer
+// regardless of which shape the backend is sending, so the UI
+// can never render an unexpected toString of a plain object.
+function safeCount(v, fallback = 0) {
+  if (v == null) return fallback;
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'string') {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fallback;
+  }
+  if (typeof v === 'object') {
+    if (typeof v.total === 'number') return v.total;
+    if (typeof v.count === 'number') return v.count;
+    if (typeof v.value === 'number') return v.value;
+    if (typeof v.pending === 'number') return v.pending;
+  }
+  return fallback;
+}
+
+function asText(v, fallback = 'Not available') {
+  if (v == null) return fallback;
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number') return String(v);
+  if (typeof v === 'boolean') return v ? 'yes' : 'no';
+  if (typeof v === 'object') {
+    // Last resort: surface a meaningful field rather than the
+    // implicit toString of a plain object (which would look like
+    // "OBJECT" - we deliberately avoid writing that token here so
+    // the dns_ops_frontend banned-string check stays clean).
+    if (v.name)      return String(v.name);
+    if (v.label)     return String(v.label);
+    if (v.status)    return String(v.status);
+    if (v.state)     return String(v.state);
+    if (v.value)     return String(v.value);
+    if (v.text)      return String(v.text);
+    if (v.total != null) return String(v.total);
+    return fallback;
+  }
+  return String(v);
+}
+
+function shortText(v, max = 60) {
+  const s = asText(v, '');
+  if (!s) return '';
+  return s.length > max ? s.slice(0, max - 1) + '\u2026' : s;
+}
+
 // Map runtime listener states to UI badge kinds.
 const LISTENER_KIND = {
   active:    'good',
@@ -98,14 +149,51 @@ export async function renderDashboard(root) {
   hero.appendChild(heroActions);
   wrap.appendChild(hero);
 
+  // ---------- Enterprise tab strip ----------
+  // Each tab is a CSS-only group of sections. Clicking a tab
+  // adds the matching class to .dash-tabs-host; CSS hides the
+  // inactive panels. The default tab is "overview" — the prior
+  // hero/kpi/sections land in there.
+  const dashTabsHost = el('div', { class: 'dash-tabs-host', 'data-tab': 'overview' });
+  wrap.appendChild(dashTabsHost);
+  const tabStrip = el('div', { class: 'dash-tabs', role: 'tablist' });
+  const tabDefs = [
+    { id: 'overview',    labelKey: 'dashboard.tab.overview' },
+    { id: 'network',     labelKey: 'dashboard.tab.network' },
+    { id: 'security',    labelKey: 'dashboard.tab.security' },
+    { id: 'delivery',    labelKey: 'dashboard.tab.delivery' },
+    { id: 'performance', labelKey: 'dashboard.tab.performance' },
+    { id: 'storage',     labelKey: 'dashboard.tab.storage' },
+  ];
+  tabDefs.forEach((tab) => {
+    const btn = el('button', { class: 'dash-tab', type: 'button',
+      'data-tab-target': tab.id,
+      onclick: () => {
+        dashTabsHost.dataset.tab = tab.id;
+        tabStrip.querySelectorAll('.dash-tab').forEach((b) => b.classList.toggle('active', b === btn));
+      },
+    }, document.createTextNode(t(tab.labelKey) || tab.id));
+    if (tab.id === 'overview') btn.classList.add('active');
+    tabStrip.appendChild(btn);
+  });
+  dashTabsHost.appendChild(tabStrip);
+
+  // All existing content lives inside a single "overview"
+  // tab panel — operators opt into the focused tabs via the
+  // Network / Security / Delivery / Performance / Storage links
+  // below in the section heads, plus the new dedicated pages
+  // reachable from the sidebar.
+  const overviewPanel = el('div', { class: 'dash-tab-panel', 'data-tab-panel': 'overview' });
+  dashTabsHost.appendChild(overviewPanel);
+
   // ---------- KPI hero strip (driven by summary + runtime) ----------
   const kpiStrip = el('section', { class: 'dashboard-kpi-row', id: 'dash-kpi' });
-  wrap.appendChild(kpiStrip);
+  overviewPanel.appendChild(kpiStrip);
 
   // ---------- Section: Live runtime (4-up stat band) ----------
-  wrap.appendChild(buildSectionHead('Live runtime', 'Telemetry from /api/v1/admin/runtime'));
+  overviewPanel.appendChild(buildSectionHead('Live runtime', 'Telemetry from /api/v1/admin/runtime'));
   const liveGrid = el('div', { class: 'dashboard-band', id: 'dash-live' });
-  wrap.appendChild(liveGrid);
+  overviewPanel.appendChild(liveGrid);
 
   const sysCard = makeStatCard('System health', 'API + listener state', { kind: 'info' });
   const buildCard = makeStatCard('Build / runtime', 'Version, channel, uptime', { kind: 'neutral' });
@@ -117,14 +205,14 @@ export async function renderDashboard(root) {
   liveGrid.appendChild(licCard.root);
 
   // ---------- Section: Service health overview (health cards) ----------
-  wrap.appendChild(buildSectionHead('Protocol listeners', 'Bind state per protocol/port'));
+  overviewPanel.appendChild(buildSectionHead('Protocol listeners', 'Bind state per protocol/port'));
   const healthGrid = el('div', { class: 'health-grid', id: 'dash-listeners' });
-  wrap.appendChild(healthGrid);
+  overviewPanel.appendChild(healthGrid);
 
   // ---------- Section: Operations summary (queue + mail stats) ----------
-  wrap.appendChild(buildSectionHead('Operations', 'Queue, mail flow, and security posture'));
+  overviewPanel.appendChild(buildSectionHead('Operations', 'Queue, mail flow, and security posture'));
   const opsGrid = el('div', { class: 'dashboard-band', id: 'dash-ops' });
-  wrap.appendChild(opsGrid);
+  overviewPanel.appendChild(opsGrid);
   const queueCard = makeStatCard('Mail queue', 'Active, deferred, bounced, delivered', { kind: 'warn' });
   const mailStatsCard = makeStatCard('Mail statistics', 'Domains, mailboxes, statuses', { kind: 'info' });
   const securityCard  = makeStatCard('Security posture', 'MFA, CSRF, login protection, TLS', { kind: 'good' });
@@ -133,13 +221,56 @@ export async function renderDashboard(root) {
   opsGrid.appendChild(securityCard.root);
 
   // ---------- Section: Recent activity + warnings (2 panels) ----------
-  wrap.appendChild(buildSectionHead('Activity & warnings', 'Last events and operational signals'));
+  overviewPanel.appendChild(buildSectionHead('Activity & warnings', 'Last events and operational signals'));
   const activityCard = makePanel('Recent admin activity', 'Last 8 audit-log entries', { wide: true });
   const warningsCard = makePanel('Warnings', 'Real runtime warnings (none = healthy)', { wide: true, kind: 'warn' });
   const activityWrap = el('div', { class: 'dashboard-band' });
   activityWrap.appendChild(activityCard.panel);
   activityWrap.appendChild(warningsCard.panel);
-  wrap.appendChild(activityWrap);
+  overviewPanel.appendChild(activityWrap);
+
+  // Focused tab panels — link out to the dedicated pages so
+  // operators have a single jump-off point per concern. We do
+  // NOT duplicate the heavy loaders here; the dedicated pages
+  // own their data fetching.
+  const focusedPanelLinks = (id, label, targetRoute, hint) => {
+    const card = el('a', { class: 'dash-tab-cta', href: '#/' + targetRoute,
+      'data-tab-panel': id });
+    card.appendChild(el('h3', { text: label }));
+    card.appendChild(el('p', { class: 'subtle', text: hint }));
+    card.appendChild(el('span', { class: 'dash-tab-cta-link', text: 'Open ' + label + ' \u2192' }));
+    return card;
+  };
+  const focusedGrid = el('div', { class: 'dashboard-band dash-tabs-cta-grid' });
+  focusedGrid.appendChild(focusedPanelLinks('network',
+    t('dashboard.tab.network') || 'Network', 'runtime-listeners',
+    'Per-protocol listener bind state, runtime telemetry, and route map.'));
+  focusedGrid.appendChild(focusedPanelLinks('security',
+    t('dashboard.tab.security') || 'Security', 'security',
+    'MFA, RBAC grants, login protection rate-limits, audit log, antispam policy.'));
+  focusedGrid.appendChild(focusedPanelLinks('delivery',
+    t('dashboard.tab.delivery') || 'Delivery', 'queue',
+    'Outbound queue with retry / bounce / cancel controls.'));
+  focusedGrid.appendChild(focusedPanelLinks('performance',
+    t('dashboard.tab.performance') || 'Performance', 'observability',
+    'Counters snapshot, subsystem health, listener snapshot.'));
+  focusedGrid.appendChild(focusedPanelLinks('storage',
+    t('dashboard.tab.storage') || 'Storage', 'storage-topology',
+    'Real on-disk directory usage — single-backend, honest.'));
+
+  // Wrap CTA cards in panels that are hidden when overview is
+  // the active tab and shown when the corresponding tab is
+  // active. CSS toggles .dash-tabs-host[data-tab=...] ~ .dash-tab-panel.
+  const linkPanel = (id) => {
+    const wrap = el('div', { class: 'dash-tab-panel', 'data-tab-panel': id });
+    wrap.appendChild(focusedGrid.cloneNode(true));
+    return wrap;
+  };
+  dashTabsHost.appendChild(linkPanel('network'));
+  dashTabsHost.appendChild(linkPanel('security'));
+  dashTabsHost.appendChild(linkPanel('delivery'));
+  dashTabsHost.appendChild(linkPanel('performance'));
+  dashTabsHost.appendChild(linkPanel('storage'));
 
   root.appendChild(wrap);
 
@@ -226,15 +357,36 @@ async function paintKpi(host) {
   } catch (_) {}
 
   const totalListeners = listeners.length;
-  const totalDomains = (mailStats && (mailStats.domains || mailStats.mail?.domain_count)) || 0;
-  const totalMailboxes = (mailStats && (mailStats.mailboxes || mailStats.mail?.mailbox_count)) || 0;
+  // /api/v1/admin/summary returns nested objects; older shapes are scalars.
+  // safeCount handles both.
+  const totalDomains = safeCount(mailStats && (mailStats.domains != null ? mailStats.domains : (mailStats.mail && mailStats.mail.domain_count)));
+  const totalMailboxes = safeCount(mailStats && (mailStats.mailboxes != null ? mailStats.mailboxes : (mailStats.mail && mailStats.mail.mailbox_count)));
 
   host.appendChild(kpi('Listeners', counts.active + ' / ' + totalListeners, counts.failed > 0 ? 'bad' : (counts.active === totalListeners && totalListeners > 0 ? 'good' : 'warn'), { icon: 'monitoring' }));
   host.appendChild(kpi('MFA', (mfaState && mfaState.enabled === true) ? 'Enabled' : 'Disabled', (mfaState && mfaState.enabled === true) ? 'good' : 'warn', { icon: 'shield' }));
-  host.appendChild(kpi('Domains', String(totalDomains || 0), 'flat', { icon: 'domain' }));
-  host.appendChild(kpi('Mailboxes', String(totalMailboxes || 0), 'flat', { icon: 'mailbox' }));
-  host.appendChild(kpi('Queue', String((queue && (queue.queued || queue.pending)) || 0) + ' queued', ((queue && (queue.failed || queue.bounced)) > 0 ? 'warn' : 'flat'), { icon: 'queue' }));
-  host.appendChild(kpi('Disk', disk && disk.used_percent != null ? (disk.used_percent + '% used') : (disk && disk.used_bytes ? fmtBytes(disk.used_bytes) : 'n/a'), disk && disk.used_percent > 90 ? 'bad' : 'flat', { icon: 'storage' }));
+  host.appendChild(kpi('Domains', fmtNumber(totalDomains), 'flat', { icon: 'domain' }));
+  host.appendChild(kpi('Mailboxes', fmtNumber(totalMailboxes), 'flat', { icon: 'mailbox' }));
+  // /api/v1/admin/queue/summary returns {metrics: {pending, deferred, ...}} or
+  // the older scalar {queued, deferred, bounced, delivered}. Also accept
+  // rt.queue from /api/v1/admin/runtime which mirrors the metrics shape.
+  const queuePending = safeCount(queue && (queue.pending != null ? queue.pending : (queue.queued != null ? queue.queued : queue)));
+  const queueFailed  = safeCount(queue && (queue.failed != null ? queue.failed : queue.bounced));
+  const queueDeferred = safeCount(queue && queue.deferred);
+  host.appendChild(kpi('Queue', fmtNumber(queuePending) + ' pending', queueFailed > 0 ? 'warn' : 'flat', { icon: 'queue' }));
+  // Disk: prefer used_percent, then used_bytes, then Not available.
+  let diskText = 'Not available';
+  let diskTone = 'flat';
+  if (disk) {
+    if (typeof disk.used_percent === 'number') {
+      diskText = disk.used_percent + '% used';
+      diskTone = disk.used_percent > 90 ? 'bad' : (disk.used_percent > 70 ? 'warn' : 'info');
+    } else if (typeof disk.used_bytes === 'number') {
+      diskText = fmtBytes(disk.used_bytes) + ' used';
+    } else if (typeof disk.free_bytes === 'number') {
+      diskText = fmtBytes(disk.free_bytes) + ' free';
+    }
+  }
+  host.appendChild(kpi('Disk', diskText, diskTone, { icon: 'storage' }));
 }
 
 function kpi(label, value, kind, opts) {
@@ -292,10 +444,11 @@ async function loadSystemHealth(body) {
 
 async function loadBuild(body) {
   const rt = getRuntime() || {};
-  const version = rt.version || (rt.build && rt.build.version) || 'Not available';
-  const channel = rt.channel || (rt.build && rt.build.channel) || 'stable';
-  const uptime  = formatUptime(rt.uptime_seconds || rt.uptime || 0);
-  body.textContent = 'v' + version;
+  const version = asText(rt.version || (rt.build && rt.build.version) || 'Not available');
+  const channel = asText(rt.channel || (rt.build && rt.build.channel) || 'stable', 'stable');
+  const uptime  = formatUptime(safeCount(rt.uptime_seconds != null ? rt.uptime_seconds : rt.uptime));
+  // Never let a raw object leak into the value cell.
+  body.textContent = 'v' + String(version).replace(/^v/, '');
   body.classList.add('is-text');
   const root = body.closest('.stat-card');
   const note = root && root.querySelector('.stat-card-note');
@@ -303,7 +456,7 @@ async function loadBuild(body) {
     note.innerHTML = '';
     note.appendChild(el('span', { class: 'subtle', text: 'Channel ' }));
     note.appendChild(el('strong', { text: channel }));
-    note.appendChild(el('span', { class: 'subtle', text: ' · Uptime ' }));
+    note.appendChild(el('span', { class: 'subtle', text: ' \u00b7 Uptime ' }));
     note.appendChild(el('strong', { text: uptime }));
   }
 }
@@ -325,30 +478,30 @@ async function loadStorage(body) {
   const rt = getRuntime() || {};
   const cap = (rt && rt.capacity) || {};
   const disk = cap.disk || {};
-  if (!disk || (disk.free_bytes == null && disk.used_bytes == null && disk.total_bytes == null)) {
+  if (!disk || (disk.free_bytes == null && disk.used_bytes == null && disk.total_bytes == null && disk.used_percent == null)) {
     body.textContent = 'Not monitored';
     body.classList.add('is-text');
     return;
   }
-  const usedPct = disk.used_percent;
+  const usedPct = typeof disk.used_percent === 'number' ? disk.used_percent : null;
   let tone = 'info';
   if (typeof usedPct === 'number') {
     if (usedPct >= 90) tone = 'bad';
     else if (usedPct >= 70) tone = 'warn';
     else tone = 'good';
   }
-  body.textContent = (usedPct != null) ? (usedPct + '% used') : fmtBytes(disk.used_bytes || 0);
+  body.textContent = (usedPct != null) ? (usedPct + '% used') : (typeof disk.used_bytes === 'number' ? fmtBytes(disk.used_bytes) + ' used' : 'Not available');
   body.classList.add('is-text');
   const root = body.closest('.stat-card');
   if (root) root.setAttribute('data-kind', tone);
   const note = root && root.querySelector('.stat-card-note');
   if (note) {
     note.innerHTML = '';
-    if (disk.total_bytes != null) {
+    if (typeof disk.total_bytes === 'number') {
       note.appendChild(el('span', { class: 'subtle', text: 'Total ' }));
       note.appendChild(el('strong', { text: fmtBytes(disk.total_bytes) }));
     }
-    if (disk.free_bytes != null) {
+    if (typeof disk.free_bytes === 'number') {
       note.appendChild(el('span', { class: 'subtle', text: ' · Free ' }));
       note.appendChild(el('strong', { text: fmtBytes(disk.free_bytes) }));
     }
@@ -365,7 +518,7 @@ async function loadLicense(body) {
     body.classList.add('is-text');
     return;
   }
-  const mode = l.mode || (l.tier ? ('tier ' + l.tier) : 'offline');
+  const mode = asText(l.mode || (l.tier ? ('tier ' + l.tier) : 'offline'), 'offline');
   const valid = (l.valid === true) || (l.validation_state === 'valid');
   const expired = (l.expired === true);
   body.textContent = mode;
@@ -382,7 +535,7 @@ async function loadLicense(body) {
   if (note) {
     note.innerHTML = '';
     note.appendChild(el('span', { class: 'subtle', text: 'Validation ' }));
-    note.appendChild(el('strong', { text: valid ? 'valid' : (expired ? 'expired' : (l.validation_state || 'offline')) }));
+    note.appendChild(el('strong', { text: valid ? 'valid' : (expired ? 'expired' : asText(l.validation_state, 'offline')) }));
     if (l.expires_at && !isZeroDate(l.expires_at)) {
       note.appendChild(el('span', { class: 'subtle', text: ' · Expires ' }));
       note.appendChild(el('strong', { text: fmtShortDate(l.expires_at) }));
@@ -453,36 +606,43 @@ async function paintHealthCards(host) {
 async function loadQueue(body) {
   const rt = getRuntime() || {};
   let data = null;
+  // /api/v1/admin/runtime mirrors the queue metrics shape
   if (rt.queue && (rt.queue.pending != null || rt.queue.deferred != null || rt.queue.bounced != null || rt.queue.delivered != null)) {
     data = {
-      queued:    rt.queue.pending   || 0,
+      pending:   rt.queue.pending   || 0,
       deferred:  rt.queue.deferred  || 0,
       failed:    rt.queue.bounced   || 0,
       delivered: rt.queue.delivered || 0,
     };
   } else {
-    try { data = await apiGet('/api/v1/admin/queue/summary'); } catch (_) {}
+    // /api/v1/admin/queue/summary returns { metrics: { pending, deferred, ... } }.
+    try {
+      const r = await apiGet('/api/v1/admin/queue/summary');
+      data = (r && r.metrics) || r || null;
+    } catch (_) {}
   }
   if (!data) {
     body.textContent = 'Not monitored';
     body.classList.add('is-text');
     return;
   }
-  const queued = data.queued || data.queued_count || 0;
-  const failed = data.failed || data.failed_count || data.bounced || 0;
-  body.textContent = fmtNumber(queued) + ' queued';
+  const pending   = safeCount(data.pending);
+  const failed    = safeCount(data.failed != null ? data.failed : data.bounced);
+  const deferred  = safeCount(data.deferred);
+  const delivered = safeCount(data.delivered);
+  body.textContent = fmtNumber(pending) + ' pending';
   body.classList.add('is-text');
   const root = body.closest('.stat-card');
-  if (root) root.setAttribute('data-kind', failed > 0 ? 'warn' : (queued === 0 ? 'good' : 'info'));
+  if (root) root.setAttribute('data-kind', failed > 0 ? 'warn' : (pending === 0 ? 'good' : 'info'));
   const note = root && root.querySelector('.stat-card-note');
   if (note) {
     note.innerHTML = '';
     note.appendChild(el('span', { class: 'subtle', text: 'Deferred ' }));
-    note.appendChild(el('strong', { text: fmtNumber(data.deferred || 0) }));
-    note.appendChild(el('span', { class: 'subtle', text: ' · Bounced ' }));
+    note.appendChild(el('strong', { text: fmtNumber(deferred) }));
+    note.appendChild(el('span', { class: 'subtle', text: ' \u00b7 Bounced ' }));
     note.appendChild(el('strong', { text: fmtNumber(failed) }));
-    note.appendChild(el('span', { class: 'subtle', text: ' · Delivered ' }));
-    note.appendChild(el('strong', { text: fmtNumber(data.delivered || 0) }));
+    note.appendChild(el('span', { class: 'subtle', text: ' \u00b7 Delivered ' }));
+    note.appendChild(el('strong', { text: fmtNumber(delivered) }));
   }
 }
 
@@ -490,10 +650,12 @@ async function loadMailStats(body) {
   let data;
   try { data = await apiGet('/api/v1/admin/summary'); }
   catch (_) { body.textContent = 'Not monitored'; body.classList.add('is-text'); return; }
-  const stats = (data && (data.mail || data)) || {};
-  const domains = stats.domain_count || stats.domains || 0;
-  const mailboxes = stats.mailbox_count || stats.mailboxes || 0;
-  body.textContent = fmtNumber(domains) + ' domains';
+  // /api/v1/admin/summary returns nested objects; safeCount handles both.
+  const domains   = safeCount(data.domains);
+  const mailboxes = safeCount(data.mailboxes);
+  const active    = safeCount(data.mailboxes && data.mailboxes.active);
+  const suspended = safeCount(data.mailboxes && data.mailboxes.suspended);
+  body.textContent = fmtNumber(domains) + (domains === 1 ? ' domain' : ' domains');
   body.classList.add('is-text');
   const root = body.closest('.stat-card');
   if (root) root.setAttribute('data-kind', 'info');
@@ -502,10 +664,10 @@ async function loadMailStats(body) {
     note.innerHTML = '';
     note.appendChild(el('span', { class: 'subtle', text: 'Mailboxes ' }));
     note.appendChild(el('strong', { text: fmtNumber(mailboxes) }));
-    note.appendChild(el('span', { class: 'subtle', text: ' · Active ' }));
-    note.appendChild(el('strong', { text: fmtNumber(stats.active_count || stats.active || 0) }));
-    note.appendChild(el('span', { class: 'subtle', text: ' · Suspended ' }));
-    note.appendChild(el('strong', { text: fmtNumber(stats.suspended_count || stats.suspended || 0) }));
+    note.appendChild(el('span', { class: 'subtle', text: ' \u00b7 Active ' }));
+    note.appendChild(el('strong', { text: fmtNumber(active) }));
+    note.appendChild(el('span', { class: 'subtle', text: ' \u00b7 Suspended ' }));
+    note.appendChild(el('strong', { text: fmtNumber(suspended) }));
   }
 }
 

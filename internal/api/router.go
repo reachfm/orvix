@@ -704,6 +704,19 @@ admin.Get("/admin/settings/protocol/:protocol", r.h.ListProtocolSettings)
 	admin.Get("/monitoring/capacity", r.h.GetMonitoringCapacity)
 	admin.Get("/monitoring/snapshot", r.h.GetMonitoringSnapshot)
 	admin.Get("/monitoring/alert-providers", r.h.GetMonitoringProviders)
+	// Admin alert-delivery audit (ORVIX-ADMIN-ENTERPRISE-PARITY):
+	// read-only, reuses monitoring.Dispatcher.ListDeliveries so the
+	// secret-free contract stays aligned with the rest of the alert
+	// pipeline.
+	admin.Get("/monitoring/alert-deliveries", r.h.ListAlertDeliveries)
+	// Admin storage topology (ORVIX-ADMIN-ENTERPRISE-PARITY-G):
+	// real on-disk usage for mail/attachments/backups. No replica or
+	// shard controls; see docs/ORVIX_STALWART_ENTERPRISE_PARITY_AUDIT.md.
+	admin.Get("/admin/storage/volumes", r.h.ListStorageVolumes)
+	// Tenants read (ORVIX-ADMIN-ENTERPRISE-PARITY-D): surface the
+	// JWT-tenant row read-only so the admin "Branding" page knows
+	// what to render. Branding writes are CSRF-protected below.
+	admin.Get("/admin/tenants/current", r.h.GetAdminTenant)
 
 	// Auto-Heal
 	admin.Get("/heal/history", r.h.ListHealHistory)
@@ -835,6 +848,11 @@ admin.Get("/admin/settings/protocol/:protocol", r.h.ListProtocolSettings)
 	men.Delete("/backups/:id", r.h.LegacyGone)
 	// Monitoring v1: resolve an alert (CSRF-protected, admin role).
 	men.Post("/monitoring/alerts/:id/resolve", r.h.PostMonitoringAlertResolve)
+	// Tenants branding write (ORVIX-ADMIN-ENTERPRISE-PARITY-E):
+	// CSRF-protected, admin role. logo_url must be a public
+	// http(s) URL (safeExternalURL-validated in handler);
+	// primary_color must match a #RRGGBB CSS hex.
+	men.Patch("/admin/tenants/:id/branding", r.h.PatchAdminTenantBranding)
 	// Update Management v1: trigger a check or a runtime update
 	// (CSRF-protected, admin role). The actual script execution is
 	// single-flight: a second concurrent call returns 409 Conflict.

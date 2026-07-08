@@ -87,6 +87,14 @@ const GROUPS = [
     { route: 'monitoring/capacity', labelKey: 'sidebar.item.charts',        icon: 'charts'     },
     { route: 'monitoring/storage',  labelKey: 'sidebar.item.storageCharts', icon: 'storage'    },
     { route: 'monitoring/alert-providers', labelKey: 'sidebar.item.alertProviders', icon: 'alert' },
+    { route: 'observability',       labelKey: 'sidebar.item.observability', icon: 'monitoring' },
+    { route: 'alerts',              labelKey: 'sidebar.item.alerts',        icon: 'alert'      },
+    { route: 'storage-topology',    labelKey: 'sidebar.item.storageTopology', icon: 'storage' },
+  ]},
+
+  { id: 'tenancy', labelKey: 'sidebar.group.tenancy', icon: 'domain', items: [
+    { route: 'tenants',  labelKey: 'sidebar.item.tenants',  icon: 'domain' },
+    { route: 'branding', labelKey: 'sidebar.item.branding', icon: 'paint'  },
   ]},
 
   { id: 'logging', labelKey: 'sidebar.group.logging', icon: 'log', items: [
