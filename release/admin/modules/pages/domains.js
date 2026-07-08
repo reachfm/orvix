@@ -135,13 +135,14 @@ const DOMAIN_FIELDS = {
 
 export async function renderDomainsPage(root) {
   root.innerHTML = '';
-  const wrap = el('div', { class: 'page-inner' });
-  wrap.appendChild(el('div', { class: 'page-head' }, [
-    el('div', null, [
-      el('h2', { class: 'page-title', text: 'Domains' }),
-      el('p', { class: 'page-subtitle subtle', text: 'Provision, suspend, and audit mail domains.' }),
+  const wrap = el('div', { class: 'page-inner ops-page' });
+  wrap.appendChild(el('div', { class: 'ops-hero' }, [
+    el('div', { class: 'ops-hero-main' }, [
+      el('span', { class: 'ops-hero-eyebrow', text: 'Provisioning' }),
+      el('h2', { class: 'ops-hero-title', text: 'Domains' }),
+      el('p', { class: 'ops-hero-sub', text: 'Provision, suspend, and audit mail domains. Each domain has its own DNS records, plan, and limits.' }),
     ]),
-    el('div', { class: 'page-actions' }, [
+    el('div', { class: 'ops-hero-actions' }, [
       el('button', { class: 'btn ghost', type: 'button', text: 'Refresh',
         onclick: () => renderDomainsPage(root) }),
       // add-domain-btn is the class contract asserted by the
@@ -180,9 +181,16 @@ export async function renderDomainsPage(root) {
     body.innerHTML = '';
     const list = (data && (data.domains || data)) || [];
     if (!list.length) {
-      body.appendChild(el('div', { class: 'empty', text: 'No domains yet.' }));
-      body.appendChild(el('p', { class: 'subtle small',
-        text: 'Click "Add Domain" above to provision your first domain. Every field below persists to the backend.' }));
+      const empty = el('div', { class: 'empty-state' });
+      empty.appendChild(el('div', { class: 'empty-illustration', text: '⌖' }));
+      empty.appendChild(el('div', { class: 'empty-title', text: 'No domains yet' }));
+      empty.appendChild(el('div', { class: 'empty-hint',
+        text: 'Click "Add Domain" to provision your first domain. Each domain gets DNS records, plan, and per-domain limits.' }));
+      empty.appendChild(el('div', { class: 'empty-actions' }, [
+        el('button', { class: 'btn primary', type: 'button', text: 'Add Domain',
+          onclick: () => openCreate(() => renderDomainsPage(root)) }),
+      ]));
+      body.appendChild(empty);
       return;
     }
     body.appendChild(table({

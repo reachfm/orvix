@@ -17,7 +17,7 @@ import { applyAutoDir } from '../rtl.js';
 // page module. Keeps the contract honest — no fake claims.
 export function renderSecurityExtraPage(root, opts) {
   root.innerHTML = '';
-  const wrap = el('div', { class: 'page-inner' });
+  const wrap = el('div', { class: 'page-inner ops-page' });
   wrap.appendChild(el('div', { class: 'page-head' }, [
     el('div', null, [
       el('h2', { class: 'page-title', text: opts.title || 'Security' }),
@@ -51,7 +51,7 @@ export function renderSecurityExtraPage(root, opts) {
 // upload / issuance we only render a read-only snapshot.
 export async function renderSslPage(root) {
   root.innerHTML = '';
-  const wrap = el('div', { class: 'page-inner' });
+  const wrap = el('div', { class: 'page-inner ops-page' });
   wrap.appendChild(el('div', { class: 'page-head' }, [
     el('div', null, [
       el('h2', { class: 'page-title', text: 'SSL certificates' }),

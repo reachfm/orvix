@@ -42,7 +42,7 @@ let _allowPartial = false;  // user toggle
 
 export async function renderBulkImportPage(root) {
   root.innerHTML = '';
-  const wrap = el('div', { class: 'page-inner' });
+  const wrap = el('div', { class: 'page-inner ops-page' });
   wrap.appendChild(el('div', { class: 'page-head' }, [
     el('div', null, [
       el('h2', { class: 'page-title', text: t('bulk.heading') }),
