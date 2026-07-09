@@ -282,13 +282,92 @@ ORVIX_RUN_DB_LOADTEST=1 go test -v -timeout 5m ./internal/storage/loadtest/ -run
 
 ---
 
-## 11. Next Phase: Schema Compatibility + Load Test
+## 11. DB-2: Real Benchmark Harness (this PR)
+
+### What was added
+
+The scaffold in `internal/storage/loadtest/` (DB-1) has been upgraded to
+a **real database-backed benchmark harness**.  The harness now opens a
+live SQLite or PostgreSQL connection via env vars and inserts real rows
+into an isolated `loadtest_coremail_messages` table that mirrors the
+production `coremail_messages` schema and query patterns.
+
+### What is real DB-backed
+
+| Test | Description | Rows (default) |
+|------|-------------|----------------|
+| `TestPostgresSchemaCompat` | Creates benchmark table + indexes, inserts row, verifies count and indexes | 1 |
+| `TestBenchmarkInsert` | Batch-inserts rows, reports sustained insert rate | 10,000 |
+| `TestBenchmarkListLatest` | Concurrent "latest 50 per mailbox" queries, reports avg latency | 10,000+ |
+| `TestBenchmarkCursorPagination` | Cursor-based `WHERE id < cursor ORDER BY id DESC LIMIT 50` pagination | 10,000+ |
+| `TestBenchmarkFlagUpdates` | Concurrent seen/deleted flag updates, reports avg per-update latency | 10,000+ |
+
+### What remains scaffold-only
+
+`TestScaffoldConfig` and `TestScaffoldSelfTests` remain as in-memory
+harness-primitive checks.  They do not connect to a database.
+
+### Env vars
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ORVIX_RUN_DB_LOADTEST` | (unset → skip) | Set to `1` to enable heavy tests |
+| `ORVIX_DB_DRIVER` | `sqlite` | `sqlite` or `postgres` |
+| `ORVIX_DB_DSN` | auto (sqlite memory) | Full DSN for Postgres; sqlite path for SQLite |
+| `ORVIX_LOADTEST_ROWS` | `10000` | Total rows to insert in insert/list tests |
+| `ORVIX_LOADTEST_MAILBOXES` | `10` | Number of distinct mailboxes |
+| `ORVIX_LOADTEST_BATCH_SIZE` | `500` | Rows per INSERT batch |
+
+### How to run
+
+```bash
+# SQLite smoke (10k rows, in-memory):
+ORVIX_RUN_DB_LOADTEST=1 \
+  go test -v -timeout 5m ./internal/storage/loadtest/ -run "SchemaCompat|Benchmark"
+
+# SQLite 3M staging (heavy):
+ORVIX_RUN_DB_LOADTEST=1 ORVIX_LOADTEST_ROWS=3000000 \
+  go test -v -timeout 2h ./internal/storage/loadtest/ -run "BenchmarkInsert"
+
+# PostgreSQL staging:
+ORVIX_RUN_DB_LOADTEST=1 ORVIX_DB_DRIVER=postgres \
+  ORVIX_DB_DSN="host=HOST port=5432 user=orvix dbname=orvix password=PASS sslmode=disable" \
+  ORVIX_LOADTEST_ROWS=10000 \
+  go test -v -timeout 5m ./internal/storage/loadtest/ -run "SchemaCompat|Benchmark"
+```
+
+### Known limitations
+
+- The benchmark table is `loadtest_coremail_messages` — an isolated
+  mirror of the production schema.  It does NOT use foreign keys,
+  DEFAULT expressions that differ per driver, or soft-delete columns.
+- Indexes are created on `(mailbox_id, received_date DESC)`,
+  `(mailbox_id, folder_id, id)`, and `(folder_id, id)` — matching the
+  production query patterns.
+- The PostgreSQL path uses `BIGSERIAL PRIMARY KEY` and `$1`-style
+  placeholders; the SQLite path uses `INTEGER PRIMARY KEY AUTOINCREMENT`
+  and `?`-style placeholders.
+- Partial indexes, `PRAGMA`, and SQLite-specific column introspection
+  are NOT used in the benchmark path.
+- `MigrateAllRaw()` remains SQLite-only and requires a separate
+  `MigrateAllPostgres()` in a later phase.
+
+### Clear statement
+
+**3M support is NOT yet proven.**  The 3M staging benchmark has not
+been executed on real SSD-backed PostgreSQL hardware.  This PR adds
+the harness to make that measurement possible; the actual metrics
+will be recorded when staging hardware is available.
+
+---
+
+## 12. Next Phase: PostgreSQL Production Migration
 
 1. Add `MigrateAllPostgres()` that runs CREATE TABLE statements without SQLite-specific syntax.
 2. Add a test that runs the full suite with `ORVIX_DB_DRIVER=postgres`.
-3. Wire the `internal/storage/loadtest/` scaffold to a real database handle (DB-2).
-4. Run the real 3M-message benchmark against PostgreSQL on staging hardware.
-5. Tune pass/fail thresholds based on real measurements.
+3. Run `ORVIX_LOADTEST_ROWS=3000000` benchmark against PostgreSQL staging.
+4. Tune pass/fail thresholds based on real measurements.
+5. Build migration tool: `cmd/orvix migrate --from sqlite --to postgres`.
 6. Report actual numbers here.
 
 ---
