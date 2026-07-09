@@ -366,7 +366,7 @@ will be recorded when staging hardware is available.
 ### What was added
 
 `MigrateAllPostgres()` in `internal/models/postgres_migrations.go` is the
-PostgreSQL-native counterpart to `MigrateAllRaw()`.  It creates **12 core
+PostgreSQL-native counterpart to `MigrateAllRaw()`.  It creates **17 core
 production metadata tables** with proper PostgreSQL DDL:
 
 | Table | Keys |
@@ -388,7 +388,7 @@ production metadata tables** with proper PostgreSQL DDL:
 
 | SQLite pattern | PostgreSQL equivalent | Affected |
 |----------------|----------------------|----------|
-| `INTEGER PRIMARY KEY AUTOINCREMENT` | `BIGSERIAL PRIMARY KEY` | All 12 tables |
+| `INTEGER PRIMARY KEY AUTOINCREMENT` | `BIGSERIAL PRIMARY KEY` | All 17 tables |
 | `DATETIME` | `TIMESTAMP` | All timestamp columns |
 | `datetime('now')` | `NOW()` | Default values |
 | `INTEGER` for boolean flags | `BOOLEAN` | ~40 flag columns |
@@ -408,7 +408,9 @@ migration/backup secrets, uploaded certificates — all deferred to DB-4.
 ### Schema smoke test
 
 `TestPostgresProductionSchemaCompat` in `models_test.go`:
-- Creates all 12 tables via `MigrateAllPostgres()`
+- Creates all 17 tables via `MigrateAllPostgres()` inside an isolated schema (`orvix_pg_test_<timestamp>`)
+- Uses partial unique indexes (`WHERE deleted_at IS NULL`) for soft-delete uniqueness
+- Cleans up with `DROP SCHEMA ... CASCADE` (never drops public tables)
 - Verifies tables exist via `information_schema.tables`
 - Verifies 11 critical indexes via `pg_indexes`
 - Inserts and queries a representative row
@@ -470,7 +472,7 @@ migration/backup secrets, uploaded certificates — all deferred to DB-4.
 ## 14. Clear Statement
 
 **RC4 is still the SQLite default.**  PostgreSQL schema compatibility
-exists for 12 core tables but has not been deployed to production.
+exists for 17 core tables but has not been deployed to production.
 Full 45-table migration, 3M staging benchmark, and migration tooling
 are required before any production PostgreSQL deployment.
 

@@ -2,6 +2,7 @@ package models
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -347,8 +348,13 @@ func TestCriticalIndexesExist(t *testing.T) {
 }
 
 // TestPostgresProductionSchemaCompat creates the PostgreSQL-native
-// production schema via MigrateAllPostgres and verifies all 12 core
-// tables and their indexes exist.  Runs only when:
+// production schema via MigrateAllPostgres inside an isolated schema
+// and verifies all 17 core tables and their indexes exist.
+//
+// NEVER drops public tables — uses an isolated schema:
+//   orvix_pg_test_<timestamp>
+//
+// Runs only when:
 //
 //	ORVIX_RUN_POSTGRES_SCHEMA_TEST=1
 //	ORVIX_DB_DRIVER=postgres
@@ -386,26 +392,30 @@ func TestPostgresProductionSchemaCompat(t *testing.T) {
 	}
 	defer sqlDB.Close()
 
-	// Drop any leftover tables from a previous run (safe: these are
-	// the same tables MigrateAllPostgres creates).
-	dropOrder := []string{
-		"security_events", "mfa_recovery_codes", "coremail_mailboxes",
-		"mailboxes", "domains", "users", "coremail_audit",
-		"sessions", "api_keys", "tenants", "feature_flags", "licenses",
+	// Create an isolated test schema so we never touch public tables.
+	testSchema := fmt.Sprintf("orvix_pg_test_%d", time.Now().UnixNano())
+	_, err = sqlDB.Exec(`CREATE SCHEMA IF NOT EXISTS ` + testSchema)
+	if err != nil {
+		t.Fatalf("create schema %s: %v", testSchema, err)
 	}
-	for _, tbl := range dropOrder {
-		sqlDB.Exec(`DROP TABLE IF EXISTS ` + tbl + ` CASCADE`)
+	_, err = sqlDB.Exec(`SET search_path TO ` + testSchema)
+	if err != nil {
+		t.Fatalf("set search_path: %v", err)
 	}
+	defer func() {
+		sqlDB.Exec(`SET search_path TO public`)
+		sqlDB.Exec(`DROP SCHEMA IF EXISTS ` + testSchema + ` CASCADE`)
+	}()
 
 	if err := MigrateAllPostgres(db); err != nil {
 		t.Fatalf("MigrateAllPostgres: %v", err)
 	}
 
-	// Verify all 12 core tables exist.
-	if err := PostgresSchemaCompatible(db); err != nil {
+	// Verify all 17 core tables exist in the test schema.
+	if err := PostgresSchemaCompatible(db, testSchema); err != nil {
 		t.Fatalf("PostgresSchemaCompatible: %v", err)
 	}
-	t.Log("all 12 core postgres tables created and verified")
+	t.Logf("all 17 core postgres tables created in schema %s and verified", testSchema)
 
 	// Insert a representative row to prove DML works.
 	_, err = sqlDB.Exec(
@@ -424,36 +434,52 @@ func TestPostgresProductionSchemaCompat(t *testing.T) {
 		t.Errorf("expected slug=smoke-tenant, got %s", slug)
 	}
 
-	// Verify key indexes exist.
+	// Verify key indexes exist in the test schema.
 	pgIndexes := []string{
+		// Partial unique indexes for soft-delete
+		"uq_tenants_slug_active",
+		"uq_tenants_domain_active",
+		"uq_users_email_active",
+		"uq_domains_domain_active",
+		"uq_mailboxes_email_active",
+		// Simple unique indexes
+		"uq_licenses_key_hash",
+		"uq_feature_flags_name",
+		"uq_api_keys_key_hash",
+		"uq_sessions_token_hash",
+		"uq_coremail_messages_message_id",
+		// Standard indexes
 		"idx_tenants_deleted_at",
 		"idx_users_email",
 		"idx_users_deleted_at",
-		"idx_domains_tenant_id",
-		"idx_mailboxes_tenant_id",
-		"idx_sessions_token_hash",
 		"idx_sessions_user_id",
 		"idx_coremail_audit_timestamp",
 		"idx_coremail_audit_actor",
 		"idx_security_events_email",
 		"idx_security_events_event_type",
+		// Message indexes
+		"idx_cm_messages_mailbox_id",
+		"idx_cm_messages_mailbox_folder_id",
+		"idx_cm_messages_mailbox_date",
+		"idx_cm_messages_flags",
+		// Queue indexes
+		"idx_pg_queue_lease",
+		"idx_pg_queue_tenant",
+		// Delivery attempt indexes
+		"idx_pg_del_attempts_entry",
 	}
 	for _, idxName := range pgIndexes {
 		var count int
 		if err := sqlDB.QueryRow(
-			`SELECT COUNT(*) FROM pg_indexes WHERE indexname = $1`, idxName,
+			`SELECT COUNT(*) FROM pg_indexes WHERE indexname = $1 AND schemaname = $2`,
+			idxName, testSchema,
 		).Scan(&count); err != nil {
 			t.Errorf("check index %s: %v", idxName, err)
 		} else if count == 0 {
-			t.Errorf("index %s not found", idxName)
+			t.Errorf("index %s not found in schema %s", idxName, testSchema)
 		} else {
 			t.Logf("index %s verified", idxName)
 		}
-	}
-
-	// Clean up.
-	for _, tbl := range dropOrder {
-		sqlDB.Exec(`DROP TABLE IF EXISTS ` + tbl + ` CASCADE`)
 	}
 
 	t.Log("postgres production schema smoke: PASS")
