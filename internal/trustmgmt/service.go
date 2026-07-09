@@ -35,3 +35,17 @@ func (s *Service) ClearLockout(ctx context.Context, key string) error {
 	}
 	return fmt.Errorf("lockout not found: %s", key)
 }
+
+// RecordAuth records an authentication event (success or failure).
+func (s *Service) RecordAuth(ctx context.Context, email, ip string, success bool) {
+	if success {
+		s.engine.RecordAuthSuccess(ip)
+	} else {
+		s.engine.RecordAuthFailure(ip)
+	}
+}
+
+// IsLockedOut returns true if the given key (ip or email) is currently locked out.
+func (s *Service) IsLockedOut(ctx context.Context, key string) bool {
+	return s.engine.IsLockedOut(key)
+}

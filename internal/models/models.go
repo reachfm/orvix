@@ -208,10 +208,22 @@ type ProvisionedDomain struct {
 }
 
 // Session represents a user session.
+//
+// The Role and Email columns are server-persisted at login time and
+// restored by the auth middleware on every request — the opaque
+// HttpOnly cookie is the only thing the client holds. Storing the
+// server-derived role on the session row removes the need to look up
+// the users table on every request and, more importantly, lets the
+// middleware restore the real role without trusting any
+// client-supplied claim. Legacy rows written before this column
+// existed are refused by ValidateOpaqueSession so a missing role
+// never downgrades a real admin to a per-mailbox user.
 type Session struct {
 	Common
 	UserID    uint      `gorm:"index;not null" json:"user_id"`
 	TokenHash string    `gorm:"uniqueIndex;not null" json:"token_hash"`
+	Role      string    `gorm:"not null;default:''" json:"role"`
+	Email     string    `gorm:"not null;default:''" json:"email"`
 	IP        string    `gorm:"not null" json:"ip"`
 	UserAgent string    `gorm:"type:text" json:"user_agent"`
 	ExpiresAt time.Time `gorm:"not null" json:"expires_at"`
@@ -505,6 +517,8 @@ func MigrateAllRaw(db *gorm.DB) error {
 			deleted_at DATETIME,
 			user_id INTEGER NOT NULL,
 			token_hash TEXT NOT NULL UNIQUE,
+			role TEXT NOT NULL DEFAULT '',
+			email TEXT NOT NULL DEFAULT '',
 			ip TEXT NOT NULL,
 			user_agent TEXT,
 			expires_at DATETIME NOT NULL
@@ -858,8 +872,17 @@ func MigrateAllRaw(db *gorm.DB) error {
 			used_at DATETIME,
 			created_at DATETIME NOT NULL DEFAULT (datetime('now'))
 		)`,
+		// Security events for login protection.
+		`CREATE TABLE IF NOT EXISTS security_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			ip TEXT NOT NULL DEFAULT '',
+			email TEXT NOT NULL DEFAULT '',
+			event_type TEXT NOT NULL DEFAULT '',
+			count INTEGER NOT NULL DEFAULT 1,
+			created_at DATETIME NOT NULL DEFAULT (datetime('now'))
+		)`,
 		// Admin Enterprise v2 — Acceptance & Routing
-		// rules. Distinct from coremail_acl_rules (which is
+// rules. Distinct from coremail_acl_rules (which is
 		// the per-mailbox access list at the protocol layer);
 		// these are admin-scoped "what should I do when this
 		// sender sends to this recipient" decisions. Each
@@ -1108,6 +1131,9 @@ func MigrateAllRaw(db *gorm.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_migration_sources_tenant ON coremail_migration_sources(tenant_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_backup_targets_tenant ON coremail_backup_targets(tenant_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_uploaded_certs_tenant ON coremail_uploaded_certificates(tenant_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_security_events_email ON security_events(email)`,
+		`CREATE INDEX IF NOT EXISTS idx_security_events_event_type ON security_events(event_type)`,
+		`CREATE INDEX IF NOT EXISTS idx_security_events_created ON security_events(created_at)`,
 	}
 
 	// Execute index creation statements

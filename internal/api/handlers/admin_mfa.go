@@ -368,11 +368,21 @@ func (h *Handler) MFALoginVerify(c fiber.Ctx) error {
 		h.writeAuditLog(c, "mfa.login.totp", fmt.Sprintf("user_id:%d", userID))
 	}
 
-	// MFA passed — issue real tokens.
+	// MFA passed — issue tokens.
 	var userRole string
-	err = sqlDB.QueryRow("SELECT role FROM users WHERE id = ?", userID).Scan(&userRole)
+	var userEmail string
+	err = sqlDB.QueryRow("SELECT role, email FROM users WHERE id = ?", userID).Scan(&userRole, &userEmail)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "user lookup failed"})
+	}
+
+	// Issue opaque session cookie alongside JWT for transition.
+	// Cookie issuance is the source of truth for browser auth; if
+	// the store refuses the write we refuse the login rather than
+	// return success without a usable session.
+	if err := h.issueLoginSession(c, userID, auth.Role(userRole), userEmail); err != nil {
+		h.logger.Error("failed to issue login session", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authentication failed"})
 	}
 
 	accessToken, err := h.auth.GenerateAccessToken(userID, auth.Role(userRole))

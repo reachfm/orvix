@@ -285,8 +285,9 @@ func splitHash(encoded string) []string {
 	return nil
 }
 
-// Middleware returns a Fiber middleware that validates JWT access tokens.
-// If the request was already authenticated via API key (auth_method set), it skips JWT validation.
+// Middleware returns a Fiber middleware that validates JWT access tokens
+// or opaque session cookies. If the request was already authenticated via
+// API key (auth_method set), it skips validation.
 func (a *Authenticator) Middleware() fiber.Handler {
 	return func(c fiber.Ctx) error {
 		if c.Locals("auth_method") != nil {
@@ -301,23 +302,39 @@ func (a *Authenticator) Middleware() fiber.Handler {
 			}
 		}
 
-		if token == "" {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"error": "missing authentication token",
-			})
+		if token != "" {
+			userID, role, err := a.ValidateAccessToken(token)
+			if err == nil {
+				c.Locals("user_id", userID)
+				c.Locals("role", role)
+				return c.Next()
+			}
 		}
 
-		userID, role, err := a.ValidateAccessToken(token)
-		if err != nil {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"error": "invalid or expired token",
-			})
+		// Fall back to opaque session cookie. The session row
+		// stores the user id, the role, and the email captured at
+		// login time so middleware can restore every one of them
+		// without trusting any client-supplied claim. The role
+		// restoration is the contract the /api/v1/internal/* super
+		// admin gate and the /api/v1/admin/* admin gate both rely
+		// on; a hard-coded "role: user" fallback would silently
+		// open every gated route.
+		sessionToken := c.Cookies("__Host-orvix_session")
+		if sessionToken != "" {
+			userID, role, email, err := a.ValidateOpaqueSession(sessionToken)
+			if err == nil {
+				c.Locals("user_id", userID)
+				c.Locals("role", role)
+				if email != "" {
+					c.Locals("email", email)
+				}
+				return c.Next()
+			}
 		}
 
-		c.Locals("user_id", userID)
-		c.Locals("role", role)
-
-		return c.Next()
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "missing or invalid authentication token",
+		})
 	}
 }
 
@@ -395,6 +412,98 @@ func (a *Authenticator) GenerateMFAChallengeToken(userID uint) (string, error) {
 // ValidateMFAChallengeToken validates an MFA challenge token and
 // returns the user ID. Returns an error if the token is invalid,
 // expired, or is not an MFA challenge token.
+// OpaqueSessionTTL is the 30-minute idle TTL applied to opaque
+// HttpOnly session cookies. The session is renewed on every
+// authenticated request so an actively-used browser stays signed in
+// while a forgotten browser expires.
+const OpaqueSessionTTL = 30 * time.Minute
+
+// GenerateOpaqueSession creates an opaque session token, stores its
+// SHA-256 hash server-side with a 30-minute idle TTL along with the
+// caller-supplied role and email (so middleware can restore the real
+// role on every request without trusting the client), and returns the
+// raw token for use in the HttpOnly cookie. The raw token is never
+// persisted — only its SHA-256 hash is written to the database, so a
+// DB read alone cannot replay a session.
+//
+// role MUST be the server-derived role for the user (looked up from
+// the users table at login time). It is the authoritative source the
+// middleware reads back; passing the client's claim would defeat the
+// purpose. email is the canonical user email and is included so
+// future /me and audit calls do not need a second DB roundtrip.
+func (a *Authenticator) GenerateOpaqueSession(userID uint, role Role, email string) (string, error) {
+	if userID == 0 {
+		return "", fmt.Errorf("generate opaque session: userID is required")
+	}
+	if role == "" {
+		return "", fmt.Errorf("generate opaque session: role is required")
+	}
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate session token: %w", err)
+	}
+	token := hex.EncodeToString(b)
+	tokenHash := fmt.Sprintf("%x", sha256.Sum256([]byte(token)))
+
+	expiresAt := time.Now().Add(OpaqueSessionTTL)
+
+	session := struct {
+		UserID    uint
+		TokenHash string
+		Role      string
+		Email     string
+		ExpiresAt time.Time
+	}{
+		UserID:    userID,
+		TokenHash: tokenHash,
+		Role:      string(role),
+		Email:     email,
+		ExpiresAt: expiresAt,
+	}
+
+	if err := a.db.Table("sessions").Create(&session).Error; err != nil {
+		return "", fmt.Errorf("store session: %w", err)
+	}
+
+	return token, nil
+}
+
+// ValidateOpaqueSession validates an opaque session token by looking
+// up its SHA-256 hash in the sessions table. On success it returns
+// the user ID, the server-persisted role, and the email so the
+// middleware can populate c.Locals("role") and c.Locals("email")
+// with the same values the session was created with. A row missing
+// role (legacy data from before the column existed) is treated as
+// expired so the browser is forced to re-authenticate through the
+// login flow — the response always restores the real role, never a
+// guess.
+func (a *Authenticator) ValidateOpaqueSession(token string) (uint, Role, string, error) {
+	tokenHash := fmt.Sprintf("%x", sha256.Sum256([]byte(token)))
+
+	var session struct {
+		UserID    uint
+		Role      string
+		Email     string
+		ExpiresAt time.Time
+	}
+
+	if err := a.db.Table("sessions").
+		Where("token_hash = ? AND expires_at > ?", tokenHash, time.Now()).
+		First(&session).Error; err != nil {
+		return 0, "", "", ErrSessionExpired
+	}
+
+	// Defensive: refuse to honour sessions persisted before the
+	// role column existed. Returning ErrSessionExpired forces the
+	// caller to re-issue a fresh session, after which every
+	// request will restore the real role.
+	if session.Role == "" {
+		return 0, "", "", ErrSessionExpired
+	}
+
+	return session.UserID, Role(session.Role), session.Email, nil
+}
+
 func (a *Authenticator) ValidateMFAChallengeToken(tokenString string) (uint, error) {
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {
