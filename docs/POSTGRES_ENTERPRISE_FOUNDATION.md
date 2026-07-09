@@ -366,7 +366,7 @@ will be recorded when staging hardware is available.
 ### What was added
 
 `MigrateAllPostgres()` in `internal/models/postgres_migrations.go` is the
-PostgreSQL-native counterpart to `MigrateAllRaw()`.  It creates **17 core
+PostgreSQL-native counterpart to `MigrateAllRaw()`.  It creates **37 core
 production metadata tables** with proper PostgreSQL DDL:
 
 | Table | Keys |

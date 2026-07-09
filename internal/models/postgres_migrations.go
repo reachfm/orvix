@@ -362,6 +362,330 @@ func postgresTables() []string {
 			worker_id TEXT NOT NULL DEFAULT '',
 			attempted_at TIMESTAMP NOT NULL DEFAULT NOW()
 		)`,
+
+		// --- Expanded tables (DB-4 readiness) ---
+
+		// Resellers
+		`CREATE TABLE IF NOT EXISTS resellers (
+			id BIGSERIAL PRIMARY KEY,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			deleted_at TIMESTAMP,
+			name TEXT NOT NULL,
+			email TEXT NOT NULL,
+			password_hash TEXT NOT NULL,
+			max_tenants INTEGER DEFAULT 50,
+			max_domains INTEGER DEFAULT 500,
+			max_mailboxes INTEGER DEFAULT 10000,
+			commission DOUBLE PRECISION DEFAULT 0.0,
+			active BOOLEAN DEFAULT true
+		)`,
+
+		// LDAP configs
+		`CREATE TABLE IF NOT EXISTS l_dap_configs (
+			id BIGSERIAL PRIMARY KEY,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			deleted_at TIMESTAMP,
+			tenant_id INTEGER NOT NULL,
+			host TEXT NOT NULL,
+			port INTEGER DEFAULT 389,
+			base_dn TEXT NOT NULL,
+			bind_dn TEXT NOT NULL,
+			bind_password TEXT NOT NULL,
+			user_filter TEXT DEFAULT '(objectClass=person)',
+			sync_enabled BOOLEAN DEFAULT false,
+			last_sync TIMESTAMP
+		)`,
+
+		// SSO configs
+		`CREATE TABLE IF NOT EXISTS s_s_o_configs (
+			id BIGSERIAL PRIMARY KEY,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			deleted_at TIMESTAMP,
+			tenant_id INTEGER NOT NULL,
+			provider TEXT NOT NULL,
+			client_id TEXT NOT NULL,
+			client_secret TEXT NOT NULL,
+			issuer_url TEXT,
+			enabled BOOLEAN DEFAULT false
+		)`,
+
+		// Alert configs
+		`CREATE TABLE IF NOT EXISTS alert_configs (
+			id BIGSERIAL PRIMARY KEY,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			deleted_at TIMESTAMP,
+			tenant_id INTEGER NOT NULL,
+			smtp_enabled BOOLEAN DEFAULT false,
+			smtp_server TEXT,
+			smtp_port INTEGER DEFAULT 587,
+			smtp_username TEXT,
+			smtp_password TEXT,
+			smtp_from TEXT,
+			webhook_enabled BOOLEAN DEFAULT false,
+			webhook_url TEXT,
+			alert_on_failed_login BOOLEAN DEFAULT true,
+			alert_on_suspicious_key BOOLEAN DEFAULT true
+		)`,
+
+		// Provisioned domains
+		`CREATE TABLE IF NOT EXISTS provisioned_domains (
+			id BIGSERIAL PRIMARY KEY,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			deleted_at TIMESTAMP,
+			domain TEXT NOT NULL,
+			plan TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			provisioned_by INTEGER NOT NULL,
+			metadata TEXT
+		)`,
+
+		// CoreMail domains
+		`CREATE TABLE IF NOT EXISTS coremail_domains (
+			id BIGSERIAL PRIMARY KEY,
+			name TEXT NOT NULL,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			reseller_id INTEGER NOT NULL DEFAULT 0,
+			status TEXT NOT NULL DEFAULT 'active',
+			plan TEXT NOT NULL DEFAULT 'smb',
+			description TEXT NOT NULL DEFAULT '',
+			max_mailboxes INTEGER NOT NULL DEFAULT 0,
+			max_aliases INTEGER NOT NULL DEFAULT 0,
+			max_quota_mb INTEGER NOT NULL DEFAULT 0,
+			dkim_enabled BOOLEAN NOT NULL DEFAULT false,
+			dkim_selector TEXT NOT NULL DEFAULT '',
+			dmarc_enabled BOOLEAN NOT NULL DEFAULT false,
+			mtasts_enabled BOOLEAN NOT NULL DEFAULT false,
+			catchall_address TEXT NOT NULL DEFAULT '',
+			abuse_contact TEXT NOT NULL DEFAULT '',
+			labels TEXT NOT NULL DEFAULT '',
+			mailbox_count INTEGER NOT NULL DEFAULT 0,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			deleted_at TIMESTAMP
+		)`,
+
+		// CoreMail aliases
+		`CREATE TABLE IF NOT EXISTS coremail_aliases (
+			id BIGSERIAL PRIMARY KEY,
+			domain_id INTEGER NOT NULL,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			from_addr TEXT NOT NULL,
+			to_addr TEXT NOT NULL,
+			active BOOLEAN NOT NULL DEFAULT true,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			deleted_at TIMESTAMP
+		)`,
+
+		// CoreMail account classes
+		`CREATE TABLE IF NOT EXISTS coremail_account_classes (
+			id BIGSERIAL PRIMARY KEY,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			name TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			default_quota_mb INTEGER NOT NULL DEFAULT 1024,
+			max_quota_mb INTEGER NOT NULL DEFAULT 5120,
+			max_send_per_hour INTEGER NOT NULL DEFAULT 500,
+			max_recv_per_hour INTEGER NOT NULL DEFAULT 5000,
+			allow_external_forwarding BOOLEAN NOT NULL DEFAULT true,
+			allow_imap BOOLEAN NOT NULL DEFAULT true,
+			allow_pop3 BOOLEAN NOT NULL DEFAULT true,
+			allow_jmap BOOLEAN NOT NULL DEFAULT true,
+			allow_webmail BOOLEAN NOT NULL DEFAULT true,
+			is_admin_class BOOLEAN NOT NULL DEFAULT false,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			deleted_at TIMESTAMP
+		)`,
+
+		// CoreMail admin groups
+		`CREATE TABLE IF NOT EXISTS coremail_admin_groups (
+			id BIGSERIAL PRIMARY KEY,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			name TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			grants TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			deleted_at TIMESTAMP
+		)`,
+
+		// CoreMail admin group members
+		`CREATE TABLE IF NOT EXISTS coremail_admin_group_members (
+			id BIGSERIAL PRIMARY KEY,
+			group_id INTEGER NOT NULL,
+			user_id INTEGER NOT NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW()
+		)`,
+
+		// CoreMail ACL rules
+		`CREATE TABLE IF NOT EXISTS coremail_acl_rules (
+			id BIGSERIAL PRIMARY KEY,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			scope TEXT NOT NULL DEFAULT 'global',
+			scope_target TEXT NOT NULL DEFAULT '',
+			action TEXT NOT NULL DEFAULT 'allow',
+			protocol TEXT NOT NULL DEFAULT 'all',
+			source TEXT NOT NULL DEFAULT '',
+			priority INTEGER NOT NULL DEFAULT 100,
+			note TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			deleted_at TIMESTAMP
+		)`,
+
+		// CoreMail quarantine index
+		`CREATE TABLE IF NOT EXISTS coremail_quarantine_index (
+			id BIGSERIAL PRIMARY KEY,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			message_id TEXT NOT NULL,
+			recipient TEXT NOT NULL DEFAULT '',
+			sender TEXT NOT NULL DEFAULT '',
+			subject TEXT NOT NULL DEFAULT '',
+			reason TEXT NOT NULL DEFAULT '',
+			severity TEXT NOT NULL DEFAULT 'low',
+			status TEXT NOT NULL DEFAULT 'held',
+			resolved_at TIMESTAMP,
+			resolved_by TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT NOW()
+		)`,
+
+		// CoreMail DKIM config
+		`CREATE TABLE IF NOT EXISTS coremail_dkim_config (
+			id BIGSERIAL PRIMARY KEY,
+			domain TEXT NOT NULL,
+			selector TEXT NOT NULL DEFAULT 'default',
+			private_key_pem TEXT NOT NULL,
+			enabled BOOLEAN NOT NULL DEFAULT true,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+		)`,
+
+		// CoreMail acceptance rules
+		`CREATE TABLE IF NOT EXISTS coremail_acceptance_rules (
+			id BIGSERIAL PRIMARY KEY,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			name TEXT NOT NULL DEFAULT '',
+			priority INTEGER NOT NULL DEFAULT 100,
+			enabled BOOLEAN NOT NULL DEFAULT true,
+			scope TEXT NOT NULL DEFAULT 'global',
+			scope_target TEXT NOT NULL DEFAULT '',
+			sender_pattern TEXT NOT NULL DEFAULT '',
+			recipient_pattern TEXT NOT NULL DEFAULT '',
+			source_ip_cidr TEXT NOT NULL DEFAULT '',
+			action TEXT NOT NULL DEFAULT 'accept',
+			redirect_to TEXT NOT NULL DEFAULT '',
+			note TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			deleted_at TIMESTAMP
+		)`,
+
+		// CoreMail incoming message rules
+		`CREATE TABLE IF NOT EXISTS coremail_incoming_msg_rules (
+			id BIGSERIAL PRIMARY KEY,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			name TEXT NOT NULL DEFAULT '',
+			priority INTEGER NOT NULL DEFAULT 100,
+			enabled BOOLEAN NOT NULL DEFAULT true,
+			field TEXT NOT NULL DEFAULT 'subject',
+			operator TEXT NOT NULL DEFAULT 'contains',
+			value TEXT NOT NULL DEFAULT '',
+			action TEXT NOT NULL DEFAULT 'move',
+			action_target TEXT NOT NULL DEFAULT '',
+			apply_to TEXT NOT NULL DEFAULT 'all',
+			stop_processing BOOLEAN NOT NULL DEFAULT false,
+			note TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			deleted_at TIMESTAMP
+		)`,
+
+		// CoreMail migration sources
+		`CREATE TABLE IF NOT EXISTS coremail_migration_sources (
+			id BIGSERIAL PRIMARY KEY,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			name TEXT NOT NULL,
+			kind TEXT NOT NULL DEFAULT 'imap',
+			host TEXT NOT NULL DEFAULT '',
+			port INTEGER NOT NULL DEFAULT 993,
+			username TEXT NOT NULL DEFAULT '',
+			use_tls BOOLEAN NOT NULL DEFAULT true,
+			allow_insecure BOOLEAN NOT NULL DEFAULT false,
+			default_base_folder TEXT NOT NULL DEFAULT 'INBOX',
+			verify_hostname TEXT NOT NULL DEFAULT '',
+			note TEXT NOT NULL DEFAULT '',
+			has_secret BOOLEAN NOT NULL DEFAULT false,
+			last_test_status TEXT NOT NULL DEFAULT '',
+			last_test_at TIMESTAMP,
+			last_test_message TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			deleted_at TIMESTAMP
+		)`,
+
+		// CoreMail migration source secrets (PK = FK identity, no auto-gen)
+		`CREATE TABLE IF NOT EXISTS coremail_migration_source_secrets (
+			source_id BIGINT PRIMARY KEY,
+			password_enc TEXT NOT NULL DEFAULT '',
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+		)`,
+
+		// CoreMail backup targets
+		`CREATE TABLE IF NOT EXISTS coremail_backup_targets (
+			id BIGSERIAL PRIMARY KEY,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			name TEXT NOT NULL,
+			kind TEXT NOT NULL DEFAULT 'ftp',
+			host TEXT NOT NULL DEFAULT '',
+			port INTEGER NOT NULL DEFAULT 21,
+			username TEXT NOT NULL DEFAULT '',
+			path TEXT NOT NULL DEFAULT '/',
+			enabled BOOLEAN NOT NULL DEFAULT false,
+			verify_hostname BOOLEAN NOT NULL DEFAULT true,
+			has_secret BOOLEAN NOT NULL DEFAULT false,
+			last_test_status TEXT NOT NULL DEFAULT '',
+			last_test_at TIMESTAMP,
+			last_test_message TEXT NOT NULL DEFAULT '',
+			note TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			deleted_at TIMESTAMP
+		)`,
+
+		// CoreMail backup target secrets (PK = FK identity, no auto-gen)
+		`CREATE TABLE IF NOT EXISTS coremail_backup_target_secrets (
+			target_id BIGINT PRIMARY KEY,
+			password_enc TEXT NOT NULL DEFAULT '',
+			private_key_path TEXT NOT NULL DEFAULT '',
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+		)`,
+
+		// CoreMail uploaded certificates
+		`CREATE TABLE IF NOT EXISTS coremail_uploaded_certificates (
+			id BIGSERIAL PRIMARY KEY,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			name TEXT NOT NULL,
+			cert_path TEXT NOT NULL DEFAULT '',
+			key_path TEXT NOT NULL DEFAULT '',
+			common_name TEXT NOT NULL DEFAULT '',
+			sans TEXT NOT NULL DEFAULT '',
+			issuer TEXT NOT NULL DEFAULT '',
+			serial_number TEXT NOT NULL DEFAULT '',
+			not_before TIMESTAMP,
+			not_after TIMESTAMP,
+			fingerprint_sha256 TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'unknown',
+			created_by INTEGER NOT NULL DEFAULT 0,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			deleted_at TIMESTAMP
+		)`,
 	}
 }
 
@@ -461,6 +785,74 @@ func postgresIndexes() []string {
 		idx("idx_pg_del_attempts_entry", "coremail_delivery_attempts", "queue_entry_id, attempt_number"),
 		idx("idx_pg_del_attempts_status", "coremail_delivery_attempts", "status"),
 		idx("idx_pg_del_attempts_time", "coremail_delivery_attempts", "attempted_at"),
+
+		// --- Expanded table indexes ---
+
+		// Resellers
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_resellers_email ON resellers (email)`,
+		idx("idx_resellers_deleted_at", "resellers", "deleted_at"),
+
+		// LDAP/SSO
+		idx("idx_l_dap_configs_tenant_id", "l_dap_configs", "tenant_id"),
+		idx("idx_l_dap_configs_deleted_at", "l_dap_configs", "deleted_at"),
+		idx("idx_s_s_o_configs_tenant_id", "s_s_o_configs", "tenant_id"),
+		idx("idx_s_s_o_configs_deleted_at", "s_s_o_configs", "deleted_at"),
+
+		// Alert configs
+		idx("idx_alert_configs_tenant_id", "alert_configs", "tenant_id"),
+		idx("idx_alert_configs_deleted_at", "alert_configs", "deleted_at"),
+
+		// Provisioned domains
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_provisioned_domains_domain ON provisioned_domains (domain)`,
+		idx("idx_provisioned_domains_deleted_at", "provisioned_domains", "deleted_at"),
+
+		// CoreMail domains
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_coremail_domains_name ON coremail_domains (name)`,
+		idx("idx_coremail_domains_tenant_id", "coremail_domains", "tenant_id"),
+		idx("idx_coremail_domains_deleted_at", "coremail_domains", "deleted_at"),
+
+		// CoreMail aliases
+		idx("idx_coremail_aliases_domain_id", "coremail_aliases", "domain_id"),
+		idx("idx_coremail_aliases_from", "coremail_aliases", "from_addr"),
+
+		// CoreMail account classes
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_account_classes_tenant_name ON coremail_account_classes (tenant_id, name)`,
+		idx("idx_account_classes_deleted_at", "coremail_account_classes", "deleted_at"),
+
+		// Admin groups
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_admin_groups_tenant_name ON coremail_admin_groups (tenant_id, name)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_admin_group_members_group_user ON coremail_admin_group_members (group_id, user_id)`,
+		idx("idx_admin_groups_tenant_id", "coremail_admin_groups", "tenant_id"),
+
+		// ACL rules
+		idx("idx_acl_rules_tenant_id", "coremail_acl_rules", "tenant_id"),
+
+		// Quarantine
+		idx("idx_quarantine_tenant_id", "coremail_quarantine_index", "tenant_id"),
+		idx("idx_quarantine_status", "coremail_quarantine_index", "status"),
+
+		// DKIM
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_dkim_config_domain ON coremail_dkim_config (domain)`,
+
+		// Acceptance rules
+		idx("idx_acceptance_rules_tenant_id", "coremail_acceptance_rules", "tenant_id"),
+		idx("idx_acceptance_rules_priority", "coremail_acceptance_rules", "priority"),
+
+		// Incoming message rules
+		idx("idx_incoming_msg_rules_tenant_id", "coremail_incoming_msg_rules", "tenant_id"),
+		idx("idx_incoming_msg_rules_priority", "coremail_incoming_msg_rules", "priority"),
+
+		// Migration sources
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_migration_sources_tenant_name ON coremail_migration_sources (tenant_id, name)`,
+		idx("idx_migration_sources_tenant_id", "coremail_migration_sources", "tenant_id"),
+
+		// Backup targets
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_backup_targets_tenant_name ON coremail_backup_targets (tenant_id, name)`,
+		idx("idx_backup_targets_tenant_id", "coremail_backup_targets", "tenant_id"),
+
+		// Uploaded certificates
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_uploaded_certs_tenant_name ON coremail_uploaded_certificates (tenant_id, name)`,
+		idx("idx_uploaded_certs_tenant_id", "coremail_uploaded_certificates", "tenant_id"),
 	}
 }
 
@@ -482,6 +874,15 @@ func PostgresSchemaCompatible(db *gorm.DB, tableSchema string) error {
 		"security_events", "mfa_recovery_codes", "coremail_mailboxes",
 		"coremail_folders", "coremail_messages", "coremail_attachments",
 		"coremail_queue", "coremail_delivery_attempts",
+		"resellers", "l_dap_configs", "s_s_o_configs", "alert_configs",
+		"provisioned_domains", "coremail_domains", "coremail_aliases",
+		"coremail_account_classes", "coremail_admin_groups",
+		"coremail_admin_group_members", "coremail_acl_rules",
+		"coremail_quarantine_index", "coremail_dkim_config",
+		"coremail_acceptance_rules", "coremail_incoming_msg_rules",
+		"coremail_migration_sources", "coremail_migration_source_secrets",
+		"coremail_backup_targets", "coremail_backup_target_secrets",
+		"coremail_uploaded_certificates",
 	}
 
 	var missing []string
