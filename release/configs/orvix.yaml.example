@@ -40,17 +40,38 @@ server:
     - "127.0.0.1"
     - "::1"
 
+# ────────────────────────────────────────────────────────────
+# Database — metadata backend for Orvix.
+#
+# Supported drivers: sqlite (dev/single-node), postgres (production/SaaS).
+#
+# ── SQLite (default) ──────────────────────────────────────
+#  driver: sqlite
+#  sqlite_path: /var/lib/orvix/orvix.db
+#
+# ── PostgreSQL (production) ────────────────────────────────
+#  driver: postgres
+#  dsn: "host=localhost port=5432 user=orvix dbname=orvix password=CHANGEME sslmode=disable"
+#
+#  The DSN may also be a connection URI:
+#  dsn: "postgres://orvix:CHANGEME@localhost:5432/orvix?sslmode=disable"
+#
+#  Connection pool (Postgres only — SQLite uses 1/1):
+#  max_open: 25        # max concurrent connections
+#  max_idle: 5         # idle connection pool size
+#  max_lifetime: 300   # max connection lifetime in seconds
+#
+#  Deployment mode: set to "production" to enforce Postgres-only
+#  (refuses to boot with driver=sqlite when deployment_mode=production):
+#  deployment_mode: "production"
+#
+#  When DSN is empty, the config loader constructs it from
+#  host/port/user/dbname/password/sslmode fields. The DSN field
+#  always takes precedence when set.
+# ────────────────────────────────────────────────────────────
 database:
   driver: sqlite
   sqlite_path: /var/lib/orvix/orvix.db
-  # PostgreSQL example (uncomment to use):
-  # driver: postgres
-  # host: localhost
-  # port: 5432
-  # user: orvix
-  # password: CHANGEME
-  # dbname: orvix
-  # sslmode: disable
 
 redis:
   host: 127.0.0.1

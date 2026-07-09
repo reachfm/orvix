@@ -271,3 +271,75 @@ func testSQLiteColumnExists(t *testing.T, db *sql.DB, table, column string) bool
 	}
 	return false
 }
+
+// TestCriticalIndexesExist verifies that high-growth and security-critical
+// indexes are created by MigrateAllRaw. This guards against accidental index
+// removal and proves the schema is ready for enterprise query patterns.
+func TestCriticalIndexesExist(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(t.TempDir(), "orvix.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	db, err := config.NewDatabase(&cfg.Database, zap.NewNop())
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	defer sqlDB.Close()
+
+	if err := MigrateAllRaw(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	criticalIndexes := []struct {
+		table  string
+		index  string
+		reason string
+	}{
+		// Sessions — soft-delete cleanup.
+		{"sessions", "idx_sessions_deleted_at", "soft-delete cleanup"},
+		// Users — soft-delete cleanup.
+		{"users", "idx_users_deleted_at", "soft-delete cleanup"},
+		// Mailboxes — filtered lists per tenant/domain.
+		{"mailboxes", "idx_mailboxes_tenant_id", "mailbox list per tenant"},
+		{"mailboxes", "idx_mailboxes_domain_id", "mailbox list per domain"},
+		{"mailboxes", "idx_mailboxes_deleted_at", "soft-delete cleanup"},
+		// Domains — filtered lists per tenant.
+		{"domains", "idx_domains_tenant_id", "domain list per tenant"},
+		{"domains", "idx_domains_deleted_at", "soft-delete cleanup"},
+		// Tenants — reseller query and soft-delete.
+		{"tenants", "idx_tenants_reseller_id", "tenant list per reseller"},
+		{"tenants", "idx_tenants_deleted_at", "soft-delete cleanup"},
+		// API keys — user lookup and soft-delete.
+		{"api_keys", "idx_api_keys_user_id", "API key list per user"},
+		{"api_keys", "idx_api_keys_deleted_at", "soft-delete cleanup"},
+		// Security events — login protection queries.
+		{"security_events", "idx_security_events_email", "rate-limit lookup by email"},
+		{"security_events", "idx_security_events_event_type", "filter by event type"},
+		{"security_events", "idx_security_events_created", "time-range queries"},
+		// Audit trail — actor and time-range queries.
+		{"coremail_audit", "idx_coremail_audit_timestamp", "audit time-range queries"},
+		{"coremail_audit", "idx_coremail_audit_actor", "audit lookup by actor"},
+	}
+
+	for _, tc := range criticalIndexes {
+		tc := tc
+		t.Run(tc.reason, func(t *testing.T) {
+			var count int
+			err := sqlDB.QueryRow(
+				"SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?",
+				tc.index,
+			).Scan(&count)
+			if err != nil {
+				t.Fatalf("query sqlite_master for index %s: %v", tc.index, err)
+			}
+			if count == 0 {
+				t.Errorf("CRITICAL INDEX MISSING: %s on %s (%s). "+
+					"This index is required for enterprise query performance.",
+					tc.index, tc.table, tc.reason)
+			}
+		})
+	}
+}

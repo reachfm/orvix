@@ -94,10 +94,15 @@ func newPostgresDB(cfg *DatabaseConfig, logger *zap.Logger) (*gorm.DB, error) {
 	sqlDB.SetMaxIdleConns(cfg.MaxIdle)
 	sqlDB.SetConnMaxLifetime(time.Duration(cfg.MaxLifetime) * time.Second)
 
-	logger.Info("postgres connection established",
+	logger.Info("database connection established",
+		zap.String("driver", "postgres"),
 		zap.Int("max_open", cfg.MaxOpen),
 		zap.Int("max_idle", cfg.MaxIdle),
+		zap.Int("max_lifetime", cfg.MaxLifetime),
 	)
+	// Audit log: record driver selection without leaking DSN or credentials.
+	// The DSN is never logged at any level; structured fields (driver, pool)
+	// are safe to surface in monitoring dashboards.
 
 	return db, nil
 }

@@ -1088,6 +1088,7 @@ func MigrateAllRaw(db *gorm.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_heal_histories_deleted_at ON heal_histories(deleted_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_provisioned_domains_deleted_at ON provisioned_domains(deleted_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_coremail_audit_timestamp ON coremail_audit(timestamp)`,
+		`CREATE INDEX IF NOT EXISTS idx_coremail_audit_actor ON coremail_audit(actor, timestamp)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_deleted_at ON sessions(deleted_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_update_histories_deleted_at ON update_histories(deleted_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_guardian_logs_message_id ON guardian_logs(message_id)`,
