@@ -361,125 +361,191 @@ will be recorded when staging hardware is available.
 
 ---
 
-## 12. DB-3: PostgreSQL Production Schema Compatibility (this PR)
+## 12. DB-3 / DB-4: PostgreSQL Production Schema Compatibility
 
-### What was added
+### What was added (37 tables)
 
 `MigrateAllPostgres()` in `internal/models/postgres_migrations.go` is the
-PostgreSQL-native counterpart to `MigrateAllRaw()`.  It creates **37 core
-production metadata tables** with proper PostgreSQL DDL:
+PostgreSQL-native counterpart to `MigrateAllRaw()`.  It creates **37
+production metadata tables** with proper PostgreSQL DDL.
 
-| Table | Keys |
-|-------|------|
-| `licenses` | `BIGSERIAL PK`, unique `key_hash` |
-| `feature_flags` | `BIGSERIAL PK`, unique `name` |
-| `tenants` | `BIGSERIAL PK`, unique `(slug, deleted_at)`, `(domain, deleted_at)` |
-| `users` | `BIGSERIAL PK`, unique `(email, deleted_at)` |
-| `domains` | `BIGSERIAL PK`, unique `(domain, deleted_at)` |
-| `mailboxes` | `BIGSERIAL PK`, unique `(email, deleted_at)` |
-| `api_keys` | `BIGSERIAL PK`, unique `key_hash` |
-| `sessions` | `BIGSERIAL PK`, unique `token_hash` |
-| `coremail_audit` | `BIGSERIAL PK`, indexed on `timestamp`, `(actor, timestamp)` |
-| `security_events` | `BIGSERIAL PK`, indexed on `email`, `event_type`, `created_at` |
-| `mfa_recovery_codes` | `BIGSERIAL PK` |
-| `coremail_mailboxes` | `BIGSERIAL PK`, indexed on `domain_id`, `email` |
+**Admin / platform (13 tables):**
+
+| Table | Unique constraint |
+|-------|------------------|
+| `licenses` | `key_hash` |
+| `feature_flags` | `name` |
+| `tenants` | `slug WHERE deleted_at IS NULL`, `domain WHERE deleted_at IS NULL` |
+| `users` | `email WHERE deleted_at IS NULL` |
+| `domains` | `domain WHERE deleted_at IS NULL` |
+| `mailboxes` | `email WHERE deleted_at IS NULL` |
+| `api_keys` | `key_hash` |
+| `resellers` | `email` |
+| `l_dap_configs` | — |
+| `s_s_o_configs` | — |
+| `alert_configs` | — |
+| `provisioned_domains` | `domain` |
+| `module_versions` | deferred |
+
+**Sessions / security / audit (4 tables):**
+
+| Table | Unique constraint |
+|-------|------------------|
+| `sessions` | `token_hash` |
+| `coremail_audit` | — |
+| `security_events` | — |
+| `mfa_recovery_codes` | — |
+
+**CoreMail operational (16 tables):**
+
+| Table | Unique constraint |
+|-------|------------------|
+| `coremail_mailboxes` | — |
+| `coremail_domains` | `name` |
+| `coremail_aliases` | — |
+| `coremail_account_classes` | `(tenant_id, name)` |
+| `coremail_admin_groups` | `(tenant_id, name)` |
+| `coremail_admin_group_members` | `(group_id, user_id)` |
+| `coremail_acl_rules` | — |
+| `coremail_quarantine_index` | — |
+| `coremail_dkim_config` | `domain` |
+| `coremail_acceptance_rules` | — |
+| `coremail_incoming_msg_rules` | — |
+| `coremail_migration_sources` | `(tenant_id, name)` |
+| `coremail_migration_source_secrets` | PK = `source_id` (FK identity) |
+| `coremail_backup_targets` | `(tenant_id, name)` |
+| `coremail_backup_target_secrets` | PK = `target_id` (FK identity) |
+| `coremail_uploaded_certificates` | `(tenant_id, name)` |
+
+**Mail storage (4 tables):**
+
+| Table | Unique constraint |
+|-------|------------------|
+| `coremail_folders` | — |
+| `coremail_messages` | `message_id` |
+| `coremail_attachments` | — |
+| `coremail_queue` | — |
+| `coremail_delivery_attempts` | — |
+
+### Soft-delete uniqueness
+
+Tables with soft-delete use **partial unique indexes** (`WHERE deleted_at
+IS NULL`).  This correctly prevents duplicate active rows.  The SQLite
+pattern `UNIQUE(col, deleted_at)` is **not** used because it allows
+duplicate active rows in both databases (NULLs are distinct in UNIQUE
+constraints).
+
+Partial unique indexes:
+
+| Table | Index name | Columns |
+|-------|-----------|---------|
+| `tenants` | `uq_tenants_slug_active` | `slug` |
+| `tenants` | `uq_tenants_domain_active` | `domain` |
+| `users` | `uq_users_email_active` | `email` |
+| `domains` | `uq_domains_domain_active` | `domain` |
+| `mailboxes` | `uq_mailboxes_email_active` | `email` |
 
 ### Key PostgreSQL conversions
 
 | SQLite pattern | PostgreSQL equivalent | Affected |
 |----------------|----------------------|----------|
-| `INTEGER PRIMARY KEY AUTOINCREMENT` | `BIGSERIAL PRIMARY KEY` | All 17 tables |
+| `INTEGER PRIMARY KEY AUTOINCREMENT` | `BIGSERIAL PRIMARY KEY` | All 37 tables |
 | `DATETIME` | `TIMESTAMP` | All timestamp columns |
 | `datetime('now')` | `NOW()` | Default values |
-| `INTEGER` for boolean flags | `BOOLEAN` | ~40 flag columns |
+| `INTEGER` for boolean flags | `BOOLEAN` | ~80 flag columns |
 | `PRAGMA table_info()` | `information_schema.columns` | N/A (not used in PG path) |
 | `sqlite_master` | `information_schema.tables` | Verification queries |
-| `REAL` | N/A (skipped in core tables) | Deferred |
+| `REAL` | `DOUBLE PRECISION` | `resellers.commission` |
+| `UNIQUE(col, deleted_at)` | `WHERE deleted_at IS NULL` partial index | 5 tables |
 
-### What remains not migrated (33+ tables)
+### What remains unmigrated (16 tables)
 
-Resellers, LDAP/SSO configs, alert configs, firewall rules/logs,
-guardian logs, heal histories, provisioned domains, update histories,
-CoreMail domains, aliases, account classes, domain groups, mailing
-lists, public folders, admin groups, ACL rules, log rules, quarantine
-index, DKIM config, acceptance rules, incoming message rules,
-migration/backup secrets, uploaded certificates — all deferred to DB-4.
+These tables are defined in `MigrateAllRaw()` but not yet in
+`MigrateAllPostgres()`.  They are lower-priority operational tables
+deferred to DB-5:
+
+- `module_versions` — module install history
+- `firewall_rules`, `firewall_logs` — firewall config/logs
+- `guardian_logs` — AI threat analysis
+- `heal_histories` — auto-heal actions
+- `update_histories` — update history
+- `coremail_domain_groups`, `coremail_domain_group_members` — domain grouping
+- `coremail_mailing_lists`, `coremail_mailing_list_members` — mailing lists
+- `coremail_public_folders`, `coremail_public_folder_members` — shared folders
+- `coremail_log_rules` — log collection rules
+
+Additional tables in other packages (backup, monitoring, TLS, AV, trust,
+settings, updater) are also deferred.  See `docs/POSTGRES_DML_COMPATIBILITY_AUDIT.md`
+for the full DML compatibility roadmap.
 
 ### Schema smoke test
 
 `TestPostgresProductionSchemaCompat` in `models_test.go`:
-- Creates all 17 tables via `MigrateAllPostgres()` inside an isolated schema (`orvix_pg_test_<timestamp>`)
-- Uses partial unique indexes (`WHERE deleted_at IS NULL`) for soft-delete uniqueness
-- Cleans up with `DROP SCHEMA ... CASCADE` (never drops public tables)
-- Verifies tables exist via `information_schema.tables`
-- Verifies 11 critical indexes via `pg_indexes`
+- Creates an isolated schema (`orvix_pg_test_<timestamp>`), never drops public tables
+- Runs `MigrateAllPostgres()`, verifies all 37 tables via `information_schema.tables`
+- Verifies indexes via `pg_indexes` (filtered by schemaname)
 - Inserts and queries a representative row
-- Cleans up all tables with `DROP ... CASCADE`
+- Cleans up with `DROP SCHEMA ... CASCADE`
 - Requires: `ORVIX_RUN_POSTGRES_SCHEMA_TEST=1`, `ORVIX_DB_DRIVER=postgres`, `ORVIX_DB_DSN=<dsn>`
 - Skipped silently in normal CI
-
-### New docs
-
-- `docs/POSTGRES_STAGING_RUNBOOK.md` — step-by-step how to run schema
-  smoke and benchmarks on staging PostgreSQL, including:
-  - DB creation commands
-  - 10k / 100k / 3M benchmark commands
-  - Metrics collection and extraction
-  - Cleanup procedures
-  - PASS/FAIL decision thresholds
-  - DSN security rules
+- Status: **NOT RUN** (no local PostgreSQL)
 
 ---
 
 ## 13. Remaining Phases
 
-### DB-4: Complete PostgreSQL migration (all 45+ tables)
+### DB-5: Complete schema + DML audit
 
-1. Convert remaining 33 tables from `INTEGER PRIMARY KEY AUTOINCREMENT`
+1. Migrate remaining 16 tables from `INTEGER PRIMARY KEY AUTOINCREMENT`
    to `BIGSERIAL PRIMARY KEY`.
-2. Add PostgreSQL-native DDL for CoreMail operational tables
-   (domains, aliases, account classes, domain groups, mailing lists,
-   public folders, admin groups, ACL, log rules, quarantine, DKIM,
-   acceptance, incoming msg rules).
-3. Handle `migration_source_secrets` and `backup_target_secrets`
-   tables where PRIMARY KEY is used as a foreign-key identity without
-   AUTOINCREMENT — these need `BIGINT PRIMARY KEY` or `BIGSERIAL PRIMARY KEY`.
-
-### DB-5: Full production-schema DML audit
-
-1. Replace all `datetime('now')` DML calls with `NOW()`.
-2. Replace `INSERT OR REPLACE` (SQLite-only) with
-   `INSERT ... ON CONFLICT ... DO UPDATE` (Postgres upsert).
-3. Audit `internal/coremail/` and `internal/trust/` for SQLite-specific
-   DML syntax.
+2. Replace all `datetime('now')` DML calls with `NOW()` (10+ call sites).
+3. Replace `INSERT OR REPLACE` with `INSERT ... ON CONFLICT ... DO UPDATE`
+   (2 call sites in `internal/trust/`).
+4. Audit and fix `?` placeholder usage in raw SQL — verify every raw
+   SQL query is either GORM-generated (driver-translated) or uses
+   `$N` placeholders for the PostgreSQL path.
 
 ### DB-6: Staging 3M run
 
 1. Execute `ORVIX_LOADTEST_ROWS=3000000` benchmark on PostgreSQL staging.
 2. Record insert rate, list latency, pagination, flag update metrics.
 3. Tune thresholds based on real measurements.
-4. Report actual numbers in this document.
 
 ### DB-7: Migration tool
 
 1. Build `cmd/orvix migrate --from sqlite --to postgres` CLI.
-2. Table-by-table export/import with progress, row counts, SHA256
-   checksums.
-3. Downtime estimation for dataset size.
+2. Table-by-table export/import with progress, row count, and checksum
+   verification.
+3. Test backup, restore, and rollback procedures on staging PostgreSQL.
+4. Measure downtime for representative dataset sizes.
 
 ---
 
 ## 14. Clear Statement
 
-**RC4 is still the SQLite default.**  PostgreSQL schema compatibility
-exists for 17 core tables but has not been deployed to production.
-Full 45-table migration, 3M staging benchmark, and migration tooling
-are required before any production PostgreSQL deployment.
+**RC4 is still the SQLite default.**  `MigrateAllPostgres()` covers 37
+tables with PostgreSQL-native DDL, verified by opt-in schema smoke test.
+16 additional tables remain unmigrated.  DML compatibility (placeholder
+translation, `datetime('now')` replacement, upsert syntax) is deferred
+to DB-5.
 
-**3M support is NOT yet proven.**  The benchmark harness exists, the
-schema path exists for core tables, and the staging runbook documents
-how to run the measurement.  No 3M benchmark has been executed on
-real PostgreSQL staging hardware.
+**Production PostgreSQL is NOT ready.**  The following blocks deployment:
+
+1. DML compatibility audit has 4 deferred findings.
+2. No migration CLI exists.
+3. No backup/restore/rollback has been tested on PostgreSQL.
+4. No 3M staging benchmark has been run.
+
+**3M support is NOT proven.**  No 3M benchmark has been executed on
+real PostgreSQL staging hardware.  The harness, schema, and runbook
+exist to make that measurement possible.
+
+**PostgreSQL schema DDL is expanded but not live-verified in this PR.**
+
+---
+
+**Last updated:** 2026-07-09
+**Author:** Orvix DB Engineering
 
 ---
 

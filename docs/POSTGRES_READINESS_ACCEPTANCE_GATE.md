@@ -72,13 +72,13 @@ Gates 1-3 must pass in CI. Gates 4-7 require staging hardware.
 | **Status** | PASS — 10 findings audited, 4 deferred, 5 fixed, 1 safe as-is |
 | **Date** | 2026-07-09 |
 
-## Gate 8 — Migration / backup / rollback plan
+## Gate 8 — Migration / backup / rollback
 
 | Field | Value |
 |-------|-------|
-| **Document** | `docs/POSTGRES_ENTERPRISE_FOUNDATION.md` Section 7-8 |
-| **Expected** | Migration path documented. Rollback strategy exists. Backup/restore procedures documented. |
-| **Status** | PASS — documented in foundation document |
+| **Document** | `docs/POSTGRES_ENTERPRISE_FOUNDATION.md` Sections 7-8 |
+| **Expected** | Executable migration CLI exists. Backup tested. Restore tested. Rollback tested. Row counts and checksums verified after migration. |
+| **Status** | NOT COMPLETE — documented but not implemented or tested. Migration path is described (4-phase plan) but no CLI exists. Backup/restore procedures are documented for both SQLite and PostgreSQL but have not been tested on PostgreSQL. Rollback strategy is described but unverified. |
 | **Date** | 2026-07-09 |
 
 ---
@@ -94,10 +94,12 @@ Gates 1-3 must pass in CI. Gates 4-7 require staging hardware.
 | 5 — PostgreSQL benchmark 100k | NOT RUN | Gate 4 not passed |
 | 6 — PostgreSQL benchmark 3M | NOT RUN | Staging hardware needed |
 | 7 — DML audit | PASS | — |
-| 8 — Migration/backup plan | PASS | — |
+| 8 — Migration/backup/rollback | NOT COMPLETE | No executable CLI; backup/restore/rollback untested |
 
-**Overall status:** Gates 1-2, 7-8 PASS. Gates 3-6 need PostgreSQL staging.
+**Overall status:** Gates 1-2, 7 PASS. Gates 3-6 need PostgreSQL staging. Gate 8 needs migration tool implementation.
 RC4 SQLite default is unchanged. Production PostgreSQL is NOT ready.
+PostgreSQL schema DDL is expanded (37 tables) but not live-verified.
+3M is NOT proven. VPS deploy is NOT safe for PostgreSQL.
 
 ---
 

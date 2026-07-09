@@ -71,11 +71,11 @@ Generated from codebase inspection at commit `40b8f9d`.
 
 | Field | Detail |
 |-------|--------|
-| **Files** | All raw SQL in `models.go`, `coremail/storage/`, `coremail/queue/` |
+| **Files** | All raw SQL in `models.go`, `coremail/storage/`, `coremail/queue/`, `internal/trust/`, `internal/api/` |
 | **SQLite behavior** | `?` positional parameter |
-| **PostgreSQL risk** | PostgreSQL uses `$1, $2, ...` positional parameters |
-| **Fix required** | Use `$N` placeholders in PostgreSQL path. The existing `MigrateAllRaw()` uses `?` for SQLite; `MigrateAllPostgres()` uses `$N` for PG |
-| **Fixed in PR** | Yes — `MigrateAllPostgres()` uses `$N`. All application-layer raw SQL uses `?` which works with the Go `database/sql` driver regardless of database (driver translates `?` to `$N` automatically). |
+| **PostgreSQL risk** | PostgreSQL natively uses `$1, $2, ...` positional parameters. The Go `database/sql` driver does NOT automatically translate `?` to `$N` for PostgreSQL — this is driver-specific behavior. `MigrateAllPostgres()` creates DDL with `$N`, but application-layer raw SQL continues to use `?` which may fail on PostgreSQL. |
+| **Fix required** | Every raw SQL query must use driver-aware placeholders: `$N` for PostgreSQL, `?` for SQLite. Or route all queries through a query builder that selects the placeholder style based on the active driver. |
+| **Fixed in PR** | No — `MigrateAllPostgres()` DDL uses `$N`, but application-layer DML (inserts, updates, selects in handlers, storage, queue) still uses `?`. Requires full audit in DB-5. |
 
 ---
 
@@ -131,22 +131,24 @@ Generated from codebase inspection at commit `40b8f9d`.
 
 | Finding | Status | Risk |
 |---------|--------|------|
-| PRAGMA table_info | Deferred DB-4 | Blocking for full migration |
+| PRAGMA table_info | Deferred DB-5 | Blocking for full migration |
 | sqlite_master | Fixed (PG path) | Done |
 | datetime('now') DML | Deferred DB-5 | Blocking for production Postgres |
 | INSERT OR REPLACE | Deferred DB-5 | Blocking for trust package |
 | INTEGER as boolean | Fixed (PG path) | Done |
-| ? placeholders | Works via driver | No issue |
+| ? placeholders | NOT FIXED (needs audit) | Blocking — every raw SQL query must be driver-aware |
 | CURRENT_TIMESTAMP | Fixed (PG path) | Done |
 | LIMIT/OFFSET scaling | Deferred | Performance, not blocking |
 | Transaction boundaries | Audit needed | Medium risk |
 | Queue lease | Safe as-is | No issue |
 
 **Overall DML compatibility:** Core schema DDL is PostgreSQL-ready (37 tables).
-Application DML (datetime('now'), INSERT OR REPLACE) still has SQLite-isms
-in ~10 call sites. These are deferred to DB-5. The codebase can create
-and verify PostgreSQL schemas but cannot safely run production workloads
-on PostgreSQL until DML compatibility is addressed.
+Application DML still has SQLite-isms in every raw SQL file:
+- `?` placeholders must be converted to `$N` for PostgreSQL
+- `datetime('now')` must become `NOW()` (~10 call sites)
+- `INSERT OR REPLACE` must become `ON CONFLICT` upsert (2 call sites)
+These are deferred to DB-5. The codebase cannot safely run production
+workloads on PostgreSQL until all three DML issues are addressed.
 
 ---
 
