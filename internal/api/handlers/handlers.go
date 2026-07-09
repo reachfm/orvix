@@ -290,6 +290,16 @@ func (h *Handler) SetSettingsBridge(b *settingsbridge.Bridge) {
 	h.settingsBridge = b
 }
 
+// loginDomain extracts the domain part from an email address.
+// Returns "" for invalid addresses.
+func loginDomain(email string) string {
+	parts := strings.Split(email, "@")
+	if len(parts) < 2 || parts[1] == "" {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(parts[1]))
+}
+
 func (h *Handler) SetTrustService(s *trustmgmt.Service) {
 	h.trustService = s
 }
@@ -305,6 +315,59 @@ func (h *Handler) SetTrustPersistence(ok bool, errMsg string) {
 		h.trustPersistence = "in_memory"
 		h.trustPersistenceOK = false
 		h.trustPersistenceError = errMsg
+	}
+}
+
+// setPreferredSessionCookie sets the opaque HttpOnly session cookie.
+func (h *Handler) setPreferredSessionCookie(c fiber.Ctx, token string) {
+	c.Cookie(&fiber.Cookie{
+		Name:     "__Host-orvix_session",
+		Value:    token,
+		Expires:  time.Now().Add(30 * time.Minute),
+		HTTPOnly: true,
+		Secure:   true,
+		SameSite: "Lax",
+		Path:     "/",
+	})
+}
+
+// issueLoginSession creates an opaque session and sets the session
+// cookie. The role and email passed here are the server-derived
+// values from the users table at login time — they get persisted
+// alongside the SHA-256 hash of the session token so the auth
+// middleware can restore the real role on every request without
+// trusting the client. If the underlying store refuses the write
+// (DB unavailable, schema drift, etc.) the error is returned and
+// the caller MUST fail the request with a 5xx — silently logging
+// the error and continuing would let a non-admin user hold a
+// session whose role we cannot restore, which would either lock
+// them out at the role gate or, worse, allow a role downgrade if
+// the middleware ever had to fall back to a default.
+func (h *Handler) issueLoginSession(c fiber.Ctx, userID uint, role auth.Role, email string) error {
+	if userID == 0 {
+		return fmt.Errorf("issue login session: userID is required")
+	}
+	if role == "" {
+		return fmt.Errorf("issue login session: role is required")
+	}
+	token, err := h.auth.GenerateOpaqueSession(userID, role, email)
+	if err != nil {
+		return err
+	}
+	h.setPreferredSessionCookie(c, token)
+	return nil
+}
+
+// recordLoginFailure records a failed login attempt via the security monitor.
+func (h *Handler) recordLoginFailure(c fiber.Ctx, email string) {
+	h.security.RecordFailedLogin(c.Context(), c.IP(), email)
+}
+
+// recordLoginSuccess records a successful login and resets the rate limiter.
+func (h *Handler) recordLoginSuccess(c fiber.Ctx) {
+	h.security.RecordSuccessfulLogin(c.IP())
+	if h.rateLimiter != nil {
+		h.rateLimiter.ResetLoginLimit(c.IP())
 	}
 }
 
@@ -439,6 +502,15 @@ func (h *Handler) Login(c fiber.Ctx) error {
 			"mfa_challenge":   challengeToken,
 			"mfa_expires_in":  300,
 		})
+	}
+
+	// Issue opaque session cookie alongside JWT for transition.
+	// Cookie issuance is the source of truth for browser auth; if
+	// the store refuses the write we refuse the login rather than
+	// return success without a usable session.
+	if err := h.issueLoginSession(c, userID, auth.Role(userRole), loginEmail); err != nil {
+		h.logger.Error("failed to issue login session", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authentication failed"})
 	}
 
 	accessToken, err := h.auth.GenerateAccessToken(userID, auth.Role(userRole))

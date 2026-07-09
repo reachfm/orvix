@@ -1,25 +1,13 @@
 /* =====================================================================
-   modules/api.js — HTTP client with CSRF + auth + error normalization.
+   modules/api.js — HTTP client with cookie auth + CSRF + error normalization.
 
-   This is the only file in the admin frontend that talks to fetch().
-   Every page module imports apiGet / apiPost / apiPatch / apiDelete
-   from here. Two safety guarantees:
-
-     1. Every mutating call adds X-CSRF-Token. The header is fetched
-        once per page load (CSRF tokens are long-lived in this build)
-        and refreshed automatically on a CSRF-specific 403.
-
-     2. Non-2xx responses are normalized into a thrown ApiError that
-        carries .status, .code, .message and (for some endpoints)
-        .fields. This means page modules can stay small: they catch
-        one error shape and render it once.
-
-   All exported functions return the parsed JSON body. Non-JSON
-   responses throw an ApiError(status, 'non_json', body).
+   Browser authentication is cookie-based. The admin UI does not store or
+   read bearer tokens from localStorage or sessionStorage. The server sets
+   HttpOnly cookies, including the preferred __Host-orvix_session session
+   cookie, and JavaScript only fetches a CSRF value for write requests.
    ===================================================================== */
 
-const TOKEN_KEY = 'orvix_admin_token';
-const CSRF_KEY  = 'orvix_admin_csrf';
+let cachedCsrf = '';
 
 export class ApiError extends Error {
   constructor(status, code, message, fields) {
@@ -31,37 +19,13 @@ export class ApiError extends Error {
   }
 }
 
-// ---------- token + csrf storage ----------------------------------
-function getToken() {
-  try { return sessionStorage.getItem(TOKEN_KEY) || ''; } catch (_) { return ''; }
-}
-export function setToken(t) {
-  try {
-    if (t) sessionStorage.setItem(TOKEN_KEY, t);
-    else   sessionStorage.removeItem(TOKEN_KEY);
-  } catch (_) { /* sessionStorage may be disabled */ }
-}
-export function clearToken() {
-  try { sessionStorage.removeItem(TOKEN_KEY); } catch (_) {}
-}
-function getCachedCsrf() {
-  try { return sessionStorage.getItem(CSRF_KEY) || ''; } catch (_) { return ''; }
-}
-function setCachedCsrf(t) {
-  try {
-    if (t) sessionStorage.setItem(CSRF_KEY, t);
-    else   sessionStorage.removeItem(CSRF_KEY);
-  } catch (_) {}
-}
-
 function authHeaders() {
-  const t = getToken();
-  const h = { 'Accept': 'application/json' };
-  if (t) h['Authorization'] = 'Bearer ' + t;
-  return h;
+  return { 'Accept': 'application/json' };
 }
 
-// ---------- csrf refresh -----------------------------------------
+function getCachedCsrf() { return cachedCsrf || ''; }
+function setCachedCsrf(t) { cachedCsrf = t || ''; }
+
 async function refreshCsrf() {
   const resp = await fetch('/api/v1/csrf-token', {
     method: 'GET',
@@ -74,21 +38,23 @@ async function refreshCsrf() {
   }
   let body = null;
   try { body = await resp.json(); } catch (_) {}
-  const tok = (body && body.csrf_token) || '';
+  const tok = (body && (body.csrf_token || body.token)) || '';
   setCachedCsrf(tok);
   return tok;
 }
 
 async function ensureCsrf() {
-  let tok = getCachedCsrf();
+  const tok = getCachedCsrf();
   if (tok) return tok;
   return refreshCsrf();
 }
 
-// ---------- core fetch with retry on 403 -------------------------
 async function rawFetch(url, init) {
-  const resp = await fetch(url, init);
-  return resp;
+  try {
+    return await fetch(url, init);
+  } catch (err) {
+    throw new ApiError(0, 'network_error', (err && err.message) || 'network error');
+  }
 }
 
 function wantsCsrf(method) {
@@ -106,8 +72,9 @@ async function parseError(resp) {
 
 /**
  * csrfFetch is the canonical caller. It:
- *   - sends Auth + CSRF headers automatically
- *   - retries exactly once on a 403 with code 'csrf_invalid'
+ *   - sends same-origin cookies automatically
+ *   - sends X-CSRF-Token for POST/PUT/PATCH/DELETE
+ *   - retries exactly once on a CSRF-specific 403
  *   - throws a normalized ApiError on every non-2xx
  */
 export async function csrfFetch(url, init = {}, opts = {}) {
@@ -126,7 +93,6 @@ export async function csrfFetch(url, init = {}, opts = {}) {
     credentials: 'same-origin',
   }));
 
-  // CSRF retry path.
   if (resp.status === 403 && wantsCsrf(method)) {
     let body = null;
     try { body = await resp.clone().json(); } catch (_) {}
@@ -155,11 +121,9 @@ async function consume(resp, opts) {
     }
     return await resp.text();
   }
-  // Body may already be consumed by the CSRF-retry path; clone-aware fallback.
   throw await parseError(resp);
 }
 
-// ---------- shorthand methods ------------------------------------
 export function apiGet(url, opts) { return csrfFetch(url, { method: 'GET' }, opts); }
 export function apiPost(url, body, opts) {
   return csrfFetch(url, { method: 'POST', body: typeof body === 'string' ? body : JSON.stringify(body || {}) }, opts);
@@ -179,35 +143,40 @@ export function apiDelete(url, opts) {
   return csrfFetch(url, init, opts);
 }
 
-// ---------- login / logout (auth boundaries) ---------------------
-export async function login(email, password, mfaCode) {
-  const resp = await fetch('/api/v1/auth/login', {
+async function postAuth(url, body) {
+  const resp = await fetch(url, {
     method: 'POST',
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-    body: JSON.stringify({ email, password, mfa_code: mfaCode || '' }),
+    body: JSON.stringify(body || {}),
   });
   const data = await resp.json().catch(() => null);
   if (!resp.ok) {
     throw new ApiError(resp.status, data && data.code || '', data && (data.message || data.error) || 'login failed');
   }
-  if (!data || !data.access_token) {
-    throw new ApiError(resp.status, '', 'login response missing access_token');
+  return data || {};
+}
+
+export async function login(email, password, mfaCode, mfaChallenge) {
+  let data;
+  if (mfaChallenge) {
+    data = await postAuth('/api/v1/auth/mfa/verify', { mfa_challenge: mfaChallenge, code: mfaCode || '' });
+  } else {
+    data = await postAuth('/api/v1/auth/login', { email, password });
   }
-  setToken(data.access_token);
-  if (data.refresh_token) {
-    try { sessionStorage.setItem('orvix_admin_refresh', data.refresh_token); } catch (_) {}
+  if (data && data.mfa_required) {
+    const err = new ApiError(401, 'mfa_required', 'mfa required');
+    err.challenge = data.mfa_challenge || '';
+    err.expiresIn = data.mfa_expires_in || 0;
+    throw err;
   }
-  // Pre-fetch a CSRF so the first mutating call doesn't have to.
   refreshCsrf().catch(() => {});
   return data;
 }
 
 export async function logout() {
   try { await csrfFetch('/api/v1/auth/logout', { method: 'POST' }); } catch (_) {}
-  clearToken();
   setCachedCsrf('');
-  try { sessionStorage.removeItem('orvix_admin_refresh'); } catch (_) {}
 }
 
-export function isAuthenticated() { return !!getToken(); }
+export function isAuthenticated() { return true; }

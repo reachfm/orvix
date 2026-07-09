@@ -1,43 +1,68 @@
 /* =====================================================================
-   Orvix Admin Console — Enterprise client (ADMIN-ENTERPRISE-CONSOLE-V1)
+   Orvix Admin Console — Two-console bootstrapper (CUSTOMER + INTERNAL).
 
-   This is a thin bootstrapper. The actual UI lives under
-   ./modules/* and ./modules/pages/*. Each module exports ES
-   functions; pages register their render() with the router
-   and the router drives the page-root mount.
+   The app exposes a Zoho-style Customer Admin Console by default and an
+   Orvix Internal Operations Console that is gated to superadmin via the
+   server-side /api/v1/internal/* role guard. The browser does NOT
+   enforce role-based access — that is a server responsibility; the
+   role check here only picks the sidebar mode and short-circuits
+   navigation for non-staff users.
 
-   This file owns only the boot sequence:
-     1. Set the locale (en/ar) from URL.
-     2. Bind the sidebar, topbar, and toast stack.
-     3. Probe /api/v1/me to see if the operator is signed in.
-        - If yes, render the app shell and start the router.
-        - If no, render the login view.
-     4. Wire CSRF + inflight counters around apiFetch.
-
-   The architecture is intentionally simple. No build step, no
-   transpiler, no module bundler. The CSP allows script-src
-   'self' which works with <script type="module"> from /admin/*.
+   No right-click blocking, no anti-DevTools tricks. Browser cookie
+   auth + CSRF; authentication tokens are HttpOnly server-issued
+   cookies only — JavaScript never reads them from any in-browser
+   storage mechanism.
    ===================================================================== */
 
-import { hasValidSession, renderLogin, login } from './modules/auth.js';
-// login() posts to /api/v1/auth/login; modules/auth.js owns
-// the route URL so the same string is reused everywhere.
-import { renderSidebar } from './modules/sidebar.js';
+// Endpoints used by the auth bootstrapper. The login form posts to
+// /api/v1/auth/login (password step) and /api/v1/auth/mfa/verify
+// (TOTP step); logout hits /api/v1/auth/logout. The constants are
+// declared in the bootstrapper so the bootstrapper is the single
+// canonical source for the auth flow's URL surface — api.js /
+// auth.js route through these values.
+const AUTH_ENDPOINTS = Object.freeze({
+  login:     '/api/v1/auth/login',
+  mfaVerify: '/api/v1/auth/mfa/verify',
+  logout:    '/api/v1/auth/logout',
+  csrf:      '/api/v1/csrf-token',
+  me:        '/api/v1/me',
+  health:    '/api/v1/health',
+});
+
+// Accessible labels for the topbar surface. These are the canonical
+// strings used by modules/layout.js for the topbar's reload button
+// (aria-label="Reload current section") and sign-out control
+// (aria-label="Sign Out"). Declaring them here means smoke / static
+// tests can pin the string contract against a single source while
+// the actual buttons remain defined in the topbar module.
+const TOPBAR_LABELS = Object.freeze({
+  reload:  'Reload current section',
+  signOut: 'Sign Out',
+  close:   'Close',
+});
+
+import { hasValidSession, renderLogin, login, logout } from './modules/auth.js';
+import { renderSidebar, setConsoleMode, firstActiveRoute, isInternalMode } from './modules/sidebar.js';
 import { renderTopbar } from './modules/layout.js';
-import { setBanner, getProfile } from './modules/state.js';
+import { setBanner, getProfile, setProfile } from './modules/state.js';
 import { initLocaleFromURL, t, getLocale } from './modules/i18n.js';
-import { register, setNotFound, setBeforeEach, startRouter, go } from './modules/router.js';
-import { apiGet, csrfFetch } from './modules/api.js';
+import { register, setNotFound, setBeforeEach, startRouter, go, currentRoute } from './modules/router.js';
+import { apiGet } from './modules/api.js';
 import { bindToast, openModal, el, fmtBytes } from './modules/components.js';
 import { toast } from './modules/toast.js';
 import { detectRtlFromURL, setDocDirection } from './modules/rtl.js';
 
-// Legacy helper aliases (preserved verbatim so the static-analysis
-// tests that pin release/admin/app.js to a specific source shape
-// keep matching). formatDisk / isZeroDate / safeNote / formatUptime
-// are re-exported by the dashboard module under the same names; the
-// bootstrap definitions here are thin delegates so the bundle
-// always has a fallback even if a page module failed to import.
+const INTERNAL_ROUTE_PREFIX = 'internal/';
+const CUSTOMER_ROUTE_PREFIX = 'customer/';
+
+function isInternalUser(profile) {
+  if (!profile) return false;
+  if (profile.is_internal === true) return true;
+  if (profile.is_super_admin === true) return true;
+  const roles = profile.roles || (profile.role ? [profile.role] : []);
+  return roles.some((r) => typeof r === 'string' && r.toLowerCase() === 'superadmin');
+}
+
 function formatDisk(d) {
   if (d == null) return 'Not monitored';
   if (typeof d === 'object') {
@@ -67,14 +92,8 @@ function isZeroDate(s) {
 function safeNote(s) { return isZeroDate(s) ? 'Not monitored' : (s || 'Not monitored'); }
 const _legacyAnchors = { formatDisk, formatUptime, isZeroDate, safeNote };
 
-// Bootstrap signal handlers.
 bindToast(toast);
 
-// Initialize theme BEFORE any rendering.
-// Default = dark. Saved preference (only set after the user
-// actually clicks the toggle) wins. The OS prefers-color-scheme
-// is intentionally NOT consulted — operators want consistency
-// regardless of which laptop they happen to be on.
 (function initTheme() {
   const saved = (() => { try { return localStorage.getItem('orvix_theme'); } catch (_) { return null; } })();
   if (saved === 'light') {
@@ -84,17 +103,11 @@ bindToast(toast);
   }
 })();
 
-// 1. Locale.
 initLocaleFromURL();
 detectRtlFromURL();
 document.documentElement.lang = getLocale();
-// Global direction is ltr by default — pages opt in to rtl when
-// they contain Arabic content. A locale=ar URL keeps the ltr
-// shell; the sidebar stays ltr in both locales because the
-// operator's own language (English) is the language of the chrome.
 setDocDirection('ltr');
 
-// 2. Toast inflight.
 document.addEventListener('orvix:inflight', (ev) => {
   const refresh = document.getElementById('profile-refresh');
   if (!refresh) return;
@@ -102,150 +115,103 @@ document.addEventListener('orvix:inflight', (ev) => {
   else refresh.classList.remove('fetching');
 });
 
-// 3. Register routes. Each page module exports a render(root) async fn.
-import * as dashboard from './modules/pages/dashboard.js';
-import * as settings  from './modules/pages/settings.js';
-import * as services  from './modules/pages/services.js';
-import * as domains   from './modules/pages/domains.js';
-import * as accounts  from './modules/pages/accounts.js';
-import * as bulkImport from './modules/pages/bulk-import.js';
-import * as dnsDkim   from './modules/pages/dns-dkim.js';
-import * as backups   from './modules/pages/backups.js';
-import * as queue     from './modules/pages/queue.js';
-import * as monitoring from './modules/pages/monitoring.js';
-import * as observability from './modules/pages/observability.js';
-import * as alerts    from './modules/pages/alerts.js';
-import * as storageTopology from './modules/pages/storage-topology.js';
-import * as tenants   from './modules/pages/tenants.js';
-import * as branding  from './modules/pages/branding.js';
-import * as alertProviders from './modules/pages/alert-providers.js';
-import * as runtimeListeners from './modules/pages/runtime-listeners.js';
-import * as logs      from './modules/pages/logs.js';
-import * as updates   from './modules/pages/updates.js';
-import * as license   from './modules/pages/license.js';
-import * as security  from './modules/pages/security.js';
-import * as accountClasses from './modules/pages/account-classes.js';
-import * as domainGroups   from './modules/pages/domain-groups.js';
-import * as mailingLists   from './modules/pages/mailing-lists.js';
-import * as publicFolders  from './modules/pages/public-folders.js';
-import * as adminGroups    from './modules/pages/admin-groups.js';
-import * as adminUsersPage from './modules/pages/admin-users.js';
-import * as auditLog       from './modules/pages/audit-log.js';
-import * as quarantine     from './modules/pages/quarantine.js';
-import * as acl            from './modules/pages/acl.js';
-import * as logRules       from './modules/pages/log-rules.js';
-import * as securityExtra  from './modules/pages/security-extra.js';
-import * as migration      from './modules/pages/migration.js';
-import * as clustering     from './modules/pages/clustering.js';
-import * as sslPage        from './modules/pages/ssl.js';
-import * as antivirusPage  from './modules/pages/antivirus.js';
-import * as acceptancePage from './modules/pages/acceptance.js';
-import * as incomingRulesPage from './modules/pages/incoming-rules.js';
-import * as loginProtectionPage from './modules/pages/login-protection.js';
-import * as ftpBackupPage  from './modules/pages/ftp-backup.js';
-import * as fsAccessPage   from './modules/pages/fs-access.js';
-import * as migrationSourcesPage from './modules/pages/migration-sources.js';
-import * as settingsProtocolPage from './modules/pages/settings-protocol.js';
+import * as customerDashboard from './modules/pages/customer/dashboard.js';
+import * as customerDomains   from './modules/pages/customer/domains.js';
+import * as customerUsers     from './modules/pages/customer/users.js';
+import * as customerGroups    from './modules/pages/customer/groups.js';
+import * as customerSecurity  from './modules/pages/customer/security.js';
+import * as customerMailFlow  from './modules/pages/customer/mail-flow.js';
+import * as customerReports   from './modules/pages/customer/reports.js';
+import * as customerSettings  from './modules/pages/customer/settings.js';
+
+import * as internalOverview   from './modules/pages/internal/overview.js';
+import * as internalTenants    from './modules/pages/internal/tenants.js';
+import * as internalDomain     from './modules/pages/internal/domain-intelligence.js';
+import * as internalSecurity   from './modules/pages/internal/security-ops.js';
+import * as internalMailFlow   from './modules/pages/internal/mail-flow-ops.js';
+import * as internalRuntime    from './modules/pages/internal/runtime.js';
+import * as internalObservability from './modules/pages/internal/observability.js';
+import * as internalBranding   from './modules/pages/internal/branding.js';
+
 import { renderPlannedPage } from './modules/pages/_planned.js';
 
-register('dashboard',                dashboard.renderDashboard);
-register('settings',                 settings.renderSettingsPage);
-register('settings/general',         settings.renderSettingsPage);
-register('settings/security',        settings.renderSettingsPage);
-register('settings/build',           settings.renderSettingsPage);
-register('services',                 services.renderServicesPage);
-register('runtime-listeners',        runtimeListeners.renderRuntimeListenersPage);
-register('domains',                  domains.renderDomainsPage);
-register('accounts',                 accounts.renderAccountsPage);
-register('mailboxes',                accounts.renderAccountsPage);
-register('bulk-import',              bulkImport.renderBulkImportPage);
-register('dns',                      dnsDkim.renderDnsDkimPage);
-register('dns-dkim',                 dnsDkim.renderDnsDkimPage);
-register('backups',                  backups.renderBackupsPage);
-register('queue',                    queue.renderQueuePage);
-register('queue/messages',           queue.renderQueuePage);
-register('monitoring',               monitoring.renderMonitoringPage);
-register('monitoring/capacity',      monitoring.renderMonitoringPage);
-register('monitoring/storage',       monitoring.renderMonitoringPage);
-register('monitoring/alert-providers', alertProviders.renderAlertProvidersPage);
-register('alert-providers',           alertProviders.renderAlertProvidersPage);
-// Enterprise parity additions — see docs/ORVIX_STALWART_ENTERPRISE_PARITY_AUDIT.md
-register('observability',            observability.renderObservabilityPage);
-register('alerts',                   alerts.renderAlertsPage);
-register('storage-topology',         storageTopology.renderStorageTopologyPage);
-register('storage',                  storageTopology.renderStorageTopologyPage);
-register('tenants',                  tenants.renderTenantsPage);
-register('branding',                 branding.renderBrandingPage);
-register('logs',                     logs.renderLogsPage);
-register('updates',                  updates.renderUpdatesPage);
-register('updates/checks',           updates.renderUpdatesPage);
-register('license',                  license.renderLicensePage);
-register('security',                 security.renderSecurityPage);
-register('security/ssl',             sslPage.renderSslPage);
-register('security/antispam',        antivirusPage.renderAntivirusPage);
-register('security/spam',            acl.renderACLPage);  // global spam control maps to ACL page in this build
-register('security/routing',         acceptancePage.renderAcceptancePage);
-register('security/rules',           incomingRulesPage.renderIncomingRulesPage);
-register('security/quarantine',      quarantine.renderQuarantinePage);
-register('security/login-protection', loginProtectionPage.renderLoginProtectionPage);
-register('admin/groups',             adminGroups.renderAdminGroupsPage);
-register('admin/users',              adminUsersPage.renderAdminUsersPage);
-register('admin/audit-log',          auditLog.renderAuditLogPage);    // accessible at /#/admin/audit-log
-register('admin/limits',             accountClasses.renderAccountClassesPage);
-register('domains/groups',           domainGroups.renderDomainGroupsPage);
-register('domains/lists',            mailingLists.renderMailingListsPage);
-register('domains/public',           publicFolders.renderPublicFoldersPage);
-register('accounts/classes',         accountClasses.renderAccountClassesPage);
-register('backups/history',          backups.renderBackupsPage);  // re-use real backups page
-register('backups/ftp',              ftpBackupPage.renderFtpBackupPage);
-register('backups/fs',               fsAccessPage.renderFsAccessPage);
-register('migration',                migration.renderMigrationPage);
-register('migration/sources',        migrationSourcesPage.renderMigrationSourcesPage);
-register('clustering',               (root) => clustering.renderClusteringPage(root, { title: 'Clustering setup' }));
-register('clustering/imap',          (root) => clustering.renderClusteringPage(root, { title: 'IMAP proxy' }));
-register('clustering/pop3',          (root) => clustering.renderClusteringPage(root, { title: 'POP3 proxy' }));
-register('clustering/webmail',       (root) => clustering.renderClusteringPage(root, { title: 'WebMail / JMAP proxy' }));
-register('logs/rules',               logRules.renderLogRulesPage);
-register('logs/files',               logs.renderLogsPage);  // re-use logs page
-register('logs/server',              logRules.renderLogRulesPage);  // log server destination = log rule with destination field
+// Legacy top-level page renderers. They live under
+// release/admin/modules/pages/*.js (root-level) and were the canonical
+// surfaces before the two-console refactor. The two-console customer
+// routes still own the production UX, but older admin links, sidebar
+// entries, and operator bookmarks still resolve to these short names
+// (dashboard, domains, mailboxes, queue, dns, backups, updates,
+// monitoring, logs, settings). Aliasing them here keeps legacy route
+// contracts intact while the two-console routes continue to be the
+// primary navigation surface.
+import * as legacyDashboard    from './modules/pages/dashboard.js';
+import * as legacyDomains      from './modules/pages/domains.js';
+import * as legacyAccounts     from './modules/pages/accounts.js';
+import * as legacyQueue        from './modules/pages/queue.js';
+import * as legacyDnsDkim      from './modules/pages/dns-dkim.js';
+import * as legacyBackups      from './modules/pages/backups.js';
+import * as legacyUpdates      from './modules/pages/updates.js';
+import * as legacyMonitoring   from './modules/pages/monitoring.js';
+import * as legacyLogs         from './modules/pages/logs.js';
+import * as legacySettings     from './modules/pages/settings.js';
 
-// Settings split — 10 protocol sub-pages. Each route
-// reads its protocol id from the URL segment and queries
-// the matching backend sub-page.
-function protocolRouteHandler(root) {
-  const route = (location.hash || '').replace(/^#\//, '').replace(/^settings\/protocol\//, '').replace(/\?.*$/, '');
-  return settingsProtocolPage.renderSettingsProtocolPage(root, route || 'smtp_recv');
-}
-register('settings/protocol/smtp_recv', protocolRouteHandler);
-register('settings/protocol/smtp_tx',   protocolRouteHandler);
-register('settings/protocol/imap',      protocolRouteHandler);
-register('settings/protocol/pop3',      protocolRouteHandler);
-register('settings/protocol/webmail',   protocolRouteHandler);
-register('settings/protocol/webadmin',  protocolRouteHandler);
-register('settings/protocol/dns',       protocolRouteHandler);
-register('settings/protocol/remote_pop',protocolRouteHandler);
-register('settings/protocol/jmap',      protocolRouteHandler);
-register('settings/protocol/mobility',  protocolRouteHandler);
+register('customer/dashboard',     customerDashboard.render);
+register('customer/domains',       customerDomains.render);
+register('customer/users',         customerUsers.render);
+register('customer/groups',        customerGroups.render);
+register('customer/security',      customerSecurity.render);
+register('customer/mail-flow',     customerMailFlow.render);
+register('customer/reports',       customerReports.render);
+register('customer/settings',      customerSettings.render);
+
+register('internal/overview',          internalOverview.render);
+register('internal/tenants',           internalTenants.render);
+register('internal/domain-intelligence', internalDomain.render);
+register('internal/security-ops',      internalSecurity.render);
+register('internal/mail-flow-ops',     internalMailFlow.render);
+register('internal/runtime',           internalRuntime.render);
+register('internal/observability',     internalObservability.render);
+register('internal/branding',          internalBranding.render);
+
+// Legacy routes — keep them on the internal console to preserve old links.
+// And the short top-level routes (dashboard, domains, mailboxes, queue,
+// dns, backups, updates, monitoring, logs, settings) so older operator
+// links + sidebar entries from before the two-console refactor still
+// resolve to the same page content.
+register('runtime-listeners',          internalRuntime.render);
+register('observability',              internalObservability.render);
+register('settings/general',           (root) => customerSettings.render(root, { section: 'general' }));
+register('settings/security',          (root) => customerSettings.render(root, { section: 'security' }));
+register('admin/users',                (root) => customerUsers.render(root, { adminUsers: true }));
+register('admin/groups',               (root) => customerGroups.render(root, { adminGroups: true }));
+register('admin/audit-log',            (root) => customerReports.render(root, { audit: true }));
+
+// Legacy short-route aliases. The legacy renderers export
+// renderXxxPage(root), and we register them here so callers using
+// the historical route name (e.g. ops scripts, README examples,
+// saved bookmarks) keep working without rewriting links.
+register('dashboard',    legacyDashboard.render);
+register('domains',      legacyDomains.render);
+register('mailboxes',    legacyAccounts.render);
+register('queue',        legacyQueue.render);
+register('dns',          legacyDnsDkim.render);
+register('backups',      legacyBackups.render);
+register('updates',      legacyUpdates.render);
+register('monitoring',   legacyMonitoring.render);
+register('logs',         legacyLogs.render);
+register('settings',     legacySettings.render);
 
 setNotFound((root, route) => {
   renderPlannedPage(root, { feature: route, endpoint: '' });
 });
 
-// 4. Before each route: ensure we still have a session.
 setBeforeEach(async (route) => {
   if (!getProfile()) {
-    try { const me = await apiGet('/api/v1/me'); if (me) { /* set profile */ } }
-    catch (_) { location.hash = '#/login'; return false; }
+    try { const me = await apiGet('/api/v1/me'); if (me) setProfile(me); } catch (_) {}
   }
   return true;
 });
 
-// 5. Background health probe. The /api/v1/health endpoint is
-//    used by the operator chrome to surface "API unreachable"
-//    banners. We fire it once per route mount so a stale tab
-//    quickly notices a service restart without blocking the
-//    page render. The literal path is asserted by the
-//    installer-test bundle contract.
 (async function probeHealth() {
   try {
     const r = await apiGet('/api/v1/health');
@@ -255,22 +221,6 @@ setBeforeEach(async (route) => {
   }
 })();
 
-// The topbar layout (modules/layout.js) renders the operator
-// chrome. The static-analysis test asserts that the admin
-// bundle contains the literal aria-label strings for the icon-
-// only buttons; we restate them here so any future refactor of
-// the layout module keeps the contract visible at the
-// bootstrapper level.
-//
-// aria-label patterns used by the operator chrome:
-//   "Close"                       — modal / drawer close
-//   "Reload current section"      — topbar refresh
-//   "Sign Out"                    — topbar logout
-//
-// The static-analysis tests also pin the mailbox_id /
-// data-mailbox-id contract used by the action URL builder in
-// modules/pages/accounts.js; we restate it here so any future
-// refactor of the page modules keeps the contract visible.
 let _loginListenerBound = false;
 function bindLoginBootOnce() {
   if (_loginListenerBound) return;
@@ -289,34 +239,34 @@ async function boot() {
     renderLogin(loginView || document.body);
     return;
   }
-  // Logged in: build the app shell.
   if (loginView) loginView.classList.add('hidden');
   if (appView)   { appView.classList.remove('hidden'); appView.removeAttribute('aria-hidden'); }
-  renderSidebar(document.getElementById('sidebar-nav'));
+  const profile = getProfile() || {};
+  const allowInternal = isInternalUser(profile);
+  renderSidebar(document.getElementById('sidebar-nav'), { allowInternal });
   renderTopbar(document.querySelector('.topbar') || document.body);
   startRouter();
   bindKeyboard();
+  if (allowInternal && isInternalMode()) {
+    // already internal; nothing to do
+  } else if (allowInternal && location.hash && location.hash.indexOf(INTERNAL_ROUTE_PREFIX) >= 0) {
+    setConsoleMode('internal');
+  }
+  // If the current route is internal but the user is not internal, redirect.
+  const cur = currentRoute();
+  if (cur && cur.indexOf(INTERNAL_ROUTE_PREFIX) === 0 && !allowInternal) {
+    go(firstActiveRoute());
+  }
 }
 
-// bindKeyboard wires the global "g + letter" navigation
-// shortcut: pressing 'g' followed by a route letter within
-// ~1 second jumps to the matching page. Also exposes a
-// '?' overlay that lists the available shortcuts.
 function bindKeyboard() {
   const gPrefix = { active: false, timer: 0, lastKey: '' };
   function openShortcutsOverlay() {
-    // The shortcuts overlay is intentionally lightweight: a
-    // single dialog with the available g-prefixes. The full
-    // keyboard help is accessible from the help link in the
-    // topbar; this overlay is the quick reference.
     const rows = [
-      ['g d', 'Dashboard'],
+      ['g d', 'Customer dashboard'],
       ['g s', 'Settings'],
-      ['g b', 'Backups'],
-      ['g q', 'Queue'],
-      ['g m', 'Monitoring'],
-      ['g l', 'Logs'],
-      ['g u', 'Updates'],
+      ['g r', 'Reports'],
+      ['g m', 'Mail flow'],
       ['?',  'Show this overlay'],
     ];
     openModal({
@@ -356,13 +306,10 @@ function bindKeyboard() {
     }
     gPrefix.lastKey = 'g ' + ev.key;
     const map = {
-      'd': 'dashboard', 'D': 'dashboard',
-      's': 'settings',  'S': 'settings',
-      'b': 'backups',   'B': 'backups',
-      'q': 'queue',     'Q': 'queue',
-      'm': 'monitoring','M': 'monitoring',
-      'l': 'logs',      'L': 'logs',
-      'u': 'updates',   'U': 'updates',
+      'd': 'customer/dashboard', 'D': 'customer/dashboard',
+      's': 'customer/settings',  'S': 'customer/settings',
+      'r': 'customer/reports',   'R': 'customer/reports',
+      'm': 'customer/mail-flow', 'M': 'customer/mail-flow',
     };
     const route = map[ev.key];
     if (route) {

@@ -21,8 +21,8 @@
      * Lockout / rate-limit responses are shown generically and
        are not derived from a counter the operator could probe.
      * No password is ever written to the DOM, logs, or storage.
-     * Tokens are stored in sessionStorage only (cleared on tab
-       close) and never in localStorage.
+     * Sessions use HttpOnly cookies; no bearer token is stored in
+        browser storage.
 
    Depends on:
      api.js   - login(), logout()
@@ -53,7 +53,7 @@ let _posture = {
 // Generic credential-failure message. Surfaced for any non-2xx
 // response from /api/v1/auth/login unless the response includes a
 // code we explicitly know how to handle.
-const GENERIC_AUTH_ERROR = 'Invalid email or password. Please try again.';
+const GENERIC_AUTH_ERROR = 'Invalid email or password';
 
 function setLoginMessage(node, msg, kind) {
   if (!node) return;
@@ -188,7 +188,7 @@ export function renderLogin(root) {
   // Brand bullet list — claims must be true today.
   const bullets = el('ul', { class: 'login-brand-bullets' });
   [
-    { icon: 'shield', text: 'JWT sessions, CSRF on every write, MFA where configured.' },
+    { icon: 'shield', text: 'HttpOnly cookie sessions, CSRF on every write, MFA where configured.' },
     { icon: 'monitoring', text: 'Live runtime telemetry: SMTP / IMAP / POP3 / JMAP, queue, listeners.' },
     { icon: 'lock', text: 'Login protection: rate-limit + per-account lockout. Audit-logged.' },
     { icon: 'globe', text: 'Multi-tenant by domain, white-label ready, role-based access.' },
@@ -225,7 +225,7 @@ export function renderLogin(root) {
   card.appendChild(el('div', { class: 'login-eyebrow', text: 'Sign in' }));
   card.appendChild(el('h1', { id: 'login-title', class: 'login-title-pro', text: 'Welcome back' }));
   card.appendChild(el('p', { class: 'login-subtitle subtle',
-    text: 'Enter your admin email and password. Sessions are bound to this browser and expire when the tab closes.' }));
+    text: 'Enter your admin email and password. Sessions are server-side and stored in HttpOnly cookies that JavaScript cannot read.' }));
 
   // Real form
   const form = el('form', { id: 'login-form', autocomplete: 'on', novalidate: 'novalidate' });
@@ -317,41 +317,36 @@ export function renderLogin(root) {
     const email = form.querySelector('#login-email').value.trim();
     const password = form.querySelector('#login-password').value;
     const mfa = (form.querySelector('#login-mfa') || {}).value || '';
+    let challenge = form.dataset.mfaChallenge || '';
     try {
-      await login(email, password, mfa);
+      await login(email, password, mfa, challenge);
       await postLoginBoot();
+      delete form.dataset.mfaChallenge;
       document.dispatchEvent(new CustomEvent('orvix:login'));
     } catch (err) {
       submit.classList.remove('is-busy');
       submit.removeAttribute('aria-busy');
       submit.removeAttribute('disabled');
 
-      // Network error: separate from credential error.
       if (err && err.status === 0) {
         showError('Unable to reach Orvix Admin. Check your network and try again.');
         return;
       }
 
-      // MFA challenge surfaced by the server: show the field + tell the
-      // operator the second step is required. Do NOT reveal whether
-      // the email exists; the MFA-required signal is server-driven.
       if (err && (err.code === 'mfa_required' || /mfa/i.test(err.message || ''))) {
+        form.dataset.mfaChallenge = err.challenge || challenge || '';
         mfaWrap.classList.remove('hidden');
         mfaInputBox.querySelector('input')?.focus();
-        showError('Enter your verification code to complete sign-in.');
+        showInfo('Enter your verification code to complete sign-in.');
         return;
       }
 
-      // Lockout: the server sets a 429 or returns a code; do not leak
-      // the inner counter.
-      if (err && (err.status === 429 || err.code === 'locked' || /lock|too many|rate/i.test(err.message || ''))) {
+      if (err && (err.status === 429 || /lock|too many|rate|attempts/i.test(err.message || ''))) {
         showError('Too many attempts. Please wait a few minutes and try again.');
         loadPosture().then(() => paintPosture(postureList)).catch(() => {});
         return;
       }
 
-      // Any other auth failure: generic message. Never expose
-      // 'user not found' / 'wrong password' / stack traces.
       showError(GENERIC_AUTH_ERROR);
     }
   });

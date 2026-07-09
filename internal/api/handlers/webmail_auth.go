@@ -238,13 +238,24 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 	// provisioned before the user can send.
 	if err := coremail.EnsureMailboxSystemFolders(c.Context(), sqlDB, mailboxID); err != nil {
 		// Do not fail login on folder provision
-		// failure â€” the UI will surface the error
+		// failure — the UI will surface the error
 		// when the user tries to send. Logging
 		// the error is enough.
 		h.logger.Warn("webmail login: ensure system folders",
 			zap.String("email", loginEmail),
 			zap.Uint("mailbox_id", mailboxID),
 			zap.Error(err))
+	}
+
+	// Issue opaque session cookie for the admin SPA. Cookie
+	// issuance is the source of truth for browser auth; if the
+	// store refuses the write we refuse the login rather than
+	// return success without a usable session.
+	if err := h.issueLoginSession(c, userID, role, loginEmail); err != nil {
+		h.logger.Error("webmail login: issue login session", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "authentication failed",
+		})
 	}
 
 	accessToken, err := h.auth.GenerateAccessToken(userID, role)

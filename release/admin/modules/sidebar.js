@@ -1,14 +1,13 @@
 /* =====================================================================
-   modules/sidebar.js — Grouped navigation with collapsible sections.
+   modules/sidebar.js — Two-console navigation (Customer / Internal).
 
-   The sidebar is rendered into #sidebar-nav in index.html. Sections
-   can be collapsed (state is persisted to localStorage). The active
-   state is set by the router via orvix:route events.
+   The sidebar renders a Zoho-style navigation surface for tenant customer
+   admins. Orvix internal staff (superadmin) sees the Internal Ops
+   surface; the route guards in router.js refuse internal routes for any
+   non-internal role, so the sidebar simply hides them.
 
-   Each group has a header (collapsible), a list of items, and an
-   optional planned badge. Items route through hash navigation
-   (#/route). A planned item renders a dimmed badge and does not
-   navigate.
+   Both experiences use the same collapsible-section machinery; only the
+   group / item definitions change.
    ===================================================================== */
 
 import { el } from './components.js';
@@ -16,118 +15,69 @@ import { t } from './i18n.js';
 import { i } from './icons.js';
 
 const STORAGE_KEY = 'orvix_sidebar_v1';
+const MODE_KEY    = 'orvix_console_mode_v1';
 
-const GROUPS = [
-  // group = { id, labelKey, icon, items = [{ route, labelKey, icon, planned?, badge? }] }
-  { id: 'overview',  labelKey: null, items: [
-    { route: 'dashboard', labelKey: 'sidebar.dashboard', icon: 'dashboard' },
-  ]},
-
-  { id: 'globalSettings', labelKey: 'sidebar.group.globalSettings', icon: 'settings', items: [
-    { route: 'settings/general',  labelKey: 'sidebar.item.generalSettings',  icon: 'settings' },
-    { route: 'settings/security', labelKey: 'sidebar.item.securityDefaults', icon: 'shield'   },
-    { route: 'license',           labelKey: 'sidebar.item.license',          icon: 'license'  },
-    { route: 'settings/build',    labelKey: 'sidebar.item.buildInfo',        icon: 'cpu'      },
-  ]},
-
-  // Settings split — 10 protocol sub-pages. The
-  // backend exposes one endpoint per protocol under
-  // /api/v1/admin/settings/protocol/:protocol.
-  { id: 'protocolSettings', labelKey: 'sidebar.group.protocolSettings', icon: 'globe', items: [
-    { route: 'settings/protocol/smtp_recv', labelKey: 'sidebar.item.smtpRecv',   icon: 'smtp' },
-    { route: 'settings/protocol/smtp_tx',   labelKey: 'sidebar.item.smtpTx',     icon: 'smtp' },
-    { route: 'settings/protocol/imap',      labelKey: 'sidebar.item.imap',       icon: 'imap' },
-    { route: 'settings/protocol/pop3',      labelKey: 'sidebar.item.pop3',       icon: 'pop3' },
-    { route: 'settings/protocol/webmail',   labelKey: 'sidebar.item.webmailS',   icon: 'mail' },
-    { route: 'settings/protocol/webadmin',  labelKey: 'sidebar.item.webadminS',  icon: 'admin' },
-    { route: 'settings/protocol/dns',       labelKey: 'sidebar.item.dnsProto',   icon: 'dns' },
-    { route: 'settings/protocol/remote_pop',labelKey: 'sidebar.item.remotePop',  icon: 'pop3' },
-    { route: 'settings/protocol/jmap',      labelKey: 'sidebar.item.jmap',       icon: 'mail' },
-    { route: 'settings/protocol/mobility',  labelKey: 'sidebar.item.mobility',   icon: 'globe' },
-  ]},
-
-  { id: 'services', labelKey: 'sidebar.group.services', icon: 'cpu', items: [
-    { route: 'services',          labelKey: 'sidebar.item.services',         icon: 'services' },
-    { route: 'runtime-listeners', labelKey: 'sidebar.item.runtimeListeners', icon: 'monitoring' },
+const CUSTOMER_GROUPS = [
+  { id: 'overview', labelKey: null, items: [
+    { route: 'customer/dashboard', labelKey: 'sidebar.dashboard', icon: 'dashboard' },
   ]},
 
   { id: 'domainsAccounts', labelKey: 'sidebar.group.domainsAccounts', icon: 'domain', items: [
-    { route: 'domains',       labelKey: 'sidebar.item.domains',        icon: 'domain'  },
-    { route: 'accounts',      labelKey: 'sidebar.item.accounts',       icon: 'mailbox' },
-    { route: 'domains/groups', labelKey: 'sidebar.item.groups',        icon: 'group'   },
-    { route: 'domains/lists',  labelKey: 'sidebar.item.mailingLists',  icon: 'list'    },
-    { route: 'domains/public', labelKey: 'sidebar.item.publicFolders', icon: 'folder'  },
-    { route: 'accounts/classes', labelKey: 'sidebar.item.accountClasses', icon: 'user' },
-    { route: 'bulk-import',   labelKey: 'sidebar.item.bulkImport',     icon: 'upload'  },
-    { route: 'dns',           labelKey: 'sidebar.item.dnsDkim',        icon: 'dns'     },
+    { route: 'customer/domains', labelKey: 'sidebar.item.domains',  icon: 'domain'  },
+    { route: 'customer/users',   labelKey: 'sidebar.item.accounts', icon: 'mailbox' },
+    { route: 'customer/groups',  labelKey: 'sidebar.item.groups',  icon: 'group'   },
   ]},
 
   { id: 'security', labelKey: 'sidebar.group.security', icon: 'shield', items: [
-    { route: 'security/ssl',      labelKey: 'sidebar.item.sslCerts',       icon: 'certificate' },
-    { route: 'security/antispam', labelKey: 'sidebar.item.antivirus',      icon: 'shield' },
-    { route: 'security/spam',     labelKey: 'sidebar.item.spamControl',    icon: 'spam'   },
-    { route: 'security/routing',  labelKey: 'sidebar.item.routing',        icon: 'routing'},
-    { route: 'security/rules',    labelKey: 'sidebar.item.incomingRules',  icon: 'rules'  },
-    { route: 'security/quarantine', labelKey: 'sidebar.item.quarantine',   icon: 'lock'   },
-    { route: 'security/login-protection', labelKey: 'sidebar.item.loginProtection', icon: 'key' },
+    { route: 'customer/security', labelKey: 'sidebar.item.security', icon: 'shield' },
   ]},
 
-  { id: 'updates', labelKey: 'sidebar.group.updates', icon: 'update', items: [
-    { route: 'updates', labelKey: 'sidebar.item.updateStatus',  icon: 'update' },
-    { route: 'updates/checks', labelKey: 'sidebar.item.upgradeChecks', icon: 'refresh' },
+  { id: 'mailFlow', labelKey: 'sidebar.group.mailflow', icon: 'mail', items: [
+    { route: 'customer/mail-flow', labelKey: 'sidebar.item.mailflow', icon: 'mail' },
   ]},
 
-  { id: 'queue', labelKey: 'sidebar.group.queue', icon: 'queue', items: [
-    { route: 'queue',          labelKey: 'sidebar.item.queueProcessing', icon: 'queue' },
-    { route: 'queue/messages', labelKey: 'sidebar.item.queueView',       icon: 'mail'  },
+  { id: 'reports', labelKey: 'sidebar.group.reports', icon: 'monitoring', items: [
+    { route: 'customer/reports', labelKey: 'sidebar.item.reports', icon: 'monitoring' },
   ]},
 
-  { id: 'status', labelKey: 'sidebar.group.status', icon: 'monitoring', items: [
-    { route: 'monitoring',          labelKey: 'sidebar.item.reporting',      icon: 'monitoring' },
-    { route: 'monitoring/capacity', labelKey: 'sidebar.item.charts',        icon: 'charts'     },
-    { route: 'monitoring/storage',  labelKey: 'sidebar.item.storageCharts', icon: 'storage'    },
-    { route: 'monitoring/alert-providers', labelKey: 'sidebar.item.alertProviders', icon: 'alert' },
-    { route: 'observability',       labelKey: 'sidebar.item.observability', icon: 'monitoring' },
-    { route: 'alerts',              labelKey: 'sidebar.item.alerts',        icon: 'alert'      },
-    { route: 'storage-topology',    labelKey: 'sidebar.item.storageTopology', icon: 'storage' },
-  ]},
-
-  { id: 'tenancy', labelKey: 'sidebar.group.tenancy', icon: 'domain', items: [
-    { route: 'tenants',  labelKey: 'sidebar.item.tenants',  icon: 'domain' },
-    { route: 'branding', labelKey: 'sidebar.item.branding', icon: 'paint'  },
-  ]},
-
-  { id: 'logging', labelKey: 'sidebar.group.logging', icon: 'log', items: [
-    { route: 'logs',           labelKey: 'sidebar.item.localLogs',   icon: 'log'   },
-    { route: 'logs/rules',     labelKey: 'sidebar.item.logRules',   icon: 'rules' },
-    { route: 'logs/files',     labelKey: 'sidebar.item.viewLogFiles', icon: 'folder' },
-    { route: 'logs/server',    labelKey: 'sidebar.item.logServer',  icon: 'server' },
-  ]},
-
-  { id: 'backup', labelKey: 'sidebar.group.backup', icon: 'backup', items: [
-    { route: 'backups',           labelKey: 'sidebar.item.backupStatus',  icon: 'backup' },
-    { route: 'backups/history',   labelKey: 'sidebar.item.backupHistory', icon: 'log'    },
-    { route: 'backups/ftp',       labelKey: 'sidebar.item.ftpBackup',     icon: 'globe'  },
-    { route: 'backups/fs',        labelKey: 'sidebar.item.fsAccess',      icon: 'folder' },
-  ]},
-
-  { id: 'migration', labelKey: 'sidebar.group.migration', icon: 'migration', items: [
-    { route: 'migration',         labelKey: 'sidebar.item.migrationJobs',  hide: true, icon: 'migration' },
-    { route: 'migration/sources', labelKey: 'sidebar.item.sourceServers', hide: true, icon: 'server'    },
-  ]},
-
-  { id: 'clustering', labelKey: 'sidebar.group.clustering', icon: 'cluster', items: [
-    { route: 'clustering',         labelKey: 'sidebar.item.clusterSetup',   hide: true, icon: 'cluster' },
-    { route: 'clustering/imap',    labelKey: 'sidebar.item.imapProxy',      hide: true, icon: 'imap'    },
-    { route: 'clustering/pop3',    labelKey: 'sidebar.item.pop3Proxy',      hide: true, icon: 'pop3'    },
-    { route: 'clustering/webmail', labelKey: 'sidebar.item.webmailProxy',   hide: true, icon: 'mail'    },
-  ]},
-
-  { id: 'admin', labelKey: 'sidebar.group.adminRights', icon: 'admin', items: [
-    { route: 'admin/groups', labelKey: 'sidebar.item.adminGroups', icon: 'group' },
-    { route: 'admin/users',  labelKey: 'sidebar.item.adminUsers',  icon: 'user'  },
+  { id: 'settings', labelKey: 'sidebar.group.settings', icon: 'settings', items: [
+    { route: 'customer/settings', labelKey: 'sidebar.item.settings', icon: 'settings' },
   ]},
 ];
+
+const INTERNAL_GROUPS = [
+  { id: 'overview', labelKey: null, items: [
+    { route: 'internal/overview', labelKey: 'sidebar.dashboard', icon: 'dashboard' },
+  ]},
+
+  { id: 'tenants', labelKey: 'sidebar.group.tenants', icon: 'domain', items: [
+    { route: 'internal/tenants', labelKey: 'sidebar.item.tenants', icon: 'domain' },
+    { route: 'internal/domain-intelligence', labelKey: 'sidebar.item.domainIntel', icon: 'monitoring' },
+  ]},
+
+  { id: 'ops', labelKey: 'sidebar.group.ops', icon: 'monitoring', items: [
+    { route: 'internal/mail-flow-ops', labelKey: 'sidebar.item.mailflowOps', icon: 'queue' },
+    { route: 'internal/security-ops',  labelKey: 'sidebar.item.securityOps', icon: 'shield' },
+  ]},
+
+  { id: 'branding', labelKey: 'sidebar.group.branding', icon: 'paint', items: [
+    { route: 'internal/branding', labelKey: 'sidebar.item.branding', icon: 'paint' },
+  ]},
+
+  { id: 'legacyAdmin', labelKey: 'sidebar.group.admin', icon: 'admin', items: [
+    { route: 'settings/general', labelKey: 'sidebar.item.generalSettings', icon: 'settings' },
+    { route: 'admin/users',      labelKey: 'sidebar.item.adminUsers',     icon: 'user'   },
+    { route: 'admin/groups',     labelKey: 'sidebar.item.adminGroups',    icon: 'group'  },
+    { route: 'admin/audit-log',  labelKey: 'sidebar.item.auditLog',       icon: 'log'    },
+  ]},
+];
+
+const GROUPS_BY_MODE = {
+  customer: CUSTOMER_GROUPS,
+  internal: INTERNAL_GROUPS,
+};
+
+let currentGroups = CUSTOMER_GROUPS;
 
 function loadCollapsed() {
   try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); } catch (_) { return {}; }
@@ -135,82 +85,141 @@ function loadCollapsed() {
 function saveCollapsed(state) {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (_) {}
 }
+function loadMode() {
+  try { return localStorage.getItem(MODE_KEY) || 'customer'; } catch (_) { return 'customer'; }
+}
+function saveMode(m) {
+  try { localStorage.setItem(MODE_KEY, m); } catch (_) {}
+}
 
-// Render an inline SVG icon into a temporary container so we can adopt
-// the DOM node into the rest of the sidebar tree.
 function iconNode(name) {
   const tmp = document.createElement('span');
   tmp.className = 'nav-icon';
   tmp.innerHTML = i(name || 'dashboard', { size: 15 });
-  // unwrap to keep the markup clean (the <span> wrapper is the icon container)
   return tmp;
 }
 
-export function renderSidebar(root) {
-  if (!root) return;
-  root.innerHTML = '';
-  const collapsed = loadCollapsed();
-  GROUPS.forEach((group, gIdx) => {
-    const visibleItems = group.items.filter((it) => !it.hide);
-    if (!visibleItems.length) return;
-    if (group.labelKey) {
-      const head = el('div', {
-        class: 'sidebar-section-head',
-        role: 'button',
-        tabindex: '0',
-        'data-toggle': group.id,
-      });
-      const label = el('span', { class: 'sidebar-section-label' });
-      if (group.icon) {
-        const iconWrap = el('span', { class: 'nav-icon' });
-        iconWrap.innerHTML = i(group.icon, { size: 12 });
-        label.appendChild(iconWrap);
-      }
-      label.appendChild(document.createTextNode(t(group.labelKey)));
-      head.appendChild(label);
-      const caret = el('span', { class: 'sidebar-section-caret' });
-      caret.textContent = collapsed[group.id] ? '\u25b8' : '\u25be';
-      head.appendChild(caret);
-      head.addEventListener('click', () => toggleGroup(group.id));
-      head.addEventListener('keydown', (ev) => {
-        if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); toggleGroup(group.id); }
-      });
-      root.appendChild(head);
-    }
+function buildGroupHead(group) {
+  const head = el('div', {
+    class: 'sidebar-section-head',
+    role: 'button',
+    tabindex: '0',
+    'data-toggle': group.id,
+  });
+  const label = el('span', { class: 'sidebar-section-label' });
+  if (group.icon) {
+    const iconWrap = el('span', { class: 'nav-icon' });
+    iconWrap.innerHTML = i(group.icon, { size: 12 });
+    label.appendChild(iconWrap);
+  }
+  label.appendChild(document.createTextNode(t(group.labelKey)));
+  head.appendChild(label);
+  const caret = el('span', { class: 'sidebar-section-caret' });
+  caret.textContent = '\u25be';
+  head.appendChild(caret);
+  head.addEventListener('click', () => toggleGroup(group.id));
+  head.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); toggleGroup(group.id); }
+  });
+  return head;
+}
 
+function buildItem(item) {
+  const li = el('li', { class: 'sidebar-item' + (item.planned ? ' planned' : '') });
+  const a = el('a', {
+    href: '#/' + item.route,
+    class: 'sidebar-link',
+    'data-route': item.route,
+    tabindex: item.planned ? '-1' : '0',
+  });
+  if (item.icon) {
+    const iconWrap = el('span', { class: 'nav-icon' });
+    iconWrap.innerHTML = i(item.icon, { size: 14 });
+    a.appendChild(iconWrap);
+  }
+  a.appendChild(el('span', { text: t(item.labelKey) }));
+  if (item.planned) {
+    li.classList.add('disabled');
+    a.addEventListener('click', (e) => e.preventDefault());
+  }
+  li.appendChild(a);
+  if (item.planned) {
+    li.appendChild(el('span', { class: 'badge tag no-dot', title: t('common.planned'), text: t('common.planned') }));
+  }
+  return li;
+}
+
+function buildModeSwitcher(host) {
+  const switcher = el('div', { class: 'sidebar-mode' });
+  const customerBtn = el('button', {
+    class: 'sidebar-mode-btn', type: 'button',
+    'data-mode': 'customer',
+    onclick: () => setConsoleMode('customer'),
+  }, t('sidebar.mode.customer'));
+  const internalBtn = el('button', {
+    class: 'sidebar-mode-btn', type: 'button',
+    'data-mode': 'internal',
+    onclick: () => setConsoleMode('internal'),
+  }, t('sidebar.mode.internal'));
+  switcher.appendChild(customerBtn);
+  switcher.appendChild(internalBtn);
+  host.appendChild(switcher);
+  const update = () => {
+    switcher.querySelectorAll('.sidebar-mode-btn').forEach((b) => {
+      const m = b.getAttribute('data-mode');
+      b.classList.toggle('active', m === currentMode());
+    });
+  };
+  return update;
+}
+
+let _modeSwitcher = null;
+
+function currentMode() {
+  return currentGroups === INTERNAL_GROUPS ? 'internal' : 'customer';
+}
+
+export function setConsoleMode(mode) {
+  if (mode !== 'customer' && mode !== 'internal') return;
+  saveMode(mode);
+  const root = document.getElementById('sidebar-nav');
+  if (!root) return;
+  renderSidebar(root, { mode });
+}
+
+export function isInternalMode() {
+  return currentMode() === 'internal';
+}
+
+export function getGroupsForMode(mode) {
+  return GROUPS_BY_MODE[mode] || CUSTOMER_GROUPS;
+}
+
+export function renderSidebar(root, opts) {
+  if (!root) return;
+  const mode = (opts && opts.mode) || loadMode();
+  currentGroups = (mode === 'internal' && opts && opts.allowInternal !== false)
+    ? INTERNAL_GROUPS
+    : CUSTOMER_GROUPS;
+  root.innerHTML = '';
+  if (opts && opts.allowInternal) {
+    _modeSwitcher = buildModeSwitcher(root);
+  }
+  const collapsed = loadCollapsed();
+  currentGroups.forEach((group, gIdx) => {
+    if (group.labelKey) {
+      root.appendChild(buildGroupHead(group));
+    }
     const list = el('ul', {
       class: 'sidebar-list',
       'data-group': group.id,
       style: collapsed[group.id] ? 'display:none;' : '',
     });
-    visibleItems.forEach((item) => {
-      const li = el('li', { class: 'sidebar-item' + (item.planned ? ' planned' : '') });
-      const a = el('a', {
-        href: '#/' + item.route,
-        class: 'sidebar-link',
-        'data-route': item.route,
-        tabindex: item.planned ? '-1' : '0',
-      });
-      if (item.icon) {
-        const iconWrap = el('span', { class: 'nav-icon' });
-        iconWrap.innerHTML = i(item.icon, { size: 14 });
-        a.appendChild(iconWrap);
-      }
-      const span = el('span', { text: t(item.labelKey) });
-      a.appendChild(span);
-      if (item.planned) {
-        li.classList.add('disabled');
-        a.addEventListener('click', (e) => e.preventDefault());
-      }
-      li.appendChild(a);
-      if (item.planned) {
-        li.appendChild(el('span', { class: 'badge tag no-dot', title: t('common.planned'), text: t('common.planned') }));
-      }
-      list.appendChild(li);
-    });
+    group.items.forEach((item) => list.appendChild(buildItem(item)));
     if (gIdx === 0) list.classList.add('sidebar-list-overview');
     root.appendChild(list);
   });
+  if (_modeSwitcher) _modeSwitcher();
 
   document.addEventListener('orvix:route', (ev) => {
     const route = ev.detail && ev.detail.route;
@@ -219,7 +228,6 @@ export function renderSidebar(root) {
       const r = a.dataset.route;
       const li = a.closest('li');
       if (!li) return;
-      // Allow prefix match so /settings/general highlights the settings item too.
       const isActive = route === r || (r && r.indexOf('/') >= 0 && route.indexOf(r) === 0);
       if (isActive) {
         li.classList.add('active');
@@ -237,18 +245,17 @@ function toggleGroup(id) {
   collapsed[id] = !collapsed[id];
   saveCollapsed(collapsed);
   const head = document.querySelector(`[data-toggle="${id}"]`);
-  if (head) head.querySelector('.sidebar-section-caret').textContent = collapsed[id] ? '\u25b8' : '\u25be';
+  if (head) {
+    const caret = head.querySelector('.sidebar-section-caret');
+    if (caret) caret.textContent = collapsed[id] ? '\u25b8' : '\u25be';
+  }
   const list = document.querySelector(`[data-group="${id}"]`);
   if (list) list.style.display = collapsed[id] ? 'none' : '';
 }
 
-/**
- * routeToFirst returns the first non-planned route in the sidebar.
- * Used by the dashboard "missing route" fallback.
- */
 export function firstActiveRoute() {
-  for (const g of GROUPS) {
+  for (const g of currentGroups) {
     for (const it of g.items) if (!it.planned && !it.hide) return it.route;
   }
-  return 'dashboard';
+  return 'customer/dashboard';
 }

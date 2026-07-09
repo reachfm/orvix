@@ -388,8 +388,18 @@ func (r *Router) setupMiddleware() {
 	if len(origins) == 0 {
 		origins = []string{"http://localhost:3000", "http://localhost:3001"}
 	}
+	// Reject wildcard origins when credentials are enabled
+	// (CORS safety requirement). If the config has a wildcard
+	// and credentials are true, enforce the wildcard rejection
+	// at startup so the admin SPA cannot be loaded from an
+	// attacker-controlled origin with cookies attached.
+	allowOrigins := origins
+	if len(allowOrigins) == 1 && allowOrigins[0] == "*" {
+		allowOrigins = []string{"http://localhost:3000", "http://localhost:3001"}
+		r.logger.Warn("CORS: wildcard origin replaced with localhost defaults because AllowCredentials=true")
+	}
 	r.app.Use(cors.New(cors.Config{
-		AllowOrigins:     origins,
+		AllowOrigins:     allowOrigins,
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
 		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-CSRF-Token"},
 		AllowCredentials: true,
@@ -846,6 +856,22 @@ admin.Get("/admin/settings/protocol/:protocol", r.h.ListProtocolSettings)
 	men.Post("/backups/schedule", r.h.LegacyGone)
 	men.Post("/backups/retention", r.h.LegacyGone)
 	men.Delete("/backups/:id", r.h.LegacyGone)
+	// SaaS Two-Console: Internal Ops (superadmin-only, read-only).
+	admin.Get("/console/reports", r.h.AdminReports)
+	// The /console/internal/* surface is the Orvix-internal
+	// operations control plane. Customer admins must not be able
+	// to read it even if they guess the URL — the contract is
+	// server-side role enforcement, not client-side hiding. We
+	// therefore mount these routes on a sub-group that requires
+	// RoleSuperAdmin; the parent `admin` group still accepts
+	// admin-or-superadmin for the customer-facing read paths.
+	internalOps := admin.Group("/console/internal", auth.RequireRole(auth.RoleSuperAdmin))
+	internalOps.Get("/overview", r.h.InternalOverview)
+	internalOps.Get("/tenants", r.h.InternalTenants)
+	internalOps.Get("/domain-intelligence", r.h.InternalDomainIntelligence)
+	internalOps.Get("/security-ops", r.h.InternalSecurityOps)
+	internalOps.Get("/mail-flow-ops", r.h.InternalMailFlowOps)
+
 	// Monitoring v1: resolve an alert (CSRF-protected, admin role).
 	men.Post("/monitoring/alerts/:id/resolve", r.h.PostMonitoringAlertResolve)
 	// Tenants branding write (ORVIX-ADMIN-ENTERPRISE-PARITY-E):
