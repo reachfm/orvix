@@ -100,7 +100,19 @@ export function plural(n, one, many) {
 }
 
 // ---------- badge + status pill --------------------------------
-const _knownKinds = new Set(['good', 'warn', 'bad', 'neutral', 'info', 'muted']);
+// Trusted badge tones. Anything outside this list falls back to
+// `neutral` so a stray or attacker-controlled status string cannot
+// inject an unknown CSS class. The Stalwart-style vocabulary
+// (active / skipped / degraded / not-monitored / offline /
+// warning / error) all map to one of these tones via statusKind().
+const _knownKinds = new Set([
+  'good', 'active',
+  'warn', 'warning', 'degraded',
+  'bad', 'error', 'critical',
+  'neutral', 'offline', 'skipped', 'muted',
+  'not-monitored', 'not-configured',
+  'info', 'accent', 'tag',
+]);
 export function badge(label, kind) {
   const k = _knownKinds.has(kind) ? kind : 'neutral';
   return el('span', { class: 'badge ' + k }, label == null ? '' : String(label));
@@ -108,9 +120,21 @@ export function badge(label, kind) {
 export function statusKind(s) {
   if (!s) return 'neutral';
   const v = String(s).toLowerCase();
-  if (v === 'active' || v === 'ok' || v === 'healthy' || v === 'good' || v === 'delivered' || v === 'enabled' || v === 'online' || v === 'resolved' || v === 'success') return 'good';
-  if (v === 'pending' || v === 'starting' || v === 'queued' || v === 'degraded') return 'warn';
-  if (v === 'failed' || v === 'fail' || v === 'error' || v === 'critical' || v === 'offline' || v === 'skipped' || v === 'disabled') return 'bad';
+  // Health: green
+  if (v === 'active' || v === 'ok' || v === 'healthy' || v === 'good' ||
+      v === 'delivered' || v === 'enabled' || v === 'online' ||
+      v === 'resolved' || v === 'success') return 'good';
+  // Soft health: yellow (warn / degraded / pending)
+  if (v === 'pending' || v === 'starting' || v === 'queued' ||
+      v === 'degraded' || v === 'warn' || v === 'warning') return 'warn';
+  // Disabled / not-running — MUTED, not red. Skipped listeners and
+  // "managed by Caddy" surfaces should not look like outages.
+  if (v === 'skipped' || v === 'disabled' || v === 'muted' ||
+      v === 'not-monitored' || v === 'not_configured' ||
+      v === 'offline' /* offline defaults to muted unless we add a
+                          dedicated red set above */) return 'neutral';
+  // Hard failure: red
+  if (v === 'failed' || v === 'fail' || v === 'error' || v === 'critical') return 'bad';
   return 'neutral';
 }
 

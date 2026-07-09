@@ -70,18 +70,17 @@ const _legacyAnchors = { formatDisk, formatUptime, isZeroDate, safeNote };
 // Bootstrap signal handlers.
 bindToast(toast);
 
-// Initialize theme before any rendering. Priority:
-//   1. saved preference (from previous session)
-//   2. prefers-color-scheme (system preference)
-//   3. dark (default)
+// Initialize theme BEFORE any rendering.
+// Default = dark. Saved preference (only set after the user
+// actually clicks the toggle) wins. The OS prefers-color-scheme
+// is intentionally NOT consulted — operators want consistency
+// regardless of which laptop they happen to be on.
 (function initTheme() {
   const saved = (() => { try { return localStorage.getItem('orvix_theme'); } catch (_) { return null; } })();
   if (saved === 'light') {
     document.documentElement.classList.add('theme-light');
-  } else if (saved === 'dark') {
+  } else {
     document.documentElement.classList.remove('theme-light');
-  } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
-    document.documentElement.classList.add('theme-light');
   }
 })();
 
