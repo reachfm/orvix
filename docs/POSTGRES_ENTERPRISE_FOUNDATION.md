@@ -488,7 +488,7 @@ for the full DML compatibility roadmap.
 - Cleans up with `DROP SCHEMA ... CASCADE`
 - Requires: `ORVIX_RUN_POSTGRES_SCHEMA_TEST=1`, `ORVIX_DB_DRIVER=postgres`, `ORVIX_DB_DSN=<dsn>`
 - Skipped silently in normal CI
-- Status: **NOT RUN** (no local PostgreSQL)
+- Status: **PASS** — 2026-07-10, local Docker PostgreSQL 16 (1.809s)
 
 ---
 
@@ -505,11 +505,14 @@ for the full DML compatibility roadmap.
    SQL query is either GORM-generated (driver-translated) or uses
    `$N` placeholders for the PostgreSQL path.
 
-### DB-6: Staging 3M run
+### DB-6: Staging 3M run — COMPLETED (local evidence)
 
-1. Execute `ORVIX_LOADTEST_ROWS=3000000` benchmark on PostgreSQL staging.
-2. Record insert rate, list latency, pagination, flag update metrics.
-3. Tune thresholds based on real measurements.
+1. `ORVIX_LOADTEST_ROWS=3000000` benchmark executed on local Docker
+   PostgreSQL 16 (2026-07-10).  Metrics recorded.  See
+   `docs/POSTGRES_READINESS_ACCEPTANCE_GATE.md` for full evidence.
+2. Insert rate: 33,489 rows/sec.  List: 41.75ms avg.  Cursor: 2.33ms
+   avg/page.  Flag update: 2.99ms avg.
+3. Production hardening (DB-5 + DB-7) still required before deployment.
 
 ### DB-7: Migration tool
 
@@ -524,30 +527,39 @@ for the full DML compatibility roadmap.
 ## 14. Clear Statement
 
 **RC4 is still the SQLite default.**  `MigrateAllPostgres()` covers 37
-tables with PostgreSQL-native DDL, verified by opt-in schema smoke test.
-16 additional tables remain unmigrated.  DML compatibility (placeholder
-translation, `datetime('now')` replacement, upsert syntax) is deferred
-to DB-5.
+tables with PostgreSQL-native DDL, verified PASS on local Docker
+PostgreSQL 16 (2026-07-10).  16 additional tables remain unmigrated.
+DML compatibility (placeholder translation, `datetime('now')` replacement,
+upsert syntax) is deferred to DB-5.
 
 **Production PostgreSQL is NOT ready.**  The following blocks deployment:
 
-1. DML compatibility audit has 4 deferred findings.
+1. DML compatibility audit has 4 deferred findings (placeholders,
+   `datetime('now')`, `INSERT OR REPLACE`, transaction audit).
 2. No migration CLI exists.
 3. No backup/restore/rollback has been tested on PostgreSQL.
-4. No 3M staging benchmark has been run.
 
-**3M support is NOT proven.**  No 3M benchmark has been executed on
-real PostgreSQL staging hardware.  The harness, schema, and runbook
-exist to make that measurement possible.
+**3M benchmark harness passed on local PostgreSQL.**  The harness
+successfully inserted 3,000,000 rows and ran list/cursor/flag queries
+against PostgreSQL 16 on 2026-07-10.  Insert rate: 33,489 rows/sec.
+This is benchmark evidence, not production readiness — DB-5 and DB-7
+are still required before any production PostgreSQL deployment.
 
-**PostgreSQL schema DDL is expanded but not live-verified in this PR.**
+**Local PostgreSQL gate evidence — 2026-07-10**
+
+| Gate | Result | Key metric |
+|------|--------|------------|
+| Gate 3 — Schema smoke | PASS | 1.809s, 37 tables verified |
+| Gate 4 — 10k benchmark | PASS | 24,202 rows/sec insert |
+| Gate 5 — 100k benchmark | PASS | 35,432 rows/sec insert |
+| Gate 5b — 1M pre-3M | PASS | 33,523 rows/sec insert |
+| Gate 6 — 3M benchmark | PASS (with note) | 33,489 rows/sec insert, 41.75ms list, 2.33ms cursor |
+
+Full details in `docs/POSTGRES_READINESS_ACCEPTANCE_GATE.md`.
+
+**VPS deploy is NOT safe for PostgreSQL.**
 
 ---
 
-**Last updated:** 2026-07-09
-**Author:** Orvix DB Engineering
-
----
-
-**Last updated:** 2026-07-09
+**Last updated:** 2026-07-10
 **Author:** Orvix DB Engineering

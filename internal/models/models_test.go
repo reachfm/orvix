@@ -415,7 +415,7 @@ func TestPostgresProductionSchemaCompat(t *testing.T) {
 	if err := PostgresSchemaCompatible(db, testSchema); err != nil {
 		t.Fatalf("PostgresSchemaCompatible: %v", err)
 	}
-	t.Logf("all 17 core postgres tables created in schema %s and verified", testSchema)
+	t.Logf("all 37 postgres tables created in schema %s and verified", testSchema)
 
 	// Insert a representative row to prove DML works.
 	_, err = sqlDB.Exec(
