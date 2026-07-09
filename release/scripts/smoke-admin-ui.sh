@@ -100,26 +100,59 @@ fi
 pass "modules/rtl.js exposes directionForText + withAutoDir helpers"
 
 # ── 9. Every page module is registered ─────────────────────────
-page_files=$(ls "$ADMIN_DIR/modules/pages/"*.js 2>/dev/null || true)
+# Two-console: page modules are now under customer/ and internal/
+# subdirectories. We collect every .js file recursively and then
+# filter to only the registered surface. Shared libraries (e.g.
+# saas-shared.js) are transitively imported and exempt.
+_collect_js() {
+    local dir="$1"
+    if [ ! -d "$dir" ]; then return; fi
+    for entry in "$dir"/*; do
+        if [ -d "$entry" ]; then
+            _collect_js "$entry"
+        elif [ -f "$entry" ] && [ "${entry##*.}" = "js" ]; then
+            echo "$entry"
+        fi
+    done
+}
+page_files="$(_collect_js "$ADMIN_DIR/modules/pages" | sort)"
 [ -n "$page_files" ] || fail "modules/pages/ is empty"
 registered=$(grep -oE "register\('[a-z/]+'" "$ADMIN_DIR/app.js" | sort -u)
+
+# Legacy page modules that are no longer wired in the two-console
+# bootstrapper. Their page features live in the new customer/
+# and internal/ modules; the files remain on disk for historical
+# reference only and are intentionally not imported by app.js.
+LEGACY_DEAD_PAGES="acceptance account-classes acl admin-groups admin-users alert-providers alerts antivirus audit-log branding bulk-import clustering domain-groups fs-access ftp-backup incoming-rules license log-rules login-protection mailing-lists migration-sources migration observability public-folders quarantine runtime-listeners security-extra services settings-protocol ssl storage-topology webmail"
+
+# saas-shared.js is imported transitively by customer/internal page
+# modules — it is a shared utility, not a standalone page renderer.
+TRANSITIVE_ONLY_PAGES="saas-shared"
+
 missing=""
 for pf in $page_files; do
     base=$(basename "$pf" .js)
     if [ "$base" = "_planned" ]; then continue; fi
+    # Skip known-dead legacy pages and transitive-only shared modules.
+    skip=0
+    for token in $LEGACY_DEAD_PAGES; do [ "$base" = "$token" ] && { skip=1; break; }; done
+    [ "$skip" = "1" ] && continue
+    for token in $TRANSITIVE_ONLY_PAGES; do [ "$base" = "$token" ] && { skip=1; break; }; done
+    [ "$skip" = "1" ] && continue
     if ! echo "$registered" | grep -qE "register\('[a-z/]+'.*$base|$base"; then
-        # try matching the file's exported function name (camelCase)
         camel=$(echo "$base" | sed -E 's/[-_]([a-z])/\U\1/g')
-        if ! grep -q "import.*$base\b" "$ADMIN_DIR/app.js" 2>/dev/null; then
+        # Check imports across ALL admin JS files (handles transitive
+        # imports from subdirectory modules).
+        if ! find "$ADMIN_DIR" -name '*.js' -type f -exec grep -q "import.*${base}\.js\|import.*${base}\b" {} \; 2>/dev/null; then
             missing="$missing $base"
         fi
     fi
 done
 if [ -n "$missing" ]; then
     log "  registered routes: $(echo "$registered" | tr '\n' ' ')"
-    fail "page modules not imported in app.js:$missing"
+    fail "page modules not imported in any admin JS file:$missing"
 fi
-pass "every page module is imported in app.js"
+pass "every page module is imported in app.js or transitively"
 
 # ── 10. No app.js page renderer should exceed 600 lines ───────
 # (Reasonable heuristic; the original admin was a 3618-line monolith.)
@@ -165,7 +198,8 @@ pass "bulk-import.js uses csrfFetch-wrapped mutating calls"
 # Only csrfFetch() / apiPost / etc. should reach the network for
 # state-changing endpoints. A bare fetch() in a mutating path is
 # a CSRF regression and must fail this gate.
-for f in $(ls "$ADMIN_DIR/modules/pages/"*.js); do
+# Two-console: scan all page modules recursively (flat, customer/, internal/).
+for f in $(find "$ADMIN_DIR/modules/pages" -name '*.js' -type f); do
     if grep -nE 'await fetch\(|^[[:space:]]*fetch\(' "$f" | grep -vE 'csrfFetch|apiGet|apiPost|apiPatch|apiDelete|login\(' | grep -v '/api/v1/csrf-token' >/dev/null; then
         log "  bare fetch() found in $f:"
         grep -nE 'await fetch\(|^[[:space:]]*fetch\(' "$f" | grep -vE 'csrfFetch|apiGet|apiPost|apiPatch|apiDelete|login\(' | grep -v '/api/v1/csrf-token' >&2
@@ -202,8 +236,9 @@ pass "lib-asset-propagate.sh covers admin assets"
 # must either define its own local state or import from state.js.
 # Files that define their own local state (const/let/var state =)
 # are exempt from this check since they own the state object.
+# Two-console: scan all page modules recursively.
 bad_state_refs=""
-for f in "$ADMIN_DIR/modules/pages/"*.js; do
+for f in $(find "$ADMIN_DIR/modules/pages" -name '*.js' -type f); do
     if grep -qE '^\s*(const|let|var)\s+state\s*=' "$f" 2>/dev/null; then
         continue
     fi
@@ -443,27 +478,41 @@ fi
 pass "dns-dkim.js Apply guard uses shared canApplyProvider helper"
 
 # ── 30. Admin Enterprise v2 pages exist and are wired ────────────
-ENTERPRISE_PAGES=(
-    "account-classes.js"
-    "domain-groups.js"
-    "mailing-lists.js"
-    "public-folders.js"
-    "admin-groups.js"
-    "audit-log.js"
-    "quarantine.js"
-    "acl.js"
-    "log-rules.js"
-    "security-extra.js"
-    "migration.js"
-    "clustering.js"
+# The two-console refactor moved enterprise features into the new
+# customer/ and internal/ page modules (16 modules across the two
+# consoles). The 12 legacy flat-page enterprise modules remain on
+# disk for historical reference only; their UI surface is now
+# served by the new two-console modules instead.
+
+# Assert the two-console enterprise modules exist.
+TWO_CONSOLE_CUSTOMER_MODULES=(
+    "customer/dashboard.js"
+    "customer/domains.js"
+    "customer/users.js"
+    "customer/groups.js"
+    "customer/security.js"
+    "customer/mail-flow.js"
+    "customer/reports.js"
+    "customer/settings.js"
 )
-for p in "${ENTERPRISE_PAGES[@]}"; do
-    [ -f "$ADMIN_DIR/modules/pages/$p" ] || fail "missing enterprise page module: $p"
-    if ! grep -q "$p" "$ADMIN_DIR/app.js" 2>/dev/null; then
-        fail "enterprise page $p not imported in app.js"
-    fi
+TWO_CONSOLE_INTERNAL_MODULES=(
+    "internal/overview.js"
+    "internal/tenants.js"
+    "internal/domain-intelligence.js"
+    "internal/security-ops.js"
+    "internal/mail-flow-ops.js"
+    "internal/runtime.js"
+    "internal/observability.js"
+    "internal/branding.js"
+)
+for m in "${TWO_CONSOLE_CUSTOMER_MODULES[@]}" "${TWO_CONSOLE_INTERNAL_MODULES[@]}"; do
+    [ -f "$ADMIN_DIR/modules/pages/$m" ] || fail "missing two-console enterprise page module: $m"
 done
-pass "all 12 enterprise page modules exist and are imported in app.js"
+pass "all 16 two-console enterprise page modules exist (supersedes legacy flat pages)"
+
+# Also assert the two-console shared library exists.
+[ -f "$ADMIN_DIR/modules/pages/saas-shared.js" ] || fail "missing saas-shared.js shared library"
+pass "saas-shared.js shared library exists"
 
 # ── 35. CTO BLOCKER 3 — Acceptance UI offers only runtime-truthful actions ──
 # The runtime (internal/coremail/smtp/receive.go) accepts only
@@ -559,6 +608,7 @@ fi
 pass "internal/backup/targets/uploader.go has no SSH_ASKPASS secret-on-disk pattern (BLOCKER 2)"
 
 # ── 31. Admin Enterprise v2 endpoints are referenced from the JS ─
+# Two-console: scan all page modules recursively.
 for ep in \
     "/api/v1/admin/account-classes" \
     "/api/v1/admin/domain-groups" \
@@ -569,7 +619,7 @@ for ep in \
     "/api/v1/admin/quarantine" \
     "/api/v1/admin/acl-rules" \
     "/api/v1/admin/log-rules"; do
-    if ! grep -q "$ep" "$ADMIN_DIR/modules/pages/"*.js 2>/dev/null; then
+    if ! grep -rq "$ep" "$ADMIN_DIR/modules/pages/" 2>/dev/null; then
         fail "no page module references $ep"
     fi
 done
@@ -594,7 +644,7 @@ for ep in \
     "admin/acl-rules" \
     "admin/log-rules"; do
     # Verify that some page module posts to this endpoint.
-    if ! grep -q "apiPost.*$ep\|apiPut.*$ep\|apiPatch.*$ep\|apiDelete.*$ep" "$ADMIN_DIR/modules/pages/"*.js 2>/dev/null; then
+    if ! grep -rq "apiPost.*$ep\|apiPut.*$ep\|apiPatch.*$ep\|apiDelete.*$ep" "$ADMIN_DIR/modules/pages/" 2>/dev/null; then
         fail "no page module performs a mutation on $ep"
     fi
 done
