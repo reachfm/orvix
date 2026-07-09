@@ -361,14 +361,123 @@ will be recorded when staging hardware is available.
 
 ---
 
-## 12. Next Phase: PostgreSQL Production Migration
+## 12. DB-3: PostgreSQL Production Schema Compatibility (this PR)
 
-1. Add `MigrateAllPostgres()` that runs CREATE TABLE statements without SQLite-specific syntax.
-2. Add a test that runs the full suite with `ORVIX_DB_DRIVER=postgres`.
-3. Run `ORVIX_LOADTEST_ROWS=3000000` benchmark against PostgreSQL staging.
-4. Tune pass/fail thresholds based on real measurements.
-5. Build migration tool: `cmd/orvix migrate --from sqlite --to postgres`.
-6. Report actual numbers here.
+### What was added
+
+`MigrateAllPostgres()` in `internal/models/postgres_migrations.go` is the
+PostgreSQL-native counterpart to `MigrateAllRaw()`.  It creates **12 core
+production metadata tables** with proper PostgreSQL DDL:
+
+| Table | Keys |
+|-------|------|
+| `licenses` | `BIGSERIAL PK`, unique `key_hash` |
+| `feature_flags` | `BIGSERIAL PK`, unique `name` |
+| `tenants` | `BIGSERIAL PK`, unique `(slug, deleted_at)`, `(domain, deleted_at)` |
+| `users` | `BIGSERIAL PK`, unique `(email, deleted_at)` |
+| `domains` | `BIGSERIAL PK`, unique `(domain, deleted_at)` |
+| `mailboxes` | `BIGSERIAL PK`, unique `(email, deleted_at)` |
+| `api_keys` | `BIGSERIAL PK`, unique `key_hash` |
+| `sessions` | `BIGSERIAL PK`, unique `token_hash` |
+| `coremail_audit` | `BIGSERIAL PK`, indexed on `timestamp`, `(actor, timestamp)` |
+| `security_events` | `BIGSERIAL PK`, indexed on `email`, `event_type`, `created_at` |
+| `mfa_recovery_codes` | `BIGSERIAL PK` |
+| `coremail_mailboxes` | `BIGSERIAL PK`, indexed on `domain_id`, `email` |
+
+### Key PostgreSQL conversions
+
+| SQLite pattern | PostgreSQL equivalent | Affected |
+|----------------|----------------------|----------|
+| `INTEGER PRIMARY KEY AUTOINCREMENT` | `BIGSERIAL PRIMARY KEY` | All 12 tables |
+| `DATETIME` | `TIMESTAMP` | All timestamp columns |
+| `datetime('now')` | `NOW()` | Default values |
+| `INTEGER` for boolean flags | `BOOLEAN` | ~40 flag columns |
+| `PRAGMA table_info()` | `information_schema.columns` | N/A (not used in PG path) |
+| `sqlite_master` | `information_schema.tables` | Verification queries |
+| `REAL` | N/A (skipped in core tables) | Deferred |
+
+### What remains not migrated (33+ tables)
+
+Resellers, LDAP/SSO configs, alert configs, firewall rules/logs,
+guardian logs, heal histories, provisioned domains, update histories,
+CoreMail domains, aliases, account classes, domain groups, mailing
+lists, public folders, admin groups, ACL rules, log rules, quarantine
+index, DKIM config, acceptance rules, incoming message rules,
+migration/backup secrets, uploaded certificates — all deferred to DB-4.
+
+### Schema smoke test
+
+`TestPostgresProductionSchemaCompat` in `models_test.go`:
+- Creates all 12 tables via `MigrateAllPostgres()`
+- Verifies tables exist via `information_schema.tables`
+- Verifies 11 critical indexes via `pg_indexes`
+- Inserts and queries a representative row
+- Cleans up all tables with `DROP ... CASCADE`
+- Requires: `ORVIX_RUN_POSTGRES_SCHEMA_TEST=1`, `ORVIX_DB_DRIVER=postgres`, `ORVIX_DB_DSN=<dsn>`
+- Skipped silently in normal CI
+
+### New docs
+
+- `docs/POSTGRES_STAGING_RUNBOOK.md` — step-by-step how to run schema
+  smoke and benchmarks on staging PostgreSQL, including:
+  - DB creation commands
+  - 10k / 100k / 3M benchmark commands
+  - Metrics collection and extraction
+  - Cleanup procedures
+  - PASS/FAIL decision thresholds
+  - DSN security rules
+
+---
+
+## 13. Remaining Phases
+
+### DB-4: Complete PostgreSQL migration (all 45+ tables)
+
+1. Convert remaining 33 tables from `INTEGER PRIMARY KEY AUTOINCREMENT`
+   to `BIGSERIAL PRIMARY KEY`.
+2. Add PostgreSQL-native DDL for CoreMail operational tables
+   (domains, aliases, account classes, domain groups, mailing lists,
+   public folders, admin groups, ACL, log rules, quarantine, DKIM,
+   acceptance, incoming msg rules).
+3. Handle `migration_source_secrets` and `backup_target_secrets`
+   tables where PRIMARY KEY is used as a foreign-key identity without
+   AUTOINCREMENT — these need `BIGINT PRIMARY KEY` or `BIGSERIAL PRIMARY KEY`.
+
+### DB-5: Full production-schema DML audit
+
+1. Replace all `datetime('now')` DML calls with `NOW()`.
+2. Replace `INSERT OR REPLACE` (SQLite-only) with
+   `INSERT ... ON CONFLICT ... DO UPDATE` (Postgres upsert).
+3. Audit `internal/coremail/` and `internal/trust/` for SQLite-specific
+   DML syntax.
+
+### DB-6: Staging 3M run
+
+1. Execute `ORVIX_LOADTEST_ROWS=3000000` benchmark on PostgreSQL staging.
+2. Record insert rate, list latency, pagination, flag update metrics.
+3. Tune thresholds based on real measurements.
+4. Report actual numbers in this document.
+
+### DB-7: Migration tool
+
+1. Build `cmd/orvix migrate --from sqlite --to postgres` CLI.
+2. Table-by-table export/import with progress, row counts, SHA256
+   checksums.
+3. Downtime estimation for dataset size.
+
+---
+
+## 14. Clear Statement
+
+**RC4 is still the SQLite default.**  PostgreSQL schema compatibility
+exists for 12 core tables but has not been deployed to production.
+Full 45-table migration, 3M staging benchmark, and migration tooling
+are required before any production PostgreSQL deployment.
+
+**3M support is NOT yet proven.**  The benchmark harness exists, the
+schema path exists for core tables, and the staging runbook documents
+how to run the measurement.  No 3M benchmark has been executed on
+real PostgreSQL staging hardware.
 
 ---
 

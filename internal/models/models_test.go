@@ -2,7 +2,9 @@ package models
 
 import (
 	"database/sql"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -342,4 +344,117 @@ func TestCriticalIndexesExist(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPostgresProductionSchemaCompat creates the PostgreSQL-native
+// production schema via MigrateAllPostgres and verifies all 12 core
+// tables and their indexes exist.  Runs only when:
+//
+//	ORVIX_RUN_POSTGRES_SCHEMA_TEST=1
+//	ORVIX_DB_DRIVER=postgres
+//	ORVIX_DB_DSN=<valid postgres DSN>
+//
+// The DSN is never printed.  Skipped silently when env vars are
+// not set — normal CI is unaffected.
+func TestPostgresProductionSchemaCompat(t *testing.T) {
+	if strings.TrimSpace(os.Getenv("ORVIX_RUN_POSTGRES_SCHEMA_TEST")) != "1" {
+		t.Skip("set ORVIX_RUN_POSTGRES_SCHEMA_TEST=1 to run postgres schema smoke")
+	}
+	driver := strings.ToLower(strings.TrimSpace(os.Getenv("ORVIX_DB_DRIVER")))
+	if driver != "postgres" {
+		t.Skipf("ORVIX_DB_DRIVER=%q (want postgres)", driver)
+	}
+	dsn := strings.TrimSpace(os.Getenv("ORVIX_DB_DSN"))
+	if dsn == "" {
+		t.Skip("ORVIX_DB_DSN is empty")
+	}
+
+	cfg := config.Defaults()
+	cfg.Database.Driver = "postgres"
+	cfg.Database.DSN = dsn
+	cfg.Database.MaxOpen = 5
+	cfg.Database.MaxIdle = 2
+	cfg.Database.MaxLifetime = 300
+
+	db, err := config.NewDatabase(&cfg.Database, zap.NewNop())
+	if err != nil {
+		t.Fatalf("connect to postgres: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("get sql.DB: %v", err)
+	}
+	defer sqlDB.Close()
+
+	// Drop any leftover tables from a previous run (safe: these are
+	// the same tables MigrateAllPostgres creates).
+	dropOrder := []string{
+		"security_events", "mfa_recovery_codes", "coremail_mailboxes",
+		"mailboxes", "domains", "users", "coremail_audit",
+		"sessions", "api_keys", "tenants", "feature_flags", "licenses",
+	}
+	for _, tbl := range dropOrder {
+		sqlDB.Exec(`DROP TABLE IF EXISTS ` + tbl + ` CASCADE`)
+	}
+
+	if err := MigrateAllPostgres(db); err != nil {
+		t.Fatalf("MigrateAllPostgres: %v", err)
+	}
+
+	// Verify all 12 core tables exist.
+	if err := PostgresSchemaCompatible(db); err != nil {
+		t.Fatalf("PostgresSchemaCompatible: %v", err)
+	}
+	t.Log("all 12 core postgres tables created and verified")
+
+	// Insert a representative row to prove DML works.
+	_, err = sqlDB.Exec(
+		`INSERT INTO tenants (name, slug, domain) VALUES ($1, $2, $3)`,
+		"Smoke Tenant", "smoke-tenant", "smoke.example.com",
+	)
+	if err != nil {
+		t.Fatalf("insert into tenants: %v", err)
+	}
+
+	var slug string
+	if err := sqlDB.QueryRow(`SELECT slug FROM tenants WHERE name = $1`, "Smoke Tenant").Scan(&slug); err != nil {
+		t.Fatalf("query tenants: %v", err)
+	}
+	if slug != "smoke-tenant" {
+		t.Errorf("expected slug=smoke-tenant, got %s", slug)
+	}
+
+	// Verify key indexes exist.
+	pgIndexes := []string{
+		"idx_tenants_deleted_at",
+		"idx_users_email",
+		"idx_users_deleted_at",
+		"idx_domains_tenant_id",
+		"idx_mailboxes_tenant_id",
+		"idx_sessions_token_hash",
+		"idx_sessions_user_id",
+		"idx_coremail_audit_timestamp",
+		"idx_coremail_audit_actor",
+		"idx_security_events_email",
+		"idx_security_events_event_type",
+	}
+	for _, idxName := range pgIndexes {
+		var count int
+		if err := sqlDB.QueryRow(
+			`SELECT COUNT(*) FROM pg_indexes WHERE indexname = $1`, idxName,
+		).Scan(&count); err != nil {
+			t.Errorf("check index %s: %v", idxName, err)
+		} else if count == 0 {
+			t.Errorf("index %s not found", idxName)
+		} else {
+			t.Logf("index %s verified", idxName)
+		}
+	}
+
+	// Clean up.
+	for _, tbl := range dropOrder {
+		sqlDB.Exec(`DROP TABLE IF EXISTS ` + tbl + ` CASCADE`)
+	}
+
+	t.Log("postgres production schema smoke: PASS")
 }
