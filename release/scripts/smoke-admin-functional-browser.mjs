@@ -1,4 +1,5 @@
 import http from 'node:http';
+import https from 'node:https';
 import fs from 'node:fs/promises';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
@@ -8,6 +9,54 @@ import { spawn } from 'node:child_process';
 const adminDir = path.resolve(process.argv[2] || 'release/admin');
 const failures = [];
 const requests = [];
+const SMOKE_SESSION = 'admin-functional-session';
+const SMOKE_CERT = `-----BEGIN CERTIFICATE-----
+MIIDJTCCAg2gAwIBAgIUM5Q9uaK6lz1xFWj1N68005cDmV8wDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MDcwOTE0MTIwMFoXDTM2MDcw
+NjE0MTIwMFowFDESMBAGA1UEAwwJMTI3LjAuMC4xMIIBIjANBgkqhkiG9w0BAQEF
+AAOCAQ8AMIIBCgKCAQEAjBKQxRW4uZP4xXdGr0sYPTqN93F94fL+HotLz8fMDBI+
+uCyOwllFTJIg78LkDq7UPSh954zW4eecsdJGG52jdGxOzcrUP13eYEw5LyU9KrTI
+um80kyLcomWOPSePiFErCrrMlcHTlhO3UE+6M1Fu0A3FAKQIQZr6SuqBv/lGS2NE
+oELx30pa1maPq9p9zpM/n1wwQNljBq2jX0Bq/OQwfeNdhFTpcFkiksq03XXMBjDR
+RATyYRbe4hnGeRHwqsq5/y0u+ag3FRvvmSG5DvUt2UWmfbHlLT+APBq0JIWg+4AQ
+J1vcYrYLTgugulnkgoyj478KpFzp6anUUGmKeBBnEQIDAQABo28wbTAdBgNVHQ4E
+FgQUl7QTCrXR51S9jGGNKQCciJS4VAIwHwYDVR0jBBgwFoAUl7QTCrXR51S9jGGN
+KQCciJS4VAIwDwYDVR0TAQH/BAUwAwEB/zAaBgNVHREEEzARhwR/AAABgglsb2Nh
+bGhvc3QwDQYJKoZIhvcNAQELBQADggEBAC2Bpc8M7q2uo7N73+U1s7CmWbeTz9w4
+vEBeY7JsLghkE9j5eBl0kUux7HkGnLd6mjDHQhgtpxAyvZV6vQCGEwD1kMFHU41U
+pn01MjZQD77LGjN1wy0nccJFog1rMOW2O0iIm/Ph0SCDhgP26LSEVolUO7cOjb18
+ZPtWe4pVxACGZzc7NQeRHzky7vWyOZQNWnGigQKQwD/6suK6ekztdvO1F/1VjLeq
+v+CSK3PzRBAnAlaN5e8FLm0sG8933p0LSbbMAemGNCPPifh56Z6E/ENKkYxm9ua7
+CoHIt7t6vnwV/IjprY9KEkMyzb9rTgDeJ4qqJ3m4pSk8CbKpXXYSaeM=
+-----END CERTIFICATE-----`;
+const SMOKE_KEY = `-----BEGIN PRIVATE KEY-----
+MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCMEpDFFbi5k/jF
+d0avSxg9Oo33cX3h8v4ei0vPx8wMEj64LI7CWUVMkiDvwuQOrtQ9KH3njNbh55yx
+0kYbnaN0bE7NytQ/Xd5gTDkvJT0qtMi6bzSTItyiZY49J4+IUSsKusyVwdOWE7dQ
+T7ozUW7QDcUApAhBmvpK6oG/+UZLY0SgQvHfSlrWZo+r2n3Okz+fXDBA2WMGraNf
+QGr85DB9412EVOlwWSKSyrTddcwGMNFEBPJhFt7iGcZ5EfCqyrn/LS75qDcVG++Z
+IbkO9S3ZRaZ9seUtP4A8GrQkhaD7gBAnW9xitgtOC6C6WeSCjKPjvwqkXOnpqdRQ
+aYp4EGcRAgMBAAECggEAQkjC01DtInyge6lu/KLXrJnZ9p9xR4w6ru+SB5hvucKk
+hXkocVXXUl3QUkVysHQRIYPY2MswIKT+5LMx0/2sDPr367Cw8e+UvRM0+Fdx85Sr
+bHYVdg9IQ101i0D+Ti7C5IfzKmcXnmxkEhA4d/JwMuphMGVvNsSE7xC8J8Fpf2Ce
+Ly2NzEX70GWKtBFdwMefK6n+IPRfc8dY4m6u+E5rsdj0V885dguJhKpanQkSe+qR
+tanhRQSsxnjQg4iK8+HQFI+sHfbTs5BDmZ2FaFW1XWBIDgbMbUIfi79bMTqkqk9t
+QtqJetLrmeZ1EiQjz/0hN0+N/MyT/8R6BL8/8BTTBQKBgQC91/XqmfkVaIGlWVOA
+oRJEckkgpzkpS5U7itX0p+zEUClsJ51noaxm/ElhVxG0uSxTEvNcVtd+T+xwpx8L
+tpXWxWc6MCehs9uFyc7j+X24shPCu4u4GqvyRwwS3YsYJJ5DWapGaMWsqdy26+jn
+BK3C0l/Z+uSgjmodrTlVVgkvOwKBgQC84oDPShtgTZlo3mBPM9k5KFOjbqX1h7IR
+Wzmw0vhDuHj8W/gfMhOhR2CrM7+dH+Oia1EKLuHHrZPXTId5IxYffUxHGuKG8pc3
+pcstEAagwNL/3N7YI/bb6BLOrDkDtaPWFFBAySz6z8iZBZ0HZWmnY6nzFoZnUVse
+13qgGgG2IwKBgHvFmWdjC6qRgDU1j+OFIEvP1y2a2QG7bYhsdCIWeZ9kRB1nlpBC
+MAzU32K/SaPyNpvS9yd01vpbUWQBEZSpbfegrDSbwLsEcFNBx8mKmBUaxRdo/ycA
+/Knw+EY0esM63JQ8mW9eT8LK3EPGewpjWoZyclvD39tt/nFqxr6EYWiRAoGAatKO
+lq0KnoREZpKdVS21hCXSZ3OEWD/N7RLypZYq4eHKSq6YvMvNXkDH4wr5KxuF2a1n
+v6KT/iGkovadB11YfaaXJP+HbVp1OvuA1JNjrDZhHmMDhKmSSvwM5uVvuTFY3xHN
+8VXVImOwxxntnOk1v30V+GycxoG0TtT+fN04apECgYADV/SBlAS2dTBfyUIp5Dr+
+IQhmS1iqFDSm+WJ6tm4zNnYKgjYY9UzPLvPmRUN9ptulWudVyT18qnuriBRcu3XZ
+jP21J0VEXnwJ1bo+QaZZP3LKQwppnH2Mx3ozm7dttPf3eF417PcNG6/bT7huz0JR
+5CLINSMZH6rZALFyHimdhQ==
+-----END PRIVATE KEY-----`;
 
 function fail(msg) {
   throw new Error(msg);
@@ -62,32 +111,35 @@ async function readBody(req) {
   try { return JSON.parse(raw); } catch { return {}; }
 }
 
-function sendJSON(res, status, body) {
+function sendJSON(res, status, body, headers = {}) {
   res.writeHead(status, {
     'content-type': 'application/json',
     'cache-control': 'no-store',
+    ...headers,
   });
   res.end(JSON.stringify(body));
 }
 
 function startServer() {
   return new Promise((resolve, reject) => {
-    const server = http.createServer(async (req, res) => {
+    const server = https.createServer({ key: SMOKE_KEY, cert: SMOKE_CERT }, async (req, res) => {
       try {
-        const url = new URL(req.url, 'http://127.0.0.1');
+        const url = new URL(req.url, 'https://127.0.0.1');
         requests.push(`${req.method} ${url.pathname}`);
         if (url.pathname.startsWith('/api/')) {
           if (url.pathname === '/api/v1/me') {
-            const auth = req.headers.authorization || '';
-            if (auth === 'Bearer admin-functional-token') return sendJSON(res, 200, { email: 'admin@example.com', roles: ['admin'] });
+            const cookie = req.headers.cookie || '';
+            if (cookie.includes(`__Host-orvix_session=${SMOKE_SESSION}`)) {
+              return sendJSON(res, 200, { email: 'admin@example.com', roles: ['admin'], role: 'admin' });
+            }
             return sendJSON(res, 401, { code: 'unauthorized', message: 'unauthorized' });
           }
           if (url.pathname === '/api/v1/auth/login' && req.method === 'POST') {
             const body = await readBody(req);
             if (body.email && body.password) return sendJSON(res, 200, {
-              access_token: 'admin-functional-token',
-              refresh_token: 'admin-functional-refresh',
-              token_type: 'Bearer',
+              status: 'ok',
+            }, {
+              'set-cookie': `__Host-orvix_session=${SMOKE_SESSION}; Path=/; HttpOnly; Secure; SameSite=Lax`,
             });
             return sendJSON(res, 401, { code: 'invalid_credentials', message: 'invalid credentials' });
           }
@@ -311,6 +363,8 @@ async function main() {
     '--disable-setuid-sandbox',
     '--disable-dbus',
     '--remote-allow-origins=*',
+    '--ignore-certificate-errors',
+    '--allow-insecure-localhost',
     'about:blank',
   ];
   const proc = spawn(chrome, chromeArgs, {
@@ -357,7 +411,8 @@ async function main() {
         console.error(`browser ${msg.level}: ${(msg.text || '')} ${(msg.url || '')}:${msg.line || 0}`);
       }
     });
-    await cdp.send('Page.navigate', { url: `http://127.0.0.1:${port}/admin/` });
+    await cdp.send('Network.enable');
+    await cdp.send('Page.navigate', { url: `https://127.0.0.1:${port}/admin/` });
     await new Promise((resolve) => cdp.on('Page.loadEventFired', resolve));
     // After load event, wait a moment for deferred module scripts to execute
     await new Promise((r) => setTimeout(r, 500));
@@ -422,6 +477,11 @@ async function main() {
       document.querySelector('#login-password').value='correct horse battery staple';
       document.querySelector('#login-form').requestSubmit();
     `);
+    await waitFor(async () => {
+      const got = await cdp.send('Network.getCookies', { urls: [`https://127.0.0.1:${port}/admin/`] });
+      const cookie = (got.cookies || []).find((c) => c.name === '__Host-orvix_session');
+      return cookie && cookie.secure === true && cookie.httpOnly === true && cookie.path === '/' && !cookie.domain.startsWith('.');
+    }, 'secure __Host-orvix_session cookie');
     await waitFor(() => evalJS(`!document.querySelector('#app-view')?.classList.contains('hidden')`), 'app shell after login');
     await waitFor(async () => (await mainText()).length > 10, 'nonblank dashboard');
     const dashText = await mainText();

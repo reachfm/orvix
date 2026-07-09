@@ -154,6 +154,13 @@ import * as legacyUpdates      from './modules/pages/updates.js';
 import * as legacyMonitoring   from './modules/pages/monitoring.js';
 import * as legacyLogs         from './modules/pages/logs.js';
 import * as legacySettings     from './modules/pages/settings.js';
+import * as legacyRuntimeListeners from './modules/pages/runtime-listeners.js';
+import * as legacyAdminGroups  from './modules/pages/admin-groups.js';
+import * as legacyAcl          from './modules/pages/acl.js';
+import * as legacyAcceptance   from './modules/pages/acceptance.js';
+import * as legacyIncoming     from './modules/pages/incoming-rules.js';
+import * as legacyMailingLists from './modules/pages/mailing-lists.js';
+import * as legacyPublicFolders from './modules/pages/public-folders.js';
 
 register('customer/dashboard',     customerDashboard.render);
 register('customer/domains',       customerDomains.render);
@@ -178,28 +185,34 @@ register('internal/branding',          internalBranding.render);
 // dns, backups, updates, monitoring, logs, settings) so older operator
 // links + sidebar entries from before the two-console refactor still
 // resolve to the same page content.
-register('runtime-listeners',          internalRuntime.render);
+register('runtime-listeners',          legacyRuntimeListeners.renderRuntimeListenersPage);
 register('observability',              internalObservability.render);
 register('settings/general',           (root) => customerSettings.render(root, { section: 'general' }));
 register('settings/security',          (root) => customerSettings.render(root, { section: 'security' }));
 register('admin/users',                (root) => customerUsers.render(root, { adminUsers: true }));
-register('admin/groups',               (root) => customerGroups.render(root, { adminGroups: true }));
+register('admin/groups',               legacyAdminGroups.renderAdminGroupsPage);
 register('admin/audit-log',            (root) => customerReports.render(root, { audit: true }));
+register('security/spam',              legacyAcl.renderACLPage);
+register('security/routing',           legacyAcceptance.renderAcceptancePage);
+register('security/rules',             legacyIncoming.renderIncomingRulesPage);
+register('domains/lists',              legacyMailingLists.renderMailingListsPage);
+register('domains/public',             legacyPublicFolders.renderPublicFoldersPage);
 
 // Legacy short-route aliases. The legacy renderers export
 // renderXxxPage(root), and we register them here so callers using
 // the historical route name (e.g. ops scripts, README examples,
 // saved bookmarks) keep working without rewriting links.
-register('dashboard',    legacyDashboard.render);
-register('domains',      legacyDomains.render);
-register('mailboxes',    legacyAccounts.render);
-register('queue',        legacyQueue.render);
-register('dns',          legacyDnsDkim.render);
-register('backups',      legacyBackups.render);
-register('updates',      legacyUpdates.render);
-register('monitoring',   legacyMonitoring.render);
-register('logs',         legacyLogs.render);
-register('settings',     legacySettings.render);
+register('dashboard',    legacyDashboard.renderDashboard);
+register('domains',      legacyDomains.renderDomainsPage);
+register('mailboxes',    legacyAccounts.renderAccountsPage);
+register('accounts',     legacyAccounts.renderAccountsPage);
+register('queue',        legacyQueue.renderQueuePage);
+register('dns',          legacyDnsDkim.renderDnsDkimPage);
+register('backups',      legacyBackups.renderBackupsPage);
+register('updates',      legacyUpdates.renderUpdatesPage);
+register('monitoring',   legacyMonitoring.renderMonitoringPage);
+register('logs',         legacyLogs.renderLogsPage);
+register('settings',     legacySettings.renderSettingsPage);
 
 setNotFound((root, route) => {
   renderPlannedPage(root, { feature: route, endpoint: '' });
