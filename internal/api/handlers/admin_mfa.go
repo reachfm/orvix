@@ -31,8 +31,9 @@ func (h *Handler) MFAStatusGet(c fiber.Ctx) error {
 
 	var mfaEnabled bool
 	var mfaLabel string
+	dial := dbdialect.FromDriver(h.cfg.Database.Driver)
 	err = sqlDB.QueryRow(
-		"SELECT COALESCE(mfa_enabled, 0), COALESCE(mfa_label, '') FROM users WHERE id = ?",
+		"SELECT COALESCE(mfa_enabled, 0), COALESCE(mfa_label, '') FROM users WHERE id = "+dial.Placeholder(1),
 		userID).Scan(&mfaEnabled, &mfaLabel)
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"error": "user not found"})
@@ -64,7 +65,8 @@ func (h *Handler) MFASetupBegin(c fiber.Ctx) error {
 
 	var passwordHash string
 	var email string
-	err = sqlDB.QueryRow("SELECT email, password_hash FROM users WHERE id = ?", userID).Scan(&email, &passwordHash)
+	dial := dbdialect.FromDriver(h.cfg.Database.Driver)
+	err = sqlDB.QueryRow("SELECT email, password_hash FROM users WHERE id = "+dial.Placeholder(1), userID).Scan(&email, &passwordHash)
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"error": "user not found"})
 	}
@@ -83,14 +85,14 @@ func (h *Handler) MFASetupBegin(c fiber.Ctx) error {
 	// Store secret temporarily (hashed) in a pending_mfa_secret column
 	// Only store hashed version, never plaintext
 	hashedSecret := hashSecret(secretBytes)
-	_, err = sqlDB.Exec(`UPDATE users SET pending_mfa_secret = ?, mfa_label = ? WHERE id = ?`,
+	_, err = sqlDB.Exec(`UPDATE users SET pending_mfa_secret = `+dial.Placeholder(1)+`, mfa_label = `+dial.Placeholder(2)+` WHERE id = `+dial.Placeholder(3),
 		base64Encode(hashedSecret), email, userID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "failed to store pending setup"})
 	}
 
 	// Also store raw secret temporarily for verification
-	_, err = sqlDB.Exec(`UPDATE users SET pending_mfa_secret_raw = ? WHERE id = ?`,
+	_, err = sqlDB.Exec(`UPDATE users SET pending_mfa_secret_raw = `+dial.Placeholder(1)+` WHERE id = `+dial.Placeholder(2),
 		base64Encode(secretBytes), userID)
 	if err != nil {
 		h.logger.Warn("failed to store raw pending mfa secret", zap.Error(err))
@@ -130,7 +132,8 @@ func (h *Handler) MFASetupVerify(c fiber.Ctx) error {
 	}
 
 	var pendingSecret, pendingSecretRaw, email string
-	err = sqlDB.QueryRow("SELECT pending_mfa_secret, COALESCE(pending_mfa_secret_raw, ''), email FROM users WHERE id = ?", userID).
+	dial := dbdialect.FromDriver(h.cfg.Database.Driver)
+	err = sqlDB.QueryRow("SELECT pending_mfa_secret, COALESCE(pending_mfa_secret_raw, ''), email FROM users WHERE id = "+dial.Placeholder(1), userID).
 		Scan(&pendingSecret, &pendingSecretRaw, &email)
 	if err != nil || pendingSecret == "" {
 		return c.Status(400).JSON(fiber.Map{"error": "no pending MFA setup; call /mfa/setup/begin first"})
@@ -156,7 +159,7 @@ func (h *Handler) MFASetupVerify(c fiber.Ctx) error {
 	// and keep the raw secret in mfa_secret_raw for future TOTP verification.
 	_, err = sqlDB.Exec(`UPDATE users SET mfa_enabled = 1, mfa_secret = pending_mfa_secret,
 		mfa_secret_raw = pending_mfa_secret_raw,
-		pending_mfa_secret = '', pending_mfa_secret_raw = '' WHERE id = ?`, userID)
+		pending_mfa_secret = '', pending_mfa_secret_raw = '' WHERE id = `+dial.Placeholder(1), userID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "failed to enable MFA"})
 	}
@@ -165,7 +168,7 @@ func (h *Handler) MFASetupVerify(c fiber.Ctx) error {
 	rawCodes := generateRecoveryCodes()
 	for _, code := range rawCodes {
 		codeHash := fmt.Sprintf("%x", sha256.Sum256([]byte(code)))
-		sqlDB.Exec(`INSERT INTO mfa_recovery_codes (user_id, code_hash) VALUES (?, ?)`, userID, codeHash)
+		sqlDB.Exec(`INSERT INTO mfa_recovery_codes (user_id, code_hash) VALUES (`+dial.Placeholder(1)+`, `+dial.Placeholder(2)+`)`, userID, codeHash)
 	}
 
 	h.writeAuditLog(c, "mfa.enabled", email)
@@ -195,7 +198,8 @@ func (h *Handler) MFADisable(c fiber.Ctx) error {
 	}
 
 	var passwordHash string
-	err = sqlDB.QueryRow("SELECT password_hash FROM users WHERE id = ?", userID).Scan(&passwordHash)
+	dial := dbdialect.FromDriver(h.cfg.Database.Driver)
+	err = sqlDB.QueryRow("SELECT password_hash FROM users WHERE id = "+dial.Placeholder(1), userID).Scan(&passwordHash)
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"error": "user not found"})
 	}
@@ -208,7 +212,7 @@ func (h *Handler) MFADisable(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"error": "MFA code required to disable"})
 	}
 	var mfaSecretRaw string
-	err = sqlDB.QueryRow("SELECT COALESCE(mfa_secret_raw, '') FROM users WHERE id = ?", userID).Scan(&mfaSecretRaw)
+	err = sqlDB.QueryRow("SELECT COALESCE(mfa_secret_raw, '') FROM users WHERE id = "+dial.Placeholder(1), userID).Scan(&mfaSecretRaw)
 	if err != nil || mfaSecretRaw == "" {
 		return c.Status(400).JSON(fiber.Map{"error": "MFA is not enabled or secret is missing"})
 	}
@@ -222,11 +226,13 @@ func (h *Handler) MFADisable(c fiber.Ctx) error {
 		return c.Status(401).JSON(fiber.Map{"error": "invalid MFA code"})
 	}
 
-	_, err = sqlDB.Exec(`UPDATE users SET mfa_enabled = 0, mfa_secret = '', mfa_secret_raw = '', pending_mfa_secret = '', pending_mfa_secret_raw = '' WHERE id = ?`, userID)
+	_, err = sqlDB.Exec(
+		`UPDATE users SET mfa_enabled = 0, mfa_secret = '', mfa_secret_raw = '', pending_mfa_secret = '', pending_mfa_secret_raw = '' WHERE id = `+dial.Placeholder(1),
+		userID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "failed to disable MFA"})
 	}
-	sqlDB.Exec(`DELETE FROM mfa_recovery_codes WHERE user_id = ?`, userID)
+	sqlDB.Exec(`DELETE FROM mfa_recovery_codes WHERE user_id = `+dial.Placeholder(1), userID)
 
 	h.writeAuditLog(c, "mfa.disabled", "")
 
@@ -325,7 +331,9 @@ func (h *Handler) MFALoginVerify(c fiber.Ctx) error {
 		// Recovery code redemption.
 		codeHash := fmt.Sprintf("%x", sha256.Sum256([]byte(req.RecoveryCode)))
 		var recoveryID uint
-		err = sqlDB.QueryRow(`SELECT id FROM mfa_recovery_codes WHERE user_id = ? AND code_hash = ? AND used_at IS NULL`,
+		dial := dbdialect.FromDriver(h.cfg.Database.Driver)
+		err = sqlDB.QueryRow(
+			`SELECT id FROM mfa_recovery_codes WHERE user_id = `+dial.Placeholder(1)+` AND code_hash = `+dial.Placeholder(2)+` AND used_at IS NULL`,
 			userID, codeHash).Scan(&recoveryID)
 		if err != nil {
 			h.logger.Warn("mfa login: invalid or already-used recovery code",
@@ -334,7 +342,6 @@ func (h *Handler) MFALoginVerify(c fiber.Ctx) error {
 		}
 		// Mark recovery code as used (one-time use). The used_at predicate
 		// keeps concurrent redemption attempts from reusing the same code.
-		dial := dbdialect.FromDriver(h.cfg.Database.Driver)
 		res, err := sqlDB.Exec(
 			`UPDATE mfa_recovery_codes SET used_at = `+dial.Placeholder(1)+` WHERE id = `+dial.Placeholder(2)+` AND used_at IS NULL`,
 			time.Now().UTC(), recoveryID)
@@ -356,7 +363,8 @@ func (h *Handler) MFALoginVerify(c fiber.Ctx) error {
 	} else {
 		// TOTP code verification.
 		var mfaSecretRaw string
-		err = sqlDB.QueryRow("SELECT COALESCE(mfa_secret_raw, '') FROM users WHERE id = ?", userID).Scan(&mfaSecretRaw)
+		dial := dbdialect.FromDriver(h.cfg.Database.Driver)
+		err = sqlDB.QueryRow("SELECT COALESCE(mfa_secret_raw, '') FROM users WHERE id = "+dial.Placeholder(1), userID).Scan(&mfaSecretRaw)
 		if err != nil || mfaSecretRaw == "" {
 			return c.Status(401).JSON(fiber.Map{"error": "MFA not configured"})
 		}
@@ -375,7 +383,8 @@ func (h *Handler) MFALoginVerify(c fiber.Ctx) error {
 	// MFA passed — issue tokens.
 	var userRole string
 	var userEmail string
-	err = sqlDB.QueryRow("SELECT role, email FROM users WHERE id = ?", userID).Scan(&userRole, &userEmail)
+	dial := dbdialect.FromDriver(h.cfg.Database.Driver)
+	err = sqlDB.QueryRow("SELECT role, email FROM users WHERE id = "+dial.Placeholder(1), userID).Scan(&userRole, &userEmail)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "user lookup failed"})
 	}
