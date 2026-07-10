@@ -1,12 +1,17 @@
 # Orvix PostgreSQL Staging Runbook
 
-**DB-3** — how to run PostgreSQL schema compatibility tests and benchmarks on a staging machine.
+**DB-3** — how to run PostgreSQL schema compatibility, migration, and runtime
+tests on a staging machine.
+
+**Scope declaration:** This runbook covers the **metadata/admin PostgreSQL
+foundation**. CoreMail operational storage (messages, attachments, queue)
+remains SQLite-only. Full PostgreSQL deployment is not supported by this branch.
 
 This runbook assumes:
-- PostgreSQL is installed and running on the staging host (or local docker)
-- You have a database and user created
-- You have the Orvix repo checked out
-- You never print the PostgreSQL DSN/password in terminal output or logs
+- PostgreSQL is installed and running on the staging host (or local docker).
+- You have a database and user created.
+- You have the Orvix repo checked out.
+- You never print the PostgreSQL DSN/password in terminal output or logs.
 
 ---
 
@@ -212,7 +217,52 @@ Use the following placeholder thresholds until real staging measurements exist:
 
 ---
 
-## 10. Never Print or Log the DSN
+## 10. Migration, Runtime, and Backup/Restore Tests
+
+### 10.1 Full 10-table migration
+
+```bash
+ORVIX_RUN_POSTGRES_MIGRATE_TEST=1 \
+ORVIX_DB_DRIVER=postgres \
+ORVIX_DB_DSN="$ORVIX_BENCH_DSN" \
+go test -v -count=1 -timeout=15m ./cmd/orvix -run TestMigrateAll10TablesWithRowVerification
+```
+
+**Expected:** 26 rows migrated across 10 metadata tables; row counts match;
+mailbox `local_part`/`email` semantics verified.
+
+### 10.2 Runtime startup on PostgreSQL
+
+```bash
+ORVIX_DB_DRIVER=postgres \
+ORVIX_DB_DSN="$ORVIX_BENCH_DSN" \
+go test -v -count=1 -timeout=15m ./cmd/orvix -run TestStartupPostgresRuntime
+```
+
+**Expected:** migrations, feature-flag seed, admin seed, module InitAll/StartAll,
+health 200, admin login 200, clean StopAll.
+
+> CoreMail remains disabled by default; this tests the supported hybrid
+> architecture (PostgreSQL metadata, SQLite CoreMail storage).
+
+### 10.3 Backup/restore round-trip
+
+Requires `pg_dump` and `pg_restore` in PATH.
+
+```bash
+ORVIX_RUN_POSTGRES_BACKUP_TEST=1 \
+ORVIX_RUN_POSTGRES_MIGRATE_TEST=1 \
+ORVIX_DB_DRIVER=postgres \
+ORVIX_DB_DSN="$ORVIX_BENCH_DSN" \
+go test -v -count=1 -timeout=20m ./cmd/orvix -run TestPostgresBackupRestoreAndRuntime
+```
+
+**Expected:** source and destination databases created, migrated data dumped and
+restored, counts/semantics/sequences verified, runtime starts against restored DB.
+
+---
+
+## 11. Never Print or Log the DSN
 
 - Always use env vars.
 - Never `echo $ORVIX_BENCH_DSN`.
@@ -223,7 +273,7 @@ Use the following placeholder thresholds until real staging measurements exist:
 
 ---
 
-## 11. What Is Still Not Migrated (DB-4+)
+## 12. What Is Still Not Migrated (DB-4+)
 
 These 33+ tables from MigrateAllRaw are NOT yet covered by `MigrateAllPostgres()`:
 
@@ -242,4 +292,4 @@ PostgreSQL-native conversion.
 
 ---
 
-**Last updated:** 2026-07-09
+**Last updated:** 2026-07-11

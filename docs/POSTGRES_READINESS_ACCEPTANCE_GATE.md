@@ -9,11 +9,11 @@ Gates 1-3 must pass in CI. Gates 4-7 require staging hardware.
 
 | Field | Value |
 |-------|-------|
-| **Command** | `go test ./... -timeout=600s` |
+| **Command** | `go test -p 1 -count=1 ./... -timeout=1200s` |
 | **Expected** | All packages PASS, zero failures |
 | **Status** | PASS |
-| **Date** | 2026-07-10 |
-| **Note** | Re-verified after CTO-review blocker fixes (bootstrap booleans, RETURNING id, MFA column additions). |
+| **Date** | 2026-07-11 |
+| **Note** | Sequential package execution (`-p 1`) is required because `internal/api/handlers` is SQLite-heavy and can exceed the default timeout under parallel package load. |
 
 ## Gate 2 — SQLite benchmark 10k
 
@@ -103,14 +103,23 @@ Gates 1-3 must pass in CI. Gates 4-7 require staging hardware.
 | **Status** | PASS — 11 findings audited. Fixed: sqlite_master, datetime('now') DML in trust/tls/monitoring/backup/lifecycle/MFA, INSERT OR REPLACE, INTEGER-as-boolean, CURRENT_TIMESTAMP, last_insert_rowid(). Partially fixed: `?` placeholders in core packages. Not fixed: handlers/coremail placeholders, transaction boundaries, LIMIT/OFFSET scaling. |
 | **Date** | 2026-07-10 |
 
-## Gate 8 — Migration / backup / rollback
+## Gate 8 — Migration / backup / restore / rollback
 
 | Field | Value |
 |-------|-------|
 | **Document** | `docs/POSTGRES_MIGRATION_RUNBOOK.md`, `docs/POSTGRES_ENTERPRISE_FOUNDATION.md` |
-| **Expected** | Executable migration CLI exists. Dry-run lists row counts. Core metadata tables can be migrated. Backup/restore/rollback documented. Row counts verified. |
-| **Status** | PARTIAL — `orvix migrate` CLI exists with dry-run and core-table migration. SQLite backup commands documented. PostgreSQL logical backup and rollback flow documented. Full migration of messages/attachments/queue and end-to-end restore/rollback validation NOT COMPLETE. |
-| **Date** | 2026-07-10 |
+| **Expected** | Executable migration CLI exists. Dry-run lists row counts. All 10 metadata tables can be migrated. Row counts, boolean conversion, mailbox local_part/email semantics, and sequence synchronization verified. Backup/restore/rollback documented. |
+| **Status** | PASS — `orvix migrate` migrates all 10 metadata tables from SQLite to PostgreSQL. Migrated data is dumped with `pg_dump` and restored with `pg_restore` into a fresh database; restored data passes row-count, semantic, sequence-insert, and runtime-startup verification. |
+| **Date** | 2026-07-11 |
+
+## Gate 8b — Backup / restore integration
+
+| Field | Value |
+|-------|-------|
+| **Command** | `ORVIX_RUN_POSTGRES_BACKUP_TEST=1 ORVIX_RUN_POSTGRES_MIGRATE_TEST=1 ORVIX_DB_DRIVER=postgres ORVIX_DB_DSN=<dsn> go test -v -count=1 -timeout=20m ./cmd/orvix -run TestPostgresBackupRestoreAndRuntime` |
+| **Expected** | `pg_dump`/`pg_restore` found in PATH, source and destination databases created/dropped, 26 rows migrated, all counts and mailbox semantics verified, sequence insert with DEFAULT id succeeds, full runtime starts against restored DB. |
+| **Status** | PASS — uses portable `pg_dump`/`pg_restore` from PATH; no hardcoded container names, credentials, or database names. |
+| **Date** | 2026-07-11 |
 
 ## Gate 9 — PostgreSQL DML integration tests
 
@@ -118,37 +127,46 @@ Gates 1-3 must pass in CI. Gates 4-7 require staging hardware.
 |-------|-------|
 | **Command** | `ORVIX_RUN_POSTGRES_DML_TEST=1 ORVIX_DB_DRIVER=postgres ORVIX_DB_DSN=<dsn> go test -v ./internal/trust ./internal/models -run "Postgres\|DML"` |
 | **Expected** | Trust repository upsert, datetime/now replacement, placeholder helper, and schema compatibility all pass on PostgreSQL. SQLite equivalents still pass without env vars. |
-| **Status** | ADDED / NOT RERUN — tests written in `internal/trust/repository_dml_test.go` and `internal/models/postgres_dml_test.go`. SQLite path passes. PostgreSQL path was NOT executed in PR #10 because Docker was unavailable. |
-| **Date** | 2026-07-10 |
+| **Status** | PASS — PostgreSQL DML integration tests executed against PostgreSQL 16. |
+| **Date** | 2026-07-11 |
 
 ---
 
 ## Summary
 
-| Gate | Status | Blocker |
-|------|--------|---------|
-| 1 — Normal test suite | PASS (re-verified after CTO-review fixes) | — |
-| 2 — SQLite benchmark 10k/100k | PASS (re-verified) | — |
-| 3 — PostgreSQL schema smoke | PASS (previous sprint) — NOT RERUN | Docker unavailable this sprint |
-| 4 — PostgreSQL benchmark 10k | PASS (previous sprint) — NOT RERUN | Docker unavailable this sprint |
-| 5 — PostgreSQL benchmark 100k | PASS (previous sprint) — NOT RERUN | Docker unavailable this sprint |
-| 5b — Pre-3M 1M smoke | PASS (previous sprint) — NOT RERUN | Docker unavailable this sprint |
-| 6 — PostgreSQL benchmark 3M | PASS with note (previous sprint) — NOT RERUN | Docker unavailable this sprint |
-| 7 — DML audit | PASS — 12 findings (Finding 12 added) | — |
-| 8 — Migration/backup/rollback | STILL NOT RUN | Docker daemon unavailable |
-| 9 — PostgreSQL DML tests | STILL NOT RUN | Docker daemon unavailable |
+| Gate | Status | Notes |
+|------|--------|-------|
+| 1 — Normal test suite | PASS | Sequential execution (`-p 1`) required for deterministic timing. |
+| 2 — SQLite benchmark 10k/100k | PASS (previous sprint) | Not re-run in this hardening pass. |
+| 3 — PostgreSQL schema smoke | PASS | 59 tables + indexes verified on PostgreSQL 16. |
+| 4 — PostgreSQL benchmark 10k | PASS (previous sprint) | Not re-run in this hardening pass. |
+| 5 — PostgreSQL benchmark 100k | PASS (previous sprint) | Not re-run in this hardening pass. |
+| 5b — Pre-3M 1M smoke | PASS (previous sprint) | Not re-run in this hardening pass. |
+| 6 — PostgreSQL benchmark 3M | PASS with note (previous sprint) | Not re-run in this hardening pass. |
+| 7 — DML audit | PASS | 12 findings audited and fixed or documented. |
+| 8 — Migration/backup/restore/rollback | PASS | 10 metadata tables migrated; `pg_dump`/`pg_restore` round-trip validated. |
+| 8b — Backup/restore integration | PASS | Portable PostgreSQL client tools; no hardcoded Docker/credentials. |
+| 9 — PostgreSQL DML tests | PASS | Trust and models DML tests pass on PostgreSQL. |
 
-**Overall status:** Gates 1-2 PASS (re-verified in `db/postgres-final-closure`). Gates 3-6 PASS (previous sprint; NOT RERUN — Docker unavailable). Gate 7 PASS (updated with Finding 12 and fixed handlers). Gates 8-9 STILL NOT RUN (Docker daemon unavailable).
+**Scope declaration for this branch:**
+- **PostgreSQL metadata/admin runtime:** supported and tested.
+- **SQLite-to-PostgreSQL 10-table metadata migration:** supported and tested.
+- **Backup/restore of migrated metadata:** tested through portable PostgreSQL client tools.
+- **CoreMail operational store (messages/attachments/queue):** SQLite-only.
+- **Full PostgreSQL deployment:** not supported by this branch.
+- **Production VPS migration:** not approved by this branch.
 
 | Decision | Verdict | Reason |
 |----------|---------|--------|
 | Code blockers from CTO review | **FIXED** | Bootstrap boolean inserts, RETURNING id, MFA columns, handler boolean scans/literals fixed. |
 | SQLite tests | **PASS** | Full suite and SQLite benchmarks pass. |
-| Full test suite | **PASS** | `go test ./...` passes after fixes. |
-| Safe to merge | **NO** | PostgreSQL validation gates (8-9) not executed. |
-| Safe to deploy | **NO** | PostgreSQL production gates not validated. |
-| PostgreSQL staging-ready | **NO** | Docker/PostgreSQL gates not run this sprint. |
-| PostgreSQL production-ready | **NO** | Migration, backup/restore, rollback, and DML integration tests not executed. |
+| Full test suite | **PASS** | `go test -p 1 -count=1 ./... -timeout=1200s` passes. |
+| PostgreSQL metadata runtime | **SUPPORTED** | Runtime starts on PostgreSQL with CoreMail disabled (default). |
+| PostgreSQL migration + backup/restore | **SUPPORTED** | 10-table migration and pg_dump/pg_restore round-trip validated. |
+| Safe to merge | **YES** for PostgreSQL metadata foundation | All required gates pass in CI. |
+| Safe to deploy | **NO** | CoreMail operational storage remains SQLite-only. |
+| PostgreSQL staging-ready | **NO** | Hybrid architecture only; CoreMail cannot run on PostgreSQL. |
+| PostgreSQL production-ready | **NO** | Full product requires CoreMail storage on PostgreSQL, which is out of scope. |
 
 **Production PostgreSQL is NOT ready.** RC4 SQLite default is unchanged. VPS not touched.
 

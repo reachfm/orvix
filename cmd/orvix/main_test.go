@@ -14,7 +14,6 @@ import (
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/api"
@@ -546,48 +545,50 @@ func TestStartupPostgresRuntime(t *testing.T) {
 // TestPostgresBackupRestoreAndRuntime validates that a full 10-table
 // migration can be dumped with pg_dump, restored into a fresh PostgreSQL
 // database with pg_restore, and that the restored database passes the
-// same row-count, semantic, and runtime-startup checks as the source.
+// same row-count, semantic, sequence, and runtime-startup checks as the
+// source.
+//
+// This test requires:
+//   - ORVIX_DB_DRIVER=postgres
+//   - ORVIX_DB_DSN set to a PostgreSQL server the test can create/drop databases on
+//   - ORVIX_RUN_POSTGRES_BACKUP_TEST=1
+//   - pg_dump and pg_restore in PATH
 func TestPostgresBackupRestoreAndRuntime(t *testing.T) {
 	if strings.ToLower(strings.TrimSpace(os.Getenv("ORVIX_DB_DRIVER"))) != "postgres" {
 		t.Skip("ORVIX_DB_DRIVER must be postgres")
 	}
+	if os.Getenv("ORVIX_RUN_POSTGRES_BACKUP_TEST") != "1" {
+		t.Skip("set ORVIX_RUN_POSTGRES_BACKUP_TEST=1 to run backup/restore integration")
+	}
 	baseDSN := strings.TrimSpace(os.Getenv("ORVIX_DB_DSN"))
 	if baseDSN == "" {
-		t.Skip("ORVIX_DB_DSN is empty")
+		t.Fatal("ORVIX_DB_DSN is empty")
 	}
 
 	const adminEmail = "admin@restored.test"
 	const adminPassword = "AdminBackupRestore123!"
 
+	pgDump := findPGTool(t, "pg_dump")
+	pgRestore := findPGTool(t, "pg_restore")
+
 	// Build isolated source/destination database names.
-	suffix := time.Now().UnixNano()
-	srcDB := fmt.Sprintf("orvix_backup_src_%d", suffix)
-	dstDB := fmt.Sprintf("orvix_backup_dst_%d", suffix)
+	srcDB := generateTestDBName("orvix_backup_src")
+	dstDB := generateTestDBName("orvix_backup_dst")
 
-	createDB := func(name string) {
-		t.Helper()
-		cmd := exec.Command("docker", "exec", "orvix-pg-final", "psql", "-U", "orvix", "-d", "postgres", "-c", "CREATE DATABASE "+name)
-		cmd.Env = append(os.Environ(), "PGPASSWORD=local_orvix_only")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("create database %s: %v\n%s", name, err, out)
-		}
-	}
-	dropDB := func(name string) {
-		t.Helper()
-		cmd := exec.Command("docker", "exec", "orvix-pg-final", "psql", "-U", "orvix", "-d", "postgres", "-c", "DROP DATABASE IF EXISTS "+name)
-		cmd.Env = append(os.Environ(), "PGPASSWORD=local_orvix_only")
-		_ = cmd.Run()
-	}
+	createTestDatabase(t, baseDSN, srcDB)
+	defer dropTestDatabase(t, baseDSN, srcDB)
+	createTestDatabase(t, baseDSN, dstDB)
+	defer dropTestDatabase(t, baseDSN, dstDB)
 
-	createDB(srcDB)
-	defer dropDB(srcDB)
-	createDB(dstDB)
-	defer dropDB(dstDB)
-
-	srcDSN := strings.Replace(baseDSN, " dbname=orvix", " dbname="+srcDB, 1)
-	if !strings.Contains(srcDSN, " dbname=") {
-		srcDSN += " dbname=" + srcDB
+	srcDSN, err := replaceDSNDatabase(baseDSN, srcDB)
+	if err != nil {
+		t.Fatalf("build source dsn: %v", err)
 	}
+	dstDSN, err := replaceDSNDatabase(baseDSN, dstDB)
+	if err != nil {
+		t.Fatalf("build destination dsn: %v", err)
+	}
+	t.Logf("backup test source db=%s destination db=%s", srcDB, dstDB)
 
 	// 1. Create and seed SQLite source.
 	srcDir := t.TempDir()
@@ -620,39 +621,43 @@ func TestPostgresBackupRestoreAndRuntime(t *testing.T) {
 		t.Fatalf("migration to source db returned %d", code)
 	}
 
-	// 3. pg_dump source database.
+	// 3. pg_dump source database to a temporary file.
 	dumpFile := filepath.Join(t.TempDir(), "orvix.dump")
-	dumpCmd := exec.Command("docker", "exec", "orvix-pg-final", "pg_dump", "-Fc", "-U", "orvix", "-d", srcDB)
-	dumpCmd.Env = append(os.Environ(), "PGPASSWORD=local_orvix_only")
-	out, err := dumpCmd.Output()
-	if err != nil {
-		t.Fatalf("pg_dump: %v", err)
+	dumpCmd := exec.Command(pgDump,
+		"--format=custom",
+		"--no-owner",
+		"--no-privileges",
+		"--file="+dumpFile,
+		"--dbname="+srcDSN,
+	)
+	if out, err := dumpCmd.CombinedOutput(); err != nil {
+		t.Fatalf("pg_dump failed: %v\n%s", err, sanitizeOutput(string(out), baseDSN))
 	}
-	if err := os.WriteFile(dumpFile, out, 0o600); err != nil {
-		t.Fatalf("write dump: %v", err)
+	dumpInfo, err := os.Stat(dumpFile)
+	if err != nil || dumpInfo.Size() == 0 {
+		t.Fatalf("pg_dump produced no output at %s", dumpFile)
 	}
-	t.Logf("pg_dump wrote %d bytes", len(out))
+	t.Logf("pg_dump wrote %d bytes", dumpInfo.Size())
 
-	// 4. pg_restore into destination database.
-	dump, err := os.Open(dumpFile)
-	if err != nil {
-		t.Fatalf("open dump: %v", err)
-	}
-	defer dump.Close()
-	restoreCmd := exec.Command("docker", "exec", "-i", "orvix-pg-final", "pg_restore", "-U", "orvix", "-d", dstDB)
-	restoreCmd.Env = append(os.Environ(), "PGPASSWORD=local_orvix_only")
-	restoreCmd.Stdin = dump
-	restoreOut, err := restoreCmd.CombinedOutput()
-	if err != nil {
-		t.Logf("pg_restore output:\n%s", restoreOut)
-		// pg_restore may emit non-fatal errors; continue verification.
+	// 4. Verify the dump is readable with pg_restore --list.
+	listCmd := exec.Command(pgRestore, "--list", dumpFile)
+	if out, err := listCmd.CombinedOutput(); err != nil {
+		t.Fatalf("pg_restore --list failed: %v\n%s", err, string(out))
 	}
 
-	// 5. Verify restored counts and semantics.
-	dstDSN := strings.Replace(baseDSN, " dbname=orvix", " dbname="+dstDB, 1)
-	if !strings.Contains(dstDSN, " dbname=") {
-		dstDSN += " dbname=" + dstDB
+	// 5. pg_restore into destination database.
+	restoreCmd := exec.Command(pgRestore,
+		"--exit-on-error",
+		"--no-owner",
+		"--no-privileges",
+		"--dbname="+dstDSN,
+		dumpFile,
+	)
+	if out, err := restoreCmd.CombinedOutput(); err != nil {
+		t.Fatalf("pg_restore failed: %v\n%s", err, sanitizeOutput(string(out), baseDSN))
 	}
+
+	// 6. Verify restored counts and semantics.
 	dstCfg := config.Defaults()
 	dstCfg.Database.Driver = "postgres"
 	dstCfg.Database.DSN = dstDSN
@@ -676,9 +681,20 @@ func TestPostgresBackupRestoreAndRuntime(t *testing.T) {
 		}
 	}
 	verifyMailboxSemantics(t, dstSQL)
-	t.Log("backup/restore row counts and mailbox semantics verified")
 
-	// 6. Runtime startup against the restored database.
+	// 7. Verify sequence synchronization by inserting a row with DEFAULT id.
+	var nextID int64
+	err = dstSQL.QueryRow(`INSERT INTO tenants (created_at, updated_at, name, slug, domain, plan, active)
+		VALUES (NOW(), NOW(), 'Sequence Test', 'sequence-test', 'sequence.test', 'smb', true) RETURNING id`).Scan(&nextID)
+	if err != nil {
+		t.Fatalf("sequence sync insert failed: %v", err)
+	}
+	if nextID <= 0 {
+		t.Fatalf("sequence sync insert returned invalid id: %d", nextID)
+	}
+	t.Logf("backup/restore row counts, mailbox semantics, and sequence sync verified (new tenant id=%d)", nextID)
+
+	// 8. Runtime startup against the restored database.
 	t.Setenv("ORVIX_ADMIN_EMAIL", adminEmail)
 	t.Setenv("ORVIX_ADMIN_PASSWORD_B64", base64.StdEncoding.EncodeToString([]byte(adminPassword)))
 
@@ -748,4 +764,21 @@ func TestPostgresBackupRestoreAndRuntime(t *testing.T) {
 		t.Fatalf("StopAll on restored db: %v", err)
 	}
 	t.Log("runtime startup against restored database succeeded")
+}
+
+// sanitizeOutput removes credential-like substrings from command output so it
+// is safe to include in test failure messages.
+func sanitizeOutput(out, dsn string) string {
+	redacted := redactDSN(dsn)
+	// Also strip any line that contains a password= fragment.
+	lines := strings.Split(out, "\n")
+	filtered := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if strings.Contains(strings.ToLower(line), "password=") {
+			filtered = append(filtered, "[line redacted: contains password=]")
+			continue
+		}
+		filtered = append(filtered, line)
+	}
+	return fmt.Sprintf("dsn=%s\n%s", redacted, strings.Join(filtered, "\n"))
 }
