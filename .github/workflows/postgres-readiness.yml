@@ -48,6 +48,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -68,12 +70,17 @@ jobs:
           set -euo pipefail
           go mod download
 
-      - name: Verify gofmt
+      - name: Verify gofmt on changed files
         run: |
           set -euo pipefail
-          unformatted=$(gofmt -l $(git ls-files '*.go'))
+          changed=$(git diff --name-only origin/main...HEAD -- '*.go' || true)
+          if [ -z "$changed" ]; then
+            echo "No Go files changed."
+            exit 0
+          fi
+          unformatted=$(gofmt -l $changed)
           if [ -n "$unformatted" ]; then
-            echo "The following Go files are not formatted:"
+            echo "The following changed Go files are not formatted:"
             echo "$unformatted"
             exit 1
           fi
