@@ -23,9 +23,9 @@ import (
 	"github.com/orvix/orvix/internal/compliance"
 	"github.com/orvix/orvix/internal/compose"
 	"github.com/orvix/orvix/internal/config"
-	"github.com/orvix/orvix/internal/dbdialect"
 	coremailruntime "github.com/orvix/orvix/internal/coremail/runtime"
 	coremailstorage "github.com/orvix/orvix/internal/coremail/storage"
+	"github.com/orvix/orvix/internal/dbdialect"
 	"github.com/orvix/orvix/internal/dns"
 	"github.com/orvix/orvix/internal/firewall"
 	"github.com/orvix/orvix/internal/guardian"
@@ -162,13 +162,10 @@ func main() {
 		logger.Fatal("failed to connect to database", zap.Error(err))
 	}
 
-	if err := models.MigrateAllRaw(db); err != nil {
+	if err := migrateConfiguredDatabase(db, cfg.Database.Driver, logger); err != nil {
 		logger.Fatal("failed to run migrations", zap.Error(err))
 	}
 	logger.Info("database migrations completed")
-	if err := ensureCoreMailBootstrapSchema(db); err != nil {
-		logger.Fatal("failed to run coremail bootstrap schema migrations", zap.Error(err))
-	}
 
 	seedFeatureFlags(db, logger)
 
@@ -305,6 +302,25 @@ func ensureCoreMailBootstrapSchema(db *gorm.DB) error {
 	return nil
 }
 
+// migrateConfiguredDatabase runs the correct migration (and any
+// dialect-specific schema bootstrap) based on the database driver.
+// For SQLite it calls MigrateAllRaw + ensureCoreMailBootstrapSchema;
+// for PostgreSQL it calls only MigrateAllPostgres (the CoreMail
+// bootstrap schema is SQLite-only DDL).
+func migrateConfiguredDatabase(db *gorm.DB, driver string, logger *zap.Logger) error {
+	switch strings.ToLower(strings.TrimSpace(driver)) {
+	case "sqlite", "sqlite3":
+		if err := models.MigrateAllRaw(db); err != nil {
+			return err
+		}
+		return ensureCoreMailBootstrapSchema(db)
+	case "postgres", "postgresql":
+		return models.MigrateAllPostgres(db)
+	default:
+		return fmt.Errorf("unsupported database driver: %s", driver)
+	}
+}
+
 func seedFeatureFlags(db *gorm.DB, logger *zap.Logger) {
 	flags := []struct {
 		Name          string
@@ -366,9 +382,11 @@ func seedAdminUser(db *gorm.DB, authenticator *auth.Authenticator, logger *zap.L
 		logger.Warn("failed to access database for admin bootstrap", zap.Error(err))
 		return
 	}
-	if err := ensureCoreMailBootstrapSchema(db); err != nil {
-		logger.Warn("failed to prepare coremail storage schema for admin bootstrap", zap.Error(err))
-		return
+	if !dial.IsPostgres() {
+		if err := ensureCoreMailBootstrapSchema(db); err != nil {
+			logger.Warn("failed to prepare coremail storage schema for admin bootstrap", zap.Error(err))
+			return
+		}
 	}
 
 	var count int64

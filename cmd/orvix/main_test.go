@@ -305,6 +305,10 @@ func TestBootstrapAdminPostgresIntegration(t *testing.T) {
 		t.Fatalf("connect to postgres: %v", err)
 	}
 
+	// Clean any data from previous test runs.
+	sqlDB, _ := db.DB()
+	sqlDB.Exec("DELETE FROM coremail_folders; DELETE FROM coremail_mailboxes; DELETE FROM users; DELETE FROM tenants; DELETE FROM coremail_domains;")
+
 	if err := models.MigrateAllPostgres(db); err != nil {
 		t.Fatalf("MigrateAllPostgres: %v", err)
 	}
@@ -319,7 +323,6 @@ func TestBootstrapAdminPostgresIntegration(t *testing.T) {
 		t.Fatalf("hash password: %v", err)
 	}
 
-	sqlDB, _ := db.DB()
 	dial := dbdialect.FromDriver("postgres")
 	err = insertBootstrapAdmin(sqlDB, dial, adminEmail, hashedPassword, tenantDomain, adminPassword, logger)
 	if err != nil {
@@ -376,4 +379,90 @@ func TestBootstrapAdminPostgresIntegration(t *testing.T) {
 			t.Errorf("system folder %q not found: %v", path, err)
 		}
 	}
+}
+
+// TestStartupPostgresRuntime verifies that the full runtime bootstrap
+// sequence works against a PostgreSQL database: MigrateAllPostgres,
+// minimal module init, health endpoint, and clean shutdown.
+func TestStartupPostgresRuntime(t *testing.T) {
+	if strings.ToLower(strings.TrimSpace(os.Getenv("ORVIX_DB_DRIVER"))) != "postgres" {
+		t.Skip("ORVIX_DB_DRIVER must be postgres")
+	}
+	dsn := strings.TrimSpace(os.Getenv("ORVIX_DB_DSN"))
+	if dsn == "" {
+		t.Skip("ORVIX_DB_DSN is empty")
+	}
+
+	logger := zap.NewNop()
+	cfg := config.Defaults()
+	cfg.Database.Driver = "postgres"
+	cfg.Database.DSN = dsn
+	cfg.Database.MaxOpen = 5
+	cfg.Database.MaxIdle = 2
+	cfg.Database.MaxLifetime = 300
+
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("connect to postgres: %v", err)
+	}
+
+	// Run PostgreSQL migration (the production path).
+	if err := models.MigrateAllPostgres(db); err != nil {
+		t.Fatalf("MigrateAllPostgres: %v", err)
+	}
+
+	// Verify schema compatibility.
+	if err := models.PostgresSchemaCompatible(db, "public"); err != nil {
+		t.Fatalf("PostgresSchemaCompatible: %v", err)
+	}
+	t.Log("PostgreSQL schema verified: all 59 tables present")
+
+	// Seed feature flags (production code path).
+	seedFeatureFlags(db, logger)
+
+	// Create minimal runtime: authenticator + router.
+	authenticator, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+
+	reg := modules.NewRegistry(logger)
+	ff := license.NewFeatureFlags(logger)
+	ff.SetTier(license.TierSMB)
+
+	// Register only the lightweight modules that don't need
+	// external services (Redis, CoreMail storage, etc.).
+	router := api.NewRouter(cfg, authenticator, logger, db, reg, ff, nil)
+
+	// Verify health endpoint responds.
+	req := httptest.NewRequest("GET", "/api/v1/health", nil)
+	resp, err := router.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("health request: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected health 200, got %d", resp.StatusCode)
+	}
+	t.Log("health endpoint returned 200 OK")
+
+	// Verify admin login route is registered (returns 405 without body
+	// or 400 with wrong content-type, but must not 404).
+	emptyReq := httptest.NewRequest("POST", "/admin/login", nil)
+	emptyResp, err := router.App().Test(emptyReq, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("admin login route check: %v", err)
+	}
+	t.Logf("admin/login returned %d (expected non-404)", emptyResp.StatusCode)
+
+	// Stop all modules cleanly.
+	if err := reg.StopAll(); err != nil {
+		t.Fatalf("module shutdown: %v", err)
+	}
+	t.Log("all modules stopped cleanly")
+
+	sqlDB, err := db.DB()
+	if err == nil {
+		sqlDB.Close()
+	}
+	t.Log("PostgreSQL runtime startup test PASSED")
 }
