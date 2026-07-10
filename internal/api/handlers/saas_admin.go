@@ -12,21 +12,21 @@ import (
 )
 
 type adminDomainReport struct {
-	Domain            string `json:"domain"`
-	TenantID          int64  `json:"tenant_id,omitempty"`
-	MailboxCount      int64  `json:"mailbox_count"`
-	StorageBytes      int64  `json:"storage_bytes"`
-	SentCount         int64  `json:"sent_count"`
-	ReceivedCount     int64  `json:"received_count"`
-	DeferredCount     int64  `json:"deferred_count"`
-	BouncedCount      int64  `json:"bounced_count"`
-	RejectedCount     int64  `json:"rejected_count"`
-	LoginFailures     int64  `json:"login_failures"`
-	SuspiciousLogins  int64  `json:"suspicious_login_count"`
-	DNSHealth         string `json:"dns_health"`
-	SPFStatus         string `json:"spf_status"`
-	DKIMStatus        string `json:"dkim_status"`
-	DMARCStatus       string `json:"dmarc_status"`
+	Domain           string `json:"domain"`
+	TenantID         int64  `json:"tenant_id,omitempty"`
+	MailboxCount     int64  `json:"mailbox_count"`
+	StorageBytes     int64  `json:"storage_bytes"`
+	SentCount        int64  `json:"sent_count"`
+	ReceivedCount    int64  `json:"received_count"`
+	DeferredCount    int64  `json:"deferred_count"`
+	BouncedCount     int64  `json:"bounced_count"`
+	RejectedCount    int64  `json:"rejected_count"`
+	LoginFailures    int64  `json:"login_failures"`
+	SuspiciousLogins int64  `json:"suspicious_login_count"`
+	DNSHealth        string `json:"dns_health"`
+	SPFStatus        string `json:"spf_status"`
+	DKIMStatus       string `json:"dkim_status"`
+	DMARCStatus      string `json:"dmarc_status"`
 }
 
 type queueCount struct {
@@ -35,18 +35,18 @@ type queueCount struct {
 }
 
 type tenantOpsRow struct {
-	ID              int64  `json:"id"`
-	Name            string `json:"name"`
-	Slug            string `json:"slug"`
-	Domain          string `json:"domain"`
-	Plan            string `json:"plan"`
-	Active          bool   `json:"active"`
-	Domains         int64  `json:"domains"`
-	Mailboxes       int64  `json:"mailboxes"`
-	StorageBytes    int64  `json:"storage_bytes"`
-	LoginFailures   int64  `json:"login_failures"`
-	DeferredCount   int64  `json:"deferred_count"`
-	RejectedCount   int64  `json:"rejected_count"`
+	ID            int64  `json:"id"`
+	Name          string `json:"name"`
+	Slug          string `json:"slug"`
+	Domain        string `json:"domain"`
+	Plan          string `json:"plan"`
+	Active        bool   `json:"active"`
+	Domains       int64  `json:"domains"`
+	Mailboxes     int64  `json:"mailboxes"`
+	StorageBytes  int64  `json:"storage_bytes"`
+	LoginFailures int64  `json:"login_failures"`
+	DeferredCount int64  `json:"deferred_count"`
+	RejectedCount int64  `json:"rejected_count"`
 }
 
 func isSuperRole(c fiber.Ctx) bool {
@@ -207,20 +207,20 @@ func (h *Handler) AdminReports(c fiber.Ctx) error {
 	tenantID := h.scopedTenantID(c)
 	domains := domainList(db, dial, tenantID, crossTenant)
 	return c.JSON(fiber.Map{
-		"scope":                    map[string]any{"tenant_id": tenantID, "cross_tenant": crossTenant},
-		"generated_at":             time.Now().UTC(),
-		"domains":                  domains,
-		"sent_count":               totalDomainMetric(domains, func(r adminDomainReport) int64 { return r.SentCount }),
-		"received_count":           totalDomainMetric(domains, func(r adminDomainReport) int64 { return r.ReceivedCount }),
-		"deferred_count":           totalDomainMetric(domains, func(r adminDomainReport) int64 { return r.DeferredCount }),
-		"bounced_count":            totalDomainMetric(domains, func(r adminDomainReport) int64 { return r.BouncedCount }),
-		"rejected_count":           totalDomainMetric(domains, func(r adminDomainReport) int64 { return r.RejectedCount }),
-		"login_failures":           totalDomainMetric(domains, func(r adminDomainReport) int64 { return r.LoginFailures }),
-		"suspicious_login_count":   totalDomainMetric(domains, func(r adminDomainReport) int64 { return r.SuspiciousLogins }),
-		"storage_usage_bytes":      totalDomainMetric(domains, func(r adminDomainReport) int64 { return r.StorageBytes }),
-		"top_senders":              topSenders(db, dial, domains),
-		"top_recipient_domains":    topRecipientDomains(db, dial, domains),
-		"csv_export_available":     false,
+		"scope":                         map[string]any{"tenant_id": tenantID, "cross_tenant": crossTenant},
+		"generated_at":                  time.Now().UTC(),
+		"domains":                       domains,
+		"sent_count":                    totalDomainMetric(domains, func(r adminDomainReport) int64 { return r.SentCount }),
+		"received_count":                totalDomainMetric(domains, func(r adminDomainReport) int64 { return r.ReceivedCount }),
+		"deferred_count":                totalDomainMetric(domains, func(r adminDomainReport) int64 { return r.DeferredCount }),
+		"bounced_count":                 totalDomainMetric(domains, func(r adminDomainReport) int64 { return r.BouncedCount }),
+		"rejected_count":                totalDomainMetric(domains, func(r adminDomainReport) int64 { return r.RejectedCount }),
+		"login_failures":                totalDomainMetric(domains, func(r adminDomainReport) int64 { return r.LoginFailures }),
+		"suspicious_login_count":        totalDomainMetric(domains, func(r adminDomainReport) int64 { return r.SuspiciousLogins }),
+		"storage_usage_bytes":           totalDomainMetric(domains, func(r adminDomainReport) int64 { return r.StorageBytes }),
+		"top_senders":                   topSenders(db, dial, domains),
+		"top_recipient_domains":         topRecipientDomains(db, dial, domains),
+		"csv_export_available":          false,
 		"csv_export_unavailable_reason": "CSV export is not enabled for this report endpoint yet.",
 	})
 }
@@ -231,22 +231,22 @@ func (h *Handler) InternalOverview(c fiber.Ctx) error {
 	dial := dbdialect.FromDriver(h.cfg.Database.Driver)
 	return c.JSON(fiber.Map{
 		"platform": fiber.Map{
-			"status": "ok",
+			"status":       "ok",
 			"generated_at": time.Now().UTC(),
 		},
-		"tenant_count": sqlInt(db, "SELECT COUNT(*) FROM tenants WHERE deleted_at IS NULL"),
+		"tenant_count":  sqlInt(db, "SELECT COUNT(*) FROM tenants WHERE deleted_at IS NULL"),
 		"domains_count": sqlInt(db, "SELECT COUNT(*) FROM coremail_domains WHERE deleted_at IS NULL"),
 		"mailbox_count": sqlInt(db, "SELECT COUNT(*) FROM coremail_mailboxes WHERE deleted_at IS NULL"),
 		"queue": fiber.Map{
-			"pending": sqlInt(db, "SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND status IN ('pending','queued')"),
+			"pending":  sqlInt(db, "SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND status IN ('pending','queued')"),
 			"deferred": sqlInt(db, "SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND status = 'deferred'"),
-			"failed": sqlInt(db, "SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND status IN ('failed','bounced','rejected')"),
+			"failed":   sqlInt(db, "SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND status IN ('failed','bounced','rejected')"),
 		},
 		"security": fiber.Map{
 			"failed_logins": sqlInt(db, "SELECT COUNT(*) FROM security_events WHERE event_type = 'failed_login'"),
-			"suspicious": sqlInt(db, "SELECT COUNT(*) FROM security_events WHERE event_type IN ('security_alert','suspicious_login')"),
+			"suspicious":    sqlInt(db, "SELECT COUNT(*) FROM security_events WHERE event_type IN ('security_alert','suspicious_login')"),
 		},
-		"recent_alerts": []fiber.Map{},
+		"recent_alerts":       []fiber.Map{},
 		"recent_audit_events": recentAudit(db, dial, 8),
 	})
 }
@@ -295,24 +295,24 @@ func (h *Handler) InternalSecurityOps(c fiber.Ctx) error {
 		lockouts = len(h.trustService.ListLockouts(c.Context()))
 	}
 	return c.JSON(fiber.Map{
-		"failed_auth_total": sqlInt(db, "SELECT COUNT(*) FROM security_events WHERE event_type = 'failed_login'"),
-		"suspicious_total": sqlInt(db, "SELECT COUNT(*) FROM security_events WHERE event_type IN ('security_alert','suspicious_login')"),
-		"lockouts": lockouts,
+		"failed_auth_total":   sqlInt(db, "SELECT COUNT(*) FROM security_events WHERE event_type = 'failed_login'"),
+		"suspicious_total":    sqlInt(db, "SELECT COUNT(*) FROM security_events WHERE event_type IN ('security_alert','suspicious_login')"),
+		"lockouts":            lockouts,
 		"failed_auth_domains": groupedSecurity(db, "domain"),
-		"attacked_accounts": groupedSecurity(db, "account"),
-		"timeline": recentSecurity(db, dial, 25),
+		"attacked_accounts":   groupedSecurity(db, "account"),
+		"timeline":            recentSecurity(db, dial, 25),
 	})
 }
 
 func (h *Handler) InternalMailFlowOps(c fiber.Ctx) error {
 	db := h.sqlDB()
 	return c.JSON(fiber.Map{
-		"queue_depth": sqlInt(db, "SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL"),
-		"deferred": sqlInt(db, "SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND status = 'deferred'"),
-		"bounces": sqlInt(db, "SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND status IN ('bounced','failed')"),
-		"outbound_errors": sqlInt(db, "SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND direction = 'outbound' AND status IN ('deferred','failed','bounced','rejected')"),
+		"queue_depth":        sqlInt(db, "SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL"),
+		"deferred":           sqlInt(db, "SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND status = 'deferred'"),
+		"bounces":            sqlInt(db, "SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND status IN ('bounced','failed')"),
+		"outbound_errors":    sqlInt(db, "SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND direction = 'outbound' AND status IN ('deferred','failed','bounced','rejected')"),
 		"top_queued_domains": topQueuedDomains(db),
-		"status_counts": queueStatusCounts(db),
+		"status_counts":      queueStatusCounts(db),
 	})
 }
 

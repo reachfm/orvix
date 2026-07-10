@@ -317,10 +317,10 @@ func (h *Handler) AdminSslExpiryWarnings(c fiber.Ctx) error {
 	for _, ci := range all {
 		if string(ci.Status) == "warning" || string(ci.Status) == "expired" {
 			warn = append(warn, map[string]any{
-				"name":          ci.Name,
-				"not_after":     ci.NotAfter.UTC().Format("2006-01-02T15:04:05Z"),
+				"name":           ci.Name,
+				"not_after":      ci.NotAfter.UTC().Format("2006-01-02T15:04:05Z"),
 				"days_remaining": ci.DaysRemaining,
-				"status":        string(ci.Status),
+				"status":         string(ci.Status),
 			})
 		}
 	}

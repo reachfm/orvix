@@ -71,7 +71,9 @@ func (s *Service) Search(ctx context.Context, messageID, sender, recipient, doma
 		return nil, fmt.Errorf("database not available")
 	}
 	db := s.attemptsDB
-	if limit <= 0 || limit > 200 { limit = 100 }
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
 
 	d := s.dialect
 	var where []string

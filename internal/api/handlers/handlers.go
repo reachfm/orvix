@@ -18,27 +18,27 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/antivirus"
 	"github.com/orvix/orvix/internal/api/handlers/settings"
 	"github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/coremail"
+	"github.com/orvix/orvix/internal/coremail/push"
+	"github.com/orvix/orvix/internal/coremail/queue"
+	"github.com/orvix/orvix/internal/coremail/storage"
+	"github.com/orvix/orvix/internal/dbdialect"
 	"github.com/orvix/orvix/internal/dnsops"
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
-	"github.com/orvix/orvix/internal/antivirus"
-	"github.com/orvix/orvix/internal/runtime"
+	"github.com/orvix/orvix/internal/observability"
 	"github.com/orvix/orvix/internal/ruler"
+	"github.com/orvix/orvix/internal/runtime"
+	settingsbridge "github.com/orvix/orvix/internal/settings/bridge"
 	"github.com/orvix/orvix/internal/tlsmgmt"
 	"github.com/orvix/orvix/internal/trustmgmt"
 	"github.com/orvix/orvix/internal/updater"
-	"github.com/orvix/orvix/internal/coremail/queue"
-	"github.com/orvix/orvix/internal/coremail/push"
-	"github.com/orvix/orvix/internal/coremail/storage"
-	"github.com/orvix/orvix/internal/dbdialect"
-	"github.com/orvix/orvix/internal/observability"
-	settingsbridge "github.com/orvix/orvix/internal/settings/bridge"
 	"github.com/orvix/orvix/internal/webmailmgmt"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/argon2"
@@ -47,9 +47,9 @@ import (
 
 // Handler holds dependencies for all HTTP handlers.
 type Handler struct {
-	db      *gorm.DB
-	dialect *dbdialect.Info
-	auth    *auth.Authenticator
+	db          *gorm.DB
+	dialect     *dbdialect.Info
+	auth        *auth.Authenticator
 	apikeys     *auth.APIKeyManager
 	logger      *zap.Logger
 	cfg         *config.Config
@@ -66,7 +66,7 @@ type Handler struct {
 	// read folders, messages, RFC822 bodies, and write
 	// new outbound messages through this store directly.
 	// Set via SetMailStore at router construction time.
-	mailStore  *storage.MailStore
+	mailStore *storage.MailStore
 
 	// queueEngine is the same *queue.QueueEngine used by
 	// the coremail runtime module. The user-facing
@@ -505,9 +505,9 @@ func (h *Handler) Login(c fiber.Ctx) error {
 		}
 		h.logger.Info("MFA challenge issued", zap.Uint("user_id", userID))
 		return c.JSON(fiber.Map{
-			"mfa_required":    true,
-			"mfa_challenge":   challengeToken,
-			"mfa_expires_in":  300,
+			"mfa_required":   true,
+			"mfa_challenge":  challengeToken,
+			"mfa_expires_in": 300,
 		})
 	}
 
@@ -1082,21 +1082,21 @@ func (h *Handler) CreateDomain(c fiber.Ctx) error {
 		dkimEnabled, dmarcEnabled, mtastsEnabled,
 	))
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-		"id":                domainID,
-		"domain":            domainName,
-		"status":            status,
-		"plan":              plan,
-		"description":       description,
-		"max_mailboxes":     maxMailboxes,
-		"max_aliases":       maxAliases,
-		"max_quota_mb":      maxQuotaMB,
-		"dkim_enabled":      dkimEnabled == 1,
-		"dkim_selector":     dkimSelector,
-		"dmarc_enabled":     dmarcEnabled == 1,
-		"mtasts_enabled":    mtastsEnabled == 1,
-		"catchall_address":  catchallAddress,
-		"abuse_contact":     abuseContact,
-		"created_at":        now,
+		"id":               domainID,
+		"domain":           domainName,
+		"status":           status,
+		"plan":             plan,
+		"description":      description,
+		"max_mailboxes":    maxMailboxes,
+		"max_aliases":      maxAliases,
+		"max_quota_mb":     maxQuotaMB,
+		"dkim_enabled":     dkimEnabled == 1,
+		"dkim_selector":    dkimSelector,
+		"dmarc_enabled":    dmarcEnabled == 1,
+		"mtasts_enabled":   mtastsEnabled == 1,
+		"catchall_address": catchallAddress,
+		"abuse_contact":    abuseContact,
+		"created_at":       now,
 	})
 }
 
@@ -1199,13 +1199,13 @@ func (h *Handler) GetDomain(c fiber.Ctx) error {
 	}
 
 	var (
-		domainID                uint
-		domainName, status, plan string
-		description              string
-		maxMailboxes, maxAliases, maxQuotaMB int64
-		dkimEnabled, dmarcEnabled, mtastsEnabled int
+		domainID                                    uint
+		domainName, status, plan                    string
+		description                                 string
+		maxMailboxes, maxAliases, maxQuotaMB        int64
+		dkimEnabled, dmarcEnabled, mtastsEnabled    int
 		dkimSelector, catchallAddress, abuseContact string
-		createdAt, updatedAt     string
+		createdAt, updatedAt                        string
 	)
 	err = sqlDB.QueryRow(
 		"SELECT id, name, status, plan, description,"+
@@ -1257,25 +1257,25 @@ func (h *Handler) GetDomain(c fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{
-		"id":                domainID,
-		"domain":            domainName,
-		"status":            status,
-		"plan":              plan,
-		"description":       description,
-		"max_mailboxes":     maxMailboxes,
-		"max_aliases":       maxAliases,
-		"max_quota_mb":      maxQuotaMB,
-		"mailbox_count":     mailboxCount,
-		"dkim_enabled":      dkimEnabled == 1,
-		"dkim_selector":     dkimSelector,
-		"dmarc_enabled":     dmarcEnabled == 1,
-		"mtasts_enabled":    mtastsEnabled == 1,
-		"catchall_address":  catchallAddress,
-		"abuse_contact":     abuseContact,
-		"created_at":        createdAt,
-		"updated_at":        updatedAt,
-		"deleted":           false,
-		"mailboxes":         mailboxes,
+		"id":               domainID,
+		"domain":           domainName,
+		"status":           status,
+		"plan":             plan,
+		"description":      description,
+		"max_mailboxes":    maxMailboxes,
+		"max_aliases":      maxAliases,
+		"max_quota_mb":     maxQuotaMB,
+		"mailbox_count":    mailboxCount,
+		"dkim_enabled":     dkimEnabled == 1,
+		"dkim_selector":    dkimSelector,
+		"dmarc_enabled":    dmarcEnabled == 1,
+		"mtasts_enabled":   mtastsEnabled == 1,
+		"catchall_address": catchallAddress,
+		"abuse_contact":    abuseContact,
+		"created_at":       createdAt,
+		"updated_at":       updatedAt,
+		"deleted":          false,
+		"mailboxes":        mailboxes,
 	})
 }
 
@@ -1327,8 +1327,8 @@ func (h *Handler) PatchDomain(c fiber.Ctx) error {
 	}
 
 	type update struct {
-		set   []string
-		args  []interface{}
+		set  []string
+		args []interface{}
 	}
 	var u update
 	for k, raw := range req {
@@ -1499,18 +1499,18 @@ func (h *Handler) GetMailbox(c fiber.Ctx) error {
 	sqlDB.QueryRow("SELECT COUNT(*) FROM coremail_queue WHERE mailbox_id = "+h.dialect.Placeholder(1)+" AND deleted_at IS NULL", id).Scan(&queueItems)
 
 	return c.JSON(fiber.Map{
-		"mailbox_id": id,
-		"email":      email,
-		"domain":     domainName,
-		"status":     status,
-		"is_admin":   isAdmin,
-		"created_at": createdAt,
-		"updated_at": updatedAt,
-		"deleted":    false,
-		"allow_smtp": allowSMTP,
-		"allow_imap": allowIMAP,
-		"allow_pop3": allowPOP3,
-		"allow_jmap": allowJMAP,
+		"mailbox_id":    id,
+		"email":         email,
+		"domain":        domainName,
+		"status":        status,
+		"is_admin":      isAdmin,
+		"created_at":    createdAt,
+		"updated_at":    updatedAt,
+		"deleted":       false,
+		"allow_smtp":    allowSMTP,
+		"allow_imap":    allowIMAP,
+		"allow_pop3":    allowPOP3,
+		"allow_jmap":    allowJMAP,
 		"allow_webmail": allowWebmail,
 		"stats": fiber.Map{
 			"messages":    messages,
@@ -2079,11 +2079,26 @@ func (h *Handler) UpdateMailboxProtocols(c fiber.Ctx) error {
 	now := time.Now().UTC()
 	var sets []string
 	var args []any
-	if req.AllowSMTP != nil { sets = append(sets, "allow_smtp = "+h.dialect.Placeholder(len(args)+1)); args = append(args, *req.AllowSMTP) }
-	if req.AllowIMAP != nil { sets = append(sets, "allow_imap = "+h.dialect.Placeholder(len(args)+1)); args = append(args, *req.AllowIMAP) }
-	if req.AllowPOP3 != nil { sets = append(sets, "allow_pop3 = "+h.dialect.Placeholder(len(args)+1)); args = append(args, *req.AllowPOP3) }
-	if req.AllowJMAP != nil { sets = append(sets, "allow_jmap = "+h.dialect.Placeholder(len(args)+1)); args = append(args, *req.AllowJMAP) }
-	if req.AllowWebmail != nil { sets = append(sets, "allow_webmail = "+h.dialect.Placeholder(len(args)+1)); args = append(args, *req.AllowWebmail) }
+	if req.AllowSMTP != nil {
+		sets = append(sets, "allow_smtp = "+h.dialect.Placeholder(len(args)+1))
+		args = append(args, *req.AllowSMTP)
+	}
+	if req.AllowIMAP != nil {
+		sets = append(sets, "allow_imap = "+h.dialect.Placeholder(len(args)+1))
+		args = append(args, *req.AllowIMAP)
+	}
+	if req.AllowPOP3 != nil {
+		sets = append(sets, "allow_pop3 = "+h.dialect.Placeholder(len(args)+1))
+		args = append(args, *req.AllowPOP3)
+	}
+	if req.AllowJMAP != nil {
+		sets = append(sets, "allow_jmap = "+h.dialect.Placeholder(len(args)+1))
+		args = append(args, *req.AllowJMAP)
+	}
+	if req.AllowWebmail != nil {
+		sets = append(sets, "allow_webmail = "+h.dialect.Placeholder(len(args)+1))
+		args = append(args, *req.AllowWebmail)
+	}
 	sets = append(sets, "updated_at = "+h.dialect.Placeholder(len(args)+1))
 	args = append(args, now, id)
 
@@ -2559,22 +2574,22 @@ func (h *Handler) GetAdminQueueEntry(c fiber.Ctx) error {
 // tenant_id, domain_id, mailbox_id, priority, lease fields,
 // deleted_at, and any future raw message body.
 type adminQueueEntryDTO struct {
-	ID             int64  `json:"id"`
-	Status         string `json:"status"`
-	From           string `json:"from"`
-	To             string `json:"to"`
-	RecipientDomain string `json:"recipient_domain,omitempty"`
-	Attempts       int    `json:"attempts"`
-	MaxAttempts    int    `json:"max_attempts,omitempty"`
-	DeliveryMode   string `json:"delivery_mode,omitempty"`
-	RemoteHost     string `json:"remote_host,omitempty"`
-	LastStatusCode int    `json:"last_status_code,omitempty"`
+	ID               int64  `json:"id"`
+	Status           string `json:"status"`
+	From             string `json:"from"`
+	To               string `json:"to"`
+	RecipientDomain  string `json:"recipient_domain,omitempty"`
+	Attempts         int    `json:"attempts"`
+	MaxAttempts      int    `json:"max_attempts,omitempty"`
+	DeliveryMode     string `json:"delivery_mode,omitempty"`
+	RemoteHost       string `json:"remote_host,omitempty"`
+	LastStatusCode   int    `json:"last_status_code,omitempty"`
 	LastEnhancedCode string `json:"last_enhanced_code,omitempty"`
-	LastError      string `json:"last_error,omitempty"`
-	NextAttemptAt  string `json:"next_attempt_at,omitempty"`
-	LastAttemptAt  string `json:"last_attempt_at,omitempty"`
-	CreatedAt      string `json:"created_at,omitempty"`
-	UpdatedAt      string `json:"updated_at,omitempty"`
+	LastError        string `json:"last_error,omitempty"`
+	NextAttemptAt    string `json:"next_attempt_at,omitempty"`
+	LastAttemptAt    string `json:"last_attempt_at,omitempty"`
+	CreatedAt        string `json:"created_at,omitempty"`
+	UpdatedAt        string `json:"updated_at,omitempty"`
 }
 
 // sanitizeQueueDiagnostic sanitizes a queue diagnostic/error string
@@ -2774,7 +2789,7 @@ func (h *Handler) AdminSummary(c fiber.Ctx) error {
 		sqlDB.QueryRow("SELECT COUNT(*) FROM coremail_mailboxes WHERE deleted_at IS NULL").Scan(&mbTotal)
 		sqlDB.QueryRow("SELECT COUNT(*) FROM coremail_mailboxes WHERE deleted_at IS NULL AND status = 'active'").Scan(&mbActive)
 		sqlDB.QueryRow("SELECT COUNT(*) FROM coremail_mailboxes WHERE deleted_at IS NULL AND status = 'suspended'").Scan(&mbSuspended)
-		sqlDB.QueryRow("SELECT COUNT(*) FROM coremail_mailboxes WHERE deleted_at IS NULL AND is_admin = "+h.dialect.TrueLiteral()).Scan(&mbAdmin)
+		sqlDB.QueryRow("SELECT COUNT(*) FROM coremail_mailboxes WHERE deleted_at IS NULL AND is_admin = " + h.dialect.TrueLiteral()).Scan(&mbAdmin)
 
 		sqlDB.QueryRow("SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL").Scan(&qTotal)
 		sqlDB.QueryRow("SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND status = 'pending'").Scan(&qPending)
@@ -3164,21 +3179,21 @@ func (h *Handler) GetAdminRuntime(c fiber.Ctx) error {
 		listenerSnapshot = h.listenerRegistry.Snapshot()
 	}
 	tel := runtime.NewTelemetry(runtime.Inputs{
-		Version:   wm.Version,
-		Commit:    config.GetBuildCommit(),
-		BuildTime: wm.BuildTime,
-		GoVersion: wm.GoVersion,
-		Arch:      wm.Arch,
-		StartedAt: h.processStartedAt,
-		DataPath:  h.dataPathForTelemetry(),
-		DBPing:    h.dbPingErrorForTelemetry,
-		QueueCounts: h.queueCountsForTelemetry(c.Context()),
-		License:   h.licensePostureForTelemetry(c.Context()),
+		Version:          wm.Version,
+		Commit:           config.GetBuildCommit(),
+		BuildTime:        wm.BuildTime,
+		GoVersion:        wm.GoVersion,
+		Arch:             wm.Arch,
+		StartedAt:        h.processStartedAt,
+		DataPath:         h.dataPathForTelemetry(),
+		DBPing:           h.dbPingErrorForTelemetry,
+		QueueCounts:      h.queueCountsForTelemetry(c.Context()),
+		License:          h.licensePostureForTelemetry(c.Context()),
 		ListenerSnapshot: listenerSnapshot,
-		SMHTTPPort:  smtpPort,
-		IMAPPort:    imapPort,
-		POP3Port:    pop3Port,
-		JMAPPort:    jmapPort,
+		SMHTTPPort:       smtpPort,
+		IMAPPort:         imapPort,
+		POP3Port:         pop3Port,
+		JMAPPort:         jmapPort,
 	})
 	return c.JSON(tel)
 }

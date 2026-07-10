@@ -186,9 +186,9 @@ func deriveDKIMPublicKey(privPEM string) (string, bool) {
 //   - "manual"        — manual provider; always available
 //   - "not_configured" — credentials missing server-side
 //   - "dry_run_only"   — credentials present, but the
-//                         apply kill switch is off (Namecheap)
-//                         or live apply is intentionally
-//                         disabled (Cloudflare in this build)
+//     apply kill switch is off (Namecheap)
+//     or live apply is intentionally
+//     disabled (Cloudflare in this build)
 //   - "ready"         — credentials + apply enabled
 //
 // The response never carries a token value. Operators can read
@@ -241,9 +241,9 @@ func (h *Handler) GetAdminDNSProviders(c fiber.Ctx) error {
 			notes = append(notes, "credentials are server-side only; the dashboard never receives the token value")
 		}
 		out = append(out, fiber.Map{
-			"name":     name,
-			"status":   status,
-			"notes":    notes,
+			"name":   name,
+			"status": status,
+			"notes":  notes,
 		})
 	}
 	return c.JSON(fiber.Map{"providers": out})
@@ -341,8 +341,9 @@ func (h *Handler) PostAdminDNSVerify(c fiber.Ctx) error {
 //
 // Body: { "selector"?: "<name>" }
 // Response: { "domain": "...", "selector": "...", "public_dns_txt": "v=DKIM1; k=rsa; p=...",
-//            "dns_record_name": "<selector>._domainkey.<domain>",
-//            "stored": true }
+//
+//	"dns_record_name": "<selector>._domainkey.<domain>",
+//	"stored": true }
 //
 // Safety guards (DNS-DKIM-OPERATIONS-2F-SAFETY-FIX):
 //
@@ -443,7 +444,7 @@ func (h *Handler) PostAdminDNSDKIM(c fiber.Ctx) error {
 	} else {
 		if _, err := sqlDB.ExecContext(c.Context(),
 			`INSERT INTO coremail_dkim_config (domain, selector, private_key_pem, enabled, created_at, updated_at)`+
-			` VALUES (`+h.dialect.Placeholder(1)+`, `+h.dialect.Placeholder(2)+`, `+h.dialect.Placeholder(3)+`, `+h.dialect.TrueLiteral()+`, `+h.dialect.Placeholder(4)+`, `+h.dialect.Placeholder(5)+`)`,
+				` VALUES (`+h.dialect.Placeholder(1)+`, `+h.dialect.Placeholder(2)+`, `+h.dialect.Placeholder(3)+`, `+h.dialect.TrueLiteral()+`, `+h.dialect.Placeholder(4)+`, `+h.dialect.Placeholder(5)+`)`,
 			domain, selector, privPEM, now, now); err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"error": "dkim insert: " + err.Error(),
