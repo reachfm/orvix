@@ -172,13 +172,13 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 	var (
 		mailboxID     uint
 		mailboxStatus string
-		isAdmin       int
+		isAdmin       bool
 		hash          string
 		authScheme    string
-		allowWebmail  int
+		allowWebmail  bool
 	)
 	row := sqlDB.QueryRow(
-		fmt.Sprintf("SELECT id, status, is_admin, password_hash, COALESCE(auth_scheme,''), COALESCE(allow_webmail,1) FROM coremail_mailboxes WHERE email = %s AND deleted_at IS NULL", dial.Placeholder(1)),
+		fmt.Sprintf("SELECT id, status, is_admin, password_hash, COALESCE(auth_scheme,''), COALESCE(allow_webmail,"+dial.TrueLiteral()+") FROM coremail_mailboxes WHERE email = %s AND deleted_at IS NULL", dial.Placeholder(1)),
 		loginEmail,
 	)
 	if err := row.Scan(&mailboxID, &mailboxStatus, &isAdmin, &hash, &authScheme, &allowWebmail); err != nil {
@@ -199,7 +199,7 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 			"error": "mailbox is not active",
 		})
 	}
-	if allowWebmail != 1 {
+	if !allowWebmail {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 			"error": "invalid credentials",
 		})
@@ -219,7 +219,7 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 	// compatibility (and so the admin-role middleware
 	// still gates the right endpoints) we map the
 	// mailbox to a users row by email.
-	userID, err := h.ensureWebmailUser(dial, sqlDB, loginEmail, isAdmin == 1)
+	userID, err := h.ensureWebmailUser(dial, sqlDB, loginEmail, isAdmin)
 	if err != nil {
 		h.logger.Error("webmail login: ensureWebmailUser failed", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -228,7 +228,7 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 	}
 
 	role := auth.RoleUser
-	if isAdmin == 1 {
+	if isAdmin {
 		role = auth.RoleAdmin
 	}
 
@@ -320,7 +320,7 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 		"mailbox": fiber.Map{
 			"id":       mailboxID,
 			"email":    loginEmail,
-			"is_admin": isAdmin == 1,
+			"is_admin": isAdmin,
 		},
 	})
 }
@@ -601,6 +601,16 @@ func (h *Handler) ensureWebmailUser(dial *dbdialect.Info, sqlDB *sql.DB, email s
 		return 0, fmt.Errorf("hash placeholder: %w", err)
 	}
 	now := time.Now().UTC()
+	if dial.IsPostgres() {
+		if err := sqlDB.QueryRow(
+			fmt.Sprintf(`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
+			 VALUES (%s) RETURNING id`, dial.Placeholders(8)),
+			now, now, email, string(placeholder), role, tenantID, true, true,
+		).Scan(&userID); err != nil {
+			return 0, fmt.Errorf("insert user: %w", err)
+		}
+		return userID, nil
+	}
 	res, err := sqlDB.Exec(
 		fmt.Sprintf(`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
 		 VALUES (%s)`, dial.Placeholders(8)),

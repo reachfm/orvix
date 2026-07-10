@@ -455,49 +455,63 @@ func insertBootstrapAdmin(db *sql.DB, dial *dbdialect.Info, adminEmail, hashedPa
 	var tenantID int64
 	err = tx.QueryRow("SELECT id FROM tenants WHERE domain = "+dial.Placeholder(1)+" AND deleted_at IS NULL", tenantDomain).Scan(&tenantID)
 	if err == sql.ErrNoRows {
-		res, err := tx.Exec(
-			`INSERT INTO tenants (created_at, updated_at, name, slug, domain, plan, active)
-			 VALUES (`+dial.Placeholder(1)+`, `+dial.Placeholder(2)+`, `+dial.Placeholder(3)+`, `+dial.Placeholder(4)+`, `+dial.Placeholder(5)+`, `+dial.Placeholder(6)+`, `+dial.Placeholder(7)+`)`,
-			now, now, tenantDomain, slug, tenantDomain, "enterprise", 1,
-		)
-		if err != nil {
-			return err
+		if dial.IsPostgres() {
+			err = tx.QueryRow(
+				"INSERT INTO tenants (created_at, updated_at, name, slug, domain, plan, active) VALUES ("+dial.Placeholder(1)+", "+dial.Placeholder(2)+", "+dial.Placeholder(3)+", "+dial.Placeholder(4)+", "+dial.Placeholder(5)+", "+dial.Placeholder(6)+", "+dial.Placeholder(7)+") RETURNING id",
+				now, now, tenantDomain, slug, tenantDomain, "enterprise", true,
+			).Scan(&tenantID)
+		} else {
+			res, execErr := tx.Exec(
+				`INSERT INTO tenants (created_at, updated_at, name, slug, domain, plan, active)
+				 VALUES (`+dial.Placeholder(1)+`, `+dial.Placeholder(2)+`, `+dial.Placeholder(3)+`, `+dial.Placeholder(4)+`, `+dial.Placeholder(5)+`, `+dial.Placeholder(6)+`, `+dial.Placeholder(7)+`)`,
+				now, now, tenantDomain, slug, tenantDomain, "enterprise", 1,
+			)
+			if execErr != nil {
+				return fmt.Errorf("insert tenant: %w", execErr)
+			}
+			tenantID, err = res.LastInsertId()
 		}
-		tenantID, err = res.LastInsertId()
 		if err != nil {
-			return err
+			return fmt.Errorf("tenant id: %w", err)
 		}
 	} else if err != nil {
-		return err
+		return fmt.Errorf("select tenant: %w", err)
 	}
 
 	_, err = tx.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
 		 VALUES (`+dial.Placeholder(1)+`, `+dial.Placeholder(2)+`, `+dial.Placeholder(3)+`, `+dial.Placeholder(4)+`, `+dial.Placeholder(5)+`, `+dial.Placeholder(6)+`, `+dial.Placeholder(7)+`, `+dial.Placeholder(8)+`)`,
-		now, now, adminEmail, hashedPassword, "admin", tenantID, 1, 1,
+		now, now, adminEmail, hashedPassword, "admin", tenantID, true, true,
 	)
 	if err != nil {
-		return err
+		return fmt.Errorf("insert user: %w", err)
 	}
 
 	// Create CoreMail domain.
 	var domainID int64
 	err = tx.QueryRow("SELECT id FROM coremail_domains WHERE name = "+dial.Placeholder(1), tenantDomain).Scan(&domainID)
 	if err == sql.ErrNoRows {
-		res, err := tx.Exec(
-			`INSERT INTO coremail_domains (name, tenant_id, status, plan, max_mailboxes, max_aliases, max_quota_mb, created_at, updated_at)
-			 VALUES (`+dial.Placeholder(1)+`, `+dial.Placeholder(2)+`, 'active', 'enterprise', 0, 0, 0, `+dial.Placeholder(3)+`, `+dial.Placeholder(4)+`)`,
-			tenantDomain, tenantID, now, now,
-		)
-		if err != nil {
-			return err
+		if dial.IsPostgres() {
+			err = tx.QueryRow(
+				"INSERT INTO coremail_domains (name, tenant_id, status, plan, max_mailboxes, max_aliases, max_quota_mb, created_at, updated_at) VALUES ("+dial.Placeholder(1)+", "+dial.Placeholder(2)+", 'active', 'enterprise', 0, 0, 0, "+dial.Placeholder(3)+", "+dial.Placeholder(4)+") RETURNING id",
+				tenantDomain, tenantID, now, now,
+			).Scan(&domainID)
+		} else {
+			res, execErr := tx.Exec(
+				`INSERT INTO coremail_domains (name, tenant_id, status, plan, max_mailboxes, max_aliases, max_quota_mb, created_at, updated_at)
+				 VALUES (`+dial.Placeholder(1)+`, `+dial.Placeholder(2)+`, 'active', 'enterprise', 0, 0, 0, `+dial.Placeholder(3)+`, `+dial.Placeholder(4)+`)`,
+				tenantDomain, tenantID, now, now,
+			)
+			if execErr != nil {
+				return fmt.Errorf("insert domain: %w", execErr)
+			}
+			domainID, err = res.LastInsertId()
 		}
-		domainID, err = res.LastInsertId()
 		if err != nil {
-			return err
+			return fmt.Errorf("domain id: %w", err)
 		}
 	} else if err != nil {
-		return err
+		return fmt.Errorf("select domain: %w", err)
 	}
 
 	// Create CoreMail mailbox with Argon2id hash.
@@ -510,17 +524,28 @@ func insertBootstrapAdmin(db *sql.DB, dial *dbdialect.Info, adminEmail, hashedPa
 	if err != nil {
 		logger.Warn("failed to hash admin password with argon2id, skipping mailbox creation", zap.Error(err))
 	} else {
-		mailboxRes, err := tx.Exec(
-			`INSERT INTO coremail_mailboxes (domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme, status, quota_mb, is_admin, created_at, updated_at)
-			 VALUES (`+dial.Placeholder(1)+`, `+dial.Placeholder(2)+`, `+dial.Placeholder(3)+`, `+dial.Placeholder(4)+`, 'Admin', `+dial.Placeholder(5)+`, 'argon2id', 'active', 1024, 1, `+dial.Placeholder(6)+`, `+dial.Placeholder(7)+`)`,
-			domainID, tenantID, localPart, adminEmail, argon2Hash, now, now,
-		)
-		if err != nil {
-			return err
-		}
-		mailboxID, err := mailboxRes.LastInsertId()
-		if err != nil {
-			return err
+		var mailboxID int64
+		if dial.IsPostgres() {
+			err = tx.QueryRow(
+				"INSERT INTO coremail_mailboxes (domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme, status, quota_mb, is_admin, created_at, updated_at) VALUES ("+dial.Placeholder(1)+", "+dial.Placeholder(2)+", "+dial.Placeholder(3)+", "+dial.Placeholder(4)+", 'Admin', "+dial.Placeholder(5)+", 'argon2id', 'active', 1024, "+dial.Placeholder(6)+", "+dial.Placeholder(7)+", "+dial.Placeholder(8)+") RETURNING id",
+				domainID, tenantID, localPart, adminEmail, argon2Hash, true, now, now,
+			).Scan(&mailboxID)
+			if err != nil {
+				return fmt.Errorf("mailbox id pg: %w", err)
+			}
+		} else {
+			mailboxRes, execErr := tx.Exec(
+				`INSERT INTO coremail_mailboxes (domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme, status, quota_mb, is_admin, created_at, updated_at)
+				 VALUES (`+dial.Placeholder(1)+`, `+dial.Placeholder(2)+`, `+dial.Placeholder(3)+`, `+dial.Placeholder(4)+`, 'Admin', `+dial.Placeholder(5)+`, 'argon2id', 'active', 1024, 1, `+dial.Placeholder(6)+`, `+dial.Placeholder(7)+`)`,
+				domainID, tenantID, localPart, adminEmail, argon2Hash, now, now,
+			)
+			if execErr != nil {
+				return fmt.Errorf("insert mailbox: %w", execErr)
+			}
+			mailboxID, err = mailboxRes.LastInsertId()
+			if err != nil {
+				return fmt.Errorf("mailbox id sqlite: %w", err)
+			}
 		}
 
 		if err := provisionSystemFoldersTx(context.Background(), tx, dial, uint(mailboxID), now); err != nil {

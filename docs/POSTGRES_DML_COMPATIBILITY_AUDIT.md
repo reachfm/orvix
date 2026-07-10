@@ -170,6 +170,42 @@ Updated for branch `db/postgres-production-readiness`.
 
 ---
 
+## Finding 13: Bootstrap boolean parameter mismatches
+
+| Field | Detail |
+|-------|--------|
+| **File** | `cmd/orvix/main.go` |
+| **Risk** | PostgreSQL `BOOLEAN` columns reject integer `1`/`0` parameters when the driver is strict about types. |
+| **Fix** | Branch bootstrap seed queries per driver: PostgreSQL passes `true`/`false` bool parameters for `tenants.active`, `users.active`, `users.email_verified`, and `coremail_mailboxes.is_admin`; SQLite keeps `1`/`0` int parameters. |
+| **Status** | **FIXED**. SQLite tests pass. PostgreSQL path not executed (Docker unavailable). |
+
+## Finding 14: `LastInsertId` / `RETURNING id` in bootstrap
+
+| Field | Detail |
+|-------|--------|
+| **File** | `cmd/orvix/main.go` |
+| **Risk** | PostgreSQL drivers do not support `Result.LastInsertId()`. Calling it panics or returns an error. |
+| **Fix** | PostgreSQL branch uses `INSERT ... RETURNING id` with `QueryRow().Scan(&id)`. SQLite branch keeps `Exec` + `LastInsertId()`. |
+| **Status** | **FIXED**. SQLite tests pass. PostgreSQL path not executed (Docker unavailable). |
+
+## Finding 15: Missing MFA columns in PostgreSQL `users` table
+
+| Field | Detail |
+|-------|--------|
+| **File** | `internal/models/postgres_migrations.go` |
+| **Risk** | Login/ MFA handler code scans `mfa_enabled`, `mfa_secret`, `pending_mfa_secret`, etc. PostgreSQL schema creation failed to create these columns, causing runtime query errors. |
+| **Fix** | Added the following columns to the PostgreSQL `users` table: `mfa_enabled`, `mfa_secret`, `pending_mfa_secret`, `pending_mfa_secret_raw`, `mfa_secret_raw`, `mfa_label`. |
+| **Status** | **FIXED**. PostgreSQL schema smoke not rerun (Docker unavailable); SQLite tests pass. |
+
+## Finding 16: Handler boolean scan / literal mismatches
+
+| Field | Detail |
+|-------|--------|
+| **Files** | `internal/api/handlers/handlers.go`, `internal/api/handlers/webmail_auth.go`, `internal/api/handlers/admin_users.go`, `internal/api/handlers/dns_ops.go`, `internal/api/handlers/enterprise_admin_v3.go` |
+| **Risk** | Variables declared as `int` scanning into `BOOLEAN` columns fail on PostgreSQL. Boolean literals written as `1`/`0` or raw `TRUE`/`FALSE` are not dialect-portable. |
+| **Fix** | `handlers.go`: `mfaEnabled` and `allow_*` flags scan as `bool`; removed `boolToInt` (now returns bool). `webmail_auth.go`: `isAdmin`/`allowWebmail` scan as `bool`; `COALESCE(allow_webmail, TRUE/FALSE)` uses dialect literals. `admin_users.go`: `active = TRUE/FALSE` via dialect literals with correct placeholders. `dns_ops.go`: `enabled = TRUE/FALSE` via dialect literals with correct placeholders. `enterprise_admin_v3.go`: `boolToInt` returns `bool` for PostgreSQL compatibility. |
+| **Status** | **FIXED**. SQLite tests pass. PostgreSQL path not executed (Docker unavailable). |
+
 ## Summary
 
 | Finding | Status | Risk |
@@ -186,6 +222,10 @@ Updated for branch `db/postgres-production-readiness`.
 | Transaction boundaries | Audited (see POSTGRES_TRANSACTION_AUDIT.md) | Low-Medium risk |
 | Queue lease | Safe as-is | No issue |
 | CoreMail SQLite-only | Documented | None — architectural |
+| Bootstrap boolean parameters | Fixed | Done |
+| Bootstrap RETURNING id | Fixed | Done |
+| Missing MFA columns | Fixed | Done |
+| Handler boolean scans/literals | Fixed | Done |
 
 **Overall DML compatibility:** Core schema DDL is PostgreSQL-ready (59 tables). Application DML in `internal/api/handlers/`, `internal/audit/`, `internal/messagetrace/`, `internal/lifecycle/`, `cmd/orvix/main.go`, and the previously-fixed core packages has been made driver-aware. The `internal/coremail/` packages are intentionally SQLite-only (Finding 12) and do not need DML conversion.
 
@@ -194,6 +234,17 @@ Updated for branch `db/postgres-production-readiness`.
 2. Migration CLI is validated end-to-end with real data.
 3. Backup/restore/rollback procedures are executed and verified.
 4. Staging gates (10k/100k/1M/3M) pass on PostgreSQL staging hardware.
+
+| Decision | Verdict | Reason |
+|----------|---------|--------|
+| Code blockers from CTO review | **FIXED** | Findings 13-16 addressed. |
+| SQLite tests | **PASS** | Full suite passes. |
+| Full test suite | **PASS** | `go test ./...` passes. |
+| PostgreSQL DML integration tests | **NOT RUN** | Docker daemon unavailable. |
+| Safe to merge | **NO** | PostgreSQL validation gates not executed. |
+| Safe to deploy | **NO** | Production PostgreSQL not validated. |
+| PostgreSQL staging-ready | **NO** | Docker/PostgreSQL gates not run. |
+| PostgreSQL production-ready | **NO** | Migration, backup/restore, rollback, and DML tests not executed. |
 
 ---
 
@@ -217,9 +268,32 @@ Audited coremail storage/queue/mailbox/domain/alias packages. Confirmed they use
 and a global write mutex. These are architectural decisions — coremail storage
 is a self-contained SQLite subsystem. No changes needed.
 
+### Finding 13 — Bootstrap boolean parameters: ADDED
+Fixed in `cmd/orvix/main.go`: PostgreSQL branch passes `true`/`false` bool
+parameters for `tenants.active`, `users.active`, `users.email_verified`, and
+`coremail_mailboxes.is_admin`; SQLite branch keeps `1`/`0` int parameters.
+
+### Finding 14 — Bootstrap `LastInsertId` / `RETURNING id`: ADDED
+Fixed in `cmd/orvix/main.go`: PostgreSQL branch uses `INSERT ... RETURNING id`
+with `QueryRow().Scan(&id)`; SQLite branch keeps `Exec` + `LastInsertId()`.
+
+### Finding 15 — Missing MFA columns in PostgreSQL users table: ADDED
+Added `mfa_enabled`, `mfa_secret`, `pending_mfa_secret`,
+`pending_mfa_secret_raw`, `mfa_secret_raw`, `mfa_label` to the PostgreSQL
+`users` DDL in `internal/models/postgres_migrations.go`.
+
+### Finding 16 — Handler boolean scan / literal mismatches: ADDED
+Fixed across handlers:
+- `handlers.go`: `mfaEnabled` and `allow_*` flags scan as `bool`; `boolToInt` removed (now returns bool).
+- `webmail_auth.go`: `isAdmin`/`allowWebmail` scan as `bool`; `COALESCE(allow_webmail, TRUE/FALSE)` uses dialect literals.
+- `admin_users.go`: `active = TRUE/FALSE` via dialect literals; placeholders fixed.
+- `dns_ops.go`: `enabled = TRUE/FALSE` via dialect literals; placeholders fixed.
+- `enterprise_admin_v3.go`: `boolToInt` returns `bool` for PostgreSQL compatibility.
+
 ### Verification
 - `go vet ./...`: PASS
 - `go build ./...`: PASS
+- `go test ./... -timeout=600s`: PASS
 - `go test ./cmd/orvix/`, `./internal/api/handlers/`, `./internal/audit/`, `./internal/messagetrace/`, `./internal/lifecycle/`: PASS
 
 ---

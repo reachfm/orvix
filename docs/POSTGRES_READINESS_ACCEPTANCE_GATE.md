@@ -12,7 +12,8 @@ Gates 1-3 must pass in CI. Gates 4-7 require staging hardware.
 | **Command** | `go test ./... -timeout=600s` |
 | **Expected** | All packages PASS, zero failures |
 | **Status** | PASS |
-| **Date** | 2026-07-09 |
+| **Date** | 2026-07-10 |
+| **Note** | Re-verified after CTO-review blocker fixes (bootstrap booleans, RETURNING id, MFA column additions). |
 
 ## Gate 2 — SQLite benchmark 10k
 
@@ -126,7 +127,7 @@ Gates 1-3 must pass in CI. Gates 4-7 require staging hardware.
 
 | Gate | Status | Blocker |
 |------|--------|---------|
-| 1 — Normal test suite | PASS (re-verified) | — |
+| 1 — Normal test suite | PASS (re-verified after CTO-review fixes) | — |
 | 2 — SQLite benchmark 10k/100k | PASS (re-verified) | — |
 | 3 — PostgreSQL schema smoke | PASS (previous sprint) — NOT RERUN | Docker unavailable this sprint |
 | 4 — PostgreSQL benchmark 10k | PASS (previous sprint) — NOT RERUN | Docker unavailable this sprint |
@@ -134,10 +135,20 @@ Gates 1-3 must pass in CI. Gates 4-7 require staging hardware.
 | 5b — Pre-3M 1M smoke | PASS (previous sprint) — NOT RERUN | Docker unavailable this sprint |
 | 6 — PostgreSQL benchmark 3M | PASS with note (previous sprint) — NOT RERUN | Docker unavailable this sprint |
 | 7 — DML audit | PASS — 12 findings (Finding 12 added) | — |
-| 8 — Migration/backup/rollback | NOT PASS | Not executed; requires PostgreSQL (Docker unavailable) |
-| 9 — PostgreSQL DML tests | NOT PASS | Not executed; Docker unavailable |
+| 8 — Migration/backup/rollback | STILL NOT RUN | Docker daemon unavailable |
+| 9 — PostgreSQL DML tests | STILL NOT RUN | Docker daemon unavailable |
 
-**Overall status:** Gates 1-2 PASS (re-verified in `db/postgres-final-closure`). Gates 3-6 PASS (previous sprint; NOT RERUN — Docker unavailable). Gate 7 PASS (updated with Finding 12 and fixed handlers). Gate 8 NOT PASS (migration/backup/rollback not executed — requires PostgreSQL). Gate 9 NOT PASS (DML tests not executed — Docker unavailable).
+**Overall status:** Gates 1-2 PASS (re-verified in `db/postgres-final-closure`). Gates 3-6 PASS (previous sprint; NOT RERUN — Docker unavailable). Gate 7 PASS (updated with Finding 12 and fixed handlers). Gates 8-9 STILL NOT RUN (Docker daemon unavailable).
+
+| Decision | Verdict | Reason |
+|----------|---------|--------|
+| Code blockers from CTO review | **FIXED** | Bootstrap boolean inserts, RETURNING id, MFA columns, handler boolean scans/literals fixed. |
+| SQLite tests | **PASS** | Full suite and SQLite benchmarks pass. |
+| Full test suite | **PASS** | `go test ./...` passes after fixes. |
+| Safe to merge | **NO** | PostgreSQL validation gates (8-9) not executed. |
+| Safe to deploy | **NO** | PostgreSQL production gates not validated. |
+| PostgreSQL staging-ready | **NO** | Docker/PostgreSQL gates not run this sprint. |
+| PostgreSQL production-ready | **NO** | Migration, backup/restore, rollback, and DML integration tests not executed. |
 
 **Production PostgreSQL is NOT ready.** RC4 SQLite default is unchanged. VPS not touched.
 
@@ -247,6 +258,65 @@ containers (backend-postgres-1, backend-redis-1) were not touched.
 
 ---
 
+## CTO-Review Blocker Fixes
+
+**Date:** 2026-07-10
+
+The following PostgreSQL compatibility blockers were identified during CTO review and are now **FIXED**:
+
+### Bootstrap boolean inserts (`cmd/orvix/main.go`)
+
+Seed/admin insertion queries were passing integer literals (`1`/`0`) for `BOOLEAN` columns under PostgreSQL, causing type errors.
+
+| Column | Table | PostgreSQL branch | SQLite branch |
+|--------|-------|-------------------|---------------|
+| `active` | `tenants` | `true` / `false` bool parameters | `1` / `0` int parameters |
+| `active` | `users` | `true` / `false` bool parameters | `1` / `0` int parameters |
+| `email_verified` | `users` | `true` / `false` bool parameters | `1` / `0` int parameters |
+| `is_admin` | `coremail_mailboxes` | `true` / `false` bool parameters | `1` / `0` int parameters |
+
+### LastInsertId / `RETURNING id` (`cmd/orvix/main.go`)
+
+Bootstrap code used `Exec` + `LastInsertId()`, which fails on PostgreSQL (`LastInsertId` is not supported by `lib/pq`).
+
+| Driver | Pattern |
+|--------|---------|
+| PostgreSQL | `INSERT ... RETURNING id` with `QueryRow().Scan(&id)` |
+| SQLite | `Exec` + `LastInsertId()` (unchanged) |
+
+### Login MFA scan type (`internal/api/handlers/handlers.go`)
+
+`mfaEnabled` was declared as `int` and scanned into a bool target, causing a scan type mismatch on PostgreSQL. Changed to `bool`.
+
+### Missing MFA columns in PostgreSQL users table
+
+`internal/models/postgres_migrations.go` was missing several MFA-related columns present in the SQLite schema. Added to the PostgreSQL `users` table:
+
+- `mfa_enabled`
+- `mfa_secret`
+- `pending_mfa_secret`
+- `pending_mfa_secret_raw`
+- `mfa_secret_raw`
+- `mfa_label`
+
+### Additional boolean literal / scan fixes
+
+| File | Fix |
+|------|-----|
+| `internal/api/handlers/webmail_auth.go` | `isAdmin` and `allowWebmail` scan as `bool`; `COALESCE(allow_webmail, TRUE/FALSE)` uses dialect literals. |
+| `internal/api/handlers/handlers.go` | `allow_*` flags scan as `bool`; `boolToInt` removed (now returns `bool`). |
+| `internal/api/handlers/admin_users.go` | `active = TRUE/FALSE` with dialect literals; placeholders fixed. |
+| `internal/api/handlers/dns_ops.go` | `enabled = TRUE/FALSE` with dialect literals; placeholders fixed. |
+| `internal/api/handlers/enterprise_admin_v3.go` | `boolToInt` returns `bool` for PostgreSQL compatibility. |
+
+### Verification after fixes
+
+- `go vet ./...`: PASS
+- `go build ./...`: PASS
+- `go test ./... -timeout=600s`: PASS
+- SQLite benchmark 10k/100k: PASS
+- PostgreSQL gates (3-6, 8-9): STILL NOT RUN — Docker daemon unavailable.
+
 ---
 
 ## db/postgres-final-closure Sprint Update
@@ -259,13 +329,15 @@ containers (backend-postgres-1, backend-redis-1) were not touched.
 - Fixed boolean literals: `COALESCE(mfa_enabled, 0)` → `h.dialect.FalseLiteral()`, `COALESCE(allow_webmail, 1)` → `h.dialect.TrueLiteral()`, `is_admin = 0/1` → `FalseLiteral()/TrueLiteral()`
 - Fixed admin_queue.go: dynamic WHERE clause placeholders + LIMIT/OFFSET to `dial.Placeholder(N)`
 - Fixed saas_admin.go: all raw SQL placeholders in report/overview/security/intelligence endpoints
-- Fixed webmail_auth.go: all raw SQL placeholders in login/change-password/ensure-user endpoints
-- Fixed admin_users.go: `INSERT OR IGNORE` → dialect-aware `Upsert` with `DO NOTHING`
+- Fixed webmail_auth.go: all raw SQL placeholders in login/change-password/ensure-user endpoints; `isAdmin`/`allowWebmail` scan as `bool`; `COALESCE(allow_webmail, TRUE/FALSE)` via dialect literals
+- Fixed admin_users.go: `INSERT OR IGNORE` → dialect-aware `Upsert` with `DO NOTHING`; `active = TRUE/FALSE` via dialect literals; placeholders fixed
+- Fixed dns_ops.go: `enabled = TRUE/FALSE` via dialect literals; placeholders fixed
 - Fixed enterprise_admin_ssl.go: `CURRENT_TIMESTAMP` → `time.Now().UTC()` parameter, `?` → `dial.Placeholder(N)`
+- Fixed enterprise_admin_v3.go: `boolToInt` returns `bool` for PostgreSQL compatibility
 - Fixed lifecycle/service.go: remaining `?` placeholders, `last_insert_rowid()` verified guarded
 - Fixed audit/audit.go: Added `dialect` field to Store, `Detect()` used, all `?` → `dial.Placeholder(N)`, `LIMIT ? OFFSET ?` fixed
 - Fixed messagetrace/service.go: Added `dialect` field, all `?` → `dial.Placeholder(N)`, `LIMIT ? OFFSET ?` fixed
-- Fixed cmd/orvix/main.go: `?` → `dial.Placeholder(N)` in seedAdminUser, verifyHash, insertBootstrapAdmin, provisionSystemFoldersTx
+- Fixed cmd/orvix/main.go: `?` → `dial.Placeholder(N)` in seedAdminUser, verifyHash, insertBootstrapAdmin, provisionSystemFoldersTx; bootstrap booleans use bool params for PostgreSQL / int params for SQLite; `INSERT ... RETURNING id` for PostgreSQL, `LastInsertId` for SQLite
 
 ### Workstream B — CoreMail audit (COMPLETED)
 - Audited coremail storage/queue/mailbox/domain/alias packages
@@ -276,16 +348,19 @@ containers (backend-postgres-1, backend-redis-1) were not touched.
 - Created POSTGRES_TRANSACTION_AUDIT.md (14 packages, 13 findings)
 - Fixed `INSERT OR IGNORE` in admin_users.go (dialect-aware Upsert)
 
-### Workstream D — PostgreSQL DML tests (NOT EXECUTED)
+### Workstream D — Schema completeness / MFA columns (COMPLETED)
+- Added missing MFA columns to PostgreSQL `users` table in `internal/models/postgres_migrations.go`: `mfa_enabled`, `mfa_secret`, `pending_mfa_secret`, `pending_mfa_secret_raw`, `mfa_secret_raw`, `mfa_label`
+
+### Workstream E — PostgreSQL DML tests (NOT EXECUTED)
 - Docker daemon NOT running — PostgreSQL tests NOT EXECUTED
 
-### Workstream E — Migration CLI (NOT EXECUTED)
+### Workstream F — Migration CLI (NOT EXECUTED)
 - Requires PostgreSQL
 
-### Workstream F — Backup/restore/rollback (NOT EXECUTED)
+### Workstream G — Backup/restore/rollback (NOT EXECUTED)
 - Requires PostgreSQL
 
-### Workstream G — Load gates (PARTIAL)
+### Workstream H — Load gates (PARTIAL)
 - 10,000 rows: PASS on SQLite (insert=691ms, flag-updates=34ms)
 - 100,000 rows: PASS on SQLite (insert=6.6s, flag-updates=39ms)
 - 1M/3M: NOT RERUN IN THIS SPRINT
@@ -293,6 +368,7 @@ containers (backend-postgres-1, backend-redis-1) were not touched.
 ### Verification
 - `go vet ./...`: PASS
 - `go build ./...`: PASS
+- `go test ./... -timeout=600s`: PASS
 - `go test ./cmd/orvix/ -timeout=120s`: PASS
 - `go test ./internal/api/handlers/ -timeout=300s`: PASS
 - `go test ./internal/audit/ ./internal/messagetrace/ ./internal/lifecycle/`: PASS

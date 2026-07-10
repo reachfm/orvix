@@ -764,12 +764,12 @@ func (h *Handler) TestAcceptanceRule(c fiber.Ctx) error {
 	if err := json.Unmarshal(c.Body(), &body); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid JSON body")
 	}
-	rows, err := h.sqlDB().QueryContext(c.Context(), `
-		SELECT id, name, priority, enabled, scope, scope_target, sender_pattern,
-		       recipient_pattern, source_ip_cidr, action
-		FROM coremail_acceptance_rules
-		WHERE tenant_id = ? AND deleted_at IS NULL AND enabled = 1
-		ORDER BY priority ASC, id ASC`, tenantID)
+	rows, err := h.sqlDB().QueryContext(c.Context(),
+		`SELECT id, name, priority, enabled, scope, scope_target, sender_pattern,`+
+		` recipient_pattern, source_ip_cidr, action`+
+		` FROM coremail_acceptance_rules`+
+		` WHERE tenant_id = `+h.dialect.Placeholder(1)+` AND deleted_at IS NULL AND enabled = `+h.dialect.TrueLiteral()+
+		` ORDER BY priority ASC, id ASC`, tenantID)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("list rules: %v", err))
 	}
@@ -2179,12 +2179,11 @@ func tlsDial(network, address, serverName string) (*tls.Conn, error) {
 // Utility helpers — keep the rest of the file readable.
 // =====================================================================
 
-// boolToInt is just a tiny helper.
-func boolToInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
+// boolToInt converts a Go bool to a driver-safe boolean value.
+// Historically this returned 1/0 for SQLite; it now returns bool so the
+// same parameter works for both SQLite INTEGER and PostgreSQL BOOLEAN.
+func boolToInt(b bool) bool {
+	return b
 }
 
 // Mailbox class_id is wired into the existing CreateMailbox

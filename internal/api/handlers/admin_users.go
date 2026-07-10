@@ -289,12 +289,12 @@ func (h *Handler) UpdateAdminUserStatus(c fiber.Ctx) error {
 	if !body.Active {
 		var superadminCount int
 		sqlDB.QueryRowContext(c.Context(),
-			`SELECT COUNT(*) FROM users WHERE tenant_id = ? AND role = 'superadmin' AND active = 1 AND deleted_at IS NULL`,
+			`SELECT COUNT(*) FROM users WHERE tenant_id = `+h.dialect.Placeholder(1)+` AND role = 'superadmin' AND active = `+h.dialect.TrueLiteral()+` AND deleted_at IS NULL`,
 			tenantID).Scan(&superadminCount)
 		if superadminCount <= 1 {
 			var isSuperadmin bool
 			sqlDB.QueryRowContext(c.Context(),
-				`SELECT role = 'superadmin' FROM users WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
+				`SELECT role = 'superadmin' FROM users WHERE id = `+h.dialect.Placeholder(1)+` AND tenant_id = `+h.dialect.Placeholder(2)+` AND deleted_at IS NULL`,
 				id, tenantID).Scan(&isSuperadmin)
 			if isSuperadmin {
 				return fiber.NewError(fiber.StatusForbidden, "cannot disable the last active superadmin")
@@ -304,8 +304,8 @@ func (h *Handler) UpdateAdminUserStatus(c fiber.Ctx) error {
 
 	now := time.Now().UTC()
 	res, err := sqlDB.ExecContext(c.Context(),
-		`UPDATE users SET active = ?, updated_at = ? WHERE id = ? AND tenant_id = ? AND role IN ('admin','superadmin') AND deleted_at IS NULL`,
-		boolToInt(body.Active), now, id, tenantID)
+		`UPDATE users SET active = `+h.dialect.Placeholder(1)+`, updated_at = `+h.dialect.Placeholder(2)+` WHERE id = `+h.dialect.Placeholder(3)+` AND tenant_id = `+h.dialect.Placeholder(4)+` AND role IN ('admin','superadmin') AND deleted_at IS NULL`,
+		body.Active, now, id, tenantID)
 	if err != nil {
 		h.logger.Error("update admin user status: DB update failed", zap.Error(err))
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to process admin user request")
@@ -412,12 +412,12 @@ func (h *Handler) DeleteAdminUser(c fiber.Ctx) error {
 	// Check if this is the last active superadmin
 	var isSuperadmin bool
 	sqlDB.QueryRowContext(c.Context(),
-		`SELECT role = 'superadmin' FROM users WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
+		`SELECT role = 'superadmin' FROM users WHERE id = `+h.dialect.Placeholder(1)+` AND tenant_id = `+h.dialect.Placeholder(2)+` AND deleted_at IS NULL`,
 		id, tenantID).Scan(&isSuperadmin)
 	if isSuperadmin {
 		var count int
 		sqlDB.QueryRowContext(c.Context(),
-			`SELECT COUNT(*) FROM users WHERE tenant_id = ? AND role = 'superadmin' AND active = 1 AND deleted_at IS NULL`,
+			`SELECT COUNT(*) FROM users WHERE tenant_id = `+h.dialect.Placeholder(1)+` AND role = 'superadmin' AND active = `+h.dialect.TrueLiteral()+` AND deleted_at IS NULL`,
 			tenantID).Scan(&count)
 		if count <= 1 {
 			return fiber.NewError(fiber.StatusForbidden, "cannot delete the last active superadmin")
@@ -426,7 +426,7 @@ func (h *Handler) DeleteAdminUser(c fiber.Ctx) error {
 
 	now := time.Now().UTC()
 	res, err := sqlDB.ExecContext(c.Context(),
-		`UPDATE users SET active = 0, deleted_at = ?, updated_at = ? WHERE id = ? AND tenant_id = ? AND role IN ('admin','superadmin') AND deleted_at IS NULL`,
+		`UPDATE users SET active = `+h.dialect.FalseLiteral()+`, deleted_at = `+h.dialect.Placeholder(1)+`, updated_at = `+h.dialect.Placeholder(2)+` WHERE id = `+h.dialect.Placeholder(3)+` AND tenant_id = `+h.dialect.Placeholder(4)+` AND role IN ('admin','superadmin') AND deleted_at IS NULL`,
 		now, now, id, tenantID)
 	if err != nil {
 		h.logger.Error("delete admin user: DB update failed", zap.Error(err))

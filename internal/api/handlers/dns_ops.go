@@ -98,7 +98,7 @@ func (h *Handler) dnsOpsInputsForDomain(ctx context.Context, domain string) (dns
 	if sqlDB, err := h.db.DB(); err == nil {
 		var s string
 		row := sqlDB.QueryRowContext(ctx,
-			`SELECT selector, private_key_pem FROM coremail_dkim_config WHERE domain = ?`,
+			`SELECT selector, private_key_pem FROM coremail_dkim_config WHERE domain = `+h.dialect.Placeholder(1),
 			domain)
 		var priv string
 		if err := row.Scan(&s, &priv); err == nil {
@@ -398,7 +398,7 @@ func (h *Handler) PostAdminDNSDKIM(c fiber.Ctx) error {
 	now := time.Now().UTC()
 	var existing int64
 	row := sqlDB.QueryRowContext(c.Context(),
-		`SELECT COUNT(*) FROM coremail_dkim_config WHERE domain = ?`, domain)
+		`SELECT COUNT(*) FROM coremail_dkim_config WHERE domain = `+h.dialect.Placeholder(1), domain)
 	if err := row.Scan(&existing); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "dkim lookup: " + err.Error(),
@@ -434,7 +434,7 @@ func (h *Handler) PostAdminDNSDKIM(c fiber.Ctx) error {
 	// Persist to coremail_dkim_config.
 	if existing > 0 {
 		if _, err := sqlDB.ExecContext(c.Context(),
-			`UPDATE coremail_dkim_config SET selector = ?, private_key_pem = ?, enabled = 1, updated_at = ? WHERE domain = ?`,
+			`UPDATE coremail_dkim_config SET selector = `+h.dialect.Placeholder(1)+`, private_key_pem = `+h.dialect.Placeholder(2)+`, enabled = `+h.dialect.TrueLiteral()+`, updated_at = `+h.dialect.Placeholder(3)+` WHERE domain = `+h.dialect.Placeholder(4),
 			selector, privPEM, now, domain); err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"error": "dkim update: " + err.Error(),
@@ -442,8 +442,8 @@ func (h *Handler) PostAdminDNSDKIM(c fiber.Ctx) error {
 		}
 	} else {
 		if _, err := sqlDB.ExecContext(c.Context(),
-			`INSERT INTO coremail_dkim_config (domain, selector, private_key_pem, enabled, created_at, updated_at)
-			 VALUES (?, ?, ?, 1, ?, ?)`,
+			`INSERT INTO coremail_dkim_config (domain, selector, private_key_pem, enabled, created_at, updated_at)`+
+			` VALUES (`+h.dialect.Placeholder(1)+`, `+h.dialect.Placeholder(2)+`, `+h.dialect.Placeholder(3)+`, `+h.dialect.TrueLiteral()+`, `+h.dialect.Placeholder(4)+`, `+h.dialect.Placeholder(5)+`)`,
 			domain, selector, privPEM, now, now); err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"error": "dkim insert: " + err.Error(),

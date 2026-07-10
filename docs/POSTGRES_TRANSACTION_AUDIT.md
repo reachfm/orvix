@@ -33,13 +33,17 @@ This audit inspects every file in the Orvix codebase that contains explicit tran
 
 ## Findings
 
-### F1: insertBootstrapAdmin — Proper Transaction (OK)
+### F1: insertBootstrapAdmin — Proper Transaction (OK, CTO-review fixes applied)
 - **File**: `cmd/orvix/main.go:449-534`
 - **Risk**: LOW
 - **Status**: PASS
 - **What it wraps**: Tenant INSERT (or lookup), User INSERT, CoreMail domain INSERT (or lookup), CoreMail mailbox INSERT (with Argon2id hash), system folder provisioning.
 - **Coverage**: `defer tx.Rollback()` on line 453, `return tx.Commit()` on line 534.
 - **Analysis**: All 4-5 inserts/lookups are atomic. If any step fails, the entire bootstrap rolls back. Error paths all return before reaching Commit, and the deferred Rollback handles them. This is the **gold standard** for transaction management in this codebase.
+- **CTO-review fixes applied**:
+  - Boolean flag parameters are now driver-branched: PostgreSQL receives `true`/`false` for `tenants.active`, `users.active`, `users.email_verified`, and `coremail_mailboxes.is_admin`; SQLite keeps `1`/`0`.
+  - PostgreSQL branch uses `INSERT ... RETURNING id` with `QueryRow().Scan(&id)` instead of `Exec` + `LastInsertId()`.
+  - SQLite branch remains unchanged and tests pass.
 
 ### F2: BulkImportMailboxes — SAVEPOINT Pattern (OK)
 - **File**: `internal/api/handlers/mailbox_bulk_import.go:221-479`
@@ -181,6 +185,21 @@ The password change flow at `handlers.go:685-709` reads the current hash, verifi
 
 **Blocker resolved:** `INSERT OR IGNORE` has been replaced with dialect-aware `Upsert` (produces `ON CONFLICT DO NOTHING` for PostgreSQL).
 
+**CTO-review blockers resolved in bootstrap:** Boolean parameters are driver-branched and `RETURNING id` is used for PostgreSQL in `cmd/orvix/main.go`.
+
+### Honest status
+
+| Decision | Verdict | Reason |
+|----------|---------|--------|
+| Code blockers from CTO review | **FIXED** | Bootstrap booleans, RETURNING id, MFA columns, handler boolean scans/literals fixed. |
+| SQLite tests | **PASS** | Full suite and SQLite benchmarks pass. |
+| Full test suite | **PASS** | `go test ./...` passes after fixes. |
+| PostgreSQL transaction tests | **NOT RUN** | Docker daemon unavailable; no PostgreSQL transaction-specific tests executed. |
+| Safe to merge | **NO** | PostgreSQL validation gates not executed. |
+| Safe to deploy | **NO** | Production PostgreSQL not validated. |
+| PostgreSQL staging-ready | **NO** | Docker/PostgreSQL gates not run. |
+| PostgreSQL production-ready | **NO** | Migration, backup/restore, rollback, and DML integration tests not executed. |
+
 **Remaining recommendations for production PostgreSQL:**
 
 1. **RECOMMENDED:** Gate `writeMu` behind a dialect check so PostgreSQL deployments are not artificially serialized.
@@ -196,11 +215,45 @@ With these addressed, the codebase is operationally safe for PostgreSQL. Items a
 
 **Date:** 2026-07-10
 
+### F1 — Bootstrap transaction: CTO-review fixes applied
+- Boolean parameters in `cmd/orvix/main.go` bootstrap queries are now driver-branched: PostgreSQL uses `true`/`false`; SQLite uses `1`/`0`.
+- PostgreSQL branch uses `INSERT ... RETURNING id` with `QueryRow().Scan(&id)`; SQLite branch keeps `Exec` + `LastInsertId()`.
+- SQLite tests pass. PostgreSQL path not executed (Docker unavailable).
+
 ### F13 — INSERT OR IGNORE: FIXED
 Replaced `INSERT OR IGNORE INTO coremail_admin_group_members` in
 `internal/api/handlers/admin_users.go:369` with dialect-aware `Upsert(ctx, tx, table, columns, values, conflictColumns, nil)`. The `nil` updateColumns produces `INSERT INTO ... ON CONFLICT DO NOTHING` for PostgreSQL and `INSERT OR IGNORE` for SQLite. This was the only remaining correctness blocker identified in the transaction audit.
 
 Tests pass on SQLite. PostgreSQL test not executed (Docker unavailable).
+
+### Additional handler boolean fixes (not transaction-boundary issues, but related)
+- `handlers.go`: `mfaEnabled` changed from `int` to `bool`; `allow_*` flags scan as `bool`; `boolToInt` removed (now returns bool).
+- `webmail_auth.go`: `isAdmin`/`allowWebmail` scan as `bool`; `COALESCE(allow_webmail, TRUE/FALSE)` uses dialect literals.
+- `admin_users.go`: `active = TRUE/FALSE` via dialect literals; placeholders fixed.
+- `dns_ops.go`: `enabled = TRUE/FALSE` via dialect literals; placeholders fixed.
+- `enterprise_admin_v3.go`: `boolToInt` returns `bool` for PostgreSQL compatibility.
+
+### MFA column completeness
+- Added `mfa_enabled`, `mfa_secret`, `pending_mfa_secret`, `pending_mfa_secret_raw`, `mfa_secret_raw`, `mfa_label` to PostgreSQL `users` table in `internal/models/postgres_migrations.go`.
+
+### Verification
+- `go vet ./...`: PASS
+- `go build ./...`: PASS
+- `go test ./... -timeout=600s`: PASS
+- SQLite transaction-related tests: PASS
+- PostgreSQL transaction tests: NOT RUN (Docker unavailable)
+
+### Honest status
+| Decision | Verdict |
+|----------|---------|
+| Code blockers from CTO review | **FIXED** |
+| SQLite tests | **PASS** |
+| Full test suite | **PASS** |
+| PostgreSQL validation gates | **NOT RUN** |
+| Safe to merge | **NO** |
+| Safe to deploy | **NO** |
+| PostgreSQL staging-ready | **NO** |
+| PostgreSQL production-ready | **NO** |
 
 ### Remaining recommendations (NOT blocking)
 - R1 (`writeMu`): Gate behind dialect check for PG deployments (performance, not correctness)

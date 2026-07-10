@@ -131,7 +131,13 @@ func postgresTables() []string {
 			full_name TEXT NOT NULL DEFAULT '',
 			active BOOLEAN NOT NULL DEFAULT true,
 			email_verified BOOLEAN NOT NULL DEFAULT false,
-			last_login TIMESTAMP
+			last_login TIMESTAMP,
+			mfa_enabled BOOLEAN NOT NULL DEFAULT false,
+			mfa_secret TEXT NOT NULL DEFAULT '',
+			pending_mfa_secret TEXT NOT NULL DEFAULT '',
+			pending_mfa_secret_raw TEXT NOT NULL DEFAULT '',
+			mfa_secret_raw TEXT NOT NULL DEFAULT '',
+			mfa_label TEXT NOT NULL DEFAULT ''
 		)`,
 
 		`CREATE TABLE IF NOT EXISTS domains (

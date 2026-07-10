@@ -141,12 +141,24 @@ func testAdminBootstrapLogin(t *testing.T, email, password string, encoded bool)
 	}
 	seedAdminUser(db, authenticator, logger, dbdialect.FromDriver("sqlite"))
 
-	var count int
 	sqlDB, err := db.DB()
 	if err != nil {
 		t.Fatalf("sql db: %v", err)
 	}
 	defer sqlDB.Close()
+
+	var storedHash string
+	if err := sqlDB.QueryRow("SELECT password_hash FROM users WHERE email = ?", email).Scan(&storedHash); err != nil {
+		t.Fatalf("query seeded user: %v", err)
+	}
+	if storedHash == "" {
+		t.Fatal("seeded user has empty password_hash")
+	}
+	if !authenticator.VerifyPassword(password, storedHash) {
+		t.Fatalf("authenticator.VerifyPassword failed immediately after seed for user %s", email)
+	}
+
+	var count int
 	if err := sqlDB.QueryRow("SELECT COUNT(*) FROM users WHERE email = ?", email).Scan(&count); err != nil {
 		t.Fatalf("count users: %v", err)
 	}

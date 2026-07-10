@@ -462,7 +462,7 @@ func (h *Handler) Login(c fiber.Ctx) error {
 	var userID uint
 	var passwordHash string
 	var userRole string
-	var mfaEnabled int
+	var mfaEnabled bool
 
 	sqlDB, err := h.db.DB()
 	if err != nil {
@@ -497,7 +497,7 @@ func (h *Handler) Login(c fiber.Ctx) error {
 	// MFA enforcement: if MFA is enabled, do NOT issue access/refresh tokens.
 	// Instead return an MFA challenge token that can only be exchanged at
 	// the /auth/mfa/verify endpoint.
-	if mfaEnabled != 0 {
+	if mfaEnabled {
 		challengeToken, err := h.auth.GenerateMFAChallengeToken(userID)
 		if err != nil {
 			h.logger.Error("failed to generate MFA challenge token", zap.Error(err))
@@ -1479,7 +1479,7 @@ func (h *Handler) GetMailbox(c fiber.Ctx) error {
 	}
 
 	var email, domainName, status, createdAt, updatedAt string
-	var isAdmin, allowSMTP, allowIMAP, allowPOP3, allowJMAP, allowWebmail int
+	var isAdmin, allowSMTP, allowIMAP, allowPOP3, allowJMAP, allowWebmail bool
 	err = sqlDB.QueryRow("SELECT m.email, COALESCE(d.name, ''), m.status, m.is_admin, m.created_at, m.updated_at,"+
 		" COALESCE(m.allow_smtp,"+h.dialect.TrueLiteral()+"), COALESCE(m.allow_imap,"+h.dialect.TrueLiteral()+"), COALESCE(m.allow_pop3,"+h.dialect.TrueLiteral()+"), COALESCE(m.allow_jmap,"+h.dialect.TrueLiteral()+"), COALESCE(m.allow_webmail,"+h.dialect.TrueLiteral()+")"+
 		" FROM coremail_mailboxes m LEFT JOIN coremail_domains d ON m.domain_id = d.id"+
@@ -1503,15 +1503,15 @@ func (h *Handler) GetMailbox(c fiber.Ctx) error {
 		"email":      email,
 		"domain":     domainName,
 		"status":     status,
-		"is_admin":   isAdmin == 1,
+		"is_admin":   isAdmin,
 		"created_at": createdAt,
 		"updated_at": updatedAt,
 		"deleted":    false,
-		"allow_smtp": allowSMTP == 1,
-		"allow_imap": allowIMAP == 1,
-		"allow_pop3": allowPOP3 == 1,
-		"allow_jmap": allowJMAP == 1,
-		"allow_webmail": allowWebmail == 1,
+		"allow_smtp": allowSMTP,
+		"allow_imap": allowIMAP,
+		"allow_pop3": allowPOP3,
+		"allow_jmap": allowJMAP,
+		"allow_webmail": allowWebmail,
 		"stats": fiber.Map{
 			"messages":    messages,
 			"queue_items": queueItems,
@@ -2079,11 +2079,11 @@ func (h *Handler) UpdateMailboxProtocols(c fiber.Ctx) error {
 	now := time.Now().UTC()
 	var sets []string
 	var args []any
-	if req.AllowSMTP != nil { sets = append(sets, "allow_smtp = "+h.dialect.Placeholder(len(args)+1)); args = append(args, boolToInt(*req.AllowSMTP)) }
-	if req.AllowIMAP != nil { sets = append(sets, "allow_imap = "+h.dialect.Placeholder(len(args)+1)); args = append(args, boolToInt(*req.AllowIMAP)) }
-	if req.AllowPOP3 != nil { sets = append(sets, "allow_pop3 = "+h.dialect.Placeholder(len(args)+1)); args = append(args, boolToInt(*req.AllowPOP3)) }
-	if req.AllowJMAP != nil { sets = append(sets, "allow_jmap = "+h.dialect.Placeholder(len(args)+1)); args = append(args, boolToInt(*req.AllowJMAP)) }
-	if req.AllowWebmail != nil { sets = append(sets, "allow_webmail = "+h.dialect.Placeholder(len(args)+1)); args = append(args, boolToInt(*req.AllowWebmail)) }
+	if req.AllowSMTP != nil { sets = append(sets, "allow_smtp = "+h.dialect.Placeholder(len(args)+1)); args = append(args, *req.AllowSMTP) }
+	if req.AllowIMAP != nil { sets = append(sets, "allow_imap = "+h.dialect.Placeholder(len(args)+1)); args = append(args, *req.AllowIMAP) }
+	if req.AllowPOP3 != nil { sets = append(sets, "allow_pop3 = "+h.dialect.Placeholder(len(args)+1)); args = append(args, *req.AllowPOP3) }
+	if req.AllowJMAP != nil { sets = append(sets, "allow_jmap = "+h.dialect.Placeholder(len(args)+1)); args = append(args, *req.AllowJMAP) }
+	if req.AllowWebmail != nil { sets = append(sets, "allow_webmail = "+h.dialect.Placeholder(len(args)+1)); args = append(args, *req.AllowWebmail) }
 	sets = append(sets, "updated_at = "+h.dialect.Placeholder(len(args)+1))
 	args = append(args, now, id)
 
@@ -2095,11 +2095,11 @@ func (h *Handler) UpdateMailboxProtocols(c fiber.Ctx) error {
 
 	h.writeAuditLog(c, "mailbox.protocols_update", fmt.Sprintf("mailbox_id:%d|email:%s", id, email))
 	// Return updated flags
-	var smtp, imap, pop3, jmap, wm int
+	var smtp, imap, pop3, jmap, wm bool
 	sqlDB.QueryRow("SELECT allow_smtp, allow_imap, allow_pop3, allow_jmap, allow_webmail FROM coremail_mailboxes WHERE id = "+h.dialect.Placeholder(1), id).Scan(&smtp, &imap, &pop3, &jmap, &wm)
 	return c.JSON(fiber.Map{"result": "updated", "protocols": fiber.Map{
-		"allow_smtp": smtp == 1, "allow_imap": imap == 1, "allow_pop3": pop3 == 1,
-		"allow_jmap": jmap == 1, "allow_webmail": wm == 1,
+		"allow_smtp": smtp, "allow_imap": imap, "allow_pop3": pop3,
+		"allow_jmap": jmap, "allow_webmail": wm,
 	}})
 }
 
