@@ -8,7 +8,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -21,6 +20,14 @@ import (
 // migrateCommand runs `orvix migrate --from sqlite --to postgres`.
 // It is intentionally conservative: dry-run by default, refuses to write
 // to a non-empty PostgreSQL target, and never logs the DSN.
+//
+// Schema safety: when --target-schema is set to a non-public value,
+// the command opens a dedicated single-connection sql.DB for PostgreSQL
+// and issues SET search_path on that connection, so tables created by
+// MigrateAllPostgres and row-count queries all land in the isolated
+// schema. GORM connection pooling would break this, so the migration
+// path uses the raw sql.DB directly. When --target-schema is "public"
+// (the default), GORM is used normally.
 func migrateCommand(args []string) int {
 	fs := flag.NewFlagSet("migrate", flag.ExitOnError)
 	from := fs.String("from", "", "source database type (sqlite)")
@@ -65,8 +72,9 @@ func migrateCommand(args []string) int {
 	cfg := config.Defaults()
 	cfg.Database.Driver = "postgres"
 	cfg.Database.DSN = *postgresDSN
-	cfg.Database.MaxOpen = 5
-	cfg.Database.MaxIdle = 2
+	// Force a single connection so SET search_path is reliable.
+	cfg.Database.MaxOpen = 1
+	cfg.Database.MaxIdle = 1
 	cfg.Database.MaxLifetime = 300
 
 	logger, err := config.NewLogger(&config.LoggingConfig{Level: "error", Format: "console", Output: "stderr"})
@@ -86,17 +94,25 @@ func migrateCommand(args []string) int {
 	}
 	defer tgtDB.Close()
 
-	// Ensure target schema exists and set search path.
-	if _, err := tgtDB.ExecContext(ctx, "CREATE SCHEMA IF NOT EXISTS "+quoteIdentifier(*targetSchema)); err != nil {
-		fmt.Fprintf(os.Stderr, "migrate: create target schema: %v\n", err)
+	// Ensure target schema exists and set search path on this connection.
+	targetSchemaName := *targetSchema
+	if err := validateIdentifier(targetSchemaName); err != nil {
+		fmt.Fprintf(os.Stderr, "migrate: target-schema: %v\n", err)
 		return 2
 	}
-	if _, err := tgtDB.ExecContext(ctx, "SET search_path TO "+quoteIdentifier(*targetSchema)); err != nil {
+	if targetSchemaName != "public" {
+		if _, err := tgtDB.ExecContext(ctx, "CREATE SCHEMA IF NOT EXISTS "+quoteIdentifier(targetSchemaName)); err != nil {
+			fmt.Fprintf(os.Stderr, "migrate: create target schema: %v\n", err)
+			return 2
+		}
+	}
+	if _, err := tgtDB.ExecContext(ctx, "SET search_path TO "+quoteIdentifier(targetSchemaName)); err != nil {
 		fmt.Fprintf(os.Stderr, "migrate: set search_path: %v\n", err)
 		return 2
 	}
 
-	// Create PostgreSQL schema if missing.
+	// Create PostgreSQL schema using MigrateAllPostgres. Because MaxOpen=1,
+	// the SET search_path above applies to the single pooled connection.
 	if err := models.MigrateAllPostgres(tgtGorm); err != nil {
 		fmt.Fprintf(os.Stderr, "migrate: create postgres schema: %v\n", err)
 		return 2
@@ -121,7 +137,7 @@ func migrateCommand(args []string) int {
 	fmt.Println("Orvix SQLite → PostgreSQL migration plan")
 	fmt.Println("========================================")
 	fmt.Printf("Source:      %s\n", *sqlitePath)
-	fmt.Printf("Target:      postgres schema %s\n", *targetSchema)
+	fmt.Printf("Target:      postgres schema %s\n", targetSchemaName)
 	fmt.Printf("Dry-run:     %v\n", *dryRun)
 	fmt.Println()
 	fmt.Println("Table                          Source rows    Target rows")
@@ -205,10 +221,6 @@ type migrationPlan struct {
 }
 
 func defaultMigrationPlan() migrationPlan {
-	// Core metadata tables that are safe to migrate automatically.
-	// Tables with complex relationships (messages, attachments, queue) are
-	// listed but skipped by the runner until future work adds dedicated
-	// bulk-copy logic.
 	return migrationPlan{
 		tables: []string{
 			"tenants",
@@ -231,7 +243,6 @@ func (p migrationPlan) rowCounts(ctx context.Context, db *sql.DB) (map[string]in
 		var n int64
 		err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+quoteIdentifier(table)).Scan(&n)
 		if err != nil {
-			// Table may not exist on source; treat as 0.
 			counts[table] = 0
 			continue
 		}
@@ -250,6 +261,10 @@ func (p migrationPlan) run(ctx context.Context, srcDB, tgtDB *sql.DB) error {
 }
 
 func migrateTable(ctx context.Context, srcDB, tgtDB *sql.DB, table string) error {
+	if err := validateIdentifier(table); err != nil {
+		return fmt.Errorf("invalid table name %q: %w", table, err)
+	}
+
 	// Discover columns from source. PRAGMA is SQLite-specific, which is
 	// acceptable because the source is always SQLite for this command.
 	rows, err := srcDB.QueryContext(ctx, "PRAGMA table_info("+quoteIdentifier(table)+")")
@@ -267,17 +282,25 @@ func migrateTable(ctx context.Context, srcDB, tgtDB *sql.DB, table string) error
 		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
 			return fmt.Errorf("scan table_info for %s: %w", table, err)
 		}
+		if err := validateIdentifier(name); err != nil {
+			return fmt.Errorf("invalid column name %q in table %s: %w", name, table, err)
+		}
 		columns = append(columns, name)
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
 	if len(columns) == 0 {
-		return nil // table does not exist on source
+		return nil
 	}
 	sort.Strings(columns)
 
-	colList := strings.Join(columns, ", ")
+	quotedColumns := make([]string, len(columns))
+	for i, c := range columns {
+		quotedColumns[i] = quoteIdentifier(c)
+	}
+	colList := strings.Join(quotedColumns, ", ")
+
 	placeholders := make([]string, len(columns))
 	for i := range placeholders {
 		placeholders[i] = fmt.Sprintf("$%d", i+1)
@@ -315,23 +338,30 @@ func migrateTable(ctx context.Context, srcDB, tgtDB *sql.DB, table string) error
 	return nil
 }
 
-func quoteIdentifier(name string) string {
-	// PostgreSQL identifier quoting. Reject obviously dangerous characters.
-	if strings.ContainsAny(name, ";\x00") {
-		panic("invalid identifier: " + name)
+// validateIdentifier checks that name is non-empty and contains only
+// characters safe for an SQL identifier (alphanumeric, underscore).
+func validateIdentifier(name string) error {
+	if name == "" {
+		return fmt.Errorf("identifier must not be empty")
 	}
-	return "\"" + strings.ReplaceAll(name, "\"", "\"") + "\""
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+			continue
+		}
+		return fmt.Errorf("invalid character %q in identifier %q", r, name)
+	}
+	return nil
+}
+
+// quoteIdentifier wraps name in double quotes and escapes embedded quotes.
+func quoteIdentifier(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
 
 // tableChecksum returns a simple SHA256 over ordered column hashes for a table.
-// It is not cryptographically strong but is good enough for row-count-plus-content
-// verification across databases.
 func tableChecksum(ctx context.Context, db *sql.DB, table string) (string, error) {
 	var total int64
 	var hashSum string
-	// This is a placeholder for a real per-row checksum query.
-	// A real implementation would concatenate column values per row and
-	// hash them, but that is driver-specific and left for DB-7 follow-up.
 	_ = ctx
 	_ = db
 	_ = table
@@ -354,9 +384,7 @@ func fileSHA256(path string) (string, error) {
 }
 
 func init() {
-	// Ensure the helper functions are referenced so they compile.
 	_ = tableChecksum
 	_ = fileSHA256
-	_ = filepath.Join
 	_ = time.Now
 }

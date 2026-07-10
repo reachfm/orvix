@@ -570,7 +570,7 @@ production PostgreSQL deployment.
 | Gate 5 — 100k benchmark | PASS | 35,432 rows/sec insert |
 | Gate 5b — 1M pre-3M | PASS | 33,523 rows/sec insert |
 | Gate 6 — 3M benchmark | PASS (with note) | 33,489 rows/sec insert, 41.75ms list, 2.33ms cursor |
-| Gate 9 — DML integration tests | PASS (env-gated) | trust upsert, datetime/now, placeholders, schema compat |
+| Gate 9 — DML integration tests | ADDED / NOT RERUN | trust upsert, datetime/now, placeholders, schema compat |
 
 Full details in `docs/POSTGRES_READINESS_ACCEPTANCE_GATE.md`.
 

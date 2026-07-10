@@ -115,9 +115,9 @@ Gates 1-3 must pass in CI. Gates 4-7 require staging hardware.
 
 | Field | Value |
 |-------|-------|
-| **Command** | `ORVIX_RUN_POSTGRES_DML_TEST=1 ORVIX_DB_DRIVER=postgres ORVIX_DB_DSN=<dsn> go test -v ./internal/trust ./internal/models -run "Postgres|DML"` |
+| **Command** | `ORVIX_RUN_POSTGRES_DML_TEST=1 ORVIX_DB_DRIVER=postgres ORVIX_DB_DSN=<dsn> go test -v ./internal/trust ./internal/models -run "Postgres\|DML"` |
 | **Expected** | Trust repository upsert, datetime/now replacement, placeholder helper, and schema compatibility all pass on PostgreSQL. SQLite equivalents still pass without env vars. |
-| **Status** | PASS — tests added and passing on SQLite; PostgreSQL run requires env gate (same local Docker PostgreSQL 16 environment). |
+| **Status** | ADDED / NOT RERUN — tests written in `internal/trust/repository_dml_test.go` and `internal/models/postgres_dml_test.go`. SQLite path passes. PostgreSQL path was NOT executed in PR #10 because Docker was unavailable. |
 | **Date** | 2026-07-10 |
 
 ---
@@ -135,9 +135,9 @@ Gates 1-3 must pass in CI. Gates 4-7 require staging hardware.
 | 6 — PostgreSQL benchmark 3M | PASS (with note) | — |
 | 7 — DML audit | PASS | — |
 | 8 — Migration/backup/rollback | PARTIAL | Full restore/rollback validation pending |
-| 9 — PostgreSQL DML tests | PASS (env-gated) | — |
+| 9 — PostgreSQL DML tests | ADDED / NOT RERUN | SQLite path passes; PostgreSQL run not executed in this PR |
 
-**Overall status:** Gates 1-7 and 9 PASS. Gate 8 is PARTIAL — CLI and docs exist, full validation pending.
+**Overall status:** Gates 1-7 PASS. Gate 8 is PARTIAL — CLI and docs exist, full validation pending. Gate 9 tests are written and pass on SQLite but the PostgreSQL gate was not rerun (Docker unavailable).
 All PostgreSQL gates passed on local Docker PostgreSQL 16.
 RC4 SQLite default is unchanged.
 
