@@ -33,7 +33,7 @@ func (h *Handler) MFAStatusGet(c fiber.Ctx) error {
 	var mfaLabel string
 	dial := dbdialect.FromDriver(h.cfg.Database.Driver)
 	err = sqlDB.QueryRow(
-		"SELECT COALESCE(mfa_enabled, 0), COALESCE(mfa_label, '') FROM users WHERE id = "+dial.Placeholder(1),
+		"SELECT COALESCE(mfa_enabled, "+dial.FalseLiteral()+"), COALESCE(mfa_label, '') FROM users WHERE id = "+dial.Placeholder(1),
 		userID).Scan(&mfaEnabled, &mfaLabel)
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"error": "user not found"})
@@ -157,7 +157,7 @@ func (h *Handler) MFASetupVerify(c fiber.Ctx) error {
 
 	// Move pending to active: hash the secret and store in mfa_secret,
 	// and keep the raw secret in mfa_secret_raw for future TOTP verification.
-	_, err = sqlDB.Exec(`UPDATE users SET mfa_enabled = 1, mfa_secret = pending_mfa_secret,
+	_, err = sqlDB.Exec(`UPDATE users SET mfa_enabled = `+dial.TrueLiteral()+`, mfa_secret = pending_mfa_secret,
 		mfa_secret_raw = pending_mfa_secret_raw,
 		pending_mfa_secret = '', pending_mfa_secret_raw = '' WHERE id = `+dial.Placeholder(1), userID)
 	if err != nil {
@@ -227,7 +227,7 @@ func (h *Handler) MFADisable(c fiber.Ctx) error {
 	}
 
 	_, err = sqlDB.Exec(
-		`UPDATE users SET mfa_enabled = 0, mfa_secret = '', mfa_secret_raw = '', pending_mfa_secret = '', pending_mfa_secret_raw = '' WHERE id = `+dial.Placeholder(1),
+		`UPDATE users SET mfa_enabled = `+dial.FalseLiteral()+`, mfa_secret = '', mfa_secret_raw = '', pending_mfa_secret = '', pending_mfa_secret_raw = '' WHERE id = `+dial.Placeholder(1),
 		userID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "failed to disable MFA"})

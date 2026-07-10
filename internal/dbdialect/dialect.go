@@ -158,3 +158,19 @@ func (d *Info) CurrentTimestampFunction() string {
 	}
 	return "CURRENT_TIMESTAMP"
 }
+
+// TrueLiteral returns the SQL literal for a boolean true.
+func (d *Info) TrueLiteral() string {
+	if d.Dialect == Postgres {
+		return "TRUE"
+	}
+	return "1"
+}
+
+// FalseLiteral returns the SQL literal for a boolean false.
+func (d *Info) FalseLiteral() string {
+	if d.Dialect == Postgres {
+		return "FALSE"
+	}
+	return "0"
+}

@@ -80,3 +80,25 @@ func TestUpsertDoNothing(t *testing.T) {
 		t.Errorf("postgres upsert do nothing =\n%q\nwant\n%q", got, want)
 	}
 }
+
+func TestTrueLiteral(t *testing.T) {
+	pg := &Info{Dialect: Postgres}
+	if got := pg.TrueLiteral(); got != "TRUE" {
+		t.Errorf("postgres true = %q want TRUE", got)
+	}
+	sq := &Info{Dialect: SQLite}
+	if got := sq.TrueLiteral(); got != "1" {
+		t.Errorf("sqlite true = %q want 1", got)
+	}
+}
+
+func TestFalseLiteral(t *testing.T) {
+	pg := &Info{Dialect: Postgres}
+	if got := pg.FalseLiteral(); got != "FALSE" {
+		t.Errorf("postgres false = %q want FALSE", got)
+	}
+	sq := &Info{Dialect: SQLite}
+	if got := sq.FalseLiteral(); got != "0" {
+		t.Errorf("sqlite false = %q want 0", got)
+	}
+}
