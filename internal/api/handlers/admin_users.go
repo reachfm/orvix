@@ -344,7 +344,7 @@ func (h *Handler) UpdateAdminUserGroups(c fiber.Ctx) error {
 	// Verify user exists and is an admin
 	var exists bool
 	sqlDB.QueryRowContext(c.Context(),
-		`SELECT EXISTS(SELECT 1 FROM users WHERE id = ? AND tenant_id = ? AND role IN ('admin','superadmin') AND deleted_at IS NULL)`,
+		`SELECT EXISTS(SELECT 1 FROM users WHERE id = `+h.dialect.Placeholder(1)+` AND tenant_id = `+h.dialect.Placeholder(2)+` AND role IN ('admin','superadmin') AND deleted_at IS NULL)`,
 		userID, tenantID).Scan(&exists)
 	if !exists {
 		return fiber.NewError(fiber.StatusNotFound, "admin user not found")
@@ -359,14 +359,21 @@ func (h *Handler) UpdateAdminUserGroups(c fiber.Ctx) error {
 	defer tx.Rollback()
 
 		if _, err := tx.ExecContext(c.Context(),
-			`DELETE FROM coremail_admin_group_members WHERE user_id = ?`, userID); err != nil {
+			`DELETE FROM coremail_admin_group_members WHERE user_id = `+h.dialect.Placeholder(1), userID); err != nil {
 			h.logger.Error("admin user groups: clear groups failed", zap.Error(err))
 			return fiber.NewError(fiber.StatusInternalServerError, "failed to process admin user request")
 		}
 
 		for _, gid := range body.GroupIDs {
-			if _, err := tx.ExecContext(c.Context(),
-				`INSERT OR IGNORE INTO coremail_admin_group_members (group_id, user_id) VALUES (?, ?)`, gid, userID); err != nil {
+			_, err = tx.ExecContext(c.Context(),
+				h.dialect.Upsert("coremail_admin_group_members",
+					[]string{"group_id", "user_id"},
+					[]string{"group_id", "user_id"},
+					nil,
+				),
+				gid, userID,
+			)
+			if err != nil {
 				h.logger.Error("admin user groups: add group failed", zap.Error(err))
 				return fiber.NewError(fiber.StatusInternalServerError, "failed to process admin user request")
 			}

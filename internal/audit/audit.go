@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 // Entry is a single audit record.
@@ -35,12 +37,17 @@ type Query struct {
 
 // Store provides persistent audit log storage.
 type Store struct {
-	db *sql.DB
+	db      *sql.DB
+	dialect *dbdialect.Info
 }
 
 // NewStore creates a persistent audit store.
 func NewStore(db *sql.DB) *Store {
-	return &Store{db: db}
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
+	return &Store{db: db, dialect: dialect}
 }
 
 // EnsureTable creates the audit table.
@@ -64,8 +71,9 @@ func (s *Store) Record(ctx context.Context, e *Entry) error {
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now().UTC()
 	}
+	d := s.dialect
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO coremail_audit (actor, role, action, target, result, ip, user_agent, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO coremail_audit (actor, role, action, target, result, ip, user_agent, timestamp) VALUES (`+d.Placeholder(1)+`, `+d.Placeholder(2)+`, `+d.Placeholder(3)+`, `+d.Placeholder(4)+`, `+d.Placeholder(5)+`, `+d.Placeholder(6)+`, `+d.Placeholder(7)+`, `+d.Placeholder(8)+`)`,
 		e.Actor, e.Role, e.Action, e.Target, e.Result, e.IP, e.UserAgent, e.Timestamp)
 	if err != nil {
 		return fmt.Errorf("record audit: %w", err)
@@ -82,31 +90,39 @@ func (s *Store) Search(ctx context.Context, q *Query) ([]Entry, int64, error) {
 		q.Limit = 100
 	}
 
+	d := s.dialect
 	var where []string
 	var args []interface{}
+	argNum := 0
 
 	if q.Actor != "" {
-		where = append(where, "actor LIKE ?")
+		argNum++
+		where = append(where, "actor LIKE "+d.Placeholder(argNum))
 		args = append(args, "%"+q.Actor+"%")
 	}
 	if q.Action != "" {
-		where = append(where, "action = ?")
+		argNum++
+		where = append(where, "action = "+d.Placeholder(argNum))
 		args = append(args, q.Action)
 	}
 	if q.Target != "" {
-		where = append(where, "target LIKE ?")
+		argNum++
+		where = append(where, "target LIKE "+d.Placeholder(argNum))
 		args = append(args, "%"+q.Target+"%")
 	}
 	if q.Result != "" {
-		where = append(where, "result = ?")
+		argNum++
+		where = append(where, "result = "+d.Placeholder(argNum))
 		args = append(args, q.Result)
 	}
 	if q.Since != nil {
-		where = append(where, "timestamp >= ?")
+		argNum++
+		where = append(where, "timestamp >= "+d.Placeholder(argNum))
 		args = append(args, *q.Since)
 	}
 	if q.Until != nil {
-		where = append(where, "timestamp <= ?")
+		argNum++
+		where = append(where, "timestamp <= "+d.Placeholder(argNum))
 		args = append(args, *q.Until)
 	}
 
@@ -123,7 +139,7 @@ func (s *Store) Search(ctx context.Context, q *Query) ([]Entry, int64, error) {
 	}
 
 	// Data.
-	query := "SELECT id, actor, role, action, target, result, ip, user_agent, timestamp FROM coremail_audit" + whereClause + " ORDER BY id DESC LIMIT ? OFFSET ?"
+	query := "SELECT id, actor, role, action, target, result, ip, user_agent, timestamp FROM coremail_audit" + whereClause + " ORDER BY id DESC LIMIT " + d.Placeholder(argNum+1) + " OFFSET " + d.Placeholder(argNum+2)
 	dataArgs := append(args, q.Limit, q.Offset)
 
 	rows, err := s.db.QueryContext(ctx, query, dataArgs...)
@@ -145,7 +161,7 @@ func (s *Store) Search(ctx context.Context, q *Query) ([]Entry, int64, error) {
 
 // PurgeOlderThan removes audit entries older than the specified time.
 func (s *Store) PurgeOlderThan(ctx context.Context, olderThan time.Time) (int64, error) {
-	res, err := s.db.ExecContext(ctx, "DELETE FROM coremail_audit WHERE timestamp < ?", olderThan)
+	res, err := s.db.ExecContext(ctx, "DELETE FROM coremail_audit WHERE timestamp < "+s.dialect.Placeholder(1), olderThan)
 	if err != nil {
 		return 0, err
 	}

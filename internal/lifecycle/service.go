@@ -121,6 +121,13 @@ func (s *Service) VersionHistory(ctx context.Context) ([]VersionRecord, error) {
 
 func (s *Service) RecordVersion(ctx context.Context, version, installedBy, notes string) (*VersionRecord, error) {
 	v := &VersionRecord{Version: version, InstalledBy: installedBy, Notes: notes, InstalledAt: time.Now().UTC()}
+	if s.dialect.IsPostgres() {
+		err := s.db.QueryRowContext(ctx,
+			"INSERT INTO coremail_versions (version, installed_at, installed_by, notes) VALUES ($1, $2, $3, $4) RETURNING id",
+			v.Version, v.InstalledAt, v.InstalledBy, v.Notes).Scan(&v.ID)
+		if err != nil { return nil, err }
+		return v, nil
+	}
 	res, err := s.db.ExecContext(ctx, "INSERT INTO coremail_versions (version, installed_at, installed_by, notes) VALUES (?, ?, ?, ?)",
 		v.Version, v.InstalledAt, v.InstalledBy, v.Notes)
 	if err != nil { return nil, err }
@@ -223,7 +230,7 @@ func (s *Service) Upgrade(ctx context.Context, fromVersion, toVersion string) *U
 
 func (s *Service) Rollback(ctx context.Context) *UpgradeRecord {
 	// Find last completed upgrade to rollback from.
-	row := s.db.QueryRowContext(ctx, "SELECT id, from_version, to_version, started_at FROM upgrade_history WHERE status=? ORDER BY id DESC LIMIT 1", UpgradeCompleted)
+	row := s.db.QueryRowContext(ctx, "SELECT id, from_version, to_version, started_at FROM upgrade_history WHERE status="+s.dialect.Placeholder(1)+" ORDER BY id DESC LIMIT 1", UpgradeCompleted)
 	var last UpgradeRecord
 	if err := row.Scan(&last.ID, &last.FromVersion, &last.ToVersion, &last.StartedAt); err != nil {
 		return &UpgradeRecord{Status: UpgradeFailed}

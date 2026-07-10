@@ -12,6 +12,7 @@ import (
 	"github.com/orvix/orvix/internal/api"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/config"
+	"github.com/orvix/orvix/internal/dbdialect"
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
@@ -71,7 +72,7 @@ func TestAdminBootstrapCreatesCoreMailFoldersOnFreshDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("authenticator: %v", err)
 	}
-	seedAdminUser(db, authenticator, logger)
+	seedAdminUser(db, authenticator, logger, dbdialect.FromDriver("sqlite"))
 	if logs.FilterMessage("failed to provision system folders for admin mailbox").Len() != 0 {
 		t.Fatal("admin bootstrap logged system folder provisioning failure")
 	}
@@ -138,7 +139,7 @@ func testAdminBootstrapLogin(t *testing.T, email, password string, encoded bool)
 	if err != nil {
 		t.Fatalf("authenticator: %v", err)
 	}
-	seedAdminUser(db, authenticator, logger)
+	seedAdminUser(db, authenticator, logger, dbdialect.FromDriver("sqlite"))
 
 	var count int
 	sqlDB, err := db.DB()
@@ -225,7 +226,7 @@ func TestAdminBootstrapRefusesInconsistentHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("authenticator: %v", err)
 	}
-	seedAdminUser(db, authenticator, logger)
+	seedAdminUser(db, authenticator, logger, dbdialect.FromDriver("sqlite"))
 
 	sqlDB, err := db.DB()
 	if err != nil {
@@ -247,7 +248,7 @@ func TestAdminBootstrapRefusesInconsistentHash(t *testing.T) {
 	// is already 1, so we go down the "user exists" branch.
 	// The new guard must detect that the stored hash does not
 	// verify the env password and refuse to keep the row.
-	seedAdminUser(db, authenticator, logger)
+	seedAdminUser(db, authenticator, logger, dbdialect.FromDriver("sqlite"))
 
 	// The hash must still be the corrupt one — we did NOT
 	// silently overwrite it. If the guard were missing, a

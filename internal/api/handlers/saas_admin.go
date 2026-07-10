@@ -2,11 +2,13 @@ package handlers
 
 import (
 	"database/sql"
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/auth"
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 type adminDomainReport struct {
@@ -81,7 +83,7 @@ func sqlString(db *sql.DB, query string, args ...any) string {
 	return s.String
 }
 
-func domainList(db *sql.DB, tenantID int64, crossTenant bool) []adminDomainReport {
+func domainList(db *sql.DB, dial *dbdialect.Info, tenantID int64, crossTenant bool) []adminDomainReport {
 	out := []adminDomainReport{}
 	if db == nil {
 		return out
@@ -89,7 +91,7 @@ func domainList(db *sql.DB, tenantID int64, crossTenant bool) []adminDomainRepor
 	query := "SELECT id, name, tenant_id, COALESCE(dkim_enabled,0), COALESCE(dmarc_enabled,0) FROM coremail_domains WHERE deleted_at IS NULL"
 	args := []any{}
 	if !crossTenant {
-		query += " AND tenant_id = ?"
+		query += fmt.Sprintf(" AND tenant_id = %s", dial.Placeholder(1))
 		args = append(args, tenantID)
 	}
 	query += " ORDER BY name ASC"
@@ -109,15 +111,15 @@ func domainList(db *sql.DB, tenantID int64, crossTenant bool) []adminDomainRepor
 		report := adminDomainReport{
 			Domain:           name,
 			TenantID:         tid,
-			MailboxCount:     sqlInt(db, "SELECT COUNT(*) FROM coremail_mailboxes WHERE domain_id = ? AND deleted_at IS NULL", id),
-			StorageBytes:     sqlInt(db, "SELECT COALESCE(SUM(used_bytes),0) FROM coremail_mailboxes WHERE domain_id = ? AND deleted_at IS NULL", id),
-			SentCount:        sqlInt(db, "SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND from_address LIKE ?", like),
-			ReceivedCount:    sqlInt(db, "SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND to_address LIKE ?", like),
-			DeferredCount:    sqlInt(db, "SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND (from_address LIKE ? OR to_address LIKE ?) AND status = 'deferred'", like, like),
-			BouncedCount:     sqlInt(db, "SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND (from_address LIKE ? OR to_address LIKE ?) AND status IN ('bounced','failed')", like, like),
-			RejectedCount:    sqlInt(db, "SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND (from_address LIKE ? OR to_address LIKE ?) AND status = 'rejected'", like, like),
-			LoginFailures:    sqlInt(db, "SELECT COUNT(*) FROM security_events WHERE email LIKE ? AND event_type = 'failed_login'", like),
-			SuspiciousLogins: sqlInt(db, "SELECT COUNT(*) FROM security_events WHERE email LIKE ? AND event_type IN ('security_alert','suspicious_login')", like),
+			MailboxCount:     sqlInt(db, fmt.Sprintf("SELECT COUNT(*) FROM coremail_mailboxes WHERE domain_id = %s AND deleted_at IS NULL", dial.Placeholder(1)), id),
+			StorageBytes:     sqlInt(db, fmt.Sprintf("SELECT COALESCE(SUM(used_bytes),0) FROM coremail_mailboxes WHERE domain_id = %s AND deleted_at IS NULL", dial.Placeholder(1)), id),
+			SentCount:        sqlInt(db, fmt.Sprintf("SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND from_address LIKE %s", dial.Placeholder(1)), like),
+			ReceivedCount:    sqlInt(db, fmt.Sprintf("SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND to_address LIKE %s", dial.Placeholder(1)), like),
+			DeferredCount:    sqlInt(db, fmt.Sprintf("SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND (from_address LIKE %s OR to_address LIKE %s) AND status = 'deferred'", dial.Placeholder(1), dial.Placeholder(2)), like, like),
+			BouncedCount:     sqlInt(db, fmt.Sprintf("SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND (from_address LIKE %s OR to_address LIKE %s) AND status IN ('bounced','failed')", dial.Placeholder(1), dial.Placeholder(2)), like, like),
+			RejectedCount:    sqlInt(db, fmt.Sprintf("SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND (from_address LIKE %s OR to_address LIKE %s) AND status = 'rejected'", dial.Placeholder(1), dial.Placeholder(2)), like, like),
+			LoginFailures:    sqlInt(db, fmt.Sprintf("SELECT COUNT(*) FROM security_events WHERE email LIKE %s AND event_type = 'failed_login'", dial.Placeholder(1)), like),
+			SuspiciousLogins: sqlInt(db, fmt.Sprintf("SELECT COUNT(*) FROM security_events WHERE email LIKE %s AND event_type IN ('security_alert','suspicious_login')", dial.Placeholder(1)), like),
 			DNSHealth:        "not_reported",
 			SPFStatus:        "not_reported",
 			DKIMStatus:       "not_configured",
@@ -142,13 +144,13 @@ func totalDomainMetric(rows []adminDomainReport, pick func(adminDomainReport) in
 	return n
 }
 
-func topSenders(db *sql.DB, domains []adminDomainReport) []fiber.Map {
+func topSenders(db *sql.DB, dial *dbdialect.Info, domains []adminDomainReport) []fiber.Map {
 	out := []fiber.Map{}
 	if db == nil || len(domains) == 0 {
 		return out
 	}
 	for _, d := range domains {
-		rows, err := db.Query("SELECT from_address, COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND from_address LIKE ? GROUP BY from_address ORDER BY COUNT(*) DESC LIMIT 5", "%@"+d.Domain)
+		rows, err := db.Query(fmt.Sprintf("SELECT from_address, COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND from_address LIKE %s GROUP BY from_address ORDER BY COUNT(*) DESC LIMIT 5", dial.Placeholder(1)), "%@"+d.Domain)
 		if err != nil {
 			continue
 		}
@@ -167,14 +169,14 @@ func topSenders(db *sql.DB, domains []adminDomainReport) []fiber.Map {
 	return out
 }
 
-func topRecipientDomains(db *sql.DB, domains []adminDomainReport) []fiber.Map {
+func topRecipientDomains(db *sql.DB, dial *dbdialect.Info, domains []adminDomainReport) []fiber.Map {
 	out := []fiber.Map{}
 	if db == nil || len(domains) == 0 {
 		return out
 	}
 	seen := map[string]int64{}
 	for _, d := range domains {
-		rows, err := db.Query("SELECT to_address FROM coremail_queue WHERE deleted_at IS NULL AND from_address LIKE ? LIMIT 500", "%@"+d.Domain)
+		rows, err := db.Query(fmt.Sprintf("SELECT to_address FROM coremail_queue WHERE deleted_at IS NULL AND from_address LIKE %s LIMIT 500", dial.Placeholder(1)), "%@"+d.Domain)
 		if err != nil {
 			continue
 		}
@@ -200,9 +202,10 @@ func topRecipientDomains(db *sql.DB, domains []adminDomainReport) []fiber.Map {
 // AdminReports returns tenant-scoped reporting from existing mail/domain/auth data.
 func (h *Handler) AdminReports(c fiber.Ctx) error {
 	db := h.sqlDB()
+	dial := dbdialect.FromDriver(h.cfg.Database.Driver)
 	crossTenant := isSuperRole(c) && strings.EqualFold(c.Query("scope"), "all")
 	tenantID := h.scopedTenantID(c)
-	domains := domainList(db, tenantID, crossTenant)
+	domains := domainList(db, dial, tenantID, crossTenant)
 	return c.JSON(fiber.Map{
 		"scope":                    map[string]any{"tenant_id": tenantID, "cross_tenant": crossTenant},
 		"generated_at":             time.Now().UTC(),
@@ -215,8 +218,8 @@ func (h *Handler) AdminReports(c fiber.Ctx) error {
 		"login_failures":           totalDomainMetric(domains, func(r adminDomainReport) int64 { return r.LoginFailures }),
 		"suspicious_login_count":   totalDomainMetric(domains, func(r adminDomainReport) int64 { return r.SuspiciousLogins }),
 		"storage_usage_bytes":      totalDomainMetric(domains, func(r adminDomainReport) int64 { return r.StorageBytes }),
-		"top_senders":              topSenders(db, domains),
-		"top_recipient_domains":    topRecipientDomains(db, domains),
+		"top_senders":              topSenders(db, dial, domains),
+		"top_recipient_domains":    topRecipientDomains(db, dial, domains),
 		"csv_export_available":     false,
 		"csv_export_unavailable_reason": "CSV export is not enabled for this report endpoint yet.",
 	})
@@ -225,6 +228,7 @@ func (h *Handler) AdminReports(c fiber.Ctx) error {
 // InternalOverview returns cross-tenant platform health for Orvix staff only.
 func (h *Handler) InternalOverview(c fiber.Ctx) error {
 	db := h.sqlDB()
+	dial := dbdialect.FromDriver(h.cfg.Database.Driver)
 	return c.JSON(fiber.Map{
 		"platform": fiber.Map{
 			"status": "ok",
@@ -243,12 +247,13 @@ func (h *Handler) InternalOverview(c fiber.Ctx) error {
 			"suspicious": sqlInt(db, "SELECT COUNT(*) FROM security_events WHERE event_type IN ('security_alert','suspicious_login')"),
 		},
 		"recent_alerts": []fiber.Map{},
-		"recent_audit_events": recentAudit(db, 8),
+		"recent_audit_events": recentAudit(db, dial, 8),
 	})
 }
 
 func (h *Handler) InternalTenants(c fiber.Ctx) error {
 	db := h.sqlDB()
+	dial := dbdialect.FromDriver(h.cfg.Database.Driver)
 	out := []tenantOpsRow{}
 	if db == nil {
 		return c.JSON(fiber.Map{"tenants": out})
@@ -265,24 +270,26 @@ func (h *Handler) InternalTenants(c fiber.Ctx) error {
 			continue
 		}
 		r.Active = active != 0
-		r.Domains = sqlInt(db, "SELECT COUNT(*) FROM coremail_domains WHERE tenant_id = ? AND deleted_at IS NULL", r.ID)
-		r.Mailboxes = sqlInt(db, "SELECT COUNT(*) FROM coremail_mailboxes WHERE tenant_id = ? AND deleted_at IS NULL", r.ID)
-		r.StorageBytes = sqlInt(db, "SELECT COALESCE(SUM(used_bytes),0) FROM coremail_mailboxes WHERE tenant_id = ? AND deleted_at IS NULL", r.ID)
-		r.LoginFailures = sqlInt(db, "SELECT COUNT(*) FROM security_events WHERE email LIKE ? AND event_type = 'failed_login'", "%@"+r.Domain)
-		r.DeferredCount = sqlInt(db, "SELECT COUNT(*) FROM coremail_queue q JOIN coremail_domains d ON d.name = substr(q.from_address, instr(q.from_address, '@') + 1) WHERE d.tenant_id = ? AND q.deleted_at IS NULL AND q.status = 'deferred'", r.ID)
-		r.RejectedCount = sqlInt(db, "SELECT COUNT(*) FROM coremail_queue q JOIN coremail_domains d ON d.name = substr(q.from_address, instr(q.from_address, '@') + 1) WHERE d.tenant_id = ? AND q.deleted_at IS NULL AND q.status IN ('rejected','failed','bounced')", r.ID)
+		r.Domains = sqlInt(db, fmt.Sprintf("SELECT COUNT(*) FROM coremail_domains WHERE tenant_id = %s AND deleted_at IS NULL", dial.Placeholder(1)), r.ID)
+		r.Mailboxes = sqlInt(db, fmt.Sprintf("SELECT COUNT(*) FROM coremail_mailboxes WHERE tenant_id = %s AND deleted_at IS NULL", dial.Placeholder(1)), r.ID)
+		r.StorageBytes = sqlInt(db, fmt.Sprintf("SELECT COALESCE(SUM(used_bytes),0) FROM coremail_mailboxes WHERE tenant_id = %s AND deleted_at IS NULL", dial.Placeholder(1)), r.ID)
+		r.LoginFailures = sqlInt(db, fmt.Sprintf("SELECT COUNT(*) FROM security_events WHERE email LIKE %s AND event_type = 'failed_login'", dial.Placeholder(1)), "%@"+r.Domain)
+		r.DeferredCount = sqlInt(db, fmt.Sprintf("SELECT COUNT(*) FROM coremail_queue q JOIN coremail_domains d ON d.name = substr(q.from_address, instr(q.from_address, '@') + 1) WHERE d.tenant_id = %s AND q.deleted_at IS NULL AND q.status = 'deferred'", dial.Placeholder(1)), r.ID)
+		r.RejectedCount = sqlInt(db, fmt.Sprintf("SELECT COUNT(*) FROM coremail_queue q JOIN coremail_domains d ON d.name = substr(q.from_address, instr(q.from_address, '@') + 1) WHERE d.tenant_id = %s AND q.deleted_at IS NULL AND q.status IN ('rejected','failed','bounced')", dial.Placeholder(1)), r.ID)
 		out = append(out, r)
 	}
 	return c.JSON(fiber.Map{"tenants": out})
 }
 
 func (h *Handler) InternalDomainIntelligence(c fiber.Ctx) error {
-	domains := domainList(h.sqlDB(), 0, true)
+	dial := dbdialect.FromDriver(h.cfg.Database.Driver)
+	domains := domainList(h.sqlDB(), dial, 0, true)
 	return c.JSON(fiber.Map{"domains": domains, "generated_at": time.Now().UTC()})
 }
 
 func (h *Handler) InternalSecurityOps(c fiber.Ctx) error {
 	db := h.sqlDB()
+	dial := dbdialect.FromDriver(h.cfg.Database.Driver)
 	lockouts := 0
 	if h.trustService != nil {
 		lockouts = len(h.trustService.ListLockouts(c.Context()))
@@ -293,7 +300,7 @@ func (h *Handler) InternalSecurityOps(c fiber.Ctx) error {
 		"lockouts": lockouts,
 		"failed_auth_domains": groupedSecurity(db, "domain"),
 		"attacked_accounts": groupedSecurity(db, "account"),
-		"timeline": recentSecurity(db, 25),
+		"timeline": recentSecurity(db, dial, 25),
 	})
 }
 
@@ -309,12 +316,12 @@ func (h *Handler) InternalMailFlowOps(c fiber.Ctx) error {
 	})
 }
 
-func recentAudit(db *sql.DB, limit int) []fiber.Map {
+func recentAudit(db *sql.DB, dial *dbdialect.Info, limit int) []fiber.Map {
 	out := []fiber.Map{}
 	if db == nil {
 		return out
 	}
-	rows, err := db.Query("SELECT actor, action, target, result, timestamp FROM coremail_audit ORDER BY timestamp DESC LIMIT ?", limit)
+	rows, err := db.Query(fmt.Sprintf("SELECT actor, action, target, result, timestamp FROM coremail_audit ORDER BY timestamp DESC LIMIT %s", dial.Placeholder(1)), limit)
 	if err != nil {
 		return out
 	}
@@ -360,12 +367,12 @@ func groupedSecurity(db *sql.DB, mode string) []fiber.Map {
 	return out
 }
 
-func recentSecurity(db *sql.DB, limit int) []fiber.Map {
+func recentSecurity(db *sql.DB, dial *dbdialect.Info, limit int) []fiber.Map {
 	out := []fiber.Map{}
 	if db == nil {
 		return out
 	}
-	rows, err := db.Query("SELECT ip, email, event_type, count, created_at FROM security_events ORDER BY created_at DESC LIMIT ?", limit)
+	rows, err := db.Query(fmt.Sprintf("SELECT ip, email, event_type, count, created_at FROM security_events ORDER BY created_at DESC LIMIT %s", dial.Placeholder(1)), limit)
 	if err != nil {
 		return out
 	}

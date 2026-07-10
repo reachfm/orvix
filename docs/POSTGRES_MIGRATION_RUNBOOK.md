@@ -225,4 +225,21 @@ Store this backup separately from the SQLite backup.
 
 ---
 
-**Last updated:** 2026-07-10
+## db/postgres-final-closure Sprint Update
+
+**Date:** 2026-07-10
+
+**Status:** Migration CLI and runbook were NOT modified or executed in this sprint.
+The CLI and docs remain at the state achieved in the `db/postgres-production-readiness`
+sprint. Execution requires a running PostgreSQL instance (Docker unavailable).
+
+All remaining gaps listed in Section 7 still apply:
+- Bulk migration of messages, attachments, queue, and other large tables
+- Incremental / online migration (currently offline)
+- Per-table SHA256 checksums inside the CLI
+- Parallel table copy for large datasets
+- Migration of file-backed data (mail store, attachments)
+
+---
+
+**Last updated:** 2026-07-10 (`db/postgres-final-closure` sprint)

@@ -126,35 +126,20 @@ Gates 1-3 must pass in CI. Gates 4-7 require staging hardware.
 
 | Gate | Status | Blocker |
 |------|--------|---------|
-| 1 — Normal test suite | PASS | — |
-| 2 — SQLite benchmark 10k | PASS | — |
-| 3 — PostgreSQL schema smoke | PASS | — |
-| 4 — PostgreSQL benchmark 10k | PASS | — |
-| 5 — PostgreSQL benchmark 100k | PASS | — |
-| 5b — Pre-3M 1M smoke | PASS | — |
-| 6 — PostgreSQL benchmark 3M | PASS (with note) | — |
-| 7 — DML audit | PASS | — |
-| 8 — Migration/backup/rollback | PARTIAL | Full restore/rollback validation pending |
-| 9 — PostgreSQL DML tests | ADDED / NOT RERUN | SQLite path passes; PostgreSQL run not executed in this PR |
+| 1 — Normal test suite | PASS (re-verified) | — |
+| 2 — SQLite benchmark 10k/100k | PASS (re-verified) | — |
+| 3 — PostgreSQL schema smoke | PASS (previous sprint) — NOT RERUN | Docker unavailable this sprint |
+| 4 — PostgreSQL benchmark 10k | PASS (previous sprint) — NOT RERUN | Docker unavailable this sprint |
+| 5 — PostgreSQL benchmark 100k | PASS (previous sprint) — NOT RERUN | Docker unavailable this sprint |
+| 5b — Pre-3M 1M smoke | PASS (previous sprint) — NOT RERUN | Docker unavailable this sprint |
+| 6 — PostgreSQL benchmark 3M | PASS with note (previous sprint) — NOT RERUN | Docker unavailable this sprint |
+| 7 — DML audit | PASS — 12 findings (Finding 12 added) | — |
+| 8 — Migration/backup/rollback | NOT PASS | Not executed; requires PostgreSQL (Docker unavailable) |
+| 9 — PostgreSQL DML tests | NOT PASS | Not executed; Docker unavailable |
 
-**Overall status:** Gates 1-7 PASS. Gate 8 is PARTIAL — CLI and docs exist, full validation pending. Gate 9 tests are written and pass on SQLite but the PostgreSQL gate was not rerun (Docker unavailable).
-All PostgreSQL gates passed on local Docker PostgreSQL 16.
-RC4 SQLite default is unchanged.
+**Overall status:** Gates 1-2 PASS (re-verified in `db/postgres-final-closure`). Gates 3-6 PASS (previous sprint; NOT RERUN — Docker unavailable). Gate 7 PASS (updated with Finding 12 and fixed handlers). Gate 8 NOT PASS (migration/backup/rollback not executed — requires PostgreSQL). Gate 9 NOT PASS (DML tests not executed — Docker unavailable).
 
-**Production PostgreSQL is NOT ready.** Local gate evidence proves the
-harness and schema work at scale on PostgreSQL, but production deployment
-still requires:
-- Fix remaining `?` placeholders in `internal/api/handlers/` and `internal/coremail/`.
-- Audit transaction boundaries for PostgreSQL.
-- Complete Gate 8: full migration of all tables and verified restore/rollback.
-- Production-hardened deployment playbook.
-
-**3M harness proved on local PostgreSQL.** The benchmark harness
-successfully inserted 3,000,000 rows and ran list/cursor/flag queries
-against PostgreSQL 16. Metrics are recorded. This is benchmark evidence,
-not production readiness.
-
-**VPS deploy is NOT safe for PostgreSQL.**
+**Production PostgreSQL is NOT ready.** RC4 SQLite default is unchanged. VPS not touched.
 
 ---
 
@@ -262,4 +247,59 @@ containers (backend-postgres-1, backend-redis-1) were not touched.
 
 ---
 
-**Last updated:** 2026-07-10 (DB-5/DB-6/DB-7 consolidated sprint)
+---
+
+## db/postgres-final-closure Sprint Update
+
+**Date:** 2026-07-10
+
+### Workstream A — Raw SQL compatibility (COMPLETED)
+- Added `dialect *dbdialect.Info` field to Handler struct in handlers.go
+- Converted ALL raw `?` placeholders in handlers.go (31+ occurrences) to `h.dialect.Placeholder(N)`
+- Fixed boolean literals: `COALESCE(mfa_enabled, 0)` → `h.dialect.FalseLiteral()`, `COALESCE(allow_webmail, 1)` → `h.dialect.TrueLiteral()`, `is_admin = 0/1` → `FalseLiteral()/TrueLiteral()`
+- Fixed admin_queue.go: dynamic WHERE clause placeholders + LIMIT/OFFSET to `dial.Placeholder(N)`
+- Fixed saas_admin.go: all raw SQL placeholders in report/overview/security/intelligence endpoints
+- Fixed webmail_auth.go: all raw SQL placeholders in login/change-password/ensure-user endpoints
+- Fixed admin_users.go: `INSERT OR IGNORE` → dialect-aware `Upsert` with `DO NOTHING`
+- Fixed enterprise_admin_ssl.go: `CURRENT_TIMESTAMP` → `time.Now().UTC()` parameter, `?` → `dial.Placeholder(N)`
+- Fixed lifecycle/service.go: remaining `?` placeholders, `last_insert_rowid()` verified guarded
+- Fixed audit/audit.go: Added `dialect` field to Store, `Detect()` used, all `?` → `dial.Placeholder(N)`, `LIMIT ? OFFSET ?` fixed
+- Fixed messagetrace/service.go: Added `dialect` field, all `?` → `dial.Placeholder(N)`, `LIMIT ? OFFSET ?` fixed
+- Fixed cmd/orvix/main.go: `?` → `dial.Placeholder(N)` in seedAdminUser, verifyHash, insertBootstrapAdmin, provisionSystemFoldersTx
+
+### Workstream B — CoreMail audit (COMPLETED)
+- Audited coremail storage/queue/mailbox/domain/alias packages
+- Confirmed intentionally SQLite-only (use sql.Open("sqlite"), PRAGMA, AUTOINCREMENT)
+- Added Finding 12 to POSTGRES_DML_COMPATIBILITY_AUDIT.md
+
+### Workstream C — Transaction audit (COMPLETED)
+- Created POSTGRES_TRANSACTION_AUDIT.md (14 packages, 13 findings)
+- Fixed `INSERT OR IGNORE` in admin_users.go (dialect-aware Upsert)
+
+### Workstream D — PostgreSQL DML tests (NOT EXECUTED)
+- Docker daemon NOT running — PostgreSQL tests NOT EXECUTED
+
+### Workstream E — Migration CLI (NOT EXECUTED)
+- Requires PostgreSQL
+
+### Workstream F — Backup/restore/rollback (NOT EXECUTED)
+- Requires PostgreSQL
+
+### Workstream G — Load gates (PARTIAL)
+- 10,000 rows: PASS on SQLite (insert=691ms, flag-updates=34ms)
+- 100,000 rows: PASS on SQLite (insert=6.6s, flag-updates=39ms)
+- 1M/3M: NOT RERUN IN THIS SPRINT
+
+### Verification
+- `go vet ./...`: PASS
+- `go build ./...`: PASS
+- `go test ./cmd/orvix/ -timeout=120s`: PASS
+- `go test ./internal/api/handlers/ -timeout=300s`: PASS
+- `go test ./internal/audit/ ./internal/messagetrace/ ./internal/lifecycle/`: PASS
+- `go test ./internal/storage/loadtest/` (10k + 100k): PASS
+- PostgreSQL schema smoke: NOT RUN (Docker unavailable)
+- PostgreSQL DML tests: NOT RUN (Docker unavailable)
+
+---
+
+**Last updated:** 2026-07-10 (`db/postgres-final-closure` sprint)

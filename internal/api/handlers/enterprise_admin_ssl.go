@@ -23,6 +23,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/gofiber/fiber/v3"
@@ -213,8 +214,8 @@ func (h *Handler) AdminSslDeleteCertificate(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusConflict, "certificate is currently used by the runtime; change coremail.tls_cert_file first")
 	}
 	if _, err := h.sqlDB().ExecContext(c.Context(),
-		`UPDATE coremail_uploaded_certificates SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND tenant_id = ?`,
-		rowID, tenantID); err != nil {
+		`UPDATE coremail_uploaded_certificates SET deleted_at = `+h.dialect.Placeholder(1)+`, updated_at = `+h.dialect.Placeholder(2)+` WHERE id = `+h.dialect.Placeholder(3)+` AND tenant_id = `+h.dialect.Placeholder(4),
+		time.Now().UTC(), time.Now().UTC(), rowID, tenantID); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("soft delete: %v", err))
 	}
 	if certP != "" {

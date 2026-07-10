@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/orvix/orvix/internal/coremail/queue"
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 // AttemptLister defines the interface for reading delivery attempts.
@@ -36,13 +37,19 @@ type DeliveryAttemptRow struct {
 type Service struct {
 	queueRepo  queue.Repository
 	attemptsDB *sql.DB
+	dialect    *dbdialect.Info
 }
 
 // NewService creates a message trace service.
 func NewService(qe *queue.QueueEngine, attDB *sql.DB) *Service {
+	dialect, err := dbdialect.Detect(attDB)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
 	return &Service{
 		queueRepo:  qe.Repo,
 		attemptsDB: attDB,
+		dialect:    dialect,
 	}
 }
 
@@ -66,28 +73,36 @@ func (s *Service) Search(ctx context.Context, messageID, sender, recipient, doma
 	db := s.attemptsDB
 	if limit <= 0 || limit > 200 { limit = 100 }
 
+	d := s.dialect
 	var where []string
 	var args []interface{}
-	where = append(where, "deleted_at IS NULL")
+	argNum := 0
 
 	if messageID != "" {
-		where = append(where, "message_id LIKE ?")
+		argNum++
+		where = append(where, "message_id LIKE "+d.Placeholder(argNum))
 		args = append(args, "%"+messageID+"%")
 	}
 	if sender != "" {
-		where = append(where, "from_address LIKE ?")
+		argNum++
+		where = append(where, "from_address LIKE "+d.Placeholder(argNum))
 		args = append(args, "%"+sender+"%")
 	}
 	if recipient != "" {
-		where = append(where, "to_address LIKE ?")
+		argNum++
+		where = append(where, "to_address LIKE "+d.Placeholder(argNum))
 		args = append(args, "%"+recipient+"%")
 	}
 	if domain != "" {
-		where = append(where, "recipient_domain LIKE ?")
+		argNum++
+		where = append(where, "recipient_domain LIKE "+d.Placeholder(argNum))
 		args = append(args, "%"+domain+"%")
 	}
 
-	whereClause := strings.Join(where, " AND ")
+	whereClause := "deleted_at IS NULL"
+	if len(where) > 0 {
+		whereClause += " AND " + strings.Join(where, " AND ")
+	}
 
 	// Count.
 	var total int64
@@ -97,7 +112,7 @@ func (s *Service) Search(ctx context.Context, messageID, sender, recipient, doma
 	}
 
 	// Data.
-	query := "SELECT id, message_id, from_address, to_address, status, attempt_count, created_at FROM coremail_queue WHERE " + whereClause + " ORDER BY id DESC LIMIT ? OFFSET ?"
+	query := "SELECT id, message_id, from_address, to_address, status, attempt_count, created_at FROM coremail_queue WHERE " + whereClause + " ORDER BY id DESC LIMIT " + d.Placeholder(argNum+1) + " OFFSET " + d.Placeholder(argNum+2)
 	args = append(args, limit, offset)
 
 	rows, err := db.QueryContext(ctx, query, args...)
@@ -154,7 +169,7 @@ func (s *Service) loadAttempts(ctx context.Context, entryID uint) ([]DeliveryAtt
 	rows, err := s.attemptsDB.QueryContext(ctx,
 		`SELECT id, queue_entry_id, attempt_number, status, remote_host, remote_ip,
 		        status_code, status_msg, duration_ms, tls_used, attempted_at
-		 FROM coremail_delivery_attempts WHERE queue_entry_id = ? ORDER BY attempt_number`, entryID)
+		 FROM coremail_delivery_attempts WHERE queue_entry_id = `+s.dialect.Placeholder(1)+` ORDER BY attempt_number`, entryID)
 	if err != nil {
 		return nil, err
 	}

@@ -23,6 +23,7 @@ import (
 	"github.com/orvix/orvix/internal/compliance"
 	"github.com/orvix/orvix/internal/compose"
 	"github.com/orvix/orvix/internal/config"
+	"github.com/orvix/orvix/internal/dbdialect"
 	coremailruntime "github.com/orvix/orvix/internal/coremail/runtime"
 	coremailstorage "github.com/orvix/orvix/internal/coremail/storage"
 	"github.com/orvix/orvix/internal/dns"
@@ -189,7 +190,7 @@ func main() {
 		logger.Fatal("failed to create authenticator", zap.Error(err))
 	}
 
-	seedAdminUser(db, authenticator, logger)
+	seedAdminUser(db, authenticator, logger, dbdialect.FromDriver(cfg.Database.Driver))
 
 	registerModules(reg, cfg, db, logger, featureFlags, listenerRegistry)
 
@@ -347,7 +348,7 @@ func seedFeatureFlags(db *gorm.DB, logger *zap.Logger) {
 	logger.Info("feature flags seeded")
 }
 
-func seedAdminUser(db *gorm.DB, authenticator *auth.Authenticator, logger *zap.Logger) {
+func seedAdminUser(db *gorm.DB, authenticator *auth.Authenticator, logger *zap.Logger, dial *dbdialect.Info) {
 	adminEmail := os.Getenv("ORVIX_ADMIN_EMAIL")
 	adminPassword, passwordErr := bootstrapAdminPassword()
 
@@ -371,18 +372,12 @@ func seedAdminUser(db *gorm.DB, authenticator *auth.Authenticator, logger *zap.L
 	}
 
 	var count int64
-	if err := sqlDB.QueryRow("SELECT COUNT(*) FROM users WHERE email = ?", adminEmail).Scan(&count); err != nil {
+	if err := sqlDB.QueryRow("SELECT COUNT(*) FROM users WHERE email = "+dial.Placeholder(1), adminEmail).Scan(&count); err != nil {
 		logger.Warn("failed to check existing admin user", zap.Error(err))
 		return
 	}
 	if count > 0 {
-		// User row already exists from a previous boot. Re-verify
-		// the stored hash actually matches the env password — if
-		// the env is being re-applied after a partial failure on a
-		// previous boot (e.g. the row was inserted but the hash
-		// got mangled), this is the only place we can detect the
-		// mismatch and refuse to silently keep the broken row.
-		if !verifyStoredAdminHash(sqlDB, authenticator, adminEmail, adminPassword) {
+		if !verifyStoredAdminHash(sqlDB, dial, authenticator, adminEmail, adminPassword) {
 			logger.Error("admin user row exists but password verification failed; refusing to keep inconsistent state",
 				zap.String("email", adminEmail),
 				zap.String("hint", "stop the service, delete /etc/orvix/bootstrap.env, then run the installer again"))
@@ -406,18 +401,12 @@ func seedAdminUser(db *gorm.DB, authenticator *auth.Authenticator, logger *zap.L
 		tenantDomain = "local"
 	}
 
-	if err := insertBootstrapAdmin(sqlDB, adminEmail, hashedPassword, tenantDomain, adminPassword, logger); err != nil {
+	if err := insertBootstrapAdmin(sqlDB, dial, adminEmail, hashedPassword, tenantDomain, adminPassword, logger); err != nil {
 		logger.Warn("failed to create admin user", zap.Error(err))
 		return
 	}
 
-	// Post-insert guard: prove the freshly written hash verifies
-	// the same password. If this fails, the row was committed
-	// with a hash that cannot authenticate — the symptom would
-	// be "INSTALLATION VERIFICATION PASSED" on first boot but
-	// every subsequent login fails. We catch that here and log
-	// the root cause instead of waiting for the user to report it.
-	if !verifyStoredAdminHash(sqlDB, authenticator, adminEmail, adminPassword) {
+	if !verifyStoredAdminHash(sqlDB, dial, authenticator, adminEmail, adminPassword) {
 		logger.Error("admin user was created but password verification failed against the stored hash",
 			zap.String("email", adminEmail),
 			zap.String("hint", "this is a runtime bug; please report with the install log"))
@@ -434,9 +423,9 @@ func seedAdminUser(db *gorm.DB, authenticator *auth.Authenticator, logger *zap.L
 // can authenticate the same credentials the installer's
 // verify_install used, in this process, with this database
 // connection.
-func verifyStoredAdminHash(sqlDB *sql.DB, authenticator *auth.Authenticator, email, password string) bool {
+func verifyStoredAdminHash(sqlDB *sql.DB, dial *dbdialect.Info, authenticator *auth.Authenticator, email, password string) bool {
 	var storedHash string
-	if err := sqlDB.QueryRow("SELECT password_hash FROM users WHERE email = ?", email).Scan(&storedHash); err != nil {
+	if err := sqlDB.QueryRow("SELECT password_hash FROM users WHERE email = "+dial.Placeholder(1), email).Scan(&storedHash); err != nil {
 		return false
 	}
 	return authenticator.VerifyPassword(password, storedHash)
@@ -453,7 +442,7 @@ func bootstrapAdminPassword() (string, error) {
 	return os.Getenv("ORVIX_ADMIN_PASSWORD"), nil
 }
 
-func insertBootstrapAdmin(db *sql.DB, adminEmail, hashedPassword, tenantDomain, plainPassword string, logger *zap.Logger) error {
+func insertBootstrapAdmin(db *sql.DB, dial *dbdialect.Info, adminEmail, hashedPassword, tenantDomain, plainPassword string, logger *zap.Logger) error {
 	now := time.Now().UTC()
 	slug := strings.ReplaceAll(tenantDomain, ".", "-")
 
@@ -464,11 +453,11 @@ func insertBootstrapAdmin(db *sql.DB, adminEmail, hashedPassword, tenantDomain, 
 	defer tx.Rollback()
 
 	var tenantID int64
-	err = tx.QueryRow("SELECT id FROM tenants WHERE domain = ? AND deleted_at IS NULL", tenantDomain).Scan(&tenantID)
+	err = tx.QueryRow("SELECT id FROM tenants WHERE domain = "+dial.Placeholder(1)+" AND deleted_at IS NULL", tenantDomain).Scan(&tenantID)
 	if err == sql.ErrNoRows {
 		res, err := tx.Exec(
 			`INSERT INTO tenants (created_at, updated_at, name, slug, domain, plan, active)
-			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			 VALUES (`+dial.Placeholder(1)+`, `+dial.Placeholder(2)+`, `+dial.Placeholder(3)+`, `+dial.Placeholder(4)+`, `+dial.Placeholder(5)+`, `+dial.Placeholder(6)+`, `+dial.Placeholder(7)+`)`,
 			now, now, tenantDomain, slug, tenantDomain, "enterprise", 1,
 		)
 		if err != nil {
@@ -484,7 +473,7 @@ func insertBootstrapAdmin(db *sql.DB, adminEmail, hashedPassword, tenantDomain, 
 
 	_, err = tx.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (`+dial.Placeholder(1)+`, `+dial.Placeholder(2)+`, `+dial.Placeholder(3)+`, `+dial.Placeholder(4)+`, `+dial.Placeholder(5)+`, `+dial.Placeholder(6)+`, `+dial.Placeholder(7)+`, `+dial.Placeholder(8)+`)`,
 		now, now, adminEmail, hashedPassword, "admin", tenantID, 1, 1,
 	)
 	if err != nil {
@@ -493,11 +482,11 @@ func insertBootstrapAdmin(db *sql.DB, adminEmail, hashedPassword, tenantDomain, 
 
 	// Create CoreMail domain.
 	var domainID int64
-	err = tx.QueryRow("SELECT id FROM coremail_domains WHERE name = ?", tenantDomain).Scan(&domainID)
+	err = tx.QueryRow("SELECT id FROM coremail_domains WHERE name = "+dial.Placeholder(1), tenantDomain).Scan(&domainID)
 	if err == sql.ErrNoRows {
 		res, err := tx.Exec(
 			`INSERT INTO coremail_domains (name, tenant_id, status, plan, max_mailboxes, max_aliases, max_quota_mb, created_at, updated_at)
-			 VALUES (?, ?, 'active', 'enterprise', 0, 0, 0, ?, ?)`,
+			 VALUES (`+dial.Placeholder(1)+`, `+dial.Placeholder(2)+`, 'active', 'enterprise', 0, 0, 0, `+dial.Placeholder(3)+`, `+dial.Placeholder(4)+`)`,
 			tenantDomain, tenantID, now, now,
 		)
 		if err != nil {
@@ -523,7 +512,7 @@ func insertBootstrapAdmin(db *sql.DB, adminEmail, hashedPassword, tenantDomain, 
 	} else {
 		mailboxRes, err := tx.Exec(
 			`INSERT INTO coremail_mailboxes (domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme, status, quota_mb, is_admin, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, 'Admin', ?, 'argon2id', 'active', 1024, 1, ?, ?)`,
+			 VALUES (`+dial.Placeholder(1)+`, `+dial.Placeholder(2)+`, `+dial.Placeholder(3)+`, `+dial.Placeholder(4)+`, 'Admin', `+dial.Placeholder(5)+`, 'argon2id', 'active', 1024, 1, `+dial.Placeholder(6)+`, `+dial.Placeholder(7)+`)`,
 			domainID, tenantID, localPart, adminEmail, argon2Hash, now, now,
 		)
 		if err != nil {
@@ -534,19 +523,7 @@ func insertBootstrapAdmin(db *sql.DB, adminEmail, hashedPassword, tenantDomain, 
 			return err
 		}
 
-		// Provision the canonical system folders
-		// (INBOX, Sent, Drafts, Trash, Junk,
-		// Archive) for the freshly created admin
-		// mailbox. Without this, the first time the
-		// admin opens Webmail and tries to send,
-		// the Send handler returns
-		//   "Sent folder not found for mailbox;
-		//    ensure system folders are provisioned"
-		// — which is the exact bug we are fixing
-		// here. The provision runs inside the
-		// bootstrap transaction so a partial install
-		// never leaves a mailbox with no folders.
-		if err := provisionSystemFoldersTx(context.Background(), tx, uint(mailboxID), now); err != nil {
+		if err := provisionSystemFoldersTx(context.Background(), tx, dial, uint(mailboxID), now); err != nil {
 			logger.Warn("failed to provision system folders for admin mailbox",
 				zap.String("email", adminEmail),
 				zap.Int64("mailbox_id", mailboxID),
@@ -591,16 +568,7 @@ func hashPasswordArgon2id(password string) (string, error) {
 // Like the standalone helper, this is idempotent: if a
 // folder at the canonical path already exists, it is
 // left as-is.
-func provisionSystemFoldersTx(ctx context.Context, tx *sql.Tx, mailboxID uint, now time.Time) error {
-	// Inline copy of the canonical list, kept in
-	// sync with internal/coremail/system_folders.go
-	// and internal/coremail/storage/schema.go's
-	// DefaultSystemFolders. We intentionally do NOT
-	// import those from cmd/orvix/main.go: this
-	// file is the install-time bootstrap, and
-	// pulling storage or coremail helpers into the
-	// installer binary would change its dependency
-	// surface for no gain.
+func provisionSystemFoldersTx(ctx context.Context, tx *sql.Tx, dial *dbdialect.Info, mailboxID uint, now time.Time) error {
 	folders := []struct {
 		path string
 		typ  string
@@ -615,7 +583,7 @@ func provisionSystemFoldersTx(ctx context.Context, tx *sql.Tx, mailboxID uint, n
 	for _, f := range folders {
 		var existingID uint
 		err := tx.QueryRowContext(ctx,
-			"SELECT id FROM coremail_folders WHERE mailbox_id = ? AND path = ?",
+			"SELECT id FROM coremail_folders WHERE mailbox_id = "+dial.Placeholder(1)+" AND path = "+dial.Placeholder(2),
 			mailboxID, f.path,
 		).Scan(&existingID)
 		switch err {
@@ -631,7 +599,7 @@ func provisionSystemFoldersTx(ctx context.Context, tx *sql.Tx, mailboxID uint, n
 				(mailbox_id, parent_id, name, path, folder_type,
 				 message_count, unread_count, total_size,
 				 created_at, updated_at)
-			VALUES (?, NULL, ?, ?, ?, 0, 0, 0, ?, ?)`,
+			VALUES (`+dial.Placeholder(1)+`, NULL, `+dial.Placeholder(2)+`, `+dial.Placeholder(3)+`, `+dial.Placeholder(4)+`, 0, 0, 0, `+dial.Placeholder(5)+`, `+dial.Placeholder(6)+`)`,
 			mailboxID, f.path, f.path, f.typ, now, now,
 		); err != nil {
 			return fmt.Errorf("create system folder %s: %w", f.path, err)
