@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 type ConfigProvider interface {
@@ -34,15 +36,25 @@ type ConfigProvider interface {
 type Service struct {
 	mu      sync.Mutex
 	db      *sql.DB
+	dialect *dbdialect.Info
 	cfg     ConfigProvider
 	certs   []TLSCertificate
 }
 
 func NewService(db *sql.DB, cfg ConfigProvider) *Service {
-	return &Service{db: db, cfg: cfg}
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
+	return &Service{db: db, dialect: dialect, cfg: cfg}
 }
 
 func (s *Service) ensureSchema(ctx context.Context) error {
+	// PostgreSQL schema is created by models.MigrateAllPostgres; the
+	// package-local schema is SQLite-only.
+	if s.dialect.IsPostgres() {
+		return nil
+	}
 	for _, stmt := range schema {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			return err
@@ -56,8 +68,14 @@ func (s *Service) ensureSchema(ctx context.Context) error {
 // declared in internal/models/models.go (it's idempotent), so this
 // function is a defensive belt-and-suspenders that no-ops when the
 // table is already there.
+//
+// On PostgreSQL the table is created by models.MigrateAllPostgres, so
+// this function returns early to avoid SQLite-only DDL.
 func (s *Service) EnsureUploadedCertSchema(ctx context.Context) error {
 	if s.db == nil {
+		return nil
+	}
+	if s.dialect.IsPostgres() {
 		return nil
 	}
 	_, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS coremail_uploaded_certificates (
@@ -521,7 +539,9 @@ func (s *Service) getCertByID(ctx context.Context, id string) (*TLSCertificate, 
 		if s.certs[i].ID == id { return &s.certs[i], nil }
 	}
 	// Try from DB.
-	row := s.db.QueryRowContext(ctx, "SELECT id, name, common_name, sans, issuer, serial_number, not_before, not_after, fingerprint_sha256, status FROM tls_certificates WHERE id=?", id)
+	row := s.db.QueryRowContext(ctx,
+		"SELECT id, name, common_name, sans, issuer, serial_number, not_before, not_after, fingerprint_sha256, status FROM tls_certificates WHERE id="+s.dialect.Placeholder(1),
+		id)
 	var c TLSCertificate
 	var sans string
 	var notBefore, notAfter sql.NullTime
@@ -543,11 +563,16 @@ func (s *Service) loadAllLocked(ctx context.Context) ([]TLSCertificate, error) {
 
 func (s *Service) saveCert(ctx context.Context, c *TLSCertificate) {
 	if s.db == nil { return }
-	s.db.ExecContext(ctx,
-		`INSERT OR REPLACE INTO tls_certificates (id, name, common_name, sans, issuer, serial_number, not_before, not_after, fingerprint_sha256, status, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+	q := s.dialect.Upsert(
+		"tls_certificates",
+		[]string{"id", "name", "common_name", "sans", "issuer", "serial_number", "not_before", "not_after", "fingerprint_sha256", "status", "created_at", "updated_at"},
+		[]string{"id"},
+		[]string{"name", "common_name", "sans", "issuer", "serial_number", "not_before", "not_after", "fingerprint_sha256", "status", "updated_at"},
+	)
+	now := time.Now().UTC()
+	s.db.ExecContext(ctx, q,
 		c.ID, c.Name, c.CommonName, strings.Join(c.SANs, ","), c.Issuer, c.SerialNumber,
-		c.NotBefore, c.NotAfter, c.FingerprintSHA256, string(c.Status))
+		c.NotBefore, c.NotAfter, c.FingerprintSHA256, string(c.Status), now, now)
 }
 
 func parseCertificateFile(certPath, keyPath string) (*TLSCertificate, error) {
