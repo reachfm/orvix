@@ -176,28 +176,29 @@ func seed10Tables(t *testing.T, sqlDB *sql.DB) {
 		t.Fatalf("seed domain 3: %v", err)
 	}
 
-	// 4. mailboxes (FK → domains). local_part is used as email prefix.
+	// 4. mailboxes (FK → domains). local_part is the part before '@';
+	// the migration joins domains to build the target email address.
 	_, err = sqlDB.Exec(`INSERT INTO mailboxes (created_at, updated_at, tenant_id, domain_id, local_part, password_hash, quota_mb, is_alias, is_catchall, is_active, display_name, send_limit)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		now, now, 1, 1, "admin@acme.com", "$2a$10$abc", 2048, 0, 0, 1, "Admin User", 500)
+		now, now, 1, 1, "admin", "$2a$10$abc", 2048, 0, 0, 1, "Admin User", 500)
 	if err != nil {
 		t.Fatalf("seed mailbox 1: %v", err)
 	}
 	_, err = sqlDB.Exec(`INSERT INTO mailboxes (created_at, updated_at, tenant_id, domain_id, local_part, password_hash, quota_mb, is_alias, is_catchall, is_active, display_name, send_limit)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		now, now, 1, 1, "user@acme.com", "$2a$10$def", 1024, 0, 0, 1, "Regular User", 200)
+		now, now, 1, 1, "user", "$2a$10$def", 1024, 0, 0, 1, "Regular User", 200)
 	if err != nil {
 		t.Fatalf("seed mailbox 2: %v", err)
 	}
 	_, err = sqlDB.Exec(`INSERT INTO mailboxes (created_at, updated_at, tenant_id, domain_id, local_part, password_hash, quota_mb, is_alias, is_catchall, is_active)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		now, now, 1, 1, "catchall@acme.com", "$2a$10$xyz", 512, 0, 1, 1)
+		now, now, 1, 1, "catchall", "$2a$10$xyz", 512, 0, 1, 1)
 	if err != nil {
 		t.Fatalf("seed mailbox 3: %v", err)
 	}
 	_, err = sqlDB.Exec(`INSERT INTO mailboxes (created_at, updated_at, tenant_id, domain_id, local_part, password_hash, quota_mb, is_alias, is_catchall, is_active, display_name)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		now, now, 2, 3, "admin@beta.com", "$2a$10$ghi", 1024, 0, 0, 1, "Beta Admin")
+		now, now, 2, 3, "admin", "$2a$10$ghi", 1024, 0, 0, 1, "Beta Admin")
 	if err != nil {
 		t.Fatalf("seed mailbox 4: %v", err)
 	}
@@ -410,6 +411,9 @@ func TestMigrateAll10TablesWithRowVerification(t *testing.T) {
 	// Verify boolean columns were properly converted.
 	verifyBooleanConversions(t, tgtDB)
 
+	// Verify mailbox local_part/domain/email semantics.
+	verifyMailboxSemantics(t, tgtDB)
+
 	// Verify non-empty target guard blocks second migration.
 	code2 := migrateCommand([]string{
 		"--from", "sqlite",
@@ -542,6 +546,46 @@ func verifyBooleanConversions(t *testing.T, db *sql.DB) {
 		t.Errorf("query licenses.active: %v", err)
 	} else if licActive {
 		t.Error("licenses.active should be false for lic_inactive")
+	}
+}
+
+// verifyMailboxSemantics asserts that a mailbox row was reconstructed
+// from SQLite local_part + domains.domain instead of copying local_part
+// directly into the email column.
+func verifyMailboxSemantics(t *testing.T, db *sql.DB) {
+	t.Helper()
+
+	var email, localPart, displayName, domain string
+	var domainID int64
+	var passwordHash string
+	var quotaMB, sendLimit int
+	err := db.QueryRow(`SELECT m.email, m.local_part, m.password_hash, m.quota_mb, m.display_name, m.send_limit, m.domain_id, d.domain
+		FROM mailboxes m JOIN domains d ON m.domain_id = d.id
+		WHERE m.local_part = 'admin' AND d.domain = 'acme.com'`).Scan(
+		&email, &localPart, &passwordHash, &quotaMB, &displayName, &sendLimit, &domainID, &domain)
+	if err != nil {
+		t.Fatalf("query admin mailbox semantics: %v", err)
+	}
+	if email != "admin@acme.com" {
+		t.Errorf("mailbox email should be admin@acme.com, got %q", email)
+	}
+	if localPart != "admin" {
+		t.Errorf("mailbox local_part should be preserved as 'admin', got %q", localPart)
+	}
+	if passwordHash != "$2a$10$abc" {
+		t.Errorf("mailbox password_hash not preserved: got %q", passwordHash)
+	}
+	if quotaMB != 2048 {
+		t.Errorf("mailbox quota_mb not preserved: expected 2048, got %d", quotaMB)
+	}
+	if displayName != "Admin User" {
+		t.Errorf("mailbox display_name not preserved: got %q", displayName)
+	}
+	if sendLimit != 500 {
+		t.Errorf("mailbox send_limit not preserved: expected 500, got %d", sendLimit)
+	}
+	if domain != "acme.com" {
+		t.Errorf("mailbox domain relationship not preserved: expected acme.com, got %q", domain)
 	}
 }
 

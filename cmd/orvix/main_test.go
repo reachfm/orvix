@@ -1,14 +1,20 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http/httptest"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/api"
@@ -18,6 +24,7 @@ import (
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
+	orvixruntime "github.com/orvix/orvix/internal/runtime"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -381,9 +388,28 @@ func TestBootstrapAdminPostgresIntegration(t *testing.T) {
 	}
 }
 
-// TestStartupPostgresRuntime verifies that the full runtime bootstrap
-// sequence works against a PostgreSQL database: MigrateAllPostgres,
-// minimal module init, health endpoint, and clean shutdown.
+// freePort returns an ephemeral TCP port for test listeners.
+func freePort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("free port: %v", err)
+	}
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port
+}
+
+// TestStartupPostgresRuntime exercises the exact production bootstrap
+// sequence from main() against a live PostgreSQL database.
+//
+// Architecture note: CoreMail operational storage remains SQLite-only.
+// config.Defaults() leaves CoreMail.Enabled=false, so the production
+// bootstrap on a PostgreSQL metadata database is the supported hybrid
+// configuration: metadata (tenants, users, domains, mailboxes, etc.) in
+// PostgreSQL, CoreMail message/queue storage in SQLite. Enabling CoreMail
+// on PostgreSQL would fail because storage.Tables()/Indexes() use SQLite
+// AUTOINCREMENT syntax. This test documents that the hybrid path starts,
+// serves health, and admin login succeeds.
 func TestStartupPostgresRuntime(t *testing.T) {
 	if strings.ToLower(strings.TrimSpace(os.Getenv("ORVIX_DB_DRIVER"))) != "postgres" {
 		t.Skip("ORVIX_DB_DRIVER must be postgres")
@@ -393,48 +419,87 @@ func TestStartupPostgresRuntime(t *testing.T) {
 		t.Skip("ORVIX_DB_DSN is empty")
 	}
 
+	const (
+		adminEmail    = "admin@runtime.test"
+		adminPassword = "RuntimePassword123!"
+	)
+	t.Setenv("ORVIX_ADMIN_EMAIL", adminEmail)
+	t.Setenv("ORVIX_ADMIN_PASSWORD_B64", base64.StdEncoding.EncodeToString([]byte(adminPassword)))
+
 	logger := zap.NewNop()
 	cfg := config.Defaults()
+	cfg.SetLogger(logger)
 	cfg.Database.Driver = "postgres"
 	cfg.Database.DSN = dsn
 	cfg.Database.MaxOpen = 5
 	cfg.Database.MaxIdle = 2
 	cfg.Database.MaxLifetime = 300
 
+	// Isolate runtime: use an isolated admin port and a temp mailstore path.
+	// CoreMail is left disabled (default). The metadata runtime starts on
+	// PostgreSQL; CoreMail operational storage would require a separate
+	// SQLite database and is therefore not exercised here.
+	cfg.Server.Host = "127.0.0.1"
+	cfg.Server.AdminPort = freePort(t)
+	cfg.CoreMail.DataPath = t.TempDir()
+	cfg.CoreMail.MailStorePath = cfg.CoreMail.DataPath
+
 	db, err := config.NewDatabase(&cfg.Database, logger)
 	if err != nil {
 		t.Fatalf("connect to postgres: %v", err)
 	}
+	defer func() {
+		if sqlDB, err := db.DB(); err == nil {
+			sqlDB.Close()
+		}
+	}()
 
-	// Run PostgreSQL migration (the production path).
-	if err := models.MigrateAllPostgres(db); err != nil {
-		t.Fatalf("MigrateAllPostgres: %v", err)
+	// 1. migrateConfiguredDatabase (production path).
+	if err := migrateConfiguredDatabase(db, cfg.Database.Driver, logger); err != nil {
+		t.Fatalf("migrateConfiguredDatabase: %v", err)
 	}
+	t.Log("database migrations completed")
 
-	// Verify schema compatibility.
-	if err := models.PostgresSchemaCompatible(db, "public"); err != nil {
-		t.Fatalf("PostgresSchemaCompatible: %v", err)
-	}
-	t.Log("PostgreSQL schema verified: all 59 tables present")
-
-	// Seed feature flags (production code path).
+	// 2. seedFeatureFlags.
 	seedFeatureFlags(db, logger)
+	t.Log("feature flags seeded")
 
-	// Create minimal runtime: authenticator + router.
+	// 3. Build registry and listener registry.
+	reg := modules.NewRegistry(logger)
+	listenerReg := orvixruntime.NewListenerRegistry()
+
+	// 4. Create authenticator.
 	authenticator, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
 	if err != nil {
 		t.Fatalf("authenticator: %v", err)
 	}
 
-	reg := modules.NewRegistry(logger)
-	ff := license.NewFeatureFlags(logger)
-	ff.SetTier(license.TierSMB)
+	// 5. seedAdminUser.
+	seedAdminUser(db, authenticator, logger, dbdialect.FromDriver(cfg.Database.Driver))
+	t.Log("admin user seeded")
 
-	// Register only the lightweight modules that don't need
-	// external services (Redis, CoreMail storage, etc.).
-	router := api.NewRouter(cfg, authenticator, logger, db, reg, ff, nil)
+	// 6. registerModules.
+	featureFlags := license.NewFeatureFlags(logger)
+	featureFlags.SetTier(license.TierSMB)
+	registerModules(reg, cfg, db, logger, featureFlags, listenerReg)
+	t.Log("modules registered")
 
-	// Verify health endpoint responds.
+	// 7. InitAll.
+	if err := reg.InitAll(cfg, db); err != nil {
+		t.Fatalf("InitAll: %v", err)
+	}
+	t.Log("modules initialized")
+
+	// 8. StartAll.
+	if err := reg.StartAll(); err != nil {
+		t.Fatalf("StartAll: %v", err)
+	}
+	t.Log("modules started")
+
+	// 9. Create router.
+	router := api.NewRouter(cfg, authenticator, logger, db, reg, featureFlags, nil)
+
+	// 10. Health endpoint.
 	req := httptest.NewRequest("GET", "/api/v1/health", nil)
 	resp, err := router.App().Test(req, fiber.TestConfig{Timeout: 0})
 	if err != nil {
@@ -445,24 +510,242 @@ func TestStartupPostgresRuntime(t *testing.T) {
 	}
 	t.Log("health endpoint returned 200 OK")
 
-	// Verify admin login route is registered (returns 405 without body
-	// or 400 with wrong content-type, but must not 404).
-	emptyReq := httptest.NewRequest("POST", "/admin/login", nil)
-	emptyResp, err := router.App().Test(emptyReq, fiber.TestConfig{Timeout: 0})
+	// 11. Admin login succeeds.
+	payload, err := json.Marshal(map[string]string{"email": adminEmail, "password": adminPassword})
 	if err != nil {
-		t.Fatalf("admin login route check: %v", err)
+		t.Fatalf("marshal login payload: %v", err)
 	}
-	t.Logf("admin/login returned %d (expected non-404)", emptyResp.StatusCode)
+	loginReq := httptest.NewRequest("POST", "/admin/login", strings.NewReader(string(payload)))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginResp, err := router.App().Test(loginReq, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("login request: %v", err)
+	}
+	if loginResp.StatusCode != 200 {
+		t.Fatalf("expected admin login 200, got %d", loginResp.StatusCode)
+	}
+	var loginBody struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(loginResp.Body).Decode(&loginBody); err != nil {
+		t.Fatalf("decode login response: %v", err)
+	}
+	if loginBody.AccessToken == "" {
+		t.Fatal("expected access token in login response")
+	}
+	t.Log("admin login succeeded")
 
-	// Stop all modules cleanly.
+	// 12. StopAll cleanly.
 	if err := reg.StopAll(); err != nil {
-		t.Fatalf("module shutdown: %v", err)
+		t.Fatalf("StopAll: %v", err)
 	}
-	t.Log("all modules stopped cleanly")
+	t.Log("modules stopped cleanly")
+	t.Log("PostgreSQL runtime startup test PASSED (hybrid architecture: PostgreSQL metadata, CoreMail disabled)")
+}
 
-	sqlDB, err := db.DB()
-	if err == nil {
-		sqlDB.Close()
+// TestPostgresBackupRestoreAndRuntime validates that a full 10-table
+// migration can be dumped with pg_dump, restored into a fresh PostgreSQL
+// database with pg_restore, and that the restored database passes the
+// same row-count, semantic, and runtime-startup checks as the source.
+func TestPostgresBackupRestoreAndRuntime(t *testing.T) {
+	if strings.ToLower(strings.TrimSpace(os.Getenv("ORVIX_DB_DRIVER"))) != "postgres" {
+		t.Skip("ORVIX_DB_DRIVER must be postgres")
 	}
-	t.Log("PostgreSQL runtime startup test PASSED")
+	baseDSN := strings.TrimSpace(os.Getenv("ORVIX_DB_DSN"))
+	if baseDSN == "" {
+		t.Skip("ORVIX_DB_DSN is empty")
+	}
+
+	const adminEmail = "admin@restored.test"
+	const adminPassword = "AdminBackupRestore123!"
+
+	// Build isolated source/destination database names.
+	suffix := time.Now().UnixNano()
+	srcDB := fmt.Sprintf("orvix_backup_src_%d", suffix)
+	dstDB := fmt.Sprintf("orvix_backup_dst_%d", suffix)
+
+	createDB := func(name string) {
+		t.Helper()
+		cmd := exec.Command("docker", "exec", "orvix-pg-final", "psql", "-U", "orvix", "-d", "postgres", "-c", "CREATE DATABASE "+name)
+		cmd.Env = append(os.Environ(), "PGPASSWORD=local_orvix_only")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("create database %s: %v\n%s", name, err, out)
+		}
+	}
+	dropDB := func(name string) {
+		t.Helper()
+		cmd := exec.Command("docker", "exec", "orvix-pg-final", "psql", "-U", "orvix", "-d", "postgres", "-c", "DROP DATABASE IF EXISTS "+name)
+		cmd.Env = append(os.Environ(), "PGPASSWORD=local_orvix_only")
+		_ = cmd.Run()
+	}
+
+	createDB(srcDB)
+	defer dropDB(srcDB)
+	createDB(dstDB)
+	defer dropDB(dstDB)
+
+	srcDSN := strings.Replace(baseDSN, " dbname=orvix", " dbname="+srcDB, 1)
+	if !strings.Contains(srcDSN, " dbname=") {
+		srcDSN += " dbname=" + srcDB
+	}
+
+	// 1. Create and seed SQLite source.
+	srcDir := t.TempDir()
+	srcPath := filepath.Join(srcDir, "orvix.db")
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = srcPath + "?_loc=auto&_busy_timeout=5000"
+	sqliteGorm, err := config.NewDatabase(&cfg.Database, zap.NewNop())
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := models.MigrateAllRaw(sqliteGorm); err != nil {
+		t.Fatalf("migrate sqlite: %v", err)
+	}
+	sqliteDB, _ := sqliteGorm.DB()
+	seed10Tables(t, sqliteDB)
+	sqliteDB.Close()
+
+	// 2. Migrate SQLite → source PostgreSQL database.
+	code := migrateCommand([]string{
+		"--from", "sqlite",
+		"--to", "postgres",
+		"--sqlite-path", srcPath,
+		"--postgres-dsn", srcDSN,
+		"--target-schema", "public",
+		"--dry-run=false",
+		"--skip-confirm",
+	})
+	if code != 0 {
+		t.Fatalf("migration to source db returned %d", code)
+	}
+
+	// 3. pg_dump source database.
+	dumpFile := filepath.Join(t.TempDir(), "orvix.dump")
+	dumpCmd := exec.Command("docker", "exec", "orvix-pg-final", "pg_dump", "-Fc", "-U", "orvix", "-d", srcDB)
+	dumpCmd.Env = append(os.Environ(), "PGPASSWORD=local_orvix_only")
+	out, err := dumpCmd.Output()
+	if err != nil {
+		t.Fatalf("pg_dump: %v", err)
+	}
+	if err := os.WriteFile(dumpFile, out, 0o600); err != nil {
+		t.Fatalf("write dump: %v", err)
+	}
+	t.Logf("pg_dump wrote %d bytes", len(out))
+
+	// 4. pg_restore into destination database.
+	dump, err := os.Open(dumpFile)
+	if err != nil {
+		t.Fatalf("open dump: %v", err)
+	}
+	defer dump.Close()
+	restoreCmd := exec.Command("docker", "exec", "-i", "orvix-pg-final", "pg_restore", "-U", "orvix", "-d", dstDB)
+	restoreCmd.Env = append(os.Environ(), "PGPASSWORD=local_orvix_only")
+	restoreCmd.Stdin = dump
+	restoreOut, err := restoreCmd.CombinedOutput()
+	if err != nil {
+		t.Logf("pg_restore output:\n%s", restoreOut)
+		// pg_restore may emit non-fatal errors; continue verification.
+	}
+
+	// 5. Verify restored counts and semantics.
+	dstDSN := strings.Replace(baseDSN, " dbname=orvix", " dbname="+dstDB, 1)
+	if !strings.Contains(dstDSN, " dbname=") {
+		dstDSN += " dbname=" + dstDB
+	}
+	dstCfg := config.Defaults()
+	dstCfg.Database.Driver = "postgres"
+	dstCfg.Database.DSN = dstDSN
+	dstCfg.Database.MaxOpen = 1
+	dstGorm, err := config.NewDatabase(&dstCfg.Database, zap.NewNop())
+	if err != nil {
+		t.Fatalf("connect to restored db: %v", err)
+	}
+	dstSQL, _ := dstGorm.DB()
+	defer dstSQL.Close()
+
+	plan := defaultMigrationPlan()
+	counts, err := plan.rowCounts(context.Background(), dstSQL)
+	if err != nil {
+		t.Fatalf("row counts on restored db: %v", err)
+	}
+	expected := expectedRowCounts()
+	for table, want := range expected {
+		if got := counts[table]; got != want {
+			t.Errorf("restored table %s: expected %d rows, got %d", table, want, got)
+		}
+	}
+	verifyMailboxSemantics(t, dstSQL)
+	t.Log("backup/restore row counts and mailbox semantics verified")
+
+	// 6. Runtime startup against the restored database.
+	t.Setenv("ORVIX_ADMIN_EMAIL", adminEmail)
+	t.Setenv("ORVIX_ADMIN_PASSWORD_B64", base64.StdEncoding.EncodeToString([]byte(adminPassword)))
+
+	logger := zap.NewNop()
+	rtcfg := config.Defaults()
+	rtcfg.SetLogger(logger)
+	rtcfg.Database.Driver = "postgres"
+	rtcfg.Database.DSN = dstDSN
+	rtcfg.Server.Host = "127.0.0.1"
+	rtcfg.Server.AdminPort = freePort(t)
+	rtcfg.CoreMail.DataPath = t.TempDir()
+	rtcfg.CoreMail.MailStorePath = rtcfg.CoreMail.DataPath
+
+	db, err := config.NewDatabase(&rtcfg.Database, logger)
+	if err != nil {
+		t.Fatalf("connect runtime to restored db: %v", err)
+	}
+	defer func() {
+		if sqlDB, err := db.DB(); err == nil {
+			sqlDB.Close()
+		}
+	}()
+
+	if err := migrateConfiguredDatabase(db, rtcfg.Database.Driver, logger); err != nil {
+		t.Fatalf("migrateConfiguredDatabase on restored db: %v", err)
+	}
+	seedFeatureFlags(db, logger)
+	reg := modules.NewRegistry(logger)
+	listenerReg := orvixruntime.NewListenerRegistry()
+	authenticator, err := auth.NewAuthenticator(&rtcfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	seedAdminUser(db, authenticator, logger, dbdialect.FromDriver(rtcfg.Database.Driver))
+	ff := license.NewFeatureFlags(logger)
+	ff.SetTier(license.TierSMB)
+	registerModules(reg, rtcfg, db, logger, ff, listenerReg)
+	if err := reg.InitAll(rtcfg, db); err != nil {
+		t.Fatalf("InitAll on restored db: %v", err)
+	}
+	if err := reg.StartAll(); err != nil {
+		t.Fatalf("StartAll on restored db: %v", err)
+	}
+	router := api.NewRouter(rtcfg, authenticator, logger, db, reg, ff, nil)
+
+	req := httptest.NewRequest("GET", "/api/v1/health", nil)
+	resp, err := router.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("health request on restored db: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected health 200 on restored db, got %d", resp.StatusCode)
+	}
+
+	payload, _ := json.Marshal(map[string]string{"email": adminEmail, "password": adminPassword})
+	loginReq := httptest.NewRequest("POST", "/admin/login", strings.NewReader(string(payload)))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginResp, err := router.App().Test(loginReq, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("login request on restored db: %v", err)
+	}
+	if loginResp.StatusCode != 200 {
+		t.Fatalf("expected login 200 on restored db, got %d", loginResp.StatusCode)
+	}
+
+	if err := reg.StopAll(); err != nil {
+		t.Fatalf("StopAll on restored db: %v", err)
+	}
+	t.Log("runtime startup against restored database succeeded")
 }

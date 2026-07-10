@@ -219,6 +219,7 @@ type tableMigration struct {
 	boolColumns  []string
 	dependsOn    []string
 	nullDefaults map[string]any // column → default value when source is NULL
+	sourceQuery  string         // optional custom SELECT query; overrides default SELECT srcColumns FROM table
 }
 
 // tableColumnMap defines explicit source→target column mappings for
@@ -247,11 +248,19 @@ var tableColumnMap = map[string]tableMigration{
 		dependsOn:   []string{"tenants"},
 	},
 	"mailboxes": {
-		srcColumns:   []string{"id", "created_at", "updated_at", "deleted_at", "tenant_id", "domain_id", "local_part", "password_hash", "quota_mb", "is_alias", "is_catchall", "is_active", "display_name", "send_limit"},
-		tgtColumns:   []string{"id", "created_at", "updated_at", "deleted_at", "tenant_id", "domain_id", "email", "password_hash", "quota_mb", "is_alias", "is_catchall", "is_active", "display_name", "send_limit"},
+		// SQLite mailboxes stores local_part + domain_id; PostgreSQL mailboxes
+		// stores local_part + email. The source query joins domains so the
+		// target email is built as local_part || '@' || domains.domain, preserving
+		// the real mailbox identity instead of copying local_part into email.
+		srcColumns:   []string{"id", "created_at", "updated_at", "deleted_at", "tenant_id", "domain_id", "local_part", "email", "password_hash", "quota_mb", "is_alias", "is_catchall", "is_active", "display_name", "send_limit"},
+		tgtColumns:   []string{"id", "created_at", "updated_at", "deleted_at", "tenant_id", "domain_id", "local_part", "email", "password_hash", "quota_mb", "is_alias", "is_catchall", "is_active", "display_name", "send_limit"},
 		boolColumns:  []string{"is_alias", "is_catchall", "is_active"},
-		nullDefaults: map[string]any{"display_name": "", "local_part": ""},
+		nullDefaults: map[string]any{"display_name": ""},
 		dependsOn:    []string{"domains"},
+		sourceQuery: `SELECT m.id, m.created_at, m.updated_at, m.deleted_at, m.tenant_id, m.domain_id, m.local_part,
+		m.local_part || '@' || d.domain AS email, m.password_hash, m.quota_mb, m.is_alias, m.is_catchall,
+		m.is_active, COALESCE(m.display_name, '') AS display_name, m.send_limit
+		FROM mailboxes m JOIN domains d ON m.domain_id = d.id`,
 	},
 	"api_keys": {
 		srcColumns:  []string{"id", "created_at", "updated_at", "deleted_at", "user_id", "key_hash", "name", "expires_at", "last_used_at", "active"},
@@ -310,10 +319,8 @@ func (p migrationPlan) rowCounts(ctx context.Context, db *sql.DB) (map[string]in
 	counts := make(map[string]int64)
 	for _, table := range p.tables {
 		var n int64
-		err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+quoteIdentifier(table)).Scan(&n)
-		if err != nil {
-			counts[table] = 0
-			continue
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+quoteIdentifier(table)).Scan(&n); err != nil {
+			return nil, fmt.Errorf("count %s: %w", table, err)
 		}
 		counts[table] = n
 	}
@@ -330,6 +337,29 @@ func (p migrationPlan) run(ctx context.Context, srcDB, tgtDB *sql.DB) error {
 		if err := migrateTable(ctx, srcDB, tgtDB, table, tm); err != nil {
 			return fmt.Errorf("migrate table %s: %w", table, err)
 		}
+		if err := syncSequence(ctx, tgtDB, table); err != nil {
+			return fmt.Errorf("sync sequence for %s: %w", table, err)
+		}
+	}
+	return nil
+}
+
+// syncSequence updates the PostgreSQL SERIAL/BIGSERIAL sequence for table
+// so that subsequent inserts using DEFAULT nextval(...) do not collide with
+// rows that were copied with explicit SQLite ids.
+func syncSequence(ctx context.Context, tgtDB *sql.DB, table string) error {
+	var seqName sql.NullString
+	if err := tgtDB.QueryRowContext(ctx, "SELECT pg_get_serial_sequence($1, 'id')", table).Scan(&seqName); err != nil {
+		return fmt.Errorf("lookup sequence for %s: %w", table, err)
+	}
+	if !seqName.Valid || seqName.String == "" {
+		return nil // no serial sequence for this table
+	}
+	_, err := tgtDB.ExecContext(ctx,
+		"SELECT setval($1, COALESCE((SELECT MAX(id) FROM "+quoteIdentifier(table)+"), 1), true)",
+		seqName.String)
+	if err != nil {
+		return fmt.Errorf("setval %s for %s: %w", seqName.String, table, err)
 	}
 	return nil
 }
@@ -405,7 +435,10 @@ func migrateTable(ctx context.Context, srcDB, tgtDB *sql.DB, table string, tm ta
 	insertSQL := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) ON CONFLICT DO NOTHING",
 		quoteIdentifier(table), tgtColList, strings.Join(placeholders, ", "))
 
-	selectSQL := fmt.Sprintf("SELECT %s FROM %s", srcColList, quoteIdentifier(table))
+	selectSQL := tm.sourceQuery
+	if selectSQL == "" {
+		selectSQL = fmt.Sprintf("SELECT %s FROM %s", srcColList, quoteIdentifier(table))
+	}
 	srcRows, err := srcDB.QueryContext(ctx, selectSQL)
 	if err != nil {
 		return fmt.Errorf("select from source %s: %w", table, err)
@@ -424,7 +457,8 @@ func migrateTable(ctx context.Context, srcDB, tgtDB *sql.DB, table string, tm ta
 		valuePtrs[i] = &values[i]
 	}
 
-	var migrated int64
+	var processed int64
+	var inserted int64
 	for srcRows.Next() {
 		if err := srcRows.Scan(valuePtrs...); err != nil {
 			return fmt.Errorf("scan row from %s: %w", table, err)
@@ -448,16 +482,22 @@ func migrateTable(ctx context.Context, srcDB, tgtDB *sql.DB, table string, tm ta
 				values[i] = dflt
 			}
 		}
-		if _, err := tgtDB.ExecContext(ctx, insertSQL, values...); err != nil {
+		res, err := tgtDB.ExecContext(ctx, insertSQL, values...)
+		if err != nil {
 			return fmt.Errorf("insert into %s: %w", table, err)
 		}
-		migrated++
+		processed++
+		// ON CONFLICT DO NOTHING returns RowsAffected=0 when a row is skipped.
+		// Only count rows that were actually inserted.
+		if n, raErr := res.RowsAffected(); raErr == nil && n > 0 {
+			inserted++
+		}
 	}
 	if err := srcRows.Err(); err != nil {
 		return err
 	}
 
-	fmt.Printf("Migrated %d rows into %s\n", migrated, table)
+	fmt.Printf("Migrated %d rows into %s (%d processed, %d inserted, %d skipped)\n", inserted, table, processed, inserted, processed-inserted)
 	return nil
 }
 

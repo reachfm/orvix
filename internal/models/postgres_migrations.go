@@ -181,6 +181,7 @@ func postgresTables() []string {
 			deleted_at TIMESTAMP,
 			tenant_id INTEGER NOT NULL,
 			domain_id INTEGER NOT NULL,
+			local_part TEXT NOT NULL DEFAULT '',
 			email TEXT NOT NULL,
 			password_hash TEXT NOT NULL,
 			quota_mb INTEGER DEFAULT 0,
