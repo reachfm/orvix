@@ -5,16 +5,25 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
-// Repository persists trust state to SQLite.
+// Repository persists trust state to the database.
 type Repository struct {
-	db *sql.DB
+	db      *sql.DB
+	dialect *dbdialect.Info
 }
 
 // NewRepository creates a trust repository.
 func NewRepository(db *sql.DB) *Repository {
-	return &Repository{db: db}
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		// Fall back to SQLite for backward compatibility with tests
+		// that open a raw *sql.DB without a registered driver name.
+		dialect = dbdialect.FromDriver("sqlite")
+	}
+	return &Repository{db: db, dialect: dialect}
 }
 
 // ── Lockouts ─────────────────────────────────────────────
@@ -22,7 +31,8 @@ func NewRepository(db *sql.DB) *Repository {
 // LoadLockouts loads all active lockouts from the database.
 func (r *Repository) LoadLockouts(ctx context.Context) (map[string]time.Time, error) {
 	result := make(map[string]time.Time)
-	rows, err := r.db.QueryContext(ctx, "SELECT key, expires_at FROM coremail_lockouts WHERE expires_at > datetime('now')")
+	rows, err := r.db.QueryContext(ctx,
+		"SELECT key, expires_at FROM coremail_lockouts WHERE expires_at > "+r.dialect.NowExpr())
 	if err != nil {
 		return result, err
 	}
@@ -40,21 +50,25 @@ func (r *Repository) LoadLockouts(ctx context.Context) (map[string]time.Time, er
 
 // SaveLockout persists a lockout record.
 func (r *Repository) SaveLockout(ctx context.Context, key string, expiresAt time.Time) error {
-	_, err := r.db.ExecContext(ctx,
-		`INSERT OR REPLACE INTO coremail_lockouts (key, expires_at, created_at) VALUES (?, ?, datetime('now'))`,
-		key, expiresAt)
+	q := r.dialect.Upsert(
+		"coremail_lockouts",
+		[]string{"key", "expires_at", "created_at"},
+		[]string{"key"},
+		[]string{"expires_at", "created_at"},
+	)
+	_, err := r.db.ExecContext(ctx, q, key, expiresAt, time.Now().UTC())
 	return err
 }
 
 // DeleteLockout removes a lockout record.
 func (r *Repository) DeleteLockout(ctx context.Context, key string) error {
-	_, err := r.db.ExecContext(ctx, "DELETE FROM coremail_lockouts WHERE key=?", key)
+	_, err := r.db.ExecContext(ctx, "DELETE FROM coremail_lockouts WHERE key="+r.dialect.Placeholder(1), key)
 	return err
 }
 
 // DeleteExpiredLockouts removes expired lockout records.
 func (r *Repository) DeleteExpiredLockouts(ctx context.Context) (int64, error) {
-	res, err := r.db.ExecContext(ctx, "DELETE FROM coremail_lockouts WHERE expires_at <= datetime('now')")
+	res, err := r.db.ExecContext(ctx, "DELETE FROM coremail_lockouts WHERE expires_at <= "+r.dialect.NowExpr())
 	if err != nil {
 		return 0, err
 	}
@@ -109,9 +123,13 @@ func (r *Repository) LoadTrustScores(ctx context.Context) (*TrustScores, error) 
 
 // SaveTrustScore persists a trust score record.
 func (r *Repository) SaveTrustScore(ctx context.Context, scope, target, reason string, score TrustScore) error {
-	_, err := r.db.ExecContext(ctx,
-		`INSERT OR REPLACE INTO coremail_trust_scores (scope, target, score, reason, updated_at) VALUES (?, ?, ?, ?, datetime('now'))`,
-		scope, target, int(score), reason)
+	q := r.dialect.Upsert(
+		"coremail_trust_scores",
+		[]string{"scope", "target", "score", "reason", "updated_at"},
+		[]string{"scope", "target"},
+		[]string{"score", "reason", "updated_at"},
+	)
+	_, err := r.db.ExecContext(ctx, q, scope, target, int(score), reason, time.Now().UTC())
 	return err
 }
 

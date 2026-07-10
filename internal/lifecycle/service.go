@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 // BackupCreator creates a safety backup before upgrade.
@@ -41,6 +43,7 @@ type HealthChecker interface {
 // Service provides lifecycle management.
 type Service struct {
 	db             *sql.DB
+	dialect        *dbdialect.Info
 	backupCreator  BackupCreator
 	backupRestorer BackupRestorer
 	policy         PolicyLoader
@@ -51,7 +54,11 @@ type Service struct {
 
 // NewService creates a lifecycle service.
 func NewService(db *sql.DB) *Service {
-	return &Service{db: db}
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
+	return &Service{db: db, dialect: dialect}
 }
 
 // SetBackupCreator attaches a backup creator for safety snapshots.
@@ -74,8 +81,14 @@ func (s *Service) SetHealthChecker(h HealthChecker) { s.health = h }
 
 // EnsureSchema creates required tables.
 func (s *Service) EnsureSchema(ctx context.Context) error {
+	// PostgreSQL schema is created by models.MigrateAllPostgres.
+	if s.dialect.IsPostgres() {
+		return nil
+	}
 	for _, stmt := range schema {
-		if _, err := s.db.ExecContext(ctx, stmt); err != nil { return err }
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -258,15 +271,25 @@ func (s *Service) UpgradeHistory(ctx context.Context) ([]UpgradeRecord, error) {
 // ── Internal ────────────────────────────────────────────
 
 func (s *Service) saveUpgrade(ctx context.Context, r *UpgradeRecord) {
+	var id uint
+	if s.dialect.IsPostgres() {
+		err := s.db.QueryRowContext(ctx,
+			"INSERT INTO upgrade_history (from_version, to_version, status, started_at) VALUES ($1, $2, $3, $4) RETURNING id",
+			r.FromVersion, r.ToVersion, string(r.Status), r.StartedAt).Scan(&id)
+		if err == nil {
+			r.ID = id
+		}
+		return
+	}
 	s.db.ExecContext(ctx, "INSERT INTO upgrade_history (from_version, to_version, status, started_at) VALUES (?, ?, ?, ?)",
 		r.FromVersion, r.ToVersion, string(r.Status), r.StartedAt)
 	// Set ID from last insert (best-effort).
-	var id uint
 	s.db.QueryRowContext(ctx, "SELECT last_insert_rowid()").Scan(&id)
 	r.ID = id
 }
 
 func (s *Service) updateUpgrade(ctx context.Context, r *UpgradeRecord) {
-	s.db.ExecContext(ctx, "UPDATE upgrade_history SET status=?, completed_at=? WHERE id=?",
+	s.db.ExecContext(ctx,
+		"UPDATE upgrade_history SET status="+s.dialect.Placeholder(1)+", completed_at="+s.dialect.Placeholder(2)+" WHERE id="+s.dialect.Placeholder(3),
 		string(r.Status), r.CompletedAt, r.ID)
 }

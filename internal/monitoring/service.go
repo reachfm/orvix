@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 // DataSources provides access to all subsystems for monitoring.
@@ -57,8 +59,9 @@ type DataSources struct {
 
 // Service provides monitoring and alerting.
 type Service struct {
-	db  *sql.DB
-	src *DataSources
+	db      *sql.DB
+	dialect *dbdialect.Info
+	src     *DataSources
 
 	// startTime is captured at NewService so the uptime is meaningful
 	// even when the caller forgets to set DataSources.ServiceStartedAt.
@@ -91,8 +94,13 @@ func NewService(db *sql.DB, src *DataSources) *Service {
 	if src == nil {
 		src = &DataSources{}
 	}
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
 	return &Service{
 		db:        db,
+		dialect:   dialect,
 		src:       src,
 		startTime: time.Now().UTC(),
 	}
@@ -100,6 +108,10 @@ func NewService(db *sql.DB, src *DataSources) *Service {
 
 // EnsureSchema creates required tables.
 func (s *Service) EnsureSchema(ctx context.Context) error {
+	// PostgreSQL schema is created by models.MigrateAllPostgres.
+	if s.dialect.IsPostgres() {
+		return nil
+	}
 	for _, stmt := range schema {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			return err
@@ -690,7 +702,7 @@ func (s *Service) resolveAll(ctx context.Context) {
 	if s.db == nil {
 		return
 	}
-	s.db.ExecContext(ctx, "UPDATE monitoring_alerts SET active=0, resolved_at=datetime('now') WHERE active=1")
+	s.db.ExecContext(ctx, "UPDATE monitoring_alerts SET active=0, resolved_at="+s.dialect.NowExpr()+" WHERE active=1")
 }
 
 // alertMu serializes EvaluateAlerts / saveAlert / resolveAll so two
@@ -747,7 +759,8 @@ func (s *Service) ResolveAlert(ctx context.Context, id uint) (int64, error) {
 	if s.db == nil {
 		return 0, errors.New("monitoring: no database configured")
 	}
-	res, err := s.db.ExecContext(ctx, "UPDATE monitoring_alerts SET active=0, resolved_at=datetime('now') WHERE id=? AND active=1", id)
+	res, err := s.db.ExecContext(ctx,
+		"UPDATE monitoring_alerts SET active=0, resolved_at="+s.dialect.NowExpr()+" WHERE id="+s.dialect.Placeholder(1)+" AND active=1", id)
 	if err != nil {
 		return 0, err
 	}

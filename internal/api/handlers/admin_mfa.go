@@ -333,7 +333,7 @@ func (h *Handler) MFALoginVerify(c fiber.Ctx) error {
 		}
 		// Mark recovery code as used (one-time use). The used_at predicate
 		// keeps concurrent redemption attempts from reusing the same code.
-		res, err := sqlDB.Exec(`UPDATE mfa_recovery_codes SET used_at = datetime('now') WHERE id = ? AND used_at IS NULL`, recoveryID)
+		res, err := sqlDB.Exec(`UPDATE mfa_recovery_codes SET used_at = ? WHERE id = ? AND used_at IS NULL`, time.Now().UTC(), recoveryID)
 		if err != nil {
 			h.logger.Error("failed to mark recovery code used", zap.Error(err))
 			return c.Status(500).JSON(fiber.Map{"error": "failed to redeem recovery code"})

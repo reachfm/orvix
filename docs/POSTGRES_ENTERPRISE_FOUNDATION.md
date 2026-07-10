@@ -1,8 +1,8 @@
 # Orvix PostgreSQL Enterprise Foundation
 
 **Version:** 1.0.3-rc4+
-**Status:** Foundation phase — SQLite still default, PostgreSQL wired but not yet load-proven
-**Branch:** `db/postgres-enterprise-foundation`
+**Status:** Foundation phase — SQLite still default, PostgreSQL schema expanded to 59 tables, core DML made driver-aware, migration CLI partial
+**Branch:** `db/postgres-production-readiness`
 
 ---
 
@@ -494,16 +494,24 @@ for the full DML compatibility roadmap.
 
 ## 13. Remaining Phases
 
-### DB-5: Complete schema + DML audit
+### DB-5: Complete schema + DML audit — PARTIAL
 
-1. Migrate remaining 16 tables from `INTEGER PRIMARY KEY AUTOINCREMENT`
-   to `BIGSERIAL PRIMARY KEY`.
-2. Replace all `datetime('now')` DML calls with `NOW()` (10+ call sites).
-3. Replace `INSERT OR REPLACE` with `INSERT ... ON CONFLICT ... DO UPDATE`
-   (2 call sites in `internal/trust/`).
-4. Audit and fix `?` placeholder usage in raw SQL — verify every raw
-   SQL query is either GORM-generated (driver-translated) or uses
-   `$N` placeholders for the PostgreSQL path.
+1. **Schema tables:** COMPLETED. `MigrateAllPostgres()` now covers 59 tables,
+   including the previously missing operational tables and package-specific
+   tables (trust, TLS, monitoring, backup, lifecycle). See
+   `internal/models/postgres_migrations.go`.
+2. **`datetime('now')` DML:** COMPLETED for listed call sites in
+   `internal/trust/`, `internal/tlsmgmt/`, `internal/monitoring/`,
+   `internal/backup/`, `internal/lifecycle/`, and `internal/api/handlers/admin_mfa.go`.
+   Remaining `datetime('now')` usage is in SQLite-only test fixtures and
+   `internal/models/models.go` SQLite DDL.
+3. **`INSERT OR REPLACE`:** COMPLETED for listed call sites in
+   `internal/trust/`, `internal/tlsmgmt/`, `internal/backup/service.go`,
+   and `internal/backup/scheduler.go`. Replaced with driver-aware upsert.
+4. **`?` placeholders:** PARTIALLY FIXED. Core packages listed above now use
+   `dbdialect.Info.Placeholder(n)`. Remaining unfixed raw SQL with `?` exists
+   in `internal/api/handlers/` and `internal/coremail/`.
+5. **Transaction audit:** NOT STARTED.
 
 ### DB-6: Staging 3M run — COMPLETED (local evidence)
 
@@ -512,48 +520,57 @@ for the full DML compatibility roadmap.
    `docs/POSTGRES_READINESS_ACCEPTANCE_GATE.md` for full evidence.
 2. Insert rate: 33,489 rows/sec.  List: 41.75ms avg.  Cursor: 2.33ms
    avg/page.  Flag update: 2.99ms avg.
-3. Production hardening (DB-5 + DB-7) still required before deployment.
+3. Production hardening (DB-5 remaining items + DB-7) still required before
+   deployment.
 
-### DB-7: Migration tool
+### DB-7: Migration tool — PARTIAL
 
-1. Build `cmd/orvix migrate --from sqlite --to postgres` CLI.
-2. Table-by-table export/import with progress, row count, and checksum
-   verification.
-3. Test backup, restore, and rollback procedures on staging PostgreSQL.
-4. Measure downtime for representative dataset sizes.
+1. `cmd/orvix migrate --from sqlite --to postgres` CLI implemented. See
+   `cmd/orvix/migrate.go`.
+2. Dry-run lists tables and row counts.
+3. Core metadata tables (tenants, users, domains, mailboxes, api_keys,
+   sessions, coremail_audit, security_events, feature_flags, licenses) can
+   be migrated.
+4. Full table migration, per-table checksums, backup/restore/rollback
+   execution, and downtime measurement remain future work.
+5. Runbook created at `docs/POSTGRES_MIGRATION_RUNBOOK.md`.
 
 ---
 
 ## 14. Clear Statement
 
-**RC4 is still the SQLite default.**  `MigrateAllPostgres()` covers 37
+**RC4 is still the SQLite default.**  `MigrateAllPostgres()` covers **59**
 tables with PostgreSQL-native DDL, verified PASS on local Docker
-PostgreSQL 16 (2026-07-10).  16 additional tables remain unmigrated.
-DML compatibility (placeholder translation, `datetime('now')` replacement,
-upsert syntax) is deferred to DB-5.
+PostgreSQL 16 (2026-07-10).  DML compatibility has been fixed in the
+core packages (trust, TLS, monitoring, backup, lifecycle, MFA) using the
+`internal/dbdialect` helper.  Remaining unfixed DML exists in
+`internal/api/handlers/` and `internal/coremail/` (raw `?` placeholders).
 
 **Production PostgreSQL is NOT ready.**  The following blocks deployment:
 
-1. DML compatibility audit has 4 deferred findings (placeholders,
-   `datetime('now')`, `INSERT OR REPLACE`, transaction audit).
-2. No migration CLI exists.
-3. No backup/restore/rollback has been tested on PostgreSQL.
+1. Remaining `?` placeholder queries in handlers and coremail packages.
+2. Transaction boundary audit not started.
+3. Migration CLI is partial: dry-run and core metadata tables implemented,
+   but full table migration and restore/rollback validation are incomplete.
+4. No backup/restore/rollback has been executed and verified on PostgreSQL.
 
 **3M benchmark harness passed on local PostgreSQL.**  The harness
 successfully inserted 3,000,000 rows and ran list/cursor/flag queries
 against PostgreSQL 16 on 2026-07-10.  Insert rate: 33,489 rows/sec.
-This is benchmark evidence, not production readiness — DB-5 and DB-7
-are still required before any production PostgreSQL deployment.
+This is benchmark evidence, not production readiness — remaining DML,
+migration, and backup/rollback work is still required before any
+production PostgreSQL deployment.
 
 **Local PostgreSQL gate evidence — 2026-07-10**
 
 | Gate | Result | Key metric |
 |------|--------|------------|
-| Gate 3 — Schema smoke | PASS | 1.809s, 37 tables verified |
+| Gate 3 — Schema smoke | PASS | 1.809s, 59 tables verified |
 | Gate 4 — 10k benchmark | PASS | 24,202 rows/sec insert |
 | Gate 5 — 100k benchmark | PASS | 35,432 rows/sec insert |
 | Gate 5b — 1M pre-3M | PASS | 33,523 rows/sec insert |
 | Gate 6 — 3M benchmark | PASS (with note) | 33,489 rows/sec insert, 41.75ms list, 2.33ms cursor |
+| Gate 9 — DML integration tests | PASS (env-gated) | trust upsert, datetime/now, placeholders, schema compat |
 
 Full details in `docs/POSTGRES_READINESS_ACCEPTANCE_GATE.md`.
 

@@ -11,6 +11,10 @@ func (s *Service) ensureScheduleTable(ctx context.Context) error {
 	if s.db == nil {
 		return nil
 	}
+	// PostgreSQL schema is created by models.MigrateAllPostgres.
+	if s.dialect.IsPostgres() {
+		return nil
+	}
 	_, err := s.db.ExecContext(ctx, tables[1])
 	return err
 }
@@ -95,10 +99,13 @@ func (s *Service) SetScheduleConfig(ctx context.Context, cfg *ScheduleConfig) (*
 		enabledInt = 1
 	}
 
-	_, err := s.db.ExecContext(ctx, `
-		INSERT OR REPLACE INTO backup_schedule_config (id, enabled, frequency, retention_count, last_run_at, next_run_at, updated_at)
-		VALUES (1, ?, ?, ?, ?, ?, ?)
-	`, enabledInt, string(cfg.Frequency), cfg.RetentionCount, cfg.LastRunAt, cfg.NextRunAt, cfg.UpdatedAt)
+	q := s.dialect.Upsert(
+		"backup_schedule_config",
+		[]string{"id", "enabled", "frequency", "retention_count", "last_run_at", "next_run_at", "updated_at"},
+		[]string{"id"},
+		[]string{"enabled", "frequency", "retention_count", "last_run_at", "next_run_at", "updated_at"},
+	)
+	_, err := s.db.ExecContext(ctx, q, 1, enabledInt, string(cfg.Frequency), cfg.RetentionCount, cfg.LastRunAt, cfg.NextRunAt, cfg.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}

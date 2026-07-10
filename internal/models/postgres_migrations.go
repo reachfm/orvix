@@ -20,13 +20,28 @@ import (
 // rows in both databases because NULLs are distinct in UNIQUE
 // constraints per the SQL standard.
 //
-// Tables created (17):
+// Tables created (59):
 //
-//	licenses, feature_flags, tenants, users, domains, mailboxes,
-//	api_keys, sessions, coremail_audit, security_events,
-//	mfa_recovery_codes, coremail_mailboxes,
+//	licenses, feature_flags, module_versions, tenants, users, domains,
+//	mailboxes, api_keys, sessions, coremail_audit, security_events,
+//	mfa_recovery_codes, firewall_rules, firewall_logs, guardian_logs,
+//	heal_histories, update_histories, coremail_mailboxes,
 //	coremail_folders, coremail_messages, coremail_attachments,
-//	coremail_queue, coremail_delivery_attempts
+//	coremail_queue, coremail_delivery_attempts, resellers,
+//	l_dap_configs, s_s_o_configs, alert_configs, provisioned_domains,
+//	coremail_domains, coremail_aliases, coremail_account_classes,
+//	coremail_admin_groups, coremail_admin_group_members,
+//	coremail_domain_groups, coremail_domain_group_members,
+//	coremail_mailing_lists, coremail_mailing_list_members,
+//	coremail_public_folders, coremail_public_folder_members,
+//	coremail_acl_rules, coremail_log_rules, coremail_quarantine_index,
+//	coremail_dkim_config, coremail_acceptance_rules,
+//	coremail_incoming_msg_rules, coremail_migration_sources,
+//	coremail_migration_source_secrets, coremail_backup_targets,
+//	coremail_backup_target_secrets, coremail_uploaded_certificates,
+//	coremail_lockouts, coremail_trust_scores, tls_certificates,
+//	monitoring_alerts, monitoring_alert_deliveries, backup_registry,
+//	backup_schedule_config, upgrade_history, coremail_versions
 //
 // This function is opt-in.  It is NOT called from cmd/orvix/main.go.
 // SQLite deployments are unaffected.
@@ -686,6 +701,259 @@ func postgresTables() []string {
 			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
 			deleted_at TIMESTAMP
 		)`,
+
+		// --- Models from MigrateAll (module/lifecycle/trust/security) ---
+
+		`CREATE TABLE IF NOT EXISTS module_versions (
+			id BIGSERIAL PRIMARY KEY,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			deleted_at TIMESTAMP,
+			module_id TEXT NOT NULL,
+			version TEXT NOT NULL,
+			installed_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			checksum TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'active',
+			changelog TEXT
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS firewall_rules (
+			id BIGSERIAL PRIMARY KEY,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			deleted_at TIMESTAMP,
+			name TEXT NOT NULL,
+			condition TEXT NOT NULL,
+			action TEXT NOT NULL,
+			priority INTEGER NOT NULL DEFAULT 0,
+			enabled BOOLEAN NOT NULL DEFAULT true
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS firewall_logs (
+			id BIGSERIAL PRIMARY KEY,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			deleted_at TIMESTAMP,
+			ip TEXT NOT NULL,
+			domain TEXT NOT NULL,
+			sender TEXT,
+			recipient TEXT,
+			action TEXT NOT NULL,
+			reason TEXT,
+			threat_score DOUBLE PRECISION NOT NULL DEFAULT 0
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS guardian_logs (
+			id BIGSERIAL PRIMARY KEY,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			deleted_at TIMESTAMP,
+			message_id TEXT NOT NULL,
+			threat_score DOUBLE PRECISION NOT NULL,
+			verdict TEXT NOT NULL,
+			confidence DOUBLE PRECISION NOT NULL DEFAULT 0,
+			reasons TEXT,
+			action TEXT NOT NULL
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS heal_histories (
+			id BIGSERIAL PRIMARY KEY,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			deleted_at TIMESTAMP,
+			check_name TEXT NOT NULL,
+			severity TEXT NOT NULL,
+			issue TEXT NOT NULL,
+			fix_applied TEXT,
+			success BOOLEAN NOT NULL
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS update_histories (
+			id BIGSERIAL PRIMARY KEY,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			deleted_at TIMESTAMP,
+			module_id TEXT NOT NULL,
+			from_version TEXT NOT NULL,
+			to_version TEXT NOT NULL,
+			status TEXT NOT NULL,
+			backup_path TEXT
+		)`,
+
+		// --- Admin enterprise v2 group/list/folder/rule tables ---
+
+		`CREATE TABLE IF NOT EXISTS coremail_domain_groups (
+			id BIGSERIAL PRIMARY KEY,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			name TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			color TEXT NOT NULL DEFAULT '#1f6feb',
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			deleted_at TIMESTAMP
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS coremail_domain_group_members (
+			id BIGSERIAL PRIMARY KEY,
+			group_id INTEGER NOT NULL,
+			domain_id INTEGER NOT NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW()
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS coremail_mailing_lists (
+			id BIGSERIAL PRIMARY KEY,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			domain_id INTEGER NOT NULL,
+			address TEXT NOT NULL,
+			display_name TEXT NOT NULL DEFAULT '',
+			description TEXT NOT NULL DEFAULT '',
+			moderation_required BOOLEAN NOT NULL DEFAULT false,
+			archive_enabled BOOLEAN NOT NULL DEFAULT false,
+			subscription_policy TEXT NOT NULL DEFAULT 'closed',
+			max_members INTEGER NOT NULL DEFAULT 0,
+			status TEXT NOT NULL DEFAULT 'active',
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			deleted_at TIMESTAMP
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS coremail_mailing_list_members (
+			id BIGSERIAL PRIMARY KEY,
+			list_id INTEGER NOT NULL,
+			address TEXT NOT NULL,
+			display_name TEXT NOT NULL DEFAULT '',
+			role TEXT NOT NULL DEFAULT 'subscriber',
+			created_at TIMESTAMP NOT NULL DEFAULT NOW()
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS coremail_public_folders (
+			id BIGSERIAL PRIMARY KEY,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			owner_mailbox_id INTEGER NOT NULL,
+			folder_path TEXT NOT NULL,
+			display_name TEXT NOT NULL DEFAULT '',
+			description TEXT NOT NULL DEFAULT '',
+			read_only BOOLEAN NOT NULL DEFAULT false,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			deleted_at TIMESTAMP
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS coremail_public_folder_members (
+			id BIGSERIAL PRIMARY KEY,
+			folder_id INTEGER NOT NULL,
+			mailbox_id INTEGER NOT NULL,
+			permission TEXT NOT NULL DEFAULT 'readonly',
+			created_at TIMESTAMP NOT NULL DEFAULT NOW()
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS coremail_log_rules (
+			id BIGSERIAL PRIMARY KEY,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			name TEXT NOT NULL,
+			source TEXT NOT NULL DEFAULT 'journald',
+			severity TEXT NOT NULL DEFAULT 'info',
+			match_pattern TEXT NOT NULL DEFAULT '',
+			destination TEXT NOT NULL DEFAULT '',
+			enabled BOOLEAN NOT NULL DEFAULT true,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			deleted_at TIMESTAMP
+		)`,
+
+		// --- Package-specific schemas (trust, tlsmgmt, monitoring, backup, lifecycle) ---
+
+		`CREATE TABLE IF NOT EXISTS coremail_lockouts (
+			key TEXT PRIMARY KEY,
+			expires_at TIMESTAMP NOT NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW()
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS coremail_trust_scores (
+			id BIGSERIAL PRIMARY KEY,
+			scope TEXT NOT NULL,
+			target TEXT NOT NULL,
+			score INTEGER NOT NULL DEFAULT 0,
+			reason TEXT NOT NULL DEFAULT '',
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS tls_certificates (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL DEFAULT '',
+			cert_path TEXT NOT NULL DEFAULT '',
+			key_path TEXT NOT NULL DEFAULT '',
+			common_name TEXT NOT NULL DEFAULT '',
+			sans TEXT NOT NULL DEFAULT '',
+			issuer TEXT NOT NULL DEFAULT '',
+			serial_number TEXT NOT NULL DEFAULT '',
+			not_before TIMESTAMP,
+			not_after TIMESTAMP,
+			fingerprint_sha256 TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'unknown',
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS monitoring_alerts (
+			id BIGSERIAL PRIMARY KEY,
+			category TEXT NOT NULL DEFAULT '',
+			severity TEXT NOT NULL DEFAULT '',
+			title TEXT NOT NULL DEFAULT '',
+			message TEXT NOT NULL DEFAULT '',
+			source TEXT NOT NULL DEFAULT '',
+			active BOOLEAN NOT NULL DEFAULT true,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			resolved_at TIMESTAMP
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS monitoring_alert_deliveries (
+			id BIGSERIAL PRIMARY KEY,
+			alert_title TEXT NOT NULL DEFAULT '',
+			alert_severity TEXT NOT NULL DEFAULT '',
+			alert_category TEXT NOT NULL DEFAULT '',
+			provider TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+			detail TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT NOW()
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS backup_registry (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'pending',
+			size_bytes INTEGER NOT NULL DEFAULT 0,
+			sha256 TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			completed_at TIMESTAMP
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS backup_schedule_config (
+			id INTEGER PRIMARY KEY DEFAULT 1,
+			enabled BOOLEAN NOT NULL DEFAULT false,
+			frequency TEXT NOT NULL DEFAULT 'manual',
+			retention_count INTEGER NOT NULL DEFAULT 10,
+			last_run_at TIMESTAMP,
+			next_run_at TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS upgrade_history (
+			id BIGSERIAL PRIMARY KEY,
+			from_version TEXT NOT NULL DEFAULT '',
+			to_version TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'pending',
+			started_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			completed_at TIMESTAMP
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS coremail_versions (
+			id BIGSERIAL PRIMARY KEY,
+			version TEXT NOT NULL DEFAULT '',
+			installed_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			installed_by TEXT NOT NULL DEFAULT '',
+			notes TEXT NOT NULL DEFAULT ''
+		)`,
 	}
 }
 
@@ -853,6 +1121,84 @@ func postgresIndexes() []string {
 		// Uploaded certificates
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_uploaded_certs_tenant_name ON coremail_uploaded_certificates (tenant_id, name)`,
 		idx("idx_uploaded_certs_tenant_id", "coremail_uploaded_certificates", "tenant_id"),
+
+		// --- Models from MigrateAll ---
+
+		// Module versions
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_module_versions_module_id ON module_versions (module_id)`,
+		idx("idx_module_versions_deleted_at", "module_versions", "deleted_at"),
+
+		// Firewall
+		idx("idx_firewall_rules_deleted_at", "firewall_rules", "deleted_at"),
+		idx("idx_firewall_rules_priority", "firewall_rules", "priority"),
+		idx("idx_firewall_logs_deleted_at", "firewall_logs", "deleted_at"),
+		idx("idx_firewall_logs_ip", "firewall_logs", "ip"),
+		idx("idx_firewall_logs_domain", "firewall_logs", "domain"),
+
+		// Guardian / heal / update
+		idx("idx_guardian_logs_deleted_at", "guardian_logs", "deleted_at"),
+		idx("idx_guardian_logs_message_id", "guardian_logs", "message_id"),
+		idx("idx_heal_histories_deleted_at", "heal_histories", "deleted_at"),
+		idx("idx_heal_histories_check_name", "heal_histories", "check_name"),
+		idx("idx_update_histories_deleted_at", "update_histories", "deleted_at"),
+		idx("idx_update_histories_module_id", "update_histories", "module_id"),
+
+		// --- Admin enterprise v2 group/list/folder/rule tables ---
+
+		// Domain groups
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_domain_groups_tenant_name ON coremail_domain_groups (tenant_id, name)`,
+		idx("idx_domain_groups_tenant_id", "coremail_domain_groups", "tenant_id"),
+		idx("idx_domain_groups_deleted_at", "coremail_domain_groups", "deleted_at"),
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_domain_group_members_group_domain ON coremail_domain_group_members (group_id, domain_id)`,
+		idx("idx_domain_group_members_group_id", "coremail_domain_group_members", "group_id"),
+
+		// Mailing lists
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_mailing_lists_domain_address ON coremail_mailing_lists (domain_id, address)`,
+		idx("idx_mailing_lists_domain_id", "coremail_mailing_lists", "domain_id"),
+		idx("idx_mailing_lists_deleted_at", "coremail_mailing_lists", "deleted_at"),
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_mailing_list_members_list_address ON coremail_mailing_list_members (list_id, address)`,
+		idx("idx_mailing_list_members_list_id", "coremail_mailing_list_members", "list_id"),
+
+		// Public folders
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_public_folders_owner_path ON coremail_public_folders (owner_mailbox_id, folder_path)`,
+		idx("idx_public_folders_owner_id", "coremail_public_folders", "owner_mailbox_id"),
+		idx("idx_public_folders_deleted_at", "coremail_public_folders", "deleted_at"),
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_public_folder_members_folder_mailbox ON coremail_public_folder_members (folder_id, mailbox_id)`,
+		idx("idx_public_folder_members_folder_id", "coremail_public_folder_members", "folder_id"),
+
+		// Log rules
+		idx("idx_log_rules_tenant_id", "coremail_log_rules", "tenant_id"),
+		idx("idx_log_rules_deleted_at", "coremail_log_rules", "deleted_at"),
+
+		// --- Package-specific schemas ---
+
+		// Trust
+		idx("idx_coremail_lockouts_expires_at", "coremail_lockouts", "expires_at"),
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_trust_scores_scope_target ON coremail_trust_scores (scope, target)`,
+		idx("idx_trust_scores_scope", "coremail_trust_scores", "scope"),
+
+		// TLS management
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_tls_certificates_fingerprint ON tls_certificates (fingerprint_sha256)`,
+		idx("idx_tls_certificates_status", "tls_certificates", "status"),
+
+		// Monitoring
+		idx("idx_monitoring_alerts_category", "monitoring_alerts", "category"),
+		idx("idx_monitoring_alerts_severity", "monitoring_alerts", "severity"),
+		idx("idx_monitoring_alerts_active", "monitoring_alerts", "active"),
+		idx("idx_monitoring_alerts_created_at", "monitoring_alerts", "created_at"),
+		idx("idx_monitoring_alert_deliveries_created_at", "monitoring_alert_deliveries", "created_at"),
+		idx("idx_monitoring_alert_deliveries_provider", "monitoring_alert_deliveries", "provider"),
+
+		// Backup
+		idx("idx_backup_registry_status", "backup_registry", "status"),
+		idx("idx_backup_registry_created_at", "backup_registry", "created_at"),
+		idx("idx_backup_schedule_enabled", "backup_schedule_config", "enabled"),
+
+		// Lifecycle
+		idx("idx_upgrade_history_status", "upgrade_history", "status"),
+		idx("idx_upgrade_history_started_at", "upgrade_history", "started_at"),
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_coremail_versions_version ON coremail_versions (version)`,
+		idx("idx_coremail_versions_installed_at", "coremail_versions", "installed_at"),
 	}
 }
 
@@ -869,20 +1215,27 @@ func PostgresSchemaCompatible(db *gorm.DB, tableSchema string) error {
 	}
 
 	critical := []string{
-		"licenses", "feature_flags", "tenants", "users", "domains",
+		"licenses", "feature_flags", "module_versions", "tenants", "users", "domains",
 		"mailboxes", "api_keys", "sessions", "coremail_audit",
-		"security_events", "mfa_recovery_codes", "coremail_mailboxes",
-		"coremail_folders", "coremail_messages", "coremail_attachments",
-		"coremail_queue", "coremail_delivery_attempts",
+		"security_events", "mfa_recovery_codes", "firewall_rules",
+		"firewall_logs", "guardian_logs", "heal_histories", "update_histories",
+		"coremail_mailboxes", "coremail_folders", "coremail_messages",
+		"coremail_attachments", "coremail_queue", "coremail_delivery_attempts",
 		"resellers", "l_dap_configs", "s_s_o_configs", "alert_configs",
 		"provisioned_domains", "coremail_domains", "coremail_aliases",
 		"coremail_account_classes", "coremail_admin_groups",
-		"coremail_admin_group_members", "coremail_acl_rules",
-		"coremail_quarantine_index", "coremail_dkim_config",
-		"coremail_acceptance_rules", "coremail_incoming_msg_rules",
-		"coremail_migration_sources", "coremail_migration_source_secrets",
-		"coremail_backup_targets", "coremail_backup_target_secrets",
-		"coremail_uploaded_certificates",
+		"coremail_admin_group_members", "coremail_domain_groups",
+		"coremail_domain_group_members", "coremail_mailing_lists",
+		"coremail_mailing_list_members", "coremail_public_folders",
+		"coremail_public_folder_members", "coremail_acl_rules",
+		"coremail_log_rules", "coremail_quarantine_index",
+		"coremail_dkim_config", "coremail_acceptance_rules",
+		"coremail_incoming_msg_rules", "coremail_migration_sources",
+		"coremail_migration_source_secrets", "coremail_backup_targets",
+		"coremail_backup_target_secrets", "coremail_uploaded_certificates",
+		"coremail_lockouts", "coremail_trust_scores", "tls_certificates",
+		"monitoring_alerts", "monitoring_alert_deliveries", "backup_registry",
+		"backup_schedule_config", "upgrade_history", "coremail_versions",
 	}
 
 	var missing []string

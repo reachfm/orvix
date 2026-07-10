@@ -45,7 +45,8 @@ func (s *Service) listCompletedBackups(ctx context.Context) ([]Backup, error) {
 	if s.db == nil {
 		return nil, nil
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, status, size_bytes, sha256, created_at, completed_at FROM backup_registry WHERE status = ? ORDER BY created_at DESC`, string(StatusCompleted))
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT id, name, status, size_bytes, sha256, created_at, completed_at FROM backup_registry WHERE status = "+s.dialect.Placeholder(1)+" ORDER BY created_at DESC", string(StatusCompleted))
 	if err != nil {
 		return nil, err
 	}

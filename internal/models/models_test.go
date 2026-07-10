@@ -349,7 +349,7 @@ func TestCriticalIndexesExist(t *testing.T) {
 
 // TestPostgresProductionSchemaCompat creates the PostgreSQL-native
 // production schema via MigrateAllPostgres inside an isolated schema
-// and verifies all 17 core tables and their indexes exist.
+// and verifies all 59 core tables and their indexes exist.
 //
 // NEVER drops public tables — uses an isolated schema:
 //   orvix_pg_test_<timestamp>
@@ -411,11 +411,11 @@ func TestPostgresProductionSchemaCompat(t *testing.T) {
 		t.Fatalf("MigrateAllPostgres: %v", err)
 	}
 
-	// Verify all 17 core tables exist in the test schema.
+	// Verify all 59 core tables exist in the test schema.
 	if err := PostgresSchemaCompatible(db, testSchema); err != nil {
 		t.Fatalf("PostgresSchemaCompatible: %v", err)
 	}
-	t.Logf("all 37 postgres tables created in schema %s and verified", testSchema)
+	t.Logf("all 59 postgres tables created in schema %s and verified", testSchema)
 
 	// Insert a representative row to prove DML works.
 	_, err = sqlDB.Exec(
@@ -467,6 +467,15 @@ func TestPostgresProductionSchemaCompat(t *testing.T) {
 		"idx_pg_queue_tenant",
 		// Delivery attempt indexes
 		"idx_pg_del_attempts_entry",
+		// Expanded table indexes
+		"uq_domain_groups_tenant_name",
+		"uq_mailing_lists_domain_address",
+		"uq_public_folders_owner_path",
+		"idx_log_rules_tenant_id",
+		"uq_tls_certificates_fingerprint",
+		"idx_monitoring_alerts_active",
+		"idx_backup_registry_status",
+		"uq_coremail_versions_version",
 	}
 	for _, idxName := range pgIndexes {
 		var count int

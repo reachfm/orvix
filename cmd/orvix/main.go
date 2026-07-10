@@ -92,6 +92,7 @@ Usage:
 
 Commands:
   serve              Start the Orvix runtime (default if no command is given).
+  migrate            Migrate data between database backends. See ` + "`orvix migrate -h`" + `.
   version [--full]   Print version metadata and exit. Does not touch config,
                      database, migrations, modules, or listeners.
   help, -h, --help   Print this help and exit. Same fast-path as version.
@@ -122,6 +123,17 @@ func main() {
 	// promote this to flag.Parse or a small subcommand multiplexer.
 	if handled, exit := handleMetadataArgs(os.Args[1:]); handled {
 		os.Exit(exit)
+	}
+
+	// Dispatch non-server subcommands before booting config/DB/runtime.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "migrate":
+			os.Exit(migrateCommand(os.Args[2:]))
+		case "serve":
+			// fall through to normal startup
+			_ = 0
+		}
 	}
 
 	logger, err := config.NewLogger(&config.LoggingConfig{

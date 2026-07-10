@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 // defaultStagingRoot is the directory under which restore staging
@@ -37,6 +39,7 @@ type Service struct {
 	basePath       string
 	stagingRoot    string
 	db             *sql.DB
+	dialect        *dbdialect.Info
 	mailStoreDB    *sql.DB
 	mailDir        string
 	attachDir      string
@@ -61,10 +64,15 @@ type Service struct {
 
 // NewService creates a backup service.
 func NewService(basePath string, db, mailStoreDB *sql.DB, mailDir, attachDir string) *Service {
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
 	return &Service{
 		basePath:    basePath,
 		stagingRoot: defaultStagingRoot,
 		db:          db,
+		dialect:     dialect,
 		mailStoreDB: mailStoreDB,
 		mailDir:     mailDir,
 		attachDir:   attachDir,
@@ -376,7 +384,8 @@ func (s *Service) createBackupLocked(ctx context.Context, name string) (*Backup,
 		// status because the local files are still valid
 		// for restore via the directory path.
 		if s.db != nil {
-			_, _ = s.db.ExecContext(ctx, `UPDATE backup_registry SET last_test_message=? WHERE id=?`,
+			_, _ = s.db.ExecContext(ctx,
+				fmt.Sprintf("UPDATE backup_registry SET last_test_message=%s WHERE id=%s", s.dialect.Placeholder(1), s.dialect.Placeholder(2)),
 				"archive_failed:"+archiveErr.Error(), backup.ID)
 		}
 	} else if s.postCreateHook != nil {
@@ -405,9 +414,13 @@ func (s *Service) saveToRegistry(ctx context.Context, b *Backup) {
 	if s.db == nil {
 		return
 	}
-	s.db.ExecContext(ctx,
-		`INSERT OR REPLACE INTO backup_registry (id, name, status, size_bytes, sha256, created_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		b.ID, b.Name, string(b.Status), b.SizeBytes, b.SHA256, b.CreatedAt, b.CompletedAt)
+	q := s.dialect.Upsert(
+		"backup_registry",
+		[]string{"id", "name", "status", "size_bytes", "sha256", "created_at", "completed_at"},
+		[]string{"id"},
+		[]string{"name", "status", "size_bytes", "sha256", "created_at", "completed_at"},
+	)
+	s.db.ExecContext(ctx, q, b.ID, b.Name, string(b.Status), b.SizeBytes, b.SHA256, b.CreatedAt, b.CompletedAt)
 }
 
 func (s *Service) populateManifestCounts(ctx context.Context, m *BackupManifest) {
@@ -461,7 +474,8 @@ func (s *Service) getBackupLocked(ctx context.Context, id string) (*Backup, erro
 	if s.db == nil {
 		return s.readFromDisk(id)
 	}
-	row := s.db.QueryRowContext(ctx, "SELECT id, name, status, size_bytes, sha256, created_at, completed_at FROM backup_registry WHERE id=?", id)
+	row := s.db.QueryRowContext(ctx,
+		"SELECT id, name, status, size_bytes, sha256, created_at, completed_at FROM backup_registry WHERE id="+s.dialect.Placeholder(1), id)
 	var b Backup
 	err := row.Scan(&b.ID, &b.Name, &b.Status, &b.SizeBytes, &b.SHA256, &b.CreatedAt, &b.CompletedAt)
 	if err == sql.ErrNoRows {
@@ -510,7 +524,7 @@ func (s *Service) DeleteBackup(ctx context.Context, id string) error {
 		return err
 	}
 	if s.db != nil {
-		s.db.ExecContext(ctx, "DELETE FROM backup_registry WHERE id=?", id)
+		s.db.ExecContext(ctx, "DELETE FROM backup_registry WHERE id="+s.dialect.Placeholder(1), id)
 	}
 	return nil
 }
@@ -753,7 +767,7 @@ func (s *Service) lastCompletedBackupTime(ctx context.Context) (time.Time, error
 	}
 	var t sql.NullString
 	row := s.db.QueryRowContext(ctx,
-		`SELECT MAX(completed_at) FROM backup_registry WHERE status = ?`, string(StatusCompleted))
+		"SELECT MAX(completed_at) FROM backup_registry WHERE status = "+s.dialect.Placeholder(1), string(StatusCompleted))
 	if err := row.Scan(&t); err != nil {
 		return time.Time{}, err
 	}
