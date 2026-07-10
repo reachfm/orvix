@@ -325,6 +325,15 @@ func migrateTable(ctx context.Context, srcDB, tgtDB *sql.DB, table string) error
 		if err := srcRows.Scan(valuePtrs...); err != nil {
 			return fmt.Errorf("scan row from %s: %w", table, err)
 		}
+		// Convert SQLite integer booleans to Go bool for PostgreSQL BOOLEAN columns.
+		for _, idx := range boolColumnIndices(table, columns) {
+			switch v := values[idx].(type) {
+			case int64:
+				values[idx] = v != 0
+			case float64:
+				values[idx] = v != 0
+			}
+		}
 		if _, err := tgtDB.ExecContext(ctx, insertSQL, values...); err != nil {
 			return fmt.Errorf("insert into %s: %w", table, err)
 		}
@@ -356,6 +365,36 @@ func validateIdentifier(name string) error {
 // quoteIdentifier wraps name in double quotes and escapes embedded quotes.
 func quoteIdentifier(name string) string {
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+// boolColumnIndices returns the indices of columns in the given table
+// that are BOOLEAN in the PostgreSQL target but stored as INTEGER 0/1 in SQLite.
+func boolColumnIndices(table string, columns []string) []int {
+	boolCols := map[string][]string{
+		"tenants":             {"active"},
+		"users":               {"active", "email_verified", "mfa_enabled", "deleted"},
+		"domains":             {"is_verified", "is_primary"},
+		"mailboxes":           {"is_verified", "is_primary"},
+		"coremail_mailboxes":  {"is_admin", "is_forwarder", "mfa_enabled", "allow_smtp", "allow_imap", "allow_pop3", "allow_jmap", "allow_webmail"},
+		"coremail_domains":    {"dkim_enabled", "dmarc_enabled", "mtasts_enabled"},
+		"feature_flags":       {"enabled"},
+		"licenses":            {"active"},
+	}
+	names, ok := boolCols[table]
+	if !ok {
+		return nil
+	}
+	set := make(map[string]bool)
+	for _, n := range names {
+		set[n] = true
+	}
+	var indices []int
+	for i, col := range columns {
+		if set[col] {
+			indices = append(indices, i)
+		}
+	}
+	return indices
 }
 
 // tableChecksum returns a simple SHA256 over ordered column hashes for a table.

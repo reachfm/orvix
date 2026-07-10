@@ -65,11 +65,13 @@ func newSQLiteDB(cfg *DatabaseConfig, logger *zap.Logger) (*gorm.DB, error) {
 	// Use our pre-configured connection pool
 	db.ConnPool = sqldb
 
-	logger.Info("database connection established",
-		zap.String("driver", "sqlite"),
-		zap.Int("max_open", 1),
-		zap.Int("max_idle", 1),
-	)
+	if logger != nil {
+		logger.Info("database connection established",
+			zap.String("driver", "sqlite"),
+			zap.Int("max_open", 1),
+			zap.Int("max_idle", 1),
+		)
+	}
 
 	return db, nil
 }
@@ -94,12 +96,14 @@ func newPostgresDB(cfg *DatabaseConfig, logger *zap.Logger) (*gorm.DB, error) {
 	sqlDB.SetMaxIdleConns(cfg.MaxIdle)
 	sqlDB.SetConnMaxLifetime(time.Duration(cfg.MaxLifetime) * time.Second)
 
-	logger.Info("database connection established",
-		zap.String("driver", "postgres"),
-		zap.Int("max_open", cfg.MaxOpen),
-		zap.Int("max_idle", cfg.MaxIdle),
-		zap.Int("max_lifetime", cfg.MaxLifetime),
-	)
+	if logger != nil {
+		logger.Info("database connection established",
+			zap.String("driver", "postgres"),
+			zap.Int("max_open", cfg.MaxOpen),
+			zap.Int("max_idle", cfg.MaxIdle),
+			zap.Int("max_lifetime", cfg.MaxLifetime),
+		)
+	}
 	// Audit log: record driver selection without leaking DSN or credentials.
 	// The DSN is never logged at any level; structured fields (driver, pool)
 	// are safe to surface in monitoring dashboards.

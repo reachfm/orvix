@@ -115,3 +115,95 @@ func TestMigrateDryRunListsRows(t *testing.T) {
 	cleanupDB.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE")
 	cleanupDB.Close()
 }
+
+func TestMigrateRealPostgresWithRowCounts(t *testing.T) {
+	if os.Getenv("ORVIX_RUN_POSTGRES_MIGRATE_TEST") != "1" {
+		t.Skip("set ORVIX_RUN_POSTGRES_MIGRATE_TEST=1 to run postgres migration tests")
+	}
+	if strings.ToLower(strings.TrimSpace(os.Getenv("ORVIX_DB_DRIVER"))) != "postgres" {
+		t.Skip("ORVIX_DB_DRIVER must be postgres")
+	}
+	dsn := strings.TrimSpace(os.Getenv("ORVIX_DB_DSN"))
+	if dsn == "" {
+		t.Skip("ORVIX_DB_DSN is empty")
+	}
+
+	srcDir := t.TempDir()
+	srcPath := filepath.Join(srcDir, "orvix.db")
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = srcPath + "?_loc=auto&_busy_timeout=5000"
+	db, err := config.NewDatabase(&cfg.Database, zap.NewNop())
+	if err != nil {
+		t.Fatalf("open source db: %v", err)
+	}
+	if err := models.MigrateAllRaw(db); err != nil {
+		t.Fatalf("migrate source: %v", err)
+	}
+	sqlDB, _ := db.DB()
+
+	now := time.Now().UTC().Format("2006-01-02T15:04:05Z")
+	sqlDB.Exec("INSERT INTO tenants (created_at, updated_at, name, slug, domain, plan, active) VALUES (?, ?, 'Test', 'test', 'test.example.com', 'smb', 1)", now, now)
+	sqlDB.Exec("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'admin@test.example.com', '$2a$04$placeholder', 'admin', 1, 1, 1)", now, now)
+
+	var srcTenants, srcUsers int
+	sqlDB.QueryRow("SELECT COUNT(*) FROM tenants").Scan(&srcTenants)
+	sqlDB.QueryRow("SELECT COUNT(*) FROM users").Scan(&srcUsers)
+	t.Logf("source: tenants=%d users=%d", srcTenants, srcUsers)
+	sqlDB.Close()
+
+	schema := fmt.Sprintf("orvix_migrate_test_%d", time.Now().UnixNano())
+	code := migrateCommand([]string{
+		"--from", "sqlite",
+		"--to", "postgres",
+		"--sqlite-path", srcPath,
+		"--postgres-dsn", dsn,
+		"--target-schema", schema,
+		"--dry-run=false",
+		"--skip-confirm",
+	})
+	if code != 0 {
+		t.Fatalf("expected migration exit 0, got %d", code)
+	}
+
+	// Verify target row counts.
+	cleanupCfg := config.Defaults()
+	cleanupCfg.Database.Driver = "postgres"
+	cleanupCfg.Database.DSN = dsn
+	gormDB, err := config.NewDatabase(&cleanupCfg.Database, zap.NewNop())
+	if err != nil {
+		t.Fatalf("connect for cleanup: %v", err)
+	}
+	cleanupDB, _ := gormDB.DB()
+	defer cleanupDB.Close()
+
+	cleanupDB.Exec("SET search_path TO " + schema)
+	var tgtTenants, tgtUsers int
+	cleanupDB.QueryRow("SELECT COUNT(*) FROM tenants").Scan(&tgtTenants)
+	cleanupDB.QueryRow("SELECT COUNT(*) FROM users").Scan(&tgtUsers)
+	t.Logf("target: tenants=%d users=%d", tgtTenants, tgtUsers)
+
+	if tgtTenants != srcTenants {
+		t.Errorf("tenant count mismatch: src=%d tgt=%d", srcTenants, tgtTenants)
+	}
+	if tgtUsers != srcUsers {
+		t.Errorf("user count mismatch: src=%d tgt=%d", srcUsers, tgtUsers)
+	}
+
+	// Verify non-empty target guard.
+	code2 := migrateCommand([]string{
+		"--from", "sqlite",
+		"--to", "postgres",
+		"--sqlite-path", srcPath,
+		"--postgres-dsn", dsn,
+		"--target-schema", schema,
+		"--dry-run=false",
+	})
+	if code2 == 0 {
+		t.Error("expected non-empty target guard to refuse migration")
+	}
+	t.Logf("non-empty target guard exit code: %d", code2)
+
+	cleanupDB.Exec("SET search_path TO public")
+	cleanupDB.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE")
+}

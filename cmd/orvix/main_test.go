@@ -1,9 +1,11 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"net/http/httptest"
+	"os"
 	"sort"
 	"strings"
 	"testing"
@@ -272,5 +274,106 @@ func TestAdminBootstrapRefusesInconsistentHash(t *testing.T) {
 	}
 	if after != corruptHash {
 		t.Fatalf("expected guard to leave corrupt hash untouched, got %q", after)
+	}
+}
+
+func TestBootstrapAdminPostgresIntegration(t *testing.T) {
+	if strings.ToLower(strings.TrimSpace(os.Getenv("ORVIX_DB_DRIVER"))) != "postgres" {
+		t.Skip("ORVIX_DB_DRIVER must be postgres")
+	}
+	dsn := strings.TrimSpace(os.Getenv("ORVIX_DB_DSN"))
+	if dsn == "" {
+		t.Skip("ORVIX_DB_DSN is empty")
+	}
+
+	const (
+		adminEmail    = "admin@orvix.email"
+		adminPassword = "AdminPassword123!"
+		tenantDomain  = "orvix.email"
+	)
+	t.Setenv("ORVIX_ADMIN_EMAIL", adminEmail)
+	t.Setenv("ORVIX_ADMIN_PASSWORD_B64", base64.StdEncoding.EncodeToString([]byte(adminPassword)))
+
+	cfg := config.Defaults()
+	cfg.Database.Driver = "postgres"
+	cfg.Database.DSN = dsn
+	cfg.Database.MaxOpen = 5
+
+	logger := zap.NewNop()
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("connect to postgres: %v", err)
+	}
+
+	if err := models.MigrateAllPostgres(db); err != nil {
+		t.Fatalf("MigrateAllPostgres: %v", err)
+	}
+
+	authenticator, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+
+	hashedPassword, err := authenticator.HashPassword(adminPassword)
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+
+	sqlDB, _ := db.DB()
+	dial := dbdialect.FromDriver("postgres")
+	err = insertBootstrapAdmin(sqlDB, dial, adminEmail, hashedPassword, tenantDomain, adminPassword, logger)
+	if err != nil {
+		t.Fatalf("insertBootstrapAdmin: %v", err)
+	}
+
+	var userCount, tenantCount, mailboxCount, folderCount int
+	sqlDB.QueryRow("SELECT COUNT(*) FROM users").Scan(&userCount)
+	sqlDB.QueryRow("SELECT COUNT(*) FROM tenants").Scan(&tenantCount)
+	sqlDB.QueryRow("SELECT COUNT(*) FROM coremail_mailboxes").Scan(&mailboxCount)
+	sqlDB.QueryRow("SELECT COUNT(*) FROM coremail_folders").Scan(&folderCount)
+	t.Logf("users=%d tenants=%d mailboxes=%d folders=%d", userCount, tenantCount, mailboxCount, folderCount)
+
+	if userCount != 1 {
+		t.Fatalf("expected 1 user, got %d", userCount)
+	}
+	if tenantCount != 1 {
+		t.Fatalf("expected 1 tenant, got %d", tenantCount)
+	}
+	if mailboxCount != 1 {
+		t.Fatalf("expected 1 mailbox, got %d", mailboxCount)
+	}
+	if folderCount < 6 {
+		t.Fatalf("expected at least 6 system folders, got %d", folderCount)
+	}
+
+	var storedHash string
+	var active, emailVerified, isAdmin bool
+	var mfaEnabled sql.NullBool
+	sqlDB.QueryRow("SELECT password_hash, active, email_verified, mfa_enabled FROM users WHERE email = $1", adminEmail).Scan(&storedHash, &active, &emailVerified, &mfaEnabled)
+	if storedHash == "" {
+		t.Fatal("stored password_hash is empty")
+	}
+	if !active {
+		t.Fatal("active should be true")
+	}
+	if !emailVerified {
+		t.Fatal("email_verified should be true")
+	}
+	if !authenticator.VerifyPassword(adminPassword, storedHash) {
+		t.Fatal("password verification failed")
+	}
+
+	sqlDB.QueryRow("SELECT is_admin FROM coremail_mailboxes WHERE email = $1", adminEmail).Scan(&isAdmin)
+	if !isAdmin {
+		t.Fatal("is_admin should be true")
+	}
+
+	selectors := []string{"INBOX", "Sent", "Drafts", "Trash", "Junk", "Archive"}
+	for _, path := range selectors {
+		var fid int
+		err := sqlDB.QueryRow("SELECT id FROM coremail_folders WHERE path = $1 AND mailbox_id = (SELECT id FROM coremail_mailboxes WHERE email = $2)", path, adminEmail).Scan(&fid)
+		if err != nil {
+			t.Errorf("system folder %q not found: %v", path, err)
+		}
 	}
 }

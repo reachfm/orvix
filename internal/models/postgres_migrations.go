@@ -242,6 +242,7 @@ func postgresTables() []string {
 			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
 			domain_id INTEGER NOT NULL,
+			local_part TEXT NOT NULL DEFAULT '',
 			email TEXT NOT NULL,
 			password_hash TEXT NOT NULL DEFAULT '',
 			display_name TEXT NOT NULL DEFAULT '',
