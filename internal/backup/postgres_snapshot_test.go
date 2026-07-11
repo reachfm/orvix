@@ -15,13 +15,13 @@ import (
 // VACUUM INTO is SQLite-only syntax and errors outright against a
 // real PostgreSQL connection (this was the actual production bug —
 // every backup attempt failed on a Postgres deployment because
-// snapshotDB never checked dialect). A real pg_dump binary is not
-// available in this environment, so the success path is exercised
-// in CI (postgres-readiness.yml, which runs on ubuntu-latest with
-// postgresql-client installed); these tests cover the two
-// fail-loud paths that must never silently produce a fake/empty
-// backup: (1) SetPostgresDSN was never called, (2) pg_dump is not
-// on PATH.
+// snapshotDB never checked dialect). The pg_dump success path is exercised in
+// CI (postgres-readiness.yml, on ubuntu-24.04 with a version-matched
+// postgresql-client against the postgres:16 service). These unit tests cover the
+// two fail-loud paths that must never silently produce a fake/empty backup:
+// (1) SetPostgresDSN was never called, (2) pg_dump is not on PATH. Both control
+// their own environment so they pass deterministically whether or not pg_dump is
+// installed on the host running them.
 
 func newTestSQLDB(t *testing.T) *sql.DB {
 	t.Helper()
@@ -55,10 +55,15 @@ func TestSnapshotDB_PostgresDialectMissingPgDump(t *testing.T) {
 		dialect:     dbdialect.FromDriver("postgres"),
 	}
 	s.SetPostgresDSN("postgres://user:pass@localhost:5432/orvix?sslmode=disable")
-	// PATH is deliberately not touched — the test environment has
-	// no pg_dump installed, which is exactly the condition this
-	// assertion documents: fail with a clear, actionable error
-	// rather than silently skip the metadata dump.
+	// Force pg_dump to be unresolvable regardless of whether the host
+	// (or CI runner) actually has it installed, by pointing PATH at an
+	// empty directory. This makes the test deterministic: it always
+	// exercises the "pg_dump not on PATH" branch, which must fail with a
+	// clear, actionable error rather than silently skip the metadata
+	// dump. (Previously this relied on the host lacking pg_dump, which is
+	// false in CI where postgresql-client is installed — the call then
+	// reached pg_dump and failed with an auth error instead.)
+	t.Setenv("PATH", t.TempDir())
 	err := s.snapshotDB(context.Background(), filepath.Join(s.basePath, "database.sqlite"))
 	if err == nil {
 		t.Fatal("expected error when pg_dump binary is not on PATH")
