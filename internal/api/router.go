@@ -626,7 +626,16 @@ func (r *Router) setupRoutes() {
 	// so cross-mailbox password changes are impossible.
 	authCSRF.Post("/webmail/password/change", r.h.WebmailChangePassword)
 
-	admin := protected.Group("", auth.RequireAnyRole(auth.RoleAdmin, auth.RoleSuperAdmin))
+	// CSRF is enforced on the entire admin group by default (deny-list,
+	// not allow-list) rather than only on routes an author remembered to
+	// nest under a separate CSRF sub-group — several state-changing
+	// routes (migration start, domain provisioning, calendar/contacts/
+	// tasks, compliance policies) were previously mounted directly here
+	// and shipped with no CSRF check at all. csrf.Middleware() already
+	// no-ops on GET/HEAD/OPTIONS and on API-key-authenticated requests,
+	// so this adds no burden to the read-only routes or to the
+	// provisioning API below.
+	admin := protected.Group("", auth.RequireAnyRole(auth.RoleAdmin, auth.RoleSuperAdmin), r.csrf.Middleware())
 	admin.Get("/domains", r.h.ListDomains)
 	admin.Get("/users", r.h.ListUsers)
 	admin.Get("/mailboxes", r.h.ListUsers)
@@ -827,7 +836,10 @@ admin.Get("/admin/settings/protocol/:protocol", r.h.ListProtocolSettings)
 	admin.Get("/collaboration/mailboxes", r.h.ListSharedMailboxes)
 	admin.Post("/collaboration/mailboxes", r.h.CreateSharedMailbox)
 
-	men := admin.Group("", r.csrf.Middleware())
+	// men no longer adds its own CSRF middleware — admin (above) now
+	// enforces it for the whole group. Kept as a separate alias so the
+	// diff for existing routes below stays minimal.
+	men := admin
 	men.Post("/domains", r.h.CreateDomain)
 	men.Patch("/domains/:name", r.h.PatchDomain)
 	men.Patch("/domains/:name/status", r.h.UpdateDomainStatus)

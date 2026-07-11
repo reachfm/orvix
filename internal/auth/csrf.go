@@ -97,6 +97,17 @@ func (cm *CSRFManager) GenerateToken(c fiber.Ctx, userID uint) (string, error) {
 // Middleware validates CSRF tokens on state-changing requests.
 func (cm *CSRFManager) Middleware() fiber.Handler {
 	return func(c fiber.Ctx) error {
+		// API key requests carry no ambient browser credentials (no
+		// cookies are automatically attached cross-site to a Bearer
+		// token the way they are to a session cookie), so they are
+		// not a CSRF target and must not be required to present a
+		// CSRF cookie they were never issued. apikeys.Middleware
+		// sets this local only on a successfully authenticated API
+		// key request.
+		if c.Locals("auth_method") == "apikey" {
+			return c.Next()
+		}
+
 		method := c.Method()
 
 		if method == "GET" || method == "HEAD" || method == "OPTIONS" {
