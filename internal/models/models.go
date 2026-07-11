@@ -523,6 +523,13 @@ func MigrateAllRaw(db *gorm.DB) error {
 			user_agent TEXT,
 			expires_at DATETIME NOT NULL
 		)`,
+		// revoked_tokens backs H-9 access-token revocation on logout:
+		// a logged-out access token's jti is stored here until its
+		// own expiry so ValidateAccessToken rejects it immediately.
+		`CREATE TABLE IF NOT EXISTS revoked_tokens (
+			jti TEXT PRIMARY KEY,
+			expires_at INTEGER NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS update_histories (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			created_at DATETIME NOT NULL,

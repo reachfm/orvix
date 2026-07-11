@@ -17,6 +17,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/orvix/orvix/internal/config"
+	"github.com/orvix/orvix/internal/dbdialect"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
@@ -63,6 +64,7 @@ type Authenticator struct {
 	privateKey   *rsa.PrivateKey
 	publicKey    *rsa.PublicKey
 	db           *gorm.DB
+	dialect      *dbdialect.Info
 	logger       *zap.Logger
 	accessTTL    time.Duration
 	refreshTTL   time.Duration
@@ -77,10 +79,24 @@ func NewAuthenticator(cfg *config.AuthConfig, db *gorm.DB, logger *zap.Logger) (
 		return nil, fmt.Errorf("failed to initialize RSA key: %w", err)
 	}
 
+	// Detect the SQL dialect once so raw revocation-store queries (H-9) use
+	// the correct placeholder style. Raw *sql.DB is used there rather than
+	// GORM because GORM writes silently no-op under the custom modernc SQLite
+	// dialector (same reason C-1's tenant lookup uses raw *sql.DB).
+	dialect := dbdialect.FromDriver("sqlite")
+	if db != nil {
+		if sqlDB, derr := db.DB(); derr == nil {
+			if di, derr2 := dbdialect.Detect(sqlDB); derr2 == nil {
+				dialect = di
+			}
+		}
+	}
+
 	return &Authenticator{
 		privateKey:   privateKey,
 		publicKey:    &privateKey.PublicKey,
 		db:           db,
+		dialect:      dialect,
 		logger:       logger,
 		accessTTL:    cfg.JWTAccessTTL,
 		refreshTTL:   cfg.JWTRefreshTTL,
@@ -133,13 +149,23 @@ func loadOrGenerateKey(keyPath string, logger *zap.Logger) (*rsa.PrivateKey, err
 }
 
 // GenerateAccessToken creates a short-lived JWT access token (RS256).
+//
+// Each token carries a unique "jti" (JWT ID) so it can be individually revoked
+// on logout — see RevokeAccessToken / ValidateAccessToken (finding H-9). Tokens
+// minted before this change simply have no jti and are treated as
+// non-revocable; they expire within the short access TTL.
 func (a *Authenticator) GenerateAccessToken(userID uint, role Role) (string, error) {
 	now := time.Now()
+	jti, err := newJTI()
+	if err != nil {
+		return "", fmt.Errorf("failed to generate token id: %w", err)
+	}
 	claims := jwt.MapClaims{
 		"sub":  fmt.Sprintf("%d", userID),
 		"role": string(role),
 		"iat":  now.Unix(),
 		"exp":  now.Add(a.accessTTL).Unix(),
+		"jti":  jti,
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
@@ -149,6 +175,15 @@ func (a *Authenticator) GenerateAccessToken(userID uint, role Role) (string, err
 	}
 
 	return tokenString, nil
+}
+
+// newJTI returns a random 128-bit token identifier as hex.
+func newJTI() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // GenerateRefreshToken creates a long-lived refresh token stored as HttpOnly cookie.
@@ -202,11 +237,100 @@ func (a *Authenticator) ValidateAccessToken(tokenString string) (uint, Role, err
 		return 0, "", ErrTokenExpired
 	}
 
+	// H-9: reject tokens explicitly revoked on logout. Tokens minted
+	// before H-9 carry no jti and are treated as non-revocable (they
+	// expire within the short access TTL). isTokenRevoked fails safe
+	// (returns false) if the revocation store is unavailable, so a
+	// storage hiccup can never lock every user out.
+	if jti, ok := claims["jti"].(string); ok && jti != "" {
+		if a.isTokenRevoked(jti) {
+			return 0, "", ErrTokenInvalid
+		}
+	}
+
 	var userID uint
 	fmt.Sscanf(claims["sub"].(string), "%d", &userID)
 	role, _ := claims["role"].(string)
 
 	return userID, Role(role), nil
+}
+
+// dbDialect returns the detected dialect, defaulting to SQLite when unset (as
+// in unit tests that construct Authenticator directly).
+func (a *Authenticator) dbDialect() *dbdialect.Info {
+	if a.dialect != nil {
+		return a.dialect
+	}
+	return dbdialect.FromDriver("sqlite")
+}
+
+// RevokeAccessToken parses a signed access token, extracts its jti and exp, and
+// records the jti in the revocation store until that expiry so the token is
+// rejected by ValidateAccessToken for the remainder of its (short) lifetime.
+// Used by logout. A token without a jti (pre-H-9) or already expired is a
+// no-op. Errors from the store are returned but must not block logout.
+func (a *Authenticator) RevokeAccessToken(tokenString string) error {
+	token, _, err := jwt.NewParser().ParseUnverified(tokenString, jwt.MapClaims{})
+	if err != nil {
+		return nil // unparseable token: nothing to revoke
+	}
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return nil
+	}
+	jti, _ := claims["jti"].(string)
+	if jti == "" {
+		return nil // pre-H-9 token; expires within the access TTL
+	}
+	exp, _ := claims["exp"].(float64)
+	expiresAt := time.Unix(int64(exp), 0)
+	if exp == 0 {
+		expiresAt = time.Now().Add(a.accessTTL)
+	}
+	return a.revokeToken(jti, expiresAt)
+}
+
+// revokeToken records jti as revoked until expiresAt (Unix seconds) and
+// opportunistically prunes already-expired rows so the table stays bounded.
+// Uses raw *sql.DB (not GORM) because GORM writes silently no-op under the
+// custom modernc SQLite dialector; dbdialect supplies the correct placeholder
+// style and a portable upsert for both SQLite and PostgreSQL.
+func (a *Authenticator) revokeToken(jti string, expiresAt time.Time) error {
+	if a.db == nil {
+		return nil
+	}
+	sqlDB, err := a.db.DB()
+	if err != nil {
+		return err
+	}
+	d := a.dbDialect()
+	if _, err := sqlDB.Exec("DELETE FROM revoked_tokens WHERE expires_at < "+d.Placeholder(1), time.Now().Unix()); err != nil {
+		a.logger.Warn("failed to prune expired revoked tokens", zap.Error(err))
+	}
+	upsert := d.Upsert("revoked_tokens", []string{"jti", "expires_at"}, []string{"jti"}, []string{"expires_at"})
+	_, err = sqlDB.Exec(upsert, jti, expiresAt.Unix())
+	return err
+}
+
+// isTokenRevoked reports whether jti is in the revocation store and not yet
+// expired. Fails safe (false) if the store is unset or errors, so a
+// revocation-store outage degrades to "not revoked" rather than rejecting
+// every request.
+func (a *Authenticator) isTokenRevoked(jti string) bool {
+	if a.db == nil {
+		return false
+	}
+	sqlDB, err := a.db.DB()
+	if err != nil {
+		return false
+	}
+	d := a.dbDialect()
+	query := "SELECT COUNT(*) FROM revoked_tokens WHERE jti = " + d.Placeholder(1) + " AND expires_at > " + d.Placeholder(2)
+	var count int
+	if err := sqlDB.QueryRow(query, jti, time.Now().Unix()).Scan(&count); err != nil {
+		return false
+	}
+	return count > 0
 }
 
 // RefreshToken validates a refresh token, rotates it, and returns new tokens.

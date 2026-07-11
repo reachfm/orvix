@@ -637,8 +637,29 @@ func (h *Handler) clearAuthCookies(c fiber.Ctx) {
 	})
 }
 
-// Logout clears auth cookies.
+// revokeCurrentAccessToken revokes the access token presented on the request
+// (cookie or Bearer header) so it is rejected immediately, closing the H-9 gap
+// where a stateless JWT stayed valid until expiry after logout. Best-effort:
+// never blocks logout if the revocation store errors.
+func (h *Handler) revokeCurrentAccessToken(c fiber.Ctx) {
+	token := c.Cookies("access_token")
+	if token == "" {
+		authHeader := c.Get("Authorization")
+		if len(authHeader) > 7 && authHeader[:7] == "Bearer " {
+			token = authHeader[7:]
+		}
+	}
+	if token == "" {
+		return
+	}
+	if err := h.auth.RevokeAccessToken(token); err != nil {
+		h.logger.Warn("failed to revoke access token on logout", zap.Error(err))
+	}
+}
+
+// Logout clears auth cookies and revokes the presented access token.
 func (h *Handler) Logout(c fiber.Ctx) error {
+	h.revokeCurrentAccessToken(c)
 	userID, ok := c.Locals("user_id").(uint)
 	if ok {
 		_ = h.auth.InvalidateAllSessions(userID)
@@ -650,6 +671,7 @@ func (h *Handler) Logout(c fiber.Ctx) error {
 
 // LogoutAll invalidates all sessions for the current user.
 func (h *Handler) LogoutAll(c fiber.Ctx) error {
+	h.revokeCurrentAccessToken(c)
 	userID := c.Locals("user_id").(uint)
 	if err := h.auth.InvalidateAllSessions(userID); err != nil {
 		h.logger.Error("failed to invalidate all sessions", zap.Error(err))
