@@ -69,19 +69,19 @@ type ManifestItem struct {
 // referential hash. Instead the final archive sha256 is stored in a
 // sidecar file: backup-archive.tar.gz.sha256.
 type BackupArchiveManifest struct {
-	BackupID            string         `json:"backup_id"`
-	CreatedAt           string         `json:"created_at"`
-	Hostname            string         `json:"hostname"`
-	Product             string         `json:"product"`
-	Version             string         `json:"version"`
-	BuildCommit         string         `json:"build_commit"`
-	SchemaVersion       int            `json:"schema_version"`
-	BackupFormatVersion int            `json:"backup_format_version"`
-	IncludedItems       []ManifestItem `json:"included_items"`
-	DatabasePath        string         `json:"database_path"`
-	ConfigPath          string         `json:"config_path"`
-	Warnings            []string       `json:"warnings,omitempty"`
-	ConfigSummaryRedacted bool         `json:"config_summary_redacted"`
+	BackupID              string         `json:"backup_id"`
+	CreatedAt             string         `json:"created_at"`
+	Hostname              string         `json:"hostname"`
+	Product               string         `json:"product"`
+	Version               string         `json:"version"`
+	BuildCommit           string         `json:"build_commit"`
+	SchemaVersion         int            `json:"schema_version"`
+	BackupFormatVersion   int            `json:"backup_format_version"`
+	IncludedItems         []ManifestItem `json:"included_items"`
+	DatabasePath          string         `json:"database_path"`
+	ConfigPath            string         `json:"config_path"`
+	Warnings              []string       `json:"warnings,omitempty"`
+	ConfigSummaryRedacted bool           `json:"config_summary_redacted"`
 }
 
 type VerifyResult struct {
@@ -103,9 +103,9 @@ type RestorePreview struct {
 // RestoreStageResult is returned by RestoreBackup.
 // In Phase 2H the restore is staged (not applied live).
 type RestoreStageResult struct {
-	Status    string `json:"status"`
-	Message   string `json:"message"`
-	BackupID  string `json:"backup_id"`
+	Status      string `json:"status"`
+	Message     string `json:"message"`
+	BackupID    string `json:"backup_id"`
 	StagingPath string `json:"staging_path,omitempty"`
 }
 
@@ -168,13 +168,13 @@ type BackupHealth struct {
 // so the API handlers and tests can match on them without using
 // string literals.
 const (
-	HealthStatusOK            = "ok"
-	HealthStatusWarning       = "warning"
-	HealthStatusCritical      = "critical"
-	HealthStatusNoBackups     = "no_backups"
-	HealthStatusDirMissing    = "directory_missing"
+	HealthStatusOK             = "ok"
+	HealthStatusWarning        = "warning"
+	HealthStatusCritical       = "critical"
+	HealthStatusNoBackups      = "no_backups"
+	HealthStatusDirMissing     = "directory_missing"
 	HealthStatusDirNotWritable = "directory_not_writable"
-	HealthStatusDisabled      = "scheduler_disabled"
+	HealthStatusDisabled       = "scheduler_disabled"
 )
 
 var tables = []string{

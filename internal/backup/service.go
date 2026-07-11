@@ -30,25 +30,25 @@ const defaultStagingRoot = "/var/lib/orvix/restore-staging"
 
 // Max archive entry sizes for validation safety.
 const (
-	maxMetadataEntrySize = 10 * 1024 * 1024  // 10 MiB for manifest/checksums/config
-	maxDBEntrySize       = 2 * 1024 * 1024 * 1024  // 2 GiB for database snapshot
+	maxMetadataEntrySize  = 10 * 1024 * 1024        // 10 MiB for manifest/checksums/config
+	maxDBEntrySize        = 2 * 1024 * 1024 * 1024  // 2 GiB for database snapshot
 	maxMailStoreEntrySize = 10 * 1024 * 1024 * 1024 // 10 GiB for mail store tar.gz
-	maxTotalArchiveBytes = 50 * 1024 * 1024 * 1024 // 50 GiB total archive
+	maxTotalArchiveBytes  = 50 * 1024 * 1024 * 1024 // 50 GiB total archive
 )
 
 // Service provides backup and restore operations.
 type Service struct {
-	basePath       string
-	stagingRoot    string
-	db             *sql.DB
-	dialect        *dbdialect.Info
-	mailStoreDB    *sql.DB
-	mailDir        string
-	attachDir      string
-	configPath     string
-	buildVersion   string
-	buildCommit    string
-	keyPaths       []string
+	basePath     string
+	stagingRoot  string
+	db           *sql.DB
+	dialect      *dbdialect.Info
+	mailStoreDB  *sql.DB
+	mailDir      string
+	attachDir    string
+	configPath   string
+	buildVersion string
+	buildCommit  string
+	keyPaths     []string
 	// postgresDSN is the connection string used to shell out to
 	// pg_dump when the metadata/mailstore connection is PostgreSQL.
 	// VACUUM INTO (SQLite-only syntax) cannot run against a
@@ -105,7 +105,10 @@ func (s *Service) SetPostCreateHook(h func(backupID, archivePath string)) {
 func (s *Service) SetConfigPath(path string) { s.configPath = path }
 
 // SetBuildInfo sets version and commit for the backup manifest.
-func (s *Service) SetBuildInfo(version, commit string) { s.buildVersion = version; s.buildCommit = commit }
+func (s *Service) SetBuildInfo(version, commit string) {
+	s.buildVersion = version
+	s.buildCommit = commit
+}
 
 // SetStagingRoot sets the directory for restore staging.
 func (s *Service) SetStagingRoot(root string) { s.stagingRoot = root }
@@ -1028,17 +1031,17 @@ func (s *Service) CreateArchive(ctx context.Context, backupID string) (string, e
 	// Build the enterprise manifest.
 	hostname, _ := os.Hostname()
 	manifest := BackupArchiveManifest{
-		BackupID:            backupID,
-		CreatedAt:           time.Now().UTC().Format(time.RFC3339),
-		Hostname:            hostname,
-		Product:             ProductName,
-		Version:             s.buildVersion,
-		BuildCommit:         s.buildCommit,
-		SchemaVersion:       1,
-		BackupFormatVersion: BackupFormatVersion,
-		IncludedItems:       items,
-		DatabasePath:        "/var/lib/orvix/orvix.db",
-		ConfigPath:          cfgPath,
+		BackupID:              backupID,
+		CreatedAt:             time.Now().UTC().Format(time.RFC3339),
+		Hostname:              hostname,
+		Product:               ProductName,
+		Version:               s.buildVersion,
+		BuildCommit:           s.buildCommit,
+		SchemaVersion:         1,
+		BackupFormatVersion:   BackupFormatVersion,
+		IncludedItems:         items,
+		DatabasePath:          "/var/lib/orvix/orvix.db",
+		ConfigPath:            cfgPath,
 		ConfigSummaryRedacted: true,
 	}
 	manifestData, _ := json.MarshalIndent(manifest, "", "  ")
@@ -1317,10 +1320,10 @@ func (s *Service) validateArchiveLocked(ctx context.Context, id string) (*Verify
 
 	// Track allowed names from manifest and checksums.
 	allowedByManifest := map[string]bool{
-		"backup.json": true,
-		"checksums.txt": true,
-		"RESTORE_INSTRUCTIONS.txt": true,
-		"var/lib/orvix/orvix.db": true,
+		"backup.json":                   true,
+		"checksums.txt":                 true,
+		"RESTORE_INSTRUCTIONS.txt":      true,
+		"var/lib/orvix/orvix.db":        true,
 		"etc/orvix/orvix.yaml.redacted": true,
 	}
 

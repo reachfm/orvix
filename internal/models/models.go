@@ -889,7 +889,7 @@ func MigrateAllRaw(db *gorm.DB) error {
 			created_at DATETIME NOT NULL DEFAULT (datetime('now'))
 		)`,
 		// Admin Enterprise v2 — Acceptance & Routing
-// rules. Distinct from coremail_acl_rules (which is
+		// rules. Distinct from coremail_acl_rules (which is
 		// the per-mailbox access list at the protocol layer);
 		// these are admin-scoped "what should I do when this
 		// sender sends to this recipient" decisions. Each

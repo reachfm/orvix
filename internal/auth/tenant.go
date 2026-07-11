@@ -50,9 +50,9 @@ func ResolverMiddleware(db *gorm.DB) fiber.Handler {
 		}
 
 		var tenant struct {
-			ID   uint
-			Name string
-			LogoURL string
+			ID           uint
+			Name         string
+			LogoURL      string
 			PrimaryColor string
 		}
 		err := db.Model(&struct {
