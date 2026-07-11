@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"database/sql"
 	"encoding/base32"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -767,5 +768,83 @@ func TestMFASetupVerifyRejectsWrongCode(t *testing.T) {
 	}
 	if resp["enabled"].(bool) {
 		t.Errorf("MFA should remain disabled after wrong code, got enabled=%v", resp["enabled"])
+	}
+}
+
+// TestMFASecretStoredEncryptedNotBase64 pins down the fix for the
+// reversible-plaintext MFA secret storage bug: pending_mfa_secret_raw
+// and mfa_secret_raw must be genuine AES-GCM ciphertext (config.Encrypt
+// output), not base64(secret) — a database-only compromise (backup
+// theft, SQL injection elsewhere, rogue DB access) must not be enough
+// to recover a working TOTP secret.
+func TestMFASecretStoredEncryptedNotBase64(t *testing.T) {
+	e := buildMFATestEnv(t)
+
+	status, resp := mfaRequest(t, e, "POST", "/api/v1/admin/mfa/setup/begin", e.adminToken, e.csrfToken, map[string]interface{}{
+		"current_password": e.adminPass,
+	})
+	if status != 200 {
+		t.Fatalf("setup begin: expected 200, got %d: %v", status, resp)
+	}
+	secret, _ := resp["secret"].(string)
+	if secret == "" {
+		t.Fatalf("setup begin must return secret, got %v", resp)
+	}
+	rawSecretBytes, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(secret)
+	if err != nil {
+		t.Fatalf("decode returned secret: %v", err)
+	}
+
+	var storedRaw string
+	if err := e.sqlDB.QueryRow("SELECT COALESCE(pending_mfa_secret_raw, '') FROM users WHERE email = ?", e.adminEmail).Scan(&storedRaw); err != nil {
+		t.Fatalf("query stored pending_mfa_secret_raw: %v", err)
+	}
+	if storedRaw == "" {
+		t.Fatal("pending_mfa_secret_raw was not stored")
+	}
+
+	// Negative check: plain base64 of the raw secret must NOT appear
+	// verbatim in the stored value (that was the actual bug — trivially
+	// reversible, not genuinely encrypted).
+	plainB64 := base64.StdEncoding.EncodeToString(rawSecretBytes)
+	if storedRaw == plainB64 {
+		t.Fatalf("pending_mfa_secret_raw is stored as plain base64 of the secret — not encrypted")
+	}
+
+	// Positive check: it must decrypt correctly via config.Decrypt (the
+	// real production code path — see MFASetupVerify/MFADisable/
+	// MFALoginVerify), proving it's genuine AES-GCM ciphertext, not
+	// some other encoding that merely differs from base64 by luck.
+	decrypted, err := config.Decrypt(storedRaw)
+	if err != nil {
+		t.Fatalf("stored pending_mfa_secret_raw did not decrypt with config.Decrypt: %v", err)
+	}
+	if !bytes.Equal(decrypted, rawSecretBytes) {
+		t.Fatalf("decrypted secret does not match the original: got %x, want %x", decrypted, rawSecretBytes)
+	}
+
+	// Complete setup and verify the same guarantee holds for the
+	// long-lived mfa_secret_raw column.
+	correctCode := mfaComputeTOTP(secret, time.Now().UTC())
+	status, resp = mfaRequest(t, e, "POST", "/api/v1/admin/mfa/setup/verify", e.adminToken, e.csrfToken, map[string]interface{}{
+		"code": correctCode,
+	})
+	if status != 200 {
+		t.Fatalf("setup verify: expected 200, got %d: %v", status, resp)
+	}
+
+	var storedActive string
+	if err := e.sqlDB.QueryRow("SELECT COALESCE(mfa_secret_raw, '') FROM users WHERE email = ?", e.adminEmail).Scan(&storedActive); err != nil {
+		t.Fatalf("query stored mfa_secret_raw: %v", err)
+	}
+	if storedActive == plainB64 {
+		t.Fatalf("mfa_secret_raw is stored as plain base64 of the secret — not encrypted")
+	}
+	decryptedActive, err := config.Decrypt(storedActive)
+	if err != nil {
+		t.Fatalf("stored mfa_secret_raw did not decrypt with config.Decrypt: %v", err)
+	}
+	if !bytes.Equal(decryptedActive, rawSecretBytes) {
+		t.Fatalf("decrypted active secret does not match the original: got %x, want %x", decryptedActive, rawSecretBytes)
 	}
 }
