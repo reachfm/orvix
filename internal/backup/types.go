@@ -48,6 +48,12 @@ type BackupManifest struct {
 	BuildCommit     string            `json:"buildCommit,omitempty"`
 	Hostname        string            `json:"hostname,omitempty"`
 	Files           map[string]string `json:"files,omitempty"`
+	// DatabaseFormat describes the format of the "database.sqlite"
+	// entry: "sqlite" (a real SQLite file produced by VACUUM INTO)
+	// or "postgres-custom" (a pg_dump -Fc archive, despite the
+	// filename — restore with `pg_restore`, not by copying the
+	// file back as a SQLite database).
+	DatabaseFormat string `json:"databaseFormat,omitempty"`
 }
 
 // ManifestItem describes a single file in the backup archive.

@@ -2,6 +2,7 @@ package backup
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/rand"
@@ -13,6 +14,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -47,6 +49,14 @@ type Service struct {
 	buildVersion   string
 	buildCommit    string
 	keyPaths       []string
+	// postgresDSN is the connection string used to shell out to
+	// pg_dump when the metadata/mailstore connection is PostgreSQL.
+	// VACUUM INTO (SQLite-only syntax) cannot run against a
+	// PostgreSQL connection, so snapshotDB branches on dialect and
+	// needs its own connection string for pg_dump — a *sql.DB
+	// handle cannot be reused by an external process. Empty in
+	// SQLite deployments, where it is never read.
+	postgresDSN string
 
 	// postCreateHook is invoked once a successful
 	// CreateBackup completes, with the local archive
@@ -103,6 +113,11 @@ func (s *Service) SetStagingRoot(root string) { s.stagingRoot = root }
 // AddKeyPath adds a key file path to include in every backup.
 // Paths that do not exist are silently skipped during backup creation.
 func (s *Service) AddKeyPath(path string) { s.keyPaths = append(s.keyPaths, path) }
+
+// SetPostgresDSN sets the connection string used for pg_dump/pg_restore
+// when the deployment's database dialect is PostgreSQL. Has no effect
+// (never read) on SQLite deployments.
+func (s *Service) SetPostgresDSN(dsn string) { s.postgresDSN = dsn }
 
 func (s *Service) ensureBasePath() error { return os.MkdirAll(s.basePath, 0750) }
 
@@ -287,12 +302,17 @@ func (s *Service) createBackupLocked(ctx context.Context, name string) (*Backup,
 	backup := &Backup{ID: id, Name: name, Status: StatusInProgress, CreatedAt: time.Now().UTC()}
 
 	hostname, _ := os.Hostname()
+	dbFormat := "sqlite"
+	if s.dialect != nil && s.dialect.IsPostgres() {
+		dbFormat = "postgres-custom"
+	}
 	manifest := BackupManifest{
 		ID: id, Name: name, CreatedAt: backup.CreatedAt,
-		Version:     s.buildVersion,
-		BuildCommit: s.buildCommit,
-		Hostname:    hostname,
-		Files:       make(map[string]string),
+		Version:        s.buildVersion,
+		BuildCommit:    s.buildCommit,
+		Hostname:       hostname,
+		DatabaseFormat: dbFormat,
+		Files:          make(map[string]string),
 	}
 
 	dbPath := filepath.Join(bp, "database.sqlite")
@@ -1545,6 +1565,13 @@ func writeTarEntry(tw *tar.Writer, name string, data []byte, mode int64) error {
 	return err
 }
 
+// snapshotDB writes a full, restorable point-in-time snapshot of the
+// database to destPath. The mechanism is dialect-dependent: SQLite's
+// VACUUM INTO is SQLite-only syntax and fails outright against a
+// PostgreSQL connection, so PostgreSQL deployments shell out to
+// pg_dump instead. Both branches write to the same destPath (see
+// BackupManifest.DatabaseFormat for how a restore operator tells
+// which format a given backup actually contains).
 func (s *Service) snapshotDB(ctx context.Context, destPath string) error {
 	if s.mailStoreDB == nil {
 		return nil
@@ -1552,9 +1579,41 @@ func (s *Service) snapshotDB(ctx context.Context, destPath string) error {
 	if err := s.validateBackupOutputPath(destPath); err != nil {
 		return err
 	}
+	if s.dialect != nil && s.dialect.IsPostgres() {
+		return s.snapshotPostgres(ctx, destPath)
+	}
 	_, err := s.mailStoreDB.ExecContext(ctx, "VACUUM INTO ?", destPath)
 	if err != nil {
 		return fmt.Errorf("vacuum into: %w", err)
+	}
+	return nil
+}
+
+// snapshotPostgres runs pg_dump against s.postgresDSN, writing a
+// custom-format (-Fc) archive to destPath. Custom format is used
+// (not plain SQL) because it is pg_restore's native input and
+// supports selective/parallel restore. Fails loudly — no fallback,
+// no partial/fake success — if pg_dump is missing or the dump
+// itself fails, since a backup that silently omits the database is
+// worse than one that visibly errors.
+func (s *Service) snapshotPostgres(ctx context.Context, destPath string) error {
+	if s.postgresDSN == "" {
+		return fmt.Errorf("postgres backup: no connection string configured (SetPostgresDSN was never called)")
+	}
+	pgDump, err := exec.LookPath("pg_dump")
+	if err != nil {
+		return fmt.Errorf("postgres backup: pg_dump not found in PATH (install the postgresql-client package): %w", err)
+	}
+	cmd := exec.CommandContext(ctx, pgDump,
+		"--format=custom",
+		"--file="+destPath,
+		"--no-password",
+		s.postgresDSN,
+	)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("pg_dump failed: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
 }
