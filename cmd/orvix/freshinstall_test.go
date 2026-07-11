@@ -21,6 +21,7 @@ import (
 	"github.com/orvix/orvix/internal/api"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/config"
+	"github.com/orvix/orvix/internal/dbdialect"
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
@@ -66,7 +67,7 @@ func buildFreshInstallHarness(t *testing.T, email, password string) *freshInstal
 	if err != nil {
 		t.Fatalf("authenticator: %v", err)
 	}
-	seedAdminUser(db, authenticator, logger)
+	seedAdminUser(db, authenticator, logger, dbdialect.FromDriver("sqlite"))
 
 	// Stage the admin and webmail UI bundles. We use a
 	// non-tempdir scratch path so that the test framework does

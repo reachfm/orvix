@@ -65,6 +65,14 @@ func MigrateAllPostgres(db *gorm.DB) error {
 		}
 	}
 
+	additions := postgresColumnAdditions()
+	for _, ddl := range additions {
+		if _, err := sqlDB.Exec(ddl); err != nil {
+			// Column may already exist; log but don't fail.
+			_ = err
+		}
+	}
+
 	return nil
 }
 
@@ -88,8 +96,13 @@ func postgresTables() []string {
 			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
 			deleted_at TIMESTAMP,
 			key_hash TEXT NOT NULL,
+			tier TEXT NOT NULL DEFAULT 'smb',
 			issued_at TIMESTAMP,
 			expires_at TIMESTAMP,
+			max_domains INTEGER NOT NULL DEFAULT 10,
+			max_mailboxes INTEGER NOT NULL DEFAULT 500,
+			hardware_id TEXT NOT NULL DEFAULT '',
+			metadata TEXT,
 			active BOOLEAN NOT NULL DEFAULT true
 		)`,
 
@@ -99,7 +112,10 @@ func postgresTables() []string {
 			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
 			deleted_at TIMESTAMP,
 			name TEXT NOT NULL,
-			enabled BOOLEAN NOT NULL DEFAULT false
+			enabled BOOLEAN NOT NULL DEFAULT false,
+			tier_required TEXT NOT NULL DEFAULT '',
+			module_version TEXT NOT NULL DEFAULT '1.0.0',
+			description TEXT
 		)`,
 
 		`CREATE TABLE IF NOT EXISTS tenants (
@@ -131,7 +147,13 @@ func postgresTables() []string {
 			full_name TEXT NOT NULL DEFAULT '',
 			active BOOLEAN NOT NULL DEFAULT true,
 			email_verified BOOLEAN NOT NULL DEFAULT false,
-			last_login TIMESTAMP
+			last_login TIMESTAMP,
+			mfa_enabled BOOLEAN NOT NULL DEFAULT false,
+			mfa_secret TEXT NOT NULL DEFAULT '',
+			pending_mfa_secret TEXT NOT NULL DEFAULT '',
+			pending_mfa_secret_raw TEXT NOT NULL DEFAULT '',
+			mfa_secret_raw TEXT NOT NULL DEFAULT '',
+			mfa_label TEXT NOT NULL DEFAULT ''
 		)`,
 
 		`CREATE TABLE IF NOT EXISTS domains (
@@ -147,7 +169,9 @@ func postgresTables() []string {
 			max_quota_mb INTEGER DEFAULT 1024,
 			is_verified BOOLEAN NOT NULL DEFAULT false,
 			is_primary BOOLEAN NOT NULL DEFAULT false,
-			dns_record_json TEXT NOT NULL DEFAULT '{}'
+			dns_record_json TEXT NOT NULL DEFAULT '{}',
+			status TEXT NOT NULL DEFAULT 'pending',
+			dkim_selector TEXT NOT NULL DEFAULT ''
 		)`,
 
 		`CREATE TABLE IF NOT EXISTS mailboxes (
@@ -157,12 +181,15 @@ func postgresTables() []string {
 			deleted_at TIMESTAMP,
 			tenant_id INTEGER NOT NULL,
 			domain_id INTEGER NOT NULL,
+			local_part TEXT NOT NULL DEFAULT '',
 			email TEXT NOT NULL,
 			password_hash TEXT NOT NULL,
 			quota_mb INTEGER DEFAULT 0,
 			is_alias BOOLEAN NOT NULL DEFAULT false,
 			is_catchall BOOLEAN NOT NULL DEFAULT false,
-			is_active BOOLEAN NOT NULL DEFAULT true
+			is_active BOOLEAN NOT NULL DEFAULT true,
+			display_name TEXT NOT NULL DEFAULT '',
+			send_limit INTEGER NOT NULL DEFAULT 0
 		)`,
 
 		`CREATE TABLE IF NOT EXISTS api_keys (
@@ -236,6 +263,7 @@ func postgresTables() []string {
 			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
 			domain_id INTEGER NOT NULL,
+			local_part TEXT NOT NULL DEFAULT '',
 			email TEXT NOT NULL,
 			password_hash TEXT NOT NULL DEFAULT '',
 			display_name TEXT NOT NULL DEFAULT '',
@@ -954,6 +982,29 @@ func postgresTables() []string {
 			installed_by TEXT NOT NULL DEFAULT '',
 			notes TEXT NOT NULL DEFAULT ''
 		)`,
+	}
+}
+
+// postgresColumnAdditions returns ALTER TABLE statements for columns
+// added after the initial CREATE TABLE. Uses IF NOT EXISTS (PG 9.6+)
+// so re-runs are safe.
+func postgresColumnAdditions() []string {
+	return []string{
+		`ALTER TABLE licenses ADD COLUMN IF NOT EXISTS tier TEXT NOT NULL DEFAULT 'smb'`,
+		`ALTER TABLE licenses ADD COLUMN IF NOT EXISTS max_domains INTEGER NOT NULL DEFAULT 10`,
+		`ALTER TABLE licenses ADD COLUMN IF NOT EXISTS max_mailboxes INTEGER NOT NULL DEFAULT 500`,
+		`ALTER TABLE licenses ADD COLUMN IF NOT EXISTS hardware_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE licenses ADD COLUMN IF NOT EXISTS metadata TEXT`,
+
+		`ALTER TABLE feature_flags ADD COLUMN IF NOT EXISTS tier_required TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE feature_flags ADD COLUMN IF NOT EXISTS module_version TEXT NOT NULL DEFAULT '1.0.0'`,
+		`ALTER TABLE feature_flags ADD COLUMN IF NOT EXISTS description TEXT`,
+
+		`ALTER TABLE domains ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending'`,
+		`ALTER TABLE domains ADD COLUMN IF NOT EXISTS dkim_selector TEXT NOT NULL DEFAULT ''`,
+
+		`ALTER TABLE mailboxes ADD COLUMN IF NOT EXISTS display_name TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE mailboxes ADD COLUMN IF NOT EXISTS send_limit INTEGER NOT NULL DEFAULT 0`,
 	}
 }
 

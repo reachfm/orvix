@@ -72,10 +72,10 @@ func configEncryptString(s string) (string, error) { return config.EncryptString
 // descriptions here are the source of truth for what each
 // protocol page exposes in the UI.
 type protocolDef struct {
-	ID             string
-	Title          string
-	Description    string
-	Keys           []protocolKey
+	ID              string
+	Title           string
+	Description     string
+	Keys            []protocolKey
 	RequiresRestart bool // the protocol as a whole needs restart on hot change
 }
 
@@ -90,8 +90,8 @@ type protocolKey struct {
 
 var protocolDefs = map[string]protocolDef{
 	"smtp_recv": {
-		ID:    "smtp_recv",
-		Title: "SMTP receiving",
+		ID:          "smtp_recv",
+		Title:       "SMTP receiving",
 		Description: "Inbound SMTP listener configuration (port 25, opportunistic / required TLS, banners, size limits, recipient limits).",
 		Keys: []protocolKey{
 			{Key: "coremail.smtp_port", Type: "int", Label: "SMTP port", RestartRequired: true, Default: 25},
@@ -105,8 +105,8 @@ var protocolDefs = map[string]protocolDef{
 		},
 	},
 	"smtp_tx": {
-		ID:    "smtp_tx",
-		Title: "SMTP sending / submission",
+		ID:          "smtp_tx",
+		Title:       "SMTP sending / submission",
 		Description: "Outbound SMTP delivery and submission listener (587, SMTPS 465).",
 		Keys: []protocolKey{
 			{Key: "coremail.submission_enabled", Type: "bool", Label: "Submission enabled (587)", RestartRequired: false, Default: true},
@@ -118,8 +118,8 @@ var protocolDefs = map[string]protocolDef{
 		},
 	},
 	"imap": {
-		ID:    "imap",
-		Title: "IMAP",
+		ID:          "imap",
+		Title:       "IMAP",
 		Description: "IMAP / IMAPS listener configuration (143 / 993).",
 		Keys: []protocolKey{
 			{Key: "coremail.imap_host", Type: "string", Label: "IMAP bind host", RestartRequired: true, Default: "0.0.0.0"},
@@ -129,8 +129,8 @@ var protocolDefs = map[string]protocolDef{
 		},
 	},
 	"pop3": {
-		ID:    "pop3",
-		Title: "POP3",
+		ID:          "pop3",
+		Title:       "POP3",
 		Description: "POP3 / POP3S listener configuration (110 / 995).",
 		Keys: []protocolKey{
 			{Key: "coremail.pop3_host", Type: "string", Label: "POP3 bind host", RestartRequired: true, Default: "0.0.0.0"},
@@ -140,8 +140,8 @@ var protocolDefs = map[string]protocolDef{
 		},
 	},
 	"webmail": {
-		ID:    "webmail",
-		Title: "WebMail",
+		ID:          "webmail",
+		Title:       "WebMail",
 		Description: "WebMail UI runtime configuration.",
 		Keys: []protocolKey{
 			{Key: "auth.cookie_domain", Type: "string", Label: "Auth cookie domain (.parent.com)", RestartRequired: true, Default: ""},
@@ -150,8 +150,8 @@ var protocolDefs = map[string]protocolDef{
 		},
 	},
 	"webadmin": {
-		ID:    "webadmin",
-		Title: "WebAdmin",
+		ID:          "webadmin",
+		Title:       "WebAdmin",
 		Description: "Admin console runtime configuration.",
 		Keys: []protocolKey{
 			{Key: "auth.password_min_length", Type: "int", Label: "Password min length", RestartRequired: true, Default: 8},
@@ -160,8 +160,8 @@ var protocolDefs = map[string]protocolDef{
 		},
 	},
 	"dns": {
-		ID:    "dns",
-		Title: "DNS automation",
+		ID:          "dns",
+		Title:       "DNS automation",
 		Description: "DNS provider integration for automated record management.",
 		Keys: []protocolKey{
 			{Key: "dns.public_ipv4", Type: "string", Label: "Public IPv4", RestartRequired: true, Default: ""},
@@ -170,16 +170,16 @@ var protocolDefs = map[string]protocolDef{
 		},
 	},
 	"remote_pop": {
-		ID:    "remote_pop",
-		Title: "Remote POP",
+		ID:          "remote_pop",
+		Title:       "Remote POP",
 		Description: "Remote POP fetch (fetchmail) settings used by per-mailbox external pop3 polling.",
 		Keys: []protocolKey{
 			{Key: "coremail.imap_idle_enabled", Type: "bool", Label: "IMAP IDLE push", RestartRequired: false, Default: false},
 		},
 	},
 	"jmap": {
-		ID:    "jmap",
-		Title: "JMAP / CJA / modern sync",
+		ID:          "jmap",
+		Title:       "JMAP / CJA / modern sync",
 		Description: "JMAP listener configuration (RFC 8620 / 8621).",
 		Keys: []protocolKey{
 			{Key: "coremail.jmap_host", Type: "string", Label: "JMAP bind host", RestartRequired: true, Default: "127.0.0.1"},
@@ -187,8 +187,8 @@ var protocolDefs = map[string]protocolDef{
 		},
 	},
 	"mobility": {
-		ID:    "mobility",
-		Title: "Mobility & Sync",
+		ID:          "mobility",
+		Title:       "Mobility & Sync",
 		Description: "Mobile device sync (EAS / Activesync) and push notification settings.",
 		Keys: []protocolKey{
 			{Key: "coremail.vapid_subject", Type: "string", Label: "VAPID subject (mailto:)", RestartRequired: false, Default: ""},
@@ -532,30 +532,30 @@ func (h *Handler) AdminAntivirusStatus(c fiber.Ctx) error {
 	antispamActive := false // policy not advertised in this build
 
 	return c.JSON(fiber.Map{
-		"engine":               "clamav",
-		"engine_configured":    clamavConfigured,
-		"engine_reachable":     clamavReachable,
-		"engine_active":        clamavConfigured && clamavReachable,
-		"runtime_enforced":     runtimeEnforced,
-		"clamav_host":          host,
-		"clamav_port":          port,
-		"clamav_response":      clamavPing,
-		"policy_on_infected":   policyOnInfected,
+		"engine":                        "clamav",
+		"engine_configured":             clamavConfigured,
+		"engine_reachable":              clamavReachable,
+		"engine_active":                 clamavConfigured && clamavReachable,
+		"runtime_enforced":              runtimeEnforced,
+		"clamav_host":                   host,
+		"clamav_port":                   port,
+		"clamav_response":               clamavPing,
+		"policy_on_infected":            policyOnInfected,
 		"policy_on_scanner_unavailable": policyOnScannerUnavailable,
-		"last_error":           lastErr,
+		"last_error":                    lastErr,
 		"counts": fiber.Map{
-			"scanned":        scanned,
-			"infected":       infected,
-			"rejected":       rejCount,
-			"quarantined":    quarCount,
-			"tagged":         tagCount,
-			"fail_open":      failOpen,
-			"fail_closed":    failClosed,
+			"scanned":     scanned,
+			"infected":    infected,
+			"rejected":    rejCount,
+			"quarantined": quarCount,
+			"tagged":      tagCount,
+			"fail_open":   failOpen,
+			"fail_closed": failClosed,
 		},
-		"antispam_engine": "rspamd_not_wired",
-		"antispam_active": antispamActive,
-		"routing_engine":  "internal_ruler",
-		"routing_active":  routingActive,
+		"antispam_engine":     "rspamd_not_wired",
+		"antispam_active":     antispamActive,
+		"routing_engine":      "internal_ruler",
+		"routing_active":      routingActive,
 		"incoming_msg_engine": "internal_ruler",
 		"incoming_msg_active": incomingActive,
 		"honest_notes": []string{
@@ -603,11 +603,11 @@ func (h *Handler) ListAcceptanceRules(c fiber.Ctx) error {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id                                                                                                  int64
-			name, scope, scopeTarget, senderPat, recipientPat, sourceCIDR, action, redirectTo, note              string
-			priority                                                                                            int
-			enabled                                                                                             int
-			created, updated                                                                                    time.Time
+			id                                                                                      int64
+			name, scope, scopeTarget, senderPat, recipientPat, sourceCIDR, action, redirectTo, note string
+			priority                                                                                int
+			enabled                                                                                 int
+			created, updated                                                                        time.Time
 		)
 		if err := rows.Scan(&id, &name, &priority, &enabled, &scope, &scopeTarget, &senderPat,
 			&recipientPat, &sourceCIDR, &action, &redirectTo, &note, &created, &updated); err != nil {
@@ -764,19 +764,19 @@ func (h *Handler) TestAcceptanceRule(c fiber.Ctx) error {
 	if err := json.Unmarshal(c.Body(), &body); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid JSON body")
 	}
-	rows, err := h.sqlDB().QueryContext(c.Context(), `
-		SELECT id, name, priority, enabled, scope, scope_target, sender_pattern,
-		       recipient_pattern, source_ip_cidr, action
-		FROM coremail_acceptance_rules
-		WHERE tenant_id = ? AND deleted_at IS NULL AND enabled = 1
-		ORDER BY priority ASC, id ASC`, tenantID)
+	rows, err := h.sqlDB().QueryContext(c.Context(),
+		`SELECT id, name, priority, enabled, scope, scope_target, sender_pattern,`+
+			` recipient_pattern, source_ip_cidr, action`+
+			` FROM coremail_acceptance_rules`+
+			` WHERE tenant_id = `+h.dialect.Placeholder(1)+` AND deleted_at IS NULL AND enabled = `+h.dialect.TrueLiteral()+
+			` ORDER BY priority ASC, id ASC`, tenantID)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("list rules: %v", err))
 	}
 	defer rows.Close()
 
 	type rule struct {
-		ID, Priority                                int64
+		ID, Priority                                                          int64
 		Name, Scope, ScopeTarget, SenderPat, RecipientPat, SourceCIDR, Action string
 	}
 	var rules []rule
@@ -874,17 +874,17 @@ type acceptanceRulePayload struct {
 //
 // Adding an action here requires three things to land
 // in the same change:
-//   1. an extension to the runtime switch in
-//      internal/coremail/smtp/receive.go (or
-//      internal/coremail/smtp/commands.go for the
-//      MAIL FROM / RCPT TO path),
-//   2. a documented matching handler in
-//      receive.go that explains how the action is
-//      applied to the inbound message,
-//   3. a unit test in
-//      internal/coremail/smtp/runtime_integration_test.go
-//      that exercises the action against a fixture
-//      envelope.
+//  1. an extension to the runtime switch in
+//     internal/coremail/smtp/receive.go (or
+//     internal/coremail/smtp/commands.go for the
+//     MAIL FROM / RCPT TO path),
+//  2. a documented matching handler in
+//     receive.go that explains how the action is
+//     applied to the inbound message,
+//  3. a unit test in
+//     internal/coremail/smtp/runtime_integration_test.go
+//     that exercises the action against a fixture
+//     envelope.
 //
 // Until all three exist, the action MUST NOT appear in
 // this map; otherwise the API would accept a rule that
@@ -984,30 +984,30 @@ func (h *Handler) ListIncomingMsgRules(c fiber.Ctx) error {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id, priority, stop                                       int64
+			id, priority, stop                                        int64
 			name, field, op, val, action, actionTarget, applyTo, note string
-			enabled                                                  int
-			created, updated                                         time.Time
+			enabled                                                   int
+			created, updated                                          time.Time
 		)
 		if err := rows.Scan(&id, &name, &priority, &enabled, &field, &op, &val, &action,
 			&actionTarget, &applyTo, &stop, &note, &created, &updated); err != nil {
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("scan: %v", err))
 		}
 		out = append(out, map[string]any{
-			"id":               id,
-			"name":             name,
-			"priority":         priority,
-			"enabled":          enabled == 1,
-			"field":            field,
-			"operator":         op,
-			"value":            val,
-			"action":           action,
-			"action_target":    actionTarget,
-			"apply_to":         applyTo,
-			"stop_processing":  stop == 1,
-			"note":             note,
-			"created_at":       created.UTC().Format(time.RFC3339),
-			"updated_at":       updated.UTC().Format(time.RFC3339),
+			"id":              id,
+			"name":            name,
+			"priority":        priority,
+			"enabled":         enabled == 1,
+			"field":           field,
+			"operator":        op,
+			"value":           val,
+			"action":          action,
+			"action_target":   actionTarget,
+			"apply_to":        applyTo,
+			"stop_processing": stop == 1,
+			"note":            note,
+			"created_at":      created.UTC().Format(time.RFC3339),
+			"updated_at":      updated.UTC().Format(time.RFC3339),
 		})
 	}
 	return c.JSON(fiber.Map{"rules": out})
@@ -1218,12 +1218,12 @@ func (h *Handler) ListMigrationSources(c fiber.Ctx) error {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id                                                                                       int64
+			id                                                                                        int64
 			name, kind, host, username, baseFolder, verifyHostname, note, lastTestStatus, lastTestMsg string
-			port                                                                                     int
+			port                                                                                      int
 			useTLS, allowInsecure, hasSecret                                                          int
-			lastTestAt                                                                               *time.Time
-			created, updated                                                                         time.Time
+			lastTestAt                                                                                *time.Time
+			created, updated                                                                          time.Time
 		)
 		if err := rows.Scan(&id, &name, &kind, &host, &port, &username, &useTLS, &allowInsecure,
 			&baseFolder, &verifyHostname, &note, &hasSecret,
@@ -1554,10 +1554,10 @@ func (h *Handler) ListBackupTargets(c fiber.Ctx) error {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id, port, enabled, hasSecret                                                       int64
-			name, kind, host, username, path, verifyHost, lastStatus, lastMsg, note            string
-			lastTestAt                                                                          *time.Time
-			created, updated                                                                   time.Time
+			id, port, enabled, hasSecret                                            int64
+			name, kind, host, username, path, verifyHost, lastStatus, lastMsg, note string
+			lastTestAt                                                              *time.Time
+			created, updated                                                        time.Time
 		)
 		if err := rows.Scan(&id, &name, &kind, &host, &port, &username, &path, &enabled,
 			&verifyHost, &hasSecret, &lastStatus, &lastTestAt, &lastMsg, &note,
@@ -1809,18 +1809,18 @@ func (h *Handler) TestBackupTarget(c fiber.Ctx) error {
 }
 
 type backupTargetPayload struct {
-	Name            string `json:"name"`
-	Kind            string `json:"kind"`
-	Host            string `json:"host"`
-	Port            int    `json:"port"`
-	Username        string `json:"username"`
-	Password        string `json:"password"`
-	PrivateKeyPath  string `json:"private_key_path"`
-	Path            string `json:"path"`
-	Enabled         bool   `json:"enabled"`
-	VerifyHostname  bool   `json:"verify_hostname"`
-	Note            string `json:"note"`
-	ClearSecret     bool   `json:"clear_secret"`
+	Name           string `json:"name"`
+	Kind           string `json:"kind"`
+	Host           string `json:"host"`
+	Port           int    `json:"port"`
+	Username       string `json:"username"`
+	Password       string `json:"password"`
+	PrivateKeyPath string `json:"private_key_path"`
+	Path           string `json:"path"`
+	Enabled        bool   `json:"enabled"`
+	VerifyHostname bool   `json:"verify_hostname"`
+	Note           string `json:"note"`
+	ClearSecret    bool   `json:"clear_secret"`
 }
 
 var allowedBackupKinds = map[string]bool{"ftp": true, "sftp": true}
@@ -1917,12 +1917,12 @@ func (h *Handler) AdminFsBrowse(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("readdir: %v", err))
 	}
 	type entry struct {
-		Name        string `json:"name"`
-		Path        string `json:"path"`
-		IsDir       bool   `json:"is_dir"`
-		Size        int64  `json:"size"`
-		ModifiedAt  string `json:"modified_at"`
-		SecretFlag  bool   `json:"secret_flag"`
+		Name       string `json:"name"`
+		Path       string `json:"path"`
+		IsDir      bool   `json:"is_dir"`
+		Size       int64  `json:"size"`
+		ModifiedAt string `json:"modified_at"`
+		SecretFlag bool   `json:"secret_flag"`
 	}
 	out := make([]entry, 0, len(entries))
 	for _, e := range entries {
@@ -1947,9 +1947,9 @@ func (h *Handler) AdminFsBrowse(c fiber.Ctx) error {
 		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
 	})
 	return c.JSON(fiber.Map{
-		"root":         root,
+		"root":           root,
 		"approved_roots": fsApprovedRoots,
-		"entries":      out,
+		"entries":        out,
 	})
 }
 
@@ -1973,9 +1973,9 @@ func (h *Handler) AdminFsRead(c fiber.Ctx) error {
 	// Reject secret-shaped files.
 	if isSecretPath(cleaned) {
 		return c.JSON(fiber.Map{
-			"path":         cleaned,
+			"path":            cleaned,
 			"secret_redacted": true,
-			"reason":       "file name matches a secret-shape pattern (private key, password file, etc.); contents not returned",
+			"reason":          "file name matches a secret-shape pattern (private key, password file, etc.); contents not returned",
 		})
 	}
 	info, err := os.Stat(cleaned)
@@ -1998,12 +1998,12 @@ func (h *Handler) AdminFsRead(c fiber.Ctx) error {
 		n = maxBytes
 	}
 	return c.JSON(fiber.Map{
-		"path":         cleaned,
-		"size":         info.Size(),
-		"truncated":    truncated,
-		"max_bytes":    maxBytes,
-		"content":      string(buf[:n]),
-		"is_text":      isLikelyText(buf[:n]),
+		"path":      cleaned,
+		"size":      info.Size(),
+		"truncated": truncated,
+		"max_bytes": maxBytes,
+		"content":   string(buf[:n]),
+		"is_text":   isLikelyText(buf[:n]),
 	})
 }
 
@@ -2179,12 +2179,11 @@ func tlsDial(network, address, serverName string) (*tls.Conn, error) {
 // Utility helpers — keep the rest of the file readable.
 // =====================================================================
 
-// boolToInt is just a tiny helper.
-func boolToInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
+// boolToInt converts a Go bool to a driver-safe boolean value.
+// Historically this returned 1/0 for SQLite; it now returns bool so the
+// same parameter works for both SQLite INTEGER and PostgreSQL BOOLEAN.
+func boolToInt(b bool) bool {
+	return b
 }
 
 // Mailbox class_id is wired into the existing CreateMailbox
@@ -2201,10 +2200,10 @@ func (h *Handler) lookupAccountClass(ctx context.Context, tenantID, classID int6
 		FROM coremail_account_classes
 		WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`, classID, tenantID)
 	var (
-		id                              int64
-		name                            string
-		dq, mq, msh, mrh                int
-		aef, aim, apo, ajm, awe, isAdm  int
+		id                             int64
+		name                           string
+		dq, mq, msh, mrh               int
+		aef, aim, apo, ajm, awe, isAdm int
 	)
 	if err := row.Scan(&id, &name, &dq, &mq, &msh, &mrh, &aef, &aim, &apo, &ajm, &awe, &isAdm); err != nil {
 		if err == sql.ErrNoRows {
@@ -2213,17 +2212,17 @@ func (h *Handler) lookupAccountClass(ctx context.Context, tenantID, classID int6
 		return nil, err
 	}
 	return map[string]any{
-		"id":                       id,
-		"name":                     name,
-		"default_quota_mb":         dq,
-		"max_quota_mb":             mq,
-		"max_send_per_hour":        msh,
-		"max_recv_per_hour":        mrh,
+		"id":                        id,
+		"name":                      name,
+		"default_quota_mb":          dq,
+		"max_quota_mb":              mq,
+		"max_send_per_hour":         msh,
+		"max_recv_per_hour":         mrh,
 		"allow_external_forwarding": aef == 1,
-		"allow_imap":               aim == 1,
-		"allow_pop3":               apo == 1,
-		"allow_jmap":               ajm == 1,
-		"allow_webmail":            awe == 1,
-		"is_admin_class":           isAdm == 1,
+		"allow_imap":                aim == 1,
+		"allow_pop3":                apo == 1,
+		"allow_jmap":                ajm == 1,
+		"allow_webmail":             awe == 1,
+		"is_admin_class":            isAdm == 1,
 	}, nil
 }

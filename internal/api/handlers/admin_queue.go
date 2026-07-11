@@ -9,6 +9,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/auth"
+	"github.com/orvix/orvix/internal/dbdialect"
 	"go.uber.org/zap"
 )
 
@@ -80,6 +81,8 @@ func (h *Handler) AdminQueueList(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"error": "database error"})
 	}
 
+	dial := dbdialect.FromDriver(h.cfg.Database.Driver)
+
 	query := `SELECT id, from_address, to_address, recipient_domain, status, priority,
 		attempt_count, max_attempts, next_attempt_at, last_attempt_at,
 		last_error, last_status_code, delivery_mode, remote_host,
@@ -87,11 +90,11 @@ func (h *Handler) AdminQueueList(c fiber.Ctx) error {
 	args := []interface{}{}
 
 	if f.Status != "" {
-		query += ` AND status = ?`
+		query += fmt.Sprintf(" AND status = %s", dial.Placeholder(len(args)+1))
 		args = append(args, f.Status)
 	}
 	if f.Domain != "" {
-		query += ` AND recipient_domain = ?`
+		query += fmt.Sprintf(" AND recipient_domain = %s", dial.Placeholder(len(args)+1))
 		args = append(args, f.Domain)
 	}
 	if f.Sender != "" || f.From != "" {
@@ -99,11 +102,11 @@ func (h *Handler) AdminQueueList(c fiber.Ctx) error {
 		if sender == "" {
 			sender = f.Sender
 		}
-		query += ` AND from_address LIKE ?`
+		query += fmt.Sprintf(" AND from_address LIKE %s", dial.Placeholder(len(args)+1))
 		args = append(args, "%"+sender+"%")
 	}
 	if f.To != "" {
-		query += ` AND to_address LIKE ?`
+		query += fmt.Sprintf(" AND to_address LIKE %s", dial.Placeholder(len(args)+1))
 		args = append(args, "%"+f.To+"%")
 	}
 
@@ -113,7 +116,7 @@ func (h *Handler) AdminQueueList(c fiber.Ctx) error {
 		h.logger.Error("queue count query failed", zap.Error(err))
 	}
 
-	query += ` ORDER BY id DESC LIMIT ? OFFSET ?`
+	query += fmt.Sprintf(" ORDER BY id DESC LIMIT %s OFFSET %s", dial.Placeholder(len(args)+1), dial.Placeholder(len(args)+2))
 	args = append(args, f.Limit, f.Offset)
 
 	rows, err := sqlDB.Query(query, args...)
@@ -169,13 +172,16 @@ func (h *Handler) AdminQueueDetail(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"error": "database error"})
 	}
 
+	dial := dbdialect.FromDriver(h.cfg.Database.Driver)
+
 	var m QueueMessage
 	var nextAt, lastAt *time.Time
 	var createdAt time.Time
-	err = sqlDB.QueryRow(`SELECT id, from_address, to_address, recipient_domain, status, priority,
+	err = sqlDB.QueryRow(
+		`SELECT id, from_address, to_address, recipient_domain, status, priority,
 		attempt_count, max_attempts, next_attempt_at, last_attempt_at,
 		last_error, last_status_code, delivery_mode, remote_host,
-		created_at FROM coremail_queue WHERE id = ? AND deleted_at IS NULL`, id).
+		created_at FROM coremail_queue WHERE id = `+dial.Placeholder(1)+` AND deleted_at IS NULL`, id).
 		Scan(&m.ID, &m.FromAddress, &m.ToAddress, &m.RecipientDomain,
 			&m.Status, &m.Priority, &m.AttemptCount, &m.MaxAttempts,
 			&nextAt, &lastAt, &m.LastError, &m.LastStatusCode,
@@ -194,8 +200,9 @@ func (h *Handler) AdminQueueDetail(c fiber.Ctx) error {
 	m.CreatedAt = createdAt.Format(time.RFC3339)
 
 	attempts := []fiber.Map{}
-	attRows, err := sqlDB.Query(`SELECT attempt_number, attempted_at, result, error_message,
-		remote_host, status_code FROM queue_attempts WHERE queue_id = ? ORDER BY attempt_number`, id)
+	attRows, err := sqlDB.Query(
+		`SELECT attempt_number, attempted_at, result, error_message,
+		remote_host, status_code FROM queue_attempts WHERE queue_id = `+dial.Placeholder(1)+` ORDER BY attempt_number`, id)
 	if err == nil {
 		defer attRows.Close()
 		for attRows.Next() {

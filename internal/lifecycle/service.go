@@ -22,10 +22,14 @@ type BackupRestorer interface {
 }
 
 // PolicyLoader reloads policy engine from DB.
-type PolicyLoader interface{ LoadFromDB(ctx context.Context) error }
+type PolicyLoader interface {
+	LoadFromDB(ctx context.Context) error
+}
 
 // TrustLoader reloads trust engine from DB.
-type TrustLoader interface{ LoadFromDB(ctx context.Context) error }
+type TrustLoader interface {
+	LoadFromDB(ctx context.Context) error
+}
 
 // RuntimeReloader reloads runtime after upgrade/rollback.
 type RuntimeReloader interface{ Reload() error }
@@ -99,14 +103,20 @@ func (s *Service) CurrentVersion(ctx context.Context) (*VersionRecord, error) {
 	row := s.db.QueryRowContext(ctx, "SELECT id, version, installed_at, installed_by, notes FROM coremail_versions ORDER BY id DESC LIMIT 1")
 	var v VersionRecord
 	err := row.Scan(&v.ID, &v.Version, &v.InstalledAt, &v.InstalledBy, &v.Notes)
-	if err == sql.ErrNoRows { return nil, nil }
-	if err != nil { return nil, err }
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
 	return &v, nil
 }
 
 func (s *Service) VersionHistory(ctx context.Context) ([]VersionRecord, error) {
 	rows, err := s.db.QueryContext(ctx, "SELECT id, version, installed_at, installed_by, notes FROM coremail_versions ORDER BY id DESC")
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	var versions []VersionRecord
 	for rows.Next() {
@@ -121,9 +131,20 @@ func (s *Service) VersionHistory(ctx context.Context) ([]VersionRecord, error) {
 
 func (s *Service) RecordVersion(ctx context.Context, version, installedBy, notes string) (*VersionRecord, error) {
 	v := &VersionRecord{Version: version, InstalledBy: installedBy, Notes: notes, InstalledAt: time.Now().UTC()}
+	if s.dialect.IsPostgres() {
+		err := s.db.QueryRowContext(ctx,
+			"INSERT INTO coremail_versions (version, installed_at, installed_by, notes) VALUES ($1, $2, $3, $4) RETURNING id",
+			v.Version, v.InstalledAt, v.InstalledBy, v.Notes).Scan(&v.ID)
+		if err != nil {
+			return nil, err
+		}
+		return v, nil
+	}
 	res, err := s.db.ExecContext(ctx, "INSERT INTO coremail_versions (version, installed_at, installed_by, notes) VALUES (?, ?, ?, ?)",
 		v.Version, v.InstalledAt, v.InstalledBy, v.Notes)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	id, _ := res.LastInsertId()
 	v.ID = uint(id)
 	return v, nil
@@ -135,12 +156,18 @@ func (s *Service) RunPreflight(ctx context.Context) *PreflightResult {
 	result := &PreflightResult{Pass: true}
 	add := func(name, status, detail string) {
 		result.Checks = append(result.Checks, PreflightCheck{Name: name, Status: status, Detail: detail})
-		if status == "fail" { result.Pass = false }
+		if status == "fail" {
+			result.Pass = false
+		}
 	}
 
 	if s.health != nil {
 		check := func(name string, healthy bool) {
-			if healthy { add(name, "pass", "") } else { add(name, "fail", "service unhealthy") }
+			if healthy {
+				add(name, "pass", "")
+			} else {
+				add(name, "fail", "service unhealthy")
+			}
 		}
 		check("SMTP", s.health.SMTPHealthy())
 		check("IMAP", s.health.IMAPHealthy())
@@ -207,9 +234,15 @@ func (s *Service) Upgrade(ctx context.Context, fromVersion, toVersion string) *U
 	s.RecordVersion(ctx, toVersion, "system", "upgrade")
 
 	// Step 4: Reload engines.
-	if s.policy != nil { s.policy.LoadFromDB(ctx) }
-	if s.trust != nil { s.trust.LoadFromDB(ctx) }
-	if s.runtime != nil { s.runtime.Reload() }
+	if s.policy != nil {
+		s.policy.LoadFromDB(ctx)
+	}
+	if s.trust != nil {
+		s.trust.LoadFromDB(ctx)
+	}
+	if s.runtime != nil {
+		s.runtime.Reload()
+	}
 
 	// Step 5: Mark completed.
 	now := time.Now().UTC()
@@ -223,7 +256,7 @@ func (s *Service) Upgrade(ctx context.Context, fromVersion, toVersion string) *U
 
 func (s *Service) Rollback(ctx context.Context) *UpgradeRecord {
 	// Find last completed upgrade to rollback from.
-	row := s.db.QueryRowContext(ctx, "SELECT id, from_version, to_version, started_at FROM upgrade_history WHERE status=? ORDER BY id DESC LIMIT 1", UpgradeCompleted)
+	row := s.db.QueryRowContext(ctx, "SELECT id, from_version, to_version, started_at FROM upgrade_history WHERE status="+s.dialect.Placeholder(1)+" ORDER BY id DESC LIMIT 1", UpgradeCompleted)
 	var last UpgradeRecord
 	if err := row.Scan(&last.ID, &last.FromVersion, &last.ToVersion, &last.StartedAt); err != nil {
 		return &UpgradeRecord{Status: UpgradeFailed}
@@ -242,9 +275,15 @@ func (s *Service) rollbackTo(ctx context.Context, record *UpgradeRecord) *Upgrad
 	s.updateUpgrade(ctx, record)
 
 	// Reload engines after rollback.
-	if s.policy != nil { s.policy.LoadFromDB(ctx) }
-	if s.trust != nil { s.trust.LoadFromDB(ctx) }
-	if s.runtime != nil { s.runtime.Reload() }
+	if s.policy != nil {
+		s.policy.LoadFromDB(ctx)
+	}
+	if s.trust != nil {
+		s.trust.LoadFromDB(ctx)
+	}
+	if s.runtime != nil {
+		s.runtime.Reload()
+	}
 
 	return record
 }
@@ -253,7 +292,9 @@ func (s *Service) rollbackTo(ctx context.Context, record *UpgradeRecord) *Upgrad
 
 func (s *Service) UpgradeHistory(ctx context.Context) ([]UpgradeRecord, error) {
 	rows, err := s.db.QueryContext(ctx, "SELECT id, from_version, to_version, status, started_at, completed_at FROM upgrade_history ORDER BY id DESC")
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	var records []UpgradeRecord
 	for rows.Next() {
@@ -262,7 +303,9 @@ func (s *Service) UpgradeHistory(ctx context.Context) ([]UpgradeRecord, error) {
 		if err := rows.Scan(&r.ID, &r.FromVersion, &r.ToVersion, &r.Status, &r.StartedAt, &completedAt); err != nil {
 			return nil, err
 		}
-		if completedAt.Valid { r.CompletedAt = &completedAt.Time }
+		if completedAt.Valid {
+			r.CompletedAt = &completedAt.Time
+		}
 		records = append(records, r)
 	}
 	return records, rows.Err()

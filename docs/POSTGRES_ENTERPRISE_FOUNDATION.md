@@ -2,7 +2,7 @@
 
 **Version:** 1.0.3-rc4+
 **Status:** Foundation phase — SQLite still default, PostgreSQL schema expanded to 59 tables, core DML made driver-aware, migration CLI partial
-**Branch:** `db/postgres-production-readiness`
+**Branch:** `db/postgres-final-closure`
 
 ---
 
@@ -494,7 +494,7 @@ for the full DML compatibility roadmap.
 
 ## 13. Remaining Phases
 
-### DB-5: Complete schema + DML audit — PARTIAL
+### DB-5: Complete schema + DML audit — MOSTLY COMPLETED
 
 1. **Schema tables:** COMPLETED. `MigrateAllPostgres()` now covers 59 tables,
    including the previously missing operational tables and package-specific
@@ -505,13 +505,17 @@ for the full DML compatibility roadmap.
    `internal/backup/`, `internal/lifecycle/`, and `internal/api/handlers/admin_mfa.go`.
    Remaining `datetime('now')` usage is in SQLite-only test fixtures and
    `internal/models/models.go` SQLite DDL.
-3. **`INSERT OR REPLACE`:** COMPLETED for listed call sites in
-   `internal/trust/`, `internal/tlsmgmt/`, `internal/backup/service.go`,
-   and `internal/backup/scheduler.go`. Replaced with driver-aware upsert.
-4. **`?` placeholders:** PARTIALLY FIXED. Core packages listed above now use
-   `dbdialect.Info.Placeholder(n)`. Remaining unfixed raw SQL with `?` exists
-   in `internal/api/handlers/` and `internal/coremail/`.
-5. **Transaction audit:** NOT STARTED.
+3. **`INSERT OR REPLACE`:** COMPLETED for all call sites. Replaced with
+   driver-aware upsert. Includes additional `INSERT OR IGNORE` → `Upsert` fix
+   in `internal/api/handlers/admin_users.go`.
+4. **`?` placeholders:** MOSTLY FIXED. All raw SQL in `internal/api/handlers/`
+   (handlers.go, admin_queue.go, saas_admin.go, webmail_auth.go, admin_users.go,
+   enterprise_admin_ssl.go), `internal/audit/`, `internal/messagetrace/`,
+   `internal/lifecycle/`, and `cmd/orvix/main.go` now use
+   `dbdialect.Info.Placeholder(n)`. `internal/coremail/` packages are
+   intentionally SQLite-only (Finding 12 in DML audit).
+5. **Transaction audit:** COMPLETED. See `docs/POSTGRES_TRANSACTION_AUDIT.md` —
+   14 packages audited, 13 findings. `INSERT OR IGNORE` fixed.
 
 ### DB-6: Staging 3M run — COMPLETED (local evidence)
 
@@ -541,42 +545,86 @@ for the full DML compatibility roadmap.
 
 **RC4 is still the SQLite default.**  `MigrateAllPostgres()` covers **59**
 tables with PostgreSQL-native DDL, verified PASS on local Docker
-PostgreSQL 16 (2026-07-10).  DML compatibility has been fixed in the
-core packages (trust, TLS, monitoring, backup, lifecycle, MFA) using the
-`internal/dbdialect` helper.  Remaining unfixed DML exists in
-`internal/api/handlers/` and `internal/coremail/` (raw `?` placeholders).
+PostgreSQL 16 (previous sprint).  DML compatibility in the `internal/api/handlers/`
+layer has been completed: all raw SQL (`?` placeholders, boolean literals,
+`INSERT OR IGNORE`, `CURRENT_TIMESTAMP`) is now dialect-aware via
+`internal/dbdialect`.  The `internal/coremail/` packages remain
+intentionally SQLite-only (Finding 12 in DML audit).
+
+### CTO-review blocker fixes (this sprint)
+
+The following PostgreSQL compatibility blockers were fixed after CTO review:
+
+1. **Bootstrap boolean inserts** (`cmd/orvix/main.go`) — PostgreSQL branch now passes `true`/`false` bool parameters for `tenants.active`, `users.active`, `users.email_verified`, and `coremail_mailboxes.is_admin`; SQLite branch keeps `1`/`0`.
+2. **Bootstrap `LastInsertId` / `RETURNING id`** (`cmd/orvix/main.go`) — PostgreSQL branch uses `INSERT ... RETURNING id` with `QueryRow().Scan(&id)`; SQLite branch keeps `Exec` + `LastInsertId()`.
+3. **Login MFA scan type** (`internal/api/handlers/handlers.go`) — `mfaEnabled` changed from `int` to `bool`.
+4. **Missing MFA columns** (`internal/models/postgres_migrations.go`) — Added `mfa_enabled`, `mfa_secret`, `pending_mfa_secret`, `pending_mfa_secret_raw`, `mfa_secret_raw`, `mfa_label` to PostgreSQL `users`.
+5. **Handler boolean scans/literals** — Fixed in `webmail_auth.go`, `handlers.go`, `admin_users.go`, `dns_ops.go`, `enterprise_admin_v3.go`.
+
+### Honest status
+
+| Decision | Verdict | Reason |
+|----------|---------|--------|
+| Code blockers from CTO review | **FIXED** | Bootstrap booleans, RETURNING id, MFA columns, handler boolean scans/literals fixed. |
+| SQLite tests | **PASS** | Full suite and SQLite benchmarks pass. |
+| Full test suite | **PASS** | `go test ./...` passes after fixes. |
+| PostgreSQL DML integration tests (Gate 9) | **NOT RUN** | Docker daemon unavailable. |
+| Migration/backup/rollback (Gate 8) | **NOT RUN** | Docker daemon unavailable. |
+| PostgreSQL schema smoke / benchmarks (Gates 3-6) | **NOT RERUN** | Docker daemon unavailable. |
+| Safe to merge | **NO** | PostgreSQL validation gates not executed. |
+| Safe to deploy | **NO** | Production PostgreSQL not validated. |
+| PostgreSQL staging-ready | **NO** | Docker/PostgreSQL gates not run this sprint. |
+| PostgreSQL production-ready | **NO** | Migration, backup/restore, rollback, and DML integration tests not executed. |
 
 **Production PostgreSQL is NOT ready.**  The following blocks deployment:
 
-1. Remaining `?` placeholder queries in handlers and coremail packages.
-2. Transaction boundary audit not started.
-3. Migration CLI is partial: dry-run and core metadata tables implemented,
-   but full table migration and restore/rollback validation are incomplete.
-4. No backup/restore/rollback has been executed and verified on PostgreSQL.
+1. PostgreSQL DML integration tests (Gate 9) not executed — Docker unavailable.
+2. Migration CLI end-to-end validation not executed — requires PostgreSQL.
+3. Backup/restore/rollback not executed and verified — requires PostgreSQL.
+4. PostgreSQL schema smoke and benchmark gates (3-6) not rerun — Docker unavailable.
 
-**3M benchmark harness passed on local PostgreSQL.**  The harness
-successfully inserted 3,000,000 rows and ran list/cursor/flag queries
-against PostgreSQL 16 on 2026-07-10.  Insert rate: 33,489 rows/sec.
-This is benchmark evidence, not production readiness — remaining DML,
-migration, and backup/rollback work is still required before any
-production PostgreSQL deployment.
+**Transaction audit completed.**  14 packages audited, 13 findings documented
+in `docs/POSTGRES_TRANSACTION_AUDIT.md`.  `INSERT OR IGNORE` blocker fixed.
+Remaining recommendations (writeMu gating, retrySQL for PG) are performance
+optimizations, not correctness blockers.
 
-**Local PostgreSQL gate evidence — 2026-07-10**
-
-| Gate | Result | Key metric |
-|------|--------|------------|
-| Gate 3 — Schema smoke | PASS | 1.809s, 59 tables verified |
-| Gate 4 — 10k benchmark | PASS | 24,202 rows/sec insert |
-| Gate 5 — 100k benchmark | PASS | 35,432 rows/sec insert |
-| Gate 5b — 1M pre-3M | PASS | 33,523 rows/sec insert |
-| Gate 6 — 3M benchmark | PASS (with note) | 33,489 rows/sec insert, 41.75ms list, 2.33ms cursor |
-| Gate 9 — DML integration tests | ADDED / NOT RERUN | trust upsert, datetime/now, placeholders, schema compat |
-
-Full details in `docs/POSTGRES_READINESS_ACCEPTANCE_GATE.md`.
+**3M benchmark harness passed on local PostgreSQL** (previous sprint).
+Gate evidence from the `db/postgres-production-readiness` sprint remains
+valid but was NOT rerun in this sprint (Docker unavailable).
 
 **VPS deploy is NOT safe for PostgreSQL.**
 
 ---
 
-**Last updated:** 2026-07-10
+---
+
+## db/postgres-final-closure Sprint Update
+
+**Date:** 2026-07-10
+
+### Completed in this sprint
+- **Raw SQL compatibility (Workstream A):** All `?` placeholders in `internal/api/handlers/` (handlers.go, admin_queue.go, saas_admin.go, webmail_auth.go, admin_users.go, enterprise_admin_ssl.go) converted to `dialect.Placeholder(N)`. Boolean literals (`0`/`1`) replaced with `FalseLiteral()`/`TrueLiteral()`. `INSERT OR IGNORE` replaced with dialect-aware `Upsert`. Also fixed: `internal/audit/`, `internal/messagetrace/`, `internal/lifecycle/`, `cmd/orvix/main.go`.
+- **Bootstrap boolean / RETURNING id fixes:** `cmd/orvix/main.go` now uses bool parameters for PostgreSQL bootstrap inserts and `INSERT ... RETURNING id` for PostgreSQL; SQLite branch unchanged.
+- **MFA column completeness:** Added `mfa_enabled`, `mfa_secret`, `pending_mfa_secret`, `pending_mfa_secret_raw`, `mfa_secret_raw`, `mfa_label` to PostgreSQL `users` table.
+- **Handler boolean scan / literal fixes:** Fixed across `handlers.go`, `webmail_auth.go`, `admin_users.go`, `dns_ops.go`, `enterprise_admin_v3.go`.
+- **CoreMail audit (Workstream B):** Confirmed coremail storage/queue/mailbox/domain/alias packages are intentionally SQLite-only. Finding 12 added to DML audit.
+- **Transaction audit (Workstream C):** POSTGRES_TRANSACTION_AUDIT.md created. 14 packages, 13 findings. `INSERT OR IGNORE` blocker fixed.
+- **Load gates (Workstream H):** SQLite 10k/100k benchmarks PASS (10k: insert=691ms, flag-updates=34ms; 100k: insert=6.6s, flag-updates=39ms). 1M/3M NOT RERUN.
+- **Verification:** `go vet ./...`, `go build ./...`, `go test ./... -timeout=600s`, and targeted `go test` on cmd/orvix, handlers, audit, messagetrace, lifecycle, and loadtest all PASS.
+
+### Not executed in this sprint (requires PostgreSQL — Docker unavailable)
+- PostgreSQL DML integration tests (Gate 9)
+- Migration CLI end-to-end validation
+- Backup/restore/rollback execution
+- PostgreSQL schema smoke (Gate 3)
+- PostgreSQL benchmarks (Gates 4-6)
+
+### Key remaining
+- Docker daemon must be running to execute Gates 3-6, 8, 9
+- Full migration of all tables + verified restore/rollback
+- Production-hardened deployment playbook
+
+---
+
+**Last updated:** 2026-07-10 (`db/postgres-final-closure` sprint)
 **Author:** Orvix DB Engineering

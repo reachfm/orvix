@@ -1,0 +1,121 @@
+name: PostgreSQL Readiness
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+      - db/postgres-final-closure
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  postgres-readiness:
+    name: PostgreSQL metadata runtime and migration gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: orvix
+          POSTGRES_PASSWORD: ci_orvix_only
+          POSTGRES_DB: orvix
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    env:
+      ORVIX_DB_DRIVER: postgres
+      ORVIX_DB_DSN: host=localhost port=5432 user=orvix password=ci_orvix_only dbname=orvix sslmode=disable
+      ORVIX_RUN_POSTGRES_SCHEMA_TEST: 1
+      ORVIX_RUN_POSTGRES_DML_TEST: 1
+      ORVIX_RUN_POSTGRES_MIGRATE_TEST: 1
+      ORVIX_RUN_POSTGRES_BACKUP_TEST: 1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install PostgreSQL client tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update -o Acquire::Retries=3
+          sudo apt-get install -y --no-install-recommends postgresql-client
+          pg_dump --version
+          pg_restore --version
+
+      - name: Download Go modules
+        run: |
+          set -euo pipefail
+          go mod download
+
+      - name: Verify gofmt on changed files
+        run: |
+          set -euo pipefail
+          changed=$(git diff --name-only origin/main...HEAD -- '*.go' || true)
+          if [ -z "$changed" ]; then
+            echo "No Go files changed."
+            exit 0
+          fi
+          unformatted=$(gofmt -l $changed)
+          if [ -n "$unformatted" ]; then
+            echo "The following changed Go files are not formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: |
+          set -euo pipefail
+          go vet ./...
+
+      - name: go build
+        run: |
+          set -euo pipefail
+          go build ./...
+
+      - name: Full suite (parallel)
+        run: |
+          set -euo pipefail
+          go test -count=1 ./... -timeout=1200s
+
+      - name: Full suite (sequential)
+        run: |
+          set -euo pipefail
+          go test -p 1 -count=1 ./... -timeout=1200s
+
+      - name: PostgreSQL runtime, migration, and backup/restore tests
+        run: |
+          set -euo pipefail
+          go test -v -count=1 -timeout=20m ./cmd/orvix -run "Postgres|Migration|Bootstrap|Startup|BackupRestore"
+
+      - name: PostgreSQL schema smoke test
+        run: |
+          set -euo pipefail
+          go test -v -count=1 -timeout=15m ./internal/models -run TestPostgresProductionSchemaCompat
+
+      - name: PostgreSQL DML tests
+        run: |
+          set -euo pipefail
+          go test -v -count=1 -timeout=15m ./internal/trust ./internal/models -run "Postgres|DML"

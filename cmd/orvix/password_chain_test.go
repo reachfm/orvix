@@ -36,6 +36,7 @@ import (
 	"github.com/orvix/orvix/internal/api"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/config"
+	"github.com/orvix/orvix/internal/dbdialect"
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
@@ -135,7 +136,7 @@ func runPasswordChain(t *testing.T, c passwordChainCase) passwordChainTrace {
 	if err != nil {
 		t.Fatalf("authenticator: %v", err)
 	}
-	seedAdminUser(db, authenticator, logger)
+	seedAdminUser(db, authenticator, logger, dbdialect.FromDriver("sqlite"))
 
 	sqlDB, err := db.DB()
 	if err != nil {
@@ -356,7 +357,7 @@ func TestPasswordChain_TraceIsStableAcrossReBootstrap(t *testing.T) {
 		t.Fatalf("authenticator: %v", err)
 	}
 
-	seedAdminUser(db, authenticator, logger)
+	seedAdminUser(db, authenticator, logger, dbdialect.FromDriver("sqlite"))
 	sqlDB, err := db.DB()
 	if err != nil {
 		t.Fatalf("sql db: %v", err)
@@ -374,7 +375,7 @@ func TestPasswordChain_TraceIsStableAcrossReBootstrap(t *testing.T) {
 	// keep the existing hash. If the hash changes, the next
 	// login attempt against the previous hash would fail.
 	for i := 0; i < 5; i++ {
-		seedAdminUser(db, authenticator, logger)
+		seedAdminUser(db, authenticator, logger, dbdialect.FromDriver("sqlite"))
 	}
 
 	var last string
@@ -421,7 +422,7 @@ func TestPasswordChain_DistinctPasswordsProduceDistinctHashes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("authenticator: %v", err)
 			}
-			seedAdminUser(db, authenticator, logger)
+			seedAdminUser(db, authenticator, logger, dbdialect.FromDriver("sqlite"))
 			sqlDB, err := db.DB()
 			if err != nil {
 				t.Fatalf("sql db: %v", err)
@@ -508,7 +509,7 @@ func TestPasswordChain_BcryptSeventyTwoByteLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("authenticator: %v", err)
 	}
-	seedAdminUser(db, authenticator, logger)
+	seedAdminUser(db, authenticator, logger, dbdialect.FromDriver("sqlite"))
 
 	sqlDB, err := db.DB()
 	if err != nil {

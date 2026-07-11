@@ -26,6 +26,7 @@ import (
 	"github.com/orvix/orvix/internal/api"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/config"
+	"github.com/orvix/orvix/internal/dbdialect"
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
@@ -65,7 +66,7 @@ func buildFullStackHarness(t *testing.T, email, password string) *fullStackHarne
 	if err != nil {
 		t.Fatalf("authenticator: %v", err)
 	}
-	seedAdminUser(db, authenticator, logger)
+	seedAdminUser(db, authenticator, logger, dbdialect.FromDriver("sqlite"))
 
 	scratch, err := os.MkdirTemp("", "orvix-fullstack-*")
 	if err != nil {

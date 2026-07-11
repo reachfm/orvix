@@ -53,6 +53,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/coremail"
+	"github.com/orvix/orvix/internal/dbdialect"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/bcrypt"
@@ -163,19 +164,21 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 		})
 	}
 
+	dial := dbdialect.FromDriver(h.cfg.Database.Driver)
+
 	// Look up the mailbox. The user is logging into
 	// webmail as a mailbox owner; an admin user with
 	// no mailbox cannot log in here.
 	var (
 		mailboxID     uint
 		mailboxStatus string
-		isAdmin       int
+		isAdmin       bool
 		hash          string
 		authScheme    string
-		allowWebmail  int
+		allowWebmail  bool
 	)
 	row := sqlDB.QueryRow(
-		"SELECT id, status, is_admin, password_hash, COALESCE(auth_scheme,''), COALESCE(allow_webmail,1) FROM coremail_mailboxes WHERE email = ? AND deleted_at IS NULL",
+		fmt.Sprintf("SELECT id, status, is_admin, password_hash, COALESCE(auth_scheme,''), COALESCE(allow_webmail,"+dial.TrueLiteral()+") FROM coremail_mailboxes WHERE email = %s AND deleted_at IS NULL", dial.Placeholder(1)),
 		loginEmail,
 	)
 	if err := row.Scan(&mailboxID, &mailboxStatus, &isAdmin, &hash, &authScheme, &allowWebmail); err != nil {
@@ -196,7 +199,7 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 			"error": "mailbox is not active",
 		})
 	}
-	if allowWebmail != 1 {
+	if !allowWebmail {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 			"error": "invalid credentials",
 		})
@@ -216,7 +219,7 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 	// compatibility (and so the admin-role middleware
 	// still gates the right endpoints) we map the
 	// mailbox to a users row by email.
-	userID, err := h.ensureWebmailUser(sqlDB, loginEmail, isAdmin == 1)
+	userID, err := h.ensureWebmailUser(dial, sqlDB, loginEmail, isAdmin)
 	if err != nil {
 		h.logger.Error("webmail login: ensureWebmailUser failed", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -225,7 +228,7 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 	}
 
 	role := auth.RoleUser
-	if isAdmin == 1 {
+	if isAdmin {
 		role = auth.RoleAdmin
 	}
 
@@ -317,7 +320,7 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 		"mailbox": fiber.Map{
 			"id":       mailboxID,
 			"email":    loginEmail,
-			"is_admin": isAdmin == 1,
+			"is_admin": isAdmin,
 		},
 	})
 }
@@ -462,14 +465,16 @@ func (h *Handler) WebmailChangePassword(c fiber.Ctx) error {
 			"error": "password change failed",
 		})
 	}
+	dial := dbdialect.FromDriver(h.cfg.Database.Driver)
 	var (
 		currentHash string
 		authScheme  string
 	)
 	row := sqlDB.QueryRowContext(c.Context(),
-		`SELECT password_hash, COALESCE(auth_scheme, '')
+		fmt.Sprintf(`SELECT password_hash, COALESCE(auth_scheme, '')
 		   FROM coremail_mailboxes
-		  WHERE id = ? AND deleted_at IS NULL`,
+		  WHERE id = %s AND deleted_at IS NULL`,
+			dial.Placeholder(1)),
 		ctx.Mailbox.ID)
 	if err := row.Scan(&currentHash, &authScheme); err != nil {
 		// Mailbox not found (or deleted) — generic error
@@ -510,9 +515,10 @@ func (h *Handler) WebmailChangePassword(c fiber.Ctx) error {
 
 	now := time.Now().UTC()
 	if _, err := sqlDB.ExecContext(c.Context(),
-		`UPDATE coremail_mailboxes
-		    SET password_hash = ?, auth_scheme = ?, updated_at = ?
-		  WHERE id = ? AND deleted_at IS NULL`,
+		fmt.Sprintf(`UPDATE coremail_mailboxes
+		    SET password_hash = %s, auth_scheme = %s, updated_at = %s
+		  WHERE id = %s AND deleted_at IS NULL`,
+			dial.Placeholder(1), dial.Placeholder(2), dial.Placeholder(3), dial.Placeholder(4)),
 		newHash, "$argon2id$", now, ctx.Mailbox.ID); err != nil {
 		h.logger.Error("webmail change password: db update failed",
 			zap.Uint("mailbox_id", ctx.Mailbox.ID),
@@ -547,9 +553,9 @@ func (h *Handler) WebmailChangePassword(c fiber.Ctx) error {
 // We deliberately do NOT bind the mailbox's password
 // to the user row. If the user ever sets an admin-panel
 // password, it is independent of the mailbox password.
-func (h *Handler) ensureWebmailUser(sqlDB *sql.DB, email string, isAdmin bool) (uint, error) {
+func (h *Handler) ensureWebmailUser(dial *dbdialect.Info, sqlDB *sql.DB, email string, isAdmin bool) (uint, error) {
 	var userID uint
-	row := sqlDB.QueryRow("SELECT id FROM users WHERE email = ?", email)
+	row := sqlDB.QueryRow(fmt.Sprintf("SELECT id FROM users WHERE email = %s", dial.Placeholder(1)), email)
 	if err := row.Scan(&userID); err == nil {
 		// Existing user row; make sure the role
 		// matches the mailbox so admin mailboxes
@@ -559,7 +565,7 @@ func (h *Handler) ensureWebmailUser(sqlDB *sql.DB, email string, isAdmin bool) (
 			desired = "admin"
 		}
 		if _, err := sqlDB.Exec(
-			"UPDATE users SET role = ?, updated_at = ? WHERE id = ?",
+			fmt.Sprintf("UPDATE users SET role = %s, updated_at = %s WHERE id = %s", dial.Placeholder(1), dial.Placeholder(2), dial.Placeholder(3)),
 			desired, time.Now().UTC(), userID,
 		); err != nil {
 			return 0, fmt.Errorf("update user role: %w", err)
@@ -572,10 +578,10 @@ func (h *Handler) ensureWebmailUser(sqlDB *sql.DB, email string, isAdmin bool) (
 	// No users row â€” create one tied to the same
 	// tenant as the mailbox.
 	var tenantID uint
-	row = sqlDB.QueryRow(`
-		SELECT m.tenant_id
+	row = sqlDB.QueryRow(
+		fmt.Sprintf(`SELECT m.tenant_id
 		FROM coremail_mailboxes m
-		WHERE m.email = ? AND m.deleted_at IS NULL`, email)
+		WHERE m.email = %s AND m.deleted_at IS NULL`, dial.Placeholder(1)), email)
 	if err := row.Scan(&tenantID); err != nil {
 		return 0, fmt.Errorf("lookup tenant: %w", err)
 	}
@@ -595,9 +601,19 @@ func (h *Handler) ensureWebmailUser(sqlDB *sql.DB, email string, isAdmin bool) (
 		return 0, fmt.Errorf("hash placeholder: %w", err)
 	}
 	now := time.Now().UTC()
+	if dial.IsPostgres() {
+		if err := sqlDB.QueryRow(
+			fmt.Sprintf(`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
+			 VALUES (%s) RETURNING id`, dial.Placeholders(8)),
+			now, now, email, string(placeholder), role, tenantID, true, true,
+		).Scan(&userID); err != nil {
+			return 0, fmt.Errorf("insert user: %w", err)
+		}
+		return userID, nil
+	}
 	res, err := sqlDB.Exec(
-		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		fmt.Sprintf(`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
+		 VALUES (%s)`, dial.Placeholders(8)),
 		now, now, email, string(placeholder), role, tenantID, 1, 1,
 	)
 	if err != nil {

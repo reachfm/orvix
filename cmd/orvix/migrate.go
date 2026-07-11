@@ -2,13 +2,10 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"flag"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
@@ -215,6 +212,87 @@ func printRollbackInstructions() {
 	fmt.Println("4. Row-count verification: compare source SQLite and target PostgreSQL table row counts above.")
 }
 
+// tableMigration defines an explicit column mapping for a single table.
+type tableMigration struct {
+	srcColumns   []string
+	tgtColumns   []string
+	boolColumns  []string
+	dependsOn    []string
+	nullDefaults map[string]any // column → default value when source is NULL
+	sourceQuery  string         // optional custom SELECT query; overrides default SELECT srcColumns FROM table
+}
+
+// tableColumnMap defines explicit source→target column mappings for
+// all 10 migration tables. srcColumns and tgtColumns are positionally
+// mapped: srcColumns[i] is SELECTed from SQLite and inserted into
+// tgtColumns[i] on PostgreSQL. Columns present in SQLite but absent in
+// PG are simply omitted from srcColumns; columns present only in PG
+// get their DDL defaults. boolColumns lists source columns whose
+// INTEGER 0/1 values must be converted to Go bool for PG BOOLEAN.
+var tableColumnMap = map[string]tableMigration{
+	"tenants": {
+		srcColumns:  []string{"id", "created_at", "updated_at", "deleted_at", "name", "slug", "domain", "plan", "max_domains", "max_mailboxes", "logo_url", "primary_color", "active", "reseller_id"},
+		tgtColumns:  []string{"id", "created_at", "updated_at", "deleted_at", "name", "slug", "domain", "plan", "max_domains", "max_mailboxes", "logo_url", "primary_color", "active", "reseller_id"},
+		boolColumns: []string{"active"},
+	},
+	"users": {
+		srcColumns:  []string{"id", "created_at", "updated_at", "deleted_at", "email", "password_hash", "role", "tenant_id", "active", "email_verified", "last_login"},
+		tgtColumns:  []string{"id", "created_at", "updated_at", "deleted_at", "email", "password_hash", "role", "tenant_id", "active", "email_verified", "last_login"},
+		boolColumns: []string{"active", "email_verified"},
+		dependsOn:   []string{"tenants"},
+	},
+	"domains": {
+		srcColumns:  []string{"id", "created_at", "updated_at", "deleted_at", "tenant_id", "domain", "dkim_selector", "status", "is_verified", "is_primary"},
+		tgtColumns:  []string{"id", "created_at", "updated_at", "deleted_at", "tenant_id", "domain", "dkim_selector", "status", "is_verified", "is_primary"},
+		boolColumns: []string{"is_verified", "is_primary"},
+		dependsOn:   []string{"tenants"},
+	},
+	"mailboxes": {
+		// SQLite mailboxes stores local_part + domain_id; PostgreSQL mailboxes
+		// stores local_part + email. The source query joins domains so the
+		// target email is built as local_part || '@' || domains.domain, preserving
+		// the real mailbox identity instead of copying local_part into email.
+		srcColumns:   []string{"id", "created_at", "updated_at", "deleted_at", "tenant_id", "domain_id", "local_part", "email", "password_hash", "quota_mb", "is_alias", "is_catchall", "is_active", "display_name", "send_limit"},
+		tgtColumns:   []string{"id", "created_at", "updated_at", "deleted_at", "tenant_id", "domain_id", "local_part", "email", "password_hash", "quota_mb", "is_alias", "is_catchall", "is_active", "display_name", "send_limit"},
+		boolColumns:  []string{"is_alias", "is_catchall", "is_active"},
+		nullDefaults: map[string]any{"display_name": ""},
+		dependsOn:    []string{"domains"},
+		sourceQuery: `SELECT m.id, m.created_at, m.updated_at, m.deleted_at, m.tenant_id, m.domain_id, m.local_part,
+		m.local_part || '@' || d.domain AS email, m.password_hash, m.quota_mb, m.is_alias, m.is_catchall,
+		m.is_active, COALESCE(m.display_name, '') AS display_name, m.send_limit
+		FROM mailboxes m JOIN domains d ON m.domain_id = d.id`,
+	},
+	"api_keys": {
+		srcColumns:  []string{"id", "created_at", "updated_at", "deleted_at", "user_id", "key_hash", "name", "expires_at", "last_used_at", "active"},
+		tgtColumns:  []string{"id", "created_at", "updated_at", "deleted_at", "user_id", "key_hash", "name", "expires_at", "last_used_at", "active"},
+		boolColumns: []string{"active"},
+		dependsOn:   []string{"users"},
+	},
+	"sessions": {
+		srcColumns: []string{"id", "created_at", "updated_at", "deleted_at", "user_id", "token_hash", "role", "email", "ip", "user_agent", "expires_at"},
+		tgtColumns: []string{"id", "created_at", "updated_at", "deleted_at", "user_id", "token_hash", "role", "email", "ip", "user_agent", "expires_at"},
+		dependsOn:  []string{"users"},
+	},
+	"coremail_audit": {
+		srcColumns: []string{"id", "actor", "role", "action", "target", "result", "ip", "user_agent", "timestamp"},
+		tgtColumns: []string{"id", "actor", "role", "action", "target", "result", "ip", "user_agent", "timestamp"},
+	},
+	"security_events": {
+		srcColumns: []string{"id", "created_at", "ip", "email", "event_type", "count"},
+		tgtColumns: []string{"id", "created_at", "ip", "email", "event_type", "count"},
+	},
+	"feature_flags": {
+		srcColumns:  []string{"id", "created_at", "updated_at", "deleted_at", "name", "enabled", "tier_required", "module_version", "description"},
+		tgtColumns:  []string{"id", "created_at", "updated_at", "deleted_at", "name", "enabled", "tier_required", "module_version", "description"},
+		boolColumns: []string{"enabled"},
+	},
+	"licenses": {
+		srcColumns:  []string{"id", "created_at", "updated_at", "deleted_at", "key_hash", "tier", "issued_at", "expires_at", "max_domains", "max_mailboxes", "hardware_id", "metadata", "active"},
+		tgtColumns:  []string{"id", "created_at", "updated_at", "deleted_at", "key_hash", "tier", "issued_at", "expires_at", "max_domains", "max_mailboxes", "hardware_id", "metadata", "active"},
+		boolColumns: []string{"active"},
+	},
+}
+
 // migrationPlan describes a conservative table-by-table migration.
 type migrationPlan struct {
 	tables []string
@@ -241,10 +319,8 @@ func (p migrationPlan) rowCounts(ctx context.Context, db *sql.DB) (map[string]in
 	counts := make(map[string]int64)
 	for _, table := range p.tables {
 		var n int64
-		err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+quoteIdentifier(table)).Scan(&n)
-		if err != nil {
-			counts[table] = 0
-			continue
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+quoteIdentifier(table)).Scan(&n); err != nil {
+			return nil, fmt.Errorf("count %s: %w", table, err)
 		}
 		counts[table] = n
 	}
@@ -252,89 +328,176 @@ func (p migrationPlan) rowCounts(ctx context.Context, db *sql.DB) (map[string]in
 }
 
 func (p migrationPlan) run(ctx context.Context, srcDB, tgtDB *sql.DB) error {
-	for _, table := range p.tables {
-		if err := migrateTable(ctx, srcDB, tgtDB, table); err != nil {
+	ordered := p.dependencyOrder()
+	for _, table := range ordered {
+		tm, ok := tableColumnMap[table]
+		if !ok {
+			return fmt.Errorf("no migration definition for table %s", table)
+		}
+		if err := migrateTable(ctx, srcDB, tgtDB, table, tm); err != nil {
 			return fmt.Errorf("migrate table %s: %w", table, err)
+		}
+		if err := syncSequence(ctx, tgtDB, table); err != nil {
+			return fmt.Errorf("sync sequence for %s: %w", table, err)
 		}
 	}
 	return nil
 }
 
-func migrateTable(ctx context.Context, srcDB, tgtDB *sql.DB, table string) error {
+// syncSequence updates the PostgreSQL SERIAL/BIGSERIAL sequence for table
+// so that subsequent inserts using DEFAULT nextval(...) do not collide with
+// rows that were copied with explicit SQLite ids.
+func syncSequence(ctx context.Context, tgtDB *sql.DB, table string) error {
+	var seqName sql.NullString
+	if err := tgtDB.QueryRowContext(ctx, "SELECT pg_get_serial_sequence($1, 'id')", table).Scan(&seqName); err != nil {
+		return fmt.Errorf("lookup sequence for %s: %w", table, err)
+	}
+	if !seqName.Valid || seqName.String == "" {
+		return nil // no serial sequence for this table
+	}
+	_, err := tgtDB.ExecContext(ctx,
+		"SELECT setval($1, COALESCE((SELECT MAX(id) FROM "+quoteIdentifier(table)+"), 1), true)",
+		seqName.String)
+	if err != nil {
+		return fmt.Errorf("setval %s for %s: %w", seqName.String, table, err)
+	}
+	return nil
+}
+
+// dependencyOrder returns tables sorted so that dependents come after
+// their dependencies, using topological sort.
+func (p migrationPlan) dependencyOrder() []string {
+	inDegree := make(map[string]int)
+	graph := make(map[string][]string)
+	for _, t := range p.tables {
+		if _, ok := inDegree[t]; !ok {
+			inDegree[t] = 0
+		}
+		tm := tableColumnMap[t]
+		for _, dep := range tm.dependsOn {
+			graph[dep] = append(graph[dep], t)
+			inDegree[t]++
+		}
+	}
+	var queue []string
+	for _, t := range p.tables {
+		if inDegree[t] == 0 {
+			queue = append(queue, t)
+		}
+	}
+	var result []string
+	for len(queue) > 0 {
+		node := queue[0]
+		queue = queue[1:]
+		result = append(result, node)
+		for _, neighbor := range graph[node] {
+			inDegree[neighbor]--
+			if inDegree[neighbor] == 0 {
+				queue = append(queue, neighbor)
+			}
+		}
+	}
+	return result
+}
+
+func migrateTable(ctx context.Context, srcDB, tgtDB *sql.DB, table string, tm tableMigration) error {
 	if err := validateIdentifier(table); err != nil {
 		return fmt.Errorf("invalid table name %q: %w", table, err)
 	}
-
-	// Discover columns from source. PRAGMA is SQLite-specific, which is
-	// acceptable because the source is always SQLite for this command.
-	rows, err := srcDB.QueryContext(ctx, "PRAGMA table_info("+quoteIdentifier(table)+")")
-	if err != nil {
-		return fmt.Errorf("inspect source table %s: %w", table, err)
-	}
-	defer rows.Close()
-
-	var columns []string
-	for rows.Next() {
-		var cid int
-		var name, typ string
-		var notNull, pk int
-		var dflt any
-		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
-			return fmt.Errorf("scan table_info for %s: %w", table, err)
-		}
-		if err := validateIdentifier(name); err != nil {
-			return fmt.Errorf("invalid column name %q in table %s: %w", name, table, err)
-		}
-		columns = append(columns, name)
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	if len(columns) == 0 {
+	if len(tm.srcColumns) == 0 {
 		return nil
 	}
-	sort.Strings(columns)
 
-	quotedColumns := make([]string, len(columns))
-	for i, c := range columns {
-		quotedColumns[i] = quoteIdentifier(c)
+	// Build SELECT from source using srcColumns.
+	srcQuoted := make([]string, len(tm.srcColumns))
+	for i, c := range tm.srcColumns {
+		if err := validateIdentifier(c); err != nil {
+			return fmt.Errorf("invalid source column %q in table %s: %w", c, table, err)
+		}
+		srcQuoted[i] = quoteIdentifier(c)
 	}
-	colList := strings.Join(quotedColumns, ", ")
+	srcColList := strings.Join(srcQuoted, ", ")
 
-	placeholders := make([]string, len(columns))
+	// Build INSERT into target using tgtColumns.
+	tgtQuoted := make([]string, len(tm.tgtColumns))
+	for i, c := range tm.tgtColumns {
+		if err := validateIdentifier(c); err != nil {
+			return fmt.Errorf("invalid target column %q in table %s: %w", c, table, err)
+		}
+		tgtQuoted[i] = quoteIdentifier(c)
+	}
+	tgtColList := strings.Join(tgtQuoted, ", ")
+
+	placeholders := make([]string, len(tm.tgtColumns))
 	for i := range placeholders {
 		placeholders[i] = fmt.Sprintf("$%d", i+1)
 	}
 	insertSQL := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) ON CONFLICT DO NOTHING",
-		quoteIdentifier(table), colList, strings.Join(placeholders, ", "))
+		quoteIdentifier(table), tgtColList, strings.Join(placeholders, ", "))
 
-	srcRows, err := srcDB.QueryContext(ctx, "SELECT "+colList+" FROM "+quoteIdentifier(table))
+	selectSQL := tm.sourceQuery
+	if selectSQL == "" {
+		selectSQL = fmt.Sprintf("SELECT %s FROM %s", srcColList, quoteIdentifier(table))
+	}
+	srcRows, err := srcDB.QueryContext(ctx, selectSQL)
 	if err != nil {
 		return fmt.Errorf("select from source %s: %w", table, err)
 	}
 	defer srcRows.Close()
 
-	valuePtrs := make([]any, len(columns))
-	values := make([]any, len(columns))
+	// Build bool column lookup set.
+	boolSet := make(map[string]bool)
+	for _, c := range tm.boolColumns {
+		boolSet[c] = true
+	}
+
+	valuePtrs := make([]any, len(tm.srcColumns))
+	values := make([]any, len(tm.srcColumns))
 	for i := range valuePtrs {
 		valuePtrs[i] = &values[i]
 	}
 
-	var migrated int64
+	var processed int64
+	var inserted int64
 	for srcRows.Next() {
 		if err := srcRows.Scan(valuePtrs...); err != nil {
 			return fmt.Errorf("scan row from %s: %w", table, err)
 		}
-		if _, err := tgtDB.ExecContext(ctx, insertSQL, values...); err != nil {
+		// Convert SQLite integer booleans to Go bool for PostgreSQL BOOLEAN columns.
+		for i, col := range tm.srcColumns {
+			if boolSet[col] {
+				switch v := values[i].(type) {
+				case int64:
+					values[i] = v != 0
+				case float64:
+					values[i] = v != 0
+				}
+			}
+		}
+		// Apply null defaults: when a SQLite value is NULL and
+		// a default is defined, substitute it so we don't violate
+		// PostgreSQL NOT NULL constraints.
+		for i, col := range tm.srcColumns {
+			if dflt, ok := tm.nullDefaults[col]; ok && values[i] == nil {
+				values[i] = dflt
+			}
+		}
+		res, err := tgtDB.ExecContext(ctx, insertSQL, values...)
+		if err != nil {
 			return fmt.Errorf("insert into %s: %w", table, err)
 		}
-		migrated++
+		processed++
+		// ON CONFLICT DO NOTHING returns RowsAffected=0 when a row is skipped.
+		// Only count rows that were actually inserted.
+		if n, raErr := res.RowsAffected(); raErr == nil && n > 0 {
+			inserted++
+		}
 	}
 	if err := srcRows.Err(); err != nil {
 		return err
 	}
 
-	fmt.Printf("Migrated %d rows into %s\n", migrated, table)
+	fmt.Printf("Migrated %d rows into %s (%d processed, %d inserted, %d skipped)\n", inserted, table, processed, inserted, processed-inserted)
 	return nil
 }
 
@@ -358,33 +521,6 @@ func quoteIdentifier(name string) string {
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
 
-// tableChecksum returns a simple SHA256 over ordered column hashes for a table.
-func tableChecksum(ctx context.Context, db *sql.DB, table string) (string, error) {
-	var total int64
-	var hashSum string
-	_ = ctx
-	_ = db
-	_ = table
-	return fmt.Sprintf("%d:%s", total, hashSum), nil
-}
-
-// sha256sum computes the SHA256 of a byte slice.
-func sha256sum(b []byte) string {
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
-}
-
-// fileSHA256 returns the hex SHA256 of a file.
-func fileSHA256(path string) (string, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	return sha256sum(b), nil
-}
-
 func init() {
-	_ = tableChecksum
-	_ = fileSHA256
 	_ = time.Now
 }
