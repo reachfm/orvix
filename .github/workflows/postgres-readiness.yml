@@ -19,7 +19,13 @@ permissions:
 jobs:
   postgres-readiness:
     name: PostgreSQL metadata runtime and migration gates
-    runs-on: ubuntu-latest
+    # Pinned to ubuntu-24.04 (ships postgresql-client-16) so pg_dump/pg_restore
+    # match the postgres:16 service below. `ubuntu-latest` rolled to 24.04->26.04
+    # (postgresql-client-18), and a client newer than the v16 server emits GUCs
+    # such as `transaction_timeout` that the v16 server rejects on restore,
+    # breaking TestPostgresBackupRestoreAndRuntime. See the version assertion in
+    # "Install PostgreSQL client tools".
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
 
     services:
@@ -64,6 +70,19 @@ jobs:
           sudo apt-get install -y --no-install-recommends postgresql-client
           pg_dump --version
           pg_restore --version
+          # Guard: pg_dump/pg_restore MUST match the postgres service major
+          # (16). A newer client against the v16 server produces newer
+          # archive/GUC output the server rejects on restore (e.g.
+          # transaction_timeout), which silently breaks
+          # TestPostgresBackupRestoreAndRuntime. Fail loudly if the runner
+          # image ever drifts the client version again.
+          client_major="$(pg_dump --version | grep -oE '[0-9]+' | head -1)"
+          if [ "$client_major" != "16" ]; then
+            echo "ERROR: pg_dump major ${client_major} != postgres service major 16." >&2
+            echo "Client/server version mismatch will break backup/restore integration tests." >&2
+            echo "Pin the runner (runs-on) or install postgresql-client-16 explicitly." >&2
+            exit 1
+          fi
 
       - name: Download Go modules
         run: |
