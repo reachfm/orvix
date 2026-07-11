@@ -13,9 +13,12 @@ func TenantMiddleware(db *gorm.DB) fiber.Handler {
 			return c.Next()
 		}
 
+		sqlDB, err := db.DB()
+		if err != nil {
+			return c.Next()
+		}
 		var tenantID uint
-		err := db.Table("users").Select("tenant_id").Where("id = ?", userID).Scan(&tenantID).Error
-		if err == nil && tenantID > 0 {
+		if err := sqlDB.QueryRow("SELECT tenant_id FROM users WHERE id = ?", userID).Scan(&tenantID); err == nil && tenantID > 0 {
 			c.Locals("tenant_id", tenantID)
 		}
 

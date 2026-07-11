@@ -61,6 +61,19 @@ func (h *Handler) scopedTenantID(c fiber.Ctx) int64 {
 	return h.tenantID(c)
 }
 
+// callerOwnsTenant reports whether the caller may act on a resource owned
+// by ownerTenantID. Super admins can cross tenants; every other caller
+// must match scopedTenantID exactly. Handlers that look up a mailbox or
+// domain by id/name must check this before returning data or applying a
+// mutation, and must respond 404 (not 403) on failure so a caller cannot
+// use the response to distinguish "not mine" from "does not exist".
+func (h *Handler) callerOwnsTenant(c fiber.Ctx, ownerTenantID int64) bool {
+	if isSuperRole(c) {
+		return true
+	}
+	return ownerTenantID == h.scopedTenantID(c)
+}
+
 func sqlInt(db *sql.DB, query string, args ...any) int64 {
 	if db == nil {
 		return 0

@@ -50,6 +50,7 @@ type Router struct {
 	h            *handlers.Handler
 	appCtx       context.Context
 	cancel       context.CancelFunc
+	db           *gorm.DB
 }
 
 func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *zap.Logger,
@@ -94,6 +95,7 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		appCtx:       ctx,
 		cancel:       cancel,
 		h:            handlers.NewHandler(db, authenticator, apikeyMgr, logger, cfg, registry, ff, rateLimiter),
+		db:           db,
 	}
 	// Record the moment the router was constructed. The runtime
 	// telemetry endpoint (/api/v1/admin/runtime) reads this to
@@ -511,7 +513,11 @@ func (r *Router) setupRoutes() {
 		webmailLoginGroup.Post("/login", limiter.New(limiter.Config{Max: 5, Expiration: 15 * 60 * 1000}), r.h.WebmailLogin)
 	}
 
-	protected := api.Group("", r.apikeys.Middleware(), r.auth.Middleware())
+	// TenantMiddleware resolves tenant_id from the authenticated user
+	// row and stores it in c.Locals so handlers can scope mailbox/domain
+	// lookups to the caller's own tenant (see Handler.callerOwnsTenant).
+	// It must run after auth (which sets user_id) and before any handler.
+	protected := api.Group("", r.apikeys.Middleware(), r.auth.Middleware(), auth.TenantMiddleware(r.db))
 	protected.Get("/me", r.h.Me)
 
 	// User-facing webmail endpoints. Mounted on the
