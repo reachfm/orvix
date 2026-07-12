@@ -637,8 +637,29 @@ func (h *Handler) clearAuthCookies(c fiber.Ctx) {
 	})
 }
 
-// Logout clears auth cookies.
+// revokeCurrentAccessToken revokes the access token presented on the request
+// (cookie or Bearer header) so it is rejected immediately, closing the H-9 gap
+// where a stateless JWT stayed valid until expiry after logout. Best-effort:
+// never blocks logout if the revocation store errors.
+func (h *Handler) revokeCurrentAccessToken(c fiber.Ctx) {
+	token := c.Cookies("access_token")
+	if token == "" {
+		authHeader := c.Get("Authorization")
+		if len(authHeader) > 7 && authHeader[:7] == "Bearer " {
+			token = authHeader[7:]
+		}
+	}
+	if token == "" {
+		return
+	}
+	if err := h.auth.RevokeAccessToken(token); err != nil {
+		h.logger.Warn("failed to revoke access token on logout", zap.Error(err))
+	}
+}
+
+// Logout clears auth cookies and revokes the presented access token.
 func (h *Handler) Logout(c fiber.Ctx) error {
+	h.revokeCurrentAccessToken(c)
 	userID, ok := c.Locals("user_id").(uint)
 	if ok {
 		_ = h.auth.InvalidateAllSessions(userID)
@@ -650,6 +671,7 @@ func (h *Handler) Logout(c fiber.Ctx) error {
 
 // LogoutAll invalidates all sessions for the current user.
 func (h *Handler) LogoutAll(c fiber.Ctx) error {
+	h.revokeCurrentAccessToken(c)
 	userID := c.Locals("user_id").(uint)
 	if err := h.auth.InvalidateAllSessions(userID); err != nil {
 		h.logger.Error("failed to invalidate all sessions", zap.Error(err))
@@ -1063,10 +1085,17 @@ func (h *Handler) CreateDomain(c fiber.Ctx) error {
 	}
 
 	now := time.Now().UTC()
+	// The domain belongs to the creating caller's own tenant. This was
+	// previously hardcoded to 0, which silently orphaned every
+	// API-created domain from tenant scoping (see callerOwnsTenant) —
+	// harmless before tenant checks existed, but it must be the real
+	// tenant now that GetDomain/UpdateDomainStatus/DeleteDomain enforce
+	// ownership.
+	callerTenantID := h.scopedTenantID(c)
 	result, err := sqlDB.Exec(
 		"INSERT INTO coremail_domains (name, tenant_id, reseller_id, status, plan, description, max_mailboxes, max_aliases, max_quota_mb, dkim_enabled, dkim_selector, dmarc_enabled, mtasts_enabled, catchall_address, abuse_contact, labels, mailbox_count, created_at, updated_at)"+
-			" VALUES ("+h.dialect.Placeholder(1)+", 0, 0, "+h.dialect.Placeholder(2)+", "+h.dialect.Placeholder(3)+", "+h.dialect.Placeholder(4)+", "+h.dialect.Placeholder(5)+", "+h.dialect.Placeholder(6)+", "+h.dialect.Placeholder(7)+", "+h.dialect.Placeholder(8)+", "+h.dialect.Placeholder(9)+", "+h.dialect.Placeholder(10)+", "+h.dialect.Placeholder(11)+", "+h.dialect.Placeholder(12)+", "+h.dialect.Placeholder(13)+", '', 0, "+h.dialect.Placeholder(14)+", "+h.dialect.Placeholder(15)+")",
-		domainName, status, plan, description, maxMailboxes, maxAliases, maxQuotaMB,
+			" VALUES ("+h.dialect.Placeholder(1)+", "+h.dialect.Placeholder(2)+", 0, "+h.dialect.Placeholder(3)+", "+h.dialect.Placeholder(4)+", "+h.dialect.Placeholder(5)+", "+h.dialect.Placeholder(6)+", "+h.dialect.Placeholder(7)+", "+h.dialect.Placeholder(8)+", "+h.dialect.Placeholder(9)+", "+h.dialect.Placeholder(10)+", "+h.dialect.Placeholder(11)+", "+h.dialect.Placeholder(12)+", "+h.dialect.Placeholder(13)+", "+h.dialect.Placeholder(14)+", '', 0, "+h.dialect.Placeholder(15)+", "+h.dialect.Placeholder(16)+")",
+		domainName, callerTenantID, status, plan, description, maxMailboxes, maxAliases, maxQuotaMB,
 		dkimEnabled, dkimSelector, dmarcEnabled, mtastsEnabled, catchallAddress, abuseContact,
 		now, now,
 	)
@@ -1114,12 +1143,16 @@ func (h *Handler) DeleteDomain(c fiber.Ctx) error {
 
 	var domainID uint
 	var domainName string
-	err = sqlDB.QueryRow("SELECT id, name FROM coremail_domains WHERE name = "+h.dialect.Placeholder(1)+" AND deleted_at IS NULL", idStr).Scan(&domainID, &domainName)
+	var tenantID int64
+	err = sqlDB.QueryRow("SELECT id, name, tenant_id FROM coremail_domains WHERE name = "+h.dialect.Placeholder(1)+" AND deleted_at IS NULL", idStr).Scan(&domainID, &domainName, &tenantID)
 	if err == sql.ErrNoRows {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "domain not found: " + idStr})
 	}
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+	if !h.callerOwnsTenant(c, tenantID) {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "domain not found: " + idStr})
 	}
 
 	var mailboxCount int64
@@ -1129,7 +1162,7 @@ func (h *Handler) DeleteDomain(c fiber.Ctx) error {
 	}
 
 	now := time.Now().UTC()
-	_, err = sqlDB.Exec("UPDATE coremail_domains SET deleted_at = "+h.dialect.Placeholder(1)+", updated_at = "+h.dialect.Placeholder(2)+" WHERE id = "+h.dialect.Placeholder(3), now, now, domainID)
+	_, err = sqlDB.Exec("UPDATE coremail_domains SET deleted_at = "+h.dialect.Placeholder(1)+", updated_at = "+h.dialect.Placeholder(2)+" WHERE id = "+h.dialect.Placeholder(3)+" AND tenant_id = "+h.dialect.Placeholder(4), now, now, domainID, tenantID)
 	if err != nil {
 		h.logger.Error("failed to delete domain", zap.String("domain", domainName), zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "delete failed"})
@@ -1162,15 +1195,19 @@ func (h *Handler) UpdateDomainStatus(c fiber.Ctx) error {
 	}
 
 	var domainID uint
-	err = sqlDB.QueryRow("SELECT id FROM coremail_domains WHERE name = "+h.dialect.Placeholder(1)+" AND deleted_at IS NULL", name).Scan(&domainID)
+	var tenantID int64
+	err = sqlDB.QueryRow("SELECT id, tenant_id FROM coremail_domains WHERE name = "+h.dialect.Placeholder(1)+" AND deleted_at IS NULL", name).Scan(&domainID, &tenantID)
 	if err == sql.ErrNoRows {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "domain not found: " + name})
 	}
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
 	}
+	if !h.callerOwnsTenant(c, tenantID) {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "domain not found: " + name})
+	}
 
-	_, err = sqlDB.Exec("UPDATE coremail_domains SET status = "+h.dialect.Placeholder(1)+", updated_at = "+h.dialect.Placeholder(2)+" WHERE id = "+h.dialect.Placeholder(3), req.Status, time.Now().UTC(), domainID)
+	_, err = sqlDB.Exec("UPDATE coremail_domains SET status = "+h.dialect.Placeholder(1)+", updated_at = "+h.dialect.Placeholder(2)+" WHERE id = "+h.dialect.Placeholder(3)+" AND tenant_id = "+h.dialect.Placeholder(4), req.Status, time.Now().UTC(), domainID, tenantID)
 	if err != nil {
 		h.logger.Error("failed to update domain status", zap.String("domain", name), zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "status update failed"})
@@ -1206,13 +1243,14 @@ func (h *Handler) GetDomain(c fiber.Ctx) error {
 		dkimEnabled, dmarcEnabled, mtastsEnabled    int
 		dkimSelector, catchallAddress, abuseContact string
 		createdAt, updatedAt                        string
+		tenantID                                    int64
 	)
 	err = sqlDB.QueryRow(
 		"SELECT id, name, status, plan, description,"+
 			" max_mailboxes, max_aliases, max_quota_mb,"+
 			" dkim_enabled, dkim_selector, dmarc_enabled, mtasts_enabled,"+
 			" catchall_address, abuse_contact,"+
-			" created_at, updated_at"+
+			" created_at, updated_at, tenant_id"+
 			" FROM coremail_domains"+
 			" WHERE name = "+h.dialect.Placeholder(1)+" AND deleted_at IS NULL",
 		name,
@@ -1221,13 +1259,16 @@ func (h *Handler) GetDomain(c fiber.Ctx) error {
 		&maxMailboxes, &maxAliases, &maxQuotaMB,
 		&dkimEnabled, &dkimSelector, &dmarcEnabled, &mtastsEnabled,
 		&catchallAddress, &abuseContact,
-		&createdAt, &updatedAt,
+		&createdAt, &updatedAt, &tenantID,
 	)
 	if err == sql.ErrNoRows {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "domain not found"})
 	}
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+	if !h.callerOwnsTenant(c, tenantID) {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "domain not found"})
 	}
 
 	var mailboxCount int64
@@ -1480,16 +1521,21 @@ func (h *Handler) GetMailbox(c fiber.Ctx) error {
 
 	var email, domainName, status, createdAt, updatedAt string
 	var isAdmin, allowSMTP, allowIMAP, allowPOP3, allowJMAP, allowWebmail bool
+	var tenantID int64
 	err = sqlDB.QueryRow("SELECT m.email, COALESCE(d.name, ''), m.status, m.is_admin, m.created_at, m.updated_at,"+
-		" COALESCE(m.allow_smtp,"+h.dialect.TrueLiteral()+"), COALESCE(m.allow_imap,"+h.dialect.TrueLiteral()+"), COALESCE(m.allow_pop3,"+h.dialect.TrueLiteral()+"), COALESCE(m.allow_jmap,"+h.dialect.TrueLiteral()+"), COALESCE(m.allow_webmail,"+h.dialect.TrueLiteral()+")"+
+		" COALESCE(m.allow_smtp,"+h.dialect.TrueLiteral()+"), COALESCE(m.allow_imap,"+h.dialect.TrueLiteral()+"), COALESCE(m.allow_pop3,"+h.dialect.TrueLiteral()+"), COALESCE(m.allow_jmap,"+h.dialect.TrueLiteral()+"), COALESCE(m.allow_webmail,"+h.dialect.TrueLiteral()+"),"+
+		" m.tenant_id"+
 		" FROM coremail_mailboxes m LEFT JOIN coremail_domains d ON m.domain_id = d.id"+
 		" WHERE m.id = "+h.dialect.Placeholder(1)+" AND m.deleted_at IS NULL", id).Scan(&email, &domainName, &status, &isAdmin, &createdAt, &updatedAt,
-		&allowSMTP, &allowIMAP, &allowPOP3, &allowJMAP, &allowWebmail)
+		&allowSMTP, &allowIMAP, &allowPOP3, &allowJMAP, &allowWebmail, &tenantID)
 	if err == sql.ErrNoRows {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "mailbox not found"})
 	}
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+	if !h.callerOwnsTenant(c, tenantID) {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "mailbox not found"})
 	}
 
 	var messages int64
@@ -1923,12 +1969,16 @@ func (h *Handler) UpdateMailboxPassword(c fiber.Ctx) error {
 	}
 
 	var email string
-	err = sqlDB.QueryRow("SELECT email FROM coremail_mailboxes WHERE id = "+h.dialect.Placeholder(1)+" AND deleted_at IS NULL", id).Scan(&email)
+	var tenantID int64
+	err = sqlDB.QueryRow("SELECT email, tenant_id FROM coremail_mailboxes WHERE id = "+h.dialect.Placeholder(1)+" AND deleted_at IS NULL", id).Scan(&email, &tenantID)
 	if err == sql.ErrNoRows {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "mailbox not found"})
 	}
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+	if !h.callerOwnsTenant(c, tenantID) {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "mailbox not found"})
 	}
 
 	argon2Hash, err := hashPasswordArgon2id(req.Password)
@@ -1937,7 +1987,7 @@ func (h *Handler) UpdateMailboxPassword(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "password update failed"})
 	}
 
-	_, err = sqlDB.Exec("UPDATE coremail_mailboxes SET password_hash = "+h.dialect.Placeholder(1)+", updated_at = "+h.dialect.Placeholder(2)+" WHERE id = "+h.dialect.Placeholder(3), argon2Hash, time.Now().UTC(), id)
+	_, err = sqlDB.Exec("UPDATE coremail_mailboxes SET password_hash = "+h.dialect.Placeholder(1)+", updated_at = "+h.dialect.Placeholder(2)+" WHERE id = "+h.dialect.Placeholder(3)+" AND tenant_id = "+h.dialect.Placeholder(4), argon2Hash, time.Now().UTC(), id, tenantID)
 	if err != nil {
 		h.logger.Error("failed to update mailbox password", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "password update failed"})
@@ -1973,19 +2023,23 @@ func (h *Handler) UpdateMailboxStatus(c fiber.Ctx) error {
 
 	var email string
 	var isAdmin int
-	err = sqlDB.QueryRow("SELECT email, is_admin FROM coremail_mailboxes WHERE id = "+h.dialect.Placeholder(1)+" AND deleted_at IS NULL", id).Scan(&email, &isAdmin)
+	var tenantID int64
+	err = sqlDB.QueryRow("SELECT email, is_admin, tenant_id FROM coremail_mailboxes WHERE id = "+h.dialect.Placeholder(1)+" AND deleted_at IS NULL", id).Scan(&email, &isAdmin, &tenantID)
 	if err == sql.ErrNoRows {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "mailbox not found"})
 	}
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
 	}
+	if !h.callerOwnsTenant(c, tenantID) {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "mailbox not found"})
+	}
 
 	if isAdmin == 1 && req.Status != "active" {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "cannot disable admin mailbox"})
 	}
 
-	_, err = sqlDB.Exec("UPDATE coremail_mailboxes SET status = "+h.dialect.Placeholder(1)+", updated_at = "+h.dialect.Placeholder(2)+" WHERE id = "+h.dialect.Placeholder(3), req.Status, time.Now().UTC(), id)
+	_, err = sqlDB.Exec("UPDATE coremail_mailboxes SET status = "+h.dialect.Placeholder(1)+", updated_at = "+h.dialect.Placeholder(2)+" WHERE id = "+h.dialect.Placeholder(3)+" AND tenant_id = "+h.dialect.Placeholder(4), req.Status, time.Now().UTC(), id, tenantID)
 	if err != nil {
 		h.logger.Error("failed to update mailbox status", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "status update failed"})
@@ -2021,15 +2075,19 @@ func (h *Handler) UpdateMailboxQuota(c fiber.Ctx) error {
 	}
 
 	var email string
-	err = sqlDB.QueryRow("SELECT email FROM coremail_mailboxes WHERE id = "+h.dialect.Placeholder(1)+" AND deleted_at IS NULL", id).Scan(&email)
+	var tenantID int64
+	err = sqlDB.QueryRow("SELECT email, tenant_id FROM coremail_mailboxes WHERE id = "+h.dialect.Placeholder(1)+" AND deleted_at IS NULL", id).Scan(&email, &tenantID)
 	if err == sql.ErrNoRows {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "mailbox not found"})
 	}
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
 	}
+	if !h.callerOwnsTenant(c, tenantID) {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "mailbox not found"})
+	}
 
-	_, err = sqlDB.Exec("UPDATE coremail_mailboxes SET quota_mb = "+h.dialect.Placeholder(1)+", updated_at = "+h.dialect.Placeholder(2)+" WHERE id = "+h.dialect.Placeholder(3), req.QuotaMB, time.Now().UTC(), id)
+	_, err = sqlDB.Exec("UPDATE coremail_mailboxes SET quota_mb = "+h.dialect.Placeholder(1)+", updated_at = "+h.dialect.Placeholder(2)+" WHERE id = "+h.dialect.Placeholder(3)+" AND tenant_id = "+h.dialect.Placeholder(4), req.QuotaMB, time.Now().UTC(), id, tenantID)
 	if err != nil {
 		h.logger.Error("failed to update mailbox quota", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "quota update failed"})
@@ -2068,12 +2126,16 @@ func (h *Handler) UpdateMailboxProtocols(c fiber.Ctx) error {
 	}
 
 	var email string
-	err = sqlDB.QueryRow("SELECT email FROM coremail_mailboxes WHERE id = "+h.dialect.Placeholder(1)+" AND deleted_at IS NULL", id).Scan(&email)
+	var tenantID int64
+	err = sqlDB.QueryRow("SELECT email, tenant_id FROM coremail_mailboxes WHERE id = "+h.dialect.Placeholder(1)+" AND deleted_at IS NULL", id).Scan(&email, &tenantID)
 	if err == sql.ErrNoRows {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "mailbox not found"})
 	}
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+	if !h.callerOwnsTenant(c, tenantID) {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "mailbox not found"})
 	}
 
 	now := time.Now().UTC()
@@ -2081,28 +2143,28 @@ func (h *Handler) UpdateMailboxProtocols(c fiber.Ctx) error {
 	var args []any
 	if req.AllowSMTP != nil {
 		sets = append(sets, "allow_smtp = "+h.dialect.Placeholder(len(args)+1))
-		args = append(args, *req.AllowSMTP)
+		args = append(args, boolToInt(*req.AllowSMTP))
 	}
 	if req.AllowIMAP != nil {
 		sets = append(sets, "allow_imap = "+h.dialect.Placeholder(len(args)+1))
-		args = append(args, *req.AllowIMAP)
+		args = append(args, boolToInt(*req.AllowIMAP))
 	}
 	if req.AllowPOP3 != nil {
 		sets = append(sets, "allow_pop3 = "+h.dialect.Placeholder(len(args)+1))
-		args = append(args, *req.AllowPOP3)
+		args = append(args, boolToInt(*req.AllowPOP3))
 	}
 	if req.AllowJMAP != nil {
 		sets = append(sets, "allow_jmap = "+h.dialect.Placeholder(len(args)+1))
-		args = append(args, *req.AllowJMAP)
+		args = append(args, boolToInt(*req.AllowJMAP))
 	}
 	if req.AllowWebmail != nil {
 		sets = append(sets, "allow_webmail = "+h.dialect.Placeholder(len(args)+1))
-		args = append(args, *req.AllowWebmail)
+		args = append(args, boolToInt(*req.AllowWebmail))
 	}
 	sets = append(sets, "updated_at = "+h.dialect.Placeholder(len(args)+1))
-	args = append(args, now, id)
+	args = append(args, now, id, tenantID)
 
-	_, err = sqlDB.Exec(fmt.Sprintf("UPDATE coremail_mailboxes SET %s WHERE id = "+h.dialect.Placeholder(len(args))+" AND deleted_at IS NULL", strings.Join(sets, ", ")), args...)
+	_, err = sqlDB.Exec(fmt.Sprintf("UPDATE coremail_mailboxes SET %s WHERE id = "+h.dialect.Placeholder(len(args)-1)+" AND tenant_id = "+h.dialect.Placeholder(len(args)), strings.Join(sets, ", ")), args...)
 	if err != nil {
 		h.logger.Error("failed to update mailbox protocols", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "protocol update failed"})
@@ -2150,6 +2212,8 @@ func (h *Handler) BulkMailboxStatus(c fiber.Ctx) error {
 	updated := 0
 	skipped := 0
 	now := time.Now().UTC()
+	crossTenant := isSuperRole(c)
+	callerTenant := h.scopedTenantID(c)
 
 	for _, id := range req.MailboxIDs {
 		if id == 0 {
@@ -2158,14 +2222,18 @@ func (h *Handler) BulkMailboxStatus(c fiber.Ctx) error {
 		}
 		// RACE-SAFE UPDATE: the safety predicate is enforced atomically
 		// at the database write site. We never trust a pre-check result;
-		// if the row was soft-deleted, flipped to admin, or no longer
-		// matches the requested status, RowsAffected will be 0 and we
-		// count it as skipped. Admin mailboxes can never be touched
-		// by this bulk endpoint.
-		res, err := sqlDB.Exec(
-			"UPDATE coremail_mailboxes SET status = "+h.dialect.Placeholder(1)+", updated_at = "+h.dialect.Placeholder(2)+" WHERE id = "+h.dialect.Placeholder(3)+" AND deleted_at IS NULL AND is_admin = "+h.dialect.FalseLiteral(),
-			req.Status, now, id,
-		)
+		// if the row was soft-deleted, flipped to admin, no longer
+		// matches the requested status, or (unless the caller is a
+		// super admin) belongs to a different tenant, RowsAffected will
+		// be 0 and we count it as skipped. Admin mailboxes can never be
+		// touched by this bulk endpoint.
+		query := "UPDATE coremail_mailboxes SET status = " + h.dialect.Placeholder(1) + ", updated_at = " + h.dialect.Placeholder(2) + " WHERE id = " + h.dialect.Placeholder(3) + " AND deleted_at IS NULL AND is_admin = " + h.dialect.FalseLiteral()
+		args := []any{req.Status, now, id}
+		if !crossTenant {
+			query += " AND tenant_id = " + h.dialect.Placeholder(len(args)+1)
+			args = append(args, callerTenant)
+		}
+		res, err := sqlDB.Exec(query, args...)
 		if err != nil {
 			h.logger.Error("bulk mailbox update failed", zap.Uint("mailbox_id", id), zap.Error(err))
 			skipped++
@@ -2222,6 +2290,8 @@ func (h *Handler) BulkDomainStatus(c fiber.Ctx) error {
 	updated := 0
 	skipped := 0
 	now := time.Now().UTC()
+	crossTenant := isSuperRole(c)
+	callerTenant := h.scopedTenantID(c)
 
 	for _, name := range req.Domains {
 		name = strings.ToLower(strings.TrimSpace(name))
@@ -2233,12 +2303,17 @@ func (h *Handler) BulkDomainStatus(c fiber.Ctx) error {
 		// at the database write site. We do not pre-fetch; we run a
 		// single UPDATE whose predicate covers both the row match and
 		// the not-deleted invariant. RowsAffected == 0 means the row
-		// did not exist, was soft-deleted, or already matched the new
-		// status — in all cases it is correctly NOT counted as updated.
-		res, err := sqlDB.Exec(
-			"UPDATE coremail_domains SET status = "+h.dialect.Placeholder(1)+", updated_at = "+h.dialect.Placeholder(2)+" WHERE name = "+h.dialect.Placeholder(3)+" AND deleted_at IS NULL",
-			req.Status, now, name,
-		)
+		// did not exist, was soft-deleted, already matched the new
+		// status, or (unless the caller is a super admin) belongs to a
+		// different tenant — in all cases it is correctly NOT counted
+		// as updated.
+		query := "UPDATE coremail_domains SET status = " + h.dialect.Placeholder(1) + ", updated_at = " + h.dialect.Placeholder(2) + " WHERE name = " + h.dialect.Placeholder(3) + " AND deleted_at IS NULL"
+		args := []any{req.Status, now, name}
+		if !crossTenant {
+			query += " AND tenant_id = " + h.dialect.Placeholder(len(args)+1)
+			args = append(args, callerTenant)
+		}
+		res, err := sqlDB.Exec(query, args...)
 		if err != nil {
 			h.logger.Error("bulk domain update failed", zap.String("domain", name), zap.Error(err))
 			skipped++
@@ -2277,12 +2352,16 @@ func (h *Handler) DeleteMailbox(c fiber.Ctx) error {
 
 	var email string
 	var isAdmin int
-	err = sqlDB.QueryRow("SELECT email, is_admin FROM coremail_mailboxes WHERE id = "+h.dialect.Placeholder(1)+" AND deleted_at IS NULL", id).Scan(&email, &isAdmin)
+	var tenantID int64
+	err = sqlDB.QueryRow("SELECT email, is_admin, tenant_id FROM coremail_mailboxes WHERE id = "+h.dialect.Placeholder(1)+" AND deleted_at IS NULL", id).Scan(&email, &isAdmin, &tenantID)
 	if err == sql.ErrNoRows {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "mailbox not found"})
 	}
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+	if !h.callerOwnsTenant(c, tenantID) {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "mailbox not found"})
 	}
 
 	if isAdmin == 1 {
@@ -2290,7 +2369,7 @@ func (h *Handler) DeleteMailbox(c fiber.Ctx) error {
 	}
 
 	now := time.Now().UTC()
-	_, err = sqlDB.Exec("UPDATE coremail_mailboxes SET deleted_at = "+h.dialect.Placeholder(1)+", updated_at = "+h.dialect.Placeholder(2)+" WHERE id = "+h.dialect.Placeholder(3), now, now, id)
+	_, err = sqlDB.Exec("UPDATE coremail_mailboxes SET deleted_at = "+h.dialect.Placeholder(1)+", updated_at = "+h.dialect.Placeholder(2)+" WHERE id = "+h.dialect.Placeholder(3)+" AND tenant_id = "+h.dialect.Placeholder(4), now, now, id, tenantID)
 	if err != nil {
 		h.logger.Error("failed to delete mailbox", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "delete failed"})
@@ -3070,8 +3149,12 @@ func (h *Handler) GetMailboxAudit(c fiber.Ctx) error {
 		return c.JSON([]struct{}{})
 	}
 	var email string
-	err = sqlDB.QueryRow("SELECT email FROM coremail_mailboxes WHERE id = "+h.dialect.Placeholder(1)+" AND deleted_at IS NULL", id).Scan(&email)
+	var tenantID int64
+	err = sqlDB.QueryRow("SELECT email, tenant_id FROM coremail_mailboxes WHERE id = "+h.dialect.Placeholder(1)+" AND deleted_at IS NULL", id).Scan(&email, &tenantID)
 	if err != nil {
+		return c.JSON([]struct{}{})
+	}
+	if !h.callerOwnsTenant(c, tenantID) {
 		return c.JSON([]struct{}{})
 	}
 
@@ -3083,6 +3166,14 @@ func (h *Handler) GetDomainAudit(c fiber.Ctx) error {
 	name := c.Params("name")
 	if name == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "domain name required"})
+	}
+	sqlDB, err := h.db.DB()
+	if err == nil {
+		var tenantID int64
+		lookupErr := sqlDB.QueryRow("SELECT tenant_id FROM coremail_domains WHERE name = "+h.dialect.Placeholder(1)+" AND deleted_at IS NULL", name).Scan(&tenantID)
+		if lookupErr == nil && !h.callerOwnsTenant(c, tenantID) {
+			return c.JSON([]struct{}{})
+		}
 	}
 	return h.auditTimeline(c, []string{fmt.Sprintf("domain:%s", name)})
 }

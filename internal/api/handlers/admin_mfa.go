@@ -13,6 +13,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/auth"
+	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/dbdialect"
 	"go.uber.org/zap"
 )
@@ -91,9 +92,18 @@ func (h *Handler) MFASetupBegin(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"error": "failed to store pending setup"})
 	}
 
-	// Also store raw secret temporarily for verification
+	// Also store the raw secret temporarily for verification, encrypted
+	// at rest (AES-256-GCM via config.Encrypt) so a database-only
+	// compromise cannot recover working TOTP codes — a hashed or
+	// plaintext/base64-only copy would defeat the point of MFA against
+	// exactly that threat.
+	encryptedSecret, err := config.Encrypt(secretBytes)
+	if err != nil {
+		h.logger.Error("failed to encrypt pending mfa secret", zap.Error(err))
+		return c.Status(500).JSON(fiber.Map{"error": "failed to store pending setup"})
+	}
 	_, err = sqlDB.Exec(`UPDATE users SET pending_mfa_secret_raw = `+dial.Placeholder(1)+` WHERE id = `+dial.Placeholder(2),
-		base64Encode(secretBytes), userID)
+		encryptedSecret, userID)
 	if err != nil {
 		h.logger.Warn("failed to store raw pending mfa secret", zap.Error(err))
 	}
@@ -139,11 +149,11 @@ func (h *Handler) MFASetupVerify(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"error": "no pending MFA setup; call /mfa/setup/begin first"})
 	}
 
-	// Decode raw pending secret for TOTP verification.
+	// Decrypt raw pending secret for TOTP verification.
 	if pendingSecretRaw == "" {
 		return c.Status(400).JSON(fiber.Map{"error": "no pending MFA setup; call /mfa/setup/begin first"})
 	}
-	rawSecretBytes, err := base64Decode(pendingSecretRaw)
+	rawSecretBytes, err := config.Decrypt(pendingSecretRaw)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "internal error"})
 	}
@@ -216,7 +226,7 @@ func (h *Handler) MFADisable(c fiber.Ctx) error {
 	if err != nil || mfaSecretRaw == "" {
 		return c.Status(400).JSON(fiber.Map{"error": "MFA is not enabled or secret is missing"})
 	}
-	rawSecretBytes, err := base64Decode(mfaSecretRaw)
+	rawSecretBytes, err := config.Decrypt(mfaSecretRaw)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "internal error"})
 	}
@@ -276,10 +286,6 @@ func hashSecret(b []byte) []byte {
 
 func base64Encode(b []byte) string {
 	return base64.StdEncoding.EncodeToString(b)
-}
-
-func base64Decode(s string) ([]byte, error) {
-	return base64.StdEncoding.DecodeString(s)
 }
 
 func generateRecoveryCodes() []string {
@@ -368,7 +374,7 @@ func (h *Handler) MFALoginVerify(c fiber.Ctx) error {
 		if err != nil || mfaSecretRaw == "" {
 			return c.Status(401).JSON(fiber.Map{"error": "MFA not configured"})
 		}
-		rawSecretBytes, err := base64Decode(mfaSecretRaw)
+		rawSecretBytes, err := config.Decrypt(mfaSecretRaw)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": "internal error"})
 		}

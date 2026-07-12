@@ -58,6 +58,12 @@ func (h *Handler) backupService() (*backup.Service, error) {
 	}
 	svc := backup.NewService(h.backupDir(), sqlDB, sqlDB, mailDir, attachDir)
 	svc.SetConfigPath("/etc/orvix/orvix.yaml")
+	if h.cfg != nil {
+		// Only meaningful when the configured dialect is
+		// PostgreSQL (see Service.snapshotDB); harmless to set
+		// unconditionally otherwise, since it is never read.
+		svc.SetPostgresDSN(h.cfg.Database.DSN)
+	}
 	bi := updater.ReadBuildInfo()
 	svc.SetBuildInfo(bi.Version, bi.SHA)
 

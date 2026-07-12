@@ -221,6 +221,14 @@ func postgresTables() []string {
 			expires_at TIMESTAMP NOT NULL
 		)`,
 
+		// revoked_tokens backs H-9 access-token revocation on logout:
+		// a logged-out access token's jti is stored here until its
+		// own expiry so ValidateAccessToken rejects it immediately.
+		`CREATE TABLE IF NOT EXISTS revoked_tokens (
+			jti TEXT PRIMARY KEY,
+			expires_at BIGINT NOT NULL
+		)`,
+
 		`CREATE TABLE IF NOT EXISTS coremail_audit (
 			id BIGSERIAL PRIMARY KEY,
 			created_at TIMESTAMP NOT NULL DEFAULT NOW(),

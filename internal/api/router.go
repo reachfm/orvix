@@ -14,7 +14,6 @@ import (
 	"github.com/orvix/orvix/internal/antivirus"
 	"github.com/orvix/orvix/internal/api/handlers"
 	"github.com/orvix/orvix/internal/api/handlers/settings"
-	settingsbridge "github.com/orvix/orvix/internal/settings/bridge"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/coremail"
@@ -27,8 +26,9 @@ import (
 	"github.com/orvix/orvix/internal/metrics"
 	"github.com/orvix/orvix/internal/modules"
 	"github.com/orvix/orvix/internal/observability"
-	orvixruntime "github.com/orvix/orvix/internal/runtime"
 	"github.com/orvix/orvix/internal/ruler"
+	orvixruntime "github.com/orvix/orvix/internal/runtime"
+	settingsbridge "github.com/orvix/orvix/internal/settings/bridge"
 	"github.com/orvix/orvix/internal/tlsmgmt"
 	"github.com/orvix/orvix/internal/trust"
 	"github.com/orvix/orvix/internal/trustmgmt"
@@ -50,6 +50,7 @@ type Router struct {
 	h            *handlers.Handler
 	appCtx       context.Context
 	cancel       context.CancelFunc
+	db           *gorm.DB
 }
 
 func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *zap.Logger,
@@ -94,6 +95,7 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		appCtx:       ctx,
 		cancel:       cancel,
 		h:            handlers.NewHandler(db, authenticator, apikeyMgr, logger, cfg, registry, ff, rateLimiter),
+		db:           db,
 	}
 	// Record the moment the router was constructed. The runtime
 	// telemetry endpoint (/api/v1/admin/runtime) reads this to
@@ -511,7 +513,11 @@ func (r *Router) setupRoutes() {
 		webmailLoginGroup.Post("/login", limiter.New(limiter.Config{Max: 5, Expiration: 15 * 60 * 1000}), r.h.WebmailLogin)
 	}
 
-	protected := api.Group("", r.apikeys.Middleware(), r.auth.Middleware())
+	// TenantMiddleware resolves tenant_id from the authenticated user
+	// row and stores it in c.Locals so handlers can scope mailbox/domain
+	// lookups to the caller's own tenant (see Handler.callerOwnsTenant).
+	// It must run after auth (which sets user_id) and before any handler.
+	protected := api.Group("", r.apikeys.Middleware(), r.auth.Middleware(), auth.TenantMiddleware(r.db))
 	protected.Get("/me", r.h.Me)
 
 	// User-facing webmail endpoints. Mounted on the
@@ -620,7 +626,16 @@ func (r *Router) setupRoutes() {
 	// so cross-mailbox password changes are impossible.
 	authCSRF.Post("/webmail/password/change", r.h.WebmailChangePassword)
 
-	admin := protected.Group("", auth.RequireAnyRole(auth.RoleAdmin, auth.RoleSuperAdmin))
+	// CSRF is enforced on the entire admin group by default (deny-list,
+	// not allow-list) rather than only on routes an author remembered to
+	// nest under a separate CSRF sub-group — several state-changing
+	// routes (migration start, domain provisioning, calendar/contacts/
+	// tasks, compliance policies) were previously mounted directly here
+	// and shipped with no CSRF check at all. csrf.Middleware() already
+	// no-ops on GET/HEAD/OPTIONS and on API-key-authenticated requests,
+	// so this adds no burden to the read-only routes or to the
+	// provisioning API below.
+	admin := protected.Group("", auth.RequireAnyRole(auth.RoleAdmin, auth.RoleSuperAdmin), r.csrf.Middleware())
 	admin.Get("/domains", r.h.ListDomains)
 	admin.Get("/users", r.h.ListUsers)
 	admin.Get("/mailboxes", r.h.ListUsers)
@@ -672,34 +687,34 @@ func (r *Router) setupRoutes() {
 	admin.Get("/admin/public-folders", r.h.ListPublicFolders)
 	admin.Get("/admin/admin-groups", r.h.ListAdminGroups)
 	admin.Get("/admin/quarantine", r.h.ListQuarantine)
-admin.Get("/admin/audit-logs", r.h.ListAdminAuditLogs)
+	admin.Get("/admin/audit-logs", r.h.ListAdminAuditLogs)
 	admin.Get("/admin/acl-rules", r.h.ListACLRules)
 	admin.Get("/admin/login-protection/status", r.h.LoginProtectionStatus)
 	admin.Get("/admin/login-protection/lockouts", r.h.ListLockouts)
 	admin.Get("/admin/admin-users", r.h.ListAdminUsers)
 	admin.Get("/admin/admin-users/:id", r.h.GetAdminUser)
 	admin.Get("/admin/log-rules", r.h.ListLogRules)
-// Enterprise v3 — SSL, acceptance rules, incoming message
-// rules, FTP backup targets, file system browser,
-// migration sources, clustering, antivirus, settings
-// protocol splits.
-admin.Get("/admin/ssl/certificates", r.h.AdminSslListCertificates)
-admin.Get("/admin/ssl/certificates/reload", r.h.AdminSslReloadCertificates)
-admin.Get("/admin/ssl/expiry-warnings", r.h.AdminSslExpiryWarnings)
-admin.Get("/admin/ssl/acme/status", r.h.AdminSslAcmeStatus)
-admin.Get("/admin/acceptance-rules", r.h.ListAcceptanceRules)
-admin.Get("/admin/incoming-msg-rules", r.h.ListIncomingMsgRules)
-admin.Get("/admin/migration-sources", r.h.ListMigrationSources)
-admin.Get("/admin/backup-targets", r.h.ListBackupTargets)
-admin.Get("/admin/backup-targets/:id/test", r.h.TestBackupTarget)
-admin.Get("/admin/migration-sources/:id/test", r.h.TestMigrationSource)
-admin.Get("/admin/fs/browse", r.h.AdminFsBrowse)
-admin.Get("/admin/fs/read", r.h.AdminFsRead)
-admin.Get("/admin/cluster/status", r.h.AdminClusteringStatus)
-admin.Get("/admin/security/antivirus", r.h.AdminAntivirusStatus)
-// Per-protocol settings sub-pages. The :protocol path
-// parameter is one of the IDs in the protocolDefs map.
-admin.Get("/admin/settings/protocol/:protocol", r.h.ListProtocolSettings)
+	// Enterprise v3 — SSL, acceptance rules, incoming message
+	// rules, FTP backup targets, file system browser,
+	// migration sources, clustering, antivirus, settings
+	// protocol splits.
+	admin.Get("/admin/ssl/certificates", r.h.AdminSslListCertificates)
+	admin.Get("/admin/ssl/certificates/reload", r.h.AdminSslReloadCertificates)
+	admin.Get("/admin/ssl/expiry-warnings", r.h.AdminSslExpiryWarnings)
+	admin.Get("/admin/ssl/acme/status", r.h.AdminSslAcmeStatus)
+	admin.Get("/admin/acceptance-rules", r.h.ListAcceptanceRules)
+	admin.Get("/admin/incoming-msg-rules", r.h.ListIncomingMsgRules)
+	admin.Get("/admin/migration-sources", r.h.ListMigrationSources)
+	admin.Get("/admin/backup-targets", r.h.ListBackupTargets)
+	admin.Get("/admin/backup-targets/:id/test", r.h.TestBackupTarget)
+	admin.Get("/admin/migration-sources/:id/test", r.h.TestMigrationSource)
+	admin.Get("/admin/fs/browse", r.h.AdminFsBrowse)
+	admin.Get("/admin/fs/read", r.h.AdminFsRead)
+	admin.Get("/admin/cluster/status", r.h.AdminClusteringStatus)
+	admin.Get("/admin/security/antivirus", r.h.AdminAntivirusStatus)
+	// Per-protocol settings sub-pages. The :protocol path
+	// parameter is one of the IDs in the protocolDefs map.
+	admin.Get("/admin/settings/protocol/:protocol", r.h.ListProtocolSettings)
 	admin.Get("/admin/mailing-lists/:id/members", r.h.ListMailingListMembers)
 	admin.Get("/admin/admin-groups/:id/members", r.h.ListAdminGroupMembers)
 	admin.Get("/feature-flags", r.h.ListFeatureFlags)
@@ -821,7 +836,10 @@ admin.Get("/admin/settings/protocol/:protocol", r.h.ListProtocolSettings)
 	admin.Get("/collaboration/mailboxes", r.h.ListSharedMailboxes)
 	admin.Post("/collaboration/mailboxes", r.h.CreateSharedMailbox)
 
-	men := admin.Group("", r.csrf.Middleware())
+	// men no longer adds its own CSRF middleware — admin (above) now
+	// enforces it for the whole group. Kept as a separate alias so the
+	// diff for existing routes below stays minimal.
+	men := admin
 	men.Post("/domains", r.h.CreateDomain)
 	men.Patch("/domains/:name", r.h.PatchDomain)
 	men.Patch("/domains/:name/status", r.h.UpdateDomainStatus)
@@ -953,32 +971,32 @@ admin.Get("/admin/settings/protocol/:protocol", r.h.ListProtocolSettings)
 	men.Patch("/admin/admin-users/:id/status", r.h.UpdateAdminUserStatus)
 	men.Patch("/admin/admin-users/:id/groups", r.h.UpdateAdminUserGroups)
 	men.Delete("/admin/admin-users/:id", r.h.DeleteAdminUser)
-men.Post("/admin/log-rules", r.h.CreateLogRule)
-men.Delete("/admin/log-rules/:id", r.h.DeleteLogRule)
-// Enterprise v3 — CSRF-protected mutations for the new
-// sections. Each one is mounted inside `men` so the
-// X-CSRF-Token check runs before the handler. All
-// handlers in enterprise_admin_v3.go + ssl.go write to
-// the audit table via h.appendAudit.
-men.Post("/admin/ssl/certificates", r.h.AdminSslUploadCertificate)
-men.Post("/admin/ssl/certificates/reload", r.h.AdminSslReloadCertificates)
-men.Delete("/admin/ssl/certificates/:id", r.h.AdminSslDeleteCertificate)
-men.Post("/admin/acceptance-rules", r.h.CreateAcceptanceRule)
-men.Patch("/admin/acceptance-rules/:id", r.h.UpdateAcceptanceRule)
-men.Post("/admin/acceptance-rules/test", r.h.TestAcceptanceRule)
-men.Delete("/admin/acceptance-rules/:id", r.h.DeleteAcceptanceRule)
-men.Post("/admin/incoming-msg-rules", r.h.CreateIncomingMsgRule)
-men.Patch("/admin/incoming-msg-rules/:id", r.h.UpdateIncomingMsgRule)
-men.Delete("/admin/incoming-msg-rules/:id", r.h.DeleteIncomingMsgRule)
-men.Post("/admin/migration-sources", r.h.CreateMigrationSource)
-men.Patch("/admin/migration-sources/:id", r.h.UpdateMigrationSource)
-men.Delete("/admin/migration-sources/:id", r.h.DeleteMigrationSource)
-men.Post("/admin/migration-sources/:id/test", r.h.TestMigrationSource)
-men.Post("/admin/backup-targets", r.h.CreateBackupTarget)
-men.Patch("/admin/backup-targets/:id", r.h.UpdateBackupTarget)
-men.Delete("/admin/backup-targets/:id", r.h.DeleteBackupTarget)
-men.Post("/admin/backup-targets/:id/test", r.h.TestBackupTarget)
-men.Patch("/admin/settings/protocol/:protocol", r.h.PatchProtocolSettings)
+	men.Post("/admin/log-rules", r.h.CreateLogRule)
+	men.Delete("/admin/log-rules/:id", r.h.DeleteLogRule)
+	// Enterprise v3 — CSRF-protected mutations for the new
+	// sections. Each one is mounted inside `men` so the
+	// X-CSRF-Token check runs before the handler. All
+	// handlers in enterprise_admin_v3.go + ssl.go write to
+	// the audit table via h.appendAudit.
+	men.Post("/admin/ssl/certificates", r.h.AdminSslUploadCertificate)
+	men.Post("/admin/ssl/certificates/reload", r.h.AdminSslReloadCertificates)
+	men.Delete("/admin/ssl/certificates/:id", r.h.AdminSslDeleteCertificate)
+	men.Post("/admin/acceptance-rules", r.h.CreateAcceptanceRule)
+	men.Patch("/admin/acceptance-rules/:id", r.h.UpdateAcceptanceRule)
+	men.Post("/admin/acceptance-rules/test", r.h.TestAcceptanceRule)
+	men.Delete("/admin/acceptance-rules/:id", r.h.DeleteAcceptanceRule)
+	men.Post("/admin/incoming-msg-rules", r.h.CreateIncomingMsgRule)
+	men.Patch("/admin/incoming-msg-rules/:id", r.h.UpdateIncomingMsgRule)
+	men.Delete("/admin/incoming-msg-rules/:id", r.h.DeleteIncomingMsgRule)
+	men.Post("/admin/migration-sources", r.h.CreateMigrationSource)
+	men.Patch("/admin/migration-sources/:id", r.h.UpdateMigrationSource)
+	men.Delete("/admin/migration-sources/:id", r.h.DeleteMigrationSource)
+	men.Post("/admin/migration-sources/:id/test", r.h.TestMigrationSource)
+	men.Post("/admin/backup-targets", r.h.CreateBackupTarget)
+	men.Patch("/admin/backup-targets/:id", r.h.UpdateBackupTarget)
+	men.Delete("/admin/backup-targets/:id", r.h.DeleteBackupTarget)
+	men.Post("/admin/backup-targets/:id/test", r.h.TestBackupTarget)
+	men.Patch("/admin/settings/protocol/:protocol", r.h.PatchProtocolSettings)
 }
 
 func (r *Router) setupAdminUI() {
