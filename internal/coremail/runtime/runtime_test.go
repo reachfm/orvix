@@ -20,6 +20,7 @@ import (
 
 	"github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/config"
+	"github.com/orvix/orvix/internal/coremail/delivery"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
 	"github.com/orvix/orvix/internal/modules"
@@ -176,6 +177,62 @@ func TestRuntimeWiresOutboundPreferIPv4ToWorkers(t *testing.T) {
 	}
 }
 
+// TestRuntimeRejectsInvalidOutboundTLSPolicy verifies that an
+// unparseable outbound.tls_policy value stops initCore (and therefore
+// startup) instead of silently falling back to opportunistic.
+func TestRuntimeRejectsInvalidOutboundTLSPolicy(t *testing.T) {
+	dir := t.TempDir()
+	sqlDB := testRuntimeDB(t, dir)
+	t.Cleanup(func() { sqlDB.Close() })
+
+	cfg := config.Defaults()
+	cfg.CoreMail.Enabled = true
+	cfg.CoreMail.Hostname = "test.orvix.local"
+	cfg.CoreMail.MailStorePath = filepath.Join(dir, "msgs")
+	cfg.Outbound.TLSPolicy = "tlsplease"
+
+	mod := New(zap.NewNop())
+	mod.cfg = cfg
+	mod.db = sqlDB
+	err := mod.initCore(cfg, sqlDB)
+	if err == nil {
+		t.Fatal("initCore accepted invalid outbound.tls_policy; startup must fail")
+	}
+	if !strings.Contains(err.Error(), "outbound.tls_policy") {
+		t.Errorf("error should name outbound.tls_policy, got: %v", err)
+	}
+}
+
+// TestRuntimeWiresOutboundTLSPolicyToWorkers verifies the resolved
+// canonical policy value reaches every delivery worker's transport.
+func TestRuntimeWiresOutboundTLSPolicyToWorkers(t *testing.T) {
+	dir := t.TempDir()
+	sqlDB := testRuntimeDB(t, dir)
+	t.Cleanup(func() { sqlDB.Close() })
+
+	cfg := config.Defaults()
+	cfg.CoreMail.Enabled = true
+	cfg.CoreMail.Hostname = "test.orvix.local"
+	cfg.CoreMail.MailStorePath = filepath.Join(dir, "msgs")
+	cfg.CoreMail.QueueWorkers = 2
+	cfg.Outbound.TLSPolicy = "strict"
+
+	mod := New(zap.NewNop())
+	mod.cfg = cfg
+	mod.db = sqlDB
+	if err := mod.initCore(cfg, sqlDB); err != nil {
+		t.Fatalf("init core: %v", err)
+	}
+	if len(mod.workers) != 2 {
+		t.Fatalf("workers = %d, want 2", len(mod.workers))
+	}
+	for i, worker := range mod.workers {
+		if worker.Transport.Config.TLSPolicy != delivery.TLSPolicyStrict {
+			t.Fatalf("worker %d transport TLSPolicy = %v, want strict", i, worker.Transport.Config.TLSPolicy)
+		}
+	}
+}
+
 func TestRuntimeWiresCoreMailRequireAuthForSubmissionToSMTP(t *testing.T) {
 	// Verify inbound (port 25) does NOT require auth; submission (port 587) requires TLS certificate.
 	dir := t.TempDir()
@@ -272,7 +329,6 @@ func TestRuntimeKeepsInboundMailFromCleartextWhenAuthRequiresTLS(t *testing.T) {
 		t.Fatal("submission (port 587) must require TLS for auth")
 	}
 }
-
 
 func TestRuntimeHealthRegistered(t *testing.T) {
 	dir := t.TempDir()
@@ -510,9 +566,9 @@ func generateRuntimeTestCert(t *testing.T) (certPEM, keyPEM []byte) {
 
 // TestRuntimeSubmissionDisabledWhenTLSCertPathInvalid verifies that
 // a submission-enabled config with a bogus TLS cert path:
-//   * does NOT fail initCore (port 25 stays up),
-//   * does NOT create the submission server (no plaintext AUTH),
-//   * records a clear "TLS certificate/key failed to load" reason
+//   - does NOT fail initCore (port 25 stays up),
+//   - does NOT create the submission server (no plaintext AUTH),
+//   - records a clear "TLS certificate/key failed to load" reason
 //     for the admin dashboard.
 func TestRuntimeSubmissionDisabledWhenTLSCertPathInvalid(t *testing.T) {
 	dir := t.TempDir()
@@ -691,10 +747,10 @@ func TestRuntimeSubmissionStartsWhenTLSCertValid(t *testing.T) {
 
 // TestRuntimeSubmissionDisabledReasonMatrix verifies the four
 // distinct telemetry reasons across the gating matrix:
-//   * submission disabled by config (flag false)
-//   * submission enabled, no TLS configured
-//   * submission enabled, TLS invalid
-//   * submission enabled, TLS valid (no disabled reason — listener runs)
+//   - submission disabled by config (flag false)
+//   - submission enabled, no TLS configured
+//   - submission enabled, TLS invalid
+//   - submission enabled, TLS valid (no disabled reason — listener runs)
 func TestRuntimeSubmissionDisabledReasonMatrix(t *testing.T) {
 	dir := t.TempDir()
 

@@ -146,6 +146,63 @@ func TestRecordAndListSessions(t *testing.T) {
 	}
 }
 
+// TestListSessionsDeterministicOrderOnEqualTimestamps forces the exact
+// condition the ORDER BY tiebreaker exists for: multiple sessions with
+// an identical last_seen_at value. The rows are inserted directly with
+// a fixed timestamp (not via RecordSession/time.Now), so the test is
+// deterministic — without the "ws.id DESC" tiebreaker the order of
+// equal-timestamp rows would be unspecified.
+func TestListSessionsDeterministicOrderOnEqualTimestamps(t *testing.T) {
+	svc, _ := testService(t)
+	ctx := context.Background()
+
+	if err := svc.ensureTables(ctx); err != nil {
+		t.Fatalf("ensure tables: %v", err)
+	}
+
+	fixed := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	ips := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5"}
+	for _, ip := range ips {
+		if _, err := svc.engine.DB.ExecContext(ctx, `
+			INSERT INTO webmail_sessions (mailbox_id, ip, user_agent, created_at, last_seen_at)
+			VALUES (1, ?, 'EqualTS/1.0', ?, ?)
+		`, ip, fixed, fixed); err != nil {
+			t.Fatalf("insert session %s: %v", ip, err)
+		}
+	}
+
+	assertNewestFirstByID := func(sessions []WebmailSession) {
+		t.Helper()
+		if len(sessions) != len(ips) {
+			t.Fatalf("expected %d sessions, got %d", len(ips), len(sessions))
+		}
+		for i, s := range sessions {
+			wantIP := ips[len(ips)-1-i]
+			if s.IP != wantIP {
+				t.Fatalf("position %d: IP = %s, want %s (equal timestamps must order by id DESC)", i, s.IP, wantIP)
+			}
+			if i > 0 && sessions[i-1].ID <= s.ID {
+				t.Fatalf("ids not strictly descending: %d then %d", sessions[i-1].ID, s.ID)
+			}
+		}
+	}
+
+	// All-sessions path.
+	sessions, err := svc.ListSessions(ctx, nil)
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	assertNewestFirstByID(sessions)
+
+	// Mailbox-filtered path.
+	mbID := uint(1)
+	sessions, err = svc.ListSessions(ctx, &mbID)
+	if err != nil {
+		t.Fatalf("list sessions by mailbox: %v", err)
+	}
+	assertNewestFirstByID(sessions)
+}
+
 func TestRevokeSession(t *testing.T) {
 	svc, _ := testService(t)
 	ctx := context.Background()
