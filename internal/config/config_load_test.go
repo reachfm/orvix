@@ -196,3 +196,169 @@ func TestLoadWithoutConfigFileUsesDefaults(t *testing.T) {
 		t.Error("default coremail.enabled = true, want false")
 	}
 }
+
+// ── TLS Policy Configuration Tests ─────────────────────────────
+
+func TestTLSPolicyCanonicalKeySetsTLSPolicy(t *testing.T) {
+	unsetenv(t, "ORVIX_CONFIG")
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "tls.yaml")
+	content := `
+server:
+  host: "127.0.0.1"
+  admin_port: 8080
+coremail:
+  enabled: true
+outbound:
+  tls_policy: strict
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	setenv(t, "ORVIX_CONFIG", cfgPath)
+	oldWD, _ := os.Getwd()
+	os.Chdir(dir)
+	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+
+	cfg, err := Load(zap.NewNop())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Outbound.TLSPolicy != "strict" {
+		t.Errorf("TLSPolicy = %q, want strict", cfg.Outbound.TLSPolicy)
+	}
+	if cfg.Outbound.TLSPolicyLegacy != "" {
+		t.Errorf("TLSPolicyLegacy = %q, want empty", cfg.Outbound.TLSPolicyLegacy)
+	}
+	if cfg.Outbound.ResolvedTLSPolicy() != "strict" {
+		t.Errorf("ResolvedTLSPolicy = %q, want strict", cfg.Outbound.ResolvedTLSPolicy())
+	}
+}
+
+func TestTLSPolicyCanonicalKeyAcceptsOpportunistic(t *testing.T) {
+	unsetenv(t, "ORVIX_CONFIG")
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "tls.yaml")
+	content := `
+server:
+  host: "127.0.0.1"
+  admin_port: 8080
+coremail:
+  enabled: true
+outbound:
+  tls_policy: opportunistic
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	setenv(t, "ORVIX_CONFIG", cfgPath)
+	oldWD, _ := os.Getwd()
+	os.Chdir(dir)
+	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+
+	cfg, err := Load(zap.NewNop())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Outbound.TLSPolicy != "opportunistic" {
+		t.Errorf("TLSPolicy = %q, want opportunistic", cfg.Outbound.TLSPolicy)
+	}
+}
+
+func TestTLSPolicyLegacyKeyStillWorks(t *testing.T) {
+	unsetenv(t, "ORVIX_CONFIG")
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "tls.yaml")
+	content := `
+server:
+  host: "127.0.0.1"
+  admin_port: 8080
+coremail:
+  enabled: true
+outbound:
+  outbound_tls_policy: strict
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	setenv(t, "ORVIX_CONFIG", cfgPath)
+	oldWD, _ := os.Getwd()
+	os.Chdir(dir)
+	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+
+	cfg, err := Load(zap.NewNop())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Outbound.TLSPolicy != "strict" {
+		t.Errorf("TLSPolicy (resolved from legacy) = %q, want strict", cfg.Outbound.TLSPolicy)
+	}
+	if cfg.Outbound.TLSPolicyLegacy != "" {
+		t.Errorf("TLSPolicyLegacy = %q, want empty after resolution", cfg.Outbound.TLSPolicyLegacy)
+	}
+}
+
+func TestTLSPolicyCanonicalWinsWhenBothKeysSet(t *testing.T) {
+	unsetenv(t, "ORVIX_CONFIG")
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "tls.yaml")
+	content := `
+server:
+  host: "127.0.0.1"
+  admin_port: 8080
+coremail:
+  enabled: true
+outbound:
+  tls_policy: strict
+  outbound_tls_policy: opportunistic
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	setenv(t, "ORVIX_CONFIG", cfgPath)
+	oldWD, _ := os.Getwd()
+	os.Chdir(dir)
+	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+
+	cfg, err := Load(zap.NewNop())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Outbound.TLSPolicy != "strict" {
+		t.Errorf("canonical TLSPolicy = %q, want strict (canonical wins)", cfg.Outbound.TLSPolicy)
+	}
+	if cfg.Outbound.TLSPolicyLegacy != "" {
+		t.Errorf("TLSPolicyLegacy = %q, want empty after resolution", cfg.Outbound.TLSPolicyLegacy)
+	}
+}
+
+func TestTLSPolicyMissingKeyUsesEmptyDefault(t *testing.T) {
+	unsetenv(t, "ORVIX_CONFIG")
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "tls.yaml")
+	content := `
+server:
+  host: "127.0.0.1"
+  admin_port: 8080
+coremail:
+  enabled: true
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	setenv(t, "ORVIX_CONFIG", cfgPath)
+	oldWD, _ := os.Getwd()
+	os.Chdir(dir)
+	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+
+	cfg, err := Load(zap.NewNop())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Outbound.TLSPolicy != "" {
+		t.Errorf("TLSPolicy = %q, want empty (defaults to opportunistic at runtime)", cfg.Outbound.TLSPolicy)
+	}
+	if cfg.Outbound.ResolvedTLSPolicy() != "" {
+		t.Errorf("ResolvedTLSPolicy = %q, want empty", cfg.Outbound.ResolvedTLSPolicy())
+	}
+}
