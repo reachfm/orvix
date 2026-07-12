@@ -144,11 +144,11 @@ func startFakeSMTPServerOpts(t *testing.T, requireStartTLS bool) *fakeSMTPServer
 func startFakeSMTPServerWithTLS(t *testing.T, requireStartTLS bool, tlsLn net.Listener, tlsCfg *tls.Config) *fakeSMTPServer {
 	t.Helper()
 	fs := &fakeSMTPServer{
-		t:               t,
-		greetingCode:    220,
-		greetingMsg:     "Fake SMTP Server",
-		requireStartTLS: requireStartTLS,
-		cachedTLSConfig: tlsCfg,
+		t:                 t,
+		greetingCode:      220,
+		greetingMsg:       "Fake SMTP Server",
+		requireStartTLS:   requireStartTLS,
+		cachedTLSConfig:   tlsCfg,
 		customTLSListener: tlsLn,
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

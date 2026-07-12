@@ -93,8 +93,8 @@ type ClamAVConfig struct {
 
 // OutboundConfig controls outbound SMTP delivery behavior.
 type OutboundConfig struct {
-	PreferIPv4  bool   `mapstructure:"prefer_ipv4"`
-	TLSPolicy   string `mapstructure:"outbound_tls_policy"`
+	PreferIPv4 bool   `mapstructure:"prefer_ipv4"`
+	TLSPolicy  string `mapstructure:"outbound_tls_policy"`
 }
 
 // BackupConfig holds backup settings.

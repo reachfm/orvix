@@ -653,5 +653,221 @@ func TestTLSPolicyStrictMXHostname(t *testing.T) {
 	}
 }
 
+// ── Review Regression Tests ──────────────────────────────────
+
+// TestTLSPolicyStrictZeroValueFlagsNoPlaintext verifies that strict
+// mode never proceeds to plaintext delivery even when the transport
+// flags AttemptSTARTTLS and RequireSTARTTLS are zero-valued (a
+// TransportConfig built without DefaultTransportConfig). Strict must
+// own its TLS requirement; it cannot depend on orthogonal flags.
+func TestTLSPolicyStrictZeroValueFlagsNoPlaintext(t *testing.T) {
+	// Server that does NOT advertise STARTTLS and accepts plaintext.
+	fs := startFakeSMTP(t)
+	cfg := DefaultTransportConfig()
+	cfg.TLSPolicy = TLSPolicyStrict
+	cfg.AttemptSTARTTLS = false
+	cfg.RequireSTARTTLS = false
+	transport := NewSMTPTransport(cfg)
+
+	result := transport.DeliverWithTLSName(context.Background(), fs.addr, false,
+		"sender@test.com", []string{"rcpt@test.com"}, []byte("data"),
+		"test.orvix.local", "127.0.0.1")
+
+	if result.Success {
+		t.Fatal("strict mode must not deliver plaintext when AttemptSTARTTLS/RequireSTARTTLS are false")
+	}
+	if !result.TempFail {
+		t.Error("strict no-TLS failure should be TempFail")
+	}
+	if result.TLSUsed {
+		t.Error("TLSUsed should be false when no TLS was negotiated")
+	}
+}
+
+// TestTLSPolicyStrictZeroValueFlagsStillUpgrades verifies that strict
+// mode attempts the STARTTLS upgrade even when AttemptSTARTTLS=false,
+// so a strict transport with zero-valued flags still delivers over
+// verified TLS instead of failing or downgrading.
+func TestTLSPolicyStrictZeroValueFlagsStillUpgrades(t *testing.T) {
+	caCert, caKey, pool := testCertPool(t)
+	serverCert := issueServerCert(t, caCert, caKey, "127.0.0.1",
+		[]string{"localhost"}, []net.IP{net.ParseIP("127.0.0.1")},
+		time.Now().Add(24*time.Hour))
+	tlsLn := newSMTPTLSListener(t, serverCert)
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+		MinVersion:   tls.VersionTLS12,
+	}
+	fs := startFakeSMTPServerWithTLS(t, true, tlsLn, tlsCfg)
+
+	cfg := DefaultTransportConfig()
+	cfg.TLSPolicy = TLSPolicyStrict
+	cfg.AttemptSTARTTLS = false
+	cfg.RequireSTARTTLS = false
+	cfg.TLSRootCAs = pool
+	transport := NewSMTPTransport(cfg)
+
+	result := transport.DeliverWithTLSName(context.Background(), fs.addr, false,
+		"sender@test.com", []string{"rcpt@test.com"}, []byte("Subject: Test\r\n\r\nBody"),
+		"test.orvix.local", "127.0.0.1")
+
+	if !result.Success {
+		t.Fatalf("strict mode should upgrade via STARTTLS despite AttemptSTARTTLS=false, got: %s", result.StatusMsg)
+	}
+	if !result.TLSUsed || !result.TLSVerified {
+		t.Errorf("expected verified TLS delivery, got TLSUsed=%v TLSVerified=%v", result.TLSUsed, result.TLSVerified)
+	}
+}
+
+// TestTLSPolicyOpportunisticIntermediateChain verifies that the
+// opportunistic verifier accepts a real-world chain shape: leaf signed
+// by an intermediate CA, intermediate signed by the trusted root, with
+// the server presenting [leaf, intermediate]. Without offering the
+// presented intermediates to the verifier, every such chain would be
+// misreported as unverified.
+func TestTLSPolicyOpportunisticIntermediateChain(t *testing.T) {
+	rootCert, rootKey, pool := testCertPool(t)
+
+	// Intermediate CA signed by the root.
+	interKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("intermediate keygen: %v", err)
+	}
+	interTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(3),
+		Subject:               pkix.Name{CommonName: "Test Intermediate CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	interDER, err := x509.CreateCertificate(rand.Reader, interTmpl, rootCert, &interKey.PublicKey, rootKey)
+	if err != nil {
+		t.Fatalf("intermediate cert: %v", err)
+	}
+	interCert, err := x509.ParseCertificate(interDER)
+	if err != nil {
+		t.Fatalf("intermediate parse: %v", err)
+	}
+
+	// Leaf signed by the intermediate.
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("leaf keygen: %v", err)
+	}
+	leafTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(4),
+		Subject:      pkix.Name{CommonName: "127.0.0.1"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     []string{"localhost"},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, interCert, &leafKey.PublicKey, interKey)
+	if err != nil {
+		t.Fatalf("leaf cert: %v", err)
+	}
+	chainCert := tls.Certificate{
+		Certificate: [][]byte{leafDER, interDER},
+		PrivateKey:  leafKey,
+	}
+
+	tlsLn := newSMTPTLSListener(t, chainCert)
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{chainCert},
+		MinVersion:   tls.VersionTLS12,
+	}
+	fs := startFakeSMTPServerWithTLS(t, true, tlsLn, tlsCfg)
+	oppCfg := testTLSTransportConfig(TLSPolicyOpportunistic)
+	oppCfg.TLSRootCAs = pool
+	transport := NewSMTPTransport(oppCfg)
+
+	result := transport.DeliverWithTLSName(context.Background(), fs.addr, false,
+		"sender@test.com", []string{"rcpt@test.com"}, []byte("Subject: Test\r\n\r\nBody"),
+		"test.orvix.local", "127.0.0.1")
+
+	if !result.Success {
+		t.Fatalf("opportunistic should succeed with intermediate chain, got: %s", result.StatusMsg)
+	}
+	if !result.TLSVerified {
+		t.Error("TLSVerified should be true for a chain that validates through a presented intermediate")
+	}
+
+	// Strict mode must also accept the same chain (Go's handshake
+	// verifier handles presented intermediates natively).
+	strictCfg := testTLSTransportConfig(TLSPolicyStrict)
+	strictCfg.TLSRootCAs = pool
+	strictTransport := NewSMTPTransport(strictCfg)
+	result2 := strictTransport.DeliverWithTLSName(context.Background(), fs.addr, false,
+		"sender@test.com", []string{"rcpt@test.com"}, []byte("Subject: Test\r\n\r\nBody"),
+		"test.orvix.local", "127.0.0.1")
+	if !result2.Success || !result2.TLSVerified {
+		t.Errorf("strict mode should verify intermediate chain, got Success=%v TLSVerified=%v msg=%s",
+			result2.Success, result2.TLSVerified, result2.StatusMsg)
+	}
+}
+
+// TestTLSPolicyServerNameDerivedFromAddr verifies the explicit-port MX
+// path the worker uses: with an empty tlsServerName the transport
+// derives the server name from addr (stripping the port), so
+// verification succeeds. Passing the raw host:port as the server name
+// (the pre-review worker behavior) must never verify.
+func TestTLSPolicyServerNameDerivedFromAddr(t *testing.T) {
+	caCert, caKey, pool := testCertPool(t)
+	serverCert := issueServerCert(t, caCert, caKey, "127.0.0.1",
+		[]string{"localhost"}, []net.IP{net.ParseIP("127.0.0.1")},
+		time.Now().Add(24*time.Hour))
+	tlsLn := newSMTPTLSListener(t, serverCert)
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+		MinVersion:   tls.VersionTLS12,
+	}
+	fs := startFakeSMTPServerWithTLS(t, true, tlsLn, tlsCfg)
+	oppCfg := testTLSTransportConfig(TLSPolicyOpportunistic)
+	oppCfg.TLSRootCAs = pool
+	transport := NewSMTPTransport(oppCfg)
+
+	// Empty tlsServerName: derived from addr, port stripped → verifies.
+	result := transport.Deliver(context.Background(), fs.addr, false,
+		"sender@test.com", []string{"rcpt@test.com"}, []byte("Subject: Test\r\n\r\nBody"),
+		"test.orvix.local")
+	if !result.Success {
+		t.Fatalf("delivery should succeed, got: %s", result.StatusMsg)
+	}
+	if !result.TLSVerified {
+		t.Error("TLSVerified should be true when server name is derived from addr")
+	}
+
+	// host:port passed verbatim as the server name → must not verify.
+	result2 := transport.DeliverWithTLSName(context.Background(), fs.addr, false,
+		"sender@test.com", []string{"rcpt@test.com"}, []byte("Subject: Test\r\n\r\nBody"),
+		"test.orvix.local", fs.addr)
+	if result2.Success && result2.TLSVerified {
+		t.Error("TLSVerified must be false when the server name contains a port")
+	}
+}
+
+// TestTLSStateString verifies the operator-facing TLS state
+// classification: verified, encrypted-but-unverified, and plaintext
+// must be mutually distinguishable.
+func TestTLSStateString(t *testing.T) {
+	tests := []struct {
+		result DeliveryResult
+		want   string
+	}{
+		{DeliveryResult{TLSUsed: true, TLSVerified: true}, "verified"},
+		{DeliveryResult{TLSUsed: true, TLSVerified: false}, "encrypted_unverified"},
+		{DeliveryResult{TLSUsed: false, TLSVerified: false}, "plaintext"},
+	}
+	for _, tc := range tests {
+		if got := tlsStateString(&tc.result); got != tc.want {
+			t.Errorf("tlsStateString(%+v) = %q, want %q", tc.result, got, tc.want)
+		}
+	}
+}
+
 // Ensure DeliverWithTLSName is accessible (linker check).
 var _ = (&SMTPTransport{}).DeliverWithTLSName

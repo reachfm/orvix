@@ -76,14 +76,32 @@ func (p TLSPolicy) BuildTLSConfig(serverName string) *tls.Config {
 func (p TLSPolicy) verifyTLSConnection(state tls.ConnectionState, serverName string, roots *x509.CertPool) (bool, error) {
 	switch p {
 	case TLSPolicyStrict:
+		// Strict mode verified during the handshake
+		// (InsecureSkipVerify=false); reaching here
+		// means the chain and hostname already passed.
 		return true, nil
 	default:
 		if len(state.PeerCertificates) == 0 {
 			return false, nil
 		}
+		// Never claim verified without a hostname to
+		// verify against: an empty DNSName would skip
+		// hostname matching entirely.
+		if serverName == "" {
+			return false, nil
+		}
+		// Servers send the leaf first followed by any
+		// intermediates; without offering those to the
+		// verifier every real-world chain (leaf +
+		// intermediate) would be reported unverified.
+		intermediates := x509.NewCertPool()
+		for _, cert := range state.PeerCertificates[1:] {
+			intermediates.AddCert(cert)
+		}
 		opts := x509.VerifyOptions{
-			DNSName: serverName,
-			Roots:   roots,
+			DNSName:       serverName,
+			Intermediates: intermediates,
+			Roots:         roots,
 		}
 		if _, err := state.PeerCertificates[0].Verify(opts); err != nil {
 			return false, nil
@@ -140,8 +158,8 @@ type DeliveryResult struct {
 	RcptOK       bool
 	DataOK       bool
 	TLSUsed      bool
-	TLSHandshake bool   // true if STARTTLS upgrade completed
-	TLSVerified  bool   // true if TLS certificate was verified successfully
+	TLSHandshake bool // true if STARTTLS upgrade completed
+	TLSVerified  bool // true if TLS certificate was verified successfully
 	RemoteHost   string
 	RemoteIP     string
 	AttemptCount int
@@ -298,7 +316,7 @@ func (t *SMTPTransport) DeliverWithTLSName(ctx context.Context, addr string, use
 	// STARTTLS is required by the server (the next
 	// command would return 5.7.0) we MUST have done
 	// this — otherwise the message is misrouted.
-	if !res.TLSUsed && t.Config.AttemptSTARTTLS && hasCapability(res.Capabilities, "STARTTLS") {
+	if !res.TLSUsed && (t.Config.AttemptSTARTTLS || t.Config.TLSPolicy == TLSPolicyStrict) && hasCapability(res.Capabilities, "STARTTLS") {
 		// Issue STARTTLS. A 220 reply is the
 		// readiness signal; the server then waits
 		// for the client to begin TLS on the same
@@ -371,8 +389,11 @@ func (t *SMTPTransport) DeliverWithTLSName(ctx context.Context, addr string, use
 	// If the server is going to require STARTTLS, and
 	// we did not do it, fail-fast with TempFail so the
 	// queue retries and the operator can see the
-	// diagnostic.
-	if t.Config.RequireSTARTTLS && !res.TLSUsed {
+	// diagnostic. Strict policy requires TLS regardless
+	// of the RequireSTARTTLS flag: strict must never
+	// proceed to plaintext MAIL FROM even when the
+	// transport flags are zero-valued.
+	if (t.Config.RequireSTARTTLS || t.Config.TLSPolicy == TLSPolicyStrict) && !res.TLSUsed {
 		res.StatusMsg = "starttls required but not advertised; deferring"
 		res.TempFail = true
 		return res

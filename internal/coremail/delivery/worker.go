@@ -465,6 +465,7 @@ func (w *DeliveryWorker) recordDeliveryEvent(ctx context.Context, entry *queue.Q
 	}
 	if result != nil {
 		fields["status"] = result.StatusMsg
+		fields["tls"] = tlsStateString(result)
 	}
 	w.Observability.EventHistory.Record(typ, fields)
 }
@@ -487,6 +488,23 @@ func (w *DeliveryWorker) recordDKIMEvent(ctx context.Context, entry *queue.Queue
 		"sender":     entry.FromAddress,
 		"detail":     detail,
 	})
+}
+
+// tlsStateString classifies a delivery attempt's transport
+// security for the operator event history. It distinguishes
+// verified TLS, encrypted-but-unverified TLS (opportunistic
+// mode with a failed certificate validation), and plaintext —
+// unverified TLS must never be reported as verified, and must
+// remain distinguishable from plaintext.
+func tlsStateString(result *DeliveryResult) string {
+	switch {
+	case result.TLSVerified:
+		return "verified"
+	case result.TLSUsed:
+		return "encrypted_unverified"
+	default:
+		return "plaintext"
+	}
 }
 
 func extractDomainFromAddress(addr string) string {
@@ -552,7 +570,12 @@ func (w *DeliveryWorker) deliverRemote(ctx context.Context, entry *queue.QueueEn
 	for _, mx := range mxRecords {
 		host := strings.TrimSuffix(mx.Host, ".")
 		if hasExplicitPort(host) {
-			result := w.Transport.DeliverWithTLSName(ctx, host, false, entry.FromAddress, []string{entry.ToAddress}, data, w.HeloHost, host)
+			// host carries an explicit port; the transport
+			// derives the TLS server name from addr, which
+			// strips the port. Passing host verbatim would
+			// make the ServerName "host:port" — malformed
+			// SNI and a guaranteed verification mismatch.
+			result := w.Transport.Deliver(ctx, host, false, entry.FromAddress, []string{entry.ToAddress}, data, w.HeloHost)
 			result.RemoteHost = host
 			result.RemoteIP = host
 			if result.Success || !result.TempFail {
