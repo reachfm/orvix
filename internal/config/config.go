@@ -13,18 +13,18 @@ import (
 
 // Config holds all Orvix configuration values.
 type Config struct {
-	logger   *zap.Logger
-	Server   ServerConfig   `mapstructure:"server"`
-	Database DatabaseConfig `mapstructure:"database"`
-	Redis    RedisConfig    `mapstructure:"redis"`
-	Auth     AuthConfig     `mapstructure:"auth"`
-	License  LicenseConfig  `mapstructure:"license"`
-	Logging  LoggingConfig  `mapstructure:"logging"`
-	Metrics  MetricsConfig  `mapstructure:"metrics"`
-	Update   UpdateConfig   `mapstructure:"update"`
-	AI       AIConfig       `mapstructure:"ai"`
-	DNS      DNSConfig      `mapstructure:"dns"`
-	ClamAV   ClamAVConfig   `mapstructure:"clamav"`
+	logger     *zap.Logger
+	Server     ServerConfig     `mapstructure:"server"`
+	Database   DatabaseConfig   `mapstructure:"database"`
+	Redis      RedisConfig      `mapstructure:"redis"`
+	Auth       AuthConfig       `mapstructure:"auth"`
+	License    LicenseConfig    `mapstructure:"license"`
+	Logging    LoggingConfig    `mapstructure:"logging"`
+	Metrics    MetricsConfig    `mapstructure:"metrics"`
+	Update     UpdateConfig     `mapstructure:"update"`
+	AI         AIConfig         `mapstructure:"ai"`
+	DNS        DNSConfig        `mapstructure:"dns"`
+	ClamAV     ClamAVConfig     `mapstructure:"clamav"`
 	Backup     BackupConfig     `mapstructure:"backup"`
 	Monitoring MonitoringConfig `mapstructure:"monitoring"`
 	CoreMail   CoreMailConfig   `mapstructure:"coremail"`
@@ -239,19 +239,19 @@ type ServerConfig struct {
 // internal/database/mode.ValidateProductionSafety and is wired into
 // config.Load.
 type DatabaseConfig struct {
-	Driver          string `mapstructure:"driver"`
-	DSN             string `mapstructure:"dsn"`
-	Host            string `mapstructure:"host"`
-	Port            int    `mapstructure:"port"`
-	User            string `mapstructure:"user"`
-	Password        string `mapstructure:"password"`
-	DBName          string `mapstructure:"dbname"`
-	SSLMode         string `mapstructure:"sslmode"`
-	MaxOpen         int    `mapstructure:"max_open"`
-	MaxIdle         int    `mapstructure:"max_idle"`
-	MaxLifetime     int    `mapstructure:"max_lifetime"`
-	SQLitePath      string `mapstructure:"sqlite_path"`
-	DeploymentMode  string `mapstructure:"deployment_mode"` // "dev" (default) or "production"
+	Driver         string `mapstructure:"driver"`
+	DSN            string `mapstructure:"dsn"`
+	Host           string `mapstructure:"host"`
+	Port           int    `mapstructure:"port"`
+	User           string `mapstructure:"user"`
+	Password       string `mapstructure:"password"`
+	DBName         string `mapstructure:"dbname"`
+	SSLMode        string `mapstructure:"sslmode"`
+	MaxOpen        int    `mapstructure:"max_open"`
+	MaxIdle        int    `mapstructure:"max_idle"`
+	MaxLifetime    int    `mapstructure:"max_lifetime"`
+	SQLitePath     string `mapstructure:"sqlite_path"`
+	DeploymentMode string `mapstructure:"deployment_mode"` // "dev" (default) or "production"
 }
 
 // IsProduction reports whether the deployment mode is "production".
@@ -480,27 +480,27 @@ func Defaults() *Config {
 			PreferIPv4: false,
 		},
 		CoreMail: CoreMailConfig{
-			Enabled:                  false,
-			Hostname:                 "mail.local",
-			MailStorePath:            "/var/lib/orvix/mailstore",
-			SMTPHost:                 "0.0.0.0",
-			SMTPPort:                 25,
-			SubmissionEnabled:        false,
-			SubmissionHost:           "0.0.0.0",
-			SubmissionPort:           587,
-			SMTPsEnabled:             false,
-			SMTPsHost:                "0.0.0.0",
-			SMTPsPort:                465,
-			IMAPsEnabled:             false,
-			IMAPsHost:                "0.0.0.0",
-			IMAPsPort:                993,
-			POP3sEnabled:             false,
-			POP3sHost:                "0.0.0.0",
-			POP3sPort:                995,
-			IMAPHost:                 "0.0.0.0",
-			IMAPPort:                 143,
-			POP3Host:                 "0.0.0.0",
-			POP3Port:                 110,
+			Enabled:           false,
+			Hostname:          "mail.local",
+			MailStorePath:     "/var/lib/orvix/mailstore",
+			SMTPHost:          "0.0.0.0",
+			SMTPPort:          25,
+			SubmissionEnabled: false,
+			SubmissionHost:    "0.0.0.0",
+			SubmissionPort:    587,
+			SMTPsEnabled:      false,
+			SMTPsHost:         "0.0.0.0",
+			SMTPsPort:         465,
+			IMAPsEnabled:      false,
+			IMAPsHost:         "0.0.0.0",
+			IMAPsPort:         993,
+			POP3sEnabled:      false,
+			POP3sHost:         "0.0.0.0",
+			POP3sPort:         995,
+			IMAPHost:          "0.0.0.0",
+			IMAPPort:          143,
+			POP3Host:          "0.0.0.0",
+			POP3Port:          110,
 			// JMAP default bind is 127.0.0.1:8081, matching the
 			// installer's orvix.yaml. The previous default of
 			// 0.0.0.0:443 exposed the JMAP endpoint on the bare

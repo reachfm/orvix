@@ -263,6 +263,16 @@ func (fs *fakeSMTPServer) postStartTLSEHLO() string {
 	return fs.heloHostPost
 }
 
+// setGreeting overrides the greeting code/message under fs.mu so a test
+// goroutine can reconfigure the server after the serve goroutine has
+// started without racing handle()'s greeting read (delivery_test.go:274).
+func (fs *fakeSMTPServer) setGreeting(code int, msg string) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	fs.greetingCode = code
+	fs.greetingMsg = msg
+}
+
 func (fs *fakeSMTPServer) handle(conn net.Conn, tlsActive bool) {
 	defer conn.Close()
 	// reader/writer track the active transport. They
@@ -271,7 +281,17 @@ func (fs *fakeSMTPServer) handle(conn net.Conn, tlsActive bool) {
 	// TLS layer.
 	reader := bufio.NewReader(conn)
 	writer := bufio.NewWriter(conn)
-	fmt.Fprintf(writer, "%d %s\r\n", fs.greetingCode, fs.greetingMsg)
+	// The greeting is written before any client round-trip, so unlike
+	// the config that handle() reads after the first request/response
+	// exchange, there is no happens-before edge yet between a test
+	// goroutine that overrides greetingCode/greetingMsg after the serve
+	// goroutine started and this read. Read them under fs.mu; setGreeting
+	// writes under the same lock.
+	fs.mu.Lock()
+	greetingCode := fs.greetingCode
+	greetingMsg := fs.greetingMsg
+	fs.mu.Unlock()
+	fmt.Fprintf(writer, "%d %s\r\n", greetingCode, greetingMsg)
 	writer.Flush()
 
 	// Track STARTTLS state for THIS connection. The
@@ -624,8 +644,7 @@ func TestTransportDeliverSuccess(t *testing.T) {
 
 func TestTransportBadGreeting(t *testing.T) {
 	fs := startFakeSMTP(t)
-	fs.greetingCode = 554
-	fs.greetingMsg = "No SMTP here"
+	fs.setGreeting(554, "No SMTP here")
 	transport := NewSMTPTransport(testTransportConfig())
 	result := transport.Deliver(context.Background(), fs.addr, false, "sender@test.com", []string{"rcpt@test.com"}, []byte("data"), "test.orvix.local")
 	if result.Success {
@@ -1442,8 +1461,7 @@ func TestTransportStoresLastRemoteResponse(t *testing.T) {
 
 func TestTransport421Defer(t *testing.T) {
 	fs := startFakeSMTP(t)
-	fs.greetingCode = 421
-	fs.greetingMsg = "4.2.1 Service unavailable"
+	fs.setGreeting(421, "4.2.1 Service unavailable")
 	transport := NewSMTPTransport(testTransportConfig())
 	result := transport.Deliver(context.Background(), fs.addr, false, "sender@test.com", []string{"rcpt@test.com"}, []byte("data"), "test.orvix.local")
 	if result.Success {

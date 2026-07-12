@@ -27,8 +27,8 @@ import (
 	"github.com/orvix/orvix/internal/licensingauthority"
 	"github.com/orvix/orvix/internal/observability"
 	"github.com/orvix/orvix/internal/policy"
-	orvixruntime "github.com/orvix/orvix/internal/runtime"
 	"github.com/orvix/orvix/internal/ruler"
+	orvixruntime "github.com/orvix/orvix/internal/runtime"
 	"github.com/orvix/orvix/internal/trust"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -61,15 +61,15 @@ type Module struct {
 	// the rule tables are LIVE (not just stored).
 	rulerEngine *ruler.Engine
 
-	smtpServer      *smtp.Server
+	smtpServer       *smtp.Server
 	submissionServer *smtp.Server
-	smtpsServer     *smtp.Server
-	imapServer      *imap.Server
-	imapsServer     *imap.Server
-	pop3Server      *pop3.Server
-	pop3sServer     *pop3.Server
-	jmapServer      *jmap.Server
-	workers    []*delivery.DeliveryWorker
+	smtpsServer      *smtp.Server
+	imapServer       *imap.Server
+	imapsServer      *imap.Server
+	pop3Server       *pop3.Server
+	pop3sServer      *pop3.Server
+	jmapServer       *jmap.Server
+	workers          []*delivery.DeliveryWorker
 
 	// pushNotifier is the Web Push (RFC 8030 / RFC 8291) dispatcher.
 	// It is constructed in initCore from cfg.CoreMail.VAPIDPublicKey
