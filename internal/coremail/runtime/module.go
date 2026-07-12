@@ -463,7 +463,7 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	if cfg.Outbound.TLSPolicy != "" {
 		parsed, err := delivery.ParseTLSPolicy(cfg.Outbound.TLSPolicy)
 		if err != nil {
-			return fmt.Errorf("outbound_tls_policy: %w", err)
+			return fmt.Errorf("outbound.tls_policy: %w", err)
 		}
 		transportCfg.TLSPolicy = parsed
 	}
