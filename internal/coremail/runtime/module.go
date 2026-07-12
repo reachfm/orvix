@@ -27,8 +27,8 @@ import (
 	"github.com/orvix/orvix/internal/licensingauthority"
 	"github.com/orvix/orvix/internal/observability"
 	"github.com/orvix/orvix/internal/policy"
-	orvixruntime "github.com/orvix/orvix/internal/runtime"
 	"github.com/orvix/orvix/internal/ruler"
+	orvixruntime "github.com/orvix/orvix/internal/runtime"
 	"github.com/orvix/orvix/internal/trust"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -61,15 +61,15 @@ type Module struct {
 	// the rule tables are LIVE (not just stored).
 	rulerEngine *ruler.Engine
 
-	smtpServer      *smtp.Server
+	smtpServer       *smtp.Server
 	submissionServer *smtp.Server
-	smtpsServer     *smtp.Server
-	imapServer      *imap.Server
-	imapsServer     *imap.Server
-	pop3Server      *pop3.Server
-	pop3sServer     *pop3.Server
-	jmapServer      *jmap.Server
-	workers    []*delivery.DeliveryWorker
+	smtpsServer      *smtp.Server
+	imapServer       *imap.Server
+	imapsServer      *imap.Server
+	pop3Server       *pop3.Server
+	pop3sServer      *pop3.Server
+	jmapServer       *jmap.Server
+	workers          []*delivery.DeliveryWorker
 
 	// pushNotifier is the Web Push (RFC 8030 / RFC 8291) dispatcher.
 	// It is constructed in initCore from cfg.CoreMail.VAPIDPublicKey
@@ -459,13 +459,21 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	if workerCount < 1 {
 		workerCount = 1
 	}
+	transportCfg := delivery.DefaultTransportConfig()
+	if cfg.Outbound.TLSPolicy != "" {
+		parsed, err := delivery.ParseTLSPolicy(cfg.Outbound.TLSPolicy)
+		if err != nil {
+			return fmt.Errorf("outbound_tls_policy: %w", err)
+		}
+		transportCfg.TLSPolicy = parsed
+	}
 	m.workers = make([]*delivery.DeliveryWorker, 0, workerCount)
 	for i := 0; i < workerCount; i++ {
 		worker := delivery.NewDeliveryWorker(
 			m.queue,
 			m.store,
 			delivery.NewDNSResolver(),
-			delivery.NewSMTPTransport(delivery.DefaultTransportConfig()),
+			delivery.NewSMTPTransport(transportCfg),
 			cfg.CoreMail.Hostname,
 			fmt.Sprintf("coremail-worker-%d", i+1),
 		)

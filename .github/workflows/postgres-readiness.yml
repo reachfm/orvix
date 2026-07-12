@@ -138,3 +138,33 @@ jobs:
         run: |
           set -euo pipefail
           go test -v -count=1 -timeout=15m ./internal/trust ./internal/models -run "Postgres|DML"
+
+  outbound-delivery-race:
+    name: Outbound delivery race detector
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download Go modules
+        run: |
+          set -euo pipefail
+          go mod download
+
+      - name: Outbound delivery race detector
+        run: |
+          set -euo pipefail
+          go test -race -count=1 ./internal/coremail/delivery/... -timeout=600s
