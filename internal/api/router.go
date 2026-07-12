@@ -18,6 +18,7 @@ import (
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/coremail"
 	"github.com/orvix/orvix/internal/coremail/push"
+	customerdomain "github.com/orvix/orvix/internal/customerdomain"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
 	"github.com/orvix/orvix/internal/dnsops"
@@ -140,6 +141,17 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		eng := coremail.NewEngine(coremail.EngineConfig{DB: sqlDB, AuthCfg: coremail.DefaultAuthConfig()})
 		ws := webmailmgmt.NewService(eng, sqlDB)
 		router.h.SetWebmailService(ws)
+
+		// Wire customer domain administration service.
+		domainRepo := coremail.NewDomainSQLRepo(sqlDB)
+		dnsResolver := dnsops.NewNetResolver()
+		inspector := customerdomain.NewDNSInspector(dnsResolver)
+		verifRepo := customerdomain.NewVerificationRepo(sqlDB)
+		if err := verifRepo.EnsureTable(context.Background()); err != nil {
+			logger.Warn("customer domain verification table skipped", zap.Error(err))
+		}
+		cds := customerdomain.NewService(sqlDB, domainRepo, inspector, verifRepo)
+		router.h.SetCustomerDomainService(cds)
 	} else {
 		logger.Warn("webmail service not available: failed to get sql.DB", zap.Error(err))
 	}
@@ -625,6 +637,16 @@ func (r *Router) setupRoutes() {
 	// and operates on the mailbox the JWT resolves to,
 	// so cross-mailbox password changes are impossible.
 	authCSRF.Post("/webmail/password/change", r.h.WebmailChangePassword)
+
+	// Customer domain administration. Mounted on the protected group
+	// (auth + tenant middleware) without admin role restriction so
+	// regular tenant users can view and verify their own domains.
+	// The service layer enforces tenant isolation: every query is
+	// scoped to the caller's tenant_id.
+	protected.Get("/customer/domains", r.h.ListCustomerDomains)
+	protected.Get("/customer/domains/:domain_id", r.h.GetCustomerDomain)
+	protected.Get("/customer/domains/:domain_id/dns", r.h.GetCustomerDomainDNS)
+	protected.Post("/customer/domains/:domain_id/verify", r.h.VerifyCustomerDomain)
 
 	// CSRF is enforced on the entire admin group by default (deny-list,
 	// not allow-list) rather than only on routes an author remembered to

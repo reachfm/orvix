@@ -25,6 +25,7 @@ import (
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/coremail"
 	"github.com/orvix/orvix/internal/coremail/push"
+	"github.com/orvix/orvix/internal/customerdomain"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
 	"github.com/orvix/orvix/internal/dbdialect"
@@ -129,6 +130,11 @@ type Handler struct {
 	// admin UI can still render but every action fails closed
 	// rather than fabricating data.
 	dnsOps *dnsops.Service
+
+	// customerDomainSvc is the customer-facing domain administration
+	// service. Set once at router construction. nil disables the
+	// customer domain endpoints with a 503.
+	customerDomainSvc *customerdomain.Service
 
 	// settingsStore is the DB-backed admin settings persistence
 	// layer (see internal/api/handlers/settings). Set once at
@@ -239,6 +245,12 @@ func (h *Handler) SetListenerRegistry(r *runtime.ListenerRegistry) {
 // admin handlers will return 503 rather than fabricating data.
 func (h *Handler) SetDNSOpsService(s *dnsops.Service) {
 	h.dnsOps = s
+}
+
+// SetCustomerDomainService wires the customer-facing domain administration
+// service. Without it, the customer domain endpoints return 503.
+func (h *Handler) SetCustomerDomainService(s *customerdomain.Service) {
+	h.customerDomainSvc = s
 }
 
 // SetSettingsStore wires the admin settings persistence layer.
