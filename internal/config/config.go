@@ -94,7 +94,20 @@ type ClamAVConfig struct {
 // OutboundConfig controls outbound SMTP delivery behavior.
 type OutboundConfig struct {
 	PreferIPv4 bool   `mapstructure:"prefer_ipv4"`
-	TLSPolicy  string `mapstructure:"outbound_tls_policy"`
+	TLSPolicy  string `mapstructure:"tls_policy"`
+	// TLSPolicyLegacy is the deprecated outbound_tls_policy key.
+	// It is read for backward compatibility only and is resolved
+	// into TLSPolicy during validation. New installations should
+	// use tls_policy instead.
+	TLSPolicyLegacy string `mapstructure:"outbound_tls_policy"`
+}
+
+// ResolvedTLSPolicy returns the resolved canonical tls_policy value.
+// If tls_policy is set, it takes precedence over the legacy key.
+// If only the legacy key is set, its value is used.
+// An empty value means the default (opportunistic).
+func (c OutboundConfig) ResolvedTLSPolicy() string {
+	return c.TLSPolicy
 }
 
 // BackupConfig holds backup settings.
@@ -726,6 +739,23 @@ func (c *Config) GetLogger() *zap.Logger {
 }
 
 func (c *Config) validate() {
+	// Resolve TLS policy: canonical tls_policy wins over legacy outbound_tls_policy.
+	canonical := c.Outbound.TLSPolicy
+	legacy := c.Outbound.TLSPolicyLegacy
+	if canonical != "" && legacy != "" {
+		if c.logger != nil {
+			c.logger.Warn("deprecated config key outbound.outbound_tls_policy ignored; using outbound.tls_policy",
+				zap.String("canonical", canonical),
+				zap.String("legacy", legacy))
+		}
+		c.Outbound.TLSPolicyLegacy = ""
+	} else if legacy != "" {
+		c.Outbound.TLSPolicy = legacy
+		if c.logger != nil {
+			c.logger.Warn("outbound.outbound_tls_policy is deprecated; use outbound.tls_policy instead")
+		}
+		c.Outbound.TLSPolicyLegacy = ""
+	}
 	if c.CoreMail.DataPath != "" {
 		c.CoreMail.MailStorePath = c.CoreMail.DataPath
 	}

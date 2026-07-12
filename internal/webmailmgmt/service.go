@@ -92,7 +92,7 @@ func (s *Service) ListSessions(ctx context.Context, mailboxID *uint) ([]WebmailS
 			FROM webmail_sessions ws
 			LEFT JOIN coremail_mailboxes cm ON cm.id = ws.mailbox_id
 			WHERE ws.revoked_at IS NULL AND ws.mailbox_id = ?
-			ORDER BY ws.last_seen_at DESC
+			ORDER BY ws.last_seen_at DESC, ws.id DESC
 		`, *mailboxID)
 	} else {
 		rows, err = s.engine.DB.QueryContext(ctx, `
@@ -100,7 +100,7 @@ func (s *Service) ListSessions(ctx context.Context, mailboxID *uint) ([]WebmailS
 			FROM webmail_sessions ws
 			LEFT JOIN coremail_mailboxes cm ON cm.id = ws.mailbox_id
 			WHERE ws.revoked_at IS NULL
-			ORDER BY ws.last_seen_at DESC
+			ORDER BY ws.last_seen_at DESC, ws.id DESC
 		`)
 	}
 	if err != nil {

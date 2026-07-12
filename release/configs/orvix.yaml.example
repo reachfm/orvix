@@ -82,6 +82,31 @@ outbound:
   # fallback after temporary IPv4 network failures.
   prefer_ipv4: true
 
+  # Outbound SMTP TLS verification policy.
+  #
+  # Allowed values:
+  #   - "opportunistic" (default): Attempt TLS when the remote server
+  #     advertises STARTTLS. The connection is always encrypted when TLS
+  #     is used, but unverified certificates are accepted.
+  #     Certificate verification is attempted and the result is recorded
+  #     (tls=verified / encrypted_unverified) but DOES NOT block delivery.
+  #     This is the safe default for production mail delivery — it matches
+  #     the behavior of most production MTAs (Postfix smtpd_tls_security_level=may).
+  #   - "strict": Require verified TLS. Connections fail if the remote
+  #     server does not support STARTTLS, the certificate chain is invalid,
+  #     the hostname does not match, or the certificate is expired /
+  #     self-signed / untrusted. Failures are deferred (TempFail) so the
+  #     queue retries rather than bouncing. No plaintext fallback occurs
+  #     after a failed TLS handshake.
+  #
+  # The legacy key "outbound_tls_policy" is deprecated but still supported
+  # during the RC1 compatibility window. When both keys are set, tls_policy
+  # takes precedence. The preferred canonical key is "tls_policy".
+  #
+  # MTA-STS and DANE enforcement are not implemented in this sprint.
+  # TLS 1.2 minimum is required for all outbound connections.
+  tls_policy: opportunistic
+
 coremail:
   enabled: true
   hostname: mail.example.com
