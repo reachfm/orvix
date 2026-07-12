@@ -8,7 +8,6 @@ import (
 	"go.uber.org/zap"
 )
 
-
 // ListCustomerDomains returns paginated domains for the calling tenant.
 func (h *Handler) ListCustomerDomains(c fiber.Ctx) error {
 	tenantID := h.tenantIDUint(c)
@@ -85,8 +84,16 @@ func (h *Handler) VerifyCustomerDomain(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
 	}
 
-	// Return the latest snapshot after verification.
-	snap, _ := h.customerDomainSvc.GetLatestSnapshot(c.Context(), tenantID, uint(domainID))
+	// Return the latest snapshot after verification. Guard against a
+	// nil snapshot (e.g. the snapshot read failed) so we return a clean
+	// response instead of panicking on snap.Score.
+	snap, snapErr := h.customerDomainSvc.GetLatestSnapshot(c.Context(), tenantID, uint(domainID))
+	if snapErr != nil || snap == nil {
+		return c.JSON(fiber.Map{
+			"status":  "verified",
+			"message": "domain verification complete",
+		})
+	}
 	return c.JSON(fiber.Map{
 		"status":  "verified",
 		"score":   snap.Score,

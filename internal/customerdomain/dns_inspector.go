@@ -81,7 +81,7 @@ func (i *DNSInspector) checkMX(ctx context.Context, domain, expectedMX, now stri
 	if matched {
 		return &MXCheck{Status: string(DNSStatusPass), Observed: observed, Expected: expected, CheckedAt: now}
 	}
-		return &MXCheck{Status: string(DNSStatusWarning), Observed: observed, Expected: expected, Reason: "expected MX host not found", CheckedAt: now}
+	return &MXCheck{Status: string(DNSStatusWarning), Observed: observed, Expected: expected, Reason: "expected MX host not found", CheckedAt: now}
 }
 
 func (i *DNSInspector) checkSPF(ctx context.Context, domain, now string) *SPFCheck {
