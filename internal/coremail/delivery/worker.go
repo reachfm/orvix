@@ -552,7 +552,7 @@ func (w *DeliveryWorker) deliverRemote(ctx context.Context, entry *queue.QueueEn
 	for _, mx := range mxRecords {
 		host := strings.TrimSuffix(mx.Host, ".")
 		if hasExplicitPort(host) {
-			result := w.Transport.Deliver(ctx, host, false, entry.FromAddress, []string{entry.ToAddress}, data, w.HeloHost)
+			result := w.Transport.DeliverWithTLSName(ctx, host, false, entry.FromAddress, []string{entry.ToAddress}, data, w.HeloHost, host)
 			result.RemoteHost = host
 			result.RemoteIP = host
 			if result.Success || !result.TempFail {
@@ -572,7 +572,7 @@ func (w *DeliveryWorker) deliverRemote(ctx context.Context, entry *queue.QueueEn
 		}
 		for _, ip := range orderResolvedAddresses(addrs, w.PreferIPv4) {
 			addr := smtpDialAddress(ip, "25")
-			result := w.Transport.Deliver(ctx, addr, false, entry.FromAddress, []string{entry.ToAddress}, data, w.HeloHost)
+			result := w.Transport.DeliverWithTLSName(ctx, addr, false, entry.FromAddress, []string{entry.ToAddress}, data, w.HeloHost, host)
 			result.RemoteHost = host
 			result.RemoteIP = ip
 			if result.Success || !result.TempFail {

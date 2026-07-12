@@ -459,13 +459,21 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	if workerCount < 1 {
 		workerCount = 1
 	}
+	transportCfg := delivery.DefaultTransportConfig()
+	if cfg.Outbound.TLSPolicy != "" {
+		parsed, err := delivery.ParseTLSPolicy(cfg.Outbound.TLSPolicy)
+		if err != nil {
+			return fmt.Errorf("outbound_tls_policy: %w", err)
+		}
+		transportCfg.TLSPolicy = parsed
+	}
 	m.workers = make([]*delivery.DeliveryWorker, 0, workerCount)
 	for i := 0; i < workerCount; i++ {
 		worker := delivery.NewDeliveryWorker(
 			m.queue,
 			m.store,
 			delivery.NewDNSResolver(),
-			delivery.NewSMTPTransport(delivery.DefaultTransportConfig()),
+			delivery.NewSMTPTransport(transportCfg),
 			cfg.CoreMail.Hostname,
 			fmt.Sprintf("coremail-worker-%d", i+1),
 		)

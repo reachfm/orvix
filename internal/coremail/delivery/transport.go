@@ -4,11 +4,93 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net"
 	"strings"
 	"time"
 )
+
+// TLSPolicy defines outbound SMTP TLS verification behavior.
+type TLSPolicy int
+
+const (
+	// TLSPolicyOpportunistic attempts TLS when available but does not
+	// require successful certificate verification. Connections are still
+	// encrypted when TLS is used, but unverified certificates are accepted.
+	// This is the default and matches the behavior of most production MTAs.
+	TLSPolicyOpportunistic TLSPolicy = iota
+
+	// TLSPolicyStrict requires TLS and valid certificate verification.
+	// Connections fail if the remote server does not support STARTTLS,
+	// the certificate chain is invalid, the hostname does not match, or
+	// the certificate is expired/self-signed/untrusted.
+	TLSPolicyStrict
+)
+
+// String returns the string representation of a TLSPolicy.
+func (p TLSPolicy) String() string {
+	switch p {
+	case TLSPolicyOpportunistic:
+		return "opportunistic"
+	case TLSPolicyStrict:
+		return "strict"
+	default:
+		return "unknown"
+	}
+}
+
+// ParseTLSPolicy parses a string into a TLSPolicy.
+// Returns an error for unknown values.
+func ParseTLSPolicy(s string) (TLSPolicy, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "opportunistic", "":
+		return TLSPolicyOpportunistic, nil
+	case "strict":
+		return TLSPolicyStrict, nil
+	default:
+		return TLSPolicyOpportunistic, fmt.Errorf("unknown tls policy %q: valid values are %q and %q", s, "opportunistic", "strict")
+	}
+}
+
+// BuildTLSConfig creates a tls.Config for outbound SMTP connections
+// based on the policy and target server name.
+func (p TLSPolicy) BuildTLSConfig(serverName string) *tls.Config {
+	cfg := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		ServerName: serverName,
+	}
+	switch p {
+	case TLSPolicyStrict:
+		cfg.InsecureSkipVerify = false
+	default:
+		cfg.InsecureSkipVerify = true
+	}
+	return cfg
+}
+
+// verifyTLSConnection performs post-handshake certificate verification.
+// In opportunistic mode, verification failures are recorded but do not
+// abort the connection. Returns true when the certificate is verified,
+// false when it is not (opportunistic mode only).
+func (p TLSPolicy) verifyTLSConnection(state tls.ConnectionState, serverName string, roots *x509.CertPool) (bool, error) {
+	switch p {
+	case TLSPolicyStrict:
+		return true, nil
+	default:
+		if len(state.PeerCertificates) == 0 {
+			return false, nil
+		}
+		opts := x509.VerifyOptions{
+			DNSName: serverName,
+			Roots:   roots,
+		}
+		if _, err := state.PeerCertificates[0].Verify(opts); err != nil {
+			return false, nil
+		}
+		return true, nil
+	}
+}
 
 // TransportConfig holds SMTP transport settings.
 type TransportConfig struct {
@@ -25,6 +107,12 @@ type TransportConfig struct {
 	// plaintext AUTH/MAIL FROM when the peer demands
 	// encryption.
 	RequireSTARTTLS bool
+	// TLSPolicy controls outbound TLS certificate verification.
+	// Supported values: opportunistic (default), strict.
+	TLSPolicy TLSPolicy
+	// TLSRootCAs is an optional root CA pool for certificate verification.
+	// When nil, the system root pool is used. Intended for testing.
+	TLSRootCAs *x509.CertPool
 }
 
 // DefaultTransportConfig returns default transport settings.
@@ -36,6 +124,7 @@ func DefaultTransportConfig() TransportConfig {
 		MaxLineLength:   1000,
 		AttemptSTARTTLS: true,
 		RequireSTARTTLS: true,
+		TLSPolicy:       TLSPolicyOpportunistic,
 	}
 }
 
@@ -52,6 +141,7 @@ type DeliveryResult struct {
 	DataOK       bool
 	TLSUsed      bool
 	TLSHandshake bool   // true if STARTTLS upgrade completed
+	TLSVerified  bool   // true if TLS certificate was verified successfully
 	RemoteHost   string
 	RemoteIP     string
 	AttemptCount int
@@ -104,15 +194,18 @@ func NewSMTPTransport(cfg TransportConfig) *SMTPTransport {
 // may have a window of 5 minutes during which STARTTLS
 // is unavailable, after which it is required again.
 //
-// The TLS handshake uses InsecureSkipVerify=true to
-// avoid tying deliverability to the operator's PKI
-// chain. The certificate is still recorded on the
-// result (TLSHandshake=true) so the operator can audit
-// the connection's transport security. STARTTLS without
-// certificate validation is still encrypted on the wire;
-// it is the same trade-off many production MTAs make
-// for opportunistic TLS.
+// Deliver sends a message to a remote SMTP server.
+//
+// For TLS certificate verification, the hostname is extracted from addr.
+// Use DeliverWithTLSName to provide an explicit TLS server name.
 func (t *SMTPTransport) Deliver(ctx context.Context, addr string, useTLS bool, from string, to []string, data []byte, heloHost string) *DeliveryResult {
+	return t.DeliverWithTLSName(ctx, addr, useTLS, from, to, data, heloHost, "")
+}
+
+// DeliverWithTLSName is like Deliver but with an explicit TLS server name
+// for certificate verification. When tlsServerName is empty, the hostname
+// is extracted from addr.
+func (t *SMTPTransport) DeliverWithTLSName(ctx context.Context, addr string, useTLS bool, from string, to []string, data []byte, heloHost string, tlsServerName string) *DeliveryResult {
 	startTime := time.Now()
 	res := &DeliveryResult{
 		RemoteHost: addr,
@@ -133,15 +226,28 @@ func (t *SMTPTransport) Deliver(ctx context.Context, addr string, useTLS bool, f
 	defer conn.Close()
 
 	if useTLS {
-		tlsConn := tls.Client(conn, &tls.Config{InsecureSkipVerify: true})
+		serverName := tlsServerName
+		if serverName == "" {
+			if h, _, err := net.SplitHostPort(addr); err == nil {
+				serverName = h
+			}
+		}
+		tlsCfg := t.Config.TLSPolicy.BuildTLSConfig(serverName)
+		if t.Config.TLSRootCAs != nil {
+			tlsCfg.RootCAs = t.Config.TLSRootCAs
+		}
+		tlsConn := tls.Client(conn, tlsCfg)
 		if err := tlsConn.Handshake(); err != nil {
 			res.StatusMsg = fmt.Sprintf("tls handshake failed: %v", err)
 			res.TempFail = true
 			return res
 		}
+		state := tlsConn.ConnectionState()
+		verified, _ := t.Config.TLSPolicy.verifyTLSConnection(state, serverName, t.Config.TLSRootCAs)
 		conn = tlsConn
 		res.TLSUsed = true
 		res.TLSHandshake = true
+		res.TLSVerified = verified
 	}
 
 	conn.SetDeadline(time.Now().Add(t.Config.ReadTimeout))
@@ -217,17 +323,30 @@ func (t *SMTPTransport) Deliver(ctx context.Context, addr string, useTLS bool, f
 		// the handshake. On success we replace
 		// the conn and reader; on failure we
 		// defer.
-		tlsConn := tls.Client(conn, &tls.Config{InsecureSkipVerify: true})
+		serverName := tlsServerName
+		if serverName == "" {
+			if h, _, err := net.SplitHostPort(addr); err == nil {
+				serverName = h
+			}
+		}
+		tlsCfg := t.Config.TLSPolicy.BuildTLSConfig(serverName)
+		if t.Config.TLSRootCAs != nil {
+			tlsCfg.RootCAs = t.Config.TLSRootCAs
+		}
+		tlsConn := tls.Client(conn, tlsCfg)
 		if err := tlsConn.Handshake(); err != nil {
 			captureResult(0, "")
 			res.StatusMsg = fmt.Sprintf("starttls handshake failed: %v", err)
 			res.TempFail = true
 			return res
 		}
+		state := tlsConn.ConnectionState()
+		verified, _ := t.Config.TLSPolicy.verifyTLSConnection(state, serverName, t.Config.TLSRootCAs)
 		conn = tlsConn
 		reader = bufio.NewReader(conn)
 		res.TLSUsed = true
 		res.TLSHandshake = true
+		res.TLSVerified = verified
 		conn.SetDeadline(time.Now().Add(t.Config.ReadTimeout))
 
 		// Re-EHLO after the TLS upgrade. RFC 3207
