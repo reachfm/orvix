@@ -564,19 +564,6 @@ func postgresServiceEnv(t *testing.T) (*Service, *sql.DB) {
 			cleanDB.Close()
 		}
 	})
-	t.Cleanup(func() { db.Close() })
-
-	schema := fmt.Sprintf("orvix_cd_svc_%d", time.Now().UnixNano())
-	if _, err := db.Exec("CREATE SCHEMA IF NOT EXISTS " + schema); err != nil {
-		t.Fatalf("create schema: %v", err)
-	}
-	if _, err := db.Exec("SET search_path TO " + schema); err != nil {
-		t.Fatalf("set search_path: %v", err)
-	}
-	t.Cleanup(func() {
-		db.Exec("SET search_path TO public")
-		db.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE")
-	})
 
 	// Create coremail_domains table (PostgreSQL-compatible).
 	_, err = db.Exec(`
