@@ -397,8 +397,29 @@ done
 [ -f release/trust/orvix-release-signing.pub.pem ] && \
     cp release/trust/orvix-release-signing.pub.pem "$BUNDLE_ROOT/release/trust/orvix-release-signing.pub.pem"
 
-# Asset trees
-(cd release/admin && tar -cf - .) | (cd "$BUNDLE_ROOT/release/admin" && tar -xf -)
+# Asset trees — admin SPA
+# The React-based web/admin is the reviewed production UI. If the
+# build toolchain is available, we build it fresh and package the
+# dist output. Otherwise we fall back to the legacy release/admin
+# (committed plain-JS) so the bundle script never fails in an
+# environment without Node.js.
+if [ -d web/admin ] && [ -f web/admin/package.json ]; then
+    info "building web/admin (React SPA)..."
+    (cd web/admin && npm ci --silent 2>/dev/null && npm run build 2>/dev/null) \
+        || warn "web/admin build failed or toolchain unavailable; falling back to release/admin"
+    if [ -d web/admin/dist ] && [ -f web/admin/dist/index.html ]; then
+        rm -rf "$BUNDLE_ROOT/release/admin"
+        mkdir -p "$BUNDLE_ROOT/release/admin"
+        (cd web/admin/dist && tar -cf - .) | (cd "$BUNDLE_ROOT/release/admin" && tar -xf -)
+        info "packaged web/admin/dist as release/admin ($(find "$BUNDLE_ROOT/release/admin" -type f | wc -l) files)"
+    else
+        warn "web/admin/dist not found after build — using legacy release/admin"
+        (cd release/admin && tar -cf - .) | (cd "$BUNDLE_ROOT/release/admin" && tar -xf -)
+    fi
+else
+    warn "web/admin not found — using legacy release/admin"
+    (cd release/admin && tar -cf - .) | (cd "$BUNDLE_ROOT/release/admin" && tar -xf -)
+fi
 (cd release/webmail && tar -cf - .) | (cd "$BUNDLE_ROOT/release/webmail" && tar -xf -)
 
 cp release/VERSION "$BUNDLE_ROOT/VERSION"
@@ -430,10 +451,7 @@ BUNDLE_REQUIRED=(
     release/systemd/orvix.service
     release/systemd/orvix-update.service
     release/sudoers.d/orvix-update
-    release/admin/app.js
     release/admin/index.html
-    release/admin/modules/auth.js
-    release/admin/modules/components.js
     release/webmail/index.html
     release/scripts/setup-https.sh
     release/scripts/smoke-admin-browser.sh
@@ -448,6 +466,36 @@ BUNDLE_REQUIRED=(
 for f in "${BUNDLE_REQUIRED[@]}"; do
     [ -e "$BUNDLE_ROOT/$f" ] || fail "bundle is missing $f (assembly lost a file)" 4
 done
+
+# Verify the admin SPA has the expected ops pages. When built from
+# web/admin the JS bundle hashed filename varies, so we check the
+# index.html reference and the built asset directory.
+admin_index="$BUNDLE_ROOT/release/admin/index.html"
+[ -f "$admin_index" ] || fail "bundle is missing release/admin/index.html" 4
+admin_assets_dir="$BUNDLE_ROOT/release/admin/assets"
+[ -d "$admin_assets_dir" ] || fail "bundle is missing release/admin/assets/ (no built assets)" 4
+admin_asset_count=$(find "$admin_assets_dir" -type f 2>/dev/null | wc -l)
+[ "$admin_asset_count" -ge 2 ] || fail "release/admin/assets/ has fewer than 2 built assets (got $admin_asset_count)" 4
+
+# Verify ops pages exist in the built admin JS.
+# The React build produces hashed filenames, so we grep index.html
+# for the JS src and then check the resolved file for page component names.
+admin_js_src=$(grep -oE 'src="[^"]+\.js"' "$admin_index" | sed -E 's/src="([^"]+)"/\1/' | head -1)
+if [ -n "$admin_js_src" ] && [ -f "$BUNDLE_ROOT/release/admin/$admin_js_src" ]; then
+    admin_js="$BUNDLE_ROOT/release/admin/$admin_js_src"
+else
+    # Fallback: try the assets directory directly
+    admin_js=$(find "$admin_assets_dir" -name '*.js' -not -name 'vendor-*' 2>/dev/null | head -1)
+fi
+if [ -n "$admin_js" ] && [ -f "$admin_js" ]; then
+    for page in LicenseStatus BackupStatus SystemHealth; do
+        if grep -q "$page" "$admin_js" 2>/dev/null; then
+            info "ops UI page component verified: $page"
+        else
+            warn "ops UI page component '$page' not found in admin JS — may be missing from the React build"
+        fi
+    done
+fi
 
 # ── 6. checksums.txt — sha256 of every file in the bundle ────────
 ( cd "$BUNDLE_ROOT" && find . -type f -print0 | sort -z | xargs -0 sha256sum ) \

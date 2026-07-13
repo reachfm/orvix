@@ -81,6 +81,13 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: web/admin/package-lock.json
+
       - name: Install Chromium for browser smoke
         run: |
           set -euo pipefail
