@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/coremail"
 	"github.com/orvix/orvix/internal/dbdialect"
 	"github.com/orvix/orvix/internal/dnsops"
@@ -257,10 +257,14 @@ func TestSQLiteStaleClaimCleaned(t *testing.T) {
 
 func postgresVerifRepo(t *testing.T) (*VerificationRepo, *sql.DB) {
 	t.Helper()
-	dsn := postgresDSN(t)
-	db, err := sql.Open("pgx", dsn)
+	cfg, _ := postgresConfig(t)
+	gormDB, err := config.NewDatabase(cfg, nil)
 	if err != nil {
-		t.Fatalf("open postgres: %v", err)
+		t.Fatalf("connect to postgres: %v", err)
+	}
+	db, err := gormDB.DB()
+	if err != nil {
+		t.Fatalf("get sql.DB: %v", err)
 	}
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { db.Close() })
@@ -285,7 +289,7 @@ func postgresVerifRepo(t *testing.T) (*VerificationRepo, *sql.DB) {
 	return repo, db
 }
 
-func postgresDSN(t *testing.T) string {
+func postgresConfig(t *testing.T) (*config.DatabaseConfig, string) {
 	t.Helper()
 	if strings.TrimSpace(os.Getenv("ORVIX_RUN_POSTGRES_DML_TEST")) != "1" {
 		t.Skip("set ORVIX_RUN_POSTGRES_DML_TEST=1 to run postgres tests")
@@ -297,7 +301,14 @@ func postgresDSN(t *testing.T) string {
 	if dsn == "" {
 		t.Skip("ORVIX_DB_DSN is empty")
 	}
-	return dsn
+	cfg := &config.DatabaseConfig{
+		Driver:      "postgres",
+		DSN:         dsn,
+		MaxOpen:     1,
+		MaxIdle:     1,
+		MaxLifetime: 300,
+	}
+	return cfg, dsn
 }
 
 func TestPostgresEnsureTable_CreatesTables(t *testing.T) {
@@ -529,10 +540,14 @@ func TestPostgresDialectDetection(t *testing.T) {
 
 func postgresServiceEnv(t *testing.T) (*Service, *sql.DB) {
 	t.Helper()
-	dsn := postgresDSN(t)
-	db, err := sql.Open("pgx", dsn)
+	_, cfg := postgresConfig(t)
+	gormDB, err := config.NewDatabase(cfg, nil)
 	if err != nil {
-		t.Fatalf("open postgres: %v", err)
+		t.Fatalf("connect to postgres: %v", err)
+	}
+	db, err := gormDB.DB()
+	if err != nil {
+		t.Fatalf("get sql.DB: %v", err)
 	}
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { db.Close() })

@@ -137,7 +137,7 @@ func (r *DomainSQLRepo) GetByID(ctx context.Context, id uint, tx interface{}) (*
 		       COALESCE(catchall_address,''), COALESCE(abuse_contact,''), COALESCE(labels,''),
 		       mailbox_count, created_at, updated_at, deleted_at
 		FROM coremail_domains WHERE id = ? AND deleted_at IS NULL`), id)
-	return scanDomain(row)
+	return r.scanDomain(row)
 }
 
 func (r *DomainSQLRepo) GetByName(ctx context.Context, name string, tx interface{}) (*Domain, error) {
@@ -149,7 +149,7 @@ func (r *DomainSQLRepo) GetByName(ctx context.Context, name string, tx interface
 		       COALESCE(catchall_address,''), COALESCE(abuse_contact,''), COALESCE(labels,''),
 		       mailbox_count, created_at, updated_at, deleted_at
 		FROM coremail_domains WHERE name = ? AND deleted_at IS NULL`), name)
-	return scanDomain(row)
+	return r.scanDomain(row)
 }
 
 func (r *DomainSQLRepo) List(ctx context.Context, filter DomainFilter, tx interface{}) ([]Domain, int64, error) {
@@ -202,7 +202,7 @@ func (r *DomainSQLRepo) List(ctx context.Context, filter DomainFilter, tx interf
 
 	var domains []Domain
 	for rows.Next() {
-		d, err := scanDomain(rows)
+		d, err := r.scanDomain(rows)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -255,11 +255,28 @@ func (r *DomainSQLRepo) Exists(ctx context.Context, name string, tx interface{})
 	return count > 0, err
 }
 
-func scanDomain(row interface {
+func (r *DomainSQLRepo) scanDomain(row interface {
 	Scan(dest ...interface{}) error
 }) (*Domain, error) {
 	var d Domain
 	var status string
+	if r.getDialect().IsPostgres() {
+		err := row.Scan(
+			&d.ID, &d.Name, &d.TenantID, &d.ResellerID, &status, &d.Plan,
+			&d.Description, &d.MaxMailboxes, &d.MaxAliases, &d.MaxQuotaMB,
+			&d.DKIMEnabled, &d.DKIMSelector, &d.DMARCEnabled, &d.MTASTSEnabled,
+			&d.CatchallAddress, &d.AbuseContact, &d.Labels,
+			&d.MailboxCount, &d.CreatedAt, &d.UpdatedAt, &d.DeletedAt,
+		)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("scan domain: %w", err)
+		}
+		d.Status = DomainStatus(status)
+		return &d, nil
+	}
 	var dkimEnabled, dmarcEnabled, mtastsEnabled int
 	err := row.Scan(
 		&d.ID, &d.Name, &d.TenantID, &d.ResellerID, &status, &d.Plan,
