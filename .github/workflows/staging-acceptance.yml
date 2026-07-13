@@ -89,7 +89,8 @@ jobs:
             cp /tmp/signing-key.pub.pem release/trust/orvix-release-signing.pub.pem
           fi
           bash release/scripts/build-release-bundle.sh --output /tmp/dist
-          echo "BUNDLE_FILE=$(ls /tmp/dist/orvix-enterprise-mail-*-linux-amd64.tar.gz)" >> "$GITHUB_ENV"
+          BUNDLE_PATH=$(ls /tmp/dist/orvix-enterprise-mail-*-linux-amd64.tar.gz 2>/dev/null | head -1)
+          echo "BUNDLE_FILE=$BUNDLE_PATH" >> "$GITHUB_ENV"
 
       - name: 1. Install release bundle
         run: |
