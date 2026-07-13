@@ -141,9 +141,15 @@ jobs:
             sleep 2
           done
           echo "----- postgres startup log -----"; cat /tmp/pgtest/pg.log || true
-          # Fail on any suppressed SQL dialect error in the startup log.
-          if grep -Eiq 'AUTOINCREMENT|no such|syntax error|pragma|failed to ensure|sql: ' /tmp/pgtest/pg.log; then
-            echo "PostgreSQL startup log contains SQL/dialect errors"; kill "$PG_PID" 2>/dev/null || true; exit 1
+          # Fail on any suppressed SQL dialect error in the startup log. The
+          # patterns are unambiguous SQL problems (SQLite-only keywords sent to
+          # PostgreSQL, PostgreSQL parse errors, or a swallowed schema-migration
+          # failure) so benign warnings (missing license key, key-dir perms) do
+          # not trip it.
+          if grep -Eiq 'AUTOINCREMENT|SQLSTATE 42|syntax error at or near|schema migration failed|no such table|relation ".*" does not exist' /tmp/pgtest/pg.log; then
+            echo "PostgreSQL startup log contains SQL/dialect errors:"
+            grep -Ei 'AUTOINCREMENT|SQLSTATE 42|syntax error at or near|schema migration failed|no such table|relation ".*" does not exist' /tmp/pgtest/pg.log || true
+            kill "$PG_PID" 2>/dev/null || true; exit 1
           fi
           [ "$ok" = "1" ] || { echo "orvix did not become healthy on PostgreSQL"; kill "$PG_PID" 2>/dev/null || true; exit 1; }
           # Prove expected control-plane metadata tables exist in PostgreSQL.

@@ -27,6 +27,7 @@ import (
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
 	customerdomain "github.com/orvix/orvix/internal/customerdomain"
+	"github.com/orvix/orvix/internal/dbdialect"
 	"github.com/orvix/orvix/internal/dnsops"
 	"github.com/orvix/orvix/internal/dnsops/providers"
 	entrbac "github.com/orvix/orvix/internal/enterprise/rbac"
@@ -310,8 +311,15 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 
 	// Wire the trust / login protection service.
 	if sqlDB, err := db.DB(); err == nil {
-		// Ensure the trust persistence tables exist before LoadFromDB.
-		for _, ddl := range trust.Tables() {
+		// Ensure the trust persistence tables exist before LoadFromDB using
+		// dialect-correct DDL. On PostgreSQL these tables are owned by
+		// models.MigrateAllPostgres; emitting SQLite-only DDL (AUTOINCREMENT/
+		// DATETIME) there is a syntax error that used to be swallowed.
+		trustDialect, derr := dbdialect.Detect(sqlDB)
+		if derr != nil {
+			trustDialect = dbdialect.FromDriver("sqlite")
+		}
+		for _, ddl := range trust.TablesForDialect(trustDialect) {
 			if _, err := sqlDB.ExecContext(context.Background(), ddl); err != nil {
 				logger.Warn("trust schema migration failed, falling back to in-memory", zap.Error(err))
 			}
