@@ -8,8 +8,23 @@ import (
 	"go.uber.org/zap"
 )
 
+// customerDomainReady reports whether the customer domain service is
+// wired. When it is nil (e.g. verification-table init failed at router
+// construction) the endpoints must return a deterministic 503 instead
+// of dereferencing a nil service and panicking into a 500.
+func (h *Handler) customerDomainReady(c fiber.Ctx) bool {
+	if h.customerDomainSvc == nil {
+		_ = c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "customer domain service not available"})
+		return false
+	}
+	return true
+}
+
 // ListCustomerDomains returns paginated domains for the calling tenant.
 func (h *Handler) ListCustomerDomains(c fiber.Ctx) error {
+	if !h.customerDomainReady(c) {
+		return nil
+	}
 	tenantID := h.tenantIDUint(c)
 
 	var req customerdomain.DomainListRequest
@@ -28,6 +43,9 @@ func (h *Handler) ListCustomerDomains(c fiber.Ctx) error {
 
 // GetCustomerDomain returns detailed information for a specific domain.
 func (h *Handler) GetCustomerDomain(c fiber.Ctx) error {
+	if !h.customerDomainReady(c) {
+		return nil
+	}
 	tenantID := h.tenantIDUint(c)
 	domainID, err := strconv.ParseUint(c.Params("domain_id"), 10, 64)
 	if err != nil || domainID == 0 {
@@ -47,6 +65,9 @@ func (h *Handler) GetCustomerDomain(c fiber.Ctx) error {
 
 // GetCustomerDomainDNS returns DNS inspection results for a domain.
 func (h *Handler) GetCustomerDomainDNS(c fiber.Ctx) error {
+	if !h.customerDomainReady(c) {
+		return nil
+	}
 	tenantID := h.tenantIDUint(c)
 	domainID, err := strconv.ParseUint(c.Params("domain_id"), 10, 64)
 	if err != nil || domainID == 0 {
@@ -66,6 +87,9 @@ func (h *Handler) GetCustomerDomainDNS(c fiber.Ctx) error {
 
 // VerifyCustomerDomain triggers a bounded DNS verification refresh.
 func (h *Handler) VerifyCustomerDomain(c fiber.Ctx) error {
+	if !h.customerDomainReady(c) {
+		return nil
+	}
 	tenantID := h.tenantIDUint(c)
 	domainID, err := strconv.ParseUint(c.Params("domain_id"), 10, 64)
 	if err != nil || domainID == 0 {
