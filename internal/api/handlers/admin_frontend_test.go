@@ -475,9 +475,10 @@ func TestAdminNoObjectObjectInMonitoringCapacity(t *testing.T) {
 	}
 }
 
-// TestAdminNoFakeRestoreUI confirms the backups page exposes only
-// staged restore semantics. The UI must not claim restore is absent,
-// and it must not claim live production data was restored.
+// TestAdminNoFakeRestoreUI confirms the backups page exposes accurate
+// automatic restore semantics. The UI must document the restore lifecycle
+// (validate, safety-snapshot, activate, restart, health-verify, rollback)
+// and must not overclaim.
 func TestAdminNoFakeRestoreUI(t *testing.T) {
 	root := adminRepoRoot(t)
 	src := adminJSContents(t, root)
@@ -486,21 +487,24 @@ func TestAdminNoFakeRestoreUI(t *testing.T) {
 	}
 	for _, want := range []string{
 		"restore-orvix-backup",
-		"stages the backup only",
-		"does not overwrite live data",
-		"Manual apply/restart is required",
+		"pre-restore safety backup",
+		"rolls back",
+		"activates the selected backup",
 	} {
 		if !strings.Contains(src, want) {
-			t.Errorf("admin backups page must document staged-only restore behavior; missing %q", want)
+			t.Errorf("admin backups page must document automatic restore behavior; missing %q", want)
 		}
 	}
 	for _, banned := range []string{
+		"stages the backup only",
+		"does not overwrite live data",
+		"Manual apply/restart is required",
 		"restored successfully",
 		"live restore completed",
 		"production data overwritten",
 	} {
 		if strings.Contains(src, banned) {
-			t.Errorf("admin backups page must not claim live restore success: found %q", banned)
+			t.Errorf("admin backups page must not contain banned phrase: found %q", banned)
 		}
 	}
 }
