@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/coremail"
 	"github.com/orvix/orvix/internal/dbdialect"
 	"github.com/orvix/orvix/internal/dnsops"
@@ -257,29 +256,34 @@ func TestSQLiteStaleClaimCleaned(t *testing.T) {
 
 func postgresVerifRepo(t *testing.T) (*VerificationRepo, *sql.DB) {
 	t.Helper()
-	cfg, _ := postgresConfig(t)
-	gormDB, err := config.NewDatabase(cfg, nil)
-	if err != nil {
-		t.Fatalf("connect to postgres: %v", err)
-	}
-	db, err := gormDB.DB()
-	if err != nil {
-		t.Fatalf("get sql.DB: %v", err)
-	}
-	db.SetMaxOpenConns(1)
-	t.Cleanup(func() { db.Close() })
+	dsn := postgresDSN(t)
 
-	// Create isolated schema.
+	// Create isolated schema before main connection so search_path is
+	// baked into the DSN. Avoids SET search_path + connection pool races.
 	schema := fmt.Sprintf("orvix_cd_test_%d", time.Now().UnixNano())
-	if _, err := db.Exec("CREATE SCHEMA IF NOT EXISTS " + schema); err != nil {
+	schemaDB, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open temp postgres: %v", err)
+	}
+	if _, err := schemaDB.Exec("CREATE SCHEMA IF NOT EXISTS " + schema); err != nil {
+		schemaDB.Close()
 		t.Fatalf("create schema: %v", err)
 	}
-	if _, err := db.Exec("SET search_path TO " + schema); err != nil {
-		t.Fatalf("set search_path: %v", err)
+	schemaDB.Close()
+
+	db, err := sql.Open("pgx", dsn+" search_path="+schema)
+	if err != nil {
+		t.Fatalf("open postgres: %v", err)
 	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	t.Cleanup(func() {
-		db.Exec("SET search_path TO public")
-		db.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE")
+		db.Close()
+		cleanDB, _ := sql.Open("pgx", dsn)
+		if cleanDB != nil {
+			cleanDB.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE")
+			cleanDB.Close()
+		}
 	})
 
 	repo := NewVerificationRepo(db)
@@ -289,7 +293,7 @@ func postgresVerifRepo(t *testing.T) (*VerificationRepo, *sql.DB) {
 	return repo, db
 }
 
-func postgresConfig(t *testing.T) (*config.DatabaseConfig, string) {
+func postgresDSN(t *testing.T) string {
 	t.Helper()
 	if strings.TrimSpace(os.Getenv("ORVIX_RUN_POSTGRES_DML_TEST")) != "1" {
 		t.Skip("set ORVIX_RUN_POSTGRES_DML_TEST=1 to run postgres tests")
@@ -301,14 +305,7 @@ func postgresConfig(t *testing.T) (*config.DatabaseConfig, string) {
 	if dsn == "" {
 		t.Skip("ORVIX_DB_DSN is empty")
 	}
-	cfg := &config.DatabaseConfig{
-		Driver:      "postgres",
-		DSN:         dsn,
-		MaxOpen:     1,
-		MaxIdle:     1,
-		MaxLifetime: 300,
-	}
-	return cfg, dsn
+	return dsn
 }
 
 func TestPostgresEnsureTable_CreatesTables(t *testing.T) {
@@ -540,16 +537,33 @@ func TestPostgresDialectDetection(t *testing.T) {
 
 func postgresServiceEnv(t *testing.T) (*Service, *sql.DB) {
 	t.Helper()
-	cfg, _ := postgresConfig(t)
-	gormDB, err := config.NewDatabase(cfg, nil)
+	dsn := postgresDSN(t)
+
+	schema := fmt.Sprintf("orvix_cd_svc_%d", time.Now().UnixNano())
+	schemaDB, err := sql.Open("pgx", dsn)
 	if err != nil {
-		t.Fatalf("connect to postgres: %v", err)
+		t.Fatalf("open temp postgres: %v", err)
 	}
-	db, err := gormDB.DB()
+	if _, err := schemaDB.Exec("CREATE SCHEMA IF NOT EXISTS " + schema); err != nil {
+		schemaDB.Close()
+		t.Fatalf("create schema: %v", err)
+	}
+	schemaDB.Close()
+
+	db, err := sql.Open("pgx", dsn+" search_path="+schema)
 	if err != nil {
-		t.Fatalf("get sql.DB: %v", err)
+		t.Fatalf("open postgres: %v", err)
 	}
 	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	t.Cleanup(func() {
+		db.Close()
+		cleanDB, _ := sql.Open("pgx", dsn)
+		if cleanDB != nil {
+			cleanDB.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE")
+			cleanDB.Close()
+		}
+	})
 	t.Cleanup(func() { db.Close() })
 
 	schema := fmt.Sprintf("orvix_cd_svc_%d", time.Now().UnixNano())
