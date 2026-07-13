@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/orvix/orvix/internal/coremail"
@@ -19,44 +18,17 @@ type Service struct {
 	inspector *DNSInspector
 	verifRepo *VerificationRepo
 	cooldown  time.Duration
-
-	// verifyMu guards verifyLocks. verifyLocks holds a per-domain lock
-	// that serializes the cooldown-check → inspect → save sequence in
-	// VerifyDomain so concurrent requests for the same domain cannot
-	// both pass the cooldown gate and persist duplicate snapshots.
-	// This makes verification correct within a single process (the
-	// single-node SQLite deployment). A multi-instance deployment
-	// additionally needs DB-level enforcement — see the review notes.
-	verifyMu    sync.Mutex
-	verifyLocks map[uint]*sync.Mutex
 }
 
 // NewService creates a domain administration service.
 func NewService(db *sql.DB, domainRepo *coremail.DomainSQLRepo, inspector *DNSInspector, verifRepo *VerificationRepo) *Service {
 	return &Service{
-		db:          db,
-		domains:     domainRepo,
-		inspector:   inspector,
-		verifRepo:   verifRepo,
-		cooldown:    5 * time.Minute,
-		verifyLocks: make(map[uint]*sync.Mutex),
+		db:        db,
+		domains:   domainRepo,
+		inspector: inspector,
+		verifRepo: verifRepo,
+		cooldown:  5 * time.Minute,
 	}
-}
-
-// domainVerifyLock returns the per-domain lock that serializes
-// verification for a single domain.
-func (s *Service) domainVerifyLock(domainID uint) *sync.Mutex {
-	s.verifyMu.Lock()
-	defer s.verifyMu.Unlock()
-	if s.verifyLocks == nil {
-		s.verifyLocks = make(map[uint]*sync.Mutex)
-	}
-	lk := s.verifyLocks[domainID]
-	if lk == nil {
-		lk = &sync.Mutex{}
-		s.verifyLocks[domainID] = lk
-	}
-	return lk
 }
 
 // ListDomains returns paginated domain overviews for a tenant.
@@ -181,6 +153,10 @@ func (s *Service) GetDNS(ctx context.Context, tenantID uint, domainID uint) (*DN
 }
 
 // VerifyDomain runs a fresh DNS verification and persists the result.
+// Concurrency: uses a DB-backed claim (not a Go mutex) so it is safe
+// across multiple application instances. The claim is acquired in a
+// short atomic INSERT, released before DNS work, and the snapshot is
+// persisted atomically with the claim release in SaveAndRelease.
 func (s *Service) VerifyDomain(ctx context.Context, tenantID uint, domainID uint) error {
 	d, err := s.domains.GetByID(ctx, domainID, nil)
 	if err != nil {
@@ -190,22 +166,17 @@ func (s *Service) VerifyDomain(ctx context.Context, tenantID uint, domainID uint
 		return ErrDomainNotFound
 	}
 
-	// Serialize the cooldown-check → inspect → save sequence per domain
-	// so two concurrent verify requests for the same domain cannot both
-	// observe "no recent verification", run the inspection, and persist
-	// duplicate snapshots (bypassing the cooldown).
-	lk := s.domainVerifyLock(domainID)
-	lk.Lock()
-	defer lk.Unlock()
-
-	recent, err := s.verifRepo.ExistsRecent(ctx, domainID, s.cooldown)
+	// DB-backed atomic claim: also checks cooldown.
+	// No transaction held after this call returns.
+	claimed, err := s.verifRepo.TryClaim(ctx, domainID, s.cooldown)
 	if err != nil {
-		return fmt.Errorf("check cooldown: %w", err)
+		return fmt.Errorf("claim verification: %w", err)
 	}
-	if recent {
+	if !claimed {
 		return ErrVerificationCooldown
 	}
 
+	// DNS inspection runs OUTSIDE any database transaction.
 	expectedMX := "mail." + d.Name
 	result := s.inspector.Inspect(ctx, d.Name, expectedMX, d.DKIMSelector, "")
 	hr := HealthScore(result)
@@ -241,7 +212,9 @@ func (s *Service) VerifyDomain(ctx context.Context, tenantID uint, domainID uint
 		}),
 		Evidence: string(evidence),
 	}
-	return s.verifRepo.Save(ctx, snap)
+
+	// Persist snapshot and release claim in a single transaction.
+	return s.verifRepo.SaveAndRelease(ctx, snap, domainID)
 }
 
 // GetLatestSnapshot returns the most recent persisted verification for a domain.

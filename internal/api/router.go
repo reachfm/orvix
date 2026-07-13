@@ -148,10 +148,12 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		inspector := customerdomain.NewDNSInspector(dnsResolver)
 		verifRepo := customerdomain.NewVerificationRepo(sqlDB)
 		if err := verifRepo.EnsureTable(context.Background()); err != nil {
-			logger.Warn("customer domain verification table skipped", zap.Error(err))
+			logger.Error("customer domain verification init failed, service disabled", zap.Error(err))
+		} else {
+			cds := customerdomain.NewService(sqlDB, domainRepo, inspector, verifRepo)
+			router.h.SetCustomerDomainService(cds)
+			logger.Info("customer domain administration service wired")
 		}
-		cds := customerdomain.NewService(sqlDB, domainRepo, inspector, verifRepo)
-		router.h.SetCustomerDomainService(cds)
 	} else {
 		logger.Warn("webmail service not available: failed to get sql.DB", zap.Error(err))
 	}

@@ -20,28 +20,29 @@ import (
 // rows in both databases because NULLs are distinct in UNIQUE
 // constraints per the SQL standard.
 //
-// Tables created (59):
-//
-//	licenses, feature_flags, module_versions, tenants, users, domains,
-//	mailboxes, api_keys, sessions, coremail_audit, security_events,
-//	mfa_recovery_codes, firewall_rules, firewall_logs, guardian_logs,
-//	heal_histories, update_histories, coremail_mailboxes,
-//	coremail_folders, coremail_messages, coremail_attachments,
-//	coremail_queue, coremail_delivery_attempts, resellers,
-//	l_dap_configs, s_s_o_configs, alert_configs, provisioned_domains,
-//	coremail_domains, coremail_aliases, coremail_account_classes,
-//	coremail_admin_groups, coremail_admin_group_members,
-//	coremail_domain_groups, coremail_domain_group_members,
-//	coremail_mailing_lists, coremail_mailing_list_members,
-//	coremail_public_folders, coremail_public_folder_members,
-//	coremail_acl_rules, coremail_log_rules, coremail_quarantine_index,
-//	coremail_dkim_config, coremail_acceptance_rules,
-//	coremail_incoming_msg_rules, coremail_migration_sources,
-//	coremail_migration_source_secrets, coremail_backup_targets,
-//	coremail_backup_target_secrets, coremail_uploaded_certificates,
-//	coremail_lockouts, coremail_trust_scores, tls_certificates,
-//	monitoring_alerts, monitoring_alert_deliveries, backup_registry,
-//	backup_schedule_config, upgrade_history, coremail_versions
+	// Tables created (61):
+	//
+	//	licenses, feature_flags, module_versions, tenants, users, domains,
+	//	mailboxes, api_keys, sessions, coremail_audit, security_events,
+	//	mfa_recovery_codes, firewall_rules, firewall_logs, guardian_logs,
+	//	heal_histories, update_histories, coremail_mailboxes,
+	//	coremail_folders, coremail_messages, coremail_attachments,
+	//	coremail_queue, coremail_delivery_attempts, resellers,
+	//	l_dap_configs, s_s_o_configs, alert_configs, provisioned_domains,
+	//	coremail_domains, coremail_aliases, coremail_account_classes,
+	//	coremail_admin_groups, coremail_admin_group_members,
+	//	coremail_domain_groups, coremail_domain_group_members,
+	//	coremail_mailing_lists, coremail_mailing_list_members,
+	//	coremail_public_folders, coremail_public_folder_members,
+	//	coremail_acl_rules, coremail_log_rules, coremail_quarantine_index,
+	//	coremail_dkim_config, coremail_acceptance_rules,
+	//	coremail_incoming_msg_rules, coremail_migration_sources,
+	//	coremail_migration_source_secrets, coremail_backup_targets,
+	//	coremail_backup_target_secrets, coremail_uploaded_certificates,
+	//	coremail_lockouts, coremail_trust_scores, tls_certificates,
+	//	monitoring_alerts, monitoring_alert_deliveries, backup_registry,
+	//	backup_schedule_config, upgrade_history, coremail_versions,
+	//	customer_domain_verifications, customer_domain_verification_claims
 //
 // This function is opt-in.  It is NOT called from cmd/orvix/main.go.
 // SQLite deployments are unaffected.
@@ -990,6 +991,29 @@ func postgresTables() []string {
 			installed_by TEXT NOT NULL DEFAULT '',
 			notes TEXT NOT NULL DEFAULT ''
 		)`,
+
+		// Customer domain administration — verification snapshots.
+		`CREATE TABLE IF NOT EXISTS customer_domain_verifications (
+			id BIGSERIAL PRIMARY KEY,
+			domain_id BIGINT NOT NULL,
+			score INTEGER NOT NULL DEFAULT 0,
+			status TEXT NOT NULL DEFAULT '',
+			mx_status TEXT NOT NULL DEFAULT '',
+			spf_status TEXT NOT NULL DEFAULT '',
+			dkim_status TEXT NOT NULL DEFAULT '',
+			dmarc_status TEXT NOT NULL DEFAULT '',
+			evidence TEXT NOT NULL DEFAULT '',
+			checked_at TIMESTAMP NOT NULL,
+			created_at TIMESTAMP NOT NULL,
+			CONSTRAINT chk_cdv_score CHECK (score >= 0 AND score <= 100)
+		)`,
+
+		// Customer domain administration — verification claims
+		// (DB-backed cooldown enforcement across instances).
+		`CREATE TABLE IF NOT EXISTS customer_domain_verification_claims (
+			domain_id BIGINT PRIMARY KEY,
+			claimed_until TIMESTAMP NOT NULL
+		)`,
 	}
 }
 
@@ -1258,6 +1282,10 @@ func postgresIndexes() []string {
 		idx("idx_upgrade_history_started_at", "upgrade_history", "started_at"),
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_coremail_versions_version ON coremail_versions (version)`,
 		idx("idx_coremail_versions_installed_at", "coremail_versions", "installed_at"),
+
+		// Customer domain administration
+		idx("idx_cdv_domain", "customer_domain_verifications", "domain_id"),
+		idx("idx_cdv_created_desc", "customer_domain_verifications", "domain_id, created_at DESC"),
 	}
 }
 
@@ -1295,6 +1323,7 @@ func PostgresSchemaCompatible(db *gorm.DB, tableSchema string) error {
 		"coremail_lockouts", "coremail_trust_scores", "tls_certificates",
 		"monitoring_alerts", "monitoring_alert_deliveries", "backup_registry",
 		"backup_schedule_config", "upgrade_history", "coremail_versions",
+		"customer_domain_verifications", "customer_domain_verification_claims",
 	}
 
 	var missing []string
