@@ -14,6 +14,7 @@ import (
 	"github.com/orvix/orvix/internal/coremail"
 	"github.com/orvix/orvix/internal/dbdialect"
 	"github.com/orvix/orvix/internal/dnsops"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
 
