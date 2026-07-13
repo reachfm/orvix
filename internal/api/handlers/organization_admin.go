@@ -34,11 +34,29 @@ func (h *Handler) ListOrganizations(c fiber.Ctx) error {
 }
 
 func (h *Handler) GetOrganization(c fiber.Ctx) error {
+	// This handler is mounted only on the tenant-scoped /enterprise
+	// group (admin/operator + tenant context). An organization IS a
+	// tenant, so a caller may only read their own organization; the
+	// service GetByID is not tenant-scoped, so we must enforce it here.
+	// Cross-tenant reads go through the platform routes, which are
+	// gated to admin/superadmin only. Without this check an operator
+	// could enumerate any tenant's organization metadata by id (IDOR).
+	tenantID, err := auth.RequireTenantID(c)
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": err.Error()})
+	}
+
 	idVal, err := strconv.ParseUint(c.Params("id"), 10, 64)
 	if err != nil || idVal == 0 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid organization id"})
 	}
 	id := uint(idVal)
+
+	// Return 404 (not 403) on a cross-tenant id so we do not leak the
+	// existence of other tenants.
+	if id != tenantID {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "organization not found"})
+	}
 
 	org, err := h.orgAdminSvc.GetOrganization(c.Context(), id)
 	if err != nil {
