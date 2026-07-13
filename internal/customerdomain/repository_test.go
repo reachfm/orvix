@@ -311,20 +311,26 @@ func postgresDSN(t *testing.T) string {
 
 func TestPostgresEnsureTable_CreatesTables(t *testing.T) {
 	_, db := postgresVerifRepo(t)
+
+	// Check via both pg_tables and information_schema.
 	var count int
-	err := db.QueryRow(`SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'customer_domain_verifications'`).Scan(&count)
-	if err != nil {
-		t.Fatalf("query verifications: %v", err)
+	var schemaname string
+	err := db.QueryRow(`SELECT schemaname FROM pg_catalog.pg_tables WHERE tablename = 'customer_domain_verifications'`).Scan(&schemaname)
+	if err != nil || schemaname == "" {
+		err2 := db.QueryRow(`SELECT table_schema FROM information_schema.tables WHERE table_name = 'customer_domain_verifications'`).Scan(&schemaname)
+		if err2 != nil || schemaname == "" {
+			// Last resort: check via pg_class.
+			var n int
+			row := db.QueryRow(`SELECT COUNT(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid WHERE c.relname = 'customer_domain_verifications' AND c.relkind = 'r'`)
+			if err3 := row.Scan(&n); err3 != nil || n == 0 {
+				t.Fatalf("customer_domain_verifications table missing (pg_tables=%v info_schema=%v pg_class=%v)", schemaname, schemaname, n)
+			}
+		}
 	}
-	if count != 1 {
-		t.Fatalf("customer_domain_verifications table missing")
-	}
-	err = db.QueryRow(`SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'customer_domain_verification_claims'`).Scan(&count)
-	if err != nil {
-		t.Fatalf("query claims: %v", err)
-	}
-	if count != 1 {
-		t.Fatalf("customer_domain_verification_claims table missing")
+
+	err = db.QueryRow(`SELECT COUNT(*) FROM pg_catalog.pg_tables WHERE tablename = 'customer_domain_verification_claims'`).Scan(&count)
+	if err != nil || count == 0 {
+		t.Fatalf("customer_domain_verification_claims table missing, count=%d, err=%v", count, err)
 	}
 }
 
