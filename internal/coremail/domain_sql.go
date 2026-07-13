@@ -85,6 +85,13 @@ func (r *DomainSQLRepo) Create(ctx context.Context, d *Domain, tx interface{}) e
 	}
 
 	if r.getDialect().IsPostgres() {
+		args := []interface{}{
+			d.Name, d.TenantID, d.ResellerID, string(d.Status), d.Plan, d.Description,
+			d.MaxMailboxes, d.MaxAliases, d.MaxQuotaMB,
+			d.DKIMEnabled, d.DKIMSelector, d.DMARCEnabled, d.MTASTSEnabled,
+			d.CatchallAddress, d.AbuseContact, d.Labels,
+			d.CreatedAt, d.UpdatedAt,
+		}
 		row := e.QueryRowContext(ctx, r.qf(`
 			INSERT INTO coremail_domains
 				(name, tenant_id, reseller_id, status, plan, description,

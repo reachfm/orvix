@@ -262,7 +262,7 @@ func postgresVerifRepo(t *testing.T) (*VerificationRepo, *sql.DB) {
 	if err != nil {
 		t.Fatalf("open postgres: %v", err)
 	}
-	db.SetMaxOpenConns(5)
+	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { db.Close() })
 
 	// Create isolated schema.
@@ -534,7 +534,7 @@ func postgresServiceEnv(t *testing.T) (*Service, *sql.DB) {
 	if err != nil {
 		t.Fatalf("open postgres: %v", err)
 	}
-	db.SetMaxOpenConns(5)
+	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { db.Close() })
 
 	schema := fmt.Sprintf("orvix_cd_svc_%d", time.Now().UnixNano())
