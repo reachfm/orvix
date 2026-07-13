@@ -8,6 +8,9 @@ import (
 )
 
 func (h *Handler) ListPlatformOrganizations(c fiber.Ctx) error {
+	if h.platformAdminSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "platform admin service not available"})
+	}
 	var req struct {
 		Search string `json:"search"`
 		Limit  int    `json:"limit"`
@@ -26,6 +29,9 @@ func (h *Handler) ListPlatformOrganizations(c fiber.Ctx) error {
 }
 
 func (h *Handler) GetPlatformOrganization(c fiber.Ctx) error {
+	if h.platformAdminSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "platform admin service not available"})
+	}
 	idVal, err := strconv.ParseUint(c.Params("id"), 10, 64)
 	if err != nil || idVal == 0 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid organization id"})

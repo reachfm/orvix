@@ -16,9 +16,11 @@ import (
 	mailboxadminsvc "github.com/orvix/orvix/internal/admin/mailbox"
 	orgadminsvc "github.com/orvix/orvix/internal/admin/organization"
 	platformpkg "github.com/orvix/orvix/internal/admin/platform"
+	entrbac "github.com/orvix/orvix/internal/enterprise/rbac"
 	"github.com/orvix/orvix/internal/antivirus"
 	"github.com/orvix/orvix/internal/api/handlers"
 	"github.com/orvix/orvix/internal/api/handlers/settings"
+	auditpkg "github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/coremail"
@@ -165,22 +167,26 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 
 	// Wire enterprise admin services (mailbox, org, domain, platform, dashboard).
 	if sqlDB, err := db.DB(); err == nil {
+		auditExtendedStore := auditpkg.NewExtendedStore(sqlDB)
+		auditExtendedStore.EnsureTable(context.Background())
+		rbacEval := entrbac.NewEvaluator(sqlDB)
+
 		adminMailboxRepo := mailboxadminsvc.NewAdminMailboxRepo(sqlDB)
-		router.h.SetMailboxAdminService(mailboxadminsvc.NewService(adminMailboxRepo, nil, nil))
+		router.h.SetMailboxAdminService(mailboxadminsvc.NewService(adminMailboxRepo, auditExtendedStore, rbacEval))
 
 		orgRepo := orgadminsvc.NewOrganizationRepo(sqlDB)
-		router.h.SetOrganizationAdminService(orgadminsvc.NewService(orgRepo, nil, nil))
+		router.h.SetOrganizationAdminService(orgadminsvc.NewService(orgRepo, auditExtendedStore, rbacEval))
 
 		domainAdminRepo := domainadminsvc.NewDomainAdminRepo(sqlDB)
-		router.h.SetDomainAdminService(domainadminsvc.NewService(domainAdminRepo, nil, nil))
+		router.h.SetDomainAdminService(domainadminsvc.NewService(domainAdminRepo, auditExtendedStore, rbacEval))
 
 		dashboardSvc := dashboardsvc.NewDashboardService(sqlDB)
 		router.h.SetDashboardService(dashboardSvc)
 
-		platformSvc := platformpkg.NewPlatformService(sqlDB, nil, nil)
+		platformSvc := platformpkg.NewPlatformService(sqlDB, auditExtendedStore, rbacEval)
 		router.h.SetPlatformAdminService(platformSvc)
 
-		logger.Info("enterprise admin services wired")
+		logger.Info("enterprise admin services wired with audit and RBAC")
 	}
 
 	// Wire MailStore from the coremail runtime module. The

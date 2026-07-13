@@ -30,13 +30,6 @@ func (r *AdminMailboxRepo) GetByID(ctx context.Context, id, tenantID uint) (*Adm
 	return scanAdminMailbox(row)
 }
 
-func (r *AdminMailboxRepo) GetByIDCrossTenant(ctx context.Context, id uint) (*AdminMailbox, error) {
-	row := r.db.QueryRowContext(ctx,
-		"SELECT id, domain_id, tenant_id, email, local_part, name, status, quota_mb, used_bytes, msg_count, is_admin, allow_smtp, allow_imap, allow_pop3, allow_jmap, mfa_enabled, send_limit_per_hour, last_login, COALESCE(last_ip,''), created_at, updated_at FROM coremail_mailboxes WHERE id = ? AND deleted_at IS NULL",
-		id)
-	return scanAdminMailbox(row)
-}
-
 func (r *AdminMailboxRepo) List(ctx context.Context, filter MailboxFilter) ([]AdminMailbox, int64, error) {
 	var where []string
 	var args []interface{}

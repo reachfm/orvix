@@ -8,6 +8,9 @@ import (
 )
 
 func (h *Handler) ListOrganizations(c fiber.Ctx) error {
+	if h.orgAdminSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "organization admin service not available"})
+	}
 	var req struct {
 		Search string `json:"search"`
 		Active *bool  `json:"active"`
@@ -34,6 +37,9 @@ func (h *Handler) ListOrganizations(c fiber.Ctx) error {
 }
 
 func (h *Handler) GetOrganization(c fiber.Ctx) error {
+	if h.orgAdminSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "organization admin service not available"})
+	}
 	// This handler is mounted only on the tenant-scoped /enterprise
 	// group (admin/operator + tenant context). An organization IS a
 	// tenant, so a caller may only read their own organization; the
@@ -69,6 +75,9 @@ func (h *Handler) GetOrganization(c fiber.Ctx) error {
 }
 
 func (h *Handler) CreateOrganization(c fiber.Ctx) error {
+	if h.orgAdminSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "organization admin service not available"})
+	}
 	var req organization.CreateOrganizationRequest
 	if err := c.Bind().JSON(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
@@ -93,6 +102,9 @@ func (h *Handler) CreateOrganization(c fiber.Ctx) error {
 }
 
 func (h *Handler) UpdateOrganization(c fiber.Ctx) error {
+	if h.orgAdminSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "organization admin service not available"})
+	}
 	idVal, err := strconv.ParseUint(c.Params("id"), 10, 64)
 	if err != nil || idVal == 0 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid organization id"})
@@ -115,6 +127,9 @@ func (h *Handler) UpdateOrganization(c fiber.Ctx) error {
 }
 
 func (h *Handler) SetOrganizationActive(c fiber.Ctx) error {
+	if h.orgAdminSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "organization admin service not available"})
+	}
 	idVal, err := strconv.ParseUint(c.Params("id"), 10, 64)
 	if err != nil || idVal == 0 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid organization id"})
@@ -136,6 +151,9 @@ func (h *Handler) SetOrganizationActive(c fiber.Ctx) error {
 }
 
 func (h *Handler) GetOrganizationDetail(c fiber.Ctx) error {
+	if h.orgAdminSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "organization admin service not available"})
+	}
 	idVal, err := strconv.ParseUint(c.Params("id"), 10, 64)
 	if err != nil || idVal == 0 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid organization id"})

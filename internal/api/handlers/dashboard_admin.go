@@ -6,6 +6,9 @@ import (
 )
 
 func (h *Handler) CustomerDashboard(c fiber.Ctx) error {
+	if h.dashboardSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "dashboard service not available"})
+	}
 	tenantID, err := auth.RequireTenantID(c)
 	if err != nil {
 		return c.Status(err.(*fiber.Error).Code).JSON(fiber.Map{"error": err.Error()})
@@ -19,6 +22,9 @@ func (h *Handler) CustomerDashboard(c fiber.Ctx) error {
 }
 
 func (h *Handler) PlatformDashboard(c fiber.Ctx) error {
+	if h.dashboardSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "dashboard service not available"})
+	}
 	d, err := h.dashboardSvc.PlatformDashboard(c.Context())
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})

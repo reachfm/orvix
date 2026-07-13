@@ -8,6 +8,9 @@ import (
 )
 
 func (h *Handler) ListAdminDomains(c fiber.Ctx) error {
+	if h.domainAdminSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "domain admin service not available"})
+	}
 	tenantID, err := auth.RequireTenantID(c)
 	if err != nil {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": err.Error()})
@@ -45,6 +48,9 @@ func (h *Handler) ListAdminDomains(c fiber.Ctx) error {
 }
 
 func (h *Handler) GetAdminDomain(c fiber.Ctx) error {
+	if h.domainAdminSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "domain admin service not available"})
+	}
 	tenantID, err := auth.RequireTenantID(c)
 	if err != nil {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": err.Error()})
@@ -67,6 +73,9 @@ func (h *Handler) GetAdminDomain(c fiber.Ctx) error {
 }
 
 func (h *Handler) CreateAdminDomain(c fiber.Ctx) error {
+	if h.domainAdminSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "domain admin service not available"})
+	}
 	tenantID, err := auth.RequireTenantID(c)
 	if err != nil {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": err.Error()})
@@ -88,6 +97,9 @@ func (h *Handler) CreateAdminDomain(c fiber.Ctx) error {
 }
 
 func (h *Handler) UpdateAdminDomain(c fiber.Ctx) error {
+	if h.domainAdminSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "domain admin service not available"})
+	}
 	tenantID, err := auth.RequireTenantID(c)
 	if err != nil {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": err.Error()})
@@ -112,6 +124,9 @@ func (h *Handler) UpdateAdminDomain(c fiber.Ctx) error {
 }
 
 func (h *Handler) SetAdminDomainStatus(c fiber.Ctx) error {
+	if h.domainAdminSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "domain admin service not available"})
+	}
 	tenantID, err := auth.RequireTenantID(c)
 	if err != nil {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": err.Error()})

@@ -204,30 +204,55 @@ func sanitizeEntry(e *ExtendedEntry) {
 }
 
 var sensitiveFields = map[string]bool{
-	"password": true, "password_hash": true, "passwordHash": true,
+	"password": true, "password_hash": true, "passwordhash": true,
 	"secret": true, "token": true, "key": true, "private_key": true,
-	"privateKey": true, "credential": true, "session_token": true,
+	"privatekey": true, "credential": true, "session_token": true,
+	"sessiontoken": true, "authorization": true, "cookie": true,
+	"hash": true,
 }
 
 func sanitizeJSON(input string, sensitiveFields map[string]bool) string {
 	if input == "" {
 		return ""
 	}
-	var data map[string]interface{}
-	if err := json.Unmarshal([]byte(input), &data); err != nil {
+	var val interface{}
+	if err := json.Unmarshal([]byte(input), &val); err != nil {
 		return `"` + input + `"`
 	}
-	for k := range data {
-		lower := strings.ToLower(k)
-		for sf := range sensitiveFields {
-			if strings.Contains(lower, sf) {
-				data[k] = "[REDACTED]"
-				break
+	redacted := recursiveRedact(val, sensitiveFields)
+	out, _ := json.Marshal(redacted)
+	return string(out)
+}
+
+func recursiveRedact(val interface{}, sensitiveFields map[string]bool) interface{} {
+	switch v := val.(type) {
+	case map[string]interface{}:
+		for k, sub := range v {
+			if isSensitive(k, sensitiveFields) {
+				v[k] = "[REDACTED]"
+			} else {
+				v[k] = recursiveRedact(sub, sensitiveFields)
 			}
 		}
+		return v
+	case []interface{}:
+		for i, sub := range v {
+			v[i] = recursiveRedact(sub, sensitiveFields)
+		}
+		return v
+	default:
+		return val
 	}
-	out, _ := json.Marshal(data)
-	return string(out)
+}
+
+func isSensitive(key string, sensitiveFields map[string]bool) bool {
+	lower := strings.ToLower(key)
+	for sf := range sensitiveFields {
+		if strings.Contains(lower, sf) {
+			return true
+		}
+	}
+	return false
 }
 
 func ActorEntry(c fiber.Ctx, action, target, result string, targetID uint) *ExtendedEntry {
