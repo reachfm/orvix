@@ -258,7 +258,7 @@ func TestSQLiteStaleClaimCleaned(t *testing.T) {
 func postgresVerifRepo(t *testing.T) (*VerificationRepo, *sql.DB) {
 	t.Helper()
 	dsn := postgresDSN(t)
-	db, err := sql.Open("postgres", dsn)
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatalf("open postgres: %v", err)
 	}
@@ -530,7 +530,7 @@ func TestPostgresDialectDetection(t *testing.T) {
 func postgresServiceEnv(t *testing.T) (*Service, *sql.DB) {
 	t.Helper()
 	dsn := postgresDSN(t)
-	db, err := sql.Open("postgres", dsn)
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatalf("open postgres: %v", err)
 	}
