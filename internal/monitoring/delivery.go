@@ -3,9 +3,12 @@ package monitoring
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"time"
 )
@@ -49,9 +52,9 @@ type DeliveryProvider interface {
 type ProviderStatus struct {
 	Name      string `json:"name"`
 	Enabled   bool   `json:"enabled"`
-	Target    string `json:"target,omitempty"`    // redacted (e.g. "REDACTED") — never the raw URL
-	HasSecret bool   `json:"hasSecret"`           // true when a token/secret is configured
-	Detail    string `json:"detail,omitempty"`    // safe human-readable note
+	Target    string `json:"target,omitempty"` // redacted (e.g. "REDACTED") — never the raw URL
+	HasSecret bool   `json:"hasSecret"`        // true when a token/secret is configured
+	Detail    string `json:"detail,omitempty"` // safe human-readable note
 }
 
 // DeliveryLogger receives safe, secret-free delivery diagnostics. A
@@ -223,33 +226,89 @@ func (p *InAppProvider) Status() ProviderStatus {
 //   - Transport errors from net/http typically embed the target URL
 //     (e.g. `Post "https://…": dial tcp …`). Deliver deliberately
 //     discards that text and returns a sanitized, secret-free error.
+const (
+	defaultWebhookTimeout      = 10 * time.Second
+	defaultMaxBodySize         = 1 << 20 // 1 MB
+	defaultMaxWebhookRedirects = 3
+)
+
 type WebhookProvider struct {
-	url     string
-	token   string
-	enabled bool
-	client  *http.Client
+	url          string
+	token        string
+	enabled      bool
+	timeout      time.Duration
+	maxBodySize  int64
+	maxRedirects int
+	client       *http.Client
 }
 
 // WebhookConfig configures a WebhookProvider.
 type WebhookConfig struct {
-	Enabled bool
-	URL     string
-	Token   string
-	Timeout time.Duration
+	Enabled        bool
+	URL            string
+	Token          string
+	Timeout        time.Duration
+	SkipValidation bool // for testing only; skips SSRF URL checks
 }
 
 // NewWebhookProvider builds a webhook provider from config.
-func NewWebhookProvider(cfg WebhookConfig) *WebhookProvider {
+// The URL is validated against SSRF attacks. If validation fails the
+// provider is not created and an error is returned.
+func NewWebhookProvider(cfg WebhookConfig) (*WebhookProvider, error) {
 	timeout := cfg.Timeout
 	if timeout <= 0 {
-		timeout = 10 * time.Second
+		timeout = defaultWebhookTimeout
+	}
+	if cfg.URL != "" && !cfg.SkipValidation {
+		if err := ValidateWebhookURL(cfg.URL); err != nil {
+			return nil, err
+		}
+	}
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: -1, // disable keep-alive to force DNS re-resolution per connection
+	}
+	transport := &http.Transport{
+		DialContext:       dialer.DialContext,
+		DisableKeepAlives: true,
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
+	}
+	client := &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= defaultMaxWebhookRedirects {
+				return fmt.Errorf("too many redirects")
+			}
+			if req.URL.Host == "" {
+				return fmt.Errorf("redirect to URL with no host")
+			}
+			if req.URL.Scheme != "https" {
+				return fmt.Errorf("redirect to non-HTTPS URL")
+			}
+			ips, err := net.LookupIP(req.URL.Hostname())
+			if err != nil {
+				return fmt.Errorf("cannot resolve redirect host: %w", err)
+			}
+			for _, ip := range ips {
+				if isUnsafeIP(ip) {
+					return fmt.Errorf("redirect to unsafe address: %s", ip.String())
+				}
+			}
+			return nil
+		},
 	}
 	return &WebhookProvider{
-		url:     cfg.URL,
-		token:   cfg.Token,
-		enabled: cfg.Enabled,
-		client:  &http.Client{Timeout: timeout},
-	}
+		url:          cfg.URL,
+		token:        cfg.Token,
+		enabled:      cfg.Enabled,
+		timeout:      timeout,
+		maxBodySize:  defaultMaxBodySize,
+		maxRedirects: defaultMaxWebhookRedirects,
+		client:       client,
+	}, nil
 }
 
 func (w *WebhookProvider) Name() string { return "webhook" }
@@ -293,10 +352,10 @@ func (w *WebhookProvider) Deliver(ctx context.Context, a Alert) error {
 	}
 	resp, err := w.client.Do(req)
 	if err != nil {
-		// Transport errors embed the URL; return a sanitized message.
 		return fmt.Errorf("webhook delivery failed: transport error")
 	}
 	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, w.maxBodySize))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("webhook delivery failed: HTTP status %d", resp.StatusCode)
 	}

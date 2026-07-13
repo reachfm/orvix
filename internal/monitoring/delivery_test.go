@@ -126,7 +126,10 @@ func TestWebhookDeliverySuccess(t *testing.T) {
 	defer srv.Close()
 
 	db := deliveryTestDB(t)
-	wh := NewWebhookProvider(WebhookConfig{Enabled: true, URL: srv.URL, Token: "super-secret-token"})
+	wh, err := NewWebhookProvider(WebhookConfig{Enabled: true, URL: srv.URL, Token: "super-secret-token", SkipValidation: true})
+	if err != nil {
+		t.Fatalf("NewWebhookProvider: %v", err)
+	}
 	d := NewDispatcher(db, nil, wh)
 	ctx := context.Background()
 
@@ -161,7 +164,10 @@ func TestWebhookDeliveryFailureRecordedNoCrash(t *testing.T) {
 	defer srv.Close()
 
 	db := deliveryTestDB(t)
-	wh := NewWebhookProvider(WebhookConfig{Enabled: true, URL: srv.URL, Token: "tkn"})
+	wh, err := NewWebhookProvider(WebhookConfig{Enabled: true, URL: srv.URL, Token: "tkn", SkipValidation: true})
+	if err != nil {
+		t.Fatalf("NewWebhookProvider: %v", err)
+	}
 	d := NewDispatcher(db, nil, NewInAppProvider(), wh)
 	ctx := context.Background()
 
@@ -208,7 +214,10 @@ func TestWebhookSecretRedactedInLogsAndStatus(t *testing.T) {
 	logger := log.New(&buf, "", 0)
 
 	db := deliveryTestDB(t)
-	wh := NewWebhookProvider(WebhookConfig{Enabled: true, URL: srv.URL, Token: "hunter2-token"})
+	wh, err := NewWebhookProvider(WebhookConfig{Enabled: true, URL: srv.URL, Token: "hunter2-token", SkipValidation: true})
+	if err != nil {
+		t.Fatalf("NewWebhookProvider: %v", err)
+	}
 	d := NewDispatcher(db, logger, wh)
 	ctx := context.Background()
 
@@ -257,8 +266,10 @@ func TestDisabledProviderSkippedHonestly(t *testing.T) {
 	defer srv.Close()
 
 	db := deliveryTestDB(t)
-	// enabled=false → skipped honestly even though a URL is set.
-	wh := NewWebhookProvider(WebhookConfig{Enabled: false, URL: srv.URL})
+	wh, err := NewWebhookProvider(WebhookConfig{Enabled: false, URL: srv.URL, SkipValidation: true})
+	if err != nil {
+		t.Fatalf("NewWebhookProvider: %v", err)
+	}
 	d := NewDispatcher(db, nil, wh)
 	ctx := context.Background()
 
@@ -285,7 +296,10 @@ func TestDisabledProviderSkippedHonestly(t *testing.T) {
 // TestWebhookEnabledButNoURLIsDisabled proves an enabled flag with no
 // URL is honestly reported as disabled (no fake "enabled").
 func TestWebhookEnabledButNoURLIsDisabled(t *testing.T) {
-	wh := NewWebhookProvider(WebhookConfig{Enabled: true, URL: ""})
+	wh, err := NewWebhookProvider(WebhookConfig{Enabled: true, URL: ""})
+	if err != nil {
+		t.Fatalf("NewWebhookProvider: %v", err)
+	}
 	if wh.Enabled() {
 		t.Fatal("webhook with no URL must not be enabled")
 	}

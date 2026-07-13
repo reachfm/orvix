@@ -483,10 +483,10 @@ func TestCreateArchiveExplicitAllowlist(t *testing.T) {
 	tr := tar.NewReader(gr)
 
 	allowed := map[string]bool{
-		"var/lib/orvix/orvix.db": false,
-		"backup.json":            false,
+		"var/lib/orvix/orvix.db":   false,
+		"backup.json":              false,
 		"RESTORE_INSTRUCTIONS.txt": false,
-		"checksums.txt":          false,
+		"checksums.txt":            false,
 	}
 	// etc/orvix/orvix.yaml.redacted may not exist if /etc/orvix is not present on test machine
 
@@ -1012,7 +1012,7 @@ func TestArchiveContainsOnlyAllowedEntries(t *testing.T) {
 		"etc/orvix/orvix.yaml.redacted": false,
 		"backup.json":                   false,
 		"RESTORE_INSTRUCTIONS.txt":      false,
-		"checksums.txt":                false,
+		"checksums.txt":                 false,
 	}
 
 	for {
@@ -2212,12 +2212,16 @@ func TestValidateMissingChecksumsTxtRejected(t *testing.T) {
 			return nil
 		}
 		rel, _ := filepath.Rel(tmpDir, path)
-		if rel == "checksums.txt" { return nil }
+		if rel == "checksums.txt" {
+			return nil
+		}
 		data, _ := os.ReadFile(path)
 		writeTarEntry(tw, rel, data, 0640)
 		return nil
 	})
-	tw.Close(); gw.Close(); out.Close()
+	tw.Close()
+	gw.Close()
+	out.Close()
 
 	vr, err := s.ValidateArchive(ctx, bID)
 	if err != nil {
@@ -2240,14 +2244,20 @@ func TestValidateMissingBackupJsonRejected(t *testing.T) {
 	gw := gzip.NewWriter(out)
 	tw := tar.NewWriter(gw)
 	filepath.Walk(tmpDir, func(path string, info fs.FileInfo, err error) error {
-		if err != nil || info.IsDir() { return nil }
+		if err != nil || info.IsDir() {
+			return nil
+		}
 		rel, _ := filepath.Rel(tmpDir, path)
-		if rel == "backup.json" { return nil }
+		if rel == "backup.json" {
+			return nil
+		}
 		data, _ := os.ReadFile(path)
 		writeTarEntry(tw, rel, data, 0640)
 		return nil
 	})
-	tw.Close(); gw.Close(); out.Close()
+	tw.Close()
+	gw.Close()
+	out.Close()
 	vr, _ := s.ValidateArchive(ctx, bID)
 	if vr.Valid {
 		t.Fatal("expected validation to reject missing backup.json")
@@ -2266,7 +2276,9 @@ func TestValidateMissingPerFileChecksumRejected(t *testing.T) {
 	lines := strings.Split(string(csData), "\n")
 	var filtered []string
 	for _, line := range lines {
-		if strings.Contains(line, "orvix.db") { continue }
+		if strings.Contains(line, "orvix.db") {
+			continue
+		}
 		filtered = append(filtered, line)
 	}
 	os.WriteFile(csPath, []byte(strings.Join(filtered, "\n")), 0640)
@@ -2275,13 +2287,17 @@ func TestValidateMissingPerFileChecksumRejected(t *testing.T) {
 	gw := gzip.NewWriter(out)
 	tw := tar.NewWriter(gw)
 	filepath.Walk(tmpDir, func(path string, info fs.FileInfo, err error) error {
-		if err != nil || info.IsDir() { return nil }
+		if err != nil || info.IsDir() {
+			return nil
+		}
 		rel, _ := filepath.Rel(tmpDir, path)
 		data, _ := os.ReadFile(path)
 		writeTarEntry(tw, rel, data, 0640)
 		return nil
 	})
-	tw.Close(); gw.Close(); out.Close()
+	tw.Close()
+	gw.Close()
+	out.Close()
 	vr, _ := s.ValidateArchive(ctx, bID)
 	if vr.Valid {
 		t.Fatal("expected validation to reject missing per-file checksum")
@@ -2304,13 +2320,17 @@ func TestValidateChecksumEntryForAbsentFileRejected(t *testing.T) {
 	gw := gzip.NewWriter(out)
 	tw := tar.NewWriter(gw)
 	filepath.Walk(tmpDir, func(path string, info fs.FileInfo, err error) error {
-		if err != nil || info.IsDir() { return nil }
+		if err != nil || info.IsDir() {
+			return nil
+		}
 		rel, _ := filepath.Rel(tmpDir, path)
 		data, _ := os.ReadFile(path)
 		writeTarEntry(tw, rel, data, 0640)
 		return nil
 	})
-	tw.Close(); gw.Close(); out.Close()
+	tw.Close()
+	gw.Close()
+	out.Close()
 	vr, _ := s.ValidateArchive(ctx, bID)
 	if vr.Valid {
 		t.Fatal("expected validation to reject checksum entry for absent file")
@@ -2330,13 +2350,17 @@ func TestValidateUnknownEntryRejected(t *testing.T) {
 	gw := gzip.NewWriter(out)
 	tw := tar.NewWriter(gw)
 	filepath.Walk(tmpDir, func(path string, info fs.FileInfo, err error) error {
-		if err != nil || info.IsDir() { return nil }
+		if err != nil || info.IsDir() {
+			return nil
+		}
 		rel, _ := filepath.Rel(tmpDir, path)
 		data, _ := os.ReadFile(path)
 		writeTarEntry(tw, rel, data, 0640)
 		return nil
 	})
-	tw.Close(); gw.Close(); out.Close()
+	tw.Close()
+	gw.Close()
+	out.Close()
 	vr, _ := s.ValidateArchive(ctx, bID)
 	if vr.Valid {
 		t.Fatal("expected validation to reject unknown entry")
@@ -2360,7 +2384,9 @@ func TestValidateTraversalEntryRejected(t *testing.T) {
 	// Write traversal entry.
 	tw.WriteHeader(&tar.Header{Name: "../etc/passwd", Mode: 0640, Size: int64(len("pwned")), Typeflag: tar.TypeReg})
 	tw.Write([]byte("pwned"))
-	tw.Close(); gw.Close(); out.Close()
+	tw.Close()
+	gw.Close()
+	out.Close()
 	vr, _ := s.ValidateArchive(ctx, bID)
 	if vr.Valid {
 		t.Fatal("expected validation to reject traversal entry")
@@ -2380,7 +2406,9 @@ func TestValidateAbsolutePathEntryRejected(t *testing.T) {
 	writeTarEntry(tw, "backup.json", []byte(`{"product":"Orvix Enterprise Mail","backup_format_version":1}`), 0640)
 	tw.WriteHeader(&tar.Header{Name: "/etc/passwd", Mode: 0640, Size: int64(len("pwned")), Typeflag: tar.TypeReg})
 	tw.Write([]byte("pwned"))
-	tw.Close(); gw.Close(); out.Close()
+	tw.Close()
+	gw.Close()
+	out.Close()
 	vr, _ := s.ValidateArchive(ctx, bID)
 	if vr.Valid {
 		t.Fatal("expected validation to reject absolute path entry")
@@ -2399,7 +2427,9 @@ func TestValidateSymlinkEntryRejected(t *testing.T) {
 	writeTarEntry(tw, "checksums.txt", []byte("abc  test.txt\n"), 0640)
 	writeTarEntry(tw, "backup.json", []byte(`{"product":"Orvix Enterprise Mail","backup_format_version":1}`), 0640)
 	tw.WriteHeader(&tar.Header{Name: "symlink", Typeflag: tar.TypeSymlink, Linkname: "/etc/passwd"})
-	tw.Close(); gw.Close(); out.Close()
+	tw.Close()
+	gw.Close()
+	out.Close()
 	vr, _ := s.ValidateArchive(ctx, bID)
 	if vr.Valid {
 		t.Fatal("expected validation to reject symlink entry")
@@ -2418,7 +2448,9 @@ func TestValidateHardlinkEntryRejected(t *testing.T) {
 	writeTarEntry(tw, "checksums.txt", []byte("abc  test.txt\n"), 0640)
 	writeTarEntry(tw, "backup.json", []byte(`{"product":"Orvix Enterprise Mail","backup_format_version":1}`), 0640)
 	tw.WriteHeader(&tar.Header{Name: "hardlink", Typeflag: tar.TypeLink, Linkname: "target"})
-	tw.Close(); gw.Close(); out.Close()
+	tw.Close()
+	gw.Close()
+	out.Close()
 	vr, _ := s.ValidateArchive(ctx, bID)
 	if vr.Valid {
 		t.Fatal("expected validation to reject hardlink entry")
@@ -2441,13 +2473,17 @@ func TestValidateUnsupportedFormatRejected(t *testing.T) {
 	gw := gzip.NewWriter(out)
 	tw := tar.NewWriter(gw)
 	filepath.Walk(tmpDir, func(path string, info fs.FileInfo, err error) error {
-		if err != nil || info.IsDir() { return nil }
+		if err != nil || info.IsDir() {
+			return nil
+		}
 		rel, _ := filepath.Rel(tmpDir, path)
 		data, _ := os.ReadFile(path)
 		writeTarEntry(tw, rel, data, 0640)
 		return nil
 	})
-	tw.Close(); gw.Close(); out.Close()
+	tw.Close()
+	gw.Close()
+	out.Close()
 	vr, _ := s.ValidateArchive(ctx, bID)
 	if vr.Valid {
 		t.Fatal("expected validation to reject unsupported format version")
@@ -2469,13 +2505,17 @@ func TestValidateWrongProductRejected(t *testing.T) {
 	gw := gzip.NewWriter(out)
 	tw := tar.NewWriter(gw)
 	filepath.Walk(tmpDir, func(path string, info fs.FileInfo, err error) error {
-		if err != nil || info.IsDir() { return nil }
+		if err != nil || info.IsDir() {
+			return nil
+		}
 		rel, _ := filepath.Rel(tmpDir, path)
 		data, _ := os.ReadFile(path)
 		writeTarEntry(tw, rel, data, 0640)
 		return nil
 	})
-	tw.Close(); gw.Close(); out.Close()
+	tw.Close()
+	gw.Close()
+	out.Close()
 	vr, _ := s.ValidateArchive(ctx, bID)
 	if vr.Valid {
 		t.Fatal("expected validation to reject wrong product")
@@ -2498,13 +2538,17 @@ func TestValidateChecksumMismatchRejected(t *testing.T) {
 	gw := gzip.NewWriter(out)
 	tw := tar.NewWriter(gw)
 	filepath.Walk(tmpDir, func(path string, info fs.FileInfo, err error) error {
-		if err != nil || info.IsDir() { return nil }
+		if err != nil || info.IsDir() {
+			return nil
+		}
 		rel, _ := filepath.Rel(tmpDir, path)
 		data, _ := os.ReadFile(path)
 		writeTarEntry(tw, rel, data, 0640)
 		return nil
 	})
-	tw.Close(); gw.Close(); out.Close()
+	tw.Close()
+	gw.Close()
+	out.Close()
 	vr, _ := s.ValidateArchive(ctx, bID)
 	if vr.Valid {
 		t.Fatal("expected validation to reject checksum mismatch")
@@ -2542,7 +2586,9 @@ NORMAL_PUBLIC_VALUE=hello
 	// Find the .env.redacted file.
 	var envRedactedData []byte
 	filepath.Walk(tmpDir, func(path string, info fs.FileInfo, err error) error {
-		if err != nil || info.IsDir() { return nil }
+		if err != nil || info.IsDir() {
+			return nil
+		}
 		if strings.HasSuffix(path, ".env.redacted") {
 			envRedactedData, _ = os.ReadFile(path)
 		}

@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	_ "modernc.org/sqlite"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/ssh"
+	_ "modernc.org/sqlite"
 )
 
 func openTestDB(t *testing.T) *sql.DB {

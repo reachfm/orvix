@@ -69,6 +69,10 @@ type Service struct {
 	// this nil and accept local-only behaviour.
 	postCreateHook func(backupID, archivePath string)
 
+	// encryptedBackups enables backup encryption using a password-derived AES-256-GCM key.
+	// When non-nil, CreateBackup encrypts data before writing and RestoreBackup decrypts.
+	encryptedBackups *BackupEncryptionConfig
+
 	mu sync.Mutex
 }
 
@@ -121,6 +125,31 @@ func (s *Service) AddKeyPath(path string) { s.keyPaths = append(s.keyPaths, path
 // when the deployment's database dialect is PostgreSQL. Has no effect
 // (never read) on SQLite deployments.
 func (s *Service) SetPostgresDSN(dsn string) { s.postgresDSN = dsn }
+
+// SetEncryptionKey derives an AES-256-GCM key from password and enables encryption.
+func (s *Service) SetEncryptionKey(password string) error {
+	salt := []byte(fmt.Sprintf("orvix-backup-salt-%d", time.Now().UnixNano())[:32])
+	BackupEncryptionKey = DeriveBackupKey(password, salt)
+	s.encryptedBackups = &BackupEncryptionConfig{Enabled: true}
+	return nil
+}
+
+// SetEncryptionConfig stores the encryption configuration and derives a key if a password is provided.
+func (s *Service) SetEncryptionConfig(cfg BackupEncryptionConfig) error {
+	s.encryptedBackups = &cfg
+	if cfg.Password != "" {
+		salt := []byte(fmt.Sprintf("orvix-backup-salt-%d", time.Now().UnixNano())[:32])
+		BackupEncryptionKey = DeriveBackupKey(cfg.Password, salt)
+	}
+	if cfg.KeyFile != "" {
+		data, err := os.ReadFile(cfg.KeyFile)
+		if err != nil {
+			return fmt.Errorf("read key file: %w", err)
+		}
+		BackupEncryptionKey = data
+	}
+	return nil
+}
 
 func (s *Service) ensureBasePath() error { return os.MkdirAll(s.basePath, 0750) }
 
@@ -411,18 +440,34 @@ func (s *Service) createBackupLocked(ctx context.Context, name string) (*Backup,
 				fmt.Sprintf("UPDATE backup_registry SET last_test_message=%s WHERE id=%s", s.dialect.Placeholder(1), s.dialect.Placeholder(2)),
 				"archive_failed:"+archiveErr.Error(), backup.ID)
 		}
-	} else if s.postCreateHook != nil {
-		// Fire the post-create hook (target upload). The
-		// hook runs in its own goroutine so a slow /
-		// timing-out upload never blocks the return to
-		// the admin caller.
-		hook := s.postCreateHook
-		go func(id, path string) {
-			defer func() {
-				_ = recover()
-			}()
-			hook(id, path)
-		}(backup.ID, archivePath)
+	} else {
+		if s.encryptedBackups != nil && s.encryptedBackups.Enabled {
+			archiveData, err := os.ReadFile(archivePath)
+			if err == nil {
+				encrypted, encErr := EncryptBackup(archiveData)
+				if encErr == nil {
+					if writeErr := os.WriteFile(archivePath, encrypted, 0600); writeErr == nil {
+						manifest.Encrypted = true
+						manifest.Checksum = ComputeBackupChecksum(encrypted)
+						manifestBytes, _ = json.Marshal(manifest)
+						os.WriteFile(filepath.Join(bp, "manifest.json"), manifestBytes, 0640)
+					}
+				}
+			}
+		}
+		if s.postCreateHook != nil {
+			// Fire the post-create hook (target upload). The
+			// hook runs in its own goroutine so a slow /
+			// timing-out upload never blocks the return to
+			// the admin caller.
+			hook := s.postCreateHook
+			go func(id, path string) {
+				defer func() {
+					_ = recover()
+				}()
+				hook(id, path)
+			}(backup.ID, archivePath)
+		}
 	}
 
 	return backup, nil
@@ -1263,6 +1308,28 @@ func (s *Service) RestoreBackup(ctx context.Context, id string) (*RestoreStageRe
 		return nil, err
 	}
 	archivePath := filepath.Join(bp, "backup-archive.tar.gz")
+
+	manifestPath := filepath.Join(bp, "manifest.json")
+	if data, err := os.ReadFile(manifestPath); err == nil {
+		var manifest BackupManifest
+		if json.Unmarshal(data, &manifest) == nil && manifest.Encrypted {
+			archiveData, err := os.ReadFile(archivePath)
+			if err != nil {
+				return nil, fmt.Errorf("read encrypted archive: %w", err)
+			}
+			decrypted, err := DecryptBackup(archiveData)
+			if err != nil {
+				return nil, fmt.Errorf("decrypt archive: %w", err)
+			}
+			tmpPath := archivePath + ".decrypted"
+			if err := os.WriteFile(tmpPath, decrypted, 0600); err != nil {
+				return nil, fmt.Errorf("write decrypted archive: %w", err)
+			}
+			defer os.Remove(tmpPath)
+			archivePath = tmpPath
+		}
+	}
+
 	if err := extractTarGz(archivePath, stagingDir); err != nil {
 		return nil, fmt.Errorf("extract to staging: %w", err)
 	}

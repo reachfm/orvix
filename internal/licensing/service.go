@@ -13,9 +13,9 @@ import (
 
 // Service provides license management.
 type Service struct {
-	mu        sync.RWMutex
-	license   *License
-	status    LicenseStatus
+	mu          sync.RWMutex
+	license     *License
+	status      LicenseStatus
 	licensePath string
 }
 
@@ -143,12 +143,12 @@ func (s *Service) StatusWithUsage(ctx context.Context, domainCount, mailboxCount
 	s.mu.RUnlock()
 
 	result := map[string]interface{}{
-		"edition":         string(status.Edition),
-		"valid":           status.Valid,
-		"machineId":       status.MachineID,
-		"errorMessage":    status.ErrorMessage,
-		"daysRemaining":   -1,
-		"graceState":      "valid",
+		"edition":       string(status.Edition),
+		"valid":         status.Valid,
+		"machineId":     status.MachineID,
+		"errorMessage":  status.ErrorMessage,
+		"daysRemaining": -1,
+		"graceState":    "valid",
 	}
 
 	if lic != nil {

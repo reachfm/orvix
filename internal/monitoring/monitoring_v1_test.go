@@ -229,8 +229,8 @@ func TestHealthRedactsPrivateDiskPaths(t *testing.T) {
 	defer db.Close()
 	dir := t.TempDir()
 	ds := &DataSources{
-		DB:         db,
-		BackupDir:  dir,
+		DB:        db,
+		BackupDir: dir,
 		DiskPathLabels: map[string]string{
 			dir: "backups",
 		},
@@ -261,9 +261,9 @@ func TestMemoryAndCPU(t *testing.T) {
 	}
 	defer db.Close()
 	ds := &DataSources{
-		DB:         db,
+		DB:          db,
 		MemoryUsage: func() (int64, int64) { return 100, 1000 },
-		CPULoad:    func() (float64, float64, float64, error) { return 0.1, 0.2, 0.3, nil },
+		CPULoad:     func() (float64, float64, float64, error) { return 0.1, 0.2, 0.3, nil },
 	}
 	svc := NewService(db, ds)
 	used, total := svc.MemoryBytes()

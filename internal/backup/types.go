@@ -54,6 +54,15 @@ type BackupManifest struct {
 	// filename — restore with `pg_restore`, not by copying the
 	// file back as a SQLite database).
 	DatabaseFormat string `json:"databaseFormat,omitempty"`
+	Encrypted      bool   `json:"encrypted,omitempty"`
+	Checksum       string `json:"checksum,omitempty"`
+}
+
+// BackupEncryptionConfig holds the configuration for backup encryption.
+type BackupEncryptionConfig struct {
+	Enabled  bool
+	Password string
+	KeyFile  string
 }
 
 // ManifestItem describes a single file in the backup archive.

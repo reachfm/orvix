@@ -35,16 +35,16 @@ type License struct {
 }
 
 type ValidationResult struct {
-	Valid  bool     `json:"valid"`
-	Errors []string `json:"errors,omitempty"`
+	Valid    bool     `json:"valid"`
+	Errors   []string `json:"errors,omitempty"`
 	Warnings []string `json:"warnings,omitempty"`
 }
 
 type LicenseStatus struct {
-	License      *License         `json:"license,omitempty"`
-	Edition      Edition          `json:"edition"`
-	Valid        bool             `json:"valid"`
+	License      *License          `json:"license,omitempty"`
+	Edition      Edition           `json:"edition"`
+	Valid        bool              `json:"valid"`
 	Validation   *ValidationResult `json:"validation,omitempty"`
-	MachineID    string           `json:"machineId"`
-	ErrorMessage string           `json:"errorMessage,omitempty"`
+	MachineID    string            `json:"machineId"`
+	ErrorMessage string            `json:"errorMessage,omitempty"`
 }

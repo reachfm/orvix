@@ -22,7 +22,10 @@ func TestEvaluateAlertsDispatchesOnlyNewAlerts(t *testing.T) {
 	defer srv.Close()
 
 	db := deliveryTestDB(t)
-	wh := NewWebhookProvider(WebhookConfig{Enabled: true, URL: srv.URL})
+	wh, err := NewWebhookProvider(WebhookConfig{Enabled: true, URL: srv.URL, SkipValidation: true})
+	if err != nil {
+		t.Fatalf("NewWebhookProvider: %v", err)
+	}
 	d := NewDispatcher(db, nil, NewInAppProvider(), wh)
 
 	svc := testService(t, &DataSources{
@@ -70,7 +73,10 @@ func TestMonitoringReadEndpointDoesNotRedeliverActiveAlert(t *testing.T) {
 	defer srv.Close()
 
 	db := deliveryTestDB(t)
-	wh := NewWebhookProvider(WebhookConfig{Enabled: true, URL: srv.URL})
+	wh, err := NewWebhookProvider(WebhookConfig{Enabled: true, URL: srv.URL, SkipValidation: true})
+	if err != nil {
+		t.Fatalf("NewWebhookProvider: %v", err)
+	}
 	d := NewDispatcher(db, nil, NewInAppProvider(), wh)
 
 	svc := testService(t, &DataSources{
@@ -126,7 +132,10 @@ func TestAlertDispatchAfterResolveAndReRaise(t *testing.T) {
 	deadFn := func() (int64, error) { return dead, nil }
 
 	db := deliveryTestDB(t)
-	wh := NewWebhookProvider(WebhookConfig{Enabled: true, URL: srv.URL})
+	wh, err := NewWebhookProvider(WebhookConfig{Enabled: true, URL: srv.URL, SkipValidation: true})
+	if err != nil {
+		t.Fatalf("NewWebhookProvider: %v", err)
+	}
 	d := NewDispatcher(db, nil, NewInAppProvider(), wh)
 	svc := testService(t, &DataSources{QueueDeadLetter: deadFn})
 	svc.SetDispatcher(d)
