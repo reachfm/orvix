@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/backup"
 	"github.com/orvix/orvix/internal/backup/targets"
 	"github.com/orvix/orvix/internal/updater"
@@ -108,6 +110,62 @@ func (h *Handler) backupService() (*backup.Service, error) {
 		bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
 		mgr.Run(bgCtx, archivePath, backupID)
+	})
+
+	// Wire the restore restart and health callbacks so
+	// RestoreBackup can actually restart the service and
+	// verify the restored state is valid before returning
+	// "Validated, activated, and health verified".
+	svc.SetRestoreRestart(func(ctx context.Context) error {
+		// Fork a detached shell that sleeps 2s then runs
+		// systemctl restart. The sleep ensures the HTTP
+		// response is written before the process is killed.
+		// The detached shell is re-parented to init so it
+		// survives the service cgroup death.
+		cmd := exec.CommandContext(ctx, "/bin/sh", "-c",
+			"(sleep 2; systemctl restart orvix) &")
+		return cmd.Start()
+	})
+	svc.SetRestoreHealthCheck(func(ctx context.Context) error {
+		// Verify the restored SQLite database file is valid.
+		// After activation the file has been atomically
+		// replaced on disk so we can open and integrity-check
+		// it without requiring a running service.
+		dbPath := h.cfg.Database.SQLitePath
+		if dbPath == "" {
+			dbPath = "/var/lib/orvix/orvix.db"
+		}
+		fi, err := os.Stat(dbPath)
+		if err != nil {
+			return fmt.Errorf("restored database not found: %w", err)
+		}
+		if fi.Size() == 0 {
+			return fmt.Errorf("restored database is empty")
+		}
+		sqlDB, err := sql.Open("sqlite", dbPath+"?mode=ro&_query_only=true")
+		if err != nil {
+			return fmt.Errorf("cannot open restored database: %w", err)
+		}
+		defer sqlDB.Close()
+		var integrity string
+		if err := sqlDB.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&integrity); err != nil {
+			return fmt.Errorf("restored database integrity check failed: %w", err)
+		}
+		if integrity != "ok" {
+			return fmt.Errorf("restored database integrity: %s", integrity)
+		}
+		return nil
+	})
+	svc.SetRestoreAuditHook(func(ctx context.Context, action, detail string) {
+		if h.auditStore == nil {
+			return
+		}
+		_ = h.auditStore.Record(ctx, &audit.Entry{
+			Actor:  "system:restore",
+			Action: action,
+			Target: detail,
+			Result: "success",
+		})
 	})
 
 	// Add key file paths from config to be included in backups.

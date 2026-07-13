@@ -2090,6 +2090,112 @@ func TestRestoreRequiresMaintenanceMode(t *testing.T) {
 	}
 }
 
+func TestRestoreRestartSuccess(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	b, err := s.CreateBackup(ctx, "restart-success")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	restartCalled := false
+	s.SetRestoreRestart(func(context.Context) error { restartCalled = true; return nil })
+	result, err := s.RestoreBackup(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if result == nil || result.Status != RestoreStatusActivated {
+		t.Fatalf("expected activated, got %+v", result)
+	}
+	if !restartCalled {
+		t.Fatal("restart callback was not called")
+	}
+}
+
+func TestRestoreRestartFailureRollsBack(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	b, err := s.CreateBackup(ctx, "restart-fail")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(s.mailDir, "restart-rollback-marker.eml"), []byte("live"), 0640); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+	// Fail on first call (restore restart), succeed on second (rollback restart)
+	callCount := 0
+	s.SetRestoreRestart(func(context.Context) error {
+		callCount++
+		if callCount == 1 {
+			return fmt.Errorf("restart failed")
+		}
+		return nil
+	})
+	result, err := s.RestoreBackup(ctx, b.ID)
+	if err == nil {
+		t.Fatal("expected restart failure")
+	}
+	if result == nil {
+		t.Fatal("expected rollback result")
+	}
+	if result.Status != RestoreStatusRolledBack || !result.RolledBack {
+		t.Fatalf("expected rolled_back, got %+v", result)
+	}
+	// The safety backup must have been restored
+	if _, statErr := os.Stat(filepath.Join(s.mailDir, "restart-rollback-marker.eml")); statErr != nil {
+		t.Fatalf("rollback did not restore marker: %v", statErr)
+	}
+}
+
+func TestRestoreHealthSuccess(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	b, err := s.CreateBackup(ctx, "health-success")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	healthCalled := false
+	s.SetRestoreHealthCheck(func(context.Context) error { healthCalled = true; return nil })
+	result, err := s.RestoreBackup(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if result == nil || result.Status != RestoreStatusActivated {
+		t.Fatalf("expected activated, got %+v", result)
+	}
+	if !healthCalled {
+		t.Fatal("health check callback was not called")
+	}
+}
+
+func TestRestoreBothCallbacksSucceed(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	b, err := s.CreateBackup(ctx, "both-callbacks")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	restartCalled := false
+	healthCalled := false
+	s.SetRestoreRestart(func(context.Context) error { restartCalled = true; return nil })
+	s.SetRestoreHealthCheck(func(context.Context) error { healthCalled = true; return nil })
+	result, err := s.RestoreBackup(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if result == nil || result.Status != RestoreStatusActivated {
+		t.Fatalf("expected activated, got %+v", result)
+	}
+	if !restartCalled {
+		t.Fatal("restart callback was not called")
+	}
+	if !healthCalled {
+		t.Fatal("health check callback was not called")
+	}
+	if result.Message != RestoreActivatedMessage {
+		t.Fatalf("expected %q, got %q", RestoreActivatedMessage, result.Message)
+	}
+}
+
 func TestRestoreHealthFailureRollsBack(t *testing.T) {
 	s := testService(t)
 	ctx := context.Background()
