@@ -1,4 +1,4 @@
-﻿package handlers_test
+package handlers_test
 
 // Static-analysis tests for the admin DNS / DKIM Operations UI
 // (DNS-DKIM-OPERATIONS-2F). The admin assets are inspected as text

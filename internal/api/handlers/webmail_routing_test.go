@@ -63,15 +63,15 @@ import (
 // same tenant as the admin so the local path is
 // eligible.
 type webmailRoutingEnv struct {
-	router       *api.Router
-	mailStore    *storage.MailStore
-	qe           *queue.QueueEngine
-	db           *gorm.DB
-	sqlDB        *sql.DB
-	senderEmail  string
-	senderPass   string
+	router         *api.Router
+	mailStore      *storage.MailStore
+	qe             *queue.QueueEngine
+	db             *gorm.DB
+	sqlDB          *sql.DB
+	senderEmail    string
+	senderPass     string
 	recipientEmail string
-	recipientID  uint
+	recipientID    uint
 }
 
 func buildWebmailRoutingEnv(t *testing.T) *webmailRoutingEnv {
@@ -244,13 +244,13 @@ type routingRuntimeModule struct {
 
 func (m *routingRuntimeModule) ID() string                              { return "coremail-runtime" }
 func (m *routingRuntimeModule) Version() string                         { return "test" }
-func (m *routingRuntimeModule) Requires() []string                       { return nil }
+func (m *routingRuntimeModule) Requires() []string                      { return nil }
 func (m *routingRuntimeModule) Init(_ *config.Config, _ *gorm.DB) error { return nil }
-func (m *routingRuntimeModule) Start() error                             { return nil }
-func (m *routingRuntimeModule) Stop() error                              { return nil }
-func (m *routingRuntimeModule) Migrate() error                           { return nil }
+func (m *routingRuntimeModule) Start() error                            { return nil }
+func (m *routingRuntimeModule) Stop() error                             { return nil }
+func (m *routingRuntimeModule) Migrate() error                          { return nil }
 func (m *routingRuntimeModule) MailStore() *storage.MailStore           { return m.store }
-func (m *routingRuntimeModule) QueueEngine() *queue.QueueEngine          { return m.queue }
+func (m *routingRuntimeModule) QueueEngine() *queue.QueueEngine         { return m.queue }
 
 // loginSender performs a real webmail login (the
 // form-posted /api/v1/webmail/login flow) and

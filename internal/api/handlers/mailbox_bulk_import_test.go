@@ -168,8 +168,8 @@ func TestBulkImportInvalidCSVReturnsRowLevelErrors(t *testing.T) {
 		t.Fatalf("errors=%d, want 3; body=%s", len(got.Errors), body)
 	}
 	wantSubstrings := map[string]string{
-		"invalid email format":   "not-an-email",
-		"domain not found":       "carol@unknown.org",
+		"invalid email format":      "not-an-email",
+		"domain not found":          "carol@unknown.org",
 		"password must be at least": "dave@example.com",
 	}
 	for _, e := range got.Errors {
@@ -815,11 +815,11 @@ func TestBulkImportAllowPartialFolderFailureKeepsSuccessfulRows(t *testing.T) {
 // the handler so the per-row INSERT errors out with "no such
 // table". With allow_partial=true the handler must:
 //
-//   1. invoke the helper to roll back the per-row savepoint,
-//   2. release the savepoint (or fail closed if either step errors),
-//   3. report a row-level "insert failed" error,
-//   4. commit zero created rows,
-//   5. leave the database free of any partial writes from this row.
+//  1. invoke the helper to roll back the per-row savepoint,
+//  2. release the savepoint (or fail closed if either step errors),
+//  3. report a row-level "insert failed" error,
+//  4. commit zero created rows,
+//  5. leave the database free of any partial writes from this row.
 //
 // The companion TestBulkImportAllowPartialFolderFailureDoesNotCommitMailbox
 // covers the folder-provisioning failure branch, so both helper

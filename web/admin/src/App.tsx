@@ -1,16 +1,22 @@
 import { useState } from "react";
-import { LayoutDashboard, Globe, Users, Shield, Zap, Activity, Settings, Server } from "lucide-react";
+import { LayoutDashboard, Globe, Users, Shield, Zap, Activity, Settings, Server, Building, Mail, Monitor } from "lucide-react";
 import Dashboard from "./components/Dashboard";
 import Domains from "./components/Domains";
 import UsersPage from "./components/UsersPage";
 import Firewall from "./components/Firewall";
 import Modules from "./components/Modules";
 import AuditLog from "./components/AuditLog";
+import EnterpriseDashboard from "./components/EnterpriseDashboard";
+import MailboxList from "./components/MailboxList";
+import OrganizationList from "./components/OrganizationList";
 
-type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" | "settings";
+type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" | "settings" | "enterprise" | "mailboxes" | "organizations";
 
-const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard }[] = [
+const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: string }[] = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+  { id: "enterprise", label: "Enterprise", icon: Monitor, section: "Customer Admin" },
+  { id: "mailboxes", label: "Mailboxes", icon: Mail },
+  { id: "organizations", label: "Organizations", icon: Building },
   { id: "domains", label: "Domains", icon: Globe },
   { id: "users", label: "Users", icon: Users },
   { id: "firewall", label: "Firewall", icon: Shield },
@@ -30,6 +36,9 @@ export default function App() {
       case "firewall": return <Firewall />;
       case "modules": return <Modules />;
       case "audit": return <AuditLog />;
+      case "enterprise": return <EnterpriseDashboard />;
+      case "mailboxes": return <MailboxList />;
+      case "organizations": return <OrganizationList />;
       default: return <Dashboard />;
     }
   };
@@ -45,18 +54,32 @@ export default function App() {
           </div>
         </div>
 
-        <nav className="flex-1 px-2 py-3 space-y-0.5">
+        <nav className="flex-1 px-2 py-3 space-y-0.5 overflow-y-auto">
           {tabs.map((t) => {
             const Icon = t.icon;
             const active = currentTab === t.id;
+            if (t.section) {
+              return (
+                <div key={t.id}>
+                  <div className="px-3 pt-4 pb-1 text-xs font-semibold text-[#555D73] uppercase tracking-wider">{t.section}</div>
+                  <button
+                    onClick={() => setCurrentTab(t.id)}
+                    className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
+                      active ? "bg-[#222736] text-[#E8EAF0]" : "text-[#8B92A8] hover:bg-[#1A1E26] hover:text-[#E8EAF0]"
+                    }`}
+                  >
+                    <Icon size={18} />
+                    <span>{t.label}</span>
+                  </button>
+                </div>
+              );
+            }
             return (
               <button
                 key={t.id}
                 onClick={() => setCurrentTab(t.id)}
                 className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
-                  active
-                    ? "bg-[#222736] text-[#E8EAF0]"
-                    : "text-[#8B92A8] hover:bg-[#1A1E26] hover:text-[#E8EAF0]"
+                  active ? "bg-[#222736] text-[#E8EAF0]" : "text-[#8B92A8] hover:bg-[#1A1E26] hover:text-[#E8EAF0]"
                 }`}
               >
                 <Icon size={18} />

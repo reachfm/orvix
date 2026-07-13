@@ -198,15 +198,15 @@ func TestDNSOpsDKIMRejectsUnsafeSelector(t *testing.T) {
 	h := newDNSOpsHarness(t)
 	defer h.close()
 	unsafeSelectors := []string{
-		"foo.bar",     // dot
-		"foo bar",     // space
-		"foo/bar",     // slash
-		"foo_bar",     // underscore
-		"-foo",        // leading hyphen
-		"foo-",        // trailing hyphen
-		"foo--bar",    // consecutive hyphens
-		"α",           // unicode
-		"foo*",        // wildcard
+		"foo.bar",               // dot
+		"foo bar",               // space
+		"foo/bar",               // slash
+		"foo_bar",               // underscore
+		"-foo",                  // leading hyphen
+		"foo-",                  // trailing hyphen
+		"foo--bar",              // consecutive hyphens
+		"α",                     // unicode
+		"foo*",                  // wildcard
 		strings.Repeat("a", 64), // too long
 	}
 	for _, sel := range unsafeSelectors {
@@ -329,8 +329,8 @@ func TestDNSOpsDKIMAcceptsSafeSelectorAndEmptyDefault(t *testing.T) {
 			continue
 		}
 		var resp struct {
-			Selector       string `json:"selector"`
-			DNSRecordName  string `json:"dns_record_name"`
+			Selector      string `json:"selector"`
+			DNSRecordName string `json:"dns_record_name"`
 		}
 		if err := json.Unmarshal([]byte(body), &resp); err != nil {
 			t.Fatalf("case %d unmarshal: %v body=%s", i, err, body)
@@ -470,6 +470,7 @@ func TestDNSOpsPlanWithSpecialUse192Rejected(t *testing.T) {
 		h.close()
 	}
 }
+
 // TestDNSOpsDKIMKeygenWorksAfterMigrateAllRaw is the regression
 // test for the live VPS blocker: a fresh DB initialized via the
 // canonical migration path (models.MigrateAllRaw) must have the

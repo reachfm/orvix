@@ -16,7 +16,7 @@ import (
 // statements cannot be proven — this fake is the unit-test seam that
 // proves that contract.
 type fakeSavepointExec struct {
-	real          savepointExec
+	real           savepointExec
 	forcedRollback error
 	forcedRelease  error
 	rollbackCalls  int
@@ -135,7 +135,7 @@ func TestRollbackAndReleaseSavepointReleaseErrorFailsClosed(t *testing.T) {
 		t.Fatalf("savepoint open: %v", err)
 	}
 	wrap := &fakeSavepointExec{
-		real:         tx,
+		real:          tx,
 		forcedRelease: errors.New("release permission denied"),
 	}
 	err := rollbackAndReleaseSavepoint(ctx, wrap, "import_row_0")

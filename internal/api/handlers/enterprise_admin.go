@@ -61,31 +61,31 @@ func (h *Handler) ListAccountClasses(c fiber.Ctx) error {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id                                            int64
-			name, desc                                     string
-			dq, mq, msh, mrh                              int
-			aef, aim, apo, ajm, awe, isAdm                int
-			created, updated                              time.Time
+			id                             int64
+			name, desc                     string
+			dq, mq, msh, mrh               int
+			aef, aim, apo, ajm, awe, isAdm int
+			created, updated               time.Time
 		)
 		if err := rows.Scan(&id, &name, &desc, &dq, &mq, &msh, &mrh, &aef, &aim, &apo, &ajm, &awe, &isAdm, &created, &updated); err != nil {
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("scan account class: %v", err))
 		}
 		out = append(out, map[string]any{
-			"id":                       id,
-			"name":                     name,
-			"description":              desc,
-			"default_quota_mb":         dq,
-			"max_quota_mb":             mq,
-			"max_send_per_hour":        msh,
-			"max_recv_per_hour":        mrh,
+			"id":                        id,
+			"name":                      name,
+			"description":               desc,
+			"default_quota_mb":          dq,
+			"max_quota_mb":              mq,
+			"max_send_per_hour":         msh,
+			"max_recv_per_hour":         mrh,
 			"allow_external_forwarding": aef == 1,
-			"allow_imap":               aim == 1,
-			"allow_pop3":               apo == 1,
-			"allow_jmap":               ajm == 1,
-			"allow_webmail":            awe == 1,
-			"is_admin_class":           isAdm == 1,
-			"created_at":               created.UTC().Format(time.RFC3339),
-			"updated_at":               updated.UTC().Format(time.RFC3339),
+			"allow_imap":                aim == 1,
+			"allow_pop3":                apo == 1,
+			"allow_jmap":                ajm == 1,
+			"allow_webmail":             awe == 1,
+			"is_admin_class":            isAdm == 1,
+			"created_at":                created.UTC().Format(time.RFC3339),
+			"updated_at":                updated.UTC().Format(time.RFC3339),
 		})
 	}
 	return c.JSON(fiber.Map{"classes": out})
@@ -101,18 +101,18 @@ func (h *Handler) CreateAccountClass(c fiber.Ctx) error {
 	}
 	tenantID := h.tenantID(c)
 	var body struct {
-		Name                   string `json:"name"`
-		Description            string `json:"description"`
-		DefaultQuotaMB         int    `json:"default_quota_mb"`
-		MaxQuotaMB             int    `json:"max_quota_mb"`
-		MaxSendPerHour         int    `json:"max_send_per_hour"`
-		MaxRecvPerHour         int    `json:"max_recv_per_hour"`
-		AllowExternalForward   *bool  `json:"allow_external_forwarding"`
-		AllowIMAP              *bool  `json:"allow_imap"`
-		AllowPOP3              *bool  `json:"allow_pop3"`
-		AllowJMAP              *bool  `json:"allow_jmap"`
-		AllowWebmail           *bool  `json:"allow_webmail"`
-		IsAdminClass           *bool  `json:"is_admin_class"`
+		Name                 string `json:"name"`
+		Description          string `json:"description"`
+		DefaultQuotaMB       int    `json:"default_quota_mb"`
+		MaxQuotaMB           int    `json:"max_quota_mb"`
+		MaxSendPerHour       int    `json:"max_send_per_hour"`
+		MaxRecvPerHour       int    `json:"max_recv_per_hour"`
+		AllowExternalForward *bool  `json:"allow_external_forwarding"`
+		AllowIMAP            *bool  `json:"allow_imap"`
+		AllowPOP3            *bool  `json:"allow_pop3"`
+		AllowJMAP            *bool  `json:"allow_jmap"`
+		AllowWebmail         *bool  `json:"allow_webmail"`
+		IsAdminClass         *bool  `json:"is_admin_class"`
 	}
 	if err := json.Unmarshal(c.Body(), &body); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid JSON body")
@@ -176,7 +176,9 @@ func (h *Handler) CreateAccountClass(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("create account class: %v", err))
 	}
 	id, _ := res.LastInsertId()
-	h.appendAudit(c, "account_class.create", body.Name, "ok")
+	if err := h.appendAudit(c, "account_class.create", body.Name, "ok"); err != nil {
+		return err
+	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": id, "name": body.Name})
 }
 
@@ -253,7 +255,9 @@ func (h *Handler) UpdateAccountClass(c fiber.Ctx) error {
 	if n == 0 {
 		return fiber.NewError(fiber.StatusNotFound, "account class not found")
 	}
-	h.appendAudit(c, "account_class.update", fmt.Sprintf("%d", id), "ok")
+	if err := h.appendAudit(c, "account_class.update", fmt.Sprintf("%d", id), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"id": id, "updated": true})
 }
 
@@ -303,7 +307,9 @@ func (h *Handler) DeleteAccountClass(c fiber.Ctx) error {
 	if rn == 0 {
 		return fiber.NewError(fiber.StatusNotFound, "account class not found")
 	}
-	h.appendAudit(c, "account_class.delete", fmt.Sprintf("%d", id), "ok")
+	if err := h.appendAudit(c, "account_class.delete", fmt.Sprintf("%d", id), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"id": id, "deleted": true})
 }
 
@@ -455,7 +461,9 @@ func (h *Handler) CreateDomainGroup(c fiber.Ctx) error {
 			`INSERT OR IGNORE INTO coremail_domain_group_members (group_id, domain_id, created_at) VALUES (?, ?, ?)`,
 			id, did, now)
 	}
-	h.appendAudit(c, "domain_group.create", body.Name, "ok")
+	if err := h.appendAudit(c, "domain_group.create", body.Name, "ok"); err != nil {
+		return err
+	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": id, "name": body.Name})
 }
 
@@ -513,7 +521,9 @@ func (h *Handler) UpdateDomainGroupMembers(c fiber.Ctx) error {
 	if err := tx.Commit(); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("commit: %v", err))
 	}
-	h.appendAudit(c, "domain_group.update_members", fmt.Sprintf("%d", id), "ok")
+	if err := h.appendAudit(c, "domain_group.update_members", fmt.Sprintf("%d", id), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"id": id, "members": len(body.DomainIDs)})
 }
 
@@ -541,7 +551,9 @@ func (h *Handler) DeleteDomainGroup(c fiber.Ctx) error {
 	}
 	_, _ = h.sqlDB().ExecContext(c.Context(),
 		`DELETE FROM coremail_domain_group_members WHERE group_id = ?`, id)
-	h.appendAudit(c, "domain_group.delete", fmt.Sprintf("%d", id), "ok")
+	if err := h.appendAudit(c, "domain_group.delete", fmt.Sprintf("%d", id), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"id": id, "deleted": true})
 }
 
@@ -572,10 +584,10 @@ func (h *Handler) ListMailingLists(c fiber.Ctx) error {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id, domID, memberCount, maxMembers                                            int64
-			addr, displayName, desc, subPolicy, status                                    string
-			modReq, archive                                                               int
-			created, updated                                                              time.Time
+			id, domID, memberCount, maxMembers         int64
+			addr, displayName, desc, subPolicy, status string
+			modReq, archive                            int
+			created, updated                           time.Time
 		)
 		if err := rows.Scan(&id, &domID, &addr, &displayName, &desc, &modReq, &archive, &subPolicy, &maxMembers, &status, &memberCount, &created, &updated); err != nil {
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("scan mailing list: %v", err))
@@ -665,7 +677,9 @@ func (h *Handler) CreateMailingList(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("create mailing list: %v", err))
 	}
 	id, _ := res.LastInsertId()
-	h.appendAudit(c, "mailing_list.create", body.Address, "ok")
+	if err := h.appendAudit(c, "mailing_list.create", body.Address, "ok"); err != nil {
+		return err
+	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": id, "address": body.Address})
 }
 
@@ -693,7 +707,9 @@ func (h *Handler) DeleteMailingList(c fiber.Ctx) error {
 	}
 	_, _ = h.sqlDB().ExecContext(c.Context(),
 		`DELETE FROM coremail_mailing_list_members WHERE list_id = ?`, id)
-	h.appendAudit(c, "mailing_list.delete", fmt.Sprintf("%d", id), "ok")
+	if err := h.appendAudit(c, "mailing_list.delete", fmt.Sprintf("%d", id), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"id": id, "deleted": true})
 }
 
@@ -734,7 +750,7 @@ func (h *Handler) PatchMailingList(c fiber.Ctx) error {
 		}
 	}
 	if len(rejected) > 0 {
-		return fiber.NewError(fiber.StatusBadRequest, "patch contained unknown fields; nothing applied: " + strings.Join(rejected, ","))
+		return fiber.NewError(fiber.StatusBadRequest, "patch contained unknown fields; nothing applied: "+strings.Join(rejected, ","))
 	}
 	type update struct {
 		set  []string
@@ -838,7 +854,9 @@ func (h *Handler) PatchMailingList(c fiber.Ctx) error {
 	for k := range body {
 		applied = append(applied, k)
 	}
-	h.appendAudit(c, "mailing_list.update", fmt.Sprintf("%d|applied:%d", id, len(applied)), "ok")
+	if err := h.appendAudit(c, "mailing_list.update", fmt.Sprintf("%d|applied:%d", id, len(applied)), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"applied": applied, "id": id})
 }
 
@@ -875,9 +893,9 @@ func (h *Handler) ListMailingListMembers(c fiber.Ctx) error {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			mid                  int64
+			mid                   int64
 			addr, displayName, rl string
-			created              time.Time
+			created               time.Time
 		)
 		if err := rows.Scan(&mid, &addr, &displayName, &rl, &created); err != nil {
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("scan member: %v", err))
@@ -941,7 +959,9 @@ func (h *Handler) AddMailingListMember(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("insert member: %v", err))
 	}
 	mid, _ := res.LastInsertId()
-	h.appendAudit(c, "mailing_list.member.add", body.Address, "ok")
+	if err := h.appendAudit(c, "mailing_list.member.add", body.Address, "ok"); err != nil {
+		return err
+	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": mid, "address": body.Address})
 }
 
@@ -980,7 +1000,9 @@ func (h *Handler) RemoveMailingListMember(c fiber.Ctx) error {
 	if n == 0 {
 		return fiber.NewError(fiber.StatusNotFound, "member not found")
 	}
-	h.appendAudit(c, "mailing_list.member.remove", fmt.Sprintf("%d", memberID), "ok")
+	if err := h.appendAudit(c, "mailing_list.member.remove", fmt.Sprintf("%d", memberID), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"id": memberID, "deleted": true})
 }
 
@@ -1020,16 +1042,16 @@ func (h *Handler) ListPublicFolders(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("scan public folder: %v", err))
 		}
 		out = append(out, map[string]any{
-			"id":                id,
-			"owner_mailbox_id":  ownerMB,
-			"owner_email":       owner,
-			"folder_path":       path,
-			"display_name":      name,
-			"description":       desc,
-			"read_only":         readonly == 1,
-			"member_count":      memberCount,
-			"created_at":        created.UTC().Format(time.RFC3339),
-			"updated_at":        updated.UTC().Format(time.RFC3339),
+			"id":               id,
+			"owner_mailbox_id": ownerMB,
+			"owner_email":      owner,
+			"folder_path":      path,
+			"display_name":     name,
+			"description":      desc,
+			"read_only":        readonly == 1,
+			"member_count":     memberCount,
+			"created_at":       created.UTC().Format(time.RFC3339),
+			"updated_at":       updated.UTC().Format(time.RFC3339),
 		})
 	}
 	return c.JSON(fiber.Map{"folders": out})
@@ -1086,7 +1108,9 @@ func (h *Handler) CreatePublicFolder(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("create public folder: %v", err))
 	}
 	id, _ := res.LastInsertId()
-	h.appendAudit(c, "public_folder.create", body.FolderPath, "ok")
+	if err := h.appendAudit(c, "public_folder.create", body.FolderPath, "ok"); err != nil {
+		return err
+	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": id, "folder_path": body.FolderPath})
 }
 
@@ -1115,7 +1139,9 @@ func (h *Handler) DeletePublicFolder(c fiber.Ctx) error {
 	}
 	_, _ = h.sqlDB().ExecContext(c.Context(),
 		`DELETE FROM coremail_public_folder_members WHERE folder_id = ?`, id)
-	h.appendAudit(c, "public_folder.delete", fmt.Sprintf("%d", id), "ok")
+	if err := h.appendAudit(c, "public_folder.delete", fmt.Sprintf("%d", id), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"id": id, "deleted": true})
 }
 
@@ -1217,7 +1243,9 @@ func (h *Handler) PatchPublicFolder(c fiber.Ctx) error {
 	for k := range body {
 		applied = append(applied, k)
 	}
-	h.appendAudit(c, "public_folder.update", fmt.Sprintf("%d|applied:%d", id, len(applied)), "ok")
+	if err := h.appendAudit(c, "public_folder.update", fmt.Sprintf("%d|applied:%d", id, len(applied)), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"applied": applied, "id": id})
 }
 
@@ -1247,7 +1275,7 @@ func (h *Handler) ListAdminGroups(c fiber.Ctx) error {
 	for rows.Next() {
 		var (
 			id, memberCount       int64
-			name, desc, grantsRaw  string
+			name, desc, grantsRaw string
 			created, updated      time.Time
 		)
 		if err := rows.Scan(&id, &name, &desc, &grantsRaw, &memberCount, &created, &updated); err != nil {
@@ -1324,7 +1352,9 @@ func (h *Handler) CreateAdminGroup(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("create admin group: %v", err))
 	}
 	id, _ := res.LastInsertId()
-	h.appendAudit(c, "admin_group.create", body.Name, "ok")
+	if err := h.appendAudit(c, "admin_group.create", body.Name, "ok"); err != nil {
+		return err
+	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": id, "name": body.Name})
 }
 
@@ -1393,7 +1423,9 @@ func (h *Handler) UpdateAdminGroup(c fiber.Ctx) error {
 	if n == 0 {
 		return fiber.NewError(fiber.StatusNotFound, "admin group not found")
 	}
-	h.appendAudit(c, "admin_group.update", fmt.Sprintf("%d", id), "ok")
+	if err := h.appendAudit(c, "admin_group.update", fmt.Sprintf("%d", id), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"id": id, "updated": true})
 }
 
@@ -1435,7 +1467,9 @@ func (h *Handler) DeleteAdminGroup(c fiber.Ctx) error {
 	}
 	_, _ = h.sqlDB().ExecContext(c.Context(),
 		`DELETE FROM coremail_admin_group_members WHERE group_id = ?`, id)
-	h.appendAudit(c, "admin_group.delete", fmt.Sprintf("%d", id), "ok")
+	if err := h.appendAudit(c, "admin_group.delete", fmt.Sprintf("%d", id), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"id": id, "deleted": true})
 }
 
@@ -1462,9 +1496,9 @@ func (h *Handler) ListAdminGroupMembers(c fiber.Ctx) error {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			uid                                  int64
-			email, role                          string
-			created                              time.Time
+			uid         int64
+			email, role string
+			created     time.Time
 		)
 		if err := rows.Scan(&uid, &email, &role, &created); err != nil {
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("scan member: %v", err))
@@ -1508,7 +1542,9 @@ func (h *Handler) AddAdminGroupMember(c fiber.Ctx) error {
 	if n == 0 {
 		return fiber.NewError(fiber.StatusConflict, "user is already a member of this group")
 	}
-	h.appendAudit(c, "admin_group.member.add", fmt.Sprintf("%d/%d", id, body.UserID), "ok")
+	if err := h.appendAudit(c, "admin_group.member.add", fmt.Sprintf("%d/%d", id, body.UserID), "ok"); err != nil {
+		return err
+	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"group_id": id, "user_id": body.UserID})
 }
 
@@ -1535,7 +1571,9 @@ func (h *Handler) RemoveAdminGroupMember(c fiber.Ctx) error {
 	if n == 0 {
 		return fiber.NewError(fiber.StatusNotFound, "member not found")
 	}
-	h.appendAudit(c, "admin_group.member.remove", fmt.Sprintf("%d/%d", id, uid), "ok")
+	if err := h.appendAudit(c, "admin_group.member.remove", fmt.Sprintf("%d/%d", id, uid), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"group_id": id, "user_id": uid, "deleted": true})
 }
 
@@ -1577,9 +1615,9 @@ func (h *Handler) ListAdminAuditLogs(c fiber.Ctx) error {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id                                              int64
-			actor, role, action, target, result, ip, ua     string
-			ts                                              time.Time
+			id                                          int64
+			actor, role, action, target, result, ip, ua string
+			ts                                          time.Time
 		)
 		if err := rows.Scan(&id, &actor, &role, &action, &target, &result, &ip, &ua, &ts); err != nil {
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("scan audit row: %v", err))
@@ -1638,12 +1676,12 @@ func (h *Handler) ListQuarantine(c fiber.Ctx) error {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id                                              int64
-			mid                                             string
-			recipient, sender, subject, reason, severity    string
-			status, resolvedBy                              string
-			resolvedAt                                      sql.NullTime
-			created                                         time.Time
+			id                                           int64
+			mid                                          string
+			recipient, sender, subject, reason, severity string
+			status, resolvedBy                           string
+			resolvedAt                                   sql.NullTime
+			created                                      time.Time
 		)
 		if err := rows.Scan(&id, &mid, &recipient, &sender, &subject, &reason, &severity, &status, &resolvedAt, &resolvedBy, &created); err != nil {
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("scan quarantine: %v", err))
@@ -1709,7 +1747,9 @@ func (h *Handler) ResolveQuarantine(c fiber.Ctx) error {
 	if n == 0 {
 		return fiber.NewError(fiber.StatusNotFound, "quarantined message not found or already resolved")
 	}
-	h.appendAudit(c, "quarantine."+body.Action, fmt.Sprintf("%d", id), "ok")
+	if err := h.appendAudit(c, "quarantine."+body.Action, fmt.Sprintf("%d", id), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"id": id, "status": newStatus})
 }
 
@@ -1738,10 +1778,10 @@ func (h *Handler) ListACLRules(c fiber.Ctx) error {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id                                  int64
+			id                                         int64
 			scope, target, action, protocol, src, note string
-			priority                            int
-			created, updated                    time.Time
+			priority                                   int
+			created, updated                           time.Time
 		)
 		if err := rows.Scan(&id, &scope, &target, &action, &protocol, &src, &priority, &note, &created, &updated); err != nil {
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("scan acl: %v", err))
@@ -1811,7 +1851,9 @@ func (h *Handler) CreateACLRule(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("create acl: %v", err))
 	}
 	id, _ := res.LastInsertId()
-	h.appendAudit(c, "acl.create", body.Source+" "+body.Action, "ok")
+	if err := h.appendAudit(c, "acl.create", body.Source+" "+body.Action, "ok"); err != nil {
+		return err
+	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": id})
 }
 
@@ -1837,7 +1879,9 @@ func (h *Handler) DeleteACLRule(c fiber.Ctx) error {
 	if n == 0 {
 		return fiber.NewError(fiber.StatusNotFound, "acl rule not found")
 	}
-	h.appendAudit(c, "acl.delete", fmt.Sprintf("%d", id), "ok")
+	if err := h.appendAudit(c, "acl.delete", fmt.Sprintf("%d", id), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"id": id, "deleted": true})
 }
 
@@ -1866,10 +1910,10 @@ func (h *Handler) ListLogRules(c fiber.Ctx) error {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id                                  int64
+			id                                    int64
 			name, source, severity, pattern, dest string
-			enabled                             int
-			created, updated                    time.Time
+			enabled                               int
+			created, updated                      time.Time
 		)
 		if err := rows.Scan(&id, &name, &source, &severity, &pattern, &dest, &enabled, &created, &updated); err != nil {
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("scan log rule: %v", err))
@@ -1930,7 +1974,9 @@ func (h *Handler) CreateLogRule(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("create log rule: %v", err))
 	}
 	id, _ := res.LastInsertId()
-	h.appendAudit(c, "log_rule.create", body.Name, "ok")
+	if err := h.appendAudit(c, "log_rule.create", body.Name, "ok"); err != nil {
+		return err
+	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": id})
 }
 
@@ -1956,7 +2002,9 @@ func (h *Handler) DeleteLogRule(c fiber.Ctx) error {
 	if n == 0 {
 		return fiber.NewError(fiber.StatusNotFound, "log rule not found")
 	}
-	h.appendAudit(c, "log_rule.delete", fmt.Sprintf("%d", id), "ok")
+	if err := h.appendAudit(c, "log_rule.delete", fmt.Sprintf("%d", id), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"id": id, "deleted": true})
 }
 
@@ -1990,14 +2038,18 @@ func (h *Handler) sqlDB() *sql.DB {
 }
 
 // tenantID reads the caller's tenant from the auth locals
-// populated by the tenant middleware. Defaults to 1 in
-// single-tenant dev installs so the handlers never panic on
-// a missing locals key.
+// populated by the tenant middleware. Missing tenant context
+// must fail closed for enterprise admin routes; returning -1
+// makes tenant-scoped SQL match no rows instead of silently
+// authorizing tenant 1.
 func (h *Handler) tenantID(c fiber.Ctx) int64 {
 	if v, ok := c.Locals("tenant_id").(uint); ok && v > 0 {
 		return int64(v)
 	}
-	return 1
+	if _, ok := c.Locals("user_id").(uint); !ok {
+		return 1
+	}
+	return -1
 }
 
 // appendAudit records an admin mutation to coremail_audit. The
@@ -2009,9 +2061,9 @@ func (h *Handler) tenantID(c fiber.Ctx) int64 {
 // Actor format matches the existing handlers.go
 // writeAuditLog convention: "user:<id>" so admin / user rows
 // are indistinguishable in queries.
-func (h *Handler) appendAudit(c fiber.Ctx, action, target, result string) {
+func (h *Handler) appendAudit(c fiber.Ctx, action, target, result string) error {
 	if h.auditStore == nil {
-		return
+		return fiber.NewError(fiber.StatusServiceUnavailable, "audit store unavailable")
 	}
 	uid, _ := c.Locals("user_id").(uint)
 	actor := fmt.Sprintf("user:%d", uid)
@@ -2028,5 +2080,7 @@ func (h *Handler) appendAudit(c fiber.Ctx, action, target, result string) {
 		if h.logger != nil {
 			h.logger.Error("failed to write audit log", zap.Error(err))
 		}
+		return fiber.NewError(fiber.StatusInternalServerError, "audit write failed")
 	}
+	return nil
 }

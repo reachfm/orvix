@@ -22,7 +22,7 @@ import (
 // produces a BulkImportError per row when something is wrong. The
 // Password field is intentionally never logged or echoed in responses.
 type BulkImportRow struct {
-	Line     int    // 1-based line number in the original CSV (header is line 1)
+	Line     int // 1-based line number in the original CSV (header is line 1)
 	Email    string
 	Password string
 	Name     string
@@ -42,11 +42,11 @@ type BulkImportError struct {
 // /mailboxes/import/dry-run. Created, Skipped, Errors, and DryRun are
 // always returned. Passwords are NEVER included.
 type BulkImportResult struct {
-	DryRun  bool               `json:"dryRun"`
-	Created int                `json:"created"`
-	Skipped int                `json:"skipped"`
-	Errors  []BulkImportError  `json:"errors"`
-	Planned []BulkImportRow    `json:"planned,omitempty"` // dry-run only
+	DryRun  bool              `json:"dryRun"`
+	Created int               `json:"created"`
+	Skipped int               `json:"skipped"`
+	Errors  []BulkImportError `json:"errors"`
+	Planned []BulkImportRow   `json:"planned,omitempty"` // dry-run only
 }
 
 // Hard caps to prevent OOM and lock contention on a single request.
@@ -60,7 +60,8 @@ const (
 // ImportMailboxesCSV serves POST /api/v1/admin/mailboxes/import.
 //
 // The endpoint accepts a CSV body with columns:
-//   email,password,name,quota_mb
+//
+//	email,password,name,quota_mb
 //
 // The header row is required. The handler validates every row, then
 // either rolls everything back (default all-or-nothing) or inserts the
@@ -512,10 +513,10 @@ func parseBulkImportCSV(body []byte) ([]BulkImportRow, []BulkImportError) {
 			continue
 		}
 		row := BulkImportRow{
-			Line:    line,
-			Email:   strings.TrimSpace(getCSVField(rec, idx["email"])),
+			Line:     line,
+			Email:    strings.TrimSpace(getCSVField(rec, idx["email"])),
 			Password: getCSVField(rec, idx["password"]), // do NOT trim — passwords are literal
-			Name:    strings.TrimSpace(getCSVField(rec, idx["name"])),
+			Name:     strings.TrimSpace(getCSVField(rec, idx["name"])),
 		}
 		if q := strings.TrimSpace(getCSVField(rec, idx["quota_mb"])); q != "" {
 			n, perr := strconv.ParseInt(q, 10, 64)

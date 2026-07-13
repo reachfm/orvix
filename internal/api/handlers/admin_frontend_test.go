@@ -1,4 +1,4 @@
-﻿package handlers_test
+package handlers_test
 
 // Static-analysis tests for the admin client. The admin assets are
 // not loaded into a headless browser â€” they are inspected as text to
@@ -245,7 +245,7 @@ func TestAdminHasAriaLabels(t *testing.T) {
 // We accept the following safe uses of innerHTML which carry only
 // trusted static markup:
 //   - el({html: ...}) when the value is a static string literal
-//   - empty-state / error-state renderers that only use innerHTML = ''
+//   - empty-state / error-state renderers that only use innerHTML = ”
 //
 // Anything else that writes a server-derived value to innerHTML is a
 // finding. The test scans every innerHTML assignment and asserts
@@ -257,13 +257,19 @@ func TestAdminNoUnsafeInnerHTMLForDynamicData(t *testing.T) {
 	// Collect every line that contains innerHTML.
 	var unsafe []string
 	for _, line := range strings.Split(src, "\n") {
-		if !strings.Contains(line, "innerHTML") { continue; }
+		if !strings.Contains(line, "innerHTML") {
+			continue
+		}
 		trimmed := strings.TrimSpace(line)
 		// Safe: empty string assignment (clear pattern).
-		if strings.Contains(trimmed, "innerHTML = ''") || strings.Contains(trimmed, "innerHTML = \"\"") { continue; }
+		if strings.Contains(trimmed, "innerHTML = ''") || strings.Contains(trimmed, "innerHTML = \"\"") {
+			continue
+		}
 		// Safe: static literal containing only HTML we author.
 		// We accept the 'html' option in el() and pre-built constants.
-		if strings.HasPrefix(trimmed, "//") { continue; }
+		if strings.HasPrefix(trimmed, "//") {
+			continue
+		}
 		// Everything else is a finding â€” print so the operator
 		// can review manually.
 		unsafe = append(unsafe, trimmed)
@@ -276,7 +282,9 @@ func TestAdminNoUnsafeInnerHTMLForDynamicData(t *testing.T) {
 	// non-empty innerHTML writes.
 	if len(unsafe) > 12 {
 		t.Errorf("admin app.js has %d non-empty innerHTML writes â€” review manually for XSS surface", len(unsafe))
-		for _, u := range unsafe { t.Logf("  %s", u) }
+		for _, u := range unsafe {
+			t.Logf("  %s", u)
+		}
 	}
 }
 
@@ -385,7 +393,7 @@ func TestAdminNoFakeDKIMKeyGenUI(t *testing.T) {
 	// the banned string dynamically so the literal does not exist
 	// anywhere in shipped assets or test code.
 	banned := "-PUBLIC-KEY"
-	if strings.Contains(src, "YOUR" + banned) {
+	if strings.Contains(src, "YOUR"+banned) {
 		t.Errorf("admin DNS page must not render a copy-ready fake DKIM value with a placeholder")
 	}
 	// The DKIM value must honestly say "not generated" / "public
@@ -604,11 +612,12 @@ func TestAdminPageRenderersRegistered(t *testing.T) {
 			// Accept either the legacy "function renderXxx(" form
 			// or the ES module "export ... function renderXxx(" /
 			// "export const renderXxx =" form.
-			if strings.Contains(src, "function " + fn + "(") ||
-				strings.Contains(src, "function " + fn + " (") ||
-				strings.Contains(src, "export async function " + fn + "(") ||
-				strings.Contains(src, "export function " + fn + "(") {
-				found = true; break;
+			if strings.Contains(src, "function "+fn+"(") ||
+				strings.Contains(src, "function "+fn+" (") ||
+				strings.Contains(src, "export async function "+fn+"(") ||
+				strings.Contains(src, "export function "+fn+"(") {
+				found = true
+				break
 			}
 		}
 		if !found {

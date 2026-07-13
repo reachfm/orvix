@@ -386,11 +386,11 @@ func TestDNSOpsVerifyReturnsVerifierReport(t *testing.T) {
 			Warnings  []string `json:"warnings"`
 			Plan      struct {
 				Records []struct {
-					Type     string `json:"type"`
-					Name     string `json:"name"`
-					Purpose  string `json:"purpose"`
-					Status   string `json:"status"`
-					Reason   string `json:"reason"`
+					Type    string `json:"type"`
+					Name    string `json:"name"`
+					Purpose string `json:"purpose"`
+					Status  string `json:"status"`
+					Reason  string `json:"reason"`
 				} `json:"records"`
 			} `json:"plan"`
 		} `json:"report"`
@@ -685,11 +685,11 @@ func TestDNSOpsDKIMGenerateStoresPrivateKeyAndReturnsPublicOnly(t *testing.T) {
 		t.Fatalf("dkim generate must be 201; got %d body=%s", code, body)
 	}
 	var resp struct {
-		Domain         string `json:"domain"`
-		Selector       string `json:"selector"`
-		PublicDNSTXT   string `json:"public_dns_txt"`
-		DNSRecordName  string `json:"dns_record_name"`
-		Stored         bool   `json:"stored"`
+		Domain        string `json:"domain"`
+		Selector      string `json:"selector"`
+		PublicDNSTXT  string `json:"public_dns_txt"`
+		DNSRecordName string `json:"dns_record_name"`
+		Stored        bool   `json:"stored"`
 	}
 	if err := json.Unmarshal([]byte(body), &resp); err != nil {
 		t.Fatalf("unmarshal: %v body=%s", err, body)

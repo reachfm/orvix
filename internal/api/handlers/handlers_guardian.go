@@ -9,15 +9,15 @@ import (
 // AnalyzeEmail performs Guardian AI threat analysis on an email.
 func (h *Handler) AnalyzeEmail(c fiber.Ctx) error {
 	var req struct {
-		EmailID       string `json:"email_id"`
-		SenderIP      string `json:"sender_ip"`
-		SenderDomain  string `json:"sender_domain"`
-		Subject       string `json:"subject"`
-		Body          string `json:"body"`
-		HasAttachments bool `json:"has_attachments"`
-		SPFResult     string `json:"spf_result"`
-		DKIMResult    string `json:"dkim_result"`
-		DMARCResult   string `json:"dmarc_result"`
+		EmailID        string `json:"email_id"`
+		SenderIP       string `json:"sender_ip"`
+		SenderDomain   string `json:"sender_domain"`
+		Subject        string `json:"subject"`
+		Body           string `json:"body"`
+		HasAttachments bool   `json:"has_attachments"`
+		SPFResult      string `json:"spf_result"`
+		DKIMResult     string `json:"dkim_result"`
+		DMARCResult    string `json:"dmarc_result"`
 	}
 	if err := c.Bind().JSON(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "invalid request"})
@@ -27,15 +27,15 @@ func (h *Handler) AnalyzeEmail(c fiber.Ctx) error {
 		if mod.ID() == "guardian-agent" {
 			if g, ok := mod.(interface{ Agent() *guardian.Agent }); ok {
 				analysisReq := &guardian.AnalyzeRequest{
-					EmailID:       req.EmailID,
-					SenderIP:      req.SenderIP,
-					SenderDomain:  req.SenderDomain,
-					Subject:       req.Subject,
-					Body:          req.Body,
+					EmailID:        req.EmailID,
+					SenderIP:       req.SenderIP,
+					SenderDomain:   req.SenderDomain,
+					Subject:        req.Subject,
+					Body:           req.Body,
 					HasAttachments: req.HasAttachments,
-					SPFResult:     req.SPFResult,
-					DKIMResult:    req.DKIMResult,
-					DMARCResult:   req.DMARCResult,
+					SPFResult:      req.SPFResult,
+					DKIMResult:     req.DKIMResult,
+					DMARCResult:    req.DMARCResult,
 				}
 				result, err := g.Agent().Analyze(c.Context(), analysisReq)
 				if err != nil {

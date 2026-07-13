@@ -656,7 +656,7 @@ func TestBuildMozillaAutoconfigXMLRoundTrip(t *testing.T) {
 	}
 	// Round-trip via encoding/xml.
 	type roundTrip struct {
-		XMLName     xml.Name `xml:"clientConfig"`
+		XMLName       xml.Name `xml:"clientConfig"`
 		EmailProvider struct {
 			ID       string `xml:"id,attr"`
 			Domains  string `xml:"domains>domain"`
@@ -928,11 +928,11 @@ func TestDomainIsProvisionedExcludesSoftDeleted(t *testing.T) {
 		domain string
 		want   bool
 	}{
-		{"example.com", true}, // active
-		{"deleted.com", false}, // soft-deleted must be filtered
-		{"DELETED.com", false}, // case-insensitive AND soft-deleted
+		{"example.com", true},    // active
+		{"deleted.com", false},   // soft-deleted must be filtered
+		{"DELETED.com", false},   // case-insensitive AND soft-deleted
 		{"deleted.com  ", false}, // trimmed AND soft-deleted
-		{"unknown.test", false}, // not present at all
+		{"unknown.test", false},  // not present at all
 	} {
 		got, err := ah.h.DomainIsProvisionedForTest(ctx, tc.domain)
 		if err != nil {

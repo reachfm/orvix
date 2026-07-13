@@ -94,8 +94,12 @@ func buildadminMailingPublicFolderPatchEnv(t *testing.T) *adminMailingPublicFold
 	scratchDir := t.TempDir()
 	adminDir := filepath.Join(scratchDir, "admin")
 	webmailDir := filepath.Join(scratchDir, "webmail")
-	if err := mkdirEmpty(adminDir); err != nil { t.Fatalf("mkdir admin: %v", err) }
-	if err := mkdirEmpty(webmailDir); err != nil { t.Fatalf("mkdir webmail: %v", err) }
+	if err := mkdirEmpty(adminDir); err != nil {
+		t.Fatalf("mkdir admin: %v", err)
+	}
+	if err := mkdirEmpty(webmailDir); err != nil {
+		t.Fatalf("mkdir webmail: %v", err)
+	}
 	cfg.Server.AdminUIDir = adminDir
 	cfg.Server.WebmailUIDir = webmailDir
 	reg := modules.NewRegistry(logger)
@@ -175,10 +179,18 @@ func v2Req(t *testing.T, e *adminMailingPublicFolderPatchEnv, method, path, bear
 		req.Header.Set("Content-Type", "application/json")
 	}
 	cookies := []string{}
-	if bearer != "" { cookies = append(cookies, "access_token="+bearer) }
-	if csrf != ""  { cookies = append(cookies, "csrf_token="+csrf) }
-	if len(cookies) > 0 { req.Header.Set("Cookie", strings.Join(cookies, "; ")) }
-	if csrf != "" { req.Header.Set("X-CSRF-Token", csrf) }
+	if bearer != "" {
+		cookies = append(cookies, "access_token="+bearer)
+	}
+	if csrf != "" {
+		cookies = append(cookies, "csrf_token="+csrf)
+	}
+	if len(cookies) > 0 {
+		req.Header.Set("Cookie", strings.Join(cookies, "; "))
+	}
+	if csrf != "" {
+		req.Header.Set("X-CSRF-Token", csrf)
+	}
 	resp, err := e.router.App().Test(req, fiber.TestConfig{Timeout: 0})
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
@@ -202,15 +214,15 @@ func TestAdminMailingListPatchAllowedFields(t *testing.T) {
 	status, body := v2Req(t, e, "POST", "/api/v1/admin/mailing-lists",
 		e.adminToken, e.csrfToken,
 		map[string]interface{}{
-			"domain_id":    1,
-			"address":      "all",
-			"display_name": "Original list",
-			"description":  "Original description",
+			"domain_id":           1,
+			"address":             "all",
+			"display_name":        "Original list",
+			"description":         "Original description",
 			"subscription_policy": "closed",
-			"max_members":  10,
-			"status":       "active",
+			"max_members":         10,
+			"status":              "active",
 			"moderation_required": false,
-			"archive_enabled": false,
+			"archive_enabled":     false,
 		})
 	if status != 201 {
 		t.Fatalf("seed create failed: %d: %v", status, body)
@@ -290,7 +302,7 @@ func TestAdminMailingListPatchUnknownFieldHardReject(t *testing.T) {
 	status, body = v2Req(t, e, "PATCH", "/api/v1/admin/mailing-lists/1",
 		e.adminToken, e.csrfToken,
 		map[string]interface{}{
-			"display_name":   "valid",
+			"display_name":    "valid",
 			"dangerous_field": "should-hard-reject",
 		})
 	// The handler may return 400 + JSON OR 400 + plain (the latter

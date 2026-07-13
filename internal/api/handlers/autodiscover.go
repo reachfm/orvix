@@ -239,7 +239,7 @@ func extractDomainFromEmail(email string) string {
 // Outlook expects.
 
 type outlookAutodiscoverResponse struct {
-	XMLName xml.Name `xml:"http://schemas.microsoft.com/exchange/autodiscover/responseschema/2006 Autodiscover"`
+	XMLName  xml.Name `xml:"http://schemas.microsoft.com/exchange/autodiscover/responseschema/2006 Autodiscover"`
 	Response outlookAutodiscoverResponseBody
 }
 
@@ -261,13 +261,13 @@ type outlookUser struct {
 }
 
 type outlookAccount struct {
-	XMLName         xml.Name         `xml:"Account"`
-	AccountType     string           `xml:"AccountType"`
-	Action          string           `xml:"Action"`
-	Redirect        string           `xml:"Redirect,omitempty"`
-	RedirectURL     string           `xml:"RedirectURL,omitempty"`
-	Image           string           `xml:"Image,omitempty"`
-	ServiceHomePage string           `xml:"ServiceHomePage,omitempty"`
+	XMLName         xml.Name          `xml:"Account"`
+	AccountType     string            `xml:"AccountType"`
+	Action          string            `xml:"Action"`
+	Redirect        string            `xml:"Redirect,omitempty"`
+	RedirectURL     string            `xml:"RedirectURL,omitempty"`
+	Image           string            `xml:"Image,omitempty"`
+	ServiceHomePage string            `xml:"ServiceHomePage,omitempty"`
 	Protocols       []outlookProtocol `xml:"Protocol"`
 }
 
@@ -293,7 +293,7 @@ type outlookProtocol struct {
 // it expects a 200 with <Response><Error>...</Error></Response>
 // so it can show the user a readable error.
 type outlookAutodiscoverErrorResponse struct {
-	XMLName xml.Name `xml:"http://schemas.microsoft.com/exchange/autodiscover/responseschema/2006 Autodiscover"`
+	XMLName  xml.Name `xml:"http://schemas.microsoft.com/exchange/autodiscover/responseschema/2006 Autodiscover"`
 	Response outlookAutodiscoverErrorBody
 }
 

@@ -298,7 +298,9 @@ func TestIncomingActionCanonicalisedAfterInsert(t *testing.T) {
 // acceptanceIDFromCreateBody extracts the rule id from
 // a POST /api/v1/admin/acceptance-rules 201 response
 // body. The enterprise admin handler returns
-//   {"id":<int>,"name":...}
+//
+//	{"id":<int>,"name":...}
+//
 // on create; we parse it back as JSON so each PATCH test
 // can target the row it just created. The helper lives
 // here (not next to postJSON) because it is only used by

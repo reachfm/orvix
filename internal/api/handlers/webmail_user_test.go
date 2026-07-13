@@ -65,13 +65,13 @@ type webmailTestEnv struct {
 // handler. The ID matches the production coremail runtime
 // module so the same wiring path in router.go picks it up.
 type runtimeProviderModule struct {
-	store    *storage.MailStore
-	queue    *queue.QueueEngine
+	store *storage.MailStore
+	queue *queue.QueueEngine
 }
 
-func (m *runtimeProviderModule) ID() string             { return "coremail-runtime" }
-func (m *runtimeProviderModule) Version() string        { return "test" }
-func (m *runtimeProviderModule) Requires() []string     { return nil }
+func (m *runtimeProviderModule) ID() string         { return "coremail-runtime" }
+func (m *runtimeProviderModule) Version() string    { return "test" }
+func (m *runtimeProviderModule) Requires() []string { return nil }
 func (m *runtimeProviderModule) Init(_ *config.Config, _ *gorm.DB) error {
 	return nil
 }
@@ -1612,7 +1612,7 @@ func TestWebmailAPISearchByQuery(t *testing.T) {
 	}
 	tok := e.loginAdmin(t)
 	q := "SEARCHMARKER_" + makeID()
-	e.injectMessage(t, q+" hello", "body of " + q)
+	e.injectMessage(t, q+" hello", "body of "+q)
 	e.injectMessage(t, "irrelevant subject", "no marker here")
 	e.injectMessage(t, "another", q+" world") // marker in body only
 

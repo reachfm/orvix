@@ -128,13 +128,13 @@ func mkdirEmpty(dir string) error {
 		return err
 	}
 	pairs := map[string]string{
-		"index.html":     "<html></html>",
-		"app.js":         "",
-		"styles.css":     "",
-		"auth-gate.css":  "",
-		"auth-gate.js":   "",
-		"webmail.css":    "",
-		"webmail.js":     "",
+		"index.html":    "<html></html>",
+		"app.js":        "",
+		"styles.css":    "",
+		"auth-gate.css": "",
+		"auth-gate.js":  "",
+		"webmail.css":   "",
+		"webmail.js":    "",
 	}
 	for name, content := range pairs {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
@@ -306,7 +306,7 @@ func TestAdminDomainCreateInvalidCatchall(t *testing.T) {
 	status, body := domainReq(t, e, "POST", "/api/v1/domains",
 		e.adminToken, e.csrfToken,
 		map[string]interface{}{
-			"name":            "wrongcatchall.example",
+			"name":             "wrongcatchall.example",
 			"catchall_address": "someone@elsewhere.com",
 		},
 	)

@@ -448,9 +448,9 @@ func TestWebmailCSSHasPremiumComponents(t *testing.T) {
 		".empty-illustration",
 		".empty-title",
 		".field-expander",
-		".toast.warning", // new toast type
-		"--grad-brand",   // brand gradient token
-		"--grad-active",  // active row gradient token
+		".toast.warning",         // new toast type
+		"--grad-brand",           // brand gradient token
+		"--grad-active",          // active row gradient token
 		".folder.active::before", // active row accent bar
 		":root.theme-light",
 		"backdrop-filter", // modal backdrop blur

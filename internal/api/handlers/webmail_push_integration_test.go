@@ -68,9 +68,9 @@ type pushProviderModule struct {
 	notifier *push.PushNotifier
 }
 
-func (m *pushProviderModule) ID() string             { return "coremail-runtime" }
-func (m *pushProviderModule) Version() string        { return "test" }
-func (m *pushProviderModule) Requires() []string     { return nil }
+func (m *pushProviderModule) ID() string         { return "coremail-runtime" }
+func (m *pushProviderModule) Version() string    { return "test" }
+func (m *pushProviderModule) Requires() []string { return nil }
 func (m *pushProviderModule) Init(_ *config.Config, _ *gorm.DB) error {
 	return nil
 }
@@ -474,11 +474,11 @@ func TestPushSubscribeCrossMailboxRejection(t *testing.T) {
 	// Insert a subscription for mailbox ID 2 (the victim).
 	repo := push.NewSubscriptionSQLRepo(sqlDB)
 	if err := repo.Create(context.Background(), &push.PushSubscription{
-		MailboxID:  2,
-		Endpoint:   "https://fcm.googleapis.com/fcm/send/victim-ep",
-		P256DHKey:  fakeP256DHKey(t),
-		AuthKey:    fakeAuthKey(),
-		UserAgent:  "attacker",
+		MailboxID: 2,
+		Endpoint:  "https://fcm.googleapis.com/fcm/send/victim-ep",
+		P256DHKey: fakeP256DHKey(t),
+		AuthKey:   fakeAuthKey(),
+		UserAgent: "attacker",
 	}); err != nil {
 		t.Fatalf("seed subscription: %v", err)
 	}
@@ -506,10 +506,10 @@ func TestPushUnsubscribeCrossMailboxRejection(t *testing.T) {
 	sqlDB := env.mailbox.DB
 	repo := push.NewSubscriptionSQLRepo(sqlDB)
 	if err := repo.Create(context.Background(), &push.PushSubscription{
-		MailboxID:  99,
-		Endpoint:   "https://updates.push.services.mozilla.com/other/y",
-		P256DHKey:  fakeP256DHKey(t),
-		AuthKey:    fakeAuthKey(),
+		MailboxID: 99,
+		Endpoint:  "https://updates.push.services.mozilla.com/other/y",
+		P256DHKey: fakeP256DHKey(t),
+		AuthKey:   fakeAuthKey(),
 	}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -822,12 +822,13 @@ func TestReleaseWebmailNoQueueAPIRefs(t *testing.T) {
 // without hitting a real push service. Each POST is counted.
 //
 // Usage:
-//   rec := newRecordingSender(t)
-//   defer rec.close()
-//   env.notifier.Sender = rec.sender
-//   repo.Create(... &PushSubscription{Endpoint: rec.server.URL, ...})
-//   env.notifier.NotifyMailboxMessage(...)
-//   rec.count() // dispatches observed
+//
+//	rec := newRecordingSender(t)
+//	defer rec.close()
+//	env.notifier.Sender = rec.sender
+//	repo.Create(... &PushSubscription{Endpoint: rec.server.URL, ...})
+//	env.notifier.NotifyMailboxMessage(...)
+//	rec.count() // dispatches observed
 type recordingSender struct {
 	server *httptest.Server
 	sender *push.WebPushSender
@@ -1129,9 +1130,9 @@ func TestPushSubscribeRejectsAllowlistSuffixBypass(t *testing.T) {
 // "trusted suffix" misdirection: the suffix may match the
 // allowlist but the LEFTMOST label is an attacker's domain.
 //
-//   fcm.googleapis.com.attacker.com      — leftmost is attacker.com
-//   fcm-googleapis.com                    — typosquat of googleapis.com
-//   web.push.apple.com.attacker.io       — leftmost is attacker.io
+//	fcm.googleapis.com.attacker.com      — leftmost is attacker.com
+//	fcm-googleapis.com                    — typosquat of googleapis.com
+//	web.push.apple.com.attacker.io       — leftmost is attacker.io
 //
 // None of these match the strict apex-only allowlist, so all
 // three are rejected outright.

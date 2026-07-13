@@ -1014,6 +1014,27 @@ func postgresTables() []string {
 			domain_id BIGINT PRIMARY KEY,
 			claimed_until TIMESTAMP NOT NULL
 		)`,
+
+		// Enterprise audit trail with tenant scoping, actor metadata,
+		// safe before/after snapshots, and correlation IDs.
+		`CREATE TABLE IF NOT EXISTS orvix_audit (
+			id BIGSERIAL PRIMARY KEY,
+			actor TEXT NOT NULL DEFAULT '',
+			actor_id INTEGER NOT NULL DEFAULT 0,
+			actor_role TEXT NOT NULL DEFAULT '',
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			action TEXT NOT NULL DEFAULT '',
+			target TEXT NOT NULL DEFAULT '',
+			target_id INTEGER NOT NULL DEFAULT 0,
+			result TEXT NOT NULL DEFAULT '',
+			reason TEXT NOT NULL DEFAULT '',
+			before TEXT NOT NULL DEFAULT '',
+			after TEXT NOT NULL DEFAULT '',
+			request_id TEXT NOT NULL DEFAULT '',
+			ip TEXT NOT NULL DEFAULT '',
+			user_agent TEXT NOT NULL DEFAULT '',
+			timestamp TIMESTAMP NOT NULL DEFAULT NOW()
+		)`,
 	}
 }
 
@@ -1286,6 +1307,11 @@ func postgresIndexes() []string {
 		// Customer domain administration
 		idx("idx_cdv_domain", "customer_domain_verifications", "domain_id"),
 		idx("idx_cdv_created_desc", "customer_domain_verifications", "domain_id, created_at DESC"),
+
+		// Enterprise audit
+		idx("idx_orvix_audit_tenant", "orvix_audit", "tenant_id"),
+		idx("idx_orvix_audit_action", "orvix_audit", "action"),
+		idx("idx_orvix_audit_timestamp", "orvix_audit", "timestamp DESC"),
 	}
 }
 
@@ -1324,6 +1350,7 @@ func PostgresSchemaCompatible(db *gorm.DB, tableSchema string) error {
 		"monitoring_alerts", "monitoring_alert_deliveries", "backup_registry",
 		"backup_schedule_config", "upgrade_history", "coremail_versions",
 		"customer_domain_verifications", "customer_domain_verification_claims",
+		"orvix_audit",
 	}
 
 	var missing []string

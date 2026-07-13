@@ -32,7 +32,9 @@ func runEnterpriseV3(t *testing.T, router interface{ App() interface{} }, sqlDB 
 // minimal compile-only assertion interface so the
 // signature in this file is decoupled from any future
 // router refactor.
-type queryQueryable interface{ QueryRow(string, ...any) interface{ Scan(...any) error } }
+type queryQueryable interface {
+	QueryRow(string, ...any) interface{ Scan(...any) error }
+}
 
 // Test that the v3 GET endpoints respond 200 with a JSON
 // body that includes the expected keys.
@@ -348,7 +350,9 @@ func TestEnterpriseV3UpdateMailboxQuota(t *testing.T) {
 	if resp.status != 201 {
 		t.Fatalf("create mailbox: want 201, got %d %s", resp.status, resp.body)
 	}
-	var created struct{ ID int64 `json:"id"` }
+	var created struct {
+		ID int64 `json:"id"`
+	}
 	if err := json.Unmarshal(resp.bodyBytes, &created); err != nil || created.ID == 0 {
 		t.Fatalf("parse created id: %v, body=%s", err, resp.body)
 	}

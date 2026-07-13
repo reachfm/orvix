@@ -173,7 +173,9 @@ func (h *Handler) AdminSslUploadCertificate(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
-	h.appendAudit(c, "ssl.certificate.upload", body.Name, "ok")
+	if err := h.appendAudit(c, "ssl.certificate.upload", body.Name, "ok"); err != nil {
+		return err
+	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
 		"name":               cert.Name,
 		"common_name":        cert.CommonName,
@@ -224,7 +226,9 @@ func (h *Handler) AdminSslDeleteCertificate(c fiber.Ctx) error {
 	if keyP != "" {
 		_ = os.Remove(keyP)
 	}
-	h.appendAudit(c, "ssl.certificate.delete", fmt.Sprintf("id:%d|name:%s", rowID, name), "ok")
+	if err := h.appendAudit(c, "ssl.certificate.delete", fmt.Sprintf("id:%d|name:%s", rowID, name), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"id": rowID, "deleted": true})
 }
 
@@ -245,7 +249,9 @@ func (h *Handler) AdminSslReloadCertificates(c fiber.Ctx) error {
 	if !res.Success {
 		resultStr = "fail"
 	}
-	h.appendAudit(c, "ssl.certificate.reload", res.Message, resultStr)
+	if err := h.appendAudit(c, "ssl.certificate.reload", res.Message, resultStr); err != nil {
+		return err
+	}
 	return c.Status(status).JSON(fiber.Map{
 		"success": res.Success,
 		"message": res.Message,

@@ -144,6 +144,21 @@ jobs:
           set -euo pipefail
           go test -v -count=1 -timeout=600s ./internal/customerdomain -run "Postgres|SQLite"
 
+      - name: Enterprise admin tests
+        run: |
+          set -euo pipefail
+          go test -v -count=1 -timeout=600s ./internal/admin/... -run "Test"
+
+      - name: RBAC permission matrix tests
+        run: |
+          set -euo pipefail
+          go test -v -count=1 -timeout=600s ./internal/auth/rbac -run "Test"
+
+      - name: Enterprise audit tests
+        run: |
+          set -euo pipefail
+          go test -v -count=1 -timeout=600s ./internal/audit -run "Test"
+
   outbound-delivery-race:
     name: Outbound delivery race detector
     runs-on: ubuntu-24.04
