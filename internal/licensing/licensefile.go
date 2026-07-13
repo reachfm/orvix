@@ -5,20 +5,33 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 )
 
 // PublicKey is the compiled-in Ed25519 public key for signature verification.
-// In production, this would be a real key baked into the binary.
-// For development, we use a well-known test key.
+// Set via environment variable ORVIX_LICENSE_PUBLIC_KEY (base64) in production.
+// Falls back to development test key when the env var is unset.
 var PublicKey ed25519.PublicKey
 
 func init() {
-	// Development-only test key. Replace with production key in release builds.
+	if k := os.Getenv("ORVIX_LICENSE_PUBLIC_KEY"); k != "" {
+		key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(k))
+		if err == nil && len(key) == ed25519.PublicKeySize {
+			PublicKey = ed25519.PublicKey(key)
+			return
+		}
+	}
 	key, err := base64.StdEncoding.DecodeString("MCowBQYDK2VwAyEAQkFBS0VZQUtFWUtFWUtFWUtFWUtFWUtFWUtFWUtFWUtFWUtFWUtFWUtG")
 	if err == nil && len(key) == ed25519.PublicKeySize {
 		PublicKey = ed25519.PublicKey(key)
 	}
+}
+
+// IsDevKey returns true when using the development test key.
+func IsDevKey() bool {
+	prodKey := os.Getenv("ORVIX_LICENSE_PUBLIC_KEY")
+	return prodKey == ""
 }
 
 // ParseLicense parses, validates signature, and returns a License from signed JSON.
