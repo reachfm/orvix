@@ -540,7 +540,7 @@ func TestPostgresDialectDetection(t *testing.T) {
 
 func postgresServiceEnv(t *testing.T) (*Service, *sql.DB) {
 	t.Helper()
-	_, cfg := postgresConfig(t)
+	cfg, _ := postgresConfig(t)
 	gormDB, err := config.NewDatabase(cfg, nil)
 	if err != nil {
 		t.Fatalf("connect to postgres: %v", err)
