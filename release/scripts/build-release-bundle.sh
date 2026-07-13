@@ -114,6 +114,12 @@ fail() { printf '%bERROR:%b %s\n' "$RED" "$NC" "$*" >&2; exit "${2:-1}"; }
 info() { printf '%bINFO:%b %s\n' "$GREEN" "$NC" "$*" >&2; }
 warn() { printf '%bWARN:%b %s\n' "$YELLOW" "$NC" "$*" >&2; }
 
+# Admin SPA build/packaging logic (fail-closed legacy fallback) lives in a
+# sourced library so it can be unit-tested in isolation.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=release/scripts/lib-admin-build.sh
+. "$SCRIPT_DIR/lib-admin-build.sh"
+
 # ── 1. Pre-flight ─────────────────────────────────────────────────
 command -v git  >/dev/null 2>&1 || fail "git is required"
 command -v tar  >/dev/null 2>&1 || fail "tar is required"
@@ -175,6 +181,7 @@ REQUIRED_FILES=(
     release/scripts/orvix-doctor.sh
     release/scripts/diagnostics.sh
     release/scripts/lib-asset-propagate.sh
+    release/scripts/lib-admin-build.sh
     release/scripts/apply-runtime-update.sh
     release/scripts/generate-vapid-keys.sh
     release/scripts/reset-admin-password.sh
@@ -397,28 +404,17 @@ done
 [ -f release/trust/orvix-release-signing.pub.pem ] && \
     cp release/trust/orvix-release-signing.pub.pem "$BUNDLE_ROOT/release/trust/orvix-release-signing.pub.pem"
 
-# Asset trees — admin SPA
-# The React-based web/admin is the reviewed production UI. If the
-# build toolchain is available, we build it fresh and package the
-# dist output. Otherwise we fall back to the legacy release/admin
-# (committed plain-JS) so the bundle script never fails in an
-# environment without Node.js.
-if [ -d web/admin ] && [ -f web/admin/package.json ]; then
-    info "building web/admin (React SPA)..."
-    (cd web/admin && npm ci --silent 2>/dev/null && npm run build 2>/dev/null) \
-        || warn "web/admin build failed or toolchain unavailable; falling back to release/admin"
-    if [ -d web/admin/dist ] && [ -f web/admin/dist/index.html ]; then
-        rm -rf "$BUNDLE_ROOT/release/admin"
-        mkdir -p "$BUNDLE_ROOT/release/admin"
-        (cd web/admin/dist && tar -cf - .) | (cd "$BUNDLE_ROOT/release/admin" && tar -xf -)
-        info "packaged web/admin/dist as release/admin ($(find "$BUNDLE_ROOT/release/admin" -type f | wc -l) files)"
-    else
-        warn "web/admin/dist not found after build — using legacy release/admin"
-        (cd release/admin && tar -cf - .) | (cd "$BUNDLE_ROOT/release/admin" && tar -xf -)
-    fi
+# Asset trees — admin SPA.
+# The React-based web/admin is the reviewed production UI. The committed
+# legacy release/admin is used ONLY when the Node/npm toolchain is genuinely
+# unavailable. When the toolchain is present, any failure of npm ci /
+# TypeScript validation / npm run build / built-output verification is a hard
+# bundle failure — build-release-bundle.sh never ships stale legacy admin
+# assets after a real build error. See lib-admin-build.sh (package_admin_spa).
+if ADMIN_SOURCE="$(package_admin_spa "$REPO_ROOT" "$BUNDLE_ROOT/release/admin")"; then
+    info "admin assets packaged from: $ADMIN_SOURCE ($(find "$BUNDLE_ROOT/release/admin" -type f | wc -l) files)"
 else
-    warn "web/admin not found — using legacy release/admin"
-    (cd release/admin && tar -cf - .) | (cd "$BUNDLE_ROOT/release/admin" && tar -xf -)
+    fail "admin SPA packaging failed (see errors above); refusing to ship a bundle with stale or missing admin assets" 2
 fi
 (cd release/webmail && tar -cf - .) | (cd "$BUNDLE_ROOT/release/webmail" && tar -xf -)
 
@@ -467,34 +463,21 @@ for f in "${BUNDLE_REQUIRED[@]}"; do
     [ -e "$BUNDLE_ROOT/$f" ] || fail "bundle is missing $f (assembly lost a file)" 4
 done
 
-# Verify the admin SPA has the expected ops pages. When built from
-# web/admin the JS bundle hashed filename varies, so we check the
-# index.html reference and the built asset directory.
+# Verify the admin SPA index exists in every case.
 admin_index="$BUNDLE_ROOT/release/admin/index.html"
 [ -f "$admin_index" ] || fail "bundle is missing release/admin/index.html" 4
-admin_assets_dir="$BUNDLE_ROOT/release/admin/assets"
-[ -d "$admin_assets_dir" ] || fail "bundle is missing release/admin/assets/ (no built assets)" 4
-admin_asset_count=$(find "$admin_assets_dir" -type f 2>/dev/null | wc -l)
-[ "$admin_asset_count" -ge 2 ] || fail "release/admin/assets/ has fewer than 2 built assets (got $admin_asset_count)" 4
 
-# Verify ops pages exist in the built admin JS.
-# The React build produces hashed filenames, so we grep index.html
-# for the JS src and then check the resolved file for page component names.
-admin_js_src=$(grep -oE 'src="[^"]+\.js"' "$admin_index" | sed -E 's/src="([^"]+)"/\1/' | head -1)
-if [ -n "$admin_js_src" ] && [ -f "$BUNDLE_ROOT/release/admin/$admin_js_src" ]; then
-    admin_js="$BUNDLE_ROOT/release/admin/$admin_js_src"
+# When the admin was built from web/admin, assert the built ops modules are
+# present (fail-closed). package_admin_spa already ran this check; we re-assert
+# on the sealed bundle tree so a lost/rewritten asset is caught before sealing.
+# The legacy (toolchain-absent) fallback has no assets/ directory and is
+# intentionally exempt from the built-assets assertions.
+if [ "${ADMIN_SOURCE:-}" = "built" ]; then
+    verify_admin_ops_assets "$BUNDLE_ROOT/release/admin" \
+        || fail "built admin output failed ops-module verification (see errors above)" 4
+    info "built admin ops modules verified in sealed bundle tree"
 else
-    # Fallback: try the assets directory directly
-    admin_js=$(find "$admin_assets_dir" -name '*.js' -not -name 'vendor-*' 2>/dev/null | head -1)
-fi
-if [ -n "$admin_js" ] && [ -f "$admin_js" ]; then
-    for page in LicenseStatus BackupStatus SystemHealth; do
-        if grep -q "$page" "$admin_js" 2>/dev/null; then
-            info "ops UI page component verified: $page"
-        else
-            warn "ops UI page component '$page' not found in admin JS — may be missing from the React build"
-        fi
-    done
+    info "admin packaged from legacy fallback (toolchain absent); skipping built-assets assertions"
 fi
 
 # ── 6. checksums.txt — sha256 of every file in the bundle ────────

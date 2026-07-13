@@ -45,6 +45,12 @@ func testService(t *testing.T) *Service {
 	s.SetStagingRoot(filepath.Join(base, "restore-staging"))
 	s.SetDatabasePath(filepath.Join(base, "restored-orvix.db"))
 	s.SetRestoreMaintenanceChecker(func(context.Context) error { return nil })
+	// Restore now fails closed unless a restart integration and a
+	// post-restart health verification are wired. Tests that are not
+	// specifically exercising restart/health wire trivial success callbacks
+	// here; the restart/health-focused tests override them.
+	s.SetRestoreRestart(func(context.Context) error { return nil })
+	s.SetRestoreHealthCheck(func(context.Context) error { return nil })
 	return s
 }
 

@@ -28,6 +28,11 @@ import (
 // <stagingRoot>/<backup_id>/.
 const defaultStagingRoot = "/var/lib/orvix/restore-staging"
 
+// defaultRestoreVerifyTimeout bounds the post-activation restart + health
+// verification window. A restart or health check that does not complete
+// within this window is treated as a failure and triggers rollback.
+const defaultRestoreVerifyTimeout = 120 * time.Second
+
 // Max archive entry sizes for validation safety.
 const (
 	maxMetadataEntrySize  = 10 * 1024 * 1024        // 10 MiB for manifest/checksums/config
@@ -67,6 +72,13 @@ type Service struct {
 	restoreHealthCheck      func(context.Context) error
 	restoreRestart          func(context.Context) error
 	restoreAudit            func(context.Context, string, string)
+
+	// restoreVerifyTimeout bounds how long the post-activation restart
+	// and health verification may run before they are treated as failed
+	// and rolled back. Zero uses defaultRestoreVerifyTimeout. It exists so
+	// a hung service manager or an unhealthy service cannot leave a restore
+	// half-applied forever.
+	restoreVerifyTimeout time.Duration
 
 	// postCreateHook is invoked once a successful
 	// CreateBackup completes, with the local archive
@@ -156,6 +168,31 @@ func (s *Service) SetRestoreHealthCheck(fn func(context.Context) error) { s.rest
 // SetRestoreRestart installs the service restart/reload operation used after
 // activation and rollback. It is explicit so tests can run without systemd.
 func (s *Service) SetRestoreRestart(fn func(context.Context) error) { s.restoreRestart = fn }
+
+// SetRestoreVerifyTimeout overrides the bounded restart+health verification
+// window. Non-positive values reset it to the default.
+func (s *Service) SetRestoreVerifyTimeout(d time.Duration) { s.restoreVerifyTimeout = d }
+
+// runBoundedRestoreStep runs fn under a bounded timeout derived from ctx. If
+// fn does not return within the window (a hung service manager or a wedged
+// health probe) the step is reported as timed out so the caller rolls back,
+// even when fn ignores context cancellation.
+func (s *Service) runBoundedRestoreStep(ctx context.Context, fn func(context.Context) error) error {
+	timeout := s.restoreVerifyTimeout
+	if timeout <= 0 {
+		timeout = defaultRestoreVerifyTimeout
+	}
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- fn(cctx) }()
+	select {
+	case err := <-done:
+		return err
+	case <-cctx.Done():
+		return fmt.Errorf("restore verification step did not complete within %s: %w", timeout, cctx.Err())
+	}
+}
 
 // SetRestoreAuditHook installs a minimal audit hook for restore lifecycle
 // events without coupling the backup package to the admin API.
@@ -1441,6 +1478,22 @@ func (s *Service) RestoreBackup(ctx context.Context, id string) (*RestoreStageRe
 	if err := s.restoreMaintenanceCheck(ctx); err != nil {
 		return nil, fmt.Errorf("restore maintenance mode is not active: %w", err)
 	}
+
+	// Fail closed BEFORE any destructive work if the restart or
+	// post-restart health verification integrations are missing. A restore
+	// that cannot actually restart the service and prove the restarted
+	// service is healthy must never be started, let alone reported as
+	// successful. Checking here (before validation/safety/activation) avoids
+	// leaving a half-applied restore when the deployment is misconfigured.
+	if s.restoreRestart == nil {
+		s.auditRestore(ctx, "backup.restore.failed", "backup_id:"+id+"|phase:preflight|error:restart integration not configured")
+		return nil, fmt.Errorf("restore restart integration is not configured; refusing to restore (fail-closed)")
+	}
+	if s.restoreHealthCheck == nil {
+		s.auditRestore(ctx, "backup.restore.failed", "backup_id:"+id+"|phase:preflight|error:post-restart health verification not configured")
+		return nil, fmt.Errorf("restore post-restart health verification is not configured; refusing to restore (fail-closed)")
+	}
+
 	s.auditRestore(ctx, "backup.restore.start", "backup_id:"+id)
 
 	// 1. Validate the archive before creating any new state.
@@ -1477,16 +1530,23 @@ func (s *Service) RestoreBackup(ctx context.Context, id string) (*RestoreStageRe
 	if err := s.activateStagedRestoreLocked(ctx, stagingDir); err != nil {
 		return s.rollbackRestoreLocked(ctx, id, safetyBackup.ID, fmt.Errorf("activation failed: %w", err))
 	}
-	if s.restoreRestart != nil {
-		if err := s.restoreRestart(ctx); err != nil {
-			return s.rollbackRestoreLocked(ctx, id, safetyBackup.ID, fmt.Errorf("restart after restore failed: %w", err))
-		}
+
+	// Actual service restart. Bounded so a hung/unavailable service manager
+	// rolls back instead of hanging. Any error (command failure, timeout,
+	// service manager unavailable) fails closed into rollback. restoreRestart
+	// is guaranteed non-nil by the preflight check above.
+	if err := s.runBoundedRestoreStep(ctx, s.restoreRestart); err != nil {
+		return s.rollbackRestoreLocked(ctx, id, safetyBackup.ID, fmt.Errorf("restart after restore failed: %w", err))
 	}
-	if s.restoreHealthCheck != nil {
-		if err := s.restoreHealthCheck(ctx); err != nil {
-			return s.rollbackRestoreLocked(ctx, id, safetyBackup.ID, fmt.Errorf("post-restore health check failed: %w", err))
-		}
+
+	// Post-restart service health verification. Runs only AFTER the restart
+	// step returned; success is never reported before this gate passes. A
+	// failing or timed-out health check rolls back. restoreHealthCheck is
+	// guaranteed non-nil by the preflight check above.
+	if err := s.runBoundedRestoreStep(ctx, s.restoreHealthCheck); err != nil {
+		return s.rollbackRestoreLocked(ctx, id, safetyBackup.ID, fmt.Errorf("post-restore health check failed: %w", err))
 	}
+
 	s.auditRestore(ctx, "backup.restore.activated", "backup_id:"+id+"|safety_backup_id:"+safetyBackup.ID)
 	return &RestoreStageResult{
 		Status:         RestoreStatusActivated,
@@ -1525,7 +1585,7 @@ func (s *Service) rollbackRestoreLocked(ctx context.Context, sourceID, safetyID 
 		}, cause
 	}
 	if s.restoreRestart != nil {
-		if err := s.restoreRestart(ctx); err != nil {
+		if err := s.runBoundedRestoreStep(ctx, s.restoreRestart); err != nil {
 			s.auditRestore(ctx, "backup.restore.rollback_failed", "backup_id:"+sourceID+"|safety_backup_id:"+safetyID+"|error:"+err.Error())
 			return &RestoreStageResult{
 				Status:         RestoreStatusFailed,
