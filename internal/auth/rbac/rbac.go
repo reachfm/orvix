@@ -61,6 +61,38 @@ const (
 
 	// Audit log.
 	PermAuditRead Permission = "audit.read"
+
+	// Organization / tenant management.
+	PermOrganizationsRead  Permission = "organizations.read"
+	PermOrganizationsWrite Permission = "organizations.write"
+
+	// Domain management.
+	PermDomainsRead  Permission = "domains.read"
+	PermDomainsWrite Permission = "domains.write"
+
+	// Mailbox / user management.
+	PermMailboxesRead  Permission = "mailboxes.read"
+	PermMailboxesWrite Permission = "mailboxes.write"
+
+	// Credentials management.
+	PermCredentialsReset Permission = "credentials.reset"
+	PermSessionsRevoke   Permission = "sessions.revoke"
+
+	// Dashboard.
+	PermDashboardRead Permission = "dashboard.read"
+
+	// Security.
+	PermSecurityRead Permission = "security.read"
+
+	// Aliases.
+	PermAliasesRead  Permission = "aliases.read"
+	PermAliasesWrite Permission = "aliases.write"
+
+	// Platform (cross-tenant).
+	PermPlatformOrganizationsRead  Permission = "platform.organizations.read"
+	PermPlatformOrganizationsWrite Permission = "platform.organizations.write"
+	PermPlatformSecurityRead       Permission = "platform.security.read"
+	PermPlatformSessionsRevoke     Permission = "platform.sessions.revoke"
 )
 
 // AllPermissions is the canonical ordered list of permissions.
@@ -79,6 +111,22 @@ var AllPermissions = []Permission{
 	PermUsersRead,
 	PermUsersWrite,
 	PermAuditRead,
+	PermOrganizationsRead,
+	PermOrganizationsWrite,
+	PermDomainsRead,
+	PermDomainsWrite,
+	PermMailboxesRead,
+	PermMailboxesWrite,
+	PermCredentialsReset,
+	PermSessionsRevoke,
+	PermDashboardRead,
+	PermSecurityRead,
+	PermAliasesRead,
+	PermAliasesWrite,
+	PermPlatformOrganizationsRead,
+	PermPlatformOrganizationsWrite,
+	PermPlatformSecurityRead,
+	PermPlatformSessionsRevoke,
 }
 
 // rolePermissions is the source of truth for "what can role X
@@ -91,44 +139,69 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermSettingsRead: true, PermSettingsWrite: true,
 		PermBackupsRead: true, PermBackupsWrite: true,
 		PermMonitoringRead: true,
-		PermLicenseRead: true, PermLicenseWrite: true,
+		PermLicenseRead:    true, PermLicenseWrite: true,
 		PermUsersRead: true, PermUsersWrite: true,
-		PermAuditRead: true,
+		PermAuditRead:         true,
+		PermOrganizationsRead: true, PermOrganizationsWrite: true,
+		PermDomainsRead: true, PermDomainsWrite: true,
+		PermMailboxesRead: true, PermMailboxesWrite: true,
+		PermCredentialsReset: true,
+		PermSessionsRevoke:   true,
+		PermDashboardRead:    true,
+		PermSecurityRead:     true,
+		PermAliasesRead:      true, PermAliasesWrite: true,
+		PermPlatformOrganizationsRead: true, PermPlatformOrganizationsWrite: true,
+		PermPlatformSecurityRead:   true,
+		PermPlatformSessionsRevoke: true,
 	},
 	auth.RoleAdmin: {
-		// Admin has every permission EXCEPT license.write. A
-		// license change is reserved for super_admin because
-		// it can affect feature flags and tier enforcement.
 		PermQueueRead: true, PermQueueAction: true,
 		PermSettingsRead: true, PermSettingsWrite: true,
 		PermBackupsRead: true, PermBackupsWrite: true,
 		PermMonitoringRead: true,
-		PermLicenseRead: true,
-		PermUsersRead: true, PermUsersWrite: true,
-		PermAuditRead: true,
+		PermLicenseRead:    true,
+		PermUsersRead:      true, PermUsersWrite: true,
+		PermAuditRead:         true,
+		PermOrganizationsRead: true, PermOrganizationsWrite: true,
+		PermDomainsRead: true, PermDomainsWrite: true,
+		PermMailboxesRead: true, PermMailboxesWrite: true,
+		PermCredentialsReset: true,
+		PermSessionsRevoke:   true,
+		PermDashboardRead:    true,
+		PermSecurityRead:     true,
+		PermAliasesRead:      true, PermAliasesWrite: true,
 	},
-	// Operator is a helpdesk persona: read everything, act on
-	// queue and users (password rotation, account unlock), but
-	// cannot modify settings, backups, or license.
 	auth.RoleOperator: {
 		PermQueueRead: true, PermQueueAction: true,
-		PermSettingsRead: true,
-		PermBackupsRead: true,
+		PermSettingsRead:   true,
+		PermBackupsRead:    true,
 		PermMonitoringRead: true,
-		PermLicenseRead: true,
-		PermUsersRead: true, PermUsersWrite: true,
-		PermAuditRead: true,
+		PermLicenseRead:    true,
+		PermUsersRead:      true, PermUsersWrite: true,
+		PermAuditRead:         true,
+		PermOrganizationsRead: true,
+		PermDomainsRead:       true,
+		PermMailboxesRead:     true, PermMailboxesWrite: true,
+		PermCredentialsReset: true,
+		PermSessionsRevoke:   true,
+		PermDashboardRead:    true,
+		PermSecurityRead:     true,
+		PermAliasesRead:      true,
 	},
-	// ReadOnly: auditor / observer. Read everything, write
-	// nothing.
 	auth.RoleReadOnly: {
-		PermQueueRead: true,
-		PermSettingsRead: true,
-		PermBackupsRead: true,
-		PermMonitoringRead: true,
-		PermLicenseRead: true,
-		PermUsersRead: true,
-		PermAuditRead: true,
+		PermQueueRead:         true,
+		PermSettingsRead:      true,
+		PermBackupsRead:       true,
+		PermMonitoringRead:    true,
+		PermLicenseRead:       true,
+		PermUsersRead:         true,
+		PermAuditRead:         true,
+		PermOrganizationsRead: true,
+		PermDomainsRead:       true,
+		PermMailboxesRead:     true,
+		PermDashboardRead:     true,
+		PermSecurityRead:      true,
+		PermAliasesRead:       true,
 	},
 }
 
@@ -181,9 +254,9 @@ func Require(perms ...Permission) fiber.Handler {
 		}
 		if len(missing) > 0 {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
-				"error":    "insufficient permissions",
-				"missing":  missing,
-				"role":     string(role),
+				"error":   "insufficient permissions",
+				"missing": missing,
+				"role":    string(role),
 			})
 		}
 		return c.Next()
@@ -208,9 +281,9 @@ func RequireAny(perms ...Permission) fiber.Handler {
 			}
 		}
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
-			"error":             "insufficient permissions",
-			"required_any_of":   perms,
-			"role":              string(role),
+			"error":           "insufficient permissions",
+			"required_any_of": perms,
+			"role":            string(role),
 		})
 	}
 }
