@@ -983,11 +983,81 @@ provision_config() {
         # who intentionally cleared the field to "null out" DNS).
         # dns.public_ipv6 follows the same rule.
         migrate_dns_public_ip "$server_public_ip"
+        migrate_backup_encryption_config
         # Reaffirm in the log that the existing config was not
         # overwritten. A re-running operator can grep their
         # install log for this line to confirm the contract.
         log_detail "CONFIG provisioning: existing config preserved; only safety-critical bind migrations applied"
     fi
+}
+
+# migrate_backup_encryption_config adds only the Phase 2 backup-encryption
+# fields that are absent from an existing operator config. Existing values,
+# including a custom encryption key path, are preserved verbatim. An explicit
+# encryption_enabled: false is not silently overwritten; provisioning later
+# fails closed with a clear instruction instead.
+migrate_backup_encryption_config() {
+    local cfg="$ORVIX_CONFIG"
+    [ -f "$cfg" ] || return 0
+    local tmp
+    tmp="$(mktemp "${cfg}.backup-encryption-XXXXXX")"
+    awk '
+    BEGIN { section = ""; saw_backup = 0; saw_enabled = 0; saw_key = 0 }
+    function add_missing() {
+        if (!saw_enabled) print "  encryption_enabled: true"
+        if (!saw_key) print "  encryption_key_file: /etc/orvix/backup_encryption.key"
+    }
+    /^[a-zA-Z][a-zA-Z0-9_-]*:/ {
+        next_section = $1
+        gsub(/:/, "", next_section)
+        if (section == "backup" && next_section != "backup") add_missing()
+        section = next_section
+        if (section == "backup") saw_backup = 1
+    }
+    section == "backup" && /^[[:space:]]*encryption_enabled[[:space:]]*:/ { saw_enabled = 1 }
+    section == "backup" && /^[[:space:]]*encryption_key_file[[:space:]]*:/ { saw_key = 1 }
+    { print }
+    END {
+        if (section == "backup") add_missing()
+        if (!saw_backup) {
+            print ""
+            print "backup:"
+            print "  encryption_enabled: true"
+            print "  encryption_key_file: /etc/orvix/backup_encryption.key"
+        }
+    }
+    ' "$cfg" >"$tmp" || { rm -f "$tmp"; fail "could not migrate backup encryption config"; }
+    if cmp -s "$cfg" "$tmp"; then
+        rm -f "$tmp"
+        log_detail "MIGRATE backup encryption: existing configuration already complete"
+        return 0
+    fi
+    chmod --reference="$cfg" "$tmp" 2>/dev/null || chmod 0600 "$tmp"
+    chown --reference="$cfg" "$tmp" 2>/dev/null || true
+    mv "$tmp" "$cfg"
+    log_detail "MIGRATE backup encryption: added missing encryption settings; existing backup/operator values preserved"
+}
+
+backup_config_value() {
+    local key="$1"
+    awk -v wanted="$key" '
+    /^[a-zA-Z][a-zA-Z0-9_-]*:/ {
+        section = $1
+        gsub(/:/, "", section)
+    }
+    section == "backup" {
+        line = $0
+        sub(/^[[:space:]]*/, "", line)
+        split(line, parts, ":")
+        if (parts[1] == wanted) {
+            sub(/^[^:]*:[[:space:]]*/, "", line)
+            sub(/[[:space:]]+#.*$/, "", line)
+            gsub(/^"|"$/, "", line)
+            print line
+            exit
+        }
+    }
+    ' "$ORVIX_CONFIG"
 }
 
 # migrate_unsafe_internal_binds hardens an existing /etc/orvix/orvix.yaml
@@ -1382,6 +1452,9 @@ update:
 
 backup:
   dir: /var/lib/orvix/backups
+  retention_count: 10
+  encryption_enabled: true
+  encryption_key_file: /etc/orvix/backup_encryption.key
 YAML
     chown orvix:orvix "$ORVIX_CONFIG"
     chmod 0640 "$ORVIX_CONFIG"
@@ -1462,6 +1535,41 @@ provision_vapid_keys() {
     grep -q 'vapid_public_key:' "$ORVIX_CONFIG" || fail "config missing coremail.vapid_public_key"
     grep -q 'vapid_private_key_file: "/etc/orvix/vapid_private.key"' "$ORVIX_CONFIG" || fail "config missing coremail.vapid_private_key_file"
     grep -q "vapid_subject: \"mailto:$admin_email\"" "$ORVIX_CONFIG" || fail "config missing coremail.vapid_subject"
+}
+
+provision_backup_encryption_key() {
+    local enabled key_path
+    enabled="$(backup_config_value encryption_enabled)"
+    key_path="$(backup_config_value encryption_key_file)"
+    [ "$enabled" = "true" ] || fail "backup encryption must be enabled under the top-level backup section"
+    [ -n "$key_path" ] || fail "backup.encryption_key_file is required"
+    case "$key_path" in
+        /*) ;;
+        *) fail "backup.encryption_key_file must be an absolute path" ;;
+    esac
+    run_quiet mkdir -p "$(dirname "$key_path")"
+    [ ! -L "$key_path" ] || fail "backup encryption key path must not be a symlink"
+    if [ -e "$key_path" ] && [ ! -f "$key_path" ]; then
+        fail "backup encryption key path must be a regular file"
+    fi
+    if [ -s "$key_path" ]; then
+        log_detail "Backup encryption key already exists; preserving existing key"
+    else
+        local old_umask
+        old_umask="$(umask)"
+        umask 0027
+        openssl rand -hex 32 >"$key_path" || {
+            umask "$old_umask"
+            fail "could not generate backup encryption key"
+        }
+        umask "$old_umask"
+    fi
+    run_quiet chown root:orvix "$key_path"
+    run_quiet chmod 0640 "$key_path"
+    [ "$(stat -c '%U:%G' "$key_path" 2>/dev/null || true)" = "root:orvix" ] || fail "backup encryption key owner must be root:orvix"
+    [ "$(stat -c '%a' "$key_path" 2>/dev/null || true)" = "640" ] || fail "backup encryption key mode must be 0640"
+    [ "$(backup_config_value encryption_enabled)" = "true" ] || fail "config must enable backup encryption"
+    [ "$(backup_config_value encryption_key_file)" = "$key_path" ] || fail "config backup encryption key path could not be read"
 }
 
 write_service() {
@@ -2815,6 +2923,7 @@ IPFAIL
     esac
     install_release_scripts
     provision_vapid_keys "$admin_email"
+    provision_backup_encryption_key
     # Propagate admin + webmail static assets via the shared
     # lib-asset-propagate.sh library. The lib is the single source
     # of truth for the copy + backup + hash-verify + permission

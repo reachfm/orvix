@@ -80,6 +80,8 @@ required_safety=(
     'lib-asset-propagate.sh'
     'propagate_assets'
     'asset_propagate'
+    'acquire_upgrade_lock'
+    'flock -n 9'
 )
 
 for needle in "${required_safety[@]}"; do

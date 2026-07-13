@@ -119,6 +119,10 @@ command -v git  >/dev/null 2>&1 || fail "git is required"
 command -v tar  >/dev/null 2>&1 || fail "tar is required"
 command -v sha256sum >/dev/null 2>&1 || fail "sha256sum is required"
 
+if [ -n "$(git status --porcelain --untracked-files=no)" ] && [ "${ORVIX_ALLOW_DIRTY_BUILD:-}" != "1" ]; then
+    fail "tracked working tree is dirty; commit reviewed changes before building a release"
+fi
+
 case "$TARGET_OS-$TARGET_ARCH" in
     linux-amd64|linux-arm64) ;;
     *) fail "unsupported target $TARGET_OS-$TARGET_ARCH (supported: linux-amd64, linux-arm64)" ;;
@@ -140,6 +144,12 @@ fi
 [ -n "$RESOLVED_VERSION" ] || fail "could not resolve version (no --version and release/VERSION missing)"
 RESOLVED_CHANNEL="${CHANNEL_OVERRIDE:-stable}"
 [ -n "$RESOLVED_CHANNEL" ] || fail "channel resolved empty"
+case "$RESOLVED_VERSION" in
+    *[!A-Za-z0-9._+-]*) fail "invalid release version token: $RESOLVED_VERSION" ;;
+esac
+case "$RESOLVED_CHANNEL" in
+    ""|*[!a-z0-9._-]*|[._-]*) fail "invalid release channel token: $RESOLVED_CHANNEL" ;;
+esac
 
 info "building bundle version=$RESOLVED_VERSION commit=$GIT_SHORT_COMMIT channel=$RESOLVED_CHANNEL target=$TARGET_OS-$TARGET_ARCH"
 
@@ -220,7 +230,7 @@ BUNDLE_ROOT="$WORK_DIR/orvix"
 mkdir -p "$BUNDLE_ROOT/bin" "$BUNDLE_ROOT/release/admin" "$BUNDLE_ROOT/release/webmail" \
          "$BUNDLE_ROOT/release/systemd" "$BUNDLE_ROOT/release/sudoers.d" \
          "$BUNDLE_ROOT/release/scripts" "$BUNDLE_ROOT/release/scripts/tests" \
-         "$BUNDLE_ROOT/release/configs"
+         "$BUNDLE_ROOT/release/configs" "$BUNDLE_ROOT/release/trust"
 
 BIN_OUT="$BUNDLE_ROOT/bin/orvix"
 LDFLAGS=(
@@ -384,6 +394,8 @@ for s in release/scripts/tests/*.sh; do
 done
 [ -f release/configs/orvix.yaml.example ] && \
     cp release/configs/orvix.yaml.example "$BUNDLE_ROOT/release/configs/orvix.yaml.example"
+[ -f release/trust/orvix-release-signing.pub.pem ] && \
+    cp release/trust/orvix-release-signing.pub.pem "$BUNDLE_ROOT/release/trust/orvix-release-signing.pub.pem"
 
 # Asset trees
 (cd release/admin && tar -cf - .) | (cd "$BUNDLE_ROOT/release/admin" && tar -xf -)
@@ -402,6 +414,11 @@ target_os=$TARGET_OS
 target_arch=$TARGET_ARCH
 built_by=build-release-bundle.sh
 BUILDINFO
+
+# SPDX 2.3 SBOM generated from the exact module graph and binary sealed into
+# this bundle. The generator contains no network calls and no private data.
+bash release/scripts/generate-sbom.sh "$BUNDLE_ROOT/SBOM.spdx" "$BIN_OUT" "$RESOLVED_VERSION" "$GIT_COMMIT" \
+    || fail "SBOM generation failed" 4
 
 # ── 5. Per-file sanity checks on bundle contents ─────────────────
 # Every required entry must exist inside the bundle before we seal it.
@@ -423,8 +440,10 @@ BUNDLE_REQUIRED=(
     release/scripts/smoke-admin-import-graph.mjs
     release/scripts/smoke-admin-runtime.mjs
     release/scripts/verify-fresh-vps-one-command.sh
+    release/trust/orvix-release-signing.pub.pem
     VERSION
     BUILDINFO
+    SBOM.spdx
 )
 for f in "${BUNDLE_REQUIRED[@]}"; do
     [ -e "$BUNDLE_ROOT/$f" ] || fail "bundle is missing $f (assembly lost a file)" 4
@@ -454,6 +473,51 @@ STABLE_ARCHIVE="$OUTPUT_DIR/orvix-enterprise-mail-${RESOLVED_CHANNEL}-${TARGET_O
 cp "$ARCHIVE" "$STABLE_ARCHIVE"
 sha256sum "$STABLE_ARCHIVE" | awk -v a="$STABLE_ARCHIVE" '{printf "%s  %s\n", $1, a}' > "$STABLE_ARCHIVE.sha256"
 info "stable alias: $STABLE_ARCHIVE"
+
+write_release_manifest() {
+    local artifact="$1" output="$2"
+    local artifact_sha sbom_sha
+    artifact_sha="$(sha256sum "$artifact" | awk '{print $1}')"
+    sbom_sha="$(sha256sum "$BUNDLE_ROOT/SBOM.spdx" | awk '{print $1}')"
+    cat >"$output" <<MANIFEST
+{
+  "schema": 1,
+  "product": "Orvix Enterprise Mail",
+  "version": "$RESOLVED_VERSION",
+  "channel": "$RESOLVED_CHANNEL",
+  "commit": "$GIT_COMMIT",
+  "build_time": "$GIT_BUILD_TIME",
+  "target": "$TARGET_OS/$TARGET_ARCH",
+  "artifact": "$(basename "$artifact")",
+  "artifact_sha256": "$artifact_sha",
+  "sbom": "SBOM.spdx",
+  "sbom_sha256": "$sbom_sha"
+}
+MANIFEST
+}
+
+cp "$BUNDLE_ROOT/SBOM.spdx" "$ARCHIVE.sbom.spdx"
+cp "$BUNDLE_ROOT/SBOM.spdx" "$STABLE_ARCHIVE.sbom.spdx"
+write_release_manifest "$ARCHIVE" "$ARCHIVE.manifest.json"
+write_release_manifest "$STABLE_ARCHIVE" "$STABLE_ARCHIVE.manifest.json"
+
+# Signing is deliberately keyless by default. A release operator/CI must
+# provide a private Ed25519 key outside the repository. The corresponding
+# public key is distributed through the independently managed trust channel.
+if [ -n "${ORVIX_RELEASE_SIGNING_KEY_FILE:-}" ]; then
+    for artifact in "$ARCHIVE" "$ARCHIVE.manifest.json" "$ARCHIVE.sbom.spdx" "$STABLE_ARCHIVE" "$STABLE_ARCHIVE.manifest.json" "$STABLE_ARCHIVE.sbom.spdx"; do
+        bash release/scripts/sign-release-artifact.sh "$artifact" "$ORVIX_RELEASE_SIGNING_KEY_FILE" "$artifact.sig" \
+            || fail "release signing failed for $(basename "$artifact")" 4
+    done
+    if [ -n "${ORVIX_RELEASE_VERIFYING_KEY_FILE:-}" ]; then
+        for artifact in "$ARCHIVE" "$ARCHIVE.manifest.json" "$ARCHIVE.sbom.spdx" "$STABLE_ARCHIVE" "$STABLE_ARCHIVE.manifest.json" "$STABLE_ARCHIVE.sbom.spdx"; do
+            bash release/scripts/verify-release-signature.sh "$artifact" "$artifact.sig" "$ORVIX_RELEASE_VERIFYING_KEY_FILE" \
+                || fail "release signature self-check failed for $(basename "$artifact")" 4
+        done
+    fi
+elif [ "${ORVIX_REQUIRE_RELEASE_SIGNATURE:-}" = "1" ]; then
+    fail "release signature required but ORVIX_RELEASE_SIGNING_KEY_FILE is not configured" 4
+fi
 
 # Pull the binary out of the tarball and re-run version to be 100%
 # sure the sealed binary is the same one we built (catches a corrupt

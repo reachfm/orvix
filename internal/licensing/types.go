@@ -22,6 +22,7 @@ func (e Edition) Valid() bool {
 }
 
 type License struct {
+	KeyID          string    `json:"keyId,omitempty"`
 	LicenseID      string    `json:"licenseId"`
 	Edition        Edition   `json:"edition"`
 	IssuedAt       time.Time `json:"issuedAt"`

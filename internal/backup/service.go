@@ -56,7 +56,17 @@ type Service struct {
 	// needs its own connection string for pg_dump — a *sql.DB
 	// handle cannot be reused by an external process. Empty in
 	// SQLite deployments, where it is never read.
-	postgresDSN string
+	postgresDSN  string
+	databasePath string
+
+	// restoreMaintenanceCheck must return nil only when the operator has put
+	// Orvix into an explicit restore maintenance state. Production wiring sets
+	// this to a file/flag check; tests set it deliberately. A nil checker is
+	// fail-closed for RestoreBackup.
+	restoreMaintenanceCheck func(context.Context) error
+	restoreHealthCheck      func(context.Context) error
+	restoreRestart          func(context.Context) error
+	restoreAudit            func(context.Context, string, string)
 
 	// postCreateHook is invoked once a successful
 	// CreateBackup completes, with the local archive
@@ -72,6 +82,8 @@ type Service struct {
 	// encryptedBackups enables backup encryption using a password-derived AES-256-GCM key.
 	// When non-nil, CreateBackup encrypts data before writing and RestoreBackup decrypts.
 	encryptedBackups *BackupEncryptionConfig
+	encryptionKey    []byte
+	encryptFile      func([]byte, string, string) error
 
 	mu sync.Mutex
 }
@@ -90,6 +102,7 @@ func NewService(basePath string, db, mailStoreDB *sql.DB, mailDir, attachDir str
 		mailStoreDB: mailStoreDB,
 		mailDir:     mailDir,
 		attachDir:   attachDir,
+		encryptFile: EncryptBackupFile,
 	}
 }
 
@@ -126,29 +139,65 @@ func (s *Service) AddKeyPath(path string) { s.keyPaths = append(s.keyPaths, path
 // (never read) on SQLite deployments.
 func (s *Service) SetPostgresDSN(dsn string) { s.postgresDSN = dsn }
 
-// SetEncryptionKey derives an AES-256-GCM key from password and enables encryption.
-func (s *Service) SetEncryptionKey(password string) error {
-	salt := []byte(fmt.Sprintf("orvix-backup-salt-%d", time.Now().UnixNano())[:32])
-	BackupEncryptionKey = DeriveBackupKey(password, salt)
-	s.encryptedBackups = &BackupEncryptionConfig{Enabled: true}
+// SetDatabasePath sets the SQLite database path to replace during an
+// operational restore. PostgreSQL restores use SetPostgresDSN instead.
+func (s *Service) SetDatabasePath(path string) { s.databasePath = path }
+
+// SetRestoreMaintenanceChecker installs the fail-closed maintenance-mode gate
+// required before any restore activation can mutate live state.
+func (s *Service) SetRestoreMaintenanceChecker(fn func(context.Context) error) {
+	s.restoreMaintenanceCheck = fn
+}
+
+// SetRestoreHealthCheck installs a post-activation health gate. A failing
+// health check triggers rollback to the pre-restore safety backup.
+func (s *Service) SetRestoreHealthCheck(fn func(context.Context) error) { s.restoreHealthCheck = fn }
+
+// SetRestoreRestart installs the service restart/reload operation used after
+// activation and rollback. It is explicit so tests can run without systemd.
+func (s *Service) SetRestoreRestart(fn func(context.Context) error) { s.restoreRestart = fn }
+
+// SetRestoreAuditHook installs a minimal audit hook for restore lifecycle
+// events without coupling the backup package to the admin API.
+func (s *Service) SetRestoreAuditHook(fn func(context.Context, string, string)) {
+	s.restoreAudit = fn
+}
+
+// SetEncryptionConfig loads a stable service-owned AES-256 key. The key is
+// never global and never derived from an unpersisted salt, so encrypted
+// backups remain recoverable after a process restart.
+func (s *Service) SetEncryptionConfig(cfg BackupEncryptionConfig) error {
+	if !cfg.Enabled {
+		s.encryptedBackups = &BackupEncryptionConfig{}
+		s.encryptionKey = nil
+		return nil
+	}
+	if cfg.KeyFile == "" {
+		return fmt.Errorf("backup encryption key file is required when encryption is enabled")
+	}
+	key, err := LoadBackupEncryptionKey(cfg.KeyFile)
+	if err != nil {
+		return err
+	}
+	s.encryptedBackups = &cfg
+	s.encryptionKey = key
 	return nil
 }
 
-// SetEncryptionConfig stores the encryption configuration and derives a key if a password is provided.
-func (s *Service) SetEncryptionConfig(cfg BackupEncryptionConfig) error {
-	s.encryptedBackups = &cfg
-	if cfg.Password != "" {
-		salt := []byte(fmt.Sprintf("orvix-backup-salt-%d", time.Now().UnixNano())[:32])
-		BackupEncryptionKey = DeriveBackupKey(cfg.Password, salt)
+// SetEncryptionKeyBytes is an explicit test/operator seam for callers that
+// already hold a securely provisioned 32-byte key. Production wiring uses
+// SetEncryptionConfig with a root-owned key file.
+func (s *Service) SetEncryptionKeyBytes(key []byte) error {
+	if err := validateBackupKey(key); err != nil {
+		return err
 	}
-	if cfg.KeyFile != "" {
-		data, err := os.ReadFile(cfg.KeyFile)
-		if err != nil {
-			return fmt.Errorf("read key file: %w", err)
-		}
-		BackupEncryptionKey = data
-	}
+	s.encryptedBackups = &BackupEncryptionConfig{Enabled: true}
+	s.encryptionKey = append([]byte(nil), key...)
 	return nil
+}
+
+func (s *Service) encryptionEnabled() bool {
+	return s.encryptedBackups != nil && s.encryptedBackups.Enabled && len(s.encryptionKey) == 32
 }
 
 func (s *Service) ensureBasePath() error { return os.MkdirAll(s.basePath, 0750) }
@@ -383,17 +432,25 @@ func (s *Service) createBackupLocked(ctx context.Context, name string) (*Backup,
 		}
 	}
 
-	// Copy key files (DKIM, JWT, VAPID, etc.)
-	for _, kp := range s.keyPaths {
-		if kp == "" {
-			continue
-		}
-		if data, err := os.ReadFile(kp); err == nil {
+	// Secret key material is included only when the final archive will be
+	// encrypted. Plaintext/development backups intentionally omit it.
+	if s.encryptionEnabled() {
+		for _, kp := range s.keyPaths {
+			if kp == "" {
+				continue
+			}
+			data, readErr := os.ReadFile(kp)
+			if readErr != nil {
+				os.RemoveAll(bp)
+				return nil, fmt.Errorf("read backup key material: %w", readErr)
+			}
 			baseName := filepath.Base(kp)
 			keyDest := filepath.Join(bp, baseName)
-			if err := os.WriteFile(keyDest, data, 0600); err == nil {
-				manifest.Files[baseName] = fileSHA256(keyDest)
+			if err := os.WriteFile(keyDest, data, 0600); err != nil {
+				os.RemoveAll(bp)
+				return nil, fmt.Errorf("stage backup key material: %w", err)
 			}
+			manifest.Files[baseName] = fileSHA256(keyDest)
 		}
 	}
 
@@ -410,77 +467,122 @@ func (s *Service) createBackupLocked(ctx context.Context, name string) (*Backup,
 	manifest.SHA256 = sha
 	manifest.SizeBytes = totalSize
 
-	now := time.Now().UTC()
-	backup.CompletedAt = &now
-	backup.Status = StatusCompleted
-	manifest.CompletedAt = &now
-
 	manifestBytes, _ := json.Marshal(manifest)
-	os.WriteFile(filepath.Join(bp, "manifest.json"), manifestBytes, 0640)
+	if err := os.WriteFile(filepath.Join(bp, "manifest.json"), manifestBytes, 0640); err != nil {
+		os.RemoveAll(bp)
+		return nil, fmt.Errorf("write backup manifest: %w", err)
+	}
 
-	s.saveToRegistry(ctx, backup)
 	s.populateManifestCounts(ctx, &manifest)
 
 	manifestBytes, _ = json.Marshal(manifest)
-	os.WriteFile(filepath.Join(bp, "manifest.json"), manifestBytes, 0640)
+	if err := os.WriteFile(filepath.Join(bp, "manifest.json"), manifestBytes, 0640); err != nil {
+		os.RemoveAll(bp)
+		return nil, fmt.Errorf("update backup manifest: %w", err)
+	}
 
 	// Build the final tar.gz archive. We do this AFTER
 	// all in-place files are written so the archive
 	// captures the manifest + manifest counts that the
 	// UI / downstream consumers expect.
-	archivePath, archiveErr := archiveBackupDir(bp, backup.ID)
+	archivePath, archiveErr := s.CreateArchive(ctx, backup.ID)
 	if archiveErr != nil {
-		// An archive failure cannot corrupt the local
-		// backup, only the remote-upload path. We log it
-		// and continue; the row remains in completed
-		// status because the local files are still valid
-		// for restore via the directory path.
-		if s.db != nil {
-			_, _ = s.db.ExecContext(ctx,
-				fmt.Sprintf("UPDATE backup_registry SET last_test_message=%s WHERE id=%s", s.dialect.Placeholder(1), s.dialect.Placeholder(2)),
-				"archive_failed:"+archiveErr.Error(), backup.ID)
+		s.removeStagedRecoveryKeys(bp)
+		backup.Status = StatusFailed
+		_ = s.saveToRegistry(ctx, backup)
+		return nil, fmt.Errorf("create canonical backup archive: %w", archiveErr)
+	}
+	if s.encryptionEnabled() {
+		encryptedPath := archivePath + ".enc"
+		if err := s.encryptFile(s.encryptionKey, archivePath, encryptedPath); err != nil {
+			s.removePlaintextSensitiveArtifacts(bp, archivePath)
+			backup.Status = StatusFailed
+			_ = s.saveToRegistry(ctx, backup)
+			return nil, fmt.Errorf("encrypt backup archive: %w", err)
 		}
-	} else {
-		if s.encryptedBackups != nil && s.encryptedBackups.Enabled {
-			archiveData, err := os.ReadFile(archivePath)
-			if err == nil {
-				encrypted, encErr := EncryptBackup(archiveData)
-				if encErr == nil {
-					if writeErr := os.WriteFile(archivePath, encrypted, 0600); writeErr == nil {
-						manifest.Encrypted = true
-						manifest.Checksum = ComputeBackupChecksum(encrypted)
-						manifestBytes, _ = json.Marshal(manifest)
-						os.WriteFile(filepath.Join(bp, "manifest.json"), manifestBytes, 0640)
-					}
-				}
-			}
+		checksum, err := writeArchiveSidecar(encryptedPath)
+		if err != nil {
+			_ = os.Remove(encryptedPath)
+			s.removePlaintextSensitiveArtifacts(bp, archivePath)
+			backup.Status = StatusFailed
+			_ = s.saveToRegistry(ctx, backup)
+			return nil, fmt.Errorf("write encrypted backup checksum: %w", err)
 		}
-		if s.postCreateHook != nil {
-			// Fire the post-create hook (target upload). The
-			// hook runs in its own goroutine so a slow /
-			// timing-out upload never blocks the return to
-			// the admin caller.
-			hook := s.postCreateHook
-			go func(id, path string) {
-				defer func() {
-					_ = recover()
-				}()
-				hook(id, path)
-			}(backup.ID, archivePath)
+		manifest.Encrypted = true
+		manifest.Checksum = checksum
+		manifestBytes, _ = json.Marshal(manifest)
+		if err := os.WriteFile(filepath.Join(bp, "manifest.json"), manifestBytes, 0640); err != nil {
+			_ = os.Remove(encryptedPath)
+			_ = os.Remove(encryptedPath + ".sha256")
+			s.removePlaintextSensitiveArtifacts(bp, archivePath)
+			backup.Status = StatusFailed
+			_ = s.saveToRegistry(ctx, backup)
+			return nil, fmt.Errorf("write encrypted backup manifest: %w", err)
 		}
+		// Only after the encrypted artifact and checksum are durable do we
+		// remove the plaintext archive and staged payloads.
+		_ = os.Remove(archivePath)
+		_ = os.Remove(archivePath + ".sha256")
+		for name := range manifest.Files {
+			_ = os.Remove(filepath.Join(bp, name))
+		}
+		archivePath = encryptedPath
+	}
+	info, err := os.Stat(archivePath)
+	if err != nil {
+		backup.Status = StatusFailed
+		_ = s.saveToRegistry(ctx, backup)
+		return nil, fmt.Errorf("stat canonical backup archive: %w", err)
+	}
+	backup.SizeBytes = info.Size()
+	backup.SHA256 = fileSHA256(archivePath)
+	now := time.Now().UTC()
+	backup.CompletedAt = &now
+	backup.Status = StatusCompleted
+	manifest.CompletedAt = &now
+	if err := s.saveToRegistry(ctx, backup); err != nil {
+		return nil, fmt.Errorf("record completed backup: %w", err)
+	}
+
+	if s.postCreateHook != nil {
+		// Fire the post-create hook (target upload). The
+		// hook runs in its own goroutine so a slow /
+		// timing-out upload never blocks the return to
+		// the admin caller.
+		hook := s.postCreateHook
+		go func(id, path string) {
+			defer func() {
+				_ = recover()
+			}()
+			hook(id, path)
+		}(backup.ID, archivePath)
 	}
 
 	return backup, nil
 }
 
-func (s *Service) setFailed(ctx context.Context, b *Backup, reason string) {
-	b.Status = StatusFailed
-	s.saveToRegistry(ctx, b)
+func (s *Service) removeStagedRecoveryKeys(backupPath string) {
+	for _, keyPath := range s.keyPaths {
+		if keyPath != "" {
+			_ = os.Remove(filepath.Join(backupPath, filepath.Base(keyPath)))
+		}
+	}
 }
 
-func (s *Service) saveToRegistry(ctx context.Context, b *Backup) {
+func (s *Service) removePlaintextSensitiveArtifacts(backupPath, archivePath string) {
+	_ = os.Remove(archivePath)
+	_ = os.Remove(archivePath + ".sha256")
+	s.removeStagedRecoveryKeys(backupPath)
+}
+
+func (s *Service) setFailed(ctx context.Context, b *Backup, reason string) {
+	b.Status = StatusFailed
+	_ = s.saveToRegistry(ctx, b)
+}
+
+func (s *Service) saveToRegistry(ctx context.Context, b *Backup) error {
 	if s.db == nil {
-		return
+		return nil
 	}
 	q := s.dialect.Upsert(
 		"backup_registry",
@@ -488,7 +590,8 @@ func (s *Service) saveToRegistry(ctx context.Context, b *Backup) {
 		[]string{"id"},
 		[]string{"name", "status", "size_bytes", "sha256", "created_at", "completed_at"},
 	)
-	s.db.ExecContext(ctx, q, b.ID, b.Name, string(b.Status), b.SizeBytes, b.SHA256, b.CreatedAt, b.CompletedAt)
+	_, err := s.db.ExecContext(ctx, q, b.ID, b.Name, string(b.Status), b.SizeBytes, b.SHA256, b.CreatedAt, b.CompletedAt)
+	return err
 }
 
 func (s *Service) populateManifestCounts(ctx context.Context, m *BackupManifest) {
@@ -983,14 +1086,20 @@ func redactEnvFile(input []byte) []byte {
 //
 // Large payloads (DB, mail store) are streamed through the tar writer
 // and hashed incrementally so the archive is never fully in memory.
-// Sensitive files (.env, .key, .pem, .crt, .p12, .pfx, license, token files)
-// are NEVER included.
+// Recovery-critical key files explicitly registered with AddKeyPath are
+// included only when the canonical archive is encrypted. Other sensitive
+// files are excluded, and the configuration copy is redacted.
 func (s *Service) CreateArchive(ctx context.Context, backupID string) (string, error) {
 	bp, err := s.safeBackupPath(backupID)
 	if err != nil {
 		return "", err
 	}
 	archivePath := filepath.Join(bp, "backup-archive.tar.gz")
+	if s.encryptionEnabled() {
+		if _, err := os.Stat(archivePath + ".enc"); err == nil {
+			return archivePath + ".enc", nil
+		}
+	}
 
 	f, err := os.Create(archivePath)
 	if err != nil {
@@ -999,6 +1108,16 @@ func (s *Service) CreateArchive(ctx context.Context, backupID string) (string, e
 
 	gw := gzip.NewWriter(f)
 	tw := tar.NewWriter(gw)
+	archiveComplete := false
+	defer func() {
+		if !archiveComplete {
+			_ = tw.Close()
+			_ = gw.Close()
+			_ = f.Close()
+			_ = os.Remove(archivePath)
+			_ = os.Remove(archivePath + ".sha256")
+		}
+	}()
 
 	// Collect file items with their sha256 for the manifest and checksums.txt.
 	var items []ManifestItem
@@ -1046,7 +1165,25 @@ func (s *Service) CreateArchive(ctx context.Context, backupID string) (string, e
 		}
 	}
 
-	// 2. Redacted config (small metadata, read into memory)
+	// 2. Mail data and attachments. These are already consistent snapshots
+	// created by CreateBackup; they must be present in the canonical archive
+	// or a disaster recovery would restore metadata without message bodies.
+	for _, item := range []struct {
+		tarName string
+		source  string
+	}{
+		{tarName: "var/lib/orvix/mailstore.tar.gz", source: filepath.Join(bp, "mailstore.tar.gz")},
+		{tarName: "var/lib/orvix/attachments.tar.gz", source: filepath.Join(bp, "attachments.tar.gz")},
+	} {
+		if _, err := os.Stat(item.source); err != nil {
+			return "", fmt.Errorf("required backup payload missing: %s", filepath.Base(item.source))
+		}
+		if err := writeStreamEntry(item.tarName, item.source); err != nil {
+			return "", fmt.Errorf("archive %s: %w", filepath.Base(item.source), err)
+		}
+	}
+
+	// 3. Redacted config (small metadata, read into memory)
 	cfgPath := s.configPath
 	if cfgPath == "" {
 		cfgPath = "/etc/orvix/orvix.yaml"
@@ -1058,7 +1195,7 @@ func (s *Service) CreateArchive(ctx context.Context, backupID string) (string, e
 		}
 	}
 
-	// 3. .env files if present (redacted)
+	// 4. .env files if present (redacted)
 	envDir := filepath.Dir(cfgPath)
 	envPattern := filepath.Join(envDir, "*.env")
 	if envMatches, err := filepath.Glob(envPattern); err == nil {
@@ -1069,6 +1206,21 @@ func (s *Service) CreateArchive(ctx context.Context, backupID string) (string, e
 				if err := writeBufEntry(relName, redacted); err != nil {
 					return "", fmt.Errorf("archive env: %w", err)
 				}
+			}
+		}
+	}
+
+	// 5. Recovery key material is allowed only inside an encrypted archive.
+	// The source files were copied into the backup directory with 0600 mode.
+	if s.encryptionEnabled() {
+		for _, keyPath := range s.keyPaths {
+			name := filepath.Base(keyPath)
+			staged := filepath.Join(bp, name)
+			if _, err := os.Stat(staged); err != nil {
+				return "", fmt.Errorf("required recovery key missing: %s", name)
+			}
+			if err := writeStreamEntry("etc/orvix/secrets/"+name, staged); err != nil {
+				return "", fmt.Errorf("archive recovery key %s: %w", name, err)
 			}
 		}
 	}
@@ -1090,27 +1242,25 @@ func (s *Service) CreateArchive(ctx context.Context, backupID string) (string, e
 		ConfigSummaryRedacted: true,
 	}
 	manifestData, _ := json.MarshalIndent(manifest, "", "  ")
-	fileHash := sha256.Sum256(manifestData)
-	items = append(items, ManifestItem{Path: "backup.json", Size: int64(len(manifestData)), SHA256: hex.EncodeToString(fileHash[:])})
 
-	// 4. Write manifest
+	// 6. Write manifest
 	if err := writeBufEntry("backup.json", manifestData); err != nil {
 		return "", fmt.Errorf("archive manifest: %w", err)
 	}
 
-	// 5. Write RESTORE_INSTRUCTIONS.txt
+	// 7. Write RESTORE_INSTRUCTIONS.txt
 	instructions := `Orvix Enterprise Mail — Restore Instructions
 
 This archive contains a backup of the Orvix Enterprise Mail system.
 
 What is included:
-  - SQLite database snapshot (var/lib/orvix/orvix.db)
+  - Metadata database snapshot (var/lib/orvix/orvix.db)
+  - Message store snapshot (var/lib/orvix/mailstore.tar.gz)
+  - Attachment snapshot (var/lib/orvix/attachments.tar.gz)
   - Server configuration (etc/orvix/orvix.yaml.redacted)
   - Environment files, if present (etc/orvix/*.env.redacted)
 
 What is NOT included (for security):
-  - TLS private keys
-  - DKIM private keys
   - Provider API tokens
   - Raw secrets in plaintext
 
@@ -1130,7 +1280,7 @@ then use the admin panel to restore from this backup.
 		return "", fmt.Errorf("archive instructions: %w", err)
 	}
 
-	// 6. Write checksums.txt
+	// 8. Write checksums.txt
 	var checksums strings.Builder
 	for _, it := range items {
 		checksums.WriteString(fmt.Sprintf("%s  %s\n", it.SHA256, it.Path))
@@ -1153,23 +1303,30 @@ then use the admin panel to restore from this backup.
 		return "", fmt.Errorf("close archive: %w", err)
 	}
 
-	// Compute final archive sha256 by streaming the file (not ReadFile).
-	sidecarPath := archivePath + ".sha256"
-	sidecarFile, err := os.Open(archivePath)
-	if err != nil {
-		return "", fmt.Errorf("open archive for sidecar: %w", err)
-	}
-	defer sidecarFile.Close()
-	sidecarHash := sha256.New()
-	if _, err := io.Copy(sidecarHash, sidecarFile); err != nil {
-		return "", fmt.Errorf("hash archive for sidecar: %w", err)
-	}
-	sidecarData := hex.EncodeToString(sidecarHash.Sum(nil)) + "  " + filepath.Base(archivePath) + "\n"
-	if err := os.WriteFile(sidecarPath, []byte(sidecarData), 0640); err != nil {
-		return "", fmt.Errorf("write sidecar: %w", err)
+	if _, err := writeArchiveSidecar(archivePath); err != nil {
+		return "", err
 	}
 
+	archiveComplete = true
 	return archivePath, nil
+}
+
+func writeArchiveSidecar(archivePath string) (string, error) {
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return "", fmt.Errorf("open archive for checksum: %w", err)
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", fmt.Errorf("hash archive: %w", err)
+	}
+	sum := hex.EncodeToString(h.Sum(nil))
+	data := sum + "  " + filepath.Base(archivePath) + "\n"
+	if err := os.WriteFile(archivePath+".sha256", []byte(data), 0o640); err != nil {
+		return "", fmt.Errorf("write archive checksum: %w", err)
+	}
+	return sum, nil
 }
 
 // ValidateBackup validates the on-disk backup directory contents.
@@ -1268,78 +1425,356 @@ func (s *Service) safeStagingPath(id string) (string, error) {
 	return absCandidate, nil
 }
 
-// RestoreBackup validates the backup archive and stages it for restore.
-// Phase 2H: does NOT overwrite live data. Returns staged status.
+// RestoreBackup validates the backup archive and activates it while Orvix is
+// in explicit restore maintenance mode. It creates a pre-restore safety
+// backup first, verifies the archive manifest/checksums, extracts into a
+// private staging directory, activates database/mail/attachment payloads,
+// restarts/reloads if configured, runs health verification, and rolls back to
+// the safety backup on activation or health failure.
 func (s *Service) RestoreBackup(ctx context.Context, id string) (*RestoreStageResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// 1. Validate the archive first.
+	if s.restoreMaintenanceCheck == nil {
+		return nil, fmt.Errorf("restore maintenance mode checker is not configured")
+	}
+	if err := s.restoreMaintenanceCheck(ctx); err != nil {
+		return nil, fmt.Errorf("restore maintenance mode is not active: %w", err)
+	}
+	s.auditRestore(ctx, "backup.restore.start", "backup_id:"+id)
+
+	// 1. Validate the archive before creating any new state.
 	vr, err := s.validateArchiveLocked(ctx, id)
 	if err != nil {
+		s.auditRestore(ctx, "backup.restore.failed", "backup_id:"+id+"|phase:validate|error:"+err.Error())
 		return nil, fmt.Errorf("pre-restore validation: %w", err)
 	}
 	if !vr.Valid {
+		msg := "Archive validation failed: " + strings.Join(vr.Errors, "; ")
+		s.auditRestore(ctx, "backup.restore.failed", "backup_id:"+id+"|phase:validate")
 		return &RestoreStageResult{
 			Status:  RestoreStatusFailed,
-			Message: "Archive validation failed: " + strings.Join(vr.Errors, "; "),
+			Message: msg,
 		}, nil
 	}
 
-	// 2. Create a pre-restore safety backup.
+	// 2. Create a pre-restore safety backup before destructive activation.
 	safetyName := fmt.Sprintf("pre-restore-safety-%s-%s", id, time.Now().UTC().Format("20060102-150405"))
 	safetyBackup, err := s.createBackupLocked(ctx, safetyName)
 	if err != nil {
+		s.auditRestore(ctx, "backup.restore.failed", "backup_id:"+id+"|phase:safety|error:"+err.Error())
 		return nil, fmt.Errorf("pre-restore safety backup failed: %w", err)
 	}
 
-	// 3. Create staging directory with safe path resolution.
-	stagingDir, err := s.safeStagingPath(id)
+	// 3. Extract the requested backup into a clean staging directory.
+	stagingDir, cleanup, err := s.stageBackupArchiveLocked(id, "activate")
 	if err != nil {
-		return nil, fmt.Errorf("safe staging path: %w", err)
-	}
-	if err := os.MkdirAll(stagingDir, 0750); err != nil {
-		return nil, fmt.Errorf("create staging dir: %w", err)
-	}
-
-	// 4. Extract archive to staging directory.
-	bp, err := s.safeBackupPath(id)
-	if err != nil {
+		s.auditRestore(ctx, "backup.restore.failed", "backup_id:"+id+"|phase:stage|error:"+err.Error())
 		return nil, err
 	}
-	archivePath := filepath.Join(bp, "backup-archive.tar.gz")
+	defer cleanup()
 
-	manifestPath := filepath.Join(bp, "manifest.json")
-	if data, err := os.ReadFile(manifestPath); err == nil {
-		var manifest BackupManifest
-		if json.Unmarshal(data, &manifest) == nil && manifest.Encrypted {
-			archiveData, err := os.ReadFile(archivePath)
-			if err != nil {
-				return nil, fmt.Errorf("read encrypted archive: %w", err)
-			}
-			decrypted, err := DecryptBackup(archiveData)
-			if err != nil {
-				return nil, fmt.Errorf("decrypt archive: %w", err)
-			}
-			tmpPath := archivePath + ".decrypted"
-			if err := os.WriteFile(tmpPath, decrypted, 0600); err != nil {
-				return nil, fmt.Errorf("write decrypted archive: %w", err)
-			}
-			defer os.Remove(tmpPath)
-			archivePath = tmpPath
+	if err := s.activateStagedRestoreLocked(ctx, stagingDir); err != nil {
+		return s.rollbackRestoreLocked(ctx, id, safetyBackup.ID, fmt.Errorf("activation failed: %w", err))
+	}
+	if s.restoreRestart != nil {
+		if err := s.restoreRestart(ctx); err != nil {
+			return s.rollbackRestoreLocked(ctx, id, safetyBackup.ID, fmt.Errorf("restart after restore failed: %w", err))
 		}
 	}
-
-	if err := extractTarGz(archivePath, stagingDir); err != nil {
-		return nil, fmt.Errorf("extract to staging: %w", err)
+	if s.restoreHealthCheck != nil {
+		if err := s.restoreHealthCheck(ctx); err != nil {
+			return s.rollbackRestoreLocked(ctx, id, safetyBackup.ID, fmt.Errorf("post-restore health check failed: %w", err))
+		}
 	}
-
+	s.auditRestore(ctx, "backup.restore.activated", "backup_id:"+id+"|safety_backup_id:"+safetyBackup.ID)
 	return &RestoreStageResult{
-		Status:      RestoreStatusStaged,
-		Message:     RestoreStagedMessage,
-		BackupID:    safetyBackup.ID,
-		StagingPath: stagingDir,
+		Status:         RestoreStatusActivated,
+		Message:        RestoreActivatedMessage,
+		BackupID:       id,
+		SafetyBackupID: safetyBackup.ID,
 	}, nil
+}
+
+func (s *Service) auditRestore(ctx context.Context, event, detail string) {
+	if s.restoreAudit != nil {
+		s.restoreAudit(ctx, event, detail)
+	}
+}
+
+func (s *Service) rollbackRestoreLocked(ctx context.Context, sourceID, safetyID string, cause error) (*RestoreStageResult, error) {
+	s.auditRestore(ctx, "backup.restore.rollback_start", "backup_id:"+sourceID+"|safety_backup_id:"+safetyID+"|error:"+cause.Error())
+	rollbackDir, cleanup, err := s.stageBackupArchiveLocked(safetyID, "rollback")
+	if err != nil {
+		s.auditRestore(ctx, "backup.restore.rollback_failed", "backup_id:"+sourceID+"|safety_backup_id:"+safetyID+"|error:"+err.Error())
+		return &RestoreStageResult{
+			Status:         RestoreStatusFailed,
+			Message:        cause.Error() + "; rollback staging failed: " + err.Error(),
+			BackupID:       sourceID,
+			SafetyBackupID: safetyID,
+		}, cause
+	}
+	defer cleanup()
+	if err := s.activateStagedRestoreLocked(ctx, rollbackDir); err != nil {
+		s.auditRestore(ctx, "backup.restore.rollback_failed", "backup_id:"+sourceID+"|safety_backup_id:"+safetyID+"|error:"+err.Error())
+		return &RestoreStageResult{
+			Status:         RestoreStatusFailed,
+			Message:        cause.Error() + "; rollback activation failed: " + err.Error(),
+			BackupID:       sourceID,
+			SafetyBackupID: safetyID,
+		}, cause
+	}
+	if s.restoreRestart != nil {
+		if err := s.restoreRestart(ctx); err != nil {
+			s.auditRestore(ctx, "backup.restore.rollback_failed", "backup_id:"+sourceID+"|safety_backup_id:"+safetyID+"|error:"+err.Error())
+			return &RestoreStageResult{
+				Status:         RestoreStatusFailed,
+				Message:        cause.Error() + "; rollback restart failed: " + err.Error(),
+				BackupID:       sourceID,
+				SafetyBackupID: safetyID,
+			}, cause
+		}
+	}
+	s.auditRestore(ctx, "backup.restore.rolled_back", "backup_id:"+sourceID+"|safety_backup_id:"+safetyID)
+	return &RestoreStageResult{
+		Status:         RestoreStatusRolledBack,
+		Message:        cause.Error() + "; rolled back to pre-restore safety backup",
+		BackupID:       sourceID,
+		SafetyBackupID: safetyID,
+		RolledBack:     true,
+	}, cause
+}
+
+func (s *Service) stageBackupArchiveLocked(id, phase string) (string, func(), error) {
+	stagingID := id + "-" + phase + "-" + time.Now().UTC().Format("20060102150405.000000000")
+	stagingDir, err := s.safeStagingPath(stagingID)
+	if err != nil {
+		return "", func() {}, fmt.Errorf("safe staging path: %w", err)
+	}
+	if err := os.RemoveAll(stagingDir); err != nil {
+		return "", func() {}, fmt.Errorf("clear staging dir: %w", err)
+	}
+	if err := os.MkdirAll(stagingDir, 0750); err != nil {
+		return "", func() {}, fmt.Errorf("create staging dir: %w", err)
+	}
+	archivePath, cleanupArchive, err := s.materializeArchiveLocked(id)
+	if err != nil {
+		_ = os.RemoveAll(stagingDir)
+		return "", cleanupArchive, err
+	}
+	if err := extractTarGz(archivePath, stagingDir); err != nil {
+		cleanupArchive()
+		_ = os.RemoveAll(stagingDir)
+		return "", func() {}, fmt.Errorf("extract to staging: %w", err)
+	}
+	cleanup := func() {
+		cleanupArchive()
+		_ = os.RemoveAll(stagingDir)
+	}
+	return stagingDir, cleanup, nil
+}
+
+func (s *Service) activateStagedRestoreLocked(ctx context.Context, stagingDir string) error {
+	manifest, err := readArchiveManifest(stagingDir)
+	if err != nil {
+		return err
+	}
+	if manifest.Product != ProductName {
+		return fmt.Errorf("restore product mismatch: %q", manifest.Product)
+	}
+	if manifest.BackupFormatVersion != BackupFormatVersion {
+		return fmt.Errorf("unsupported backup format version %d", manifest.BackupFormatVersion)
+	}
+	dbSnapshot := filepath.Join(stagingDir, "var", "lib", "orvix", "orvix.db")
+	if _, err := os.Stat(dbSnapshot); err != nil {
+		return fmt.Errorf("staged database snapshot missing: %w", err)
+	}
+	if s.dialect != nil && s.dialect.IsPostgres() {
+		if err := s.restorePostgres(ctx, dbSnapshot); err != nil {
+			return err
+		}
+	} else {
+		if s.databasePath == "" {
+			return fmt.Errorf("sqlite restore target path is not configured")
+		}
+		if err := replaceFileAtomically(dbSnapshot, s.databasePath, 0640); err != nil {
+			return fmt.Errorf("activate sqlite database: %w", err)
+		}
+	}
+	if err := s.activateArchiveDir(filepath.Join(stagingDir, "var", "lib", "orvix", "mailstore.tar.gz"), s.mailDir, 0750); err != nil {
+		return fmt.Errorf("activate mailstore: %w", err)
+	}
+	if err := s.activateArchiveDir(filepath.Join(stagingDir, "var", "lib", "orvix", "attachments.tar.gz"), s.attachDir, 0750); err != nil {
+		return fmt.Errorf("activate attachments: %w", err)
+	}
+	if err := s.restoreKeyMaterial(stagingDir); err != nil {
+		return err
+	}
+	return s.repairRestorePermissions()
+}
+
+func readArchiveManifest(stagingDir string) (*BackupArchiveManifest, error) {
+	data, err := os.ReadFile(filepath.Join(stagingDir, "backup.json"))
+	if err != nil {
+		return nil, fmt.Errorf("read backup manifest: %w", err)
+	}
+	var manifest BackupArchiveManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return nil, fmt.Errorf("parse backup manifest: %w", err)
+	}
+	return &manifest, nil
+}
+
+func (s *Service) restorePostgres(ctx context.Context, dumpPath string) error {
+	if s.postgresDSN == "" {
+		return fmt.Errorf("postgres restore: no connection string configured")
+	}
+	pgRestore, err := exec.LookPath("pg_restore")
+	if err != nil {
+		return fmt.Errorf("postgres restore: pg_restore not found in PATH: %w", err)
+	}
+	cmd := exec.CommandContext(ctx, pgRestore,
+		"--clean",
+		"--if-exists",
+		"--no-owner",
+		"--no-privileges",
+		"--dbname="+s.postgresDSN,
+		dumpPath,
+	)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("pg_restore failed: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+func (s *Service) activateArchiveDir(archivePath, targetDir string, mode fs.FileMode) error {
+	if targetDir == "" {
+		return fmt.Errorf("target directory is not configured")
+	}
+	if _, err := os.Stat(archivePath); err != nil {
+		return fmt.Errorf("staged archive missing: %w", err)
+	}
+	parent := filepath.Dir(targetDir)
+	if err := os.MkdirAll(parent, 0750); err != nil {
+		return err
+	}
+	tmpDir := targetDir + ".restore-new-" + time.Now().UTC().Format("20060102150405.000000000")
+	if err := os.RemoveAll(tmpDir); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(tmpDir, mode); err != nil {
+		return err
+	}
+	if err := extractTarGz(archivePath, tmpDir); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return err
+	}
+	previous := targetDir + ".restore-prev-" + time.Now().UTC().Format("20060102150405.000000000")
+	hadPrevious := false
+	if _, err := os.Stat(targetDir); err == nil {
+		hadPrevious = true
+		if err := os.Rename(targetDir, previous); err != nil {
+			_ = os.RemoveAll(tmpDir)
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		_ = os.RemoveAll(tmpDir)
+		return err
+	}
+	if err := os.Rename(tmpDir, targetDir); err != nil {
+		if hadPrevious {
+			_ = os.Rename(previous, targetDir)
+		}
+		_ = os.RemoveAll(tmpDir)
+		return err
+	}
+	if hadPrevious {
+		_ = os.RemoveAll(previous)
+	}
+	return nil
+}
+
+func replaceFileAtomically(src, dest string, mode fs.FileMode) error {
+	parent := filepath.Dir(dest)
+	if err := os.MkdirAll(parent, 0750); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(parent, filepath.Base(dest)+".restore-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	complete := false
+	defer func() {
+		if !complete {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	in, err := os.Open(src)
+	if err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	defer in.Close()
+	if _, err := io.Copy(tmp, in); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, dest); err != nil {
+		return err
+	}
+	complete = true
+	return nil
+}
+
+func (s *Service) restoreKeyMaterial(stagingDir string) error {
+	for _, keyPath := range s.keyPaths {
+		if keyPath == "" {
+			continue
+		}
+		src := filepath.Join(stagingDir, "etc", "orvix", "secrets", filepath.Base(keyPath))
+		if _, err := os.Stat(src); os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			return fmt.Errorf("restore key material: %w", err)
+		}
+		if err := replaceFileAtomically(src, keyPath, 0600); err != nil {
+			return fmt.Errorf("restore key material %s: %w", filepath.Base(keyPath), err)
+		}
+	}
+	return nil
+}
+
+func (s *Service) repairRestorePermissions() error {
+	for _, item := range []struct {
+		path string
+		mode fs.FileMode
+	}{
+		{s.mailDir, 0750},
+		{s.attachDir, 0750},
+		{s.databasePath, 0640},
+	} {
+		if item.path == "" {
+			continue
+		}
+		if err := os.Chmod(item.path, item.mode); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("repair permissions %s: %w", item.path, err)
+		}
+	}
+	return nil
 }
 
 // validateArchiveLocked is the internal locked version used by RestoreBackup.
@@ -1347,17 +1782,21 @@ func (s *Service) RestoreBackup(ctx context.Context, id string) (*RestoreStageRe
 // coverage, rejects unknown entries, traversal, absolute paths, symlinks.
 func (s *Service) validateArchiveLocked(ctx context.Context, id string) (*VerifyResult, error) {
 	result := &VerifyResult{Valid: true}
-	bp, err := s.safeBackupPath(id)
-	if err != nil {
+	if _, err := s.safeBackupPath(id); err != nil {
 		return nil, err
 	}
-
-	archivePath := filepath.Join(bp, "backup-archive.tar.gz")
-	if _, err := os.Stat(archivePath); os.IsNotExist(err) {
+	archivePath, cleanup, err := s.materializeArchiveLocked(id)
+	if os.IsNotExist(err) {
 		result.Valid = false
-		result.Errors = append(result.Errors, "backup-archive.tar.gz not found")
+		result.Errors = append(result.Errors, "canonical backup archive not found")
 		return result, nil
 	}
+	if err != nil {
+		result.Valid = false
+		result.Errors = append(result.Errors, err.Error())
+		return result, nil
+	}
+	defer cleanup()
 
 	f, err := os.Open(archivePath)
 	if err != nil {
@@ -1387,11 +1826,13 @@ func (s *Service) validateArchiveLocked(ctx context.Context, id string) (*Verify
 
 	// Track allowed names from manifest and checksums.
 	allowedByManifest := map[string]bool{
-		"backup.json":                   true,
-		"checksums.txt":                 true,
-		"RESTORE_INSTRUCTIONS.txt":      true,
-		"var/lib/orvix/orvix.db":        true,
-		"etc/orvix/orvix.yaml.redacted": true,
+		"backup.json":                      true,
+		"checksums.txt":                    true,
+		"RESTORE_INSTRUCTIONS.txt":         true,
+		"var/lib/orvix/orvix.db":           true,
+		"var/lib/orvix/mailstore.tar.gz":   true,
+		"var/lib/orvix/attachments.tar.gz": true,
+		"etc/orvix/orvix.yaml.redacted":    true,
 	}
 
 	for {
@@ -1438,7 +1879,9 @@ func (s *Service) validateArchiveLocked(ctx context.Context, id string) (*Verify
 		// Check allowlist.
 		if !allowedByManifest[cleanName] {
 			// Allow etc/orvix/*.env.redacted patterns.
-			if !strings.HasPrefix(cleanName, "etc/orvix/") || !strings.HasSuffix(cleanName, ".env.redacted") {
+			redactedEnv := strings.HasPrefix(cleanName, "etc/orvix/") && strings.HasSuffix(cleanName, ".env.redacted")
+			encryptedSecret := s.encryptionEnabled() && strings.HasPrefix(cleanName, "etc/orvix/secrets/")
+			if !redactedEnv && !encryptedSecret {
 				result.Valid = false
 				result.Errors = append(result.Errors, fmt.Sprintf("unknown archive entry: %s", cleanName))
 				continue
@@ -1620,6 +2063,62 @@ func (s *Service) validateArchiveLocked(ctx context.Context, id string) (*Verify
 	result.SHA256 = hex.EncodeToString(archiveSHA.Sum(nil))
 
 	return result, nil
+}
+
+func (s *Service) materializeArchiveLocked(id string) (string, func(), error) {
+	bp, err := s.safeBackupPath(id)
+	if err != nil {
+		return "", func() {}, err
+	}
+	plainPath := filepath.Join(bp, "backup-archive.tar.gz")
+	encryptedPath := plainPath + ".enc"
+	if _, err := os.Stat(encryptedPath); err == nil {
+		if !s.encryptionEnabled() {
+			return "", func() {}, fmt.Errorf("backup is encrypted but no valid encryption key is configured")
+		}
+		if err := verifyArchiveSidecar(encryptedPath); err != nil {
+			return "", func() {}, err
+		}
+		if err := os.MkdirAll(s.stagingRoot, 0o700); err != nil {
+			return "", func() {}, fmt.Errorf("create secure restore temp directory: %w", err)
+		}
+		tmp, err := os.CreateTemp(s.stagingRoot, ".orvix-backup-decrypted-*")
+		if err != nil {
+			return "", func() {}, fmt.Errorf("create secure restore temp file: %w", err)
+		}
+		tmpPath := tmp.Name()
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		cleanup := func() { _ = os.Remove(tmpPath) }
+		if err := DecryptBackupFile(s.encryptionKey, encryptedPath, tmpPath); err != nil {
+			cleanup()
+			return "", func() {}, err
+		}
+		return tmpPath, cleanup, nil
+	}
+	if _, err := os.Stat(plainPath); err != nil {
+		return "", func() {}, err
+	}
+	if err := verifyArchiveSidecar(plainPath); err != nil {
+		return "", func() {}, err
+	}
+	return plainPath, func() {}, nil
+}
+
+func verifyArchiveSidecar(archivePath string) error {
+	data, err := os.ReadFile(archivePath + ".sha256")
+	if err != nil {
+		return fmt.Errorf("read archive checksum: %w", err)
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) < 1 || len(fields[0]) != sha256.Size*2 {
+		return fmt.Errorf("invalid archive checksum sidecar")
+	}
+	actual := fileSHA256(archivePath)
+	if actual == "" || !strings.EqualFold(actual, fields[0]) {
+		return fmt.Errorf("archive checksum mismatch")
+	}
+	return nil
 }
 
 func writeTarEntry(tw *tar.Writer, name string, data []byte, mode int64) error {

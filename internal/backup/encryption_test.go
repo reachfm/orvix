@@ -1,400 +1,230 @@
 package backup
 
 import (
-	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
+	"encoding/base64"
 	"encoding/json"
-	"io"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
-func TestEncryptDecryptRoundTrip(t *testing.T) {
-	password := "test-password-123"
-	salt := make([]byte, 32)
-	rand.Read(salt)
-	BackupEncryptionKey = DeriveBackupKey(password, salt)
+func randomBackupKey(t *testing.T) []byte {
+	t.Helper()
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	return key
+}
 
-	plaintext := []byte("This is a test backup archive content that needs to be encrypted securely.")
+func writeBackupKeyFile(t *testing.T, dir string, key []byte) string {
+	t.Helper()
+	path := filepath.Join(dir, "backup.key")
+	encoded := base64.RawURLEncoding.EncodeToString(key) + "\n"
+	if err := os.WriteFile(path, []byte(encoded), 0o640); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+	return path
+}
 
-	encrypted, err := EncryptBackup(plaintext)
-	if err != nil {
+func TestBackupEncryptionFileRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	plain := filepath.Join(dir, "backup.tar.gz")
+	encrypted := plain + ".enc"
+	restored := filepath.Join(dir, "restored.tar.gz")
+	want := make([]byte, backupChunkSize+731)
+	if _, err := rand.Read(want); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(plain, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	key := randomBackupKey(t)
+	if err := EncryptBackupFile(key, plain, encrypted); err != nil {
 		t.Fatalf("encrypt: %v", err)
 	}
-
-	if bytes.Contains(encrypted, plaintext) {
-		t.Fatal("encrypted data should not contain plaintext verbatim")
-	}
-
-	decrypted, err := DecryptBackup(encrypted)
-	if err != nil {
+	if err := DecryptBackupFile(key, encrypted, restored); err != nil {
 		t.Fatalf("decrypt: %v", err)
 	}
-
-	if !bytes.Equal(decrypted, plaintext) {
-		t.Fatalf("round-trip mismatch")
-	}
-}
-
-func TestWrongKeyProducesError(t *testing.T) {
-	password1 := "correct-password"
-	password2 := "wrong-password"
-	salt := make([]byte, 32)
-	rand.Read(salt)
-
-	BackupEncryptionKey = DeriveBackupKey(password1, salt)
-	plaintext := []byte("sensitive backup data")
-	encrypted, err := EncryptBackup(plaintext)
+	got, err := os.ReadFile(restored)
 	if err != nil {
-		t.Fatalf("encrypt: %v", err)
+		t.Fatal(err)
 	}
-
-	BackupEncryptionKey = DeriveBackupKey(password2, salt)
-	_, err = DecryptBackup(encrypted)
-	if err == nil {
-		t.Fatal("expected decryption error with wrong password")
+	if !bytes.Equal(got, want) {
+		t.Fatal("decrypted backup differs from source")
 	}
 }
 
-func TestWrongKeyProducesErrorDifferentSalt(t *testing.T) {
-	password := "same-password"
-	salt1 := make([]byte, 32)
-	salt2 := make([]byte, 32)
-	rand.Read(salt1)
-	rand.Read(salt2)
+func TestBackupEncryptionFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	plain := filepath.Join(dir, "plain")
+	encrypted := filepath.Join(dir, "encrypted")
+	if err := os.WriteFile(plain, []byte("confidential backup"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	key := randomBackupKey(t)
+	if err := EncryptBackupFile(key, plain, encrypted); err != nil {
+		t.Fatal(err)
+	}
 
-	BackupEncryptionKey = DeriveBackupKey(password, salt1)
-	plaintext := []byte("sensitive backup data")
-	encrypted, err := EncryptBackup(plaintext)
+	t.Run("wrong key", func(t *testing.T) {
+		if err := DecryptBackupFile(randomBackupKey(t), encrypted, filepath.Join(dir, "wrong")); err == nil {
+			t.Fatal("expected wrong key to fail")
+		}
+	})
+	t.Run("tampered", func(t *testing.T) {
+		data, err := os.ReadFile(encrypted)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data[len(data)/2] ^= 0xff
+		path := filepath.Join(dir, "tampered")
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := DecryptBackupFile(key, path, filepath.Join(dir, "tampered.out")); err == nil {
+			t.Fatal("expected tampered envelope to fail")
+		}
+	})
+	t.Run("truncated", func(t *testing.T) {
+		data, err := os.ReadFile(encrypted)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(dir, "truncated")
+		if err := os.WriteFile(path, data[:len(data)-1], 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := DecryptBackupFile(key, path, filepath.Join(dir, "truncated.out")); err == nil {
+			t.Fatal("expected truncated envelope to fail")
+		}
+	})
+}
+
+func TestLoadBackupEncryptionKey(t *testing.T) {
+	dir := t.TempDir()
+	key := randomBackupKey(t)
+	path := writeBackupKeyFile(t, dir, key)
+	got, err := LoadBackupEncryptionKey(path)
 	if err != nil {
-		t.Fatalf("encrypt: %v", err)
+		t.Fatalf("load key: %v", err)
 	}
-
-	BackupEncryptionKey = DeriveBackupKey(password, salt2)
-	_, err = DecryptBackup(encrypted)
-	if err == nil {
-		t.Fatal("expected decryption error with different salt")
+	if !bytes.Equal(got, key) {
+		t.Fatal("loaded key differs")
 	}
-}
-
-func TestEmptyPasswordHandling(t *testing.T) {
-	salt := make([]byte, 32)
-	rand.Read(salt)
-	BackupEncryptionKey = DeriveBackupKey("", salt)
-
-	plaintext := []byte("test data for empty password")
-	encrypted, err := EncryptBackup(plaintext)
-	if err != nil {
-		t.Fatalf("encrypt with empty password: %v", err)
-	}
-
-	decrypted, err := DecryptBackup(encrypted)
-	if err != nil {
-		t.Fatalf("decrypt with empty password: %v", err)
-	}
-
-	if !bytes.Equal(decrypted, plaintext) {
-		t.Fatal("empty password round-trip mismatch")
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(path, 0o660); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadBackupEncryptionKey(path); err == nil {
+			t.Fatal("group-writable key must be rejected")
+		}
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadBackupEncryptionKey(path); err == nil {
+			t.Fatal("world-readable key must be rejected")
+		}
 	}
 }
 
-func TestEmptyPasswordProducesDifferentKey(t *testing.T) {
-	salt := make([]byte, 32)
-	rand.Read(salt)
-
-	key1 := DeriveBackupKey("", salt)
-	key2 := DeriveBackupKey("actual-password", salt)
-
-	if bytes.Equal(key1, key2) {
-		t.Fatal("empty password and non-empty password should produce different keys")
-	}
-}
-
-func TestChecksumValidation(t *testing.T) {
-	password := "checksum-test-password"
-	salt := make([]byte, 32)
-	rand.Read(salt)
-	BackupEncryptionKey = DeriveBackupKey(password, salt)
-
-	data := []byte("data for checksum validation")
-	encrypted, err := EncryptBackup(data)
-	if err != nil {
-		t.Fatalf("encrypt: %v", err)
-	}
-
-	checksum := ComputeBackupChecksum(encrypted)
-	if checksum == "" {
-		t.Fatal("checksum should not be empty")
-	}
-
-	expected := sha256.Sum256(encrypted)
-	expectedHex := hex.EncodeToString(expected[:])
-	if checksum != expectedHex {
-		t.Fatalf("checksum mismatch: got %s, expected %s", checksum, expectedHex)
-	}
-}
-
-func TestChecksumDetectsTampering(t *testing.T) {
-	password := "tamper-test"
-	salt := make([]byte, 32)
-	rand.Read(salt)
-	BackupEncryptionKey = DeriveBackupKey(password, salt)
-
-	data := []byte("original backup data")
-	encrypted, err := EncryptBackup(data)
-	if err != nil {
-		t.Fatalf("encrypt: %v", err)
-	}
-
-	originalChecksum := ComputeBackupChecksum(encrypted)
-
-	if len(encrypted) > 0 {
-		encrypted[len(encrypted)/2] ^= 0xFF
-	}
-
-	tamperedChecksum := ComputeBackupChecksum(encrypted)
-	if originalChecksum == tamperedChecksum {
-		t.Fatal("tampered data should produce different checksum")
-	}
-}
-
-func TestEncryptWithoutKey(t *testing.T) {
-	BackupEncryptionKey = nil
-	_, err := EncryptBackup([]byte("test"))
-	if err == nil {
-		t.Fatal("expected error when encryption key is not set")
-	}
-}
-
-func TestDecryptWithoutKey(t *testing.T) {
-	BackupEncryptionKey = nil
-	_, err := DecryptBackup([]byte("test"))
-	if err == nil {
-		t.Fatal("expected error when decryption key is not set")
-	}
-}
-
-func TestDecryptCorruptedData(t *testing.T) {
-	password := "corrupt-test"
-	salt := make([]byte, 32)
-	rand.Read(salt)
-	BackupEncryptionKey = DeriveBackupKey(password, salt)
-
-	data := []byte("data that will be encrypted")
-	encrypted, err := EncryptBackup(data)
-	if err != nil {
-		t.Fatalf("encrypt: %v", err)
-	}
-
-	if len(encrypted) > 12 {
-		encrypted[12] ^= 0x01
-	}
-
-	_, err = DecryptBackup(encrypted)
-	if err == nil {
-		t.Fatal("expected error when decrypting corrupted data")
-	}
-}
-
-func TestDecryptTooShort(t *testing.T) {
-	password := "short-test"
-	salt := make([]byte, 32)
-	rand.Read(salt)
-	BackupEncryptionKey = DeriveBackupKey(password, salt)
-
-	_, err := DecryptBackup([]byte("short"))
-	if err == nil {
-		t.Fatal("expected error for ciphertext too short")
-	}
-}
-
-func TestLargeDataRoundTrip(t *testing.T) {
-	password := "large-test"
-	salt := make([]byte, 32)
-	rand.Read(salt)
-	BackupEncryptionKey = DeriveBackupKey(password, salt)
-
-	largeData := make([]byte, 1024*1024)
-	rand.Read(largeData)
-
-	encrypted, err := EncryptBackup(largeData)
-	if err != nil {
-		t.Fatalf("encrypt large: %v", err)
-	}
-
-	decrypted, err := DecryptBackup(encrypted)
-	if err != nil {
-		t.Fatalf("decrypt large: %v", err)
-	}
-
-	if !bytes.Equal(decrypted, largeData) {
-		t.Fatal("large data round-trip mismatch")
-	}
-}
-
-func TestDeriveBackupKeyDeterministic(t *testing.T) {
-	password := "deterministic-test"
-	salt := []byte("fixed-salt-for-testing-32bytes!!")
-
-	key1 := DeriveBackupKey(password, salt)
-	key2 := DeriveBackupKey(password, salt)
-
-	if !bytes.Equal(key1, key2) {
-		t.Fatal("key derivation should be deterministic for same inputs")
-	}
-
-	if len(key1) != 32 {
-		t.Fatalf("derived key should be 32 bytes, got %d", len(key1))
-	}
-}
-
-func TestDeriveBackupKeyDifferentPasswords(t *testing.T) {
-	salt := []byte("fixed-salt-for-testing-32bytes!!")
-
-	key1 := DeriveBackupKey("password-alpha", salt)
-	key2 := DeriveBackupKey("password-beta", salt)
-
-	if bytes.Equal(key1, key2) {
-		t.Fatal("different passwords should produce different keys")
-	}
-}
-
-func TestDeriveBackupKeyDifferentSalts(t *testing.T) {
-	password := "same-password"
-	salt1 := []byte("salt-number-one-for-testing!!")
-	salt2 := []byte("salt-number-two-for-testing!!")
-
-	key1 := DeriveBackupKey(password, salt1)
-	key2 := DeriveBackupKey(password, salt2)
-
-	if bytes.Equal(key1, key2) {
-		t.Fatal("different salts should produce different keys")
-	}
-}
-
-func TestSetEncryptionKey(t *testing.T) {
-	password := "orvix-test-password-2024"
-	salt := make([]byte, 32)
-	rand.Read(salt)
-	BackupEncryptionKey = DeriveBackupKey(password, salt)
-
-	plaintext := []byte("test data encrypted after SetEncryptionKey")
-	encrypted, err := EncryptBackup(plaintext)
-	if err != nil {
-		t.Fatalf("encrypt after set encryption key: %v", err)
-	}
-
-	decrypted, err := DecryptBackup(encrypted)
-	if err != nil {
-		t.Fatalf("decrypt after set encryption key: %v", err)
-	}
-
-	if !bytes.Equal(decrypted, plaintext) {
-		t.Fatal("set encryption key round-trip mismatch")
-	}
-}
-
-func TestCreateBackupWithEncryption(t *testing.T) {
+func TestEncryptedBackupSurvivesServiceRestartAndRestores(t *testing.T) {
 	s := testService(t)
-	ctx := context.Background()
-
-	if err := s.SetEncryptionKey("encrypted-backup-test-password"); err != nil {
-		t.Fatalf("set encryption key: %v", err)
+	key := randomBackupKey(t)
+	keyFile := writeBackupKeyFile(t, t.TempDir(), key)
+	if err := s.SetEncryptionConfig(BackupEncryptionConfig{Enabled: true, KeyFile: keyFile}); err != nil {
+		t.Fatal(err)
 	}
-
-	b, err := s.CreateBackup(ctx, "encrypted-test-backup")
+	b, err := s.CreateBackup(context.Background(), "encrypted-restart")
 	if err != nil {
 		t.Fatalf("create encrypted backup: %v", err)
 	}
-	if b.Status != StatusCompleted {
-		t.Fatalf("expected completed, got %s", b.Status)
-	}
-
 	bp := s.backupPath(b.ID)
-	manifestPath := filepath.Join(bp, "manifest.json")
-	data, err := os.ReadFile(manifestPath)
+	archive := filepath.Join(bp, "backup-archive.tar.gz.enc")
+	if _, err := os.Stat(archive); err != nil {
+		t.Fatalf("encrypted archive missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(bp, "backup-archive.tar.gz")); !os.IsNotExist(err) {
+		t.Fatal("plaintext archive remains after encryption")
+	}
+	data, err := os.ReadFile(filepath.Join(bp, "manifest.json"))
 	if err != nil {
-		t.Fatalf("read manifest: %v", err)
+		t.Fatal(err)
 	}
 	var manifest BackupManifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
-		t.Fatalf("unmarshal manifest: %v", err)
+		t.Fatal(err)
 	}
-	if !manifest.Encrypted {
-		t.Fatal("expected manifest.Encrypted to be true")
-	}
-	if manifest.Checksum == "" {
-		t.Fatal("expected manifest.Checksum to be set")
+	if !manifest.Encrypted || manifest.Checksum == "" {
+		t.Fatal("encrypted manifest metadata missing")
 	}
 
-	archivePath := filepath.Join(bp, b.ID+".tar.gz")
-	if _, err := os.Stat(archivePath); os.IsNotExist(err) {
-		t.Fatalf("archive not found: %s", archivePath)
+	// Reconfigure from the persisted key file to model a process restart.
+	s.encryptionKey = nil
+	s.encryptedBackups = nil
+	if err := s.SetEncryptionConfig(BackupEncryptionConfig{Enabled: true, KeyFile: keyFile}); err != nil {
+		t.Fatal(err)
 	}
-
-	archiveData, err := os.ReadFile(archivePath)
+	result, err := s.RestoreBackup(context.Background(), b.ID)
 	if err != nil {
-		t.Fatalf("read archive: %v", err)
+		t.Fatalf("activate encrypted restore: %v", err)
 	}
-	decrypted, err := DecryptBackup(archiveData)
-	if err != nil {
-		t.Fatalf("decrypt archive: %v", err)
+	if result.Status != RestoreStatusActivated {
+		t.Fatalf("restore status = %s", result.Status)
 	}
-
-	gr, err := gzip.NewReader(bytes.NewReader(decrypted))
-	if err != nil {
-		t.Fatalf("decompressing decrypted archive: %v", err)
-	}
-	defer gr.Close()
-	tr := tar.NewReader(gr)
-	foundManifest := false
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			t.Fatalf("tar read: %v", err)
-		}
-		if hdr.Name == "manifest.json" {
-			foundManifest = true
-			break
-		}
-	}
-	if !foundManifest {
-		t.Fatal("decrypted archive should contain manifest.json")
+	if _, err := os.Stat(filepath.Join(s.mailDir, "test.eml")); err != nil {
+		t.Fatalf("restored mail missing: %v", err)
 	}
 }
 
-func TestCreateBackupWithoutEncryption(t *testing.T) {
+func TestCreateBackupEncryptionFailureRemovesPlaintextSecrets(t *testing.T) {
 	s := testService(t)
-	ctx := context.Background()
+	key := randomBackupKey(t)
+	keyFile := writeBackupKeyFile(t, t.TempDir(), key)
+	if err := s.SetEncryptionConfig(BackupEncryptionConfig{Enabled: true, KeyFile: keyFile}); err != nil {
+		t.Fatal(err)
+	}
+	s.AddKeyPath(keyFile)
+	s.encryptFile = func([]byte, string, string) error { return errors.New("injected encryption failure") }
 
-	b, err := s.CreateBackup(ctx, "unencrypted-test-backup")
+	if _, err := s.CreateBackup(context.Background(), "encryption-failure"); err == nil {
+		t.Fatal("expected encryption failure")
+	}
+	entries, err := os.ReadDir(s.basePath)
 	if err != nil {
-		t.Fatalf("create unencrypted backup: %v", err)
+		t.Fatal(err)
 	}
-	if b.Status != StatusCompleted {
-		t.Fatalf("expected completed, got %s", b.Status)
+	if len(entries) != 1 {
+		t.Fatalf("backup directories = %d, want 1 failed backup", len(entries))
 	}
+	failedPath := filepath.Join(s.basePath, entries[0].Name())
+	for _, forbidden := range []string{
+		"backup-archive.tar.gz",
+		"backup-archive.tar.gz.sha256",
+		filepath.Base(keyFile),
+	} {
+		if _, err := os.Stat(filepath.Join(failedPath, forbidden)); !os.IsNotExist(err) {
+			t.Fatalf("plaintext sensitive artifact remains after encryption failure: %s", forbidden)
+		}
+	}
+	for _, retained := range []string{"database.sqlite", "mailstore.tar.gz", "attachments.tar.gz"} {
+		if _, err := os.Stat(filepath.Join(failedPath, retained)); err != nil {
+			t.Fatalf("non-secret recovery snapshot %s was not retained: %v", retained, err)
+		}
+	}
+}
 
-	bp := s.backupPath(b.ID)
-	manifestPath := filepath.Join(bp, "manifest.json")
-	data, err := os.ReadFile(manifestPath)
-	if err != nil {
-		t.Fatalf("read manifest: %v", err)
+func TestCreateBackupFailsWhenCompletedRegistryWriteFails(t *testing.T) {
+	s := testService(t)
+	if _, err := s.db.Exec(`DROP TABLE backup_registry`); err != nil {
+		t.Fatal(err)
 	}
-	var manifest BackupManifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		t.Fatalf("unmarshal manifest: %v", err)
-	}
-	if manifest.Encrypted {
-		t.Fatal("expected manifest.Encrypted to be false when no encryption key is set")
+	if _, err := s.CreateBackup(context.Background(), "registry-failure"); err == nil {
+		t.Fatal("backup must not report success when its completed state cannot be persisted")
 	}
 }

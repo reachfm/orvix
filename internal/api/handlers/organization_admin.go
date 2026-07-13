@@ -86,9 +86,9 @@ func (h *Handler) CreateOrganization(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "slug and domain are required"})
 	}
 
-	tenantID, _ := auth.RequireTenantID(c)
-	if tenantID == 0 {
-		tenantID = 1
+	tenantID, err := auth.RequireTenantID(c)
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "tenant context required"})
 	}
 
 	org, err := h.orgAdminSvc.CreateOrganization(c.Context(), req, tenantID)

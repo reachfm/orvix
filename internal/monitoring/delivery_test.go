@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,6 +16,34 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+type fixedWebhookResolver struct{ addresses []net.IPAddr }
+
+func (r fixedWebhookResolver) LookupIPAddr(context.Context, string) ([]net.IPAddr, error) {
+	return r.addresses, nil
+}
+
+type fixedWebhookDialer struct{ address string }
+
+func (d fixedWebhookDialer) DialContext(ctx context.Context, network, _ string) (net.Conn, error) {
+	return (&net.Dialer{}).DialContext(ctx, network, d.address)
+}
+
+func testWebhookProvider(t *testing.T, srv *httptest.Server, cfg WebhookConfig) *WebhookProvider {
+	t.Helper()
+	cfg.URL = "https://example.com/webhook"
+	tlsConfig := srv.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+	provider, err := newWebhookProvider(
+		cfg,
+		fixedWebhookResolver{addresses: []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}},
+		fixedWebhookDialer{address: srv.Listener.Addr().String()},
+		tlsConfig,
+	)
+	if err != nil {
+		t.Fatalf("newWebhookProvider: %v", err)
+	}
+	return provider
+}
 
 func deliveryTestDB(t *testing.T) *sql.DB {
 	t.Helper()
@@ -116,7 +145,7 @@ func TestInAppDeliverySucceeds(t *testing.T) {
 func TestWebhookDeliverySuccess(t *testing.T) {
 	var gotAuth string
 	var gotBody []byte
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
 		buf := new(bytes.Buffer)
 		_, _ = buf.ReadFrom(r.Body)
@@ -126,10 +155,7 @@ func TestWebhookDeliverySuccess(t *testing.T) {
 	defer srv.Close()
 
 	db := deliveryTestDB(t)
-	wh, err := NewWebhookProvider(WebhookConfig{Enabled: true, URL: srv.URL, Token: "super-secret-token", SkipValidation: true})
-	if err != nil {
-		t.Fatalf("NewWebhookProvider: %v", err)
-	}
+	wh := testWebhookProvider(t, srv, WebhookConfig{Enabled: true, Token: "super-secret-token"})
 	d := NewDispatcher(db, nil, wh)
 	ctx := context.Background()
 
@@ -158,16 +184,13 @@ func TestWebhookDeliverySuccess(t *testing.T) {
 // recorded but does not crash monitoring and does not abort alert
 // evaluation.
 func TestWebhookDeliveryFailureRecordedNoCrash(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
 
 	db := deliveryTestDB(t)
-	wh, err := NewWebhookProvider(WebhookConfig{Enabled: true, URL: srv.URL, Token: "tkn", SkipValidation: true})
-	if err != nil {
-		t.Fatalf("NewWebhookProvider: %v", err)
-	}
+	wh := testWebhookProvider(t, srv, WebhookConfig{Enabled: true, Token: "tkn"})
 	d := NewDispatcher(db, nil, NewInAppProvider(), wh)
 	ctx := context.Background()
 
@@ -205,7 +228,7 @@ func TestWebhookDeliveryFailureRecordedNoCrash(t *testing.T) {
 // token never appear in the delivery logs or the status report.
 func TestWebhookSecretRedactedInLogsAndStatus(t *testing.T) {
 	// A server that always fails so the dispatcher logs the failure.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
 	}))
 	defer srv.Close()
@@ -214,10 +237,7 @@ func TestWebhookSecretRedactedInLogsAndStatus(t *testing.T) {
 	logger := log.New(&buf, "", 0)
 
 	db := deliveryTestDB(t)
-	wh, err := NewWebhookProvider(WebhookConfig{Enabled: true, URL: srv.URL, Token: "hunter2-token", SkipValidation: true})
-	if err != nil {
-		t.Fatalf("NewWebhookProvider: %v", err)
-	}
+	wh := testWebhookProvider(t, srv, WebhookConfig{Enabled: true, Token: "hunter2-token"})
 	d := NewDispatcher(db, logger, wh)
 	ctx := context.Background()
 
@@ -257,7 +277,7 @@ func TestWebhookSecretRedactedInLogsAndStatus(t *testing.T) {
 func TestDisabledProviderSkippedHonestly(t *testing.T) {
 	var called int32
 	var mu sync.Mutex
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		called++
 		mu.Unlock()
@@ -266,10 +286,7 @@ func TestDisabledProviderSkippedHonestly(t *testing.T) {
 	defer srv.Close()
 
 	db := deliveryTestDB(t)
-	wh, err := NewWebhookProvider(WebhookConfig{Enabled: false, URL: srv.URL, SkipValidation: true})
-	if err != nil {
-		t.Fatalf("NewWebhookProvider: %v", err)
-	}
+	wh := testWebhookProvider(t, srv, WebhookConfig{Enabled: false})
 	d := NewDispatcher(db, nil, wh)
 	ctx := context.Background()
 

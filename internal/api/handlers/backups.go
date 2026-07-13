@@ -59,10 +59,38 @@ func (h *Handler) backupService() (*backup.Service, error) {
 	svc := backup.NewService(h.backupDir(), sqlDB, sqlDB, mailDir, attachDir)
 	svc.SetConfigPath("/etc/orvix/orvix.yaml")
 	if h.cfg != nil {
+		svc.SetDatabasePath(h.cfg.Database.SQLitePath)
+		maintenanceFile := strings.TrimSpace(os.Getenv("ORVIX_RESTORE_MAINTENANCE_FILE"))
+		if maintenanceFile == "" {
+			maintenanceFile = filepath.Join(h.cfg.CoreMail.DataPath, "restore-maintenance.enabled")
+			if h.cfg.CoreMail.DataPath == "" {
+				maintenanceFile = "/var/lib/orvix/restore-maintenance.enabled"
+			}
+		}
+		svc.SetRestoreMaintenanceChecker(func(context.Context) error {
+			st, err := os.Stat(maintenanceFile)
+			if err != nil {
+				return fmt.Errorf("create %s to enable offline restore maintenance: %w", maintenanceFile, err)
+			}
+			if st.IsDir() {
+				return fmt.Errorf("restore maintenance marker is a directory: %s", maintenanceFile)
+			}
+			return nil
+		})
 		// Only meaningful when the configured dialect is
 		// PostgreSQL (see Service.snapshotDB); harmless to set
 		// unconditionally otherwise, since it is never read.
 		svc.SetPostgresDSN(h.cfg.Database.DSN)
+		if h.cfg.Backup.EncryptionEnabled {
+			if err := svc.SetEncryptionConfig(backup.BackupEncryptionConfig{
+				Enabled: true,
+				KeyFile: h.cfg.Backup.EncryptionKeyFile,
+			}); err != nil {
+				return nil, fmt.Errorf("backup encryption unavailable: %w", err)
+			}
+		} else if h.cfg.Database.IsProduction() {
+			return nil, fmt.Errorf("backup encryption must be enabled in production")
+		}
 	}
 	bi := updater.ReadBuildInfo()
 	svc.SetBuildInfo(bi.Version, bi.SHA)
@@ -89,9 +117,6 @@ func (h *Handler) backupService() (*backup.Service, error) {
 		}
 		if h.cfg.CoreMail.VAPIDPrivateKeyFile != "" {
 			svc.AddKeyPath(h.cfg.CoreMail.VAPIDPrivateKeyFile)
-		}
-		if h.cfg.CoreMail.VAPIDPrivateKey != "" {
-			svc.AddKeyPath(h.cfg.CoreMail.VAPIDPrivateKey)
 		}
 	}
 	return svc, nil
@@ -187,7 +212,12 @@ func (h *Handler) DownloadBackup(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "backup archive failed"})
 	}
 	filename := "orvix-backup-" + id + ".tar.gz"
-	c.Set("Content-Type", "application/gzip")
+	contentType := "application/gzip"
+	if strings.HasSuffix(archivePath, ".enc") {
+		filename += ".enc"
+		contentType = "application/octet-stream"
+	}
+	c.Set("Content-Type", contentType)
 	c.Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	h.writeAuditLog(c, "backup.download", fmt.Sprintf("backup_id:%s", id))
 	file, err := os.Open(archivePath)
@@ -393,10 +423,8 @@ func (h *Handler) PostValidateBackup(c fiber.Ctx) error {
 	return c.JSON(result)
 }
 
-// PostRestoreBackup validates and stages a backup for manual restore.
-// Phase 2H: stages the backup archive to a staging directory only.
-// Does NOT overwrite live data. The operator must manually stop the
-// service, swap files, and restart. This is a staged-only operation.
+// PostRestoreBackup validates, safety-snapshots, and activates a backup.
+// It fails closed unless the operator has enabled restore maintenance mode.
 func (h *Handler) PostRestoreBackup(c fiber.Ctx) error {
 	id := c.Params("id")
 	if invalidBackupID(id) {
@@ -417,19 +445,10 @@ func (h *Handler) PostRestoreBackup(c fiber.Ctx) error {
 	}
 	result, err := svc.RestoreBackup(c.Context(), id)
 	if err != nil {
-		h.logger.Error("backup restore staging failed", zap.String("backup_id", id), zap.Error(err))
+		h.logger.Error("backup restore activation failed", zap.String("backup_id", id), zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
-
-	// Health check runs but does not trigger automatic rollback —
-	// the restore is staged-only. The health result is informational.
-	health, healthErr := svc.GetBackupHealth(c.Context())
-	if healthErr == nil && health.Status == "critical" {
-		result.Message += " (Warning: backup health is critical after staging — manual intervention may be required)"
-	}
-	_ = health
-
-	h.writeAuditLog(c, "backup.restore_stage", fmt.Sprintf("backup_id:%s|status:%s", id, result.Status))
+	h.writeAuditLog(c, "backup.restore", fmt.Sprintf("backup_id:%s|status:%s|rolled_back:%v", id, result.Status, result.RolledBack))
 	return c.JSON(result)
 }
 

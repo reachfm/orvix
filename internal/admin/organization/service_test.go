@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"testing"
 
+	"github.com/orvix/orvix/internal/audit"
 	_ "modernc.org/sqlite"
 )
 
@@ -60,5 +61,21 @@ func TestOrganizationServiceLifecycleAndDuplicateSlug(t *testing.T) {
 	}
 	if got.Active {
 		t.Fatalf("organization remained active after disable")
+	}
+}
+
+func TestOrganizationMutationRollsBackWhenAuditWriteFails(t *testing.T) {
+	db := newOrganizationTestDB(t)
+	db.SetMaxOpenConns(1)
+	svc := NewService(NewOrganizationRepo(db), audit.NewExtendedStore(db), nil)
+	if _, err := svc.CreateOrganization(context.Background(), CreateOrganizationRequest{Slug: "audit-failure", Domain: "audit-failure.test"}, 1); err == nil {
+		t.Fatal("audit failure must fail the organization mutation")
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM tenants WHERE slug = ?`, "audit-failure").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("organization mutation committed without its audit record")
 	}
 }

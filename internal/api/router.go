@@ -168,25 +168,28 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 	// Wire enterprise admin services (mailbox, org, domain, platform, dashboard).
 	if sqlDB, err := db.DB(); err == nil {
 		auditExtendedStore := auditpkg.NewExtendedStore(sqlDB)
-		auditExtendedStore.EnsureTable(context.Background())
-		rbacEval := entrbac.NewEvaluator(sqlDB)
+		if err := auditExtendedStore.EnsureTable(context.Background()); err != nil {
+			logger.Error("enterprise admin audit initialization failed; mutation services disabled", zap.Error(err))
+		} else {
+			rbacEval := entrbac.NewEvaluator(sqlDB)
 
-		adminMailboxRepo := mailboxadminsvc.NewAdminMailboxRepo(sqlDB)
-		router.h.SetMailboxAdminService(mailboxadminsvc.NewService(adminMailboxRepo, auditExtendedStore, rbacEval))
+			adminMailboxRepo := mailboxadminsvc.NewAdminMailboxRepo(sqlDB)
+			router.h.SetMailboxAdminService(mailboxadminsvc.NewService(adminMailboxRepo, auditExtendedStore, rbacEval))
 
-		orgRepo := orgadminsvc.NewOrganizationRepo(sqlDB)
-		router.h.SetOrganizationAdminService(orgadminsvc.NewService(orgRepo, auditExtendedStore, rbacEval))
+			orgRepo := orgadminsvc.NewOrganizationRepo(sqlDB)
+			router.h.SetOrganizationAdminService(orgadminsvc.NewService(orgRepo, auditExtendedStore, rbacEval))
 
-		domainAdminRepo := domainadminsvc.NewDomainAdminRepo(sqlDB)
-		router.h.SetDomainAdminService(domainadminsvc.NewService(domainAdminRepo, auditExtendedStore, rbacEval))
+			domainAdminRepo := domainadminsvc.NewDomainAdminRepo(sqlDB)
+			router.h.SetDomainAdminService(domainadminsvc.NewService(domainAdminRepo, auditExtendedStore, rbacEval))
 
-		dashboardSvc := dashboardsvc.NewDashboardService(sqlDB)
-		router.h.SetDashboardService(dashboardSvc)
+			dashboardSvc := dashboardsvc.NewDashboardService(sqlDB)
+			router.h.SetDashboardService(dashboardSvc)
 
-		platformSvc := platformpkg.NewPlatformService(sqlDB, auditExtendedStore, rbacEval)
-		router.h.SetPlatformAdminService(platformSvc)
+			platformSvc := platformpkg.NewPlatformService(sqlDB, auditExtendedStore, rbacEval)
+			router.h.SetPlatformAdminService(platformSvc)
 
-		logger.Info("enterprise admin services wired with audit and RBAC")
+			logger.Info("enterprise admin services wired with transactional audit and RBAC")
+		}
 	}
 
 	// Wire MailStore from the coremail runtime module. The
@@ -470,10 +473,6 @@ func (r *Router) setupMiddleware() {
 	// via the dedicated `LoginMiddleware()` already mounted in
 	// `setupRoutes()`. Security is unchanged — only the scope of
 	// the limit changed.
-	// The metrics endpoint stays reachable without rate-limit.
-	if r.cfg.Metrics.Enabled {
-		r.app.Get(r.cfg.Metrics.Path, metrics.Handler())
-	}
 }
 
 // apiRateLimitMiddleware returns the general API rate limiter
@@ -527,7 +526,6 @@ func (r *Router) setupRoutes() {
 	// per-IP API budget.
 	api := r.app.Group("/api/v1", r.apiRateLimitMiddleware())
 	api.Get("/health", r.h.Health)
-	api.Get("/metrics", metrics.Handler())
 
 	loginGroup := api.Group("/auth")
 	if r.redisLimiter != nil {
@@ -813,6 +811,12 @@ func (r *Router) setupRoutes() {
 	admin.Get("/monitoring/capacity", r.h.GetMonitoringCapacity)
 	admin.Get("/monitoring/snapshot", r.h.GetMonitoringSnapshot)
 	admin.Get("/monitoring/alert-providers", r.h.GetMonitoringProviders)
+	if r.cfg.Metrics.Enabled {
+		// Metrics contain operational state and are never exposed on a public
+		// unauthenticated route. Operators scrape this admin-authenticated path
+		// through a trusted collector or the loopback API.
+		admin.Get("/metrics", metrics.Handler())
+	}
 	// Admin alert-delivery audit (ORVIX-ADMIN-ENTERPRISE-PARITY):
 	// read-only, reuses monitoring.Dispatcher.ListDeliveries so the
 	// secret-free contract stays aligned with the rest of the alert
@@ -977,7 +981,7 @@ func (r *Router) setupRoutes() {
 	// Platform administration (cross-tenant, admin/superadmin only).
 	// These routes operate on all tenants and require explicit
 	// platform-level authorization — not just tenant membership.
-	platform := admin.Group("/platform")
+	platform := admin.Group("/platform", auth.RequireRole(auth.RoleSuperAdmin))
 	platform.Get("/dashboard", r.h.PlatformDashboard)
 	platform.Get("/organizations", r.h.ListPlatformOrganizations)
 	platform.Get("/organizations/:id", r.h.GetPlatformOrganization)

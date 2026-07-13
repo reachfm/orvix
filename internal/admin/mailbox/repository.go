@@ -11,8 +11,15 @@ import (
 )
 
 type AdminMailboxRepo struct {
-	db      *sql.DB
+	root    *sql.DB
+	db      mailboxDB
 	dialect *dbdialect.Info
+}
+
+type mailboxDB interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
 func NewAdminMailboxRepo(db *sql.DB) *AdminMailboxRepo {
@@ -20,7 +27,15 @@ func NewAdminMailboxRepo(db *sql.DB) *AdminMailboxRepo {
 	if err != nil {
 		d = dbdialect.FromDriver("sqlite")
 	}
-	return &AdminMailboxRepo{db: db, dialect: d}
+	return &AdminMailboxRepo{root: db, db: db, dialect: d}
+}
+
+func (r *AdminMailboxRepo) BeginTx(ctx context.Context) (*sql.Tx, error) {
+	return r.root.BeginTx(ctx, nil)
+}
+
+func (r *AdminMailboxRepo) WithTx(tx *sql.Tx) *AdminMailboxRepo {
+	return &AdminMailboxRepo{root: r.root, db: tx, dialect: r.dialect}
 }
 
 func (r *AdminMailboxRepo) GetByID(ctx context.Context, id, tenantID uint) (*AdminMailbox, error) {

@@ -11,8 +11,15 @@ import (
 )
 
 type OrganizationRepo struct {
-	db      *sql.DB
+	root    *sql.DB
+	db      organizationDB
 	dialect *dbdialect.Info
+}
+
+type organizationDB interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
 func NewOrganizationRepo(db *sql.DB) *OrganizationRepo {
@@ -20,7 +27,15 @@ func NewOrganizationRepo(db *sql.DB) *OrganizationRepo {
 	if err != nil {
 		d = dbdialect.FromDriver("sqlite")
 	}
-	return &OrganizationRepo{db: db, dialect: d}
+	return &OrganizationRepo{root: db, db: db, dialect: d}
+}
+
+func (r *OrganizationRepo) BeginTx(ctx context.Context) (*sql.Tx, error) {
+	return r.root.BeginTx(ctx, nil)
+}
+
+func (r *OrganizationRepo) WithTx(tx *sql.Tx) *OrganizationRepo {
+	return &OrganizationRepo{root: r.root, db: tx, dialect: r.dialect}
 }
 
 func (r *OrganizationRepo) GetByID(ctx context.Context, id uint) (*Organization, error) {

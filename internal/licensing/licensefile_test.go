@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -210,35 +209,61 @@ func TestParseLicense_Malformed(t *testing.T) {
 }
 
 func TestEnvKeyFallback(t *testing.T) {
-	os.Setenv("ORVIX_LICENSE_PUBLIC_KEY", "")
-	originalKey := PublicKey
-
-	resetPublicKey()
-
-	if !IsDevKey() {
-		t.Error("Expected IsDevKey to return true when env var is empty after reset")
+	t.Setenv("ORVIX_LICENSE_PUBLIC_KEY", "")
+	t.Setenv("ORVIX_LICENSE_DEV_MODE", "")
+	if err := ConfigurePublicKeyFromEnvironment(); err == nil {
+		t.Fatal("missing production key must fail closed")
 	}
-
-	PublicKey = originalKey
+	if PublicKey != nil || IsDevKey() {
+		t.Fatal("missing production key must not activate a development key")
+	}
 }
 
 func TestIsDevKey(t *testing.T) {
-	os.Setenv("ORVIX_LICENSE_PUBLIC_KEY", "")
+	t.Setenv("ORVIX_LICENSE_PUBLIC_KEY", "")
+	t.Setenv("ORVIX_LICENSE_DEV_MODE", "1")
+	if err := ConfigurePublicKeyFromEnvironment(); err != nil {
+		t.Fatal(err)
+	}
 	if !IsDevKey() {
-		t.Error("Expected IsDevKey to return true when env var is empty")
+		t.Error("explicit development mode must report the development key")
 	}
 }
 
-func resetPublicKey() {
-	if k := os.Getenv("ORVIX_LICENSE_PUBLIC_KEY"); k != "" {
-		key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(k))
-		if err == nil && len(key) == ed25519.PublicKeySize {
-			PublicKey = ed25519.PublicKey(key)
-			return
-		}
+func TestMalformedEnvironmentKeyFailsClosed(t *testing.T) {
+	t.Setenv("ORVIX_LICENSE_PUBLIC_KEY", "not-base64")
+	t.Setenv("ORVIX_LICENSE_DEV_MODE", "1")
+	if err := ConfigurePublicKeyFromEnvironment(); err == nil {
+		t.Fatal("malformed configured key must not fall back to development")
 	}
-	key, err := base64.StdEncoding.DecodeString("MCowBQYDK2VwAyEAQkFBS0VZQUtFWUtFWUtFWUtFWUtFWUtFWUtFWUtFWUtFWUtFWUtFWUtG")
-	if err == nil && len(key) == ed25519.PublicKeySize {
-		PublicKey = ed25519.PublicKey(key)
+	if PublicKey != nil || IsDevKey() {
+		t.Fatal("malformed configured key must leave verification disabled")
+	}
+}
+
+func TestUnknownLicenseKeyIDIsRejected(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalKey, originalID := PublicKey, PublicKeyID
+	SetPublicKey(pub)
+	defer func() { PublicKey, PublicKeyID = originalKey, originalID }()
+	lic := &License{
+		KeyID:     "unknown-key",
+		LicenseID: "UNKNOWN-KEY-ID",
+		Edition:   EditionEnterprise,
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+	data, err := signLicenseWrapper(priv, lic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseLicense(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if VerifyLicenseSignature(parsed) {
+		t.Fatal("license signed by the active key but naming an unknown key ID must fail")
 	}
 }

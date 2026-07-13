@@ -60,9 +60,8 @@ type BackupManifest struct {
 
 // BackupEncryptionConfig holds the configuration for backup encryption.
 type BackupEncryptionConfig struct {
-	Enabled  bool
-	Password string
-	KeyFile  string
+	Enabled bool
+	KeyFile string
 }
 
 // ManifestItem describes a single file in the backup archive.
@@ -112,16 +111,19 @@ type RestorePreview struct {
 // RestoreStageResult is returned by RestoreBackup.
 // In Phase 2H the restore is staged (not applied live).
 type RestoreStageResult struct {
-	Status      string `json:"status"`
-	Message     string `json:"message"`
-	BackupID    string `json:"backup_id"`
-	StagingPath string `json:"staging_path,omitempty"`
+	Status         string `json:"status"`
+	Message        string `json:"message"`
+	BackupID       string `json:"backup_id"`
+	SafetyBackupID string `json:"safety_backup_id,omitempty"`
+	RolledBack     bool   `json:"rolled_back,omitempty"`
+	StagingPath    string `json:"staging_path,omitempty"`
 }
 
 const (
-	RestoreStatusStaged  = "staged"
-	RestoreStatusFailed  = "failed"
-	RestoreStagedMessage = "Validated and staged, restart/manual apply required"
+	RestoreStatusActivated  = "activated"
+	RestoreStatusFailed     = "failed"
+	RestoreStatusRolledBack = "rolled_back"
+	RestoreActivatedMessage = "Validated, activated, and health verified"
 )
 
 type Frequency string

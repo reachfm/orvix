@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"testing"
 
+	"github.com/orvix/orvix/internal/audit"
 	_ "modernc.org/sqlite"
 )
 
@@ -65,5 +66,21 @@ func TestDomainServiceTenantScopedLifecycle(t *testing.T) {
 	}
 	if got.Status != "suspended" {
 		t.Fatalf("status not persisted: %#v", got)
+	}
+}
+
+func TestDomainMutationRollsBackWhenAuditWriteFails(t *testing.T) {
+	db := newDomainTestDB(t)
+	db.SetMaxOpenConns(1)
+	svc := NewService(NewDomainAdminRepo(db), audit.NewExtendedStore(db), nil)
+	if _, err := svc.CreateDomain(context.Background(), CreateDomainRequest{Name: "audit-failure.test"}, 5); err == nil {
+		t.Fatal("audit failure must fail the domain mutation")
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM coremail_domains WHERE name = ?`, "audit-failure.test").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("domain mutation committed without its audit record")
 	}
 }

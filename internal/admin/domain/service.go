@@ -13,8 +13,15 @@ import (
 )
 
 type DomainAdminRepo struct {
-	db      *sql.DB
+	root    *sql.DB
+	db      domainDB
 	dialect *dbdialect.Info
+}
+
+type domainDB interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
 func NewDomainAdminRepo(db *sql.DB) *DomainAdminRepo {
@@ -22,7 +29,15 @@ func NewDomainAdminRepo(db *sql.DB) *DomainAdminRepo {
 	if err != nil {
 		d = dbdialect.FromDriver("sqlite")
 	}
-	return &DomainAdminRepo{db: db, dialect: d}
+	return &DomainAdminRepo{root: db, db: db, dialect: d}
+}
+
+func (r *DomainAdminRepo) BeginTx(ctx context.Context) (*sql.Tx, error) {
+	return r.root.BeginTx(ctx, nil)
+}
+
+func (r *DomainAdminRepo) WithTx(tx *sql.Tx) *DomainAdminRepo {
+	return &DomainAdminRepo{root: r.root, db: tx, dialect: r.dialect}
 }
 
 func (r *DomainAdminRepo) List(ctx context.Context, filter DomainFilter) ([]AdminDomain, int64, error) {
@@ -202,12 +217,18 @@ func (s *Service) CreateDomain(ctx context.Context, req CreateDomainRequest, ten
 		MaxQuotaMB:   req.MaxQuotaMB,
 	}
 
-	created, err := s.repo.Create(ctx, d)
-	if err != nil {
+	var created *AdminDomain
+	entry := &audit.ExtendedEntry{Action: "domain.create", TenantID: tenantID, Result: "success"}
+	if err := s.mutateWithAudit(ctx, entry, func(repo *DomainAdminRepo) error {
+		var createErr error
+		created, createErr = repo.Create(ctx, d)
+		if createErr == nil {
+			entry.Target, entry.TargetID = fmt.Sprintf("domain:%d", created.ID), created.ID
+		}
+		return createErr
+	}); err != nil {
 		return nil, err
 	}
-
-	s.recordAudit(ctx, "domain.create", fmt.Sprintf("domain:%d", created.ID), created.ID, tenantID, "success", "")
 	return created, nil
 }
 
@@ -239,34 +260,39 @@ func (s *Service) UpdateDomain(ctx context.Context, id, tenantID uint, req Updat
 		d.DMARCEnabled = *req.DMARCEnabled
 	}
 
-	if err := s.repo.Update(ctx, d); err != nil {
+	entry := &audit.ExtendedEntry{Action: "domain.update", Target: fmt.Sprintf("domain:%d", d.ID), TargetID: d.ID, TenantID: tenantID, Result: "success"}
+	if err := s.mutateWithAudit(ctx, entry, func(repo *DomainAdminRepo) error { return repo.Update(ctx, d) }); err != nil {
 		return nil, err
 	}
-
-	s.recordAudit(ctx, "domain.update", fmt.Sprintf("domain:%d", d.ID), d.ID, tenantID, "success", "")
 	return d, nil
 }
 
 func (s *Service) SetDomainStatus(ctx context.Context, id, tenantID uint, status string, reason string) error {
-	if err := s.repo.UpdateStatus(ctx, id, tenantID, status); err != nil {
-		return err
-	}
-	s.recordAudit(ctx, "domain."+status, fmt.Sprintf("domain:%d", id), id, tenantID, "success", reason)
-	return nil
+	entry := &audit.ExtendedEntry{Action: "domain." + status, Target: fmt.Sprintf("domain:%d", id), TargetID: id, TenantID: tenantID, Result: "success", Reason: reason}
+	return s.mutateWithAudit(ctx, entry, func(repo *DomainAdminRepo) error {
+		return repo.UpdateStatus(ctx, id, tenantID, status)
+	})
 }
 
-func (s *Service) recordAudit(ctx context.Context, action, target string, targetID, tenantID uint, result, reason string) {
+func (s *Service) mutateWithAudit(ctx context.Context, entry *audit.ExtendedEntry, mutate func(*DomainAdminRepo) error) error {
 	if s.auditStore == nil {
-		return
+		return mutate(s.repo)
 	}
-	_ = s.auditStore.Record(ctx, &audit.ExtendedEntry{
-		Action:   action,
-		Target:   target,
-		TargetID: targetID,
-		TenantID: tenantID,
-		Result:   result,
-		Reason:   reason,
-	})
+	tx, err := s.repo.BeginTx(ctx)
+	if err != nil {
+		return fmt.Errorf("begin domain mutation: %w", err)
+	}
+	defer tx.Rollback()
+	if err := mutate(s.repo.WithTx(tx)); err != nil {
+		return err
+	}
+	if err := s.auditStore.RecordTx(ctx, tx, entry); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit domain mutation: %w", err)
+	}
+	return nil
 }
 
 func scanAdminDomain(row interface {

@@ -112,8 +112,10 @@ func (c OutboundConfig) ResolvedTLSPolicy() string {
 
 // BackupConfig holds backup settings.
 type BackupConfig struct {
-	Dir            string `mapstructure:"dir"`
-	RetentionCount int    `mapstructure:"retention_count"`
+	Dir               string `mapstructure:"dir"`
+	RetentionCount    int    `mapstructure:"retention_count"`
+	EncryptionEnabled bool   `mapstructure:"encryption_enabled"`
+	EncryptionKeyFile string `mapstructure:"encryption_key_file"`
 }
 
 // MonitoringConfig holds monitoring alert threshold settings.

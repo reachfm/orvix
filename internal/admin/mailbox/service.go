@@ -86,12 +86,18 @@ func (s *Service) CreateMailbox(ctx context.Context, req CreateMailboxRequest, t
 		AllowJMAP: true,
 	}
 
-	created, err := s.repo.Create(ctx, m, string(passwordHash))
-	if err != nil {
+	var created *AdminMailbox
+	entry := &audit.ExtendedEntry{Action: "mailbox.create", TenantID: tenantID, Result: "success"}
+	if err := s.mutateWithAudit(ctx, entry, func(repo *AdminMailboxRepo) error {
+		var createErr error
+		created, createErr = repo.Create(ctx, m, string(passwordHash))
+		if createErr == nil {
+			entry.Target, entry.TargetID = fmt.Sprintf("mailbox:%d", created.ID), created.ID
+		}
+		return createErr
+	}); err != nil {
 		return nil, err
 	}
-
-	s.recordAudit(ctx, "mailbox.create", fmt.Sprintf("mailbox:%d", created.ID), created.ID, tenantID, "success", "")
 
 	resp := &CreateMailboxResponse{Mailbox: *created, Password: req.Password}
 	if req.ForcePasswordChange {
@@ -134,11 +140,10 @@ func (s *Service) UpdateMailbox(ctx context.Context, id, tenantID uint, req Upda
 		m.AllowJMAP = *req.AllowJMAP
 	}
 
-	if err := s.repo.Update(ctx, m); err != nil {
+	entry := &audit.ExtendedEntry{Action: "mailbox.update", Target: fmt.Sprintf("mailbox:%d", m.ID), TargetID: m.ID, TenantID: tenantID, Result: "success"}
+	if err := s.mutateWithAudit(ctx, entry, func(repo *AdminMailboxRepo) error { return repo.Update(ctx, m) }); err != nil {
 		return nil, err
 	}
-
-	s.recordAudit(ctx, "mailbox.update", fmt.Sprintf("mailbox:%d", m.ID), m.ID, tenantID, "success", "")
 	return m, nil
 }
 
@@ -154,22 +159,24 @@ func (s *Service) SetStatus(ctx context.Context, id, tenantID uint, status Admin
 		return fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, m.Status, status)
 	}
 
-	if err := s.repo.UpdateStatus(ctx, id, tenantID, status); err != nil {
-		return err
-	}
-
 	action := fmt.Sprintf("mailbox.%s", status)
-	s.recordAudit(ctx, action, fmt.Sprintf("mailbox:%d", id), id, tenantID, "success", reason)
-	return nil
+	entry := &audit.ExtendedEntry{Action: action, Target: fmt.Sprintf("mailbox:%d", id), TargetID: id, TenantID: tenantID, Result: "success", Reason: reason}
+	return s.mutateWithAudit(ctx, entry, func(repo *AdminMailboxRepo) error {
+		return repo.UpdateStatus(ctx, id, tenantID, status)
+	})
 }
 
 func (s *Service) BulkSetStatus(ctx context.Context, ids []uint, tenantID uint, status AdminMailboxStatus, reason string) (int64, error) {
-	affected, err := s.repo.UpdateStatusBulk(ctx, ids, tenantID, status)
-	if err != nil {
+	var affected int64
+	action := fmt.Sprintf("mailbox.bulk_%s", status)
+	entry := &audit.ExtendedEntry{Action: action, Target: fmt.Sprintf("mailboxes:%v", ids), TenantID: tenantID, Result: "success", Reason: reason}
+	if err := s.mutateWithAudit(ctx, entry, func(repo *AdminMailboxRepo) error {
+		var updateErr error
+		affected, updateErr = repo.UpdateStatusBulk(ctx, ids, tenantID, status)
+		return updateErr
+	}); err != nil {
 		return 0, err
 	}
-	action := fmt.Sprintf("mailbox.bulk_%s", status)
-	s.recordAudit(ctx, action, fmt.Sprintf("mailboxes:%v", ids), 0, tenantID, "success", reason)
 	return affected, nil
 }
 
@@ -188,27 +195,34 @@ func (s *Service) ResetPassword(ctx context.Context, id, tenantID uint) (string,
 		return "", fmt.Errorf("hash password: %w", err)
 	}
 
-	if err := s.repo.UpdatePassword(ctx, id, tenantID, string(passwordHash)); err != nil {
+	entry := &audit.ExtendedEntry{Action: "mailbox.password_reset", Target: fmt.Sprintf("mailbox:%d", id), TargetID: id, TenantID: tenantID, Result: "success"}
+	if err := s.mutateWithAudit(ctx, entry, func(repo *AdminMailboxRepo) error {
+		return repo.UpdatePassword(ctx, id, tenantID, string(passwordHash))
+	}); err != nil {
 		return "", err
 	}
-
-	s.recordAudit(ctx, "mailbox.password_reset", fmt.Sprintf("mailbox:%d", id), id, tenantID, "success", "")
 	return newPassword, nil
 }
 
-func (s *Service) recordAudit(ctx context.Context, action, target string, targetID, tenantID uint, result, reason string) {
+func (s *Service) mutateWithAudit(ctx context.Context, entry *audit.ExtendedEntry, mutate func(*AdminMailboxRepo) error) error {
 	if s.auditStore == nil {
-		return
+		return mutate(s.repo)
 	}
-	e := &audit.ExtendedEntry{
-		Action:   action,
-		Target:   target,
-		TargetID: targetID,
-		TenantID: tenantID,
-		Result:   result,
-		Reason:   reason,
+	tx, err := s.repo.BeginTx(ctx)
+	if err != nil {
+		return fmt.Errorf("begin mailbox mutation: %w", err)
 	}
-	_ = s.auditStore.Record(ctx, e)
+	defer tx.Rollback()
+	if err := mutate(s.repo.WithTx(tx)); err != nil {
+		return err
+	}
+	if err := s.auditStore.RecordTx(ctx, tx, entry); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit mailbox mutation: %w", err)
+	}
+	return nil
 }
 
 func isValidStatusTransition(from, to AdminMailboxStatus) bool {

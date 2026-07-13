@@ -244,36 +244,62 @@ type WebhookProvider struct {
 
 // WebhookConfig configures a WebhookProvider.
 type WebhookConfig struct {
-	Enabled        bool
-	URL            string
-	Token          string
-	Timeout        time.Duration
-	SkipValidation bool // for testing only; skips SSRF URL checks
+	Enabled bool
+	URL     string
+	Token   string
+	Timeout time.Duration
+}
+
+type webhookDialer interface {
+	DialContext(context.Context, string, string) (net.Conn, error)
 }
 
 // NewWebhookProvider builds a webhook provider from config.
 // The URL is validated against SSRF attacks. If validation fails the
 // provider is not created and an error is returned.
 func NewWebhookProvider(cfg WebhookConfig) (*WebhookProvider, error) {
+	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: -1}
+	return newWebhookProvider(cfg, systemWebhookResolver{resolver: net.DefaultResolver}, dialer, nil)
+}
+
+func newWebhookProvider(cfg WebhookConfig, resolver webhookResolver, dialer webhookDialer, tlsConfig *tls.Config) (*WebhookProvider, error) {
 	timeout := cfg.Timeout
 	if timeout <= 0 {
 		timeout = defaultWebhookTimeout
 	}
-	if cfg.URL != "" && !cfg.SkipValidation {
-		if err := ValidateWebhookURL(cfg.URL); err != nil {
+	if cfg.URL != "" {
+		if err := validateWebhookURL(context.Background(), cfg.URL, resolver); err != nil {
 			return nil, err
 		}
 	}
-	dialer := &net.Dialer{
-		Timeout:   30 * time.Second,
-		KeepAlive: -1, // disable keep-alive to force DNS re-resolution per connection
+	if tlsConfig == nil {
+		tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	}
 	transport := &http.Transport{
-		DialContext:       dialer.DialContext,
-		DisableKeepAlives: true,
-		TLSClientConfig: &tls.Config{
-			MinVersion: tls.VersionTLS12,
+		// Resolve and validate immediately before every socket connection, then
+		// dial the selected IP literal. This closes the validate-then-resolve
+		// DNS-rebinding window and deliberately ignores proxy environment vars.
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(address)
+			if err != nil {
+				return nil, fmt.Errorf("invalid webhook destination")
+			}
+			addresses, err := resolveSafeWebhookIPs(ctx, resolver, host)
+			if err != nil {
+				return nil, err
+			}
+			var lastErr error
+			for _, resolved := range addresses {
+				conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(resolved.IP.String(), port))
+				if dialErr == nil {
+					return conn, nil
+				}
+				lastErr = dialErr
+			}
+			return nil, fmt.Errorf("webhook connection failed: %w", lastErr)
 		},
+		DisableKeepAlives: true,
+		TLSClientConfig:   tlsConfig,
 	}
 	client := &http.Client{
 		Timeout:   timeout,
@@ -288,14 +314,8 @@ func NewWebhookProvider(cfg WebhookConfig) (*WebhookProvider, error) {
 			if req.URL.Scheme != "https" {
 				return fmt.Errorf("redirect to non-HTTPS URL")
 			}
-			ips, err := net.LookupIP(req.URL.Hostname())
-			if err != nil {
-				return fmt.Errorf("cannot resolve redirect host: %w", err)
-			}
-			for _, ip := range ips {
-				if isUnsafeIP(ip) {
-					return fmt.Errorf("redirect to unsafe address: %s", ip.String())
-				}
+			if err := validateWebhookURL(req.Context(), req.URL.String(), resolver); err != nil {
+				return fmt.Errorf("unsafe webhook redirect")
 			}
 			return nil
 		},

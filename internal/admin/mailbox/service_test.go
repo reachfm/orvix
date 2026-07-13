@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/orvix/orvix/internal/audit"
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
 )
@@ -49,6 +51,45 @@ func newMailboxTestDB(t *testing.T) *sql.DB {
 		t.Fatal(err)
 	}
 	return db
+}
+
+func TestMailboxMutationRollsBackWhenAuditWriteFails(t *testing.T) {
+	before := metricCounterValue(t, "orvix_audit_write_failures_total")
+	db := newMailboxTestDB(t)
+	db.SetMaxOpenConns(1)
+	store := audit.NewExtendedStore(db)
+	svc := NewService(NewAdminMailboxRepo(db), store, nil)
+	_, err := svc.CreateMailbox(context.Background(), CreateMailboxRequest{
+		Email: "audit-failure@example.test", Password: "InitialPassword123!",
+	}, 10, 20)
+	if err == nil {
+		t.Fatal("audit failure must fail the mutation")
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM coremail_mailboxes WHERE email = ?`, "audit-failure@example.test").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("mailbox mutation committed without its audit record")
+	}
+	if got := metricCounterValue(t, "orvix_audit_write_failures_total"); got != before+1 {
+		t.Fatalf("audit failure metric = %v, want %v", got, before+1)
+	}
+}
+
+func metricCounterValue(t *testing.T, name string) float64 {
+	t.Helper()
+	families, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range families {
+		if family.GetName() == name && len(family.Metric) == 1 {
+			return family.Metric[0].GetCounter().GetValue()
+		}
+	}
+	t.Fatalf("metric %q not found", name)
+	return 0
 }
 
 func TestMailboxServiceTenantScopeAndSecurePasswordReset(t *testing.T) {

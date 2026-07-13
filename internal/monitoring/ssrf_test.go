@@ -1,9 +1,28 @@
 package monitoring
 
 import (
+	"context"
+	"net"
 	"strings"
 	"testing"
 )
+
+type rebindingResolver struct{ calls int }
+
+func (r *rebindingResolver) LookupIPAddr(context.Context, string) ([]net.IPAddr, error) {
+	r.calls++
+	if r.calls == 1 {
+		return []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}, nil
+	}
+	return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
+}
+
+type countingDialer struct{ calls int }
+
+func (d *countingDialer) DialContext(context.Context, string, string) (net.Conn, error) {
+	d.calls++
+	return nil, context.DeadlineExceeded
+}
 
 func TestValidateWebhookURL_ValidHTTPS(t *testing.T) {
 	if err := ValidateWebhookURL("https://example.com/webhook"); err != nil {
@@ -66,5 +85,41 @@ func TestValidateWebhookURL_MalformedURL(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid URL") {
 		t.Fatalf("expected 'invalid URL' error, got: %v", err)
+	}
+}
+
+func TestUnsafeSpecialUseAddressesRejected(t *testing.T) {
+	for _, address := range []string{
+		"100.64.0.1", "192.0.0.1", "198.18.0.1", "240.0.0.1",
+		"::ffff:127.0.0.1", "fc00::1", "fe80::1",
+	} {
+		t.Run(address, func(t *testing.T) {
+			if !isUnsafeIP(net.ParseIP(address)) {
+				t.Fatalf("%s must be blocked", address)
+			}
+		})
+	}
+}
+
+func TestWebhookDialRevalidatesAndBlocksDNSRebinding(t *testing.T) {
+	resolver := &rebindingResolver{}
+	dialer := &countingDialer{}
+	provider, err := newWebhookProvider(
+		WebhookConfig{Enabled: true, URL: "https://example.com/hook"},
+		resolver,
+		dialer,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("construct provider: %v", err)
+	}
+	if err := provider.Deliver(context.Background(), sampleAlert()); err == nil {
+		t.Fatal("rebinding delivery must fail")
+	}
+	if resolver.calls < 2 {
+		t.Fatalf("expected validation and dial-time resolution, got %d calls", resolver.calls)
+	}
+	if dialer.calls != 0 {
+		t.Fatal("unsafe rebound address reached the socket dialer")
 	}
 }

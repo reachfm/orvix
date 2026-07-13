@@ -43,6 +43,8 @@ func testService(t *testing.T) *Service {
 
 	s := NewService(filepath.Join(base, "backups"), db, db, mailDir, attDir)
 	s.SetStagingRoot(filepath.Join(base, "restore-staging"))
+	s.SetDatabasePath(filepath.Join(base, "restored-orvix.db"))
+	s.SetRestoreMaintenanceChecker(func(context.Context) error { return nil })
 	return s
 }
 
@@ -483,10 +485,12 @@ func TestCreateArchiveExplicitAllowlist(t *testing.T) {
 	tr := tar.NewReader(gr)
 
 	allowed := map[string]bool{
-		"var/lib/orvix/orvix.db":   false,
-		"backup.json":              false,
-		"RESTORE_INSTRUCTIONS.txt": false,
-		"checksums.txt":            false,
+		"var/lib/orvix/orvix.db":           false,
+		"var/lib/orvix/mailstore.tar.gz":   false,
+		"var/lib/orvix/attachments.tar.gz": false,
+		"backup.json":                      false,
+		"RESTORE_INSTRUCTIONS.txt":         false,
+		"checksums.txt":                    false,
 	}
 	// etc/orvix/orvix.yaml.redacted may not exist if /etc/orvix is not present on test machine
 
@@ -1008,11 +1012,13 @@ func TestArchiveContainsOnlyAllowedEntries(t *testing.T) {
 	tr := tar.NewReader(gr)
 
 	allowedEntries := map[string]bool{
-		"var/lib/orvix/orvix.db":        false,
-		"etc/orvix/orvix.yaml.redacted": false,
-		"backup.json":                   false,
-		"RESTORE_INSTRUCTIONS.txt":      false,
-		"checksums.txt":                 false,
+		"var/lib/orvix/orvix.db":           false,
+		"var/lib/orvix/mailstore.tar.gz":   false,
+		"var/lib/orvix/attachments.tar.gz": false,
+		"etc/orvix/orvix.yaml.redacted":    false,
+		"backup.json":                      false,
+		"RESTORE_INSTRUCTIONS.txt":         false,
+		"checksums.txt":                    false,
 	}
 
 	for {
@@ -1996,7 +2002,7 @@ func TestRestoreRequiresValidArchive(t *testing.T) {
 		}
 		return
 	}
-	if result != nil && result.Status == RestoreStatusStaged {
+	if result != nil && result.Status == RestoreStatusActivated {
 		t.Fatal("restore should not succeed with corrupt archive")
 	}
 }
@@ -2021,11 +2027,11 @@ func TestRestoreCreatesPreRestoreSafetyBackup(t *testing.T) {
 	if result == nil {
 		t.Fatal("expected restore result")
 	}
-	if result.Status != RestoreStatusStaged {
-		t.Fatalf("expected staged, got %s", result.Status)
+	if result.Status != RestoreStatusActivated {
+		t.Fatalf("expected activated, got %s", result.Status)
 	}
-	if result.Message != RestoreStagedMessage {
-		t.Fatalf("expected staged message, got %s", result.Message)
+	if result.Message != RestoreActivatedMessage {
+		t.Fatalf("expected activated message, got %s", result.Message)
 	}
 	// A pre-restore safety backup must have been created
 	after, _ := s.ListBackups(ctx)
@@ -2033,18 +2039,21 @@ func TestRestoreCreatesPreRestoreSafetyBackup(t *testing.T) {
 		t.Fatal("expected pre-restore safety backup to be created")
 	}
 	// The safety backup should have a distinct ID from the restore source
-	if result.BackupID == b.ID {
+	if result.SafetyBackupID == b.ID {
 		t.Fatal("safety backup ID should differ from source backup ID")
 	}
 }
 
-func TestRestoreStagesToStagingDir(t *testing.T) {
+func TestRestoreActivatesMailstore(t *testing.T) {
 	s := testService(t)
 	ctx := context.Background()
 	b, _ := s.CreateBackup(ctx, "staging-test")
 	archivePath, _ := s.CreateArchive(ctx, b.ID)
 	if _, err := os.Stat(archivePath); err != nil {
 		t.Fatalf("archive not created: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(s.mailDir, "live-only.eml"), []byte("live"), 0640); err != nil {
+		t.Fatalf("write live marker: %v", err)
 	}
 	result, err := s.RestoreBackup(ctx, b.ID)
 	if err != nil {
@@ -2053,16 +2062,57 @@ func TestRestoreStagesToStagingDir(t *testing.T) {
 	if result == nil {
 		t.Fatal("expected restore result")
 	}
-	if result.StagingPath == "" {
-		t.Fatal("expected non-empty staging path")
+	if result.Status != RestoreStatusActivated {
+		t.Fatalf("expected activated, got %s", result.Status)
 	}
-	// Verify staging directory exists
-	if _, err := os.Stat(result.StagingPath); err != nil {
-		t.Fatalf("staging dir not found: %v", err)
+	if _, err := os.Stat(filepath.Join(s.mailDir, "test.eml")); err != nil {
+		t.Fatalf("restored mail missing: %v", err)
 	}
-	// Verify archive was extracted
-	if _, err := os.Stat(filepath.Join(result.StagingPath, "var/lib/orvix/orvix.db")); err != nil {
-		t.Fatalf("db not staged: %v", err)
+	if _, err := os.Stat(filepath.Join(s.mailDir, "live-only.eml")); !os.IsNotExist(err) {
+		t.Fatalf("live-only marker should have been replaced, err=%v", err)
+	}
+}
+
+func TestRestoreRequiresMaintenanceMode(t *testing.T) {
+	s := testService(t)
+	s.SetRestoreMaintenanceChecker(nil)
+	ctx := context.Background()
+	b, err := s.CreateBackup(ctx, "maintenance-required")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	result, err := s.RestoreBackup(ctx, b.ID)
+	if err == nil {
+		t.Fatalf("expected maintenance error, result=%+v", result)
+	}
+	if !strings.Contains(err.Error(), "maintenance mode checker") {
+		t.Fatalf("expected maintenance checker error, got %v", err)
+	}
+}
+
+func TestRestoreHealthFailureRollsBack(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	b, err := s.CreateBackup(ctx, "rollback-health")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(s.mailDir, "live-only.eml"), []byte("live"), 0640); err != nil {
+		t.Fatalf("write live marker: %v", err)
+	}
+	s.SetRestoreHealthCheck(func(context.Context) error { return fmt.Errorf("health failed") })
+	result, err := s.RestoreBackup(ctx, b.ID)
+	if err == nil {
+		t.Fatal("expected restore health failure")
+	}
+	if result == nil {
+		t.Fatal("expected rollback result")
+	}
+	if result.Status != RestoreStatusRolledBack || !result.RolledBack {
+		t.Fatalf("expected rolled_back result, got %+v", result)
+	}
+	if _, statErr := os.Stat(filepath.Join(s.mailDir, "live-only.eml")); statErr != nil {
+		t.Fatalf("rollback did not restore live marker: %v", statErr)
 	}
 }
 
@@ -2128,7 +2178,7 @@ func TestErrorsNotFakeSuccess(t *testing.T) {
 	// Delete and then try to restore - must fail
 	s.DeleteBackup(ctx, b.ID)
 	result, err := s.RestoreBackup(ctx, b.ID)
-	if err == nil && result != nil && result.Status == RestoreStatusStaged {
+	if err == nil && result != nil && result.Status == RestoreStatusActivated {
 		t.Fatal("restore must not succeed for deleted backup")
 	}
 }
