@@ -18,6 +18,11 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	dashboardsvc "github.com/orvix/orvix/internal/admin/dashboard"
+	domainadminsvc "github.com/orvix/orvix/internal/admin/domain"
+	mailboxadminsvc "github.com/orvix/orvix/internal/admin/mailbox"
+	orgadminsvc "github.com/orvix/orvix/internal/admin/organization"
+	platformsvc "github.com/orvix/orvix/internal/admin/platform"
 	"github.com/orvix/orvix/internal/antivirus"
 	"github.com/orvix/orvix/internal/api/handlers/settings"
 	"github.com/orvix/orvix/internal/audit"
@@ -179,6 +184,13 @@ type Handler struct {
 	// live cfg. The admin /settings/protocol/:protocol
 	// endpoint reads through this handle.
 	settingsBridge *settingsbridge.Bridge
+
+	// Enterprise admin services.
+	mailboxAdminSvc  *mailboxadminsvc.Service
+	orgAdminSvc      *orgadminsvc.Service
+	domainAdminSvc   *domainadminsvc.Service
+	platformAdminSvc *platformsvc.PlatformService
+	dashboardSvc     *dashboardsvc.DashboardService
 }
 
 // NewHandler creates a new Handler with dependencies.
@@ -335,6 +347,31 @@ func (h *Handler) SetTrustPersistence(ok bool, errMsg string) {
 		h.trustPersistenceOK = false
 		h.trustPersistenceError = errMsg
 	}
+}
+
+// SetMailboxAdminService wires the enterprise mailbox admin service.
+func (h *Handler) SetMailboxAdminService(s *mailboxadminsvc.Service) {
+	h.mailboxAdminSvc = s
+}
+
+// SetOrganizationAdminService wires the organization admin service.
+func (h *Handler) SetOrganizationAdminService(s *orgadminsvc.Service) {
+	h.orgAdminSvc = s
+}
+
+// SetDomainAdminService wires the domain admin service.
+func (h *Handler) SetDomainAdminService(s *domainadminsvc.Service) {
+	h.domainAdminSvc = s
+}
+
+// SetPlatformAdminService wires the platform admin service.
+func (h *Handler) SetPlatformAdminService(s *platformsvc.PlatformService) {
+	h.platformAdminSvc = s
+}
+
+// SetDashboardService wires the dashboard aggregation service.
+func (h *Handler) SetDashboardService(s *dashboardsvc.DashboardService) {
+	h.dashboardSvc = s
 }
 
 // setPreferredSessionCookie sets the opaque HttpOnly session cookie.

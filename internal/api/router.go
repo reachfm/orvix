@@ -11,6 +11,11 @@ import (
 	"github.com/gofiber/fiber/v3/middleware/cors"
 	"github.com/gofiber/fiber/v3/middleware/limiter"
 	"github.com/gofiber/fiber/v3/middleware/recover"
+	dashboardsvc "github.com/orvix/orvix/internal/admin/dashboard"
+	domainadminsvc "github.com/orvix/orvix/internal/admin/domain"
+	mailboxadminsvc "github.com/orvix/orvix/internal/admin/mailbox"
+	orgadminsvc "github.com/orvix/orvix/internal/admin/organization"
+	platformpkg "github.com/orvix/orvix/internal/admin/platform"
 	"github.com/orvix/orvix/internal/antivirus"
 	"github.com/orvix/orvix/internal/api/handlers"
 	"github.com/orvix/orvix/internal/api/handlers/settings"
@@ -156,6 +161,26 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		}
 	} else {
 		logger.Warn("webmail service not available: failed to get sql.DB", zap.Error(err))
+	}
+
+	// Wire enterprise admin services (mailbox, org, domain, platform, dashboard).
+	if sqlDB, err := db.DB(); err == nil {
+		adminMailboxRepo := mailboxadminsvc.NewAdminMailboxRepo(sqlDB)
+		router.h.SetMailboxAdminService(mailboxadminsvc.NewService(adminMailboxRepo, nil, nil))
+
+		orgRepo := orgadminsvc.NewOrganizationRepo(sqlDB)
+		router.h.SetOrganizationAdminService(orgadminsvc.NewService(orgRepo, nil, nil))
+
+		domainAdminRepo := domainadminsvc.NewDomainAdminRepo(sqlDB)
+		router.h.SetDomainAdminService(domainadminsvc.NewService(domainAdminRepo, nil, nil))
+
+		dashboardSvc := dashboardsvc.NewDashboardService(sqlDB)
+		router.h.SetDashboardService(dashboardSvc)
+
+		platformSvc := platformpkg.NewPlatformService(sqlDB, nil, nil)
+		router.h.SetPlatformAdminService(platformSvc)
+
+		logger.Info("enterprise admin services wired")
 	}
 
 	// Wire MailStore from the coremail runtime module. The
@@ -650,6 +675,26 @@ func (r *Router) setupRoutes() {
 	protected.Get("/customer/domains/:domain_id/dns", r.h.GetCustomerDomainDNS)
 	protected.Post("/customer/domains/:domain_id/verify", r.h.VerifyCustomerDomain)
 
+	// Enterprise customer administration (tenant-scoped).
+	// Available to organization admins, operators, and above.
+	// All operations are scoped to the caller's tenant_id.
+	enterprise := protected.Group("/enterprise",
+		auth.RequireAnyRole(auth.RoleAdmin, auth.RoleSuperAdmin, auth.RoleOperator))
+	enterprise.Get("/dashboard", r.h.CustomerDashboard)
+	enterprise.Get("/domains", r.h.ListAdminDomains)
+	enterprise.Get("/domains/:id", r.h.GetAdminDomain)
+	enterprise.Post("/domains", r.h.CreateAdminDomain)
+	enterprise.Patch("/domains/:id", r.h.UpdateAdminDomain)
+	enterprise.Post("/domains/:id/status", r.h.SetAdminDomainStatus)
+	enterprise.Get("/mailboxes", r.h.ListAdminMailboxes)
+	enterprise.Get("/mailboxes/:id", r.h.GetAdminMailbox)
+	enterprise.Post("/mailboxes", r.h.CreateAdminMailbox)
+	enterprise.Patch("/mailboxes/:id", r.h.UpdateAdminMailbox)
+	enterprise.Post("/mailboxes/:id/status", r.h.SetAdminMailboxStatus)
+	enterprise.Post("/mailboxes/bulk/status", r.h.BulkSetAdminMailboxStatus)
+	enterprise.Post("/mailboxes/:id/reset-password", r.h.ResetAdminMailboxPassword)
+	enterprise.Get("/organizations/:id", r.h.GetOrganization)
+
 	// CSRF is enforced on the entire admin group by default (deny-list,
 	// not allow-list) rather than only on routes an author remembered to
 	// nest under a separate CSRF sub-group — several state-changing
@@ -913,6 +958,18 @@ func (r *Router) setupRoutes() {
 	internalOps.Get("/domain-intelligence", r.h.InternalDomainIntelligence)
 	internalOps.Get("/security-ops", r.h.InternalSecurityOps)
 	internalOps.Get("/mail-flow-ops", r.h.InternalMailFlowOps)
+
+	// Platform administration (cross-tenant, admin/superadmin only).
+	// These routes operate on all tenants and require explicit
+	// platform-level authorization — not just tenant membership.
+	platform := admin.Group("/platform")
+	platform.Get("/dashboard", r.h.PlatformDashboard)
+	platform.Get("/organizations", r.h.ListPlatformOrganizations)
+	platform.Get("/organizations/:id", r.h.GetPlatformOrganization)
+	platform.Post("/organizations", r.h.CreateOrganization)
+	platform.Patch("/organizations/:id", r.h.UpdateOrganization)
+	platform.Post("/organizations/:id/active", r.h.SetOrganizationActive)
+	platform.Get("/organizations/:id/detail", r.h.GetOrganizationDetail)
 
 	// Monitoring v1: resolve an alert (CSRF-protected, admin role).
 	men.Post("/monitoring/alerts/:id/resolve", r.h.PostMonitoringAlertResolve)
