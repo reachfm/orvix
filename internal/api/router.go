@@ -527,6 +527,7 @@ func (r *Router) setupRoutes() {
 	// per-IP API budget.
 	api := r.app.Group("/api/v1", r.apiRateLimitMiddleware())
 	api.Get("/health", r.h.Health)
+	api.Get("/metrics", metrics.Handler())
 
 	loginGroup := api.Group("/auth")
 	if r.redisLimiter != nil {
