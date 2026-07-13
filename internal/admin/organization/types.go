@@ -34,14 +34,14 @@ type OrganizationFilter struct {
 }
 
 type CreateOrganizationRequest struct {
-	Name         string `json:"name"`
-	Slug         string `json:"slug"`
-	Domain       string `json:"domain"`
-	AdminEmail   string `json:"admin_email"`
+	Name          string `json:"name"`
+	Slug          string `json:"slug"`
+	Domain        string `json:"domain"`
+	AdminEmail    string `json:"admin_email"`
 	AdminPassword string `json:"admin_password"`
-	Plan         string `json:"plan,omitempty"`
-	MaxDomains   int    `json:"max_domains,omitempty"`
-	MaxMailboxes int    `json:"max_mailboxes,omitempty"`
+	Plan          string `json:"plan,omitempty"`
+	MaxDomains    int    `json:"max_domains,omitempty"`
+	MaxMailboxes  int    `json:"max_mailboxes,omitempty"`
 }
 
 type UpdateOrganizationRequest struct {

@@ -176,7 +176,9 @@ func (h *Handler) CreateAccountClass(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("create account class: %v", err))
 	}
 	id, _ := res.LastInsertId()
-	h.appendAudit(c, "account_class.create", body.Name, "ok")
+	if err := h.appendAudit(c, "account_class.create", body.Name, "ok"); err != nil {
+		return err
+	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": id, "name": body.Name})
 }
 
@@ -253,7 +255,9 @@ func (h *Handler) UpdateAccountClass(c fiber.Ctx) error {
 	if n == 0 {
 		return fiber.NewError(fiber.StatusNotFound, "account class not found")
 	}
-	h.appendAudit(c, "account_class.update", fmt.Sprintf("%d", id), "ok")
+	if err := h.appendAudit(c, "account_class.update", fmt.Sprintf("%d", id), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"id": id, "updated": true})
 }
 
@@ -303,7 +307,9 @@ func (h *Handler) DeleteAccountClass(c fiber.Ctx) error {
 	if rn == 0 {
 		return fiber.NewError(fiber.StatusNotFound, "account class not found")
 	}
-	h.appendAudit(c, "account_class.delete", fmt.Sprintf("%d", id), "ok")
+	if err := h.appendAudit(c, "account_class.delete", fmt.Sprintf("%d", id), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"id": id, "deleted": true})
 }
 
@@ -455,7 +461,9 @@ func (h *Handler) CreateDomainGroup(c fiber.Ctx) error {
 			`INSERT OR IGNORE INTO coremail_domain_group_members (group_id, domain_id, created_at) VALUES (?, ?, ?)`,
 			id, did, now)
 	}
-	h.appendAudit(c, "domain_group.create", body.Name, "ok")
+	if err := h.appendAudit(c, "domain_group.create", body.Name, "ok"); err != nil {
+		return err
+	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": id, "name": body.Name})
 }
 
@@ -513,7 +521,9 @@ func (h *Handler) UpdateDomainGroupMembers(c fiber.Ctx) error {
 	if err := tx.Commit(); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("commit: %v", err))
 	}
-	h.appendAudit(c, "domain_group.update_members", fmt.Sprintf("%d", id), "ok")
+	if err := h.appendAudit(c, "domain_group.update_members", fmt.Sprintf("%d", id), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"id": id, "members": len(body.DomainIDs)})
 }
 
@@ -541,7 +551,9 @@ func (h *Handler) DeleteDomainGroup(c fiber.Ctx) error {
 	}
 	_, _ = h.sqlDB().ExecContext(c.Context(),
 		`DELETE FROM coremail_domain_group_members WHERE group_id = ?`, id)
-	h.appendAudit(c, "domain_group.delete", fmt.Sprintf("%d", id), "ok")
+	if err := h.appendAudit(c, "domain_group.delete", fmt.Sprintf("%d", id), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"id": id, "deleted": true})
 }
 
@@ -665,7 +677,9 @@ func (h *Handler) CreateMailingList(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("create mailing list: %v", err))
 	}
 	id, _ := res.LastInsertId()
-	h.appendAudit(c, "mailing_list.create", body.Address, "ok")
+	if err := h.appendAudit(c, "mailing_list.create", body.Address, "ok"); err != nil {
+		return err
+	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": id, "address": body.Address})
 }
 
@@ -693,7 +707,9 @@ func (h *Handler) DeleteMailingList(c fiber.Ctx) error {
 	}
 	_, _ = h.sqlDB().ExecContext(c.Context(),
 		`DELETE FROM coremail_mailing_list_members WHERE list_id = ?`, id)
-	h.appendAudit(c, "mailing_list.delete", fmt.Sprintf("%d", id), "ok")
+	if err := h.appendAudit(c, "mailing_list.delete", fmt.Sprintf("%d", id), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"id": id, "deleted": true})
 }
 
@@ -838,7 +854,9 @@ func (h *Handler) PatchMailingList(c fiber.Ctx) error {
 	for k := range body {
 		applied = append(applied, k)
 	}
-	h.appendAudit(c, "mailing_list.update", fmt.Sprintf("%d|applied:%d", id, len(applied)), "ok")
+	if err := h.appendAudit(c, "mailing_list.update", fmt.Sprintf("%d|applied:%d", id, len(applied)), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"applied": applied, "id": id})
 }
 
@@ -941,7 +959,9 @@ func (h *Handler) AddMailingListMember(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("insert member: %v", err))
 	}
 	mid, _ := res.LastInsertId()
-	h.appendAudit(c, "mailing_list.member.add", body.Address, "ok")
+	if err := h.appendAudit(c, "mailing_list.member.add", body.Address, "ok"); err != nil {
+		return err
+	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": mid, "address": body.Address})
 }
 
@@ -980,7 +1000,9 @@ func (h *Handler) RemoveMailingListMember(c fiber.Ctx) error {
 	if n == 0 {
 		return fiber.NewError(fiber.StatusNotFound, "member not found")
 	}
-	h.appendAudit(c, "mailing_list.member.remove", fmt.Sprintf("%d", memberID), "ok")
+	if err := h.appendAudit(c, "mailing_list.member.remove", fmt.Sprintf("%d", memberID), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"id": memberID, "deleted": true})
 }
 
@@ -1086,7 +1108,9 @@ func (h *Handler) CreatePublicFolder(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("create public folder: %v", err))
 	}
 	id, _ := res.LastInsertId()
-	h.appendAudit(c, "public_folder.create", body.FolderPath, "ok")
+	if err := h.appendAudit(c, "public_folder.create", body.FolderPath, "ok"); err != nil {
+		return err
+	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": id, "folder_path": body.FolderPath})
 }
 
@@ -1115,7 +1139,9 @@ func (h *Handler) DeletePublicFolder(c fiber.Ctx) error {
 	}
 	_, _ = h.sqlDB().ExecContext(c.Context(),
 		`DELETE FROM coremail_public_folder_members WHERE folder_id = ?`, id)
-	h.appendAudit(c, "public_folder.delete", fmt.Sprintf("%d", id), "ok")
+	if err := h.appendAudit(c, "public_folder.delete", fmt.Sprintf("%d", id), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"id": id, "deleted": true})
 }
 
@@ -1217,7 +1243,9 @@ func (h *Handler) PatchPublicFolder(c fiber.Ctx) error {
 	for k := range body {
 		applied = append(applied, k)
 	}
-	h.appendAudit(c, "public_folder.update", fmt.Sprintf("%d|applied:%d", id, len(applied)), "ok")
+	if err := h.appendAudit(c, "public_folder.update", fmt.Sprintf("%d|applied:%d", id, len(applied)), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"applied": applied, "id": id})
 }
 
@@ -1324,7 +1352,9 @@ func (h *Handler) CreateAdminGroup(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("create admin group: %v", err))
 	}
 	id, _ := res.LastInsertId()
-	h.appendAudit(c, "admin_group.create", body.Name, "ok")
+	if err := h.appendAudit(c, "admin_group.create", body.Name, "ok"); err != nil {
+		return err
+	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": id, "name": body.Name})
 }
 
@@ -1393,7 +1423,9 @@ func (h *Handler) UpdateAdminGroup(c fiber.Ctx) error {
 	if n == 0 {
 		return fiber.NewError(fiber.StatusNotFound, "admin group not found")
 	}
-	h.appendAudit(c, "admin_group.update", fmt.Sprintf("%d", id), "ok")
+	if err := h.appendAudit(c, "admin_group.update", fmt.Sprintf("%d", id), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"id": id, "updated": true})
 }
 
@@ -1435,7 +1467,9 @@ func (h *Handler) DeleteAdminGroup(c fiber.Ctx) error {
 	}
 	_, _ = h.sqlDB().ExecContext(c.Context(),
 		`DELETE FROM coremail_admin_group_members WHERE group_id = ?`, id)
-	h.appendAudit(c, "admin_group.delete", fmt.Sprintf("%d", id), "ok")
+	if err := h.appendAudit(c, "admin_group.delete", fmt.Sprintf("%d", id), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"id": id, "deleted": true})
 }
 
@@ -1508,7 +1542,9 @@ func (h *Handler) AddAdminGroupMember(c fiber.Ctx) error {
 	if n == 0 {
 		return fiber.NewError(fiber.StatusConflict, "user is already a member of this group")
 	}
-	h.appendAudit(c, "admin_group.member.add", fmt.Sprintf("%d/%d", id, body.UserID), "ok")
+	if err := h.appendAudit(c, "admin_group.member.add", fmt.Sprintf("%d/%d", id, body.UserID), "ok"); err != nil {
+		return err
+	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"group_id": id, "user_id": body.UserID})
 }
 
@@ -1535,7 +1571,9 @@ func (h *Handler) RemoveAdminGroupMember(c fiber.Ctx) error {
 	if n == 0 {
 		return fiber.NewError(fiber.StatusNotFound, "member not found")
 	}
-	h.appendAudit(c, "admin_group.member.remove", fmt.Sprintf("%d/%d", id, uid), "ok")
+	if err := h.appendAudit(c, "admin_group.member.remove", fmt.Sprintf("%d/%d", id, uid), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"group_id": id, "user_id": uid, "deleted": true})
 }
 
@@ -1709,7 +1747,9 @@ func (h *Handler) ResolveQuarantine(c fiber.Ctx) error {
 	if n == 0 {
 		return fiber.NewError(fiber.StatusNotFound, "quarantined message not found or already resolved")
 	}
-	h.appendAudit(c, "quarantine."+body.Action, fmt.Sprintf("%d", id), "ok")
+	if err := h.appendAudit(c, "quarantine."+body.Action, fmt.Sprintf("%d", id), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"id": id, "status": newStatus})
 }
 
@@ -1811,7 +1851,9 @@ func (h *Handler) CreateACLRule(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("create acl: %v", err))
 	}
 	id, _ := res.LastInsertId()
-	h.appendAudit(c, "acl.create", body.Source+" "+body.Action, "ok")
+	if err := h.appendAudit(c, "acl.create", body.Source+" "+body.Action, "ok"); err != nil {
+		return err
+	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": id})
 }
 
@@ -1837,7 +1879,9 @@ func (h *Handler) DeleteACLRule(c fiber.Ctx) error {
 	if n == 0 {
 		return fiber.NewError(fiber.StatusNotFound, "acl rule not found")
 	}
-	h.appendAudit(c, "acl.delete", fmt.Sprintf("%d", id), "ok")
+	if err := h.appendAudit(c, "acl.delete", fmt.Sprintf("%d", id), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"id": id, "deleted": true})
 }
 
@@ -1930,7 +1974,9 @@ func (h *Handler) CreateLogRule(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("create log rule: %v", err))
 	}
 	id, _ := res.LastInsertId()
-	h.appendAudit(c, "log_rule.create", body.Name, "ok")
+	if err := h.appendAudit(c, "log_rule.create", body.Name, "ok"); err != nil {
+		return err
+	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": id})
 }
 
@@ -1956,7 +2002,9 @@ func (h *Handler) DeleteLogRule(c fiber.Ctx) error {
 	if n == 0 {
 		return fiber.NewError(fiber.StatusNotFound, "log rule not found")
 	}
-	h.appendAudit(c, "log_rule.delete", fmt.Sprintf("%d", id), "ok")
+	if err := h.appendAudit(c, "log_rule.delete", fmt.Sprintf("%d", id), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"id": id, "deleted": true})
 }
 
@@ -1990,14 +2038,18 @@ func (h *Handler) sqlDB() *sql.DB {
 }
 
 // tenantID reads the caller's tenant from the auth locals
-// populated by the tenant middleware. Defaults to 1 in
-// single-tenant dev installs so the handlers never panic on
-// a missing locals key.
+// populated by the tenant middleware. Missing tenant context
+// must fail closed for enterprise admin routes; returning -1
+// makes tenant-scoped SQL match no rows instead of silently
+// authorizing tenant 1.
 func (h *Handler) tenantID(c fiber.Ctx) int64 {
 	if v, ok := c.Locals("tenant_id").(uint); ok && v > 0 {
 		return int64(v)
 	}
-	return 1
+	if _, ok := c.Locals("user_id").(uint); !ok {
+		return 1
+	}
+	return -1
 }
 
 // appendAudit records an admin mutation to coremail_audit. The
@@ -2009,9 +2061,9 @@ func (h *Handler) tenantID(c fiber.Ctx) int64 {
 // Actor format matches the existing handlers.go
 // writeAuditLog convention: "user:<id>" so admin / user rows
 // are indistinguishable in queries.
-func (h *Handler) appendAudit(c fiber.Ctx, action, target, result string) {
+func (h *Handler) appendAudit(c fiber.Ctx, action, target, result string) error {
 	if h.auditStore == nil {
-		return
+		return fiber.NewError(fiber.StatusServiceUnavailable, "audit store unavailable")
 	}
 	uid, _ := c.Locals("user_id").(uint)
 	actor := fmt.Sprintf("user:%d", uid)
@@ -2028,5 +2080,7 @@ func (h *Handler) appendAudit(c fiber.Ctx, action, target, result string) {
 		if h.logger != nil {
 			h.logger.Error("failed to write audit log", zap.Error(err))
 		}
+		return fiber.NewError(fiber.StatusInternalServerError, "audit write failed")
 	}
+	return nil
 }

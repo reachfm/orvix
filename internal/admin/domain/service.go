@@ -269,7 +269,9 @@ func (s *Service) recordAudit(ctx context.Context, action, target string, target
 	})
 }
 
-func scanAdminDomain(row interface{ Scan(dest ...interface{}) error }) (*AdminDomain, error) {
+func scanAdminDomain(row interface {
+	Scan(dest ...interface{}) error
+}) (*AdminDomain, error) {
 	var d AdminDomain
 	var dkimEnabled, dmarcEnabled int
 	err := row.Scan(&d.ID, &d.TenantID, &d.Name, &d.Status, &d.Plan, &d.Description,
@@ -288,7 +290,9 @@ func scanAdminDomain(row interface{ Scan(dest ...interface{}) error }) (*AdminDo
 }
 
 func boolToInt(b bool) int {
-	if b { return 1 }
+	if b {
+		return 1
+	}
 	return 0
 }
 

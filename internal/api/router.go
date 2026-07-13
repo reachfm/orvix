@@ -665,6 +665,13 @@ func (r *Router) setupRoutes() {
 	// so cross-mailbox password changes are impossible.
 	authCSRF.Post("/webmail/password/change", r.h.WebmailChangePassword)
 
+	requireTenantContext := func(c fiber.Ctx) error {
+		if _, err := auth.RequireTenantID(c); err != nil {
+			return err
+		}
+		return c.Next()
+	}
+
 	// Customer domain administration. Mounted on the protected group
 	// (auth + tenant middleware) without admin role restriction so
 	// regular tenant users can view and verify their own domains.
@@ -679,6 +686,7 @@ func (r *Router) setupRoutes() {
 	// Available to organization admins, operators, and above.
 	// All operations are scoped to the caller's tenant_id.
 	enterprise := protected.Group("/enterprise",
+		requireTenantContext,
 		auth.RequireAnyRole(auth.RoleAdmin, auth.RoleSuperAdmin, auth.RoleOperator))
 	enterprise.Get("/dashboard", r.h.CustomerDashboard)
 	enterprise.Get("/domains", r.h.ListAdminDomains)

@@ -114,7 +114,7 @@ func (s *PlatformService) GetOrganizationDetail(ctx context.Context, id uint) (m
 	}
 
 	return map[string]interface{}{
-		"organization": summary,
+		"organization":   summary,
 		"administrators": admins,
 	}, nil
 }

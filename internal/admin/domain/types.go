@@ -22,10 +22,10 @@ type AdminDomain struct {
 }
 
 type DomainAdminAssignment struct {
-	ID       uint      `json:"id"`
-	DomainID uint      `json:"domain_id"`
-	UserID   uint      `json:"user_id"`
-	TenantID uint      `json:"tenant_id"`
+	ID        uint      `json:"id"`
+	DomainID  uint      `json:"domain_id"`
+	UserID    uint      `json:"user_id"`
+	TenantID  uint      `json:"tenant_id"`
 	CreatedAt time.Time `json:"created_at"`
 }
 

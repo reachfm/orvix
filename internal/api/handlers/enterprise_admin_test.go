@@ -382,6 +382,23 @@ func TestEnterpriseAdminV2CSRFEnforced(t *testing.T) {
 	}
 }
 
+func TestEnterpriseAdminRequiresTenantContext(t *testing.T) {
+	router, sqlDB := newEnterpriseRouter(t)
+	token := enterpriseLoginForTest(t, router, "admin@test.local", "TestPassword123!")
+
+	if _, err := sqlDB.Exec(`UPDATE users SET tenant_id = 0 WHERE email = 'admin@test.local'`); err != nil {
+		t.Fatalf("clear tenant: %v", err)
+	}
+
+	resp := getJSON(t, router, "/api/v1/enterprise/dashboard", token)
+	if resp.status != 403 {
+		t.Fatalf("tenantless enterprise request must fail closed with 403, got %d body=%s", resp.status, resp.body)
+	}
+	if bytes.Contains(resp.bodyBytes, []byte("standard")) || bytes.Contains(resp.bodyBytes, []byte("admin")) {
+		t.Fatalf("tenantless enterprise request leaked tenant-scoped data: %s", resp.body)
+	}
+}
+
 // helper: read body and return as string + raw bytes.
 type httpResp struct {
 	status    int

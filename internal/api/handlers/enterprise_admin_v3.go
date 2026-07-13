@@ -661,7 +661,9 @@ func (h *Handler) CreateAcceptanceRule(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("create rule: %v", err))
 	}
 	id, _ := res.LastInsertId()
-	h.appendAudit(c, "acceptance_rule.create", body.Name, "ok")
+	if err := h.appendAudit(c, "acceptance_rule.create", body.Name, "ok"); err != nil {
+		return err
+	}
 	if h.rulerService != nil {
 		h.rulerService.Invalidate()
 	}
@@ -708,7 +710,9 @@ func (h *Handler) UpdateAcceptanceRule(c fiber.Ctx) error {
 	if n == 0 {
 		return fiber.NewError(fiber.StatusNotFound, "rule not found in this tenant")
 	}
-	h.appendAudit(c, "acceptance_rule.update", fmt.Sprintf("rule:%d", id), "ok")
+	if err := h.appendAudit(c, "acceptance_rule.update", fmt.Sprintf("rule:%d", id), "ok"); err != nil {
+		return err
+	}
 	if h.rulerService != nil {
 		h.rulerService.Invalidate()
 	}
@@ -738,7 +742,9 @@ func (h *Handler) DeleteAcceptanceRule(c fiber.Ctx) error {
 	if n == 0 {
 		return fiber.NewError(fiber.StatusNotFound, "rule not found in this tenant")
 	}
-	h.appendAudit(c, "acceptance_rule.delete", fmt.Sprintf("rule:%d", id), "ok")
+	if err := h.appendAudit(c, "acceptance_rule.delete", fmt.Sprintf("rule:%d", id), "ok"); err != nil {
+		return err
+	}
 	if h.rulerService != nil {
 		h.rulerService.Invalidate()
 	}
@@ -1041,7 +1047,9 @@ func (h *Handler) CreateIncomingMsgRule(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("create: %v", err))
 	}
 	id, _ := res.LastInsertId()
-	h.appendAudit(c, "incoming_msg_rule.create", body.Name, "ok")
+	if err := h.appendAudit(c, "incoming_msg_rule.create", body.Name, "ok"); err != nil {
+		return err
+	}
 	if h.rulerService != nil {
 		h.rulerService.Invalidate()
 	}
@@ -1083,7 +1091,9 @@ func (h *Handler) UpdateIncomingMsgRule(c fiber.Ctx) error {
 	if n == 0 {
 		return fiber.NewError(fiber.StatusNotFound, "rule not found in this tenant")
 	}
-	h.appendAudit(c, "incoming_msg_rule.update", fmt.Sprintf("rule:%d", id), "ok")
+	if err := h.appendAudit(c, "incoming_msg_rule.update", fmt.Sprintf("rule:%d", id), "ok"); err != nil {
+		return err
+	}
 	if h.rulerService != nil {
 		h.rulerService.Invalidate()
 	}
@@ -1113,7 +1123,9 @@ func (h *Handler) DeleteIncomingMsgRule(c fiber.Ctx) error {
 	if n == 0 {
 		return fiber.NewError(fiber.StatusNotFound, "rule not found in this tenant")
 	}
-	h.appendAudit(c, "incoming_msg_rule.delete", fmt.Sprintf("rule:%d", id), "ok")
+	if err := h.appendAudit(c, "incoming_msg_rule.delete", fmt.Sprintf("rule:%d", id), "ok"); err != nil {
+		return err
+	}
 	if h.rulerService != nil {
 		h.rulerService.Invalidate()
 	}
@@ -1298,7 +1310,9 @@ func (h *Handler) CreateMigrationSource(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("store secret: %v", err))
 		}
 	}
-	h.appendAudit(c, "migration_source.create", body.Name, "ok")
+	if err := h.appendAudit(c, "migration_source.create", body.Name, "ok"); err != nil {
+		return err
+	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": id, "name": body.Name})
 }
 
@@ -1387,7 +1401,9 @@ func (h *Handler) UpdateMigrationSource(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("clear secret: %v", err))
 		}
 	}
-	h.appendAudit(c, "migration_source.update", fmt.Sprintf("source:%d", id), "ok")
+	if err := h.appendAudit(c, "migration_source.update", fmt.Sprintf("source:%d", id), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"id": id, "updated": true})
 }
 
@@ -1418,7 +1434,9 @@ func (h *Handler) DeleteMigrationSource(c fiber.Ctx) error {
 	if _, err := h.sqlDB().ExecContext(c.Context(), `DELETE FROM coremail_migration_source_secrets WHERE source_id = ?`, id); err != nil {
 		h.logger.Warn("migration source: secret row cleanup failed", zap.Int64("source_id", id), zap.Error(err))
 	}
-	h.appendAudit(c, "migration_source.delete", fmt.Sprintf("source:%d", id), "ok")
+	if err := h.appendAudit(c, "migration_source.delete", fmt.Sprintf("source:%d", id), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"id": id, "deleted": true})
 }
 
@@ -1475,7 +1493,9 @@ func (h *Handler) TestMigrationSource(c fiber.Ctx) error {
 		result.Status, now, result.Message, id, tenantID); err != nil {
 		h.logger.Warn("test source: persist failed", zap.Error(err))
 	}
-	h.appendAudit(c, "migration_source.test", fmt.Sprintf("source:%d:%s", id, result.Status), "ok")
+	if err := h.appendAudit(c, "migration_source.test", fmt.Sprintf("source:%d:%s", id, result.Status), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(result)
 }
 
@@ -1625,7 +1645,9 @@ func (h *Handler) CreateBackupTarget(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("store secret: %v", err))
 		}
 	}
-	h.appendAudit(c, "backup_target.create", body.Name, "ok")
+	if err := h.appendAudit(c, "backup_target.create", body.Name, "ok"); err != nil {
+		return err
+	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": id, "name": body.Name})
 }
 
@@ -1711,7 +1733,9 @@ func (h *Handler) UpdateBackupTarget(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("clear secret: %v", err))
 		}
 	}
-	h.appendAudit(c, "backup_target.update", fmt.Sprintf("target:%d", id), "ok")
+	if err := h.appendAudit(c, "backup_target.update", fmt.Sprintf("target:%d", id), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"id": id, "updated": true})
 }
 
@@ -1741,7 +1765,9 @@ func (h *Handler) DeleteBackupTarget(c fiber.Ctx) error {
 	if _, err := h.sqlDB().ExecContext(c.Context(), `DELETE FROM coremail_backup_target_secrets WHERE target_id = ?`, id); err != nil {
 		h.logger.Warn("backup target: secret row cleanup failed", zap.Int64("target_id", id), zap.Error(err))
 	}
-	h.appendAudit(c, "backup_target.delete", fmt.Sprintf("target:%d", id), "ok")
+	if err := h.appendAudit(c, "backup_target.delete", fmt.Sprintf("target:%d", id), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(fiber.Map{"id": id, "deleted": true})
 }
 
@@ -1804,7 +1830,9 @@ func (h *Handler) TestBackupTarget(c fiber.Ctx) error {
 		result.Status, now, result.Message, id, tenantID); err != nil {
 		h.logger.Warn("test target: persist failed", zap.Error(err))
 	}
-	h.appendAudit(c, "backup_target.test", fmt.Sprintf("target:%d:%s", id, result.Status), "ok")
+	if err := h.appendAudit(c, "backup_target.test", fmt.Sprintf("target:%d:%s", id, result.Status), "ok"); err != nil {
+		return err
+	}
 	return c.JSON(result)
 }
 

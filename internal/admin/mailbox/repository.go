@@ -214,7 +214,9 @@ func (r *AdminMailboxRepo) ExistsByEmail(ctx context.Context, email string, excl
 	return count > 0, err
 }
 
-func scanAdminMailbox(row interface{ Scan(dest ...interface{}) error }) (*AdminMailbox, error) {
+func scanAdminMailbox(row interface {
+	Scan(dest ...interface{}) error
+}) (*AdminMailbox, error) {
 	var m AdminMailbox
 	var status string
 	var isAdmin, allowSMTP, allowIMAP, allowPOP3, allowJMAP, mfaEnabled int
@@ -241,7 +243,9 @@ func scanAdminMailbox(row interface{ Scan(dest ...interface{}) error }) (*AdminM
 }
 
 func boolToInt(b bool) int {
-	if b { return 1 }
+	if b {
+		return 1
+	}
 	return 0
 }
 

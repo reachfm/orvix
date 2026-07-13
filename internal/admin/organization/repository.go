@@ -136,7 +136,9 @@ func (r *OrganizationRepo) CountAdmins(ctx context.Context, tenantID uint) (int,
 	return count, err
 }
 
-func scanOrg(row interface{ Scan(dest ...interface{}) error }) (*Organization, error) {
+func scanOrg(row interface {
+	Scan(dest ...interface{}) error
+}) (*Organization, error) {
 	var o Organization
 	var active int
 	err := row.Scan(&o.ID, &o.Name, &o.Slug, &o.Domain, &o.Plan, &o.MaxDomains, &o.MaxMailboxes, &o.LogoURL, &o.PrimaryColor, &active, &o.CreatedAt, &o.UpdatedAt)
@@ -151,6 +153,8 @@ func scanOrg(row interface{ Scan(dest ...interface{}) error }) (*Organization, e
 }
 
 func boolToInt(b bool) int {
-	if b { return 1 }
+	if b {
+		return 1
+	}
 	return 0
 }

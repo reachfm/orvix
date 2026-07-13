@@ -3,7 +3,7 @@ package mailbox
 import (
 	"context"
 	"crypto/rand"
-	"encoding/hex"
+	"encoding/base64"
 	"fmt"
 	"strings"
 
@@ -83,7 +83,7 @@ func (s *Service) CreateMailbox(ctx context.Context, req CreateMailboxRequest, t
 		AllowSMTP: true,
 		AllowIMAP: true,
 		AllowPOP3: true,
-		AllowJMAP:  true,
+		AllowJMAP: true,
 	}
 
 	created, err := s.repo.Create(ctx, m, string(passwordHash))
@@ -182,7 +182,7 @@ func (s *Service) ResetPassword(ctx context.Context, id, tenantID uint) (string,
 		return "", ErrMailboxNotFound
 	}
 
-	newPassword := generatePassword(16)
+	newPassword := generatePassword(24)
 	passwordHash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
 	if err != nil {
 		return "", fmt.Errorf("hash password: %w", err)
@@ -226,15 +226,24 @@ func isValidStatusTransition(from, to AdminMailboxStatus) bool {
 }
 
 func generatePassword(length int) string {
+	if length < 24 {
+		length = 24
+	}
 	b := make([]byte, length)
-	rand.Read(b)
-	return hex.EncodeToString(b)[:length]
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand failed while generating mailbox password")
+	}
+	out := base64.RawURLEncoding.EncodeToString(b)
+	if len(out) < length {
+		return out
+	}
+	return out[:length]
 }
 
 var (
-	ErrMailboxNotFound    = fmt.Errorf("mailbox not found")
-	ErrMailboxExists      = fmt.Errorf("mailbox already exists")
-	ErrInvalidEmail       = fmt.Errorf("invalid email address")
-	ErrPasswordRequired   = fmt.Errorf("password is required")
-	ErrInvalidTransition  = fmt.Errorf("invalid status transition")
+	ErrMailboxNotFound   = fmt.Errorf("mailbox not found")
+	ErrMailboxExists     = fmt.Errorf("mailbox already exists")
+	ErrInvalidEmail      = fmt.Errorf("invalid email address")
+	ErrPasswordRequired  = fmt.Errorf("password is required")
+	ErrInvalidTransition = fmt.Errorf("invalid status transition")
 )
