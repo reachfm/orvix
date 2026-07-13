@@ -55,14 +55,14 @@ import (
 // MailStore + QueueEngine plus two authenticated users
 // in the same domain. Both have active mailbox rows.
 type rulesOwnershipEnv struct {
-	router       *api.Router
-	sqlDB        *sql.DB
-	aliceToken   string
-	bobToken     string
+	router         *api.Router
+	sqlDB          *sql.DB
+	aliceToken     string
+	bobToken       string
 	aliceMailboxID uint
 	bobMailboxID   uint
-	aliceEmail   string
-	bobEmail     string
+	aliceEmail     string
+	bobEmail       string
 }
 
 func buildRulesOwnershipEnv(t *testing.T) *rulesOwnershipEnv {
@@ -404,9 +404,9 @@ func TestVacationAPI_MailboxOwnershipIsolation(t *testing.T) {
 
 	// Alice enables her vacation.
 	status, body := doJSON(t, e.router, "PUT", "/api/v1/webmail/vacation", e.aliceToken, map[string]interface{}{
-		"enabled":               true,
-		"subject":               "Alice OOO",
-		"body":                  "I am out of the office",
+		"enabled":                true,
+		"subject":                "Alice OOO",
+		"body":                   "I am out of the office",
 		"reply_interval_seconds": 3600,
 	})
 	if status != fiber.StatusOK {
@@ -613,9 +613,9 @@ func TestRulesAPI_StrictJSON_ValidRequestStillPasses(t *testing.T) {
 
 	// Valid vacation PUT.
 	status, body = doJSON(t, e.router, "PUT", "/api/v1/webmail/vacation", e.aliceToken, map[string]interface{}{
-		"enabled":               true,
-		"subject":               "Out of office",
-		"body":                  "I am out",
+		"enabled":                true,
+		"subject":                "Out of office",
+		"body":                   "I am out",
 		"reply_interval_seconds": 3600,
 	})
 	if status != fiber.StatusOK {

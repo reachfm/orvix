@@ -18,7 +18,9 @@ func TestAdminUsersCreateListGet(t *testing.T) {
 	if resp.status != 201 {
 		t.Fatalf("create: want 201, got %d %s", resp.status, resp.body)
 	}
-	var created struct{ ID int64 `json:"id"` }
+	var created struct {
+		ID int64 `json:"id"`
+	}
 	if err := json.Unmarshal(resp.bodyBytes, &created); err != nil || created.ID == 0 {
 		t.Fatalf("parse created: %v body=%s", err, resp.body)
 	}
@@ -56,7 +58,9 @@ func TestAdminUsersUpdateStatus(t *testing.T) {
 	if resp.status != 201 {
 		t.Fatalf("create: %d %s", resp.status, resp.body)
 	}
-	var created struct{ ID int64 `json:"id"` }
+	var created struct {
+		ID int64 `json:"id"`
+	}
 	json.Unmarshal(resp.bodyBytes, &created)
 
 	resp2 := patchJSON(t, router, "/api/v1/admin/admin-users/"+strconv.FormatInt(created.ID, 10)+"/status", token, csrf,
@@ -82,7 +86,9 @@ func TestAdminUsersResetPassword(t *testing.T) {
 	if resp.status != 201 {
 		t.Fatalf("create: %d %s", resp.status, resp.body)
 	}
-	var created struct{ ID int64 `json:"id"` }
+	var created struct {
+		ID int64 `json:"id"`
+	}
 	json.Unmarshal(resp.bodyBytes, &created)
 
 	resp2 := patchJSON(t, router, "/api/v1/admin/admin-users/"+strconv.FormatInt(created.ID, 10)+"/password", token, csrf,
@@ -109,7 +115,9 @@ func TestAdminUsersLastSuperadminProtection(t *testing.T) {
 	if resp.status != 201 {
 		t.Fatalf("create other admin: %d %s", resp.status, resp.body)
 	}
-	var other struct{ ID int64 `json:"id"` }
+	var other struct {
+		ID int64 `json:"id"`
+	}
 	json.Unmarshal(resp.bodyBytes, &other)
 
 	// Demote the original admin so only one superadmin remains

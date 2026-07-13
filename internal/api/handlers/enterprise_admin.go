@@ -61,31 +61,31 @@ func (h *Handler) ListAccountClasses(c fiber.Ctx) error {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id                                            int64
-			name, desc                                     string
-			dq, mq, msh, mrh                              int
-			aef, aim, apo, ajm, awe, isAdm                int
-			created, updated                              time.Time
+			id                             int64
+			name, desc                     string
+			dq, mq, msh, mrh               int
+			aef, aim, apo, ajm, awe, isAdm int
+			created, updated               time.Time
 		)
 		if err := rows.Scan(&id, &name, &desc, &dq, &mq, &msh, &mrh, &aef, &aim, &apo, &ajm, &awe, &isAdm, &created, &updated); err != nil {
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("scan account class: %v", err))
 		}
 		out = append(out, map[string]any{
-			"id":                       id,
-			"name":                     name,
-			"description":              desc,
-			"default_quota_mb":         dq,
-			"max_quota_mb":             mq,
-			"max_send_per_hour":        msh,
-			"max_recv_per_hour":        mrh,
+			"id":                        id,
+			"name":                      name,
+			"description":               desc,
+			"default_quota_mb":          dq,
+			"max_quota_mb":              mq,
+			"max_send_per_hour":         msh,
+			"max_recv_per_hour":         mrh,
 			"allow_external_forwarding": aef == 1,
-			"allow_imap":               aim == 1,
-			"allow_pop3":               apo == 1,
-			"allow_jmap":               ajm == 1,
-			"allow_webmail":            awe == 1,
-			"is_admin_class":           isAdm == 1,
-			"created_at":               created.UTC().Format(time.RFC3339),
-			"updated_at":               updated.UTC().Format(time.RFC3339),
+			"allow_imap":                aim == 1,
+			"allow_pop3":                apo == 1,
+			"allow_jmap":                ajm == 1,
+			"allow_webmail":             awe == 1,
+			"is_admin_class":            isAdm == 1,
+			"created_at":                created.UTC().Format(time.RFC3339),
+			"updated_at":                updated.UTC().Format(time.RFC3339),
 		})
 	}
 	return c.JSON(fiber.Map{"classes": out})
@@ -101,18 +101,18 @@ func (h *Handler) CreateAccountClass(c fiber.Ctx) error {
 	}
 	tenantID := h.tenantID(c)
 	var body struct {
-		Name                   string `json:"name"`
-		Description            string `json:"description"`
-		DefaultQuotaMB         int    `json:"default_quota_mb"`
-		MaxQuotaMB             int    `json:"max_quota_mb"`
-		MaxSendPerHour         int    `json:"max_send_per_hour"`
-		MaxRecvPerHour         int    `json:"max_recv_per_hour"`
-		AllowExternalForward   *bool  `json:"allow_external_forwarding"`
-		AllowIMAP              *bool  `json:"allow_imap"`
-		AllowPOP3              *bool  `json:"allow_pop3"`
-		AllowJMAP              *bool  `json:"allow_jmap"`
-		AllowWebmail           *bool  `json:"allow_webmail"`
-		IsAdminClass           *bool  `json:"is_admin_class"`
+		Name                 string `json:"name"`
+		Description          string `json:"description"`
+		DefaultQuotaMB       int    `json:"default_quota_mb"`
+		MaxQuotaMB           int    `json:"max_quota_mb"`
+		MaxSendPerHour       int    `json:"max_send_per_hour"`
+		MaxRecvPerHour       int    `json:"max_recv_per_hour"`
+		AllowExternalForward *bool  `json:"allow_external_forwarding"`
+		AllowIMAP            *bool  `json:"allow_imap"`
+		AllowPOP3            *bool  `json:"allow_pop3"`
+		AllowJMAP            *bool  `json:"allow_jmap"`
+		AllowWebmail         *bool  `json:"allow_webmail"`
+		IsAdminClass         *bool  `json:"is_admin_class"`
 	}
 	if err := json.Unmarshal(c.Body(), &body); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid JSON body")
@@ -572,10 +572,10 @@ func (h *Handler) ListMailingLists(c fiber.Ctx) error {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id, domID, memberCount, maxMembers                                            int64
-			addr, displayName, desc, subPolicy, status                                    string
-			modReq, archive                                                               int
-			created, updated                                                              time.Time
+			id, domID, memberCount, maxMembers         int64
+			addr, displayName, desc, subPolicy, status string
+			modReq, archive                            int
+			created, updated                           time.Time
 		)
 		if err := rows.Scan(&id, &domID, &addr, &displayName, &desc, &modReq, &archive, &subPolicy, &maxMembers, &status, &memberCount, &created, &updated); err != nil {
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("scan mailing list: %v", err))
@@ -734,7 +734,7 @@ func (h *Handler) PatchMailingList(c fiber.Ctx) error {
 		}
 	}
 	if len(rejected) > 0 {
-		return fiber.NewError(fiber.StatusBadRequest, "patch contained unknown fields; nothing applied: " + strings.Join(rejected, ","))
+		return fiber.NewError(fiber.StatusBadRequest, "patch contained unknown fields; nothing applied: "+strings.Join(rejected, ","))
 	}
 	type update struct {
 		set  []string
@@ -875,9 +875,9 @@ func (h *Handler) ListMailingListMembers(c fiber.Ctx) error {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			mid                  int64
+			mid                   int64
 			addr, displayName, rl string
-			created              time.Time
+			created               time.Time
 		)
 		if err := rows.Scan(&mid, &addr, &displayName, &rl, &created); err != nil {
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("scan member: %v", err))
@@ -1020,16 +1020,16 @@ func (h *Handler) ListPublicFolders(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("scan public folder: %v", err))
 		}
 		out = append(out, map[string]any{
-			"id":                id,
-			"owner_mailbox_id":  ownerMB,
-			"owner_email":       owner,
-			"folder_path":       path,
-			"display_name":      name,
-			"description":       desc,
-			"read_only":         readonly == 1,
-			"member_count":      memberCount,
-			"created_at":        created.UTC().Format(time.RFC3339),
-			"updated_at":        updated.UTC().Format(time.RFC3339),
+			"id":               id,
+			"owner_mailbox_id": ownerMB,
+			"owner_email":      owner,
+			"folder_path":      path,
+			"display_name":     name,
+			"description":      desc,
+			"read_only":        readonly == 1,
+			"member_count":     memberCount,
+			"created_at":       created.UTC().Format(time.RFC3339),
+			"updated_at":       updated.UTC().Format(time.RFC3339),
 		})
 	}
 	return c.JSON(fiber.Map{"folders": out})
@@ -1247,7 +1247,7 @@ func (h *Handler) ListAdminGroups(c fiber.Ctx) error {
 	for rows.Next() {
 		var (
 			id, memberCount       int64
-			name, desc, grantsRaw  string
+			name, desc, grantsRaw string
 			created, updated      time.Time
 		)
 		if err := rows.Scan(&id, &name, &desc, &grantsRaw, &memberCount, &created, &updated); err != nil {
@@ -1462,9 +1462,9 @@ func (h *Handler) ListAdminGroupMembers(c fiber.Ctx) error {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			uid                                  int64
-			email, role                          string
-			created                              time.Time
+			uid         int64
+			email, role string
+			created     time.Time
 		)
 		if err := rows.Scan(&uid, &email, &role, &created); err != nil {
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("scan member: %v", err))
@@ -1577,9 +1577,9 @@ func (h *Handler) ListAdminAuditLogs(c fiber.Ctx) error {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id                                              int64
-			actor, role, action, target, result, ip, ua     string
-			ts                                              time.Time
+			id                                          int64
+			actor, role, action, target, result, ip, ua string
+			ts                                          time.Time
 		)
 		if err := rows.Scan(&id, &actor, &role, &action, &target, &result, &ip, &ua, &ts); err != nil {
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("scan audit row: %v", err))
@@ -1638,12 +1638,12 @@ func (h *Handler) ListQuarantine(c fiber.Ctx) error {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id                                              int64
-			mid                                             string
-			recipient, sender, subject, reason, severity    string
-			status, resolvedBy                              string
-			resolvedAt                                      sql.NullTime
-			created                                         time.Time
+			id                                           int64
+			mid                                          string
+			recipient, sender, subject, reason, severity string
+			status, resolvedBy                           string
+			resolvedAt                                   sql.NullTime
+			created                                      time.Time
 		)
 		if err := rows.Scan(&id, &mid, &recipient, &sender, &subject, &reason, &severity, &status, &resolvedAt, &resolvedBy, &created); err != nil {
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("scan quarantine: %v", err))
@@ -1738,10 +1738,10 @@ func (h *Handler) ListACLRules(c fiber.Ctx) error {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id                                  int64
+			id                                         int64
 			scope, target, action, protocol, src, note string
-			priority                            int
-			created, updated                    time.Time
+			priority                                   int
+			created, updated                           time.Time
 		)
 		if err := rows.Scan(&id, &scope, &target, &action, &protocol, &src, &priority, &note, &created, &updated); err != nil {
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("scan acl: %v", err))
@@ -1866,10 +1866,10 @@ func (h *Handler) ListLogRules(c fiber.Ctx) error {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id                                  int64
+			id                                    int64
 			name, source, severity, pattern, dest string
-			enabled                             int
-			created, updated                    time.Time
+			enabled                               int
+			created, updated                      time.Time
 		)
 		if err := rows.Scan(&id, &name, &source, &severity, &pattern, &dest, &enabled, &created, &updated); err != nil {
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("scan log rule: %v", err))

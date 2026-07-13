@@ -1,4 +1,4 @@
-﻿package handlers_test
+package handlers_test
 
 // Static-analysis tests for ADMIN-RUNTIME-TELEMETRY-2B. The
 // admin app.js is inspected as text (no headless browser) so the

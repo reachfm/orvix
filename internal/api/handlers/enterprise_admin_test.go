@@ -174,7 +174,9 @@ func runEnterprise(t *testing.T, router *api.Router, sqlDB *sql.DB, token, csrf 
 		if resp.status != 201 {
 			t.Fatalf("create: want 201, got %d %s", resp.status, resp.body)
 		}
-		var created struct{ ID int64 `json:"id"` }
+		var created struct {
+			ID int64 `json:"id"`
+		}
 		_ = json.Unmarshal(resp.bodyBytes, &created)
 		resp2 := patchJSON(t, router, "/api/v1/admin/account-classes/"+strconv.FormatInt(created.ID, 10), token, csrf, `{"description":"Premium tier"}`)
 		if resp2.status != 200 {
@@ -196,7 +198,9 @@ func runEnterprise(t *testing.T, router *api.Router, sqlDB *sql.DB, token, csrf 
 		if resp.status != 201 {
 			t.Fatalf("create: want 201, got %d %s", resp.status, resp.body)
 		}
-		var created struct{ ID int64 `json:"id"` }
+		var created struct {
+			ID int64 `json:"id"`
+		}
 		_ = json.Unmarshal(resp.bodyBytes, &created)
 		resp2 := putJSON(t, router, "/api/v1/admin/domain-groups/"+strconv.FormatInt(created.ID, 10)+"/members", token, csrf, `{"domain_ids":[1]}`)
 		if resp2.status != 200 {
@@ -214,7 +218,9 @@ func runEnterprise(t *testing.T, router *api.Router, sqlDB *sql.DB, token, csrf 
 		if resp.status != 201 {
 			t.Fatalf("create: want 201, got %d %s", resp.status, resp.body)
 		}
-		var created struct{ ID int64 `json:"id"` }
+		var created struct {
+			ID int64 `json:"id"`
+		}
 		_ = json.Unmarshal(resp.bodyBytes, &created)
 		addResp := postJSON(t, router, "/api/v1/admin/mailing-lists/"+strconv.FormatInt(created.ID, 10)+"/members", token, csrf, `{"address":"alice@test.local"}`)
 		if addResp.status != 201 {
@@ -236,7 +242,9 @@ func runEnterprise(t *testing.T, router *api.Router, sqlDB *sql.DB, token, csrf 
 		if resp.status != 201 {
 			t.Fatalf("create: want 201, got %d %s", resp.status, resp.body)
 		}
-		var created struct{ ID int64 `json:"id"` }
+		var created struct {
+			ID int64 `json:"id"`
+		}
 		_ = json.Unmarshal(resp.bodyBytes, &created)
 		delResp := delJSON(t, router, "/api/v1/admin/public-folders/"+strconv.FormatInt(created.ID, 10), token, csrf)
 		if delResp.status != 200 {
@@ -250,7 +258,9 @@ func runEnterprise(t *testing.T, router *api.Router, sqlDB *sql.DB, token, csrf 
 		if resp.status != 201 {
 			t.Fatalf("create: want 201, got %d %s", resp.status, resp.body)
 		}
-		var created struct{ ID int64 `json:"id"` }
+		var created struct {
+			ID int64 `json:"id"`
+		}
 		_ = json.Unmarshal(resp.bodyBytes, &created)
 		patchResp := patchJSON(t, router, "/api/v1/admin/admin-groups/"+strconv.FormatInt(created.ID, 10), token, csrf, `{"description":"Domain admins v2"}`)
 		if patchResp.status != 200 {
@@ -268,7 +278,9 @@ func runEnterprise(t *testing.T, router *api.Router, sqlDB *sql.DB, token, csrf 
 		if resp.status != 201 {
 			t.Fatalf("create: want 201, got %d %s", resp.status, resp.body)
 		}
-		var created struct{ ID int64 `json:"id"` }
+		var created struct {
+			ID int64 `json:"id"`
+		}
 		_ = json.Unmarshal(resp.bodyBytes, &created)
 		delResp := delJSON(t, router, "/api/v1/admin/acl-rules/"+strconv.FormatInt(created.ID, 10), token, csrf)
 		if delResp.status != 200 {
@@ -282,7 +294,9 @@ func runEnterprise(t *testing.T, router *api.Router, sqlDB *sql.DB, token, csrf 
 		if resp.status != 201 {
 			t.Fatalf("create: want 201, got %d %s", resp.status, resp.body)
 		}
-		var created struct{ ID int64 `json:"id"` }
+		var created struct {
+			ID int64 `json:"id"`
+		}
 		_ = json.Unmarshal(resp.bodyBytes, &created)
 		delResp := delJSON(t, router, "/api/v1/admin/log-rules/"+strconv.FormatInt(created.ID, 10), token, csrf)
 		if delResp.status != 200 {

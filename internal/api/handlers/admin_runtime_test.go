@@ -260,8 +260,8 @@ func TestAdminRuntimeUptimePositive(t *testing.T) {
 	defer h.close()
 	_, body := h.get(t, h.adminT)
 	var resp struct {
-		UptimeSeconds int64   `json:"uptime_seconds"`
-		Status        string  `json:"status"`
+		UptimeSeconds int64  `json:"uptime_seconds"`
+		Status        string `json:"status"`
 	}
 	if err := json.Unmarshal([]byte(body), &resp); err != nil {
 		t.Fatalf("unmarshal: %v", err)

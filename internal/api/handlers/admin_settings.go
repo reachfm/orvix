@@ -46,26 +46,26 @@ func (h *Handler) AdminSettingsGet(c fiber.Ctx) error {
 			"is_dev_build":   bi.IsDev,
 		},
 		"mail_listeners": fiber.Map{
-			"smtp_host":           cfg.CoreMail.SMTPHost,
-			"smtp_port":           cfg.CoreMail.SMTPPort,
-			"imap_host":           cfg.CoreMail.IMAPHost,
-			"imap_port":           cfg.CoreMail.IMAPPort,
-			"pop3_host":           cfg.CoreMail.POP3Host,
-			"pop3_port":           cfg.CoreMail.POP3Port,
-			"jmap_host":           cfg.CoreMail.JMAPHost,
-			"jmap_port":           cfg.CoreMail.JMAPPort,
-			"submission_enabled":  cfg.CoreMail.SubmissionEnabled,
-			"submission_host":     cfg.CoreMail.SubmissionHost,
-			"submission_port":     cfg.CoreMail.SubmissionPort,
-			"smtps_enabled":       cfg.CoreMail.SMTPsEnabled,
-			"smtps_host":          cfg.CoreMail.SMTPsHost,
-			"smtps_port":          cfg.CoreMail.SMTPsPort,
-			"imaps_enabled":       cfg.CoreMail.IMAPsEnabled,
-			"imaps_host":          cfg.CoreMail.IMAPsHost,
-			"imaps_port":          cfg.CoreMail.IMAPsPort,
-			"pop3s_enabled":       cfg.CoreMail.POP3sEnabled,
-			"pop3s_host":          cfg.CoreMail.POP3sHost,
-			"pop3s_port":          cfg.CoreMail.POP3sPort,
+			"smtp_host":          cfg.CoreMail.SMTPHost,
+			"smtp_port":          cfg.CoreMail.SMTPPort,
+			"imap_host":          cfg.CoreMail.IMAPHost,
+			"imap_port":          cfg.CoreMail.IMAPPort,
+			"pop3_host":          cfg.CoreMail.POP3Host,
+			"pop3_port":          cfg.CoreMail.POP3Port,
+			"jmap_host":          cfg.CoreMail.JMAPHost,
+			"jmap_port":          cfg.CoreMail.JMAPPort,
+			"submission_enabled": cfg.CoreMail.SubmissionEnabled,
+			"submission_host":    cfg.CoreMail.SubmissionHost,
+			"submission_port":    cfg.CoreMail.SubmissionPort,
+			"smtps_enabled":      cfg.CoreMail.SMTPsEnabled,
+			"smtps_host":         cfg.CoreMail.SMTPsHost,
+			"smtps_port":         cfg.CoreMail.SMTPsPort,
+			"imaps_enabled":      cfg.CoreMail.IMAPsEnabled,
+			"imaps_host":         cfg.CoreMail.IMAPsHost,
+			"imaps_port":         cfg.CoreMail.IMAPsPort,
+			"pop3s_enabled":      cfg.CoreMail.POP3sEnabled,
+			"pop3s_host":         cfg.CoreMail.POP3sHost,
+			"pop3s_port":         cfg.CoreMail.POP3sPort,
 		},
 		"security": fiber.Map{
 			"password_min_len":    cfg.Auth.PasswordMinLen,
@@ -77,8 +77,8 @@ func (h *Handler) AdminSettingsGet(c fiber.Ctx) error {
 			"retention_count": cfg.Backup.RetentionCount,
 		},
 		"dns": fiber.Map{
-			"public_ipv4":               cfg.DNS.PublicIPv4,
-			"public_ipv6":               cfg.DNS.PublicIPv6,
+			"public_ipv4":                cfg.DNS.PublicIPv4,
+			"public_ipv6":                cfg.DNS.PublicIPv6,
 			"cloudflare_zone_configured": cfg.DNS.CloudflareZoneID != "",
 			"namecheap_configured":       cfg.DNS.NamecheapAPIKey != "",
 		},
@@ -129,10 +129,10 @@ func (h *Handler) AdminSettingsGet(c fiber.Ctx) error {
 						}
 					} else {
 						sectionMap[field] = fiber.Map{
-							"value":             e.Value,
-							"requires_restart":  e.RequiresRestart,
-							"db_overridden":     true,
-							"updated_at":        e.UpdatedAt,
+							"value":            e.Value,
+							"requires_restart": e.RequiresRestart,
+							"db_overridden":    true,
+							"updated_at":       e.UpdatedAt,
 						}
 					}
 				}
@@ -141,8 +141,8 @@ func (h *Handler) AdminSettingsGet(c fiber.Ctx) error {
 		}
 	} else {
 		out["_settings_persistence"] = fiber.Map{
-			"enabled":   false,
-			"note":      "settings store not wired in this build; PATCH /admin/settings will return not_implemented",
+			"enabled": false,
+			"note":    "settings store not wired in this build; PATCH /admin/settings will return not_implemented",
 		}
 	}
 
@@ -201,7 +201,7 @@ func (h *Handler) AdminSettingsPatch(c fiber.Ctx) error {
 	}
 
 	result, err := h.settingsStore.Patch(c.Context(), settings.Patch{
-		Sections: body,
+		Sections:  body,
 		UpdatedBy: updatedBy,
 	})
 	if err != nil {
@@ -210,10 +210,10 @@ func (h *Handler) AdminSettingsPatch(c fiber.Ctx) error {
 			h.writeAuditLog(c, "settings.patch_rejected",
 				fmt.Sprintf("rejected:%d|applied:0|restart_required:false", len(result.Rejected)))
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error":             "patch contained unknown or unsafe fields; nothing applied",
-				"rejected":          result.Rejected,
-				"applied":           []string{},
-				"restart_required":  false,
+				"error":            "patch contained unknown or unsafe fields; nothing applied",
+				"rejected":         result.Rejected,
+				"applied":          []string{},
+				"restart_required": false,
 			})
 		}
 		h.logger.Error("settings patch failed", zap.Error(err))

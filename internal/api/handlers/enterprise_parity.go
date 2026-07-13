@@ -3,13 +3,13 @@
 // This file adds four endpoints that close the gap between the existing
 // admin SPA pages and the data model that already exists in models.go:
 //
-//   GET  /api/v1/admin/tenants/current        — read the JWT-tenant row.
-//   PATCH /api/v1/admin/tenants/:id/branding  — set logo_url + primary_color
-//                                               on the tenant row.
-//   GET  /api/v1/admin/storage/volumes        — stat the mail / attachments /
-//                                               backup data directories.
-//   GET  /api/v1/admin/monitoring/alert-deliveries
-//                                             — read monitoring_alert_deliveries.
+//	GET  /api/v1/admin/tenants/current        — read the JWT-tenant row.
+//	PATCH /api/v1/admin/tenants/:id/branding  — set logo_url + primary_color
+//	                                            on the tenant row.
+//	GET  /api/v1/admin/storage/volumes        — stat the mail / attachments /
+//	                                            backup data directories.
+//	GET  /api/v1/admin/monitoring/alert-deliveries
+//	                                          — read monitoring_alert_deliveries.
 //
 // Every endpoint:
 //   - Defaults to a clean "not configured" payload when the data is absent.
@@ -360,8 +360,8 @@ func (h *Handler) ListAlertDeliveries(c fiber.Ctx) error {
 		// must not panic. The page renders the existing
 		// "(not configured)" hint in this branch.
 		return c.JSON(fiber.Map{
-			"deliveries": []monitoring.DeliveryRecord{},
-			"limit":      0,
+			"deliveries":  []monitoring.DeliveryRecord{},
+			"limit":       0,
 			"honest_note": "Alert dispatcher not wired; delivery audit is unavailable in this build.",
 		})
 	}
@@ -380,8 +380,8 @@ func (h *Handler) ListAlertDeliveries(c fiber.Ctx) error {
 	d := h.alertDispatcher(sqlDB)
 	if d == nil {
 		return c.JSON(fiber.Map{
-			"deliveries":    []interface{}{},
-			"honest_note":   "Alert dispatcher not wired; delivery audit is unavailable in this build.",
+			"deliveries":  []interface{}{},
+			"honest_note": "Alert dispatcher not wired; delivery audit is unavailable in this build.",
 		})
 	}
 	records, err := d.ListDeliveries(c.Context(), limit)

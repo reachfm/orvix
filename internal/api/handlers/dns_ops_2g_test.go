@@ -259,16 +259,16 @@ func TestDNSPlanIncludesMTASTSARecord(t *testing.T) {
 		Plan struct {
 			ServerIPv4     string `json:"server_ipv4"`
 			MTAPolicyURL   string `json:"mta_sts_policy_url"`
-			MTAStsHostName  string `json:"mta_sts_hostname"`
+			MTAStsHostName string `json:"mta_sts_hostname"`
 			MTAPolicyID    string `json:"mta_sts_policy_id"`
 			MTAMode        string `json:"mta_sts_mode"`
 			MTAPolicyFile  string `json:"mta_sts_policy_file"`
-			Records []struct {
-				Name    string `json:"name"`
-				Type    string `json:"type"`
-				Value   string `json:"value"`
-				Purpose string `json:"purpose"`
-				Required bool  `json:"required"`
+			Records        []struct {
+				Name     string `json:"name"`
+				Type     string `json:"type"`
+				Value    string `json:"value"`
+				Purpose  string `json:"purpose"`
+				Required bool   `json:"required"`
 			} `json:"records"`
 		} `json:"plan"`
 	}

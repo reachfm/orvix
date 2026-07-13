@@ -292,8 +292,8 @@ func TestStore_Patch_UpdatedByRecorded(t *testing.T) {
 
 func TestStore_IsForbiddenKey(t *testing.T) {
 	cases := []struct {
-		key      string
-		forbid   bool
+		key    string
+		forbid bool
 	}{
 		// Writable configuration knobs must NOT be flagged.
 		{"mail_listeners.submission_enabled", false},

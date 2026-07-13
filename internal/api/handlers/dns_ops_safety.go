@@ -1,4 +1,4 @@
-﻿package handlers
+package handlers
 
 // DNS Ops safety helpers (DNS-DKIM-OPERATIONS-2F-SAFETY-FIX).
 //

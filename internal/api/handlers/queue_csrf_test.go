@@ -62,11 +62,11 @@ import (
 // auth+CSRF stack, an admin user, a non-admin user,
 // and one queue row we can mutate.
 type queueCSRFEnv struct {
-	router         *api.Router
-	adminToken     string
+	router          *api.Router
+	adminToken      string
 	adminCSRFCookie string
-	userToken      string
-	queueID        uint
+	userToken       string
+	queueID         uint
 }
 
 func buildQueueCSRFEnv(t *testing.T) *queueCSRFEnv {

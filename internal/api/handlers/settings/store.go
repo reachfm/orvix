@@ -32,14 +32,14 @@ import (
 type Section string
 
 const (
-	SectionGeneral     Section = "general"
-	SectionListeners   Section = "mail_listeners"
-	SectionSecurity    Section = "security"
-	SectionBackup      Section = "backup"
-	SectionDNS         Section = "dns"
-	SectionMonitoring  Section = "monitoring"
-	SectionLicense     Section = "license"
-	SectionMailboxMgr  Section = "mailbox_management"
+	SectionGeneral    Section = "general"
+	SectionListeners  Section = "mail_listeners"
+	SectionSecurity   Section = "security"
+	SectionBackup     Section = "backup"
+	SectionDNS        Section = "dns"
+	SectionMonitoring Section = "monitoring"
+	SectionLicense    Section = "license"
+	SectionMailboxMgr Section = "mailbox_management"
 )
 
 // Field is one writable setting.
@@ -92,10 +92,10 @@ var allowlist = map[string]Field{
 	"security.refresh_ttl_seconds": {Key: "security.refresh_ttl_seconds", Section: SectionSecurity, Type: "int", RestartRequired: true},
 
 	// backup: dir and frequency require restart; retention_count is hot.
-	"backup.dir":             {Key: "backup.dir", Section: SectionBackup, Type: "string", RestartRequired: true},
-	"backup.retention_count": {Key: "backup.retention_count", Section: SectionBackup, Type: "int", RestartRequired: false},
+	"backup.dir":               {Key: "backup.dir", Section: SectionBackup, Type: "string", RestartRequired: true},
+	"backup.retention_count":   {Key: "backup.retention_count", Section: SectionBackup, Type: "int", RestartRequired: false},
 	"backup.scheduler_enabled": {Key: "backup.scheduler_enabled", Section: SectionBackup, Type: "bool", RestartRequired: false},
-	"backup.frequency":       {Key: "backup.frequency", Section: SectionBackup, Type: "string", RestartRequired: true},
+	"backup.frequency":         {Key: "backup.frequency", Section: SectionBackup, Type: "string", RestartRequired: true},
 
 	// dns: public IPs are restart_required because the listeners
 	// bind to them on init.
@@ -127,23 +127,23 @@ var allowlist = map[string]Field{
 // introduced. The list is intentionally redundant with the
 // per-field .Unsafe flag in the allowlist: belt and suspenders.
 var forbiddenPatterns = []string{
-	"password_hash",      // the actual stored hash, never a config knob
-	"jwt_secret",         // symmetric HS256 key
-	"jwt_key_path",       // the path to the RSA key file
-	"vapid_private_key",  // web push private key
+	"password_hash",          // the actual stored hash, never a config knob
+	"jwt_secret",             // symmetric HS256 key
+	"jwt_key_path",           // the path to the RSA key file
+	"vapid_private_key",      // web push private key
 	"vapid_private_key_file", // path to web push private key file
-	"cloudflare_api_key", // DNS provider secret
+	"cloudflare_api_key",     // DNS provider secret
 	"cloudflare_api_token",
 	"namecheap_api_key", // DNS provider secret
 	"route53_secret_key",
 	"route53_access_key",
-	"deepseek_api_key",   // AI provider key
-	"license_key",        // license key
-	"api_keys",           // per-user API keys (managed elsewhere)
-	"dsn",                // raw DSN (may contain password)
-	"bearer",             // never a config value
-	"credential",         // generic credential
-	"private_key",        // generic private key
+	"deepseek_api_key", // AI provider key
+	"license_key",      // license key
+	"api_keys",         // per-user API keys (managed elsewhere)
+	"dsn",              // raw DSN (may contain password)
+	"bearer",           // never a config value
+	"credential",       // generic credential
+	"private_key",      // generic private key
 }
 
 // IsForbiddenKey reports whether a key matches any forbidden pattern.

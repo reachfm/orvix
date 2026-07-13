@@ -1,4 +1,4 @@
-﻿package handlers
+package handlers
 
 // Safety-fix tests for DNS-DKIM-OPERATIONS-2F-SAFETY-FIX.
 //
@@ -104,10 +104,10 @@ func TestIsPublicUnicastIP_Multicast(t *testing.T) {
 
 func TestIsPublicUnicastIP_RejectsDocumentationRanges(t *testing.T) {
 	for _, ip := range []string{
-		"192.0.2.1",     // TEST-NET-1 (RFC 5737)
-		"198.51.100.1",  // TEST-NET-2 (RFC 5737)
-		"203.0.113.10",  // TEST-NET-3 (RFC 5737)
-		"2001:db8::1",   // Documentation IPv6 (RFC 3849)
+		"192.0.2.1",    // TEST-NET-1 (RFC 5737)
+		"198.51.100.1", // TEST-NET-2 (RFC 5737)
+		"203.0.113.10", // TEST-NET-3 (RFC 5737)
+		"2001:db8::1",  // Documentation IPv6 (RFC 3849)
 	} {
 		_, err := isPublicUnicastIP(ip)
 		if err == nil {

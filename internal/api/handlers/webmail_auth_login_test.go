@@ -83,9 +83,9 @@ type webmailLoginRuntimeModule struct {
 	queue *queue.QueueEngine
 }
 
-func (m *webmailLoginRuntimeModule) ID() string             { return "coremail-runtime" }
-func (m *webmailLoginRuntimeModule) Version() string        { return "test" }
-func (m *webmailLoginRuntimeModule) Requires() []string     { return nil }
+func (m *webmailLoginRuntimeModule) ID() string         { return "coremail-runtime" }
+func (m *webmailLoginRuntimeModule) Version() string    { return "test" }
+func (m *webmailLoginRuntimeModule) Requires() []string { return nil }
 func (m *webmailLoginRuntimeModule) Init(_ *config.Config, _ *gorm.DB) error {
 	return nil
 }
@@ -508,8 +508,9 @@ func TestWebmailLoginProvisionsSystemFoldersForFreshMailbox(t *testing.T) {
 // message — the Sent folder exists because the login
 // handler provisioned it. Without the fix, the Send
 // handler returns
-//   "Sent folder not found for mailbox; ensure
-//    system folders are provisioned"
+//
+//	"Sent folder not found for mailbox; ensure
+//	 system folders are provisioned"
 func TestWebmailSendAfterLoginProvisionsSentFolder(t *testing.T) {
 	env := buildWebmailLoginEnv(t)
 	sqlDB, err := env.db.DB()
