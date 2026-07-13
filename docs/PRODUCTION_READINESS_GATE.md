@@ -227,7 +227,7 @@ The admin dashboard surfaces a "Create backup" button which calls `internal/back
 
 ### 5.2 Restore (in-app)
 
-`RestoreBackup` stages the archive to `/var/lib/orvix/restore-staging/<id>/` and refuses to overwrite live data. A pre-restore safety backup is always created first. The operator must restart the service to apply.
+`RestoreBackup` is fully automatic. It validates the archive, creates a pre-restore safety backup, stages and activates the selected backup, restarts the service via systemctl, and verifies system health. On any failure (activation, restart, or health check) the system automatically rolls back to the pre-restore safety backup and re-restarts. The operator must first enable restore maintenance mode (touch the maintenance marker file) before the API accepts a restore request.
 
 ### 5.3 upgrade.sh rollback
 

@@ -229,9 +229,11 @@ the project can claim "tested at billion-row scale":
   operator should switch to a streaming pg_dump + S3 layout
   and use Postgres-native PITR.
 * **Disaster recovery RPO / RTO.** No formal SLA has been
-  measured. The backup / restore path is staged-only in
-  this release; live restore requires a maintenance
-  window.
+  measured. Backup and restore are fully automatic:
+  RestoreBackup validates, safety-snapshots, activates,
+  restarts, health-verifies, and rolls back on failure.
+  A maintenance window is required because restore puts the
+  system in maintenance mode before proceeding.
 
 ## 4. Recommended production topology
 
@@ -316,12 +318,14 @@ each index costs write throughput.
   tar.gz, the attachments tar.gz, and the redacted
   configuration. They are written to the directory
   configured in `cfg.Backup.Dir`.
-* Restore is staged-only in this release. The admin
-  endpoint `POST /api/v1/admin/backups/:id/restore` writes
-  the archive to `/var/lib/orvix/restore-staging/<id>/` and
-  the operator must manually swap the live data in a
-  maintenance window. The endpoint requires typed
-  confirmation (`confirm: "restore-orvix-backup"`).
+* Restore is fully automatic. The admin endpoint
+  `POST /api/v1/admin/backups/:id/restore` validates the
+  archive, creates a pre-restore safety backup, activates
+  the backup, restarts the service, and verifies system
+  health. On any failure the system automatically rolls
+  back to the safety backup. The endpoint requires typed
+  confirmation (`confirm: "restore-orvix-backup"`) and the
+  operator must enable restore maintenance mode first.
 * At petabyte scale, the operator should switch to native
   Postgres backup tooling (`pg_basebackup` + WAL-G or
   `pgBackRest`). The Orvix backup service is suitable for

@@ -67,14 +67,11 @@ export async function renderBackupsPage(root) {
   if (list && list.__err) { body.appendChild(el('div', { class: 'error', text: list.__err.message || 'load failed' })); applyAutoDir(wrap); return; }
   const items = (list && (list.backups || list)) || [];
   if (!items.length) { body.appendChild(el('div', { class: 'empty', text: t('common.empty') })); applyAutoDir(wrap); return; }
-  // Staged-only restore notice. The Orvix admin client only
-  // stages a restore; it never overwrites live data. The
-  // operator must perform a manual apply/restart before the
-  // backup is brought online. The static-analysis test
-  // (TestAdminNoFakeRestoreUI) pins this contract.
+  // Automatic restore notice. RestoreBackup validates, safety-snapshots,
+  // activates, restarts, health-verifies, and rolls back on failure.
   body.appendChild(el('p', { class: 'subtle' }, [
     el('strong', { text: 'restore-orvix-backup' }),
-    el('span', { text: ': This admin client only stages the backup only. The restore operation does not overwrite live data — Manual apply/restart is required before the staged backup is brought online.' }),
+    el('span', { text: ': Restore replaces ALL current mailboxes, domains, and rules. The system creates a pre-restore safety backup, activates the selected backup, restarts the service, and verifies system health. On failure the system automatically rolls back to the safety backup.' }),
   ]));
   body.appendChild(table({
     columns: [
@@ -184,7 +181,7 @@ async function doRestore(id) {
   // Stage 1: typed id confirmation.
   const stage1 = await confirmDanger({
     title: 'Restore backup',
-    message: 'Restoring a backup replaces ALL current mailboxes, aliases, and rules. The backend is in staged (manual) mode in this build — the operator must put the cluster in maintenance before pressing the live restore button.',
+    message: 'Restoring a backup replaces ALL current mailboxes, domains, and rules. A pre-restore safety backup is created automatically. The system validates, activates, restarts, and health-verifies the restore — rolling back on any failure. The operator must enable restore maintenance mode before proceeding.',
     confirmLabel: 'Continue',
     requireText: id,
   });
@@ -192,14 +189,14 @@ async function doRestore(id) {
   // Stage 2: phrase confirmation.
   const stage2 = await confirmDanger({
     title: 'Final confirmation',
-    message: 'Type the phrase "restore backup" to confirm.',
+    message: 'Type the phrase restore-orvix-backup to confirm.',
     confirmLabel: 'Restore',
-    requireText: 'restore backup',
+    requireText: 'restore-orvix-backup',
   });
   if (!stage2) return;
   try {
-    await apiPost('/api/v1/admin/backups/' + encodeURIComponent(id) + '/restore', {});
-    toast('Restore initiated', 'success', 4000);
+    await apiPost('/api/v1/admin/backups/' + encodeURIComponent(id) + '/restore', { confirm: 'restore-orvix-backup' });
+    toast('Restore initiated — system will restart and verify health', 'success', 4000);
   } catch (err) {
     toast((err && err.message) || 'Restore failed', 'error', 6000);
   }
