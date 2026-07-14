@@ -28,7 +28,10 @@ EnvironmentFile=-/etc/orvix/bootstrap.env
 ProtectSystem=full
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/var/lib/orvix /var/backups/orvix /etc/orvix /var/log/orvix
+# /var/lib/orvix covers the SQLite DB, mail/attachment store, backups
+# (/var/lib/orvix/backups), and the restore job queue. Every listed path must
+# exist or systemd fails the unit with 226/NAMESPACE.
+ReadWritePaths=/var/lib/orvix /etc/orvix /var/log/orvix
 # Bounded so a wedged restore cannot run forever; the coordinator applies its
 # own restart/health timeouts internally as well.
 TimeoutStartSec=600
