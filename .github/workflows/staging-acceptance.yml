@@ -227,9 +227,12 @@ jobs:
           # fallback bodies, no || true.
           api() {
             local method="$1" path="$2" data="${3:-}"
-            local args=(-sS -o /tmp/body -w '%{http_code}' -b "$COOKIES" -c "$COOKIES" -X "$method" "$BASE$path")
+            local args=(-sS -o /tmp/body -w '%{http_code}' -X "$method" "$BASE$path")
             [ -n "$TOKEN" ] && args+=(-H "Authorization: Bearer $TOKEN")
-            [ -n "$CSRF" ] && args+=(-H "X-CSRF-Token: $CSRF")
+            # Double-submit CSRF: the csrf_token cookie is Domain-scoped to the
+            # configured hostname, so a loopback request's jar would not send
+            # it. Present the real issued token as both the cookie and header.
+            [ -n "$CSRF" ] && args+=(-H "X-CSRF-Token: $CSRF" -H "Cookie: csrf_token=$CSRF")
             if [ -n "$data" ]; then args+=(-H 'Content-Type: application/json' --data "$data"); fi
             local code; code="$(curl "${args[@]}")" || { echo "TRANSPORT ERROR: $method $path" >&2; return 1; }
             local body; body="$(cat /tmp/body)"
