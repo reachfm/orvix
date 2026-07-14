@@ -33,7 +33,27 @@ export const api = {
   // Enterprise (tenant-scoped)
   getOrganization: (id: number) => request<any>(`/enterprise/organizations/${id}`),
   listDomainsEnterprise: () => request<any>("/enterprise/domains"),
+  createDomainEnterprise: (data: any) =>
+    request("/enterprise/domains", { method: "POST", body: JSON.stringify(data) }),
   listMailboxes: () => request<any>("/enterprise/mailboxes"),
   createMailbox: (data: any) =>
     request("/enterprise/mailboxes", { method: "POST", body: JSON.stringify(data) }),
+  deleteMailbox: (id: number) =>
+    request(`/enterprise/mailboxes/${id}`, { method: "DELETE" }),
+
+  // Abuse
+  listAbuseSignals: () => request<any[]>("/enterprise/abuse/signals"),
+  acknowledgeSignal: (id: number) =>
+    request("/enterprise/abuse/signals/acknowledge", { method: "POST", body: JSON.stringify({ id }) }),
+  resolveSignal: (id: number) =>
+    request("/enterprise/abuse/signals/resolve", { method: "POST", body: JSON.stringify({ id }) }),
+  checkSendLimit: () => request<any>("/enterprise/abuse/send-limit"),
+
+  // Auth helpers
+  login: (email: string, password: string) =>
+    request<any>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
+  refresh: () => request<any>("/auth/refresh", { method: "POST" }),
+
+  // Current user
+  getMe: () => request<any>("/me"),
 };
