@@ -27,6 +27,7 @@ import (
 	"github.com/orvix/orvix/internal/api/handlers/settings"
 	"github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/auth"
+	"github.com/orvix/orvix/internal/billing"
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/coremail"
 	"github.com/orvix/orvix/internal/coremail/push"
@@ -191,6 +192,10 @@ type Handler struct {
 	domainAdminSvc   *domainadminsvc.Service
 	platformAdminSvc *platformsvc.PlatformService
 	dashboardSvc     *dashboardsvc.DashboardService
+
+	billingSvc *billing.Service
+	usageSvc   *billing.UsageService
+	quotaSvc   *billing.QuotaService
 }
 
 // NewHandler creates a new Handler with dependencies.
@@ -372,6 +377,18 @@ func (h *Handler) SetPlatformAdminService(s *platformsvc.PlatformService) {
 // SetDashboardService wires the dashboard aggregation service.
 func (h *Handler) SetDashboardService(s *dashboardsvc.DashboardService) {
 	h.dashboardSvc = s
+}
+
+func (h *Handler) SetBillingService(s *billing.Service) {
+	h.billingSvc = s
+}
+
+func (h *Handler) SetBillingUsageService(s *billing.UsageService) {
+	h.usageSvc = s
+}
+
+func (h *Handler) SetBillingQuotaService(s *billing.QuotaService) {
+	h.quotaSvc = s
 }
 
 // setPreferredSessionCookie sets the opaque HttpOnly session cookie.
