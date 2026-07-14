@@ -260,8 +260,11 @@ jobs:
           echo "license_verification=PASS" >> "$RESULTS_FILE"
 
           # --- Tenant creation: domain + mailbox ---
-          api POST /api/v1/domains "$(jq -nc --arg n "$STAGING_DOMAIN" '{name:$n}')" >/dev/null
-          MB="acceptance-$(date +%s)@$STAGING_DOMAIN"
+          # Use a fresh domain (the installer bootstrap already created the
+          # admin's own domain, which would 409 here).
+          CREATE_DOMAIN="accept-$(date +%s).orvix.test"
+          api POST /api/v1/domains "$(jq -nc --arg n "$CREATE_DOMAIN" '{name:$n}')" >/dev/null
+          MB="acceptance@$CREATE_DOMAIN"
           api POST /api/v1/mailboxes "$(jq -nc --arg e "$MB" '{email:$e,password:"AcceptPass123!x"}')" >/dev/null
           # Prove the mailbox is actually queryable back.
           api GET /api/v1/mailboxes | jq -e --arg e "$MB" 'any((.mailboxes? // .) []?; (.email? // "")==$e)' >/dev/null \
