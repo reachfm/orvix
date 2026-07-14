@@ -44,9 +44,9 @@ const (
 type DeliveryProtocol string
 
 const (
-	DeliverySMTP  DeliveryProtocol = "smtp"
-	DeliveryIMAP  DeliveryProtocol = "imap"
-	DeliveryPOP3  DeliveryProtocol = "pop3"
+	DeliverySMTP    DeliveryProtocol = "smtp"
+	DeliveryIMAP    DeliveryProtocol = "imap"
+	DeliveryPOP3    DeliveryProtocol = "pop3"
 	DeliveryAPISMTP DeliveryProtocol = "api"
 )
 

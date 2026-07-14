@@ -52,12 +52,12 @@ import (
 // ORVIX_DNS_NAMECHEAP_ENABLE_APPLY (env) by the router; the
 // provider itself only consumes the boolean.
 type NamecheapConfig struct {
-	APIUser         string
-	APIKey          string
-	Username        string
-	ClientIP        string // required for sandbox; production accepts empty
-	Sandbox         bool
-	EnableApply     bool
+	APIUser     string
+	APIKey      string
+	Username    string
+	ClientIP    string // required for sandbox; production accepts empty
+	Sandbox     bool
+	EnableApply bool
 }
 
 // HasCredentials returns true if the provider has enough
@@ -297,15 +297,15 @@ func (p *NamecheapProvider) Name() string { return "namecheap" }
 //
 //   - create  — desired record is missing in live state
 //   - update  — desired record exists in live state with a
-//               different value
+//     different value
 //   - skip    — desired record exists in live state with the
-//               same value (or it is an unrelated record
-//               Orvix does not manage)
+//     same value (or it is an unrelated record
+//     Orvix does not manage)
 //   - conflict — live record has the same purpose-identity
-//               as a desired Orvix-managed record but a
-//               value we cannot safely replace. The provider
-//               refuses to overwrite without explicit operator
-//               opt-in.
+//     as a desired Orvix-managed record but a
+//     value we cannot safely replace. The provider
+//     refuses to overwrite without explicit operator
+//     opt-in.
 //   - delete  — never emitted; reserved.
 //
 // Unrelated TXT records at the same host (e.g.

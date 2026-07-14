@@ -35,7 +35,7 @@ type CreateMailboxRequest struct {
 
 // UpdateMailboxRequest is the input for updating a mailbox.
 type UpdateMailboxRequest struct {
-	Name    *string       `json:"name,omitempty"`
+	Name    *string        `json:"name,omitempty"`
 	Status  *MailboxStatus `json:"status,omitempty"`
-	QuotaMB *int64        `json:"quotaMB,omitempty"`
+	QuotaMB *int64         `json:"quotaMB,omitempty"`
 }

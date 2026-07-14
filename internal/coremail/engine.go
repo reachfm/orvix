@@ -10,11 +10,11 @@ import (
 // Engine is the top-level orchestrator for all CoreMail operations.
 // It provides transaction management and coordinates repositories.
 type Engine struct {
-	DB             *sql.DB
-	Domains        DomainRepository
-	Mailboxes      MailboxRepository
-	Aliases        AliasRepository
-	Auth           *AuthService
+	DB        *sql.DB
+	Domains   DomainRepository
+	Mailboxes MailboxRepository
+	Aliases   AliasRepository
+	Auth      *AuthService
 }
 
 // EngineConfig holds configuration for initializing the CoreMail engine.
@@ -78,10 +78,10 @@ func (e *Engine) ProvisionDomain(ctx context.Context, domainName, plan, adminEma
 		}
 
 		domain = &Domain{
-			Name:       domainName,
-			TenantID:   tenantID,
-			Status:     DomainActive,
-			Plan:       plan,
+			Name:         domainName,
+			TenantID:     tenantID,
+			Status:       DomainActive,
+			Plan:         plan,
 			MaxMailboxes: 1,
 		}
 		if err := e.Domains.Create(ctx, domain, tx); err != nil {

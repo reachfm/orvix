@@ -267,7 +267,9 @@ func (r *rulesSQLRepo) Delete(ctx context.Context, mailboxID uint, id uint) erro
 	return nil
 }
 
-type scanner interface{ Scan(dest ...interface{}) error }
+type scanner interface {
+	Scan(dest ...interface{}) error
+}
 
 func scanRuleRow(s scanner) (*Rule, error) {
 	var enabled, stop int

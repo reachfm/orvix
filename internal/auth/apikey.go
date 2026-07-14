@@ -14,15 +14,15 @@ import (
 
 // APIKeyRecord represents a stored API key with tenant binding and scopes.
 type APIKeyRecord struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	Name      string    `gorm:"not null" json:"name"`
-	KeyPrefix string    `gorm:"uniqueIndex;not null;size:8" json:"key_prefix"`
-	KeyHash   string    `gorm:"uniqueIndex;not null" json:"-"`
-	UserID    uint      `gorm:"index;not null" json:"user_id"`
-	TenantID  uint      `gorm:"not null;default:0" json:"tenant_id"`
-	Role      string    `gorm:"not null;default:'user'" json:"role"`
-	Scopes    string    `gorm:"type:text" json:"scopes,omitempty"`
-	Enabled   bool      `gorm:"not null;default:true" json:"enabled"`
+	ID        uint       `gorm:"primaryKey" json:"id"`
+	Name      string     `gorm:"not null" json:"name"`
+	KeyPrefix string     `gorm:"uniqueIndex;not null;size:8" json:"key_prefix"`
+	KeyHash   string     `gorm:"uniqueIndex;not null" json:"-"`
+	UserID    uint       `gorm:"index;not null" json:"user_id"`
+	TenantID  uint       `gorm:"not null;default:0" json:"tenant_id"`
+	Role      string     `gorm:"not null;default:'user'" json:"role"`
+	Scopes    string     `gorm:"type:text" json:"scopes,omitempty"`
+	Enabled   bool       `gorm:"not null;default:true" json:"enabled"`
 	LastUsed  *time.Time `json:"last_used,omitempty"`
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 	CreatedAt time.Time  `json:"created_at"`

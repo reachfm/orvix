@@ -23,13 +23,13 @@ type ZeroKnowledgeEncryption struct {
 
 // EncryptedBlob represents an encrypted email or attachment stored on the server.
 type EncryptedBlob struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	UserID    uint      `gorm:"index;not null" json:"user_id"`
-	BlobType  string    `gorm:"not null" json:"blob_type"`
-	Salt      string    `gorm:"not null" json:"salt"`
-	Nonce     string    `gorm:"not null" json:"nonce"`
-	Ciphertext string   `gorm:"type:text;not null" json:"ciphertext"`
-	CreatedAt time.Time `json:"created_at"`
+	ID         uint      `gorm:"primaryKey" json:"id"`
+	UserID     uint      `gorm:"index;not null" json:"user_id"`
+	BlobType   string    `gorm:"not null" json:"blob_type"`
+	Salt       string    `gorm:"not null" json:"salt"`
+	Nonce      string    `gorm:"not null" json:"nonce"`
+	Ciphertext string    `gorm:"type:text;not null" json:"ciphertext"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // NewZeroKnowledgeEncryption creates a new ZKE service.

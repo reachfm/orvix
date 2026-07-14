@@ -23,7 +23,7 @@ const (
 
 type Condition struct {
 	Type  ConditionType `json:"type"`
-	Value string         `json:"value,omitempty"`
+	Value string        `json:"value,omitempty"`
 }
 
 type ActionType string

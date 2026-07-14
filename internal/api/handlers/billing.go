@@ -35,9 +35,9 @@ func (h *Handler) CreateBillingSubscription(c fiber.Ctx) error {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "billing service not available"})
 	}
 	var req struct {
-		PlanID           billing.PlanID            `json:"plan_id"`
-		BillingInterval  billing.BillingInterval   `json:"billing_interval"`
-		TrialDays        int                       `json:"trial_days"`
+		PlanID          billing.PlanID          `json:"plan_id"`
+		BillingInterval billing.BillingInterval `json:"billing_interval"`
+		TrialDays       int                     `json:"trial_days"`
 	}
 	if err := c.Bind().JSON(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})

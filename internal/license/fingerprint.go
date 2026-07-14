@@ -13,11 +13,11 @@ import (
 
 // HardwareFingerprint collects unique hardware identifiers.
 type HardwareFingerprint struct {
-	Hostname   string `json:"hostname"`
-	MAC        string `json:"mac"`
-	CPUCores   int    `json:"cpu_cores"`
-	OS         string `json:"os"`
-	MachineID  string `json:"machine_id"`
+	Hostname  string `json:"hostname"`
+	MAC       string `json:"mac"`
+	CPUCores  int    `json:"cpu_cores"`
+	OS        string `json:"os"`
+	MachineID string `json:"machine_id"`
 }
 
 // CollectFingerprint gathers hardware information for license binding.

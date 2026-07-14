@@ -17,7 +17,7 @@ import (
 type VerifyResult int
 
 const (
-	VerifyPass     VerifyResult = iota
+	VerifyPass VerifyResult = iota
 	VerifyFail
 	VerifyNone
 	VerifyTempError

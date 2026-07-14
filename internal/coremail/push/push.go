@@ -137,10 +137,10 @@ type VAPIDConfig struct {
 }
 
 type PushNotifier struct {
-	Store      *storage.MailStore
-	Repo       SubscriptionRepository
-	VAPID      VAPIDConfig
-	Sender     *WebPushSender
+	Store  *storage.MailStore
+	Repo   SubscriptionRepository
+	VAPID  VAPIDConfig
+	Sender *WebPushSender
 }
 
 func NewPushNotifier(ms *storage.MailStore, repo SubscriptionRepository, vapid VAPIDConfig) *PushNotifier {

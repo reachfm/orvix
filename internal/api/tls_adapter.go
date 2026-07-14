@@ -40,9 +40,10 @@ func (a *tlsConfigAdapter) GetKeyPath() string {
 	return a.cfg.CoreMail.TLSKeyFile
 }
 
-func (a *tlsConfigAdapter) SMTPTLSEnabled() bool  { return a.cfg != nil && a.cfg.CoreMail.SMTPsEnabled }
-func (a *tlsConfigAdapter) IMAPTLSEnabled() bool  { return a.cfg != nil && a.cfg.CoreMail.IMAPsEnabled }
-func (a *tlsConfigAdapter) POP3TLSEnabled() bool  { return a.cfg != nil && a.cfg.CoreMail.POP3sEnabled }
+func (a *tlsConfigAdapter) SMTPTLSEnabled() bool { return a.cfg != nil && a.cfg.CoreMail.SMTPsEnabled }
+func (a *tlsConfigAdapter) IMAPTLSEnabled() bool { return a.cfg != nil && a.cfg.CoreMail.IMAPsEnabled }
+func (a *tlsConfigAdapter) POP3TLSEnabled() bool { return a.cfg != nil && a.cfg.CoreMail.POP3sEnabled }
+
 // JMAP runs TLS-terminated by the reverse proxy (Caddy)
 // in our topology. The listener itself does not own a
 // TLS handshake. Report false from this adapter; the

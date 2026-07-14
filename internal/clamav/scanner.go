@@ -13,10 +13,10 @@ import (
 
 // Scanner performs virus scanning via ClamAV daemon.
 type Scanner struct {
-	host   string
-	port   int
+	host    string
+	port    int
 	timeout time.Duration
-	logger *zap.Logger
+	logger  *zap.Logger
 }
 
 // ScanResult represents a ClamAV scan result.

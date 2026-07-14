@@ -6,9 +6,9 @@ import "net"
 type Verdict int
 
 const (
-	VerdictAccept  Verdict = iota // Clean message, deliver normally
-	VerdictSuspicious             // Suspicious but deliver (adds headers)
-	VerdictReject                 // Reject the message
+	VerdictAccept     Verdict = iota // Clean message, deliver normally
+	VerdictSuspicious                // Suspicious but deliver (adds headers)
+	VerdictReject                    // Reject the message
 )
 
 func (v Verdict) String() string {
@@ -34,16 +34,16 @@ type RuleResult struct {
 
 // SpamAssessment is the unified output of the anti-spam engine.
 type SpamAssessment struct {
-	Score         float64
-	Verdict       Verdict
-	Reasons       []string
-	MatchedRules  []RuleResult
-	RemoteIP      net.IP
-	SenderDomain  string
-	HELODomain    string
-	SPFResult     string
-	DKIMResult    string
-	DMARCResult   string
+	Score          float64
+	Verdict        Verdict
+	Reasons        []string
+	MatchedRules   []RuleResult
+	RemoteIP       net.IP
+	SenderDomain   string
+	HELODomain     string
+	SPFResult      string
+	DKIMResult     string
+	DMARCResult    string
 	RecipientCount int
 }
 
@@ -57,18 +57,18 @@ type Rule interface {
 
 // RuleContext carries evaluation inputs for a single rule evaluation.
 type RuleContext struct {
-	RemoteIP        net.IP
-	HELODomain      string
-	MailFromDomain  string
-	FromDomain      string
-	SPFResult       string
-	DKIMResult      string
-	DMARCResult     string
-	DMARCPolicy     string
-	RecipientCount  int
-	Reputation      ReputationProvider
-	HasReverseDNS   bool
-	ReverseDNSName  string
+	RemoteIP       net.IP
+	HELODomain     string
+	MailFromDomain string
+	FromDomain     string
+	SPFResult      string
+	DKIMResult     string
+	DMARCResult    string
+	DMARCPolicy    string
+	RecipientCount int
+	Reputation     ReputationProvider
+	HasReverseDNS  bool
+	ReverseDNSName string
 }
 
 // ReputationProvider provides IP and domain reputation data.
@@ -80,11 +80,11 @@ type ReputationProvider interface {
 
 // DomainReputation represents known information about a sender domain.
 type DomainReputation struct {
-	KnownGood   bool
-	KnownBad    bool
-	HasMX       bool
-	MXHosts     []string
-	Confidence  float64 // 0.0 to 1.0
+	KnownGood  bool
+	KnownBad   bool
+	HasMX      bool
+	MXHosts    []string
+	Confidence float64 // 0.0 to 1.0
 }
 
 // Thresholds define the score boundaries for verdicts.

@@ -14,13 +14,13 @@ type testModule struct {
 	requires []string
 }
 
-func (m *testModule) ID() string                    { return m.id }
-func (m *testModule) Version() string               { return m.version }
-func (m *testModule) Requires() []string             { return m.requires }
+func (m *testModule) ID() string                                 { return m.id }
+func (m *testModule) Version() string                            { return m.version }
+func (m *testModule) Requires() []string                         { return m.requires }
 func (m *testModule) Init(cfg *config.Config, db *gorm.DB) error { return nil }
-func (m *testModule) Start() error                  { return nil }
-func (m *testModule) Stop() error                   { return nil }
-func (m *testModule) Migrate() error                { return nil }
+func (m *testModule) Start() error                               { return nil }
+func (m *testModule) Stop() error                                { return nil }
+func (m *testModule) Migrate() error                             { return nil }
 
 func TestRegisterAndGet(t *testing.T) {
 	logger, _ := zap.NewDevelopment()

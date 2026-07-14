@@ -15,8 +15,10 @@ import (
 
 // Authenticator wraps the IdentityService for IMAP LOGIN.
 type Authenticator struct {
-	engine    interface { AuthenticateMailbox(ctx interface{}, username, password string) (interface{}, error) }
-	users     sync.Map // cache: username -> mailboxID
+	engine interface {
+		AuthenticateMailbox(ctx interface{}, username, password string) (interface{}, error)
+	}
+	users sync.Map // cache: username -> mailboxID
 }
 
 // NewAuthenticator creates an IMAP authenticator.
@@ -64,9 +66,9 @@ func (a *Authenticator) Authenticate(username, password string) (uint, bool) {
 
 // Server represents an IMAP server instance.
 type Server struct {
-	Config       Config
-	MailStore    *storage.MailStore
-	Auth         AuthBackend
+	Config        Config
+	MailStore     *storage.MailStore
+	Auth          AuthBackend
 	Observability *observability.Observability
 
 	mu       sync.Mutex

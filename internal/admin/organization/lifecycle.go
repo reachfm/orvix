@@ -10,11 +10,11 @@ import (
 type SuspensionState string
 
 const (
-	SuspensionNone       SuspensionState = ""
-	SuspensionManual     SuspensionState = "manual"
-	SuspensionBilling    SuspensionState = "billing"
-	SuspensionAbuse      SuspensionState = "abuse"
-	SuspensionLegal      SuspensionState = "legal"
+	SuspensionNone    SuspensionState = ""
+	SuspensionManual  SuspensionState = "manual"
+	SuspensionBilling SuspensionState = "billing"
+	SuspensionAbuse   SuspensionState = "abuse"
+	SuspensionLegal   SuspensionState = "legal"
 )
 
 type DeletionState string
@@ -47,16 +47,16 @@ type SuspensionRecord struct {
 }
 
 type DeletionRecord struct {
-	ID               uint          `json:"id"`
-	OrganizationID   uint          `json:"organization_id"`
-	RequestedBy      uint          `json:"requested_by"`
-	State            DeletionState `json:"state"`
-	RetentionUntil   *time.Time    `json:"retention_until,omitempty"`
-	RequestedAt      time.Time     `json:"requested_at"`
-	ConfirmedAt      *time.Time    `json:"confirmed_at,omitempty"`
-	RetentionExpiresAt *time.Time  `json:"retention_expires_at,omitempty"`
-	CancelledAt      *time.Time    `json:"cancelled_at,omitempty"`
-	CreatedAt        time.Time     `json:"created_at"`
+	ID                 uint          `json:"id"`
+	OrganizationID     uint          `json:"organization_id"`
+	RequestedBy        uint          `json:"requested_by"`
+	State              DeletionState `json:"state"`
+	RetentionUntil     *time.Time    `json:"retention_until,omitempty"`
+	RequestedAt        time.Time     `json:"requested_at"`
+	ConfirmedAt        *time.Time    `json:"confirmed_at,omitempty"`
+	RetentionExpiresAt *time.Time    `json:"retention_expires_at,omitempty"`
+	CancelledAt        *time.Time    `json:"cancelled_at,omitempty"`
+	CreatedAt          time.Time     `json:"created_at"`
 }
 
 func (s *Service) SuspendOrganization(ctx context.Context, orgID, suspendedBy uint, reason SuspensionState, note string) error {

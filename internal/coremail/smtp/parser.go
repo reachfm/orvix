@@ -7,9 +7,9 @@ import (
 
 // ParsedCommand represents a parsed SMTP command line.
 type ParsedCommand struct {
-	Verb    string
-	Args    string
-	Raw     string
+	Verb string
+	Args string
+	Raw  string
 }
 
 const maxLineLength = 1000

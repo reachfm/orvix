@@ -98,7 +98,7 @@ func (s *Server) handleEmailChanges(ctx context.Context, mc *MethodCall, mailbox
 	resp := EmailChangesResponse{
 		AccountID: accountID, OldState: params.SinceState, NewState: newState,
 		HasMoreChanges: hasMore,
-		Created: created, Updated: updated, Destroyed: destroyed,
+		Created:        created, Updated: updated, Destroyed: destroyed,
 	}
 	return &MethodResponse{Name: "Email/changes", ID: mc.ID, Params: resp}
 }

@@ -11,7 +11,9 @@ import (
 	"github.com/orvix/orvix/internal/policy"
 )
 
-func (s *Server) SetQueueEngine(qe interface{ Enqueue(ctx context.Context, entry *queue.QueueEntry) error }) {
+func (s *Server) SetQueueEngine(qe interface {
+	Enqueue(ctx context.Context, entry *queue.QueueEntry) error
+}) {
 	s.queueEngine = qe
 }
 

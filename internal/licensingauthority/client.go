@@ -42,11 +42,11 @@ func (n *NoopAuthorityClient) Entitlements(_ context.Context, _ *EntitlementRequ
 
 // FakeAuthorityClient is a configurable client for tests.
 type FakeAuthorityClient struct {
-	mu               sync.RWMutex
-	validateFn       func(*ValidationRequest) (*ValidationResponse, error)
-	activateFn       func(*ActivationRequest) (*ActivationResponse, error)
-	heartbeatFn      func(*HeartbeatRequest) (*HeartbeatResponse, error)
-	entitlementsFn   func(*EntitlementRequest) (*EntitlementResponse, error)
+	mu             sync.RWMutex
+	validateFn     func(*ValidationRequest) (*ValidationResponse, error)
+	activateFn     func(*ActivationRequest) (*ActivationResponse, error)
+	heartbeatFn    func(*HeartbeatRequest) (*HeartbeatResponse, error)
+	entitlementsFn func(*EntitlementRequest) (*EntitlementResponse, error)
 }
 
 func NewFakeAuthorityClient() *FakeAuthorityClient {

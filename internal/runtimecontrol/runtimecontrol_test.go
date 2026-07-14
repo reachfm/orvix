@@ -12,7 +12,7 @@ type testConfigProvider struct {
 }
 
 func (t *testConfigProvider) GetConfig() *config.Config { return t.cfg }
-func (t *testConfigProvider) ReloadConfig() error        { return nil }
+func (t *testConfigProvider) ReloadConfig() error       { return nil }
 
 func testControl() *RuntimeControl {
 	obs := observability.NewObservability(100, 100)
@@ -76,7 +76,7 @@ func TestSettingsRead(t *testing.T) {
 func TestSettingsUpdateValid(t *testing.T) {
 	rc := testControl()
 	err := rc.UpdateSettings(&Settings{
-		SMTP: SMTPSettings{MaxMessageSizeMB: 50, MaxRecipients: 200},
+		SMTP:  SMTPSettings{MaxMessageSizeMB: 50, MaxRecipients: 200},
 		Queue: QueueSettings{WorkerCount: 5},
 	})
 	if err != nil {

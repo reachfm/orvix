@@ -6,31 +6,31 @@ import "time"
 type PolicyAction string
 
 const (
-	ActionAllow     PolicyAction = "allow"
+	ActionAllow      PolicyAction = "allow"
 	ActionQuarantine PolicyAction = "quarantine"
-	ActionReject    PolicyAction = "reject"
+	ActionReject     PolicyAction = "reject"
 )
 
 // PolicyScope defines what the policy filters on.
 type PolicyScope string
 
 const (
-	ScopeDomain   PolicyScope = "domain"
-	ScopeSender   PolicyScope = "sender"
+	ScopeDomain    PolicyScope = "domain"
+	ScopeSender    PolicyScope = "sender"
 	ScopeRecipient PolicyScope = "recipient"
-	ScopeSubject  PolicyScope = "subject"
+	ScopeSubject   PolicyScope = "subject"
 )
 
 // Policy is a compliance rule.
 type Policy struct {
-	ID        uint          `json:"id"`
-	Name      string        `json:"name"`
-	Enabled   bool          `json:"enabled"`
-	Action    PolicyAction  `json:"action"`
-	Scope     PolicyScope   `json:"scope"`
-	Value     string        `json:"value"`
-	CreatedAt time.Time     `json:"createdAt"`
-	UpdatedAt time.Time     `json:"updatedAt"`
+	ID        uint         `json:"id"`
+	Name      string       `json:"name"`
+	Enabled   bool         `json:"enabled"`
+	Action    PolicyAction `json:"action"`
+	Scope     PolicyScope  `json:"scope"`
+	Value     string       `json:"value"`
+	CreatedAt time.Time    `json:"createdAt"`
+	UpdatedAt time.Time    `json:"updatedAt"`
 }
 
 // QuarantineStatus represents the state of a quarantined message.

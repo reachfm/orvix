@@ -10,18 +10,18 @@ import (
 type DeliveryEventType string
 
 const (
-	EventQueued          DeliveryEventType = "queued"
-	EventLeased          DeliveryEventType = "leased"
-	EventConnecting      DeliveryEventType = "connecting"
-	EventConnected       DeliveryEventType = "connected"
-	EventRemoteAccepted  DeliveryEventType = "remote_accepted"
-	EventRemoteRejected  DeliveryEventType = "remote_rejected"
-	EventDeferred        DeliveryEventType = "deferred"
-	EventBounced         DeliveryEventType = "bounced"
-	EventDelivered       DeliveryEventType = "delivered"
-	EventDeadLetter      DeliveryEventType = "dead_letter"
-	EventPolicyRejected  DeliveryEventType = "policy_rejected"
-	EventLoopDetected    DeliveryEventType = "loop_detected"
+	EventQueued         DeliveryEventType = "queued"
+	EventLeased         DeliveryEventType = "leased"
+	EventConnecting     DeliveryEventType = "connecting"
+	EventConnected      DeliveryEventType = "connected"
+	EventRemoteAccepted DeliveryEventType = "remote_accepted"
+	EventRemoteRejected DeliveryEventType = "remote_rejected"
+	EventDeferred       DeliveryEventType = "deferred"
+	EventBounced        DeliveryEventType = "bounced"
+	EventDelivered      DeliveryEventType = "delivered"
+	EventDeadLetter     DeliveryEventType = "dead_letter"
+	EventPolicyRejected DeliveryEventType = "policy_rejected"
+	EventLoopDetected   DeliveryEventType = "loop_detected"
 )
 
 // DeliveryEvent records a single delivery lifecycle event.

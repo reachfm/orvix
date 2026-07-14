@@ -6,12 +6,12 @@ import "time"
 type LicenseState string
 
 const (
-	LicenseValid       LicenseState = "valid"
-	LicenseWarning     LicenseState = "warning"
-	LicenseGrace       LicenseState = "grace"
-	LicenseExpired     LicenseState = "expired"
-	LicenseRevoked     LicenseState = "revoked"
-	LicenseSuspended   LicenseState = "suspended"
+	LicenseValid        LicenseState = "valid"
+	LicenseWarning      LicenseState = "warning"
+	LicenseGrace        LicenseState = "grace"
+	LicenseExpired      LicenseState = "expired"
+	LicenseRevoked      LicenseState = "revoked"
+	LicenseSuspended    LicenseState = "suspended"
 	LicenseOfflineGrace LicenseState = "offline_grace"
 )
 
@@ -26,14 +26,14 @@ const (
 
 // ValidationRequest is sent to validate a license with the authority.
 type ValidationRequest struct {
-	LicenseID  string `json:"licenseId"`
-	Edition    string `json:"edition"`
-	MachineID  string `json:"machineId"`
+	LicenseID string `json:"licenseId"`
+	Edition   string `json:"edition"`
+	MachineID string `json:"machineId"`
 }
 
 // ValidationResponse from the authority.
 type ValidationResponse struct {
-	Valid        bool       `json:"valid"`
+	Valid        bool         `json:"valid"`
 	LicenseState LicenseState `json:"licenseState"`
 	Reason       string       `json:"reason,omitempty"`
 	ValidatedAt  time.Time    `json:"validatedAt"`
@@ -73,12 +73,12 @@ type EntitlementRequest struct {
 
 // EntitlementResponse from the authority.
 type EntitlementResponse struct {
-	LicenseID string `json:"licenseId"`
-	Edition   string `json:"edition"`
-	Features  []string `json:"features"`
+	LicenseID string            `json:"licenseId"`
+	Edition   string            `json:"edition"`
+	Features  []string          `json:"features"`
 	Limits    EntitlementLimits `json:"limits"`
-	ExpiresAt time.Time `json:"expiresAt"`
-	IssuedAt  time.Time `json:"issuedAt"`
+	ExpiresAt time.Time         `json:"expiresAt"`
+	IssuedAt  time.Time         `json:"issuedAt"`
 }
 
 // EntitlementLimits defines resource limits.
@@ -93,15 +93,15 @@ type EntitlementLimits struct {
 
 // AuthorityStatus is the runtime status for admin visibility.
 type AuthorityStatus struct {
-	LicenseID           string         `json:"licenseId"`
-	Edition             string         `json:"edition"`
-	LicenseState        LicenseState   `json:"licenseState"`
-	AuthorityState      AuthorityState `json:"authorityState"`
-	LastValidation      time.Time      `json:"lastValidation"`
-	NextValidation      time.Time      `json:"nextValidation"`
-	GraceExpiresAt      time.Time      `json:"graceExpiresAt"`
-	CacheValid          bool           `json:"cacheValid"`
-	OfflineAllowed      bool           `json:"offlineAllowed"`
-	OfflineSeconds      int64          `json:"offlineSeconds"`
-	ErrorMessage        string         `json:"errorMessage,omitempty"`
+	LicenseID      string         `json:"licenseId"`
+	Edition        string         `json:"edition"`
+	LicenseState   LicenseState   `json:"licenseState"`
+	AuthorityState AuthorityState `json:"authorityState"`
+	LastValidation time.Time      `json:"lastValidation"`
+	NextValidation time.Time      `json:"nextValidation"`
+	GraceExpiresAt time.Time      `json:"graceExpiresAt"`
+	CacheValid     bool           `json:"cacheValid"`
+	OfflineAllowed bool           `json:"offlineAllowed"`
+	OfflineSeconds int64          `json:"offlineSeconds"`
+	ErrorMessage   string         `json:"errorMessage,omitempty"`
 }

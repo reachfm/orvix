@@ -126,14 +126,14 @@ func jmapStoreMsg(t *testing.T, ms *storage.MailStore, mailboxID uint, subject, 
 
 	now := time.Now()
 	msg := &storage.Message{
-		MessageID:   storage.GenerateMessageID(),
-		TenantID:    1,
-		DomainID:    1,
-		MailboxID:   mailboxID,
-		FolderID:    folder.ID,
-		FromAddress: from,
-		ToAddresses: to,
-		Subject:     subject,
+		MessageID:    storage.GenerateMessageID(),
+		TenantID:     1,
+		DomainID:     1,
+		MailboxID:    mailboxID,
+		FolderID:     folder.ID,
+		FromAddress:  from,
+		ToAddresses:  to,
+		Subject:      subject,
 		ReceivedDate: now,
 	}
 	rfc822 := []byte(fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nMessage-ID: <msg-%s>\r\n\r\n%s",

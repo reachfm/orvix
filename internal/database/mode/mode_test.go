@@ -7,11 +7,11 @@ import (
 	"strings"
 	"testing"
 
-	_ "modernc.org/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
 	"gorm.io/gorm/schema"
+	_ "modernc.org/sqlite"
 )
 
 func TestParse(t *testing.T) {
@@ -294,9 +294,9 @@ func openTestSQLite(t *testing.T, path string) *gorm.DB {
 // would import this package and create a cycle).
 type internalDialector struct{}
 
-func (internalDialector) Name() string { return "sqlite" }
-func (internalDialector) Initialize(*gorm.DB) error { return nil }
-func (internalDialector) Migrator(*gorm.DB) gorm.Migrator { return nil }
+func (internalDialector) Name() string                          { return "sqlite" }
+func (internalDialector) Initialize(*gorm.DB) error             { return nil }
+func (internalDialector) Migrator(*gorm.DB) gorm.Migrator       { return nil }
 func (internalDialector) DataTypeOf(field *schema.Field) string { return "text" }
 func (internalDialector) DefaultValueOf(*schema.Field) clause.Expression {
 	return clause.Expr{SQL: "DEFAULT"}

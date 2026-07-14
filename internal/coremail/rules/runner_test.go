@@ -45,12 +45,12 @@ import (
 // stack. Tests get a fresh fixture so they never see each
 // other's mailbox rows or queue entries.
 type fixture struct {
-	t        *testing.T
-	db       *sql.DB
-	store    *storage.MailStore
-	queue    *queue.QueueEngine
-	logger   *zap.Logger
-	runner   *Runner
+	t      *testing.T
+	db     *sql.DB
+	store  *storage.MailStore
+	queue  *queue.QueueEngine
+	logger *zap.Logger
+	runner *Runner
 }
 
 // newFixture spins up an in-memory MailStore + QueueEngine +
@@ -736,10 +736,15 @@ func TestRunner_RuleForwardWinsOverForwardingRow(t *testing.T) {
 
 // ── Local helpers ────────────────────────────────────────────
 
-func boolPtrLocal(v bool) *bool       { return &v }
-func strPtrLocal(v string) *string     { return &v }
-func intPtrLocal(v int) *int          { return &v }
-func boolToIntLocal(v bool) int       { if v { return 1 }; return 0 }
+func boolPtrLocal(v bool) *bool    { return &v }
+func strPtrLocal(v string) *string { return &v }
+func intPtrLocal(v int) *int       { return &v }
+func boolToIntLocal(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
 
 // testMailboxesTableDDL is the schema for the
 // coremail_mailboxes table the runner tests need so the

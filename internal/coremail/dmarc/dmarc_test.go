@@ -538,9 +538,9 @@ func TestFormatAuthResultsNil(t *testing.T) {
 
 func TestAuthResultFromDMARC(t *testing.T) {
 	er := &EvaluationResult{
-		Result:        ResultPass,
+		Result:          ResultPass,
 		EvaluatedDomain: "example.com",
-		Explanation:   "aligned",
+		Explanation:     "aligned",
 	}
 	ar := AuthResultFromDMARC(er)
 	if ar.Method != "dmarc" {

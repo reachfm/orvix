@@ -37,15 +37,15 @@ func TestNewTelemetryHonestDefaults(t *testing.T) {
 // "private_key" or env-dump content.
 func TestNewTelemetryNoSecrets(t *testing.T) {
 	tel := NewTelemetry(Inputs{
-		Version:   "1.0.0",
-		Commit:    "abc123",
-		BuildTime: "development",
-		StartedAt: time.Now().Add(-time.Hour),
-		DataPath:  "/var/lib/orvix/data",
-		DBPing:    func() error { return nil },
+		Version:     "1.0.0",
+		Commit:      "abc123",
+		BuildTime:   "development",
+		StartedAt:   time.Now().Add(-time.Hour),
+		DataPath:    "/var/lib/orvix/data",
+		DBPing:      func() error { return nil },
 		QueueCounts: QueueCounts{Pending: 1, Deferred: 0, Bounced: 0, Delivered: 0},
-		License:   LicensePosture{Mode: "offline", PublicKeyLoaded: true, Status: "ok"},
-		SMHTTPPort: 25, IMAPPort: 143, POP3Port: 110, JMAPPort: 8080,
+		License:     LicensePosture{Mode: "offline", PublicKeyLoaded: true, Status: "ok"},
+		SMHTTPPort:  25, IMAPPort: 143, POP3Port: 110, JMAPPort: 8080,
 		HostnameFn: func() (string, error) { return "mail.example.com", nil },
 	})
 	b, err := json.Marshal(tel)
@@ -140,11 +140,11 @@ func TestSafeDiskLabel(t *testing.T) {
 	cases := map[string]struct {
 		dataPath, hinted, want string
 	}{
-		"empty":      {"", "", "data"},
-		"data only":  {"/var/lib/orvix/data", "", "data"},
-		"good hint":  {"/var/lib/orvix/data", "mailstore", "mailstore"},
-		"abs hint":   {"/var/lib/orvix/data", "/etc/passwd", "data"},
-		"win abs":    {"C:\\data", "C:\\secret", "data"},
+		"empty":     {"", "", "data"},
+		"data only": {"/var/lib/orvix/data", "", "data"},
+		"good hint": {"/var/lib/orvix/data", "mailstore", "mailstore"},
+		"abs hint":  {"/var/lib/orvix/data", "/etc/passwd", "data"},
+		"win abs":   {"C:\\data", "C:\\secret", "data"},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -539,7 +539,6 @@ func TestListenerRegistryEmptySnapshotFallback(t *testing.T) {
 		}
 	}
 }
-
 
 // ── Normalized state taxonomy (active|skipped|degraded|failed) ──
 

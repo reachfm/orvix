@@ -25,10 +25,10 @@ type MessageStorer interface {
 
 // Service provides migration import operations.
 type Service struct {
-	db              *sql.DB
-	domainCreator   DomainCreator
-	mailboxCreator  MailboxCreator
-	messageStorer   MessageStorer
+	db             *sql.DB
+	domainCreator  DomainCreator
+	mailboxCreator MailboxCreator
+	messageStorer  MessageStorer
 }
 
 // NewService creates a migration service.
@@ -48,7 +48,9 @@ func (s *Service) SetMessageStorer(m MessageStorer) { s.messageStorer = m }
 // EnsureSchema creates required tables.
 func (s *Service) EnsureSchema(ctx context.Context) error {
 	for _, stmt := range schema {
-		if _, err := s.db.ExecContext(ctx, stmt); err != nil { return err }
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -63,7 +65,9 @@ func (s *Service) CreateJob(ctx context.Context, sourceType ImportSourceType, so
 	res, err := s.db.ExecContext(ctx,
 		"INSERT INTO coremail_migrations (source_type, source_host, status, started_at) VALUES (?, ?, ?, ?)",
 		string(j.SourceType), j.SourceHost, string(j.Status), j.StartedAt)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	id, _ := res.LastInsertId()
 	j.ID = uint(id)
 	return j, nil
@@ -71,7 +75,9 @@ func (s *Service) CreateJob(ctx context.Context, sourceType ImportSourceType, so
 
 func (s *Service) ListJobs(ctx context.Context) ([]ImportJob, error) {
 	rows, err := s.db.QueryContext(ctx, "SELECT id, source_type, source_host, status, domains_imported, mailboxes_imported, messages_imported, errors, started_at, completed_at FROM coremail_migrations ORDER BY id DESC")
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	var jobs []ImportJob
 	for rows.Next() {
@@ -80,7 +86,9 @@ func (s *Service) ListJobs(ctx context.Context) ([]ImportJob, error) {
 		if err := rows.Scan(&j.ID, &j.SourceType, &j.SourceHost, &j.Status, &j.DomainsImported, &j.MailboxesImported, &j.MessagesImported, &j.Errors, &j.StartedAt, &completedAt); err != nil {
 			return nil, err
 		}
-		if completedAt.Valid { j.CompletedAt = &completedAt.Time }
+		if completedAt.Valid {
+			j.CompletedAt = &completedAt.Time
+		}
 		jobs = append(jobs, j)
 	}
 	return jobs, rows.Err()
@@ -91,9 +99,15 @@ func (s *Service) GetJob(ctx context.Context, id uint) (*ImportJob, error) {
 	var j ImportJob
 	var completedAt sql.NullTime
 	err := row.Scan(&j.ID, &j.SourceType, &j.SourceHost, &j.Status, &j.DomainsImported, &j.MailboxesImported, &j.MessagesImported, &j.Errors, &j.StartedAt, &completedAt)
-	if err == sql.ErrNoRows { return nil, nil }
-	if err != nil { return nil, err }
-	if completedAt.Valid { j.CompletedAt = &completedAt.Time }
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if completedAt.Valid {
+		j.CompletedAt = &completedAt.Time
+	}
 	return &j, nil
 }
 
@@ -110,10 +124,14 @@ func (s *Service) updateStatus(ctx context.Context, id uint, status ImportJobSta
 // ── Domain Import ───────────────────────────────────────
 
 func (s *Service) ImportDomain(ctx context.Context, jobID uint, domain DomainImport) error {
-	if s.domainCreator == nil { return fmt.Errorf("domain creator not configured") }
+	if s.domainCreator == nil {
+		return fmt.Errorf("domain creator not configured")
+	}
 
 	exists, err := s.domainCreator.DomainExists(ctx, domain.Domain)
-	if err != nil { return fmt.Errorf("check domain: %w", err) }
+	if err != nil {
+		return fmt.Errorf("check domain: %w", err)
+	}
 	if exists {
 		s.incrementErrors(ctx, jobID)
 		return fmt.Errorf("domain already exists: %s", domain.Domain)
@@ -132,7 +150,9 @@ func (s *Service) ImportDomain(ctx context.Context, jobID uint, domain DomainImp
 // ── Mailbox Import ──────────────────────────────────────
 
 func (s *Service) ImportMailbox(ctx context.Context, jobID uint, mb MailboxImport) error {
-	if s.mailboxCreator == nil { return fmt.Errorf("mailbox creator not configured") }
+	if s.mailboxCreator == nil {
+		return fmt.Errorf("mailbox creator not configured")
+	}
 
 	_, err := s.mailboxCreator.CreateMailbox(ctx, mb.Email, mb.Name, mb.Password, mb.DomainID, mb.QuotaMB)
 	if err != nil {
@@ -147,7 +167,9 @@ func (s *Service) ImportMailbox(ctx context.Context, jobID uint, mb MailboxImpor
 // ── Message Import ──────────────────────────────────────
 
 func (s *Service) ImportMessage(ctx context.Context, jobID uint, msg MessageImport) error {
-	if s.messageStorer == nil { return fmt.Errorf("message storer not configured") }
+	if s.messageStorer == nil {
+		return fmt.Errorf("message storer not configured")
+	}
 
 	_, err := s.messageStorer.StoreMessage(ctx, msg.MailboxID, []byte(msg.RFC822Data))
 	if err != nil {

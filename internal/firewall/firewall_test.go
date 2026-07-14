@@ -9,10 +9,10 @@ import (
 )
 
 type testLayer struct {
-	name  string
-	score float64
+	name   string
+	score  float64
 	reason string
-	err   error
+	err    error
 }
 
 func (l *testLayer) Name() string { return l.name }
@@ -96,11 +96,11 @@ func TestPipelineMultipleLayers(t *testing.T) {
 	p.AddLayer(&testLayer{name: "layer-3", score: 1.0, reason: "suspicious link"})
 
 	email := &EmailContext{
-		MessageID:   "test-multi",
-		SenderIP:    "10.0.0.3",
+		MessageID:    "test-multi",
+		SenderIP:     "10.0.0.3",
 		SenderDomain: "spam.example.com",
-		SPFResult:   "fail",
-		ReceivedAt:  time.Now(),
+		SPFResult:    "fail",
+		ReceivedAt:   time.Now(),
 	}
 
 	verdict, err := p.Process(context.Background(), email)

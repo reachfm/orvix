@@ -1,8 +1,8 @@
 package compose
 
 import (
-	"testing"
 	"go.uber.org/zap"
+	"testing"
 )
 
 func TestNewStreamer(t *testing.T) {
@@ -18,11 +18,11 @@ func TestNewStreamer(t *testing.T) {
 
 func TestCompletionRequestDefaults(t *testing.T) {
 	req := &CompletionRequest{
-		Context: "Previous email thread",
-		Prompt:  "Write a reply",
-		Tone:    "formal",
+		Context:   "Previous email thread",
+		Prompt:    "Write a reply",
+		Tone:      "formal",
 		MaxTokens: 500,
-		Action: "compose",
+		Action:    "compose",
 	}
 	if req.Tone != "formal" {
 		t.Fatalf("unexpected tone: %s", req.Tone)

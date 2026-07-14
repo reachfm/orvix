@@ -7,26 +7,34 @@ import (
 )
 
 type mockResolver struct {
-	txts   map[string][]string
-	mxs    map[string][]*net.MX
-	hosts  map[string][]string
-	addrs  map[string][]string
+	txts  map[string][]string
+	mxs   map[string][]*net.MX
+	hosts map[string][]string
+	addrs map[string][]string
 }
 
 func (m *mockResolver) LookupTXT(host string) ([]string, error) {
-	if v, ok := m.txts[host]; ok { return v, nil }
+	if v, ok := m.txts[host]; ok {
+		return v, nil
+	}
 	return nil, fmt.Errorf("not found")
 }
 func (m *mockResolver) LookupMX(host string) ([]*net.MX, error) {
-	if v, ok := m.mxs[host]; ok { return v, nil }
+	if v, ok := m.mxs[host]; ok {
+		return v, nil
+	}
 	return nil, fmt.Errorf("not found")
 }
 func (m *mockResolver) LookupHost(host string) ([]string, error) {
-	if v, ok := m.hosts[host]; ok { return v, nil }
+	if v, ok := m.hosts[host]; ok {
+		return v, nil
+	}
 	return nil, fmt.Errorf("not found")
 }
 func (m *mockResolver) LookupAddr(addr string) ([]string, error) {
-	if v, ok := m.addrs[addr]; ok { return v, nil }
+	if v, ok := m.addrs[addr]; ok {
+		return v, nil
+	}
 	return nil, fmt.Errorf("not found")
 }
 
@@ -201,9 +209,9 @@ func TestGenerateReport(t *testing.T) {
 	s := NewService("default")
 	s.SetResolver(&mockResolver{
 		txts: map[string][]string{
-			"example.com":                  {"v=spf1 include:_spf.example.com ~all"},
+			"example.com":                    {"v=spf1 include:_spf.example.com ~all"},
 			"default._domainkey.example.com": {"v=DKIM1; p=keydata"},
-			"_dmarc.example.com":            {"v=DMARC1; p=reject"},
+			"_dmarc.example.com":             {"v=DMARC1; p=reject"},
 		},
 		mxs: map[string][]*net.MX{
 			"example.com": {{Host: "mail.example.com", Pref: 10}},

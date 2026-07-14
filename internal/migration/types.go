@@ -22,16 +22,16 @@ const (
 )
 
 type ImportJob struct {
-	ID                uint            `json:"id"`
+	ID                uint             `json:"id"`
 	SourceType        ImportSourceType `json:"sourceType"`
-	SourceHost        string          `json:"sourceHost,omitempty"`
-	Status            ImportJobStatus `json:"status"`
-	DomainsImported   int             `json:"domainsImported"`
-	MailboxesImported int             `json:"mailboxesImported"`
-	MessagesImported  int64           `json:"messagesImported"`
-	Errors            int             `json:"errors"`
-	StartedAt         time.Time       `json:"startedAt"`
-	CompletedAt       *time.Time      `json:"completedAt,omitempty"`
+	SourceHost        string           `json:"sourceHost,omitempty"`
+	Status            ImportJobStatus  `json:"status"`
+	DomainsImported   int              `json:"domainsImported"`
+	MailboxesImported int              `json:"mailboxesImported"`
+	MessagesImported  int64            `json:"messagesImported"`
+	Errors            int              `json:"errors"`
+	StartedAt         time.Time        `json:"startedAt"`
+	CompletedAt       *time.Time       `json:"completedAt,omitempty"`
 }
 
 type DomainImport struct {

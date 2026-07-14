@@ -164,7 +164,7 @@ func TestValidatePushEndpoint_RejectsHostnamesWithDotsButNoPublicSuffix(t *testi
 	// Hostnames that don't match any known push service are
 	// rejected outright — there is no "trust the suffix" fallback.
 	for _, ep := range []string{
-		"https://fcm-googleapis.com/push",     // typosquat
+		"https://fcm-googleapis.com/push",              // typosquat
 		"https://fcm.googleapis.com.attacker.com/push", // suffix confusion
 		"https://attacker.com/push",
 		"https://webmail.malicious.example/push",
@@ -295,9 +295,9 @@ func TestHasIPv4PrefixLabels(t *testing.T) {
 		{"fcm.googleapis.com", false},
 		{"push.apple.com", false},
 		{"web.push.apple.com", false},
-		{"3.example.com", false},        // one numeric label — not suspicious
+		{"3.example.com", false},          // one numeric label — not suspicious
 		{"127.fcm.googleapis.com", false}, // only one numeric label
-		{"mail.1.example.com", false},    // one numeric label mid-hostname
+		{"mail.1.example.com", false},     // one numeric label mid-hostname
 	}
 	for _, c := range cases {
 		got := hasIPv4PrefixLabels(c.host)

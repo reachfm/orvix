@@ -19,8 +19,8 @@ type Module struct {
 	sync   *IMAPSync
 }
 
-func (m *Module) ID() string { return "migration-tool" }
-func (m *Module) Version() string { return "1.0.0" }
+func (m *Module) ID() string         { return "migration-tool" }
+func (m *Module) Version() string    { return "1.0.0" }
 func (m *Module) Requires() []string { return []string{"core"} }
 
 func (m *Module) Init(cfg *config.Config, db *gorm.DB) error {
@@ -33,8 +33,8 @@ func (m *Module) Init(cfg *config.Config, db *gorm.DB) error {
 	return nil
 }
 
-func (m *Module) Start() error { m.logger.Info("migration-tool module started"); return nil }
-func (m *Module) Stop() error { m.logger.Info("migration-tool module stopped"); return nil }
+func (m *Module) Start() error   { m.logger.Info("migration-tool module started"); return nil }
+func (m *Module) Stop() error    { m.logger.Info("migration-tool module stopped"); return nil }
 func (m *Module) Migrate() error { return nil }
 
 func (m *Module) Sync() *IMAPSync { return m.sync }

@@ -32,10 +32,10 @@ func NewGenerator() *Generator {
 
 // Inputs collects everything the generator needs.
 type Inputs struct {
-	Domain        string // apex domain, e.g. "orvix.email"
-	MailHost      string // e.g. "mail.orvix.email"
-	ServerIPv4    string // canonical dotted IPv4, e.g. "65.75.203.74"
-	ServerIPv6    string // canonical IPv6, "" if not configured
+	Domain     string // apex domain, e.g. "orvix.email"
+	MailHost   string // e.g. "mail.orvix.email"
+	ServerIPv4 string // canonical dotted IPv4, e.g. "65.75.203.74"
+	ServerIPv6 string // canonical IPv6, "" if not configured
 	// ListenerBind is the SMTP / POP3 / IMAP listener bind host
 	// from coremail.smtp_host. It is INFORMATIONAL ONLY and is
 	// echoed in Plan.ListenerBind so the dashboard can show the
@@ -43,13 +43,13 @@ type Inputs struct {
 	// A / AAAA / SPF records MUST use ServerIPv4 / ServerIPv6,
 	// NOT ListenerBind (the listener bind host defaults to
 	// 0.0.0.0 and has nothing to do with the public DNS plan).
-	ListenerBind  string
-	DKIMSelector  string // e.g. "orvix"; default "default" when empty
-	DKIMKeyID     string // opaque key id (returned in Plan.DKIMKeyID)
-	DKIMPubKey    string // base64 DER public key, no PEM headers (empty → "not generated")
-	ReportMailbox string // e.g. "dmarc@orvix.email"; default derived
-	MTAMode       string // "testing" or "enforce"; default "testing"
-	DNSSECDetected bool // if true, DANE/TLSA readiness row is added
+	ListenerBind   string
+	DKIMSelector   string // e.g. "orvix"; default "default" when empty
+	DKIMKeyID      string // opaque key id (returned in Plan.DKIMKeyID)
+	DKIMPubKey     string // base64 DER public key, no PEM headers (empty → "not generated")
+	ReportMailbox  string // e.g. "dmarc@orvix.email"; default derived
+	MTAMode        string // "testing" or "enforce"; default "testing"
+	DNSSECDetected bool   // if true, DANE/TLSA readiness row is added
 }
 
 // Validate returns an error if any required input is missing or

@@ -20,7 +20,7 @@ type Provider interface {
 // Manager handles DNS automation across multiple providers.
 type Manager struct {
 	providers map[string]Provider
-	logger   *zap.Logger
+	logger    *zap.Logger
 }
 
 // NewManager creates a new DNS manager.
@@ -55,10 +55,10 @@ func (m *Manager) RunWizard(ctx context.Context, providerName, domain string) (*
 	}
 
 	result := &WizardResult{
-		SPFStatus:    "pending",
-		DKIMStatus:   "pending",
-		DMARCStatus:  "pending",
-		MXStatus:     "pending",
+		SPFStatus:   "pending",
+		DKIMStatus:  "pending",
+		DMARCStatus: "pending",
+		MXStatus:    "pending",
 	}
 
 	if err := provider.CreateMXRecord(ctx, domain, fmt.Sprintf("mail.%s", domain), 10); err != nil {

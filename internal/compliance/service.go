@@ -32,7 +32,9 @@ func (s *Service) EnsureSchema(ctx context.Context) error {
 
 func (s *Service) ListPolicies(ctx context.Context) ([]Policy, error) {
 	rows, err := s.db.QueryContext(ctx, "SELECT id, name, enabled, action, scope, value, created_at, updated_at FROM compliance_policies ORDER BY name")
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	var policies []Policy
 	for rows.Next() {
@@ -46,10 +48,18 @@ func (s *Service) ListPolicies(ctx context.Context) ([]Policy, error) {
 }
 
 func (s *Service) CreatePolicy(ctx context.Context, p *Policy) error {
-	if p.Name == "" { return fmt.Errorf("policy name is required") }
-	if p.Action == "" { return fmt.Errorf("policy action is required") }
-	if p.Scope == "" { return fmt.Errorf("policy scope is required") }
-	if p.Value == "" { return fmt.Errorf("policy value is required") }
+	if p.Name == "" {
+		return fmt.Errorf("policy name is required")
+	}
+	if p.Action == "" {
+		return fmt.Errorf("policy action is required")
+	}
+	if p.Scope == "" {
+		return fmt.Errorf("policy scope is required")
+	}
+	if p.Value == "" {
+		return fmt.Errorf("policy value is required")
+	}
 
 	if p.Action != ActionAllow && p.Action != ActionQuarantine && p.Action != ActionReject {
 		return fmt.Errorf("invalid action: %s", p.Action)
@@ -64,7 +74,9 @@ func (s *Service) CreatePolicy(ctx context.Context, p *Policy) error {
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO compliance_policies (name, enabled, action, scope, value, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		p.Name, p.Enabled, string(p.Action), string(p.Scope), strings.ToLower(p.Value), p.CreatedAt, p.UpdatedAt)
-	if err != nil { return fmt.Errorf("create policy: %w", err) }
+	if err != nil {
+		return fmt.Errorf("create policy: %w", err)
+	}
 	id, _ := res.LastInsertId()
 	p.ID = uint(id)
 	return nil
@@ -72,13 +84,25 @@ func (s *Service) CreatePolicy(ctx context.Context, p *Policy) error {
 
 func (s *Service) UpdatePolicy(ctx context.Context, id uint, p *Policy) error {
 	existing, err := s.GetPolicy(ctx, id)
-	if err != nil { return err }
-	if existing == nil { return fmt.Errorf("policy not found") }
+	if err != nil {
+		return err
+	}
+	if existing == nil {
+		return fmt.Errorf("policy not found")
+	}
 
-	if p.Name != "" { existing.Name = p.Name }
-	if p.Action != "" { existing.Action = p.Action }
-	if p.Scope != "" { existing.Scope = p.Scope }
-	if p.Value != "" { existing.Value = strings.ToLower(p.Value) }
+	if p.Name != "" {
+		existing.Name = p.Name
+	}
+	if p.Action != "" {
+		existing.Action = p.Action
+	}
+	if p.Scope != "" {
+		existing.Scope = p.Scope
+	}
+	if p.Value != "" {
+		existing.Value = strings.ToLower(p.Value)
+	}
 	existing.Enabled = p.Enabled
 	existing.UpdatedAt = time.Now().UTC()
 
@@ -92,8 +116,12 @@ func (s *Service) GetPolicy(ctx context.Context, id uint) (*Policy, error) {
 	row := s.db.QueryRowContext(ctx, "SELECT id, name, enabled, action, scope, value, created_at, updated_at FROM compliance_policies WHERE id=?", id)
 	var p Policy
 	err := row.Scan(&p.ID, &p.Name, &p.Enabled, &p.Action, &p.Scope, &p.Value, &p.CreatedAt, &p.UpdatedAt)
-	if err == sql.ErrNoRows { return nil, nil }
-	if err != nil { return nil, err }
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
 	return &p, nil
 }
 
@@ -112,7 +140,9 @@ func (s *Service) QuarantineMessage(ctx context.Context, msgID, sender, recipien
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO coremail_quarantine (message_id, sender, recipient, reason, status, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
 		q.MessageID, q.Sender, q.Recipient, q.Reason, string(q.Status), q.CreatedAt)
-	if err != nil { return nil, fmt.Errorf("quarantine: %w", err) }
+	if err != nil {
+		return nil, fmt.Errorf("quarantine: %w", err)
+	}
 	id, _ := res.LastInsertId()
 	q.ID = uint(id)
 	return q, nil
@@ -120,7 +150,9 @@ func (s *Service) QuarantineMessage(ctx context.Context, msgID, sender, recipien
 
 func (s *Service) ListQuarantine(ctx context.Context) ([]QuarantinedMessage, error) {
 	rows, err := s.db.QueryContext(ctx, "SELECT id, message_id, sender, recipient, reason, status, created_at, released_at, released_by FROM coremail_quarantine ORDER BY created_at DESC")
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	var msgs []QuarantinedMessage
 	for rows.Next() {
@@ -129,7 +161,9 @@ func (s *Service) ListQuarantine(ctx context.Context) ([]QuarantinedMessage, err
 		if err := rows.Scan(&q.ID, &q.MessageID, &q.Sender, &q.Recipient, &q.Reason, &q.Status, &q.CreatedAt, &releasedAt, &q.ReleasedBy); err != nil {
 			return nil, err
 		}
-		if releasedAt.Valid { q.ReleasedAt = &releasedAt.Time }
+		if releasedAt.Valid {
+			q.ReleasedAt = &releasedAt.Time
+		}
 		msgs = append(msgs, q)
 	}
 	return msgs, rows.Err()
@@ -140,9 +174,15 @@ func (s *Service) GetQuarantine(ctx context.Context, id uint) (*QuarantinedMessa
 	var q QuarantinedMessage
 	var releasedAt sql.NullTime
 	err := row.Scan(&q.ID, &q.MessageID, &q.Sender, &q.Recipient, &q.Reason, &q.Status, &q.CreatedAt, &releasedAt, &q.ReleasedBy)
-	if err == sql.ErrNoRows { return nil, nil }
-	if err != nil { return nil, err }
-	if releasedAt.Valid { q.ReleasedAt = &releasedAt.Time }
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if releasedAt.Valid {
+		q.ReleasedAt = &releasedAt.Time
+	}
 	return &q, nil
 }
 
@@ -151,7 +191,9 @@ func (s *Service) ReleaseMessage(ctx context.Context, id uint, releasedBy string
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE coremail_quarantine SET status=?, released_at=?, released_by=? WHERE id=? AND status=?`,
 		string(QStatusReleased), now, releasedBy, id, string(QStatusQuarantined))
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	return s.GetQuarantine(ctx, id)
 }
 
@@ -168,7 +210,9 @@ func (s *Service) ListAbuseEvents(ctx context.Context) ([]AbuseEvent, error) {
 		`SELECT id, 'audit' as source, action, actor, result, timestamp FROM coremail_audit
 		 WHERE action LIKE 'trust_%' OR action LIKE 'admin_login_failure'
 		 ORDER BY timestamp DESC LIMIT 100`)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	var events []AbuseEvent
 	for rows.Next() {

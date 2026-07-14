@@ -13,14 +13,14 @@ import (
 
 // Module implements the modules.Module interface for Auto-Heal.
 type Module struct {
-	cfg    *config.Config
-	db     *gorm.DB
-	logger *zap.Logger
+	cfg     *config.Config
+	db      *gorm.DB
+	logger  *zap.Logger
 	monitor *Monitor
 }
 
-func (m *Module) ID() string { return "auto-heal" }
-func (m *Module) Version() string { return "1.0.0" }
+func (m *Module) ID() string         { return "auto-heal" }
+func (m *Module) Version() string    { return "1.0.0" }
 func (m *Module) Requires() []string { return []string{"core"} }
 
 func (m *Module) Init(cfg *config.Config, db *gorm.DB) error {

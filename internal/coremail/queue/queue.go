@@ -10,8 +10,8 @@ import (
 
 // QueueEngine orchestrates queue operations with transaction support.
 type QueueEngine struct {
-	DB       *sql.DB
-	Repo     Repository
+	DB   *sql.DB
+	Repo Repository
 	// Tenant fairness configuration.
 	MaxWorkersPerTenant int
 	GlobalMaxWorkers    int
@@ -21,8 +21,8 @@ type QueueEngine struct {
 // NewQueueEngine creates a queue engine with default tenant fairness limits.
 func NewQueueEngine(db *sql.DB) *QueueEngine {
 	return &QueueEngine{
-		DB:   db,
-		Repo: NewSQLRepo(db),
+		DB:                  db,
+		Repo:                NewSQLRepo(db),
 		MaxWorkersPerTenant: 4,
 		GlobalMaxWorkers:    100,
 		pendingClaims:       make(map[string]int),

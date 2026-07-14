@@ -8,7 +8,7 @@ import (
 
 // SequenceSet represents a parsed IMAP sequence set.
 type SequenceSet struct {
-	ranges []seqRange
+	ranges  []seqRange
 	hasStar bool
 }
 

@@ -9,13 +9,13 @@ import (
 
 // AuthIdentity represents an authenticated mailbox identity.
 type AuthIdentity struct {
-	Username   string // Full email address
-	LocalPart  string
-	Domain     string
-	TenantID   uint
-	MailboxID  uint
-	DomainID   uint
-	IsAdmin    bool
+	Username  string // Full email address
+	LocalPart string
+	Domain    string
+	TenantID  uint
+	MailboxID uint
+	DomainID  uint
+	IsAdmin   bool
 }
 
 // AuthBackend provides authentication against the CoreMail directory.

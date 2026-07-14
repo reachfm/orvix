@@ -810,13 +810,13 @@ func (h *Handler) ListAPIKeys(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list API keys"})
 	}
 	type safeKey struct {
-		ID        uint      `json:"id"`
-		Name      string    `json:"name"`
-		KeyPrefix string    `json:"key_prefix"`
-		Enabled   bool      `json:"enabled"`
+		ID        uint       `json:"id"`
+		Name      string     `json:"name"`
+		KeyPrefix string     `json:"key_prefix"`
+		Enabled   bool       `json:"enabled"`
 		LastUsed  *time.Time `json:"last_used,omitempty"`
 		ExpiresAt *time.Time `json:"expires_at,omitempty"`
-		CreatedAt time.Time `json:"created_at"`
+		CreatedAt time.Time  `json:"created_at"`
 	}
 	result := make([]safeKey, 0, len(keys))
 	for _, k := range keys {

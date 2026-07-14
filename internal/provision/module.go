@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/orvix/orvix/internal/config"
-	"github.com/orvix/orvix/internal/modules"
 	"github.com/orvix/orvix/internal/models"
+	"github.com/orvix/orvix/internal/modules"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
@@ -18,8 +18,8 @@ type Module struct {
 	logger *zap.Logger
 }
 
-func (m *Module) ID() string { return "provision-api" }
-func (m *Module) Version() string { return "1.0.0" }
+func (m *Module) ID() string         { return "provision-api" }
+func (m *Module) Version() string    { return "1.0.0" }
 func (m *Module) Requires() []string { return []string{"core"} }
 
 func (m *Module) Init(cfg *config.Config, db *gorm.DB) error {
@@ -30,8 +30,8 @@ func (m *Module) Init(cfg *config.Config, db *gorm.DB) error {
 	return nil
 }
 
-func (m *Module) Start() error { m.logger.Info("provision-api module started"); return nil }
-func (m *Module) Stop() error { m.logger.Info("provision-api module stopped"); return nil }
+func (m *Module) Start() error   { m.logger.Info("provision-api module started"); return nil }
+func (m *Module) Stop() error    { m.logger.Info("provision-api module stopped"); return nil }
 func (m *Module) Migrate() error { return nil }
 
 type ProvisionRequest struct {

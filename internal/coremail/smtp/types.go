@@ -9,13 +9,13 @@ import (
 type SessionState int
 
 const (
-	StateNew      SessionState = iota // Before any greeting
-	StateGreeted                      // After EHLO/HELO
-	StateMail                         // After MAIL FROM (awaiting RCPT or DATA)
-	StateRcpt                         // After at least one RCPT TO (awaiting more RCPT or DATA)
-	StateData                         // Inside DATA transfer
-	StateAuthenticated                // After successful AUTH
-	StateClosed                       // After QUIT or fatal error
+	StateNew           SessionState = iota // Before any greeting
+	StateGreeted                           // After EHLO/HELO
+	StateMail                              // After MAIL FROM (awaiting RCPT or DATA)
+	StateRcpt                              // After at least one RCPT TO (awaiting more RCPT or DATA)
+	StateData                              // Inside DATA transfer
+	StateAuthenticated                     // After successful AUTH
+	StateClosed                            // After QUIT or fatal error
 )
 
 func (s SessionState) String() string {
@@ -50,44 +50,44 @@ const (
 
 // Config holds SMTP server configuration.
 type Config struct {
-	Hostname                string `json:"hostname"`
-	MaxMessageSizeBytes     int64  `json:"max_message_size_bytes"`
-	MaxRecipientsPerMessage int    `json:"max_recipients_per_message"`
-	MaxLineLength           int    `json:"max_line_length"`
-	RequireAuthForSubmission bool  `json:"require_auth_for_submission"`
-	AllowPlainAuthWithoutTLS bool  `json:"allow_plain_auth_without_tls"`
-	RequireTLSForAuth       bool   `json:"require_tls_for_auth"`
-	RequireTLSForSubmission bool   `json:"require_tls_for_submission"`
-	MaxConcurrentSessions   int    `json:"max_concurrent_sessions"`
-	ReadTimeout             time.Duration `json:"read_timeout"`
-	WriteTimeout            time.Duration `json:"write_timeout"`
-	DataTimeout             time.Duration `json:"data_timeout"`
-	TLSCertFile             string `json:"tls_cert_file"`
-	TLSKeyFile              string `json:"tls_key_file"`
-	SpamMode                SpamEnforcementMode `json:"spam_mode"`
-	DisableAuth             bool   `json:"disable_auth"`
-	ImplicitTLS             bool   `json:"implicit_tls"`
-	ListenerName            string `json:"listener_name"`
+	Hostname                 string              `json:"hostname"`
+	MaxMessageSizeBytes      int64               `json:"max_message_size_bytes"`
+	MaxRecipientsPerMessage  int                 `json:"max_recipients_per_message"`
+	MaxLineLength            int                 `json:"max_line_length"`
+	RequireAuthForSubmission bool                `json:"require_auth_for_submission"`
+	AllowPlainAuthWithoutTLS bool                `json:"allow_plain_auth_without_tls"`
+	RequireTLSForAuth        bool                `json:"require_tls_for_auth"`
+	RequireTLSForSubmission  bool                `json:"require_tls_for_submission"`
+	MaxConcurrentSessions    int                 `json:"max_concurrent_sessions"`
+	ReadTimeout              time.Duration       `json:"read_timeout"`
+	WriteTimeout             time.Duration       `json:"write_timeout"`
+	DataTimeout              time.Duration       `json:"data_timeout"`
+	TLSCertFile              string              `json:"tls_cert_file"`
+	TLSKeyFile               string              `json:"tls_key_file"`
+	SpamMode                 SpamEnforcementMode `json:"spam_mode"`
+	DisableAuth              bool                `json:"disable_auth"`
+	ImplicitTLS              bool                `json:"implicit_tls"`
+	ListenerName             string              `json:"listener_name"`
 }
 
 // DefaultConfig returns a Config with safe defaults (inbound listener).
 func DefaultConfig() Config {
 	return Config{
-		Hostname:                  "mail.orvix.local",
-		MaxMessageSizeBytes:       25 * 1024 * 1024,
-		MaxRecipientsPerMessage:   100,
-		MaxLineLength:             1000,
-		RequireAuthForSubmission:  true,
-		AllowPlainAuthWithoutTLS:  false,
-		RequireTLSForAuth:         false,
-		RequireTLSForSubmission:   false,
-		MaxConcurrentSessions:     250,
-		ReadTimeout:               5 * time.Minute,
-		WriteTimeout:              5 * time.Minute,
-		DataTimeout:               10 * time.Minute,
-		DisableAuth:               false,
-		ImplicitTLS:               false,
-		ListenerName:              "default",
+		Hostname:                 "mail.orvix.local",
+		MaxMessageSizeBytes:      25 * 1024 * 1024,
+		MaxRecipientsPerMessage:  100,
+		MaxLineLength:            1000,
+		RequireAuthForSubmission: true,
+		AllowPlainAuthWithoutTLS: false,
+		RequireTLSForAuth:        false,
+		RequireTLSForSubmission:  false,
+		MaxConcurrentSessions:    250,
+		ReadTimeout:              5 * time.Minute,
+		WriteTimeout:             5 * time.Minute,
+		DataTimeout:              10 * time.Minute,
+		DisableAuth:              false,
+		ImplicitTLS:              false,
+		ListenerName:             "default",
 	}
 }
 
@@ -124,21 +124,21 @@ func SMTPSConfig() Config {
 
 // Session holds the state for a single SMTP connection.
 type Session struct {
-	ID           string
-	State        SessionState
-	MailFrom     string
-	Recipients   []string
-	HeloDomain   string
-	AuthUser     string
-	AuthIdentity *AuthIdentity
+	ID            string
+	State         SessionState
+	MailFrom      string
+	Recipients    []string
+	HeloDomain    string
+	AuthUser      string
+	AuthIdentity  *AuthIdentity
 	Authenticated bool
-	TLSActive    bool
-	TLSConfig    *tls.Config
-	DataBuffer   []byte
-	RemoteAddr   string
-	StartTime    time.Time
-	MessageSize  int64
-	Extensions   []string
+	TLSActive     bool
+	TLSConfig     *tls.Config
+	DataBuffer    []byte
+	RemoteAddr    string
+	StartTime     time.Time
+	MessageSize   int64
+	Extensions    []string
 }
 
 // NewSession creates a new SMTP session.

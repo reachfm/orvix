@@ -9,24 +9,24 @@ import (
 
 // Envelope represents an IMAP ENVELOPE response structure.
 type Envelope struct {
-	Date         string   // Date header
-	Subject      string   // Subject header
-	From         []*Address
-	Sender       []*Address
-	ReplyTo      []*Address
-	To           []*Address
-	Cc           []*Address
-	Bcc          []*Address
-	InReplyTo    string
-	MessageID    string
+	Date      string // Date header
+	Subject   string // Subject header
+	From      []*Address
+	Sender    []*Address
+	ReplyTo   []*Address
+	To        []*Address
+	Cc        []*Address
+	Bcc       []*Address
+	InReplyTo string
+	MessageID string
 }
 
 // Address represents an IMAP email address structure.
 type Address struct {
-	Name     string // personal name (NIL if absent)
-	Source   string // SMTP source route (obsolete, NIL)
-	Mailbox  string // local part
-	Host     string // domain
+	Name    string // personal name (NIL if absent)
+	Source  string // SMTP source route (obsolete, NIL)
+	Mailbox string // local part
+	Host    string // domain
 }
 
 // FormatEnvelope formats an Envelope into the IMAP ENVELOPE response string.

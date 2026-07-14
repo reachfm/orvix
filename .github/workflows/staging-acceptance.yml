@@ -87,6 +87,7 @@ jobs:
       - name: Build release bundle (real installer payload)
         env:
           ORVIX_RELEASE_SIGNING_KEY_PEM_B64: ${{ secrets.ORVIX_RELEASE_SIGNING_KEY_PEM_B64 }}
+          ORVIX_ALLOW_DIRTY_BUILD: '1'
         run: |
           set -euo pipefail
           # Ephemeral signing key when the repo secret is unavailable, so the

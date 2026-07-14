@@ -13,10 +13,10 @@ type VersionRecord struct {
 type UpgradeStatus string
 
 const (
-	UpgradePending   UpgradeStatus = "pending"
-	UpgradeRunning   UpgradeStatus = "running"
-	UpgradeCompleted UpgradeStatus = "completed"
-	UpgradeFailed    UpgradeStatus = "failed"
+	UpgradePending    UpgradeStatus = "pending"
+	UpgradeRunning    UpgradeStatus = "running"
+	UpgradeCompleted  UpgradeStatus = "completed"
+	UpgradeFailed     UpgradeStatus = "failed"
 	UpgradeRolledBack UpgradeStatus = "rolled_back"
 )
 
@@ -30,8 +30,8 @@ type UpgradeRecord struct {
 }
 
 type PreflightResult struct {
-	Pass    bool              `json:"pass"`
-	Checks  []PreflightCheck  `json:"checks"`
+	Pass   bool             `json:"pass"`
+	Checks []PreflightCheck `json:"checks"`
 }
 
 type PreflightCheck struct {

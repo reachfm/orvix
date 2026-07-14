@@ -10,20 +10,20 @@ import (
 )
 
 const (
-	defaultGraceDuration = 30 * 24 * time.Hour  // 30 days offline grace
-	cacheRefreshInterval = 6 * time.Hour         // attempt validation every 6h
-	cacheSecretEnv      = "ORVIX_CACHE_SECRET"
-	defaultCacheSecret  = "orvix-cache-secret-default-change-in-production"
+	defaultGraceDuration = 30 * 24 * time.Hour // 30 days offline grace
+	cacheRefreshInterval = 6 * time.Hour       // attempt validation every 6h
+	cacheSecretEnv       = "ORVIX_CACHE_SECRET"
+	defaultCacheSecret   = "orvix-cache-secret-default-change-in-production"
 )
 
 // AuthorityService manages license authority validation and caching.
 // It NEVER enforces — status only. No network calls in this foundation.
 type AuthorityService struct {
-	mu         sync.RWMutex
-	client     LicenseAuthorityClient
-	cache      *EntitlementCache
-	cachePath  string
-	cacheSecret string
+	mu           sync.RWMutex
+	client       LicenseAuthorityClient
+	cache        *EntitlementCache
+	cachePath    string
+	cacheSecret  string
 	offlineSince time.Time
 }
 

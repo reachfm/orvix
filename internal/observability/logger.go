@@ -9,10 +9,10 @@ import (
 
 // Logger handles structured event logging with optional history ring buffer.
 type Logger struct {
-	mu       sync.RWMutex
-	history  []LogEvent
-	maxSize  int
-	sink     func(LogEvent) // optional external sink (e.g., log.Printf)
+	mu      sync.RWMutex
+	history []LogEvent
+	maxSize int
+	sink    func(LogEvent) // optional external sink (e.g., log.Printf)
 }
 
 // NewLogger creates a structured logger with bounded history.

@@ -10,14 +10,14 @@ import (
 
 // Alias represents an email alias that forwards to one or more destinations.
 type Alias struct {
-	ID        uint      `json:"id"`
-	DomainID  uint      `json:"domain_id"`
-	TenantID  uint      `json:"tenant_id"`
-	FromAddr  string    `json:"from_addr"`  // full email: alias@domain
-	ToAddr    string    `json:"to_addr"`    // destination(s): comma-separated
-	Active    bool      `json:"active"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID        uint       `json:"id"`
+	DomainID  uint       `json:"domain_id"`
+	TenantID  uint       `json:"tenant_id"`
+	FromAddr  string     `json:"from_addr"` // full email: alias@domain
+	ToAddr    string     `json:"to_addr"`   // destination(s): comma-separated
+	Active    bool       `json:"active"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
 	DeletedAt *time.Time `json:"deleted_at,omitempty"`
 }
 

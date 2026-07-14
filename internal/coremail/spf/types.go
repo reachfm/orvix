@@ -6,13 +6,13 @@ import "net"
 type Result int
 
 const (
-	ResultNone     Result = iota // No SPF record found
-	ResultNeutral               // Neutral (default if no match)
-	ResultPass                  // Pass (authorized)
-	ResultFail                  // Fail (not authorized)
-	ResultSoftFail              // SoftFail (likely not authorized)
-	ResultTempError             // Temporary DNS error
-	ResultPermError             // Permanent error (malformed record)
+	ResultNone      Result = iota // No SPF record found
+	ResultNeutral                 // Neutral (default if no match)
+	ResultPass                    // Pass (authorized)
+	ResultFail                    // Fail (not authorized)
+	ResultSoftFail                // SoftFail (likely not authorized)
+	ResultTempError               // Temporary DNS error
+	ResultPermError               // Permanent error (malformed record)
 )
 
 func (r Result) String() string {
@@ -80,8 +80,8 @@ type SPFRecord struct {
 
 // Context carries the evaluation inputs and state.
 type Context struct {
-	ConnectingIP net.IP
-	HeloDomain   string
+	ConnectingIP   net.IP
+	HeloDomain     string
 	MailFromDomain string
 	// evaluatedDomains tracks include chains for loop detection.
 	evaluatedDomains map[string]bool

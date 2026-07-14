@@ -12,9 +12,9 @@ import (
 )
 
 var (
-	ErrOwnershipAlreadyVerified   = errors.New("domain ownership already verified")
-	ErrOwnershipNoTokenGenerated  = errors.New("no ownership token generated; generate one first")
-	ErrOwnershipTokenInvalid      = errors.New("TXT record not found or does not match the expected token")
+	ErrOwnershipAlreadyVerified  = errors.New("domain ownership already verified")
+	ErrOwnershipNoTokenGenerated = errors.New("no ownership token generated; generate one first")
+	ErrOwnershipTokenInvalid     = errors.New("TXT record not found or does not match the expected token")
 )
 
 type OwnershipStatus string
@@ -93,7 +93,9 @@ func (r *OwnershipRepo) Upsert(ctx context.Context, rec *DomainOwnership) error 
 	return err
 }
 
-func scanOwnership(s interface{ Scan(dest ...interface{}) error }) (*DomainOwnership, error) {
+func scanOwnership(s interface {
+	Scan(dest ...interface{}) error
+}) (*DomainOwnership, error) {
 	var o DomainOwnership
 	err := s.Scan(&o.ID, &o.DomainID, &o.TokenHash, &o.Status,
 		&o.TokenGeneratedAt, &o.TokenRotatedAt, &o.VerifiedAt, &o.LastCheckAt,

@@ -12,33 +12,33 @@ import (
 )
 
 var (
-	ErrTransferNotFound      = errors.New("ownership transfer not found")
-	ErrTransferExpired       = errors.New("ownership transfer has expired")
-	ErrTransferAlreadyUsed   = errors.New("ownership transfer already completed")
-	ErrCannotTransferToSelf  = errors.New("cannot transfer ownership to yourself")
-	ErrTargetNotMember       = errors.New("target user is not a member of this organization")
-	ErrNotCurrentOwner       = errors.New("only the current organization owner can initiate a transfer")
+	ErrTransferNotFound     = errors.New("ownership transfer not found")
+	ErrTransferExpired      = errors.New("ownership transfer has expired")
+	ErrTransferAlreadyUsed  = errors.New("ownership transfer already completed")
+	ErrCannotTransferToSelf = errors.New("cannot transfer ownership to yourself")
+	ErrTargetNotMember      = errors.New("target user is not a member of this organization")
+	ErrNotCurrentOwner      = errors.New("only the current organization owner can initiate a transfer")
 )
 
 type TransferStatus string
 
 const (
-	TransferPending  TransferStatus = "pending"
-	TransferAccepted TransferStatus = "accepted"
-	TransferExpired  TransferStatus = "expired"
+	TransferPending   TransferStatus = "pending"
+	TransferAccepted  TransferStatus = "accepted"
+	TransferExpired   TransferStatus = "expired"
 	TransferCancelled TransferStatus = "cancelled"
 )
 
 type OwnershipTransfer struct {
-	ID               uint           `json:"id"`
-	OrganizationID   uint           `json:"organization_id"`
-	FromUserID       uint           `json:"from_user_id"`
-	ToUserID         uint           `json:"to_user_id"`
-	TokenHash        string         `json:"-"`
-	Status           TransferStatus `json:"status"`
-	ExpiresAt        time.Time      `json:"expires_at"`
-	AcceptedAt       *time.Time     `json:"accepted_at,omitempty"`
-	CreatedAt        time.Time      `json:"created_at"`
+	ID             uint           `json:"id"`
+	OrganizationID uint           `json:"organization_id"`
+	FromUserID     uint           `json:"from_user_id"`
+	ToUserID       uint           `json:"to_user_id"`
+	TokenHash      string         `json:"-"`
+	Status         TransferStatus `json:"status"`
+	ExpiresAt      time.Time      `json:"expires_at"`
+	AcceptedAt     *time.Time     `json:"accepted_at,omitempty"`
+	CreatedAt      time.Time      `json:"created_at"`
 }
 
 func generateTransferToken() (raw string, hash string, err error) {
@@ -201,7 +201,9 @@ func (r *OrganizationRepo) ListOwnershipTransfers(ctx context.Context, orgID uin
 	return ts, rows.Err()
 }
 
-func scanTransfer(s interface{ Scan(dest ...interface{}) error }) (*OwnershipTransfer, error) {
+func scanTransfer(s interface {
+	Scan(dest ...interface{}) error
+}) (*OwnershipTransfer, error) {
 	var t OwnershipTransfer
 	if err := s.Scan(&t.ID, &t.OrganizationID, &t.FromUserID, &t.ToUserID, &t.TokenHash, &t.Status, &t.ExpiresAt, &t.AcceptedAt, &t.CreatedAt); err != nil {
 		if err == sql.ErrNoRows {

@@ -9,8 +9,8 @@ import (
 )
 
 type RateLimitService struct {
-	mu   sync.Mutex
-	db   *sql.DB
+	mu sync.Mutex
+	db *sql.DB
 }
 
 func NewRateLimitService(db *sql.DB) *RateLimitService {

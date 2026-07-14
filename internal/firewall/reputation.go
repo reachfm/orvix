@@ -14,11 +14,11 @@ import (
 
 // IPReputation checks sender IP reputation via AbuseIPDB.
 type IPReputation struct {
-	apiKey    string
-	client    *http.Client
-	cache     map[string]cachedResult
-	mu        sync.RWMutex
-	logger    *zap.Logger
+	apiKey string
+	client *http.Client
+	cache  map[string]cachedResult
+	mu     sync.RWMutex
+	logger *zap.Logger
 }
 
 type cachedResult struct {
@@ -29,8 +29,8 @@ type cachedResult struct {
 // AbuseIPDBResponse represents the AbuseIPDB API response.
 type AbuseIPDBResponse struct {
 	Data struct {
-		AbuseConfidenceScore int `json:"abuseConfidenceScore"`
-		TotalReports         int `json:"totalReports"`
+		AbuseConfidenceScore int    `json:"abuseConfidenceScore"`
+		TotalReports         int    `json:"totalReports"`
 		ISP                  string `json:"isp"`
 		Domain               string `json:"domain"`
 		UsageType            string `json:"usageType"`

@@ -5,9 +5,9 @@ import "time"
 type OverallStatus string
 
 const (
-	StatusHealthy  OverallStatus = "healthy"
-	StatusWarning  OverallStatus = "warning"
-	StatusFailed   OverallStatus = "failed"
+	StatusHealthy OverallStatus = "healthy"
+	StatusWarning OverallStatus = "warning"
+	StatusFailed  OverallStatus = "failed"
 )
 
 type DNSRecord struct {
@@ -41,8 +41,8 @@ type MXResult struct {
 }
 
 type MXRecord struct {
-	Host    string `json:"host"`
-	Pref    uint16 `json:"preference"`
+	Host string `json:"host"`
+	Pref uint16 `json:"preference"`
 }
 
 type AResult struct {
@@ -62,14 +62,14 @@ type PTRResult struct {
 }
 
 type DomainDNSReport struct {
-	Domain      string       `json:"domain"`
-	GeneratedAt time.Time    `json:"generatedAt"`
-	SPF         SPFResult    `json:"spf"`
-	DKIM        DKIMResult   `json:"dkim"`
-	DMARC       DMARCResult  `json:"dmarc"`
-	MX          MXResult     `json:"mx"`
-	A           AResult      `json:"a"`
-	AAAA        AAAAResult   `json:"aaaa"`
-	PTR         PTRResult    `json:"ptr"`
+	Domain      string        `json:"domain"`
+	GeneratedAt time.Time     `json:"generatedAt"`
+	SPF         SPFResult     `json:"spf"`
+	DKIM        DKIMResult    `json:"dkim"`
+	DMARC       DMARCResult   `json:"dmarc"`
+	MX          MXResult      `json:"mx"`
+	A           AResult       `json:"a"`
+	AAAA        AAAAResult    `json:"aaaa"`
+	PTR         PTRResult     `json:"ptr"`
 	Overall     OverallStatus `json:"overall"`
 }

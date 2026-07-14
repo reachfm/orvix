@@ -215,7 +215,9 @@ func (r *OrganizationRepo) ListInvitations(ctx context.Context, orgID uint) ([]O
 	return invs, rows.Err()
 }
 
-func scanInvitation(s interface{ Scan(dest ...interface{}) error }) (*OrganizationInvitation, error) {
+func scanInvitation(s interface {
+	Scan(dest ...interface{}) error
+}) (*OrganizationInvitation, error) {
 	var inv OrganizationInvitation
 	if err := s.Scan(&inv.ID, &inv.OrganizationID, &inv.InviterID, &inv.Email, &inv.TokenHash, &inv.Role, &inv.Status, &inv.ExpiresAt, &inv.AcceptedAt, &inv.RevokedAt, &inv.CreatedAt, &inv.UpdatedAt); err != nil {
 		return nil, err

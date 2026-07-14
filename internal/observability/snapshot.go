@@ -7,9 +7,9 @@ import (
 
 // EventHistory provides a bounded, concurrency-safe ring buffer of events.
 type EventHistory struct {
-	mu       sync.RWMutex
-	events   []EventEntry
-	maxSize  int
+	mu      sync.RWMutex
+	events  []EventEntry
+	maxSize int
 }
 
 // NewEventHistory creates a bounded event history buffer.

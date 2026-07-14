@@ -56,14 +56,20 @@ func (s *Server) handleMailboxQuery(ctx context.Context, mc *MethodCall, mailbox
 	}
 
 	pos := params.Position
-	if pos < 0 { pos = 0 }
-	if pos >= len(filtered) { pos = len(filtered) }
+	if pos < 0 {
+		pos = 0
+	}
+	if pos >= len(filtered) {
+		pos = len(filtered)
+	}
 	limit := 500
 	if params.Limit != nil && *params.Limit > 0 && *params.Limit < limit {
 		limit = *params.Limit
 	}
 	end := pos + limit
-	if end > len(filtered) { end = len(filtered) }
+	if end > len(filtered) {
+		end = len(filtered)
+	}
 	page := filtered[pos:end]
 
 	ids := make([]string, len(page))

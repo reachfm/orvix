@@ -307,11 +307,17 @@ func (s *Service) loadCertificatesLocked(ctx context.Context) ([]TLSCertificate,
 		if err := rows.Scan(&c.ID, &c.Name, &c.CommonName, &sans, &c.Issuer, &c.SerialNumber, &notBefore, &notAfter, &fingerprint, &status); err != nil {
 			return nil, err
 		}
-		if notBefore.Valid { c.NotBefore = notBefore.Time }
-		if notAfter.Valid { c.NotAfter = notAfter.Time }
+		if notBefore.Valid {
+			c.NotBefore = notBefore.Time
+		}
+		if notAfter.Valid {
+			c.NotAfter = notAfter.Time
+		}
 		c.FingerprintSHA256 = fingerprint
 		c.Status = CertStatus(status)
-		if sans != "" { c.SANs = strings.Split(sans, ",") }
+		if sans != "" {
+			c.SANs = strings.Split(sans, ",")
+		}
 		c.DaysRemaining = daysUntil(c.NotAfter)
 		certs = append(certs, c)
 	}
@@ -336,10 +342,14 @@ func (s *Service) certsFromFile(ctx context.Context) ([]TLSCertificate, error) {
 }
 
 func (s *Service) scanConfiguredCerts(ctx context.Context) ([]TLSCertificate, error) {
-	if s.cfg == nil { return nil, nil }
+	if s.cfg == nil {
+		return nil, nil
+	}
 	certPath := s.cfg.GetCertPath()
 	keyPath := s.cfg.GetKeyPath()
-	if certPath == "" { return nil, nil }
+	if certPath == "" {
+		return nil, nil
+	}
 
 	cert, err := parseCertificateFile(certPath, keyPath)
 	if err != nil {
@@ -358,8 +368,12 @@ func (s *Service) ValidateCertificate(ctx context.Context, id string) (*CertVali
 	defer s.mu.Unlock()
 
 	cert, err := s.getCertByID(ctx, id)
-	if err != nil { return nil, err }
-	if cert == nil { return nil, fmt.Errorf("certificate not found") }
+	if err != nil {
+		return nil, err
+	}
+	if cert == nil {
+		return nil, fmt.Errorf("certificate not found")
+	}
 
 	result := &CertValidationResult{Valid: true}
 
@@ -439,10 +453,14 @@ func (s *Service) CheckExpiration(ctx context.Context) ([]TLSCertificate, error)
 	defer s.mu.Unlock()
 
 	certs, err := s.loadAllLocked(ctx)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 
 	for i, c := range certs {
-		if c.NotAfter.IsZero() { continue }
+		if c.NotAfter.IsZero() {
+			continue
+		}
 		remaining := time.Until(c.NotAfter)
 		days := int(remaining.Hours() / 24)
 
@@ -528,7 +546,9 @@ func (s *Service) GetRuntimeTLSStatus(ctx context.Context) []RuntimeTLSStatus {
 }
 
 func tlsMode(enabled bool) string {
-	if enabled { return "required" }
+	if enabled {
+		return "required"
+	}
 	return "disabled"
 }
 
@@ -536,7 +556,9 @@ func tlsMode(enabled bool) string {
 
 func (s *Service) getCertByID(ctx context.Context, id string) (*TLSCertificate, error) {
 	for i := range s.certs {
-		if s.certs[i].ID == id { return &s.certs[i], nil }
+		if s.certs[i].ID == id {
+			return &s.certs[i], nil
+		}
 	}
 	// Try from DB.
 	row := s.db.QueryRowContext(ctx,
@@ -547,22 +569,34 @@ func (s *Service) getCertByID(ctx context.Context, id string) (*TLSCertificate, 
 	var notBefore, notAfter sql.NullTime
 	var fingerprint, status string
 	err := row.Scan(&c.ID, &c.Name, &c.CommonName, &sans, &c.Issuer, &c.SerialNumber, &notBefore, &notAfter, &fingerprint, &status)
-	if err != nil { return nil, nil }
-	if notBefore.Valid { c.NotBefore = notBefore.Time }
-	if notAfter.Valid { c.NotAfter = notAfter.Time }
+	if err != nil {
+		return nil, nil
+	}
+	if notBefore.Valid {
+		c.NotBefore = notBefore.Time
+	}
+	if notAfter.Valid {
+		c.NotAfter = notAfter.Time
+	}
 	c.FingerprintSHA256 = fingerprint
 	c.Status = CertStatus(status)
-	if sans != "" { c.SANs = strings.Split(sans, ",") }
+	if sans != "" {
+		c.SANs = strings.Split(sans, ",")
+	}
 	return &c, nil
 }
 
 func (s *Service) loadAllLocked(ctx context.Context) ([]TLSCertificate, error) {
-	if len(s.certs) > 0 { return s.certs, nil }
+	if len(s.certs) > 0 {
+		return s.certs, nil
+	}
 	return s.loadCertificatesLocked(ctx)
 }
 
 func (s *Service) saveCert(ctx context.Context, c *TLSCertificate) {
-	if s.db == nil { return }
+	if s.db == nil {
+		return
+	}
 	q := s.dialect.Upsert(
 		"tls_certificates",
 		[]string{"id", "name", "common_name", "sans", "issuer", "serial_number", "not_before", "not_after", "fingerprint_sha256", "status", "created_at", "updated_at"},
@@ -577,12 +611,18 @@ func (s *Service) saveCert(ctx context.Context, c *TLSCertificate) {
 
 func parseCertificateFile(certPath, keyPath string) (*TLSCertificate, error) {
 	certData, err := os.ReadFile(certPath)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	block, _ := pem.Decode(certData)
-	if block == nil { return nil, fmt.Errorf("failed to decode PEM") }
+	if block == nil {
+		return nil, fmt.Errorf("failed to decode PEM")
+	}
 
 	x509Cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 
 	fingerprint := sha256.Sum256(block.Bytes)
 
@@ -616,7 +656,9 @@ func parseCertificateFile(certPath, keyPath string) (*TLSCertificate, error) {
 }
 
 func formatSerial(serial *big.Int) string {
-	if serial == nil { return "" }
+	if serial == nil {
+		return ""
+	}
 	return fmt.Sprintf("%x", serial)
 }
 

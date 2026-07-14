@@ -6,29 +6,29 @@ import "time"
 type BounceType string
 
 const (
-	BounceUndetermined   BounceType = "undetermined"
-	BounceUserUnknown    BounceType = "user_unknown"
-	BounceMailboxFull    BounceType = "mailbox_full"
-	BounceMessageTooBig  BounceType = "message_too_big"
-	BounceRelayDenied    BounceType = "relay_denied"
-	BounceSpamBlocked    BounceType = "spam_blocked"
-	BounceTimeout        BounceType = "timeout"
-	BounceUnavailable    BounceType = "unavailable"
-	BounceConfigError    BounceType = "config_error"
-	BounceSystemError    BounceType = "system_error"
+	BounceUndetermined  BounceType = "undetermined"
+	BounceUserUnknown   BounceType = "user_unknown"
+	BounceMailboxFull   BounceType = "mailbox_full"
+	BounceMessageTooBig BounceType = "message_too_big"
+	BounceRelayDenied   BounceType = "relay_denied"
+	BounceSpamBlocked   BounceType = "spam_blocked"
+	BounceTimeout       BounceType = "timeout"
+	BounceUnavailable   BounceType = "unavailable"
+	BounceConfigError   BounceType = "config_error"
+	BounceSystemError   BounceType = "system_error"
 )
 
 // BounceEvent represents a delivery failure that may generate a bounce.
 type BounceEvent struct {
-	QueueEntryID uint      `json:"queue_entry_id"`
-	FromAddress  string    `json:"from_address"`
-	ToAddress    string    `json:"to_address"`
+	QueueEntryID uint       `json:"queue_entry_id"`
+	FromAddress  string     `json:"from_address"`
+	ToAddress    string     `json:"to_address"`
 	BounceType   BounceType `json:"bounce_type"`
-	StatusCode   int       `json:"status_code"`
-	StatusMsg    string    `json:"status_msg"`
-	TempFail     bool      `json:"temp_fail"`
-	AttemptCount int       `json:"attempt_count"`
-	Timestamp    time.Time `json:"timestamp"`
+	StatusCode   int        `json:"status_code"`
+	StatusMsg    string     `json:"status_msg"`
+	TempFail     bool       `json:"temp_fail"`
+	AttemptCount int        `json:"attempt_count"`
+	Timestamp    time.Time  `json:"timestamp"`
 }
 
 // ClassifyBounce determines the bounce type from an SMTP response.

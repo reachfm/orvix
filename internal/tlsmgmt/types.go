@@ -5,10 +5,10 @@ import "time"
 type CertStatus string
 
 const (
-	CertActive   CertStatus = "active"
-	CertWarning  CertStatus = "warning"
-	CertExpired  CertStatus = "expired"
-	CertInvalid  CertStatus = "invalid"
+	CertActive  CertStatus = "active"
+	CertWarning CertStatus = "warning"
+	CertExpired CertStatus = "expired"
+	CertInvalid CertStatus = "invalid"
 )
 
 type TLSCertificate struct {
@@ -30,21 +30,21 @@ type TLSCertificate struct {
 }
 
 type CertValidationResult struct {
-	Valid       bool     `json:"valid"`
-	Errors      []string `json:"errors,omitempty"`
-	CommonName  string   `json:"commonName,omitempty"`
-	SANs        []string `json:"sans,omitempty"`
-	Issuer      string   `json:"issuer,omitempty"`
-	NotAfter    string   `json:"notAfter,omitempty"`
-	DaysLeft    int      `json:"daysLeft"`
+	Valid      bool     `json:"valid"`
+	Errors     []string `json:"errors,omitempty"`
+	CommonName string   `json:"commonName,omitempty"`
+	SANs       []string `json:"sans,omitempty"`
+	Issuer     string   `json:"issuer,omitempty"`
+	NotAfter   string   `json:"notAfter,omitempty"`
+	DaysLeft   int      `json:"daysLeft"`
 }
 
 type RuntimeTLSStatus struct {
-	Protocol    string `json:"protocol"`
-	TLSEnabled  bool   `json:"tlsEnabled"`
-	TLSMode     string `json:"tlsMode"` // "disabled", "opportunistic", "required"
-	CertName    string `json:"certName,omitempty"`
-	Address     string `json:"address"`
+	Protocol   string `json:"protocol"`
+	TLSEnabled bool   `json:"tlsEnabled"`
+	TLSMode    string `json:"tlsMode"` // "disabled", "opportunistic", "required"
+	CertName   string `json:"certName,omitempty"`
+	Address    string `json:"address"`
 }
 
 type ReloadResult struct {

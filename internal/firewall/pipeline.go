@@ -23,17 +23,17 @@ type Layer interface {
 
 // EmailContext contains metadata about an inbound email.
 type EmailContext struct {
-	MessageID  string
-	SenderIP   string
-	SenderDomain string
-	Recipient  string
-	Subject    string
-	Body       string
+	MessageID      string
+	SenderIP       string
+	SenderDomain   string
+	Recipient      string
+	Subject        string
+	Body           string
 	HasAttachments bool
-	SPFResult  string
-	DKIMResult string
-	DMARCResult string
-	ReceivedAt time.Time
+	SPFResult      string
+	DKIMResult     string
+	DMARCResult    string
+	ReceivedAt     time.Time
 }
 
 // NewPipeline creates a new firewall pipeline.

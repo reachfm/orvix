@@ -59,10 +59,10 @@ func (r *NetResolver) LookupMX(ctx context.Context, domain string) ([]*net.MX, e
 
 // FakeResolverEntry holds fake DNS data for a domain.
 type FakeResolverEntry struct {
-	TXT   []string
-	A     []string // IP strings
-	AAAA  []string // IP strings
-	MX    []string // domain names
+	TXT  []string
+	A    []string // IP strings
+	AAAA []string // IP strings
+	MX   []string // domain names
 }
 
 // FakeResolver implements DNSResolver with in-memory data.

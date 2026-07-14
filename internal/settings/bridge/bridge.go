@@ -130,12 +130,12 @@ func (b *Bridge) Apply(ctx context.Context) (summary Summary, err error) {
 		b.applied = append(b.applied, key)
 	}
 	return Summary{
-		Loaded:    len(b.loaded),
-		Applied:   len(b.applied),
-		Pending:   len(b.pending),
-		LoadedAt:  b.loadedAt,
-		AppliedKeys:   append([]string(nil), b.applied...),
-		PendingKeys:   append([]string(nil), b.pending...),
+		Loaded:      len(b.loaded),
+		Applied:     len(b.applied),
+		Pending:     len(b.pending),
+		LoadedAt:    b.loadedAt,
+		AppliedKeys: append([]string(nil), b.applied...),
+		PendingKeys: append([]string(nil), b.pending...),
 	}, rows.Err()
 }
 

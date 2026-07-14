@@ -4,8 +4,8 @@ import "sync"
 
 // HealthChecker provides system health checks.
 type HealthChecker struct {
-	mu       sync.RWMutex
-	checks   map[string]HealthCheck
+	mu     sync.RWMutex
+	checks map[string]HealthCheck
 }
 
 // NewHealthChecker creates a health checker.
@@ -46,12 +46,12 @@ func (h *HealthChecker) Report() *HealthReport {
 
 // HealthCheckNames returns standard health check names.
 const (
-	HealthCheckSMTPReceive     = "smtp_receive"
-	HealthCheckQueue           = "queue"
-	HealthCheckMailStore       = "mailstore"
-	HealthCheckDNSResolver     = "dns_resolver"
-	HealthCheckDKIMConfig      = "dkim_config"
-	HealthCheckDatabase        = "database"
+	HealthCheckSMTPReceive = "smtp_receive"
+	HealthCheckQueue       = "queue"
+	HealthCheckMailStore   = "mailstore"
+	HealthCheckDNSResolver = "dns_resolver"
+	HealthCheckDKIMConfig  = "dkim_config"
+	HealthCheckDatabase    = "database"
 )
 
 // Built-in check helpers.

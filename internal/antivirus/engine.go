@@ -139,12 +139,12 @@ type Decision struct {
 // — the underlying clamav.Scanner performs per-call
 // dialing.
 type Engine struct {
-	cfg          Config
-	policy       atomic.Pointer[Policy]
-	scanner      *clamav.Scanner
-	logger       *zap.Logger
-	observ       *observability.Observability
-	auditStore   *audit.Store
+	cfg        Config
+	policy     atomic.Pointer[Policy]
+	scanner    *clamav.Scanner
+	logger     *zap.Logger
+	observ     *observability.Observability
+	auditStore *audit.Store
 
 	// runtimeEnforced is set true by the SMTP receiver
 	// after the engine is successfully attached to
@@ -330,10 +330,10 @@ func (e *Engine) Scan(ctx context.Context, rfc822 []byte, messageID string) Deci
 	switch policy.OnInfected {
 	case "quarantine":
 		dec = Decision{
-			Action:   ActionQuarantine,
-			Virus:    res.Virus,
-			Reason:   "infected: " + res.Virus,
-			Filename: res.Filename,
+			Action:    ActionQuarantine,
+			Virus:     res.Virus,
+			Reason:    "infected: " + res.Virus,
+			Filename:  res.Filename,
 			LatencyMS: latency,
 		}
 		if e.observ != nil {
@@ -341,10 +341,10 @@ func (e *Engine) Scan(ctx context.Context, rfc822 []byte, messageID string) Deci
 		}
 	case "tag":
 		dec = Decision{
-			Action:   ActionTag,
-			Virus:    res.Virus,
-			Reason:   "tag-only: " + res.Virus,
-			Filename: res.Filename,
+			Action:    ActionTag,
+			Virus:     res.Virus,
+			Reason:    "tag-only: " + res.Virus,
+			Filename:  res.Filename,
 			LatencyMS: latency,
 		}
 		if e.observ != nil {
@@ -352,10 +352,10 @@ func (e *Engine) Scan(ctx context.Context, rfc822 []byte, messageID string) Deci
 		}
 	default: // reject (default policy)
 		dec = Decision{
-			Action:   ActionReject,
-			Virus:    res.Virus,
-			Reason:   "infected: " + res.Virus,
-			Filename: res.Filename,
+			Action:    ActionReject,
+			Virus:     res.Virus,
+			Reason:    "infected: " + res.Virus,
+			Filename:  res.Filename,
 			LatencyMS: latency,
 		}
 		if e.observ != nil {
@@ -478,20 +478,20 @@ func (e *Engine) Counts() (scanned, infected int64) {
 // claim runtime_enforced=true when the SMTP receiver
 // has not wired this Engine into the receive path.
 type Status struct {
-	EngineConfigured bool   `json:"engine_configured"`
-	EngineEnabled     bool   `json:"engine_enabled"`
-	EngineReachable   bool   `json:"engine_reachable"`
-	EngineActive      bool   `json:"engine_active"`
-	ScannerHost       string `json:"scanner_host"`
-	ScannerPort       int    `json:"scanner_port"`
-	PolicyOnInfected  string `json:"policy_on_infected"`
+	EngineConfigured    bool   `json:"engine_configured"`
+	EngineEnabled       bool   `json:"engine_enabled"`
+	EngineReachable     bool   `json:"engine_reachable"`
+	EngineActive        bool   `json:"engine_active"`
+	ScannerHost         string `json:"scanner_host"`
+	ScannerPort         int    `json:"scanner_port"`
+	PolicyOnInfected    string `json:"policy_on_infected"`
 	PolicyOnUnavailable string `json:"policy_on_scanner_unavailable"`
-	TimeoutMS         int    `json:"timeout_ms"`
-	RuntimeEnforced   bool   `json:"runtime_enforced"`
-	LastError         string `json:"last_error"`
-	LastErrorAt       string `json:"last_error_at"`
-	Scanned           int64  `json:"scanned"`
-	Infected          int64  `json:"infected"`
+	TimeoutMS           int    `json:"timeout_ms"`
+	RuntimeEnforced     bool   `json:"runtime_enforced"`
+	LastError           string `json:"last_error"`
+	LastErrorAt         string `json:"last_error_at"`
+	Scanned             int64  `json:"scanned"`
+	Infected            int64  `json:"infected"`
 }
 
 // Snapshot returns a status snapshot suitable for the
@@ -507,19 +507,19 @@ func (e *Engine) Snapshot(ctx context.Context) Status {
 	reachable := e.Reachable(ctx) == nil
 	lastErr, lastErrAt := e.LastError()
 	out := Status{
-		EngineConfigured:     e.cfg.Enabled,
-		EngineEnabled:         e.cfg.Enabled,
-		EngineReachable:       reachable,
-		EngineActive:          reachable && e.cfg.Enabled,
-		ScannerHost:           e.cfg.Host,
-		ScannerPort:           e.cfg.Port,
-		PolicyOnInfected:      policy.OnInfected,
-		PolicyOnUnavailable:   policy.OnScannerUnavailable,
-		TimeoutMS:             policy.TimeoutMS,
-		RuntimeEnforced:       e.RuntimeEnforced(),
-		LastError:             lastErr,
-		Scanned:               scanned,
-		Infected:              infected,
+		EngineConfigured:    e.cfg.Enabled,
+		EngineEnabled:       e.cfg.Enabled,
+		EngineReachable:     reachable,
+		EngineActive:        reachable && e.cfg.Enabled,
+		ScannerHost:         e.cfg.Host,
+		ScannerPort:         e.cfg.Port,
+		PolicyOnInfected:    policy.OnInfected,
+		PolicyOnUnavailable: policy.OnScannerUnavailable,
+		TimeoutMS:           policy.TimeoutMS,
+		RuntimeEnforced:     e.RuntimeEnforced(),
+		LastError:           lastErr,
+		Scanned:             scanned,
+		Infected:            infected,
 	}
 	if !lastErrAt.IsZero() {
 		out.LastErrorAt = lastErrAt.Format(time.RFC3339)

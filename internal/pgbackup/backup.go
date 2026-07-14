@@ -29,23 +29,23 @@ type BackupManifest struct {
 }
 
 type BackupConfig struct {
-	Host         string
-	Port         string
-	Database     string
-	User         string
-	Password     string
-	OutputDir    string
-	AppVersion   string
+	Host          string
+	Port          string
+	Database      string
+	User          string
+	Password      string
+	OutputDir     string
+	AppVersion    string
 	SchemaVersion string
 	EncryptionKey string
-	Timeout      time.Duration
+	Timeout       time.Duration
 }
 
 func DefaultConfig() BackupConfig {
 	return BackupConfig{
-		Host:     "127.0.0.1",
-		Port:     "5432",
-		Timeout:  5 * time.Minute,
+		Host:      "127.0.0.1",
+		Port:      "5432",
+		Timeout:   5 * time.Minute,
 		OutputDir: "/var/backups/orvix/pg",
 	}
 }

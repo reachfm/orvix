@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	_ "modernc.org/sqlite"
 	"github.com/orvix/orvix/internal/config"
 	"go.uber.org/zap"
+	_ "modernc.org/sqlite"
 )
 
 func jsonMarshal(v any) ([]byte, error) { return json.Marshal(v) }

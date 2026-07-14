@@ -18,13 +18,13 @@ const (
 // Domain represents a mail domain hosted by Orvix.
 // Enterprise fields support multi-tenant, reseller, licensing, and abuse tracking.
 type Domain struct {
-	ID           uint         `json:"id"`
-	Name         string       `json:"name"`
-	TenantID     uint         `json:"tenant_id"`
-	ResellerID   uint         `json:"reseller_id,omitempty"`
-	Status       DomainStatus `json:"status"`
-	Plan         string       `json:"plan"`
-	Description  string       `json:"description,omitempty"`
+	ID          uint         `json:"id"`
+	Name        string       `json:"name"`
+	TenantID    uint         `json:"tenant_id"`
+	ResellerID  uint         `json:"reseller_id,omitempty"`
+	Status      DomainStatus `json:"status"`
+	Plan        string       `json:"plan"`
+	Description string       `json:"description,omitempty"`
 
 	// Quota limits (0 = unlimited at this level, inherits from tenant/plan).
 	MaxMailboxes int   `json:"max_mailboxes"`
@@ -32,20 +32,20 @@ type Domain struct {
 	MaxQuotaMB   int64 `json:"max_quota_mb"`
 
 	// Enterprise features.
-	DKIMEnabled       bool   `json:"dkim_enabled"`
-	DKIMSelector      string `json:"dkim_selector,omitempty"`
-	DMARCEnabled      bool   `json:"dmarc_enabled"`
-	MTASTSEnabled     bool   `json:"mtasts_enabled"`
-	CatchallAddress   string `json:"catchall_address,omitempty"`
+	DKIMEnabled     bool   `json:"dkim_enabled"`
+	DKIMSelector    string `json:"dkim_selector,omitempty"`
+	DMARCEnabled    bool   `json:"dmarc_enabled"`
+	MTASTSEnabled   bool   `json:"mtasts_enabled"`
+	CatchallAddress string `json:"catchall_address,omitempty"`
 
 	// Abuse tracking.
 	AbuseContact string `json:"abuse_contact,omitempty"`
 
 	// Metadata.
-	Labels       string    `json:"labels,omitempty"` // comma-separated for reseller categorization
-	MailboxCount int       `json:"mailbox_count,omitempty"` // cached count
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	Labels       string     `json:"labels,omitempty"`        // comma-separated for reseller categorization
+	MailboxCount int        `json:"mailbox_count,omitempty"` // cached count
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 	DeletedAt    *time.Time `json:"deleted_at,omitempty"`
 }
 

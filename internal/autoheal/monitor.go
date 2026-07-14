@@ -31,11 +31,11 @@ type HealthCheck struct {
 
 // Monitor runs health checks at regular intervals.
 type Monitor struct {
-	checks   []HealthCheck
-	logger   *zap.Logger
-	db       *gorm.DB
-	mu       sync.Mutex
-	cancel   context.CancelFunc
+	checks []HealthCheck
+	logger *zap.Logger
+	db     *gorm.DB
+	mu     sync.Mutex
+	cancel context.CancelFunc
 }
 
 // NewMonitor creates a new health monitor.

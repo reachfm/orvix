@@ -76,7 +76,7 @@ func TestGeneratorDKIMUsesProvidedPubKey(t *testing.T) {
 	g := NewGenerator()
 	plan, err := g.Generate(Inputs{
 		Domain: "example.com", MailHost: "mail.example.com",
-		ServerIPv4: "8.8.8.8",
+		ServerIPv4:   "8.8.8.8",
 		DKIMSelector: "orvix",
 		DKIMPubKey:   "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArealpubkey123",
 	})

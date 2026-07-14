@@ -7,8 +7,8 @@ import (
 )
 
 type SignalService struct {
-	db      *sql.DB
-	rlSvc   *RateLimitService
+	db    *sql.DB
+	rlSvc *RateLimitService
 }
 
 func NewSignalService(db *sql.DB, rlSvc *RateLimitService) *SignalService {

@@ -16,8 +16,8 @@ import (
 )
 
 var (
-	ErrLicenseExpired = errors.New("license has expired")
-	ErrInvalidLicense = errors.New("invalid license key")
+	ErrLicenseExpired   = errors.New("license has expired")
+	ErrInvalidLicense   = errors.New("invalid license key")
 	ErrHardwareMismatch = errors.New("hardware fingerprint mismatch")
 )
 
@@ -115,10 +115,10 @@ func (v *Validator) offlineValidate(tokenString string) (*Claims, Tier, error) {
 	tier := TierSMB
 
 	var lic struct {
-		KeyHash string
-		Tier    string
+		KeyHash   string
+		Tier      string
 		ExpiresAt time.Time
-		Active  bool
+		Active    bool
 	}
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(tokenString)))
 
@@ -238,16 +238,16 @@ func (v *Validator) Status() StatusReport {
 	// cheaply is check the expiry.
 	if time.Now().After(lic.ExpiresAt) {
 		return StatusReport{
-			Status:     StatusExpired,
-			Tier:       lic.Tier,
-			ExpiresAt:  lic.ExpiresAt.UTC().Format(time.RFC3339),
-			Reason:     "license expired; renew or replace",
+			Status:    StatusExpired,
+			Tier:      lic.Tier,
+			ExpiresAt: lic.ExpiresAt.UTC().Format(time.RFC3339),
+			Reason:    "license expired; renew or replace",
 		}
 	}
 	return StatusReport{
-		Status:     StatusValid,
-		Tier:       lic.Tier,
-		ExpiresAt:  lic.ExpiresAt.UTC().Format(time.RFC3339),
+		Status:    StatusValid,
+		Tier:      lic.Tier,
+		ExpiresAt: lic.ExpiresAt.UTC().Format(time.RFC3339),
 	}
 }
 

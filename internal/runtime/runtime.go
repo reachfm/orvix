@@ -31,17 +31,17 @@ import (
 // field is a primitive, an int64, a small struct, or a string with
 // no embedded secret.
 type Telemetry struct {
-	Status        string             `json:"status"`        // "ok" | "degraded" | "unknown"
-	Version       string             `json:"version"`       // build version
-	Commit        string             `json:"commit"`        // build commit SHA, or "not reported"
-	BuildTime     string             `json:"build_time"`    // build timestamp string, or "development"
-	GoVersion     string             `json:"go_version"`    // runtime.Version()
-	Arch          string             `json:"arch"`          // GOOS/GOARCH
-	Hostname      string             `json:"hostname"`      // os.Hostname()
+	Status        string             `json:"status"`     // "ok" | "degraded" | "unknown"
+	Version       string             `json:"version"`    // build version
+	Commit        string             `json:"commit"`     // build commit SHA, or "not reported"
+	BuildTime     string             `json:"build_time"` // build timestamp string, or "development"
+	GoVersion     string             `json:"go_version"` // runtime.Version()
+	Arch          string             `json:"arch"`       // GOOS/GOARCH
+	Hostname      string             `json:"hostname"`   // os.Hostname()
 	UptimeSeconds int64              `json:"uptime_seconds"`
 	StartedAt     string             `json:"started_at,omitempty"` // RFC3339
 	Services      map[string]Service `json:"services"`
-	Listeners     []ListenerEntry    `json:"listeners,omitempty"`   // stable listener array
+	Listeners     []ListenerEntry    `json:"listeners,omitempty"` // stable listener array
 	Capacity      Capacity           `json:"capacity"`
 	Queue         QueueCounts        `json:"queue"`
 	License       LicensePosture     `json:"license"`
@@ -51,11 +51,11 @@ type Telemetry struct {
 // ListenerEntry is a stable representation of a protocol listener
 // for the admin services and runtime pages.
 type ListenerEntry struct {
-	Protocol string `json:"protocol"`          // "smtp", "imap", "pop3", "jmap"
-	Kind     string `json:"kind"`              // listener kind from registry
+	Protocol string `json:"protocol"` // "smtp", "imap", "pop3", "jmap"
+	Kind     string `json:"kind"`     // listener kind from registry
 	Port     int    `json:"port"`
-	Status   string `json:"status"`            // "ok" | "warn" | "fail" | "unknown"
-	State    string `json:"state"`             // "active" | "skipped" | "degraded" | "failed" | "unknown"
+	Status   string `json:"status"` // "ok" | "warn" | "fail" | "unknown"
+	State    string `json:"state"`  // "active" | "skipped" | "degraded" | "failed" | "unknown"
 	Detail   string `json:"detail,omitempty"`
 }
 
@@ -63,8 +63,8 @@ type ListenerEntry struct {
 // dashboard can show the listening port alongside the status without
 // any client-side mapping table.
 type Service struct {
-	Status string `json:"status"` // "ok" | "warn" | "fail" | "unknown"
-	State  string `json:"state,omitempty"`  // normalized listener state: active|skipped|degraded|failed|unknown
+	Status string `json:"status"`          // "ok" | "warn" | "fail" | "unknown"
+	State  string `json:"state,omitempty"` // normalized listener state: active|skipped|degraded|failed|unknown
 	Detail string `json:"detail"`
 	Port   int    `json:"port,omitempty"`
 }
@@ -111,13 +111,13 @@ type QueueCounts struct {
 //	"invalid"  — license validation was attempted and failed
 //	"unknown"  — state cannot be determined
 type LicensePosture struct {
-	Mode             string `json:"mode"`               // "online" | "offline" | "missing"
-	PublicKeyLoaded  bool   `json:"public_key_loaded"`
-	PublicKeyState   string `json:"public_key_state"`   // "missing" | "invalid" | "loaded"
-	ValidationState  string `json:"validation_state"`   // "offline" | "valid" | "invalid" | "unknown"
-	Status           string `json:"status"`             // "ok" | "warn" | "missing"
-	Tier             string `json:"tier,omitempty"`     // tier from the most recent license row, if any
-	ExpiresAt        string `json:"expires_at,omitempty"`
+	Mode            string `json:"mode"` // "online" | "offline" | "missing"
+	PublicKeyLoaded bool   `json:"public_key_loaded"`
+	PublicKeyState  string `json:"public_key_state"` // "missing" | "invalid" | "loaded"
+	ValidationState string `json:"validation_state"` // "offline" | "valid" | "invalid" | "unknown"
+	Status          string `json:"status"`           // "ok" | "warn" | "missing"
+	Tier            string `json:"tier,omitempty"`   // tier from the most recent license row, if any
+	ExpiresAt       string `json:"expires_at,omitempty"`
 }
 
 // Warning is a single server-rolled-up warning. The Code is a stable
@@ -141,12 +141,12 @@ type Inputs struct {
 	GoVersion   string
 	Arch        string
 	StartedAt   time.Time
-	DataPath    string             // disk path to stat (label falls back to "data" if empty)
+	DataPath    string                 // disk path to stat (label falls back to "data" if empty)
 	HostnameFn  func() (string, error) // defaults to os.Hostname
-	DiskFn      DiskUsageFn        // defaults to syscall-based statfs
-	DBPing      func() error       // nil = unknown
-	QueueCounts QueueCounts        // zero = unknown
-	License     LicensePosture     // zero = unknown
+	DiskFn      DiskUsageFn            // defaults to syscall-based statfs
+	DBPing      func() error           // nil = unknown
+	QueueCounts QueueCounts            // zero = unknown
+	License     LicensePosture         // zero = unknown
 	// ListenerSnapshot is the current state of protocol listeners,
 	// populated by the coremail runtime module at startup. When
 	// nil or empty, listeners are reported as "unknown" with the

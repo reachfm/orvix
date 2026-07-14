@@ -20,19 +20,19 @@ const (
 
 // Mailbox represents an email mailbox (user account) on the Orvix server.
 type Mailbox struct {
-	ID        uint          `json:"id"`
-	DomainID  uint          `json:"domain_id"`
-	TenantID  uint          `json:"tenant_id"`
-	LocalPart string        `json:"local_part"`
-	Email     string        `json:"email"`
-	Name      string        `json:"name"`
+	ID        uint   `json:"id"`
+	DomainID  uint   `json:"domain_id"`
+	TenantID  uint   `json:"tenant_id"`
+	LocalPart string `json:"local_part"`
+	Email     string `json:"email"`
+	Name      string `json:"name"`
 
 	// Authentication.
-	PasswordHash     string     `json:"-"`
-	AuthScheme      AuthScheme `json:"auth_scheme"`
-	MFAEnabled      bool       `json:"mfa_enabled"`
-	MFASecret       string     `json:"-"`
-	AppPasswords    string     `json:"-"`
+	PasswordHash string     `json:"-"`
+	AuthScheme   AuthScheme `json:"auth_scheme"`
+	MFAEnabled   bool       `json:"mfa_enabled"`
+	MFASecret    string     `json:"-"`
+	AppPasswords string     `json:"-"`
 
 	// Status.
 	Status MailboxStatus `json:"status"`
@@ -43,10 +43,10 @@ type Mailbox struct {
 	MsgCount  int   `json:"msg_count"`  // current message count
 
 	// Enterprise.
-	IsAdmin    bool   `json:"is_admin"`
-	IsForwarder bool  `json:"is_forwarder"`
-	ForwardTo  string `json:"forward_to,omitempty"`
-	Labels     string `json:"labels,omitempty"`
+	IsAdmin     bool   `json:"is_admin"`
+	IsForwarder bool   `json:"is_forwarder"`
+	ForwardTo   string `json:"forward_to,omitempty"`
+	Labels      string `json:"labels,omitempty"`
 
 	// Protocol access.
 	AllowSMTP    bool `json:"allow_smtp"`
@@ -56,15 +56,15 @@ type Mailbox struct {
 	AllowWebmail bool `json:"allow_webmail"`
 
 	// Abuse prevention.
-	SendLimitPerHour  int `json:"send_limit_per_hour"`
-	RecvLimitPerHour  int `json:"recv_limit_per_hour"`
+	SendLimitPerHour int `json:"send_limit_per_hour"`
+	RecvLimitPerHour int `json:"recv_limit_per_hour"`
 
 	// Metadata.
-	LastLogin  *time.Time `json:"last_login,omitempty"`
-	LastIP     string     `json:"last_ip,omitempty"`
-	CreatedAt  time.Time  `json:"created_at"`
-	UpdatedAt  time.Time  `json:"updated_at"`
-	DeletedAt  *time.Time `json:"deleted_at,omitempty"`
+	LastLogin *time.Time `json:"last_login,omitempty"`
+	LastIP    string     `json:"last_ip,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+	DeletedAt *time.Time `json:"deleted_at,omitempty"`
 }
 
 // GetID returns the mailbox ID (implements mailboxIfce for IMAP authenticator).

@@ -22,19 +22,19 @@ const (
 type circuitState int
 
 const (
-	circuitClosed   circuitState = iota
+	circuitClosed circuitState = iota
 	circuitOpen
 	circuitHalfOpen
 )
 
 type HTTPAuthorityClient struct {
-	baseURL        string
-	httpClient     *http.Client
-	testMode       bool
-	mu             sync.Mutex
-	failures       int
-	state          circuitState
-	lastFailure    time.Time
+	baseURL     string
+	httpClient  *http.Client
+	testMode    bool
+	mu          sync.Mutex
+	failures    int
+	state       circuitState
+	lastFailure time.Time
 }
 
 type HTTPAuthorityConfig struct {

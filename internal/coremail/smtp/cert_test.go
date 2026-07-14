@@ -21,14 +21,14 @@ import (
 // ── Cross-Protocol Helpers ────────────────────────────────
 
 type certEnv struct {
-	db        *sql.DB
-	eng       *coremail.Engine
-	ms        *storage.MailStore
-	qe        *queue.QueueEngine
-	smtpAddr  string
-	imapAddr  string
-	pop3Addr  string
-	smtpRcv   *Receiver
+	db       *sql.DB
+	eng      *coremail.Engine
+	ms       *storage.MailStore
+	qe       *queue.QueueEngine
+	smtpAddr string
+	imapAddr string
+	pop3Addr string
+	smtpRcv  *Receiver
 }
 
 func newCertEnv(t *testing.T) *certEnv {

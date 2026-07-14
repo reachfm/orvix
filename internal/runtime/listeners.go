@@ -8,14 +8,14 @@ import (
 type ListenerKind string
 
 const (
-	ListenerSMTP        ListenerKind = "smtp"
-	ListenerSubmission  ListenerKind = "smtp-submission"
-	ListenerSMTPS       ListenerKind = "smtps"
-	ListenerIMAP        ListenerKind = "imap"
-	ListenerIMAPS       ListenerKind = "imaps"
-	ListenerPOP3        ListenerKind = "pop3"
-	ListenerPOP3S       ListenerKind = "pop3s"
-	ListenerJMAP        ListenerKind = "jmap"
+	ListenerSMTP       ListenerKind = "smtp"
+	ListenerSubmission ListenerKind = "smtp-submission"
+	ListenerSMTPS      ListenerKind = "smtps"
+	ListenerIMAP       ListenerKind = "imap"
+	ListenerIMAPS      ListenerKind = "imaps"
+	ListenerPOP3       ListenerKind = "pop3"
+	ListenerPOP3S      ListenerKind = "pop3s"
+	ListenerJMAP       ListenerKind = "jmap"
 )
 
 // ListenerStatus represents the runtime state of a single

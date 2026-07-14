@@ -104,7 +104,9 @@ func (r *SQLRepo) List(ctx context.Context, tx interface{}) ([]DKIMConfig, error
 	return configs, rows.Err()
 }
 
-func scan(row interface{ Scan(dest ...interface{}) error }) (*DKIMConfig, error) {
+func scan(row interface {
+	Scan(dest ...interface{}) error
+}) (*DKIMConfig, error) {
 	var c DKIMConfig
 	var enabled int
 	err := row.Scan(&c.ID, &c.Domain, &c.Selector, &c.PrivateKeyPEM, &enabled, &c.CreatedAt, &c.UpdatedAt)

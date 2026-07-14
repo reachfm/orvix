@@ -122,12 +122,12 @@ func TestStatus_StringValues(t *testing.T) {
 	// Sanity: the documented status strings are stable because
 	// the admin UI parses them.
 	cases := map[Status]string{
-		StatusOffline:           "offline",
-		StatusPublicKeyMissing:  "public_key_missing",
-		StatusLicenseMissing:    "license_missing",
-		StatusInvalid:           "invalid",
-		StatusExpired:           "expired",
-		StatusValid:             "valid",
+		StatusOffline:          "offline",
+		StatusPublicKeyMissing: "public_key_missing",
+		StatusLicenseMissing:   "license_missing",
+		StatusInvalid:          "invalid",
+		StatusExpired:          "expired",
+		StatusValid:            "valid",
 	}
 	for s, want := range cases {
 		if string(s) != want {

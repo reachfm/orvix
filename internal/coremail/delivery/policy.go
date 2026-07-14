@@ -33,16 +33,16 @@ type DeliveryPolicy struct {
 // DefaultDeliveryPolicy returns safe defaults for enterprise outbound delivery.
 func DefaultDeliveryPolicy() DeliveryPolicy {
 	return DeliveryPolicy{
-		MaxOutboundPerDomain:   1000,
-		MaxRecipientsPerDomain: 5000,
-		MaxOutboundPerMailbox:  200,
+		MaxOutboundPerDomain:    1000,
+		MaxRecipientsPerDomain:  5000,
+		MaxOutboundPerMailbox:   200,
 		MaxRecipientsPerMessage: 100,
-		MaxMessageSizeBytes:    25 * 1024 * 1024, // 25 MB
-		MaxOutboundPerTenant:   10000,
-		MaxRecipientsPerTenant: 50000,
-		MaxReceivedHeaders:     50,
-		MaxDeferralCount:       10,
-		Window:                 1 * time.Hour,
+		MaxMessageSizeBytes:     25 * 1024 * 1024, // 25 MB
+		MaxOutboundPerTenant:    10000,
+		MaxRecipientsPerTenant:  50000,
+		MaxReceivedHeaders:      50,
+		MaxDeferralCount:        10,
+		Window:                  1 * time.Hour,
 	}
 }
 

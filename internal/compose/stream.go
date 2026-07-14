@@ -85,7 +85,9 @@ func (s *Streamer) Complete(ctx context.Context, req *CompletionRequest) (string
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	var result struct {
 		Choices []struct {
-			Message struct{ Content string `json:"content"` }
+			Message struct {
+				Content string `json:"content"`
+			}
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
@@ -144,7 +146,11 @@ func (s *Streamer) Stream(ctx context.Context, req *CompletionRequest, onChunk f
 			return nil
 		}
 		var chunk struct {
-			Choices []struct{ Delta struct{ Content string `json:"content"` } } `json:"choices"`
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				}
+			} `json:"choices"`
 		}
 		if json.Unmarshal([]byte(d), &chunk) == nil && len(chunk.Choices) > 0 {
 			onChunk(chunk.Choices[0].Delta.Content)

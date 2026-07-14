@@ -8,12 +8,12 @@ import (
 // MemoryReporter provides reputation lookups from in-memory lists.
 // This is the default implementation for tests and small deployments.
 type MemoryReporter struct {
-	mu       sync.RWMutex
-	badIPs   []net.IP
-	badCIDRs []*net.IPNet
+	mu           sync.RWMutex
+	badIPs       []net.IP
+	badCIDRs     []*net.IPNet
 	allowedIPs   []net.IP
 	allowedCIDRs []*net.IPNet
-	domains  map[string]DomainReputation
+	domains      map[string]DomainReputation
 }
 
 func NewMemoryReporter() *MemoryReporter {

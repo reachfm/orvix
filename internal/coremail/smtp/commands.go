@@ -17,13 +17,13 @@ type SenderValidator func(ctx context.Context, identity *AuthIdentity, fromAddre
 
 // CommandHandler handles all SMTP commands for a session.
 type CommandHandler struct {
-	cfg           Config
-	auth          *Authenticator
-	session       *Session
-	authStep      int
-	authUser      string
-	authPass      string
-	validateRcpt  RecipientValidator
+	cfg            Config
+	auth           *Authenticator
+	session        *Session
+	authStep       int
+	authUser       string
+	authPass       string
+	validateRcpt   RecipientValidator
 	validateSender SenderValidator
 	isLocalDomain  func(ctx context.Context, domain string) (bool, error)
 	onAuthEvent    func(eventType string, identity string, detail string)
@@ -34,16 +34,16 @@ type CommandHandler struct {
 	// during initCore so the operator's admin PATCHes
 	// take effect on the very next SMTP command.
 	acceptanceEngine RuleEvaluator
-	Observability *observability.Observability
+	Observability    *observability.Observability
 }
 
 // NewCommandHandler creates a command handler bound to a session.
 // Default isLocalDomain checker returns false (fail-closed: no external relay).
 func NewCommandHandler(cfg Config, auth *Authenticator, session *Session) *CommandHandler {
 	return &CommandHandler{
-		cfg:      cfg,
-		auth:     auth,
-		session:  session,
+		cfg:     cfg,
+		auth:    auth,
+		session: session,
 		isLocalDomain: func(ctx context.Context, domain string) (bool, error) {
 			return false, nil
 		},

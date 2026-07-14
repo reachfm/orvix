@@ -26,15 +26,15 @@ import (
 // If SPFEvaluator and DMARCEvaluator are non-nil, SPF and DMARC evaluation
 // are performed during message acceptance and auth headers are injected.
 type Receiver struct {
-	Engine          *coremail.Engine
-	MailStore       *storage.MailStore
-	QueueEngine     *queue.QueueEngine
-	Config          Config
-	SPFEvaluator    *spf.Evaluator
-	DMARCEvaluator  *dmarc.Evaluator
-	AntiSpamEngine  *antispam.Engine
-	DKIMVerifier    *dkim.Verifier
-	Observability   *observability.Observability
+	Engine         *coremail.Engine
+	MailStore      *storage.MailStore
+	QueueEngine    *queue.QueueEngine
+	Config         Config
+	SPFEvaluator   *spf.Evaluator
+	DMARCEvaluator *dmarc.Evaluator
+	AntiSpamEngine *antispam.Engine
+	DKIMVerifier   *dkim.Verifier
+	Observability  *observability.Observability
 	// RulesRunner is the optional rules engine runner. When
 	// non-nil, every local-delivery message is fed through it
 	// AFTER the message is durably stored in the recipient's
@@ -129,17 +129,17 @@ type externalRecipient struct {
 
 // AcceptMessage processes a completed DATA transfer.
 // Steps:
-// 1. Evaluate SPF (if configured)
-// 2. Evaluate DKIM (if configured)
-// 3. Evaluate DMARC (if configured)
-// 4. Anti-spam assessment
-// 5. Enforce spam policy (reject if in enforcement mode)
-// 6. Inject Received-SPF, Authentication-Results, X-Orvix-Spam headers
-// 7. Parse the destination domain(s)
-// 8. Validate recipients exist locally
-// 9. Store message in each recipient's MailStore
-// 10. Enqueue for local delivery (BEFORE any rule side effects)
-// 11. Apply rules engine runner (forward / vacation / move /
+//  1. Evaluate SPF (if configured)
+//  2. Evaluate DKIM (if configured)
+//  3. Evaluate DMARC (if configured)
+//  4. Anti-spam assessment
+//  5. Enforce spam policy (reject if in enforcement mode)
+//  6. Inject Received-SPF, Authentication-Results, X-Orvix-Spam headers
+//  7. Parse the destination domain(s)
+//  8. Validate recipients exist locally
+//  9. Store message in each recipient's MailStore
+//  10. Enqueue for local delivery (BEFORE any rule side effects)
+//  11. Apply rules engine runner (forward / vacation / move /
 //     copy / flag). The runner may enqueue outbound work but
 //     ONLY AFTER local delivery is durably enqueued. If the
 //     local enqueue in step 10 fails the runner NEVER runs
@@ -272,9 +272,9 @@ func (r *Receiver) AcceptMessage(ctx context.Context, session *Session) error {
 	if r.SPFEvaluator != nil && connectingIP != nil && mailFromDomain != "" {
 		var spfErr error
 		spfResult, spfErr = r.SPFEvaluator.Evaluate(ctx, &spf.Context{
-			ConnectingIP:    connectingIP,
-			HeloDomain:      heloDomain,
-			MailFromDomain:  mailFromDomain,
+			ConnectingIP:   connectingIP,
+			HeloDomain:     heloDomain,
+			MailFromDomain: mailFromDomain,
 		})
 		if spfErr != nil {
 			spfResult = &spf.EvaluationResult{

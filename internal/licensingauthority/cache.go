@@ -12,15 +12,15 @@ import (
 
 // EntitlementCache is a locally-signed cache of the last successful validation.
 type EntitlementCache struct {
-	LicenseID            string             `json:"licenseId"`
-	Edition              string             `json:"edition"`
-	Features             []string           `json:"features"`
-	Limits               EntitlementLimits  `json:"limits"`
-	LastSuccessfulValidation time.Time      `json:"lastSuccessfulValidation"`
-	NextValidation       time.Time          `json:"nextValidation"`
-	GraceExpiresAt       time.Time          `json:"graceExpiresAt"`
-	AuthorityState       AuthorityState     `json:"authorityState"`
-	Signature            string             `json:"signature"`
+	LicenseID                string            `json:"licenseId"`
+	Edition                  string            `json:"edition"`
+	Features                 []string          `json:"features"`
+	Limits                   EntitlementLimits `json:"limits"`
+	LastSuccessfulValidation time.Time         `json:"lastSuccessfulValidation"`
+	NextValidation           time.Time         `json:"nextValidation"`
+	GraceExpiresAt           time.Time         `json:"graceExpiresAt"`
+	AuthorityState           AuthorityState    `json:"authorityState"`
+	Signature                string            `json:"signature"`
 }
 
 // cacheKey derives a machine-specific HMAC key from a base secret.
@@ -92,13 +92,13 @@ func LoadCache(path, secret string) (*EntitlementCache, error) {
 // DefaultEntitlement returns a safe default cache for community edition.
 func DefaultEntitlement() *EntitlementCache {
 	return &EntitlementCache{
-		LicenseID:            "community-default",
-		Edition:              "community",
-		Features:             []string{},
-		Limits:               EntitlementLimits{MaxDomains: 1, MaxMailboxes: 5, MaxStorageGB: 1},
+		LicenseID:                "community-default",
+		Edition:                  "community",
+		Features:                 []string{},
+		Limits:                   EntitlementLimits{MaxDomains: 1, MaxMailboxes: 5, MaxStorageGB: 1},
 		LastSuccessfulValidation: time.Now(),
-		NextValidation:       time.Now().Add(24 * time.Hour),
-		GraceExpiresAt:       time.Now().Add(defaultGraceDuration),
-		AuthorityState:       AuthorityUnknown,
+		NextValidation:           time.Now().Add(24 * time.Hour),
+		GraceExpiresAt:           time.Now().Add(defaultGraceDuration),
+		AuthorityState:           AuthorityUnknown,
 	}
 }
