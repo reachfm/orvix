@@ -116,6 +116,14 @@ func (d *Info) BooleanType() string {
 	return "INTEGER"
 }
 
+// BlobType returns the preferred binary/blob column type.
+func (d *Info) BlobType() string {
+	if d.Dialect == Postgres {
+		return "BYTEA"
+	}
+	return "BLOB"
+}
+
 // AutoIncrement returns the primary-key autoincrement clause.
 func (d *Info) AutoIncrement() string {
 	if d.Dialect == Postgres {

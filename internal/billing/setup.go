@@ -20,6 +20,7 @@ func CreateTables(db *sql.DB) error {
 	ddl := func(sql string) string {
 		sql = strings.ReplaceAll(sql, "__AUTOINC__", autoInc)
 		sql = strings.ReplaceAll(sql, "__TS__", ts)
+		sql = strings.ReplaceAll(sql, "__BLOB__", dialect.BlobType())
 		return sql
 	}
 
@@ -77,7 +78,7 @@ func CreateTables(db *sql.DB) error {
 			provider TEXT DEFAULT '',
 			event_type TEXT DEFAULT '',
 			provider_sub_id TEXT DEFAULT '',
-			raw_payload BLOB,
+			raw_payload __BLOB__,
 			signature TEXT DEFAULT '',
 			received_at __TS__ NOT NULL,
 			processed_at __TS__,
