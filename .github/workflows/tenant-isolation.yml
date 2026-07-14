@@ -1,0 +1,31 @@
+name: Tenant Isolation
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tenant-isolation:
+    name: Tenant isolation gates
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Tenant isolation tests
+        run: |
+          set -euo pipefail
+          go test ./internal/abuse/... -v -run "Isolation" -count=1 -timeout 60s
+          go test ./internal/customerdomain/... -v -run "Isolation" -count=1 -timeout 60s
+          echo "TENANT_ISOLATION=PASS" >> "$GITHUB_ENV"

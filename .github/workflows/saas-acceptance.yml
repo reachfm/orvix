@@ -1,0 +1,52 @@
+name: SaaS Acceptance
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  saas-acceptance:
+    name: SaaS end-to-end acceptance
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: orvix
+          POSTGRES_PASSWORD: ci_orvix_only
+          POSTGRES_DB: orvix
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: SaaS acceptance tests
+        run: |
+          set -euo pipefail
+          export ORVIX_RUN_POSTGRES_DML_TEST=1
+          export PGHOST=localhost
+          export PGPORT=5432
+          export PGUSER=orvix
+          export PGPASSWORD=ci_orvix_only
+          export PGDATABASE=orvix
+          go test ./internal/admin/organization/... -v -count=1 -timeout 120s
+          go test ./internal/customerdomain/... -v -count=1 -timeout 120s
+          go test ./internal/billing/... -v -count=1 -timeout 120s
+          echo "SAAS_ACCEPTANCE=PASS" >> "$GITHUB_ENV"

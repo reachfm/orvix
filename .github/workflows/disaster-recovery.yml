@@ -1,0 +1,51 @@
+name: Disaster Recovery
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  dr-test:
+    name: Coordinated DR test
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: orvix
+          POSTGRES_PASSWORD: ci_orvix_only
+          POSTGRES_DB: orvix
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install pg_dump
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-16
+          pg_dump --version
+          pg_restore --version
+      - name: Run coordinated DR tests
+        run: |
+          set -euo pipefail
+          export ORVIX_RUN_POSTGRES_DML_TEST=1
+          export PGHOST=localhost
+          export PGPORT=5432
+          export PGUSER=orvix
+          export PGPASSWORD=ci_orvix_only
+          export PGDATABASE=orvix
+          go test ./internal/pgbackup/... -v -count=1 -timeout 120s
+          echo "DR_ACCEPTANCE=PASS" >> "$GITHUB_ENV"
