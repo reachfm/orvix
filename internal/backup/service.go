@@ -1660,6 +1660,13 @@ func (s *Service) activateStagedRestoreLocked(ctx context.Context, stagingDir st
 		if err := replaceFileAtomically(dbSnapshot, s.databasePath, 0640); err != nil {
 			return fmt.Errorf("activate sqlite database: %w", err)
 		}
+		// VACUUM INTO produces a clean standalone database. Stale WAL/SHM
+		// files from the previous database point to a different inode and
+		// cause SQLITE_CORRUPT (11) when the restarted service opens the
+		// new database. Remove them so the new database is opened cleanly.
+		for _, suf := range []string{"-wal", "-shm"} {
+			_ = os.Remove(s.databasePath + suf)
+		}
 	}
 	if err := s.activateArchiveDir(filepath.Join(stagingDir, "var", "lib", "orvix", "mailstore.tar.gz"), s.mailDir, 0750); err != nil {
 		return fmt.Errorf("activate mailstore: %w", err)

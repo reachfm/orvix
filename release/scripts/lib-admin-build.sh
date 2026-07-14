@@ -77,17 +77,19 @@ package_admin_spa() {
     fi
 
     # Toolchain present: build fresh. Every failure below is fatal.
-    if ! ( cd "$web_admin" && npm ci ); then
+    # npm output to stdout is suppressed so the function returns exactly
+    # "built" or "legacy" on stdout (the caller captures it via $()).
+    if ! ( cd "$web_admin" && npm ci >/dev/null ); then
         echo "package_admin_spa: 'npm ci' failed with Node/npm present; refusing to ship stale legacy admin assets" >&2
         return 2
     fi
     if [ -f "$web_admin/tsconfig.json" ]; then
-        if ! ( cd "$web_admin" && npx --no-install tsc --noEmit -p tsconfig.json ); then
+        if ! ( cd "$web_admin" && npx --no-install tsc --noEmit -p tsconfig.json >/dev/null ); then
             echo "package_admin_spa: TypeScript validation ('tsc --noEmit') failed; refusing to ship stale legacy admin assets" >&2
             return 2
         fi
     fi
-    if ! ( cd "$web_admin" && npm run build ); then
+    if ! ( cd "$web_admin" && npm run build >/dev/null ); then
         echo "package_admin_spa: 'npm run build' failed; refusing to ship stale legacy admin assets" >&2
         return 2
     fi

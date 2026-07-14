@@ -2202,6 +2202,42 @@ func TestRestoreBothCallbacksSucceed(t *testing.T) {
 	}
 }
 
+func TestRestoreRemovesStaleWALAndSHMFiles(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+
+	// Create stale WAL and SHM files at the database path to simulate
+	// a live SQLite database in WAL mode.
+	walPath := s.databasePath + "-wal"
+	shmPath := s.databasePath + "-shm"
+	if err := os.WriteFile(walPath, []byte("stale-wal"), 0640); err != nil {
+		t.Fatalf("write wal: %v", err)
+	}
+	if err := os.WriteFile(shmPath, []byte("stale-shm"), 0640); err != nil {
+		t.Fatalf("write shm: %v", err)
+	}
+
+	b, err := s.CreateBackup(ctx, "wal-shm-cleanup")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Restore must remove the stale WAL/SHM files so the restarted
+	// service opens a clean VACUUM INTO database.
+	result, err := s.RestoreBackup(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if result == nil || result.Status != RestoreStatusActivated {
+		t.Fatalf("expected activated, got %+v", result)
+	}
+	if _, err := os.Stat(walPath); !os.IsNotExist(err) {
+		t.Fatalf("stale WAL file was not removed after restore")
+	}
+	if _, err := os.Stat(shmPath); !os.IsNotExist(err) {
+		t.Fatalf("stale SHM file was not removed after restore")
+	}
+}
+
 func TestRestoreHealthFailureRollsBack(t *testing.T) {
 	s := testService(t)
 	ctx := context.Background()
