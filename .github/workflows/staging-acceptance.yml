@@ -213,15 +213,22 @@ jobs:
       - name: Authenticated acceptance checks (fail-closed)
         run: |
           set -euo pipefail
-          COOKIES="$(mktemp)"; CSRF=""
+          COOKIES="$(mktemp)"; CSRF=""; TOKEN=""
           ADMIN_PASSWORD="$(cat /tmp/admin_password)"
 
+          # Auth uses a Bearer access token (the access_token cookie is
+          # Secure-only and will not traverse the plain-HTTP loopback the
+          # installed service listens on). CSRF for state-changing requests
+          # uses the non-Secure csrf_token cookie + matching header, which does
+          # traverse HTTP.
+          #
           # Strict JSON API helper: fails on transport error, non-2xx,
           # invalid JSON, or a JSON body carrying an "error" field. No
           # fallback bodies, no || true.
           api() {
             local method="$1" path="$2" data="${3:-}"
             local args=(-sS -o /tmp/body -w '%{http_code}' -b "$COOKIES" -c "$COOKIES" -X "$method" "$BASE$path")
+            [ -n "$TOKEN" ] && args+=(-H "Authorization: Bearer $TOKEN")
             [ -n "$CSRF" ] && args+=(-H "X-CSRF-Token: $CSRF")
             if [ -n "$data" ]; then args+=(-H 'Content-Type: application/json' --data "$data"); fi
             local code; code="$(curl "${args[@]}")" || { echo "TRANSPORT ERROR: $method $path" >&2; return 1; }
@@ -238,8 +245,10 @@ jobs:
             [ "$code" = "$want" ] || { echo "expected $want for $method $path, got $code" >&2; return 1; }
           }
 
-          # --- Auth: login (CSRF-exempt) then fetch a CSRF token/cookie ---
+          # --- Auth: login (CSRF-exempt) → Bearer token, then a CSRF cookie ---
           login_body="$(api POST /api/v1/auth/login "$(jq -nc --arg e "$ADMIN_EMAIL" --arg p "$ADMIN_PASSWORD" '{email:$e,password:$p}')")"
+          TOKEN="$(echo "$login_body" | jq -r '.access_token')"
+          [ -n "$TOKEN" ] && [ "$TOKEN" != "null" ] || { echo "login did not return an access token: $login_body"; exit 1; }
           CSRF="$(api GET /api/v1/csrf-token | jq -r '.csrf_token')"
           [ -n "$CSRF" ] && [ "$CSRF" != "null" ] || { echo "no csrf token"; exit 1; }
 
@@ -285,7 +294,7 @@ jobs:
           echo "restore=PASS" >> "$RESULTS_FILE"
 
           # --- Metrics (Prometheus text) ---
-          code="$(curl -sS -o /tmp/metrics -w '%{http_code}' -b "$COOKIES" "$BASE/api/v1/metrics")"
+          code="$(curl -sS -o /tmp/metrics -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$BASE/api/v1/metrics")"
           [ "$code" = "200" ] || { echo "metrics HTTP $code"; exit 1; }
           grep -Eq '^# (HELP|TYPE)|orvix' /tmp/metrics || { echo "metrics output not Prometheus-like"; head -c 300 /tmp/metrics; exit 1; }
           echo "metrics=PASS" >> "$RESULTS_FILE"
