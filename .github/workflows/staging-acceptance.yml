@@ -174,13 +174,15 @@ jobs:
           # Install the REAL bundled binary: point the installer at the
           # bundle root (has bin/orvix + BUILDINFO, no go.mod) and force the
           # prebuilt so it never rebuilds from the CI source checkout.
-          # The runner has no public IPv4; supply a documentation-range
-          # (TEST-NET-3) address so the installer writes a syntactically valid
-          # dns.public_ipv4 for this disposable install (never real DNS).
+          # The runner has no public IPv4; supply a placeholder that passes the
+          # installer's public-IP validator (which rejects RFC5737
+          # documentation ranges). This value is only written to
+          # dns.public_ipv4 config for this disposable install — the service
+          # binds 127.0.0.1 and never uses it for real DNS.
           sudo env \
             ORVIX_SOURCE_DIR=/tmp/stage/orvix \
             ORVIX_USE_PREBUILT=1 \
-            ORVIX_PUBLIC_IPV4=203.0.113.10 \
+            ORVIX_PUBLIC_IPV4=100.0.0.10 \
             ORVIX_PRIMARY_DOMAIN="$STAGING_DOMAIN" \
             ORVIX_ADMIN_EMAIL="$ADMIN_EMAIL" \
             ORVIX_ADMIN_PASSWORD_B64="$ADMIN_PASSWORD_B64" \
