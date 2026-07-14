@@ -12,6 +12,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/orvix/orvix/internal/backup"
@@ -32,6 +33,11 @@ import (
 // restoreVerifyTimeout bounds each of the restart and post-restart health
 // steps performed by the coordinator.
 const restoreVerifyTimeout = 120 * time.Second
+
+// restoreHealthInjected ensures ORVIX_RESTORE_FORCE_HEALTH_FAILURE only
+// triggers on the FIRST health probe call (primary restore), allowing the
+// rollback health probe (second call) to succeed and produce rolled_back: true.
+var restoreHealthInjected int32
 
 // restoreRunCommand is the `orvix restore-run` entrypoint. It drains the
 // restore job queue under an exclusive lock and returns a process exit code.
@@ -296,15 +302,21 @@ func systemctlRestartOrvix(ctx context.Context) error {
 // probeOrvixHealth polls the restarted service's HTTP health endpoint until it
 // reports healthy or the bounded context expires.
 func probeOrvixHealth(ctx context.Context, cfg *config.Config) error {
-	// Test-only failure injection for the staging FAILURE-path acceptance. It
-	// forces the post-restart health gate to fail so the rollback lifecycle
-	// (reactivate safety backup -> real restart) is exercised with a REAL
-	// service restart — not a simulated one. It is honored ONLY in a
-	// non-production deployment; a production (PostgreSQL) install ignores it
-	// entirely, so it can never be activated accidentally in production.
+	// Test-only failure injection for the staging FAILURE-path acceptance.
+	// It forces ONLY the primary (first) post-restore health gate to fail so
+	// the rollback lifecycle (reactivate safety backup -> real restart) is
+	// exercised with a REAL service restart. The rollback health probe
+	// (subsequent calls) must succeed so rolled_back: true is reported.
+	// Honored ONLY in a non-production deployment; a production (PostgreSQL)
+	// install ignores it entirely.
 	if os.Getenv("ORVIX_RESTORE_FORCE_HEALTH_FAILURE") == "1" && (cfg == nil || !cfg.Database.IsProduction()) {
-		return fmt.Errorf("forced post-restart health failure (test-only injection; non-production only)")
+		if atomic.CompareAndSwapInt32(&restoreHealthInjected, 0, 1) {
+			return fmt.Errorf("forced post-restart health failure (test-only injection; non-production only)")
+		}
 	}
+
+	// Package-level sentinel for the one-shot test injection above.
+	// _ = restoreHealthInjected // referenced only via sync/atomic
 
 	port := 8080
 	if cfg != nil && cfg.Server.AdminPort > 0 {

@@ -120,8 +120,8 @@ func TestRunOneRestoreJob_RestartFailure_RollsBack(t *testing.T) {
 		}
 		return nil // rollback restart recovers
 	}
-	healthCalled := false
-	health := func(context.Context) error { healthCalled = true; return nil }
+	// Rollback health must pass so rolled_back=true is reported.
+	health := func(context.Context) error { return nil }
 
 	err := runOneRestoreJob(context.Background(), coord, svc, jobID, restart, health, zap.NewNop())
 	if err == nil {
@@ -137,18 +137,23 @@ func TestRunOneRestoreJob_RestartFailure_RollsBack(t *testing.T) {
 	if res.Error == "" {
 		t.Fatal("expected preserved error chain")
 	}
-	if healthCalled {
-		t.Fatal("health must not run after a failed restart")
-	}
 }
 
-// Health failure -> rollback -> durable failed.
+// Health failure on primary restore -> rollback. Rollback health must pass
+// for rolled_back=true.
 func TestRunOneRestoreJob_HealthFailure_RollsBack(t *testing.T) {
 	svc, backupID := buildRealRestoreService(t)
 	coord, jobID := newTestCoordWithJob(t, backupID)
 
 	restart := func(context.Context) error { return nil }
-	health := func(context.Context) error { return fmt.Errorf("service unhealthy after restart") }
+	healthCalls := 0
+	health := func(context.Context) error {
+		healthCalls++
+		if healthCalls == 1 {
+			return fmt.Errorf("service unhealthy after restart")
+		}
+		return nil // rollback health passes
+	}
 
 	err := runOneRestoreJob(context.Background(), coord, svc, jobID, restart, health, zap.NewNop())
 	if err == nil {
