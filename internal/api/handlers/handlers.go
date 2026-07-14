@@ -814,8 +814,8 @@ func (h *Handler) ListAPIKeys(c fiber.Ctx) error {
 		Name      string    `json:"name"`
 		KeyPrefix string    `json:"key_prefix"`
 		Enabled   bool      `json:"enabled"`
-		LastUsed  time.Time `json:"last_used"`
-		ExpiresAt time.Time `json:"expires_at"`
+		LastUsed  *time.Time `json:"last_used,omitempty"`
+		ExpiresAt *time.Time `json:"expires_at,omitempty"`
 		CreatedAt time.Time `json:"created_at"`
 	}
 	result := make([]safeKey, 0, len(keys))
@@ -850,14 +850,15 @@ func (h *Handler) CreateAPIKey(c fiber.Ctx) error {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "API keys require ISP or Enterprise license"})
 	}
 
-	ttl := 365 * 24 * time.Hour
+	ttlDays := 365
 	if req.TTL != "" {
 		if d, err := time.ParseDuration(req.TTL); err == nil {
-			ttl = d
+			ttlDays = int(d.Hours() / 24)
 		}
 	}
 
-	fullKey, record, err := h.apikeys.Generate(req.Name, userID, role, ttl)
+	tenantID := c.Locals("tenant_id").(uint)
+	fullKey, record, err := h.apikeys.Generate(req.Name, userID, tenantID, role, nil, ttlDays)
 	if err != nil {
 		h.logger.Error("failed to generate API key", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "API key generation failed"})
