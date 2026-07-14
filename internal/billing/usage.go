@@ -57,9 +57,9 @@ func (s *UsageService) increment(tenantID uint, field string, count int64) error
 	now := time.Now().UTC()
 	periodStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 	query := `INSERT INTO usage_records (tenant_id, period_start, period_end, ` + field + `, created_at)
-		VALUES (?, ?, ?, ?, datetime('now'))
+		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(tenant_id, period_start) DO UPDATE SET ` + field + ` = ` + field + ` + ?`
-	_, err := s.db.Exec(query, tenantID, periodStart, periodStart.AddDate(0, 1, 0), count, count)
+	_, err := s.db.Exec(query, tenantID, periodStart, periodStart.AddDate(0, 1, 0), count, now, count)
 	return err
 }
 
@@ -67,8 +67,8 @@ func (s *UsageService) setField(tenantID uint, field string, value int64) error 
 	now := time.Now().UTC()
 	periodStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 	query := `INSERT INTO usage_records (tenant_id, period_start, period_end, ` + field + `, created_at)
-		VALUES (?, ?, ?, ?, datetime('now'))
+		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(tenant_id, period_start) DO UPDATE SET ` + field + ` = ?`
-	_, err := s.db.Exec(query, tenantID, periodStart, periodStart.AddDate(0, 1, 0), value, value)
+	_, err := s.db.Exec(query, tenantID, periodStart, periodStart.AddDate(0, 1, 0), value, now, value)
 	return err
 }

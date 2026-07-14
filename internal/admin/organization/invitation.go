@@ -3,7 +3,8 @@ package organization
 import (
 	"context"
 	"crypto/rand"
-	"database/sql"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -15,9 +16,6 @@ var (
 	ErrInvitationExpired       = errors.New("invitation has expired")
 	ErrInvitationAlreadyUsed   = errors.New("invitation already accepted")
 	ErrInvitationRevoked       = errors.New("invitation was revoked")
-	ErrCannotInviteSelf        = errors.New("cannot invite yourself to your own organization")
-	ErrOwnerCannotBeRemoved    = errors.New("cannot remove the organization owner")
-	ErrLastOwnerCannotTransfer = errors.New("cannot transfer ownership: no remaining owner would exist")
 )
 
 type InvitationStatus string
@@ -34,7 +32,7 @@ type OrganizationInvitation struct {
 	OrganizationID uint             `json:"organization_id"`
 	InviterID      uint             `json:"inviter_id"`
 	Email          string           `json:"email"`
-	Token          string           `json:"-"`
+	TokenHash      string           `json:"-"`
 	Role           string           `json:"role"`
 	Status         InvitationStatus `json:"status"`
 	ExpiresAt      time.Time        `json:"expires_at"`
@@ -44,34 +42,29 @@ type OrganizationInvitation struct {
 	UpdatedAt      time.Time        `json:"updated_at"`
 }
 
-type TransferRequest struct {
-	ID               uint       `json:"id"`
-	OrganizationID   uint       `json:"organization_id"`
-	FromUserID       uint       `json:"from_user_id"`
-	ToUserID         uint       `json:"to_user_id"`
-	Token            string     `json:"-"`
-	Status           string     `json:"status"`
-	ExpiresAt        time.Time  `json:"expires_at"`
-	AcceptedAt       *time.Time `json:"accepted_at,omitempty"`
-	CreatedAt        time.Time  `json:"created_at"`
-}
-
-func generateInviteToken() (string, error) {
+func generateInviteToken() (raw string, hash string, err error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return hex.EncodeToString(b), nil
+	raw = hex.EncodeToString(b)
+	h := sha256.Sum256([]byte(raw))
+	return raw, hex.EncodeToString(h[:]), nil
 }
 
-func (s *Service) CreateInvitation(ctx context.Context, orgID, inviterID uint, email, role string, expiryDays int) (*OrganizationInvitation, error) {
+func hashToken(raw string) string {
+	h := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(h[:])
+}
+
+func (s *Service) CreateInvitation(ctx context.Context, orgID, inviterID uint, email, role string, expiryDays int) (*OrganizationInvitation, string, error) {
 	org, err := s.repo.GetByID(ctx, orgID)
 	if err != nil || org == nil {
-		return nil, ErrOrganizationNotFound
+		return nil, "", ErrOrganizationNotFound
 	}
-	token, err := generateInviteToken()
+	rawToken, tokenHash, err := generateInviteToken()
 	if err != nil {
-		return nil, fmt.Errorf("generate token: %w", err)
+		return nil, "", fmt.Errorf("generate token: %w", err)
 	}
 	if expiryDays <= 0 {
 		expiryDays = 7
@@ -80,7 +73,7 @@ func (s *Service) CreateInvitation(ctx context.Context, orgID, inviterID uint, e
 		OrganizationID: orgID,
 		InviterID:      inviterID,
 		Email:          email,
-		Token:          token,
+		TokenHash:      tokenHash,
 		Role:           role,
 		Status:         InvitationPending,
 		ExpiresAt:      time.Now().UTC().AddDate(0, 0, expiryDays),
@@ -88,14 +81,21 @@ func (s *Service) CreateInvitation(ctx context.Context, orgID, inviterID uint, e
 		UpdatedAt:      time.Now().UTC(),
 	}
 	if err := s.repo.CreateInvitation(ctx, inv); err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return inv, nil
+	return inv, rawToken, nil
 }
 
-func (s *Service) AcceptInvitation(ctx context.Context, token string, userID uint) error {
-	inv, err := s.repo.GetInvitationByToken(ctx, token)
-	if err != nil {
+func (s *Service) AcceptInvitation(ctx context.Context, rawToken string, userID uint) error {
+	if len(rawToken) == 0 || len(rawToken) > 128 {
+		return ErrInvitationNotFound
+	}
+	tokenHash := hashToken(rawToken)
+	inv, err := s.repo.GetInvitationByHash(ctx, tokenHash)
+	if err != nil || inv == nil {
+		return ErrInvitationNotFound
+	}
+	if subtle.ConstantTimeCompare([]byte(inv.TokenHash), []byte(tokenHash)) != 1 {
 		return ErrInvitationNotFound
 	}
 	if inv.Status == InvitationAccepted {
@@ -127,24 +127,43 @@ func (s *Service) ListInvitations(ctx context.Context, orgID uint) ([]Organizati
 	return s.repo.ListInvitations(ctx, orgID)
 }
 
+func (s *Service) RotateInvitationToken(ctx context.Context, invID, orgID uint) (*OrganizationInvitation, string, error) {
+	inv, err := s.repo.GetInvitationByID(ctx, invID)
+	if err != nil || inv == nil || inv.OrganizationID != orgID {
+		return nil, "", ErrInvitationNotFound
+	}
+	if inv.Status != InvitationPending {
+		return nil, "", fmt.Errorf("cannot rotate token: invitation status is %s", inv.Status)
+	}
+	rawToken, tokenHash, err := generateInviteToken()
+	if err != nil {
+		return nil, "", err
+	}
+	if err := s.repo.RotateInvitationToken(ctx, inv.ID, tokenHash); err != nil {
+		return nil, "", err
+	}
+	inv.TokenHash = tokenHash
+	return inv, rawToken, nil
+}
+
 func (r *OrganizationRepo) CreateInvitation(ctx context.Context, inv *OrganizationInvitation) error {
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO org_invitations (organization_id, inviter_id, email, token, role, status, expires_at, created_at, updated_at)
+		`INSERT INTO org_invitations (organization_id, inviter_id, email, token_hash, role, status, expires_at, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		inv.OrganizationID, inv.InviterID, inv.Email, inv.Token, inv.Role, inv.Status, inv.ExpiresAt, inv.CreatedAt, inv.UpdatedAt)
+		inv.OrganizationID, inv.InviterID, inv.Email, inv.TokenHash, inv.Role, inv.Status, inv.ExpiresAt, inv.CreatedAt, inv.UpdatedAt)
 	return err
 }
 
-func (r *OrganizationRepo) GetInvitationByToken(ctx context.Context, token string) (*OrganizationInvitation, error) {
+func (r *OrganizationRepo) GetInvitationByHash(ctx context.Context, tokenHash string) (*OrganizationInvitation, error) {
 	row := r.db.QueryRowContext(ctx,
-		`SELECT id, organization_id, inviter_id, email, token, role, status, expires_at, accepted_at, revoked_at, created_at, updated_at
-		FROM org_invitations WHERE token = ?`, token)
+		`SELECT id, organization_id, inviter_id, email, token_hash, role, status, expires_at, accepted_at, revoked_at, created_at, updated_at
+		FROM org_invitations WHERE token_hash = ?`, tokenHash)
 	return scanInvitation(row)
 }
 
 func (r *OrganizationRepo) GetInvitationByID(ctx context.Context, id uint) (*OrganizationInvitation, error) {
 	row := r.db.QueryRowContext(ctx,
-		`SELECT id, organization_id, inviter_id, email, token, role, status, expires_at, accepted_at, revoked_at, created_at, updated_at
+		`SELECT id, organization_id, inviter_id, email, token_hash, role, status, expires_at, accepted_at, revoked_at, created_at, updated_at
 		FROM org_invitations WHERE id = ?`, id)
 	return scanInvitation(row)
 }
@@ -168,9 +187,17 @@ func (r *OrganizationRepo) AcceptInvitation(ctx context.Context, id, userID uint
 	return err
 }
 
+func (r *OrganizationRepo) RotateInvitationToken(ctx context.Context, id uint, newTokenHash string) error {
+	now := time.Now().UTC()
+	_, err := r.db.ExecContext(ctx,
+		"UPDATE org_invitations SET token_hash=?, updated_at=? WHERE id=?",
+		newTokenHash, now, id)
+	return err
+}
+
 func (r *OrganizationRepo) ListInvitations(ctx context.Context, orgID uint) ([]OrganizationInvitation, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, organization_id, inviter_id, email, token, role, status, expires_at, accepted_at, revoked_at, created_at, updated_at
+		`SELECT id, organization_id, inviter_id, email, token_hash, role, status, expires_at, accepted_at, revoked_at, created_at, updated_at
 		FROM org_invitations WHERE organization_id = ? ORDER BY created_at DESC`, orgID)
 	if err != nil {
 		return nil, err
@@ -189,9 +216,8 @@ func (r *OrganizationRepo) ListInvitations(ctx context.Context, orgID uint) ([]O
 
 func scanInvitation(s interface{ Scan(dest ...interface{}) error }) (*OrganizationInvitation, error) {
 	var inv OrganizationInvitation
-	err := s.Scan(&inv.ID, &inv.OrganizationID, &inv.InviterID, &inv.Email, &inv.Token, &inv.Role, &inv.Status, &inv.ExpiresAt, &inv.AcceptedAt, &inv.RevokedAt, &inv.CreatedAt, &inv.UpdatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
+	if err := s.Scan(&inv.ID, &inv.OrganizationID, &inv.InviterID, &inv.Email, &inv.TokenHash, &inv.Role, &inv.Status, &inv.ExpiresAt, &inv.AcceptedAt, &inv.RevokedAt, &inv.CreatedAt, &inv.UpdatedAt); err != nil {
+		return nil, err
 	}
-	return &inv, err
+	return &inv, nil
 }

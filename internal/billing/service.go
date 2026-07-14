@@ -65,11 +65,12 @@ func (s *Service) SeedDefaultPlans() error {
 		var existing string
 		err := s.db.QueryRow("SELECT id FROM plans WHERE id = ?", p.ID).Scan(&existing)
 		if errors.Is(err, sql.ErrNoRows) {
-			_, err = s.db.Exec(`INSERT INTO plans (id, name, description, price_monthly, price_yearly,
+			now := time.Now().UTC()
+		_, err = s.db.Exec(`INSERT INTO plans (id, name, description, price_monthly, price_yearly,
 				max_domains, max_mailboxes, storage_mb, send_limit_day, features, created_at, updated_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				p.ID, p.Name, p.Description, p.PriceMonthly, p.PriceYearly,
-				p.MaxDomains, p.MaxMailboxes, p.StorageMB, p.SendLimitDay, p.Features)
+				p.MaxDomains, p.MaxMailboxes, p.StorageMB, p.SendLimitDay, p.Features, now, now)
 			if err != nil {
 				return err
 			}
@@ -115,8 +116,8 @@ func (s *Service) CreateSubscription(tenantID uint, planID PlanID, interval Bill
 	}
 	_, err = s.db.Exec(`INSERT INTO subscriptions (tenant_id, plan_id, status, billing_interval, trial_ends_at,
 		current_period_start, current_period_end, storage_mb, send_limit_day, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
-		tenantID, planID, status, interval, trialEnd, now, periodEnd, plan.StorageMB, plan.SendLimitDay)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		tenantID, planID, status, interval, trialEnd, now, periodEnd, plan.StorageMB, plan.SendLimitDay, now, now)
 	if err != nil {
 		return nil, err
 	}
@@ -128,8 +129,9 @@ func (s *Service) ChangePlan(tenantID uint, newPlanID PlanID) (*Subscription, er
 	if err != nil {
 		return nil, err
 	}
-	_, err = s.db.Exec("UPDATE subscriptions SET plan_id = ?, storage_mb = ?, send_limit_day = ?, updated_at = datetime('now') WHERE tenant_id = ?",
-		newPlanID, plan.StorageMB, plan.SendLimitDay, tenantID)
+	now := time.Now().UTC()
+	_, err = s.db.Exec("UPDATE subscriptions SET plan_id = ?, storage_mb = ?, send_limit_day = ?, updated_at = ? WHERE tenant_id = ?",
+		newPlanID, plan.StorageMB, plan.SendLimitDay, now, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -157,8 +159,8 @@ func (s *Service) TransitionState(tenantID uint, newStatus SubscriptionStatus) e
 		cancelledAt = &now
 	}
 	_, err = s.db.Exec(`UPDATE subscriptions SET status = ?, past_due_since = ?, grace_period_ends_at = ?,
-		suspended_at = ?, cancelled_at = ?, updated_at = datetime('now') WHERE tenant_id = ?`,
-		newStatus, pastDueSince, graceEndsAt, suspendedAt, cancelledAt, tenantID)
+		suspended_at = ?, cancelled_at = ?, updated_at = ? WHERE tenant_id = ?`,
+		newStatus, pastDueSince, graceEndsAt, suspendedAt, cancelledAt, now, tenantID)
 	return err
 }
 

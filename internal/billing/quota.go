@@ -1,6 +1,10 @@
 package billing
 
-import "database/sql"
+import (
+	"database/sql"
+	"encoding/json"
+	"strings"
+)
 
 type QuotaService struct {
 	db  *sql.DB
@@ -67,6 +71,20 @@ func (s *QuotaService) CanSendEmail(tenantID uint, sentToday int64) *QuotaCheckR
 	}
 }
 
+func PlanHasFeature(plan *Plan, feature PlanFeature) bool {
+	var features []string
+	if plan.Features != "" {
+		json.Unmarshal([]byte(plan.Features), &features)
+	}
+	feat := string(feature)
+	for _, f := range features {
+		if strings.EqualFold(f, feat) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *QuotaService) HasFeature(tenantID uint, feature PlanFeature) bool {
 	sub, err := s.svc.GetSubscription(tenantID)
 	if err != nil {
@@ -76,36 +94,5 @@ func (s *QuotaService) HasFeature(tenantID uint, feature PlanFeature) bool {
 	if err != nil {
 		return false
 	}
-	return planHasFeature(plan, feature)
-}
-
-func planHasFeature(plan *Plan, feature PlanFeature) bool {
-	freeOnly := map[PlanFeature]bool{
-		FeatureCustomDomain: true,
-		FeatureDKIM:         true,
-	}
-	businessPlus := map[PlanFeature]bool{
-		FeatureCustomDomain:    true,
-		FeatureDKIM:            true,
-		FeatureMTASTS:          true,
-		FeatureAPI:             true,
-		FeatureTeam:            true,
-		FeatureGroups:          true,
-		FeatureCatchAll:        true,
-		FeatureMailForwarding:  true,
-		FeatureBackup:          true,
-		FeatureAuditLog:        true,
-		FeatureMFA:             true,
-	}
-	switch plan.ID {
-	case PlanFree:
-		return freeOnly[feature]
-	case PlanStarter:
-		return feature == FeatureCustomDomain || feature == FeatureDKIM || feature == FeatureMTASTS || feature == FeatureAPI || feature == FeatureTeam
-	case PlanBusiness:
-		return businessPlus[feature]
-	case PlanEnterprise:
-		return true
-	}
-	return false
+	return PlanHasFeature(plan, feature)
 }

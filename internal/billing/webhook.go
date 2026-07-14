@@ -3,10 +3,12 @@ package billing
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -17,17 +19,17 @@ var (
 )
 
 type WebhookEventRecord struct {
-	ID              string    `json:"id"`
-	Provider        string    `json:"provider"`
-	EventType       string    `json:"event_type"`
-	ProviderSubID   string    `json:"provider_sub_id"`
-	RawPayload      string    `json:"-"`
-	Signature       string    `json:"-"`
-	ReceivedAt      time.Time `json:"received_at"`
+	ID              string     `json:"id"`
+	Provider        string     `json:"provider"`
+	EventType       string     `json:"event_type"`
+	ProviderSubID   string     `json:"provider_sub_id"`
+	RawPayload      []byte     `json:"-"`
+	Signature       string     `json:"-"`
+	ReceivedAt      time.Time  `json:"received_at"`
 	ProcessedAt     *time.Time `json:"processed_at,omitempty"`
-	ProcessingError string    `json:"processing_error,omitempty"`
-	IdempotencyKey  string    `json:"idempotency_key"`
-	CreatedAt       time.Time `json:"created_at"`
+	ProcessingError string     `json:"processing_error,omitempty"`
+	IdempotencyKey  string     `json:"idempotency_key"`
+	CreatedAt       time.Time  `json:"created_at"`
 }
 
 type WebhookService struct {
@@ -38,8 +40,6 @@ func NewWebhookService(db *sql.DB) *WebhookService {
 	return &WebhookService{db: db}
 }
 
-// VerifySignature checks an HMAC-SHA256 signature with timestamp tolerance.
-// If the signature is valid, the event is recorded for idempotency.
 func (s *WebhookService) VerifySignature(payload []byte, signature, secret string, timestamp int64, tolerance time.Duration) (string, error) {
 	now := time.Now().Unix()
 	diff := now - timestamp
@@ -50,19 +50,30 @@ func (s *WebhookService) VerifySignature(payload []byte, signature, secret strin
 		return "", ErrWebhookTimestampExpired
 	}
 
+	signedPayload := fmt.Sprintf("%d.%s", timestamp, string(payload))
 	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(string(payload) + "." + string(rune(timestamp))))
+	mac.Write([]byte(signedPayload))
 	expected := hex.EncodeToString(mac.Sum(nil))
 
 	if !hmac.Equal([]byte(signature), []byte(expected)) {
 		return "", ErrWebhookSignatureInvalid
 	}
 
-	id := hex.EncodeToString(mac.Sum(nil))[:32]
-	return id, nil
+	return hex.EncodeToString(mac.Sum(nil))[:32], nil
 }
 
 func (s *WebhookService) RecordEvent(ctx context.Context, rec *WebhookEventRecord) error {
+	if rec.ReceivedAt.IsZero() {
+		rec.ReceivedAt = time.Now().UTC()
+	}
+	if rec.IdempotencyKey == "" {
+		b := make([]byte, 16)
+		rand.Read(b)
+		rec.IdempotencyKey = hex.EncodeToString(b)
+	}
+	rec.ProcessedAt = nil
+	rec.ProcessingError = ""
+
 	var existing string
 	err := s.db.QueryRowContext(ctx, "SELECT id FROM webhook_events WHERE idempotency_key = ?", rec.IdempotencyKey).Scan(&existing)
 	if err == nil {
@@ -71,9 +82,9 @@ func (s *WebhookService) RecordEvent(ctx context.Context, rec *WebhookEventRecor
 	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO webhook_events (id, provider, event_type, provider_sub_id, raw_payload, signature,
 		received_at, idempotency_key, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		rec.ID, rec.Provider, rec.EventType, rec.ProviderSubID, rec.RawPayload, rec.Signature,
-		rec.ReceivedAt, rec.IdempotencyKey)
+		rec.ReceivedAt, rec.IdempotencyKey, time.Now().UTC())
 	return err
 }
 
@@ -83,7 +94,7 @@ func (s *WebhookService) MarkProcessed(ctx context.Context, eventID string, proc
 		errStr = processingErr.Error()
 	}
 	_, err := s.db.ExecContext(ctx,
-		"UPDATE webhook_events SET processed_at = datetime('now'), processing_error = ? WHERE id = ?",
-		errStr, eventID)
+		"UPDATE webhook_events SET processed_at = ?, processing_error = ? WHERE id = ?",
+		time.Now().UTC(), errStr, eventID)
 	return err
 }
