@@ -23,6 +23,7 @@ import (
 	mailboxadminsvc "github.com/orvix/orvix/internal/admin/mailbox"
 	orgadminsvc "github.com/orvix/orvix/internal/admin/organization"
 	platformsvc "github.com/orvix/orvix/internal/admin/platform"
+	"github.com/orvix/orvix/internal/abuse"
 	"github.com/orvix/orvix/internal/antivirus"
 	"github.com/orvix/orvix/internal/api/handlers/settings"
 	"github.com/orvix/orvix/internal/audit"
@@ -196,6 +197,8 @@ type Handler struct {
 	billingSvc *billing.Service
 	usageSvc   *billing.UsageService
 	quotaSvc   *billing.QuotaService
+	abuseSvc   *abuse.SignalService
+	rateLimitSvc *abuse.RateLimitService
 }
 
 // NewHandler creates a new Handler with dependencies.
@@ -389,6 +392,14 @@ func (h *Handler) SetBillingUsageService(s *billing.UsageService) {
 
 func (h *Handler) SetBillingQuotaService(s *billing.QuotaService) {
 	h.quotaSvc = s
+}
+
+func (h *Handler) SetAbuseSignalService(s *abuse.SignalService) {
+	h.abuseSvc = s
+}
+
+func (h *Handler) SetRateLimitService(s *abuse.RateLimitService) {
+	h.rateLimitSvc = s
 }
 
 // setPreferredSessionCookie sets the opaque HttpOnly session cookie.

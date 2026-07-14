@@ -16,6 +16,7 @@ import (
 	mailboxadminsvc "github.com/orvix/orvix/internal/admin/mailbox"
 	orgadminsvc "github.com/orvix/orvix/internal/admin/organization"
 	platformpkg "github.com/orvix/orvix/internal/admin/platform"
+	"github.com/orvix/orvix/internal/abuse"
 	"github.com/orvix/orvix/internal/antivirus"
 	"github.com/orvix/orvix/internal/api/handlers"
 	"github.com/orvix/orvix/internal/api/handlers/settings"
@@ -201,6 +202,11 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			router.h.SetBillingUsageService(usageSvc)
 			router.h.SetBillingQuotaService(quotaSvc)
 			logger.Info("billing services wired")
+
+			abuseSvc := abuse.NewSignalService(sqlDB, abuse.NewRateLimitService(sqlDB))
+			router.h.SetAbuseSignalService(abuseSvc)
+			router.h.SetRateLimitService(abuse.NewRateLimitService(sqlDB))
+			logger.Info("abuse services wired")
 		}
 	}
 
@@ -732,6 +738,11 @@ func (r *Router) setupRoutes() {
 	enterprise.Post("/billing/subscription", r.h.CreateBillingSubscription)
 	enterprise.Get("/billing/usage", r.h.GetBillingUsage)
 	enterprise.Get("/billing/quota", r.h.CheckBillingQuota)
+
+	enterprise.Get("/abuse/signals", r.h.ListAbuseSignals)
+	enterprise.Post("/abuse/signals/acknowledge", r.h.AcknowledgeAbuseSignal)
+	enterprise.Post("/abuse/signals/resolve", r.h.ResolveAbuseSignal)
+	enterprise.Get("/abuse/send-limit", r.h.CheckSendLimit)
 
 	// CSRF is enforced on the entire admin group by default (deny-list,
 	// not allow-list) rather than only on routes an author remembered to
