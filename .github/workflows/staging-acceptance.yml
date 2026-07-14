@@ -76,7 +76,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -o Acquire::Retries=3
-          sudo apt-get install -y --no-install-recommends postgresql-client sqlite3 jq
+          sudo apt-get install -y --no-install-recommends postgresql-client-16 sqlite3 jq
           psql --version && jq --version
 
       - name: Initialize results (no result is PASS until proven)
