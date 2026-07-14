@@ -135,15 +135,11 @@ func (s *Service) CreateSubscription(tenantID uint, planID PlanID, interval Bill
 				return ErrTenantAlreadyHasSub
 			}
 		}
-		_, err = tx.Exec(`INSERT INTO subscriptions (tenant_id, plan_id, status, billing_interval, trial_ends_at,
-			current_period_start, current_period_end, storage_mb, send_limit_day, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			tenantID, planID, status, interval, trialEnd, now, periodEnd, plan.StorageMB, plan.SendLimitDay, now, now)
-		if err != nil {
-			return err
-		}
 		var id uint
-		tx.QueryRow("SELECT last_insert_rowid()").Scan(&id)
+		err = tx.QueryRow(`INSERT INTO subscriptions (tenant_id, plan_id, status, billing_interval, trial_ends_at,
+			current_period_start, current_period_end, storage_mb, send_limit_day, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+			tenantID, planID, status, interval, trialEnd, now, periodEnd, plan.StorageMB, plan.SendLimitDay, now, now).Scan(&id)
 		sub = &Subscription{
 			ID: id, TenantID: tenantID, PlanID: planID, Status: status, BillingInterval: interval,
 			TrialEndsAt: trialEnd, CurrentPeriodStart: now, CurrentPeriodEnd: periodEnd,
