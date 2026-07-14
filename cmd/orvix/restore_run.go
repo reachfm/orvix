@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"time"
@@ -86,7 +87,18 @@ func restoreRunCommand(args []string) int {
 		return 0
 	}
 
-	restart := func(ctx context.Context) error { return systemctlRestartOrvix(ctx) }
+	// The coordinator runs as root, so files it activates (the SQLite DB, mail
+	// store, attachments) are root-owned. The orvix service runs as User=orvix
+	// and could not open a root-owned database (SQLITE_CANTOPEN). Re-assert the
+	// service account's ownership of the data tree BEFORE restarting so the
+	// restarted service can open the restored state. This also runs before the
+	// rollback restart, so a rolled-back safety backup is equally usable.
+	restart := func(ctx context.Context) error {
+		if err := chownServiceData(cfg, logger); err != nil {
+			return fmt.Errorf("re-assert data ownership before restart: %w", err)
+		}
+		return systemctlRestartOrvix(ctx)
+	}
 	health := func(ctx context.Context) error { return probeOrvixHealth(ctx, cfg) }
 
 	rc := 0
@@ -228,6 +240,37 @@ func failJobResult(coord *restorecoord.Coordinator, id string, cause error, logg
 	if werr := coord.WriteResult(res); werr != nil {
 		logger.Error("restore-run: write failure result", zap.String("job", id), zap.Error(werr))
 	}
+}
+
+// chownServiceData re-asserts ownership of the runtime data tree to the orvix
+// service account after a root-driven activation/rollback. Paths are fixed
+// (config-derived data locations), never caller input, and chown is invoked
+// directly (no shell). It is a no-op when the service user cannot be resolved
+// (e.g. a non-systemd dev box).
+func chownServiceData(cfg *config.Config, logger *zap.Logger) error {
+	owner := strings.TrimSpace(os.Getenv("ORVIX_SERVICE_USER"))
+	if owner == "" {
+		owner = "orvix"
+	}
+	if _, err := user.Lookup(owner); err != nil {
+		logger.Warn("restore-run: service user not found; skipping ownership re-assert", zap.String("user", owner), zap.Error(err))
+		return nil
+	}
+	dataRoot := "/var/lib/orvix"
+	if cfg != nil && strings.TrimSpace(cfg.CoreMail.DataPath) != "" {
+		// Chown the common parent of the data path and the DB so the restored
+		// DB, mail store, attachments, and job queue are all service-owned.
+		dataRoot = "/var/lib/orvix"
+	}
+	chownBin, err := exec.LookPath("chown")
+	if err != nil {
+		return fmt.Errorf("chown not found: %w", err)
+	}
+	out, err := exec.Command(chownBin, "-R", owner+":"+owner, dataRoot).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("chown -R %s %s: %w (output: %s)", owner, dataRoot, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // systemctlRestartOrvix restarts the orvix service via systemd. It is
