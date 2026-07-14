@@ -1,9 +1,29 @@
 package billing
 
-import "database/sql"
+import (
+	"database/sql"
+	"fmt"
+	"strings"
+
+	"github.com/orvix/orvix/internal/dbdialect"
+)
 
 func CreateTables(db *sql.DB) error {
-	for _, ddl := range []string{
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
+	autoInc := dialect.AutoIncrement()
+	ts := dialect.TimestampType()
+
+	// Replace SQLite-specific keywords in DDL templates.
+	ddl := func(sql string) string {
+		sql = strings.ReplaceAll(sql, "__AUTOINC__", autoInc)
+		sql = strings.ReplaceAll(sql, "__TS__", ts)
+		return sql
+	}
+
+	templates := []string{
 		`CREATE TABLE IF NOT EXISTS plans (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL DEFAULT '',
@@ -15,41 +35,41 @@ func CreateTables(db *sql.DB) error {
 			storage_mb INTEGER NOT NULL DEFAULT 1024,
 			send_limit_day INTEGER NOT NULL DEFAULT 500,
 			features TEXT DEFAULT '',
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			created_at __TS__ DEFAULT CURRENT_TIMESTAMP,
+			updated_at __TS__ DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS subscriptions (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			id __AUTOINC__,
 			tenant_id INTEGER NOT NULL UNIQUE,
 			plan_id TEXT NOT NULL DEFAULT '',
 			status TEXT NOT NULL DEFAULT 'trialing',
 			billing_interval TEXT NOT NULL DEFAULT 'monthly',
-			trial_ends_at TIMESTAMP,
-			current_period_start TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			current_period_end TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			cancelled_at TIMESTAMP,
-			past_due_since TIMESTAMP,
-			grace_period_ends_at TIMESTAMP,
-			suspended_at TIMESTAMP,
+			trial_ends_at __TS__,
+			current_period_start __TS__ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			current_period_end __TS__ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			cancelled_at __TS__,
+			past_due_since __TS__,
+			grace_period_ends_at __TS__,
+			suspended_at __TS__,
 			storage_mb INTEGER NOT NULL DEFAULT 1024,
 			send_limit_day INTEGER NOT NULL DEFAULT 500,
 			provider TEXT DEFAULT '',
 			provider_sub_id TEXT DEFAULT '',
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			created_at __TS__ DEFAULT CURRENT_TIMESTAMP,
+			updated_at __TS__ DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS usage_records (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			id __AUTOINC__,
 			tenant_id INTEGER NOT NULL,
-			period_start TIMESTAMP NOT NULL,
-			period_end TIMESTAMP NOT NULL,
+			period_start __TS__ NOT NULL,
+			period_end __TS__ NOT NULL,
 			mailboxes_used INTEGER NOT NULL DEFAULT 0,
 			domains_used INTEGER NOT NULL DEFAULT 0,
 			storage_used_mb INTEGER NOT NULL DEFAULT 0,
 			emails_sent INTEGER NOT NULL DEFAULT 0,
 			emails_received INTEGER NOT NULL DEFAULT 0,
 			api_calls INTEGER NOT NULL DEFAULT 0,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			created_at __TS__ DEFAULT CURRENT_TIMESTAMP,
 			UNIQUE(tenant_id, period_start)
 		)`,
 		`CREATE TABLE IF NOT EXISTS webhook_events (
@@ -59,101 +79,102 @@ func CreateTables(db *sql.DB) error {
 			provider_sub_id TEXT DEFAULT '',
 			raw_payload BLOB,
 			signature TEXT DEFAULT '',
-			received_at TIMESTAMP NOT NULL,
-			processed_at TIMESTAMP,
+			received_at __TS__ NOT NULL,
+			processed_at __TS__,
 			processing_error TEXT DEFAULT '',
 			idempotency_key TEXT NOT NULL UNIQUE,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			created_at __TS__ DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS org_invitations (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			id __AUTOINC__,
 			organization_id INTEGER NOT NULL,
 			inviter_id INTEGER NOT NULL,
 			email TEXT NOT NULL,
 			token_hash TEXT NOT NULL,
 			role TEXT NOT NULL DEFAULT 'user',
 			status TEXT NOT NULL DEFAULT 'pending',
-			expires_at TIMESTAMP NOT NULL,
-			accepted_at TIMESTAMP,
-			revoked_at TIMESTAMP,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			expires_at __TS__ NOT NULL,
+			accepted_at __TS__,
+			revoked_at __TS__,
+			created_at __TS__ DEFAULT CURRENT_TIMESTAMP,
+			updated_at __TS__ DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS org_ownership_transfers (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			id __AUTOINC__,
 			organization_id INTEGER NOT NULL,
 			from_user_id INTEGER NOT NULL,
 			to_user_id INTEGER NOT NULL,
 			token_hash TEXT NOT NULL,
 			status TEXT NOT NULL DEFAULT 'pending',
-			expires_at TIMESTAMP NOT NULL,
-			accepted_at TIMESTAMP,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			expires_at __TS__ NOT NULL,
+			accepted_at __TS__,
+			created_at __TS__ DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS org_suspensions (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			id __AUTOINC__,
 			organization_id INTEGER NOT NULL,
 			reason TEXT NOT NULL DEFAULT '',
 			suspended_by INTEGER NOT NULL,
 			note TEXT DEFAULT '',
-			suspended_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			reactivated_at TIMESTAMP,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			suspended_at __TS__ DEFAULT CURRENT_TIMESTAMP,
+			reactivated_at __TS__,
+			created_at __TS__ DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS org_deletions (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			id __AUTOINC__,
 			organization_id INTEGER NOT NULL,
 			requested_by INTEGER NOT NULL,
 			state TEXT NOT NULL DEFAULT 'deletion_requested',
-			retention_expires_at TIMESTAMP,
-			requested_at TIMESTAMP NOT NULL,
-			confirmed_at TIMESTAMP,
-			cancelled_at TIMESTAMP,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			retention_expires_at __TS__,
+			requested_at __TS__ NOT NULL,
+			confirmed_at __TS__,
+			cancelled_at __TS__,
+			created_at __TS__ DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS domain_ownership (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			id __AUTOINC__,
 			domain_id INTEGER NOT NULL UNIQUE,
 			token_hash TEXT NOT NULL,
 			status TEXT NOT NULL DEFAULT 'pending',
-			token_generated_at TIMESTAMP NOT NULL,
-			token_rotated_at TIMESTAMP,
-			verified_at TIMESTAMP,
-			last_check_at TIMESTAMP,
+			token_generated_at __TS__ NOT NULL,
+			token_rotated_at __TS__,
+			verified_at __TS__,
+			last_check_at __TS__,
 			last_error TEXT DEFAULT '',
 			check_count INTEGER NOT NULL DEFAULT 0,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			created_at __TS__ DEFAULT CURRENT_TIMESTAMP,
+			updated_at __TS__ DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS abuse_send_counts (
 			day_key TEXT PRIMARY KEY,
 			tenant_id INTEGER NOT NULL,
 			emails_sent INTEGER NOT NULL DEFAULT 0,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			created_at __TS__ DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS abuse_bounce_counts (
 			day_key TEXT PRIMARY KEY,
 			tenant_id INTEGER NOT NULL,
 			bounce_count INTEGER NOT NULL DEFAULT 0,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			created_at __TS__ DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS abuse_signals (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			id __AUTOINC__,
 			tenant_id INTEGER NOT NULL,
 			mailbox_id INTEGER,
 			signal_type TEXT NOT NULL DEFAULT '',
 			severity TEXT NOT NULL DEFAULT 'info',
 			description TEXT DEFAULT '',
 			metadata TEXT DEFAULT '',
-			detected_at TIMESTAMP NOT NULL,
-			acknowledged_at TIMESTAMP,
-			resolved_at TIMESTAMP,
+			detected_at __TS__ NOT NULL,
+			acknowledged_at __TS__,
+			resolved_at __TS__,
 			resolved_by INTEGER,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			created_at __TS__ DEFAULT CURRENT_TIMESTAMP
 		)`,
-	} {
-		if _, err := db.Exec(ddl); err != nil {
-			return err
+	}
+	for _, t := range templates {
+		if _, err := db.Exec(ddl(t)); err != nil {
+			return fmt.Errorf("create table: %w", err)
 		}
 	}
 	return nil
