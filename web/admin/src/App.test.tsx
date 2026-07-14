@@ -6,7 +6,7 @@ import App from "./App";
 
 describe("Admin console certification", () => {
   beforeAll(() => {
-    global.fetch = vi.fn<typeof fetch>().mockResolvedValue({ ok: true } as Response);
+    globalThis.fetch = vi.fn<typeof fetch>().mockResolvedValue({ ok: true } as Response);
   });
 
   afterEach(() => {

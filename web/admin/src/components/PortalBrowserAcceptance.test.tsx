@@ -12,7 +12,7 @@ function Wrapper({ children }: { children: ReactNode }) {
 
 describe("Portal browser acceptance", () => {
   beforeAll(() => {
-    global.fetch = vi.fn<typeof fetch>(() => Promise.resolve({ ok: true, json: () => Promise.resolve([]) } as any));
+    globalThis.fetch = vi.fn<typeof fetch>(() => Promise.resolve({ ok: true, json: () => Promise.resolve([]) } as any));
   });
 
   afterEach(() => { cleanup(); });
