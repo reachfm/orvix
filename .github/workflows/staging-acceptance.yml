@@ -97,8 +97,6 @@ jobs:
             export ORVIX_RELEASE_SIGNING_KEY_FILE=/tmp/signing-key.pem
             export ORVIX_RELEASE_VERIFYING_KEY_FILE=/tmp/signing-key.pub.pem
             export ORVIX_REQUIRE_RELEASE_SIGNATURE=1
-            mkdir -p release/trust
-            cp /tmp/signing-key.pub.pem release/trust/orvix-release-signing.pub.pem
           fi
           bash release/scripts/build-release-bundle.sh --channel stable --output /tmp/dist
           BUNDLE_PATH="$(ls /tmp/dist/orvix-enterprise-mail-*-linux-amd64.tar.gz | grep -v stable | head -1)"
