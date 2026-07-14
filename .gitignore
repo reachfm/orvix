@@ -13,6 +13,7 @@ vendor/
 *.dll
 *.key
 *.pem
+!release/trust/orvix-release-signing.pub.pem
 *.crt
 *.csr
 *.p12
