@@ -79,6 +79,17 @@ func CreateTables(db *sql.DB) error {
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
+		`CREATE TABLE IF NOT EXISTS org_ownership_transfers (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			organization_id INTEGER NOT NULL,
+			from_user_id INTEGER NOT NULL,
+			to_user_id INTEGER NOT NULL,
+			token_hash TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			expires_at DATETIME NOT NULL,
+			accepted_at DATETIME,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
 		`CREATE TABLE IF NOT EXISTS org_suspensions (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			organization_id INTEGER NOT NULL,

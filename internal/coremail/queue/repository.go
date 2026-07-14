@@ -23,6 +23,10 @@ type Repository interface {
 	// Only one worker will receive each job. Returns nil if no job is available.
 	LeaseNext(ctx context.Context, owner string, leaseSeconds int, allowedStatuses []QueueStatus, tx interface{}) (*QueueEntry, error)
 
+	// LeaseNextTenantFair claims the next available job while respecting per-tenant
+	// worker ceilings. Prevents one tenant from monopolizing queue workers.
+	LeaseNextTenantFair(ctx context.Context, owner string, leaseSeconds int, allowedStatuses []QueueStatus, maxPerTenant, globalMax int, tx interface{}) (*QueueEntry, error)
+
 	// AckDelivered marks a job as successfully delivered.
 	AckDelivered(ctx context.Context, id uint, tx interface{}) error
 
@@ -314,6 +318,98 @@ func (r *SQLRepo) LeaseNext(ctx context.Context, owner string, leaseSeconds int,
 	rowsAffected, _ := res.RowsAffected()
 	if rowsAffected == 0 {
 		return nil, nil // someone else got it
+	}
+
+	entry.Status = StatusLeased
+	entry.LeaseOwner = owner
+	entry.LeaseExpiresAt = &leaseExp
+	entry.AttemptCount++
+	entry.UpdatedAt = now
+	return entry, nil
+}
+
+// LeaseNextTenantFair claims the next available job while respecting per-tenant
+// worker ceilings. Prevents one tenant from monopolizing the queue.
+func (r *SQLRepo) LeaseNextTenantFair(ctx context.Context, owner string, leaseSeconds int, allowedStatuses []QueueStatus, maxPerTenant, globalMax int, tx interface{}) (*QueueEntry, error) {
+	e := r.exec(tx)
+
+	// Check global ceiling.
+	if globalMax > 0 {
+		var active int
+		e.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM coremail_queue WHERE status='leased' AND lease_expires_at>datetime('now') AND deleted_at IS NULL").Scan(&active)
+		if active >= globalMax {
+			return nil, nil
+		}
+	}
+
+	statusPlaceholders := make([]string, len(allowedStatuses))
+	statusArgs := make([]interface{}, len(allowedStatuses))
+	for i, s := range allowedStatuses {
+		statusPlaceholders[i] = "?"
+		statusArgs[i] = string(s)
+	}
+
+	// Find least-loaded tenant with pending work (tenant fairness).
+	var chosenTenant *uint
+	if maxPerTenant > 0 {
+		candidates, err := e.QueryContext(ctx,
+			`SELECT q.tenant_id, COUNT(q2.id) as active
+			FROM coremail_queue q
+			LEFT JOIN coremail_queue q2 ON q2.tenant_id = q.tenant_id AND q2.status='leased' AND q2.lease_expires_at>datetime('now') AND q2.deleted_at IS NULL
+			WHERE q.status IN (`+strings.Join(statusPlaceholders, ",")+`) AND q.deleted_at IS NULL
+			GROUP BY q.tenant_id
+			ORDER BY active ASC LIMIT 1`, statusArgs...)
+		if err == nil {
+			if candidates.Next() {
+				var tid uint
+				var activeCount int
+				candidates.Scan(&tid, &activeCount)
+				if activeCount < maxPerTenant {
+					chosenTenant = &tid
+				}
+			}
+			candidates.Close()
+		}
+	}
+
+	// Build WHERE clause.
+	now := nowFn()
+	whereStatus := "status IN (" + strings.Join(statusPlaceholders, ",") + ")"
+	whereArgs := append([]interface{}{}, statusArgs...)
+
+	if chosenTenant != nil {
+		whereStatus += " AND tenant_id = ?"
+		whereArgs = append(whereArgs, *chosenTenant)
+	}
+
+	// Step 1: SELECT candidate.
+	row := e.QueryRowContext(ctx,
+		`SELECT `+queueCols+` FROM coremail_queue
+		WHERE `+whereStatus+` AND (next_attempt_at IS NULL OR next_attempt_at <= ?) AND deleted_at IS NULL
+		ORDER BY priority DESC, next_attempt_at ASC, id ASC LIMIT 1`,
+		append(whereArgs, now)...,
+	)
+	entry, err := scanEntry(row)
+	if err != nil || entry == nil {
+		return nil, nil
+	}
+
+	// Step 2: atomic claim.
+	leaseExp := now.Add(time.Duration(leaseSeconds) * time.Second)
+	claimArgs := []interface{}{StatusLeased, owner, leaseExp, now, entry.ID}
+	claimArgs = append(claimArgs, statusArgs...)
+	res, err := e.ExecContext(ctx,
+		`UPDATE coremail_queue SET status=?, lease_owner=?, lease_expires_at=?, attempt_count=attempt_count+1, updated_at=?
+		WHERE id=? AND status IN (`+strings.Join(statusPlaceholders, ",")+`) AND deleted_at IS NULL`,
+		claimArgs...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return nil, nil
 	}
 
 	entry.Status = StatusLeased
