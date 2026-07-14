@@ -208,6 +208,10 @@ func (s *Service) GetDomain(ctx context.Context, id, tenantID uint) (*AdminDomai
 	return d, nil
 }
 
+func (s *Service) CountByTenant(ctx context.Context, tenantID uint) (int64, error) {
+	return s.repo.CountByTenant(ctx, tenantID)
+}
+
 func (s *Service) CreateDomain(ctx context.Context, req CreateDomainRequest, tenantID uint) (*AdminDomain, error) {
 	d := &AdminDomain{
 		TenantID:     tenantID,

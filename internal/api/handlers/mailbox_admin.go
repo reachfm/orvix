@@ -102,10 +102,20 @@ func (h *Handler) CreateAdminMailbox(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "password is required"})
 	}
 
-	var domainID uint
-	if domainIDVal := c.FormValue("domain_id"); domainIDVal != "" {
-		_ = domainID
+	// Quota enforcement: check mailbox limit before creating.
+	if h.quotaSvc != nil && h.mailboxAdminSvc != nil {
+		count := h.mailboxAdminSvc.CountByTenant(c.Context(), tenantID)
+		if result := h.quotaSvc.CanCreateMailbox(tenantID, int(count)); result != nil && !result.Allowed {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"error":   "mailbox quota exceeded: " + result.Reason,
+				"limit":   result.Limit,
+				"used":    result.Used,
+				"allowed": false,
+			})
+		}
 	}
+
+	var domainID uint
 
 	resp, err := h.mailboxAdminSvc.CreateMailbox(c.Context(), req, tenantID, domainID)
 	if err != nil {

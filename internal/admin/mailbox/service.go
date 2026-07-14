@@ -23,6 +23,14 @@ func NewService(repo *AdminMailboxRepo, auditStore *audit.ExtendedStore, rbac *e
 	return &Service{repo: repo, auditStore: auditStore, rbac: rbac}
 }
 
+func (s *Service) CountByTenant(ctx context.Context, tenantID uint) int64 {
+	count, err := s.repo.CountByTenant(ctx, tenantID)
+	if err != nil {
+		return 0
+	}
+	return count
+}
+
 func (s *Service) ListMailboxes(ctx context.Context, filter MailboxFilter) ([]AdminMailbox, int64, error) {
 	return s.repo.List(ctx, filter)
 }

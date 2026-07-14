@@ -691,6 +691,21 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		})
 	}
 
+	// Quota enforcement: check daily send limit before processing.
+	if h.quotaSvc != nil && h.usageSvc != nil {
+		usage, err := h.usageSvc.GetCurrentUsage(ctx.Mailbox.TenantID)
+		if err == nil {
+			if result := h.quotaSvc.CanSendEmail(ctx.Mailbox.TenantID, usage.EmailsSent); result != nil && !result.Allowed {
+				return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+					"error":     "daily send limit reached: " + result.Reason,
+					"limit":     result.Limit,
+					"sent":      result.Used,
+					"remaining": result.Remaining,
+				})
+			}
+		}
+	}
+
 	var req struct {
 		To      string
 		Cc      string
@@ -899,6 +914,11 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 			"folder":     sentFolder.Path,
 			"status":     "stored",
 		})
+	}
+
+	// Update usage counter after successful enqueue.
+	if h.usageSvc != nil && queuedCount > 0 {
+		h.usageSvc.IncrementEmailsSent(ctx.Mailbox.TenantID, int64(queuedCount))
 	}
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{

@@ -56,4 +56,61 @@ export const api = {
 
   // Current user
   getMe: () => request<any>("/me"),
+
+  // Organization
+  getCurrentOrganization: () => request<any>("/enterprise/organizations/current"),
+
+  // Invitations
+  listInvitations: () => request<any[]>("/enterprise/invitations"),
+  createInvitation: (data: any) =>
+    request("/enterprise/invitations", { method: "POST", body: JSON.stringify(data) }),
+  revokeInvitation: (id: number) =>
+    request(`/enterprise/invitations/${id}/revoke`, { method: "POST" }),
+
+  // Members
+  listMembers: () => request<any[]>("/enterprise/members"),
+  updateMemberRole: (userId: number, role: string) =>
+    request(`/enterprise/members/${userId}/role`, { method: "PATCH", body: JSON.stringify({ role }) }),
+  removeMember: (userId: number) =>
+    request(`/enterprise/members/${userId}`, { method: "DELETE" }),
+
+  // Ownership transfer
+  requestOwnershipTransfer: (email: string) =>
+    request("/enterprise/ownership/request", { method: "POST", body: JSON.stringify({ email }) }),
+  acceptOwnershipTransfer: (token: string) =>
+    request(`/enterprise/ownership/accept`, { method: "POST", body: JSON.stringify({ token }) }),
+  cancelOwnershipTransfer: () =>
+    request("/enterprise/ownership/cancel", { method: "POST" }),
+
+  // Aliases
+  listAliases: () => request<any[]>("/enterprise/aliases"),
+  createAlias: (data: any) =>
+    request("/enterprise/aliases", { method: "POST", body: JSON.stringify(data) }),
+  deleteAlias: (id: number) => request(`/enterprise/aliases/${id}`, { method: "DELETE" }),
+
+  // Groups
+  listGroups: () => request<any[]>("/enterprise/groups"),
+  createGroup: (data: any) =>
+    request("/enterprise/groups", { method: "POST", body: JSON.stringify(data) }),
+  deleteGroup: (id: number) => request(`/enterprise/groups/${id}`, { method: "DELETE" }),
+  addGroupMember: (groupId: number, email: string) =>
+    request(`/enterprise/groups/${groupId}/members`, { method: "POST", body: JSON.stringify({ email }) }),
+  removeGroupMember: (groupId: number, memberId: number) =>
+    request(`/enterprise/groups/${groupId}/members/${memberId}`, { method: "DELETE" }),
+
+  // Account settings
+  updateProfile: (data: any) =>
+    request("/account/profile", { method: "PATCH", body: JSON.stringify(data) }),
+  changePassword: (data: any) =>
+    request("/auth/change-password", { method: "POST", body: JSON.stringify(data) }),
+
+  // Signup
+  signup: (data: any) =>
+    request("/auth/signup", { method: "POST", body: JSON.stringify(data) }),
+
+  // Forgot/reset password
+  forgotPassword: (email: string) =>
+    request("/auth/forgot-password", { method: "POST", body: JSON.stringify({ email }) }),
+  resetPassword: (token: string, password: string) =>
+    request("/auth/reset-password", { method: "POST", body: JSON.stringify({ token, password }) }),
 };
