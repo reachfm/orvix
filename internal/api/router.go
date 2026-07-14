@@ -21,6 +21,7 @@ import (
 	"github.com/orvix/orvix/internal/api/handlers/settings"
 	auditpkg "github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/auth"
+	"github.com/orvix/orvix/internal/billing"
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/coremail"
 	"github.com/orvix/orvix/internal/coremail/push"
@@ -190,6 +191,16 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			router.h.SetPlatformAdminService(platformSvc)
 
 			logger.Info("enterprise admin services wired with transactional audit and RBAC")
+		}
+
+		billingSvc, usageSvc, quotaSvc, _, _, err := billing.Initialize(sqlDB)
+		if err != nil {
+			logger.Error("billing initialization failed", zap.Error(err))
+		} else {
+			router.h.SetBillingService(billingSvc)
+			router.h.SetBillingUsageService(usageSvc)
+			router.h.SetBillingQuotaService(quotaSvc)
+			logger.Info("billing services wired")
 		}
 	}
 
@@ -550,6 +561,8 @@ func (r *Router) setupRoutes() {
 	loginGroup.Post("/mfa/verify", r.h.MFALoginVerify)
 	r.app.Post("/admin/login", r.h.Login)
 
+	protected.Get("/billing/plans", r.h.ListBillingPlans)
+
 	// Webmail authentication (public — no auth middleware).
 	//
 	// /api/v1/webmail/login is the form submission. The
@@ -715,6 +728,11 @@ func (r *Router) setupRoutes() {
 	enterprise.Post("/mailboxes/bulk/status", r.h.BulkSetAdminMailboxStatus)
 	enterprise.Post("/mailboxes/:id/reset-password", r.h.ResetAdminMailboxPassword)
 	enterprise.Get("/organizations/:id", r.h.GetOrganization)
+
+	enterprise.Get("/billing/subscription", r.h.GetBillingSubscription)
+	enterprise.Post("/billing/subscription", r.h.CreateBillingSubscription)
+	enterprise.Get("/billing/usage", r.h.GetBillingUsage)
+	enterprise.Get("/billing/quota", r.h.CheckBillingQuota)
 
 	// CSRF is enforced on the entire admin group by default (deny-list,
 	// not allow-list) rather than only on routes an author remembered to
