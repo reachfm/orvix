@@ -2248,7 +2248,15 @@ func TestRestoreHealthFailureRollsBack(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(s.mailDir, "live-only.eml"), []byte("live"), 0640); err != nil {
 		t.Fatalf("write live marker: %v", err)
 	}
-	s.SetRestoreHealthCheck(func(context.Context) error { return fmt.Errorf("health failed") })
+	// Fail only on the primary restore health check; rollback health must pass.
+	callCount := 0
+	s.SetRestoreHealthCheck(func(context.Context) error {
+		callCount++
+		if callCount == 1 {
+			return fmt.Errorf("health failed")
+		}
+		return nil
+	})
 	result, err := s.RestoreBackup(ctx, b.ID)
 	if err == nil {
 		t.Fatal("expected restore health failure")
@@ -2261,6 +2269,60 @@ func TestRestoreHealthFailureRollsBack(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(s.mailDir, "live-only.eml")); statErr != nil {
 		t.Fatalf("rollback did not restore live marker: %v", statErr)
+	}
+}
+
+func TestRollbackHealthFailureReportsNotRolledBack(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	b, err := s.CreateBackup(ctx, "rollback-health-fail")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Health check always fails -> restore fails AND rollback health fails -> not rolled back
+	s.SetRestoreHealthCheck(func(context.Context) error { return fmt.Errorf("health failed") })
+	result, err := s.RestoreBackup(ctx, b.ID)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if result == nil {
+		t.Fatal("expected result")
+	}
+	if result.RolledBack {
+		t.Fatalf("expected RolledBack=false when rollback health also fails, got %+v", result)
+	}
+	if !strings.Contains(result.Message, "rollback health check failed") {
+		t.Fatalf("expected rollback health failure in message, got: %s", result.Message)
+	}
+}
+
+func TestRollbackRestartFailureReportsNotRolledBack(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	b, err := s.CreateBackup(ctx, "rollback-restart-fail")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Health check fails on restore -> triggers rollback
+	// Restart callback always fails -> rollback restart fails -> not rolled back
+	callCount := 0
+	s.SetRestoreHealthCheck(func(context.Context) error {
+		callCount++
+		if callCount == 1 {
+			return fmt.Errorf("health failed")
+		}
+		return nil
+	})
+	s.SetRestoreRestart(func(context.Context) error { return fmt.Errorf("restart failed") })
+	result, err := s.RestoreBackup(ctx, b.ID)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if result == nil {
+		t.Fatal("expected result")
+	}
+	if result.RolledBack {
+		t.Fatalf("expected RolledBack=false when rollback restart fails, got %+v", result)
 	}
 }
 

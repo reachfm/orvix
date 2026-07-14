@@ -1462,12 +1462,28 @@ func (s *Service) safeStagingPath(id string) (string, error) {
 	return absCandidate, nil
 }
 
-// RestoreBackup validates the backup archive and activates it while Orvix is
-// in explicit restore maintenance mode. It creates a pre-restore safety
-// backup first, verifies the archive manifest/checksums, extracts into a
-// private staging directory, activates database/mail/attachment payloads,
-// restarts/reloads if configured, runs health verification, and rolls back to
-// the safety backup on activation or health failure.
+// RestoreBackup runs the full automatic restore lifecycle. The external
+// coordinator (orvix-restore.service, a separate systemd unit running as root)
+// drives the lifecycle so the service can be genuinely restarted and its
+// post-restart health observed. The in-process API only submits a durable job
+// and polls its result; it never performs activation, restart, or health
+// verification itself.
+//
+// Lifecycle:
+//  1. Validate the backup archive (manifest/checksums/format version).
+//  2. Create a pre-restore safety backup of the current live state.
+//  3. Extract the requested backup into a private staging directory.
+//  4. Activate: atomically replace database, mail store, attachments, keys.
+//  5. Remove stale SQLite WAL/SHM files so the restarted service opens cleanly.
+//  6. Restart the Orvix service via the configured restart callback.
+//  7. Run post-restart health verification via the configured health callback.
+//  8. On any failure: roll back to the safety backup (reactivate + restart +
+//     health check), audit, and return a truthful error.
+//
+// RestoreStatusActivated / "Validated, activated, and health verified" is
+// only returned when every step (including the post-restart health check)
+// succeeds. Rollback also verifies post-rollback health before setting
+// RolledBack: true.
 func (s *Service) RestoreBackup(ctx context.Context, id string) (*RestoreStageResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1592,6 +1608,22 @@ func (s *Service) rollbackRestoreLocked(ctx context.Context, sourceID, safetyID 
 				Message:        cause.Error() + "; rollback restart failed: " + err.Error(),
 				BackupID:       sourceID,
 				SafetyBackupID: safetyID,
+				RolledBack:     false,
+			}, cause
+		}
+	}
+	// Verify the rollback produced a healthy running service. RolledBack is
+	// only set to true when the safety backup activation, restart, and health
+	// check all succeed.
+	if s.restoreHealthCheck != nil {
+		if err := s.runBoundedRestoreStep(ctx, s.restoreHealthCheck); err != nil {
+			s.auditRestore(ctx, "backup.restore.rollback_failed", "backup_id:"+sourceID+"|safety_backup_id:"+safetyID+"|error:"+err.Error())
+			return &RestoreStageResult{
+				Status:         RestoreStatusFailed,
+				Message:        cause.Error() + "; rollback health check failed: " + err.Error(),
+				BackupID:       sourceID,
+				SafetyBackupID: safetyID,
+				RolledBack:     false,
 			}, cause
 		}
 	}

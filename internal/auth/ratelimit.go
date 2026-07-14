@@ -67,13 +67,18 @@ func (rl *RedisRateLimiter) Middleware() fiber.Handler {
 }
 
 // LoginMiddleware returns a middleware specifically for login rate limiting.
+// On Redis failure it fails CLOSED (503) rather than allowing unthrottled login
+// attempts during a Redis outage. The error response omits internal Redis details
+// and does not name the dependency.
 func (rl *RedisRateLimiter) LoginMiddleware() fiber.Handler {
 	return func(c fiber.Ctx) error {
 		key := fmt.Sprintf("ratelimit:login:%s", c.IP())
 		allowed, remaining, err := rl.check(c.Context(), key, rl.loginMax, rl.loginWin)
 		if err != nil {
-			rl.logger.Error("login rate limiter error", zap.Error(err))
-			return c.Next()
+			rl.logger.Error("login rate limiter unavailable", zap.Error(err))
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+				"error": "authentication temporarily unavailable, please try again later",
+			})
 		}
 		c.Set("X-RateLimit-Login-Remaining", fmt.Sprintf("%d", remaining))
 		if !allowed {

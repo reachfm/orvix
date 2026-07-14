@@ -52,9 +52,8 @@ func TestRestore_MissingHealthIntegration_FailsClosed(t *testing.T) {
 	}
 }
 
-// 2. restart returns error → rollback (safety reactivated; health never reached).
-// The restore-target restart fails; the rollback restart (2nd invocation)
-// succeeds, so the service recovers onto the pre-restore safety backup.
+// 2. restart returns error → rollback (safety reactivated; rollback restart
+// succeeds; rollback health succeeds; healthCalls==1 from rollback verification).
 func TestRestore_RestartError_RollsBackAndSkipsHealth(t *testing.T) {
 	s := testService(t)
 	var restartCalls, healthCalls int32
@@ -77,8 +76,9 @@ func TestRestore_RestartError_RollsBackAndSkipsHealth(t *testing.T) {
 	if result == nil || result.Status != RestoreStatusRolledBack || !result.RolledBack {
 		t.Fatalf("expected rolled_back, got %+v", result)
 	}
-	if atomic.LoadInt32(&healthCalls) != 0 {
-		t.Fatal("health check must NOT run after a failed restart")
+	// Rollback health check runs (and succeeds); primary restore health never runs.
+	if atomic.LoadInt32(&healthCalls) != 1 {
+		t.Fatalf("expected exactly 1 health call (rollback verification), got %d", healthCalls)
 	}
 }
 
@@ -111,10 +111,17 @@ func TestRestore_RestartTimeout_RollsBack(t *testing.T) {
 	}
 }
 
-// 4. service health fails → rollback.
+// 4. service health fails during primary restore → rollback. Rollback health
+// must succeed for RolledBack: true.
 func TestRestore_HealthFailure_RollsBack(t *testing.T) {
 	s := testService(t)
-	s.SetRestoreHealthCheck(func(context.Context) error { return fmt.Errorf("service unhealthy after restart") })
+	var healthCalls int32
+	s.SetRestoreHealthCheck(func(context.Context) error {
+		if atomic.AddInt32(&healthCalls, 1) == 1 {
+			return fmt.Errorf("service unhealthy after restart")
+		}
+		return nil // rollback health passes
+	})
 	id := newRestoreTestBackup(t, s, "health-fail")
 
 	result, err := s.RestoreBackup(context.Background(), id)

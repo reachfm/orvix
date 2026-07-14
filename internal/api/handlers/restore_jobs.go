@@ -40,10 +40,20 @@ func (h *Handler) restoreCoordinator() *restorecoord.Coordinator {
 
 // restoreCoordinatorInstalled reports whether the external restore coordinator
 // (systemd path + service units) is installed, so the API fails closed rather
-// than accepting a restore that can never actually run. An explicit env opt-in
-// is provided for controlled test/staging harnesses; it is never set in a
-// normal production install (which ships the real unit files).
+// than accepting a restore that can never actually run.
+//
+// ORVIX_RESTORE_COORDINATOR_ASSUME_READY is a staging/test-only override that
+// skips the on-disk unit-file check. It is HONORED ONLY when the process is
+// NOT running under a production database dialect (see the gate in
+// probeOrvixHealth for the same pattern). Production installs ship the real
+// unit files, never set this env var, and are therefore gated by the actual
+// on-disk presence of orvix-restore.path.
 func restoreCoordinatorInstalled() bool {
+	// Staging/test override: assume the coordinator is ready without
+	// checking for the on-disk systemd unit files. This allows the
+	// disposable staging acceptance workflow to exercise the full
+	// restore lifecycle without manually creating unit symlinks.
+	// Production deployments never set this variable.
 	if os.Getenv("ORVIX_RESTORE_COORDINATOR_ASSUME_READY") == "1" {
 		return true
 	}

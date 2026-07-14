@@ -20,7 +20,10 @@ Group=root
 ExecStart=/usr/local/bin/orvix restore-run
 Environment=ORVIX_CONFIG=/etc/orvix/orvix.yaml
 Environment=ORVIX_LOG_DIR=/var/log/orvix
-EnvironmentFile=-/etc/orvix/bootstrap.env
+# The restore coordinator does NOT import bootstrap.env: it does not
+# require admin credentials, and loading them into the root process
+# would grant unnecessary access to secrets that the coordinator
+# never reads.
 
 # Narrow the writable surface to exactly the restore-relevant paths. Everything
 # else is read-only. The unit deliberately avoids aggressive sandboxing that
