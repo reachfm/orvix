@@ -13,7 +13,9 @@ import (
 func generateTestKey(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
 	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil { t.Fatalf("generate key: %v", err) }
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
 	return pub, priv
 }
 
@@ -30,11 +32,11 @@ func signLicense(t *testing.T, lic *License, priv ed25519.PrivateKey) string {
 func makeLicense(t *testing.T, edition Edition, daysValid int, machineID string) *License {
 	t.Helper()
 	lic := &License{
-		LicenseID:    "ORV-TEST-001",
-		Edition:      edition,
-		IssuedAt:     time.Now().Add(-1 * time.Hour),
-		ExpiresAt:    time.Now().Add(time.Duration(daysValid) * 24 * time.Hour),
-		Features:     []string{"jmap", "admin", "backup"},
+		LicenseID:      "ORV-TEST-001",
+		Edition:        edition,
+		IssuedAt:       time.Now().Add(-1 * time.Hour),
+		ExpiresAt:      time.Now().Add(time.Duration(daysValid) * 24 * time.Hour),
+		Features:       []string{"jmap", "admin", "backup"},
 		MachineBinding: machineID,
 	}
 	return lic
@@ -48,10 +50,14 @@ func TestParseLicense(t *testing.T) {
 	lic.Signature = signLicense(t, lic, priv)
 
 	data, err := SerializeLicense(lic)
-	if err != nil { t.Fatalf("serialize: %v", err) }
+	if err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
 
 	parsed, err := ParseLicense(data)
-	if err != nil { t.Fatalf("parse: %v", err) }
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
 	if parsed.Edition != EditionEnterprise {
 		t.Fatalf("expected enterprise, got %s", parsed.Edition)
 	}
@@ -204,9 +210,15 @@ func TestStatusWithUsage(t *testing.T) {
 		t.Fatalf("expected enterprise, got %s", result["edition"])
 	}
 	usage, ok := result["usage"].(map[string]interface{})
-	if !ok { t.Fatal("expected usage map") }
-	if usage["domains"] != int64(3) { t.Fatalf("expected 3 domains, got %v", usage["domains"]) }
-	if usage["mailboxes"] != int64(25) { t.Fatalf("expected 25 mailboxes, got %v", usage["mailboxes"]) }
+	if !ok {
+		t.Fatal("expected usage map")
+	}
+	if usage["domains"] != int64(3) {
+		t.Fatalf("expected 3 domains, got %v", usage["domains"])
+	}
+	if usage["mailboxes"] != int64(25) {
+		t.Fatalf("expected 25 mailboxes, got %v", usage["mailboxes"])
+	}
 }
 
 func TestStatusWithUsageNoLicense(t *testing.T) {
@@ -264,19 +276,33 @@ func TestLimitsFromResponse(t *testing.T) {
 
 	result := svc.StatusWithUsage(context.Background(), nil, nil)
 	limits, ok := result["limits"].(map[string]interface{})
-	if !ok { t.Fatal("expected limits map") }
-	if limits["domains"] != int64(100) { t.Fatalf("expected 100, got %v", limits["domains"]) }
-	if limits["mailboxes"] != int64(1000) { t.Fatalf("expected 1000, got %v", limits["mailboxes"]) }
-	if limits["storageGB"] != int64(500) { t.Fatalf("expected 500, got %v", limits["storageGB"]) }
+	if !ok {
+		t.Fatal("expected limits map")
+	}
+	if limits["domains"] != int64(100) {
+		t.Fatalf("expected 100, got %v", limits["domains"])
+	}
+	if limits["mailboxes"] != int64(1000) {
+		t.Fatalf("expected 1000, got %v", limits["mailboxes"])
+	}
+	if limits["storageGB"] != int64(500) {
+		t.Fatalf("expected 500, got %v", limits["storageGB"])
+	}
 }
 
 func TestDefaultLimits(t *testing.T) {
 	svc := NewService("/nonexistent")
 	result := svc.StatusWithUsage(context.Background(), nil, nil)
 	limits, ok := result["limits"].(map[string]interface{})
-	if !ok { t.Fatal("expected limits map") }
-	if limits["domains"] != int64(1) { t.Fatalf("expected 1, got %v", limits["domains"]) }
-	if limits["mailboxes"] != int64(5) { t.Fatalf("expected 5, got %v", limits["mailboxes"]) }
+	if !ok {
+		t.Fatal("expected limits map")
+	}
+	if limits["domains"] != int64(1) {
+		t.Fatalf("expected 1, got %v", limits["domains"])
+	}
+	if limits["mailboxes"] != int64(5) {
+		t.Fatalf("expected 5, got %v", limits["mailboxes"])
+	}
 }
 
 func TestConcurrentValidation(t *testing.T) {
@@ -303,6 +329,8 @@ func TestConcurrentValidation(t *testing.T) {
 func mustSerialize(t *testing.T, lic *License) []byte {
 	t.Helper()
 	data, err := SerializeLicense(lic)
-	if err != nil { t.Fatalf("serialize: %v", err) }
+	if err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
 	return data
 }

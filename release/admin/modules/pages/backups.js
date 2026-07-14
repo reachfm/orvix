@@ -14,9 +14,13 @@
    Restore is double-gated:
      1. The operator must type the backup id exactly.
      2. A second dialog confirms with a typed phrase.
-   Live restore is not advertised; we label it as "staged"
-   and require the operator to switch to maintenance mode via
-   the CLI.
+   Restore is a LIVE, asynchronous, job-based operation. POST returns 202 with
+   a job id; an external privileged coordinator (orvix-restore.service)
+   activates the backup, restarts Orvix (this UI's connection may drop),
+   verifies the restarted service's health, and automatically rolls back to a
+   pre-restore safety backup on failure. The UI polls
+   GET /api/v1/admin/backups/restore-jobs/:job_id and shows success ONLY after
+   the coordinator reports the restarted service is healthy.
    ===================================================================== */
 
 import { el, table, badge, fmtShortDate, fmtBytes, openModal, confirmDanger } from '../components.js';
@@ -67,14 +71,11 @@ export async function renderBackupsPage(root) {
   if (list && list.__err) { body.appendChild(el('div', { class: 'error', text: list.__err.message || 'load failed' })); applyAutoDir(wrap); return; }
   const items = (list && (list.backups || list)) || [];
   if (!items.length) { body.appendChild(el('div', { class: 'empty', text: t('common.empty') })); applyAutoDir(wrap); return; }
-  // Staged-only restore notice. The Orvix admin client only
-  // stages a restore; it never overwrites live data. The
-  // operator must perform a manual apply/restart before the
-  // backup is brought online. The static-analysis test
-  // (TestAdminNoFakeRestoreUI) pins this contract.
+  // Automatic restore notice. RestoreBackup validates, safety-snapshots,
+  // activates, restarts, health-verifies, and rolls back on failure.
   body.appendChild(el('p', { class: 'subtle' }, [
     el('strong', { text: 'restore-orvix-backup' }),
-    el('span', { text: ': This admin client only stages the backup only. The restore operation does not overwrite live data — Manual apply/restart is required before the staged backup is brought online.' }),
+    el('span', { text: ': Restore replaces ALL current mailboxes, domains, and rules. The system creates a pre-restore safety backup, activates the selected backup, restarts the service, and verifies system health. On failure the system automatically rolls back to the safety backup.' }),
   ]));
   body.appendChild(table({
     columns: [
@@ -184,7 +185,7 @@ async function doRestore(id) {
   // Stage 1: typed id confirmation.
   const stage1 = await confirmDanger({
     title: 'Restore backup',
-    message: 'Restoring a backup replaces ALL current mailboxes, aliases, and rules. The backend is in staged (manual) mode in this build — the operator must put the cluster in maintenance before pressing the live restore button.',
+    message: 'Restoring a backup replaces ALL current mailboxes, domains, and rules. A pre-restore safety backup is created automatically. Restore runs as a background job: Orvix will RESTART (this page may briefly lose connection), then the restarted service is health-checked. On any failure the system automatically rolls back to the safety backup. Progress is tracked as a restore job.',
     confirmLabel: 'Continue',
     requireText: id,
   });
@@ -192,15 +193,56 @@ async function doRestore(id) {
   // Stage 2: phrase confirmation.
   const stage2 = await confirmDanger({
     title: 'Final confirmation',
-    message: 'Type the phrase "restore backup" to confirm.',
+    message: 'Type the phrase restore-orvix-backup to confirm.',
     confirmLabel: 'Restore',
-    requireText: 'restore backup',
+    requireText: 'restore-orvix-backup',
   });
   if (!stage2) return;
+  let job;
   try {
-    await apiPost('/api/v1/admin/backups/' + encodeURIComponent(id) + '/restore', {});
-    toast('Restore initiated', 'success', 4000);
+    // Restore is asynchronous: the API accepts the job (202) and an external
+    // coordinator activates the backup, restarts Orvix, and verifies health.
+    job = await apiPost('/api/v1/admin/backups/' + encodeURIComponent(id) + '/restore', { confirm: 'restore-orvix-backup' });
   } catch (err) {
-    toast((err && err.message) || 'Restore failed', 'error', 6000);
+    toast((err && err.message) || 'Restore could not be submitted', 'error', 6000);
+    return;
   }
+  if (!job || !job.job_id) {
+    toast('Restore submitted, but no job id was returned', 'error', 6000);
+    return;
+  }
+  toast('Restore started. Orvix will restart and this connection may drop; tracking job ' + job.job_id.slice(0, 12) + '…', 'info', 6000);
+  pollRestoreJob(job.job_id);
+}
+
+// pollRestoreJob follows the durable restore job status. The Orvix service is
+// restarted by the external coordinator, so polls will fail transiently while
+// it is down; those errors are tolerated until the job reaches a terminal
+// state or the poll budget is exhausted. Success is shown ONLY when the
+// coordinator reports the restarted service passed its health check.
+async function pollRestoreJob(jobId) {
+  const url = '/api/v1/admin/backups/restore-jobs/' + encodeURIComponent(jobId);
+  const deadline = Date.now() + 5 * 60 * 1000; // 5 minutes
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 3000));
+    let res;
+    try {
+      res = await apiGet(url);
+    } catch (_e) {
+      // Expected while Orvix is restarting; keep polling.
+      continue;
+    }
+    if (!res || !res.status) continue;
+    if (res.status === 'succeeded') {
+      toast('Restore complete — restarted service verified healthy', 'success', 6000);
+      return;
+    }
+    if (res.status === 'failed') {
+      const rb = res.rolled_back ? ' (rolled back to the pre-restore safety backup)' : '';
+      toast('Restore failed' + rb + (res.error ? ': ' + res.error : ''), 'error', 9000);
+      return;
+    }
+    // pending / activating / restarting / verifying / rolling_back — keep going.
+  }
+  toast('Restore is still in progress; check the restore job status shortly.', 'info', 6000);
 }

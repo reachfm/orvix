@@ -131,6 +131,10 @@ func main() {
 		switch os.Args[1] {
 		case "migrate":
 			os.Exit(migrateCommand(os.Args[2:]))
+		case "restore-run":
+			// External, privileged restore coordinator invoked by
+			// orvix-restore.service. Never started by the API process.
+			os.Exit(restoreRunCommand(os.Args[2:]))
 		case "serve":
 			// fall through to normal startup
 			_ = 0

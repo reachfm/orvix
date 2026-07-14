@@ -1,0 +1,45 @@
+[Unit]
+Description=Orvix restore coordinator (privileged, external to orvix.service)
+Documentation=https://github.com/reachfm/orvix
+# This oneshot runs OUTSIDE orvix.service. It is the only process permitted to
+# activate a restore, restart orvix.service, verify the restarted service's
+# health, and roll back on failure. Because it is a separate unit, restarting
+# orvix.service here does not terminate this coordinator, so completion and
+# post-restart health are genuinely observable. It is triggered by
+# orvix-restore.path when the unprivileged API drops a job file into the queue.
+After=network.target
+
+[Service]
+Type=oneshot
+# Root is required to restart orvix.service and to swap the SQLite database and
+# mail/attachment payloads during activation/rollback. ExecStart is fixed and
+# takes NO caller-supplied arguments: the job to run is read from the validated
+# on-disk queue (crypto-random hex ids only), never from the command line.
+User=root
+Group=root
+ExecStart=/usr/local/bin/orvix restore-run
+Environment=ORVIX_CONFIG=/etc/orvix/orvix.yaml
+Environment=ORVIX_LOG_DIR=/var/log/orvix
+# The restore coordinator does NOT import bootstrap.env: it does not
+# require admin credentials, and loading them into the root process
+# would grant unnecessary access to secrets that the coordinator
+# never reads.
+
+# Narrow the writable surface to exactly the restore-relevant paths. Everything
+# else is read-only. The unit deliberately avoids aggressive sandboxing that
+# would block `systemctl restart orvix` over the system bus.
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+# /var/lib/orvix covers the SQLite DB, mail/attachment store, backups
+# (/var/lib/orvix/backups), and the restore job queue. Every listed path must
+# exist or systemd fails the unit with 226/NAMESPACE.
+ReadWritePaths=/var/lib/orvix /etc/orvix /var/log/orvix
+# Bounded so a wedged restore cannot run forever; the coordinator applies its
+# own restart/health timeouts internally as well.
+TimeoutStartSec=600
+LimitNOFILE=65536
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=orvix-restore

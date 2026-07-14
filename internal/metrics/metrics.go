@@ -95,6 +95,13 @@ var (
 		},
 		[]string{"check_name", "success"},
 	)
+
+	AuditWriteFailures = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "orvix_audit_write_failures_total",
+			Help: "Total number of audit records that could not be persisted.",
+		},
+	)
 )
 
 func init() {
@@ -109,6 +116,7 @@ func init() {
 	prometheus.MustRegister(FirewallBlocks)
 	prometheus.MustRegister(SpamScore)
 	prometheus.MustRegister(HealActions)
+	prometheus.MustRegister(AuditWriteFailures)
 }
 
 // Handler returns a Fiber handler for Prometheus metrics.

@@ -71,6 +71,11 @@ set -euo pipefail
 #                           archive. Off by default.
 #   ORVIX_SKIP_BUNDLE_VERIFY Disable bundle sha256 check (NOT recommended;
 #                           only for air-gapped test rigs).
+#   ORVIX_REQUIRE_RELEASE_SIGNATURE
+#                           Require detached .sig verification for release
+#                           bundles. Default: 1.
+#   ORVIX_RELEASE_VERIFYING_KEY_FILE
+#                           Optional path to a trusted Ed25519 public key.
 #
 
 ORVIX_DOCS_URL="${ORVIX_DOCS_URL:-https://docs.orvix.email}"
@@ -84,6 +89,8 @@ ORVIX_BUNDLE_URL="${ORVIX_BUNDLE_URL:-}"
 ORVIX_BUNDLE_SHA256="${ORVIX_BUNDLE_SHA256:-}"
 ORVIX_GITHUB_REF="${ORVIX_GITHUB_REF:-}"
 ORVIX_SKIP_BUNDLE_VERIFY="${ORVIX_SKIP_BUNDLE_VERIFY:-}"
+ORVIX_REQUIRE_RELEASE_SIGNATURE="${ORVIX_REQUIRE_RELEASE_SIGNATURE:-1}"
+ORVIX_RELEASE_VERIFYING_KEY_FILE="${ORVIX_RELEASE_VERIFYING_KEY_FILE:-}"
 
 RED=$'\033[0;31m'
 GREEN=$'\033[0;32m'
@@ -130,6 +137,8 @@ Environment variables:
   ORVIX_GITHUB_REPO              GitHub repo slug (default: orvix/orvix)
   ORVIX_GITHUB_REF               GitHub ref to install (bypasses bundle)
   ORVIX_SKIP_BUNDLE_VERIFY       Skip sha256 verification (NOT recommended)
+  ORVIX_REQUIRE_RELEASE_SIGNATURE Require .sig verification for bundles (default 1)
+  ORVIX_RELEASE_VERIFYING_KEY_FILE Trusted Ed25519 public key override
 
 Flags:
   --help, -h                    Show this message
@@ -266,6 +275,48 @@ verify_bundle_sha256() {
     info "bundle sha256 verified: $actual"
 }
 
+trusted_release_key_file() {
+    if [ -n "$ORVIX_RELEASE_VERIFYING_KEY_FILE" ]; then
+        [ -f "$ORVIX_RELEASE_VERIFYING_KEY_FILE" ] || fail "release verifying key not found: $ORVIX_RELEASE_VERIFYING_KEY_FILE"
+        printf '%s\n' "$ORVIX_RELEASE_VERIFYING_KEY_FILE"
+        return 0
+    fi
+    local tmp
+    tmp="$(mktemp /tmp/orvix-release-key.XXXXXX.pem)"
+    cat >"$tmp" <<'KEY'
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAtS/Uv9QvTrbhBziXhcbdnFHAKkwb2gNYUKNVNsRcKnI=
+-----END PUBLIC KEY-----
+KEY
+    printf '%s\n' "$tmp"
+}
+
+verify_bundle_signature() {
+    local bundle_url="$1"
+    local bundle_path="$2"
+    if [ "$ORVIX_REQUIRE_RELEASE_SIGNATURE" != "1" ]; then
+        warn "release signature verification disabled by ORVIX_REQUIRE_RELEASE_SIGNATURE=$ORVIX_REQUIRE_RELEASE_SIGNATURE"
+        return 0
+    fi
+    command -v openssl >/dev/null 2>&1 || fail "openssl is required for release signature verification"
+    local sig_url="${bundle_url}.sig"
+    local sig_file key_file
+    sig_file="$(mktemp /tmp/orvix-bundle.XXXXXX.sig)"
+    if ! curl -fsSL --max-time 30 -o "$sig_file" "$sig_url"; then
+        rm -f "$sig_file"
+        fail "cannot verify bundle authenticity: signature sidecar not found at $sig_url"
+    fi
+    key_file="$(trusted_release_key_file)"
+    if ! openssl pkeyutl -verify -rawin -pubin -inkey "$key_file" -in "$bundle_path" -sigfile "$sig_file" >/dev/null 2>&1; then
+        rm -f "$sig_file"
+        if [ -z "$ORVIX_RELEASE_VERIFYING_KEY_FILE" ]; then rm -f "$key_file"; fi
+        fail "bundle signature verification failed"
+    fi
+    rm -f "$sig_file"
+    if [ -z "$ORVIX_RELEASE_VERIFYING_KEY_FILE" ]; then rm -f "$key_file"; fi
+    info "bundle signature verified"
+}
+
 # try_download_sha256 attempts to download a .sha256 sidecar for the
 # given bundle URL. On success it prints the sha256 hash and returns 0.
 # On failure (missing sidecar, network error) it returns 1 silently.
@@ -343,6 +394,7 @@ release/scripts/check-smtp-tls.sh
 release/scripts/publish-github-release.sh
 release/scripts/verify-github-release-assets.sh
 release/scripts/verify-fresh-vps-one-command.sh
+release/trust/orvix-release-signing.pub.pem
 release/scripts/healthcheck.sh
 release/scripts/diagnostics.sh
 release/admin/index.html
@@ -520,6 +572,7 @@ ERR
 
         if [ -z "$ORVIX_SKIP_BUNDLE_VERIFY" ]; then
             verify_bundle_sha256 "$bundle_tar" "$bundle_sha_used"
+            verify_bundle_signature "$bundle_url" "$bundle_tar"
         fi
 
         info "extracting bundle to $bundle_extract"

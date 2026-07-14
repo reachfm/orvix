@@ -124,17 +124,29 @@ func TestCommunityMailboxLimit(t *testing.T) {
 func TestCheckDomainLimit(t *testing.T) {
 	enf := testEnforcer(t, EditionEnterprise, 10, 0)
 	used, limit, err := enf.CheckDomainLimit(context.Background())
-	if err != nil { t.Fatalf("check: %v", err) }
-	if used != 10 { t.Fatalf("expected used 10, got %d", used) }
-	if limit != 10 { t.Fatalf("expected limit 10, got %d", limit) }
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	if used != 10 {
+		t.Fatalf("expected used 10, got %d", used)
+	}
+	if limit != 10 {
+		t.Fatalf("expected limit 10, got %d", limit)
+	}
 }
 
 func TestCheckMailboxLimit(t *testing.T) {
 	enf := testEnforcer(t, EditionEnterprise, 0, 100)
 	used, limit, err := enf.CheckMailboxLimit(context.Background())
-	if err != nil { t.Fatalf("check: %v", err) }
-	if used != 100 { t.Fatalf("expected used 100, got %d", used) }
-	if limit != 100 { t.Fatalf("expected limit 100, got %d", limit) }
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	if used != 100 {
+		t.Fatalf("expected used 100, got %d", used)
+	}
+	if limit != 100 {
+		t.Fatalf("expected limit 100, got %d", limit)
+	}
 }
 
 func TestNoLicenseServiceAllowsCreates(t *testing.T) {
@@ -154,11 +166,11 @@ func TestExpiredLicenseStillEnforces(t *testing.T) {
 	SetPublicKey(pub)
 
 	lic := &License{
-		LicenseID: "ORV-EXPIRED",
-		Edition:   EditionEnterprise,
-		IssuedAt:  time.Now().Add(-60 * 24 * time.Hour),
-		ExpiresAt: time.Now().Add(-1 * 24 * time.Hour), // expired yesterday
-		DomainsLimit: 5,
+		LicenseID:      "ORV-EXPIRED",
+		Edition:        EditionEnterprise,
+		IssuedAt:       time.Now().Add(-60 * 24 * time.Hour),
+		ExpiresAt:      time.Now().Add(-1 * 24 * time.Hour), // expired yesterday
+		DomainsLimit:   5,
 		MailboxesLimit: 50,
 		MachineBinding: GenerateMachineID(),
 	}

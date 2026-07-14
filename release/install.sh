@@ -983,11 +983,81 @@ provision_config() {
         # who intentionally cleared the field to "null out" DNS).
         # dns.public_ipv6 follows the same rule.
         migrate_dns_public_ip "$server_public_ip"
+        migrate_backup_encryption_config
         # Reaffirm in the log that the existing config was not
         # overwritten. A re-running operator can grep their
         # install log for this line to confirm the contract.
         log_detail "CONFIG provisioning: existing config preserved; only safety-critical bind migrations applied"
     fi
+}
+
+# migrate_backup_encryption_config adds only the Phase 2 backup-encryption
+# fields that are absent from an existing operator config. Existing values,
+# including a custom encryption key path, are preserved verbatim. An explicit
+# encryption_enabled: false is not silently overwritten; provisioning later
+# fails closed with a clear instruction instead.
+migrate_backup_encryption_config() {
+    local cfg="$ORVIX_CONFIG"
+    [ -f "$cfg" ] || return 0
+    local tmp
+    tmp="$(mktemp "${cfg}.backup-encryption-XXXXXX")"
+    awk '
+    BEGIN { section = ""; saw_backup = 0; saw_enabled = 0; saw_key = 0 }
+    function add_missing() {
+        if (!saw_enabled) print "  encryption_enabled: true"
+        if (!saw_key) print "  encryption_key_file: /etc/orvix/backup_encryption.key"
+    }
+    /^[a-zA-Z][a-zA-Z0-9_-]*:/ {
+        next_section = $1
+        gsub(/:/, "", next_section)
+        if (section == "backup" && next_section != "backup") add_missing()
+        section = next_section
+        if (section == "backup") saw_backup = 1
+    }
+    section == "backup" && /^[[:space:]]*encryption_enabled[[:space:]]*:/ { saw_enabled = 1 }
+    section == "backup" && /^[[:space:]]*encryption_key_file[[:space:]]*:/ { saw_key = 1 }
+    { print }
+    END {
+        if (section == "backup") add_missing()
+        if (!saw_backup) {
+            print ""
+            print "backup:"
+            print "  encryption_enabled: true"
+            print "  encryption_key_file: /etc/orvix/backup_encryption.key"
+        }
+    }
+    ' "$cfg" >"$tmp" || { rm -f "$tmp"; fail "could not migrate backup encryption config"; }
+    if cmp -s "$cfg" "$tmp"; then
+        rm -f "$tmp"
+        log_detail "MIGRATE backup encryption: existing configuration already complete"
+        return 0
+    fi
+    chmod --reference="$cfg" "$tmp" 2>/dev/null || chmod 0600 "$tmp"
+    chown --reference="$cfg" "$tmp" 2>/dev/null || true
+    mv "$tmp" "$cfg"
+    log_detail "MIGRATE backup encryption: added missing encryption settings; existing backup/operator values preserved"
+}
+
+backup_config_value() {
+    local key="$1"
+    awk -v wanted="$key" '
+    /^[a-zA-Z][a-zA-Z0-9_-]*:/ {
+        section = $1
+        gsub(/:/, "", section)
+    }
+    section == "backup" {
+        line = $0
+        sub(/^[[:space:]]*/, "", line)
+        split(line, parts, ":")
+        if (parts[1] == wanted) {
+            sub(/^[^:]*:[[:space:]]*/, "", line)
+            sub(/[[:space:]]+#.*$/, "", line)
+            gsub(/^"|"$/, "", line)
+            print line
+            exit
+        }
+    }
+    ' "$ORVIX_CONFIG"
 }
 
 # migrate_unsafe_internal_binds hardens an existing /etc/orvix/orvix.yaml
@@ -1382,6 +1452,9 @@ update:
 
 backup:
   dir: /var/lib/orvix/backups
+  retention_count: 10
+  encryption_enabled: true
+  encryption_key_file: /etc/orvix/backup_encryption.key
 YAML
     chown orvix:orvix "$ORVIX_CONFIG"
     chmod 0640 "$ORVIX_CONFIG"
@@ -1464,6 +1537,41 @@ provision_vapid_keys() {
     grep -q "vapid_subject: \"mailto:$admin_email\"" "$ORVIX_CONFIG" || fail "config missing coremail.vapid_subject"
 }
 
+provision_backup_encryption_key() {
+    local enabled key_path
+    enabled="$(backup_config_value encryption_enabled)"
+    key_path="$(backup_config_value encryption_key_file)"
+    [ "$enabled" = "true" ] || fail "backup encryption must be enabled under the top-level backup section"
+    [ -n "$key_path" ] || fail "backup.encryption_key_file is required"
+    case "$key_path" in
+        /*) ;;
+        *) fail "backup.encryption_key_file must be an absolute path" ;;
+    esac
+    run_quiet mkdir -p "$(dirname "$key_path")"
+    [ ! -L "$key_path" ] || fail "backup encryption key path must not be a symlink"
+    if [ -e "$key_path" ] && [ ! -f "$key_path" ]; then
+        fail "backup encryption key path must be a regular file"
+    fi
+    if [ -s "$key_path" ]; then
+        log_detail "Backup encryption key already exists; preserving existing key"
+    else
+        local old_umask
+        old_umask="$(umask)"
+        umask 0027
+        openssl rand -hex 32 >"$key_path" || {
+            umask "$old_umask"
+            fail "could not generate backup encryption key"
+        }
+        umask "$old_umask"
+    fi
+    run_quiet chown root:orvix "$key_path"
+    run_quiet chmod 0640 "$key_path"
+    [ "$(stat -c '%U:%G' "$key_path" 2>/dev/null || true)" = "root:orvix" ] || fail "backup encryption key owner must be root:orvix"
+    [ "$(stat -c '%a' "$key_path" 2>/dev/null || true)" = "640" ] || fail "backup encryption key mode must be 0640"
+    [ "$(backup_config_value encryption_enabled)" = "true" ] || fail "config must enable backup encryption"
+    [ "$(backup_config_value encryption_key_file)" = "$key_path" ] || fail "config backup encryption key path could not be read"
+}
+
 write_service() {
     # Production-readiness gate BLOCKER 1: do NOT inline a
     # divergent copy of the systemd unit. Copy the same unit
@@ -1496,6 +1604,27 @@ write_service() {
     done
     install -m 0644 -o root -g root "$src" /etc/systemd/system/orvix.service
     log_detail "installed /etc/systemd/system/orvix.service from $src (0644 root:root)"
+}
+
+# write_restore_coordinator installs the external, privileged restore
+# coordinator units. orvix-restore.path (watched by systemd as root) triggers
+# orvix-restore.service (a root oneshot running `orvix restore-run`) when the
+# unprivileged API drops a job file. This is the ONLY mechanism by which a
+# restore restarts orvix + verifies health from OUTSIDE the process being
+# restarted. Both units ship byte-for-byte from release/systemd.
+write_restore_coordinator() {
+    local svc_src="$ORVIX_SOURCE_DIR/release/systemd/orvix-restore.service"
+    local path_src="$ORVIX_SOURCE_DIR/release/systemd/orvix-restore.path"
+    if [ ! -f "$svc_src" ] || [ ! -f "$path_src" ]; then
+        fail "shipped restore coordinator units not found (orvix-restore.service/.path); cannot install restore lifecycle"
+    fi
+    # Refuse to install a coordinator that restarts itself in-process.
+    if ! grep -qF 'orvix restore-run' "$svc_src"; then
+        fail "orvix-restore.service does not invoke 'orvix restore-run' (refusing non-reviewed unit)"
+    fi
+    install -m 0644 -o root -g root "$svc_src" /etc/systemd/system/orvix-restore.service
+    install -m 0644 -o root -g root "$path_src" /etc/systemd/system/orvix-restore.path
+    log_detail "installed /etc/systemd/system/orvix-restore.{service,path} (0644 root:root)"
 }
 
 write_bootstrap_env() {
@@ -1856,10 +1985,19 @@ validate_admin_ui() {
     if [ ! -f "$ui_dir/index.html" ]; then
         fail "admin UI index.html not found at $ui_dir/index.html"
     fi
-    if [ ! -f "$ui_dir/app.js" ]; then
-        fail "admin UI app.js not found at $ui_dir/app.js"
+    # Accept the built React SPA (index.html + assets/*.js — the reviewed
+    # production UI that build-release-bundle.sh now ships) as well as the
+    # legacy plain-JS admin (index.html + app.js). Exactly one must be present;
+    # an admin dir with neither is a failed install.
+    if [ -f "$ui_dir/app.js" ]; then
+        log_detail "VALIDATE admin UI $ui_dir: legacy layout (index.html + app.js) present"
+        return 0
     fi
-    log_detail "VALIDATE admin UI $ui_dir: index.html + app.js present"
+    if [ -d "$ui_dir/assets" ] && ls "$ui_dir"/assets/*.js >/dev/null 2>&1; then
+        log_detail "VALIDATE admin UI $ui_dir: built React SPA (index.html + assets/*.js) present"
+        return 0
+    fi
+    fail "admin UI at $ui_dir has neither built assets/*.js (React SPA) nor legacy app.js"
 }
 
 # validate_webmail_ui checks that the webmail UI assets were
@@ -2697,6 +2835,11 @@ main() {
     fi
 
     run_quiet install -d -o orvix -g orvix -m 0750 /etc/orvix /var/lib/orvix /var/lib/orvix/coremail /var/lib/orvix/backups /var/log/orvix
+    # Restore job/result queue shared by the unprivileged API (writes jobs,
+    # reads results) and the privileged orvix-restore.service coordinator
+    # (reads jobs, writes results). Owned by orvix so the API can enqueue; the
+    # root coordinator can read/write regardless.
+    run_quiet install -d -o orvix -g orvix -m 0700 /var/lib/orvix/restore-jobs /var/lib/orvix/restore-jobs/queue /var/lib/orvix/restore-jobs/results
     run_quiet install -d -o root -g root -m 0755 /usr/share/orvix/admin
     run_quiet install -d -o root -g root -m 0755 /usr/share/orvix/webmail
     run_quiet install -d -o root -g root -m 0755 /usr/share/orvix/scripts
@@ -2815,6 +2958,7 @@ IPFAIL
     esac
     install_release_scripts
     provision_vapid_keys "$admin_email"
+    provision_backup_encryption_key
     # Propagate admin + webmail static assets via the shared
     # lib-asset-propagate.sh library. The lib is the single source
     # of truth for the copy + backup + hash-verify + permission
@@ -2848,8 +2992,13 @@ IPFAIL
     set_step "systemd" "Service activation" 85
     write_service
     install_update_helper
+    write_restore_coordinator
     run_quiet systemctl daemon-reload
     run_quiet systemctl enable orvix
+    # The restore path watcher must be enabled AND started so a queued restore
+    # job triggers the root coordinator. The oneshot service itself is started
+    # on demand by the path unit, never enabled directly.
+    run_quiet systemctl enable --now orvix-restore.path
     # Production-readiness gate BLOCKER 2: orvix-update.service
     # is operator-triggered ONLY. The unit file intentionally
     # has no [Install] section so `systemctl enable` would

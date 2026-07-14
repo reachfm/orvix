@@ -3,9 +3,12 @@ package monitoring
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"time"
 )
@@ -49,9 +52,9 @@ type DeliveryProvider interface {
 type ProviderStatus struct {
 	Name      string `json:"name"`
 	Enabled   bool   `json:"enabled"`
-	Target    string `json:"target,omitempty"`    // redacted (e.g. "REDACTED") — never the raw URL
-	HasSecret bool   `json:"hasSecret"`           // true when a token/secret is configured
-	Detail    string `json:"detail,omitempty"`    // safe human-readable note
+	Target    string `json:"target,omitempty"` // redacted (e.g. "REDACTED") — never the raw URL
+	HasSecret bool   `json:"hasSecret"`        // true when a token/secret is configured
+	Detail    string `json:"detail,omitempty"` // safe human-readable note
 }
 
 // DeliveryLogger receives safe, secret-free delivery diagnostics. A
@@ -223,11 +226,20 @@ func (p *InAppProvider) Status() ProviderStatus {
 //   - Transport errors from net/http typically embed the target URL
 //     (e.g. `Post "https://…": dial tcp …`). Deliver deliberately
 //     discards that text and returns a sanitized, secret-free error.
+const (
+	defaultWebhookTimeout      = 10 * time.Second
+	defaultMaxBodySize         = 1 << 20 // 1 MB
+	defaultMaxWebhookRedirects = 3
+)
+
 type WebhookProvider struct {
-	url     string
-	token   string
-	enabled bool
-	client  *http.Client
+	url          string
+	token        string
+	enabled      bool
+	timeout      time.Duration
+	maxBodySize  int64
+	maxRedirects int
+	client       *http.Client
 }
 
 // WebhookConfig configures a WebhookProvider.
@@ -238,18 +250,85 @@ type WebhookConfig struct {
 	Timeout time.Duration
 }
 
+type webhookDialer interface {
+	DialContext(context.Context, string, string) (net.Conn, error)
+}
+
 // NewWebhookProvider builds a webhook provider from config.
-func NewWebhookProvider(cfg WebhookConfig) *WebhookProvider {
+// The URL is validated against SSRF attacks. If validation fails the
+// provider is not created and an error is returned.
+func NewWebhookProvider(cfg WebhookConfig) (*WebhookProvider, error) {
+	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: -1}
+	return newWebhookProvider(cfg, systemWebhookResolver{resolver: net.DefaultResolver}, dialer, nil)
+}
+
+func newWebhookProvider(cfg WebhookConfig, resolver webhookResolver, dialer webhookDialer, tlsConfig *tls.Config) (*WebhookProvider, error) {
 	timeout := cfg.Timeout
 	if timeout <= 0 {
-		timeout = 10 * time.Second
+		timeout = defaultWebhookTimeout
+	}
+	if cfg.URL != "" {
+		if err := validateWebhookURL(context.Background(), cfg.URL, resolver); err != nil {
+			return nil, err
+		}
+	}
+	if tlsConfig == nil {
+		tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	transport := &http.Transport{
+		// Resolve and validate immediately before every socket connection, then
+		// dial the selected IP literal. This closes the validate-then-resolve
+		// DNS-rebinding window and deliberately ignores proxy environment vars.
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(address)
+			if err != nil {
+				return nil, fmt.Errorf("invalid webhook destination")
+			}
+			addresses, err := resolveSafeWebhookIPs(ctx, resolver, host)
+			if err != nil {
+				return nil, err
+			}
+			var lastErr error
+			for _, resolved := range addresses {
+				conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(resolved.IP.String(), port))
+				if dialErr == nil {
+					return conn, nil
+				}
+				lastErr = dialErr
+			}
+			return nil, fmt.Errorf("webhook connection failed: %w", lastErr)
+		},
+		DisableKeepAlives: true,
+		TLSClientConfig:   tlsConfig,
+	}
+	client := &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= defaultMaxWebhookRedirects {
+				return fmt.Errorf("too many redirects")
+			}
+			if req.URL.Host == "" {
+				return fmt.Errorf("redirect to URL with no host")
+			}
+			if req.URL.Scheme != "https" {
+				return fmt.Errorf("redirect to non-HTTPS URL")
+			}
+			if err := validateWebhookURL(req.Context(), req.URL.String(), resolver); err != nil {
+				return fmt.Errorf("unsafe webhook redirect")
+			}
+			return nil
+		},
 	}
 	return &WebhookProvider{
-		url:     cfg.URL,
-		token:   cfg.Token,
-		enabled: cfg.Enabled,
-		client:  &http.Client{Timeout: timeout},
-	}
+		url:          cfg.URL,
+		token:        cfg.Token,
+		enabled:      cfg.Enabled,
+		timeout:      timeout,
+		maxBodySize:  defaultMaxBodySize,
+		maxRedirects: defaultMaxWebhookRedirects,
+		client:       client,
+	}, nil
 }
 
 func (w *WebhookProvider) Name() string { return "webhook" }
@@ -293,10 +372,10 @@ func (w *WebhookProvider) Deliver(ctx context.Context, a Alert) error {
 	}
 	resp, err := w.client.Do(req)
 	if err != nil {
-		// Transport errors embed the URL; return a sanitized message.
 		return fmt.Errorf("webhook delivery failed: transport error")
 	}
 	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, w.maxBodySize))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("webhook delivery failed: HTTP status %d", resp.StatusCode)
 	}

@@ -19,6 +19,7 @@ import (
 	"github.com/orvix/orvix/internal/antivirus"
 	"github.com/orvix/orvix/internal/api/handlers"
 	"github.com/orvix/orvix/internal/api/handlers/settings"
+	auditpkg "github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/coremail"
@@ -26,8 +27,10 @@ import (
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
 	customerdomain "github.com/orvix/orvix/internal/customerdomain"
+	"github.com/orvix/orvix/internal/dbdialect"
 	"github.com/orvix/orvix/internal/dnsops"
 	"github.com/orvix/orvix/internal/dnsops/providers"
+	entrbac "github.com/orvix/orvix/internal/enterprise/rbac"
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/metrics"
 	"github.com/orvix/orvix/internal/modules"
@@ -165,22 +168,29 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 
 	// Wire enterprise admin services (mailbox, org, domain, platform, dashboard).
 	if sqlDB, err := db.DB(); err == nil {
-		adminMailboxRepo := mailboxadminsvc.NewAdminMailboxRepo(sqlDB)
-		router.h.SetMailboxAdminService(mailboxadminsvc.NewService(adminMailboxRepo, nil, nil))
+		auditExtendedStore := auditpkg.NewExtendedStore(sqlDB)
+		if err := auditExtendedStore.EnsureTable(context.Background()); err != nil {
+			logger.Error("enterprise admin audit initialization failed; mutation services disabled", zap.Error(err))
+		} else {
+			rbacEval := entrbac.NewEvaluator(sqlDB)
 
-		orgRepo := orgadminsvc.NewOrganizationRepo(sqlDB)
-		router.h.SetOrganizationAdminService(orgadminsvc.NewService(orgRepo, nil, nil))
+			adminMailboxRepo := mailboxadminsvc.NewAdminMailboxRepo(sqlDB)
+			router.h.SetMailboxAdminService(mailboxadminsvc.NewService(adminMailboxRepo, auditExtendedStore, rbacEval))
 
-		domainAdminRepo := domainadminsvc.NewDomainAdminRepo(sqlDB)
-		router.h.SetDomainAdminService(domainadminsvc.NewService(domainAdminRepo, nil, nil))
+			orgRepo := orgadminsvc.NewOrganizationRepo(sqlDB)
+			router.h.SetOrganizationAdminService(orgadminsvc.NewService(orgRepo, auditExtendedStore, rbacEval))
 
-		dashboardSvc := dashboardsvc.NewDashboardService(sqlDB)
-		router.h.SetDashboardService(dashboardSvc)
+			domainAdminRepo := domainadminsvc.NewDomainAdminRepo(sqlDB)
+			router.h.SetDomainAdminService(domainadminsvc.NewService(domainAdminRepo, auditExtendedStore, rbacEval))
 
-		platformSvc := platformpkg.NewPlatformService(sqlDB, nil, nil)
-		router.h.SetPlatformAdminService(platformSvc)
+			dashboardSvc := dashboardsvc.NewDashboardService(sqlDB)
+			router.h.SetDashboardService(dashboardSvc)
 
-		logger.Info("enterprise admin services wired")
+			platformSvc := platformpkg.NewPlatformService(sqlDB, auditExtendedStore, rbacEval)
+			router.h.SetPlatformAdminService(platformSvc)
+
+			logger.Info("enterprise admin services wired with transactional audit and RBAC")
+		}
 	}
 
 	// Wire MailStore from the coremail runtime module. The
@@ -301,8 +311,15 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 
 	// Wire the trust / login protection service.
 	if sqlDB, err := db.DB(); err == nil {
-		// Ensure the trust persistence tables exist before LoadFromDB.
-		for _, ddl := range trust.Tables() {
+		// Ensure the trust persistence tables exist before LoadFromDB using
+		// dialect-correct DDL. On PostgreSQL these tables are owned by
+		// models.MigrateAllPostgres; emitting SQLite-only DDL (AUTOINCREMENT/
+		// DATETIME) there is a syntax error that used to be swallowed.
+		trustDialect, derr := dbdialect.Detect(sqlDB)
+		if derr != nil {
+			trustDialect = dbdialect.FromDriver("sqlite")
+		}
+		for _, ddl := range trust.TablesForDialect(trustDialect) {
 			if _, err := sqlDB.ExecContext(context.Background(), ddl); err != nil {
 				logger.Warn("trust schema migration failed, falling back to in-memory", zap.Error(err))
 			}
@@ -464,10 +481,6 @@ func (r *Router) setupMiddleware() {
 	// via the dedicated `LoginMiddleware()` already mounted in
 	// `setupRoutes()`. Security is unchanged — only the scope of
 	// the limit changed.
-	// The metrics endpoint stays reachable without rate-limit.
-	if r.cfg.Metrics.Enabled {
-		r.app.Get(r.cfg.Metrics.Path, metrics.Handler())
-	}
 }
 
 // apiRateLimitMiddleware returns the general API rate limiter
@@ -741,6 +754,9 @@ func (r *Router) setupRoutes() {
 	admin.Get("/admin/backups/schedule", r.h.GetBackupSchedule)
 	admin.Get("/admin/backups/metrics", r.h.GetBackupMetrics)
 	admin.Get("/admin/backups/health", r.h.GetBackupHealth)
+	// Durable restore-job status (async restore lifecycle). Placed before the
+	// /admin/backups/:id catch-all so "restore-jobs" is never treated as an id.
+	admin.Get("/admin/backups/restore-jobs/:job_id", r.h.GetRestoreJobStatus)
 	admin.Get("/admin/backups/:id/download", r.h.DownloadBackup)
 	admin.Get("/admin/backups/:id", r.h.GetBackup)
 	// Legacy /backups routes — return 410 Gone so the frontend
@@ -806,6 +822,12 @@ func (r *Router) setupRoutes() {
 	admin.Get("/monitoring/capacity", r.h.GetMonitoringCapacity)
 	admin.Get("/monitoring/snapshot", r.h.GetMonitoringSnapshot)
 	admin.Get("/monitoring/alert-providers", r.h.GetMonitoringProviders)
+	if r.cfg.Metrics.Enabled {
+		// Metrics contain operational state and are never exposed on a public
+		// unauthenticated route. Operators scrape this admin-authenticated path
+		// through a trusted collector or the loopback API.
+		admin.Get("/metrics", metrics.Handler())
+	}
 	// Admin alert-delivery audit (ORVIX-ADMIN-ENTERPRISE-PARITY):
 	// read-only, reuses monitoring.Dispatcher.ListDeliveries so the
 	// secret-free contract stays aligned with the rest of the alert
@@ -970,7 +992,7 @@ func (r *Router) setupRoutes() {
 	// Platform administration (cross-tenant, admin/superadmin only).
 	// These routes operate on all tenants and require explicit
 	// platform-level authorization — not just tenant membership.
-	platform := admin.Group("/platform")
+	platform := admin.Group("/platform", auth.RequireRole(auth.RoleSuperAdmin))
 	platform.Get("/dashboard", r.h.PlatformDashboard)
 	platform.Get("/organizations", r.h.ListPlatformOrganizations)
 	platform.Get("/organizations/:id", r.h.GetPlatformOrganization)

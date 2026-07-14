@@ -114,10 +114,20 @@ fail() { printf '%bERROR:%b %s\n' "$RED" "$NC" "$*" >&2; exit "${2:-1}"; }
 info() { printf '%bINFO:%b %s\n' "$GREEN" "$NC" "$*" >&2; }
 warn() { printf '%bWARN:%b %s\n' "$YELLOW" "$NC" "$*" >&2; }
 
+# Admin SPA build/packaging logic (fail-closed legacy fallback) lives in a
+# sourced library so it can be unit-tested in isolation.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=release/scripts/lib-admin-build.sh
+. "$SCRIPT_DIR/lib-admin-build.sh"
+
 # ── 1. Pre-flight ─────────────────────────────────────────────────
 command -v git  >/dev/null 2>&1 || fail "git is required"
 command -v tar  >/dev/null 2>&1 || fail "tar is required"
 command -v sha256sum >/dev/null 2>&1 || fail "sha256sum is required"
+
+if [ -n "$(git status --porcelain --untracked-files=no)" ] && [ "${ORVIX_ALLOW_DIRTY_BUILD:-}" != "1" ]; then
+    fail "tracked working tree is dirty; commit reviewed changes before building a release"
+fi
 
 case "$TARGET_OS-$TARGET_ARCH" in
     linux-amd64|linux-arm64) ;;
@@ -140,6 +150,12 @@ fi
 [ -n "$RESOLVED_VERSION" ] || fail "could not resolve version (no --version and release/VERSION missing)"
 RESOLVED_CHANNEL="${CHANNEL_OVERRIDE:-stable}"
 [ -n "$RESOLVED_CHANNEL" ] || fail "channel resolved empty"
+case "$RESOLVED_VERSION" in
+    *[!A-Za-z0-9._+-]*) fail "invalid release version token: $RESOLVED_VERSION" ;;
+esac
+case "$RESOLVED_CHANNEL" in
+    ""|*[!a-z0-9._-]*|[._-]*) fail "invalid release channel token: $RESOLVED_CHANNEL" ;;
+esac
 
 info "building bundle version=$RESOLVED_VERSION commit=$GIT_SHORT_COMMIT channel=$RESOLVED_CHANNEL target=$TARGET_OS-$TARGET_ARCH"
 
@@ -152,6 +168,8 @@ REQUIRED_FILES=(
     release/VERSION
     release/systemd/orvix.service
     release/systemd/orvix-update.service
+    release/systemd/orvix-restore.service
+    release/systemd/orvix-restore.path
     release/sudoers.d/orvix-update
     release/scripts/healthcheck.sh
     release/scripts/smoke-admin-js.sh
@@ -165,6 +183,7 @@ REQUIRED_FILES=(
     release/scripts/orvix-doctor.sh
     release/scripts/diagnostics.sh
     release/scripts/lib-asset-propagate.sh
+    release/scripts/lib-admin-build.sh
     release/scripts/apply-runtime-update.sh
     release/scripts/generate-vapid-keys.sh
     release/scripts/reset-admin-password.sh
@@ -220,7 +239,7 @@ BUNDLE_ROOT="$WORK_DIR/orvix"
 mkdir -p "$BUNDLE_ROOT/bin" "$BUNDLE_ROOT/release/admin" "$BUNDLE_ROOT/release/webmail" \
          "$BUNDLE_ROOT/release/systemd" "$BUNDLE_ROOT/release/sudoers.d" \
          "$BUNDLE_ROOT/release/scripts" "$BUNDLE_ROOT/release/scripts/tests" \
-         "$BUNDLE_ROOT/release/configs"
+         "$BUNDLE_ROOT/release/configs" "$BUNDLE_ROOT/release/trust"
 
 BIN_OUT="$BUNDLE_ROOT/bin/orvix"
 LDFLAGS=(
@@ -366,8 +385,10 @@ cp release/install-public.sh "$BUNDLE_ROOT/release/install-public.sh"
 cp release/upgrade.sh "$BUNDLE_ROOT/release/upgrade.sh"
 [ -f release/uninstall.sh ] && cp release/uninstall.sh "$BUNDLE_ROOT/release/uninstall.sh"
 
-cp release/systemd/orvix.service        "$BUNDLE_ROOT/release/systemd/orvix.service"
-cp release/systemd/orvix-update.service "$BUNDLE_ROOT/release/systemd/orvix-update.service"
+cp release/systemd/orvix.service         "$BUNDLE_ROOT/release/systemd/orvix.service"
+cp release/systemd/orvix-update.service  "$BUNDLE_ROOT/release/systemd/orvix-update.service"
+cp release/systemd/orvix-restore.service "$BUNDLE_ROOT/release/systemd/orvix-restore.service"
+cp release/systemd/orvix-restore.path    "$BUNDLE_ROOT/release/systemd/orvix-restore.path"
 cp release/sudoers.d/orvix-update       "$BUNDLE_ROOT/release/sudoers.d/orvix-update"
 
 for s in release/scripts/*.sh; do
@@ -384,9 +405,21 @@ for s in release/scripts/tests/*.sh; do
 done
 [ -f release/configs/orvix.yaml.example ] && \
     cp release/configs/orvix.yaml.example "$BUNDLE_ROOT/release/configs/orvix.yaml.example"
+[ -f release/trust/orvix-release-signing.pub.pem ] && \
+    cp release/trust/orvix-release-signing.pub.pem "$BUNDLE_ROOT/release/trust/orvix-release-signing.pub.pem"
 
-# Asset trees
-(cd release/admin && tar -cf - .) | (cd "$BUNDLE_ROOT/release/admin" && tar -xf -)
+# Asset trees — admin SPA.
+# The React-based web/admin is the reviewed production UI. The committed
+# legacy release/admin is used ONLY when the Node/npm toolchain is genuinely
+# unavailable. When the toolchain is present, any failure of npm ci /
+# TypeScript validation / npm run build / built-output verification is a hard
+# bundle failure — build-release-bundle.sh never ships stale legacy admin
+# assets after a real build error. See lib-admin-build.sh (package_admin_spa).
+if ADMIN_SOURCE="$(package_admin_spa "$REPO_ROOT" "$BUNDLE_ROOT/release/admin")"; then
+    info "admin assets packaged from: $ADMIN_SOURCE ($(find "$BUNDLE_ROOT/release/admin" -type f | wc -l) files)"
+else
+    fail "admin SPA packaging failed (see errors above); refusing to ship a bundle with stale or missing admin assets" 2
+fi
 (cd release/webmail && tar -cf - .) | (cd "$BUNDLE_ROOT/release/webmail" && tar -xf -)
 
 cp release/VERSION "$BUNDLE_ROOT/VERSION"
@@ -403,6 +436,11 @@ target_arch=$TARGET_ARCH
 built_by=build-release-bundle.sh
 BUILDINFO
 
+# SPDX 2.3 SBOM generated from the exact module graph and binary sealed into
+# this bundle. The generator contains no network calls and no private data.
+bash release/scripts/generate-sbom.sh "$BUNDLE_ROOT/SBOM.spdx" "$BIN_OUT" "$RESOLVED_VERSION" "$GIT_COMMIT" \
+    || fail "SBOM generation failed" 4
+
 # ── 5. Per-file sanity checks on bundle contents ─────────────────
 # Every required entry must exist inside the bundle before we seal it.
 BUNDLE_REQUIRED=(
@@ -412,23 +450,41 @@ BUNDLE_REQUIRED=(
     release/upgrade.sh
     release/systemd/orvix.service
     release/systemd/orvix-update.service
+    release/systemd/orvix-restore.service
+    release/systemd/orvix-restore.path
     release/sudoers.d/orvix-update
-    release/admin/app.js
     release/admin/index.html
-    release/admin/modules/auth.js
-    release/admin/modules/components.js
     release/webmail/index.html
     release/scripts/setup-https.sh
     release/scripts/smoke-admin-browser.sh
     release/scripts/smoke-admin-import-graph.mjs
     release/scripts/smoke-admin-runtime.mjs
     release/scripts/verify-fresh-vps-one-command.sh
+    release/trust/orvix-release-signing.pub.pem
     VERSION
     BUILDINFO
+    SBOM.spdx
 )
 for f in "${BUNDLE_REQUIRED[@]}"; do
     [ -e "$BUNDLE_ROOT/$f" ] || fail "bundle is missing $f (assembly lost a file)" 4
 done
+
+# Verify the admin SPA index exists in every case.
+admin_index="$BUNDLE_ROOT/release/admin/index.html"
+[ -f "$admin_index" ] || fail "bundle is missing release/admin/index.html" 4
+
+# When the admin was built from web/admin, assert the built ops modules are
+# present (fail-closed). package_admin_spa already ran this check; we re-assert
+# on the sealed bundle tree so a lost/rewritten asset is caught before sealing.
+# The legacy (toolchain-absent) fallback has no assets/ directory and is
+# intentionally exempt from the built-assets assertions.
+if [ "${ADMIN_SOURCE:-}" = "built" ]; then
+    verify_admin_ops_assets "$BUNDLE_ROOT/release/admin" \
+        || fail "built admin output failed ops-module verification (see errors above)" 4
+    info "built admin ops modules verified in sealed bundle tree"
+else
+    info "admin packaged from legacy fallback (toolchain absent); skipping built-assets assertions"
+fi
 
 # ── 6. checksums.txt — sha256 of every file in the bundle ────────
 ( cd "$BUNDLE_ROOT" && find . -type f -print0 | sort -z | xargs -0 sha256sum ) \
@@ -454,6 +510,51 @@ STABLE_ARCHIVE="$OUTPUT_DIR/orvix-enterprise-mail-${RESOLVED_CHANNEL}-${TARGET_O
 cp "$ARCHIVE" "$STABLE_ARCHIVE"
 sha256sum "$STABLE_ARCHIVE" | awk -v a="$STABLE_ARCHIVE" '{printf "%s  %s\n", $1, a}' > "$STABLE_ARCHIVE.sha256"
 info "stable alias: $STABLE_ARCHIVE"
+
+write_release_manifest() {
+    local artifact="$1" output="$2"
+    local artifact_sha sbom_sha
+    artifact_sha="$(sha256sum "$artifact" | awk '{print $1}')"
+    sbom_sha="$(sha256sum "$BUNDLE_ROOT/SBOM.spdx" | awk '{print $1}')"
+    cat >"$output" <<MANIFEST
+{
+  "schema": 1,
+  "product": "Orvix Enterprise Mail",
+  "version": "$RESOLVED_VERSION",
+  "channel": "$RESOLVED_CHANNEL",
+  "commit": "$GIT_COMMIT",
+  "build_time": "$GIT_BUILD_TIME",
+  "target": "$TARGET_OS/$TARGET_ARCH",
+  "artifact": "$(basename "$artifact")",
+  "artifact_sha256": "$artifact_sha",
+  "sbom": "SBOM.spdx",
+  "sbom_sha256": "$sbom_sha"
+}
+MANIFEST
+}
+
+cp "$BUNDLE_ROOT/SBOM.spdx" "$ARCHIVE.sbom.spdx"
+cp "$BUNDLE_ROOT/SBOM.spdx" "$STABLE_ARCHIVE.sbom.spdx"
+write_release_manifest "$ARCHIVE" "$ARCHIVE.manifest.json"
+write_release_manifest "$STABLE_ARCHIVE" "$STABLE_ARCHIVE.manifest.json"
+
+# Signing is deliberately keyless by default. A release operator/CI must
+# provide a private Ed25519 key outside the repository. The corresponding
+# public key is distributed through the independently managed trust channel.
+if [ -n "${ORVIX_RELEASE_SIGNING_KEY_FILE:-}" ]; then
+    for artifact in "$ARCHIVE" "$ARCHIVE.manifest.json" "$ARCHIVE.sbom.spdx" "$STABLE_ARCHIVE" "$STABLE_ARCHIVE.manifest.json" "$STABLE_ARCHIVE.sbom.spdx"; do
+        bash release/scripts/sign-release-artifact.sh "$artifact" "$ORVIX_RELEASE_SIGNING_KEY_FILE" "$artifact.sig" \
+            || fail "release signing failed for $(basename "$artifact")" 4
+    done
+    if [ -n "${ORVIX_RELEASE_VERIFYING_KEY_FILE:-}" ]; then
+        for artifact in "$ARCHIVE" "$ARCHIVE.manifest.json" "$ARCHIVE.sbom.spdx" "$STABLE_ARCHIVE" "$STABLE_ARCHIVE.manifest.json" "$STABLE_ARCHIVE.sbom.spdx"; do
+            bash release/scripts/verify-release-signature.sh "$artifact" "$artifact.sig" "$ORVIX_RELEASE_VERIFYING_KEY_FILE" \
+                || fail "release signature self-check failed for $(basename "$artifact")" 4
+        done
+    fi
+elif [ "${ORVIX_REQUIRE_RELEASE_SIGNATURE:-}" = "1" ]; then
+    fail "release signature required but ORVIX_RELEASE_SIGNING_KEY_FILE is not configured" 4
+fi
 
 # Pull the binary out of the tarball and re-run version to be 100%
 # sure the sealed binary is the same one we built (catches a corrupt

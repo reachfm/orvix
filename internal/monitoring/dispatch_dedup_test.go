@@ -15,14 +15,14 @@ import (
 // webhook/in-app delivery for an alert that was already active.
 func TestEvaluateAlertsDispatchesOnlyNewAlerts(t *testing.T) {
 	var webhookCalls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&webhookCalls, 1)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
 
 	db := deliveryTestDB(t)
-	wh := NewWebhookProvider(WebhookConfig{Enabled: true, URL: srv.URL})
+	wh := testWebhookProvider(t, srv, WebhookConfig{Enabled: true})
 	d := NewDispatcher(db, nil, NewInAppProvider(), wh)
 
 	svc := testService(t, &DataSources{
@@ -63,14 +63,14 @@ func TestEvaluateAlertsDispatchesOnlyNewAlerts(t *testing.T) {
 // detection of a new alert condition.
 func TestMonitoringReadEndpointDoesNotRedeliverActiveAlert(t *testing.T) {
 	var webhookCalls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&webhookCalls, 1)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
 
 	db := deliveryTestDB(t)
-	wh := NewWebhookProvider(WebhookConfig{Enabled: true, URL: srv.URL})
+	wh := testWebhookProvider(t, srv, WebhookConfig{Enabled: true})
 	d := NewDispatcher(db, nil, NewInAppProvider(), wh)
 
 	svc := testService(t, &DataSources{
@@ -114,7 +114,7 @@ func TestMonitoringReadEndpointDoesNotRedeliverActiveAlert(t *testing.T) {
 // snapshot no longer contains its key.
 func TestAlertDispatchAfterResolveAndReRaise(t *testing.T) {
 	var webhookCalls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&webhookCalls, 1)
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -126,7 +126,7 @@ func TestAlertDispatchAfterResolveAndReRaise(t *testing.T) {
 	deadFn := func() (int64, error) { return dead, nil }
 
 	db := deliveryTestDB(t)
-	wh := NewWebhookProvider(WebhookConfig{Enabled: true, URL: srv.URL})
+	wh := testWebhookProvider(t, srv, WebhookConfig{Enabled: true})
 	d := NewDispatcher(db, nil, NewInAppProvider(), wh)
 	svc := testService(t, &DataSources{QueueDeadLetter: deadFn})
 	svc.SetDispatcher(d)

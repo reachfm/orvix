@@ -80,16 +80,16 @@ type DiskUsage struct {
 // labels. No env values, no tokens, no file contents, no private
 // filesystem paths.
 type Health struct {
-	Status        string       `json:"status"`        // "ok" | "degraded" | "down"
-	UptimeSeconds int64        `json:"uptimeSeconds"` // process uptime
-	GeneratedAt   time.Time    `json:"generatedAt"`
-	Disk          []DiskUsage  `json:"disk"`
+	Status        string          `json:"status"`        // "ok" | "degraded" | "down"
+	UptimeSeconds int64           `json:"uptimeSeconds"` // process uptime
+	GeneratedAt   time.Time       `json:"generatedAt"`
+	Disk          []DiskUsage     `json:"disk"`
 	DB            ComponentHealth `json:"db"`
 	Queue         ComponentHealth `json:"queue"`
 	Backup        ComponentHealth `json:"backup"`
 	API           ComponentHealth `json:"api"`
-	Capacity      Capacity     `json:"capacity"`
-	OpenAlerts    int          `json:"openAlerts"`
+	Capacity      Capacity        `json:"capacity"`
+	OpenAlerts    int             `json:"openAlerts"`
 }
 
 // ComponentHealth is a per-subsystem status.
@@ -142,27 +142,27 @@ func (t *AlertThresholds) ApplyDefaults() {
 // MonitoringSnapshot provides a comprehensive snapshot of all health indicators
 // in a single JSON response.
 type MonitoringSnapshot struct {
-	GeneratedAt    time.Time        `json:"generatedAt"`
-	ServiceStatus  string           `json:"serviceStatus"`
-	UptimeSeconds  int64            `json:"uptimeSeconds"`
-	Disk           []DiskUsage      `json:"disk"`
-	DBHealth       ComponentHealth  `json:"dbHealth"`
-	QueueHealth    ComponentHealth  `json:"queueHealth"`
-	BackupHealth   ComponentHealth  `json:"backupHealth"`
-	APIHealth      ComponentHealth  `json:"apiHealth"`
-	CertExpiry     CertExpiryStatus `json:"certExpiry"`
-	DNSReadiness   ComponentHealth  `json:"dnsReadiness"`
-	Capacity       Capacity         `json:"capacity"`
-	OpenAlerts     int              `json:"openAlerts"`
-	MemoryUsedBytes int64           `json:"memoryUsedBytes"`
-	MemoryTotalBytes int64          `json:"memoryTotalBytes"`
+	GeneratedAt      time.Time        `json:"generatedAt"`
+	ServiceStatus    string           `json:"serviceStatus"`
+	UptimeSeconds    int64            `json:"uptimeSeconds"`
+	Disk             []DiskUsage      `json:"disk"`
+	DBHealth         ComponentHealth  `json:"dbHealth"`
+	QueueHealth      ComponentHealth  `json:"queueHealth"`
+	BackupHealth     ComponentHealth  `json:"backupHealth"`
+	APIHealth        ComponentHealth  `json:"apiHealth"`
+	CertExpiry       CertExpiryStatus `json:"certExpiry"`
+	DNSReadiness     ComponentHealth  `json:"dnsReadiness"`
+	Capacity         Capacity         `json:"capacity"`
+	OpenAlerts       int              `json:"openAlerts"`
+	MemoryUsedBytes  int64            `json:"memoryUsedBytes"`
+	MemoryTotalBytes int64            `json:"memoryTotalBytes"`
 }
 
 // CertExpiryStatus reports TLS certificate expiry status.
 type CertExpiryStatus struct {
-	Status          string `json:"status"`
-	ExpiringWithin7 int    `json:"expiringWithin7"`
-	ExpiringWithin30 int   `json:"expiringWithin30"`
+	Status           string `json:"status"`
+	ExpiringWithin7  int    `json:"expiringWithin7"`
+	ExpiringWithin30 int    `json:"expiringWithin30"`
 }
 
 var schema = []string{

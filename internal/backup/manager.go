@@ -23,9 +23,9 @@ type BackupHistory struct {
 
 // Manager handles database and config backups.
 type Manager struct {
-	db         *gorm.DB
-	logger     *zap.Logger
-	backupDir  string
+	db        *gorm.DB
+	logger    *zap.Logger
+	backupDir string
 }
 
 // NewManager creates a new backup manager.

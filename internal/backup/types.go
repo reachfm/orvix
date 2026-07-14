@@ -54,6 +54,14 @@ type BackupManifest struct {
 	// filename — restore with `pg_restore`, not by copying the
 	// file back as a SQLite database).
 	DatabaseFormat string `json:"databaseFormat,omitempty"`
+	Encrypted      bool   `json:"encrypted,omitempty"`
+	Checksum       string `json:"checksum,omitempty"`
+}
+
+// BackupEncryptionConfig holds the configuration for backup encryption.
+type BackupEncryptionConfig struct {
+	Enabled bool
+	KeyFile string
 }
 
 // ManifestItem describes a single file in the backup archive.
@@ -100,19 +108,27 @@ type RestorePreview struct {
 	SizeBytes       int64 `json:"sizeBytes"`
 }
 
-// RestoreStageResult is returned by RestoreBackup.
-// In Phase 2H the restore is staged (not applied live).
+// RestoreStageResult is the outcome of a single RestoreBackup call. Restore is
+// applied LIVE by the external restore coordinator (orvix-restore.service): it
+// validates the archive, creates a pre-restore safety backup, activates the
+// payload, restarts the Orvix service, verifies the restarted service's health,
+// and rolls back to the safety backup on any failure. An "activated" result
+// therefore means the service was really restarted and verified healthy — it is
+// produced by that external coordinator, never by the pre-restart API process.
 type RestoreStageResult struct {
-	Status      string `json:"status"`
-	Message     string `json:"message"`
-	BackupID    string `json:"backup_id"`
-	StagingPath string `json:"staging_path,omitempty"`
+	Status         string `json:"status"`
+	Message        string `json:"message"`
+	BackupID       string `json:"backup_id"`
+	SafetyBackupID string `json:"safety_backup_id,omitempty"`
+	RolledBack     bool   `json:"rolled_back,omitempty"`
+	StagingPath    string `json:"staging_path,omitempty"`
 }
 
 const (
-	RestoreStatusStaged  = "staged"
-	RestoreStatusFailed  = "failed"
-	RestoreStagedMessage = "Validated and staged, restart/manual apply required"
+	RestoreStatusActivated  = "activated"
+	RestoreStatusFailed     = "failed"
+	RestoreStatusRolledBack = "rolled_back"
+	RestoreActivatedMessage = "Validated, activated, and health verified"
 )
 
 type Frequency string

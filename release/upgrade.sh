@@ -45,9 +45,13 @@ HEALTH_INTERVAL="${HEALTH_INTERVAL:-2}"
 ORVIX_JWT_KEY="${ORVIX_JWT_KEY:-/var/lib/orvix/jwt_key.pem}"
 ORVIX_VAPID_PRIVATE_KEY="${ORVIX_VAPID_PRIVATE_KEY:-/etc/orvix/vapid_private.key}"
 ORVIX_VAPID_PUBLIC_KEY="${ORVIX_VAPID_PUBLIC_KEY:-/etc/orvix/vapid_public.key}"
+ORVIX_BACKUP_ENCRYPTION_KEY="${ORVIX_BACKUP_ENCRYPTION_KEY:-/etc/orvix/backup_encryption.key}"
 ORVIX_DKIM_DIR="${ORVIX_DKIM_DIR:-/var/lib/orvix/dkim}"
 ORVIX_DOCTOR_SCRIPT="${ORVIX_DOCTOR_SCRIPT:-/usr/share/orvix/scripts/orvix-doctor.sh}"
 ORVIX_SOURCE_DIR="${ORVIX_SOURCE_DIR:-$(pwd)}"
+ORVIX_UPGRADE_LOCK="${ORVIX_UPGRADE_LOCK:-/run/lock/orvix-upgrade.lock}"
+ORVIX_REQUIRE_RELEASE_SIGNATURE="${ORVIX_REQUIRE_RELEASE_SIGNATURE:-1}"
+ORVIX_RELEASE_VERIFYING_KEY_FILE="${ORVIX_RELEASE_VERIFYING_KEY_FILE:-}"
 
 # Admin + webmail UI deployment targets. The upgrade path MUST
 # propagate both trees, not just the binary; otherwise a fresh
@@ -173,9 +177,73 @@ require_root() {
     [ "$(id -u)" -eq 0 ] || fail "must be run as root (or with sudo)"
 }
 
+acquire_upgrade_lock() {
+    command -v flock >/dev/null 2>&1 || fail "flock is required for process-safe upgrades"
+    mkdir -p "$(dirname "$ORVIX_UPGRADE_LOCK")" || fail "cannot create upgrade lock directory"
+    exec 9>"$ORVIX_UPGRADE_LOCK" || fail "cannot open upgrade lock"
+    flock -n 9 || fail "another Orvix upgrade is already running"
+}
+
 # sha256_of_file prints the SHA256 of $1 in lowercase hex.
 sha256_of_file() {
     sha256sum "$1" | awk '{print $1}'
+}
+
+trusted_release_key_file() {
+    if [ -n "$ORVIX_RELEASE_VERIFYING_KEY_FILE" ]; then
+        [ -f "$ORVIX_RELEASE_VERIFYING_KEY_FILE" ] || fail "release verifying key not found: $ORVIX_RELEASE_VERIFYING_KEY_FILE"
+        printf '%s\n' "$ORVIX_RELEASE_VERIFYING_KEY_FILE"
+        return 0
+    fi
+    local tmp
+    tmp="$(mktemp /tmp/orvix-release-key.XXXXXX.pem)"
+    cat >"$tmp" <<'KEY'
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAtS/Uv9QvTrbhBziXhcbdnFHAKkwb2gNYUKNVNsRcKnI=
+-----END PUBLIC KEY-----
+KEY
+    printf '%s\n' "$tmp"
+}
+
+verify_release_signature_fail_closed() {
+    local artifact="$1"
+    if [ "$ORVIX_REQUIRE_RELEASE_SIGNATURE" != "1" ]; then
+        printf '%bWARN%b release signature verification disabled by ORVIX_REQUIRE_RELEASE_SIGNATURE=%s\n' "$YELLOW" "$NC" "$ORVIX_REQUIRE_RELEASE_SIGNATURE" >&2
+        return 0
+    fi
+    command -v openssl >/dev/null 2>&1 || {
+        printf '%bFAIL%b openssl is required for release signature verification\n' "$RED" "$NC" >&2
+        return 1
+    }
+    local sig_file=""
+    if [ -n "$FROM_URL" ]; then
+        sig_file="$(mktemp /tmp/orvix-upgrade.XXXXXX.sig)"
+        if ! curl -fsSL --retry 3 --max-time 60 -o "$sig_file" "${FROM_URL}.sig"; then
+            rm -f "$sig_file"
+            printf '%bFAIL%b missing release signature sidecar: %s.sig\n' "$RED" "$NC" "$FROM_URL" >&2
+            return 1
+        fi
+    elif [ -f "${artifact}.sig" ]; then
+        sig_file="${artifact}.sig"
+    elif [ "$ALLOW_UNSIGNED_LOCAL" = "1" ] || [ "$DEV_UNSAFE" = "1" ]; then
+        printf '%bWARN%b local artifact signature missing; allowed only because unsafe dev mode is enabled\n' "$YELLOW" "$NC" >&2
+        return 0
+    else
+        printf '%bFAIL%b missing local release signature: %s.sig\n' "$RED" "$NC" "$artifact" >&2
+        return 1
+    fi
+    local key_file
+    key_file="$(trusted_release_key_file)"
+    if ! openssl pkeyutl -verify -rawin -pubin -inkey "$key_file" -in "$artifact" -sigfile "$sig_file" >/dev/null 2>&1; then
+        [ -n "$FROM_URL" ] && rm -f "$sig_file"
+        [ -z "$ORVIX_RELEASE_VERIFYING_KEY_FILE" ] && rm -f "$key_file"
+        printf '%bFAIL%b release signature verification failed for %s\n' "$RED" "$NC" "$artifact" >&2
+        return 1
+    fi
+    [ -n "$FROM_URL" ] && rm -f "$sig_file"
+    [ -z "$ORVIX_RELEASE_VERIFYING_KEY_FILE" ] && rm -f "$key_file"
+    printf '%bOK%b release signature verified for %s\n' "$GREEN" "$NC" "$artifact" >&2
+    return 0
 }
 
 # resolve_expected_sha returns the expected SHA256 hex string for
@@ -308,6 +376,7 @@ preflight_backup() {
         "$ORVIX_JWT_KEY" \
         "$ORVIX_VAPID_PRIVATE_KEY" \
         "$ORVIX_VAPID_PUBLIC_KEY" \
+        "$ORVIX_BACKUP_ENCRYPTION_KEY" \
         /etc/orvix/license.json \
         /etc/orvix/bootstrap.env \
         "$ORVIX_DATA_DIR/license-cache.json"
@@ -380,12 +449,16 @@ full_rollback() {
         rolled=$((rolled + 1))
     fi
 
-    for item in "$ORVIX_JWT_KEY" "$ORVIX_VAPID_PRIVATE_KEY" "$ORVIX_VAPID_PUBLIC_KEY"; do
+    for item in "$ORVIX_JWT_KEY" "$ORVIX_VAPID_PRIVATE_KEY" "$ORVIX_VAPID_PUBLIC_KEY" "$ORVIX_BACKUP_ENCRYPTION_KEY"; do
         dest="$backup_dir$item"
         if [ -f "$dest" ]; then
             cp -a "$dest" "$item"
             chown root:orvix "$item" 2>/dev/null || chown orvix:orvix "$item" 2>/dev/null || true
-            chmod 0600 "$item" 2>/dev/null || true
+            if [ "$item" = "$ORVIX_BACKUP_ENCRYPTION_KEY" ] || [ "$item" = "$ORVIX_VAPID_PRIVATE_KEY" ]; then
+                chmod 0640 "$item" 2>/dev/null || true
+            else
+                chmod 0600 "$item" 2>/dev/null || true
+            fi
             log "  rolled back $item"
             rolled=$((rolled + 1))
         fi
@@ -531,6 +604,13 @@ install_and_restart() {
     fi
     report "green" "checksum verification passed"
 
+    log "verifying release signature (fail-closed)"
+    if ! verify_release_signature_fail_closed "$NEW_BIN"; then
+        report "red" "release signature verification failed (fail-closed)"
+        fail "release signature verification failed (fail-closed)"
+    fi
+    report "green" "release signature verification passed"
+
     if [ "$DRY_RUN" = "1" ]; then
         report "" "--- Dry Run Summary ---"
         report "yellow" "DRY-RUN: would replace $ORVIX_BIN with $NEW_BIN"
@@ -648,6 +728,7 @@ main() {
     done
 
     require_root
+    acquire_upgrade_lock
     BACKUP_DIR=""
 
     # Parse args.

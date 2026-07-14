@@ -67,12 +67,18 @@ func (s *Service) CreateOrganization(ctx context.Context, req CreateOrganization
 		Active:       true,
 	}
 
-	created, err := s.repo.Create(ctx, o)
-	if err != nil {
+	var created *Organization
+	entry := &audit.ExtendedEntry{Action: "organization.create", TenantID: platformTenantID, Result: "success"}
+	if err := s.mutateWithAudit(ctx, entry, func(repo *OrganizationRepo) error {
+		var createErr error
+		created, createErr = repo.Create(ctx, o)
+		if createErr == nil {
+			entry.Target, entry.TargetID = fmt.Sprintf("tenant:%d", created.ID), created.ID
+		}
+		return createErr
+	}); err != nil {
 		return nil, err
 	}
-
-	s.recordAudit(ctx, "organization.create", fmt.Sprintf("tenant:%d", created.ID), created.ID, platformTenantID, "success", "")
 	return created, nil
 }
 
@@ -107,10 +113,10 @@ func (s *Service) UpdateOrganization(ctx context.Context, id uint, req UpdateOrg
 		o.PrimaryColor = *req.PrimaryColor
 	}
 
-	if err := s.repo.Update(ctx, o); err != nil {
+	entry := &audit.ExtendedEntry{Action: "organization.update", Target: fmt.Sprintf("tenant:%d", id), TargetID: id, TenantID: id, Result: "success"}
+	if err := s.mutateWithAudit(ctx, entry, func(repo *OrganizationRepo) error { return repo.Update(ctx, o) }); err != nil {
 		return nil, err
 	}
-	s.recordAudit(ctx, "organization.update", fmt.Sprintf("tenant:%d", id), id, id, "success", "")
 	return o, nil
 }
 
@@ -119,15 +125,14 @@ func (s *Service) SetOrganizationActive(ctx context.Context, id uint, active boo
 	if err != nil {
 		return err
 	}
-	if err := s.repo.SetActive(ctx, id, active); err != nil {
-		return err
-	}
 	action := "organization.disable"
 	if active {
 		action = "organization.enable"
 	}
-	s.recordAudit(ctx, action, fmt.Sprintf("tenant:%d", id), id, id, "success", reason)
-	return nil
+	entry := &audit.ExtendedEntry{Action: action, Target: fmt.Sprintf("tenant:%d", id), TargetID: id, TenantID: id, Result: "success", Reason: reason}
+	return s.mutateWithAudit(ctx, entry, func(repo *OrganizationRepo) error {
+		return repo.SetActive(ctx, id, active)
+	})
 }
 
 func (s *Service) GetOrganizationDetail(ctx context.Context, id uint) (*OrganizationDetail, error) {
@@ -148,19 +153,25 @@ func (s *Service) GetOrganizationDetail(ctx context.Context, id uint) (*Organiza
 	return detail, nil
 }
 
-func (s *Service) recordAudit(ctx context.Context, action, target string, targetID, tenantID uint, result, reason string) {
+func (s *Service) mutateWithAudit(ctx context.Context, entry *audit.ExtendedEntry, mutate func(*OrganizationRepo) error) error {
 	if s.auditStore == nil {
-		return
+		return mutate(s.repo)
 	}
-	e := &audit.ExtendedEntry{
-		Action:   action,
-		Target:   target,
-		TargetID: targetID,
-		TenantID: tenantID,
-		Result:   result,
-		Reason:   reason,
+	tx, err := s.repo.BeginTx(ctx)
+	if err != nil {
+		return fmt.Errorf("begin organization mutation: %w", err)
 	}
-	_ = s.auditStore.Record(ctx, e)
+	defer tx.Rollback()
+	if err := mutate(s.repo.WithTx(tx)); err != nil {
+		return err
+	}
+	if err := s.auditStore.RecordTx(ctx, tx, entry); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit organization mutation: %w", err)
+	}
+	return nil
 }
 
 var (

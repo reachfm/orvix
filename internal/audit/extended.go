@@ -10,6 +10,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/dbdialect"
+	"github.com/orvix/orvix/internal/metrics"
 )
 
 type ExtendedEntry struct {
@@ -49,6 +50,10 @@ type ExtendedStore struct {
 	dialect *dbdialect.Info
 }
 
+type auditExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
 func NewExtendedStore(db *sql.DB) *ExtendedStore {
 	dialect, err := dbdialect.Detect(db)
 	if err != nil {
@@ -81,6 +86,20 @@ func (s *ExtendedStore) EnsureTable(ctx context.Context) error {
 }
 
 func (s *ExtendedStore) Record(ctx context.Context, e *ExtendedEntry) error {
+	return s.recordWith(ctx, s.db, e)
+}
+
+// RecordTx persists an audit entry in the caller's mutation transaction.
+// The business mutation and its audit record therefore commit or roll back as
+// one unit; callers must treat any audit failure as a transaction failure.
+func (s *ExtendedStore) RecordTx(ctx context.Context, tx *sql.Tx, e *ExtendedEntry) error {
+	if tx == nil {
+		return fmt.Errorf("record extended audit: transaction is required")
+	}
+	return s.recordWith(ctx, tx, e)
+}
+
+func (s *ExtendedStore) recordWith(ctx context.Context, exec auditExecer, e *ExtendedEntry) error {
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now().UTC()
 	}
@@ -88,7 +107,7 @@ func (s *ExtendedStore) Record(ctx context.Context, e *ExtendedEntry) error {
 	d := s.dialect
 	before, _ := json.Marshal(e.Before)
 	after, _ := json.Marshal(e.After)
-	_, err := s.db.ExecContext(ctx,
+	_, err := exec.ExecContext(ctx,
 		fmt.Sprintf(`INSERT INTO orvix_audit
 			(actor, actor_id, actor_role, tenant_id, action, target, target_id,
 			 result, reason, before, after, request_id, ip, user_agent, timestamp)
@@ -104,6 +123,7 @@ func (s *ExtendedStore) Record(ctx context.Context, e *ExtendedEntry) error {
 		e.RequestID, e.IP, e.UserAgent, e.Timestamp,
 	)
 	if err != nil {
+		metrics.AuditWriteFailures.Inc()
 		return fmt.Errorf("record extended audit: %w", err)
 	}
 	return nil
@@ -204,30 +224,55 @@ func sanitizeEntry(e *ExtendedEntry) {
 }
 
 var sensitiveFields = map[string]bool{
-	"password": true, "password_hash": true, "passwordHash": true,
+	"password": true, "password_hash": true, "passwordhash": true,
 	"secret": true, "token": true, "key": true, "private_key": true,
-	"privateKey": true, "credential": true, "session_token": true,
+	"privatekey": true, "credential": true, "session_token": true,
+	"sessiontoken": true, "authorization": true, "cookie": true,
+	"hash": true,
 }
 
 func sanitizeJSON(input string, sensitiveFields map[string]bool) string {
 	if input == "" {
 		return ""
 	}
-	var data map[string]interface{}
-	if err := json.Unmarshal([]byte(input), &data); err != nil {
-		return `"` + input + `"`
+	var val interface{}
+	if err := json.Unmarshal([]byte(input), &val); err != nil {
+		return `"[REDACTED: invalid audit metadata]"`
 	}
-	for k := range data {
-		lower := strings.ToLower(k)
-		for sf := range sensitiveFields {
-			if strings.Contains(lower, sf) {
-				data[k] = "[REDACTED]"
-				break
+	redacted := recursiveRedact(val, sensitiveFields)
+	out, _ := json.Marshal(redacted)
+	return string(out)
+}
+
+func recursiveRedact(val interface{}, sensitiveFields map[string]bool) interface{} {
+	switch v := val.(type) {
+	case map[string]interface{}:
+		for k, sub := range v {
+			if isSensitive(k, sensitiveFields) {
+				v[k] = "[REDACTED]"
+			} else {
+				v[k] = recursiveRedact(sub, sensitiveFields)
 			}
 		}
+		return v
+	case []interface{}:
+		for i, sub := range v {
+			v[i] = recursiveRedact(sub, sensitiveFields)
+		}
+		return v
+	default:
+		return val
 	}
-	out, _ := json.Marshal(data)
-	return string(out)
+}
+
+func isSensitive(key string, sensitiveFields map[string]bool) bool {
+	lower := strings.ToLower(key)
+	for sf := range sensitiveFields {
+		if strings.Contains(lower, sf) {
+			return true
+		}
+	}
+	return false
 }
 
 func ActorEntry(c fiber.Ctx, action, target, result string, targetID uint) *ExtendedEntry {

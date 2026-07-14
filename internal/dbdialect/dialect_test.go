@@ -51,7 +51,7 @@ func TestNowExpr(t *testing.T) {
 		t.Errorf("postgres now = %q", got)
 	}
 	sq := &Info{Dialect: SQLite}
-	if got := sq.NowExpr(); got != "datetime('now')" {
+	if got := sq.NowExpr(); got != "(datetime('now'))" {
 		t.Errorf("sqlite now = %q", got)
 	}
 }

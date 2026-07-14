@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { LayoutDashboard, Globe, Users, Shield, Zap, Activity, Settings, Server, Building, Mail, Monitor } from "lucide-react";
+import { LayoutDashboard, Globe, Users, Shield, Zap, Activity, Settings, Server, Building, Mail, Monitor, Key, HardDrive, HeartPulse } from "lucide-react";
 import Dashboard from "./components/Dashboard";
 import Domains from "./components/Domains";
 import UsersPage from "./components/UsersPage";
@@ -9,8 +9,11 @@ import AuditLog from "./components/AuditLog";
 import EnterpriseDashboard from "./components/EnterpriseDashboard";
 import MailboxList from "./components/MailboxList";
 import OrganizationList from "./components/OrganizationList";
+import LicenseStatus from "./components/LicenseStatus";
+import BackupStatus from "./components/BackupStatus";
+import SystemHealth from "./components/SystemHealth";
 
-type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" | "settings" | "enterprise" | "mailboxes" | "organizations";
+type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" | "settings" | "enterprise" | "mailboxes" | "organizations" | "license" | "backups" | "health";
 
 const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: string }[] = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -22,6 +25,9 @@ const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: st
   { id: "firewall", label: "Firewall", icon: Shield },
   { id: "modules", label: "Modules", icon: Zap },
   { id: "audit", label: "Audit Log", icon: Activity },
+  { id: "license", label: "License", icon: Key, section: "System" },
+  { id: "backups", label: "Backups", icon: HardDrive },
+  { id: "health", label: "Health", icon: HeartPulse },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
@@ -39,6 +45,9 @@ export default function App() {
       case "enterprise": return <EnterpriseDashboard />;
       case "mailboxes": return <MailboxList />;
       case "organizations": return <OrganizationList />;
+      case "license": return <LicenseStatus />;
+      case "backups": return <BackupStatus />;
+      case "health": return <SystemHealth />;
       default: return <Dashboard />;
     }
   };

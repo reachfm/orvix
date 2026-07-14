@@ -11,8 +11,15 @@ import (
 )
 
 type AdminMailboxRepo struct {
-	db      *sql.DB
+	root    *sql.DB
+	db      mailboxDB
 	dialect *dbdialect.Info
+}
+
+type mailboxDB interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
 func NewAdminMailboxRepo(db *sql.DB) *AdminMailboxRepo {
@@ -20,20 +27,21 @@ func NewAdminMailboxRepo(db *sql.DB) *AdminMailboxRepo {
 	if err != nil {
 		d = dbdialect.FromDriver("sqlite")
 	}
-	return &AdminMailboxRepo{db: db, dialect: d}
+	return &AdminMailboxRepo{root: db, db: db, dialect: d}
+}
+
+func (r *AdminMailboxRepo) BeginTx(ctx context.Context) (*sql.Tx, error) {
+	return r.root.BeginTx(ctx, nil)
+}
+
+func (r *AdminMailboxRepo) WithTx(tx *sql.Tx) *AdminMailboxRepo {
+	return &AdminMailboxRepo{root: r.root, db: tx, dialect: r.dialect}
 }
 
 func (r *AdminMailboxRepo) GetByID(ctx context.Context, id, tenantID uint) (*AdminMailbox, error) {
 	row := r.db.QueryRowContext(ctx,
 		"SELECT id, domain_id, tenant_id, email, local_part, name, status, quota_mb, used_bytes, msg_count, is_admin, allow_smtp, allow_imap, allow_pop3, allow_jmap, mfa_enabled, send_limit_per_hour, last_login, COALESCE(last_ip,''), created_at, updated_at FROM coremail_mailboxes WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL",
 		id, tenantID)
-	return scanAdminMailbox(row)
-}
-
-func (r *AdminMailboxRepo) GetByIDCrossTenant(ctx context.Context, id uint) (*AdminMailbox, error) {
-	row := r.db.QueryRowContext(ctx,
-		"SELECT id, domain_id, tenant_id, email, local_part, name, status, quota_mb, used_bytes, msg_count, is_admin, allow_smtp, allow_imap, allow_pop3, allow_jmap, mfa_enabled, send_limit_per_hour, last_login, COALESCE(last_ip,''), created_at, updated_at FROM coremail_mailboxes WHERE id = ? AND deleted_at IS NULL",
-		id)
 	return scanAdminMailbox(row)
 }
 

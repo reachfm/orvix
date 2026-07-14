@@ -328,3 +328,8 @@ clamav:
 backup:
   dir: /var/backups/orvix/
   retention_count: 10
+  # Production backups are sealed with chunked AES-256-GCM before upload.
+  # The installer creates this root:orvix 0640 key file. Do not copy the key
+  # into the backup directory or commit it to source control.
+  encryption_enabled: true
+  encryption_key_file: /etc/orvix/backup_encryption.key

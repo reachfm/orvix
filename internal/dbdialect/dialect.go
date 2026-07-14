@@ -91,11 +91,13 @@ func (d *Info) Tuple(arity int) string {
 }
 
 // NowExpr returns the SQL expression for the current UTC timestamp.
+// On SQLite the expression is wrapped in parentheses so it is valid as a
+// column DEFAULT value; bare datetime('now') is a syntax error in DEFAULT.
 func (d *Info) NowExpr() string {
 	if d.Dialect == Postgres {
 		return "NOW()"
 	}
-	return "datetime('now')"
+	return "(datetime('now'))"
 }
 
 // TimestampType returns the preferred timestamp column type.

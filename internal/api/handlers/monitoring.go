@@ -72,11 +72,17 @@ func (h *Handler) alertDispatcher(sqlDB *sql.DB) *monitoring.Dispatcher {
 	if h.cfg != nil {
 		mc := h.cfg.Monitoring
 		if mc.AlertWebhookEnabled || mc.AlertWebhookURL != "" {
-			providers = append(providers, monitoring.NewWebhookProvider(monitoring.WebhookConfig{
+			wh, err := monitoring.NewWebhookProvider(monitoring.WebhookConfig{
 				Enabled: mc.AlertWebhookEnabled,
 				URL:     mc.AlertWebhookURL,
 				Token:   mc.AlertWebhookToken,
-			}))
+			})
+			if err != nil {
+				h.logger.Warn("webhook provider not created, URL validation failed",
+					zap.Error(err))
+			} else {
+				providers = append(providers, wh)
+			}
 		}
 	}
 	return monitoring.NewDispatcher(sqlDB, zapDeliveryLogger{h.logger}, providers...)

@@ -46,6 +46,49 @@ func TestCSPHeader(t *testing.T) {
 	}
 }
 
+func TestMetricsEndpointIsNotPublic(t *testing.T) {
+	logger := zap.NewNop()
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(t.TempDir(), "orvix.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	cfg.Metrics.Enabled = true
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	defer sqlDB.Close()
+	if err := models.MigrateAllRaw(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	authenticator, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	router := NewRouter(cfg, authenticator, logger, db, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
+	defer router.App().Shutdown()
+
+	for _, path := range []string{cfg.Metrics.Path, "/api/v1/metrics"} {
+		resp, err := router.App().Test(httptest.NewRequest("GET", path, nil))
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		if resp.StatusCode == 200 {
+			t.Fatalf("public metrics path %s unexpectedly returned 200", path)
+		}
+	}
+	resp, err := router.App().Test(httptest.NewRequest("GET", "/api/v1/admin/metrics", nil))
+	if err != nil {
+		t.Fatalf("GET protected metrics: %v", err)
+	}
+	if resp.StatusCode != fiber.StatusUnauthorized {
+		t.Fatalf("unauthenticated admin metrics status = %d, want %d", resp.StatusCode, fiber.StatusUnauthorized)
+	}
+}
+
 // TestAdminSPAExemptFromRateLimit is the regression test for the
 // PHASE-0 blocker where `GET /admin` returned a JSON 429 because
 // the rate limiter was registered globally and every static SPA

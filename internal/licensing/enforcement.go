@@ -10,9 +10,9 @@ type CounterFunc func(ctx context.Context) (int64, error)
 
 // EnforcementService checks license limits before resource creation.
 type EnforcementService struct {
-	svc             *Service
-	domainCount     CounterFunc
-	mailboxCount    CounterFunc
+	svc          *Service
+	domainCount  CounterFunc
+	mailboxCount CounterFunc
 }
 
 // NewEnforcementService creates an enforcement service backed by real counters.

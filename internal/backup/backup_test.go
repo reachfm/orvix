@@ -43,6 +43,14 @@ func testService(t *testing.T) *Service {
 
 	s := NewService(filepath.Join(base, "backups"), db, db, mailDir, attDir)
 	s.SetStagingRoot(filepath.Join(base, "restore-staging"))
+	s.SetDatabasePath(filepath.Join(base, "restored-orvix.db"))
+	s.SetRestoreMaintenanceChecker(func(context.Context) error { return nil })
+	// Restore now fails closed unless a restart integration and a
+	// post-restart health verification are wired. Tests that are not
+	// specifically exercising restart/health wire trivial success callbacks
+	// here; the restart/health-focused tests override them.
+	s.SetRestoreRestart(func(context.Context) error { return nil })
+	s.SetRestoreHealthCheck(func(context.Context) error { return nil })
 	return s
 }
 
@@ -483,10 +491,12 @@ func TestCreateArchiveExplicitAllowlist(t *testing.T) {
 	tr := tar.NewReader(gr)
 
 	allowed := map[string]bool{
-		"var/lib/orvix/orvix.db": false,
-		"backup.json":            false,
-		"RESTORE_INSTRUCTIONS.txt": false,
-		"checksums.txt":          false,
+		"var/lib/orvix/orvix.db":           false,
+		"var/lib/orvix/mailstore.tar.gz":   false,
+		"var/lib/orvix/attachments.tar.gz": false,
+		"backup.json":                      false,
+		"RESTORE_INSTRUCTIONS.txt":         false,
+		"checksums.txt":                    false,
 	}
 	// etc/orvix/orvix.yaml.redacted may not exist if /etc/orvix is not present on test machine
 
@@ -1008,11 +1018,13 @@ func TestArchiveContainsOnlyAllowedEntries(t *testing.T) {
 	tr := tar.NewReader(gr)
 
 	allowedEntries := map[string]bool{
-		"var/lib/orvix/orvix.db":        false,
-		"etc/orvix/orvix.yaml.redacted": false,
-		"backup.json":                   false,
-		"RESTORE_INSTRUCTIONS.txt":      false,
-		"checksums.txt":                false,
+		"var/lib/orvix/orvix.db":           false,
+		"var/lib/orvix/mailstore.tar.gz":   false,
+		"var/lib/orvix/attachments.tar.gz": false,
+		"etc/orvix/orvix.yaml.redacted":    false,
+		"backup.json":                      false,
+		"RESTORE_INSTRUCTIONS.txt":         false,
+		"checksums.txt":                    false,
 	}
 
 	for {
@@ -1996,7 +2008,7 @@ func TestRestoreRequiresValidArchive(t *testing.T) {
 		}
 		return
 	}
-	if result != nil && result.Status == RestoreStatusStaged {
+	if result != nil && result.Status == RestoreStatusActivated {
 		t.Fatal("restore should not succeed with corrupt archive")
 	}
 }
@@ -2021,11 +2033,11 @@ func TestRestoreCreatesPreRestoreSafetyBackup(t *testing.T) {
 	if result == nil {
 		t.Fatal("expected restore result")
 	}
-	if result.Status != RestoreStatusStaged {
-		t.Fatalf("expected staged, got %s", result.Status)
+	if result.Status != RestoreStatusActivated {
+		t.Fatalf("expected activated, got %s", result.Status)
 	}
-	if result.Message != RestoreStagedMessage {
-		t.Fatalf("expected staged message, got %s", result.Message)
+	if result.Message != RestoreActivatedMessage {
+		t.Fatalf("expected activated message, got %s", result.Message)
 	}
 	// A pre-restore safety backup must have been created
 	after, _ := s.ListBackups(ctx)
@@ -2033,18 +2045,21 @@ func TestRestoreCreatesPreRestoreSafetyBackup(t *testing.T) {
 		t.Fatal("expected pre-restore safety backup to be created")
 	}
 	// The safety backup should have a distinct ID from the restore source
-	if result.BackupID == b.ID {
+	if result.SafetyBackupID == b.ID {
 		t.Fatal("safety backup ID should differ from source backup ID")
 	}
 }
 
-func TestRestoreStagesToStagingDir(t *testing.T) {
+func TestRestoreActivatesMailstore(t *testing.T) {
 	s := testService(t)
 	ctx := context.Background()
 	b, _ := s.CreateBackup(ctx, "staging-test")
 	archivePath, _ := s.CreateArchive(ctx, b.ID)
 	if _, err := os.Stat(archivePath); err != nil {
 		t.Fatalf("archive not created: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(s.mailDir, "live-only.eml"), []byte("live"), 0640); err != nil {
+		t.Fatalf("write live marker: %v", err)
 	}
 	result, err := s.RestoreBackup(ctx, b.ID)
 	if err != nil {
@@ -2053,16 +2068,261 @@ func TestRestoreStagesToStagingDir(t *testing.T) {
 	if result == nil {
 		t.Fatal("expected restore result")
 	}
-	if result.StagingPath == "" {
-		t.Fatal("expected non-empty staging path")
+	if result.Status != RestoreStatusActivated {
+		t.Fatalf("expected activated, got %s", result.Status)
 	}
-	// Verify staging directory exists
-	if _, err := os.Stat(result.StagingPath); err != nil {
-		t.Fatalf("staging dir not found: %v", err)
+	if _, err := os.Stat(filepath.Join(s.mailDir, "test.eml")); err != nil {
+		t.Fatalf("restored mail missing: %v", err)
 	}
-	// Verify archive was extracted
-	if _, err := os.Stat(filepath.Join(result.StagingPath, "var/lib/orvix/orvix.db")); err != nil {
-		t.Fatalf("db not staged: %v", err)
+	if _, err := os.Stat(filepath.Join(s.mailDir, "live-only.eml")); !os.IsNotExist(err) {
+		t.Fatalf("live-only marker should have been replaced, err=%v", err)
+	}
+}
+
+func TestRestoreRequiresMaintenanceMode(t *testing.T) {
+	s := testService(t)
+	s.SetRestoreMaintenanceChecker(nil)
+	ctx := context.Background()
+	b, err := s.CreateBackup(ctx, "maintenance-required")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	result, err := s.RestoreBackup(ctx, b.ID)
+	if err == nil {
+		t.Fatalf("expected maintenance error, result=%+v", result)
+	}
+	if !strings.Contains(err.Error(), "maintenance mode checker") {
+		t.Fatalf("expected maintenance checker error, got %v", err)
+	}
+}
+
+func TestRestoreRestartSuccess(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	b, err := s.CreateBackup(ctx, "restart-success")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	restartCalled := false
+	s.SetRestoreRestart(func(context.Context) error { restartCalled = true; return nil })
+	result, err := s.RestoreBackup(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if result == nil || result.Status != RestoreStatusActivated {
+		t.Fatalf("expected activated, got %+v", result)
+	}
+	if !restartCalled {
+		t.Fatal("restart callback was not called")
+	}
+}
+
+func TestRestoreRestartFailureRollsBack(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	b, err := s.CreateBackup(ctx, "restart-fail")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(s.mailDir, "restart-rollback-marker.eml"), []byte("live"), 0640); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+	// Fail on first call (restore restart), succeed on second (rollback restart)
+	callCount := 0
+	s.SetRestoreRestart(func(context.Context) error {
+		callCount++
+		if callCount == 1 {
+			return fmt.Errorf("restart failed")
+		}
+		return nil
+	})
+	result, err := s.RestoreBackup(ctx, b.ID)
+	if err == nil {
+		t.Fatal("expected restart failure")
+	}
+	if result == nil {
+		t.Fatal("expected rollback result")
+	}
+	if result.Status != RestoreStatusRolledBack || !result.RolledBack {
+		t.Fatalf("expected rolled_back, got %+v", result)
+	}
+	// The safety backup must have been restored
+	if _, statErr := os.Stat(filepath.Join(s.mailDir, "restart-rollback-marker.eml")); statErr != nil {
+		t.Fatalf("rollback did not restore marker: %v", statErr)
+	}
+}
+
+func TestRestoreHealthSuccess(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	b, err := s.CreateBackup(ctx, "health-success")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	healthCalled := false
+	s.SetRestoreHealthCheck(func(context.Context) error { healthCalled = true; return nil })
+	result, err := s.RestoreBackup(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if result == nil || result.Status != RestoreStatusActivated {
+		t.Fatalf("expected activated, got %+v", result)
+	}
+	if !healthCalled {
+		t.Fatal("health check callback was not called")
+	}
+}
+
+func TestRestoreBothCallbacksSucceed(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	b, err := s.CreateBackup(ctx, "both-callbacks")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	restartCalled := false
+	healthCalled := false
+	s.SetRestoreRestart(func(context.Context) error { restartCalled = true; return nil })
+	s.SetRestoreHealthCheck(func(context.Context) error { healthCalled = true; return nil })
+	result, err := s.RestoreBackup(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if result == nil || result.Status != RestoreStatusActivated {
+		t.Fatalf("expected activated, got %+v", result)
+	}
+	if !restartCalled {
+		t.Fatal("restart callback was not called")
+	}
+	if !healthCalled {
+		t.Fatal("health check callback was not called")
+	}
+	if result.Message != RestoreActivatedMessage {
+		t.Fatalf("expected %q, got %q", RestoreActivatedMessage, result.Message)
+	}
+}
+
+func TestRestoreRemovesStaleWALAndSHMFiles(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+
+	// Create stale WAL and SHM files at the database path to simulate
+	// a live SQLite database in WAL mode.
+	walPath := s.databasePath + "-wal"
+	shmPath := s.databasePath + "-shm"
+	if err := os.WriteFile(walPath, []byte("stale-wal"), 0640); err != nil {
+		t.Fatalf("write wal: %v", err)
+	}
+	if err := os.WriteFile(shmPath, []byte("stale-shm"), 0640); err != nil {
+		t.Fatalf("write shm: %v", err)
+	}
+
+	b, err := s.CreateBackup(ctx, "wal-shm-cleanup")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Restore must remove the stale WAL/SHM files so the restarted
+	// service opens a clean VACUUM INTO database.
+	result, err := s.RestoreBackup(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if result == nil || result.Status != RestoreStatusActivated {
+		t.Fatalf("expected activated, got %+v", result)
+	}
+	if _, err := os.Stat(walPath); !os.IsNotExist(err) {
+		t.Fatalf("stale WAL file was not removed after restore")
+	}
+	if _, err := os.Stat(shmPath); !os.IsNotExist(err) {
+		t.Fatalf("stale SHM file was not removed after restore")
+	}
+}
+
+func TestRestoreHealthFailureRollsBack(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	b, err := s.CreateBackup(ctx, "rollback-health")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(s.mailDir, "live-only.eml"), []byte("live"), 0640); err != nil {
+		t.Fatalf("write live marker: %v", err)
+	}
+	// Fail only on the primary restore health check; rollback health must pass.
+	callCount := 0
+	s.SetRestoreHealthCheck(func(context.Context) error {
+		callCount++
+		if callCount == 1 {
+			return fmt.Errorf("health failed")
+		}
+		return nil
+	})
+	result, err := s.RestoreBackup(ctx, b.ID)
+	if err == nil {
+		t.Fatal("expected restore health failure")
+	}
+	if result == nil {
+		t.Fatal("expected rollback result")
+	}
+	if result.Status != RestoreStatusRolledBack || !result.RolledBack {
+		t.Fatalf("expected rolled_back result, got %+v", result)
+	}
+	if _, statErr := os.Stat(filepath.Join(s.mailDir, "live-only.eml")); statErr != nil {
+		t.Fatalf("rollback did not restore live marker: %v", statErr)
+	}
+}
+
+func TestRollbackHealthFailureReportsNotRolledBack(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	b, err := s.CreateBackup(ctx, "rollback-health-fail")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Health check always fails -> restore fails AND rollback health fails -> not rolled back
+	s.SetRestoreHealthCheck(func(context.Context) error { return fmt.Errorf("health failed") })
+	result, err := s.RestoreBackup(ctx, b.ID)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if result == nil {
+		t.Fatal("expected result")
+	}
+	if result.RolledBack {
+		t.Fatalf("expected RolledBack=false when rollback health also fails, got %+v", result)
+	}
+	if !strings.Contains(result.Message, "rollback health check failed") {
+		t.Fatalf("expected rollback health failure in message, got: %s", result.Message)
+	}
+}
+
+func TestRollbackRestartFailureReportsNotRolledBack(t *testing.T) {
+	s := testService(t)
+	ctx := context.Background()
+	b, err := s.CreateBackup(ctx, "rollback-restart-fail")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Health check fails on restore -> triggers rollback
+	// Restart callback always fails -> rollback restart fails -> not rolled back
+	callCount := 0
+	s.SetRestoreHealthCheck(func(context.Context) error {
+		callCount++
+		if callCount == 1 {
+			return fmt.Errorf("health failed")
+		}
+		return nil
+	})
+	s.SetRestoreRestart(func(context.Context) error { return fmt.Errorf("restart failed") })
+	result, err := s.RestoreBackup(ctx, b.ID)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if result == nil {
+		t.Fatal("expected result")
+	}
+	if result.RolledBack {
+		t.Fatalf("expected RolledBack=false when rollback restart fails, got %+v", result)
 	}
 }
 
@@ -2128,7 +2388,7 @@ func TestErrorsNotFakeSuccess(t *testing.T) {
 	// Delete and then try to restore - must fail
 	s.DeleteBackup(ctx, b.ID)
 	result, err := s.RestoreBackup(ctx, b.ID)
-	if err == nil && result != nil && result.Status == RestoreStatusStaged {
+	if err == nil && result != nil && result.Status == RestoreStatusActivated {
 		t.Fatal("restore must not succeed for deleted backup")
 	}
 }
@@ -2212,12 +2472,16 @@ func TestValidateMissingChecksumsTxtRejected(t *testing.T) {
 			return nil
 		}
 		rel, _ := filepath.Rel(tmpDir, path)
-		if rel == "checksums.txt" { return nil }
+		if rel == "checksums.txt" {
+			return nil
+		}
 		data, _ := os.ReadFile(path)
 		writeTarEntry(tw, rel, data, 0640)
 		return nil
 	})
-	tw.Close(); gw.Close(); out.Close()
+	tw.Close()
+	gw.Close()
+	out.Close()
 
 	vr, err := s.ValidateArchive(ctx, bID)
 	if err != nil {
@@ -2240,14 +2504,20 @@ func TestValidateMissingBackupJsonRejected(t *testing.T) {
 	gw := gzip.NewWriter(out)
 	tw := tar.NewWriter(gw)
 	filepath.Walk(tmpDir, func(path string, info fs.FileInfo, err error) error {
-		if err != nil || info.IsDir() { return nil }
+		if err != nil || info.IsDir() {
+			return nil
+		}
 		rel, _ := filepath.Rel(tmpDir, path)
-		if rel == "backup.json" { return nil }
+		if rel == "backup.json" {
+			return nil
+		}
 		data, _ := os.ReadFile(path)
 		writeTarEntry(tw, rel, data, 0640)
 		return nil
 	})
-	tw.Close(); gw.Close(); out.Close()
+	tw.Close()
+	gw.Close()
+	out.Close()
 	vr, _ := s.ValidateArchive(ctx, bID)
 	if vr.Valid {
 		t.Fatal("expected validation to reject missing backup.json")
@@ -2266,7 +2536,9 @@ func TestValidateMissingPerFileChecksumRejected(t *testing.T) {
 	lines := strings.Split(string(csData), "\n")
 	var filtered []string
 	for _, line := range lines {
-		if strings.Contains(line, "orvix.db") { continue }
+		if strings.Contains(line, "orvix.db") {
+			continue
+		}
 		filtered = append(filtered, line)
 	}
 	os.WriteFile(csPath, []byte(strings.Join(filtered, "\n")), 0640)
@@ -2275,13 +2547,17 @@ func TestValidateMissingPerFileChecksumRejected(t *testing.T) {
 	gw := gzip.NewWriter(out)
 	tw := tar.NewWriter(gw)
 	filepath.Walk(tmpDir, func(path string, info fs.FileInfo, err error) error {
-		if err != nil || info.IsDir() { return nil }
+		if err != nil || info.IsDir() {
+			return nil
+		}
 		rel, _ := filepath.Rel(tmpDir, path)
 		data, _ := os.ReadFile(path)
 		writeTarEntry(tw, rel, data, 0640)
 		return nil
 	})
-	tw.Close(); gw.Close(); out.Close()
+	tw.Close()
+	gw.Close()
+	out.Close()
 	vr, _ := s.ValidateArchive(ctx, bID)
 	if vr.Valid {
 		t.Fatal("expected validation to reject missing per-file checksum")
@@ -2304,13 +2580,17 @@ func TestValidateChecksumEntryForAbsentFileRejected(t *testing.T) {
 	gw := gzip.NewWriter(out)
 	tw := tar.NewWriter(gw)
 	filepath.Walk(tmpDir, func(path string, info fs.FileInfo, err error) error {
-		if err != nil || info.IsDir() { return nil }
+		if err != nil || info.IsDir() {
+			return nil
+		}
 		rel, _ := filepath.Rel(tmpDir, path)
 		data, _ := os.ReadFile(path)
 		writeTarEntry(tw, rel, data, 0640)
 		return nil
 	})
-	tw.Close(); gw.Close(); out.Close()
+	tw.Close()
+	gw.Close()
+	out.Close()
 	vr, _ := s.ValidateArchive(ctx, bID)
 	if vr.Valid {
 		t.Fatal("expected validation to reject checksum entry for absent file")
@@ -2330,13 +2610,17 @@ func TestValidateUnknownEntryRejected(t *testing.T) {
 	gw := gzip.NewWriter(out)
 	tw := tar.NewWriter(gw)
 	filepath.Walk(tmpDir, func(path string, info fs.FileInfo, err error) error {
-		if err != nil || info.IsDir() { return nil }
+		if err != nil || info.IsDir() {
+			return nil
+		}
 		rel, _ := filepath.Rel(tmpDir, path)
 		data, _ := os.ReadFile(path)
 		writeTarEntry(tw, rel, data, 0640)
 		return nil
 	})
-	tw.Close(); gw.Close(); out.Close()
+	tw.Close()
+	gw.Close()
+	out.Close()
 	vr, _ := s.ValidateArchive(ctx, bID)
 	if vr.Valid {
 		t.Fatal("expected validation to reject unknown entry")
@@ -2360,7 +2644,9 @@ func TestValidateTraversalEntryRejected(t *testing.T) {
 	// Write traversal entry.
 	tw.WriteHeader(&tar.Header{Name: "../etc/passwd", Mode: 0640, Size: int64(len("pwned")), Typeflag: tar.TypeReg})
 	tw.Write([]byte("pwned"))
-	tw.Close(); gw.Close(); out.Close()
+	tw.Close()
+	gw.Close()
+	out.Close()
 	vr, _ := s.ValidateArchive(ctx, bID)
 	if vr.Valid {
 		t.Fatal("expected validation to reject traversal entry")
@@ -2380,7 +2666,9 @@ func TestValidateAbsolutePathEntryRejected(t *testing.T) {
 	writeTarEntry(tw, "backup.json", []byte(`{"product":"Orvix Enterprise Mail","backup_format_version":1}`), 0640)
 	tw.WriteHeader(&tar.Header{Name: "/etc/passwd", Mode: 0640, Size: int64(len("pwned")), Typeflag: tar.TypeReg})
 	tw.Write([]byte("pwned"))
-	tw.Close(); gw.Close(); out.Close()
+	tw.Close()
+	gw.Close()
+	out.Close()
 	vr, _ := s.ValidateArchive(ctx, bID)
 	if vr.Valid {
 		t.Fatal("expected validation to reject absolute path entry")
@@ -2399,7 +2687,9 @@ func TestValidateSymlinkEntryRejected(t *testing.T) {
 	writeTarEntry(tw, "checksums.txt", []byte("abc  test.txt\n"), 0640)
 	writeTarEntry(tw, "backup.json", []byte(`{"product":"Orvix Enterprise Mail","backup_format_version":1}`), 0640)
 	tw.WriteHeader(&tar.Header{Name: "symlink", Typeflag: tar.TypeSymlink, Linkname: "/etc/passwd"})
-	tw.Close(); gw.Close(); out.Close()
+	tw.Close()
+	gw.Close()
+	out.Close()
 	vr, _ := s.ValidateArchive(ctx, bID)
 	if vr.Valid {
 		t.Fatal("expected validation to reject symlink entry")
@@ -2418,7 +2708,9 @@ func TestValidateHardlinkEntryRejected(t *testing.T) {
 	writeTarEntry(tw, "checksums.txt", []byte("abc  test.txt\n"), 0640)
 	writeTarEntry(tw, "backup.json", []byte(`{"product":"Orvix Enterprise Mail","backup_format_version":1}`), 0640)
 	tw.WriteHeader(&tar.Header{Name: "hardlink", Typeflag: tar.TypeLink, Linkname: "target"})
-	tw.Close(); gw.Close(); out.Close()
+	tw.Close()
+	gw.Close()
+	out.Close()
 	vr, _ := s.ValidateArchive(ctx, bID)
 	if vr.Valid {
 		t.Fatal("expected validation to reject hardlink entry")
@@ -2441,13 +2733,17 @@ func TestValidateUnsupportedFormatRejected(t *testing.T) {
 	gw := gzip.NewWriter(out)
 	tw := tar.NewWriter(gw)
 	filepath.Walk(tmpDir, func(path string, info fs.FileInfo, err error) error {
-		if err != nil || info.IsDir() { return nil }
+		if err != nil || info.IsDir() {
+			return nil
+		}
 		rel, _ := filepath.Rel(tmpDir, path)
 		data, _ := os.ReadFile(path)
 		writeTarEntry(tw, rel, data, 0640)
 		return nil
 	})
-	tw.Close(); gw.Close(); out.Close()
+	tw.Close()
+	gw.Close()
+	out.Close()
 	vr, _ := s.ValidateArchive(ctx, bID)
 	if vr.Valid {
 		t.Fatal("expected validation to reject unsupported format version")
@@ -2469,13 +2765,17 @@ func TestValidateWrongProductRejected(t *testing.T) {
 	gw := gzip.NewWriter(out)
 	tw := tar.NewWriter(gw)
 	filepath.Walk(tmpDir, func(path string, info fs.FileInfo, err error) error {
-		if err != nil || info.IsDir() { return nil }
+		if err != nil || info.IsDir() {
+			return nil
+		}
 		rel, _ := filepath.Rel(tmpDir, path)
 		data, _ := os.ReadFile(path)
 		writeTarEntry(tw, rel, data, 0640)
 		return nil
 	})
-	tw.Close(); gw.Close(); out.Close()
+	tw.Close()
+	gw.Close()
+	out.Close()
 	vr, _ := s.ValidateArchive(ctx, bID)
 	if vr.Valid {
 		t.Fatal("expected validation to reject wrong product")
@@ -2498,13 +2798,17 @@ func TestValidateChecksumMismatchRejected(t *testing.T) {
 	gw := gzip.NewWriter(out)
 	tw := tar.NewWriter(gw)
 	filepath.Walk(tmpDir, func(path string, info fs.FileInfo, err error) error {
-		if err != nil || info.IsDir() { return nil }
+		if err != nil || info.IsDir() {
+			return nil
+		}
 		rel, _ := filepath.Rel(tmpDir, path)
 		data, _ := os.ReadFile(path)
 		writeTarEntry(tw, rel, data, 0640)
 		return nil
 	})
-	tw.Close(); gw.Close(); out.Close()
+	tw.Close()
+	gw.Close()
+	out.Close()
 	vr, _ := s.ValidateArchive(ctx, bID)
 	if vr.Valid {
 		t.Fatal("expected validation to reject checksum mismatch")
@@ -2542,7 +2846,9 @@ NORMAL_PUBLIC_VALUE=hello
 	// Find the .env.redacted file.
 	var envRedactedData []byte
 	filepath.Walk(tmpDir, func(path string, info fs.FileInfo, err error) error {
-		if err != nil || info.IsDir() { return nil }
+		if err != nil || info.IsDir() {
+			return nil
+		}
 		if strings.HasSuffix(path, ".env.redacted") {
 			envRedactedData, _ = os.ReadFile(path)
 		}

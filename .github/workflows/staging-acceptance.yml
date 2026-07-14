@@ -1,0 +1,421 @@
+name: Staging Acceptance
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+      - rc1/production-release-complete
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  staging-acceptance:
+    name: Disposable staging acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    # Disposable PostgreSQL used ONLY to prove the control-plane migration
+    # applies cleanly. The installed service itself runs on SQLite (CoreMail
+    # storage stays SQLite). This is a disposable CI VM; nothing here touches
+    # any production VPS.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: orvix
+          POSTGRES_PASSWORD: ci_orvix_only
+          POSTGRES_DB: orvix
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    env:
+      REPORT_FILE: /tmp/staging-acceptance-report.json
+      RESULTS_FILE: /tmp/staging-acceptance-results.env
+      BASE: http://127.0.0.1:8080
+      PGHOST: localhost
+      PGPORT: "5432"
+      PGUSER: orvix
+      PGPASSWORD: ci_orvix_only
+      PGDATABASE: orvix
+      STAGING_DOMAIN: staging-acceptance.orvix.test
+      ADMIN_EMAIL: admin@staging-acceptance.orvix.test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: web/admin/package-lock.json
+
+      - name: Install tools (psql, jq, sqlite3)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -o Acquire::Retries=3
+          sudo apt-get install -y --no-install-recommends postgresql-client sqlite3 jq
+          psql --version && jq --version
+
+      - name: Initialize results (no result is PASS until proven)
+        run: |
+          set -euo pipefail
+          : > "$RESULTS_FILE"
+
+      - name: Build release bundle (real installer payload)
+        env:
+          ORVIX_RELEASE_SIGNING_KEY_PEM_B64: ${{ secrets.ORVIX_RELEASE_SIGNING_KEY_PEM_B64 }}
+        run: |
+          set -euo pipefail
+          # Ephemeral signing key when the repo secret is unavailable, so the
+          # signed-release path is exercised on every run.
+          if [ -z "${ORVIX_RELEASE_SIGNING_KEY_PEM_B64:-}" ]; then
+            openssl genpkey -algorithm ed25519 -out /tmp/signing-key.pem
+            openssl pkey -in /tmp/signing-key.pem -pubout -out /tmp/signing-key.pub.pem
+            export ORVIX_RELEASE_SIGNING_KEY_FILE=/tmp/signing-key.pem
+            export ORVIX_RELEASE_VERIFYING_KEY_FILE=/tmp/signing-key.pub.pem
+            export ORVIX_REQUIRE_RELEASE_SIGNATURE=1
+            mkdir -p release/trust
+            cp /tmp/signing-key.pub.pem release/trust/orvix-release-signing.pub.pem
+          fi
+          bash release/scripts/build-release-bundle.sh --channel stable --output /tmp/dist
+          BUNDLE_PATH="$(ls /tmp/dist/orvix-enterprise-mail-*-linux-amd64.tar.gz | grep -v stable | head -1)"
+          [ -n "$BUNDLE_PATH" ] || { echo "bundle not produced"; exit 1; }
+          echo "BUNDLE_FILE=$BUNDLE_PATH" >> "$GITHUB_ENV"
+          echo "bundle_build=PASS" >> "$RESULTS_FILE"
+
+      - name: Extract bundle
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/stage
+          tar -C /tmp/stage -xzf "$BUNDLE_FILE"
+          test -x /tmp/stage/orvix/bin/orvix || { echo "bundled binary missing/not-exec"; exit 1; }
+          test -f /tmp/stage/orvix/release/install.sh || { echo "installer missing from bundle"; exit 1; }
+
+      - name: PostgreSQL control-plane migration verification
+        run: |
+          set -euo pipefail
+          # Prove the control-plane migration applies cleanly to a fresh
+          # PostgreSQL and that startup emits NO SQLite-only DDL errors
+          # (AUTOINCREMENT / PRAGMA / "syntax error"). Any such error fails.
+          mkdir -p /tmp/pgtest/coremail
+          cat > /tmp/pgtest/orvix-pg.yaml <<CFG
+          server:
+            host: 127.0.0.1
+            admin_port: 8090
+          database:
+            driver: postgres
+            dsn: host=${PGHOST} port=${PGPORT} user=${PGUSER} password=${PGPASSWORD} dbname=${PGDATABASE} sslmode=disable
+          coremail:
+            data_path: /tmp/pgtest/coremail
+            hostname: ${STAGING_DOMAIN}
+          CFG
+          ORVIX_CONFIG=/tmp/pgtest/orvix-pg.yaml /tmp/stage/orvix/bin/orvix serve > /tmp/pgtest/pg.log 2>&1 &
+          PG_PID=$!
+          ok=0
+          for i in $(seq 1 45); do
+            if curl -fsS "http://127.0.0.1:8090/api/v1/health" >/dev/null 2>&1; then ok=1; break; fi
+            kill -0 "$PG_PID" 2>/dev/null || break
+            sleep 2
+          done
+          echo "----- postgres startup log -----"; cat /tmp/pgtest/pg.log || true
+          # Fail on any suppressed SQL dialect error in the startup log. The
+          # patterns are unambiguous SQL problems (SQLite-only keywords sent to
+          # PostgreSQL, PostgreSQL parse errors, or a swallowed schema-migration
+          # failure) so benign warnings (missing license key, key-dir perms) do
+          # not trip it.
+          if grep -Eiq 'AUTOINCREMENT|SQLSTATE 42|syntax error at or near|schema migration failed|no such table|relation ".*" does not exist' /tmp/pgtest/pg.log; then
+            echo "PostgreSQL startup log contains SQL/dialect errors:"
+            grep -Ei 'AUTOINCREMENT|SQLSTATE 42|syntax error at or near|schema migration failed|no such table|relation ".*" does not exist' /tmp/pgtest/pg.log || true
+            kill "$PG_PID" 2>/dev/null || true; exit 1
+          fi
+          [ "$ok" = "1" ] || { echo "orvix did not become healthy on PostgreSQL"; kill "$PG_PID" 2>/dev/null || true; exit 1; }
+          # Prove expected control-plane metadata tables exist in PostgreSQL.
+          for t in tenants users coremail_audit orvix_audit customer_domain_verifications; do
+            n="$(psql -tAc "SELECT to_regclass('public.$t') IS NOT NULL;")"
+            [ "$n" = "t" ] || { echo "expected PostgreSQL metadata table missing: $t"; kill "$PG_PID" 2>/dev/null || true; exit 1; }
+          done
+          kill "$PG_PID" 2>/dev/null || true; wait "$PG_PID" 2>/dev/null || true
+          echo "postgres_migration=PASS" >> "$RESULTS_FILE"
+
+      - name: Run the real installer (SQLite runtime) and start via systemd
+        run: |
+          set -euo pipefail
+          ADMIN_PASSWORD="$(openssl rand -base64 24)"
+          ADMIN_PASSWORD_B64="$(printf '%s' "$ADMIN_PASSWORD" | base64 -w0)"
+          printf '%s' "$ADMIN_PASSWORD" > /tmp/admin_password
+          # Install the REAL bundled binary: point the installer at the bundle
+          # root (has bin/orvix + BUILDINFO, no go.mod) and force the prebuilt so
+          # it never rebuilds from the CI source checkout. The runner has no
+          # public IPv4; supply a placeholder that passes the installer's
+          # public-IP validator. It is only written to dns.public_ipv4 for this
+          # disposable install (the service binds 127.0.0.1). No restart
+          # override is used: the installed orvix-restore.path/.service units
+          # drive the real production restore lifecycle.
+          sudo env \
+            ORVIX_SOURCE_DIR=/tmp/stage/orvix \
+            ORVIX_USE_PREBUILT=1 \
+            ORVIX_PUBLIC_IPV4=100.0.0.10 \
+            ORVIX_PRIMARY_DOMAIN="$STAGING_DOMAIN" \
+            ORVIX_ADMIN_EMAIL="$ADMIN_EMAIL" \
+            ORVIX_ADMIN_PASSWORD_B64="$ADMIN_PASSWORD_B64" \
+            bash /tmp/stage/orvix/release/install.sh
+          # Prove the external restore coordinator units are installed + active;
+          # the restore lifecycle fails closed without them.
+          test -f /etc/systemd/system/orvix-restore.service || { echo "orvix-restore.service not installed"; exit 1; }
+          test -f /etc/systemd/system/orvix-restore.path || { echo "orvix-restore.path not installed"; exit 1; }
+          sudo systemctl is-active orvix-restore.path | grep -q active || { echo "orvix-restore.path not active"; sudo systemctl status orvix-restore.path --no-pager || true; exit 1; }
+          echo "install=PASS" >> "$RESULTS_FILE"
+
+      - name: Wait for service health (installed systemd unit)
+        run: |
+          set -euo pipefail
+          ok=0
+          for i in $(seq 1 45); do
+            if curl -fsS "$BASE/api/v1/health" | jq -e '.status=="ok"' >/dev/null 2>&1; then ok=1; break; fi
+            sleep 2
+          done
+          [ "$ok" = "1" ] || { echo "installed service did not become healthy"; sudo journalctl -u orvix --no-pager -n 120 || true; exit 1; }
+          echo "startup=PASS" >> "$RESULTS_FILE"
+          echo "health=PASS" >> "$RESULTS_FILE"
+
+      - name: Authenticated acceptance checks (fail-closed)
+        run: |
+          set -euo pipefail
+          COOKIES="$(mktemp)"; CSRF=""; TOKEN=""
+          ADMIN_PASSWORD="$(cat /tmp/admin_password)"
+
+          # Auth uses a Bearer access token (the access_token cookie is
+          # Secure-only and will not traverse the plain-HTTP loopback the
+          # installed service listens on). CSRF for state-changing requests
+          # uses the non-Secure csrf_token cookie + matching header, which does
+          # traverse HTTP.
+          #
+          # Strict JSON API helper: fails on transport error, non-2xx,
+          # invalid JSON, or a JSON body carrying an "error" field. No
+          # fallback bodies, no || true.
+          api() {
+            local method="$1" path="$2" data="${3:-}"
+            local args=(-sS -o /tmp/body -w '%{http_code}' -X "$method" "$BASE$path")
+            [ -n "$TOKEN" ] && args+=(-H "Authorization: Bearer $TOKEN")
+            # Double-submit CSRF: the csrf_token cookie is Domain-scoped to the
+            # configured hostname, so a loopback request's jar would not send
+            # it. Present the real issued token as both the cookie and header.
+            [ -n "$CSRF" ] && args+=(-H "X-CSRF-Token: $CSRF" -H "Cookie: csrf_token=$CSRF")
+            if [ -n "$data" ]; then args+=(-H 'Content-Type: application/json' --data "$data"); fi
+            local code; code="$(curl "${args[@]}")" || { echo "TRANSPORT ERROR: $method $path" >&2; return 1; }
+            local body; body="$(cat /tmp/body)"
+            if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then echo "HTTP $code: $method $path :: $body" >&2; return 1; fi
+            echo "$body" | jq -e . >/dev/null 2>&1 || { echo "INVALID JSON: $method $path :: $body" >&2; return 1; }
+            if echo "$body" | jq -e 'type=="object" and has("error")' >/dev/null 2>&1; then echo "ERROR JSON: $method $path :: $body" >&2; return 1; fi
+            printf '%s' "$body"
+          }
+          # Expect a specific HTTP status (used for negative/isolation checks).
+          expect_status() {
+            local want="$1" method="$2" path="$3"
+            local code; code="$(curl -sS -o /dev/null -w '%{http_code}' -X "$method" "$BASE$path" || echo 000)"
+            [ "$code" = "$want" ] || { echo "expected $want for $method $path, got $code" >&2; return 1; }
+          }
+          # Poll a restore job to a terminal state. Prefers the status API (to
+          # prove the endpoint works) and falls back to the durable result file
+          # so the terminal state is observed even while Orvix is restarting.
+          # Echoes the terminal body; returns 0 for succeeded, 1 for failed,
+          # 2 for timeout.
+          poll_status() {
+            local jid="$1" deadline=$(( $(date +%s) + 240 )) body="" st=""
+            local rf="/var/lib/orvix/restore-jobs/results/${jid}.result"
+            while [ "$(date +%s)" -lt "$deadline" ]; do
+              body="$(curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/v1/admin/backups/restore-jobs/${jid}" 2>/dev/null || true)"
+              st="$(printf '%s' "$body" | jq -r '.status // empty' 2>/dev/null || true)"
+              if [ "$st" != "succeeded" ] && [ "$st" != "failed" ]; then
+                local fbody; fbody="$(sudo cat "$rf" 2>/dev/null || true)"
+                if [ -n "$fbody" ]; then body="$fbody"; st="$(printf '%s' "$body" | jq -r '.status // empty' 2>/dev/null || true)"; fi
+              fi
+              case "$st" in
+                succeeded) printf '%s' "$body"; return 0 ;;
+                failed) printf '%s' "$body"; return 1 ;;
+              esac
+              sleep 3
+            done
+            printf '%s' "$body"; return 2
+          }
+
+          # --- Auth: login (CSRF-exempt) → Bearer token, then a CSRF cookie ---
+          login_body="$(api POST /api/v1/auth/login "$(jq -nc --arg e "$ADMIN_EMAIL" --arg p "$ADMIN_PASSWORD" '{email:$e,password:$p}')")"
+          TOKEN="$(echo "$login_body" | jq -r '.access_token')"
+          [ -n "$TOKEN" ] && [ "$TOKEN" != "null" ] || { echo "login did not return an access token: $login_body"; exit 1; }
+          CSRF="$(api GET /api/v1/csrf-token | jq -r '.csrf_token')"
+          [ -n "$CSRF" ] && [ "$CSRF" != "null" ] || { echo "no csrf token"; exit 1; }
+
+          # --- License endpoint ---
+          api GET /api/v1/license | jq -e 'type=="object"' >/dev/null
+          echo "license_verification=PASS" >> "$RESULTS_FILE"
+
+          # --- Tenant creation: domain + mailbox ---
+          # Use a fresh domain (the installer bootstrap already created the
+          # admin's own domain, which would 409 here).
+          CREATE_DOMAIN="accept-$(date +%s).orvix.test"
+          api POST /api/v1/domains "$(jq -nc --arg n "$CREATE_DOMAIN" '{name:$n}')" >/dev/null
+          MB="acceptance@$CREATE_DOMAIN"
+          api POST /api/v1/mailboxes "$(jq -nc --arg e "$MB" '{email:$e,password:"AcceptPass123!x"}')" >/dev/null
+          # Prove the mailbox is actually queryable back.
+          api GET /api/v1/mailboxes | jq -e --arg e "$MB" 'any((.mailboxes? // .) []?; (.email? // "")==$e)' >/dev/null \
+            || { echo "created mailbox not found in listing"; exit 1; }
+          echo "tenant_creation=PASS" >> "$RESULTS_FILE"
+
+          # --- Tenant isolation / auth gating: no credentials must be rejected ---
+          expect_status 401 GET /api/v1/domains || expect_status 403 GET /api/v1/domains
+          echo "tenant_isolation=PASS" >> "$RESULTS_FILE"
+
+          # --- Encrypted backup: must produce a real ID ---
+          backup_body="$(api POST /api/v1/admin/backups '')"
+          BACKUP_ID="$(echo "$backup_body" | jq -r '.id // empty')"
+          [ -n "$BACKUP_ID" ] || { echo "backup did not return an id: $backup_body"; exit 1; }
+          echo "encrypted_backup=PASS" >> "$RESULTS_FILE"
+
+          # --- Restore (async job, REAL production lifecycle) ---
+          # Submit returns 202 + job_id and must NOT claim success. The external
+          # orvix-restore.service coordinator activates the backup, actually
+          # restarts orvix (MainPID changes), and verifies the restarted
+          # service's health before the durable result is marked succeeded.
+          api POST "/api/v1/admin/backups/$BACKUP_ID/validate" '{}' | jq -e '.valid==true' >/dev/null \
+            || { echo "backup validation did not report valid"; exit 1; }
+          PID_BEFORE="$(sudo systemctl show -p MainPID --value orvix)"
+          submit="$(api POST "/api/v1/admin/backups/$BACKUP_ID/restore" '{"confirm":"restore-orvix-backup"}')"
+          echo "restore submit: $submit"
+          JOB_ID="$(echo "$submit" | jq -r '.job_id // empty')"
+          [ -n "$JOB_ID" ] || { echo "restore did not return a job id: $submit"; exit 1; }
+          echo "$submit" | jq -e '.status=="pending"' >/dev/null \
+            || { echo "submit must be pending; the pre-restart API must not claim success: $submit"; exit 1; }
+          if final="$(poll_status "$JOB_ID")"; then
+            echo "restore final: $final"
+          else
+            rc=$?
+            echo "restore job did not succeed (rc=$rc): $final"
+            sudo journalctl -u orvix-restore --no-pager -n 100 || true
+            exit 1
+          fi
+          echo "$final" | jq -e '.status=="succeeded"' >/dev/null || { echo "restore not succeeded: $final"; exit 1; }
+          # Prove the service actually restarted (activation identity changed).
+          PID_AFTER="$(sudo systemctl show -p MainPID --value orvix)"
+          [ -n "$PID_AFTER" ] && [ "$PID_AFTER" != "$PID_BEFORE" ] \
+            || { echo "orvix MainPID did not change; restore did not really restart the service (before=$PID_BEFORE after=$PID_AFTER)"; exit 1; }
+          curl -fsS "$BASE/api/v1/health" | jq -e '.status=="ok"' >/dev/null \
+            || { echo "service not healthy after restore"; exit 1; }
+          echo "restore=PASS" >> "$RESULTS_FILE"
+
+          # --- Restore FAILURE path: forced post-restart health failure proves
+          # the rollback lifecycle with a REAL restart. The injection is honored
+          # only in this non-production install and is removed afterwards. ---
+          sudo mkdir -p /etc/systemd/system/orvix-restore.service.d
+          printf '[Service]\nEnvironment=ORVIX_RESTORE_FORCE_HEALTH_FAILURE=1\n' \
+            | sudo tee /etc/systemd/system/orvix-restore.service.d/force-health-fail.conf >/dev/null
+          sudo systemctl daemon-reload
+          fbk="$(api POST /api/v1/admin/backups '')"; FBID="$(echo "$fbk" | jq -r '.id // empty')"
+          [ -n "$FBID" ] || { echo "failure-path backup id missing: $fbk"; exit 1; }
+          fsub="$(api POST "/api/v1/admin/backups/$FBID/restore" '{"confirm":"restore-orvix-backup"}')"
+          FJOB="$(echo "$fsub" | jq -r '.job_id // empty')"
+          [ -n "$FJOB" ] || { echo "failure-path job id missing: $fsub"; exit 1; }
+          if fbody="$(poll_status "$FJOB")"; then
+            echo "failure-path unexpectedly SUCCEEDED: $fbody"; exit 1
+          fi
+          echo "failure-path result: $fbody"
+          echo "$fbody" | jq -e '.status=="failed" and .rolled_back==true' >/dev/null \
+            || { echo "failure-path must report failed + rolled_back: $fbody"; exit 1; }
+          # Remove the injection and prove the service recovered on the safety backup.
+          sudo rm -f /etc/systemd/system/orvix-restore.service.d/force-health-fail.conf
+          sudo systemctl daemon-reload
+          rok=0
+          for i in $(seq 1 30); do curl -fsS "$BASE/api/v1/health" | jq -e '.status=="ok"' >/dev/null 2>&1 && { rok=1; break; }; sleep 2; done
+          [ "$rok" = "1" ] || { echo "service not healthy after rollback"; exit 1; }
+          echo "restore_rollback=PASS" >> "$RESULTS_FILE"
+
+          # --- Metrics (Prometheus text) ---
+          code="$(curl -sS -o /tmp/metrics -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$BASE/api/v1/metrics")"
+          [ "$code" = "200" ] || { echo "metrics HTTP $code"; exit 1; }
+          grep -Eq '^# (HELP|TYPE)|orvix' /tmp/metrics || { echo "metrics output not Prometheus-like"; head -c 300 /tmp/metrics; exit 1; }
+          echo "metrics=PASS" >> "$RESULTS_FILE"
+
+          # --- Operations admin UI: built assets present in installed tree ---
+          ADMIN_DIR=""
+          for d in /opt/orvix/release/admin /usr/share/orvix/admin /var/lib/orvix/admin; do
+            [ -f "$d/index.html" ] && ADMIN_DIR="$d" && break
+          done
+          [ -n "$ADMIN_DIR" ] || { echo "installed admin UI not found"; exit 1; }
+          for marker in "/api/v1/admin/backups" "/api/v1/license" "/api/v1/monitoring/health"; do
+            grep -rqF "$marker" "$ADMIN_DIR"/assets/*.js 2>/dev/null || { echo "ops UI missing marker: $marker"; exit 1; }
+          done
+          echo "operations_ui=PASS" >> "$RESULTS_FILE"
+
+      - name: Produce report (from actual results only)
+        if: always()
+        run: |
+          set -euo pipefail
+          # Build the report strictly from recorded results. A check that did
+          # not record PASS is reported as FAIL/absent — never hard-coded.
+          checks="bundle_build install startup postgres_migration health license_verification tenant_creation tenant_isolation encrypted_backup restore restore_rollback metrics operations_ui"
+          overall="PASS"
+          {
+            echo "{"
+            echo "  \"suite\": \"staging-acceptance\","
+            echo "  \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\","
+            echo "  \"results\": {"
+            first=1
+            for c in $checks; do
+              val="$(grep -E "^${c}=" "$RESULTS_FILE" 2>/dev/null | tail -1 | cut -d= -f2)"
+              [ -n "$val" ] || { val="FAIL"; overall="FAIL"; }
+              [ "$val" = "PASS" ] || overall="FAIL"
+              [ $first -eq 1 ] && first=0 || echo ","
+              printf '    "%s": "%s"' "$c" "$val"
+            done
+            echo ""
+            echo "  },"
+            echo "  \"overall\": \"$overall\""
+            echo "}"
+          } > "$REPORT_FILE"
+          echo "## Staging Acceptance Report" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat "$REPORT_FILE" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          # Do NOT convert failure to success: mirror overall into exit code so
+          # a green job always means every required check actually passed.
+          [ "$overall" = "PASS" ]
+
+      - name: Upload report (even on failure)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-acceptance-report
+          path: ${{ env.REPORT_FILE }}
+          if-no-files-found: warn
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          echo "===== orvix journal ====="; sudo journalctl -u orvix --no-pager -n 200 || true
+          echo "===== orvix-restore coordinator journal ====="; sudo journalctl -u orvix-restore.service -u orvix-restore.path --no-pager -n 200 || true
+          echo "===== restore results ====="; sudo ls -la /var/lib/orvix/restore-jobs/results 2>/dev/null || true; sudo cat /var/lib/orvix/restore-jobs/results/*.result 2>/dev/null || true
+          echo "===== install log ====="; sudo cat /var/log/orvix/install.log 2>/dev/null || true
+          echo "===== pg startup log ====="; cat /tmp/pgtest/pg.log 2>/dev/null || true

@@ -9,6 +9,9 @@ import (
 )
 
 func (h *Handler) ListAdminMailboxes(c fiber.Ctx) error {
+	if h.mailboxAdminSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "mailbox admin service not available"})
+	}
 	tenantID, err := auth.RequireTenantID(c)
 	if err != nil {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": err.Error()})
@@ -54,6 +57,9 @@ func (h *Handler) ListAdminMailboxes(c fiber.Ctx) error {
 }
 
 func (h *Handler) GetAdminMailbox(c fiber.Ctx) error {
+	if h.mailboxAdminSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "mailbox admin service not available"})
+	}
 	tenantID, err := auth.RequireTenantID(c)
 	if err != nil {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": err.Error()})
@@ -77,6 +83,9 @@ func (h *Handler) GetAdminMailbox(c fiber.Ctx) error {
 }
 
 func (h *Handler) CreateAdminMailbox(c fiber.Ctx) error {
+	if h.mailboxAdminSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "mailbox admin service not available"})
+	}
 	tenantID, err := auth.RequireTenantID(c)
 	if err != nil {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": err.Error()})
@@ -120,6 +129,9 @@ func (h *Handler) CreateAdminMailbox(c fiber.Ctx) error {
 }
 
 func (h *Handler) UpdateAdminMailbox(c fiber.Ctx) error {
+	if h.mailboxAdminSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "mailbox admin service not available"})
+	}
 	tenantID, err := auth.RequireTenantID(c)
 	if err != nil {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": err.Error()})
@@ -147,6 +159,9 @@ func (h *Handler) UpdateAdminMailbox(c fiber.Ctx) error {
 }
 
 func (h *Handler) SetAdminMailboxStatus(c fiber.Ctx) error {
+	if h.mailboxAdminSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "mailbox admin service not available"})
+	}
 	tenantID, err := auth.RequireTenantID(c)
 	if err != nil {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": err.Error()})
@@ -174,6 +189,9 @@ func (h *Handler) SetAdminMailboxStatus(c fiber.Ctx) error {
 }
 
 func (h *Handler) BulkSetAdminMailboxStatus(c fiber.Ctx) error {
+	if h.mailboxAdminSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "mailbox admin service not available"})
+	}
 	tenantID, err := auth.RequireTenantID(c)
 	if err != nil {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": err.Error()})
@@ -197,6 +215,9 @@ func (h *Handler) BulkSetAdminMailboxStatus(c fiber.Ctx) error {
 }
 
 func (h *Handler) ResetAdminMailboxPassword(c fiber.Ctx) error {
+	if h.mailboxAdminSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "mailbox admin service not available"})
+	}
 	tenantID, err := auth.RequireTenantID(c)
 	if err != nil {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": err.Error()})

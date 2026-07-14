@@ -1653,20 +1653,20 @@ func TestInstallerBindPostureSkipsDisabledOptionalPorts(t *testing.T) {
 	installer := mustRead(t, filepath.Join(repoRoot(t), "release", "install.sh"))
 
 	// The installer must check the config before requiring 587/465.
-	if !strings.Contains(installer, `submission_enabled` ) {
+	if !strings.Contains(installer, `submission_enabled`) {
 		t.Error("verify_install must check coremail.submission_enabled before requiring port 587")
 	}
-	if !strings.Contains(installer, `smtps_enabled` ) {
+	if !strings.Contains(installer, `smtps_enabled`) {
 		t.Error("verify_install must check coremail.smtps_enabled before requiring port 465")
 	}
 	// The mandatory public ports (25, 110, 143) must still be checked.
-	if !strings.Contains(installer, `check_public_port 25` ) {
+	if !strings.Contains(installer, `check_public_port 25`) {
 		t.Error("verify_install must require port 25 (SMTP)")
 	}
-	if !strings.Contains(installer, `check_public_port 110` ) {
+	if !strings.Contains(installer, `check_public_port 110`) {
 		t.Error("verify_install must require port 110 (POP3)")
 	}
-	if !strings.Contains(installer, `check_public_port 143` ) {
+	if !strings.Contains(installer, `check_public_port 143`) {
 		t.Error("verify_install must require port 143 (IMAP)")
 	}
 	// 587 and 465 must NOT be unconditionally checked.
@@ -1685,23 +1685,23 @@ func TestInstallerBindPostureAllBindsLoopback(t *testing.T) {
 	installer := mustRead(t, filepath.Join(repoRoot(t), "release", "install.sh"))
 
 	// Must iterate every bound address for each internal port.
-	if !strings.Contains(installer, `for addr in $addrs` ) {
+	if !strings.Contains(installer, `for addr in $addrs`) {
 		t.Error("verify_install must iterate all bound addresses for 8080/8081")
 	}
 	// Must track has_loopback AND all_loopback flags.
-	if !strings.Contains(installer, `all_loopback` ) {
+	if !strings.Contains(installer, `all_loopback`) {
 		t.Error("verify_install must track all_loopback flag for 8080/8081")
 	}
-	if !strings.Contains(installer, `has_loopback` ) {
+	if !strings.Contains(installer, `has_loopback`) {
 		t.Error("verify_install must track has_loopback flag for 8080/8081")
 	}
 	// Must reject when has_loopback is true but all_loopback is false
 	// (mixed loopback + public bind).
-	if !strings.Contains(installer, `is exposed on non-loopback` ) {
+	if !strings.Contains(installer, `is exposed on non-loopback`) {
 		t.Error("verify_install must reject mixed loopback+public binds for 8080/8081")
 	}
 	// Must reject when no loopback bind exists.
-	if !strings.Contains(installer, `has no loopback bind` ) {
+	if !strings.Contains(installer, `has no loopback bind`) {
 		t.Error("verify_install must reject when no loopback bind exists for 8080/8081")
 	}
 }
@@ -1712,11 +1712,11 @@ func TestInstallerBindPostureAllBindsLoopback(t *testing.T) {
 func TestInstallerBindPostureCoremailBoolHelper(t *testing.T) {
 	installer := mustRead(t, filepath.Join(repoRoot(t), "release", "install.sh"))
 
-	if !strings.Contains(installer, `coremail_bool()` ) {
+	if !strings.Contains(installer, `coremail_bool()`) {
 		t.Error("verify_install must define coremail_bool() helper to read config values scoped to coremail section")
 	}
 	// Must use awk for section-aware tracking, not global grep.
-	if !strings.Contains(installer, `in_coremail = (sec == "coremail"` ) {
+	if !strings.Contains(installer, `in_coremail = (sec == "coremail"`) {
 		t.Error("coremail_bool() must use section-aware awk to scope matching to coremail: section")
 	}
 }
@@ -1726,10 +1726,10 @@ func TestInstallerBindPostureCoremailBoolHelper(t *testing.T) {
 func TestInstallerBindPostureMainPID(t *testing.T) {
 	installer := mustRead(t, filepath.Join(repoRoot(t), "release", "install.sh"))
 
-	if !strings.Contains(installer, `systemctl show -p MainPID --value orvix` ) {
+	if !strings.Contains(installer, `systemctl show -p MainPID --value orvix`) {
 		t.Error("verify_install must use systemctl show -p MainPID --value orvix to find the process")
 	}
-	if strings.Contains(installer, `pidof orvix` ) {
+	if strings.Contains(installer, `pidof orvix`) {
 		t.Error("verify_install must NOT use pidof orvix (may return multiple PIDs)")
 	}
 }
@@ -1745,18 +1745,18 @@ func TestInstallerBindPostureMainPID(t *testing.T) {
 // be present in the live orvix process.
 //
 // The contract verified here is:
-//   1. The MainPID empty / zero check is still in place (existing).
-//   2. The /proc/$MainPID/environ file is checked for readability
-//      BEFORE it is read, and unreadable is a `fail`.
-//   3. The captured environment is loaded into a separate variable
-//      with a `|| fail` failure path so a read error does not
-//      silently succeed.
-//   4. The captured (not piped-from-disk) environment is what the
-//      grep step inspects — proving the read is fail-closed rather
-//      than silent-on-failure.
-//   5. The naive `tr ... | grep` pipe pattern is gone, so a future
-//      refactor cannot accidentally re-introduce the silent-success
-//      hole.
+//  1. The MainPID empty / zero check is still in place (existing).
+//  2. The /proc/$MainPID/environ file is checked for readability
+//     BEFORE it is read, and unreadable is a `fail`.
+//  3. The captured environment is loaded into a separate variable
+//     with a `|| fail` failure path so a read error does not
+//     silently succeed.
+//  4. The captured (not piped-from-disk) environment is what the
+//     grep step inspects — proving the read is fail-closed rather
+//     than silent-on-failure.
+//  5. The naive `tr ... | grep` pipe pattern is gone, so a future
+//     refactor cannot accidentally re-introduce the silent-success
+//     hole.
 func TestInstallerBootstrapEnvReadFailsClosed(t *testing.T) {
 	root := repoRoot(t)
 	installer := mustRead(t, filepath.Join(root, "release", "install.sh"))
@@ -1983,21 +1983,21 @@ echo "OK"
 // an otherwise healthy install.
 //
 // Contract verified here:
-//   1. A helper `wait_for_runtime_ready_after_restart()` is defined.
-//   2. It is called BETWEEN the bootstrap-env verification
-//      (`VERIFY orvix process environment: no bootstrap password
-//      material found`) and the listener bind posture validation
-//      (`local bind_check_failed=0`).
-//   3. The helper probes BOTH HTTP endpoints AND listener sockets —
-//      it does not rely only on `systemctl is-active`.
-//   4. The endpoints probed are the same ones the bind posture
-//      check guards: 8080/health, 8081/jmap.
-//   5. The listeners probed are 25, 110, 143, 8080, 8081.
-//   6. The failure path dumps `ss -ltnp` AND recent
-//      `journalctl -u orvix` into $INSTALL_LOG so an operator can
-//      diagnose a stuck install without re-running.
-//   7. The failure path uses `fail` (not `warn` / `return 1`) so
-//      bind posture is never skipped.
+//  1. A helper `wait_for_runtime_ready_after_restart()` is defined.
+//  2. It is called BETWEEN the bootstrap-env verification
+//     (`VERIFY orvix process environment: no bootstrap password
+//     material found`) and the listener bind posture validation
+//     (`local bind_check_failed=0`).
+//  3. The helper probes BOTH HTTP endpoints AND listener sockets —
+//     it does not rely only on `systemctl is-active`.
+//  4. The endpoints probed are the same ones the bind posture
+//     check guards: 8080/health, 8081/jmap.
+//  5. The listeners probed are 25, 110, 143, 8080, 8081.
+//  6. The failure path dumps `ss -ltnp` AND recent
+//     `journalctl -u orvix` into $INSTALL_LOG so an operator can
+//     diagnose a stuck install without re-running.
+//  7. The failure path uses `fail` (not `warn` / `return 1`) so
+//     bind posture is never skipped.
 func TestInstallerPostBootstrapReadinessWaitExists(t *testing.T) {
 	root := repoRoot(t)
 	installer := mustRead(t, filepath.Join(root, "release", "install.sh"))
@@ -2210,12 +2210,12 @@ echo "READINESS_OK"
 // against stubbed curl/ss that simulate the fresh-VPS false-negative
 // scenario: listeners never come up within the deadline. The test
 // asserts:
-//   1. Exit code is non-zero.
-//   2. The fail() message names the bootstrap-cleanup-restart reason.
-//   3. $INSTALL_LOG receives the `ss -ltnp` and `journalctl -u orvix`
-//      diagnostic dumps so an operator can diagnose post-mortem.
-//   4. The helper's loop runs MORE THAN ONCE (i.e. it actually
-//      polls and waits, it does not bail on the first attempt).
+//  1. Exit code is non-zero.
+//  2. The fail() message names the bootstrap-cleanup-restart reason.
+//  3. $INSTALL_LOG receives the `ss -ltnp` and `journalctl -u orvix`
+//     diagnostic dumps so an operator can diagnose post-mortem.
+//  4. The helper's loop runs MORE THAN ONCE (i.e. it actually
+//     polls and waits, it does not bail on the first attempt).
 //
 // NOTE on counters: same subshell caveat as the Order test. We use
 // file appends in the stubbed curl/ss so the parent can count calls
@@ -2491,10 +2491,10 @@ func TestInstallerBindPosturePublicMailPortAcceptsSpecificIP(t *testing.T) {
 
 	// The check_public_port function must check for at least one
 	// non-loopback address, not only wildcard patterns.
-	if !strings.Contains(installer, `has_public=true` ) {
+	if !strings.Contains(installer, `has_public=true`) {
 		t.Error("check_public_port must detect any non-loopback bind as public")
 	}
-	if !strings.Contains(installer, `127.*|127.0.0.1|\[::1\]|::1` ) {
+	if !strings.Contains(installer, `127.*|127.0.0.1|\[::1\]|::1`) {
 		t.Error("check_public_port must skip all loopback addresses and accept specific IPs")
 	}
 }
@@ -2571,14 +2571,14 @@ func TestInstallerMigrateUnsafeInternalBindsBehavior(t *testing.T) {
 	}
 
 	cases := []struct {
-		name        string
-		initial     string
-		wantServer  string
-		wantJmap    string
-		wantSMTP    string
-		wantIMAP    string
-		wantPOP3    string
-		wantAdmin   string // operator-edited field, must be preserved
+		name       string
+		initial    string
+		wantServer string
+		wantJmap   string
+		wantSMTP   string
+		wantIMAP   string
+		wantPOP3   string
+		wantAdmin  string // operator-edited field, must be preserved
 	}{
 		{
 			name: "fresh unsafe config (server.host + jmap_host = 0.0.0.0)",
@@ -2994,7 +2994,7 @@ auth:
 }
 
 // TestProvisionConfigReRunDoesNotOverwriteOperatorFields is the
-// negative control: a re-run MUST NOT introduce any of the keys
+// negative control: a re-run MUST NOT introduce unrelated keys
 // the operator did not already have in their config. The fresh
 // write_config heredoc emits a long list of fields (auth.*,
 // coremail.vapid_*, coremail.max_attachment_size_mb, etc.) and
@@ -3054,13 +3054,13 @@ coremail:
 	// Sections that were NOT in the pre-existing config MUST NOT
 	// be injected by the re-run path. If write_config ran, it
 	// would have written `auth:`, `metrics:`, `update:`,
-	// `backup:`, `logging:`, etc. None of these are present in
-	// the initial config and none are created by migration.
+	// `logging:`, etc. None of these are present in the initial
+	// config and none are created by migration. The backup encryption
+	// section is the sole intentional security-critical addition.
 	for _, forbidden := range []string{
 		"auth:",
 		"metrics:",
 		"update:",
-		"backup:",
 		"logging:",
 		"database:",
 		"redis:",
@@ -3070,7 +3070,63 @@ coremail:
 			t.Errorf("re-run injected %q (write_config must not run on re-run); rendered:\n%s", forbidden, rendered)
 		}
 	}
+	for _, required := range []string{
+		"backup:",
+		"encryption_enabled: true",
+		"encryption_key_file: /etc/orvix/backup_encryption.key",
+	} {
+		if !strings.Contains(rendered, required) {
+			t.Errorf("re-run did not add required backup encryption setting %q; rendered:\n%s", required, rendered)
+		}
+	}
 }
+
+func TestProvisionConfigPreservesCustomBackupEncryptionConfig(t *testing.T) {
+	root := repoRoot(t)
+	installer := mustRead(t, filepath.Join(root, "release", "install.sh"))
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "orvix.yaml")
+	initial := `server:
+  host: "127.0.0.1"
+coremail:
+  jmap_host: 127.0.0.1
+backup:
+  dir: /srv/orvix/backups
+  encryption_enabled: true
+  encryption_key_file: /srv/orvix/keys/backup.key
+custom_provider:
+  token_file: /srv/orvix/provider.token
+`
+	if err := os.WriteFile(configPath, []byte(initial), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	harness := strings.Replace(installer, `main "$@"`,
+		fmt.Sprintf(`chown() { :; }; chmod() { :; }; ORVIX_CONFIG="$1"; INSTALL_LOG="%s/install.log"; touch "$INSTALL_LOG"; provision_config "example.com"; cat "$ORVIX_CONFIG"`, "$2"), 1)
+	harnessPath := filepath.Join(dir, "rerun-custom-backup.sh")
+	if err := os.WriteFile(harnessPath, []byte(harness), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bashCommand(t), filepath.Base(harnessPath), configPath, dir)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run custom backup config rerun: %v\n%s", err, out)
+	}
+	rendered := string(out)
+	for _, preserved := range []string{
+		"dir: /srv/orvix/backups",
+		"encryption_key_file: /srv/orvix/keys/backup.key",
+		"token_file: /srv/orvix/provider.token",
+	} {
+		if !strings.Contains(rendered, preserved) {
+			t.Fatalf("operator setting %q was not preserved:\n%s", preserved, rendered)
+		}
+	}
+	if strings.Contains(rendered, "encryption_key_file: /etc/orvix/backup_encryption.key") {
+		t.Fatalf("default backup key path was injected beside operator path:\n%s", rendered)
+	}
+}
+
 // generated by release/scripts/setup-https.sh proxies every
 // public hostname to 127.0.0.1 (NOT to 0.0.0.0 or any public IP).
 // This is the load-bearing assumption that allows the admin and
@@ -3357,18 +3413,18 @@ dns:
 				fmt.Sprintf(`chown() { :; }; chmod() { :; }; ORVIX_CONFIG="$1"; INSTALL_LOG="%s/install.log"; touch "$INSTALL_LOG"; provision_config "example.com" "%s"; cat "$ORVIX_CONFIG"`, dir, c.installerIPArg),
 				1,
 			)
-harnessPath := filepath.Join(dir, "rerun.sh")
-		if err := os.WriteFile(harnessPath, []byte(harness), 0o755); err != nil {
-			t.Fatalf("write harness: %v", err)
-		}
+			harnessPath := filepath.Join(dir, "rerun.sh")
+			if err := os.WriteFile(harnessPath, []byte(harness), 0o755); err != nil {
+				t.Fatalf("write harness: %v", err)
+			}
 
-		cmd := exec.Command(bashCommand(t), "rerun.sh", configPath)
-		cmd.Dir = dir
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("re-run provision_config: %v\noutput:\n%s", err, out)
-		}
-		rendered := string(out)
+			cmd := exec.Command(bashCommand(t), "rerun.sh", configPath)
+			cmd.Dir = dir
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("re-run provision_config: %v\noutput:\n%s", err, out)
+			}
+			rendered := string(out)
 
 			v := viper.New()
 			v.SetConfigType("yaml")
@@ -4142,8 +4198,8 @@ fi
 // nothing or returned a private address; that produced a fresh
 // install whose /etc/orvix/orvix.yaml contained:
 //
-//   dns:
-//     public_ipv4: "127.0.0.1"
+//	dns:
+//	  public_ipv4: "127.0.0.1"
 //
 // which the runtime then rejected as loopback, blocking the
 // admin DNS/DKIM dashboard with a confusing 422. The new
@@ -4152,11 +4208,11 @@ fi
 // We drive the actual main() entry point under a stubbed
 // hostname that emits a hostname -I with ONLY private/loopback
 // addresses, and assert:
-//   1. exit code is non-zero,
-//   2. failure message names ORVIX_PUBLIC_IPV4 (so the operator
-//      knows how to recover),
-//   3. /etc/orvix/orvix.yaml is NEVER created (write_config is
-//      not reached on the failure path).
+//  1. exit code is non-zero,
+//  2. failure message names ORVIX_PUBLIC_IPV4 (so the operator
+//     knows how to recover),
+//  3. /etc/orvix/orvix.yaml is NEVER created (write_config is
+//     not reached on the failure path).
 func TestInstallerNoLoopbackFallbackOnFreshInstall(t *testing.T) {
 	root := repoRoot(t)
 	installer := mustRead(t, filepath.Join(root, "release", "install.sh"))
@@ -4505,7 +4561,7 @@ func TestSetupHttpsRestartsOrvixAfterPatch(t *testing.T) {
 	script := mustRead(t, filepath.Join(root, "release", "scripts", "setup-https.sh"))
 	scriptNoMain := strings.Replace(script, "main \"$@\"", "# main disabled by test harness", 1)
 
-// Helper to build the harness with a config that needs
+	// Helper to build the harness with a config that needs
 	// patching (dns.public_ipv4 missing). The stubbed systemctl
 	// records every call to a file so the test can prove restart was
 	// invoked. curl and the systemctl is-active check are
@@ -4832,20 +4888,20 @@ func TestInstallerNonInteractiveEnvMode(t *testing.T) {
 		wantMsg   string
 	}{
 		{
-			name:    "missing ORVIX_DOMAIN in non-interactive mode",
-			env:     map[string]string{"ORVIX_NON_INTERACTIVE": "1", "ORVIX_PUBLIC_IPV4": "65.75.203.74"},
+			name:      "missing ORVIX_DOMAIN in non-interactive mode",
+			env:       map[string]string{"ORVIX_NON_INTERACTIVE": "1", "ORVIX_PUBLIC_IPV4": "65.75.203.74"},
 			wantExit1: true,
 			wantMsg:   "ORVIX_DOMAIN",
 		},
 		{
-			name:    "missing ORVIX_PUBLIC_IPV4 in non-interactive mode",
-			env:     map[string]string{"ORVIX_NON_INTERACTIVE": "1", "ORVIX_DOMAIN": "example.com"},
+			name:      "missing ORVIX_PUBLIC_IPV4 in non-interactive mode",
+			env:       map[string]string{"ORVIX_NON_INTERACTIVE": "1", "ORVIX_DOMAIN": "example.com"},
 			wantExit1: true,
 			wantMsg:   "ORVIX_PUBLIC_IPV4",
 		},
 		{
-			name:    "both set in non-interactive -> passes env validation",
-			env:     map[string]string{"ORVIX_NON_INTERACTIVE": "1", "ORVIX_DOMAIN": "example.com", "ORVIX_PUBLIC_IPV4": "65.75.203.74"},
+			name:      "both set in non-interactive -> passes env validation",
+			env:       map[string]string{"ORVIX_NON_INTERACTIVE": "1", "ORVIX_DOMAIN": "example.com", "ORVIX_PUBLIC_IPV4": "65.75.203.74"},
 			wantExit1: false,
 			wantMsg:   "",
 		},
@@ -5473,5 +5529,28 @@ func TestInstallerFailureLogUsesCurrentRunOnly(t *testing.T) {
 	}
 	if strings.Contains(installer, "tail -n 80 \"$INSTALL_LOG\" || true\n\tfi\n\tcat <<FOOTER") {
 		t.Error("render_failure must not blindly show the last 80 lines across previous install runs")
+	}
+}
+
+func TestInstallerProvisionsStableBackupEncryptionKey(t *testing.T) {
+	installer := mustRead(t, filepath.Join(repoRoot(t), "release", "install.sh"))
+	for _, needle := range []string{
+		"migrate_backup_encryption_config()",
+		"backup_config_value()",
+		"provision_backup_encryption_key()",
+		"openssl rand -hex 32",
+		"chown root:orvix \"$key_path\"",
+		"chmod 0640 \"$key_path\"",
+		"encryption_enabled: true",
+		"encryption_key_file: /etc/orvix/backup_encryption.key",
+		"provision_backup_encryption_key",
+	} {
+		if !strings.Contains(installer, needle) {
+			t.Errorf("installer backup encryption contract missing %q", needle)
+		}
+	}
+	upgrade := mustRead(t, filepath.Join(repoRoot(t), "release", "upgrade.sh"))
+	if !strings.Contains(upgrade, "ORVIX_BACKUP_ENCRYPTION_KEY") {
+		t.Error("upgrade rollback must preserve the backup encryption key")
 	}
 }

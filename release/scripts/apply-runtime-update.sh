@@ -129,9 +129,15 @@ find /usr/share/orvix/admin -type d -exec chmod 0755 {} +
 find /usr/share/orvix/admin -type f -exec chmod 0644 {} +
 chown -R root:root /usr/share/orvix/admin
 
-# Verify the deployed admin UI is intact.
-if [ ! -f /usr/share/orvix/admin/index.html ] || [ ! -f /usr/share/orvix/admin/app.js ]; then
-  echo "ERROR: admin UI deployment incomplete (index.html or app.js missing)." >&2
+# Verify the deployed admin UI is intact. Accept the built React SPA
+# (index.html + assets/*.js) shipped by build-release-bundle.sh as well as the
+# legacy plain-JS admin (index.html + app.js).
+if [ ! -f /usr/share/orvix/admin/index.html ]; then
+  echo "ERROR: admin UI deployment incomplete (index.html missing)." >&2
+  exit 1
+fi
+if [ ! -f /usr/share/orvix/admin/app.js ] && ! ls /usr/share/orvix/admin/assets/*.js >/dev/null 2>&1; then
+  echo "ERROR: admin UI deployment incomplete (neither assets/*.js nor app.js present)." >&2
   exit 1
 fi
 

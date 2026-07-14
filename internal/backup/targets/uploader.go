@@ -86,9 +86,9 @@ type SFTPClient interface {
 // can record the bytes without spinning up an SSH server.
 type sftpAdapter struct{ inner *sftp.Client }
 
-func (a sftpAdapter) Mkdir(p string) error              { return a.inner.Mkdir(p) }
+func (a sftpAdapter) Mkdir(p string) error                    { return a.inner.Mkdir(p) }
 func (a sftpAdapter) Create(p string) (io.WriteCloser, error) { return a.inner.Create(p) }
-func (a sftpAdapter) Close() error                      { return a.inner.Close() }
+func (a sftpAdapter) Close() error                            { return a.inner.Close() }
 
 // sftpDialer is the minimal seam used to open an SFTP
 // session. The default implementation builds a real

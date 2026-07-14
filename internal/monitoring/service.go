@@ -43,15 +43,15 @@ type DataSources struct {
 	BackupCount      func() (int, error)
 
 	// NEW fields for Monitoring v1.
-	BackupDir            string  // absolute path to the backup dir (used for writability + disk-usage label)
-	BackupDirWritable    func() bool  // explicit writability check; if nil, the service computes one
-	DatabaseSize         func() (int64, error) // explicit DB size; if nil, computed from the live DB
-	ServiceStartedAt     time.Time // process start time, used for uptime
-	APIPing              func() error // self-ping for admin API health; nil = unknown
-	DiskPathLabels       map[string]string // map absolute path -> safe label (e.g. cfg.Backup.Dir -> "backup")
-	MemoryUsage          func() (usedBytes, totalBytes int64) // explicit memory; if nil, computed from runtime.MemStats
-	CPULoad              func() (load1, load5, load15 float64, err error) // explicit load; if nil, computed on POSIX only
-	DNSHealthy           func() bool // DNS resolver health; nil = unknown
+	BackupDir         string                                           // absolute path to the backup dir (used for writability + disk-usage label)
+	BackupDirWritable func() bool                                      // explicit writability check; if nil, the service computes one
+	DatabaseSize      func() (int64, error)                            // explicit DB size; if nil, computed from the live DB
+	ServiceStartedAt  time.Time                                        // process start time, used for uptime
+	APIPing           func() error                                     // self-ping for admin API health; nil = unknown
+	DiskPathLabels    map[string]string                                // map absolute path -> safe label (e.g. cfg.Backup.Dir -> "backup")
+	MemoryUsage       func() (usedBytes, totalBytes int64)             // explicit memory; if nil, computed from runtime.MemStats
+	CPULoad           func() (load1, load5, load15 float64, err error) // explicit load; if nil, computed on POSIX only
+	DNSHealthy        func() bool                                      // DNS resolver health; nil = unknown
 
 	// Alert thresholds — if nil, sensible defaults are used.
 	Thresholds *AlertThresholds
@@ -176,18 +176,18 @@ func (s *Service) GetHealth(ctx context.Context) *Health {
 func (s *Service) GetSnapshot(ctx context.Context) *MonitoringSnapshot {
 	t := s.thresholds()
 	snapshot := &MonitoringSnapshot{
-		GeneratedAt:    time.Now().UTC(),
-		ServiceStatus:  "ok",
-		UptimeSeconds:  int64(time.Since(s.uptimeFrom()).Seconds()),
-		Disk:           s.collectDisk(),
-		DBHealth:       s.collectDBHealth(ctx),
-		QueueHealth:    s.collectQueueHealth(),
-		BackupHealth:   s.collectBackupHealth(),
-		APIHealth:      s.collectAPIHealth(),
-		CertExpiry:     CertExpiryStatus{Status: "ok"},
-		DNSReadiness:   ComponentHealth{Status: "unknown", Message: "DNS readiness not configured"},
-		Capacity:       s.collectCapacityShim(ctx),
-		MemoryUsedBytes: 0,
+		GeneratedAt:      time.Now().UTC(),
+		ServiceStatus:    "ok",
+		UptimeSeconds:    int64(time.Since(s.uptimeFrom()).Seconds()),
+		Disk:             s.collectDisk(),
+		DBHealth:         s.collectDBHealth(ctx),
+		QueueHealth:      s.collectQueueHealth(),
+		BackupHealth:     s.collectBackupHealth(),
+		APIHealth:        s.collectAPIHealth(),
+		CertExpiry:       CertExpiryStatus{Status: "ok"},
+		DNSReadiness:     ComponentHealth{Status: "unknown", Message: "DNS readiness not configured"},
+		Capacity:         s.collectCapacityShim(ctx),
+		MemoryUsedBytes:  0,
 		MemoryTotalBytes: 0,
 	}
 

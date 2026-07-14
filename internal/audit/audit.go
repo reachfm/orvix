@@ -50,10 +50,25 @@ func NewStore(db *sql.DB) *Store {
 	return &Store{db: db, dialect: dialect}
 }
 
-// EnsureTable creates the audit table.
+// EnsureTable creates the audit table using dialect-appropriate DDL.
+//
+// On PostgreSQL the coremail_audit table is owned by the control-plane
+// migration (models.MigrateAllPostgres); this CREATE TABLE IF NOT EXISTS
+// then no-ops. It MUST NOT emit SQLite-only DDL (INTEGER PRIMARY KEY
+// AUTOINCREMENT / DATETIME) to PostgreSQL, which is a parse-time syntax
+// error near "AUTOINCREMENT". Use the dialect helpers so the statement
+// parses cleanly on both engines instead of erroring and being swallowed.
 func (s *Store) EnsureTable(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS coremail_audit (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
+	_, err := s.db.ExecContext(ctx, coremailAuditDDL(s.dialect))
+	return err
+}
+
+// coremailAuditDDL returns the dialect-appropriate CREATE TABLE for the
+// coremail_audit table. Kept as a pure function so the emitted DDL can be
+// asserted in tests without a live database of either engine.
+func coremailAuditDDL(d *dbdialect.Info) string {
+	return `CREATE TABLE IF NOT EXISTS coremail_audit (
+		id ` + d.AutoIncrement() + `,
 		actor TEXT NOT NULL DEFAULT '',
 		role TEXT NOT NULL DEFAULT '',
 		action TEXT NOT NULL DEFAULT '',
@@ -61,9 +76,8 @@ func (s *Store) EnsureTable(ctx context.Context) error {
 		result TEXT NOT NULL DEFAULT '',
 		ip TEXT NOT NULL DEFAULT '',
 		user_agent TEXT NOT NULL DEFAULT '',
-		timestamp DATETIME NOT NULL
-	)`)
-	return err
+		timestamp ` + d.TimestampType() + ` NOT NULL
+	)`
 }
 
 // Record inserts an audit entry.
