@@ -167,7 +167,8 @@ if [ "$MODE" = "live" ]; then
              "$BUNDLE_STAGING/release/webmail/assets" \
              "$BUNDLE_STAGING/release/systemd" \
              "$BUNDLE_STAGING/release/sudoers.d" \
-             "$BUNDLE_STAGING/release/scripts"
+             "$BUNDLE_STAGING/release/scripts" \
+             "$BUNDLE_STAGING/release/trust"
 
     # Minimal install.sh that records its invocation and exits 0
     # so we can assert install-public.sh reached the delegation step.
@@ -216,6 +217,7 @@ BIN_EOF
         release/scripts/verify-github-release-assets.sh \
         release/scripts/verify-fresh-vps-one-command.sh \
         release/scripts/healthcheck.sh release/scripts/diagnostics.sh \
+        release/trust/orvix-release-signing.pub.pem \
         release/admin/index.html release/admin/app.js release/admin/styles.css \
         release/admin/modules/auth.js release/admin/modules/components.js \
         release/webmail/index.html release/webmail/sw.js \
