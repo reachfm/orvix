@@ -3,7 +3,6 @@ package handlers
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
@@ -24,14 +23,15 @@ import (
 // roll back on failure -> write the durable result this endpoint returns. Only
 // that external coordinator may mark a job succeeded.
 
-// restoreCoordinatorRoot mirrors cmd/orvix restoreCoordRoot so the API and the
-// helper agree on the job/result directory.
+// restoreCoordinatorRoot is the FIXED restore job/result directory, matching
+// cmd/orvix restoreJobsDir and the systemd orvix-restore.path watched path
+// (which cannot read config). Overridable via ORVIX_RESTORE_JOBS_DIR only for
+// test/staging harnesses.
 func (h *Handler) restoreCoordinatorRoot() string {
-	base := "/var/lib/orvix"
-	if h.cfg != nil && strings.TrimSpace(h.cfg.CoreMail.DataPath) != "" {
-		base = h.cfg.CoreMail.DataPath
+	if v := strings.TrimSpace(os.Getenv("ORVIX_RESTORE_JOBS_DIR")); v != "" {
+		return v
 	}
-	return filepath.Join(base, "restore-jobs")
+	return "/var/lib/orvix/restore-jobs"
 }
 
 func (h *Handler) restoreCoordinator() *restorecoord.Coordinator {

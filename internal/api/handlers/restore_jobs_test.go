@@ -15,9 +15,10 @@ import (
 
 func restoreTestHandler(t *testing.T) *Handler {
 	t.Helper()
-	cfg := &config.Config{}
-	cfg.CoreMail.DataPath = t.TempDir() // coordinator root -> <tmp>/restore-jobs
-	return &Handler{logger: zap.NewNop(), cfg: cfg}
+	// The coordinator root is a fixed path in production; point it at a temp
+	// dir for the test via the documented override.
+	t.Setenv("ORVIX_RESTORE_JOBS_DIR", t.TempDir())
+	return &Handler{logger: zap.NewNop(), cfg: &config.Config{}}
 }
 
 // Restore must fail closed (503) when the external coordinator units are not

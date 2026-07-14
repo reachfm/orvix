@@ -58,7 +58,7 @@ func restoreRunCommand(args []string) int {
 		return 1
 	}
 
-	coord := restorecoord.New(restoreCoordRoot(cfg))
+	coord := restorecoord.New(restoreJobsDir())
 	if err := coord.EnsureDirs(); err != nil {
 		logger.Error("restore-run: ensure dirs", zap.Error(err))
 		return 1
@@ -310,14 +310,16 @@ func healthJSONOK(body []byte) bool {
 	return false
 }
 
-// restoreCoordRoot resolves the restore job/result directory shared by the API
-// and this helper. Both derive it from the same config so they never diverge.
-func restoreCoordRoot(cfg *config.Config) string {
-	base := "/var/lib/orvix"
-	if cfg != nil && strings.TrimSpace(cfg.CoreMail.DataPath) != "" {
-		base = cfg.CoreMail.DataPath
+// restoreJobsDir resolves the restore job/result directory. It is a FIXED path
+// (not derived from config) because the systemd orvix-restore.path unit watches
+// it literally and cannot read the config; the API and this helper must agree
+// with that watched path exactly. Overridable via ORVIX_RESTORE_JOBS_DIR only
+// for test/staging harnesses that set it identically on both units.
+func restoreJobsDir() string {
+	if v := strings.TrimSpace(os.Getenv("ORVIX_RESTORE_JOBS_DIR")); v != "" {
+		return v
 	}
-	return filepath.Join(base, "restore-jobs")
+	return "/var/lib/orvix/restore-jobs"
 }
 
 // buildRestoreService constructs a backup.Service equivalent to the API's for
