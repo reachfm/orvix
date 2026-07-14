@@ -18,14 +18,14 @@ func NewQuotaService(db *sql.DB, svc *Service) *QuotaService {
 func (s *QuotaService) CanCreateDomain(tenantID uint, currentDomains int) *QuotaCheckResult {
 	sub, err := s.svc.GetSubscription(tenantID)
 	if err != nil {
-		return &QuotaCheckResult{Allowed: false, Reason: "no active subscription"}
+		return nil
 	}
 	if sub.Status == SubSuspended || sub.Status == SubExpired {
 		return &QuotaCheckResult{Allowed: false, Reason: "subscription is " + string(sub.Status)}
 	}
 	plan, err := s.svc.GetPlan(sub.PlanID)
 	if err != nil {
-		return &QuotaCheckResult{Allowed: false, Reason: "plan not found"}
+		return nil
 	}
 	remaining := plan.MaxDomains - currentDomains
 	return &QuotaCheckResult{
@@ -39,14 +39,14 @@ func (s *QuotaService) CanCreateDomain(tenantID uint, currentDomains int) *Quota
 func (s *QuotaService) CanCreateMailbox(tenantID uint, currentMailboxes int) *QuotaCheckResult {
 	sub, err := s.svc.GetSubscription(tenantID)
 	if err != nil {
-		return &QuotaCheckResult{Allowed: false, Reason: "no active subscription"}
+		return nil
 	}
 	if sub.Status == SubSuspended || sub.Status == SubExpired {
 		return &QuotaCheckResult{Allowed: false, Reason: "subscription is " + string(sub.Status)}
 	}
 	plan, err := s.svc.GetPlan(sub.PlanID)
 	if err != nil {
-		return &QuotaCheckResult{Allowed: false, Reason: "plan not found"}
+		return nil
 	}
 	remaining := plan.MaxMailboxes - currentMailboxes
 	return &QuotaCheckResult{
@@ -60,7 +60,7 @@ func (s *QuotaService) CanCreateMailbox(tenantID uint, currentMailboxes int) *Qu
 func (s *QuotaService) CanSendEmail(tenantID uint, sentToday int64) *QuotaCheckResult {
 	sub, err := s.svc.GetSubscription(tenantID)
 	if err != nil {
-		return &QuotaCheckResult{Allowed: false, Reason: "no active subscription"}
+		return nil
 	}
 	remaining := int64(sub.SendLimitDay) - sentToday
 	return &QuotaCheckResult{
