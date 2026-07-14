@@ -21,6 +21,18 @@ func NewService(db *sql.DB) *Service {
 	return &Service{db: db}
 }
 
+func (s *Service) withTx(fn func(*sql.Tx) error) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Service) GetPlan(id PlanID) (*Plan, error) {
 	row := s.db.QueryRow(`SELECT id, name, description, price_monthly, price_yearly,
 		max_domains, max_mailboxes, storage_mb, send_limit_day, features, created_at, updated_at
@@ -61,22 +73,24 @@ func (s *Service) SeedDefaultPlans() error {
 		{ID: PlanBusiness, Name: "Business", Description: "For growing companies", PriceMonthly: 2999, PriceYearly: 29990, MaxDomains: 10, MaxMailboxes: 100, StorageMB: 102400, SendLimitDay: 10000, Features: `["custom_domain","dkim","mta_sts","api","team","groups","catch_all","mail_forwarding","backup","audit_log","mfa"]`},
 		{ID: PlanEnterprise, Name: "Enterprise", Description: "For large organizations", PriceMonthly: 9999, PriceYearly: 99990, MaxDomains: 100, MaxMailboxes: 1000, StorageMB: 1048576, SendLimitDay: 100000, Features: `["custom_domain","dkim","mta_sts","api","team","groups","catch_all","mail_forwarding","backup","audit_log","sso","mfa","sla","priority_support"]`},
 	}
-	for _, p := range defaults {
-		var existing string
-		err := s.db.QueryRow("SELECT id FROM plans WHERE id = ?", p.ID).Scan(&existing)
-		if errors.Is(err, sql.ErrNoRows) {
-			now := time.Now().UTC()
-		_, err = s.db.Exec(`INSERT INTO plans (id, name, description, price_monthly, price_yearly,
-				max_domains, max_mailboxes, storage_mb, send_limit_day, features, created_at, updated_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				p.ID, p.Name, p.Description, p.PriceMonthly, p.PriceYearly,
-				p.MaxDomains, p.MaxMailboxes, p.StorageMB, p.SendLimitDay, p.Features, now, now)
-			if err != nil {
-				return err
+	return s.withTx(func(tx *sql.Tx) error {
+		for _, p := range defaults {
+			var existing string
+			err := tx.QueryRow("SELECT id FROM plans WHERE id = ?", p.ID).Scan(&existing)
+			if errors.Is(err, sql.ErrNoRows) {
+				now := time.Now().UTC()
+				_, err = tx.Exec(`INSERT INTO plans (id, name, description, price_monthly, price_yearly,
+					max_domains, max_mailboxes, storage_mb, send_limit_day, features, created_at, updated_at)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+					p.ID, p.Name, p.Description, p.PriceMonthly, p.PriceYearly,
+					p.MaxDomains, p.MaxMailboxes, p.StorageMB, p.SendLimitDay, p.Features, now, now)
+				if err != nil {
+					return err
+				}
 			}
 		}
-	}
-	return nil
+		return nil
+	})
 }
 
 func (s *Service) GetSubscription(tenantID uint) (*Subscription, error) {
@@ -96,10 +110,6 @@ func (s *Service) GetSubscription(tenantID uint) (*Subscription, error) {
 }
 
 func (s *Service) CreateSubscription(tenantID uint, planID PlanID, interval BillingInterval, trialDays int) (*Subscription, error) {
-	existing, err := s.GetSubscription(tenantID)
-	if err == nil && existing.Status != SubCancelled && existing.Status != SubExpired {
-		return nil, ErrTenantAlreadyHasSub
-	}
 	plan, err := s.GetPlan(planID)
 	if err != nil {
 		return nil, err
@@ -114,14 +124,34 @@ func (s *Service) CreateSubscription(tenantID uint, planID PlanID, interval Bill
 		status = SubTrialing
 		periodEnd = t
 	}
-	_, err = s.db.Exec(`INSERT INTO subscriptions (tenant_id, plan_id, status, billing_interval, trial_ends_at,
-		current_period_start, current_period_end, storage_mb, send_limit_day, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		tenantID, planID, status, interval, trialEnd, now, periodEnd, plan.StorageMB, plan.SendLimitDay, now, now)
-	if err != nil {
-		return nil, err
-	}
-	return s.GetSubscription(tenantID)
+	var sub *Subscription
+	err = s.withTx(func(tx *sql.Tx) error {
+		var existingID uint
+		err := tx.QueryRow("SELECT id FROM subscriptions WHERE tenant_id = ?", tenantID).Scan(&existingID)
+		if err == nil {
+			var existingStatus SubscriptionStatus
+			tx.QueryRow("SELECT status FROM subscriptions WHERE id = ?", existingID).Scan(&existingStatus)
+			if existingStatus != SubCancelled && existingStatus != SubExpired {
+				return ErrTenantAlreadyHasSub
+			}
+		}
+		_, err = tx.Exec(`INSERT INTO subscriptions (tenant_id, plan_id, status, billing_interval, trial_ends_at,
+			current_period_start, current_period_end, storage_mb, send_limit_day, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			tenantID, planID, status, interval, trialEnd, now, periodEnd, plan.StorageMB, plan.SendLimitDay, now, now)
+		if err != nil {
+			return err
+		}
+		var id uint
+		tx.QueryRow("SELECT last_insert_rowid()").Scan(&id)
+		sub = &Subscription{
+			ID: id, TenantID: tenantID, PlanID: planID, Status: status, BillingInterval: interval,
+			TrialEndsAt: trialEnd, CurrentPeriodStart: now, CurrentPeriodEnd: periodEnd,
+			StorageMB: plan.StorageMB, SendLimitDay: plan.SendLimitDay, CreatedAt: now, UpdatedAt: now,
+		}
+		return nil
+	})
+	return sub, err
 }
 
 func (s *Service) ChangePlan(tenantID uint, newPlanID PlanID) (*Subscription, error) {
@@ -129,9 +159,12 @@ func (s *Service) ChangePlan(tenantID uint, newPlanID PlanID) (*Subscription, er
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now().UTC()
-	_, err = s.db.Exec("UPDATE subscriptions SET plan_id = ?, storage_mb = ?, send_limit_day = ?, updated_at = ? WHERE tenant_id = ?",
-		newPlanID, plan.StorageMB, plan.SendLimitDay, now, tenantID)
+	err = s.withTx(func(tx *sql.Tx) error {
+		now := time.Now().UTC()
+		_, err := tx.Exec("UPDATE subscriptions SET plan_id = ?, storage_mb = ?, send_limit_day = ?, updated_at = ? WHERE tenant_id = ?",
+			newPlanID, plan.StorageMB, plan.SendLimitDay, now, tenantID)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -139,29 +172,32 @@ func (s *Service) ChangePlan(tenantID uint, newPlanID PlanID) (*Subscription, er
 }
 
 func (s *Service) TransitionState(tenantID uint, newStatus SubscriptionStatus) error {
-	sub, err := s.GetSubscription(tenantID)
-	if err != nil {
+	return s.withTx(func(tx *sql.Tx) error {
+		var current SubscriptionStatus
+		err := tx.QueryRow("SELECT status FROM subscriptions WHERE tenant_id = ?", tenantID).Scan(&current)
+		if err != nil {
+			return ErrSubscriptionNotFound
+		}
+		if !validTransition(current, newStatus) {
+			return ErrInvalidTransition
+		}
+		now := time.Now().UTC()
+		var pastDueSince, graceEndsAt, suspendedAt, cancelledAt *time.Time
+		switch newStatus {
+		case SubPastDue:
+			pastDueSince = &now
+			g := now.AddDate(0, 0, 7)
+			graceEndsAt = &g
+		case SubSuspended:
+			suspendedAt = &now
+		case SubCancelled:
+			cancelledAt = &now
+		}
+		_, err = tx.Exec(`UPDATE subscriptions SET status = ?, past_due_since = ?, grace_period_ends_at = ?,
+			suspended_at = ?, cancelled_at = ?, updated_at = ? WHERE tenant_id = ?`,
+			newStatus, pastDueSince, graceEndsAt, suspendedAt, cancelledAt, now, tenantID)
 		return err
-	}
-	if !validTransition(sub.Status, newStatus) {
-		return ErrInvalidTransition
-	}
-	now := time.Now().UTC()
-	var pastDueSince, graceEndsAt, suspendedAt, cancelledAt *time.Time
-	switch newStatus {
-	case SubPastDue:
-		pastDueSince = &now
-		g := now.AddDate(0, 0, 7)
-		graceEndsAt = &g
-	case SubSuspended:
-		suspendedAt = &now
-	case SubCancelled:
-		cancelledAt = &now
-	}
-	_, err = s.db.Exec(`UPDATE subscriptions SET status = ?, past_due_since = ?, grace_period_ends_at = ?,
-		suspended_at = ?, cancelled_at = ?, updated_at = ? WHERE tenant_id = ?`,
-		newStatus, pastDueSince, graceEndsAt, suspendedAt, cancelledAt, now, tenantID)
-	return err
+	})
 }
 
 func validTransition(from, to SubscriptionStatus) bool {

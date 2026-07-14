@@ -16,6 +16,7 @@ var (
 	ErrInvitationExpired       = errors.New("invitation has expired")
 	ErrInvitationAlreadyUsed   = errors.New("invitation already accepted")
 	ErrInvitationRevoked       = errors.New("invitation was revoked")
+	ErrLastOwnerCannotTransfer = errors.New("cannot transfer ownership: no remaining owner would exist")
 )
 
 type InvitationStatus string
