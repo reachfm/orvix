@@ -18,12 +18,12 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/abuse"
 	dashboardsvc "github.com/orvix/orvix/internal/admin/dashboard"
 	domainadminsvc "github.com/orvix/orvix/internal/admin/domain"
 	mailboxadminsvc "github.com/orvix/orvix/internal/admin/mailbox"
 	orgadminsvc "github.com/orvix/orvix/internal/admin/organization"
 	platformsvc "github.com/orvix/orvix/internal/admin/platform"
-	"github.com/orvix/orvix/internal/abuse"
 	"github.com/orvix/orvix/internal/antivirus"
 	"github.com/orvix/orvix/internal/api/handlers/settings"
 	"github.com/orvix/orvix/internal/audit"
@@ -194,10 +194,10 @@ type Handler struct {
 	platformAdminSvc *platformsvc.PlatformService
 	dashboardSvc     *dashboardsvc.DashboardService
 
-	billingSvc *billing.Service
-	usageSvc   *billing.UsageService
-	quotaSvc   *billing.QuotaService
-	abuseSvc   *abuse.SignalService
+	billingSvc   *billing.Service
+	usageSvc     *billing.UsageService
+	quotaSvc     *billing.QuotaService
+	abuseSvc     *abuse.SignalService
 	rateLimitSvc *abuse.RateLimitService
 }
 

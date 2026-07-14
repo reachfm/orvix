@@ -25,7 +25,9 @@ func (h *Handler) AcknowledgeAbuseSignal(c fiber.Ctx) error {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "abuse service not available"})
 	}
 	var id uint
-	c.Bind().URI(&struct{ ID uint `uri:"id"` }{})
+	c.Bind().URI(&struct {
+		ID uint `uri:"id"`
+	}{})
 	if id == 0 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid id"})
 	}
