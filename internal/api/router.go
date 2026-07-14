@@ -545,6 +545,7 @@ func (r *Router) setupRoutes() {
 	// per-IP API budget.
 	api := r.app.Group("/api/v1", r.apiRateLimitMiddleware())
 	api.Get("/health", r.h.Health)
+	api.Get("/billing/plans", r.h.ListBillingPlans)
 
 	loginGroup := api.Group("/auth")
 	if r.redisLimiter != nil {
@@ -560,8 +561,6 @@ func (r *Router) setupRoutes() {
 	// so MFA-enabled users can complete login without being authenticated.
 	loginGroup.Post("/mfa/verify", r.h.MFALoginVerify)
 	r.app.Post("/admin/login", r.h.Login)
-
-	protected.Get("/billing/plans", r.h.ListBillingPlans)
 
 	// Webmail authentication (public — no auth middleware).
 	//
