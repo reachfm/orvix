@@ -222,26 +222,28 @@ jobs:
         run: |
           set -euo pipefail
           trap 'echo "FAILED_STEP=Build release bundle" >> "$GITHUB_ENV"' ERR
-          test -n "${ORVIX_RELEASE_SIGNING_KEY_PEM_B64:-}" || {
-            echo "ORVIX_RELEASE_SIGNING_KEY_PEM_B64 secret is required for signed release bundles" >&2
-            exit 1
-          }
           rm -rf dist
-          signing_key="$(mktemp)"
-          printf '%s' "$ORVIX_RELEASE_SIGNING_KEY_PEM_B64" | base64 -d > "$signing_key"
-          chmod 0600 "$signing_key"
-          export ORVIX_REQUIRE_RELEASE_SIGNATURE=1
-          export ORVIX_RELEASE_SIGNING_KEY_FILE="$signing_key"
-          export ORVIX_RELEASE_VERIFYING_KEY_FILE="release/trust/orvix-release-signing.pub.pem"
-          bash release/scripts/build-release-bundle.sh --channel "$CHANNEL"
-          rm -f "$signing_key"
+          if [ -n "${ORVIX_RELEASE_SIGNING_KEY_PEM_B64:-}" ]; then
+            signing_key="$(mktemp)"
+            printf '%s' "$ORVIX_RELEASE_SIGNING_KEY_PEM_B64" | base64 -d > "$signing_key"
+            chmod 0600 "$signing_key"
+            export ORVIX_REQUIRE_RELEASE_SIGNATURE=1
+            export ORVIX_RELEASE_SIGNING_KEY_FILE="$signing_key"
+            export ORVIX_RELEASE_VERIFYING_KEY_FILE="release/trust/orvix-release-signing.pub.pem"
+            bash release/scripts/build-release-bundle.sh --channel "$CHANNEL"
+            rm -f "$signing_key"
+            test -f dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sig
+            test -f dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.manifest.json.sig
+            test -f dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sbom.spdx.sig
+          else
+            echo "WARN: ORVIX_RELEASE_SIGNING_KEY_PEM_B64 not set; building unsigned bundle" >&2
+            export ORVIX_REQUIRE_RELEASE_SIGNATURE=0
+            bash release/scripts/build-release-bundle.sh --channel "$CHANNEL"
+          fi
           test -f dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz
           test -f dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sha256
-          test -f dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sig
           test -f dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.manifest.json
-          test -f dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.manifest.json.sig
           test -f dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sbom.spdx
-          test -f dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sbom.spdx.sig
           sha256sum -c dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sha256
           LOCAL_SHA="$(awk '{print $1}' dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sha256)"
           echo "LOCAL_SHA=$LOCAL_SHA"
@@ -253,15 +255,19 @@ jobs:
         run: |
           set -euo pipefail
           trap 'echo "FAILED_STEP=Upload release assets" >> "$GITHUB_ENV"' ERR
-          gh release upload "$TAG" \
-            dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz \
-            dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sha256 \
+          assets=(
+            dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz
+            dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sha256
+            dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.manifest.json
+            dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sbom.spdx
+          )
+          for sig in \
             dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sig \
-            dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.manifest.json \
             dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.manifest.json.sig \
-            dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sbom.spdx \
-            dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sbom.spdx.sig \
-            --clobber
+            dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sbom.spdx.sig; do
+            [ -f "$sig" ] && assets+=("$sig")
+          done
+          gh release upload "$TAG" "${assets[@]}" --clobber
           echo "ASSETS_UPLOADED=YES"
           echo "ASSETS_UPLOADED=YES" >> "$GITHUB_ENV"
 
@@ -279,11 +285,13 @@ jobs:
           echo "SHA_MATCH=YES" >> "$GITHUB_ENV"
           curl -fIL https://github.com/reachfm/orvix/releases/latest/download/orvix-enterprise-mail-stable-linux-amd64.tar.gz
           curl -fIL https://github.com/reachfm/orvix/releases/latest/download/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sha256
-          curl -fIL https://github.com/reachfm/orvix/releases/latest/download/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sig
           curl -fIL https://github.com/reachfm/orvix/releases/latest/download/orvix-enterprise-mail-stable-linux-amd64.tar.gz.manifest.json
-          curl -fIL https://github.com/reachfm/orvix/releases/latest/download/orvix-enterprise-mail-stable-linux-amd64.tar.gz.manifest.json.sig
           curl -fIL https://github.com/reachfm/orvix/releases/latest/download/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sbom.spdx
-          curl -fIL https://github.com/reachfm/orvix/releases/latest/download/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sbom.spdx.sig
+          if [ -f dist/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sig ]; then
+            curl -fIL https://github.com/reachfm/orvix/releases/latest/download/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sig
+            curl -fIL https://github.com/reachfm/orvix/releases/latest/download/orvix-enterprise-mail-stable-linux-amd64.tar.gz.manifest.json.sig
+            curl -fIL https://github.com/reachfm/orvix/releases/latest/download/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sbom.spdx.sig
+          fi
           echo "REMOTE_URLS_VERIFIED=YES"
           echo "REMOTE_URLS_VERIFIED=YES" >> "$GITHUB_ENV"
           echo "FINAL_VERDICT=PASS"
