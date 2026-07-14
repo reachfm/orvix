@@ -15,8 +15,8 @@ func CreateTables(db *sql.DB) error {
 			storage_mb INTEGER NOT NULL DEFAULT 1024,
 			send_limit_day INTEGER NOT NULL DEFAULT 500,
 			features TEXT DEFAULT '',
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS subscriptions (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -24,32 +24,32 @@ func CreateTables(db *sql.DB) error {
 			plan_id TEXT NOT NULL DEFAULT '',
 			status TEXT NOT NULL DEFAULT 'trialing',
 			billing_interval TEXT NOT NULL DEFAULT 'monthly',
-			trial_ends_at DATETIME,
-			current_period_start DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			current_period_end DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			cancelled_at DATETIME,
-			past_due_since DATETIME,
-			grace_period_ends_at DATETIME,
-			suspended_at DATETIME,
+			trial_ends_at TIMESTAMP,
+			current_period_start TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			current_period_end TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			cancelled_at TIMESTAMP,
+			past_due_since TIMESTAMP,
+			grace_period_ends_at TIMESTAMP,
+			suspended_at TIMESTAMP,
 			storage_mb INTEGER NOT NULL DEFAULT 1024,
 			send_limit_day INTEGER NOT NULL DEFAULT 500,
 			provider TEXT DEFAULT '',
 			provider_sub_id TEXT DEFAULT '',
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS usage_records (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			tenant_id INTEGER NOT NULL,
-			period_start DATETIME NOT NULL,
-			period_end DATETIME NOT NULL,
+			period_start TIMESTAMP NOT NULL,
+			period_end TIMESTAMP NOT NULL,
 			mailboxes_used INTEGER NOT NULL DEFAULT 0,
 			domains_used INTEGER NOT NULL DEFAULT 0,
 			storage_used_mb INTEGER NOT NULL DEFAULT 0,
 			emails_sent INTEGER NOT NULL DEFAULT 0,
 			emails_received INTEGER NOT NULL DEFAULT 0,
 			api_calls INTEGER NOT NULL DEFAULT 0,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			UNIQUE(tenant_id, period_start)
 		)`,
 		`CREATE TABLE IF NOT EXISTS webhook_events (
@@ -59,11 +59,11 @@ func CreateTables(db *sql.DB) error {
 			provider_sub_id TEXT DEFAULT '',
 			raw_payload BLOB,
 			signature TEXT DEFAULT '',
-			received_at DATETIME NOT NULL,
-			processed_at DATETIME,
+			received_at TIMESTAMP NOT NULL,
+			processed_at TIMESTAMP,
 			processing_error TEXT DEFAULT '',
 			idempotency_key TEXT NOT NULL UNIQUE,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS org_invitations (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,11 +73,11 @@ func CreateTables(db *sql.DB) error {
 			token_hash TEXT NOT NULL,
 			role TEXT NOT NULL DEFAULT 'user',
 			status TEXT NOT NULL DEFAULT 'pending',
-			expires_at DATETIME NOT NULL,
-			accepted_at DATETIME,
-			revoked_at DATETIME,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			expires_at TIMESTAMP NOT NULL,
+			accepted_at TIMESTAMP,
+			revoked_at TIMESTAMP,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS org_ownership_transfers (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -86,9 +86,9 @@ func CreateTables(db *sql.DB) error {
 			to_user_id INTEGER NOT NULL,
 			token_hash TEXT NOT NULL,
 			status TEXT NOT NULL DEFAULT 'pending',
-			expires_at DATETIME NOT NULL,
-			accepted_at DATETIME,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			expires_at TIMESTAMP NOT NULL,
+			accepted_at TIMESTAMP,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS org_suspensions (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,46 +96,46 @@ func CreateTables(db *sql.DB) error {
 			reason TEXT NOT NULL DEFAULT '',
 			suspended_by INTEGER NOT NULL,
 			note TEXT DEFAULT '',
-			suspended_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			reactivated_at DATETIME,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			suspended_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			reactivated_at TIMESTAMP,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS org_deletions (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			organization_id INTEGER NOT NULL,
 			requested_by INTEGER NOT NULL,
 			state TEXT NOT NULL DEFAULT 'deletion_requested',
-			retention_expires_at DATETIME,
-			requested_at DATETIME NOT NULL,
-			confirmed_at DATETIME,
-			cancelled_at DATETIME,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			retention_expires_at TIMESTAMP,
+			requested_at TIMESTAMP NOT NULL,
+			confirmed_at TIMESTAMP,
+			cancelled_at TIMESTAMP,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS domain_ownership (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			domain_id INTEGER NOT NULL UNIQUE,
 			token_hash TEXT NOT NULL,
 			status TEXT NOT NULL DEFAULT 'pending',
-			token_generated_at DATETIME NOT NULL,
-			token_rotated_at DATETIME,
-			verified_at DATETIME,
-			last_check_at DATETIME,
+			token_generated_at TIMESTAMP NOT NULL,
+			token_rotated_at TIMESTAMP,
+			verified_at TIMESTAMP,
+			last_check_at TIMESTAMP,
 			last_error TEXT DEFAULT '',
 			check_count INTEGER NOT NULL DEFAULT 0,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS abuse_send_counts (
 			day_key TEXT PRIMARY KEY,
 			tenant_id INTEGER NOT NULL,
 			emails_sent INTEGER NOT NULL DEFAULT 0,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS abuse_bounce_counts (
 			day_key TEXT PRIMARY KEY,
 			tenant_id INTEGER NOT NULL,
 			bounce_count INTEGER NOT NULL DEFAULT 0,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS abuse_signals (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -145,11 +145,11 @@ func CreateTables(db *sql.DB) error {
 			severity TEXT NOT NULL DEFAULT 'info',
 			description TEXT DEFAULT '',
 			metadata TEXT DEFAULT '',
-			detected_at DATETIME NOT NULL,
-			acknowledged_at DATETIME,
-			resolved_at DATETIME,
+			detected_at TIMESTAMP NOT NULL,
+			acknowledged_at TIMESTAMP,
+			resolved_at TIMESTAMP,
 			resolved_by INTEGER,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 	} {
 		if _, err := db.Exec(ddl); err != nil {
