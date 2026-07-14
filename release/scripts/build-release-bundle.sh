@@ -168,6 +168,8 @@ REQUIRED_FILES=(
     release/VERSION
     release/systemd/orvix.service
     release/systemd/orvix-update.service
+    release/systemd/orvix-restore.service
+    release/systemd/orvix-restore.path
     release/sudoers.d/orvix-update
     release/scripts/healthcheck.sh
     release/scripts/smoke-admin-js.sh
@@ -383,8 +385,10 @@ cp release/install-public.sh "$BUNDLE_ROOT/release/install-public.sh"
 cp release/upgrade.sh "$BUNDLE_ROOT/release/upgrade.sh"
 [ -f release/uninstall.sh ] && cp release/uninstall.sh "$BUNDLE_ROOT/release/uninstall.sh"
 
-cp release/systemd/orvix.service        "$BUNDLE_ROOT/release/systemd/orvix.service"
-cp release/systemd/orvix-update.service "$BUNDLE_ROOT/release/systemd/orvix-update.service"
+cp release/systemd/orvix.service         "$BUNDLE_ROOT/release/systemd/orvix.service"
+cp release/systemd/orvix-update.service  "$BUNDLE_ROOT/release/systemd/orvix-update.service"
+cp release/systemd/orvix-restore.service "$BUNDLE_ROOT/release/systemd/orvix-restore.service"
+cp release/systemd/orvix-restore.path    "$BUNDLE_ROOT/release/systemd/orvix-restore.path"
 cp release/sudoers.d/orvix-update       "$BUNDLE_ROOT/release/sudoers.d/orvix-update"
 
 for s in release/scripts/*.sh; do
@@ -446,6 +450,8 @@ BUNDLE_REQUIRED=(
     release/upgrade.sh
     release/systemd/orvix.service
     release/systemd/orvix-update.service
+    release/systemd/orvix-restore.service
+    release/systemd/orvix-restore.path
     release/sudoers.d/orvix-update
     release/admin/index.html
     release/webmail/index.html

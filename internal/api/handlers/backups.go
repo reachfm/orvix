@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
-	"github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/backup"
 	"github.com/orvix/orvix/internal/backup/targets"
 	"github.com/orvix/orvix/internal/updater"
@@ -111,24 +110,14 @@ func (h *Handler) backupService() (*backup.Service, error) {
 		mgr.Run(bgCtx, archivePath, backupID)
 	})
 
-	// Wire the restore restart and health callbacks so RestoreBackup can
-	// actually restart the service and verify the RESTARTED SERVICE is
-	// healthy before reporting success. Both are observable and fail closed;
-	// the service layer bounds them with a timeout and rolls back to the
-	// pre-restore safety backup on any failure. See restore_orchestration.go.
-	svc.SetRestoreRestart(h.restoreRestartCallback())
-	svc.SetRestoreHealthCheck(h.restoreHealthCallback())
-	svc.SetRestoreAuditHook(func(ctx context.Context, action, detail string) {
-		if h.auditStore == nil {
-			return
-		}
-		_ = h.auditStore.Record(ctx, &audit.Entry{
-			Actor:  "system:restore",
-			Action: action,
-			Target: detail,
-			Result: "success",
-		})
-	})
+	// NOTE: restore is NOT performed in-process. An HTTP handler cannot
+	// safely restart its own (User=orvix, NoNewPrivileges) service and then
+	// observe the restart/health/rollback from the process being killed.
+	// PostRestoreBackup only SUBMITS a restore job; the external, privileged
+	// orvix-restore.service coordinator (see cmd/orvix restore-run) activates
+	// the backup, restarts orvix, verifies the restarted service's health, and
+	// rolls back on failure. This service instance is used only for the
+	// non-destructive backup operations (create/list/validate/preview).
 
 	// Add key file paths from config to be included in backups.
 	if h.cfg != nil {
@@ -445,32 +434,7 @@ func (h *Handler) PostValidateBackup(c fiber.Ctx) error {
 
 // PostRestoreBackup validates, safety-snapshots, and activates a backup.
 // It fails closed unless the operator has enabled restore maintenance mode.
-func (h *Handler) PostRestoreBackup(c fiber.Ctx) error {
-	id := c.Params("id")
-	if invalidBackupID(id) {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid backup id"})
-	}
-	var req struct {
-		Confirm string `json:"confirm"`
-	}
-	if err := c.Bind().JSON(&req); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
-	}
-	if req.Confirm != "restore-orvix-backup" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "restore requires typed confirmation: restore-orvix-backup"})
-	}
-	svc, err := h.backupService()
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "backup service unavailable"})
-	}
-	result, err := svc.RestoreBackup(c.Context(), id)
-	if err != nil {
-		h.logger.Error("backup restore activation failed", zap.String("backup_id", id), zap.Error(err))
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
-	}
-	h.writeAuditLog(c, "backup.restore", fmt.Sprintf("backup_id:%s|status:%s|rolled_back:%v", id, result.Status, result.RolledBack))
-	return c.JSON(result)
-}
+// PostRestoreBackup is implemented in restore_jobs.go (async job model).
 
 // PostBackupNow creates an immediate backup and returns the backup ID.
 // This is the explicit "backup now" endpoint for administrator-triggered backups.

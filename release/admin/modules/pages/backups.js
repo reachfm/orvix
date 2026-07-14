@@ -14,9 +14,13 @@
    Restore is double-gated:
      1. The operator must type the backup id exactly.
      2. A second dialog confirms with a typed phrase.
-   Live restore is not advertised; we label it as "staged"
-   and require the operator to switch to maintenance mode via
-   the CLI.
+   Restore is a LIVE, asynchronous, job-based operation. POST returns 202 with
+   a job id; an external privileged coordinator (orvix-restore.service)
+   activates the backup, restarts Orvix (this UI's connection may drop),
+   verifies the restarted service's health, and automatically rolls back to a
+   pre-restore safety backup on failure. The UI polls
+   GET /api/v1/admin/backups/restore-jobs/:job_id and shows success ONLY after
+   the coordinator reports the restarted service is healthy.
    ===================================================================== */
 
 import { el, table, badge, fmtShortDate, fmtBytes, openModal, confirmDanger } from '../components.js';
@@ -181,7 +185,7 @@ async function doRestore(id) {
   // Stage 1: typed id confirmation.
   const stage1 = await confirmDanger({
     title: 'Restore backup',
-    message: 'Restoring a backup replaces ALL current mailboxes, domains, and rules. A pre-restore safety backup is created automatically. The system validates, activates, restarts, and health-verifies the restore — rolling back on any failure. The operator must enable restore maintenance mode before proceeding.',
+    message: 'Restoring a backup replaces ALL current mailboxes, domains, and rules. A pre-restore safety backup is created automatically. Restore runs as a background job: Orvix will RESTART (this page may briefly lose connection), then the restarted service is health-checked. On any failure the system automatically rolls back to the safety backup. Progress is tracked as a restore job.',
     confirmLabel: 'Continue',
     requireText: id,
   });
@@ -194,10 +198,51 @@ async function doRestore(id) {
     requireText: 'restore-orvix-backup',
   });
   if (!stage2) return;
+  let job;
   try {
-    await apiPost('/api/v1/admin/backups/' + encodeURIComponent(id) + '/restore', { confirm: 'restore-orvix-backup' });
-    toast('Restore initiated — system will restart and verify health', 'success', 4000);
+    // Restore is asynchronous: the API accepts the job (202) and an external
+    // coordinator activates the backup, restarts Orvix, and verifies health.
+    job = await apiPost('/api/v1/admin/backups/' + encodeURIComponent(id) + '/restore', { confirm: 'restore-orvix-backup' });
   } catch (err) {
-    toast((err && err.message) || 'Restore failed', 'error', 6000);
+    toast((err && err.message) || 'Restore could not be submitted', 'error', 6000);
+    return;
   }
+  if (!job || !job.job_id) {
+    toast('Restore submitted, but no job id was returned', 'error', 6000);
+    return;
+  }
+  toast('Restore started. Orvix will restart and this connection may drop; tracking job ' + job.job_id.slice(0, 12) + '…', 'info', 6000);
+  pollRestoreJob(job.job_id);
+}
+
+// pollRestoreJob follows the durable restore job status. The Orvix service is
+// restarted by the external coordinator, so polls will fail transiently while
+// it is down; those errors are tolerated until the job reaches a terminal
+// state or the poll budget is exhausted. Success is shown ONLY when the
+// coordinator reports the restarted service passed its health check.
+async function pollRestoreJob(jobId) {
+  const url = '/api/v1/admin/backups/restore-jobs/' + encodeURIComponent(jobId);
+  const deadline = Date.now() + 5 * 60 * 1000; // 5 minutes
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 3000));
+    let res;
+    try {
+      res = await apiGet(url);
+    } catch (_e) {
+      // Expected while Orvix is restarting; keep polling.
+      continue;
+    }
+    if (!res || !res.status) continue;
+    if (res.status === 'succeeded') {
+      toast('Restore complete — restarted service verified healthy', 'success', 6000);
+      return;
+    }
+    if (res.status === 'failed') {
+      const rb = res.rolled_back ? ' (rolled back to the pre-restore safety backup)' : '';
+      toast('Restore failed' + rb + (res.error ? ': ' + res.error : ''), 'error', 9000);
+      return;
+    }
+    // pending / activating / restarting / verifying / rolling_back — keep going.
+  }
+  toast('Restore is still in progress; check the restore job status shortly.', 'info', 6000);
 }

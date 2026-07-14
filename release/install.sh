@@ -1606,6 +1606,27 @@ write_service() {
     log_detail "installed /etc/systemd/system/orvix.service from $src (0644 root:root)"
 }
 
+# write_restore_coordinator installs the external, privileged restore
+# coordinator units. orvix-restore.path (watched by systemd as root) triggers
+# orvix-restore.service (a root oneshot running `orvix restore-run`) when the
+# unprivileged API drops a job file. This is the ONLY mechanism by which a
+# restore restarts orvix + verifies health from OUTSIDE the process being
+# restarted. Both units ship byte-for-byte from release/systemd.
+write_restore_coordinator() {
+    local svc_src="$ORVIX_SOURCE_DIR/release/systemd/orvix-restore.service"
+    local path_src="$ORVIX_SOURCE_DIR/release/systemd/orvix-restore.path"
+    if [ ! -f "$svc_src" ] || [ ! -f "$path_src" ]; then
+        fail "shipped restore coordinator units not found (orvix-restore.service/.path); cannot install restore lifecycle"
+    fi
+    # Refuse to install a coordinator that restarts itself in-process.
+    if ! grep -qF 'orvix restore-run' "$svc_src"; then
+        fail "orvix-restore.service does not invoke 'orvix restore-run' (refusing non-reviewed unit)"
+    fi
+    install -m 0644 -o root -g root "$svc_src" /etc/systemd/system/orvix-restore.service
+    install -m 0644 -o root -g root "$path_src" /etc/systemd/system/orvix-restore.path
+    log_detail "installed /etc/systemd/system/orvix-restore.{service,path} (0644 root:root)"
+}
+
 write_bootstrap_env() {
     # Persist the bootstrap credentials so the freshly-installed
     # systemd unit can read ORVIX_ADMIN_EMAIL and
@@ -2814,6 +2835,11 @@ main() {
     fi
 
     run_quiet install -d -o orvix -g orvix -m 0750 /etc/orvix /var/lib/orvix /var/lib/orvix/coremail /var/lib/orvix/backups /var/log/orvix
+    # Restore job/result queue shared by the unprivileged API (writes jobs,
+    # reads results) and the privileged orvix-restore.service coordinator
+    # (reads jobs, writes results). Owned by orvix so the API can enqueue; the
+    # root coordinator can read/write regardless.
+    run_quiet install -d -o orvix -g orvix -m 0700 /var/lib/orvix/restore-jobs /var/lib/orvix/restore-jobs/queue /var/lib/orvix/restore-jobs/results
     run_quiet install -d -o root -g root -m 0755 /usr/share/orvix/admin
     run_quiet install -d -o root -g root -m 0755 /usr/share/orvix/webmail
     run_quiet install -d -o root -g root -m 0755 /usr/share/orvix/scripts
@@ -2966,8 +2992,13 @@ IPFAIL
     set_step "systemd" "Service activation" 85
     write_service
     install_update_helper
+    write_restore_coordinator
     run_quiet systemctl daemon-reload
     run_quiet systemctl enable orvix
+    # The restore path watcher must be enabled AND started so a queued restore
+    # job triggers the root coordinator. The oneshot service itself is started
+    # on demand by the path unit, never enabled directly.
+    run_quiet systemctl enable --now orvix-restore.path
     # Production-readiness gate BLOCKER 2: orvix-update.service
     # is operator-triggered ONLY. The unit file intentionally
     # has no [Install] section so `systemctl enable` would

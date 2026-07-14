@@ -1,0 +1,15 @@
+[Unit]
+Description=Watch for Orvix restore jobs and trigger the restore coordinator
+Documentation=https://github.com/reachfm/orvix
+
+[Path]
+# The unprivileged Orvix API (User=orvix) writes a *.job file into this queue.
+# systemd (PID 1) notices the non-empty queue and starts orvix-restore.service
+# as root. This is the privilege boundary: the API never gains the ability to
+# restart orvix or run arbitrary commands; it only drops a validated job file
+# that a fixed root oneshot picks up.
+DirectoryNotEmpty=/var/lib/orvix/restore-jobs/queue
+Unit=orvix-restore.service
+
+[Install]
+WantedBy=multi-user.target

@@ -166,19 +166,14 @@ jobs:
           ADMIN_PASSWORD="$(openssl rand -base64 24)"
           ADMIN_PASSWORD_B64="$(printf '%s' "$ADMIN_PASSWORD" | base64 -w0)"
           printf '%s' "$ADMIN_PASSWORD" > /tmp/admin_password
-          # Route restore's restart integration to an observable marker command
-          # so the destructive-restore acceptance is deterministic in CI
-          # (systemctl-restart of the CI job's own service is validated by
-          # BLOCKER 2 unit tests; here we prove the full orchestration returns
-          # success only after the restart command ran and health verified).
-          # Install the REAL bundled binary: point the installer at the
-          # bundle root (has bin/orvix + BUILDINFO, no go.mod) and force the
-          # prebuilt so it never rebuilds from the CI source checkout.
-          # The runner has no public IPv4; supply a placeholder that passes the
-          # installer's public-IP validator (which rejects RFC5737
-          # documentation ranges). This value is only written to
-          # dns.public_ipv4 config for this disposable install — the service
-          # binds 127.0.0.1 and never uses it for real DNS.
+          # Install the REAL bundled binary: point the installer at the bundle
+          # root (has bin/orvix + BUILDINFO, no go.mod) and force the prebuilt so
+          # it never rebuilds from the CI source checkout. The runner has no
+          # public IPv4; supply a placeholder that passes the installer's
+          # public-IP validator. It is only written to dns.public_ipv4 for this
+          # disposable install (the service binds 127.0.0.1). No restart
+          # override is used: the installed orvix-restore.path/.service units
+          # drive the real production restore lifecycle.
           sudo env \
             ORVIX_SOURCE_DIR=/tmp/stage/orvix \
             ORVIX_USE_PREBUILT=1 \
@@ -187,17 +182,11 @@ jobs:
             ORVIX_ADMIN_EMAIL="$ADMIN_EMAIL" \
             ORVIX_ADMIN_PASSWORD_B64="$ADMIN_PASSWORD_B64" \
             bash /tmp/stage/orvix/release/install.sh
-          # Observable restart override + maintenance file via a systemd drop-in.
-          sudo mkdir -p /etc/systemd/system/orvix.service.d
-          # systemd Environment= splits on spaces unless the whole assignment
-          # is quoted; the restart command value contains a space (touch + path).
-          sudo tee /etc/systemd/system/orvix.service.d/staging-acceptance.conf >/dev/null <<'DROPIN'
-          [Service]
-          Environment="ORVIX_RESTORE_RESTART_COMMAND=/usr/bin/touch /var/lib/orvix/restore-restart.marker"
-          Environment="ORVIX_RESTORE_MAINTENANCE_FILE=/var/lib/orvix/restore-maintenance.enabled"
-          DROPIN
-          sudo systemctl daemon-reload
-          sudo systemctl restart orvix
+          # Prove the external restore coordinator units are installed + active;
+          # the restore lifecycle fails closed without them.
+          test -f /etc/systemd/system/orvix-restore.service || { echo "orvix-restore.service not installed"; exit 1; }
+          test -f /etc/systemd/system/orvix-restore.path || { echo "orvix-restore.path not installed"; exit 1; }
+          sudo systemctl is-active orvix-restore.path | grep -q active || { echo "orvix-restore.path not active"; sudo systemctl status orvix-restore.path --no-pager || true; exit 1; }
           echo "install=PASS" >> "$RESULTS_FILE"
 
       - name: Wait for service health (installed systemd unit)
@@ -249,6 +238,29 @@ jobs:
             local code; code="$(curl -sS -o /dev/null -w '%{http_code}' -X "$method" "$BASE$path" || echo 000)"
             [ "$code" = "$want" ] || { echo "expected $want for $method $path, got $code" >&2; return 1; }
           }
+          # Poll a restore job to a terminal state. Prefers the status API (to
+          # prove the endpoint works) and falls back to the durable result file
+          # so the terminal state is observed even while Orvix is restarting.
+          # Echoes the terminal body; returns 0 for succeeded, 1 for failed,
+          # 2 for timeout.
+          poll_status() {
+            local jid="$1" deadline=$(( $(date +%s) + 240 )) body="" st=""
+            local rf="/var/lib/orvix/restore-jobs/results/${jid}.result"
+            while [ "$(date +%s)" -lt "$deadline" ]; do
+              body="$(curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/v1/admin/backups/restore-jobs/${jid}" 2>/dev/null || true)"
+              st="$(printf '%s' "$body" | jq -r '.status // empty' 2>/dev/null || true)"
+              if [ "$st" != "succeeded" ] && [ "$st" != "failed" ]; then
+                local fbody; fbody="$(sudo cat "$rf" 2>/dev/null || true)"
+                if [ -n "$fbody" ]; then body="$fbody"; st="$(printf '%s' "$body" | jq -r '.status // empty' 2>/dev/null || true)"; fi
+              fi
+              case "$st" in
+                succeeded) printf '%s' "$body"; return 0 ;;
+                failed) printf '%s' "$body"; return 1 ;;
+              esac
+              sleep 3
+            done
+            printf '%s' "$body"; return 2
+          }
 
           # --- Auth: login (CSRF-exempt) → Bearer token, then a CSRF cookie ---
           login_body="$(api POST /api/v1/auth/login "$(jq -nc --arg e "$ADMIN_EMAIL" --arg p "$ADMIN_PASSWORD" '{email:$e,password:$p}')")"
@@ -283,23 +295,62 @@ jobs:
           [ -n "$BACKUP_ID" ] || { echo "backup did not return an id: $backup_body"; exit 1; }
           echo "encrypted_backup=PASS" >> "$RESULTS_FILE"
 
-          # --- Restore: validate, then execute a real restore under maintenance ---
+          # --- Restore (async job, REAL production lifecycle) ---
+          # Submit returns 202 + job_id and must NOT claim success. The external
+          # orvix-restore.service coordinator activates the backup, actually
+          # restarts orvix (MainPID changes), and verifies the restarted
+          # service's health before the durable result is marked succeeded.
           api POST "/api/v1/admin/backups/$BACKUP_ID/validate" '{}' | jq -e '.valid==true' >/dev/null \
             || { echo "backup validation did not report valid"; exit 1; }
-          sudo touch /var/lib/orvix/restore-maintenance.enabled
-          sudo rm -f /var/lib/orvix/restore-restart.marker
-          restore_body="$(api POST "/api/v1/admin/backups/$BACKUP_ID/restore" '{"confirm":"restore-orvix-backup"}')"
-          echo "restore response: $restore_body"
-          echo "$restore_body" | jq -e '.status=="activated"' >/dev/null \
-            || { echo "restore did not report activated"; exit 1; }
-          # Prove the restart integration actually executed (observable marker)
-          # and the service is healthy after restore.
-          sudo test -f /var/lib/orvix/restore-restart.marker \
-            || { echo "restore restart command did not run (no marker)"; exit 1; }
+          PID_BEFORE="$(sudo systemctl show -p MainPID --value orvix)"
+          submit="$(api POST "/api/v1/admin/backups/$BACKUP_ID/restore" '{"confirm":"restore-orvix-backup"}')"
+          echo "restore submit: $submit"
+          JOB_ID="$(echo "$submit" | jq -r '.job_id // empty')"
+          [ -n "$JOB_ID" ] || { echo "restore did not return a job id: $submit"; exit 1; }
+          echo "$submit" | jq -e '.status=="pending"' >/dev/null \
+            || { echo "submit must be pending; the pre-restart API must not claim success: $submit"; exit 1; }
+          if final="$(poll_status "$JOB_ID")"; then
+            echo "restore final: $final"
+          else
+            rc=$?
+            echo "restore job did not succeed (rc=$rc): $final"
+            sudo journalctl -u orvix-restore --no-pager -n 100 || true
+            exit 1
+          fi
+          echo "$final" | jq -e '.status=="succeeded"' >/dev/null || { echo "restore not succeeded: $final"; exit 1; }
+          # Prove the service actually restarted (activation identity changed).
+          PID_AFTER="$(sudo systemctl show -p MainPID --value orvix)"
+          [ -n "$PID_AFTER" ] && [ "$PID_AFTER" != "$PID_BEFORE" ] \
+            || { echo "orvix MainPID did not change; restore did not really restart the service (before=$PID_BEFORE after=$PID_AFTER)"; exit 1; }
           curl -fsS "$BASE/api/v1/health" | jq -e '.status=="ok"' >/dev/null \
             || { echo "service not healthy after restore"; exit 1; }
-          sudo rm -f /var/lib/orvix/restore-maintenance.enabled
           echo "restore=PASS" >> "$RESULTS_FILE"
+
+          # --- Restore FAILURE path: forced post-restart health failure proves
+          # the rollback lifecycle with a REAL restart. The injection is honored
+          # only in this non-production install and is removed afterwards. ---
+          sudo mkdir -p /etc/systemd/system/orvix-restore.service.d
+          printf '[Service]\nEnvironment=ORVIX_RESTORE_FORCE_HEALTH_FAILURE=1\n' \
+            | sudo tee /etc/systemd/system/orvix-restore.service.d/force-health-fail.conf >/dev/null
+          sudo systemctl daemon-reload
+          fbk="$(api POST /api/v1/admin/backups '')"; FBID="$(echo "$fbk" | jq -r '.id // empty')"
+          [ -n "$FBID" ] || { echo "failure-path backup id missing: $fbk"; exit 1; }
+          fsub="$(api POST "/api/v1/admin/backups/$FBID/restore" '{"confirm":"restore-orvix-backup"}')"
+          FJOB="$(echo "$fsub" | jq -r '.job_id // empty')"
+          [ -n "$FJOB" ] || { echo "failure-path job id missing: $fsub"; exit 1; }
+          if fbody="$(poll_status "$FJOB")"; then
+            echo "failure-path unexpectedly SUCCEEDED: $fbody"; exit 1
+          fi
+          echo "failure-path result: $fbody"
+          echo "$fbody" | jq -e '.status=="failed" and .rolled_back==true' >/dev/null \
+            || { echo "failure-path must report failed + rolled_back: $fbody"; exit 1; }
+          # Remove the injection and prove the service recovered on the safety backup.
+          sudo rm -f /etc/systemd/system/orvix-restore.service.d/force-health-fail.conf
+          sudo systemctl daemon-reload
+          rok=0
+          for i in $(seq 1 30); do curl -fsS "$BASE/api/v1/health" | jq -e '.status=="ok"' >/dev/null 2>&1 && { rok=1; break; }; sleep 2; done
+          [ "$rok" = "1" ] || { echo "service not healthy after rollback"; exit 1; }
+          echo "restore_rollback=PASS" >> "$RESULTS_FILE"
 
           # --- Metrics (Prometheus text) ---
           code="$(curl -sS -o /tmp/metrics -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$BASE/api/v1/metrics")"
@@ -324,7 +375,7 @@ jobs:
           set -euo pipefail
           # Build the report strictly from recorded results. A check that did
           # not record PASS is reported as FAIL/absent — never hard-coded.
-          checks="bundle_build install startup postgres_migration health license_verification tenant_creation tenant_isolation encrypted_backup restore metrics operations_ui"
+          checks="bundle_build install startup postgres_migration health license_verification tenant_creation tenant_isolation encrypted_backup restore restore_rollback metrics operations_ui"
           overall="PASS"
           {
             echo "{"
@@ -364,5 +415,7 @@ jobs:
         if: failure()
         run: |
           echo "===== orvix journal ====="; sudo journalctl -u orvix --no-pager -n 200 || true
+          echo "===== orvix-restore coordinator journal ====="; sudo journalctl -u orvix-restore.service -u orvix-restore.path --no-pager -n 200 || true
+          echo "===== restore results ====="; sudo ls -la /var/lib/orvix/restore-jobs/results 2>/dev/null || true; sudo cat /var/lib/orvix/restore-jobs/results/*.result 2>/dev/null || true
           echo "===== install log ====="; sudo cat /var/log/orvix/install.log 2>/dev/null || true
           echo "===== pg startup log ====="; cat /tmp/pgtest/pg.log 2>/dev/null || true

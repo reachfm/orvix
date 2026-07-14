@@ -754,6 +754,9 @@ func (r *Router) setupRoutes() {
 	admin.Get("/admin/backups/schedule", r.h.GetBackupSchedule)
 	admin.Get("/admin/backups/metrics", r.h.GetBackupMetrics)
 	admin.Get("/admin/backups/health", r.h.GetBackupHealth)
+	// Durable restore-job status (async restore lifecycle). Placed before the
+	// /admin/backups/:id catch-all so "restore-jobs" is never treated as an id.
+	admin.Get("/admin/backups/restore-jobs/:job_id", r.h.GetRestoreJobStatus)
 	admin.Get("/admin/backups/:id/download", r.h.DownloadBackup)
 	admin.Get("/admin/backups/:id", r.h.GetBackup)
 	// Legacy /backups routes — return 410 Gone so the frontend

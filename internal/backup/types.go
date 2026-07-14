@@ -108,8 +108,13 @@ type RestorePreview struct {
 	SizeBytes       int64 `json:"sizeBytes"`
 }
 
-// RestoreStageResult is returned by RestoreBackup.
-// In Phase 2H the restore is staged (not applied live).
+// RestoreStageResult is the outcome of a single RestoreBackup call. Restore is
+// applied LIVE by the external restore coordinator (orvix-restore.service): it
+// validates the archive, creates a pre-restore safety backup, activates the
+// payload, restarts the Orvix service, verifies the restarted service's health,
+// and rolls back to the safety backup on any failure. An "activated" result
+// therefore means the service was really restarted and verified healthy — it is
+// produced by that external coordinator, never by the pre-restart API process.
 type RestoreStageResult struct {
 	Status         string `json:"status"`
 	Message        string `json:"message"`
