@@ -1964,10 +1964,19 @@ validate_admin_ui() {
     if [ ! -f "$ui_dir/index.html" ]; then
         fail "admin UI index.html not found at $ui_dir/index.html"
     fi
-    if [ ! -f "$ui_dir/app.js" ]; then
-        fail "admin UI app.js not found at $ui_dir/app.js"
+    # Accept the built React SPA (index.html + assets/*.js — the reviewed
+    # production UI that build-release-bundle.sh now ships) as well as the
+    # legacy plain-JS admin (index.html + app.js). Exactly one must be present;
+    # an admin dir with neither is a failed install.
+    if [ -f "$ui_dir/app.js" ]; then
+        log_detail "VALIDATE admin UI $ui_dir: legacy layout (index.html + app.js) present"
+        return 0
     fi
-    log_detail "VALIDATE admin UI $ui_dir: index.html + app.js present"
+    if [ -d "$ui_dir/assets" ] && ls "$ui_dir"/assets/*.js >/dev/null 2>&1; then
+        log_detail "VALIDATE admin UI $ui_dir: built React SPA (index.html + assets/*.js) present"
+        return 0
+    fi
+    fail "admin UI at $ui_dir has neither built assets/*.js (React SPA) nor legacy app.js"
 }
 
 # validate_webmail_ui checks that the webmail UI assets were
