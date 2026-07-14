@@ -189,10 +189,12 @@ jobs:
             bash /tmp/stage/orvix/release/install.sh
           # Observable restart override + maintenance file via a systemd drop-in.
           sudo mkdir -p /etc/systemd/system/orvix.service.d
+          # systemd Environment= splits on spaces unless the whole assignment
+          # is quoted; the restart command value contains a space (touch + path).
           sudo tee /etc/systemd/system/orvix.service.d/staging-acceptance.conf >/dev/null <<'DROPIN'
           [Service]
-          Environment=ORVIX_RESTORE_RESTART_COMMAND=/usr/bin/touch /var/lib/orvix/restore-restart.marker
-          Environment=ORVIX_RESTORE_MAINTENANCE_FILE=/var/lib/orvix/restore-maintenance.enabled
+          Environment="ORVIX_RESTORE_RESTART_COMMAND=/usr/bin/touch /var/lib/orvix/restore-restart.marker"
+          Environment="ORVIX_RESTORE_MAINTENANCE_FILE=/var/lib/orvix/restore-maintenance.enabled"
           DROPIN
           sudo systemctl daemon-reload
           sudo systemctl restart orvix
