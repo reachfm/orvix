@@ -148,6 +148,7 @@ check "install.sh rejects stale release/orvix-linux-amd64 mismatches" \
 # ── Live exercise ────────────────────────────────────────────────
 if [ "$MODE" = "live" ]; then
     command -v tar >/dev/null 2>&1 || fail "tar is required for --live"
+    command -v openssl >/dev/null 2>&1 || fail "openssl is required for --live (signature verification)"
     info "running live install-public.sh fixture..."
 
     WORK="$(mktemp -d -t orvix-pub-smoke.XXXXXX)"
@@ -240,6 +241,64 @@ BIN_EOF
     cp "$FIX" "$SRV/orvix-enterprise-mail-stable-linux-amd64.tar.gz"
     sha="$(sha256sum "$FIX" | awk '{print $1}')"
     echo "$sha" > "$SRV/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sha256"
+
+    # Generate ephemeral Ed25519 signing key for bundle signature
+    # verification. install-public.sh requires a .sig sidecar and a
+    # trusted public key; we create a one-shot key pair so the
+    # signature verification path is exercised end-to-end without
+    # depending on the repository's signing key.
+    openssl genpkey -algorithm Ed25519 -out "$SRV/signing-key.pem" 2>/dev/null
+    openssl pkey -in "$SRV/signing-key.pem" -pubout -out "$SRV/signing-key.pub" 2>/dev/null
+    openssl pkeyutl -sign -rawin -inkey "$SRV/signing-key.pem" \
+        -in "$SRV/orvix-enterprise-mail-stable-linux-amd64.tar.gz" \
+        -out "$SRV/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sig" 2>/dev/null
+
+    # Generate minimal release manifest and SBOM so the synthetic
+    # release server serves the same sidecar set as a real bundle.
+    cat > "$SRV/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sbom.spdx" <<'SBOM'
+SPDXVersion: SPDX-2.3
+DataLicense: CC0-1.0
+SPDXID: SPDXRef-DOCUMENT
+DocumentName: orvix-enterprise-mail-1.0.3-rc5
+SBOM
+    openssl pkeyutl -sign -rawin -inkey "$SRV/signing-key.pem" \
+        -in "$SRV/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sbom.spdx" \
+        -out "$SRV/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sbom.spdx.sig" 2>/dev/null
+
+    sbom_sha="$(sha256sum "$SRV/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sbom.spdx" | awk '{print $1}')"
+    cat > "$SRV/orvix-enterprise-mail-stable-linux-amd64.tar.gz.manifest.json" <<MANIFEST
+{
+  "schema": 1,
+  "product": "Orvix Enterprise Mail",
+  "version": "1.0.3-rc5",
+  "channel": "stable",
+  "commit": "53ecf2400000000000000000000000000000000",
+  "build_time": "2026-07-03T17:40:57Z",
+  "target": "linux/amd64",
+  "artifact": "orvix-enterprise-mail-stable-linux-amd64.tar.gz",
+  "artifact_sha256": "$sha",
+  "sbom": "SBOM.spdx",
+  "sbom_sha256": "$sbom_sha"
+}
+MANIFEST
+    openssl pkeyutl -sign -rawin -inkey "$SRV/signing-key.pem" \
+        -in "$SRV/orvix-enterprise-mail-stable-linux-amd64.tar.gz.manifest.json" \
+        -out "$SRV/orvix-enterprise-mail-stable-linux-amd64.tar.gz.manifest.json.sig" 2>/dev/null
+
+    # Verify all required release sidecars exist before starting the
+    # HTTP server — the smoke must fail if any sidecar is absent.
+    for sidecar in \
+        "$SRV/orvix-enterprise-mail-stable-linux-amd64.tar.gz" \
+        "$SRV/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sha256" \
+        "$SRV/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sig" \
+        "$SRV/orvix-enterprise-mail-stable-linux-amd64.tar.gz.manifest.json" \
+        "$SRV/orvix-enterprise-mail-stable-linux-amd64.tar.gz.manifest.json.sig" \
+        "$SRV/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sbom.spdx" \
+        "$SRV/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sbom.spdx.sig"; do
+        [ -f "$sidecar" ] || fail "missing required sidecar: $sidecar"
+    done
+    info "all 7 release sidecars present on synthetic server"
+
     HTTP_PORT="$(
         python3 - <<'PY'
 import socket
@@ -255,6 +314,8 @@ PY
     cd "$REPO_ROOT"
     sleep 0.5
     info "synthetic release server up on 127.0.0.1:$HTTP_PORT (pid $HTTP_PID)"
+    info "server root: $SRV ($(ls -la "$SRV/" | wc -l) entries)"
+    ls -la "$SRV/" >&2
 
     cleanup() {
         if [ -n "${HTTP_PID:-}" ] && kill -0 "$HTTP_PID" 2>/dev/null; then
@@ -296,6 +357,7 @@ PY
     set +e
     ORVIX_BUNDLE_URL="http://127.0.0.1:${HTTP_PORT}/orvix-enterprise-mail-stable-linux-amd64.tar.gz" \
     ORVIX_BUNDLE_SHA256="$sha" \
+    ORVIX_RELEASE_VERIFYING_KEY_FILE="$SRV/signing-key.pub" \
     ORVIX_NON_INTERACTIVE=1 \
     ORVIX_DOMAIN="example.com" \
     ORVIX_PUBLIC_IPV4="65.75.203.74" \
@@ -320,6 +382,9 @@ PY
     grep -q 'ORVIX_COMMIT=53ecf24' "$WORK/pos.out" \
         || fail "complete bundle did not export ORVIX_COMMIT from BUILDINFO"
     pass "ORVIX_COMMIT exported to install.sh"
+    grep -q 'bundle signature verified' "$WORK/pos.out" \
+        || fail "bundle signature was not verified (missing or failed .sig sidecar at $SRV)"
+    pass "bundle signature verified via install-public.sh"
 
     if [ -n "${HTTP_PID:-}" ] && kill -0 "$HTTP_PID" 2>/dev/null; then
         kill "$HTTP_PID" 2>/dev/null || true
