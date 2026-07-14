@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { LayoutDashboard, Globe, Users, Shield, Zap, Activity, Settings, Server, Building, Mail, Monitor, Key, HardDrive, HeartPulse } from "lucide-react";
+import { LayoutDashboard, Globe, Users, Shield, Zap, Activity, Settings, Server, Building, Mail, Monitor, Key, HardDrive, HeartPulse, CreditCard, Keyboard } from "lucide-react";
 import Dashboard from "./components/Dashboard";
 import Domains from "./components/Domains";
 import UsersPage from "./components/UsersPage";
@@ -12,8 +12,11 @@ import OrganizationList from "./components/OrganizationList";
 import LicenseStatus from "./components/LicenseStatus";
 import BackupStatus from "./components/BackupStatus";
 import SystemHealth from "./components/SystemHealth";
+import BillingPage from "./components/BillingPage";
+import DomainOnboarding from "./components/DomainOnboarding";
+import ApiKeysPage from "./components/ApiKeysPage";
 
-type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" | "settings" | "enterprise" | "mailboxes" | "organizations" | "license" | "backups" | "health";
+type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" | "settings" | "enterprise" | "mailboxes" | "organizations" | "license" | "backups" | "health" | "billing" | "onboarding" | "apikeys";
 
 const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: string }[] = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -29,6 +32,9 @@ const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: st
   { id: "backups", label: "Backups", icon: HardDrive },
   { id: "health", label: "Health", icon: HeartPulse },
   { id: "settings", label: "Settings", icon: Settings },
+  { id: "onboarding", label: "Domain Setup", icon: Globe, section: "Customer" },
+  { id: "billing", label: "Billing", icon: CreditCard },
+  { id: "apikeys", label: "API Keys", icon: Keyboard },
 ];
 
 export default function App() {
@@ -48,6 +54,9 @@ export default function App() {
       case "license": return <LicenseStatus />;
       case "backups": return <BackupStatus />;
       case "health": return <SystemHealth />;
+      case "billing": return <BillingPage />;
+      case "onboarding": return <DomainOnboarding />;
+      case "apikeys": return <ApiKeysPage />;
       default: return <Dashboard />;
     }
   };
