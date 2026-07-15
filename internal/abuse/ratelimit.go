@@ -6,15 +6,22 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 type RateLimitService struct {
-	mu sync.Mutex
-	db *sql.DB
+	mu      sync.Mutex
+	db      *sql.DB
+	dialect *dbdialect.Info
 }
 
 func NewRateLimitService(db *sql.DB) *RateLimitService {
-	return &RateLimitService{db: db}
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
+	return &RateLimitService{db: db, dialect: dialect}
 }
 
 func (s *RateLimitService) CheckSendLimit(ctx context.Context, tenantID uint, mailboxID uint) (*RateLimitBucket, error) {
@@ -32,7 +39,7 @@ func (s *RateLimitService) CheckSendLimit(ctx context.Context, tenantID uint, ma
 
 	var sentToday int
 	err = s.db.QueryRowContext(ctx,
-		"SELECT COALESCE(emails_sent, 0) FROM abuse_send_counts WHERE day_key = ?", dayKey).Scan(&sentToday)
+		"SELECT COALESCE(emails_sent, 0) FROM abuse_send_counts WHERE day_key = "+s.dialect.Placeholder(1), dayKey).Scan(&sentToday)
 	if err == sql.ErrNoRows {
 		sentToday = 0
 	} else if err != nil {
@@ -58,9 +65,9 @@ func (s *RateLimitService) RecordSend(ctx context.Context, tenantID uint, count 
 	dayKey := fmt.Sprintf("send:%d:%s", tenantID, now.Format("2006-01-02"))
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO abuse_send_counts (day_key, tenant_id, emails_sent, created_at)
-		VALUES (?, ?, ?, datetime('now'))
-		ON CONFLICT(day_key) DO UPDATE SET emails_sent = emails_sent + ?`,
-		dayKey, tenantID, count, count)
+		VALUES (`+s.dialect.Placeholder(1)+`, `+s.dialect.Placeholder(2)+`, `+s.dialect.Placeholder(3)+`, `+s.dialect.Placeholder(4)+`)
+		ON CONFLICT (day_key) DO UPDATE SET emails_sent = emails_sent + `+s.dialect.Placeholder(5),
+		dayKey, tenantID, count, now, count)
 	return err
 }
 
@@ -69,15 +76,15 @@ func (s *RateLimitService) RecordBounce(ctx context.Context, tenantID uint) erro
 	dayKey := fmt.Sprintf("bounce:%d:%s", tenantID, now.Format("2006-01-02"))
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO abuse_bounce_counts (day_key, tenant_id, bounce_count, created_at)
-		VALUES (?, ?, 1, datetime('now'))
-		ON CONFLICT(day_key) DO UPDATE SET bounce_count = bounce_count + 1`,
-		dayKey, tenantID)
+		VALUES (`+s.dialect.Placeholder(1)+`, `+s.dialect.Placeholder(2)+`, 1, `+s.dialect.Placeholder(3)+`)
+		ON CONFLICT (day_key) DO UPDATE SET bounce_count = bounce_count + 1`,
+		dayKey, tenantID, now)
 	return err
 }
 
 func (s *RateLimitService) getPlanSendLimit(ctx context.Context, tenantID uint) (int, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT COALESCE(send_limit_day, 500) FROM subscriptions WHERE tenant_id = ?`, tenantID)
+		`SELECT COALESCE(send_limit_day, 500) FROM subscriptions WHERE tenant_id = `+s.dialect.Placeholder(1), tenantID)
 	var limit int
 	err := row.Scan(&limit)
 	if err == sql.ErrNoRows {
@@ -92,7 +99,7 @@ func (s *RateLimitService) CheckBounceRate(ctx context.Context, tenantID uint) (
 
 	var totalSent int
 	err := s.db.QueryRowContext(ctx,
-		"SELECT COALESCE(SUM(emails_sent), 0) FROM abuse_send_counts WHERE tenant_id = ? AND created_at >= ?",
+		"SELECT COALESCE(SUM(emails_sent), 0) FROM abuse_send_counts WHERE tenant_id = "+s.dialect.Placeholder(1)+" AND created_at >= "+s.dialect.Placeholder(2),
 		tenantID, weekAgo).Scan(&totalSent)
 	if err != nil {
 		return 0, err
@@ -104,7 +111,7 @@ func (s *RateLimitService) CheckBounceRate(ctx context.Context, tenantID uint) (
 
 	var totalBounces int
 	err = s.db.QueryRowContext(ctx,
-		"SELECT COALESCE(SUM(bounce_count), 0) FROM abuse_bounce_counts WHERE tenant_id = ? AND created_at >= ?",
+		"SELECT COALESCE(SUM(bounce_count), 0) FROM abuse_bounce_counts WHERE tenant_id = "+s.dialect.Placeholder(1)+" AND created_at >= "+s.dialect.Placeholder(2),
 		tenantID, weekAgo).Scan(&totalBounces)
 	if err != nil {
 		return 0, err

@@ -4,30 +4,38 @@ import (
 	"context"
 	"database/sql"
 	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 type SignalService struct {
-	db    *sql.DB
-	rlSvc *RateLimitService
+	db      *sql.DB
+	dialect *dbdialect.Info
+	rlSvc   *RateLimitService
 }
 
 func NewSignalService(db *sql.DB, rlSvc *RateLimitService) *SignalService {
-	return &SignalService{db: db, rlSvc: rlSvc}
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
+	return &SignalService{db: db, dialect: dialect, rlSvc: rlSvc}
 }
 
 func (s *SignalService) RecordSignal(ctx context.Context, signal *AbuseSignal) error {
+	now := time.Now().UTC()
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO abuse_signals (tenant_id, mailbox_id, signal_type, severity, description, metadata, detected_at, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+		VALUES (`+s.dialect.Placeholder(1)+`, `+s.dialect.Placeholder(2)+`, `+s.dialect.Placeholder(3)+`, `+s.dialect.Placeholder(4)+`, `+s.dialect.Placeholder(5)+`, `+s.dialect.Placeholder(6)+`, `+s.dialect.Placeholder(7)+`, `+s.dialect.Placeholder(8)+`)`,
 		signal.TenantID, signal.MailboxID, signal.SignalType, signal.Severity,
-		signal.Description, signal.Metadata, signal.DetectedAt)
+		signal.Description, signal.Metadata, signal.DetectedAt, now)
 	return err
 }
 
 func (s *SignalService) AcknowledgeSignal(ctx context.Context, signalID uint) error {
 	now := time.Now().UTC()
 	_, err := s.db.ExecContext(ctx,
-		"UPDATE abuse_signals SET acknowledged_at = ? WHERE id = ?",
+		"UPDATE abuse_signals SET acknowledged_at = "+s.dialect.Placeholder(1)+" WHERE id = "+s.dialect.Placeholder(2),
 		now, signalID)
 	return err
 }
@@ -35,7 +43,7 @@ func (s *SignalService) AcknowledgeSignal(ctx context.Context, signalID uint) er
 func (s *SignalService) ResolveSignal(ctx context.Context, signalID, operatorID uint) error {
 	now := time.Now().UTC()
 	_, err := s.db.ExecContext(ctx,
-		"UPDATE abuse_signals SET resolved_at = ?, resolved_by = ? WHERE id = ?",
+		"UPDATE abuse_signals SET resolved_at = "+s.dialect.Placeholder(1)+", resolved_by = "+s.dialect.Placeholder(2)+" WHERE id = "+s.dialect.Placeholder(3),
 		now, operatorID, signalID)
 	return err
 }
@@ -44,7 +52,7 @@ func (s *SignalService) ListActiveSignals(ctx context.Context, tenantID uint) ([
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, tenant_id, mailbox_id, signal_type, severity, description, metadata, detected_at,
 		acknowledged_at, resolved_at, resolved_by, created_at
-		FROM abuse_signals WHERE tenant_id = ? AND resolved_at IS NULL
+		FROM abuse_signals WHERE tenant_id = `+s.dialect.Placeholder(1)+` AND resolved_at IS NULL
 		ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END, detected_at DESC`, tenantID)
 	if err != nil {
 		return nil, err
