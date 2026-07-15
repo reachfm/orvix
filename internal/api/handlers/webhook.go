@@ -72,7 +72,7 @@ func (h *Handler) ReceivePaymentWebhook(c fiber.Ctx) error {
 		}
 	}
 
-	processingErr := h.billingWebhook.MarkProcessed(c.Context(), event.ProviderEventID, nil)
+	processingErr := h.billingWebhook.MarkProcessed(c.Context(), event.ProviderEventID, rec.Provider, nil)
 	if processingErr != nil {
 		h.logger.Error("webhook mark processed failed", zap.Error(processingErr))
 	}

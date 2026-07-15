@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/orvix/orvix/internal/dbdialect"
@@ -18,6 +19,10 @@ var (
 	ErrWebhookAlreadyProcessed = errors.New("webhook event already processed")
 	ErrWebhookSignatureInvalid = errors.New("webhook signature is invalid")
 )
+
+func NormalizeProvider(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
+}
 
 type WebhookEventRecord struct {
 	ID              string     `json:"id"`
@@ -72,10 +77,16 @@ func (s *WebhookService) RecordEvent(ctx context.Context, rec *WebhookEventRecor
 	if rec.ReceivedAt.IsZero() {
 		rec.ReceivedAt = time.Now().UTC()
 	}
+	rec.Provider = NormalizeProvider(rec.Provider)
+	if rec.Provider == "" {
+		return fmt.Errorf("webhook provider is required")
+	}
 	if rec.IdempotencyKey == "" {
 		b := make([]byte, 16)
 		rand.Read(b)
 		rec.IdempotencyKey = hex.EncodeToString(b)
+	} else {
+		rec.IdempotencyKey = NormalizeProvider(rec.IdempotencyKey)
 	}
 	rec.ProcessedAt = nil
 	rec.ProcessingError = ""
@@ -86,7 +97,7 @@ func (s *WebhookService) RecordEvent(ctx context.Context, rec *WebhookEventRecor
 		result, err = s.db.ExecContext(ctx,
 			`INSERT INTO webhook_events (id, provider, event_type, provider_sub_id, raw_payload, signature,
 			received_at, idempotency_key, created_at)
-			VALUES (`+s.dialect.Placeholders(9)+`) ON CONFLICT (provider, idempotency_key) DO NOTHING`,
+			VALUES (`+s.dialect.Placeholders(9)+`) ON CONFLICT (provider, id) DO NOTHING`,
 			rec.ID, rec.Provider, rec.EventType, rec.ProviderSubID, rec.RawPayload, rec.Signature,
 			rec.ReceivedAt, rec.IdempotencyKey, time.Now().UTC())
 	} else {
@@ -106,13 +117,14 @@ func (s *WebhookService) RecordEvent(ctx context.Context, rec *WebhookEventRecor
 	return nil
 }
 
-func (s *WebhookService) MarkProcessed(ctx context.Context, eventID string, processingErr error) error {
+func (s *WebhookService) MarkProcessed(ctx context.Context, eventID, provider string, processingErr error) error {
+	provider = NormalizeProvider(provider)
 	var errStr string
 	if processingErr != nil {
 		errStr = processingErr.Error()
 	}
 	_, err := s.db.ExecContext(ctx,
-		"UPDATE webhook_events SET processed_at = "+s.dialect.Placeholder(1)+", processing_error = "+s.dialect.Placeholder(2)+" WHERE id = "+s.dialect.Placeholder(3),
-		time.Now().UTC(), errStr, eventID)
+		"UPDATE webhook_events SET processed_at = "+s.dialect.Placeholder(1)+", processing_error = "+s.dialect.Placeholder(2)+" WHERE id = "+s.dialect.Placeholder(3)+" AND provider = "+s.dialect.Placeholder(4),
+		time.Now().UTC(), errStr, eventID, provider)
 	return err
 }

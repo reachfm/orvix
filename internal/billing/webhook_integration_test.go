@@ -138,7 +138,7 @@ func setupWebhookEnv(t *testing.T) *webhookTestEnv {
 				svc.TransitionState(sub.TenantID, SubActive)
 			}
 		}
-		webhookSvc.MarkProcessed(c.Context(), event.ProviderEventID, nil)
+		webhookSvc.MarkProcessed(c.Context(), event.ProviderEventID, "test", nil)
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "received"})
 	})
 

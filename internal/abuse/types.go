@@ -28,6 +28,7 @@ type AbuseSignal struct {
 	Metadata       string         `json:"metadata,omitempty"`
 	DetectedAt     time.Time      `json:"detected_at"`
 	AcknowledgedAt *time.Time     `json:"acknowledged_at,omitempty"`
+	AcknowledgedBy *uint          `json:"acknowledged_by,omitempty"`
 	ResolvedAt     *time.Time     `json:"resolved_at,omitempty"`
 	ResolvedBy     *uint          `json:"resolved_by,omitempty"`
 	CreatedAt      time.Time      `json:"created_at"`

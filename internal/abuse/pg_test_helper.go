@@ -104,6 +104,7 @@ func abuseDDL(pg bool) []string {
 			metadata TEXT DEFAULT '',
 			detected_at %s NOT NULL,
 			acknowledged_at %s,
+			acknowledged_by INTEGER,
 			resolved_at %s,
 			resolved_by INTEGER,
 			created_at %s DEFAULT CURRENT_TIMESTAMP

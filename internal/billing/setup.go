@@ -74,8 +74,9 @@ func CreateTables(db *sql.DB) error {
 			UNIQUE(tenant_id, period_start)
 		)`,
 		`CREATE TABLE IF NOT EXISTS webhook_events (
-			id TEXT PRIMARY KEY,
-			provider TEXT DEFAULT '',
+			row_id __AUTOINC__,
+			id TEXT NOT NULL,
+			provider TEXT NOT NULL,
 			event_type TEXT DEFAULT '',
 			provider_sub_id TEXT DEFAULT '',
 			raw_payload __BLOB__,
@@ -84,10 +85,10 @@ func CreateTables(db *sql.DB) error {
 			processed_at __TS__,
 			processing_error TEXT DEFAULT '',
 			idempotency_key TEXT NOT NULL,
-			created_at __TS__ DEFAULT CURRENT_TIMESTAMP
+			created_at __TS__ DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(provider, id),
+			UNIQUE(provider, idempotency_key)
 		)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_webhook_events_provider_idempotency
-			ON webhook_events (provider, idempotency_key)`,
 		`CREATE TABLE IF NOT EXISTS org_invitations (
 			id __AUTOINC__,
 			organization_id INTEGER NOT NULL,
@@ -170,6 +171,7 @@ func CreateTables(db *sql.DB) error {
 			metadata TEXT DEFAULT '',
 			detected_at __TS__ NOT NULL,
 			acknowledged_at __TS__,
+			acknowledged_by INTEGER,
 			resolved_at __TS__,
 			resolved_by INTEGER,
 			created_at __TS__ DEFAULT CURRENT_TIMESTAMP
@@ -190,6 +192,91 @@ func CreateTables(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+// MigrateWebhookEvents migrates old webhook_events schema to the current
+// one (surrogate row_id, provider-scoped unique constraints). It is
+// idempotent: if the table already has the expected shape (row_id
+// column exists), the function returns immediately without data loss.
+func MigrateWebhookEvents(db *sql.DB) error {
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
+
+	var migrationNeeded bool
+	if dialect.IsPostgres() {
+		var colExists bool
+		db.QueryRow("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='webhook_events' AND column_name='row_id')").Scan(&colExists)
+		migrationNeeded = !colExists
+	} else {
+		rows, err := db.Query("SELECT sql FROM sqlite_master WHERE type='table' AND name='webhook_events'")
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		if rows.Next() {
+			var ddl string
+			rows.Scan(&ddl)
+			migrationNeeded = !strings.Contains(ddl, "row_id")
+		}
+	}
+	if !migrationNeeded {
+		return nil
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if dialect.IsPostgres() {
+		if _, err := tx.Exec(`
+			ALTER TABLE webhook_events DROP CONSTRAINT IF EXISTS webhook_events_pkey CASCADE;
+			ALTER TABLE webhook_events ADD COLUMN IF NOT EXISTS row_id BIGSERIAL;
+			UPDATE webhook_events SET row_id = DEFAULT WHERE row_id IS NULL;
+			ALTER TABLE webhook_events ADD PRIMARY KEY (row_id);
+			ALTER TABLE webhook_events ALTER COLUMN provider SET NOT NULL;
+			ALTER TABLE webhook_events ALTER COLUMN provider SET DEFAULT '';
+			UPDATE webhook_events SET provider = LOWER(TRIM(provider));
+		`); err != nil {
+			return err
+		}
+	} else {
+		if _, err := tx.Exec(`
+			CREATE TABLE IF NOT EXISTS webhook_events_new (
+				row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+				id TEXT NOT NULL,
+				provider TEXT NOT NULL,
+				event_type TEXT DEFAULT '',
+				provider_sub_id TEXT DEFAULT '',
+				raw_payload BLOB,
+				signature TEXT DEFAULT '',
+				received_at DATETIME NOT NULL,
+				processed_at DATETIME,
+				processing_error TEXT DEFAULT '',
+				idempotency_key TEXT NOT NULL,
+				created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+				UNIQUE(provider, id),
+				UNIQUE(provider, idempotency_key)
+			);
+			INSERT INTO webhook_events_new
+				(id, provider, event_type, provider_sub_id, raw_payload, signature,
+				received_at, processed_at, processing_error, idempotency_key, created_at)
+			SELECT id, LOWER(TRIM(COALESCE(provider,''))), event_type, provider_sub_id, raw_payload, signature,
+				received_at, processed_at, processing_error, idempotency_key, created_at
+			FROM webhook_events
+			WHERE true
+			ON CONFLICT (provider, id) DO NOTHING;
+			DROP TABLE webhook_events;
+			ALTER TABLE webhook_events_new RENAME TO webhook_events;
+		`); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
 }
 
 func Initialize(db *sql.DB) (*Service, *UsageService, *QuotaService, *WebhookService, *Scheduler, *SendEnforcer, error) {

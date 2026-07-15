@@ -38,8 +38,8 @@ func (s *SignalService) RecordSignal(ctx context.Context, signal *AbuseSignal) e
 func (s *SignalService) AcknowledgeSignal(ctx context.Context, tenantID, signalID uint, operatorID uint) error {
 	now := time.Now().UTC()
 	result, err := s.db.ExecContext(ctx,
-		"UPDATE abuse_signals SET acknowledged_at = "+s.dialect.Placeholder(1)+" WHERE id = "+s.dialect.Placeholder(2)+" AND tenant_id = "+s.dialect.Placeholder(3),
-		now, signalID, tenantID)
+		"UPDATE abuse_signals SET acknowledged_at = "+s.dialect.Placeholder(1)+", acknowledged_by = "+s.dialect.Placeholder(2)+" WHERE id = "+s.dialect.Placeholder(3)+" AND tenant_id = "+s.dialect.Placeholder(4),
+		now, operatorID, signalID, tenantID)
 	if err != nil {
 		return err
 	}
@@ -68,7 +68,7 @@ func (s *SignalService) ResolveSignal(ctx context.Context, tenantID, signalID, o
 func (s *SignalService) ListActiveSignals(ctx context.Context, tenantID uint) ([]AbuseSignal, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, tenant_id, mailbox_id, signal_type, severity, description, metadata, detected_at,
-		acknowledged_at, resolved_at, resolved_by, created_at
+		acknowledged_at, acknowledged_by, resolved_at, resolved_by, created_at
 		FROM abuse_signals WHERE tenant_id = `+s.dialect.Placeholder(1)+` AND resolved_at IS NULL
 		ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END, detected_at DESC`, tenantID)
 	if err != nil {
@@ -79,7 +79,7 @@ func (s *SignalService) ListActiveSignals(ctx context.Context, tenantID uint) ([
 	for rows.Next() {
 		var sig AbuseSignal
 		err := rows.Scan(&sig.ID, &sig.TenantID, &sig.MailboxID, &sig.SignalType, &sig.Severity,
-			&sig.Description, &sig.Metadata, &sig.DetectedAt, &sig.AcknowledgedAt, &sig.ResolvedAt, &sig.ResolvedBy, &sig.CreatedAt)
+			&sig.Description, &sig.Metadata, &sig.DetectedAt, &sig.AcknowledgedAt, &sig.AcknowledgedBy, &sig.ResolvedAt, &sig.ResolvedBy, &sig.CreatedAt)
 		if err != nil {
 			return nil, err
 		}

@@ -692,20 +692,22 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		})
 	}
 
-	// Shared enforcement: check subscription state, send quota, and abuse limits.
-	// This is a pre-flight gate that runs BEFORE recipients are parsed so we can
-	// reject the request early when the subscription is suspended/cancelled/expired
-	// or the database is unreachable. The recipient-count check below is the real
-	// quota gate and runs AFTER recipient parsing + dedup.
+	// Pre-flight subscription status check only. The real quota
+	// gate (with actual recipient count) runs after parsing below.
 	if h.sendEnforcer != nil {
 		id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
 		if result := h.sendEnforcer.AllowSend(c.Context(), id, 1); !result.Allowed {
-			if result.Reason == "quota lookup failed" || result.Reason == "no active subscription" || result.Reason == "invalid tenant" {
+			if result.Reason == "quota lookup failed" || result.Reason == "no active subscription" ||
+				result.Reason == "invalid tenant" || result.Reason == "invalid recipient count" {
 				return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "cannot determine quota"})
 			}
-			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
-				"error": "send rejected: " + result.Reason, "limit": result.Limit, "remaining": result.Remaining,
-			})
+			if strings.HasPrefix(result.Reason, "subscription is ") && !strings.Contains(result.Reason, "active") {
+				return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+					"error": "send rejected: " + result.Reason, "limit": result.Limit, "remaining": result.Remaining,
+				})
+			}
+			// Non-suspension denials (quota-related at count=1) pass through
+			// to the real gate below.
 		}
 	}
 
@@ -801,7 +803,7 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 
 	// Real quota gate: number of unique, valid recipients.
 	intendedRecipientCount := len(allRecipients)
-	if h.sendEnforcer != nil && intendedRecipientCount > 1 {
+	if h.sendEnforcer != nil {
 		id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
 		if result := h.sendEnforcer.AllowSend(c.Context(), id, intendedRecipientCount); !result.Allowed {
 			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
@@ -933,6 +935,13 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		}
 	}
 
+	// Unified send event: records billing usage, abuse counters, metrics atomically.
+	// Must run even on partial enqueue to account for successfully enqueued recipients.
+	if h.sendEnforcer != nil && queuedCount > 0 {
+		id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
+		h.sendEnforcer.RecordSend(c.Context(), id, msg.MessageID, queuedCount)
+	}
+
 	if len(enqueueErrors) > 0 {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error":      "failed to enqueue some recipients: " + strings.Join(enqueueErrors, "; "),
@@ -941,12 +950,6 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 			"folder":     sentFolder.Path,
 			"status":     "stored",
 		})
-	}
-
-	// Unified send event: records billing usage, abuse counters, metrics atomically.
-	if h.sendEnforcer != nil && queuedCount > 0 {
-		id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
-		h.sendEnforcer.RecordSend(c.Context(), id, msg.MessageID, queuedCount)
 	}
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{

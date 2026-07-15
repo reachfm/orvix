@@ -452,7 +452,19 @@ func (h *Handler) StartBillingScheduler(ctx context.Context, interval time.Durat
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				h.billingScheduler.RunAll(ctx)
+				start := time.Now()
+				n, err := h.billingScheduler.RunAll(ctx)
+				elapsed := time.Since(start)
+				if err != nil {
+					h.logger.Error("billing scheduler run failed",
+						zap.Int("transitions", n),
+						zap.Duration("duration", elapsed),
+						zap.Error(err))
+				} else {
+					h.logger.Info("billing scheduler run completed",
+						zap.Int("transitions", n),
+						zap.Duration("duration", elapsed))
+				}
 			}
 		}
 	}()

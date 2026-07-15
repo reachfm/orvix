@@ -44,9 +44,9 @@ export const api = {
   // Abuse
   listAbuseSignals: () => request<any[]>("/enterprise/abuse/signals"),
   acknowledgeSignal: (id: number) =>
-    request("/enterprise/abuse/signals/acknowledge", { method: "POST", body: JSON.stringify({ id }) }),
+    request(`/enterprise/abuse/signals/${id}/acknowledge`, { method: "POST" }),
   resolveSignal: (id: number) =>
-    request("/enterprise/abuse/signals/resolve", { method: "POST", body: JSON.stringify({ id }) }),
+    request(`/enterprise/abuse/signals/${id}/resolve`, { method: "POST" }),
   checkSendLimit: () => request<any>("/enterprise/abuse/send-limit"),
 
   // Auth helpers

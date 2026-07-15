@@ -77,7 +77,7 @@ func (h *Handler) ReceiveComplaintWebhook(c fiber.Ctx) error {
 		}
 	}
 
-	if err := h.billingWebhook.MarkProcessed(c.Context(), event.ProviderEventID, nil); err != nil {
+	if err := h.billingWebhook.MarkProcessed(c.Context(), event.ProviderEventID, rec.Provider, nil); err != nil {
 		h.logger.Error("complaint mark processed failed", zap.Error(err))
 	}
 
