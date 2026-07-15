@@ -19,12 +19,10 @@ permissions:
 jobs:
   postgres-readiness:
     name: PostgreSQL metadata runtime and migration gates
-    # Pinned to ubuntu-24.04 (ships postgresql-client-16) so pg_dump/pg_restore
-    # match the postgres:16 service below. `ubuntu-latest` rolled to 24.04->26.04
-    # (postgresql-client-18), and a client newer than the v16 server emits GUCs
-    # such as `transaction_timeout` that the v16 server rejects on restore,
-    # breaking TestPostgresBackupRestoreAndRuntime. See the version assertion in
-    # "Install PostgreSQL client tools".
+    # Pinned to ubuntu-24.04. PostgreSQL client binaries are installed from the
+    # official PostgreSQL apt repository (apt.postgresql.org) and called via
+    # absolute path (/usr/lib/postgresql/16/bin/*) to guarantee major-version
+    # alignment with the postgres:16 service container below.
     runs-on: ubuntu-24.04
     timeout-minutes: 60
 
@@ -50,6 +48,7 @@ jobs:
       ORVIX_RUN_POSTGRES_DML_TEST: 1
       ORVIX_RUN_POSTGRES_MIGRATE_TEST: 1
       ORVIX_RUN_POSTGRES_BACKUP_TEST: 1
+      PG_MAJOR: 16
 
     steps:
       - name: Checkout
@@ -66,23 +65,81 @@ jobs:
       - name: Install PostgreSQL client tools
         run: |
           set -euo pipefail
-          sudo apt-get update -o Acquire::Retries=3
-          sudo apt-get install -y --no-install-recommends postgresql-client-16
-          pg_dump --version
-          pg_restore --version
-          # Guard: pg_dump/pg_restore MUST match the postgres service major
-          # (16). A newer client against the v16 server produces newer
-          # archive/GUC output the server rejects on restore (e.g.
-          # transaction_timeout), which silently breaks
-          # TestPostgresBackupRestoreAndRuntime. Fail loudly if the runner
-          # image ever drifts the client version again.
-          client_major="$(pg_dump --version | grep -oE '[0-9]+' | head -1)"
-          if [ "$client_major" != "16" ]; then
-            echo "ERROR: pg_dump major ${client_major} != postgres service major 16." >&2
-            echo "Client/server version mismatch will break backup/restore integration tests." >&2
-            echo "Pin the runner (runs-on) or install postgresql-client-16 explicitly." >&2
+
+          PG_MAJOR="${PG_MAJOR:-16}"
+          PG_BINDIR="/usr/lib/postgresql/${PG_MAJOR}/bin"
+          PG_DUMP="${PG_BINDIR}/pg_dump"
+          PG_RESTORE="${PG_BINDIR}/pg_restore"
+          PSQL="${PG_BINDIR}/psql"
+
+          # Install the official PostgreSQL apt repository to get deterministic
+          # client binaries that match our service container major.
+          sudo apt-get update -o Acquire::Retries=3 -qq
+          sudo apt-get install -y --no-install-recommends -qq curl ca-certificates
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | \
+            sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg
+          sudo sh -c "echo 'deb https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main' \
+            > /etc/apt/sources.list.d/pgdg.list"
+          sudo apt-get update -o Acquire::Retries=3 -qq
+          sudo apt-get install -y --no-install-recommends -qq "postgresql-client-${PG_MAJOR}"
+
+          # ---- Preflight checks (fail-closed) ----
+
+          # 1. Every expected binary exists at the expected absolute path
+          for bin in "${PG_DUMP}" "${PG_RESTORE}" "${PSQL}"; do
+            if [ ! -x "${bin}" ]; then
+              echo "ERROR: required binary not found or not executable: ${bin}" >&2
+              exit 1
+            fi
+          done
+
+          # 2. Print versions with path provenance
+          echo "=== pg_dump ==="
+          "${PG_DUMP}" --version
+          echo "expected path: ${PG_DUMP}"
+          echo "=== pg_restore ==="
+          "${PG_RESTORE}" --version
+          echo "expected path: ${PG_RESTORE}"
+          echo "=== psql ==="
+          "${PSQL}" --version
+          echo "expected path: ${PSQL}"
+
+          # 3. pg_dump major MUST match the service container major
+          dump_version="$("${PG_DUMP}" --version | grep -oP 'PostgreSQL \K[0-9]+')"
+          if [ "${dump_version}" != "${PG_MAJOR}" ]; then
+            echo "ERROR: pg_dump major ${dump_version} != expected ${PG_MAJOR}." >&2
+            echo "Client/server version mismatch will break backup/restore tests." >&2
             exit 1
           fi
+
+          # 4. pg_restore major MUST match
+          restore_version="$("${PG_RESTORE}" --version | grep -oP 'PostgreSQL \K[0-9]+')"
+          if [ "${restore_version}" != "${PG_MAJOR}" ]; then
+            echo "ERROR: pg_restore major ${restore_version} != expected ${PG_MAJOR}." >&2
+            exit 1
+          fi
+
+          # 5. psql connectivity check (no credentials leaked)
+          "${PSQL}" -h localhost -p 5432 -U orvix -d orvix -c "SELECT version();" 2>&1 | head -5
+
+          # 6. Prepend versioned binary directory to PATH so all subsequent
+          # Go test steps (which call exec.LookPath("pg_dump") etc.) resolve
+          # the correct versioned binary first.
+          echo "${PG_BINDIR}" >> "${GITHUB_PATH}"
+          export PATH="${PG_BINDIR}:${PATH}"
+
+          # 7. Verify the resolved binary is our expected one, not a distro shim
+          for name in pg_dump pg_restore psql; do
+            resolved="$(command -v "${name}")"
+            expected="${PG_BINDIR}/${name}"
+            if [ "${resolved}" != "${expected}" ]; then
+              echo "ERROR: ${name} resolves to ${resolved}, expected ${expected}" >&2
+              echo "There is a conflicting package ahead in PATH." >&2
+              exit 1
+            fi
+          done
+
+          echo "=== PostgreSQL client preflight checks PASSED ==="
 
       - name: Download Go modules
         run: |

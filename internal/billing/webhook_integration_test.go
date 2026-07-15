@@ -3,8 +3,8 @@ package billing
 import (
 	"bytes"
 	"crypto/hmac"
-	"crypto/sha256"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -54,10 +54,10 @@ func (p *testPaymentProvider) VerifyWebhook(payload []byte, signature string) (*
 		Type string `json:"type"`
 		Data struct {
 			Object struct {
-				ID             string `json:"id"`
-				Subscription   string `json:"subscription"`
-				Status         string `json:"status"`
-				PaymentStatus  string `json:"payment_status"`
+				ID            string `json:"id"`
+				Subscription  string `json:"subscription"`
+				Status        string `json:"status"`
+				PaymentStatus string `json:"payment_status"`
 			} `json:"object"`
 		} `json:"data"`
 	}
@@ -192,7 +192,9 @@ func doWebhookReq(t *testing.T, env *webhookTestEnv, payload []byte, sig string)
 		req.Header.Set("X-Payment-Signature", sig)
 	}
 	resp, err := env.app.Test(req)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	return resp
 }
 
