@@ -920,6 +920,9 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 	if h.usageSvc != nil && queuedCount > 0 {
 		h.usageSvc.IncrementEmailsSent(ctx.Mailbox.TenantID, int64(queuedCount))
 	}
+	if h.rateLimitSvc != nil && queuedCount > 0 {
+		h.rateLimitSvc.RecordSend(c.Context(), ctx.Mailbox.TenantID, queuedCount)
+	}
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
 		"id":               msg.ID,
