@@ -186,6 +186,15 @@ func buildWebmailTestEnv(t *testing.T) *webmailTestEnv {
 		t.Fatalf("provision admin user: %v", err)
 	}
 
+	// Ensure a subscription exists for the test tenant so quota
+	// enforcement allows sends (fail-closed: no-sub → denied).
+	now := time.Now().UTC()
+	periodEnd := now.AddDate(0, 1, 0)
+	sqlDB.Exec(`INSERT OR IGNORE INTO subscriptions (tenant_id, plan_id, status, billing_interval,
+		current_period_start, current_period_end, send_limit_day, storage_mb, created_at, updated_at)
+		VALUES (1, 'free', 'active', 'monthly', ?, ?, 500, 1024, ?, ?)`,
+		now, periodEnd, now, now)
+
 	t.Cleanup(func() {
 		_ = router.App().Shutdown()
 		_ = sqlDB.Close()
@@ -220,6 +229,12 @@ func provisionAdminUser(t *testing.T, sqlDB *sql.DB, email, password string) err
 		// Insert may fail if a previous run already
 		// populated the tenant; that's fine.
 	}
+
+	periodEnd := now.AddDate(0, 1, 0)
+	sqlDB.Exec(`INSERT OR IGNORE INTO subscriptions (tenant_id, plan_id, status, billing_interval,
+		current_period_start, current_period_end, send_limit_day, storage_mb, created_at, updated_at)
+		VALUES (1, 'free', 'active', 'monthly', ?, ?, 500, 1024, ?, ?)`,
+		now, periodEnd, now, now)
 
 	// Insert users row.
 	if _, err := sqlDB.Exec(
@@ -1008,6 +1023,87 @@ func TestWebmailAPISendEnqueuesAllRecipients(t *testing.T) {
 	}
 }
 
+func TestWebmailAPISendDeduplicatesBeforeQuotaReservation(t *testing.T) {
+	e := buildWebmailTestEnv(t)
+	if err := e.mailbox.Folders.EnsureSystemFolders(t.Context(), mustMailboxIDForTest(t, e, e.email), nil); err != nil {
+		t.Fatalf("ensure system folders: %v", err)
+	}
+	tok := e.loginAdmin(t)
+	sqlDB := e.mailbox.DB
+	mustSetWebmailSendLimit(t, sqlDB, 1, 1)
+
+	status, resp := e.webmailRequest(t, "POST", "/api/v1/webmail/send", tok, map[string]string{
+		"to":      "Alice@Example.com, alice@example.com",
+		"cc":      "ALICE@example.com",
+		"subject": "Deduped send",
+		"body":    "one accepted recipient",
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("POST /send: expected 201, got %d: %v", status, resp)
+	}
+	if resp["queued_count"] != float64(1) {
+		t.Fatalf("queued_count=%v want 1 after case-insensitive dedupe", resp["queued_count"])
+	}
+	assertWebmailScalar(t, sqlDB, "SELECT COALESCE(SUM(recipient_count), 0) FROM send_events WHERE tenant_id = 1 AND event_type = 'send'", 1)
+	assertWebmailScalar(t, sqlDB, "SELECT COUNT(*) FROM send_events WHERE event_type = 'reservation'", 0)
+}
+
+func TestWebmailAPISendQuotaUsesFinalRecipientCount(t *testing.T) {
+	e := buildWebmailTestEnv(t)
+	if err := e.mailbox.Folders.EnsureSystemFolders(t.Context(), mustMailboxIDForTest(t, e, e.email), nil); err != nil {
+		t.Fatalf("ensure system folders: %v", err)
+	}
+	tok := e.loginAdmin(t)
+	sqlDB := e.mailbox.DB
+	mailboxID := mailboxIDForEmail(t, e.mailbox, e.email)
+	mustSetWebmailSendLimit(t, sqlDB, 1, 1)
+	before, _ := queueRowCount(t, sqlDB, mailboxID)
+
+	status, resp := e.webmailRequest(t, "POST", "/api/v1/webmail/send", tok, map[string]string{
+		"to":      "one@example.com, two@example.com",
+		"subject": "Denied by recipient count",
+		"body":    "too many",
+	})
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("POST /send: expected 429, got %d: %v", status, resp)
+	}
+	after, _ := queueRowCount(t, sqlDB, mailboxID)
+	if after != before {
+		t.Fatalf("quota-denied send enqueued rows: before=%d after=%d", before, after)
+	}
+	assertWebmailScalar(t, sqlDB, "SELECT COUNT(*) FROM send_events", 0)
+}
+
+func TestWebmailAPISendInvalidRecipientDoesNotConsumeQuota(t *testing.T) {
+	e := buildWebmailTestEnv(t)
+	if err := e.mailbox.Folders.EnsureSystemFolders(t.Context(), mustMailboxIDForTest(t, e, e.email), nil); err != nil {
+		t.Fatalf("ensure system folders: %v", err)
+	}
+	tok := e.loginAdmin(t)
+	sqlDB := e.mailbox.DB
+	mustSetWebmailSendLimit(t, sqlDB, 1, 1)
+
+	status, _ := e.webmailRequest(t, "POST", "/api/v1/webmail/send", tok, map[string]string{
+		"to":      "not-an-email",
+		"subject": "invalid",
+		"body":    "invalid",
+	})
+	if status != http.StatusBadRequest {
+		t.Fatalf("invalid recipient: status=%d want 400", status)
+	}
+	assertWebmailScalar(t, sqlDB, "SELECT COUNT(*) FROM send_events", 0)
+
+	status, resp := e.webmailRequest(t, "POST", "/api/v1/webmail/send", tok, map[string]string{
+		"to":      "valid@example.com",
+		"subject": "valid",
+		"body":    "valid",
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("valid send after invalid recipient should still have quota: status=%d resp=%v", status, resp)
+	}
+	assertWebmailScalar(t, sqlDB, "SELECT COALESCE(SUM(recipient_count), 0) FROM send_events WHERE event_type = 'send'", 1)
+}
+
 // TestWebmailAPISendRejectsInvalidRecipient is the
 // authorization-by-input test: malformed To/Cc/Bcc values
 // must be rejected with 400 BEFORE we touch the disk or
@@ -1231,6 +1327,80 @@ func TestWebmailAPISendPartialEnqueueFailure(t *testing.T) {
 	}
 }
 
+func TestWebmailAPISendPartialEnqueueRecordsSuccessfulRecipients(t *testing.T) {
+	e := buildWebmailTestEnv(t)
+	if err := e.mailbox.Folders.EnsureSystemFolders(t.Context(), mustMailboxIDForTest(t, e, e.email), nil); err != nil {
+		t.Fatalf("ensure system folders: %v", err)
+	}
+	tok := e.loginAdmin(t)
+	sqlDB := e.mailbox.DB
+	e.queue.Repo = &failAfterNRepo{Repository: e.queue.Repo, failAfter: 1}
+
+	status, resp := e.webmailRequest(t, "POST", "/api/v1/webmail/send", tok, map[string]string{
+		"to":      "alice@example.com, bob@example.com",
+		"subject": "Partial accounting",
+		"body":    "one row should enqueue",
+	})
+	if status != http.StatusInternalServerError {
+		t.Fatalf("partial enqueue: status=%d resp=%v, want 500", status, resp)
+	}
+	assertWebmailScalar(t, sqlDB, "SELECT COALESCE(SUM(recipient_count), 0) FROM send_events WHERE event_type = 'send'", 1)
+	assertWebmailScalar(t, sqlDB, "SELECT COUNT(*) FROM send_events WHERE event_type = 'reservation'", 0)
+	assertWebmailScalar(t, sqlDB, "SELECT COALESCE(SUM(emails_sent), 0) FROM usage_records WHERE tenant_id = 1", 1)
+}
+
+func TestWebmailAPISendConcurrentRequestsCannotExceedQuota(t *testing.T) {
+	e := buildWebmailTestEnv(t)
+	if err := e.mailbox.Folders.EnsureSystemFolders(t.Context(), mustMailboxIDForTest(t, e, e.email), nil); err != nil {
+		t.Fatalf("ensure system folders: %v", err)
+	}
+	tok := e.loginAdmin(t)
+	sqlDB := e.mailbox.DB
+	mailboxID := mailboxIDForEmail(t, e.mailbox, e.email)
+	mustSetWebmailSendLimit(t, sqlDB, 1, 1)
+
+	type result struct {
+		status int
+		resp   map[string]interface{}
+	}
+	results := make(chan result, 2)
+	for i := 0; i < 2; i++ {
+		i := i
+		go func() {
+			status, resp := e.webmailRequest(t, "POST", "/api/v1/webmail/send", tok, map[string]string{
+				"to":      fmt.Sprintf("concurrent-%d@example.com", i),
+				"subject": "Concurrent quota",
+				"body":    "one should win",
+			})
+			results <- result{status: status, resp: resp}
+		}()
+	}
+	created := 0
+	denied := 0
+	for i := 0; i < 2; i++ {
+		got := <-results
+		switch got.status {
+		case http.StatusCreated:
+			created++
+		case http.StatusTooManyRequests:
+			denied++
+		default:
+			t.Fatalf("unexpected concurrent send status=%d resp=%v", got.status, got.resp)
+		}
+	}
+	if created != 1 || denied != 1 {
+		t.Fatalf("created=%d denied=%d, want exactly one success and one quota denial", created, denied)
+	}
+	rows, err := queueRowCount(t, sqlDB, mailboxID)
+	if err != nil {
+		t.Fatalf("queue rows: %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("queue rows=%d want 1", rows)
+	}
+	assertWebmailScalar(t, sqlDB, "SELECT COALESCE(SUM(recipient_count), 0) FROM send_events WHERE event_type = 'send'", 1)
+}
+
 // queueRowCount returns the count of non-deleted queue
 // rows. Pass 0 for "all rows across all mailboxes" (used
 // when we want to assert no rows were created for
@@ -1245,6 +1415,24 @@ func queueRowCount(t *testing.T, sqlDB *sql.DB, mailboxID uint) (int64, error) {
 		err = sqlDB.QueryRow(`SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL AND mailbox_id = ?`, mailboxID).Scan(&n)
 	}
 	return n, err
+}
+
+func mustSetWebmailSendLimit(t *testing.T, db *sql.DB, tenantID uint, limit int) {
+	t.Helper()
+	if _, err := db.Exec("UPDATE subscriptions SET send_limit_day = ? WHERE tenant_id = ?", limit, tenantID); err != nil {
+		t.Fatalf("set webmail send limit: %v", err)
+	}
+}
+
+func assertWebmailScalar(t *testing.T, db *sql.DB, query string, want int64) {
+	t.Helper()
+	var got int64
+	if err := db.QueryRow(query).Scan(&got); err != nil {
+		t.Fatalf("query %q: %v", query, err)
+	}
+	if got != want {
+		t.Fatalf("query %q got %d want %d", query, got, want)
+	}
 }
 
 // createOrphanUser inserts a users row WITHOUT a

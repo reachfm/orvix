@@ -103,8 +103,8 @@ func (e *Evaluator) evaluateDomain(ctx context.Context, c *Context, domain strin
 		match, subResult, err := e.evaluateMechanism(ctx, c, &mec, domain, depth)
 		if err != nil {
 			return &EvaluationResult{
-				Result:          ResultTempError,
-				Explanation:     fmt.Sprintf("error evaluating %s: %v", mec.Directive, err),
+				Result:           ResultTempError,
+				Explanation:      fmt.Sprintf("error evaluating %s: %v", mec.Directive, err),
 				MatchedMechanism: mec.Directive,
 				EvaluatedDomain:  domain,
 			}, nil

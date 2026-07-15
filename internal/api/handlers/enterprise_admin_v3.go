@@ -308,9 +308,10 @@ func (h *Handler) PatchProtocolSettings(c fiber.Ctx) error {
 		if h.db != nil {
 			sqlDB, derr := h.db.DB()
 			if derr == nil {
+				d := h.sqlDialect()
 				if _, execErr := sqlDB.ExecContext(c.Context(),
-					`INSERT INTO admin_settings (key, value, section, requires_restart, updated_at, updated_by) VALUES (?, ?, ?, ?, ?, ?)
-					 ON CONFLICT(key) DO UPDATE SET value=excluded.value, section=excluded.section, requires_restart=excluded.requires_restart, updated_at=excluded.updated_at`,
+					`INSERT INTO admin_settings (key, value, section, requires_restart, updated_at, updated_by) VALUES (`+d.Placeholders(6)+`)
+				 ON CONFLICT (key) DO UPDATE SET value=`+d.Excluded("value")+`, section=`+d.Excluded("section")+`, requires_restart=`+d.Excluded("requires_restart")+`, updated_at=`+d.Excluded("updated_at"),
 					key, string(encoded), pid, boolToInt(defKey.RestartRequired), now, auditActorFromCtx(c)); execErr != nil {
 					rejected = append(rejected, map[string]any{
 						"key":    key,
@@ -589,13 +590,13 @@ func (h *Handler) ListAcceptanceRules(c fiber.Ctx) error {
 		return err
 	}
 	tenantID := h.tenantID(c)
-	rows, err := h.sqlDB().QueryContext(c.Context(), `
+	rows, err := h.sqlDB().QueryContext(c.Context(), h.sqlQ(`
 		SELECT id, name, priority, enabled, scope, scope_target, sender_pattern,
 		       recipient_pattern, source_ip_cidr, action, redirect_to, note,
 		       created_at, updated_at
 		FROM coremail_acceptance_rules
 		WHERE tenant_id = ? AND deleted_at IS NULL
-		ORDER BY priority ASC, id ASC`, tenantID)
+		ORDER BY priority ASC, id ASC`), tenantID)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("list rules: %v", err))
 	}
@@ -647,12 +648,12 @@ func (h *Handler) CreateAcceptanceRule(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
 	now := time.Now().UTC()
-	res, err := h.sqlDB().ExecContext(c.Context(), `
+	res, err := h.sqlDB().ExecContext(c.Context(), h.sqlQ(`
 		INSERT INTO coremail_acceptance_rules
 			(tenant_id, name, priority, enabled, scope, scope_target, sender_pattern,
 			 recipient_pattern, source_ip_cidr, action, redirect_to, note,
 			 created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		tenantID, body.Name, body.Priority, boolToInt(body.Enabled), body.Scope, body.ScopeTarget,
 		body.SenderPattern, body.RecipientPattern, body.SourceIPCIDR, body.Action, body.RedirectTo,
 		body.Note, now, now,
@@ -694,12 +695,12 @@ func (h *Handler) UpdateAcceptanceRule(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
 	now := time.Now().UTC()
-	res, err := h.sqlDB().ExecContext(c.Context(), `
+	res, err := h.sqlDB().ExecContext(c.Context(), h.sqlQ(`
 		UPDATE coremail_acceptance_rules SET
 			priority = ?, enabled = ?, scope = ?, scope_target = ?, sender_pattern = ?,
 			recipient_pattern = ?, source_ip_cidr = ?, action = ?, redirect_to = ?, note = ?,
 			updated_at = ?
-		WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
+		WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`),
 		body.Priority, boolToInt(body.Enabled), body.Scope, body.ScopeTarget, body.SenderPattern,
 		body.RecipientPattern, body.SourceIPCIDR, body.Action, body.RedirectTo, body.Note,
 		now, id, tenantID)
@@ -732,8 +733,8 @@ func (h *Handler) DeleteAcceptanceRule(c fiber.Ctx) error {
 	}
 	now := time.Now().UTC()
 	res, err := h.sqlDB().ExecContext(c.Context(),
-		`UPDATE coremail_acceptance_rules SET deleted_at = ?, updated_at = ?
-		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
+		h.sqlQ(`UPDATE coremail_acceptance_rules SET deleted_at = ?, updated_at = ?
+		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`),
 		now, now, id, tenantID)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("delete rule: %v", err))
@@ -976,13 +977,13 @@ func (h *Handler) ListIncomingMsgRules(c fiber.Ctx) error {
 		return err
 	}
 	tenantID := h.tenantID(c)
-	rows, err := h.sqlDB().QueryContext(c.Context(), `
+	rows, err := h.sqlDB().QueryContext(c.Context(), h.sqlQ(`
 		SELECT id, name, priority, enabled, field, operator, value, action,
 		       action_target, apply_to, stop_processing, note,
 		       created_at, updated_at
 		FROM coremail_incoming_msg_rules
 		WHERE tenant_id = ? AND deleted_at IS NULL
-		ORDER BY priority ASC, id ASC`, tenantID)
+		ORDER BY priority ASC, id ASC`), tenantID)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("list rules: %v", err))
 	}
@@ -1034,12 +1035,12 @@ func (h *Handler) CreateIncomingMsgRule(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
 	now := time.Now().UTC()
-	res, err := h.sqlDB().ExecContext(c.Context(), `
+	res, err := h.sqlDB().ExecContext(c.Context(), h.sqlQ(`
 		INSERT INTO coremail_incoming_msg_rules
 			(tenant_id, name, priority, enabled, field, operator, value,
 			 action, action_target, apply_to, stop_processing, note,
 			 created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		tenantID, body.Name, body.Priority, boolToInt(body.Enabled), body.Field, body.Operator, body.Value,
 		body.Action, body.ActionTarget, body.ApplyTo, boolToInt(body.StopProcessing), body.Note,
 		now, now)
@@ -1075,12 +1076,12 @@ func (h *Handler) UpdateIncomingMsgRule(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
 	now := time.Now().UTC()
-	res, err := h.sqlDB().ExecContext(c.Context(), `
+	res, err := h.sqlDB().ExecContext(c.Context(), h.sqlQ(`
 		UPDATE coremail_incoming_msg_rules SET
 			priority = ?, enabled = ?, field = ?, operator = ?, value = ?,
 			action = ?, action_target = ?, apply_to = ?, stop_processing = ?, note = ?,
 			updated_at = ?
-		WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
+		WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`),
 		body.Priority, boolToInt(body.Enabled), body.Field, body.Operator, body.Value,
 		body.Action, body.ActionTarget, body.ApplyTo, boolToInt(body.StopProcessing), body.Note,
 		now, id, tenantID)
@@ -1113,8 +1114,8 @@ func (h *Handler) DeleteIncomingMsgRule(c fiber.Ctx) error {
 	}
 	now := time.Now().UTC()
 	res, err := h.sqlDB().ExecContext(c.Context(),
-		`UPDATE coremail_incoming_msg_rules SET deleted_at = ?, updated_at = ?
-		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
+		h.sqlQ(`UPDATE coremail_incoming_msg_rules SET deleted_at = ?, updated_at = ?
+		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`),
 		now, now, id, tenantID)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("delete: %v", err))
@@ -1215,14 +1216,14 @@ func (h *Handler) ListMigrationSources(c fiber.Ctx) error {
 		return err
 	}
 	tenantID := h.tenantID(c)
-	rows, err := h.sqlDB().QueryContext(c.Context(), `
+	rows, err := h.sqlDB().QueryContext(c.Context(), h.sqlQ(`
 		SELECT id, name, kind, host, port, username, use_tls, allow_insecure,
 		       default_base_folder, verify_hostname, note, has_secret,
 		       last_test_status, last_test_at, last_test_message,
 		       created_at, updated_at
 		FROM coremail_migration_sources
 		WHERE tenant_id = ? AND deleted_at IS NULL
-		ORDER BY name ASC`, tenantID)
+		ORDER BY name ASC`), tenantID)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("list sources: %v", err))
 	}
@@ -1287,12 +1288,12 @@ func (h *Handler) CreateMigrationSource(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
 	now := time.Now().UTC()
-	res, err := h.sqlDB().ExecContext(c.Context(), `
+	res, err := h.sqlDB().ExecContext(c.Context(), h.sqlQ(`
 		INSERT INTO coremail_migration_sources
 			(tenant_id, name, kind, host, port, username, use_tls, allow_insecure,
 			 default_base_folder, verify_hostname, note, has_secret,
 			 created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		tenantID, body.Name, body.Kind, body.Host, body.Port, body.Username,
 		boolToInt(body.UseTLS), boolToInt(body.AllowInsecure),
 		body.DefaultBaseFolder, body.VerifyHostname, body.Note,
@@ -1347,7 +1348,7 @@ func (h *Handler) UpdateMigrationSource(c fiber.Ctx) error {
 		// preserve existing flag if not explicitly cleared and no new pw
 		var existing int
 		_ = h.sqlDB().QueryRowContext(c.Context(),
-			`SELECT has_secret FROM coremail_migration_sources WHERE id=? AND tenant_id=? AND deleted_at IS NULL`,
+			h.sqlQ(`SELECT has_secret FROM coremail_migration_sources WHERE id=? AND tenant_id=? AND deleted_at IS NULL`),
 			id, tenantID).Scan(&existing)
 		if pwSupplied {
 			newHasSecret = 1
@@ -1359,11 +1360,11 @@ func (h *Handler) UpdateMigrationSource(c fiber.Ctx) error {
 		newHasSecret = -2 // sentinel: don't touch flag
 	}
 	if newHasSecret == -2 {
-		res, err := h.sqlDB().ExecContext(c.Context(), `
+		res, err := h.sqlDB().ExecContext(c.Context(), h.sqlQ(`
 			UPDATE coremail_migration_sources SET
 				name = ?, kind = ?, host = ?, port = ?, username = ?, use_tls = ?, allow_insecure = ?,
 				default_base_folder = ?, verify_hostname = ?, note = ?, updated_at = ?
-			WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
+			WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`),
 			body.Name, body.Kind, body.Host, body.Port, body.Username,
 			boolToInt(body.UseTLS), boolToInt(body.AllowInsecure),
 			body.DefaultBaseFolder, body.VerifyHostname, body.Note, now, id, tenantID)
@@ -1375,11 +1376,11 @@ func (h *Handler) UpdateMigrationSource(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusNotFound, "source not found in this tenant")
 		}
 	} else {
-		res, err := h.sqlDB().ExecContext(c.Context(), `
+		res, err := h.sqlDB().ExecContext(c.Context(), h.sqlQ(`
 			UPDATE coremail_migration_sources SET
 				name = ?, kind = ?, host = ?, port = ?, username = ?, use_tls = ?, allow_insecure = ?,
 				default_base_folder = ?, verify_hostname = ?, note = ?, has_secret = ?, updated_at = ?
-			WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
+			WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`),
 			body.Name, body.Kind, body.Host, body.Port, body.Username,
 			boolToInt(body.UseTLS), boolToInt(body.AllowInsecure),
 			body.DefaultBaseFolder, body.VerifyHostname, body.Note, newHasSecret, now, id, tenantID)
@@ -1397,7 +1398,7 @@ func (h *Handler) UpdateMigrationSource(c fiber.Ctx) error {
 		}
 	}
 	if body.ClearSecret {
-		if _, err := h.sqlDB().ExecContext(c.Context(), `DELETE FROM coremail_migration_source_secrets WHERE source_id = ?`, id); err != nil {
+		if _, err := h.sqlDB().ExecContext(c.Context(), h.sqlQ(`DELETE FROM coremail_migration_source_secrets WHERE source_id = ?`), id); err != nil {
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("clear secret: %v", err))
 		}
 	}
@@ -1420,8 +1421,8 @@ func (h *Handler) DeleteMigrationSource(c fiber.Ctx) error {
 	}
 	now := time.Now().UTC()
 	res, err := h.sqlDB().ExecContext(c.Context(),
-		`UPDATE coremail_migration_sources SET deleted_at = ?, updated_at = ?
-		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
+		h.sqlQ(`UPDATE coremail_migration_sources SET deleted_at = ?, updated_at = ?
+		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`),
 		now, now, id, tenantID)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("delete: %v", err))
@@ -1431,7 +1432,7 @@ func (h *Handler) DeleteMigrationSource(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusNotFound, "source not found in this tenant")
 	}
 	// Secrets go with the source. Best-effort.
-	if _, err := h.sqlDB().ExecContext(c.Context(), `DELETE FROM coremail_migration_source_secrets WHERE source_id = ?`, id); err != nil {
+	if _, err := h.sqlDB().ExecContext(c.Context(), h.sqlQ(`DELETE FROM coremail_migration_source_secrets WHERE source_id = ?`), id); err != nil {
 		h.logger.Warn("migration source: secret row cleanup failed", zap.Int64("source_id", id), zap.Error(err))
 	}
 	if err := h.appendAudit(c, "migration_source.delete", fmt.Sprintf("source:%d", id), "ok"); err != nil {
@@ -1462,7 +1463,7 @@ func (h *Handler) TestMigrationSource(c fiber.Ctx) error {
 		username string
 	)
 	if err := h.sqlDB().QueryRowContext(c.Context(),
-		`SELECT host, port, use_tls, kind, username FROM coremail_migration_sources WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
+		h.sqlQ(`SELECT host, port, use_tls, kind, username FROM coremail_migration_sources WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`),
 		id, tenantID).Scan(&host, &port, &useTLS, &kind, &username); err != nil {
 		if err == sql.ErrNoRows {
 			return fiber.NewError(fiber.StatusNotFound, "source not found in this tenant")
@@ -1489,7 +1490,7 @@ func (h *Handler) TestMigrationSource(c fiber.Ctx) error {
 	}
 	now := time.Now().UTC()
 	if _, err := h.sqlDB().ExecContext(c.Context(),
-		`UPDATE coremail_migration_sources SET last_test_status = ?, last_test_at = ?, last_test_message = ? WHERE id = ? AND tenant_id = ?`,
+		h.sqlQ(`UPDATE coremail_migration_sources SET last_test_status = ?, last_test_at = ?, last_test_message = ? WHERE id = ? AND tenant_id = ?`),
 		result.Status, now, result.Message, id, tenantID); err != nil {
 		h.logger.Warn("test source: persist failed", zap.Error(err))
 	}
@@ -1540,9 +1541,10 @@ func storeMigrationSecret(c fiber.Ctx, h *Handler, sourceID int64, password stri
 		return err
 	}
 	now := time.Now().UTC()
+	d := h.sqlDialect()
 	_, err = h.sqlDB().ExecContext(c.Context(),
-		`INSERT INTO coremail_migration_source_secrets (source_id, password_enc, updated_at) VALUES (?, ?, ?)
-		 ON CONFLICT(source_id) DO UPDATE SET password_enc=excluded.password_enc, updated_at=excluded.updated_at`,
+		`INSERT INTO coremail_migration_source_secrets (source_id, password_enc, updated_at) VALUES (`+d.Placeholders(3)+`)
+		 ON CONFLICT (source_id) DO UPDATE SET password_enc=`+d.Excluded("password_enc")+`, updated_at=`+d.Excluded("updated_at"),
 		sourceID, cipher, now)
 	return err
 }
@@ -1560,13 +1562,13 @@ func (h *Handler) ListBackupTargets(c fiber.Ctx) error {
 		return err
 	}
 	tenantID := h.tenantID(c)
-	rows, err := h.sqlDB().QueryContext(c.Context(), `
+	rows, err := h.sqlDB().QueryContext(c.Context(), h.sqlQ(`
 		SELECT id, name, kind, host, port, username, path, enabled, verify_hostname,
 		       has_secret, last_test_status, last_test_at, last_test_message, note,
 		       created_at, updated_at
 		FROM coremail_backup_targets
 		WHERE tenant_id = ? AND deleted_at IS NULL
-		ORDER BY name ASC`, tenantID)
+		ORDER BY name ASC`), tenantID)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("list: %v", err))
 	}
@@ -1625,11 +1627,11 @@ func (h *Handler) CreateBackupTarget(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
 	now := time.Now().UTC()
-	res, err := h.sqlDB().ExecContext(c.Context(), `
+	res, err := h.sqlDB().ExecContext(c.Context(), h.sqlQ(`
 		INSERT INTO coremail_backup_targets
 			(tenant_id, name, kind, host, port, username, path, enabled, verify_hostname,
 			 has_secret, note, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		tenantID, body.Name, body.Kind, body.Host, body.Port, body.Username, body.Path,
 		boolToInt(body.Enabled), boolToInt(body.VerifyHostname),
 		boolToInt(body.Password != ""), body.Note, now, now)
@@ -1678,7 +1680,7 @@ func (h *Handler) UpdateBackupTarget(c fiber.Ctx) error {
 	if newHasSecret == -1 {
 		var existing int
 		_ = h.sqlDB().QueryRowContext(c.Context(),
-			`SELECT has_secret FROM coremail_backup_targets WHERE id=? AND tenant_id=? AND deleted_at IS NULL`,
+			h.sqlQ(`SELECT has_secret FROM coremail_backup_targets WHERE id=? AND tenant_id=? AND deleted_at IS NULL`),
 			id, tenantID).Scan(&existing)
 		if body.Password != "" {
 			newHasSecret = 1
@@ -1691,11 +1693,11 @@ func (h *Handler) UpdateBackupTarget(c fiber.Ctx) error {
 		newHasSecret = -2
 	}
 	if newHasSecret == -2 {
-		res, err := h.sqlDB().ExecContext(c.Context(), `
+		res, err := h.sqlDB().ExecContext(c.Context(), h.sqlQ(`
 			UPDATE coremail_backup_targets SET
 				name = ?, kind = ?, host = ?, port = ?, username = ?, path = ?, enabled = ?, verify_hostname = ?,
 				note = ?, updated_at = ?
-			WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
+			WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`),
 			body.Name, body.Kind, body.Host, body.Port, body.Username, body.Path,
 			boolToInt(body.Enabled), boolToInt(body.VerifyHostname),
 			body.Note, now, id, tenantID)
@@ -1707,11 +1709,11 @@ func (h *Handler) UpdateBackupTarget(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusNotFound, "target not found in this tenant")
 		}
 	} else {
-		res, err := h.sqlDB().ExecContext(c.Context(), `
+		res, err := h.sqlDB().ExecContext(c.Context(), h.sqlQ(`
 			UPDATE coremail_backup_targets SET
 				name = ?, kind = ?, host = ?, port = ?, username = ?, path = ?, enabled = ?, verify_hostname = ?,
 				has_secret = ?, note = ?, updated_at = ?
-			WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
+			WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`),
 			body.Name, body.Kind, body.Host, body.Port, body.Username, body.Path,
 			boolToInt(body.Enabled), boolToInt(body.VerifyHostname),
 			newHasSecret, body.Note, now, id, tenantID)
@@ -1729,7 +1731,7 @@ func (h *Handler) UpdateBackupTarget(c fiber.Ctx) error {
 		}
 	}
 	if body.ClearSecret {
-		if _, err := h.sqlDB().ExecContext(c.Context(), `DELETE FROM coremail_backup_target_secrets WHERE target_id = ?`, id); err != nil {
+		if _, err := h.sqlDB().ExecContext(c.Context(), h.sqlQ(`DELETE FROM coremail_backup_target_secrets WHERE target_id = ?`), id); err != nil {
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("clear secret: %v", err))
 		}
 	}
@@ -1752,8 +1754,8 @@ func (h *Handler) DeleteBackupTarget(c fiber.Ctx) error {
 	}
 	now := time.Now().UTC()
 	res, err := h.sqlDB().ExecContext(c.Context(),
-		`UPDATE coremail_backup_targets SET deleted_at = ?, updated_at = ?
-		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
+		h.sqlQ(`UPDATE coremail_backup_targets SET deleted_at = ?, updated_at = ?
+		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`),
 		now, now, id, tenantID)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("delete: %v", err))
@@ -1762,7 +1764,7 @@ func (h *Handler) DeleteBackupTarget(c fiber.Ctx) error {
 	if n == 0 {
 		return fiber.NewError(fiber.StatusNotFound, "target not found in this tenant")
 	}
-	if _, err := h.sqlDB().ExecContext(c.Context(), `DELETE FROM coremail_backup_target_secrets WHERE target_id = ?`, id); err != nil {
+	if _, err := h.sqlDB().ExecContext(c.Context(), h.sqlQ(`DELETE FROM coremail_backup_target_secrets WHERE target_id = ?`), id); err != nil {
 		h.logger.Warn("backup target: secret row cleanup failed", zap.Int64("target_id", id), zap.Error(err))
 	}
 	if err := h.appendAudit(c, "backup_target.delete", fmt.Sprintf("target:%d", id), "ok"); err != nil {
@@ -1790,7 +1792,7 @@ func (h *Handler) TestBackupTarget(c fiber.Ctx) error {
 		port       int
 	)
 	if err := h.sqlDB().QueryRowContext(c.Context(),
-		`SELECT host, port, kind FROM coremail_backup_targets WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
+		h.sqlQ(`SELECT host, port, kind FROM coremail_backup_targets WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`),
 		id, tenantID).Scan(&host, &port, &kind); err != nil {
 		if err == sql.ErrNoRows {
 			return fiber.NewError(fiber.StatusNotFound, "target not found in this tenant")
@@ -1826,7 +1828,7 @@ func (h *Handler) TestBackupTarget(c fiber.Ctx) error {
 	}
 	now := time.Now().UTC()
 	if _, err := h.sqlDB().ExecContext(c.Context(),
-		`UPDATE coremail_backup_targets SET last_test_status = ?, last_test_at = ?, last_test_message = ? WHERE id = ? AND tenant_id = ?`,
+		h.sqlQ(`UPDATE coremail_backup_targets SET last_test_status = ?, last_test_at = ?, last_test_message = ? WHERE id = ? AND tenant_id = ?`),
 		result.Status, now, result.Message, id, tenantID); err != nil {
 		h.logger.Warn("test target: persist failed", zap.Error(err))
 	}
@@ -1884,9 +1886,10 @@ func storeBackupTargetSecret(c fiber.Ctx, h *Handler, targetID int64, password, 
 		return err
 	}
 	now := time.Now().UTC()
+	d := h.sqlDialect()
 	_, err = h.sqlDB().ExecContext(c.Context(),
-		`INSERT INTO coremail_backup_target_secrets (target_id, password_enc, private_key_path, updated_at) VALUES (?, ?, ?, ?)
-		 ON CONFLICT(target_id) DO UPDATE SET password_enc=excluded.password_enc, private_key_path=excluded.private_key_path, updated_at=excluded.updated_at`,
+		`INSERT INTO coremail_backup_target_secrets (target_id, password_enc, private_key_path, updated_at) VALUES (`+d.Placeholders(4)+`)
+		 ON CONFLICT (target_id) DO UPDATE SET password_enc=`+d.Excluded("password_enc")+`, private_key_path=`+d.Excluded("private_key_path")+`, updated_at=`+d.Excluded("updated_at"),
 		targetID, enc, privKey, now)
 	return err
 }
@@ -2222,11 +2225,11 @@ func (h *Handler) lookupAccountClass(ctx context.Context, tenantID, classID int6
 	if classID <= 0 {
 		return nil, nil
 	}
-	row := h.sqlDB().QueryRowContext(ctx, `
+	row := h.sqlDB().QueryRowContext(ctx, h.sqlQ(`
 		SELECT id, name, default_quota_mb, max_quota_mb, max_send_per_hour, max_recv_per_hour,
 		       allow_external_forwarding, allow_imap, allow_pop3, allow_jmap, allow_webmail, is_admin_class
 		FROM coremail_account_classes
-		WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`, classID, tenantID)
+		WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`), classID, tenantID)
 	var (
 		id                             int64
 		name                           string

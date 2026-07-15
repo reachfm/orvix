@@ -15,8 +15,12 @@ func (s *Service) ensureScheduleTable(ctx context.Context) error {
 	if s.dialect.IsPostgres() {
 		return nil
 	}
-	_, err := s.db.ExecContext(ctx, tables[1])
-	return err
+	for _, stmt := range tables(s.dialect) {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) GetScheduleConfig(ctx context.Context) (*ScheduleConfig, error) {
@@ -137,7 +141,7 @@ func (s *Service) RunScheduledBackupIfNeeded(ctx context.Context) (*Backup, erro
 	now := time.Now().UTC()
 	nextRun := calculateNextRun(cfg.Frequency, now)
 
-	_, err = s.db.ExecContext(ctx, `UPDATE backup_schedule_config SET last_run_at = ?, next_run_at = ?, updated_at = ? WHERE id = 1`,
+	_, err = s.db.ExecContext(ctx, `UPDATE backup_schedule_config SET last_run_at = `+s.dialect.Placeholder(1)+`, next_run_at = `+s.dialect.Placeholder(2)+`, updated_at = `+s.dialect.Placeholder(3)+` WHERE id = 1`,
 		now, nextRun, now)
 	if err != nil {
 		return nil, err

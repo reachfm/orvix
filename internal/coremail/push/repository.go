@@ -148,7 +148,9 @@ func (r *SubscriptionSQLRepo) CleanupExpired(ctx context.Context, olderThan time
 	return n, nil
 }
 
-func scanSubscription(scanner interface{ Scan(dest ...interface{}) error }) (*PushSubscription, error) {
+func scanSubscription(scanner interface {
+	Scan(dest ...interface{}) error
+}) (*PushSubscription, error) {
 	var s PushSubscription
 	var disabledAt, lastSeenAt sql.NullTime
 	var userAgent sql.NullString

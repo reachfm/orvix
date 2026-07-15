@@ -9,9 +9,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/orvix/orvix/internal/observability"
-	"github.com/orvix/orvix/internal/coremail/storage"
 	"github.com/orvix/orvix/internal/coremail/queue"
+	"github.com/orvix/orvix/internal/coremail/storage"
+	"github.com/orvix/orvix/internal/observability"
 )
 
 // ── CONCURRENCY: Repeated connect/disconnect ────────────────
@@ -87,8 +87,8 @@ func TestHardeningSQLiteConcurrentWriters(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < 5; j++ {
 				msg := &storage.Message{
-					MessageID:   fmt.Sprintf("harden-sqlite-%d-%d", id, j),
-					TenantID:    1, DomainID: 1, MailboxID: 1, FolderID: 1,
+					MessageID: fmt.Sprintf("harden-sqlite-%d-%d", id, j),
+					TenantID:  1, DomainID: 1, MailboxID: 1, FolderID: 1,
 					FromAddress: "sender@test.com", ToAddresses: "rcpt@test.com",
 					Subject: "Harden SQLite",
 				}

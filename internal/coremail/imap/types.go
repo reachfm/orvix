@@ -35,14 +35,14 @@ func (s SessionState) String() string {
 
 // Config holds IMAP server configuration.
 type Config struct {
-	Hostname     string
-	Port         int
-	ReadTimeout   time.Duration
-	WriteTimeout  time.Duration
-	MaxSessions   int
-	MaxBodySize   int64 // max FETCH BODY[] size in bytes (0 = unlimited)
-	TLSCertFile   string
-	TLSKeyFile    string
+	Hostname          string
+	Port              int
+	ReadTimeout       time.Duration
+	WriteTimeout      time.Duration
+	MaxSessions       int
+	MaxBodySize       int64 // max FETCH BODY[] size in bytes (0 = unlimited)
+	TLSCertFile       string
+	TLSKeyFile        string
 	RequireTLSForAuth bool
 }
 
@@ -60,18 +60,18 @@ func DefaultConfig() Config {
 
 // Session represents a single IMAP connection session.
 type Session struct {
-	ID            string
-	State         SessionState
-	Username      string
-	MailboxID     uint
+	ID              string
+	State           SessionState
+	Username        string
+	MailboxID       uint
 	SelectedMailbox *storage.Folder
-	MailStore     *storage.MailStore
-	Tag           string // current command tag
-	RemoteAddr    string
-	CreatedAt     time.Time
-	TLSActive     bool
-	RequireTLS    bool
-	conn          net.Conn
+	MailStore       *storage.MailStore
+	Tag             string // current command tag
+	RemoteAddr      string
+	CreatedAt       time.Time
+	TLSActive       bool
+	RequireTLS      bool
+	conn            net.Conn
 }
 
 // NewSession creates a new IMAP session.
@@ -94,8 +94,8 @@ func (s *Session) Reset() {
 
 // IMAP response constants.
 const (
-	StatusOK = "OK"
-	StatusNO = "NO"
+	StatusOK  = "OK"
+	StatusNO  = "NO"
 	StatusBAD = "BAD"
 	StatusBYE = "BYE"
 )

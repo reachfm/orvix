@@ -40,7 +40,7 @@ func (r *AdminMailboxRepo) WithTx(tx *sql.Tx) *AdminMailboxRepo {
 
 func (r *AdminMailboxRepo) GetByID(ctx context.Context, id, tenantID uint) (*AdminMailbox, error) {
 	row := r.db.QueryRowContext(ctx,
-		"SELECT id, domain_id, tenant_id, email, local_part, name, status, quota_mb, used_bytes, msg_count, is_admin, allow_smtp, allow_imap, allow_pop3, allow_jmap, mfa_enabled, send_limit_per_hour, last_login, COALESCE(last_ip,''), created_at, updated_at FROM coremail_mailboxes WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL",
+		"SELECT id, domain_id, tenant_id, email, local_part, name, status, quota_mb, used_bytes, msg_count, is_admin, allow_smtp, allow_imap, allow_pop3, allow_jmap, mfa_enabled, send_limit_per_hour, last_login, COALESCE(last_ip,''), created_at, updated_at FROM coremail_mailboxes WHERE id = "+r.dialect.Placeholder(1)+" AND tenant_id = "+r.dialect.Placeholder(2)+" AND deleted_at IS NULL",
 		id, tenantID)
 	return scanAdminMailbox(row)
 }
@@ -51,19 +51,19 @@ func (r *AdminMailboxRepo) List(ctx context.Context, filter MailboxFilter) ([]Ad
 	where = append(where, "deleted_at IS NULL")
 
 	if filter.TenantID != nil {
-		where = append(where, "tenant_id = ?")
+		where = append(where, "tenant_id = "+r.dialect.Placeholder(len(args)+1))
 		args = append(args, *filter.TenantID)
 	}
 	if filter.DomainID != nil {
-		where = append(where, "domain_id = ?")
+		where = append(where, "domain_id = "+r.dialect.Placeholder(len(args)+1))
 		args = append(args, *filter.DomainID)
 	}
 	if filter.Status != nil {
-		where = append(where, "status = ?")
+		where = append(where, "status = "+r.dialect.Placeholder(len(args)+1))
 		args = append(args, string(*filter.Status))
 	}
 	if filter.Search != "" {
-		where = append(where, "(email LIKE ? OR name LIKE ?)")
+		where = append(where, "(email LIKE "+r.dialect.Placeholder(len(args)+1)+" OR name LIKE "+r.dialect.Placeholder(len(args)+2)+")")
 		s := "%" + filter.Search + "%"
 		args = append(args, s, s)
 	}
@@ -85,7 +85,7 @@ func (r *AdminMailboxRepo) List(ctx context.Context, filter MailboxFilter) ([]Ad
 	query := `SELECT id, domain_id, tenant_id, email, local_part, name, status, quota_mb, used_bytes, msg_count,
 		is_admin, allow_smtp, allow_imap, allow_pop3, allow_jmap, mfa_enabled, send_limit_per_hour,
 		last_login, COALESCE(last_ip,''), created_at, updated_at
-		FROM coremail_mailboxes WHERE ` + clause + ` ORDER BY created_at DESC LIMIT ? OFFSET ?`
+		FROM coremail_mailboxes WHERE ` + clause + ` ORDER BY created_at DESC LIMIT ` + r.dialect.Placeholder(len(args)+1) + ` OFFSET ` + r.dialect.Placeholder(len(args)+2)
 	args = append(args, filter.Limit, filter.Offset)
 
 	rows, err := r.db.QueryContext(ctx, query, args...)
@@ -118,8 +118,8 @@ func (r *AdminMailboxRepo) Create(ctx context.Context, m *AdminMailbox, password
 			(domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme,
 			 status, quota_mb, is_admin, allow_smtp, allow_imap, allow_pop3, allow_jmap,
 			 allow_webmail, send_limit_per_hour, recv_limit_per_hour, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, 'argon2id', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		m.DomainID, m.TenantID, m.LocalPart, m.Email, m.Name, passwordHash,
+		VALUES (`+r.dialect.Placeholders(19)+`)`,
+		m.DomainID, m.TenantID, m.LocalPart, m.Email, m.Name, passwordHash, "bcrypt",
 		string(m.Status), m.QuotaMB, boolToInt(m.IsAdmin),
 		boolToInt(m.AllowSMTP), boolToInt(m.AllowIMAP), boolToInt(m.AllowPOP3), boolToInt(m.AllowJMAP),
 		true, m.SendLimit, 1000, m.CreatedAt, m.UpdatedAt,
@@ -135,8 +135,8 @@ func (r *AdminMailboxRepo) Create(ctx context.Context, m *AdminMailbox, password
 func (r *AdminMailboxRepo) Update(ctx context.Context, m *AdminMailbox) error {
 	m.UpdatedAt = time.Now().UTC()
 	_, err := r.db.ExecContext(ctx,
-		`UPDATE coremail_mailboxes SET name=?, quota_mb=?, is_admin=?, allow_smtp=?, allow_imap=?, allow_pop3=?, allow_jmap=?, send_limit_per_hour=?, updated_at=?
-		 WHERE id=? AND tenant_id=? AND deleted_at IS NULL`,
+		`UPDATE coremail_mailboxes SET name=`+r.dialect.Placeholder(1)+`, quota_mb=`+r.dialect.Placeholder(2)+`, is_admin=`+r.dialect.Placeholder(3)+`, allow_smtp=`+r.dialect.Placeholder(4)+`, allow_imap=`+r.dialect.Placeholder(5)+`, allow_pop3=`+r.dialect.Placeholder(6)+`, allow_jmap=`+r.dialect.Placeholder(7)+`, send_limit_per_hour=`+r.dialect.Placeholder(8)+`, updated_at=`+r.dialect.Placeholder(9)+`
+		 WHERE id=`+r.dialect.Placeholder(10)+` AND tenant_id=`+r.dialect.Placeholder(11)+` AND deleted_at IS NULL`,
 		m.Name, m.QuotaMB, boolToInt(m.IsAdmin), boolToInt(m.AllowSMTP), boolToInt(m.AllowIMAP),
 		boolToInt(m.AllowPOP3), boolToInt(m.AllowJMAP), m.SendLimit, m.UpdatedAt, m.ID, m.TenantID,
 	)
@@ -147,12 +147,12 @@ func (r *AdminMailboxRepo) UpdateStatus(ctx context.Context, id, tenantID uint, 
 	now := time.Now().UTC()
 	if status == AdminMailboxDeleted {
 		_, err := r.db.ExecContext(ctx,
-			"UPDATE coremail_mailboxes SET status=?, deleted_at=? WHERE id=? AND tenant_id=?",
+			"UPDATE coremail_mailboxes SET status="+r.dialect.Placeholder(1)+", deleted_at="+r.dialect.Placeholder(2)+" WHERE id="+r.dialect.Placeholder(3)+" AND tenant_id="+r.dialect.Placeholder(4),
 			string(status), now, id, tenantID)
 		return err
 	}
 	_, err := r.db.ExecContext(ctx,
-		"UPDATE coremail_mailboxes SET status=?, updated_at=? WHERE id=? AND tenant_id=? AND deleted_at IS NULL",
+		"UPDATE coremail_mailboxes SET status="+r.dialect.Placeholder(1)+", updated_at="+r.dialect.Placeholder(2)+" WHERE id="+r.dialect.Placeholder(3)+" AND tenant_id="+r.dialect.Placeholder(4)+" AND deleted_at IS NULL",
 		string(status), now, id, tenantID)
 	return err
 }
@@ -162,13 +162,13 @@ func (r *AdminMailboxRepo) UpdateStatusBulk(ctx context.Context, ids []uint, ten
 		return 0, nil
 	}
 	placeholders := make([]string, len(ids))
-	args := make([]interface{}, 0, len(ids)+2)
+	args := make([]interface{}, 0, len(ids)+3)
 	args = append(args, string(status), time.Now().UTC(), tenantID)
 	for i, id := range ids {
-		placeholders[i] = "?"
+		placeholders[i] = r.dialect.Placeholder(i + 4)
 		args = append(args, id)
 	}
-	query := fmt.Sprintf("UPDATE coremail_mailboxes SET status=?, updated_at=? WHERE tenant_id=? AND id IN (%s) AND deleted_at IS NULL",
+	query := fmt.Sprintf("UPDATE coremail_mailboxes SET status="+r.dialect.Placeholder(1)+", updated_at="+r.dialect.Placeholder(2)+" WHERE tenant_id="+r.dialect.Placeholder(3)+" AND id IN (%s) AND deleted_at IS NULL",
 		strings.Join(placeholders, ","))
 	res, err := r.db.ExecContext(ctx, query, args...)
 	if err != nil {
@@ -179,7 +179,7 @@ func (r *AdminMailboxRepo) UpdateStatusBulk(ctx context.Context, ids []uint, ten
 
 func (r *AdminMailboxRepo) UpdatePassword(ctx context.Context, id, tenantID uint, passwordHash string) error {
 	_, err := r.db.ExecContext(ctx,
-		"UPDATE coremail_mailboxes SET password_hash=?, updated_at=? WHERE id=? AND tenant_id=? AND deleted_at IS NULL",
+		"UPDATE coremail_mailboxes SET password_hash="+r.dialect.Placeholder(1)+", updated_at="+r.dialect.Placeholder(2)+" WHERE id="+r.dialect.Placeholder(3)+" AND tenant_id="+r.dialect.Placeholder(4)+" AND deleted_at IS NULL",
 		passwordHash, time.Now().UTC(), id, tenantID)
 	return err
 }
@@ -187,28 +187,28 @@ func (r *AdminMailboxRepo) UpdatePassword(ctx context.Context, id, tenantID uint
 func (r *AdminMailboxRepo) CountByTenant(ctx context.Context, tenantID uint) (int64, error) {
 	var count int64
 	err := r.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM coremail_mailboxes WHERE tenant_id=? AND deleted_at IS NULL", tenantID).Scan(&count)
+		"SELECT COUNT(*) FROM coremail_mailboxes WHERE tenant_id="+r.dialect.Placeholder(1)+" AND deleted_at IS NULL", tenantID).Scan(&count)
 	return count, err
 }
 
 func (r *AdminMailboxRepo) CountByDomain(ctx context.Context, domainID, tenantID uint) (int64, error) {
 	var count int64
 	err := r.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM coremail_mailboxes WHERE domain_id=? AND tenant_id=? AND deleted_at IS NULL", domainID, tenantID).Scan(&count)
+		"SELECT COUNT(*) FROM coremail_mailboxes WHERE domain_id="+r.dialect.Placeholder(1)+" AND tenant_id="+r.dialect.Placeholder(2)+" AND deleted_at IS NULL", domainID, tenantID).Scan(&count)
 	return count, err
 }
 
 func (r *AdminMailboxRepo) CountByStatus(ctx context.Context, tenantID uint, status AdminMailboxStatus) (int64, error) {
 	var count int64
 	err := r.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM coremail_mailboxes WHERE tenant_id=? AND status=? AND deleted_at IS NULL", tenantID, status).Scan(&count)
+		"SELECT COUNT(*) FROM coremail_mailboxes WHERE tenant_id="+r.dialect.Placeholder(1)+" AND status="+r.dialect.Placeholder(2)+" AND deleted_at IS NULL", tenantID, status).Scan(&count)
 	return count, err
 }
 
 func (r *AdminMailboxRepo) SumQuotaUsed(ctx context.Context, tenantID uint) (int64, error) {
 	var total sql.NullInt64
 	err := r.db.QueryRowContext(ctx,
-		"SELECT SUM(used_bytes) FROM coremail_mailboxes WHERE tenant_id=? AND deleted_at IS NULL", tenantID).Scan(&total)
+		"SELECT SUM(used_bytes) FROM coremail_mailboxes WHERE tenant_id="+r.dialect.Placeholder(1)+" AND deleted_at IS NULL", tenantID).Scan(&total)
 	if err != nil {
 		return 0, err
 	}
@@ -218,7 +218,7 @@ func (r *AdminMailboxRepo) SumQuotaUsed(ctx context.Context, tenantID uint) (int
 func (r *AdminMailboxRepo) ExistsByEmail(ctx context.Context, email string, excludeID uint) (bool, error) {
 	var count int64
 	err := r.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM coremail_mailboxes WHERE email=? AND id!=? AND deleted_at IS NULL", email, excludeID).Scan(&count)
+		"SELECT COUNT(*) FROM coremail_mailboxes WHERE email="+r.dialect.Placeholder(1)+" AND id!="+r.dialect.Placeholder(2)+" AND deleted_at IS NULL", email, excludeID).Scan(&count)
 	return count > 0, err
 }
 

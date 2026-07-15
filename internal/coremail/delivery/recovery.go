@@ -11,10 +11,10 @@ import (
 
 // WorkerCrashRecovery handles lease recovery and worker crash detection.
 type WorkerCrashRecovery struct {
-	Queue       *queue.QueueEngine
-	WorkerID    string
+	Queue        *queue.QueueEngine
+	WorkerID     string
 	LeaseSeconds int
-	recovered   int64
+	recovered    int64
 }
 
 // NewWorkerCrashRecovery creates a worker crash recovery handler.

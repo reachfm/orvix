@@ -1,0 +1,62 @@
+name: Portal Playwright Acceptance
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  playwright-e2e:
+    name: Real browser portal acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build Go binary at repo root
+        run: go build -o orvix ./cmd/orvix/
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: Build frontend
+        run: |
+          cd web/admin
+          npm ci
+          npm run build
+
+      - name: Install Playwright
+        run: |
+          cd test/playwright
+          npm init -y 2>/dev/null
+          npm install @playwright/test
+          npx playwright install chromium --with-deps
+
+      - name: Run Playwright E2E tests
+        run: |
+          cd test/playwright
+          npx playwright test --reporter list
+
+      - name: Upload Playwright traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-traces
+          path: test/playwright/test-results/
+          if-no-files-found: warn

@@ -32,14 +32,14 @@ func (s SessionState) String() string {
 
 // Config holds POP3 server configuration.
 type Config struct {
-	Hostname     string
-	Port         int
-	ReadTimeout   time.Duration
-	WriteTimeout  time.Duration
-	MaxSessions   int
-	MessageDomain string
-	TLSCertFile   string
-	TLSKeyFile    string
+	Hostname          string
+	Port              int
+	ReadTimeout       time.Duration
+	WriteTimeout      time.Duration
+	MaxSessions       int
+	MessageDomain     string
+	TLSCertFile       string
+	TLSKeyFile        string
 	RequireTLSForAuth bool
 }
 
@@ -55,18 +55,18 @@ func DefaultConfig() Config {
 
 // Session represents a single POP3 connection.
 type Session struct {
-	ID             string
-	State          SessionState
-	Username       string
-	MailboxID      uint
-	MailStore      *storage.MailStore
-	Messages       []storage.Message
-	Deleted        map[uint]bool
-	RemoteAddr     string
-	CreatedAt      time.Time
-	TLSActive      bool
-	RequireTLS     bool
-	conn           net.Conn
+	ID         string
+	State      SessionState
+	Username   string
+	MailboxID  uint
+	MailStore  *storage.MailStore
+	Messages   []storage.Message
+	Deleted    map[uint]bool
+	RemoteAddr string
+	CreatedAt  time.Time
+	TLSActive  bool
+	RequireTLS bool
+	conn       net.Conn
 }
 
 func NewSession(remoteAddr string) *Session {

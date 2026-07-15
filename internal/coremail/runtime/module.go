@@ -23,6 +23,7 @@ import (
 	"github.com/orvix/orvix/internal/coremail/rules"
 	"github.com/orvix/orvix/internal/coremail/smtp"
 	"github.com/orvix/orvix/internal/coremail/storage"
+	"github.com/orvix/orvix/internal/dbdialect"
 	"github.com/orvix/orvix/internal/licensing"
 	"github.com/orvix/orvix/internal/licensingauthority"
 	"github.com/orvix/orvix/internal/observability"
@@ -61,15 +62,16 @@ type Module struct {
 	// the rule tables are LIVE (not just stored).
 	rulerEngine *ruler.Engine
 
-	smtpServer       *smtp.Server
-	submissionServer *smtp.Server
-	smtpsServer      *smtp.Server
-	imapServer       *imap.Server
-	imapsServer      *imap.Server
-	pop3Server       *pop3.Server
-	pop3sServer      *pop3.Server
-	jmapServer       *jmap.Server
-	workers          []*delivery.DeliveryWorker
+	smtpServer        *smtp.Server
+	submissionServer  *smtp.Server
+	submissionHandler *smtp.CommandHandler
+	smtpsServer       *smtp.Server
+	imapServer        *imap.Server
+	imapsServer       *imap.Server
+	pop3Server        *pop3.Server
+	pop3sServer       *pop3.Server
+	jmapServer        *jmap.Server
+	workers           []*delivery.DeliveryWorker
 
 	// pushNotifier is the Web Push (RFC 8030 / RFC 8291) dispatcher.
 	// It is constructed in initCore from cfg.CoreMail.VAPIDPublicKey
@@ -369,6 +371,7 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 			subCfg.TLSKeyFile = cfg.CoreMail.TLSKeyFile
 			subHandler := smtp.NewCommandHandler(subCfg, smtpAuth, smtp.NewSession("runtime-init", tlsCfg, subCfg))
 			subHandler.SetAcceptanceEngine(m.rulerEngine)
+			m.submissionHandler = subHandler
 			m.submissionServer = smtp.NewServer(subCfg, subHandler, receiver)
 			m.submissionServer.TLSConfig = tlsCfg
 			m.submissionServer.SetLocalDomainChecker(identity.IsLocalDomain)
@@ -522,6 +525,10 @@ func (m *Module) Migrate() error {
 	if m.db == nil {
 		return nil
 	}
+	dialect, err := dbdialect.Detect(m.db)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
 	for _, stmt := range append(storage.Tables(), storage.Indexes()...) {
 		if _, err := m.db.Exec(stmt); err != nil {
 			return fmt.Errorf("coremail storage migration: %w", err)
@@ -532,12 +539,12 @@ func (m *Module) Migrate() error {
 			return fmt.Errorf("coremail queue migration: %w", err)
 		}
 	}
-	for _, stmt := range append(policy.Tables(), policy.Indexes()...) {
+	for _, stmt := range append(policy.Tables(dialect), policy.Indexes()...) {
 		if _, err := m.db.Exec(stmt); err != nil {
 			return fmt.Errorf("coremail policy migration: %w", err)
 		}
 	}
-	for _, stmt := range trust.Tables() {
+	for _, stmt := range trust.TablesForDialect(dialect) {
 		if _, err := m.db.Exec(stmt); err != nil {
 			return fmt.Errorf("coremail trust migration: %w", err)
 		}
@@ -861,6 +868,26 @@ func (m *Module) RulesRunner() *rules.Runner {
 // only genuinely stuck goroutines trip it. Healthy listeners
 // drain via their own per-server Stop() in well under 1s.
 const moduleStopTimeout = 3 * time.Second
+
+// SetSendEnforcerCallback wires shared send enforcement into the SMTP
+// submission pipeline. Called by the router after billing services are
+// initialized. preFn checks AllowSend before DATA (returns error on rejection);
+// postFn calls RecordSend after successful acceptance (no error, best effort).
+// SetSendEnforcerCallback wires shared send enforcement into the SMTP
+// submission pipeline. Called by the router after billing services are
+// initialized. preFn checks AllowSend before DATA (returns error on rejection);
+// postFn calls RecordSend after successful acceptance (no error, best effort).
+func (m *Module) SetSendEnforcerCallback(preFn func(ctx context.Context, tenantID, mailboxID uint, count int) error, postFn func(ctx context.Context, tenantID, mailboxID uint, count int, eventID string), bounceFn func(ctx context.Context, tenantID, mailboxID uint, eventID string)) {
+	if m.submissionHandler != nil {
+		m.submissionHandler.SetSendEnforcer(preFn)
+	}
+	if m.submissionServer != nil {
+		m.submissionServer.PostAcceptFn = postFn
+	}
+	for _, w := range m.workers {
+		w.OnBounceFn = bounceFn
+	}
+}
 
 func (m *Module) Stop() error {
 	if m.cancel != nil {

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/orvix/orvix/internal/dbdialect"
 	_ "modernc.org/sqlite"
 )
 
@@ -15,7 +16,7 @@ func testPolicyRepo(t *testing.T, dbPath string) (*sql.DB, *Repository) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	for _, stmt := range Tables() {
+	for _, stmt := range Tables(dbdialect.FromDriver("sqlite")) {
 		if _, err := db.Exec(stmt); err != nil {
 			t.Fatalf("create table: %v", err)
 		}

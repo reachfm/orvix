@@ -1,36 +1,40 @@
 package compliance
 
-import "time"
+import (
+	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
+)
 
 // PolicyAction defines what happens when a policy matches.
 type PolicyAction string
 
 const (
-	ActionAllow     PolicyAction = "allow"
+	ActionAllow      PolicyAction = "allow"
 	ActionQuarantine PolicyAction = "quarantine"
-	ActionReject    PolicyAction = "reject"
+	ActionReject     PolicyAction = "reject"
 )
 
 // PolicyScope defines what the policy filters on.
 type PolicyScope string
 
 const (
-	ScopeDomain   PolicyScope = "domain"
-	ScopeSender   PolicyScope = "sender"
+	ScopeDomain    PolicyScope = "domain"
+	ScopeSender    PolicyScope = "sender"
 	ScopeRecipient PolicyScope = "recipient"
-	ScopeSubject  PolicyScope = "subject"
+	ScopeSubject   PolicyScope = "subject"
 )
 
 // Policy is a compliance rule.
 type Policy struct {
-	ID        uint          `json:"id"`
-	Name      string        `json:"name"`
-	Enabled   bool          `json:"enabled"`
-	Action    PolicyAction  `json:"action"`
-	Scope     PolicyScope   `json:"scope"`
-	Value     string        `json:"value"`
-	CreatedAt time.Time     `json:"createdAt"`
-	UpdatedAt time.Time     `json:"updatedAt"`
+	ID        uint         `json:"id"`
+	Name      string       `json:"name"`
+	Enabled   bool         `json:"enabled"`
+	Action    PolicyAction `json:"action"`
+	Scope     PolicyScope  `json:"scope"`
+	Value     string       `json:"value"`
+	CreatedAt time.Time    `json:"createdAt"`
+	UpdatedAt time.Time    `json:"updatedAt"`
 }
 
 // QuarantineStatus represents the state of a quarantined message.
@@ -65,26 +69,30 @@ type AbuseEvent struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
-var schema = []string{
-	`CREATE TABLE IF NOT EXISTS compliance_policies (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		name TEXT NOT NULL DEFAULT '',
-		enabled INTEGER NOT NULL DEFAULT 1,
-		action TEXT NOT NULL DEFAULT 'allow',
-		scope TEXT NOT NULL DEFAULT '',
-		value TEXT NOT NULL DEFAULT '',
-		created_at DATETIME NOT NULL,
-		updated_at DATETIME NOT NULL
-	)`,
-	`CREATE TABLE IF NOT EXISTS coremail_quarantine (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		message_id TEXT NOT NULL DEFAULT '',
-		sender TEXT NOT NULL DEFAULT '',
-		recipient TEXT NOT NULL DEFAULT '',
-		reason TEXT NOT NULL DEFAULT '',
-		status TEXT NOT NULL DEFAULT 'quarantined',
-		created_at DATETIME NOT NULL,
-		released_at DATETIME,
-		released_by TEXT NOT NULL DEFAULT ''
-	)`,
+func schema(d *dbdialect.Info) []string {
+	ts := d.TimestampType()
+	autoInc := d.AutoIncrement()
+	return []string{
+		`CREATE TABLE IF NOT EXISTS compliance_policies (
+			id ` + autoInc + `,
+			name TEXT NOT NULL DEFAULT '',
+			enabled INTEGER NOT NULL DEFAULT 1,
+			action TEXT NOT NULL DEFAULT 'allow',
+			scope TEXT NOT NULL DEFAULT '',
+			value TEXT NOT NULL DEFAULT '',
+			created_at ` + ts + ` NOT NULL,
+			updated_at ` + ts + ` NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS coremail_quarantine (
+			id ` + autoInc + `,
+			message_id TEXT NOT NULL DEFAULT '',
+			sender TEXT NOT NULL DEFAULT '',
+			recipient TEXT NOT NULL DEFAULT '',
+			reason TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'quarantined',
+			created_at ` + ts + ` NOT NULL,
+			released_at ` + ts + `,
+			released_by TEXT NOT NULL DEFAULT ''
+		)`,
+	}
 }

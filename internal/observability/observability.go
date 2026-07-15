@@ -2,11 +2,11 @@ package observability
 
 // Observability bundles all operational visibility components.
 type Observability struct {
-	Logger         *Logger
-	Metrics        *MetricsCollector
-	Health         *HealthChecker
-	EventHistory   *EventHistory
-	Snapshot       *SnapshotCollector
+	Logger       *Logger
+	Metrics      *MetricsCollector
+	Health       *HealthChecker
+	EventHistory *EventHistory
+	Snapshot     *SnapshotCollector
 }
 
 // NewObservability creates a fully wired observability instance.

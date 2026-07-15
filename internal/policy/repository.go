@@ -5,16 +5,23 @@ import (
 	"database/sql"
 	"strconv"
 	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
-// Repository persists policy state to SQLite.
+// Repository persists policy state.
 type Repository struct {
-	db *sql.DB
+	db      *sql.DB
+	dialect *dbdialect.Info
 }
 
 // NewRepository creates a policy repository.
 func NewRepository(db *sql.DB) *Repository {
-	return &Repository{db: db}
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
+	return &Repository{db: db, dialect: dialect}
 }
 
 // PolicySnapshot contains all persisted policy scopes.
@@ -69,16 +76,17 @@ func (r *Repository) LoadAll(ctx context.Context) (*PolicySnapshot, error) {
 
 // SavePolicy inserts or updates a policy record.
 func (r *Repository) SavePolicy(ctx context.Context, scope, target string, mode PolicyMode) error {
-	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO coremail_policies (scope, target, mode, updated_at) VALUES (?, ?, ?, ?)
-		 ON CONFLICT(scope, target) DO UPDATE SET mode = ?, updated_at = ?`,
-		scope, target, int(mode), time.Now(), int(mode), time.Now())
+	q := `INSERT INTO coremail_policies (scope, target, mode, updated_at) VALUES (` + r.dialect.Placeholders(4) + `)
+		 ON CONFLICT (scope, target) DO UPDATE SET mode = ` + r.dialect.Excluded("mode") + `, updated_at = ` + r.dialect.Excluded("updated_at")
+	now := time.Now().UTC()
+	_, err := r.db.ExecContext(ctx, q, scope, target, int(mode), now)
 	return err
 }
 
 // DeletePolicy removes a policy record.
 func (r *Repository) DeletePolicy(ctx context.Context, scope, target string) error {
-	_, err := r.db.ExecContext(ctx, "DELETE FROM coremail_policies WHERE scope=? AND target=?", scope, target)
+	q := "DELETE FROM coremail_policies WHERE scope=" + r.dialect.Placeholder(1) + " AND target=" + r.dialect.Placeholder(2)
+	_, err := r.db.ExecContext(ctx, q, scope, target)
 	return err
 }
 

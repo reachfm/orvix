@@ -79,15 +79,25 @@ func matchFilter(m *storage.Message, f *EmailQueryFilter) bool {
 		k := *f.HasKeyword
 		switch k {
 		case "$seen":
-			if !m.Seen { return false }
+			if !m.Seen {
+				return false
+			}
 		case "$answered":
-			if !m.Answered { return false }
+			if !m.Answered {
+				return false
+			}
 		case "$flagged":
-			if !m.Flagged { return false }
+			if !m.Flagged {
+				return false
+			}
 		case "$draft":
-			if !m.Draft { return false }
+			if !m.Draft {
+				return false
+			}
 		case "$deleted":
-			if !m.Deleted { return false }
+			if !m.Deleted {
+				return false
+			}
 		}
 	}
 
@@ -95,15 +105,25 @@ func matchFilter(m *storage.Message, f *EmailQueryFilter) bool {
 		k := *f.NotKeyword
 		switch k {
 		case "$seen":
-			if m.Seen { return false }
+			if m.Seen {
+				return false
+			}
 		case "$answered":
-			if m.Answered { return false }
+			if m.Answered {
+				return false
+			}
 		case "$flagged":
-			if m.Flagged { return false }
+			if m.Flagged {
+				return false
+			}
 		case "$draft":
-			if m.Draft { return false }
+			if m.Draft {
+				return false
+			}
 		case "$deleted":
-			if m.Deleted { return false }
+			if m.Deleted {
+				return false
+			}
 		}
 	}
 

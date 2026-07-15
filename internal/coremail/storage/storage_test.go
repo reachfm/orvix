@@ -871,9 +871,9 @@ func TestRetentionPolicyCreateAndList(t *testing.T) {
 	repo := NewRetentionSQLRepo(db)
 
 	p := RetentionPolicy{
-		Name:          "Default Retention",
-		RetentionType: RetentionByAge,
-		RetentionDays: 365,
+		Name:              "Default Retention",
+		RetentionType:     RetentionByAge,
+		RetentionDays:     365,
 		DeleteAfterExpiry: true,
 	}
 	if err := repo.Create(ctx, &p, nil); err != nil {

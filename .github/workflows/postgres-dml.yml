@@ -1,0 +1,89 @@
+name: PostgreSQL Runtime DML
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  postgres-dml:
+    name: PostgreSQL DML integration tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: orvix
+          POSTGRES_PASSWORD: ci_orvix_only
+          POSTGRES_DB: orvix
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    env:
+      ORVIX_RUN_POSTGRES_DML_TEST: 1
+      PGHOST: localhost
+      PGPORT: 5432
+      PGUSER: orvix
+      PGPASSWORD: ci_orvix_only
+      PGDATABASE: orvix
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install PostgreSQL client
+        run: |
+          set -euo pipefail
+          sudo apt-get update -o Acquire::Retries=3
+          sudo apt-get install -y --no-install-recommends postgresql-client-16
+
+      - name: Verify PostgreSQL connectivity
+        run: |
+          set -euo pipefail
+          psql -c "SELECT version()"
+          psql -c "SELECT 1"
+
+      - name: Billing PostgreSQL DML tests
+        run: |
+          set -euo pipefail
+          go test ./internal/billing/... -count=1 -timeout 120s -v
+
+      - name: Abuse PostgreSQL DML tests
+        run: |
+          set -euo pipefail
+          go test ./internal/abuse/... -count=1 -timeout 120s -v
+
+      - name: Signup transaction PostgreSQL tests
+        run: |
+          set -euo pipefail
+          out="$(mktemp)"
+          go test ./internal/api/handlers -run "TestSignupTransactionPostgres" -count=1 -timeout 300s -v | tee "$out"
+          if grep -q -- "--- SKIP: TestSignupTransactionPostgres" "$out"; then
+            echo "PostgreSQL signup transaction tests skipped; PG environment is not wired correctly" >&2
+            exit 1
+          fi
+          grep -q -- "--- PASS: TestSignupTransactionPostgresMaxOpenConnsOneNoDeadlock" "$out"
+          grep -q -- "--- PASS: TestSignupTransactionPostgresSubscriptionFailureRollsBackTenantAndUser" "$out"

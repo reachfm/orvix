@@ -306,19 +306,19 @@ func (s *Server) handleEmailSet(ctx context.Context, mc *MethodCall, mailboxID u
 		}
 
 		msg := &storage.Message{
-			MessageID:        storage.GenerateMessageID(),
+			MessageID:         storage.GenerateMessageID(),
 			InternetMessageID: messageID,
-			TenantID:         0,
-			DomainID:         0,
-			MailboxID:        mailboxID,
-			FolderID:         targetFolder.ID,
-			FromAddress:      from,
-			ToAddresses:      to,
-			CcAddresses:      cc,
-			BccAddresses:     bcc,
-			Subject:          subject,
-			Seen:             !isDraft,
-			Draft:            isDraft,
+			TenantID:          0,
+			DomainID:          0,
+			MailboxID:         mailboxID,
+			FolderID:          targetFolder.ID,
+			FromAddress:       from,
+			ToAddresses:       to,
+			CcAddresses:       cc,
+			BccAddresses:      bcc,
+			Subject:           subject,
+			Seen:              !isDraft,
+			Draft:             isDraft,
 		}
 
 		if err := s.MailStore.StoreMessage(ctx, msg, rfc822Data, nil); err != nil {

@@ -25,6 +25,7 @@ type Config struct {
 	AI         AIConfig         `mapstructure:"ai"`
 	DNS        DNSConfig        `mapstructure:"dns"`
 	ClamAV     ClamAVConfig     `mapstructure:"clamav"`
+	Payment    PaymentConfig    `mapstructure:"payment"`
 	Backup     BackupConfig     `mapstructure:"backup"`
 	Monitoring MonitoringConfig `mapstructure:"monitoring"`
 	CoreMail   CoreMailConfig   `mapstructure:"coremail"`
@@ -110,7 +111,14 @@ func (c OutboundConfig) ResolvedTLSPolicy() string {
 	return c.TLSPolicy
 }
 
-// BackupConfig holds backup settings.
+// PaymentConfig controls the billing payment provider integration.
+type PaymentConfig struct {
+	Provider                string `mapstructure:"provider"`
+	Secret                  string `mapstructure:"secret"`
+	WebhookSecret           string `mapstructure:"webhook_secret"`
+	WebhookToleranceSeconds int    `mapstructure:"webhook_tolerance_seconds"`
+	Enabled                 bool   `mapstructure:"enabled"`
+}
 type BackupConfig struct {
 	Dir               string `mapstructure:"dir"`
 	RetentionCount    int    `mapstructure:"retention_count"`

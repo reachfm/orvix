@@ -70,11 +70,11 @@ type Engine struct {
 	// never loaded" from "we loaded an empty rule set
 	// that should be the fresh answer for the next
 	// call too".
-	mu               sync.RWMutex
-	acceptLoaded     bool
-	acceptCache      []acceptanceRule
-	incomingLoaded   bool
-	incomingCache    []incomingRule
+	mu             sync.RWMutex
+	acceptLoaded   bool
+	acceptCache    []acceptanceRule
+	incomingLoaded bool
+	incomingCache  []incomingRule
 }
 
 // New constructs the rule engine bundle. db may be nil in
@@ -107,18 +107,18 @@ func (e *Engine) IncomingEnforced() bool   { return e.enforcedIncoming.Load() }
 // acceptanceRule is the flat shape we load per
 // coremail_acceptance_rules row.
 type acceptanceRule struct {
-	ID             int64
-	Name           string
-	Priority       int
-	Enabled        bool
-	Scope          string
-	ScopeTarget    string
-	SenderPattern  string
-	RecipientPat   string
-	SourceIPCIDR   string
-	Action         string
-	RedirectTo     string
-	TenantID       int64
+	ID            int64
+	Name          string
+	Priority      int
+	Enabled       bool
+	Scope         string
+	ScopeTarget   string
+	SenderPattern string
+	RecipientPat  string
+	SourceIPCIDR  string
+	Action        string
+	RedirectTo    string
+	TenantID      int64
 }
 
 // incomingRule is the flat shape we load per
@@ -568,7 +568,7 @@ func parseCIDR(s string) (any, *netCIDR, error) {
 			bits -= 8
 			continue
 		}
-		mask[i] = byte(0xff << (8 - bits)) & 0xff
+		mask[i] = byte(0xff<<(8-bits)) & 0xff
 		bits = 0
 	}
 	network := make([]byte, 4)

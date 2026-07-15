@@ -1,0 +1,26 @@
+name: OpenAPI Validation
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate OpenAPI specification
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate OpenAPI
+        run: |
+          set -euo pipefail
+          test -f docs/api/openapi.yaml || { echo "OpenAPI spec not found"; exit 1; }
+          npx @redocly/cli@1.25.0 lint docs/api/openapi.yaml --format stylish

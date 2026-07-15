@@ -1,0 +1,538 @@
+openapi: "3.1.0"
+info:
+  title: Orvix Enterprise Mail API
+  version: "1.0.0"
+  description: |
+    SaaS API for Orvix Enterprise Mail.
+    All API endpoints are under /api/v1.
+    Authentication uses JWT Bearer tokens or API keys.
+servers:
+  - url: https://api.orvix.email/api/v1
+    description: Production
+  - url: http://localhost:8080/api/v1
+    description: Local development
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT access token from POST /auth/login
+    apiKeyAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: api_key
+      description: API key with 'orv_' prefix
+
+  parameters:
+    tenantId:
+      name: tenant_id
+      in: path
+      required: true
+      schema:
+        type: integer
+    paginationLimit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        default: 20
+        maximum: 100
+    paginationOffset:
+      name: offset
+      in: query
+      schema:
+        type: integer
+        default: 0
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Human-readable error message
+        code:
+          type: string
+          description: Machine-readable error code
+
+    Health:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded, down]
+        version:
+          type: string
+
+    Plan:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        max_domains:
+          type: integer
+        max_mailboxes:
+          type: integer
+        storage_mb:
+          type: integer
+        send_limit_day:
+          type: integer
+        price_monthly:
+          type: integer
+        features:
+          type: array
+          items:
+            type: string
+
+    Subscription:
+      type: object
+      properties:
+        tenant_id:
+          type: integer
+        plan_id:
+          type: string
+        status:
+          type: string
+          enum: [trialing, active, past_due, grace_period, suspended, cancelled, expired]
+        billing_interval:
+          type: string
+        current_period_end:
+          type: string
+          format: date-time
+        storage_mb:
+          type: integer
+        send_limit_day:
+          type: integer
+
+    UsageRecord:
+      type: object
+      properties:
+        tenant_id:
+          type: integer
+        period_start:
+          type: string
+          format: date-time
+        emails_sent:
+          type: integer
+        emails_received:
+          type: integer
+        mailboxes_used:
+          type: integer
+        domains_used:
+          type: integer
+        storage_used_mb:
+          type: integer
+        api_calls:
+          type: integer
+
+    QuotaCheckResult:
+      type: object
+      properties:
+        allowed:
+          type: boolean
+        limit:
+          type: integer
+        used:
+          type: integer
+        remaining:
+          type: integer
+        reason:
+          type: string
+
+    Domain:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        status:
+          type: string
+        health_score:
+          type: integer
+        mailbox_count:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+
+    OwnershipToken:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [pending, verified]
+        token:
+          type: string
+        hostname:
+          type: string
+        expected_value:
+          type: string
+
+    Organization:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        slug:
+          type: string
+        domain:
+          type: string
+        plan:
+          type: string
+        max_domains:
+          type: integer
+        max_mailboxes:
+          type: integer
+        active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    Invitation:
+      type: object
+      properties:
+        id:
+          type: integer
+        email:
+          type: string
+        role:
+          type: string
+        status:
+          type: string
+          enum: [pending, accepted, expired, revoked]
+        expires_at:
+          type: string
+          format: date-time
+
+    Mailbox:
+      type: object
+      properties:
+        id:
+          type: integer
+        email:
+          type: string
+        local_part:
+          type: string
+        domain:
+          type: string
+        quota_mb:
+          type: integer
+        send_limit:
+          type: integer
+        status:
+          type: string
+
+    APIKey:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        key_prefix:
+          type: string
+        role:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+        last_used:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+
+    PaginatedResponse:
+      type: object
+      properties:
+        data:
+          type: array
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      tags: [System]
+      security: []
+      responses:
+        '200':
+          description: Service health
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+
+  /auth/login:
+    post:
+      summary: Authenticate and get JWT token
+      tags: [Authentication]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+      responses:
+        '200':
+          description: Authentication successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token:
+                    type: string
+                  refresh_token:
+                    type: string
+        '401':
+          description: Invalid credentials
+
+  /billing/plans:
+    get:
+      summary: List available plans
+      tags: [Billing]
+      security: []
+      responses:
+        '200':
+          description: Plan list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Plan'
+
+  /enterprise/billing/subscription:
+    get:
+      summary: Get current tenant subscription
+      tags: [Billing]
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Current subscription
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+    post:
+      summary: Create or update subscription
+      tags: [Billing]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [plan_id]
+              properties:
+                plan_id:
+                  type: string
+                billing_interval:
+                  type: string
+                  enum: [monthly, yearly]
+                trial_days:
+                  type: integer
+      responses:
+        '201':
+          description: Subscription created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+
+  /enterprise/billing/usage:
+    get:
+      summary: Get current usage metrics
+      tags: [Billing]
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Current usage
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsageRecord'
+
+  /enterprise/billing/quota:
+    get:
+      summary: Check resource quota
+      tags: [Billing]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: resource
+          in: query
+          schema:
+            type: string
+            enum: [domains, mailboxes]
+        - name: used
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Quota check result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuotaCheckResult'
+
+  /enterprise/domains:
+    get:
+      summary: List domains
+      tags: [Domains]
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Domain list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Domain'
+                  total:
+                    type: integer
+    post:
+      summary: Create domain
+      tags: [Domains]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [domain]
+              properties:
+                domain:
+                  type: string
+      responses:
+        '201':
+          description: Domain created
+
+  /customer/domains:
+    get:
+      summary: List customer domains
+      tags: [Domains]
+      security:
+        - bearerAuth: []
+
+  /customer/domains/{domain_id}/verify:
+    post:
+      summary: Trigger DNS verification
+      tags: [Domains]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: domain_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Verification result
+
+  /enterprise/mailboxes:
+    get:
+      summary: List mailboxes
+      tags: [Mailboxes]
+      security:
+        - bearerAuth: []
+    post:
+      summary: Create mailbox
+      tags: [Mailboxes]
+      security:
+        - bearerAuth: []
+
+  /enterprise/organizations/{id}:
+    get:
+      summary: Get organization
+      tags: [Organizations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+
+  /admin/queue/summary:
+    get:
+      summary: Queue metrics
+      tags: [Operations]
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Queue metrics
+
+  /admin/backups:
+    get:
+      summary: List backups
+      tags: [Operations]
+      security:
+        - bearerAuth: []
+    post:
+      summary: Create backup
+      tags: [Operations]
+      security:
+        - bearerAuth: []
+
+  /admin/backups/{id}/restore:
+    post:
+      summary: Start restore
+      tags: [Operations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+
+  /platform/organizations:
+    get:
+      summary: List all organizations (superadmin)
+      tags: [Platform]
+      security:
+        - bearerAuth: []

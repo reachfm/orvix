@@ -46,13 +46,13 @@ const (
 type Purpose string
 
 const (
-	PurposeMX        Purpose = "mx"
-	PurposeMailA     Purpose = "mail_a"
-	PurposeMailAAAA  Purpose = "mail_aaaa"
-	PurposeSPF       Purpose = "spf"
-	PurposeDKIM      Purpose = "dkim"
-	PurposeDMARC     Purpose = "dmarc"
-	PurposeMTASTS    Purpose = "mta_sts"
+	PurposeMX       Purpose = "mx"
+	PurposeMailA    Purpose = "mail_a"
+	PurposeMailAAAA Purpose = "mail_aaaa"
+	PurposeSPF      Purpose = "spf"
+	PurposeDKIM     Purpose = "dkim"
+	PurposeDMARC    Purpose = "dmarc"
+	PurposeMTASTS   Purpose = "mta_sts"
 	// PurposeMTASTSValue carries the TXT portion of the mta-sts
 	// policy descriptor (_mta-sts TXT, v=STSv1; id=...). When
 	// the operator wants to read both records as one logical
@@ -63,12 +63,12 @@ const (
 	// policy endpoint at https://mta-sts.<domain>/.well-known/mta-sts.txt
 	// is reachable. The endpoint itself is served by Orvix; the
 	// A / AAAA record is what makes the hostname resolve.
-	PurposeMTASTSHost   Purpose = "mta_sts_host"
-	PurposeTLSRPT       Purpose = "tls_rpt"
-	PurposeCAA          Purpose = "caa"
-	PurposePTR          Purpose = "ptr"
-	PurposeBIMI         Purpose = "bimi"
-	PurposeDANETLSA     Purpose = "dane_tlsa"
+	PurposeMTASTSHost Purpose = "mta_sts_host"
+	PurposeTLSRPT     Purpose = "tls_rpt"
+	PurposeCAA        Purpose = "caa"
+	PurposePTR        Purpose = "ptr"
+	PurposeBIMI       Purpose = "bimi"
+	PurposeDANETLSA   Purpose = "dane_tlsa"
 )
 
 // Status is the verification outcome of a record.
@@ -93,11 +93,11 @@ const (
 type Action string
 
 const (
-	ActionCreate  Action = "create"
-	ActionUpdate  Action = "update"
-	ActionSkip    Action = "skip"
+	ActionCreate   Action = "create"
+	ActionUpdate   Action = "update"
+	ActionSkip     Action = "skip"
 	ActionConflict Action = "conflict"
-	ActionDelete  Action = "delete" // never emitted by default; reserved
+	ActionDelete   Action = "delete" // never emitted by default; reserved
 )
 
 // Record is the canonical DNS record model used end-to-end (plan,
@@ -124,10 +124,10 @@ type Record struct {
 
 // Plan is the desired DNS state for a domain.
 type Plan struct {
-	Domain       string   `json:"domain"`
-	MailHost     string   `json:"mail_host"`     // e.g. "mail.orvix.email"
-	ServerIPv4   string   `json:"server_ipv4"`   // canonical IPv4 string; "" if unknown
-	ServerIPv6   string   `json:"server_ipv6"`   // canonical IPv6 string; "" if not configured
+	Domain     string `json:"domain"`
+	MailHost   string `json:"mail_host"`   // e.g. "mail.orvix.email"
+	ServerIPv4 string `json:"server_ipv4"` // canonical IPv4 string; "" if unknown
+	ServerIPv6 string `json:"server_ipv6"` // canonical IPv6 string; "" if not configured
 	// ListenerBind is the SMTP/POP3/IMAP listener bind host from
 	// coremail.smtp_host. It is INFORMATIONAL ONLY — the dashboard
 	// surfaces it alongside ServerIPv4 so the operator can see the
@@ -135,13 +135,13 @@ type Plan struct {
 	// use ServerIPv4 / ServerIPv6, NEVER ListenerBind (which is
 	// a bind address, not a public DNS value, and typically
 	// 0.0.0.0 on production installs).
-	ListenerBind string   `json:"listener_bind,omitempty"`
-	DKIMSelector string   `json:"dkim_selector"` // e.g. "orvix" or "default"
-	DKIMKeyID    string   `json:"dkim_key_id,omitempty"` // opaque key id for the active pair
-	ReportMailbox string  `json:"report_mailbox"` // e.g. "dmarc@orvix.email"
-	MTAPolicyID  string   `json:"mta_sts_policy_id"` // content-derived policy id; same policy body => same id
-	MTAMode      string   `json:"mta_sts_mode"`       // "testing" or "enforce"
-	Records      []Record `json:"records"`
+	ListenerBind  string   `json:"listener_bind,omitempty"`
+	DKIMSelector  string   `json:"dkim_selector"`         // e.g. "orvix" or "default"
+	DKIMKeyID     string   `json:"dkim_key_id,omitempty"` // opaque key id for the active pair
+	ReportMailbox string   `json:"report_mailbox"`        // e.g. "dmarc@orvix.email"
+	MTAPolicyID   string   `json:"mta_sts_policy_id"`     // content-derived policy id; same policy body => same id
+	MTAMode       string   `json:"mta_sts_mode"`          // "testing" or "enforce"
+	Records       []Record `json:"records"`
 
 	// Read-only text blocks surfaced to the dashboard so the
 	// operator can copy/paste them at the DNS provider. The DKIM
@@ -157,7 +157,7 @@ type Plan struct {
 	// MTAPolicyURL is the absolute URL where the policy file is
 	// served. Built from cfg.DNS (scheme) when the public MTA-STS
 	// host is configured; falls back to "https://" + MTAStsHostName.
-	MTAPolicyURL   string `json:"mta_sts_policy_url,omitempty"`
+	MTAPolicyURL string `json:"mta_sts_policy_url,omitempty"`
 }
 
 // IsComplete returns true if every Required record is verified. Used
@@ -193,7 +193,7 @@ func (p *Plan) RequiredRecords() []Record {
 // per-record next-step list, plus a top-level note. Apply() consumes
 // the same ChangePlan plus an explicit confirmation.
 type ChangePlan struct {
-	Provider string   `json:"provider"`           // "manual", "cloudflare", "namecheap"
+	Provider string   `json:"provider"` // "manual", "cloudflare", "namecheap"
 	Domain   string   `json:"domain"`
 	Steps    []Change `json:"steps"`
 	Notes    []string `json:"notes,omitempty"` // e.g. "no token configured", "no live read"

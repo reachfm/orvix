@@ -21,12 +21,12 @@ type UpdateManager struct {
 
 // UpdateInfo contains information about an available update.
 type UpdateInfo struct {
-	ModuleID    string `json:"module_id"`
-	CurrentVer  string `json:"current_version"`
-	LatestVer   string `json:"latest_version"`
-	Changelog   string `json:"changelog"`
-	Checksum    string `json:"checksum"`
-	Critical    bool   `json:"critical"`
+	ModuleID   string `json:"module_id"`
+	CurrentVer string `json:"current_version"`
+	LatestVer  string `json:"latest_version"`
+	Changelog  string `json:"changelog"`
+	Checksum   string `json:"checksum"`
+	Critical   bool   `json:"critical"`
 }
 
 // NewUpdateManager creates a new update manager.

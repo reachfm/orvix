@@ -3,10 +3,12 @@ package smtp
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +25,12 @@ type Server struct {
 	RecipientValidator RecipientValidator
 	SenderValidator    SenderValidator
 	Observability      *observability.Observability
+	// PostAcceptFn is called after a message is successfully
+	// accepted and enqueued. tenantID, mailboxID, recipientCount.
+	// PostAcceptFn is called after successful message acceptance.
+	// Params: ctx, tenantID, mailboxID, recipientCount, eventID.
+	// eventID is a content-deterministic hash enabling retry-safe idempotency.
+	PostAcceptFn func(ctx context.Context, tenantID, mailboxID uint, count int, eventID string)
 
 	mu       sync.Mutex
 	sessions map[string]*Session
@@ -318,6 +326,11 @@ func (s *Server) handleConn(conn net.Conn) {
 				}
 			}
 
+			if s.PostAcceptFn != nil && session.AuthIdentity != nil {
+				eventID := smtpEventID(session)
+				s.PostAcceptFn(context.Background(), session.AuthIdentity.TenantID, session.AuthIdentity.MailboxID, len(session.Recipients), eventID)
+			}
+
 			writeResponse(writer, MessageAccepted)
 			writer.Flush()
 			session.State = StateGreeted
@@ -383,4 +396,20 @@ func writeResponse(writer *bufio.Writer, resp Response) {
 		return
 	}
 	writer.WriteString(fmt.Sprintf("%d %s\r\n", resp.Code, resp.Message))
+}
+
+func smtpEventID(session *Session) string {
+	rcpts := make([]string, len(session.Recipients))
+	copy(rcpts, session.Recipients)
+	sort.Strings(rcpts)
+	h := sha256.New()
+	h.Write([]byte(session.MailFrom))
+	sep := []byte{0}
+	for _, r := range rcpts {
+		h.Write(sep)
+		h.Write([]byte(r))
+	}
+	h.Write(sep)
+	h.Write(session.DataBuffer)
+	return fmt.Sprintf("smtp:%x", h.Sum(nil)[:16])
 }

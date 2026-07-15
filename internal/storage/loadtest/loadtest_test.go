@@ -43,12 +43,12 @@ func runHeavy() bool {
 // real staging hardware (SSD-backed PostgreSQL).  They are NOT current
 // performance claims — they are scaffolding constants.
 const (
-	targetRows        = 3_000_000 // future target row count
-	minInsertRate     = 500       // rows/sec placeholder — measure on staging
-	maxListLatencyMS  = 500       // placeholder — measure on staging
-	maxFlagUpdateMS   = 100       // placeholder — measure on staging
-	maxLeaseClaimMS   = 100       // placeholder — measure on staging
-	maxSearchMS       = 2000      // placeholder — measure on staging
+	targetRows       = 3_000_000 // future target row count
+	minInsertRate    = 500       // rows/sec placeholder — measure on staging
+	maxListLatencyMS = 500       // placeholder — measure on staging
+	maxFlagUpdateMS  = 100       // placeholder — measure on staging
+	maxLeaseClaimMS  = 100       // placeholder — measure on staging
+	maxSearchMS      = 2000      // placeholder — measure on staging
 )
 
 // TestScaffoldConfig verifies the load-test scaffold compiles and the
@@ -134,9 +134,9 @@ func TestScaffoldSelfTests(t *testing.T) {
 
 	t.Run("cursor_pagination_timing", func(t *testing.T) {
 		const (
-			pageSize  = 50
-			numPages  = 1000
-			maxPerOp  = 50 * time.Millisecond
+			pageSize = 50
+			numPages = 1000
+			maxPerOp = 50 * time.Millisecond
 		)
 		var totalPages int64
 		start := time.Now()

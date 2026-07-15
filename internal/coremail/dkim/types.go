@@ -4,9 +4,9 @@ import "time"
 
 // DKIMConfig represents a domain's DKIM signing configuration.
 type DKIMConfig struct {
-	ID       uint      `json:"id"`
-	Domain   string    `json:"domain"`   // signing domain (d=)
-	Selector string    `json:"selector"` // selector (s=)
+	ID       uint   `json:"id"`
+	Domain   string `json:"domain"`   // signing domain (d=)
+	Selector string `json:"selector"` // selector (s=)
 	// PrivateKeyPEM is the RSA private key in PKCS8 PEM format.
 	PrivateKeyPEM string    `json:"-"`
 	Enabled       bool      `json:"enabled"`
@@ -49,12 +49,12 @@ var DefaultHeaders = []string{
 
 // HeaderSet holds signing parameters for a single message.
 type HeaderSet struct {
-	Domain       string
-	Selector     string
+	Domain        string
+	Selector      string
 	PrivateKeyPEM string
 	SignedHeaders []string
-	BodyCanon    CanonAlgo
-	HeaderCanon  CanonAlgo
-	HashAlgo     HashAlgo
-	SignAlgo     SignAlgo
+	BodyCanon     CanonAlgo
+	HeaderCanon   CanonAlgo
+	HashAlgo      HashAlgo
+	SignAlgo      SignAlgo
 }

@@ -49,7 +49,7 @@ func (s *PlatformService) ListOrganizationSummaries(ctx context.Context, search 
 	where := "t.deleted_at IS NULL"
 	args := []interface{}{}
 	if search != "" {
-		where += " AND (t.name LIKE ? OR t.slug LIKE ? OR t.domain LIKE ?)"
+		where += " AND (t.name LIKE " + s.dialect.Placeholder(len(args)+1) + " OR t.slug LIKE " + s.dialect.Placeholder(len(args)+2) + " OR t.domain LIKE " + s.dialect.Placeholder(len(args)+3) + ")"
 		s := "%" + search + "%"
 		args = append(args, s, s, s)
 	}
@@ -63,7 +63,7 @@ func (s *PlatformService) ListOrganizationSummaries(ctx context.Context, search 
 		COALESCE((SELECT COUNT(*) FROM coremail_mailboxes m WHERE m.tenant_id=t.id AND m.deleted_at IS NULL),0),
 		COALESCE((SELECT COUNT(*) FROM coremail_domains d WHERE d.tenant_id=t.id AND d.deleted_at IS NULL),0),
 		t.created_at
-		FROM tenants t WHERE %s ORDER BY t.created_at DESC LIMIT ? OFFSET ?`, where)
+		FROM tenants t WHERE %s ORDER BY t.created_at DESC LIMIT `+s.dialect.Placeholder(len(args)+1)+` OFFSET `+s.dialect.Placeholder(len(args)+2), where)
 	args = append(args, limit, offset)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -97,7 +97,7 @@ func (s *PlatformService) GetOrganizationDetail(ctx context.Context, id uint) (m
 	}
 
 	adminRows, err := s.db.QueryContext(ctx,
-		"SELECT id, email, role FROM users WHERE tenant_id=? AND role IN ('admin','superadmin','operator','readonly') AND deleted_at IS NULL", id)
+		"SELECT id, email, role FROM users WHERE tenant_id="+s.dialect.Placeholder(1)+" AND role IN ('admin','superadmin','operator','readonly') AND deleted_at IS NULL", id)
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +126,7 @@ func (s *PlatformService) getOrgSummary(ctx context.Context, id uint) (*Organiza
 	err := s.db.QueryRowContext(ctx, `SELECT t.id, t.name, t.slug, t.domain, t.plan, t.active,
 		COALESCE((SELECT COUNT(*) FROM coremail_mailboxes m WHERE m.tenant_id=t.id AND m.deleted_at IS NULL),0),
 		COALESCE((SELECT COUNT(*) FROM coremail_domains d WHERE d.tenant_id=t.id AND d.deleted_at IS NULL),0),
-		t.created_at FROM tenants t WHERE t.id=? AND t.deleted_at IS NULL`, id).Scan(
+		t.created_at FROM tenants t WHERE t.id=`+s.dialect.Placeholder(1)+` AND t.deleted_at IS NULL`, id).Scan(
 		&srv.ID, &srv.Name, &srv.Slug, &srv.Domain, &srv.Plan, &active, &srv.MailboxCount, &srv.DomainCount, &created)
 	if err != nil {
 		if err == sql.ErrNoRows {

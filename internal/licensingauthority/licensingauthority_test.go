@@ -19,14 +19,14 @@ func TestCacheSaveLoad(t *testing.T) {
 	secret := "test-secret"
 
 	cache := &EntitlementCache{
-		LicenseID:            "test-license",
-		Edition:              "professional",
-		Features:             []string{"smtp", "imap"},
-		Limits:               EntitlementLimits{MaxDomains: 50, MaxMailboxes: 500, MaxStorageGB: 50},
+		LicenseID:                "test-license",
+		Edition:                  "professional",
+		Features:                 []string{"smtp", "imap"},
+		Limits:                   EntitlementLimits{MaxDomains: 50, MaxMailboxes: 500, MaxStorageGB: 50},
 		LastSuccessfulValidation: time.Now().Truncate(time.Second),
-		NextValidation:       time.Now().Add(6 * time.Hour).Truncate(time.Second),
-		GraceExpiresAt:       time.Now().Add(30 * 24 * time.Hour).Truncate(time.Second),
-		AuthorityState:       AuthorityOnline,
+		NextValidation:           time.Now().Add(6 * time.Hour).Truncate(time.Second),
+		GraceExpiresAt:           time.Now().Add(30 * 24 * time.Hour).Truncate(time.Second),
+		AuthorityState:           AuthorityOnline,
 	}
 
 	if err := SaveCache(cache, cachePath, secret); err != nil {
@@ -65,14 +65,14 @@ func TestCacheTamperDetection(t *testing.T) {
 	secret := "test-secret"
 
 	cache := &EntitlementCache{
-		LicenseID:            "test-license",
-		Edition:              "enterprise",
-		Features:             []string{"all"},
-		Limits:               EntitlementLimits{MaxDomains: 1000, MaxMailboxes: 10000, MaxStorageGB: 1000},
+		LicenseID:                "test-license",
+		Edition:                  "enterprise",
+		Features:                 []string{"all"},
+		Limits:                   EntitlementLimits{MaxDomains: 1000, MaxMailboxes: 10000, MaxStorageGB: 1000},
 		LastSuccessfulValidation: time.Now(),
-		NextValidation:       time.Now().Add(6 * time.Hour),
-		GraceExpiresAt:       time.Now().Add(90 * 24 * time.Hour),
-		AuthorityState:       AuthorityOnline,
+		NextValidation:           time.Now().Add(6 * time.Hour),
+		GraceExpiresAt:           time.Now().Add(90 * 24 * time.Hour),
+		AuthorityState:           AuthorityOnline,
 	}
 	SaveCache(cache, cachePath, secret)
 
@@ -95,14 +95,14 @@ func TestCacheWrongSecretDetected(t *testing.T) {
 	cachePath := filepath.Join(dir, "cache.json")
 
 	cache := &EntitlementCache{
-		LicenseID:            "test-license",
-		Edition:              "professional",
-		Features:             []string{},
-		Limits:               EntitlementLimits{},
+		LicenseID:                "test-license",
+		Edition:                  "professional",
+		Features:                 []string{},
+		Limits:                   EntitlementLimits{},
 		LastSuccessfulValidation: time.Now(),
-		NextValidation:       time.Now().Add(6 * time.Hour),
-		GraceExpiresAt:       time.Now().Add(30 * 24 * time.Hour),
-		AuthorityState:       AuthorityOnline,
+		NextValidation:           time.Now().Add(6 * time.Hour),
+		GraceExpiresAt:           time.Now().Add(30 * 24 * time.Hour),
+		AuthorityState:           AuthorityOnline,
 	}
 	SaveCache(cache, cachePath, "real-secret")
 
@@ -390,25 +390,25 @@ func TestSignCacheConsistency(t *testing.T) {
 	secret := "consistent-secret"
 
 	cache1 := &EntitlementCache{
-		LicenseID:            "test",
-		Edition:              "professional",
-		Features:             []string{"smtp", "imap"},
-		Limits:               EntitlementLimits{MaxDomains: 50, MaxMailboxes: 500},
+		LicenseID:                "test",
+		Edition:                  "professional",
+		Features:                 []string{"smtp", "imap"},
+		Limits:                   EntitlementLimits{MaxDomains: 50, MaxMailboxes: 500},
 		LastSuccessfulValidation: time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC),
-		NextValidation:       time.Date(2026, 6, 9, 16, 0, 0, 0, time.UTC),
-		GraceExpiresAt:       time.Date(2026, 7, 9, 10, 0, 0, 0, time.UTC),
-		AuthorityState:       AuthorityOnline,
+		NextValidation:           time.Date(2026, 6, 9, 16, 0, 0, 0, time.UTC),
+		GraceExpiresAt:           time.Date(2026, 7, 9, 10, 0, 0, 0, time.UTC),
+		AuthorityState:           AuthorityOnline,
 	}
 
 	cache2 := &EntitlementCache{
-		LicenseID:            "test",
-		Edition:              "professional",
-		Features:             []string{"smtp", "imap"},
-		Limits:               EntitlementLimits{MaxDomains: 50, MaxMailboxes: 500},
+		LicenseID:                "test",
+		Edition:                  "professional",
+		Features:                 []string{"smtp", "imap"},
+		Limits:                   EntitlementLimits{MaxDomains: 50, MaxMailboxes: 500},
 		LastSuccessfulValidation: time.Date(2026, 6, 9, 10, 0, 0, 0, time.UTC),
-		NextValidation:       time.Date(2026, 6, 9, 16, 0, 0, 0, time.UTC),
-		GraceExpiresAt:       time.Date(2026, 7, 9, 10, 0, 0, 0, time.UTC),
-		AuthorityState:       AuthorityOnline,
+		NextValidation:           time.Date(2026, 6, 9, 16, 0, 0, 0, time.UTC),
+		GraceExpiresAt:           time.Date(2026, 7, 9, 10, 0, 0, 0, time.UTC),
+		AuthorityState:           AuthorityOnline,
 	}
 
 	sig1 := SignCache(cache1, secret)

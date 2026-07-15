@@ -1,0 +1,224 @@
+package handlers
+
+import (
+	"strconv"
+	"time"
+
+	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/auth"
+)
+
+func (h *Handler) ListAliases(c fiber.Ctx) error {
+	tenantID, err := auth.RequireTenantID(c)
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "tenant context required"})
+	}
+	db, err := h.db.DB()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database unavailable"})
+	}
+	rows, err := db.QueryContext(c.Context(),
+		`SELECT id, domain_id, from_addr, to_addr, active, created_at FROM coremail_aliases WHERE tenant_id = ? AND deleted_at IS NULL ORDER BY from_addr`, tenantID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list aliases"})
+	}
+	defer rows.Close()
+	type Alias struct {
+		ID        uint   `json:"id"`
+		DomainID  uint   `json:"domain_id"`
+		FromAddr  string `json:"from_addr"`
+		ToAddr    string `json:"to_addr"`
+		Active    bool   `json:"active"`
+		CreatedAt string `json:"created_at"`
+	}
+	var aliases []Alias
+	for rows.Next() {
+		var a Alias
+		if err := rows.Scan(&a.ID, &a.DomainID, &a.FromAddr, &a.ToAddr, &a.Active, &a.CreatedAt); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "scan error"})
+		}
+		aliases = append(aliases, a)
+	}
+	return c.JSON(aliases)
+}
+
+func (h *Handler) CreateAlias(c fiber.Ctx) error {
+	var req struct {
+		DomainID uint   `json:"domain_id"`
+		FromAddr string `json:"from_addr"`
+		ToAddr   string `json:"to_addr"`
+	}
+	if err := c.Bind().JSON(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
+	}
+	if req.FromAddr == "" || req.ToAddr == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "from_addr and to_addr are required"})
+	}
+	tenantID, err := auth.RequireTenantID(c)
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "tenant context required"})
+	}
+	db, err := h.db.DB()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database unavailable"})
+	}
+	now := time.Now().UTC()
+	_, err = db.ExecContext(c.Context(),
+		`INSERT INTO coremail_aliases (domain_id, tenant_id, from_addr, to_addr, active, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 1, ?, ?)`,
+		req.DomainID, tenantID, req.FromAddr, req.ToAddr, now, now)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "failed to create alias: " + err.Error()})
+	}
+	h.writeAuditLog(c, "alias.create", "from:"+req.FromAddr+" to:"+req.ToAddr)
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"status": "created"})
+}
+
+func (h *Handler) DeleteAlias(c fiber.Ctx) error {
+	idStr := c.Params("id")
+	id, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid alias id"})
+	}
+	db, err := h.db.DB()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database unavailable"})
+	}
+	now := time.Now().UTC()
+	_, err = db.ExecContext(c.Context(),
+		"UPDATE coremail_aliases SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL", now, id)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "alias not found"})
+	}
+	h.writeAuditLog(c, "alias.delete", "id:"+idStr)
+	return c.JSON(fiber.Map{"status": "deleted"})
+}
+
+func (h *Handler) ListGroups(c fiber.Ctx) error {
+	tenantID, err := auth.RequireTenantID(c)
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "tenant context required"})
+	}
+	db, err := h.db.DB()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database unavailable"})
+	}
+	rows, err := db.QueryContext(c.Context(),
+		`SELECT id, name, description, created_at FROM coremail_groups WHERE tenant_id = ? AND deleted_at IS NULL ORDER BY name`, tenantID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list groups"})
+	}
+	defer rows.Close()
+	type Group struct {
+		ID          uint   `json:"id"`
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	}
+	var groups []Group
+	for rows.Next() {
+		var g Group
+		if err := rows.Scan(&g.ID, &g.Name, &g.Description); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "scan error"})
+		}
+		groups = append(groups, g)
+	}
+	return c.JSON(groups)
+}
+
+func (h *Handler) CreateGroup(c fiber.Ctx) error {
+	var req struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	}
+	if err := c.Bind().JSON(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
+	}
+	if req.Name == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "name is required"})
+	}
+	tenantID, err := auth.RequireTenantID(c)
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "tenant context required"})
+	}
+	db, err := h.db.DB()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database unavailable"})
+	}
+	now := time.Now().UTC()
+	_, err = db.ExecContext(c.Context(),
+		`INSERT INTO coremail_groups (tenant_id, name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+		tenantID, req.Name, req.Description, now, now)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "failed to create group: " + err.Error()})
+	}
+	h.writeAuditLog(c, "group.create", "name:"+req.Name)
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"status": "created"})
+}
+
+func (h *Handler) DeleteGroup(c fiber.Ctx) error {
+	idStr := c.Params("id")
+	id, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid group id"})
+	}
+	db, err := h.db.DB()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database unavailable"})
+	}
+	now := time.Now().UTC()
+	_, err = db.ExecContext(c.Context(),
+		"UPDATE coremail_groups SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL", now, id)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "group not found"})
+	}
+	h.writeAuditLog(c, "group.delete", "id:"+idStr)
+	return c.JSON(fiber.Map{"status": "deleted"})
+}
+
+func (h *Handler) AddGroupMember(c fiber.Ctx) error {
+	groupIDStr := c.Params("id")
+	groupID, err := strconv.ParseUint(groupIDStr, 10, 64)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid group id"})
+	}
+	var req struct {
+		Email string `json:"email"`
+	}
+	if err := c.Bind().JSON(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
+	}
+	db, err := h.db.DB()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database unavailable"})
+	}
+	now := time.Now().UTC()
+	_, err = db.ExecContext(c.Context(),
+		`INSERT INTO coremail_group_members (group_id, email, added_at) VALUES (?, ?, ?)`, groupID, req.Email, now)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "failed to add member: " + err.Error()})
+	}
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"status": "added"})
+}
+
+func (h *Handler) RemoveGroupMember(c fiber.Ctx) error {
+	groupIDStr := c.Params("id")
+	memberIDStr := c.Params("memberId")
+	memberID, err := strconv.ParseUint(memberIDStr, 10, 64)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid member id"})
+	}
+	_, err = strconv.ParseUint(groupIDStr, 10, 64)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid group id"})
+	}
+	db, err := h.db.DB()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database unavailable"})
+	}
+	_, err = db.ExecContext(c.Context(),
+		"DELETE FROM coremail_group_members WHERE id = ?", memberID)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "member not found"})
+	}
+	return c.JSON(fiber.Map{"status": "removed"})
+}

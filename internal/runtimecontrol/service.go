@@ -82,8 +82,12 @@ func (rc *RuntimeControl) serviceHealth(name string) string {
 }
 
 func joinHostPort(host string, port int) string {
-	if host == "" { host = "0.0.0.0" }
-	if port <= 0 { return host + ":0" }
+	if host == "" {
+		host = "0.0.0.0"
+	}
+	if port <= 0 {
+		return host + ":0"
+	}
 	return fmt.Sprintf("%s:%d", host, port)
 }
 
@@ -92,7 +96,9 @@ func joinHostPort(host string, port int) string {
 func (rc *RuntimeControl) GetSettings() *Settings {
 	cfg := rc.cfgRef
 	s := &Settings{}
-	if cfg == nil { return s }
+	if cfg == nil {
+		return s
+	}
 
 	cm := cfg.CoreMail
 	s.SMTP = SMTPSettings{
@@ -110,19 +116,37 @@ func (rc *RuntimeControl) GetSettings() *Settings {
 }
 
 func (rc *RuntimeControl) UpdateSettings(s *Settings) error {
-	if s == nil { return fmt.Errorf("settings cannot be nil") }
+	if s == nil {
+		return fmt.Errorf("settings cannot be nil")
+	}
 
-	if s.SMTP.MaxMessageSizeMB > 100 { return fmt.Errorf("max_message_size_mb cannot exceed 100") }
-	if s.SMTP.MaxRecipients > 1000 { return fmt.Errorf("max_recipients cannot exceed 1000") }
-	if s.SMTP.MaxConcurrentSessions > 5000 { return fmt.Errorf("max_concurrent_sessions cannot exceed 5000") }
+	if s.SMTP.MaxMessageSizeMB > 100 {
+		return fmt.Errorf("max_message_size_mb cannot exceed 100")
+	}
+	if s.SMTP.MaxRecipients > 1000 {
+		return fmt.Errorf("max_recipients cannot exceed 1000")
+	}
+	if s.SMTP.MaxConcurrentSessions > 5000 {
+		return fmt.Errorf("max_concurrent_sessions cannot exceed 5000")
+	}
 	if s.SMTP.SpamMode != "" && s.SMTP.SpamMode != "observation" && s.SMTP.SpamMode != "enforcement" && s.SMTP.SpamMode != "suspicious" {
 		return fmt.Errorf("invalid spam_mode: %s", s.SMTP.SpamMode)
 	}
-	if s.IMAP.MaxSessions > 5000 { return fmt.Errorf("imap max_sessions cannot exceed 5000") }
-	if s.POP3.MaxSessions > 5000 { return fmt.Errorf("pop3 max_sessions cannot exceed 5000") }
-	if s.Queue.WorkerCount > 50 { return fmt.Errorf("worker_count cannot exceed 50") }
-	if s.Trust.MaxAttempts > 100 { return fmt.Errorf("max_attempts cannot exceed 100") }
-	if s.Trust.LockoutDurationMin > 1440 { return fmt.Errorf("lockout_duration_min cannot exceed 1440") }
+	if s.IMAP.MaxSessions > 5000 {
+		return fmt.Errorf("imap max_sessions cannot exceed 5000")
+	}
+	if s.POP3.MaxSessions > 5000 {
+		return fmt.Errorf("pop3 max_sessions cannot exceed 5000")
+	}
+	if s.Queue.WorkerCount > 50 {
+		return fmt.Errorf("worker_count cannot exceed 50")
+	}
+	if s.Trust.MaxAttempts > 100 {
+		return fmt.Errorf("max_attempts cannot exceed 100")
+	}
+	if s.Trust.LockoutDurationMin > 1440 {
+		return fmt.Errorf("lockout_duration_min cannot exceed 1440")
+	}
 	if s.Policy.DefaultMode != "" && s.Policy.DefaultMode != "allow" && s.Policy.DefaultMode != "block" {
 		return fmt.Errorf("invalid policy default_mode")
 	}
@@ -130,10 +154,16 @@ func (rc *RuntimeControl) UpdateSettings(s *Settings) error {
 	cfg := rc.cfgRef
 	if cfg != nil {
 		cm := &cfg.CoreMail
-		if s.SMTP.Hostname != "" { cm.Hostname = s.SMTP.Hostname }
-		if s.Queue.WorkerCount > 0 { cm.QueueWorkers = s.Queue.WorkerCount }
+		if s.SMTP.Hostname != "" {
+			cm.Hostname = s.SMTP.Hostname
+		}
+		if s.Queue.WorkerCount > 0 {
+			cm.QueueWorkers = s.Queue.WorkerCount
+		}
 		if s.Queue.WorkerInterval != "" {
-			if d, err := time.ParseDuration(s.Queue.WorkerInterval); err == nil { cm.WorkerInterval = d }
+			if d, err := time.ParseDuration(s.Queue.WorkerInterval); err == nil {
+				cm.WorkerInterval = d
+			}
 		}
 	}
 	return nil

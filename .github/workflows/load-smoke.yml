@@ -1,0 +1,35 @@
+name: Load Smoke
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * 1' # weekly Monday
+
+permissions:
+  contents: read
+
+jobs:
+  load-smoke:
+    name: Development-baseline load smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run benchmarks
+        run: |
+          set -euo pipefail
+          echo "=== Environment ==="
+          echo "Runner: ubuntu-24.04"
+          nproc
+          free -h
+          echo "=== Benchmarks ==="
+          go test ./internal/billing/... -bench=. -benchmem -count=1 -timeout 120s 2>&1 | tee bench_output.txt
+          echo "=== Load summary ==="
+          echo "Environment: github-actions (ubuntu-24.04)"
+          echo "Concurrency: 1 (serial benchmarks)"
+          echo "Duration: measured per benchmark"
+          grep "Benchmark" bench_output.txt | head -20
+          echo "LOAD_SMOKE=PASS" >> "$GITHUB_ENV"

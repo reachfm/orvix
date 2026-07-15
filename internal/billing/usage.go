@@ -1,0 +1,97 @@
+package billing
+
+import (
+	"database/sql"
+	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
+)
+
+type UsageService struct {
+	db      *sql.DB
+	dialect *dbdialect.Info
+}
+
+func NewUsageService(db *sql.DB) *UsageService {
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
+	return &UsageService{db: db, dialect: dialect}
+}
+
+func (s *UsageService) GetCurrentUsage(tenantID uint) (*UsageRecord, error) {
+	now := time.Now().UTC()
+	periodStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	row := s.db.QueryRow(`SELECT id, tenant_id, period_start, period_end, mailboxes_used, domains_used,
+		storage_used_mb, emails_sent, emails_received, api_calls, created_at
+		FROM usage_records WHERE tenant_id = `+s.dialect.Placeholder(1)+` AND period_start = `+s.dialect.Placeholder(2), tenantID, periodStart)
+	var rec UsageRecord
+	err := row.Scan(&rec.ID, &rec.TenantID, &rec.PeriodStart, &rec.PeriodEnd,
+		&rec.MailboxesUsed, &rec.DomainsUsed, &rec.StorageUsedMB,
+		&rec.EmailsSent, &rec.EmailsReceived, &rec.APICalls, &rec.CreatedAt)
+	if err == sql.ErrNoRows {
+		return &UsageRecord{
+			TenantID:    tenantID,
+			PeriodStart: periodStart,
+			PeriodEnd:   periodStart.AddDate(0, 1, 0),
+		}, nil
+	}
+	return &rec, err
+}
+
+func (s *UsageService) IncrementEmailsSent(tenantID uint, count int64) error {
+	return s.increment(tenantID, "emails_sent", count)
+}
+
+func (s *UsageService) IncrementEmailsReceived(tenantID uint, count int64) error {
+	return s.increment(tenantID, "emails_received", count)
+}
+
+func (s *UsageService) IncrementAPICalls(tenantID uint, count int64) error {
+	return s.increment(tenantID, "api_calls", count)
+}
+
+func (s *UsageService) SetMailboxCount(tenantID uint, count int) error {
+	return s.setField(tenantID, "mailboxes_used", int64(count))
+}
+
+func (s *UsageService) SetDomainCount(tenantID uint, count int) error {
+	return s.setField(tenantID, "domains_used", int64(count))
+}
+
+func (s *UsageService) increment(tenantID uint, field string, count int64) error {
+	now := time.Now().UTC()
+	periodStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	var query string
+	if s.dialect.IsPostgres() {
+		query = `INSERT INTO usage_records (tenant_id, period_start, period_end, ` + field + `, created_at)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (tenant_id, period_start) DO UPDATE SET ` + field + ` = usage_records.` + field + ` + EXCLUDED.` + field
+		_, err := s.db.Exec(query, tenantID, periodStart, periodStart.AddDate(0, 1, 0), count, now)
+		return err
+	}
+	query = `INSERT INTO usage_records (tenant_id, period_start, period_end, ` + field + `, created_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT (tenant_id, period_start) DO UPDATE SET ` + field + ` = ` + field + ` + ?`
+	_, err := s.db.Exec(query, tenantID, periodStart, periodStart.AddDate(0, 1, 0), count, now, count)
+	return err
+}
+
+func (s *UsageService) setField(tenantID uint, field string, value int64) error {
+	now := time.Now().UTC()
+	periodStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	var query string
+	if s.dialect.IsPostgres() {
+		query = `INSERT INTO usage_records (tenant_id, period_start, period_end, ` + field + `, created_at)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (tenant_id, period_start) DO UPDATE SET ` + field + ` = EXCLUDED.` + field
+		_, err := s.db.Exec(query, tenantID, periodStart, periodStart.AddDate(0, 1, 0), value, now)
+		return err
+	}
+	query = `INSERT INTO usage_records (tenant_id, period_start, period_end, ` + field + `, created_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT (tenant_id, period_start) DO UPDATE SET ` + field + ` = ?`
+	_, err := s.db.Exec(query, tenantID, periodStart, periodStart.AddDate(0, 1, 0), value, now, value)
+	return err
+}

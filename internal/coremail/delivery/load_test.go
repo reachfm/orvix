@@ -44,8 +44,8 @@ func TestLoad1000QueuedEntries(t *testing.T) {
 		}
 
 		msg := &storage.Message{
-			MessageID:   fmt.Sprintf("msg-load-%d", i),
-			TenantID:    1, DomainID: 1, MailboxID: 1,
+			MessageID: fmt.Sprintf("msg-load-%d", i),
+			TenantID:  1, DomainID: 1, MailboxID: 1,
 			FromAddress: "sender@example.com",
 			ToAddresses: fmt.Sprintf("rcp%d@load.test", i),
 		}
@@ -104,8 +104,8 @@ func TestLoadMultipleConcurrentWorkers(t *testing.T) {
 		}
 		qe.Enqueue(ctx, entry)
 		msg := &storage.Message{
-			MessageID:   fmt.Sprintf("msg-concur-%d", i),
-			TenantID: 1, DomainID: 1, MailboxID: 1,
+			MessageID: fmt.Sprintf("msg-concur-%d", i),
+			TenantID:  1, DomainID: 1, MailboxID: 1,
 			FromAddress: "sender@example.com",
 			ToAddresses: fmt.Sprintf("rcp%d@concur.test", i),
 		}

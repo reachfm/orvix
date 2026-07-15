@@ -1,6 +1,10 @@
 package monitoring
 
-import "time"
+import (
+	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
+)
 
 // Severity classifies an alert by impact.
 type Severity string
@@ -165,33 +169,37 @@ type CertExpiryStatus struct {
 	ExpiringWithin30 int    `json:"expiringWithin30"`
 }
 
-var schema = []string{
-	`CREATE TABLE IF NOT EXISTS monitoring_alerts (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		category TEXT NOT NULL DEFAULT '',
-		severity TEXT NOT NULL DEFAULT '',
-		title TEXT NOT NULL DEFAULT '',
-		message TEXT NOT NULL DEFAULT '',
-		source TEXT NOT NULL DEFAULT '',
-		active INTEGER NOT NULL DEFAULT 1,
-		created_at DATETIME NOT NULL,
-		resolved_at DATETIME
-	)`,
-	// monitoring_alert_deliveries records the outcome of every attempt
-	// to deliver an alert through a configured provider (in-app,
-	// webhook, …). The detail column is a SAFE label only: it MUST
-	// NEVER contain a webhook URL, token, Authorization header, or any
-	// other secret. See delivery.go for the redaction contract.
-	`CREATE TABLE IF NOT EXISTS monitoring_alert_deliveries (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		alert_title TEXT NOT NULL DEFAULT '',
-		alert_severity TEXT NOT NULL DEFAULT '',
-		alert_category TEXT NOT NULL DEFAULT '',
-		provider TEXT NOT NULL DEFAULT '',
-		status TEXT NOT NULL DEFAULT '',
-		detail TEXT NOT NULL DEFAULT '',
-		created_at DATETIME NOT NULL
-	)`,
+func schema(d *dbdialect.Info) []string {
+	ts := d.TimestampType()
+	autoInc := d.AutoIncrement()
+	return []string{
+		`CREATE TABLE IF NOT EXISTS monitoring_alerts (
+			id ` + autoInc + `,
+			category TEXT NOT NULL DEFAULT '',
+			severity TEXT NOT NULL DEFAULT '',
+			title TEXT NOT NULL DEFAULT '',
+			message TEXT NOT NULL DEFAULT '',
+			source TEXT NOT NULL DEFAULT '',
+			active INTEGER NOT NULL DEFAULT 1,
+			created_at ` + ts + ` NOT NULL,
+			resolved_at ` + ts + `
+		)`,
+		// monitoring_alert_deliveries records the outcome of every attempt
+		// to deliver an alert through a configured provider (in-app,
+		// webhook, …). The detail column is a SAFE label only: it MUST
+		// NEVER contain a webhook URL, token, Authorization header, or any
+		// other secret. See delivery.go for the redaction contract.
+		`CREATE TABLE IF NOT EXISTS monitoring_alert_deliveries (
+			id ` + autoInc + `,
+			alert_title TEXT NOT NULL DEFAULT '',
+			alert_severity TEXT NOT NULL DEFAULT '',
+			alert_category TEXT NOT NULL DEFAULT '',
+			provider TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+			detail TEXT NOT NULL DEFAULT '',
+			created_at ` + ts + ` NOT NULL
+		)`,
+	}
 }
 
 // Schema returns the SQL DDL statements the monitoring service needs.
@@ -199,5 +207,5 @@ var schema = []string{
 // with the latest definition; CREATE TABLE IF NOT EXISTS is idempotent
 // and cheap.
 func Schema() []string {
-	return schema
+	return schema(dbdialect.FromDriver("sqlite"))
 }

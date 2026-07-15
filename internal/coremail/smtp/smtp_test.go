@@ -5063,3 +5063,50 @@ func TestDeliveryWorkerSkipsAlreadyStoredInboxWithoutDuplicate(t *testing.T) {
 		t.Fatalf("delivery worker created duplicate: INBOX count=%d (expected 1)", countAfter)
 	}
 }
+
+func TestSMTPEventIDDeterminism(t *testing.T) {
+	makeSession := func(from string, rcpts []string, data []byte) *Session {
+		s := &Session{MailFrom: from, Recipients: rcpts, DataBuffer: data}
+		return s
+	}
+
+	t.Run("same message produces same ID", func(t *testing.T) {
+		a := makeSession("alice@example.com", []string{"bob@test.com"}, []byte("Hello, World!\r\n"))
+		b := makeSession("alice@example.com", []string{"bob@test.com"}, []byte("Hello, World!\r\n"))
+		if smtpEventID(a) != smtpEventID(b) {
+			t.Fatal("identical messages must produce same event ID")
+		}
+	})
+
+	t.Run("reordered recipients produce same ID", func(t *testing.T) {
+		a := makeSession("alice@x.com", []string{"b@t.com", "a@t.com"}, []byte("body"))
+		b := makeSession("alice@x.com", []string{"a@t.com", "b@t.com"}, []byte("body"))
+		if smtpEventID(a) != smtpEventID(b) {
+			t.Fatal("reordered recipients must produce same event ID")
+		}
+	})
+
+	t.Run("different sender produces different ID", func(t *testing.T) {
+		a := makeSession("alice@x.com", []string{"bob@t.com"}, []byte("body"))
+		b := makeSession("carol@x.com", []string{"bob@t.com"}, []byte("body"))
+		if smtpEventID(a) == smtpEventID(b) {
+			t.Fatal("different senders must produce different event IDs")
+		}
+	})
+
+	t.Run("same prefix different suffix produces different ID", func(t *testing.T) {
+		a := makeSession("alice@x.com", []string{"bob@t.com"}, []byte("Hello, this is a short message.\r\n"))
+		b := makeSession("alice@x.com", []string{"bob@t.com"}, []byte("Hello, this is a short message with extra content at the end that changes the hash.\r\n"))
+		if smtpEventID(a) == smtpEventID(b) {
+			t.Fatal("different body content must produce different event IDs")
+		}
+	})
+
+	t.Run("different recipients produce different ID", func(t *testing.T) {
+		a := makeSession("alice@x.com", []string{"bob@t.com"}, []byte("body"))
+		b := makeSession("alice@x.com", []string{"carol@t.com"}, []byte("body"))
+		if smtpEventID(a) == smtpEventID(b) {
+			t.Fatal("different recipients must produce different event IDs")
+		}
+	})
+}

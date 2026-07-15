@@ -21,9 +21,9 @@ type SearchResponse struct {
 
 // TimelineEvent represents a single event in the delivery timeline.
 type TimelineEvent struct {
-	Time    time.Time `json:"time"`
-	Event   string    `json:"event"`
-	Detail  string    `json:"detail,omitempty"`
+	Time   time.Time `json:"time"`
+	Event  string    `json:"event"`
+	Detail string    `json:"detail,omitempty"`
 }
 
 // DeliveryAttemptInfo contains details about a delivery attempt.
@@ -42,8 +42,8 @@ type DeliveryAttemptInfo struct {
 
 // TraceDetail is the full trace information for a single queue entry.
 type TraceDetail struct {
-	Entry    TraceResult          `json:"entry"`
-	Attempts []DeliveryAttemptInfo `json:"attempts"`
-	Timeline []TimelineEvent      `json:"timeline"`
-	LastError string              `json:"lastError,omitempty"`
+	Entry     TraceResult           `json:"entry"`
+	Attempts  []DeliveryAttemptInfo `json:"attempts"`
+	Timeline  []TimelineEvent       `json:"timeline"`
+	LastError string                `json:"lastError,omitempty"`
 }

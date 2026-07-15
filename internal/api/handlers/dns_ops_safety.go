@@ -199,7 +199,7 @@ func (h *Handler) domainExists(ctx context.Context, domain string) (bool, error)
 	}
 	var count int64
 	row := sqlDB.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM coremail_domains WHERE LOWER(name) = ? AND deleted_at IS NULL`,
+		h.sqlQ(`SELECT COUNT(*) FROM coremail_domains WHERE LOWER(name) = ? AND deleted_at IS NULL`),
 		domain)
 	if err := row.Scan(&count); err != nil {
 		return false, fmt.Errorf("domain lookup: %w", err)

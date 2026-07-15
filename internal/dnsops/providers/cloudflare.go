@@ -12,8 +12,8 @@ import (
 // the provider to attempt a real Plan / Apply. Tokens are passed in
 // memory only — never serialised, never returned to a caller.
 type CloudflareConfig struct {
-	APIToken string // Cloudflare API token (Bearer); required
-	ZoneID   string // zone id for the apex domain; required
+	APIToken  string // Cloudflare API token (Bearer); required
+	ZoneID    string // zone id for the apex domain; required
 	AccountID string // optional; reserved for multi-zone ops
 }
 
@@ -44,7 +44,7 @@ func (c CloudflareConfig) HasCredentials() bool {
 // flag once we've audited the Cloudflare v4 API and tested against
 // a sandbox zone.
 type CloudflareProvider struct {
-	cfg     CloudflareConfig
+	cfg      CloudflareConfig
 	resolver dnsops.Resolver
 }
 

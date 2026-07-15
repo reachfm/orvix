@@ -19,19 +19,19 @@ type Summary struct {
 // ── Queue Entry ───────────────────────────────────────────
 
 type Entry struct {
-	ID              uint       `json:"id"`
-	MessageID       string     `json:"messageId"`
-	FromAddress     string     `json:"fromAddress"`
-	ToAddress       string     `json:"toAddress"`
-	Status          string     `json:"status"`
-	Direction       string     `json:"direction"`
-	AttemptCount    int        `json:"attemptCount"`
-	MaxAttempts     int        `json:"maxAttempts"`
-	LastError       string     `json:"lastError,omitempty"`
-	CreatedAt       time.Time  `json:"createdAt"`
-	UpdatedAt       time.Time  `json:"updatedAt"`
-	LastAttemptAt   *time.Time `json:"lastAttemptAt,omitempty"`
-	NextAttemptAt   *time.Time `json:"nextAttemptAt,omitempty"`
+	ID            uint       `json:"id"`
+	MessageID     string     `json:"messageId"`
+	FromAddress   string     `json:"fromAddress"`
+	ToAddress     string     `json:"toAddress"`
+	Status        string     `json:"status"`
+	Direction     string     `json:"direction"`
+	AttemptCount  int        `json:"attemptCount"`
+	MaxAttempts   int        `json:"maxAttempts"`
+	LastError     string     `json:"lastError,omitempty"`
+	CreatedAt     time.Time  `json:"createdAt"`
+	UpdatedAt     time.Time  `json:"updatedAt"`
+	LastAttemptAt *time.Time `json:"lastAttemptAt,omitempty"`
+	NextAttemptAt *time.Time `json:"nextAttemptAt,omitempty"`
 }
 
 // ── Delivery Attempt ──────────────────────────────────────

@@ -10,15 +10,22 @@ import (
 
 // QueueEngine orchestrates queue operations with transaction support.
 type QueueEngine struct {
-	DB       *sql.DB
-	Repo     Repository
+	DB   *sql.DB
+	Repo Repository
+	// Tenant fairness configuration.
+	MaxWorkersPerTenant int
+	GlobalMaxWorkers    int
+	pendingClaims       map[string]int // tenant_id -> active claims (in-memory best-effort)
 }
 
-// NewQueueEngine creates a queue engine.
+// NewQueueEngine creates a queue engine with default tenant fairness limits.
 func NewQueueEngine(db *sql.DB) *QueueEngine {
 	return &QueueEngine{
-		DB:   db,
-		Repo: NewSQLRepo(db),
+		DB:                  db,
+		Repo:                NewSQLRepo(db),
+		MaxWorkersPerTenant: 4,
+		GlobalMaxWorkers:    100,
+		pendingClaims:       make(map[string]int),
 	}
 }
 
@@ -65,6 +72,25 @@ func (qe *QueueEngine) LeaseNext(ctx context.Context, owner string) (*QueueEntry
 // LeaseNextWithStatuses claims the next available job from the given statuses.
 func (qe *QueueEngine) LeaseNextWithStatuses(ctx context.Context, owner string, allowedStatuses []QueueStatus) (*QueueEntry, error) {
 	return qe.Repo.LeaseNext(ctx, owner, DefaultLeaseSeconds, allowedStatuses, nil)
+}
+
+// LeaseNextTenantFair claims the next available job respecting per-tenant worker ceilings.
+// Prevents one tenant from starving others by limiting active leases per tenant.
+func (qe *QueueEngine) LeaseNextTenantFair(ctx context.Context, owner string) (*QueueEntry, error) {
+	return qe.Repo.LeaseNextTenantFair(ctx, owner, DefaultLeaseSeconds,
+		[]QueueStatus{StatusPending, StatusDeferred}, qe.MaxWorkersPerTenant, qe.GlobalMaxWorkers, nil)
+}
+
+// ReleaseClaim decrements the in-memory claim counter for a tenant.
+// Should be called when a worker completes or releases a claim.
+func (qe *QueueEngine) ReleaseClaim(tenantID string) {
+	if qe.pendingClaims == nil {
+		return
+	}
+	qe.pendingClaims[tenantID]--
+	if qe.pendingClaims[tenantID] <= 0 {
+		delete(qe.pendingClaims, tenantID)
+	}
 }
 
 // AckDelivered marks a job as delivered.

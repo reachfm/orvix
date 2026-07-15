@@ -19,10 +19,10 @@ func NewService(engine *policy.Engine) *Service {
 
 // PolicyEntry is the admin view of a policy rule.
 type PolicyEntry struct {
-	ID      string `json:"id"`
-	Scope   string `json:"scope"`
-	Target  string `json:"target"`
-	Mode    string `json:"mode"`
+	ID     string `json:"id"`
+	Scope  string `json:"scope"`
+	Target string `json:"target"`
+	Mode   string `json:"mode"`
 }
 
 // List returns all configured policies.

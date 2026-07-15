@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 // DomainCreator creates domains for import.
@@ -25,15 +27,20 @@ type MessageStorer interface {
 
 // Service provides migration import operations.
 type Service struct {
-	db              *sql.DB
-	domainCreator   DomainCreator
-	mailboxCreator  MailboxCreator
-	messageStorer   MessageStorer
+	db             *sql.DB
+	dialect        *dbdialect.Info
+	domainCreator  DomainCreator
+	mailboxCreator MailboxCreator
+	messageStorer  MessageStorer
 }
 
 // NewService creates a migration service.
 func NewService(db *sql.DB) *Service {
-	return &Service{db: db}
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
+	return &Service{db: db, dialect: dialect}
 }
 
 // SetDomainCreator attaches a domain registry.
@@ -47,8 +54,10 @@ func (s *Service) SetMessageStorer(m MessageStorer) { s.messageStorer = m }
 
 // EnsureSchema creates required tables.
 func (s *Service) EnsureSchema(ctx context.Context) error {
-	for _, stmt := range schema {
-		if _, err := s.db.ExecContext(ctx, stmt); err != nil { return err }
+	for _, stmt := range schema(s.dialect) {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -61,9 +70,11 @@ func (s *Service) CreateJob(ctx context.Context, sourceType ImportSourceType, so
 		Status: ImpPending, StartedAt: time.Now().UTC(),
 	}
 	res, err := s.db.ExecContext(ctx,
-		"INSERT INTO coremail_migrations (source_type, source_host, status, started_at) VALUES (?, ?, ?, ?)",
+		"INSERT INTO coremail_migrations (source_type, source_host, status, started_at) VALUES ("+s.dialect.Placeholders(4)+")",
 		string(j.SourceType), j.SourceHost, string(j.Status), j.StartedAt)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	id, _ := res.LastInsertId()
 	j.ID = uint(id)
 	return j, nil
@@ -71,7 +82,9 @@ func (s *Service) CreateJob(ctx context.Context, sourceType ImportSourceType, so
 
 func (s *Service) ListJobs(ctx context.Context) ([]ImportJob, error) {
 	rows, err := s.db.QueryContext(ctx, "SELECT id, source_type, source_host, status, domains_imported, mailboxes_imported, messages_imported, errors, started_at, completed_at FROM coremail_migrations ORDER BY id DESC")
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	var jobs []ImportJob
 	for rows.Next() {
@@ -80,20 +93,28 @@ func (s *Service) ListJobs(ctx context.Context) ([]ImportJob, error) {
 		if err := rows.Scan(&j.ID, &j.SourceType, &j.SourceHost, &j.Status, &j.DomainsImported, &j.MailboxesImported, &j.MessagesImported, &j.Errors, &j.StartedAt, &completedAt); err != nil {
 			return nil, err
 		}
-		if completedAt.Valid { j.CompletedAt = &completedAt.Time }
+		if completedAt.Valid {
+			j.CompletedAt = &completedAt.Time
+		}
 		jobs = append(jobs, j)
 	}
 	return jobs, rows.Err()
 }
 
 func (s *Service) GetJob(ctx context.Context, id uint) (*ImportJob, error) {
-	row := s.db.QueryRowContext(ctx, "SELECT id, source_type, source_host, status, domains_imported, mailboxes_imported, messages_imported, errors, started_at, completed_at FROM coremail_migrations WHERE id=?", id)
+	row := s.db.QueryRowContext(ctx, "SELECT id, source_type, source_host, status, domains_imported, mailboxes_imported, messages_imported, errors, started_at, completed_at FROM coremail_migrations WHERE id="+s.dialect.Placeholder(1), id)
 	var j ImportJob
 	var completedAt sql.NullTime
 	err := row.Scan(&j.ID, &j.SourceType, &j.SourceHost, &j.Status, &j.DomainsImported, &j.MailboxesImported, &j.MessagesImported, &j.Errors, &j.StartedAt, &completedAt)
-	if err == sql.ErrNoRows { return nil, nil }
-	if err != nil { return nil, err }
-	if completedAt.Valid { j.CompletedAt = &completedAt.Time }
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if completedAt.Valid {
+		j.CompletedAt = &completedAt.Time
+	}
 	return &j, nil
 }
 
@@ -103,17 +124,21 @@ func (s *Service) CancelJob(ctx context.Context, id uint) error {
 
 func (s *Service) updateStatus(ctx context.Context, id uint, status ImportJobStatus) error {
 	now := time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, "UPDATE coremail_migrations SET status=?, completed_at=? WHERE id=?", string(status), now, id)
+	_, err := s.db.ExecContext(ctx, "UPDATE coremail_migrations SET status="+s.dialect.Placeholder(1)+", completed_at="+s.dialect.Placeholder(2)+" WHERE id="+s.dialect.Placeholder(3), string(status), now, id)
 	return err
 }
 
 // ── Domain Import ───────────────────────────────────────
 
 func (s *Service) ImportDomain(ctx context.Context, jobID uint, domain DomainImport) error {
-	if s.domainCreator == nil { return fmt.Errorf("domain creator not configured") }
+	if s.domainCreator == nil {
+		return fmt.Errorf("domain creator not configured")
+	}
 
 	exists, err := s.domainCreator.DomainExists(ctx, domain.Domain)
-	if err != nil { return fmt.Errorf("check domain: %w", err) }
+	if err != nil {
+		return fmt.Errorf("check domain: %w", err)
+	}
 	if exists {
 		s.incrementErrors(ctx, jobID)
 		return fmt.Errorf("domain already exists: %s", domain.Domain)
@@ -132,7 +157,9 @@ func (s *Service) ImportDomain(ctx context.Context, jobID uint, domain DomainImp
 // ── Mailbox Import ──────────────────────────────────────
 
 func (s *Service) ImportMailbox(ctx context.Context, jobID uint, mb MailboxImport) error {
-	if s.mailboxCreator == nil { return fmt.Errorf("mailbox creator not configured") }
+	if s.mailboxCreator == nil {
+		return fmt.Errorf("mailbox creator not configured")
+	}
 
 	_, err := s.mailboxCreator.CreateMailbox(ctx, mb.Email, mb.Name, mb.Password, mb.DomainID, mb.QuotaMB)
 	if err != nil {
@@ -147,7 +174,9 @@ func (s *Service) ImportMailbox(ctx context.Context, jobID uint, mb MailboxImpor
 // ── Message Import ──────────────────────────────────────
 
 func (s *Service) ImportMessage(ctx context.Context, jobID uint, msg MessageImport) error {
-	if s.messageStorer == nil { return fmt.Errorf("message storer not configured") }
+	if s.messageStorer == nil {
+		return fmt.Errorf("message storer not configured")
+	}
 
 	_, err := s.messageStorer.StoreMessage(ctx, msg.MailboxID, []byte(msg.RFC822Data))
 	if err != nil {
@@ -162,17 +191,17 @@ func (s *Service) ImportMessage(ctx context.Context, jobID uint, msg MessageImpo
 // ── Internal ────────────────────────────────────────────
 
 func (s *Service) incrementDomains(ctx context.Context, jobID uint) {
-	s.db.ExecContext(ctx, "UPDATE coremail_migrations SET domains_imported = domains_imported + 1 WHERE id=?", jobID)
+	s.db.ExecContext(ctx, "UPDATE coremail_migrations SET domains_imported = domains_imported + 1 WHERE id="+s.dialect.Placeholder(1), jobID)
 }
 
 func (s *Service) incrementMailboxes(ctx context.Context, jobID uint) {
-	s.db.ExecContext(ctx, "UPDATE coremail_migrations SET mailboxes_imported = mailboxes_imported + 1 WHERE id=?", jobID)
+	s.db.ExecContext(ctx, "UPDATE coremail_migrations SET mailboxes_imported = mailboxes_imported + 1 WHERE id="+s.dialect.Placeholder(1), jobID)
 }
 
 func (s *Service) incrementMessages(ctx context.Context, jobID uint) {
-	s.db.ExecContext(ctx, "UPDATE coremail_migrations SET messages_imported = messages_imported + 1 WHERE id=?", jobID)
+	s.db.ExecContext(ctx, "UPDATE coremail_migrations SET messages_imported = messages_imported + 1 WHERE id="+s.dialect.Placeholder(1), jobID)
 }
 
 func (s *Service) incrementErrors(ctx context.Context, jobID uint) {
-	s.db.ExecContext(ctx, "UPDATE coremail_migrations SET errors = errors + 1 WHERE id=?", jobID)
+	s.db.ExecContext(ctx, "UPDATE coremail_migrations SET errors = errors + 1 WHERE id="+s.dialect.Placeholder(1), jobID)
 }

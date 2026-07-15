@@ -51,19 +51,19 @@ func (s *Server) handleWellKnown(w http.ResponseWriter, r *http.Request) {
 func (s *Server) capabilities() map[string]interface{} {
 	return map[string]interface{}{
 		"urn:ietf:params:jmap:core": map[string]interface{}{
-			"maxSizeUpload":          50 * 1024 * 1024,
-			"maxConcurrentUpload":    4,
-			"maxSizeRequest":         10 * 1024 * 1024,
-			"maxConcurrentRequests":  4,
-			"maxCallsInRequest":      16,
-			"maxObjectsInGet":        500,
-			"maxObjectsInSet":        500,
-			"collationAlgorithms":    []string{"i;unicode-casemap"},
+			"maxSizeUpload":         50 * 1024 * 1024,
+			"maxConcurrentUpload":   4,
+			"maxSizeRequest":        10 * 1024 * 1024,
+			"maxConcurrentRequests": 4,
+			"maxCallsInRequest":     16,
+			"maxObjectsInGet":       500,
+			"maxObjectsInSet":       500,
+			"collationAlgorithms":   []string{"i;unicode-casemap"},
 		},
 		"urn:ietf:params:jmap:mail": map[string]interface{}{
-			"maxMailboxesPerEmail":    100,
-			"maxMailboxDepth":         10,
-			"maxSizeMailboxName":      200,
+			"maxMailboxesPerEmail": 100,
+			"maxMailboxDepth":      10,
+			"maxSizeMailboxName":   200,
 		},
 	}
 }

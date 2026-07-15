@@ -5,26 +5,35 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 // Repository handles domain persistence.
 type Repository struct {
-	db *sql.DB
+	db      *sql.DB
+	dialect *dbdialect.Info
 }
 
 // NewRepository creates a domain repository backed by the given DB.
 func NewRepository(db *sql.DB) *Repository {
-	return &Repository{db: db}
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
+	return &Repository{db: db, dialect: dialect}
 }
 
 // EnsureTable creates the domains table if it doesn't exist.
 func (r *Repository) EnsureTable(ctx context.Context) error {
+	ts := r.dialect.TimestampType()
+	autoInc := r.dialect.AutoIncrement()
 	_, err := r.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS domain_registry (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		id `+autoInc+`,
 		name TEXT UNIQUE NOT NULL,
 		status TEXT NOT NULL DEFAULT 'active',
-		created_at DATETIME NOT NULL,
-		updated_at DATETIME NOT NULL
+		created_at `+ts+` NOT NULL,
+		updated_at `+ts+` NOT NULL
 	)`)
 	return err
 }
@@ -37,7 +46,7 @@ func (r *Repository) Create(ctx context.Context, d *Domain) error {
 		d.Status = DomainActive
 	}
 	res, err := r.db.ExecContext(ctx,
-		`INSERT INTO domain_registry (name, status, created_at, updated_at) VALUES (?, ?, ?, ?)`,
+		`INSERT INTO domain_registry (name, status, created_at, updated_at) VALUES (`+r.dialect.Placeholders(4)+`)`,
 		d.Name, d.Status, d.CreatedAt, d.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("create domain: %w", err)
@@ -49,13 +58,13 @@ func (r *Repository) Create(ctx context.Context, d *Domain) error {
 
 func (r *Repository) GetByID(ctx context.Context, id uint) (*Domain, error) {
 	row := r.db.QueryRowContext(ctx,
-		`SELECT id, name, status, created_at, updated_at FROM domain_registry WHERE id=?`, id)
+		`SELECT id, name, status, created_at, updated_at FROM domain_registry WHERE id=`+r.dialect.Placeholder(1), id)
 	return scanDomain(row)
 }
 
 func (r *Repository) GetByName(ctx context.Context, name string) (*Domain, error) {
 	row := r.db.QueryRowContext(ctx,
-		`SELECT id, name, status, created_at, updated_at FROM domain_registry WHERE name=?`, name)
+		`SELECT id, name, status, created_at, updated_at FROM domain_registry WHERE name=`+r.dialect.Placeholder(1), name)
 	return scanDomain(row)
 }
 
@@ -80,19 +89,19 @@ func (r *Repository) List(ctx context.Context) ([]Domain, error) {
 func (r *Repository) Update(ctx context.Context, d *Domain) error {
 	d.UpdatedAt = time.Now().UTC()
 	_, err := r.db.ExecContext(ctx,
-		`UPDATE domain_registry SET name=?, status=?, updated_at=? WHERE id=?`,
+		`UPDATE domain_registry SET name=`+r.dialect.Placeholder(1)+`, status=`+r.dialect.Placeholder(2)+`, updated_at=`+r.dialect.Placeholder(3)+` WHERE id=`+r.dialect.Placeholder(4),
 		d.Name, d.Status, d.UpdatedAt, d.ID)
 	return err
 }
 
 func (r *Repository) Delete(ctx context.Context, id uint) error {
-	_, err := r.db.ExecContext(ctx, `DELETE FROM domain_registry WHERE id=?`, id)
+	_, err := r.db.ExecContext(ctx, `DELETE FROM domain_registry WHERE id=`+r.dialect.Placeholder(1), id)
 	return err
 }
 
 func (r *Repository) Exists(ctx context.Context, name string) (bool, error) {
 	var count int
-	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM domain_registry WHERE name=?`, name).Scan(&count)
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM domain_registry WHERE name=`+r.dialect.Placeholder(1), name).Scan(&count)
 	return count > 0, err
 }
 

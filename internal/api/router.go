@@ -2,15 +2,18 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/cors"
 	"github.com/gofiber/fiber/v3/middleware/limiter"
 	"github.com/gofiber/fiber/v3/middleware/recover"
+	"github.com/orvix/orvix/internal/abuse"
 	dashboardsvc "github.com/orvix/orvix/internal/admin/dashboard"
 	domainadminsvc "github.com/orvix/orvix/internal/admin/domain"
 	mailboxadminsvc "github.com/orvix/orvix/internal/admin/mailbox"
@@ -21,6 +24,7 @@ import (
 	"github.com/orvix/orvix/internal/api/handlers/settings"
 	auditpkg "github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/auth"
+	"github.com/orvix/orvix/internal/billing"
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/coremail"
 	"github.com/orvix/orvix/internal/coremail/push"
@@ -60,6 +64,7 @@ type Router struct {
 	appCtx       context.Context
 	cancel       context.CancelFunc
 	db           *gorm.DB
+	startOnce    sync.Once
 }
 
 func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *zap.Logger,
@@ -106,6 +111,14 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		h:            handlers.NewHandler(db, authenticator, apikeyMgr, logger, cfg, registry, ff, rateLimiter),
 		db:           db,
 	}
+
+	// Cancel the background context when the Fiber app shuts
+	// down, stopping the billing scheduler and any other
+	// context-bound goroutines cleanly.
+	app.Hooks().OnPreShutdown(func() error {
+		cancel()
+		return nil
+	})
 	// Record the moment the router was constructed. The runtime
 	// telemetry endpoint (/api/v1/admin/runtime) reads this to
 	// compute uptime. Capturing it here (rather than at process
@@ -190,6 +203,73 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			router.h.SetPlatformAdminService(platformSvc)
 
 			logger.Info("enterprise admin services wired with transactional audit and RBAC")
+		}
+
+		if billingSvc, usageSvc, quotaSvc, webhookSvc, sched, enforcer, err := billing.Initialize(sqlDB); err != nil {
+			logger.Error("billing initialization failed", zap.Error(err))
+		} else {
+			router.h.SetBillingService(billingSvc)
+			router.h.SetBillingUsageService(usageSvc)
+			router.h.SetBillingQuotaService(quotaSvc)
+			router.h.SetSendEnforcer(enforcer)
+			logger.Info("billing services wired")
+
+			abuseSvc := abuse.NewSignalService(sqlDB, abuse.NewRateLimitService(sqlDB))
+			router.h.SetAbuseSignalService(abuseSvc)
+			router.h.SetRateLimitService(abuse.NewRateLimitService(sqlDB))
+			logger.Info("abuse services wired")
+
+			if enforcer != nil {
+				if mod, ok := registry.Get("coremail-runtime"); ok {
+					if esc, ok := mod.(interface {
+						SetSendEnforcerCallback(func(ctx context.Context, tenantID, mailboxID uint, count int) error, func(ctx context.Context, tenantID, mailboxID uint, count int, eventID string), func(ctx context.Context, tenantID, mailboxID uint, eventID string))
+					}); ok {
+						esc.SetSendEnforcerCallback(
+							func(ctx context.Context, tenantID, mailboxID uint, count int) error {
+								id := billing.SendIdentity{TenantID: tenantID, MailboxID: mailboxID}
+								result := enforcer.AllowSend(ctx, id, count)
+								if !result.Allowed {
+									return fmt.Errorf("%s", result.Reason)
+								}
+								return nil
+							},
+							func(ctx context.Context, tenantID, mailboxID uint, count int, eventID string) {
+								id := billing.SendIdentity{TenantID: tenantID, MailboxID: mailboxID}
+								enforcer.RecordSend(ctx, id, eventID, count)
+							},
+							func(ctx context.Context, tenantID, mailboxID uint, eventID string) {
+								id := billing.SendIdentity{TenantID: tenantID, MailboxID: mailboxID}
+								enforcer.RecordBounce(ctx, id, eventID)
+							},
+						)
+						logger.Info("SMTP send enforcement wired")
+					}
+				}
+			}
+
+			if sched != nil {
+				router.h.SetBillingScheduler(sched)
+				logger.Info("billing scheduler wired (call router.Start() to begin)")
+			}
+			if webhookSvc != nil {
+				router.h.SetBillingWebhook(webhookSvc)
+				logger.Info("billing webhook service wired")
+			}
+
+			if provider, err := billing.NewPaymentProviderFromConfig(
+				router.cfg.Payment.Provider,
+				router.cfg.Payment.Secret,
+				router.cfg.Payment.WebhookSecret,
+				router.cfg.Payment.Enabled,
+				time.Duration(router.cfg.Payment.WebhookToleranceSeconds)*time.Second,
+			); err != nil {
+				logger.Error("payment provider init failed", zap.Error(err))
+			} else if provider != nil {
+				router.h.SetPaymentProvider(provider)
+				logger.Info("payment provider wired", zap.String("provider", router.cfg.Payment.Provider))
+			} else {
+				logger.Info("payment provider not configured — webhook returns 503")
+			}
 		}
 	}
 
@@ -415,6 +495,11 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		}
 	}
 
+	// Wire transactional mail sender for password resets.
+	// Uses the CoreMail SMTP host/port when configured.
+	ms := initTransactionalMailSender(cfg.CoreMail.SMTPHost, cfg.CoreMail.SMTPPort, cfg.CoreMail.Hostname, logger)
+	router.h.SetMailSender(ms)
+
 	router.setupMiddleware()
 	router.setupRoutes()
 	router.setupAdminUI()
@@ -439,6 +524,23 @@ func (r *Router) SetTrustPersistence(ok bool, errMsg string) {
 }
 
 func (r *Router) App() *fiber.App { return r.app }
+
+// Start begins background services (billing scheduler, etc).
+// Called by the production entry point; test callers should NOT
+// call Start to avoid background goroutines leaking.
+func (r *Router) Start() {
+	r.startOnce.Do(func() {
+		r.h.StartBillingScheduler(r.appCtx, 15*time.Minute)
+	})
+}
+
+// Shutdown cancels the router's background context, stopping
+// the billing scheduler and any other context-bound goroutines.
+// Call during application shutdown or test cleanup.
+func (r *Router) Shutdown() error {
+	r.cancel()
+	return r.app.Shutdown()
+}
 
 func (r *Router) setupMiddleware() {
 	r.app.Use(recover.New())
@@ -534,6 +636,9 @@ func (r *Router) setupRoutes() {
 	// per-IP API budget.
 	api := r.app.Group("/api/v1", r.apiRateLimitMiddleware())
 	api.Get("/health", r.h.Health)
+	api.Get("/billing/plans", r.h.ListBillingPlans)
+	api.Post("/billing/webhook", r.h.ReceivePaymentWebhook)
+	api.Post("/billing/complaint", r.h.ReceiveComplaintWebhook)
 
 	loginGroup := api.Group("/auth")
 	if r.redisLimiter != nil {
@@ -548,6 +653,16 @@ func (r *Router) setupRoutes() {
 	// for real access/refresh tokens. Mounted on the public login group
 	// so MFA-enabled users can complete login without being authenticated.
 	loginGroup.Post("/mfa/verify", r.h.MFALoginVerify)
+
+	// Customer portal auth (public — no auth middleware).
+	loginGroup.Post("/signup", r.h.Signup)
+	if r.redisLimiter != nil {
+		loginGroup.Post("/forgot-password", r.redisLimiter.LoginMiddleware(), r.h.ForgotPassword)
+	} else {
+		loginGroup.Post("/forgot-password", limiter.New(limiter.Config{Max: 5, Expiration: 15 * 60 * 1000}), r.h.ForgotPassword)
+	}
+	loginGroup.Post("/reset-password", r.h.ResetPassword)
+
 	r.app.Post("/admin/login", r.h.Login)
 
 	// Webmail authentication (public — no auth middleware).
@@ -695,12 +810,13 @@ func (r *Router) setupRoutes() {
 	protected.Get("/customer/domains/:domain_id/dns", r.h.GetCustomerDomainDNS)
 	protected.Post("/customer/domains/:domain_id/verify", r.h.VerifyCustomerDomain)
 
-	// Enterprise customer administration (tenant-scoped).
+	// Enterprise customer administration (tenant-scoped, CSRF-protected).
 	// Available to organization admins, operators, and above.
 	// All operations are scoped to the caller's tenant_id.
 	enterprise := protected.Group("/enterprise",
 		requireTenantContext,
-		auth.RequireAnyRole(auth.RoleAdmin, auth.RoleSuperAdmin, auth.RoleOperator))
+		auth.RequireAnyRole(auth.RoleAdmin, auth.RoleSuperAdmin, auth.RoleOperator),
+		r.csrf.Middleware())
 	enterprise.Get("/dashboard", r.h.CustomerDashboard)
 	enterprise.Get("/domains", r.h.ListAdminDomains)
 	enterprise.Get("/domains/:id", r.h.GetAdminDomain)
@@ -715,6 +831,43 @@ func (r *Router) setupRoutes() {
 	enterprise.Post("/mailboxes/bulk/status", r.h.BulkSetAdminMailboxStatus)
 	enterprise.Post("/mailboxes/:id/reset-password", r.h.ResetAdminMailboxPassword)
 	enterprise.Get("/organizations/:id", r.h.GetOrganization)
+	enterprise.Get("/organizations/current", r.h.GetCurrentOrganization)
+
+	enterprise.Get("/invitations", r.h.ListInvitations)
+	enterprise.Post("/invitations", r.h.CreateInvitation)
+	enterprise.Post("/invitations/:id/revoke", r.h.RevokeInvitation)
+
+	enterprise.Get("/members", r.h.ListMembers)
+	enterprise.Patch("/members/:id/role", r.h.UpdateMemberRole)
+	enterprise.Delete("/members/:id", r.h.RemoveMember)
+
+	enterprise.Post("/ownership/request", r.h.RequestOwnershipTransfer)
+	enterprise.Post("/ownership/accept", r.h.AcceptOwnershipTransfer)
+	enterprise.Post("/ownership/cancel", r.h.CancelOwnershipTransfer)
+
+	enterprise.Get("/aliases", r.h.ListAliases)
+	enterprise.Post("/aliases", r.h.CreateAlias)
+	enterprise.Delete("/aliases/:id", r.h.DeleteAlias)
+
+	enterprise.Get("/groups", r.h.ListGroups)
+	enterprise.Post("/groups", r.h.CreateGroup)
+	enterprise.Post("/groups/:id/members", r.h.AddGroupMember)
+	enterprise.Delete("/groups/:id/members/:memberId", r.h.RemoveGroupMember)
+	enterprise.Delete("/groups/:id", r.h.DeleteGroup)
+
+	enterprise.Get("/abuse/send-limit", r.h.CheckSendLimit)
+	enterprise.Get("/status", r.h.SuspensionStatus)
+	enterprise.Post("/deletion", r.h.RequestDeletion)
+	enterprise.Post("/deletion/cancel", r.h.CancelDeletion)
+
+	enterprise.Get("/billing/subscription", r.h.GetBillingSubscription)
+	enterprise.Post("/billing/subscription", r.h.CreateBillingSubscription)
+	enterprise.Get("/billing/usage", r.h.GetBillingUsage)
+	enterprise.Get("/billing/quota", r.h.CheckBillingQuota)
+
+	enterprise.Get("/abuse/signals", r.h.ListAbuseSignals)
+	enterprise.Post("/abuse/signals/:id/acknowledge", r.h.AcknowledgeAbuseSignal)
+	enterprise.Post("/abuse/signals/:id/resolve", r.h.ResolveAbuseSignal)
 
 	// CSRF is enforced on the entire admin group by default (deny-list,
 	// not allow-list) rather than only on routes an author remembered to

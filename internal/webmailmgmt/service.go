@@ -8,31 +8,55 @@ import (
 	"time"
 
 	"github.com/orvix/orvix/internal/coremail"
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 type Service struct {
-	engine  *coremail.Engine
-	storeDB *sql.DB
+	engine        *coremail.Engine
+	engineDialect *dbdialect.Info
+	storeDB       *sql.DB
+	storeDialect  *dbdialect.Info
+}
+
+func detectDialect(db *sql.DB) *dbdialect.Info {
+	if db == nil {
+		return dbdialect.FromDriver("sqlite")
+	}
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		return dbdialect.FromDriver("sqlite")
+	}
+	return dialect
 }
 
 func NewService(engine *coremail.Engine, storeDB *sql.DB) *Service {
-	return &Service{engine: engine, storeDB: storeDB}
+	var engineDB *sql.DB
+	if engine != nil {
+		engineDB = engine.DB
+	}
+	return &Service{
+		engine:        engine,
+		engineDialect: detectDialect(engineDB),
+		storeDB:       storeDB,
+		storeDialect:  detectDialect(storeDB),
+	}
 }
 
 func (s *Service) ensureTables(ctx context.Context) error {
 	if s.engine == nil || s.engine.DB == nil {
 		return fmt.Errorf("engine not available")
 	}
+	d := s.engineDialect
 	_, err := s.engine.DB.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS webmail_sessions (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			id `+d.AutoIncrement()+`,
 			mailbox_id INTEGER NOT NULL,
 			ip TEXT NOT NULL,
 			user_agent TEXT DEFAULT '',
-			created_at DATETIME NOT NULL,
-			last_seen_at DATETIME NOT NULL,
-			expires_at DATETIME,
-			revoked_at DATETIME
+			created_at `+d.TimestampType()+` NOT NULL,
+			last_seen_at `+d.TimestampType()+` NOT NULL,
+			expires_at `+d.TimestampType()+`,
+			revoked_at `+d.TimestampType()+`
 		)
 	`)
 	if err != nil {
@@ -43,12 +67,12 @@ func (s *Service) ensureTables(ctx context.Context) error {
 	}
 	_, err = s.engine.DB.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS webmail_login_activity (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			id `+d.AutoIncrement()+`,
 			mailbox_id INTEGER NOT NULL,
 			success INTEGER NOT NULL DEFAULT 0,
 			ip TEXT NOT NULL,
 			user_agent TEXT DEFAULT '',
-			attempted_at DATETIME NOT NULL
+			attempted_at `+d.TimestampType()+` NOT NULL
 		)
 	`)
 	if err != nil {
@@ -73,10 +97,9 @@ func (s *Service) RecordSession(ctx context.Context, mailboxID uint, ip, userAge
 		return err
 	}
 	now := time.Now().UTC()
-	_, err := s.engine.DB.ExecContext(ctx, `
-		INSERT INTO webmail_sessions (mailbox_id, ip, user_agent, created_at, last_seen_at)
-		VALUES (?, ?, ?, ?, ?)
-	`, mailboxID, ip, userAgent, now, now)
+	q := `INSERT INTO webmail_sessions (mailbox_id, ip, user_agent, created_at, last_seen_at)
+		VALUES (` + s.engineDialect.Placeholders(5) + `)`
+	_, err := s.engine.DB.ExecContext(ctx, q, mailboxID, ip, userAgent, now, now)
 	return err
 }
 
@@ -91,7 +114,7 @@ func (s *Service) ListSessions(ctx context.Context, mailboxID *uint) ([]WebmailS
 			SELECT ws.id, ws.mailbox_id, cm.email, ws.ip, ws.user_agent, ws.created_at, ws.last_seen_at, ws.expires_at, ws.revoked_at
 			FROM webmail_sessions ws
 			LEFT JOIN coremail_mailboxes cm ON cm.id = ws.mailbox_id
-			WHERE ws.revoked_at IS NULL AND ws.mailbox_id = ?
+			WHERE ws.revoked_at IS NULL AND ws.mailbox_id = `+s.engineDialect.Placeholder(1)+`
 			ORDER BY ws.last_seen_at DESC, ws.id DESC
 		`, *mailboxID)
 	} else {
@@ -127,7 +150,8 @@ func (s *Service) RevokeSession(ctx context.Context, sessionID uint) error {
 		return err
 	}
 	now := time.Now().UTC()
-	res, err := s.engine.DB.ExecContext(ctx, `UPDATE webmail_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`, now, sessionID)
+	q := `UPDATE webmail_sessions SET revoked_at = ` + s.engineDialect.Placeholder(1) + ` WHERE id = ` + s.engineDialect.Placeholder(2) + ` AND revoked_at IS NULL`
+	res, err := s.engine.DB.ExecContext(ctx, q, now, sessionID)
 	if err != nil {
 		return err
 	}
@@ -143,7 +167,8 @@ func (s *Service) RevokeAllSessions(ctx context.Context, mailboxID uint) error {
 		return err
 	}
 	now := time.Now().UTC()
-	_, err := s.engine.DB.ExecContext(ctx, `UPDATE webmail_sessions SET revoked_at = ? WHERE mailbox_id = ? AND revoked_at IS NULL`, now, mailboxID)
+	q := `UPDATE webmail_sessions SET revoked_at = ` + s.engineDialect.Placeholder(1) + ` WHERE mailbox_id = ` + s.engineDialect.Placeholder(2) + ` AND revoked_at IS NULL`
+	_, err := s.engine.DB.ExecContext(ctx, q, now, mailboxID)
 	return err
 }
 
@@ -152,19 +177,20 @@ func (s *Service) GetLoginActivity(ctx context.Context, mailboxID uint) (*LoginA
 		return nil, err
 	}
 	var result LoginActivity
+	d := s.engineDialect
 
-	if err := s.engine.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM webmail_login_activity WHERE mailbox_id = ? AND success = 1`, mailboxID).Scan(&result.SuccessfulLogins); err != nil {
+	if err := s.engine.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM webmail_login_activity WHERE mailbox_id = `+d.Placeholder(1)+` AND success = 1`, mailboxID).Scan(&result.SuccessfulLogins); err != nil {
 		return nil, err
 	}
-	if err := s.engine.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM webmail_login_activity WHERE mailbox_id = ? AND success = 0`, mailboxID).Scan(&result.FailedLogins); err != nil {
+	if err := s.engine.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM webmail_login_activity WHERE mailbox_id = `+d.Placeholder(1)+` AND success = 0`, mailboxID).Scan(&result.FailedLogins); err != nil {
 		return nil, err
 	}
 
 	var lastLoginStr, lastFailedStr sql.NullString
-	if err := s.engine.DB.QueryRowContext(ctx, `SELECT MAX(attempted_at) FROM webmail_login_activity WHERE mailbox_id = ? AND success = 1`, mailboxID).Scan(&lastLoginStr); err != nil {
+	if err := s.engine.DB.QueryRowContext(ctx, `SELECT MAX(attempted_at) FROM webmail_login_activity WHERE mailbox_id = `+d.Placeholder(1)+` AND success = 1`, mailboxID).Scan(&lastLoginStr); err != nil {
 		return nil, err
 	}
-	if err := s.engine.DB.QueryRowContext(ctx, `SELECT MAX(attempted_at) FROM webmail_login_activity WHERE mailbox_id = ? AND success = 0`, mailboxID).Scan(&lastFailedStr); err != nil {
+	if err := s.engine.DB.QueryRowContext(ctx, `SELECT MAX(attempted_at) FROM webmail_login_activity WHERE mailbox_id = `+d.Placeholder(1)+` AND success = 0`, mailboxID).Scan(&lastFailedStr); err != nil {
 		return nil, err
 	}
 
@@ -199,10 +225,9 @@ func (s *Service) RecordLoginActivity(ctx context.Context, mailboxID uint, succe
 	if success {
 		successInt = 1
 	}
-	_, err := s.engine.DB.ExecContext(ctx, `
-		INSERT INTO webmail_login_activity (mailbox_id, success, ip, user_agent, attempted_at)
-		VALUES (?, ?, ?, ?, ?)
-	`, mailboxID, successInt, ip, userAgent, now)
+	q := `INSERT INTO webmail_login_activity (mailbox_id, success, ip, user_agent, attempted_at)
+		VALUES (` + s.engineDialect.Placeholders(5) + `)`
+	_, err := s.engine.DB.ExecContext(ctx, q, mailboxID, successInt, ip, userAgent, now)
 	return err
 }
 
@@ -213,7 +238,7 @@ func (s *Service) GetStorageMetrics(ctx context.Context, mailboxID uint) (*Stora
 
 	// Verify mailbox exists.
 	var exists int
-	if err := s.engine.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM coremail_mailboxes WHERE id = ? AND deleted_at IS NULL`, mailboxID).Scan(&exists); err != nil {
+	if err := s.engine.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM coremail_mailboxes WHERE id = `+s.engineDialect.Placeholder(1)+` AND deleted_at IS NULL`, mailboxID).Scan(&exists); err != nil {
 		return nil, err
 	}
 	if exists == 0 {
@@ -221,20 +246,21 @@ func (s *Service) GetStorageMetrics(ctx context.Context, mailboxID uint) (*Stora
 	}
 
 	var result StorageMetrics
+	d := s.storeDialect
 
 	// MessageCount from canonical coremail_messages (not cached mailbox counters).
-	if err := s.storeDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM coremail_messages WHERE mailbox_id = ? AND purged_at IS NULL`, mailboxID).Scan(&result.MessageCount); err != nil {
+	if err := s.storeDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM coremail_messages WHERE mailbox_id = `+d.Placeholder(1)+` AND purged_at IS NULL`, mailboxID).Scan(&result.MessageCount); err != nil {
 		result.MessageCount = 0
 	}
 
 	// MailboxSize from canonical size_bytes in coremail_messages (not cached used_bytes).
-	if err := s.storeDB.QueryRowContext(ctx, `SELECT COALESCE(SUM(size_bytes), 0) FROM coremail_messages WHERE mailbox_id = ? AND purged_at IS NULL`, mailboxID).Scan(&result.MailboxSize); err != nil {
+	if err := s.storeDB.QueryRowContext(ctx, `SELECT COALESCE(SUM(size_bytes), 0) FROM coremail_messages WHERE mailbox_id = `+d.Placeholder(1)+` AND purged_at IS NULL`, mailboxID).Scan(&result.MailboxSize); err != nil {
 		result.MailboxSize = 0
 	}
 
 	// Sent/Received counts from authoritative folder metadata only.
 	var sentFolderID, inboxFolderID *uint
-	rows, err := s.storeDB.QueryContext(ctx, `SELECT id, folder_type FROM coremail_folders WHERE mailbox_id = ? AND (folder_type = 'sent' OR folder_type = 'inbox')`, mailboxID)
+	rows, err := s.storeDB.QueryContext(ctx, `SELECT id, folder_type FROM coremail_folders WHERE mailbox_id = `+d.Placeholder(1)+` AND (folder_type = 'sent' OR folder_type = 'inbox')`, mailboxID)
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
@@ -251,14 +277,14 @@ func (s *Service) GetStorageMetrics(ctx context.Context, mailboxID uint) (*Stora
 	}
 
 	if sentFolderID != nil {
-		err = s.storeDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM coremail_messages WHERE mailbox_id = ? AND folder_id = ? AND purged_at IS NULL`, mailboxID, *sentFolderID).Scan(&result.SentCount)
+		err = s.storeDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM coremail_messages WHERE mailbox_id = `+d.Placeholder(1)+` AND folder_id = `+d.Placeholder(2)+` AND purged_at IS NULL`, mailboxID, *sentFolderID).Scan(&result.SentCount)
 		if err != nil {
 			result.SentCount = 0
 		}
 	}
 
 	if inboxFolderID != nil {
-		err = s.storeDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM coremail_messages WHERE mailbox_id = ? AND folder_id = ? AND purged_at IS NULL`, mailboxID, *inboxFolderID).Scan(&result.ReceivedCount)
+		err = s.storeDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM coremail_messages WHERE mailbox_id = `+d.Placeholder(1)+` AND folder_id = `+d.Placeholder(2)+` AND purged_at IS NULL`, mailboxID, *inboxFolderID).Scan(&result.ReceivedCount)
 		if err != nil {
 			result.ReceivedCount = 0
 		}
@@ -277,18 +303,23 @@ func (s *Service) ListAccounts(ctx context.Context, search, domainFilter, status
 		JOIN coremail_domains d ON d.id = cm.domain_id
 		WHERE cm.deleted_at IS NULL`
 	args := []interface{}{}
+	idx := 1
+	d := s.engineDialect
 
 	if search != "" {
-		query += ` AND LOWER(cm.email) LIKE ?`
+		query += ` AND LOWER(cm.email) LIKE ` + d.Placeholder(idx)
 		args = append(args, "%"+strings.ToLower(search)+"%")
+		idx++
 	}
 	if domainFilter != "" {
-		query += ` AND d.name = ?`
+		query += ` AND d.name = ` + d.Placeholder(idx)
 		args = append(args, domainFilter)
+		idx++
 	}
 	if statusFilter != "" {
-		query += ` AND cm.status = ?`
+		query += ` AND cm.status = ` + d.Placeholder(idx)
 		args = append(args, statusFilter)
+		idx++
 	}
 	if adminFilter != nil {
 		if *adminFilter {
@@ -345,6 +376,7 @@ func (s *Service) ClearFailedLoginCounters(ctx context.Context, mailboxID uint) 
 	if err := s.withDB(ctx); err != nil {
 		return err
 	}
-	_, err := s.engine.DB.ExecContext(ctx, `DELETE FROM webmail_login_activity WHERE mailbox_id = ? AND success = 0`, mailboxID)
+	q := `DELETE FROM webmail_login_activity WHERE mailbox_id = ` + s.engineDialect.Placeholder(1) + ` AND success = 0`
+	_, err := s.engine.DB.ExecContext(ctx, q, mailboxID)
 	return err
 }

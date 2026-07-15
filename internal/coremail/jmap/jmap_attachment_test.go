@@ -283,14 +283,14 @@ func storeTestMsgWithAttach(ctx context.Context, t *testing.T, ms *storage.MailS
 		"--" + boundary + "--\r\n")
 
 	msg := &storage.Message{
-		MessageID:    storage.GenerateMessageID(),
-		MailboxID:    mailboxID,
-		FolderID:     inbox.ID,
-		FromAddress:  "user@test.com",
-		ToAddresses:  "rcpt@test.com",
-		Subject:      "With Attach",
-		TenantID:     1,
-		DomainID:     1,
+		MessageID:   storage.GenerateMessageID(),
+		MailboxID:   mailboxID,
+		FolderID:    inbox.ID,
+		FromAddress: "user@test.com",
+		ToAddresses: "rcpt@test.com",
+		Subject:     "With Attach",
+		TenantID:    1,
+		DomainID:    1,
 	}
 
 	if err := ms.StoreMessage(ctx, msg, rfc822, nil); err != nil {

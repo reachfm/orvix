@@ -47,20 +47,20 @@ const maxNamecheapResponseBytes = 1 << 20 // 1 MiB
 // update / delete; for read-merge-write the provider uses Name
 // + Type + Address as the unique identity.
 type NamecheapHost struct {
-	HostID   string `xml:"HostId,attr"`
-	Name     string `xml:"Name,attr"`
-	Type     string `xml:"Type,attr"`
-	Address  string `xml:"Address,attr"`
-	MXPref   string `xml:"MXPref,attr"`
-	TTL      string `xml:"TTL,attr"`
+	HostID  string `xml:"HostId,attr"`
+	Name    string `xml:"Name,attr"`
+	Type    string `xml:"Type,attr"`
+	Address string `xml:"Address,attr"`
+	MXPref  string `xml:"MXPref,attr"`
+	TTL     string `xml:"TTL,attr"`
 }
 
 // namecheapHostsResponse is the inner element of the API's
 // getHosts response.
 type namecheapHostsResponse struct {
-	XMLName xml.Name          `xml:"namecheapresponse"`
-	Status  string            `xml:"status,attr"`
-	Hosts   []NamecheapHost   `xml:"host"`
+	XMLName xml.Name        `xml:"namecheapresponse"`
+	Status  string          `xml:"status,attr"`
+	Hosts   []NamecheapHost `xml:"host"`
 }
 
 // NamecheapClient abstracts the live Namecheap HTTP roundtrip.
@@ -236,10 +236,10 @@ func (c *NetNamecheapClient) SetHosts(ctx context.Context, sld, tld string, host
 // never touches the network. Tests pre-seed hosts via SetLive
 // and assert on the captured SetHosts calls via LastSet / SetCalls.
 type FakeNamecheapClient struct {
-	mu      sync.Mutex
-	live    map[string][]NamecheapHost // key = "<sld>.<tld>"
-	setErr  error
-	getErr  error
+	mu     sync.Mutex
+	live   map[string][]NamecheapHost // key = "<sld>.<tld>"
+	setErr error
+	getErr error
 	// setCalls records the full set of (sld, tld, hosts) tuples
 	// submitted to SetHosts so tests can assert that a
 	// read-merge-write actually preserved unrelated records.

@@ -19,29 +19,31 @@ import (
 )
 
 type testConfig struct {
-	certPath      string
-	keyPath       string
-	smtpTLS       bool
-	imapTLS       bool
-	pop3TLS       bool
-	jmapTLS       bool
+	certPath string
+	keyPath  string
+	smtpTLS  bool
+	imapTLS  bool
+	pop3TLS  bool
+	jmapTLS  bool
 }
 
-func (t *testConfig) GetCertPath() string     { return t.certPath }
-func (t *testConfig) GetKeyPath() string      { return t.keyPath }
-func (t *testConfig) SMTPTLSEnabled() bool    { return t.smtpTLS }
-func (t *testConfig) IMAPTLSEnabled() bool    { return t.imapTLS }
-func (t *testConfig) POP3TLSEnabled() bool    { return t.pop3TLS }
-func (t *testConfig) JMAPTLSEnabled() bool    { return t.jmapTLS }
-func (t *testConfig) SMTPAddress() string     { return "0.0.0.0:25" }
-func (t *testConfig) IMAPAddress() string     { return "0.0.0.0:143" }
-func (t *testConfig) POP3Address() string     { return "0.0.0.0:110" }
-func (t *testConfig) JMAPAddress() string     { return "0.0.0.0:8080" }
+func (t *testConfig) GetCertPath() string  { return t.certPath }
+func (t *testConfig) GetKeyPath() string   { return t.keyPath }
+func (t *testConfig) SMTPTLSEnabled() bool { return t.smtpTLS }
+func (t *testConfig) IMAPTLSEnabled() bool { return t.imapTLS }
+func (t *testConfig) POP3TLSEnabled() bool { return t.pop3TLS }
+func (t *testConfig) JMAPTLSEnabled() bool { return t.jmapTLS }
+func (t *testConfig) SMTPAddress() string  { return "0.0.0.0:25" }
+func (t *testConfig) IMAPAddress() string  { return "0.0.0.0:143" }
+func (t *testConfig) POP3Address() string  { return "0.0.0.0:110" }
+func (t *testConfig) JMAPAddress() string  { return "0.0.0.0:8080" }
 
 func generateTestCert(t *testing.T, dir string, daysValid int) (certPath, keyPath string) {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil { t.Fatalf("generate key: %v", err) }
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
 
 	template := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
@@ -51,7 +53,9 @@ func generateTestCert(t *testing.T, dir string, daysValid int) (certPath, keyPat
 		DNSNames:     []string{"test.example.com", "mail.example.com"},
 	}
 	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
-	if err != nil { t.Fatalf("create cert: %v", err) }
+	if err != nil {
+		t.Fatalf("create cert: %v", err)
+	}
 
 	certPath = filepath.Join(dir, "cert.pem")
 	keyPath = filepath.Join(dir, "key.pem")
@@ -71,7 +75,9 @@ func testService(t *testing.T) (*Service, string) {
 	t.Helper()
 	dir := t.TempDir()
 	db, err := sql.Open("sqlite", fmt.Sprintf("%s/tls_test.db", dir))
-	if err != nil { t.Fatalf("open db: %v", err) }
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
 	t.Cleanup(func() { db.Close() })
 
 	svc := NewService(db, nil)
@@ -89,8 +95,12 @@ func TestCertificateLoad(t *testing.T) {
 	svc.cfg = cfg
 
 	certs, err := svc.LoadCertificates(context.Background())
-	if err != nil { t.Fatalf("load: %v", err) }
-	if len(certs) == 0 { t.Fatal("expected at least 1 certificate") }
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(certs) == 0 {
+		t.Fatal("expected at least 1 certificate")
+	}
 	if certs[0].CommonName != "test.example.com" {
 		t.Fatalf("expected test.example.com, got %s", certs[0].CommonName)
 	}
@@ -103,12 +113,20 @@ func TestCertificateValidation(t *testing.T) {
 	svc.cfg = cfg
 	// LoadCertificates is called via CheckExpiration or directly.
 	certs, err := svc.LoadCertificates(context.Background())
-	if err != nil { t.Fatalf("load: %v", err) }
-	if len(certs) == 0 { t.Fatal("no certs loaded") }
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(certs) == 0 {
+		t.Fatal("no certs loaded")
+	}
 
 	result, err := svc.ValidateCertificate(context.Background(), "default")
-	if err != nil { t.Fatalf("validate: %v", err) }
-	if !result.Valid { t.Fatalf("expected valid, errors: %v", result.Errors) }
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if !result.Valid {
+		t.Fatalf("expected valid, errors: %v", result.Errors)
+	}
 	if result.CommonName != "test.example.com" {
 		t.Fatalf("expected test.example.com, got %s", result.CommonName)
 	}
@@ -122,9 +140,15 @@ func TestCertificateExpirationHealthy(t *testing.T) {
 	svc.LoadCertificates(context.Background())
 
 	certs, err := svc.CheckExpiration(context.Background())
-	if err != nil { t.Fatalf("check exp: %v", err) }
-	if len(certs) == 0 { t.Fatal("expected certs") }
-	if certs[0].DaysRemaining <= 30 { t.Fatal("expected >30 days for healthy cert") }
+	if err != nil {
+		t.Fatalf("check exp: %v", err)
+	}
+	if len(certs) == 0 {
+		t.Fatal("expected certs")
+	}
+	if certs[0].DaysRemaining <= 30 {
+		t.Fatal("expected >30 days for healthy cert")
+	}
 }
 
 func TestCertificateExpirationWarning(t *testing.T) {
@@ -135,8 +159,12 @@ func TestCertificateExpirationWarning(t *testing.T) {
 	svc.LoadCertificates(context.Background())
 
 	certs, err := svc.CheckExpiration(context.Background())
-	if err != nil { t.Fatalf("check exp: %v", err) }
-	if len(certs) == 0 { t.Fatal("expected certs") }
+	if err != nil {
+		t.Fatalf("check exp: %v", err)
+	}
+	if len(certs) == 0 {
+		t.Fatal("expected certs")
+	}
 }
 
 func TestCertificateExpired(t *testing.T) {
@@ -147,7 +175,9 @@ func TestCertificateExpired(t *testing.T) {
 	svc.LoadCertificates(context.Background())
 
 	certs, err := svc.CheckExpiration(context.Background())
-	if err != nil { t.Fatalf("check exp: %v", err) }
+	if err != nil {
+		t.Fatalf("check exp: %v", err)
+	}
 	if len(certs) > 0 && certs[0].Status != CertExpired {
 		t.Fatalf("expected expired, got %s", certs[0].Status)
 	}
@@ -188,7 +218,9 @@ func TestCertificateReload(t *testing.T) {
 	svc.cfg = cfg
 
 	result := svc.ReloadCertificates(context.Background())
-	if !result.Success { t.Fatalf("reload: %s", result.Message) }
+	if !result.Success {
+		t.Fatalf("reload: %s", result.Message)
+	}
 }
 
 func TestRuntimeTLSInventory(t *testing.T) {
@@ -198,12 +230,18 @@ func TestRuntimeTLSInventory(t *testing.T) {
 	svc.cfg = cfg
 
 	statuses := svc.GetRuntimeTLSStatus(context.Background())
-	if len(statuses) == 0 { t.Fatal("expected statuses") }
+	if len(statuses) == 0 {
+		t.Fatal("expected statuses")
+	}
 	foundSMTP := false
 	for _, s := range statuses {
-		if s.Protocol == "SMTP" && s.TLSEnabled { foundSMTP = true }
+		if s.Protocol == "SMTP" && s.TLSEnabled {
+			foundSMTP = true
+		}
 	}
-	if !foundSMTP { t.Fatal("expected SMTP with TLS enabled") }
+	if !foundSMTP {
+		t.Fatal("expected SMTP with TLS enabled")
+	}
 }
 
 func TestInvalidCertificateRejected(t *testing.T) {
@@ -216,7 +254,9 @@ func TestInvalidCertificateRejected(t *testing.T) {
 	svc.LoadCertificates(context.Background())
 
 	result, _ := svc.ValidateCertificate(context.Background(), "default")
-	if result.Valid { t.Fatal("expected invalid for bad certificate data") }
+	if result.Valid {
+		t.Fatal("expected invalid for bad certificate data")
+	}
 }
 
 func TestMissingCertificateRejected(t *testing.T) {
@@ -225,7 +265,9 @@ func TestMissingCertificateRejected(t *testing.T) {
 	svc.cfg = cfg
 
 	result := svc.ReloadCertificates(context.Background())
-	if result.Success { t.Fatal("expected failure for missing certificate") }
+	if result.Success {
+		t.Fatal("expected failure for missing certificate")
+	}
 }
 
 func TestReloadFailure(t *testing.T) {
@@ -242,7 +284,9 @@ func mustNewService(t *testing.T) *Service {
 	t.Helper()
 	dir := t.TempDir()
 	db, err := sql.Open("sqlite", fmt.Sprintf("%s/tls_test.db", dir))
-	if err != nil { t.Fatalf("open db: %v", err) }
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
 	t.Cleanup(func() { db.Close() })
 	svc := NewService(db, nil)
 	svc.ensureSchema(context.Background())

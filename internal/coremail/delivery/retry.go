@@ -69,7 +69,7 @@ func (p RetryPolicy) RetrySchedule(attemptCount int) (time.Duration, error) {
 	if p.JitterPercent > 0 {
 		jitterRange := int64(float64(delay) * p.JitterPercent)
 		if jitterRange > 0 {
-			jitter := rand.Int63n(jitterRange*2 + 1) - jitterRange
+			jitter := rand.Int63n(jitterRange*2+1) - jitterRange
 			delay += time.Duration(jitter)
 			if delay < 0 {
 				delay = 0
@@ -93,9 +93,9 @@ func (p RetryPolicy) NextAttemptAt(attemptCount int, now time.Time) (time.Time, 
 type RetryDecision int
 
 const (
-	DecisionDelivered   RetryDecision = iota // Success — remove from queue
-	DecisionRetry                            // Temporary failure — schedule retry
-	DecisionDeadLetter                       // Permanent failure or max attempts — move to DLQ
+	DecisionDelivered  RetryDecision = iota // Success — remove from queue
+	DecisionRetry                           // Temporary failure — schedule retry
+	DecisionDeadLetter                      // Permanent failure or max attempts — move to DLQ
 )
 
 // ClassifyResult inspects a DeliveryResult and the current attempt count to

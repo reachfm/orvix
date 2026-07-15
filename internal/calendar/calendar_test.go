@@ -52,7 +52,7 @@ func TestTaskStruct(t *testing.T) {
 	task := Task{
 		UserID: 1, Title: "Complete report",
 		Description: "Finish Q3 financial report",
-		DueDate: &dueDate, Completed: false, Priority: "high",
+		DueDate:     &dueDate, Completed: false, Priority: "high",
 	}
 	if task.Title != "Complete report" {
 		t.Fatalf("unexpected title: %s", task.Title)

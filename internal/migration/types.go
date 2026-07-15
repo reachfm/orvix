@@ -1,6 +1,10 @@
 package migration
 
-import "time"
+import (
+	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
+)
 
 type ImportSourceType string
 
@@ -22,16 +26,16 @@ const (
 )
 
 type ImportJob struct {
-	ID                uint            `json:"id"`
+	ID                uint             `json:"id"`
 	SourceType        ImportSourceType `json:"sourceType"`
-	SourceHost        string          `json:"sourceHost,omitempty"`
-	Status            ImportJobStatus `json:"status"`
-	DomainsImported   int             `json:"domainsImported"`
-	MailboxesImported int             `json:"mailboxesImported"`
-	MessagesImported  int64           `json:"messagesImported"`
-	Errors            int             `json:"errors"`
-	StartedAt         time.Time       `json:"startedAt"`
-	CompletedAt       *time.Time      `json:"completedAt,omitempty"`
+	SourceHost        string           `json:"sourceHost,omitempty"`
+	Status            ImportJobStatus  `json:"status"`
+	DomainsImported   int              `json:"domainsImported"`
+	MailboxesImported int              `json:"mailboxesImported"`
+	MessagesImported  int64            `json:"messagesImported"`
+	Errors            int              `json:"errors"`
+	StartedAt         time.Time        `json:"startedAt"`
+	CompletedAt       *time.Time       `json:"completedAt,omitempty"`
 }
 
 type DomainImport struct {
@@ -53,17 +57,21 @@ type MessageImport struct {
 	Folder     string `json:"folder,omitempty"`
 }
 
-var schema = []string{
-	`CREATE TABLE IF NOT EXISTS coremail_migrations (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		source_type TEXT NOT NULL DEFAULT '',
-		source_host TEXT NOT NULL DEFAULT '',
-		status TEXT NOT NULL DEFAULT 'pending',
-		domains_imported INTEGER NOT NULL DEFAULT 0,
-		mailboxes_imported INTEGER NOT NULL DEFAULT 0,
-		messages_imported INTEGER NOT NULL DEFAULT 0,
-		errors INTEGER NOT NULL DEFAULT 0,
-		started_at DATETIME NOT NULL,
-		completed_at DATETIME
-	)`,
+func schema(d *dbdialect.Info) []string {
+	ts := d.TimestampType()
+	autoInc := d.AutoIncrement()
+	return []string{
+		`CREATE TABLE IF NOT EXISTS coremail_migrations (
+			id ` + autoInc + `,
+			source_type TEXT NOT NULL DEFAULT '',
+			source_host TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'pending',
+			domains_imported INTEGER NOT NULL DEFAULT 0,
+			mailboxes_imported INTEGER NOT NULL DEFAULT 0,
+			messages_imported INTEGER NOT NULL DEFAULT 0,
+			errors INTEGER NOT NULL DEFAULT 0,
+			started_at ` + ts + ` NOT NULL,
+			completed_at ` + ts + `
+		)`,
+	}
 }

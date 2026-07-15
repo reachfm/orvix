@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { LayoutDashboard, Globe, Users, Shield, Zap, Activity, Settings, Server, Building, Mail, Monitor, Key, HardDrive, HeartPulse } from "lucide-react";
+import { useState, useEffect } from "react";
+import { LayoutDashboard, Globe, Users, Shield, Zap, Activity, Settings, Server, Building, Mail, Monitor, Key, HardDrive, HeartPulse, CreditCard, Keyboard, User, AtSign, BarChart, AlertTriangle, UserPlus, Send, LogOut } from "lucide-react";
 import Dashboard from "./components/Dashboard";
 import Domains from "./components/Domains";
 import UsersPage from "./components/UsersPage";
@@ -12,8 +12,30 @@ import OrganizationList from "./components/OrganizationList";
 import LicenseStatus from "./components/LicenseStatus";
 import BackupStatus from "./components/BackupStatus";
 import SystemHealth from "./components/SystemHealth";
+import BillingPage from "./components/BillingPage";
+import DomainOnboarding from "./components/DomainOnboarding";
+import ApiKeysPage from "./components/ApiKeysPage";
+import SignupPage from "./components/SignupPage";
+import LoginPage from "./components/LoginPage";
+import ForgotPasswordPage from "./components/ForgotPasswordPage";
+import ResetPasswordPage from "./components/ResetPasswordPage";
+import AccountSettingsPage from "./components/AccountSettingsPage";
+import OrganizationOverviewPage from "./components/OrganizationOverviewPage";
+import InvitationsPage from "./components/InvitationsPage";
+import MembersRolesPage from "./components/MembersRolesPage";
+import OwnershipTransferPage from "./components/OwnershipTransferPage";
+import SuspensionDeletionPage from "./components/SuspensionDeletionPage";
+import CustomerMailboxesPage from "./components/CustomerMailboxesPage";
+import AliasesPage from "./components/AliasesPage";
+import GroupsPage from "./components/GroupsPage";
+import UsageQuotasPage from "./components/UsageQuotasPage";
 
-type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" | "settings" | "enterprise" | "mailboxes" | "organizations" | "license" | "backups" | "health";
+type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" | "settings"
+  | "enterprise" | "mailboxes" | "organizations" | "license" | "backups" | "health"
+  | "billing" | "onboarding" | "apikeys"
+  | "account-settings" | "org-overview" | "invitations" | "members-roles" | "ownership-transfer"
+  | "suspension-deletion" | "customer-mailboxes" | "aliases" | "groups" | "usage-quotas"
+  | "login" | "signup" | "forgot-password" | "reset-password";
 
 const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: string }[] = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -29,10 +51,52 @@ const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: st
   { id: "backups", label: "Backups", icon: HardDrive },
   { id: "health", label: "Health", icon: HeartPulse },
   { id: "settings", label: "Settings", icon: Settings },
+  { id: "org-overview", label: "Organization", icon: Building, section: "Customer Portal" },
+  { id: "customer-mailboxes", label: "Mailboxes", icon: Mail },
+  { id: "aliases", label: "Aliases", icon: AtSign },
+  { id: "groups", label: "Groups", icon: Users },
+  { id: "usage-quotas", label: "Usage", icon: BarChart },
+  { id: "onboarding", label: "Domain Setup", icon: Globe },
+  { id: "invitations", label: "Invitations", icon: UserPlus },
+  { id: "members-roles", label: "Members", icon: Shield },
+  { id: "ownership-transfer", label: "Ownership", icon: Send },
+  { id: "suspension-deletion", label: "Status", icon: AlertTriangle },
+  { id: "billing", label: "Billing", icon: CreditCard },
+  { id: "apikeys", label: "API Keys", icon: Keyboard },
+  { id: "account-settings", label: "Account", icon: User, section: "Account" },
 ];
 
 export default function App() {
   const [currentTab, setCurrentTab] = useState<Tab>("dashboard");
+  const [authenticated, setAuthenticated] = useState(false);
+  const [authLoading, setAuthLoading] = useState(true);
+
+  useEffect(() => {
+    fetch("/api/v1/me", { credentials: "include" })
+      .then((r) => { setAuthenticated(r.ok); setAuthLoading(false); })
+      .catch(() => { setAuthenticated(false); setAuthLoading(false); });
+  }, []);
+
+  const navigateTo = (route: string) => {
+    const tabMap: Record<string, Tab> = {
+      "/": "dashboard", "/login": "login", "/signup": "signup",
+      "/forgot-password": "forgot-password", "/reset-password": "reset-password",
+    };
+    setCurrentTab(tabMap[route] || "dashboard");
+  };
+
+  if (authLoading) {
+    return <div className="h-screen bg-[#0C0E12] flex items-center justify-center"><p className="text-gray-400">Loading...</p></div>;
+  }
+
+  if (!authenticated) {
+    switch (currentTab) {
+      case "signup": return <SignupPage />;
+      case "forgot-password": return <ForgotPasswordPage />;
+      case "reset-password": return <ResetPasswordPage />;
+      default: return <LoginPage />;
+    }
+  }
 
   const renderContent = () => {
     switch (currentTab) {
@@ -48,6 +112,19 @@ export default function App() {
       case "license": return <LicenseStatus />;
       case "backups": return <BackupStatus />;
       case "health": return <SystemHealth />;
+      case "billing": return <BillingPage />;
+      case "onboarding": return <DomainOnboarding />;
+      case "apikeys": return <ApiKeysPage />;
+      case "account-settings": return <AccountSettingsPage />;
+      case "org-overview": return <OrganizationOverviewPage />;
+      case "invitations": return <InvitationsPage />;
+      case "members-roles": return <MembersRolesPage />;
+      case "ownership-transfer": return <OwnershipTransferPage />;
+      case "suspension-deletion": return <SuspensionDeletionPage />;
+      case "customer-mailboxes": return <CustomerMailboxesPage />;
+      case "aliases": return <AliasesPage />;
+      case "groups": return <GroupsPage />;
+      case "usage-quotas": return <UsageQuotasPage />;
       default: return <Dashboard />;
     }
   };
@@ -97,6 +174,13 @@ export default function App() {
             );
           })}
         </nav>
+
+        <div className="p-3 border-t border-[#2A2F3E]">
+          <button onClick={() => { fetch("/api/v1/auth/logout", { method: "POST", credentials: "include" }); setAuthenticated(false); }}
+            className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-[#8B92A8] hover:bg-[#1A1E26] hover:text-[#E8EAF0]">
+            <LogOut size={18} /> Logout
+          </button>
+        </div>
       </aside>
 
       <main className="flex-1 overflow-auto bg-[#0C0E12]">

@@ -9,16 +9,16 @@ import (
 
 // RetentionPolicy defines how long messages are kept and what happens after expiry.
 type RetentionPolicy struct {
-	ID               uint          `json:"id"`
-	Name             string        `json:"name"`
-	RetentionType    RetentionType `json:"retention_type"`
-	RetentionDays    int           `json:"retention_days"`
-	MaxMessages      int           `json:"max_messages"`
-	MaxSizeBytes     int64         `json:"max_size_bytes"`
-	DeleteAfterExpiry bool         `json:"delete_after_expiry"`
-	Hold             bool          `json:"hold"`
-	CreatedAt        time.Time     `json:"created_at"`
-	UpdatedAt        time.Time     `json:"updated_at"`
+	ID                uint          `json:"id"`
+	Name              string        `json:"name"`
+	RetentionType     RetentionType `json:"retention_type"`
+	RetentionDays     int           `json:"retention_days"`
+	MaxMessages       int           `json:"max_messages"`
+	MaxSizeBytes      int64         `json:"max_size_bytes"`
+	DeleteAfterExpiry bool          `json:"delete_after_expiry"`
+	Hold              bool          `json:"hold"`
+	CreatedAt         time.Time     `json:"created_at"`
+	UpdatedAt         time.Time     `json:"updated_at"`
 }
 
 // RetentionRepository defines the contract for retention policy persistence.
@@ -117,7 +117,9 @@ func (r *RetentionSQLRepo) Delete(ctx context.Context, id uint, tx interface{}) 
 	return err
 }
 
-func scanRetentionPolicy(row interface{ Scan(dest ...interface{}) error }) (*RetentionPolicy, error) {
+func scanRetentionPolicy(row interface {
+	Scan(dest ...interface{}) error
+}) (*RetentionPolicy, error) {
 	var p RetentionPolicy
 	var retentionType string
 	var deleteAfterExpiry, hold int

@@ -146,8 +146,8 @@ func eval(t *testing.T, r *FakeResolver, domain string, ip net.IP) *EvaluationRe
 	e := NewEvaluator(r)
 	ctx := context.Background()
 	result, err := e.Evaluate(ctx, &Context{
-		ConnectingIP:    ip,
-		MailFromDomain:  domain,
+		ConnectingIP:   ip,
+		MailFromDomain: domain,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -380,10 +380,10 @@ func TestSPFDeepRecursion(t *testing.T) {
 
 func TestFormatReceivedSPF(t *testing.T) {
 	result := &EvaluationResult{
-		Result:          ResultPass,
-		Explanation:     "192.0.2.1 matches ip4 for domain example.com",
+		Result:           ResultPass,
+		Explanation:      "192.0.2.1 matches ip4 for domain example.com",
 		MatchedMechanism: "ip4",
-		EvaluatedDomain: "example.com",
+		EvaluatedDomain:  "example.com",
 	}
 	header := FormatReceivedSPF(result, net.ParseIP("192.0.2.1"), "mx.example.com")
 	if header == "" {
@@ -409,10 +409,10 @@ func TestFormatReceivedSPFNil(t *testing.T) {
 
 func TestFormatReceivedSPFFail(t *testing.T) {
 	result := &EvaluationResult{
-		Result:          ResultFail,
-		Explanation:     "192.0.2.99 not authorized via all for domain example.com",
+		Result:           ResultFail,
+		Explanation:      "192.0.2.99 not authorized via all for domain example.com",
 		MatchedMechanism: "all",
-		EvaluatedDomain: "example.com",
+		EvaluatedDomain:  "example.com",
 	}
 	header := FormatReceivedSPF(result, net.ParseIP("192.0.2.99"), "mx.example.com")
 	if !contains(header, "fail") {
@@ -424,10 +424,10 @@ func TestFormatReceivedSPFFail(t *testing.T) {
 
 func TestAuthResultFromSPF(t *testing.T) {
 	result := &EvaluationResult{
-		Result:          ResultPass,
-		Explanation:     "match",
+		Result:           ResultPass,
+		Explanation:      "match",
 		MatchedMechanism: "ip4",
-		EvaluatedDomain: "example.com",
+		EvaluatedDomain:  "example.com",
 	}
 	ar := AuthResultFromSPF(result)
 	if ar.Method != "spf" {

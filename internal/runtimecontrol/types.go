@@ -27,20 +27,20 @@ type RuntimeSnapshot struct {
 
 // Settings represents all editable runtime settings.
 type Settings struct {
-	SMTP      SMTPSettings      `json:"smtp"`
-	IMAP      IMAPSettings      `json:"imap"`
-	POP3      POP3Settings      `json:"pop3"`
-	Queue     QueueSettings     `json:"queue"`
-	Trust     TrustSettings     `json:"trust"`
-	Policy    PolicySettings    `json:"policy"`
+	SMTP   SMTPSettings   `json:"smtp"`
+	IMAP   IMAPSettings   `json:"imap"`
+	POP3   POP3Settings   `json:"pop3"`
+	Queue  QueueSettings  `json:"queue"`
+	Trust  TrustSettings  `json:"trust"`
+	Policy PolicySettings `json:"policy"`
 }
 
 type SMTPSettings struct {
-	Hostname            string `json:"hostname"`
-	MaxMessageSizeMB    int    `json:"max_message_size_mb"`
-	MaxRecipients       int    `json:"max_recipients"`
-	MaxConcurrentSessions int  `json:"max_concurrent_sessions"`
-	SpamMode            string `json:"spam_mode"`
+	Hostname              string `json:"hostname"`
+	MaxMessageSizeMB      int    `json:"max_message_size_mb"`
+	MaxRecipients         int    `json:"max_recipients"`
+	MaxConcurrentSessions int    `json:"max_concurrent_sessions"`
+	SpamMode              string `json:"spam_mode"`
 }
 
 type IMAPSettings struct {
@@ -61,8 +61,8 @@ type QueueSettings struct {
 }
 
 type TrustSettings struct {
-	MaxAttempts         int    `json:"max_attempts"`
-	LockoutDurationMin  int    `json:"lockout_duration_min"`
+	MaxAttempts        int `json:"max_attempts"`
+	LockoutDurationMin int `json:"lockout_duration_min"`
 }
 
 type PolicySettings struct {
@@ -72,7 +72,7 @@ type PolicySettings struct {
 // ── Reload ──────────────────────────────────────────────────
 
 type ReloadResult struct {
-	Success   bool     `json:"success"`
-	Message   string   `json:"message"`
-	Warnings  []string `json:"warnings,omitempty"`
+	Success  bool     `json:"success"`
+	Message  string   `json:"message"`
+	Warnings []string `json:"warnings,omitempty"`
 }

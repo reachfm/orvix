@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	maxRuleLength    = 2048
-	regexTimeout     = 1 * time.Second
+	maxRuleLength = 2048
+	regexTimeout  = 1 * time.Second
 )
 
 // RuleEngine evaluates user-defined firewall rules.

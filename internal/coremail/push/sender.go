@@ -90,7 +90,7 @@ var knownPushServices = map[string]struct{}{
 	// issues subdomains like "*.fcm.googleapis.com" to the
 	// application server (the path component carries the
 	// sub-stream identifier, not the hostname).
-	"fcm.googleapis.com":              {},
+	"fcm.googleapis.com":               {},
 	"fcm-notifications.googleapis.com": {},
 	// Mozilla autopush.
 	"updates.push.services.mozilla.com": {},

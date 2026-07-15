@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/orvix/orvix/internal/dbdialect"
 	_ "modernc.org/sqlite"
 )
 
@@ -29,7 +30,7 @@ func testService(t *testing.T) *Service {
 		t.Fatalf("open db: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	for _, stmt := range tables {
+	for _, stmt := range tables(dbdialect.FromDriver("sqlite")) {
 		db.Exec(stmt)
 	}
 

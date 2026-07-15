@@ -18,16 +18,16 @@ import (
 
 // Module implements the modules.Module interface for Guardian Agent.
 type Module struct {
-	cfg     *config.Config
-	db      *gorm.DB
-	logger  *zap.Logger
-	agent   *Agent
-	api     *API
-	mod     *modules.Module
+	cfg    *config.Config
+	db     *gorm.DB
+	logger *zap.Logger
+	agent  *Agent
+	api    *API
+	mod    *modules.Module
 }
 
-func (m *Module) ID() string { return "guardian-agent" }
-func (m *Module) Version() string { return "1.0.0" }
+func (m *Module) ID() string         { return "guardian-agent" }
+func (m *Module) Version() string    { return "1.0.0" }
 func (m *Module) Requires() []string { return []string{"core"} }
 
 func (m *Module) Init(cfg *config.Config, db *gorm.DB) error {
@@ -67,15 +67,15 @@ var _ modules.Module = (*Module)(nil)
 
 // AnalyzeRequest represents an email analysis request.
 type AnalyzeRequest struct {
-	EmailID       string `json:"email_id"`
-	SenderIP      string `json:"sender_ip"`
-	SenderDomain  string `json:"sender_domain"`
-	Subject       string `json:"subject"`
-	Body          string `json:"body"`
-	HasAttachments bool `json:"has_attachments"`
-	SPFResult     string `json:"spf_result"`
-	DKIMResult    string `json:"dkim_result"`
-	DMARCResult   string `json:"dmarc_result"`
+	EmailID        string `json:"email_id"`
+	SenderIP       string `json:"sender_ip"`
+	SenderDomain   string `json:"sender_domain"`
+	Subject        string `json:"subject"`
+	Body           string `json:"body"`
+	HasAttachments bool   `json:"has_attachments"`
+	SPFResult      string `json:"spf_result"`
+	DKIMResult     string `json:"dkim_result"`
+	DMARCResult    string `json:"dmarc_result"`
 }
 
 // AnalyzeResult represents the threat analysis verdict.
@@ -194,13 +194,16 @@ func (a *Agent) offlineAnalysis(req *AnalyzeRequest) *AnalyzeResult {
 	reasons := []string{}
 
 	if req.SPFResult == "fail" {
-		score += 0.3; reasons = append(reasons, "SPF check failed")
+		score += 0.3
+		reasons = append(reasons, "SPF check failed")
 	}
 	if req.DKIMResult == "fail" {
-		score += 0.2; reasons = append(reasons, "DKIM signature invalid")
+		score += 0.2
+		reasons = append(reasons, "DKIM signature invalid")
 	}
 	if req.DMARCResult == "fail" {
-		score += 0.2; reasons = append(reasons, "DMARC policy failed")
+		score += 0.2
+		reasons = append(reasons, "DMARC policy failed")
 	}
 
 	action := "pass"

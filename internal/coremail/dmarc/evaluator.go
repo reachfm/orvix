@@ -27,7 +27,7 @@ func (e *Evaluator) Evaluate(input *EvaluationInput) (*EvaluationResult, error) 
 	}
 	if input.FromDomain == "" {
 		return &EvaluationResult{
-			Result:  ResultNone,
+			Result:      ResultNone,
 			Explanation: "no From domain provided",
 		}, nil
 	}

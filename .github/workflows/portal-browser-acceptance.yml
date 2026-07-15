@@ -1,0 +1,43 @@
+name: Portal Component Tests (Vitest)
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  portal-browser:
+    name: Portal browser component acceptance
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/admin/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: web/admin
+
+      - name: Build frontend
+        run: npm run build
+        working-directory: web/admin
+
+      - name: Run portal browser acceptance tests
+        run: npx vitest run --reporter verbose src/components/PortalBrowserAcceptance.test.tsx
+        working-directory: web/admin
+
+      - name: Run App shell tests
+        run: npx vitest run --reporter verbose src/App.test.tsx
+        working-directory: web/admin

@@ -46,15 +46,15 @@ func (r *DomainAdminRepo) List(ctx context.Context, filter DomainFilter) ([]Admi
 	where = append(where, "d.deleted_at IS NULL")
 
 	if filter.TenantID != nil {
-		where = append(where, "d.tenant_id = ?")
+		where = append(where, "d.tenant_id = "+r.dialect.Placeholder(len(args)+1))
 		args = append(args, *filter.TenantID)
 	}
 	if filter.Status != nil && *filter.Status != "" {
-		where = append(where, "d.status = ?")
+		where = append(where, "d.status = "+r.dialect.Placeholder(len(args)+1))
 		args = append(args, *filter.Status)
 	}
 	if filter.Search != "" {
-		where = append(where, "d.name LIKE ?")
+		where = append(where, "d.name LIKE "+r.dialect.Placeholder(len(args)+1))
 		args = append(args, "%"+filter.Search+"%")
 	}
 
@@ -78,7 +78,7 @@ func (r *DomainAdminRepo) List(ctx context.Context, filter DomainFilter) ([]Admi
 		COALESCE((SELECT COUNT(*) FROM coremail_mailboxes m WHERE m.domain_id=d.id AND m.deleted_at IS NULL),0),
 		COALESCE((SELECT COUNT(*) FROM coremail_aliases a WHERE a.domain_id=d.id AND a.deleted_at IS NULL),0),
 		d.created_at, d.updated_at
-		FROM coremail_domains d WHERE ` + clause + ` ORDER BY d.name ASC LIMIT ? OFFSET ?`
+		FROM coremail_domains d WHERE ` + clause + ` ORDER BY d.name ASC LIMIT ` + r.dialect.Placeholder(len(args)+1) + ` OFFSET ` + r.dialect.Placeholder(len(args)+2)
 	args = append(args, filter.Limit, filter.Offset)
 
 	rows, err := r.db.QueryContext(ctx, query, args...)
@@ -112,7 +112,7 @@ func (r *DomainAdminRepo) GetByID(ctx context.Context, id, tenantID uint) (*Admi
 			COALESCE((SELECT COUNT(*) FROM coremail_mailboxes m WHERE m.domain_id=d.id AND m.deleted_at IS NULL),0),
 			COALESCE((SELECT COUNT(*) FROM coremail_aliases a WHERE a.domain_id=d.id AND a.deleted_at IS NULL),0),
 			d.created_at, d.updated_at
-		FROM coremail_domains d WHERE d.id = ? AND d.tenant_id = ? AND d.deleted_at IS NULL`, id, tenantID)
+		FROM coremail_domains d WHERE d.id = `+r.dialect.Placeholder(1)+` AND d.tenant_id = `+r.dialect.Placeholder(2)+` AND d.deleted_at IS NULL`, id, tenantID)
 	return scanAdminDomain(row)
 }
 
@@ -140,7 +140,7 @@ func (r *DomainAdminRepo) Create(ctx context.Context, d *AdminDomain) (*AdminDom
 	}
 
 	res, err := r.db.ExecContext(ctx,
-		"INSERT INTO coremail_domains (tenant_id, name, status, plan, description, max_mailboxes, max_aliases, max_quota_mb, dkim_enabled, dkim_selector, dmarc_enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		"INSERT INTO coremail_domains (tenant_id, name, status, plan, description, max_mailboxes, max_aliases, max_quota_mb, dkim_enabled, dkim_selector, dmarc_enabled, created_at, updated_at) VALUES ("+r.dialect.Placeholders(13)+")",
 		d.TenantID, d.Name, d.Status, d.Plan, d.Description, d.MaxMailboxes, d.MaxAliases, d.MaxQuotaMB,
 		boolToInt(d.DKIMEnabled), d.DKIMSelector, boolToInt(d.DMARCEnabled), d.CreatedAt, d.UpdatedAt)
 	if err != nil {
@@ -154,14 +154,14 @@ func (r *DomainAdminRepo) Create(ctx context.Context, d *AdminDomain) (*AdminDom
 func (r *DomainAdminRepo) Update(ctx context.Context, d *AdminDomain) error {
 	d.UpdatedAt = time.Now().UTC()
 	_, err := r.db.ExecContext(ctx,
-		"UPDATE coremail_domains SET description=?, max_mailboxes=?, max_aliases=?, max_quota_mb=?, dkim_enabled=?, dmarc_enabled=?, updated_at=? WHERE id=? AND tenant_id=? AND deleted_at IS NULL",
+		"UPDATE coremail_domains SET description="+r.dialect.Placeholder(1)+", max_mailboxes="+r.dialect.Placeholder(2)+", max_aliases="+r.dialect.Placeholder(3)+", max_quota_mb="+r.dialect.Placeholder(4)+", dkim_enabled="+r.dialect.Placeholder(5)+", dmarc_enabled="+r.dialect.Placeholder(6)+", updated_at="+r.dialect.Placeholder(7)+" WHERE id="+r.dialect.Placeholder(8)+" AND tenant_id="+r.dialect.Placeholder(9)+" AND deleted_at IS NULL",
 		d.Description, d.MaxMailboxes, d.MaxAliases, d.MaxQuotaMB, boolToInt(d.DKIMEnabled), boolToInt(d.DMARCEnabled), d.UpdatedAt, d.ID, d.TenantID)
 	return err
 }
 
 func (r *DomainAdminRepo) UpdateStatus(ctx context.Context, id, tenantID uint, status string) error {
 	_, err := r.db.ExecContext(ctx,
-		"UPDATE coremail_domains SET status=?, updated_at=? WHERE id=? AND tenant_id=? AND deleted_at IS NULL",
+		"UPDATE coremail_domains SET status="+r.dialect.Placeholder(1)+", updated_at="+r.dialect.Placeholder(2)+" WHERE id="+r.dialect.Placeholder(3)+" AND tenant_id="+r.dialect.Placeholder(4)+" AND deleted_at IS NULL",
 		status, time.Now().UTC(), id, tenantID)
 	return err
 }
@@ -169,13 +169,13 @@ func (r *DomainAdminRepo) UpdateStatus(ctx context.Context, id, tenantID uint, s
 func (r *DomainAdminRepo) CountByTenant(ctx context.Context, tenantID uint) (int64, error) {
 	var count int64
 	err := r.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM coremail_domains WHERE tenant_id=? AND deleted_at IS NULL", tenantID).Scan(&count)
+		"SELECT COUNT(*) FROM coremail_domains WHERE tenant_id="+r.dialect.Placeholder(1)+" AND deleted_at IS NULL", tenantID).Scan(&count)
 	return count, err
 }
 
 func (r *DomainAdminRepo) AssignDomainAdmin(ctx context.Context, domainID, userID, tenantID uint) error {
 	_, err := r.db.ExecContext(ctx,
-		"INSERT INTO coremail_admin_group_members (group_id, user_id) SELECT g.id, ? FROM coremail_admin_groups g WHERE g.tenant_id=? AND g.name='domain_admin' AND g.deleted_at IS NULL",
+		"INSERT INTO coremail_admin_group_members (group_id, user_id) SELECT g.id, "+r.dialect.Placeholder(1)+" FROM coremail_admin_groups g WHERE g.tenant_id="+r.dialect.Placeholder(2)+" AND g.name='domain_admin' AND g.deleted_at IS NULL",
 		userID, tenantID)
 	if err != nil {
 		return fmt.Errorf("assign domain admin: %w", err)
@@ -206,6 +206,10 @@ func (s *Service) GetDomain(ctx context.Context, id, tenantID uint) (*AdminDomai
 		return nil, ErrDomainNotFound
 	}
 	return d, nil
+}
+
+func (s *Service) CountByTenant(ctx context.Context, tenantID uint) (int64, error) {
+	return s.repo.CountByTenant(ctx, tenantID)
 }
 
 func (s *Service) CreateDomain(ctx context.Context, req CreateDomainRequest, tenantID uint) (*AdminDomain, error) {

@@ -16,7 +16,7 @@ type Attachment struct {
 	ContentType string    `json:"content_type"`
 	SizeBytes   int64     `json:"size_bytes"`
 	SHA256      string    `json:"sha256"`
-	StoragePath string    `json:"storage_path"` // path on local disk; future: S3 key
+	StoragePath string    `json:"storage_path"`  // path on local disk; future: S3 key
 	CID         string    `json:"cid,omitempty"` // Content-ID for inline attachments
 	CreatedAt   time.Time `json:"created_at"`
 }
@@ -169,7 +169,9 @@ func (r *AttachmentSQLRepo) GetByMessageAndID(ctx context.Context, messageID, at
 	return scanAttachment(row)
 }
 
-func scanAttachment(row interface{ Scan(dest ...interface{}) error }) (*Attachment, error) {
+func scanAttachment(row interface {
+	Scan(dest ...interface{}) error
+}) (*Attachment, error) {
 	var a Attachment
 	err := row.Scan(&a.ID, &a.MessageID, &a.Filename, &a.ContentType, &a.SizeBytes, &a.SHA256, &a.StoragePath, &a.CID, &a.CreatedAt)
 	if err != nil {

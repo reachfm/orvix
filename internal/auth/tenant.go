@@ -2,10 +2,12 @@ package auth
 
 import (
 	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/dbdialect"
 	"gorm.io/gorm"
 )
 
 // TenantMiddleware resolves the tenant from the authenticated user and stores it in context.
+// On DB errors it fails closed so missing tenant context is never silently ignored.
 func TenantMiddleware(db *gorm.DB) fiber.Handler {
 	return func(c fiber.Ctx) error {
 		userID, ok := c.Locals("user_id").(uint)
@@ -15,28 +17,17 @@ func TenantMiddleware(db *gorm.DB) fiber.Handler {
 
 		sqlDB, err := db.DB()
 		if err != nil {
-			return c.Next()
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal server error"})
+		}
+		dialect, err := dbdialect.Detect(sqlDB)
+		if err != nil {
+			dialect = dbdialect.FromDriver("sqlite")
 		}
 		var tenantID uint
-		if err := sqlDB.QueryRow("SELECT tenant_id FROM users WHERE id = ?", userID).Scan(&tenantID); err == nil && tenantID > 0 {
+		if err := sqlDB.QueryRow("SELECT tenant_id FROM users WHERE id = "+dialect.Placeholder(1), userID).Scan(&tenantID); err == nil && tenantID > 0 {
 			c.Locals("tenant_id", tenantID)
 		}
 
-		return c.Next()
-	}
-}
-
-// RequireTenantAccess returns middleware that checks a user can only access their own tenant's resources.
-func RequireTenantAccess(paramName string) fiber.Handler {
-	return func(c fiber.Ctx) error {
-		tenantID, ok := c.Locals("tenant_id").(uint)
-		if !ok || tenantID == 0 {
-			return c.Next()
-		}
-		role, _ := c.Locals("role").(Role)
-		if role == RoleSuperAdmin {
-			return c.Next()
-		}
 		return c.Next()
 	}
 }

@@ -62,7 +62,7 @@ func TestLoggerEventDoesNotContainPrivateKey(t *testing.T) {
 
 func TestLoggerValidatesSensitiveFields(t *testing.T) {
 	err := ValidateEventSafety(LogEvent{
-		Type: EventSMTPAuthSuccess,
+		Type:   EventSMTPAuthSuccess,
 		Fields: map[string]string{"password": "secret123"},
 	})
 	if err == nil {
@@ -70,7 +70,7 @@ func TestLoggerValidatesSensitiveFields(t *testing.T) {
 	}
 
 	err = ValidateEventSafety(LogEvent{
-		Type: EventDKIMSignSuccess,
+		Type:   EventDKIMSignSuccess,
 		Fields: map[string]string{"private_key": "pempem"},
 	})
 	if err == nil {
@@ -99,7 +99,7 @@ func TestFormatEventSensitiveFieldSkipped(t *testing.T) {
 	e := LogEvent{
 		Type: EventDKIMSignSuccess,
 		Fields: map[string]string{
-			"domain":     "test.com",
+			"domain":      "test.com",
 			"private_key": "should-not-appear",
 		},
 	}

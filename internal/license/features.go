@@ -17,10 +17,10 @@ const (
 
 // FeatureFlags provides feature enablement based on license tier.
 type FeatureFlags struct {
-	mu      sync.RWMutex
-	tier    Tier
-	flags   map[string]bool
-	logger  *zap.Logger
+	mu     sync.RWMutex
+	tier   Tier
+	flags  map[string]bool
+	logger *zap.Logger
 }
 
 // NewFeatureFlags creates a new feature flag system.

@@ -19,32 +19,32 @@ const (
 	EventTLSFailure      EventType = "smtp.tls.failure"
 
 	// Auth results.
-	EventSPFPass     EventType = "spf.pass"
-	EventSPFFail     EventType = "spf.fail"
-	EventSPFNone     EventType = "spf.none"
+	EventSPFPass      EventType = "spf.pass"
+	EventSPFFail      EventType = "spf.fail"
+	EventSPFNone      EventType = "spf.none"
 	EventSPFTempError EventType = "spf.temperror"
 
 	EventDKIMSignSuccess EventType = "dkim.sign.success"
 	EventDKIMSignSkipped EventType = "dkim.sign.skipped"
 	EventDKIMSignFailure EventType = "dkim.sign.failure"
 
-	EventDMARCPass EventType = "dmarc.pass"
-	EventDMARCFail EventType = "dmarc.fail"
-	EventDMARCNone EventType = "dmarc.none"
+	EventDMARCPass      EventType = "dmarc.pass"
+	EventDMARCFail      EventType = "dmarc.fail"
+	EventDMARCNone      EventType = "dmarc.none"
 	EventDMARCTempError EventType = "dmarc.temperror"
 
 	// Spam.
-	EventSpamAccepted    EventType = "spam.verdict.accept"
-	EventSpamSuspicious  EventType = "spam.verdict.suspicious"
-	EventSpamRejected    EventType = "spam.verdict.reject"
+	EventSpamAccepted   EventType = "spam.verdict.accept"
+	EventSpamSuspicious EventType = "spam.verdict.suspicious"
+	EventSpamRejected   EventType = "spam.verdict.reject"
 
 	// Antivirus runtime events. Recorded by the
 	// internal/antivirus engine on every scan decision.
-	EventAntivirusScanned      EventType = "antivirus.scanned"
-	EventAntivirusInfected     EventType = "antivirus.infected"
-	EventAntivirusRejected     EventType = "antivirus.rejected"
-	EventAntivirusQuarantined  EventType = "antivirus.quarantined"
-	EventAntivirusTagged       EventType = "antivirus.tagged"
+	EventAntivirusScanned     EventType = "antivirus.scanned"
+	EventAntivirusInfected    EventType = "antivirus.infected"
+	EventAntivirusRejected    EventType = "antivirus.rejected"
+	EventAntivirusQuarantined EventType = "antivirus.quarantined"
+	EventAntivirusTagged      EventType = "antivirus.tagged"
 
 	// Quarantine events recorded whenever a message is
 	// held for inspection — these come from antivirus
@@ -54,9 +54,9 @@ const (
 
 	EventAcceptanceRuleMatched  EventType = "acceptance_rule.matched"
 	EventAcceptanceRuleRejected EventType = "acceptance_rule.rejected"
-	EventAntivirusScannerError EventType = "antivirus.scanner_error"
-	EventAntivirusFailOpen     EventType = "antivirus.fail_open"
-	EventAntivirusFailClosed   EventType = "antivirus.fail_closed"
+	EventAntivirusScannerError  EventType = "antivirus.scanner_error"
+	EventAntivirusFailOpen      EventType = "antivirus.fail_open"
+	EventAntivirusFailClosed    EventType = "antivirus.fail_closed"
 
 	// Admin-scoped incoming rule events.
 	EventIncomingRuleApplied  EventType = "incoming_rule.applied"
@@ -68,11 +68,11 @@ const (
 	EventBackupTargetUploadFailure EventType = "backup_target.upload.failure"
 
 	// Queue delivery.
-	EventQueueLeased      EventType = "queue.leased"
-	EventQueueDelivered   EventType = "queue.delivered"
-	EventQueueDeferred    EventType = "queue.deferred"
-	EventQueueBounced     EventType = "queue.bounced"
-	EventQueueDeadLetter  EventType = "queue.deadletter"
+	EventQueueLeased     EventType = "queue.leased"
+	EventQueueDelivered  EventType = "queue.delivered"
+	EventQueueDeferred   EventType = "queue.deferred"
+	EventQueueBounced    EventType = "queue.bounced"
+	EventQueueDeadLetter EventType = "queue.deadletter"
 
 	// IMAP.
 	EventIMAPSessionCreated EventType = "imap.session.created"
@@ -87,9 +87,9 @@ const (
 	EventJMAPError          EventType = "jmap.error"
 
 	// Trust.
-	EventTrustScoreChanged EventType = "trust.score.changed"
-	EventTrustLockout      EventType = "trust.lockout"
-	EventTrustRateLimit    EventType = "trust.rate_limit"
+	EventTrustScoreChanged  EventType = "trust.score.changed"
+	EventTrustLockout       EventType = "trust.lockout"
+	EventTrustRateLimit     EventType = "trust.rate_limit"
 	EventTrustAbuseDetected EventType = "trust.abuse.detected"
 
 	// Policy.
@@ -104,13 +104,13 @@ const (
 	// move / flag fired), skip (matched but suppressed —
 	// loop marker, rate limit, Auto-Submitted, etc.) and
 	// error (runner panic / DB failure / move failure).
-	EventRulesRunnerPass    EventType = "rules.runner.passthrough"
-	EventRulesRunnerAction  EventType = "rules.runner.action"
-	EventRulesRunnerSkip    EventType = "rules.runner.skip"
-	EventRulesRunnerError   EventType = "rules.runner.error"
-	EventIMAPSessionClosed  EventType = "imap.session.closed"
-	EventIMAPLoginSuccess   EventType = "imap.login.success"
-	EventIMAPLoginFailure   EventType = "imap.login.failure"
+	EventRulesRunnerPass     EventType = "rules.runner.passthrough"
+	EventRulesRunnerAction   EventType = "rules.runner.action"
+	EventRulesRunnerSkip     EventType = "rules.runner.skip"
+	EventRulesRunnerError    EventType = "rules.runner.error"
+	EventIMAPSessionClosed   EventType = "imap.session.closed"
+	EventIMAPLoginSuccess    EventType = "imap.login.success"
+	EventIMAPLoginFailure    EventType = "imap.login.failure"
 	EventIMAPMailboxSelected EventType = "imap.mailbox.selected"
 )
 
@@ -149,9 +149,9 @@ type Metrics struct {
 	DKIMFailed  int64 `json:"dkim_failed"`
 
 	// DMARC.
-	DMARCPass int64 `json:"dmarc_pass"`
-	DMARCFail int64 `json:"dmarc_fail"`
-	DMARCNone int64 `json:"dmarc_none"`
+	DMARCPass      int64 `json:"dmarc_pass"`
+	DMARCFail      int64 `json:"dmarc_fail"`
+	DMARCNone      int64 `json:"dmarc_none"`
 	DMARCTempError int64 `json:"dmarc_temperror"`
 
 	// Spam verdicts.
@@ -160,9 +160,9 @@ type Metrics struct {
 	SpamRejected   int64 `json:"spam_rejected"`
 
 	// Queue delivery.
-	QueueDelivered int64 `json:"queue_delivered"`
-	QueueDeferred  int64 `json:"queue_deferred"`
-	QueueBounced   int64 `json:"queue_bounced"`
+	QueueDelivered  int64 `json:"queue_delivered"`
+	QueueDeferred   int64 `json:"queue_deferred"`
+	QueueBounced    int64 `json:"queue_bounced"`
 	QueueDeadLetter int64 `json:"queue_deadletter"`
 
 	// Delivery latency in milliseconds (cumulative for averaging).
@@ -176,38 +176,38 @@ type Metrics struct {
 	IMAPMailboxSelected int64 `json:"imap_mailbox_selected"`
 
 	// POP3.
-	POP3Sessions         int64 `json:"pop3_sessions"`
-	POP3LoginSuccess     int64 `json:"pop3_login_success"`
-	POP3LoginFailure     int64 `json:"pop3_login_failure"`
+	POP3Sessions          int64 `json:"pop3_sessions"`
+	POP3LoginSuccess      int64 `json:"pop3_login_success"`
+	POP3LoginFailure      int64 `json:"pop3_login_failure"`
 	POP3MessagesRetrieved int64 `json:"pop3_messages_retrieved"`
 	POP3MessagesDeleted   int64 `json:"pop3_messages_deleted"`
 
 	// Trust.
-	TrustLockouts       int64 `json:"trust_lockouts"`
-	TrustRateLimits     int64 `json:"trust_rate_limits"`
+	TrustLockouts        int64 `json:"trust_lockouts"`
+	TrustRateLimits      int64 `json:"trust_rate_limits"`
 	TrustAbuseDetections int64 `json:"trust_abuse_detections"`
 
 	// Policy.
-	PolicyAllowed  int64 `json:"policy_allowed"`
-	PolicyBlocked  int64 `json:"policy_blocked"`
+	PolicyAllowed   int64 `json:"policy_allowed"`
+	PolicyBlocked   int64 `json:"policy_blocked"`
 	PolicyOverrides int64 `json:"policy_overrides"`
 
 	// JMAP.
-	JMAPRequests       int64 `json:"jmap_requests"`
-	JMAPMailboxQueries int64 `json:"jmap_mailbox_queries"`
-	JMAPMailboxChanges int64 `json:"jmap_mailbox_changes"`
-	JMAPEmailChanges   int64 `json:"jmap_email_changes"`
-	JMAPEmailSet       int64 `json:"jmap_email_set"`
-	JMAPEmailUpdated   int64 `json:"jmap_email_updated"`
-	JMAPEmailDestroyed int64 `json:"jmap_email_destroyed"`
+	JMAPRequests         int64 `json:"jmap_requests"`
+	JMAPMailboxQueries   int64 `json:"jmap_mailbox_queries"`
+	JMAPMailboxChanges   int64 `json:"jmap_mailbox_changes"`
+	JMAPEmailChanges     int64 `json:"jmap_email_changes"`
+	JMAPEmailSet         int64 `json:"jmap_email_set"`
+	JMAPEmailUpdated     int64 `json:"jmap_email_updated"`
+	JMAPEmailDestroyed   int64 `json:"jmap_email_destroyed"`
 	JMAPSubmissions      int64 `json:"jmap_submissions"`
 	JMAPSubmissionQueued int64 `json:"jmap_submission_queued"`
 	JMAPSubmissionFailed int64 `json:"jmap_submission_failed"`
-	JMAPAuthSuccess   int64 `json:"jmap_auth_success"`
-	JMAPAuthFailure   int64 `json:"jmap_auth_failure"`
-	JMAPMethodSuccess int64 `json:"jmap_method_success"`
-	JMAPMethodFailure int64 `json:"jmap_method_failure"`
-	JMAPErrors        int64 `json:"jmap_errors"`
+	JMAPAuthSuccess      int64 `json:"jmap_auth_success"`
+	JMAPAuthFailure      int64 `json:"jmap_auth_failure"`
+	JMAPMethodSuccess    int64 `json:"jmap_method_success"`
+	JMAPMethodFailure    int64 `json:"jmap_method_failure"`
+	JMAPErrors           int64 `json:"jmap_errors"`
 
 	// Backup.
 	BackupsCreated  int64 `json:"backups_created"`
@@ -226,8 +226,8 @@ type Metrics struct {
 	LicenseBlocks           int64 `json:"license_blocks"`
 
 	// TLS.
-	TLSCertificates      int64 `json:"tls_certificates"`
-	TLSExpiredCerts      int64 `json:"tls_expired_certificates"`
+	TLSCertificates int64 `json:"tls_certificates"`
+	TLSExpiredCerts int64 `json:"tls_expired_certificates"`
 
 	// Antivirus runtime counters. Bumped by the
 	// internal/antivirus package from the SMTP receive
@@ -247,9 +247,9 @@ type Metrics struct {
 	BackupTargetUploadsAttempt int64 `json:"backup_target_uploads_attempt"`
 	BackupTargetUploadsSuccess int64 `json:"backup_target_uploads_success"`
 	BackupTargetUploadsFailure int64 `json:"backup_target_uploads_failure"`
-	TLSWarningCerts      int64 `json:"tls_warning_certificates"`
-	TLSReloads           int64 `json:"tls_reloads"`
-	TLSReloadFailures    int64 `json:"tls_reload_failures"`
+	TLSWarningCerts            int64 `json:"tls_warning_certificates"`
+	TLSReloads                 int64 `json:"tls_reloads"`
+	TLSReloadFailures          int64 `json:"tls_reload_failures"`
 }
 
 // ── Health ───────────────────────────────────────────────────
@@ -279,8 +279,8 @@ func (h HealthStatus) String() string {
 
 // HealthReport contains the overall system health.
 type HealthReport struct {
-	Overall  HealthStatus           `json:"overall"`
-	Checks   map[string]HealthCheck `json:"checks"`
+	Overall HealthStatus           `json:"overall"`
+	Checks  map[string]HealthCheck `json:"checks"`
 }
 
 // HealthCheck is the result of a single subsystem health check.
@@ -300,13 +300,13 @@ type EventEntry struct {
 
 // DiagnosticSnapshot is a point-in-time view of system state.
 type DiagnosticSnapshot struct {
-	Metrics           Metrics            `json:"metrics"`
-	RecentEvents      []EventEntry       `json:"recent_events"`
-	Health            *HealthReport      `json:"health"`
-	QueueSummary      *QueueSummary      `json:"queue_summary,omitempty"`
-	RecentFailures    []EventEntry       `json:"recent_failures"`
-	RecentAuthFailures []EventEntry      `json:"recent_auth_failures"`
-	RecentSpamRejects []EventEntry      `json:"recent_spam_rejects"`
+	Metrics            Metrics       `json:"metrics"`
+	RecentEvents       []EventEntry  `json:"recent_events"`
+	Health             *HealthReport `json:"health"`
+	QueueSummary       *QueueSummary `json:"queue_summary,omitempty"`
+	RecentFailures     []EventEntry  `json:"recent_failures"`
+	RecentAuthFailures []EventEntry  `json:"recent_auth_failures"`
+	RecentSpamRejects  []EventEntry  `json:"recent_spam_rejects"`
 }
 
 // QueueSummary is a high-level view of queue state.

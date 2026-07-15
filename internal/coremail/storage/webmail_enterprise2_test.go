@@ -26,18 +26,18 @@ import (
 // effective scope is subject / from / to.
 func TestMessageFilterScopeDefaults(t *testing.T) {
 	cases := []struct {
-		name           string
-		filter         MessageFilter
+		name                                                  string
+		filter                                                MessageFilter
 		wantSubj, wantFrom, wantTo, wantCC, wantBCC, wantBody bool
 	}{
 		{
-			name:    "empty-search",
-			filter:  MessageFilter{Search: ""},
+			name:     "empty-search",
+			filter:   MessageFilter{Search: ""},
 			wantSubj: false, wantFrom: false, wantTo: false, wantCC: false, wantBCC: false, wantBody: false,
 		},
 		{
-			name:    "no-flags-set",
-			filter:  MessageFilter{Search: "invoice"},
+			name:     "no-flags-set",
+			filter:   MessageFilter{Search: "invoice"},
 			wantSubj: true, wantFrom: true, wantTo: true, wantCC: false, wantBCC: false, wantBody: false,
 		},
 		{
@@ -64,7 +64,7 @@ func TestMessageFilterScopeDefaults(t *testing.T) {
 		{
 			name: "body-only",
 			filter: MessageFilter{
-				Search:    "invoice",
+				Search:     "invoice",
 				SearchBody: true,
 			},
 			wantSubj: false, wantFrom: false, wantTo: false, wantCC: false, wantBCC: false, wantBody: true,
@@ -346,7 +346,3 @@ func TestAttachmentGetByMessageAndID(t *testing.T) {
 		t.Errorf("cross-message lookup should return nil, got %+v", got)
 	}
 }
-
-
-
-

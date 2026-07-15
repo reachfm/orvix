@@ -352,7 +352,8 @@ func TestCriticalIndexesExist(t *testing.T) {
 // and verifies all 59 core tables and their indexes exist.
 //
 // NEVER drops public tables — uses an isolated schema:
-//   orvix_pg_test_<timestamp>
+//
+//	orvix_pg_test_<timestamp>
 //
 // Runs only when:
 //

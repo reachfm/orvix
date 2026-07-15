@@ -189,7 +189,9 @@ func (r *FolderSQLRepo) EnsureSystemFolders(ctx context.Context, mailboxID uint,
 	return nil
 }
 
-func scanFolder(row interface{ Scan(dest ...interface{}) error }) (*Folder, error) {
+func scanFolder(row interface {
+	Scan(dest ...interface{}) error
+}) (*Folder, error) {
 	var f Folder
 	var folderType string
 	err := row.Scan(&f.ID, &f.MailboxID, &f.ParentID, &f.Name, &f.Path, &folderType,

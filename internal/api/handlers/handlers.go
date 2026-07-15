@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/abuse"
 	dashboardsvc "github.com/orvix/orvix/internal/admin/dashboard"
 	domainadminsvc "github.com/orvix/orvix/internal/admin/domain"
 	mailboxadminsvc "github.com/orvix/orvix/internal/admin/mailbox"
@@ -27,6 +28,7 @@ import (
 	"github.com/orvix/orvix/internal/api/handlers/settings"
 	"github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/auth"
+	"github.com/orvix/orvix/internal/billing"
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/coremail"
 	"github.com/orvix/orvix/internal/coremail/push"
@@ -191,6 +193,38 @@ type Handler struct {
 	domainAdminSvc   *domainadminsvc.Service
 	platformAdminSvc *platformsvc.PlatformService
 	dashboardSvc     *dashboardsvc.DashboardService
+
+	billingSvc   *billing.Service
+	usageSvc     *billing.UsageService
+	quotaSvc     *billing.QuotaService
+	abuseSvc     *abuse.SignalService
+	rateLimitSvc *abuse.RateLimitService
+
+	billingScheduler *billing.Scheduler
+	billingWebhook   *billing.WebhookService
+	paymentProvider  billing.PaymentProvider
+	sendEnforcer     *billing.SendEnforcer
+	mailSender       MailSender
+}
+
+// MailSender sends transactional emails.
+type MailSender interface {
+	Send(to, subject, body string) error
+}
+
+// sqlDialect returns the dialect-aware SQL helper for raw queries.
+// Falls back to SQLite when the handler was constructed without a config.
+func (h *Handler) sqlDialect() *dbdialect.Info {
+	if h.dialect != nil {
+		return h.dialect
+	}
+	return dbdialect.FromDriver("sqlite")
+}
+
+// sqlQ rewrites a raw SQL string containing ? placeholders so it works on
+// the active database dialect (e.g. $1, $2, ... for PostgreSQL).
+func (h *Handler) sqlQ(query string) string {
+	return h.sqlDialect().Rewrite(query)
 }
 
 // NewHandler creates a new Handler with dependencies.
@@ -372,6 +406,76 @@ func (h *Handler) SetPlatformAdminService(s *platformsvc.PlatformService) {
 // SetDashboardService wires the dashboard aggregation service.
 func (h *Handler) SetDashboardService(s *dashboardsvc.DashboardService) {
 	h.dashboardSvc = s
+}
+
+func (h *Handler) SetBillingService(s *billing.Service) {
+	h.billingSvc = s
+}
+
+func (h *Handler) SetBillingUsageService(s *billing.UsageService) {
+	h.usageSvc = s
+}
+
+func (h *Handler) SetBillingQuotaService(s *billing.QuotaService) {
+	h.quotaSvc = s
+}
+
+func (h *Handler) SetBillingScheduler(s *billing.Scheduler) {
+	h.billingScheduler = s
+}
+
+func (h *Handler) SetBillingWebhook(s *billing.WebhookService) {
+	h.billingWebhook = s
+}
+
+func (h *Handler) SetPaymentProvider(p billing.PaymentProvider) {
+	h.paymentProvider = p
+}
+
+func (h *Handler) SetSendEnforcer(e *billing.SendEnforcer) {
+	h.sendEnforcer = e
+}
+
+func (h *Handler) SetMailSender(m MailSender) {
+	h.mailSender = m
+}
+
+func (h *Handler) StartBillingScheduler(ctx context.Context, interval time.Duration) {
+	if h.billingScheduler == nil {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				start := time.Now()
+				n, err := h.billingScheduler.RunAll(ctx)
+				elapsed := time.Since(start)
+				if err != nil {
+					h.logger.Error("billing scheduler run failed",
+						zap.Int("transitions", n),
+						zap.Duration("duration", elapsed),
+						zap.Error(err))
+				} else {
+					h.logger.Info("billing scheduler run completed",
+						zap.Int("transitions", n),
+						zap.Duration("duration", elapsed))
+				}
+			}
+		}
+	}()
+}
+
+func (h *Handler) SetAbuseSignalService(s *abuse.SignalService) {
+	h.abuseSvc = s
+}
+
+func (h *Handler) SetRateLimitService(s *abuse.RateLimitService) {
+	h.rateLimitSvc = s
 }
 
 // setPreferredSessionCookie sets the opaque HttpOnly session cookie.
@@ -793,13 +897,13 @@ func (h *Handler) ListAPIKeys(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list API keys"})
 	}
 	type safeKey struct {
-		ID        uint      `json:"id"`
-		Name      string    `json:"name"`
-		KeyPrefix string    `json:"key_prefix"`
-		Enabled   bool      `json:"enabled"`
-		LastUsed  time.Time `json:"last_used"`
-		ExpiresAt time.Time `json:"expires_at"`
-		CreatedAt time.Time `json:"created_at"`
+		ID        uint       `json:"id"`
+		Name      string     `json:"name"`
+		KeyPrefix string     `json:"key_prefix"`
+		Enabled   bool       `json:"enabled"`
+		LastUsed  *time.Time `json:"last_used,omitempty"`
+		ExpiresAt *time.Time `json:"expires_at,omitempty"`
+		CreatedAt time.Time  `json:"created_at"`
 	}
 	result := make([]safeKey, 0, len(keys))
 	for _, k := range keys {
@@ -833,14 +937,15 @@ func (h *Handler) CreateAPIKey(c fiber.Ctx) error {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "API keys require ISP or Enterprise license"})
 	}
 
-	ttl := 365 * 24 * time.Hour
+	ttlDays := 365
 	if req.TTL != "" {
 		if d, err := time.ParseDuration(req.TTL); err == nil {
-			ttl = d
+			ttlDays = int(d.Hours() / 24)
 		}
 	}
 
-	fullKey, record, err := h.apikeys.Generate(req.Name, userID, role, ttl)
+	tenantID := c.Locals("tenant_id").(uint)
+	fullKey, record, err := h.apikeys.Generate(req.Name, userID, tenantID, role, nil, ttlDays)
 	if err != nil {
 		h.logger.Error("failed to generate API key", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "API key generation failed"})
@@ -857,7 +962,7 @@ func (h *Handler) CreateAPIKey(c fiber.Ctx) error {
 	})
 }
 
-// DeleteAPIKey revokes an API key.
+// DeleteAPIKey revokes an API key, scoped to the authenticated user.
 func (h *Handler) DeleteAPIKey(c fiber.Ctx) error {
 	idStr := c.Params("id")
 	var id uint
@@ -865,7 +970,11 @@ func (h *Handler) DeleteAPIKey(c fiber.Ctx) error {
 	if id == 0 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid id"})
 	}
-	if err := h.apikeys.Revoke(id); err != nil {
+	userID, ok := c.Locals("user_id").(uint)
+	if !ok || userID == 0 {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authentication required"})
+	}
+	if err := h.apikeys.RevokeScoped(id, userID); err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "API key not found"})
 	}
 	h.writeAuditLog(c, "apikey.revoke", fmt.Sprintf("id:%d", id))

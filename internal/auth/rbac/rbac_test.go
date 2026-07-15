@@ -15,9 +15,9 @@ func TestHasPermission_Matrix(t *testing.T) {
 	// must be reflected here, and the test must be updated
 	// alongside it.
 	cases := []struct {
-		role    auth.Role
-		perm    Permission
-		want    bool
+		role auth.Role
+		perm Permission
+		want bool
 	}{
 		// Super admin: every permission.
 		{auth.RoleSuperAdmin, PermQueueRead, true},

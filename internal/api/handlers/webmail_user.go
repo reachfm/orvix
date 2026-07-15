@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/billing"
 	"github.com/orvix/orvix/internal/coremail"
 	coremailmime "github.com/orvix/orvix/internal/coremail/mime"
 	"github.com/orvix/orvix/internal/coremail/queue"
@@ -98,7 +99,7 @@ func (h *Handler) resolveWebmailUserContext(c fiber.Ctx) (*webmailUserContext, s
 
 	var email, role string
 	if err := sqlDB.QueryRow(
-		"SELECT email, role FROM users WHERE id = ?", userID,
+		h.sqlQ("SELECT email, role FROM users WHERE id = ?"), userID,
 	).Scan(&email, &role); err != nil {
 		return nil, "user_not_found"
 	}
@@ -109,7 +110,7 @@ func (h *Handler) resolveWebmailUserContext(c fiber.Ctx) (*webmailUserContext, s
 	// Look up the mailbox by email. We query coremail_mailboxes
 	// directly because the MailStore wraps folder/message
 	// repositories and does not own the mailbox row.
-	mailbox, err := lookupMailboxByEmail(c.Context(), sqlDB, email)
+	mailbox, err := h.lookupMailboxByEmail(c.Context(), sqlDB, email)
 	if err != nil || mailbox == nil {
 		return nil, "no_mailbox"
 	}
@@ -131,7 +132,7 @@ func (h *Handler) resolveWebmailUserContext(c fiber.Ctx) (*webmailUserContext, s
 // in the coremail package has a GetByEmail method but it
 // expects a transaction; the user-facing endpoints run
 // outside a transaction so we issue the query directly.
-func lookupMailboxByEmail(ctx context.Context, db *sql.DB, email string) (*coremail.Mailbox, error) {
+func (h *Handler) lookupMailboxByEmail(ctx context.Context, db *sql.DB, email string) (*coremail.Mailbox, error) {
 	const q = `SELECT id, domain_id, tenant_id, local_part, email, name,
 		password_hash, auth_scheme, mfa_enabled, COALESCE(mfa_secret,''),
 		COALESCE(app_passwords,''), status, quota_mb, used_bytes, msg_count,
@@ -139,7 +140,7 @@ func lookupMailboxByEmail(ctx context.Context, db *sql.DB, email string) (*corem
 		send_limit_per_hour, recv_limit_per_hour, last_login, COALESCE(last_ip,''),
 		created_at, updated_at, deleted_at
 		FROM coremail_mailboxes WHERE email = ? AND deleted_at IS NULL LIMIT 1`
-	row := db.QueryRowContext(ctx, q, email)
+	row := db.QueryRowContext(ctx, h.sqlQ(q), email)
 	m := &coremail.Mailbox{}
 	var lastLogin sql.NullTime
 	var deletedAt sql.NullTime
@@ -763,8 +764,60 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		}
 	}
 
+	allRecipients := make([]*mail.Address, 0, len(toList)+len(ccList)+len(bccList))
+	allRecipients = append(allRecipients, toList...)
+	allRecipients = append(allRecipients, ccList...)
+	allRecipients = append(allRecipients, bccList...)
+
+	// Deduplicate recipients by normalized address. Duplicate
+	// addresses must not inflate quota consumption.
+	seen := make(map[string]bool, len(allRecipients))
+	unique := make([]*mail.Address, 0, len(allRecipients))
+	for _, addr := range allRecipients {
+		norm := strings.ToLower(strings.TrimSpace(addr.Address))
+		if !seen[norm] {
+			seen[norm] = true
+			unique = append(unique, addr)
+		}
+	}
+	allRecipients = unique
+
+	// Real quota gate: number of unique, valid recipients.
+	// This reserves quota atomically before storage/queue side
+	// effects, then reconciles the reservation to the actual
+	// successful enqueue count below.
+	intendedRecipientCount := len(allRecipients)
+	var reservedSend *billing.SendReservationResult
+	if h.sendEnforcer != nil {
+		id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
+		result, err := h.sendEnforcer.ReserveSend(c.Context(), id, messageID, intendedRecipientCount)
+		if err != nil {
+			h.logger.Error("webmail send quota reservation failed",
+				zap.String("message_id", messageID),
+				zap.Error(err))
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "cannot determine quota"})
+		}
+		if !result.Allowed {
+			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+				"error": "send rejected: " + result.Reason, "limit": result.Limit, "remaining": result.Remaining,
+			})
+		}
+		reservedSend = result
+	}
+	cancelReservation := func() {
+		if h.sendEnforcer != nil && reservedSend != nil {
+			id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
+			if err := h.sendEnforcer.CancelSendReservation(c.Context(), id, messageID); err != nil {
+				h.logger.Error("webmail send quota reservation release failed",
+					zap.String("message_id", messageID),
+					zap.Error(err))
+			}
+		}
+	}
+
 	sentFolder, err := resolveFolderCaseInsensitive(c.Context(), ctx.MailboxStore, ctx.Mailbox.ID, "Sent")
 	if err != nil || sentFolder == nil {
+		cancelReservation()
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "Sent folder not found for mailbox; ensure system folders are provisioned",
 		})
@@ -789,6 +842,7 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 	}
 
 	if err := ctx.MailboxStore.StoreMessage(c.Context(), msg, rfc822, nil); err != nil {
+		cancelReservation()
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": fmt.Sprintf("store message: %v", err),
 		})
@@ -802,6 +856,7 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 	// the user's mail.
 	qe, ok := h.queueEngineForUser()
 	if !ok {
+		cancelReservation()
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
 			"error":      "queue engine not available",
 			"message_id": msg.MessageID,
@@ -825,11 +880,6 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 	// The classification runs on the same Domain +
 	// Mailbox lookups the SMTP receiver uses for
 	// inbound — there is no parallel "is-local" path.
-	allRecipients := make([]*mail.Address, 0, len(toList)+len(ccList)+len(bccList))
-	allRecipients = append(allRecipients, toList...)
-	allRecipients = append(allRecipients, ccList...)
-	allRecipients = append(allRecipients, bccList...)
-
 	mailboxID := ctx.Mailbox.ID
 	enqueueErrors := make([]string, 0, len(allRecipients))
 	queuedCount := 0
@@ -888,6 +938,36 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		queuedCount++
 		if local {
 			deliveredLocal = append(deliveredLocal, bare)
+		}
+	}
+
+	// Unified send event: records billing usage, abuse counters, metrics atomically.
+	// Must run even on partial enqueue to account for successfully enqueued recipients.
+	if h.sendEnforcer != nil && queuedCount > 0 {
+		id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
+		if reservedSend != nil {
+			if err := h.sendEnforcer.FinalizeSendReservation(c.Context(), id, msg.MessageID, queuedCount); err != nil {
+				h.logger.Error("webmail send quota reservation finalize failed",
+					zap.String("message_id", msg.MessageID),
+					zap.Int("queued_count", queuedCount),
+					zap.Error(err))
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+					"error":      "failed to finalize send accounting",
+					"id":         msg.ID,
+					"message_id": msg.MessageID,
+					"folder":     sentFolder.Path,
+					"status":     "stored",
+				})
+			}
+		} else {
+			h.sendEnforcer.RecordSend(c.Context(), id, msg.MessageID, queuedCount)
+		}
+	} else if h.sendEnforcer != nil && reservedSend != nil {
+		id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
+		if err := h.sendEnforcer.CancelSendReservation(c.Context(), id, msg.MessageID); err != nil {
+			h.logger.Error("webmail send empty quota reservation release failed",
+				zap.String("message_id", msg.MessageID),
+				zap.Error(err))
 		}
 	}
 
@@ -1138,8 +1218,8 @@ func (h *Handler) classifyLocalRecipient(
 	var domainID uint
 	var domainStatus string
 	err = sqlDB.QueryRowContext(ctx,
-		`SELECT id, status FROM coremail_domains
-		 WHERE name = ? AND tenant_id = ? AND deleted_at IS NULL`,
+		h.sqlQ(`SELECT id, status FROM coremail_domains
+		 WHERE name = ? AND tenant_id = ? AND deleted_at IS NULL`),
 		domain, senderTenantID,
 	).Scan(&domainID, &domainStatus)
 	if err != nil {
@@ -1170,8 +1250,8 @@ func (h *Handler) classifyLocalRecipient(
 	var mailboxID uint
 	var mailboxStatus string
 	err = sqlDB.QueryRowContext(ctx,
-		`SELECT id, status FROM coremail_mailboxes
-		 WHERE email = ? AND tenant_id = ? AND deleted_at IS NULL`,
+		h.sqlQ(`SELECT id, status FROM coremail_mailboxes
+		 WHERE email = ? AND tenant_id = ? AND deleted_at IS NULL`),
 		email, senderTenantID,
 	).Scan(&mailboxID, &mailboxStatus)
 	if err != nil {
@@ -1747,7 +1827,7 @@ func (h *Handler) WebmailMarkFolderRead(c fiber.Ctx) error {
 	}
 	now := time.Now().UTC()
 	res, err := sqlDB.Exec(
-		"UPDATE coremail_messages SET seen = 1, updated_at = ? WHERE mailbox_id = ? AND folder_id = ? AND deleted = 0 AND seen = 0",
+		h.sqlQ("UPDATE coremail_messages SET seen = 1, updated_at = ? WHERE mailbox_id = ? AND folder_id = ? AND deleted = 0 AND seen = 0"),
 		now, ctx.Mailbox.ID, folder.ID,
 	)
 	if err != nil {

@@ -172,7 +172,7 @@ func (h *Handler) domainIsProvisioned(ctx context.Context, domain string) (bool,
 	}
 	var count int
 	row := sqlDB.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM coremail_domains WHERE LOWER(name) = ? AND deleted_at IS NULL`,
+		h.sqlQ(`SELECT COUNT(*) FROM coremail_domains WHERE LOWER(name) = ? AND deleted_at IS NULL`),
 		domain)
 	if err := row.Scan(&count); err != nil {
 		return false, err

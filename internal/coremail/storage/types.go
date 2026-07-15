@@ -72,13 +72,13 @@ type MessageFilter struct {
 	MailboxID uint
 	FolderID  *uint
 	Flags     *struct {
-		Seen     *bool
-		Flagged  *bool
-		Draft    *bool
-		Deleted  *bool
-		Junk     *bool
+		Seen    *bool
+		Flagged *bool
+		Draft   *bool
+		Deleted *bool
+		Junk    *bool
 	}
-	Search       string
+	Search        string
 	SearchSubject bool
 	SearchFrom    bool
 	SearchTo      bool
@@ -161,4 +161,3 @@ type MessagesByID []Message
 func (m MessagesByID) Len() int           { return len(m) }
 func (m MessagesByID) Less(i, j int) bool { return m[i].ID > m[j].ID }
 func (m MessagesByID) Swap(i, j int)      { m[i], m[j] = m[j], m[i] }
-

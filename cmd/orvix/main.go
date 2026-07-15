@@ -209,6 +209,8 @@ func main() {
 	}
 
 	router := api.NewRouter(cfg, authenticator, logger, db, reg, featureFlags, redisClient)
+	router.Start()
+	logger.Info("billing scheduler and background services started")
 
 	app := router.App()
 
@@ -264,7 +266,7 @@ func main() {
 
 	logger.Info("shutting down orvix...")
 
-	if err := app.Shutdown(); err != nil {
+	if err := router.Shutdown(); err != nil {
 		logger.Error("admin server shutdown error", zap.Error(err))
 	}
 

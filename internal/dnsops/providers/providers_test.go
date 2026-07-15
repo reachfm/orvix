@@ -124,10 +124,10 @@ func TestNamecheapProviderNoCredentialsReturnsNotConfigured(t *testing.T) {
 func TestNamecheapProviderWithCredentialsDryRun(t *testing.T) {
 	client := NewFakeNamecheapClient()
 	p := NewNamecheapProvider(NamecheapConfig{
-		APIUser:      "user-secret-do-not-leak",
-		APIKey:       "key-secret-do-not-leak",
-		Username:     "u",
-		EnableApply:  true,
+		APIUser:     "user-secret-do-not-leak",
+		APIKey:      "key-secret-do-not-leak",
+		Username:    "u",
+		EnableApply: true,
 	}, client)
 	cp, err := p.Plan(context.Background(), fixturePlan(t))
 	if err != nil {

@@ -15,8 +15,8 @@ type Module struct {
 	mgr    *Manager
 }
 
-func (m *Module) ID() string { return "dns-automation" }
-func (m *Module) Version() string { return "1.0.0" }
+func (m *Module) ID() string         { return "dns-automation" }
+func (m *Module) Version() string    { return "1.0.0" }
 func (m *Module) Requires() []string { return []string{"core"} }
 
 func (m *Module) Init(cfg *config.Config, db *gorm.DB) error {

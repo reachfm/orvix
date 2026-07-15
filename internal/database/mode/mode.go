@@ -192,10 +192,10 @@ const PingTimeout = 2 * time.Second
 // unavailable" rather than crashing the API handler.
 func CheckHealth(ctx context.Context, db *gorm.DB, in HealthInputs) Health {
 	h := Health{
-		Mode:       Parse(in.Driver),
-		Driver:     in.Driver,
-		Production: in.IsProduction,
-		CheckedAt:  time.Now().UTC(),
+		Mode:        Parse(in.Driver),
+		Driver:      in.Driver,
+		Production:  in.IsProduction,
+		CheckedAt:   time.Now().UTC(),
 		PoolMaxOpen: in.MaxOpen,
 		PoolMaxIdle: in.MaxIdle,
 	}

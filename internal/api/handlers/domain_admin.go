@@ -89,9 +89,25 @@ func (h *Handler) CreateAdminDomain(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "domain name is required"})
 	}
 
+	// Quota enforcement: check domain limit before creating.
+	count, err := h.domainAdminSvc.CountByTenant(c.Context(), tenantID)
+	if err == nil && h.quotaSvc != nil {
+		if result := h.quotaSvc.CanCreateDomain(tenantID, int(count)); result != nil && !result.Allowed {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"error":   "domain quota exceeded: " + result.Reason,
+				"limit":   result.Limit,
+				"used":    result.Used,
+				"allowed": false,
+			})
+		}
+	}
+
 	d, err := h.domainAdminSvc.CreateDomain(c.Context(), req, tenantID)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
+	}
+	if h.usageSvc != nil {
+		h.usageSvc.SetDomainCount(tenantID, int(count)+1)
 	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"domain": d})
 }

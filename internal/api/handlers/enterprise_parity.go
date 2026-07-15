@@ -70,9 +70,9 @@ func (h *Handler) GetAdminTenant(c fiber.Ctx) error {
 		})
 	}
 	row := db.QueryRowContext(c.Context(),
-		`SELECT id, name, slug, domain, plan, max_domains, max_mailboxes,
+		h.sqlQ(`SELECT id, name, slug, domain, plan, max_domains, max_mailboxes,
 		        logo_url, primary_color, active, created_at, updated_at
-		 FROM tenants WHERE id = ? AND deleted_at IS NULL`, tenantID)
+		 FROM tenants WHERE id = ? AND deleted_at IS NULL`), tenantID)
 	var t struct {
 		ID           int64
 		Name         sql.NullString
@@ -217,8 +217,8 @@ func (h *Handler) PatchAdminTenantBranding(c fiber.Ctx) error {
 	}
 	args = append(args, id)
 	res, err := db.ExecContext(c.Context(),
-		"UPDATE tenants SET "+strings.Join(setClauses, ", ")+
-			" WHERE id = ? AND deleted_at IS NULL", args...)
+		h.sqlQ("UPDATE tenants SET "+strings.Join(setClauses, ", ")+
+			" WHERE id = ? AND deleted_at IS NULL"), args...)
 	if err != nil {
 		if h.logger != nil {
 			h.logger.Error("admin branding update failed", zap.Error(err))

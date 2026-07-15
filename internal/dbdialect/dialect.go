@@ -116,6 +116,14 @@ func (d *Info) BooleanType() string {
 	return "INTEGER"
 }
 
+// BlobType returns the preferred binary/blob column type.
+func (d *Info) BlobType() string {
+	if d.Dialect == Postgres {
+		return "BYTEA"
+	}
+	return "BLOB"
+}
+
 // AutoIncrement returns the primary-key autoincrement clause.
 func (d *Info) AutoIncrement() string {
 	if d.Dialect == Postgres {
@@ -175,4 +183,54 @@ func (d *Info) FalseLiteral() string {
 		return "FALSE"
 	}
 	return "0"
+}
+
+// Excluded returns the conflict-row reference for column in an upsert.
+// PostgreSQL requires EXCLUDED.col; SQLite accepts excluded.col.
+func (d *Info) Excluded(column string) string {
+	if d.Dialect == Postgres {
+		return "EXCLUDED." + column
+	}
+	return "excluded." + column
+}
+
+// Rewrite returns sql with positional ? placeholders rewritten for the
+// active dialect. For PostgreSQL each ? becomes $1, $2, …; for SQLite the
+// input is returned unchanged. Question marks inside SQL string literals
+// (single quotes) are left untouched.
+func (d *Info) Rewrite(sql string) string {
+	if d.Dialect != Postgres {
+		return sql
+	}
+	var b strings.Builder
+	b.Grow(len(sql) + 8)
+	idx := 0
+	inString := false
+	escaped := false
+	for i := 0; i < len(sql); i++ {
+		c := sql[i]
+		if inString {
+			if escaped {
+				escaped = false
+			} else if c == '\\' {
+				escaped = true
+			} else if c == '\'' {
+				inString = false
+			}
+			b.WriteByte(c)
+			continue
+		}
+		if c == '\'' {
+			inString = true
+			b.WriteByte(c)
+			continue
+		}
+		if c == '?' {
+			idx++
+			fmt.Fprintf(&b, "$%d", idx)
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
 }

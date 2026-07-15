@@ -101,11 +101,11 @@ const MaxRfc822ReadBytes = 256 * 1024
 // All interfaces are satisfied by the existing types in the
 // codebase; tests pass fakes.
 type Dependencies struct {
-	MailStore       *storage.MailStore
-	QueueEngine     *queue.QueueEngine
-	Vacation        storage.VacationRepository
-	Forwarding      storage.ForwardingRepository
-	Logger          *zap.Logger
+	MailStore   *storage.MailStore
+	QueueEngine *queue.QueueEngine
+	Vacation    storage.VacationRepository
+	Forwarding  storage.ForwardingRepository
+	Logger      *zap.Logger
 }
 
 // Runner evaluates the rules engine for one inbound message.

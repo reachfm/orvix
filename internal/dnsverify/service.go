@@ -16,15 +16,15 @@ type Resolver interface {
 
 type defaultResolver struct{}
 
-func (defaultResolver) LookupTXT(host string) ([]string, error) { return net.LookupTXT(host) }
-func (defaultResolver) LookupMX(host string) ([]*net.MX, error) { return net.LookupMX(host) }
+func (defaultResolver) LookupTXT(host string) ([]string, error)  { return net.LookupTXT(host) }
+func (defaultResolver) LookupMX(host string) ([]*net.MX, error)  { return net.LookupMX(host) }
 func (defaultResolver) LookupHost(host string) ([]string, error) { return net.LookupHost(host) }
 func (defaultResolver) LookupAddr(addr string) ([]string, error) { return net.LookupAddr(addr) }
 
 // Service performs real DNS verification for deliverability.
 type Service struct {
-	resolver   Resolver
-	dkimSel string
+	resolver Resolver
+	dkimSel  string
 }
 
 // NewService creates a DNS verification service with a configurable DKIM selector.
@@ -33,8 +33,8 @@ func NewService(dkimSelector string) *Service {
 		dkimSelector = "default"
 	}
 	return &Service{
-		resolver:   defaultResolver{},
-		dkimSel: dkimSelector,
+		resolver: defaultResolver{},
+		dkimSel:  dkimSelector,
 	}
 }
 
@@ -169,12 +169,24 @@ func (s *Service) computeOverall(r *DomainDNSReport) OverallStatus {
 	failures := 0
 	warnings := 0
 
-	if !r.SPF.Present { failures++ }
-	if !r.DKIM.Present { warnings++ }
-	if !r.DMARC.Present { warnings++ }
-	if !r.MX.Present { failures++ }
-	if !r.A.Present { failures++ }
-	if r.PTR.Present && !r.PTR.Valid { warnings++ }
+	if !r.SPF.Present {
+		failures++
+	}
+	if !r.DKIM.Present {
+		warnings++
+	}
+	if !r.DMARC.Present {
+		warnings++
+	}
+	if !r.MX.Present {
+		failures++
+	}
+	if !r.A.Present {
+		failures++
+	}
+	if r.PTR.Present && !r.PTR.Valid {
+		warnings++
+	}
 
 	switch {
 	case failures > 0:

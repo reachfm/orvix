@@ -17,13 +17,13 @@ type SenderValidator func(ctx context.Context, identity *AuthIdentity, fromAddre
 
 // CommandHandler handles all SMTP commands for a session.
 type CommandHandler struct {
-	cfg           Config
-	auth          *Authenticator
-	session       *Session
-	authStep      int
-	authUser      string
-	authPass      string
-	validateRcpt  RecipientValidator
+	cfg            Config
+	auth           *Authenticator
+	session        *Session
+	authStep       int
+	authUser       string
+	authPass       string
+	validateRcpt   RecipientValidator
 	validateSender SenderValidator
 	isLocalDomain  func(ctx context.Context, domain string) (bool, error)
 	onAuthEvent    func(eventType string, identity string, detail string)
@@ -34,16 +34,18 @@ type CommandHandler struct {
 	// during initCore so the operator's admin PATCHes
 	// take effect on the very next SMTP command.
 	acceptanceEngine RuleEvaluator
-	Observability *observability.Observability
+	Observability    *observability.Observability
+	sendEnforceFn    func(ctx context.Context, tenantID, mailboxID uint, count int) error
+	authIdentity     *AuthIdentity
 }
 
 // NewCommandHandler creates a command handler bound to a session.
 // Default isLocalDomain checker returns false (fail-closed: no external relay).
 func NewCommandHandler(cfg Config, auth *Authenticator, session *Session) *CommandHandler {
 	return &CommandHandler{
-		cfg:      cfg,
-		auth:     auth,
-		session:  session,
+		cfg:     cfg,
+		auth:    auth,
+		session: session,
 		isLocalDomain: func(ctx context.Context, domain string) (bool, error) {
 			return false, nil
 		},
@@ -64,6 +66,13 @@ func (h *CommandHandler) SetRecipientValidator(v RecipientValidator) {
 // SetSenderValidator sets a function to validate MAIL FROM against the authenticated identity.
 func (h *CommandHandler) SetSenderValidator(v SenderValidator) {
 	h.validateSender = v
+}
+
+// SetSendEnforcer wires a shared send enforcement callback. Called by
+// the runtime module to connect the billing/abuse enforcement service
+// to the SMTP command handler. nil disables enforcement.
+func (h *CommandHandler) SetSendEnforcer(fn func(ctx context.Context, tenantID, mailboxID uint, count int) error) {
+	h.sendEnforceFn = fn
 }
 
 // SetLocalDomainChecker sets a function to check if a domain is hosted locally.
@@ -299,6 +308,12 @@ func (h *CommandHandler) handleDATA(ctx context.Context, cmd *ParsedCommand) Res
 	}
 	if len(h.session.Recipients) == 0 {
 		return ResponseNoRecipient
+	}
+
+	if h.sendEnforceFn != nil && h.session.AuthIdentity != nil {
+		if err := h.sendEnforceFn(ctx, h.session.AuthIdentity.TenantID, h.session.AuthIdentity.MailboxID, len(h.session.Recipients)); err != nil {
+			return Response{StatusServiceNotAvailable, "4.7.0 " + err.Error()}
+		}
 	}
 
 	h.session.State = StateData

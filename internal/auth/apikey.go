@@ -12,18 +12,27 @@ import (
 	"gorm.io/gorm"
 )
 
-// APIKeyRecord represents a stored API key.
+// APIKeyRecord represents a stored API key with tenant binding and scopes.
 type APIKeyRecord struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	Name      string    `gorm:"not null" json:"name"`
-	KeyPrefix string    `gorm:"uniqueIndex;not null;size:8" json:"key_prefix"`
-	KeyHash   string    `gorm:"uniqueIndex;not null" json:"-"`
-	UserID    uint      `gorm:"index;not null" json:"user_id"`
-	Role      string    `gorm:"not null;default:'user'" json:"role"`
-	Enabled   bool      `gorm:"not null;default:true" json:"enabled"`
-	LastUsed  time.Time `json:"last_used"`
-	ExpiresAt time.Time `json:"expires_at"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        uint       `gorm:"primaryKey" json:"id"`
+	Name      string     `gorm:"not null" json:"name"`
+	KeyPrefix string     `gorm:"uniqueIndex;not null;size:8" json:"key_prefix"`
+	KeyHash   string     `gorm:"uniqueIndex;not null" json:"-"`
+	UserID    uint       `gorm:"index;not null" json:"user_id"`
+	TenantID  uint       `gorm:"not null;default:0" json:"tenant_id"`
+	Role      string     `gorm:"not null;default:'user'" json:"role"`
+	Scopes    string     `gorm:"type:text" json:"scopes,omitempty"`
+	Enabled   bool       `gorm:"not null;default:true" json:"enabled"`
+	LastUsed  *time.Time `json:"last_used,omitempty"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+}
+
+// APIKeyRequest is used for creating or rotating API keys.
+type APIKeyRequest struct {
+	Name    string   `json:"name"`
+	Scopes  []string `json:"scopes,omitempty"`
+	TTLDays int      `json:"ttl_days,omitempty"`
 }
 
 // APIKeyManager handles API key lifecycle.
@@ -42,7 +51,7 @@ func NewAPIKeyManager(db *gorm.DB, logger *zap.Logger) *APIKeyManager {
 }
 
 // Generate creates a new API key and returns the full key (shown once).
-func (m *APIKeyManager) Generate(name string, userID uint, role string, ttl time.Duration) (string, *APIKeyRecord, error) {
+func (m *APIKeyManager) Generate(name string, userID, tenantID uint, role string, scopes []string, ttlDays int) (string, *APIKeyRecord, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return "", nil, fmt.Errorf("failed to generate API key: %w", err)
@@ -52,21 +61,39 @@ func (m *APIKeyManager) Generate(name string, userID uint, role string, ttl time
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(fullKey)))
 	prefix := fullKey[:11]
 
+	scopesStr := ""
+	if len(scopes) > 0 {
+		for i, s := range scopes {
+			if i > 0 {
+				scopesStr += ","
+			}
+			scopesStr += s
+		}
+	}
+
+	var expiresAt *time.Time
+	if ttlDays > 0 {
+		t := time.Now().AddDate(0, 0, ttlDays)
+		expiresAt = &t
+	}
+
 	record := &APIKeyRecord{
 		Name:      name,
 		KeyPrefix: prefix,
 		KeyHash:   hash,
 		UserID:    userID,
+		TenantID:  tenantID,
 		Role:      role,
+		Scopes:    scopesStr,
 		Enabled:   true,
-		ExpiresAt: time.Now().Add(ttl),
+		ExpiresAt: expiresAt,
 	}
 
 	if err := m.db.Create(record).Error; err != nil {
 		return "", nil, fmt.Errorf("failed to store API key: %w", err)
 	}
 
-	m.logger.Info("API key generated", zap.String("name", name), zap.String("prefix", prefix))
+	m.logger.Info("API key generated", zap.String("name", name), zap.String("prefix", prefix), zap.Uint("tenant", tenantID))
 	return fullKey, record, nil
 }
 
@@ -79,23 +106,33 @@ func (m *APIKeyManager) Validate(key string) (*APIKeyRecord, error) {
 		return nil, fmt.Errorf("invalid API key")
 	}
 
-	if !record.ExpiresAt.IsZero() && time.Now().After(record.ExpiresAt) {
+	if record.ExpiresAt != nil && time.Now().After(*record.ExpiresAt) {
 		return nil, fmt.Errorf("API key expired")
 	}
 
-	m.db.Model(&record).Update("last_used", time.Now())
+	now := time.Now()
+	m.db.Model(&record).Update("last_used", now)
 	return &record, nil
 }
 
 // Rotate invalidates the old key and generates a new one.
-func (m *APIKeyManager) Rotate(name string, userID uint, role string, ttl time.Duration) (string, *APIKeyRecord, error) {
+func (m *APIKeyManager) Rotate(name string, userID, tenantID uint, role string, scopes []string, ttlDays int) (string, *APIKeyRecord, error) {
 	m.db.Where("name = ? AND user_id = ?", name, userID).Delete(&APIKeyRecord{})
-	return m.Generate(name, userID, role, ttl)
+	return m.Generate(name, userID, tenantID, role, scopes, ttlDays)
 }
 
-// Revoke disables an API key by ID.
+// Revoke disables an API key by ID (legacy — use RevokeScoped to enforce ownership).
 func (m *APIKeyManager) Revoke(id uint) error {
 	result := m.db.Model(&APIKeyRecord{}).Where("id = ?", id).Update("enabled", false)
+	if result.RowsAffected == 0 {
+		return fmt.Errorf("API key not found")
+	}
+	return nil
+}
+
+// RevokeScoped disables an API key by ID, scoped to the owning user.
+func (m *APIKeyManager) RevokeScoped(id, userID uint) error {
+	result := m.db.Model(&APIKeyRecord{}).Where("id = ? AND user_id = ?", id, userID).Update("enabled", false)
 	if result.RowsAffected == 0 {
 		return fmt.Errorf("API key not found")
 	}

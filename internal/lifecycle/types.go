@@ -1,6 +1,10 @@
 package lifecycle
 
-import "time"
+import (
+	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
+)
 
 type VersionRecord struct {
 	ID          uint      `json:"id"`
@@ -13,10 +17,10 @@ type VersionRecord struct {
 type UpgradeStatus string
 
 const (
-	UpgradePending   UpgradeStatus = "pending"
-	UpgradeRunning   UpgradeStatus = "running"
-	UpgradeCompleted UpgradeStatus = "completed"
-	UpgradeFailed    UpgradeStatus = "failed"
+	UpgradePending    UpgradeStatus = "pending"
+	UpgradeRunning    UpgradeStatus = "running"
+	UpgradeCompleted  UpgradeStatus = "completed"
+	UpgradeFailed     UpgradeStatus = "failed"
 	UpgradeRolledBack UpgradeStatus = "rolled_back"
 )
 
@@ -30,8 +34,8 @@ type UpgradeRecord struct {
 }
 
 type PreflightResult struct {
-	Pass    bool              `json:"pass"`
-	Checks  []PreflightCheck  `json:"checks"`
+	Pass   bool             `json:"pass"`
+	Checks []PreflightCheck `json:"checks"`
 }
 
 type PreflightCheck struct {
@@ -40,20 +44,24 @@ type PreflightCheck struct {
 	Detail string `json:"detail,omitempty"`
 }
 
-var schema = []string{
-	`CREATE TABLE IF NOT EXISTS coremail_versions (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		version TEXT NOT NULL DEFAULT '',
-		installed_at DATETIME NOT NULL,
-		installed_by TEXT NOT NULL DEFAULT '',
-		notes TEXT NOT NULL DEFAULT ''
-	)`,
-	`CREATE TABLE IF NOT EXISTS upgrade_history (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		from_version TEXT NOT NULL DEFAULT '',
-		to_version TEXT NOT NULL DEFAULT '',
-		status TEXT NOT NULL DEFAULT 'pending',
-		started_at DATETIME NOT NULL,
-		completed_at DATETIME
-	)`,
+func schema(d *dbdialect.Info) []string {
+	ts := d.TimestampType()
+	autoInc := d.AutoIncrement()
+	return []string{
+		`CREATE TABLE IF NOT EXISTS coremail_versions (
+			id ` + autoInc + `,
+			version TEXT NOT NULL DEFAULT '',
+			installed_at ` + ts + ` NOT NULL,
+			installed_by TEXT NOT NULL DEFAULT '',
+			notes TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE TABLE IF NOT EXISTS upgrade_history (
+			id ` + autoInc + `,
+			from_version TEXT NOT NULL DEFAULT '',
+			to_version TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'pending',
+			started_at ` + ts + ` NOT NULL,
+			completed_at ` + ts + `
+		)`,
+	}
 }

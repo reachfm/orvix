@@ -51,12 +51,12 @@ func (s *Server) handleMailboxGet(ctx context.Context, mc *MethodCall, mailboxID
 		total, _ := s.MailStore.Messages.CountByFolder(ctx, f.ID, nil)
 
 		entry := MailboxEntry{
-			ID:        fmt.Sprintf("%d", f.ID),
-			Name:      f.Name,
-			SortOrder: folderSortOrder(f.Name),
-			TotalEmails: int(total),
-			UnreadEmails: int(total),
-			TotalThreads: int(total),
+			ID:            fmt.Sprintf("%d", f.ID),
+			Name:          f.Name,
+			SortOrder:     folderSortOrder(f.Name),
+			TotalEmails:   int(total),
+			UnreadEmails:  int(total),
+			TotalThreads:  int(total),
 			UnreadThreads: int(total),
 			MyRights: &MailboxRights{
 				MayRead: true, MayReadItems: true, MayRemoveItems: true,

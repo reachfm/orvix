@@ -112,7 +112,7 @@ func (s *Service) EnsureSchema(ctx context.Context) error {
 	if s.dialect.IsPostgres() {
 		return nil
 	}
-	for _, stmt := range schema {
+	for _, stmt := range schema(s.dialect) {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			return err
 		}
@@ -694,7 +694,7 @@ func (s *Service) saveAlert(ctx context.Context, a *Alert) {
 		return
 	}
 	s.db.ExecContext(ctx,
-		`INSERT INTO monitoring_alerts (category, severity, title, message, source, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO monitoring_alerts (category, severity, title, message, source, active, created_at) VALUES (`+s.dialect.Placeholders(7)+`)`,
 		string(a.Category), string(a.Severity), a.Title, a.Message, a.Source, a.Active, a.CreatedAt)
 }
 
@@ -798,7 +798,11 @@ func (s *Service) GetCapacity(ctx context.Context) *Capacity {
 		}
 	} else if s.db != nil {
 		var size int64
-		s.db.QueryRowContext(ctx, "SELECT IFNULL(SUM(pgsize), 0) FROM (SELECT page_count * page_size as pgsize FROM pragma_page_count(), pragma_page_size())").Scan(&size)
+		if s.dialect.IsPostgres() {
+			s.db.QueryRowContext(ctx, "SELECT pg_database_size(current_database())").Scan(&size)
+		} else {
+			s.db.QueryRowContext(ctx, "SELECT IFNULL(SUM(pgsize), 0) FROM (SELECT page_count * page_size as pgsize FROM pragma_page_count(), pragma_page_size())").Scan(&size)
+		}
 		c.DatabaseSize = size
 	}
 
