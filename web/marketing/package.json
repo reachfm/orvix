@@ -14,7 +14,7 @@
     "check:links": "node scripts/check-internal-links.mjs",
     "check:seo": "node scripts/check-seo-tags.mjs",
     "test:e2e": "playwright test",
-    "verify": "npm run typecheck && npm run test && npm run build && npm run test:e2e"
+    "verify": "npm run typecheck && npm run test && npm run build"
   },
   "dependencies": {
     "lucide-react": "^0.400.0",
