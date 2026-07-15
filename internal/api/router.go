@@ -598,6 +598,16 @@ func (r *Router) setupRoutes() {
 	// for real access/refresh tokens. Mounted on the public login group
 	// so MFA-enabled users can complete login without being authenticated.
 	loginGroup.Post("/mfa/verify", r.h.MFALoginVerify)
+
+	// Customer portal auth (public — no auth middleware).
+	loginGroup.Post("/signup", r.h.Signup)
+	if r.redisLimiter != nil {
+		loginGroup.Post("/forgot-password", r.redisLimiter.LoginMiddleware(), r.h.ForgotPassword)
+	} else {
+		loginGroup.Post("/forgot-password", limiter.New(limiter.Config{Max: 5, Expiration: 15 * 60 * 1000}), r.h.ForgotPassword)
+	}
+	loginGroup.Post("/reset-password", r.h.ResetPassword)
+
 	r.app.Post("/admin/login", r.h.Login)
 
 	// Webmail authentication (public — no auth middleware).
@@ -766,6 +776,34 @@ func (r *Router) setupRoutes() {
 	enterprise.Post("/mailboxes/bulk/status", r.h.BulkSetAdminMailboxStatus)
 	enterprise.Post("/mailboxes/:id/reset-password", r.h.ResetAdminMailboxPassword)
 	enterprise.Get("/organizations/:id", r.h.GetOrganization)
+	enterprise.Get("/organizations/current", r.h.GetCurrentOrganization)
+
+	enterprise.Get("/invitations", r.h.ListInvitations)
+	enterprise.Post("/invitations", r.h.CreateInvitation)
+	enterprise.Post("/invitations/:id/revoke", r.h.RevokeInvitation)
+
+	enterprise.Get("/members", r.h.ListMembers)
+	enterprise.Patch("/members/:id/role", r.h.UpdateMemberRole)
+	enterprise.Delete("/members/:id", r.h.RemoveMember)
+
+	enterprise.Post("/ownership/request", r.h.RequestOwnershipTransfer)
+	enterprise.Post("/ownership/accept", r.h.AcceptOwnershipTransfer)
+	enterprise.Post("/ownership/cancel", r.h.CancelOwnershipTransfer)
+
+	enterprise.Get("/aliases", r.h.ListAliases)
+	enterprise.Post("/aliases", r.h.CreateAlias)
+	enterprise.Delete("/aliases/:id", r.h.DeleteAlias)
+
+	enterprise.Get("/groups", r.h.ListGroups)
+	enterprise.Post("/groups", r.h.CreateGroup)
+	enterprise.Post("/groups/:id/members", r.h.AddGroupMember)
+	enterprise.Delete("/groups/:id/members/:memberId", r.h.RemoveGroupMember)
+	enterprise.Delete("/groups/:id", r.h.DeleteGroup)
+
+	enterprise.Get("/abuse/send-limit", r.h.CheckSendLimit)
+	enterprise.Get("/status", r.h.SuspensionStatus)
+	enterprise.Post("/deletion", r.h.RequestDeletion)
+	enterprise.Post("/deletion/cancel", r.h.CancelDeletion)
 
 	enterprise.Get("/billing/subscription", r.h.GetBillingSubscription)
 	enterprise.Post("/billing/subscription", r.h.CreateBillingSubscription)

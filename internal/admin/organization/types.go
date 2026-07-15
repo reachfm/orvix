@@ -17,6 +17,14 @@ type Organization struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
+type OrganizationMember struct {
+	ID        uint      `json:"id"`
+	Email     string    `json:"email"`
+	Role      string    `json:"role"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 type OrganizationDetail struct {
 	Organization
 	DomainCount    int    `json:"domain_count"`
