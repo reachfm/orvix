@@ -35,6 +35,8 @@ type CommandHandler struct {
 	// take effect on the very next SMTP command.
 	acceptanceEngine RuleEvaluator
 	Observability    *observability.Observability
+	sendEnforceFn    func(ctx context.Context, tenantID, mailboxID uint, count int) error
+	authIdentity     *AuthIdentity
 }
 
 // NewCommandHandler creates a command handler bound to a session.
@@ -64,6 +66,13 @@ func (h *CommandHandler) SetRecipientValidator(v RecipientValidator) {
 // SetSenderValidator sets a function to validate MAIL FROM against the authenticated identity.
 func (h *CommandHandler) SetSenderValidator(v SenderValidator) {
 	h.validateSender = v
+}
+
+// SetSendEnforcer wires a shared send enforcement callback. Called by
+// the runtime module to connect the billing/abuse enforcement service
+// to the SMTP command handler. nil disables enforcement.
+func (h *CommandHandler) SetSendEnforcer(fn func(ctx context.Context, tenantID, mailboxID uint, count int) error) {
+	h.sendEnforceFn = fn
 }
 
 // SetLocalDomainChecker sets a function to check if a domain is hosted locally.
@@ -299,6 +308,12 @@ func (h *CommandHandler) handleDATA(ctx context.Context, cmd *ParsedCommand) Res
 	}
 	if len(h.session.Recipients) == 0 {
 		return ResponseNoRecipient
+	}
+
+	if h.sendEnforceFn != nil && h.session.AuthIdentity != nil {
+		if err := h.sendEnforceFn(ctx, h.session.AuthIdentity.TenantID, h.session.AuthIdentity.MailboxID, len(h.session.Recipients)); err != nil {
+			return Response{StatusServiceNotAvailable, "4.7.0 " + err.Error()}
+		}
 	}
 
 	h.session.State = StateData

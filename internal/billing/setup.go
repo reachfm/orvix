@@ -172,6 +172,15 @@ func CreateTables(db *sql.DB) error {
 			resolved_by INTEGER,
 			created_at __TS__ DEFAULT CURRENT_TIMESTAMP
 		)`,
+		`CREATE TABLE IF NOT EXISTS send_events (
+			event_id TEXT NOT NULL,
+			tenant_id INTEGER NOT NULL,
+			mailbox_id INTEGER,
+			event_type TEXT NOT NULL DEFAULT 'send',
+			recipient_count INTEGER NOT NULL DEFAULT 1,
+			created_at __TS__ DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (event_id, tenant_id)
+		)`,
 	}
 	for _, t := range templates {
 		if _, err := db.Exec(ddl(t)); err != nil {
@@ -181,17 +190,18 @@ func CreateTables(db *sql.DB) error {
 	return nil
 }
 
-func Initialize(db *sql.DB) (*Service, *UsageService, *QuotaService, *WebhookService, *Scheduler, error) {
+func Initialize(db *sql.DB) (*Service, *UsageService, *QuotaService, *WebhookService, *Scheduler, *SendEnforcer, error) {
 	if err := CreateTables(db); err != nil {
-		return nil, nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, err
 	}
 	svc := NewService(db)
 	if err := svc.SeedDefaultPlans(); err != nil {
-		return nil, nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, err
 	}
 	usageSvc := NewUsageService(db)
 	quotaSvc := NewQuotaService(db, svc)
 	webhookSvc := NewWebhookService(db)
 	scheduler := NewScheduler(db, svc)
-	return svc, usageSvc, quotaSvc, webhookSvc, scheduler, nil
+	enforcer := NewSendEnforcer(db, svc, quotaSvc)
+	return svc, usageSvc, quotaSvc, webhookSvc, scheduler, enforcer, nil
 }

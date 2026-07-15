@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -202,18 +203,37 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			logger.Info("enterprise admin services wired with transactional audit and RBAC")
 		}
 
-		if billingSvc, usageSvc, quotaSvc, webhookSvc, sched, err := billing.Initialize(sqlDB); err != nil {
+		if billingSvc, usageSvc, quotaSvc, webhookSvc, sched, enforcer, err := billing.Initialize(sqlDB); err != nil {
 			logger.Error("billing initialization failed", zap.Error(err))
 		} else {
 			router.h.SetBillingService(billingSvc)
 			router.h.SetBillingUsageService(usageSvc)
 			router.h.SetBillingQuotaService(quotaSvc)
+			router.h.SetSendEnforcer(enforcer)
 			logger.Info("billing services wired")
 
 			abuseSvc := abuse.NewSignalService(sqlDB, abuse.NewRateLimitService(sqlDB))
 			router.h.SetAbuseSignalService(abuseSvc)
 			router.h.SetRateLimitService(abuse.NewRateLimitService(sqlDB))
 			logger.Info("abuse services wired")
+
+			if enforcer != nil {
+				if mod, ok := registry.Get("coremail-runtime"); ok {
+					if esc, ok := mod.(interface {
+						SetSendEnforcerCallback(func(ctx context.Context, tenantID, mailboxID uint, count int) error)
+					}); ok {
+						esc.SetSendEnforcerCallback(func(ctx context.Context, tenantID, mailboxID uint, count int) error {
+							id := billing.SendIdentity{TenantID: tenantID, MailboxID: mailboxID}
+							result := enforcer.AllowSend(ctx, id, count)
+							if !result.Allowed {
+								return fmt.Errorf("%s", result.Reason)
+							}
+							return nil
+						})
+						logger.Info("SMTP send enforcement wired")
+					}
+				}
+			}
 
 			if sched != nil {
 				router.h.SetBillingScheduler(sched)

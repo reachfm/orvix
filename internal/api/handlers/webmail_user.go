@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/billing"
 	"github.com/orvix/orvix/internal/coremail"
 	coremailmime "github.com/orvix/orvix/internal/coremail/mime"
 	"github.com/orvix/orvix/internal/coremail/queue"
@@ -691,20 +692,15 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		})
 	}
 
-	// Quota enforcement: check daily send limit before processing.
-	if h.quotaSvc != nil && h.usageSvc != nil {
-		usage, err := h.usageSvc.GetCurrentUsage(ctx.Mailbox.TenantID)
-		if err != nil {
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
-				"error": "cannot determine subscription state, try again later",
-			})
-		}
-		if result := h.quotaSvc.CanSendEmail(ctx.Mailbox.TenantID, usage.EmailsSent); result != nil && !result.Allowed {
+	// Shared enforcement: check subscription state, send quota, and abuse limits.
+	if h.sendEnforcer != nil {
+		id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
+		if result := h.sendEnforcer.AllowSend(c.Context(), id, 1); !result.Allowed {
+			if result.Reason == "cannot determine quota" {
+				return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "cannot determine quota"})
+			}
 			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
-				"error":     "daily send limit reached: " + result.Reason,
-				"limit":     result.Limit,
-				"sent":      result.Used,
-				"remaining": result.Remaining,
+				"error": "send rejected: " + result.Reason, "limit": result.Limit, "remaining": result.Remaining,
 			})
 		}
 	}
@@ -919,12 +915,10 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		})
 	}
 
-	// Update usage counter after successful enqueue.
-	if h.usageSvc != nil && queuedCount > 0 {
-		h.usageSvc.IncrementEmailsSent(ctx.Mailbox.TenantID, int64(queuedCount))
-	}
-	if h.rateLimitSvc != nil && queuedCount > 0 {
-		h.rateLimitSvc.RecordSend(c.Context(), ctx.Mailbox.TenantID, queuedCount)
+	// Unified send event: records billing usage, abuse counters, metrics atomically.
+	if h.sendEnforcer != nil && queuedCount > 0 {
+		id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
+		h.sendEnforcer.RecordSend(c.Context(), id, msg.MessageID, queuedCount)
 	}
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{

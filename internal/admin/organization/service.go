@@ -80,44 +80,74 @@ func (s *Service) UpdateOrganization(ctx context.Context, id uint, req UpdateOrg
 	if o == nil {
 		return nil, ErrOrganizationNotFound
 	}
-	if req.Name != nil { o.Name = *req.Name }
-	if req.Domain != nil { o.Domain = *req.Domain }
-	if req.Plan != nil { o.Plan = *req.Plan }
-	if req.MaxDomains != nil { o.MaxDomains = *req.MaxDomains }
-	if req.MaxMailboxes != nil { o.MaxMailboxes = *req.MaxMailboxes }
-	if req.LogoURL != nil { o.LogoURL = *req.LogoURL }
-	if req.PrimaryColor != nil { o.PrimaryColor = *req.PrimaryColor }
+	if req.Name != nil {
+		o.Name = *req.Name
+	}
+	if req.Domain != nil {
+		o.Domain = *req.Domain
+	}
+	if req.Plan != nil {
+		o.Plan = *req.Plan
+	}
+	if req.MaxDomains != nil {
+		o.MaxDomains = *req.MaxDomains
+	}
+	if req.MaxMailboxes != nil {
+		o.MaxMailboxes = *req.MaxMailboxes
+	}
+	if req.LogoURL != nil {
+		o.LogoURL = *req.LogoURL
+	}
+	if req.PrimaryColor != nil {
+		o.PrimaryColor = *req.PrimaryColor
+	}
 	entry := &audit.ExtendedEntry{Action: "organization.update", Target: fmt.Sprintf("tenant:%d", id), TargetID: id, TenantID: id, Result: "success"}
 	return o, s.mutateWithAudit(ctx, entry, func(repo *OrganizationRepo) error { return repo.Update(ctx, o) })
 }
 
 func (s *Service) SetOrganizationActive(ctx context.Context, id uint, active bool, reason string) error {
 	_, err := s.repo.GetByID(ctx, id)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	action := "organization.disable"
-	if active { action = "organization.enable" }
+	if active {
+		action = "organization.enable"
+	}
 	entry := &audit.ExtendedEntry{Action: action, Target: fmt.Sprintf("tenant:%d", id), TargetID: id, TenantID: id, Result: "success", Reason: reason}
 	return s.mutateWithAudit(ctx, entry, func(repo *OrganizationRepo) error { return repo.SetActive(ctx, id, active) })
 }
 
 func (s *Service) GetOrganizationDetail(ctx context.Context, id uint) (*OrganizationDetail, error) {
 	o, err := s.repo.GetByID(ctx, id)
-	if err != nil { return nil, err }
-	if o == nil { return nil, ErrOrganizationNotFound }
+	if err != nil {
+		return nil, err
+	}
+	if o == nil {
+		return nil, ErrOrganizationNotFound
+	}
 	detail := &OrganizationDetail{Organization: *o}
-	if o.Active { detail.StatusLabel = "active" } else { detail.StatusLabel = "disabled" }
+	if o.Active {
+		detail.StatusLabel = "active"
+	} else {
+		detail.StatusLabel = "disabled"
+	}
 	return detail, nil
 }
 
 func (s *Service) ListMembers(ctx context.Context, orgID uint) ([]OrganizationMember, error) {
 	rows, err := s.repo.db.QueryContext(ctx,
 		`SELECT id, email, COALESCE(role, 'user'), COALESCE(name, ''), created_at FROM users WHERE tenant_id = `+s.repo.dialect.Placeholder(1)+` ORDER BY id ASC`, orgID)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	var members []OrganizationMember
 	for rows.Next() {
 		var m OrganizationMember
-		if err := rows.Scan(&m.ID, &m.Email, &m.Role, &m.Name, &m.CreatedAt); err != nil { return nil, err }
+		if err := rows.Scan(&m.ID, &m.Email, &m.Role, &m.Name, &m.CreatedAt); err != nil {
+			return nil, err
+		}
 		members = append(members, m)
 	}
 	return members, rows.Err()
@@ -144,17 +174,27 @@ func (s *Service) GetSuspensionStatus(ctx context.Context, orgID uint) (*Suspens
 		ORDER BY id DESC LIMIT 1`, orgID)
 	var rec SuspensionRecord
 	err := row.Scan(&rec.ID, &rec.OrganizationID, &rec.Reason, &rec.SuspendedBy, &rec.Note, &rec.SuspendedAt, &rec.ReactivatedAt, &rec.CreatedAt)
-	if err != nil { return nil, nil }
+	if err != nil {
+		return nil, nil
+	}
 	return &rec, nil
 }
 
 func (s *Service) mutateWithAudit(ctx context.Context, entry *audit.ExtendedEntry, mutate func(*OrganizationRepo) error) error {
-	if s.auditStore == nil { return mutate(s.repo) }
+	if s.auditStore == nil {
+		return mutate(s.repo)
+	}
 	tx, err := s.repo.BeginTx(ctx)
-	if err != nil { return fmt.Errorf("begin organization mutation: %w", err) }
+	if err != nil {
+		return fmt.Errorf("begin organization mutation: %w", err)
+	}
 	defer tx.Rollback()
-	if err := mutate(s.repo.WithTx(tx)); err != nil { return err }
-	if err := s.auditStore.RecordTx(ctx, tx, entry); err != nil { return err }
+	if err := mutate(s.repo.WithTx(tx)); err != nil {
+		return err
+	}
+	if err := s.auditStore.RecordTx(ctx, tx, entry); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 

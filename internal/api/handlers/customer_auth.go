@@ -295,8 +295,8 @@ func (h *Handler) ResetPassword(c fiber.Ctx) error {
 	tokenHash := fmt.Sprintf("%x", sha256.Sum256([]byte(req.Token)))
 
 	var (
-		resetID  int64
-		userID   uint
+		resetID   int64
+		userID    uint
 		expiresAt time.Time
 	)
 	row := sqlDB.QueryRow(
