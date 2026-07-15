@@ -53,6 +53,19 @@ func (s *Service) GetPlan(id PlanID) (*Plan, error) {
 	return &p, err
 }
 
+func (s *Service) GetPlanTx(tx *sql.Tx, id PlanID) (*Plan, error) {
+	row := tx.QueryRow(`SELECT id, name, description, price_monthly, price_yearly,
+		max_domains, max_mailboxes, storage_mb, send_limit_day, features, created_at, updated_at
+		FROM plans WHERE id = `+s.dialect.Placeholder(1), id)
+	var p Plan
+	err := row.Scan(&p.ID, &p.Name, &p.Description, &p.PriceMonthly, &p.PriceYearly,
+		&p.MaxDomains, &p.MaxMailboxes, &p.StorageMB, &p.SendLimitDay, &p.Features, &p.CreatedAt, &p.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrPlanNotFound
+	}
+	return &p, err
+}
+
 func (s *Service) ListPlans() ([]Plan, error) {
 	rows, err := s.db.Query(`SELECT id, name, description, price_monthly, price_yearly,
 		max_domains, max_mailboxes, storage_mb, send_limit_day, features, created_at, updated_at
@@ -147,7 +160,7 @@ func (s *Service) CreateSubscription(tenantID uint, planID PlanID, interval Bill
 }
 
 func (s *Service) CreateSubscriptionTx(tx *sql.Tx, dial *dbdialect.Info, tenantID uint, planID PlanID, interval BillingInterval, trialDays int) (*Subscription, error) {
-	plan, err := s.GetPlan(planID)
+	plan, err := s.GetPlanTx(tx, planID)
 	if err != nil {
 		return nil, err
 	}

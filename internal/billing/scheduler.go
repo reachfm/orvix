@@ -3,10 +3,18 @@ package billing
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/orvix/orvix/internal/dbdialect"
 )
+
+type schedulerResult struct {
+	name  string
+	count int
+	err   error
+}
 
 type Scheduler struct {
 	db      *sql.DB
@@ -90,14 +98,35 @@ func (s *Scheduler) transitionRows(ctx context.Context, rows *sql.Rows, target S
 }
 
 func (s *Scheduler) RunAll(ctx context.Context) (int, error) {
+	type result struct {
+		name  string
+		count int
+		err   error
+	}
+	results := []schedulerResult{
+		s.runWithResult(ctx, "trial_expiry", s.ProcessTrialExpiry),
+		s.runWithResult(ctx, "past_due_escalation", s.ProcessPastDueEscalation),
+		s.runWithResult(ctx, "grace_period_expiry", s.ProcessGracePeriodExpiry),
+		s.runWithResult(ctx, "expired_subscriptions", s.ProcessExpiredSubscriptions),
+	}
 	var total int
-	n, _ := s.ProcessTrialExpiry(ctx)
-	total += n
-	n, _ = s.ProcessPastDueEscalation(ctx)
-	total += n
-	n, _ = s.ProcessGracePeriodExpiry(ctx)
-	total += n
-	n, _ = s.ProcessExpiredSubscriptions(ctx)
-	total += n
+	var errs []error
+	for _, r := range results {
+		total += r.count
+		if r.err != nil {
+			errs = append(errs, r.err)
+		}
+	}
+	if len(errs) > 0 {
+		return total, errors.Join(errs...)
+	}
 	return total, nil
+}
+
+func (s *Scheduler) runWithResult(ctx context.Context, name string, fn func(ctx context.Context) (int, error)) schedulerResult {
+	n, err := fn(ctx)
+	if err != nil {
+		return schedulerResult{name: name, count: n, err: fmt.Errorf("scheduler %s: %w", name, err)}
+	}
+	return schedulerResult{name: name, count: n}
 }

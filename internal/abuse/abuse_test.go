@@ -3,6 +3,7 @@ package abuse
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
@@ -122,10 +123,10 @@ func TestSignalAcknowledgeResolve(t *testing.T) {
 	if len(signals) != 1 {
 		t.Fatal("expected signal")
 	}
-	if err := svc.AcknowledgeSignal(context.Background(), signals[0].ID); err != nil {
+	if err := svc.AcknowledgeSignal(context.Background(), 1, signals[0].ID, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.ResolveSignal(context.Background(), signals[0].ID, 99); err != nil {
+	if err := svc.ResolveSignal(context.Background(), 1, signals[0].ID, 99); err != nil {
 		t.Fatal(err)
 	}
 	signals, _ = svc.ListActiveSignals(context.Background(), 1)
@@ -186,5 +187,43 @@ func TestRateLimitTenantIsolation(t *testing.T) {
 	db.QueryRow("SELECT COALESCE(emails_sent,0) FROM abuse_send_counts WHERE tenant_id=2").Scan(&t2sent)
 	if t1sent != 50 || t2sent != 10 {
 		t.Fatalf("tenant isolation broken: t1=%d t2=%d", t1sent, t2sent)
+	}
+}
+
+func TestSignalCrossTenantAcknowledgeRejected(t *testing.T) {
+	db := setupTestDB(t)
+	svc := NewSignalService(db, NewRateLimitService(db))
+	svc.RecordSignal(context.Background(), &AbuseSignal{TenantID: 1, SignalType: SignalHighBounceRate, Severity: SeverityWarning, Description: "tenant1", DetectedAt: time.Now().UTC()})
+	svc.RecordSignal(context.Background(), &AbuseSignal{TenantID: 2, SignalType: SignalHighBounceRate, Severity: SeverityWarning, Description: "tenant2", DetectedAt: time.Now().UTC()})
+
+	signals2, _ := svc.ListActiveSignals(context.Background(), 2)
+	if len(signals2) != 1 {
+		t.Fatalf("expected 1 signal for tenant 2, got %d", len(signals2))
+	}
+
+	err := svc.AcknowledgeSignal(context.Background(), 1, signals2[0].ID, 0)
+	if !errors.Is(err, ErrSignalNotFound) {
+		t.Fatalf("expected ErrSignalNotFound for cross-tenant acknowledge, got %v", err)
+	}
+}
+
+func TestSignalCrossTenantResolveRejected(t *testing.T) {
+	db := setupTestDB(t)
+	svc := NewSignalService(db, NewRateLimitService(db))
+	svc.RecordSignal(context.Background(), &AbuseSignal{TenantID: 1, SignalType: SignalHighBounceRate, Severity: SeverityWarning, Description: "tenant1", DetectedAt: time.Now().UTC()})
+
+	signals1, _ := svc.ListActiveSignals(context.Background(), 1)
+	if len(signals1) != 1 {
+		t.Fatalf("expected 1 signal for tenant 1, got %d", len(signals1))
+	}
+
+	err := svc.ResolveSignal(context.Background(), 2, signals1[0].ID, 99)
+	if !errors.Is(err, ErrSignalNotFound) {
+		t.Fatalf("expected ErrSignalNotFound for cross-tenant resolve, got %v", err)
+	}
+
+	err = svc.ResolveSignal(context.Background(), 1, 99999, 99)
+	if !errors.Is(err, ErrSignalNotFound) {
+		t.Fatalf("expected ErrSignalNotFound for nonexistent ID, got %v", err)
 	}
 }

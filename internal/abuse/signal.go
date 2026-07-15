@@ -3,10 +3,13 @@ package abuse
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 
 	"github.com/orvix/orvix/internal/dbdialect"
 )
+
+var ErrSignalNotFound = errors.New("abuse signal not found or belongs to a different tenant")
 
 type SignalService struct {
 	db      *sql.DB
@@ -32,20 +35,34 @@ func (s *SignalService) RecordSignal(ctx context.Context, signal *AbuseSignal) e
 	return err
 }
 
-func (s *SignalService) AcknowledgeSignal(ctx context.Context, signalID uint) error {
+func (s *SignalService) AcknowledgeSignal(ctx context.Context, tenantID, signalID uint, operatorID uint) error {
 	now := time.Now().UTC()
-	_, err := s.db.ExecContext(ctx,
-		"UPDATE abuse_signals SET acknowledged_at = "+s.dialect.Placeholder(1)+" WHERE id = "+s.dialect.Placeholder(2),
-		now, signalID)
-	return err
+	result, err := s.db.ExecContext(ctx,
+		"UPDATE abuse_signals SET acknowledged_at = "+s.dialect.Placeholder(1)+" WHERE id = "+s.dialect.Placeholder(2)+" AND tenant_id = "+s.dialect.Placeholder(3),
+		now, signalID, tenantID)
+	if err != nil {
+		return err
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return ErrSignalNotFound
+	}
+	return nil
 }
 
-func (s *SignalService) ResolveSignal(ctx context.Context, signalID, operatorID uint) error {
+func (s *SignalService) ResolveSignal(ctx context.Context, tenantID, signalID, operatorID uint) error {
 	now := time.Now().UTC()
-	_, err := s.db.ExecContext(ctx,
-		"UPDATE abuse_signals SET resolved_at = "+s.dialect.Placeholder(1)+", resolved_by = "+s.dialect.Placeholder(2)+" WHERE id = "+s.dialect.Placeholder(3),
-		now, operatorID, signalID)
-	return err
+	result, err := s.db.ExecContext(ctx,
+		"UPDATE abuse_signals SET resolved_at = "+s.dialect.Placeholder(1)+", resolved_by = "+s.dialect.Placeholder(2)+" WHERE id = "+s.dialect.Placeholder(3)+" AND tenant_id = "+s.dialect.Placeholder(4),
+		now, operatorID, signalID, tenantID)
+	if err != nil {
+		return err
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return ErrSignalNotFound
+	}
+	return nil
 }
 
 func (s *SignalService) ListActiveSignals(ctx context.Context, tenantID uint) ([]AbuseSignal, error) {

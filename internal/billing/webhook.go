@@ -86,7 +86,7 @@ func (s *WebhookService) RecordEvent(ctx context.Context, rec *WebhookEventRecor
 		result, err = s.db.ExecContext(ctx,
 			`INSERT INTO webhook_events (id, provider, event_type, provider_sub_id, raw_payload, signature,
 			received_at, idempotency_key, created_at)
-			VALUES (`+s.dialect.Placeholders(9)+`) ON CONFLICT (idempotency_key) DO NOTHING`,
+			VALUES (`+s.dialect.Placeholders(9)+`) ON CONFLICT (provider, idempotency_key) DO NOTHING`,
 			rec.ID, rec.Provider, rec.EventType, rec.ProviderSubID, rec.RawPayload, rec.Signature,
 			rec.ReceivedAt, rec.IdempotencyKey, time.Now().UTC())
 	} else {

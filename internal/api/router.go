@@ -866,8 +866,8 @@ func (r *Router) setupRoutes() {
 	enterprise.Get("/billing/quota", r.h.CheckBillingQuota)
 
 	enterprise.Get("/abuse/signals", r.h.ListAbuseSignals)
-	enterprise.Post("/abuse/signals/acknowledge", r.h.AcknowledgeAbuseSignal)
-	enterprise.Post("/abuse/signals/resolve", r.h.ResolveAbuseSignal)
+	enterprise.Post("/abuse/signals/:id/acknowledge", r.h.AcknowledgeAbuseSignal)
+	enterprise.Post("/abuse/signals/:id/resolve", r.h.ResolveAbuseSignal)
 
 	// CSRF is enforced on the entire admin group by default (deny-list,
 	// not allow-list) rather than only on routes an author remembered to

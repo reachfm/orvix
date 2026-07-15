@@ -83,9 +83,11 @@ func CreateTables(db *sql.DB) error {
 			received_at __TS__ NOT NULL,
 			processed_at __TS__,
 			processing_error TEXT DEFAULT '',
-			idempotency_key TEXT NOT NULL UNIQUE,
+			idempotency_key TEXT NOT NULL,
 			created_at __TS__ DEFAULT CURRENT_TIMESTAMP
 		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_webhook_events_provider_idempotency
+			ON webhook_events (provider, idempotency_key)`,
 		`CREATE TABLE IF NOT EXISTS org_invitations (
 			id __AUTOINC__,
 			organization_id INTEGER NOT NULL,

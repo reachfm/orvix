@@ -693,10 +693,14 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 	}
 
 	// Shared enforcement: check subscription state, send quota, and abuse limits.
+	// This is a pre-flight gate that runs BEFORE recipients are parsed so we can
+	// reject the request early when the subscription is suspended/cancelled/expired
+	// or the database is unreachable. The recipient-count check below is the real
+	// quota gate and runs AFTER recipient parsing + dedup.
 	if h.sendEnforcer != nil {
 		id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
 		if result := h.sendEnforcer.AllowSend(c.Context(), id, 1); !result.Allowed {
-			if result.Reason == "cannot determine quota" {
+			if result.Reason == "quota lookup failed" || result.Reason == "no active subscription" || result.Reason == "invalid tenant" {
 				return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "cannot determine quota"})
 			}
 			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
@@ -777,6 +781,35 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		}
 	}
 
+	allRecipients := make([]*mail.Address, 0, len(toList)+len(ccList)+len(bccList))
+	allRecipients = append(allRecipients, toList...)
+	allRecipients = append(allRecipients, ccList...)
+	allRecipients = append(allRecipients, bccList...)
+
+	// Deduplicate recipients by normalized address. Duplicate
+	// addresses must not inflate quota consumption.
+	seen := make(map[string]bool, len(allRecipients))
+	unique := make([]*mail.Address, 0, len(allRecipients))
+	for _, addr := range allRecipients {
+		norm := strings.ToLower(strings.TrimSpace(addr.Address))
+		if !seen[norm] {
+			seen[norm] = true
+			unique = append(unique, addr)
+		}
+	}
+	allRecipients = unique
+
+	// Real quota gate: number of unique, valid recipients.
+	intendedRecipientCount := len(allRecipients)
+	if h.sendEnforcer != nil && intendedRecipientCount > 1 {
+		id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
+		if result := h.sendEnforcer.AllowSend(c.Context(), id, intendedRecipientCount); !result.Allowed {
+			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+				"error": "send rejected: " + result.Reason, "limit": result.Limit, "remaining": result.Remaining,
+			})
+		}
+	}
+
 	sentFolder, err := resolveFolderCaseInsensitive(c.Context(), ctx.MailboxStore, ctx.Mailbox.ID, "Sent")
 	if err != nil || sentFolder == nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -839,11 +872,6 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 	// The classification runs on the same Domain +
 	// Mailbox lookups the SMTP receiver uses for
 	// inbound — there is no parallel "is-local" path.
-	allRecipients := make([]*mail.Address, 0, len(toList)+len(ccList)+len(bccList))
-	allRecipients = append(allRecipients, toList...)
-	allRecipients = append(allRecipients, ccList...)
-	allRecipients = append(allRecipients, bccList...)
-
 	mailboxID := ctx.Mailbox.ID
 	enqueueErrors := make([]string, 0, len(allRecipients))
 	queuedCount := 0
