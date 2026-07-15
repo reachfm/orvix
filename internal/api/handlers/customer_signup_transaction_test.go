@@ -107,8 +107,12 @@ func newSignupTxEnv(t *testing.T, cfg *config.Config) *signupTxEnv {
 	sqlDB.SetMaxIdleConns(1)
 	t.Cleanup(func() { sqlDB.Close() })
 
-	if err := models.MigrateAllRaw(db); err != nil {
-		t.Fatalf("migrate: %v", err)
+	if cfg.Database.Driver == "postgres" {
+		if err := models.MigrateAllPostgres(db); err != nil {
+			t.Fatalf("migrate postgres: %v", err)
+		}
+	} else if err := models.MigrateAllRaw(db); err != nil {
+		t.Fatalf("migrate raw: %v", err)
 	}
 	authenticator, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
 	if err != nil {
