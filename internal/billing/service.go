@@ -83,7 +83,7 @@ func (s *Service) SeedDefaultPlans() error {
 	return s.withTx(func(tx *sql.Tx) error {
 		for _, p := range defaults {
 			var existing string
-			err := tx.QueryRow("SELECT id FROM plans WHERE id = " + s.dialect.Placeholder(1), p.ID).Scan(&existing)
+			err := tx.QueryRow("SELECT id FROM plans WHERE id = "+s.dialect.Placeholder(1), p.ID).Scan(&existing)
 			if errors.Is(err, sql.ErrNoRows) {
 				now := time.Now().UTC()
 				_, err = tx.Exec(`INSERT INTO plans (id, name, description, price_monthly, price_yearly,
@@ -134,10 +134,10 @@ func (s *Service) CreateSubscription(tenantID uint, planID PlanID, interval Bill
 	var sub *Subscription
 	err = s.withTx(func(tx *sql.Tx) error {
 		var existingID uint
-		existingErr := tx.QueryRow("SELECT id FROM subscriptions WHERE tenant_id = " + s.dialect.Placeholder(1), tenantID).Scan(&existingID)
+		existingErr := tx.QueryRow("SELECT id FROM subscriptions WHERE tenant_id = "+s.dialect.Placeholder(1), tenantID).Scan(&existingID)
 		if existingErr == nil {
 			var existingStatus SubscriptionStatus
-			if err := tx.QueryRow("SELECT status FROM subscriptions WHERE id = " + s.dialect.Placeholder(1), existingID).Scan(&existingStatus); err != nil {
+			if err := tx.QueryRow("SELECT status FROM subscriptions WHERE id = "+s.dialect.Placeholder(1), existingID).Scan(&existingStatus); err != nil {
 				return err
 			}
 			if existingStatus != SubCancelled && existingStatus != SubExpired {
@@ -199,7 +199,7 @@ func (s *Service) ChangePlan(tenantID uint, newPlanID PlanID) (*Subscription, er
 func (s *Service) TransitionState(tenantID uint, newStatus SubscriptionStatus) error {
 	return s.withTx(func(tx *sql.Tx) error {
 		var current SubscriptionStatus
-		err := tx.QueryRow("SELECT status FROM subscriptions WHERE tenant_id = " + s.dialect.Placeholder(1), tenantID).Scan(&current)
+		err := tx.QueryRow("SELECT status FROM subscriptions WHERE tenant_id = "+s.dialect.Placeholder(1), tenantID).Scan(&current)
 		if err != nil {
 			return ErrSubscriptionNotFound
 		}

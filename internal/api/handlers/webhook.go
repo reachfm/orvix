@@ -30,9 +30,9 @@ func (h *Handler) ReceivePaymentWebhook(c fiber.Ctx) error {
 	eventID := hex.EncodeToString(b)
 
 	rec := &billing.WebhookEventRecord{
-		ID:        eventID,
-		Provider:  "stripe",
-		EventType: eventType,
+		ID:         eventID,
+		Provider:   "stripe",
+		EventType:  eventType,
 		RawPayload: rawPayload,
 		ReceivedAt: time.Now().UTC(),
 	}

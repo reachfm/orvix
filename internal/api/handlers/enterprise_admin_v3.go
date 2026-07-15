@@ -308,11 +308,11 @@ func (h *Handler) PatchProtocolSettings(c fiber.Ctx) error {
 		if h.db != nil {
 			sqlDB, derr := h.db.DB()
 			if derr == nil {
-			d := h.sqlDialect()
-			if _, execErr := sqlDB.ExecContext(c.Context(),
-				`INSERT INTO admin_settings (key, value, section, requires_restart, updated_at, updated_by) VALUES (`+d.Placeholders(6)+`)
+				d := h.sqlDialect()
+				if _, execErr := sqlDB.ExecContext(c.Context(),
+					`INSERT INTO admin_settings (key, value, section, requires_restart, updated_at, updated_by) VALUES (`+d.Placeholders(6)+`)
 				 ON CONFLICT (key) DO UPDATE SET value=`+d.Excluded("value")+`, section=`+d.Excluded("section")+`, requires_restart=`+d.Excluded("requires_restart")+`, updated_at=`+d.Excluded("updated_at"),
-				key, string(encoded), pid, boolToInt(defKey.RestartRequired), now, auditActorFromCtx(c)); execErr != nil {
+					key, string(encoded), pid, boolToInt(defKey.RestartRequired), now, auditActorFromCtx(c)); execErr != nil {
 					rejected = append(rejected, map[string]any{
 						"key":    key,
 						"reason": "persist: " + execErr.Error(),

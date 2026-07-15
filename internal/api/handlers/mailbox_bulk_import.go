@@ -160,7 +160,7 @@ func (h *Handler) importMailboxes(c fiber.Ctx, dryRun bool) error {
 		// Append parse errors first so the operator sees the full picture.
 		outErrs = append(outErrs, parseErrs...)
 		for _, row := range rows {
-		if errStr := validateBulkRow(sqlDB, h.sqlDialect(), row, pwMin); errStr != "" {
+			if errStr := validateBulkRow(sqlDB, h.sqlDialect(), row, pwMin); errStr != "" {
 				outErrs = append(outErrs, BulkImportError{Line: row.Line, Email: row.Email, Error: errStr})
 				continue
 			}
