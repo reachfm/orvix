@@ -121,9 +121,18 @@ func (m *APIKeyManager) Rotate(name string, userID, tenantID uint, role string, 
 	return m.Generate(name, userID, tenantID, role, scopes, ttlDays)
 }
 
-// Revoke disables an API key by ID.
+// Revoke disables an API key by ID (legacy — use RevokeScoped to enforce ownership).
 func (m *APIKeyManager) Revoke(id uint) error {
 	result := m.db.Model(&APIKeyRecord{}).Where("id = ?", id).Update("enabled", false)
+	if result.RowsAffected == 0 {
+		return fmt.Errorf("API key not found")
+	}
+	return nil
+}
+
+// RevokeScoped disables an API key by ID, scoped to the owning user.
+func (m *APIKeyManager) RevokeScoped(id, userID uint) error {
+	result := m.db.Model(&APIKeyRecord{}).Where("id = ? AND user_id = ?", id, userID).Update("enabled", false)
 	if result.RowsAffected == 0 {
 		return fmt.Errorf("API key not found")
 	}

@@ -930,7 +930,7 @@ func (h *Handler) CreateAPIKey(c fiber.Ctx) error {
 	})
 }
 
-// DeleteAPIKey revokes an API key.
+// DeleteAPIKey revokes an API key, scoped to the authenticated user.
 func (h *Handler) DeleteAPIKey(c fiber.Ctx) error {
 	idStr := c.Params("id")
 	var id uint
@@ -938,7 +938,11 @@ func (h *Handler) DeleteAPIKey(c fiber.Ctx) error {
 	if id == 0 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid id"})
 	}
-	if err := h.apikeys.Revoke(id); err != nil {
+	userID, ok := c.Locals("user_id").(uint)
+	if !ok || userID == 0 {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "authentication required"})
+	}
+	if err := h.apikeys.RevokeScoped(id, userID); err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "API key not found"})
 	}
 	h.writeAuditLog(c, "apikey.revoke", fmt.Sprintf("id:%d", id))

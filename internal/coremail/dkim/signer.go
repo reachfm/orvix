@@ -97,55 +97,6 @@ func (s *Signer) Sign(rfc822 []byte, hs HeaderSet) (*SignResult, error) {
 	return &SignResult{Signature: sigValue, HeaderSet: hs}, nil
 }
 
-// Verify checks that a message's DKIM signature is valid.
-// This is a testing/verification utility only.
-func (s *Signer) Verify(rfc822 []byte, sigValue string) (bool, error) {
-	// Parse signature header.
-	params := parseTagValue(sigValue)
-	d := params["d"]
-	_ = d
-	bh := params["bh"]
-	b64sig, hasB := params["b"]
-	hlist, hasH := params["h"]
-	if !hasB || !hasH {
-		return false, fmt.Errorf("missing required DKIM fields")
-	}
-
-	_, body := splitMessage(rfc822)
-
-	// Compute body hash.
-	canonBody := canonicalizeBody(body, CanonRelaxed)
-	bodyHash := sha256.Sum256(canonBody)
-	expectedBH := base64.StdEncoding.EncodeToString(bodyHash[:])
-	if bh != expectedBH {
-		return false, fmt.Errorf("body hash mismatch: expected %s, got %s", expectedBH, bh)
-	}
-
-	// Build data that was signed.
-	alg := params["a"]
-	canon := params["c"]
-	domain := params["d"]
-	selector := params["s"]
-
-	sigData := fmt.Sprintf("v=1; a=%s; c=%s; d=%s; s=%s; h=%s; bh=%s; b=%s",
-		alg, canon, domain, selector, hlist, bh, b64sig)
-
-	// Decode signature.
-	sigBytes, err := base64.StdEncoding.DecodeString(b64sig)
-	if err != nil {
-		return false, fmt.Errorf("decode signature: %w", err)
-	}
-
-	// Compute hash of signature data.
-	hash := sha256.Sum256([]byte(sigData))
-	// For verification we need the public key. This utility requires the public key
-	// to be extracted separately. For now, return body hash check status.
-	_ = hash
-	_ = sigBytes
-
-	return true, nil
-}
-
 // ── Canonicalization ─────────────────────────────────────────
 
 // canonicalizeBody applies the body canonicalization algorithm.
