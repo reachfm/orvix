@@ -49,9 +49,11 @@ func (e *SendEnforcer) AllowSend(ctx context.Context, id SendIdentity, count int
 		return &SendEnforcementResult{Allowed: false, Reason: "subscription is " + string(sub.Status)}
 	}
 	var sentToday int64
-	e.db.QueryRowContext(ctx,
+	if err := e.db.QueryRowContext(ctx,
 		"SELECT COALESCE(SUM(recipient_count), 0) FROM send_events WHERE tenant_id = "+e.dialect.Placeholder(1)+" AND event_type = 'send' AND created_at >= "+e.dialect.Placeholder(2),
-		id.TenantID, time.Now().UTC().Truncate(24*time.Hour)).Scan(&sentToday)
+		id.TenantID, time.Now().UTC().Truncate(24*time.Hour)).Scan(&sentToday); err != nil {
+		return &SendEnforcementResult{Allowed: false, Reason: "quota lookup failed"}
+	}
 	result := e.quota.CanSendEmail(id.TenantID, sentToday)
 	if result != nil && !result.Allowed {
 		return &SendEnforcementResult{
@@ -120,28 +122,30 @@ func (e *SendEnforcer) RecordBounce(ctx context.Context, id SendIdentity, eventI
 	if id.TenantID == 0 {
 		return nil
 	}
-	now := time.Now().UTC()
-	dayKey := fmt.Sprintf("bounce:%d:%s", id.TenantID, now.Format("2006-01-02"))
-	if eventID != "" {
-		var exists bool
-		if err := e.db.QueryRowContext(ctx,
-			"SELECT 1 FROM send_events WHERE event_id = "+e.dialect.Placeholder(1)+" AND event_type = 'bounce' AND tenant_id = "+e.dialect.Placeholder(2),
-			eventID, id.TenantID).Scan(&exists); err == nil {
-			return nil
+	return e.withTx(func(tx *sql.Tx) error {
+		now := time.Now().UTC()
+		dayKey := fmt.Sprintf("bounce:%d:%s", id.TenantID, now.Format("2006-01-02"))
+		if eventID != "" {
+			var exists bool
+			if err := tx.QueryRowContext(ctx,
+				"SELECT 1 FROM send_events WHERE event_id = "+e.dialect.Placeholder(1)+" AND event_type = 'bounce' AND tenant_id = "+e.dialect.Placeholder(2),
+				eventID, id.TenantID).Scan(&exists); err == nil {
+				return nil
+			}
+			_, err := tx.ExecContext(ctx,
+				"INSERT INTO send_events (event_id, tenant_id, mailbox_id, event_type, created_at) VALUES ("+e.dialect.Placeholder(1)+", "+e.dialect.Placeholder(2)+", "+e.dialect.Placeholder(3)+", 'bounce', "+e.dialect.Placeholder(4)+")",
+				eventID, id.TenantID, id.MailboxID, now)
+			if err != nil {
+				return err
+			}
 		}
-		_, err := e.db.ExecContext(ctx,
-			"INSERT INTO send_events (event_id, tenant_id, mailbox_id, event_type, created_at) VALUES ("+e.dialect.Placeholder(1)+", "+e.dialect.Placeholder(2)+", "+e.dialect.Placeholder(3)+", 'bounce', "+e.dialect.Placeholder(4)+")",
-			eventID, id.TenantID, id.MailboxID, now)
-		if err != nil {
-			return err
-		}
-	}
-	_, err := e.db.ExecContext(ctx,
-		`INSERT INTO abuse_bounce_counts (day_key, tenant_id, bounce_count, created_at)
-		VALUES (`+e.dialect.Placeholder(1)+`, `+e.dialect.Placeholder(2)+`, 1, `+e.dialect.Placeholder(3)+`)
-		ON CONFLICT (day_key) DO UPDATE SET bounce_count = abuse_bounce_counts.bounce_count + 1`,
-		dayKey, id.TenantID, now)
-	return err
+		_, err := tx.ExecContext(ctx,
+			`INSERT INTO abuse_bounce_counts (day_key, tenant_id, bounce_count, created_at)
+			VALUES (`+e.dialect.Placeholder(1)+`, `+e.dialect.Placeholder(2)+`, 1, `+e.dialect.Placeholder(3)+`)
+			ON CONFLICT (day_key) DO UPDATE SET bounce_count = abuse_bounce_counts.bounce_count + 1`,
+			dayKey, id.TenantID, now)
+		return err
+	})
 }
 
 func (e *SendEnforcer) withTx(fn func(tx *sql.Tx) error) error {

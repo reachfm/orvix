@@ -256,19 +256,18 @@ func (w *DeliveryWorker) deliver(ctx context.Context, entry *queue.QueueEntry) e
 				w.OnBounceFn(ctx, entry.TenantID, mbID, fmt.Sprintf("bounce:q:%d", entry.ID))
 			}
 			w.recordDeliveryEvent(ctx, entry, observability.EventQueueBounced, result)
-			// BounceWithDiagnostics stores the
-			// full remote SMTP response (status
-			// code, enhanced code, host, IP, TLS)
-			// on the queue row. The iCloud bounce
-			// from production (queue id=3,
-			// status=bounced) is now diagnosable
-			// from the admin queue UI without
-			// grepping logs.
 			diag := diagnosticsFromResult(result)
 			return w.Queue.Repo.BounceWithDiagnostics(ctx, entry.ID, diag, nil)
 		}
 		w.emitAudit(ctx, entry, EventDeadLetter, result)
 		w.Metrics.RecordDeadLetter()
+		if !result.TempFail && w.OnBounceFn != nil {
+			mbID := uint(0)
+			if entry.MailboxID != nil {
+				mbID = *entry.MailboxID
+			}
+			w.OnBounceFn(ctx, entry.TenantID, mbID, fmt.Sprintf("bounce:q:%d", entry.ID))
+		}
 		w.recordDeliveryEvent(ctx, entry, observability.EventQueueDeadLetter, result)
 		diag := diagnosticsFromResult(result)
 		return w.Queue.Repo.DeadLetterWithDiagnostics(ctx, entry.ID, diag, nil)
@@ -305,6 +304,7 @@ func (w *DeliveryWorker) checkPolicy(ctx context.Context, entry *queue.QueueEntr
 		w.recordAttempt(ctx, entry, attemptNumber, &DeliveryResult{StatusCode: pr.Code, StatusMsg: pr.Reason, TempFail: false})
 		w.emitAudit(ctx, entry, EventPolicyRejected, &DeliveryResult{StatusMsg: pr.Reason, StatusCode: pr.Code})
 		w.Metrics.RecordBounce()
+		w.callOnBounceFn(ctx, entry, "policy:sender")
 		w.Queue.Repo.Bounce(ctx, entry.ID, pr.Reason, nil)
 		return false
 	}
@@ -314,6 +314,7 @@ func (w *DeliveryWorker) checkPolicy(ctx context.Context, entry *queue.QueueEntr
 		w.recordAttempt(ctx, entry, attemptNumber, &DeliveryResult{StatusCode: pr2.Code, StatusMsg: pr2.Reason, TempFail: false})
 		w.emitAudit(ctx, entry, EventPolicyRejected, &DeliveryResult{StatusMsg: pr2.Reason, StatusCode: pr2.Code})
 		w.Metrics.RecordBounce()
+		w.callOnBounceFn(ctx, entry, "policy:domain")
 		w.Queue.Repo.Bounce(ctx, entry.ID, pr2.Reason, nil)
 		return false
 	}
@@ -341,6 +342,7 @@ func (w *DeliveryWorker) handleLoop(ctx context.Context, entry *queue.QueueEntry
 	w.recordAttempt(ctx, entry, attemptNumber, &DeliveryResult{StatusMsg: reason, StatusCode: 550, TempFail: false})
 	w.emitAudit(ctx, entry, EventLoopDetected, &DeliveryResult{StatusMsg: reason, StatusCode: 550})
 	w.Metrics.RecordBounce()
+	w.callOnBounceFn(ctx, entry, "loop")
 	w.Queue.Repo.Bounce(ctx, entry.ID, reason, nil)
 	return false
 }
@@ -353,6 +355,7 @@ func (w *DeliveryWorker) failPermanent(ctx context.Context, entry *queue.QueueEn
 	w.recordAttempt(ctx, entry, attemptNumber, &DeliveryResult{StatusMsg: msg, TempFail: false})
 	w.emitAudit(ctx, entry, EventBounced, &DeliveryResult{StatusMsg: msg})
 	w.Metrics.RecordBounce()
+	w.callOnBounceFn(ctx, entry, tag)
 	return w.Queue.Repo.Bounce(ctx, entry.ID, msg, nil)
 }
 
@@ -360,7 +363,22 @@ func (w *DeliveryWorker) failPolicy(ctx context.Context, entry *queue.QueueEntry
 	w.recordAttempt(ctx, entry, attemptNumber, &DeliveryResult{StatusCode: code, StatusMsg: reason, TempFail: false})
 	w.emitAudit(ctx, entry, EventPolicyRejected, &DeliveryResult{StatusCode: code, StatusMsg: reason})
 	w.Metrics.RecordBounce()
+	w.callOnBounceFn(ctx, entry, "policy")
 	return w.Queue.Repo.Bounce(ctx, entry.ID, reason, nil)
+}
+
+// callOnBounceFn invokes the bounce callback when the callback and
+// entry tenant are both available. All permanent-failure paths
+// converge through this helper so that billing/abuse bounce
+// accounting is never skipped.
+func (w *DeliveryWorker) callOnBounceFn(ctx context.Context, entry *queue.QueueEntry, tag string) {
+	if w.OnBounceFn != nil && entry.TenantID != 0 {
+		mbID := uint(0)
+		if entry.MailboxID != nil {
+			mbID = *entry.MailboxID
+		}
+		w.OnBounceFn(ctx, entry.TenantID, mbID, fmt.Sprintf("bounce:%s:%d", tag, entry.ID))
+	}
 }
 
 // recordAttempt persists a delivery attempt to the history repository.

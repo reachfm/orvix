@@ -112,16 +112,8 @@ type webhookTestEnv struct {
 
 func setupWebhookEnv(t *testing.T) *webhookTestEnv {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
+	db := newTestDB(t)
 	db.SetMaxOpenConns(1)
-	t.Cleanup(func() { db.Close() })
-
-	if err := CreateTables(db); err != nil {
-		t.Fatal(err)
-	}
 	svc := NewService(db)
 	if err := svc.SeedDefaultPlans(); err != nil {
 		t.Fatal(err)

@@ -7,18 +7,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func setupTestDB(t *testing.T) *sql.DB {
-	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-	if err := CreateTables(db); err != nil {
-		t.Fatal(err)
-	}
-	return db
-}
+func setupTestDB(t *testing.T) *sql.DB { return newTestDB(t) }
 
 func TestSeedDefaultPlans(t *testing.T) {
 	db := setupTestDB(t)

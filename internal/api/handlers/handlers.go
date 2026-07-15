@@ -204,6 +204,12 @@ type Handler struct {
 	billingWebhook   *billing.WebhookService
 	paymentProvider  billing.PaymentProvider
 	sendEnforcer     *billing.SendEnforcer
+	mailSender       MailSender
+}
+
+// MailSender sends transactional emails.
+type MailSender interface {
+	Send(to, subject, body string) error
 }
 
 // sqlDialect returns the dialect-aware SQL helper for raw queries.
@@ -428,6 +434,10 @@ func (h *Handler) SetPaymentProvider(p billing.PaymentProvider) {
 
 func (h *Handler) SetSendEnforcer(e *billing.SendEnforcer) {
 	h.sendEnforcer = e
+}
+
+func (h *Handler) SetMailSender(m MailSender) {
+	h.mailSender = m
 }
 
 func (h *Handler) StartBillingScheduler(ctx context.Context, interval time.Duration) {

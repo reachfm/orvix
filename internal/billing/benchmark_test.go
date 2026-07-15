@@ -9,14 +9,7 @@ import (
 
 func benchmarkSetup(b *testing.B) (*sql.DB, *Service) {
 	b.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		b.Fatal(err)
-	}
-	b.Cleanup(func() { db.Close() })
-	if err := CreateTables(db); err != nil {
-		b.Fatal(err)
-	}
+	db := newTestDB(b)
 	svc := NewService(db)
 	if err := svc.SeedDefaultPlans(); err != nil {
 		b.Fatal(err)

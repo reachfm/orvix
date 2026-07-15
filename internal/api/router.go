@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -63,6 +64,7 @@ type Router struct {
 	appCtx       context.Context
 	cancel       context.CancelFunc
 	db           *gorm.DB
+	startOnce    sync.Once
 }
 
 func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *zap.Logger,
@@ -252,6 +254,20 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			if webhookSvc != nil {
 				router.h.SetBillingWebhook(webhookSvc)
 				logger.Info("billing webhook service wired")
+			}
+
+			if provider, err := billing.NewPaymentProviderFromConfig(
+				router.cfg.Payment.Provider,
+				router.cfg.Payment.Secret,
+				router.cfg.Payment.WebhookSecret,
+				router.cfg.Payment.Enabled,
+			); err != nil {
+				logger.Error("payment provider init failed", zap.Error(err))
+			} else if provider != nil {
+				router.h.SetPaymentProvider(provider)
+				logger.Info("payment provider wired", zap.String("provider", router.cfg.Payment.Provider))
+			} else {
+				logger.Info("payment provider not configured — webhook returns 503")
 			}
 		}
 	}
@@ -478,6 +494,11 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		}
 	}
 
+	// Wire transactional mail sender for password resets.
+	// Uses the CoreMail SMTP host/port when configured.
+	ms := initTransactionalMailSender(cfg.CoreMail.SMTPHost, cfg.CoreMail.SMTPPort, cfg.CoreMail.Hostname, logger)
+	router.h.SetMailSender(ms)
+
 	router.setupMiddleware()
 	router.setupRoutes()
 	router.setupAdminUI()
@@ -507,7 +528,9 @@ func (r *Router) App() *fiber.App { return r.app }
 // Called by the production entry point; test callers should NOT
 // call Start to avoid background goroutines leaking.
 func (r *Router) Start() {
-	r.h.StartBillingScheduler(r.appCtx, 15*time.Minute)
+	r.startOnce.Do(func() {
+		r.h.StartBillingScheduler(r.appCtx, 15*time.Minute)
+	})
 }
 
 // Shutdown cancels the router's background context, stopping
@@ -844,7 +867,6 @@ func (r *Router) setupRoutes() {
 	enterprise.Get("/abuse/signals", r.h.ListAbuseSignals)
 	enterprise.Post("/abuse/signals/acknowledge", r.h.AcknowledgeAbuseSignal)
 	enterprise.Post("/abuse/signals/resolve", r.h.ResolveAbuseSignal)
-	enterprise.Get("/abuse/send-limit", r.h.CheckSendLimit)
 
 	// CSRF is enforced on the entire admin group by default (deny-list,
 	// not allow-list) rather than only on routes an author remembered to

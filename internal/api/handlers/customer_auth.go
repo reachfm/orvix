@@ -14,6 +14,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/auth"
+	"github.com/orvix/orvix/internal/billing"
 	"github.com/orvix/orvix/internal/dbdialect"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
@@ -72,7 +73,7 @@ func passwordStrength(pw string) error {
 	return nil
 }
 
-// Signup creates a new customer portal account.
+// Signup creates a new customer portal account with a default subscription.
 // POST /auth/signup
 func (h *Handler) Signup(c fiber.Ctx) error {
 	var req SignupRequest
@@ -107,6 +108,13 @@ func (h *Handler) Signup(c fiber.Ctx) error {
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "an account with this email already exists"})
 	}
 
+	tx, err := sqlDB.Begin()
+	if err != nil {
+		h.logger.Error("signup: begin tx", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
+	}
+	defer tx.Rollback()
+
 	domain := loginDomain(email)
 	tenantName := strings.TrimSpace(req.Name)
 	if tenantName == "" {
@@ -117,7 +125,7 @@ func (h *Handler) Signup(c fiber.Ctx) error {
 	slug := strings.NewReplacer(".", "-", "@", "-", " ", "-").Replace(strings.ToLower(tenantName))
 	now := time.Now().UTC()
 	if dial.IsPostgres() {
-		err = sqlDB.QueryRow(
+		err = tx.QueryRow(
 			fmt.Sprintf("INSERT INTO tenants (name, slug, domain, plan, max_domains, max_mailboxes, created_at, updated_at) VALUES (%s) RETURNING id", dial.Placeholders(8)),
 			tenantName, slug, domain, "smb", 10, 500, now, now,
 		).Scan(&tenantID)
@@ -126,7 +134,7 @@ func (h *Handler) Signup(c fiber.Ctx) error {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create account"})
 		}
 	} else {
-		res, err := sqlDB.Exec(
+		res, err := tx.Exec(
 			fmt.Sprintf("INSERT INTO tenants (name, slug, domain, plan, max_domains, max_mailboxes, created_at, updated_at) VALUES (%s)", dial.Placeholders(8)),
 			tenantName, slug, domain, "smb", 10, 500, now, now,
 		)
@@ -151,7 +159,7 @@ func (h *Handler) Signup(c fiber.Ctx) error {
 	var userID uint
 	now = time.Now().UTC()
 	if dial.IsPostgres() {
-		err = sqlDB.QueryRow(
+		err = tx.QueryRow(
 			fmt.Sprintf("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (%s) RETURNING id", dial.Placeholders(8)),
 			now, now, email, string(hash), string(auth.RoleUser), tenantID, true, true,
 		).Scan(&userID)
@@ -160,7 +168,7 @@ func (h *Handler) Signup(c fiber.Ctx) error {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create account"})
 		}
 	} else {
-		res, err := sqlDB.Exec(
+		res, err := tx.Exec(
 			fmt.Sprintf("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (%s)", dial.Placeholders(8)),
 			now, now, email, string(hash), string(auth.RoleUser), tenantID, true, true,
 		)
@@ -174,6 +182,21 @@ func (h *Handler) Signup(c fiber.Ctx) error {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create account"})
 		}
 		userID = uint(id)
+	}
+
+	// Create default subscription for the new tenant. This is
+	// inside the same transaction so a subscription failure
+	// rolls back the tenant and user creation.
+	if h.billingSvc != nil {
+		if _, err := h.billingSvc.CreateSubscriptionTx(tx, dial, tenantID, billing.PlanFree, billing.IntervalMonthly, 0); err != nil {
+			h.logger.Error("signup: create subscription", zap.Error(err))
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create account"})
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		h.logger.Error("signup: commit tx", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create account"})
 	}
 
 	if h.auditStore != nil {
@@ -255,6 +278,32 @@ func (h *Handler) ForgotPassword(c fiber.Ctx) error {
 		zap.String("email", email),
 		zap.Uint("user_id", userID),
 		zap.Time("expires_at", expiresAt))
+
+	if h.mailSender != nil {
+		resetURL := fmt.Sprintf("https://%s/reset-password?token=%s", loginDomain(email), token)
+		body := fmt.Sprintf("Reset your password by clicking the link below:\n\n%s\n\nThis link expires in 1 hour.", resetURL)
+		if err := h.mailSender.Send(email, "Password Reset Request", body); err != nil {
+			h.logger.Error("forgot password: send email", zap.Error(err))
+		} else {
+			h.logger.Info("password reset email sent", zap.String("email", email))
+		}
+	} else {
+		h.logger.Warn("forgot password: no mail sender configured — email not delivered",
+			zap.String("email", email))
+	}
+
+	if h.auditStore != nil {
+		if err := h.auditStore.Record(c.Context(), &audit.Entry{
+			Actor:     fmt.Sprintf("user:%d", userID),
+			Action:    "customer.password_reset_requested",
+			Target:    fmt.Sprintf("user:%d|email:%s", userID, email),
+			Result:    "success",
+			IP:        c.IP(),
+			UserAgent: c.Get("User-Agent"),
+		}); err != nil {
+			h.logger.Error("forgot password: write audit", zap.Error(err))
+		}
+	}
 
 	return c.JSON(fiber.Map{"message": "if the email exists, a reset link has been sent"})
 }

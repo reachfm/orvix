@@ -9,51 +9,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func setupTestDB(t *testing.T) *sql.DB {
-	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS abuse_send_counts (
-			day_key TEXT PRIMARY KEY,
-			tenant_id INTEGER NOT NULL,
-			emails_sent INTEGER NOT NULL DEFAULT 0,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		);
-		CREATE TABLE IF NOT EXISTS abuse_bounce_counts (
-			day_key TEXT PRIMARY KEY,
-			tenant_id INTEGER NOT NULL,
-			bounce_count INTEGER NOT NULL DEFAULT 0,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		);
-		CREATE TABLE IF NOT EXISTS abuse_signals (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			tenant_id INTEGER NOT NULL,
-			mailbox_id INTEGER,
-			signal_type TEXT NOT NULL DEFAULT '',
-			severity TEXT NOT NULL DEFAULT 'info',
-			description TEXT DEFAULT '',
-			metadata TEXT DEFAULT '',
-			detected_at DATETIME NOT NULL,
-			acknowledged_at DATETIME,
-			resolved_at DATETIME,
-			resolved_by INTEGER,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		);
-		CREATE TABLE IF NOT EXISTS subscriptions (
-			tenant_id INTEGER PRIMARY KEY,
-			send_limit_day INTEGER NOT NULL DEFAULT 500,
-			status TEXT NOT NULL DEFAULT 'active'
-		);
-	`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return db
-}
+func setupTestDB(t *testing.T) *sql.DB { return newTestDB(t) }
 
 func TestRecordSend(t *testing.T) {
 	db := setupTestDB(t)
