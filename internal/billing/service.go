@@ -237,10 +237,8 @@ func (s *Service) TransitionState(tenantID uint, newStatus SubscriptionStatus) e
 			g := now.AddDate(0, 0, 7)
 			graceEndsAt = &g
 		case SubGracePeriod:
-			if graceEndsAt == nil {
-				g := now.AddDate(0, 0, 7)
-				graceEndsAt = &g
-			}
+			g := now.AddDate(0, 0, 7)
+			graceEndsAt = &g
 		case SubSuspended:
 			suspendedAt = &now
 		case SubCancelled:

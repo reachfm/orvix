@@ -75,19 +75,25 @@ func (e *SendEnforcer) RecordSend(ctx context.Context, id SendIdentity, eventID 
 		return nil
 	}
 	return e.withTx(func(tx *sql.Tx) error {
-		var exists bool
-		err := tx.QueryRowContext(ctx,
-			"SELECT 1 FROM send_events WHERE event_id = "+e.dialect.Placeholder(1)+" AND tenant_id = "+e.dialect.Placeholder(2),
-			eventID, id.TenantID).Scan(&exists)
-		if err == nil {
-			return nil
-		}
 		now := time.Now().UTC()
-		_, err = tx.ExecContext(ctx,
-			"INSERT INTO send_events (event_id, tenant_id, mailbox_id, recipient_count, created_at) VALUES ("+e.dialect.Placeholder(1)+", "+e.dialect.Placeholder(2)+", "+e.dialect.Placeholder(3)+", "+e.dialect.Placeholder(4)+", "+e.dialect.Placeholder(5)+")",
-			eventID, id.TenantID, id.MailboxID, count, now)
+		var result sql.Result
+		var err error
+		if e.dialect.IsPostgres() {
+			result, err = tx.ExecContext(ctx,
+				`INSERT INTO send_events (event_id, tenant_id, mailbox_id, recipient_count, event_type, created_at)
+				VALUES ($1, $2, $3, $4, 'send', $5) ON CONFLICT (event_id, tenant_id) DO NOTHING`,
+				eventID, id.TenantID, id.MailboxID, count, now)
+		} else {
+			result, err = tx.ExecContext(ctx,
+				`INSERT OR IGNORE INTO send_events (event_id, tenant_id, mailbox_id, recipient_count, event_type, created_at)
+				VALUES (?, ?, ?, ?, 'send', ?)`,
+				eventID, id.TenantID, id.MailboxID, count, now)
+		}
 		if err != nil {
 			return err
+		}
+		if n, _ := result.RowsAffected(); n == 0 {
+			return nil
 		}
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO abuse_send_counts (day_key, tenant_id, emails_sent, created_at)

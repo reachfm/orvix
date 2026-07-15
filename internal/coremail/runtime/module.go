@@ -869,12 +869,16 @@ func (m *Module) RulesRunner() *rules.Runner {
 // drain via their own per-server Stop() in well under 1s.
 const moduleStopTimeout = 3 * time.Second
 
-// SetSendEnforcerCallback wires a shared send enforcement callback into
-// the SMTP submission handler. Called by the router after billing services
-// are initialized so SMTP cannot bypass Webmail enforcement.
-func (m *Module) SetSendEnforcerCallback(fn func(ctx context.Context, tenantID, mailboxID uint, count int) error) {
+// SetSendEnforcerCallback wires shared send enforcement into the SMTP
+// submission pipeline. Called by the router after billing services are
+// initialized. preFn checks AllowSend before DATA (returns error on rejection);
+// postFn calls RecordSend after successful acceptance (no error, best effort).
+func (m *Module) SetSendEnforcerCallback(preFn func(ctx context.Context, tenantID, mailboxID uint, count int) error, postFn func(ctx context.Context, tenantID, mailboxID uint, count int)) {
 	if m.submissionHandler != nil {
-		m.submissionHandler.SetSendEnforcer(fn)
+		m.submissionHandler.SetSendEnforcer(preFn)
+	}
+	if m.submissionServer != nil {
+		m.submissionServer.PostAcceptFn = postFn
 	}
 }
 

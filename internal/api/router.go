@@ -220,16 +220,23 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			if enforcer != nil {
 				if mod, ok := registry.Get("coremail-runtime"); ok {
 					if esc, ok := mod.(interface {
-						SetSendEnforcerCallback(func(ctx context.Context, tenantID, mailboxID uint, count int) error)
+						SetSendEnforcerCallback(func(ctx context.Context, tenantID, mailboxID uint, count int) error, func(ctx context.Context, tenantID, mailboxID uint, count int))
 					}); ok {
-						esc.SetSendEnforcerCallback(func(ctx context.Context, tenantID, mailboxID uint, count int) error {
-							id := billing.SendIdentity{TenantID: tenantID, MailboxID: mailboxID}
-							result := enforcer.AllowSend(ctx, id, count)
-							if !result.Allowed {
-								return fmt.Errorf("%s", result.Reason)
-							}
-							return nil
-						})
+						esc.SetSendEnforcerCallback(
+							func(ctx context.Context, tenantID, mailboxID uint, count int) error {
+								id := billing.SendIdentity{TenantID: tenantID, MailboxID: mailboxID}
+								result := enforcer.AllowSend(ctx, id, count)
+								if !result.Allowed {
+									return fmt.Errorf("%s", result.Reason)
+								}
+								return nil
+							},
+							func(ctx context.Context, tenantID, mailboxID uint, count int) {
+								id := billing.SendIdentity{TenantID: tenantID, MailboxID: mailboxID}
+								eid := fmt.Sprintf("smtp:%d:%d:%d", tenantID, mailboxID, time.Now().UnixNano())
+								enforcer.RecordSend(ctx, id, eid, count)
+							},
+						)
 						logger.Info("SMTP send enforcement wired")
 					}
 				}

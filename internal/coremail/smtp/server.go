@@ -23,6 +23,9 @@ type Server struct {
 	RecipientValidator RecipientValidator
 	SenderValidator    SenderValidator
 	Observability      *observability.Observability
+	// PostAcceptFn is called after a message is successfully
+	// accepted and enqueued. tenantID, mailboxID, recipientCount.
+	PostAcceptFn func(ctx context.Context, tenantID, mailboxID uint, count int)
 
 	mu       sync.Mutex
 	sessions map[string]*Session
@@ -316,6 +319,10 @@ func (s *Server) handleConn(conn net.Conn) {
 					writer.Flush()
 					continue
 				}
+			}
+
+			if s.PostAcceptFn != nil && session.AuthIdentity != nil {
+				s.PostAcceptFn(context.Background(), session.AuthIdentity.TenantID, session.AuthIdentity.MailboxID, len(session.Recipients))
 			}
 
 			writeResponse(writer, MessageAccepted)
