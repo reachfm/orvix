@@ -186,6 +186,15 @@ func buildWebmailTestEnv(t *testing.T) *webmailTestEnv {
 		t.Fatalf("provision admin user: %v", err)
 	}
 
+	// Ensure a subscription exists for the test tenant so quota
+	// enforcement allows sends (fail-closed: no-sub → denied).
+	now := time.Now().UTC()
+	periodEnd := now.AddDate(0, 1, 0)
+	sqlDB.Exec(`INSERT OR IGNORE INTO subscriptions (tenant_id, plan_id, status, billing_interval,
+		current_period_start, current_period_end, send_limit_day, storage_mb, created_at, updated_at)
+		VALUES (1, 'free', 'active', 'monthly', ?, ?, 500, 1024, ?, ?)`,
+		now, periodEnd, now, now)
+
 	t.Cleanup(func() {
 		_ = router.App().Shutdown()
 		_ = sqlDB.Close()
@@ -220,6 +229,12 @@ func provisionAdminUser(t *testing.T, sqlDB *sql.DB, email, password string) err
 		// Insert may fail if a previous run already
 		// populated the tenant; that's fine.
 	}
+
+	periodEnd := now.AddDate(0, 1, 0)
+	sqlDB.Exec(`INSERT OR IGNORE INTO subscriptions (tenant_id, plan_id, status, billing_interval,
+		current_period_start, current_period_end, send_limit_day, storage_mb, created_at, updated_at)
+		VALUES (1, 'free', 'active', 'monthly', ?, ?, 500, 1024, ?, ?)`,
+		now, periodEnd, now, now)
 
 	// Insert users row.
 	if _, err := sqlDB.Exec(
