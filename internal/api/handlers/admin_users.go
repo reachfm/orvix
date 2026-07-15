@@ -18,11 +18,11 @@ func (h *Handler) ListAdminUsers(c fiber.Ctx) error {
 	sqlDB := h.sqlDB()
 	tenantID := h.tenantID(c)
 
-	rows, err := sqlDB.QueryContext(c.Context(), `
+	rows, err := sqlDB.QueryContext(c.Context(), h.sqlQ(`
 		SELECT id, email, role, active, email_verified, created_at, updated_at
 		FROM users
 		WHERE tenant_id = ? AND role IN ('admin','superadmin') AND deleted_at IS NULL
-		ORDER BY email ASC`, tenantID)
+		ORDER BY email ASC`), tenantID)
 	if err != nil {
 		h.logger.Error("list admin users: DB query failed", zap.Error(err))
 		return fiber.NewError(fiber.StatusInternalServerError, "admin users temporarily unavailable")
@@ -95,9 +95,9 @@ func (h *Handler) CreateAdminUser(c fiber.Ctx) error {
 	}
 
 	now := time.Now().UTC()
-	res, err := sqlDB.ExecContext(c.Context(), `
+	res, err := sqlDB.ExecContext(c.Context(), h.sqlQ(`
 		INSERT INTO users (tenant_id, email, password_hash, role, active, email_verified, created_at, updated_at)
-		VALUES (?, ?, ?, ?, 1, 1, ?, ?)`,
+		VALUES (?, ?, ?, ?, 1, 1, ?, ?)`),
 		tenantID, body.Email, hash, body.Role, now, now)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
@@ -129,9 +129,9 @@ func (h *Handler) GetAdminUser(c fiber.Ctx) error {
 	var email, role string
 	var active, emailVerified bool
 	var createdAt, updatedAt time.Time
-	err := sqlDB.QueryRowContext(c.Context(), `
+	err := sqlDB.QueryRowContext(c.Context(), h.sqlQ(`
 		SELECT id, email, role, active, email_verified, created_at, updated_at
-		FROM users WHERE id = ? AND tenant_id = ? AND role IN ('admin','superadmin') AND deleted_at IS NULL`,
+		FROM users WHERE id = ? AND tenant_id = ? AND role IN ('admin','superadmin') AND deleted_at IS NULL`),
 		id, tenantID).Scan(&id, &email, &role, &active, &emailVerified, &createdAt, &updatedAt)
 	if err != nil {
 		return fiber.NewError(fiber.StatusNotFound, "admin user not found")
@@ -243,7 +243,7 @@ func (h *Handler) UpdateAdminUserPassword(c fiber.Ctx) error {
 
 	now := time.Now().UTC()
 	res, err := sqlDB.ExecContext(c.Context(),
-		`UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ? AND tenant_id = ? AND role IN ('admin','superadmin') AND deleted_at IS NULL`,
+		h.sqlQ(`UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ? AND tenant_id = ? AND role IN ('admin','superadmin') AND deleted_at IS NULL`),
 		hash, now, id, tenantID)
 	if err != nil {
 		h.logger.Error("reset password: DB update failed", zap.Error(err))

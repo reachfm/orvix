@@ -25,29 +25,29 @@ func (s *DashboardService) CustomerDashboard(ctx context.Context, tenantID uint)
 	d := &CustomerDashboard{}
 
 	s.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM coremail_domains WHERE tenant_id=? AND deleted_at IS NULL", tenantID).Scan(&d.TotalDomains)
+		"SELECT COUNT(*) FROM coremail_domains WHERE tenant_id="+s.dialect.Placeholder(1)+" AND deleted_at IS NULL", tenantID).Scan(&d.TotalDomains)
 
 	s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM coremail_domains WHERE tenant_id=? AND status='active' AND deleted_at IS NULL`, tenantID).Scan(&d.HealthyDomains)
+		`SELECT COUNT(*) FROM coremail_domains WHERE tenant_id=`+s.dialect.Placeholder(1)+` AND status='active' AND deleted_at IS NULL`, tenantID).Scan(&d.HealthyDomains)
 
 	s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM coremail_domains WHERE tenant_id=? AND status NOT IN ('active','deleted') AND deleted_at IS NULL`, tenantID).Scan(&d.DomainsNeedingAttention)
+		`SELECT COUNT(*) FROM coremail_domains WHERE tenant_id=`+s.dialect.Placeholder(1)+` AND status NOT IN ('active','deleted') AND deleted_at IS NULL`, tenantID).Scan(&d.DomainsNeedingAttention)
 
 	s.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM coremail_mailboxes WHERE tenant_id=? AND deleted_at IS NULL", tenantID).Scan(&d.TotalMailboxes)
+		"SELECT COUNT(*) FROM coremail_mailboxes WHERE tenant_id="+s.dialect.Placeholder(1)+" AND deleted_at IS NULL", tenantID).Scan(&d.TotalMailboxes)
 
 	s.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM coremail_mailboxes WHERE tenant_id=? AND status='active' AND deleted_at IS NULL", tenantID).Scan(&d.ActiveMailboxes)
+		"SELECT COUNT(*) FROM coremail_mailboxes WHERE tenant_id="+s.dialect.Placeholder(1)+" AND status='active' AND deleted_at IS NULL", tenantID).Scan(&d.ActiveMailboxes)
 
 	s.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM coremail_mailboxes WHERE tenant_id=? AND status='suspended' AND deleted_at IS NULL", tenantID).Scan(&d.SuspendedMailboxes)
+		"SELECT COUNT(*) FROM coremail_mailboxes WHERE tenant_id="+s.dialect.Placeholder(1)+" AND status='suspended' AND deleted_at IS NULL", tenantID).Scan(&d.SuspendedMailboxes)
 
 	s.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM coremail_mailboxes WHERE tenant_id=? AND status='disabled' AND deleted_at IS NULL", tenantID).Scan(&d.DisabledMailboxes)
+		"SELECT COUNT(*) FROM coremail_mailboxes WHERE tenant_id="+s.dialect.Placeholder(1)+" AND status='disabled' AND deleted_at IS NULL", tenantID).Scan(&d.DisabledMailboxes)
 
 	var quotaUsed sql.NullInt64
 	s.db.QueryRowContext(ctx,
-		"SELECT SUM(used_bytes) FROM coremail_mailboxes WHERE tenant_id=? AND deleted_at IS NULL", tenantID).Scan(&quotaUsed)
+		"SELECT SUM(used_bytes) FROM coremail_mailboxes WHERE tenant_id="+s.dialect.Placeholder(1)+" AND deleted_at IS NULL", tenantID).Scan(&quotaUsed)
 	d.QuotaUsedBytes = quotaUsed.Int64
 
 	s.loadRecentActions(ctx, tenantID, d)
@@ -77,7 +77,7 @@ func (s *DashboardService) PlatformDashboard(ctx context.Context) (*PlatformDash
 
 func (s *DashboardService) loadRecentActions(ctx context.Context, tenantID uint, d *CustomerDashboard) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT action, target, timestamp FROM orvix_audit WHERE tenant_id=? ORDER BY id DESC LIMIT 10", tenantID)
+		"SELECT action, target, timestamp FROM orvix_audit WHERE tenant_id="+s.dialect.Placeholder(1)+" ORDER BY id DESC LIMIT 10", tenantID)
 	if err != nil {
 		return
 	}

@@ -1,6 +1,10 @@
 package backup
 
-import "time"
+import (
+	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
+)
 
 // ProductName is the canonical product name embedded in backup manifests.
 const ProductName = "Orvix Enterprise Mail"
@@ -193,23 +197,26 @@ const (
 	HealthStatusDisabled       = "scheduler_disabled"
 )
 
-var tables = []string{
-	`CREATE TABLE IF NOT EXISTS backup_registry (
-		id TEXT PRIMARY KEY,
-		name TEXT NOT NULL DEFAULT '',
-		status TEXT NOT NULL DEFAULT 'pending',
-		size_bytes INTEGER NOT NULL DEFAULT 0,
-		sha256 TEXT NOT NULL DEFAULT '',
-		created_at DATETIME NOT NULL,
-		completed_at DATETIME
-	)`,
-	`CREATE TABLE IF NOT EXISTS backup_schedule_config (
-		id INTEGER PRIMARY KEY DEFAULT 1,
-		enabled INTEGER NOT NULL DEFAULT 0,
-		frequency TEXT NOT NULL DEFAULT 'manual',
-		retention_count INTEGER NOT NULL DEFAULT 10,
-		last_run_at DATETIME,
-		next_run_at DATETIME,
-		updated_at DATETIME NOT NULL
-	)`,
+func tables(d *dbdialect.Info) []string {
+	ts := d.TimestampType()
+	return []string{
+		`CREATE TABLE IF NOT EXISTS backup_registry (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'pending',
+			size_bytes INTEGER NOT NULL DEFAULT 0,
+			sha256 TEXT NOT NULL DEFAULT '',
+			created_at ` + ts + ` NOT NULL,
+			completed_at ` + ts + `
+		)`,
+		`CREATE TABLE IF NOT EXISTS backup_schedule_config (
+			id INTEGER PRIMARY KEY DEFAULT 1,
+			enabled INTEGER NOT NULL DEFAULT 0,
+			frequency TEXT NOT NULL DEFAULT 'manual',
+			retention_count INTEGER NOT NULL DEFAULT 10,
+			last_run_at ` + ts + `,
+			next_run_at ` + ts + `,
+			updated_at ` + ts + ` NOT NULL
+		)`,
+	}
 }

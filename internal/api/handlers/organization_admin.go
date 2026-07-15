@@ -4,6 +4,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/admin/organization"
 	"github.com/orvix/orvix/internal/auth"
+	"github.com/orvix/orvix/internal/billing"
 	"strconv"
 )
 
@@ -97,6 +98,11 @@ func (h *Handler) CreateOrganization(c fiber.Ctx) error {
 			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "organization already exists"})
 		}
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
+	}
+	if h.billingSvc != nil {
+		if _, subErr := h.billingSvc.GetSubscription(org.ID); subErr != nil {
+			h.billingSvc.CreateSubscription(org.ID, billing.PlanFree, billing.IntervalMonthly, 0)
+		}
 	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"organization": org})
 }

@@ -23,6 +23,7 @@ import (
 	"github.com/orvix/orvix/internal/coremail/rules"
 	"github.com/orvix/orvix/internal/coremail/smtp"
 	"github.com/orvix/orvix/internal/coremail/storage"
+	"github.com/orvix/orvix/internal/dbdialect"
 	"github.com/orvix/orvix/internal/licensing"
 	"github.com/orvix/orvix/internal/licensingauthority"
 	"github.com/orvix/orvix/internal/observability"
@@ -522,6 +523,10 @@ func (m *Module) Migrate() error {
 	if m.db == nil {
 		return nil
 	}
+	dialect, err := dbdialect.Detect(m.db)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
 	for _, stmt := range append(storage.Tables(), storage.Indexes()...) {
 		if _, err := m.db.Exec(stmt); err != nil {
 			return fmt.Errorf("coremail storage migration: %w", err)
@@ -532,12 +537,12 @@ func (m *Module) Migrate() error {
 			return fmt.Errorf("coremail queue migration: %w", err)
 		}
 	}
-	for _, stmt := range append(policy.Tables(), policy.Indexes()...) {
+	for _, stmt := range append(policy.Tables(dialect), policy.Indexes()...) {
 		if _, err := m.db.Exec(stmt); err != nil {
 			return fmt.Errorf("coremail policy migration: %w", err)
 		}
 	}
-	for _, stmt := range trust.Tables() {
+	for _, stmt := range trust.TablesForDialect(dialect) {
 		if _, err := m.db.Exec(stmt); err != nil {
 			return fmt.Errorf("coremail trust migration: %w", err)
 		}

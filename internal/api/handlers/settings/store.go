@@ -26,6 +26,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 // Section is the top-level grouping for the admin UI.
@@ -171,12 +173,19 @@ func Allowlist() map[string]Field {
 
 // Store is the DB-backed admin settings store.
 type Store struct {
-	db *sql.DB
+	db      *sql.DB
+	dialect *dbdialect.Info
 }
 
 // NewStore returns a Store bound to the given DB. The store
 // automatically creates the admin_settings table on first use.
-func NewStore(db *sql.DB) *Store { return &Store{db: db} }
+func NewStore(db *sql.DB) *Store {
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
+	return &Store{db: db, dialect: dialect}
+}
 
 // EnsureSchema creates the admin_settings table and indexes if they
 // do not exist. Idempotent.
@@ -371,15 +380,19 @@ func (s *Store) Patch(ctx context.Context, p Patch) (*PatchResult, error) {
 			restartFlag = 1
 			result.RestartRequired = true
 		}
+		setConflict := "excluded"
+		if s.dialect.IsPostgres() {
+			setConflict = "EXCLUDED"
+		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO admin_settings (key, value, section, requires_restart, updated_at, updated_by)
-			VALUES (?, ?, ?, ?, ?, ?)
-			ON CONFLICT(key) DO UPDATE SET
-				value = excluded.value,
-				section = excluded.section,
-				requires_restart = excluded.requires_restart,
-				updated_at = excluded.updated_at,
-				updated_by = excluded.updated_by`,
+			VALUES (`+s.dialect.Placeholders(6)+`)
+			ON CONFLICT (key) DO UPDATE SET
+				value = `+setConflict+`.value,
+				section = `+setConflict+`.section,
+				requires_restart = `+setConflict+`.requires_restart,
+				updated_at = `+setConflict+`.updated_at,
+				updated_by = `+setConflict+`.updated_by`,
 			tf.key, string(encoded), string(tf.field.Section), restartFlag, tf.now, p.UpdatedBy,
 		); err != nil {
 			result.Rejected = append(result.Rejected, RejectedField{Key: tf.key, Reason: "persist: " + err.Error()})
@@ -466,7 +479,7 @@ func (s *Store) Get(ctx context.Context, key string) (*Entry, error) {
 	}
 	row := s.db.QueryRowContext(ctx, `
 		SELECT key, value, section, requires_restart, updated_at, updated_by
-		FROM admin_settings WHERE key = ?`, key)
+		FROM admin_settings WHERE key = `+s.dialect.Placeholder(1), key)
 	var e Entry
 	var value string
 	var section string

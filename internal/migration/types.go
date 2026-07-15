@@ -1,6 +1,10 @@
 package migration
 
-import "time"
+import (
+	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
+)
 
 type ImportSourceType string
 
@@ -53,17 +57,21 @@ type MessageImport struct {
 	Folder     string `json:"folder,omitempty"`
 }
 
-var schema = []string{
-	`CREATE TABLE IF NOT EXISTS coremail_migrations (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		source_type TEXT NOT NULL DEFAULT '',
-		source_host TEXT NOT NULL DEFAULT '',
-		status TEXT NOT NULL DEFAULT 'pending',
-		domains_imported INTEGER NOT NULL DEFAULT 0,
-		mailboxes_imported INTEGER NOT NULL DEFAULT 0,
-		messages_imported INTEGER NOT NULL DEFAULT 0,
-		errors INTEGER NOT NULL DEFAULT 0,
-		started_at DATETIME NOT NULL,
-		completed_at DATETIME
-	)`,
+func schema(d *dbdialect.Info) []string {
+	ts := d.TimestampType()
+	autoInc := d.AutoIncrement()
+	return []string{
+		`CREATE TABLE IF NOT EXISTS coremail_migrations (
+			id ` + autoInc + `,
+			source_type TEXT NOT NULL DEFAULT '',
+			source_host TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'pending',
+			domains_imported INTEGER NOT NULL DEFAULT 0,
+			mailboxes_imported INTEGER NOT NULL DEFAULT 0,
+			messages_imported INTEGER NOT NULL DEFAULT 0,
+			errors INTEGER NOT NULL DEFAULT 0,
+			started_at ` + ts + ` NOT NULL,
+			completed_at ` + ts + `
+		)`,
+	}
 }

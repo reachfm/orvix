@@ -6,21 +6,28 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 // Service provides compliance, quarantine, and abuse operations.
 type Service struct {
-	db *sql.DB
+	db      *sql.DB
+	dialect *dbdialect.Info
 }
 
 // NewService creates a compliance service.
 func NewService(db *sql.DB) *Service {
-	return &Service{db: db}
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
+	return &Service{db: db, dialect: dialect}
 }
 
 // EnsureSchema creates required tables.
 func (s *Service) EnsureSchema(ctx context.Context) error {
-	for _, stmt := range schema {
+	for _, stmt := range schema(s.dialect) {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			return err
 		}
@@ -72,7 +79,7 @@ func (s *Service) CreatePolicy(ctx context.Context, p *Policy) error {
 	p.CreatedAt = now
 	p.UpdatedAt = now
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO compliance_policies (name, enabled, action, scope, value, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO compliance_policies (name, enabled, action, scope, value, created_at, updated_at) VALUES (`+s.dialect.Placeholders(7)+`)`,
 		p.Name, p.Enabled, string(p.Action), string(p.Scope), strings.ToLower(p.Value), p.CreatedAt, p.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("create policy: %w", err)
@@ -107,13 +114,13 @@ func (s *Service) UpdatePolicy(ctx context.Context, id uint, p *Policy) error {
 	existing.UpdatedAt = time.Now().UTC()
 
 	_, err = s.db.ExecContext(ctx,
-		`UPDATE compliance_policies SET name=?, enabled=?, action=?, scope=?, value=?, updated_at=? WHERE id=?`,
+		`UPDATE compliance_policies SET name=`+s.dialect.Placeholder(1)+`, enabled=`+s.dialect.Placeholder(2)+`, action=`+s.dialect.Placeholder(3)+`, scope=`+s.dialect.Placeholder(4)+`, value=`+s.dialect.Placeholder(5)+`, updated_at=`+s.dialect.Placeholder(6)+` WHERE id=`+s.dialect.Placeholder(7),
 		existing.Name, existing.Enabled, string(existing.Action), string(existing.Scope), existing.Value, existing.UpdatedAt, id)
 	return err
 }
 
 func (s *Service) GetPolicy(ctx context.Context, id uint) (*Policy, error) {
-	row := s.db.QueryRowContext(ctx, "SELECT id, name, enabled, action, scope, value, created_at, updated_at FROM compliance_policies WHERE id=?", id)
+	row := s.db.QueryRowContext(ctx, "SELECT id, name, enabled, action, scope, value, created_at, updated_at FROM compliance_policies WHERE id="+s.dialect.Placeholder(1), id)
 	var p Policy
 	err := row.Scan(&p.ID, &p.Name, &p.Enabled, &p.Action, &p.Scope, &p.Value, &p.CreatedAt, &p.UpdatedAt)
 	if err == sql.ErrNoRows {
@@ -126,7 +133,7 @@ func (s *Service) GetPolicy(ctx context.Context, id uint) (*Policy, error) {
 }
 
 func (s *Service) DeletePolicy(ctx context.Context, id uint) error {
-	_, err := s.db.ExecContext(ctx, "DELETE FROM compliance_policies WHERE id=?", id)
+	_, err := s.db.ExecContext(ctx, "DELETE FROM compliance_policies WHERE id="+s.dialect.Placeholder(1), id)
 	return err
 }
 
@@ -138,7 +145,7 @@ func (s *Service) QuarantineMessage(ctx context.Context, msgID, sender, recipien
 		Reason: reason, Status: QStatusQuarantined, CreatedAt: time.Now().UTC(),
 	}
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO coremail_quarantine (message_id, sender, recipient, reason, status, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO coremail_quarantine (message_id, sender, recipient, reason, status, created_at) VALUES (`+s.dialect.Placeholders(6)+`)`,
 		q.MessageID, q.Sender, q.Recipient, q.Reason, string(q.Status), q.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("quarantine: %w", err)
@@ -170,7 +177,7 @@ func (s *Service) ListQuarantine(ctx context.Context) ([]QuarantinedMessage, err
 }
 
 func (s *Service) GetQuarantine(ctx context.Context, id uint) (*QuarantinedMessage, error) {
-	row := s.db.QueryRowContext(ctx, "SELECT id, message_id, sender, recipient, reason, status, created_at, released_at, released_by FROM coremail_quarantine WHERE id=?", id)
+	row := s.db.QueryRowContext(ctx, "SELECT id, message_id, sender, recipient, reason, status, created_at, released_at, released_by FROM coremail_quarantine WHERE id="+s.dialect.Placeholder(1), id)
 	var q QuarantinedMessage
 	var releasedAt sql.NullTime
 	err := row.Scan(&q.ID, &q.MessageID, &q.Sender, &q.Recipient, &q.Reason, &q.Status, &q.CreatedAt, &releasedAt, &q.ReleasedBy)
@@ -189,7 +196,7 @@ func (s *Service) GetQuarantine(ctx context.Context, id uint) (*QuarantinedMessa
 func (s *Service) ReleaseMessage(ctx context.Context, id uint, releasedBy string) (*QuarantinedMessage, error) {
 	now := time.Now().UTC()
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE coremail_quarantine SET status=?, released_at=?, released_by=? WHERE id=? AND status=?`,
+		`UPDATE coremail_quarantine SET status=`+s.dialect.Placeholder(1)+`, released_at=`+s.dialect.Placeholder(2)+`, released_by=`+s.dialect.Placeholder(3)+` WHERE id=`+s.dialect.Placeholder(4)+` AND status=`+s.dialect.Placeholder(5),
 		string(QStatusReleased), now, releasedBy, id, string(QStatusQuarantined))
 	if err != nil {
 		return nil, err
@@ -198,7 +205,7 @@ func (s *Service) ReleaseMessage(ctx context.Context, id uint, releasedBy string
 }
 
 func (s *Service) DeleteQuarantine(ctx context.Context, id uint) error {
-	_, err := s.db.ExecContext(ctx, "UPDATE coremail_quarantine SET status=? WHERE id=?", string(QStatusDeleted), id)
+	_, err := s.db.ExecContext(ctx, "UPDATE coremail_quarantine SET status="+s.dialect.Placeholder(1)+" WHERE id="+s.dialect.Placeholder(2), string(QStatusDeleted), id)
 	return err
 }
 

@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 // DomainCreator creates domains for import.
@@ -26,6 +28,7 @@ type MessageStorer interface {
 // Service provides migration import operations.
 type Service struct {
 	db             *sql.DB
+	dialect        *dbdialect.Info
 	domainCreator  DomainCreator
 	mailboxCreator MailboxCreator
 	messageStorer  MessageStorer
@@ -33,7 +36,11 @@ type Service struct {
 
 // NewService creates a migration service.
 func NewService(db *sql.DB) *Service {
-	return &Service{db: db}
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
+	return &Service{db: db, dialect: dialect}
 }
 
 // SetDomainCreator attaches a domain registry.
@@ -47,7 +54,7 @@ func (s *Service) SetMessageStorer(m MessageStorer) { s.messageStorer = m }
 
 // EnsureSchema creates required tables.
 func (s *Service) EnsureSchema(ctx context.Context) error {
-	for _, stmt := range schema {
+	for _, stmt := range schema(s.dialect) {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			return err
 		}
@@ -63,7 +70,7 @@ func (s *Service) CreateJob(ctx context.Context, sourceType ImportSourceType, so
 		Status: ImpPending, StartedAt: time.Now().UTC(),
 	}
 	res, err := s.db.ExecContext(ctx,
-		"INSERT INTO coremail_migrations (source_type, source_host, status, started_at) VALUES (?, ?, ?, ?)",
+		"INSERT INTO coremail_migrations (source_type, source_host, status, started_at) VALUES ("+s.dialect.Placeholders(4)+")",
 		string(j.SourceType), j.SourceHost, string(j.Status), j.StartedAt)
 	if err != nil {
 		return nil, err
@@ -95,7 +102,7 @@ func (s *Service) ListJobs(ctx context.Context) ([]ImportJob, error) {
 }
 
 func (s *Service) GetJob(ctx context.Context, id uint) (*ImportJob, error) {
-	row := s.db.QueryRowContext(ctx, "SELECT id, source_type, source_host, status, domains_imported, mailboxes_imported, messages_imported, errors, started_at, completed_at FROM coremail_migrations WHERE id=?", id)
+	row := s.db.QueryRowContext(ctx, "SELECT id, source_type, source_host, status, domains_imported, mailboxes_imported, messages_imported, errors, started_at, completed_at FROM coremail_migrations WHERE id="+s.dialect.Placeholder(1), id)
 	var j ImportJob
 	var completedAt sql.NullTime
 	err := row.Scan(&j.ID, &j.SourceType, &j.SourceHost, &j.Status, &j.DomainsImported, &j.MailboxesImported, &j.MessagesImported, &j.Errors, &j.StartedAt, &completedAt)
@@ -117,7 +124,7 @@ func (s *Service) CancelJob(ctx context.Context, id uint) error {
 
 func (s *Service) updateStatus(ctx context.Context, id uint, status ImportJobStatus) error {
 	now := time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, "UPDATE coremail_migrations SET status=?, completed_at=? WHERE id=?", string(status), now, id)
+	_, err := s.db.ExecContext(ctx, "UPDATE coremail_migrations SET status="+s.dialect.Placeholder(1)+", completed_at="+s.dialect.Placeholder(2)+" WHERE id="+s.dialect.Placeholder(3), string(status), now, id)
 	return err
 }
 
@@ -184,17 +191,17 @@ func (s *Service) ImportMessage(ctx context.Context, jobID uint, msg MessageImpo
 // ── Internal ────────────────────────────────────────────
 
 func (s *Service) incrementDomains(ctx context.Context, jobID uint) {
-	s.db.ExecContext(ctx, "UPDATE coremail_migrations SET domains_imported = domains_imported + 1 WHERE id=?", jobID)
+	s.db.ExecContext(ctx, "UPDATE coremail_migrations SET domains_imported = domains_imported + 1 WHERE id="+s.dialect.Placeholder(1), jobID)
 }
 
 func (s *Service) incrementMailboxes(ctx context.Context, jobID uint) {
-	s.db.ExecContext(ctx, "UPDATE coremail_migrations SET mailboxes_imported = mailboxes_imported + 1 WHERE id=?", jobID)
+	s.db.ExecContext(ctx, "UPDATE coremail_migrations SET mailboxes_imported = mailboxes_imported + 1 WHERE id="+s.dialect.Placeholder(1), jobID)
 }
 
 func (s *Service) incrementMessages(ctx context.Context, jobID uint) {
-	s.db.ExecContext(ctx, "UPDATE coremail_migrations SET messages_imported = messages_imported + 1 WHERE id=?", jobID)
+	s.db.ExecContext(ctx, "UPDATE coremail_migrations SET messages_imported = messages_imported + 1 WHERE id="+s.dialect.Placeholder(1), jobID)
 }
 
 func (s *Service) incrementErrors(ctx context.Context, jobID uint) {
-	s.db.ExecContext(ctx, "UPDATE coremail_migrations SET errors = errors + 1 WHERE id=?", jobID)
+	s.db.ExecContext(ctx, "UPDATE coremail_migrations SET errors = errors + 1 WHERE id="+s.dialect.Placeholder(1), jobID)
 }

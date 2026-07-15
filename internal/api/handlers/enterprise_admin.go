@@ -45,7 +45,7 @@ func (h *Handler) ListAccountClasses(c fiber.Ctx) error {
 		return err
 	}
 	tenantID := h.tenantID(c)
-	rows, err := h.sqlDB().QueryContext(c.Context(), `
+	rows, err := h.sqlDB().QueryContext(c.Context(), h.sqlQ(`
 		SELECT id, name, description, default_quota_mb, max_quota_mb,
 		       max_send_per_hour, max_recv_per_hour,
 		       allow_external_forwarding, allow_imap, allow_pop3,
@@ -53,7 +53,7 @@ func (h *Handler) ListAccountClasses(c fiber.Ctx) error {
 		       created_at, updated_at
 		FROM coremail_account_classes
 		WHERE tenant_id = ? AND deleted_at IS NULL
-		ORDER BY name ASC`, tenantID)
+		ORDER BY name ASC`), tenantID)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("list account classes: %v", err))
 	}
@@ -158,13 +158,13 @@ func (h *Handler) CreateAccountClass(c fiber.Ctx) error {
 		isAdm = 1
 	}
 	now := time.Now().UTC()
-	res, err := h.sqlDB().ExecContext(c.Context(), `
+	res, err := h.sqlDB().ExecContext(c.Context(), h.sqlQ(`
 		INSERT INTO coremail_account_classes
 		(tenant_id, name, description, default_quota_mb, max_quota_mb,
 		 max_send_per_hour, max_recv_per_hour, allow_external_forwarding,
 		 allow_imap, allow_pop3, allow_jmap, allow_webmail, is_admin_class,
 		 created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		tenantID, body.Name, body.Description, body.DefaultQuotaMB, body.MaxQuotaMB,
 		body.MaxSendPerHour, body.MaxRecvPerHour, aef, aim, apo, ajm, awe, isAdm,
 		now, now,
@@ -202,8 +202,8 @@ func (h *Handler) UpdateAccountClass(c fiber.Ctx) error {
 	// into an admin mailbox.
 	var isAdminClass int
 	if err := h.sqlDB().QueryRowContext(c.Context(),
-		`SELECT is_admin_class FROM coremail_account_classes
-		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
+		h.sqlQ(`SELECT is_admin_class FROM coremail_account_classes
+		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`),
 		id, tenantID).Scan(&isAdminClass); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fiber.NewError(fiber.StatusNotFound, "account class not found")
@@ -275,8 +275,8 @@ func (h *Handler) DeleteAccountClass(c fiber.Ctx) error {
 	}
 	var isAdminClass int
 	if err := h.sqlDB().QueryRowContext(c.Context(),
-		`SELECT is_admin_class FROM coremail_account_classes
-		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
+		h.sqlQ(`SELECT is_admin_class FROM coremail_account_classes
+		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`),
 		id, tenantID).Scan(&isAdminClass); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fiber.NewError(fiber.StatusNotFound, "account class not found")
@@ -288,7 +288,7 @@ func (h *Handler) DeleteAccountClass(c fiber.Ctx) error {
 	}
 	var n int
 	if err := h.sqlDB().QueryRowContext(c.Context(),
-		`SELECT COUNT(*) FROM coremail_mailboxes WHERE class_id = ? AND deleted_at IS NULL`,
+		h.sqlQ(`SELECT COUNT(*) FROM coremail_mailboxes WHERE class_id = ? AND deleted_at IS NULL`),
 		id).Scan(&n); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("count mailboxes: %v", err))
 	}
@@ -297,8 +297,8 @@ func (h *Handler) DeleteAccountClass(c fiber.Ctx) error {
 	}
 	now := time.Now().UTC()
 	res, err := h.sqlDB().ExecContext(c.Context(),
-		`UPDATE coremail_account_classes SET deleted_at = ?, updated_at = ?
-		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
+		h.sqlQ(`UPDATE coremail_account_classes SET deleted_at = ?, updated_at = ?
+		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`),
 		now, now, id, tenantID)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("delete account class: %v", err))
@@ -336,13 +336,13 @@ func (h *Handler) EnsureDefaultAccountClasses(tenantID int64) error {
 		{"admin", "Administrative mailbox with elevated privileges", 2048, 10240, 1000, 10000, 1},
 	}
 	for _, d := range defaults {
-		_, err := h.sqlDB().ExecContext(context.Background(), `
+		_, err := h.sqlDB().ExecContext(context.Background(), h.sqlQ(`
 			INSERT OR IGNORE INTO coremail_account_classes
 			(tenant_id, name, description, default_quota_mb, max_quota_mb,
 			 max_send_per_hour, max_recv_per_hour, allow_external_forwarding,
 			 allow_imap, allow_pop3, allow_jmap, allow_webmail, is_admin_class,
 			 created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, 1, 1, 1, ?, ?, ?)`,
+			VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, 1, 1, 1, ?, ?, ?)`),
 			tenantID, d.name, d.desc, d.dq, d.mq, d.msh, d.mrh, d.adm, now, now)
 		if err != nil {
 			return fmt.Errorf("seed default class %q: %w", d.name, err)
@@ -362,11 +362,11 @@ func (h *Handler) ListDomainGroups(c fiber.Ctx) error {
 		return err
 	}
 	tenantID := h.tenantID(c)
-	rows, err := h.sqlDB().QueryContext(c.Context(), `
+	rows, err := h.sqlDB().QueryContext(c.Context(), h.sqlQ(`
 		SELECT id, name, description, color, created_at, updated_at
 		FROM coremail_domain_groups
 		WHERE tenant_id = ? AND deleted_at IS NULL
-		ORDER BY name ASC`, tenantID)
+		ORDER BY name ASC`), tenantID)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("list domain groups: %v", err))
 	}
@@ -398,12 +398,12 @@ func (h *Handler) ListDomainGroups(c fiber.Ctx) error {
 }
 
 func (h *Handler) fetchDomainGroupMembers(ctx context.Context, groupID int64) ([]map[string]any, error) {
-	rows, err := h.sqlDB().QueryContext(ctx, `
+	rows, err := h.sqlDB().QueryContext(ctx, h.sqlQ(`
 		SELECT m.domain_id, d.name
 		FROM coremail_domain_group_members m
 		JOIN coremail_domains d ON d.id = m.domain_id
 		WHERE m.group_id = ? AND d.deleted_at IS NULL
-		ORDER BY d.name ASC`, groupID)
+		ORDER BY d.name ASC`), groupID)
 	if err != nil {
 		return nil, err
 	}
@@ -444,10 +444,10 @@ func (h *Handler) CreateDomainGroup(c fiber.Ctx) error {
 		body.Color = "#1f6feb"
 	}
 	now := time.Now().UTC()
-	res, err := h.sqlDB().ExecContext(c.Context(), `
+	res, err := h.sqlDB().ExecContext(c.Context(), h.sqlQ(`
 		INSERT INTO coremail_domain_groups
 		(tenant_id, name, description, color, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?)`),
 		tenantID, body.Name, body.Description, body.Color, now, now)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
@@ -458,7 +458,7 @@ func (h *Handler) CreateDomainGroup(c fiber.Ctx) error {
 	id, _ := res.LastInsertId()
 	for _, did := range body.DomainIDs {
 		_, _ = h.sqlDB().ExecContext(c.Context(),
-			`INSERT OR IGNORE INTO coremail_domain_group_members (group_id, domain_id, created_at) VALUES (?, ?, ?)`,
+			h.sqlQ(`INSERT OR IGNORE INTO coremail_domain_group_members (group_id, domain_id, created_at) VALUES (?, ?, ?)`),
 			id, did, now)
 	}
 	if err := h.appendAudit(c, "domain_group.create", body.Name, "ok"); err != nil {
@@ -488,7 +488,7 @@ func (h *Handler) UpdateDomainGroupMembers(c fiber.Ctx) error {
 	// confirm group belongs to tenant
 	var owner int64
 	if err := h.sqlDB().QueryRowContext(c.Context(),
-		`SELECT tenant_id FROM coremail_domain_groups WHERE id = ? AND deleted_at IS NULL`, id).Scan(&owner); err != nil {
+		h.sqlQ(`SELECT tenant_id FROM coremail_domain_groups WHERE id = ? AND deleted_at IS NULL`), id).Scan(&owner); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fiber.NewError(fiber.StatusNotFound, "domain group not found")
 		}
@@ -539,8 +539,8 @@ func (h *Handler) DeleteDomainGroup(c fiber.Ctx) error {
 	}
 	now := time.Now().UTC()
 	res, err := h.sqlDB().ExecContext(c.Context(),
-		`UPDATE coremail_domain_groups SET deleted_at = ?, updated_at = ?
-		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
+		h.sqlQ(`UPDATE coremail_domain_groups SET deleted_at = ?, updated_at = ?
+		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`),
 		now, now, id, tenantID)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("delete domain group: %v", err))
@@ -550,7 +550,7 @@ func (h *Handler) DeleteDomainGroup(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusNotFound, "domain group not found")
 	}
 	_, _ = h.sqlDB().ExecContext(c.Context(),
-		`DELETE FROM coremail_domain_group_members WHERE group_id = ?`, id)
+		h.sqlQ(`DELETE FROM coremail_domain_group_members WHERE group_id = ?`), id)
 	if err := h.appendAudit(c, "domain_group.delete", fmt.Sprintf("%d", id), "ok"); err != nil {
 		return err
 	}
@@ -568,7 +568,7 @@ func (h *Handler) ListMailingLists(c fiber.Ctx) error {
 		return err
 	}
 	tenantID := h.tenantID(c)
-	rows, err := h.sqlDB().QueryContext(c.Context(), `
+	rows, err := h.sqlDB().QueryContext(c.Context(), h.sqlQ(`
 		SELECT l.id, l.domain_id, l.address, l.display_name, l.description,
 		       l.moderation_required, l.archive_enabled, l.subscription_policy,
 		       l.max_members, l.status,
@@ -576,7 +576,7 @@ func (h *Handler) ListMailingLists(c fiber.Ctx) error {
 		       l.created_at, l.updated_at
 		FROM coremail_mailing_lists l
 		WHERE l.tenant_id = ? AND l.deleted_at IS NULL
-		ORDER BY l.address ASC`, tenantID)
+		ORDER BY l.address ASC`), tenantID)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("list mailing lists: %v", err))
 	}
@@ -644,7 +644,7 @@ func (h *Handler) CreateMailingList(c fiber.Ctx) error {
 	// confirm domain ownership
 	var domTenant int64
 	if err := h.sqlDB().QueryRowContext(c.Context(),
-		`SELECT tenant_id FROM coremail_domains WHERE id = ? AND deleted_at IS NULL`, body.DomainID).Scan(&domTenant); err != nil {
+		h.sqlQ(`SELECT tenant_id FROM coremail_domains WHERE id = ? AND deleted_at IS NULL`), body.DomainID).Scan(&domTenant); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fiber.NewError(fiber.StatusNotFound, "domain not found")
 		}
@@ -662,12 +662,12 @@ func (h *Handler) CreateMailingList(c fiber.Ctx) error {
 	if body.ArchiveEnabled {
 		arch = 1
 	}
-	res, err := h.sqlDB().ExecContext(c.Context(), `
+	res, err := h.sqlDB().ExecContext(c.Context(), h.sqlQ(`
 		INSERT INTO coremail_mailing_lists
 		(tenant_id, domain_id, address, display_name, description,
 		 moderation_required, archive_enabled, subscription_policy, max_members,
 		 status, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`),
 		tenantID, body.DomainID, body.Address, body.DisplayName, body.Description,
 		mod, arch, body.SubscriptionPolicy, body.MaxMembers, now, now)
 	if err != nil {
@@ -695,8 +695,8 @@ func (h *Handler) DeleteMailingList(c fiber.Ctx) error {
 	}
 	now := time.Now().UTC()
 	res, err := h.sqlDB().ExecContext(c.Context(),
-		`UPDATE coremail_mailing_lists SET deleted_at = ?, updated_at = ?, status = 'deleted'
-		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
+		h.sqlQ(`UPDATE coremail_mailing_lists SET deleted_at = ?, updated_at = ?, status = 'deleted'
+		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`),
 		now, now, id, tenantID)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("delete mailing list: %v", err))
@@ -706,7 +706,7 @@ func (h *Handler) DeleteMailingList(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusNotFound, "mailing list not found")
 	}
 	_, _ = h.sqlDB().ExecContext(c.Context(),
-		`DELETE FROM coremail_mailing_list_members WHERE list_id = ?`, id)
+		h.sqlQ(`DELETE FROM coremail_mailing_list_members WHERE list_id = ?`), id)
 	if err := h.appendAudit(c, "mailing_list.delete", fmt.Sprintf("%d", id), "ok"); err != nil {
 		return err
 	}
@@ -873,7 +873,7 @@ func (h *Handler) ListMailingListMembers(c fiber.Ctx) error {
 	}
 	var owner int64
 	if err := h.sqlDB().QueryRowContext(c.Context(),
-		`SELECT tenant_id FROM coremail_mailing_lists WHERE id = ? AND deleted_at IS NULL`, id).Scan(&owner); err != nil {
+		h.sqlQ(`SELECT tenant_id FROM coremail_mailing_lists WHERE id = ? AND deleted_at IS NULL`), id).Scan(&owner); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fiber.NewError(fiber.StatusNotFound, "mailing list not found")
 		}
@@ -882,10 +882,10 @@ func (h *Handler) ListMailingListMembers(c fiber.Ctx) error {
 	if owner != tenantID {
 		return fiber.NewError(fiber.StatusForbidden, "cross-tenant access denied")
 	}
-	rows, err := h.sqlDB().QueryContext(c.Context(), `
+	rows, err := h.sqlDB().QueryContext(c.Context(), h.sqlQ(`
 		SELECT id, address, display_name, role, created_at
 		FROM coremail_mailing_list_members WHERE list_id = ?
-		ORDER BY address ASC`, id)
+		ORDER BY address ASC`), id)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("list members: %v", err))
 	}
@@ -923,7 +923,7 @@ func (h *Handler) AddMailingListMember(c fiber.Ctx) error {
 	tenantID := h.tenantID(c)
 	var owner int64
 	if err := h.sqlDB().QueryRowContext(c.Context(),
-		`SELECT tenant_id FROM coremail_mailing_lists WHERE id = ? AND deleted_at IS NULL`, id).Scan(&owner); err != nil {
+		h.sqlQ(`SELECT tenant_id FROM coremail_mailing_lists WHERE id = ? AND deleted_at IS NULL`), id).Scan(&owner); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fiber.NewError(fiber.StatusNotFound, "mailing list not found")
 		}
@@ -949,8 +949,8 @@ func (h *Handler) AddMailingListMember(c fiber.Ctx) error {
 	}
 	now := time.Now().UTC()
 	res, err := h.sqlDB().ExecContext(c.Context(),
-		`INSERT INTO coremail_mailing_list_members (list_id, address, display_name, role, created_at)
-		 VALUES (?, ?, ?, ?, ?)`,
+		h.sqlQ(`INSERT INTO coremail_mailing_list_members (list_id, address, display_name, role, created_at)
+		 VALUES (?, ?, ?, ?, ?)`),
 		id, body.Address, body.DisplayName, body.Role, now)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
@@ -981,7 +981,7 @@ func (h *Handler) RemoveMailingListMember(c fiber.Ctx) error {
 	tenantID := h.tenantID(c)
 	var owner int64
 	if err := h.sqlDB().QueryRowContext(c.Context(),
-		`SELECT tenant_id FROM coremail_mailing_lists WHERE id = ? AND deleted_at IS NULL`, listID).Scan(&owner); err != nil {
+		h.sqlQ(`SELECT tenant_id FROM coremail_mailing_lists WHERE id = ? AND deleted_at IS NULL`), listID).Scan(&owner); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fiber.NewError(fiber.StatusNotFound, "mailing list not found")
 		}
@@ -991,7 +991,7 @@ func (h *Handler) RemoveMailingListMember(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusForbidden, "cross-tenant access denied")
 	}
 	res, err := h.sqlDB().ExecContext(c.Context(),
-		`DELETE FROM coremail_mailing_list_members WHERE id = ? AND list_id = ?`,
+		h.sqlQ(`DELETE FROM coremail_mailing_list_members WHERE id = ? AND list_id = ?`),
 		memberID, listID)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("delete member: %v", err))
@@ -1017,7 +1017,7 @@ func (h *Handler) ListPublicFolders(c fiber.Ctx) error {
 		return err
 	}
 	tenantID := h.tenantID(c)
-	rows, err := h.sqlDB().QueryContext(c.Context(), `
+	rows, err := h.sqlDB().QueryContext(c.Context(), h.sqlQ(`
 		SELECT p.id, p.owner_mailbox_id, p.folder_path, p.display_name,
 		       p.description, p.read_only,
 		       (SELECT email FROM coremail_mailboxes m WHERE m.id = p.owner_mailbox_id) AS owner_email,
@@ -1025,7 +1025,7 @@ func (h *Handler) ListPublicFolders(c fiber.Ctx) error {
 		       p.created_at, p.updated_at
 		FROM coremail_public_folders p
 		WHERE p.tenant_id = ? AND p.deleted_at IS NULL
-		ORDER BY p.folder_path ASC`, tenantID)
+		ORDER BY p.folder_path ASC`), tenantID)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("list public folders: %v", err))
 	}
@@ -1080,7 +1080,7 @@ func (h *Handler) CreatePublicFolder(c fiber.Ctx) error {
 	}
 	var ownerTenant int64
 	if err := h.sqlDB().QueryRowContext(c.Context(),
-		`SELECT tenant_id FROM coremail_mailboxes WHERE id = ? AND deleted_at IS NULL`, body.OwnerMailboxID).Scan(&ownerTenant); err != nil {
+		h.sqlQ(`SELECT tenant_id FROM coremail_mailboxes WHERE id = ? AND deleted_at IS NULL`), body.OwnerMailboxID).Scan(&ownerTenant); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fiber.NewError(fiber.StatusNotFound, "owner mailbox not found")
 		}
@@ -1094,11 +1094,11 @@ func (h *Handler) CreatePublicFolder(c fiber.Ctx) error {
 	if body.ReadOnly {
 		ro = 1
 	}
-	res, err := h.sqlDB().ExecContext(c.Context(), `
+	res, err := h.sqlDB().ExecContext(c.Context(), h.sqlQ(`
 		INSERT INTO coremail_public_folders
 		(tenant_id, owner_mailbox_id, folder_path, display_name, description,
 		 read_only, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
 		tenantID, body.OwnerMailboxID, body.FolderPath, body.DisplayName, body.Description,
 		ro, now, now)
 	if err != nil {
@@ -1127,8 +1127,8 @@ func (h *Handler) DeletePublicFolder(c fiber.Ctx) error {
 	}
 	now := time.Now().UTC()
 	res, err := h.sqlDB().ExecContext(c.Context(),
-		`UPDATE coremail_public_folders SET deleted_at = ?, updated_at = ?
-		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
+		h.sqlQ(`UPDATE coremail_public_folders SET deleted_at = ?, updated_at = ?
+		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`),
 		now, now, id, tenantID)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("delete public folder: %v", err))
@@ -1138,7 +1138,7 @@ func (h *Handler) DeletePublicFolder(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusNotFound, "public folder not found")
 	}
 	_, _ = h.sqlDB().ExecContext(c.Context(),
-		`DELETE FROM coremail_public_folder_members WHERE folder_id = ?`, id)
+		h.sqlQ(`DELETE FROM coremail_public_folder_members WHERE folder_id = ?`), id)
 	if err := h.appendAudit(c, "public_folder.delete", fmt.Sprintf("%d", id), "ok"); err != nil {
 		return err
 	}
@@ -1260,13 +1260,13 @@ func (h *Handler) ListAdminGroups(c fiber.Ctx) error {
 		return err
 	}
 	tenantID := h.tenantID(c)
-	rows, err := h.sqlDB().QueryContext(c.Context(), `
+	rows, err := h.sqlDB().QueryContext(c.Context(), h.sqlQ(`
 		SELECT id, name, description, grants,
 		       (SELECT COUNT(*) FROM coremail_admin_group_members m WHERE m.group_id = g.id) AS member_count,
 		       created_at, updated_at
 		FROM coremail_admin_groups g
 		WHERE tenant_id = ? AND deleted_at IS NULL
-		ORDER BY name ASC`, tenantID)
+		ORDER BY name ASC`), tenantID)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("list admin groups: %v", err))
 	}
@@ -1341,9 +1341,9 @@ func (h *Handler) CreateAdminGroup(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "name is required")
 	}
 	now := time.Now().UTC()
-	res, err := h.sqlDB().ExecContext(c.Context(), `
+	res, err := h.sqlDB().ExecContext(c.Context(), h.sqlQ(`
 		INSERT INTO coremail_admin_groups (tenant_id, name, description, grants, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?)`),
 		tenantID, body.Name, body.Description, joinGrants(body.Grants), now, now)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
@@ -1374,8 +1374,8 @@ func (h *Handler) UpdateAdminGroup(c fiber.Ctx) error {
 	}
 	var name string
 	if err := h.sqlDB().QueryRowContext(c.Context(),
-		`SELECT name FROM coremail_admin_groups
-		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
+		h.sqlQ(`SELECT name FROM coremail_admin_groups
+		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`),
 		id, tenantID).Scan(&name); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fiber.NewError(fiber.StatusNotFound, "admin group not found")
@@ -1442,8 +1442,8 @@ func (h *Handler) DeleteAdminGroup(c fiber.Ctx) error {
 	}
 	var name string
 	if err := h.sqlDB().QueryRowContext(c.Context(),
-		`SELECT name FROM coremail_admin_groups
-		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
+		h.sqlQ(`SELECT name FROM coremail_admin_groups
+		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`),
 		id, tenantID).Scan(&name); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fiber.NewError(fiber.StatusNotFound, "admin group not found")
@@ -1455,8 +1455,8 @@ func (h *Handler) DeleteAdminGroup(c fiber.Ctx) error {
 	}
 	now := time.Now().UTC()
 	res, err := h.sqlDB().ExecContext(c.Context(),
-		`UPDATE coremail_admin_groups SET deleted_at = ?, updated_at = ?
-		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
+		h.sqlQ(`UPDATE coremail_admin_groups SET deleted_at = ?, updated_at = ?
+		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`),
 		now, now, id, tenantID)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("delete admin group: %v", err))
@@ -1466,7 +1466,7 @@ func (h *Handler) DeleteAdminGroup(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusNotFound, "admin group not found")
 	}
 	_, _ = h.sqlDB().ExecContext(c.Context(),
-		`DELETE FROM coremail_admin_group_members WHERE group_id = ?`, id)
+		h.sqlQ(`DELETE FROM coremail_admin_group_members WHERE group_id = ?`), id)
 	if err := h.appendAudit(c, "admin_group.delete", fmt.Sprintf("%d", id), "ok"); err != nil {
 		return err
 	}
@@ -1483,12 +1483,12 @@ func (h *Handler) ListAdminGroupMembers(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid id")
 	}
-	rows, err := h.sqlDB().QueryContext(c.Context(), `
+	rows, err := h.sqlDB().QueryContext(c.Context(), h.sqlQ(`
 		SELECT m.user_id, u.email, u.role, m.created_at
 		FROM coremail_admin_group_members m
 		JOIN users u ON u.id = m.user_id
 		WHERE m.group_id = ? AND u.deleted_at IS NULL
-		ORDER BY u.email ASC`, id)
+		ORDER BY u.email ASC`), id)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("list members: %v", err))
 	}
@@ -1533,7 +1533,7 @@ func (h *Handler) AddAdminGroupMember(c fiber.Ctx) error {
 	}
 	now := time.Now().UTC()
 	res, err := h.sqlDB().ExecContext(c.Context(),
-		`INSERT OR IGNORE INTO coremail_admin_group_members (group_id, user_id, created_at) VALUES (?, ?, ?)`,
+		h.sqlQ(`INSERT OR IGNORE INTO coremail_admin_group_members (group_id, user_id, created_at) VALUES (?, ?, ?)`),
 		id, body.UserID, now)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("insert member: %v", err))
@@ -1562,7 +1562,7 @@ func (h *Handler) RemoveAdminGroupMember(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid user id")
 	}
 	res, err := h.sqlDB().ExecContext(c.Context(),
-		`DELETE FROM coremail_admin_group_members WHERE group_id = ? AND user_id = ?`,
+		h.sqlQ(`DELETE FROM coremail_admin_group_members WHERE group_id = ? AND user_id = ?`),
 		id, uid)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("delete member: %v", err))
@@ -1736,9 +1736,9 @@ func (h *Handler) ResolveQuarantine(c fiber.Ctx) error {
 	actor, _ := c.Locals("user_email").(string)
 	now := time.Now().UTC()
 	res, err := h.sqlDB().ExecContext(c.Context(),
-		`UPDATE coremail_quarantine_index
+		h.sqlQ(`UPDATE coremail_quarantine_index
 		 SET status = ?, resolved_at = ?, resolved_by = ?
-		 WHERE id = ? AND tenant_id = ? AND status = 'held'`,
+		 WHERE id = ? AND tenant_id = ? AND status = 'held'`),
 		newStatus, now, actor, id, tenantID)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("resolve quarantine: %v", err))
@@ -1765,12 +1765,12 @@ func (h *Handler) ListACLRules(c fiber.Ctx) error {
 		return err
 	}
 	tenantID := h.tenantID(c)
-	rows, err := h.sqlDB().QueryContext(c.Context(), `
+	rows, err := h.sqlDB().QueryContext(c.Context(), h.sqlQ(`
 		SELECT id, scope, scope_target, action, protocol, source, priority, note,
 		       created_at, updated_at
 		FROM coremail_acl_rules
 		WHERE tenant_id = ? AND deleted_at IS NULL
-		ORDER BY priority ASC, id ASC`, tenantID)
+		ORDER BY priority ASC, id ASC`), tenantID)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("list acl: %v", err))
 	}
@@ -1842,10 +1842,10 @@ func (h *Handler) CreateACLRule(c fiber.Ctx) error {
 		body.Scope = "global"
 	}
 	now := time.Now().UTC()
-	res, err := h.sqlDB().ExecContext(c.Context(), `
+	res, err := h.sqlDB().ExecContext(c.Context(), h.sqlQ(`
 		INSERT INTO coremail_acl_rules
 		(tenant_id, scope, scope_target, action, protocol, source, priority, note, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		tenantID, body.Scope, body.ScopeTarget, body.Action, body.Protocol, body.Source, body.Priority, body.Note, now, now)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("create acl: %v", err))
@@ -1869,8 +1869,8 @@ func (h *Handler) DeleteACLRule(c fiber.Ctx) error {
 	}
 	now := time.Now().UTC()
 	res, err := h.sqlDB().ExecContext(c.Context(),
-		`UPDATE coremail_acl_rules SET deleted_at = ?, updated_at = ?
-		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
+		h.sqlQ(`UPDATE coremail_acl_rules SET deleted_at = ?, updated_at = ?
+		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`),
 		now, now, id, tenantID)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("delete acl: %v", err))
@@ -1897,12 +1897,12 @@ func (h *Handler) ListLogRules(c fiber.Ctx) error {
 		return err
 	}
 	tenantID := h.tenantID(c)
-	rows, err := h.sqlDB().QueryContext(c.Context(), `
+	rows, err := h.sqlDB().QueryContext(c.Context(), h.sqlQ(`
 		SELECT id, name, source, severity, match_pattern, destination, enabled,
 		       created_at, updated_at
 		FROM coremail_log_rules
 		WHERE tenant_id = ? AND deleted_at IS NULL
-		ORDER BY name ASC`, tenantID)
+		ORDER BY name ASC`), tenantID)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("list log rules: %v", err))
 	}
@@ -1965,10 +1965,10 @@ func (h *Handler) CreateLogRule(c fiber.Ctx) error {
 		en = 1
 	}
 	now := time.Now().UTC()
-	res, err := h.sqlDB().ExecContext(c.Context(), `
+	res, err := h.sqlDB().ExecContext(c.Context(), h.sqlQ(`
 		INSERT INTO coremail_log_rules
 		(tenant_id, name, source, severity, match_pattern, destination, enabled, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		tenantID, body.Name, body.Source, body.Severity, body.MatchPattern, body.Destination, en, now, now)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("create log rule: %v", err))
@@ -1992,8 +1992,8 @@ func (h *Handler) DeleteLogRule(c fiber.Ctx) error {
 	}
 	now := time.Now().UTC()
 	res, err := h.sqlDB().ExecContext(c.Context(),
-		`UPDATE coremail_log_rules SET deleted_at = ?, updated_at = ?
-		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
+		h.sqlQ(`UPDATE coremail_log_rules SET deleted_at = ?, updated_at = ?
+		 WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`),
 		now, now, id, tenantID)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("delete log rule: %v", err))

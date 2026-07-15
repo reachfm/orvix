@@ -16,6 +16,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/coremail"
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 // BulkImportRow is one parsed CSV row. Fields are raw — the validator
@@ -159,7 +160,7 @@ func (h *Handler) importMailboxes(c fiber.Ctx, dryRun bool) error {
 		// Append parse errors first so the operator sees the full picture.
 		outErrs = append(outErrs, parseErrs...)
 		for _, row := range rows {
-			if errStr := validateBulkRow(sqlDB, row, pwMin); errStr != "" {
+		if errStr := validateBulkRow(sqlDB, h.sqlDialect(), row, pwMin); errStr != "" {
 				outErrs = append(outErrs, BulkImportError{Line: row.Line, Email: row.Email, Error: errStr})
 				continue
 			}
@@ -197,7 +198,7 @@ func (h *Handler) importMailboxes(c fiber.Ctx, dryRun bool) error {
 			continue
 		}
 		seenEmails[row.Email] = row.Line
-		if errStr := validateBulkRow(sqlDB, row, pwMin); errStr != "" {
+		if errStr := validateBulkRow(sqlDB, h.sqlDialect(), row, pwMin); errStr != "" {
 			rowErrs = append(rowErrs, BulkImportError{Line: row.Line, Email: row.Email, Error: errStr})
 			continue
 		}
@@ -254,7 +255,7 @@ func (h *Handler) importMailboxes(c fiber.Ctx, dryRun bool) error {
 		parts := strings.SplitN(row.Email, "@", 2)
 		var domainID, tenantID int64
 		err := tx.QueryRowContext(c.Context(),
-			`SELECT id, tenant_id FROM coremail_domains WHERE name = ? AND deleted_at IS NULL AND status = 'active'`,
+			h.sqlQ(`SELECT id, tenant_id FROM coremail_domains WHERE name = ? AND deleted_at IS NULL AND status = 'active'`),
 			parts[1]).Scan(&domainID, &tenantID)
 		if err != nil {
 			// No savepoint needed — the domain lookup is read-only,
@@ -311,8 +312,8 @@ func (h *Handler) importMailboxes(c fiber.Ctx, dryRun bool) error {
 		}
 
 		res, ierr := tx.ExecContext(c.Context(),
-			`INSERT INTO coremail_mailboxes (domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme, status, quota_mb, is_admin, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, 'argon2id', 'active', ?, 0, ?, ?)`,
+			h.sqlQ(`INSERT INTO coremail_mailboxes (domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme, status, quota_mb, is_admin, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, 'argon2id', 'active', ?, 0, ?, ?)`),
 			domainID, tenantID, parts[0], row.Email, row.Name, hash, quota, now, now)
 		if ierr != nil {
 			if allowPartial {
@@ -560,7 +561,7 @@ func getCSVField(rec []string, i int) string {
 // and password policy. It returns "" for valid rows or a stable,
 // human-readable error label otherwise. The returned string never
 // includes the password.
-func validateBulkRow(sqlDB *sql.DB, row BulkImportRow, pwMin int) string {
+func validateBulkRow(sqlDB *sql.DB, dialect *dbdialect.Info, row BulkImportRow, pwMin int) string {
 	if row.Email == "" {
 		return "email is required"
 	}
@@ -581,7 +582,7 @@ func validateBulkRow(sqlDB *sql.DB, row BulkImportRow, pwMin int) string {
 	// Domain must be local, active.
 	var domainID int64
 	err = sqlDB.QueryRow(
-		`SELECT id FROM coremail_domains WHERE name = ? AND deleted_at IS NULL AND status = 'active'`,
+		dialect.Rewrite(`SELECT id FROM coremail_domains WHERE name = ? AND deleted_at IS NULL AND status = 'active'`),
 		parts[1]).Scan(&domainID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "domain not found or inactive: " + parts[1]
@@ -592,7 +593,7 @@ func validateBulkRow(sqlDB *sql.DB, row BulkImportRow, pwMin int) string {
 	// Duplicate mailbox check.
 	var existing int64
 	if err := sqlDB.QueryRow(
-		`SELECT COUNT(*) FROM coremail_mailboxes WHERE email = ? AND deleted_at IS NULL`,
+		dialect.Rewrite(`SELECT COUNT(*) FROM coremail_mailboxes WHERE email = ? AND deleted_at IS NULL`),
 		row.Email).Scan(&existing); err == nil && existing > 0 {
 		return "mailbox already exists: " + row.Email
 	}

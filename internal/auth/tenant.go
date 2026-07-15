@@ -2,6 +2,7 @@ package auth
 
 import (
 	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/dbdialect"
 	"gorm.io/gorm"
 )
 
@@ -17,8 +18,12 @@ func TenantMiddleware(db *gorm.DB) fiber.Handler {
 		if err != nil {
 			return c.Next()
 		}
+		dialect, err := dbdialect.Detect(sqlDB)
+		if err != nil {
+			dialect = dbdialect.FromDriver("sqlite")
+		}
 		var tenantID uint
-		if err := sqlDB.QueryRow("SELECT tenant_id FROM users WHERE id = ?", userID).Scan(&tenantID); err == nil && tenantID > 0 {
+		if err := sqlDB.QueryRow("SELECT tenant_id FROM users WHERE id = "+dialect.Placeholder(1), userID).Scan(&tenantID); err == nil && tenantID > 0 {
 			c.Locals("tenant_id", tenantID)
 		}
 

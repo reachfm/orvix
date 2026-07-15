@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 var (
@@ -58,27 +60,32 @@ func generateOwnershipToken() (raw string, hash string, err error) {
 }
 
 type OwnershipRepo struct {
-	db *sql.DB
+	db      *sql.DB
+	dialect *dbdialect.Info
 }
 
 func NewOwnershipRepo(db *sql.DB) *OwnershipRepo {
-	return &OwnershipRepo{db: db}
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
+	return &OwnershipRepo{db: db, dialect: dialect}
 }
 
 func (r *OwnershipRepo) GetByDomain(ctx context.Context, domainID uint) (*DomainOwnership, error) {
 	row := r.db.QueryRowContext(ctx,
 		`SELECT id, domain_id, token_hash, status, token_generated_at, token_rotated_at,
 		verified_at, last_check_at, last_error, check_count, created_at, updated_at
-		FROM domain_ownership WHERE domain_id = ?`, domainID)
+		FROM domain_ownership WHERE domain_id = `+r.dialect.Placeholder(1), domainID)
 	return scanOwnership(row)
 }
 
 func (r *OwnershipRepo) Upsert(ctx context.Context, rec *DomainOwnership) error {
 	if rec.ID > 0 {
 		_, err := r.db.ExecContext(ctx,
-			`UPDATE domain_ownership SET token_hash=?, status=?, token_generated_at=?,
-			token_rotated_at=?, verified_at=?, last_check_at=?, last_error=?, check_count=?, updated_at=?
-			WHERE id=?`,
+			`UPDATE domain_ownership SET token_hash=`+r.dialect.Placeholder(1)+`, status=`+r.dialect.Placeholder(2)+`, token_generated_at=`+r.dialect.Placeholder(3)+`,
+			token_rotated_at=`+r.dialect.Placeholder(4)+`, verified_at=`+r.dialect.Placeholder(5)+`, last_check_at=`+r.dialect.Placeholder(6)+`, last_error=`+r.dialect.Placeholder(7)+`, check_count=`+r.dialect.Placeholder(8)+`, updated_at=`+r.dialect.Placeholder(9)+`
+			WHERE id=`+r.dialect.Placeholder(10),
 			rec.TokenHash, rec.Status, rec.TokenGeneratedAt,
 			rec.TokenRotatedAt, rec.VerifiedAt, rec.LastCheckAt, rec.LastError, rec.CheckCount, rec.UpdatedAt,
 			rec.ID)
@@ -87,7 +94,7 @@ func (r *OwnershipRepo) Upsert(ctx context.Context, rec *DomainOwnership) error 
 	_, err := r.db.ExecContext(ctx,
 		`INSERT INTO domain_ownership (domain_id, token_hash, status, token_generated_at,
 		token_rotated_at, verified_at, last_check_at, last_error, check_count, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (`+r.dialect.Placeholders(11)+`)`,
 		rec.DomainID, rec.TokenHash, rec.Status, rec.TokenGeneratedAt,
 		rec.TokenRotatedAt, rec.VerifiedAt, rec.LastCheckAt, rec.LastError, rec.CheckCount, rec.CreatedAt, rec.UpdatedAt)
 	return err

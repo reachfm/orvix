@@ -197,11 +197,11 @@ func (h *Handler) loadOwnedAttachment(c fiber.Ctx, ctx *webmailUserContext, atta
 	// the same query: we only return the attachment row
 	// if its parent message is in the caller's mailbox.
 	// Cross-mailbox attachment ids return no rows.
-	row := sqlDB.QueryRowContext(c.Context(), `
+	row := sqlDB.QueryRowContext(c.Context(), h.sqlQ(`
 		SELECT a.id, a.message_id, a.filename, a.content_type, a.size_bytes, a.storage_path
 		FROM coremail_attachments a
 		JOIN coremail_messages m ON m.id = a.message_id
-		WHERE a.id = ? AND m.mailbox_id = ? AND m.purged_at IS NULL`,
+		WHERE a.id = ? AND m.mailbox_id = ? AND m.purged_at IS NULL`),
 		attachmentID, ctx.Mailbox.ID)
 	var a fiberAttachment
 	if err := row.Scan(&a.ID, &a.MessageID, &a.Filename, &a.ContentType, &a.SizeBytes, &a.StoragePath); err != nil {

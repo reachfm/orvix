@@ -132,7 +132,7 @@ func (s *Service) ListOwnershipTransfers(ctx context.Context, orgID uint) ([]Own
 func (r *OrganizationRepo) CreateOwnershipTransfer(ctx context.Context, t *OwnershipTransfer) error {
 	_, err := r.db.ExecContext(ctx,
 		`INSERT INTO org_ownership_transfers (organization_id, from_user_id, to_user_id, token_hash, status, expires_at, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (`+r.dialect.Placeholders(7)+`)`,
 		t.OrganizationID, t.FromUserID, t.ToUserID, t.TokenHash, t.Status, t.ExpiresAt, t.CreatedAt)
 	return err
 }
@@ -140,20 +140,21 @@ func (r *OrganizationRepo) CreateOwnershipTransfer(ctx context.Context, t *Owner
 func (r *OrganizationRepo) GetOwnershipTransferByHash(ctx context.Context, hash string) (*OwnershipTransfer, error) {
 	row := r.db.QueryRowContext(ctx,
 		`SELECT id, organization_id, from_user_id, to_user_id, token_hash, status, expires_at, accepted_at, created_at
-		FROM org_ownership_transfers WHERE token_hash = ?`, hash)
+		FROM org_ownership_transfers WHERE token_hash = `+r.dialect.Placeholder(1), hash)
 	return scanTransfer(row)
 }
 
 func (r *OrganizationRepo) GetOwnershipTransferByID(ctx context.Context, id uint) (*OwnershipTransfer, error) {
 	row := r.db.QueryRowContext(ctx,
 		`SELECT id, organization_id, from_user_id, to_user_id, token_hash, status, expires_at, accepted_at, created_at
-		FROM org_ownership_transfers WHERE id = ?`, id)
+		FROM org_ownership_transfers WHERE id = `+r.dialect.Placeholder(1), id)
 	return scanTransfer(row)
 }
 
 func (r *OrganizationRepo) SetTransferStatus(ctx context.Context, id uint, status TransferStatus) error {
+	now := time.Now().UTC()
 	_, err := r.db.ExecContext(ctx,
-		"UPDATE org_ownership_transfers SET status = ?, updated_at = datetime('now') WHERE id = ?", status, id)
+		"UPDATE org_ownership_transfers SET status = "+r.dialect.Placeholder(1)+", updated_at = "+r.dialect.Placeholder(2)+" WHERE id = "+r.dialect.Placeholder(3), status, now, id)
 	return err
 }
 
@@ -167,15 +168,15 @@ func (r *OrganizationRepo) AcceptOwnershipTransfer(ctx context.Context, id uint,
 	if err != nil || t == nil {
 		return ErrTransferNotFound
 	}
-	if _, err := tx.ExecContext(ctx, "UPDATE org_ownership_transfers SET status = ?, accepted_at = ? WHERE id = ?",
+	if _, err := tx.ExecContext(ctx, "UPDATE org_ownership_transfers SET status = "+r.dialect.Placeholder(1)+", accepted_at = "+r.dialect.Placeholder(2)+" WHERE id = "+r.dialect.Placeholder(3),
 		TransferAccepted, acceptedAt, id); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, "UPDATE users SET role = 'admin' WHERE id = ? AND tenant_id = ?",
+	if _, err := tx.ExecContext(ctx, "UPDATE users SET role = 'admin' WHERE id = "+r.dialect.Placeholder(1)+" AND tenant_id = "+r.dialect.Placeholder(2),
 		t.FromUserID, t.OrganizationID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, "UPDATE users SET role = 'superadmin' WHERE id = ? AND tenant_id = ?",
+	if _, err := tx.ExecContext(ctx, "UPDATE users SET role = 'superadmin' WHERE id = "+r.dialect.Placeholder(1)+" AND tenant_id = "+r.dialect.Placeholder(2),
 		t.ToUserID, t.OrganizationID); err != nil {
 		return err
 	}
@@ -185,7 +186,7 @@ func (r *OrganizationRepo) AcceptOwnershipTransfer(ctx context.Context, id uint,
 func (r *OrganizationRepo) ListOwnershipTransfers(ctx context.Context, orgID uint) ([]OwnershipTransfer, error) {
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT id, organization_id, from_user_id, to_user_id, token_hash, status, expires_at, accepted_at, created_at
-		FROM org_ownership_transfers WHERE organization_id = ? ORDER BY created_at DESC`, orgID)
+		FROM org_ownership_transfers WHERE organization_id = `+r.dialect.Placeholder(1)+` ORDER BY created_at DESC`, orgID)
 	if err != nil {
 		return nil, err
 	}

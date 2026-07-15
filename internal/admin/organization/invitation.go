@@ -150,7 +150,7 @@ func (s *Service) RotateInvitationToken(ctx context.Context, invID, orgID uint) 
 func (r *OrganizationRepo) CreateInvitation(ctx context.Context, inv *OrganizationInvitation) error {
 	_, err := r.db.ExecContext(ctx,
 		`INSERT INTO org_invitations (organization_id, inviter_id, email, token_hash, role, status, expires_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (`+r.dialect.Placeholders(9)+`)`,
 		inv.OrganizationID, inv.InviterID, inv.Email, inv.TokenHash, inv.Role, inv.Status, inv.ExpiresAt, inv.CreatedAt, inv.UpdatedAt)
 	return err
 }
@@ -158,14 +158,14 @@ func (r *OrganizationRepo) CreateInvitation(ctx context.Context, inv *Organizati
 func (r *OrganizationRepo) GetInvitationByHash(ctx context.Context, tokenHash string) (*OrganizationInvitation, error) {
 	row := r.db.QueryRowContext(ctx,
 		`SELECT id, organization_id, inviter_id, email, token_hash, role, status, expires_at, accepted_at, revoked_at, created_at, updated_at
-		FROM org_invitations WHERE token_hash = ?`, tokenHash)
+		FROM org_invitations WHERE token_hash = `+r.dialect.Placeholder(1), tokenHash)
 	return scanInvitation(row)
 }
 
 func (r *OrganizationRepo) GetInvitationByID(ctx context.Context, id uint) (*OrganizationInvitation, error) {
 	row := r.db.QueryRowContext(ctx,
 		`SELECT id, organization_id, inviter_id, email, token_hash, role, status, expires_at, accepted_at, revoked_at, created_at, updated_at
-		FROM org_invitations WHERE id = ?`, id)
+		FROM org_invitations WHERE id = `+r.dialect.Placeholder(1), id)
 	return scanInvitation(row)
 }
 
@@ -176,14 +176,14 @@ func (r *OrganizationRepo) SetInvitationStatus(ctx context.Context, id uint, sta
 		revokedAt = &now
 	}
 	_, err := r.db.ExecContext(ctx,
-		"UPDATE org_invitations SET status=?, revoked_at=?, updated_at=? WHERE id=?",
+		"UPDATE org_invitations SET status="+r.dialect.Placeholder(1)+", revoked_at="+r.dialect.Placeholder(2)+", updated_at="+r.dialect.Placeholder(3)+" WHERE id="+r.dialect.Placeholder(4),
 		status, revokedAt, now, id)
 	return err
 }
 
 func (r *OrganizationRepo) AcceptInvitation(ctx context.Context, id, userID uint, acceptedAt time.Time) error {
 	_, err := r.db.ExecContext(ctx,
-		"UPDATE org_invitations SET status=?, accepted_at=?, updated_at=? WHERE id=?",
+		"UPDATE org_invitations SET status="+r.dialect.Placeholder(1)+", accepted_at="+r.dialect.Placeholder(2)+", updated_at="+r.dialect.Placeholder(3)+" WHERE id="+r.dialect.Placeholder(4),
 		InvitationAccepted, acceptedAt, acceptedAt, id)
 	return err
 }
@@ -191,7 +191,7 @@ func (r *OrganizationRepo) AcceptInvitation(ctx context.Context, id, userID uint
 func (r *OrganizationRepo) RotateInvitationToken(ctx context.Context, id uint, newTokenHash string) error {
 	now := time.Now().UTC()
 	_, err := r.db.ExecContext(ctx,
-		"UPDATE org_invitations SET token_hash=?, updated_at=? WHERE id=?",
+		"UPDATE org_invitations SET token_hash="+r.dialect.Placeholder(1)+", updated_at="+r.dialect.Placeholder(2)+" WHERE id="+r.dialect.Placeholder(3),
 		newTokenHash, now, id)
 	return err
 }
@@ -199,7 +199,7 @@ func (r *OrganizationRepo) RotateInvitationToken(ctx context.Context, id uint, n
 func (r *OrganizationRepo) ListInvitations(ctx context.Context, orgID uint) ([]OrganizationInvitation, error) {
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT id, organization_id, inviter_id, email, token_hash, role, status, expires_at, accepted_at, revoked_at, created_at, updated_at
-		FROM org_invitations WHERE organization_id = ? ORDER BY created_at DESC`, orgID)
+		FROM org_invitations WHERE organization_id = `+r.dialect.Placeholder(1)+` ORDER BY created_at DESC`, orgID)
 	if err != nil {
 		return nil, err
 	}

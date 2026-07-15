@@ -89,7 +89,7 @@ func (s *Service) EnsureSchema(ctx context.Context) error {
 	if s.dialect.IsPostgres() {
 		return nil
 	}
-	for _, stmt := range schema {
+	for _, stmt := range schema(s.dialect) {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			return err
 		}

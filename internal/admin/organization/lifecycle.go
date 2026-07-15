@@ -123,38 +123,41 @@ var _ *SuspensionRecord // suppress unused
 var _ *DeletionRecord
 
 func (r *OrganizationRepo) RecordSuspension(ctx context.Context, orgID, suspendedBy uint, reason SuspensionState, note string) error {
+	now := time.Now().UTC()
 	_, err := r.db.ExecContext(ctx,
 		`INSERT INTO org_suspensions (organization_id, reason, suspended_by, note, suspended_at, created_at)
-		VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))`,
-		orgID, reason, suspendedBy, note)
+		VALUES (`+r.dialect.Placeholders(6)+`)`,
+		orgID, reason, suspendedBy, note, now, now)
 	return err
 }
 
 func (r *OrganizationRepo) CloseActiveSuspension(ctx context.Context, orgID uint) error {
+	now := time.Now().UTC()
 	_, err := r.db.ExecContext(ctx,
-		`UPDATE org_suspensions SET reactivated_at = datetime('now') WHERE organization_id = ? AND reactivated_at IS NULL`, orgID)
+		`UPDATE org_suspensions SET reactivated_at = `+r.dialect.Placeholder(1)+` WHERE organization_id = `+r.dialect.Placeholder(2)+` AND reactivated_at IS NULL`, now, orgID)
 	return err
 }
 
 func (r *OrganizationRepo) HasActiveDeletionRequest(ctx context.Context, orgID uint) (bool, error) {
 	var count int
 	err := r.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM org_deletions WHERE organization_id = ? AND state != 'completed' AND cancelled_at IS NULL`, orgID).Scan(&count)
+		`SELECT COUNT(*) FROM org_deletions WHERE organization_id = `+r.dialect.Placeholder(1)+` AND state != 'completed' AND cancelled_at IS NULL`, orgID).Scan(&count)
 	return count > 0, err
 }
 
 func (r *OrganizationRepo) CreateDeletionRequest(ctx context.Context, orgID, requestedBy uint, requestedAt time.Time, retentionUntil time.Time) error {
+	now := time.Now().UTC()
 	_, err := r.db.ExecContext(ctx,
 		`INSERT INTO org_deletions (organization_id, requested_by, state, requested_at, retention_expires_at, created_at)
-		VALUES (?, ?, ?, ?, ?, datetime('now'))`,
-		orgID, requestedBy, DeletionRequested, requestedAt, retentionUntil)
+		VALUES (`+r.dialect.Placeholders(6)+`)`,
+		orgID, requestedBy, DeletionRequested, requestedAt, retentionUntil, now)
 	return err
 }
 
 func (r *OrganizationRepo) GetActiveDeletion(ctx context.Context, orgID uint) (*DeletionRecord, error) {
 	row := r.db.QueryRowContext(ctx,
 		`SELECT id, organization_id, requested_by, state, retention_expires_at, requested_at, confirmed_at, cancelled_at, created_at
-		FROM org_deletions WHERE organization_id = ? AND cancelled_at IS NULL AND state != 'completed'
+		FROM org_deletions WHERE organization_id = `+r.dialect.Placeholder(1)+` AND cancelled_at IS NULL AND state != 'completed'
 		ORDER BY created_at DESC LIMIT 1`, orgID)
 	var rec DeletionRecord
 	var confirmedAt, cancelledAt, retentionExpires sql.NullTime
@@ -175,18 +178,19 @@ func (r *OrganizationRepo) GetActiveDeletion(ctx context.Context, orgID uint) (*
 }
 
 func (r *OrganizationRepo) CancelDeletionRequest(ctx context.Context, orgID uint) error {
+	now := time.Now().UTC()
 	_, err := r.db.ExecContext(ctx,
-		`UPDATE org_deletions SET cancelled_at = datetime('now'), state = 'retention' WHERE organization_id = ? AND cancelled_at IS NULL AND state != 'completed'`, orgID)
+		`UPDATE org_deletions SET cancelled_at = `+r.dialect.Placeholder(1)+`, state = 'retention' WHERE organization_id = `+r.dialect.Placeholder(2)+` AND cancelled_at IS NULL AND state != 'completed'`, now, orgID)
 	return err
 }
 
 func (r *OrganizationRepo) CompleteDeletion(ctx context.Context, orgID uint, at time.Time) error {
 	_, err := r.db.ExecContext(ctx,
-		`UPDATE org_deletions SET confirmed_at = ?, state = 'completed' WHERE organization_id = ? AND cancelled_at IS NULL`, at, orgID)
+		`UPDATE org_deletions SET confirmed_at = `+r.dialect.Placeholder(1)+`, state = 'completed' WHERE organization_id = `+r.dialect.Placeholder(2)+` AND cancelled_at IS NULL`, at, orgID)
 	if err != nil {
 		return err
 	}
 	// Hard-delete tenant data after retention period
-	_, err = r.db.ExecContext(ctx, `UPDATE tenants SET deleted_at = ? WHERE id = ?`, at, orgID)
+	_, err = r.db.ExecContext(ctx, `UPDATE tenants SET deleted_at = `+r.dialect.Placeholder(1)+` WHERE id = `+r.dialect.Placeholder(2), at, orgID)
 	return err
 }

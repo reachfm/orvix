@@ -98,7 +98,7 @@ func (h *Handler) resolveWebmailUserContext(c fiber.Ctx) (*webmailUserContext, s
 
 	var email, role string
 	if err := sqlDB.QueryRow(
-		"SELECT email, role FROM users WHERE id = ?", userID,
+		h.sqlQ("SELECT email, role FROM users WHERE id = ?"), userID,
 	).Scan(&email, &role); err != nil {
 		return nil, "user_not_found"
 	}
@@ -109,7 +109,7 @@ func (h *Handler) resolveWebmailUserContext(c fiber.Ctx) (*webmailUserContext, s
 	// Look up the mailbox by email. We query coremail_mailboxes
 	// directly because the MailStore wraps folder/message
 	// repositories and does not own the mailbox row.
-	mailbox, err := lookupMailboxByEmail(c.Context(), sqlDB, email)
+	mailbox, err := h.lookupMailboxByEmail(c.Context(), sqlDB, email)
 	if err != nil || mailbox == nil {
 		return nil, "no_mailbox"
 	}
@@ -131,7 +131,7 @@ func (h *Handler) resolveWebmailUserContext(c fiber.Ctx) (*webmailUserContext, s
 // in the coremail package has a GetByEmail method but it
 // expects a transaction; the user-facing endpoints run
 // outside a transaction so we issue the query directly.
-func lookupMailboxByEmail(ctx context.Context, db *sql.DB, email string) (*coremail.Mailbox, error) {
+func (h *Handler) lookupMailboxByEmail(ctx context.Context, db *sql.DB, email string) (*coremail.Mailbox, error) {
 	const q = `SELECT id, domain_id, tenant_id, local_part, email, name,
 		password_hash, auth_scheme, mfa_enabled, COALESCE(mfa_secret,''),
 		COALESCE(app_passwords,''), status, quota_mb, used_bytes, msg_count,
@@ -139,7 +139,7 @@ func lookupMailboxByEmail(ctx context.Context, db *sql.DB, email string) (*corem
 		send_limit_per_hour, recv_limit_per_hour, last_login, COALESCE(last_ip,''),
 		created_at, updated_at, deleted_at
 		FROM coremail_mailboxes WHERE email = ? AND deleted_at IS NULL LIMIT 1`
-	row := db.QueryRowContext(ctx, q, email)
+	row := db.QueryRowContext(ctx, h.sqlQ(q), email)
 	m := &coremail.Mailbox{}
 	var lastLogin sql.NullTime
 	var deletedAt sql.NullTime
@@ -1158,8 +1158,8 @@ func (h *Handler) classifyLocalRecipient(
 	var domainID uint
 	var domainStatus string
 	err = sqlDB.QueryRowContext(ctx,
-		`SELECT id, status FROM coremail_domains
-		 WHERE name = ? AND tenant_id = ? AND deleted_at IS NULL`,
+		h.sqlQ(`SELECT id, status FROM coremail_domains
+		 WHERE name = ? AND tenant_id = ? AND deleted_at IS NULL`),
 		domain, senderTenantID,
 	).Scan(&domainID, &domainStatus)
 	if err != nil {
@@ -1190,8 +1190,8 @@ func (h *Handler) classifyLocalRecipient(
 	var mailboxID uint
 	var mailboxStatus string
 	err = sqlDB.QueryRowContext(ctx,
-		`SELECT id, status FROM coremail_mailboxes
-		 WHERE email = ? AND tenant_id = ? AND deleted_at IS NULL`,
+		h.sqlQ(`SELECT id, status FROM coremail_mailboxes
+		 WHERE email = ? AND tenant_id = ? AND deleted_at IS NULL`),
 		email, senderTenantID,
 	).Scan(&mailboxID, &mailboxStatus)
 	if err != nil {
@@ -1767,7 +1767,7 @@ func (h *Handler) WebmailMarkFolderRead(c fiber.Ctx) error {
 	}
 	now := time.Now().UTC()
 	res, err := sqlDB.Exec(
-		"UPDATE coremail_messages SET seen = 1, updated_at = ? WHERE mailbox_id = ? AND folder_id = ? AND deleted = 0 AND seen = 0",
+		h.sqlQ("UPDATE coremail_messages SET seen = 1, updated_at = ? WHERE mailbox_id = ? AND folder_id = ? AND deleted = 0 AND seen = 0"),
 		now, ctx.Mailbox.ID, folder.ID,
 	)
 	if err != nil {

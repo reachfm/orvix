@@ -2250,7 +2250,7 @@ func (s *Service) snapshotDB(ctx context.Context, destPath string) error {
 	if s.dialect != nil && s.dialect.IsPostgres() {
 		return s.snapshotPostgres(ctx, destPath)
 	}
-	_, err := s.mailStoreDB.ExecContext(ctx, "VACUUM INTO ?", destPath)
+	_, err := s.mailStoreDB.ExecContext(ctx, "VACUUM INTO "+s.dialect.Placeholder(1), destPath)
 	if err != nil {
 		return fmt.Errorf("vacuum into: %w", err)
 	}

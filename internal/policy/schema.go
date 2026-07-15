@@ -1,14 +1,16 @@
 package policy
 
+import "github.com/orvix/orvix/internal/dbdialect"
+
 // Tables returns DDL statements for policy persistence.
-func Tables() []string {
+func Tables(d *dbdialect.Info) []string {
 	return []string{
 		`CREATE TABLE IF NOT EXISTS coremail_policies (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			id ` + d.AutoIncrement() + `,
 			scope TEXT NOT NULL,
 			target TEXT NOT NULL DEFAULT '',
 			mode INTEGER NOT NULL DEFAULT 0,
-			updated_at DATETIME NOT NULL,
+			updated_at ` + d.TimestampType() + ` NOT NULL,
 			UNIQUE(scope, target)
 		)`,
 	}

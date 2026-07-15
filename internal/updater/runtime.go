@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/orvix/orvix/internal/dbdialect"
 	"go.uber.org/zap"
 )
 
@@ -44,9 +45,10 @@ import (
 //   - All long-running work holds a single-flight mutex so two
 //     concurrent update requests are rejected with 409 Conflict.
 type RuntimeService struct {
-	db     *sql.DB
-	cfg    Config
-	logger *zap.Logger
+	db      *sql.DB
+	dialect *dbdialect.Info
+	cfg     Config
+	logger  *zap.Logger
 
 	// checkURL is the optional update check URL, supplied by the
 	// handler via WithCheckURL. It is read from server config and
@@ -131,7 +133,11 @@ func NewRuntimeService(db *sql.DB, cfg Config) *RuntimeService {
 	if cfg.UpdateHelperUnit == "" {
 		cfg.UpdateHelperUnit = DefaultUpdateHelperUnit
 	}
-	return &RuntimeService{db: db, cfg: cfg}
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
+	return &RuntimeService{db: db, dialect: dialect, cfg: cfg}
 }
 
 // WithCheckURL returns a copy of the service with the check URL
@@ -144,6 +150,7 @@ func NewRuntimeService(db *sql.DB, cfg Config) *RuntimeService {
 func (s *RuntimeService) WithCheckURL(url string) *RuntimeService {
 	cp := &RuntimeService{
 		db:       s.db,
+		dialect:  s.dialect,
 		cfg:      s.cfg,
 		logger:   s.logger,
 		checkURL: url,
@@ -157,10 +164,10 @@ func (s *RuntimeService) EnsureSchema(ctx context.Context) error {
 	if s.db == nil {
 		return nil
 	}
-	_, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS update_history (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		started_at DATETIME NOT NULL,
-		completed_at DATETIME,
+	q := `CREATE TABLE IF NOT EXISTS update_history (
+		id ` + s.dialect.AutoIncrement() + `,
+		started_at ` + s.dialect.TimestampType() + ` NOT NULL,
+		completed_at ` + s.dialect.TimestampType() + `,
 		duration_seconds INTEGER NOT NULL DEFAULT 0,
 		previous_sha TEXT NOT NULL DEFAULT '',
 		new_sha TEXT NOT NULL DEFAULT '',
@@ -170,7 +177,8 @@ func (s *RuntimeService) EnsureSchema(ctx context.Context) error {
 		severity TEXT NOT NULL DEFAULT '',
 		actor TEXT NOT NULL DEFAULT '',
 		notes TEXT NOT NULL DEFAULT ''
-	)`)
+	)`
+	_, err := s.db.ExecContext(ctx, q)
 	return err
 }
 
@@ -504,7 +512,7 @@ func (s *RuntimeService) History(ctx context.Context, limit int) ([]UpdateHistor
 	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, started_at, completed_at, duration_seconds, previous_sha, new_sha, from_version, to_version, status, severity, actor, notes
-		 FROM update_history ORDER BY id DESC LIMIT ?`, limit)
+		 FROM update_history ORDER BY id DESC LIMIT `+s.dialect.Placeholder(1), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1041,9 +1049,9 @@ func (s *RuntimeService) Run(ctx context.Context, actor string) (*UpdateHistoryR
 	job.CompletedAt = &completedAt
 	// Persist history.
 	if s.db != nil {
-		_, derr := s.db.ExecContext(ctx,
-			`INSERT INTO update_history (started_at, completed_at, duration_seconds, previous_sha, new_sha, from_version, to_version, status, severity, actor, notes)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		q := `INSERT INTO update_history (started_at, completed_at, duration_seconds, previous_sha, new_sha, from_version, to_version, status, severity, actor, notes)
+			 VALUES (` + s.dialect.Placeholders(11) + `)`
+		_, derr := s.db.ExecContext(ctx, q,
 			row.StartedAt, row.CompletedAt, row.DurationSeconds, row.PreviousSHA, row.NewSHA, row.FromVersion, row.ToVersion, row.Status, string(row.Severity), row.Actor, row.Notes)
 		if derr != nil {
 			s.cfg.Logger.Warn("update_history insert failed", zap.Error(derr))
@@ -1176,9 +1184,9 @@ func (s *RuntimeService) recordRunFailure(startedAt time.Time, previousSHA, from
 		Notes:           string(code),
 	}
 	if s.db != nil {
-		_, derr := s.db.ExecContext(context.Background(),
-			`INSERT INTO update_history (started_at, completed_at, duration_seconds, previous_sha, new_sha, from_version, to_version, status, severity, actor, notes)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		q := `INSERT INTO update_history (started_at, completed_at, duration_seconds, previous_sha, new_sha, from_version, to_version, status, severity, actor, notes)
+			 VALUES (` + s.dialect.Placeholders(11) + `)`
+		_, derr := s.db.ExecContext(context.Background(), q,
 			row.StartedAt, row.CompletedAt, row.DurationSeconds, row.PreviousSHA, row.NewSHA, row.FromVersion, row.ToVersion, row.Status, string(row.Severity), row.Actor, row.Notes)
 		if derr != nil {
 			s.cfg.Logger.Warn("update_history insert failed", zap.Error(derr))

@@ -43,6 +43,7 @@ import (
 
 	"github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/clamav"
+	"github.com/orvix/orvix/internal/dbdialect"
 	"github.com/orvix/orvix/internal/observability"
 	"go.uber.org/zap"
 )
@@ -536,19 +537,28 @@ func EnsureSchema(ctx context.Context, db *sql.DB) error {
 	if db == nil {
 		return nil
 	}
-	_, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS coremail_av_quarantine (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
+	if dialect.IsPostgres() {
+		return nil
+	}
+	ts := dialect.TimestampType()
+	autoInc := dialect.AutoIncrement()
+	_, err = db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS coremail_av_quarantine (
+		id `+autoInc+`,
 		message_id TEXT NOT NULL,
-		received_at DATETIME NOT NULL,
+		received_at `+ts+` NOT NULL,
 		sender TEXT NOT NULL DEFAULT '',
 		recipient TEXT NOT NULL DEFAULT '',
 		subject TEXT NOT NULL DEFAULT '',
 		virus TEXT NOT NULL DEFAULT '',
 		raw_path TEXT NOT NULL DEFAULT '',
 		raw_size INTEGER NOT NULL DEFAULT 0,
-		resolved_at DATETIME,
+		resolved_at `+ts+`,
 		resolved_by TEXT NOT NULL DEFAULT '',
-		created_at DATETIME NOT NULL
+		created_at `+ts+` NOT NULL
 	)`)
 	return err
 }
@@ -575,6 +585,10 @@ func (e *Engine) Quarantine(ctx context.Context, db *sql.DB, rawDir, messageID, 
 	if err := EnsureSchema(ctx, db); err != nil {
 		return "", err
 	}
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
 	safeID := sanitize(messageID)
 	path := rawDir + "/" + safeID + ".eml"
 	if err := os.WriteFile(path, rfc822, 0o600); err != nil {
@@ -583,7 +597,7 @@ func (e *Engine) Quarantine(ctx context.Context, db *sql.DB, rawDir, messageID, 
 	now := time.Now().UTC()
 	if _, err := db.ExecContext(ctx, `INSERT INTO coremail_av_quarantine
 		(message_id, received_at, sender, recipient, subject, virus, raw_path, raw_size, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (`+dialect.Placeholders(9)+`)`,
 		messageID, now, sender, recipient, subject, virus, path, len(rfc822), now); err != nil {
 		return "", fmt.Errorf("quarantine: insert: %w", err)
 	}

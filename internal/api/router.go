@@ -194,7 +194,7 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			logger.Info("enterprise admin services wired with transactional audit and RBAC")
 		}
 
-		billingSvc, usageSvc, quotaSvc, _, _, err := billing.Initialize(sqlDB)
+		billingSvc, usageSvc, quotaSvc, webhookSvc, sched, err := billing.Initialize(sqlDB)
 		if err != nil {
 			logger.Error("billing initialization failed", zap.Error(err))
 		} else {
@@ -207,6 +207,15 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			router.h.SetAbuseSignalService(abuseSvc)
 			router.h.SetRateLimitService(abuse.NewRateLimitService(sqlDB))
 			logger.Info("abuse services wired")
+
+			if sched != nil {
+				router.h.SetBillingScheduler(sched)
+				logger.Info("billing scheduler wired (started externally)")
+			}
+			if webhookSvc != nil {
+				router.h.SetBillingWebhook(webhookSvc)
+				logger.Info("billing webhook service wired")
+			}
 		}
 	}
 
@@ -552,6 +561,7 @@ func (r *Router) setupRoutes() {
 	api := r.app.Group("/api/v1", r.apiRateLimitMiddleware())
 	api.Get("/health", r.h.Health)
 	api.Get("/billing/plans", r.h.ListBillingPlans)
+	api.Post("/billing/webhook", r.h.ReceivePaymentWebhook)
 
 	loginGroup := api.Group("/auth")
 	if r.redisLimiter != nil {

@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 var (
@@ -33,11 +35,16 @@ type WebhookEventRecord struct {
 }
 
 type WebhookService struct {
-	db *sql.DB
+	db      *sql.DB
+	dialect *dbdialect.Info
 }
 
 func NewWebhookService(db *sql.DB) *WebhookService {
-	return &WebhookService{db: db}
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
+	return &WebhookService{db: db, dialect: dialect}
 }
 
 func (s *WebhookService) VerifySignature(payload []byte, signature, secret string, timestamp int64, tolerance time.Duration) (string, error) {
@@ -75,14 +82,14 @@ func (s *WebhookService) RecordEvent(ctx context.Context, rec *WebhookEventRecor
 	rec.ProcessingError = ""
 
 	var existing string
-	err := s.db.QueryRowContext(ctx, "SELECT id FROM webhook_events WHERE idempotency_key = ?", rec.IdempotencyKey).Scan(&existing)
+	err := s.db.QueryRowContext(ctx, "SELECT id FROM webhook_events WHERE idempotency_key = "+s.dialect.Placeholder(1), rec.IdempotencyKey).Scan(&existing)
 	if err == nil {
 		return ErrWebhookAlreadyProcessed
 	}
 	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO webhook_events (id, provider, event_type, provider_sub_id, raw_payload, signature,
 		received_at, idempotency_key, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (`+s.dialect.Placeholders(9)+`)`,
 		rec.ID, rec.Provider, rec.EventType, rec.ProviderSubID, rec.RawPayload, rec.Signature,
 		rec.ReceivedAt, rec.IdempotencyKey, time.Now().UTC())
 	return err
@@ -94,7 +101,7 @@ func (s *WebhookService) MarkProcessed(ctx context.Context, eventID string, proc
 		errStr = processingErr.Error()
 	}
 	_, err := s.db.ExecContext(ctx,
-		"UPDATE webhook_events SET processed_at = ?, processing_error = ? WHERE id = ?",
+		"UPDATE webhook_events SET processed_at = "+s.dialect.Placeholder(1)+", processing_error = "+s.dialect.Placeholder(2)+" WHERE id = "+s.dialect.Placeholder(3),
 		time.Now().UTC(), errStr, eventID)
 	return err
 }

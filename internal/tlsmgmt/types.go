@@ -1,6 +1,10 @@
 package tlsmgmt
 
-import "time"
+import (
+	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
+)
 
 type CertStatus string
 
@@ -52,21 +56,24 @@ type ReloadResult struct {
 	Message string `json:"message"`
 }
 
-var schema = []string{
-	`CREATE TABLE IF NOT EXISTS tls_certificates (
-		id TEXT PRIMARY KEY,
-		name TEXT NOT NULL DEFAULT '',
-		cert_path TEXT NOT NULL DEFAULT '',
-		key_path TEXT NOT NULL DEFAULT '',
-		common_name TEXT NOT NULL DEFAULT '',
-		sans TEXT NOT NULL DEFAULT '',
-		issuer TEXT NOT NULL DEFAULT '',
-		serial_number TEXT NOT NULL DEFAULT '',
-		not_before DATETIME,
-		not_after DATETIME,
-		fingerprint_sha256 TEXT NOT NULL DEFAULT '',
-		status TEXT NOT NULL DEFAULT 'unknown',
-		created_at DATETIME NOT NULL,
-		updated_at DATETIME NOT NULL
-	)`,
+func schema(d *dbdialect.Info) []string {
+	ts := d.TimestampType()
+	return []string{
+		`CREATE TABLE IF NOT EXISTS tls_certificates (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL DEFAULT '',
+			cert_path TEXT NOT NULL DEFAULT '',
+			key_path TEXT NOT NULL DEFAULT '',
+			common_name TEXT NOT NULL DEFAULT '',
+			sans TEXT NOT NULL DEFAULT '',
+			issuer TEXT NOT NULL DEFAULT '',
+			serial_number TEXT NOT NULL DEFAULT '',
+			not_before ` + ts + `,
+			not_after ` + ts + `,
+			fingerprint_sha256 TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'unknown',
+			created_at ` + ts + ` NOT NULL,
+			updated_at ` + ts + ` NOT NULL
+		)`,
+	}
 }

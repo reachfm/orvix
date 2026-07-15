@@ -55,7 +55,7 @@ func (s *Service) ensureSchema(ctx context.Context) error {
 	if s.dialect.IsPostgres() {
 		return nil
 	}
-	for _, stmt := range schema {
+	for _, stmt := range schema(s.dialect) {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			return err
 		}
@@ -78,8 +78,10 @@ func (s *Service) EnsureUploadedCertSchema(ctx context.Context) error {
 	if s.dialect.IsPostgres() {
 		return nil
 	}
+	ts := s.dialect.TimestampType()
+	autoInc := s.dialect.AutoIncrement()
 	_, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS coremail_uploaded_certificates (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		id `+autoInc+`,
 		tenant_id INTEGER NOT NULL DEFAULT 0,
 		name TEXT NOT NULL DEFAULT '',
 		cert_path TEXT NOT NULL DEFAULT '',
@@ -88,14 +90,14 @@ func (s *Service) EnsureUploadedCertSchema(ctx context.Context) error {
 		sans TEXT NOT NULL DEFAULT '',
 		issuer TEXT NOT NULL DEFAULT '',
 		serial_number TEXT NOT NULL DEFAULT '',
-		not_before DATETIME,
-		not_after DATETIME,
+		not_before `+ts+`,
+		not_after `+ts+`,
 		fingerprint_sha256 TEXT NOT NULL DEFAULT '',
 		status TEXT NOT NULL DEFAULT 'unknown',
 		created_by INTEGER NOT NULL DEFAULT 0,
-		created_at DATETIME NOT NULL,
-		updated_at DATETIME NOT NULL,
-		deleted_at DATETIME,
+		created_at `+ts+` NOT NULL,
+		updated_at `+ts+` NOT NULL,
+		deleted_at `+ts+`,
 		UNIQUE(tenant_id, name)
 	)`)
 	return err
@@ -188,23 +190,28 @@ func (s *Service) ImportCertificate(ctx context.Context, name string, certPEM, k
 
 	now := time.Now().UTC()
 
+	ph := s.dialect
+	setConflict := "excluded"
+	if ph.IsPostgres() {
+		setConflict = "EXCLUDED"
+	}
 	if _, err := s.db.ExecContext(ctx, `
 		INSERT INTO coremail_uploaded_certificates
 			(tenant_id, name, cert_path, key_path, common_name, sans, issuer, serial_number,
 			 not_before, not_after, fingerprint_sha256, status, created_by, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(tenant_id, name) DO UPDATE SET
-			cert_path=excluded.cert_path,
-			key_path=excluded.key_path,
-			common_name=excluded.common_name,
-			sans=excluded.sans,
-			issuer=excluded.issuer,
-			serial_number=excluded.serial_number,
-			not_before=excluded.not_before,
-			not_after=excluded.not_after,
-			fingerprint_sha256=excluded.fingerprint_sha256,
-			status=excluded.status,
-			updated_at=excluded.updated_at,
+		VALUES (`+ph.Placeholders(15)+`)
+		ON CONFLICT (tenant_id, name) DO UPDATE SET
+			cert_path=`+setConflict+`.cert_path,
+			key_path=`+setConflict+`.key_path,
+			common_name=`+setConflict+`.common_name,
+			sans=`+setConflict+`.sans,
+			issuer=`+setConflict+`.issuer,
+			serial_number=`+setConflict+`.serial_number,
+			not_before=`+setConflict+`.not_before,
+			not_after=`+setConflict+`.not_after,
+			fingerprint_sha256=`+setConflict+`.fingerprint_sha256,
+			status=`+setConflict+`.status,
+			updated_at=`+setConflict+`.updated_at,
 			deleted_at=NULL`,
 		tenantID, name, certPath, keyPath, x509Cert.Subject.CommonName, sansCSV,
 		x509Cert.Issuer.CommonName, formatSerial(x509Cert.SerialNumber),
@@ -244,7 +251,7 @@ func (s *Service) ListUploadedCertificates(ctx context.Context, tenantID int64) 
 		SELECT id, name, cert_path, key_path, common_name, sans,
 		       issuer, serial_number, not_before, not_after, fingerprint_sha256, status, created_at, updated_at
 		FROM coremail_uploaded_certificates
-		WHERE tenant_id = ? AND deleted_at IS NULL
+		WHERE tenant_id = `+s.dialect.Placeholder(1)+` AND deleted_at IS NULL
 		ORDER BY name ASC`, tenantID)
 	if err != nil {
 		return nil, err

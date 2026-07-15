@@ -40,7 +40,7 @@ func (r *OrganizationRepo) WithTx(tx *sql.Tx) *OrganizationRepo {
 
 func (r *OrganizationRepo) GetByID(ctx context.Context, id uint) (*Organization, error) {
 	row := r.db.QueryRowContext(ctx,
-		"SELECT id, name, slug, domain, plan, max_domains, max_mailboxes, COALESCE(logo_url,''), COALESCE(primary_color,'#4F7CFF'), active, created_at, updated_at FROM tenants WHERE id = ? AND deleted_at IS NULL", id)
+		"SELECT id, name, slug, domain, plan, max_domains, max_mailboxes, COALESCE(logo_url,''), COALESCE(primary_color,'#4F7CFF'), active, created_at, updated_at FROM tenants WHERE id = "+r.dialect.Placeholder(1)+" AND deleted_at IS NULL", id)
 	return scanOrg(row)
 }
 
@@ -50,7 +50,7 @@ func (r *OrganizationRepo) List(ctx context.Context, filter OrganizationFilter) 
 	where = append(where, "deleted_at IS NULL")
 
 	if filter.Search != "" {
-		where = append(where, "(name LIKE ? OR slug LIKE ? OR domain LIKE ?)")
+		where = append(where, "(name LIKE "+r.dialect.Placeholder(1)+" OR slug LIKE "+r.dialect.Placeholder(2)+" OR domain LIKE "+r.dialect.Placeholder(3)+")")
 		s := "%" + filter.Search + "%"
 		args = append(args, s, s, s)
 	}
@@ -76,7 +76,7 @@ func (r *OrganizationRepo) List(ctx context.Context, filter OrganizationFilter) 
 		filter.Limit = 500
 	}
 
-	query := "SELECT id, name, slug, domain, plan, max_domains, max_mailboxes, COALESCE(logo_url,''), COALESCE(primary_color,'#4F7CFF'), active, created_at, updated_at FROM tenants WHERE " + clause + " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+	query := "SELECT id, name, slug, domain, plan, max_domains, max_mailboxes, COALESCE(logo_url,''), COALESCE(primary_color,'#4F7CFF'), active, created_at, updated_at FROM tenants WHERE " + clause + " ORDER BY created_at DESC LIMIT " + r.dialect.Placeholder(len(args)+1) + " OFFSET " + r.dialect.Placeholder(len(args)+2)
 	args = append(args, filter.Limit, filter.Offset)
 
 	rows, err := r.db.QueryContext(ctx, query, args...)
@@ -114,7 +114,7 @@ func (r *OrganizationRepo) Create(ctx context.Context, o *Organization) (*Organi
 	}
 
 	res, err := r.db.ExecContext(ctx,
-		"INSERT INTO tenants (name, slug, domain, plan, max_domains, max_mailboxes, logo_url, primary_color, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		"INSERT INTO tenants (name, slug, domain, plan, max_domains, max_mailboxes, logo_url, primary_color, active, created_at, updated_at) VALUES ("+r.dialect.Placeholders(11)+")",
 		o.Name, o.Slug, o.Domain, o.Plan, o.MaxDomains, o.MaxMailboxes, o.LogoURL, o.PrimaryColor, boolToInt(o.Active), o.CreatedAt, o.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("create organization: %w", err)
@@ -127,27 +127,27 @@ func (r *OrganizationRepo) Create(ctx context.Context, o *Organization) (*Organi
 func (r *OrganizationRepo) Update(ctx context.Context, o *Organization) error {
 	o.UpdatedAt = time.Now().UTC()
 	_, err := r.db.ExecContext(ctx,
-		"UPDATE tenants SET name=?, domain=?, plan=?, max_domains=?, max_mailboxes=?, logo_url=?, primary_color=?, updated_at=? WHERE id=? AND deleted_at IS NULL",
+		"UPDATE tenants SET name="+r.dialect.Placeholder(1)+", domain="+r.dialect.Placeholder(2)+", plan="+r.dialect.Placeholder(3)+", max_domains="+r.dialect.Placeholder(4)+", max_mailboxes="+r.dialect.Placeholder(5)+", logo_url="+r.dialect.Placeholder(6)+", primary_color="+r.dialect.Placeholder(7)+", updated_at="+r.dialect.Placeholder(8)+" WHERE id="+r.dialect.Placeholder(9)+" AND deleted_at IS NULL",
 		o.Name, o.Domain, o.Plan, o.MaxDomains, o.MaxMailboxes, o.LogoURL, o.PrimaryColor, o.UpdatedAt, o.ID)
 	return err
 }
 
 func (r *OrganizationRepo) SetActive(ctx context.Context, id uint, active bool) error {
-	_, err := r.db.ExecContext(ctx, "UPDATE tenants SET active=?, updated_at=? WHERE id=? AND deleted_at IS NULL", boolToInt(active), time.Now().UTC(), id)
+	_, err := r.db.ExecContext(ctx, "UPDATE tenants SET active="+r.dialect.Placeholder(1)+", updated_at="+r.dialect.Placeholder(2)+" WHERE id="+r.dialect.Placeholder(3)+" AND deleted_at IS NULL", boolToInt(active), time.Now().UTC(), id)
 	return err
 }
 
 func (r *OrganizationRepo) ExistsBySlug(ctx context.Context, slug string, excludeID uint) (bool, error) {
 	var count int64
 	err := r.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM tenants WHERE slug=? AND id!=? AND deleted_at IS NULL", slug, excludeID).Scan(&count)
+		"SELECT COUNT(*) FROM tenants WHERE slug="+r.dialect.Placeholder(1)+" AND id!="+r.dialect.Placeholder(2)+" AND deleted_at IS NULL", slug, excludeID).Scan(&count)
 	return count > 0, err
 }
 
 func (r *OrganizationRepo) CountAdmins(ctx context.Context, tenantID uint) (int, error) {
 	var count int
 	err := r.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM users WHERE tenant_id=? AND role IN ('admin','superadmin') AND deleted_at IS NULL", tenantID).Scan(&count)
+		"SELECT COUNT(*) FROM users WHERE tenant_id="+r.dialect.Placeholder(1)+" AND role IN ('admin','superadmin') AND deleted_at IS NULL", tenantID).Scan(&count)
 	return count, err
 }
 

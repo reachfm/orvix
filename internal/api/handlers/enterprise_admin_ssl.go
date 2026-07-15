@@ -200,7 +200,7 @@ func (h *Handler) AdminSslDeleteCertificate(c fiber.Ctx) error {
 	}
 	tenantID := h.tenantID(c)
 	row := h.sqlDB().QueryRowContext(c.Context(),
-		`SELECT id, name, cert_path, key_path FROM coremail_uploaded_certificates WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
+		h.sqlQ(`SELECT id, name, cert_path, key_path FROM coremail_uploaded_certificates WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`),
 		id, tenantID)
 	var (
 		rowID int64

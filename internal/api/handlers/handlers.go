@@ -199,6 +199,24 @@ type Handler struct {
 	quotaSvc     *billing.QuotaService
 	abuseSvc     *abuse.SignalService
 	rateLimitSvc *abuse.RateLimitService
+
+	billingScheduler *billing.Scheduler
+	billingWebhook   *billing.WebhookService
+}
+
+// sqlDialect returns the dialect-aware SQL helper for raw queries.
+// Falls back to SQLite when the handler was constructed without a config.
+func (h *Handler) sqlDialect() *dbdialect.Info {
+	if h.dialect != nil {
+		return h.dialect
+	}
+	return dbdialect.FromDriver("sqlite")
+}
+
+// sqlQ rewrites a raw SQL string containing ? placeholders so it works on
+// the active database dialect (e.g. $1, $2, ... for PostgreSQL).
+func (h *Handler) sqlQ(query string) string {
+	return h.sqlDialect().Rewrite(query)
 }
 
 // NewHandler creates a new Handler with dependencies.
@@ -392,6 +410,32 @@ func (h *Handler) SetBillingUsageService(s *billing.UsageService) {
 
 func (h *Handler) SetBillingQuotaService(s *billing.QuotaService) {
 	h.quotaSvc = s
+}
+
+func (h *Handler) SetBillingScheduler(s *billing.Scheduler) {
+	h.billingScheduler = s
+}
+
+func (h *Handler) SetBillingWebhook(s *billing.WebhookService) {
+	h.billingWebhook = s
+}
+
+func (h *Handler) StartBillingScheduler(ctx context.Context, interval time.Duration) {
+	if h.billingScheduler == nil {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				h.billingScheduler.RunAll(ctx)
+			}
+		}
+	}()
 }
 
 func (h *Handler) SetAbuseSignalService(s *abuse.SignalService) {

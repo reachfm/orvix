@@ -3,14 +3,21 @@ package billing
 import (
 	"database/sql"
 	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 type UsageService struct {
-	db *sql.DB
+	db      *sql.DB
+	dialect *dbdialect.Info
 }
 
 func NewUsageService(db *sql.DB) *UsageService {
-	return &UsageService{db: db}
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
+	return &UsageService{db: db, dialect: dialect}
 }
 
 func (s *UsageService) GetCurrentUsage(tenantID uint) (*UsageRecord, error) {
@@ -18,7 +25,7 @@ func (s *UsageService) GetCurrentUsage(tenantID uint) (*UsageRecord, error) {
 	periodStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 	row := s.db.QueryRow(`SELECT id, tenant_id, period_start, period_end, mailboxes_used, domains_used,
 		storage_used_mb, emails_sent, emails_received, api_calls, created_at
-		FROM usage_records WHERE tenant_id = ? AND period_start = ?`, tenantID, periodStart)
+		FROM usage_records WHERE tenant_id = `+s.dialect.Placeholder(1)+` AND period_start = `+s.dialect.Placeholder(2), tenantID, periodStart)
 	var rec UsageRecord
 	err := row.Scan(&rec.ID, &rec.TenantID, &rec.PeriodStart, &rec.PeriodEnd,
 		&rec.MailboxesUsed, &rec.DomainsUsed, &rec.StorageUsedMB,
@@ -56,7 +63,15 @@ func (s *UsageService) SetDomainCount(tenantID uint, count int) error {
 func (s *UsageService) increment(tenantID uint, field string, count int64) error {
 	now := time.Now().UTC()
 	periodStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
-	query := `INSERT INTO usage_records (tenant_id, period_start, period_end, ` + field + `, created_at)
+	var query string
+	if s.dialect.IsPostgres() {
+		query = `INSERT INTO usage_records (tenant_id, period_start, period_end, ` + field + `, created_at)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (tenant_id, period_start) DO UPDATE SET ` + field + ` = usage_records.` + field + ` + EXCLUDED.` + field
+		_, err := s.db.Exec(query, tenantID, periodStart, periodStart.AddDate(0, 1, 0), count, now)
+		return err
+	}
+	query = `INSERT INTO usage_records (tenant_id, period_start, period_end, ` + field + `, created_at)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT (tenant_id, period_start) DO UPDATE SET ` + field + ` = ` + field + ` + ?`
 	_, err := s.db.Exec(query, tenantID, periodStart, periodStart.AddDate(0, 1, 0), count, now, count)
@@ -66,7 +81,15 @@ func (s *UsageService) increment(tenantID uint, field string, count int64) error
 func (s *UsageService) setField(tenantID uint, field string, value int64) error {
 	now := time.Now().UTC()
 	periodStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
-	query := `INSERT INTO usage_records (tenant_id, period_start, period_end, ` + field + `, created_at)
+	var query string
+	if s.dialect.IsPostgres() {
+		query = `INSERT INTO usage_records (tenant_id, period_start, period_end, ` + field + `, created_at)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (tenant_id, period_start) DO UPDATE SET ` + field + ` = EXCLUDED.` + field
+		_, err := s.db.Exec(query, tenantID, periodStart, periodStart.AddDate(0, 1, 0), value, now)
+		return err
+	}
+	query = `INSERT INTO usage_records (tenant_id, period_start, period_end, ` + field + `, created_at)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT (tenant_id, period_start) DO UPDATE SET ` + field + ` = ?`
 	_, err := s.db.Exec(query, tenantID, periodStart, periodStart.AddDate(0, 1, 0), value, now, value)

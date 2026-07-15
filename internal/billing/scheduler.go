@@ -4,22 +4,29 @@ import (
 	"context"
 	"database/sql"
 	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 type Scheduler struct {
-	db  *sql.DB
-	svc *Service
+	db      *sql.DB
+	dialect *dbdialect.Info
+	svc     *Service
 }
 
 func NewScheduler(db *sql.DB, svc *Service) *Scheduler {
-	return &Scheduler{db: db, svc: svc}
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
+	return &Scheduler{db: db, dialect: dialect, svc: svc}
 }
 
 func (s *Scheduler) ProcessTrialExpiry(ctx context.Context) (int, error) {
 	now := time.Now().UTC()
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT tenant_id FROM subscriptions
-		WHERE status = ? AND trial_ends_at IS NOT NULL AND trial_ends_at <= ?
+		WHERE status = `+s.dialect.Placeholder(1)+` AND trial_ends_at IS NOT NULL AND trial_ends_at <= `+s.dialect.Placeholder(2)+`
 		ORDER BY trial_ends_at ASC LIMIT 100`, SubTrialing, now)
 	if err != nil {
 		return 0, err
@@ -32,7 +39,7 @@ func (s *Scheduler) ProcessGracePeriodExpiry(ctx context.Context) (int, error) {
 	now := time.Now().UTC()
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT tenant_id FROM subscriptions
-		WHERE status = ? AND grace_period_ends_at IS NOT NULL AND grace_period_ends_at <= ?
+		WHERE status = `+s.dialect.Placeholder(1)+` AND grace_period_ends_at IS NOT NULL AND grace_period_ends_at <= `+s.dialect.Placeholder(2)+`
 		ORDER BY grace_period_ends_at ASC LIMIT 100`, SubGracePeriod, now)
 	if err != nil {
 		return 0, err
@@ -45,7 +52,7 @@ func (s *Scheduler) ProcessPastDueEscalation(ctx context.Context) (int, error) {
 	now := time.Now().UTC()
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT tenant_id FROM subscriptions
-		WHERE status = ? AND grace_period_ends_at IS NOT NULL AND grace_period_ends_at <= ?
+		WHERE status = `+s.dialect.Placeholder(1)+` AND grace_period_ends_at IS NOT NULL AND grace_period_ends_at <= `+s.dialect.Placeholder(2)+`
 		ORDER BY grace_period_ends_at ASC LIMIT 100`, SubPastDue, now)
 	if err != nil {
 		return 0, err
@@ -55,10 +62,11 @@ func (s *Scheduler) ProcessPastDueEscalation(ctx context.Context) (int, error) {
 }
 
 func (s *Scheduler) ProcessExpiredSubscriptions(ctx context.Context) (int, error) {
+	cutoff := time.Now().UTC().AddDate(0, 0, -30)
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT tenant_id FROM subscriptions
-		WHERE status = ? AND cancelled_at IS NOT NULL AND cancelled_at <= datetime('now', '-30 days')
-		ORDER BY cancelled_at ASC LIMIT 100`, SubCancelled)
+		WHERE status = `+s.dialect.Placeholder(1)+` AND cancelled_at IS NOT NULL AND cancelled_at <= `+s.dialect.Placeholder(2)+`
+		ORDER BY cancelled_at ASC LIMIT 100`, SubCancelled, cutoff)
 	if err != nil {
 		return 0, err
 	}
