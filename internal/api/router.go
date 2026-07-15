@@ -219,9 +219,9 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 
 			if enforcer != nil {
 				if mod, ok := registry.Get("coremail-runtime"); ok {
-			if esc, ok := mod.(interface {
-				SetSendEnforcerCallback(func(ctx context.Context, tenantID, mailboxID uint, count int) error, func(ctx context.Context, tenantID, mailboxID uint, count int, eventID string), func(ctx context.Context, tenantID, mailboxID uint, eventID string))
-			}); ok {
+					if esc, ok := mod.(interface {
+						SetSendEnforcerCallback(func(ctx context.Context, tenantID, mailboxID uint, count int) error, func(ctx context.Context, tenantID, mailboxID uint, count int, eventID string), func(ctx context.Context, tenantID, mailboxID uint, eventID string))
+					}); ok {
 						esc.SetSendEnforcerCallback(
 							func(ctx context.Context, tenantID, mailboxID uint, count int) error {
 								id := billing.SendIdentity{TenantID: tenantID, MailboxID: mailboxID}
@@ -614,6 +614,7 @@ func (r *Router) setupRoutes() {
 	api.Get("/health", r.h.Health)
 	api.Get("/billing/plans", r.h.ListBillingPlans)
 	api.Post("/billing/webhook", r.h.ReceivePaymentWebhook)
+	api.Post("/billing/complaint", r.h.ReceiveComplaintWebhook)
 
 	loginGroup := api.Group("/auth")
 	if r.redisLimiter != nil {

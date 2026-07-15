@@ -404,16 +404,12 @@ func smtpEventID(session *Session) string {
 	sort.Strings(rcpts)
 	h := sha256.New()
 	h.Write([]byte(session.MailFrom))
+	sep := []byte{0}
 	for _, r := range rcpts {
+		h.Write(sep)
 		h.Write([]byte(r))
 	}
-	h.Write([]byte{byte(len(session.DataBuffer) >> 24), byte(len(session.DataBuffer) >> 16), byte(len(session.DataBuffer) >> 8), byte(len(session.DataBuffer))})
-	if len(session.DataBuffer) > 0 {
-		n := 4096
-		if len(session.DataBuffer) < n {
-			n = len(session.DataBuffer)
-		}
-		h.Write(session.DataBuffer[:n])
-	}
+	h.Write(sep)
+	h.Write(session.DataBuffer)
 	return fmt.Sprintf("smtp:%x", h.Sum(nil)[:16])
 }
