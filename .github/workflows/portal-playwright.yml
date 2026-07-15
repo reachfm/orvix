@@ -18,22 +18,6 @@ jobs:
     name: Real browser portal acceptance
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: orvix
-          POSTGRES_PASSWORD: ci_orvix_only
-          POSTGRES_DB: orvix
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-
     steps:
       - uses: actions/checkout@v7
 
@@ -43,56 +27,31 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Build Go binary at repo root
+        run: go build -o orvix ./cmd/orvix/
+
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
           node-version: '22'
-          cache: 'npm'
-          cache-dependency-path: web/admin/package-lock.json
-
-      - name: Install PostgreSQL client
-        run: |
-          sudo apt-get update -o Acquire::Retries=3
-          sudo apt-get install -y --no-install-recommends postgresql-client-16
-
-      - name: Install frontend dependencies
-        run: npm ci
-        working-directory: web/admin
 
       - name: Build frontend
-        run: npm run build
-        working-directory: web/admin
-
-      - name: Build Go backend
-        run: go build ./...
-        working-directory: ./
+        run: |
+          cd web/admin
+          npm ci
+          npm run build
 
       - name: Install Playwright
         run: |
-          npm init -y
+          cd test/playwright
+          npm init -y 2>/dev/null
           npm install @playwright/test
           npx playwright install chromium --with-deps
-        working-directory: test/playwright
-
-      - name: Start backend with test DB
-        run: |
-          echo "Starting Orvix backend..."
-          go run ./cmd/orvix/... &
-          BACKEND_PID=$!
-          echo "BACKEND_PID=$BACKEND_PID" >> "$GITHUB_ENV"
-          for i in $(seq 1 30); do
-            if curl -fsS http://localhost:8080/api/v1/health >/dev/null 2>&1; then
-              echo "Backend healthy"
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "Backend failed to start"
-          exit 1
 
       - name: Run Playwright E2E tests
-        run: npx playwright test
-        working-directory: test/playwright
+        run: |
+          cd test/playwright
+          npx playwright test --reporter list
 
       - name: Upload Playwright traces on failure
         if: failure()
@@ -100,10 +59,4 @@ jobs:
         with:
           name: playwright-traces
           path: test/playwright/test-results/
-
-      - name: Stop backend
-        if: always()
-        run: |
-          if [ -n "${BACKEND_PID:-}" ]; then
-            kill $BACKEND_PID 2>/dev/null || true
-          fi
+          if-no-files-found: warn

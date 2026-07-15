@@ -56,7 +56,8 @@ test.beforeAll(async () => {
   if (!fs.existsSync(adminUiDir)) {
     throw new Error(`Admin UI dist not found at ${adminUiDir}`);
   }
-  const binaryPath = path.resolve(__dirname, "../../orvix.exe");
+  const ext = process.platform === "win32" ? ".exe" : "";
+  const binaryPath = path.resolve(__dirname, `../../orvix${ext}`);
   if (!fs.existsSync(binaryPath)) {
     throw new Error(`orvix binary not found at ${binaryPath}`);
   }
