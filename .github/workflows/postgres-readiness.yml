@@ -119,8 +119,10 @@ jobs:
             exit 1
           fi
 
-          # 5. psql connectivity check (no credentials leaked)
-          "${PSQL}" -h localhost -p 5432 -U orvix -d orvix -c "SELECT version();" 2>&1 | head -5
+          # 5. psql connectivity check – use PGPASSWORD to avoid password
+          # prompt; the output is sanitised by GitHub Actions (***).
+          PGPASSWORD=ci_orvix_only "${PSQL}" -h localhost -p 5432 -U orvix -d orvix \
+            -c "SELECT version();" 2>&1
 
           # 6. Prepend versioned binary directory to PATH so all subsequent
           # Go test steps (which call exec.LookPath("pg_dump") etc.) resolve
