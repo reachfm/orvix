@@ -272,6 +272,7 @@ paths:
     get:
       summary: Health check
       tags: [System]
+      security: []
       responses:
         '200':
           description: Service health
@@ -284,6 +285,7 @@ paths:
     post:
       summary: Authenticate and get JWT token
       tags: [Authentication]
+      security: []
       requestBody:
         required: true
         content:
@@ -316,6 +318,7 @@ paths:
     get:
       summary: List available plans
       tags: [Billing]
+      security: []
       responses:
         '200':
           description: Plan list
@@ -520,6 +523,12 @@ paths:
       tags: [Operations]
       security:
         - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
 
   /platform/organizations:
     get:

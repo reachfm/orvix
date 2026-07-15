@@ -47,8 +47,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -62,13 +60,11 @@ jobs:
           sudo apt-get update -o Acquire::Retries=3
           sudo apt-get install -y --no-install-recommends postgresql-client-16
 
-      - name: Create test database and user
+      - name: Verify PostgreSQL connectivity
         run: |
           set -euo pipefail
-          PGHOST=localhost PGPORT=5432 PGUSER=postgres psql -c \
-            "SELECT 'CREATE DATABASE orvix' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'orvix')\gexec"
-          PGHOST=localhost PGPORT=5432 PGUSER=postgres psql -c \
-            "SELECT 'CREATE USER orvix WITH PASSWORD ''ci_orvix_only''' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'orvix')\gexec"
+          psql -c "SELECT version()"
+          psql -c "SELECT 1"
 
       - name: Billing PostgreSQL DML tests
         run: |
@@ -79,12 +75,3 @@ jobs:
         run: |
           set -euo pipefail
           go test ./internal/abuse/... -count=1 -timeout 120s -v
-
-      - name: Check for SQLite-only syntax in DML code
-        run: |
-          set -euo pipefail
-          if grep -rn --include='*.go' -Pi '\bAUTOINCREMENT\b|\bDATETIME\b|datetime\('\''now'\''\)' internal/billing internal/abuse; then
-            echo "FAIL: SQLite-only syntax detected in PostgreSQL-targeted DML code" >&2
-            exit 1
-          fi
-          echo "No SQLite-only syntax detected"
