@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/dbdialect"
 
 	_ "modernc.org/sqlite"
 )
@@ -368,8 +369,12 @@ func TestWebhook_ReplayUsesIdempotencyKey(t *testing.T) {
 
 func assertWebhookEventCount(t *testing.T, db *sql.DB, id string, want int) {
 	t.Helper()
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
 	var got int
-	if err := db.QueryRow("SELECT COUNT(*) FROM webhook_events WHERE id = ?", id).Scan(&got); err != nil {
+	if err := db.QueryRow("SELECT COUNT(*) FROM webhook_events WHERE id = "+dialect.Placeholder(1), id).Scan(&got); err != nil {
 		t.Fatalf("count webhook events for %s: %v", id, err)
 	}
 	if got != want {
