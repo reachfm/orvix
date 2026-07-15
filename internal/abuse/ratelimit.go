@@ -63,22 +63,34 @@ func (s *RateLimitService) CheckSendLimit(ctx context.Context, tenantID uint, ma
 func (s *RateLimitService) RecordSend(ctx context.Context, tenantID uint, count int) error {
 	now := time.Now().UTC()
 	dayKey := fmt.Sprintf("send:%d:%s", tenantID, now.Format("2006-01-02"))
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO abuse_send_counts (day_key, tenant_id, emails_sent, created_at)
-		VALUES (`+s.dialect.Placeholder(1)+`, `+s.dialect.Placeholder(2)+`, `+s.dialect.Placeholder(3)+`, `+s.dialect.Placeholder(4)+`)
-		ON CONFLICT (day_key) DO UPDATE SET emails_sent = emails_sent + `+s.dialect.Placeholder(5),
-		dayKey, tenantID, count, now, count)
+	var q string
+	if s.dialect.IsPostgres() {
+		q = `INSERT INTO abuse_send_counts (day_key, tenant_id, emails_sent, created_at)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT (day_key) DO UPDATE SET emails_sent = abuse_send_counts.emails_sent + $5`
+	} else {
+		q = `INSERT INTO abuse_send_counts (day_key, tenant_id, emails_sent, created_at)
+			VALUES (?, ?, ?, ?)
+			ON CONFLICT (day_key) DO UPDATE SET emails_sent = emails_sent + ?`
+	}
+	_, err := s.db.ExecContext(ctx, q, dayKey, tenantID, count, now, count)
 	return err
 }
 
 func (s *RateLimitService) RecordBounce(ctx context.Context, tenantID uint) error {
 	now := time.Now().UTC()
 	dayKey := fmt.Sprintf("bounce:%d:%s", tenantID, now.Format("2006-01-02"))
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO abuse_bounce_counts (day_key, tenant_id, bounce_count, created_at)
-		VALUES (`+s.dialect.Placeholder(1)+`, `+s.dialect.Placeholder(2)+`, 1, `+s.dialect.Placeholder(3)+`)
-		ON CONFLICT (day_key) DO UPDATE SET bounce_count = bounce_count + 1`,
-		dayKey, tenantID, now)
+	var q string
+	if s.dialect.IsPostgres() {
+		q = `INSERT INTO abuse_bounce_counts (day_key, tenant_id, bounce_count, created_at)
+			VALUES ($1, $2, 1, $3)
+			ON CONFLICT (day_key) DO UPDATE SET bounce_count = abuse_bounce_counts.bounce_count + 1`
+	} else {
+		q = `INSERT INTO abuse_bounce_counts (day_key, tenant_id, bounce_count, created_at)
+			VALUES (?, ?, 1, ?)
+			ON CONFLICT (day_key) DO UPDATE SET bounce_count = bounce_count + 1`
+	}
+	_, err := s.db.ExecContext(ctx, q, dayKey, tenantID, now)
 	return err
 }
 
