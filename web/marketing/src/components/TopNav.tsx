@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, NavLink, useLocation } from "react-router-dom";
 import { Menu, X } from "lucide-react";
 import Container from "./Container";
 import Logo from "./Logo";
+import { PORTAL_LOGIN, PORTAL_SIGNUP } from "../lib/links";
 
 const NAV_LINKS = [
   { to: "/features", label: "Features" },
@@ -16,11 +17,40 @@ const NAV_LINKS = [
 export default function TopNav() {
   const [open, setOpen] = useState(false);
   const location = useLocation();
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
 
   // Close the mobile menu on route change.
   useEffect(() => {
     setOpen(false);
   }, [location.pathname]);
+
+  useEffect(() => {
+    if (!open) return;
+    const menu = menuRef.current;
+    const focusable = menu?.querySelectorAll<HTMLElement>('a[href], button:not([disabled])');
+    focusable?.[0]?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setOpen(false);
+        toggleRef.current?.focus();
+        return;
+      }
+      if (event.key !== "Tab" || !focusable?.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [open]);
 
   return (
     <header
@@ -110,23 +140,24 @@ export default function TopNav() {
               gap: "var(--sp-2)",
             }}
           >
-            <Link
-              to="/login"
+            <a
+              href={PORTAL_LOGIN}
               className="btn btn-ghost btn-sm"
               aria-label="Sign in to the Orvix portal"
             >
               Sign in
-            </Link>
-            <Link
-              to="/signup"
+            </a>
+            <a
+              href={PORTAL_SIGNUP}
               className="btn btn-primary btn-sm"
               aria-label="Start a free Orvix account"
             >
               Start free
-            </Link>
+            </a>
           </div>
 
           <button
+            ref={toggleRef}
             className="nav-toggle"
             aria-label={open ? "Close menu" : "Open menu"}
             aria-expanded={open}
@@ -148,8 +179,12 @@ export default function TopNav() {
 
         {open && (
           <div
+            ref={menuRef}
             id="mobile-menu"
             className="nav-mobile"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Mobile navigation"
             style={{
               padding: "var(--sp-4) 0 var(--sp-5)",
               borderTop: "1px solid var(--border-subtle)",
@@ -193,12 +228,12 @@ export default function TopNav() {
                 marginTop: "var(--sp-4)",
               }}
             >
-              <Link to="/login" className="btn btn-secondary">
+              <a href={PORTAL_LOGIN} className="btn btn-secondary">
                 Sign in
-              </Link>
-              <Link to="/signup" className="btn btn-primary">
+              </a>
+              <a href={PORTAL_SIGNUP} className="btn btn-primary">
                 Start free
-              </Link>
+              </a>
             </div>
           </div>
         )}

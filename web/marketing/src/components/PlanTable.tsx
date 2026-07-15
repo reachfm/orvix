@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import { Check } from "lucide-react";
 import { PLANS, formatPrice, formatStorage } from "../lib/plans";
+import { PORTAL_SIGNUP } from "../lib/links";
 
 export default function PlanTable() {
   return (
@@ -109,8 +110,8 @@ export default function PlanTable() {
                 color: "var(--text-secondary)",
               }}
             >
-              <Limit label="Domains" value={plan.domains === 1000 ? "Unlimited" : String(plan.domains)} />
-              <Limit label="Mailboxes" value={plan.mailboxes === 1000 ? "Unlimited" : String(plan.mailboxes)} />
+              <Limit label="Domains" value={String(plan.domains)} />
+              <Limit label="Mailboxes" value={String(plan.mailboxes)} />
               <Limit label="Storage" value={formatStorage(plan.storageBytes)} />
               <Limit
                 label="Sends per day"
@@ -176,18 +177,15 @@ export default function PlanTable() {
             </div>
 
             <div style={{ marginTop: "auto" }}>
-              <Link
-                to={plan.id === "free" ? "/signup" : "/contact"}
-                className={featured ? "btn btn-primary" : "btn btn-secondary"}
-                style={{ width: "100%" }}
-                aria-label={
-                  plan.id === "free"
-                    ? "Start a free Orvix account"
-                    : `Contact sales about Orvix ${plan.name}`
-                }
-              >
-                {plan.id === "free" ? "Start free" : "Contact sales"}
-              </Link>
+              {plan.id === "free" ? (
+                <a href={PORTAL_SIGNUP} className="btn btn-secondary" style={{ width: "100%" }} aria-label="Start a free Orvix account">
+                  Start free
+                </a>
+              ) : (
+                <Link to="/contact" className={featured ? "btn btn-primary" : "btn btn-secondary"} style={{ width: "100%" }} aria-label={`Contact sales about Orvix ${plan.name}`}>
+                  Contact sales
+                </Link>
+              )}
             </div>
           </article>
         );

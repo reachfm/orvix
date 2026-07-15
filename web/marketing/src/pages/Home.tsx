@@ -19,6 +19,7 @@ import PlanTable from "../components/PlanTable";
 import FAQ, { type FaqItem } from "../components/FAQ";
 import CapabilityBlock from "../components/CapabilityBlock";
 import Illustration from "../components/Illustration";
+import { PORTAL_SIGNUP } from "../lib/links";
 
 const FAQ_ITEMS: FaqItem[] = [
   {
@@ -61,7 +62,7 @@ export default function Home() {
           </>
         }
         subheading="Orvix is professional email hosting with custom domains, encrypted transport, and the admin controls a real team needs. Start free with up to 5 mailboxes on 1 domain."
-        primaryCta={{ to: "/signup", label: "Start free" }}
+        primaryCta={{ to: PORTAL_SIGNUP, label: "Start free", external: true }}
         secondaryCta={{ to: "/pricing", label: "See pricing" }}
         belowCta={
           <>
@@ -88,21 +89,21 @@ export default function Home() {
           <CapabilityBlock
             icon={Inbox}
             title="Webmail"
-            body="A modern webmail client with folders, search, compose, calendar, and contacts. Works in every modern browser."
+            body="Webmail with folders, search, drafts, compose, attachments, settings, and notifications."
             href="/features"
             hrefLabel="Tour the webmail"
           />
           <CapabilityBlock
             icon={Server}
             title="Admin"
-            body="Manage domains, mailboxes, aliases, and groups from one place. Every action is logged in the audit trail."
+            body="Manage domains, mailboxes, aliases, groups, runtime status, and security controls from one place."
             href="/enterprise"
             hrefLabel="Tour the admin"
           />
           <CapabilityBlock
             icon={Layers}
             title="API"
-            body="A REST API for everything you can do in the admin UI, with bearer-token auth and an OpenAPI 3.0 spec."
+            body="Documented public, customer, enterprise, and operator HTTP routes with an OpenAPI 3.0 contract."
             href="/api"
             hrefLabel="Read the API one-pager"
           />
@@ -113,7 +114,7 @@ export default function Home() {
       <Section
         eyebrow="Built for the boring 99% of mail"
         heading="Encryption, authentication, and quotas — done right, out of the box"
-        lede="Email is critical infrastructure. We treat it that way: TLS 1.2 minimum, DKIM on every domain, MTA-STS on paid plans, MFA on Business and above, and an audit log that records every admin action."
+        lede="Orvix combines transport configuration, domain-authentication workflows, MFA, access controls, quotas, and audit facilities. Deployment-dependent controls remain the operator's responsibility."
       >
         <div
           className="two-col"
@@ -135,13 +136,13 @@ export default function Home() {
           >
             <Bullet
               icon={Lock}
-              title="Encrypted in transit and at rest"
-              body="Opportunistic TLS for inbound, required TLS for outbound, and AES-256-GCM encryption for mailbox storage and backups."
+              title="Transport and storage controls"
+              body="TLS support for mail transport, with at-rest storage and backup protection determined by the operator's deployment configuration."
             />
             <Bullet
               icon={ShieldCheck}
               title="DKIM, SPF, DMARC, and MTA-STS"
-              body="Set up correctly by default on every domain. The DNS page shows the exact records to publish."
+              body="The DNS workflow generates the records and policy data the operator must publish and verify for each domain."
             />
             <Bullet
               icon={KeyRound}
@@ -271,9 +272,9 @@ export default function Home() {
               justifyContent: "center",
             }}
           >
-            <Link to="/signup" className="btn btn-primary btn-lg">
+            <a href={PORTAL_SIGNUP} className="btn btn-primary btn-lg">
               Start free
-            </Link>
+            </a>
             <Link to="/contact" className="btn btn-secondary btn-lg">
               Talk to sales
             </Link>

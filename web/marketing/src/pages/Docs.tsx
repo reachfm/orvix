@@ -7,6 +7,7 @@ import Section from "../components/Section";
 import Container from "../components/Container";
 import DocLinkCard from "../components/DocLinkCard";
 import { DOCS } from "../data/docs-index";
+import { DOCS_BASE } from "../lib/links";
 
 export default function Docs() {
   const [query, setQuery] = useState("");
@@ -38,7 +39,7 @@ export default function Docs() {
         eyebrow="Documentation"
         heading="Everything you need to run Orvix"
         subheading="Searchable guides for getting started, running mailboxes, configuring DNS, using the API, and operating the product. The full source lives in the customer docs directory; this page indexes it."
-        primaryCta={{ to: "/docs/getting-started", label: "Start with Getting started" }}
+        primaryCta={{ to: `${DOCS_BASE}/getting-started`, label: "Start with Getting started", external: true }}
         secondaryCta={{ to: "/api", label: "See the API one-pager" }}
       />
 
@@ -116,7 +117,7 @@ export default function Docs() {
                   key={doc.slug}
                   title={doc.title}
                   body={doc.summary}
-                  href={`/docs/${doc.slug}`}
+                  href={`${DOCS_BASE}/${doc.slug}`}
                 />
               ))}
             </div>

@@ -1,62 +1,69 @@
-import { Helmet } from "react-helmet-async";
+import { useEffect } from "react";
 import { ROUTE_SEO, SITE_NAME, canonical, organizationLd, websiteLd } from "../lib/seo";
 
 interface SEOProps {
-  /** Path-only URL, e.g. "/pricing". Must exist in ROUTE_SEO. */
   path: keyof typeof ROUTE_SEO;
-  /** Override the title/description if needed; otherwise uses ROUTE_SEO. */
   title?: string;
   description?: string;
   noindex?: boolean;
   jsonLd?: object;
 }
 
-export default function SEO({
-  path,
-  title,
-  description,
-  noindex,
-  jsonLd,
-}: SEOProps) {
+export default function SEO({ path, title, description, noindex, jsonLd }: SEOProps) {
   const fallback = ROUTE_SEO[path];
-  const finalTitle = title ?? fallback?.title ?? `${SITE_NAME}`;
+  const finalTitle = title ?? fallback?.title ?? SITE_NAME;
   const finalDescription = description ?? fallback?.description ?? "";
   const canonicalUrl = canonical(path);
-  const ogImage = `${SITE_NAME && "https://orvix.com"}/og-default.png`;
+  const ogImage = "https://orvix.com/favicon.svg";
 
-  return (
-    <Helmet>
-      <html lang="en" />
-      <title>{finalTitle}</title>
-      <meta name="description" content={finalDescription} />
-      <link rel="canonical" href={canonicalUrl} />
-      {noindex ? (
-        <meta name="robots" content="noindex,nofollow" />
-      ) : (
-        <meta name="robots" content="index,follow" />
-      )}
+  useEffect(() => {
+    document.title = finalTitle;
+    setMeta("name", "description", finalDescription);
+    setMeta("name", "robots", noindex ? "noindex,nofollow" : "index,follow");
+    setLink("canonical", canonicalUrl);
+    setMeta("property", "og:type", "website");
+    setMeta("property", "og:title", finalTitle);
+    setMeta("property", "og:description", finalDescription);
+    setMeta("property", "og:url", canonicalUrl);
+    setMeta("property", "og:image", ogImage);
+    setMeta("property", "og:site_name", SITE_NAME);
+    setMeta("property", "og:locale", "en_US");
+    setMeta("name", "twitter:card", "summary");
+    setMeta("name", "twitter:title", finalTitle);
+    setMeta("name", "twitter:description", finalDescription);
+    setMeta("name", "twitter:image", ogImage);
 
-      {/* Open Graph */}
-      <meta property="og:type" content="website" />
-      <meta property="og:title" content={finalTitle} />
-      <meta property="og:description" content={finalDescription} />
-      <meta property="og:url" content={canonicalUrl} />
-      <meta property="og:image" content={ogImage} />
-      <meta property="og:site_name" content={SITE_NAME} />
-      <meta property="og:locale" content="en_US" />
+    document.querySelectorAll("script[data-orvix-seo]").forEach((node) => node.remove());
+    const payloads = [organizationLd(), websiteLd(), jsonLd ? JSON.stringify(jsonLd) : ""];
+    for (const payload of payloads) {
+      if (!payload) continue;
+      const script = document.createElement("script");
+      script.type = "application/ld+json";
+      script.dataset.orvixSeo = "true";
+      script.text = payload;
+      document.head.appendChild(script);
+    }
+  }, [canonicalUrl, finalDescription, finalTitle, jsonLd, noindex, ogImage]);
 
-      {/* Twitter */}
-      <meta name="twitter:card" content="summary_large_image" />
-      <meta name="twitter:title" content={finalTitle} />
-      <meta name="twitter:description" content={finalDescription} />
-      <meta name="twitter:image" content={ogImage} />
+  return null;
+}
 
-      {/* Structured data — emit organization + website JSON-LD on every page. */}
-      <script type="application/ld+json">{organizationLd()}</script>
-      <script type="application/ld+json">{websiteLd()}</script>
-      {jsonLd && (
-        <script type="application/ld+json">{JSON.stringify(jsonLd)}</script>
-      )}
-    </Helmet>
-  );
+function setMeta(attribute: "name" | "property", key: string, content: string) {
+  let node = document.head.querySelector<HTMLMetaElement>(`meta[${attribute}="${key}"]`);
+  if (!node) {
+    node = document.createElement("meta");
+    node.setAttribute(attribute, key);
+    document.head.appendChild(node);
+  }
+  node.content = content;
+}
+
+function setLink(rel: string, href: string) {
+  let node = document.head.querySelector<HTMLLinkElement>(`link[rel="${rel}"]`);
+  if (!node) {
+    node = document.createElement("link");
+    node.rel = rel;
+    document.head.appendChild(node);
+  }
+  node.href = href;
 }

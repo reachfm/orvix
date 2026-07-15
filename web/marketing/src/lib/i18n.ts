@@ -49,7 +49,7 @@ const STRINGS: Record<string, string> = {
   "lang.en": "English",
   "lang.ar": "العربية",
   "cookie.bannerText":
-    "We use a small set of strictly necessary and functional cookies to run this site. Analytics is opt-in. You can change your choice any time on the cookie policy page.",
+    "We use a small set of strictly necessary and functional cookies to run this site. No analytics SDK is included in this release.",
   "cookie.accept": "Accept all",
   "cookie.reject": "Reject non-essential",
   "cookie.policy": "Cookie policy",

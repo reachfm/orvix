@@ -120,12 +120,19 @@ kbd {
   position: absolute;
   top: -40px;
   left: var(--sp-4);
-  background: var(--accent);
+  background: #1d4f91;
   color: #fff;
   padding: var(--sp-2) var(--sp-3);
   border-radius: var(--r-sm);
   z-index: 1000;
   transition: top var(--dur-2) var(--ease-out);
+}
+
+p a,
+.prose a {
+  text-decoration: underline;
+  text-decoration-thickness: 0.08em;
+  text-underline-offset: 0.16em;
 }
 
 .skip-link:focus {

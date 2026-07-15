@@ -181,6 +181,7 @@ fi
 printf '\n%b%s%b\n' "$BOLD" "[4/5] Removing scripts + UI assets" "$NC"
 rm -rf /usr/share/orvix/admin
 rm -rf /usr/share/orvix/webmail
+rm -rf /usr/share/orvix/marketing
 rm -rf /usr/share/orvix/scripts
 rm -rf /opt/orvix
 info "✓ UI assets + helper scripts removed"

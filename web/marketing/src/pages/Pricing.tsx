@@ -9,6 +9,7 @@ import ComparisonTable from "../components/ComparisonTable";
 import PricingToggle from "../components/PricingToggle";
 import FAQ, { type FaqItem } from "../components/FAQ";
 import { PLANS, formatPrice } from "../lib/plans";
+import { PORTAL_SIGNUP } from "../lib/links";
 
 const FAQ_ITEMS: FaqItem[] = [
   {
@@ -17,7 +18,7 @@ const FAQ_ITEMS: FaqItem[] = [
   },
   {
     q: "Can I switch plans later?",
-    a: "Yes — you can upgrade or downgrade any time from the billing page in the customer portal. Upgrades take effect immediately; downgrades take effect at the end of the current billing period.",
+    a: "Yes. Plan changes are requested from the billing page. Entitlement limits update according to the billing service, while the new charge applies at the next renewal; there is no prorated mid-cycle charge.",
   },
   {
     q: "What is the difference between monthly and yearly billing?",
@@ -29,15 +30,15 @@ const FAQ_ITEMS: FaqItem[] = [
   },
   {
     q: "What payment methods do you accept?",
-    a: "Credit and debit cards via our billing provider. Annual plans on Business and Enterprise can be paid by invoice — contact sales.",
+    a: "The checkout page shows the payment methods supported by the configured billing provider. Contact sales before relying on invoice terms.",
   },
   {
-    q: "Do you offer a discount for non-profits or open-source projects?",
-    a: "Yes. Email hello@orvix.com with a short description of your project and we'll get back to you within a few days.",
+    q: "Are custom discounts published?",
+    a: "No custom discount program is promised on this page. The catalog prices above are the public prices.",
   },
   {
     q: "Can I get a refund?",
-    a: "We don't publish a refund policy on the marketing site. The terms of service document the conditions under which a refund may be issued.",
+    a: "Refund requests must be sent to billing@orvix.com within 14 days. Eligibility is reviewed against the applicable terms and order.",
   },
 ];
 
@@ -50,7 +51,7 @@ export default function Pricing() {
         eyebrow="Pricing"
         heading={<>Simple pricing. No surprises.</>}
         subheading="Four plans, four honest price points. Switch any time. Annual billing is a 16% discount and is real — not a marketing trick."
-        primaryCta={{ to: "/signup", label: "Start free" }}
+        primaryCta={{ to: PORTAL_SIGNUP, label: "Start free", external: true }}
         secondaryCta={{ to: "/contact", label: "Contact sales" }}
       />
 
@@ -122,8 +123,8 @@ export default function Pricing() {
                   color: "var(--text-secondary)",
                 }}
               >
-                <li>{p.domains === 1000 ? "Unlimited" : p.domains} domain{p.domains === 1 ? "" : "s"}</li>
-                <li>{p.mailboxes === 1000 ? "Unlimited" : p.mailboxes} mailboxes</li>
+                <li>{p.domains} domain{p.domains === 1 ? "" : "s"}</li>
+                <li>{p.mailboxes} mailboxes</li>
                 <li>{p.sendsPerDay.toLocaleString()} sends/day</li>
               </ul>
             </div>

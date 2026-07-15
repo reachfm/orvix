@@ -4,9 +4,11 @@ import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  // /assets/* is reserved for the existing webmail compatibility route.
   base: "/",
   build: {
     outDir: "dist",
+    assetsDir: "marketing-assets",
     emptyOutDir: true,
     sourcemap: false,
     rollupOptions: {

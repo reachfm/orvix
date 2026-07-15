@@ -17,7 +17,7 @@
   --text-primary: #E8EAF0;
   --text-secondary: #B5BCC9;
   --text-muted: #8B92A8;
-  --text-faint: #555D73;
+  --text-faint: #8B92A8;
 
   /* Borders */
   --border-subtle: #1F2430;
@@ -95,7 +95,7 @@
   --text-primary: #0C0E12;
   --text-secondary: #3D4452;
   --text-muted: #6B7385;
-  --text-faint: #9CA3B5;
+  --text-faint: #6B7385;
 
   --border-subtle: #E5E8EE;
   --border-default: #D2D7E0;

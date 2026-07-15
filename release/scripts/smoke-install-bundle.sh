@@ -160,6 +160,10 @@ check "release tree has all required webmail assets" \
     "[ -f release/webmail/index.html ] && [ -f release/webmail/sw.js ] && \
       [ -f release/webmail/assets/auth-gate.js ] && [ -f release/webmail/assets/auth-gate.css ] && \
       [ -f release/webmail/assets/webmail.js ] && [ -f release/webmail/assets/webmail.css ]"
+check "release tree has all required marketing assets" \
+    "[ -f release/marketing/index.html ] && [ -f release/marketing/404.html ] && \
+      [ -f release/marketing/robots.txt ] && [ -f release/marketing/sitemap.xml ] && \
+      compgen -G 'release/marketing/marketing-assets/*.js' >/dev/null"
 check "release tree has systemd units + sudoers drop-in" \
     "[ -f release/systemd/orvix.service ] && [ -f release/systemd/orvix-update.service ] && [ -f release/sudoers.d/orvix-update ]"
 check "release tree has install/upgrade/uninstall scripts" \
@@ -185,9 +189,11 @@ check "build-release-bundle.sh embeds buildinfo.Channel via ldflags" \
 check "build-release-bundle.sh emits BUILDINFO sidecar with version+commit+channel" \
     "grep -qE '^version=|^commit=|^channel=|^build_time=' release/scripts/build-release-bundle.sh"
 
-check "build-release-bundle.sh includes admin + webmail assets" \
+check "build-release-bundle.sh includes admin + webmail + marketing assets" \
     "grep -q 'release/admin' release/scripts/build-release-bundle.sh && \
-     grep -q 'release/webmail' release/scripts/build-release-bundle.sh"
+     grep -q 'release/webmail' release/scripts/build-release-bundle.sh && \
+     grep -q 'release/marketing' release/scripts/build-release-bundle.sh && \
+     grep -q 'npm run verify' release/scripts/build-release-bundle.sh"
 
 check "build-release-bundle.sh includes systemd + sudoers + scripts" \
     "grep -q 'release/systemd' release/scripts/build-release-bundle.sh && \
@@ -228,7 +234,9 @@ if [ "$MODE" = "build" ]; then
     for rel in bin/orvix release/install.sh release/install-public.sh release/upgrade.sh \
         release/systemd/orvix.service release/systemd/orvix-update.service \
         release/sudoers.d/orvix-update release/admin/app.js release/admin/index.html \
-        release/webmail/index.html VERSION BUILDINFO; do
+        release/webmail/index.html release/marketing/index.html \
+        release/marketing/404.html release/marketing/robots.txt \
+        release/marketing/sitemap.xml VERSION BUILDINFO; do
         if [ ! -e "$BDIR/orvix/$rel" ]; then
             fail "sealed bundle is missing $rel"
         fi

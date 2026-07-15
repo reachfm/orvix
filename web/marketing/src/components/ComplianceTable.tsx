@@ -11,6 +11,8 @@ interface ComplianceTableProps {
 export default function ComplianceTable({ rows, caption }: ComplianceTableProps) {
   return (
     <div
+      tabIndex={0}
+      aria-label={caption}
       style={{
         overflowX: "auto",
         background: "var(--bg-canvas)",

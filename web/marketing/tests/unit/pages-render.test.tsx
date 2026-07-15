@@ -1,7 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { render } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { HelmetProvider } from "react-helmet-async";
 import Home from "../../src/pages/Home";
 import Pricing from "../../src/pages/Pricing";
 import Features from "../../src/pages/Features";
@@ -51,11 +50,9 @@ const PAGES: Array<[string, React.ComponentType]> = [
 
 function renderInRouter(Page: React.ComponentType) {
   return render(
-    <HelmetProvider>
-      <MemoryRouter>
-        <Page />
-      </MemoryRouter>
-    </HelmetProvider>,
+    <MemoryRouter>
+      <Page />
+    </MemoryRouter>,
   );
 }
 

@@ -27,7 +27,7 @@ export default function LegalPrivacy() {
             <ul>
               <li>Account: name, email, organization, password hash.</li>
               <li>Billing: plan, billing email, last 4 of the payment card on file (the full card is held by the billing provider, not by us).</li>
-              <li>Usage: how you use Orvix (pages visited, API endpoints called, messages sent).</li>
+              <li>Service usage: API operations, messages sent, quota accounting, and security events needed to operate the product.</li>
               <li>Mail: the content of the messages you send and receive on Orvix. This is processed on your behalf as a processor.</li>
               <li>Logs: connection metadata (source IP, TLS handshake, user agent) for security and debugging.</li>
             </ul>
@@ -37,37 +37,31 @@ export default function LegalPrivacy() {
               <li>To provide the service you signed up for.</li>
               <li>To bill you for paid plans.</li>
               <li>To secure the service and prevent abuse.</li>
-              <li>To improve the product (aggregate, anonymized analytics).</li>
               <li>To comply with legal obligations.</li>
             </ul>
 
             <h2>How long we keep it</h2>
             <ul>
-              <li>Account: for the life of the account. Deleted within 30 days of account closure, except where retention is required by law.</li>
-              <li>Mail: stored on the operator&apos;s server. Backups are retained for 30 days. Deleted within 90 days of mailbox deletion.</li>
-              <li>Logs: 90 days for security and debugging.</li>
-              <li>Billing: 7 years, where required by tax and accounting law.</li>
+              <li>Account, mail, logs, billing, and backup retention depend on product behavior, operator configuration, and applicable legal requirements.</li>
+              <li>Obtain the deployment-specific retention schedule from the operator or applicable customer agreement.</li>
             </ul>
 
             <h2>Who we share it with</h2>
             <p>
-              We do not sell your data. We share it with subprocessors only
-              where necessary to provide the service. The current list is on
-              the data and privacy page.
+              We do not claim to sell personal data. Service providers vary by
+              deployment; the applicable provider list belongs in the operator
+              privacy notice or customer agreement.
             </p>
 
             <h2>Your rights</h2>
             <ul>
-              <li>Access: you can export your data at any time from the customer portal.</li>
-              <li>Rectification: you can update your account information at any time.</li>
-              <li>Erasure: you can delete your account, which erases associated personal data per the retention periods above.</li>
-              <li>Objection: you can opt out of analytics cookies from the cookie banner.</li>
-              <li>Portability: mail can be exported as mbox or EML.</li>
+              <li>Access, rectification, erasure, objection, and portability requests may be submitted to the address below.</li>
+              <li>Identity and authority may be verified before a request is processed.</li>
             </ul>
             <p>
               To exercise any of these rights, email{" "}
               <a href="mailto:privacy@orvix.com">privacy@orvix.com</a>. We
-              respond within 30 days.
+              will process requests under the applicable policy and law.
             </p>
 
             <h2>Children</h2>
@@ -78,16 +72,14 @@ export default function LegalPrivacy() {
 
             <h2>International transfers</h2>
             <p>
-              Mail content and metadata are stored in the region the operator
-              selected at signup. The data and privacy page lists the regions
-              we operate in and the lawful basis for cross-region transfers
-              where applicable.
+              Data location and any international transfer depend on the actual
+              deployment and its service providers. This page does not promise
+              region selection or multi-region residency.
             </p>
 
             <h2>Changes to this policy</h2>
             <p>
-              We&apos;ll notify you of material changes by email at least 30
-              days before they take effect.
+              Material changes will be published with an updated effective date.
             </p>
 
             <h2>Contact</h2>

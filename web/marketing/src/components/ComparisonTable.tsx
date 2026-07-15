@@ -21,6 +21,8 @@ const FEATURE_LABELS: Record<string, string> = {
 export default function ComparisonTable() {
   return (
     <div
+      tabIndex={0}
+      aria-label="Plan comparison table"
       style={{
         overflowX: "auto",
         background: "var(--bg-canvas)",

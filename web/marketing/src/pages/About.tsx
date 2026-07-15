@@ -4,6 +4,7 @@ import SEO from "../components/SEO";
 import Hero from "../components/Hero";
 import Section from "../components/Section";
 import Container from "../components/Container";
+import { PORTAL_SIGNUP } from "../lib/links";
 
 const PRINCIPLES = [
   {
@@ -14,7 +15,7 @@ const PRINCIPLES = [
   {
     title: "Open standards, not lock-in",
     body:
-      "We use IMAP, JMAP, SMTP, OpenAPI, and OAuth. Your data is yours; you can export it and walk away whenever you want. We'd rather earn your renewal than make leaving hard.",
+      "We use IMAP, JMAP, SMTP, and OpenAPI. Product behavior and supported export paths are documented rather than replaced with proprietary protocol claims.",
   },
   {
     title: "Honest numbers",
@@ -24,7 +25,7 @@ const PRINCIPLES = [
   {
     title: "Real security",
     body:
-      "TLS, DKIM, SPF, DMARC, MFA, audit log, and a coordinated-disclosure program that we actually run. The security page has the details and the PGP key.",
+      "TLS, DKIM, SPF, DMARC, MFA, audit logging, and responsible-disclosure contact information. The security page separates product controls from deployment responsibilities.",
   },
 ];
 
@@ -32,17 +33,17 @@ const TEAM_PLACEHOLDERS = [
   {
     role: "Engineering",
     body:
-      "Small, senior team. Everyone on the team has run a mail system in production before. We review code, write runbooks, and we know what 4am looks like.",
+      "Builds the mail runtime, administrative controls, customer portal, tests, and release tooling published with Orvix.",
   },
   {
     role: "Support",
     body:
-      "Support is staffed by people who have read the source. We answer in plain English and we tell you when we don't know.",
+      "Handles product and deployment questions through the contact channels published for each plan.",
   },
   {
     role: "Security",
     body:
-      "A security engineer on-call 24/7. Coordinated disclosure at security@orvix.com. The security page documents the process.",
+      "Security reports can be sent to security@orvix.com. The security page explains what information to include.",
   },
 ];
 
@@ -54,7 +55,7 @@ export default function About() {
       <Hero
         eyebrow="About"
         heading="Email is critical infrastructure. We treat it that way."
-        subheading="Orvix is professional email hosting for teams that need it to work. Custom domains, encrypted transport, and the admin controls a real team needs — without the surprise bills or the surprise outages."
+        subheading="Orvix is email infrastructure for custom domains, with mail protocols, transport security, webmail, and administrative controls in one release."
         primaryCta={{ to: "/contact", label: "Get in touch" }}
         secondaryCta={{ to: "/security", label: "Read the security overview" }}
       />
@@ -121,8 +122,8 @@ export default function About() {
 
       <Section
         eyebrow="The team"
-        heading="A small team with a long memory"
-        lede="Orvix is run by a small team that has run mail systems in production before. We don't pretend to be a household name; we pretend to be reliable."
+        heading="The work behind Orvix"
+        lede="The product combines mail runtime, operations, security controls, documentation, and release engineering."
       >
         <Container>
           <div
@@ -230,13 +231,13 @@ export default function About() {
               color: "var(--text-secondary)",
             }}
           >
-            Sign up for a free account, add a domain, and send your first
-            message in under five minutes.
+            Sign up for a free account and follow the documented domain and
+            DNS setup flow at your own deployment pace.
           </p>
           <p style={{ display: "flex", gap: "var(--sp-3)", justifyContent: "center", flexWrap: "wrap" }}>
-            <Link to="/signup" className="btn btn-primary btn-lg">
+            <a href={PORTAL_SIGNUP} className="btn btn-primary btn-lg">
               Start free
-            </Link>
+            </a>
             <Link to="/features" className="btn btn-secondary btn-lg">
               Tour the product
             </Link>

@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
 import SEO from "../components/SEO";
+import { PORTAL_SIGNUP } from "../lib/links";
 import Hero from "../components/Hero";
 import Section from "../components/Section";
 import Container from "../components/Container";
@@ -105,7 +106,7 @@ export default function BlogWelcome() {
 
             <h3>The things that are not negotiable</h3>
             <ul>
-              <li>Encrypted in transit and at rest, on every plan.</li>
+              <li>Transport security and deployment-controlled storage protection.</li>
               <li>DKIM, SPF, and DMARC set up correctly by default.</li>
               <li>MFA on every account, with optional enforcement.</li>
               <li>An audit log of every administrative action.</li>
@@ -114,20 +115,17 @@ export default function BlogWelcome() {
 
             <h2>What&apos;s next</h2>
             <p>
-              The roadmap is in the launch spec, but the short version is:
-              deeper analytics, JMAP for calendars, SCIM provisioning on
-              Enterprise, and the second region. We&apos;ll post here when each
-              one lands.
+              Future capabilities will be documented here only after they ship.
             </p>
 
             <h2>Try it</h2>
             <p>
               The fastest way to see what we built is to{" "}
-              <Link to="/signup" style={{ color: "var(--accent)" }}>
+              <a href={PORTAL_SIGNUP} style={{ color: "var(--accent)" }}>
                 sign up
-              </Link>
-              , add a domain, and send your first message. It takes about five
-              minutes. If you get stuck, the{" "}
+              </a>
+              , add a domain, and follow the DNS verification workflow. If you
+              get stuck, the{" "}
               <Link to="/docs" style={{ color: "var(--accent)" }}>
                 docs
               </Link>{" "}
@@ -146,12 +144,13 @@ export default function BlogWelcome() {
         </Container>
       </Section>
 
-      <Hero
-        heading="More from the blog"
-        subheading="Just this one post for now — we'll publish the next one when there's something real to say."
-        primaryCta={{ to: "/blog", label: "All posts" }}
-        secondaryCta={{ to: "/signup", label: "Try Orvix" }}
-      />
+      <Section bordered>
+        <Container width="narrow" style={{ textAlign: "center" }}>
+          <h2>More from the blog</h2>
+          <p style={{ marginTop: "var(--sp-3)", color: "var(--text-secondary)" }}>Just this one post for now. We will publish the next one when there is something real to say.</p>
+          <p style={{ marginTop: "var(--sp-4)", display: "flex", justifyContent: "center", gap: "var(--sp-3)" }}><Link to="/blog" className="btn btn-secondary">All posts</Link><a href={PORTAL_SIGNUP} className="btn btn-primary">Try Orvix</a></p>
+        </Container>
+      </Section>
     </>
   );
 }

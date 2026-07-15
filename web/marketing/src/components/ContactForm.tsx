@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Mail, Building, MessageSquare, CheckCircle2 } from "lucide-react";
-import { Link } from "react-router-dom";
+import { PORTAL_LOGIN } from "../lib/links";
 
 type Subject = "sales" | "support" | "security" | "press" | "other";
 
@@ -179,9 +179,9 @@ export default function ContactForm() {
           Or email us directly at{" "}
           <a href="mailto:hello@orvix.com">hello@orvix.com</a>. For account
           questions, please{" "}
-          <Link to="/login" style={{ color: "var(--accent)" }}>
+          <a href={PORTAL_LOGIN} style={{ color: "var(--accent)" }}>
             sign in
-          </Link>{" "}
+          </a>{" "}
           and use in-product support.
         </p>
       </div>
@@ -200,7 +200,7 @@ export function ContactSidebar() {
       <SidebarItem
         icon={Building}
         title="Sales"
-        body="Quotes, demos, and procurement questions. We respond within one business day."
+        body="Quotes, demos, and procurement questions."
         address="sales@orvix.com"
       />
       <SidebarItem
@@ -212,7 +212,7 @@ export function ContactSidebar() {
       <SidebarItem
         icon={Mail}
         title="Security disclosure"
-        body="Coordinated disclosure for vulnerabilities. PGP key on the security page."
+        body="Coordinated disclosure for reproducible vulnerabilities."
         address="security@orvix.com"
       />
     </aside>

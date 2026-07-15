@@ -111,7 +111,8 @@ function Frame({ children }: { children: React.ReactNode }) {
       viewBox="0 0 800 480"
       width="100%"
       height="100%"
-      role="img"
+      aria-hidden="true"
+      focusable="false"
       style={{ display: "block" }}
     >
       {children}
@@ -122,13 +123,7 @@ function Frame({ children }: { children: React.ReactNode }) {
 function WindowChrome({ title }: { title: string }) {
   return (
     <g>
-      <rect
-        x={0}
-        y={0}
-        width={800}
-        height={36}
-        fill={colors.bgApp}
-      />
+      <rect x={0} y={0} width={800} height={36} fill={colors.bgApp} />
       <circle cx={18} cy={18} r={5} fill={colors.danger} />
       <circle cx={36} cy={18} r={5} fill={colors.warning} />
       <circle cx={54} cy={18} r={5} fill={colors.success} />
@@ -214,7 +209,6 @@ function NavRow({
       )}
       <foreignObject x={x} y={y - 12} width={140} height={28}>
         <div
-          
           style={{
             display: "flex",
             alignItems: "center",
@@ -225,7 +219,9 @@ function NavRow({
             fontFamily: "sans-serif",
           }}
         >
-          {icon === "compose" && <Plus size={14} color={accent ? colors.accent : colors.textMuted} />}
+          {icon === "compose" && (
+            <Plus size={14} color={accent ? colors.accent : colors.textMuted} />
+          )}
           {icon === "inbox" && <Inbox size={14} />}
           {icon === "star" && <Star size={14} />}
           {icon === "send" && <Send size={14} />}
@@ -461,7 +457,6 @@ function ComposeScene() {
       </text>
       <foreignObject x={140} y={400} width={300} height={28}>
         <div
-          
           style={{
             display: "flex",
             alignItems: "center",
@@ -787,7 +782,16 @@ function Pill({
         : colors.danger;
   return (
     <g>
-      <rect x={x} y={y} width={80} height={26} rx={13} fill={colors.bgApp} stroke={color} strokeWidth={1} />
+      <rect
+        x={x}
+        y={y}
+        width={80}
+        height={26}
+        rx={13}
+        fill={colors.bgApp}
+        stroke={color}
+        strokeWidth={1}
+      />
       <circle cx={x + 14} cy={y + 13} r={4} fill={color} />
       <text
         x={x + 26}
@@ -905,11 +909,36 @@ function AdminQueueScene() {
         Queue
       </text>
       {[
-        { from: "alice@acme.example", to: "x@external.test", state: "delivered", code: "250" },
-        { from: "team@acme.example", to: "y@external.test", state: "deferred", code: "421" },
-        { from: "bob@acme.example", to: "z@external.test", state: "delivered", code: "250" },
-        { from: "news@acme.example", to: "list@external.test", state: "bounced", code: "550" },
-        { from: "carol@acme.example", to: "q@external.test", state: "delivered", code: "250" },
+        {
+          from: "alice@acme.example",
+          to: "x@external.test",
+          state: "delivered",
+          code: "250",
+        },
+        {
+          from: "team@acme.example",
+          to: "y@external.test",
+          state: "deferred",
+          code: "421",
+        },
+        {
+          from: "bob@acme.example",
+          to: "z@external.test",
+          state: "delivered",
+          code: "250",
+        },
+        {
+          from: "news@acme.example",
+          to: "list@external.test",
+          state: "bounced",
+          code: "550",
+        },
+        {
+          from: "carol@acme.example",
+          to: "q@external.test",
+          state: "delivered",
+          code: "250",
+        },
       ].map((row, i) => {
         const color =
           row.state === "delivered"
@@ -929,13 +958,7 @@ function AdminQueueScene() {
               stroke={colors.borderDefault}
               strokeWidth={1}
             />
-            <rect
-              x={32}
-              y={92 + i * 64}
-              width={4}
-              height={54}
-              fill={color}
-            />
+            <rect x={32} y={92 + i * 64} width={4} height={54} fill={color} />
             <text
               x={56}
               y={114 + i * 64}
@@ -998,14 +1021,14 @@ function ApiExplorerScene() {
         Endpoints
       </text>
       {[
-        "GET /v1/health",
-        "GET /v1/billing/plans",
-        "POST /v1/auth/login",
-        "GET /v1/me",
-        "GET /v1/me/mailboxes",
-        "POST /v1/me/messages",
-        "POST /v1/enterprise/domains",
-        "POST /v1/enterprise/mailboxes",
+        "GET /api/v1/health",
+        "GET /api/v1/billing/plans",
+        "POST /api/v1/auth/login",
+        "GET /api/v1/me",
+        "GET /api/v1/enterprise/domains",
+        "GET /api/v1/enterprise/mailboxes",
+        "POST /api/v1/enterprise/domains",
+        "POST /api/v1/enterprise/mailboxes",
       ].map((e, i) => (
         <text
           key={e}

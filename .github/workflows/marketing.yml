@@ -1,0 +1,89 @@
+name: Marketing Website
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/marketing.yml"
+      - "web/marketing/**"
+      - "release/marketing/**"
+      - "scripts/build-marketing-release.mjs"
+      - "internal/api/router.go"
+      - "internal/api/router_test.go"
+      - "internal/config/**"
+      - "release/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/marketing.yml"
+      - "web/marketing/**"
+      - "release/marketing/**"
+      - "scripts/build-marketing-release.mjs"
+      - "internal/api/router.go"
+      - "internal/api/router_test.go"
+      - "internal/config/**"
+      - "release/**"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Build, browser, accessibility, and release checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/marketing/package-lock.json
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install exact frontend dependencies
+        working-directory: web/marketing
+        run: npm ci
+      - name: Install Playwright Chromium
+        working-directory: web/marketing
+        run: npx playwright install --with-deps chromium
+      - name: Typecheck and unit tests
+        working-directory: web/marketing
+        run: npm run typecheck && npm test
+      - name: Build and validate route metadata
+        working-directory: web/marketing
+        run: npm run build
+      - name: Production browser and accessibility tests
+        working-directory: web/marketing
+        run: npm run test:e2e
+      - name: Dependency audit
+        working-directory: web/marketing
+        run: npm audit --omit=dev
+      - name: Deterministic production build
+        shell: bash
+        run: |
+          set -euo pipefail
+          find web/marketing/dist -type f -print0 | sort -z | xargs -0 sha256sum > /tmp/marketing-first.sha
+          rm -rf web/marketing/dist
+          npm --prefix web/marketing run build
+          find web/marketing/dist -type f -print0 | sort -z | xargs -0 sha256sum > /tmp/marketing-second.sha
+          diff -u /tmp/marketing-first.sha /tmp/marketing-second.sha
+      - name: Server route and installer tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n release/install.sh release/install-public.sh release/upgrade.sh release/uninstall.sh release/scripts/*.sh
+          go test ./internal/api -run TestMarketingSPADeepLinksAndExistingUISurvive -count=1
+          go test ./internal/config -count=1
+      - name: Archive browser diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: marketing-browser-diagnostics
+          path: |
+            web/marketing/playwright-report
+            web/marketing/test-results
+          if-no-files-found: ignore
+          retention-days: 7

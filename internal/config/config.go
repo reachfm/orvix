@@ -228,6 +228,7 @@ type ServerConfig struct {
 	TLSEmail       string        `mapstructure:"tls_email"`
 	AdminUIDir     string        `mapstructure:"admin_ui_dir"`
 	WebmailUIDir   string        `mapstructure:"webmail_ui_dir"`
+	MarketingUIDir string        `mapstructure:"marketing_ui_dir"`
 	AllowedOrigins []string      `mapstructure:"allowed_origins"`
 	TrustedProxies []string      `mapstructure:"trusted_proxies"`
 	// Hostname the operator points their DNS A record at for
@@ -428,6 +429,7 @@ func Defaults() *Config {
 			TLSCacheDir:    "/var/lib/orvix/cert-cache",
 			AdminUIDir:     "/usr/share/orvix/admin",
 			WebmailUIDir:   "/usr/share/orvix/webmail",
+			MarketingUIDir: "/usr/share/orvix/marketing",
 			AllowedOrigins: []string{},
 			TrustedProxies: []string{},
 		},

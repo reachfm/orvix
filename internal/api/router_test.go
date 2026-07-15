@@ -46,6 +46,66 @@ func TestCSPHeader(t *testing.T) {
 	}
 }
 
+func TestMarketingSPADeepLinksAndExistingUISurvive(t *testing.T) {
+	releaseDir, err := filepath.Abs(filepath.Join("..", "..", "release"))
+	if err != nil {
+		t.Fatalf("resolve release directory: %v", err)
+	}
+	adminDir := filepath.Join(releaseDir, "admin")
+	webmailDir := filepath.Join(releaseDir, "webmail")
+	marketingDir := filepath.Join(releaseDir, "marketing")
+	marketingAssets, err := filepath.Glob(filepath.Join(marketingDir, "marketing-assets", "*.js"))
+	if err != nil || len(marketingAssets) == 0 {
+		t.Fatalf("locate built marketing asset: matches=%d err=%v", len(marketingAssets), err)
+	}
+	marketingAssetURL := "/marketing-assets/" + filepath.Base(marketingAssets[0])
+
+	cfg := config.Defaults()
+	cfg.Server.AdminUIDir = adminDir
+	cfg.Server.WebmailUIDir = webmailDir
+	cfg.Server.MarketingUIDir = marketingDir
+	router := &Router{app: fiber.New(), cfg: cfg}
+	router.setupAdminUI()
+	t.Cleanup(func() {
+		if err := router.app.Shutdown(); err != nil {
+			t.Errorf("shutdown marketing test app: %v", err)
+		}
+	})
+
+	tests := []struct {
+		path   string
+		status int
+		want   string
+	}{
+		{path: "/", status: 200, want: `rel="canonical" href="https://orvix.com/"`},
+		{path: "/pricing", status: 200, want: `rel="canonical" href="https://orvix.com/pricing"`},
+		{path: "/pricing/", status: 200, want: `rel="canonical" href="https://orvix.com/pricing"`},
+		{path: marketingAssetURL, status: 200},
+		{path: "/robots.txt", status: 200, want: "Sitemap:"},
+		{path: "/admin", status: 200, want: "<title>Orvix Admin</title>"},
+		{path: "/webmail", status: 200, want: "<title>Orvix Webmail</title>"},
+		{path: "/assets/webmail.js", status: 200},
+		{path: "/not-a-real-marketing-route", status: 404, want: `name="robots" content="noindex,nofollow"`},
+		{path: "/api/v1/not-a-real-endpoint", status: 404, want: "api endpoint not found"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.path, func(t *testing.T) {
+			resp, err := router.app.Test(httptest.NewRequest("GET", tc.path, nil))
+			if err != nil {
+				t.Fatalf("GET %s: %v", tc.path, err)
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("read body: %v", err)
+			}
+			if resp.StatusCode != tc.status || len(body) == 0 || (tc.want != "" && !strings.Contains(string(body), tc.want)) {
+				t.Fatalf("GET %s: status=%d body=%q, want status=%d containing %q", tc.path, resp.StatusCode, body, tc.status, tc.want)
+			}
+		})
+	}
+}
+
 func TestMetricsEndpointIsNotPublic(t *testing.T) {
 	logger := zap.NewNop()
 	cfg := config.Defaults()

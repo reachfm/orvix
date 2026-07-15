@@ -74,7 +74,7 @@ export default function CookieBanner() {
           }}
         >
           We use a small set of strictly necessary and functional cookies to run
-          this site. Analytics is opt-in. See our{" "}
+          this site. No analytics SDK is included in this release. See our{" "}
           <Link to="/legal/cookies" style={{ color: "var(--accent)" }}>
             cookie policy
           </Link>

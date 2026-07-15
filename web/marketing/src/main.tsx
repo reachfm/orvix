@@ -1,7 +1,6 @@
 import React, { Suspense } from "react";
 import ReactDOM from "react-dom/client";
 import { BrowserRouter, Route, Routes, useLocation } from "react-router-dom";
-import { HelmetProvider } from "react-helmet-async";
 
 import "./styles/tokens.css";
 import "./styles/base.css";
@@ -16,8 +15,7 @@ import { PAGE_LOADERS } from "./lib/route-table";
 
 const App = () => {
   return (
-    <HelmetProvider>
-      <BrowserRouter>
+    <BrowserRouter>
         <ErrorBoundary>
           <a href="#main" className="skip-link">
             Skip to main content
@@ -40,8 +38,7 @@ const App = () => {
           <Footer />
           <CookieBanner />
         </ErrorBoundary>
-      </BrowserRouter>
-    </HelmetProvider>
+    </BrowserRouter>
   );
 };
 

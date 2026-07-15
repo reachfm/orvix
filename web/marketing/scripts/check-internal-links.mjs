@@ -34,23 +34,7 @@ const PUBLIC_PATHS = new Set([
   "/legal/data-and-privacy",
 ]);
 
-// Auth/onboarding routes that are served by the portal host
-// (app.orvix.com). The marketing site links to them.
-const PORTAL_PATHS = new Set([
-  "/login",
-  "/signup",
-  "/forgot",
-  "/reset",
-  "/changelog",
-]);
-
-// /docs/<slug> is allowed if <slug> is in DOC_PATHS or in
-// docs-index.ts (the marketing-site mirror). We accept any /docs/*
-// here and rely on the data file to gate the slugs.
-
-const PUBLIC_PREFIXES = ["/docs/"];
-
-const KNOWN = new Set([...PUBLIC_PATHS, ...PORTAL_PATHS]);
+const KNOWN = new Set(PUBLIC_PATHS);
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
@@ -91,9 +75,6 @@ async function walk(dir) {
         // Extract just the path part (ignore search/hash).
         const pathOnly = url.split(/[?#]/)[0];
         if (KNOWN.has(pathOnly)) {
-          continue;
-        }
-        if (PUBLIC_PREFIXES.some((p) => pathOnly.startsWith(p))) {
           continue;
         }
         failures.push({

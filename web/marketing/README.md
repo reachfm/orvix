@@ -11,7 +11,7 @@ it at `/` (apex).
 - **Vite 6** for the dev server and production build
 - **Tailwind v4** with the `@tailwindcss/vite` plugin
 - **react-router-dom 7** for client-side routing
-- **react-helmet-async** for per-page SEO
+- Route-specific prerendering for crawler-visible SEO metadata
 - **lucide-react** for icons
 - **vitest 4** + **@testing-library/react** for unit tests
 
@@ -42,7 +42,7 @@ web/marketing/
 │   ├── check-internal-links.mjs
 │   └── check-seo-tags.mjs
 ├── src/
-│   ├── main.tsx            # entry — BrowserRouter + HelmetProvider
+│   ├── main.tsx            # entry — BrowserRouter + route table
 │   ├── styles/             # design tokens, base, components, pages
 │   ├── lib/                # plans, seo, i18n, route-table, design-tokens
 │   ├── data/               # blog-posts, docs-index, features-matrix

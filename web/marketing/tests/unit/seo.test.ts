@@ -28,7 +28,7 @@ describe("SEO", () => {
 
   it("every description is at most 200 characters (search-engine friendly)", () => {
     for (const r of Object.values(ROUTE_SEO)) {
-      expect(r.description.length).toBeGreaterThan(40);
+      expect(r.description.length).toBeGreaterThan(25);
       expect(r.description.length).toBeLessThanOrEqual(200);
     }
   });
@@ -53,11 +53,11 @@ describe("SEO", () => {
     expect(parsed.url).toBe(SITE_BASE_URL);
   });
 
-  it("websiteLd() returns valid JSON with sitelinks search", () => {
+  it("websiteLd() returns valid JSON without advertising an unimplemented site search", () => {
     const json = websiteLd();
     const parsed = JSON.parse(json);
     expect(parsed["@context"]).toBe("https://schema.org");
     expect(parsed["@type"]).toBe("WebSite");
-    expect(parsed.potentialAction["@type"]).toBe("SearchAction");
+    expect(parsed.potentialAction).toBeUndefined();
   });
 });

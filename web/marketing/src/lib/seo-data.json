@@ -1,0 +1,24 @@
+{
+  "siteName": "Orvix",
+  "siteBaseUrl": "https://orvix.com",
+  "routes": {
+    "/": { "title": "Orvix — Email hosting for teams that need it to work", "description": "Professional email hosting with custom domains, encrypted transport, DKIM, MFA, and admin controls. Start free with up to 5 mailboxes on 1 domain." },
+    "/pricing": { "title": "Pricing — Orvix", "description": "Orvix plans start free and scale from $9.99 per month. Compare the real plan catalog, limits, and included capabilities." },
+    "/features": { "title": "Features — Orvix", "description": "Explore Orvix email hosting capabilities across the plan catalog, including custom domains, DKIM, MTA-STS, backups, MFA, and audit logs." },
+    "/enterprise": { "title": "Enterprise — Orvix", "description": "Orvix Enterprise supports up to 100 domains, 1,000 mailboxes, 1 TB storage, 100,000 sends per day, SSO, SLA, and priority support." },
+    "/security": { "title": "Security — Orvix", "description": "Review Orvix transport security, domain authentication, MFA, audit logging, backup controls, and responsible disclosure information." },
+    "/docs": { "title": "Documentation — Orvix", "description": "Find Orvix guides for setup, DNS, mailboxes, security, billing, and API use." },
+    "/api": { "title": "API — Orvix", "description": "Review the documented Orvix REST API surface for health, authentication, domains, and mailboxes." },
+    "/status": { "title": "Service status — Orvix", "description": "Check the current public Orvix health endpoint and find the incident contact path." },
+    "/about": { "title": "About — Orvix", "description": "Learn the product principles behind Orvix professional email hosting." },
+    "/contact": { "title": "Contact — Orvix", "description": "Contact Orvix sales, support, security, or press by email." },
+    "/blog": { "title": "Blog — Orvix", "description": "Product and engineering updates from Orvix." },
+    "/blog/welcome-to-orvix": { "title": "Welcome to Orvix — Orvix", "description": "An introduction to Orvix professional email hosting and its plan structure." },
+    "/legal": { "title": "Legal — Orvix", "description": "Orvix terms, privacy, acceptable use, cookies, and data information." },
+    "/legal/terms": { "title": "Terms of service — Orvix", "description": "Read the Orvix terms of service." },
+    "/legal/privacy": { "title": "Privacy policy — Orvix", "description": "Read the Orvix privacy policy and privacy contact path." },
+    "/legal/aup": { "title": "Acceptable use policy — Orvix", "description": "Read the Orvix acceptable use policy." },
+    "/legal/cookies": { "title": "Cookie policy — Orvix", "description": "Review the cookies and local storage used by the Orvix marketing site." },
+    "/legal/data-and-privacy": { "title": "Data and privacy — Orvix", "description": "Review current Orvix data handling information and privacy contacts." }
+  }
+}

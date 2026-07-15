@@ -33,12 +33,12 @@ const GROUPS = [
     description: "The interface for the people who send and receive.",
     icon: Inbox,
     capabilities: [
-      { icon: Inbox, title: "Folders and labels", body: "Standard inbox, sent, drafts, spam, trash, archive — plus labels for organization." },
+      { icon: Inbox, title: "Mail folders", body: "Inbox, sent, drafts, spam, trash, archive, and custom folders through the webmail interface." },
       { icon: Search, title: "Full-text search", body: "Search every message you have, by sender, subject, body, or attachment filename." },
-      { icon: CalendarIcon, title: "Calendar", body: "Day, week, month, and agenda views. Share calendars with your team." },
-      { icon: PenLine, title: "Compose", body: "Rich-text compose with attachments, mentions, and undo send." },
-      { icon: AtSign, title: "Contacts", body: "Auto-complete from your sent and received mail. Sync with CardDAV." },
-      { icon: Clock, title: "Snooze and send later", body: "Schedule a message to send at a specific time, or snooze it to your inbox." },
+      { icon: CalendarIcon, title: "Drafts", body: "Create, autosave, reopen, and send drafts from the webmail client." },
+      { icon: PenLine, title: "Compose", body: "Compose mail with attachments, signatures, reply, reply-all, and forward actions." },
+      { icon: AtSign, title: "Mailbox settings", body: "Configure display, signature, compose, and notification preferences exposed by webmail." },
+      { icon: Clock, title: "Mailbox automation", body: "Configure implemented filters, vacation replies, and forwarding behavior." },
     ],
   },
   {
@@ -50,7 +50,7 @@ const GROUPS = [
       { icon: Globe, title: "Domains and DNS", body: "Verify ownership, then publish the exact MX, SPF, DKIM, and DMARC records we give you." },
       { icon: Users, title: "Members and roles", body: "Owner, admin, operator, and member. Per-role permissions documented in the API." },
       { icon: AtSign, title: "Aliases and groups", body: "Forward addresses, catch-all, and distribution lists — all from the admin UI." },
-      { icon: Activity, title: "Audit log", body: "Every administrative action recorded with actor, target, timestamp, and IP." },
+      { icon: Activity, title: "Audit log", body: "Security-sensitive administrative operations are recorded with actor and target context." },
       { icon: FileText, title: "Usage and quotas", body: "Storage and sends per mailbox, per domain, per organization." },
     ],
   },
@@ -59,25 +59,25 @@ const GROUPS = [
     description: "The defaults that protect every account.",
     icon: ShieldCheck,
     capabilities: [
-      { icon: Lock, title: "Encrypted in transit", body: "TLS 1.2 minimum on every connection. Outbound uses opportunistic TLS by default." },
+      { icon: Lock, title: "Transport security", body: "HTTPS and secure mail protocols are configured by the deployment, with SMTP STARTTLS behavior visible to operators." },
       { icon: ShieldCheck, title: "DKIM, SPF, DMARC", body: "DKIM signing on every domain by default. SPF and DMARC are validated on every incoming message." },
       { icon: KeyRound, title: "Multi-factor auth", body: "TOTP for every account. Optional enforcement at the org level." },
-      { icon: Hash, title: "Encrypted at rest", body: "AES-256-GCM for mailbox storage and backups. Keys rotated on a documented schedule." },
-      { icon: Filter, title: "Spam and abuse filtering", body: "Reputation-based scoring plus per-org rules. Quarantine for reviewable messages." },
-      { icon: Activity, title: "Login protection", body: "Rate-limited login attempts. Suspicious logins trigger MFA challenge." },
+      { icon: Hash, title: "Deployment-controlled storage", body: "At-rest encryption and key rotation depend on the database, filesystem, backup, and key-management configuration selected by the operator." },
+      { icon: Filter, title: "Protocol access", body: "Administrative, webmail, JMAP, and mail-protocol access can be controlled independently." },
+      { icon: Activity, title: "Login protection", body: "Login rate limiting, lockout state, MFA challenges, and session controls are implemented." },
     ],
   },
   {
     name: "API",
-    description: "Everything you can do in the admin UI, in JSON.",
+    description: "Documented HTTP routes for customer and operator workflows.",
     icon: Code2,
     capabilities: [
-      { icon: Code2, title: "REST + bearer tokens", body: "JSON over HTTPS. Authenticate with a per-org API key." },
-      { icon: Webhook, title: "Webhooks", body: "Get notified when a message arrives, a mailbox is created, or a domain is verified." },
-      { icon: FileText, title: "OpenAPI 3.0", body: "A spec you can generate clients from. The docs page links to it." },
-      { icon: Layers, title: "Idempotent writes", body: "POST endpoints accept an Idempotency-Key header so retries are safe." },
-      { icon: Globe, title: "Open data formats", body: "Export mailboxes as mbox or EML. Import via the bulk-mailbox endpoint." },
-      { icon: Server, title: "Rate limits documented", body: "Per-key rate limits documented in the API reference. 429 responses include Retry-After." },
+      { icon: Code2, title: "JSON API", body: "Public health and plan routes plus authenticated customer, enterprise, and operator routes." },
+      { icon: Webhook, title: "Billing webhooks", body: "Payment webhook verification uses transmitted timestamps, replay controls, and provider-scoped idempotency." },
+      { icon: FileText, title: "OpenAPI 3.0", body: "The versioned OpenAPI document defines supported route contracts." },
+      { icon: Layers, title: "Tenant scope", body: "Protected enterprise operations derive tenant identity from authenticated context." },
+      { icon: Globe, title: "Mail standards", body: "SMTP, IMAP, POP3, JMAP, Autodiscover, and Autoconfig are implemented server interfaces." },
+      { icon: Server, title: "Rate limiting", body: "API and login paths are protected by the server's configured rate-limit middleware." },
     ],
   },
 ];
@@ -199,6 +199,8 @@ export default function Features() {
                 {group}
               </h3>
               <div
+                tabIndex={0}
+                aria-label={`${group} plan availability`}
                 style={{
                   overflowX: "auto",
                   background: "var(--bg-canvas)",

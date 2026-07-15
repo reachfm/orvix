@@ -11,7 +11,6 @@ const COLUMNS = [
       { to: "/security", label: "Security" },
       { to: "/pricing", label: "Pricing" },
       { to: "/status", label: "Status" },
-      { to: "/changelog", label: "Changelog" },
     ],
   },
   {

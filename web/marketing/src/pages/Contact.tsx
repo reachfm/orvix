@@ -3,6 +3,7 @@ import Hero from "../components/Hero";
 import Section from "../components/Section";
 import Container from "../components/Container";
 import ContactForm, { ContactSidebar } from "../components/ContactForm";
+import { PORTAL_LOGIN } from "../lib/links";
 
 export default function Contact() {
   return (
@@ -12,7 +13,7 @@ export default function Contact() {
       <Hero
         eyebrow="Contact"
         heading="Talk to the right team"
-        subheading="Use the form to compose your message — it'll open in your mail client pre-filled with the right address. Or email us directly. We respond within one business day."
+        subheading="Use the form to compose your message in your mail client, or email the appropriate address directly."
       />
 
       <Section>
@@ -52,7 +53,7 @@ export default function Contact() {
             }}
           >
             For account, billing, or product questions, please{" "}
-            <a href="/login" style={{ color: "var(--accent)" }}>
+            <a href={PORTAL_LOGIN} style={{ color: "var(--accent)" }}>
               sign in
             </a>{" "}
             and use in-product support. We can see your account, your plan, and

@@ -96,7 +96,7 @@ export default function LegalAup() {
               If you see something on Orvix that violates this policy, email{" "}
               <a href="mailto:abuse@orvix.com">abuse@orvix.com</a> with the
               message ID, the source address, and a description of the issue.
-              We respond within one business day.
+              Reports are reviewed through the abuse process.
             </p>
 
             <h2>Changes to this policy</h2>
