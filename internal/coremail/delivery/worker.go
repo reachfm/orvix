@@ -38,6 +38,10 @@ type DeliveryWorker struct {
 	Recovery     *WorkerCrashRecovery
 	Shutdown     *ShutdownManager
 
+	// OnBounceFn is called when a message permanently bounces.
+	// tenantID, mailboxID, queueID (used as event ID for idempotency).
+	OnBounceFn func(ctx context.Context, tenantID, mailboxID uint, eventID string)
+
 	// DKIM signing integration (optional).
 	DKIMSigner  *dkim.Signer
 	DKIMConfigs dkim.Repository
@@ -244,6 +248,13 @@ func (w *DeliveryWorker) deliver(ctx context.Context, entry *queue.QueueEntry) e
 		if !result.TempFail && attemptNumber < maxAllowed {
 			w.emitAudit(ctx, entry, EventBounced, result)
 			w.Metrics.RecordBounce()
+			if w.OnBounceFn != nil {
+				mbID := uint(0)
+				if entry.MailboxID != nil {
+					mbID = *entry.MailboxID
+				}
+				w.OnBounceFn(ctx, entry.TenantID, mbID, fmt.Sprintf("bounce:q:%d", entry.ID))
+			}
 			w.recordDeliveryEvent(ctx, entry, observability.EventQueueBounced, result)
 			// BounceWithDiagnostics stores the
 			// full remote SMTP response (status

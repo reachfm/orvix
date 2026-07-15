@@ -113,38 +113,32 @@ func (h *Handler) Signup(c fiber.Ctx) error {
 	}
 
 	var tenantID uint
-	row := sqlDB.QueryRow(fmt.Sprintf("SELECT id FROM tenants WHERE LOWER(domain) = %s OR LOWER(slug) = %s LIMIT 1", dial.Placeholder(1), dial.Placeholder(2)), domain, domain)
-	if err := row.Scan(&tenantID); err == sql.ErrNoRows {
-		slug := strings.NewReplacer(".", "-", "@", "-", " ", "-").Replace(strings.ToLower(tenantName))
-		now := time.Now().UTC()
-		if dial.IsPostgres() {
-			err = sqlDB.QueryRow(
-				fmt.Sprintf("INSERT INTO tenants (name, slug, domain, plan, max_domains, max_mailboxes, created_at, updated_at) VALUES (%s) RETURNING id", dial.Placeholders(8)),
-				tenantName, slug, domain, "smb", 10, 500, now, now,
-			).Scan(&tenantID)
-			if err != nil {
-				h.logger.Error("signup: create tenant", zap.Error(err))
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create account"})
-			}
-		} else {
-			res, err := sqlDB.Exec(
-				fmt.Sprintf("INSERT INTO tenants (name, slug, domain, plan, max_domains, max_mailboxes, created_at, updated_at) VALUES (%s)", dial.Placeholders(8)),
-				tenantName, slug, domain, "smb", 10, 500, now, now,
-			)
-			if err != nil {
-				h.logger.Error("signup: create tenant", zap.Error(err))
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create account"})
-			}
-			id, err := res.LastInsertId()
-			if err != nil {
-				h.logger.Error("signup: tenant last insert id", zap.Error(err))
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create account"})
-			}
-			tenantID = uint(id)
+	slug := strings.NewReplacer(".", "-", "@", "-", " ", "-").Replace(strings.ToLower(tenantName))
+	now := time.Now().UTC()
+	if dial.IsPostgres() {
+		err = sqlDB.QueryRow(
+			fmt.Sprintf("INSERT INTO tenants (name, slug, domain, plan, max_domains, max_mailboxes, created_at, updated_at) VALUES (%s) RETURNING id", dial.Placeholders(8)),
+			tenantName, slug, domain, "smb", 10, 500, now, now,
+		).Scan(&tenantID)
+		if err != nil {
+			h.logger.Error("signup: create tenant", zap.Error(err))
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create account"})
 		}
-	} else if err != nil {
-		h.logger.Error("signup: look up tenant", zap.Error(err))
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
+	} else {
+		res, err := sqlDB.Exec(
+			fmt.Sprintf("INSERT INTO tenants (name, slug, domain, plan, max_domains, max_mailboxes, created_at, updated_at) VALUES (%s)", dial.Placeholders(8)),
+			tenantName, slug, domain, "smb", 10, 500, now, now,
+		)
+		if err != nil {
+			h.logger.Error("signup: create tenant", zap.Error(err))
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create account"})
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			h.logger.Error("signup: tenant last insert id", zap.Error(err))
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create account"})
+		}
+		tenantID = uint(id)
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
@@ -154,7 +148,7 @@ func (h *Handler) Signup(c fiber.Ctx) error {
 	}
 
 	var userID uint
-	now := time.Now().UTC()
+	now = time.Now().UTC()
 	if dial.IsPostgres() {
 		err = sqlDB.QueryRow(
 			fmt.Sprintf("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (%s) RETURNING id", dial.Placeholders(8)),
@@ -259,7 +253,6 @@ func (h *Handler) ForgotPassword(c fiber.Ctx) error {
 	h.logger.Info("password reset token generated",
 		zap.String("email", email),
 		zap.Uint("user_id", userID),
-		zap.String("token", token),
 		zap.Time("expires_at", expiresAt))
 
 	return c.JSON(fiber.Map{"message": "if the email exists, a reset link has been sent"})

@@ -873,12 +873,19 @@ const moduleStopTimeout = 3 * time.Second
 // submission pipeline. Called by the router after billing services are
 // initialized. preFn checks AllowSend before DATA (returns error on rejection);
 // postFn calls RecordSend after successful acceptance (no error, best effort).
-func (m *Module) SetSendEnforcerCallback(preFn func(ctx context.Context, tenantID, mailboxID uint, count int) error, postFn func(ctx context.Context, tenantID, mailboxID uint, count int)) {
+// SetSendEnforcerCallback wires shared send enforcement into the SMTP
+// submission pipeline. Called by the router after billing services are
+// initialized. preFn checks AllowSend before DATA (returns error on rejection);
+// postFn calls RecordSend after successful acceptance (no error, best effort).
+func (m *Module) SetSendEnforcerCallback(preFn func(ctx context.Context, tenantID, mailboxID uint, count int) error, postFn func(ctx context.Context, tenantID, mailboxID uint, count int, eventID string), bounceFn func(ctx context.Context, tenantID, mailboxID uint, eventID string)) {
 	if m.submissionHandler != nil {
 		m.submissionHandler.SetSendEnforcer(preFn)
 	}
 	if m.submissionServer != nil {
 		m.submissionServer.PostAcceptFn = postFn
+	}
+	for _, w := range m.workers {
+		w.OnBounceFn = bounceFn
 	}
 }
 
