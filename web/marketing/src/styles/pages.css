@@ -1,0 +1,130 @@
+/* Page-level layout helpers. */
+
+.page {
+  min-height: calc(100vh - var(--nav-height));
+  display: flex;
+  flex-direction: column;
+}
+
+.page-hero {
+  padding: var(--sp-9) 0 var(--sp-7);
+  background: radial-gradient(
+      ellipse at top,
+      var(--accent-glow) 0%,
+      transparent 60%
+    ),
+    var(--bg-app);
+}
+
+.page-section {
+  padding: var(--sp-8) 0;
+}
+
+.page-section-tight {
+  padding: var(--sp-6) 0;
+}
+
+.page-section-alt {
+  background: var(--bg-canvas);
+}
+
+.eyebrow {
+  display: inline-block;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+  margin-bottom: var(--sp-3);
+}
+
+.lede {
+  font-size: var(--fs-lg);
+  color: var(--text-secondary);
+  max-width: 60ch;
+}
+
+.prose {
+  max-width: 70ch;
+  color: var(--text-secondary);
+  line-height: 1.7;
+}
+
+.prose h2 {
+  margin-top: var(--sp-7);
+  margin-bottom: var(--sp-3);
+  color: var(--text-primary);
+}
+
+.prose h3 {
+  margin-top: var(--sp-5);
+  margin-bottom: var(--sp-2);
+  color: var(--text-primary);
+}
+
+.prose p,
+.prose ul,
+.prose ol {
+  margin-bottom: var(--sp-4);
+}
+
+.prose ul,
+.prose ol {
+  padding-left: var(--sp-5);
+}
+
+.prose li {
+  margin-bottom: var(--sp-2);
+}
+
+.prose strong {
+  color: var(--text-primary);
+}
+
+.prose a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+}
+
+.prose blockquote {
+  border-left: 3px solid var(--accent);
+  padding-left: var(--sp-4);
+  color: var(--text-muted);
+  font-style: italic;
+  margin: var(--sp-5) 0;
+}
+
+.legal-doc h2 {
+  font-size: var(--fs-xl);
+  margin-top: var(--sp-6);
+  margin-bottom: var(--sp-2);
+  color: var(--text-primary);
+}
+
+.legal-doc h3 {
+  font-size: var(--fs-lg);
+  margin-top: var(--sp-5);
+  margin-bottom: var(--sp-2);
+  color: var(--text-primary);
+}
+
+.legal-doc p,
+.legal-doc li {
+  margin-bottom: var(--sp-3);
+  color: var(--text-secondary);
+}
+
+.legal-doc ul {
+  padding-left: var(--sp-5);
+}
+
+@media (max-width: 640px) {
+  .page-hero {
+    padding: var(--sp-7) 0 var(--sp-6);
+  }
+  .page-section {
+    padding: var(--sp-6) 0;
+  }
+}

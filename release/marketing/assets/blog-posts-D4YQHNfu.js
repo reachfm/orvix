@@ -1,0 +1,1 @@
+const o=[{slug:"welcome-to-orvix",title:"Welcome to Orvix",excerpt:"Orvix is professional email hosting with custom domains, encrypted transport, and the admin controls a real team needs. Here's what we shipped and what's next.",date:"2026-07-15",readingMinutes:4,author:"The Orvix team"}];function s(e){return o.find(t=>t.slug===e)}export{o as B,s as g};

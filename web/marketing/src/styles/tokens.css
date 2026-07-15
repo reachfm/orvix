@@ -1,0 +1,108 @@
+/* Orvix Marketing — Design tokens
+ * Matches the existing Orvix design system used by web/webmail
+ * and web/admin (see release/webmail/assets/webmail.css and
+ * release/admin/styles.css). All values here are the canonical
+ * marketing site tokens; components must consume these via CSS
+ * custom properties, never inline literals. */
+
+:root {
+  /* Surfaces */
+  --bg-app: #0C0E12;
+  --bg-canvas: #13161C;
+  --bg-surface: #1A1E26;
+  --bg-elevated: #222736;
+  --bg-raised: #2A2F3E;
+
+  /* Text */
+  --text-primary: #E8EAF0;
+  --text-secondary: #B5BCC9;
+  --text-muted: #8B92A8;
+  --text-faint: #555D73;
+
+  /* Borders */
+  --border-subtle: #1F2430;
+  --border-default: #2A2F3E;
+  --border-strong: #3A4154;
+
+  /* Brand */
+  --accent: #5b9eff;
+  --accent-strong: #7ab1ff;
+  --accent-soft: #2A4A7A;
+  --accent-glow: rgba(91, 158, 255, 0.18);
+
+  /* Semantic */
+  --success: #34D399;
+  --warning: #FBBF24;
+  --danger: #F87171;
+  --info: #60A5FA;
+
+  /* Spacing scale (8pt baseline) */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --sp-7: 48px;
+  --sp-8: 64px;
+  --sp-9: 96px;
+  --sp-10: 128px;
+
+  /* Radii */
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 20px;
+  --r-2xl: 28px;
+
+  /* Shadows */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 4px 12px rgba(0, 0, 0, 0.45);
+  --shadow-3: 0 16px 40px rgba(0, 0, 0, 0.55);
+  --shadow-accent: 0 8px 24px rgba(91, 158, 255, 0.25);
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --dur-1: 120ms;
+  --dur-2: 200ms;
+  --dur-3: 320ms;
+
+  /* Type scale */
+  --fs-xs: 12px;
+  --fs-sm: 14px;
+  --fs-base: 16px;
+  --fs-lg: 18px;
+  --fs-xl: 22px;
+  --fs-2xl: 28px;
+  --fs-3xl: 36px;
+  --fs-4xl: 48px;
+  --fs-5xl: 64px;
+
+  /* Layout */
+  --container-max: 1200px;
+  --container-narrow: 760px;
+  --nav-height: 64px;
+}
+
+/* Light theme is opt-in via data-theme="light" on <html> */
+:root[data-theme="light"] {
+  --bg-app: #FFFFFF;
+  --bg-canvas: #F7F8FA;
+  --bg-surface: #FFFFFF;
+  --bg-elevated: #F2F4F8;
+  --bg-raised: #E9ECF2;
+
+  --text-primary: #0C0E12;
+  --text-secondary: #3D4452;
+  --text-muted: #6B7385;
+  --text-faint: #9CA3B5;
+
+  --border-subtle: #E5E8EE;
+  --border-default: #D2D7E0;
+  --border-strong: #B5BCC9;
+
+  --accent: #2563EB;
+  --accent-strong: #1D4ED8;
+  --accent-soft: #DBE6FF;
+  --accent-glow: rgba(37, 99, 235, 0.12);
+}
