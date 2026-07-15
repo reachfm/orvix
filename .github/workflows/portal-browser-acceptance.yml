@@ -1,4 +1,4 @@
-name: Portal Browser Acceptance
+name: Portal Component Tests (Vitest)
 
 on:
   pull_request:
@@ -41,6 +41,3 @@ jobs:
       - name: Run App shell tests
         run: npx vitest run --reporter verbose src/App.test.tsx
         working-directory: web/admin
-
-      - name: Summary
-        run: echo "PORTAL_BROWSER_ACCEPTANCE=PASS" >> "$GITHUB_ENV"
