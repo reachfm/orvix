@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
 	"errors"
@@ -95,6 +96,9 @@ func (s *Service) AcceptOwnershipTransfer(ctx context.Context, rawToken string, 
 	tokenHash := hashTransferToken(rawToken)
 	t, err := s.repo.GetOwnershipTransferByHash(ctx, tokenHash)
 	if err != nil || t == nil {
+		return ErrTransferNotFound
+	}
+	if subtle.ConstantTimeCompare([]byte(t.TokenHash), []byte(tokenHash)) != 1 {
 		return ErrTransferNotFound
 	}
 	if t.Status == TransferAccepted {

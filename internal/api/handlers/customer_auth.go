@@ -3,6 +3,7 @@ package handlers
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
 	"fmt"
@@ -291,17 +292,22 @@ func (h *Handler) ResetPassword(c fiber.Ctx) error {
 		resetID   int64
 		userID    uint
 		expiresAt time.Time
+		dbHash    string
 	)
 	row := sqlDB.QueryRow(
-		fmt.Sprintf("SELECT id, user_id, expires_at FROM password_reset_tokens WHERE token_hash = %s AND used_at IS NULL", dial.Placeholder(1)),
+		fmt.Sprintf("SELECT id, user_id, token_hash, expires_at FROM password_reset_tokens WHERE token_hash = %s AND used_at IS NULL", dial.Placeholder(1)),
 		tokenHash,
 	)
-	if err := row.Scan(&resetID, &userID, &expiresAt); err != nil {
+	if err := row.Scan(&resetID, &userID, &dbHash, &expiresAt); err != nil {
 		if err == sql.ErrNoRows {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid or expired token"})
 		}
 		h.logger.Error("reset password: query token", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
+	}
+
+	if subtle.ConstantTimeCompare([]byte(dbHash), []byte(tokenHash)) != 1 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid or expired token"})
 	}
 
 	if time.Now().UTC().After(expiresAt) {
