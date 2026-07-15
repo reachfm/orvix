@@ -692,25 +692,6 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		})
 	}
 
-	// Pre-flight subscription status check only. The real quota
-	// gate (with actual recipient count) runs after parsing below.
-	if h.sendEnforcer != nil {
-		id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
-		if result := h.sendEnforcer.AllowSend(c.Context(), id, 1); !result.Allowed {
-			if result.Reason == "quota lookup failed" || result.Reason == "no active subscription" ||
-				result.Reason == "invalid tenant" || result.Reason == "invalid recipient count" {
-				return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "cannot determine quota"})
-			}
-			if strings.HasPrefix(result.Reason, "subscription is ") && !strings.Contains(result.Reason, "active") {
-				return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
-					"error": "send rejected: " + result.Reason, "limit": result.Limit, "remaining": result.Remaining,
-				})
-			}
-			// Non-suspension denials (quota-related at count=1) pass through
-			// to the real gate below.
-		}
-	}
-
 	var req struct {
 		To      string
 		Cc      string
@@ -802,18 +783,41 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 	allRecipients = unique
 
 	// Real quota gate: number of unique, valid recipients.
+	// This reserves quota atomically before storage/queue side
+	// effects, then reconciles the reservation to the actual
+	// successful enqueue count below.
 	intendedRecipientCount := len(allRecipients)
+	var reservedSend *billing.SendReservationResult
 	if h.sendEnforcer != nil {
 		id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
-		if result := h.sendEnforcer.AllowSend(c.Context(), id, intendedRecipientCount); !result.Allowed {
+		result, err := h.sendEnforcer.ReserveSend(c.Context(), id, messageID, intendedRecipientCount)
+		if err != nil {
+			h.logger.Error("webmail send quota reservation failed",
+				zap.String("message_id", messageID),
+				zap.Error(err))
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "cannot determine quota"})
+		}
+		if !result.Allowed {
 			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
 				"error": "send rejected: " + result.Reason, "limit": result.Limit, "remaining": result.Remaining,
 			})
+		}
+		reservedSend = result
+	}
+	cancelReservation := func() {
+		if h.sendEnforcer != nil && reservedSend != nil {
+			id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
+			if err := h.sendEnforcer.CancelSendReservation(c.Context(), id, messageID); err != nil {
+				h.logger.Error("webmail send quota reservation release failed",
+					zap.String("message_id", messageID),
+					zap.Error(err))
+			}
 		}
 	}
 
 	sentFolder, err := resolveFolderCaseInsensitive(c.Context(), ctx.MailboxStore, ctx.Mailbox.ID, "Sent")
 	if err != nil || sentFolder == nil {
+		cancelReservation()
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "Sent folder not found for mailbox; ensure system folders are provisioned",
 		})
@@ -838,6 +842,7 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 	}
 
 	if err := ctx.MailboxStore.StoreMessage(c.Context(), msg, rfc822, nil); err != nil {
+		cancelReservation()
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": fmt.Sprintf("store message: %v", err),
 		})
@@ -851,6 +856,7 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 	// the user's mail.
 	qe, ok := h.queueEngineForUser()
 	if !ok {
+		cancelReservation()
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
 			"error":      "queue engine not available",
 			"message_id": msg.MessageID,
@@ -939,7 +945,30 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 	// Must run even on partial enqueue to account for successfully enqueued recipients.
 	if h.sendEnforcer != nil && queuedCount > 0 {
 		id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
-		h.sendEnforcer.RecordSend(c.Context(), id, msg.MessageID, queuedCount)
+		if reservedSend != nil {
+			if err := h.sendEnforcer.FinalizeSendReservation(c.Context(), id, msg.MessageID, queuedCount); err != nil {
+				h.logger.Error("webmail send quota reservation finalize failed",
+					zap.String("message_id", msg.MessageID),
+					zap.Int("queued_count", queuedCount),
+					zap.Error(err))
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+					"error":      "failed to finalize send accounting",
+					"id":         msg.ID,
+					"message_id": msg.MessageID,
+					"folder":     sentFolder.Path,
+					"status":     "stored",
+				})
+			}
+		} else {
+			h.sendEnforcer.RecordSend(c.Context(), id, msg.MessageID, queuedCount)
+		}
+	} else if h.sendEnforcer != nil && reservedSend != nil {
+		id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
+		if err := h.sendEnforcer.CancelSendReservation(c.Context(), id, msg.MessageID); err != nil {
+			h.logger.Error("webmail send empty quota reservation release failed",
+				zap.String("message_id", msg.MessageID),
+				zap.Error(err))
+		}
 	}
 
 	if len(enqueueErrors) > 0 {

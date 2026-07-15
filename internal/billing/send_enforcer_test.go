@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 type sendEnforcerTestEnv struct {
@@ -136,6 +139,144 @@ func TestSendEnforcerIgnoresInvalidIdempotencyInputs(t *testing.T) {
 	assertScalarInt64(t, env.db, "SELECT COALESCE(SUM(bounce_count), 0) FROM abuse_bounce_counts WHERE tenant_id = 1", 0)
 }
 
+func TestSendEnforcerReserveConcurrentOneRemainingQuota(t *testing.T) {
+	env := newSendEnforcerTestEnv(t)
+	mustSetSendLimit(t, env.db, 1, 1)
+
+	var mu sync.Mutex
+	allowed := 0
+	var seq int64
+	runConcurrent(t, 2, func() error {
+		eventID := fmt.Sprintf("evt-reserve-one-%d", atomic.AddInt64(&seq, 1))
+		res, err := env.enforcer.ReserveSend(context.Background(), env.id, eventID, 1)
+		if err != nil {
+			return err
+		}
+		if res.Allowed {
+			mu.Lock()
+			allowed++
+			mu.Unlock()
+		}
+		return nil
+	})
+
+	if allowed != 1 {
+		t.Fatalf("exactly one concurrent one-recipient reservation should win, got %d", allowed)
+	}
+	assertEventCount(t, env.db, "reservation", 1)
+	assertEventRecipientTotal(t, env.db, "reservation", 1)
+}
+
+func TestSendEnforcerReserveConcurrentMultiRecipientCannotExceedQuota(t *testing.T) {
+	env := newSendEnforcerTestEnv(t)
+	mustSetSendLimit(t, env.db, 1, 3)
+
+	var mu sync.Mutex
+	allowed := 0
+	var seq int64
+	runConcurrent(t, 2, func() error {
+		eventID := fmt.Sprintf("evt-reserve-multi-%d", atomic.AddInt64(&seq, 1))
+		res, err := env.enforcer.ReserveSend(context.Background(), env.id, eventID, 2)
+		if err != nil {
+			return err
+		}
+		if res.Allowed {
+			mu.Lock()
+			allowed++
+			mu.Unlock()
+		}
+		return nil
+	})
+
+	if allowed != 1 {
+		t.Fatalf("only one two-recipient reservation should fit limit=3, got %d", allowed)
+	}
+	assertEventCount(t, env.db, "reservation", 1)
+	assertEventRecipientTotal(t, env.db, "reservation", 2)
+}
+
+func TestSendEnforcerCancelReservationReleasesQuota(t *testing.T) {
+	env := newSendEnforcerTestEnv(t)
+	mustSetSendLimit(t, env.db, 1, 2)
+
+	res, err := env.enforcer.ReserveSend(context.Background(), env.id, "evt-release", 2)
+	if err != nil || !res.Allowed {
+		t.Fatalf("reserve: %+v err=%v", res, err)
+	}
+	if err := env.enforcer.CancelSendReservation(context.Background(), env.id, "evt-release"); err != nil {
+		t.Fatalf("cancel reservation: %v", err)
+	}
+	assertScalarInt64(t, env.db, "SELECT COUNT(*) FROM send_events", 0)
+
+	res, err = env.enforcer.ReserveSend(context.Background(), env.id, "evt-after-release", 2)
+	if err != nil || !res.Allowed {
+		t.Fatalf("reserve after release should fit full quota: %+v err=%v", res, err)
+	}
+}
+
+func TestSendEnforcerFinalizeReservationPartialReconcilesCounters(t *testing.T) {
+	env := newSendEnforcerTestEnv(t)
+	mustSetSendLimit(t, env.db, 1, 5)
+
+	res, err := env.enforcer.ReserveSend(context.Background(), env.id, "evt-partial", 5)
+	if err != nil || !res.Allowed {
+		t.Fatalf("reserve: %+v err=%v", res, err)
+	}
+	if err := env.enforcer.FinalizeSendReservation(context.Background(), env.id, "evt-partial", 2); err != nil {
+		t.Fatalf("finalize partial: %v", err)
+	}
+
+	assertEventCount(t, env.db, "reservation", 0)
+	assertEventCount(t, env.db, "send", 1)
+	assertEventRecipientTotal(t, env.db, "send", 2)
+	assertScalarInt64(t, env.db, "SELECT COALESCE(SUM(emails_sent), 0) FROM abuse_send_counts WHERE tenant_id = 1", 2)
+	assertScalarInt64(t, env.db, "SELECT COALESCE(SUM(emails_sent), 0) FROM usage_records WHERE tenant_id = 1", 2)
+}
+
+func TestSendEnforcerDuplicateReservationAndFinalizeIdempotent(t *testing.T) {
+	env := newSendEnforcerTestEnv(t)
+	mustSetSendLimit(t, env.db, 1, 5)
+
+	for i := 0; i < 2; i++ {
+		res, err := env.enforcer.ReserveSend(context.Background(), env.id, "evt-retry", 3)
+		if err != nil || !res.Allowed {
+			t.Fatalf("reserve attempt %d: %+v err=%v", i+1, res, err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if err := env.enforcer.FinalizeSendReservation(context.Background(), env.id, "evt-retry", 3); err != nil {
+			t.Fatalf("finalize attempt %d: %v", i+1, err)
+		}
+	}
+
+	assertEventCount(t, env.db, "send", 1)
+	assertEventRecipientTotal(t, env.db, "send", 3)
+	assertScalarInt64(t, env.db, "SELECT COALESCE(SUM(emails_sent), 0) FROM abuse_send_counts WHERE tenant_id = 1", 3)
+	assertScalarInt64(t, env.db, "SELECT COALESCE(SUM(emails_sent), 0) FROM usage_records WHERE tenant_id = 1", 3)
+}
+
+func TestSendEnforcerReserveTenantCountersRemainIsolated(t *testing.T) {
+	env := newSendEnforcerTestEnv(t)
+	svc := NewService(env.db)
+	if _, err := svc.CreateSubscription(2, PlanFree, IntervalMonthly, 0); err != nil {
+		t.Fatalf("create second tenant subscription: %v", err)
+	}
+	mustSetSendLimit(t, env.db, 1, 1)
+	mustSetSendLimit(t, env.db, 2, 1)
+
+	res1, err := env.enforcer.ReserveSend(context.Background(), env.id, "evt-tenant-1", 1)
+	if err != nil || !res1.Allowed {
+		t.Fatalf("tenant 1 reserve: %+v err=%v", res1, err)
+	}
+	id2 := SendIdentity{TenantID: 2, MailboxID: 8}
+	res2, err := env.enforcer.ReserveSend(context.Background(), id2, "evt-tenant-2", 1)
+	if err != nil || !res2.Allowed {
+		t.Fatalf("tenant 2 reserve: %+v err=%v", res2, err)
+	}
+	assertScalarInt64(t, env.db, "SELECT COALESCE(SUM(recipient_count), 0) FROM send_events WHERE tenant_id = 1", 1)
+	assertScalarInt64(t, env.db, "SELECT COALESCE(SUM(recipient_count), 0) FROM send_events WHERE tenant_id = 2", 1)
+}
+
 func runConcurrent(t *testing.T, n int, fn func() error) {
 	t.Helper()
 	var wg sync.WaitGroup
@@ -153,6 +294,17 @@ func runConcurrent(t *testing.T, n int, fn func() error) {
 		if err != nil {
 			t.Fatalf("concurrent operation failed: %v", err)
 		}
+	}
+}
+
+func mustSetSendLimit(t *testing.T, db *sql.DB, tenantID uint, limit int) {
+	t.Helper()
+	dial, err := dbdialect.Detect(db)
+	if err != nil {
+		dial = dbdialect.FromDriver("sqlite")
+	}
+	if _, err := db.Exec("UPDATE subscriptions SET send_limit_day = "+dial.Placeholder(1)+" WHERE tenant_id = "+dial.Placeholder(2), limit, tenantID); err != nil {
+		t.Fatalf("set send limit: %v", err)
 	}
 }
 

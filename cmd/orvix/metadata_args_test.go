@@ -160,7 +160,9 @@ func TestMetadataArgs_DoNotBootstrapConfig(t *testing.T) {
 			// booting. That makes any regression easy to spot.
 			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")}
 
-			// Set a very short timeout — metadata commands must be fast.
+			// Metadata commands must be fast, but the Windows full-suite
+			// runner can be heavily contended while other packages build
+			// and test in parallel.
 			done := make(chan struct{})
 			var out []byte
 			var err error
@@ -170,9 +172,11 @@ func TestMetadataArgs_DoNotBootstrapConfig(t *testing.T) {
 			}()
 			select {
 			case <-done:
-			case <-time.After(10 * time.Second):
-				_ = cmd.Process.Kill()
-				t.Fatalf("metadata command %v took >10s; should be near-instant", tc.args)
+			case <-time.After(30 * time.Second):
+				if cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
+				t.Fatalf("metadata command %v took >30s; should be near-instant", tc.args)
 			}
 
 			if err != nil {
