@@ -105,7 +105,7 @@ jobs:
           echo "expected path: ${PSQL}"
 
           # 3. pg_dump major MUST match the service container major
-          dump_version="$("${PG_DUMP}" --version | grep -oP 'PostgreSQL \K[0-9]+')"
+          dump_version="$("${PG_DUMP}" --version | grep -oE '[0-9]+' | head -1)"
           if [ "${dump_version}" != "${PG_MAJOR}" ]; then
             echo "ERROR: pg_dump major ${dump_version} != expected ${PG_MAJOR}." >&2
             echo "Client/server version mismatch will break backup/restore tests." >&2
@@ -113,7 +113,7 @@ jobs:
           fi
 
           # 4. pg_restore major MUST match
-          restore_version="$("${PG_RESTORE}" --version | grep -oP 'PostgreSQL \K[0-9]+')"
+          restore_version="$("${PG_RESTORE}" --version | grep -oE '[0-9]+' | head -1)"
           if [ "${restore_version}" != "${PG_MAJOR}" ]; then
             echo "ERROR: pg_restore major ${restore_version} != expected ${PG_MAJOR}." >&2
             exit 1
