@@ -20,7 +20,11 @@ func (h *Handler) ReceiveComplaintWebhook(c fiber.Ctx) error {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "abuse service not configured"})
 	}
 
-	signature := c.Get("X-Payment-Signature")
+	timestamp := c.Get(paymentTimestampHeader)
+	if timestamp == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "missing timestamp"})
+	}
+	signature := c.Get(paymentSignatureHeader)
 	if signature == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "missing signature"})
 	}
@@ -30,7 +34,7 @@ func (h *Handler) ReceiveComplaintWebhook(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid payload"})
 	}
 
-	event, err := h.paymentProvider.VerifyWebhook(rawPayload, signature)
+	event, err := h.paymentProvider.VerifyWebhook(rawPayload, timestamp, signature)
 	if err != nil {
 		h.logger.Warn("complaint verification failed", zap.Error(err))
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "verification failed"})

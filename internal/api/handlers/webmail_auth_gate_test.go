@@ -389,7 +389,10 @@ func TestAdminUIUnaffectedByWebmailGate(t *testing.T) {
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Logf("node not available; skipping node --check for admin/app.js")
 	} else {
-		out, err := exec.Command("node", "--check", filepath.Join(root, "release/admin/app.js")).CombinedOutput()
+		adminApp := readFile(t, root, "release/admin/app.js")
+		cmd := exec.Command("node", "--input-type=module", "--check", "-")
+		cmd.Stdin = strings.NewReader(adminApp)
+		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("node --check release/admin/app.js failed: %v\n%s", err, string(out))
 		}

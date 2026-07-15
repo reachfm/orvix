@@ -261,6 +261,7 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 				router.cfg.Payment.Secret,
 				router.cfg.Payment.WebhookSecret,
 				router.cfg.Payment.Enabled,
+				time.Duration(router.cfg.Payment.WebhookToleranceSeconds)*time.Second,
 			); err != nil {
 				logger.Error("payment provider init failed", zap.Error(err))
 			} else if provider != nil {

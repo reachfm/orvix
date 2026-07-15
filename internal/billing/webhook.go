@@ -17,7 +17,6 @@ import (
 var (
 	ErrWebhookAlreadyProcessed = errors.New("webhook event already processed")
 	ErrWebhookSignatureInvalid = errors.New("webhook signature is invalid")
-	ErrWebhookTimestampExpired = errors.New("webhook timestamp is outside tolerance window")
 )
 
 type WebhookEventRecord struct {
@@ -81,18 +80,30 @@ func (s *WebhookService) RecordEvent(ctx context.Context, rec *WebhookEventRecor
 	rec.ProcessedAt = nil
 	rec.ProcessingError = ""
 
-	var existing string
-	err := s.db.QueryRowContext(ctx, "SELECT id FROM webhook_events WHERE idempotency_key = "+s.dialect.Placeholder(1), rec.IdempotencyKey).Scan(&existing)
-	if err == nil {
+	var result sql.Result
+	var err error
+	if s.dialect.IsPostgres() {
+		result, err = s.db.ExecContext(ctx,
+			`INSERT INTO webhook_events (id, provider, event_type, provider_sub_id, raw_payload, signature,
+			received_at, idempotency_key, created_at)
+			VALUES (`+s.dialect.Placeholders(9)+`) ON CONFLICT (idempotency_key) DO NOTHING`,
+			rec.ID, rec.Provider, rec.EventType, rec.ProviderSubID, rec.RawPayload, rec.Signature,
+			rec.ReceivedAt, rec.IdempotencyKey, time.Now().UTC())
+	} else {
+		result, err = s.db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO webhook_events (id, provider, event_type, provider_sub_id, raw_payload, signature,
+			received_at, idempotency_key, created_at)
+			VALUES (`+s.dialect.Placeholders(9)+`)`,
+			rec.ID, rec.Provider, rec.EventType, rec.ProviderSubID, rec.RawPayload, rec.Signature,
+			rec.ReceivedAt, rec.IdempotencyKey, time.Now().UTC())
+	}
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
 		return ErrWebhookAlreadyProcessed
 	}
-	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO webhook_events (id, provider, event_type, provider_sub_id, raw_payload, signature,
-		received_at, idempotency_key, created_at)
-		VALUES (`+s.dialect.Placeholders(9)+`)`,
-		rec.ID, rec.Provider, rec.EventType, rec.ProviderSubID, rec.RawPayload, rec.Signature,
-		rec.ReceivedAt, rec.IdempotencyKey, time.Now().UTC())
-	return err
+	return nil
 }
 
 func (s *WebhookService) MarkProcessed(ctx context.Context, eventID string, processingErr error) error {

@@ -6,13 +6,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 )
+
+const DefaultWebhookTolerance = 5 * time.Minute
 
 // NewPaymentProviderFromConfig creates a PaymentProvider from configuration.
 // When the provider is not enabled or not configured, nil is returned and
 // webhook/complaint endpoints return 503 (service unavailable).
-func NewPaymentProviderFromConfig(providerName, secret, webhookSecret string, enabled bool) (PaymentProvider, error) {
+func NewPaymentProviderFromConfig(providerName, secret, webhookSecret string, enabled bool, tolerance time.Duration) (PaymentProvider, error) {
 	if !enabled || providerName == "" {
 		return nil, nil
 	}
@@ -20,7 +24,7 @@ func NewPaymentProviderFromConfig(providerName, secret, webhookSecret string, en
 	case "stripe":
 		return nil, fmt.Errorf("stripe provider not yet implemented")
 	case "hmac":
-		return newHMACPaymentProvider(secret, webhookSecret), nil
+		return newHMACPaymentProvider(secret, webhookSecret, tolerance), nil
 	default:
 		return nil, fmt.Errorf("unsupported payment provider: %s", providerName)
 	}
@@ -35,10 +39,20 @@ func NewPaymentProviderFromConfig(providerName, secret, webhookSecret string, en
 type hmacPaymentProvider struct {
 	secret        string
 	webhookSecret string
+	tolerance     time.Duration
+	now           func() time.Time
 }
 
-func newHMACPaymentProvider(secret, webhookSecret string) *hmacPaymentProvider {
-	return &hmacPaymentProvider{secret: secret, webhookSecret: webhookSecret}
+func newHMACPaymentProvider(secret, webhookSecret string, tolerance time.Duration) *hmacPaymentProvider {
+	if tolerance <= 0 {
+		tolerance = DefaultWebhookTolerance
+	}
+	return &hmacPaymentProvider{
+		secret:        secret,
+		webhookSecret: webhookSecret,
+		tolerance:     tolerance,
+		now:           time.Now,
+	}
 }
 
 func (p *hmacPaymentProvider) CreateCheckout(tenantID uint, planID PlanID, interval BillingInterval, returnURL string) (*CheckoutSession, error) {
@@ -49,16 +63,36 @@ func (p *hmacPaymentProvider) GetCustomerPortalURL(tenantID uint, returnURL stri
 	return "", fmt.Errorf("payment provider: portal not available")
 }
 
-func (p *hmacPaymentProvider) VerifyWebhook(payload []byte, signature string) (*WebhookEvent, error) {
-	if p.webhookSecret == "" || signature == "" {
+func (p *hmacPaymentProvider) VerifyWebhook(payload []byte, timestamp, signature string) (*WebhookEvent, error) {
+	timestamp = strings.TrimSpace(timestamp)
+	signature = strings.TrimSpace(signature)
+	if p.webhookSecret == "" || timestamp == "" || signature == "" {
 		return nil, ErrWebhookInvalid
 	}
-	ts := fmt.Sprintf("%d", time.Now().Unix())
-	signedPayload := fmt.Sprintf("%s.%s", ts, string(payload))
+	ts, err := strconv.ParseInt(timestamp, 10, 64)
+	if err != nil || ts <= 0 || strconv.FormatInt(ts, 10) != timestamp {
+		return nil, ErrWebhookTimestampMalformed
+	}
+	now := p.now
+	if now == nil {
+		now = time.Now
+	}
+	age := now().Unix() - ts
+	if age < 0 {
+		age = -age
+	}
+	if time.Duration(age)*time.Second > p.tolerance {
+		return nil, ErrWebhookTimestampExpired
+	}
+	signedPayload := fmt.Sprintf("%s.%s", timestamp, string(payload))
 	mac := hmac.New(sha256.New, []byte(p.webhookSecret))
 	mac.Write([]byte(signedPayload))
-	expectedSig := hex.EncodeToString(mac.Sum(nil))
-	if !hmac.Equal([]byte(signature), []byte(expectedSig)) {
+	gotSig, err := hex.DecodeString(signature)
+	if err != nil || len(gotSig) != sha256.Size {
+		return nil, ErrWebhookInvalid
+	}
+	expectedSig := mac.Sum(nil)
+	if !hmac.Equal(gotSig, expectedSig) {
 		return nil, ErrWebhookInvalid
 	}
 	var raw struct {

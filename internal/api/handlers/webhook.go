@@ -10,13 +10,19 @@ import (
 )
 
 const maxWebhookPayloadBytes = 1 << 20 // 1 MB
+const paymentTimestampHeader = "X-Payment-Timestamp"
+const paymentSignatureHeader = "X-Payment-Signature"
 
 func (h *Handler) ReceivePaymentWebhook(c fiber.Ctx) error {
 	if h.billingWebhook == nil || h.paymentProvider == nil {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "payment processing not configured"})
 	}
 
-	signature := c.Get("X-Payment-Signature")
+	timestamp := c.Get(paymentTimestampHeader)
+	if timestamp == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "missing payment timestamp"})
+	}
+	signature := c.Get(paymentSignatureHeader)
 	if signature == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "missing payment signature"})
 	}
@@ -29,10 +35,10 @@ func (h *Handler) ReceivePaymentWebhook(c fiber.Ctx) error {
 		return c.Status(fiber.StatusRequestEntityTooLarge).JSON(fiber.Map{"error": "payload too large"})
 	}
 
-	event, err := h.paymentProvider.VerifyWebhook(rawPayload, signature)
+	event, err := h.paymentProvider.VerifyWebhook(rawPayload, timestamp, signature)
 	if err != nil {
 		h.logger.Warn("webhook verification failed", zap.Error(err))
-		if errors.Is(err, billing.ErrWebhookInvalid) || errors.Is(err, billing.ErrNoProviderConfigured) {
+		if errors.Is(err, billing.ErrWebhookInvalid) || errors.Is(err, billing.ErrWebhookSignatureInvalid) || errors.Is(err, billing.ErrWebhookTimestampMalformed) || errors.Is(err, billing.ErrWebhookTimestampExpired) || errors.Is(err, billing.ErrNoProviderConfigured) {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid signature"})
 		}
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "webhook verification failed"})

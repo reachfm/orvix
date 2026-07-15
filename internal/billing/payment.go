@@ -3,14 +3,16 @@ package billing
 import "errors"
 
 var (
-	ErrPaymentProvider = errors.New("payment provider error")
-	ErrWebhookInvalid  = errors.New("invalid webhook signature")
+	ErrPaymentProvider           = errors.New("payment provider error")
+	ErrWebhookInvalid            = errors.New("invalid webhook signature")
+	ErrWebhookTimestampMalformed = errors.New("webhook timestamp is malformed")
+	ErrWebhookTimestampExpired   = errors.New("webhook timestamp is outside tolerance window")
 )
 
 type PaymentProvider interface {
 	CreateCheckout(tenantID uint, planID PlanID, interval BillingInterval, returnURL string) (*CheckoutSession, error)
 	GetCustomerPortalURL(tenantID uint, returnURL string) (string, error)
-	VerifyWebhook(payload []byte, signature string) (*WebhookEvent, error)
+	VerifyWebhook(payload []byte, timestamp, signature string) (*WebhookEvent, error)
 	CancelSubscription(providerSubID string) error
 	SynchronizeSubscription(providerSubID string) (*SyncResult, error)
 }

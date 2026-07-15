@@ -113,10 +113,11 @@ func (c OutboundConfig) ResolvedTLSPolicy() string {
 
 // PaymentConfig controls the billing payment provider integration.
 type PaymentConfig struct {
-	Provider      string `mapstructure:"provider"`
-	Secret        string `mapstructure:"secret"`
-	WebhookSecret string `mapstructure:"webhook_secret"`
-	Enabled       bool   `mapstructure:"enabled"`
+	Provider                string `mapstructure:"provider"`
+	Secret                  string `mapstructure:"secret"`
+	WebhookSecret           string `mapstructure:"webhook_secret"`
+	WebhookToleranceSeconds int    `mapstructure:"webhook_tolerance_seconds"`
+	Enabled                 bool   `mapstructure:"enabled"`
 }
 type BackupConfig struct {
 	Dir               string `mapstructure:"dir"`

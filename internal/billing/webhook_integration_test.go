@@ -21,13 +21,18 @@ import (
 )
 
 type testPaymentProvider struct {
+	*hmacPaymentProvider
 	secret string
 }
 
 func newTestPaymentProvider() *testPaymentProvider {
 	b := make([]byte, 16)
 	rand.Read(b)
-	return &testPaymentProvider{secret: hex.EncodeToString(b)}
+	secret := hex.EncodeToString(b)
+	return &testPaymentProvider{
+		hmacPaymentProvider: newHMACPaymentProvider("", secret, DefaultWebhookTolerance),
+		secret:              secret,
+	}
 }
 
 func (p *testPaymentProvider) CreateCheckout(tenantID uint, planID PlanID, interval BillingInterval, returnURL string) (*CheckoutSession, error) {
@@ -38,49 +43,8 @@ func (p *testPaymentProvider) GetCustomerPortalURL(tenantID uint, returnURL stri
 	return returnURL + "?portal=test", nil
 }
 
-func (p *testPaymentProvider) VerifyWebhook(payload []byte, signature string) (*WebhookEvent, error) {
-	if p.secret == "" || signature == "" {
-		return nil, ErrWebhookInvalid
-	}
-	ts := fmt.Sprintf("%d", time.Now().Unix())
-	signedPayload := fmt.Sprintf("%s.%s", ts, string(payload))
-	mac := hmac.New(sha256.New, []byte(p.secret))
-	mac.Write([]byte(signedPayload))
-	expectedSig := hex.EncodeToString(mac.Sum(nil))
-	if !hmac.Equal([]byte(signature), []byte(expectedSig)) {
-		return nil, ErrWebhookInvalid
-	}
-	var raw struct {
-		Type string `json:"type"`
-		Data struct {
-			Object struct {
-				ID            string `json:"id"`
-				Subscription  string `json:"subscription"`
-				Status        string `json:"status"`
-				PaymentStatus string `json:"payment_status"`
-			} `json:"object"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(payload, &raw); err != nil {
-		return nil, err
-	}
-	return &WebhookEvent{
-		Type:               raw.Type,
-		ProviderSubID:      raw.Data.Object.Subscription,
-		SubscriptionStatus: raw.Data.Object.Status,
-		PaymentStatus:      raw.Data.Object.PaymentStatus,
-		ProviderEventID:    raw.Data.Object.ID,
-	}, nil
-}
-
-func (p *testPaymentProvider) CancelSubscription(providerSubID string) error { return nil }
-func (p *testPaymentProvider) SynchronizeSubscription(providerSubID string) (*SyncResult, error) {
-	return &SyncResult{ProviderSubID: providerSubID, Status: SubActive}, nil
-}
-
-func signWebhook(secret string, payload []byte) string {
-	ts := fmt.Sprintf("%d", time.Now().Unix())
-	signedPayload := fmt.Sprintf("%s.%s", ts, string(payload))
+func signWebhook(secret string, timestamp string, payload []byte) string {
+	signedPayload := fmt.Sprintf("%s.%s", timestamp, string(payload))
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(signedPayload))
 	return hex.EncodeToString(mac.Sum(nil))
@@ -133,6 +97,10 @@ func setupWebhookEnv(t *testing.T) *webhookTestEnv {
 		if webhookSvc == nil || provider == nil {
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "not configured"})
 		}
+		timestamp := c.Get("X-Payment-Timestamp")
+		if timestamp == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "missing timestamp"})
+		}
 		signature := c.Get("X-Payment-Signature")
 		if signature == "" {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "missing signature"})
@@ -141,7 +109,7 @@ func setupWebhookEnv(t *testing.T) *webhookTestEnv {
 		if len(rawPayload) == 0 {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "empty payload"})
 		}
-		event, err := provider.VerifyWebhook(rawPayload, signature)
+		event, err := provider.VerifyWebhook(rawPayload, timestamp, signature)
 		if err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "verification failed"})
 		}
@@ -176,10 +144,13 @@ func setupWebhookEnv(t *testing.T) *webhookTestEnv {
 	return &webhookTestEnv{app: app, db: db, provider: provider, svc: svc, webhook: webhookSvc}
 }
 
-func doWebhookReq(t *testing.T, env *webhookTestEnv, payload []byte, sig string) *http.Response {
+func doWebhookReq(t *testing.T, env *webhookTestEnv, payload []byte, timestamp, sig string) *http.Response {
 	t.Helper()
 	req := httptest.NewRequest("POST", "/webhook", bytes.NewReader(payload))
 	req.Header.Set("Content-Type", "application/json")
+	if timestamp != "" {
+		req.Header.Set("X-Payment-Timestamp", timestamp)
+	}
 	if sig != "" {
 		req.Header.Set("X-Payment-Signature", sig)
 	}
@@ -205,17 +176,75 @@ func TestWebhook_ProviderNotConfigured(t *testing.T) {
 func TestWebhook_InvalidSignature(t *testing.T) {
 	env := setupWebhookEnv(t)
 	payload := testPayload(t, "evt_001")
-	resp := doWebhookReq(t, env, payload, "bad_signature")
+	ts := fmt.Sprintf("%d", time.Now().Unix())
+	resp := doWebhookReq(t, env, payload, ts, "bad_signature")
 	if resp.StatusCode != 400 {
 		t.Errorf("expected 400 for invalid signature, got %d", resp.StatusCode)
+	}
+}
+
+func TestWebhook_MissingTimestamp(t *testing.T) {
+	env := setupWebhookEnv(t)
+	payload := testPayload(t, "evt_missing_timestamp")
+	ts := fmt.Sprintf("%d", time.Now().Unix())
+	sig := signWebhook(env.provider.secret, ts, payload)
+	resp := doWebhookReq(t, env, payload, "", sig)
+	if resp.StatusCode != 400 {
+		t.Fatalf("expected 400 for missing timestamp, got %d", resp.StatusCode)
+	}
+}
+
+func TestWebhook_MalformedTimestamp(t *testing.T) {
+	env := setupWebhookEnv(t)
+	payload := testPayload(t, "evt_malformed_timestamp")
+	ts := "not-a-unix-time"
+	sig := signWebhook(env.provider.secret, ts, payload)
+	resp := doWebhookReq(t, env, payload, ts, sig)
+	if resp.StatusCode != 400 {
+		t.Fatalf("expected 400 for malformed timestamp, got %d", resp.StatusCode)
+	}
+}
+
+func TestWebhook_ExpiredTimestampRejected(t *testing.T) {
+	env := setupWebhookEnv(t)
+	now := time.Unix(1_700_000_000, 0)
+	env.provider.now = func() time.Time { return now }
+	payload := testPayload(t, "evt_expired_timestamp")
+	ts := fmt.Sprintf("%d", now.Add(-DefaultWebhookTolerance-time.Second).Unix())
+	sig := signWebhook(env.provider.secret, ts, payload)
+	resp := doWebhookReq(t, env, payload, ts, sig)
+	if resp.StatusCode != 400 {
+		t.Fatalf("expected 400 for expired timestamp, got %d", resp.StatusCode)
+	}
+}
+
+func TestWebhook_UsesTransmittedTimestampForSignature(t *testing.T) {
+	env := setupWebhookEnv(t)
+	now := time.Unix(1_700_000_000, 0)
+	env.provider.now = func() time.Time { return now }
+	payload := testPayload(t, "evt_transmitted_timestamp")
+	headerTS := fmt.Sprintf("%d", now.Add(-time.Minute).Unix())
+	validSig := signWebhook(env.provider.secret, headerTS, payload)
+	resp := doWebhookReq(t, env, payload, headerTS, validSig)
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected signature over transmitted timestamp to pass, got %d", resp.StatusCode)
+	}
+
+	payload = testPayload(t, "evt_receiver_timestamp_rejected")
+	receiverLocalTS := fmt.Sprintf("%d", now.Unix())
+	receiverLocalSig := signWebhook(env.provider.secret, receiverLocalTS, payload)
+	resp = doWebhookReq(t, env, payload, headerTS, receiverLocalSig)
+	if resp.StatusCode != 400 {
+		t.Fatalf("expected signature over receiver-local timestamp to fail, got %d", resp.StatusCode)
 	}
 }
 
 func TestWebhook_ValidSignature(t *testing.T) {
 	env := setupWebhookEnv(t)
 	payload := testPayload(t, "evt_002")
-	sig := signWebhook(env.provider.secret, payload)
-	resp := doWebhookReq(t, env, payload, sig)
+	ts := fmt.Sprintf("%d", time.Now().Unix())
+	sig := signWebhook(env.provider.secret, ts, payload)
+	resp := doWebhookReq(t, env, payload, ts, sig)
 	if resp.StatusCode != 200 {
 		body := make([]byte, 1024)
 		resp.Body.Read(body)
@@ -229,8 +258,9 @@ func TestWebhook_MissingEventID(t *testing.T) {
 		"type": "checkout.session.completed",
 		"data": map[string]interface{}{"object": map[string]interface{}{}},
 	})
-	sig := signWebhook(env.provider.secret, payload)
-	resp := doWebhookReq(t, env, payload, sig)
+	ts := fmt.Sprintf("%d", time.Now().Unix())
+	sig := signWebhook(env.provider.secret, ts, payload)
+	resp := doWebhookReq(t, env, payload, ts, sig)
 	if resp.StatusCode != 400 {
 		t.Errorf("expected 400 for missing event ID, got %d", resp.StatusCode)
 	}
@@ -239,22 +269,25 @@ func TestWebhook_MissingEventID(t *testing.T) {
 func TestWebhook_DuplicateIgnored(t *testing.T) {
 	env := setupWebhookEnv(t)
 	payload := testPayload(t, "evt_dup")
-	sig := signWebhook(env.provider.secret, payload)
+	ts := fmt.Sprintf("%d", time.Now().Unix())
+	sig := signWebhook(env.provider.secret, ts, payload)
 
-	r1 := doWebhookReq(t, env, payload, sig)
+	r1 := doWebhookReq(t, env, payload, ts, sig)
 	if r1.StatusCode != 200 {
 		t.Fatalf("first send should be 200, got %d", r1.StatusCode)
 	}
-	r2 := doWebhookReq(t, env, payload, sig)
+	r2 := doWebhookReq(t, env, payload, ts, sig)
 	if r2.StatusCode != 200 {
 		t.Fatalf("duplicate should be 200, got %d", r2.StatusCode)
 	}
+	assertWebhookEventCount(t, env.db, "evt_dup", 1)
 }
 
 func TestWebhook_ConcurrentDuplicate(t *testing.T) {
 	env := setupWebhookEnv(t)
 	payload := testPayload(t, fmt.Sprintf("evt_conc_%d", time.Now().UnixNano()))
-	sig := signWebhook(env.provider.secret, payload)
+	ts := fmt.Sprintf("%d", time.Now().Unix())
+	sig := signWebhook(env.provider.secret, ts, payload)
 
 	var wg sync.WaitGroup
 	failures := make(chan int, 5)
@@ -262,8 +295,8 @@ func TestWebhook_ConcurrentDuplicate(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			resp := doWebhookReq(t, env, payload, sig)
-			if resp.StatusCode != 200 && resp.StatusCode != 409 && resp.StatusCode != 500 {
+			resp := doWebhookReq(t, env, payload, ts, sig)
+			if resp.StatusCode != 200 {
 				failures <- resp.StatusCode
 			}
 		}()
@@ -273,6 +306,7 @@ func TestWebhook_ConcurrentDuplicate(t *testing.T) {
 	for code := range failures {
 		t.Errorf("unexpected status code from concurrent request: %d", code)
 	}
+	assertWebhookEventCount(t, env.db, extractEventID(t, payload), 1)
 }
 
 func TestWebhook_ActivateSubscription(t *testing.T) {
@@ -290,8 +324,9 @@ func TestWebhook_ActivateSubscription(t *testing.T) {
 			},
 		},
 	})
-	sig := signWebhook(env.provider.secret, payload)
-	resp := doWebhookReq(t, env, payload, sig)
+	ts := fmt.Sprintf("%d", time.Now().Unix())
+	sig := signWebhook(env.provider.secret, ts, payload)
+	resp := doWebhookReq(t, env, payload, ts, sig)
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -308,9 +343,10 @@ func TestWebhook_ActivateSubscription(t *testing.T) {
 func TestWebhook_ReplayUsesIdempotencyKey(t *testing.T) {
 	env := setupWebhookEnv(t)
 	payload := testPayload(t, "evt_replay")
-	sig := signWebhook(env.provider.secret, payload)
+	ts := fmt.Sprintf("%d", time.Now().Unix())
+	sig := signWebhook(env.provider.secret, ts, payload)
 
-	r1 := doWebhookReq(t, env, payload, sig)
+	r1 := doWebhookReq(t, env, payload, ts, sig)
 	if r1.StatusCode != 200 {
 		t.Fatalf("first: %d", r1.StatusCode)
 	}
@@ -322,9 +358,36 @@ func TestWebhook_ReplayUsesIdempotencyKey(t *testing.T) {
 	}
 
 	for i := 0; i < 3; i++ {
-		r := doWebhookReq(t, env, payload, sig)
+		r := doWebhookReq(t, env, payload, ts, sig)
 		if r.StatusCode != 200 {
 			t.Errorf("replay %d: expected 200, got %d", i, r.StatusCode)
 		}
 	}
+	assertWebhookEventCount(t, env.db, "evt_replay", 1)
+}
+
+func assertWebhookEventCount(t *testing.T, db *sql.DB, id string, want int) {
+	t.Helper()
+	var got int
+	if err := db.QueryRow("SELECT COUNT(*) FROM webhook_events WHERE id = ?", id).Scan(&got); err != nil {
+		t.Fatalf("count webhook events for %s: %v", id, err)
+	}
+	if got != want {
+		t.Fatalf("webhook event count for %s: got %d want %d", id, got, want)
+	}
+}
+
+func extractEventID(t *testing.T, payload []byte) string {
+	t.Helper()
+	var raw struct {
+		Data struct {
+			Object struct {
+				ID string `json:"id"`
+			} `json:"object"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		t.Fatalf("parse payload: %v", err)
+	}
+	return raw.Data.Object.ID
 }

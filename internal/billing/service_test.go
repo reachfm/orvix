@@ -149,7 +149,7 @@ func (p *NoopPaymentProvider) GetCustomerPortalURL(tenantID uint, returnURL stri
 	return returnURL + "?portal=simulated", nil
 }
 
-func (p *NoopPaymentProvider) VerifyWebhook(payload []byte, signature string) (*WebhookEvent, error) {
+func (p *NoopPaymentProvider) VerifyWebhook(payload []byte, timestamp, signature string) (*WebhookEvent, error) {
 	return &WebhookEvent{Type: "checkout.session.completed", ProviderSubID: "sub_simulated", SubscriptionStatus: "active", PaymentStatus: "paid", ProviderEventID: "evt_simulated"}, nil
 }
 
@@ -168,7 +168,7 @@ func TestNoopPaymentProvider(t *testing.T) {
 	if s.SessionID == "" {
 		t.Fatal("expected session ID")
 	}
-	ev, err := p.VerifyWebhook([]byte(`{}`), "sig")
+	ev, err := p.VerifyWebhook([]byte(`{}`), "123", "sig")
 	if err != nil {
 		t.Fatal(err)
 	}
