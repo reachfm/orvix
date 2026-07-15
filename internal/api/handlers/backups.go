@@ -60,6 +60,10 @@ func (h *Handler) backupService() (*backup.Service, error) {
 	svc.SetConfigPath("/etc/orvix/orvix.yaml")
 	if h.cfg != nil {
 		svc.SetDatabasePath(h.cfg.Database.SQLitePath)
+		// Only meaningful when the configured dialect is
+		// PostgreSQL (see Service.snapshotDB); harmless to set
+		// unconditionally otherwise, since it is never read.
+		svc.SetPostgresDSN(h.cfg.Database.DSN)
 		maintenanceFile := strings.TrimSpace(os.Getenv("ORVIX_RESTORE_MAINTENANCE_FILE"))
 		if maintenanceFile == "" {
 			maintenanceFile = filepath.Join(h.cfg.CoreMail.DataPath, "restore-maintenance.enabled")
@@ -77,10 +81,6 @@ func (h *Handler) backupService() (*backup.Service, error) {
 			}
 			return nil
 		})
-		// Only meaningful when the configured dialect is
-		// PostgreSQL (see Service.snapshotDB); harmless to set
-		// unconditionally otherwise, since it is never read.
-		svc.SetPostgresDSN(h.cfg.Database.DSN)
 		if h.cfg.Backup.EncryptionEnabled {
 			if err := svc.SetEncryptionConfig(backup.BackupEncryptionConfig{
 				Enabled: true,

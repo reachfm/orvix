@@ -713,12 +713,13 @@ func (r *Router) setupRoutes() {
 	protected.Get("/customer/domains/:domain_id/dns", r.h.GetCustomerDomainDNS)
 	protected.Post("/customer/domains/:domain_id/verify", r.h.VerifyCustomerDomain)
 
-	// Enterprise customer administration (tenant-scoped).
+	// Enterprise customer administration (tenant-scoped, CSRF-protected).
 	// Available to organization admins, operators, and above.
 	// All operations are scoped to the caller's tenant_id.
 	enterprise := protected.Group("/enterprise",
 		requireTenantContext,
-		auth.RequireAnyRole(auth.RoleAdmin, auth.RoleSuperAdmin, auth.RoleOperator))
+		auth.RequireAnyRole(auth.RoleAdmin, auth.RoleSuperAdmin, auth.RoleOperator),
+		r.csrf.Middleware())
 	enterprise.Get("/dashboard", r.h.CustomerDashboard)
 	enterprise.Get("/domains", r.h.ListAdminDomains)
 	enterprise.Get("/domains/:id", r.h.GetAdminDomain)
