@@ -62,6 +62,9 @@ func (s *QuotaService) CanSendEmail(tenantID uint, sentToday int64) *QuotaCheckR
 	if err != nil {
 		return &QuotaCheckResult{Allowed: false, Reason: "no active subscription"}
 	}
+	if sub.Status == SubSuspended || sub.Status == SubCancelled || sub.Status == SubExpired {
+		return &QuotaCheckResult{Allowed: false, Reason: "subscription is " + string(sub.Status)}
+	}
 	remaining := int64(sub.SendLimitDay) - sentToday
 	return &QuotaCheckResult{
 		Allowed:   remaining > 0,

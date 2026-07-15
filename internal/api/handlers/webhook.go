@@ -1,8 +1,7 @@
 package handlers
 
 import (
-	"crypto/rand"
-	"encoding/hex"
+	"errors"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -10,41 +9,67 @@ import (
 	"go.uber.org/zap"
 )
 
+const maxWebhookPayloadBytes = 1 << 20 // 1 MB
+
 func (h *Handler) ReceivePaymentWebhook(c fiber.Ctx) error {
-	if h.billingWebhook == nil {
-		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "webhook service not available"})
+	if h.billingWebhook == nil || h.paymentProvider == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "payment processing not configured"})
 	}
 
-	eventType := c.Get("X-Webhook-Event")
-	if eventType == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "missing webhook event type"})
+	signature := c.Get("X-Payment-Signature")
+	if signature == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "missing payment signature"})
 	}
 
 	rawPayload := c.Body()
 	if len(rawPayload) == 0 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "empty payload"})
 	}
+	if len(rawPayload) > maxWebhookPayloadBytes {
+		return c.Status(fiber.StatusRequestEntityTooLarge).JSON(fiber.Map{"error": "payload too large"})
+	}
 
-	b := make([]byte, 8)
-	rand.Read(b)
-	eventID := hex.EncodeToString(b)
+	event, err := h.paymentProvider.VerifyWebhook(rawPayload, signature)
+	if err != nil {
+		h.logger.Warn("webhook verification failed", zap.Error(err))
+		if errors.Is(err, billing.ErrWebhookInvalid) || errors.Is(err, billing.ErrNoProviderConfigured) {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid signature"})
+		}
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "webhook verification failed"})
+	}
+	if event.ProviderEventID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "missing provider event id"})
+	}
 
 	rec := &billing.WebhookEventRecord{
-		ID:         eventID,
-		Provider:   "stripe",
-		EventType:  eventType,
-		RawPayload: rawPayload,
-		ReceivedAt: time.Now().UTC(),
+		ID:             event.ProviderEventID,
+		Provider:       "stripe",
+		EventType:      event.Type,
+		ProviderSubID:  event.ProviderSubID,
+		RawPayload:     rawPayload,
+		Signature:      signature,
+		ReceivedAt:     time.Now().UTC(),
+		IdempotencyKey: event.ProviderEventID,
 	}
 
 	if err := h.billingWebhook.RecordEvent(c.Context(), rec); err != nil {
+		if errors.Is(err, billing.ErrWebhookAlreadyProcessed) {
+			return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "already_processed", "event_id": event.ProviderEventID})
+		}
 		h.logger.Error("webhook record failed", zap.Error(err))
-		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "event already processed or recording failed"})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "event recording failed"})
 	}
 
-	if err := h.billingWebhook.MarkProcessed(c.Context(), eventID, nil); err != nil {
-		h.logger.Error("webhook mark processed failed", zap.Error(err))
+	if event.PaymentStatus == "paid" && event.SubscriptionStatus == "active" && event.ProviderSubID != "" && h.billingSvc != nil {
+		if sub, subErr := h.billingSvc.GetSubscriptionByProviderID(event.ProviderSubID); subErr == nil {
+			h.billingSvc.TransitionState(sub.TenantID, billing.SubActive)
+		}
 	}
 
-	return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "received", "event_id": eventID})
+	processingErr := h.billingWebhook.MarkProcessed(c.Context(), event.ProviderEventID, nil)
+	if processingErr != nil {
+		h.logger.Error("webhook mark processed failed", zap.Error(processingErr))
+	}
+
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "received", "event_id": event.ProviderEventID})
 }

@@ -144,6 +144,32 @@ func TestQuotaService(t *testing.T) {
 	}
 }
 
+// NoopPaymentProvider is a test-only payment provider that simulates
+// successful payment flows. It MUST NOT be used in production code.
+type NoopPaymentProvider struct{}
+
+func NewNoopPaymentProvider() *NoopPaymentProvider {
+	return &NoopPaymentProvider{}
+}
+
+func (p *NoopPaymentProvider) CreateCheckout(tenantID uint, planID PlanID, interval BillingInterval, returnURL string) (*CheckoutSession, error) {
+	return &CheckoutSession{URL: returnURL + "?checkout=simulated&plan=" + string(planID), SessionID: "cs_simulated_" + string(planID)}, nil
+}
+
+func (p *NoopPaymentProvider) GetCustomerPortalURL(tenantID uint, returnURL string) (string, error) {
+	return returnURL + "?portal=simulated", nil
+}
+
+func (p *NoopPaymentProvider) VerifyWebhook(payload []byte, signature string) (*WebhookEvent, error) {
+	return &WebhookEvent{Type: "checkout.session.completed", ProviderSubID: "sub_simulated", SubscriptionStatus: "active", PaymentStatus: "paid", ProviderEventID: "evt_simulated"}, nil
+}
+
+func (p *NoopPaymentProvider) CancelSubscription(providerSubID string) error { return nil }
+
+func (p *NoopPaymentProvider) SynchronizeSubscription(providerSubID string) (*SyncResult, error) {
+	return &SyncResult{ProviderSubID: providerSubID, Status: SubActive, CancelAtPeriodEnd: false}, nil
+}
+
 func TestNoopPaymentProvider(t *testing.T) {
 	p := NewNoopPaymentProvider()
 	s, err := p.CreateCheckout(1, PlanBusiness, IntervalMonthly, "https://example.com/return")

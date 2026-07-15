@@ -108,6 +108,14 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		h:            handlers.NewHandler(db, authenticator, apikeyMgr, logger, cfg, registry, ff, rateLimiter),
 		db:           db,
 	}
+
+	// Cancel the background context when the Fiber app shuts
+	// down, stopping the billing scheduler and any other
+	// context-bound goroutines cleanly.
+	app.Hooks().OnPreShutdown(func() error {
+		cancel()
+		return nil
+	})
 	// Record the moment the router was constructed. The runtime
 	// telemetry endpoint (/api/v1/admin/runtime) reads this to
 	// compute uptime. Capturing it here (rather than at process
@@ -194,8 +202,7 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			logger.Info("enterprise admin services wired with transactional audit and RBAC")
 		}
 
-		billingSvc, usageSvc, quotaSvc, webhookSvc, sched, err := billing.Initialize(sqlDB)
-		if err != nil {
+		if billingSvc, usageSvc, quotaSvc, webhookSvc, sched, err := billing.Initialize(sqlDB); err != nil {
 			logger.Error("billing initialization failed", zap.Error(err))
 		} else {
 			router.h.SetBillingService(billingSvc)
@@ -210,7 +217,7 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 
 			if sched != nil {
 				router.h.SetBillingScheduler(sched)
-				logger.Info("billing scheduler wired (started externally)")
+				logger.Info("billing scheduler wired (call router.Start() to begin)")
 			}
 			if webhookSvc != nil {
 				router.h.SetBillingWebhook(webhookSvc)
@@ -465,6 +472,21 @@ func (r *Router) SetTrustPersistence(ok bool, errMsg string) {
 }
 
 func (r *Router) App() *fiber.App { return r.app }
+
+// Start begins background services (billing scheduler, etc).
+// Called by the production entry point; test callers should NOT
+// call Start to avoid background goroutines leaking.
+func (r *Router) Start() {
+	r.h.StartBillingScheduler(r.appCtx, 15*time.Minute)
+}
+
+// Shutdown cancels the router's background context, stopping
+// the billing scheduler and any other context-bound goroutines.
+// Call during application shutdown or test cleanup.
+func (r *Router) Shutdown() error {
+	r.cancel()
+	return r.app.Shutdown()
+}
 
 func (r *Router) setupMiddleware() {
 	r.app.Use(recover.New())

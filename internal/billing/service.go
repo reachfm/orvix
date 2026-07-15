@@ -116,6 +116,22 @@ func (s *Service) GetSubscription(tenantID uint) (*Subscription, error) {
 	return &sub, err
 }
 
+func (s *Service) GetSubscriptionByProviderID(providerSubID string) (*Subscription, error) {
+	row := s.db.QueryRow(`SELECT id, tenant_id, plan_id, status, billing_interval, trial_ends_at,
+		current_period_start, current_period_end, cancelled_at, past_due_since, grace_period_ends_at,
+		suspended_at, storage_mb, send_limit_day, provider, provider_sub_id, created_at, updated_at
+		FROM subscriptions WHERE provider_sub_id = `+s.dialect.Placeholder(1), providerSubID)
+	var sub Subscription
+	err := row.Scan(&sub.ID, &sub.TenantID, &sub.PlanID, &sub.Status, &sub.BillingInterval,
+		&sub.TrialEndsAt, &sub.CurrentPeriodStart, &sub.CurrentPeriodEnd, &sub.CancelledAt,
+		&sub.PastDueSince, &sub.GracePeriodEndsAt, &sub.SuspendedAt, &sub.StorageMB,
+		&sub.SendLimitDay, &sub.Provider, &sub.ProviderSubID, &sub.CreatedAt, &sub.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrSubscriptionNotFound
+	}
+	return &sub, err
+}
+
 func (s *Service) CreateSubscription(tenantID uint, planID PlanID, interval BillingInterval, trialDays int) (*Subscription, error) {
 	plan, err := s.GetPlan(planID)
 	if err != nil {
@@ -198,21 +214,33 @@ func (s *Service) ChangePlan(tenantID uint, newPlanID PlanID) (*Subscription, er
 
 func (s *Service) TransitionState(tenantID uint, newStatus SubscriptionStatus) error {
 	return s.withTx(func(tx *sql.Tx) error {
-		var current SubscriptionStatus
-		err := tx.QueryRow("SELECT status FROM subscriptions WHERE tenant_id = "+s.dialect.Placeholder(1), tenantID).Scan(&current)
+		var current struct {
+			status            SubscriptionStatus
+			pastDueSince      *time.Time
+			gracePeriodEndsAt *time.Time
+		}
+		err := tx.QueryRow("SELECT status, past_due_since, grace_period_ends_at FROM subscriptions WHERE tenant_id = "+s.dialect.Placeholder(1), tenantID).
+			Scan(&current.status, &current.pastDueSince, &current.gracePeriodEndsAt)
 		if err != nil {
 			return ErrSubscriptionNotFound
 		}
-		if !validTransition(current, newStatus) {
+		if !validTransition(current.status, newStatus) {
 			return ErrInvalidTransition
 		}
 		now := time.Now().UTC()
-		var pastDueSince, graceEndsAt, suspendedAt, cancelledAt *time.Time
+		pastDueSince := current.pastDueSince
+		graceEndsAt := current.gracePeriodEndsAt
+		var suspendedAt, cancelledAt *time.Time
 		switch newStatus {
 		case SubPastDue:
 			pastDueSince = &now
 			g := now.AddDate(0, 0, 7)
 			graceEndsAt = &g
+		case SubGracePeriod:
+			if graceEndsAt == nil {
+				g := now.AddDate(0, 0, 7)
+				graceEndsAt = &g
+			}
 		case SubSuspended:
 			suspendedAt = &now
 		case SubCancelled:

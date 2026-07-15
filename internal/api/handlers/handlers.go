@@ -202,6 +202,7 @@ type Handler struct {
 
 	billingScheduler *billing.Scheduler
 	billingWebhook   *billing.WebhookService
+	paymentProvider  billing.PaymentProvider
 }
 
 // sqlDialect returns the dialect-aware SQL helper for raw queries.
@@ -418,6 +419,10 @@ func (h *Handler) SetBillingScheduler(s *billing.Scheduler) {
 
 func (h *Handler) SetBillingWebhook(s *billing.WebhookService) {
 	h.billingWebhook = s
+}
+
+func (h *Handler) SetPaymentProvider(p billing.PaymentProvider) {
+	h.paymentProvider = p
 }
 
 func (h *Handler) StartBillingScheduler(ctx context.Context, interval time.Duration) {
