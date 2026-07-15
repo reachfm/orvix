@@ -187,3 +187,131 @@ func TestNoopPaymentProvider(t *testing.T) {
 		t.Fatalf("expected checkout.session.completed, got %s", ev.Type)
 	}
 }
+
+func TestLifecycleTrialToExpired(t *testing.T) {
+	db := setupTestDB(t)
+	svc := NewService(db)
+	if err := svc.SeedDefaultPlans(); err != nil {
+		t.Fatal(err)
+	}
+	sub, err := svc.CreateSubscription(1, PlanFree, IntervalMonthly, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sub.Status != SubTrialing {
+		t.Fatalf("expected trialing, got %s", sub.Status)
+	}
+	if err := svc.TransitionState(1, SubPastDue); err != nil {
+		t.Fatal(err)
+	}
+	sub, _ = svc.GetSubscription(1)
+	if sub.Status != SubPastDue {
+		t.Fatalf("expected past_due, got %s", sub.Status)
+	}
+	if sub.GracePeriodEndsAt == nil {
+		t.Fatal("expected grace_period_ends_at to be set")
+	}
+	if err := svc.TransitionState(1, SubGracePeriod); err != nil {
+		t.Fatal(err)
+	}
+	sub, _ = svc.GetSubscription(1)
+	if sub.Status != SubGracePeriod {
+		t.Fatalf("expected grace_period, got %s", sub.Status)
+	}
+	if sub.GracePeriodEndsAt == nil {
+		t.Fatal("grace_period_ends_at must be preserved after transition to GracePeriod")
+	}
+	if err := svc.TransitionState(1, SubSuspended); err != nil {
+		t.Fatal(err)
+	}
+	sub, _ = svc.GetSubscription(1)
+	if sub.Status != SubSuspended {
+		t.Fatalf("expected suspended, got %s", sub.Status)
+	}
+	if err := svc.TransitionState(1, SubCancelled); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.TransitionState(1, SubExpired); err != nil {
+		t.Fatal(err)
+	}
+	sub, _ = svc.GetSubscription(1)
+	if sub.Status != SubExpired {
+		t.Fatalf("expected expired, got %s", sub.Status)
+	}
+}
+
+func TestQuotaCanSendEmailDeniesSuspended(t *testing.T) {
+	db := setupTestDB(t)
+	svc := NewService(db)
+	if err := svc.SeedDefaultPlans(); err != nil {
+		t.Fatal(err)
+	}
+	quotaSvc := NewQuotaService(db, svc)
+	if _, err := svc.CreateSubscription(1, PlanFree, IntervalMonthly, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.TransitionState(1, SubPastDue); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.TransitionState(1, SubSuspended); err != nil {
+		t.Fatal(err)
+	}
+	r := quotaSvc.CanSendEmail(1, 0)
+	if r.Allowed {
+		t.Fatal("CanSendEmail must deny suspended subscription")
+	}
+}
+
+func TestQuotaCanSendEmailDeniesCancelled(t *testing.T) {
+	db := setupTestDB(t)
+	svc := NewService(db)
+	if err := svc.SeedDefaultPlans(); err != nil {
+		t.Fatal(err)
+	}
+	quotaSvc := NewQuotaService(db, svc)
+	if _, err := svc.CreateSubscription(1, PlanFree, IntervalMonthly, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.TransitionState(1, SubCancelled); err != nil {
+		t.Fatal(err)
+	}
+	r := quotaSvc.CanSendEmail(1, 0)
+	if r.Allowed {
+		t.Fatal("CanSendEmail must deny cancelled subscription")
+	}
+}
+
+func TestQuotaCanSendEmailDeniesExpired(t *testing.T) {
+	db := setupTestDB(t)
+	svc := NewService(db)
+	if err := svc.SeedDefaultPlans(); err != nil {
+		t.Fatal(err)
+	}
+	quotaSvc := NewQuotaService(db, svc)
+	if _, err := svc.CreateSubscription(1, PlanFree, IntervalMonthly, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.TransitionState(1, SubExpired); err != nil {
+		t.Fatal(err)
+	}
+	r := quotaSvc.CanSendEmail(1, 0)
+	if r.Allowed {
+		t.Fatal("CanSendEmail must deny expired subscription")
+	}
+}
+
+func TestQuotaCanSendEmailAllowsActive(t *testing.T) {
+	db := setupTestDB(t)
+	svc := NewService(db)
+	if err := svc.SeedDefaultPlans(); err != nil {
+		t.Fatal(err)
+	}
+	quotaSvc := NewQuotaService(db, svc)
+	if _, err := svc.CreateSubscription(1, PlanFree, IntervalMonthly, 0); err != nil {
+		t.Fatal(err)
+	}
+	r := quotaSvc.CanSendEmail(1, 0)
+	if !r.Allowed {
+		t.Fatal("CanSendEmail must allow active subscription")
+	}
+}

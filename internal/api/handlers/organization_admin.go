@@ -5,6 +5,7 @@ import (
 	"github.com/orvix/orvix/internal/admin/organization"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/billing"
+	"go.uber.org/zap"
 	"strconv"
 )
 
@@ -99,9 +100,18 @@ func (h *Handler) CreateOrganization(c fiber.Ctx) error {
 		}
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
 	}
+	// Organization.ID is the canonical tenant ID for billing.
+	// Provision a Free subscription for the new organization.
+	// If subscription provisioning fails, log the error but do
+	// not rollback the organization — the billing init path
+	// will backfill missing subscriptions on restart.
 	if h.billingSvc != nil {
 		if _, subErr := h.billingSvc.GetSubscription(org.ID); subErr != nil {
-			h.billingSvc.CreateSubscription(org.ID, billing.PlanFree, billing.IntervalMonthly, 0)
+			if _, createErr := h.billingSvc.CreateSubscription(org.ID, billing.PlanFree, billing.IntervalMonthly, 0); createErr != nil {
+				h.logger.Error("subscription provisioning failed for new organization",
+					zap.Uint("org_id", org.ID),
+					zap.Error(createErr))
+			}
 		}
 	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"organization": org})

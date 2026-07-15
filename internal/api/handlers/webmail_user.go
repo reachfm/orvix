@@ -694,15 +694,18 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 	// Quota enforcement: check daily send limit before processing.
 	if h.quotaSvc != nil && h.usageSvc != nil {
 		usage, err := h.usageSvc.GetCurrentUsage(ctx.Mailbox.TenantID)
-		if err == nil {
-			if result := h.quotaSvc.CanSendEmail(ctx.Mailbox.TenantID, usage.EmailsSent); result != nil && !result.Allowed {
-				return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
-					"error":     "daily send limit reached: " + result.Reason,
-					"limit":     result.Limit,
-					"sent":      result.Used,
-					"remaining": result.Remaining,
-				})
-			}
+		if err != nil {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+				"error": "cannot determine subscription state, try again later",
+			})
+		}
+		if result := h.quotaSvc.CanSendEmail(ctx.Mailbox.TenantID, usage.EmailsSent); result != nil && !result.Allowed {
+			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+				"error":     "daily send limit reached: " + result.Reason,
+				"limit":     result.Limit,
+				"sent":      result.Used,
+				"remaining": result.Remaining,
+			})
 		}
 	}
 
