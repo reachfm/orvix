@@ -81,6 +81,11 @@ func TestHasPermission_Matrix(t *testing.T) {
 		{auth.RoleUser, PermUsersWrite, true},
 		{auth.RoleUser, PermAliasesRead, true},
 		{auth.RoleUser, PermAliasesWrite, true},
+		{auth.RoleUser, PermGroupsWrite, true},
+		{auth.RoleUser, PermInvitationsWrite, true},
+		{auth.RoleUser, PermOwnershipTransfer, true},
+		{auth.RoleUser, PermAPIKeysWrite, true},
+		{auth.RoleUser, PermBillingWrite, true},
 		{auth.RoleUser, PermAuditRead, true},
 		{auth.RoleUser, PermSettingsRead, true},
 		{auth.RoleUser, PermCredentialsReset, true},
@@ -97,7 +102,7 @@ func TestHasPermission_Matrix(t *testing.T) {
 		{auth.RoleUser, PermQueueRead, false},
 		{auth.RoleUser, PermQueueAction, false},
 
-		// RoleBilling: read access, no mutations.
+		// RoleBilling: read access + billing write. No other mutations.
 		{auth.RoleBilling, PermDashboardRead, true},
 		{auth.RoleBilling, PermDomainsRead, true},
 		{auth.RoleBilling, PermDomainsWrite, false},
@@ -106,6 +111,11 @@ func TestHasPermission_Matrix(t *testing.T) {
 		{auth.RoleBilling, PermOrganizationsWrite, false},
 		{auth.RoleBilling, PermUsersWrite, false},
 		{auth.RoleBilling, PermAliasesWrite, false},
+		{auth.RoleBilling, PermGroupsWrite, false},
+		{auth.RoleBilling, PermInvitationsWrite, false},
+		{auth.RoleBilling, PermOwnershipTransfer, false},
+		{auth.RoleBilling, PermAPIKeysWrite, false},
+		{auth.RoleBilling, PermBillingWrite, true},
 
 		// Unknown roles: deny by default.
 		{auth.Role("unknown"), PermQueueRead, false},
