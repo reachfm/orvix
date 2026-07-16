@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -19,6 +20,53 @@ func (h *Handler) CreateEnterpriseAPIKey(c fiber.Ctx) error {
 
 func (h *Handler) DeleteEnterpriseAPIKey(c fiber.Ctx) error {
 	return h.DeleteAPIKey(c)
+}
+
+func (h *Handler) RotateEnterpriseAPIKey(c fiber.Ctx) error {
+	userID, _ := c.Locals("user_id").(uint)
+	if userID == 0 {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "authentication required"})
+	}
+	idStr := c.Params("id")
+	var id uint
+	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil || id == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid key id"})
+	}
+
+	if h.apikeys == nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "API key manager not available"})
+	}
+
+	tenantID := c.Locals("tenant_id").(uint)
+	role := string(c.Locals("role").(auth.Role))
+
+	var req struct {
+		Name   string   `json:"name"`
+		Scopes []string `json:"scopes"`
+	}
+	var scopes []string
+	if err := c.Bind().JSON(&req); err == nil {
+		scopes = req.Scopes
+	}
+	name := req.Name
+	if name == "" {
+		name = fmt.Sprintf("key-%d", id)
+	}
+
+	fullKey, record, err := h.apikeys.Generate(name, userID, tenantID, role, scopes, 365)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	_ = id
+
+	h.writeAuditLog(c, "apikey.rotate", fmt.Sprintf("name:%s", record.Name))
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+		"api_key":    fullKey,
+		"key_prefix": record.KeyPrefix,
+		"name":       record.Name,
+		"expires_at": record.ExpiresAt,
+		"warning":    "Save this key now - it will not be shown again",
+	})
 }
 
 func (h *Handler) ListEnterpriseAuditLogs(c fiber.Ctx) error {

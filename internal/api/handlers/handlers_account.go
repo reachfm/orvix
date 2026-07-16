@@ -346,3 +346,90 @@ var validTimezones = map[string]bool{
 func isValidTimezone(tz string) bool {
 	return validTimezones[tz]
 }
+
+func (h *Handler) ListCustomerInvoices(c fiber.Ctx) error {
+	tenantID, err := auth.RequireTenantID(c)
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "tenant context required"})
+	}
+	var invoices []models.Invoice
+	q := h.db.Where("tenant_id = ?", tenantID).Order("issued_at DESC").Limit(50)
+	if status := c.Query("status"); status != "" {
+		q = q.Where("status = ?", status)
+	}
+	if err := q.Find(&invoices).Error; err != nil {
+		return c.JSON([]fiber.Map{})
+	}
+	type result struct {
+		ID                uint    `json:"id"`
+		InvoiceNumber     string  `json:"invoice_number"`
+		Currency          string  `json:"currency"`
+		Total             int64   `json:"total"`
+		AmountPaid        int64   `json:"amount_paid"`
+		AmountDue         int64   `json:"amount_due"`
+		Status            string  `json:"status"`
+		PeriodStart       string  `json:"period_start,omitempty"`
+		PeriodEnd         string  `json:"period_end,omitempty"`
+		IssuedAt          string  `json:"issued_at,omitempty"`
+		DueAt             string  `json:"due_at,omitempty"`
+		PaidAt            string  `json:"paid_at,omitempty"`
+		HostedInvoiceURL  string  `json:"hosted_invoice_url,omitempty"`
+		PDFURL            string  `json:"pdf_url,omitempty"`
+	}
+	out := make([]result, 0, len(invoices))
+	for _, inv := range invoices {
+		r := result{
+			ID:            inv.ID,
+			InvoiceNumber: inv.InvoiceNumber,
+			Currency:      inv.Currency,
+			Total:         inv.Total,
+			AmountPaid:    inv.AmountPaid,
+			AmountDue:     inv.AmountDue,
+			Status:        inv.Status,
+			HostedInvoiceURL: inv.HostedInvoiceURL,
+			PDFURL:         inv.PDFURL,
+		}
+		if inv.PeriodStart != nil { r.PeriodStart = inv.PeriodStart.Format(time.RFC3339) }
+		if inv.PeriodEnd != nil { r.PeriodEnd = inv.PeriodEnd.Format(time.RFC3339) }
+		if inv.IssuedAt != nil { r.IssuedAt = inv.IssuedAt.Format(time.RFC3339) }
+		if inv.DueAt != nil { r.DueAt = inv.DueAt.Format(time.RFC3339) }
+		if inv.PaidAt != nil { r.PaidAt = inv.PaidAt.Format(time.RFC3339) }
+		out = append(out, r)
+	}
+	return c.JSON(out)
+}
+
+func (h *Handler) GetCustomerInvoice(c fiber.Ctx) error {
+	tenantID, err := auth.RequireTenantID(c)
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "tenant context required"})
+	}
+	idStr := c.Params("id")
+	var id uint
+	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil || id == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid invoice id"})
+	}
+	var inv models.Invoice
+	if err := h.db.Where("id = ? AND tenant_id = ?", id, tenantID).First(&inv).Error; err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "invoice not found"})
+	}
+	r := fiber.Map{
+		"id":              inv.ID,
+		"invoice_number":  inv.InvoiceNumber,
+		"currency":        inv.Currency,
+		"subtotal":        inv.Subtotal,
+		"tax":             inv.Tax,
+		"total":           inv.Total,
+		"amount_paid":     inv.AmountPaid,
+		"amount_due":      inv.AmountDue,
+		"status":          inv.Status,
+		"hosted_invoice_url": inv.HostedInvoiceURL,
+		"pdf_url":          inv.PDFURL,
+	}
+	if inv.PeriodStart != nil { r["period_start"] = inv.PeriodStart.Format(time.RFC3339) }
+	if inv.PeriodEnd != nil { r["period_end"] = inv.PeriodEnd.Format(time.RFC3339) }
+	if inv.IssuedAt != nil { r["issued_at"] = inv.IssuedAt.Format(time.RFC3339) }
+	if inv.DueAt != nil { r["due_at"] = inv.DueAt.Format(time.RFC3339) }
+	if inv.PaidAt != nil { r["paid_at"] = inv.PaidAt.Format(time.RFC3339) }
+	return c.JSON(r)
+}

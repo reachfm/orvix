@@ -291,6 +291,7 @@ type APIKey struct {
 	UserID     uint       `gorm:"index;not null" json:"user_id"`
 	KeyHash    string     `gorm:"uniqueIndex;not null" json:"-"`
 	Name       string     `gorm:"not null" json:"name"`
+	Scopes     string     `gorm:"type:text;not null;default:''" json:"scopes"`
 	ExpiresAt  *time.Time `json:"expires_at"`
 	LastUsedAt *time.Time `json:"last_used_at"`
 	Active     bool       `gorm:"not null;default:true" json:"active"`
@@ -592,6 +593,47 @@ func MigrateAllRaw(db *gorm.DB) error {
 			delivery_status TEXT NOT NULL DEFAULT 'pending',
 			delivery_error TEXT NOT NULL DEFAULT ''
 		)`,
+		`CREATE TABLE IF NOT EXISTS invoices (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			tenant_id INTEGER NOT NULL,
+			subscription_id INTEGER,
+			provider TEXT NOT NULL DEFAULT '',
+			provider_invoice_id TEXT UNIQUE,
+			invoice_number TEXT,
+			currency TEXT NOT NULL DEFAULT 'usd',
+			subtotal INTEGER NOT NULL DEFAULT 0,
+			tax INTEGER NOT NULL DEFAULT 0,
+			total INTEGER NOT NULL DEFAULT 0,
+			amount_paid INTEGER NOT NULL DEFAULT 0,
+			amount_due INTEGER NOT NULL DEFAULT 0,
+			status TEXT NOT NULL DEFAULT 'draft',
+			period_start DATETIME,
+			period_end DATETIME,
+			issued_at DATETIME,
+			due_at DATETIME,
+			paid_at DATETIME,
+			hosted_invoice_url TEXT,
+			pdf_url TEXT
+		)`,
+		`CREATE TABLE IF NOT EXISTS domains (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			tenant_id INTEGER NOT NULL,
+			domain TEXT NOT NULL,
+			dkim_selector TEXT DEFAULT 'mail',
+			spf_record TEXT,
+			dmarc_record TEXT,
+			dkim_record TEXT,
+			mx_record TEXT,
+			status TEXT NOT NULL DEFAULT 'pending',
+			is_verified INTEGER NOT NULL DEFAULT 0,
+			is_primary INTEGER NOT NULL DEFAULT 0,
+			UNIQUE(domain, deleted_at)
+		)`,
 		`CREATE TABLE IF NOT EXISTS mailboxes (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			created_at DATETIME NOT NULL,
@@ -617,6 +659,7 @@ func MigrateAllRaw(db *gorm.DB) error {
 			user_id INTEGER NOT NULL,
 			key_hash TEXT NOT NULL UNIQUE,
 			name TEXT NOT NULL,
+			scopes TEXT NOT NULL DEFAULT '',
 			expires_at DATETIME,
 			last_used_at DATETIME,
 			active INTEGER NOT NULL DEFAULT 1

@@ -960,10 +960,13 @@ func (r *Router) setupRoutes() {
 	enterpriseRead.Get("/billing/usage", r.h.GetBillingUsage)
 	enterpriseRead.Get("/billing/quota", r.h.CheckBillingQuota)
 	canWriteBilling.Post("/billing/subscription", r.h.CreateBillingSubscription)
+	enterpriseRead.Get("/billing/invoices", r.h.ListCustomerInvoices)
+	enterpriseRead.Get("/billing/invoices/:id", r.h.GetCustomerInvoice)
 
 	// ── API Keys ──
 	enterpriseRead.Get("/api-keys", r.h.ListEnterpriseAPIKeys)
 	canWriteAPIKeys.Post("/api-keys", r.h.CreateEnterpriseAPIKey)
+	canWriteAPIKeys.Post("/api-keys/:id/rotate", r.h.RotateEnterpriseAPIKey)
 	canWriteAPIKeys.Delete("/api-keys/:id", r.h.DeleteEnterpriseAPIKey)
 
 	// ── Audit Logs ──

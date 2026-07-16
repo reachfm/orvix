@@ -79,12 +79,45 @@ export default function App() {
   const [currentTab, setCurrentTab] = useState<Tab>("dashboard");
   const [authenticated, setAuthenticated] = useState(false);
   const [authLoading, setAuthLoading] = useState(true);
+  const [userRole, setUserRole] = useState("");
 
   useEffect(() => {
     fetch("/api/v1/me", { credentials: "include" })
-      .then((r) => { setAuthenticated(r.ok); setAuthLoading(false); })
+      .then(async (r) => {
+        setAuthenticated(r.ok);
+        if (r.ok) {
+          try { const u = await r.json(); setUserRole(u.role || ""); } catch { setUserRole(""); }
+        }
+        setAuthLoading(false);
+      })
       .catch(() => { setAuthenticated(false); setAuthLoading(false); });
   }, []);
+
+  const isPlatformRole = userRole === "admin" || userRole === "superadmin" || userRole === "operator";
+
+  const filteredTabs = tabs.filter((t) => {
+    if (!isPlatformRole) {
+      // Customer users see only Customer Portal + Account sections.
+      // Platform admin tabs (Dashboard, Mailboxes admin, Organizations, Domains admin,
+      // Users, Firewall, Modules, License, Backups, Health, Settings) are hidden.
+      if (t.id === "dashboard") return true;
+      if (t.id === "enterprise") return false;
+      if (t.id === "mailboxes") return false;
+      if (t.id === "organizations") return false;
+      if (t.id === "domains") return false;
+      if (t.id === "users") return false;
+      if (t.id === "firewall") return false;
+      if (t.id === "modules") return false;
+      if (t.id === "audit") return false;
+      if (t.id === "license") return false;
+      if (t.id === "backups") return false;
+      if (t.id === "health") return false;
+      if (t.id === "settings") return false;
+      // Keep Customer Portal + Account items
+      return true;
+    }
+    return true;
+  });
 
   const navigateTo = (route: string) => {
     const tabMap: Record<string, Tab> = {
@@ -154,7 +187,7 @@ export default function App() {
         </div>
 
         <nav className="flex-1 px-2 py-3 space-y-0.5 overflow-y-auto">
-          {tabs.map((t) => {
+          {filteredTabs.map((t) => {
             const Icon = t.icon;
             const active = currentTab === t.id;
             if (t.section) {
