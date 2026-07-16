@@ -43,6 +43,11 @@ type WebhookService struct {
 	dialect *dbdialect.Info
 }
 
+type billingDBTX interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
 func NewWebhookService(db *sql.DB) *WebhookService {
 	dialect, err := dbdialect.Detect(db)
 	if err != nil {
@@ -74,6 +79,10 @@ func (s *WebhookService) VerifySignature(payload []byte, signature, secret strin
 }
 
 func (s *WebhookService) RecordEvent(ctx context.Context, rec *WebhookEventRecord) error {
+	return s.recordEvent(ctx, s.db, rec)
+}
+
+func (s *WebhookService) recordEvent(ctx context.Context, exec billingDBTX, rec *WebhookEventRecord) error {
 	if rec.ReceivedAt.IsZero() {
 		rec.ReceivedAt = time.Now().UTC()
 	}
@@ -94,14 +103,14 @@ func (s *WebhookService) RecordEvent(ctx context.Context, rec *WebhookEventRecor
 	var result sql.Result
 	var err error
 	if s.dialect.IsPostgres() {
-		result, err = s.db.ExecContext(ctx,
+		result, err = exec.ExecContext(ctx,
 			`INSERT INTO webhook_events (id, provider, event_type, provider_sub_id, raw_payload, signature,
 			received_at, idempotency_key, created_at)
 			VALUES (`+s.dialect.Placeholders(9)+`) ON CONFLICT (provider, id) DO NOTHING`,
 			rec.ID, rec.Provider, rec.EventType, rec.ProviderSubID, rec.RawPayload, rec.Signature,
 			rec.ReceivedAt, rec.IdempotencyKey, time.Now().UTC())
 	} else {
-		result, err = s.db.ExecContext(ctx,
+		result, err = exec.ExecContext(ctx,
 			`INSERT OR IGNORE INTO webhook_events (id, provider, event_type, provider_sub_id, raw_payload, signature,
 			received_at, idempotency_key, created_at)
 			VALUES (`+s.dialect.Placeholders(9)+`)`,
@@ -117,13 +126,45 @@ func (s *WebhookService) RecordEvent(ctx context.Context, rec *WebhookEventRecor
 	return nil
 }
 
+// ProcessEvent records a verified provider event and applies its database
+// mutation in one transaction. A failed mutation rolls back the event claim,
+// so the provider can safely retry the same event ID. Concurrent duplicates
+// serialize on the provider-scoped unique key and observe the committed event.
+func (s *WebhookService) ProcessEvent(ctx context.Context, rec *WebhookEventRecord, process func(*sql.Tx) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin webhook transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if err := s.recordEvent(ctx, tx, rec); err != nil {
+		return err
+	}
+	if process != nil {
+		if err := process(tx); err != nil {
+			return fmt.Errorf("process webhook event: %w", err)
+		}
+	}
+	if err := s.markProcessed(ctx, tx, rec.ID, rec.Provider, nil); err != nil {
+		return fmt.Errorf("mark webhook processed: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit webhook transaction: %w", err)
+	}
+	return nil
+}
+
 func (s *WebhookService) MarkProcessed(ctx context.Context, eventID, provider string, processingErr error) error {
+	return s.markProcessed(ctx, s.db, eventID, provider, processingErr)
+}
+
+func (s *WebhookService) markProcessed(ctx context.Context, exec billingDBTX, eventID, provider string, processingErr error) error {
 	provider = NormalizeProvider(provider)
 	var errStr string
 	if processingErr != nil {
 		errStr = processingErr.Error()
 	}
-	_, err := s.db.ExecContext(ctx,
+	_, err := exec.ExecContext(ctx,
 		"UPDATE webhook_events SET processed_at = "+s.dialect.Placeholder(1)+", processing_error = "+s.dialect.Placeholder(2)+" WHERE id = "+s.dialect.Placeholder(3)+" AND provider = "+s.dialect.Placeholder(4),
 		time.Now().UTC(), errStr, eventID, provider)
 	return err

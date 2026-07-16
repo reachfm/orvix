@@ -58,6 +58,17 @@ type InvoiceFilter struct {
 }
 
 func (s *InvoiceService) UpsertFromProviderEvent(ctx context.Context, inv *InvoiceRecord, eventCreatedAt *time.Time, eventID string) (*InvoiceRecord, error) {
+	return s.upsertFromProviderEvent(ctx, s.db, inv, eventCreatedAt, eventID)
+}
+
+func (s *InvoiceService) UpsertFromProviderEventTx(ctx context.Context, tx *sql.Tx, inv *InvoiceRecord, eventCreatedAt *time.Time, eventID string) (*InvoiceRecord, error) {
+	if tx == nil {
+		return nil, fmt.Errorf("invoice transaction is required")
+	}
+	return s.upsertFromProviderEvent(ctx, tx, inv, eventCreatedAt, eventID)
+}
+
+func (s *InvoiceService) upsertFromProviderEvent(ctx context.Context, exec billingDBTX, inv *InvoiceRecord, eventCreatedAt *time.Time, eventID string) (*InvoiceRecord, error) {
 	prov := NormalizeProvider(inv.Provider)
 	if prov == "" {
 		return nil, fmt.Errorf("invoice provider is required")
@@ -73,7 +84,8 @@ func (s *InvoiceService) UpsertFromProviderEvent(ctx context.Context, inv *Invoi
 	now := time.Now().UTC()
 	var id uint
 
-	err := s.db.QueryRowContext(ctx,
+	excluded := func(column string) string { return d.Excluded(column) }
+	err := exec.QueryRowContext(ctx,
 		`INSERT INTO invoices (created_at, updated_at, tenant_id, subscription_id, provider,
 		provider_invoice_id, invoice_number, currency, subtotal, tax, total,
 		amount_paid, amount_due, status, period_start, period_end, issued_at,
@@ -81,84 +93,59 @@ func (s *InvoiceService) UpsertFromProviderEvent(ctx context.Context, inv *Invoi
 		provider_event_created_at, provider_event_id, provider_updated_at)
 		VALUES (`+d.Placeholders(24)+`)
 		ON CONFLICT (provider, provider_invoice_id) DO UPDATE SET
-		updated_at = `+d.Placeholder(25)+`,
+		updated_at = `+excluded("updated_at")+`,
 		status = CASE
-			WHEN invoices.status = 'paid' AND `+d.Placeholder(26)+` NOT IN ('void', 'uncollectible') THEN 'paid'
-			ELSE `+d.Placeholder(27)+`
+			WHEN invoices.status = 'paid' AND `+excluded("status")+` NOT IN ('void', 'uncollectible') THEN 'paid'
+			ELSE `+excluded("status")+`
 		END,
 		total = CASE
-			WHEN `+d.Placeholder(28)+` IS NOT NULL AND invoices.provider_event_created_at IS NOT NULL AND `+d.Placeholder(29)+` < invoices.provider_event_created_at THEN invoices.total
-			ELSE `+d.Placeholder(30)+`
+			WHEN `+excluded("provider_event_created_at")+` IS NOT NULL AND invoices.provider_event_created_at IS NOT NULL AND `+excluded("provider_event_created_at")+` < invoices.provider_event_created_at THEN invoices.total
+			ELSE `+excluded("total")+`
 		END,
 		amount_paid = CASE
-			WHEN `+d.Placeholder(31)+` IS NOT NULL AND invoices.provider_event_created_at IS NOT NULL AND `+d.Placeholder(32)+` < invoices.provider_event_created_at THEN invoices.amount_paid
-			ELSE `+d.Placeholder(33)+`
+			WHEN `+excluded("provider_event_created_at")+` IS NOT NULL AND invoices.provider_event_created_at IS NOT NULL AND `+excluded("provider_event_created_at")+` < invoices.provider_event_created_at THEN invoices.amount_paid
+			ELSE `+excluded("amount_paid")+`
 		END,
 		amount_due = CASE
-			WHEN `+d.Placeholder(34)+` IS NOT NULL AND invoices.provider_event_created_at IS NOT NULL AND `+d.Placeholder(35)+` < invoices.provider_event_created_at THEN invoices.amount_due
-			ELSE `+d.Placeholder(36)+`
+			WHEN `+excluded("provider_event_created_at")+` IS NOT NULL AND invoices.provider_event_created_at IS NOT NULL AND `+excluded("provider_event_created_at")+` < invoices.provider_event_created_at THEN invoices.amount_due
+			ELSE `+excluded("amount_due")+`
 		END,
 		subtotal = CASE
-			WHEN `+d.Placeholder(37)+` IS NOT NULL AND invoices.provider_event_created_at IS NOT NULL AND `+d.Placeholder(38)+` < invoices.provider_event_created_at THEN invoices.subtotal
-			ELSE `+d.Placeholder(39)+`
+			WHEN `+excluded("provider_event_created_at")+` IS NOT NULL AND invoices.provider_event_created_at IS NOT NULL AND `+excluded("provider_event_created_at")+` < invoices.provider_event_created_at THEN invoices.subtotal
+			ELSE `+excluded("subtotal")+`
 		END,
 		tax = CASE
-			WHEN `+d.Placeholder(40)+` IS NOT NULL AND invoices.provider_event_created_at IS NOT NULL AND `+d.Placeholder(41)+` < invoices.provider_event_created_at THEN invoices.tax
-			ELSE `+d.Placeholder(42)+`
+			WHEN `+excluded("provider_event_created_at")+` IS NOT NULL AND invoices.provider_event_created_at IS NOT NULL AND `+excluded("provider_event_created_at")+` < invoices.provider_event_created_at THEN invoices.tax
+			ELSE `+excluded("tax")+`
 		END,
-		currency = `+d.Placeholder(43)+`,
-		invoice_number = `+d.Placeholder(44)+`,
-		subscription_id = `+d.Placeholder(45)+`,
-		period_start = `+d.Placeholder(46)+`,
-		period_end = `+d.Placeholder(47)+`,
-		issued_at = `+d.Placeholder(48)+`,
-		due_at = `+d.Placeholder(49)+`,
-		paid_at = `+d.Placeholder(50)+`,
-		hosted_invoice_url = `+d.Placeholder(51)+`,
-		pdf_url = `+d.Placeholder(52)+`,
+		currency = `+excluded("currency")+`,
+		invoice_number = `+excluded("invoice_number")+`,
+		subscription_id = `+excluded("subscription_id")+`,
+		period_start = `+excluded("period_start")+`,
+		period_end = `+excluded("period_end")+`,
+		issued_at = `+excluded("issued_at")+`,
+		due_at = `+excluded("due_at")+`,
+		paid_at = `+excluded("paid_at")+`,
+		hosted_invoice_url = `+excluded("hosted_invoice_url")+`,
+		pdf_url = `+excluded("pdf_url")+`,
 		provider_event_created_at = CASE
-			WHEN `+d.Placeholder(53)+` IS NULL OR invoices.provider_event_created_at IS NULL THEN `+d.Placeholder(54)+`
-			WHEN `+d.Placeholder(55)+` > invoices.provider_event_created_at THEN `+d.Placeholder(56)+`
+			WHEN `+excluded("provider_event_created_at")+` IS NULL OR invoices.provider_event_created_at IS NULL THEN `+excluded("provider_event_created_at")+`
+			WHEN `+excluded("provider_event_created_at")+` > invoices.provider_event_created_at THEN `+excluded("provider_event_created_at")+`
 			ELSE invoices.provider_event_created_at
 		END,
 		provider_event_id = CASE
-			WHEN `+d.Placeholder(57)+` IS NULL THEN `+d.Placeholder(58)+`
-			WHEN invoices.provider_event_created_at IS NULL THEN `+d.Placeholder(59)+`
-			WHEN `+d.Placeholder(60)+` > invoices.provider_event_created_at THEN `+d.Placeholder(61)+`
+			WHEN `+excluded("provider_event_id")+` IS NULL THEN `+excluded("provider_event_id")+`
+			WHEN invoices.provider_event_created_at IS NULL THEN `+excluded("provider_event_id")+`
+			WHEN `+excluded("provider_event_created_at")+` > invoices.provider_event_created_at THEN `+excluded("provider_event_id")+`
 			ELSE invoices.provider_event_id
 		END,
-		provider_updated_at = `+d.Placeholder(62)+`
+		provider_updated_at = `+excluded("provider_updated_at")+`
 		RETURNING id`,
-		// INSERT values (24)
 		now, now, inv.TenantID, inv.SubscriptionID, prov,
 		inv.ProviderInvoiceID, inv.InvoiceNumber, inv.Currency, inv.Subtotal, inv.Tax, inv.Total,
 		inv.AmountPaid, inv.AmountDue, inv.Status, inv.PeriodStart, inv.PeriodEnd, inv.IssuedAt,
 		inv.DueAt, inv.PaidAt, inv.HostedInvoiceURL, inv.PDFURL,
 		eventCreatedAt, eventID, now,
-		// UPDATE values starting at 25
-		now,                    // 25: updated_at
-		inv.Status, inv.Status, // 26-27: status CASE
-		eventCreatedAt, eventCreatedAt, inv.Total, // 28-30: total CASE
-		eventCreatedAt, eventCreatedAt, inv.AmountPaid, // 31-33: amount_paid CASE
-		eventCreatedAt, eventCreatedAt, inv.AmountDue, // 34-36: amount_due CASE
-		eventCreatedAt, eventCreatedAt, inv.Subtotal, // 37-39: subtotal CASE
-		eventCreatedAt, eventCreatedAt, inv.Tax, // 40-42: tax CASE
-		inv.Currency,                   // 43: currency
-		inv.InvoiceNumber,              // 44: invoice_number
-		inv.SubscriptionID,             // 45: subscription_id
-		inv.PeriodStart,                // 46: period_start
-		inv.PeriodEnd,                  // 47: period_end
-		inv.IssuedAt,                   // 48: issued_at
-		inv.DueAt,                      // 49: due_at
-		inv.PaidAt,                     // 50: paid_at
-		inv.HostedInvoiceURL,           // 51: hosted_invoice_url
-		inv.PDFURL,                     // 52: pdf_url
-		eventCreatedAt, eventCreatedAt, // 53-54: provider_event_created_at CASE (first)
-		eventCreatedAt, eventCreatedAt, // 55-56: provider_event_created_at CASE (condition+value)
-		eventID, eventID, // 57-58: provider_event_id CASE first
-		eventID,                        // 59: provider_event_id CASE second
-		eventCreatedAt, eventCreatedAt, // 60-61: provider_event_id CASE condition+value
-		now, // 62: provider_updated_at
 	).Scan(&id)
 	if err != nil {
 		return nil, fmt.Errorf("upsert invoice: %w", err)

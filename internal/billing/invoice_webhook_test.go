@@ -190,12 +190,7 @@ func setupInvoiceWebhookEnv(t *testing.T) *invoiceWebhookEnv {
 			ReceivedAt:     time.Now().UTC(),
 			IdempotencyKey: eventID,
 		}
-		if err := webhookSvc.RecordEvent(c.Context(), rec); err != nil {
-			if err == ErrWebhookAlreadyProcessed {
-				return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "already_processed"})
-			}
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "recording failed"})
-		}
+		var invoice *InvoiceRecord
 
 		// If this is an invoice event, create/update the invoice using invoiceID.
 		if strings.HasPrefix(full.Type, "invoice.") && invSvc != nil {
@@ -207,7 +202,7 @@ func setupInvoiceWebhookEnv(t *testing.T) *invoiceWebhookEnv {
 					tm := time.Unix(full.Data.Object.Created, 0)
 					created = &tm
 				}
-				inv := &InvoiceRecord{
+				invoice = &InvoiceRecord{
 					TenantID:          sub.TenantID,
 					SubscriptionID:    &sub.ID,
 					Provider:          "test",
@@ -221,10 +216,22 @@ func setupInvoiceWebhookEnv(t *testing.T) *invoiceWebhookEnv {
 					AmountDue:         full.Data.Object.AmountDue,
 					Status:            mapTestInvoiceStatus(full.Data.Object.PaymentStatus, full.Type),
 				}
-				if _, err := invSvc.UpsertFromProviderEvent(c.Context(), inv, created, eventID); err != nil {
-					return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "invoice write failed"})
-				}
+				invoice.IssuedAt = created
 			}
+		}
+
+		err := webhookSvc.ProcessEvent(c.Context(), rec, func(tx *sql.Tx) error {
+			if invoice == nil {
+				return nil
+			}
+			_, err := invSvc.UpsertFromProviderEventTx(c.Context(), tx, invoice, invoice.IssuedAt, eventID)
+			return err
+		})
+		if err != nil {
+			if err == ErrWebhookAlreadyProcessed {
+				return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "already_processed"})
+			}
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "event processing failed"})
 		}
 
 		if full.Data.Object.PaymentStatus == "paid" && full.Data.Object.Subscription != "" {
@@ -233,7 +240,6 @@ func setupInvoiceWebhookEnv(t *testing.T) *invoiceWebhookEnv {
 			}
 		}
 
-		webhookSvc.MarkProcessed(c.Context(), eventID, "test", nil)
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "received"})
 	})
 
@@ -319,6 +325,10 @@ func TestInvoiceWebhook_Updated(t *testing.T) {
 	resp := doInvoiceWebhook(t, env, payload2)
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	env.db.QueryRow("SELECT total FROM invoices WHERE provider_invoice_id = 'evt_create_inv'").Scan(&total)
+	if total != 7500 {
+		t.Fatalf("expected total 7500 after update, got %d", total)
 	}
 }
 
@@ -445,6 +455,39 @@ func TestInvoiceWebhook_UnknownSubscription(t *testing.T) {
 	}
 }
 
+func TestInvoiceWebhook_TenantIsolationUsesSubscriptionOwner(t *testing.T) {
+	env := setupInvoiceWebhookEnv(t)
+	if _, err := env.svc.CreateSubscription(2, PlanFree, IntervalMonthly, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.db.Exec("UPDATE subscriptions SET provider_sub_id = 'sub_inv_tenant_2' WHERE tenant_id = 2"); err != nil {
+		t.Fatal(err)
+	}
+
+	payload := invoicePayload(t, "evt_tenant_2", "invoice.created", map[string]interface{}{
+		"subscription": "sub_inv_tenant_2",
+	})
+	resp := doInvoiceWebhook(t, env, payload)
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var tenantID uint
+	if err := env.db.QueryRow("SELECT tenant_id FROM invoices WHERE provider_invoice_id = 'evt_tenant_2'").Scan(&tenantID); err != nil {
+		t.Fatal(err)
+	}
+	if tenantID != 2 {
+		t.Fatalf("invoice tenant: got %d want 2", tenantID)
+	}
+	var tenantOneCount int
+	if err := env.db.QueryRow("SELECT COUNT(*) FROM invoices WHERE provider_invoice_id = 'evt_tenant_2' AND tenant_id = 1").Scan(&tenantOneCount); err != nil {
+		t.Fatal(err)
+	}
+	if tenantOneCount != 0 {
+		t.Fatalf("tenant 1 can observe tenant 2 invoice row: count=%d", tenantOneCount)
+	}
+}
+
 func TestInvoiceWebhook_OlderEventDoesNotRegressPaid(t *testing.T) {
 	env := setupInvoiceWebhookEnv(t)
 	now := time.Now().UTC()
@@ -509,39 +552,50 @@ func TestInvoiceWebhook_RollbackOnDBFailure(t *testing.T) {
 	env.db.Exec("DROP TABLE IF EXISTS invoices")
 
 	resp := doInvoiceWebhook(t, env, payload)
-	if resp.StatusCode == 500 {
-		t.Log("webhook returned 500 on DB failure (expected behavior)")
+	if resp.StatusCode != 500 {
+		t.Fatalf("webhook DB failure: expected 500, got %d", resp.StatusCode)
+	}
+	var eventCount int
+	if err := env.db.QueryRow("SELECT COUNT(*) FROM webhook_events WHERE provider = 'test' AND id = 'evt_rollback'").Scan(&eventCount); err != nil {
+		t.Fatal(err)
+	}
+	if eventCount != 0 {
+		t.Fatalf("failed invoice write permanently consumed event: count=%d", eventCount)
 	}
 
 	// Recreate the table
+	dial, err := dbdialect.Detect(env.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	timestampType := dial.TimestampType()
 	rebuildSQL := `CREATE TABLE IF NOT EXISTS invoices (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL,
+		id ` + dial.AutoIncrement() + `,
+		created_at ` + timestampType + ` NOT NULL, updated_at ` + timestampType + ` NOT NULL,
 		tenant_id INTEGER NOT NULL, subscription_id INTEGER,
 		provider TEXT NOT NULL DEFAULT '', provider_invoice_id TEXT,
 		invoice_number TEXT, currency TEXT NOT NULL DEFAULT 'usd',
-		subtotal INTEGER NOT NULL DEFAULT 0, tax INTEGER NOT NULL DEFAULT 0,
-		total INTEGER NOT NULL DEFAULT 0, amount_paid INTEGER NOT NULL DEFAULT 0,
-		amount_due INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'draft',
-		period_start DATETIME, period_end DATETIME, issued_at DATETIME,
-		due_at DATETIME, paid_at DATETIME, hosted_invoice_url TEXT, pdf_url TEXT,
-		provider_event_created_at DATETIME, provider_event_id TEXT,
-		provider_updated_at DATETIME,
+		subtotal BIGINT NOT NULL DEFAULT 0, tax BIGINT NOT NULL DEFAULT 0,
+		total BIGINT NOT NULL DEFAULT 0, amount_paid BIGINT NOT NULL DEFAULT 0,
+		amount_due BIGINT NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'draft',
+		period_start ` + timestampType + `, period_end ` + timestampType + `, issued_at ` + timestampType + `,
+		due_at ` + timestampType + `, paid_at ` + timestampType + `, hosted_invoice_url TEXT, pdf_url TEXT,
+		provider_event_created_at ` + timestampType + `, provider_event_id TEXT,
+		provider_updated_at ` + timestampType + `,
 		UNIQUE(provider, provider_invoice_id)
 	)`
 	if _, err := env.db.Exec(rebuildSQL); err != nil {
 		t.Fatal(err)
 	}
 
-	// Provider retry — use a new event ID since the old one was already recorded.
-	payload2 := invoicePayload(t, "evt_rollback_retry", "invoice.created", nil, time.Now().UTC())
-	resp = doInvoiceWebhook(t, env, payload2)
+	// Retry the same provider event after restoring the invoice table.
+	resp = doInvoiceWebhook(t, env, payload)
 	if resp.StatusCode != 200 {
 		t.Fatalf("retry after DB restore: expected 200, got %d", resp.StatusCode)
 	}
 
 	var count int64
-	env.db.QueryRow("SELECT COUNT(*) FROM invoices WHERE provider_invoice_id = 'evt_rollback_retry'").Scan(&count)
+	env.db.QueryRow("SELECT COUNT(*) FROM invoices WHERE provider_invoice_id = 'evt_rollback'").Scan(&count)
 	if count != 1 {
 		t.Fatalf("expected 1 invoice after retry, got %d", count)
 	}
