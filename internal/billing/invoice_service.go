@@ -23,26 +23,26 @@ func NewInvoiceService(db *sql.DB) *InvoiceService {
 }
 
 type InvoiceRecord struct {
-	ID                uint       `json:"id"`
-	TenantID          uint       `json:"tenant_id"`
-	SubscriptionID    *uint      `json:"subscription_id,omitempty"`
-	Provider          string     `json:"provider"`
-	ProviderInvoiceID string     `json:"provider_invoice_id"`
-	InvoiceNumber     string     `json:"invoice_number"`
-	Currency          string     `json:"currency"`
-	Subtotal          int64      `json:"subtotal"`
-	Tax               int64      `json:"tax"`
-	Total             int64      `json:"total"`
-	AmountPaid        int64      `json:"amount_paid"`
-	AmountDue         int64      `json:"amount_due"`
-	Status            string     `json:"status"`
-	PeriodStart       *time.Time `json:"period_start,omitempty"`
-	PeriodEnd         *time.Time `json:"period_end,omitempty"`
-	IssuedAt          *time.Time `json:"issued_at,omitempty"`
-	DueAt             *time.Time `json:"due_at,omitempty"`
-	PaidAt            *time.Time `json:"paid_at,omitempty"`
-	HostedInvoiceURL  string     `json:"hosted_invoice_url,omitempty"`
-	PDFURL            string     `json:"pdf_url,omitempty"`
+	ID                     uint       `json:"id"`
+	TenantID               uint       `json:"tenant_id"`
+	SubscriptionID         *uint      `json:"subscription_id,omitempty"`
+	Provider               string     `json:"provider"`
+	ProviderInvoiceID      string     `json:"provider_invoice_id"`
+	InvoiceNumber          string     `json:"invoice_number"`
+	Currency               string     `json:"currency"`
+	Subtotal               int64      `json:"subtotal"`
+	Tax                    int64      `json:"tax"`
+	Total                  int64      `json:"total"`
+	AmountPaid             int64      `json:"amount_paid"`
+	AmountDue              int64      `json:"amount_due"`
+	Status                 string     `json:"status"`
+	PeriodStart            *time.Time `json:"period_start,omitempty"`
+	PeriodEnd              *time.Time `json:"period_end,omitempty"`
+	IssuedAt               *time.Time `json:"issued_at,omitempty"`
+	DueAt                  *time.Time `json:"due_at,omitempty"`
+	PaidAt                 *time.Time `json:"paid_at,omitempty"`
+	HostedInvoiceURL       string     `json:"hosted_invoice_url,omitempty"`
+	PDFURL                 string     `json:"pdf_url,omitempty"`
 	ProviderEventCreatedAt *time.Time `json:"provider_event_created_at,omitempty"`
 	ProviderEventID        string     `json:"provider_event_id,omitempty"`
 	ProviderUpdatedAt      *time.Time `json:"provider_updated_at,omitempty"`

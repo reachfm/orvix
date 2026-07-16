@@ -114,6 +114,10 @@ export const api = {
   // Dashboard
   getDashboard: () => request<any>("/enterprise/dashboard"),
 
+  // Invoices
+  listInvoices: () => request<any[]>("/enterprise/billing/invoices"),
+  getInvoice: (id: number) => request<any>(`/enterprise/billing/invoices/${id}`),
+
   // Audit logs
   listAuditLogs: () => request<any[]>("/enterprise/audit/logs"),
 

@@ -57,17 +57,17 @@ func TestInvoiceCreateFromProviderEvent(t *testing.T) {
 	now := time.Now().UTC()
 
 	inv := &InvoiceRecord{
-		TenantID:         1,
-		Provider:         "stripe",
+		TenantID:          1,
+		Provider:          "stripe",
 		ProviderInvoiceID: "in_123",
-		InvoiceNumber:    "INV-001",
-		Currency:         "usd",
-		Subtotal:         10000,
-		Tax:              1000,
-		Total:            11000,
-		AmountPaid:       0,
-		AmountDue:        11000,
-		Status:           "open",
+		InvoiceNumber:     "INV-001",
+		Currency:          "usd",
+		Subtotal:          10000,
+		Tax:               1000,
+		Total:             11000,
+		AmountPaid:        0,
+		AmountDue:         11000,
+		Status:            "open",
 	}
 
 	result, err := svc.UpsertFromProviderEvent(ctx, inv, &now, "evt_001")
@@ -160,11 +160,11 @@ func TestInvoiceListPagination(t *testing.T) {
 
 	for i := 0; i < 5; i++ {
 		inv := &InvoiceRecord{
-			TenantID:         1,
-			Provider:         "stripe",
+			TenantID:          1,
+			Provider:          "stripe",
 			ProviderInvoiceID: fmt.Sprintf("in_page_%d", i),
-			Total:            1000 + int64(i*100),
-			Status:           "open",
+			Total:             1000 + int64(i*100),
+			Status:            "open",
 		}
 		svc.UpsertFromProviderEvent(ctx, inv, &now, fmt.Sprintf("evt_%d", i))
 	}

@@ -1,12 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
-import { CreditCard, Download, FileText, HardDrive, Mail } from "lucide-react";
+import { CreditCard, Download, ExternalLink, FileText, HardDrive, Mail } from "lucide-react";
 import { api } from "../api";
 
 export default function InvoicesPage() {
   const { data: sub, isLoading: subLoading } = useQuery({ queryKey: ["subscription"], queryFn: api.getSubscription });
   const { data: usage, isLoading: usageLoading } = useQuery({ queryKey: ["usage"], queryFn: api.getUsage });
+  const { data: invoices, isLoading: invLoading } = useQuery({ queryKey: ["invoices"], queryFn: api.listInvoices });
 
-  if (subLoading || usageLoading) return <p className="text-[#8B92A8]">Loading...</p>;
+  if (subLoading || usageLoading || invLoading) return <p className="text-[#8B92A8]">Loading...</p>;
 
   const statusColors: Record<string, string> = {
     active: "bg-[#34D399]/10 text-[#34D399]",
@@ -14,17 +15,19 @@ export default function InvoicesPage() {
     past_due: "bg-[#FBBF24]/10 text-[#FBBF24]",
     cancelled: "bg-[#F87171]/10 text-[#F87171]",
     suspended: "bg-[#F87171]/10 text-[#F87171]",
+    paid: "bg-[#34D399]/10 text-[#34D399]",
+    open: "bg-[#4F7CFF]/10 text-[#4F7CFF]",
+    void: "bg-[#555D73]/10 text-[#555D73]",
+    uncollectible: "bg-[#F87171]/10 text-[#F87171]",
   };
 
-  const invoiceEntries = sub ? [
-    {
-      id: 1,
-      description: `${sub.plan_id || "Subscription"} - Monthly charge`,
-      amount: sub.amount ? `$${(sub.amount / 100).toFixed(2)}` : "-",
-      date: sub.current_period_start || "-",
-      status: sub.status || "unknown",
-    },
-  ] : [];
+  const formatAmount = (amount: number, currency: string) => {
+    const major = (amount / 100).toFixed(2);
+    return new Intl.NumberFormat("en-US", { style: "currency", currency: (currency || "USD").toUpperCase() })
+      .format(parseFloat(major));
+  };
+
+  const invList = Array.isArray(invoices) ? invoices : [];
 
   return (
     <div className="space-y-6">
@@ -46,8 +49,6 @@ export default function InvoicesPage() {
             <div><span className="text-gray-400">Status: </span><span className="text-white">{(sub.status || "").replace(/_/g, " ")}</span></div>
             <div><span className="text-gray-400">Period Start: </span><span className="text-white">{sub.current_period_start || "-"}</span></div>
             <div><span className="text-gray-400">Period End: </span><span className="text-white">{sub.current_period_end || "-"}</span></div>
-            {sub.storage_mb && <div><span className="text-gray-400">Storage: </span><span className="text-white">{sub.storage_mb} MB</span></div>}
-            {sub.send_limit_day && <div><span className="text-gray-400">Send Limit: </span><span className="text-white">{sub.send_limit_day}/day</span></div>}
           </div>
         </div>
       ) : (
@@ -92,37 +93,50 @@ export default function InvoicesPage() {
           <h3 className="text-lg font-medium text-white">Invoices</h3>
         </div>
 
-        {invoiceEntries.length > 0 ? (
+        {invList.length > 0 ? (
           <div className="overflow-hidden rounded-lg border border-[#2A2F3E]">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-[#2A2F3E] bg-[#0C0E12]">
-                  <th className="text-left p-3 text-[#8B92A8] font-medium">Description</th>
-                  <th className="text-left p-3 text-[#8B92A8] font-medium">Date</th>
+                  <th className="text-left p-3 text-[#8B92A8] font-medium">Invoice</th>
+                  <th className="text-left p-3 text-[#8B92A8] font-medium">Period</th>
                   <th className="text-left p-3 text-[#8B92A8] font-medium">Amount</th>
                   <th className="text-left p-3 text-[#8B92A8] font-medium">Status</th>
-                  <th className="text-right p-3 text-[#8B92A8] font-medium">Download</th>
+                  <th className="text-right p-3 text-[#8B92A8] font-medium">Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {invoiceEntries.map((inv) => (
+                {invList.map((inv: any) => (
                   <tr key={inv.id} className="border-b border-[#262A33] hover:bg-[#13161C]">
-                    <td className="p-3 text-[#E8EAF0]">{inv.description}</td>
-                    <td className="p-3 text-[#8B92A8]">{inv.date}</td>
-                    <td className="p-3 text-white font-medium">{inv.amount}</td>
+                    <td className="p-3 text-[#E8EAF0]">{inv.invoice_number || `#${inv.id}`}</td>
+                    <td className="p-3 text-[#8B92A8]">
+                      {inv.period_start ? new Date(inv.period_start).toLocaleDateString() : "-"}
+                      {" – "}
+                      {inv.period_end ? new Date(inv.period_end).toLocaleDateString() : "-"}
+                    </td>
+                    <td className="p-3 text-white font-medium">{formatAmount(inv.total, inv.currency)}</td>
                     <td className="p-3">
                       <span className={`px-2 py-1 text-xs rounded-full ${statusColors[inv.status] || "text-gray-400 bg-gray-400/10"}`}>
                         {inv.status}
                       </span>
                     </td>
                     <td className="p-3 text-right">
-                      <button
-                        disabled
-                        title="Invoice generation coming soon"
-                        className="inline-flex items-center gap-1 text-xs text-[#555D73] cursor-not-allowed"
-                      >
-                        <Download size={14} /> PDF
-                      </button>
+                      <div className="flex items-center justify-end gap-2">
+                        {inv.hosted_invoice_url && (
+                          <a href={inv.hosted_invoice_url} target="_blank" rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 text-xs text-[#4F7CFF] hover:underline">
+                            <ExternalLink size={14} /> View
+                          </a>
+                        )}
+                        {inv.pdf_url ? (
+                          <a href={inv.pdf_url} target="_blank" rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 text-xs text-[#4F7CFF] hover:underline">
+                            <Download size={14} /> PDF
+                          </a>
+                        ) : (
+                          <span className="text-xs text-[#555D73]">–</span>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}
