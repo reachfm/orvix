@@ -208,8 +208,8 @@ func postgresTables() []string {
 			key_hash TEXT NOT NULL,
 			key_prefix TEXT NOT NULL DEFAULT '',
 			scopes TEXT NOT NULL DEFAULT '',
-			enabled BOOLEAN NOT NULL DEFAULT true,
-			last_used TIMESTAMP,
+			active BOOLEAN NOT NULL DEFAULT true,
+			last_used_at TIMESTAMP,
 			expires_at TIMESTAMP
 		)`,
 		`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS scopes TEXT NOT NULL DEFAULT ''`,

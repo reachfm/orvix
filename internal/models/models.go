@@ -669,8 +669,8 @@ func MigrateAllRaw(db *gorm.DB) error {
 			key_hash TEXT NOT NULL UNIQUE,
 			key_prefix TEXT NOT NULL DEFAULT '',
 			scopes TEXT NOT NULL DEFAULT '',
-			enabled INTEGER NOT NULL DEFAULT 1,
-			last_used DATETIME,
+			active INTEGER NOT NULL DEFAULT 1,
+			last_used_at DATETIME,
 			expires_at DATETIME
 		)`,
 		// CoreMail tables
@@ -1417,8 +1417,7 @@ func migrateAPIKeysSchema(ctx context.Context, db *sql.DB) error {
 		{"key_prefix", "ALTER TABLE api_keys ADD COLUMN key_prefix TEXT NOT NULL DEFAULT ''"},
 		{"tenant_id", "ALTER TABLE api_keys ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 0"},
 		{"role", "ALTER TABLE api_keys ADD COLUMN role TEXT NOT NULL DEFAULT 'user'"},
-		{"enabled", "ALTER TABLE api_keys ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1"},
-		{"last_used", "ALTER TABLE api_keys ADD COLUMN last_used DATETIME"},
+		{"scopes", "ALTER TABLE api_keys ADD COLUMN scopes TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, addition := range additions {
 		if columns[addition.name] {
@@ -1428,11 +1427,6 @@ func migrateAPIKeysSchema(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("add api_keys.%s: %w", addition.name, err)
 		}
 		columns[addition.name] = true
-	}
-
-	// Migrate data from old `active` column to `enabled` if active exists and enabled was just added.
-	if columns["active"] {
-		db.ExecContext(ctx, "UPDATE api_keys SET enabled = active WHERE enabled IS NULL OR enabled = 0")
 	}
 
 	return nil

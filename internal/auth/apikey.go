@@ -22,8 +22,8 @@ type APIKeyRecord struct {
 	TenantID  uint       `gorm:"not null;default:0" json:"tenant_id"`
 	Role      string     `gorm:"not null;default:'user'" json:"role"`
 	Scopes    string     `gorm:"type:text" json:"scopes,omitempty"`
-	Enabled   bool       `gorm:"not null;default:true" json:"enabled"`
-	LastUsed  *time.Time `json:"last_used,omitempty"`
+	Enabled   bool       `gorm:"column:active;not null;default:true" json:"enabled"`
+	LastUsed  *time.Time `gorm:"column:last_used_at" json:"last_used,omitempty"`
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 	CreatedAt time.Time  `json:"created_at"`
 }
@@ -102,7 +102,7 @@ func (m *APIKeyManager) Validate(key string) (*APIKeyRecord, error) {
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(key)))
 
 	var record APIKeyRecord
-	if err := m.db.Where("key_hash = ? AND enabled = ?", hash, true).First(&record).Error; err != nil {
+	if err := m.db.Where("key_hash = ? AND active = ?", hash, true).First(&record).Error; err != nil {
 		return nil, fmt.Errorf("invalid API key")
 	}
 
@@ -182,7 +182,7 @@ func (m *APIKeyManager) RotateByID(oldID, userID, tenantID uint, role string, sc
 		}
 
 		// Disable old key.
-		if err := tx.Model(&APIKeyRecord{}).Where("id = ?", oldID).Update("enabled", false).Error; err != nil {
+		if err := tx.Model(&APIKeyRecord{}).Where("id = ?", oldID).Update("active", false).Error; err != nil {
 			return fmt.Errorf("failed to revoke old key: %w", err)
 		}
 
@@ -207,7 +207,7 @@ func (m *APIKeyManager) Revoke(id uint) error {
 
 // RevokeScoped disables an API key by ID, scoped to the owning user.
 func (m *APIKeyManager) RevokeScoped(id, userID uint) error {
-	result := m.db.Model(&APIKeyRecord{}).Where("id = ? AND user_id = ?", id, userID).Update("enabled", false)
+	result := m.db.Model(&APIKeyRecord{}).Where("id = ? AND user_id = ?", id, userID).Update("active", false)
 	if result.RowsAffected == 0 {
 		return fmt.Errorf("API key not found")
 	}

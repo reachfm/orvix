@@ -204,13 +204,13 @@ func seed10Tables(t *testing.T, sqlDB *sql.DB) {
 	}
 
 	// 5. api_keys (FK → users)
-	_, err = sqlDB.Exec(`INSERT INTO api_keys (created_at, updated_at, user_id, key_hash, name, expires_at, last_used, enabled)
+	_, err = sqlDB.Exec(`INSERT INTO api_keys (created_at, updated_at, user_id, key_hash, name, expires_at, last_used_at, active)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		now, now, 1, "sk_live_abc123", "Production API Key", now, now, 1)
 	if err != nil {
 		t.Fatalf("seed api_key 1: %v", err)
 	}
-	_, err = sqlDB.Exec(`INSERT INTO api_keys (created_at, updated_at, user_id, key_hash, name, enabled)
+	_, err = sqlDB.Exec(`INSERT INTO api_keys (created_at, updated_at, user_id, key_hash, name, active)
 		VALUES (?, ?, ?, ?, ?, ?)`,
 		now, now, 1, "sk_test_def456", "Test API Key", 1)
 	if err != nil {
@@ -513,12 +513,12 @@ func verifyBooleanConversions(t *testing.T, db *sql.DB) {
 		}
 	}
 
-	// api_keys.enabled
-	var keyEnabled bool
-	if err := db.QueryRow("SELECT enabled FROM api_keys WHERE key_hash = 'sk_live_abc123'").Scan(&keyEnabled); err != nil {
-		t.Errorf("query api_keys.enabled: %v", err)
-	} else if !keyEnabled {
-		t.Error("api_keys.enabled should be true")
+	// api_keys.active
+	var keyActive bool
+	if err := db.QueryRow("SELECT active FROM api_keys WHERE key_hash = 'sk_live_abc123'").Scan(&keyActive); err != nil {
+		t.Errorf("query api_keys.active: %v", err)
+	} else if !keyActive {
+		t.Error("api_keys.active should be true")
 	}
 
 	// feature_flags.enabled
