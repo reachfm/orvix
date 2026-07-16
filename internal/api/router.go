@@ -717,6 +717,11 @@ func (r *Router) setupRoutes() {
 		},
 	})
 	protected.Post("/account/support-requests", supportLimiter, r.h.SubmitSupportRequest)
+	protected.Get("/account/mfa/status", r.h.AccountMFAStatus)
+	protected.Post("/account/mfa/setup", r.h.AccountMFASetup)
+	protected.Post("/account/mfa/verify", r.h.AccountMFAVerify)
+	protected.Post("/account/mfa/disable", r.h.AccountMFADisable)
+	protected.Post("/account/mfa/recovery-codes/regenerate", r.h.AccountMFARegenerateRecoveryCodes)
 
 	// User-facing webmail endpoints. Mounted on the
 	// protected group so the auth middleware rejects

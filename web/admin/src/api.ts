@@ -127,13 +127,15 @@ export const api = {
     request(`/account/sessions/${id}/revoke`, { method: "POST" }),
 
   // MFA
-  getMFAStatus: () => request<any>("/admin/mfa/status"),
+  getMFAStatus: () => request<any>("/account/mfa/status"),
   setupMFABegin: (data: { current_password: string }) =>
-    request("/admin/mfa/setup/begin", { method: "POST", body: JSON.stringify(data) }),
+    request("/account/mfa/setup", { method: "POST", body: JSON.stringify(data) }),
   setupMFAVerify: (code: string) =>
-    request("/admin/mfa/setup/verify", { method: "POST", body: JSON.stringify({ code }) }),
-  disableMFA: (data: { current_password: string; code: string }) =>
-    request("/admin/mfa/disable", { method: "POST", body: JSON.stringify(data) }),
+    request("/account/mfa/verify", { method: "POST", body: JSON.stringify({ code }) }),
+  disableMFA: (data: { current_password: string; code?: string; recovery_code?: string }) =>
+    request("/account/mfa/disable", { method: "POST", body: JSON.stringify(data) }),
+  regenerateRecoveryCodes: (data: { current_password: string; code?: string }) =>
+    request("/account/mfa/recovery-codes/regenerate", { method: "POST", body: JSON.stringify(data) }),
 
   // Forgot/reset password
   forgotPassword: (email: string) =>
