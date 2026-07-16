@@ -224,8 +224,10 @@ func postgresTables() []string {
 			email TEXT NOT NULL DEFAULT '',
 			ip TEXT NOT NULL DEFAULT '',
 			user_agent TEXT,
+			jti TEXT NOT NULL DEFAULT '',
 			expires_at TIMESTAMP NOT NULL
 		)`,
+		`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS jti TEXT NOT NULL DEFAULT ''`,
 
 		// revoked_tokens backs H-9 access-token revocation on logout:
 		// a logged-out access token's jti is stored here until its

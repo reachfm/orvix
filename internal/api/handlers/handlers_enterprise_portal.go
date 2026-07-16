@@ -17,6 +17,19 @@ func (h *Handler) ListEnterpriseAPIKeys(c fiber.Ctx) error {
 }
 
 func (h *Handler) CreateEnterpriseAPIKey(c fiber.Ctx) error {
+	var req struct {
+		Name   string   `json:"name"`
+		Scopes []string `json:"scopes"`
+		TTL    string   `json:"ttl"`
+	}
+	if err := c.Bind().JSON(&req); err == nil {
+		if len(req.Scopes) > 0 {
+			role, _ := c.Locals("role").(auth.Role)
+			if err := validateAPIKeyScopes(req.Scopes, role); err != nil {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+			}
+		}
+	}
 	return h.CreateAPIKey(c)
 }
 
@@ -72,8 +85,9 @@ func (h *Handler) RotateEnterpriseAPIKey(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 
-	// Atomic rotation: revoke old + generate new in a single operation.
-	fullKey, record, err := h.apikeys.Rotate(oldName, userID, tenantID, role, scopes, 365)
+	// Atomic rotation via RotateByID: loads old key by ID + user + tenant,
+	// generates new key, inserts replacement, disables old, commits atomically.
+	fullKey, record, err := h.apikeys.RotateByID(id, userID, tenantID, role, scopes, 365)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}

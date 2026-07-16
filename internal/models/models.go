@@ -224,6 +224,7 @@ type Session struct {
 	TokenHash string    `gorm:"uniqueIndex;not null" json:"token_hash"`
 	Role      string    `gorm:"not null;default:''" json:"role"`
 	Email     string    `gorm:"not null;default:''" json:"email"`
+	JTI       string    `gorm:"default:''" json:"jti"`
 	IP        string    `gorm:"not null" json:"ip"`
 	UserAgent string    `gorm:"type:text" json:"user_agent"`
 	ExpiresAt time.Time `gorm:"not null" json:"expires_at"`
@@ -526,6 +527,7 @@ func MigrateAllRaw(db *gorm.DB) error {
 			email TEXT NOT NULL DEFAULT '',
 			ip TEXT NOT NULL,
 			user_agent TEXT,
+			jti TEXT NOT NULL DEFAULT '',
 			expires_at DATETIME NOT NULL
 		)`,
 		// revoked_tokens backs H-9 access-token revocation on logout:
@@ -1148,6 +1150,9 @@ func MigrateAllRaw(db *gorm.DB) error {
 	if err := migrateUsersProfileSchema(ctx, sqlDB); err != nil {
 		return err
 	}
+	if err := migrateSessionsJTI(ctx, sqlDB); err != nil {
+		return err
+	}
 	if err := migrateInvoicesSchema(ctx, sqlDB); err != nil {
 		return err
 	}
@@ -1376,6 +1381,20 @@ func migrateInvoicesSchema(ctx context.Context, db *sql.DB) error {
 		columns[addition.name] = true
 	}
 
+	return nil
+}
+
+func migrateSessionsJTI(ctx context.Context, db *sql.DB) error {
+	columns, err := sqliteColumns(ctx, db, "sessions")
+	if err != nil {
+		return fmt.Errorf("inspect sessions schema: %w", err)
+	}
+	if columns["jti"] {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx, "ALTER TABLE sessions ADD COLUMN jti TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("add sessions.jti: %w", err)
+	}
 	return nil
 }
 

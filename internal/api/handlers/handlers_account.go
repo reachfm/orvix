@@ -59,14 +59,25 @@ func (h *Handler) RevokeAccountSession(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid session id"})
 	}
 
-	result := h.db.Where("id = ? AND user_id = ?", uint(id), userID).Delete(&models.Session{})
-	if result.RowsAffected == 0 {
+	// Look up the session to get its JTI for JWT revocation.
+	var session models.Session
+	if err := h.db.Where("id = ? AND user_id = ?", uint(id), userID).First(&session).Error; err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "session not found"})
 	}
-	// Also revoke the JWT access token if present.
+
+	// Delete the opaque session row.
+	h.db.Where("id = ? AND user_id = ?", uint(id), userID).Delete(&models.Session{})
+
+	// Revoke the associated JWT via its JTI.
+	if session.JTI != "" {
+		h.db.Exec("INSERT OR IGNORE INTO revoked_tokens (jti, expires_at) VALUES (?, ?)", session.JTI, session.ExpiresAt)
+	}
+
+	// Also revoke the caller's current cookie token if present.
 	if accessToken := c.Cookies("access_token"); accessToken != "" {
 		h.auth.RevokeAccessToken(accessToken)
 	}
+
 	h.writeAuditLog(c, "session.revoke", fmt.Sprintf("session_id:%d", id))
 	return c.JSON(fiber.Map{"status": "revoked"})
 }

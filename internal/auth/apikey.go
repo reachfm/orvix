@@ -115,10 +115,85 @@ func (m *APIKeyManager) Validate(key string) (*APIKeyRecord, error) {
 	return &record, nil
 }
 
-// Rotate invalidates the old key and generates a new one.
+// Rotate invalidates the old key and generates a new one. Deprecated:
+// use RotateByID which is ID-scoped and transactional.
 func (m *APIKeyManager) Rotate(name string, userID, tenantID uint, role string, scopes []string, ttlDays int) (string, *APIKeyRecord, error) {
 	m.db.Where("name = ? AND user_id = ?", name, userID).Delete(&APIKeyRecord{})
 	return m.Generate(name, userID, tenantID, role, scopes, ttlDays)
+}
+
+// RotateByID atomically rotates an API key by ID. Within a single
+// GORM transaction: loads the old key (scoped by id+user+tenant),
+// validates it is enabled, generates a new key, inserts the replacement,
+// disables the old key, and commits. Rollback on any error.
+func (m *APIKeyManager) RotateByID(oldID, userID, tenantID uint, role string, scopes []string, ttlDays int) (string, *APIKeyRecord, error) {
+	var fullKey string
+	var newRecord *APIKeyRecord
+
+	err := m.db.Transaction(func(tx *gorm.DB) error {
+		// Load old key scoped by ID + user.
+		var old APIKeyRecord
+		if err := tx.Where("id = ? AND user_id = ? AND tenant_id = ?", oldID, userID, tenantID).First(&old).Error; err != nil {
+			return fmt.Errorf("API key not found: %w", err)
+		}
+		if !old.Enabled {
+			return fmt.Errorf("API key is already disabled")
+		}
+
+		// Generate new key.
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err != nil {
+			return fmt.Errorf("failed to generate API key: %w", err)
+		}
+		fullKey = "orv_" + hex.EncodeToString(b)
+		hash := fmt.Sprintf("%x", sha256.Sum256([]byte(fullKey)))
+		prefix := fullKey[:11]
+
+		scopesStr := ""
+		if len(scopes) > 0 {
+			for i, s := range scopes {
+				if i > 0 {
+					scopesStr += ","
+				}
+				scopesStr += s
+			}
+		}
+
+		var expiresAt *time.Time
+		if ttlDays > 0 {
+			t := time.Now().AddDate(0, 0, ttlDays)
+			expiresAt = &t
+		}
+
+		newRecord = &APIKeyRecord{
+			Name:      old.Name,
+			KeyPrefix: prefix,
+			KeyHash:   hash,
+			UserID:    userID,
+			TenantID:  tenantID,
+			Role:      role,
+			Scopes:    scopesStr,
+			Enabled:   true,
+			ExpiresAt: expiresAt,
+		}
+
+		if err := tx.Create(newRecord).Error; err != nil {
+			return fmt.Errorf("failed to insert replacement key: %w", err)
+		}
+
+		// Disable old key.
+		if err := tx.Model(&APIKeyRecord{}).Where("id = ?", oldID).Update("enabled", false).Error; err != nil {
+			return fmt.Errorf("failed to revoke old key: %w", err)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return "", nil, err
+	}
+	m.logger.Info("API key rotated", zap.String("name", newRecord.Name), zap.String("prefix", newRecord.KeyPrefix), zap.Uint("id", oldID))
+	return fullKey, newRecord, nil
 }
 
 // Revoke disables an API key by ID (legacy — use RevokeScoped to enforce ownership).
