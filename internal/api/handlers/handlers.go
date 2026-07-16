@@ -197,6 +197,7 @@ type Handler struct {
 	billingSvc   *billing.Service
 	usageSvc     *billing.UsageService
 	quotaSvc     *billing.QuotaService
+	invoiceSvc   *billing.InvoiceService
 	abuseSvc     *abuse.SignalService
 	rateLimitSvc *abuse.RateLimitService
 
@@ -429,6 +430,10 @@ func (h *Handler) SetBillingScheduler(s *billing.Scheduler) {
 
 func (h *Handler) SetBillingWebhook(s *billing.WebhookService) {
 	h.billingWebhook = s
+}
+
+func (h *Handler) SetInvoiceService(s *billing.InvoiceService) {
+	h.invoiceSvc = s
 }
 
 func (h *Handler) SetPaymentProvider(p billing.PaymentProvider) {

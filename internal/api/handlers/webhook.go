@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -66,6 +67,37 @@ func (h *Handler) ReceivePaymentWebhook(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "event recording failed"})
 	}
 
+	// Process invoice events — create or update the invoice record.
+	if event.InvoiceID != "" && strings.HasPrefix(event.Type, "invoice.") && h.invoiceSvc != nil {
+		sub, subErr := h.billingSvc.GetSubscriptionByProviderID(event.ProviderSubID)
+		if subErr == nil && sub != nil {
+			inv := &billing.InvoiceRecord{
+				TenantID:          sub.TenantID,
+				SubscriptionID:    &sub.ID,
+				Provider:          rec.Provider,
+				ProviderInvoiceID: event.InvoiceID,
+				InvoiceNumber:     event.InvoiceNumber,
+				Currency:          strings.ToUpper(event.Currency),
+				Subtotal:          event.AmountSubtotal,
+				Tax:               event.AmountTax,
+				Total:             event.AmountTotal,
+				AmountPaid:        event.AmountPaid,
+				AmountDue:         event.AmountDue,
+				Status:            mapInvoiceStatus(event.PaymentStatus, event.Type),
+				PeriodStart:       event.PeriodStart,
+				PeriodEnd:         event.PeriodEnd,
+				HostedInvoiceURL:  event.HostedInvoiceURL,
+				PDFURL:            event.PDFURL,
+			}
+			if event.Created != nil {
+				inv.IssuedAt = event.Created
+			}
+			if _, err := h.invoiceSvc.UpsertFromProviderEvent(c.Context(), inv); err != nil {
+				h.logger.Error("invoice upsert failed", zap.Error(err))
+			}
+		}
+	}
+
 	if event.PaymentStatus == "paid" && event.SubscriptionStatus == "active" && event.ProviderSubID != "" && h.billingSvc != nil {
 		if sub, subErr := h.billingSvc.GetSubscriptionByProviderID(event.ProviderSubID); subErr == nil {
 			h.billingSvc.TransitionState(sub.TenantID, billing.SubActive)
@@ -78,4 +110,37 @@ func (h *Handler) ReceivePaymentWebhook(c fiber.Ctx) error {
 	}
 
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "received", "event_id": event.ProviderEventID})
+}
+
+func mapInvoiceStatus(paymentStatus, eventType string) string {
+	// Map from payment provider statuses to our invoice statuses.
+	if paymentStatus == "paid" {
+		return "paid"
+	}
+	if strings.HasSuffix(eventType, ".paid") {
+		return "paid"
+	}
+	if strings.HasSuffix(eventType, ".voided") {
+		return "void"
+	}
+	if strings.HasSuffix(eventType, ".payment_failed") {
+		return "past_due"
+	}
+	if strings.HasSuffix(eventType, ".finalized") {
+		return "open"
+	}
+	switch paymentStatus {
+	case "open":
+		return "open"
+	case "past_due":
+		return "past_due"
+	case "uncollectible":
+		return "uncollectible"
+	case "void":
+		return "void"
+	case "draft":
+		return "draft"
+	default:
+		return "open"
+	}
 }

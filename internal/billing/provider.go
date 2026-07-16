@@ -99,23 +99,58 @@ func (p *hmacPaymentProvider) VerifyWebhook(payload []byte, timestamp, signature
 		Type string `json:"type"`
 		Data struct {
 			Object struct {
-				ID            string `json:"id"`
-				Subscription  string `json:"subscription"`
-				Status        string `json:"status"`
-				PaymentStatus string `json:"payment_status"`
+				ID               string `json:"id"`
+				Subscription     string `json:"subscription"`
+				Status           string `json:"status"`
+				PaymentStatus    string `json:"payment_status"`
+				InvoiceNumber    string `json:"invoice_number"`
+				AmountPaid       int64  `json:"amount_paid"`
+				AmountDue        int64  `json:"amount_due"`
+				Subtotal         int64  `json:"subtotal"`
+				Tax              int64  `json:"tax"`
+				Total            int64  `json:"total"`
+				Currency         string `json:"currency"`
+				PeriodStart      int64  `json:"period_start"`
+				PeriodEnd        int64  `json:"period_end"`
+				HostedInvoiceURL string `json:"hosted_invoice_url"`
+				InvoicePDF       string `json:"invoice_pdf"`
+				Created          int64  `json:"created"`
 			} `json:"object"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		return nil, err
 	}
-	return &WebhookEvent{
+	evt := &WebhookEvent{
 		Type:               raw.Type,
 		ProviderSubID:      raw.Data.Object.Subscription,
 		SubscriptionStatus: raw.Data.Object.Status,
 		PaymentStatus:      raw.Data.Object.PaymentStatus,
 		ProviderEventID:    raw.Data.Object.ID,
-	}, nil
+		InvoiceID:          raw.Data.Object.ID,
+		InvoiceNumber:      raw.Data.Object.InvoiceNumber,
+		AmountPaid:         raw.Data.Object.AmountPaid,
+		AmountDue:          raw.Data.Object.AmountDue,
+		AmountSubtotal:     raw.Data.Object.Subtotal,
+		AmountTax:          raw.Data.Object.Tax,
+		AmountTotal:        raw.Data.Object.Total,
+		Currency:           raw.Data.Object.Currency,
+		HostedInvoiceURL:   raw.Data.Object.HostedInvoiceURL,
+		PDFURL:             raw.Data.Object.InvoicePDF,
+	}
+	if raw.Data.Object.PeriodStart > 0 {
+		t := time.Unix(raw.Data.Object.PeriodStart, 0)
+		evt.PeriodStart = &t
+	}
+	if raw.Data.Object.PeriodEnd > 0 {
+		t := time.Unix(raw.Data.Object.PeriodEnd, 0)
+		evt.PeriodEnd = &t
+	}
+	if raw.Data.Object.Created > 0 {
+		t := time.Unix(raw.Data.Object.Created, 0)
+		evt.Created = &t
+	}
+	return evt, nil
 }
 
 func (p *hmacPaymentProvider) CancelSubscription(providerSubID string) error {

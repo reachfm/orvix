@@ -255,6 +255,7 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			}
 			if webhookSvc != nil {
 				router.h.SetBillingWebhook(webhookSvc)
+				router.h.SetInvoiceService(billing.NewInvoiceService(sqlDB))
 				logger.Info("billing webhook service wired")
 			}
 
