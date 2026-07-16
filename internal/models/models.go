@@ -615,7 +615,10 @@ func MigrateAllRaw(db *gorm.DB) error {
 			due_at DATETIME,
 			paid_at DATETIME,
 			hosted_invoice_url TEXT,
-			pdf_url TEXT
+			pdf_url TEXT,
+			provider_event_created_at DATETIME,
+			provider_event_id TEXT,
+			provider_updated_at DATETIME
 		)`,
 		`CREATE TABLE IF NOT EXISTS domains (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1144,6 +1147,9 @@ func MigrateAllRaw(db *gorm.DB) error {
 	if err := migrateUsersProfileSchema(ctx, sqlDB); err != nil {
 		return err
 	}
+	if err := migrateInvoicesSchema(ctx, sqlDB); err != nil {
+		return err
+	}
 
 	// Create indexes
 	indexes := []string{
@@ -1322,6 +1328,44 @@ func migrateUsersMFASchema(ctx context.Context, db *sql.DB) error {
 		}
 		if _, err := db.ExecContext(ctx, addition.sql); err != nil {
 			return fmt.Errorf("add users.%s: %w", addition.name, err)
+		}
+		columns[addition.name] = true
+	}
+
+	return nil
+}
+
+func migrateInvoicesSchema(ctx context.Context, db *sql.DB) error {
+	// Check if table exists first.
+	rows, err := db.QueryContext(ctx, "SELECT name FROM sqlite_master WHERE type='table' AND name='invoices'")
+	if err != nil {
+		return fmt.Errorf("check invoices table: %w", err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil // Table doesn't exist yet — CREATE TABLE in batch handles it.
+	}
+
+	columns, err := sqliteColumns(ctx, db, "invoices")
+	if err != nil {
+		return fmt.Errorf("inspect invoices schema: %w", err)
+	}
+
+	additions := []struct {
+		name string
+		sql  string
+	}{
+		{"provider_event_created_at", "ALTER TABLE invoices ADD COLUMN provider_event_created_at DATETIME"},
+		{"provider_event_id", "ALTER TABLE invoices ADD COLUMN provider_event_id TEXT NOT NULL DEFAULT ''"},
+		{"provider_updated_at", "ALTER TABLE invoices ADD COLUMN provider_updated_at DATETIME"},
+	}
+
+	for _, addition := range additions {
+		if columns[addition.name] {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, addition.sql); err != nil {
+			return fmt.Errorf("add invoices.%s: %w", addition.name, err)
 		}
 		columns[addition.name] = true
 	}

@@ -43,6 +43,9 @@ type InvoiceRecord struct {
 	PaidAt            *time.Time `json:"paid_at,omitempty"`
 	HostedInvoiceURL  string     `json:"hosted_invoice_url,omitempty"`
 	PDFURL            string     `json:"pdf_url,omitempty"`
+	ProviderEventCreatedAt *time.Time `json:"provider_event_created_at,omitempty"`
+	ProviderEventID        string     `json:"provider_event_id,omitempty"`
+	ProviderUpdatedAt      *time.Time `json:"provider_updated_at,omitempty"`
 }
 
 type InvoiceFilter struct {
@@ -54,7 +57,7 @@ type InvoiceFilter struct {
 	Offset   int
 }
 
-func (s *InvoiceService) UpsertFromProviderEvent(ctx context.Context, inv *InvoiceRecord) (*InvoiceRecord, error) {
+func (s *InvoiceService) UpsertFromProviderEvent(ctx context.Context, inv *InvoiceRecord, eventCreatedAt *time.Time, eventID string) (*InvoiceRecord, error) {
 	prov := NormalizeProvider(inv.Provider)
 	if prov == "" {
 		return nil, fmt.Errorf("invoice provider is required")
@@ -68,46 +71,90 @@ func (s *InvoiceService) UpsertFromProviderEvent(ctx context.Context, inv *Invoi
 
 	d := s.dialect
 	now := time.Now().UTC()
+
+	// Try to get existing invoice to check ordering.
+	existing, err := s.getExistingByProvider(ctx, prov, inv.ProviderInvoiceID)
+	if err == nil && existing != nil {
+		// Out-of-order protection: if the incoming event is older than what we already
+		// have, skip the update but report success (idempotent).
+		if eventCreatedAt != nil && existing.ProviderEventCreatedAt != nil {
+			if eventCreatedAt.Before(*existing.ProviderEventCreatedAt) {
+				// Older event — preserve existing state, especially if already paid.
+				return existing, nil
+			}
+		}
+		// Paid state protection: never regress from paid unless explicit void/uncollectible.
+		if existing.Status == "paid" && inv.Status != "void" && inv.Status != "uncollectible" {
+			// Keep paid status, just update amounts/payment info.
+			inv.Status = "paid"
+		}
+		// Update the existing record.
+		_, err := s.db.ExecContext(ctx,
+			`UPDATE invoices SET updated_at = `+d.Placeholder(1)+`,
+			status = `+d.Placeholder(2)+`, total = `+d.Placeholder(3)+`,
+			amount_paid = `+d.Placeholder(4)+`, amount_due = `+d.Placeholder(5)+`,
+			subtotal = `+d.Placeholder(6)+`, tax = `+d.Placeholder(7)+`,
+			currency = `+d.Placeholder(8)+`, invoice_number = `+d.Placeholder(9)+`,
+			subscription_id = `+d.Placeholder(10)+`,
+			period_start = `+d.Placeholder(11)+`, period_end = `+d.Placeholder(12)+`,
+			issued_at = `+d.Placeholder(13)+`, due_at = `+d.Placeholder(14)+`,
+			paid_at = `+d.Placeholder(15)+`,
+			hosted_invoice_url = `+d.Placeholder(16)+`, pdf_url = `+d.Placeholder(17)+`,
+			provider_event_created_at = `+d.Placeholder(18)+`,
+			provider_event_id = `+d.Placeholder(19)+`,
+			provider_updated_at = `+d.Placeholder(20)+`
+			WHERE provider = `+d.Placeholder(21)+` AND provider_invoice_id = `+d.Placeholder(22)+` AND tenant_id = `+d.Placeholder(23),
+			now, inv.Status, inv.Total, inv.AmountPaid, inv.AmountDue,
+			inv.Subtotal, inv.Tax, inv.Currency, inv.InvoiceNumber,
+			inv.SubscriptionID, inv.PeriodStart, inv.PeriodEnd, inv.IssuedAt, inv.DueAt,
+			inv.PaidAt, inv.HostedInvoiceURL, inv.PDFURL,
+			eventCreatedAt, eventID, now,
+			prov, inv.ProviderInvoiceID, inv.TenantID)
+		if err != nil {
+			return nil, fmt.Errorf("update invoice: %w", err)
+		}
+		inv.ID = existing.ID
+		return inv, nil
+	}
+
+	// Insert new.
 	var id uint
-	err := s.db.QueryRowContext(ctx,
+	err = s.db.QueryRowContext(ctx,
 		`INSERT INTO invoices (created_at, updated_at, tenant_id, subscription_id, provider,
 		provider_invoice_id, invoice_number, currency, subtotal, tax, total,
 		amount_paid, amount_due, status, period_start, period_end, issued_at,
-		due_at, paid_at, hosted_invoice_url, pdf_url)
-		VALUES (`+d.Placeholders(21)+`)
-		ON CONFLICT (provider, provider_invoice_id) DO UPDATE SET
-		updated_at = `+d.Placeholder(22)+`,
-		status = `+d.Placeholder(23)+`,
-		total = `+d.Placeholder(24)+`,
-		amount_paid = `+d.Placeholder(25)+`,
-		amount_due = `+d.Placeholder(26)+`,
-		subtotal = `+d.Placeholder(27)+`,
-		tax = `+d.Placeholder(28)+`,
-		currency = `+d.Placeholder(29)+`,
-		invoice_number = `+d.Placeholder(30)+`,
-		subscription_id = `+d.Placeholder(31)+`,
-		period_start = `+d.Placeholder(32)+`,
-		period_end = `+d.Placeholder(33)+`,
-		issued_at = `+d.Placeholder(34)+`,
-		due_at = `+d.Placeholder(35)+`,
-		paid_at = `+d.Placeholder(36)+`,
-		hosted_invoice_url = `+d.Placeholder(37)+`,
-		pdf_url = `+d.Placeholder(38)+`
+		due_at, paid_at, hosted_invoice_url, pdf_url,
+		provider_event_created_at, provider_event_id, provider_updated_at)
+		VALUES (`+d.Placeholders(24)+`)
 		RETURNING id`,
 		now, now, inv.TenantID, inv.SubscriptionID, prov,
 		inv.ProviderInvoiceID, inv.InvoiceNumber, inv.Currency, inv.Subtotal, inv.Tax, inv.Total,
 		inv.AmountPaid, inv.AmountDue, inv.Status, inv.PeriodStart, inv.PeriodEnd, inv.IssuedAt,
 		inv.DueAt, inv.PaidAt, inv.HostedInvoiceURL, inv.PDFURL,
-		now, inv.Status, inv.Total, inv.AmountPaid, inv.AmountDue,
-		inv.Subtotal, inv.Tax, inv.Currency, inv.InvoiceNumber, inv.SubscriptionID,
-		inv.PeriodStart, inv.PeriodEnd, inv.IssuedAt, inv.DueAt, inv.PaidAt,
-		inv.HostedInvoiceURL, inv.PDFURL,
+		eventCreatedAt, eventID, now,
 	).Scan(&id)
 	if err != nil {
-		return nil, fmt.Errorf("upsert invoice: %w", err)
+		return nil, fmt.Errorf("insert invoice: %w", err)
 	}
 	inv.ID = id
 	return inv, nil
+}
+
+func (s *InvoiceService) getExistingByProvider(ctx context.Context, provider, providerID string) (*InvoiceRecord, error) {
+	var inv InvoiceRecord
+	var eventCreated sql.NullTime
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, tenant_id, status, provider_event_created_at
+		FROM invoices WHERE provider = `+s.dialect.Placeholder(1)+` AND provider_invoice_id = `+s.dialect.Placeholder(2),
+		provider, providerID,
+	).Scan(&inv.ID, &inv.TenantID, &inv.Status, &eventCreated)
+	if err != nil {
+		return nil, err
+	}
+	if eventCreated.Valid {
+		inv.ProviderEventCreatedAt = &eventCreated.Time
+	}
+	return &inv, nil
 }
 
 func (s *InvoiceService) GetByProviderInvoice(ctx context.Context, provider, providerID string) (*InvoiceRecord, error) {
@@ -205,7 +252,7 @@ func (s *InvoiceService) ListTenantInvoices(ctx context.Context, filter *Invoice
 	}
 	defer rows.Close()
 
-	var invoices []InvoiceRecord
+	invoices := make([]InvoiceRecord, 0)
 	for rows.Next() {
 		var inv InvoiceRecord
 		if err := rows.Scan(&inv.ID, &inv.TenantID, &inv.SubscriptionID, &inv.Provider, &inv.ProviderInvoiceID,

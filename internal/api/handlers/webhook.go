@@ -92,7 +92,7 @@ func (h *Handler) ReceivePaymentWebhook(c fiber.Ctx) error {
 			if event.Created != nil {
 				inv.IssuedAt = event.Created
 			}
-			if _, err := h.invoiceSvc.UpsertFromProviderEvent(c.Context(), inv); err != nil {
+			if _, err := h.invoiceSvc.UpsertFromProviderEvent(c.Context(), inv, event.Created, event.ProviderEventID); err != nil {
 				h.logger.Error("invoice upsert failed", zap.Error(err))
 			}
 		}
