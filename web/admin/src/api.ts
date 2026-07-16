@@ -118,9 +118,9 @@ export const api = {
   listAuditLogs: () => request<any[]>("/enterprise/audit/logs"),
 
   // Sessions
-  listSessions: () => request<any>("/enterprise/sessions"),
+  listSessions: () => request<any>("/account/sessions"),
   revokeSession: (id: string) =>
-    request(`/enterprise/sessions/${id}/revoke`, { method: "POST" }),
+    request(`/account/sessions/${id}/revoke`, { method: "POST" }),
 
   // MFA
   getMFAStatus: () => request<any>("/admin/mfa/status"),

@@ -128,22 +128,3 @@ func (h *Handler) ListEnterpriseAuditLogs(c fiber.Ctx) error {
 	}
 	return c.JSON(result)
 }
-
-func (h *Handler) ListEnterpriseSessions(c fiber.Ctx) error {
-	c.Locals("tenant_id")
-	return c.JSON(fiber.Map{
-		"sessions": []fiber.Map{
-			{
-				"id":          "current",
-				"device":      "Current Session",
-				"ip":          c.IP(),
-				"last_active": time.Now().UTC().Format(time.RFC3339),
-				"current":     true,
-			},
-		},
-	})
-}
-
-func (h *Handler) RevokeEnterpriseSession(c fiber.Ctx) error {
-	return c.JSON(fiber.Map{"status": "ok"})
-}

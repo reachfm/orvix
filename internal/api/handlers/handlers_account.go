@@ -174,8 +174,8 @@ func (h *Handler) SubmitSupportRequest(c fiber.Ctx) error {
 
 	h.writeAuditLog(c, "support.request.create", fmt.Sprintf("category:%s ref:%s", req.Category, refID))
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-		"reference_id":   refID,
-		"status":         sr.Status,
+		"reference_id":    refID,
+		"status":          sr.Status,
 		"delivery_status": sr.DeliveryStatus,
 	})
 }
@@ -337,7 +337,7 @@ var validTimezones = map[string]bool{
 	"Europe/Kyiv": true, "Europe/Lisbon": true, "Europe/London": true, "Europe/Madrid": true,
 	"Europe/Moscow": true, "Europe/Oslo": true, "Europe/Paris": true, "Europe/Prague": true,
 	"Europe/Rome": true, "Europe/Stockholm": true, "Europe/Vienna": true, "Europe/Warsaw": true,
-	"Europe/Zurich": true,
+	"Europe/Zurich":    true,
 	"Pacific/Auckland": true, "Pacific/Fiji": true, "Pacific/Guam": true, "Pacific/Honolulu": true,
 	"US/Alaska": true, "US/Arizona": true, "US/Central": true, "US/Eastern": true,
 	"US/Hawaii": true, "US/Mountain": true, "US/Pacific": true,
@@ -361,39 +361,49 @@ func (h *Handler) ListCustomerInvoices(c fiber.Ctx) error {
 		return c.JSON([]fiber.Map{})
 	}
 	type result struct {
-		ID                uint    `json:"id"`
-		InvoiceNumber     string  `json:"invoice_number"`
-		Currency          string  `json:"currency"`
-		Total             int64   `json:"total"`
-		AmountPaid        int64   `json:"amount_paid"`
-		AmountDue         int64   `json:"amount_due"`
-		Status            string  `json:"status"`
-		PeriodStart       string  `json:"period_start,omitempty"`
-		PeriodEnd         string  `json:"period_end,omitempty"`
-		IssuedAt          string  `json:"issued_at,omitempty"`
-		DueAt             string  `json:"due_at,omitempty"`
-		PaidAt            string  `json:"paid_at,omitempty"`
-		HostedInvoiceURL  string  `json:"hosted_invoice_url,omitempty"`
-		PDFURL            string  `json:"pdf_url,omitempty"`
+		ID               uint   `json:"id"`
+		InvoiceNumber    string `json:"invoice_number"`
+		Currency         string `json:"currency"`
+		Total            int64  `json:"total"`
+		AmountPaid       int64  `json:"amount_paid"`
+		AmountDue        int64  `json:"amount_due"`
+		Status           string `json:"status"`
+		PeriodStart      string `json:"period_start,omitempty"`
+		PeriodEnd        string `json:"period_end,omitempty"`
+		IssuedAt         string `json:"issued_at,omitempty"`
+		DueAt            string `json:"due_at,omitempty"`
+		PaidAt           string `json:"paid_at,omitempty"`
+		HostedInvoiceURL string `json:"hosted_invoice_url,omitempty"`
+		PDFURL           string `json:"pdf_url,omitempty"`
 	}
 	out := make([]result, 0, len(invoices))
 	for _, inv := range invoices {
 		r := result{
-			ID:            inv.ID,
-			InvoiceNumber: inv.InvoiceNumber,
-			Currency:      inv.Currency,
-			Total:         inv.Total,
-			AmountPaid:    inv.AmountPaid,
-			AmountDue:     inv.AmountDue,
-			Status:        inv.Status,
+			ID:               inv.ID,
+			InvoiceNumber:    inv.InvoiceNumber,
+			Currency:         inv.Currency,
+			Total:            inv.Total,
+			AmountPaid:       inv.AmountPaid,
+			AmountDue:        inv.AmountDue,
+			Status:           inv.Status,
 			HostedInvoiceURL: inv.HostedInvoiceURL,
-			PDFURL:         inv.PDFURL,
+			PDFURL:           inv.PDFURL,
 		}
-		if inv.PeriodStart != nil { r.PeriodStart = inv.PeriodStart.Format(time.RFC3339) }
-		if inv.PeriodEnd != nil { r.PeriodEnd = inv.PeriodEnd.Format(time.RFC3339) }
-		if inv.IssuedAt != nil { r.IssuedAt = inv.IssuedAt.Format(time.RFC3339) }
-		if inv.DueAt != nil { r.DueAt = inv.DueAt.Format(time.RFC3339) }
-		if inv.PaidAt != nil { r.PaidAt = inv.PaidAt.Format(time.RFC3339) }
+		if inv.PeriodStart != nil {
+			r.PeriodStart = inv.PeriodStart.Format(time.RFC3339)
+		}
+		if inv.PeriodEnd != nil {
+			r.PeriodEnd = inv.PeriodEnd.Format(time.RFC3339)
+		}
+		if inv.IssuedAt != nil {
+			r.IssuedAt = inv.IssuedAt.Format(time.RFC3339)
+		}
+		if inv.DueAt != nil {
+			r.DueAt = inv.DueAt.Format(time.RFC3339)
+		}
+		if inv.PaidAt != nil {
+			r.PaidAt = inv.PaidAt.Format(time.RFC3339)
+		}
 		out = append(out, r)
 	}
 	return c.JSON(out)
@@ -414,22 +424,32 @@ func (h *Handler) GetCustomerInvoice(c fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "invoice not found"})
 	}
 	r := fiber.Map{
-		"id":              inv.ID,
-		"invoice_number":  inv.InvoiceNumber,
-		"currency":        inv.Currency,
-		"subtotal":        inv.Subtotal,
-		"tax":             inv.Tax,
-		"total":           inv.Total,
-		"amount_paid":     inv.AmountPaid,
-		"amount_due":      inv.AmountDue,
-		"status":          inv.Status,
+		"id":                 inv.ID,
+		"invoice_number":     inv.InvoiceNumber,
+		"currency":           inv.Currency,
+		"subtotal":           inv.Subtotal,
+		"tax":                inv.Tax,
+		"total":              inv.Total,
+		"amount_paid":        inv.AmountPaid,
+		"amount_due":         inv.AmountDue,
+		"status":             inv.Status,
 		"hosted_invoice_url": inv.HostedInvoiceURL,
-		"pdf_url":          inv.PDFURL,
+		"pdf_url":            inv.PDFURL,
 	}
-	if inv.PeriodStart != nil { r["period_start"] = inv.PeriodStart.Format(time.RFC3339) }
-	if inv.PeriodEnd != nil { r["period_end"] = inv.PeriodEnd.Format(time.RFC3339) }
-	if inv.IssuedAt != nil { r["issued_at"] = inv.IssuedAt.Format(time.RFC3339) }
-	if inv.DueAt != nil { r["due_at"] = inv.DueAt.Format(time.RFC3339) }
-	if inv.PaidAt != nil { r["paid_at"] = inv.PaidAt.Format(time.RFC3339) }
+	if inv.PeriodStart != nil {
+		r["period_start"] = inv.PeriodStart.Format(time.RFC3339)
+	}
+	if inv.PeriodEnd != nil {
+		r["period_end"] = inv.PeriodEnd.Format(time.RFC3339)
+	}
+	if inv.IssuedAt != nil {
+		r["issued_at"] = inv.IssuedAt.Format(time.RFC3339)
+	}
+	if inv.DueAt != nil {
+		r["due_at"] = inv.DueAt.Format(time.RFC3339)
+	}
+	if inv.PaidAt != nil {
+		r["paid_at"] = inv.PaidAt.Format(time.RFC3339)
+	}
 	return c.JSON(r)
 }

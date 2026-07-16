@@ -24,7 +24,7 @@ describe("Admin console certification", () => {
       if (path.endsWith("/customer/domains")) return Promise.resolve(mockResponse([{ id: 1, name: "example.com", status: "active", verified: true, mx_status: "ok", spf_status: "ok", dkim_status: "ok", dmarc_status: "ok" }]));
       if (path.endsWith("/enterprise/audit/logs")) return Promise.resolve(mockResponse([{ id: 1, action: "user.login", actor: "admin@test", target: "", result: "success", timestamp: "2026-01-01T00:00:00Z" }]));
       if (path.includes("/enterprise/api-keys")) return Promise.resolve(mockResponse([]));
-      if (path.includes("/enterprise/sessions")) return Promise.resolve(mockResponse({ sessions: [] }));
+      if (path.includes("/account/sessions")) return Promise.resolve(mockResponse({ sessions: [] }));
       if (path.includes("/enterprise/billing")) return Promise.resolve(mockResponse({ plan_name: "Pro", status: "active" }));
       return Promise.resolve(mockResponse({}));
     });
