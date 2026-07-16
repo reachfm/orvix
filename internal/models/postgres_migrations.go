@@ -159,7 +159,6 @@ func postgresTables() []string {
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS locale TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS timezone TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS theme TEXT NOT NULL DEFAULT 'dark'`,
-		`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS scopes TEXT NOT NULL DEFAULT ''`,
 
 		`CREATE TABLE IF NOT EXISTS domains (
 			id BIGSERIAL PRIMARY KEY,
@@ -210,6 +209,7 @@ func postgresTables() []string {
 			expires_at TIMESTAMP,
 			last_used_at TIMESTAMP
 		)`,
+		`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS scopes TEXT NOT NULL DEFAULT ''`,
 
 		// --- Sessions / security / audit ---
 

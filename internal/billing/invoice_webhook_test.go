@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/dbdialect"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -62,22 +64,46 @@ func setupInvoiceWebhookEnv(t *testing.T) *invoiceWebhookEnv {
 	db := newTestDB(t)
 	db.SetMaxOpenConns(1)
 
-	// Create invoices table for test.
-	createInvSQL := `CREATE TABLE IF NOT EXISTS invoices (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL,
-		tenant_id INTEGER NOT NULL, subscription_id INTEGER,
-		provider TEXT NOT NULL DEFAULT '', provider_invoice_id TEXT,
-		invoice_number TEXT, currency TEXT NOT NULL DEFAULT 'usd',
-		subtotal INTEGER NOT NULL DEFAULT 0, tax INTEGER NOT NULL DEFAULT 0,
-		total INTEGER NOT NULL DEFAULT 0, amount_paid INTEGER NOT NULL DEFAULT 0,
-		amount_due INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'draft',
-		period_start DATETIME, period_end DATETIME, issued_at DATETIME,
-		due_at DATETIME, paid_at DATETIME, hosted_invoice_url TEXT, pdf_url TEXT,
-		provider_event_created_at DATETIME, provider_event_id TEXT,
-		provider_updated_at DATETIME,
-		UNIQUE(provider, provider_invoice_id)
-	)`
+	// Create invoices table for test — dialect-aware DDL.
+	dial, err := dbdialect.Detect(db)
+	if err != nil {
+		dial = dbdialect.FromDriver("sqlite")
+	}
+	var createInvSQL string
+	if dial.IsPostgres() {
+		createInvSQL = `CREATE TABLE IF NOT EXISTS invoices (
+			id ` + dial.AutoIncrement() + ` PRIMARY KEY,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			tenant_id INTEGER NOT NULL, subscription_id INTEGER,
+			provider TEXT NOT NULL DEFAULT '', provider_invoice_id TEXT,
+			invoice_number TEXT, currency TEXT NOT NULL DEFAULT 'usd',
+			subtotal BIGINT NOT NULL DEFAULT 0, tax BIGINT NOT NULL DEFAULT 0,
+			total BIGINT NOT NULL DEFAULT 0, amount_paid BIGINT NOT NULL DEFAULT 0,
+			amount_due BIGINT NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'draft',
+			period_start TIMESTAMP, period_end TIMESTAMP, issued_at TIMESTAMP,
+			due_at TIMESTAMP, paid_at TIMESTAMP, hosted_invoice_url TEXT, pdf_url TEXT,
+			provider_event_created_at TIMESTAMP, provider_event_id TEXT,
+			provider_updated_at TIMESTAMP,
+			UNIQUE(provider, provider_invoice_id)
+		)`
+	} else {
+		createInvSQL = `CREATE TABLE IF NOT EXISTS invoices (
+			id ` + dial.AutoIncrement() + `,
+			created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL,
+			tenant_id INTEGER NOT NULL, subscription_id INTEGER,
+			provider TEXT NOT NULL DEFAULT '', provider_invoice_id TEXT,
+			invoice_number TEXT, currency TEXT NOT NULL DEFAULT 'usd',
+			subtotal INTEGER NOT NULL DEFAULT 0, tax INTEGER NOT NULL DEFAULT 0,
+			total INTEGER NOT NULL DEFAULT 0, amount_paid INTEGER NOT NULL DEFAULT 0,
+			amount_due INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'draft',
+			period_start DATETIME, period_end DATETIME, issued_at DATETIME,
+			due_at DATETIME, paid_at DATETIME, hosted_invoice_url TEXT, pdf_url TEXT,
+			provider_event_created_at DATETIME, provider_event_id TEXT,
+			provider_updated_at DATETIME,
+			UNIQUE(provider, provider_invoice_id)
+		)`
+	}
 	if _, err := db.Exec(createInvSQL); err != nil {
 		t.Fatal(err)
 	}
