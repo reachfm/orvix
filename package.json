@@ -1,0 +1,32 @@
+{
+  "name": "orvix_new",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "marketing:install": "cd web/marketing && npm install --legacy-peer-deps",
+    "marketing:dev": "cd web/marketing && npm run dev",
+    "marketing:build": "cd web/marketing && npm run build && node web/marketing/scripts/build-sitemap.mjs && node web/marketing/scripts/check-seo-tags.mjs && node web/marketing/scripts/check-internal-links.mjs",
+    "marketing:test": "cd web/marketing && npm run test",
+    "marketing:release": "node scripts/build-marketing-release.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/reachfm/orvix.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/reachfm/orvix/issues"
+  },
+  "homepage": "https://github.com/reachfm/orvix#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.61.1"
+  }
+}

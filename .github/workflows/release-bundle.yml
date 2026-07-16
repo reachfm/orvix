@@ -17,6 +17,8 @@ on:
     paths:
       - ".github/workflows/release-bundle.yml"
       - "release/**"
+      - "web/marketing/**"
+      - "scripts/build-marketing-release.mjs"
       - "internal/**"
       - "cmd/**"
       - "go.mod"
@@ -86,7 +88,9 @@ jobs:
         with:
           node-version: '22'
           cache: 'npm'
-          cache-dependency-path: web/admin/package-lock.json
+          cache-dependency-path: |
+            web/admin/package-lock.json
+            web/marketing/package-lock.json
 
       - name: Install Chromium for browser smoke
         run: |

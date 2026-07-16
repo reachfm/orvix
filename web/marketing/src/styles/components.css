@@ -1,0 +1,197 @@
+/* Shared component classes. Components may also use Tailwind utilities
+ * for layout, but the look-and-feel primitives live here so we have
+ * one place to evolve the visual language. */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-5);
+  border-radius: var(--r-md);
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  line-height: 1;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background var(--dur-2) var(--ease-out),
+    border-color var(--dur-2) var(--ease-out),
+    transform var(--dur-1) var(--ease-out),
+    box-shadow var(--dur-2) var(--ease-out);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.btn:disabled,
+.btn[aria-disabled="true"] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #0C0E12;
+  box-shadow: var(--shadow-accent);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-strong);
+  color: #0C0E12;
+  transform: translateY(-1px);
+}
+
+.btn-secondary {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  border-color: var(--border-default);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: var(--bg-raised);
+  border-color: var(--border-strong);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-primary);
+}
+
+.btn-ghost:hover:not(:disabled) {
+  background: var(--bg-elevated);
+}
+
+.btn-sm {
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-xs);
+}
+
+.btn-lg {
+  padding: var(--sp-4) var(--sp-6);
+  font-size: var(--fs-base);
+}
+
+.card {
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-lg);
+  padding: var(--sp-6);
+  transition: border-color var(--dur-2) var(--ease-out),
+    transform var(--dur-2) var(--ease-out),
+    box-shadow var(--dur-2) var(--ease-out);
+}
+
+.card:hover {
+  border-color: var(--border-strong);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-2);
+}
+
+.card-static {
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-lg);
+  padding: var(--sp-6);
+}
+
+.card-featured {
+  background: linear-gradient(180deg, var(--accent-soft) 0%, var(--bg-canvas) 70%);
+  border-color: var(--accent);
+  box-shadow: var(--shadow-accent);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: 999px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-default);
+}
+
+.badge-accent {
+  background: var(--accent-glow);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.badge-success {
+  background: rgba(52, 211, 153, 0.12);
+  color: var(--success);
+  border-color: var(--success);
+}
+
+.badge-warning {
+  background: rgba(251, 191, 36, 0.12);
+  color: var(--warning);
+  border-color: var(--warning);
+}
+
+.kbd {
+  display: inline-block;
+  padding: 2px 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-bottom-width: 2px;
+  border-radius: var(--r-sm);
+  font-size: 11px;
+  font-family: inherit;
+  color: var(--text-secondary);
+}
+
+.input {
+  display: block;
+  width: 100%;
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-md);
+  font-size: var(--fs-sm);
+  font-family: inherit;
+  transition: border-color var(--dur-2) var(--ease-out),
+    background var(--dur-2) var(--ease-out);
+}
+
+.input::placeholder {
+  color: var(--text-faint);
+}
+
+.input:focus {
+  border-color: var(--accent);
+  background: var(--bg-surface);
+}
+
+.label {
+  display: block;
+  margin-bottom: var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.divider {
+  border: none;
+  border-top: 1px solid var(--border-default);
+  margin: var(--sp-7) 0;
+}
+
+.code-block {
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-md);
+  padding: var(--sp-4);
+  font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  color: var(--text-primary);
+  overflow-x: auto;
+}
+
+.code-block .tok-key { color: var(--accent); }
+.code-block .tok-str { color: var(--success); }
+.code-block .tok-num { color: var(--warning); }
+.code-block .tok-cmt { color: var(--text-faint); font-style: italic; }

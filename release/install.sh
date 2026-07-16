@@ -1308,6 +1308,7 @@ server:
   admin_port: 8080
   admin_ui_dir: /usr/share/orvix/admin
   webmail_ui_dir: /usr/share/orvix/webmail
+  marketing_ui_dir: /usr/share/orvix/marketing
   read_timeout: 60s
   write_timeout: 60s
   idle_timeout: 120s
@@ -1914,6 +1915,7 @@ validate_directory() {
             for ap in \
                 /opt/orvix \
                 /usr/share/orvix/admin \
+                /usr/share/orvix/marketing \
                 /var/lib/orvix \
                 /var/log/orvix \
                 /var/lib/orvix/backups \
@@ -2066,6 +2068,18 @@ validate_webmail_ui() {
         fail "webmail UI gate script must be referenced before the webmail client"
     fi
     log_detail "VALIDATE webmail UI $ui_dir: index.html + auth-gate.js + auth-gate.css + webmail.js present, gate before client"
+}
+
+validate_marketing_ui() {
+    local ui_dir="/usr/share/orvix/marketing"
+    [ -d "$ui_dir" ] || fail "marketing UI directory $ui_dir does not exist"
+    [ -f "$ui_dir/index.html" ] || fail "marketing UI index.html is missing"
+    [ -f "$ui_dir/404.html" ] || fail "marketing UI 404.html is missing"
+    [ -f "$ui_dir/robots.txt" ] || fail "marketing UI robots.txt is missing"
+    [ -f "$ui_dir/sitemap.xml" ] || fail "marketing UI sitemap.xml is missing"
+    if ! find "$ui_dir/marketing-assets" -maxdepth 1 -type f -name '*.js' -print -quit 2>/dev/null | grep -q .; then
+        fail "marketing UI deployment has no built JavaScript assets"
+    fi
 }
 
 # write_admin_login_file persists operator-facing access
@@ -2842,10 +2856,12 @@ main() {
     run_quiet install -d -o orvix -g orvix -m 0700 /var/lib/orvix/restore-jobs /var/lib/orvix/restore-jobs/queue /var/lib/orvix/restore-jobs/results
     run_quiet install -d -o root -g root -m 0755 /usr/share/orvix/admin
     run_quiet install -d -o root -g root -m 0755 /usr/share/orvix/webmail
+    run_quiet install -d -o root -g root -m 0755 /usr/share/orvix/marketing
     run_quiet install -d -o root -g root -m 0755 /usr/share/orvix/scripts
     # Validate and self-heal runtime directories.
     validate_directory /opt/orvix root:root 0755
     validate_directory /usr/share/orvix/admin root:root 0755
+    validate_directory /usr/share/orvix/marketing root:root 0755
     validate_directory /var/lib/orvix orvix:orvix 0750
     validate_directory /var/log/orvix orvix:orvix 0750
     validate_directory /var/lib/orvix/backups orvix:orvix 0750
@@ -2971,6 +2987,8 @@ IPFAIL
             fail "admin asset propagation failed during install"
         asset_propagate "$ORVIX_SOURCE_DIR/release/webmail" /usr/share/orvix/webmail webmail || \
             fail "webmail asset propagation failed during install"
+        asset_propagate "$ORVIX_SOURCE_DIR/release/marketing" /usr/share/orvix/marketing marketing || \
+            fail "marketing asset propagation failed during install"
     else
         # Fallback to the inline copy for very old checkouts that
         # pre-date the lib. The smoke test still requires the lib to
@@ -2979,15 +2997,20 @@ IPFAIL
         # full install.sh without the lib.
         run_quiet cp -R "$ORVIX_SOURCE_DIR"/release/admin/. /usr/share/orvix/admin/
         run_quiet cp -R "$ORVIX_SOURCE_DIR"/release/webmail/. /usr/share/orvix/webmail/
+        run_quiet cp -R "$ORVIX_SOURCE_DIR"/release/marketing/. /usr/share/orvix/marketing/
         run_quiet chown -R root:root /usr/share/orvix/admin
         run_quiet chown -R root:root /usr/share/orvix/webmail
         run_quiet find /usr/share/orvix/admin -type d -exec chmod 0755 {} +
         run_quiet find /usr/share/orvix/admin -type f -exec chmod 0644 {} +
         run_quiet find /usr/share/orvix/webmail -type d -exec chmod 0755 {} +
         run_quiet find /usr/share/orvix/webmail -type f -exec chmod 0644 {} +
+        run_quiet chown -R root:root /usr/share/orvix/marketing
+        run_quiet find /usr/share/orvix/marketing -type d -exec chmod 0755 {} +
+        run_quiet find /usr/share/orvix/marketing -type f -exec chmod 0644 {} +
     fi
     validate_admin_ui
     validate_webmail_ui
+    validate_marketing_ui
 
     set_step "systemd" "Service activation" 85
     write_service

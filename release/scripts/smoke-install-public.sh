@@ -112,6 +112,9 @@ check "validate_bundle_layout requires admin assets" \
 check "validate_bundle_layout requires webmail assets" \
     "sed -n '/^validate_bundle_layout/,/^}/p' release/install-public.sh | grep -qE 'release/webmail/(index\\.html|sw\\.js|assets/auth-gate\\.js|assets/webmail\\.js)'"
 
+check "validate_bundle_layout requires marketing assets" \
+    "sed -n '/^validate_bundle_layout/,/^}/p' release/install-public.sh | grep -qE 'release/marketing/(index\\.html|404\\.html|robots\\.txt|sitemap\\.xml)' && sed -n '/^validate_bundle_layout/,/^}/p' release/install-public.sh | grep -q 'marketing-assets/\\*.js'"
+
 check "validate_bundle_layout requires systemd + sudoers" \
     "sed -n '/^validate_bundle_layout/,/^}/p' release/install-public.sh | grep -qE 'orvix\\.service|orvix-update\\.service|orvix-update$'"
 
@@ -165,6 +168,7 @@ if [ "$MODE" = "live" ]; then
     mkdir -p "$BUNDLE_STAGING/bin" \
              "$BUNDLE_STAGING/release/admin" \
              "$BUNDLE_STAGING/release/webmail/assets" \
+             "$BUNDLE_STAGING/release/marketing/marketing-assets" \
              "$BUNDLE_STAGING/release/systemd" \
              "$BUNDLE_STAGING/release/sudoers.d" \
              "$BUNDLE_STAGING/release/scripts" \
@@ -221,7 +225,10 @@ BIN_EOF
         release/admin/index.html release/admin/app.js release/admin/styles.css \
         release/admin/modules/auth.js release/admin/modules/components.js \
         release/webmail/index.html release/webmail/sw.js \
-        release/webmail/assets/auth-gate.js release/webmail/assets/webmail.js; do
+        release/webmail/assets/auth-gate.js release/webmail/assets/webmail.js \
+        release/marketing/index.html release/marketing/404.html \
+        release/marketing/robots.txt release/marketing/sitemap.xml \
+        release/marketing/marketing-assets/index-test.js; do
         mkdir -p "$BUNDLE_STAGING/$(dirname "$rel")"
         printf '#!/usr/bin/env bash\necho stub >/dev/null\n' > "$BUNDLE_STAGING/$rel"
         chmod +x "$BUNDLE_STAGING/$rel" || true

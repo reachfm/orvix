@@ -151,6 +151,10 @@ install_caddy() {
 
 write_caddyfile() {
 	cat > /etc/caddy/Caddyfile <<CADDY
+$PRIMARY_DOMAIN {
+	reverse_proxy 127.0.0.1:8080
+}
+
 $ADMIN_DOMAIN {
 	reverse_proxy 127.0.0.1:8080
 }
@@ -626,12 +630,16 @@ main() {
 	run_quiet systemctl reload caddy || run_quiet systemctl restart caddy
 	systemctl is-active --quiet caddy || fail "caddy service is not active"
 
+	check_dns "$PRIMARY_DOMAIN"
 	check_dns "$ADMIN_DOMAIN"
 	check_dns "$WEBMAIL_DOMAIN"
 	check_dns "$MAIL_DOMAIN"
 	check_local_port 80
 	check_local_port 443
 
+	check_https "https://$PRIMARY_DOMAIN/" HEAD
+	check_https "https://$PRIMARY_DOMAIN/pricing" HEAD
+	check_https "https://$PRIMARY_DOMAIN/robots.txt" HEAD
 	check_https "https://$ADMIN_DOMAIN/admin" HEAD
 	check_https "https://$ADMIN_DOMAIN/api/v1/health" GET
 	check_https "https://$WEBMAIL_DOMAIN/webmail/assets/webmail.js" HEAD
@@ -642,6 +650,8 @@ main() {
 	check_https "https://$WEBMAIL_DOMAIN/api/v1/health" GET
 	check_https "https://$MAIL_DOMAIN/.well-known/jmap" GET
 
+	check_content_type "https://$PRIMARY_DOMAIN/" "text/html"
+	check_content_type "https://$PRIMARY_DOMAIN/robots.txt" "text/plain"
 	check_content_type "https://$WEBMAIL_DOMAIN/webmail/assets/webmail.js" "text/javascript"
 	check_content_type "https://$WEBMAIL_DOMAIN/webmail/assets/webmail.css" "text/css"
 	check_content_type "https://$WEBMAIL_DOMAIN/assets/webmail.js" "text/javascript"

@@ -356,6 +356,7 @@ try_download_sha256() {
 #                     setup-smtp-tls.sh, healthcheck.sh, diagnostics.sh}
 #   - release/admin/{index.html, app.js, styles.css}
 #   - release/webmail/{index.html, sw.js, assets/auth-gate.js, assets/webmail.js}
+#   - release/marketing/{index.html, 404.html, robots.txt, sitemap.xml, marketing-assets/*.js}
 #   - VERSION, BUILDINFO
 validate_bundle_layout() {
     local root="$1"
@@ -406,6 +407,10 @@ release/webmail/index.html
 release/webmail/sw.js
 release/webmail/assets/auth-gate.js
 release/webmail/assets/webmail.js
+release/marketing/index.html
+release/marketing/404.html
+release/marketing/robots.txt
+release/marketing/sitemap.xml
 REQUIRED
     if [ "${#missing[@]}" -gt 0 ]; then
         printf 'BUNDLE_MISSING_FILES:\n' >&2
@@ -414,6 +419,10 @@ REQUIRED
         done
         return 1
     fi
+    find "$root/release/marketing/marketing-assets" -maxdepth 1 -type f -name '*.js' -print -quit 2>/dev/null | grep -q . || {
+        printf 'BUNDLE_MISSING_FILES:\n  - release/marketing/marketing-assets/*.js\n' >&2
+        return 1
+    }
     return 0
 }
 

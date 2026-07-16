@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Orvix CoreMail runtime update — binary + admin UI + webmail UI.
+# Orvix CoreMail runtime update — binary + admin, webmail, and marketing UIs.
 #
 # This script builds the Go binary from the current source tree,
 # installs it to /usr/local/bin/orvix, copies release/admin and
-# release/webmail to /usr/share/orvix/admin and
-# /usr/share/orvix/webmail respectively, then restarts the
+# release/webmail and release/marketing to /usr/share/orvix/admin,
+# /usr/share/orvix/webmail, and /usr/share/orvix/marketing, then restarts the
 # orvix service and probes /api/v1/health.
 #
 # Idempotency: each install step uses `install -m ...` or
@@ -171,6 +171,24 @@ cp -r "$REPO_ROOT/release/webmail/." /usr/share/orvix/webmail/
 find /usr/share/orvix/webmail -type d -exec chmod 0755 {} +
 find /usr/share/orvix/webmail -type f -exec chmod 0644 {} +
 chown -R root:root /usr/share/orvix/webmail
+
+echo "[5/7] Installing marketing UI to /usr/share/orvix/marketing..."
+if [ ! -d "$REPO_ROOT/release/marketing" ]; then
+  echo "ERROR: $REPO_ROOT/release/marketing does not exist; cannot install marketing UI." >&2
+  exit 1
+fi
+install -d -o root -g root -m 0755 /usr/share/orvix/marketing
+rm -rf /usr/share/orvix/marketing/marketing-assets
+cp -r "$REPO_ROOT/release/marketing/." /usr/share/orvix/marketing/
+find /usr/share/orvix/marketing -type d -exec chmod 0755 {} +
+find /usr/share/orvix/marketing -type f -exec chmod 0644 {} +
+chown -R root:root /usr/share/orvix/marketing
+if [ ! -f /usr/share/orvix/marketing/index.html ] || \
+   [ ! -f /usr/share/orvix/marketing/404.html ] || \
+   ! ls /usr/share/orvix/marketing/marketing-assets/*.js >/dev/null 2>&1; then
+  echo "ERROR: marketing UI deployment incomplete." >&2
+  exit 1
+fi
 
 # Defensive regression guard. The webmail v1 ships with
 # auth-gate.js + webmail.js. If any of the legacy Vite/

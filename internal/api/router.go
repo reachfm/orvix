@@ -1268,9 +1268,6 @@ func (r *Router) setupAdminUI() {
 	if adminDir == "" {
 		adminDir = "/usr/share/orvix/admin"
 	}
-	r.app.Get("/", func(c fiber.Ctx) error {
-		return c.Redirect().To("/admin")
-	})
 	r.serveSPA("/admin", adminDir)
 
 	webmailDir := r.cfg.Server.WebmailUIDir
@@ -1296,6 +1293,49 @@ func (r *Router) setupAdminUI() {
 		return c.SendStatus(fiber.StatusNotFound)
 	})
 	r.serveSPA("/webmail", webmailDir)
+
+	// Keep unknown API reads inside the API surface. Without this guard the
+	// marketing SPA catch-all below would return HTML for a misspelled API URL.
+	r.app.Get("/api/v1/*", func(c fiber.Ctx) error {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"error": "api endpoint not found",
+		})
+	})
+
+	marketingDir := r.cfg.Server.MarketingUIDir
+	if marketingDir == "" {
+		marketingDir = "/usr/share/orvix/marketing"
+	}
+	r.serveMarketingSPA(marketingDir)
+}
+
+func (r *Router) serveMarketingSPA(dir string) {
+	indexPath := filepath.Join(dir, "index.html")
+	notFoundPath := filepath.Join(dir, "404.html")
+
+	r.app.Get("/", func(c fiber.Ctx) error {
+		return c.SendFile(indexPath)
+	})
+	r.app.Get("/*", func(c fiber.Ctx) error {
+		requestPath := strings.TrimPrefix(c.Params("*"), "/")
+		clean := filepath.Clean(filepath.FromSlash(requestPath))
+		if clean == "." || clean == ".." || filepath.IsAbs(clean) || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+			return c.SendStatus(fiber.StatusBadRequest)
+		}
+
+		target := filepath.Join(dir, clean)
+		if info, err := os.Stat(target); err == nil {
+			if !info.IsDir() {
+				return c.SendFile(target)
+			}
+			routeIndex := filepath.Join(target, "index.html")
+			if routeInfo, routeErr := os.Stat(routeIndex); routeErr == nil && !routeInfo.IsDir() {
+				return c.SendFile(routeIndex)
+			}
+		}
+
+		return c.Status(fiber.StatusNotFound).SendFile(notFoundPath)
+	})
 }
 
 func (r *Router) serveSPA(prefix, dir string) {

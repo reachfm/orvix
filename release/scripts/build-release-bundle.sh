@@ -25,6 +25,7 @@
 #     release/scripts/*.sh
 #     release/admin/**                 # admin SPA + modules
 #     release/webmail/**               # webmail SPA
+#     release/marketing/**             # public marketing SPA
 #     release/configs/orvix.yaml.example
 #     VERSION
 #     BUILDINFO                        # commit/version/build_time/channel
@@ -200,6 +201,8 @@ REQUIRED_FILES=(
     release/admin/modules/components.js
     release/webmail/index.html
     release/webmail/sw.js
+    release/marketing/index.html
+    release/marketing/404.html
 )
 missing=()
 for f in "${REQUIRED_FILES[@]}"; do
@@ -236,7 +239,7 @@ fi
 WORK_DIR="$(mktemp -d -t orvix-bundle.XXXXXX)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 BUNDLE_ROOT="$WORK_DIR/orvix"
-mkdir -p "$BUNDLE_ROOT/bin" "$BUNDLE_ROOT/release/admin" "$BUNDLE_ROOT/release/webmail" \
+mkdir -p "$BUNDLE_ROOT/bin" "$BUNDLE_ROOT/release/admin" "$BUNDLE_ROOT/release/webmail" "$BUNDLE_ROOT/release/marketing" \
          "$BUNDLE_ROOT/release/systemd" "$BUNDLE_ROOT/release/sudoers.d" \
          "$BUNDLE_ROOT/release/scripts" "$BUNDLE_ROOT/release/scripts/tests" \
          "$BUNDLE_ROOT/release/configs" "$BUNDLE_ROOT/release/trust"
@@ -422,6 +425,26 @@ else
 fi
 (cd release/webmail && tar -cf - .) | (cd "$BUNDLE_ROOT/release/webmail" && tar -xf -)
 
+# Marketing SPA. With Node/npm available, the source build is mandatory and
+# any install/build/verification failure aborts the release. The committed
+# release/marketing tree is used only on operator hosts without a JS toolchain.
+if [ -f web/marketing/package.json ] && command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+    info "building marketing SPA from web/marketing"
+    (
+        cd web/marketing
+        npm ci
+        npm run verify
+    ) || fail "marketing SPA build or verification failed; refusing to ship stale assets" 2
+    rm -rf "$BUNDLE_ROOT/release/marketing"
+    mkdir -p "$BUNDLE_ROOT/release/marketing"
+    (cd web/marketing/dist && tar -cf - .) | (cd "$BUNDLE_ROOT/release/marketing" && tar -xf -)
+    MARKETING_SOURCE="built"
+else
+    info "Node/npm unavailable; packaging committed release/marketing fallback"
+    (cd release/marketing && tar -cf - .) | (cd "$BUNDLE_ROOT/release/marketing" && tar -xf -)
+    MARKETING_SOURCE="committed-fallback"
+fi
+
 cp release/VERSION "$BUNDLE_ROOT/VERSION"
 
 # BUILDINFO — single source of truth for the bundle installer to read
@@ -455,6 +478,10 @@ BUNDLE_REQUIRED=(
     release/sudoers.d/orvix-update
     release/admin/index.html
     release/webmail/index.html
+    release/marketing/index.html
+    release/marketing/404.html
+    release/marketing/robots.txt
+    release/marketing/sitemap.xml
     release/scripts/setup-https.sh
     release/scripts/smoke-admin-browser.sh
     release/scripts/smoke-admin-import-graph.mjs
@@ -468,6 +495,10 @@ BUNDLE_REQUIRED=(
 for f in "${BUNDLE_REQUIRED[@]}"; do
     [ -e "$BUNDLE_ROOT/$f" ] || fail "bundle is missing $f (assembly lost a file)" 4
 done
+
+find "$BUNDLE_ROOT/release/marketing/marketing-assets" -maxdepth 1 -type f -name '*.js' -print -quit | grep -q . \
+    || fail "bundle marketing SPA has no JavaScript assets" 4
+info "marketing assets packaged from: $MARKETING_SOURCE"
 
 # Verify the admin SPA index exists in every case.
 admin_index="$BUNDLE_ROOT/release/admin/index.html"

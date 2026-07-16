@@ -61,8 +61,10 @@ ORVIX_RELEASE_VERIFYING_KEY_FILE="${ORVIX_RELEASE_VERIFYING_KEY_FILE:-}"
 # for the assertions.
 ORVIX_ADMIN_UI_DIR="${ORVIX_ADMIN_UI_DIR:-/usr/share/orvix/admin}"
 ORVIX_WEBMAIL_UI_DIR="${ORVIX_WEBMAIL_UI_DIR:-/usr/share/orvix/webmail}"
+ORVIX_MARKETING_UI_DIR="${ORVIX_MARKETING_UI_DIR:-/usr/share/orvix/marketing}"
 ORVIX_RELEASE_ADMIN_SRC="${ORVIX_RELEASE_ADMIN_SRC:-$ORVIX_SOURCE_DIR/release/admin}"
 ORVIX_RELEASE_WEBMAIL_SRC="${ORVIX_RELEASE_WEBMAIL_SRC:-$ORVIX_SOURCE_DIR/release/webmail}"
+ORVIX_RELEASE_MARKETING_SRC="${ORVIX_RELEASE_MARKETING_SRC:-$ORVIX_SOURCE_DIR/release/marketing}"
 
 # Source the asset-propagation library. BLOCKER 3 (fail-closed):
 # the lib is REQUIRED — a backend upgrade MUST ship the matching
@@ -557,8 +559,23 @@ propagate_assets() {
 		report "red" "webmail asset source missing; refusing to upgrade"
 		return 1
 	fi
+
+	if [ -d "$ORVIX_RELEASE_MARKETING_SRC" ]; then
+		log "propagating marketing assets: $ORVIX_RELEASE_MARKETING_SRC -> $ORVIX_MARKETING_UI_DIR"
+		if ! ASSET_BACKUP_PARENT="$BACKUP_PARENT/assets" \
+			ASSET_VERBOSE=1 \
+			asset_propagate "$ORVIX_RELEASE_MARKETING_SRC" "$ORVIX_MARKETING_UI_DIR" marketing; then
+			log "ERROR: marketing asset propagation failed; rolled back from backup"
+			report "red" "marketing asset propagation failed (rolled back from backup)"
+			ok=0
+		fi
+	else
+		log "ERROR: marketing release assets missing: $ORVIX_RELEASE_MARKETING_SRC"
+		report "red" "marketing release assets missing; refusing to upgrade with a stale public site"
+		ok=0
+	fi
 	if [ "$ok" = "1" ]; then
-		report "green" "admin + webmail assets propagated (backups under $BACKUP_PARENT/assets)"
+		report "green" "admin + webmail + marketing assets propagated (backups under $BACKUP_PARENT/assets)"
 		return 0
 	fi
 	return 1

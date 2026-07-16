@@ -39,3 +39,4 @@ AUDIT_REPORTS_*
 AUDIT_REPORTS/
 DEPLOYMENT_CERTIFICATION*
 .worktrees/
+!web/marketing/src/data/
