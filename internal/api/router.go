@@ -698,7 +698,24 @@ func (r *Router) setupRoutes() {
 	protected.Patch("/account/notification-preferences", r.h.UpdateNotificationPreferences)
 	protected.Get("/account/sessions", r.h.ListAccountSessions)
 	protected.Post("/account/sessions/:id/revoke", r.h.RevokeAccountSession)
-	protected.Post("/account/support-requests", r.h.SubmitSupportRequest)
+	// Support requests: dedicated rate limit — 5 requests per 10 minutes per user.
+	supportLimiter := limiter.New(limiter.Config{
+		Max:        5,
+		Expiration: 10 * 60 * 1000, // 10 minutes in milliseconds
+		KeyGenerator: func(c fiber.Ctx) string {
+			if uid, ok := c.Locals("user_id").(uint); ok && uid > 0 {
+				return fmt.Sprintf("support_req:%d", uid)
+			}
+			return "support_req:" + c.IP()
+		},
+		LimitReached: func(c fiber.Ctx) error {
+			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+				"error":       "too many support requests, please try again later",
+				"retry_after": "10 minutes",
+			})
+		},
+	})
+	protected.Post("/account/support-requests", supportLimiter, r.h.SubmitSupportRequest)
 
 	// User-facing webmail endpoints. Mounted on the
 	// protected group so the auth middleware rejects

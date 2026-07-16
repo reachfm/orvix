@@ -127,6 +127,7 @@ func (h *Handler) UpdateAccountProfile(c fiber.Ctx) error {
 func (h *Handler) SubmitSupportRequest(c fiber.Ctx) error {
 	userID, _ := c.Locals("user_id").(uint)
 	email, _ := c.Locals("email").(string)
+	tenantID, _ := c.Locals("tenant_id").(uint)
 	if userID == 0 {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "authentication required"})
 	}
@@ -144,16 +145,38 @@ func (h *Handler) SubmitSupportRequest(c fiber.Ctx) error {
 	}
 
 	refID := fmt.Sprintf("SR-%d-%d-%d", userID, time.Now().UnixNano()/1000, time.Now().Nanosecond()%1000)
+	sr := models.SupportRequest{
+		ReferenceID: refID,
+		TenantID:    tenantID,
+		UserID:      userID,
+		UserEmail:   email,
+		Category:    req.Category,
+		Subject:     req.Subject,
+		Message:     req.Message,
+		Status:      "received",
+	}
 	if h.mailSender != nil {
-		body := fmt.Sprintf("Support Request #%s\nCategory: %s\nSubject: %s\nUser: %s (ID: %d)\n\n%s",
-			refID, req.Category, req.Subject, email, userID, req.Message)
-		_ = h.mailSender.Send("noreply@orvix.email", "Orvix Support: "+req.Subject, body)
+		body := fmt.Sprintf("Support Request #%s\nCategory: %s\nSubject: %s\nUser: %s (ID: %d)\nTenant: %d\n\n%s",
+			refID, req.Category, req.Subject, email, userID, tenantID, req.Message)
+		if err := h.mailSender.Send("noreply@orvix.email", "Orvix Support: "+req.Subject, body); err != nil {
+			sr.DeliveryStatus = "failed"
+			sr.DeliveryError = err.Error()
+		} else {
+			sr.DeliveryStatus = "sent"
+		}
+	} else {
+		sr.DeliveryStatus = "queued"
+	}
+
+	if err := h.db.Create(&sr).Error; err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to save support request"})
 	}
 
 	h.writeAuditLog(c, "support.request.create", fmt.Sprintf("category:%s ref:%s", req.Category, refID))
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-		"reference_id": refID,
-		"status":       "received",
+		"reference_id":   refID,
+		"status":         sr.Status,
+		"delivery_status": sr.DeliveryStatus,
 	})
 }
 
@@ -185,14 +208,15 @@ func (h *Handler) UpdateAccountPreferences(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
 	}
 	validThemes := map[string]bool{"light": true, "dark": true, "system": true}
+	validLocales := map[string]bool{"en": true, "ar": true, "fr": true, "es": true, "de": true, "pt": true, "zh": true, "ja": true, "ko": true, "ru": true}
 	if req.Theme != nil && !validThemes[*req.Theme] {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "theme must be light, dark, or system"})
 	}
-	if req.Locale != nil && len(*req.Locale) > 10 {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "locale too long"})
+	if req.Locale != nil && !validLocales[*req.Locale] {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "unsupported locale"})
 	}
-	if req.Timezone != nil && len(*req.Timezone) > 64 {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "timezone too long"})
+	if req.Timezone != nil && !isValidTimezone(*req.Timezone) {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid timezone"})
 	}
 
 	updates := map[string]interface{}{}
@@ -223,17 +247,16 @@ func (h *Handler) GetNotificationPreferences(c fiber.Ctx) error {
 	var pref models.UserNotificationPreference
 	result := h.db.Where("user_id = ?", userID).First(&pref)
 	if result.Error != nil {
-		pref = models.UserNotificationPreference{
-			UserID:             userID,
-			DomainVerification: true,
-			QuotaWarning:       true,
-			QuotaReached:       true,
-			BillingStatus:      true,
-			Invitation:         true,
-			SessionActivity:    true,
-			ChannelEmail:       true,
-		}
-		h.db.Create(&pref)
+		// Return defaults without persisting — no side effects on GET.
+		return c.JSON(fiber.Map{
+			"domain_verification": true,
+			"quota_warning":       true,
+			"quota_reached":       true,
+			"billing_status":      true,
+			"invitation":          true,
+			"session_activity":    true,
+			"channel_email":       true,
+		})
 	}
 	return c.JSON(fiber.Map{
 		"domain_verification": pref.DomainVerification,
@@ -266,7 +289,8 @@ func (h *Handler) UpdateNotificationPreferences(c fiber.Ctx) error {
 
 	var pref models.UserNotificationPreference
 	if err := h.db.Where("user_id = ?", userID).First(&pref).Error; err != nil {
-		pref = models.UserNotificationPreference{UserID: userID}
+		pref = models.UserNotificationPreference{UserID: userID} // defaults via GORM
+		h.db.Create(&pref)
 	}
 	if req.DomainVerification != nil {
 		pref.DomainVerification = *req.DomainVerification
@@ -294,4 +318,31 @@ func (h *Handler) UpdateNotificationPreferences(c fiber.Ctx) error {
 	}
 	h.writeAuditLog(c, "notification_prefs.update", fmt.Sprintf("user:%d", userID))
 	return c.JSON(fiber.Map{"status": "ok"})
+}
+
+var validTimezones = map[string]bool{
+	"UTC": true, "GMT": true,
+	"Africa/Cairo": true, "Africa/Johannesburg": true, "Africa/Lagos": true, "Africa/Nairobi": true,
+	"America/Chicago": true, "America/Denver": true, "America/Los_Angeles": true,
+	"America/New_York": true, "America/Phoenix": true, "America/Sao_Paulo": true,
+	"America/Toronto": true, "America/Vancouver": true,
+	"Asia/Baghdad": true, "Asia/Bangkok": true, "Asia/Calcutta": true, "Asia/Dhaka": true,
+	"Asia/Dubai": true, "Asia/Hong_Kong": true, "Asia/Jakarta": true, "Asia/Jerusalem": true,
+	"Asia/Karachi": true, "Asia/Kolkata": true, "Asia/Manila": true, "Asia/Seoul": true,
+	"Asia/Shanghai": true, "Asia/Singapore": true, "Asia/Tokyo": true,
+	"Australia/Adelaide": true, "Australia/Brisbane": true, "Australia/Melbourne": true,
+	"Australia/Perth": true, "Australia/Sydney": true,
+	"Europe/Amsterdam": true, "Europe/Athens": true, "Europe/Berlin": true, "Europe/Brussels": true,
+	"Europe/Bucharest": true, "Europe/Dublin": true, "Europe/Helsinki": true, "Europe/Istanbul": true,
+	"Europe/Kyiv": true, "Europe/Lisbon": true, "Europe/London": true, "Europe/Madrid": true,
+	"Europe/Moscow": true, "Europe/Oslo": true, "Europe/Paris": true, "Europe/Prague": true,
+	"Europe/Rome": true, "Europe/Stockholm": true, "Europe/Vienna": true, "Europe/Warsaw": true,
+	"Europe/Zurich": true,
+	"Pacific/Auckland": true, "Pacific/Fiji": true, "Pacific/Guam": true, "Pacific/Honolulu": true,
+	"US/Alaska": true, "US/Arizona": true, "US/Central": true, "US/Eastern": true,
+	"US/Hawaii": true, "US/Mountain": true, "US/Pacific": true,
+}
+
+func isValidTimezone(tz string) bool {
+	return validTimezones[tz]
 }

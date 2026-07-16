@@ -577,6 +577,21 @@ func MigrateAllRaw(db *gorm.DB) error {
 			session_activity INTEGER NOT NULL DEFAULT 1,
 			channel_email INTEGER NOT NULL DEFAULT 1
 		)`,
+		`CREATE TABLE IF NOT EXISTS support_requests (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			reference_id TEXT NOT NULL UNIQUE,
+			tenant_id INTEGER NOT NULL,
+			user_id INTEGER NOT NULL,
+			user_email TEXT NOT NULL,
+			category TEXT NOT NULL,
+			subject TEXT NOT NULL,
+			message TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'received',
+			delivery_status TEXT NOT NULL DEFAULT 'pending',
+			delivery_error TEXT NOT NULL DEFAULT ''
+		)`,
 		`CREATE TABLE IF NOT EXISTS mailboxes (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			created_at DATETIME NOT NULL,
