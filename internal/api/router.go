@@ -811,11 +811,12 @@ func (r *Router) setupRoutes() {
 	protected.Post("/customer/domains/:domain_id/verify", r.h.VerifyCustomerDomain)
 
 	// Enterprise customer administration (tenant-scoped, CSRF-protected).
-	// Available to organization admins, operators, and above.
-	// All operations are scoped to the caller's tenant_id.
+	// Available to any authenticated user with a valid tenant context.
+	// All operations are scoped to the caller's tenant_id. Signup-created
+	// organization owners receive RoleUser and need portal access immediately.
 	enterprise := protected.Group("/enterprise",
 		requireTenantContext,
-		auth.RequireAnyRole(auth.RoleAdmin, auth.RoleSuperAdmin, auth.RoleOperator),
+		auth.RequireAnyRole(auth.RoleAdmin, auth.RoleSuperAdmin, auth.RoleOperator, auth.RoleUser, auth.RoleReadOnly),
 		r.csrf.Middleware())
 	enterprise.Get("/dashboard", r.h.CustomerDashboard)
 	enterprise.Get("/domains", r.h.ListAdminDomains)

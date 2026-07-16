@@ -141,11 +141,14 @@ test.describe("Orvix admin portal E2E", () => {
     await page.goto(`http://127.0.0.1:${adminPort}/admin`);
     await page.waitForLoadState("networkidle");
 
-    // Verify dashboard loads with key elements
-    await expect(page.locator("h2").filter({ hasText: "Dashboard" })).toBeVisible();
-    await expect(page.getByText("Domains")).toBeVisible();
-    await expect(page.getByText("Mailboxes")).toBeVisible();
-    await expect(page.getByText("Storage")).toBeVisible();
+    // Verify dashboard loads with key elements.
+    // Use within() scoped to the <main> content area to avoid
+    // matching sidebar navigation buttons that share the same text.
+    const mainContent = page.locator("main");
+    await expect(mainContent.locator("h2").filter({ hasText: "Dashboard" })).toBeVisible();
+    await expect(mainContent.getByText("Domains")).toBeVisible();
+    await expect(mainContent.getByText("Mailboxes")).toBeVisible();
+    await expect(mainContent.getByText("Storage")).toBeVisible();
 
     // Navigate to each Customer Portal section and verify page renders.
     // The sidebar has ambiguous button labels (e.g. "Organizations" + "Organization",

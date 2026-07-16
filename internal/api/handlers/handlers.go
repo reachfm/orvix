@@ -238,6 +238,9 @@ func NewHandler(db *gorm.DB, authenticator *auth.Authenticator, apikeyMgr *auth.
 			if err := auditStore.EnsureTable(context.Background()); err != nil {
 				logger.Error("failed to ensure audit store", zap.Error(err))
 			}
+			if err := auditStore.EnsureTenantColumn(context.Background()); err != nil {
+				logger.Error("failed to ensure tenant_id column on audit store", zap.Error(err))
+			}
 		}
 	}
 	// SecurityMonitor needs a non-nil DB; pass nil when DB is nil.

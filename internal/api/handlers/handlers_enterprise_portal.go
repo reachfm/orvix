@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -30,15 +29,32 @@ func (h *Handler) ListEnterpriseAuditLogs(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(err.(*fiber.Error).Code).JSON(fiber.Map{"error": err.Error()})
 	}
-	actor := c.Locals("email")
-	actorStr := ""
-	if actor != nil {
-		actorStr = fmt.Sprintf("%v", actor)
-	}
-	_ = actorStr
-	_ = tenantID
 
-	logs, _, err := h.auditStore.Search(c.Context(), &audit.Query{Limit: 100})
+	q := &audit.Query{
+		TenantID: tenantID,
+		Limit:    100,
+	}
+	if actor := c.Query("actor"); actor != "" {
+		q.Actor = actor
+	}
+	if action := c.Query("action"); action != "" {
+		q.Action = action
+	}
+	if target := c.Query("target"); target != "" {
+		q.Target = target
+	}
+	if since := c.Query("since"); since != "" {
+		if t, err := time.Parse(time.RFC3339, since); err == nil {
+			q.Since = &t
+		}
+	}
+	if until := c.Query("until"); until != "" {
+		if t, err := time.Parse(time.RFC3339, until); err == nil {
+			q.Until = &t
+		}
+	}
+
+	logs, _, err := h.auditStore.Search(c.Context(), q)
 	if err != nil {
 		h.logger.Error("failed to list enterprise audit logs", zap.Error(err))
 		return c.JSON([]struct{}{})
