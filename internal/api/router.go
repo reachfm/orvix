@@ -689,9 +689,13 @@ func (r *Router) setupRoutes() {
 	protected := api.Group("", r.apikeys.Middleware(), r.auth.Middleware(), auth.TenantMiddleware(r.db))
 	protected.Get("/me", r.h.Me)
 
-	// Account endpoints — own profile, sessions. Authenticated user only.
+	// Account endpoints — own profile, sessions, preferences. Authenticated user only.
 	protected.Get("/account/profile", r.h.GetAccountProfile)
 	protected.Patch("/account/profile", r.h.UpdateAccountProfile)
+	protected.Get("/account/preferences", r.h.GetAccountPreferences)
+	protected.Patch("/account/preferences", r.h.UpdateAccountPreferences)
+	protected.Get("/account/notification-preferences", r.h.GetNotificationPreferences)
+	protected.Patch("/account/notification-preferences", r.h.UpdateNotificationPreferences)
 	protected.Get("/account/sessions", r.h.ListAccountSessions)
 	protected.Post("/account/sessions/:id/revoke", r.h.RevokeAccountSession)
 	protected.Post("/account/support-requests", r.h.SubmitSupportRequest)

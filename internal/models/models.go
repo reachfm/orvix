@@ -249,6 +249,10 @@ type User struct {
 	Active        bool       `gorm:"not null;default:true" json:"active"`
 	EmailVerified bool       `gorm:"not null;default:false" json:"email_verified"`
 	LastLogin     *time.Time `json:"last_login"`
+	DisplayName   string     `gorm:"column:full_name;default:''" json:"display_name,omitempty"`
+	Locale        string     `gorm:"default:''" json:"locale,omitempty"`
+	Timezone      string     `gorm:"default:''" json:"timezone,omitempty"`
+	Theme         string     `gorm:"default:'dark'" json:"theme,omitempty"`
 }
 
 // Domain represents a mail domain.
@@ -553,24 +557,25 @@ func MigrateAllRaw(db *gorm.DB) error {
 			active INTEGER NOT NULL DEFAULT 1,
 			email_verified INTEGER NOT NULL DEFAULT 0,
 			last_login DATETIME,
+			full_name TEXT NOT NULL DEFAULT '',
+			locale TEXT NOT NULL DEFAULT '',
+			timezone TEXT NOT NULL DEFAULT '',
+			theme TEXT NOT NULL DEFAULT 'dark',
 			UNIQUE(email, deleted_at)
 		)`,
-		`CREATE TABLE IF NOT EXISTS domains (
+		`CREATE TABLE IF NOT EXISTS user_notification_preferences (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL,
 			deleted_at DATETIME,
-			tenant_id INTEGER NOT NULL,
-			domain TEXT NOT NULL,
-			dkim_selector TEXT DEFAULT 'mail',
-			spf_record TEXT,
-			dmarc_record TEXT,
-			dkim_record TEXT,
-			mx_record TEXT,
-			status TEXT NOT NULL DEFAULT 'pending',
-			is_verified INTEGER NOT NULL DEFAULT 0,
-			is_primary INTEGER NOT NULL DEFAULT 0,
-			UNIQUE(domain, deleted_at)
+			user_id INTEGER NOT NULL UNIQUE,
+			domain_verification INTEGER NOT NULL DEFAULT 1,
+			quota_warning INTEGER NOT NULL DEFAULT 1,
+			quota_reached INTEGER NOT NULL DEFAULT 1,
+			billing_status INTEGER NOT NULL DEFAULT 1,
+			invitation INTEGER NOT NULL DEFAULT 1,
+			session_activity INTEGER NOT NULL DEFAULT 1,
+			channel_email INTEGER NOT NULL DEFAULT 1
 		)`,
 		`CREATE TABLE IF NOT EXISTS mailboxes (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1078,6 +1083,9 @@ func MigrateAllRaw(db *gorm.DB) error {
 	if err := migrateUsersMFASchema(ctx, sqlDB); err != nil {
 		return err
 	}
+	if err := migrateUsersProfileSchema(ctx, sqlDB); err != nil {
+		return err
+	}
 
 	// Create indexes
 	indexes := []string{
@@ -1244,6 +1252,35 @@ func migrateUsersMFASchema(ctx context.Context, db *sql.DB) error {
 		{"pending_mfa_secret_raw", "ALTER TABLE users ADD COLUMN pending_mfa_secret_raw TEXT NOT NULL DEFAULT ''"},
 		{"mfa_secret_raw", "ALTER TABLE users ADD COLUMN mfa_secret_raw TEXT NOT NULL DEFAULT ''"},
 		{"mfa_label", "ALTER TABLE users ADD COLUMN mfa_label TEXT NOT NULL DEFAULT ''"},
+	}
+
+	for _, addition := range additions {
+		if columns[addition.name] {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, addition.sql); err != nil {
+			return fmt.Errorf("add users.%s: %w", addition.name, err)
+		}
+		columns[addition.name] = true
+	}
+
+	return nil
+}
+
+func migrateUsersProfileSchema(ctx context.Context, db *sql.DB) error {
+	columns, err := sqliteColumns(ctx, db, "users")
+	if err != nil {
+		return fmt.Errorf("inspect users schema for profile columns: %w", err)
+	}
+
+	additions := []struct {
+		name string
+		sql  string
+	}{
+		{"full_name", "ALTER TABLE users ADD COLUMN full_name TEXT NOT NULL DEFAULT ''"},
+		{"locale", "ALTER TABLE users ADD COLUMN locale TEXT NOT NULL DEFAULT ''"},
+		{"timezone", "ALTER TABLE users ADD COLUMN timezone TEXT NOT NULL DEFAULT ''"},
+		{"theme", "ALTER TABLE users ADD COLUMN theme TEXT NOT NULL DEFAULT 'dark'"},
 	}
 
 	for _, addition := range additions {
