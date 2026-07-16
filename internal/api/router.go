@@ -869,6 +869,15 @@ func (r *Router) setupRoutes() {
 	enterprise.Post("/abuse/signals/:id/acknowledge", r.h.AcknowledgeAbuseSignal)
 	enterprise.Post("/abuse/signals/:id/resolve", r.h.ResolveAbuseSignal)
 
+	enterprise.Get("/api-keys", r.h.ListEnterpriseAPIKeys)
+	enterprise.Post("/api-keys", r.h.CreateEnterpriseAPIKey)
+	enterprise.Delete("/api-keys/:id", r.h.DeleteEnterpriseAPIKey)
+
+	enterprise.Get("/audit/logs", r.h.ListEnterpriseAuditLogs)
+
+	enterprise.Get("/sessions", r.h.ListEnterpriseSessions)
+	enterprise.Post("/sessions/:id/revoke", r.h.RevokeEnterpriseSession)
+
 	// CSRF is enforced on the entire admin group by default (deny-list,
 	// not allow-list) rather than only on routes an author remembered to
 	// nest under a separate CSRF sub-group — several state-changing

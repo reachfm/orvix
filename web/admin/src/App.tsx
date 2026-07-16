@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { LayoutDashboard, Globe, Users, Shield, Zap, Activity, Settings, Server, Building, Mail, Monitor, Key, HardDrive, HeartPulse, CreditCard, Keyboard, User, AtSign, BarChart, AlertTriangle, UserPlus, Send, LogOut } from "lucide-react";
+import { LayoutDashboard, Globe, Users, Shield, Zap, Activity, Settings, Server, Building, Mail, Monitor, Key, HardDrive, HeartPulse, CreditCard, Keyboard, User, AtSign, BarChart, AlertTriangle, UserPlus, Send, LogOut, FileText, Bell } from "lucide-react";
 import Dashboard from "./components/Dashboard";
 import Domains from "./components/Domains";
 import UsersPage from "./components/UsersPage";
@@ -29,12 +29,17 @@ import CustomerMailboxesPage from "./components/CustomerMailboxesPage";
 import AliasesPage from "./components/AliasesPage";
 import GroupsPage from "./components/GroupsPage";
 import UsageQuotasPage from "./components/UsageQuotasPage";
+import InvoicesPage from "./components/InvoicesPage";
+import SecurityPage from "./components/SecurityPage";
+import SupportPage from "./components/SupportPage";
+import PreferencesPage from "./components/PreferencesPage";
 
 type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" | "settings"
   | "enterprise" | "mailboxes" | "organizations" | "license" | "backups" | "health"
   | "billing" | "onboarding" | "apikeys"
   | "account-settings" | "org-overview" | "invitations" | "members-roles" | "ownership-transfer"
   | "suspension-deletion" | "customer-mailboxes" | "aliases" | "groups" | "usage-quotas"
+  | "invoices" | "security" | "support" | "preferences"
   | "login" | "signup" | "forgot-password" | "reset-password";
 
 const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: string }[] = [
@@ -61,9 +66,13 @@ const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: st
   { id: "members-roles", label: "Members", icon: Shield },
   { id: "ownership-transfer", label: "Ownership", icon: Send },
   { id: "suspension-deletion", label: "Status", icon: AlertTriangle },
+  { id: "invoices", label: "Invoices", icon: FileText },
   { id: "billing", label: "Billing", icon: CreditCard },
   { id: "apikeys", label: "API Keys", icon: Keyboard },
   { id: "account-settings", label: "Account", icon: User, section: "Account" },
+  { id: "security", label: "Security", icon: Shield },
+  { id: "preferences", label: "Preferences", icon: Bell },
+  { id: "support", label: "Support", icon: HeartPulse },
 ];
 
 export default function App() {
@@ -125,6 +134,10 @@ export default function App() {
       case "aliases": return <AliasesPage />;
       case "groups": return <GroupsPage />;
       case "usage-quotas": return <UsageQuotasPage />;
+      case "invoices": return <InvoicesPage />;
+      case "security": return <SecurityPage />;
+      case "support": return <SupportPage />;
+      case "preferences": return <PreferencesPage />;
       default: return <Dashboard />;
     }
   };

@@ -108,6 +108,26 @@ export const api = {
   signup: (data: any) =>
     request("/auth/signup", { method: "POST", body: JSON.stringify(data) }),
 
+  // Dashboard
+  getDashboard: () => request<any>("/enterprise/dashboard"),
+
+  // Audit logs
+  listAuditLogs: () => request<any[]>("/enterprise/audit/logs"),
+
+  // Sessions
+  listSessions: () => request<any>("/enterprise/sessions"),
+  revokeSession: (id: string) =>
+    request(`/enterprise/sessions/${id}/revoke`, { method: "POST" }),
+
+  // MFA
+  getMFAStatus: () => request<any>("/admin/mfa/status"),
+  setupMFABegin: (data: { current_password: string }) =>
+    request("/admin/mfa/setup/begin", { method: "POST", body: JSON.stringify(data) }),
+  setupMFAVerify: (code: string) =>
+    request("/admin/mfa/setup/verify", { method: "POST", body: JSON.stringify({ code }) }),
+  disableMFA: (data: { current_password: string; code: string }) =>
+    request("/admin/mfa/disable", { method: "POST", body: JSON.stringify(data) }),
+
   // Forgot/reset password
   forgotPassword: (email: string) =>
     request("/auth/forgot-password", { method: "POST", body: JSON.stringify({ email }) }),

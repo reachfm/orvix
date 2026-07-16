@@ -141,10 +141,11 @@ test.describe("Orvix admin portal E2E", () => {
     await page.goto(`http://127.0.0.1:${adminPort}/admin`);
     await page.waitForLoadState("networkidle");
 
-    // Verify dashboard loads with key elements (use .first() for ambiguous text)
+    // Verify dashboard loads with key elements
     await expect(page.locator("h2").filter({ hasText: "Dashboard" })).toBeVisible();
-    await expect(page.getByText("Emails Today")).toBeVisible();
-    await expect(page.getByText("Queue Depth")).toBeVisible();
+    await expect(page.getByText("Domains")).toBeVisible();
+    await expect(page.getByText("Mailboxes")).toBeVisible();
+    await expect(page.getByText("Storage")).toBeVisible();
 
     // Navigate to each Customer Portal section and verify page renders.
     // The sidebar has ambiguous button labels (e.g. "Organizations" + "Organization",
@@ -163,6 +164,10 @@ test.describe("Orvix admin portal E2E", () => {
       { text: "Status", heading: "Organization Status" },
       { text: "Billing", heading: "Billing & Subscription" },
       { text: "API Keys", heading: "API Keys" },
+      { text: "Invoices", heading: "Invoices" },
+      { text: "Security", heading: "Security" },
+      { text: "Support", heading: "Support" },
+      { text: "Preferences", heading: "Preferences" },
     ];
 
     for (const section of portalSections) {
