@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -40,26 +41,44 @@ func (h *Handler) RotateEnterpriseAPIKey(c fiber.Ctx) error {
 	tenantID := c.Locals("tenant_id").(uint)
 	role := string(c.Locals("role").(auth.Role))
 
+	// Look up the existing key to preserve its name and scopes.
+	existingKeys, _ := h.apikeys.List(userID)
+	var oldName string
+	var oldScopes []string
+	for _, k := range existingKeys {
+		if k.ID == id {
+			oldName = k.Name
+			if k.Scopes != "" {
+				oldScopes = parseScopes(k.Scopes)
+			}
+			break
+		}
+	}
+	if oldName == "" {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "API key not found"})
+	}
+
+	// Revoke old key atomically before generating new.
+	if err := h.apikeys.RevokeScoped(id, userID); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+
 	var req struct {
-		Name   string   `json:"name"`
 		Scopes []string `json:"scopes"`
 	}
 	var scopes []string
-	if err := c.Bind().JSON(&req); err == nil {
+	if err := c.Bind().JSON(&req); err == nil && len(req.Scopes) > 0 {
 		scopes = req.Scopes
-	}
-	name := req.Name
-	if name == "" {
-		name = fmt.Sprintf("key-%d", id)
+	} else {
+		scopes = oldScopes
 	}
 
-	fullKey, record, err := h.apikeys.Generate(name, userID, tenantID, role, scopes, 365)
+	fullKey, record, err := h.apikeys.Generate(oldName, userID, tenantID, role, scopes, 365)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
-	_ = id
 
-	h.writeAuditLog(c, "apikey.rotate", fmt.Sprintf("name:%s", record.Name))
+	h.writeAuditLog(c, "apikey.rotate", fmt.Sprintf("name:%s old_id:%d new_id:%d", record.Name, id, record.ID))
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
 		"api_key":    fullKey,
 		"key_prefix": record.KeyPrefix,
@@ -67,6 +86,13 @@ func (h *Handler) RotateEnterpriseAPIKey(c fiber.Ctx) error {
 		"expires_at": record.ExpiresAt,
 		"warning":    "Save this key now - it will not be shown again",
 	})
+}
+
+func parseScopes(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, ",")
 }
 
 func (h *Handler) ListEnterpriseAuditLogs(c fiber.Ctx) error {

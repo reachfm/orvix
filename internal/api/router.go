@@ -719,8 +719,25 @@ func (r *Router) setupRoutes() {
 	protected.Post("/account/support-requests", supportLimiter, r.h.SubmitSupportRequest)
 	protected.Get("/account/mfa/status", r.h.AccountMFAStatus)
 	protected.Post("/account/mfa/setup", r.h.AccountMFASetup)
-	protected.Post("/account/mfa/verify", r.h.AccountMFAVerify)
-	protected.Post("/account/mfa/disable", r.h.AccountMFADisable)
+	// MFA: dedicated rate limit — 10 attempts per 15 minutes per user.
+	mfaLimiter := limiter.New(limiter.Config{
+		Max:        10,
+		Expiration: 15 * 60 * 1000,
+		KeyGenerator: func(c fiber.Ctx) string {
+			if uid, ok := c.Locals("user_id").(uint); ok && uid > 0 {
+				return fmt.Sprintf("mfa_req:%d", uid)
+			}
+			return "mfa_req:" + c.IP()
+		},
+		LimitReached: func(c fiber.Ctx) error {
+			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+				"error":       "too many MFA attempts, please try again later",
+				"retry_after": "15 minutes",
+			})
+		},
+	})
+	protected.Post("/account/mfa/verify", mfaLimiter, r.h.AccountMFAVerify)
+	protected.Post("/account/mfa/disable", mfaLimiter, r.h.AccountMFADisable)
 	protected.Post("/account/mfa/recovery-codes/regenerate", r.h.AccountMFARegenerateRecoveryCodes)
 
 	// User-facing webmail endpoints. Mounted on the

@@ -1,7 +1,8 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Shield, Monitor, Smartphone, X, Key, Lock, Check, AlertTriangle, Loader2 } from "lucide-react";
 import { api } from "../api";
+import QRCode from "qrcode";
 
 function isMobile(userAgent: string): boolean {
   return /mobile|android|iphone|ipad/i.test(userAgent);
@@ -16,7 +17,17 @@ export default function SecurityPage() {
   const [newPassword, setNewPassword] = useState("");
   const [mfaSetupCode, setMfaSetupCode] = useState("");
   const [mfaSecret, setMfaSecret] = useState("");
+  const [mfaOtpAuthUrl, setMfaOtpAuthUrl] = useState("");
   const [showSetup, setShowSetup] = useState(false);
+  const qrCanvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    if (mfaOtpAuthUrl && qrCanvasRef.current) {
+      QRCode.toCanvas(qrCanvasRef.current, mfaOtpAuthUrl, { width: 200, margin: 1 }, (err) => {
+        if (err) console.error("QR render failed", err);
+      });
+    }
+  }, [mfaOtpAuthUrl]);
 
   const sessions: any[] = (sessionsData as any)?.sessions || [];
   const nonCurrentSessions = sessions.filter((s: any) => !s.current);
@@ -35,6 +46,7 @@ export default function SecurityPage() {
     mutationFn: () => api.setupMFABegin({ current_password: currentPassword }),
     onSuccess: (data: any) => {
       setMfaSecret(data.secret);
+      setMfaOtpAuthUrl(data.otpauth_url);
       setShowSetup(true);
     },
   });
@@ -167,8 +179,12 @@ export default function SecurityPage() {
 
             {showSetup && (
               <div className="space-y-3 bg-[#0C0E12] rounded p-4">
-                <p className="text-sm text-[#E8EAF0]">Scan this QR code or enter the secret manually in your authenticator app:</p>
-                <p className="text-xs font-mono text-[#4F7CFF] bg-[#13161C] p-2 rounded break-all">{mfaSecret}</p>
+                <p className="text-sm text-[#E8EAF0]">Scan this QR code with your authenticator app:</p>
+                <canvas ref={qrCanvasRef} className="mx-auto bg-white p-1 rounded" width="200" height="200" />
+                <details>
+                  <summary className="text-xs text-[#8B92A8] cursor-pointer hover:text-[#E8EAF0]">Enter secret manually</summary>
+                  <p className="text-xs font-mono text-[#4F7CFF] bg-[#13161C] p-2 rounded break-all mt-1">{mfaSecret}</p>
+                </details>
                 <div>
                   <label className="block text-sm text-gray-400 mb-1">Verification Code</label>
                   <input value={mfaSetupCode} onChange={(e) => setMfaSetupCode(e.target.value)} placeholder="000000"
