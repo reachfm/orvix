@@ -71,70 +71,97 @@ func (s *InvoiceService) UpsertFromProviderEvent(ctx context.Context, inv *Invoi
 
 	d := s.dialect
 	now := time.Now().UTC()
-
-	// Try to get existing invoice to check ordering.
-	existing, err := s.getExistingByProvider(ctx, prov, inv.ProviderInvoiceID)
-	if err == nil && existing != nil {
-		// Out-of-order protection: if the incoming event is older than what we already
-		// have, skip the update but report success (idempotent).
-		if eventCreatedAt != nil && existing.ProviderEventCreatedAt != nil {
-			if eventCreatedAt.Before(*existing.ProviderEventCreatedAt) {
-				// Older event — preserve existing state, especially if already paid.
-				return existing, nil
-			}
-		}
-		// Paid state protection: never regress from paid unless explicit void/uncollectible.
-		if existing.Status == "paid" && inv.Status != "void" && inv.Status != "uncollectible" {
-			// Keep paid status, just update amounts/payment info.
-			inv.Status = "paid"
-		}
-		// Update the existing record.
-		_, err := s.db.ExecContext(ctx,
-			`UPDATE invoices SET updated_at = `+d.Placeholder(1)+`,
-			status = `+d.Placeholder(2)+`, total = `+d.Placeholder(3)+`,
-			amount_paid = `+d.Placeholder(4)+`, amount_due = `+d.Placeholder(5)+`,
-			subtotal = `+d.Placeholder(6)+`, tax = `+d.Placeholder(7)+`,
-			currency = `+d.Placeholder(8)+`, invoice_number = `+d.Placeholder(9)+`,
-			subscription_id = `+d.Placeholder(10)+`,
-			period_start = `+d.Placeholder(11)+`, period_end = `+d.Placeholder(12)+`,
-			issued_at = `+d.Placeholder(13)+`, due_at = `+d.Placeholder(14)+`,
-			paid_at = `+d.Placeholder(15)+`,
-			hosted_invoice_url = `+d.Placeholder(16)+`, pdf_url = `+d.Placeholder(17)+`,
-			provider_event_created_at = `+d.Placeholder(18)+`,
-			provider_event_id = `+d.Placeholder(19)+`,
-			provider_updated_at = `+d.Placeholder(20)+`
-			WHERE provider = `+d.Placeholder(21)+` AND provider_invoice_id = `+d.Placeholder(22)+` AND tenant_id = `+d.Placeholder(23),
-			now, inv.Status, inv.Total, inv.AmountPaid, inv.AmountDue,
-			inv.Subtotal, inv.Tax, inv.Currency, inv.InvoiceNumber,
-			inv.SubscriptionID, inv.PeriodStart, inv.PeriodEnd, inv.IssuedAt, inv.DueAt,
-			inv.PaidAt, inv.HostedInvoiceURL, inv.PDFURL,
-			eventCreatedAt, eventID, now,
-			prov, inv.ProviderInvoiceID, inv.TenantID)
-		if err != nil {
-			return nil, fmt.Errorf("update invoice: %w", err)
-		}
-		inv.ID = existing.ID
-		return inv, nil
-	}
-
-	// Insert new.
 	var id uint
-	err = s.db.QueryRowContext(ctx,
+
+	err := s.db.QueryRowContext(ctx,
 		`INSERT INTO invoices (created_at, updated_at, tenant_id, subscription_id, provider,
 		provider_invoice_id, invoice_number, currency, subtotal, tax, total,
 		amount_paid, amount_due, status, period_start, period_end, issued_at,
 		due_at, paid_at, hosted_invoice_url, pdf_url,
 		provider_event_created_at, provider_event_id, provider_updated_at)
 		VALUES (`+d.Placeholders(24)+`)
+		ON CONFLICT (provider, provider_invoice_id) DO UPDATE SET
+		updated_at = `+d.Placeholder(25)+`,
+		status = CASE
+			WHEN invoices.status = 'paid' AND `+d.Placeholder(26)+` NOT IN ('void', 'uncollectible') THEN 'paid'
+			ELSE `+d.Placeholder(27)+`
+		END,
+		total = CASE
+			WHEN `+d.Placeholder(28)+` IS NOT NULL AND invoices.provider_event_created_at IS NOT NULL AND `+d.Placeholder(29)+` < invoices.provider_event_created_at THEN invoices.total
+			ELSE `+d.Placeholder(30)+`
+		END,
+		amount_paid = CASE
+			WHEN `+d.Placeholder(31)+` IS NOT NULL AND invoices.provider_event_created_at IS NOT NULL AND `+d.Placeholder(32)+` < invoices.provider_event_created_at THEN invoices.amount_paid
+			ELSE `+d.Placeholder(33)+`
+		END,
+		amount_due = CASE
+			WHEN `+d.Placeholder(34)+` IS NOT NULL AND invoices.provider_event_created_at IS NOT NULL AND `+d.Placeholder(35)+` < invoices.provider_event_created_at THEN invoices.amount_due
+			ELSE `+d.Placeholder(36)+`
+		END,
+		subtotal = CASE
+			WHEN `+d.Placeholder(37)+` IS NOT NULL AND invoices.provider_event_created_at IS NOT NULL AND `+d.Placeholder(38)+` < invoices.provider_event_created_at THEN invoices.subtotal
+			ELSE `+d.Placeholder(39)+`
+		END,
+		tax = CASE
+			WHEN `+d.Placeholder(40)+` IS NOT NULL AND invoices.provider_event_created_at IS NOT NULL AND `+d.Placeholder(41)+` < invoices.provider_event_created_at THEN invoices.tax
+			ELSE `+d.Placeholder(42)+`
+		END,
+		currency = `+d.Placeholder(43)+`,
+		invoice_number = `+d.Placeholder(44)+`,
+		subscription_id = `+d.Placeholder(45)+`,
+		period_start = `+d.Placeholder(46)+`,
+		period_end = `+d.Placeholder(47)+`,
+		issued_at = `+d.Placeholder(48)+`,
+		due_at = `+d.Placeholder(49)+`,
+		paid_at = `+d.Placeholder(50)+`,
+		hosted_invoice_url = `+d.Placeholder(51)+`,
+		pdf_url = `+d.Placeholder(52)+`,
+		provider_event_created_at = CASE
+			WHEN `+d.Placeholder(53)+` IS NULL OR invoices.provider_event_created_at IS NULL THEN `+d.Placeholder(54)+`
+			WHEN `+d.Placeholder(55)+` > invoices.provider_event_created_at THEN `+d.Placeholder(56)+`
+			ELSE invoices.provider_event_created_at
+		END,
+		provider_event_id = CASE
+			WHEN `+d.Placeholder(57)+` IS NULL THEN `+d.Placeholder(58)+`
+			WHEN invoices.provider_event_created_at IS NULL THEN `+d.Placeholder(59)+`
+			WHEN `+d.Placeholder(60)+` > invoices.provider_event_created_at THEN `+d.Placeholder(61)+`
+			ELSE invoices.provider_event_id
+		END,
+		provider_updated_at = `+d.Placeholder(62)+`
 		RETURNING id`,
+		// INSERT values (24)
 		now, now, inv.TenantID, inv.SubscriptionID, prov,
 		inv.ProviderInvoiceID, inv.InvoiceNumber, inv.Currency, inv.Subtotal, inv.Tax, inv.Total,
 		inv.AmountPaid, inv.AmountDue, inv.Status, inv.PeriodStart, inv.PeriodEnd, inv.IssuedAt,
 		inv.DueAt, inv.PaidAt, inv.HostedInvoiceURL, inv.PDFURL,
 		eventCreatedAt, eventID, now,
+		// UPDATE values starting at 25
+		now,                    // 25: updated_at
+		inv.Status, inv.Status, // 26-27: status CASE
+		eventCreatedAt, eventCreatedAt, inv.Total, // 28-30: total CASE
+		eventCreatedAt, eventCreatedAt, inv.AmountPaid, // 31-33: amount_paid CASE
+		eventCreatedAt, eventCreatedAt, inv.AmountDue, // 34-36: amount_due CASE
+		eventCreatedAt, eventCreatedAt, inv.Subtotal, // 37-39: subtotal CASE
+		eventCreatedAt, eventCreatedAt, inv.Tax, // 40-42: tax CASE
+		inv.Currency,                   // 43: currency
+		inv.InvoiceNumber,              // 44: invoice_number
+		inv.SubscriptionID,             // 45: subscription_id
+		inv.PeriodStart,                // 46: period_start
+		inv.PeriodEnd,                  // 47: period_end
+		inv.IssuedAt,                   // 48: issued_at
+		inv.DueAt,                      // 49: due_at
+		inv.PaidAt,                     // 50: paid_at
+		inv.HostedInvoiceURL,           // 51: hosted_invoice_url
+		inv.PDFURL,                     // 52: pdf_url
+		eventCreatedAt, eventCreatedAt, // 53-54: provider_event_created_at CASE (first)
+		eventCreatedAt, eventCreatedAt, // 55-56: provider_event_created_at CASE (condition+value)
+		eventID, eventID, // 57-58: provider_event_id CASE first
+		eventID,                        // 59: provider_event_id CASE second
+		eventCreatedAt, eventCreatedAt, // 60-61: provider_event_id CASE condition+value
+		now, // 62: provider_updated_at
 	).Scan(&id)
 	if err != nil {
-		return nil, fmt.Errorf("insert invoice: %w", err)
+		return nil, fmt.Errorf("upsert invoice: %w", err)
 	}
 	inv.ID = id
 	return inv, nil

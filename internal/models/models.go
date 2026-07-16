@@ -600,7 +600,7 @@ func MigrateAllRaw(db *gorm.DB) error {
 			tenant_id INTEGER NOT NULL,
 			subscription_id INTEGER,
 			provider TEXT NOT NULL DEFAULT '',
-			provider_invoice_id TEXT UNIQUE,
+			provider_invoice_id TEXT,
 			invoice_number TEXT,
 			currency TEXT NOT NULL DEFAULT 'usd',
 			subtotal INTEGER NOT NULL DEFAULT 0,
@@ -618,7 +618,8 @@ func MigrateAllRaw(db *gorm.DB) error {
 			pdf_url TEXT,
 			provider_event_created_at DATETIME,
 			provider_event_id TEXT,
-			provider_updated_at DATETIME
+			provider_updated_at DATETIME,
+			UNIQUE(provider, provider_invoice_id)
 		)`,
 		`CREATE TABLE IF NOT EXISTS domains (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
