@@ -61,7 +61,7 @@ func newPostgresTestAuth(t *testing.T) *Authenticator {
 			_ = s.Close()
 		}
 	})
-	if err := models.MigrateAllRaw(db); err != nil {
+	if err := models.MigrateAllPostgres(db); err != nil {
 		t.Fatalf("postgres migrate: %v", err)
 	}
 
