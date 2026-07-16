@@ -717,8 +717,6 @@ func (r *Router) setupRoutes() {
 		},
 	})
 	protected.Post("/account/support-requests", supportLimiter, r.h.SubmitSupportRequest)
-	protected.Get("/account/mfa/status", r.h.AccountMFAStatus)
-	protected.Post("/account/mfa/setup", r.h.AccountMFASetup)
 	// MFA: dedicated rate limit — 10 attempts per 15 minutes per user.
 	mfaLimiter := limiter.New(limiter.Config{
 		Max:        10,
@@ -736,9 +734,11 @@ func (r *Router) setupRoutes() {
 			})
 		},
 	})
+	protected.Get("/account/mfa/status", r.h.AccountMFAStatus)
+	protected.Post("/account/mfa/setup", mfaLimiter, r.h.AccountMFASetup)
 	protected.Post("/account/mfa/verify", mfaLimiter, r.h.AccountMFAVerify)
 	protected.Post("/account/mfa/disable", mfaLimiter, r.h.AccountMFADisable)
-	protected.Post("/account/mfa/recovery-codes/regenerate", r.h.AccountMFARegenerateRecoveryCodes)
+	protected.Post("/account/mfa/recovery-codes/regenerate", mfaLimiter, r.h.AccountMFARegenerateRecoveryCodes)
 
 	// User-facing webmail endpoints. Mounted on the
 	// protected group so the auth middleware rejects

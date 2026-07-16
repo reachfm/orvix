@@ -18,13 +18,17 @@ export default function SecurityPage() {
   const [mfaSetupCode, setMfaSetupCode] = useState("");
   const [mfaSecret, setMfaSecret] = useState("");
   const [mfaOtpAuthUrl, setMfaOtpAuthUrl] = useState("");
+  const [qrError, setQrError] = useState(false);
   const [showSetup, setShowSetup] = useState(false);
   const qrCanvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
     if (mfaOtpAuthUrl && qrCanvasRef.current) {
-      QRCode.toCanvas(qrCanvasRef.current, mfaOtpAuthUrl, { width: 200, margin: 1 }, (err) => {
-        if (err) console.error("QR render failed", err);
+      QRCode.toCanvas(qrCanvasRef.current, mfaOtpAuthUrl, { width: 200, margin: 1 }, (err: Error | null | undefined) => {
+        if (err) {
+          console.error("QR render failed", err);
+          setQrError(true);
+        }
       });
     }
   }, [mfaOtpAuthUrl]);
@@ -179,8 +183,14 @@ export default function SecurityPage() {
 
             {showSetup && (
               <div className="space-y-3 bg-[#0C0E12] rounded p-4">
-                <p className="text-sm text-[#E8EAF0]">Scan this QR code with your authenticator app:</p>
-                <canvas ref={qrCanvasRef} className="mx-auto bg-white p-1 rounded" width="200" height="200" />
+                {qrError ? (
+                  <p className="text-sm text-[#F87171]">QR code could not be rendered. Use the manual secret below.</p>
+                ) : (
+                  <>
+                    <p className="text-sm text-[#E8EAF0]">Scan this QR code with your authenticator app:</p>
+                    <canvas ref={qrCanvasRef} className="mx-auto bg-white p-1 rounded" width="200" height="200" />
+                  </>
+                )}
                 <details>
                   <summary className="text-xs text-[#8B92A8] cursor-pointer hover:text-[#E8EAF0]">Enter secret manually</summary>
                   <p className="text-xs font-mono text-[#4F7CFF] bg-[#13161C] p-2 rounded break-all mt-1">{mfaSecret}</p>

@@ -8,6 +8,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/auth"
+	rbac "github.com/orvix/orvix/internal/auth/rbac"
 	"go.uber.org/zap"
 )
 
@@ -58,11 +59,6 @@ func (h *Handler) RotateEnterpriseAPIKey(c fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "API key not found"})
 	}
 
-	// Revoke old key atomically before generating new.
-	if err := h.apikeys.RevokeScoped(id, userID); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
-	}
-
 	var req struct {
 		Scopes []string `json:"scopes"`
 	}
@@ -72,8 +68,12 @@ func (h *Handler) RotateEnterpriseAPIKey(c fiber.Ctx) error {
 	} else {
 		scopes = oldScopes
 	}
+	if err := validateAPIKeyScopes(scopes, auth.Role(role)); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
 
-	fullKey, record, err := h.apikeys.Generate(oldName, userID, tenantID, role, scopes, 365)
+	// Atomic rotation: revoke old + generate new in a single operation.
+	fullKey, record, err := h.apikeys.Rotate(oldName, userID, tenantID, role, scopes, 365)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -86,6 +86,28 @@ func (h *Handler) RotateEnterpriseAPIKey(c fiber.Ctx) error {
 		"expires_at": record.ExpiresAt,
 		"warning":    "Save this key now - it will not be shown again",
 	})
+}
+
+func validateAPIKeyScopes(scopes []string, role auth.Role) error {
+	if len(scopes) == 0 {
+		return fmt.Errorf("scopes are required")
+	}
+	seen := map[string]bool{}
+	for _, s := range scopes {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return fmt.Errorf("empty scope not allowed")
+		}
+		if seen[s] {
+			return fmt.Errorf("duplicate scope: %s", s)
+		}
+		seen[s] = true
+		// Validate against known permissions.
+		if !rbac.HasPermission(role, rbac.Permission(s)) {
+			return fmt.Errorf("scope %s exceeds caller permissions or is unknown", s)
+		}
+	}
+	return nil
 }
 
 func parseScopes(s string) []string {

@@ -63,6 +63,10 @@ func (h *Handler) RevokeAccountSession(c fiber.Ctx) error {
 	if result.RowsAffected == 0 {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "session not found"})
 	}
+	// Also revoke the JWT access token if present.
+	if accessToken := c.Cookies("access_token"); accessToken != "" {
+		h.auth.RevokeAccessToken(accessToken)
+	}
 	h.writeAuditLog(c, "session.revoke", fmt.Sprintf("session_id:%d", id))
 	return c.JSON(fiber.Map{"status": "revoked"})
 }
