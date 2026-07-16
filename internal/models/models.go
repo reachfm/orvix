@@ -662,13 +662,16 @@ func MigrateAllRaw(db *gorm.DB) error {
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL,
 			deleted_at DATETIME,
-			user_id INTEGER NOT NULL,
-			key_hash TEXT NOT NULL UNIQUE,
 			name TEXT NOT NULL,
+			user_id INTEGER NOT NULL,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			role TEXT NOT NULL DEFAULT 'user',
+			key_hash TEXT NOT NULL UNIQUE,
+			key_prefix TEXT NOT NULL DEFAULT '',
 			scopes TEXT NOT NULL DEFAULT '',
-			expires_at DATETIME,
-			last_used_at DATETIME,
-			active INTEGER NOT NULL DEFAULT 1
+			enabled INTEGER NOT NULL DEFAULT 1,
+			last_used DATETIME,
+			expires_at DATETIME
 		)`,
 		// CoreMail tables
 		`CREATE TABLE IF NOT EXISTS coremail_domains (
@@ -1153,6 +1156,9 @@ func MigrateAllRaw(db *gorm.DB) error {
 	if err := migrateSessionsJTI(ctx, sqlDB); err != nil {
 		return err
 	}
+	if err := migrateAPIKeysSchema(ctx, sqlDB); err != nil {
+		return err
+	}
 	if err := migrateInvoicesSchema(ctx, sqlDB); err != nil {
 		return err
 	}
@@ -1395,6 +1401,40 @@ func migrateSessionsJTI(ctx context.Context, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, "ALTER TABLE sessions ADD COLUMN jti TEXT NOT NULL DEFAULT ''"); err != nil {
 		return fmt.Errorf("add sessions.jti: %w", err)
 	}
+	return nil
+}
+
+func migrateAPIKeysSchema(ctx context.Context, db *sql.DB) error {
+	columns, err := sqliteColumns(ctx, db, "api_keys")
+	if err != nil {
+		return fmt.Errorf("inspect api_keys schema: %w", err)
+	}
+
+	additions := []struct {
+		name string
+		sql  string
+	}{
+		{"key_prefix", "ALTER TABLE api_keys ADD COLUMN key_prefix TEXT NOT NULL DEFAULT ''"},
+		{"tenant_id", "ALTER TABLE api_keys ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 0"},
+		{"role", "ALTER TABLE api_keys ADD COLUMN role TEXT NOT NULL DEFAULT 'user'"},
+		{"enabled", "ALTER TABLE api_keys ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1"},
+		{"last_used", "ALTER TABLE api_keys ADD COLUMN last_used DATETIME"},
+	}
+	for _, addition := range additions {
+		if columns[addition.name] {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, addition.sql); err != nil {
+			return fmt.Errorf("add api_keys.%s: %w", addition.name, err)
+		}
+		columns[addition.name] = true
+	}
+
+	// Migrate data from old `active` column to `enabled` if active exists and enabled was just added.
+	if columns["active"] {
+		db.ExecContext(ctx, "UPDATE api_keys SET enabled = active WHERE enabled IS NULL OR enabled = 0")
+	}
+
 	return nil
 }
 
