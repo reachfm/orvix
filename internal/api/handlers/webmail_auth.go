@@ -261,14 +261,14 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 		})
 	}
 
-	accessToken, err := h.auth.GenerateAccessToken(userID, role)
+	accessToken, accessJTI, _, err := h.auth.GenerateAccessTokenWithJTI(userID, role)
 	if err != nil {
 		h.logger.Error("webmail login: mint access token", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "authentication failed",
 		})
 	}
-	refreshToken, refreshExp, err := h.auth.GenerateRefreshToken(userID)
+	refreshToken, refreshExp, err := h.auth.GenerateRefreshToken(userID, accessJTI)
 	if err != nil {
 		h.logger.Error("webmail login: mint refresh token", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{

@@ -404,12 +404,12 @@ func (h *Handler) MFALoginVerify(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authentication failed"})
 	}
 
-	accessToken, err := h.auth.GenerateAccessToken(userID, auth.Role(userRole))
+	accessToken, accessJTI, _, err := h.auth.GenerateAccessTokenWithJTI(userID, auth.Role(userRole))
 	if err != nil {
 		h.logger.Error("failed to generate access token", zap.Error(err))
 		return c.Status(500).JSON(fiber.Map{"error": "authentication failed"})
 	}
-	refreshToken, expiresAt, err := h.auth.GenerateRefreshToken(userID)
+	refreshToken, expiresAt, err := h.auth.GenerateRefreshToken(userID, accessJTI)
 	if err != nil {
 		h.logger.Error("failed to generate refresh token", zap.Error(err))
 		return c.Status(500).JSON(fiber.Map{"error": "authentication failed"})

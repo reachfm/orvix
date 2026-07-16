@@ -76,6 +76,18 @@ jobs:
           set -euo pipefail
           go test ./internal/abuse/... -count=1 -timeout 120s -v
 
+      - name: Auth (API-key rotation + session/JWT revocation) PostgreSQL tests
+        run: |
+          set -euo pipefail
+          out="$(mktemp)"
+          go test ./internal/auth -run "TestRotateByID_PostgreSQL|TestSessionRevocation_PostgreSQL" -count=1 -timeout 180s -v | tee "$out"
+          if grep -q -- "--- SKIP: TestRotateByID_PostgreSQL" "$out" || grep -q -- "--- SKIP: TestSessionRevocation_PostgreSQL" "$out"; then
+            echo "PostgreSQL auth tests skipped; PG environment is not wired correctly" >&2
+            exit 1
+          fi
+          grep -q -- "--- PASS: TestRotateByID_PostgreSQL" "$out"
+          grep -q -- "--- PASS: TestSessionRevocation_PostgreSQL" "$out"
+
       - name: Signup transaction PostgreSQL tests
         run: |
           set -euo pipefail

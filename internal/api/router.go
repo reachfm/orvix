@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -531,6 +532,32 @@ func (r *Router) App() *fiber.App { return r.app }
 // Start begins background services (billing scheduler, etc).
 // Called by the production entry point; test callers should NOT
 // call Start to avoid background goroutines leaking.
+// newUserRateLimiter builds a fiber limiter keyed by authenticated user id
+// (falling back to client IP for unauthenticated callers), returning HTTP 429
+// with a real integer-seconds Retry-After header and a stable JSON body when
+// the per-window budget is exceeded. Extracted so the exact production limiter
+// is exercised by tests (threshold, reset window, and user isolation).
+func newUserRateLimiter(prefix string, max int, window time.Duration, retryAfterSeconds int, message string) fiber.Handler {
+	retry := strconv.Itoa(retryAfterSeconds)
+	return limiter.New(limiter.Config{
+		Max:        max,
+		Expiration: window,
+		KeyGenerator: func(c fiber.Ctx) string {
+			if uid, ok := c.Locals("user_id").(uint); ok && uid > 0 {
+				return fmt.Sprintf("%s:%d", prefix, uid)
+			}
+			return prefix + ":" + c.IP()
+		},
+		LimitReached: func(c fiber.Ctx) error {
+			c.Set("Retry-After", retry)
+			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+				"error":       message,
+				"retry_after": retryAfterSeconds,
+			})
+		},
+	})
+}
+
 func (r *Router) Start() {
 	r.startOnce.Do(func() {
 		r.h.StartBillingScheduler(r.appCtx, 15*time.Minute)
@@ -700,40 +727,10 @@ func (r *Router) setupRoutes() {
 	protected.Get("/account/sessions", r.h.ListAccountSessions)
 	protected.Post("/account/sessions/:id/revoke", r.h.RevokeAccountSession)
 	// Support requests: dedicated rate limit — 5 requests per 10 minutes per user.
-	supportLimiter := limiter.New(limiter.Config{
-		Max:        5,
-		Expiration: 10 * 60 * 1000, // 10 minutes in milliseconds
-		KeyGenerator: func(c fiber.Ctx) string {
-			if uid, ok := c.Locals("user_id").(uint); ok && uid > 0 {
-				return fmt.Sprintf("support_req:%d", uid)
-			}
-			return "support_req:" + c.IP()
-		},
-		LimitReached: func(c fiber.Ctx) error {
-			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
-				"error":       "too many support requests, please try again later",
-				"retry_after": "10 minutes",
-			})
-		},
-	})
+	supportLimiter := newUserRateLimiter("support_req", 5, 10*time.Minute, 600, "too many support requests, please try again later")
 	protected.Post("/account/support-requests", supportLimiter, r.h.SubmitSupportRequest)
-	// MFA: dedicated rate limit — 10 attempts per 15 minutes per user.
-	mfaLimiter := limiter.New(limiter.Config{
-		Max:        10,
-		Expiration: 15 * 60 * 1000,
-		KeyGenerator: func(c fiber.Ctx) string {
-			if uid, ok := c.Locals("user_id").(uint); ok && uid > 0 {
-				return fmt.Sprintf("mfa_req:%d", uid)
-			}
-			return "mfa_req:" + c.IP()
-		},
-		LimitReached: func(c fiber.Ctx) error {
-			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
-				"error":       "too many MFA attempts, please try again later",
-				"retry_after": "15 minutes",
-			})
-		},
-	})
+	// MFA: dedicated per-user rate limit — 10 attempts per 15 minutes.
+	mfaLimiter := newUserRateLimiter("mfa_req", 10, 15*time.Minute, 900, "too many MFA attempts, please try again later")
 	protected.Get("/account/mfa/status", r.h.AccountMFAStatus)
 	protected.Post("/account/mfa/setup", mfaLimiter, r.h.AccountMFASetup)
 	protected.Post("/account/mfa/verify", mfaLimiter, r.h.AccountMFAVerify)

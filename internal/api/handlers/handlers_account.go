@@ -9,6 +9,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/models"
+	"go.uber.org/zap"
 )
 
 func (h *Handler) ListAccountSessions(c fiber.Ctx) error {
@@ -22,11 +23,17 @@ func (h *Handler) ListAccountSessions(c fiber.Ctx) error {
 		currentHash = fmt.Sprintf("%x", sha256.Sum256([]byte(raw)))
 	}
 
-	var sessions []models.Session
-	if err := h.db.Where("user_id = ? AND expires_at > ?", userID, time.Now()).
-		Order("created_at DESC").Limit(50).Find(&sessions).Error; err != nil {
+	sqlDB, err := h.db.DB()
+	if err != nil {
 		return c.JSON(fiber.Map{"sessions": []fiber.Map{}})
 	}
+	dial := h.sqlDialect()
+	rows, err := sqlDB.Query("SELECT id, token_hash, ip, COALESCE(user_agent, ''), created_at FROM sessions WHERE user_id = "+
+		dial.Placeholder(1)+" AND expires_at > "+dial.Placeholder(2)+" ORDER BY created_at DESC LIMIT 50", userID, time.Now().UTC())
+	if err != nil {
+		return c.JSON(fiber.Map{"sessions": []fiber.Map{}})
+	}
+	defer rows.Close()
 
 	type sessionInfo struct {
 		ID        uint   `json:"id"`
@@ -35,14 +42,24 @@ func (h *Handler) ListAccountSessions(c fiber.Ctx) error {
 		UserAgent string `json:"user_agent"`
 		Current   bool   `json:"current"`
 	}
-	result := make([]sessionInfo, 0, len(sessions))
-	for _, s := range sessions {
+	result := make([]sessionInfo, 0)
+	for rows.Next() {
+		var (
+			id        uint
+			tokenHash string
+			ip        string
+			ua        string
+			createdAt time.Time
+		)
+		if err := rows.Scan(&id, &tokenHash, &ip, &ua, &createdAt); err != nil {
+			continue
+		}
 		result = append(result, sessionInfo{
-			ID:        s.ID,
-			CreatedAt: s.CreatedAt.Format(time.RFC3339),
-			IP:        s.IP,
-			UserAgent: s.UserAgent,
-			Current:   currentHash != "" && s.TokenHash == currentHash,
+			ID:        id,
+			CreatedAt: createdAt.Format(time.RFC3339),
+			IP:        ip,
+			UserAgent: ua,
+			Current:   currentHash != "" && tokenHash == currentHash,
 		})
 	}
 	return c.JSON(fiber.Map{"sessions": result})
@@ -59,23 +76,38 @@ func (h *Handler) RevokeAccountSession(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid session id"})
 	}
 
-	// Look up the session to get its JTI for JWT revocation.
-	var session models.Session
-	if err := h.db.Where("id = ? AND user_id = ?", uint(id), userID).First(&session).Error; err != nil {
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
+	}
+	dial := h.sqlDialect()
+
+	// Load the TARGET session scoped to the caller's user_id, so one user can
+	// never revoke another user's/tenant's session and a nonexistent id returns
+	// 404 without leaking existence. Raw SQL: GORM reads/writes are unreliable
+	// under the custom modernc SQLite dialector.
+	var jti string
+	var expiresAt time.Time
+	sel := "SELECT COALESCE(jti, ''), expires_at FROM sessions WHERE id = " +
+		dial.Placeholder(1) + " AND user_id = " + dial.Placeholder(2)
+	if err := sqlDB.QueryRow(sel, uint(id), userID).Scan(&jti, &expiresAt); err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "session not found"})
 	}
 
-	// Delete the opaque session row.
-	h.db.Where("id = ? AND user_id = ?", uint(id), userID).Delete(&models.Session{})
-
-	// Revoke the associated JWT via its JTI.
-	if session.JTI != "" {
-		h.db.Exec("INSERT OR IGNORE INTO revoked_tokens (jti, expires_at) VALUES (?, ?)", session.JTI, session.ExpiresAt)
+	// Delete the session row: invalidates the opaque cookie immediately
+	// (ValidateOpaqueSession requires the row) and severs the refresh chain.
+	if _, err := sqlDB.Exec("DELETE FROM sessions WHERE id = "+dial.Placeholder(1)+" AND user_id = "+dial.Placeholder(2), uint(id), userID); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
 	}
 
-	// Also revoke the caller's current cookie token if present.
-	if accessToken := c.Cookies("access_token"); accessToken != "" {
-		h.auth.RevokeAccessToken(accessToken)
+	// Revoke the TARGET session's access-token JTI through the dialect-safe
+	// revocation store so its bearer JWT is rejected immediately — this revokes
+	// the session identified by :id, NOT the caller's own token, so revoking
+	// another device never logs the caller out. If the target IS the caller's
+	// current session, its jti is the caller's own jti, so the caller is
+	// correctly signed out too. Legacy rows without a jti are a safe no-op.
+	if err := h.auth.RevokeJTI(jti, expiresAt); err != nil {
+		h.logger.Error("failed to revoke session JWT", zap.Error(err))
 	}
 
 	h.writeAuditLog(c, "session.revoke", fmt.Sprintf("session_id:%d", id))

@@ -160,26 +160,37 @@ func loadOrGenerateKey(keyPath string, logger *zap.Logger) (*rsa.PrivateKey, err
 // minted before this change simply have no jti and are treated as
 // non-revocable; they expire within the short access TTL.
 func (a *Authenticator) GenerateAccessToken(userID uint, role Role) (string, error) {
+	token, _, _, err := a.GenerateAccessTokenWithJTI(userID, role)
+	return token, err
+}
+
+// GenerateAccessTokenWithJTI is GenerateAccessToken but also returns the token's
+// jti and expiry so the caller can bind them to the session row it creates.
+// Persisting the jti is what lets a specific session be revoked immediately
+// (its access token is added to the revocation store), and the expiry bounds
+// how long the revocation entry must live.
+func (a *Authenticator) GenerateAccessTokenWithJTI(userID uint, role Role) (string, string, time.Time, error) {
 	now := time.Now()
+	exp := now.Add(a.accessTTL)
 	jti, err := newJTI()
 	if err != nil {
-		return "", fmt.Errorf("failed to generate token id: %w", err)
+		return "", "", time.Time{}, fmt.Errorf("failed to generate token id: %w", err)
 	}
 	claims := jwt.MapClaims{
 		"sub":  fmt.Sprintf("%d", userID),
 		"role": string(role),
 		"iat":  now.Unix(),
-		"exp":  now.Add(a.accessTTL).Unix(),
+		"exp":  exp.Unix(),
 		"jti":  jti,
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
 	tokenString, err := token.SignedString(a.privateKey)
 	if err != nil {
-		return "", fmt.Errorf("failed to sign access token: %w", err)
+		return "", "", time.Time{}, fmt.Errorf("failed to sign access token: %w", err)
 	}
 
-	return tokenString, nil
+	return tokenString, jti, exp, nil
 }
 
 // newJTI returns a random 128-bit token identifier as hex.
@@ -192,7 +203,12 @@ func newJTI() (string, error) {
 }
 
 // GenerateRefreshToken creates a long-lived refresh token stored as HttpOnly cookie.
-func (a *Authenticator) GenerateRefreshToken(userID uint) (string, time.Time, error) {
+// GenerateRefreshToken creates a long-lived refresh token stored as an HttpOnly
+// cookie. accessJTI is the jti of the access token minted for the same login;
+// it is persisted on the session row so RevokeAccountSession can revoke that
+// exact access token immediately when the session is revoked. Pass "" for flows
+// that do not mint an access token.
+func (a *Authenticator) GenerateRefreshToken(userID uint, accessJTI string) (string, time.Time, error) {
 	expiresAt := time.Now().Add(a.refreshTTL)
 
 	b := make([]byte, 32)
@@ -203,21 +219,35 @@ func (a *Authenticator) GenerateRefreshToken(userID uint) (string, time.Time, er
 	token := hex.EncodeToString(b)
 	tokenHash := fmt.Sprintf("%x", sha256.Sum256([]byte(token)))
 
-	session := struct {
-		UserID    uint
-		TokenHash string
-		ExpiresAt time.Time
-	}{
-		UserID:    userID,
-		TokenHash: tokenHash,
-		ExpiresAt: expiresAt,
+	// Persist via raw, dialect-safe SQL: under the custom modernc SQLite
+	// dialector GORM Create on an anonymous struct silently no-ops, which would
+	// drop the row and the access-token jti we need for targeted revocation.
+	// All NOT NULL columns are supplied explicitly.
+	sqlDB, err := a.db.DB()
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("failed to store session: %w", err)
 	}
-
-	if err := a.db.Table("sessions").Create(&session).Error; err != nil {
+	d := a.dbDialect()
+	now := time.Now().UTC()
+	insert := "INSERT INTO sessions (created_at, updated_at, user_id, token_hash, role, email, ip, jti, expires_at) VALUES (" +
+		d.Placeholders(9) + ")"
+	if _, err := sqlDB.Exec(insert, now, now, userID, tokenHash, "", "", "", accessJTI, expiresAt); err != nil {
 		return "", time.Time{}, fmt.Errorf("failed to store session: %w", err)
 	}
 
 	return token, expiresAt, nil
+}
+
+// RevokeJTI records a JWT access-token id as revoked until expiresAt via the
+// dialect-safe revocation store, so ValidateAccessToken rejects it immediately.
+// Exported so handlers (targeted session revocation) can revoke a specific
+// session's access token without reaching into auth internals. A blank jti is a
+// no-op (legacy sessions created before jti persistence).
+func (a *Authenticator) RevokeJTI(jti string, expiresAt time.Time) error {
+	if jti == "" {
+		return nil
+	}
+	return a.revokeToken(jti, expiresAt)
 }
 
 // ValidateAccessToken validates a JWT access token and returns user ID and role.
@@ -342,25 +372,31 @@ func (a *Authenticator) isTokenRevoked(jti string) bool {
 func (a *Authenticator) RefreshToken(ctx context.Context, refreshToken string) (string, string, time.Time, error) {
 	tokenHash := fmt.Sprintf("%x", sha256.Sum256([]byte(refreshToken)))
 
-	var session struct {
-		UserID    uint
-		ExpiresAt time.Time
+	// Raw, dialect-safe read/delete to stay consistent with the raw session
+	// writes (GORM and raw do not share a view under the custom SQLite
+	// dialector).
+	sqlDB, err := a.db.DB()
+	if err != nil {
+		return "", "", time.Time{}, ErrSessionExpired
 	}
-
-	if err := a.db.Table("sessions").
-		Where("token_hash = ? AND expires_at > ?", tokenHash, time.Now()).
-		First(&session).Error; err != nil {
+	d := a.dbDialect()
+	var userID uint
+	if err := sqlDB.QueryRow(
+		"SELECT user_id FROM sessions WHERE token_hash = "+d.Placeholder(1)+" AND expires_at > "+d.Placeholder(2),
+		tokenHash, time.Now().UTC()).Scan(&userID); err != nil {
 		return "", "", time.Time{}, ErrSessionExpired
 	}
 
-	a.db.Table("sessions").Where("token_hash = ?", tokenHash).Delete(nil)
+	if _, err := sqlDB.Exec("DELETE FROM sessions WHERE token_hash = "+d.Placeholder(1), tokenHash); err != nil {
+		return "", "", time.Time{}, fmt.Errorf("rotate refresh session: %w", err)
+	}
 
-	accessToken, err := a.GenerateAccessToken(session.UserID, RoleUser)
+	accessToken, accessJTI, _, err := a.GenerateAccessTokenWithJTI(userID, RoleUser)
 	if err != nil {
 		return "", "", time.Time{}, err
 	}
 
-	newRefresh, expiresAt, err := a.GenerateRefreshToken(session.UserID)
+	newRefresh, expiresAt, err := a.GenerateRefreshToken(userID, accessJTI)
 	if err != nil {
 		return "", "", time.Time{}, err
 	}
@@ -370,9 +406,13 @@ func (a *Authenticator) RefreshToken(ctx context.Context, refreshToken string) (
 
 // InvalidateAllSessions deletes all sessions for a user.
 func (a *Authenticator) InvalidateAllSessions(userID uint) error {
-	result := a.db.Table("sessions").Where("user_id = ?", userID).Delete(nil)
-	if result.Error != nil {
-		return fmt.Errorf("failed to invalidate sessions: %w", result.Error)
+	sqlDB, err := a.db.DB()
+	if err != nil {
+		return fmt.Errorf("failed to invalidate sessions: %w", err)
+	}
+	d := a.dbDialect()
+	if _, err := sqlDB.Exec("DELETE FROM sessions WHERE user_id = "+d.Placeholder(1), userID); err != nil {
+		return fmt.Errorf("failed to invalidate sessions: %w", err)
 	}
 	a.logger.Info("all sessions invalidated", zap.Uint("user_id", userID))
 	return nil
@@ -380,11 +420,13 @@ func (a *Authenticator) InvalidateAllSessions(userID uint) error {
 
 // InvalidateOtherSessions deletes all sessions except the one with the given token hash.
 func (a *Authenticator) InvalidateOtherSessions(userID uint, currentTokenHash string) error {
-	result := a.db.Table("sessions").
-		Where("user_id = ? AND token_hash != ?", userID, currentTokenHash).
-		Delete(nil)
-	if result.Error != nil {
-		return fmt.Errorf("failed to invalidate other sessions: %w", result.Error)
+	sqlDB, err := a.db.DB()
+	if err != nil {
+		return fmt.Errorf("failed to invalidate other sessions: %w", err)
+	}
+	d := a.dbDialect()
+	if _, err := sqlDB.Exec("DELETE FROM sessions WHERE user_id = "+d.Placeholder(1)+" AND token_hash != "+d.Placeholder(2), userID, currentTokenHash); err != nil {
+		return fmt.Errorf("failed to invalidate other sessions: %w", err)
 	}
 	a.logger.Info("other sessions invalidated", zap.Uint("user_id", userID))
 	return nil
@@ -576,21 +618,19 @@ func (a *Authenticator) GenerateOpaqueSession(userID uint, role Role, email stri
 
 	expiresAt := time.Now().Add(OpaqueSessionTTL)
 
-	session := struct {
-		UserID    uint
-		TokenHash string
-		Role      string
-		Email     string
-		ExpiresAt time.Time
-	}{
-		UserID:    userID,
-		TokenHash: tokenHash,
-		Role:      string(role),
-		Email:     email,
-		ExpiresAt: expiresAt,
+	// Raw, dialect-safe INSERT: GORM Create on an anonymous struct silently
+	// no-ops under the custom modernc SQLite dialector, which would drop the
+	// session row. Raw SQL keeps opaque-session create/validate/revoke on one
+	// consistent storage path across SQLite and PostgreSQL.
+	sqlDB, err := a.db.DB()
+	if err != nil {
+		return "", fmt.Errorf("store session: %w", err)
 	}
-
-	if err := a.db.Table("sessions").Create(&session).Error; err != nil {
+	d := a.dbDialect()
+	now := time.Now().UTC()
+	insert := "INSERT INTO sessions (created_at, updated_at, user_id, token_hash, role, email, ip, jti, expires_at) VALUES (" +
+		d.Placeholders(9) + ")"
+	if _, err := sqlDB.Exec(insert, now, now, userID, tokenHash, string(role), email, "", "", expiresAt); err != nil {
 		return "", fmt.Errorf("store session: %w", err)
 	}
 
@@ -609,28 +649,29 @@ func (a *Authenticator) GenerateOpaqueSession(userID uint, role Role, email stri
 func (a *Authenticator) ValidateOpaqueSession(token string) (uint, Role, string, error) {
 	tokenHash := fmt.Sprintf("%x", sha256.Sum256([]byte(token)))
 
-	var session struct {
-		UserID    uint
-		Role      string
-		Email     string
-		ExpiresAt time.Time
+	// Raw, dialect-safe read: matches GenerateOpaqueSession / the revoke
+	// delete path so all three see the same rows on both engines.
+	sqlDB, err := a.db.DB()
+	if err != nil {
+		return 0, "", "", ErrSessionExpired
 	}
-
-	if err := a.db.Table("sessions").
-		Where("token_hash = ? AND expires_at > ?", tokenHash, time.Now()).
-		First(&session).Error; err != nil {
+	d := a.dbDialect()
+	var userID uint
+	var role, email string
+	sel := "SELECT user_id, role, email FROM sessions WHERE token_hash = " +
+		d.Placeholder(1) + " AND expires_at > " + d.Placeholder(2)
+	if err := sqlDB.QueryRow(sel, tokenHash, time.Now().UTC()).Scan(&userID, &role, &email); err != nil {
 		return 0, "", "", ErrSessionExpired
 	}
 
-	// Defensive: refuse to honour sessions persisted before the
-	// role column existed. Returning ErrSessionExpired forces the
-	// caller to re-issue a fresh session, after which every
-	// request will restore the real role.
-	if session.Role == "" {
+	// Defensive: refuse to honour sessions persisted before the role column
+	// existed. Returning ErrSessionExpired forces a fresh session, after which
+	// every request restores the real role.
+	if role == "" {
 		return 0, "", "", ErrSessionExpired
 	}
 
-	return session.UserID, Role(session.Role), session.Email, nil
+	return userID, Role(role), email, nil
 }
 
 func (a *Authenticator) ValidateMFAChallengeToken(tokenString string) (uint, error) {
