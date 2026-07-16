@@ -57,6 +57,11 @@ const (
 	// It does NOT have admin permissions; it is here for
 	// legacy callers that distinguish "admin or not" only.
 	RoleUser Role = "user"
+
+	// RoleBilling is a tenant billing-only role. Read access to
+	// tenant resources but no domain/mailbox/member mutations.
+	// Billing management only (subscription, usage, invoices).
+	RoleBilling Role = "billing"
 )
 
 // Authenticator handles JWT-based authentication with Argon2id password hashing.

@@ -24,6 +24,7 @@ import (
 	"github.com/orvix/orvix/internal/api/handlers/settings"
 	auditpkg "github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/auth"
+	authrbac "github.com/orvix/orvix/internal/auth/rbac"
 	"github.com/orvix/orvix/internal/billing"
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/coremail"
@@ -811,73 +812,111 @@ func (r *Router) setupRoutes() {
 	protected.Post("/customer/domains/:domain_id/verify", r.h.VerifyCustomerDomain)
 
 	// Enterprise customer administration (tenant-scoped, CSRF-protected).
-	// Available to any authenticated user with a valid tenant context.
-	// All operations are scoped to the caller's tenant_id. Signup-created
-	// organization owners receive RoleUser and need portal access immediately.
-	enterprise := protected.Group("/enterprise",
+	// All operations are scoped to the caller's tenant_id.
+	//
+	// GET routes (enterpriseRead): any authenticated user with valid tenant
+	// context. RoleUser (signup-created owner), RoleBilling, RoleReadOnly,
+	// RoleOperator, RoleAdmin, and RoleSuperAdmin all have dashboard read.
+	//
+	// POST/PATCH/DELETE routes (enterpriseWrite): require at least one
+	// tenant-scoped write permission from the rbac system. RoleReadOnly and
+	// RoleBilling have zero write permissions so they are denied. RoleUser
+	// has all tenant write permissions.
+	//
+	// Platform admin routes (admin group) remain separate and continue to
+	// require RoleAdmin / RoleSuperAdmin.
+
+	enterpriseRead := protected.Group("/enterprise",
 		requireTenantContext,
-		auth.RequireAnyRole(auth.RoleAdmin, auth.RoleSuperAdmin, auth.RoleOperator, auth.RoleUser, auth.RoleReadOnly),
 		r.csrf.Middleware())
-	enterprise.Get("/dashboard", r.h.CustomerDashboard)
-	enterprise.Get("/domains", r.h.ListAdminDomains)
-	enterprise.Get("/domains/:id", r.h.GetAdminDomain)
-	enterprise.Post("/domains", r.h.CreateAdminDomain)
-	enterprise.Patch("/domains/:id", r.h.UpdateAdminDomain)
-	enterprise.Post("/domains/:id/status", r.h.SetAdminDomainStatus)
-	enterprise.Get("/mailboxes", r.h.ListAdminMailboxes)
-	enterprise.Get("/mailboxes/:id", r.h.GetAdminMailbox)
-	enterprise.Post("/mailboxes", r.h.CreateAdminMailbox)
-	enterprise.Patch("/mailboxes/:id", r.h.UpdateAdminMailbox)
-	enterprise.Post("/mailboxes/:id/status", r.h.SetAdminMailboxStatus)
-	enterprise.Post("/mailboxes/bulk/status", r.h.BulkSetAdminMailboxStatus)
-	enterprise.Post("/mailboxes/:id/reset-password", r.h.ResetAdminMailboxPassword)
-	enterprise.Get("/organizations/:id", r.h.GetOrganization)
-	enterprise.Get("/organizations/current", r.h.GetCurrentOrganization)
 
-	enterprise.Get("/invitations", r.h.ListInvitations)
-	enterprise.Post("/invitations", r.h.CreateInvitation)
-	enterprise.Post("/invitations/:id/revoke", r.h.RevokeInvitation)
+	canWriteTenant := authrbac.RequireAny(
+		authrbac.PermDomainsWrite,
+		authrbac.PermMailboxesWrite,
+		authrbac.PermOrganizationsWrite,
+		authrbac.PermUsersWrite,
+		authrbac.PermAliasesWrite,
+	)
+	enterpriseWrite := enterpriseRead.Group("", canWriteTenant)
 
-	enterprise.Get("/members", r.h.ListMembers)
-	enterprise.Patch("/members/:id/role", r.h.UpdateMemberRole)
-	enterprise.Delete("/members/:id", r.h.RemoveMember)
+	// ── Dashboard ──
+	enterpriseRead.Get("/dashboard", r.h.CustomerDashboard)
 
-	enterprise.Post("/ownership/request", r.h.RequestOwnershipTransfer)
-	enterprise.Post("/ownership/accept", r.h.AcceptOwnershipTransfer)
-	enterprise.Post("/ownership/cancel", r.h.CancelOwnershipTransfer)
+	// ── Domains (read: any tenant member; write: requires domains write) ──
+	enterpriseRead.Get("/domains", r.h.ListAdminDomains)
+	enterpriseRead.Get("/domains/:id", r.h.GetAdminDomain)
+	enterpriseWrite.Post("/domains", r.h.CreateAdminDomain)
+	enterpriseWrite.Patch("/domains/:id", r.h.UpdateAdminDomain)
+	enterpriseWrite.Post("/domains/:id/status", r.h.SetAdminDomainStatus)
 
-	enterprise.Get("/aliases", r.h.ListAliases)
-	enterprise.Post("/aliases", r.h.CreateAlias)
-	enterprise.Delete("/aliases/:id", r.h.DeleteAlias)
+	// ── Mailboxes ──
+	enterpriseRead.Get("/mailboxes", r.h.ListAdminMailboxes)
+	enterpriseRead.Get("/mailboxes/:id", r.h.GetAdminMailbox)
+	enterpriseWrite.Post("/mailboxes", r.h.CreateAdminMailbox)
+	enterpriseWrite.Patch("/mailboxes/:id", r.h.UpdateAdminMailbox)
+	enterpriseWrite.Post("/mailboxes/:id/status", r.h.SetAdminMailboxStatus)
+	enterpriseWrite.Post("/mailboxes/bulk/status", r.h.BulkSetAdminMailboxStatus)
+	enterpriseWrite.Post("/mailboxes/:id/reset-password", r.h.ResetAdminMailboxPassword)
 
-	enterprise.Get("/groups", r.h.ListGroups)
-	enterprise.Post("/groups", r.h.CreateGroup)
-	enterprise.Post("/groups/:id/members", r.h.AddGroupMember)
-	enterprise.Delete("/groups/:id/members/:memberId", r.h.RemoveGroupMember)
-	enterprise.Delete("/groups/:id", r.h.DeleteGroup)
+	// ── Organizations (read only for tenant members) ──
+	enterpriseRead.Get("/organizations/:id", r.h.GetOrganization)
+	enterpriseRead.Get("/organizations/current", r.h.GetCurrentOrganization)
 
-	enterprise.Get("/abuse/send-limit", r.h.CheckSendLimit)
-	enterprise.Get("/status", r.h.SuspensionStatus)
-	enterprise.Post("/deletion", r.h.RequestDeletion)
-	enterprise.Post("/deletion/cancel", r.h.CancelDeletion)
+	// ── Invitations ──
+	enterpriseRead.Get("/invitations", r.h.ListInvitations)
+	enterpriseWrite.Post("/invitations", r.h.CreateInvitation)
+	enterpriseWrite.Post("/invitations/:id/revoke", r.h.RevokeInvitation)
 
-	enterprise.Get("/billing/subscription", r.h.GetBillingSubscription)
-	enterprise.Post("/billing/subscription", r.h.CreateBillingSubscription)
-	enterprise.Get("/billing/usage", r.h.GetBillingUsage)
-	enterprise.Get("/billing/quota", r.h.CheckBillingQuota)
+	// ── Members ──
+	enterpriseRead.Get("/members", r.h.ListMembers)
+	enterpriseWrite.Patch("/members/:id/role", r.h.UpdateMemberRole)
+	enterpriseWrite.Delete("/members/:id", r.h.RemoveMember)
 
-	enterprise.Get("/abuse/signals", r.h.ListAbuseSignals)
-	enterprise.Post("/abuse/signals/:id/acknowledge", r.h.AcknowledgeAbuseSignal)
-	enterprise.Post("/abuse/signals/:id/resolve", r.h.ResolveAbuseSignal)
+	// ── Ownership (restricted to organizations write) ──
+	enterpriseWrite.Post("/ownership/request", r.h.RequestOwnershipTransfer)
+	enterpriseWrite.Post("/ownership/accept", r.h.AcceptOwnershipTransfer)
+	enterpriseWrite.Post("/ownership/cancel", r.h.CancelOwnershipTransfer)
 
-	enterprise.Get("/api-keys", r.h.ListEnterpriseAPIKeys)
-	enterprise.Post("/api-keys", r.h.CreateEnterpriseAPIKey)
-	enterprise.Delete("/api-keys/:id", r.h.DeleteEnterpriseAPIKey)
+	// ── Aliases ──
+	enterpriseRead.Get("/aliases", r.h.ListAliases)
+	enterpriseWrite.Post("/aliases", r.h.CreateAlias)
+	enterpriseWrite.Delete("/aliases/:id", r.h.DeleteAlias)
 
-	enterprise.Get("/audit/logs", r.h.ListEnterpriseAuditLogs)
+	// ── Groups ──
+	enterpriseRead.Get("/groups", r.h.ListGroups)
+	enterpriseWrite.Post("/groups", r.h.CreateGroup)
+	enterpriseWrite.Post("/groups/:id/members", r.h.AddGroupMember)
+	enterpriseWrite.Delete("/groups/:id/members/:memberId", r.h.RemoveGroupMember)
+	enterpriseWrite.Delete("/groups/:id", r.h.DeleteGroup)
 
-	enterprise.Get("/sessions", r.h.ListEnterpriseSessions)
-	enterprise.Post("/sessions/:id/revoke", r.h.RevokeEnterpriseSession)
+	// ── Abuse (read for any tenant member; acknowledge/resolve require write) ──
+	enterpriseRead.Get("/abuse/send-limit", r.h.CheckSendLimit)
+	enterpriseRead.Get("/abuse/signals", r.h.ListAbuseSignals)
+	enterpriseWrite.Post("/abuse/signals/:id/acknowledge", r.h.AcknowledgeAbuseSignal)
+	enterpriseWrite.Post("/abuse/signals/:id/resolve", r.h.ResolveAbuseSignal)
+
+	// ── Account Status ──
+	enterpriseRead.Get("/status", r.h.SuspensionStatus)
+	enterpriseWrite.Post("/deletion", r.h.RequestDeletion)
+	enterpriseWrite.Post("/deletion/cancel", r.h.CancelDeletion)
+
+	// ── Billing (read for any tenant member; subscription create requires write) ──
+	enterpriseRead.Get("/billing/subscription", r.h.GetBillingSubscription)
+	enterpriseRead.Get("/billing/usage", r.h.GetBillingUsage)
+	enterpriseRead.Get("/billing/quota", r.h.CheckBillingQuota)
+	enterpriseWrite.Post("/billing/subscription", r.h.CreateBillingSubscription)
+
+	// ── API Keys ──
+	enterpriseRead.Get("/api-keys", r.h.ListEnterpriseAPIKeys)
+	enterpriseWrite.Post("/api-keys", r.h.CreateEnterpriseAPIKey)
+	enterpriseWrite.Delete("/api-keys/:id", r.h.DeleteEnterpriseAPIKey)
+
+	// ── Audit Logs ──
+	enterpriseRead.Get("/audit/logs", r.h.ListEnterpriseAuditLogs)
+
+	// ── Sessions ──
+	enterpriseRead.Get("/sessions", r.h.ListEnterpriseSessions)
+	enterpriseWrite.Post("/sessions/:id/revoke", r.h.RevokeEnterpriseSession)
 
 	// CSRF is enforced on the entire admin group by default (deny-list,
 	// not allow-list) rather than only on routes an author remembered to

@@ -203,6 +203,34 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermSecurityRead:      true,
 		PermAliasesRead:       true,
 	},
+	// RoleUser is a tenant owner/member who has full control over their
+	// own tenant resources but NO platform-level privileges (platform
+	// organizations read/write, platform security, platform sessions).
+	auth.RoleUser: {
+		PermDashboardRead:     true,
+		PermDomainsRead:       true, PermDomainsWrite: true,
+		PermMailboxesRead:     true, PermMailboxesWrite: true,
+		PermOrganizationsRead: true, PermOrganizationsWrite: true,
+		PermUsersRead:         true, PermUsersWrite: true,
+		PermAliasesRead:       true, PermAliasesWrite: true,
+		PermAuditRead:         true,
+		PermSettingsRead:      true,
+		PermMonitoringRead:    true,
+		PermCredentialsReset:  true,
+		PermSessionsRevoke:    true,
+		PermSecurityRead:      true,
+	},
+	// RoleBilling is a tenant billing-only role. Read access to tenant
+	// resources, billing write, but no domain/mailbox/member mutations.
+	auth.RoleBilling: {
+		PermDashboardRead:     true,
+		PermDomainsRead:       true,
+		PermMailboxesRead:     true,
+		PermOrganizationsRead: true,
+		PermAuditRead:         true,
+		PermSettingsRead:      true,
+		PermMonitoringRead:    true,
+	},
 }
 
 // HasPermission reports whether the role carries the
