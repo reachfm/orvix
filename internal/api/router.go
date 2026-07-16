@@ -689,6 +689,13 @@ func (r *Router) setupRoutes() {
 	protected := api.Group("", r.apikeys.Middleware(), r.auth.Middleware(), auth.TenantMiddleware(r.db))
 	protected.Get("/me", r.h.Me)
 
+	// Account endpoints — own profile, sessions. Authenticated user only.
+	protected.Get("/account/profile", r.h.GetAccountProfile)
+	protected.Patch("/account/profile", r.h.UpdateAccountProfile)
+	protected.Get("/account/sessions", r.h.ListAccountSessions)
+	protected.Post("/account/sessions/:id/revoke", r.h.RevokeAccountSession)
+	protected.Post("/account/support-requests", r.h.SubmitSupportRequest)
+
 	// User-facing webmail endpoints. Mounted on the
 	// protected group so the auth middleware rejects
 	// unauthenticated requests with 401 BEFORE any
@@ -942,8 +949,8 @@ func (r *Router) setupRoutes() {
 	enterpriseRead.Get("/audit/logs", r.h.ListEnterpriseAuditLogs)
 
 	// ── Sessions ──
-	enterpriseRead.Get("/sessions", r.h.ListEnterpriseSessions)
-	canWriteUsers.Post("/sessions/:id/revoke", r.h.RevokeEnterpriseSession)
+	enterpriseRead.Get("/sessions", r.h.ListAccountSessions)
+	canWriteUsers.Post("/sessions/:id/revoke", r.h.RevokeAccountSession)
 
 	// CSRF is enforced on the entire admin group by default (deny-list,
 	// not allow-list) rather than only on routes an author remembered to

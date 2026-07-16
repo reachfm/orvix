@@ -1,12 +1,15 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { Shield, Monitor, Smartphone, X, Key, Lock, Check, AlertTriangle } from "lucide-react";
+import { Shield, Monitor, Smartphone, X, Key, Lock, Check, AlertTriangle, Loader2 } from "lucide-react";
 import { api } from "../api";
+
+function isMobile(userAgent: string): boolean {
+  return /mobile|android|iphone|ipad/i.test(userAgent);
+}
 
 export default function SecurityPage() {
   const queryClient = useQueryClient();
-  const { data: me } = useQuery({ queryKey: ["me"], queryFn: api.getMe });
-  const { data: sessionsData } = useQuery({ queryKey: ["sessions"], queryFn: api.listSessions });
+  const { data: sessionsData, isLoading: sessionsLoading } = useQuery({ queryKey: ["sessions"], queryFn: api.listSessions });
   const { data: mfaStatus } = useQuery({ queryKey: ["mfaStatus"], queryFn: api.getMFAStatus });
 
   const [currentPassword, setCurrentPassword] = useState("");
@@ -16,6 +19,7 @@ export default function SecurityPage() {
   const [showSetup, setShowSetup] = useState(false);
 
   const sessions: any[] = (sessionsData as any)?.sessions || [];
+  const nonCurrentSessions = sessions.filter((s: any) => !s.current);
 
   const changePassword = useMutation({
     mutationFn: () => api.changePassword({ current_password: currentPassword, new_password: newPassword }),
@@ -59,50 +63,54 @@ export default function SecurityPage() {
 
       <div className="bg-[#1A1D24] border border-[#262A33] rounded-lg p-6">
         <div className="flex items-center gap-3 mb-4">
-          <Monitor className="w-5 h-5 text-[#4F7CFF]" />
-          <h3 className="text-lg font-medium text-white">Current Session</h3>
-        </div>
-        <div className="space-y-2 text-sm">
-          <div><span className="text-gray-400">Email: </span><span className="text-white">{me?.email || "..."}</span></div>
-          <div><span className="text-gray-400">Role: </span><span className="text-white">{me?.role || "..."}</span></div>
-        </div>
-      </div>
-
-      <div className="bg-[#1A1D24] border border-[#262A33] rounded-lg p-6">
-        <div className="flex items-center gap-3 mb-4">
           <Smartphone className="w-5 h-5 text-[#4F7CFF]" />
           <h3 className="text-lg font-medium text-white">Active Sessions</h3>
         </div>
-        {sessions.length === 0 ? (
+
+        {sessionsLoading ? (
+          <div className="flex items-center gap-2 text-[#8B92A8] text-sm py-4">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            Loading sessions...
+          </div>
+        ) : sessions.length === 0 ? (
           <p className="text-[#8B92A8] text-sm">No active sessions found.</p>
         ) : (
           <div className="space-y-2">
             {sessions.map((s: any) => (
               <div key={s.id} className="flex items-center justify-between bg-[#0C0E12] rounded p-3">
-                <div className="flex items-center gap-3">
-                  {s.device?.toLowerCase().includes("mobile") || s.device?.toLowerCase().includes("phone")
-                    ? <Smartphone size={16} className="text-[#8B92A8]" />
-                    : <Monitor size={16} className="text-[#8B92A8]" />}
-                  <div>
-                    <span className="text-white text-sm">{s.device || "Unknown"}</span>
-                    <span className="ml-2 text-xs text-[#555D73]">{s.ip || ""}</span>
+                <div className="flex items-center gap-3 min-w-0">
+                  {isMobile(s.user_agent || "") ? (
+                    <Smartphone size={16} className="text-[#8B92A8] shrink-0" />
+                  ) : (
+                    <Monitor size={16} className="text-[#8B92A8] shrink-0" />
+                  )}
+                  <div className="min-w-0">
+                    <span className="text-white text-sm truncate block">{s.user_agent || "Unknown"}</span>
+                    {s.ip && <span className="text-xs text-[#555D73]">{s.ip}</span>}
                   </div>
-                  {s.current && <span className="text-xs px-2 py-0.5 rounded bg-[#4F7CFF]/10 text-[#4F7CFF]">Current</span>}
+                  {s.current && <span className="text-xs px-2 py-0.5 rounded bg-[#4F7CFF]/10 text-[#4F7CFF] shrink-0">Current</span>}
                 </div>
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 shrink-0 ml-3">
                   <span className="text-xs text-[#555D73]">
-                    {s.last_active ? new Date(s.last_active).toLocaleString() : ""}
+                    {s.created_at ? new Date(s.created_at).toLocaleString() : ""}
                   </span>
                   {!s.current && (
                     <button onClick={() => revokeSession.mutate(s.id)}
-                      className="text-[#F87171] hover:bg-[#F87171]/10 p-1 rounded">
+                      disabled={revokeSession.isPending}
+                      className="text-[#F87171] hover:bg-[#F87171]/10 p-1 rounded disabled:opacity-50">
                       <X size={14} />
                     </button>
                   )}
                 </div>
               </div>
             ))}
+            {nonCurrentSessions.length === 0 && sessions.length === 1 && (
+              <p className="text-[#8B92A8] text-sm pt-2">No other active sessions.</p>
+            )}
           </div>
+        )}
+        {revokeSession.error && (
+          <p className="text-[#F87171] text-sm mt-2">{(revokeSession.error as any)?.message || "Failed to revoke session"}</p>
         )}
       </div>
 

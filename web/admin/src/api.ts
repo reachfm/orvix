@@ -99,8 +99,11 @@ export const api = {
     request(`/enterprise/groups/${groupId}/members/${memberId}`, { method: "DELETE" }),
 
   // Account settings
+  getProfile: () => request<any>("/account/profile"),
   updateProfile: (data: any) =>
     request("/account/profile", { method: "PATCH", body: JSON.stringify(data) }),
+  submitSupportRequest: (data: { category: string; subject: string; message: string }) =>
+    request<any>("/account/support-requests", { method: "POST", body: JSON.stringify(data) }),
   changePassword: (data: any) =>
     request("/auth/change-password", { method: "POST", body: JSON.stringify(data) }),
 

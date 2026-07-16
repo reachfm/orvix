@@ -1,7 +1,23 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { MessageSquare, BookOpen, HeartPulse, ChevronDown, ChevronRight, ExternalLink, Send, Check } from "lucide-react";
+import { useMutation } from "@tanstack/react-query";
+import { MessageSquare, BookOpen, HeartPulse, ChevronDown, ChevronRight, ExternalLink, Send, Check, Loader2 } from "lucide-react";
 import { api } from "../api";
+
+const categories = [
+  { value: "general", label: "General" },
+  { value: "billing", label: "Billing" },
+  { value: "technical", label: "Technical" },
+  { value: "security", label: "Security" },
+];
+
+const docs = [
+  { label: "Getting Started Guide", url: "https://github.com/reachfm/orvix/tree/main/docs/getting-started" },
+  { label: "Domain Configuration", url: "https://github.com/reachfm/orvix/tree/main/docs/domains" },
+  { label: "Mailbox Management", url: "https://github.com/reachfm/orvix/tree/main/docs/mailboxes" },
+  { label: "DNS Setup Guide", url: "https://github.com/reachfm/orvix/tree/main/docs/dns" },
+  { label: "API Reference", url: "https://github.com/reachfm/orvix/tree/main/docs/api" },
+  { label: "Security Best Practices", url: "https://github.com/reachfm/orvix/tree/main/docs/security" },
+];
 
 const faqItems = [
   { q: "How do I add a new domain?", a: "Navigate to the Domains page and use the Add Domain button. Follow the DNS verification wizard to configure MX, SPF, DKIM, and DMARC records." },
@@ -9,21 +25,32 @@ const faqItems = [
   { q: "What plans are available?", a: "Visit the Billing page to see all available plans. Each plan includes different limits for mailboxes, domains, storage, and send volume." },
   { q: "How do I reset my password?", a: "Go to Account Settings or Security page, enter your current password and a new password, then click Update Password." },
   { q: "Is two-factor authentication supported?", a: "Yes. Visit the Security page to enable MFA using any standard TOTP authenticator app like Google Authenticator or Authy." },
-  { q: "How do I view my billing invoices?", a: "Go to the Invoices page to see your current plan, usage summary, and billing history. Invoice PDF download is coming soon." },
+  { q: "How do I view my billing invoices?", a: "Go to the Invoices page to see your current plan, usage summary, and billing history. Invoice PDF download is available from the invoice details view." },
 ];
 
 export default function SupportPage() {
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
+  const [category, setCategory] = useState("general");
   const [subject, setSubject] = useState("");
   const [message, setMessage] = useState("");
-  const [submitted, setSubmitted] = useState(false);
   const [expanded, setExpanded] = useState<number | null>(null);
+  const [referenceId, setReferenceId] = useState<string | null>(null);
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    setSubmitted(true);
-    setName(""); setEmail(""); setSubject(""); setMessage("");
+  const submitRequest = useMutation({
+    mutationFn: () => api.submitSupportRequest({ category, subject, message }),
+    onSuccess: (data: any) => {
+      setReferenceId(data.reference_id || data.id || null);
+      setSubject("");
+      setMessage("");
+      setCategory("general");
+    },
+  });
+
+  const handleReset = () => {
+    setReferenceId(null);
+    setSubject("");
+    setMessage("");
+    setCategory("general");
+    submitRequest.reset();
   };
 
   return (
@@ -37,25 +64,30 @@ export default function SupportPage() {
             <h3 className="text-lg font-medium text-white">Contact Support</h3>
           </div>
 
-          {submitted ? (
+          {referenceId ? (
             <div className="text-center py-6">
               <Check size={32} className="text-[#34D399] mx-auto mb-3" />
-              <p className="text-white font-medium">Message Sent</p>
+              <p className="text-white font-medium">Request Submitted</p>
+              <p className="text-sm text-[#8B92A8] mt-1">
+                Reference ID: <span className="text-[#4F7CFF] font-mono">{referenceId}</span>
+              </p>
               <p className="text-sm text-[#8B92A8] mt-1">We'll get back to you soon.</p>
-              <button onClick={() => setSubmitted(false)}
-                className="mt-4 text-sm text-[#4F7CFF] hover:underline">Send another message</button>
+              <button onClick={handleReset}
+                className="mt-4 text-sm text-[#4F7CFF] hover:underline">Send another request</button>
             </div>
           ) : (
-            <form onSubmit={handleSubmit} className="space-y-3">
+            <form
+              onSubmit={(e) => { e.preventDefault(); submitRequest.mutate(); }}
+              className="space-y-3"
+            >
               <div>
-                <label className="block text-sm text-gray-400 mb-1">Name</label>
-                <input required value={name} onChange={(e) => setName(e.target.value)}
-                  className="w-full px-3 py-2 bg-[#0C0E12] border border-[#2A2F3E] rounded text-white text-sm" />
-              </div>
-              <div>
-                <label className="block text-sm text-gray-400 mb-1">Email</label>
-                <input required type="email" value={email} onChange={(e) => setEmail(e.target.value)}
-                  className="w-full px-3 py-2 bg-[#0C0E12] border border-[#2A2F3E] rounded text-white text-sm" />
+                <label className="block text-sm text-gray-400 mb-1">Category</label>
+                <select value={category} onChange={(e) => setCategory(e.target.value)}
+                  className="w-full px-3 py-2 bg-[#0C0E12] border border-[#2A2F3E] rounded text-white text-sm">
+                  {categories.map((c) => (
+                    <option key={c.value} value={c.value}>{c.label}</option>
+                  ))}
+                </select>
               </div>
               <div>
                 <label className="block text-sm text-gray-400 mb-1">Subject</label>
@@ -68,9 +100,17 @@ export default function SupportPage() {
                   className="w-full px-3 py-2 bg-[#0C0E12] border border-[#2A2F3E] rounded text-white text-sm resize-none" />
               </div>
               <button type="submit"
-                className="flex items-center gap-2 bg-[#4F7CFF] text-white rounded px-4 py-2 text-sm hover:bg-[#3D6AE8]">
-                <Send className="w-4 h-4" /> Send Message
+                disabled={submitRequest.isPending}
+                className="flex items-center gap-2 bg-[#4F7CFF] text-white rounded px-4 py-2 text-sm hover:bg-[#3D6AE8] disabled:opacity-50">
+                {submitRequest.isPending ? (
+                  <><Loader2 className="w-4 h-4 animate-spin" /> Submitting...</>
+                ) : (
+                  <><Send className="w-4 h-4" /> Send Request</>
+                )}
               </button>
+              {submitRequest.error && (
+                <p className="text-[#F87171] text-sm">{(submitRequest.error as any)?.message || "Failed to submit request"}</p>
+              )}
             </form>
           )}
         </div>
@@ -82,15 +122,8 @@ export default function SupportPage() {
               <h3 className="text-lg font-medium text-white">Documentation</h3>
             </div>
             <div className="space-y-2">
-              {[
-                { label: "Getting Started Guide", url: "#" },
-                { label: "Domain Configuration", url: "#" },
-                { label: "Mailbox Management", url: "#" },
-                { label: "DNS Setup Guide", url: "#" },
-                { label: "API Reference", url: "#" },
-                { label: "Security Best Practices", url: "#" },
-              ].map((doc) => (
-                <a key={doc.label} href={doc.url}
+              {docs.map((doc) => (
+                <a key={doc.label} href={doc.url} target="_blank" rel="noopener noreferrer"
                   className="flex items-center justify-between p-3 bg-[#0C0E12] rounded hover:bg-[#1A1E26] transition-colors group">
                   <span className="text-sm text-[#E8EAF0]">{doc.label}</span>
                   <ExternalLink size={14} className="text-[#555D73] group-hover:text-[#4F7CFF] transition-colors" />
@@ -104,12 +137,9 @@ export default function SupportPage() {
               <HeartPulse className="w-5 h-5 text-[#4F7CFF]" />
               <h3 className="text-lg font-medium text-white">System Status</h3>
             </div>
-            <div className="flex items-center gap-2 mb-3">
-              <span className="w-2 h-2 rounded-full bg-[#34D399]" />
-              <span className="text-sm text-[#E8EAF0]">All Systems Operational</span>
-            </div>
-            <p className="text-xs text-[#555D73]">
-              All services are running normally. If you experience issues, please contact support.
+            <p className="text-sm text-[#8B92A8]">System status information is not available.</p>
+            <p className="text-xs text-[#555D73] mt-1">
+              If you experience issues, please submit a support request using the form.
             </p>
           </div>
         </div>
