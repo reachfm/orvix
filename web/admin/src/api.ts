@@ -99,14 +99,43 @@ export const api = {
     request(`/enterprise/groups/${groupId}/members/${memberId}`, { method: "DELETE" }),
 
   // Account settings
+  getProfile: () => request<any>("/account/profile"),
   updateProfile: (data: any) =>
     request("/account/profile", { method: "PATCH", body: JSON.stringify(data) }),
+  submitSupportRequest: (data: { category: string; subject: string; message: string }) =>
+    request<any>("/account/support-requests", { method: "POST", body: JSON.stringify(data) }),
   changePassword: (data: any) =>
     request("/auth/change-password", { method: "POST", body: JSON.stringify(data) }),
 
   // Signup
   signup: (data: any) =>
     request("/auth/signup", { method: "POST", body: JSON.stringify(data) }),
+
+  // Dashboard
+  getDashboard: () => request<any>("/enterprise/dashboard"),
+
+  // Invoices
+  listInvoices: () => request<any[]>("/enterprise/billing/invoices"),
+  getInvoice: (id: number) => request<any>(`/enterprise/billing/invoices/${id}`),
+
+  // Audit logs
+  listAuditLogs: () => request<any[]>("/enterprise/audit/logs"),
+
+  // Sessions
+  listSessions: () => request<any>("/account/sessions"),
+  revokeSession: (id: string) =>
+    request(`/account/sessions/${id}/revoke`, { method: "POST" }),
+
+  // MFA
+  getMFAStatus: () => request<any>("/account/mfa/status"),
+  setupMFABegin: (data: { current_password: string }) =>
+    request("/account/mfa/setup", { method: "POST", body: JSON.stringify(data) }),
+  setupMFAVerify: (code: string) =>
+    request("/account/mfa/verify", { method: "POST", body: JSON.stringify({ code }) }),
+  disableMFA: (data: { current_password: string; code?: string; recovery_code?: string }) =>
+    request("/account/mfa/disable", { method: "POST", body: JSON.stringify(data) }),
+  regenerateRecoveryCodes: (data: { current_password: string; code?: string }) =>
+    request("/account/mfa/recovery-codes/regenerate", { method: "POST", body: JSON.stringify(data) }),
 
   // Forgot/reset password
   forgotPassword: (email: string) =>

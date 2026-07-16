@@ -88,6 +88,25 @@ const (
 	PermAliasesRead  Permission = "aliases.read"
 	PermAliasesWrite Permission = "aliases.write"
 
+	// Groups.
+	PermGroupsRead  Permission = "groups.read"
+	PermGroupsWrite Permission = "groups.write"
+
+	// Invitations.
+	PermInvitationsRead  Permission = "invitations.read"
+	PermInvitationsWrite Permission = "invitations.write"
+
+	// Ownership transfer.
+	PermOwnershipTransfer Permission = "ownership.transfer"
+
+	// API keys.
+	PermAPIKeysRead  Permission = "apikeys.read"
+	PermAPIKeysWrite Permission = "apikeys.write"
+
+	// Billing.
+	PermBillingRead  Permission = "billing.read"
+	PermBillingWrite Permission = "billing.write"
+
 	// Platform (cross-tenant).
 	PermPlatformOrganizationsRead  Permission = "platform.organizations.read"
 	PermPlatformOrganizationsWrite Permission = "platform.organizations.write"
@@ -123,6 +142,15 @@ var AllPermissions = []Permission{
 	PermSecurityRead,
 	PermAliasesRead,
 	PermAliasesWrite,
+	PermGroupsRead,
+	PermGroupsWrite,
+	PermInvitationsRead,
+	PermInvitationsWrite,
+	PermOwnershipTransfer,
+	PermAPIKeysRead,
+	PermAPIKeysWrite,
+	PermBillingRead,
+	PermBillingWrite,
 	PermPlatformOrganizationsRead,
 	PermPlatformOrganizationsWrite,
 	PermPlatformSecurityRead,
@@ -150,6 +178,11 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermDashboardRead:    true,
 		PermSecurityRead:     true,
 		PermAliasesRead:      true, PermAliasesWrite: true,
+		PermGroupsRead: true, PermGroupsWrite: true,
+		PermInvitationsRead: true, PermInvitationsWrite: true,
+		PermOwnershipTransfer: true,
+		PermAPIKeysRead:       true, PermAPIKeysWrite: true,
+		PermBillingRead: true, PermBillingWrite: true,
 		PermPlatformOrganizationsRead: true, PermPlatformOrganizationsWrite: true,
 		PermPlatformSecurityRead:   true,
 		PermPlatformSessionsRevoke: true,
@@ -170,6 +203,11 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermDashboardRead:    true,
 		PermSecurityRead:     true,
 		PermAliasesRead:      true, PermAliasesWrite: true,
+		PermGroupsRead: true, PermGroupsWrite: true,
+		PermInvitationsRead: true, PermInvitationsWrite: true,
+		PermOwnershipTransfer: true,
+		PermAPIKeysRead:       true, PermAPIKeysWrite: true,
+		PermBillingRead: true, PermBillingWrite: true,
 	},
 	auth.RoleOperator: {
 		PermQueueRead: true, PermQueueAction: true,
@@ -187,6 +225,10 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermDashboardRead:    true,
 		PermSecurityRead:     true,
 		PermAliasesRead:      true,
+		PermGroupsRead:       true,
+		PermInvitationsRead:  true,
+		PermAPIKeysRead:      true,
+		PermBillingRead:      true,
 	},
 	auth.RoleReadOnly: {
 		PermQueueRead:         true,
@@ -202,6 +244,48 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermDashboardRead:     true,
 		PermSecurityRead:      true,
 		PermAliasesRead:       true,
+		PermGroupsRead:        true,
+		PermInvitationsRead:   true,
+		PermAPIKeysRead:       true,
+		PermBillingRead:       true,
+	},
+	// RoleUser is a tenant owner/member who has full control over their
+	// own tenant resources but NO platform-level privileges (platform
+	// organizations read/write, platform security, platform sessions).
+	auth.RoleUser: {
+		PermDashboardRead: true,
+		PermDomainsRead:   true, PermDomainsWrite: true,
+		PermMailboxesRead: true, PermMailboxesWrite: true,
+		PermOrganizationsRead: true, PermOrganizationsWrite: true,
+		PermUsersRead: true, PermUsersWrite: true,
+		PermAliasesRead: true, PermAliasesWrite: true,
+		PermGroupsRead: true, PermGroupsWrite: true,
+		PermInvitationsRead: true, PermInvitationsWrite: true,
+		PermOwnershipTransfer: true,
+		PermAPIKeysRead:       true, PermAPIKeysWrite: true,
+		PermBillingRead: true, PermBillingWrite: true,
+		PermAuditRead:        true,
+		PermSettingsRead:     true,
+		PermMonitoringRead:   true,
+		PermCredentialsReset: true,
+		PermSessionsRevoke:   true,
+		PermSecurityRead:     true,
+	},
+	// RoleBilling is a tenant billing-only role. Read access to tenant
+	// resources. Billing write. No domain/mailbox/member mutations.
+	auth.RoleBilling: {
+		PermDashboardRead:     true,
+		PermDomainsRead:       true,
+		PermMailboxesRead:     true,
+		PermOrganizationsRead: true,
+		PermAuditRead:         true,
+		PermSettingsRead:      true,
+		PermMonitoringRead:    true,
+		PermBillingRead:       true, PermBillingWrite: true,
+		PermGroupsRead:      true,
+		PermInvitationsRead: true,
+		PermAliasesRead:     true,
+		PermAPIKeysRead:     true,
 	},
 }
 

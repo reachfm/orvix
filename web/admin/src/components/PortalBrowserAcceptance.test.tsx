@@ -96,4 +96,28 @@ describe("Portal browser acceptance", () => {
     expect(screen.getByText("Domains")).toBeInTheDocument();
     expect(screen.getByText("API Calls")).toBeInTheDocument();
   });
+
+  it("renders invoices page", async () => {
+    const { default: InvoicesPage } = await import("./InvoicesPage");
+    render(<Wrapper><InvoicesPage /></Wrapper>);
+    await waitFor(() => expect(screen.getByText("Invoices")).toBeInTheDocument());
+  });
+
+  it("renders security page", async () => {
+    const { default: SecurityPage } = await import("./SecurityPage");
+    render(<Wrapper><SecurityPage /></Wrapper>);
+    await waitFor(() => expect(screen.getByText("Security")).toBeInTheDocument());
+  });
+
+  it("renders support page", async () => {
+    const { default: SupportPage } = await import("./SupportPage");
+    render(<Wrapper><SupportPage /></Wrapper>);
+    await waitFor(() => expect(screen.getByText("Support")).toBeInTheDocument());
+  });
+
+  it("renders preferences page", async () => {
+    const { default: PreferencesPage } = await import("./PreferencesPage");
+    render(<Wrapper><PreferencesPage /></Wrapper>);
+    await waitFor(() => expect(screen.getByText("Preferences")).toBeInTheDocument());
+  });
 });

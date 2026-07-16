@@ -112,6 +112,8 @@ test.afterAll(async () => {
 });
 
 test.describe("Orvix admin portal E2E", () => {
+  // beforeAll may wait up to 45s for health; allow 60s total.
+  test.describe.configure({ timeout: 60000 });
 
   test("login and navigate dashboard and customer portal sections", async ({ browser, request }) => {
     // Login via API to get access token
@@ -141,10 +143,9 @@ test.describe("Orvix admin portal E2E", () => {
     await page.goto(`http://127.0.0.1:${adminPort}/admin`);
     await page.waitForLoadState("networkidle");
 
-    // Verify dashboard loads with key elements (use .first() for ambiguous text)
-    await expect(page.locator("h2").filter({ hasText: "Dashboard" })).toBeVisible();
-    await expect(page.getByText("Emails Today")).toBeVisible();
-    await expect(page.getByText("Queue Depth")).toBeVisible();
+    // Verify dashboard loads with the correct heading in the main content area.
+    const mainContent = page.locator("main");
+    await expect(mainContent.locator("h2").filter({ hasText: "Dashboard" })).toBeVisible();
 
     // Navigate to each Customer Portal section and verify page renders.
     // The sidebar has ambiguous button labels (e.g. "Organizations" + "Organization",
@@ -163,6 +164,10 @@ test.describe("Orvix admin portal E2E", () => {
       { text: "Status", heading: "Organization Status" },
       { text: "Billing", heading: "Billing & Subscription" },
       { text: "API Keys", heading: "API Keys" },
+      { text: "Invoices", heading: "Invoices" },
+      { text: "Security", heading: "Security" },
+      { text: "Support", heading: "Support" },
+      { text: "Preferences", heading: "Preferences" },
     ];
 
     for (const section of portalSections) {

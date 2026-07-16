@@ -68,13 +68,58 @@ func TestHasPermission_Matrix(t *testing.T) {
 		{auth.RoleReadOnly, PermUsersWrite, false},
 		{auth.RoleReadOnly, PermAuditRead, true},
 
+		// RoleUser (tenant owner/member): full tenant-scoped access,
+		// no platform privileges.
+		{auth.RoleUser, PermDashboardRead, true},
+		{auth.RoleUser, PermDomainsRead, true},
+		{auth.RoleUser, PermDomainsWrite, true},
+		{auth.RoleUser, PermMailboxesRead, true},
+		{auth.RoleUser, PermMailboxesWrite, true},
+		{auth.RoleUser, PermOrganizationsRead, true},
+		{auth.RoleUser, PermOrganizationsWrite, true},
+		{auth.RoleUser, PermUsersRead, true},
+		{auth.RoleUser, PermUsersWrite, true},
+		{auth.RoleUser, PermAliasesRead, true},
+		{auth.RoleUser, PermAliasesWrite, true},
+		{auth.RoleUser, PermGroupsWrite, true},
+		{auth.RoleUser, PermInvitationsWrite, true},
+		{auth.RoleUser, PermOwnershipTransfer, true},
+		{auth.RoleUser, PermAPIKeysWrite, true},
+		{auth.RoleUser, PermBillingWrite, true},
+		{auth.RoleUser, PermAuditRead, true},
+		{auth.RoleUser, PermSettingsRead, true},
+		{auth.RoleUser, PermCredentialsReset, true},
+		{auth.RoleUser, PermSessionsRevoke, true},
+		// Platform permissions denied.
+		{auth.RoleUser, PermPlatformOrganizationsRead, false},
+		{auth.RoleUser, PermPlatformOrganizationsWrite, false},
+		{auth.RoleUser, PermPlatformSecurityRead, false},
+		{auth.RoleUser, PermPlatformSessionsRevoke, false},
+		// License/admin-only denied.
+		{auth.RoleUser, PermLicenseRead, false},
+		{auth.RoleUser, PermLicenseWrite, false},
+		{auth.RoleUser, PermBackupsWrite, false},
+		{auth.RoleUser, PermQueueRead, false},
+		{auth.RoleUser, PermQueueAction, false},
+
+		// RoleBilling: read access + billing write. No other mutations.
+		{auth.RoleBilling, PermDashboardRead, true},
+		{auth.RoleBilling, PermDomainsRead, true},
+		{auth.RoleBilling, PermDomainsWrite, false},
+		{auth.RoleBilling, PermMailboxesRead, true},
+		{auth.RoleBilling, PermMailboxesWrite, false},
+		{auth.RoleBilling, PermOrganizationsWrite, false},
+		{auth.RoleBilling, PermUsersWrite, false},
+		{auth.RoleBilling, PermAliasesWrite, false},
+		{auth.RoleBilling, PermGroupsWrite, false},
+		{auth.RoleBilling, PermInvitationsWrite, false},
+		{auth.RoleBilling, PermOwnershipTransfer, false},
+		{auth.RoleBilling, PermAPIKeysWrite, false},
+		{auth.RoleBilling, PermBillingWrite, true},
+
 		// Unknown roles: deny by default.
 		{auth.Role("unknown"), PermQueueRead, false},
 		{auth.Role(""), PermQueueRead, false},
-		// The legacy user role is not an admin role: it gets
-		// nothing.
-		{auth.RoleUser, PermQueueRead, false},
-		{auth.RoleUser, PermSettingsRead, false},
 	}
 	for _, c := range cases {
 		got := HasPermission(c.role, c.perm)
@@ -233,11 +278,13 @@ func TestAllPermissions_AllInRoleMap(t *testing.T) {
 	// Every permission listed in AllPermissions must appear in
 	// the rolePermission map for at least one role. A
 	// permission that is never granted is dead code.
+	allRoles := []auth.Role{
+		auth.RoleSuperAdmin, auth.RoleAdmin, auth.RoleOperator,
+		auth.RoleReadOnly, auth.RoleUser, auth.RoleBilling,
+	}
 	for _, p := range AllPermissions {
 		granted := false
-		for _, role := range []auth.Role{
-			auth.RoleSuperAdmin, auth.RoleAdmin, auth.RoleOperator, auth.RoleReadOnly,
-		} {
+		for _, role := range allRoles {
 			if HasPermission(role, p) {
 				granted = true
 				break

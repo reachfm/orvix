@@ -151,3 +151,125 @@ func TestAuditPersistenceAcrossRestart(t *testing.T) {
 		t.Fatalf("wrong restored audit entry: %#v", entries[0])
 	}
 }
+
+func TestTenantIsolationSearch(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	s.Record(ctx, &Entry{Actor: "user-a", Action: "login", TenantID: 1})
+	s.Record(ctx, &Entry{Actor: "user-b", Action: "login", TenantID: 2})
+	s.Record(ctx, &Entry{Actor: "admin-a", Action: "domain_create", Target: "example.com", TenantID: 1})
+
+	// Tenant 1 sees only 2 entries.
+	entries, total, err := s.Search(ctx, &Query{TenantID: 1, Limit: 100})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if total != 2 {
+		t.Fatalf("tenant 1: expected 2 entries, got %d", total)
+	}
+	for _, e := range entries {
+		if e.TenantID != 1 {
+			t.Errorf("tenant 1 saw entry with tenant_id %d: %#v", e.TenantID, e)
+		}
+	}
+
+	// Tenant 2 sees only 1 entry.
+	entries, total, err = s.Search(ctx, &Query{TenantID: 2, Limit: 100})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("tenant 2: expected 1 entry, got %d", total)
+	}
+	for _, e := range entries {
+		if e.TenantID != 2 {
+			t.Errorf("tenant 2 saw entry with tenant_id %d", e.TenantID)
+		}
+	}
+
+	// Tenant 3 sees nothing.
+	entries, total, err = s.Search(ctx, &Query{TenantID: 3, Limit: 100})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if total != 0 {
+		t.Fatalf("tenant 3: expected 0 entries, got %d", total)
+	}
+}
+
+func TestTenantFiltersPreserveScope(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	s.Record(ctx, &Entry{Actor: "user-a1", Action: "login", TenantID: 1})
+	s.Record(ctx, &Entry{Actor: "user-a2", Action: "mailbox_create", Target: "m1", TenantID: 1})
+	s.Record(ctx, &Entry{Actor: "user-b1", Action: "login", TenantID: 2})
+
+	// Filter by action within tenant 1.
+	entries, total, err := s.Search(ctx, &Query{TenantID: 1, Action: "login", Limit: 100})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("tenant 1 + action login: expected 1, got %d", total)
+	}
+
+	// Filter by actor within tenant 1.
+	entries, total, err = s.Search(ctx, &Query{TenantID: 1, Actor: "user-a2", Limit: 100})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("tenant 1 + actor user-a2: expected 1, got %d", total)
+	}
+
+	_ = entries
+}
+
+func TestPaginationPreservesTenantScope(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	for i := 0; i < 5; i++ {
+		s.Record(ctx, &Entry{Actor: fmt.Sprintf("a-%d", i), Action: "test", TenantID: 1})
+	}
+	for i := 0; i < 3; i++ {
+		s.Record(ctx, &Entry{Actor: fmt.Sprintf("b-%d", i), Action: "test", TenantID: 2})
+	}
+
+	// Page 1, 2 per page for tenant 1.
+	page, total, err := s.Search(ctx, &Query{TenantID: 1, Limit: 2, Offset: 0})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if total != 5 {
+		t.Fatalf("tenant 1 total: expected 5, got %d", total)
+	}
+	if len(page) != 2 {
+		t.Fatalf("tenant 1 page 1: expected 2, got %d", len(page))
+	}
+	for _, e := range page {
+		if e.TenantID != 1 {
+			t.Errorf("pagination leaked tenant: %#v", e)
+		}
+	}
+}
+
+func TestEmptyTenantReturnsEmpty(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	s.Record(ctx, &Entry{Actor: "x", Action: "login", TenantID: 5})
+
+	entries, total, err := s.Search(ctx, &Query{TenantID: 999, Limit: 100})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if total != 0 {
+		t.Fatalf("expected 0 for non-existent tenant, got %d", total)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected empty slice, got %d entries", len(entries))
+	}
+}

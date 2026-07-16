@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"database/sql"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -58,12 +60,49 @@ func (h *Handler) ReceivePaymentWebhook(c fiber.Ctx) error {
 		IdempotencyKey: event.ProviderEventID,
 	}
 
-	if err := h.billingWebhook.RecordEvent(c.Context(), rec); err != nil {
+	var invoice *billing.InvoiceRecord
+
+	// Process invoice events — create or update the invoice record.
+	if event.InvoiceID != "" && strings.HasPrefix(event.Type, "invoice.") && h.invoiceSvc != nil && h.billingSvc != nil {
+		sub, subErr := h.billingSvc.GetSubscriptionByProviderID(event.ProviderSubID)
+		if subErr == nil && sub != nil {
+			invoice = &billing.InvoiceRecord{
+				TenantID:          sub.TenantID,
+				SubscriptionID:    &sub.ID,
+				Provider:          rec.Provider,
+				ProviderInvoiceID: event.InvoiceID,
+				InvoiceNumber:     event.InvoiceNumber,
+				Currency:          strings.ToUpper(event.Currency),
+				Subtotal:          event.AmountSubtotal,
+				Tax:               event.AmountTax,
+				Total:             event.AmountTotal,
+				AmountPaid:        event.AmountPaid,
+				AmountDue:         event.AmountDue,
+				Status:            mapInvoiceStatus(event.PaymentStatus, event.Type),
+				PeriodStart:       event.PeriodStart,
+				PeriodEnd:         event.PeriodEnd,
+				HostedInvoiceURL:  event.HostedInvoiceURL,
+				PDFURL:            event.PDFURL,
+			}
+			if event.Created != nil {
+				invoice.IssuedAt = event.Created
+			}
+		}
+	}
+
+	err = h.billingWebhook.ProcessEvent(c.Context(), rec, func(tx *sql.Tx) error {
+		if invoice == nil {
+			return nil
+		}
+		_, err := h.invoiceSvc.UpsertFromProviderEventTx(c.Context(), tx, invoice, event.Created, event.ProviderEventID)
+		return err
+	})
+	if err != nil {
 		if errors.Is(err, billing.ErrWebhookAlreadyProcessed) {
 			return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "already_processed", "event_id": event.ProviderEventID})
 		}
-		h.logger.Error("webhook record failed", zap.Error(err))
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "event recording failed"})
+		h.logger.Error("webhook processing failed", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "event processing failed"})
 	}
 
 	if event.PaymentStatus == "paid" && event.SubscriptionStatus == "active" && event.ProviderSubID != "" && h.billingSvc != nil {
@@ -72,10 +111,38 @@ func (h *Handler) ReceivePaymentWebhook(c fiber.Ctx) error {
 		}
 	}
 
-	processingErr := h.billingWebhook.MarkProcessed(c.Context(), event.ProviderEventID, rec.Provider, nil)
-	if processingErr != nil {
-		h.logger.Error("webhook mark processed failed", zap.Error(processingErr))
-	}
-
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": "received", "event_id": event.ProviderEventID})
+}
+
+func mapInvoiceStatus(paymentStatus, eventType string) string {
+	// Map from payment provider statuses to our invoice statuses.
+	if paymentStatus == "paid" {
+		return "paid"
+	}
+	if strings.HasSuffix(eventType, ".paid") {
+		return "paid"
+	}
+	if strings.HasSuffix(eventType, ".voided") {
+		return "void"
+	}
+	if strings.HasSuffix(eventType, ".payment_failed") {
+		return "past_due"
+	}
+	if strings.HasSuffix(eventType, ".finalized") {
+		return "open"
+	}
+	switch paymentStatus {
+	case "open":
+		return "open"
+	case "past_due":
+		return "past_due"
+	case "uncollectible":
+		return "uncollectible"
+	case "void":
+		return "void"
+	case "draft":
+		return "draft"
+	default:
+		return "open"
+	}
 }

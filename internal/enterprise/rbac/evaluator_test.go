@@ -20,8 +20,15 @@ func TestEvaluatorPermissionMatrixAndTenantScope(t *testing.T) {
 	if e.HasPermission(ctx, auth.RoleReadOnly, 2, authrbac.PermDomainsWrite) {
 		t.Fatalf("read-only auditor must not mutate domains")
 	}
-	if e.HasPermission(ctx, auth.RoleUser, 3, authrbac.PermMailboxesWrite) {
-		t.Fatalf("end user must not gain mailbox write permission")
+	// RoleUser is now the tenant owner/member role with full tenant
+	// write permissions. This is intentional — signup-created owners
+	// need to manage their tenant.
+	if !e.HasPermission(ctx, auth.RoleUser, 3, authrbac.PermMailboxesWrite) {
+		t.Fatalf("tenant owner (RoleUser) must have mailbox write permission")
+	}
+	// Platform permissions are still denied for tenant roles.
+	if e.HasPermission(ctx, auth.RoleUser, 3, authrbac.PermPlatformOrganizationsWrite) {
+		t.Fatalf("tenant owner must not have platform organization write")
 	}
 	if e.CanManageTenant(auth.RoleAdmin, 0, 1) {
 		t.Fatalf("missing actor tenant must fail closed")
@@ -49,7 +56,7 @@ func TestEvaluatorDBBackedGroupGrant(t *testing.T) {
 	if _, err := db.Exec(`CREATE TABLE coremail_admin_group_members (group_id INTEGER, user_id INTEGER)`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO coremail_admin_groups (id, grants) VALUES (1, 'domains.read, mailboxes.write')`); err != nil {
+	if _, err := db.Exec(`INSERT INTO coremail_admin_groups (id, grants) VALUES (1, 'domains.read, queue.action')`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO coremail_admin_group_members (group_id, user_id) VALUES (1, 42)`); err != nil {
@@ -57,10 +64,19 @@ func TestEvaluatorDBBackedGroupGrant(t *testing.T) {
 	}
 
 	e := NewEvaluator(db)
-	if !e.HasPermission(context.Background(), auth.RoleUser, 42, authrbac.PermMailboxesWrite) {
-		t.Fatalf("DB-backed group grant should authorize assigned permission")
+	// RoleUser now has PermMailboxesWrite from the global matrix.
+	// Use a permission that RoleUser does not have — PermQueueAction —
+	// to test that DB-backed group grants extend permissions beyond
+	// the global matrix, but unassigned users do not inherit them.
+	if !e.HasPermission(context.Background(), auth.RoleUser, 42, authrbac.PermQueueAction) {
+		t.Fatalf("DB-backed group grant should authorize assigned permission via group")
 	}
-	if e.HasPermission(context.Background(), auth.RoleUser, 99, authrbac.PermMailboxesWrite) {
+	if e.HasPermission(context.Background(), auth.RoleUser, 99, authrbac.PermQueueAction) {
 		t.Fatalf("unassigned user must not inherit another user's grant")
+	}
+	// Verify that the global matrix still denies for permissions
+	// without DB grant.
+	if e.HasPermission(context.Background(), auth.RoleUser, 42, authrbac.PermPlatformOrganizationsWrite) {
+		t.Fatalf("tenant owner must not gain platform org write via group grant")
 	}
 }

@@ -156,6 +156,9 @@ func postgresTables() []string {
 			mfa_secret_raw TEXT NOT NULL DEFAULT '',
 			mfa_label TEXT NOT NULL DEFAULT ''
 		)`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS locale TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS timezone TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS theme TEXT NOT NULL DEFAULT 'dark'`,
 
 		`CREATE TABLE IF NOT EXISTS domains (
 			id BIGSERIAL PRIMARY KEY,
@@ -198,13 +201,18 @@ func postgresTables() []string {
 			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
 			deleted_at TIMESTAMP,
-			key_hash TEXT NOT NULL,
-			user_id INTEGER NOT NULL,
 			name TEXT NOT NULL DEFAULT '',
+			user_id INTEGER NOT NULL,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			role TEXT NOT NULL DEFAULT 'user',
+			key_hash TEXT NOT NULL,
+			key_prefix TEXT NOT NULL DEFAULT '',
+			scopes TEXT NOT NULL DEFAULT '',
 			active BOOLEAN NOT NULL DEFAULT true,
-			expires_at TIMESTAMP,
-			last_used_at TIMESTAMP
+			last_used_at TIMESTAMP,
+			expires_at TIMESTAMP
 		)`,
+		`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS scopes TEXT NOT NULL DEFAULT ''`,
 
 		// --- Sessions / security / audit ---
 
@@ -219,8 +227,10 @@ func postgresTables() []string {
 			email TEXT NOT NULL DEFAULT '',
 			ip TEXT NOT NULL DEFAULT '',
 			user_agent TEXT,
+			jti TEXT NOT NULL DEFAULT '',
 			expires_at TIMESTAMP NOT NULL
 		)`,
+		`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS jti TEXT NOT NULL DEFAULT ''`,
 
 		// revoked_tokens backs H-9 access-token revocation on logout:
 		// a logged-out access token's jti is stored here until its
@@ -228,6 +238,68 @@ func postgresTables() []string {
 		`CREATE TABLE IF NOT EXISTS revoked_tokens (
 			jti TEXT PRIMARY KEY,
 			expires_at BIGINT NOT NULL
+		)`,
+
+		// --- Customer account tables ---
+
+		`CREATE TABLE IF NOT EXISTS invoices (
+			id BIGSERIAL PRIMARY KEY,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			tenant_id INTEGER NOT NULL,
+			subscription_id INTEGER,
+			provider TEXT NOT NULL DEFAULT '',
+			provider_invoice_id TEXT,
+			invoice_number TEXT,
+			currency TEXT NOT NULL DEFAULT 'usd',
+			subtotal BIGINT NOT NULL DEFAULT 0,
+			tax BIGINT NOT NULL DEFAULT 0,
+			total BIGINT NOT NULL DEFAULT 0,
+			amount_paid BIGINT NOT NULL DEFAULT 0,
+			amount_due BIGINT NOT NULL DEFAULT 0,
+			status TEXT NOT NULL DEFAULT 'draft',
+			period_start TIMESTAMP,
+			period_end TIMESTAMP,
+			issued_at TIMESTAMP,
+			due_at TIMESTAMP,
+			paid_at TIMESTAMP,
+			hosted_invoice_url TEXT,
+			pdf_url TEXT,
+			provider_event_created_at TIMESTAMP,
+			provider_event_id TEXT,
+			provider_updated_at TIMESTAMP,
+			UNIQUE(provider, provider_invoice_id)
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS user_notification_preferences (
+			id BIGSERIAL PRIMARY KEY,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			deleted_at TIMESTAMP,
+			user_id INTEGER NOT NULL UNIQUE,
+			domain_verification BOOLEAN NOT NULL DEFAULT true,
+			quota_warning BOOLEAN NOT NULL DEFAULT true,
+			quota_reached BOOLEAN NOT NULL DEFAULT true,
+			billing_status BOOLEAN NOT NULL DEFAULT true,
+			invitation BOOLEAN NOT NULL DEFAULT true,
+			session_activity BOOLEAN NOT NULL DEFAULT true,
+			channel_email BOOLEAN NOT NULL DEFAULT true
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS support_requests (
+			id BIGSERIAL PRIMARY KEY,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			reference_id TEXT NOT NULL UNIQUE,
+			tenant_id INTEGER NOT NULL,
+			user_id INTEGER NOT NULL,
+			user_email TEXT NOT NULL,
+			category TEXT NOT NULL,
+			subject TEXT NOT NULL,
+			message TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'received',
+			delivery_status TEXT NOT NULL DEFAULT 'pending',
+			delivery_error TEXT NOT NULL DEFAULT ''
 		)`,
 
 		`CREATE TABLE IF NOT EXISTS coremail_audit (
@@ -1307,6 +1379,18 @@ func postgresIndexes() []string {
 		// Customer domain administration
 		idx("idx_cdv_domain", "customer_domain_verifications", "domain_id"),
 		idx("idx_cdv_created_desc", "customer_domain_verifications", "domain_id, created_at DESC"),
+
+		// Invoices
+		idx("idx_invoices_tenant_issued", "invoices", "tenant_id, issued_at"),
+		idx("idx_invoices_tenant_status", "invoices", "tenant_id, status"),
+		idx("idx_invoices_subscription", "invoices", "subscription_id"),
+
+		// Support requests
+		idx("idx_support_requests_tenant", "support_requests", "tenant_id"),
+		idx("idx_support_requests_user", "support_requests", "user_id"),
+
+		// User notification preferences
+		idx("idx_user_notif_prefs_user", "user_notification_preferences", "user_id"),
 
 		// Enterprise audit
 		idx("idx_orvix_audit_tenant", "orvix_audit", "tenant_id"),

@@ -2,9 +2,11 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +26,7 @@ import (
 	"github.com/orvix/orvix/internal/api/handlers/settings"
 	auditpkg "github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/auth"
+	authrbac "github.com/orvix/orvix/internal/auth/rbac"
 	"github.com/orvix/orvix/internal/billing"
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/coremail"
@@ -253,6 +256,7 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			}
 			if webhookSvc != nil {
 				router.h.SetBillingWebhook(webhookSvc)
+				router.h.SetInvoiceService(billing.NewInvoiceService(sqlDB))
 				logger.Info("billing webhook service wired")
 			}
 
@@ -528,6 +532,32 @@ func (r *Router) App() *fiber.App { return r.app }
 // Start begins background services (billing scheduler, etc).
 // Called by the production entry point; test callers should NOT
 // call Start to avoid background goroutines leaking.
+// newUserRateLimiter builds a fiber limiter keyed by authenticated user id
+// (falling back to client IP for unauthenticated callers), returning HTTP 429
+// with a real integer-seconds Retry-After header and a stable JSON body when
+// the per-window budget is exceeded. Extracted so the exact production limiter
+// is exercised by tests (threshold, reset window, and user isolation).
+func newUserRateLimiter(prefix string, max int, window time.Duration, retryAfterSeconds int, message string) fiber.Handler {
+	retry := strconv.Itoa(retryAfterSeconds)
+	return limiter.New(limiter.Config{
+		Max:        max,
+		Expiration: window,
+		KeyGenerator: func(c fiber.Ctx) string {
+			if uid, ok := c.Locals("user_id").(uint); ok && uid > 0 {
+				return fmt.Sprintf("%s:%d", prefix, uid)
+			}
+			return prefix + ":" + c.IP()
+		},
+		LimitReached: func(c fiber.Ctx) error {
+			c.Set("Retry-After", retry)
+			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+				"error":       message,
+				"retry_after": retryAfterSeconds,
+			})
+		},
+	})
+}
+
 func (r *Router) Start() {
 	r.startOnce.Do(func() {
 		r.h.StartBillingScheduler(r.appCtx, 15*time.Minute)
@@ -687,6 +717,26 @@ func (r *Router) setupRoutes() {
 	protected := api.Group("", r.apikeys.Middleware(), r.auth.Middleware(), auth.TenantMiddleware(r.db))
 	protected.Get("/me", r.h.Me)
 
+	// Account endpoints — own profile, sessions, preferences. Authenticated user only.
+	protected.Get("/account/profile", r.h.GetAccountProfile)
+	protected.Patch("/account/profile", r.h.UpdateAccountProfile)
+	protected.Get("/account/preferences", r.h.GetAccountPreferences)
+	protected.Patch("/account/preferences", r.h.UpdateAccountPreferences)
+	protected.Get("/account/notification-preferences", r.h.GetNotificationPreferences)
+	protected.Patch("/account/notification-preferences", r.h.UpdateNotificationPreferences)
+	protected.Get("/account/sessions", r.h.ListAccountSessions)
+	protected.Post("/account/sessions/:id/revoke", r.h.RevokeAccountSession)
+	// Support requests: dedicated rate limit — 5 requests per 10 minutes per user.
+	supportLimiter := newUserRateLimiter("support_req", 5, 10*time.Minute, 600, "too many support requests, please try again later")
+	protected.Post("/account/support-requests", supportLimiter, r.h.SubmitSupportRequest)
+	// MFA: dedicated per-user rate limit — 10 attempts per 15 minutes.
+	mfaLimiter := newUserRateLimiter("mfa_req", 10, 15*time.Minute, 900, "too many MFA attempts, please try again later")
+	protected.Get("/account/mfa/status", r.h.AccountMFAStatus)
+	protected.Post("/account/mfa/setup", mfaLimiter, r.h.AccountMFASetup)
+	protected.Post("/account/mfa/verify", mfaLimiter, r.h.AccountMFAVerify)
+	protected.Post("/account/mfa/disable", mfaLimiter, r.h.AccountMFADisable)
+	protected.Post("/account/mfa/recovery-codes/regenerate", mfaLimiter, r.h.AccountMFARegenerateRecoveryCodes)
+
 	// User-facing webmail endpoints. Mounted on the
 	// protected group so the auth middleware rejects
 	// unauthenticated requests with 401 BEFORE any
@@ -811,63 +861,140 @@ func (r *Router) setupRoutes() {
 	protected.Post("/customer/domains/:domain_id/verify", r.h.VerifyCustomerDomain)
 
 	// Enterprise customer administration (tenant-scoped, CSRF-protected).
-	// Available to organization admins, operators, and above.
 	// All operations are scoped to the caller's tenant_id.
-	enterprise := protected.Group("/enterprise",
+	//
+	// GET routes (enterpriseRead): any authenticated user with valid tenant
+	// context. RoleUser (signup-created owner), RoleBilling, RoleReadOnly,
+	// RoleOperator, RoleAdmin, and RoleSuperAdmin all have dashboard read.
+	//
+	// POST/PATCH/DELETE routes: each capability group has its own exact
+	// permission guard. A caller with domains.write cannot reach mailbox
+	// mutations, and vice versa.
+	//
+	// Platform admin routes (admin group) remain separate and continue to
+	// require RoleAdmin / RoleSuperAdmin.
+
+	// requireTenantActive denies mutations when the organization is
+	// suspended or pending deletion. Read operations (GET/HEAD) are
+	// allowed so the tenant can see their status.
+	requireTenantActive := func(c fiber.Ctx) error {
+		if c.Method() == "GET" || c.Method() == "HEAD" || c.Method() == "OPTIONS" {
+			return c.Next()
+		}
+		tenantID, err := auth.RequireTenantID(c)
+		if err != nil {
+			return err
+		}
+		var active sql.NullBool
+		if r.db != nil {
+			r.db.Raw("SELECT active FROM organizations WHERE id = ?", tenantID).Scan(&active)
+		}
+		if !active.Valid || !active.Bool {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"error": "organization is suspended or inactive",
+			})
+		}
+		return c.Next()
+	}
+
+	enterpriseRead := protected.Group("/enterprise",
 		requireTenantContext,
-		auth.RequireAnyRole(auth.RoleAdmin, auth.RoleSuperAdmin, auth.RoleOperator),
-		r.csrf.Middleware())
-	enterprise.Get("/dashboard", r.h.CustomerDashboard)
-	enterprise.Get("/domains", r.h.ListAdminDomains)
-	enterprise.Get("/domains/:id", r.h.GetAdminDomain)
-	enterprise.Post("/domains", r.h.CreateAdminDomain)
-	enterprise.Patch("/domains/:id", r.h.UpdateAdminDomain)
-	enterprise.Post("/domains/:id/status", r.h.SetAdminDomainStatus)
-	enterprise.Get("/mailboxes", r.h.ListAdminMailboxes)
-	enterprise.Get("/mailboxes/:id", r.h.GetAdminMailbox)
-	enterprise.Post("/mailboxes", r.h.CreateAdminMailbox)
-	enterprise.Patch("/mailboxes/:id", r.h.UpdateAdminMailbox)
-	enterprise.Post("/mailboxes/:id/status", r.h.SetAdminMailboxStatus)
-	enterprise.Post("/mailboxes/bulk/status", r.h.BulkSetAdminMailboxStatus)
-	enterprise.Post("/mailboxes/:id/reset-password", r.h.ResetAdminMailboxPassword)
-	enterprise.Get("/organizations/:id", r.h.GetOrganization)
-	enterprise.Get("/organizations/current", r.h.GetCurrentOrganization)
+		r.csrf.Middleware(),
+		requireTenantActive)
 
-	enterprise.Get("/invitations", r.h.ListInvitations)
-	enterprise.Post("/invitations", r.h.CreateInvitation)
-	enterprise.Post("/invitations/:id/revoke", r.h.RevokeInvitation)
+	// Per-capability write guards: each guards only its own resource.
+	canWriteDomains := enterpriseRead.Group("", authrbac.Require(authrbac.PermDomainsWrite))
+	canWriteMailboxes := enterpriseRead.Group("", authrbac.Require(authrbac.PermMailboxesWrite))
+	canWriteOrgs := enterpriseRead.Group("", authrbac.Require(authrbac.PermOrganizationsWrite))
+	canWriteUsers := enterpriseRead.Group("", authrbac.Require(authrbac.PermUsersWrite))
+	canWriteAliases := enterpriseRead.Group("", authrbac.Require(authrbac.PermAliasesWrite))
+	canWriteGroups := enterpriseRead.Group("", authrbac.Require(authrbac.PermGroupsWrite))
+	canWriteInvitations := enterpriseRead.Group("", authrbac.Require(authrbac.PermInvitationsWrite))
+	canTransferOwnership := enterpriseRead.Group("", authrbac.Require(authrbac.PermOwnershipTransfer))
+	canWriteAPIKeys := enterpriseRead.Group("", authrbac.Require(authrbac.PermAPIKeysWrite))
+	canWriteBilling := enterpriseRead.Group("", authrbac.Require(authrbac.PermBillingWrite))
 
-	enterprise.Get("/members", r.h.ListMembers)
-	enterprise.Patch("/members/:id/role", r.h.UpdateMemberRole)
-	enterprise.Delete("/members/:id", r.h.RemoveMember)
+	// ── Dashboard ──
+	enterpriseRead.Get("/dashboard", r.h.CustomerDashboard)
 
-	enterprise.Post("/ownership/request", r.h.RequestOwnershipTransfer)
-	enterprise.Post("/ownership/accept", r.h.AcceptOwnershipTransfer)
-	enterprise.Post("/ownership/cancel", r.h.CancelOwnershipTransfer)
+	// ── Domains ──
+	enterpriseRead.Get("/domains", r.h.ListAdminDomains)
+	enterpriseRead.Get("/domains/:id", r.h.GetAdminDomain)
+	canWriteDomains.Post("/domains", r.h.CreateAdminDomain)
+	canWriteDomains.Patch("/domains/:id", r.h.UpdateAdminDomain)
+	canWriteDomains.Post("/domains/:id/status", r.h.SetAdminDomainStatus)
 
-	enterprise.Get("/aliases", r.h.ListAliases)
-	enterprise.Post("/aliases", r.h.CreateAlias)
-	enterprise.Delete("/aliases/:id", r.h.DeleteAlias)
+	// ── Mailboxes ──
+	enterpriseRead.Get("/mailboxes", r.h.ListAdminMailboxes)
+	enterpriseRead.Get("/mailboxes/:id", r.h.GetAdminMailbox)
+	canWriteMailboxes.Post("/mailboxes", r.h.CreateAdminMailbox)
+	canWriteMailboxes.Patch("/mailboxes/:id", r.h.UpdateAdminMailbox)
+	canWriteMailboxes.Post("/mailboxes/:id/status", r.h.SetAdminMailboxStatus)
+	canWriteMailboxes.Post("/mailboxes/bulk/status", r.h.BulkSetAdminMailboxStatus)
+	canWriteMailboxes.Post("/mailboxes/:id/reset-password", r.h.ResetAdminMailboxPassword)
 
-	enterprise.Get("/groups", r.h.ListGroups)
-	enterprise.Post("/groups", r.h.CreateGroup)
-	enterprise.Post("/groups/:id/members", r.h.AddGroupMember)
-	enterprise.Delete("/groups/:id/members/:memberId", r.h.RemoveGroupMember)
-	enterprise.Delete("/groups/:id", r.h.DeleteGroup)
+	// ── Organizations ──
+	enterpriseRead.Get("/organizations/:id", r.h.GetOrganization)
+	enterpriseRead.Get("/organizations/current", r.h.GetCurrentOrganization)
 
-	enterprise.Get("/abuse/send-limit", r.h.CheckSendLimit)
-	enterprise.Get("/status", r.h.SuspensionStatus)
-	enterprise.Post("/deletion", r.h.RequestDeletion)
-	enterprise.Post("/deletion/cancel", r.h.CancelDeletion)
+	// ── Invitations ──
+	enterpriseRead.Get("/invitations", r.h.ListInvitations)
+	canWriteInvitations.Post("/invitations", r.h.CreateInvitation)
+	canWriteInvitations.Post("/invitations/:id/revoke", r.h.RevokeInvitation)
 
-	enterprise.Get("/billing/subscription", r.h.GetBillingSubscription)
-	enterprise.Post("/billing/subscription", r.h.CreateBillingSubscription)
-	enterprise.Get("/billing/usage", r.h.GetBillingUsage)
-	enterprise.Get("/billing/quota", r.h.CheckBillingQuota)
+	// ── Members ──
+	enterpriseRead.Get("/members", r.h.ListMembers)
+	canWriteUsers.Patch("/members/:id/role", r.h.UpdateMemberRole)
+	canWriteUsers.Delete("/members/:id", r.h.RemoveMember)
 
-	enterprise.Get("/abuse/signals", r.h.ListAbuseSignals)
-	enterprise.Post("/abuse/signals/:id/acknowledge", r.h.AcknowledgeAbuseSignal)
-	enterprise.Post("/abuse/signals/:id/resolve", r.h.ResolveAbuseSignal)
+	// ── Ownership ──
+	canTransferOwnership.Post("/ownership/request", r.h.RequestOwnershipTransfer)
+	canTransferOwnership.Post("/ownership/accept", r.h.AcceptOwnershipTransfer)
+	canTransferOwnership.Post("/ownership/cancel", r.h.CancelOwnershipTransfer)
+
+	// ── Aliases ──
+	enterpriseRead.Get("/aliases", r.h.ListAliases)
+	canWriteAliases.Post("/aliases", r.h.CreateAlias)
+	canWriteAliases.Delete("/aliases/:id", r.h.DeleteAlias)
+
+	// ── Groups ──
+	enterpriseRead.Get("/groups", r.h.ListGroups)
+	canWriteGroups.Post("/groups", r.h.CreateGroup)
+	canWriteGroups.Post("/groups/:id/members", r.h.AddGroupMember)
+	canWriteGroups.Delete("/groups/:id/members/:memberId", r.h.RemoveGroupMember)
+	canWriteGroups.Delete("/groups/:id", r.h.DeleteGroup)
+
+	// ── Abuse ──
+	enterpriseRead.Get("/abuse/send-limit", r.h.CheckSendLimit)
+	enterpriseRead.Get("/abuse/signals", r.h.ListAbuseSignals)
+	canWriteUsers.Post("/abuse/signals/:id/acknowledge", r.h.AcknowledgeAbuseSignal)
+	canWriteUsers.Post("/abuse/signals/:id/resolve", r.h.ResolveAbuseSignal)
+
+	// ── Account Status ──
+	enterpriseRead.Get("/status", r.h.SuspensionStatus)
+	canWriteOrgs.Post("/deletion", r.h.RequestDeletion)
+	canWriteOrgs.Post("/deletion/cancel", r.h.CancelDeletion)
+
+	// ── Billing ──
+	enterpriseRead.Get("/billing/subscription", r.h.GetBillingSubscription)
+	enterpriseRead.Get("/billing/usage", r.h.GetBillingUsage)
+	enterpriseRead.Get("/billing/quota", r.h.CheckBillingQuota)
+	canWriteBilling.Post("/billing/subscription", r.h.CreateBillingSubscription)
+	enterpriseRead.Get("/billing/invoices", r.h.ListCustomerInvoices)
+	enterpriseRead.Get("/billing/invoices/:id", r.h.GetCustomerInvoice)
+
+	// ── API Keys ──
+	enterpriseRead.Get("/api-keys", r.h.ListEnterpriseAPIKeys)
+	canWriteAPIKeys.Post("/api-keys", r.h.CreateEnterpriseAPIKey)
+	canWriteAPIKeys.Post("/api-keys/:id/rotate", r.h.RotateEnterpriseAPIKey)
+	canWriteAPIKeys.Delete("/api-keys/:id", r.h.DeleteEnterpriseAPIKey)
+
+	// ── Audit Logs ──
+	enterpriseRead.Get("/audit/logs", r.h.ListEnterpriseAuditLogs)
+
+	// ── Sessions ──
+	enterpriseRead.Get("/sessions", r.h.ListAccountSessions)
+	canWriteUsers.Post("/sessions/:id/revoke", r.h.RevokeAccountSession)
 
 	// CSRF is enforced on the entire admin group by default (deny-list,
 	// not allow-list) rather than only on routes an author remembered to

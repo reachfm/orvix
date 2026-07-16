@@ -197,6 +197,7 @@ type Handler struct {
 	billingSvc   *billing.Service
 	usageSvc     *billing.UsageService
 	quotaSvc     *billing.QuotaService
+	invoiceSvc   *billing.InvoiceService
 	abuseSvc     *abuse.SignalService
 	rateLimitSvc *abuse.RateLimitService
 
@@ -237,6 +238,9 @@ func NewHandler(db *gorm.DB, authenticator *auth.Authenticator, apikeyMgr *auth.
 			auditStore = audit.NewStore(sqlDB)
 			if err := auditStore.EnsureTable(context.Background()); err != nil {
 				logger.Error("failed to ensure audit store", zap.Error(err))
+			}
+			if err := auditStore.EnsureTenantColumn(context.Background()); err != nil {
+				logger.Error("failed to ensure tenant_id column on audit store", zap.Error(err))
 			}
 		}
 	}
@@ -426,6 +430,10 @@ func (h *Handler) SetBillingScheduler(s *billing.Scheduler) {
 
 func (h *Handler) SetBillingWebhook(s *billing.WebhookService) {
 	h.billingWebhook = s
+}
+
+func (h *Handler) SetInvoiceService(s *billing.InvoiceService) {
+	h.invoiceSvc = s
 }
 
 func (h *Handler) SetPaymentProvider(p billing.PaymentProvider) {
@@ -673,13 +681,13 @@ func (h *Handler) Login(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authentication failed"})
 	}
 
-	accessToken, err := h.auth.GenerateAccessToken(userID, auth.Role(userRole))
+	accessToken, accessJTI, _, err := h.auth.GenerateAccessTokenWithJTI(userID, auth.Role(userRole))
 	if err != nil {
 		h.logger.Error("failed to generate access token", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authentication failed"})
 	}
 
-	refreshToken, expiresAt, err := h.auth.GenerateRefreshToken(userID)
+	refreshToken, expiresAt, err := h.auth.GenerateRefreshToken(userID, accessJTI)
 	if err != nil {
 		h.logger.Error("failed to generate refresh token", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authentication failed"})

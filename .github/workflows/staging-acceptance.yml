@@ -383,8 +383,7 @@ jobs:
             echo "  \"results\": {"
             first=1
             for c in $checks; do
-              val="$(grep -E "^${c}=" "$RESULTS_FILE" 2>/dev/null | tail -1 | cut -d= -f2)"
-              [ -n "$val" ] || { val="FAIL"; overall="FAIL"; }
+              val="$(grep -E "^${c}=" "$RESULTS_FILE" 2>/dev/null | tail -1 | cut -d= -f2)" || val="FAIL"
               [ "$val" = "PASS" ] || overall="FAIL"
               [ $first -eq 1 ] && first=0 || echo ","
               printf '    "%s": "%s"' "$c" "$val"

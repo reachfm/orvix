@@ -224,6 +224,7 @@ type Session struct {
 	TokenHash string    `gorm:"uniqueIndex;not null" json:"token_hash"`
 	Role      string    `gorm:"not null;default:''" json:"role"`
 	Email     string    `gorm:"not null;default:''" json:"email"`
+	JTI       string    `gorm:"default:''" json:"jti"`
 	IP        string    `gorm:"not null" json:"ip"`
 	UserAgent string    `gorm:"type:text" json:"user_agent"`
 	ExpiresAt time.Time `gorm:"not null" json:"expires_at"`
@@ -249,6 +250,10 @@ type User struct {
 	Active        bool       `gorm:"not null;default:true" json:"active"`
 	EmailVerified bool       `gorm:"not null;default:false" json:"email_verified"`
 	LastLogin     *time.Time `json:"last_login"`
+	DisplayName   string     `gorm:"column:full_name;default:''" json:"display_name,omitempty"`
+	Locale        string     `gorm:"default:''" json:"locale,omitempty"`
+	Timezone      string     `gorm:"default:''" json:"timezone,omitempty"`
+	Theme         string     `gorm:"default:'dark'" json:"theme,omitempty"`
 }
 
 // Domain represents a mail domain.
@@ -287,6 +292,7 @@ type APIKey struct {
 	UserID     uint       `gorm:"index;not null" json:"user_id"`
 	KeyHash    string     `gorm:"uniqueIndex;not null" json:"-"`
 	Name       string     `gorm:"not null" json:"name"`
+	Scopes     string     `gorm:"type:text;not null;default:''" json:"scopes"`
 	ExpiresAt  *time.Time `json:"expires_at"`
 	LastUsedAt *time.Time `json:"last_used_at"`
 	Active     bool       `gorm:"not null;default:true" json:"active"`
@@ -521,6 +527,7 @@ func MigrateAllRaw(db *gorm.DB) error {
 			email TEXT NOT NULL DEFAULT '',
 			ip TEXT NOT NULL,
 			user_agent TEXT,
+			jti TEXT NOT NULL DEFAULT '',
 			expires_at DATETIME NOT NULL
 		)`,
 		// revoked_tokens backs H-9 access-token revocation on logout:
@@ -553,7 +560,68 @@ func MigrateAllRaw(db *gorm.DB) error {
 			active INTEGER NOT NULL DEFAULT 1,
 			email_verified INTEGER NOT NULL DEFAULT 0,
 			last_login DATETIME,
+			full_name TEXT NOT NULL DEFAULT '',
+			locale TEXT NOT NULL DEFAULT '',
+			timezone TEXT NOT NULL DEFAULT '',
+			theme TEXT NOT NULL DEFAULT 'dark',
 			UNIQUE(email, deleted_at)
+		)`,
+		`CREATE TABLE IF NOT EXISTS user_notification_preferences (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			user_id INTEGER NOT NULL UNIQUE,
+			domain_verification INTEGER NOT NULL DEFAULT 1,
+			quota_warning INTEGER NOT NULL DEFAULT 1,
+			quota_reached INTEGER NOT NULL DEFAULT 1,
+			billing_status INTEGER NOT NULL DEFAULT 1,
+			invitation INTEGER NOT NULL DEFAULT 1,
+			session_activity INTEGER NOT NULL DEFAULT 1,
+			channel_email INTEGER NOT NULL DEFAULT 1
+		)`,
+		`CREATE TABLE IF NOT EXISTS support_requests (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			reference_id TEXT NOT NULL UNIQUE,
+			tenant_id INTEGER NOT NULL,
+			user_id INTEGER NOT NULL,
+			user_email TEXT NOT NULL,
+			category TEXT NOT NULL,
+			subject TEXT NOT NULL,
+			message TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'received',
+			delivery_status TEXT NOT NULL DEFAULT 'pending',
+			delivery_error TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE TABLE IF NOT EXISTS invoices (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			tenant_id INTEGER NOT NULL,
+			subscription_id INTEGER,
+			provider TEXT NOT NULL DEFAULT '',
+			provider_invoice_id TEXT,
+			invoice_number TEXT,
+			currency TEXT NOT NULL DEFAULT 'usd',
+			subtotal INTEGER NOT NULL DEFAULT 0,
+			tax INTEGER NOT NULL DEFAULT 0,
+			total INTEGER NOT NULL DEFAULT 0,
+			amount_paid INTEGER NOT NULL DEFAULT 0,
+			amount_due INTEGER NOT NULL DEFAULT 0,
+			status TEXT NOT NULL DEFAULT 'draft',
+			period_start DATETIME,
+			period_end DATETIME,
+			issued_at DATETIME,
+			due_at DATETIME,
+			paid_at DATETIME,
+			hosted_invoice_url TEXT,
+			pdf_url TEXT,
+			provider_event_created_at DATETIME,
+			provider_event_id TEXT,
+			provider_updated_at DATETIME,
+			UNIQUE(provider, provider_invoice_id)
 		)`,
 		`CREATE TABLE IF NOT EXISTS domains (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -594,12 +662,16 @@ func MigrateAllRaw(db *gorm.DB) error {
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL,
 			deleted_at DATETIME,
-			user_id INTEGER NOT NULL,
-			key_hash TEXT NOT NULL UNIQUE,
 			name TEXT NOT NULL,
-			expires_at DATETIME,
+			user_id INTEGER NOT NULL,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			role TEXT NOT NULL DEFAULT 'user',
+			key_hash TEXT NOT NULL UNIQUE,
+			key_prefix TEXT NOT NULL DEFAULT '',
+			scopes TEXT NOT NULL DEFAULT '',
+			active INTEGER NOT NULL DEFAULT 1,
 			last_used_at DATETIME,
-			active INTEGER NOT NULL DEFAULT 1
+			expires_at DATETIME
 		)`,
 		// CoreMail tables
 		`CREATE TABLE IF NOT EXISTS coremail_domains (
@@ -1078,6 +1150,18 @@ func MigrateAllRaw(db *gorm.DB) error {
 	if err := migrateUsersMFASchema(ctx, sqlDB); err != nil {
 		return err
 	}
+	if err := migrateUsersProfileSchema(ctx, sqlDB); err != nil {
+		return err
+	}
+	if err := migrateSessionsJTI(ctx, sqlDB); err != nil {
+		return err
+	}
+	if err := migrateAPIKeysSchema(ctx, sqlDB); err != nil {
+		return err
+	}
+	if err := migrateInvoicesSchema(ctx, sqlDB); err != nil {
+		return err
+	}
 
 	// Create indexes
 	indexes := []string{
@@ -1091,6 +1175,10 @@ func MigrateAllRaw(db *gorm.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_alert_configs_deleted_at ON alert_configs(deleted_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_firewall_rules_deleted_at ON firewall_rules(deleted_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_firewall_logs_deleted_at ON firewall_logs(deleted_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_invoices_tenant_issued ON invoices(tenant_id, issued_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_invoices_tenant_status ON invoices(tenant_id, status)`,
+		`CREATE INDEX IF NOT EXISTS idx_invoices_subscription ON invoices(subscription_id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_invoices_provider ON invoices(provider, provider_invoice_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_guardian_logs_deleted_at ON guardian_logs(deleted_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_heal_histories_deleted_at ON heal_histories(deleted_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_provisioned_domains_deleted_at ON provisioned_domains(deleted_at)`,
@@ -1244,6 +1332,120 @@ func migrateUsersMFASchema(ctx context.Context, db *sql.DB) error {
 		{"pending_mfa_secret_raw", "ALTER TABLE users ADD COLUMN pending_mfa_secret_raw TEXT NOT NULL DEFAULT ''"},
 		{"mfa_secret_raw", "ALTER TABLE users ADD COLUMN mfa_secret_raw TEXT NOT NULL DEFAULT ''"},
 		{"mfa_label", "ALTER TABLE users ADD COLUMN mfa_label TEXT NOT NULL DEFAULT ''"},
+	}
+
+	for _, addition := range additions {
+		if columns[addition.name] {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, addition.sql); err != nil {
+			return fmt.Errorf("add users.%s: %w", addition.name, err)
+		}
+		columns[addition.name] = true
+	}
+
+	return nil
+}
+
+func migrateInvoicesSchema(ctx context.Context, db *sql.DB) error {
+	// Check if table exists first.
+	rows, err := db.QueryContext(ctx, "SELECT name FROM sqlite_master WHERE type='table' AND name='invoices'")
+	if err != nil {
+		return fmt.Errorf("check invoices table: %w", err)
+	}
+	hasTable := rows.Next()
+	rowsErr := rows.Err()
+	rows.Close()
+	if rowsErr != nil {
+		return fmt.Errorf("check invoices table row: %w", rowsErr)
+	}
+	if !hasTable {
+		return nil // Table doesn't exist yet — CREATE TABLE in batch handles it.
+	}
+
+	columns, err := sqliteColumns(ctx, db, "invoices")
+	if err != nil {
+		return fmt.Errorf("inspect invoices schema: %w", err)
+	}
+
+	additions := []struct {
+		name string
+		sql  string
+	}{
+		{"provider_event_created_at", "ALTER TABLE invoices ADD COLUMN provider_event_created_at DATETIME"},
+		{"provider_event_id", "ALTER TABLE invoices ADD COLUMN provider_event_id TEXT NOT NULL DEFAULT ''"},
+		{"provider_updated_at", "ALTER TABLE invoices ADD COLUMN provider_updated_at DATETIME"},
+	}
+
+	for _, addition := range additions {
+		if columns[addition.name] {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, addition.sql); err != nil {
+			return fmt.Errorf("add invoices.%s: %w", addition.name, err)
+		}
+		columns[addition.name] = true
+	}
+
+	return nil
+}
+
+func migrateSessionsJTI(ctx context.Context, db *sql.DB) error {
+	columns, err := sqliteColumns(ctx, db, "sessions")
+	if err != nil {
+		return fmt.Errorf("inspect sessions schema: %w", err)
+	}
+	if columns["jti"] {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx, "ALTER TABLE sessions ADD COLUMN jti TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("add sessions.jti: %w", err)
+	}
+	return nil
+}
+
+func migrateAPIKeysSchema(ctx context.Context, db *sql.DB) error {
+	columns, err := sqliteColumns(ctx, db, "api_keys")
+	if err != nil {
+		return fmt.Errorf("inspect api_keys schema: %w", err)
+	}
+
+	additions := []struct {
+		name string
+		sql  string
+	}{
+		{"key_prefix", "ALTER TABLE api_keys ADD COLUMN key_prefix TEXT NOT NULL DEFAULT ''"},
+		{"tenant_id", "ALTER TABLE api_keys ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 0"},
+		{"role", "ALTER TABLE api_keys ADD COLUMN role TEXT NOT NULL DEFAULT 'user'"},
+		{"scopes", "ALTER TABLE api_keys ADD COLUMN scopes TEXT NOT NULL DEFAULT ''"},
+	}
+	for _, addition := range additions {
+		if columns[addition.name] {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, addition.sql); err != nil {
+			return fmt.Errorf("add api_keys.%s: %w", addition.name, err)
+		}
+		columns[addition.name] = true
+	}
+
+	return nil
+}
+
+func migrateUsersProfileSchema(ctx context.Context, db *sql.DB) error {
+	columns, err := sqliteColumns(ctx, db, "users")
+	if err != nil {
+		return fmt.Errorf("inspect users schema for profile columns: %w", err)
+	}
+
+	additions := []struct {
+		name string
+		sql  string
+	}{
+		{"full_name", "ALTER TABLE users ADD COLUMN full_name TEXT NOT NULL DEFAULT ''"},
+		{"locale", "ALTER TABLE users ADD COLUMN locale TEXT NOT NULL DEFAULT ''"},
+		{"timezone", "ALTER TABLE users ADD COLUMN timezone TEXT NOT NULL DEFAULT ''"},
+		{"theme", "ALTER TABLE users ADD COLUMN theme TEXT NOT NULL DEFAULT 'dark'"},
 	}
 
 	for _, addition := range additions {

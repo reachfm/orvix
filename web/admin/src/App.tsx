@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { LayoutDashboard, Globe, Users, Shield, Zap, Activity, Settings, Server, Building, Mail, Monitor, Key, HardDrive, HeartPulse, CreditCard, Keyboard, User, AtSign, BarChart, AlertTriangle, UserPlus, Send, LogOut } from "lucide-react";
+import { LayoutDashboard, Globe, Users, Shield, Zap, Activity, Settings, Server, Building, Mail, Monitor, Key, HardDrive, HeartPulse, CreditCard, Keyboard, User, AtSign, BarChart, AlertTriangle, UserPlus, Send, LogOut, FileText, Bell } from "lucide-react";
 import Dashboard from "./components/Dashboard";
 import Domains from "./components/Domains";
 import UsersPage from "./components/UsersPage";
@@ -29,12 +29,17 @@ import CustomerMailboxesPage from "./components/CustomerMailboxesPage";
 import AliasesPage from "./components/AliasesPage";
 import GroupsPage from "./components/GroupsPage";
 import UsageQuotasPage from "./components/UsageQuotasPage";
+import InvoicesPage from "./components/InvoicesPage";
+import SecurityPage from "./components/SecurityPage";
+import SupportPage from "./components/SupportPage";
+import PreferencesPage from "./components/PreferencesPage";
 
 type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" | "settings"
   | "enterprise" | "mailboxes" | "organizations" | "license" | "backups" | "health"
   | "billing" | "onboarding" | "apikeys"
   | "account-settings" | "org-overview" | "invitations" | "members-roles" | "ownership-transfer"
   | "suspension-deletion" | "customer-mailboxes" | "aliases" | "groups" | "usage-quotas"
+  | "invoices" | "security" | "support" | "preferences"
   | "login" | "signup" | "forgot-password" | "reset-password";
 
 const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: string }[] = [
@@ -61,21 +66,58 @@ const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: st
   { id: "members-roles", label: "Members", icon: Shield },
   { id: "ownership-transfer", label: "Ownership", icon: Send },
   { id: "suspension-deletion", label: "Status", icon: AlertTriangle },
+  { id: "invoices", label: "Invoices", icon: FileText },
   { id: "billing", label: "Billing", icon: CreditCard },
   { id: "apikeys", label: "API Keys", icon: Keyboard },
   { id: "account-settings", label: "Account", icon: User, section: "Account" },
+  { id: "security", label: "Security", icon: Shield },
+  { id: "preferences", label: "Preferences", icon: Bell },
+  { id: "support", label: "Support", icon: HeartPulse },
 ];
 
 export default function App() {
   const [currentTab, setCurrentTab] = useState<Tab>("dashboard");
   const [authenticated, setAuthenticated] = useState(false);
   const [authLoading, setAuthLoading] = useState(true);
+  const [userRole, setUserRole] = useState("");
 
   useEffect(() => {
     fetch("/api/v1/me", { credentials: "include" })
-      .then((r) => { setAuthenticated(r.ok); setAuthLoading(false); })
+      .then(async (r) => {
+        setAuthenticated(r.ok);
+        if (r.ok) {
+          try { const u = await r.json(); setUserRole(u.role || ""); } catch { setUserRole(""); }
+        }
+        setAuthLoading(false);
+      })
       .catch(() => { setAuthenticated(false); setAuthLoading(false); });
   }, []);
+
+  const isPlatformRole = userRole === "admin" || userRole === "superadmin" || userRole === "operator";
+
+  const filteredTabs = tabs.filter((t) => {
+    if (!isPlatformRole) {
+      // Customer users see only Customer Portal + Account sections.
+      // Platform admin tabs (Dashboard, Mailboxes admin, Organizations, Domains admin,
+      // Users, Firewall, Modules, License, Backups, Health, Settings) are hidden.
+      if (t.id === "dashboard") return true;
+      if (t.id === "enterprise") return false;
+      if (t.id === "mailboxes") return false;
+      if (t.id === "organizations") return false;
+      if (t.id === "domains") return false;
+      if (t.id === "users") return false;
+      if (t.id === "firewall") return false;
+      if (t.id === "modules") return false;
+      if (t.id === "audit") return false;
+      if (t.id === "license") return false;
+      if (t.id === "backups") return false;
+      if (t.id === "health") return false;
+      if (t.id === "settings") return false;
+      // Keep Customer Portal + Account items
+      return true;
+    }
+    return true;
+  });
 
   const navigateTo = (route: string) => {
     const tabMap: Record<string, Tab> = {
@@ -125,6 +167,10 @@ export default function App() {
       case "aliases": return <AliasesPage />;
       case "groups": return <GroupsPage />;
       case "usage-quotas": return <UsageQuotasPage />;
+      case "invoices": return <InvoicesPage />;
+      case "security": return <SecurityPage />;
+      case "support": return <SupportPage />;
+      case "preferences": return <PreferencesPage />;
       default: return <Dashboard />;
     }
   };
@@ -141,7 +187,7 @@ export default function App() {
         </div>
 
         <nav className="flex-1 px-2 py-3 space-y-0.5 overflow-y-auto">
-          {tabs.map((t) => {
+          {filteredTabs.map((t) => {
             const Icon = t.icon;
             const active = currentTab === t.id;
             if (t.section) {

@@ -20,19 +20,21 @@ type Entry struct {
 	Result    string    `json:"result"`
 	IP        string    `json:"ip"`
 	UserAgent string    `json:"userAgent"`
+	TenantID  uint      `json:"tenant_id"`
 	Timestamp time.Time `json:"timestamp"`
 }
 
 // Query filters for audit log.
 type Query struct {
-	Actor  string
-	Action string
-	Target string
-	Result string
-	Since  *time.Time
-	Until  *time.Time
-	Limit  int
-	Offset int
+	TenantID uint
+	Actor    string
+	Action   string
+	Target   string
+	Result   string
+	Since    *time.Time
+	Until    *time.Time
+	Limit    int
+	Offset   int
 }
 
 // Store provides persistent audit log storage.
@@ -63,6 +65,24 @@ func (s *Store) EnsureTable(ctx context.Context) error {
 	return err
 }
 
+// EnsureTenantColumn migrates existing coremail_audit tables to include
+// the tenant_id column. On SQLite this is a no-op if the column already
+// exists (SQLite ALTER TABLE ADD COLUMN ignores duplicate column names
+// after an error, so we catch and ignore). On PostgreSQL we use ADD COLUMN
+// IF NOT EXISTS natively.
+func (s *Store) EnsureTenantColumn(ctx context.Context) error {
+	if s.dialect.IsPostgres() {
+		_, err := s.db.ExecContext(ctx, `ALTER TABLE coremail_audit ADD COLUMN IF NOT EXISTS tenant_id INTEGER NOT NULL DEFAULT 0`)
+		return err
+	}
+	// SQLite: try adding column; ignore "duplicate column" error.
+	_, err := s.db.ExecContext(ctx, `ALTER TABLE coremail_audit ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 0`)
+	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		return err
+	}
+	return nil
+}
+
 // coremailAuditDDL returns the dialect-appropriate CREATE TABLE for the
 // coremail_audit table. Kept as a pure function so the emitted DDL can be
 // asserted in tests without a live database of either engine.
@@ -76,6 +96,7 @@ func coremailAuditDDL(d *dbdialect.Info) string {
 		result TEXT NOT NULL DEFAULT '',
 		ip TEXT NOT NULL DEFAULT '',
 		user_agent TEXT NOT NULL DEFAULT '',
+		tenant_id INTEGER NOT NULL DEFAULT 0,
 		timestamp ` + d.TimestampType() + ` NOT NULL
 	)`
 }
@@ -87,8 +108,8 @@ func (s *Store) Record(ctx context.Context, e *Entry) error {
 	}
 	d := s.dialect
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO coremail_audit (actor, role, action, target, result, ip, user_agent, timestamp) VALUES (`+d.Placeholder(1)+`, `+d.Placeholder(2)+`, `+d.Placeholder(3)+`, `+d.Placeholder(4)+`, `+d.Placeholder(5)+`, `+d.Placeholder(6)+`, `+d.Placeholder(7)+`, `+d.Placeholder(8)+`)`,
-		e.Actor, e.Role, e.Action, e.Target, e.Result, e.IP, e.UserAgent, e.Timestamp)
+		`INSERT INTO coremail_audit (actor, role, action, target, result, ip, user_agent, tenant_id, timestamp) VALUES (`+d.Placeholder(1)+`, `+d.Placeholder(2)+`, `+d.Placeholder(3)+`, `+d.Placeholder(4)+`, `+d.Placeholder(5)+`, `+d.Placeholder(6)+`, `+d.Placeholder(7)+`, `+d.Placeholder(8)+`, `+d.Placeholder(9)+`)`,
+		e.Actor, e.Role, e.Action, e.Target, e.Result, e.IP, e.UserAgent, e.TenantID, e.Timestamp)
 	if err != nil {
 		return fmt.Errorf("record audit: %w", err)
 	}
@@ -139,6 +160,11 @@ func (s *Store) Search(ctx context.Context, q *Query) ([]Entry, int64, error) {
 		where = append(where, "timestamp <= "+d.Placeholder(argNum))
 		args = append(args, *q.Until)
 	}
+	if q.TenantID > 0 {
+		argNum++
+		where = append(where, "tenant_id = "+d.Placeholder(argNum))
+		args = append(args, q.TenantID)
+	}
 
 	whereClause := ""
 	if len(where) > 0 {
@@ -153,7 +179,7 @@ func (s *Store) Search(ctx context.Context, q *Query) ([]Entry, int64, error) {
 	}
 
 	// Data.
-	query := "SELECT id, actor, role, action, target, result, ip, user_agent, timestamp FROM coremail_audit" + whereClause + " ORDER BY id DESC LIMIT " + d.Placeholder(argNum+1) + " OFFSET " + d.Placeholder(argNum+2)
+	query := "SELECT id, actor, role, action, target, result, ip, user_agent, tenant_id, timestamp FROM coremail_audit" + whereClause + " ORDER BY id DESC LIMIT " + d.Placeholder(argNum+1) + " OFFSET " + d.Placeholder(argNum+2)
 	dataArgs := append(args, q.Limit, q.Offset)
 
 	rows, err := s.db.QueryContext(ctx, query, dataArgs...)
@@ -165,7 +191,7 @@ func (s *Store) Search(ctx context.Context, q *Query) ([]Entry, int64, error) {
 	var entries []Entry
 	for rows.Next() {
 		var e Entry
-		if err := rows.Scan(&e.ID, &e.Actor, &e.Role, &e.Action, &e.Target, &e.Result, &e.IP, &e.UserAgent, &e.Timestamp); err != nil {
+		if err := rows.Scan(&e.ID, &e.Actor, &e.Role, &e.Action, &e.Target, &e.Result, &e.IP, &e.UserAgent, &e.TenantID, &e.Timestamp); err != nil {
 			return nil, 0, err
 		}
 		entries = append(entries, e)

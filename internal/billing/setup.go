@@ -207,24 +207,20 @@ func MigrateWebhookEvents(db *sql.DB) error {
 	var migrationNeeded bool
 	if dialect.IsPostgres() {
 		var colExists bool
-		db.QueryRow("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='webhook_events' AND column_name='row_id')").Scan(&colExists)
+		if err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name='webhook_events' AND column_name='row_id')").Scan(&colExists); err != nil {
+			return fmt.Errorf("inspect postgres webhook_events schema: %w", err)
+		}
 		migrationNeeded = !colExists
 	} else {
-		rows, err := db.Query("SELECT sql FROM sqlite_master WHERE type='table' AND name='webhook_events'")
-		if err != nil {
-			return err
+		var tableDDL string
+		if err := db.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name='webhook_events'").Scan(&tableDDL); err != nil {
+			return fmt.Errorf("inspect sqlite webhook_events schema: %w", err)
 		}
-		defer rows.Close()
-		if rows.Next() {
-			var ddl string
-			rows.Scan(&ddl)
-			migrationNeeded = !strings.Contains(ddl, "row_id")
-		}
+		migrationNeeded = !strings.Contains(tableDDL, "row_id")
 	}
 	if !migrationNeeded {
 		return nil
 	}
-
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -232,18 +228,31 @@ func MigrateWebhookEvents(db *sql.DB) error {
 	defer tx.Rollback()
 
 	if dialect.IsPostgres() {
+		if migrationNeeded {
+			if _, err := tx.Exec(`
+				ALTER TABLE webhook_events DROP CONSTRAINT IF EXISTS webhook_events_pkey CASCADE;
+				ALTER TABLE webhook_events ADD COLUMN IF NOT EXISTS row_id BIGSERIAL;
+				UPDATE webhook_events SET row_id = DEFAULT WHERE row_id IS NULL;
+				ALTER TABLE webhook_events ADD PRIMARY KEY (row_id);
+			`); err != nil {
+				return err
+			}
+		}
 		if _, err := tx.Exec(`
-			ALTER TABLE webhook_events DROP CONSTRAINT IF EXISTS webhook_events_pkey CASCADE;
-			ALTER TABLE webhook_events ADD COLUMN IF NOT EXISTS row_id BIGSERIAL;
-			UPDATE webhook_events SET row_id = DEFAULT WHERE row_id IS NULL;
-			ALTER TABLE webhook_events ADD PRIMARY KEY (row_id);
+			UPDATE webhook_events
+			SET provider = COALESCE(NULLIF(LOWER(TRIM(provider)), ''), 'legacy');
 			ALTER TABLE webhook_events ALTER COLUMN provider SET NOT NULL;
-			ALTER TABLE webhook_events ALTER COLUMN provider SET DEFAULT '';
-			UPDATE webhook_events SET provider = LOWER(TRIM(provider));
+			ALTER TABLE webhook_events ALTER COLUMN provider SET DEFAULT 'legacy';
+			ALTER TABLE webhook_events DROP CONSTRAINT IF EXISTS webhook_events_id_key;
+			ALTER TABLE webhook_events DROP CONSTRAINT IF EXISTS webhook_events_idempotency_key_key;
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_webhook_events_provider_id
+				ON webhook_events (provider, id);
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_webhook_events_provider_idempotency
+				ON webhook_events (provider, idempotency_key);
 		`); err != nil {
 			return err
 		}
-	} else {
+	} else if migrationNeeded {
 		if _, err := tx.Exec(`
 			CREATE TABLE IF NOT EXISTS webhook_events_new (
 				row_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -264,7 +273,7 @@ func MigrateWebhookEvents(db *sql.DB) error {
 			INSERT INTO webhook_events_new
 				(id, provider, event_type, provider_sub_id, raw_payload, signature,
 				received_at, processed_at, processing_error, idempotency_key, created_at)
-			SELECT id, LOWER(TRIM(COALESCE(provider,''))), event_type, provider_sub_id, raw_payload, signature,
+			SELECT id, COALESCE(NULLIF(LOWER(TRIM(provider)), ''), 'legacy'), event_type, provider_sub_id, raw_payload, signature,
 				received_at, processed_at, processing_error, idempotency_key, created_at
 			FROM webhook_events
 			WHERE true
@@ -275,13 +284,15 @@ func MigrateWebhookEvents(db *sql.DB) error {
 			return err
 		}
 	}
-
 	return tx.Commit()
 }
 
 func Initialize(db *sql.DB) (*Service, *UsageService, *QuotaService, *WebhookService, *Scheduler, *SendEnforcer, error) {
 	if err := CreateTables(db); err != nil {
 		return nil, nil, nil, nil, nil, nil, err
+	}
+	if err := MigrateWebhookEvents(db); err != nil {
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("migrate webhook events: %w", err)
 	}
 	svc := NewService(db)
 	if err := svc.SeedDefaultPlans(); err != nil {
