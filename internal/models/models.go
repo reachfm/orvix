@@ -1342,8 +1342,13 @@ func migrateInvoicesSchema(ctx context.Context, db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("check invoices table: %w", err)
 	}
-	defer rows.Close()
-	if !rows.Next() {
+	hasTable := rows.Next()
+	rowsErr := rows.Err()
+	rows.Close()
+	if rowsErr != nil {
+		return fmt.Errorf("check invoices table row: %w", rowsErr)
+	}
+	if !hasTable {
 		return nil // Table doesn't exist yet — CREATE TABLE in batch handles it.
 	}
 

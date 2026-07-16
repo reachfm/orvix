@@ -112,6 +112,8 @@ test.afterAll(async () => {
 });
 
 test.describe("Orvix admin portal E2E", () => {
+  // beforeAll may wait up to 45s for health; allow 60s total.
+  test.describe.configure({ timeout: 60000 });
 
   test("login and navigate dashboard and customer portal sections", async ({ browser, request }) => {
     // Login via API to get access token
