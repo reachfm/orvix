@@ -72,7 +72,7 @@ func setupInvoiceWebhookEnv(t *testing.T) *invoiceWebhookEnv {
 	var createInvSQL string
 	if dial.IsPostgres() {
 		createInvSQL = `CREATE TABLE IF NOT EXISTS invoices (
-			id ` + dial.AutoIncrement() + ` PRIMARY KEY,
+			id ` + dial.AutoIncrement() + `,
 			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
 			tenant_id INTEGER NOT NULL, subscription_id INTEGER,
