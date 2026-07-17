@@ -1294,6 +1294,18 @@ write_config() {
     # parent-domain scope to apply.
     local cookie_domain=".$domain"
 
+    # Database block. SQLite is the only supported driver in RC1. The
+    # operator may set ORVIX_DB_DRIVER=postgres or an unsupported value;
+    # both are rejected with a clear early-fail message.
+    local db_block
+    if [ "${ORVIX_DB_DRIVER:-sqlite}" = "postgres" ]; then
+        fail "PostgreSQL installation mode is not supported in Orvix RC1. Use the default SQLite driver for RC1. Full PostgreSQL installer support will be completed in a later release."
+    elif [ "${ORVIX_DB_DRIVER:-}" != "" ] && [ "${ORVIX_DB_DRIVER:-}" != "sqlite" ]; then
+        fail "unsupported database driver \"$ORVIX_DB_DRIVER\"; only sqlite is supported in RC1"
+    else
+        db_block=$(printf 'database:\n  driver: sqlite\n  sqlite_path: /var/lib/orvix/orvix.db\n  dsn: /var/lib/orvix/orvix.db?_loc=auto&_busy_timeout=5000&_txlock=immediate')
+    fi
+
     cat > "$ORVIX_CONFIG" <<YAML
 server:
   # The admin/webmail HTTP backend is intentionally bound to the
@@ -1339,10 +1351,7 @@ server:
     - "127.0.0.1"
     - "::1"
 
-database:
-  driver: sqlite
-  sqlite_path: /var/lib/orvix/orvix.db
-  dsn: /var/lib/orvix/orvix.db?_loc=auto&_busy_timeout=5000&_txlock=immediate
+$db_block
 
 redis:
   host: 127.0.0.1
@@ -1669,22 +1678,39 @@ is_truthy() {
     esac
 }
 
+# _orvix_db_scalar runs a scalar SQL query against the configured database:
+# the local SQLite file by default, or PostgreSQL (via psql + ORVIX_DB_DSN)
+# when ORVIX_DB_DRIVER=postgres. Prints the value (empty on error/missing).
+_orvix_db_scalar() {
+    if [ "${ORVIX_DB_DRIVER:-sqlite}" = "postgres" ]; then
+        PGCONNECT_TIMEOUT=5 psql "${ORVIX_DB_DSN:-}" -tAc "$1" 2>/dev/null | tr -d '[:space:]'
+    else
+        [ -f /var/lib/orvix/orvix.db ] || return 1
+        sqlite3 /var/lib/orvix/orvix.db "$1" 2>/dev/null
+    fi
+}
+
+# _orvix_db_true is the dialect literal for a true boolean (PG BOOLEAN vs
+# SQLite INTEGER), so the same admin queries run on both engines.
+_orvix_db_true() {
+    if [ "${ORVIX_DB_DRIVER:-sqlite}" = "postgres" ]; then printf 'true'; else printf '1'; fi
+}
+
 active_admin_count() {
-    [ -f /var/lib/orvix/orvix.db ] || { printf '0'; return 0; }
-    sqlite3 /var/lib/orvix/orvix.db "SELECT COUNT(*) FROM users WHERE role IN ('admin','superadmin','super_admin') AND active = 1;" 2>/dev/null || printf '0'
+    local n
+    n="$(_orvix_db_scalar "SELECT COUNT(*) FROM users WHERE role IN ('admin','superadmin','super_admin') AND active = $(_orvix_db_true);")" || true
+    if [ -n "$n" ]; then printf '%s' "$n"; else printf '0'; fi
 }
 
 first_active_admin_email() {
-    [ -f /var/lib/orvix/orvix.db ] || return 1
-    sqlite3 /var/lib/orvix/orvix.db "SELECT email FROM users WHERE role IN ('admin','superadmin','super_admin') AND active = 1 ORDER BY id LIMIT 1;" 2>/dev/null || true
+    _orvix_db_scalar "SELECT email FROM users WHERE role IN ('admin','superadmin','super_admin') AND active = $(_orvix_db_true) ORDER BY id LIMIT 1;"
 }
 
 admin_user_exists() {
     local email="$1"
     local sql_email count
-    [ -f /var/lib/orvix/orvix.db ] || return 1
     sql_email="$(sqlite_escape "$email")"
-    count="$(sqlite3 /var/lib/orvix/orvix.db "SELECT COUNT(*) FROM users WHERE email = '$sql_email' AND role IN ('admin','superadmin','super_admin') AND active = 1;" 2>/dev/null || true)"
+    count="$(_orvix_db_scalar "SELECT COUNT(*) FROM users WHERE email = '$sql_email' AND role IN ('admin','superadmin','super_admin') AND active = $(_orvix_db_true);")" || true
     [ "$count" = "1" ]
 }
 
@@ -2648,11 +2674,15 @@ verify_install() {
 	systemctl is-active --quiet redis-server || fail "redis-server is not active"
 	systemctl is-active --quiet orvix || fail "orvix is not active"
 	systemctl is-enabled --quiet orvix || fail "orvix is not enabled"
-	command -v sqlite3 >/dev/null 2>&1 || fail "sqlite3 is not installed"
-	[ -f /var/lib/orvix/orvix.db ] || fail "database does not exist at /var/lib/orvix/orvix.db"
-	users_count="$(sqlite3 /var/lib/orvix/orvix.db "SELECT COUNT(*) FROM users WHERE email = '$sql_email' AND role = 'admin' AND active = 1;" 2>/dev/null || true)"
+	if [ "${ORVIX_DB_DRIVER:-sqlite}" = "postgres" ]; then
+		command -v psql >/dev/null 2>&1 || fail "psql is not installed (required for postgres-mode verification)"
+	else
+		command -v sqlite3 >/dev/null 2>&1 || fail "sqlite3 is not installed"
+		[ -f /var/lib/orvix/orvix.db ] || fail "database does not exist at /var/lib/orvix/orvix.db"
+	fi
+	users_count="$(_orvix_db_scalar "SELECT COUNT(*) FROM users WHERE email = '$sql_email' AND role = 'admin' AND active = $(_orvix_db_true);" || true)"
 	[ "$users_count" = "1" ] || fail "bootstrapped admin user row was not created for $email"
-	mailbox_count="$(sqlite3 /var/lib/orvix/orvix.db "SELECT COUNT(*) FROM coremail_mailboxes WHERE email = '$sql_email' AND is_admin = 1 AND status = 'active' AND deleted_at IS NULL;" 2>/dev/null || true)"
+	mailbox_count="$(_orvix_db_scalar "SELECT COUNT(*) FROM coremail_mailboxes WHERE email = '$sql_email' AND is_admin = $(_orvix_db_true) AND status = 'active' AND deleted_at IS NULL;" || true)"
 	[ "$mailbox_count" = "1" ] || fail "bootstrapped admin mailbox row was not created for $email"
     curl -fsS http://127.0.0.1:8080/api/v1/health >/dev/null || fail "health endpoint failed"
     curl -fsSI http://127.0.0.1:8080/admin >/dev/null || fail "admin UI endpoint failed"
