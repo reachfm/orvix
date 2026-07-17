@@ -1,10 +1,13 @@
 name: Phase 5 RC Fresh Install
 
 # Phase 5A RC1: prove the exact customer release bundle installs cleanly from a
-# clean Ubuntu runner, on both SQLite and PostgreSQL 16, via the real installer
-# and systemd — with product/mail smoke, restart persistence, idempotent rerun,
-# installer failure safety, and data-preserving uninstall. Everything below runs
-# in a real Linux environment; nothing is proved by source inspection.
+# clean Ubuntu 24.04 runner using SQLite, via the real installer and systemd — with
+# product/mail smoke, restart persistence, idempotent rerun, installer failure safety,
+# and data-preserving uninstall.
+#
+# PostgreSQL installer mode is NOT supported in RC1. The installer fails early with
+# a clear message if ORVIX_DB_DRIVER=postgres is set. Existing PostgreSQL runtime and
+# readiness tests elsewhere in CI are unaffected.
 
 on:
   pull_request:
@@ -259,40 +262,39 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -o Acquire::Retries=3
-          sudo apt-get install -y --no-install-recommends jq curl ca-certificates postgresql-client-16
+          sudo apt-get install -y --no-install-recommends jq curl ca-certificates
       - name: Extract
         run: |
           set -euo pipefail
           mkdir -p /tmp/stage && tar -C /tmp/stage -xzf /tmp/dl/orvix-bundle.tar.gz
-      - name: PostgreSQL unavailable → non-zero exit, no broken service, no secret leak
+      - name: PostgreSQL mode rejected in RC1
         run: |
           set -euo pipefail
           set +e
           sudo env ORVIX_SOURCE_DIR=/tmp/stage/orvix ORVIX_USE_PREBUILT=1 ORVIX_PUBLIC_IPV4=100.0.0.10 \
             ORVIX_PRIMARY_DOMAIN=fail-pg.orvix.test ORVIX_ADMIN_EMAIL=admin@fail-pg.orvix.test \
-            ORVIX_ADMIN_PASSWORD_B64="$(printf 'x' | base64 -w0)" \
+            ORVIX_ADMIN_PASSWORD="ValidPass123!" \
             ORVIX_DB_DRIVER=postgres \
-            ORVIX_DB_DSN="host=127.0.0.1 port=5999 user=nobody password=nope dbname=absent sslmode=disable" \
             bash /tmp/stage/orvix/release/install.sh >/tmp/pgfail.log 2>&1
           rc=$?
           set -e
-          [ "$rc" -ne 0 ] || { echo "installer must fail when PostgreSQL is unreachable"; exit 1; }
-          # No healthy service should be left running.
-          if systemctl is-active --quiet orvix; then curl -fsS http://127.0.0.1:8080/api/v1/health >/dev/null 2>&1 && { echo "broken/healthy service left after failed install"; exit 1; }; fi
+          [ "$rc" -ne 0 ] || { echo "installer must fail when ORVIX_DB_DRIVER=postgres is set in RC1"; exit 1; }
+          grep -qi 'not supported in Orvix RC1' /tmp/pgfail.log || { echo "installer did not clearly reject postgres mode"; tail -n 5 /tmp/pgfail.log; exit 1; }
+          if systemctl is-active --quiet orvix 2>/dev/null; then curl -fsS http://127.0.0.1:8080/api/v1/health >/dev/null 2>&1 && { echo "broken/healthy service left after failed install"; exit 1; }; fi
           grep -qiE 'password[= ][^ ]{6,}' /tmp/pgfail.log && { echo "secret leaked in failure output"; exit 1; } || true
-          echo "PG-unavailable failure handled safely (rc=$rc)"
+          echo "PG-mode rejected as expected for RC1 (rc=$rc)"
       - name: Missing required config value → non-zero exit, clear error
         run: |
           set -euo pipefail
           set +e
-          # postgres driver without a DSN must be rejected with a clear message.
+          # Unsupported driver name must be rejected with a clear message.
           sudo env ORVIX_SOURCE_DIR=/tmp/stage/orvix ORVIX_USE_PREBUILT=1 ORVIX_PUBLIC_IPV4=100.0.0.10 \
             ORVIX_PRIMARY_DOMAIN=fail-cfg.orvix.test ORVIX_ADMIN_EMAIL=admin@fail-cfg.orvix.test \
             ORVIX_ADMIN_PASSWORD="ValidPass123!" \
-            ORVIX_DB_DRIVER=postgres \
+            ORVIX_DB_DRIVER=mysql \
             bash /tmp/stage/orvix/release/install.sh >/tmp/cfgfail.log 2>&1
           rc=$?
           set -e
-          [ "$rc" -ne 0 ] || { echo "installer must fail when ORVIX_DB_DSN is missing in postgres mode"; exit 1; }
-          grep -qi 'ORVIX_DB_DSN' /tmp/cfgfail.log || { echo "error did not clearly name the missing value"; tail -n 5 /tmp/cfgfail.log; exit 1; }
-          echo "missing-config failure handled with a clear message"
+          [ "$rc" -ne 0 ] || { echo "installer must fail when an unsupported DB driver is specified"; exit 1; }
+          grep -qi 'unsupported database driver' /tmp/cfgfail.log || { echo "error did not clearly name the issue"; tail -n 5 /tmp/cfgfail.log; exit 1; }
+          echo "unsupported-driver failure handled with a clear message"
