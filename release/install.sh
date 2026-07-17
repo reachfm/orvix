@@ -1294,14 +1294,16 @@ write_config() {
     # parent-domain scope to apply.
     local cookie_domain=".$domain"
 
-    # Database block. SQLite is the default single-host path. When the operator
-    # sets ORVIX_DB_DRIVER=postgres (with ORVIX_DB_DSN), emit a PostgreSQL
-    # control-plane config instead — the same driver the runtime supports.
+    # Database block. SQLite is the only supported driver in RC1. The
+    # operator may set ORVIX_DB_DRIVER=postgres or an unsupported value;
+    # both are rejected with a clear early-fail message.
     local db_block
     if [ "${ORVIX_DB_DRIVER:-sqlite}" = "postgres" ]; then
         fail "PostgreSQL installation mode is not supported in Orvix RC1. Use the default SQLite driver for RC1. Full PostgreSQL installer support will be completed in a later release."
     elif [ "${ORVIX_DB_DRIVER:-}" != "" ] && [ "${ORVIX_DB_DRIVER:-}" != "sqlite" ]; then
         fail "unsupported database driver \"$ORVIX_DB_DRIVER\"; only sqlite is supported in RC1"
+    else
+        db_block=$(printf 'database:\n  driver: sqlite\n  sqlite_path: /var/lib/orvix/orvix.db\n  dsn: /var/lib/orvix/orvix.db?_loc=auto&_busy_timeout=5000&_txlock=immediate')
     fi
 
     cat > "$ORVIX_CONFIG" <<YAML
