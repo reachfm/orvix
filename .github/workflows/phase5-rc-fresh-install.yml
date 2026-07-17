@@ -173,7 +173,6 @@ jobs:
           assert 200 /            "marketing home"
           assert 200 /pricing     "marketing pricing"
           grep -qiE 'orvix' /tmp/body || { echo "pricing content missing"; exit 1; }
-          assert 200 /nonexistent-marketing-route "marketing 404 route serves"; grep -qiE 'noindex' /tmp/body || true
           assert 404 /nonexistent-marketing-route "marketing 404 route has correct HTTP status"
           assert 200 /admin       "admin SPA"
           grep -qiE 'Orvix Admin|<title' /tmp/body || { echo "admin content missing"; exit 1; }
