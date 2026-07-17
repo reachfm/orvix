@@ -82,10 +82,12 @@ jobs:
           # Embedded commit matches the checkout HEAD.
           EMB="$(grep '^commit=' /tmp/inspect/orvix/BUILDINFO | cut -d= -f2)"
           case "${GITHUB_SHA:-}" in "$EMB"*) : ;; *) echo "NOTE: BUILDINFO commit=$EMB HEAD=${GITHUB_SHA:-?}";; esac
-          # Re-verify every checksum recorded in the bundle.
-          ( cd /tmp/inspect/orvix && sha256sum -c checksums.txt >/tmp/cksum.log 2>&1 ) \
-            || { echo "checksum verification FAILED"; tail -n 20 /tmp/cksum.log; exit 1; }
-          echo "all bundled checksums verified"
+          # Re-verify every checksum recorded in the bundle, excluding the
+          # manifest's own self-reference (checksums.txt is created by a redirect
+          # before it is populated, so its recorded hash is of the empty file).
+          ( cd /tmp/inspect/orvix && grep -vE '(^|[[:space:]])\./checksums\.txt$' checksums.txt | sha256sum -c - >/tmp/cksum.log 2>&1 ) \
+            || { echo "checksum verification FAILED"; grep -i 'FAILED' /tmp/cksum.log | head; tail -n 20 /tmp/cksum.log; exit 1; }
+          echo "all bundled checksums verified (excluding self-referential checksums.txt)"
           echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
       - name: Upload bundle artifact
         uses: actions/upload-artifact@v7
