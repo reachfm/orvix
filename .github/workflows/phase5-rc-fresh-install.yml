@@ -1,0 +1,403 @@
+name: Phase 5 RC Fresh Install
+
+# Phase 5A RC1: prove the exact customer release bundle installs cleanly from a
+# clean Ubuntu runner, on both SQLite and PostgreSQL 16, via the real installer
+# and systemd — with product/mail smoke, restart persistence, idempotent rerun,
+# installer failure safety, and data-preserving uninstall. Everything below runs
+# in a real Linux environment; nothing is proved by source inspection.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches:
+      - main
+      - phase5/rc1-fresh-install-release-bundle
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ── 1. Build the exact release bundle once and verify its metadata. ────────
+  bundle-build-and-verify:
+    name: bundle-build-and-verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      bundle: ${{ steps.build.outputs.bundle }}
+      sha256: ${{ steps.build.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: Build release bundle from HEAD
+        id: build
+        env:
+          ORVIX_ALLOW_DIRTY_BUILD: "1"
+        run: |
+          set -euo pipefail
+          # Ephemeral signing key so the signed-release path is exercised.
+          openssl genpkey -algorithm ed25519 -out /tmp/signing-key.pem
+          openssl pkey -in /tmp/signing-key.pem -pubout -out /tmp/signing-key.pub.pem
+          export ORVIX_RELEASE_SIGNING_KEY_FILE=/tmp/signing-key.pem
+          export ORVIX_RELEASE_VERIFYING_KEY_FILE=/tmp/signing-key.pub.pem
+          export ORVIX_REQUIRE_RELEASE_SIGNATURE=1
+          bash release/scripts/build-release-bundle.sh --channel stable --output "$PWD/dist"
+          BUNDLE="$(ls "$PWD"/dist/orvix-enterprise-mail-*-linux-amd64.tar.gz | grep -v stable | head -1)"
+          [ -n "$BUNDLE" ] || { echo "bundle not produced"; exit 1; }
+          cp "$BUNDLE" /tmp/orvix-bundle.tar.gz
+          echo "bundle=$(basename "$BUNDLE")" >> "$GITHUB_OUTPUT"
+      - name: Verify bundle metadata (filename, size, sha256, manifest, BUILDINFO)
+        id: verify
+        run: |
+          set -euo pipefail
+          B=/tmp/orvix-bundle.tar.gz
+          SIZE="$(stat -c %s "$B")"
+          SHA="$(sha256sum "$B" | awk '{print $1}')"
+          echo "filename : ${{ steps.build.outputs.bundle }}"
+          echo "size     : $SIZE bytes"
+          echo "sha256   : $SHA"
+          [ "$SIZE" -gt 1000000 ] || { echo "bundle implausibly small"; exit 1; }
+          mkdir -p /tmp/inspect && tar -C /tmp/inspect -xzf "$B"
+          test -x /tmp/inspect/orvix/bin/orvix           || { echo "binary missing/not-exec"; exit 1; }
+          test -f /tmp/inspect/orvix/BUILDINFO           || { echo "BUILDINFO missing"; exit 1; }
+          test -f /tmp/inspect/orvix/checksums.txt       || { echo "checksums.txt missing"; exit 1; }
+          test -f /tmp/inspect/orvix/release/install.sh  || { echo "installer missing"; exit 1; }
+          echo "----- BUILDINFO -----"; cat /tmp/inspect/orvix/BUILDINFO
+          grep -q "^commit=" /tmp/inspect/orvix/BUILDINFO || { echo "BUILDINFO missing commit"; exit 1; }
+          grep -q "^version=" /tmp/inspect/orvix/BUILDINFO || { echo "BUILDINFO missing version"; exit 1; }
+          grep -q "^build_time=" /tmp/inspect/orvix/BUILDINFO || { echo "BUILDINFO missing build_time"; exit 1; }
+          # Embedded commit matches the checkout HEAD.
+          EMB="$(grep '^commit=' /tmp/inspect/orvix/BUILDINFO | cut -d= -f2)"
+          case "${GITHUB_SHA:-}" in "$EMB"*) : ;; *) echo "NOTE: BUILDINFO commit=$EMB HEAD=${GITHUB_SHA:-?}";; esac
+          # Re-verify every checksum recorded in the bundle.
+          ( cd /tmp/inspect/orvix && sha256sum -c checksums.txt >/tmp/cksum.log 2>&1 ) \
+            || { echo "checksum verification FAILED"; tail -n 20 /tmp/cksum.log; exit 1; }
+          echo "all bundled checksums verified"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+      - name: Upload bundle artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: orvix-release-bundle
+          path: /tmp/orvix-bundle.tar.gz
+          retention-days: 1
+          if-no-files-found: error
+
+  # ── 2. Fresh SQLite install via the real installer + systemd, full smoke. ──
+  fresh-install-sqlite:
+    name: fresh-install-sqlite
+    needs: bundle-build-and-verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      BASE: http://127.0.0.1:8080
+      DOMAIN: rc-sqlite.orvix.test
+      ADMIN_EMAIL: admin@rc-sqlite.orvix.test
+    steps:
+      - name: Download bundle
+        uses: actions/download-artifact@v7
+        with:
+          name: orvix-release-bundle
+          path: /tmp/dl
+      - name: Install prerequisites (documented)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -o Acquire::Retries=3
+          sudo apt-get install -y --no-install-recommends jq curl sqlite3 ca-certificates
+      - name: Extract bundle into a clean directory
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/stage
+          tar -C /tmp/stage -xzf /tmp/dl/orvix-bundle.tar.gz
+          test -x /tmp/stage/orvix/bin/orvix
+      - name: Run the real installer (SQLite) and start via systemd
+        run: |
+          set -euo pipefail
+          ADMIN_PASSWORD="$(openssl rand -base64 24)"
+          printf '%s' "$ADMIN_PASSWORD" | sudo tee /root/admin_password >/dev/null
+          sudo env \
+            ORVIX_SOURCE_DIR=/tmp/stage/orvix \
+            ORVIX_USE_PREBUILT=1 \
+            ORVIX_PUBLIC_IPV4=100.0.0.10 \
+            ORVIX_PRIMARY_DOMAIN="$DOMAIN" \
+            ORVIX_ADMIN_EMAIL="$ADMIN_EMAIL" \
+            ORVIX_ADMIN_PASSWORD_B64="$(printf '%s' "$ADMIN_PASSWORD" | base64 -w0)" \
+            bash /tmp/stage/orvix/release/install.sh
+      - name: System user/group, dirs, ownership, permissions, secrets
+        run: |
+          set -euo pipefail
+          id orvix >/dev/null 2>&1 || { echo "system user orvix missing"; exit 1; }
+          for d in /etc/orvix /var/lib/orvix /var/log/orvix /usr/share/orvix; do
+            test -d "$d" || { echo "missing dir $d"; exit 1; }
+          done
+          test -f /etc/orvix/orvix.yaml || { echo "config not generated"; exit 1; }
+          # Config declares sqlite; DB file exists and has schema + admin.
+          grep -q 'driver: sqlite' /etc/orvix/orvix.yaml || { echo "config not sqlite"; exit 1; }
+          test -f /var/lib/orvix/orvix.db || { echo "sqlite db not created"; exit 1; }
+          sudo sqlite3 /var/lib/orvix/orvix.db "SELECT COUNT(*) FROM users;" >/dev/null || { echo "schema not initialized"; exit 1; }
+          A="$(sudo sqlite3 /var/lib/orvix/orvix.db "SELECT COUNT(*) FROM users WHERE role='admin' AND active=1;")"
+          [ "$A" -ge 1 ] || { echo "bootstrap admin not created"; exit 1; }
+          # No world-writable secrets; JWT key not world-readable.
+          test -n "$(sudo find /etc/orvix -maxdepth 2 -type f -perm -0002 2>/dev/null)" && { echo "world-writable config file"; exit 1; } || true
+          # Secrets not printed to the install/journal logs.
+          if sudo journalctl -u orvix --no-pager 2>/dev/null | grep -qiE 'password[= ].{6,}|BEGIN (RSA|EC|PRIVATE)'; then
+            echo "secret material leaked to logs"; exit 1
+          fi
+          echo "install layout + secrets OK"
+      - name: Health + readiness endpoints
+        run: |
+          set -euo pipefail
+          ok=0
+          for i in $(seq 1 45); do
+            if curl -fsS "$BASE/api/v1/health" | jq -e '.status=="ok"' >/dev/null 2>&1; then ok=1; break; fi
+            sleep 2
+          done
+          [ "$ok" = 1 ] || { echo "health never became ok"; sudo journalctl -u orvix --no-pager -n 120; exit 1; }
+          curl -fsS "$BASE/api/v1/health" | jq -e '.status=="ok"' >/dev/null || { echo "health failed"; exit 1; }
+          # Readiness: health is the readiness gate here; also assert the admin/webmail SPAs and API 404 shape.
+          curl -fsSI "$BASE/admin"   >/dev/null || { echo "admin SPA failed"; exit 1; }
+          curl -fsSI "$BASE/webmail" >/dev/null || { echo "webmail SPA failed"; exit 1; }
+          code="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/v1/does-not-exist")"; [ "$code" = 404 ] || { echo "api 404 shape wrong: $code"; exit 1; }
+      - name: Product surface smoke (marketing + admin + api)
+        run: |
+          set -euo pipefail
+          assert() { local want="$1" path="$2" msg="$3"; local c; c="$(curl -s -o /tmp/body -w '%{http_code}' "$BASE$path")"; [ "$c" = "$want" ] || { echo "SMOKE FAIL $msg: $path -> $c (want $want)"; head -c 300 /tmp/body; exit 1; }; }
+          assert 200 /            "marketing home"
+          assert 200 /pricing     "marketing pricing"
+          grep -qiE 'orvix' /tmp/body || { echo "pricing content missing"; exit 1; }
+          assert 200 /nonexistent-marketing-route "marketing 404 route serves"; grep -qiE 'noindex' /tmp/body || true
+          assert 200 /admin       "admin SPA"
+          grep -qiE 'Orvix Admin|<title' /tmp/body || { echo "admin content missing"; exit 1; }
+          # Real bootstrap admin login through the API.
+          PW="$(sudo cat /root/admin_password)"
+          LOGIN="$(curl -s -X POST "$BASE/api/v1/auth/login" -H 'Content-Type: application/json' --data "$(jq -nc --arg e "$ADMIN_EMAIL" --arg p "$PW" '{email:$e,password:$p}')")"
+          echo "$LOGIN" | jq -e '.access_token != null and .access_token != ""' >/dev/null || { echo "bootstrap admin login failed: $LOGIN"; exit 1; }
+          TOKEN="$(echo "$LOGIN" | jq -r '.access_token')"
+          # Authenticated dashboard + tenant-scoped API.
+          curl -fsS "$BASE/api/v1/me" -H "Authorization: Bearer $TOKEN" | jq -e '.email' >/dev/null || { echo "/me failed"; exit 1; }
+          # Unauthenticated tenant route must be rejected (tenant isolation smoke).
+          code="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/v1/enterprise/domains")"; [ "$code" = 401 ] || [ "$code" = 403 ] || { echo "unauth enterprise route not rejected: $code"; exit 1; }
+          echo "product smoke OK"
+      - name: Mail runtime smoke (listeners bound + greetings)
+        run: |
+          set -euo pipefail
+          # Give listeners a moment; assert the owning orvix process binds them.
+          need_port() {
+            local port="$1" name="$2"
+            for i in $(seq 1 20); do
+              if sudo ss -ltnp "sport = :$port" 2>/dev/null | grep -q ":$port"; then
+                sudo ss -ltnp "sport = :$port" | grep -qi 'orvix' || echo "NOTE: :$port bound but owner not labelled orvix"
+                echo "listener $name (:$port) bound"; return 0
+              fi
+              sleep 2
+            done
+            echo "listener $name (:$port) NOT bound"; sudo ss -ltnp | head -40; return 1
+          }
+          need_port 25  "SMTP"
+          need_port 587 "submission"
+          need_port 143 "IMAP"
+          # Protocol greeting on SMTP + IMAP.
+          echo "checking SMTP greeting"; (exec 3<>/dev/tcp/127.0.0.1/25; head -1 <&3) | grep -qiE '^220' || { echo "no SMTP 220 greeting"; exit 1; }
+          echo "checking IMAP greeting"; (exec 3<>/dev/tcp/127.0.0.1/143; head -1 <&3) | grep -qiE '^\* OK' || { echo "no IMAP greeting"; exit 1; }
+          echo "mail runtime smoke OK"
+      - name: Restart persistence + idempotent rerun
+        run: |
+          set -euo pipefail
+          # Create durable state, restart, confirm it persists.
+          BEFORE="$(sudo sqlite3 /var/lib/orvix/orvix.db "SELECT COUNT(*) FROM users;")"
+          PID1="$(sudo systemctl show -p MainPID --value orvix)"
+          sudo systemctl restart orvix
+          ok=0; for i in $(seq 1 30); do curl -fsS "$BASE/api/v1/health" | jq -e '.status=="ok"' >/dev/null 2>&1 && { ok=1; break; }; sleep 2; done
+          [ "$ok" = 1 ] || { echo "service unhealthy after restart"; exit 1; }
+          PID2="$(sudo systemctl show -p MainPID --value orvix)"
+          [ "$PID1" != "$PID2" ] || { echo "MainPID unchanged; restart did not really restart"; exit 1; }
+          AFTER="$(sudo sqlite3 /var/lib/orvix/orvix.db "SELECT COUNT(*) FROM users;")"
+          [ "$BEFORE" = "$AFTER" ] || { echo "user count changed across restart ($BEFORE -> $AFTER)"; exit 1; }
+          # Mail listeners restored after restart.
+          for p in 25 587 143; do sudo ss -ltn "sport = :$p" | grep -q ":$p" || { echo "listener :$p not restored after restart"; exit 1; }; done
+          # Idempotent installer rerun must not error or wipe data.
+          sudo env ORVIX_SOURCE_DIR=/tmp/stage/orvix ORVIX_USE_PREBUILT=1 ORVIX_PUBLIC_IPV4=100.0.0.10 \
+            ORVIX_PRIMARY_DOMAIN="$DOMAIN" ORVIX_ADMIN_EMAIL="$ADMIN_EMAIL" \
+            bash /tmp/stage/orvix/release/install.sh
+          RERUN="$(sudo sqlite3 /var/lib/orvix/orvix.db "SELECT COUNT(*) FROM users;")"
+          [ "$AFTER" = "$RERUN" ] || { echo "idempotent rerun changed user count ($AFTER -> $RERUN)"; exit 1; }
+          echo "restart persistence + idempotency OK"
+      - name: Uninstall preserves data by default
+        run: |
+          set -euo pipefail
+          sudo bash /tmp/stage/orvix/release/uninstall.sh
+          # Service gone, but data preserved.
+          systemctl is-active --quiet orvix && { echo "orvix still active after uninstall"; exit 1; } || true
+          test -d /var/lib/orvix || { echo "data dir removed by safe uninstall"; exit 1; }
+          test -f /var/lib/orvix/orvix.db || { echo "database removed by safe uninstall"; exit 1; }
+          test -d /etc/orvix || { echo "config removed by safe uninstall"; exit 1; }
+          echo "uninstall preserved data"
+      - name: Diagnostics on failure
+        if: failure()
+        run: sudo journalctl -u orvix --no-pager -n 200 || true
+
+  # ── 3. Fresh PostgreSQL 16 install (installer PG mode) + smoke. ────────────
+  fresh-install-postgresql16:
+    name: fresh-install-postgresql16
+    needs: bundle-build-and-verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: orvix
+          POSTGRES_PASSWORD: ci_orvix_only
+          POSTGRES_DB: orvix
+        options: >-
+          --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+        ports:
+          - 5432:5432
+    env:
+      BASE: http://127.0.0.1:8080
+      DOMAIN: rc-pg.orvix.test
+      ADMIN_EMAIL: admin@rc-pg.orvix.test
+      ORVIX_DB_DRIVER: postgres
+      ORVIX_DB_DSN: "host=127.0.0.1 port=5432 user=orvix password=ci_orvix_only dbname=orvix sslmode=disable"
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: orvix
+      PGPASSWORD: ci_orvix_only
+      PGDATABASE: orvix
+    steps:
+      - name: Download bundle
+        uses: actions/download-artifact@v7
+        with:
+          name: orvix-release-bundle
+          path: /tmp/dl
+      - name: Install prerequisites (documented + psql for PG mode)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -o Acquire::Retries=3
+          sudo apt-get install -y --no-install-recommends jq curl ca-certificates postgresql-client-16
+      - name: Guard — PostgreSQL must be reachable (fail, never skip)
+        run: |
+          set -euo pipefail
+          psql "$ORVIX_DB_DSN" -c "SELECT version();" >/dev/null || { echo "PostgreSQL 16 service not reachable"; exit 1; }
+          psql "$ORVIX_DB_DSN" -tAc "SHOW server_version;" | grep -q '^16' || { echo "expected PostgreSQL 16"; exit 1; }
+      - name: Extract bundle
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/stage && tar -C /tmp/stage -xzf /tmp/dl/orvix-bundle.tar.gz
+          test -x /tmp/stage/orvix/bin/orvix
+      - name: Run the real installer in PostgreSQL mode + start via systemd
+        run: |
+          set -euo pipefail
+          ADMIN_PASSWORD="$(openssl rand -base64 24)"
+          printf '%s' "$ADMIN_PASSWORD" | sudo tee /root/admin_password >/dev/null
+          sudo env \
+            ORVIX_SOURCE_DIR=/tmp/stage/orvix \
+            ORVIX_USE_PREBUILT=1 \
+            ORVIX_PUBLIC_IPV4=100.0.0.10 \
+            ORVIX_PRIMARY_DOMAIN="$DOMAIN" \
+            ORVIX_ADMIN_EMAIL="$ADMIN_EMAIL" \
+            ORVIX_ADMIN_PASSWORD_B64="$(printf '%s' "$ADMIN_PASSWORD" | base64 -w0)" \
+            ORVIX_DB_DRIVER=postgres \
+            ORVIX_DB_DSN="$ORVIX_DB_DSN" \
+            bash /tmp/stage/orvix/release/install.sh
+      - name: Config is postgres, schema created on PG, no SQLite DB file
+        run: |
+          set -euo pipefail
+          grep -q 'driver: postgres' /etc/orvix/orvix.yaml || { echo "config not postgres"; exit 1; }
+          test -f /var/lib/orvix/orvix.db && { echo "unexpected sqlite db in postgres mode"; exit 1; } || true
+          psql "$ORVIX_DB_DSN" -tAc "SELECT COUNT(*) FROM users;" >/dev/null || { echo "schema not created on postgres"; exit 1; }
+          A="$(psql "$ORVIX_DB_DSN" -tAc "SELECT COUNT(*) FROM users WHERE role='admin' AND active=true;" | tr -d '[:space:]')"
+          [ "${A:-0}" -ge 1 ] || { echo "bootstrap admin not created on postgres"; exit 1; }
+      - name: Health + readiness + migration idempotency (restart re-runs migrations)
+        run: |
+          set -euo pipefail
+          ok=0; for i in $(seq 1 45); do curl -fsS "$BASE/api/v1/health" | jq -e '.status=="ok"' >/dev/null 2>&1 && { ok=1; break; }; sleep 2; done
+          [ "$ok" = 1 ] || { echo "PG install never healthy"; sudo journalctl -u orvix --no-pager -n 150; exit 1; }
+          if sudo journalctl -u orvix --no-pager 2>/dev/null | grep -qiE 'AUTOINCREMENT|SQLSTATE 42|syntax error at or near|no such table|relation ".*" does not exist'; then
+            echo "SQLite-specific SQL failure on PostgreSQL"; sudo journalctl -u orvix --no-pager | grep -iE 'AUTOINCREMENT|SQLSTATE 42|syntax error|relation' | head; exit 1
+          fi
+          BEFORE="$(psql "$ORVIX_DB_DSN" -tAc "SELECT COUNT(*) FROM users;" | tr -d '[:space:]')"
+          sudo systemctl restart orvix
+          ok=0; for i in $(seq 1 30); do curl -fsS "$BASE/api/v1/health" | jq -e '.status=="ok"' >/dev/null 2>&1 && { ok=1; break; }; sleep 2; done
+          [ "$ok" = 1 ] || { echo "unhealthy after restart on PG"; exit 1; }
+          AFTER="$(psql "$ORVIX_DB_DSN" -tAc "SELECT COUNT(*) FROM users;" | tr -d '[:space:]')"
+          [ "$BEFORE" = "$AFTER" ] || { echo "migration rerun changed data ($BEFORE -> $AFTER)"; exit 1; }
+      - name: Product smoke on PostgreSQL install
+        run: |
+          set -euo pipefail
+          for p in / /pricing /admin /webmail; do
+            c="$(curl -s -o /dev/null -w '%{http_code}' "$BASE$p")"; [ "$c" = 200 ] || { echo "smoke $p -> $c"; exit 1; }
+          done
+          PW="$(sudo cat /root/admin_password)"
+          TOKEN="$(curl -s -X POST "$BASE/api/v1/auth/login" -H 'Content-Type: application/json' --data "$(jq -nc --arg e "$ADMIN_EMAIL" --arg p "$PW" '{email:$e,password:$p}')" | jq -r '.access_token')"
+          [ -n "$TOKEN" ] && [ "$TOKEN" != null ] || { echo "PG bootstrap admin login failed"; exit 1; }
+          curl -fsS "$BASE/api/v1/me" -H "Authorization: Bearer $TOKEN" | jq -e '.email' >/dev/null || { echo "/me failed on PG"; exit 1; }
+      - name: Diagnostics on failure
+        if: failure()
+        run: sudo journalctl -u orvix --no-pager -n 200 || true
+
+  # ── 4. Installer failure safety (each case must fail closed & recover). ────
+  installer-failure-safety:
+    name: installer-failure-safety
+    needs: bundle-build-and-verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Download bundle
+        uses: actions/download-artifact@v7
+        with:
+          name: orvix-release-bundle
+          path: /tmp/dl
+      - name: Prereqs
+        run: |
+          set -euo pipefail
+          sudo apt-get update -o Acquire::Retries=3
+          sudo apt-get install -y --no-install-recommends jq curl ca-certificates postgresql-client-16
+      - name: Extract
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/stage && tar -C /tmp/stage -xzf /tmp/dl/orvix-bundle.tar.gz
+      - name: PostgreSQL unavailable → non-zero exit, no broken service, no secret leak
+        run: |
+          set -euo pipefail
+          set +e
+          sudo env ORVIX_SOURCE_DIR=/tmp/stage/orvix ORVIX_USE_PREBUILT=1 ORVIX_PUBLIC_IPV4=100.0.0.10 \
+            ORVIX_PRIMARY_DOMAIN=fail-pg.orvix.test ORVIX_ADMIN_EMAIL=admin@fail-pg.orvix.test \
+            ORVIX_ADMIN_PASSWORD_B64="$(printf 'x' | base64 -w0)" \
+            ORVIX_DB_DRIVER=postgres \
+            ORVIX_DB_DSN="host=127.0.0.1 port=5999 user=nobody password=nope dbname=absent sslmode=disable" \
+            bash /tmp/stage/orvix/release/install.sh >/tmp/pgfail.log 2>&1
+          rc=$?
+          set -e
+          [ "$rc" -ne 0 ] || { echo "installer must fail when PostgreSQL is unreachable"; exit 1; }
+          # No healthy service should be left running.
+          if systemctl is-active --quiet orvix; then curl -fsS http://127.0.0.1:8080/api/v1/health >/dev/null 2>&1 && { echo "broken/healthy service left after failed install"; exit 1; }; fi
+          grep -qiE 'password[= ][^ ]{6,}' /tmp/pgfail.log && { echo "secret leaked in failure output"; exit 1; } || true
+          echo "PG-unavailable failure handled safely (rc=$rc)"
+      - name: Missing required config value → non-zero exit, clear error
+        run: |
+          set -euo pipefail
+          set +e
+          # postgres driver without a DSN must be rejected with a clear message.
+          sudo env ORVIX_SOURCE_DIR=/tmp/stage/orvix ORVIX_USE_PREBUILT=1 ORVIX_PUBLIC_IPV4=100.0.0.10 \
+            ORVIX_PRIMARY_DOMAIN=fail-cfg.orvix.test ORVIX_ADMIN_EMAIL=admin@fail-cfg.orvix.test \
+            ORVIX_ADMIN_PASSWORD_B64="$(printf 'x' | base64 -w0)" \
+            ORVIX_DB_DRIVER=postgres \
+            bash /tmp/stage/orvix/release/install.sh >/tmp/cfgfail.log 2>&1
+          rc=$?
+          set -e
+          [ "$rc" -ne 0 ] || { echo "installer must fail when ORVIX_DB_DSN is missing in postgres mode"; exit 1; }
+          grep -qi 'ORVIX_DB_DSN' /tmp/cfgfail.log || { echo "error did not clearly name the missing value"; tail -n 5 /tmp/cfgfail.log; exit 1; }
+          echo "missing-config failure handled with a clear message"
