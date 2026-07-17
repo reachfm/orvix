@@ -236,9 +236,9 @@ jobs:
           sudo bash /tmp/stage/orvix/release/uninstall.sh
           # Service gone, but data preserved.
           systemctl is-active --quiet orvix && { echo "orvix still active after uninstall"; exit 1; } || true
-          test -d /var/lib/orvix || { echo "data dir removed by safe uninstall"; exit 1; }
-          test -f /var/lib/orvix/orvix.db || { echo "database removed by safe uninstall"; exit 1; }
-          test -d /etc/orvix || { echo "config removed by safe uninstall"; exit 1; }
+          sudo test -d /var/lib/orvix || { echo "data dir removed by safe uninstall"; exit 1; }
+          sudo test -f /var/lib/orvix/orvix.db || { echo "database removed by safe uninstall"; exit 1; }
+          sudo test -d /etc/orvix || { echo "config removed by safe uninstall"; exit 1; }
           echo "uninstall preserved data"
       - name: Diagnostics on failure
         if: failure()
