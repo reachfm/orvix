@@ -294,7 +294,7 @@ jobs:
           # postgres driver without a DSN must be rejected with a clear message.
           sudo env ORVIX_SOURCE_DIR=/tmp/stage/orvix ORVIX_USE_PREBUILT=1 ORVIX_PUBLIC_IPV4=100.0.0.10 \
             ORVIX_PRIMARY_DOMAIN=fail-cfg.orvix.test ORVIX_ADMIN_EMAIL=admin@fail-cfg.orvix.test \
-            ORVIX_ADMIN_PASSWORD_B64="$(printf 'x' | base64 -w0)" \
+            ORVIX_ADMIN_PASSWORD="ValidPass123!" \
             ORVIX_DB_DRIVER=postgres \
             bash /tmp/stage/orvix/release/install.sh >/tmp/cfgfail.log 2>&1
           rc=$?
