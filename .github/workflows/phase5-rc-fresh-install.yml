@@ -233,7 +233,7 @@ jobs:
       - name: Uninstall preserves data by default
         run: |
           set -euo pipefail
-          sudo bash /tmp/stage/orvix/release/uninstall.sh || echo "NOTE: uninstall script ended non-zero (may be normal for CI environment)"
+          printf 'y\n' | sudo bash /tmp/stage/orvix/release/uninstall.sh
           # Service gone, but data preserved.
           systemctl is-active --quiet orvix && { echo "orvix still active after uninstall"; exit 1; } || true
           sudo test -d /var/lib/orvix || { echo "data dir removed by safe uninstall"; exit 1; }
