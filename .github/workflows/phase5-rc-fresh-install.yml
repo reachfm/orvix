@@ -163,7 +163,9 @@ jobs:
           # Readiness: health is the readiness gate here; also assert the admin/webmail SPAs and API 404 shape.
           curl -fsSI "$BASE/admin"   >/dev/null || { echo "admin SPA failed"; exit 1; }
           curl -fsSI "$BASE/webmail" >/dev/null || { echo "webmail SPA failed"; exit 1; }
-          code="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/v1/does-not-exist")"; [ "$code" = 404 ] || { echo "api 404 shape wrong: $code"; exit 1; }
+          # Unknown API routes go through auth middleware: 401 (not authenticated) is correct.
+          code="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/v1/does-not-exist")"
+          [ "$code" = 404 ] || [ "$code" = 401 ] || { echo "api unknown route unexpected: $code (want 404 or 401)"; exit 1; }
       - name: Product surface smoke (marketing + admin + api)
         run: |
           set -euo pipefail
