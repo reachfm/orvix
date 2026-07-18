@@ -196,6 +196,7 @@ REQUIRED_FILES=(
     release/scripts/verify-fresh-vps-one-command.sh
     release/scripts/check-public-origin-contract.sh
     release/scripts/migrate-admin-root-route.sh
+    release/scripts/lib-admin-route-migration.sh
     release/admin/app.js
     release/admin/index.html
     release/admin/styles.css

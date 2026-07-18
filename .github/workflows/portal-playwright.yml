@@ -41,6 +41,12 @@ jobs:
           npm ci
           npm run build
 
+      - name: Run Admin E2E Playwright tests
+        run: |
+          cd web/admin
+          npx playwright install --with-deps chromium
+          npm run test:e2e
+
       - name: Install Playwright
         run: |
           cd test/playwright
@@ -48,7 +54,7 @@ jobs:
           npm install @playwright/test
           npx playwright install chromium --with-deps
 
-      - name: Run Playwright E2E tests
+      - name: Run backend Playwright E2E tests
         run: |
           cd test/playwright
           npx playwright test --reporter list
@@ -58,5 +64,8 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: playwright-traces
-          path: test/playwright/test-results/
+          path: |
+            test/playwright/test-results/
+            web/admin/playwright-report/
+            web/admin/test-results/
           if-no-files-found: warn
