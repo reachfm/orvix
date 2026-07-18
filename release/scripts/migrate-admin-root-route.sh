@@ -13,256 +13,165 @@ MODE="${1:---check}"
 usage() {
   cat <<EOF
 Usage: $0 [--check|--apply|--dry-run]
-
-Modes:
-  --check    Check whether the admin root redirect exists (default).
-  --apply    Insert the redirect rule if not already present.
-  --dry-run  Show what would be changed without modifying files.
-
 Environment:
-  ORVIX_CADDYFILE      Path to Caddyfile (default: /etc/caddy/Caddyfile)
-  ORVIX_CADDY_BIN      Path to caddy binary (default: caddy)
-  ORVIX_SYSTEMCTL      Path to systemctl (default: systemctl)
-  ORVIX_ADMIN_DOMAIN   Exact admin hostname to match (default: detect admin.*)
+  ORVIX_CADDYFILE, ORVIX_CADDY_BIN, ORVIX_SYSTEMCTL, ORVIX_ADMIN_DOMAIN
 EOF
   exit 1
 }
+case "$MODE" in --check|--apply|--dry-run) ;; *) usage ;; esac
+[ -f "$ORVIX_CADDYFILE" ] || { echo "Caddyfile not found at $ORVIX_CADDYFILE"; exit 1; }
 
-case "$MODE" in
-  --check|--apply|--dry-run) ;;
-  *) usage ;;
-esac
+_caddy_base="$(dirname "$ORVIX_CADDYFILE")"
 
-if [ ! -f "$ORVIX_CADDYFILE" ]; then
-  echo "Caddyfile not found at $ORVIX_CADDYFILE"
-  exit 1
-fi
-
-# ── Parse all top-level hostname blocks ────────────────────────
-# Returns: each line is "<block_name>"
 all_blocks() {
-  awk '
-    /^[a-zA-Z0-9][a-zA-Z0-9.-]*[ \t]*\{/ {
-      name=$1; gsub(/[\t ]*\{/,"",name); print name
-    }
-  ' "$ORVIX_CADDYFILE"
+  awk '/^[a-zA-Z0-9][a-zA-Z0-9.-]*[ \t]*\{/{name=$1;gsub(/[\t ]*\{/,"",name);print name}' "$ORVIX_CADDYFILE"
 }
 
-# ── Extract a single block body (including opening and closing) ─
-extract_block() {
-  local name="$1"
-  awk -v name="$name" '
-    BEGIN { in_block=0; depth=0 }
-    /^[a-zA-Z0-9][a-zA-Z0-9.-]*[ \t]*\{/ {
-      bname=$1; gsub(/[\t ]*\{/,"",bname)
-      if(bname==name){ in_block=1; depth=0 }
-    }
-    in_block { print }
-    in_block && /{/ { depth++ }
-    in_block && /}/ { depth--; if(depth==0) in_block=0 }
-  ' "$ORVIX_CADDYFILE"
+_extract() {
+  local n="$1"
+  awk -v n="$n" 'BEGIN{b=0;d=0}/^[a-zA-Z0-9][a-zA-Z0-9.-]*[ \t]*\{/{x=$1;gsub(/[\t ]*\{/,"",x);if(x==n){b=1;d=0}}b{print}b&&/{/{d++}b&&/}/{d--;if(d==0)b=0}' "$ORVIX_CADDYFILE"
 }
 
-# ── Check contract inside a specific block ─────────────────────
-check_contract() {
-  local name="$1"
-  local body
-  body="$(extract_block "$name")"
-
+_check() {
+  local n="$1" b; b="$(_extract "$n")"
   local m mc rd
-  m=$(printf '%s\n' "$body" | grep -cF "$MARKER" 2>/dev/null; printf x)
-  m="${m%x}"
-  m=$(printf '%s' "$m" | tr -cd '0-9')
-  mc=$(printf '%s\n' "$body" | grep -cF "$MATCHER" 2>/dev/null; printf x)
-  mc="${mc%x}"
-  mc=$(printf '%s' "$mc" | tr -cd '0-9')
-  rd=$(printf '%s\n' "$body" | grep -cF "$REDIRECT" 2>/dev/null; printf x)
-  rd="${rd%x}"
-  rd=$(printf '%s' "$rd" | tr -cd '0-9')
-  [ -z "$m" ] && m=0
-  [ -z "$mc" ] && mc=0
-  [ -z "$rd" ] && rd=0
-
-  if [ "$m" = "0" ] && [ "$mc" = "0" ] && [ "$rd" = "0" ]; then
-    echo "absent"
-    return 0
-  fi
-
+  m=$(printf '%s\n' "$b" | grep -cF "$MARKER" 2>/dev/null; printf x); m="${m%x}"; m=$(printf '%s' "$m" | tr -cd '0-9'); [ -z "$m" ] && m=0
+  mc=$(printf '%s\n' "$b" | grep -cF "$MATCHER" 2>/dev/null; printf x); mc="${mc%x}"; mc=$(printf '%s' "$mc" | tr -cd '0-9'); [ -z "$mc" ] && mc=0
+  rd=$(printf '%s\n' "$b" | grep -cF "$REDIRECT" 2>/dev/null; printf x); rd="${rd%x}"; rd=$(printf '%s' "$rd" | tr -cd '0-9'); [ -z "$rd" ] && rd=0
+  if [ "$m" = "0" ] && [ "$mc" = "0" ] && [ "$rd" = "0" ]; then echo "absent"; return 0; fi
   if [ "$m" = "1" ] && [ "$mc" = "1" ] && [ "$rd" = "1" ]; then
-    # Verify order: MARKER, then MATCHER, then REDIRECT
-    local ordered om or
-    ordered=$(printf '%s\n' "$body" | grep -nF "$MARKER" | head -1 | cut -d: -f1 | tr -d '[:space:]')
-    om=$(printf '%s\n' "$body" | grep -nF "$MATCHER" | head -1 | cut -d: -f1 | tr -d '[:space:]')
-    or=$(printf '%s\n' "$body" | grep -nF "$REDIRECT" | head -1 | cut -d: -f1 | tr -d '[:space:]')
-    if [ -n "$ordered" ] && [ -n "$om" ] && [ -n "$or" ]; then
-      if [ "$ordered" -lt "$om" ] && [ "$om" -lt "$or" ]; then
-        echo "valid"
-        return 0
-      fi
-    fi
-    echo "malformed-order"
-    return 0
+    local lo lm lr
+    lo=$(printf '%s\n' "$b" | grep -nF "$MARKER" | head -1 | cut -d: -f1 | tr -cd '0-9')
+    lm=$(printf '%s\n' "$b" | grep -nF "$MATCHER" | head -1 | cut -d: -f1 | tr -cd '0-9')
+    lr=$(printf '%s\n' "$b" | grep -nF "$REDIRECT" | head -1 | cut -d: -f1 | tr -cd '0-9')
+    if [ -n "$lo" ] && [ -n "$lm" ] && [ -n "$lr" ] && [ "$lo" -lt "$lm" ] && [ "$lm" -lt "$lr" ]; then echo "valid"; return 0; fi
+    echo "malformed-order"; return 0
   fi
-
   echo "malformed/$m/$mc/$rd"
 }
 
-# ── Select exactly one Admin block ──────────────────────────────
-select_block() {
-  local blocks
-  blocks="$(all_blocks)"
-
+_select() {
+  local blocks; blocks="$(all_blocks)"
   if [ -n "$ORVIX_ADMIN_DOMAIN" ]; then
-    local found
-    found="$(echo "$blocks" | while read -r name; do
-      [ "$name" = "$ORVIX_ADMIN_DOMAIN" ] && echo "$name"
-    done || true)"
-    local count
-    count=$(printf '%s\n' "$found" | grep -c . 2>/dev/null; printf x)
-    count="${count%x}"
-    count=$(printf '%s' "$count" | tr -cd '0-9')
-    [ -z "$count" ] && count=0
-    if [ "$count" = "0" ]; then
-      echo "ERROR: no Caddy hostname block exactly matching \"$ORVIX_ADMIN_DOMAIN\"" >&2
-      exit 1
-    elif [ "$count" != "1" ]; then
-      echo "ERROR: found $count blocks exactly matching \"$ORVIX_ADMIN_DOMAIN\" (expected exactly 1)" >&2
-      exit 1
-    fi
+    local found; found="$(echo "$blocks" | while read -r nm; do [ "$nm" = "$ORVIX_ADMIN_DOMAIN" ] && echo "$nm"; done || true)"
+    local cnt; cnt=$(printf '%s\n' "$found" | grep -c . 2>/dev/null; printf x); cnt="${cnt%x}"; cnt=$(printf '%s' "$cnt" | tr -cd '0-9'); [ -z "$cnt" ] && cnt=0
+    [ "$cnt" = "0" ] && { echo "ERROR: no block matching \"$ORVIX_ADMIN_DOMAIN\"" >&2; exit 1; }
+    [ "$cnt" != "1" ] && { echo "ERROR: found $cnt blocks matching \"$ORVIX_ADMIN_DOMAIN\" (expected 1)" >&2; exit 1; }
     printf '%s' "$found"
   else
-    local admin_candidates
-    admin_candidates="$(echo "$blocks" | grep '^admin\.' || true)"
-    local count
-    count=$(printf '%s\n' "$admin_candidates" | grep -c . 2>/dev/null; printf x)
-    count="${count%x}"
-    count=$(printf '%s' "$count" | tr -cd '0-9')
-    [ -z "$count" ] && count=0
-    if [ "$count" = "0" ]; then
-      echo "ERROR: no admin.* hostname block found in $ORVIX_CADDYFILE" >&2
-      exit 1
-    elif [ "$count" != "1" ]; then
-      echo "ERROR: found $count admin.* hostname blocks — set ORVIX_ADMIN_DOMAIN to disambiguate" >&2
-      echo "$admin_candidates" >&2
-      exit 1
-    fi
-    printf '%s' "$admin_candidates"
+    local ac; ac="$(echo "$blocks" | grep '^admin\.' || true)"
+    local cnt; cnt=$(printf '%s\n' "$ac" | grep -c . 2>/dev/null; printf x); cnt="${cnt%x}"; cnt=$(printf '%s' "$cnt" | tr -cd '0-9'); [ -z "$cnt" ] && cnt=0
+    [ "$cnt" = "0" ] && { echo "ERROR: no admin.* block found" >&2; exit 1; }
+    [ "$cnt" != "1" ] && { echo "ERROR: found $cnt admin.* blocks — set ORVIX_ADMIN_DOMAIN" >&2; echo "$ac" >&2; exit 1; }
+    printf '%s' "$ac"
   fi
 }
 
-BLOCK_NAME="$(select_block)"
+BLOCK_NAME="$(_select)"
 
-# ── Check for existing valid contract ───────────────────────────
-CONTRACT="$(check_contract "$BLOCK_NAME")"
+_meta() {
+  _orig_mode=""; _orig_owner=""; _orig_group=""
+  if command -v stat >/dev/null 2>&1; then
+    if stat --version 2>/dev/null | grep -q GNU; then
+      _orig_owner="$(stat -c '%u' "$ORVIX_CADDYFILE" 2>/dev/null || echo "")"
+      _orig_group="$(stat -c '%g' "$ORVIX_CADDYFILE" 2>/dev/null || echo "")"
+      _orig_mode="$(stat -c '%a' "$ORVIX_CADDYFILE" 2>/dev/null || echo "")"
+    else
+      _orig_owner="$(stat -f '%u' "$ORVIX_CADDYFILE" 2>/dev/null || echo "")"
+      _orig_group="$(stat -f '%g' "$ORVIX_CADDYFILE" 2>/dev/null || echo "")"
+      _orig_mode="$(stat -f '%OLp' "$ORVIX_CADDYFILE" 2>/dev/null || echo "")"
+    fi
+  fi
+}
+_meta
+
+_apply_meta() {
+  local f="$1"
+  if [ -n "$_orig_owner" ] && [ -n "$_orig_group" ]; then
+    local c_owner c_group
+    if command -v stat >/dev/null 2>&1; then
+      if stat --version 2>/dev/null | grep -q GNU; then
+        c_owner="$(stat -c '%u' "$f" 2>/dev/null || echo "")"
+        c_group="$(stat -c '%g' "$f" 2>/dev/null || echo "")"
+      else
+        c_owner="$(stat -f '%u' "$f" 2>/dev/null || echo "")"
+        c_group="$(stat -f '%g' "$f" 2>/dev/null || echo "")"
+      fi
+    fi
+    if [ "$c_owner" != "$_orig_owner" ] || [ "$c_group" != "$_orig_group" ]; then
+      chown "${_orig_owner}:${_orig_group}" "$f" || { echo "ERROR: chown failed" >&2; return 1; }
+    fi
+  fi
+  if [ -n "$_orig_mode" ]; then
+    chmod "$_orig_mode" "$f" || { echo "ERROR: chmod failed" >&2; return 1; }
+  fi
+}
+
+CONTRACT="$(_check "$BLOCK_NAME")"
 
 case "$CONTRACT" in
   absent) ;;
   valid)
-    if [ "$MODE" = "--check" ]; then
-      echo "Admin root redirect already present in $BLOCK_NAME block of $ORVIX_CADDYFILE"
-      exit 0
-    elif [ "$MODE" = "--dry-run" ]; then
-      echo "Admin root redirect already present — no action needed"
-      exit 0
-    fi
-    echo "Admin root redirect already present — idempotent, skipping"
-    exit 0
-    ;;
-  *)
-    echo "ERROR: malformed admin root redirect contract in $BLOCK_NAME block: $CONTRACT" >&2
-    exit 1
-    ;;
+    if [ "$MODE" = "--check" ]; then echo "Already present in $BLOCK_NAME"; exit 0
+    elif [ "$MODE" = "--dry-run" ]; then echo "Already present — no action"; exit 0
+    else echo "Already present — idempotent, skipping"; exit 0; fi ;;
+  *) echo "ERROR: malformed contract in $BLOCK_NAME: $CONTRACT" >&2; exit 1 ;;
 esac
 
-# ── Generate candidate ─────────────────────────────────────────
-tmp="$(mktemp "${ORVIX_CADDYFILE}.tmp.XXXXXX")"
-cleanup_tmp() { rm -f "$tmp"; }
-trap cleanup_tmp EXIT
+TMP="$(mktemp "${ORVIX_CADDYFILE}.tmp.XXXXXX")"
+_cleanup() { rm -f "$TMP"; }
+trap _cleanup EXIT
 
-# Resolve original ownership and mode.
-orig_owner=""
-orig_group=""
-orig_mode=""
-if command -v stat >/dev/null 2>&1; then
-  if stat --version 2>/dev/null | grep -q GNU; then
-    orig_owner="$(stat -c '%u' "$ORVIX_CADDYFILE" 2>/dev/null || echo "")"
-    orig_group="$(stat -c '%g' "$ORVIX_CADDYFILE" 2>/dev/null || echo "")"
-    orig_mode="$(stat -c '%a' "$ORVIX_CADDYFILE" 2>/dev/null || echo "")"
-  else
-    orig_owner="$(stat -f '%u' "$ORVIX_CADDYFILE" 2>/dev/null || echo "")"
-    orig_group="$(stat -f '%g' "$ORVIX_CADDYFILE" 2>/dev/null || echo "")"
-    orig_mode="$(stat -f '%OLp' "$ORVIX_CADDYFILE" 2>/dev/null || echo "")"
-  fi
-fi
-
-# Create timestamped backup.
-backup="${ORVIX_CADDYFILE}.backup.$(date +%Y%m%d%H%M%S)"
-cp -p "$ORVIX_CADDYFILE" "$backup"
-
-# Insert marker/redirect after block-opening line.
-awk -v block="$BLOCK_NAME" -v marker="$MARKER" -v matcher="$MATCHER" -v redirect="$REDIRECT" '
-  BEGIN { inserted=0; in_block=0; depth=0 }
-  /^[a-zA-Z0-9][a-zA-Z0-9.-]*[ \t]*\{/ {
-    bname=$1; gsub(/[\t ]*\{/,"",bname)
-    if(bname==block) {
-      print
-      print marker
-      print matcher
-      print redirect
-      inserted=1
-      in_block=1
-      depth=1
-      next
-    }
-  }
+awk -v b="$BLOCK_NAME" -v m="$MARKER" -v a="$MATCHER" -v r="$REDIRECT" '
+  BEGIN { ins=0 }
+  /^[a-zA-Z0-9][a-zA-Z0-9.-]*[ \t]*\{/ { x=$1; gsub(/[\t ]*\{/,"",x); if(x==b){ print; print m; print a; print r; ins=1; next } }
   { print }
-  { if($0 ~ /{/) depth++; if($0 ~ /}/) depth--; if(depth==0) in_block=0 }
-  END { if(!inserted) { print "ERROR: could not locate block" > "/dev/stderr"; exit 1 } }
-' "$ORVIX_CADDYFILE" > "$tmp"
+  END { if(!ins) { print "ERROR: block not found" > "/dev/stderr"; exit 1 } }
+' "$ORVIX_CADDYFILE" > "$TMP"
 
-# Apply ownership/mode to candidate.
-if [ -n "$orig_owner" ] && [ -n "$orig_group" ]; then
-  chown "${orig_owner}:${orig_group}" "$tmp" 2>/dev/null || true
-fi
-if [ -n "$orig_mode" ]; then
-  chmod "$orig_mode" "$tmp" 2>/dev/null || true
-fi
+_apply_meta "$TMP"
 
-# Validate candidate.
-if ! "$ORVIX_CADDY_BIN" validate --config "$tmp" >/dev/null 2>&1; then
-  echo "ERROR: caddy validate failed for generated Caddyfile — original preserved at $backup" >&2
-  rm -f "$tmp"
+if ! "$ORVIX_CADDY_BIN" validate --config "$TMP" >/dev/null 2>&1; then
+  echo "ERROR: caddy validate failed — original preserved" >&2
   exit 1
 fi
 
-# ── Dry-run ─────────────────────────────────────────────────────
 if [ "$MODE" = "--dry-run" ]; then
-  echo "Would insert admin root redirect into $BLOCK_NAME block in $ORVIX_CADDYFILE"
-  echo "Backup would be: $backup"
-  rm -f "$backup"
-  rm -f "$tmp"
-  trap - EXIT
+  echo "Selected Admin hostname: $BLOCK_NAME"
+  echo "Candidate validation: success"
+  diff -u "$ORVIX_CADDYFILE" "$TMP" || true
   exit 0
 fi
 
-# ── Apply ───────────────────────────────────────────────────────
-mv -f "$tmp" "$ORVIX_CADDYFILE"
-trap - EXIT
-rm -f "${ORVIX_CADDYFILE}.tmp."* 2>/dev/null || true
+BACKUP="$(mktemp "${ORVIX_CADDYFILE}.backup.$(date +%Y%m%dT%H%M%S).XXXXXX")"
+cp -p "$ORVIX_CADDYFILE" "$BACKUP"
+cmp -s "$ORVIX_CADDYFILE" "$BACKUP" || { echo "ERROR: backup comparison failed" >&2; rm -f "$BACKUP"; exit 1; }
 
-# Reload Caddy.
-if ! "$ORVIX_SYSTEMCTL" reload caddy 2>/dev/null; then
-  echo "ERROR: caddy reload failed — restoring backup $backup" >&2
-  cp -p "$backup" "$ORVIX_CADDYFILE"
-  if [ -n "$orig_owner" ] && [ -n "$orig_group" ]; then
-    chown "${orig_owner}:${orig_group}" "$ORVIX_CADDYFILE" 2>/dev/null || true
-  fi
-  if [ -n "$orig_mode" ]; then
-    chmod "$orig_mode" "$ORVIX_CADDYFILE" 2>/dev/null || true
-  fi
-  "$ORVIX_SYSTEMCTL" reload caddy 2>/dev/null || true
-  exit 1
+mv -f "$TMP" "$ORVIX_CADDYFILE"
+trap - EXIT
+rm -f "$TMP"
+
+echo "Selected Admin hostname: $BLOCK_NAME"
+echo "Backup path: $BACKUP"
+echo "Validation result: success"
+
+if "$ORVIX_SYSTEMCTL" reload caddy 2>/dev/null; then
+  echo "Reload result: success"
+  exit 0
 fi
 
-echo "Admin root redirect inserted into $BLOCK_NAME block in $ORVIX_CADDYFILE (backup: $backup)"
-exit 0
+echo "Reload result: FAILED" >&2
+echo "Rolling back…" >&2
+
+restore_tmp="$(mktemp "${ORVIX_CADDYFILE}.restore.XXXXXX")"
+cp -p "$BACKUP" "$restore_tmp"
+_apply_meta "$restore_tmp"
+cmp -s "$BACKUP" "$restore_tmp" || { echo "ERROR: restore candidate mismatch" >&2; rm -f "$restore_tmp"; exit 1; }
+mv -f "$restore_tmp" "$ORVIX_CADDYFILE"
+
+if "$ORVIX_SYSTEMCTL" reload caddy 2>/dev/null; then
+  echo "Recovery reload: succeeded"
+else
+  echo "Recovery reload: FAILED" >&2
+fi
+exit 1

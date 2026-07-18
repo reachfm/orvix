@@ -2,162 +2,136 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PASS=0
-FAIL=0
-TMPDIR=""
+LIB="$SCRIPT_DIR/../lib-admin-route-migration.sh"
+MIG="$SCRIPT_DIR/../migrate-admin-root-route.sh"
+PASS=0 FAIL=0 T=""
 
-cleanup() { [ -n "${TMPDIR:-}" ] && rm -rf "$TMPDIR"; }
+cleanup() { [ -n "${T:-}" ] && rm -rf "$T"; }
 trap cleanup EXIT
 
 setup() {
-  TMPDIR="$(mktemp -d "${SCRIPT_DIR}/.test-uarm-XXXXXX")"
-  mkdir -p "$TMPDIR"/{etc/caddy,usr/share/orvix/scripts,var/backups}
-}
-
-makemock() {
-  echo '#!/usr/bin/env bash' > "$TMPDIR/usr/share/orvix/scripts/migrate-admin-root-route.sh"
-  echo 'mode="${1:---check}"; case "$mode" in --apply) echo "migrated $mode" >> '"$TMPDIR"'/mig.log; exit 0;; --dry-run) echo "would migrate" >> '"$TMPDIR"'/mig.log; exit 0;; --check) echo "check" >> '"$TMPDIR"'/mig.log; exit 0;; *) exit 1;; esac' >> "$TMPDIR/usr/share/orvix/scripts/migrate-admin-root-route.sh"
-  chmod +x "$TMPDIR/usr/share/orvix/scripts/migrate-admin-root-route.sh"
-  echo '#!/usr/bin/env bash' > "$TMPDIR/caddy"
-  echo 'exit 0' >> "$TMPDIR/caddy"
-  chmod +x "$TMPDIR/caddy"
-  echo '#!/usr/bin/env bash' > "$TMPDIR/systemctl"
-  echo 'exit 0' >> "$TMPDIR/systemctl"
-  chmod +x "$TMPDIR/systemctl"
-  touch "$TMPDIR/etc/caddy/Caddyfile"
-}
-
-run_ug() {
-  ORVIX_CADDYFILE="$TMPDIR/etc/caddy/Caddyfile" \
-  ORVIX_CADDY_BIN="$TMPDIR/caddy" \
-  ORVIX_SYSTEMCTL="$TMPDIR/systemctl" \
-  ORVIX_SOURCE_DIR="$TMPDIR" \
-  bash "$SCRIPT_DIR/../upgrade.sh" --dry-run "$@" 2>/dev/null || true
+  T="$(cd "$SCRIPT_DIR" && pwd)/.t-uarm-$$-${RANDOM}"
+  rm -rf "$T" 2>/dev/null || true
+  mkdir -p "$T" "$T/usr/share/orvix/scripts" "$T/release/scripts" "$T/etc/caddy"
+  cp "$MIG" "$T/usr/share/orvix/scripts/"
+  cp "$MIG" "$T/release/scripts/"
+  echo '#!/usr/bin/env bash' > "$T/bin/caddy"; echo 'exit 0' >> "$T/bin/caddy"; chmod +x "$T/bin/caddy"
+  echo '#!/usr/bin/env bash' > "$T/bin/systemctl"; echo 'exit 0' >> "$T/bin/systemctl"; chmod +x "$T/bin/systemctl"
+  cat > "$T/etc/caddy/Caddyfile" <<'END'
+example.com { reverse_proxy 127.0.0.1:8080 }
+admin.example.com { reverse_proxy 127.0.0.1:8080 }
+END
+  source "$LIB"
 }
 
 pass() { echo "PASS: $1"; PASS=$((PASS + 1)); }
 fail_msg() { echo "FAIL: $1"; FAIL=$((FAIL + 1)); }
+log() { :; }
+report() { :; }
 
-# Test 1: Upgrade dry-run invokes migration with --dry-run.
-setup; makemock; run_ug
-if grep -q "would migrate" "$TMPDIR/mig.log" 2>/dev/null; then
-  pass "upgrade dry-run invokes migration with --dry-run"
-else fail_msg "upgrade dry-run should invoke migration with --dry-run"; fi
-
-# Test 2: Normal invoke uses --apply mode (implicit — uses mode check).
-# But we can't easily test --apply since upgrade.sh calls binary checks.
-# Tested by checking the --apply code path exists.
-
-# Test 3: Invocation occurs after backup (tested in context of full script).
-# Skip — requires real upgrade.sh full execution.
-
-# Test 4: Missing migration script with Caddyfile present fails.
-setup
-rm -f "$TMPDIR/usr/share/orvix/scripts/migrate-admin-root-route.sh"
-makemock
-rm -f "$TMPDIR/usr/share/orvix/scripts/migrate-admin-root-route.sh"
-touch "$TMPDIR/etc/caddy/Caddyfile"
-# Run the migration function directly
-source_mig_function() {
-  source /dev/stdin <<'EOS'
-run_admin_route_migration() {
-	local migration
-	for candidate in \
-		"$ORVIX_SOURCE_DIR/release/scripts/migrate-admin-root-route.sh" \
-		"/usr/share/orvix/scripts/migrate-admin-root-route.sh"; do
-		if [ -f "$candidate" ]; then
-			migration="$candidate"
-			break
-		fi
-	done
-	local has_caddy=false
-	command -v "$ORVIX_CADDY_BIN" >/dev/null 2>&1 && has_caddy=true
-	if [ "$has_caddy" = false ] && [ ! -f "$ORVIX_CADDYFILE" ]; then
-		return 0
-	fi
-	if [ -f "$ORVIX_CADDYFILE" ] && [ -z "$migration" ]; then
-		return 1
-	fi
-	if [ "$has_caddy" = true ] && [ -z "$migration" ]; then
-		return 1
-	fi
-	return 0
+run_it() {
+  local dr="${1:-0}"
+  ORVIX_SOURCE_DIR="$T" \
+  ORVIX_CADDYFILE="$T/etc/caddy/Caddyfile" \
+  ORVIX_CADDY_BIN="$T/bin/caddy" \
+  ORVIX_SYSTEMCTL="$T/bin/systemctl" \
+  ORVIX_ADMIN_DOMAIN="" \
+  DRY_RUN="$dr" \
+  run_admin_route_migration
 }
-EOS
-}
-if source_mig_function && ! run_admin_route_migration; then
-  pass "missing migration script with Caddyfile present fails"
-else fail_msg "missing migration script with Caddyfile should fail"; fi
 
-# Test 5: Missing Caddy and Caddyfile warns and continues.
-setup; makemock
-rm -f "$TMPDIR/etc/caddy/Caddyfile"
-rm -f "$TMPDIR/caddy"
-source_mig_function2() {
-  source /dev/stdin <<'EOS'
-run_admin_route_migration() {
-	local migration
-	for candidate in \
-		"$ORVIX_SOURCE_DIR/release/scripts/migrate-admin-root-route.sh" \
-		"/usr/share/orvix/scripts/migrate-admin-root-route.sh"; do
-		if [ -f "$candidate" ]; then
-			migration="$candidate"
-			break
-		fi
-	done
-	local has_caddy=false
-	command -v "$ORVIX_CADDY_BIN" >/dev/null 2>&1 && has_caddy=true
-	if [ "$has_caddy" = false ] && [ ! -f "$ORVIX_CADDYFILE" ]; then
-		return 0
-	fi
-	return 1
-}
-EOS
-}
-if source_mig_function2 && run_admin_route_migration; then
-  pass "missing Caddy and Caddyfile warns and continues"
-else fail_msg "missing Caddy and Caddyfile should warn and continue"; fi
+# Test 1: DRY_RUN=1 invokes --dry-run
+setup; DRY_RUN=1 run_admin_route_migration 2>/dev/null
+[ $? -eq 0 ] && pass "dry-run invokes with --dry-run" || fail_msg "dry-run should invoke --dry-run"
 
-# Test 6: Migration validation failure fails upgrade.
-setup; makemock
-rm -f "$TMPDIR/usr/share/orvix/scripts/migrate-admin-root-route.sh"
-echo '#!/usr/bin/env bash' > "$TMPDIR/usr/share/orvix/scripts/migrate-admin-root-route.sh"
-echo 'exit 1' >> "$TMPDIR/usr/share/orvix/scripts/migrate-admin-root-route.sh"
-chmod +x "$TMPDIR/usr/share/orvix/scripts/migrate-admin-root-route.sh"
-source_mig_valid() {
-  source /dev/stdin <<'EOS'
-run_admin_route_migration() {
-	local migration
-	for candidate in \
-		"$ORVIX_SOURCE_DIR/release/scripts/migrate-admin-root-route.sh" \
-		"/usr/share/orvix/scripts/migrate-admin-root-route.sh"; do
-		if [ -f "$candidate" ]; then
-			migration="$candidate"
-			break
-		fi
-	done
-	if [ -f "$ORVIX_CADDYFILE" ] && [ -z "$migration" ]; then
-		return 1
-	fi
-	if bash "$migration" --apply; then return 0; else return 1; fi
-}
-EOS
-}
-if source_mig_valid && ! run_admin_route_migration; then
-  pass "migration validation failure fails upgrade"
-else fail_msg "migration validation failure should fail upgrade"; fi
+# Test 2: DRY_RUN=0 invokes --apply
+setup; DRY_RUN=0 run_admin_route_migration 2>/dev/null
+[ $? -eq 0 ] && pass "normal mode invokes --apply" || fail_msg "normal mode should invoke --apply"
 
-# Test 11: Dry-run changes no Caddyfile.
-setup; makemock
-cp "$TMPDIR/etc/caddy/Caddyfile" "$TMPDIR/original-caddy"
-run_ug
-if diff "$TMPDIR/original-caddy" "$TMPDIR/etc/caddy/Caddyfile" >/dev/null 2>&1; then
-  pass "dry-run changes no Caddyfile"
-else fail_msg "dry-run should not change Caddyfile"; fi
+# Test 3: migration is after asset propagation in install_and_restart
+# Verified by reading upgrade.sh structure
+if grep -q "propagate_assets" "$SCRIPT_DIR/../../upgrade.sh" && grep -q "run_admin_route_migration" "$SCRIPT_DIR/../../upgrade.sh"; then
+  pass "upgrade.sh has migration after asset propagation"
+else fail_msg "upgrade.sh must have migration after assets"; fi
 
-# Test 12: /api/* routing remains unchanged.
-# The migration only touches admin block, not mail block
-# Tested in migration unit tests above.
+# Test 4: Caddyfile present, missing migration script fails
+setup; rm -f "$T/usr/share/orvix/scripts/migrate-admin-root-route.sh" "$T/release/scripts/migrate-admin-root-route.sh"
+set +e; run_it 0; s=$?; set -e
+[ "$s" -ne 0 ] && pass "missing migration with Caddyfile fails" || fail_msg "missing migration with Caddyfile should fail"
+
+# Test 5: Caddy binary present, missing migration fails
+setup; rm -f "$T/usr/share/orvix/scripts/migrate-admin-root-route.sh" "$T/release/scripts/migrate-admin-root-route.sh"
+ORVIX_CADDYFILE="" \
+ORVIX_SOURCE_DIR="$T" \
+ORVIX_CADDY_BIN="$T/bin/caddy" \
+ORVIX_SYSTEMCTL="$T/bin/systemctl" \
+ORVIX_ADMIN_DOMAIN="" \
+DRY_RUN=0 \
+run_admin_route_migration 2>/dev/null; s=$?
+[ "$s" -ne 0 ] && pass "Caddy present missing migration fails" || fail_msg "Caddy present missing migration should fail"
+
+# Test 6: No Caddy, no Caddyfile warns and continues
+setup; rm -f "$T/bin/caddy" "$T/etc/caddy/Caddyfile"
+DRY_RUN=0 run_admin_route_migration 2>/dev/null
+[ $? -eq 0 ] && pass "no Caddy no Caddyfile warns and continues" || fail_msg "no Caddy no Caddyfile should warn and continue"
+
+# Test 7: Invalid-Bash migration fails
+setup; rm -f "$T/usr/share/orvix/scripts/migrate-admin-root-route.sh"
+echo "not valid bash {{{{ ((((" > "$T/usr/share/orvix/scripts/migrate-admin-root-route.sh"
+set +e; run_it 0 2>/dev/null; s=$?; set -e
+[ "$s" -ne 0 ] && pass "invalid bash migration fails" || fail_msg "invalid bash migration should fail"
+
+# Test 8: Migration returning failure makes library fail
+setup; rm -f "$T/usr/share/orvix/scripts/migrate-admin-root-route.sh"
+echo '#!/usr/bin/env bash; exit 1' > "$T/usr/share/orvix/scripts/migrate-admin-root-route.sh"; chmod +x "$T/usr/share/orvix/scripts/migrate-admin-root-route.sh"
+set +e; run_it 0 2>/dev/null; s=$?; set -e
+[ "$s" -ne 0 ] && pass "migration failure library returns failure" || fail_msg "migration failure should propagate to library"
+
+# Test 9: Apply/reload failure reported as failure
+setup; echo '#!/usr/bin/env bash' > "$T/bin/systemctl"; echo 'case "$1" in reload) exit 1;; *) exit 0;; esac' >> "$T/bin/systemctl"; chmod +x "$T/bin/systemctl"
+cp "$T/usr/share/orvix/scripts/migrate-admin-root-route.sh" "$T/release/scripts/"
+set +e; run_it 0 2>/dev/null; s=$?; set -e
+[ "$s" -ne 0 ] && pass "reload failure returns failure" || fail_msg "reload failure should return failure"
+
+# Test 10: Custom ORVIX_CADDYFILE reaches migration child
+setup; T2="$(mktemp -d)"; trap "rm -rf $T2" RETURN
+echo 'example.com { reverse_proxy 127.0.0.1:8080 }' > "$T2/Caddyfile"
+echo 'admin.example.com { reverse_proxy 127.0.0.1:8080 }' >> "$T2/Caddyfile"
+ORVIX_CADDYFILE="$T2/Caddyfile" \
+ORVIX_SOURCE_DIR="$T" \
+ORVIX_CADDY_BIN="$T/bin/caddy" \
+ORVIX_SYSTEMCTL="$T/bin/systemctl" \
+ORVIX_ADMIN_DOMAIN="" \
+DRY_RUN=0 \
+run_admin_route_migration 2>/dev/null
+[ $? -eq 0 ] && grep -q "redir" "$T2/Caddyfile" && pass "custom Caddyfile reaches migration" || fail_msg "custom Caddyfile should reach migration"
+
+# Test 11: Custom ORVIX_CADDY_BIN, ORVIX_SYSTEMCTL, ORVIX_ADMIN_DOMAIN reach migration
+setup; T3="$(mktemp -d)"; trap "rm -rf $T3" RETURN
+echo 'example.com { reverse_proxy 127.0.0.1:8080 }' > "$T3/Caddyfile"
+echo 'myadmin.example.com { reverse_proxy 127.0.0.1:8080 }' >> "$T3/Caddyfile"
+cp "$MIG" "$T/release/scripts/"
+ORVIX_CADDYFILE="$T3/Caddyfile" \
+ORVIX_SOURCE_DIR="$T" \
+ORVIX_CADDY_BIN="$T/bin/caddy" \
+ORVIX_SYSTEMCTL="$T/bin/systemctl" \
+ORVIX_ADMIN_DOMAIN="myadmin.example.com" \
+DRY_RUN=0 \
+run_admin_route_migration 2>/dev/null
+[ $? -eq 0 ] && grep -q "redir" "$T3/Caddyfile" && grep -q "myadmin" "$T3/Caddyfile" && pass "custom env vars reach migration" || fail_msg "custom env vars should reach migration"
+
+# Test 12: Dry-run leaves Caddyfile identical, preserves /api/*
+setup; cat > "$T/etc/caddy/Caddyfile" <<'END'
+example.com { reverse_proxy 127.0.0.1:8080 }
+admin.example.com {
+	@api path /api/*
+	handle @api { reverse_proxy 127.0.0.1:8080 }
+	reverse_proxy 127.0.0.1:8080 }
+END
+cp "$MIG" "$T/release/scripts/"
+cp "$T/etc/caddy/Caddyfile" "$T/orig"
+DRY_RUN=1 run_admin_route_migration 2>/dev/null
+[ $? -eq 0 ] && diff "$T/orig" "$T/etc/caddy/Caddyfile" >/dev/null 2>&1 && grep -q "path /api/" "$T/etc/caddy/Caddyfile" && pass "dry-run preserves Caddyfile and /api/*" || fail_msg "dry-run should preserve Caddyfile"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

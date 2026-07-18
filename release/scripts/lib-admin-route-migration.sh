@@ -1,78 +1,63 @@
 #!/usr/bin/env bash
-# lib-admin-route-migration.sh
-#
-# Production upgrade-integration function for the admin root
-# redirect migration. Sourced by upgrade.sh on Linux; must have
-# no top-level side effects. Relies on the environment variables
-# defined by upgrade.sh:
-#
-#   ORVIX_CADDYFILE       default: /etc/caddy/Caddyfile
-#   ORVIX_CADDY_BIN       default: caddy
-#   ORVIX_SYSTEMCTL       default: systemctl
-#   ORVIX_SOURCE_DIR      default: $(pwd)
-#   DRY_RUN               default: 0
-#
-# All output goes through the upgrade.sh `log` and `report`
-# helpers which are expected to exist in the parent scope.
 
 run_admin_route_migration() {
-	local migration
-	for candidate in \
-		"$ORVIX_SOURCE_DIR/release/scripts/migrate-admin-root-route.sh" \
-		"/usr/share/orvix/scripts/migrate-admin-root-route.sh"; do
-		if [ -f "$candidate" ]; then
-			migration="$candidate"
-			break
-		fi
-	done
+    local migration=""
+    local candidate=""
+    local has_caddy=0
+    local mode="--apply"
+    local success_message="admin root redirect migration applied"
 
-	local has_caddy=false
-	command -v "$ORVIX_CADDY_BIN" >/dev/null 2>&1 && has_caddy=true
+    for candidate in \
+        "$ORVIX_SOURCE_DIR/release/scripts/migrate-admin-root-route.sh" \
+        "/usr/share/orvix/scripts/migrate-admin-root-route.sh"
+    do
+        if [ -f "$candidate" ]; then
+            migration="$candidate"
+            break
+        fi
+    done
 
-	if [ "$has_caddy" = false ] && [ ! -f "$ORVIX_CADDYFILE" ]; then
-		log "neither Caddy binary nor Caddyfile found; skipping admin route migration"
-		report "yellow" "admin route migration skipped (neither Caddy nor Caddyfile found)"
-		return 0
-	fi
+    if command -v "$ORVIX_CADDY_BIN" >/dev/null 2>&1; then
+        has_caddy=1
+    fi
 
-	if [ -f "$ORVIX_CADDYFILE" ] && [ -z "$migration" ]; then
-		log "ERROR: Caddyfile exists at $ORVIX_CADDYFILE but migration script not found; migration is required (fail-closed)"
-		report "red" "admin route migration failed: Caddyfile exists but migration script missing"
-		return 1
-	fi
+    if [ "$has_caddy" -eq 0 ] && [ ! -f "$ORVIX_CADDYFILE" ]; then
+        log "neither Caddy binary nor Caddyfile found; skipping admin route migration"
+        report "yellow" "admin route migration skipped (neither Caddy nor Caddyfile found)"
+        return 0
+    fi
 
-	if [ "$has_caddy" = true ] && [ -z "$migration" ]; then
-		log "ERROR: Caddy binary found but migration script not found; migration is required (fail-closed)"
-		report "red" "admin route migration failed: Caddy installed but migration script missing"
-		return 1
-	fi
+    if [ -z "$migration" ]; then
+        log "ERROR: Admin route migration is required but migrate-admin-root-route.sh was not found"
+        report "red" "admin route migration failed: migration script missing"
+        return 1
+    fi
 
-	if [ -n "$migration" ]; then
-		if ! bash -n "$migration" 2>/dev/null; then
-			log "ERROR: migration script at $migration has a bash syntax error; refusing to upgrade"
-			report "red" "admin route migration failed: migration script syntax error"
-			return 1
-		fi
-	fi
+    if ! bash -n "$migration"; then
+        log "ERROR: migration script contains invalid Bash syntax: $migration"
+        report "red" "admin route migration failed: invalid migration script"
+        return 1
+    fi
 
-	if [ "$DRY_RUN" = "1" ]; then
-		if [ -n "$migration" ]; then
-			if bash "$migration" --dry-run; then
-				report "green" "admin route migration dry-run passed"
-			else
-				report "red" "admin route migration dry-run failed"
-				return 1
-			fi
-			return 0
-		fi
-		return 0
-	fi
+    if [ "${DRY_RUN:-0}" = "1" ]; then
+        mode="--dry-run"
+        success_message="admin route migration dry-run passed"
+    fi
 
-	if bash "$migration" --apply; then
-		report "green" "admin root redirect migration applied"
-	else
-		report "red" "admin root redirect migration failed"
-		return 1
-	fi
-	return 0
+    if ORVIX_CADDYFILE="$ORVIX_CADDYFILE" \
+       ORVIX_CADDY_BIN="$ORVIX_CADDY_BIN" \
+       ORVIX_SYSTEMCTL="$ORVIX_SYSTEMCTL" \
+       ORVIX_ADMIN_DOMAIN="${ORVIX_ADMIN_DOMAIN:-}" \
+       bash "$migration" "$mode"
+    then
+        report "green" "$success_message"
+        return 0
+    fi
+
+    if [ "$mode" = "--dry-run" ]; then
+        report "red" "admin route migration dry-run failed"
+    else
+        report "red" "admin root redirect migration failed"
+    fi
+    return 1
 }

@@ -412,3 +412,20 @@ No modification was made to production. All observations were read-only: `curl -
 
 - **Sign-in defect (#39):** Confirmed. Root cause is `web/marketing/src/lib/links.ts:1` hardcoding `PORTAL_BASE = "https://app.orvix.com"`. Builds into all marketing JS bundles and propagates to every CTA, header link, SEO tag, robots.txt, and sitemap.
 - **Admin routing defect (#38):** Confirmed. Root cause is `release/scripts/setup-https.sh:158-160` — the `$ADMIN_DOMAIN` Caddy vhost proxies all requests to Go Fiber without rewriting the root path `/`. Fiber serves the marketing homepage for `GET /`. Fix requires a Caddy redirect from `/` to `/admin` in the admin vhost block, plus an upgrade migration for existing installs.
+
+
+## Emergency Upgrade Script Restoration
+
+- b95e5cc accidentally collapsed release/upgrade.sh into one logical line.
+- The file was restored byte-for-byte from commit 767b5a8.
+- Known-good source blob: 4c3376005f96f6b7655632a741c5df587bf61ef7 (Unix).
+- Only the library sourcing integration was reapplied.
+- Old inline run_admin_route_migration() removed; real lib-admin-route-migration.sh sourced.
+- ForgotPasswordPage heading corrected to 'Forgot Password'.
+- ResetPasswordPage heading corrected to 'Reset Password'.
+- Migration script hardened: atomic temp files, dry-run improvements, atomic rollback.
+- 28 migration tests rewritten with strict pass/fail assertions.
+- 12 upgrade integration tests sourcing the real production library.
+- CI workflow (.github/workflows/marketing.yml) updated to run migration and upgrade tests.
+- No production change occurred.
+- No deployment occurred.

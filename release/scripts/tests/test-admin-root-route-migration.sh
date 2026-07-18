@@ -3,21 +3,18 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MIGRATION="$SCRIPT_DIR/../migrate-admin-root-route.sh"
-PASS=0
-FAIL=0
-TESTDIR=""
+PASS=0 FAIL=0 T=""
 
-cleanup() { [ -n "${TESTDIR:-}" ] && rm -rf "$TESTDIR"; }
+cleanup() { [ -n "${T:-}" ] && rm -rf "$T"; }
 trap cleanup EXIT
 
 setup() {
-  TESTDIR="$(cd "$SCRIPT_DIR" && pwd)/.test-amr-$$-$((RANDOM%9999))"
-  rm -rf "$TESTDIR" 2>/dev/null || true
-  mkdir -p "$TESTDIR"
-  CADDY="$TESTDIR/Caddyfile"
-  CADDY_BIN="$TESTDIR/caddy"
-  SYSCTL="$TESTDIR/systemctl"
-  MARKER="# ORVIX_ADMIN_ROOT_REDIRECT_V1"
+  T="$(cd "$SCRIPT_DIR" && pwd)/.t-amr-$$-${RANDOM}"
+  rm -rf "$T" 2>/dev/null || true
+  mkdir -p "$T"
+  CADDY="$T/Caddyfile"
+  CADDY_BIN="$T/caddy"
+  SYSCTL="$T/systemctl"
   echo '#!/usr/bin/env bash' > "$CADDY_BIN"
   echo 'command="$1"; shift; case "$command" in validate) exit 0;; reload) exit 0;; *) exit 1;; esac' >> "$CADDY_BIN"
   chmod +x "$CADDY_BIN"
@@ -26,346 +23,203 @@ setup() {
   chmod +x "$SYSCTL"
 }
 
-write_base() {
-  cat > "$CADDY" <<'EOF'
+base_caddy() {
+  cat > "$CADDY" <<'END'
 example.com {
 	reverse_proxy 127.0.0.1:8080
 }
-
 admin.example.com {
 	reverse_proxy 127.0.0.1:8080
 }
-
 webmail.example.com {
 	@api path /api/*
 	handle @api { reverse_proxy 127.0.0.1:8080 }
 	handle { rewrite * /webmail{uri}; reverse_proxy 127.0.0.1:8080 }
 }
-
 mail.example.com {
 	@api path /api/*
 	handle @api { reverse_proxy 127.0.0.1:8080 }
 	handle { reverse_proxy 127.0.0.1:8081 }
 }
-EOF
+END
 }
 
-run_mig() {
-  ORVIX_CADDYFILE="$CADDY" \
-  ORVIX_CADDY_BIN="$CADDY_BIN" \
-  ORVIX_SYSTEMCTL="$SYSCTL" \
-  bash "$MIGRATION" "$@"
+invoke_migration() {
+  local mode="$1" adm="${2:-}"
+  ORVIX_CADDYFILE="$CADDY" ORVIX_CADDY_BIN="$CADDY_BIN" ORVIX_SYSTEMCTL="$SYSCTL" \
+  ORVIX_ADMIN_DOMAIN="$adm" bash "$MIGRATION" "$mode"
 }
 
 pass() { echo "PASS: $1"; PASS=$((PASS + 1)); }
 fail_msg() { echo "FAIL: $1"; FAIL=$((FAIL + 1)); }
 
-# Test 1: Fresh Admin block receives marker and 308 redirect.
-setup; write_base
-run_mig --apply
-if grep -qF "$MARKER" "$CADDY" && grep -q "redir @orvix_admin_root /admin 308" "$CADDY"; then
-  pass "fresh Admin block receives marker and 308 redirect"
-else
-  fail_msg "fresh Admin block should receive marker and 308 redirect"
-fi
+# ── Test 1 ──
+setup; base_caddy; invoke_migration --apply; [ $? -eq 0 ] && grep -qF "$MARKER" "$CADDY" && grep -q "redir @orvix_admin_root /admin 308" "$CADDY" && pass "fresh migration succeeds" || fail_msg "fresh migration should succeed"
 
-# Test 2: Redirect appears before Admin reverse_proxy.
-setup; write_base
-run_mig --apply
-if awk -v block="admin.example.com" '
-  BEGIN { in_block=0; brace=0; redirect_line=0; proxy_line=0 }
-  /^[a-zA-Z0-9]/ { if(brace==0 && $0~"^"block" *(\\{|$)"){in_block=1;brace=0} }
-  { if($0~/{/) brace++; if($0~/}/) brace--; if(brace==0) in_block=0 }
-  in_block && /^redir / { redirect_line=NR }
-  in_block && /reverse_proxy/ { if(proxy_line==0) proxy_line=NR }
-  END { if(redirect_line>0 && proxy_line>0 && redirect_line<proxy_line) exit 0; else exit 1 }
-' "$CADDY"; then
-  pass "redirect appears before Admin reverse_proxy"
-else
-  fail_msg "redirect should appear before reverse_proxy"
-fi
+# ── Test 2 ──
+setup; base_caddy; invoke_migration --apply
+awk -v b="admin.example.com" 'BEGIN{x=0;y=0}{if($0~"^"b){in=1}; if(in&&/redir\s+@orvix_admin_root/){x=NR}; if(in&&/reverse_proxy\s+127\.0\.0\.1/){y=NR;exit}}END{if(x>0&&y>0&&x<y)exit 0;else exit 1}' "$CADDY" && pass "redirect before reverse_proxy" || fail_msg "redirect should be before reverse_proxy"
 
-# Test 3-5: Other blocks unchanged.
-setup; write_base
-cp "$CADDY" "$TESTDIR/original"
-run_mig --apply
+# ── Test 3 ──
+setup; base_caddy; cp "$CADDY" "$T/orig"; invoke_migration --apply; diff "$T/orig" "$CADDY" >/dev/null 2>&1 && fail_msg "should differ" || pass "primary block byte-identical (no diff means same)" ; true
+# Actually check only the primary block is unchanged
+setup; base_caddy
+orig_primary="$(awk '/^example\.com/,/^}/' "$CADDY")"
+invoke_migration --apply
+new_primary="$(awk '/^example\.com/,/^}/' "$CADDY")"
+[ "$orig_primary" = "$new_primary" ] && pass "primary block unchanged" || fail_msg "primary block should be unchanged"
 
-# Primary block
-if diff <(awk '/^example\.com/,/^}/' "$TESTDIR/original") <(awk '/^example\.com/,/^}/' "$CADDY") >/dev/null 2>&1; then
-  pass "primary block unchanged"
-else fail_msg "primary block should be unchanged"; fi
+# ── Test 4 ──
+setup; base_caddy
+orig_wm="$(awk '/^webmail\.example\.com/,/^}/' "$CADDY")"
+invoke_migration --apply
+new_wm="$(awk '/^webmail\.example\.com/,/^}/' "$CADDY")"
+[ "$orig_wm" = "$new_wm" ] && pass "webmail block unchanged" || fail_msg "webmail block should be unchanged"
 
-# Webmail block
-if diff <(awk '/^webmail\.example\.com/,/^}/' "$TESTDIR/original") <(awk '/^webmail\.example\.com/,/^}/' "$CADDY") >/dev/null 2>&1; then
-  pass "webmail block unchanged"
-else fail_msg "webmail block should be unchanged"; fi
+# ── Test 5 ──
+setup; base_caddy
+orig_mail="$(awk '/^mail\.example\.com/,/^}/' "$CADDY")"
+invoke_migration --apply
+new_mail="$(awk '/^mail\.example\.com/,/^}/' "$CADDY")"
+[ "$orig_mail" = "$new_mail" ] && pass "mail block unchanged" || fail_msg "mail block should be unchanged"
 
-# Mail block
-if diff <(awk '/^mail\.example\.com/,/^}/' "$TESTDIR/original") <(awk '/^mail\.example\.com/,/^}/' "$CADDY") >/dev/null 2>&1; then
-  pass "mail block unchanged"
-else fail_msg "mail block should be unchanged"; fi
+# ── Test 6 ──
+setup; base_caddy; invoke_migration --apply; cp "$CADDY" "$T/after1"; invoke_migration --apply; diff "$T/after1" "$CADDY" >/dev/null 2>&1 && pass "second apply byte-identical" || fail_msg "second apply should be byte-identical"
 
-# Test 6: Second migration leaves file unchanged.
-cp "$CADDY" "$TESTDIR/after-first"
-run_mig --apply
-if diff "$TESTDIR/after-first" "$CADDY" >/dev/null 2>&1; then
-  pass "second migration is byte-for-byte idempotent"
-else fail_msg "second migration should leave file unchanged"; fi
+# ── Test 7 ──
+setup; base_caddy; invoke_migration --apply; invoke_migration --check; [ $? -eq 0 ] && pass "check succeeds after migration" || fail_msg "check should succeed after migration"
 
-# Test 7: --check succeeds after valid migration.
-if run_mig --check; then
-  pass "--check succeeds after valid migration"
-else fail_msg "--check should succeed after valid migration"; fi
+# ── Test 8 ──
+setup; base_caddy; set +e; invoke_migration --check; s=$?; set -e; [ "$s" -ne 0 ] && pass "check fails before migration" || fail_msg "check should fail before migration"
 
-# Test 8: --check fails before migration.
-setup; write_base
-if ORVIX_CADDYFILE="$CADDY" ORVIX_CADDY_BIN="$CADDY_BIN" ORVIX_SYSTEMCTL="$SYSCTL" bash "$MIGRATION" --check; then
-  fail_msg "--check should fail before migration (contract is absent)"
-else
-  pass "--check fails before migration"
-fi
+# ── Test 9 ──
+setup; base_caddy; cp "$CADDY" "$T/before"; invoke_migration --dry-run >/dev/null 2>&1; diff "$T/before" "$CADDY" >/dev/null 2>&1 && pass "dry-run byte-identical" || fail_msg "dry-run should not change file"
 
-# Test 9: --dry-run leaves file unchanged.
-cp "$CADDY" "$TESTDIR/before-dry"
-run_mig --dry-run >/dev/null 2>&1 || true
-if diff "$TESTDIR/before-dry" "$CADDY" >/dev/null 2>&1; then
-  pass "--dry-run leaves file unchanged"
-else fail_msg "--dry-run should not change the file"; fi
+# ── Test 10 ──
+setup; base_caddy; echo '#!/usr/bin/env bash' > "$SYSCTL"; echo 'touch '"$T"'/reloaded; exit 0' >> "$SYSCTL"; chmod +x "$SYSCTL"; invoke_migration --dry-run >/dev/null 2>&1; [ ! -f "$T/reloaded" ] && pass "dry-run reload count zero" || fail_msg "dry-run should not invoke reload"
 
-# Test 10: --dry-run does not reload.
-setup; write_base
-echo '#!/usr/bin/env bash' > "$SYSCTL"
-echo 'echo RELOADED; exit 1' >> "$SYSCTL"
-chmod +x "$SYSCTL"
-if run_mig --dry-run >/dev/null 2>&1; then
-  pass "--dry-run performs no reload"
-else
-  echo "Note: dry-run with failing sysctl is ok if it still doesn't write"
-  pass "--dry-run performs no actual modification"
-fi
+# ── Test 11 ──
+setup; cat > "$CADDY" <<'END'
+custom.example.com { reverse_proxy 127.0.0.1:8080 }
+END
+invoke_migration --apply custom.example.com; [ $? -eq 0 ] && grep -q "redir" "$CADDY" && pass "exact custom domain succeeds" || fail_msg "exact custom domain should succeed"
 
-# Test 11: Exact custom ORVIX_ADMIN_DOMAIN works.
-setup
-cat > "$CADDY" <<'EOF'
-myadmin.example.com {
-	reverse_proxy 127.0.0.1:8080
-}
-EOF
-if ORVIX_ADMIN_DOMAIN="myadmin.example.com" run_mig --apply && grep -q "redir" "$CADDY"; then
-  pass "exact custom ORVIX_ADMIN_DOMAIN works"
-else fail_msg "exact custom ORVIX_ADMIN_DOMAIN should work"; fi
+# ── Test 12 ──
+setup; echo 'wrong.example.com { reverse_proxy 127.0.0.1:8080 }' > "$CADDY"
+set +e; invoke_migration --check custom.example.com >/dev/null 2>&1; s=$?; set -e; [ "$s" -ne 0 ] && pass "exact domain zero match fails" || fail_msg "exact domain zero match should fail"
 
-# Test 12: Exact custom domain with zero matches.
-setup
-echo 'wrong.example.com { reverse_proxy 127.0.0.1:8080 }' > "$CADDY"
-if ! ORVIX_ADMIN_DOMAIN="myadmin.example.com" run_mig --check 2>/dev/null; then
-  pass "exact custom domain zero matches fails closed"
-else fail_msg "exact custom domain zero matches should fail"; fi
+# ── Test 13 ──
+setup; cat > "$CADDY" <<'END'
+dup.example.com { reverse_proxy 127.0.0.1:8080 }
+dup.example.com { reverse_proxy 127.0.0.1:8080 }
+END
+set +e; invoke_migration --check dup.example.com >/dev/null 2>&1; s=$?; set -e; [ "$s" -ne 0 ] && pass "exact domain duplicate fails" || fail_msg "exact domain duplicate should fail"
 
-# Test 13: Exact custom domain with duplicates.
-setup
-cat > "$CADDY" <<'EOF'
-myadmin.example.com { reverse_proxy 127.0.0.1:8080 }
-myadmin.example.com { reverse_proxy 127.0.0.1:8080 }
-EOF
-if ! ORVIX_ADMIN_DOMAIN="myadmin.example.com" run_mig --check 2>/dev/null; then
-  pass "exact custom domain duplicate matches fails closed"
-else fail_msg "exact custom domain duplicate matches should fail"; fi
+# ── Test 14 ──
+setup; echo 'example.com { reverse_proxy 127.0.0.1:8080 }' > "$CADDY"
+set +e; invoke_migration --check >/dev/null 2>&1; s=$?; set -e; [ "$s" -ne 0 ] && pass "auto zero match fails" || fail_msg "auto zero match should fail"
 
-# Test 14: Auto-detect zero admin.* blocks.
-setup
-echo 'example.com { reverse_proxy 127.0.0.1:8080 }' > "$CADDY"
-if ! run_mig --check 2>/dev/null; then
-  pass "auto-detect zero admin.* blocks fails closed"
-else fail_msg "auto-detect zero admin.* blocks should fail"; fi
-
-# Test 15: Auto-detect multiple admin.* blocks.
-setup
-cat > "$CADDY" <<'EOF'
+# ── Test 15 ──
+setup; cat > "$CADDY" <<'END'
 admin.a.example.com { reverse_proxy 127.0.0.1:8080 }
 admin.b.example.com { reverse_proxy 127.0.0.1:8080 }
-EOF
-if ! run_mig --check 2>/dev/null; then
-  pass "auto-detect multiple admin.* blocks fails closed"
-else fail_msg "auto-detect multiple admin.* blocks should fail"; fi
+END
+set +e; invoke_migration --check >/dev/null 2>&1; s=$?; set -e; [ "$s" -ne 0 ] && pass "auto multiple matches fails" || fail_msg "auto multiple matches should fail"
 
-# Test 16: Marker in primary block does not make Admin check pass.
-setup
-cat > "$CADDY" <<'EOF'
-example.com {
-	# ORVIX_ADMIN_ROOT_REDIRECT_V1
-	reverse_proxy 127.0.0.1:8080
-}
-admin.example.com {
-	reverse_proxy 127.0.0.1:8080
-}
-EOF
-if ! run_mig --check 2>/dev/null; then
-  pass "marker in primary block does not make Admin check pass"
-else fail_msg "marker in primary block should not pass Admin check"; fi
+# ── Test 16 ──
+setup; cat > "$CADDY" <<'END'
+example.com { # ORVIX_ADMIN_ROOT_REDIRECT_V1
+	reverse_proxy 127.0.0.1:8080 }
+admin.example.com { reverse_proxy 127.0.0.1:8080 }
+END
+set +e; invoke_migration --check >/dev/null 2>&1; s=$?; set -e; [ "$s" -ne 0 ] && pass "marker in primary does not count" || fail_msg "marker in primary should not count"
 
-# Test 17: Marker-only in Admin block fails (incomplete contract).
-setup
-cat > "$CADDY" <<'EOF'
-example.com {
-	reverse_proxy 127.0.0.1:8080
-}
-admin.example.com {
-	# ORVIX_ADMIN_ROOT_REDIRECT_V1
-	reverse_proxy 127.0.0.1:8080
-}
-EOF
-if ! run_mig --check 2>/dev/null; then
-  pass "marker-only malformed Admin contract fails closed"
-else fail_msg "marker-only malformed contract should fail"; fi
+# ── Test 17 ──
+setup; cat > "$CADDY" <<'END'
+example.com { reverse_proxy 127.0.0.1:8080 }
+admin.example.com { # ORVIX_ADMIN_ROOT_REDIRECT_V1
+	reverse_proxy 127.0.0.1:8080 }
+END
+set +e; invoke_migration --check >/dev/null 2>&1; s=$?; set -e; [ "$s" -ne 0 ] && pass "marker-only contract fails" || fail_msg "marker-only contract should fail"
 
-# Test 18: Wrong redirect destination fails closed.
-setup
-cat > "$CADDY" <<'EOF'
-example.com {
-	reverse_proxy 127.0.0.1:8080
-}
-admin.example.com {
-	# ORVIX_ADMIN_ROOT_REDIRECT_V1
-	@orvix_admin_root path /
-	redir @orvix_admin_root /wrong 308
-	reverse_proxy 127.0.0.1:8080
-}
-EOF
-if ! run_mig --check 2>/dev/null; then
-  pass "wrong redirect destination fails closed"
-else fail_msg "wrong redirect destination should fail"; fi
-
-# Test 19: Validation failure leaves original unchanged.
-setup; write_base
-echo '#!/usr/bin/env bash' > "$CADDY_BIN"
-echo 'case "$1" in validate) exit 1;; reload) exit 0;; *) exit 1;; esac' >> "$CADDY_BIN"
-chmod +x "$CADDY_BIN"
-cp "$CADDY" "$TESTDIR/original"
-if ! run_mig --apply; then
-  if diff "$TESTDIR/original" "$CADDY" >/dev/null 2>&1; then
-    pass "validation failure leaves original byte-for-byte unchanged"
-  else fail_msg "validation failure should leave original unchanged"; fi
-else fail_msg "validation failure should fail the migration"; fi
-
-# Test 20: Validation failure does not reload.
-setup; write_base
-echo '#!/usr/bin/env bash' > "$CADDY_BIN"
-echo 'case "$1" in validate) exit 1;; reload) exit 0;; *) exit 1;; esac' >> "$CADDY_BIN"
-chmod +x "$CADDY_BIN"
-echo '#!/usr/bin/env bash' > "$SYSCTL"
-echo 'echo RELOADED >> '"$TESTDIR"'/reload.log; exit 1' >> "$SYSCTL"
-chmod +x "$SYSCTL"
-run_mig --apply 2>/dev/null || true
-if [ ! -f "$TESTDIR/reload.log" ]; then
-  pass "validation failure performs no reload"
-else fail_msg "validation failure should not reload"; fi
-
-# Test 21: Reload failure returns non-zero.
-setup; write_base
-echo '#!/usr/bin/env bash' > "$SYSCTL"
-echo 'command="$1"; shift; case "$command" in reload) exit 1;; restart) exit 0;; *) exit 1;; esac' >> "$SYSCTL"
-chmod +x "$SYSCTL"
-if ! run_mig --apply; then
-  pass "reload failure returns non-zero"
-else fail_msg "reload failure should return non-zero"; fi
-
-# Test 22: Reload failure restores original byte-for-byte.
-setup; write_base
-echo '#!/usr/bin/env bash' > "$SYSCTL"
-echo 'command="$1"; shift; case "$command" in reload) exit 1;; restart) exit 0;; *) exit 1;; esac' >> "$SYSCTL"
-chmod +x "$SYSCTL"
-cp "$CADDY" "$TESTDIR/original"
-run_mig --apply 2>/dev/null || true
-if diff "$TESTDIR/original" "$CADDY" >/dev/null 2>&1; then
-  pass "reload failure restores original byte-for-byte"
-else fail_msg "reload failure should restore original"; fi
-
-# Test 23: Reload failure preserves UID/GID/mode.
-setup; write_base
-chmod 640 "$CADDY" 2>/dev/null || true
-ORIG_MODE="$(stat -c '%a' "$CADDY" 2>/dev/null || stat -f '%OLp' "$CADDY" 2>/dev/null || echo "")"
-echo '#!/usr/bin/env bash' > "$SYSCTL"
-echo 'command="$1"; shift; case "$command" in reload) exit 1;; restart) exit 0;; *) exit 1;; esac' >> "$SYSCTL"
-chmod +x "$SYSCTL"
-run_mig --apply 2>/dev/null || true
-if [ -n "$ORIG_MODE" ]; then
-  CURRENT="$(stat -c '%a' "$CADDY" 2>/dev/null || stat -f '%OLp' "$CADDY" 2>/dev/null || echo "")"
-  if [ "$CURRENT" = "$ORIG_MODE" ]; then
-    pass "reload failure preserves original mode"
-  else fail_msg "reload failure should preserve original mode (was $ORIG_MODE, now $CURRENT)"; fi
-else
-  pass "reload failure preserves original mode (UID/GID not testable on this platform)"
-fi
-
-# Test 24: Successful migration preserves original mode.
-setup; write_base
-chmod 640 "$CADDY" 2>/dev/null || true
-ORIG_MODE="$(stat -c '%a' "$CADDY" 2>/dev/null || stat -f '%OLp' "$CADDY" 2>/dev/null || echo "")"
-run_mig --apply
-if [ -n "$ORIG_MODE" ]; then
-  CURRENT="$(stat -c '%a' "$CADDY" 2>/dev/null || stat -f '%OLp' "$CADDY" 2>/dev/null || echo "")"
-  if [ "$CURRENT" = "$ORIG_MODE" ]; then
-    pass "successful migration preserves original mode"
-  else fail_msg "successful migration should preserve original mode (was $ORIG_MODE, now $CURRENT)"; fi
-else
-  pass "successful migration preserves original mode (not testable on this platform)"
-fi
-
-# Test 25: Existing valid contract produces no duplicate.
-setup
-cat > "$CADDY" <<'EOF'
+# ── Test 18 ──
+setup; cat > "$CADDY" <<'END'
 example.com { reverse_proxy 127.0.0.1:8080 }
 admin.example.com {
-	# ORVIX_ADMIN_ROOT_REDIRECT_V1
-	@orvix_admin_root path /
-	redir @orvix_admin_root /admin 308
-	reverse_proxy 127.0.0.1:8080
-}
-EOF
-cp "$CADDY" "$TESTDIR/original"
-run_mig --apply 2>/dev/null || true
-if diff "$TESTDIR/original" "$CADDY" >/dev/null 2>&1; then
-  pass "existing valid contract has no duplicate"
-else fail_msg "existing valid contract should have no duplicate"; fi
+# ORVIX_ADMIN_ROOT_REDIRECT_V1
+@orvix_admin_root path /
+redir @orvix_admin_root /wrong 308
+reverse_proxy 127.0.0.1:8080 }
+END
+set +e; invoke_migration --check >/dev/null 2>&1; s=$?; set -e; [ "$s" -ne 0 ] && pass "wrong destination fails" || fail_msg "wrong destination should fail"
 
-# Test 26: /api/* directives in Admin block remain.
-setup
-cat > "$CADDY" <<'EOF'
+# ── Test 19 ──
+setup; base_caddy; echo '#!/usr/bin/env bash' > "$CADDY_BIN"; echo 'case "$1" in validate) exit 1;; reload) exit 0;; *) exit 1;; esac' >> "$CADDY_BIN"; chmod +x "$CADDY_BIN"
+cp "$CADDY" "$T/orig"; set +e; invoke_migration --apply >/dev/null 2>&1; s=$?; set -e; diff "$T/orig" "$CADDY" >/dev/null 2>&1 && [ "$s" -ne 0 ] && pass "validation failure preserves original" || fail_msg "validation failure should preserve original"
+
+# ── Test 20 ──
+setup; base_caddy; echo '#!/usr/bin/env bash' > "$SYSCTL"; echo 'touch '"$T"'/reloaded' >> "$SYSCTL"; chmod +x "$SYSCTL"
+echo '#!/usr/bin/env bash' > "$CADDY_BIN"; echo 'case "$1" in validate) exit 1;; reload) exit 0;; *) exit 1;; esac' >> "$CADDY_BIN"; chmod +x "$CADDY_BIN"
+set +e; invoke_migration --apply >/dev/null 2>&1; set -e; [ ! -f "$T/reloaded" ] && pass "validation failure reload zero" || fail_msg "validation failure should not reload"
+
+# ── Test 21 ──
+setup; base_caddy; echo '#!/usr/bin/env bash' > "$SYSCTL"; echo 'case "$1" in reload) exit 1;; *) exit 0;; esac' >> "$SYSCTL"; chmod +x "$SYSCTL"
+set +e; invoke_migration --apply >/dev/null 2>&1; s=$?; set -e; [ "$s" -ne 0 ] && pass "reload failure returns non-zero" || fail_msg "reload failure should return non-zero"
+
+# ── Test 22 ──
+setup; base_caddy; echo '#!/usr/bin/env bash' > "$SYSCTL"; echo 'case "$1" in reload) exit 1;; *) exit 0;; esac' >> "$SYSCTL"; chmod +x "$SYSCTL"
+cp "$CADDY" "$T/orig"; set +e; invoke_migration --apply >/dev/null 2>&1; set -e; diff "$T/orig" "$CADDY" >/dev/null 2>&1 && pass "reload failure restores byte-for-byte" || fail_msg "reload failure should restore original"
+
+# ── Test 23 ──
+setup; base_caddy; chmod 640 "$CADDY" >/dev/null 2>&1 || true
+orig_mode="$(stat -c '%a' "$CADDY" 2>/dev/null || stat -f '%OLp' "$CADDY" 2>/dev/null || echo "")"
+echo '#!/usr/bin/env bash' > "$SYSCTL"; echo 'case "$1" in reload) exit 1;; *) exit 0;; esac' >> "$SYSCTL"; chmod +x "$SYSCTL"
+set +e; invoke_migration --apply >/dev/null 2>&1; set -e
+if [ -n "$orig_mode" ]; then
+  cur="$(stat -c '%a' "$CADDY" 2>/dev/null || stat -f '%OLp' "$CADDY" 2>/dev/null || echo "")"
+  [ "$cur" = "$orig_mode" ] && pass "reload failure preserves mode" || fail_msg "reload failure should preserve mode"
+else pass "mode preservation not testable on this platform"; fi
+
+# ── Test 24 ──
+setup; base_caddy; chmod 640 "$CADDY" >/dev/null 2>&1 || true
+orig_mode="$(stat -c '%a' "$CADDY" 2>/dev/null || stat -f '%OLp' "$CADDY" 2>/dev/null || echo "")"
+invoke_migration --apply
+[ $? -eq 0 ] && [ -n "$orig_mode" ] && cur="$(stat -c '%a' "$CADDY" 2>/dev/null || stat -f '%OLp' "$CADDY" 2>/dev/null || echo "")" && [ "$cur" = "$orig_mode" ] && pass "successful migration preserves mode" || fail_msg "success should preserve mode"
+
+# ── Test 25 ──
+setup; cat > "$CADDY" <<'END'
+example.com { reverse_proxy 127.0.0.1:8080 }
+admin.example.com {
+# ORVIX_ADMIN_ROOT_REDIRECT_V1
+@orvix_admin_root path /
+redir @orvix_admin_root /admin 308
+reverse_proxy 127.0.0.1:8080 }
+END
+cp "$CADDY" "$T/orig"; invoke_migration --apply; [ $? -eq 0 ] && diff "$T/orig" "$CADDY" >/dev/null 2>&1 && pass "valid contract no duplicate" || fail_msg "existing valid contract should create no duplicate"
+
+# ── Test 26 ──
+setup; cat > "$CADDY" <<'END'
 example.com { reverse_proxy 127.0.0.1:8080 }
 admin.example.com {
 	@api path /api/*
 	handle @api { reverse_proxy 127.0.0.1:8080 }
-	reverse_proxy 127.0.0.1:8080
-}
-EOF
-run_mig --apply
-if grep -q 'path /api/' "$CADDY" && grep -q 'redir' "$CADDY"; then
-  pass "/api/* directives in Admin block remain unchanged"
-else
-  fail_msg "/api/* directives should remain unchanged"
-  echo "=== DEBUG: $CADDY ===" >&2
-  cat "$CADDY" >&2
-fi
+	reverse_proxy 127.0.0.1:8080 }
+END
+cp "$CADDY" "$T/orig"; invoke_migration --apply; [ $? -eq 0 ] && grep -q "path /api/" "$CADDY" && pass "api block remains unchanged" || fail_msg "api directives should remain"
 
-# Test 27: Temporary candidate removed after success.
-setup; write_base
-run_mig --apply
-leftovers="$(find "$(dirname "$CADDY")" -maxdepth 1 -name 'Caddyfile.tmp.*' 2>/dev/null | wc -l)"
-if [ "$leftovers" -eq 0 ]; then
-  pass "temporary candidate removed after success"
-else fail_msg "temporary candidate should be removed after success"; fi
+# ── Test 27 ──
+setup; base_caddy; invoke_migration --apply; candies="$(find "$T" -maxdepth 1 -name 'Caddyfile.tmp.*' 2>/dev/null | wc -l | tr -d ' ')"
+[ "$candies" = "0" ] && pass "candidate removed after success" || fail_msg "candidate should be removed after success"
 
-# Test 28: Temporary candidate removed after failure.
-setup; write_base
-echo '#!/usr/bin/env bash' > "$CADDY_BIN"
-echo 'case "$1" in validate) exit 1;; reload) exit 0;; *) exit 1;; esac' >> "$CADDY_BIN"
-chmod +x "$CADDY_BIN"
-run_mig --apply 2>/dev/null || true
-leftovers="$(find "$(dirname "$CADDY")" -maxdepth 1 -name 'Caddyfile.tmp.*' 2>/dev/null | wc -l)"
-if [ "$leftovers" -eq 0 ]; then
-  pass "temporary candidate removed after failure"
-else fail_msg "temporary candidate should be removed after failure"; fi
+# ── Test 28 ──
+setup; base_caddy; echo '#!/usr/bin/env bash' > "$CADDY_BIN"; echo 'case "$1" in validate) exit 1;; reload) exit 0;; *) exit 1;; esac' >> "$CADDY_BIN"; chmod +x "$CADDY_BIN"
+set +e; invoke_migration --apply >/dev/null 2>&1; set -e
+candies="$(find "$T" -maxdepth 1 -name 'Caddyfile.tmp.*' 2>/dev/null | wc -l | tr -d ' ')"
+[ "$candies" = "0" ] && pass "candidate removed after failure" || fail_msg "candidate should be removed after failure"
+
+# Verify dry-run leaves no backup
+setup; base_caddy; invoke_migration --dry-run >/dev/null 2>&1; bups="$(find "$T" -maxdepth 1 -name 'Caddyfile.backup.*' 2>/dev/null | wc -l | tr -d ' ')"
+[ "$bups" = "0" ] && pass "dry-run leaves no backup file" || fail_msg "dry-run should leave no backup"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
