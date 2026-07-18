@@ -13,7 +13,7 @@ set -euo pipefail
 # `orvix-linux-amd64` in the current working directory; this is
 # the supported path on a hardened VPS where outbound HTTP is
 # not allowed. Operators who DO want to fetch from a release
-# server must pass --from-url explicitly â€” the script no longer
+# server must pass --from-url explicitly GÇö the script no longer
 # hits https://releases.orvix.email by default because that
 # domain does not exist in this build.
 #
@@ -22,7 +22,7 @@ set -euo pipefail
 #      flow) BEFORE invoking this script. upgrade.sh makes a
 #      backup of /etc/orvix and the binary, but it cannot
 #      snapshot a running SQLite database without a
-#      coordinated `VACUUM INTO` â€” that's the runtime's job.
+#      coordinated `VACUUM INTO` GÇö that's the runtime's job.
 #   2. Read /etc/orvix/orvix.yaml after upgrade for any new
 #      required fields.
 #   3. Verify the SHA256 of the new binary against
@@ -52,6 +52,9 @@ ORVIX_SOURCE_DIR="${ORVIX_SOURCE_DIR:-$(pwd)}"
 ORVIX_UPGRADE_LOCK="${ORVIX_UPGRADE_LOCK:-/run/lock/orvix-upgrade.lock}"
 ORVIX_REQUIRE_RELEASE_SIGNATURE="${ORVIX_REQUIRE_RELEASE_SIGNATURE:-1}"
 ORVIX_RELEASE_VERIFYING_KEY_FILE="${ORVIX_RELEASE_VERIFYING_KEY_FILE:-}"
+ORVIX_CADDYFILE="${ORVIX_CADDYFILE:-/etc/caddy/Caddyfile}"
+ORVIX_CADDY_BIN="${ORVIX_CADDY_BIN:-caddy}"
+ORVIX_SYSTEMCTL="${ORVIX_SYSTEMCTL:-systemctl}"
 
 # Admin + webmail UI deployment targets. The upgrade path MUST
 # propagate both trees, not just the binary; otherwise a fresh
@@ -67,7 +70,7 @@ ORVIX_RELEASE_WEBMAIL_SRC="${ORVIX_RELEASE_WEBMAIL_SRC:-$ORVIX_SOURCE_DIR/releas
 ORVIX_RELEASE_MARKETING_SRC="${ORVIX_RELEASE_MARKETING_SRC:-$ORVIX_SOURCE_DIR/release/marketing}"
 
 # Source the asset-propagation library. BLOCKER 3 (fail-closed):
-# the lib is REQUIRED â€” a backend upgrade MUST ship the matching
+# the lib is REQUIRED GÇö a backend upgrade MUST ship the matching
 # admin + webmail static assets. If the lib is missing from the
 # release tree we abort before any state is mutated, so the
 # operator never sees a green upgrade report on a half-propagated
@@ -174,6 +177,33 @@ report() {
         *)      printf '       %s\n' "$msg" ;;
     esac
 }
+# Source the admin route migration library.
+LIB_ADMIN_ROUTE_MIGRATION=""
+for candidate in \
+    "$ORVIX_SOURCE_DIR/release/scripts/lib-admin-route-migration.sh" \
+    "/usr/share/orvix/scripts/lib-admin-route-migration.sh"
+do
+    if [ -f "$candidate" ]; then
+        LIB_ADMIN_ROUTE_MIGRATION="$candidate"
+        break
+    fi
+done
+
+if [ -z "$LIB_ADMIN_ROUTE_MIGRATION" ]; then
+    fail "lib-admin-route-migration.sh not found; refusing to run an incomplete upgrade"
+fi
+
+if ! bash -n "$LIB_ADMIN_ROUTE_MIGRATION"; then
+    fail "lib-admin-route-migration.sh contains invalid Bash syntax"
+fi
+
+# shellcheck disable=SC1090
+. "$LIB_ADMIN_ROUTE_MIGRATION"
+
+if ! declare -F run_admin_route_migration >/dev/null 2>&1; then
+    fail "lib-admin-route-migration.sh did not define run_admin_route_migration"
+fi
+
 
 require_root() {
     [ "$(id -u)" -eq 0 ] || fail "must be run as root (or with sudo)"
@@ -361,7 +391,7 @@ run_doctor() {
 }
 
 # preflight_backup copies every file the upgrade path needs to
-# be able to roll back from â€” binary, config, db, jwt, vapid keys,
+# be able to roll back from GÇö binary, config, db, jwt, vapid keys,
 # dkim keys, license, bootstrap env. Each target is logged with its
 # SHA256 so the operator can later sanity-check the rollback.
 preflight_backup() {
@@ -381,6 +411,7 @@ preflight_backup() {
         "$ORVIX_BACKUP_ENCRYPTION_KEY" \
         /etc/orvix/license.json \
         /etc/orvix/bootstrap.env \
+        "$ORVIX_CADDYFILE" \
         "$ORVIX_DATA_DIR/license-cache.json"
     do
         if [ -e "$file" ]; then
@@ -430,7 +461,7 @@ full_rollback() {
     if [ -z "$backup_dir" ] || [ ! -d "$backup_dir" ]; then
         fail "cannot roll back: no backup directory available"
     fi
-    log "ROLLBACK: rolling back â€” restoring from $backup_dir"
+    log "ROLLBACK: rolling back GÇö restoring from $backup_dir"
 
     local item dest
     local rolled=0
@@ -519,11 +550,9 @@ full_rollback() {
 # report. We now refuse to call the new service healthy until BOTH
 # asset trees have been propagated successfully; if propagation
 # fails after the pre-copy backup has been taken, the asset lib
-# itself rolls the destination back from the backup.
+
 propagate_assets() {
 	if [ -z "$LIB_ASSET_PROPAGATE" ] || ! command -v asset_propagate >/dev/null 2>&1; then
-		# Lib missing. This is a HARD failure: a backend upgrade
-		# MUST ship the matching admin + webmail static assets.
 		log "ERROR: lib-asset-propagate.sh not sourced; refusing to upgrade with stale admin/webmail assets."
 		report "red" "asset propagation library missing; refusing to upgrade (BLOCKER 3 fail-closed)"
 		return 1
@@ -655,6 +684,13 @@ install_and_restart() {
 		report "red" "asset propagation failed (BLOCKER 3 fail-closed); rolling back binary to previous state"
 		full_rollback "$BACKUP_DIR"
 		fail "asset propagation failed; rolled back to previous binary"
+	fi
+
+	report "" "--- Caddy Admin Route Migration ---"
+	if ! run_admin_route_migration; then
+		report "red" "admin route migration failed"
+		full_rollback "$BACKUP_DIR"
+		fail "admin route migration failed; rolled back"
 	fi
 
     report "" "--- Restart ---"

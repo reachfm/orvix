@@ -70,6 +70,13 @@ jobs:
           npm --prefix web/marketing run build
           find web/marketing/dist -type f -print0 | sort -z | xargs -0 sha256sum > /tmp/marketing-second.sha
           diff -u /tmp/marketing-first.sha /tmp/marketing-second.sha
+      - name: Admin routing migration contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash release/scripts/tests/test-public-origin-contract.sh
+          bash release/scripts/tests/test-admin-root-route-migration.sh
+          bash release/scripts/tests/test-upgrade-admin-route-migration.sh
       - name: Server route and installer tests
         shell: bash
         run: |

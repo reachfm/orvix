@@ -77,9 +77,9 @@ func TestMarketingSPADeepLinksAndExistingUISurvive(t *testing.T) {
 		status int
 		want   string
 	}{
-		{path: "/", status: 200, want: `rel="canonical" href="https://orvix.com/"`},
-		{path: "/pricing", status: 200, want: `rel="canonical" href="https://orvix.com/pricing"`},
-		{path: "/pricing/", status: 200, want: `rel="canonical" href="https://orvix.com/pricing"`},
+		{path: "/", status: 200, want: `rel="canonical" href="https://orvix.email/"`},
+		{path: "/pricing", status: 200, want: `rel="canonical" href="https://orvix.email/pricing"`},
+		{path: "/pricing/", status: 200, want: `rel="canonical" href="https://orvix.email/pricing"`},
 		{path: marketingAssetURL, status: 200},
 		{path: "/robots.txt", status: 200, want: "Sitemap:"},
 		{path: "/admin", status: 200, want: "<title>Orvix Admin</title>"},

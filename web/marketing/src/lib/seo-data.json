@@ -1,6 +1,6 @@
 {
   "siteName": "Orvix",
-  "siteBaseUrl": "https://orvix.com",
+  "siteBaseUrl": "https://orvix.email",
   "routes": {
     "/": { "title": "Orvix — Email hosting for teams that need it to work", "description": "Professional email hosting with custom domains, encrypted transport, DKIM, MFA, and admin controls. Start free with up to 5 mailboxes on 1 domain." },
     "/pricing": { "title": "Pricing — Orvix", "description": "Orvix plans start free and scale from $9.99 per month. Compare the real plan catalog, limits, and included capabilities." },

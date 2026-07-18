@@ -38,7 +38,7 @@ const FAQ_ITEMS: FaqItem[] = [
   },
   {
     q: "Can I get a refund?",
-    a: "Refund requests must be sent to billing@orvix.com within 14 days. Eligibility is reviewed against the applicable terms and order.",
+    a: "Refund requests must be sent to billing@orvix.email within 14 days. Eligibility is reviewed against the applicable terms and order.",
   },
 ];
 

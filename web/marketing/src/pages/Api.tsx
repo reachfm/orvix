@@ -4,7 +4,7 @@ import Hero from "../components/Hero";
 import Section from "../components/Section";
 import Container from "../components/Container";
 import Illustration from "../components/Illustration";
-import { DOCS_BASE } from "../lib/links";
+import { DOCS_BASE, CANONICAL } from "../lib/links";
 
 const ENDPOINTS = [
   { method: "GET", path: "/api/v1/health", summary: "Public service liveness probe." },
@@ -24,7 +24,7 @@ export default function Api() {
       <Hero eyebrow="API" heading="The documented Orvix HTTP API" subheading="Public health and plan endpoints plus authenticated customer and enterprise operations. The OpenAPI document is the authority for request and response details." primaryCta={{ to: `${DOCS_BASE}/api`, label: "Read the API reference", external: true }} secondaryCta={{ to: "/contact", label: "Contact us" }} illustration={<Illustration variant="api-explorer" height={360} />} />
 
       <Section alt eyebrow="Public example" heading="Check service health" lede="This endpoint proves API liveness only. It is not a promise that every mail protocol or dependency is healthy.">
-        <Container width="narrow"><pre className="card-static" style={{ overflowX: "auto" }}><code>{`curl -fsS https://app.orvix.com/api/v1/health`}</code></pre></Container>
+        <Container width="narrow"><pre className="card-static" style={{ overflowX: "auto" }}><code>{`curl -fsS ${CANONICAL.api}/health`}</code></pre></Container>
       </Section>
 
       <Section eyebrow="Selected routes" heading="A verified subset" lede="These paths are registered by the server. Consult the OpenAPI reference for authentication, CSRF, fields, and errors.">

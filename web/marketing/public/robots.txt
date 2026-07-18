@@ -2,4 +2,4 @@ User-agent: *
 Allow: /
 Disallow: /api/
 
-Sitemap: https://orvix.com/sitemap.xml
+Sitemap: https://orvix.email/sitemap.xml

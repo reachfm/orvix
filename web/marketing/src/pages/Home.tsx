@@ -44,7 +44,7 @@ const FAQ_ITEMS: FaqItem[] = [
   },
   {
     q: "How do I report a vulnerability?",
-    a: "Email security@orvix.com. The security page has our disclosure policy and PGP key.",
+    a: "Email security@orvix.email. The security page has our disclosure policy and PGP key.",
   },
 ];
 
@@ -203,7 +203,7 @@ export default function Home() {
           <CapabilityBlock
             icon={Globe}
             title="Your domain, your identity"
-            body="Mail for your own domain, not a shared orvix.com address. Set up DKIM and DMARC in minutes — we give you the exact DNS records to publish."
+            body="Mail for your own domain, not a shared orvix.email address. Set up DKIM and DMARC in minutes — we give you the exact DNS records to publish."
             href="/security"
             hrefLabel="Read the security overview"
           />

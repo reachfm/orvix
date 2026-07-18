@@ -60,7 +60,7 @@ export default function LegalPrivacy() {
             </ul>
             <p>
               To exercise any of these rights, email{" "}
-              <a href="mailto:privacy@orvix.com">privacy@orvix.com</a>. We
+              <a href="mailto:privacy@orvix.email">privacy@orvix.email</a>. We
               will process requests under the applicable policy and law.
             </p>
 
@@ -84,7 +84,7 @@ export default function LegalPrivacy() {
 
             <h2>Contact</h2>
             <p>
-              Email <a href="mailto:privacy@orvix.com">privacy@orvix.com</a>{" "}
+              Email <a href="mailto:privacy@orvix.email">privacy@orvix.email</a>{" "}
               with any questions.
             </p>
           </div>

@@ -33,14 +33,14 @@ describe("Portal browser acceptance", () => {
   it("shows forgot password page", async () => {
     const { default: ForgotPasswordPage } = await import("./ForgotPasswordPage");
     render(<Wrapper><ForgotPasswordPage /></Wrapper>);
-    expect(screen.getByText("Reset Password")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Forgot Password" })).toBeInTheDocument();
     expect(screen.getByText("Send Reset Link")).toBeInTheDocument();
   });
 
   it("shows reset password page", async () => {
     const { default: ResetPasswordPage } = await import("./ResetPasswordPage");
     render(<Wrapper><ResetPasswordPage /></Wrapper>);
-    expect(screen.getByText("Set New Password")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Reset Password" })).toBeInTheDocument();
   });
 
   it("renders account settings with profile and password sections", async () => {

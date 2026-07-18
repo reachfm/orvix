@@ -35,7 +35,7 @@ export default function Security() {
           <Card icon={KeyRound} title="Account protection">TOTP MFA, login protection, session controls, and protocol-level access settings are implemented.</Card>
           <Card icon={Eye} title="Auditability">Administrative actions and security-sensitive operations are recorded through the audit facilities exposed by the product.</Card>
           <Card icon={Server} title="Deployment responsibility">Storage encryption, backup location, retention, host hardening, and residency are deployment choices, not universal website promises.</Card>
-          <Card icon={Mail} title="Responsible disclosure">Report reproducible security issues to security@orvix.com. Do not include credentials or unrelated personal data.</Card>
+          <Card icon={Mail} title="Responsible disclosure">Report reproducible security issues to security@orvix.email. Do not include credentials or unrelated personal data.</Card>
         </div>
         <style>{`@media (max-width: 880px) { .three-col { grid-template-columns: 1fr !important; } }`}</style>
       </Section>
@@ -53,7 +53,7 @@ export default function Security() {
               <li>Steps that reproduce the issue and the observed impact.</li>
               <li>A safe contact address for follow-up.</li>
             </ul>
-            <p style={{ marginBottom: 0 }}><a href="mailto:security@orvix.com" className="btn btn-primary"><Mail size={16} aria-hidden="true" />Email security@orvix.com</a></p>
+            <p style={{ marginBottom: 0 }}><a href="mailto:security@orvix.email" className="btn btn-primary"><Mail size={16} aria-hidden="true" />Email security@orvix.email</a></p>
           </div>
         </Container>
       </Section>

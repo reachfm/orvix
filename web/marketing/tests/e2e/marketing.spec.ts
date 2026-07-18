@@ -24,8 +24,8 @@ test("unknown production route returns the prerendered 404", async ({ page }) =>
 
 test("portal and documentation links leave the marketing origin", async ({ page }) => {
   await page.goto("/");
-  await expect(page.locator('a[href="https://app.orvix.com/login"]')).not.toHaveCount(0);
-  await expect(page.locator('a[href="https://app.orvix.com/signup"]')).not.toHaveCount(0);
+  await expect(page.locator('a[href="https://admin.orvix.email/admin/login"]')).not.toHaveCount(0);
+  await expect(page.locator('a[href="https://admin.orvix.email/admin/signup"]')).not.toHaveCount(0);
   await page.goto("/docs");
   const docsLinks = page.locator('a[href^="https://docs.orvix.email"]');
   await expect(docsLinks.first()).toBeVisible();

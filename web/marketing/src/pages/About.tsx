@@ -43,7 +43,7 @@ const TEAM_PLACEHOLDERS = [
   {
     role: "Security",
     body:
-      "Security reports can be sent to security@orvix.com. The security page explains what information to include.",
+      "Security reports can be sent to security@orvix.email. The security page explains what information to include.",
   },
 ];
 
@@ -197,10 +197,10 @@ export default function About() {
               gap: "var(--sp-3)",
             }}
           >
-            <Row icon={Mail} label="General" value="hello@orvix.com" href="mailto:hello@orvix.com" />
-            <Row icon={Briefcase} label="Sales" value="sales@orvix.com" href="mailto:sales@orvix.com" />
-            <Row icon={Building} label="Press" value="press@orvix.com" href="mailto:press@orvix.com" />
-            <Row icon={Heart} label="Careers" value="careers@orvix.com" href="mailto:careers@orvix.com" />
+            <Row icon={Mail} label="General" value="hello@orvix.email" href="mailto:hello@orvix.email" />
+            <Row icon={Briefcase} label="Sales" value="sales@orvix.email" href="mailto:sales@orvix.email" />
+            <Row icon={Building} label="Press" value="press@orvix.email" href="mailto:press@orvix.email" />
+            <Row icon={Heart} label="Careers" value="careers@orvix.email" href="mailto:careers@orvix.email" />
           </ul>
         </Container>
       </Section>

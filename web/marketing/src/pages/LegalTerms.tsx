@@ -160,7 +160,7 @@ export default function LegalTerms() {
             <h2>15. Contact</h2>
             <p>
               Questions about these terms? Email{" "}
-              <a href="mailto:legal@orvix.com">legal@orvix.com</a>.
+              <a href="mailto:legal@orvix.email">legal@orvix.email</a>.
             </p>
           </div>
         </Container>
