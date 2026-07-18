@@ -44,7 +44,7 @@ export default class ErrorBoundary extends Component<Props, State> {
           <p>
             We&apos;ve logged the error. In the meantime, you can{" "}
             <a href="/">return to the home page</a> or{" "}
-            <a href="mailto:support@orvix.com">tell us what happened</a>.
+            <a href="mailto:support@orvix.email">tell us what happened</a>.
           </p>
         </div>
       );

@@ -14,7 +14,7 @@ export default function SEO({ path, title, description, noindex, jsonLd }: SEOPr
   const finalTitle = title ?? fallback?.title ?? SITE_NAME;
   const finalDescription = description ?? fallback?.description ?? "";
   const canonicalUrl = canonical(path);
-  const ogImage = "https://orvix.com/favicon.svg";
+  const ogImage = "/favicon.svg";
 
   useEffect(() => {
     document.title = finalTitle;

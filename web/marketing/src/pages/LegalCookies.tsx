@@ -18,7 +18,7 @@ export default function LegalCookies() {
         <h2>Changing preferences</h2>
         <p>You can clear site data using your browser controls. Necessary preferences may be created again when you use the corresponding site control.</p>
         <h2>Contact</h2>
-        <p>Email <a href="mailto:privacy@orvix.com">privacy@orvix.com</a> with cookie or privacy questions.</p>
+        <p>Email <a href="mailto:privacy@orvix.email">privacy@orvix.email</a> with cookie or privacy questions.</p>
       </div></Container></Section>
     </>
   );

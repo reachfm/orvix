@@ -94,7 +94,7 @@ export default function LegalAup() {
             <h2>Reporting violations</h2>
             <p>
               If you see something on Orvix that violates this policy, email{" "}
-              <a href="mailto:abuse@orvix.com">abuse@orvix.com</a> with the
+              <a href="mailto:abuse@orvix.email">abuse@orvix.email</a> with the
               message ID, the source address, and a description of the issue.
               Reports are reviewed through the abuse process.
             </p>

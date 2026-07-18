@@ -27,7 +27,7 @@ export default function LegalData() {
             <p>Retention is controlled by product behavior and operator configuration. This page does not promise a universal backup-retention or deletion schedule. Confirm the schedule for the deployment covered by your agreement.</p>
 
             <h2>Privacy requests</h2>
-            <p>Email <a href="mailto:privacy@orvix.com">privacy@orvix.com</a> with the account, organization, and request type. Identity and authority may need to be verified before a request is processed.</p>
+            <p>Email <a href="mailto:privacy@orvix.email">privacy@orvix.email</a> with the account, organization, and request type. Identity and authority may need to be verified before a request is processed.</p>
 
             <h2>Security controls</h2>
             <p>The <a href="/security">security page</a> separates implemented product controls from deployment-dependent controls. It does not represent an external certification.</p>

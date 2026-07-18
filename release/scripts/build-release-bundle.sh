@@ -194,6 +194,7 @@ REQUIRED_FILES=(
     release/scripts/publish-github-release.sh
     release/scripts/verify-github-release-assets.sh
     release/scripts/verify-fresh-vps-one-command.sh
+    release/scripts/check-public-origin-contract.sh
     release/admin/app.js
     release/admin/index.html
     release/admin/styles.css
@@ -263,6 +264,13 @@ GOOS="$TARGET_OS" GOARCH="$TARGET_ARCH" CGO_ENABLED=0 \
     "$GO_BIN" build -trimpath -ldflags "$(IFS=' '; echo "${LDFLAGS[*]}")" \
     -o "$BIN_OUT" ./cmd/orvix \
     || fail "go build failed" 2
+
+# Fail closed: ensure no forbidden domain references in marketing assets.
+# Runs before bundle assembly so we never ship stale or incorrect URLs.
+info "checking public origin contract"
+if ! bash release/scripts/check-public-origin-contract.sh; then
+    fail "public origin contract check failed — forbidden domains found in marketing assets"
+fi
 
 # On Windows, Go always appends .exe to the binary name (even for
 # Linux cross-compilation targets) so the resulting binary can be

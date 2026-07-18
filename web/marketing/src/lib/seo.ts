@@ -33,7 +33,7 @@ export function organizationLd(): string {
     contactPoint: [{
       "@type": "ContactPoint",
       contactType: "customer support",
-      email: "support@orvix.com",
+      email: "support@orvix.email",
       availableLanguage: ["English", "Arabic"],
     }],
   });

@@ -20,11 +20,11 @@ export default function ContactForm() {
   const [message, setMessage] = useState("");
 
   const addressBySubject: Record<Subject, string> = {
-    sales: "sales@orvix.com",
-    support: "support@orvix.com",
-    security: "security@orvix.com",
-    press: "press@orvix.com",
-    other: "hello@orvix.com",
+    sales: "sales@orvix.email",
+    support: "support@orvix.email",
+    security: "security@orvix.email",
+    press: "press@orvix.email",
+    other: "hello@orvix.email",
   };
 
   const body = `Name: ${name}\nEmail: ${email}\nOrganization: ${org}\n\n${message}`;
@@ -177,7 +177,7 @@ export default function ContactForm() {
           }}
         >
           Or email us directly at{" "}
-          <a href="mailto:hello@orvix.com">hello@orvix.com</a>. For account
+          <a href="mailto:hello@orvix.email">hello@orvix.email</a>. For account
           questions, please{" "}
           <a href={PORTAL_LOGIN} style={{ color: "var(--accent)" }}>
             sign in
@@ -201,19 +201,19 @@ export function ContactSidebar() {
         icon={Building}
         title="Sales"
         body="Quotes, demos, and procurement questions."
-        address="sales@orvix.com"
+        address="sales@orvix.email"
       />
       <SidebarItem
         icon={MessageSquare}
         title="Support"
         body="Account, billing, and product questions. Existing customers can also use in-product support."
-        address="support@orvix.com"
+        address="support@orvix.email"
       />
       <SidebarItem
         icon={Mail}
         title="Security disclosure"
         body="Coordinated disclosure for reproducible vulnerabilities."
-        address="security@orvix.com"
+        address="security@orvix.email"
       />
     </aside>
   );

@@ -36,6 +36,9 @@ export default function LoginPage() {
             {login.isPending ? "Signing in..." : "Sign In"}
           </button>
           {login.error && <p className="text-red-400 text-sm">{login.error.message}</p>}
+          <p className="text-sm text-gray-500 mt-4">
+            Don't have an account? <a href="/admin/signup" className="text-[#4F7CFF] hover:underline">Create account</a>
+          </p>
         </div>
       </div>
     </div>

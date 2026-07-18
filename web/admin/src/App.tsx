@@ -127,6 +127,24 @@ export default function App() {
     setCurrentTab(tabMap[route] || "dashboard");
   };
 
+  const tabFromPath = (path: string): Tab => {
+    if (path === "/admin" || path === "/admin/" || path === "/admin/login") return "login";
+    if (path === "/admin/signup") return "signup";
+    if (path === "/admin/forgot-password") return "forgot-password";
+    if (path === "/admin/reset-password") return "reset-password";
+    return "dashboard";
+  };
+
+  useEffect(() => {
+    const onPopState = () => setCurrentTab(tabFromPath(window.location.pathname));
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
+  useEffect(() => {
+    setCurrentTab(tabFromPath(window.location.pathname));
+  }, []);
+
   if (authLoading) {
     return <div className="h-screen bg-[#0C0E12] flex items-center justify-center"><p className="text-gray-400">Loading...</p></div>;
   }

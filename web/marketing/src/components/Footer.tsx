@@ -26,7 +26,7 @@ const COLUMNS = [
     links: [
       { to: "/about", label: "About" },
       { to: "/contact", label: "Contact" },
-      { to: "mailto:careers@orvix.com", label: "Careers" },
+      { to: "mailto:careers@orvix.email", label: "Careers" },
     ],
   },
   {

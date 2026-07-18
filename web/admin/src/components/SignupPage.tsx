@@ -38,6 +38,9 @@ export default function SignupPage() {
             {signup.isPending ? "Creating..." : "Create Account"}
           </button>
           {signup.error && <p className="text-red-400 text-sm">{signup.error.message}</p>}
+          <p className="text-sm text-gray-500 mt-4">
+            Already have an account? <a href="/admin/login" className="text-[#4F7CFF] hover:underline">Sign in</a>
+          </p>
         </div>
       </div>
     </div>
