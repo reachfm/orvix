@@ -69,6 +69,15 @@ ORVIX_RELEASE_ADMIN_SRC="${ORVIX_RELEASE_ADMIN_SRC:-$ORVIX_SOURCE_DIR/release/ad
 ORVIX_RELEASE_WEBMAIL_SRC="${ORVIX_RELEASE_WEBMAIL_SRC:-$ORVIX_SOURCE_DIR/release/webmail}"
 ORVIX_RELEASE_MARKETING_SRC="${ORVIX_RELEASE_MARKETING_SRC:-$ORVIX_SOURCE_DIR/release/marketing}"
 
+log() {
+    printf '[%s] %s\n' "$(date -Is)" "$*" >&2
+}
+
+fail() {
+    printf '%bERROR:%b %s\n' "$RED" "$NC" "$*" >&2
+    exit 1
+}
+
 # Source the asset-propagation library. BLOCKER 3 (fail-closed):
 # the lib is REQUIRED G�� a backend upgrade MUST ship the matching
 # admin + webmail static assets. If the lib is missing from the
