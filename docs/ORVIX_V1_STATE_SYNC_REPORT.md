@@ -53,27 +53,28 @@ Historical bodies preserved unchanged. No falsification of historical results.
 | #34 | Correct inbound/local-delivery classification in Queue UI | bug |
 | #35 | Complete Web Push and VAPID end-to-end delivery | bug |
 
+| #38 | Fix Admin portal entry route serving the marketing homepage | bug |
+| #39 | Fix orvix.email production links pointing to orvix.com | bug |
+
 ## 7. Master Tracking Issue
 
 **#36 — Orvix V1 Release Gate**
 https://github.com/reachfm/orvix/issues/36
 
-Contains checkbox list linking to all 8 issues above, plus authoritative main SHA, deployment status, and release approval status.
+Updated 2026-07-18 to include production website and portal routing (#38, #39).
+
+Contains checkbox list linking to all 10 issues above, plus authoritative main SHA, deployment status, and release approval status.
 
 ## 8. Files Committed
 
-15 files:
-- `CHANGELOG.md` (new)
-- `docs/ORVIX_V1_SOURCE_OF_TRUTH.md` (new)
-- `docs/ORVIX_V1_RELEASE_CHECKLIST.md` (new)
-- `docs/ORVIX_DEPLOYMENT_STATE.md` (new)
-- `docs/ORVIX_TECHNICAL_DECISIONS.md` (new)
-- `docs/ORVIX_MANDATORY_TRUTHFUL_REPORT.md` (modified — SUPERSEDED banner)
-- 9 historical reports (added with SUPERSEDED banners)
+15 files (first commit). Amended in a second commit:
+- `docs/ORVIX_V1_SOURCE_OF_TRUTH.md` (updated — two new product defects)
+- `docs/ORVIX_V1_RELEASE_CHECKLIST.md` (updated — new D section, re-lettered A-M)
+- `docs/ORVIX_V1_STATE_SYNC_REPORT.md` (updated — new issues, updated counts)
 
 ## 9. Commit SHA
 
-*Will be set after commit.*
+*Will be set after second commit.*
 
 ## 10. Pull Request
 

@@ -116,6 +116,18 @@ These are confirmed issues existing on `main` (commit `e7f5441`):
 6. **Test timing sensitivity** — `TestMetadataArgs_FastExit` fails under
    Windows filesystem timing (~65s vs expected <10s). Pre-existing.
 
+7. **Production links pointing to orvix.com** — Confirmed: the Sign in
+   button on `https://orvix.email/api` targets `https://app.orvix.com/login`
+   instead of the canonical `orvix.email` domain. Multiple CTA and link
+   paths are affected across marketing, webmail, admin, and API pages.
+   GitHub Issue #39.
+
+8. **Admin portal entry route serves marketing homepage** — Confirmed:
+   navigating to the Admin portal URL renders the public marketing
+   homepage instead of the Admin application or login page. The SPA
+   fallback or reverse-proxy routing is capturing Admin paths and
+   redirecting to the marketing site. GitHub Issue #38.
+
 ## Known Unresolved Engineering Findings
 
 1. **gosec informational findings** — Multiple gosec findings exist.
