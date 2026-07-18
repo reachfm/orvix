@@ -5,9 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
-	"net/smtp"
 	"time"
 
 	"go.uber.org/zap"
@@ -75,15 +73,40 @@ func (as *AlertSender) sendSMTP(cfg struct {
 	WebhookEnabled bool
 	WebhookURL     string
 }, event AlertEvent) {
-	addr := net.JoinHostPort(cfg.SMTPServer, fmt.Sprintf("%d", cfg.SMTPPort))
 	subject := fmt.Sprintf("[Orvix Alert] %s - %s", event.Severity, event.Type)
 	body := fmt.Sprintf("Subject: %s\r\n\r\nAlert: %s\r\nSeverity: %s\r\nIP: %s\r\nEmail: %s\r\nTime: %d",
 		subject, event.Message, event.Severity, event.IP, event.Email, event.Timestamp)
 
-	auth := smtp.PlainAuth("", cfg.SMTPUsername, cfg.SMTPPassword, cfg.SMTPServer)
-	err := smtp.SendMail(addr, auth, cfg.SMTPFrom, nil, []byte(body))
+	client, err := DialSMTPWithTLS(cfg.SMTPServer, cfg.SMTPPort, cfg.SMTPUsername, cfg.SMTPPassword)
 	if err != nil {
-		as.logger.Error("smtp alert failed", zap.Error(err))
+		as.logger.Error("smtp alert dial failed", zap.Error(err))
+		return
+	}
+	defer client.Close()
+
+	if err := client.Mail(cfg.SMTPFrom); err != nil {
+		as.logger.Error("smtp alert MAIL FROM failed", zap.Error(err))
+		return
+	}
+	if err := client.Rcpt(cfg.SMTPFrom); err != nil {
+		as.logger.Error("smtp alert RCPT TO failed", zap.Error(err))
+		return
+	}
+	w, err := client.Data()
+	if err != nil {
+		as.logger.Error("smtp alert DATA failed", zap.Error(err))
+		return
+	}
+	if _, err := w.Write([]byte(body)); err != nil {
+		as.logger.Error("smtp alert write failed", zap.Error(err))
+		return
+	}
+	if err := w.Close(); err != nil {
+		as.logger.Error("smtp alert close failed", zap.Error(err))
+		return
+	}
+	if err := client.Quit(); err != nil {
+		as.logger.Error("smtp alert quit failed", zap.Error(err))
 	}
 }
 

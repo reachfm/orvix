@@ -1400,7 +1400,7 @@ func TestInstallerWriteConfigRendersValidYAML(t *testing.T) {
 	// no Linux-only stat bits).
 	harness := strings.Replace(installer,
 		`main "$@"`,
-		fmt.Sprintf(`chown() { :; }; chmod() { :; }; ORVIX_CONFIG="$1"; write_config "%s"; cat "$ORVIX_CONFIG"`, domain),
+		fmt.Sprintf(`chown() { :; }; chmod() { :; }; ORVIX_DB_DRIVER=sqlite; ORVIX_CONFIG="$1"; write_config "%s"; cat "$ORVIX_CONFIG"`, domain),
 		1,
 	)
 	harnessDir := t.TempDir()
@@ -1554,7 +1554,7 @@ func TestInstallerWriteConfigBindsInternalToLoopback(t *testing.T) {
 	const domain = "example.com"
 	harness := strings.Replace(installer,
 		`main "$@"`,
-		fmt.Sprintf(`chown() { :; }; chmod() { :; }; ORVIX_CONFIG="$1"; write_config "%s"; cat "$ORVIX_CONFIG"`, domain),
+		fmt.Sprintf(`chown() { :; }; chmod() { :; }; ORVIX_DB_DRIVER=sqlite; ORVIX_CONFIG="$1"; write_config "%s"; cat "$ORVIX_CONFIG"`, domain),
 		1,
 	)
 	harnessDir := t.TempDir()
@@ -2756,7 +2756,7 @@ func TestProvisionConfigFreshInstallWritesSafeDefaults(t *testing.T) {
 	const domain = "example.com"
 	harness := strings.Replace(installer,
 		`main "$@"`,
-		fmt.Sprintf(`chown() { :; }; chmod() { :; }; ORVIX_CONFIG="$1"; INSTALL_LOG="%s/install.log"; touch "$INSTALL_LOG"; provision_config "%s"; cat "$ORVIX_CONFIG"`, "$2", domain),
+		fmt.Sprintf(`chown() { :; }; chmod() { :; }; ORVIX_DB_DRIVER=sqlite; ORVIX_CONFIG="$1"; INSTALL_LOG="%s/install.log"; touch "$INSTALL_LOG"; provision_config "%s"; cat "$ORVIX_CONFIG"`, "$2", domain),
 		1,
 	)
 	harnessDir := t.TempDir()
@@ -3187,7 +3187,7 @@ func TestInstallerWriteConfigRendersDNSPublicIPv4(t *testing.T) {
 	// file, pass the public IP as second arg, cat the result.
 	harness := strings.Replace(installer,
 		`main "$@"`,
-		fmt.Sprintf(`chown() { :; }; chmod() { :; }; ORVIX_CONFIG="$1"; write_config "%s" "%s"; cat "$ORVIX_CONFIG"`, domain, publicIPv4),
+		fmt.Sprintf(`chown() { :; }; chmod() { :; }; ORVIX_DB_DRIVER=sqlite; ORVIX_CONFIG="$1"; write_config "%s" "%s"; cat "$ORVIX_CONFIG"`, domain, publicIPv4),
 		1,
 	)
 	harnessDir := t.TempDir()
@@ -3453,7 +3453,7 @@ func TestInstallerWriteConfigNeverInfersPublicIPFromSMTPHost(t *testing.T) {
 	const domain = "example.com"
 	harness := strings.Replace(installer,
 		`main "$@"`,
-		fmt.Sprintf(`chown() { :; }; chmod() { :; }; ORVIX_CONFIG="$1"; write_config "%s" ""; cat "$ORVIX_CONFIG"`, domain),
+		fmt.Sprintf(`chown() { :; }; chmod() { :; }; ORVIX_DB_DRIVER=sqlite; ORVIX_CONFIG="$1"; write_config "%s" ""; cat "$ORVIX_CONFIG"`, domain),
 		1,
 	)
 	harnessDir := t.TempDir()
@@ -4394,7 +4394,7 @@ func TestInstallerFreshInstallUsesValidatedPublicIP(t *testing.T) {
 	const expectedIP = "65.75.203.74"
 	harness := strings.Replace(installer,
 		`main "$@"`,
-		fmt.Sprintf(`chown() { :; }; chmod() { :; }; ORVIX_CONFIG="$1"; ORVIX_PUBLIC_IPV4=%q; write_config "%s" "$(if is_valid_public_ipv4 "$ORVIX_PUBLIC_IPV4"; then echo "$ORVIX_PUBLIC_IPV4"; else detect_public_ipv4_from_host_ips; fi)"; cat "$ORVIX_CONFIG"`, expectedIP, domain),
+		fmt.Sprintf(`chown() { :; }; chmod() { :; }; ORVIX_DB_DRIVER=sqlite; ORVIX_CONFIG="$1"; ORVIX_PUBLIC_IPV4=%q; write_config "%s" "$(if is_valid_public_ipv4 "$ORVIX_PUBLIC_IPV4"; then echo "$ORVIX_PUBLIC_IPV4"; else detect_public_ipv4_from_host_ips; fi)"; cat "$ORVIX_CONFIG"`, expectedIP, domain),
 		1,
 	)
 	dir := t.TempDir()

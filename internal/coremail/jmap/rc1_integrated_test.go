@@ -14,7 +14,6 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -22,7 +21,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/orvix/orvix/internal/adminapi"
 	"github.com/orvix/orvix/internal/coremail"
 	"github.com/orvix/orvix/internal/coremail/delivery"
 	"github.com/orvix/orvix/internal/coremail/imap"
@@ -30,7 +28,6 @@ import (
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/smtp"
 	"github.com/orvix/orvix/internal/coremail/storage"
-	"github.com/orvix/orvix/internal/queuemgmt"
 	_ "modernc.org/sqlite"
 )
 
@@ -331,15 +328,6 @@ func startRC1JMAP(t *testing.T, env *rc1IntegratedEnv) string {
 	waitTCP(t, addr)
 	t.Cleanup(func() { srv.Stop() })
 	return addr
-}
-
-func startRC1Admin(t *testing.T, env *rc1IntegratedEnv) string {
-	t.Helper()
-	srv := adminapi.NewServer(env.eng)
-	srv.SetQueueService(queuemgmt.NewService(env.qe, nil))
-	ts := httptest.NewServer(srv.Handler())
-	t.Cleanup(ts.Close)
-	return strings.TrimPrefix(ts.URL, "http://")
 }
 
 func seedLocalDelivery(t *testing.T, env *rc1IntegratedEnv, mbox *coremail.Mailbox) (*storage.Message, *queue.QueueEntry) {

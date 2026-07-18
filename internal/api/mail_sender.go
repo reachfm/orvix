@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/orvix/orvix/internal/api/handlers"
+	"github.com/orvix/orvix/internal/auth"
 	"go.uber.org/zap"
 )
 
@@ -33,11 +34,42 @@ func (s *smtpMailSender) Send(to, subject, body string) error {
 	addr := fmt.Sprintf("%s:%d", s.host, s.port)
 	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s",
 		s.from, to, subject, body)
+
 	if s.username != "" && s.password != "" {
-		auth := smtp.PlainAuth("", s.username, s.password, s.host)
-		return smtp.SendMail(addr, auth, s.from, []string{to}, []byte(msg))
+		// Authenticated mode — require TLS.
+		client, err := s.dialAuthenticated()
+		if err != nil {
+			return fmt.Errorf("SMTP dial: %w", err)
+		}
+		defer client.Close()
+
+		if err := client.Mail(s.from); err != nil {
+			return fmt.Errorf("SMTP MAIL FROM: %w", err)
+		}
+		if err := client.Rcpt(to); err != nil {
+			return fmt.Errorf("SMTP RCPT TO: %w", err)
+		}
+		w, err := client.Data()
+		if err != nil {
+			return fmt.Errorf("SMTP DATA: %w", err)
+		}
+		if _, err := w.Write([]byte(msg)); err != nil {
+			return fmt.Errorf("SMTP write: %w", err)
+		}
+		if err := w.Close(); err != nil {
+			return fmt.Errorf("SMTP close: %w", err)
+		}
+		return client.Quit()
 	}
+
+	// Unauthenticated mode — use standard smtp.SendMail which supports STARTTLS.
 	return smtp.SendMail(addr, nil, s.from, []string{to}, []byte(msg))
+}
+
+// dialAuthenticated establishes a TLS-secured SMTP connection and authenticates
+// via the shared auth.DialSMTPWithTLS helper.
+func (s *smtpMailSender) dialAuthenticated() (*smtp.Client, error) {
+	return auth.DialSMTPWithTLS(s.host, s.port, s.username, s.password)
 }
 
 type noopMailSender struct{}

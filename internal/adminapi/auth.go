@@ -1,3 +1,5 @@
+//go:build legacy_adminapi
+
 package adminapi
 
 import (

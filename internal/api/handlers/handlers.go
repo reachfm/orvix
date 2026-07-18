@@ -642,11 +642,28 @@ func (h *Handler) Login(c fiber.Ctx) error {
 		zap.Uint("user_id", userID),
 		zap.String("role", userRole))
 
-	if !h.auth.VerifyPassword(req.Password, passwordHash) {
+	result := auth.VerifyPasswordWithRehash(req.Password, passwordHash)
+	if !result.Valid {
 		h.logger.Warn("password verification failed",
 			zap.String("email", loginEmail),
 			zap.Uint("user_id", userID))
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid credentials"})
+	}
+
+	if result.NeedsRehash {
+		newHash, hashErr := h.auth.HashPassword(req.Password)
+		if hashErr == nil {
+			res, execErr := sqlDB.Exec(
+				"UPDATE users SET password_hash = "+h.dialect.Placeholder(1)+" WHERE id = "+h.dialect.Placeholder(2)+" AND password_hash = "+h.dialect.Placeholder(3),
+				newHash, userID, passwordHash,
+			)
+			if execErr == nil {
+				if n, _ := res.RowsAffected(); n > 0 {
+					h.logger.Info("password rehashed to Argon2id",
+						zap.Uint("user_id", userID))
+				}
+			}
+		}
 	}
 
 	h.security.RecordSuccessfulLogin(c.IP())

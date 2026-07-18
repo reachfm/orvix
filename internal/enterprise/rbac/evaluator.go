@@ -73,23 +73,40 @@ func (e *Evaluator) hasGroupGrant(ctx context.Context, userID uint, perm rbacpkg
 }
 
 func (e *Evaluator) CanManageTenant(role auth.Role, actorTenantID, targetTenantID uint) bool {
-	if role == auth.RoleSuperAdmin {
+	if role == auth.RolePlatformSuperAdmin || role == auth.RoleSuperAdmin {
 		return true
 	}
 	return actorTenantID > 0 && actorTenantID == targetTenantID
 }
 
 func (e *Evaluator) CanAccessDomain(role auth.Role, actorTenantID, domainTenantID uint) bool {
-	if role == auth.RoleSuperAdmin {
+	if role == auth.RolePlatformSuperAdmin || role == auth.RoleSuperAdmin {
 		return true
 	}
 	return actorTenantID > 0 && actorTenantID == domainTenantID
 }
 
+// IsPlatformRole returns true if the role is a platform-scoped role.
+// These roles have no customer tenant ownership and can perform
+// cross-tenant operations.
 func IsPlatformRole(role auth.Role) bool {
-	return role == auth.RoleSuperAdmin || role == auth.RoleAdmin
+	switch role {
+	case auth.RolePlatformSuperAdmin, auth.RoleSuperAdmin, auth.RoleAdmin:
+		return true
+	default:
+		return false
+	}
 }
 
+// IsTenantRole returns true if the role is a tenant-scoped role.
+// These roles belong to exactly one customer tenant.
 func IsTenantRole(role auth.Role) bool {
-	return role == auth.RoleOperator || role == auth.RoleReadOnly || role == auth.RoleUser
+	switch role {
+	case auth.RoleTenantAdmin, auth.RoleTenantOperator, auth.RoleTenantSupport,
+		auth.RoleTenantReadOnly, auth.RoleUser, auth.RoleOperator,
+		auth.RoleReadOnly, auth.RoleBilling:
+		return true
+	default:
+		return false
+	}
 }

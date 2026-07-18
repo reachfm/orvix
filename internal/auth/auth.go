@@ -19,7 +19,6 @@ import (
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/dbdialect"
 	"go.uber.org/zap"
-	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
 
@@ -34,35 +33,106 @@ var (
 type Role string
 
 const (
+	// ── Canonical roles (v2+) ─────────────────────────────────
+	// Platform-scoped: no tenant ownership.
+	// Platform Super Admin: full platform access, no customer tenant.
+	RolePlatformSuperAdmin Role = "platform_super_admin"
+
+	// Tenant-scoped: belong to exactly one tenant.
+	RoleTenantAdmin    Role = "tenant_admin"
+	RoleTenantOperator Role = "tenant_operator"
+	RoleTenantSupport  Role = "tenant_support"
+	RoleTenantReadOnly Role = "tenant_readonly"
+
+	// ── Legacy role aliases (v1 compatibility) ─────────────────
+	// These are accepted as input during migration but are not the
+	// canonical persisted form for new accounts.
+
 	// RoleSuperAdmin has every permission, including license
 	// management and system-wide destructive operations.
+	// Deprecated: use RolePlatformSuperAdmin.
 	RoleSuperAdmin Role = "superadmin"
 
 	// RoleAdmin has every permission EXCEPT license.write. A
 	// license change is reserved for super_admin because it can
 	// affect feature flags and tier enforcement. The
 	// permission matrix lives in internal/auth/rbac.
+	// Deprecated: ambiguous — use RolePlatformSuperAdmin or
+	// RoleTenantAdmin depending on tenant_id presence.
 	RoleAdmin Role = "admin"
 
 	// RoleOperator is a helpdesk persona: read everything, act
 	// on queue and users, but cannot modify settings, backups,
 	// or license.
+	// Deprecated: use RoleTenantOperator for tenant-scoped.
 	RoleOperator Role = "operator"
 
 	// RoleReadOnly is an auditor / observer. Read everything,
 	// write nothing.
+	// Deprecated: use RoleTenantReadOnly for tenant-scoped.
 	RoleReadOnly Role = "readonly"
 
 	// RoleUser is the per-mailbox end-user role (webmail).
-	// It does NOT have admin permissions; it is here for
-	// legacy callers that distinguish "admin or not" only.
+	// It does NOT have admin permissions.
 	RoleUser Role = "user"
 
-	// RoleBilling is a tenant billing-only role. Read access to
-	// tenant resources but no domain/mailbox/member mutations.
-	// Billing management only (subscription, usage, invoices).
+	// RoleBilling is a tenant billing-only role.
 	RoleBilling Role = "billing"
 )
+
+// NormalizeRole maps legacy role strings to their canonical counterparts.
+// Returns the normalized role and whether the original value was valid.
+// Returns (Role(""), false) for unknown/invalid roles.
+//
+// Migration rules:
+//
+//	tenant_id IS NOT NULL + "admin" → "tenant_admin"
+//	tenant_id IS NULL + "superadmin"/"super_admin"/"super-admin" → "platform_super_admin"
+//	tenant_id IS NULL + "admin" → FAIL (ambiguous, requires manual review)
+//	tenant_id IS NOT NULL + "operator" → "tenant_operator"
+//	tenant_id IS NOT NULL + "readonly"/"read_only" → "tenant_readonly"
+//	tenant_id IS NOT NULL + "support" → "tenant_support"
+//	"user" → "user" (unchanged)
+//	"billing" → "billing" (unchanged)
+func NormalizeRole(role Role, tenantID *int64) (Role, bool) {
+	switch role {
+	case RolePlatformSuperAdmin, RoleTenantAdmin, RoleTenantOperator,
+		RoleTenantSupport, RoleTenantReadOnly:
+		// Already canonical.
+		return role, true
+	case "super_admin", "super-admin", RoleSuperAdmin:
+		return RolePlatformSuperAdmin, true
+	case RoleUser:
+		return RoleUser, true
+	case RoleBilling:
+		return RoleBilling, true
+	case RoleAdmin:
+		// Ambiguous: needs tenant_id to determine mapping.
+		if tenantID != nil && *tenantID > 0 {
+			return RoleTenantAdmin, true
+		}
+		// No tenant or nil tenant → ambiguous. Return as-is, caller
+		// must decide (typically fail closed for migration).
+		return RoleAdmin, false
+	case "support":
+		if tenantID != nil && *tenantID > 0 {
+			return RoleTenantSupport, true
+		}
+		return RoleTenantSupport, true // platform support is unsupported; map to tenant
+	case "read_only", "readonly":
+		if tenantID != nil && *tenantID > 0 {
+			return RoleTenantReadOnly, true
+		}
+		return RoleTenantReadOnly, true
+	case "operator":
+		if tenantID != nil && *tenantID > 0 {
+			return RoleTenantOperator, true
+		}
+		return RoleTenantOperator, true
+	default:
+		return "", false
+	}
+}
 
 // Authenticator handles JWT-based authentication with Argon2id password hashing.
 type Authenticator struct {
@@ -176,12 +246,30 @@ func (a *Authenticator) GenerateAccessTokenWithJTI(userID uint, role Role) (stri
 	if err != nil {
 		return "", "", time.Time{}, fmt.Errorf("failed to generate token id: %w", err)
 	}
+
+	// Fetch current token_version from database to embed in JWT.
+	// Gracefully handles pre-migration databases where the column
+	// may not exist yet (COALESCE would fail).
+	var tokenVersion int64 = 0
+	if a.db != nil {
+		var currentTV int64
+		// Try raw SQL first, fallback to 0 on any error (column missing,
+		// table missing, etc.).
+		row := a.db.Raw("SELECT COALESCE(token_version, 0) FROM users WHERE id = ?", userID).Row()
+		if row != nil {
+			if err := row.Scan(&currentTV); err == nil {
+				tokenVersion = currentTV
+			}
+		}
+	}
+
 	claims := jwt.MapClaims{
-		"sub":  fmt.Sprintf("%d", userID),
-		"role": string(role),
-		"iat":  now.Unix(),
-		"exp":  exp.Unix(),
-		"jti":  jti,
+		"sub":           fmt.Sprintf("%d", userID),
+		"role":          string(role),
+		"iat":           now.Unix(),
+		"exp":           exp.Unix(),
+		"jti":           jti,
+		"token_version": tokenVersion,
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
@@ -286,6 +374,23 @@ func (a *Authenticator) ValidateAccessToken(tokenString string) (uint, Role, err
 	var userID uint
 	fmt.Sscanf(claims["sub"].(string), "%d", &userID)
 	role, _ := claims["role"].(string)
+
+	// Validate token_version from database. If the user's version was
+	// bumped (role change, suspension, password reset), the old token
+	// is rejected even if the JWT signature is valid.
+	if a.db != nil {
+		if tvClaim, hasTV := claims["token_version"].(float64); hasTV {
+			var currentTV int64
+			row := a.db.Raw("SELECT COALESCE(token_version, 0) FROM users WHERE id = ?", userID).Row()
+			if row != nil {
+				if err := row.Scan(&currentTV); err == nil {
+					if int64(tvClaim) != currentTV {
+						return 0, "", ErrTokenInvalid
+					}
+				}
+			}
+		}
+	}
 
 	return userID, Role(role), nil
 }
@@ -432,19 +537,29 @@ func (a *Authenticator) InvalidateOtherSessions(userID uint, currentTokenHash st
 	return nil
 }
 
-// HashPassword hashes a password using bcrypt.
+// HashPassword hashes a password using Argon2id via the centralized
+// password package. Returns the encoded hash or an error.
 func (a *Authenticator) HashPassword(password string) (string, error) {
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if err != nil {
-		return "", fmt.Errorf("failed to hash password: %w", err)
-	}
-	return string(hash), nil
+	return HashPassword(password)
 }
 
-// VerifyPassword verifies a password against bcrypt hash.
+// VerifyPassword verifies a password against an encoded hash.
+// Supports Argon2id ($argon2id$) and bcrypt ($2a$, $2b$, $2y$) formats.
+// Returns true if the password matches.
 func (a *Authenticator) VerifyPassword(password, encoded string) bool {
-	err := bcrypt.CompareHashAndPassword([]byte(encoded), []byte(password))
-	return err == nil
+	return VerifyPasswordWithRehash(password, encoded).Valid
+}
+
+// VerifyPasswordWithRehash verifies a password and returns the full
+// PasswordVerificationResult including the NeedsRehash flag.
+// Use this when the caller must persist a new Argon2id hash after
+// a successful bcrypt login (rehash-on-login).
+func VerifyPasswordWithRehash(password, encoded string) PasswordVerificationResult {
+	result, err := VerifyPassword(encoded, password)
+	if err != nil {
+		return PasswordVerificationResult{}
+	}
+	return result
 }
 
 func splitHash(encoded string) []string {
