@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { LayoutDashboard, Globe, Users, Shield, Zap, Activity, Settings, Server, Building, Mail, Monitor, Key, HardDrive, HeartPulse, CreditCard, Keyboard, User, AtSign, BarChart, AlertTriangle, UserPlus, Send, LogOut, FileText, Bell } from "lucide-react";
+import { LayoutDashboard, Globe, Users, Shield, Zap, Activity, Settings, Server, Building, Mail, Monitor, HardDrive, HeartPulse, CreditCard, Keyboard, User, AtSign, BarChart, AlertTriangle, UserPlus, Send, LogOut, FileText, Bell } from "lucide-react";
 import Dashboard from "./components/Dashboard";
 import Domains from "./components/Domains";
 import UsersPage from "./components/UsersPage";
@@ -9,7 +9,6 @@ import AuditLog from "./components/AuditLog";
 import EnterpriseDashboard from "./components/EnterpriseDashboard";
 import MailboxList from "./components/MailboxList";
 import OrganizationList from "./components/OrganizationList";
-import LicenseStatus from "./components/LicenseStatus";
 import BackupStatus from "./components/BackupStatus";
 import SystemHealth from "./components/SystemHealth";
 import BillingPage from "./components/BillingPage";
@@ -35,7 +34,7 @@ import SupportPage from "./components/SupportPage";
 import PreferencesPage from "./components/PreferencesPage";
 
 type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" | "settings"
-  | "enterprise" | "mailboxes" | "organizations" | "license" | "backups" | "health"
+  | "enterprise" | "mailboxes" | "organizations" | "backups" | "health"
   | "billing" | "onboarding" | "apikeys"
   | "account-settings" | "org-overview" | "invitations" | "members-roles" | "ownership-transfer"
   | "suspension-deletion" | "customer-mailboxes" | "aliases" | "groups" | "usage-quotas"
@@ -52,7 +51,6 @@ const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: st
   { id: "firewall", label: "Firewall", icon: Shield },
   { id: "modules", label: "Modules", icon: Zap },
   { id: "audit", label: "Audit Log", icon: Activity },
-  { id: "license", label: "License", icon: Key, section: "System" },
   { id: "backups", label: "Backups", icon: HardDrive },
   { id: "health", label: "Health", icon: HeartPulse },
   { id: "settings", label: "Settings", icon: Settings },
@@ -99,7 +97,7 @@ export default function App() {
     if (!isPlatformRole) {
       // Customer users see only Customer Portal + Account sections.
       // Platform admin tabs (Dashboard, Mailboxes admin, Organizations, Domains admin,
-      // Users, Firewall, Modules, License, Backups, Health, Settings) are hidden.
+      // Users, Firewall, Modules, Backups, Health, Settings) are hidden.
       if (t.id === "dashboard") return true;
       if (t.id === "enterprise") return false;
       if (t.id === "mailboxes") return false;
@@ -109,7 +107,6 @@ export default function App() {
       if (t.id === "firewall") return false;
       if (t.id === "modules") return false;
       if (t.id === "audit") return false;
-      if (t.id === "license") return false;
       if (t.id === "backups") return false;
       if (t.id === "health") return false;
       if (t.id === "settings") return false;
@@ -169,7 +166,6 @@ export default function App() {
       case "enterprise": return <EnterpriseDashboard />;
       case "mailboxes": return <MailboxList />;
       case "organizations": return <OrganizationList />;
-      case "license": return <LicenseStatus />;
       case "backups": return <BackupStatus />;
       case "health": return <SystemHealth />;
       case "billing": return <BillingPage />;

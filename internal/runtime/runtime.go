@@ -315,17 +315,6 @@ func buildWarnings(in Inputs, t Telemetry) []Warning {
 	if in.StartedAt.IsZero() {
 		out = append(out, Warning{Level: "warn", Code: "telemetry_incomplete", Message: "Telemetry incomplete: process start time not reported"})
 	}
-	if t.License.PublicKeyState == "missing" {
-		out = append(out, Warning{Level: "warn", Code: "license_public_key_missing", Message: "License public key missing"})
-	} else if t.License.PublicKeyState == "invalid" {
-		out = append(out, Warning{Level: "warn", Code: "license_public_key_invalid", Message: "License public key invalid"})
-	}
-	if t.License.PublicKeyState == "loaded" && t.License.ValidationState != "valid" {
-		out = append(out, Warning{Level: "warn", Code: "license_validation_offline", Message: "License validation offline"})
-	}
-	if t.License.Mode == "missing" || t.License.PublicKeyState == "missing" {
-		out = append(out, Warning{Level: "warn", Code: "license_missing", Message: "License not configured"})
-	}
 	if in.QueueCounts.Deferred > 0 {
 		out = append(out, Warning{Level: "warn", Code: "queue_deferred", Message: "Queue has deferred messages"})
 	}

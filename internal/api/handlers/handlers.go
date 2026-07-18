@@ -3,7 +3,6 @@ package handlers
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/x509"
 	"database/sql"
 	"encoding/base64"
@@ -2957,43 +2956,18 @@ func (h *Handler) ListModules(c fiber.Ctx) error {
 // The endpoint NEVER returns the license key, the key hash, the
 // public key, or any other secret.
 func (h *Handler) GetLicense(c fiber.Ctx) error {
-	if h.licenseValidator == nil {
-		return c.JSON(license.StatusReport{
-			Status: license.StatusOffline,
-			Reason: "license validator not wired in this build",
-		})
-	}
-	return c.JSON(h.licenseValidator.Status())
+	return c.JSON(fiber.Map{
+		"status": "not_required",
+		"reason": "Local product licensing is disabled; SaaS plans and quotas apply.",
+	})
 }
 
-// ValidateLicense validates a license key.
+// ValidateLicense is deprecated — local product licensing is retired.
 func (h *Handler) ValidateLicense(c fiber.Ctx) error {
-	var req struct {
-		Key string `json:"key"`
-	}
-	if err := c.Bind().JSON(&req); err != nil || req.Key == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "license key required"})
-	}
-
-	keyHash := fmt.Sprintf("%x", sha256.Sum256([]byte(req.Key)))
-
-	encryptedHash, encErr := config.EncryptString(keyHash)
-	if encErr != nil {
-		h.logger.Error("failed to encrypt license key hash", zap.Error(encErr))
-		encryptedHash = keyHash
-	}
-
-	lic := models.License{
-		KeyHash:   encryptedHash,
-		Tier:      "smb",
-		IssuedAt:  time.Now(),
-		ExpiresAt: time.Now().AddDate(1, 0, 0),
-		Active:    true,
-	}
-	h.db.Create(&lic)
-
-	h.writeAuditLog(c, "license.validate", fmt.Sprintf("tier:%s", lic.Tier))
-	return c.JSON(fiber.Map{"status": "valid", "tier": lic.Tier, "expires_at": lic.ExpiresAt})
+	return c.Status(fiber.StatusGone).JSON(fiber.Map{
+		"code":    "license_not_required",
+		"message": "Local product licensing is disabled; SaaS plans and quotas apply.",
+	})
 }
 
 // ListAuditLogs returns audit log entries with safe fields only.
