@@ -247,7 +247,7 @@ fi
 setup
 echo "old-binary-v1.0.3" > "$T/usr/local/bin/orvix"
 echo "admin.example.com { reverse_proxy 127.0.0.1:8080 }" > "$T/etc/caddy/Caddyfile"
-BACKUP_DIR2="$(run_backup || true)"
+BACKUP_DIR2="$(run_backup | tail -1)"
 echo "new-binary-v2" > "$T/usr/local/bin/orvix"
 CADDY_VALIDATE_FAIL=1
 set +e
@@ -265,7 +265,7 @@ CADDY_VALIDATE_FAIL=0
 setup
 echo "old-binary-v1.0.3" > "$T/usr/local/bin/orvix"
 echo "admin.example.com { reverse_proxy 127.0.0.1:8080 }" > "$T/etc/caddy/Caddyfile"
-BACKUP_DIR3="$(run_backup || true)"
+BACKUP_DIR3="$(run_backup | tail -1)"
 echo "new-binary-v2" > "$T/usr/local/bin/orvix"
 CADDY_RELOAD_FAIL=1
 set +e
@@ -283,7 +283,7 @@ CADDY_RELOAD_FAIL=0
 setup
 echo "old-binary-v1.0.3" > "$T/usr/local/bin/orvix"
 echo "admin.example.com { reverse_proxy 127.0.0.1:8080 }" > "$T/etc/caddy/Caddyfile"
-BACKUP_DIR4="$(run_backup || true)"
+BACKUP_DIR4="$(run_backup | tail -1)"
 echo "new-binary-v2" > "$T/usr/local/bin/orvix"
 SYSTEMCTL_RESTART_FAIL=1
 set +e
@@ -301,7 +301,7 @@ SYSTEMCTL_RESTART_FAIL=0
 setup
 echo "old-binary-v1.0.3" > "$T/usr/local/bin/orvix"
 echo "admin.example.com { reverse_proxy 127.0.0.1:8080 }" > "$T/etc/caddy/Caddyfile"
-BACKUP_DIR5="$(run_backup || true)"
+BACKUP_DIR5="$(run_backup | tail -1)"
 echo "new-binary-v2" > "$T/usr/local/bin/orvix"
 SYSTEMCTL_ACTIVE_FAIL=1
 set +e
@@ -319,7 +319,7 @@ SYSTEMCTL_ACTIVE_FAIL=0
 setup
 echo "old-binary-v1.0.3" > "$T/usr/local/bin/orvix"
 echo "admin.example.com { reverse_proxy 127.0.0.1:8080 }" > "$T/etc/caddy/Caddyfile"
-BACKUP_DIR6="$(run_backup || true)"
+BACKUP_DIR6="$(run_backup | tail -1)"
 echo "new-binary-v2" > "$T/usr/local/bin/orvix"
 set +e; run_rollback $BACKUP_DIR; first_rc=$?; set -e
 echo "new-binary-v2" > "$T/usr/local/bin/orvix"
