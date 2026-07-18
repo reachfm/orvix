@@ -55,7 +55,7 @@ export PATH="$T/bin:$PATH"
 
 # Source upgrade.sh directly for function access
 # (source guard prevents main from executing)
-ORVIX_SOURCE_DIR="$SCRIPT_DIR/../.."
+ORVIX_SOURCE_DIR="$SCRIPT_DIR/../../.."
 source "$UPGRADE_SCRIPT"
 
 run_backup() {
