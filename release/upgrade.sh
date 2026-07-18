@@ -52,6 +52,9 @@ ORVIX_SOURCE_DIR="${ORVIX_SOURCE_DIR:-$(pwd)}"
 ORVIX_UPGRADE_LOCK="${ORVIX_UPGRADE_LOCK:-/run/lock/orvix-upgrade.lock}"
 ORVIX_REQUIRE_RELEASE_SIGNATURE="${ORVIX_REQUIRE_RELEASE_SIGNATURE:-1}"
 ORVIX_RELEASE_VERIFYING_KEY_FILE="${ORVIX_RELEASE_VERIFYING_KEY_FILE:-}"
+ORVIX_CADDYFILE="${ORVIX_CADDYFILE:-/etc/caddy/Caddyfile}"
+ORVIX_CADDY_BIN="${ORVIX_CADDY_BIN:-caddy}"
+ORVIX_SYSTEMCTL="${ORVIX_SYSTEMCTL:-systemctl}"
 
 # Admin + webmail UI deployment targets. The upgrade path MUST
 # propagate both trees, not just the binary; otherwise a fresh
@@ -381,7 +384,7 @@ preflight_backup() {
         "$ORVIX_BACKUP_ENCRYPTION_KEY" \
         /etc/orvix/license.json \
         /etc/orvix/bootstrap.env \
-        /etc/caddy/Caddyfile \
+        "$ORVIX_CADDYFILE" \
         "$ORVIX_DATA_DIR/license-cache.json"
     do
         if [ -e "$file" ]; then
@@ -528,31 +531,59 @@ full_rollback() {
 # the upgrade is aborted.
 run_admin_route_migration() {
 	local migration
-	if [ -f "$ORVIX_SOURCE_DIR/release/scripts/migrate-admin-root-route.sh" ]; then
-		migration="$ORVIX_SOURCE_DIR/release/scripts/migrate-admin-root-route.sh"
-	elif [ -f "/usr/share/orvix/scripts/migrate-admin-root-route.sh" ]; then
-		migration="/usr/share/orvix/scripts/migrate-admin-root-route.sh"
-	fi
-	if [ -z "$migration" ]; then
-		log "admin route migration script not found; skipping (not shipped with this bundle)"
-		report "yellow" "admin route migration skipped (script not found)"
+	for candidate in \
+		"$ORVIX_SOURCE_DIR/release/scripts/migrate-admin-root-route.sh" \
+		"/usr/share/orvix/scripts/migrate-admin-root-route.sh"; do
+		if [ -f "$candidate" ]; then
+			migration="$candidate"
+			break
+		fi
+	done
+
+	local has_caddy=false
+	command -v "$ORVIX_CADDY_BIN" >/dev/null 2>&1 && has_caddy=true
+
+	if [ "$has_caddy" = false ] && [ ! -f "$ORVIX_CADDYFILE" ]; then
+		log "neither Caddy binary nor Caddyfile found; skipping admin route migration"
+		report "yellow" "admin route migration skipped (neither Caddy nor Caddyfile found)"
 		return 0
 	fi
-	if ! command -v caddy >/dev/null 2>&1; then
-		log "caddy not installed; skipping admin route migration"
-		report "yellow" "admin route migration skipped (caddy not installed)"
-		return 0
+
+	if [ -f "$ORVIX_CADDYFILE" ] && [ -z "$migration" ]; then
+		log "ERROR: Caddyfile exists but migration script not found; migration is required (BLOCKER fail-closed)"
+		report "red" "admin route migration failed: Caddyfile exists but migration script missing"
+		return 1
 	fi
-	if [ ! -f /etc/caddy/Caddyfile ]; then
-		log "no Caddyfile found; skipping admin route migration"
-		report "yellow" "admin route migration skipped (no Caddyfile)"
-		return 0
+
+	if [ "$has_caddy" = true ] && [ -z "$migration" ]; then
+		log "ERROR: Caddy installed but migration script not found; migration is required (BLOCKER fail-closed)"
+		report "red" "admin route migration failed: Caddy installed but migration script missing"
+		return 1
 	fi
+
+	if [ -n "$migration" ]; then
+		if ! bash -n "$migration" 2>/dev/null; then
+			log "ERROR: migration script has a bash syntax error; refusing to upgrade"
+			report "red" "admin route migration failed: migration script syntax error"
+			return 1
+		fi
+	fi
+
 	local mode="--apply"
 	if [ "$DRY_RUN" = "1" ]; then
-		mode="--dry-run"
+		if [ -n "$migration" ]; then
+			if bash "$migration" --dry-run; then
+				report "green" "admin route migration dry-run passed"
+			else
+				report "red" "admin route migration dry-run failed"
+				return 1
+			fi
+			return 0
+		fi
+		return 0
 	fi
-	if bash "$migration" "$mode"; then
+
+	if bash "$migration" --apply; then
 		report "green" "admin root redirect migration applied"
 	else
 		report "red" "admin root redirect migration failed"
