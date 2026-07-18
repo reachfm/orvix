@@ -115,10 +115,26 @@ set +e; run_it 0; s=$?; set -e
 
 # ── Test 7: Invalid-Bash migration fails ──
 setup; rm -f "$T/usr/share/orvix/scripts/migrate-admin-root-route.sh"
-echo "this is not valid bash {{{{" > "$T/release/scripts/migrate-admin-root-route.sh"
+cat > "$T/release/scripts/migrate-admin-root-route.sh" <<'EOF'
+#!/usr/bin/env bash
+if then
+EOF
 chmod +x "$T/release/scripts/migrate-admin-root-route.sh"
+
+set +e
+bash -n "$T/release/scripts/migrate-admin-root-route.sh" >"$T/logs/test7-bash-n.stdout" 2>"$T/logs/test7-bash-n.stderr"
+fixture_status=$?
+set -e
+if [ "$fixture_status" -eq 0 ]; then
+  echo "FATAL: Test 7 fixture must fail bash -n" >&2; exit 1
+fi
+
 set +e; run_it 0; s=$?; set -e
-[ "$s" -ne 0 ] && grep -q "invalid migration script" "$TEST_REPORT" && pass "invalid bash migration fails" || fail_msg "invalid bash migration should fail"
+if [ "$s" -ne 0 ] && grep -q "red|admin route migration failed: invalid migration script" "$TEST_REPORT" && ! grep -q "admin root redirect migration failed" "$TEST_REPORT"; then
+  pass "invalid bash migration fails"
+else
+  fail_msg "invalid bash migration should fail (bash-n=$fixture_status exit=$s)"
+fi
 
 # ── Test 8: Migration failure makes library fail ──
 setup; rm -f "$T/release/scripts/migrate-admin-root-route.sh"
