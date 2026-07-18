@@ -656,8 +656,5 @@ USAGE
     fi
 }
 
-# When sourced (e.g. by tests), BASH_SOURCE differs from $0;
-# only run main when executed directly.
-if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
-    main "$@"
-fi
+[ "${BASH_SOURCE[0]}" != "${0}" ] && return 0
+main "$@"

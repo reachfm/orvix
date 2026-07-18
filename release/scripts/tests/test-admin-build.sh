@@ -52,7 +52,7 @@ if [ "\$cmd" = "run" ] && [ "\${2:-}" = "build" ]; then
     mkdir -p dist/assets
     printf '<!doctype html><script src="/assets/index-abc.js"></script>' > dist/index.html
     if [ "$emit_ops" = "1" ]; then
-        printf 'fetch("/api/v1/admin/backups");fetch("/api/v1/license");fetch("/api/v1/monitoring/health");' > dist/assets/index-abc.js
+         printf 'fetch("/api/v1/admin/backups");fetch("/api/v1/monitoring/health");' > dist/assets/index-abc.js
     else
         printf 'console.log("no ops here");' > dist/assets/index-abc.js
     fi

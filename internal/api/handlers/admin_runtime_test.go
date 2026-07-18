@@ -408,15 +408,12 @@ func TestAdminRuntimeLicenseHonest(t *testing.T) {
 	if resp.License.PublicKeyLoaded {
 		t.Errorf("public_key_loaded must be false (harness sets no public key); got %+v", resp.License)
 	}
-	// The license_public_key_missing warning must be present.
-	seen := false
+	// License warnings are intentionally suppressed: local
+	// product licensing is retired. SaaS plans and quotas apply.
 	for _, w := range resp.Warnings {
-		if w.Code == "license_public_key_missing" {
-			seen = true
+		if w.Code == "license_public_key_missing" || w.Code == "license_public_key_invalid" || w.Code == "license_missing" {
+			t.Errorf("unexpected license warning after license retirement: %+v", w)
 		}
-	}
-	if !seen {
-		t.Errorf("expected license_public_key_missing warning; got %+v", resp.Warnings)
 	}
 }
 
@@ -605,15 +602,12 @@ func TestAdminRuntimeLicenseFileMissing(t *testing.T) {
 	if resp.License.Mode == "online" {
 		t.Errorf("license mode must not be 'online' when public key file is missing; got %q", resp.License.Mode)
 	}
-	// The license_public_key_missing warning must be present.
-	seen := false
+	// License warnings are intentionally suppressed: local product
+	// licensing is retired. SaaS plans and quotas apply.
 	for _, w := range resp.Warnings {
-		if w.Code == "license_public_key_missing" {
-			seen = true
+		if w.Code == "license_public_key_missing" || w.Code == "license_public_key_invalid" || w.Code == "license_missing" {
+			t.Errorf("unexpected license warning after license retirement: %+v (got all warnings: %+v)", w, resp.Warnings)
 		}
-	}
-	if !seen {
-		t.Errorf("expected license_public_key_missing warning when public key path is set but file is missing; got %+v", resp.Warnings)
 	}
 }
 
@@ -671,22 +665,10 @@ func TestAdminRuntimeLicenseFileIsDirectory(t *testing.T) {
 	if resp.License.Mode == "online" {
 		t.Errorf("license mode must not be 'online' for a directory path; got %q", resp.License.Mode)
 	}
-	// A directory is reported as public_key_invalid (exists but
-	// is not a regular file with valid PEM content), not missing.
-	seenInvalid := false
-	seenMissing := false
+	// License warnings are intentionally suppressed.
 	for _, w := range resp.Warnings {
-		if w.Code == "license_public_key_invalid" {
-			seenInvalid = true
-		}
-		if w.Code == "license_public_key_missing" {
-			seenMissing = true
-		}
-	}
-	if !seenInvalid {
-		// Accept either invalid or missing (backward compat).
-		if !seenMissing {
-			t.Errorf("expected license_public_key_invalid or license_public_key_missing warning for directory path; got %+v", resp.Warnings)
+		if w.Code == "license_public_key_invalid" || w.Code == "license_public_key_missing" || w.Code == "license_missing" {
+			t.Errorf("unexpected license warning after license retirement: %+v", w)
 		}
 	}
 }
@@ -831,15 +813,11 @@ func TestAdminRuntimeLicenseFileOversized(t *testing.T) {
 	if resp.License.Mode == "online" {
 		t.Errorf("license mode must not be 'online' for oversized file; got %q", resp.License.Mode)
 	}
-	// The license_public_key_invalid warning must be present.
-	seen := false
+	// License warnings are intentionally suppressed.
 	for _, w := range resp.Warnings {
-		if w.Code == "license_public_key_invalid" {
-			seen = true
+		if w.Code == "license_public_key_invalid" || w.Code == "license_public_key_missing" || w.Code == "license_missing" {
+			t.Errorf("unexpected license warning after license retirement: %+v", w)
 		}
-	}
-	if !seen {
-		t.Errorf("expected license_public_key_invalid warning for oversized file; got %+v", resp.Warnings)
 	}
 }
 
