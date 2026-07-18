@@ -381,6 +381,7 @@ preflight_backup() {
         "$ORVIX_BACKUP_ENCRYPTION_KEY" \
         /etc/orvix/license.json \
         /etc/orvix/bootstrap.env \
+        /etc/caddy/Caddyfile \
         "$ORVIX_DATA_DIR/license-cache.json"
     do
         if [ -e "$file" ]; then
@@ -520,10 +521,48 @@ full_rollback() {
 # asset trees have been propagated successfully; if propagation
 # fails after the pre-copy backup has been taken, the asset lib
 # itself rolls the destination back from the backup.
+# run_admin_route_migration runs the admin root redirect migration.
+# Locates migrate-admin-root-route.sh from the source dir first,
+# then falls back to /usr/share/orvix/scripts. If Caddy is absent,
+# warns and continues. If Caddyfile exists and migration fails,
+# the upgrade is aborted.
+run_admin_route_migration() {
+	local migration
+	if [ -f "$ORVIX_SOURCE_DIR/release/scripts/migrate-admin-root-route.sh" ]; then
+		migration="$ORVIX_SOURCE_DIR/release/scripts/migrate-admin-root-route.sh"
+	elif [ -f "/usr/share/orvix/scripts/migrate-admin-root-route.sh" ]; then
+		migration="/usr/share/orvix/scripts/migrate-admin-root-route.sh"
+	fi
+	if [ -z "$migration" ]; then
+		log "admin route migration script not found; skipping (not shipped with this bundle)"
+		report "yellow" "admin route migration skipped (script not found)"
+		return 0
+	fi
+	if ! command -v caddy >/dev/null 2>&1; then
+		log "caddy not installed; skipping admin route migration"
+		report "yellow" "admin route migration skipped (caddy not installed)"
+		return 0
+	fi
+	if [ ! -f /etc/caddy/Caddyfile ]; then
+		log "no Caddyfile found; skipping admin route migration"
+		report "yellow" "admin route migration skipped (no Caddyfile)"
+		return 0
+	fi
+	local mode="--apply"
+	if [ "$DRY_RUN" = "1" ]; then
+		mode="--dry-run"
+	fi
+	if bash "$migration" "$mode"; then
+		report "green" "admin root redirect migration applied"
+	else
+		report "red" "admin root redirect migration failed"
+		return 1
+	fi
+	return 0
+}
+
 propagate_assets() {
 	if [ -z "$LIB_ASSET_PROPAGATE" ] || ! command -v asset_propagate >/dev/null 2>&1; then
-		# Lib missing. This is a HARD failure: a backend upgrade
-		# MUST ship the matching admin + webmail static assets.
 		log "ERROR: lib-asset-propagate.sh not sourced; refusing to upgrade with stale admin/webmail assets."
 		report "red" "asset propagation library missing; refusing to upgrade (BLOCKER 3 fail-closed)"
 		return 1
@@ -655,6 +694,13 @@ install_and_restart() {
 		report "red" "asset propagation failed (BLOCKER 3 fail-closed); rolling back binary to previous state"
 		full_rollback "$BACKUP_DIR"
 		fail "asset propagation failed; rolled back to previous binary"
+	fi
+
+	report "" "--- Caddy Admin Route Migration ---"
+	if ! run_admin_route_migration; then
+		report "red" "admin route migration failed"
+		full_rollback "$BACKUP_DIR"
+		fail "admin route migration failed; rolled back"
 	fi
 
     report "" "--- Restart ---"

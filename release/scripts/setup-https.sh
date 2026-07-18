@@ -156,6 +156,9 @@ $PRIMARY_DOMAIN {
 }
 
 $ADMIN_DOMAIN {
+	# ORVIX_ADMIN_ROOT_REDIRECT_V1
+	@orvix_admin_root path /
+	redir @orvix_admin_root /admin 308
 	reverse_proxy 127.0.0.1:8080
 }
 
