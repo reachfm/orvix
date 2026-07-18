@@ -53,6 +53,11 @@ export SYSTEMCTL_RESTART_FAIL=0 SYSTEMCTL_ACTIVE_FAIL=0
 export CADDY_VALIDATE_FAIL=0 CADDY_RELOAD_FAIL=0
 export PATH="$T/bin:$PATH"
 
+# Source upgrade.sh directly for function access
+# (source guard prevents main from executing)
+ORVIX_SOURCE_DIR="$SCRIPT_DIR/../.."
+source "$UPGRADE_SCRIPT"
+
 run_backup() {
   ORVIX_BIN="$T/usr/local/bin/orvix" \
   ORVIX_CONFIG="$T/etc/orvix/orvix.yaml" \
@@ -64,17 +69,8 @@ run_backup() {
   ORVIX_CADDYFILE="$T/etc/caddy/Caddyfile" \
   ORVIX_DKIM_DIR="$T/var/lib/orvix/dkim" \
   BACKUP_PARENT="$T/var/backups/orvix-upgrade" \
-  bash -c '
-    echo "Starting run_backup subshell" >&2
-    source '"$UPGRADE_SCRIPT"'
-    rc=$?
-    echo "source rc=$rc" >&2
-    if [ "$rc" != "0" ]; then echo "SOURCE FAILED with rc=$rc" >&2; exit 1; fi
-    set -x
-    preflight_backup
-    echo "BACKUP_DIR=$BACKUP_DIR" >&2
-    echo "$BACKUP_DIR"
-  '
+  preflight_backup
+  echo "$BACKUP_DIR"
 }
 
 run_rollback() {
@@ -94,10 +90,7 @@ run_rollback() {
   ORVIX_CADDY_BIN="$T/bin/caddy" \
   ORVIX_SYSTEMCTL="$T/bin/systemctl" \
   BACKUP_PARENT="$T/var/backups/orvix-upgrade" \
-  bash -c '
-    source '"$UPGRADE_SCRIPT"'
-    full_rollback "'"$backup_dir"'"
-  '
+  full_rollback "$backup_dir"
 }
 
 echo "=== Rollback Behavioral Tests ==="
@@ -116,9 +109,9 @@ echo "old-admin" > "$T/usr/share/orvix/admin/index.html"
 echo "old-webmail" > "$T/usr/share/orvix/webmail/index.html"
 echo "old-marketing" > "$T/usr/share/orvix/marketing/index.html"
 
-BACKUP_DIR="$(run_backup 2>/tmp/backup_stderr.log || true)"
-echo "DEBUG: backup_stderr:" >&2
-cat /tmp/backup_stderr.log >&2 2>/dev/null || true
+set +e
+BACKUP_DIR="$(run_backup)"
+set -e
 if [ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ]; then
   pass "preflight_backup creates backup directory"
 else
@@ -175,7 +168,7 @@ echo "new-db" > "$T/var/lib/orvix/orvix.db"
 echo "new-jwt" > "$T/var/lib/orvix/jwt_key.pem"
 
 set +e
-rollback_output="$(run_rollback "$BACKUP_DIR" 2>&1)"
+rollback_output="$(run_rollback $BACKUP_DIR)"
 rollback_rc=$?
 set -e
 if [ "$rollback_rc" = "0" ]; then
@@ -254,11 +247,11 @@ fi
 setup
 echo "old-binary-v1.0.3" > "$T/usr/local/bin/orvix"
 echo "admin.example.com { reverse_proxy 127.0.0.1:8080 }" > "$T/etc/caddy/Caddyfile"
-BACKUP_DIR2="$(run_backup 2>/tmp/backup_err.log || true)"
+BACKUP_DIR2="$(run_backup || true)"
 echo "new-binary-v2" > "$T/usr/local/bin/orvix"
 CADDY_VALIDATE_FAIL=1
 set +e
-rollback_output="$(run_rollback "$BACKUP_DIR2" 2>&1)"
+rollback_output="$(run_rollback $BACKUP_DIR)"
 rollback_rc=$?
 set -e
 if [ "$rollback_rc" != "0" ]; then
@@ -272,11 +265,11 @@ CADDY_VALIDATE_FAIL=0
 setup
 echo "old-binary-v1.0.3" > "$T/usr/local/bin/orvix"
 echo "admin.example.com { reverse_proxy 127.0.0.1:8080 }" > "$T/etc/caddy/Caddyfile"
-BACKUP_DIR3="$(run_backup 2>/tmp/backup_err.log || true)"
+BACKUP_DIR3="$(run_backup || true)"
 echo "new-binary-v2" > "$T/usr/local/bin/orvix"
 CADDY_RELOAD_FAIL=1
 set +e
-rollback_output="$(run_rollback "$BACKUP_DIR3" 2>&1)"
+rollback_output="$(run_rollback $BACKUP_DIR)"
 rollback_rc=$?
 set -e
 if [ "$rollback_rc" != "0" ]; then
@@ -290,11 +283,11 @@ CADDY_RELOAD_FAIL=0
 setup
 echo "old-binary-v1.0.3" > "$T/usr/local/bin/orvix"
 echo "admin.example.com { reverse_proxy 127.0.0.1:8080 }" > "$T/etc/caddy/Caddyfile"
-BACKUP_DIR4="$(run_backup 2>/tmp/backup_err.log || true)"
+BACKUP_DIR4="$(run_backup || true)"
 echo "new-binary-v2" > "$T/usr/local/bin/orvix"
 SYSTEMCTL_RESTART_FAIL=1
 set +e
-rollback_output="$(run_rollback "$BACKUP_DIR4" 2>&1)"
+rollback_output="$(run_rollback $BACKUP_DIR)"
 rollback_rc=$?
 set -e
 if [ "$rollback_rc" != "0" ]; then
@@ -308,11 +301,11 @@ SYSTEMCTL_RESTART_FAIL=0
 setup
 echo "old-binary-v1.0.3" > "$T/usr/local/bin/orvix"
 echo "admin.example.com { reverse_proxy 127.0.0.1:8080 }" > "$T/etc/caddy/Caddyfile"
-BACKUP_DIR5="$(run_backup 2>/tmp/backup_err.log || true)"
+BACKUP_DIR5="$(run_backup || true)"
 echo "new-binary-v2" > "$T/usr/local/bin/orvix"
 SYSTEMCTL_ACTIVE_FAIL=1
 set +e
-rollback_output="$(run_rollback "$BACKUP_DIR5" 2>&1)"
+rollback_output="$(run_rollback $BACKUP_DIR)"
 rollback_rc=$?
 set -e
 if [ "$rollback_rc" != "0" ]; then
@@ -326,11 +319,11 @@ SYSTEMCTL_ACTIVE_FAIL=0
 setup
 echo "old-binary-v1.0.3" > "$T/usr/local/bin/orvix"
 echo "admin.example.com { reverse_proxy 127.0.0.1:8080 }" > "$T/etc/caddy/Caddyfile"
-BACKUP_DIR6="$(run_backup 2>/tmp/backup_err.log || true)"
+BACKUP_DIR6="$(run_backup || true)"
 echo "new-binary-v2" > "$T/usr/local/bin/orvix"
-set +e; run_rollback "$BACKUP_DIR6" >/dev/null 2>&1; first_rc=$?; set -e
+set +e; run_rollback $BACKUP_DIR; first_rc=$?; set -e
 echo "new-binary-v2" > "$T/usr/local/bin/orvix"
-set +e; run_rollback "$BACKUP_DIR6" >/dev/null 2>&1; second_rc=$?; set -e
+set +e; run_rollback $BACKUP_DIR; second_rc=$?; set -e
 if [ "$first_rc" = "0" ] && [ "$second_rc" = "0" ]; then
   pass "rollback is idempotent"
 else
