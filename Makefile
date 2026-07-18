@@ -2,9 +2,11 @@
 
 BINARY=orvix
 BUILD_DIR=build
-VERSION=$(shell git describe --tags --always --dirty 2>/dev/null || echo "1.0.0")
-BUILD_TIME=$(shell date -u '+%Y-%m-%d_%H:%M:%S')
-LDFLAGS=-ldflags "-X github.com/orvix/orvix/internal/config.buildVersion=$(VERSION) -X github.com/orvix/orvix/internal/config.buildTime=$(BUILD_TIME)"
+VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "1.0.0")
+COMMIT   ?= $(shell git rev-parse HEAD 2>/dev/null || echo "not reported")
+CHANNEL  ?= rc
+BUILD_TIME ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS  = -ldflags "-X github.com/orvix/orvix/internal/buildinfo.Version=$(VERSION) -X github.com/orvix/orvix/internal/buildinfo.Commit=$(COMMIT) -X github.com/orvix/orvix/internal/buildinfo.Channel=$(CHANNEL) -X github.com/orvix/orvix/internal/buildinfo.BuildTime=$(BUILD_TIME)"
 
 all: build
 
