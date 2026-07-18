@@ -76,7 +76,7 @@ assert_result "999" "FAIL" "HTTP 999 is FAIL (unexpected)"
 
 # Also verify the final exit semantics of Doctor when a FAIL exists
 echo "--- Exit semantics test ---"
-$SCRIPT_DIR/../orvix-doctor.sh --quiet 2>/dev/null && exit_code=0 || exit_code=$?
+bash "$SCRIPT_DIR/../orvix-doctor.sh" --quiet 2>/dev/null && exit_code=0 || exit_code=$?
 if [ "$exit_code" = "1" ]; then
   pass "Doctor with failing check exits 1 (unhealthy)"
 else
