@@ -110,7 +110,7 @@ echo "old-webmail" > "$T/usr/share/orvix/webmail/index.html"
 echo "old-marketing" > "$T/usr/share/orvix/marketing/index.html"
 
 set +e
-BACKUP_DIR="$(run_backup)"
+BACKUP_DIR="$(run_backup | tail -1)"
 set -e
 if [ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ]; then
   pass "preflight_backup creates backup directory"
