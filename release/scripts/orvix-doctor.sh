@@ -416,13 +416,20 @@ check_dns_readiness() {
     local name="dns providers readiness"
     local code
     code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "$DNS_PROVIDERS_URL" 2>/dev/null || echo '000')"
-    if [ "$code" = "200" ]; then
-        add_check "$name" "PASS" "dns providers endpoint returned 200"
-    elif [ "$code" = "000" ]; then
-        add_check "$name" "WARN" "dns providers endpoint unreachable (orvix not running?)"
-    else
-        add_check "$name" "FAIL" "dns providers endpoint returned HTTP $code"
-    fi
+    case "$code" in
+        200)
+            add_check "$name" "PASS" "dns providers endpoint returned 200" ;;
+        401|403)
+            add_check "$name" "PASS" "protected dns providers endpoint returned $code (correctly requires authentication)" ;;
+        000)
+            add_check "$name" "WARN" "dns providers endpoint unreachable (orvix not running?)" ;;
+        404)
+            add_check "$name" "FAIL" "dns providers endpoint returned 404 (expected endpoint missing)" ;;
+        5??)
+            add_check "$name" "FAIL" "dns providers endpoint returned $code (server-side failure)" ;;
+        *)
+            add_check "$name" "FAIL" "dns providers endpoint returned unexpected HTTP $code" ;;
+    esac
 }
 
 check_backup_dir() {

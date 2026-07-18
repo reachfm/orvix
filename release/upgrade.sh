@@ -13,7 +13,7 @@ set -euo pipefail
 # `orvix-linux-amd64` in the current working directory; this is
 # the supported path on a hardened VPS where outbound HTTP is
 # not allowed. Operators who DO want to fetch from a release
-# server must pass --from-url explicitly GÇö the script no longer
+# server must pass --from-url explicitly Gï¿½ï¿½ the script no longer
 # hits https://releases.orvix.email by default because that
 # domain does not exist in this build.
 #
@@ -22,7 +22,7 @@ set -euo pipefail
 #      flow) BEFORE invoking this script. upgrade.sh makes a
 #      backup of /etc/orvix and the binary, but it cannot
 #      snapshot a running SQLite database without a
-#      coordinated `VACUUM INTO` GÇö that's the runtime's job.
+#      coordinated `VACUUM INTO` Gï¿½ï¿½ that's the runtime's job.
 #   2. Read /etc/orvix/orvix.yaml after upgrade for any new
 #      required fields.
 #   3. Verify the SHA256 of the new binary against
@@ -70,7 +70,7 @@ ORVIX_RELEASE_WEBMAIL_SRC="${ORVIX_RELEASE_WEBMAIL_SRC:-$ORVIX_SOURCE_DIR/releas
 ORVIX_RELEASE_MARKETING_SRC="${ORVIX_RELEASE_MARKETING_SRC:-$ORVIX_SOURCE_DIR/release/marketing}"
 
 # Source the asset-propagation library. BLOCKER 3 (fail-closed):
-# the lib is REQUIRED GÇö a backend upgrade MUST ship the matching
+# the lib is REQUIRED Gï¿½ï¿½ a backend upgrade MUST ship the matching
 # admin + webmail static assets. If the lib is missing from the
 # release tree we abort before any state is mutated, so the
 # operator never sees a green upgrade report on a half-propagated
@@ -391,7 +391,7 @@ run_doctor() {
 }
 
 # preflight_backup copies every file the upgrade path needs to
-# be able to roll back from GÇö binary, config, db, jwt, vapid keys,
+# be able to roll back from Gï¿½ï¿½ binary, config, db, jwt, vapid keys,
 # dkim keys, license, bootstrap env. Each target is logged with its
 # SHA256 so the operator can later sanity-check the rollback.
 preflight_backup() {
@@ -461,19 +461,35 @@ full_rollback() {
     if [ -z "$backup_dir" ] || [ ! -d "$backup_dir" ]; then
         fail "cannot roll back: no backup directory available"
     fi
-    log "ROLLBACK: rolling back GÇö restoring from $backup_dir"
+    log "ROLLBACK: rolling back Gï¿½ï¿½ restoring from $backup_dir"
 
     local item dest
     local rolled=0
 
-    for item in "$ORVIX_BIN" "$ORVIX_CONFIG"; do
+    for item in "$ORVIX_BIN" "$ORVIX_CONFIG" "$ORVIX_CADDYFILE"; do
         dest="$backup_dir$item"
         if [ -f "$dest" ]; then
-            install -m 0755 "$dest" "$item" 2>/dev/null || cp -a "$dest" "$item"
+            if [ "$item" = "$ORVIX_BIN" ]; then
+                install -m 0755 "$dest" "$item" 2>/dev/null || cp -a "$dest" "$item"
+            else
+                cp -a "$dest" "$item"
+            fi
             log "  rolled back $item"
             rolled=$((rolled + 1))
         fi
     done
+
+    if [ -f "$backup_dir$ORVIX_CADDYFILE" ]; then
+        if command -v caddy >/dev/null 2>&1; then
+            if caddy validate --config "$ORVIX_CADDYFILE" 2>/dev/null; then
+                log "  validated restored Caddyfile"
+                caddy reload --config "$ORVIX_CADDYFILE" 2>/dev/null || true
+                log "  reloaded Caddy with restored Caddyfile"
+            else
+                log "  WARNING: restored Caddyfile failed validation; Caddy not reloaded"
+            fi
+        fi
+    fi
 
     if [ -f "$backup_dir/$ORVIX_DATA_DIR/orvix.db" ]; then
         cp -a "$backup_dir/$ORVIX_DATA_DIR/orvix.db" "$ORVIX_DATA_DIR/orvix.db"
@@ -486,13 +502,14 @@ full_rollback() {
         dest="$backup_dir$item"
         if [ -f "$dest" ]; then
             cp -a "$dest" "$item"
-            chown root:orvix "$item" 2>/dev/null || chown orvix:orvix "$item" 2>/dev/null || true
-            if [ "$item" = "$ORVIX_BACKUP_ENCRYPTION_KEY" ] || [ "$item" = "$ORVIX_VAPID_PRIVATE_KEY" ]; then
-                chmod 0640 "$item" 2>/dev/null || true
-            else
+            if [ "$item" = "$ORVIX_JWT_KEY" ] || [ "$item" = "$ORVIX_BACKUP_ENCRYPTION_KEY" ] || [ "$item" = "$ORVIX_VAPID_PUBLIC_KEY" ]; then
+                chown orvix:orvix "$item" 2>/dev/null || true
                 chmod 0600 "$item" 2>/dev/null || true
+            elif [ "$item" = "$ORVIX_VAPID_PRIVATE_KEY" ]; then
+                chown orvix:orvix "$item" 2>/dev/null || true
+                chmod 0640 "$item" 2>/dev/null || true
             fi
-            log "  rolled back $item"
+            log "  rolled back $item (owner orvix:orvix)"
             rolled=$((rolled + 1))
         fi
     done
@@ -504,13 +521,13 @@ full_rollback() {
         rolled=$((rolled + 1))
     fi
 
-    # Roll back admin + webmail assets too. The asset-propagation
+    # Roll back admin + webmail + marketing assets too. The asset-propagation
     # library writes backups to $BACKUP_PARENT/assets/<ts>-<label>
     # right before overwriting; restore the most recent one for
     # each label. If a rollback snapshot is missing (e.g. this is
     # the first upgrade on a fresh install), the roll-back skips
     # the label with a warning rather than failing the operator.
-    for sub in "$ORVIX_ADMIN_UI_DIR" "$ORVIX_WEBMAIL_UI_DIR"; do
+    for sub in "$ORVIX_ADMIN_UI_DIR" "$ORVIX_WEBMAIL_UI_DIR" "$ORVIX_MARKETING_UI_DIR"; do
         local label
         label="$(basename "$sub")"
         local latest_asset_backup
