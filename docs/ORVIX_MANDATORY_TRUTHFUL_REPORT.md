@@ -1,3 +1,9 @@
+> **SUPERSEDED** — This is a historical execution report.
+> Current authoritative status: `docs/ORVIX_V1_SOURCE_OF_TRUTH.md`
+>
+> The PR described below (#27) has been squash-merged into `main` at
+> commit `e7f5441c25732b7583f3e57053f1e4d79f417fc5`.
+
 # MANDATORY TRUTHFUL EXECUTION REPORT (UPDATED)
 
 ## 1. Executive Summary
