@@ -1037,4 +1037,5 @@ DEVUNSAFE
     generate_upgrade_report
 }
 
+[ "${BASH_SOURCE[0]}" != "${0}" ] && return 0
 main "$@"

@@ -276,17 +276,23 @@ func TestAdminLicenseUIZeroDateAbsent(t *testing.T) {
 	}
 }
 
-// TestAdminLicenseUIPreferRuntimeTelemetry confirms the license
-// card code is no longer present in the built admin JS since the
-// License UI page was removed. Local product licensing is retired.
-func TestAdminLicenseUIPreferRuntimeTelemetry(t *testing.T) {
+// TestAdminRetiredLicenseUINotInShippedBundle verifies the shipped
+// release/admin assets do NOT contain retired License UI markers.
+// Local product licensing is retired; the License page and its API
+// calls must be absent from generated release assets.
+func TestAdminRetiredLicenseUINotInShippedBundle(t *testing.T) {
 	root := adminRepoRoot(t)
 	src := adminJSContents(t, root)
-	if strings.Contains(src, `"/api/v1/license"`) {
-		t.Logf("note: /api/v1/license still referenced in built JS (endpoint remains, UI removed)")
+
+	forbidden := []string{
+		`"/api/v1/license"`,
+		`"/api/v1/license/validate"`,
+		`"status":"not_required"`,
+		`"license_not_required"`,
 	}
-	// The old license card pattern must NOT be required.
-	if strings.Contains(src, "(rt && rt.license) || data") {
-		t.Logf("license card pattern exists in built JS (may be retained from shared runtime telemetry code)")
+	for _, f := range forbidden {
+		if strings.Contains(src, f) {
+			t.Errorf("retired license UI marker found in shipped Admin bundle: %s", f)
+		}
 	}
 }

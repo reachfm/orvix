@@ -77,6 +77,13 @@ jobs:
           bash release/scripts/tests/test-public-origin-contract.sh
           bash release/scripts/tests/test-admin-root-route-migration.sh
           bash release/scripts/tests/test-upgrade-admin-route-migration.sh
+      - name: Upgrade safety, Doctor, and build metadata tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash release/scripts/tests/test-doctor-dns-auth.sh
+          bash release/scripts/tests/test-upgrade-rollback-complete.sh
+          bash release/scripts/tests/test-build-metadata.sh
       - name: Server route and installer tests
         shell: bash
         run: |

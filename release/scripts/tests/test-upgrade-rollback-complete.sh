@@ -12,70 +12,45 @@ trap cleanup EXIT
 fail_msg() { echo "FAIL: $1"; FAIL=$((FAIL + 1)); }
 pass()     { echo "PASS: $1"; PASS=$((PASS + 1)); }
 
-mkdir -p "$T/bin" "$T/etc/caddy" "$T/var/backups/orvix-upgrade" "$T/var/lib/orvix" "$T/etc/orvix" "$T/usr/share/orvix/"{admin,webmail,marketing} "$T/usr/local/bin"
+setup() {
+  rm -rf "$T"/*
+  mkdir -p "$T/bin" "$T/etc/caddy" "$T/var/backups/orvix-upgrade" \
+    "$T/var/lib/orvix" "$T/etc/orvix" \
+    "$T/usr/share/orvix/"{admin,webmail,marketing} "$T/usr/local/bin"
+}
 
-# Fake systemctl
-cat > "$T/bin/systemctl" <<'END'
+# Fake systemctl: tracks calls
+cat > "$T/bin/systemctl" <<'SYSTEMCTL'
 #!/usr/bin/env bash
+echo "systemctl:$*" >> /tmp/sysctl_calls
 case "$*" in
-  "restart orvix.service") echo "systemctl: restart orvix" >> "$SYSTEMCTL_LOG"; exit 0 ;;
-  "is-active --quiet orvix") echo "systemctl: is-active orvix" >> "$SYSTEMCTL_LOG"; exit 0 ;;
+  "restart orvix.service")
+    [ "${SYSTEMCTL_RESTART_FAIL:-0}" = "1" ] && exit 1 || exit 0
+    ;;
+  "is-active --quiet orvix")
+    [ "${SYSTEMCTL_ACTIVE_FAIL:-0}" = "1" ] && exit 1 || exit 0
+    ;;
   *) exit 0 ;;
 esac
-END
+SYSTEMCTL
 chmod +x "$T/bin/systemctl"
-export SYSTEMCTL_LOG="$T/systemctl_calls.log"
 
-# Fake caddy
-cat > "$T/bin/caddy" <<'END'
+# Fake caddy: tracks calls, configurable failures
+cat > "$T/bin/caddy" <<'CADDY'
 #!/usr/bin/env bash
+echo "caddy:$*" >> /tmp/caddy_calls
 case "$1" in
-  validate)
-    echo "caddy: validate $3" >> "$CADDY_LOG"
-    exit 0
-    ;;
-  reload)
-    echo "caddy: reload $3" >> "$CADDY_LOG"
-    exit 0
-    ;;
-  *)
-    exit 1
-    ;;
+  validate) [ "${CADDY_VALIDATE_FAIL:-0}" = "1" ] && exit 1 || exit 0 ;;
+  reload)   [ "${CADDY_RELOAD_FAIL:-0}" = "1" ] && exit 1 || exit 0 ;;
+  *) exit 1 ;;
 esac
-END
+CADDY
 chmod +x "$T/bin/caddy"
-export CADDY_LOG="$T/caddy_calls.log"
 
-# Old binary
-echo "old-binary-v1.0.3" > "$T/usr/local/bin/orvix"
-
-# Old config
-echo "old-config" > "$T/etc/orvix/orvix.yaml"
-
-# Old DB
-echo "old-db" > "$T/var/lib/orvix/orvix.db"
-
-# JWT key with correct ownership
-echo "jwt-secret" > "$T/var/lib/orvix/jwt_key.pem"
-
-# VAPID keys
-echo "vapid-private" > "$T/etc/orvix/vapid_private.key"
-echo "vapid-public" > "$T/etc/orvix/vapid_public.key"
-
-# Backup encryption key
-echo "backup-key" > "$T/etc/orvix/backup_encryption.key"
-
-# Caddyfile
-echo "admin.example.com { reverse_proxy 127.0.0.1:8080 }" > "$T/etc/caddy/Caddyfile"
-
-# Old asset trees
-echo "old-admin" > "$T/usr/share/orvix/admin/index.html"
-echo "old-webmail" > "$T/usr/share/orvix/webmail/index.html"
-echo "old-marketing" > "$T/usr/share/orvix/marketing/index.html"
-
+export SYSTEMCTL_RESTART_FAIL=0 SYSTEMCTL_ACTIVE_FAIL=0
+export CADDY_VALIDATE_FAIL=0 CADDY_RELOAD_FAIL=0
 export PATH="$T/bin:$PATH"
 
-# Run preflight_backup in a subshell using the actual upgrade.sh functions
 run_backup() {
   ORVIX_BIN="$T/usr/local/bin/orvix" \
   ORVIX_CONFIG="$T/etc/orvix/orvix.yaml" \
@@ -95,56 +70,8 @@ run_backup() {
   '
 }
 
-echo "=== Rollback Behavioral Tests ==="
-
-BACKUP_DIR="$(run_backup 2>/dev/null || true)"
-if [ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ]; then
-  pass "preflight_backup created backup directory"
-else
-  fail_msg "preflight_backup did not create backup directory"
-fi
-
-# Check manifest was created
-if [ -f "$BACKUP_DIR/manifest" ]; then
-  pass "backup manifest created"
-else
-  fail_msg "backup manifest NOT created"
-fi
-
-# Check manifest contains recorded metadata
-if grep -q 'path=' "$BACKUP_DIR/manifest" 2>/dev/null; then
-  pass "manifest contains file paths"
-else
-  fail_msg "manifest does NOT contain file paths"
-fi
-
-if grep -q 'uid=' "$BACKUP_DIR/manifest" 2>/dev/null; then
-  pass "manifest records UID"
-else
-  fail_msg "manifest does NOT record UID"
-fi
-
-if grep -q 'sha256=' "$BACKUP_DIR/manifest" 2>/dev/null; then
-  pass "manifest records SHA256"
-else
-  fail_msg "manifest does NOT record SHA256"
-fi
-
-# Check run_id was saved
-if [ -f "$BACKUP_DIR/run_id" ]; then
-  pass "run_id file created"
-else
-  fail_msg "run_id file NOT created"
-fi
-
-# Simulate upgrade (install new binary, then rollback)
-echo "new-binary" > "$T/usr/local/bin/orvix"
-echo "new-config" > "$T/etc/orvix/orvix.yaml"
-echo "new-admin" > "$T/usr/share/orvix/admin/index.html"
-echo "new-marketing" > "$T/usr/share/orvix/marketing/index.html"
-
-# Run rollback using the actual production function
 run_rollback() {
+  local backup_dir="$1"
   ORVIX_BIN="$T/usr/local/bin/orvix" \
   ORVIX_CONFIG="$T/etc/orvix/orvix.yaml" \
   ORVIX_DATA_DIR="$T/var/lib/orvix" \
@@ -160,18 +87,93 @@ run_rollback() {
   ORVIX_CADDY_BIN="$T/bin/caddy" \
   ORVIX_SYSTEMCTL="$T/bin/systemctl" \
   BACKUP_PARENT="$T/var/backups/orvix-upgrade" \
-  SYSTEMCTL_LOG="$SYSTEMCTL_LOG" \
-  CADDY_LOG="$CADDY_LOG" \
   bash -c '
     source '"$UPGRADE_SCRIPT"'
-    full_rollback "'"$BACKUP_DIR"'"
+    full_rollback "'"$backup_dir"'"
   '
 }
 
-rollback_output="$(run_rollback 2>&1 || true)"
-rollback_rc=$?
+echo "=== Rollback Behavioral Tests ==="
 
-# Test: binary restored
+# ── Test 1: Preflight backup creates directory and manifest ──
+setup
+echo "old-binary-v1.0.3" > "$T/usr/local/bin/orvix"
+echo "old-config" > "$T/etc/orvix/orvix.yaml"
+echo "old-db" > "$T/var/lib/orvix/orvix.db"
+echo "jwt-secret" > "$T/var/lib/orvix/jwt_key.pem"
+echo "vapid-private" > "$T/etc/orvix/vapid_private.key"
+echo "vapid-public" > "$T/etc/orvix/vapid_public.key"
+echo "backup-key" > "$T/etc/orvix/backup_encryption.key"
+echo "admin.example.com { reverse_proxy 127.0.0.1:8080 }" > "$T/etc/caddy/Caddyfile"
+echo "old-admin" > "$T/usr/share/orvix/admin/index.html"
+echo "old-webmail" > "$T/usr/share/orvix/webmail/index.html"
+echo "old-marketing" > "$T/usr/share/orvix/marketing/index.html"
+
+BACKUP_DIR="$(run_backup 2>/dev/null || true)"
+if [ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ]; then
+  pass "preflight_backup creates backup directory"
+else
+  fail_msg "preflight_backup did not create backup directory"
+fi
+
+if [ -f "$BACKUP_DIR/manifest" ]; then
+  pass "backup manifest created"
+else
+  fail_msg "backup manifest NOT created"
+fi
+
+if grep -q 'path=' "$BACKUP_DIR/manifest" 2>/dev/null; then
+  pass "manifest contains file paths"
+else
+  fail_msg "manifest does NOT contain file paths"
+fi
+
+if grep -q 'uid=' "$BACKUP_DIR/manifest" 2>/dev/null; then
+  pass "manifest records UID"
+else
+  fail_msg "manifest does NOT record UID"
+fi
+
+if grep -q 'gid=' "$BACKUP_DIR/manifest" 2>/dev/null; then
+  pass "manifest records GID"
+else
+  fail_msg "manifest does NOT record GID"
+fi
+
+if grep -q 'mode=' "$BACKUP_DIR/manifest" 2>/dev/null; then
+  pass "manifest records numeric mode"
+else
+  fail_msg "manifest does NOT record numeric mode"
+fi
+
+if grep -q 'sha256=' "$BACKUP_DIR/manifest" 2>/dev/null; then
+  pass "manifest records SHA-256"
+else
+  fail_msg "manifest does NOT record SHA-256"
+fi
+
+if [ -f "$BACKUP_DIR/run_id" ]; then
+  pass "run_id file created"
+else
+  fail_msg "run_id file NOT created"
+fi
+
+# ── Test 2-5: Rollback restores binary, config, db, jwt byte-for-byte ──
+echo "new-binary-v2" > "$T/usr/local/bin/orvix"
+echo "new-config" > "$T/etc/orvix/orvix.yaml"
+echo "new-db" > "$T/var/lib/orvix/orvix.db"
+echo "new-jwt" > "$T/var/lib/orvix/jwt_key.pem"
+
+set +e
+rollback_output="$(run_rollback "$BACKUP_DIR" 2>&1)"
+rollback_rc=$?
+set -e
+if [ "$rollback_rc" = "0" ]; then
+  pass "rollback returns zero on success"
+else
+  fail_msg "rollback returns non-zero ($rollback_rc) even on success: $rollback_output"
+fi
+
 ACTUAL_BINARY="$(cat "$T/usr/local/bin/orvix")"
 if [ "$ACTUAL_BINARY" = "old-binary-v1.0.3" ]; then
   pass "binary restored byte-for-byte"
@@ -179,56 +181,150 @@ else
   fail_msg "binary NOT restored: got '$ACTUAL_BINARY'"
 fi
 
-# Test: config restored
 ACTUAL_CONFIG="$(cat "$T/etc/orvix/orvix.yaml")"
 if [ "$ACTUAL_CONFIG" = "old-config" ]; then
   pass "config restored byte-for-byte"
 else
-  fail_msg "config NOT restored: got '$ACTUAL_CONFIG'"
+  fail_msg "config NOT restored"
 fi
 
-# Test: Caddy validated and reloaded
-if [ -f "$CADDY_LOG" ]; then
-  if grep -q "validate" "$CADDY_LOG"; then
-    pass "Caddy validate invoked"
-  else
-    fail_msg "Caddy validate NOT invoked"
-  fi
-  if grep -q "reload" "$CADDY_LOG"; then
-    pass "Caddy reload invoked exactly once"
-  else
-    fail_msg "Caddy reload NOT invoked"
-  fi
+ACTUAL_DB="$(cat "$T/var/lib/orvix/orvix.db")"
+if [ "$ACTUAL_DB" = "old-db" ]; then
+  pass "db restored byte-for-byte"
 else
-  fail_msg "Caddy log not found"
+  fail_msg "db NOT restored"
 fi
 
-# Test: systemctl restart was called
-if [ -f "$SYSTEMCTL_LOG" ]; then
-  if grep -q "restart orvix" "$SYSTEMCTL_LOG"; then
-    pass "systemctl restart invoked after rollback"
-  else
-    fail_msg "systemctl restart NOT invoked"
-  fi
+ACTUAL_JWT="$(cat "$T/var/lib/orvix/jwt_key.pem")"
+if [ "$ACTUAL_JWT" = "jwt-secret" ]; then
+  pass "jwt restored byte-for-byte"
 else
-  fail_msg "systemctl log not found"
+  fail_msg "jwt NOT restored"
 fi
 
-# Test: rollback reports failure when Caddy fails
-cat > "$T/bin/caddy" <<'END'
-#!/usr/bin/env bash
-exit 1
-END
-chmod +x "$T/bin/caddy"
+# ── Test 6: JWT ownership is correct ──
+rollback_jwt_manifest="$(grep -A6 "path=$T/var/lib/orvix/jwt_key.pem" "$BACKUP_DIR/manifest" 2>/dev/null || true)"
+jwt_uid="$(echo "$rollback_jwt_manifest" | grep '^uid=' | cut -d= -f2)"
+jwt_gid="$(echo "$rollback_jwt_manifest" | grep '^gid=' | cut -d= -f2)"
+jwt_mode="$(echo "$rollback_jwt_manifest" | grep '^mode=' | cut -d= -f2)"
+# On Windows, stat may return '0' for UID/GID. Accept both.
+if [ -n "$jwt_uid" ] && [ -n "$jwt_gid" ] && [ -n "$jwt_mode" ]; then
+  pass "JWT metadata recorded: uid=$jwt_uid gid=$jwt_gid mode=$jwt_mode"
+else
+  fail_msg "JWT metadata not recorded in manifest"
+fi
 
-# Reset binary
-echo "new-binary" > "$T/usr/local/bin/orvix"
-rollback_output="$(run_rollback 2>&1 || true)"
+# ── Test 7: Caddy validate and reload invoked ──
+if grep -q "caddy:validate" /tmp/caddy_calls 2>/dev/null; then
+  pass "Caddy validate invoked"
+else
+  fail_msg "Caddy validate NOT invoked"
+fi
+
+if grep -q "caddy:reload" /tmp/caddy_calls 2>/dev/null; then
+  pass "Caddy reload invoked"
+else
+  fail_msg "Caddy reload NOT invoked"
+fi
+
+# ── Test 8-9: Systemctl restart and is-active ──
+if grep -q "systemctl:restart orvix.service" /tmp/sysctl_calls 2>/dev/null; then
+  pass "systemctl restart invoked"
+else
+  fail_msg "systemctl restart NOT invoked"
+fi
+
+if grep -q "systemctl:is-active" /tmp/sysctl_calls 2>/dev/null; then
+  pass "systemctl is-active checked after rollback"
+else
+  fail_msg "systemctl is-active NOT checked"
+fi
+
+# ── Test 10: Caddy validation failure causes nonzero rollback ──
+setup
+echo "old-binary-v1.0.3" > "$T/usr/local/bin/orvix"
+echo "admin.example.com { reverse_proxy 127.0.0.1:8080 }" > "$T/etc/caddy/Caddyfile"
+BACKUP_DIR2="$(run_backup 2>/dev/null || true)"
+echo "new-binary-v2" > "$T/usr/local/bin/orvix"
+CADDY_VALIDATE_FAIL=1
+set +e
+rollback_output="$(run_rollback "$BACKUP_DIR2" 2>&1)"
 rollback_rc=$?
+set -e
 if [ "$rollback_rc" != "0" ]; then
-  pass "rollback fails (nonzero exit) when Caddy validation fails"
+  pass "Caddy validation failure returns non-zero (rc=$rollback_rc)"
 else
-  fail_msg "rollback should fail when Caddy validation fails"
+  fail_msg "Caddy validation failure should return non-zero, got rc=$rollback_rc"
+fi
+CADDY_VALIDATE_FAIL=0
+
+# ── Test 11: Caddy reload failure causes nonzero rollback ──
+setup
+echo "old-binary-v1.0.3" > "$T/usr/local/bin/orvix"
+echo "admin.example.com { reverse_proxy 127.0.0.1:8080 }" > "$T/etc/caddy/Caddyfile"
+BACKUP_DIR3="$(run_backup 2>/dev/null || true)"
+echo "new-binary-v2" > "$T/usr/local/bin/orvix"
+CADDY_RELOAD_FAIL=1
+set +e
+rollback_output="$(run_rollback "$BACKUP_DIR3" 2>&1)"
+rollback_rc=$?
+set -e
+if [ "$rollback_rc" != "0" ]; then
+  pass "Caddy reload failure returns non-zero (rc=$rollback_rc)"
+else
+  fail_msg "Caddy reload failure should return non-zero, got rc=$rollback_rc"
+fi
+CADDY_RELOAD_FAIL=0
+
+# ── Test 12: Service restart failure causes nonzero rollback ──
+setup
+echo "old-binary-v1.0.3" > "$T/usr/local/bin/orvix"
+echo "admin.example.com { reverse_proxy 127.0.0.1:8080 }" > "$T/etc/caddy/Caddyfile"
+BACKUP_DIR4="$(run_backup 2>/dev/null || true)"
+echo "new-binary-v2" > "$T/usr/local/bin/orvix"
+SYSTEMCTL_RESTART_FAIL=1
+set +e
+rollback_output="$(run_rollback "$BACKUP_DIR4" 2>&1)"
+rollback_rc=$?
+set -e
+if [ "$rollback_rc" != "0" ]; then
+  pass "service restart failure returns non-zero (rc=$rollback_rc)"
+else
+  fail_msg "service restart failure should return non-zero, got rc=$rollback_rc"
+fi
+SYSTEMCTL_RESTART_FAIL=0
+
+# ── Test 13: Post-rollback health failure causes nonzero ──
+setup
+echo "old-binary-v1.0.3" > "$T/usr/local/bin/orvix"
+echo "admin.example.com { reverse_proxy 127.0.0.1:8080 }" > "$T/etc/caddy/Caddyfile"
+BACKUP_DIR5="$(run_backup 2>/dev/null || true)"
+echo "new-binary-v2" > "$T/usr/local/bin/orvix"
+SYSTEMCTL_ACTIVE_FAIL=1
+set +e
+rollback_output="$(run_rollback "$BACKUP_DIR5" 2>&1)"
+rollback_rc=$?
+set -e
+if [ "$rollback_rc" != "0" ]; then
+  pass "post-rollback health failure returns non-zero (rc=$rollback_rc)"
+else
+  fail_msg "post-rollback health failure should return non-zero, got rc=$rollback_rc"
+fi
+SYSTEMCTL_ACTIVE_FAIL=0
+
+# ── Test 14: Rollback is idempotent ──
+setup
+echo "old-binary-v1.0.3" > "$T/usr/local/bin/orvix"
+echo "admin.example.com { reverse_proxy 127.0.0.1:8080 }" > "$T/etc/caddy/Caddyfile"
+BACKUP_DIR6="$(run_backup 2>/dev/null || true)"
+echo "new-binary-v2" > "$T/usr/local/bin/orvix"
+set +e; run_rollback "$BACKUP_DIR6" >/dev/null 2>&1; first_rc=$?; set -e
+echo "new-binary-v2" > "$T/usr/local/bin/orvix"
+set +e; run_rollback "$BACKUP_DIR6" >/dev/null 2>&1; second_rc=$?; set -e
+if [ "$first_rc" = "0" ] && [ "$second_rc" = "0" ]; then
+  pass "rollback is idempotent"
+else
+  fail_msg "rollback not idempotent: first=$first_rc second=$second_rc"
 fi
 
 echo ""
