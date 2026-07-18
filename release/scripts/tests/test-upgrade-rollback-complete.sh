@@ -65,13 +65,12 @@ run_backup() {
   ORVIX_DKIM_DIR="$T/var/lib/orvix/dkim" \
   BACKUP_PARENT="$T/var/backups/orvix-upgrade" \
   bash -c '
-    set -x
     echo "Starting run_backup subshell" >&2
     source '"$UPGRADE_SCRIPT"'
     rc=$?
-    set +x
     echo "source rc=$rc" >&2
     if [ "$rc" != "0" ]; then echo "SOURCE FAILED with rc=$rc" >&2; exit 1; fi
+    set -x
     preflight_backup
     echo "BACKUP_DIR=$BACKUP_DIR" >&2
     echo "$BACKUP_DIR"
