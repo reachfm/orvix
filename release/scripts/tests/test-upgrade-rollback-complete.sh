@@ -13,16 +13,12 @@ fail_msg() { echo "FAIL: $1"; FAIL=$((FAIL + 1)); }
 pass()     { echo "PASS: $1"; PASS=$((PASS + 1)); }
 
 setup() {
-  rm -rf "$T"/*
   mkdir -p "$T/bin" "$T/etc/caddy" "$T/var/backups/orvix-upgrade" \
     "$T/var/lib/orvix" "$T/etc/orvix" \
     "$T/usr/share/orvix/"{admin,webmail,marketing} "$T/usr/local/bin"
-}
 
-mkdir -p "$T/bin"
-
-# Fake systemctl: tracks calls
-cat > "$T/bin/systemctl" <<'SYSTEMCTL'
+  # Fake systemctl
+  cat > "$T/bin/systemctl" <<'SYSTEMCTL'
 #!/usr/bin/env bash
 echo "systemctl:$*" >> /tmp/sysctl_calls
 case "$*" in
@@ -35,10 +31,10 @@ case "$*" in
   *) exit 0 ;;
 esac
 SYSTEMCTL
-chmod +x "$T/bin/systemctl"
+  chmod +x "$T/bin/systemctl"
 
-# Fake caddy: tracks calls, configurable failures
-cat > "$T/bin/caddy" <<'CADDY'
+  # Fake caddy
+  cat > "$T/bin/caddy" <<'CADDY'
 #!/usr/bin/env bash
 echo "caddy:$*" >> /tmp/caddy_calls
 case "$1" in
@@ -47,7 +43,8 @@ case "$1" in
   *) exit 1 ;;
 esac
 CADDY
-chmod +x "$T/bin/caddy"
+  chmod +x "$T/bin/caddy"
+}
 
 export SYSTEMCTL_RESTART_FAIL=0 SYSTEMCTL_ACTIVE_FAIL=0
 export CADDY_VALIDATE_FAIL=0 CADDY_RELOAD_FAIL=0

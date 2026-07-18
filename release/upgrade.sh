@@ -508,7 +508,7 @@ full_rollback() {
 
     restore_file_from_manifest() {
         local path="$1" uid="$2" gid="$3" mode="$4" sha="$5" backup="$6"
-        local full_backup="$backup_dir/$backup"
+        local full_backup="$backup"
         if [ ! -f "$full_backup" ]; then
             log "  MISSING: backup file $full_backup not found"
             rollback_failed=1
