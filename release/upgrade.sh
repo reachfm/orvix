@@ -558,7 +558,7 @@ full_rollback() {
                 sha256)       current_sha="$value" ;;
                 backup_path)  current_backup="$value" ;;
                 ---)
-                    if [ -n "$current_path" ] && [ -f "$backup_dir/$current_backup" ]; then
+                    if [ -n "$current_path" ] && [ -f "$current_backup" ]; then
                         restore_file_from_manifest "$current_path" "$current_uid" "$current_gid" "$current_mode" "$current_sha" "$current_backup"
                     elif [ -n "$current_path" ]; then
                         local existed_marker
