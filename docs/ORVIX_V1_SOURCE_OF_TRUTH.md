@@ -9,32 +9,51 @@ history, or agent memory.
 
 ## Last Updated
 
-2026-07-18T06:00:00Z
+2026-07-18
 
-## Authoritative Main Commit
+## A. Authoritative Repository Reference
 
-```
-e7f5441c25732b7583f3e57053f1e4d79f417fc5
-```
+- **Dynamic authority:** `origin/main`
+- The exact current SHA of `origin/main` must be resolved from GitHub or with:
+  ```
+  git fetch origin
+  git rev-parse origin/main
+  ```
+- This document must not require a new commit merely because unrelated commits advance `main`.
 
-## Latest Merged PR
+## B. Last State-Synchronization Merge
 
-**PR #27:** `security: harden admin auth and SMTP boundaries`
-- Authoritative squash-merge commit: `e7f5441`
+- **PR #37** — `docs: establish Orvix V1 source of truth`
+- Merge commit: `bd91d15a8fde4cdddc14b94aaf7c738ba6616a31`
+- Merged into `main`: 2026-07-18
+- Current `main` must contain this commit or a descendant.
+- Verification:
+  ```
+  git merge-base --is-ancestor \
+    bd91d15a8fde4cdddc14b94aaf7c738ba6616a31 \
+    origin/main
+  ```
+
+## C. Security Baseline Merge
+
+- **PR #27** — `security: harden admin auth and SMTP boundaries`
+- Merge commit: `e7f5441c25732b7583f3e57053f1e4d79f417fc5`
 - Merged into `main`: 2026-07-18
 
-## Current Repository State
+## D. Repository State
 
 | Property | Value |
 |----------|-------|
-| Main branch | `main` |
-| Main HEAD | `e7f5441c25732b7583f3e57053f1e4d79f417fc5` |
-| Last merged PR | #27 |
-| Open PRs | None from the security sprint |
-| Deployed to production | **NO** |
-| Deployed to staging | **NOT VERIFIED** |
-| Current release tag | v1.0.3-rc5 (pre-exists #27) |
-| V1 release tag | NOT YET CREATED |
+| Main authority | `origin/main` |
+| Exact Main HEAD | Resolve dynamically from GitHub |
+| Last state-sync PR | #37 |
+| Last state-sync merge | `bd91d15...` |
+| Security baseline PR | #27 |
+| Security baseline merge | `e7f5441...` |
+| Production deployed SHA | NOT VERIFIED |
+| PR #27 deployed | NO |
+| PR #37 deployed | NO |
+| V1 public release approved | NO |
 
 ## Completed Security Work (PR #27)
 
@@ -84,16 +103,17 @@ All of the following is merged into `main`:
 |----------|--------|
 | Production deployed SHA | NOT VERIFIED |
 | Production deployed version | NOT VERIFIED |
-| Commit e7f5441 deployed | **NO** |
+| Commit `e7f5441` (security baseline) deployed | **NO** |
+| Commit `bd91d15` (state-sync merge) deployed | **NO** |
 | Backed up before merge | NOT VERIFIED |
 | Rollback reference | NOT VERIFIED |
 | Migration applied | NOT VERIFIED |
 
-**No deployment occurred as part of PR #27 or any prior security sprint step.**
+**No deployment has occurred. Neither PR #27 nor PR #37 has been deployed to any environment.**
 
 ## Known Unresolved Product Issues
 
-These are confirmed issues existing on `main` (commit `e7f5441`):
+These are confirmed issues existing on `origin/main` (the authoritative repository reference):
 
 1. **TenantAdmin Fiber Admin route authorization** — The Fiber Admin API
    route guard may not correctly enforce canonical TenantAdmin role
@@ -159,24 +179,21 @@ The following gates must pass before Orvix V1 is released:
 
 ## Next Exact Task
 
-1. Create GitHub Issues for all known unresolved product issues (see
-   `docs/ORVIX_V1_RELEASE_CHECKLIST.md`).
+1. Verify TenantAdmin Fiber Admin route authorization.
 
-2. Verify TenantAdmin Fiber Admin route authorization.
+2. Complete Web Push and VAPID verification.
 
-3. Complete Web Push and VAPID verification.
+3. Run final installer, upgrade, backup, restore, and doctor gates.
 
-4. Run final installer, upgrade, backup, restore, and doctor gates.
+4. Deploy to staging.
 
-5. Deploy to staging.
+5. Run closed beta.
 
-6. Run closed beta.
-
-7. Deploy to production with backup and rollback approval.
+6. Deploy to production with backup and rollback approval.
 
 ## Links to Tracking GitHub Issues
 
-- Master tracking issue: **TO BE CREATED** (Orvix V1 Release Gate)
+- Master tracking issue: [#36](https://github.com/reachfm/orvix/issues/36) — Orvix V1 Release Gate
 - Individual issues: See `docs/ORVIX_V1_RELEASE_CHECKLIST.md`
 
 ## Superseded Historical Documents
@@ -200,9 +217,14 @@ authority:
 ## Rules for Future Updates
 
 1. This document is the authoritative project-state record.
-2. Any merge to `main` must update the Authoritative Main Commit field.
-3. Any deployment must update `docs/ORVIX_DEPLOYMENT_STATE.md`.
-4. Any completed task must be checked off in `docs/ORVIX_V1_RELEASE_CHECKLIST.md`.
-5. Historical reports must not be recycled as current-state documents.
-6. No field in this document may depend on human memory or chat history.
-7. The GitHub Issues tracker is the canonical task list.
+2. Update this document when project state, decisions, deployment state,
+   blockers, or release status changes.
+3. Do not update it merely because an unrelated commit advances `main`.
+4. Exact live Main HEAD is read from `origin/main`, not hard-coded.
+5. Exact deployed SHA must be recorded only after verified deployment.
+6. Historical merge SHAs remain immutable evidence of past events.
+7. Any deployment must update `docs/ORVIX_DEPLOYMENT_STATE.md`.
+8. Any completed task must be checked off in `docs/ORVIX_V1_RELEASE_CHECKLIST.md`.
+9. Historical reports must not be recycled as current-state documents.
+10. No field in this document may depend on human memory or chat history.
+11. The GitHub Issues tracker is the canonical task list.

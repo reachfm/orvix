@@ -78,12 +78,23 @@ Contains checkbox list linking to all 10 issues above, plus authoritative main S
 
 ## 10. Pull Request
 
-*Will be set after PR creation.*
+**PR #37:** https://github.com/reachfm/orvix/pull/37
 
-## 11. Deployment Status
+## 11. Post-Merge Record (2026-07-18)
 
-**NO DEPLOYMENT** — Commit `e7f5441` has not been deployed to any environment.
+- PR #37 squash-merged into `main` at `bd91d15a8fde4cdddc14b94aaf7c738ba6616a31`
+- Branch `chore/orvix-v1-state-sync` deleted after merge
+- No deployment occurred
+- Source-of-truth reference model corrected: hard-coded "Authoritative Main Commit"
+  replaced with dynamic `origin/main` reference; PR #27 and PR #37 recorded as
+  immutable historical merge SHAs (security baseline and state-sync respectively);
+  no future doc commit required when unrelated commits advance `main`.
 
-## 12. Final Verdict
+## 12. Deployment Status
+
+**NO DEPLOYMENT** — Neither commit `e7f5441` (PR #27) nor `bd91d15` (PR #37)
+has been deployed to any environment.
+
+## 13. Final Verdict
 
 **PASS — ORVIX V1 STATE FULLY SYNCHRONIZED**
