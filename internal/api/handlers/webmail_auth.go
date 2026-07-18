@@ -206,11 +206,28 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 	}
 
 	// Verify the password against the mailbox's hash.
-	if !verifyMailboxPassword(req.Password, hash) {
+	valid, needsRehash := verifyMailboxPassword(req.Password, hash)
+	if !valid {
 		h.security.RecordFailedLogin(c.Context(), c.IP(), loginEmail)
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 			"error": "invalid credentials",
 		})
+	}
+
+	if needsRehash {
+		newHash, hashErr := auth.HashPassword(req.Password)
+		if hashErr == nil {
+			res, execErr := sqlDB.Exec(
+				"UPDATE coremail_mailboxes SET password_hash = "+dial.Placeholder(1)+", auth_scheme = '$argon2id$' WHERE id = "+dial.Placeholder(2)+" AND password_hash = "+dial.Placeholder(3),
+				newHash, mailboxID, hash,
+			)
+			if execErr == nil {
+				if n, _ := res.RowsAffected(); n > 0 {
+					h.logger.Info("webmail password rehashed to Argon2id",
+						zap.Uint("mailbox_id", mailboxID))
+				}
+			}
+		}
 	}
 
 	// Find or create the users row that the JWT
@@ -490,7 +507,7 @@ func (h *Handler) WebmailChangePassword(c fiber.Ctx) error {
 	// mailboxes still work — a real production operator
 	// migration can take months and the user must not
 	// be locked out during the cutover.
-	if !verifyMailboxPassword(req.CurrentPassword, currentHash) {
+	if valid, _ := verifyMailboxPassword(req.CurrentPassword, currentHash); !valid {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 			"error": "invalid credentials",
 		})
@@ -640,16 +657,19 @@ func (h *Handler) ensureWebmailUser(dial *dbdialect.Info, sqlDB *sql.DB, email s
 // written by ensureWebmailUser) are rejected
 // unconditionally so a placeholder row cannot be
 // logged into via the mailbox path either.
-func verifyMailboxPassword(password, encoded string) bool {
+func verifyMailboxPassword(password, encoded string) (bool, bool) {
 	if encoded == "" || encoded == "!" {
-		return false
+		return false, false
 	}
 	if strings.HasPrefix(encoded, "$argon2id$") {
-		return verifyArgon2idMailbox(password, encoded)
+		return verifyArgon2idMailbox(password, encoded), false
 	}
 	// bcrypt fallback. Some legacy mailboxes use
 	// bcrypt.
-	return bcrypt.CompareHashAndPassword([]byte(encoded), []byte(password)) == nil
+	if bcrypt.CompareHashAndPassword([]byte(encoded), []byte(password)) == nil {
+		return true, true
+	}
+	return false, false
 }
 
 func verifyArgon2idMailbox(password, encoded string) bool {

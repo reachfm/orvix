@@ -1005,7 +1005,7 @@ func (r *Router) setupRoutes() {
 	// no-ops on GET/HEAD/OPTIONS and on API-key-authenticated requests,
 	// so this adds no burden to the read-only routes or to the
 	// provisioning API below.
-	admin := protected.Group("", auth.RequireAnyRole(auth.RoleAdmin, auth.RoleSuperAdmin), r.csrf.Middleware())
+	admin := protected.Group("", auth.RequireAnyRole(auth.RoleAdmin, auth.RoleSuperAdmin, auth.RolePlatformSuperAdmin), r.csrf.Middleware())
 	admin.Get("/domains", r.h.ListDomains)
 	admin.Get("/users", r.h.ListUsers)
 	admin.Get("/mailboxes", r.h.ListUsers)
@@ -1260,9 +1260,9 @@ func (r *Router) setupRoutes() {
 	// to read it even if they guess the URL — the contract is
 	// server-side role enforcement, not client-side hiding. We
 	// therefore mount these routes on a sub-group that requires
-	// RoleSuperAdmin; the parent `admin` group still accepts
+	// RolePlatformSuperAdmin or RoleSuperAdmin; the parent `admin` group still accepts
 	// admin-or-superadmin for the customer-facing read paths.
-	internalOps := admin.Group("/console/internal", auth.RequireRole(auth.RoleSuperAdmin))
+	internalOps := admin.Group("/console/internal", auth.RequireAnyRole(auth.RoleSuperAdmin, auth.RolePlatformSuperAdmin))
 	internalOps.Get("/overview", r.h.InternalOverview)
 	internalOps.Get("/tenants", r.h.InternalTenants)
 	internalOps.Get("/domain-intelligence", r.h.InternalDomainIntelligence)
@@ -1272,7 +1272,7 @@ func (r *Router) setupRoutes() {
 	// Platform administration (cross-tenant, admin/superadmin only).
 	// These routes operate on all tenants and require explicit
 	// platform-level authorization — not just tenant membership.
-	platform := admin.Group("/platform", auth.RequireRole(auth.RoleSuperAdmin))
+	platform := admin.Group("/platform", auth.RequireAnyRole(auth.RoleSuperAdmin, auth.RolePlatformSuperAdmin))
 	platform.Get("/dashboard", r.h.PlatformDashboard)
 	platform.Get("/organizations", r.h.ListPlatformOrganizations)
 	platform.Get("/organizations/:id", r.h.GetPlatformOrganization)

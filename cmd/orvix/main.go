@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
 	"fmt"
@@ -40,7 +39,6 @@ import (
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/acme/autocert"
-	"golang.org/x/crypto/argon2"
 	"gorm.io/gorm"
 )
 
@@ -544,7 +542,7 @@ func insertBootstrapAdmin(db *sql.DB, dial *dbdialect.Info, adminEmail, hashedPa
 		localPart = adminEmail[:at]
 	}
 
-	argon2Hash, err := hashPasswordArgon2id(plainPassword)
+	argon2Hash, err := auth.HashPassword(plainPassword)
 	if err != nil {
 		logger.Warn("failed to hash admin password with argon2id, skipping mailbox creation", zap.Error(err))
 	} else {
@@ -581,24 +579,6 @@ func insertBootstrapAdmin(db *sql.DB, dial *dbdialect.Info, adminEmail, hashedPa
 	}
 
 	return tx.Commit()
-}
-
-func hashPasswordArgon2id(password string) (string, error) {
-	const (
-		argon2Time    uint32 = 3
-		argon2Mem     uint32 = 65536
-		argon2Threads uint8  = 4
-		argon2KeyLen  uint32 = 32
-	)
-	salt := make([]byte, 16)
-	if _, err := rand.Read(salt); err != nil {
-		return "", fmt.Errorf("generate salt: %w", err)
-	}
-	hash := argon2.IDKey([]byte(password), salt, argon2Time, argon2Mem, argon2Threads, argon2KeyLen)
-	b64Salt := base64.RawStdEncoding.EncodeToString(salt)
-	b64Hash := base64.RawStdEncoding.EncodeToString(hash)
-	return fmt.Sprintf("$argon2id$v=19$m=%d,t=%d,p=%d$%s$%s",
-		argon2Mem, argon2Time, argon2Threads, b64Salt, b64Hash), nil
 }
 
 // provisionSystemFoldersTx inserts the canonical system

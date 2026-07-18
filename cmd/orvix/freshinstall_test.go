@@ -216,8 +216,8 @@ func TestFreshInstall_PasswordHashStaysStableAcrossLogins(t *testing.T) {
 	t.Cleanup(func() { h.close(t) })
 
 	before := readPasswordHash(t, h)
-	if !strings.HasPrefix(before, "$2") {
-		t.Fatalf("bootstrap hash is not bcrypt: %q", before[:minLen(8, len(before))])
+	if !strings.HasPrefix(before, "$argon2id$") && !strings.HasPrefix(before, "$2") {
+		t.Fatalf("bootstrap hash is not a recognized format: %q", before[:minLen(8, len(before))])
 	}
 
 	for i := 0; i < 3; i++ {

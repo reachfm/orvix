@@ -11,13 +11,13 @@ package main
 //
 // This file pins the bootstrap → DB → login chain down to
 // individual byte slices. The tests don't trust any abstraction:
-// they read the env, decode the base64, hash via bcrypt,
-// re-read the hash from SQLite, and compare the bcrypt result
-// directly. Then they walk the full HTTP login → logout →
-// second-login cycle using the EXACT wire format the installer
-// posts. If any byte changes between the installer-side
-// plaintext and the runtime-side verifier, these tests fail
-// with a message that names the byte.
+// they read the env, decode the base64, hash via the canonical
+// Argon2id implementation, re-read the hash from SQLite, and
+// compare the result directly. Then they walk the full HTTP
+// login → logout → second-login cycle using the EXACT wire
+// format the installer posts. If any byte changes between the
+// installer-side plaintext and the runtime-side verifier, these
+// tests fail with a message that names the byte.
 
 import (
 	"encoding/base64"
@@ -42,7 +42,6 @@ import (
 	"github.com/orvix/orvix/internal/modules"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/argon2"
-	"golang.org/x/crypto/bcrypt"
 )
 
 // passwordChainCase is the full input/output record for one
@@ -62,8 +61,8 @@ type passwordChainTrace struct {
 	InstallerBase64    string // value written to /etc/orvix/bootstrap.env
 	EnvAfterSystemd    string // what os.Getenv returns inside orvix serve
 	DecodedPlaintext   string // base64.StdEncoding.DecodeString result
-	StoredBcryptHash   string // SELECT password_hash FROM users
-	BcryptVerify       bool   // bcrypt.CompareHashAndPassword(plaintext, hash)
+	StoredHash         string // SELECT password_hash FROM users
+	HashVerify         bool   // auth.VerifyPassword(plaintext, hash)
 	StoredArgon2Hash   string // SELECT password_hash FROM coremail_mailboxes
 	Argon2Verify       bool   // coremail.AuthService.VerifyPassword
 	FirstLoginStatus   int    // HTTP status of POST /api/v1/auth/login
@@ -145,16 +144,19 @@ func runPasswordChain(t *testing.T, c passwordChainCase) passwordChainTrace {
 	t.Cleanup(func() { _ = sqlDB.Close() })
 
 	// Step 5 — read the EXACT bytes the bootstrap committed.
-	// If this string doesn't start with $2a/$2b/$2y the runtime
-	// stored something that bcrypt can never verify.
+	// The canonical format is $argon2id$; bcrypt $2a/$2b/$2y is
+	// also acceptable (NeedsRehash will be true on next login).
 	if err := sqlDB.QueryRow(
 		`SELECT password_hash FROM users WHERE email = ?`,
 		"admin@orvix.email",
-	).Scan(&tr.StoredBcryptHash); err != nil {
+	).Scan(&tr.StoredHash); err != nil {
 		t.Fatalf("read users.password_hash: %v", err)
 	}
-	if !strings.HasPrefix(tr.StoredBcryptHash, "$2") {
-		t.Errorf("users.password_hash is not bcrypt-encoded: %q", tr.StoredBcryptHash)
+	if !strings.HasPrefix(tr.StoredHash, "$argon2id$") &&
+		!strings.HasPrefix(tr.StoredHash, "$2a$") &&
+		!strings.HasPrefix(tr.StoredHash, "$2b$") &&
+		!strings.HasPrefix(tr.StoredHash, "$2y$") {
+		t.Errorf("users.password_hash is not a recognized hash format: %q", tr.StoredHash)
 	}
 
 	if err := sqlDB.QueryRow(
@@ -167,16 +169,15 @@ func runPasswordChain(t *testing.T, c passwordChainCase) passwordChainTrace {
 		t.Errorf("coremail_mailboxes.password_hash is not argon2id-encoded: %q", tr.StoredArgon2Hash)
 	}
 
-	// Step 6 — direct bcrypt compare. This is the same call the
-	// Login handler makes. If this returns false, the chain
-	// has already broken by the time orvix serve even started.
-	bcryptErr := bcrypt.CompareHashAndPassword([]byte(tr.StoredBcryptHash), []byte(tr.DecodedPlaintext))
-	tr.BcryptVerify = bcryptErr == nil
-	if bcryptErr != nil {
-		t.Errorf("direct bcrypt.CompareHashAndPassword failed: %v\n  plaintext hex=%s\n  hash      =%s",
-			bcryptErr,
+	// Step 6 — verify using the canonical password verifier.
+	// This is the same call the Login handler makes.
+	verifyResult, verifyErr := auth.VerifyPassword(tr.StoredHash, tr.DecodedPlaintext)
+	tr.HashVerify = verifyResult.Valid
+	if verifyErr != nil || !verifyResult.Valid {
+		t.Errorf("auth.VerifyPassword failed: valid=%v err=%v\n  plaintext hex=%s\n  hash      =%s",
+			verifyResult.Valid, verifyErr,
 			hex.EncodeToString([]byte(tr.DecodedPlaintext)),
-			tr.StoredBcryptHash)
+			tr.StoredHash)
 	}
 
 	// Step 7 — stand up the Fiber router and exercise the full
@@ -259,7 +260,6 @@ func TestPasswordChain_BootstrapToLoginCycleDeterministic(t *testing.T) {
 		{Name: "shell_subst", Pwd: `Pass$(id)word`},
 		{Name: "backtick", Pwd: "Pass`id`word"},
 		{Name: "unicode", Pwd: "MaghaghaMos086π"},
-		{Name: "exactly_72_chars_bcrypt_boundary", Pwd: strings.Repeat("a", 72)},
 		{Name: "single_char", Pwd: "x"},
 		{Name: "min_length_8", Pwd: "abcd1234"},
 	}
@@ -279,8 +279,8 @@ func TestPasswordChain_BootstrapToLoginCycleDeterministic(t *testing.T) {
 				return
 			}
 
-			if !tr.BcryptVerify {
-				t.Errorf("bcrypt.CompareHashAndPassword returned false for the EXACT bytes the installer wrote.\n"+
+			if !tr.HashVerify {
+				t.Errorf("auth.VerifyPassword returned false for the EXACT bytes the installer wrote.\n"+
 					"  plaintext hex  : %s\n"+
 					"  base64 written : %q\n"+
 					"  env read back  : %q\n"+
@@ -290,28 +290,28 @@ func TestPasswordChain_BootstrapToLoginCycleDeterministic(t *testing.T) {
 					tr.InstallerBase64,
 					tr.EnvAfterSystemd,
 					hex.EncodeToString([]byte(tr.DecodedPlaintext)),
-					tr.StoredBcryptHash)
+					tr.StoredHash)
 			}
 
 			if tr.FirstLoginStatus != 200 {
-				t.Errorf("first login: expected 200, got %d\n  plaintext hex: %s\n  stored hash : %q\n  bcrypt verify: %v",
+				t.Errorf("first login: expected 200, got %d\n  plaintext hex: %s\n  stored hash : %q\n  hash verify: %v",
 					tr.FirstLoginStatus,
 					hex.EncodeToString([]byte(tr.DecodedPlaintext)),
-					tr.StoredBcryptHash,
-					tr.BcryptVerify)
+					tr.StoredHash,
+					tr.HashVerify)
 			}
 			if tr.SecondLoginStatus != 200 {
 				t.Errorf("second login: expected 200, got %d (this is the production symptom)\n"+
 					"  plaintext hex : %s\n"+
 					"  stored hash   : %q\n"+
-					"  bcrypt verify : %v\n"+
+					"  hash verify   : %v\n"+
 					"  first access  : %s\n"+
 					"  logout status : %d\n"+
 					"  argon2 verify : %v",
 					tr.SecondLoginStatus,
 					hex.EncodeToString([]byte(tr.DecodedPlaintext)),
-					tr.StoredBcryptHash,
-					tr.BcryptVerify,
+					tr.StoredHash,
+					tr.HashVerify,
 					tr.FirstAccess,
 					tr.LogoutStatus,
 					tr.Argon2Verify)
@@ -327,7 +327,7 @@ func TestPasswordChain_BootstrapToLoginCycleDeterministic(t *testing.T) {
 
 // TestPasswordChain_TraceIsStableAcrossReBootstrap runs the
 // installer flow twice with the same env and asserts that the
-// bcrypt hash bytes do not change. This catches a class of
+// argon2id hash bytes do not change. This catches a class of
 // bugs where seedAdminUser silently re-hashes on every boot,
 // which would mean each "first login" attempt validates
 // against a different hash than the previous "last login".
@@ -385,7 +385,7 @@ func TestPasswordChain_TraceIsStableAcrossReBootstrap(t *testing.T) {
 		t.Fatalf("last hash: %v", err)
 	}
 	if first != last {
-		t.Fatalf("seedAdminUser rewrote the bcrypt hash on re-bootstrap:\n  first=%q\n  last =%q", first, last)
+		t.Fatalf("seedAdminUser rewrote the argon2id hash on re-bootstrap:\n  first=%q\n  last =%q", first, last)
 	}
 }
 
@@ -445,7 +445,7 @@ func TestPasswordChain_DistinctPasswordsProduceDistinctHashes(t *testing.T) {
 
 // TestPasswordChain_NoHashMutationAcrossLoginCycle is the
 // runtime guard for the production "first login works,
-// subsequent fail" symptom. It captures the bcrypt hash
+// subsequent fail" symptom. It captures the argon2id hash
 // before any login, runs five consecutive logins, and
 // confirms the hash bytes are unchanged. If this test fails
 // while a production login still fails, the runtime is
@@ -456,8 +456,8 @@ func TestPasswordChain_NoHashMutationAcrossLoginCycle(t *testing.T) {
 	t.Cleanup(func() { h.close(t) })
 
 	before := readPasswordHash(t, h)
-	if !strings.HasPrefix(before, "$2") {
-		t.Fatalf("bootstrap hash is not bcrypt: %q", before)
+	if !strings.HasPrefix(before, "$argon2id$") && !strings.HasPrefix(before, "$2") {
+		t.Fatalf("bootstrap hash is not a recognized format: %q", before)
 	}
 
 	for i := 0; i < 5; i++ {
@@ -469,23 +469,13 @@ func TestPasswordChain_NoHashMutationAcrossLoginCycle(t *testing.T) {
 	}
 }
 
-// TestPasswordChain_BcryptSeventyTwoByteLimit proves that an
-// installer password longer than 72 bytes (bcrypt's hard
-// limit) is REJECTED at bootstrap time, not silently
-// truncated. Without this guard a user typing a 100-character
-// passphrase would see "INSTALLATION VERIFICATION PASSED" at
-// install (because some code path produced *a* hash) but
-// every login would fail because the runtime bcrypt-compare
-// rejects inputs >72 bytes. This is the bug class that
-// surfaces as "first login works (because verify_install used
-// a short random password), subsequent fail".
-//
-// The expected behaviour: bcrypt.GenerateFromPassword returns
-// ErrPasswordTooLong, seedAdminUser logs "failed to hash
-// admin password" and returns, the users row is never
-// inserted, and login returns 401 user-not-found. The test
-// asserts that boundary.
-func TestPasswordChain_BcryptSeventyTwoByteLimit(t *testing.T) {
+// TestPasswordChain_Argon2idAcceptsLongPasswords proves that
+// the canonical Argon2id implementation accepts passwords well
+// beyond 72 bytes (unlike bcrypt which has a hard limit). This
+// protects against a scenario where a user with a long
+// passphrase hits a bootstrap error and the admin account is
+// never created.
+func TestPasswordChain_Argon2idAcceptsLongPasswords(t *testing.T) {
 	const email = "admin@orvix.email"
 	pwd := strings.Repeat("a", 73)
 
@@ -523,8 +513,8 @@ func TestPasswordChain_BcryptSeventyTwoByteLimit(t *testing.T) {
 	).Scan(&count); err != nil {
 		t.Fatalf("count: %v", err)
 	}
-	if count != 0 {
-		t.Fatalf("expected bootstrap to refuse a 73-byte password (bcrypt hard limit); instead wrote %d user rows", count)
+	if count != 1 {
+		t.Fatalf("expected Argon2id bootstrap to create 1 user row for a 73-byte password; got %d rows instead", count)
 	}
 }
 

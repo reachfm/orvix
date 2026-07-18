@@ -51,7 +51,7 @@ type tenantOpsRow struct {
 
 func isSuperRole(c fiber.Ctx) bool {
 	role, _ := c.Locals("role").(auth.Role)
-	return role == auth.RoleSuperAdmin
+	return role == auth.RoleSuperAdmin || role == auth.RolePlatformSuperAdmin
 }
 
 func (h *Handler) scopedTenantID(c fiber.Ctx) int64 {
