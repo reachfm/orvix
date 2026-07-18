@@ -19,6 +19,8 @@ setup() {
     "$T/usr/share/orvix/"{admin,webmail,marketing} "$T/usr/local/bin"
 }
 
+mkdir -p "$T/bin"
+
 # Fake systemctl: tracks calls
 cat > "$T/bin/systemctl" <<'SYSTEMCTL'
 #!/usr/bin/env bash

@@ -82,7 +82,7 @@ func TestMarketingSPADeepLinksAndExistingUISurvive(t *testing.T) {
 		{path: "/pricing/", status: 200, want: `rel="canonical" href="https://orvix.email/pricing"`},
 		{path: marketingAssetURL, status: 200},
 		{path: "/robots.txt", status: 200, want: "Sitemap:"},
-		{path: "/admin", status: 200, want: "Orvix Admin" },
+		{path: "/admin", status: 200, want: "Orvix Admin"},
 		{path: "/webmail", status: 200, want: "<title>Orvix Webmail</title>"},
 		{path: "/assets/webmail.js", status: 200},
 		{path: "/not-a-real-marketing-route", status: 404, want: `name="robots" content="noindex,nofollow"`},
