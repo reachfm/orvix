@@ -110,7 +110,12 @@ _apply_meta() {
 CONTRACT="$(_check "$BLOCK_NAME")"
 
 case "$CONTRACT" in
-  absent) ;;
+  absent)
+    if [ "$MODE" = "--check" ]; then
+      echo "Migration required in $BLOCK_NAME" >&2
+      exit 1
+    fi
+    ;;
   valid)
     if [ "$MODE" = "--check" ]; then echo "Already present in $BLOCK_NAME"; exit 0
     elif [ "$MODE" = "--dry-run" ]; then echo "Already present — no action"; exit 0
