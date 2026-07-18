@@ -65,7 +65,13 @@ run_backup() {
   ORVIX_DKIM_DIR="$T/var/lib/orvix/dkim" \
   BACKUP_PARENT="$T/var/backups/orvix-upgrade" \
   bash -c '
+    set -x
+    echo "Starting run_backup subshell" >&2
     source '"$UPGRADE_SCRIPT"'
+    rc=$?
+    set +x
+    echo "source rc=$rc" >&2
+    if [ "$rc" != "0" ]; then echo "SOURCE FAILED with rc=$rc" >&2; exit 1; fi
     preflight_backup
     echo "BACKUP_DIR=$BACKUP_DIR" >&2
     echo "$BACKUP_DIR"
@@ -111,12 +117,14 @@ echo "old-admin" > "$T/usr/share/orvix/admin/index.html"
 echo "old-webmail" > "$T/usr/share/orvix/webmail/index.html"
 echo "old-marketing" > "$T/usr/share/orvix/marketing/index.html"
 
-BACKUP_DIR="$(run_backup 2>/tmp/backup_err.log || true)"
+BACKUP_DIR="$(run_backup 2>/tmp/backup_stderr.log || true)"
+echo "DEBUG: backup_stderr:" >&2
+cat /tmp/backup_stderr.log >&2 2>/dev/null || true
 if [ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ]; then
   pass "preflight_backup creates backup directory"
 else
   fail_msg "preflight_backup did not create backup directory"
-  [ -s /tmp/backup_err.log ] && { echo "=== backup stderr ==="; cat /tmp/backup_err.log; }
+  [ -s /tmp/backup_err.log ] && { echo "=== backup err log ===" >&2; cat /tmp/backup_err.log >&2; }
 fi
 
 if [ -f "$BACKUP_DIR/manifest" ]; then
