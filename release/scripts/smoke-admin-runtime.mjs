@@ -36,6 +36,7 @@ function makeNode() {
     set(t, k, v) { t[k] = v; return true; },
   });
 }
+const rootNode = makeNode();
 globalThis.document = {
   documentElement: makeNode(),
   body: makeNode(),
@@ -43,7 +44,7 @@ globalThis.document = {
   addEventListener(){},
   removeEventListener(){},
   dispatchEvent(){ return true; },
-  getElementById: () => null,
+  getElementById: (id) => id === 'root' ? rootNode : null,
   createElement: () => makeNode(),
   createTextNode: () => ({}),
   createDocumentFragment: () => makeNode(),
