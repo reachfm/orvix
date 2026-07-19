@@ -2,13 +2,15 @@ package billing
 
 import (
 	"database/sql"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/orvix/orvix/internal/dbdialect"
 )
 
-func setupBackfillTestDB(t *testing.T) *sql.DB {
+func setupBackfillTestDB(t *testing.T) (*sql.DB, *dbdialect.Info) {
 	t.Helper()
 	db := newTestDB(t)
 	dial, err := dbdialect.Detect(db)
@@ -16,45 +18,45 @@ func setupBackfillTestDB(t *testing.T) *sql.DB {
 		dial = dbdialect.FromDriver("sqlite")
 	}
 	ts := dial.TimestampType()
+	bt := dial.BooleanType()
+	tl := dial.TrueLiteral()
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS tenants (
 		id INTEGER PRIMARY KEY,
 		name TEXT NOT NULL DEFAULT '',
 		slug TEXT NOT NULL DEFAULT '',
 		domain TEXT NOT NULL DEFAULT '',
 		plan TEXT DEFAULT 'smb',
-		active INTEGER DEFAULT 1,
-		deleted_at `+ts+`,
-		created_at `+ts+` NOT NULL,
-		updated_at `+ts+` NOT NULL
+		active ` + bt + ` NOT NULL DEFAULT ` + tl + `,
+		deleted_at ` + ts + `,
+		created_at ` + ts + ` NOT NULL,
+		updated_at ` + ts + ` NOT NULL
 	)`)
 	if err != nil {
 		t.Fatalf("create tenants table: %v", err)
 	}
-	return db
+	return db, dial
 }
 
-func seedTenant(t *testing.T, db *sql.DB, id uint, plan string, active bool) {
+func seedTenant(t *testing.T, db *sql.DB, dial *dbdialect.Info, id uint, plan string, active bool) {
 	t.Helper()
 	now := time.Now().UTC()
-	activeInt := 0
-	if active {
-		activeInt = 1
-	}
-	_, err := db.Exec("INSERT INTO tenants (id, created_at, updated_at, name, slug, domain, plan, active) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-		id, now, now, "tenant-"+plan, "tenant-"+plan, "tenant-"+plan+".example.com", plan, activeInt)
+	query := fmt.Sprintf("INSERT INTO tenants (id, created_at, updated_at, name, slug, domain, plan, active) VALUES (%s)",
+		dial.Placeholders(8))
+	_, err := db.Exec(query,
+		id, now, now, "tenant-"+plan, "tenant-"+plan, "tenant-"+plan+".example.com", plan, active)
 	if err != nil {
 		t.Fatalf("seed tenant %d: %v", id, err)
 	}
 }
 
 func TestBackfillSubscriptions_ExistingTenantWithoutSubGetsOne(t *testing.T) {
-	dt := setupBackfillTestDB(t)
+	dt, dial := setupBackfillTestDB(t)
 	svc := NewService(dt)
 	if err := svc.SeedDefaultPlans(); err != nil {
 		t.Fatal(err)
 	}
 
-	seedTenant(t, dt, 1, "enterprise", true)
+	seedTenant(t, dt, dial, 1, "enterprise", true)
 
 	count, err := svc.BackfillSubscriptions()
 	if err != nil {
@@ -77,13 +79,13 @@ func TestBackfillSubscriptions_ExistingTenantWithoutSubGetsOne(t *testing.T) {
 }
 
 func TestBackfillSubscriptions_EnterpriseLegacyMapsToEnterprise(t *testing.T) {
-	dt := setupBackfillTestDB(t)
+	dt, dial := setupBackfillTestDB(t)
 	svc := NewService(dt)
 	if err := svc.SeedDefaultPlans(); err != nil {
 		t.Fatal(err)
 	}
-	seedTenant(t, dt, 1, "enterprise", true)
-	seedTenant(t, dt, 2, "enterprise", true)
+	seedTenant(t, dt, dial, 1, "enterprise", true)
+	seedTenant(t, dt, dial, 2, "enterprise", true)
 
 	count, err := svc.BackfillSubscriptions()
 	if err != nil {
@@ -99,12 +101,12 @@ func TestBackfillSubscriptions_EnterpriseLegacyMapsToEnterprise(t *testing.T) {
 }
 
 func TestBackfillSubscriptions_BusinessLegacyMapsToBusiness(t *testing.T) {
-	dt := setupBackfillTestDB(t)
+	dt, dial := setupBackfillTestDB(t)
 	svc := NewService(dt)
 	if err := svc.SeedDefaultPlans(); err != nil {
 		t.Fatal(err)
 	}
-	seedTenant(t, dt, 1, "business", true)
+	seedTenant(t, dt, dial, 1, "business", true)
 
 	count, err := svc.BackfillSubscriptions()
 	if err != nil {
@@ -120,12 +122,12 @@ func TestBackfillSubscriptions_BusinessLegacyMapsToBusiness(t *testing.T) {
 }
 
 func TestBackfillSubscriptions_StarterLegacyMapsToStarter(t *testing.T) {
-	dt := setupBackfillTestDB(t)
+	dt, dial := setupBackfillTestDB(t)
 	svc := NewService(dt)
 	if err := svc.SeedDefaultPlans(); err != nil {
 		t.Fatal(err)
 	}
-	seedTenant(t, dt, 1, "starter", true)
+	seedTenant(t, dt, dial, 1, "starter", true)
 
 	svc.BackfillSubscriptions()
 	sub, _ := svc.GetSubscription(1)
@@ -135,12 +137,12 @@ func TestBackfillSubscriptions_StarterLegacyMapsToStarter(t *testing.T) {
 }
 
 func TestBackfillSubscriptions_FreeLegacyMapsToFree(t *testing.T) {
-	dt := setupBackfillTestDB(t)
+	dt, dial := setupBackfillTestDB(t)
 	svc := NewService(dt)
 	if err := svc.SeedDefaultPlans(); err != nil {
 		t.Fatal(err)
 	}
-	seedTenant(t, dt, 1, "free", true)
+	seedTenant(t, dt, dial, 1, "free", true)
 
 	svc.BackfillSubscriptions()
 	sub, _ := svc.GetSubscription(1)
@@ -150,12 +152,12 @@ func TestBackfillSubscriptions_FreeLegacyMapsToFree(t *testing.T) {
 }
 
 func TestBackfillSubscriptions_UnknownLegacyMapsToFree(t *testing.T) {
-	dt := setupBackfillTestDB(t)
+	dt, dial := setupBackfillTestDB(t)
 	svc := NewService(dt)
 	if err := svc.SeedDefaultPlans(); err != nil {
 		t.Fatal(err)
 	}
-	seedTenant(t, dt, 1, "smb", true)
+	seedTenant(t, dt, dial, 1, "smb", true)
 
 	svc.BackfillSubscriptions()
 	sub, _ := svc.GetSubscription(1)
@@ -165,14 +167,13 @@ func TestBackfillSubscriptions_UnknownLegacyMapsToFree(t *testing.T) {
 }
 
 func TestBackfillSubscriptions_ExistingSubIsUnchanged(t *testing.T) {
-	dt := setupBackfillTestDB(t)
+	dt, dial := setupBackfillTestDB(t)
 	svc := NewService(dt)
 	if err := svc.SeedDefaultPlans(); err != nil {
 		t.Fatal(err)
 	}
-	seedTenant(t, dt, 1, "enterprise", true)
+	seedTenant(t, dt, dial, 1, "enterprise", true)
 
-	// Manually create a subscription
 	sub, err := svc.CreateSubscription(1, PlanFree, IntervalMonthly, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -186,7 +187,6 @@ func TestBackfillSubscriptions_ExistingSubIsUnchanged(t *testing.T) {
 		t.Fatalf("expected 0 backfilled (already has sub), got %d", count)
 	}
 
-	// Verify the existing subscription was NOT overwritten
 	existing, _ := svc.GetSubscription(1)
 	if existing.PlanID != sub.PlanID {
 		t.Fatalf("existing subscription was modified: expected plan %s, got %s", sub.PlanID, existing.PlanID)
@@ -194,12 +194,12 @@ func TestBackfillSubscriptions_ExistingSubIsUnchanged(t *testing.T) {
 }
 
 func TestBackfillSubscriptions_Idempotent(t *testing.T) {
-	dt := setupBackfillTestDB(t)
+	dt, dial := setupBackfillTestDB(t)
 	svc := NewService(dt)
 	if err := svc.SeedDefaultPlans(); err != nil {
 		t.Fatal(err)
 	}
-	seedTenant(t, dt, 1, "enterprise", true)
+	seedTenant(t, dt, dial, 1, "enterprise", true)
 
 	count1, _ := svc.BackfillSubscriptions()
 	count2, _ := svc.BackfillSubscriptions()
@@ -210,12 +210,12 @@ func TestBackfillSubscriptions_Idempotent(t *testing.T) {
 }
 
 func TestBackfillSubscriptions_InactiveTenantSkipped(t *testing.T) {
-	dt := setupBackfillTestDB(t)
+	dt, dial := setupBackfillTestDB(t)
 	svc := NewService(dt)
 	if err := svc.SeedDefaultPlans(); err != nil {
 		t.Fatal(err)
 	}
-	seedTenant(t, dt, 1, "enterprise", false) // inactive
+	seedTenant(t, dt, dial, 1, "enterprise", false)
 
 	count, err := svc.BackfillSubscriptions()
 	if err != nil {
@@ -227,16 +227,93 @@ func TestBackfillSubscriptions_InactiveTenantSkipped(t *testing.T) {
 }
 
 func TestBackfillSubscriptions_SmbMapsToFree(t *testing.T) {
-	dt := setupBackfillTestDB(t)
+	dt, dial := setupBackfillTestDB(t)
 	svc := NewService(dt)
 	if err := svc.SeedDefaultPlans(); err != nil {
 		t.Fatal(err)
 	}
-	seedTenant(t, dt, 1, "smb", true)
+	seedTenant(t, dt, dial, 1, "smb", true)
 
 	svc.BackfillSubscriptions()
 	sub, _ := svc.GetSubscription(1)
 	if sub.PlanID != PlanFree {
 		t.Fatalf("expected free for smb, got %s", sub.PlanID)
+	}
+}
+
+// TestBackfillFixtureSQLGeneratesDialectCorrectSQL proves the test fixture
+// DDL and INSERT SQL are valid for both SQLite and PostgreSQL.
+func TestBackfillFixtureSQLGeneratesDialectCorrectSQL(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		dialect *dbdialect.Info
+	}{
+		{"SQLite", dbdialect.FromDriver("sqlite")},
+		{"PostgreSQL", dbdialect.FromDriver("postgres")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := tc.dialect
+			ts := d.TimestampType()
+			bt := d.BooleanType()
+			tl := d.TrueLiteral()
+
+			ddl := `CREATE TABLE IF NOT EXISTS tenants (
+		id INTEGER PRIMARY KEY,
+		name TEXT NOT NULL DEFAULT '',
+		slug TEXT NOT NULL DEFAULT '',
+		domain TEXT NOT NULL DEFAULT '',
+		plan TEXT DEFAULT 'smb',
+		active ` + bt + ` NOT NULL DEFAULT ` + tl + `,
+		deleted_at ` + ts + `,
+		created_at ` + ts + ` NOT NULL,
+		updated_at ` + ts + ` NOT NULL
+	)`
+
+			switch tc.name {
+			case "SQLite":
+				if !strings.Contains(ddl, "INTEGER") {
+					t.Errorf("SQLite DDL missing INTEGER for active: %s", ddl)
+				}
+				if !strings.Contains(ddl, "DATETIME") {
+					t.Errorf("SQLite DDL missing DATETIME: %s", ddl)
+				}
+				if !strings.Contains(ddl, "DEFAULT 1") {
+					t.Errorf("SQLite DDL missing DEFAULT 1: %s", ddl)
+				}
+			case "PostgreSQL":
+				if !strings.Contains(ddl, "BOOLEAN") {
+					t.Errorf("PostgreSQL DDL missing BOOLEAN for active: %s", ddl)
+				}
+				if !strings.Contains(ddl, "TIMESTAMP") {
+					t.Errorf("PostgreSQL DDL missing TIMESTAMP: %s", ddl)
+				}
+				if !strings.Contains(ddl, "DEFAULT TRUE") {
+					t.Errorf("PostgreSQL DDL missing DEFAULT TRUE: %s", ddl)
+				}
+			}
+
+			insert := fmt.Sprintf("INSERT INTO tenants (id, created_at, updated_at, name, slug, domain, plan, active) VALUES (%s)",
+				d.Placeholders(8))
+
+			switch tc.name {
+			case "SQLite":
+				if strings.Contains(insert, "$") {
+					t.Errorf("SQLite INSERT should use ?, got: %s", insert)
+				}
+				if !strings.Contains(insert, "?") {
+					t.Errorf("SQLite INSERT missing ? placeholders: %s", insert)
+				}
+			case "PostgreSQL":
+				for i := 1; i <= 8; i++ {
+					want := fmt.Sprintf("$%d", i)
+					if !strings.Contains(insert, want) {
+						t.Errorf("PostgreSQL INSERT missing %s: %s", want, insert)
+					}
+				}
+				if strings.Contains(insert, "?") {
+					t.Errorf("PostgreSQL INSERT should not contain ?: %s", insert)
+				}
+			}
+		})
 	}
 }
