@@ -456,23 +456,35 @@ async function main() {
     const btnWidth = await evalJS(`document.querySelector('#root button')?.getBoundingClientRect()?.width || 0`);
     console.error(`login button width: ${Math.round(btnWidth)}px`);
 
-    // Set email value via native input event to trigger React state
+    // Set email value via native input value setter to trigger React state
     await evalJS(`
       (() => {
         const el = document.querySelector('input[type="email"]');
-        if (el) { el.value = 'admin@orvix.email'; el.dispatchEvent(new Event('input', { bubbles: true })); }
+        if (el) {
+          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+          setter.call(el, 'admin@orvix.email');
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+        }
       })()
     `);
     // React SPA login form has no separate error-message element
     // until submission; errors are displayed inline after a failed submit.
 
-    // Fill form and submit — use native input events so React state updates.
+    // Fill form and submit — use native value setter so React controlled components update.
     await evalJS(`
       (() => {
         const email = document.querySelector('input[type="email"]');
         const pass = document.querySelector('input[type="password"]');
-        if (email) { email.value = 'admin@example.com'; email.dispatchEvent(new Event('input', { bubbles: true })); }
-        if (pass) { pass.value = 'correct horse battery staple'; pass.dispatchEvent(new Event('input', { bubbles: true })); }
+        if (email) {
+          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+          setter.call(email, 'admin@example.com');
+          email.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        if (pass) {
+          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+          setter.call(pass, 'correct horse battery staple');
+          pass.dispatchEvent(new Event('input', { bubbles: true }));
+        }
         const btn = document.querySelector('#root button');
         if (btn) btn.click();
       })()
