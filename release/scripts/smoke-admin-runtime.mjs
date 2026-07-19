@@ -74,6 +74,12 @@ defineGlobal('Node', StubNode);
 defineGlobal('NodeFilter', { SHOW_ELEMENT:1, FILTER_ACCEPT:1 });
 defineGlobal('CustomEvent', class { constructor(t,d){ this.type=t; this.detail=d?.detail; } });
 defineGlobal('Event', globalThis.CustomEvent);
+defineGlobal('MutationObserver', class {
+  constructor(cb) { this._cb = cb; this._target = null; }
+  observe(target) { this._target = target; }
+  disconnect() { this._target = null; }
+  takeRecords() { return []; }
+});
 
 async function walk(dir) {
   const out = [];
