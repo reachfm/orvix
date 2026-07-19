@@ -110,6 +110,7 @@ else
   fail_msg "build time override failed: $VERSION_TEST"
 fi
 
+set +e
 echo ""
 echo "---"
 echo "Results: $PASS passed, $FAIL failed"
