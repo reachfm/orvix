@@ -3,6 +3,7 @@ package billing
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/orvix/orvix/internal/dbdialect"
@@ -279,6 +280,63 @@ func (s *Service) TransitionState(tenantID uint, newStatus SubscriptionStatus) e
 			newStatus, pastDueSince, graceEndsAt, suspendedAt, cancelledAt, now, tenantID)
 		return err
 	})
+}
+
+// planMapping translates legacy tenants.plan values to billing PlanIDs.
+// Unknown or missing values default to PlanFree (the safest explicit fallback).
+var planMapping = map[string]PlanID{
+	"free":       PlanFree,
+	"starter":    PlanStarter,
+	"business":   PlanBusiness,
+	"enterprise": PlanEnterprise,
+	"smb":        PlanFree,
+}
+
+// BackfillSubscriptions finds active, non-deleted tenants without a
+// subscription row and creates one by mapping their legacy tenants.plan
+// column to a billing plan. Idempotent: tenants that already have any
+// subscription are never modified.
+func (s *Service) BackfillSubscriptions() (int, error) {
+	rows, err := s.db.Query(`SELECT t.id, COALESCE(t.plan, 'free') FROM tenants t
+		WHERE t.active = 1 AND t.deleted_at IS NULL
+		AND NOT EXISTS (SELECT 1 FROM subscriptions sub WHERE sub.tenant_id = t.id)`)
+	if err != nil {
+		return 0, fmt.Errorf("query tenants without subscription: %w", err)
+	}
+	defer rows.Close()
+
+	type tenantPlan struct {
+		id   uint
+		plan string
+	}
+	var candidates []tenantPlan
+	for rows.Next() {
+		var tp tenantPlan
+		if err := rows.Scan(&tp.id, &tp.plan); err != nil {
+			return 0, fmt.Errorf("scan tenant: %w", err)
+		}
+		candidates = append(candidates, tp)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("rows iteration: %w", err)
+	}
+
+	backfilled := 0
+	for _, tp := range candidates {
+		planID, ok := planMapping[tp.plan]
+		if !ok {
+			planID = PlanFree
+		}
+		_, err := s.CreateSubscription(tp.id, planID, IntervalMonthly, 0)
+		if err != nil {
+			if errors.Is(err, ErrTenantAlreadyHasSub) {
+				continue
+			}
+			return backfilled, fmt.Errorf("tenant %d: create subscription: %w", tp.id, err)
+		}
+		backfilled++
+	}
+	return backfilled, nil
 }
 
 func validTransition(from, to SubscriptionStatus) bool {

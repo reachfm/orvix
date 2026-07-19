@@ -298,6 +298,9 @@ func Initialize(db *sql.DB) (*Service, *UsageService, *QuotaService, *WebhookSer
 	if err := svc.SeedDefaultPlans(); err != nil {
 		return nil, nil, nil, nil, nil, nil, err
 	}
+	if _, err := svc.BackfillSubscriptions(); err != nil {
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("backfill subscriptions: %w", err)
+	}
 	usageSvc := NewUsageService(db)
 	quotaSvc := NewQuotaService(db, svc)
 	webhookSvc := NewWebhookService(db)

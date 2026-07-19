@@ -1,15 +1,98 @@
 const BASE = "/api/v1";
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
+let csrfTokenValue = "";
+let csrfTokenPromise: Promise<string> | null = null;
+
+function isMutationMethod(method?: string): boolean {
+  if (!method) return false;
+  return ["POST", "PUT", "PATCH", "DELETE"].includes(method.toUpperCase());
+}
+
+export async function initCSRF(): Promise<void> {
+  if (csrfTokenValue) return;
+  if (csrfTokenPromise) {
+    await csrfTokenPromise;
+    return;
+  }
+  csrfTokenPromise = (async () => {
+    const res = await fetch(`${BASE}/csrf-token`, { credentials: "include" });
+    if (!res.ok) {
+      csrfTokenPromise = null;
+      throw new Error(`CSRF token fetch failed: ${res.status}`);
+    }
+    const data = await res.json();
+    csrfTokenValue = data.csrf_token || "";
+    return csrfTokenValue;
+  })();
+  try {
+    await csrfTokenPromise;
+  } finally {
+    csrfTokenPromise = null;
+  }
+}
+
+export function setCSRFToken(token: string): void {
+  csrfTokenValue = token;
+}
+
+export function resetCSRFToken(): void {
+  csrfTokenValue = "";
+  csrfTokenPromise = null;
+}
+
+interface RequestOptions extends RequestInit {
+  skipCSRF?: boolean;
+  _csrfRetried?: boolean;
+}
+
+async function request<T>(path: string, options?: RequestOptions): Promise<T> {
+  const method = options?.method || "GET";
+  const isMutation = isMutationMethod(method);
+
+  if (isMutation && !options?.skipCSRF && !csrfTokenValue) {
+    await initCSRF();
+  }
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+
+  if (options?.headers) {
+    const incoming = options.headers as Record<string, string>;
+    for (const k of Object.keys(incoming)) {
+      headers[k] = incoming[k];
+    }
+  }
+
+  if (isMutation && !options?.skipCSRF && csrfTokenValue) {
+    headers["X-CSRF-Token"] = csrfTokenValue;
+  }
+
   const res = await fetch(`${BASE}${path}`, {
     credentials: "include",
-    headers: { "Content-Type": "application/json", ...options?.headers },
+    headers,
     ...options,
   });
+
   if (!res.ok) {
+    if (res.status === 403 && isMutation && !options?.skipCSRF) {
+      const body = await res.json().catch(() => ({}));
+      const errMsg = (body.error || "").toLowerCase();
+      if (errMsg.includes("csrf") && csrfTokenValue && !options?._csrfRetried) {
+        csrfTokenValue = "";
+        await initCSRF();
+        return request<T>(path, { ...options, _csrfRetried: true });
+      }
+      throw new Error(body.error || `${res.status} ${res.statusText}`);
+    }
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `${res.status} ${res.statusText}`);
   }
+
+  if (res.status === 204) {
+    return undefined as unknown as T;
+  }
+
   return res.json();
 }
 
@@ -53,6 +136,8 @@ export const api = {
   login: (email: string, password: string) =>
     request<any>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
   refresh: () => request<any>("/auth/refresh", { method: "POST" }),
+  logout: () => request<any>("/auth/logout", { method: "POST" }),
+  logoutAll: () => request<any>("/auth/logout-all", { method: "POST" }),
 
   // Current user
   getMe: () => request<any>("/me"),

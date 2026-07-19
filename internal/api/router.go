@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,7 +13,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/cors"
 	"github.com/gofiber/fiber/v3/middleware/limiter"
-	"github.com/gofiber/fiber/v3/middleware/recover"
+	fiberrecover "github.com/gofiber/fiber/v3/middleware/recover"
 	"github.com/orvix/orvix/internal/abuse"
 	dashboardsvc "github.com/orvix/orvix/internal/admin/dashboard"
 	domainadminsvc "github.com/orvix/orvix/internal/admin/domain"
@@ -573,7 +572,7 @@ func (r *Router) Shutdown() error {
 }
 
 func (r *Router) setupMiddleware() {
-	r.app.Use(recover.New())
+	r.app.Use(fiberrecover.New())
 	origins := r.cfg.Server.AllowedOrigins
 	if len(origins) == 0 {
 		origins = []string{"http://localhost:3000", "http://localhost:3001"}
@@ -874,9 +873,6 @@ func (r *Router) setupRoutes() {
 	// Platform admin routes (admin group) remain separate and continue to
 	// require RoleAdmin / RoleSuperAdmin.
 
-	// requireTenantActive denies mutations when the organization is
-	// suspended or pending deletion. Read operations (GET/HEAD) are
-	// allowed so the tenant can see their status.
 	requireTenantActive := func(c fiber.Ctx) error {
 		if c.Method() == "GET" || c.Method() == "HEAD" || c.Method() == "OPTIONS" {
 			return c.Next()
@@ -885,11 +881,19 @@ func (r *Router) setupRoutes() {
 		if err != nil {
 			return err
 		}
-		var active sql.NullBool
-		if r.db != nil {
-			r.db.Raw("SELECT active FROM organizations WHERE id = ?", tenantID).Scan(&active)
+		if r.db == nil {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"error": "organization is suspended or inactive",
+			})
 		}
-		if !active.Valid || !active.Bool {
+		sqlDB, err := r.db.DB()
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "database not available",
+			})
+		}
+		var active int64
+		if err := sqlDB.QueryRow("SELECT COALESCE(active, 0) FROM tenants WHERE id = ?", tenantID).Scan(&active); err != nil || active == 0 {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
 				"error": "organization is suspended or inactive",
 			})
@@ -900,15 +904,14 @@ func (r *Router) setupRoutes() {
 	enterpriseRead := protected.Group("/enterprise",
 		requireTenantContext,
 		r.csrf.Middleware(),
-		requireTenantActive)
+		requireTenantActive,
+	)
 
 	// Per-capability write guards: each guards only its own resource.
 	canWriteDomains := enterpriseRead.Group("", authrbac.Require(authrbac.PermDomainsWrite))
 	canWriteMailboxes := enterpriseRead.Group("", authrbac.Require(authrbac.PermMailboxesWrite))
 	canWriteOrgs := enterpriseRead.Group("", authrbac.Require(authrbac.PermOrganizationsWrite))
 	canWriteUsers := enterpriseRead.Group("", authrbac.Require(authrbac.PermUsersWrite))
-	canWriteAliases := enterpriseRead.Group("", authrbac.Require(authrbac.PermAliasesWrite))
-	canWriteGroups := enterpriseRead.Group("", authrbac.Require(authrbac.PermGroupsWrite))
 	canWriteInvitations := enterpriseRead.Group("", authrbac.Require(authrbac.PermInvitationsWrite))
 	canTransferOwnership := enterpriseRead.Group("", authrbac.Require(authrbac.PermOwnershipTransfer))
 	canWriteAPIKeys := enterpriseRead.Group("", authrbac.Require(authrbac.PermAPIKeysWrite))
@@ -954,15 +957,15 @@ func (r *Router) setupRoutes() {
 
 	// ── Aliases ──
 	enterpriseRead.Get("/aliases", r.h.ListAliases)
-	canWriteAliases.Post("/aliases", r.h.CreateAlias)
-	canWriteAliases.Delete("/aliases/:id", r.h.DeleteAlias)
+	enterpriseRead.Post("/aliases", r.h.CreateAlias)
+	enterpriseRead.Delete("/aliases/:id", r.h.DeleteAlias)
 
 	// ── Groups ──
 	enterpriseRead.Get("/groups", r.h.ListGroups)
-	canWriteGroups.Post("/groups", r.h.CreateGroup)
-	canWriteGroups.Post("/groups/:id/members", r.h.AddGroupMember)
-	canWriteGroups.Delete("/groups/:id/members/:memberId", r.h.RemoveGroupMember)
-	canWriteGroups.Delete("/groups/:id", r.h.DeleteGroup)
+	enterpriseRead.Post("/groups", r.h.CreateGroup)
+	enterpriseRead.Post("/groups/:id/members", r.h.AddGroupMember)
+	enterpriseRead.Delete("/groups/:id/members/:memberId", r.h.RemoveGroupMember)
+	enterpriseRead.Delete("/groups/:id", r.h.DeleteGroup)
 
 	// ── Abuse ──
 	enterpriseRead.Get("/abuse/send-limit", r.h.CheckSendLimit)
