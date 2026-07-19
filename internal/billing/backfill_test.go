@@ -4,21 +4,28 @@ import (
 	"database/sql"
 	"testing"
 	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 func setupBackfillTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	db := newTestDB(t)
-	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS tenants (
+	dial, err := dbdialect.Detect(db)
+	if err != nil {
+		dial = dbdialect.FromDriver("sqlite")
+	}
+	ts := dial.TimestampType()
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS tenants (
 		id INTEGER PRIMARY KEY,
 		name TEXT NOT NULL DEFAULT '',
 		slug TEXT NOT NULL DEFAULT '',
 		domain TEXT NOT NULL DEFAULT '',
 		plan TEXT DEFAULT 'smb',
 		active INTEGER DEFAULT 1,
-		deleted_at DATETIME,
-		created_at DATETIME NOT NULL,
-		updated_at DATETIME NOT NULL
+		deleted_at `+ts+`,
+		created_at `+ts+` NOT NULL,
+		updated_at `+ts+` NOT NULL
 	)`)
 	if err != nil {
 		t.Fatalf("create tenants table: %v", err)
