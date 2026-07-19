@@ -32,6 +32,7 @@ import InvoicesPage from "./components/InvoicesPage";
 import SecurityPage from "./components/SecurityPage";
 import SupportPage from "./components/SupportPage";
 import PreferencesPage from "./components/PreferencesPage";
+import { initCSRF, api } from "./api";
 
 type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" | "settings"
   | "enterprise" | "mailboxes" | "organizations" | "backups" | "health"
@@ -84,7 +85,11 @@ export default function App() {
       .then(async (r) => {
         setAuthenticated(r.ok);
         if (r.ok) {
-          try { const u = await r.json(); setUserRole(u.role || ""); } catch { setUserRole(""); }
+          try {
+            const u = await r.json();
+            setUserRole(u.role || "");
+            initCSRF().catch(() => {});
+          } catch { setUserRole(""); }
         }
         setAuthLoading(false);
       })
@@ -236,7 +241,7 @@ export default function App() {
         </nav>
 
         <div className="p-3 border-t border-[#2A2F3E]">
-          <button onClick={() => { fetch("/api/v1/auth/logout", { method: "POST", credentials: "include" }); setAuthenticated(false); }}
+          <button onClick={() => { api.logout().catch(() => {}); setAuthenticated(false); }}
             className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-[#8B92A8] hover:bg-[#1A1E26] hover:text-[#E8EAF0]">
             <LogOut size={18} /> Logout
           </button>

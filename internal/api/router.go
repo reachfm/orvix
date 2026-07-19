@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,7 +13,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/cors"
 	"github.com/gofiber/fiber/v3/middleware/limiter"
-	"github.com/gofiber/fiber/v3/middleware/recover"
+	fiberrecover "github.com/gofiber/fiber/v3/middleware/recover"
 	"github.com/orvix/orvix/internal/abuse"
 	dashboardsvc "github.com/orvix/orvix/internal/admin/dashboard"
 	domainadminsvc "github.com/orvix/orvix/internal/admin/domain"
@@ -573,7 +572,7 @@ func (r *Router) Shutdown() error {
 }
 
 func (r *Router) setupMiddleware() {
-	r.app.Use(recover.New())
+	r.app.Use(fiberrecover.New())
 	origins := r.cfg.Server.AllowedOrigins
 	if len(origins) == 0 {
 		origins = []string{"http://localhost:3000", "http://localhost:3001"}
@@ -874,9 +873,19 @@ func (r *Router) setupRoutes() {
 	// Platform admin routes (admin group) remain separate and continue to
 	// require RoleAdmin / RoleSuperAdmin.
 
-	// requireTenantActive denies mutations when the organization is
-	// suspended or pending deletion. Read operations (GET/HEAD) are
-	// allowed so the tenant can see their status.
+	// Detect dialect once for requireTenantActive SQL generation.
+	var activeDialect *dbdialect.Info
+	if r.db != nil {
+		if sqlDB, err := r.db.DB(); err == nil {
+			if d, err := dbdialect.Detect(sqlDB); err == nil {
+				activeDialect = d
+			}
+		}
+	}
+	if activeDialect == nil {
+		activeDialect = dbdialect.FromDriver("sqlite")
+	}
+
 	requireTenantActive := func(c fiber.Ctx) error {
 		if c.Method() == "GET" || c.Method() == "HEAD" || c.Method() == "OPTIONS" {
 			return c.Next()
@@ -885,11 +894,22 @@ func (r *Router) setupRoutes() {
 		if err != nil {
 			return err
 		}
-		var active sql.NullBool
-		if r.db != nil {
-			r.db.Raw("SELECT active FROM organizations WHERE id = ?", tenantID).Scan(&active)
+		if r.db == nil {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"error": "organization is suspended or inactive",
+			})
 		}
-		if !active.Valid || !active.Bool {
+		sqlDB, err := r.db.DB()
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "database not available",
+			})
+		}
+		query := "SELECT 1 FROM tenants WHERE id = " + activeDialect.Placeholder(1) +
+			" AND active = " + activeDialect.TrueLiteral() +
+			" AND deleted_at IS NULL"
+		var ok int
+		if err := sqlDB.QueryRow(query, tenantID).Scan(&ok); err != nil || ok != 1 {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
 				"error": "organization is suspended or inactive",
 			})
@@ -900,19 +920,20 @@ func (r *Router) setupRoutes() {
 	enterpriseRead := protected.Group("/enterprise",
 		requireTenantContext,
 		r.csrf.Middleware(),
-		requireTenantActive)
+		requireTenantActive,
+	)
 
 	// Per-capability write guards: each guards only its own resource.
 	canWriteDomains := enterpriseRead.Group("", authrbac.Require(authrbac.PermDomainsWrite))
 	canWriteMailboxes := enterpriseRead.Group("", authrbac.Require(authrbac.PermMailboxesWrite))
 	canWriteOrgs := enterpriseRead.Group("", authrbac.Require(authrbac.PermOrganizationsWrite))
 	canWriteUsers := enterpriseRead.Group("", authrbac.Require(authrbac.PermUsersWrite))
-	canWriteAliases := enterpriseRead.Group("", authrbac.Require(authrbac.PermAliasesWrite))
-	canWriteGroups := enterpriseRead.Group("", authrbac.Require(authrbac.PermGroupsWrite))
 	canWriteInvitations := enterpriseRead.Group("", authrbac.Require(authrbac.PermInvitationsWrite))
 	canTransferOwnership := enterpriseRead.Group("", authrbac.Require(authrbac.PermOwnershipTransfer))
 	canWriteAPIKeys := enterpriseRead.Group("", authrbac.Require(authrbac.PermAPIKeysWrite))
 	canWriteBilling := enterpriseRead.Group("", authrbac.Require(authrbac.PermBillingWrite))
+	canWriteAliases := enterpriseRead.Group("", authrbac.Require(authrbac.PermAliasesWrite))
+	canWriteGroups := enterpriseRead.Group("", authrbac.Require(authrbac.PermGroupsWrite))
 
 	// ── Dashboard ──
 	enterpriseRead.Get("/dashboard", r.h.CustomerDashboard)
