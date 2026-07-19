@@ -7,6 +7,7 @@
 
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { parseExportListItems, parseImportNames } from './_parse-utils.mjs';
 
 const ROOT = path.resolve(process.argv[2] || 'release/admin');
 
@@ -64,31 +65,6 @@ const importStarRe = /import\s*\*\s*as\s+([A-Za-z0-9_$]+)\s*from\s*['"]([^'"]+)[
 const importDefaultRe = /import\s+([A-Za-z0-9_$]+)\s*from\s*['"]([^'"]+)['"]/g;
 const importBareRe = /import\s+['"]([^'"]+)['"]/g;
 
-function parseNames(raw) {
-  return raw.split(',').map((s) => s.trim()).filter(Boolean).map((s) => {
-    // strip `name as alias`
-    const idx = s.indexOf(/\bas\b/.test(s) ? s.search(/\bas\b/) : -1);
-    if (idx < 0) return s.replace(/^type\s+/, '');
-    return s.slice(idx + 4).trim();
-  });
-}
-
-function parseImportNames(raw) {
-  // For "import { foo, bar as baz, type qux } from ..."
-  // we collect both the source name (foo) and the local alias (foo or baz).
-  const items = raw.split(',').map((s) => s.trim()).filter(Boolean);
-  const out = [];
-  for (const item of items) {
-    // skip `type X` markers
-    if (item.startsWith('type ')) continue;
-    const m = item.match(/^(?:type\s+)?([A-Za-z0-9_$]+)(?:\s+as\s+([A-Za-z0-9_$]+))?$/);
-    if (m) {
-      out.push({ imported: m[1], local: m[2] || m[1] });
-    }
-  }
-  return out;
-}
-
 for (const [rel, info] of byRelPath) {
   const dir = path.posix.dirname(rel);
   const src = info.src;
@@ -101,11 +77,11 @@ for (const [rel, info] of byRelPath) {
   while ((m = exportDefaultRe.exec(src))) info.exports.push('default');
   exportNamedListRe.lastIndex = 0;
   while ((m = exportNamedListRe.exec(src))) {
-    for (const name of parseNames(m[1])) info.exports.push(name);
+    for (const name of parseExportListItems(m[1])) info.exports.push(name);
   }
   exportFromRe.lastIndex = 0;
   while ((m = exportFromRe.exec(src))) {
-    for (const name of parseNames(m[1])) info.exports.push(name);
+    for (const name of parseExportListItems(m[1])) info.exports.push(name);
     info.imports.push({ spec: m[2], names: [] });
   }
   // imports
