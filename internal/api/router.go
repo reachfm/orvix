@@ -873,6 +873,19 @@ func (r *Router) setupRoutes() {
 	// Platform admin routes (admin group) remain separate and continue to
 	// require RoleAdmin / RoleSuperAdmin.
 
+	// Detect dialect once for requireTenantActive SQL generation.
+	var activeDialect *dbdialect.Info
+	if r.db != nil {
+		if sqlDB, err := r.db.DB(); err == nil {
+			if d, err := dbdialect.Detect(sqlDB); err == nil {
+				activeDialect = d
+			}
+		}
+	}
+	if activeDialect == nil {
+		activeDialect = dbdialect.FromDriver("sqlite")
+	}
+
 	requireTenantActive := func(c fiber.Ctx) error {
 		if c.Method() == "GET" || c.Method() == "HEAD" || c.Method() == "OPTIONS" {
 			return c.Next()
@@ -892,8 +905,11 @@ func (r *Router) setupRoutes() {
 				"error": "database not available",
 			})
 		}
-		var active int64
-		if err := sqlDB.QueryRow("SELECT COALESCE(active, 0) FROM tenants WHERE id = ?", tenantID).Scan(&active); err != nil || active == 0 {
+		query := "SELECT 1 FROM tenants WHERE id = " + activeDialect.Placeholder(1) +
+			" AND active = " + activeDialect.TrueLiteral() +
+			" AND deleted_at IS NULL"
+		var ok int
+		if err := sqlDB.QueryRow(query, tenantID).Scan(&ok); err != nil || ok != 1 {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
 				"error": "organization is suspended or inactive",
 			})
@@ -916,6 +932,8 @@ func (r *Router) setupRoutes() {
 	canTransferOwnership := enterpriseRead.Group("", authrbac.Require(authrbac.PermOwnershipTransfer))
 	canWriteAPIKeys := enterpriseRead.Group("", authrbac.Require(authrbac.PermAPIKeysWrite))
 	canWriteBilling := enterpriseRead.Group("", authrbac.Require(authrbac.PermBillingWrite))
+	canWriteAliases := enterpriseRead.Group("", authrbac.Require(authrbac.PermAliasesWrite))
+	canWriteGroups := enterpriseRead.Group("", authrbac.Require(authrbac.PermGroupsWrite))
 
 	// ── Dashboard ──
 	enterpriseRead.Get("/dashboard", r.h.CustomerDashboard)
@@ -957,15 +975,15 @@ func (r *Router) setupRoutes() {
 
 	// ── Aliases ──
 	enterpriseRead.Get("/aliases", r.h.ListAliases)
-	enterpriseRead.Post("/aliases", r.h.CreateAlias)
-	enterpriseRead.Delete("/aliases/:id", r.h.DeleteAlias)
+	canWriteAliases.Post("/aliases", r.h.CreateAlias)
+	canWriteAliases.Delete("/aliases/:id", r.h.DeleteAlias)
 
 	// ── Groups ──
 	enterpriseRead.Get("/groups", r.h.ListGroups)
-	enterpriseRead.Post("/groups", r.h.CreateGroup)
-	enterpriseRead.Post("/groups/:id/members", r.h.AddGroupMember)
-	enterpriseRead.Delete("/groups/:id/members/:memberId", r.h.RemoveGroupMember)
-	enterpriseRead.Delete("/groups/:id", r.h.DeleteGroup)
+	canWriteGroups.Post("/groups", r.h.CreateGroup)
+	canWriteGroups.Post("/groups/:id/members", r.h.AddGroupMember)
+	canWriteGroups.Delete("/groups/:id/members/:memberId", r.h.RemoveGroupMember)
+	canWriteGroups.Delete("/groups/:id", r.h.DeleteGroup)
 
 	// ── Abuse ──
 	enterpriseRead.Get("/abuse/send-limit", r.h.CheckSendLimit)

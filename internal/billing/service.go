@@ -284,6 +284,12 @@ func (s *Service) TransitionState(tenantID uint, newStatus SubscriptionStatus) e
 
 // planMapping translates legacy tenants.plan values to billing PlanIDs.
 // Unknown or missing values default to PlanFree (the safest explicit fallback).
+//
+// smb → free: smb is the DEFAULT legacy plan value (`tenants.plan DEFAULT 'smb'`).
+// Every bootstrap tenant and every tenant created before the billing system
+// received this default regardless of intended tier. Free is the only safe
+// automatic migration — it carries no cost and provides basic send capability.
+// Tenants that need higher tiers can upgrade through the billing UI.
 var planMapping = map[string]PlanID{
 	"free":       PlanFree,
 	"starter":    PlanStarter,
@@ -297,9 +303,9 @@ var planMapping = map[string]PlanID{
 // column to a billing plan. Idempotent: tenants that already have any
 // subscription are never modified.
 func (s *Service) BackfillSubscriptions() (int, error) {
-	rows, err := s.db.Query(`SELECT t.id, COALESCE(t.plan, 'free') FROM tenants t
-		WHERE t.active = 1 AND t.deleted_at IS NULL
-		AND NOT EXISTS (SELECT 1 FROM subscriptions sub WHERE sub.tenant_id = t.id)`)
+	rows, err := s.db.Query("SELECT t.id, COALESCE(t.plan, 'free') FROM tenants t" +
+		" WHERE t.active = " + s.dialect.TrueLiteral() + " AND t.deleted_at IS NULL" +
+		" AND NOT EXISTS (SELECT 1 FROM subscriptions sub WHERE sub.tenant_id = t.id)")
 	if err != nil {
 		return 0, fmt.Errorf("query tenants without subscription: %w", err)
 	}
