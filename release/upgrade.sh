@@ -13,7 +13,7 @@ set -euo pipefail
 # `orvix-linux-amd64` in the current working directory; this is
 # the supported path on a hardened VPS where outbound HTTP is
 # not allowed. Operators who DO want to fetch from a release
-# server must pass --from-url explicitly GÇö the script no longer
+# server must pass --from-url explicitly Gï¿½ï¿½ the script no longer
 # hits https://releases.orvix.email by default because that
 # domain does not exist in this build.
 #
@@ -22,7 +22,7 @@ set -euo pipefail
 #      flow) BEFORE invoking this script. upgrade.sh makes a
 #      backup of /etc/orvix and the binary, but it cannot
 #      snapshot a running SQLite database without a
-#      coordinated `VACUUM INTO` GÇö that's the runtime's job.
+#      coordinated `VACUUM INTO` Gï¿½ï¿½ that's the runtime's job.
 #   2. Read /etc/orvix/orvix.yaml after upgrade for any new
 #      required fields.
 #   3. Verify the SHA256 of the new binary against
@@ -69,8 +69,17 @@ ORVIX_RELEASE_ADMIN_SRC="${ORVIX_RELEASE_ADMIN_SRC:-$ORVIX_SOURCE_DIR/release/ad
 ORVIX_RELEASE_WEBMAIL_SRC="${ORVIX_RELEASE_WEBMAIL_SRC:-$ORVIX_SOURCE_DIR/release/webmail}"
 ORVIX_RELEASE_MARKETING_SRC="${ORVIX_RELEASE_MARKETING_SRC:-$ORVIX_SOURCE_DIR/release/marketing}"
 
+log() {
+    printf '[%s] %s\n' "$(date -Is)" "$*" >&2
+}
+
+fail() {
+    printf '%bERROR:%b %s\n' "$RED" "$NC" "$*" >&2
+    exit 1
+}
+
 # Source the asset-propagation library. BLOCKER 3 (fail-closed):
-# the lib is REQUIRED GÇö a backend upgrade MUST ship the matching
+# the lib is REQUIRED Gï¿½ï¿½ a backend upgrade MUST ship the matching
 # admin + webmail static assets. If the lib is missing from the
 # release tree we abort before any state is mutated, so the
 # operator never sees a green upgrade report on a half-propagated
@@ -391,14 +400,35 @@ run_doctor() {
 }
 
 # preflight_backup copies every file the upgrade path needs to
-# be able to roll back from GÇö binary, config, db, jwt, vapid keys,
-# dkim keys, license, bootstrap env. Each target is logged with its
-# SHA256 so the operator can later sanity-check the rollback.
+# be able to roll back from â€” binary, config, db, jwt, vapid keys,
+# dkim keys, license, bootstrap env. Each regular file's metadata
+# (UID, GID, numeric mode, SHA256) is recorded in a structured
+# manifest so rollback can restore exact ownership and verify integrity.
 preflight_backup() {
     local backup_dir="$BACKUP_PARENT/$(date -u +%Y%m%dT%H%M%SZ)"
     mkdir -p "$backup_dir"
     log "backup directory: $backup_dir"
     report "green" "backup directory: $backup_dir"
+
+    local run_id
+    run_id="$(date -u +%Y%m%dT%H%M%SZ)"
+    local manifest="$backup_dir/manifest"
+    : > "$manifest"
+
+    record_file() {
+        local src="$1" dest="$2"
+        if [ -f "$src" ]; then
+            local sha uid gid mode
+            sha="$(sha256_of_file "$src" 2>/dev/null || echo unknown)"
+            uid="$(stat -c '%u' "$src" 2>/dev/null || echo 0)"
+            gid="$(stat -c '%g' "$src" 2>/dev/null || echo 0)"
+            mode="$(stat -c '%a' "$src" 2>/dev/null || echo 644)"
+            printf 'path=%s\nuid=%s\ngid=%s\nmode=%s\nsha256=%s\nbackup_path=%s\n---\n' \
+                "$src" "$uid" "$gid" "$mode" "$sha" "$dest" >> "$manifest"
+        else
+            printf 'path=%s\nexisted=no\n---\n' "$src" >> "$manifest"
+        fi
+    }
 
     local file
     for file in \
@@ -419,12 +449,14 @@ preflight_backup() {
             mkdir -p "$dest"
             cp -a "$file" "$dest/" || fail "could not back up $file"
             if [ -f "$file" ]; then
+                record_file "$file" "$dest/$(basename "$file")"
                 log "  backed up $file (sha256 $(sha256_of_file "$file" 2>/dev/null || echo unknown))"
             else
                 log "  backed up $file"
             fi
         else
             log "  skip $file (not present)"
+            printf 'path=%s\nexisted=no\n---\n' "$file" >> "$manifest"
         fi
     done
 
@@ -446,57 +478,134 @@ preflight_backup() {
         printf 'mailstore_files=%s\nmailstore_size=%s\n' "$count" "$size" >"$backup_dir/mailstore.summary"
     fi
 
-    printf 'backup_dir=%s\ncreated_at=%s\n' "$backup_dir" "$(date -Is)" >"$BACKUP_PARENT/.latest"
+    printf 'run_id=%s\nbackup_dir=%s\ncreated_at=%s\n' "$run_id" "$backup_dir" "$(date -Is)" >"$BACKUP_PARENT/.latest"
     log "wrote $BACKUP_PARENT/.latest"
+    echo "$run_id" >"$backup_dir/run_id"
     BACKUP_DIR="$backup_dir"
-    report "green" "pre-upgrade backup complete ($(find "$backup_dir" -type f 2>/dev/null | wc -l) files)"
+    ORVIX_UPGRADE_RUN_ID="$run_id"
+    report "green" "pre-upgrade backup complete ($(find "$backup_dir" -type f 2>/dev/null | wc -l) files, run_id=$run_id)"
 }
 
 # full_rollback restores the binary, config, db, dkim keys, jwt key,
 # and vapid keys from the backup directory. This is called when
 # the service fails to restart or health verification fails after
 # the new binary is installed.
+#
+# The function reads the pre-upgrade manifest to restore exact
+# UID/GID/mode for every regular file, then verifies SHA256.
+# Caddy validation and reload failures are fail-closed.
+# Asset backup paths are tracked per-run, not guessed via ls|sort.
 full_rollback() {
     local backup_dir="${1:-$BACKUP_DIR}"
     if [ -z "$backup_dir" ] || [ ! -d "$backup_dir" ]; then
         fail "cannot roll back: no backup directory available"
     fi
-    log "ROLLBACK: rolling back GÇö restoring from $backup_dir"
+    log "ROLLBACK: restoring from $backup_dir"
 
-    local item dest
+    local manifest="$backup_dir/manifest"
+    local rollback_failed=0
     local rolled=0
 
-    for item in "$ORVIX_BIN" "$ORVIX_CONFIG"; do
-        dest="$backup_dir$item"
-        if [ -f "$dest" ]; then
-            install -m 0755 "$dest" "$item" 2>/dev/null || cp -a "$dest" "$item"
-            log "  rolled back $item"
-            rolled=$((rolled + 1))
+    restore_file_from_manifest() {
+        local path="$1" uid="$2" gid="$3" mode="$4" sha="$5" backup="$6"
+        local full_backup="$backup"
+        if [ ! -f "$full_backup" ]; then
+            log "  MISSING: backup file $full_backup not found"
+            rollback_failed=1
+            return
         fi
-    done
-
-    if [ -f "$backup_dir/$ORVIX_DATA_DIR/orvix.db" ]; then
-        cp -a "$backup_dir/$ORVIX_DATA_DIR/orvix.db" "$ORVIX_DATA_DIR/orvix.db"
-        chown orvix:orvix "$ORVIX_DATA_DIR/orvix.db" 2>/dev/null || true
-        log "  rolled back $ORVIX_DATA_DIR/orvix.db"
+        cp -a "$full_backup" "$path"
+        chown "$uid:$gid" "$path" 2>/dev/null || true
+        chmod "$mode" "$path" 2>/dev/null || true
+        local actual_sha
+        actual_sha="$(sha256_of_file "$path" 2>/dev/null || echo '')"
+        if [ -n "$actual_sha" ] && [ "$sha" != "unknown" ] && [ "$actual_sha" != "$sha" ]; then
+            log "  SHA256 MISMATCH: $path expected=$sha actual=$actual_sha"
+            rollback_failed=1
+            return
+        fi
+        local actual_uid actual_gid actual_mode
+        actual_uid="$(stat -c '%u' "$path" 2>/dev/null || echo '')"
+        actual_gid="$(stat -c '%g' "$path" 2>/dev/null || echo '')"
+        actual_mode="$(stat -c '%a' "$path" 2>/dev/null || echo '')"
+        if [ -n "$actual_uid" ] && [ "$actual_uid" != "$uid" ]; then
+            log "  UID MISMATCH: $path expected=$uid actual=$actual_uid"
+            rollback_failed=1
+            return
+        fi
+        if [ -n "$actual_gid" ] && [ "$actual_gid" != "$gid" ]; then
+            log "  GID MISMATCH: $path expected=$gid actual=$actual_gid"
+            rollback_failed=1
+            return
+        fi
+        if [ -n "$actual_mode" ] && [ "$actual_mode" != "$mode" ]; then
+            log "  MODE MISMATCH: $path expected=$mode actual=$actual_mode"
+            rollback_failed=1
+            return
+        fi
+        log "  rolled back $path (uid=$uid gid=$gid mode=$mode sha256=$sha)"
         rolled=$((rolled + 1))
+    }
+
+    if [ -f "$manifest" ]; then
+        local current_path current_uid current_gid current_mode current_sha current_backup
+        while IFS='=' read -r key value; do
+            case "$key" in
+                path)         current_path="$value" ;;
+                uid)          current_uid="$value" ;;
+                gid)          current_gid="$value" ;;
+                mode)         current_mode="$value" ;;
+                sha256)       current_sha="$value" ;;
+                backup_path)  current_backup="$value" ;;
+                ---)
+                    if [ -n "$current_path" ] && [ -f "$current_backup" ]; then
+                        restore_file_from_manifest "$current_path" "$current_uid" "$current_gid" "$current_mode" "$current_sha" "$current_backup"
+                    elif [ -n "$current_path" ]; then
+                        local existed_marker
+                        existed_marker="$(grep -A1 "^path=$current_path$" "$manifest" 2>/dev/null | grep existed || true)"
+                        if echo "$existed_marker" | grep -q 'existed=no'; then
+                            log "  skip $current_path (not present in pre-upgrade snapshot)"
+                        fi
+                    fi
+                    current_path=""
+                    ;;
+            esac
+        done < "$manifest"
+    else
+        log "  WARNING: no manifest found; falling back to simple restore"
+        local item dest
+        for item in "$ORVIX_BIN" "$ORVIX_CONFIG"; do
+            dest="$backup_dir$item"
+            if [ -f "$dest" ]; then
+                cp -a "$dest" "$item"
+                log "  rolled back $item"
+                rolled=$((rolled + 1))
+            fi
+        done
     fi
 
-    for item in "$ORVIX_JWT_KEY" "$ORVIX_VAPID_PRIVATE_KEY" "$ORVIX_VAPID_PUBLIC_KEY" "$ORVIX_BACKUP_ENCRYPTION_KEY"; do
-        dest="$backup_dir$item"
-        if [ -f "$dest" ]; then
-            cp -a "$dest" "$item"
-            chown root:orvix "$item" 2>/dev/null || chown orvix:orvix "$item" 2>/dev/null || true
-            if [ "$item" = "$ORVIX_BACKUP_ENCRYPTION_KEY" ] || [ "$item" = "$ORVIX_VAPID_PRIVATE_KEY" ]; then
-                chmod 0640 "$item" 2>/dev/null || true
+    # Caddyfile: validate and reload, fail-closed
+    if [ -f "$backup_dir$ORVIX_CADDYFILE" ]; then
+        if command -v "$ORVIX_CADDY_BIN" >/dev/null 2>&1; then
+            if "$ORVIX_CADDY_BIN" validate --config "$ORVIX_CADDYFILE" 2>/dev/null; then
+                log "  validated restored Caddyfile"
+                if "$ORVIX_CADDY_BIN" reload --config "$ORVIX_CADDYFILE" 2>/dev/null; then
+                    log "  reloaded Caddy with restored Caddyfile"
+                else
+                    log "  FAIL: Caddy reload failed after rollback"
+                    rollback_failed=1
+                fi
             else
-                chmod 0600 "$item" 2>/dev/null || true
+                log "  FAIL: restored Caddyfile failed validation"
+                rollback_failed=1
             fi
-            log "  rolled back $item"
-            rolled=$((rolled + 1))
+        else
+            log "  FAIL: $ORVIX_CADDY_BIN not available; cannot validate/reload Caddy after rollback"
+            rollback_failed=1
         fi
-    done
+    fi
 
+    # Restore DKIM keys.
     if [ -d "$backup_dir/$ORVIX_DKIM_DIR" ]; then
         mkdir -p "$ORVIX_DKIM_DIR"
         cp -a "$backup_dir/$ORVIX_DKIM_DIR/." "$ORVIX_DKIM_DIR/" 2>/dev/null || true
@@ -504,35 +613,73 @@ full_rollback() {
         rolled=$((rolled + 1))
     fi
 
-    # Roll back admin + webmail assets too. The asset-propagation
-    # library writes backups to $BACKUP_PARENT/assets/<ts>-<label>
-    # right before overwriting; restore the most recent one for
-    # each label. If a rollback snapshot is missing (e.g. this is
-    # the first upgrade on a fresh install), the roll-back skips
-    # the label with a warning rather than failing the operator.
-    for sub in "$ORVIX_ADMIN_UI_DIR" "$ORVIX_WEBMAIL_UI_DIR"; do
-        local label
-        label="$(basename "$sub")"
-        local latest_asset_backup
-        latest_asset_backup="$(ls -1d "$BACKUP_PARENT/assets"/*-"$label" 2>/dev/null | sort | tail -n 1 || true)"
-        if [ -n "$latest_asset_backup" ] && [ -d "$latest_asset_backup" ]; then
-            mkdir -p "$sub"
-            cp -a "$latest_asset_backup"/. "$sub/" 2>/dev/null || true
-            log "  rolled back $sub from $latest_asset_backup"
-            rolled=$((rolled + 1))
-        else
-            log "  no asset backup for $label; skipping (may be a fresh install)"
-        fi
-    done
+    # Roll back assets using exact per-run backup paths from manifest.
+    local assets_manifest="$backup_dir/manifest.assets"
+    if [ -f "$assets_manifest" ]; then
+        while IFS='=' read -r key path_val; do
+            case "$key" in
+                asset_admin_backup)     dest_label="admin"     dest_dir="$ORVIX_ADMIN_UI_DIR" ;;
+                asset_webmail_backup)   dest_label="webmail"   dest_dir="$ORVIX_WEBMAIL_UI_DIR" ;;
+                asset_marketing_backup) dest_label="marketing" dest_dir="$ORVIX_MARKETING_UI_DIR" ;;
+                *)                      dest_label="" dest_dir="" ;;
+            esac
+            if [ -n "$dest_label" ] && [ -d "$path_val" ] && [ -n "$dest_dir" ]; then
+                local tmp_tree
+                tmp_tree="$(mktemp -d "$(dirname "$dest_dir")/.rollback-${dest_label}-XXXXXX")"
+                if cp -a "$path_val/." "$tmp_tree/" 2>/dev/null; then
+                    local old_tree
+                    old_tree="$(mktemp -d "$(dirname "$dest_dir")/.old-${dest_label}-XXXXXX")"
+                    if [ -d "$dest_dir" ]; then
+                        mv "$dest_dir" "$old_tree/" 2>/dev/null || true
+                    fi
+                    if mv "$tmp_tree" "$dest_dir" 2>/dev/null; then
+                        log "  rolled back $dest_dir from $path_val"
+                        rolled=$((rolled + 1))
+                        rm -rf "$old_tree" 2>/dev/null || true
+                    else
+                        log "  FAIL: could not atomically replace $dest_dir"
+                        if [ -d "$old_tree/$(basename "$dest_dir")" ]; then
+                            mv "$old_tree/$(basename "$dest_dir")" "$dest_dir" 2>/dev/null || true
+                        fi
+                        rm -rf "$tmp_tree" "$old_tree" 2>/dev/null || true
+                        rollback_failed=1
+                    fi
+                else
+                    log "  FAIL: could not prepare restored $dest_label tree from $path_val"
+                    rm -rf "$tmp_tree" 2>/dev/null || true
+                    rollback_failed=1
+                fi
+            elif [ -n "$dest_label" ] && [ -n "$dest_dir" ]; then
+                log "  no asset backup for $dest_label; skipping"
+            fi
+        done < "$assets_manifest"
+    else
+        log "  no asset backup manifest; skipping asset rollback"
+    fi
 
     log "rollback restored $rolled item(s) from $backup_dir"
 
-    systemctl restart orvix.service 2>/dev/null || true
+    if [ "$rollback_failed" = "1" ]; then
+        report "red" "rollback FAILED: one or more restoration/validation steps failed; check logs"
+        return 1
+    fi
+
+    if "$ORVIX_SYSTEMCTL" restart orvix.service 2>/dev/null; then
+        log "  restarted orvix.service"
+    else
+        log "  FAIL: orvix.service restart failed after rollback"
+        rollback_failed=1
+        report "red" "rollback FAILED: service restart failed"
+        return 1
+    fi
+
     sleep 2
-    if systemctl is-active --quiet orvix 2>/dev/null; then
+    if "$ORVIX_SYSTEMCTL" is-active --quiet orvix 2>/dev/null; then
         report "green" "rollback complete; service restarted with previous binary"
+        return 0
     else
         report "red" "rollback complete but service is still not active; check journalctl"
+        return 1
     fi
 }
 
@@ -558,11 +705,14 @@ propagate_assets() {
 		return 1
 	fi
 	local ok=1
+	local run_id="${ORVIX_UPGRADE_RUN_ID:-}"
+	local asset_backup_parent="$BACKUP_PARENT/assets"
+	if [ -n "$run_id" ]; then
+		asset_backup_parent="$BACKUP_PARENT/assets/$run_id"
+	fi
 	if [ -d "$ORVIX_RELEASE_ADMIN_SRC" ]; then
 		log "propagating admin assets: $ORVIX_RELEASE_ADMIN_SRC -> $ORVIX_ADMIN_UI_DIR"
-		# ASSET_BACKUP_PARENT is the same BACKUP_PARENT the upgrade
-		# uses so asset backups live next to the binary backup.
-		if ! ASSET_BACKUP_PARENT="$BACKUP_PARENT/assets" \
+		if ! ASSET_BACKUP_PARENT="$asset_backup_parent" \
 			ASSET_VERBOSE=1 \
 			asset_propagate "$ORVIX_RELEASE_ADMIN_SRC" "$ORVIX_ADMIN_UI_DIR" admin; then
 			log "ERROR: admin asset propagation failed; rolled back from backup"
@@ -576,7 +726,7 @@ propagate_assets() {
 	fi
 	if [ -d "$ORVIX_RELEASE_WEBMAIL_SRC" ]; then
 		log "propagating webmail assets: $ORVIX_RELEASE_WEBMAIL_SRC -> $ORVIX_WEBMAIL_UI_DIR"
-		if ! ASSET_BACKUP_PARENT="$BACKUP_PARENT/assets" \
+		if ! ASSET_BACKUP_PARENT="$asset_backup_parent" \
 			ASSET_VERBOSE=1 \
 			asset_propagate "$ORVIX_RELEASE_WEBMAIL_SRC" "$ORVIX_WEBMAIL_UI_DIR" webmail; then
 			log "ERROR: webmail asset propagation failed; rolled back from backup"
@@ -591,7 +741,7 @@ propagate_assets() {
 
 	if [ -d "$ORVIX_RELEASE_MARKETING_SRC" ]; then
 		log "propagating marketing assets: $ORVIX_RELEASE_MARKETING_SRC -> $ORVIX_MARKETING_UI_DIR"
-		if ! ASSET_BACKUP_PARENT="$BACKUP_PARENT/assets" \
+		if ! ASSET_BACKUP_PARENT="$asset_backup_parent" \
 			ASSET_VERBOSE=1 \
 			asset_propagate "$ORVIX_RELEASE_MARKETING_SRC" "$ORVIX_MARKETING_UI_DIR" marketing; then
 			log "ERROR: marketing asset propagation failed; rolled back from backup"
@@ -603,8 +753,19 @@ propagate_assets() {
 		report "red" "marketing release assets missing; refusing to upgrade with a stale public site"
 		ok=0
 	fi
+
+	if [ -n "$run_id" ] && [ -n "$BACKUP_DIR" ]; then
+		for label in admin webmail marketing; do
+			local found
+			found="$(ls -1d "$asset_backup_parent"/*-"$label" 2>/dev/null | sort | tail -n 1 || true)"
+			if [ -n "$found" ]; then
+				printf 'asset_%s_backup=%s\n' "$label" "$found" >> "$BACKUP_DIR/manifest.assets"
+			fi
+		done
+	fi
+
 	if [ "$ok" = "1" ]; then
-		report "green" "admin + webmail + marketing assets propagated (backups under $BACKUP_PARENT/assets)"
+		report "green" "admin + webmail + marketing assets propagated (backups under $asset_backup_parent)"
 		return 0
 	fi
 	return 1
@@ -695,7 +856,7 @@ install_and_restart() {
 
     report "" "--- Restart ---"
     log "restarting orvix.service"
-    if ! systemctl restart orvix.service; then
+    if ! "$ORVIX_SYSTEMCTL" restart orvix.service; then
         report "red" "orvix.service restart failed"
         full_rollback "$BACKUP_DIR"
         fail "service restart failed; rolled back to previous state"
@@ -885,4 +1046,5 @@ DEVUNSAFE
     generate_upgrade_report
 }
 
+[ "${BASH_SOURCE[0]}" != "${0}" ] && return 0
 main "$@"

@@ -35,7 +35,7 @@ verify_admin_ops_assets() {
         return 1
     fi
     local marker
-    for marker in "/api/v1/admin/backups" "/api/v1/license" "/api/v1/monitoring/health"; do
+	for marker in "/api/v1/admin/backups" "/api/v1/monitoring/health"; do
         if ! grep -qF -- "$marker" "$assets_dir"/*.js 2>/dev/null; then
             echo "verify_admin_ops_assets: built admin missing expected ops module marker: $marker" >&2
             return 1

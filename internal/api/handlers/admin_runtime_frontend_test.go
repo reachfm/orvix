@@ -276,15 +276,23 @@ func TestAdminLicenseUIZeroDateAbsent(t *testing.T) {
 	}
 }
 
-// TestAdminLicenseUIPreferRuntimeTelemetry confirms the license
-// card prefers rt.license (runtime telemetry) over state.license
-// (old /api/v1/license endpoint) so the new public_key_state and
-// validation_state fields are used when available.
-func TestAdminLicenseUIPreferRuntimeTelemetry(t *testing.T) {
+// TestAdminRetiredLicenseUINotInShippedBundle verifies the shipped
+// release/admin assets do NOT contain retired License UI markers.
+// Local product licensing is retired; the License page and its API
+// calls must be absent from generated release assets.
+func TestAdminRetiredLicenseUINotInShippedBundle(t *testing.T) {
 	root := adminRepoRoot(t)
 	src := adminJSContents(t, root)
-	// The licenseInfo assignment must prefer rt.license first.
-	if !strings.Contains(src, "(rt && rt.license) || data") {
-		t.Errorf("app.js license card must prefer rt.license over state.license for runtime telemetry fields")
+
+	forbidden := []string{
+		`"/api/v1/license"`,
+		`"/api/v1/license/validate"`,
+		`"status":"not_required"`,
+		`"license_not_required"`,
+	}
+	for _, f := range forbidden {
+		if strings.Contains(src, f) {
+			t.Errorf("retired license UI marker found in shipped Admin bundle: %s", f)
+		}
 	}
 }

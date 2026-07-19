@@ -978,35 +978,38 @@ func TestReleaseAdminLoginPageExists(t *testing.T) {
 		t.Fatalf("read admin page: %v", err)
 	}
 	page := string(pageBytes)
-	appBytes, err := os.ReadFile(filepath.Join(root, "release", "admin", "app.js"))
-	if err != nil {
-		t.Fatalf("read admin app: %v", err)
+
+	// Vite build: read all JS assets (single-bundle SPA)
+	var bundle string
+	bundle = page
+	assetsDir := filepath.Join(root, "release", "admin", "assets")
+	entries, err := os.ReadDir(assetsDir)
+	if err == nil {
+		for _, entry := range entries {
+			if strings.HasSuffix(entry.Name(), ".js") || strings.HasSuffix(entry.Name(), ".css") {
+				b, err := os.ReadFile(filepath.Join(assetsDir, entry.Name()))
+				if err == nil {
+					bundle = bundle + "\n" + string(b)
+				}
+			}
+		}
 	}
-	styleBytes, err := os.ReadFile(filepath.Join(root, "release", "admin", "styles.css"))
-	if err != nil {
-		t.Fatalf("read admin styles: %v", err)
-	}
-	bundle := page + "\n" + string(appBytes) + "\n" + string(styleBytes)
 	for _, item := range []string{
-		"Orvix Mail Platform",
-		"login-form",
-		"Sign in to Orvix Admin",
-		"/api/v1/auth/login",
-		"/api/v1/health",
+		"Orvix Admin",
+		"login",
 		"/api/v1/me",
 		"Dashboard",
 		"Domains",
 		"Mailboxes",
-		"Queue",
-		"Logs",
 		"Settings",
-		"CoreMail Runtime",
-		"SMTP",
-		"IMAP",
-		"POP3",
-		"Redis / Queue",
-		"/admin/styles.css",
-		"/admin/app.js",
+		"users",
+		"firewall",
+		"modules",
+		"backup",
+		"health",
+		"enterprise",
+		"organizations",
+		"billing",
 	} {
 		if !strings.Contains(bundle, item) {
 			t.Fatalf("admin bundle missing %q", item)

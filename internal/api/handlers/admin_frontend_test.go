@@ -659,7 +659,6 @@ func aggregateAdminJS(t *testing.T, root string) string {
 		"release/admin/modules/pages/dashboard.js",
 		"release/admin/modules/pages/dns-dkim.js",
 		"release/admin/modules/pages/domains.js",
-		"release/admin/modules/pages/license.js",
 		"release/admin/modules/pages/logs.js",
 		"release/admin/modules/pages/monitoring.js",
 		"release/admin/modules/pages/queue.js",

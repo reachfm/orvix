@@ -179,8 +179,6 @@ func main() {
 	// /api/v1/admin/runtime endpoint.
 	listenerRegistry := orvixruntime.NewListenerRegistry()
 
-	_, _ = license.NewValidator("", db, logger)
-
 	featureFlags := license.NewFeatureFlags(logger)
 	featureFlags.SetTier(license.TierSMB)
 

@@ -157,17 +157,9 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	m.queue = queue.NewQueueEngine(sqlDB)
 	m.obs = observability.NewObservability(1000, 5000)
 
-	// Initialize licensing.
-	licensePath := cfg.CoreMail.LicenseFilePath
-	m.licenseSvc = licensing.NewService(licensePath)
-	if licensePath != "" {
-		m.licenseSvc.LoadLicense(context.Background())
-		if m.licenseSvc.IsValid() {
-			m.obs.Metrics.IncLicenseValid()
-		} else {
-			m.obs.Metrics.IncLicenseInvalid()
-		}
-	}
+	// Initialize licensing service (retained for SaaS quota enforcement).
+	// Local product-license files are retired; no license file is loaded.
+	m.licenseSvc = licensing.NewService("")
 
 	// Initialize license authority service — no network calls, non-blocking.
 	cachePath := cfg.CoreMail.LicenseAuthorityCachePath
@@ -210,12 +202,9 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 		return fmt.Errorf("audit migration: %w", err)
 	}
 	m.obs.Health.Ready(observability.HealthCheckDatabase)
-	// Licensing health depends on license status.
-	if m.licenseSvc != nil && m.licenseSvc.IsValid() {
-		m.obs.Health.Ready("licensing")
-	} else {
-		m.obs.Health.Ready("licensing")
-	}
+	// Licensing health: local product licensing is retired.
+	// Licensing service is retained for SaaS quota enforcement only.
+	m.obs.Health.Ready("licensing")
 	m.obs.Health.Ready(observability.HealthCheckMailStore)
 	m.obs.Health.Ready(observability.HealthCheckQueue)
 

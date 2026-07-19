@@ -91,7 +91,7 @@ if [ -f "$UPGRADE_PATH" ]; then
   ir_line="$(echo "$main_body" | grep -n 'install_and_restart' | head -1 | cut -d: -f1)"
   pa_line="$(echo "$iar_body" | grep -n 'propagate_assets' | head -1 | cut -d: -f1)"
   am_line="$(echo "$iar_body" | grep -n 'run_admin_route_migration' | head -1 | cut -d: -f1)"
-  rs_line="$(echo "$iar_body" | grep -n 'systemctl restart orvix' | head -1 | cut -d: -f1)"
+  rs_line="$(echo "$iar_body" | grep -n 'restart orvix.service;' | head -1 | cut -d: -f1)"
   if [ -n "$pb_line" ] && [ -n "$ir_line" ] && [ -n "$pa_line" ] && [ -n "$am_line" ] && [ -n "$rs_line" ] && \
      [ "$pb_line" -lt "$ir_line" ] && [ "$pa_line" -lt "$am_line" ] && [ "$am_line" -lt "$rs_line" ]; then
     pass "upgrade.sh call order correct"

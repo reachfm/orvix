@@ -363,7 +363,7 @@ jobs:
             [ -f "$d/index.html" ] && ADMIN_DIR="$d" && break
           done
           [ -n "$ADMIN_DIR" ] || { echo "installed admin UI not found"; exit 1; }
-          for marker in "/api/v1/admin/backups" "/api/v1/license" "/api/v1/monitoring/health"; do
+          for marker in "/api/v1/admin/backups" "/api/v1/monitoring/health"; do
             grep -rqF "$marker" "$ADMIN_DIR"/assets/*.js 2>/dev/null || { echo "ops UI missing marker: $marker"; exit 1; }
           done
           echo "operations_ui=PASS" >> "$RESULTS_FILE"

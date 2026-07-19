@@ -232,37 +232,29 @@ func TestServicesQueue(t *testing.T) {
 }
 
 // TestWarningsRollup confirms the server-side warning list is
-// built from the inputs and never duplicates a license warning
-// when the public key is loaded.
+// built from the inputs. License warnings are intentionally
+// suppressed — local product licensing is retired.
 func TestWarningsRollup(t *testing.T) {
-	t.Run("public key missing", func(t *testing.T) {
+	t.Run("public key missing does not warn", func(t *testing.T) {
 		tel := NewTelemetry(Inputs{
 			StartedAt: time.Now().Add(-time.Minute),
 			License:   LicensePosture{Mode: "offline", PublicKeyLoaded: false, PublicKeyState: "missing", Status: "offline"},
 		})
-		seen := false
 		for _, w := range tel.Warnings {
 			if w.Code == "license_public_key_missing" {
-				seen = true
+				t.Errorf("must not emit license_public_key_missing warning after license retirement; got %+v", tel.Warnings)
 			}
 		}
-		if !seen {
-			t.Errorf("expected license_public_key_missing warning; got %+v", tel.Warnings)
-		}
 	})
-	t.Run("public key invalid", func(t *testing.T) {
+	t.Run("public key invalid does not warn", func(t *testing.T) {
 		tel := NewTelemetry(Inputs{
 			StartedAt: time.Now().Add(-time.Minute),
 			License:   LicensePosture{Mode: "missing", PublicKeyLoaded: false, PublicKeyState: "invalid", Status: "missing"},
 		})
-		seen := false
 		for _, w := range tel.Warnings {
 			if w.Code == "license_public_key_invalid" {
-				seen = true
+				t.Errorf("must not emit license_public_key_invalid warning after license retirement; got %+v", tel.Warnings)
 			}
-		}
-		if !seen {
-			t.Errorf("expected license_public_key_invalid warning; got %+v", tel.Warnings)
 		}
 	})
 	t.Run("public key loaded skips warning", func(t *testing.T) {
