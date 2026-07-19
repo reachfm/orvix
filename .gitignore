@@ -1,6 +1,9 @@
 node_modules/
 dist/
 build/
+release/admin/
+release/orvix-linux-amd64
+release/orvix-v1.0.0-linux-amd64.tar.gz
 *.log
 .env
 .env.*
