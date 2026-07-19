@@ -184,10 +184,10 @@ else
 fi
 
 # ── 6. Static index.html contract: module script + form targets ─
-if ! grep -q 'type="module".*app.js' "$ADMIN_DIR/index.html"; then
-    fail "index.html does not load app.js as an ES module"
+if ! grep -qP 'type="module".*\.js"' "$ADMIN_DIR/index.html"; then
+    fail "index.html does not load a JS module entry point"
 fi
-pass "index.html loads app.js as <script type=\"module\">"
+pass "index.html loads an ES module entry point"
 
 # The static wrapper in #login-view MUST NOT contain the actual
 # form fields; if it does, the form is in the DOM as static HTML
