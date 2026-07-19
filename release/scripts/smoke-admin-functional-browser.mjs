@@ -430,7 +430,7 @@ async function main() {
       return res.result && res.result.value;
     };
     const exists = (sel) => `!!document.querySelector(${JSON.stringify(sel)})`;
-    const mainText = () => evalJS(`document.querySelector('#page-root')?.innerText?.trim() || ''`);
+    const mainText = () => evalJS(`document.querySelector('#root')?.innerText?.trim() || ''`);
 
     // Verify CDP evaluation works at all
     const docType = await evalJS(`typeof document`);
@@ -482,7 +482,7 @@ async function main() {
       const cookie = (got.cookies || []).find((c) => c.name === '__Host-orvix_session');
       return cookie && cookie.secure === true && cookie.httpOnly === true && cookie.path === '/' && !cookie.domain.startsWith('.');
     }, 'secure __Host-orvix_session cookie');
-    // React SPA reloads the page on login success — the dashboard renders in #page-root.
+    // React SPA reloads the page on login success — the dashboard renders in #root.
     await waitFor(async () => (await mainText()).length > 10, 'nonblank dashboard');
     const dashText = await mainText();
     if (dashText.includes('forEach is not a function') || dashText.includes('TypeError')) fail(`dashboard has JS error in rendered text: ${dashText.slice(0, 200)}`);
