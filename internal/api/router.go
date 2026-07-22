@@ -129,6 +129,26 @@ func NewRouter(cfg RouterConfig) *fiber.App {
 		ServerHeader: "OrvixEM",
 	})
 
+	// --- CSRF token endpoint (registered DIRECTLY on app, BEFORE any middleware) ---
+	// Must be public and bypass all auth/group middleware so the frontend can
+	// obtain a token before the user logs in.
+	app.Get("/api/v1/auth/csrf", func(c *fiber.Ctx) error {
+		token, err := security.GenerateCSRFToken()
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to generate CSRF token"})
+		}
+		c.Cookie(&fiber.Cookie{
+			Name:     "csrf_token",
+			Value:    token,
+			HTTPOnly: false,
+			Secure:   true,
+			SameSite: "Strict",
+			MaxAge:   3600,
+		})
+		c.Set("X-CSRF-Token", token)
+		return c.JSON(fiber.Map{"csrf_token": token})
+	})
+
 	app.Use(cors.New(cors.Config{
 		AllowOrigins:     joinStrings(cfg.Config.Security.AllowedOrigins),
 		AllowMethods:     "GET,POST,PUT,PATCH,DELETE,OPTIONS",
@@ -229,10 +249,6 @@ func NewRouter(cfg RouterConfig) *fiber.App {
 	})
 
 	app.Get("/version", h.VersionInfo)
-
-	// CSRF token endpoint — registered at app level (not inside /api/v1 group)
-	// to guarantee no group-level auth middleware can intercept it.
-	app.Get("/csrf", h.GetCSRFToken)
 
 	apiGroup := app.Group("/api/v1")
 
