@@ -230,6 +230,10 @@ func NewRouter(cfg RouterConfig) *fiber.App {
 
 	app.Get("/version", h.VersionInfo)
 
+	// CSRF token endpoint — registered at app level (not inside /api/v1 group)
+	// to guarantee no group-level auth middleware can intercept it.
+	app.Get("/csrf", h.GetCSRFToken)
+
 	apiGroup := app.Group("/api/v1")
 
 	apiGroup.Get("/license/status", h.LicenseStatus)
@@ -240,7 +244,6 @@ func NewRouter(cfg RouterConfig) *fiber.App {
 	apiGroup.Post("/auth/verify-totp", h.VerifyTOTP)
 	apiGroup.Post("/auth/refresh", h.RefreshToken)
 	apiGroup.Post("/auth/logout", h.Logout)
-	apiGroup.Get("/auth/csrf", h.GetCSRFToken)
 
 	apiGroup.Post("/admin/bootstrap", h.AdminBootstrap)
 
