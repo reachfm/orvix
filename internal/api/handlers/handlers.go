@@ -130,6 +130,25 @@ func (h *Handler) FeatureFlags(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"features": flags})
 }
 
+// GetCSRFToken generates and returns a fresh CSRF token. This endpoint is public
+// (no auth required) so the frontend SPA can obtain a token before the user logs in.
+func (h *Handler) GetCSRFToken(c *fiber.Ctx) error {
+	token, err := security.GenerateCSRFToken()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to generate CSRF token"})
+	}
+	c.Cookie(&fiber.Cookie{
+		Name:     "csrf_token",
+		Value:    token,
+		HTTPOnly: false,
+		Secure:   true,
+		SameSite: "Strict",
+		MaxAge:   3600,
+	})
+	c.Set("X-CSRF-Token", token)
+	return c.JSON(fiber.Map{"token": token})
+}
+
 func (h *Handler) ActivateLicense(c *fiber.Ctx) error {
 	var req struct {
 		LicenseKey string `json:"license_key"`

@@ -240,6 +240,7 @@ func NewRouter(cfg RouterConfig) *fiber.App {
 	apiGroup.Post("/auth/verify-totp", h.VerifyTOTP)
 	apiGroup.Post("/auth/refresh", h.RefreshToken)
 	apiGroup.Post("/auth/logout", h.Logout)
+	apiGroup.Get("/auth/csrf", h.GetCSRFToken)
 
 	apiGroup.Post("/admin/bootstrap", h.AdminBootstrap)
 
