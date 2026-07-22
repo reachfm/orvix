@@ -911,7 +911,7 @@
 # Orvix Enterprise Mail â€” .gitignore
 
 # Binaries
-orvix
+/orvix
 orvix.exe
 *.test
 *.out
