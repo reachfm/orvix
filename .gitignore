@@ -1,4 +1,4 @@
-# ==============================================================================
+﻿# ==============================================================================
 # COMPREHENSIVE .GITIGNORE TEMPLATE
 # ==============================================================================
 # This template covers most common development scenarios and tools
@@ -908,3 +908,76 @@
 # This allows outer git to track inner repo files while preserving inner git history
 **/.git_backup_by_agent
 **/.git_backup_by_agent/
+# Orvix Enterprise Mail â€” .gitignore
+
+# Binaries
+orvix
+orvix.exe
+*.test
+*.out
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+go.work
+
+# SQLite databases
+*.db
+*.db-shm
+*.db-wal
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Node / Frontend
+node_modules/
+web/*/node_modules/
+web/*/dist/
+web/*/.vite/
+web/*/build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary
+tmp/
+temp/
+*.log
+/var/
+
+# Config overrides
+configs/*.local.yaml
+
+# Build artifacts
+dist/
+out/
+build/
+*.tar.gz
+*.zip
+
+# Docker
+.docker/
+
+# Coverage
+coverage/
+coverage.out
+coverage.html
+
+# Certificates (for development)
+*.pem
+*.key
+*.crt
+!testdata/*.pem

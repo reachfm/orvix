@@ -1,0 +1,2 @@
+{"@type":"destroy","object":"Account"}
+{"@type":"create","object":"Account","value":{"account-b":{"@type":"User","locale":"en_US","memberGroupIds":{},"memberTenantId":null,"roles":{"@type":"User"},"name":"alice","timeZone":null,"aliases":{},"quotas":{},"description":null,"credentials":{},"permissions":{"@type":"Inherit"},"encryptionAtRest":{"@type":"Disabled"}}}}

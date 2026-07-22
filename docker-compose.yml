@@ -1,0 +1,88 @@
+version: "3.8"
+
+networks:
+  orvix-net:
+    driver: bridge
+
+services:
+  orvix:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: orvix
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      ORVIX_SERVER_LISTEN: ":8080"
+      ORVIX_DATABASE_DRIVER: "sqlite"
+      ORVIX_DATABASE_DSN: "/var/lib/orvix/data/orvix.db?_journal_mode=WAL&_busy_timeout=5000"
+      ORVIX_SECURITY_JWT_SECRET: "${ORVIX_JWT_SECRET:-change-me-in-production}"
+      ORVIX_UPDATES_CHANNEL: "stable"
+    volumes:
+      - orvix_data:/var/lib/orvix
+      - orvix_config:/etc/orvix:ro
+    networks:
+      - orvix-net
+
+  # PostgreSQL (optional - enable with: docker-compose --profile postgres up)
+  postgres:
+    profiles: ["postgres"]
+    image: postgres:16-alpine
+    container_name: orvix-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: orvix
+      POSTGRES_PASSWORD: orvix
+      POSTGRES_DB: orvix
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orvix"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - orvix-net
+
+  # Redis (optional - enable with: docker-compose --profile redis up)
+  redis:
+    profiles: ["redis"]
+    image: redis:7-alpine
+    container_name: orvix-redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - orvix-net
+
+  # Stalwart Mail Server (external - enable with: docker-compose --profile stalwart up)
+  stalwart:
+    profiles: ["stalwart"]
+    image: ghcr.io/stalwartlabs/stalwart:v0.16
+    container_name: orvix-stalwart
+    restart: unless-stopped
+    ports:
+      - "25:25"
+      - "587:587"
+      - "465:465"
+      - "143:143"
+      - "993:993"
+      - "110:110"
+      - "995:995"
+    volumes:
+      - stalwart_data:/var/lib/stalwart
+    networks:
+      - orvix-net
+
+volumes:
+  orvix_data:
+  orvix_config:
+  postgres_data:
+  redis_data:
+  stalwart_data:

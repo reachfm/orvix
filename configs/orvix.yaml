@@ -1,0 +1,79 @@
+# Orvix Enterprise Mail Configuration
+# orvix.yaml - Single source of truth for OrvixEM runtime configuration
+# Domain: orvix.email | Product: OrvixEM | Binary: orvix
+
+server:
+  listen: ":8080"
+  trusted_cidr: "0.0.0.0/0"
+  debug: false
+
+database:
+  driver: "sqlite"
+  dsn: "orvix.db?_journal_mode=WAL&_busy_timeout=5000"
+
+redis:
+  address: "localhost:6379"
+  password: ""
+  db: 0
+
+stalwart:
+  config_path: "/etc/stalwart/config.yaml"
+  binary_path: "/usr/local/bin/stalwart"
+  admin_port: 8081
+  admin_username: "admin"
+  admin_password: ""
+  smtp_ports: [25, 587, 465]
+  imap_ports: [143, 993]
+  pop3_ports: [110, 995]
+  jmap_ports: [80, 443]
+  health_interval: 60
+
+license:
+  public_key_path: "/etc/orvix/license.pub"
+  server_url: "https://license.orvix.email"
+  offline_grace_days: 7
+  hardware_binding: false
+
+updates:
+  channel: "stable"
+  update_server: "https://updates.orvix.email"
+  auto_check: true
+  auto_apply: false
+  rollback_dir: "/var/lib/orvix/rollback"
+  snapshot_dir: "/var/lib/orvix/snapshots"
+
+security:
+  jwt_secret: "CHANGE_ME_TO_A_SECURE_RANDOM_STRING"
+  access_token_ttl: 15
+  refresh_token_ttl: 43200
+  argon2_time: 3
+  argon2_memory: 65536
+  argon2_threads: 4
+  rate_limit_per_ip: 100
+  rate_limit_window: 60
+  allowed_origins: ["*"]
+  admin_ip_allowlist: []
+
+feature_flags:
+  cache_ttl: 300
+
+guardian:
+  enabled: false
+  mode: "local"
+  api_key: ""
+  api_endpoint: "https://api.deepseek.com/chat/completions"
+  ollama_address: "localhost:11434"
+  model: "deepseek-chat"
+
+compose:
+  enabled: false
+  mode: "local"
+  api_key: ""
+  api_endpoint: "https://api.deepseek.com/chat/completions"
+  ollama_address: "localhost:11434"
+  model: "deepseek-chat"
+
+logging:
+  level: "info"
+  format: "json"
+  output: "stdout"
