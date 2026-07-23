@@ -409,14 +409,17 @@ if [ "$HOST_OS" = "$TARGET_OS" ] && [ "$HOST_ARCH" = "$TARGET_ARCH" ]; then
     info "embedded metadata OK: version=$EMBEDDED_VERSION commit=$EMBEDDED_COMMIT channel=$EMBEDDED_CHANNEL"
 else
     warn "cross-compiling ($HOST_OS/$HOST_ARCH -> $TARGET_OS/$TARGET_ARCH); cannot execute the built binary to self-verify. Falling back to a static byte-level check of the linked -ldflags values."
-    command -v strings >/dev/null 2>&1 || fail "cross-compile verification requires 'strings' (binutils) and it was not found" 3
-    if ! strings "$BIN_OUT" | grep -qF "$GIT_COMMIT"; then
+    # grep -a treats the binary as text so it can scan for the literal
+    # embedded strings without needing the optional binutils 'strings'
+    # tool, which is not guaranteed present on every build host.
+    command -v grep >/dev/null 2>&1 || fail "cross-compile verification requires 'grep' and it was not found" 3
+    if ! grep -qaF "$GIT_COMMIT" "$BIN_OUT"; then
         fail "cross-compile static check failed: commit $GIT_COMMIT not found embedded in $BIN_OUT" 3
     fi
-    if ! strings "$BIN_OUT" | grep -qF "$RESOLVED_CHANNEL"; then
+    if ! grep -qaF "$RESOLVED_CHANNEL" "$BIN_OUT"; then
         fail "cross-compile static check failed: channel $RESOLVED_CHANNEL not found embedded in $BIN_OUT" 3
     fi
-    if ! strings "$BIN_OUT" | grep -qF "$RESOLVED_VERSION"; then
+    if ! grep -qaF "$RESOLVED_VERSION" "$BIN_OUT"; then
         fail "cross-compile static check failed: version $RESOLVED_VERSION not found embedded in $BIN_OUT" 3
     fi
     EMBEDDED_VERSION="$RESOLVED_VERSION"
