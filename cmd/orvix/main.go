@@ -22,6 +22,7 @@ import (
 	"github.com/orvix/orvix/internal/compliance"
 	"github.com/orvix/orvix/internal/compose"
 	"github.com/orvix/orvix/internal/config"
+	coremaildelivery "github.com/orvix/orvix/internal/coremail/delivery"
 	coremailruntime "github.com/orvix/orvix/internal/coremail/runtime"
 	coremailstorage "github.com/orvix/orvix/internal/coremail/storage"
 	"github.com/orvix/orvix/internal/dbdialect"
@@ -299,6 +300,16 @@ func ensureCoreMailBootstrapSchema(db *gorm.DB) error {
 	for _, stmt := range append(coremailstorage.Tables(), coremailstorage.Indexes()...) {
 		if _, err := sqlDB.Exec(stmt); err != nil {
 			return fmt.Errorf("coremail bootstrap storage migration: %w", err)
+		}
+	}
+	// coremail_delivery_attempts (used by the admin queue-detail endpoint's
+	// attempt history) had DDL defined in internal/coremail/delivery but
+	// was never invoked on the SQLite path — only the PostgreSQL raw
+	// migrations created it. Wire it in here so both dialects have it.
+	deliveryStmts := append([]string{coremaildelivery.AttemptHistoryTable()}, coremaildelivery.AttemptHistoryIndexes()...)
+	for _, stmt := range deliveryStmts {
+		if _, err := sqlDB.Exec(stmt); err != nil {
+			return fmt.Errorf("coremail delivery-attempts bootstrap migration: %w", err)
 		}
 	}
 	return nil

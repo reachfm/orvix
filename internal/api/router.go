@@ -887,7 +887,9 @@ func (r *Router) setupRoutes() {
 		}
 		var active sql.NullBool
 		if r.db != nil {
-			r.db.Raw("SELECT active FROM organizations WHERE id = ?", tenantID).Scan(&active)
+			if sqlDB, dbErr := r.db.DB(); dbErr == nil {
+				_ = sqlDB.QueryRow("SELECT active FROM tenants WHERE id = ? AND deleted_at IS NULL", tenantID).Scan(&active)
+			}
 		}
 		if !active.Valid || !active.Bool {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
@@ -1008,7 +1010,7 @@ func (r *Router) setupRoutes() {
 	admin := protected.Group("", auth.RequireAnyRole(auth.RoleAdmin, auth.RoleSuperAdmin, auth.RolePlatformSuperAdmin), r.csrf.Middleware())
 	admin.Get("/domains", r.h.ListDomains)
 	admin.Get("/users", r.h.ListUsers)
-	admin.Get("/mailboxes", r.h.ListUsers)
+	admin.Get("/mailboxes", r.h.ListMailboxes)
 	// CSV exports (admin-only, GET — no CSRF required). Registered before
 	// the parameterized :id / :name routes so the literal /export segment
 	// wins over /mailboxes/:id and /domains/:name.

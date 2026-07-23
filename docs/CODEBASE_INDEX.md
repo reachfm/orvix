@@ -24,25 +24,26 @@
 
 ## Confirmed defects (evidence-based)
 
-### 1. Router copy-paste bug — `GET /admin/mailboxes` wired to the wrong handler
-- **File:** `internal/api/router.go:1011`
-- **Evidence:** `admin.Get("/mailboxes", r.h.ListUsers)` — the mailbox-listing route calls `ListUsers`, not a mailbox handler. Looks like a copy-paste of the line above it (`/admin/users`).
-- **Impact:** `GET /api/v1/admin/mailboxes` returns a user list instead of mailboxes. A separate, correct `GetMailbox`-style handler exists (`router.go:1020`, `/mailboxes/:id`), so only the collection-list route is affected.
-- **Status:** confirmed, unfixed. See `docs/MASTER_TODO.md`.
+### 1. Router copy-paste bug — `GET /mailboxes` wired to the wrong handler — **FIXED 2026-07-23**
+- **File:** `internal/api/router.go` (was line ~1011)
+- **Original evidence:** `admin.Get("/mailboxes", r.h.ListUsers)` — the mailbox-listing route called `ListUsers`, not a mailbox handler. Copy-paste of the line above it (`/users`).
+- **Correction to prior note:** the "admin" group has an **empty URL prefix** — the live route is `GET /api/v1/mailboxes`, not `/api/v1/admin/mailboxes` as informally described in earlier audit passes.
+- **Fix:** added a new `ListMailboxes` handler (`internal/api/handlers/handlers.go`), tenant-scoped via the same `isSuperRole`/`scopedTenantID` convention as `GetMailbox`, and repointed the route at it.
+- **Verified by:** `TestAdminMailboxesRoute_ReturnsMailboxesNotUsers` (`internal/api/handlers/enterprise_mutation_smoke_test.go`).
+- **New finding surfaced while fixing this:** `ExportMailboxesCSV` (same file) has **no tenant scoping at all** — a separate, still-open issue, tracked in `docs/MASTER_TODO.md`.
 
-### 2. Schema-missing tables (four confirmed)
-Referenced by production handler code via raw SQL; no `CREATE TABLE` exists anywhere in `internal/models/` or elsewhere in non-test code. Every call to the affected endpoints returns a database driver error ("no such table" / relation does not exist) in every environment, including fresh Postgres installs.
+### 2. Schema-missing tables (four confirmed) — **ALL RESOLVED 2026-07-23**
 
-| Table | Referenced by | Evidence |
+| Table | Referenced by | Resolution |
 |---|---|---|
-| `organizations` | `requireTenantActive` middleware | `internal/api/router.go:890` — `SELECT active FROM organizations WHERE id = ?`; real tenant-status data lives in the `tenants` table instead (`internal/admin/organization/repository.go:43`) |
-| `coremail_groups` | `ListGroups`, `CreateGroup`, `DeleteGroup` | `internal/api/handlers/customer_mail.go` |
-| `coremail_group_members` | `AddGroupMember`, `RemoveGroupMember` | `internal/api/handlers/customer_mail.go` |
-| `queue_attempts` | queue-detail attempt history | `internal/api/handlers/admin_queue.go:205` — migrations only define a differently-named `coremail_delivery_attempts`, suggesting a rename drift rather than a genuinely new feature |
+| `organizations` | `requireTenantActive` middleware | **Fixed** — repointed the query at `tenants` (the real tenant-status table; see `internal/admin/organization/repository.go:43` for the established "organization IS a tenant" convention). No new table created. Also fixed a co-located GORM `.Raw().Scan()` nil-pointer panic bug found while diagnosing this. See `docs/DECISIONS.md`. |
+| `coremail_groups` | `ListGroups`, `CreateGroup`, `DeleteGroup` | **Fixed** — migration added to both `internal/models/models.go` (SQLite) and `internal/models/postgres_migrations.go` (PostgreSQL), modeled on the existing `coremail_domain_groups` convention. |
+| `coremail_group_members` | `AddGroupMember`, `RemoveGroupMember` | **Fixed** — same migration pass, modeled on `coremail_domain_group_members`. |
+| `queue_attempts` | queue-detail attempt history | **Fixed differently than expected** — confirmed via `grep` that nothing anywhere writes to `queue_attempts`; it was dead/never-implemented. The real, actively-written table is `coremail_delivery_attempts` (written by `internal/coremail/delivery/history.go`), which already had ready DDL (`AttemptHistoryTable()`/`AttemptHistoryIndexes()`) that was simply never invoked for SQLite. Repointed `admin_queue.go` at the real table and wired its DDL into the SQLite bootstrap path. No `queue_attempts` table was created. |
 
-**Practical impact today:** `requireTenantActive` silently defaults every enterprise mutation attempt to "inactive" and returns 403 — or, when combined with other issues, panics with a nil-pointer 500 (confirmed empirically during the customer-mailbox IDOR fix in this session: a `POST /api/v1/enterprise/aliases` through the full router panics before reaching handler code). The customer Groups feature (`coremail_groups`/`coremail_group_members`) is non-functional in every environment. `queue_attempts` detail views are non-functional.
+**Impact of the fixes:** All four issues verified resolved via new tests in `internal/api/handlers/enterprise_mutation_smoke_test.go`: `TestRequireTenantActive_ActiveTenantSucceeds`, `TestRequireTenantActive_InactiveTenantRejected`, `TestRequireTenantActive_MissingTenantRejectedSafely`, `TestEnterpriseGroups_FullRouterRoundTrip`, `TestGroupsSchema_MigrationCreatesRequiredTables`. Full Go test suite confirmed green after all changes (see `docs/PROJECT_AUDIT_REPORT.md` for exact validation results).
 
-**Status:** confirmed, unfixed, tracked in `docs/MASTER_TODO.md`. Fixing requires a schema migration — deliberately out of scope for the tenant-authorization fix already applied in `customer_mail.go` (commit `9bee80e`), which added correct tenant-scoping to `DeleteAlias`/`DeleteGroup`/`AddGroupMember`/`RemoveGroupMember` without attempting to fix the underlying missing-table bug.
+**A latent bug surfaced by fixing the schema:** `ListGroups`' SQL selected 4 columns but scanned only 3 destinations — invisible while the table didn't exist (query always failed earlier), now fixed alongside the schema addition.
 
 ### 3. `context.TODO()` in production POP3 server code
 - **File:** `internal/coremail/pop3/server.go:244,256`

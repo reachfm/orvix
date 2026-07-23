@@ -54,7 +54,7 @@ Legacy fallback: `release/admin/` (vanilla JS, `modules/` + `app.js`) is **not l
 | Public (no auth) | none, or login-rate-limited | ~15 | MTA-STS, Autodiscover, health, billing plans/webhook, auth login/signup/reset, admin/webmail login |
 | `protected` (base) | API key or JWT + `TenantMiddleware` | ~46 | `/me`, `/account/*`, `/webmail/*` user endpoints, `/customer/domains/*` |
 | `/api/v1/enterprise/*` | tenant context + CSRF + per-capability RBAC permission | ~45 | Most internally consistent group — fine-grained write guards |
-| `/api/v1/admin/*` (+ unprefixed admin group) | role-based (`Admin`/`SuperAdmin`/`PlatformSuperAdmin`) + CSRF at group level | ~180 | Largest, most heterogeneous group; contains a confirmed copy-paste routing bug (see Codebase Index) |
+| `/api/v1/admin/*` (+ unprefixed admin group, mounted with an empty URL prefix directly under `/api/v1`) | role-based (`Admin`/`SuperAdmin`/`PlatformSuperAdmin`) + CSRF at group level | ~180 | Largest, most heterogeneous group; the `GET /mailboxes` copy-paste routing bug is fixed this session (see Codebase Index) |
 | `/api/v1/console/internal/*` | `SuperAdmin`/`PlatformSuperAdmin` only | 5 | Correctly tighter than parent admin group |
 | `/api/v1/platform/*` | `SuperAdmin`/`PlatformSuperAdmin` only | 7 | Organization CRUD at platform level |
 
@@ -65,7 +65,7 @@ Legacy fallback: `release/admin/` (vanilla JS, `modules/` + `app.js`) is **not l
 - **GORM auto-migrated structs** (`internal/models/models.go`): Common, License, FeatureFlag, ModuleVersion, Tenant, Reseller, LDAPConfig, SSOConfig, AlertConfig, FirewallRule/Log, GuardianLog, HealHistory, ProvisionedDomain, Session, UpdateHistory, User, Domain, Mailbox, APIKey.
 - **Raw-SQL migrations** (`internal/models/postgres_migrations.go`, ~65 tables): core account tables, coremail mail-store tables, RBAC/admin-group tables, enterprise v2/v3 feature tables, security tables, ops tables.
 - **Self-managed schema** (own `EnsureSchema` inside their own package): `admin_settings`, `password_reset_tokens` — not gaps, just decentralized.
-- **Confirmed schema-missing tables** (referenced by production handler code, no `CREATE TABLE` anywhere): `organizations`, `coremail_groups`, `coremail_group_members`, `queue_attempts`. See `docs/CODEBASE_INDEX.md` and `docs/MASTER_TODO.md` for detail and remediation status.
+- **Previously schema-missing tables — fixed 2026-07-23**: `organizations` (resolved by repointing `requireTenantActive` at `tenants`, no new table), `coremail_groups` and `coremail_group_members` (migrations added to both SQLite and PostgreSQL paths), `queue_attempts` (resolved by repointing the one reader at the real `coremail_delivery_attempts` table instead of creating a speculative new one). See `docs/DECISIONS.md` for full reasoning and `docs/CODEBASE_INDEX.md` for verification evidence.
 
 ---
 

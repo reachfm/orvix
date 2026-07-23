@@ -121,11 +121,12 @@ func (h *Handler) ListGroups(c fiber.Ctx) error {
 		ID          uint   `json:"id"`
 		Name        string `json:"name"`
 		Description string `json:"description"`
+		CreatedAt   string `json:"created_at"`
 	}
-	var groups []Group
+	groups := []Group{}
 	for rows.Next() {
 		var g Group
-		if err := rows.Scan(&g.ID, &g.Name, &g.Description); err != nil {
+		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.CreatedAt); err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "scan error"})
 		}
 		groups = append(groups, g)

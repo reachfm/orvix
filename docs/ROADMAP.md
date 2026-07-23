@@ -6,44 +6,54 @@ Every item references the real source files it touches. See `docs/MASTER_TODO.md
 
 ## Immediate (release-blocking or actively broken)
 
-1. **Fix `requireTenantActive` querying nonexistent `organizations` table.**
-   Files: `internal/api/router.go:890`. Blocks every `/api/v1/enterprise/*` mutation (aliases, groups, domains, mailboxes, invitations, etc.) — either silently 403s or panics 500 depending on downstream code.
+**All five items below were fixed 2026-07-23 — see `docs/DECISIONS.md` for full detail. Kept here, checked off, per this roadmap's own convention of never deleting completed work.**
 
-2. **Create schema for `coremail_groups` / `coremail_group_members`.**
-   Files: needs a new entry in `internal/models/postgres_migrations.go` (or equivalent SQLite path). Currently the entire customer Groups feature (`internal/api/handlers/customer_mail.go`: `ListGroups`, `CreateGroup`, `DeleteGroup`, `AddGroupMember`, `RemoveGroupMember`) is non-functional in every environment.
+1. [x] **Fix `requireTenantActive` querying nonexistent `organizations` table.**
+   Files: `internal/api/router.go`. Repointed at `tenants`; also fixed a co-located GORM `.Raw().Scan()` nil-pointer panic. Verified via `TestRequireTenantActive_ActiveTenantSucceeds`/`InactiveTenantRejected`/`MissingTenantRejectedSafely`.
 
-3. **Create schema for `queue_attempts`, or repoint the handler at `coremail_delivery_attempts`.**
-   Files: `internal/api/handlers/admin_queue.go:205`.
+2. [x] **Create schema for `coremail_groups` / `coremail_group_members`.**
+   Files: `internal/models/models.go`, `internal/models/postgres_migrations.go`. Also fixed a latent `ListGroups` column/scan-count mismatch bug surfaced by the schema now existing. Verified via `TestEnterpriseGroups_FullRouterRoundTrip`.
 
-4. **Fix `GET /admin/mailboxes` copy-paste routing bug.**
-   Files: `internal/api/router.go:1011` — currently calls `r.h.ListUsers` instead of a mailbox-listing handler.
+3. [x] **`queue_attempts` — repointed at `coremail_delivery_attempts` instead of creating a new table.**
+   Files: `internal/api/handlers/admin_queue.go`, `cmd/orvix/main.go`. Confirmed via grep that nothing writes to `queue_attempts`; the real table already existed with unused DDL, now wired into the SQLite bootstrap path too.
 
-5. **Create schema for `organizations`, or repoint at `tenants`.**
-   Same root cause as item 1 — bundled here as the actual schema decision to make (see `docs/DECISIONS.md` for the two options).
+4. [x] **Fix `/mailboxes` copy-paste routing bug.**
+   Files: `internal/api/router.go`, `internal/api/handlers/handlers.go`. New `ListMailboxes` handler added, tenant-scoped, wired in place of `ListUsers`. Verified via `TestAdminMailboxesRoute_ReturnsMailboxesNotUsers`.
+
+5. [x] **`organizations` — resolved as part of item 1** (same root cause, same fix).
+
+---
+
+## Newly Discovered (surfaced while fixing the items above)
+
+6. **`ExportMailboxesCSV` has no tenant scoping.** A tenant admin can export every tenant's mailboxes via CSV — discovered while building the correctly-scoped `ListMailboxes`. Files: `internal/api/handlers/handlers.go`.
 
 ---
 
 ## Next (near-term hardening)
 
-6. **Verify and, if needed, fix `enterpriseRead.Get("/organizations/:id")` tenant-scoping at the service layer.**
+7. **Fix `ExportMailboxesCSV` missing tenant scoping.**
+   Files: `internal/api/handlers/handlers.go`. Apply the same `isSuperRole`/`scopedTenantID` pattern used in the new `ListMailboxes`.
+
+8. **Verify and, if needed, fix `enterpriseRead.Get("/organizations/:id")` tenant-scoping at the service layer.**
    Files: `internal/api/router.go:937`, `internal/admin/organization/repository.go`.
 
-7. **Verify `web/webmail/EmailList.tsx`'s `/api/v1/queue` call is intentional vs. a stale reference to `/api/v1/webmail/messages`.**
+9. **Verify `web/webmail/EmailList.tsx`'s `/api/v1/queue` call is intentional vs. a stale reference to `/api/v1/webmail/messages`.**
    Files: `web/webmail/src/components/EmailList.tsx:28`, `internal/api/router.go:757`.
 
-8. **Increase test depth for DKIM/SPF/DMARC/antispam/push/rules subpackages.**
-   Files: `internal/coremail/{dkim,spf,dmarc,antispam,push,rules}` — each currently has only 1 test file.
+10. **Increase test depth for DKIM/SPF/DMARC/antispam/push/rules subpackages.**
+    Files: `internal/coremail/{dkim,spf,dmarc,antispam,push,rules}` — each currently has only 1 test file.
 
-9. **Replace `context.TODO()` in POP3 server with request-scoped context.**
-   Files: `internal/coremail/pop3/server.go:244,256`.
+11. **Replace `context.TODO()` in POP3 server with request-scoped context.**
+    Files: `internal/coremail/pop3/server.go:244,256`.
 
-10. **Confirm and remove the deprecated legacy vacation-reply path if truly unreachable.**
+12. **Confirm and remove the deprecated legacy vacation-reply path if truly unreachable.**
     Files: `internal/coremail/storage/rules.go:97,103`.
 
-11. **Split the two largest handler files.**
-    Files: `internal/api/handlers/handlers.go` (3657 lines), `internal/api/handlers/webmail_user.go` (2535 lines).
+13. **Split the two largest handler files.**
+    Files: `internal/api/handlers/handlers.go` (now larger still after this session's additions), `internal/api/handlers/webmail_user.go` (2535 lines).
 
-12. **Verify orphaned packages before deletion.**
+14. **Verify orphaned packages before deletion.**
     Files: `internal/adminapi/`, `internal/ldap/`, `internal/pgbackup/` — each has zero references outside itself; confirm truly dead (not just unwired-but-planned) before removing.
 
 ---

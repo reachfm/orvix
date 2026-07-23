@@ -1747,6 +1747,77 @@ func (h *Handler) GetMailbox(c fiber.Ctx) error {
 	})
 }
 
+// ListMailboxes returns the mailbox collection for GET /admin/mailboxes.
+// Scoped like GetMailbox/callerOwnsTenant: super admins (RoleSuperAdmin,
+// RolePlatformSuperAdmin) see every tenant's mailboxes; every other admin
+// caller sees only their own tenant's mailboxes.
+func (h *Handler) ListMailboxes(c fiber.Ctx) error {
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	type mailboxRow struct {
+		ID         uint   `json:"id"`
+		Email      string `json:"email"`
+		DomainName string `json:"domain"`
+		Status     string `json:"status"`
+		IsAdmin    bool   `json:"is_admin"`
+		CreatedAt  string `json:"created_at"`
+	}
+
+	// Same optional server-side filters ListUsers previously supported
+	// at this route (q substring on email, status exact match, admin
+	// true/false) — preserved here so existing callers/tests are not
+	// regressed by the mailbox-shaped response fix.
+	q := strings.TrimSpace(c.Query("q"))
+	statusFilter := strings.TrimSpace(c.Query("status"))
+	adminFilter := strings.ToLower(strings.TrimSpace(c.Query("admin")))
+
+	conds := []string{"m.deleted_at IS NULL"}
+	args := []interface{}{}
+	if !isSuperRole(c) {
+		conds = append(conds, "m.tenant_id = "+h.dialect.Placeholder(len(args)+1))
+		args = append(args, h.scopedTenantID(c))
+	}
+	if q != "" {
+		conds = append(conds, "LOWER(m.email) LIKE "+h.dialect.Placeholder(len(args)+1))
+		args = append(args, "%"+strings.ToLower(q)+"%")
+	}
+	if statusFilter == "active" || statusFilter == "suspended" {
+		conds = append(conds, "m.status = "+h.dialect.Placeholder(len(args)+1))
+		args = append(args, statusFilter)
+	}
+	switch adminFilter {
+	case "true":
+		conds = append(conds, "m.is_admin = "+h.dialect.TrueLiteral())
+	case "false":
+		conds = append(conds, "m.is_admin = "+h.dialect.FalseLiteral())
+	}
+
+	query := "SELECT m.id, m.email, COALESCE(d.name, ''), m.status, m.is_admin, m.created_at" +
+		" FROM coremail_mailboxes m LEFT JOIN coremail_domains d ON m.domain_id = d.id" +
+		" WHERE " + strings.Join(conds, " AND ") +
+		" ORDER BY m.id ASC"
+
+	rows, qerr := sqlDB.Query(query, args...)
+	if qerr != nil {
+		h.logger.Error("list mailboxes query failed", zap.Error(qerr))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list mailboxes"})
+	}
+	defer rows.Close()
+
+	mailboxes := []mailboxRow{}
+	for rows.Next() {
+		var m mailboxRow
+		if err := rows.Scan(&m.ID, &m.Email, &m.DomainName, &m.Status, &m.IsAdmin, &m.CreatedAt); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "scan error"})
+		}
+		mailboxes = append(mailboxes, m)
+	}
+	return c.JSON(mailboxes)
+}
+
 // ListUsers returns all users/mailboxes with explicit identity contract.
 // CoreMail mailbox rows: mailbox_id is set, user_id linked from users table if matching email.
 // User-only rows (no coremail_mailboxes): mailbox_id is null, user_id is set, status is "user-only".

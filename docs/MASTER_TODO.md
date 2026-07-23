@@ -11,24 +11,26 @@ Completed items stay visible forever — never delete them, only check them off.
 - [x] IDOR — customer alias/group cross-tenant isolation (`customer_mail.go`, commit `9bee80e`, this session)
 - [x] RBAC permission model (role → permission map, `internal/auth/rbac`)
 - [x] Stalwart zero-tolerance removal — zero runtime/config/doc/comment references remain outside protective tests (commit `d5a48cb`, this session)
-- [ ] Fix `requireTenantActive` querying nonexistent `organizations` table (`router.go:890`) — currently causes every `/enterprise` mutation to misbehave (403 or panic-500)
+- [x] Fix `requireTenantActive` querying nonexistent `organizations` table (`router.go:890`) — repointed at `tenants`, also fixed a GORM `.Raw().Scan()` nil-pointer panic found during the fix (see `docs/DECISIONS.md`)
 - [ ] Real RFC 6238 MFA hardening review (currently TOTP/SHA1 — flagged as gosec false-positive/by-design in a prior audit pass, revisit if compliance requires SHA256+)
 - [ ] WebAuthn / FIDO2 support
 - [ ] SSO (OIDC/SAML) admin API — `s_s_o_configs` table exists, no endpoints wired
 - [ ] Verify `enterpriseRead.Get("/organizations/:id")` (`router.go:937`) enforces `:id == caller tenant` at the service layer, not just via tenant-scoped middleware (flagged, not confirmed safe)
 - [ ] Confirm the legacy vacation-reply path (`internal/coremail/storage/rules.go:97,103`) is truly unreachable, or remove it
+- [ ] `ExportMailboxesCSV` has no tenant scoping — a tenant admin can export every tenant's mailboxes via CSV (newly discovered this session while building `ListMailboxes`, see Database/Schema section)
 
 # Database / Schema
 
-- [ ] Create migration for `organizations` table, or repoint `requireTenantActive` at `tenants` (four options exist; pick one, document in `docs/DECISIONS.md`)
-- [ ] Create migration for `coremail_groups` (customer Groups feature is non-functional without it)
-- [ ] Create migration for `coremail_group_members`
-- [ ] Create migration for `queue_attempts`, or repoint `admin_queue.go:205` at the existing `coremail_delivery_attempts` table if that was the intended target
+- [x] `organizations` table issue resolved — `requireTenantActive` repointed at `tenants` (see `docs/DECISIONS.md`), no new table created
+- [x] Migration added for `coremail_groups` (both SQLite `models.go` and PostgreSQL `postgres_migrations.go`)
+- [x] Migration added for `coremail_group_members`
+- [x] `queue_attempts` resolved — confirmed dead (zero writers anywhere), repointed `admin_queue.go` at the real `coremail_delivery_attempts` table instead, and wired its previously-uncalled DDL into the SQLite bootstrap path
 - [x] Dual SQLite/PostgreSQL dialect abstraction (`internal/dbdialect`)
+- [ ] `ExportMailboxesCSV` (`internal/api/handlers/handlers.go`) has no tenant scoping at all — newly discovered while building `ListMailboxes`; a tenant admin can export every tenant's mailboxes via CSV. Needs the same `isSuperRole`/`scopedTenantID` scoping applied to `ListMailboxes`.
 
 # Backend Routing
 
-- [ ] Fix `GET /admin/mailboxes` wired to `ListUsers` instead of a mailbox handler (`router.go:1011`)
+- [x] Fix `GET /mailboxes` (the "admin" group has an empty URL prefix — not literally `/admin/mailboxes`, corrected understanding this pass) wired to `ListUsers` instead of a mailbox handler — new `ListMailboxes` handler added and wired, tenant-scoped, tested
 - [ ] Verify `web/webmail/EmailList.tsx` calling `/api/v1/queue` instead of `/api/v1/webmail/messages` is intentional, not a stale reference
 
 # Mail Protocols
@@ -66,15 +68,17 @@ Completed items stay visible forever — never delete them, only check them off.
 # Customer Panel
 
 - [x] Self-service domains, mailboxes (read), aliases (full CRUD, tenant-isolated)
-- [ ] Groups feature — blocked on missing schema (see Database/Schema above)
+- [x] Groups feature — schema added, `ListGroups` scan-count bug fixed, full router round-trip tested (`TestEnterpriseGroups_FullRouterRoundTrip`)
 - [ ] Multi-tenant write UI (backend model exists, no admin write API — documented as intentionally hidden in `docs/ORVIX_ENTERPRISE_PARITY_AUDIT.md`)
 
 # Testing
 
 - [x] Tenant-isolation regression tests for mailboxes/domains
 - [x] Tenant-isolation regression tests for aliases/groups (this session)
+- [x] End-to-end tests for `requireTenantActive` through the full router (active/inactive/missing-tenant, `enterprise_mutation_smoke_test.go`)
+- [x] Full-router regression test for the Groups feature (create/list/duplicate-rejection)
+- [x] Regression test proving `/mailboxes` returns mailbox-shaped data, not user-shaped, with tenant scoping
 - [ ] Regression tests for DKIM/SPF/DMARC beyond the single existing test file each
-- [ ] End-to-end test for the `requireTenantActive` bug once fixed (currently untestable through the full router)
 
 # Dead Code / Cleanup (needs verification before deletion, per non-negotiable rule)
 

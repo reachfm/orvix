@@ -4,23 +4,12 @@ package handlers_test
 // DeleteAlias, DeleteGroup, AddGroupMember, and RemoveGroupMember must
 // never let a caller mutate another tenant's alias, group, or group
 // membership by ID, even when that ID is known or guessed. These tests
-// exercise the handlers directly (not through the full HTTP router)
-// for two separate, pre-existing, out-of-scope reasons:
-//
-//  1. The router's /enterprise mutation gate depends on
-//     requireTenantActive, which queries a literal "organizations"
-//     table that does not exist in the schema (the real table is
-//     "tenants") — every mutation through the full router panics
-//     before reaching any handler.
-//  2. coremail_groups and coremail_group_members have no production
-//     schema/migration anywhere either — the customer Groups feature
-//     is presently non-functional in every environment. This file
-//     creates both tables test-local only (not a production
-//     migration) so the tenant-authorization logic this fix adds can
-//     still be exercised end-to-end.
-//
-// Testing the handlers directly isolates exactly the
-// tenant-authorization logic this fix changed from both gaps.
+// exercise the handlers directly (not through the full HTTP router),
+// which keeps the tenant-authorization assertions isolated from
+// unrelated router-level concerns (CSRF, rate limiting, etc.) — full
+// end-to-end coverage through the real router lives in
+// enterprise_mutation_smoke_test.go now that requireTenantActive and
+// the coremail_groups/coremail_group_members schema have been fixed.
 
 import (
 	"bytes"
@@ -78,33 +67,6 @@ func buildCustomerMailEnv(t *testing.T, callerTenantID uint) *customerMailEnv {
 		t.Fatalf("sql db: %v", err)
 	}
 	t.Cleanup(func() { _ = sqlDB.Close() })
-
-	// coremail_groups and coremail_group_members have no production
-	// Tables()/migration definition anywhere in the schema (a
-	// separate, pre-existing gap out of scope for this fix — the
-	// customer Groups feature is presently non-functional in every
-	// environment because these tables do not exist). Create them
-	// here, test-local only, so the tenant-authorization logic this
-	// fix adds can be exercised end-to-end.
-	if _, err := sqlDB.Exec(`CREATE TABLE IF NOT EXISTS coremail_groups (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		tenant_id INTEGER NOT NULL,
-		name TEXT NOT NULL,
-		description TEXT,
-		created_at DATETIME NOT NULL,
-		updated_at DATETIME NOT NULL,
-		deleted_at DATETIME
-	)`); err != nil {
-		t.Fatalf("create coremail_groups: %v", err)
-	}
-	if _, err := sqlDB.Exec(`CREATE TABLE IF NOT EXISTS coremail_group_members (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		group_id INTEGER NOT NULL,
-		email TEXT NOT NULL,
-		added_at DATETIME NOT NULL
-	)`); err != nil {
-		t.Fatalf("create coremail_group_members: %v", err)
-	}
 
 	now := time.Now().UTC()
 	exec := func(query string, args ...interface{}) int64 {
