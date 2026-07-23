@@ -75,6 +75,10 @@ func (h *Handler) CreateAlias(c fiber.Ctx) error {
 }
 
 func (h *Handler) DeleteAlias(c fiber.Ctx) error {
+	tenantID, err := auth.RequireTenantID(c)
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "tenant context required"})
+	}
 	idStr := c.Params("id")
 	id, err := strconv.ParseUint(idStr, 10, 64)
 	if err != nil {
@@ -85,9 +89,13 @@ func (h *Handler) DeleteAlias(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database unavailable"})
 	}
 	now := time.Now().UTC()
-	_, err = db.ExecContext(c.Context(),
-		"UPDATE coremail_aliases SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL", now, id)
+	result, err := db.ExecContext(c.Context(),
+		"UPDATE coremail_aliases SET deleted_at = ? WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL", now, id, tenantID)
 	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to delete alias"})
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "alias not found"})
 	}
 	h.writeAuditLog(c, "alias.delete", "id:"+idStr)
@@ -156,6 +164,10 @@ func (h *Handler) CreateGroup(c fiber.Ctx) error {
 }
 
 func (h *Handler) DeleteGroup(c fiber.Ctx) error {
+	tenantID, err := auth.RequireTenantID(c)
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "tenant context required"})
+	}
 	idStr := c.Params("id")
 	id, err := strconv.ParseUint(idStr, 10, 64)
 	if err != nil {
@@ -166,9 +178,13 @@ func (h *Handler) DeleteGroup(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database unavailable"})
 	}
 	now := time.Now().UTC()
-	_, err = db.ExecContext(c.Context(),
-		"UPDATE coremail_groups SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL", now, id)
+	result, err := db.ExecContext(c.Context(),
+		"UPDATE coremail_groups SET deleted_at = ? WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL", now, id, tenantID)
 	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to delete group"})
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "group not found"})
 	}
 	h.writeAuditLog(c, "group.delete", "id:"+idStr)
@@ -176,6 +192,10 @@ func (h *Handler) DeleteGroup(c fiber.Ctx) error {
 }
 
 func (h *Handler) AddGroupMember(c fiber.Ctx) error {
+	tenantID, err := auth.RequireTenantID(c)
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "tenant context required"})
+	}
 	groupIDStr := c.Params("id")
 	groupID, err := strconv.ParseUint(groupIDStr, 10, 64)
 	if err != nil {
@@ -191,6 +211,11 @@ func (h *Handler) AddGroupMember(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database unavailable"})
 	}
+	var exists int
+	if err := db.QueryRowContext(c.Context(),
+		"SELECT 1 FROM coremail_groups WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL", groupID, tenantID).Scan(&exists); err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "group not found"})
+	}
 	now := time.Now().UTC()
 	_, err = db.ExecContext(c.Context(),
 		`INSERT INTO coremail_group_members (group_id, email, added_at) VALUES (?, ?, ?)`, groupID, req.Email, now)
@@ -201,13 +226,17 @@ func (h *Handler) AddGroupMember(c fiber.Ctx) error {
 }
 
 func (h *Handler) RemoveGroupMember(c fiber.Ctx) error {
+	tenantID, err := auth.RequireTenantID(c)
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "tenant context required"})
+	}
 	groupIDStr := c.Params("id")
 	memberIDStr := c.Params("memberId")
 	memberID, err := strconv.ParseUint(memberIDStr, 10, 64)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid member id"})
 	}
-	_, err = strconv.ParseUint(groupIDStr, 10, 64)
+	groupID, err := strconv.ParseUint(groupIDStr, 10, 64)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid group id"})
 	}
@@ -215,9 +244,18 @@ func (h *Handler) RemoveGroupMember(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database unavailable"})
 	}
-	_, err = db.ExecContext(c.Context(),
-		"DELETE FROM coremail_group_members WHERE id = ?", memberID)
+	var exists int
+	if err := db.QueryRowContext(c.Context(),
+		"SELECT 1 FROM coremail_groups WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL", groupID, tenantID).Scan(&exists); err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "group not found"})
+	}
+	result, err := db.ExecContext(c.Context(),
+		"DELETE FROM coremail_group_members WHERE id = ? AND group_id = ?", memberID, groupID)
 	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to remove member"})
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "member not found"})
 	}
 	return c.JSON(fiber.Map{"status": "removed"})
