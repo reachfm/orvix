@@ -1115,7 +1115,7 @@ func (r *Router) setupRoutes() {
 	admin.Get("/monitoring/alert-deliveries", r.h.ListAlertDeliveries)
 	// Admin storage topology (ORVIX-ADMIN-ENTERPRISE-PARITY-G):
 	// real on-disk usage for mail/attachments/backups. No replica or
-	// shard controls; see docs/ORVIX_STALWART_ENTERPRISE_PARITY_AUDIT.md.
+	// shard controls; see docs/ORVIX_ENTERPRISE_PARITY_AUDIT.md.
 	admin.Get("/admin/storage/volumes", r.h.ListStorageVolumes)
 	// Tenants read (ORVIX-ADMIN-ENTERPRISE-PARITY-D): surface the
 	// JWT-tenant row read-only so the admin "Branding" page knows

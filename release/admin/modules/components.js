@@ -102,7 +102,7 @@ export function plural(n, one, many) {
 // ---------- badge + status pill --------------------------------
 // Trusted badge tones. Anything outside this list falls back to
 // `neutral` so a stray or attacker-controlled status string cannot
-// inject an unknown CSS class. The Stalwart-style vocabulary
+// inject an unknown CSS class. The standard status vocabulary
 // (active / skipped / degraded / not-monitored / offline /
 // warning / error) all map to one of these tones via statusKind().
 const _knownKinds = new Set([

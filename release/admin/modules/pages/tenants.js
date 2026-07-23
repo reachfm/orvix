@@ -4,7 +4,7 @@
    Wires:
      GET /api/v1/admin/tenants/current
 
-   Audit doc reference: docs/ORVIX_STALWART_ENTERPRISE_PARITY_AUDIT.md
+   Audit doc reference: docs/ORVIX_ENTERPRISE_PARITY_AUDIT.md
      §2.3 row 9 (Multi-tenant scoping)
      §3 deliverable D (Tenants read-only)
 

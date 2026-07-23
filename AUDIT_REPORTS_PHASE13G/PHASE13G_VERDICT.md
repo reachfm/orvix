@@ -10,7 +10,7 @@ Verification:
 - `go vet ./...`: PASS
 - `web/admin`: `npx tsc --noEmit`, `npx vitest run`, `npx vite build`: PASS
 - `web/webmail`: `npx tsc --noEmit`, `npx vitest run`, `npx vite build`: PASS
-- release stale scan for `stalwart|RC4|v1.0.3`: PASS, no matches
+- release stale scan for `legacy-mail-engine|RC4|v1.0.3`: PASS, no matches
 
 Final status:
 

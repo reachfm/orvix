@@ -19,7 +19,7 @@ import (
 
 // TestGetAdminTenantNoRow confirms that GET /admin/tenants/current
 // is honest about a missing tenant row instead of fabricating a
-// partial object. The audit doc (see docs/ORVIX_STALWART_ENTERPRISE_PARITY_AUDIT.md)
+// partial object. The audit doc (see docs/ORVIX_ENTERPRISE_PARITY_AUDIT.md)
 // requires every read endpoint to surface the truthful empty state.
 func TestGetAdminTenantNoRow(t *testing.T) {
 	h := newTenantTestHandler(t)
