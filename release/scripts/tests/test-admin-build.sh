@@ -137,7 +137,7 @@ t_build_success() {
     local rc=$?
     local ok=1
     [ -f "$root/out-admin/index.html" ] || ok=0
-    grep -qF "/api/v1/license" "$root/out-admin/assets/index-abc.js" 2>/dev/null || ok=0
+    grep -qF "/api/v1/admin/backups" "$root/out-admin/assets/index-abc.js" 2>/dev/null || ok=0
     rm -rf "$root" "$bin"
     if [ $rc -eq 0 ] && [ "$out" = "built" ] && [ $ok -eq 1 ]; then
         pass "toolchain present + build ok → built admin packaged"
