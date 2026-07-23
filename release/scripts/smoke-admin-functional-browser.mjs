@@ -125,16 +125,21 @@ function startServer() {
     const server = https.createServer({ key: SMOKE_KEY, cert: SMOKE_CERT }, async (req, res) => {
       try {
         const url = new URL(req.url, 'https://127.0.0.1');
+        let pathname = url.pathname;
+        // Normalize /admin/api/... to /api/... for mocking
+        if (pathname.startsWith('/admin/api/')) {
+          pathname = pathname.slice('/admin'.length);
+        }
         requests.push(`${req.method} ${url.pathname}`);
-        if (url.pathname.startsWith('/api/')) {
-          if (url.pathname === '/api/v1/me') {
+        if (pathname.startsWith('/api/')) {
+          if (pathname === '/api/v1/me') {
             const cookie = req.headers.cookie || '';
             if (cookie.includes(`__Host-orvix_session=${SMOKE_SESSION}`)) {
               return sendJSON(res, 200, { email: 'admin@example.com', roles: ['admin'], role: 'admin' });
             }
             return sendJSON(res, 401, { code: 'unauthorized', message: 'unauthorized' });
           }
-          if (url.pathname === '/api/v1/auth/login' && req.method === 'POST') {
+          if (pathname === '/api/v1/auth/login' && req.method === 'POST') {
             const body = await readBody(req);
             if (body.email && body.password) return sendJSON(res, 200, {
               status: 'ok',
@@ -143,9 +148,9 @@ function startServer() {
             });
             return sendJSON(res, 401, { code: 'invalid_credentials', message: 'invalid credentials' });
           }
-          if (url.pathname === '/api/v1/csrf-token') return sendJSON(res, 200, { csrf_token: 'csrf-functional' });
-          if (url.pathname === '/api/v1/health') return sendJSON(res, 200, { status: 'ok' });
-          if (url.pathname === '/api/v1/domains') {
+          if (pathname === '/api/v1/csrf-token') return sendJSON(res, 200, { csrf_token: 'csrf-functional' });
+          if (pathname === '/api/v1/health') return sendJSON(res, 200, { status: 'ok' });
+          if (pathname === '/api/v1/domains') {
             if (req.method === 'GET') return sendJSON(res, 200, { domains: [{
               domain: 'example.com', name: 'example.com',
               status: 'active', plan: 'smb',
@@ -177,8 +182,8 @@ function startServer() {
               });
             }
           }
-          if (url.pathname.startsWith('/api/v1/domains/')) {
-            const parts = url.pathname.split('/');
+          if (pathname.startsWith('/api/v1/domains/')) {
+            const parts = pathname.split('/');
             const dn = decodeURIComponent(parts[parts.length - 1] || 'example.com');
             if (req.method === 'GET') return sendJSON(res, 200, {
               domain: dn, name: dn,
@@ -199,27 +204,27 @@ function startServer() {
             }
             if (req.method === 'DELETE') return sendJSON(res, 204, '');
           }
-          if (url.pathname === '/api/v1/mailboxes') {
+          if (pathname === '/api/v1/mailboxes') {
             if (req.method === 'GET') return sendJSON(res, 200, { mailboxes: [] });
             if (req.method === 'POST') return sendJSON(res, 201, { id: 'mbox-1', email: 'admin@example.com' });
           }
-          if (url.pathname === '/api/v1/admin/account-classes') return sendJSON(res, 200, { classes: [] });
-          if (url.pathname === '/api/v1/admin/users') return sendJSON(res, 200, { users: [] });
-          if (url.pathname === '/api/v1/admin/admin-groups') return sendJSON(res, 200, { groups: [] });
-          if (url.pathname === '/api/v1/admin/acl-rules') return sendJSON(res, 200, { rules: [] });
-          if (url.pathname === '/api/v1/admin/acceptance-rules') return sendJSON(res, 200, { rules: [] });
-          if (url.pathname === '/api/v1/admin/incoming-msg-rules') return sendJSON(res, 200, { rules: [] });
-          if (url.pathname === '/api/v1/admin/mailing-lists') return sendJSON(res, 200, { lists: [] });
-          if (url.pathname === '/api/v1/admin/public-folders') return sendJSON(res, 200, { folders: [] });
-          if (url.pathname === '/api/v1/admin/audit-logs') return sendJSON(res, 200, { logs: [] });
-          if (url.pathname === '/api/v1/admin/runtime') return sendJSON(res, 200, {
+          if (pathname === '/api/v1/admin/account-classes') return sendJSON(res, 200, { classes: [] });
+          if (pathname === '/api/v1/admin/users') return sendJSON(res, 200, { users: [] });
+          if (pathname === '/api/v1/admin/admin-groups') return sendJSON(res, 200, { groups: [] });
+          if (pathname === '/api/v1/admin/acl-rules') return sendJSON(res, 200, { rules: [] });
+          if (pathname === '/api/v1/admin/acceptance-rules') return sendJSON(res, 200, { rules: [] });
+          if (pathname === '/api/v1/admin/incoming-msg-rules') return sendJSON(res, 200, { rules: [] });
+          if (pathname === '/api/v1/admin/mailing-lists') return sendJSON(res, 200, { lists: [] });
+          if (pathname === '/api/v1/admin/public-folders') return sendJSON(res, 200, { folders: [] });
+          if (pathname === '/api/v1/admin/audit-logs') return sendJSON(res, 200, { logs: [] });
+          if (pathname === '/api/v1/admin/runtime') return sendJSON(res, 200, {
             hostname: 'mock-host', version: '1.0.0', status: 'ok', listeners: [],
           });
-          if (url.pathname === '/api/v1/admin/summary') return sendJSON(res, 200, {
+          if (pathname === '/api/v1/admin/summary') return sendJSON(res, 200, {
             mail: { domain_count: 1, mailbox_count: 1, active_count: 1, suspended_count: 0 },
             status: 'ok', version: '1.0.0',
           });
-          if (url.pathname === '/api/v1/admin/settings') return sendJSON(res, 200, {
+          if (pathname === '/api/v1/admin/settings') return sendJSON(res, 200, {
             general:   { hostname: 'mock-host', primary_domain: 'example.com', version: '1.0.0' },
             build:     { version: '1.0.0', commit: 'mock-commit', channel: 'stable', go_version: 'go1.22' },
             security:  { password_min_len: 8, session_ttl_seconds: 3600, refresh_ttl_seconds: 86400 },
@@ -229,17 +234,17 @@ function startServer() {
             mutable_fields: [],
             _settings_persistence: { enabled: false, note: 'mock' },
           });
-          if (url.pathname === '/api/v1/admin/mfa/status') return sendJSON(res, 200, { enabled: false });
-          if (url.pathname === '/api/v1/license') return sendJSON(res, 200, {
+          if (pathname === '/api/v1/admin/mfa/status') return sendJSON(res, 200, { enabled: false });
+          if (pathname === '/api/v1/license') return sendJSON(res, 200, {
             mode: 'community', tier: 'community', public_key_present: true, valid: true, expired: false,
           });
-          if (url.pathname.startsWith('/api/v1/admin/dns/') && url.pathname.endsWith('/plan')) {
+          if (pathname.startsWith('/api/v1/admin/dns/') && pathname.endsWith('/plan')) {
             return sendJSON(res, 200, { records: [
               { type: 'MX', host: '@', value: '10 mail.example.com.', priority: 10 },
               { type: 'TXT', host: '@', value: 'v=spf1 mx -all' },
             ] });
           }
-          if (url.pathname.startsWith('/api/v1/domains/') && url.pathname.endsWith('/audit')) {
+          if (pathname.startsWith('/api/v1/domains/') && pathname.endsWith('/audit')) {
             return sendJSON(res, 200, { entries: [] });
           }
           return sendJSON(res, 200, {});
