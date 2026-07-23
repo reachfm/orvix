@@ -27,14 +27,20 @@ Before merging any change:
 2. Does it fix an item in `docs/MASTER_TODO.md`? Check it off in the same PR.
 3. Does it introduce a new schema-dependent query? Verify the referenced table actually exists (this repo has four confirmed cases where it doesn't — see `docs/CODEBASE_INDEX.md`).
 4. Does it touch a tenant-scoped resource? Confirm the handler calls `auth.RequireTenantID` (or equivalent) and every SQL mutation is scoped by `tenant_id`, not just resource `id`. This exact class of bug was found and fixed twice in this codebase's history (mailbox/domain, then alias/group).
-5. Run the full validation gate before considering the change done:
-   ```
-   go mod verify
-   go vet ./...
-   go test ./... -p=1 -count=1 -timeout=60m
-   go build ./cmd/orvix
-   ```
-   Plus frontend builds for any touched workspace (`npm ci && npm run build` in `web/admin`, `web/webmail`, or `web/marketing`).
+5. Run validation scaled to the size of the change — see **Validation Policy** below — before considering the change done.
+
+## Validation Policy
+
+Full-suite validation on every change is wasteful and slows iteration without adding safety once the affected surface is small and well understood. Scale validation to the change:
+
+| Change size | Required validation |
+|---|---|
+| **Small, targeted fix** (single handler, single bug, single file) | Run the specific new/existing tests for that fix (`go test ./pkg/... -run TestName -v`). No need to run the whole package or suite if the fix is narrowly scoped and the targeted tests pass. |
+| **Package-level change** (new handler, schema/migration touching one package, refactor within a package) | Run the full affected package(s): `go test ./internal/api/handlers/... -count=1 -timeout=15m` (adjust timeout to the package's known runtime). Run `go vet ./...` and `go build ./cmd/orvix` — these are cheap and catch cross-package breakage early. |
+| **Frontend change** | Build only the touched workspace(s) (`npm run build` in `web/admin`, `web/webmail`, or `web/marketing`). Do not build untouched workspaces. |
+| **Before push, merge, release candidate, or any broad schema/architecture change** | Run the full gate: `go mod verify`, `go vet ./...`, `go test ./... -p=1 -count=1 -timeout=60m`, `go build ./cmd/orvix`, and all three frontend builds. This is the only tier that requires the full suite. |
+
+**On full-suite failures:** if a full-suite run reports a failure, do not assume it's flakiness and do not assume it's real — isolate it. Re-run only the specific failing test(s) once, in isolation. If they pass in isolation, the failure was infrastructure flakiness (resource contention, timing) under the full run — report both results honestly and do not silently treat it as a pass. If they still fail in isolation, it is a real regression tied to the change — fix it, then re-run only what's needed to confirm the fix (see the size-based table above), not necessarily the whole suite again. Never rerun the entire suite speculatively "just to be sure" — only rerun it if a failure was proven caused by this change and a fix was applied, or if the change falls in the "before push/merge/release" tier above.
 
 ## Commit Discipline
 

@@ -4,6 +4,28 @@ Permanent engineering history. Entries are never deleted, only appended or annot
 
 ---
 
+### 2026-07-23 — Enforce tenant isolation on CSV export handlers (`ExportMailboxesCSV`, `ExportDomainsCSV`)
+
+**Decision:** Add mandatory tenant scoping to both CSV export handlers (`internal/api/handlers/handlers.go`), reusing the exact `isSuperRole(c)` / `h.scopedTenantID(c)` helpers already used by `ListMailboxes` and `GetMailbox`/`GetDomain`. Super admins export all tenants; every other caller is hard-scoped to their authenticated tenant via a `WHERE tenant_id = <scopedTenantID>` clause.
+
+**Vulnerability confirmed (not assumed):** Traced the full request flow. Live route `GET /api/v1/mailboxes/export` (the `admin` router group has an empty URL prefix). Middleware chain: rate-limit → apikey/JWT auth → `TenantMiddleware` → `RequireAnyRole(RoleAdmin, RoleSuperAdmin, RolePlatformSuperAdmin)` → CSRF. `RoleAdmin` is tenant-scoped (`isSuperRole` at `saas_admin.go:52-55` returns true only for `RoleSuperAdmin`/`RolePlatformSuperAdmin`). The pre-fix query `SELECT email, status, is_admin FROM coremail_mailboxes WHERE deleted_at IS NULL` had **no tenant_id filter**, so a tenant admin exported every tenant's mailboxes. `GetMailbox` (handlers.go) and `GetDomain` (handlers.go:1452) both enforce `callerOwnsTenant`, and `ListMailboxes` scopes by tenant — proving the intended model that export violated.
+
+**Root cause:** the export handlers predate the tenant-scoping convention and were never retrofitted; the query was a plain unscoped `SELECT`.
+
+**Fix:** parameterized `WHERE deleted_at IS NULL [AND tenant_id = ?]`, the `tenant_id` clause added only for non-super callers, tenant identity taken exclusively from `scopedTenantID(c)` (authenticated context) — never from a query parameter, route param, body, or header.
+
+**Tenant identity source — explicitly not overridable:** added regression tests proving `?tenant_id=2`, `?organization_id=2`, `?customer_id=2` are all ignored for a non-super caller.
+
+**`ExportDomainsCSV` fixed in the same pass (Phase 5):** immediately-adjacent export handler in the same file with the identical defect; `coremail_domains` has a `tenant_id` column and `GetDomain` proves domains are tenant-scoped. Same helper, same fix, covered by tests.
+
+**Tests:** `internal/api/handlers/mailbox_export_isolation_test.go` — 10 router-level tests (super-admin-sees-all, tenant-admin-own-only, bidirectional isolation, forged-param-ignored, CSV header + comma/quote/newline escaping round-trip, no-sensitive-material, requires-auth, plus domain-export equivalents). Proven to detect the vulnerability: with the fix reverted, the 5 cross-tenant assertions fail; restored, all pass. Existing `TestOpsV2_CSVExports` still passes (tenant-admin harness with same-tenant data is unaffected).
+
+**Alternatives rejected:** Restricting the export route to super-admins only — rejected because tenant admins legitimately need to export *their own* tenant's mailboxes; the correct fix is scoping, not removing the capability.
+
+**Related finding, deliberately NOT fixed here (scope discipline):** `ListDomains` (`internal/api/handlers/handlers.go:1038`, backing `GET /api/v1/domains`) has the **same** missing-tenant-scope defect class but is a *list* handler, not an export handler — outside this pass's Phase-5 "adjacent export handlers" scope. Documented with evidence in `docs/MASTER_TODO.md` for a dedicated follow-up rather than bundled into this security commit.
+
+---
+
 ### 2026-07-23 — `requireTenantActive`: repoint at `tenants`, not a new `organizations` table
 
 **Decision:** Fix `requireTenantActive` (`internal/api/router.go`) to query the canonical `tenants` table instead of the nonexistent `organizations` table, rather than creating a duplicate `organizations` table to satisfy the broken code.

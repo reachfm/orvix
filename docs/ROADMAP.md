@@ -32,8 +32,9 @@ Every item references the real source files it touches. See `docs/MASTER_TODO.md
 
 ## Next (near-term hardening)
 
-7. **Fix `ExportMailboxesCSV` missing tenant scoping.**
-   Files: `internal/api/handlers/handlers.go`. Apply the same `isSuperRole`/`scopedTenantID` pattern used in the new `ListMailboxes`.
+7. [x] **Fix `ExportMailboxesCSV` missing tenant scoping.** — **DONE**: `ExportMailboxesCSV` and the adjacent `ExportDomainsCSV` now scope by tenant via `isSuperRole`/`scopedTenantID`, regression-tested in `mailbox_export_isolation_test.go`. Files: `internal/api/handlers/handlers.go`. See `docs/DECISIONS.md`.
+
+7b. **Fix `ListDomains` missing tenant scoping** (newly confirmed while fixing the export handlers). `GET /api/v1/domains` (`internal/api/handlers/handlers.go:1038`) returns all tenants' domains to a tenant admin — same defect class as the exports, but a list handler. Apply the same `isSuperRole`/`scopedTenantID` pattern with its own regression test. Also sweep sibling admin-group list handlers (`ListUsers`, etc.).
 
 8. **Verify and, if needed, fix `enterpriseRead.Get("/organizations/:id")` tenant-scoping at the service layer.**
    Files: `internal/api/router.go:937`, `internal/admin/organization/repository.go`.

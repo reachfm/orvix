@@ -30,7 +30,8 @@
 - **Correction to prior note:** the "admin" group has an **empty URL prefix** — the live route is `GET /api/v1/mailboxes`, not `/api/v1/admin/mailboxes` as informally described in earlier audit passes.
 - **Fix:** added a new `ListMailboxes` handler (`internal/api/handlers/handlers.go`), tenant-scoped via the same `isSuperRole`/`scopedTenantID` convention as `GetMailbox`, and repointed the route at it.
 - **Verified by:** `TestAdminMailboxesRoute_ReturnsMailboxesNotUsers` (`internal/api/handlers/enterprise_mutation_smoke_test.go`).
-- **New finding surfaced while fixing this:** `ExportMailboxesCSV` (same file) has **no tenant scoping at all** — a separate, still-open issue, tracked in `docs/MASTER_TODO.md`.
+- **Finding surfaced while fixing this (now resolved):** `ExportMailboxesCSV` (same file) had **no tenant scoping at all**. **FIXED 2026-07-23** — `ExportMailboxesCSV` and the adjacent `ExportDomainsCSV` now scope non-super callers by `tenant_id` via `isSuperRole`/`scopedTenantID`, regression-tested in `internal/api/handlers/mailbox_export_isolation_test.go` (10 router-level tests, proven to fail against pre-fix code). See `docs/DECISIONS.md`.
+- **Still-open sibling finding:** `ListDomains` (handlers.go:1038, `GET /api/v1/domains`) has the same missing-tenant-scope defect class — a *list* handler, deliberately left for a focused follow-up (see `docs/MASTER_TODO.md`).
 
 ### 2. Schema-missing tables (four confirmed) — **ALL RESOLVED 2026-07-23**
 

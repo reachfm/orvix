@@ -17,7 +17,10 @@ Completed items stay visible forever — never delete them, only check them off.
 - [ ] SSO (OIDC/SAML) admin API — `s_s_o_configs` table exists, no endpoints wired
 - [ ] Verify `enterpriseRead.Get("/organizations/:id")` (`router.go:937`) enforces `:id == caller tenant` at the service layer, not just via tenant-scoped middleware (flagged, not confirmed safe)
 - [ ] Confirm the legacy vacation-reply path (`internal/coremail/storage/rules.go:97,103`) is truly unreachable, or remove it
-- [ ] `ExportMailboxesCSV` has no tenant scoping — a tenant admin can export every tenant's mailboxes via CSV (newly discovered this session while building `ListMailboxes`, see Database/Schema section)
+- [x] IDOR — `ExportMailboxesCSV` tenant isolation: a tenant admin could export every tenant's mailboxes via `GET /api/v1/mailboxes/export`. **CONFIRMED and FIXED** — added `isSuperRole`/`scopedTenantID` scoping; regression-tested in `mailbox_export_isolation_test.go` (proven to fail against pre-fix code). See `docs/DECISIONS.md`.
+- [x] IDOR — `ExportDomainsCSV` tenant isolation (adjacent handler, same defect): **CONFIRMED and FIXED** in the same pass, same helper, same test file.
+- [ ] IDOR — `ListDomains` (`internal/api/handlers/handlers.go:1038`, backs `GET /api/v1/domains`) has the **same missing-tenant-scope defect class** as the export handlers: query `SELECT id, name, plan, status FROM coremail_domains WHERE deleted_at IS NULL` (+ optional q/status) has **no `tenant_id` filter**, so a tenant admin sees every tenant's domains. Evidence: sibling `GetDomain` (handlers.go:1452) enforces `callerOwnsTenant`; `ListMailboxes` scopes by tenant; `ListDomains` does neither. Not fixed in the export-security pass (it is a *list* handler, not an export handler — kept out for scope discipline). Fix by mirroring `ListMailboxes`' `isSuperRole`/`scopedTenantID` pattern, with its own regression test.
+- [ ] Audit remaining `admin`-group *list* handlers for the same class (e.g. `ListUsers`) — the export-security pass proved the pattern exists in this group; a focused list-handler sweep is warranted but was out of scope here.
 
 # Database / Schema
 
@@ -26,7 +29,7 @@ Completed items stay visible forever — never delete them, only check them off.
 - [x] Migration added for `coremail_group_members`
 - [x] `queue_attempts` resolved — confirmed dead (zero writers anywhere), repointed `admin_queue.go` at the real `coremail_delivery_attempts` table instead, and wired its previously-uncalled DDL into the SQLite bootstrap path
 - [x] Dual SQLite/PostgreSQL dialect abstraction (`internal/dbdialect`)
-- [ ] `ExportMailboxesCSV` (`internal/api/handlers/handlers.go`) has no tenant scoping at all — newly discovered while building `ListMailboxes`; a tenant admin can export every tenant's mailboxes via CSV. Needs the same `isSuperRole`/`scopedTenantID` scoping applied to `ListMailboxes`.
+- [x] `ExportMailboxesCSV` (`internal/api/handlers/handlers.go`) had no tenant scoping — **FIXED** this pass (see the two IDOR entries in the Security section above and `docs/DECISIONS.md`).
 
 # Backend Routing
 
