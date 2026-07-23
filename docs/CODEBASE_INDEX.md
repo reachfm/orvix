@@ -31,7 +31,8 @@
 - **Fix:** added a new `ListMailboxes` handler (`internal/api/handlers/handlers.go`), tenant-scoped via the same `isSuperRole`/`scopedTenantID` convention as `GetMailbox`, and repointed the route at it.
 - **Verified by:** `TestAdminMailboxesRoute_ReturnsMailboxesNotUsers` (`internal/api/handlers/enterprise_mutation_smoke_test.go`).
 - **Finding surfaced while fixing this (now resolved):** `ExportMailboxesCSV` (same file) had **no tenant scoping at all**. **FIXED 2026-07-23** — `ExportMailboxesCSV` and the adjacent `ExportDomainsCSV` now scope non-super callers by `tenant_id` via `isSuperRole`/`scopedTenantID`, regression-tested in `internal/api/handlers/mailbox_export_isolation_test.go` (10 router-level tests, proven to fail against pre-fix code). See `docs/DECISIONS.md`.
-- **Still-open sibling finding:** `ListDomains` (handlers.go:1038, `GET /api/v1/domains`) has the same missing-tenant-scope defect class — a *list* handler, deliberately left for a focused follow-up (see `docs/MASTER_TODO.md`).
+- **Sibling finding, now resolved:** `ListDomains` (handlers.go:1038, `GET /api/v1/domains`) had the same missing-tenant-scope defect class. **FIXED 2026-07-23** — scoped via `isSuperRole`/`scopedTenantID`, regression-tested in `internal/api/handlers/domain_list_isolation_test.go` (12 router-level tests, proven to fail against pre-fix code). See `docs/DECISIONS.md`.
+- **Still-unverified sibling:** `ListUsers` (`GET /api/v1/users`) has not been traced for the same defect class — not claimed safe or vulnerable, tracked in `docs/MASTER_TODO.md`/`docs/ROADMAP.md` for a follow-up sweep.
 
 ### 2. Schema-missing tables (four confirmed) — **ALL RESOLVED 2026-07-23**
 

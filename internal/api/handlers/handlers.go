@@ -1035,6 +1035,13 @@ func (h *Handler) Me(c fiber.Ctx) error {
 // Optional server-side filter query params:
 //   - q=<substring> : case-insensitive substring match on domain
 //   - status=active|suspended : exact match on status
+//
+// Tenant isolation: the same visibility rules as ListMailboxes /
+// ExportDomainsCSV / GetDomain apply. Super admins (isSuperRole) see every
+// tenant's domains; every other caller is hard-scoped to their authenticated
+// tenant (h.scopedTenantID) via a mandatory WHERE tenant_id clause. Tenant
+// identity comes exclusively from the authenticated context — never from a
+// query parameter, route param, body, or header.
 func (h *Handler) ListDomains(c fiber.Ctx) error {
 	type domainRow struct {
 		ID           uint   `json:"id"`
@@ -1055,6 +1062,10 @@ func (h *Handler) ListDomains(c fiber.Ctx) error {
 
 	confs := []string{"deleted_at IS NULL"}
 	args := []interface{}{}
+	if !isSuperRole(c) {
+		confs = append(confs, "tenant_id = "+h.dialect.Placeholder(len(args)+1))
+		args = append(args, h.scopedTenantID(c))
+	}
 	if q != "" {
 		confs = append(confs, "LOWER(name) LIKE "+h.dialect.Placeholder(len(args)+1))
 		args = append(args, "%"+strings.ToLower(q)+"%")

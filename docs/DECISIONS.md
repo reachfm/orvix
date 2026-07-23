@@ -4,6 +4,24 @@ Permanent engineering history. Entries are never deleted, only appended or annot
 
 ---
 
+### 2026-07-23 — Enforce tenant isolation on `ListDomains` (`GET /api/v1/domains`)
+
+**Decision:** Add mandatory tenant scoping to `ListDomains` (`internal/api/handlers/handlers.go`), reusing the exact `isSuperRole(c)` / `h.scopedTenantID(c)` helpers already used by `ExportDomainsCSV`, `ListMailboxes`, `GetDomain`, and `GetMailbox`. Super admins list all tenants' domains; every other caller is hard-scoped to their authenticated tenant via a mandatory, parameterized `AND tenant_id = ?` clause inserted first in the WHERE-clause builder (before the optional `q`/`status` filters), preserving correct placeholder ordering.
+
+**Vulnerability confirmed (not assumed):** Traced the live route (`GET /api/v1/domains`, same empty-URL-prefix `admin` group), middleware chain (rate-limit → apikey/JWT auth → `TenantMiddleware` → `RequireAnyRole(RoleAdmin, RoleSuperAdmin, RolePlatformSuperAdmin)` → CSRF), and the exact pre-fix query: `SELECT id, name, plan, status FROM coremail_domains WHERE deleted_at IS NULL [AND LOWER(name) LIKE ?] [AND status = ?] ORDER BY id DESC` — no `tenant_id` filter anywhere. This is the identical defect class just fixed in `ExportDomainsCSV`/`ExportMailboxesCSV` (see the entry immediately below), confirmed at the time as a known-open sibling item.
+
+**Fix:** the `tenant_id` clause is appended to the `confs`/`args` slices before the `q`/`status` filters so the existing `h.dialect.Placeholder(len(args)+1)` self-indexing pattern remains correct regardless of which optional filters are present — no manual placeholder-number bookkeeping required.
+
+**Unresolved-tenant behavior:** a non-super caller whose authenticated context resolves no valid tenant (`scopedTenantID` falls back to `-1` via `h.tenantID(c)`) queries `tenant_id = -1`, which matches no real tenant and safely returns an empty list — no panic, no 500, no cross-tenant leak. Verified by `TestListDomains_UnresolvedTenantFailsSafely`.
+
+**Tests:** `internal/api/handlers/domain_list_isolation_test.go` — 12 router-level tests (super-admin-sees-multiple-tenants, tenant-admin-own-only, explicit cross-tenant negative, bidirectional isolation, forged `tenant_id`/`organization_id`/`customer_id` params ignored, `q` filter preserved, `status` filter preserved, soft-deleted domains excluded for both tenant and super caller, unauthenticated-rejected, unauthorized-role-rejected via `RoleUser`, unresolved-tenant-fails-safely, no-cross-tenant-field-leakage). Proven to detect the vulnerability: with the fix reverted (`git stash` on `handlers.go` only), exactly the 6 isolation-related assertions fail (the other 6 — q/status filters, deleted exclusion, auth/role gates — correctly still pass since those aren't the defect); restored, all 12 pass.
+
+**Known remaining defect of the same class:** none currently known. This closes the last confirmed unscoped domain-read endpoint. `ListUsers` (`internal/api/handlers/handlers.go`) was flagged in `docs/MASTER_TODO.md` for a follow-up sweep of the same pattern but has not been traced/confirmed — not claimed as fixed or vulnerable here.
+
+**Alternatives rejected:** none — this is a direct application of the already-established, already-reviewed scoping pattern; no design choice was open.
+
+---
+
 ### 2026-07-23 — Enforce tenant isolation on CSV export handlers (`ExportMailboxesCSV`, `ExportDomainsCSV`)
 
 **Decision:** Add mandatory tenant scoping to both CSV export handlers (`internal/api/handlers/handlers.go`), reusing the exact `isSuperRole(c)` / `h.scopedTenantID(c)` helpers already used by `ListMailboxes` and `GetMailbox`/`GetDomain`. Super admins export all tenants; every other caller is hard-scoped to their authenticated tenant via a `WHERE tenant_id = <scopedTenantID>` clause.
