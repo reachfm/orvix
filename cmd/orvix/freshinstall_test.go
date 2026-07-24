@@ -16,15 +16,16 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/orvix/orvix/internal/api"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/billing"
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/dbdialect"
 	"github.com/orvix/orvix/internal/license"
-	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -42,11 +43,68 @@ type freshInstallHarness struct {
 	gormDB        *gorm.DB
 	authenticator *auth.Authenticator
 	logger        *zap.Logger
+	dialect       *dbdialect.Info
 	email         string
 	password      string
 	adminDir      string
 	webmailDir    string
 	scratchDir    string // owned by the test, not t.TempDir; cleaned up by t.Cleanup
+}
+
+// freshInstallPostgresSchemaPrefix mirrors internal/billing/pg_test_helper.go's
+// convention: each test run gets its own schema so parallel/repeated runs
+// never collide, and it is dropped in t.Cleanup.
+const freshInstallPostgresSchemaPrefix = "orvix_freshinstall_"
+
+// configureFreshInstallDatabase points cfg.Database at either a fresh
+// SQLite file (default) or, when PGHOST is set, a real PostgreSQL
+// instance with an isolated schema — mirroring the exact auto-detection
+// convention already used by internal/billing's newTestDB/setupTestDB
+// (see internal/billing/pg_test_helper.go). This is what lets
+// TestFreshInstall_* — including the subscription-bootstrap tests —
+// run against real PostgreSQL in CI (see .github/workflows/postgres-dml.yml)
+// with zero test-body changes.
+func configureFreshInstallDatabase(t *testing.T, cfg *config.Config) {
+	t.Helper()
+	if pghost := os.Getenv("PGHOST"); pghost != "" {
+		port := os.Getenv("PGPORT")
+		if port == "" {
+			port = "5432"
+		}
+		user := os.Getenv("PGUSER")
+		password := os.Getenv("PGPASSWORD")
+		dbname := os.Getenv("PGDATABASE")
+
+		dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+			pghost, port, user, password, dbname)
+
+		bootstrap, err := sql.Open("pgx", dsn)
+		if err != nil {
+			t.Fatalf("open postgres for schema setup: %v", err)
+		}
+		schemaName := fmt.Sprintf("%s%d", freshInstallPostgresSchemaPrefix, time.Now().UnixNano())
+		if _, err := bootstrap.Exec("CREATE SCHEMA IF NOT EXISTS " + schemaName); err != nil {
+			bootstrap.Close()
+			t.Fatalf("create postgres test schema: %v", err)
+		}
+		bootstrap.Close()
+		t.Cleanup(func() {
+			cleanup, err := sql.Open("pgx", dsn)
+			if err == nil {
+				cleanup.Exec("DROP SCHEMA IF EXISTS " + schemaName + " CASCADE")
+				cleanup.Close()
+			}
+		})
+
+		cfg.Database.Driver = "postgres"
+		cfg.Database.MaxOpen = 5
+		cfg.Database.MaxIdle = 5
+		cfg.Database.MaxLifetime = 300
+		cfg.Database.DSN = dsn + fmt.Sprintf(" search_path=%s", schemaName)
+		return
+	}
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = t.TempDir() + "/orvix.db?_loc=auto&_busy_timeout=5000&_txlock=immediate"
 }
 
 func buildFreshInstallHarness(t *testing.T, email, password string) *freshInstallHarness {
@@ -57,22 +115,30 @@ func buildFreshInstallHarness(t *testing.T, email, password string) *freshInstal
 
 	logger := zap.NewNop()
 	cfg := config.Defaults()
-	cfg.Database.Driver = "sqlite"
-	cfg.Database.DSN = t.TempDir() + "/orvix.db?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	configureFreshInstallDatabase(t, cfg)
 
 	db, err := config.NewDatabase(&cfg.Database, logger)
 	if err != nil {
 		t.Fatalf("database: %v", err)
 	}
-	if err := models.MigrateAllRaw(db); err != nil {
+	if err := migrateConfiguredDatabase(db, cfg.Database.Driver, logger); err != nil {
 		t.Fatalf("migrate: %v", err)
+	}
+
+	sqlDBForDialect, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db for dialect detection: %v", err)
+	}
+	dialect, err := dbdialect.Detect(sqlDBForDialect)
+	if err != nil {
+		t.Fatalf("detect dialect: %v", err)
 	}
 
 	authenticator, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
 	if err != nil {
 		t.Fatalf("authenticator: %v", err)
 	}
-	seedAdminUser(db, authenticator, logger, dbdialect.FromDriver("sqlite"))
+	seedAdminUser(db, authenticator, logger, dialect)
 
 	// Stage the admin and webmail UI bundles. We use a
 	// non-tempdir scratch path so that the test framework does
@@ -113,6 +179,7 @@ func buildFreshInstallHarness(t *testing.T, email, password string) *freshInstal
 		gormDB:        db,
 		authenticator: authenticator,
 		logger:        logger,
+		dialect:       dialect,
 		email:         email,
 		password:      password,
 		adminDir:      adminDir,
@@ -483,13 +550,13 @@ func TestFreshInstall_AdminTenantHasActiveSubscription(t *testing.T) {
 	t.Cleanup(func() { h.close(t) })
 
 	var tenantID int64
-	if err := h.sqlDB.QueryRow("SELECT id FROM tenants WHERE domain = ?", "orvix.email").Scan(&tenantID); err != nil {
+	if err := h.sqlDB.QueryRow("SELECT id FROM tenants WHERE domain = "+h.dialect.Placeholder(1), "orvix.email").Scan(&tenantID); err != nil {
 		t.Fatalf("bootstrap tenant not found: %v", err)
 	}
 
 	var subCount int64
 	var status string
-	err := h.sqlDB.QueryRow("SELECT COUNT(*), COALESCE(MAX(status), '') FROM subscriptions WHERE tenant_id = ?", tenantID).
+	err := h.sqlDB.QueryRow("SELECT COUNT(*), COALESCE(MAX(status), '') FROM subscriptions WHERE tenant_id = "+h.dialect.Placeholder(1), tenantID).
 		Scan(&subCount, &status)
 	if err != nil {
 		t.Fatalf("query subscriptions: %v", err)
@@ -511,7 +578,7 @@ func TestFreshInstall_AdminMailboxSendIsEnforcerAllowed(t *testing.T) {
 	t.Cleanup(func() { h.close(t) })
 
 	var tenantID uint
-	if err := h.sqlDB.QueryRow("SELECT id FROM tenants WHERE domain = ?", "orvix.email").Scan(&tenantID); err != nil {
+	if err := h.sqlDB.QueryRow("SELECT id FROM tenants WHERE domain = "+h.dialect.Placeholder(1), "orvix.email").Scan(&tenantID); err != nil {
 		t.Fatalf("bootstrap tenant not found: %v", err)
 	}
 
@@ -539,11 +606,11 @@ func TestFreshInstall_SelfHealsSubscriptionForAlreadyBootstrappedTenant(t *testi
 	t.Cleanup(func() { h.close(t) })
 
 	var tenantID int64
-	if err := h.sqlDB.QueryRow("SELECT id FROM tenants WHERE domain = ?", "orvix.email").Scan(&tenantID); err != nil {
+	if err := h.sqlDB.QueryRow("SELECT id FROM tenants WHERE domain = "+h.dialect.Placeholder(1), "orvix.email").Scan(&tenantID); err != nil {
 		t.Fatalf("bootstrap tenant not found: %v", err)
 	}
 	var userCountBefore int64
-	if err := h.sqlDB.QueryRow("SELECT COUNT(*) FROM users WHERE email = ?", h.email).Scan(&userCountBefore); err != nil {
+	if err := h.sqlDB.QueryRow("SELECT COUNT(*) FROM users WHERE email = "+h.dialect.Placeholder(1), h.email).Scan(&userCountBefore); err != nil {
 		t.Fatalf("check admin user exists: %v", err)
 	}
 	if userCountBefore != 1 {
@@ -554,11 +621,11 @@ func TestFreshInstall_SelfHealsSubscriptionForAlreadyBootstrappedTenant(t *testi
 	// seedAdminUser's initial call (inside buildFreshInstallHarness)
 	// already created, as if this instance had been installed before the
 	// fix existed.
-	if _, err := h.sqlDB.Exec("DELETE FROM subscriptions WHERE tenant_id = ?", tenantID); err != nil {
+	if _, err := h.sqlDB.Exec("DELETE FROM subscriptions WHERE tenant_id = "+h.dialect.Placeholder(1), tenantID); err != nil {
 		t.Fatalf("simulate pre-fix state: %v", err)
 	}
 	var count int64
-	if err := h.sqlDB.QueryRow("SELECT COUNT(*) FROM subscriptions WHERE tenant_id = ?", tenantID).Scan(&count); err != nil {
+	if err := h.sqlDB.QueryRow("SELECT COUNT(*) FROM subscriptions WHERE tenant_id = "+h.dialect.Placeholder(1), tenantID).Scan(&count); err != nil {
 		t.Fatalf("verify simulated state: %v", err)
 	}
 	if count != 0 {
@@ -572,20 +639,20 @@ func TestFreshInstall_SelfHealsSubscriptionForAlreadyBootstrappedTenant(t *testi
 	// already exists" early-return branch, not the fresh-bootstrap
 	// branch — proving the self-heal fires from the branch a real
 	// second-and-later service start actually takes.
-	seedAdminUser(h.gormDB, h.authenticator, h.logger, dbdialect.FromDriver("sqlite"))
+	seedAdminUser(h.gormDB, h.authenticator, h.logger, h.dialect)
 
 	// The admin user row must be untouched (still exactly one, same
 	// email) — confirms seedAdminUser did not fall through to the
 	// fresh-bootstrap branch and attempt to recreate it.
 	var userCountAfter int64
-	if err := h.sqlDB.QueryRow("SELECT COUNT(*) FROM users WHERE email = ?", h.email).Scan(&userCountAfter); err != nil {
+	if err := h.sqlDB.QueryRow("SELECT COUNT(*) FROM users WHERE email = "+h.dialect.Placeholder(1), h.email).Scan(&userCountAfter); err != nil {
 		t.Fatalf("check admin user after re-run: %v", err)
 	}
 	if userCountAfter != 1 {
 		t.Fatalf("expected exactly 1 admin user after re-running seedAdminUser, got %d", userCountAfter)
 	}
 
-	if err := h.sqlDB.QueryRow("SELECT COUNT(*) FROM subscriptions WHERE tenant_id = ?", tenantID).Scan(&count); err != nil {
+	if err := h.sqlDB.QueryRow("SELECT COUNT(*) FROM subscriptions WHERE tenant_id = "+h.dialect.Placeholder(1), tenantID).Scan(&count); err != nil {
 		t.Fatalf("verify self-healed state: %v", err)
 	}
 	if count != 1 {
