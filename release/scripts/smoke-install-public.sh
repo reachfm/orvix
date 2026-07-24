@@ -106,8 +106,24 @@ check "install-public.sh exports ORVIX_COMMIT" \
 check "install-public.sh validates required bundle files" \
     "grep -q 'validate_bundle_layout' release/install-public.sh"
 
-check "validate_bundle_layout requires admin assets" \
-    "sed -n '/^validate_bundle_layout/,/^}/p' release/install-public.sh | grep -qE 'release/admin/(app\\.js|index\\.html|styles\\.css)'"
+check "validate_bundle_layout requires admin index.html" \
+    "sed -n '/^validate_bundle_layout/,/^}/p' release/install-public.sh | grep -qE 'release/admin/index\\.html'"
+
+# The Admin UI is a React/Vite build with content-hashed asset filenames
+# (release/admin/assets/index-<hash>.js) that differ every build — a fixed
+# filename requirement (the pre-migration legacy app.js/styles.css/
+# modules/*.js) rejects every genuinely complete, correctly-built bundle.
+# This exact defect shipped in release v1.0.3-rc6.recovery.0a6a557: a
+# correctly signed, correctly checksummed bundle was refused by
+# install-public.sh because it hardcoded those removed legacy filenames.
+# The fix must instead parse index.html's own module reference and
+# confirm THAT file exists — assert the hardcoded-legacy-filename check
+# is gone and the dynamic reference check is present.
+check "validate_bundle_layout does not hardcode legacy admin filenames" \
+    "! sed -n '/^validate_bundle_layout/,/^}/p' release/install-public.sh | grep -qE 'release/admin/(app\\.js|styles\\.css|modules/auth\\.js|modules/components\\.js)'"
+
+check "validate_bundle_layout dynamically validates the admin module reference" \
+    "sed -n '/^validate_bundle_layout/,/^}/p' release/install-public.sh | grep -q 'admin_module_src'"
 
 check "validate_bundle_layout requires webmail assets" \
     "sed -n '/^validate_bundle_layout/,/^}/p' release/install-public.sh | grep -qE 'release/webmail/(index\\.html|sw\\.js|assets/auth-gate\\.js|assets/webmail\\.js)'"
@@ -222,8 +238,6 @@ BIN_EOF
         release/scripts/verify-fresh-vps-one-command.sh \
         release/scripts/healthcheck.sh release/scripts/diagnostics.sh \
         release/trust/orvix-release-signing.pub.pem \
-        release/admin/index.html release/admin/app.js release/admin/styles.css \
-        release/admin/modules/auth.js release/admin/modules/components.js \
         release/webmail/index.html release/webmail/sw.js \
         release/webmail/assets/auth-gate.js release/webmail/assets/webmail.js \
         release/marketing/index.html release/marketing/404.html \
@@ -233,6 +247,22 @@ BIN_EOF
         printf '#!/usr/bin/env bash\necho stub >/dev/null\n' > "$BUNDLE_STAGING/$rel"
         chmod +x "$BUNDLE_STAGING/$rel" || true
     done
+
+    # release/admin mirrors the real React/Vite build (build-release-bundle.sh
+    # via lib-admin-build.sh's package_admin_spa()): index.html plus a
+    # content-hashed assets/*.js entrypoint. There is no fixed app.js/
+    # styles.css/modules/*.js in the shipped bundle — a prior version of
+    # this fixture (and of install-public.sh's validate_bundle_layout)
+    # hardcoded those legacy filenames, which caused install-public.sh to
+    # reject a genuinely complete, correctly-built bundle in production
+    # (release v1.0.3-rc6.recovery.0a6a557). This fixture must keep
+    # exercising the REAL contract: whatever index.html's own
+    # <script type="module" src="..."> references must exist.
+    mkdir -p "$BUNDLE_STAGING/release/admin/assets"
+    printf '<!doctype html><script type="module" crossorigin src="/admin/assets/index-testhash.js"></script>' \
+        > "$BUNDLE_STAGING/release/admin/index.html"
+    printf 'console.log("stub admin bundle");\n' \
+        > "$BUNDLE_STAGING/release/admin/assets/index-testhash.js"
 
     # Sanity-fill the unzip strip into its own tar so install-public
     # sees the same "tar -tzf ... orvix/" structure as a real bundle.
