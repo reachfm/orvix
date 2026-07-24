@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "GitHub Release tag to update"
+        description: "GitHub Release tag to update (required; must already exist as a pushed git tag for a non-dry-run publish — no default is provided so a dispatch can never silently fall back to a stale tag)"
         required: true
-        default: "v1.0.3-rc4"
+        default: ""
       channel:
         description: "Release channel"
         required: true
@@ -48,10 +48,14 @@ jobs:
     # `ubuntu-latest`.
     runs-on: ubuntu-24.04
     env:
-      TAG: ${{ github.event.inputs.tag || 'v1.0.3-rc4' }}
+      # No `|| 'v1.0.3-rc4'` (or any other) fallback here — a push event has
+      # no inputs at all, and this workflow must never guess a tag on a
+      # push. Release actions are gated entirely on IS_DISPATCH below.
+      TAG: ${{ github.event.inputs.tag }}
       CHANNEL: ${{ github.event.inputs.channel || 'stable' }}
       BUNDLE_VERSION: ${{ github.event.inputs.version }}
       DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+      IS_DISPATCH: ${{ github.event_name == 'workflow_dispatch' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -68,7 +72,61 @@ jobs:
             echo "SHA_MATCH=NO"
             echo "LOCAL_SHA="
             echo "REMOTE_SHA="
+            echo "PUBLISH=false"
           } >> "$GITHUB_ENV"
+
+      - name: Release trigger preflight
+        # Runs before any expensive setup/build step, on every trigger.
+        #
+        #   push          -> CI only. PUBLISH stays false; every
+        #                    release-only step below is skipped (shown
+        #                    grey, not red) via `if: env.PUBLISH == 'true'`.
+        #                    This is what makes an ordinary push to main
+        #                    never attempt to create, upload to, or modify
+        #                    a GitHub Release (requirement: push = CI only).
+        #   workflow_dispatch -> the only trigger allowed to publish. The
+        #                    tag is validated here, and for a real (non
+        #                    dry-run) publish the tag must already exist as
+        #                    a pushed git ref and any existing release for
+        #                    it must still be a draft — both checked here,
+        #                    fast, before Go/Node setup or any build step,
+        #                    so a doomed dispatch fails in seconds instead
+        #                    of after a ~7 minute build.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            echo "FINAL_VERDICT=CI_ONLY" >> "$GITHUB_ENV"
+            echo "::notice::${{ github.event_name }}-triggered run — CI checks only; no release will be created, uploaded to, or published."
+            exit 0
+          fi
+          echo "PUBLISH=true" >> "$GITHUB_ENV"
+          if [ -z "${TAG:-}" ]; then
+            echo "::error::workflow_dispatch requires a non-empty 'tag' input. There is no default — refusing to guess." >&2
+            exit 1
+          fi
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+            echo "::error::tag '$TAG' does not match the required vX.Y.Z[-prerelease] format." >&2
+            exit 1
+          fi
+          if [ -n "${BUNDLE_VERSION:-}" ] && [ "${BUNDLE_VERSION#v}" != "${TAG#v}" ]; then
+            echo "::error::tag '$TAG' and version input '$BUNDLE_VERSION' disagree; they must resolve to the same version." >&2
+            exit 1
+          fi
+          if [ "${DRY_RUN}" != "true" ]; then
+            if ! gh api "repos/${{ github.repository }}/git/ref/tags/$TAG" >/dev/null 2>&1; then
+              echo "::error::tag '$TAG' does not exist in ${{ github.repository }}. Push the tag before dispatching a non-dry-run publish: git tag $TAG <commit> && git push origin $TAG" >&2
+              exit 1
+            fi
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              is_draft="$(gh release view "$TAG" --json isDraft -q .isDraft)"
+              if [ "$is_draft" != "true" ]; then
+                echo "::error::release $TAG already exists and is not a draft; refusing to touch an already-published release." >&2
+                exit 1
+              fi
+            fi
+          fi
 
       - name: Install Go test deps
         # ubuntu-24.04 ships sqlite3 in `apt.cmd_packages`, but
@@ -232,6 +290,7 @@ jobs:
           fi
 
       - name: Require signing secret
+        if: env.PUBLISH == 'true'
         env:
           ORVIX_RELEASE_SIGNING_KEY_PEM_B64: ${{ secrets.ORVIX_RELEASE_SIGNING_KEY_PEM_B64 }}
         run: |
@@ -249,6 +308,7 @@ jobs:
           fi
 
       - name: Build release bundle
+        if: env.PUBLISH == 'true'
         env:
           ORVIX_RELEASE_SIGNING_KEY_PEM_B64: ${{ secrets.ORVIX_RELEASE_SIGNING_KEY_PEM_B64 }}
         run: |
@@ -300,7 +360,7 @@ jobs:
           echo "SIGNATURE_VERIFIED_LOCALLY=YES" >> "$GITHUB_ENV"
 
       - name: Dry-run verdict
-        if: env.DRY_RUN == 'true'
+        if: env.PUBLISH == 'true' && env.DRY_RUN == 'true'
         run: |
           set -euo pipefail
           # Every pre-publication check up to and including the local bundle
@@ -313,7 +373,7 @@ jobs:
           echo "FAILED_STEP=" >> "$GITHUB_ENV"
 
       - name: Create or retain draft release
-        if: env.DRY_RUN != 'true'
+        if: env.PUBLISH == 'true' && env.DRY_RUN != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -339,7 +399,7 @@ jobs:
           fi
 
       - name: Upload release assets
-        if: env.DRY_RUN != 'true'
+        if: env.PUBLISH == 'true' && env.DRY_RUN != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -359,7 +419,7 @@ jobs:
           echo "ASSETS_UPLOADED=YES" >> "$GITHUB_ENV"
 
       - name: Verify remote release assets
-        if: env.DRY_RUN != 'true'
+        if: env.PUBLISH == 'true' && env.DRY_RUN != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -407,7 +467,7 @@ jobs:
           rm -rf "$VERIFY_DIR"
 
       - name: Publish release
-        if: env.DRY_RUN != 'true'
+        if: env.PUBLISH == 'true' && env.DRY_RUN != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -438,6 +498,9 @@ jobs:
             if [ "$VERDICT" = "DRY_RUN_PASS" ]; then
               echo
               echo "DRY RUN — every pre-publication check passed (smokes, tests, vet, build, local bundle build+sign+checksum). No release, tag, or asset was created or modified."
+            elif [ "$VERDICT" = "CI_ONLY" ]; then
+              echo
+              echo "CI ONLY — this was a push-triggered run. CI checks ran; no release, tag, or asset was created, modified, or published. Use workflow_dispatch with an explicit tag to publish."
             elif [ "$VERDICT" != "PASS" ]; then
               echo
               echo "Failed step: $FAILED"
@@ -484,7 +547,7 @@ jobs:
           echo "REMOTE_URLS_VERIFIED=${REMOTE_URLS_VERIFIED:-NO}"
           echo "FINAL_VERDICT=$VERDICT"
 
-          if [ "$VERDICT" != "PASS" ] && [ "$VERDICT" != "DRY_RUN_PASS" ]; then
+          if [ "$VERDICT" != "PASS" ] && [ "$VERDICT" != "DRY_RUN_PASS" ] && [ "$VERDICT" != "CI_ONLY" ]; then
             echo "Release bundle workflow failed at: $FAILED" >&2
             exit 1
           fi
