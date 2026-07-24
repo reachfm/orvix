@@ -42,6 +42,7 @@ import (
 	"github.com/orvix/orvix/internal/observability"
 	"github.com/orvix/orvix/internal/ruler"
 	"github.com/orvix/orvix/internal/runtime"
+	"github.com/orvix/orvix/internal/selfupdate"
 	settingsbridge "github.com/orvix/orvix/internal/settings/bridge"
 	"github.com/orvix/orvix/internal/tlsmgmt"
 	"github.com/orvix/orvix/internal/trustmgmt"
@@ -98,6 +99,17 @@ type Handler struct {
 	// is called many times. The schema is a CREATE TABLE IF NOT
 	// EXISTS so it is idempotent; the Once is just an optimisation.
 	updateSvcOnce sync.Once
+
+	// selfUpdateClient is the typed IPC client to the orvix-updater
+	// daemon used by the Admin Console self-update v2 endpoints
+	// (admin_updates.go). It is set once at router construction via
+	// SetSelfUpdateClient. Handlers MUST reach the updater only
+	// through this client's Call method over the Unix socket — never
+	// by importing internal/selfupdate's Store or orchestrator
+	// directly, since the API process is unprivileged (Phase 0
+	// architecture rule). nil means self-update is not configured;
+	// handlers must return a clean 503, never panic.
+	selfUpdateClient selfupdate.IPCClient
 
 	// processStartedAt is captured once via SetProcessStartedAt
 	// during router construction. The runtime telemetry endpoint

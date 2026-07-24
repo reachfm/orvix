@@ -86,6 +86,18 @@ func NewClient(socketPath string) *Client {
 	return &Client{SocketPath: socketPath, Timeout: DefaultIPCTimeout}
 }
 
+// IPCClient is the interface internal/api/handlers depends on to reach
+// the updater daemon. It exists solely so the HTTP handlers can be unit
+// tested against a fake implementation without a real Unix socket — the
+// production wiring always uses *Client (see NewClient). Handlers must
+// never depend on the concrete *Client type directly, and must never
+// reach internal/selfupdate's Store or orchestrator by any other path.
+type IPCClient interface {
+	Call(req Request) (*Response, error)
+}
+
+var _ IPCClient = (*Client)(nil)
+
 // Call opens a fresh connection, sends req, reads exactly one Response, and
 // closes the connection. One connection per call keeps the protocol
 // stateless and trivially safe to retry.

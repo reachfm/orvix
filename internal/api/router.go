@@ -43,6 +43,7 @@ import (
 	"github.com/orvix/orvix/internal/observability"
 	"github.com/orvix/orvix/internal/ruler"
 	orvixruntime "github.com/orvix/orvix/internal/runtime"
+	"github.com/orvix/orvix/internal/selfupdate"
 	settingsbridge "github.com/orvix/orvix/internal/settings/bridge"
 	"github.com/orvix/orvix/internal/tlsmgmt"
 	"github.com/orvix/orvix/internal/trust"
@@ -353,6 +354,16 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		logger.Warn("update service not available: failed to get sql.DB", zap.Error(err))
 	}
 
+	// Wire the self-update v2 (Phase H) IPC client. The API process
+	// never talks to internal/selfupdate's Store/orchestrator directly
+	// — it only ever dials the orvix-updater daemon's Unix socket
+	// through this typed client. An empty SocketPath (not configured)
+	// leaves the client nil; admin_updates.go's handlers detect that
+	// and return a clean 503 rather than panicking.
+	if cfg.SelfUpdate.SocketPath != "" {
+		router.h.SetSelfUpdateClient(selfupdate.NewClient(cfg.SelfUpdate.SocketPath))
+	}
+
 	// Wire DNS / DKIM operations service (DNS-DKIM-OPERATIONS-2F).
 	// The Service is built with the NetResolver so live DNS
 	// verification uses the operator's real resolver (no shell-
@@ -555,6 +566,15 @@ func newUserRateLimiter(prefix string, max int, window time.Duration, retryAfter
 			})
 		},
 	})
+}
+
+// SetSelfUpdateClient overrides the self-update v2 IPC client after
+// construction. Production wiring happens once inside NewRouter from
+// cfg.SelfUpdate.SocketPath; this exported setter exists so tests can
+// inject a fake selfupdate.IPCClient and exercise the admin_updates.go
+// HTTP layer without a real Unix socket / orvix-updater daemon.
+func (r *Router) SetSelfUpdateClient(c selfupdate.IPCClient) {
+	r.h.SetSelfUpdateClient(c)
 }
 
 func (r *Router) Start() {
@@ -1301,6 +1321,37 @@ func (r *Router) setupRoutes() {
 	platform.Patch("/organizations/:id", r.h.UpdateOrganization)
 	platform.Post("/organizations/:id/active", r.h.SetOrganizationActive)
 	platform.Get("/organizations/:id/detail", r.h.GetOrganizationDetail)
+
+	// Self-update v2 (Phase H): admin_updates.go handlers driving the
+	// orvix-updater daemon over its Unix socket (internal/selfupdate).
+	// Platform-admin only — same role gate as /platform and
+	// /console/internal above (RoleAdmin is deliberately excluded: a
+	// tenant admin must never be able to trigger a host-wide binary
+	// update or rollback). CSRF is already enforced for the whole
+	// `admin` parent group; mutation routes additionally get a
+	// dedicated per-user rate limiter (reusing newUserRateLimiter, the
+	// same primitive as the existing support/MFA limiters) since these
+	// actions are far more expensive/sensitive than an ordinary CRUD
+	// write.
+	selfUpdateReadLimiter := newUserRateLimiter("selfupdate_read", 60, time.Minute, 60,
+		"too many self-update status requests, please slow down")
+	selfUpdateWriteLimiter := newUserRateLimiter("selfupdate_write", 10, time.Minute, 60,
+		"too many self-update actions, please slow down")
+	updatesAdmin := admin.Group("/admin/updates", auth.RequireAnyRole(auth.RoleSuperAdmin, auth.RolePlatformSuperAdmin))
+	updatesAdmin.Get("/status", selfUpdateReadLimiter, r.h.GetAdminUpdatesStatus)
+	updatesAdmin.Get("/releases", selfUpdateReadLimiter, r.h.GetAdminUpdatesReleases)
+	updatesAdmin.Get("/history", selfUpdateReadLimiter, r.h.GetAdminUpdatesHistory)
+	updatesAdmin.Get("/snapshots", selfUpdateReadLimiter, r.h.GetAdminUpdatesSnapshots)
+	updatesAdmin.Get("/jobs/:id", selfUpdateReadLimiter, r.h.GetAdminUpdatesJob)
+	updatesAdmin.Post("/check", selfUpdateWriteLimiter, r.h.PostAdminUpdatesCheck)
+	updatesAdmin.Post("/preflight", selfUpdateWriteLimiter, r.h.PostAdminUpdatesPreflight)
+	// install/rollback additionally require fresh password
+	// re-authentication in the body — enforced inside the handler
+	// (requireSelfUpdateReauth in admin_updates.go), since Fiber v3
+	// middleware would need to buffer/re-parse the same JSON body the
+	// handler already validates strictly.
+	updatesAdmin.Post("/install", selfUpdateWriteLimiter, r.h.PostAdminUpdatesInstall)
+	updatesAdmin.Post("/rollback", selfUpdateWriteLimiter, r.h.PostAdminUpdatesRollback)
 
 	// Monitoring v1: resolve an alert (CSRF-protected, admin role).
 	men.Post("/monitoring/alerts/:id/resolve", r.h.PostMonitoringAlertResolve)

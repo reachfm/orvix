@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/selfupdate"
 	"github.com/orvix/orvix/internal/updater"
 	"go.uber.org/zap"
 )
@@ -20,6 +21,16 @@ import (
 // guarantee is process-wide for the lifetime of the API server.
 func (h *Handler) SetUpdateService(svc *updater.RuntimeService) {
 	h.updateSvc = svc
+}
+
+// SetSelfUpdateClient attaches the typed IPC client used by the Admin
+// Console self-update v2 endpoints (admin_updates.go) to reach the
+// orvix-updater daemon over its Unix domain socket. The router calls
+// this once at startup (see api.NewRouter); test harnesses may call
+// api.Router.SetSelfUpdateClient with a fake implementing
+// selfupdate.IPCClient to exercise the HTTP layer without a real socket.
+func (h *Handler) SetSelfUpdateClient(c selfupdate.IPCClient) {
+	h.selfUpdateClient = c
 }
 
 // updateService returns the shared updater.RuntimeService. The

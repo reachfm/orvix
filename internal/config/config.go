@@ -30,6 +30,19 @@ type Config struct {
 	Monitoring MonitoringConfig `mapstructure:"monitoring"`
 	CoreMail   CoreMailConfig   `mapstructure:"coremail"`
 	Outbound   OutboundConfig   `mapstructure:"outbound"`
+	SelfUpdate SelfUpdateConfig `mapstructure:"self_update"`
+}
+
+// SelfUpdateConfig holds settings for the Admin Console self-update
+// feature's HTTP API side (internal/api/handlers/admin_updates.go). The
+// API process is unprivileged and only ever talks to the orvix-updater
+// daemon over this Unix domain socket — never directly to
+// internal/selfupdate's Store/orchestrator and never via a shell command.
+type SelfUpdateConfig struct {
+	// SocketPath is the Unix domain socket the orvix-updater daemon
+	// listens on. Empty disables the self-update admin API endpoints
+	// (they return 503 "updater unavailable").
+	SocketPath string `mapstructure:"socket_path"`
 }
 
 // CoreMailConfig controls the native CoreMail protocol runtime.
@@ -481,6 +494,9 @@ func Defaults() *Config {
 			Channel:      "stable",
 			AutoApply:    false,
 			BackupBefore: true,
+		},
+		SelfUpdate: SelfUpdateConfig{
+			SocketPath: "/run/orvix/orvix-updater.sock",
 		},
 		AI: AIConfig{
 			DeepSeekModel: "deepseek-chat",
