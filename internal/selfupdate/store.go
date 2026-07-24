@@ -105,9 +105,18 @@ var legalPhaseTransitions = map[Phase][]Phase{
 	PhaseMigrating:        {PhaseReplacingRuntime, PhaseFailed},
 	PhaseReplacingRuntime: {PhaseRestarting, PhaseFailed},
 	PhaseRestarting:       {PhaseHealthCheck, PhaseFailed},
-	PhaseHealthCheck:      {PhaseCompleted, PhaseFailed},
-	PhaseFailed:           {PhaseRollingBack},
-	PhaseRollingBack:      {PhaseRolledBack, PhaseFailed},
+	// HealthCheck -> RolledBack is legal for a JobKindRollback job's own
+	// state machine (Orchestrator.StartRollback): a manual rollback job
+	// walks queued -> ... -> health_check and its own terminal success
+	// state is "rolled_back", not "completed" (that phase name is
+	// reserved for a successful install). An install job never takes
+	// this edge — it always resolves health_check into completed or
+	// failed; only failed->rolling_back->health_check (via
+	// autoRollback's own restore+health-gate call, which does not
+	// re-enter this transition map) is used for automatic rollback.
+	PhaseHealthCheck: {PhaseCompleted, PhaseFailed, PhaseRolledBack},
+	PhaseFailed:      {PhaseRollingBack},
+	PhaseRollingBack: {PhaseRolledBack, PhaseFailed},
 }
 
 // isLegalPhaseTransition reports whether moving from -> to is allowed.
