@@ -20,6 +20,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/api"
 	"github.com/orvix/orvix/internal/auth"
+	"github.com/orvix/orvix/internal/billing"
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/dbdialect"
 	"github.com/orvix/orvix/internal/license"
@@ -457,4 +458,107 @@ func minLen(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// TestFreshInstall_AdminTenantHasActiveSubscription is the regression
+// guard for the production incident "send rejected: no active
+// subscription" on a freshly installed instance. Root cause:
+// insertBootstrapAdmin provisioned the tenant, admin user, domain,
+// mailbox, and system folders, but never created a row in the
+// subscriptions table, so internal/billing.SendEnforcer.AllowSend
+// failed closed for the bootstrap admin's own tenant on the very first
+// send attempt. seedAdminUser now calls ensureBootstrapTenantSubscription
+// to grant a real, enforcer-visible subscription through the same
+// billing.Service.CreateSubscription path used elsewhere in the
+// codebase (not a bypass of enforcement).
+func TestFreshInstall_AdminTenantHasActiveSubscription(t *testing.T) {
+	h := buildFreshInstallHarness(t, "admin@orvix.email", "MaghaghaMos086")
+	t.Cleanup(func() { h.close(t) })
+
+	var tenantID int64
+	if err := h.sqlDB.QueryRow("SELECT id FROM tenants WHERE domain = ?", "orvix.email").Scan(&tenantID); err != nil {
+		t.Fatalf("bootstrap tenant not found: %v", err)
+	}
+
+	var subCount int64
+	var status string
+	err := h.sqlDB.QueryRow("SELECT COUNT(*), COALESCE(MAX(status), '') FROM subscriptions WHERE tenant_id = ?", tenantID).
+		Scan(&subCount, &status)
+	if err != nil {
+		t.Fatalf("query subscriptions: %v", err)
+	}
+	if subCount != 1 {
+		t.Fatalf("expected exactly 1 subscription row for the bootstrap tenant, got %d — the admin mailbox would be rejected with \"no active subscription\" on its first send", subCount)
+	}
+	if status != string(billing.SubActive) {
+		t.Fatalf("expected bootstrap tenant subscription status %q, got %q", billing.SubActive, status)
+	}
+}
+
+// TestFreshInstall_AdminMailboxSendIsEnforcerAllowed exercises the
+// actual internal/billing.SendEnforcer the webmail send handler calls,
+// against the real bootstrap-produced database state, proving the fix
+// end-to-end rather than only checking the subscriptions row shape.
+func TestFreshInstall_AdminMailboxSendIsEnforcerAllowed(t *testing.T) {
+	h := buildFreshInstallHarness(t, "admin@orvix.email", "MaghaghaMos086")
+	t.Cleanup(func() { h.close(t) })
+
+	var tenantID uint
+	if err := h.sqlDB.QueryRow("SELECT id FROM tenants WHERE domain = ?", "orvix.email").Scan(&tenantID); err != nil {
+		t.Fatalf("bootstrap tenant not found: %v", err)
+	}
+
+	svc := billing.NewService(h.sqlDB)
+	quota := billing.NewQuotaService(h.sqlDB, svc)
+	enforcer := billing.NewSendEnforcer(h.sqlDB, svc, quota)
+
+	result := enforcer.AllowSend(t.Context(), billing.SendIdentity{TenantID: tenantID, MailboxID: 1}, 1)
+	if !result.Allowed {
+		t.Fatalf("bootstrap admin send was rejected: %s (this is the production incident this test guards against)", result.Reason)
+	}
+}
+
+// TestFreshInstall_SelfHealsSubscriptionForAlreadyBootstrappedTenant
+// proves ensureBootstrapTenantSubscription also repairs an instance that
+// was already installed before this fix shipped — seedAdminUser must
+// still provision the missing subscription on a later service start,
+// not only on the very first bootstrap, since re-running the installer
+// against an existing admin user takes the "admin already exists" early
+// return path.
+func TestFreshInstall_SelfHealsSubscriptionForAlreadyBootstrappedTenant(t *testing.T) {
+	h := buildFreshInstallHarness(t, "admin@orvix.email", "MaghaghaMos086")
+	t.Cleanup(func() { h.close(t) })
+
+	var tenantID int64
+	if err := h.sqlDB.QueryRow("SELECT id FROM tenants WHERE domain = ?", "orvix.email").Scan(&tenantID); err != nil {
+		t.Fatalf("bootstrap tenant not found: %v", err)
+	}
+
+	// Simulate a pre-fix install: drop the subscription that
+	// ensureBootstrapTenantSubscription just created, as if this
+	// instance had been installed before the fix existed.
+	if _, err := h.sqlDB.Exec("DELETE FROM subscriptions WHERE tenant_id = ?", tenantID); err != nil {
+		t.Fatalf("simulate pre-fix state: %v", err)
+	}
+	var count int64
+	if err := h.sqlDB.QueryRow("SELECT COUNT(*) FROM subscriptions WHERE tenant_id = ?", tenantID).Scan(&count); err != nil {
+		t.Fatalf("verify simulated state: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 subscriptions after simulated deletion, got %d", count)
+	}
+
+	// A later service start (admin user already exists) must self-heal
+	// via the "admin already exists" branch of seedAdminUser, not only
+	// the fresh-bootstrap branch. seedAdminUser's early-return branch
+	// calls exactly this function, so exercising it directly proves that
+	// branch's behavior without needing to re-run the full seed flow.
+	ensureBootstrapTenantSubscription(h.sqlDB, dbdialect.FromDriver("sqlite"), "orvix.email", zap.NewNop())
+
+	if err := h.sqlDB.QueryRow("SELECT COUNT(*) FROM subscriptions WHERE tenant_id = ?", tenantID).Scan(&count); err != nil {
+		t.Fatalf("verify self-healed state: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected self-healing to (re)provision exactly 1 subscription, got %d", count)
+	}
 }

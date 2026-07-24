@@ -27,9 +27,8 @@
 #      asset (BLOCKER 8 contract: install-public.sh would have
 #      refused a mismatch).
 #  17. The admin login form's hydration contract is intact:
-#      /admin/index.html loads app.js as <script type="module">
-#      and the shipped auth.js still exports renderLogin and
-#      hasValidSession (BLOCKER 1 regression guard).
+#      /admin/index.html loads an ES module and the file it
+#      references actually exists (BLOCKER 1 regression guard).
 #
 # Usage on a fresh VPS:
 #   sudo apt-get update && sudo apt-get install -y ca-certificates curl
@@ -269,23 +268,34 @@ fi
 
 # ── 12. Admin login form hydration contract ──────────────────────
 # The admin SPA hydrates #login-email / #login-password / #login-button
-# from modules/auth.js renderLogin(). The shipped index.html only
-# carries the static wrapper; the JS contract must be intact.
+# from its bundled JS. The shipped index.html only carries the static
+# wrapper; the JS contract must be intact.
+#
+# The Admin UI is a React/Vite build (build-release-bundle.sh via
+# lib-admin-build.sh's package_admin_spa()) with a content-hashed
+# entrypoint (release/admin/assets/index-<hash>.js), not a fixed
+# app.js/modules/auth.js — those legacy files are deleted by
+# package_admin_spa() whenever Node/npm is present (always true in CI).
+# A prior version of this check hardcoded those legacy filenames and
+# would fail on every real, correctly-built install. Parse index.html's
+# own <script type="module" src="..."> reference instead and confirm
+# THAT file exists on disk — the same dynamic check
+# release/install-public.sh's validate_bundle_layout and
+# release/scripts/smoke-admin-browser.sh already perform.
 ADMIN_INDEX=/usr/share/orvix/admin/index.html
-ADMIN_AUTH=/usr/share/orvix/admin/modules/auth.js
-ADMIN_APP=/usr/share/orvix/admin/app.js
 if [ -f "$ADMIN_INDEX" ]; then
-    if grep -q 'type="module".*app.js' "$ADMIN_INDEX"; then
-        pass "$ADMIN_INDEX loads app.js as <script type=\"module\">"
-        SUMMARY["pass"]=$(( ${SUMMARY["pass"]:-0} + 1 ))
+    ADMIN_MODULE_SRC="$(grep -oE 'type="module"[^>]*src="[^"]*"' "$ADMIN_INDEX" 2>/dev/null | head -n1 | sed -E 's/.*src="([^"]*)".*/\1/')"
+    if [ -z "$ADMIN_MODULE_SRC" ]; then
+        fail "$ADMIN_INDEX has no <script type=\"module\" src=\"...\"> entrypoint"
     else
-        fail "$ADMIN_INDEX does not load app.js as an ES module"
-    fi
-    if [ -f "$ADMIN_AUTH" ] && grep -q 'export.*renderLogin' "$ADMIN_AUTH" && grep -q 'export.*hasValidSession' "$ADMIN_AUTH"; then
-        pass "$ADMIN_AUTH still exports renderLogin + hasValidSession (BLOCKER 1 contract)"
-        SUMMARY["pass"]=$(( ${SUMMARY["pass"]:-0} + 1 ))
-    else
-        fail "$ADMIN_AUTH is missing the renderLogin / hasValidSession exports (BLOCKER 1 regression)"
+        ADMIN_MODULE_REL="${ADMIN_MODULE_SRC#/admin/}"
+        ADMIN_MODULE_PATH="/usr/share/orvix/admin/$ADMIN_MODULE_REL"
+        if [ -f "$ADMIN_MODULE_PATH" ]; then
+            pass "$ADMIN_INDEX loads an ES module ($ADMIN_MODULE_SRC) and the file exists"
+            SUMMARY["pass"]=$(( ${SUMMARY["pass"]:-0} + 1 ))
+        else
+            fail "$ADMIN_INDEX references $ADMIN_MODULE_SRC but $ADMIN_MODULE_PATH does not exist"
+        fi
     fi
 fi
 

@@ -231,9 +231,17 @@ if [ "$MODE" = "build" ]; then
     tar -xzf "$BUNDLE_PATH" -C "$BDIR"
 
     # All bundle-required files must be present in the sealed tree.
+    # release/admin/app.js is NOT in this list: the Admin UI is a React/
+    # Vite build (build-release-bundle.sh via lib-admin-build.sh's
+    # package_admin_spa()) whose entrypoint is a content-hashed
+    # release/admin/assets/index-<hash>.js, not a fixed app.js filename —
+    # package_admin_spa() deletes app.js/styles.css/modules/*.js whenever
+    # the Node/npm toolchain is present (always true here). Checked
+    # separately below via a glob, mirroring how install-public.sh's
+    # validate_bundle_layout validates the same real contract.
     for rel in bin/orvix release/install.sh release/install-public.sh release/upgrade.sh \
         release/systemd/orvix.service release/systemd/orvix-update.service \
-        release/sudoers.d/orvix-update release/admin/app.js release/admin/index.html \
+        release/sudoers.d/orvix-update release/admin/index.html \
         release/webmail/index.html release/marketing/index.html \
         release/marketing/404.html release/marketing/robots.txt \
         release/marketing/sitemap.xml VERSION BUILDINFO; do
@@ -241,6 +249,8 @@ if [ "$MODE" = "build" ]; then
             fail "sealed bundle is missing $rel"
         fi
     done
+    compgen -G "$BDIR/orvix/release/admin/assets/*.js" >/dev/null \
+        || fail "sealed bundle is missing release/admin/assets/*.js (built Admin UI entrypoint)"
     pass "sealed bundle contains every required file"
 
     # The sealed binary's metadata must match the bundle metadata.

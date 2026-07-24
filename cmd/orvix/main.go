@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/orvix/orvix/internal/api"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/autoheal"
+	"github.com/orvix/orvix/internal/billing"
 	"github.com/orvix/orvix/internal/buildinfo"
 	"github.com/orvix/orvix/internal/calendar"
 	"github.com/orvix/orvix/internal/collaboration"
@@ -402,6 +404,14 @@ func seedAdminUser(db *gorm.DB, authenticator *auth.Authenticator, logger *zap.L
 		}
 	}
 
+	parts := strings.Split(adminEmail, "@")
+	var tenantDomain string
+	if len(parts) == 2 {
+		tenantDomain = parts[1]
+	} else {
+		tenantDomain = "local"
+	}
+
 	var count int64
 	if err := sqlDB.QueryRow("SELECT COUNT(*) FROM users WHERE email = "+dial.Placeholder(1), adminEmail).Scan(&count); err != nil {
 		logger.Warn("failed to check existing admin user", zap.Error(err))
@@ -415,6 +425,12 @@ func seedAdminUser(db *gorm.DB, authenticator *auth.Authenticator, logger *zap.L
 			return
 		}
 		logger.Info("admin user already exists and password verifies", zap.String("email", adminEmail))
+		// Self-healing check: older installs may have been bootstrapped
+		// before subscription provisioning was added to this path (see
+		// ensureBootstrapTenantSubscription doc comment). Run on every
+		// service start so an already-installed instance recovers
+		// without requiring a fresh install.
+		ensureBootstrapTenantSubscription(sqlDB, dial, tenantDomain, logger)
 		return
 	}
 
@@ -424,18 +440,11 @@ func seedAdminUser(db *gorm.DB, authenticator *auth.Authenticator, logger *zap.L
 		return
 	}
 
-	parts := strings.Split(adminEmail, "@")
-	var tenantDomain string
-	if len(parts) == 2 {
-		tenantDomain = parts[1]
-	} else {
-		tenantDomain = "local"
-	}
-
 	if err := insertBootstrapAdmin(sqlDB, dial, adminEmail, hashedPassword, tenantDomain, adminPassword, logger); err != nil {
 		logger.Warn("failed to create admin user", zap.Error(err))
 		return
 	}
+	ensureBootstrapTenantSubscription(sqlDB, dial, tenantDomain, logger)
 
 	if !verifyStoredAdminHash(sqlDB, dial, authenticator, adminEmail, adminPassword) {
 		logger.Error("admin user was created but password verification failed against the stored hash",
@@ -588,6 +597,83 @@ func insertBootstrapAdmin(db *sql.DB, dial *dbdialect.Info, adminEmail, hashedPa
 	}
 
 	return tx.Commit()
+}
+
+// ensureBootstrapTenantSubscription grants the installer-bootstrapped
+// tenant a legitimate active subscription so its admin mailbox can send
+// mail immediately after install.
+//
+// Root cause of "send rejected: no active subscription" on a freshly
+// installed instance: insertBootstrapAdmin creates the tenant, admin
+// user, domain, mailbox, and system folders, but historically never
+// created a row in the subscriptions table. internal/billing.SendEnforcer
+// fails closed (Allowed: false, Reason: "no active subscription") whenever
+// billing.Service.GetSubscription finds no row for the tenant — by
+// design, since sending mail must never be silently permitted for a
+// tenant billing can't account for. This was a genuine bootstrap gap, not
+// intentional policy: every other resource the bootstrap admin needs was
+// provisioned except this one.
+//
+// The fix grants a real subscription through the same
+// billing.Service.CreateSubscriptionTx path used elsewhere (e.g. new
+// organization signup in enterprise_admin.go), on the enterprise plan
+// (matching the "enterprise" plan already stamped on the bootstrap
+// tenant row) with no trial period — status is immediately Active, never
+// Trialing, because this is the operator's own self-hosted instance, not
+// a trial signup. This does NOT bypass subscription enforcement: it
+// creates the real row the enforcer checks for, through the real
+// subscription-creation code path, so quota/limit logic still applies
+// normally afterward.
+//
+// Called on every service start (both for a brand-new bootstrap and for
+// an already-existing admin user) so an instance installed before this
+// fix self-heals without requiring a fresh install. Failures are logged
+// as warnings and never block startup — billing being unavailable must
+// not prevent the mail server itself from starting.
+func ensureBootstrapTenantSubscription(db *sql.DB, dial *dbdialect.Info, tenantDomain string, logger *zap.Logger) {
+	var tenantID int64
+	err := db.QueryRow("SELECT id FROM tenants WHERE domain = "+dial.Placeholder(1)+" AND deleted_at IS NULL", tenantDomain).Scan(&tenantID)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Tenant not created yet (should not happen on this call path,
+		// but nothing to do if it hasn't).
+		return
+	}
+	if err != nil {
+		logger.Warn("failed to look up bootstrap tenant for subscription check", zap.Error(err))
+		return
+	}
+
+	// seedAdminUser (this function's only caller) runs before
+	// api.NewRouter, and billing.Initialize — which creates the plans/
+	// subscriptions/etc. tables and seeds default plans — only runs
+	// inside api.NewRouter. Without this, CreateSubscription below fails
+	// with "no such table: plans" on every fresh install, silently
+	// logged as a warning, and the admin mailbox is left with no
+	// subscription at all. CreateTables and SeedDefaultPlans are both
+	// idempotent (CREATE TABLE IF NOT EXISTS; insert-only-if-missing),
+	// so calling them again here — and again later inside api.NewRouter
+	// — is safe.
+	if err := billing.CreateTables(db); err != nil {
+		logger.Warn("failed to prepare billing schema for bootstrap tenant subscription", zap.Error(err))
+		return
+	}
+	billingSvc := billing.NewService(db)
+	if err := billingSvc.SeedDefaultPlans(); err != nil {
+		logger.Warn("failed to seed default billing plans for bootstrap tenant subscription", zap.Error(err))
+		return
+	}
+	_, err = billingSvc.CreateSubscription(uint(tenantID), billing.PlanEnterprise, billing.IntervalMonthly, 0)
+	if err == nil {
+		logger.Info("bootstrap tenant subscription provisioned", zap.String("domain", tenantDomain), zap.String("plan", string(billing.PlanEnterprise)))
+		return
+	}
+	if errors.Is(err, billing.ErrTenantAlreadyHasSub) {
+		// Already provisioned (fresh install just created it, or a
+		// previous start already self-healed) — nothing to do.
+		return
+	}
+	logger.Warn("failed to provision bootstrap tenant subscription; admin mailbox may be unable to send until this is resolved",
+		zap.String("domain", tenantDomain), zap.Error(err))
 }
 
 // provisionSystemFoldersTx inserts the canonical system

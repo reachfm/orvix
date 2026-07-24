@@ -31,12 +31,12 @@ export default function OrganizationList() {
 
   return (
     <div>
-      <div className="flex justify-between items-center mb-4">
-        <h2 className="text-xl font-semibold text-[#E8EAF0]">Organizations</h2>
-        <button className="px-4 py-2 bg-[#4F7CFF] text-white rounded-lg text-sm hover:bg-[#3B5FD9]">
-          Create Organization
-        </button>
-      </div>
+      <h2 className="text-xl font-semibold text-[#E8EAF0] mb-4">Organizations</h2>
+      {orgs.length === 0 ? (
+        <div className="bg-[#13161C] border border-[#2A2F3E] rounded-xl p-8 text-center text-[#8B92A8]">
+          No organizations found.
+        </div>
+      ) : (
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
@@ -69,6 +69,7 @@ export default function OrganizationList() {
           </tbody>
         </table>
       </div>
+      )}
     </div>
   );
 }
