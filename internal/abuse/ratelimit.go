@@ -95,6 +95,13 @@ func (s *RateLimitService) RecordBounce(ctx context.Context, tenantID uint) erro
 }
 
 func (s *RateLimitService) getPlanSendLimit(ctx context.Context, tenantID uint) (int, error) {
+	// No ORDER BY/tie-break needed here (unlike internal/billing's raw
+	// readers): subscriptions.tenant_id is enforced unique by a UNIQUE
+	// index in the real schema (see internal/billing/setup.go), so this
+	// WHERE clause can only ever match 0 or 1 rows. This package's own
+	// isolated test fixture (pg_test_helper.go) goes further and makes
+	// tenant_id the PRIMARY KEY directly, with no separate id column at
+	// all — an ORDER BY id here would not even compile against it.
 	row := s.db.QueryRowContext(ctx,
 		`SELECT COALESCE(send_limit_day, 500) FROM subscriptions WHERE tenant_id = `+s.dialect.Placeholder(1), tenantID)
 	var limit int

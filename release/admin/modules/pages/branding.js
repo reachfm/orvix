@@ -5,7 +5,7 @@
      GET  /api/v1/admin/tenants/current
      PATCH /api/v1/admin/tenants/:id/branding   (CSRF + admin role)
 
-   Audit doc reference: docs/ORVIX_STALWART_ENTERPRISE_PARITY_AUDIT.md
+   Audit doc reference: docs/ORVIX_ENTERPRISE_PARITY_AUDIT.md
      §2.7 row 32 (Per-tenant branding)
      §3 deliverable E (Branding)
 

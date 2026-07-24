@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/api"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/config"
@@ -102,7 +103,14 @@ func (env *rehashTestEnv) doLogin(email, password string) int {
 	})
 	req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := env.router.App().Test(req)
+	// Timeout: 0 disables fiber's default 1-second Test() deadline. A login
+	// round-trip here does a bcrypt verify plus an Argon2id rehash-on-login
+	// write, which can exceed 1s under CPU contention (e.g. when this
+	// package's full test suite runs back-to-back for minutes) even though
+	// it normally completes in well under that in isolation. Without this,
+	// Test() returns os.ErrDeadlineExceeded and the panic below fires —
+	// a test-harness timing bug, not a production issue.
+	resp, err := env.router.App().Test(req, fiber.TestConfig{Timeout: 0})
 	if err != nil {
 		panic("login request: " + err.Error())
 	}

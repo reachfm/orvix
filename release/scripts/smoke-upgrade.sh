@@ -403,12 +403,144 @@ else
     fail "upgrade.sh propagate_assets does not return non-zero on failure"
 fi
 # Rollback: full_rollback must restore admin + webmail assets too.
-if grep -qE 'rolled back \$sub from' "$UPGRADE_SH" || \
-    grep -qE 'rolled back .* \$ORVIX_ADMIN_UI_DIR' "$UPGRADE_SH" || \
-    grep -qE 'rolled back .* \$ORVIX_WEBMAIL_UI_DIR' "$UPGRADE_SH"; then
+#
+# full_rollback() reads manifest.assets and restores each backed-up
+# asset tree through a single shared case-statement-driven code path
+# (dest_label/dest_dir resolved per manifest key, one shared restore +
+# log block) rather than three separate hardcoded admin/webmail/
+# marketing blocks — so the log line never literally contains
+# "$ORVIX_ADMIN_UI_DIR" or "$ORVIX_WEBMAIL_UI_DIR" as substrings; it
+# logs the resolved directory path instead ("rolled back $dest_dir
+# from $path_val"). A static check pinned to the old literal-substring
+# form breaks on this legitimate refactor while the actual
+# functionality remains correct and is exercised end-to-end below
+# (real files, byte-identical verification) — see
+# "full_rollback restores byte-identical admin + webmail assets".
+# This check instead pins the two things a regression could plausibly
+# break silently: that both asset kinds are wired into the manifest
+# case-statement dispatch, and that the shared restore path actually
+# logs a "rolled back" line when it succeeds.
+if grep -qE 'asset_admin_backup\)[^;]*dest_dir="\$ORVIX_ADMIN_UI_DIR"' "$UPGRADE_SH" && \
+    grep -qE 'asset_webmail_backup\)[^;]*dest_dir="\$ORVIX_WEBMAIL_UI_DIR"' "$UPGRADE_SH" && \
+    grep -qE 'rolled back \$dest_dir from' "$UPGRADE_SH"; then
     pass "upgrade.sh rolls back admin + webmail assets on failure"
 else
     fail "upgrade.sh does not roll back admin + webmail assets on failure (BLOCKER 3)"
+fi
+
+# ─── 4c. full_rollback() restores byte-identical admin + webmail
+#         assets end-to-end (not a static grep) ──────────────────
+# Sources upgrade.sh (safe: it guards its own `main "$@"` call behind
+# `[ "${BASH_SOURCE[0]}" != "${0}" ] && return 0`, so sourcing only
+# defines functions) and calls full_rollback() directly against a
+# real temp backup directory containing a manifest.assets in the
+# exact format the backup side of upgrade.sh writes
+# (printf 'asset_%s_backup=%s\n' "$label" "$found"). Every
+# ORVIX_*_DIR path full_rollback touches is redirected into the temp
+# tree via env var overrides (the same override convention upgrade.sh
+# already uses everywhere — see the "${VAR:-default}" declarations at
+# its top), and ORVIX_SYSTEMCTL is stubbed so the function's final
+# `systemctl restart orvix.service` / `is-active` calls succeed
+# without real systemd. No manifest, Caddyfile backup, or DKIM backup
+# is present, so those unrelated restoration branches are naturally
+# skipped (each is individually [ -f ]/[ -d ]-guarded in
+# full_rollback) — this isolates the test to exactly the asset
+# rollback path.
+ROLLBACK_TEST_TMP="$(mktemp -d -t orvix-rollback-smoke-XXXXXX)"
+trap 'rm -rf "$LIB_TEST_TMP" "$ROLLBACK_TEST_TMP" 2>/dev/null || true' EXIT
+
+RB_ADMIN_DIR="$ROLLBACK_TEST_TMP/installed/admin"
+RB_WEBMAIL_DIR="$ROLLBACK_TEST_TMP/installed/webmail"
+RB_ADMIN_BACKUP="$ROLLBACK_TEST_TMP/backup-assets/admin"
+RB_WEBMAIL_BACKUP="$ROLLBACK_TEST_TMP/backup-assets/webmail"
+RB_BACKUP_DIR="$ROLLBACK_TEST_TMP/run-backup"
+RB_STUB_BIN="$ROLLBACK_TEST_TMP/stub-bin"
+
+# Pre-upgrade ("good") asset trees — these are what a correct rollback
+# must restore, byte-for-byte.
+#
+# tree_content_hash computes a hash of a directory's file contents
+# that is independent of the directory's own absolute path — cd's
+# into it first so `find .` yields paths relative to the tree itself
+# (./index.html, not /tmp/.../admin/index.html), which is what makes
+# the "before" (backup dir) and "after" (installed dir, a different
+# absolute path) hashes directly comparable.
+tree_content_hash() {
+    (cd "$1" && find . -type f | sort | xargs sha256sum | sha256sum | awk '{print $1}')
+}
+
+mkdir -p "$RB_ADMIN_BACKUP/assets" "$RB_WEBMAIL_BACKUP/assets"
+printf '<!doctype html><script type="module" src="/admin/assets/index-good.js"></script>\n' > "$RB_ADMIN_BACKUP/index.html"
+printf 'console.log("good admin bundle");\n' > "$RB_ADMIN_BACKUP/assets/index-good.js"
+printf '<!doctype html><script type="module" src="/webmail/assets/index-good.js"></script>\n' > "$RB_WEBMAIL_BACKUP/index.html"
+printf 'console.log("good webmail bundle");\n' > "$RB_WEBMAIL_BACKUP/assets/index-good.js"
+RB_ADMIN_SHA_BEFORE="$(tree_content_hash "$RB_ADMIN_BACKUP")"
+RB_WEBMAIL_SHA_BEFORE="$(tree_content_hash "$RB_WEBMAIL_BACKUP")"
+
+# "Installed" (post-failed-upgrade) trees — deliberately different
+# content, standing in for a partially/badly upgraded state that
+# full_rollback must overwrite, not merge with.
+mkdir -p "$RB_ADMIN_DIR" "$RB_WEBMAIL_DIR"
+printf 'BROKEN\n' > "$RB_ADMIN_DIR/index.html"
+printf 'BROKEN\n' > "$RB_WEBMAIL_DIR/index.html"
+
+mkdir -p "$RB_BACKUP_DIR"
+{
+    printf 'asset_admin_backup=%s\n' "$RB_ADMIN_BACKUP"
+    printf 'asset_webmail_backup=%s\n' "$RB_WEBMAIL_BACKUP"
+} > "$RB_BACKUP_DIR/manifest.assets"
+
+# Stub systemctl: full_rollback's final steps call
+# "$ORVIX_SYSTEMCTL restart orvix.service" then
+# "$ORVIX_SYSTEMCTL is-active --quiet orvix"; both must succeed for
+# the function to report success. Real systemd is not available (or
+# desired) in this smoke.
+mkdir -p "$RB_STUB_BIN"
+cat > "$RB_STUB_BIN/systemctl" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+chmod +x "$RB_STUB_BIN/systemctl"
+
+RB_RESULT=0
+(
+    set +e
+    export ORVIX_ADMIN_UI_DIR="$RB_ADMIN_DIR"
+    export ORVIX_WEBMAIL_UI_DIR="$RB_WEBMAIL_DIR"
+    export ORVIX_MARKETING_UI_DIR="$ROLLBACK_TEST_TMP/installed/marketing"
+    export ORVIX_BIN="$ROLLBACK_TEST_TMP/no-such-bin"
+    export ORVIX_CONFIG="$ROLLBACK_TEST_TMP/no-such-config"
+    export ORVIX_CADDYFILE="/no/such/caddyfile"
+    export ORVIX_DKIM_DIR="$ROLLBACK_TEST_TMP/no-such-dkim"
+    export ORVIX_SYSTEMCTL="$RB_STUB_BIN/systemctl"
+    # shellcheck disable=SC1090
+    . "$UPGRADE_SH"
+    full_rollback "$RB_BACKUP_DIR"
+)
+RB_RESULT=$?
+
+if [ "$RB_RESULT" != "0" ]; then
+    fail "full_rollback() exited $RB_RESULT restoring admin+webmail assets from a valid manifest"
+fi
+
+RB_ADMIN_SHA_AFTER="$(tree_content_hash "$RB_ADMIN_DIR")"
+RB_WEBMAIL_SHA_AFTER="$(tree_content_hash "$RB_WEBMAIL_DIR")"
+
+if [ "$RB_ADMIN_SHA_AFTER" = "$RB_ADMIN_SHA_BEFORE" ]; then
+    pass "full_rollback restores byte-identical admin assets"
+else
+    fail "full_rollback did not restore byte-identical admin assets (before=$RB_ADMIN_SHA_BEFORE after=$RB_ADMIN_SHA_AFTER)"
+fi
+if [ "$RB_WEBMAIL_SHA_AFTER" = "$RB_WEBMAIL_SHA_BEFORE" ]; then
+    pass "full_rollback restores byte-identical webmail assets"
+else
+    fail "full_rollback did not restore byte-identical webmail assets (before=$RB_WEBMAIL_SHA_BEFORE after=$RB_WEBMAIL_SHA_AFTER)"
+fi
+# The broken pre-rollback content must genuinely be gone, not merged.
+if grep -q 'BROKEN' "$RB_ADMIN_DIR/index.html" 2>/dev/null || grep -q 'BROKEN' "$RB_WEBMAIL_DIR/index.html" 2>/dev/null; then
+    fail "full_rollback left broken pre-rollback content in place instead of replacing it"
+else
+    pass "full_rollback fully replaced the broken installed content"
 fi
 
 # ─── 5. upgrade.sh --help renders without ANSI escape artifacts ──

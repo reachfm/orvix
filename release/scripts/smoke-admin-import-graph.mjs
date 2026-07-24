@@ -20,6 +20,9 @@ async function listJsFiles(dir) {
   for (const e of entries) {
     const full = path.join(dir, e.name);
     if (e.isDirectory()) {
+      // Skip assets/ — it contains minified/built output that regex-based
+      // import/export parsing cannot analyze correctly.
+      if (e.name === 'assets') continue;
       out.push(...await listJsFiles(full));
     } else if (e.isFile() && e.name.endsWith('.js')) {
       out.push(full);

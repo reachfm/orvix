@@ -16,16 +16,19 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/orvix/orvix/internal/api"
 	"github.com/orvix/orvix/internal/auth"
+	"github.com/orvix/orvix/internal/billing"
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/dbdialect"
 	"github.com/orvix/orvix/internal/license"
-	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 // freshInstallHarness builds the full Orvix stack against a
@@ -35,13 +38,73 @@ import (
 // runtime equivalent of the installer's main() up to the
 // point of starting the HTTP listener.
 type freshInstallHarness struct {
-	router     *api.Router
-	sqlDB      *sql.DB
-	email      string
-	password   string
-	adminDir   string
-	webmailDir string
-	scratchDir string // owned by the test, not t.TempDir; cleaned up by t.Cleanup
+	router        *api.Router
+	sqlDB         *sql.DB
+	gormDB        *gorm.DB
+	authenticator *auth.Authenticator
+	logger        *zap.Logger
+	dialect       *dbdialect.Info
+	email         string
+	password      string
+	adminDir      string
+	webmailDir    string
+	scratchDir    string // owned by the test, not t.TempDir; cleaned up by t.Cleanup
+}
+
+// freshInstallPostgresSchemaPrefix mirrors internal/billing/pg_test_helper.go's
+// convention: each test run gets its own schema so parallel/repeated runs
+// never collide, and it is dropped in t.Cleanup.
+const freshInstallPostgresSchemaPrefix = "orvix_freshinstall_"
+
+// configureFreshInstallDatabase points cfg.Database at either a fresh
+// SQLite file (default) or, when PGHOST is set, a real PostgreSQL
+// instance with an isolated schema — mirroring the exact auto-detection
+// convention already used by internal/billing's newTestDB/setupTestDB
+// (see internal/billing/pg_test_helper.go). This is what lets
+// TestFreshInstall_* — including the subscription-bootstrap tests —
+// run against real PostgreSQL in CI (see .github/workflows/postgres-dml.yml)
+// with zero test-body changes.
+func configureFreshInstallDatabase(t *testing.T, cfg *config.Config) {
+	t.Helper()
+	if pghost := os.Getenv("PGHOST"); pghost != "" {
+		port := os.Getenv("PGPORT")
+		if port == "" {
+			port = "5432"
+		}
+		user := os.Getenv("PGUSER")
+		password := os.Getenv("PGPASSWORD")
+		dbname := os.Getenv("PGDATABASE")
+
+		dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
+			pghost, port, user, password, dbname)
+
+		bootstrap, err := sql.Open("pgx", dsn)
+		if err != nil {
+			t.Fatalf("open postgres for schema setup: %v", err)
+		}
+		schemaName := fmt.Sprintf("%s%d", freshInstallPostgresSchemaPrefix, time.Now().UnixNano())
+		if _, err := bootstrap.Exec("CREATE SCHEMA IF NOT EXISTS " + schemaName); err != nil {
+			bootstrap.Close()
+			t.Fatalf("create postgres test schema: %v", err)
+		}
+		bootstrap.Close()
+		t.Cleanup(func() {
+			cleanup, err := sql.Open("pgx", dsn)
+			if err == nil {
+				cleanup.Exec("DROP SCHEMA IF EXISTS " + schemaName + " CASCADE")
+				cleanup.Close()
+			}
+		})
+
+		cfg.Database.Driver = "postgres"
+		cfg.Database.MaxOpen = 5
+		cfg.Database.MaxIdle = 5
+		cfg.Database.MaxLifetime = 300
+		cfg.Database.DSN = dsn + fmt.Sprintf(" search_path=%s", schemaName)
+		return
+	}
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = t.TempDir() + "/orvix.db?_loc=auto&_busy_timeout=5000&_txlock=immediate"
 }
 
 func buildFreshInstallHarness(t *testing.T, email, password string) *freshInstallHarness {
@@ -52,22 +115,30 @@ func buildFreshInstallHarness(t *testing.T, email, password string) *freshInstal
 
 	logger := zap.NewNop()
 	cfg := config.Defaults()
-	cfg.Database.Driver = "sqlite"
-	cfg.Database.DSN = t.TempDir() + "/orvix.db?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	configureFreshInstallDatabase(t, cfg)
 
 	db, err := config.NewDatabase(&cfg.Database, logger)
 	if err != nil {
 		t.Fatalf("database: %v", err)
 	}
-	if err := models.MigrateAllRaw(db); err != nil {
+	if err := migrateConfiguredDatabase(db, cfg.Database.Driver, logger); err != nil {
 		t.Fatalf("migrate: %v", err)
+	}
+
+	sqlDBForDialect, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db for dialect detection: %v", err)
+	}
+	dialect, err := dbdialect.Detect(sqlDBForDialect)
+	if err != nil {
+		t.Fatalf("detect dialect: %v", err)
 	}
 
 	authenticator, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
 	if err != nil {
 		t.Fatalf("authenticator: %v", err)
 	}
-	seedAdminUser(db, authenticator, logger, dbdialect.FromDriver("sqlite"))
+	seedAdminUser(db, authenticator, logger, dialect)
 
 	// Stage the admin and webmail UI bundles. We use a
 	// non-tempdir scratch path so that the test framework does
@@ -103,13 +174,17 @@ func buildFreshInstallHarness(t *testing.T, email, password string) *freshInstal
 	ff := license.NewFeatureFlags(logger)
 	router := api.NewRouter(cfg, authenticator, logger, db, reg, ff, nil)
 	return &freshInstallHarness{
-		router:     router,
-		sqlDB:      sqlDB,
-		email:      email,
-		password:   password,
-		adminDir:   adminDir,
-		webmailDir: webmailDir,
-		scratchDir: scratchDir,
+		router:        router,
+		sqlDB:         sqlDB,
+		gormDB:        db,
+		authenticator: authenticator,
+		logger:        logger,
+		dialect:       dialect,
+		email:         email,
+		password:      password,
+		adminDir:      adminDir,
+		webmailDir:    webmailDir,
+		scratchDir:    scratchDir,
 	}
 }
 
@@ -457,4 +532,130 @@ func minLen(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// TestFreshInstall_AdminTenantHasActiveSubscription is the regression
+// guard for the production incident "send rejected: no active
+// subscription" on a freshly installed instance. Root cause:
+// insertBootstrapAdmin provisioned the tenant, admin user, domain,
+// mailbox, and system folders, but never created a row in the
+// subscriptions table, so internal/billing.SendEnforcer.AllowSend
+// failed closed for the bootstrap admin's own tenant on the very first
+// send attempt. seedAdminUser now calls ensureBootstrapTenantSubscription
+// to grant a real, enforcer-visible subscription through the same
+// billing.Service.CreateSubscription path used elsewhere in the
+// codebase (not a bypass of enforcement).
+func TestFreshInstall_AdminTenantHasActiveSubscription(t *testing.T) {
+	h := buildFreshInstallHarness(t, "admin@orvix.email", "MaghaghaMos086")
+	t.Cleanup(func() { h.close(t) })
+
+	var tenantID int64
+	if err := h.sqlDB.QueryRow("SELECT id FROM tenants WHERE domain = "+h.dialect.Placeholder(1), "orvix.email").Scan(&tenantID); err != nil {
+		t.Fatalf("bootstrap tenant not found: %v", err)
+	}
+
+	var subCount int64
+	var status string
+	err := h.sqlDB.QueryRow("SELECT COUNT(*), COALESCE(MAX(status), '') FROM subscriptions WHERE tenant_id = "+h.dialect.Placeholder(1), tenantID).
+		Scan(&subCount, &status)
+	if err != nil {
+		t.Fatalf("query subscriptions: %v", err)
+	}
+	if subCount != 1 {
+		t.Fatalf("expected exactly 1 subscription row for the bootstrap tenant, got %d — the admin mailbox would be rejected with \"no active subscription\" on its first send", subCount)
+	}
+	if status != string(billing.SubActive) {
+		t.Fatalf("expected bootstrap tenant subscription status %q, got %q", billing.SubActive, status)
+	}
+}
+
+// TestFreshInstall_AdminMailboxSendIsEnforcerAllowed exercises the
+// actual internal/billing.SendEnforcer the webmail send handler calls,
+// against the real bootstrap-produced database state, proving the fix
+// end-to-end rather than only checking the subscriptions row shape.
+func TestFreshInstall_AdminMailboxSendIsEnforcerAllowed(t *testing.T) {
+	h := buildFreshInstallHarness(t, "admin@orvix.email", "MaghaghaMos086")
+	t.Cleanup(func() { h.close(t) })
+
+	var tenantID uint
+	if err := h.sqlDB.QueryRow("SELECT id FROM tenants WHERE domain = "+h.dialect.Placeholder(1), "orvix.email").Scan(&tenantID); err != nil {
+		t.Fatalf("bootstrap tenant not found: %v", err)
+	}
+
+	svc := billing.NewService(h.sqlDB)
+	quota := billing.NewQuotaService(h.sqlDB, svc)
+	enforcer := billing.NewSendEnforcer(h.sqlDB, svc, quota)
+
+	result := enforcer.AllowSend(t.Context(), billing.SendIdentity{TenantID: tenantID, MailboxID: 1}, 1)
+	if !result.Allowed {
+		t.Fatalf("bootstrap admin send was rejected: %s (this is the production incident this test guards against)", result.Reason)
+	}
+}
+
+// TestFreshInstall_SelfHealsSubscriptionForAlreadyBootstrappedTenant
+// proves the "admin already exists" branch of the REAL seedAdminUser
+// (not ensureBootstrapTenantSubscription called directly) repairs an
+// instance that was already installed before this fix shipped. It
+// re-invokes seedAdminUser against the harness's already-bootstrapped
+// admin user — verifyStoredAdminHash must succeed (proving the run
+// takes the early-return "admin already exists" path, not the
+// fresh-bootstrap path) and the missing subscription must still be
+// (re)provisioned by that path's self-healing call.
+func TestFreshInstall_SelfHealsSubscriptionForAlreadyBootstrappedTenant(t *testing.T) {
+	h := buildFreshInstallHarness(t, "admin@orvix.email", "MaghaghaMos086")
+	t.Cleanup(func() { h.close(t) })
+
+	var tenantID int64
+	if err := h.sqlDB.QueryRow("SELECT id FROM tenants WHERE domain = "+h.dialect.Placeholder(1), "orvix.email").Scan(&tenantID); err != nil {
+		t.Fatalf("bootstrap tenant not found: %v", err)
+	}
+	var userCountBefore int64
+	if err := h.sqlDB.QueryRow("SELECT COUNT(*) FROM users WHERE email = "+h.dialect.Placeholder(1), h.email).Scan(&userCountBefore); err != nil {
+		t.Fatalf("check admin user exists: %v", err)
+	}
+	if userCountBefore != 1 {
+		t.Fatalf("expected exactly 1 admin user before re-running seedAdminUser, got %d", userCountBefore)
+	}
+
+	// Simulate a pre-fix install: drop the subscription that
+	// seedAdminUser's initial call (inside buildFreshInstallHarness)
+	// already created, as if this instance had been installed before the
+	// fix existed.
+	if _, err := h.sqlDB.Exec("DELETE FROM subscriptions WHERE tenant_id = "+h.dialect.Placeholder(1), tenantID); err != nil {
+		t.Fatalf("simulate pre-fix state: %v", err)
+	}
+	var count int64
+	if err := h.sqlDB.QueryRow("SELECT COUNT(*) FROM subscriptions WHERE tenant_id = "+h.dialect.Placeholder(1), tenantID).Scan(&count); err != nil {
+		t.Fatalf("verify simulated state: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 subscriptions after simulated deletion, got %d", count)
+	}
+
+	// Re-run the REAL seedAdminUser — the exact function main() calls on
+	// every service start. The admin user already exists with a
+	// verifiable password hash (set up by buildFreshInstallHarness's own
+	// initial call to seedAdminUser), so this run must take the "admin
+	// already exists" early-return branch, not the fresh-bootstrap
+	// branch — proving the self-heal fires from the branch a real
+	// second-and-later service start actually takes.
+	seedAdminUser(h.gormDB, h.authenticator, h.logger, h.dialect)
+
+	// The admin user row must be untouched (still exactly one, same
+	// email) — confirms seedAdminUser did not fall through to the
+	// fresh-bootstrap branch and attempt to recreate it.
+	var userCountAfter int64
+	if err := h.sqlDB.QueryRow("SELECT COUNT(*) FROM users WHERE email = "+h.dialect.Placeholder(1), h.email).Scan(&userCountAfter); err != nil {
+		t.Fatalf("check admin user after re-run: %v", err)
+	}
+	if userCountAfter != 1 {
+		t.Fatalf("expected exactly 1 admin user after re-running seedAdminUser, got %d", userCountAfter)
+	}
+
+	if err := h.sqlDB.QueryRow("SELECT COUNT(*) FROM subscriptions WHERE tenant_id = "+h.dialect.Placeholder(1), tenantID).Scan(&count); err != nil {
+		t.Fatalf("verify self-healed state: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected self-healing to (re)provision exactly 1 subscription, got %d", count)
+	}
 }

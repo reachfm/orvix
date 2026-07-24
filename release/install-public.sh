@@ -354,7 +354,10 @@ try_download_sha256() {
 #                     orvix-doctor.sh, lib-asset-propagate.sh, apply-runtime-update.sh,
 #                     generate-vapid-keys.sh, reset-admin-password.sh, setup-https.sh,
 #                     setup-smtp-tls.sh, healthcheck.sh, diagnostics.sh}
-#   - release/admin/{index.html, app.js, styles.css}
+#   - release/admin/index.html plus whatever ES module it references (the
+#     production Admin UI is the React/Vite build under web/admin; its
+#     bundle filenames are content-hashed per build, e.g.
+#     release/admin/assets/index-<hash>.js — never a fixed name)
 #   - release/webmail/{index.html, sw.js, assets/auth-gate.js, assets/webmail.js}
 #   - release/marketing/{index.html, 404.html, robots.txt, sitemap.xml, marketing-assets/*.js}
 #   - VERSION, BUILDINFO
@@ -399,10 +402,6 @@ release/trust/orvix-release-signing.pub.pem
 release/scripts/healthcheck.sh
 release/scripts/diagnostics.sh
 release/admin/index.html
-release/admin/app.js
-release/admin/styles.css
-release/admin/modules/auth.js
-release/admin/modules/components.js
 release/webmail/index.html
 release/webmail/sw.js
 release/webmail/assets/auth-gate.js
@@ -421,6 +420,25 @@ REQUIRED
     fi
     find "$root/release/marketing/marketing-assets" -maxdepth 1 -type f -name '*.js' -print -quit 2>/dev/null | grep -q . || {
         printf 'BUNDLE_MISSING_FILES:\n  - release/marketing/marketing-assets/*.js\n' >&2
+        return 1
+    }
+    # The Admin UI is a React/Vite build with content-hashed asset
+    # filenames (release/admin/assets/index-<hash>.js) that differ every
+    # build, so its entrypoint can't be a fixed name in the REQUIRED list
+    # above. Instead, parse index.html's own <script type="module" src="...">
+    # reference and confirm THAT file exists in the bundle — this is the
+    # same check release/scripts/smoke-admin-browser.sh performs at
+    # release-build time, repeated here against the actual shipped bundle.
+    local admin_index="$root/release/admin/index.html"
+    local admin_module_src
+    admin_module_src="$(grep -oE 'type="module"[^>]*src="[^"]*"' "$admin_index" 2>/dev/null | head -n1 | sed -E 's/.*src="([^"]*)".*/\1/')"
+    if [ -z "$admin_module_src" ]; then
+        printf 'BUNDLE_MISSING_FILES:\n  - release/admin/index.html has no <script type="module" src="..."> entrypoint\n' >&2
+        return 1
+    fi
+    local admin_module_rel="${admin_module_src#/admin/}"
+    [ -e "$root/release/admin/$admin_module_rel" ] || {
+        printf 'BUNDLE_MISSING_FILES:\n  - release/admin/%s (referenced by index.html as %s)\n' "$admin_module_rel" "$admin_module_src" >&2
         return 1
     }
     return 0

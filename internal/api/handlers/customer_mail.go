@@ -141,7 +141,7 @@ func (h *Handler) ListGroups(c fiber.Ctx) error {
 		Description string `json:"description"`
 		CreatedAt   string `json:"created_at"`
 	}
-	var groups []Group
+	groups := []Group{}
 	for rows.Next() {
 		var g Group
 		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.CreatedAt); err != nil {

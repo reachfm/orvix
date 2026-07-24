@@ -110,7 +110,13 @@ func matrixLogin(t *testing.T, r *api.Router, email, pass string) string {
 	b, _ := json.Marshal(map[string]string{"email": email, "password": pass})
 	req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := r.App().Test(req)
+	// Timeout: 0 disables fiber's default 1-second Test() deadline. Login
+	// does a bcrypt/Argon2id verify (and possibly a rehash write), which can
+	// exceed 1s under CPU contention during a full-package run even though
+	// it's fast in isolation — see docs/MASTER_TODO.md /
+	// TestRehashOnLogin_ConcurrentPasswordChangeNotOverwritten for the
+	// identical bug this mirrors.
+	resp, err := r.App().Test(req, fiber.TestConfig{Timeout: 0})
 	if err != nil {
 		t.Fatalf("login: %v", err)
 	}
@@ -129,7 +135,9 @@ func matrixCSRF(t *testing.T, r *api.Router, token string) string {
 	t.Helper()
 	req := httptest.NewRequest("GET", "/api/v1/csrf-token", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := r.App().Test(req)
+	// Timeout: 0 — see matrixLogin above for why the default 1s deadline is
+	// unsafe here.
+	resp, err := r.App().Test(req, fiber.TestConfig{Timeout: 0})
 	if err != nil {
 		t.Fatalf("csrf: %v", err)
 	}

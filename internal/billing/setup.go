@@ -191,7 +191,43 @@ func CreateTables(db *sql.DB) error {
 			return fmt.Errorf("create table: %w", err)
 		}
 	}
+
+	// Invariant: exactly one subscription row per tenant. The inline
+	// `tenant_id INTEGER NOT NULL UNIQUE` column constraint above already
+	// enforces this on a table created fresh from this DDL, but
+	// `CREATE TABLE IF NOT EXISTS` is a no-op against any table that
+	// already existed from an earlier schema revision — it does NOT
+	// retroactively add the constraint. This explicit CREATE UNIQUE INDEX
+	// IF NOT EXISTS closes that gap defensively: it is idempotent and a
+	// safe no-op when the column constraint already covers it, and
+	// retrofits the invariant onto any pre-existing table that predates
+	// it. It will fail if the table somehow already contains duplicate
+	// tenant_id rows — that failure is intentionally surfaced (not
+	// swallowed) so a genuinely inconsistent database is not silently
+	// left that way.
+	if _, err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_subscriptions_tenant_id ON subscriptions(tenant_id)"); err != nil {
+		return fmt.Errorf("enforce one-subscription-per-tenant invariant: %w", err)
+	}
+
 	return nil
+}
+
+// isUniqueViolation reports whether err is a unique-constraint/index
+// violation from either supported driver: modernc.org/sqlite (message
+// contains "UNIQUE constraint failed") or pgx/lib-pq against PostgreSQL
+// (message contains "duplicate key value violates unique constraint",
+// the standard PostgreSQL error text for SQLSTATE 23505). Used to treat
+// "another concurrent call already created this tenant's subscription"
+// as the same outcome as the pre-existing-row check
+// (ErrTenantAlreadyHasSub), not a hard failure, closing the
+// check-then-insert race window for a tenant that has no row yet.
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "UNIQUE constraint failed") ||
+		strings.Contains(msg, "duplicate key value violates unique constraint")
 }
 
 // MigrateWebhookEvents migrates old webhook_events schema to the current

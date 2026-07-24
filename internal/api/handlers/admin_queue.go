@@ -200,14 +200,19 @@ func (h *Handler) AdminQueueDetail(c fiber.Ctx) error {
 	m.CreatedAt = createdAt.Format(time.RFC3339)
 
 	attempts := []fiber.Map{}
+	// coremail_delivery_attempts is the real, actively-written attempt-history
+	// table (internal/coremail/delivery/history.go). This previously queried
+	// a "queue_attempts" table that nothing in the codebase writes to and
+	// that has no migration anywhere — a rename-drift bug that silently
+	// degraded this endpoint to always-empty attempt history.
 	attRows, err := sqlDB.Query(
-		`SELECT attempt_number, attempted_at, result, error_message,
-		remote_host, status_code FROM queue_attempts WHERE queue_id = `+dial.Placeholder(1)+` ORDER BY attempt_number`, id)
+		`SELECT attempt_number, attempted_at, status, status_msg,
+		remote_host, status_code FROM coremail_delivery_attempts WHERE queue_entry_id = `+dial.Placeholder(1)+` ORDER BY attempt_number`, id)
 	if err == nil {
 		defer attRows.Close()
 		for attRows.Next() {
-			var num int
-			var attAt, result, errMsg, remote, statusCode string
+			var num, statusCode int
+			var attAt, result, errMsg, remote string
 			if err := attRows.Scan(&num, &attAt, &result, &errMsg, &remote, &statusCode); err != nil {
 				continue
 			}

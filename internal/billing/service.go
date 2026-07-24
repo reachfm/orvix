@@ -114,11 +114,27 @@ func (s *Service) SeedDefaultPlans() error {
 	})
 }
 
+// GetSubscription returns the tenant's subscription. The invariant
+// enforced at the write path (createSubscriptionWithDialect, backed by
+// the UNIQUE index on subscriptions.tenant_id — see CreateTables) is
+// that a tenant has AT MOST ONE row here, so this query should never
+// actually need to disambiguate between rows. "ORDER BY id DESC LIMIT 1"
+// is defense-in-depth only, for a database that predates the write-path
+// fix or the index (e.g. an existing production install upgrading
+// straight to this version, before CreateTables' defensive
+// CREATE UNIQUE INDEX IF NOT EXISTS has had a chance to run, or in the
+// narrow window during that startup call) — in that scenario the most
+// recently created row is authoritative, matching the write path's own
+// "reactivate in place" behavior which always operates on the most
+// recent existing row. This is not an alternative multi-row-per-tenant
+// design; it's a tie-break for otherwise-invalid state that should not
+// exist and is actively prevented going forward.
 func (s *Service) GetSubscription(tenantID uint) (*Subscription, error) {
 	row := s.db.QueryRow(`SELECT id, tenant_id, plan_id, status, billing_interval, trial_ends_at,
 		current_period_start, current_period_end, cancelled_at, past_due_since, grace_period_ends_at,
 		suspended_at, storage_mb, send_limit_day, provider, provider_sub_id, created_at, updated_at
-		FROM subscriptions WHERE tenant_id = `+s.dialect.Placeholder(1), tenantID)
+		FROM subscriptions WHERE tenant_id = `+s.dialect.Placeholder(1)+`
+		ORDER BY id DESC LIMIT 1`, tenantID)
 	var sub Subscription
 	err := row.Scan(&sub.ID, &sub.TenantID, &sub.PlanID, &sub.Status, &sub.BillingInterval,
 		&sub.TrialEndsAt, &sub.CurrentPeriodStart, &sub.CurrentPeriodEnd, &sub.CancelledAt,
@@ -172,6 +188,31 @@ func (s *Service) createSubscriptionTx(tx *sql.Tx, plan *Plan, tenantID uint, pl
 	return s.createSubscriptionWithDialect(tx, s.dialect, plan, tenantID, interval, trialDays)
 }
 
+// createSubscriptionWithDialect enforces the invariant that a tenant has
+// AT MOST ONE row in subscriptions at any time (backed by the UNIQUE
+// index on tenant_id — see CreateTables). Three outcomes:
+//
+//  1. No existing row: insert a fresh subscription.
+//  2. Existing row with status Cancelled or Expired: reactivate that
+//     SAME row in place (UPDATE, not INSERT) — a cancelled/expired
+//     subscription is not history to preserve as a second row, it is
+//     the tenant's one-and-only billing record being renewed.
+//  3. Existing row in any other status (Trialing, Active, PastDue,
+//     Suspended): refuse — ErrTenantAlreadyHasSub. Never silently
+//     overwritten.
+//
+// Concurrency: on Postgres the existing-row lookup takes FOR UPDATE,
+// serializing concurrent callers against the same tenant_id row for the
+// duration of the transaction (mirrors the existing pattern in
+// send_enforcer.go). On SQLite, the runtime's *sql.DB is configured with
+// SetMaxOpenConns(1) (see internal/config/database.go), so all
+// transactions against it are already fully serialized — no additional
+// locking is needed or available. For the "no existing row" case on
+// either engine, if a concurrent caller's INSERT wins the race first,
+// this caller's INSERT fails on the tenant_id UNIQUE index; that failure
+// is caught by isUniqueViolation and translated to ErrTenantAlreadyHasSub
+// rather than a raw driver error, so no path can ever produce two rows
+// for the same tenant.
 func (s *Service) createSubscriptionWithDialect(tx *sql.Tx, dial *dbdialect.Info, plan *Plan, tenantID uint, interval BillingInterval, trialDays int) (*Subscription, error) {
 	now := time.Now().UTC()
 	periodEnd := now.AddDate(0, 1, 0)
@@ -183,17 +224,42 @@ func (s *Service) createSubscriptionWithDialect(tx *sql.Tx, dial *dbdialect.Info
 		status = SubTrialing
 		periodEnd = t
 	}
+
+	lookupQuery := "SELECT id, status FROM subscriptions WHERE tenant_id = " + dial.Placeholder(1) + " ORDER BY id DESC LIMIT 1"
+	if dial.IsPostgres() {
+		lookupQuery += " FOR UPDATE"
+	}
 	var existingID uint
-	existingErr := tx.QueryRow("SELECT id FROM subscriptions WHERE tenant_id = "+dial.Placeholder(1), tenantID).Scan(&existingID)
-	if existingErr == nil {
-		var existingStatus SubscriptionStatus
-		if err := tx.QueryRow("SELECT status FROM subscriptions WHERE id = "+dial.Placeholder(1), existingID).Scan(&existingStatus); err != nil {
-			return nil, err
-		}
+	var existingStatus SubscriptionStatus
+	existingErr := tx.QueryRow(lookupQuery, tenantID).Scan(&existingID, &existingStatus)
+	switch {
+	case existingErr == nil:
 		if existingStatus != SubCancelled && existingStatus != SubExpired {
 			return nil, ErrTenantAlreadyHasSub
 		}
-	} else if !errors.Is(existingErr, sql.ErrNoRows) {
+		// Reactivate the existing row in place. Clears the
+		// cancellation/suspension/past-due bookkeeping fields so the
+		// reactivated subscription reads as a clean, current record —
+		// not a cancelled one that happens to have an Active status.
+		_, err := tx.Exec(
+			`UPDATE subscriptions SET plan_id = `+dial.Placeholder(1)+`, status = `+dial.Placeholder(2)+
+				`, billing_interval = `+dial.Placeholder(3)+`, trial_ends_at = `+dial.Placeholder(4)+
+				`, current_period_start = `+dial.Placeholder(5)+`, current_period_end = `+dial.Placeholder(6)+
+				`, cancelled_at = NULL, past_due_since = NULL, grace_period_ends_at = NULL, suspended_at = NULL`+
+				`, storage_mb = `+dial.Placeholder(7)+`, send_limit_day = `+dial.Placeholder(8)+
+				`, updated_at = `+dial.Placeholder(9)+
+				` WHERE id = `+dial.Placeholder(10),
+			plan.ID, status, interval, trialEnd, now, periodEnd, plan.StorageMB, plan.SendLimitDay, now, existingID,
+		)
+		if err != nil {
+			return nil, err
+		}
+		return &Subscription{
+			ID: existingID, TenantID: tenantID, PlanID: plan.ID, Status: status, BillingInterval: interval,
+			TrialEndsAt: trialEnd, CurrentPeriodStart: now, CurrentPeriodEnd: periodEnd,
+			StorageMB: plan.StorageMB, SendLimitDay: plan.SendLimitDay, UpdatedAt: now,
+		}, nil
+	case !errors.Is(existingErr, sql.ErrNoRows):
 		return nil, existingErr
 	}
 
@@ -217,6 +283,9 @@ func (s *Service) createSubscriptionWithDialect(tx *sql.Tx, dial *dbdialect.Info
 		}
 	}
 	if insertErr != nil {
+		if isUniqueViolation(insertErr) {
+			return nil, ErrTenantAlreadyHasSub
+		}
 		return nil, insertErr
 	}
 	return &Subscription{
@@ -250,7 +319,11 @@ func (s *Service) TransitionState(tenantID uint, newStatus SubscriptionStatus) e
 			pastDueSince      *time.Time
 			gracePeriodEndsAt *time.Time
 		}
-		err := tx.QueryRow("SELECT status, past_due_since, grace_period_ends_at FROM subscriptions WHERE tenant_id = "+s.dialect.Placeholder(1), tenantID).
+		// ORDER BY id DESC LIMIT 1: defense-in-depth tie-break, matching
+		// GetSubscription — the write path enforces at most one row per
+		// tenant via a UNIQUE index, so this only matters for a database
+		// predating that enforcement.
+		err := tx.QueryRow("SELECT status, past_due_since, grace_period_ends_at FROM subscriptions WHERE tenant_id = "+s.dialect.Placeholder(1)+" ORDER BY id DESC LIMIT 1", tenantID).
 			Scan(&current.status, &current.pastDueSince, &current.gracePeriodEndsAt)
 		if err != nil {
 			return ErrSubscriptionNotFound

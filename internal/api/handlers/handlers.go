@@ -1035,6 +1035,13 @@ func (h *Handler) Me(c fiber.Ctx) error {
 // Optional server-side filter query params:
 //   - q=<substring> : case-insensitive substring match on domain
 //   - status=active|suspended : exact match on status
+//
+// Tenant isolation: the same visibility rules as ListMailboxes /
+// ExportDomainsCSV / GetDomain apply. Super admins (isSuperRole) see every
+// tenant's domains; every other caller is hard-scoped to their authenticated
+// tenant (h.scopedTenantID) via a mandatory WHERE tenant_id clause. Tenant
+// identity comes exclusively from the authenticated context — never from a
+// query parameter, route param, body, or header.
 func (h *Handler) ListDomains(c fiber.Ctx) error {
 	type domainRow struct {
 		ID           uint   `json:"id"`
@@ -1055,6 +1062,10 @@ func (h *Handler) ListDomains(c fiber.Ctx) error {
 
 	confs := []string{"deleted_at IS NULL"}
 	args := []interface{}{}
+	if !isSuperRole(c) {
+		confs = append(confs, "tenant_id = "+h.dialect.Placeholder(len(args)+1))
+		args = append(args, h.scopedTenantID(c))
+	}
 	if q != "" {
 		confs = append(confs, "LOWER(name) LIKE "+h.dialect.Placeholder(len(args)+1))
 		args = append(args, "%"+strings.ToLower(q)+"%")
@@ -1745,6 +1756,77 @@ func (h *Handler) GetMailbox(c fiber.Ctx) error {
 			"queue_items": queueItems,
 		},
 	})
+}
+
+// ListMailboxes returns the mailbox collection for GET /admin/mailboxes.
+// Scoped like GetMailbox/callerOwnsTenant: super admins (RoleSuperAdmin,
+// RolePlatformSuperAdmin) see every tenant's mailboxes; every other admin
+// caller sees only their own tenant's mailboxes.
+func (h *Handler) ListMailboxes(c fiber.Ctx) error {
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
+	}
+
+	type mailboxRow struct {
+		ID         uint   `json:"id"`
+		Email      string `json:"email"`
+		DomainName string `json:"domain"`
+		Status     string `json:"status"`
+		IsAdmin    bool   `json:"is_admin"`
+		CreatedAt  string `json:"created_at"`
+	}
+
+	// Same optional server-side filters ListUsers previously supported
+	// at this route (q substring on email, status exact match, admin
+	// true/false) — preserved here so existing callers/tests are not
+	// regressed by the mailbox-shaped response fix.
+	q := strings.TrimSpace(c.Query("q"))
+	statusFilter := strings.TrimSpace(c.Query("status"))
+	adminFilter := strings.ToLower(strings.TrimSpace(c.Query("admin")))
+
+	conds := []string{"m.deleted_at IS NULL"}
+	args := []interface{}{}
+	if !isSuperRole(c) {
+		conds = append(conds, "m.tenant_id = "+h.dialect.Placeholder(len(args)+1))
+		args = append(args, h.scopedTenantID(c))
+	}
+	if q != "" {
+		conds = append(conds, "LOWER(m.email) LIKE "+h.dialect.Placeholder(len(args)+1))
+		args = append(args, "%"+strings.ToLower(q)+"%")
+	}
+	if statusFilter == "active" || statusFilter == "suspended" {
+		conds = append(conds, "m.status = "+h.dialect.Placeholder(len(args)+1))
+		args = append(args, statusFilter)
+	}
+	switch adminFilter {
+	case "true":
+		conds = append(conds, "m.is_admin = "+h.dialect.TrueLiteral())
+	case "false":
+		conds = append(conds, "m.is_admin = "+h.dialect.FalseLiteral())
+	}
+
+	query := "SELECT m.id, m.email, COALESCE(d.name, ''), m.status, m.is_admin, m.created_at" +
+		" FROM coremail_mailboxes m LEFT JOIN coremail_domains d ON m.domain_id = d.id" +
+		" WHERE " + strings.Join(conds, " AND ") +
+		" ORDER BY m.id ASC"
+
+	rows, qerr := sqlDB.Query(query, args...)
+	if qerr != nil {
+		h.logger.Error("list mailboxes query failed", zap.Error(qerr))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list mailboxes"})
+	}
+	defer rows.Close()
+
+	mailboxes := []mailboxRow{}
+	for rows.Next() {
+		var m mailboxRow
+		if err := rows.Scan(&m.ID, &m.Email, &m.DomainName, &m.Status, &m.IsAdmin, &m.CreatedAt); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "scan error"})
+		}
+		mailboxes = append(mailboxes, m)
+	}
+	return c.JSON(mailboxes)
 }
 
 // ListUsers returns all users/mailboxes with explicit identity contract.
@@ -3124,17 +3206,33 @@ func (h *Handler) AdminSummary(c fiber.Ctx) error {
 	})
 }
 
-// ExportMailboxesCSV streams all live mailboxes as CSV. Admin-only (router group).
+// ExportMailboxesCSV streams live mailboxes as CSV. Admin-only (router group).
 // Columns: email,status,is_admin
 // Soft-deleted rows are excluded. NEVER read or include password_hash, password,
 // token, jwt, bearer, secret, or any message body / headers.
+//
+// Tenant isolation: the same visibility rules as ListMailboxes / GetMailbox
+// apply. Super admins (isSuperRole) export every tenant; every other caller is
+// hard-scoped to their authenticated tenant (h.scopedTenantID) via a mandatory
+// WHERE tenant_id clause. The tenant identity comes exclusively from the
+// authenticated context — never from a query parameter, route param, body, or
+// header — so a tenant admin cannot escape their tenant to read another's rows.
 func (h *Handler) ExportMailboxesCSV(c fiber.Ctx) error {
 	sqlDB, err := h.db.DB()
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database error"})
 	}
 
-	rows, qerr := sqlDB.Query("SELECT email, status, is_admin FROM coremail_mailboxes WHERE deleted_at IS NULL ORDER BY id ASC")
+	conds := []string{"deleted_at IS NULL"}
+	args := []interface{}{}
+	if !isSuperRole(c) {
+		conds = append(conds, "tenant_id = "+h.dialect.Placeholder(len(args)+1))
+		args = append(args, h.scopedTenantID(c))
+	}
+	query := "SELECT email, status, is_admin FROM coremail_mailboxes WHERE " +
+		strings.Join(conds, " AND ") + " ORDER BY id ASC"
+
+	rows, qerr := sqlDB.Query(query, args...)
 	if qerr != nil {
 		h.logger.Error("export mailboxes query failed", zap.Error(qerr))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "export failed"})
@@ -3167,9 +3265,14 @@ func (h *Handler) ExportMailboxesCSV(c fiber.Ctx) error {
 	return c.SendString(b.String())
 }
 
-// ExportDomainsCSV streams all live domains as CSV. Admin-only (router group).
+// ExportDomainsCSV streams live domains as CSV. Admin-only (router group).
 // Columns: domain,status,plan,mailbox_count
 // mailbox_count is the live count from coremail_mailboxes for each domain.
+//
+// Tenant isolation: the same visibility rules as GetDomain apply. Super admins
+// (isSuperRole) export every tenant's domains; every other caller is hard-scoped
+// to their authenticated tenant (h.scopedTenantID) via a mandatory WHERE
+// tenant_id clause. Tenant identity comes only from the authenticated context.
 func (h *Handler) ExportDomainsCSV(c fiber.Ctx) error {
 	sqlDB, err := h.db.DB()
 	if err != nil {
@@ -3187,7 +3290,16 @@ func (h *Handler) ExportDomainsCSV(c fiber.Ctx) error {
 	}
 	var domainRows []domainRow
 	{
-		rows, qerr := sqlDB.Query("SELECT id, name, plan, status FROM coremail_domains WHERE deleted_at IS NULL ORDER BY id ASC")
+		conds := []string{"deleted_at IS NULL"}
+		args := []interface{}{}
+		if !isSuperRole(c) {
+			conds = append(conds, "tenant_id = "+h.dialect.Placeholder(len(args)+1))
+			args = append(args, h.scopedTenantID(c))
+		}
+		query := "SELECT id, name, plan, status FROM coremail_domains WHERE " +
+			strings.Join(conds, " AND ") + " ORDER BY id ASC"
+
+		rows, qerr := sqlDB.Query(query, args...)
 		if qerr != nil {
 			h.logger.Error("export domains query failed", zap.Error(qerr))
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "export failed"})

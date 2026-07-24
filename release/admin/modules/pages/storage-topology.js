@@ -4,7 +4,7 @@
    Wires:
      GET /api/v1/admin/storage/volumes
 
-   Audit doc reference: docs/ORVIX_STALWART_ENTERPRISE_PARITY_AUDIT.md
+   Audit doc reference: docs/ORVIX_ENTERPRISE_PARITY_AUDIT.md
      §2.6 row 28 (Storage topology)
      §3 deliverable G (Storage topology truth)
 

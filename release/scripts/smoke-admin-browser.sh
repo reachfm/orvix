@@ -184,10 +184,22 @@ else
 fi
 
 # ── 6. Static index.html contract: module script + form targets ─
-if ! grep -qP 'type="module".*\.js"' "$ADMIN_DIR/index.html"; then
-    fail "index.html does not load a JS module entry point"
+# Accept either unbundled app.js or bundled hashed assets/index-*.js.
+# The built admin uses a hashed entrypoint from the minifier; the source
+# would load app.js directly. Both are valid ES modules.
+if ! grep -q 'type="module"' "$ADMIN_DIR/index.html"; then
+    fail "index.html does not load an ES module"
 fi
-pass "index.html loads an ES module entry point"
+module_src="$(grep -oE 'type="module"[^>]*src="[^"]*' "$ADMIN_DIR/index.html" | sed 's/.*src="//')"
+if [ -z "$module_src" ]; then
+    fail "index.html has type=\"module\" but no src attribute"
+fi
+# Resolve relative paths (remove leading /admin/ prefix for local file lookup)
+resolved_path="${module_src#/admin/}"
+if [ ! -f "$ADMIN_DIR/$resolved_path" ]; then
+    fail "index.html module src '$module_src' does not resolve to an existing file (checked: $ADMIN_DIR/$resolved_path)"
+fi
+pass "index.html loads an ES module: <script type=\"module\" src=\"$module_src\"></script>"
 
 # The static wrapper in #login-view MUST NOT contain the actual
 # form fields; if it does, the form is in the DOM as static HTML

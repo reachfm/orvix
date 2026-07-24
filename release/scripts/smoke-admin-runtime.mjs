@@ -89,8 +89,12 @@ async function walk(dir) {
   const out = [];
   for (const e of await fs.readdir(dir, { withFileTypes: true })) {
     const p = path.join(dir, e.name);
-    if (e.isDirectory()) out.push(...await walk(p));
-    else if (e.name.endsWith('.js')) out.push(p);
+    if (e.isDirectory()) {
+      // Skip assets/ — it contains minified/built output that requires
+      // browser APIs not available in the stubbed environment.
+      if (e.name === 'assets') continue;
+      out.push(...await walk(p));
+    } else if (e.name.endsWith('.js')) out.push(p);
   }
   return out;
 }

@@ -21,7 +21,7 @@
 // The file deliberately avoids creating fake features: there is no replica
 // or shard knob here, no AI-classifier surface, no reseller portal. Each
 // endpoint corresponds to a real backend table or column that already
-// exists in the schema (see docs/ORVIX_STALWART_ENTERPRISE_PARITY_AUDIT.md
+// exists in the schema (see docs/ORVIX_ENTERPRISE_PARITY_AUDIT.md
 // for the full matrix).
 package handlers
 

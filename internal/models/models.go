@@ -736,7 +736,11 @@ func MigrateAllRaw(db *gorm.DB) error {
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			deleted_at DATETIME
 		)`,
-		// Customer Portal — Groups (for team collaboration).
+		// Customer-facing mailing/distribution groups
+		// (internal/api/handlers/customer_mail.go: ListGroups,
+		// CreateGroup, DeleteGroup). Distinct from the admin-only
+		// coremail_domain_groups/coremail_admin_groups above —
+		// this is the tenant self-service groups feature.
 		`CREATE TABLE IF NOT EXISTS coremail_groups (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			tenant_id INTEGER NOT NULL DEFAULT 0,
@@ -1222,9 +1226,8 @@ func MigrateAllRaw(db *gorm.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_coremail_mailboxes_email ON coremail_mailboxes(email)`,
 		`CREATE INDEX IF NOT EXISTS idx_coremail_aliases_domain_id ON coremail_aliases(domain_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_coremail_aliases_from ON coremail_aliases(from_addr)`,
-		// Customer Portal group indexes
-		`CREATE INDEX IF NOT EXISTS idx_coremail_groups_tenant ON coremail_groups(tenant_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_coremail_group_members_group ON coremail_group_members(group_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_coremail_groups_tenant_id ON coremail_groups(tenant_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_coremail_group_members_group_id ON coremail_group_members(group_id)`,
 		// Admin enterprise v2 indexes
 		`CREATE INDEX IF NOT EXISTS idx_account_classes_tenant ON coremail_account_classes(tenant_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_domain_groups_tenant ON coremail_domain_groups(tenant_id)`,

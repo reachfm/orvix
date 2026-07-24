@@ -6,7 +6,7 @@
      POST /api/v1/monitoring/alerts/:id/resolve   (CSRF)
      GET  /api/v1/monitoring/alert-deliveries     (audit)
 
-   Audit doc reference: docs/ORVIX_STALWART_ENTERPRISE_PARITY_AUDIT.md
+   Audit doc reference: docs/ORVIX_ENTERPRISE_PARITY_AUDIT.md
      §2.5 Observability, alerting, telemetry   (rows 21–25)
 
    Honesty contract:

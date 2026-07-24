@@ -8,7 +8,7 @@
      GET /api/v1/admin/runtime
      GET /api/v1/admin/queue/summary
 
-   Audit doc reference: docs/ORVIX_STALWART_ENTERPRISE_PARITY_AUDIT.md
+   Audit doc reference: docs/ORVIX_ENTERPRISE_PARITY_AUDIT.md
      §2.5 rows 21–25
      §3 deliverable B (Observability page)
 

@@ -125,123 +125,38 @@ function startServer() {
     const server = https.createServer({ key: SMOKE_KEY, cert: SMOKE_CERT }, async (req, res) => {
       try {
         const url = new URL(req.url, 'https://127.0.0.1');
-        requests.push(`${req.method} ${url.pathname}`);
-        if (url.pathname.startsWith('/api/')) {
-          if (url.pathname === '/api/v1/me') {
+        const pathname = url.pathname;
+        requests.push(`${req.method} ${pathname}`);
+        // web/admin/src/api.ts uses BASE = "/api/v1" — the React app never
+        // requests /admin/api/...; no path normalization needed here.
+        if (pathname.startsWith('/api/')) {
+          if (pathname === '/api/v1/me') {
             const cookie = req.headers.cookie || '';
             if (cookie.includes(`__Host-orvix_session=${SMOKE_SESSION}`)) {
               return sendJSON(res, 200, { email: 'admin@example.com', roles: ['admin'], role: 'admin' });
             }
-            return sendJSON(res, 401, { code: 'unauthorized', message: 'unauthorized' });
+            return sendJSON(res, 401, { error: 'unauthorized' });
           }
-          if (url.pathname === '/api/v1/auth/login' && req.method === 'POST') {
+          if (pathname === '/api/v1/auth/login' && req.method === 'POST') {
             const body = await readBody(req);
-            if (body.email && body.password) return sendJSON(res, 200, {
-              status: 'ok',
-            }, {
-              'set-cookie': `__Host-orvix_session=${SMOKE_SESSION}; Path=/; HttpOnly; Secure; SameSite=Lax`,
-            });
-            return sendJSON(res, 401, { code: 'invalid_credentials', message: 'invalid credentials' });
-          }
-          if (url.pathname === '/api/v1/csrf-token') return sendJSON(res, 200, { csrf_token: 'csrf-functional' });
-          if (url.pathname === '/api/v1/health') return sendJSON(res, 200, { status: 'ok' });
-          if (url.pathname === '/api/v1/domains') {
-            if (req.method === 'GET') return sendJSON(res, 200, { domains: [{
-              domain: 'example.com', name: 'example.com',
-              status: 'active', plan: 'smb',
-              max_mailboxes: 50, max_aliases: 20, max_quota_mb: 1024,
-              dkim_enabled: true, dkim_selector: 'default',
-              dmarc_enabled: true, mtasts_enabled: false,
-              mailbox_count: 1, updated_at: '2026-01-01T00:00:00Z',
-            }] });
-            if (req.method === 'POST') {
-              const body = await readBody(req);
-              // Echo every advanced field the new modal sends so
-              // the modal can be honest about what it persisted.
-              return sendJSON(res, 201, {
-                domain: body.name || 'example.com',
-                name: body.name || 'example.com',
-                status: body.status || 'active',
-                plan: body.plan || 'smb',
-                description: body.description || '',
-                max_mailboxes: body.max_mailboxes || 0,
-                max_aliases: body.max_aliases || 0,
-                max_quota_mb: body.max_quota_mb || 0,
-                dkim_enabled: !!body.dkim_enabled,
-                dkim_selector: body.dkim_selector || '',
-                dmarc_enabled: !!body.dmarc_enabled,
-                mtasts_enabled: !!body.mtasts_enabled,
-                catchall_address: body.catchall_address || '',
-                abuse_contact: body.abuse_contact || '',
-                mailbox_count: 0,
+            // Match the real backend contract (internal/api/handlers/handlers.go
+            // Login): success sets the session cookie; failure returns
+            // {"error": "invalid credentials"} — the exact field web/admin/src/api.ts
+            // reads to build the thrown Error's .message.
+            if (body.email === 'admin@example.com' && body.password === 'correct horse battery staple') {
+              return sendJSON(res, 200, { status: 'ok' }, {
+                'set-cookie': `__Host-orvix_session=${SMOKE_SESSION}; Path=/; HttpOnly; Secure; SameSite=Lax`,
               });
             }
+            return sendJSON(res, 401, { error: 'invalid credentials' });
           }
-          if (url.pathname.startsWith('/api/v1/domains/')) {
-            const parts = url.pathname.split('/');
-            const dn = decodeURIComponent(parts[parts.length - 1] || 'example.com');
-            if (req.method === 'GET') return sendJSON(res, 200, {
-              domain: dn, name: dn,
-              status: 'active', plan: 'smb',
-              description: 'smoke test fixture',
-              max_mailboxes: 50, max_aliases: 20, max_quota_mb: 1024,
-              mailbox_count: 1,
-              dkim_enabled: true, dkim_selector: 'default',
-              dmarc_enabled: true, mtasts_enabled: false,
-              catchall_address: '', abuse_contact: '',
-              created_at: '2026-01-01T00:00:00Z',
-              updated_at: '2026-01-01T00:00:00Z',
-              mailboxes: [{ mailbox_id: 1, email: 'admin@example.com', status: 'active', is_admin: true }],
-            });
-            if (req.method === 'PATCH') {
-              const body = await readBody(req);
-              return sendJSON(res, 200, { applied: Object.keys(body || {}), domain: dn });
-            }
-            if (req.method === 'DELETE') return sendJSON(res, 204, '');
+          if (pathname === '/api/v1/auth/logout' && req.method === 'POST') {
+            return sendJSON(res, 200, { status: 'ok' }, { 'set-cookie': '__Host-orvix_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0' });
           }
-          if (url.pathname === '/api/v1/mailboxes') {
-            if (req.method === 'GET') return sendJSON(res, 200, { mailboxes: [] });
-            if (req.method === 'POST') return sendJSON(res, 201, { id: 'mbox-1', email: 'admin@example.com' });
-          }
-          if (url.pathname === '/api/v1/admin/account-classes') return sendJSON(res, 200, { classes: [] });
-          if (url.pathname === '/api/v1/admin/users') return sendJSON(res, 200, { users: [] });
-          if (url.pathname === '/api/v1/admin/admin-groups') return sendJSON(res, 200, { groups: [] });
-          if (url.pathname === '/api/v1/admin/acl-rules') return sendJSON(res, 200, { rules: [] });
-          if (url.pathname === '/api/v1/admin/acceptance-rules') return sendJSON(res, 200, { rules: [] });
-          if (url.pathname === '/api/v1/admin/incoming-msg-rules') return sendJSON(res, 200, { rules: [] });
-          if (url.pathname === '/api/v1/admin/mailing-lists') return sendJSON(res, 200, { lists: [] });
-          if (url.pathname === '/api/v1/admin/public-folders') return sendJSON(res, 200, { folders: [] });
-          if (url.pathname === '/api/v1/admin/audit-logs') return sendJSON(res, 200, { logs: [] });
-          if (url.pathname === '/api/v1/admin/runtime') return sendJSON(res, 200, {
-            hostname: 'mock-host', version: '1.0.0', status: 'ok', listeners: [],
-          });
-          if (url.pathname === '/api/v1/admin/summary') return sendJSON(res, 200, {
-            mail: { domain_count: 1, mailbox_count: 1, active_count: 1, suspended_count: 0 },
-            status: 'ok', version: '1.0.0',
-          });
-          if (url.pathname === '/api/v1/admin/settings') return sendJSON(res, 200, {
-            general:   { hostname: 'mock-host', primary_domain: 'example.com', version: '1.0.0' },
-            build:     { version: '1.0.0', commit: 'mock-commit', channel: 'stable', go_version: 'go1.22' },
-            security:  { password_min_len: 8, session_ttl_seconds: 3600, refresh_ttl_seconds: 86400 },
-            backup:    { dir: '/var/backups/orvix/', retention_count: 7 },
-            dns:       { public_ipv4: '127.0.0.1', public_ipv6: '' },
-            mail_listeners: { smtp_port: 25, submission_port: 587, imap_port: 143 },
-            mutable_fields: [],
-            _settings_persistence: { enabled: false, note: 'mock' },
-          });
-          if (url.pathname === '/api/v1/admin/mfa/status') return sendJSON(res, 200, { enabled: false });
-          if (url.pathname === '/api/v1/license') return sendJSON(res, 200, {
-            mode: 'community', tier: 'community', public_key_present: true, valid: true, expired: false,
-          });
-          if (url.pathname.startsWith('/api/v1/admin/dns/') && url.pathname.endsWith('/plan')) {
-            return sendJSON(res, 200, { records: [
-              { type: 'MX', host: '@', value: '10 mail.example.com.', priority: 10 },
-              { type: 'TXT', host: '@', value: 'v=spf1 mx -all' },
-            ] });
-          }
-          if (url.pathname.startsWith('/api/v1/domains/') && url.pathname.endsWith('/audit')) {
-            return sendJSON(res, 200, { entries: [] });
-          }
+          // Generic 200 for any other API call the authenticated shell makes
+          // while rendering its default (Dashboard) tab — the functional
+          // smoke only asserts the login/logout contract and that the
+          // authenticated shell renders, not every page's data.
           return sendJSON(res, 200, {});
         }
         let rel = url.pathname;
@@ -411,6 +326,18 @@ async function main() {
         console.error(`browser ${msg.level}: ${(msg.text || '')} ${(msg.url || '')}:${msg.line || 0}`);
       }
     });
+    // Track document/script/style response status codes so a 404 or wrong
+    // MIME type fails loudly instead of surfacing only as a later timeout.
+    // Registered before navigation so the initial document/asset requests
+    // are not missed.
+    const assetStatuses = new Map();
+    cdp.on('Network.responseReceived', (p) => {
+      const r = p.response || {};
+      const type = p.type; // Document, Script, Stylesheet, ...
+      if (['Document', 'Script', 'Stylesheet'].includes(type)) {
+        assetStatuses.set(r.url, { status: r.status, mimeType: r.mimeType });
+      }
+    });
     await cdp.send('Network.enable');
     await cdp.send('Page.navigate', { url: `https://127.0.0.1:${port}/admin/` });
     await new Promise((resolve) => cdp.on('Page.loadEventFired', resolve));
@@ -430,85 +357,97 @@ async function main() {
       return res.result && res.result.value;
     };
     const exists = (sel) => `!!document.querySelector(${JSON.stringify(sel)})`;
+    const isVisible = (sel) => `(() => {
+      const el = document.querySelector(${JSON.stringify(sel)});
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      const cs = getComputedStyle(el);
+      return r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none';
+    })()`;
+    const bodyText = () => evalJS(`document.body?.innerText || ''`);
     const mainText = () => evalJS(`document.querySelector('#root')?.innerText?.trim() || ''`);
+    // React's controlled <input> tracks value changes via its own value
+    // setter; a plain `el.value = x; dispatchEvent(new Event('input'))`
+    // is invisible to React because it bypasses that tracked setter. Use
+    // the native HTMLInputElement setter directly so React's onChange fires.
+    const setInputValue = (sel, value) => `(() => {
+      const el = document.querySelector(${JSON.stringify(sel)});
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(el, ${JSON.stringify(value)});
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`;
 
-    // Verify CDP evaluation works at all
-    const docType = await evalJS(`typeof document`);
-    console.error(`bootstrap: typeof document = ${docType}`);
-    // React SPA renders into #root — no static #login-view element.
-    // Wait for login form to appear (React Query fetch /api/v1/me completes).
-    await waitFor(() => evalJS(exists('input[type="email"]')), 'email input visible', 15000);
-    await waitFor(() => evalJS(exists('input[type="password"]')), 'password input visible');
-    await waitFor(() => evalJS(exists('button')), 'login button visible');
+    // 1. /admin/ loads successfully — CDP already confirmed via
+    // Page.loadEventFired above. Verify document/script/style requests
+    // resolved 2xx with sane MIME types.
+    for (const [reqUrl, info] of assetStatuses) {
+      if (info.status < 200 || info.status >= 300) {
+        fail(`asset did not load with 2xx: ${reqUrl} -> ${info.status}`);
+      }
+    }
+    if (assetStatuses.size < 2) fail(`expected document + script/style asset responses to be tracked, got ${assetStatuses.size}`);
+
+    // 2. Unauthenticated /api/v1/me (401, no cookie) must produce a visible
+    // login screen: email input, password input, submit button. The React
+    // component (web/admin/src/components/LoginPage.tsx) sets explicit
+    // ids on these elements, so we assert against them directly rather
+    // than the looser input[type=...] selectors.
+    await waitFor(() => evalJS(isVisible('#login-email')), 'visible email input', 15000);
+    await waitFor(() => evalJS(isVisible('#login-password')), 'visible password input');
+    await waitFor(() => evalJS(isVisible('#login-button')), 'visible submit button');
 
     // Login card: React app renders a centered card in #root.
     const viewportWidth = await evalJS(`window.innerWidth || 0`);
     console.error(`login viewport width: ${Math.round(viewportWidth)}px`);
-    const loginContainer = await evalJS(`document.querySelector('#root > div')?.getBoundingClientRect()?.width || 0`);
-    // The inner card is at #root > div > div
     const cardWidth = await evalJS(`document.querySelector('#root > div > div')?.getBoundingClientRect()?.width || 0`);
     console.error(`login card width: ${Math.round(cardWidth)}px`);
     if (cardWidth < 320 && cardWidth > 0) fail(`LOGIN_CARD_TOO_NARROW: login card is ${Math.round(cardWidth)}px wide (min 320px required)`);
 
-    const inputWidth = await evalJS(`document.querySelector('input[type="email"]')?.getBoundingClientRect()?.width || 0`);
-    console.error(`login email input width: ${Math.round(inputWidth)}px`);
+    // 3. Invalid credentials: submit, expect the API call, expect a visible
+    // error state (no page error, no silent failure).
+    await evalJS(setInputValue('#login-email', 'admin@example.com'));
+    await evalJS(setInputValue('#login-password', 'wrong-password'));
+    await evalJS(`document.querySelector('#login-button').click()`);
+    await waitFor(() => evalJS(isVisible('#login-error')), 'visible login error after invalid credentials');
+    if (!requests.includes('POST /api/v1/auth/login')) fail('invalid-credentials login POST was not sent');
 
-    const btnWidth = await evalJS(`document.querySelector('#root button')?.getBoundingClientRect()?.width || 0`);
-    console.error(`login button width: ${Math.round(btnWidth)}px`);
-
-    // Set email value via native input value setter to trigger React state
-    await evalJS(`
-      (() => {
-        const el = document.querySelector('input[type="email"]');
-        if (el) {
-          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-          setter.call(el, 'admin@orvix.email');
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-        }
-      })()
-    `);
-    // React SPA login form has no separate error-message element
-    // until submission; errors are displayed inline after a failed submit.
-
-    // Fill form and submit — use native value setter so React controlled components update.
-    await evalJS(`
-      (() => {
-        const email = document.querySelector('input[type="email"]');
-        const pass = document.querySelector('input[type="password"]');
-        if (email) {
-          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-          setter.call(email, 'admin@example.com');
-          email.dispatchEvent(new Event('input', { bubbles: true }));
-        }
-        if (pass) {
-          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-          setter.call(pass, 'correct horse battery staple');
-          pass.dispatchEvent(new Event('input', { bubbles: true }));
-        }
-        const btn = document.querySelector('#root button');
-        if (btn) btn.click();
-      })()
-    `);
+    // 4. Valid mocked credentials: submit, expect the authenticated shell.
+    // LoginPage's onSuccess does window.location.reload() — a legitimate
+    // React pattern (re-run the /api/v1/me auth check on a fresh load)
+    // rather than in-place SPA state toggling, so we simply poll for the
+    // authenticated shell to appear after the reload completes.
+    await evalJS(setInputValue('#login-email', 'admin@example.com'));
+    await evalJS(setInputValue('#login-password', 'correct horse battery staple'));
+    await evalJS(`document.querySelector('#login-button').click()`);
     await waitFor(async () => {
       const got = await cdp.send('Network.getCookies', { urls: [`https://127.0.0.1:${port}/admin/`] });
       const cookie = (got.cookies || []).find((c) => c.name === '__Host-orvix_session');
       return cookie && cookie.secure === true && cookie.httpOnly === true && cookie.path === '/' && !cookie.domain.startsWith('.');
-    }, 'secure __Host-orvix_session cookie');
+    }, 'secure __Host-orvix_session cookie', 15000);
     // React SPA reloads the page on login success — the dashboard renders in #root.
     await waitFor(async () => (await mainText()).length > 10, 'nonblank dashboard');
     const dashText = await mainText();
     if (dashText.includes('forEach is not a function') || dashText.includes('TypeError')) fail(`dashboard has JS error in rendered text: ${dashText.slice(0, 200)}`);
 
+    // 5. At least one stable authenticated navigation element is visible
+    // (the sidebar <nav> with the Dashboard entry). Reconnect Runtime.evaluate
+    // after the page's own full reload — CDP automatically targets the
+    // current execution context, so waitFor's retry loop naturally rides
+    // past the reload without a separate load-event handshake.
+    await waitFor(() => evalJS(exists('nav')), 'authenticated nav element', 15000);
+    const navText = await evalJS(`document.querySelector('nav')?.innerText || ''`);
+    if (!/dashboard/i.test(navText)) fail(`authenticated nav did not render expected content: ${navText.slice(0, 120)}`);
+    if (!requests.includes('POST /api/v1/auth/login')) fail('valid-credentials login POST was not sent');
+
+    // Navigate through all admin routes to verify they render content.
+    // (React SPA renders each route into #root with Tailwind classes;
+    // detailed structural checks are done by the import-graph validator.)
     const navigateRoute = async (route, routeName) => {
       await evalJS(`location.hash = '#/${route}'`);
       await waitFor(async () => (await mainText()).trim().length > 10, `${routeName} route content`);
       const text = await mainText();
       if (text.trim().length < 10) fail(`${routeName} route blank: "${text.slice(0, 80)}"`);
     };
-
-    // Navigate through all admin routes to verify they render content.
-    // (React SPA renders each route into #root with Tailwind classes;
-    // detailed structural checks are done by the import-graph validator.)
     for (const [route, label] of [
       ['domains', 'Domains'],
       ['accounts', 'Accounts'],
@@ -527,27 +466,23 @@ async function main() {
     ]) {
       await navigateRoute(route, label);
     }
-
-    // ── ADMIN-2026-CONTROL-PANEL — every previously-near-empty modal ──
-    // Each modal now exposes real fields (no fake / placeholder copy) and
-    // must support keyboard submit + show inline error on invalid input.
-    // The smoke opens each modal and asserts a non-trivial field count
-    // so a regression cannot re-introduce "blank modal" failures.
-
-    // Helper: open the page → click the create button → assert modal has
-    // ≥ minInputs fields → close.
-    // Navigate additional routes for content validation.
     await navigateRoute('runtime-listeners', 'Runtime Listeners (revisit)');
-    if (!requests.includes('POST /api/v1/auth/login')) fail('login POST was not called');
     // React SPA loads dashboard data via a unified endpoint after auth.
     if (!requests.some((r) => r.includes('/api/v1/enterprise/dashboard') || r.includes('/api/v1/domains')))
       fail('dashboard/domains API was not called after login');
+
+    // 6. No uncaught page errors (console.error / Runtime.exceptionThrown).
     if (failures.length) fail(`browser errors:\n${failures.join('\n')}`);
 
-    // Banned-string DOM check: after login, scan rendered page text for
-    // placeholder strings that should never appear in production UI.
+    // 7. Logout returns to login.
+    await evalJS(`document.querySelectorAll('button').forEach(b => { if (/logout/i.test(b.textContent || '')) b.click(); })`);
+    await waitFor(() => evalJS(isVisible('#login-email')), 'login screen after logout', 15000);
+    if (!requests.includes('POST /api/v1/auth/logout')) fail('logout POST was not sent');
+
+    // Banned-string DOM check: scan rendered page text for placeholder
+    // strings that should never appear in production UI.
     const BANNED_RE = /coming soon|future release|not implemented|will be added later|unavailable in this build|fake|mock/i;
-    const pageText = await evalJS(`document.body?.innerText || ''`);
+    const pageText = await bodyText();
     if (BANNED_RE.test(pageText)) {
       fail(`BANNED_STRING_IN_DOM: production UI rendered a forbidden placeholder string`);
     }
@@ -555,7 +490,7 @@ async function main() {
   } finally {
     cleanup();
   }
-  console.log('PASS admin functional browser smoke: login, dashboard, v1 routes');
+  console.log('PASS admin functional browser smoke: login (invalid + valid), authenticated shell, route navigation, logout');
 }
 
 main().catch((err) => {

@@ -91,8 +91,7 @@ loopback-only posture check.
 
 ### 6. Admin login form hydration — BLOCKER 1 contract
 
-- `/usr/share/orvix/admin/index.html`     → loads `app.js` as `<script type="module">`
-- `/usr/share/orvix/admin/modules/auth.js` → exports `renderLogin` + `hasValidSession`
+- `/usr/share/orvix/admin/index.html`     → loads an ES module (`<script type="module" src="...">`), and the file it references exists on disk. The Admin UI is a React/Vite build with a content-hashed entrypoint (`release/admin/assets/index-<hash>.js`), so the check is dynamic — it parses whatever index.html actually references rather than a fixed filename.
 
 A failed assertion here is the regression guard for the static
 HTML / no-form symptom the previous CTO review caught. The

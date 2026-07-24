@@ -1,15 +1,15 @@
-# Orvix × Stalwart Enterprise — Parity Audit
+# Orvix Enterprise Feature Parity Audit
 
 > Branch: `feature/orvix-admin-enterprise-parity`
 > Base: `f474b05` (main, post Admin Visual Renaissance v2 + login security polish)
 > Author: parity audit, run before any UI work on this branch
-> Stalwart benchmark: <https://stalw.art/enterprise/> — quality bar only, no copied
+> External enterprise mail benchmark — quality bar only, no copied
 > logos / strings / icons / assets.
 
-This document is the **truth** for what Orvix already ships versus what Stalwart
-Enterprise advertises. It is the contract this branch implements against: every
-visible surface is either (a) backed by a real endpoint, or (b) explicitly hidden
-or honest-labeled.
+This document is the **truth** for what Orvix already ships versus what an
+external enterprise mail platform benchmark advertises. It is the contract this
+branch implements against: every visible surface is either (a) backed by a real
+endpoint, or (b) explicitly hidden or honest-labeled.
 
 ---
 
@@ -30,14 +30,14 @@ or honest-labeled.
 
 ### 2.1 Dashboard & navigation
 
-| # | Feature | Stalwart Enterprise surface | Orvix status | Notes / action in this branch |
+| # | Feature | Benchmark enterprise surface | Orvix status | Notes / action in this branch |
 | --- | --- | --- | --- | --- |
 | 1 | Operator Dashboard (KPIs, alerts, licenses, activity) | Enterprise dashboard with role-aware widgets | **PARTIAL** (`release/admin/modules/pages/dashboard.js`) | Implements Overview / Network / Security / Delivery / Performance / Storage **tabs** in this branch. Source: `/admin/summary`, `/admin/runtime`, `/monitoring/alerts`, `/admin/queue/summary`, `/monitoring/capacity`. No fabricated charts. |
 | 2 | Light/dark skin | Theme switcher | **SHIPPED** (`:root.theme-light` + `orvix_theme` localStorage) | Extend contact-sheet to capture `light-dashboard` + `light-login`. |
 
 ### 2.2 Login & access security
 
-| # | Feature | Stalwart Enterprise surface | Orvix status | Notes / action in this branch |
+| # | Feature | Benchmark enterprise surface | Orvix status | Notes / action in this branch |
 | --- | --- | --- | --- | --- |
 | 3 | Single Sign-On (OIDC / SAML) | SSO via OIDC / SAML providers | **BACKEND_MISSING** | `s_s_o_configs` table exists but no admin API. Hide from sidebar. |
 | 4 | Two-factor auth (TOTP) | Admin MFA | **SHIPPED** (`/api/v1/admin/mfa/*`, `/auth/mfa/verify`) | Honesty on login: text only says "MFA" when `/admin/mfa/status` returns enabled. Otherwise MFA field stays hidden. |
@@ -48,7 +48,7 @@ or honest-labeled.
 
 ### 2.3 Tenant & account management
 
-| # | Feature | Stalwart Enterprise surface | Orvix status | Notes / action in this branch |
+| # | Feature | Benchmark enterprise surface | Orvix status | Notes / action in this branch |
 | --- | --- | --- | --- | --- |
 | 9 | Multi-tenant scoping | Tenant isolation | **BACKEND_MISSING for admin API** — the `tenants` table exists with `id, name, slug, domain, plan, max_domains, max_mailboxes, logo_url, primary_color, active, reseller_id`, and `internal/auth/tenant.go` writes `c.Locals("tenant_id")`. **There is no `/api/v1/admin/tenants` route.** | Implement honest "Tenants" page in this branch — read-only — showing the row from `current_tenant` middleware and a truthful "Multi-tenant management UI is not exposed in this build" note for write operations. |
 | 10 | Reseller hierarchy | Reseller portal | **BACKEND_MISSING** | `resellers` table exists with no admin API. Hide "Resellers" from sidebar; do not render a page. |
@@ -58,7 +58,7 @@ or honest-labeled.
 
 ### 2.4 Delivery, queue, antispam, antivirus
 
-| # | Feature | Stalwart Enterprise surface | Orvix status | Notes / action in this branch |
+| # | Feature | Benchmark enterprise surface | Orvix status | Notes / action in this branch |
 | --- | --- | --- | --- | --- |
 | 14 | Queue admin (summary, list, retry / bounce / cancel / hold) | Queue management | **SHIPPED** (`/admin/queue/summary`, `/admin/queue/messages`, `:id` retry/bounce/cancel) | Cover in `queue.js`. |
 | 15 | Acceptance / routing rules | Inbound rule chain | **SHIPPED** (`/admin/incoming-rules`, `/admin/acceptance`) | Cover in `acceptance.js`. |
@@ -70,7 +70,7 @@ or honest-labeled.
 
 ### 2.5 Observability, alerting, telemetry
 
-| # | Feature | Stalwart Enterprise surface | Orvix status | Notes / action in this branch |
+| # | Feature | Benchmark enterprise surface | Orvix status | Notes / action in this branch |
 | --- | --- | --- | --- | --- |
 | 21 | Live health snapshot | Subsystem health map | **SHIPPED** (`/monitoring/health`) | Render in observability tab. |
 | 22 | Capacity snapshot (disk / mailboxes / messages / attachments) | Capacity dashboard | **SHIPPED** (`/monitoring/capacity`) | Render in observability tab. |
@@ -82,7 +82,7 @@ or honest-labeled.
 
 ### 2.6 Storage & data protection
 
-| # | Feature | Stalwart Enterprise surface | Orvix status | Notes / action in this branch |
+| # | Feature | Benchmark enterprise surface | Orvix status | Notes / action in this branch |
 | --- | --- | --- | --- | --- |
 | 28 | Storage topology (single / sharded / read-replica) | Storage map | **PARTIAL** (one backend per process; no sharding / replica routing API) | Implement **G** (Storage topology page): honest single-backend card, list mounted volumes from filesystem, show the per-data-dir message / attachment counts the admin endpoint reports. **No fake "replica" / "shard" knobs.** |
 | 29 | Backups (scheduled, history, restore) | Backup manager | **SHIPPED** (`/admin/backups`, `/admin/backups/schedule`, `:id/download`, retention + metrics + health) | Cover in `backups.js`. |
@@ -91,7 +91,7 @@ or honest-labeled.
 
 ### 2.7 Branding, compliance, integrations
 
-| # | Feature | Stalwart Enterprise surface | Orvix status | Notes / action in this branch |
+| # | Feature | Benchmark enterprise surface | Orvix status | Notes / action in this branch |
 | --- | --- | --- | --- | --- |
 | 32 | Per-tenant branding (logo, color) | Tenant theme | **BACKEND_MISSING for admin API** (data columns exist on `tenants`) | Implement honest "Branding" page: writes to `tenants` row via a **new** `PATCH /api/v1/admin/tenants/:id/branding` endpoint that we add; uses CSRF + RBAC. If row missing, render honest empty state. Document the limit in the UI. |
 | 33 | Anti-phishing / DMARC reporting | DMARC reports | **SHIPPED for DKIM/DMARC/MTA-STS** (DNS ops page) | Already covered in `dns-dkim.js`. |
@@ -100,7 +100,7 @@ or honest-labeled.
 
 ### 2.8 Clustering, sharding, replicas
 
-| # | Feature | Stalwart Enterprise surface | Orvix status | Notes / action in this branch |
+| # | Feature | Benchmark enterprise surface | Orvix status | Notes / action in this branch |
 | --- | --- | --- | --- | --- |
 | 36 | Multi-node clustering | Cluster manager | **PARTIAL** (`/admin/cluster/status` endpoint + `release/admin/modules/pages/clustering.js` rendering the truthful single-node state) | Keep; surface a "Cluster status" card on the new Performance tab. **Never claim replication is on.** |
 | 37 | Read replicas | Read-only replicas | **BACKEND_MISSING** | Hide any "replica" UI. |
@@ -180,7 +180,7 @@ Frontend (admin SPA):
 
 Docs / harness:
 
-- `docs/ORVIX_STALWART_ENTERPRISE_PARITY_AUDIT.md` (this file).
+- `docs/ORVIX_ENTERPRISE_PARITY_AUDIT.md` (this file).
 - `release/scripts/smoke-admin-visual-screenshots.mjs` — extended for the 15 required PNGs.
 
 ---

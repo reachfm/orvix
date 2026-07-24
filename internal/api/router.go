@@ -1029,7 +1029,7 @@ func (r *Router) setupRoutes() {
 	admin := protected.Group("", auth.RequireAnyRole(auth.RoleAdmin, auth.RoleSuperAdmin, auth.RolePlatformSuperAdmin), r.csrf.Middleware())
 	admin.Get("/domains", r.h.ListDomains)
 	admin.Get("/users", r.h.ListUsers)
-	admin.Get("/mailboxes", r.h.ListUsers)
+	admin.Get("/mailboxes", r.h.ListMailboxes)
 	// CSV exports (admin-only, GET — no CSRF required). Registered before
 	// the parameterized :id / :name routes so the literal /export segment
 	// wins over /mailboxes/:id and /domains/:name.
@@ -1136,7 +1136,7 @@ func (r *Router) setupRoutes() {
 	admin.Get("/monitoring/alert-deliveries", r.h.ListAlertDeliveries)
 	// Admin storage topology (ORVIX-ADMIN-ENTERPRISE-PARITY-G):
 	// real on-disk usage for mail/attachments/backups. No replica or
-	// shard controls; see docs/ORVIX_STALWART_ENTERPRISE_PARITY_AUDIT.md.
+	// shard controls; see docs/ORVIX_ENTERPRISE_PARITY_AUDIT.md.
 	admin.Get("/admin/storage/volumes", r.h.ListStorageVolumes)
 	// Tenants read (ORVIX-ADMIN-ENTERPRISE-PARITY-D): surface the
 	// JWT-tenant row read-only so the admin "Branding" page knows

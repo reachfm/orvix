@@ -199,6 +199,15 @@ export const api = {
   // Dashboard
   getDashboard: () => request<any>("/enterprise/dashboard"),
 
+  // Platform admin summary/users/firewall/modules (superadmin/admin scope,
+  // distinct from the tenant-scoped /enterprise/* endpoints above)
+  getAdminSummary: () => request<any>("/admin/summary"),
+  listPlatformUsers: () => request<any[]>("/users"),
+  deleteUser: (userId: number) => request(`/users/${userId}`, { method: "DELETE" }),
+  listFirewallRules: () => request<any[]>("/firewall/rules"),
+  listFirewallLogs: () => request<any[]>("/firewall/logs"),
+  listModules: () => request<any[]>("/modules"),
+
   // Invoices
   listInvoices: () => request<any[]>("/enterprise/billing/invoices"),
   getInvoice: (id: number) => request<any>(`/enterprise/billing/invoices/${id}`),

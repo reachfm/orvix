@@ -801,7 +801,7 @@ async function main() {
     await captureRoute(ws, 'security/antispam',        'antivirus');
     await captureRoute(ws, 'settings',                 'settings');
     await captureRoute(ws, 'security',                 'security');
-    // Enterprise parity pages — see docs/ORVIX_STALWART_ENTERPRISE_PARITY_AUDIT.md
+    // Enterprise parity pages — see docs/ORVIX_ENTERPRISE_PARITY_AUDIT.md
     await captureRoute(ws, 'observability',            'observability');
     await captureRoute(ws, 'alerts',                   'alerts');
     await captureRoute(ws, 'storage-topology',         'storage-topology');

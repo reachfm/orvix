@@ -7,6 +7,7 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch: {}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -71,6 +72,23 @@ jobs:
           set -euo pipefail
           go test ./internal/billing/... -count=1 -timeout 120s -v
 
+      - name: Subscription lifecycle PostgreSQL tests (single-row-per-tenant invariant)
+        run: |
+          set -euo pipefail
+          out="$(mktemp)"
+          go test ./internal/billing -run TestSubscriptionLifecycle -count=1 -timeout 120s -v | tee "$out"
+          for name in \
+            TestSubscriptionLifecycle_NoSubscriptionCreatesOneActive \
+            TestSubscriptionLifecycle_ExistingActiveNotDuplicated \
+            TestSubscriptionLifecycle_NonTerminalStatusesNotOverwritten \
+            TestSubscriptionLifecycle_CancelledIsReactivatedDeterministically \
+            TestSubscriptionLifecycle_ExpiredIsReactivatedDeterministically \
+            TestSubscriptionLifecycle_RepeatedCallsStayAtOneRow \
+            TestSubscriptionLifecycle_ConcurrentCallsNoDuplicateRows \
+            TestSubscriptionLifecycle_UniqueIndexRejectsDirectDuplicateInsert; do
+            grep -q -- "--- PASS: ${name}" "$out" || { echo "missing PASS for ${name} against PostgreSQL" >&2; exit 1; }
+          done
+
       - name: Abuse PostgreSQL DML tests
         run: |
           set -euo pipefail
@@ -99,3 +117,15 @@ jobs:
           fi
           grep -q -- "--- PASS: TestSignupTransactionPostgresMaxOpenConnsOneNoDeadlock" "$out"
           grep -q -- "--- PASS: TestSignupTransactionPostgresSubscriptionFailureRollsBackTenantAndUser" "$out"
+
+      - name: Bootstrap admin subscription self-heal PostgreSQL tests
+        run: |
+          set -euo pipefail
+          out="$(mktemp)"
+          go test ./cmd/orvix -run 'TestFreshInstall_(AdminTenantHasActiveSubscription|AdminMailboxSendIsEnforcerAllowed|SelfHealsSubscriptionForAlreadyBootstrappedTenant)' -count=1 -timeout 180s -v | tee "$out"
+          for name in \
+            TestFreshInstall_AdminTenantHasActiveSubscription \
+            TestFreshInstall_AdminMailboxSendIsEnforcerAllowed \
+            TestFreshInstall_SelfHealsSubscriptionForAlreadyBootstrappedTenant; do
+            grep -q -- "--- PASS: ${name}" "$out" || { echo "missing PASS for ${name} against PostgreSQL" >&2; exit 1; }
+          done

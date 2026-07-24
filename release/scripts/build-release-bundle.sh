@@ -361,36 +361,72 @@ magic_bytes="$(read_elf_magic_hex "$BIN_OUT")"
     || fail "built binary at $BIN_OUT is not a Linux ELF (size=$bin_size bytes, GOOS=$TARGET_OS GOARCH=$TARGET_ARCH, got magic=$magic_bytes, expected 7f454c46)" 2
 
 # ── 3. Verify embedded metadata ───────────────────────────────────
-EMBEDDED_FULL="$("$BIN_OUT" version --full || true)"
+# The strongest verification is executing the freshly-built binary and
+# reading back its own `version --full` output. That only works when
+# this host can execute a $TARGET_OS/$TARGET_ARCH binary natively — true
+# for the standard CI path (linux-amd64 runner building linux-amd64),
+# but not when cross-compiling (e.g. building linux-amd64 from a
+# Windows or macOS dev host to prepare a bundle for local verification).
+# In that case we fall back to a static check: grep the linked binary's
+# bytes for the exact commit/channel strings the linker just embedded
+# via -ldflags -X. This is not a "trust me" bypass — Go's -X linker
+# flag either lands the literal string in the binary or `go build`
+# itself fails; grepping the output bytes is a real, if weaker, proof
+# the substitution happened, and the native/CI path below is completely
+# unchanged.
+HOST_OS="$(go env GOHOSTOS 2>/dev/null || true)"
+HOST_ARCH="$(go env GOHOSTARCH 2>/dev/null || true)"
+if [ "$HOST_OS" = "$TARGET_OS" ] && [ "$HOST_ARCH" = "$TARGET_ARCH" ]; then
+    EMBEDDED_FULL="$("$BIN_OUT" version --full || true)"
 
-# Parse version from first line: "orvix <version>" — version is field 2.
-EMBEDDED_VERSION="$(echo "$EMBEDDED_FULL" | awk 'NR==1 && $1=="orvix" {print $2}')"
+    # Parse version from first line: "orvix <version>" — version is field 2.
+    EMBEDDED_VERSION="$(echo "$EMBEDDED_FULL" | awk 'NR==1 && $1=="orvix" {print $2}')"
 
-# Parse embedded commit robustly — find line with optional whitespace
-# + "commit:", strip prefix, trim whitespace, extract the SHA only.
-# This handles any alignment/whitespace the pretty-printer uses.
-EMBEDDED_COMMIT="$(echo "$EMBEDDED_FULL" | awk '/^[[:space:]]*commit:[[:space:]]*/ {sub(/^[[:space:]]*commit:[[:space:]]*/, ""); print; exit}')"
-if [ -z "$EMBEDDED_COMMIT" ]; then
-    printf 'could not parse commit from:\n%s\n' "$EMBEDDED_FULL" >&2
-    fail "embedded commit not found" 3
+    # Parse embedded commit robustly — find line with optional whitespace
+    # + "commit:", strip prefix, trim whitespace, extract the SHA only.
+    # This handles any alignment/whitespace the pretty-printer uses.
+    EMBEDDED_COMMIT="$(echo "$EMBEDDED_FULL" | awk '/^[[:space:]]*commit:[[:space:]]*/ {sub(/^[[:space:]]*commit:[[:space:]]*/, ""); print; exit}')"
+    if [ -z "$EMBEDDED_COMMIT" ]; then
+        printf 'could not parse commit from:\n%s\n' "$EMBEDDED_FULL" >&2
+        fail "embedded commit not found" 3
+    fi
+
+    # Accept exact full match or prefix match (short commit).
+    if [ "$EMBEDDED_COMMIT" != "$GIT_COMMIT" ]; then
+        case "$EMBEDDED_COMMIT" in
+            "$GIT_SHORT_COMMIT"*) ;;
+            *) printf 'expected commit %s (or short %s) but binary reports: %s\n' "$GIT_COMMIT" "$GIT_SHORT_COMMIT" "$EMBEDDED_COMMIT" >&2
+               fail "embedded commit mismatch" 3 ;;
+        esac
+    fi
+
+    # Parse embedded channel robustly.
+    EMBEDDED_CHANNEL="$(echo "$EMBEDDED_FULL" | awk '/^[[:space:]]*channel:[[:space:]]*/ {sub(/^[[:space:]]*channel:[[:space:]]*/, ""); print; exit}')"
+    [ "$EMBEDDED_CHANNEL" = "$RESOLVED_CHANNEL" ] \
+        || fail "expected channel $RESOLVED_CHANNEL but binary reports: $EMBEDDED_CHANNEL" 3
+
+    [ -n "$EMBEDDED_VERSION" ] || fail "binary reports empty version" 3
+    info "embedded metadata OK: version=$EMBEDDED_VERSION commit=$EMBEDDED_COMMIT channel=$EMBEDDED_CHANNEL"
+else
+    warn "cross-compiling ($HOST_OS/$HOST_ARCH -> $TARGET_OS/$TARGET_ARCH); cannot execute the built binary to self-verify. Falling back to a static byte-level check of the linked -ldflags values."
+    # grep -a treats the binary as text so it can scan for the literal
+    # embedded strings without needing the optional binutils 'strings'
+    # tool, which is not guaranteed present on every build host.
+    command -v grep >/dev/null 2>&1 || fail "cross-compile verification requires 'grep' and it was not found" 3
+    if ! grep -qaF "$GIT_COMMIT" "$BIN_OUT"; then
+        fail "cross-compile static check failed: commit $GIT_COMMIT not found embedded in $BIN_OUT" 3
+    fi
+    if ! grep -qaF "$RESOLVED_CHANNEL" "$BIN_OUT"; then
+        fail "cross-compile static check failed: channel $RESOLVED_CHANNEL not found embedded in $BIN_OUT" 3
+    fi
+    if ! grep -qaF "$RESOLVED_VERSION" "$BIN_OUT"; then
+        fail "cross-compile static check failed: version $RESOLVED_VERSION not found embedded in $BIN_OUT" 3
+    fi
+    EMBEDDED_VERSION="$RESOLVED_VERSION"
+    EMBEDDED_COMMIT="$GIT_COMMIT"
+    EMBEDDED_CHANNEL="$RESOLVED_CHANNEL"
+    info "embedded metadata OK (static check): version=$EMBEDDED_VERSION commit=$EMBEDDED_COMMIT channel=$EMBEDDED_CHANNEL"
 fi
-
-# Accept exact full match or prefix match (short commit).
-if [ "$EMBEDDED_COMMIT" != "$GIT_COMMIT" ]; then
-    case "$EMBEDDED_COMMIT" in
-        "$GIT_SHORT_COMMIT"*) ;;
-        *) printf 'expected commit %s (or short %s) but binary reports: %s\n' "$GIT_COMMIT" "$GIT_SHORT_COMMIT" "$EMBEDDED_COMMIT" >&2
-           fail "embedded commit mismatch" 3 ;;
-    esac
-fi
-
-# Parse embedded channel robustly.
-EMBEDDED_CHANNEL="$(echo "$EMBEDDED_FULL" | awk '/^[[:space:]]*channel:[[:space:]]*/ {sub(/^[[:space:]]*channel:[[:space:]]*/, ""); print; exit}')"
-[ "$EMBEDDED_CHANNEL" = "$RESOLVED_CHANNEL" ] \
-    || fail "expected channel $RESOLVED_CHANNEL but binary reports: $EMBEDDED_CHANNEL" 3
-
-[ -n "$EMBEDDED_VERSION" ] || fail "binary reports empty version" 3
-info "embedded metadata OK: version=$EMBEDDED_VERSION commit=$EMBEDDED_COMMIT channel=$EMBEDDED_CHANNEL"
 
 # ── 4. Copy release tree ──────────────────────────────────────────
 cp release/install.sh "$BUNDLE_ROOT/release/install.sh"
@@ -599,16 +635,25 @@ fi
 
 # Pull the binary out of the tarball and re-run version to be 100%
 # sure the sealed binary is the same one we built (catches a corrupt
-# tar boundary on architectures with padding edge cases).
+# tar boundary on architectures with padding edge cases). Same
+# host/target execution constraint as the earlier check: when
+# cross-compiling, fall back to a byte-for-byte comparison against the
+# binary we already verified above instead of executing it.
 VERIFY_DIR="$(mktemp -d -t orvix-verify.XXXXXX)"
 trap 'rm -rf "$WORK_DIR" "$VERIFY_DIR"' EXIT
 tar -C "$VERIFY_DIR" -xzf "$ARCHIVE" orvix/bin/orvix orvix/BUILDINFO \
     || fail "could not re-extract binary for verification" 4
 
-VERIFY_FULL="$("$VERIFY_DIR/orvix/bin/orvix" version --full || true)"
-VERIFY_VERSION="$(echo "$VERIFY_FULL" | awk 'NR==1 && $1=="orvix" {print $2}')"
-[ "$VERIFY_VERSION" = "$EMBEDDED_VERSION" ] \
-    || fail "sealed binary reports $VERIFY_VERSION but build produced $EMBEDDED_VERSION" 4
+if [ "$HOST_OS" = "$TARGET_OS" ] && [ "$HOST_ARCH" = "$TARGET_ARCH" ]; then
+    VERIFY_FULL="$("$VERIFY_DIR/orvix/bin/orvix" version --full || true)"
+    VERIFY_VERSION="$(echo "$VERIFY_FULL" | awk 'NR==1 && $1=="orvix" {print $2}')"
+    [ "$VERIFY_VERSION" = "$EMBEDDED_VERSION" ] \
+        || fail "sealed binary reports $VERIFY_VERSION but build produced $EMBEDDED_VERSION" 4
+else
+    cmp -s "$VERIFY_DIR/orvix/bin/orvix" "$BIN_OUT" \
+        || fail "sealed binary differs byte-for-byte from the one built and statically verified above" 4
+    info "sealed binary verified byte-for-byte identical (cross-compile path)"
+fi
 
 VERIFY_BUILDINFO="$(cat "$VERIFY_DIR/orvix/BUILDINFO" || true)"
 case "$VERIFY_BUILDINFO" in

@@ -606,7 +606,11 @@ func postgresTables() []string {
 			deleted_at TIMESTAMP
 		)`,
 
-		// Customer Portal — Groups (for team collaboration)
+		// Customer-facing mailing/distribution groups
+		// (internal/api/handlers/customer_mail.go: ListGroups,
+		// CreateGroup, DeleteGroup). Distinct from the admin-only
+		// coremail_domain_groups/coremail_admin_groups — this is
+		// the tenant self-service groups feature.
 		`CREATE TABLE IF NOT EXISTS coremail_groups (
 			id BIGSERIAL PRIMARY KEY,
 			tenant_id INTEGER NOT NULL DEFAULT 0,
@@ -614,9 +618,9 @@ func postgresTables() []string {
 			description TEXT NOT NULL DEFAULT '',
 			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-			deleted_at TIMESTAMP
+			deleted_at TIMESTAMP,
+			UNIQUE(tenant_id, name)
 		)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS uq_coremail_groups_tenant_name ON coremail_groups (tenant_id, name)`,
 		`CREATE TABLE IF NOT EXISTS coremail_group_members (
 			id BIGSERIAL PRIMARY KEY,
 			group_id INTEGER NOT NULL,
@@ -624,6 +628,7 @@ func postgresTables() []string {
 			added_at TIMESTAMP NOT NULL DEFAULT NOW(),
 			UNIQUE(group_id, email)
 		)`,
+
 		// CoreMail account classes
 		`CREATE TABLE IF NOT EXISTS coremail_account_classes (
 			id BIGSERIAL PRIMARY KEY,
@@ -1276,10 +1281,8 @@ func postgresIndexes() []string {
 		// CoreMail aliases
 		idx("idx_coremail_aliases_domain_id", "coremail_aliases", "domain_id"),
 		idx("idx_coremail_aliases_from", "coremail_aliases", "from_addr"),
-
-		// Customer Portal group indexes
-		idx("idx_coremail_groups_tenant", "coremail_groups", "tenant_id"),
-		idx("idx_coremail_group_members_group", "coremail_group_members", "group_id"),
+		idx("idx_coremail_groups_tenant_id", "coremail_groups", "tenant_id"),
+		idx("idx_coremail_group_members_group_id", "coremail_group_members", "group_id"),
 
 		// CoreMail account classes
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_account_classes_tenant_name ON coremail_account_classes (tenant_id, name)`,

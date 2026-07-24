@@ -135,7 +135,11 @@ func (e *SendEnforcer) ReserveSend(ctx context.Context, id SendIdentity, eventID
 
 	var status SubscriptionStatus
 	var limit int
-	query := "SELECT status, send_limit_day FROM subscriptions WHERE tenant_id = " + e.dialect.Placeholder(1)
+	// ORDER BY id DESC LIMIT 1: defense-in-depth tie-break, matching
+	// Service.GetSubscription — the write path enforces at most one row
+	// per tenant via a UNIQUE index, so this only matters for a database
+	// predating that enforcement.
+	query := "SELECT status, send_limit_day FROM subscriptions WHERE tenant_id = " + e.dialect.Placeholder(1) + " ORDER BY id DESC LIMIT 1"
 	if e.dialect.IsPostgres() {
 		query += " FOR UPDATE"
 	}
