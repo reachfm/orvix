@@ -80,24 +80,38 @@ type Job struct {
 // Event is one immutable entry in a job's history. Jobs are append-only —
 // existing events are never edited or deleted, only appended to.
 type Event struct {
-	JobID     string    `json:"job_id"`
-	Seq       int       `json:"seq"`
-	At        time.Time `json:"at"`
-	Phase     Phase     `json:"phase"`
-	Message   string    `json:"message"`
+	JobID   string    `json:"job_id"`
+	Seq     int       `json:"seq"`
+	At      time.Time `json:"at"`
+	Phase   Phase     `json:"phase"`
+	Message string    `json:"message"`
+}
+
+// RollbackSnapshot describes one previously verified local backup that a
+// rollback can restore from. All paths are controlled by the updater
+// daemon itself — never supplied by the API/browser.
+type RollbackSnapshot struct {
+	ID             string    `json:"id"`
+	SourceVersion  string    `json:"source_version"`
+	SourceCommit   string    `json:"source_commit"`
+	ChecksumSHA256 string    `json:"checksum_sha256"`
+	Verified       bool      `json:"verified"`
+	CreatedAt      time.Time `json:"created_at"`
+	LastKnownGood  bool      `json:"last_known_good"`
+	Retained       bool      `json:"retained"`
 }
 
 // ReleaseInfo describes one release as resolved from the official GitHub
 // release channel, before verification. Nothing in this struct is trusted
 // until VerifyBundle succeeds against the corresponding downloaded bytes.
 type ReleaseInfo struct {
-	Tag             string    `json:"tag"`
-	Version         string    `json:"version"`
-	Channel         string    `json:"channel"`
-	PublishedAt     time.Time `json:"published_at"`
-	Prerelease      bool      `json:"prerelease"`
-	AssetName       string    `json:"asset_name"`
-	ChecksumSidecar string    `json:"checksum_sidecar"`
-	SignatureSidecar string   `json:"signature_sidecar"`
-	ManifestAsset   string    `json:"manifest_asset"`
+	Tag              string    `json:"tag"`
+	Version          string    `json:"version"`
+	Channel          string    `json:"channel"`
+	PublishedAt      time.Time `json:"published_at"`
+	Prerelease       bool      `json:"prerelease"`
+	AssetName        string    `json:"asset_name"`
+	ChecksumSidecar  string    `json:"checksum_sidecar"`
+	SignatureSidecar string    `json:"signature_sidecar"`
+	ManifestAsset    string    `json:"manifest_asset"`
 }

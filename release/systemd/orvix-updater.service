@@ -1,0 +1,82 @@
+[Unit]
+Description=Orvix Self-Update Daemon
+Documentation=https://github.com/reachfm/orvix
+# The updater must be able to stop/replace/restart orvix.service itself
+# during an install/rollback, so it must not be pulled down by that unit's
+# own lifecycle — After=, not BindsTo=/PartOf=.
+After=network-online.target orvix.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Root is required: this daemon is the only process allowed to run
+# release/upgrade.sh, which replaces the orvix binary, admin/webmail
+# assets, and the orvix.service unit itself, and (re)starts orvix.service
+# via systemctl. Everything downstream of that requirement is scoped as
+# tightly as systemd allows — see the ReadWritePaths/hardening block below,
+# and internal/selfupdate's peer-UID check (server.go) for the application-
+# level restriction on who may even talk to this process.
+User=root
+Group=root
+WorkingDirectory=/var/lib/orvix-updater
+ExecStart=/usr/local/bin/orvix-updater
+Restart=always
+RestartSec=5
+TimeoutStopSec=30s
+
+Environment=ORVIX_UPDATER_SOCKET=/run/orvix/updater.sock
+Environment=ORVIX_UPDATER_ALLOWED_USER=orvix
+UMask=0077
+
+# Hardening. NoNewPrivileges + the capability bounding set mean a
+# compromise of this process cannot escalate beyond what it already has
+# (root) via setuid/setgid binaries or additional capabilities; the
+# remaining directives shrink what "already has root" can actually reach.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# ReadWritePaths: the only paths this daemon may write.
+#   /var/lib/orvix-updater — job store, event log, rollback snapshots
+#   /var/lib/orvix         — the actual install target (binary, admin/
+#                            webmail assets, config) — same directory
+#                            release/upgrade.sh already writes as root
+#   /run/orvix             — the IPC socket directory
+#   /etc/orvix             — config/systemd-unit replacement during upgrade
+ReadWritePaths=/var/lib/orvix-updater /var/lib/orvix /run/orvix /etc/orvix
+RuntimeDirectory=orvix
+RuntimeDirectoryMode=0750
+StateDirectory=orvix-updater
+StateDirectoryMode=0750
+
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+# MemoryDenyWriteExecute is compatible with a statically linked Go binary
+# that does not JIT; it blocks a classic shellcode-injection primitive.
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+# AF_UNIX for the IPC socket + journald; AF_INET/AF_INET6 because
+# CheckRelease/download talk to api.github.com and
+# github-releases.githubusercontent.com over HTTPS.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Capabilities: the updater does not bind a privileged port and does not
+# need any specific capability beyond what root already implies for
+# filesystem/service management — CAP_SYS_ADMIN and friends are not
+# needed for systemctl/tar/mv, so the bounding set is left at root's
+# default rather than widened, and nothing here grants ambient
+# capabilities the way orvix.service does for CAP_NET_BIND_SERVICE.
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=orvix-updater
+
+[Install]
+WantedBy=multi-user.target

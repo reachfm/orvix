@@ -1,0 +1,19 @@
+[Unit]
+Description=Orvix Self-Update Daemon IPC Socket
+
+[Socket]
+ListenStream=/run/orvix/updater.sock
+# root:orvix (the same unprivileged group orvix.service runs as) with
+# group-read/write and no other access. This is belt-and-suspenders with
+# the application-level peer-UID check in internal/selfupdate/server.go —
+# even a process that somehow reached this socket path but was not the
+# orvix service account would be dropped by that check, but there is no
+# reason to also leave the socket file world-writable.
+SocketUser=root
+SocketGroup=orvix
+SocketMode=0660
+RemoveOnStop=true
+DirectoryMode=0750
+
+[Install]
+WantedBy=sockets.target
