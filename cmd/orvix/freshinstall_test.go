@@ -27,6 +27,7 @@ import (
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 // freshInstallHarness builds the full Orvix stack against a
@@ -36,13 +37,16 @@ import (
 // runtime equivalent of the installer's main() up to the
 // point of starting the HTTP listener.
 type freshInstallHarness struct {
-	router     *api.Router
-	sqlDB      *sql.DB
-	email      string
-	password   string
-	adminDir   string
-	webmailDir string
-	scratchDir string // owned by the test, not t.TempDir; cleaned up by t.Cleanup
+	router        *api.Router
+	sqlDB         *sql.DB
+	gormDB        *gorm.DB
+	authenticator *auth.Authenticator
+	logger        *zap.Logger
+	email         string
+	password      string
+	adminDir      string
+	webmailDir    string
+	scratchDir    string // owned by the test, not t.TempDir; cleaned up by t.Cleanup
 }
 
 func buildFreshInstallHarness(t *testing.T, email, password string) *freshInstallHarness {
@@ -104,13 +108,16 @@ func buildFreshInstallHarness(t *testing.T, email, password string) *freshInstal
 	ff := license.NewFeatureFlags(logger)
 	router := api.NewRouter(cfg, authenticator, logger, db, reg, ff, nil)
 	return &freshInstallHarness{
-		router:     router,
-		sqlDB:      sqlDB,
-		email:      email,
-		password:   password,
-		adminDir:   adminDir,
-		webmailDir: webmailDir,
-		scratchDir: scratchDir,
+		router:        router,
+		sqlDB:         sqlDB,
+		gormDB:        db,
+		authenticator: authenticator,
+		logger:        logger,
+		email:         email,
+		password:      password,
+		adminDir:      adminDir,
+		webmailDir:    webmailDir,
+		scratchDir:    scratchDir,
 	}
 }
 
@@ -519,12 +526,14 @@ func TestFreshInstall_AdminMailboxSendIsEnforcerAllowed(t *testing.T) {
 }
 
 // TestFreshInstall_SelfHealsSubscriptionForAlreadyBootstrappedTenant
-// proves ensureBootstrapTenantSubscription also repairs an instance that
-// was already installed before this fix shipped — seedAdminUser must
-// still provision the missing subscription on a later service start,
-// not only on the very first bootstrap, since re-running the installer
-// against an existing admin user takes the "admin already exists" early
-// return path.
+// proves the "admin already exists" branch of the REAL seedAdminUser
+// (not ensureBootstrapTenantSubscription called directly) repairs an
+// instance that was already installed before this fix shipped. It
+// re-invokes seedAdminUser against the harness's already-bootstrapped
+// admin user — verifyStoredAdminHash must succeed (proving the run
+// takes the early-return "admin already exists" path, not the
+// fresh-bootstrap path) and the missing subscription must still be
+// (re)provisioned by that path's self-healing call.
 func TestFreshInstall_SelfHealsSubscriptionForAlreadyBootstrappedTenant(t *testing.T) {
 	h := buildFreshInstallHarness(t, "admin@orvix.email", "MaghaghaMos086")
 	t.Cleanup(func() { h.close(t) })
@@ -533,10 +542,18 @@ func TestFreshInstall_SelfHealsSubscriptionForAlreadyBootstrappedTenant(t *testi
 	if err := h.sqlDB.QueryRow("SELECT id FROM tenants WHERE domain = ?", "orvix.email").Scan(&tenantID); err != nil {
 		t.Fatalf("bootstrap tenant not found: %v", err)
 	}
+	var userCountBefore int64
+	if err := h.sqlDB.QueryRow("SELECT COUNT(*) FROM users WHERE email = ?", h.email).Scan(&userCountBefore); err != nil {
+		t.Fatalf("check admin user exists: %v", err)
+	}
+	if userCountBefore != 1 {
+		t.Fatalf("expected exactly 1 admin user before re-running seedAdminUser, got %d", userCountBefore)
+	}
 
 	// Simulate a pre-fix install: drop the subscription that
-	// ensureBootstrapTenantSubscription just created, as if this
-	// instance had been installed before the fix existed.
+	// seedAdminUser's initial call (inside buildFreshInstallHarness)
+	// already created, as if this instance had been installed before the
+	// fix existed.
 	if _, err := h.sqlDB.Exec("DELETE FROM subscriptions WHERE tenant_id = ?", tenantID); err != nil {
 		t.Fatalf("simulate pre-fix state: %v", err)
 	}
@@ -548,12 +565,25 @@ func TestFreshInstall_SelfHealsSubscriptionForAlreadyBootstrappedTenant(t *testi
 		t.Fatalf("expected 0 subscriptions after simulated deletion, got %d", count)
 	}
 
-	// A later service start (admin user already exists) must self-heal
-	// via the "admin already exists" branch of seedAdminUser, not only
-	// the fresh-bootstrap branch. seedAdminUser's early-return branch
-	// calls exactly this function, so exercising it directly proves that
-	// branch's behavior without needing to re-run the full seed flow.
-	ensureBootstrapTenantSubscription(h.sqlDB, dbdialect.FromDriver("sqlite"), "orvix.email", zap.NewNop())
+	// Re-run the REAL seedAdminUser — the exact function main() calls on
+	// every service start. The admin user already exists with a
+	// verifiable password hash (set up by buildFreshInstallHarness's own
+	// initial call to seedAdminUser), so this run must take the "admin
+	// already exists" early-return branch, not the fresh-bootstrap
+	// branch — proving the self-heal fires from the branch a real
+	// second-and-later service start actually takes.
+	seedAdminUser(h.gormDB, h.authenticator, h.logger, dbdialect.FromDriver("sqlite"))
+
+	// The admin user row must be untouched (still exactly one, same
+	// email) — confirms seedAdminUser did not fall through to the
+	// fresh-bootstrap branch and attempt to recreate it.
+	var userCountAfter int64
+	if err := h.sqlDB.QueryRow("SELECT COUNT(*) FROM users WHERE email = ?", h.email).Scan(&userCountAfter); err != nil {
+		t.Fatalf("check admin user after re-run: %v", err)
+	}
+	if userCountAfter != 1 {
+		t.Fatalf("expected exactly 1 admin user after re-running seedAdminUser, got %d", userCountAfter)
+	}
 
 	if err := h.sqlDB.QueryRow("SELECT COUNT(*) FROM subscriptions WHERE tenant_id = ?", tenantID).Scan(&count); err != nil {
 		t.Fatalf("verify self-healed state: %v", err)
