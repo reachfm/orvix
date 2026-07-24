@@ -15,6 +15,11 @@ on:
         description: "Bundle version to embed (passed to build-release-bundle.sh --version). Defaults to release/VERSION when blank — only correct for the stable channel."
         required: false
         default: ""
+      dry_run:
+        description: "Verify-only: run every pre-publication check (smokes, tests, vet, build, local bundle build+sign) but stop before uploading assets or touching the GitHub Release. No release, tag, or public asset is created or modified."
+        type: boolean
+        required: false
+        default: false
   push:
     branches:
       - main
@@ -46,6 +51,7 @@ jobs:
       TAG: ${{ github.event.inputs.tag || 'v1.0.3-rc4' }}
       CHANNEL: ${{ github.event.inputs.channel || 'stable' }}
       BUNDLE_VERSION: ${{ github.event.inputs.version }}
+      DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -276,7 +282,21 @@ jobs:
           echo "LOCAL_SHA=$LOCAL_SHA"
           echo "LOCAL_SHA=$LOCAL_SHA" >> "$GITHUB_ENV"
 
+      - name: Dry-run verdict
+        if: env.DRY_RUN == 'true'
+        run: |
+          set -euo pipefail
+          # Every pre-publication check up to and including the local bundle
+          # build, signing, and checksum verification has passed. Stop here —
+          # do not upload assets or touch the GitHub Release. Distinct from
+          # FINAL_VERDICT=PASS so the summary never claims a real publish.
+          echo "FINAL_VERDICT=DRY_RUN_PASS"
+          echo "FINAL_VERDICT=DRY_RUN_PASS" >> "$GITHUB_ENV"
+          echo "FAILED_STEP="
+          echo "FAILED_STEP=" >> "$GITHUB_ENV"
+
       - name: Upload release assets
+        if: env.DRY_RUN != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -299,6 +319,7 @@ jobs:
           echo "ASSETS_UPLOADED=YES" >> "$GITHUB_ENV"
 
       - name: Verify remote release assets
+        if: env.DRY_RUN != 'true'
         run: |
           set -euo pipefail
           trap 'echo "FAILED_STEP=Verify remote release assets" >> "$GITHUB_ENV"' ERR
@@ -344,7 +365,10 @@ jobs:
             echo "# Orvix Release Bundle Result"
             echo
             echo "Verdict: $VERDICT"
-            if [ "$VERDICT" != "PASS" ]; then
+            if [ "$VERDICT" = "DRY_RUN_PASS" ]; then
+              echo
+              echo "DRY RUN — every pre-publication check passed (smokes, tests, vet, build, local bundle build+sign+checksum). No release, tag, or asset was created or modified."
+            elif [ "$VERDICT" != "PASS" ]; then
               echo
               echo "Failed step: $FAILED"
             fi
@@ -390,7 +414,7 @@ jobs:
           echo "REMOTE_URLS_VERIFIED=${REMOTE_URLS_VERIFIED:-NO}"
           echo "FINAL_VERDICT=$VERDICT"
 
-          if [ "$VERDICT" != "PASS" ]; then
+          if [ "$VERDICT" != "PASS" ] && [ "$VERDICT" != "DRY_RUN_PASS" ]; then
             echo "Release bundle workflow failed at: $FAILED" >&2
             exit 1
           fi
