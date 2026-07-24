@@ -231,6 +231,23 @@ jobs:
             exit 1
           fi
 
+      - name: Require signing secret
+        env:
+          ORVIX_RELEASE_SIGNING_KEY_PEM_B64: ${{ secrets.ORVIX_RELEASE_SIGNING_KEY_PEM_B64 }}
+        run: |
+          set -euo pipefail
+          trap 'echo "FAILED_STEP=Require signing secret" >> "$GITHUB_ENV"' ERR
+          # Fail closed, in BOTH dry-run and real publication runs — dry-run
+          # must prove exactly what a real publish will require, never a
+          # weaker path. A prior incident (2026-07-24, run 30056009685)
+          # published an unsigned public prerelease because this step
+          # previously only logged a WARN and continued with
+          # ORVIX_REQUIRE_RELEASE_SIGNATURE=0. Never repeat that.
+          if [ -z "${ORVIX_RELEASE_SIGNING_KEY_PEM_B64:-}" ]; then
+            echo "::error::ORVIX_RELEASE_SIGNING_KEY_PEM_B64 secret is not set. Refusing to build any bundle — signed or unsigned — without it. Configure the secret before running this workflow." >&2
+            exit 1
+          fi
+
       - name: Build release bundle
         env:
           ORVIX_RELEASE_SIGNING_KEY_PEM_B64: ${{ secrets.ORVIX_RELEASE_SIGNING_KEY_PEM_B64 }}
@@ -242,20 +259,14 @@ jobs:
           if [ -n "${BUNDLE_VERSION:-}" ]; then
             BUILD_ARGS+=(--version "$BUNDLE_VERSION")
           fi
-          if [ -n "${ORVIX_RELEASE_SIGNING_KEY_PEM_B64:-}" ]; then
-            signing_key="$(mktemp)"
-            printf '%s' "$ORVIX_RELEASE_SIGNING_KEY_PEM_B64" | base64 -d > "$signing_key"
-            chmod 0600 "$signing_key"
-            export ORVIX_REQUIRE_RELEASE_SIGNATURE=1
-            export ORVIX_RELEASE_SIGNING_KEY_FILE="$signing_key"
-            export ORVIX_RELEASE_VERIFYING_KEY_FILE="release/trust/orvix-release-signing.pub.pem"
-            bash release/scripts/build-release-bundle.sh "${BUILD_ARGS[@]}"
-            rm -f "$signing_key"
-          else
-            echo "WARN: ORVIX_RELEASE_SIGNING_KEY_PEM_B64 not set; building unsigned bundle" >&2
-            export ORVIX_REQUIRE_RELEASE_SIGNATURE=0
-            bash release/scripts/build-release-bundle.sh "${BUILD_ARGS[@]}"
-          fi
+          signing_key="$(mktemp)"
+          printf '%s' "$ORVIX_RELEASE_SIGNING_KEY_PEM_B64" | base64 -d > "$signing_key"
+          chmod 0600 "$signing_key"
+          export ORVIX_REQUIRE_RELEASE_SIGNATURE=1
+          export ORVIX_RELEASE_SIGNING_KEY_FILE="$signing_key"
+          export ORVIX_RELEASE_VERIFYING_KEY_FILE="release/trust/orvix-release-signing.pub.pem"
+          bash release/scripts/build-release-bundle.sh "${BUILD_ARGS[@]}"
+          rm -f "$signing_key"
           # build-release-bundle.sh seals two archives per run: the
           # primary version-named one (what install-public.sh's --version
           # resolver actually downloads) and a "<channel>" alias copy.
@@ -268,19 +279,25 @@ jobs:
           echo "RESOLVED_VERSION=$RESOLVED_VERSION" >> "$GITHUB_ENV"
           ASSET_BASE="dist/orvix-enterprise-mail-${RESOLVED_VERSION}-linux-amd64.tar.gz"
           echo "ASSET_BASE=$ASSET_BASE" >> "$GITHUB_ENV"
-          if [ -n "${ORVIX_RELEASE_SIGNING_KEY_PEM_B64:-}" ]; then
-            test -f "$ASSET_BASE.sig"
-            test -f "$ASSET_BASE.manifest.json.sig"
-            test -f "$ASSET_BASE.sbom.spdx.sig"
-          fi
+          # Signature gate — hard failure, not a warning, if any expected
+          # .sig is missing or the local checksum/signature don't verify.
+          test -f "$ASSET_BASE.sig" || { echo "::error::missing $ASSET_BASE.sig — refusing to publish an unsigned bundle" >&2; exit 1; }
+          test -f "$ASSET_BASE.manifest.json.sig" || { echo "::error::missing $ASSET_BASE.manifest.json.sig — refusing to publish an unsigned bundle" >&2; exit 1; }
+          test -f "$ASSET_BASE.sbom.spdx.sig" || { echo "::error::missing $ASSET_BASE.sbom.spdx.sig — refusing to publish an unsigned bundle" >&2; exit 1; }
           test -f "$ASSET_BASE"
           test -f "$ASSET_BASE.sha256"
           test -f "$ASSET_BASE.manifest.json"
           test -f "$ASSET_BASE.sbom.spdx"
-          sha256sum -c "$ASSET_BASE.sha256"
+          sha256sum -c "$ASSET_BASE.sha256" || { echo "::error::local checksum verification failed" >&2; exit 1; }
           LOCAL_SHA="$(awk '{print $1}' "$ASSET_BASE.sha256")"
           echo "LOCAL_SHA=$LOCAL_SHA"
           echo "LOCAL_SHA=$LOCAL_SHA" >> "$GITHUB_ENV"
+          openssl pkeyutl -verify -rawin -pubin \
+            -inkey release/trust/orvix-release-signing.pub.pem \
+            -in "$ASSET_BASE" -sigfile "$ASSET_BASE.sig" \
+            || { echo "::error::local Ed25519 signature verification failed" >&2; exit 1; }
+          echo "SIGNATURE_VERIFIED_LOCALLY=YES"
+          echo "SIGNATURE_VERIFIED_LOCALLY=YES" >> "$GITHUB_ENV"
 
       - name: Dry-run verdict
         if: env.DRY_RUN == 'true'
@@ -295,6 +312,32 @@ jobs:
           echo "FAILED_STEP="
           echo "FAILED_STEP=" >> "$GITHUB_ENV"
 
+      - name: Create or retain draft release
+        if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          trap 'echo "FAILED_STEP=Create or retain draft release" >> "$GITHUB_ENV"' ERR
+          # Never publish an empty/unverified release. Assets are uploaded
+          # and remotely re-verified while the release is still a draft
+          # (drafts are not publicly visible); only "Publish release" below
+          # flips it to a public prerelease, and only after that
+          # verification passes.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            is_draft="$(gh release view "$TAG" --json isDraft -q .isDraft)"
+            if [ "$is_draft" != "true" ]; then
+              echo "::error::release $TAG already exists and is not a draft; refusing to upload assets onto an already-published release" >&2
+              exit 1
+            fi
+            echo "release $TAG already exists as a draft; retaining it"
+          else
+            gh release create "$TAG" \
+              --draft --prerelease --latest=false --verify-tag \
+              --title "ORVIX Enterprise Mail $TAG" \
+              --notes "Signed rc-channel prerelease. Draft until assets are uploaded and remotely verified."
+          fi
+
       - name: Upload release assets
         if: env.DRY_RUN != 'true'
         env:
@@ -307,44 +350,73 @@ jobs:
             "$ASSET_BASE.sha256"
             "$ASSET_BASE.manifest.json"
             "$ASSET_BASE.sbom.spdx"
+            "$ASSET_BASE.sig"
+            "$ASSET_BASE.manifest.json.sig"
+            "$ASSET_BASE.sbom.spdx.sig"
           )
-          for sig in \
-            "$ASSET_BASE.sig" \
-            "$ASSET_BASE.manifest.json.sig" \
-            "$ASSET_BASE.sbom.spdx.sig"; do
-            [ -f "$sig" ] && assets+=("$sig")
-          done
           gh release upload "$TAG" "${assets[@]}" --clobber
           echo "ASSETS_UPLOADED=YES"
           echo "ASSETS_UPLOADED=YES" >> "$GITHUB_ENV"
 
       - name: Verify remote release assets
         if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           trap 'echo "FAILED_STEP=Verify remote release assets" >> "$GITHUB_ENV"' ERR
-          # Use the tag-scoped download URL, not /releases/latest/download/ —
-          # "latest" only ever resolves to the newest NON-prerelease, so it
-          # silently checks the wrong (or no) release for any prerelease tag.
+          # The release is still a draft here, so its assets are NOT
+          # publicly downloadable via a plain curl (that only works once
+          # published). Use authenticated `gh release download` instead,
+          # which works identically for draft and published releases.
           ASSET_NAME="$(basename "$ASSET_BASE")"
-          RELEASE_URL="https://github.com/reachfm/orvix/releases/download/$TAG"
+          VERIFY_DIR="$(mktemp -d)"
+          gh release download "$TAG" --dir "$VERIFY_DIR" --clobber \
+            --pattern "$ASSET_NAME" \
+            --pattern "$ASSET_NAME.sha256" \
+            --pattern "$ASSET_NAME.sig"
           LOCAL_SHA="${LOCAL_SHA:-$(awk '{print $1}' "$ASSET_BASE.sha256")}"
-          REMOTE_SHA="$(curl -fsSL "$RELEASE_URL/$ASSET_NAME.sha256" | awk '{print $1}')"
+          REMOTE_SHA="$(awk '{print $1}' "$VERIFY_DIR/$ASSET_NAME.sha256")"
           echo "LOCAL_SHA=$LOCAL_SHA"
           echo "REMOTE_SHA=$REMOTE_SHA"
           echo "REMOTE_SHA=$REMOTE_SHA" >> "$GITHUB_ENV"
           test "$REMOTE_SHA" = "$LOCAL_SHA"
           echo "SHA_MATCH=YES"
           echo "SHA_MATCH=YES" >> "$GITHUB_ENV"
-          curl -fIL "$RELEASE_URL/$ASSET_NAME"
-          curl -fIL "$RELEASE_URL/$ASSET_NAME.sha256"
-          curl -fIL "$RELEASE_URL/$ASSET_NAME.manifest.json"
-          curl -fIL "$RELEASE_URL/$ASSET_NAME.sbom.spdx"
-          if [ -f "$ASSET_BASE.sig" ]; then
-            curl -fIL "$RELEASE_URL/$ASSET_NAME.sig"
-            curl -fIL "$RELEASE_URL/$ASSET_NAME.manifest.json.sig"
-            curl -fIL "$RELEASE_URL/$ASSET_NAME.sbom.spdx.sig"
-          fi
+          # Re-verify the Ed25519 signature against the freshly-downloaded
+          # copy — this is defense against a corrupted or tampered upload,
+          # not a re-check of the same local bytes already verified in
+          # "Build release bundle".
+          openssl pkeyutl -verify -rawin -pubin \
+            -inkey release/trust/orvix-release-signing.pub.pem \
+            -in "$VERIFY_DIR/$ASSET_NAME" -sigfile "$VERIFY_DIR/$ASSET_NAME.sig" \
+            || { echo "::error::remote Ed25519 signature verification failed" >&2; exit 1; }
+          echo "REMOTE_SIGNATURE_VERIFIED=YES"
+          echo "REMOTE_SIGNATURE_VERIFIED=YES" >> "$GITHUB_ENV"
+          # Confirm the non-downloaded sidecars (manifest, sbom, and their
+          # .sig files) are present in the release's asset list.
+          asset_names="$(gh release view "$TAG" --json assets -q '.assets[].name')"
+          for required in \
+            "$ASSET_NAME.manifest.json" "$ASSET_NAME.manifest.json.sig" \
+            "$ASSET_NAME.sbom.spdx" "$ASSET_NAME.sbom.spdx.sig"; do
+            echo "$asset_names" | grep -qxF "$required" \
+              || { echo "::error::release is missing expected asset: $required" >&2; exit 1; }
+          done
+          echo "REMOTE_ASSETS_VERIFIED=YES"
+          echo "REMOTE_ASSETS_VERIFIED=YES" >> "$GITHUB_ENV"
+          rm -rf "$VERIFY_DIR"
+
+      - name: Publish release
+        if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          trap 'echo "FAILED_STEP=Publish release" >> "$GITHUB_ENV"' ERR
+          # The very last mutating step. Everything above verified the
+          # release's assets while it was still a draft (not publicly
+          # visible); only now does it become a public prerelease.
+          gh release edit "$TAG" --draft=false --prerelease --latest=false
           echo "REMOTE_URLS_VERIFIED=YES"
           echo "REMOTE_URLS_VERIFIED=YES" >> "$GITHUB_ENV"
           echo "FINAL_VERDICT=PASS"
@@ -352,8 +424,6 @@ jobs:
           echo "FAILED_STEP="
           echo "FAILED_STEP=" >> "$GITHUB_ENV"
           echo "ASSETS_UPLOADED=YES"
-          echo "REMOTE_URLS_VERIFIED=YES"
-          echo "FINAL_VERDICT=PASS"
 
       - name: Write operator summary
         if: always()
