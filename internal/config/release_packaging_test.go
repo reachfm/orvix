@@ -618,7 +618,13 @@ func TestOrvixUpdateServiceOperatorOnly(t *testing.T) {
 		if strings.HasPrefix(trimmed, "#") || trimmed == "" {
 			continue
 		}
-		if strings.Contains(line, "systemctl enable orvix-update") {
+		// Match only the operator-only orvix-update.service, not the
+		// unrelated (and intentionally enabled) orvix-updater.socket /
+		// orvix-updater.service self-update daemon units — those share
+		// the "orvix-update" prefix but are a different, legitimately
+		// auto-started component (see release/install.sh's
+		// self-update-daemon install step).
+		if strings.Contains(line, "systemctl enable orvix-update.service") {
 			t.Errorf("install.sh calls `systemctl enable orvix-update.service` (BLOCKER 2: must not enable): %s", line)
 		}
 	}
