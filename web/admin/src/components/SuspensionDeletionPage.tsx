@@ -18,6 +18,20 @@ export default function SuspensionDeletionPage() {
 
   const sendLimit = useQuery({ queryKey: ["send-limit"], queryFn: api.checkSendLimit });
 
+  const requestDeletionMutation = useMutation({
+    mutationFn: async (reason: string) => {
+      const res = await fetch("/api/v1/enterprise/organizations/current/deletion", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ reason: reason || undefined }),
+      });
+      if (!res.ok) throw new Error((await res.json()).error || "Deletion request failed");
+      return res.json();
+    },
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["org"] }); setShowDeleteConfirm(false); },
+  });
+
   return (
     <div className="space-y-6 max-w-2xl">
       <h2 className="text-xl font-semibold text-white">Organization Status</h2>
@@ -75,7 +89,10 @@ export default function SuspensionDeletionPage() {
               <div className="flex gap-2">
                 <input value={deleteReason} onChange={(e) => setDeleteReason(e.target.value)} placeholder="Reason (optional)"
                   className="flex-1 px-3 py-2 bg-[#0C0E12] border border-[#2A2F3E] rounded text-white text-sm" />
-                <button className="bg-red-500 text-white rounded px-4 py-2 text-sm hover:bg-red-600">Confirm Deletion</button>
+                <button onClick={() => requestDeletionMutation.mutate(deleteReason)} disabled={requestDeletionMutation.isPending}
+                  className="bg-red-500 text-white rounded px-4 py-2 text-sm hover:bg-red-600 disabled:opacity-50">
+                  {requestDeletionMutation.isPending ? "Requesting..." : "Confirm Deletion"}
+                </button>
                 <button onClick={() => setShowDeleteConfirm(false)} className="text-gray-400 px-4 py-2 text-sm">Cancel</button>
               </div>
             </div>

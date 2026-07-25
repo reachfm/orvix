@@ -72,4 +72,26 @@ describe("Admin console certification", () => {
     await waitFor(() => expect(screen.getByText("Orvix Admin")).toBeInTheDocument());
     expect(screen.getByRole("button", { name: /logout/i })).toBeInTheDocument();
   });
+
+  it("no hardcoded delivery rate percentages in Dashboard", async () => {
+    const src = await import("./components/Dashboard?raw");
+    expect(src.default).not.toMatch(/85,\s*92,\s*88,\s*95/);
+    expect(src.default).not.toMatch(/hardcoded.*delivery/i);
+  });
+
+  it("no fake simulated API key generation", async () => {
+    const src = await import("./components/ApiKeysPage?raw");
+    expect(src.default).not.toMatch(/orv_simulated_key/);
+    expect(src.default).not.toMatch(/simulated_key/);
+  });
+
+  it("no hardcoded version string", async () => {
+    const src = await import("./App?raw");
+    expect(src.default).not.toMatch(/Console v1\.0\.0/);
+  });
+
+  it("no dead buttons in SuspensionDeletionPage", async () => {
+    const src = await import("./components/SuspensionDeletionPage?raw");
+    expect(src.default).not.toMatch(/onClick.*\"Confirm Deletion\"/);
+  });
 });

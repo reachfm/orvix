@@ -1,12 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
-import { Globe, Mail, HardDrive, CreditCard, Activity, Inbox, Send, AlertTriangle } from "lucide-react";
+import { Globe, Mail, HardDrive, Activity, AlertTriangle } from "lucide-react";
 import { api } from "../api";
 
 export default function Dashboard() {
   const { data, isLoading, error } = useQuery({ queryKey: ["dashboard"], queryFn: api.getDashboard });
 
-  if (isLoading) return <p className="text-[#8B92A8]">Loading...</p>;
-  if (error) return <p className="text-[#F87171]">Failed to load dashboard</p>;
+  if (isLoading) return <p className="text-[#8B92A8]">Loading dashboard data...</p>;
+  if (error) return <p className="text-[#F87171]">Failed to load dashboard: {(error as Error).message}</p>;
 
   const dash = data as any;
   const storageUsedGB = dash?.quota_used_bytes ? (dash.quota_used_bytes / (1024 * 1024 * 1024)).toFixed(1) : "0.0";
@@ -42,16 +42,19 @@ export default function Dashboard() {
       <div className="grid grid-cols-2 gap-6 mb-8">
         <div className="bg-[#13161C] border border-[#2A2F3E] rounded-xl p-6">
           <h3 className="text-sm font-medium text-[#E8EAF0] mb-4">Delivery Rate</h3>
-          <div className="flex items-end gap-2 h-32">
-            {[85, 92, 88, 95, 91, 89, 94, 96, 93, 90, 97, 95].map((v, i) => (
-              <div
-                key={i}
-                className="flex-1 bg-[#4F7CFF] rounded-t"
-                style={{ height: `${v}%` }}
-              />
-            ))}
-          </div>
-          <p className="text-xs text-[#555D73] mt-2">Historical trend (12 periods)</p>
+          {(dash?.delivery_rate_history && dash.delivery_rate_history.length > 0) ? (
+            <div className="flex items-end gap-2 h-32">
+              {dash.delivery_rate_history.map((v: number, i: number) => (
+                <div
+                  key={i}
+                  className="flex-1 bg-[#4F7CFF] rounded-t"
+                  style={{ height: `${Math.min(100, v)}%` }}
+                />
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-[#8B92A8]">Insufficient delivery data to display a chart.</p>
+          )}
         </div>
 
         <div className="bg-[#13161C] border border-[#2A2F3E] rounded-xl p-6">

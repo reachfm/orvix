@@ -14,7 +14,7 @@ export default function UsageQuotasPage() {
     { label: "Mailboxes", used: usage?.mailboxes_used || 0, limit: plan?.max_mailboxes || 5, icon: Mail },
     { label: "Emails Sent", used: usage?.emails_sent || 0, limit: plan?.send_limit_day || 500, icon: Send, suffix: "/day" },
     { label: "Storage", used: Math.round((usage?.storage_used_mb || 0) / 1024 * 10) / 10, limit: Math.round((plan?.storage_mb || 1024) / 1024 * 10) / 10, icon: HardDrive, unit: "GB" },
-    { label: "API Calls", used: usage?.api_calls || 0, limit: 10000, icon: BarChart },
+    { label: "API Calls", used: usage?.api_calls || 0, limit: plan?.max_api_calls || usage?.api_limit || 10000, icon: BarChart },
   ];
 
   return (

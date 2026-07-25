@@ -79,6 +79,7 @@ export default function App() {
   const [authenticated, setAuthenticated] = useState(false);
   const [authLoading, setAuthLoading] = useState(true);
   const [userRole, setUserRole] = useState("");
+  const [appVersion, setAppVersion] = useState("");
 
   useEffect(() => {
     fetch("/api/v1/me", { credentials: "include" })
@@ -94,6 +95,9 @@ export default function App() {
         setAuthLoading(false);
       })
       .catch(() => { setAuthenticated(false); setAuthLoading(false); });
+    fetch("/api/v1/version", { credentials: "include" })
+      .then(async (r) => { if (r.ok) { const v = await r.json(); setAppVersion(v.version || v.build || ""); } })
+      .catch(() => {});
   }, []);
 
   const isPlatformRole = userRole === "admin" || userRole === "superadmin" || userRole === "operator";
@@ -201,7 +205,7 @@ export default function App() {
           <Server size={24} className="text-[#4F7CFF]" />
           <div>
             <h1 className="text-sm font-semibold text-[#E8EAF0]">Orvix Admin</h1>
-            <p className="text-xs text-[#555D73]">Console v1.0.0</p>
+            <p className="text-xs text-[#555D73]">Console {appVersion || "dev"}</p>
           </div>
         </div>
 
