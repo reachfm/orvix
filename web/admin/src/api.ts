@@ -240,6 +240,11 @@ export const api = {
   revokeApiKey: (id: number) =>
     request(`/enterprise/api-keys/${id}`, { method: "DELETE" }),
 
+  // Tenant Management (platform superadmin)
+  listInternalTenants: () => request<any>("/console/internal/tenants"),
+  setTenantActive: (id: number, active: boolean) =>
+    request(`/platform/organizations/${id}/active`, { method: "POST", body: JSON.stringify({ active }) }),
+
   // Forgot/reset password
   forgotPassword: (email: string) =>
     request("/auth/forgot-password", { method: "POST", body: JSON.stringify({ email }) }),

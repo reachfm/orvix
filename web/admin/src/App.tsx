@@ -10,6 +10,7 @@ import EnterpriseDashboard from "./components/EnterpriseDashboard";
 import MailboxList from "./components/MailboxList";
 import OrganizationList from "./components/OrganizationList";
 import BackupStatus from "./components/BackupStatus";
+import TenantManagement from "./components/TenantManagement";
 import SystemHealth from "./components/SystemHealth";
 import BillingPage from "./components/BillingPage";
 import DomainOnboarding from "./components/DomainOnboarding";
@@ -35,7 +36,7 @@ import PreferencesPage from "./components/PreferencesPage";
 import { initCSRF, api } from "./api";
 
 type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" | "settings"
-  | "enterprise" | "mailboxes" | "organizations" | "backups" | "health"
+  | "enterprise" | "mailboxes" | "organizations" | "backups" | "health" | "tenants"
   | "billing" | "onboarding" | "apikeys"
   | "account-settings" | "org-overview" | "invitations" | "members-roles" | "ownership-transfer"
   | "suspension-deletion" | "customer-mailboxes" | "aliases" | "groups" | "usage-quotas"
@@ -52,6 +53,7 @@ const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: st
   { id: "firewall", label: "Firewall", icon: Shield },
   { id: "modules", label: "Modules", icon: Zap },
   { id: "audit", label: "Audit Log", icon: Activity },
+  { id: "tenants", label: "Tenants", icon: Building, section: "Platform Admin" },
   { id: "backups", label: "Backups", icon: HardDrive },
   { id: "health", label: "Health", icon: HeartPulse },
   { id: "settings", label: "Settings", icon: Settings },
@@ -116,6 +118,7 @@ export default function App() {
       if (t.id === "firewall") return false;
       if (t.id === "modules") return false;
       if (t.id === "audit") return false;
+      if (t.id === "tenants") return false;
       if (t.id === "backups") return false;
       if (t.id === "health") return false;
       if (t.id === "settings") return false;
@@ -175,6 +178,7 @@ export default function App() {
       case "enterprise": return <EnterpriseDashboard />;
       case "mailboxes": return <MailboxList />;
       case "organizations": return <OrganizationList />;
+      case "tenants": return <TenantManagement />;
       case "backups": return <BackupStatus />;
       case "health": return <SystemHealth />;
       case "billing": return <BillingPage />;
