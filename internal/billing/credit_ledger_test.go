@@ -3,7 +3,6 @@ package billing
 import (
 	"testing"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/models"
 	"go.uber.org/zap"
