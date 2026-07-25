@@ -552,6 +552,25 @@ func MigrateAllRaw(db *gorm.DB) error {
 			user_id INTEGER NOT NULL,
 			expires_at DATETIME NOT NULL
 		)`,
+		// recent_auth_grants backs internal/auth/reauth.go's
+		// ReauthManager. Each row is a short-lived grant proving
+		// the user recently re-authenticated for a specific scope.
+		`CREATE TABLE IF NOT EXISTS recent_auth_grants (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			user_id INTEGER NOT NULL,
+			session_id TEXT NOT NULL,
+			tenant_id INTEGER NOT NULL,
+			scope TEXT NOT NULL,
+			expires_at DATETIME NOT NULL
+		)`,
+		// reauth_failures tracks failed re-authentication attempts
+		// for rate limiting.
+		`CREATE TABLE IF NOT EXISTS reauth_failures (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			user_id INTEGER NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS update_histories (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			created_at DATETIME NOT NULL,
@@ -1224,6 +1243,10 @@ func MigrateAllRaw(db *gorm.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_sessions_deleted_at ON sessions(deleted_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_csrf_records_user_id ON csrf_records(user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_csrf_records_expires_at ON csrf_records(expires_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_reauth_user_scope ON recent_auth_grants(user_id, scope)`,
+		`CREATE INDEX IF NOT EXISTS idx_reauth_expires_at ON recent_auth_grants(expires_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_reauth_failures_user ON reauth_failures(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_reauth_failures_created ON reauth_failures(created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_update_histories_deleted_at ON update_histories(deleted_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_guardian_logs_message_id ON guardian_logs(message_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_l_dap_configs_tenant_id ON l_dap_configs(tenant_id)`,

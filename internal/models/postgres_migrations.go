@@ -255,6 +255,21 @@ func postgresTables() []string {
 			expires_at TIMESTAMP NOT NULL
 		)`,
 
+		`CREATE TABLE IF NOT EXISTS recent_auth_grants (
+			id BIGSERIAL PRIMARY KEY,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			user_id INTEGER NOT NULL,
+			session_id TEXT NOT NULL,
+			tenant_id INTEGER NOT NULL,
+			scope TEXT NOT NULL,
+			expires_at TIMESTAMP NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS reauth_failures (
+			id BIGSERIAL PRIMARY KEY,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			user_id INTEGER NOT NULL
+		)`,
+
 		// --- Customer account tables ---
 
 		`CREATE TABLE IF NOT EXISTS invoices (
@@ -1218,6 +1233,10 @@ func postgresIndexes() []string {
 		idx("idx_sessions_deleted_at", "sessions", "deleted_at"),
 		idx("idx_csrf_records_user_id", "csrf_records", "user_id"),
 		idx("idx_csrf_records_expires_at", "csrf_records", "expires_at"),
+		idx("idx_reauth_user_scope", "recent_auth_grants", "user_id, scope"),
+		idx("idx_reauth_expires_at", "recent_auth_grants", "expires_at"),
+		idx("idx_reauth_failures_user", "reauth_failures", "user_id"),
+		idx("idx_reauth_failures_created", "reauth_failures", "created_at"),
 
 		// FK / lookup
 		idx("idx_tenants_reseller_id", "tenants", "reseller_id"),
