@@ -21,11 +21,11 @@ import (
 type ReauthScope string
 
 const (
-	ScopeTenantManagement  ReauthScope = "tenant_management"
+	ScopeTenantManagement   ReauthScope = "tenant_management"
 	ScopeIdentityManagement ReauthScope = "identity_management"
-	ScopeDomainManagement  ReauthScope = "domain_management"
-	ScopeMailboxManagement ReauthScope = "mailbox_management"
-	ScopeBillingManagement ReauthScope = "billing_management"
+	ScopeDomainManagement   ReauthScope = "domain_management"
+	ScopeMailboxManagement  ReauthScope = "mailbox_management"
+	ScopeBillingManagement  ReauthScope = "billing_management"
 	ScopeFirewallManagement ReauthScope = "firewall_management"
 	ScopeAPIKeyManagement   ReauthScope = "api_key_management"
 	ScopeQueueDestructive   ReauthScope = "queue_destructive"
@@ -45,18 +45,18 @@ var AllReauthScopes = []ReauthScope{
 // ── Errors ─────────────────────────────────────────────────────────
 
 var (
-	ErrReauthGrantMissing   = errors.New("recent authentication grant missing")
-	ErrReauthGrantExpired   = errors.New("recent authentication grant expired")
-	ErrReauthGrantWrongUser = errors.New("recent authentication grant belongs to a different user")
+	ErrReauthGrantMissing      = errors.New("recent authentication grant missing")
+	ErrReauthGrantExpired      = errors.New("recent authentication grant expired")
+	ErrReauthGrantWrongUser    = errors.New("recent authentication grant belongs to a different user")
 	ErrReauthGrantWrongSession = errors.New("recent authentication grant belongs to a different session")
-	ErrReauthGrantWrongTenant = errors.New("recent authentication grant belongs to a different tenant")
-	ErrReauthGrantWrongScope  = errors.New("recent authentication grant does not cover the requested scope")
-	ErrReauthPasswordWrong = errors.New("incorrect password")
-	ErrReauthTOTPRequired  = errors.New("TOTP verification required but not provided")
-	ErrReauthTOTPInvalid   = errors.New("invalid TOTP code")
-	ErrReauthTOTPReplayed  = errors.New("TOTP code has already been used")
-	ErrReauthRateLimited   = errors.New("too many verification attempts")
-	ErrReauthMFARequired   = errors.New("multi-factor authentication required")
+	ErrReauthGrantWrongTenant  = errors.New("recent authentication grant belongs to a different tenant")
+	ErrReauthGrantWrongScope   = errors.New("recent authentication grant does not cover the requested scope")
+	ErrReauthPasswordWrong     = errors.New("incorrect password")
+	ErrReauthTOTPRequired      = errors.New("TOTP verification required but not provided")
+	ErrReauthTOTPInvalid       = errors.New("invalid TOTP code")
+	ErrReauthTOTPReplayed      = errors.New("TOTP code has already been used")
+	ErrReauthRateLimited       = errors.New("too many verification attempts")
+	ErrReauthMFARequired       = errors.New("multi-factor authentication required")
 )
 
 // ── Grant ──────────────────────────────────────────────────────────
@@ -65,13 +65,13 @@ var (
 // authenticated with password (and TOTP when MFA is enabled). It is
 // bound to a specific user, session, tenant, and action scope.
 type RecentAuthGrant struct {
-	ID        uint       `gorm:"primaryKey" json:"id"`
-	CreatedAt time.Time  `json:"created_at"`
-	UserID    uint       `gorm:"index:idx_reauth_user_scope;not null" json:"user_id"`
-	SessionID string     `gorm:"not null" json:"session_id"`
-	TenantID  uint       `gorm:"not null" json:"tenant_id"`
-	Scope     string     `gorm:"index:idx_reauth_user_scope;not null" json:"scope"`
-	ExpiresAt time.Time  `gorm:"not null" json:"expires_at"`
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UserID    uint      `gorm:"index:idx_reauth_user_scope;not null" json:"user_id"`
+	SessionID string    `gorm:"not null" json:"session_id"`
+	TenantID  uint      `gorm:"not null" json:"tenant_id"`
+	Scope     string    `gorm:"index:idx_reauth_user_scope;not null" json:"scope"`
+	ExpiresAt time.Time `gorm:"not null" json:"expires_at"`
 }
 
 const reauthGrantTTL = 15 * time.Minute
@@ -82,11 +82,11 @@ const totpSkew = 1
 // ── ReauthManager ──────────────────────────────────────────────────
 
 type ReauthManager struct {
-	db           *gorm.DB
-	dialect      *dbdialect.Info
-	logger       *zap.Logger
-	auth         *Authenticator
-	now          func() time.Time
+	db      *gorm.DB
+	dialect *dbdialect.Info
+	logger  *zap.Logger
+	auth    *Authenticator
+	now     func() time.Time
 }
 
 func NewReauthManager(db *gorm.DB, logger *zap.Logger, auth *Authenticator) *ReauthManager {
@@ -191,7 +191,7 @@ func (rm *ReauthManager) VerifyTOTP(userID uint, code string) error {
 		return ErrReauthRateLimited
 	}
 	var mfa struct {
-		MFASecret string
+		MFASecret  string
 		MFAEnabled bool
 	}
 	err := rm.db.Table("users").Select("mfa_secret, mfa_enabled").Where("id = ?", userID).Take(&mfa).Error
@@ -259,17 +259,33 @@ func (rm *ReauthManager) ValidateGrant(userID uint, sessionID string, tenantID u
 	// Purge expired grants.
 	_, _ = sqlDB.Exec("DELETE FROM recent_auth_grants WHERE expires_at < "+d.Placeholder(1), now)
 
-	var dbScope string
-	query := "SELECT scope FROM recent_auth_grants WHERE user_id = " + d.Placeholder(1) +
+	// Two-phase lookup:
+	//   1. Check whether ANY valid grant exists for this user/session/tenant
+	//      (scope-agnostic). If none → ErrReauthGrantMissing.
+	//   2. Check whether a valid grant exists for the SPECIFIC scope. If not
+	//      → ErrReauthGrantWrongScope (grant exists but doesn't cover this
+	//      action).
+	// This approach correctly distinguishes the two error cases AND handles
+	// users who have concurrent grants for multiple scopes (a grant for
+	// scope A must not block validation of a valid grant for scope B).
+	var anyScope string
+	anyQuery := "SELECT scope FROM recent_auth_grants WHERE user_id = " + d.Placeholder(1) +
 		" AND session_id = " + d.Placeholder(2) +
 		" AND tenant_id = " + d.Placeholder(3) +
 		" AND expires_at > " + d.Placeholder(4) +
 		" ORDER BY created_at DESC LIMIT 1"
-	err = sqlDB.QueryRow(query, userID, sessionID, tenantID, now).Scan(&dbScope)
-	if err != nil {
+	if err = sqlDB.QueryRow(anyQuery, userID, sessionID, tenantID, now).Scan(&anyScope); err != nil {
 		return ErrReauthGrantMissing
 	}
-	if dbScope != string(scope) {
+
+	var dbScope string
+	scopeQuery := "SELECT scope FROM recent_auth_grants WHERE user_id = " + d.Placeholder(1) +
+		" AND session_id = " + d.Placeholder(2) +
+		" AND tenant_id = " + d.Placeholder(3) +
+		" AND scope = " + d.Placeholder(4) +
+		" AND expires_at > " + d.Placeholder(5) +
+		" ORDER BY created_at DESC LIMIT 1"
+	if err = sqlDB.QueryRow(scopeQuery, userID, sessionID, tenantID, string(scope), now).Scan(&dbScope); err != nil {
 		return ErrReauthGrantWrongScope
 	}
 	return nil
@@ -334,15 +350,15 @@ func (rm *ReauthManager) RequireReauth(scope ReauthScope) fiber.Handler {
 			switch {
 			case errors.Is(err, ErrReauthGrantMissing):
 				return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
-					"error":    "recent authentication required",
-					"reauth":   true,
-					"scope":    string(scope),
+					"error":  "recent authentication required",
+					"reauth": true,
+					"scope":  string(scope),
 				})
 			case errors.Is(err, ErrReauthGrantWrongScope):
 				return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
-					"error":    "recent authentication does not cover required scope",
-					"reauth":   true,
-					"scope":    string(scope),
+					"error":  "recent authentication does not cover required scope",
+					"reauth": true,
+					"scope":  string(scope),
 				})
 			default:
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -357,7 +373,7 @@ func (rm *ReauthManager) RequireReauth(scope ReauthScope) fiber.Handler {
 // ── Rate limiting ──────────────────────────────────────────────────
 
 type reauthFailure struct {
-	Count     int
+	Count       int
 	WindowStart time.Time
 }
 
@@ -439,12 +455,12 @@ func base32Decode(s string) ([]byte, error) {
 // ── Audit event helpers ──────────────────────────────────────────
 
 type ReauthAuditEvent struct {
-	UserID    uint   `json:"user_id"`
-	Action    string `json:"action"`
-	Scope     string `json:"scope,omitempty"`
-	SessionID string `json:"session_id,omitempty"`
-	Success   bool   `json:"success"`
-	Reason    string `json:"reason,omitempty"`
+	UserID    uint      `json:"user_id"`
+	Action    string    `json:"action"`
+	Scope     string    `json:"scope,omitempty"`
+	SessionID string    `json:"session_id,omitempty"`
+	Success   bool      `json:"success"`
+	Reason    string    `json:"reason,omitempty"`
 	Timestamp time.Time `json:"timestamp"`
 }
 

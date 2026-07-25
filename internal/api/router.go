@@ -172,7 +172,14 @@ func (r *Router) adminReauthMiddleware() fiber.Handler {
 		if r.reauth == nil {
 			return c.Next()
 		}
+		// c.Path() returns the full request path including the /api/v1
+		// group prefix. Strip it so the prefix rules (which are written
+		// relative to the group root, e.g. "/mailboxes") match correctly.
 		path := c.Path()
+		const apiV1Prefix = "/api/v1"
+		if strings.HasPrefix(path, apiV1Prefix) {
+			path = path[len(apiV1Prefix):]
+		}
 		var scope auth.ReauthScope
 		for _, rl := range rules {
 			if len(path) >= len(rl.prefix) && path[:len(rl.prefix)] == rl.prefix {
