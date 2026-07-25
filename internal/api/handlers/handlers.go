@@ -3470,6 +3470,7 @@ func (h *Handler) UpdateFeatureFlag(c fiber.Ctx) error {
 
 func (h *Handler) writeAuditLog(c fiber.Ctx, action, resource string) {
 	userID, _ := c.Locals("user_id").(uint)
+	tenantID, _ := c.Locals("tenant_id").(uint)
 	ip := c.IP()
 
 	if h.auditStore == nil {
@@ -3482,6 +3483,7 @@ func (h *Handler) writeAuditLog(c fiber.Ctx, action, resource string) {
 		Target:    resource,
 		Result:    "success",
 		IP:        ip,
+		TenantID:  tenantID,
 		UserAgent: c.Get("User-Agent"),
 	}); err != nil {
 		h.logger.Error("failed to write audit log", zap.Error(err))
