@@ -1160,6 +1160,62 @@ func postgresTables() []string {
 			user_agent TEXT NOT NULL DEFAULT '',
 			timestamp TIMESTAMP NOT NULL DEFAULT NOW()
 		)`,
+
+		// Immutable credit/debit ledger for prepaid balances.
+		// Every tenant interaction that changes a financial balance
+		// writes an append-only row. Balance at any point in time
+		// is SUM(amount) WHERE tenant_id=$1 AND id <= $2 .
+		`CREATE TABLE IF NOT EXISTS credit_ledger (
+			id BIGSERIAL PRIMARY KEY,
+			tenant_id INTEGER NOT NULL,
+			entry_type TEXT NOT NULL CHECK(entry_type IN ('credit','debit','adjustment','refund','expiration')),
+			amount INTEGER NOT NULL,
+			balance_after INTEGER NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			reference_type TEXT NOT NULL DEFAULT '',
+			reference_id INTEGER NOT NULL DEFAULT 0,
+			created_by INTEGER NOT NULL DEFAULT 0,
+			created_at TIMESTAMP NOT NULL
+		)`,
+
+		// Outbound webhook subscriptions for tenant-configured
+		// event notifications (e.g. billing, domain verification,
+		// security alerts).
+		`CREATE TABLE IF NOT EXISTS webhook_subscriptions (
+			id BIGSERIAL PRIMARY KEY,
+			tenant_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			url TEXT NOT NULL,
+			secret_hash TEXT NOT NULL DEFAULT '',
+			events TEXT NOT NULL DEFAULT '',
+			active BOOLEAN NOT NULL DEFAULT true,
+			retry_count INTEGER NOT NULL DEFAULT 3,
+			timeout_seconds INTEGER NOT NULL DEFAULT 10,
+			last_sent_at TIMESTAMP,
+			last_status INTEGER NOT NULL DEFAULT 0,
+			created_at TIMESTAMP NOT NULL,
+			updated_at TIMESTAMP NOT NULL,
+			deleted_at TIMESTAMP,
+			UNIQUE(tenant_id, name)
+		)`,
+
+		// Data retention policies that govern message lifecycle.
+		// Referenced by coremail_messages.retention_policy_id.
+		`CREATE TABLE IF NOT EXISTS data_retention_policies (
+			id BIGSERIAL PRIMARY KEY,
+			tenant_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			retention_days INTEGER NOT NULL DEFAULT 365,
+			action TEXT NOT NULL DEFAULT 'delete' CHECK(action IN ('delete','archive','quarantine')),
+			apply_to_folders TEXT NOT NULL DEFAULT 'all',
+			exclude_folders TEXT NOT NULL DEFAULT '',
+			active BOOLEAN NOT NULL DEFAULT true,
+			created_at TIMESTAMP NOT NULL,
+			updated_at TIMESTAMP NOT NULL,
+			deleted_at TIMESTAMP,
+			UNIQUE(tenant_id, name)
+		)`,
 	}
 }
 
@@ -1457,6 +1513,19 @@ func postgresIndexes() []string {
 		idx("idx_orvix_audit_tenant", "orvix_audit", "tenant_id"),
 		idx("idx_orvix_audit_action", "orvix_audit", "action"),
 		idx("idx_orvix_audit_timestamp", "orvix_audit", "timestamp DESC"),
+
+		// Credit ledger
+		idx("idx_credit_ledger_tenant", "credit_ledger", "tenant_id"),
+		idx("idx_credit_ledger_created", "credit_ledger", "created_at"),
+		idx("idx_credit_ledger_tenant_created", "credit_ledger", "tenant_id, id"),
+
+		// Webhook subscriptions
+		idx("idx_webhook_subscriptions_tenant", "webhook_subscriptions", "tenant_id"),
+		idx("idx_webhook_subscriptions_active", "webhook_subscriptions", "active"),
+
+		// Data retention policies
+		idx("idx_data_retention_policies_tenant", "data_retention_policies", "tenant_id"),
+		idx("idx_data_retention_policies_active", "data_retention_policies", "active"),
 	}
 }
 
@@ -1497,6 +1566,9 @@ func PostgresSchemaCompatible(db *gorm.DB, tableSchema string) error {
 		"backup_schedule_config", "upgrade_history", "coremail_versions",
 		"customer_domain_verifications", "customer_domain_verification_claims",
 		"orvix_audit",
+		"credit_ledger",
+		"webhook_subscriptions",
+		"data_retention_policies",
 	}
 
 	var missing []string

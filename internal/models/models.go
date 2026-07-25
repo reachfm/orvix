@@ -1189,6 +1189,62 @@ func MigrateAllRaw(db *gorm.DB) error {
 			deleted_at DATETIME,
 			UNIQUE(tenant_id, name)
 		)`,
+
+		// Immutable credit/debit ledger for prepaid balances.
+		// Every tenant interaction that changes a financial balance
+		// writes an append-only row. Balance at any point in time
+		// is SUM(amount) WHERE tenant_id=? AND id <= ? .
+		`CREATE TABLE IF NOT EXISTS credit_ledger (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			tenant_id INTEGER NOT NULL,
+			entry_type TEXT NOT NULL CHECK(entry_type IN ('credit','debit','adjustment','refund','expiration')),
+			amount INTEGER NOT NULL,
+			balance_after INTEGER NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			reference_type TEXT NOT NULL DEFAULT '',
+			reference_id INTEGER NOT NULL DEFAULT 0,
+			created_by INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME NOT NULL
+		)`,
+
+		// Outbound webhook subscriptions for tenant-configured
+		// event notifications (e.g. billing, domain verification,
+		// security alerts).
+		`CREATE TABLE IF NOT EXISTS webhook_subscriptions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			tenant_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			url TEXT NOT NULL,
+			secret_hash TEXT NOT NULL DEFAULT '',
+			events TEXT NOT NULL DEFAULT '',
+			active INTEGER NOT NULL DEFAULT 1,
+			retry_count INTEGER NOT NULL DEFAULT 3,
+			timeout_seconds INTEGER NOT NULL DEFAULT 10,
+			last_sent_at DATETIME,
+			last_status INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			UNIQUE(tenant_id, name)
+		)`,
+
+		// Data retention policies that govern message lifecycle.
+		// Referenced by coremail_messages.retention_policy_id.
+		`CREATE TABLE IF NOT EXISTS data_retention_policies (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			tenant_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			retention_days INTEGER NOT NULL DEFAULT 365,
+			action TEXT NOT NULL DEFAULT 'delete' CHECK(action IN ('delete','archive','quarantine')),
+			apply_to_folders TEXT NOT NULL DEFAULT 'all',
+			exclude_folders TEXT NOT NULL DEFAULT '',
+			active INTEGER NOT NULL DEFAULT 1,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME,
+			UNIQUE(tenant_id, name)
+		)`,
 	}
 
 	// Execute table creation statements
@@ -1294,6 +1350,16 @@ func MigrateAllRaw(db *gorm.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_security_events_email ON security_events(email)`,
 		`CREATE INDEX IF NOT EXISTS idx_security_events_event_type ON security_events(event_type)`,
 		`CREATE INDEX IF NOT EXISTS idx_security_events_created ON security_events(created_at)`,
+		// Credit ledger indexes
+		`CREATE INDEX IF NOT EXISTS idx_credit_ledger_tenant ON credit_ledger(tenant_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_credit_ledger_created ON credit_ledger(created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_credit_ledger_tenant_created ON credit_ledger(tenant_id, id)`,
+		// Webhook subscriptions indexes
+		`CREATE INDEX IF NOT EXISTS idx_webhook_subscriptions_tenant ON webhook_subscriptions(tenant_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_webhook_subscriptions_active ON webhook_subscriptions(active)`,
+		// Data retention policies indexes
+		`CREATE INDEX IF NOT EXISTS idx_data_retention_policies_tenant ON data_retention_policies(tenant_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_data_retention_policies_active ON data_retention_policies(active)`,
 	}
 
 	// Execute index creation statements
