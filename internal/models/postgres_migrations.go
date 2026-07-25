@@ -240,6 +240,21 @@ func postgresTables() []string {
 			expires_at BIGINT NOT NULL
 		)`,
 
+		// csrf_records backs internal/auth/csrf.go's CSRFManager
+		// (double-submit-cookie CSRF protection). Missing from this
+		// migration set previously — see the matching addition in
+		// internal/models/models.go (MigrateAllRaw) for the SQLite
+		// side and the sqlite_dialect.go fix in the same change for
+		// why the gap was invisible on SQLite (GORM writes silently
+		// no-op'd instead of erroring).
+		`CREATE TABLE IF NOT EXISTS csrf_records (
+			id BIGSERIAL PRIMARY KEY,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			token_hash TEXT NOT NULL UNIQUE,
+			user_id INTEGER NOT NULL,
+			expires_at TIMESTAMP NOT NULL
+		)`,
+
 		// --- Customer account tables ---
 
 		`CREATE TABLE IF NOT EXISTS invoices (
@@ -1201,6 +1216,8 @@ func postgresIndexes() []string {
 		idx("idx_mailboxes_deleted_at", "mailboxes", "deleted_at"),
 		idx("idx_api_keys_deleted_at", "api_keys", "deleted_at"),
 		idx("idx_sessions_deleted_at", "sessions", "deleted_at"),
+		idx("idx_csrf_records_user_id", "csrf_records", "user_id"),
+		idx("idx_csrf_records_expires_at", "csrf_records", "expires_at"),
 
 		// FK / lookup
 		idx("idx_tenants_reseller_id", "tenants", "reseller_id"),

@@ -222,7 +222,6 @@ func TestAdminUpdates_MissingCSRFRejected(t *testing.T) {
 }
 
 func TestAdminUpdates_InvalidCSRFRejected(t *testing.T) {
-	t.Skip("KNOWN GAP (pre-existing, not Phase H): internal/auth/csrf.go Middleware's DB lookup for the submitted token hash does not reliably reject a non-issued token in this test environment; see PR report")
 	router, _, _, token, _ := buildAdminUpdatesHarness(t)
 	resp, _ := adminUpdatesRequest(t, router, "POST", "/api/v1/admin/updates/check", auReqOpts{
 		token: token, csrf: true, csrfVal: "not-a-real-token", body: `{}`,
