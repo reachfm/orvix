@@ -81,19 +81,26 @@ func (h *Handler) RotateEnterpriseAPIKey(c fiber.Ctx) error {
 	} else {
 		scopes = oldScopes
 	}
-	if err := validateAPIKeyScopes(scopes, auth.Role(role)); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	if len(scopes) > 0 {
+		if err := validateAPIKeyScopes(scopes, auth.Role(role)); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+		}
 	}
 
 	// Atomic rotation via RotateByID: loads old key by ID + user + tenant,
 	// generates new key, inserts replacement, disables old, commits atomically.
-	fullKey, record, err := h.apikeys.RotateByID(id, userID, tenantID, role, scopes, 365)
+	rotateScopes := scopes
+	if len(rotateScopes) == 0 {
+		rotateScopes = nil
+	}
+	fullKey, record, err := h.apikeys.RotateByID(id, userID, tenantID, role, rotateScopes, 365)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 
 	h.writeAuditLog(c, "apikey.rotate", fmt.Sprintf("name:%s old_id:%d new_id:%d", record.Name, id, record.ID))
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+		"id":         record.ID,
 		"api_key":    fullKey,
 		"key_prefix": record.KeyPrefix,
 		"name":       record.Name,

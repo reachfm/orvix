@@ -978,6 +978,7 @@ func (h *Handler) CreateAPIKey(c fiber.Ctx) error {
 	h.writeAuditLog(c, "apikey.create", fmt.Sprintf("name:%s|prefix:%s", req.Name, record.KeyPrefix))
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+		"id":         record.ID,
 		"api_key":    fullKey,
 		"key_prefix": record.KeyPrefix,
 		"name":       record.Name,

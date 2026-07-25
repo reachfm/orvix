@@ -231,6 +231,15 @@ export const api = {
   regenerateRecoveryCodes: (data: { current_password: string; code?: string }) =>
     request("/account/mfa/recovery-codes/regenerate", { method: "POST", body: JSON.stringify(data) }),
 
+  // API Keys (tenant-scoped enterprise endpoint)
+  listApiKeys: () => request<any[]>("/enterprise/api-keys"),
+  createApiKey: (data: { name: string; scopes?: string[]; ttl?: string }) =>
+    request("/enterprise/api-keys", { method: "POST", body: JSON.stringify(data) }),
+  rotateApiKey: (id: number, data?: { scopes?: string[] }) =>
+    request(`/enterprise/api-keys/${id}/rotate`, { method: "POST", body: data ? JSON.stringify(data) : "{}" }),
+  revokeApiKey: (id: number) =>
+    request(`/enterprise/api-keys/${id}`, { method: "DELETE" }),
+
   // Forgot/reset password
   forgotPassword: (email: string) =>
     request("/auth/forgot-password", { method: "POST", body: JSON.stringify({ email }) }),
