@@ -913,6 +913,14 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 			entryMailboxID = &mailboxID
 		}
 
+		dir := queue.DirectionOutbound
+		if local {
+			if strings.EqualFold(ctx.Mailbox.Email, bare) {
+				dir = queue.DirectionInternal
+			} else {
+				dir = queue.DirectionInbound
+			}
+		}
 		entry := &queue.QueueEntry{
 			TenantID:        ctx.Mailbox.TenantID,
 			DomainID:        ctx.Mailbox.DomainID,
@@ -921,7 +929,7 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 			FromAddress:     ctx.Mailbox.Email,
 			ToAddress:       bare,
 			RecipientDomain: domain,
-			Direction:       queue.DirectionOutbound,
+			Direction:       dir,
 			DeliveryMode:    deliveryMode,
 			Status:          queue.StatusPending,
 			Priority:        0,

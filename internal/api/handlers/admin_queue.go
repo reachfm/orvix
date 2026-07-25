@@ -31,6 +31,7 @@ type QueueMessage struct {
 	FromAddress     string  `json:"from_address"`
 	ToAddress       string  `json:"to_address"`
 	RecipientDomain string  `json:"recipient_domain"`
+	Direction       string  `json:"direction"`
 	Status          string  `json:"status"`
 	Priority        int     `json:"priority"`
 	AttemptCount    int     `json:"attempt_count"`
@@ -46,13 +47,14 @@ type QueueMessage struct {
 
 // QueueFilter allows querying the queue with filters
 type QueueFilter struct {
-	Status string `json:"status"`
-	Domain string `json:"domain"`
-	Sender string `json:"sender"`
-	From   string `json:"from"`
-	To     string `json:"to"`
-	Limit  int    `json:"limit"`
-	Offset int    `json:"offset"`
+	Status    string `json:"status"`
+	Domain    string `json:"domain"`
+	Sender    string `json:"sender"`
+	From      string `json:"from"`
+	To        string `json:"to"`
+	Direction string `json:"direction"`
+	Limit     int    `json:"limit"`
+	Offset    int    `json:"offset"`
 }
 
 // AdminQueueList serves GET /api/v1/admin/queue/messages
@@ -64,6 +66,7 @@ func (h *Handler) AdminQueueList(c fiber.Ctx) error {
 	f.Sender = c.Query("sender", "")
 	f.From = c.Query("from", "")
 	f.To = c.Query("to", "")
+	f.Direction = c.Query("direction", "")
 	f.Limit = 50
 	if l := c.Query("limit", "50"); l != "" {
 		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= 500 {
@@ -83,7 +86,7 @@ func (h *Handler) AdminQueueList(c fiber.Ctx) error {
 
 	dial := dbdialect.FromDriver(h.cfg.Database.Driver)
 
-	query := `SELECT id, from_address, to_address, recipient_domain, status, priority,
+	query := `SELECT id, from_address, to_address, recipient_domain, direction, status, priority,
 		attempt_count, max_attempts, next_attempt_at, last_attempt_at,
 		last_error, last_status_code, delivery_mode, remote_host,
 		created_at FROM coremail_queue WHERE deleted_at IS NULL`
@@ -109,6 +112,10 @@ func (h *Handler) AdminQueueList(c fiber.Ctx) error {
 		query += fmt.Sprintf(" AND to_address LIKE %s", dial.Placeholder(len(args)+1))
 		args = append(args, "%"+f.To+"%")
 	}
+	if f.Direction != "" {
+		query += fmt.Sprintf(" AND direction = %s", dial.Placeholder(len(args)+1))
+		args = append(args, f.Direction)
+	}
 
 	countQuery := `SELECT COUNT(*) FROM (` + query + `)`
 	var total int64
@@ -132,7 +139,7 @@ func (h *Handler) AdminQueueList(c fiber.Ctx) error {
 		var nextAt, lastAt *time.Time
 		var createdAt time.Time
 		err := rows.Scan(&m.ID, &m.FromAddress, &m.ToAddress, &m.RecipientDomain,
-			&m.Status, &m.Priority, &m.AttemptCount, &m.MaxAttempts,
+			&m.Direction, &m.Status, &m.Priority, &m.AttemptCount, &m.MaxAttempts,
 			&nextAt, &lastAt, &m.LastError, &m.LastStatusCode,
 			&m.DeliveryMode, &m.RemoteHost, &createdAt)
 		if err != nil {
