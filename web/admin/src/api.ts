@@ -234,9 +234,9 @@ export const api = {
   // API Keys (tenant-scoped enterprise endpoint)
   listApiKeys: () => request<any[]>("/enterprise/api-keys"),
   createApiKey: (data: { name: string; scopes?: string[]; ttl?: string }) =>
-    request("/enterprise/api-keys", { method: "POST", body: JSON.stringify(data) }),
+    request<{ api_key?: string; key?: string; id: number; warning?: string }>("/enterprise/api-keys", { method: "POST", body: JSON.stringify(data) }),
   rotateApiKey: (id: number, data?: { scopes?: string[] }) =>
-    request(`/enterprise/api-keys/${id}/rotate`, { method: "POST", body: data ? JSON.stringify(data) : "{}" }),
+    request<{ api_key?: string; key?: string; id: number }>(`/enterprise/api-keys/${id}/rotate`, { method: "POST", body: data ? JSON.stringify(data) : "{}" }),
   revokeApiKey: (id: number) =>
     request(`/enterprise/api-keys/${id}`, { method: "DELETE" }),
 
