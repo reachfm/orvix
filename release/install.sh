@@ -1808,6 +1808,123 @@ PY
     log_detail "ADMIN password rotated for $email via explicit ORVIX_RESET_ADMIN_PASSWORD=1 path (hash/password not logged)"
 }
 
+install_updater_binary() {
+    # Installs the self-update daemon binary (Phase D-I) at
+    # /usr/local/bin/orvix-updater, mirroring the bundle path
+    # build-release-bundle.sh seals it at (bin/orvix-updater).
+    #
+    # This binary is optional on a source-tree dev install without a
+    # prebuilt (older bundles predate Phase J and never shipped
+    # bin/orvix-updater), so absence here is logged, not fatal — the
+    # main mail server (orvix.service) has no dependency on the
+    # updater and must not be blocked by its absence. A bundle built
+    # by the CURRENT build-release-bundle.sh always includes it.
+    local candidate="$ORVIX_SOURCE_DIR/bin/orvix-updater"
+    if [ -f "$candidate" ] && [ -x "$candidate" ]; then
+        run_quiet install -m 0755 -o root -g root "$candidate" /usr/local/bin/orvix-updater
+        log_detail "installed prebuilt orvix-updater binary from $candidate"
+        return 0
+    fi
+    if [ -f "$ORVIX_SOURCE_DIR/go.mod" ]; then
+        log_detail "no prebuilt orvix-updater at $candidate; building from source (dev/CI source-tree install)"
+        install_go_toolchain
+        (cd "$ORVIX_SOURCE_DIR" && go build -trimpath -ldflags "-s -w" -o /usr/local/bin/orvix-updater ./cmd/orvix-updater) >>"$INSTALL_LOG" 2>&1 \
+            || fail "go build failed for cmd/orvix-updater (see $INSTALL_LOG for the compiler error)"
+        run_quiet chmod 0755 /usr/local/bin/orvix-updater
+        log_detail "built orvix-updater from source"
+        return 0
+    fi
+    log_detail "WARNING: orvix-updater binary not found at $candidate and no Go source tree available; self-update daemon will NOT be installed (orvix.service is unaffected)"
+    return 1
+}
+
+# write_updater_units installs the self-update daemon's systemd unit +
+# socket, byte-for-byte from the shipped release tree (same
+# copy-not-inline contract as write_service/write_restore_coordinator).
+# Returns non-zero (and installs nothing) when the shipped units are
+# absent, e.g. an older bundle built before Phase J — the caller must
+# treat that as "updater not available on this bundle", not a fatal
+# install error.
+write_updater_units() {
+    local svc_src="$ORVIX_SOURCE_DIR/release/systemd/orvix-updater.service"
+    local sock_src="$ORVIX_SOURCE_DIR/release/systemd/orvix-updater.socket"
+    if [ ! -f "$svc_src" ] || [ ! -f "$sock_src" ]; then
+        log_detail "orvix-updater.service/.socket not found in release tree; skipping self-update daemon unit install"
+        return 1
+    fi
+    local must_have=(
+        'User=root'
+        'ExecStart=/usr/local/bin/orvix-updater'
+        'StateDirectory=orvix-updater'
+    )
+    local needle
+    for needle in "${must_have[@]}"; do
+        if ! grep -qF "$needle" "$svc_src"; then
+            fail "shipped systemd unit $svc_src is missing required directive: $needle (refusing to install a non-reviewed unit)"
+        fi
+    done
+    if ! grep -qF 'ListenStream=/run/orvix/updater.sock' "$sock_src"; then
+        fail "shipped socket unit $sock_src is missing the expected ListenStream (refusing to install a non-reviewed unit)"
+    fi
+    install -m 0644 -o root -g root "$svc_src" /etc/systemd/system/orvix-updater.service
+    install -m 0644 -o root -g root "$sock_src" /etc/systemd/system/orvix-updater.socket
+    log_detail "installed /etc/systemd/system/orvix-updater.{service,socket} from $svc_src / $sock_src (0644 root:root)"
+    return 0
+}
+
+# enable_start_updater_socket enables + starts ONLY the socket unit
+# (never the service directly) so the daemon is socket-activated per
+# orvix-updater.socket's WantedBy=sockets.target. systemd creates
+# /run/orvix (RuntimeDirectory=orvix in the .service, DirectoryMode=0750
+# in the .socket) and /var/lib/orvix-updater (StateDirectory=orvix-updater
+# in the .service) automatically on first activation — no manual mkdir
+# is needed here, and none is added (a redundant mkdir would just be a
+# second source of truth for ownership/mode that could drift from the
+# unit files).
+#
+# Idempotent: `systemctl enable` is a no-op if the symlink already
+# exists, and `systemctl start` on an already-active socket is a no-op.
+enable_start_updater_socket() {
+    run_quiet systemctl enable orvix-updater.socket
+    run_quiet systemctl start orvix-updater.socket
+    log_detail "enabled + started orvix-updater.socket (socket-activated; orvix-updater.service starts on first connection)"
+}
+
+# validate_updater_health does a best-effort, non-fatal health check of
+# the self-update daemon: socket file present + socket unit active, and
+# a probe connection (via ORVIX_BIN's own health check, if available, or
+# a raw `systemctl is-active` after nudging activation with a connect
+# attempt). This is intentionally NON-FATAL — a broken updater must
+# never fail a fresh install of the mail server itself; it only logs a
+# clear warning so the operator can investigate via
+# docs/emergency-recovery.md.
+validate_updater_health() {
+    if [ ! -S /run/orvix/updater.sock ]; then
+        log_detail "WARNING: /run/orvix/updater.sock not present after enabling orvix-updater.socket (self-update daemon may not be available; this does not affect orvix.service)"
+        return 1
+    fi
+    if ! systemctl is-active --quiet orvix-updater.socket 2>/dev/null; then
+        log_detail "WARNING: orvix-updater.socket is not active after install"
+        return 1
+    fi
+    # Nudge activation: a single connect attempt against the socket
+    # causes systemd to start orvix-updater.service if it has not
+    # already been started. `nc -Uz` is not guaranteed present on a
+    # minimal image, so this step is best-effort via /dev/tcp-style fd
+    # redirection which bash supports for AF_UNIX only via nc; fall
+    # back to just checking the socket unit state when nc is absent.
+    if command -v nc >/dev/null 2>&1; then
+        nc -Uz -w1 /run/orvix/updater.sock >/dev/null 2>&1 || true
+    fi
+    sleep 1
+    if systemctl is-active --quiet orvix-updater.service 2>/dev/null; then
+        log_detail "VALIDATE orvix-updater: socket present, orvix-updater.service active after activation probe"
+    else
+        log_detail "INFO: orvix-updater.service has not been activated yet (socket-activated on first real connection from the admin API; this is expected and not an error)"
+    fi
+    return 0
+}
+
 install_update_helper() {
     # Install the runtime update systemd oneshot unit.
     local unit_src="${ORVIX_SOURCE_DIR}/release/systemd/orvix-update.service"
@@ -3046,6 +3163,18 @@ IPFAIL
     write_service
     install_update_helper
     write_restore_coordinator
+    # Self-update daemon (Phase D-J). Optional on old/dev bundles that
+    # predate it: install_updater_binary/write_updater_units log a clear
+    # warning and return non-zero instead of failing the install when
+    # the daemon isn't shipped in this bundle. orvix.service has no
+    # dependency on orvix-updater (see release/systemd/orvix.service's
+    # After=/Wants=/Requires=), so a missing/broken updater never blocks
+    # the mail server install.
+    local updater_available=1
+    install_updater_binary || updater_available=0
+    if [ "$updater_available" -eq 1 ]; then
+        write_updater_units || updater_available=0
+    fi
     run_quiet systemctl daemon-reload
     run_quiet systemctl enable orvix
     # The restore path watcher must be enabled AND started so a queued restore
@@ -3065,6 +3194,12 @@ IPFAIL
     run_quiet systemctl restart orvix
     validate_systemd
     validate_sudoers
+    if [ "$updater_available" -eq 1 ]; then
+        enable_start_updater_socket
+        validate_updater_health || true
+    else
+        log_detail "SKIP self-update daemon activation (binary/units unavailable in this bundle)"
+    fi
 
     if [ "$admin_mode" = "reset" ]; then
         reset_existing_admin_password "$admin_email" "$admin_password"

@@ -15,12 +15,15 @@
 #
 #   orvix/
 #     bin/orvix                        # verified current binary
+#     bin/orvix-updater                # self-update daemon binary
 #     release/install.sh
 #     release/upgrade.sh
 #     release/uninstall.sh
 #     release/install-public.sh
 #     release/systemd/orvix.service
 #     release/systemd/orvix-update.service
+#     release/systemd/orvix-updater.service
+#     release/systemd/orvix-updater.socket
 #     release/sudoers.d/orvix-update
 #     release/scripts/*.sh
 #     release/admin/**                 # admin SPA + modules
@@ -171,6 +174,8 @@ REQUIRED_FILES=(
     release/systemd/orvix-update.service
     release/systemd/orvix-restore.service
     release/systemd/orvix-restore.path
+    release/systemd/orvix-updater.service
+    release/systemd/orvix-updater.socket
     release/sudoers.d/orvix-update
     release/scripts/healthcheck.sh
     release/scripts/smoke-admin-js.sh
@@ -360,6 +365,41 @@ magic_bytes="$(read_elf_magic_hex "$BIN_OUT")"
 [ "$magic_bytes" = "7f454c46" ] \
     || fail "built binary at $BIN_OUT is not a Linux ELF (size=$bin_size bytes, GOOS=$TARGET_OS GOARCH=$TARGET_ARCH, got magic=$magic_bytes, expected 7f454c46)" 2
 
+# ── 2b. Build the orvix-updater binary ────────────────────────────
+# Mirrors the main orvix build above: same GOOS/GOARCH/CGO_ENABLED,
+# same cross-compile .exe-normalisation dance, same ELF sanity check.
+# orvix-updater has no buildinfo package to stamp (it is a small,
+# separately-versioned daemon whose identity is the orvix bundle's
+# BUILDINFO/VERSION it ships alongside), so only -s -w -trimpath are
+# applied — no -ldflags -X substitutions to verify here.
+UPDATER_BIN_OUT="$BUNDLE_ROOT/bin/orvix-updater"
+GOOS="$TARGET_OS" GOARCH="$TARGET_ARCH" CGO_ENABLED=0 \
+    "$GO_BIN" build -trimpath -ldflags "-s -w" \
+    -o "$UPDATER_BIN_OUT" ./cmd/orvix-updater \
+    || fail "go build failed for cmd/orvix-updater" 2
+
+UPDATER_BIN_REAL="$UPDATER_BIN_OUT"
+if [ ! -f "$UPDATER_BIN_REAL" ] && [ -f "$UPDATER_BIN_OUT.exe" ]; then
+    UPDATER_BIN_REAL="$UPDATER_BIN_OUT.exe"
+fi
+for alt in "$UPDATER_BIN_OUT.exe" "$UPDATER_BIN_OUT" "$(dirname "$UPDATER_BIN_OUT")/orvix-updater.exe"; do
+    if [ -f "$alt" ]; then UPDATER_BIN_REAL="$alt"; break; fi
+done
+if [ ! -f "$UPDATER_BIN_REAL" ]; then
+    fail "built orvix-updater binary not found at $UPDATER_BIN_REAL (go build succeeded but output file is missing; GOOS=$TARGET_OS GOARCH=$TARGET_ARCH)" 2
+fi
+updater_bin_size="$(wc -c < "$UPDATER_BIN_REAL" 2>/dev/null || echo 0)"
+[ "$updater_bin_size" -gt 1024 ] \
+    || fail "built orvix-updater binary at $UPDATER_BIN_REAL is suspiciously small ($updater_bin_size bytes)" 2
+if [ "$UPDATER_BIN_REAL" != "$UPDATER_BIN_OUT" ]; then
+    mv "$UPDATER_BIN_REAL" "$UPDATER_BIN_OUT" || fail "could not rename $UPDATER_BIN_REAL -> $UPDATER_BIN_OUT" 2
+    UPDATER_BIN_REAL="$UPDATER_BIN_OUT"
+fi
+updater_magic_bytes="$(read_elf_magic_hex "$UPDATER_BIN_OUT")"
+[ "$updater_magic_bytes" = "7f454c46" ] \
+    || fail "built orvix-updater binary at $UPDATER_BIN_OUT is not a Linux ELF (size=$updater_bin_size bytes, got magic=$updater_magic_bytes, expected 7f454c46)" 2
+info "built orvix-updater binary: $UPDATER_BIN_OUT ($updater_bin_size bytes, GOOS=$TARGET_OS, GOARCH=$TARGET_ARCH)"
+
 # ── 3. Verify embedded metadata ───────────────────────────────────
 # The strongest verification is executing the freshly-built binary and
 # reading back its own `version --full` output. That only works when
@@ -438,6 +478,8 @@ cp release/systemd/orvix.service         "$BUNDLE_ROOT/release/systemd/orvix.ser
 cp release/systemd/orvix-update.service  "$BUNDLE_ROOT/release/systemd/orvix-update.service"
 cp release/systemd/orvix-restore.service "$BUNDLE_ROOT/release/systemd/orvix-restore.service"
 cp release/systemd/orvix-restore.path    "$BUNDLE_ROOT/release/systemd/orvix-restore.path"
+cp release/systemd/orvix-updater.service "$BUNDLE_ROOT/release/systemd/orvix-updater.service"
+cp release/systemd/orvix-updater.socket  "$BUNDLE_ROOT/release/systemd/orvix-updater.socket"
 cp release/sudoers.d/orvix-update       "$BUNDLE_ROOT/release/sudoers.d/orvix-update"
 
 for s in release/scripts/*.sh; do
@@ -514,6 +556,7 @@ bash release/scripts/generate-sbom.sh "$BUNDLE_ROOT/SBOM.spdx" "$BIN_OUT" "$RESO
 # Every required entry must exist inside the bundle before we seal it.
 BUNDLE_REQUIRED=(
     bin/orvix
+    bin/orvix-updater
     release/install.sh
     release/install-public.sh
     release/upgrade.sh
@@ -521,6 +564,8 @@ BUNDLE_REQUIRED=(
     release/systemd/orvix-update.service
     release/systemd/orvix-restore.service
     release/systemd/orvix-restore.path
+    release/systemd/orvix-updater.service
+    release/systemd/orvix-updater.socket
     release/sudoers.d/orvix-update
     release/admin/index.html
     release/webmail/index.html

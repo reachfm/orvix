@@ -886,6 +886,15 @@ install_and_restart() {
         fi
     fi
 
+    report "" "--- Self-Update Daemon Sync ---"
+    # Deliberately AFTER the health/doctor gate above: the main mail
+    # server upgrade must be verified good before we touch
+    # orvix-updater, since orvix-updater may be the very process
+    # driving this script (see sync_updater_daemon's ordering
+    # discussion). A failure here is reported but never fails the
+    # overall upgrade — see sync_updater_daemon's doc comment.
+    sync_updater_daemon || true
+
     report "" "--- Upgrade Complete ---"
     report "green" "upgrade succeeded; backup preserved at $BACKUP_DIR"
 }
@@ -894,6 +903,163 @@ install_and_restart() {
 # upgrade operation. Called at the end of main() regardless of
 # outcome (report is printed only on success; on failure the
 # fail() function already printed the error).
+# sync_updater_daemon brings the self-update daemon (orvix-updater,
+# Phase D-J) up to date as part of an orvix upgrade. Two distinct
+# scenarios are handled:
+#
+#   A) The updater is MISSING (upgrading a pre-Phase-J install that
+#      predates it). We install the binary + units from this upgrade's
+#      release tree and activate the socket for the first time.
+#
+#   B) The updater is ALREADY PRESENT — and may be the very process
+#      that invoked this script (Phase G's orchestrator runs upgrade.sh
+#      as a subprocess of orvix-updater). See the ordering discussion
+#      inline below for why replacing its binary file is always safe,
+#      and why the restart is sequenced as the LAST action in this
+#      function, called only after the main orvix.service upgrade and
+#      health check have already succeeded.
+#
+# Non-fatal by design: this function's failures are reported but never
+# call fail()/exit — a broken self-update daemon must never be allowed
+# to roll back an otherwise-successful mail server upgrade. Any failure
+# here is recoverable via docs/emergency-recovery.md.
+sync_updater_daemon() {
+    local bundled_bin="$ORVIX_SOURCE_DIR/bin/orvix-updater"
+    local svc_src="$ORVIX_SOURCE_DIR/release/systemd/orvix-updater.service"
+    local sock_src="$ORVIX_SOURCE_DIR/release/systemd/orvix-updater.socket"
+
+    if [ "$DRY_RUN" = "1" ]; then
+        report "yellow" "DRY-RUN: would sync orvix-updater binary/units from $ORVIX_SOURCE_DIR/release"
+        return 0
+    fi
+
+    if [ ! -f "$bundled_bin" ] || [ ! -f "$svc_src" ] || [ ! -f "$sock_src" ]; then
+        log "self-update daemon assets not present in this upgrade's release tree ($bundled_bin / $svc_src / $sock_src); skipping orvix-updater sync (orvix.service upgrade already completed and is unaffected)"
+        report "yellow" "orvix-updater assets not present in this bundle; self-update daemon left untouched"
+        return 0
+    fi
+    if [ ! -x "$bundled_bin" ]; then
+        log "WARNING: $bundled_bin is not executable; skipping orvix-updater binary sync"
+        report "red" "orvix-updater binary at $bundled_bin is not executable; skipped"
+        return 1
+    fi
+
+    local was_present=0
+    [ -x /usr/local/bin/orvix-updater ] && was_present=1
+
+    # Sanity-check the shipped unit files BEFORE touching anything on
+    # disk, same fail-closed contract as write_service()/install.sh.
+    if ! grep -qF 'ExecStart=/usr/local/bin/orvix-updater' "$svc_src" || \
+       ! grep -qF 'StateDirectory=orvix-updater' "$svc_src"; then
+        report "red" "orvix-updater.service at $svc_src failed sanity check; refusing to install/replace it"
+        return 1
+    fi
+    if ! grep -qF 'ListenStream=/run/orvix/updater.sock' "$sock_src"; then
+        report "red" "orvix-updater.socket at $sock_src failed sanity check; refusing to install/replace it"
+        return 1
+    fi
+
+    # Back up whatever is currently installed BEFORE replacing anything,
+    # so a failed replacement/restart can be rolled back without ever
+    # leaving neither the old nor the new updater runnable.
+    local updater_backup="$BACKUP_DIR/orvix-updater"
+    mkdir -p "$updater_backup"
+    if [ "$was_present" -eq 1 ]; then
+        cp -a /usr/local/bin/orvix-updater "$updater_backup/orvix-updater.bin" 2>/dev/null || true
+    fi
+    [ -f /etc/systemd/system/orvix-updater.service ] && \
+        cp -a /etc/systemd/system/orvix-updater.service "$updater_backup/orvix-updater.service" 2>/dev/null || true
+    [ -f /etc/systemd/system/orvix-updater.socket ] && \
+        cp -a /etc/systemd/system/orvix-updater.socket "$updater_backup/orvix-updater.socket" 2>/dev/null || true
+
+    # Replace the binary file. On Linux this is always safe even when
+    # orvix-updater is the process currently executing this very
+    # script: `install` writes a new file and atomically renames it
+    # into place, which replaces the DIRECTORY ENTRY at
+    # /usr/local/bin/orvix-updater, not the inode any already-running
+    # process has open. The kernel keeps a running process's executable
+    # mapping backed by the OLD inode until every reference to it is
+    # gone, so the currently-running orvix-updater (if any) keeps
+    # executing the old code, completely unaffected, until it is
+    # explicitly restarted below.
+    if ! install -m 0755 -o root -g root "$bundled_bin" /usr/local/bin/orvix-updater; then
+        report "red" "orvix-updater binary replacement failed; previous binary is untouched (rename is atomic)"
+        return 1
+    fi
+    log "orvix-updater binary synced: $bundled_bin -> /usr/local/bin/orvix-updater"
+
+    install -m 0644 -o root -g root "$svc_src" /etc/systemd/system/orvix-updater.service
+    install -m 0644 -o root -g root "$sock_src" /etc/systemd/system/orvix-updater.socket
+    systemctl daemon-reload
+    log "orvix-updater systemd units synced"
+
+    if [ "$was_present" -eq 0 ]; then
+        log "orvix-updater was not previously installed; enabling + starting orvix-updater.socket for the first time"
+        if systemctl enable orvix-updater.socket >/dev/null 2>&1 && systemctl start orvix-updater.socket >/dev/null 2>&1; then
+            report "green" "orvix-updater installed and activated (was missing before this upgrade)"
+            return 0
+        fi
+        report "red" "orvix-updater installed but socket activation failed; check: systemctl status orvix-updater.socket"
+        return 1
+    fi
+
+    # was_present=1: an updater was already running, and may be the
+    # process driving this very upgrade. Ordering discipline:
+    #   1. Binary + unit files are already replaced ON DISK above; the
+    #      currently-running process is unaffected (see the kernel
+    #      inode note above) and keeps serving IPC requests with the
+    #      OLD code until this restart actually happens.
+    #   2. This restart is the LAST action sync_updater_daemon takes,
+    #      and sync_updater_daemon itself is only called (see
+    #      install_and_restart below) AFTER the main orvix.service
+    #      binary/asset replacement, restart, and health verification
+    #      have ALL already succeeded. If this restart tears down the
+    #      parent process mid-script (because it IS orvix-updater),
+    #      the mail server upgrade is already complete and durable —
+    #      only the updater's own self-restart is in flight, and that
+    #      restart is owned by systemd, not by this script.
+    #   3. `systemctl restart` submits the restart job to systemd and
+    #      returns once systemd has queued/started it; systemd (not
+    #      this bash process) is what sends SIGTERM to the old
+    #      orvix-updater and waits for it to exit before starting the
+    #      replacement. That sequencing happens inside systemd/PID 1,
+    #      which does not share fate with this script's shell even
+    #      when this script's shell is a descendant of the process
+    #      being restarted.
+    log "orvix-updater was already installed; restarting it now that the main upgrade + health check have succeeded"
+    if systemctl restart orvix-updater.service; then
+        sleep 2
+        if systemctl is-active --quiet orvix-updater.service 2>/dev/null; then
+            report "green" "orvix-updater binary + units replaced and restarted successfully"
+            return 0
+        fi
+    fi
+
+    # Restart failed or the unit did not come back active: roll back
+    # the updater's own binary + units from the backup taken above so
+    # the system never ends up with neither the old nor the new updater
+    # running. The main orvix.service upgrade is NOT affected either way.
+    log "orvix-updater restart failed or did not report active; rolling back orvix-updater binary + units from $updater_backup"
+    local updater_rollback_failed=0
+    if [ -f "$updater_backup/orvix-updater.bin" ]; then
+        install -m 0755 -o root -g root "$updater_backup/orvix-updater.bin" /usr/local/bin/orvix-updater || updater_rollback_failed=1
+    fi
+    if [ -f "$updater_backup/orvix-updater.service" ]; then
+        install -m 0644 -o root -g root "$updater_backup/orvix-updater.service" /etc/systemd/system/orvix-updater.service || updater_rollback_failed=1
+    fi
+    if [ -f "$updater_backup/orvix-updater.socket" ]; then
+        install -m 0644 -o root -g root "$updater_backup/orvix-updater.socket" /etc/systemd/system/orvix-updater.socket || updater_rollback_failed=1
+    fi
+    systemctl daemon-reload
+    if systemctl restart orvix-updater.service >/dev/null 2>&1; then
+        report "red" "orvix-updater replacement failed; rolled back to the previous binary/units and restarted it successfully"
+    else
+        report "red" "orvix-updater replacement failed AND rollback restart also failed; manual recovery required — see docs/emergency-recovery.md (\"orvix-updater itself is unavailable/crashed\")"
+        updater_rollback_failed=1
+    fi
+    return "$updater_rollback_failed"
+}
+
 generate_upgrade_report() {
     cat <<REPORT
 
