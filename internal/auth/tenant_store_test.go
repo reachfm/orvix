@@ -13,16 +13,16 @@ import (
 // tenantIsolationEnv sets up two independent tenants with their own
 // domain, mailbox, and alias for adversarial cross-tenant tests.
 type tenantIsolationEnv struct {
-	db         *gorm.DB
-	store      *TenantStore
-	tenantA    uint
-	tenantB    uint
-	domainA    uint
-	domainB    uint
-	mailboxA   uint
-	mailboxB   uint
-	aliasA     uint
-	aliasB     uint
+	db       *gorm.DB
+	store    *TenantStore
+	tenantA  uint
+	tenantB  uint
+	domainA  uint
+	domainB  uint
+	mailboxA uint
+	mailboxB uint
+	aliasA   uint
+	aliasB   uint
 }
 
 func buildTenantIsolationEnv(t *testing.T) *tenantIsolationEnv {

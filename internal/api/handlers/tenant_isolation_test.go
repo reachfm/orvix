@@ -122,6 +122,27 @@ func buildTenantIsolationEnv(t *testing.T) *tenantIsolationEnv {
 	tenantAToken := loginDomainTest(t, router, adminAEmail, adminAPass)
 	tenantACSRF := getDomainCSRF(t, router, tenantAToken)
 
+	// The adminReauthMiddleware requires recent_auth_grants for mutating
+	// requests. JWT middleware does not set session_id, so grants are stored
+	// with an empty session_id. Tenant A (id=1) needs mailbox_management and
+	// domain_management to reach the cross-tenant isolation checks (which
+	// must return 404, not 403 from reauth).
+	var adminAUID uint
+	if err := sqlDB.QueryRow("SELECT id FROM users WHERE email = ?", adminAEmail).Scan(&adminAUID); err != nil {
+		t.Fatalf("get admin A uid: %v", err)
+	}
+	// Use time.Now() (not UTC) so SQLite string comparisons against
+	// rm.now() (which is also time.Now, local timezone) are consistent.
+	grantExpiry := time.Now().Add(30 * time.Minute)
+	for _, scope := range []string{"mailbox_management", "domain_management"} {
+		if _, err := sqlDB.Exec(
+			"INSERT INTO recent_auth_grants (created_at, user_id, session_id, tenant_id, scope, expires_at) VALUES (?, ?, '', 1, ?, ?)",
+			time.Now(), adminAUID, scope, grantExpiry,
+		); err != nil {
+			t.Fatalf("insert reauth grant %s: %v", scope, err)
+		}
+	}
+
 	return &tenantIsolationEnv{
 		router:       router,
 		tenantAToken: tenantAToken,

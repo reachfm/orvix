@@ -78,8 +78,8 @@ func TestRouteSecurity_Build_WithReauth(t *testing.T) {
 	})
 
 	rs := RouteSecurity{
-		RequiredScope:  ScopeBackupRestore,
-		ReauthManager:  rm,
+		RequiredScope: ScopeBackupRestore,
+		ReauthManager: rm,
 	}
 	app.Post("/backup/restore", rs.Build(), func(c fiber.Ctx) error {
 		return c.SendStatus(200)

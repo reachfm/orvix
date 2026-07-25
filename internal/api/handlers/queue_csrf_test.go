@@ -190,6 +190,24 @@ func buildQueueCSRFEnv(t *testing.T) *queueCSRFEnv {
 	adminToken := loginQueueTest(t, router, adminEmail, adminPass)
 	userToken := loginQueueTest(t, router, userEmail, userPass)
 
+	// Insert a recent_auth_grant so the adminReauthMiddleware passes for
+	// queue_destructive operations. The JWT middleware does not set
+	// session_id, so the grant must use an empty session_id.
+	var adminUID uint
+	if err := sqlDB.QueryRow("SELECT id FROM users WHERE email = ?", adminEmail).Scan(&adminUID); err != nil {
+		t.Fatalf("get admin uid: %v", err)
+	}
+	// Use time.Now() (local timezone) so that the string comparison
+	// SQLite performs against rm.now() (also time.Now()) is consistent.
+	// Using UTC here while rm.now uses local time breaks the comparison.
+	expiresAt := time.Now().Add(30 * time.Minute)
+	if _, err := sqlDB.Exec(
+		"INSERT INTO recent_auth_grants (created_at, user_id, session_id, tenant_id, scope, expires_at) VALUES (?, ?, '', 1, 'queue_destructive', ?)",
+		time.Now(), adminUID, expiresAt,
+	); err != nil {
+		t.Fatalf("insert reauth grant: %v", err)
+	}
+
 	t.Cleanup(func() {
 		_ = router.App().Shutdown()
 		_ = sqlDB.Close()

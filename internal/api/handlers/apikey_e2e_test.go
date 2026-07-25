@@ -306,8 +306,8 @@ func TestAPIKey_CrossTenantIsolation(t *testing.T) {
 	ff := license.NewFeatureFlags(logger)
 	ff.SetTier(license.TierSMB)
 	h := NewHandler(db, authenticator, apikeyMgr, logger, &config.Config{
-		Server: config.ServerConfig{ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, BodyLimit: 4 << 20},
-		Auth:   *authCfg,
+		Server:   config.ServerConfig{ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, BodyLimit: 4 << 20},
+		Auth:     *authCfg,
 		Database: dbCfg,
 	}, nil, ff, nil)
 
