@@ -7,8 +7,10 @@ package handlers_test
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -97,6 +99,18 @@ func buildAdminUpdatesHarness(t *testing.T) (*api.Router, *sql.DB, *fakeSelfUpda
 		 VALUES (?, ?, 'tenant@test.local', ?, 'admin', 1, 1, 1)`,
 		now, now, hashedPw); err != nil {
 		t.Fatalf("insert tenant admin: %v", err)
+	}
+	// Second platform-super-admin user: exists solely so tests can
+	// prove the documented session-agnostic CSRF finding (see
+	// internal/auth/csrf_regression_test.go's
+	// cross_user_token_still_accepted_because_middleware_is_session_agnostic)
+	// holds true at the full HTTP-handler layer too, not just inside
+	// CSRFManager.Middleware() in isolation.
+	if _, err := sqlDB.Exec(
+		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
+		 VALUES (?, ?, 'platform2@test.local', ?, 'platform_super_admin', 1, 1, 1)`,
+		now, now, hashedPw); err != nil {
+		t.Fatalf("insert second platform admin: %v", err)
 	}
 
 	router := api.NewRouter(cfg, authenticator, logger, db, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
@@ -221,6 +235,32 @@ func TestAdminUpdates_MissingCSRFRejected(t *testing.T) {
 	}
 }
 
+// TestAdminUpdates_ForgedMatchingCSRFRejected is the core CSRF-fix
+// regression scenario for this endpoint family: a cookie/header pair
+// that agree with EACH OTHER but were never issued by CSRFManager.
+// This is exactly the bug root-caused in internal/config/sqlite_dialect.go
+// (a no-op GORM dialector meant the DB lookup that should reject a
+// non-issued token never ran). It runs through the real router — real
+// csrf.Middleware(), real CSRFManager, real sqlite GORM DB — with no
+// mock bypass of CSRF, so it would have caught the original bug.
+func TestAdminUpdates_ForgedMatchingCSRFRejected(t *testing.T) {
+	router, _, fake, token, _ := buildAdminUpdatesHarness(t)
+	forged := "forged-token-never-issued-by-the-server"
+	resp, _ := adminUpdatesRequest(t, router, "POST", "/api/v1/admin/updates/check", auReqOpts{
+		token: token, csrf: true, csrfVal: forged, body: `{}`,
+	})
+	if resp.StatusCode != 403 {
+		t.Fatalf("expected 403 for forged matching cookie/header, got %d", resp.StatusCode)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("IPC client must not be called for a forged CSRF token, got %d calls", len(fake.calls))
+	}
+}
+
+// TestAdminUpdates_InvalidCSRFRejected is kept as a lighter-weight
+// alias of the forged-matching-token scenario above (same shape,
+// different token value) for historical continuity with earlier
+// Phase test names.
 func TestAdminUpdates_InvalidCSRFRejected(t *testing.T) {
 	router, _, _, token, _ := buildAdminUpdatesHarness(t)
 	resp, _ := adminUpdatesRequest(t, router, "POST", "/api/v1/admin/updates/check", auReqOpts{
@@ -228,6 +268,158 @@ func TestAdminUpdates_InvalidCSRFRejected(t *testing.T) {
 	})
 	if resp.StatusCode == 200 {
 		t.Fatalf("expected non-200 with invalid CSRF, got %d", resp.StatusCode)
+	}
+}
+
+// TestAdminUpdates_MissingCSRFCookieOnlyRejected exercises the cookie-
+// absent-but-header-present branch specifically (distinct from
+// TestAdminUpdates_MissingCSRFRejected, which omits both).
+func TestAdminUpdates_MissingCSRFCookieOnlyRejected(t *testing.T) {
+	router, _, fake, token, csrf := buildAdminUpdatesHarness(t)
+	req := httptest.NewRequest("POST", "/api/v1/admin/updates/check", bytes.NewReader([]byte(`{}`)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-CSRF-Token", csrf) // header only, no Cookie header at all
+	resp, err := router.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	if resp.StatusCode != 403 {
+		t.Fatalf("expected 403 with missing CSRF cookie, got %d", resp.StatusCode)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("IPC client must not be called when CSRF cookie is missing")
+	}
+}
+
+// TestAdminUpdates_MissingCSRFHeaderOnlyRejected exercises the header-
+// absent-but-cookie-present branch specifically.
+func TestAdminUpdates_MissingCSRFHeaderOnlyRejected(t *testing.T) {
+	router, _, fake, token, csrf := buildAdminUpdatesHarness(t)
+	req := httptest.NewRequest("POST", "/api/v1/admin/updates/check", bytes.NewReader([]byte(`{}`)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Cookie", "csrf_token="+csrf) // cookie only, no X-CSRF-Token header
+	resp, err := router.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	if resp.StatusCode != 403 {
+		t.Fatalf("expected 403 with missing CSRF header, got %d", resp.StatusCode)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("IPC client must not be called when CSRF header is missing")
+	}
+}
+
+// TestAdminUpdates_MismatchedCSRFCookieHeaderRejected sends two
+// DIFFERENT, both-real, both-issued CSRF tokens as cookie vs header.
+// This is distinct from the forged-matching-pair scenario: here both
+// values individually correspond to legitimately issued tokens, but
+// because they don't match EACH OTHER the double-submit check must
+// still reject the request before either is even looked up in the DB.
+func TestAdminUpdates_MismatchedCSRFCookieHeaderRejected(t *testing.T) {
+	router, sqlDB, fake, token, csrf1 := buildAdminUpdatesHarness(t)
+	// csrf2: a second, independently issued, genuinely valid CSRF token
+	// for the same platform admin (a fresh call to the /csrf-token
+	// endpoint issues a brand-new record).
+	csrf2 := adminUpdatesCSRF(t, router, token)
+	if csrf1 == csrf2 {
+		t.Fatal("test setup bug: expected two distinct issued CSRF tokens")
+	}
+	_ = sqlDB
+	req := httptest.NewRequest("POST", "/api/v1/admin/updates/check", bytes.NewReader([]byte(`{}`)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Cookie", "csrf_token="+csrf1)
+	req.Header.Set("X-CSRF-Token", csrf2)
+	resp2, err := router.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	if resp2.StatusCode != 403 {
+		t.Fatalf("expected 403 for mismatched (but individually valid) cookie/header tokens, got %d", resp2.StatusCode)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("IPC client must not be called for mismatched CSRF cookie/header")
+	}
+}
+
+// insertExpiredCSRFRecord writes a csrf_records row directly (bypassing
+// CSRFManager.GenerateToken, which always sets a 24h-future expiry) so
+// the test can exercise Middleware's expiry check deterministically.
+// Schema per internal/models/models.go's csrf_records migration:
+// id, created_at, token_hash (unique), user_id, expires_at.
+func insertExpiredCSRFRecord(t *testing.T, sqlDB *sql.DB, token string, userID uint) {
+	t.Helper()
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(token)))
+	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+	past := time.Now().UTC().Add(-time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := sqlDB.Exec(
+		`INSERT INTO csrf_records (created_at, token_hash, user_id, expires_at) VALUES (?, ?, ?, ?)`,
+		now, hash, userID, past); err != nil {
+		t.Fatalf("insert expired csrf record: %v", err)
+	}
+}
+
+func platformAdminUserID(t *testing.T, sqlDB *sql.DB, email string) uint {
+	t.Helper()
+	var id uint
+	if err := sqlDB.QueryRow(`SELECT id FROM users WHERE email = ?`, email).Scan(&id); err != nil {
+		t.Fatalf("lookup user id for %s: %v", email, err)
+	}
+	return id
+}
+
+// TestAdminUpdates_ExpiredCSRFTokenRejected reuses the same mechanism
+// as internal/auth/csrf_regression_test.go's "expired_token_rejected"
+// subtest (insert a CSRFRecord whose ExpiresAt is already in the
+// past), but drives it through the full HTTP admin_updates handler
+// stack rather than a bare CSRF-only harness.
+func TestAdminUpdates_ExpiredCSRFTokenRejected(t *testing.T) {
+	router, sqlDB, fake, token, _ := buildAdminUpdatesHarness(t)
+	userID := platformAdminUserID(t, sqlDB, "platform@test.local")
+	expiredToken := "expired-admin-updates-csrf-token"
+	insertExpiredCSRFRecord(t, sqlDB, expiredToken, userID)
+
+	resp, _ := adminUpdatesRequest(t, router, "POST", "/api/v1/admin/updates/check", auReqOpts{
+		token: token, csrf: true, csrfVal: expiredToken, body: `{}`,
+	})
+	if resp.StatusCode != 403 {
+		t.Fatalf("expected 403 for expired CSRF token, got %d", resp.StatusCode)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("IPC client must not be called for an expired CSRF token")
+	}
+}
+
+// TestAdminUpdates_CrossUserCSRFTokenAcceptedBySessionAgnosticDesign
+// confirms the documented finding (internal/auth/csrf_regression_test.go:
+// "cross_user_token_still_accepted_because_middleware_is_session_agnostic")
+// holds at the full admin_updates HTTP layer: CSRFManager.Middleware()
+// checks token_hash + expiry only, never binding to the authenticated
+// caller's user ID. A platform admin authenticated as user A, presenting
+// a CSRF cookie/header pair that was legitimately issued to a DIFFERENT
+// platform admin (user B), is accepted by CSRF middleware — the request
+// still requires user A's own valid Bearer token to pass the earlier
+// auth/role gates, so this is not a privilege-escalation gap, just the
+// documented by-design behavior. This test asserts the actual behavior,
+// not an invented stricter one.
+func TestAdminUpdates_CrossUserCSRFTokenAcceptedBySessionAgnosticDesign(t *testing.T) {
+	router, _, fake, tokenA, _ := buildAdminUpdatesHarness(t)
+	tokenB := adminUpdatesLogin(t, router, "platform2@test.local", "TestPassword123!")
+	csrfIssuedToB := adminUpdatesCSRF(t, router, tokenB)
+
+	// Authenticate the HTTP request as admin A, but present admin B's
+	// legitimately issued CSRF token.
+	resp, body := adminUpdatesRequest(t, router, "POST", "/api/v1/admin/updates/check", auReqOpts{
+		token: tokenA, csrf: true, csrfVal: csrfIssuedToB, body: `{}`,
+	})
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200: CSRF middleware is session-agnostic by design (does not bind to UserID), got %d: %s", resp.StatusCode, body)
+	}
+	if len(fake.calls) != 1 {
+		t.Fatalf("expected the request to reach the IPC layer, got %d calls", len(fake.calls))
 	}
 }
 
@@ -602,5 +794,68 @@ func TestAdminUpdates_ReauthHasNoStaleWindow_FreshCheckEveryCall(t *testing.T) {
 	}
 	if len(fake.calls) != 1 {
 		t.Fatalf("expected exactly 1 IPC call (only the properly reauthenticated one), got %d", len(fake.calls))
+	}
+}
+
+// ── Rate limiting ─────────────────────────────────────────────────
+
+// TestAdminUpdates_WriteRateLimitEnforced confirms the real
+// production rate limiter wired in internal/api/router.go
+// (selfUpdateWriteLimiter := newUserRateLimiter("selfupdate_write",
+// 10, time.Minute, ...), applied to POST /check, /preflight,
+// /install, /rollback) actually triggers: the 11th write request from
+// the same authenticated user within the 1-minute window must be
+// rejected with 429, with a Retry-After header, before ever reaching
+// the handler/IPC layer.
+func TestAdminUpdates_WriteRateLimitEnforced(t *testing.T) {
+	router, _, fake, token, csrf := buildAdminUpdatesHarness(t)
+
+	var last *http.Response
+	for i := 0; i < 10; i++ {
+		resp, body := adminUpdatesRequest(t, router, "POST", "/api/v1/admin/updates/check", auReqOpts{
+			token: token, csrf: true, csrfVal: csrf, body: `{}`,
+		})
+		if resp.StatusCode != 200 {
+			t.Fatalf("request %d: expected 200 within the rate-limit budget, got %d: %s", i+1, resp.StatusCode, body)
+		}
+		last = resp
+	}
+	_ = last
+
+	resp, body := adminUpdatesRequest(t, router, "POST", "/api/v1/admin/updates/check", auReqOpts{
+		token: token, csrf: true, csrfVal: csrf, body: `{}`,
+	})
+	if resp.StatusCode != 429 {
+		t.Fatalf("expected 429 once the write rate limit (10/min) is exceeded, got %d: %s", resp.StatusCode, body)
+	}
+	if resp.Header.Get("Retry-After") == "" {
+		t.Error("expected a Retry-After header on the 429 response")
+	}
+	if len(fake.calls) != 10 {
+		t.Fatalf("expected exactly 10 IPC calls (the 11th must be blocked before reaching the handler), got %d", len(fake.calls))
+	}
+}
+
+// TestAdminUpdates_ReadRateLimitEnforced does the same for the read
+// limiter (selfUpdateReadLimiter, 60/min) applied to GET /status etc.
+// 60 real requests is expensive to run per-test-invocation but still
+// well within normal `go test` budgets, so the full threshold is
+// exercised rather than mocked/shortened.
+func TestAdminUpdates_ReadRateLimitEnforced(t *testing.T) {
+	router, _, fake, token, _ := buildAdminUpdatesHarness(t)
+
+	for i := 0; i < 60; i++ {
+		resp, body := adminUpdatesRequest(t, router, "GET", "/api/v1/admin/updates/status", auReqOpts{token: token})
+		if resp.StatusCode != 200 {
+			t.Fatalf("request %d: expected 200 within the read rate-limit budget, got %d: %s", i+1, resp.StatusCode, body)
+		}
+	}
+
+	resp, body := adminUpdatesRequest(t, router, "GET", "/api/v1/admin/updates/status", auReqOpts{token: token})
+	if resp.StatusCode != 429 {
+		t.Fatalf("expected 429 once the read rate limit (60/min) is exceeded, got %d: %s", resp.StatusCode, body)
+	}
+	if len(fake.calls) != 60 {
+		t.Fatalf("expected exactly 60 IPC calls (the 61st must be blocked before reaching the handler), got %d", len(fake.calls))
 	}
 }
