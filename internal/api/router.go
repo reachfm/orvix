@@ -66,7 +66,125 @@ type Router struct {
 	appCtx       context.Context
 	cancel       context.CancelFunc
 	db           *gorm.DB
+	reauth       *auth.ReauthManager
 	startOnce    sync.Once
+}
+
+// requireReauth returns a middleware that enforces a recent
+// authentication grant for the given scope. The middleware is a
+// no-op when ReauthManager is nil (e.g. during early startup or
+// in tests that do not wire reauth).
+func (r *Router) requireReauth(scope auth.ReauthScope) fiber.Handler {
+	return func(c fiber.Ctx) error {
+		if r.reauth == nil {
+			return c.Next()
+		}
+		return r.reauth.RequireReauth(scope)(c)
+	}
+}
+
+// adminReauthMiddleware applies re-authentication to dangerous
+// (POST/PUT/DELETE/PATCH) routes within the admin/enterprise groups.
+// It maps request paths to re-auth scopes so that destructive operations
+// require a recent password (or password+TOTP) verification.
+//
+// Routes that do not match any known prefix are still protected with a
+// default scope, ensuring no destructive route can bypass re-auth.
+func (r *Router) adminReauthMiddleware() fiber.Handler {
+	// path-to-scope rules. Each entry is a prefix pattern and its
+	// re-auth scope. Prefixes are evaluated in order; the first
+	// match wins. These cover all dangerous routes in the admin,
+	// enterprise, and platform groups.
+	type rule struct {
+		prefix string
+		scope  auth.ReauthScope
+	}
+	rules := []rule{
+		{"/admin/backups/", auth.ScopeBackupRestore},
+		{"/backups/", auth.ScopeBackupRestore},
+		{"/admin/queue/", auth.ScopeQueueDestructive},
+		{"/queue/", auth.ScopeQueueDestructive},
+		{"/update/", auth.ScopeSystemUpdate},
+		{"/updates/", auth.ScopeSystemUpdate},
+		{"/admin/ssl/", auth.ScopeSystemSettings},
+		{"/admin/mfa/", auth.ScopeSecuritySettings},
+		{"/admin/settings", auth.ScopeSystemSettings},
+		{"/admin/admin-users/", auth.ScopeIdentityManagement},
+		{"/admin/users/", auth.ScopeIdentityManagement},
+		{"/users", auth.ScopeIdentityManagement},
+		{"/admin/tenants/", auth.ScopeTenantManagement},
+		{"/admin/dns/", auth.ScopeDomainManagement},
+		{"/domains", auth.ScopeDomainManagement},
+		{"/mailboxes", auth.ScopeMailboxManagement},
+		{"/firewall/", auth.ScopeFirewallManagement},
+		{"/api-keys", auth.ScopeAPIKeyManagement},
+		{"/apikeys", auth.ScopeAPIKeyManagement},
+		{"/billing/", auth.ScopeBillingManagement},
+		{"/subscription", auth.ScopeBillingManagement},
+		{"/admin/account-classes", auth.ScopeTenantManagement},
+		{"/admin/domain-groups", auth.ScopeDomainManagement},
+		{"/admin/mailing-lists", auth.ScopeMailboxManagement},
+		{"/admin/public-folders", auth.ScopeMailboxManagement},
+		{"/admin/admin-groups", auth.ScopeIdentityManagement},
+		{"/admin/quarantine", auth.ScopeMailboxManagement},
+		{"/admin/acl-rules", auth.ScopeFirewallManagement},
+		{"/admin/log-rules", auth.ScopeSystemSettings},
+		{"/admin/acceptance-rules", auth.ScopeDomainManagement},
+		{"/admin/incoming-msg-rules", auth.ScopeMailboxManagement},
+		{"/admin/migration-sources", auth.ScopeSystemSettings},
+		{"/admin/backup-targets", auth.ScopeBackupRestore},
+		{"/compliance/", auth.ScopeTenantManagement},
+		{"/collaboration/", auth.ScopeMailboxManagement},
+		{"/heal/", auth.ScopeSystemSettings},
+		{"/guardian/", auth.ScopeSecuritySettings},
+		{"/compose/", auth.ScopeSystemSettings},
+		{"/provision/", auth.ScopeTenantManagement},
+		{"/migration/", auth.ScopeSystemSettings},
+		{"/webmail/", auth.ScopeMailboxManagement},
+		{"/calendar/", auth.ScopeTenantManagement},
+		{"/contacts", auth.ScopeTenantManagement},
+		{"/tasks", auth.ScopeTenantManagement},
+		{"/monitoring/", auth.ScopeSystemSettings},
+		{"/license", auth.ScopeSystemSettings},
+		{"/feature-flags", auth.ScopeSystemSettings},
+		{"/organizations", auth.ScopeTenantManagement},
+		{"/platform/", auth.ScopeTenantManagement},
+		// Enterprise group (prefix: /enterprise)
+		{"/enterprise/domains", auth.ScopeDomainManagement},
+		{"/enterprise/mailboxes", auth.ScopeMailboxManagement},
+		{"/enterprise/organizations", auth.ScopeTenantManagement},
+		{"/enterprise/invitations", auth.ScopeIdentityManagement},
+		{"/enterprise/members", auth.ScopeIdentityManagement},
+		{"/enterprise/ownership", auth.ScopeTenantManagement},
+		{"/enterprise/aliases", auth.ScopeDomainManagement},
+		{"/enterprise/groups", auth.ScopeMailboxManagement},
+		{"/enterprise/abuse", auth.ScopeMailboxManagement},
+		{"/enterprise/deletion", auth.ScopeTenantManagement},
+		{"/enterprise/billing", auth.ScopeBillingManagement},
+		{"/enterprise/api-keys", auth.ScopeAPIKeyManagement},
+		{"/enterprise/sessions", auth.ScopeIdentityManagement},
+	}
+	return func(c fiber.Ctx) error {
+		method := c.Method()
+		if method == "GET" || method == "HEAD" || method == "OPTIONS" {
+			return c.Next()
+		}
+		if r.reauth == nil {
+			return c.Next()
+		}
+		path := c.Path()
+		var scope auth.ReauthScope
+		for _, rl := range rules {
+			if len(path) >= len(rl.prefix) && path[:len(rl.prefix)] == rl.prefix {
+				scope = rl.scope
+				break
+			}
+		}
+		if scope == "" {
+			scope = auth.ScopeSecuritySettings
+		}
+		return r.reauth.RequireReauth(scope)(c)
+	}
 }
 
 func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *zap.Logger,
@@ -112,6 +230,7 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		cancel:       cancel,
 		h:            handlers.NewHandler(db, authenticator, apikeyMgr, logger, cfg, registry, ff, rateLimiter),
 		db:           db,
+		reauth:       auth.NewReauthManager(db, logger, authenticator),
 	}
 
 	// Cancel the background context when the Fiber app shuts
@@ -829,7 +948,7 @@ func (r *Router) setupRoutes() {
 	authCSRF := protected.Group("", r.csrf.Middleware())
 	authCSRF.Post("/auth/logout", r.h.Logout)
 	authCSRF.Post("/auth/logout-all", r.h.LogoutAll)
-	authCSRF.Post("/auth/change-password", r.h.ChangePassword)
+	authCSRF.Post("/auth/change-password", r.requireReauth(auth.ScopeSecuritySettings), r.h.ChangePassword)
 	// Webmail logout. Mounted inside authCSRF so a CSRF
 	// token is required to clear the cookies — the
 	// session is the same one the admin panel uses, so
@@ -840,7 +959,7 @@ func (r *Router) setupRoutes() {
 	// logout. The handler ignores any id in the body
 	// and operates on the mailbox the JWT resolves to,
 	// so cross-mailbox password changes are impossible.
-	authCSRF.Post("/webmail/password/change", r.h.WebmailChangePassword)
+	authCSRF.Post("/webmail/password/change", r.requireReauth(auth.ScopeSecuritySettings), r.h.WebmailChangePassword)
 
 	requireTenantContext := func(c fiber.Ctx) error {
 		if _, err := auth.RequireTenantID(c); err != nil {
@@ -921,6 +1040,7 @@ func (r *Router) setupRoutes() {
 		requireTenantContext,
 		r.csrf.Middleware(),
 		requireTenantActive,
+		r.adminReauthMiddleware(),
 	)
 
 	// Per-capability write guards: each guards only its own resource.
@@ -1026,7 +1146,7 @@ func (r *Router) setupRoutes() {
 	// no-ops on GET/HEAD/OPTIONS and on API-key-authenticated requests,
 	// so this adds no burden to the read-only routes or to the
 	// provisioning API below.
-	admin := protected.Group("", auth.RequireAnyRole(auth.RoleAdmin, auth.RoleSuperAdmin, auth.RolePlatformSuperAdmin), r.csrf.Middleware())
+	admin := protected.Group("", auth.RequireAnyRole(auth.RoleAdmin, auth.RoleSuperAdmin, auth.RolePlatformSuperAdmin), r.csrf.Middleware(), r.adminReauthMiddleware())
 	admin.Get("/domains", r.h.ListDomains)
 	admin.Get("/users", r.h.ListUsers)
 	admin.Get("/mailboxes", r.h.ListMailboxes)

@@ -1207,6 +1207,139 @@ func MigrateAllRaw(db *gorm.DB) error {
 			created_at DATETIME NOT NULL
 		)`,
 
+		// IMAP folders for webmail. Mirrors the PostgreSQL schema
+		// for cross-platform compatibility (handlers use the same
+		// column names). This table is created on SQLite so that
+		// dev/test environments can exercise folder operations
+		// without connecting to a PostgreSQL instance.
+		`CREATE TABLE IF NOT EXISTS coremail_folders (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			mailbox_id INTEGER NOT NULL,
+			parent_id INTEGER REFERENCES coremail_folders(id),
+			name TEXT NOT NULL,
+			path TEXT NOT NULL,
+			folder_type TEXT NOT NULL DEFAULT 'custom',
+			message_count INTEGER NOT NULL DEFAULT 0,
+			unread_count INTEGER NOT NULL DEFAULT 0,
+			total_size INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS coremail_messages (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			message_id TEXT NOT NULL,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			domain_id INTEGER NOT NULL DEFAULT 0,
+			mailbox_id INTEGER NOT NULL,
+			folder_id INTEGER NOT NULL,
+			thread_id TEXT,
+			internet_message_id TEXT,
+			subject TEXT NOT NULL DEFAULT '',
+			from_address TEXT NOT NULL DEFAULT '',
+			to_addresses TEXT NOT NULL DEFAULT '',
+			cc_addresses TEXT NOT NULL DEFAULT '',
+			bcc_addresses TEXT NOT NULL DEFAULT '',
+			reply_to TEXT NOT NULL DEFAULT '',
+			message_date DATETIME,
+			received_date DATETIME NOT NULL,
+			size_bytes INTEGER NOT NULL DEFAULT 0,
+			rfc822_path TEXT NOT NULL,
+			sha256 TEXT NOT NULL,
+			seen INTEGER NOT NULL DEFAULT 0,
+			answered INTEGER NOT NULL DEFAULT 0,
+			flagged INTEGER NOT NULL DEFAULT 0,
+			draft INTEGER NOT NULL DEFAULT 0,
+			deleted INTEGER NOT NULL DEFAULT 0,
+			junk INTEGER NOT NULL DEFAULT 0,
+			importance INTEGER NOT NULL DEFAULT 0,
+			retention_policy_id INTEGER,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			purged_at DATETIME
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS coremail_attachments (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			message_id INTEGER NOT NULL,
+			filename TEXT NOT NULL DEFAULT '',
+			content_type TEXT NOT NULL DEFAULT '',
+			size_bytes INTEGER NOT NULL DEFAULT 0,
+			sha256 TEXT NOT NULL DEFAULT '',
+			storage_path TEXT NOT NULL DEFAULT '',
+			cid TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS coremail_queue (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			domain_id INTEGER NOT NULL DEFAULT 0,
+			mailbox_id INTEGER,
+			message_id TEXT NOT NULL,
+			from_address TEXT NOT NULL DEFAULT '',
+			to_address TEXT NOT NULL,
+			recipient_domain TEXT NOT NULL DEFAULT '',
+			direction TEXT NOT NULL DEFAULT 'outbound',
+			status TEXT NOT NULL DEFAULT 'pending',
+			priority INTEGER NOT NULL DEFAULT 0,
+			attempt_count INTEGER NOT NULL DEFAULT 0,
+			max_attempts INTEGER NOT NULL DEFAULT 16,
+			next_attempt_at DATETIME,
+			last_attempt_at DATETIME,
+			last_error TEXT NOT NULL DEFAULT '',
+			delivery_mode TEXT NOT NULL DEFAULT 'remote_smtp',
+			remote_host TEXT NOT NULL DEFAULT '',
+			remote_ip TEXT NOT NULL DEFAULT '',
+			tls_used INTEGER NOT NULL DEFAULT 0,
+			last_status_code INTEGER NOT NULL DEFAULT 0,
+			last_enhanced_code TEXT NOT NULL DEFAULT '',
+			lease_owner TEXT NOT NULL DEFAULT '',
+			lease_expires_at DATETIME,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			completed_at DATETIME,
+			dead_letter_at DATETIME,
+			deleted_at DATETIME
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS coremail_delivery_attempts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			queue_entry_id INTEGER NOT NULL,
+			attempt_number INTEGER NOT NULL,
+			status TEXT NOT NULL,
+			remote_host TEXT NOT NULL DEFAULT '',
+			remote_ip TEXT NOT NULL DEFAULT '',
+			status_code INTEGER NOT NULL DEFAULT 0,
+			status_msg TEXT NOT NULL DEFAULT '',
+			enhanced_code TEXT NOT NULL DEFAULT '',
+			duration_ms INTEGER NOT NULL DEFAULT 0,
+			tls_used INTEGER NOT NULL DEFAULT 0,
+			worker_id TEXT NOT NULL DEFAULT '',
+			attempted_at DATETIME NOT NULL
+		)`,
+
+		// Enterprise audit trail with tenant scoping, actor metadata,
+		// safe before/after snapshots, and correlation IDs.
+		`CREATE TABLE IF NOT EXISTS orvix_audit (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			actor TEXT NOT NULL DEFAULT '',
+			actor_id INTEGER NOT NULL DEFAULT 0,
+			actor_role TEXT NOT NULL DEFAULT '',
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			action TEXT NOT NULL DEFAULT '',
+			target TEXT NOT NULL DEFAULT '',
+			target_id INTEGER NOT NULL DEFAULT 0,
+			result TEXT NOT NULL DEFAULT '',
+			reason TEXT NOT NULL DEFAULT '',
+			before TEXT NOT NULL DEFAULT '',
+			after TEXT NOT NULL DEFAULT '',
+			request_id TEXT NOT NULL DEFAULT '',
+			ip TEXT NOT NULL DEFAULT '',
+			user_agent TEXT NOT NULL DEFAULT '',
+			timestamp DATETIME NOT NULL
+		)`,
+
 		// Outbound webhook subscriptions for tenant-configured
 		// event notifications (e.g. billing, domain verification,
 		// security alerts).
@@ -1360,6 +1493,27 @@ func MigrateAllRaw(db *gorm.DB) error {
 		// Data retention policies indexes
 		`CREATE INDEX IF NOT EXISTS idx_data_retention_policies_tenant ON data_retention_policies(tenant_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_data_retention_policies_active ON data_retention_policies(active)`,
+		// CoreMail message folder indexes
+		`CREATE INDEX IF NOT EXISTS idx_cm_folders_mailbox ON coremail_folders(mailbox_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_cm_folders_parent ON coremail_folders(parent_id)`,
+		// CoreMail message indexes
+		`CREATE INDEX IF NOT EXISTS idx_cm_messages_mailbox ON coremail_messages(mailbox_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_cm_messages_folder ON coremail_messages(mailbox_id, folder_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_cm_messages_date ON coremail_messages(mailbox_id, received_date)`,
+		`CREATE INDEX IF NOT EXISTS idx_cm_messages_purged ON coremail_messages(purged_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_cm_messages_message_id ON coremail_messages(message_id)`,
+		// CoreMail attachments
+		`CREATE INDEX IF NOT EXISTS idx_cm_attachments_message ON coremail_attachments(message_id)`,
+		// CoreMail queue
+		`CREATE INDEX IF NOT EXISTS idx_cm_queue_tenant ON coremail_queue(tenant_id, status)`,
+		`CREATE INDEX IF NOT EXISTS idx_cm_queue_lease ON coremail_queue(status, next_attempt_at, priority)`,
+		`CREATE INDEX IF NOT EXISTS idx_cm_queue_message_id ON coremail_queue(message_id)`,
+		// CoreMail delivery attempts
+		`CREATE INDEX IF NOT EXISTS idx_cm_delivery_attempts_entry ON coremail_delivery_attempts(queue_entry_id, attempt_number)`,
+		// Enterprise audit
+		`CREATE INDEX IF NOT EXISTS idx_orvix_audit_tenant ON orvix_audit(tenant_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_orvix_audit_action ON orvix_audit(action)`,
+		`CREATE INDEX IF NOT EXISTS idx_orvix_audit_timestamp ON orvix_audit(timestamp)`,
 	}
 
 	// Execute index creation statements
