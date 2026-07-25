@@ -482,3 +482,126 @@ func TestAdminUpdates_HistoryAndSnapshotsHappyPath(t *testing.T) {
 		t.Fatalf("snapshots: expected 200, got %d: %s", resp.StatusCode, body)
 	}
 }
+
+// ── Phase K: pathological Unicode fuzzing through the HTTP boundary ──
+//
+// internal/selfupdate/security_test.go already fuzzes Request.Validate
+// directly. These tests fuzz the same pathological values through the
+// actual HTTP handlers (PostAdminUpdatesInstall/Check/Preflight), which
+// apply their own validation (selfupdate.ValidateVersionString /
+// ValidateChannel) BEFORE ever constructing a selfupdate.Request — a
+// distinct code path from protocol.Validate. The requirement is: every
+// pathological value is rejected with 400 and the request never reaches
+// the IPC client (fake.calls stays empty), and none of them panic the
+// handler.
+var auPathologicalStrings = []string{
+	"\xed\xa0\x80",                       // unpaired UTF-16 surrogate as raw bytes
+	"\xc0\xaf",                           // overlong UTF-8
+	"1.0.0\x00malicious",                 // embedded NUL
+	"1.0.0‮",                             // RTL override control char
+	"1.0.0\U0001F4A9",                    // emoji / astral-plane rune
+	"1.0.0\r\nSet-Cookie: evil=1",        // CRLF injection shape
+	"../../../../etc/passwd",             // path traversal
+	"/etc/passwd",                        // absolute path
+	"http://169.254.169.254/latest/meta", // SSRF-shaped value
+}
+
+func TestAdminUpdates_UnicodeFuzzRequestedVersionRejected(t *testing.T) {
+	router, _, fake, token, csrf := buildAdminUpdatesHarness(t)
+	for _, v := range auPathologicalStrings {
+		body, _ := json.Marshal(map[string]string{
+			"password": "TestPassword123!", "idempotency_key": "k", "requested_version": v,
+		})
+		resp, respBody := adminUpdatesRequest(t, router, "POST", "/api/v1/admin/updates/install", auReqOpts{
+			token: token, csrf: true, csrfVal: csrf, body: string(body),
+		})
+		if resp.StatusCode != 400 {
+			t.Errorf("requested_version %q: expected 400, got %d: %s", v, resp.StatusCode, respBody)
+		}
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("IPC client must never be called for a pathological requested_version, got %d calls", len(fake.calls))
+	}
+}
+
+func TestAdminUpdates_UnicodeFuzzChannelRejected(t *testing.T) {
+	router, _, fake, token, csrf := buildAdminUpdatesHarness(t)
+	for _, v := range auPathologicalStrings {
+		body, _ := json.Marshal(map[string]string{"channel": v})
+		resp, respBody := adminUpdatesRequest(t, router, "POST", "/api/v1/admin/updates/check", auReqOpts{
+			token: token, csrf: true, csrfVal: csrf, body: string(body),
+		})
+		if resp.StatusCode != 400 {
+			t.Errorf("channel %q: expected 400, got %d: %s", v, resp.StatusCode, respBody)
+		}
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("IPC client must never be called for a pathological channel, got %d calls", len(fake.calls))
+	}
+}
+
+func TestAdminUpdates_UnicodeFuzzIdempotencyKeyHandledSafely(t *testing.T) {
+	// idempotency_key has no charset restriction (see protocol.go), only
+	// a length cap enforced downstream by selfupdate.Request.Validate —
+	// the HTTP handler itself only checks non-empty. This test proves a
+	// pathological key does not panic the handler and either succeeds
+	// (reaching the fake IPC client, since the daemon itself is the
+	// layer that would reject it) or is cleanly rejected — never a 5xx.
+	router, _, _, token, csrf := buildAdminUpdatesHarness(t)
+	for _, v := range auPathologicalStrings {
+		body, _ := json.Marshal(map[string]string{
+			"password": "TestPassword123!", "idempotency_key": v, "requested_version": "1.2.3",
+		})
+		resp, respBody := adminUpdatesRequest(t, router, "POST", "/api/v1/admin/updates/install", auReqOpts{
+			token: token, csrf: true, csrfVal: csrf, body: string(body),
+		})
+		if resp.StatusCode >= 500 {
+			t.Errorf("idempotency_key %q: handler returned 5xx: %d: %s", v, resp.StatusCode, respBody)
+		}
+	}
+}
+
+// ── Phase K special investigation: "stale re-auth" does not apply ────
+//
+// requireSelfUpdateReauth (admin_updates.go) has no expiry/time-window
+// concept whatsoever: it reads the "password" field fresh from THIS
+// request's body and calls h.auth.VerifyPassword against the live DB
+// hash on every single call — there is no cacheable step-up token, no
+// session flag, nothing that could go "stale". This test proves that
+// directly: a successful, freshly-reauthenticated install call is
+// immediately followed by a second privileged call that omits the
+// password, and the second call is rejected exactly like a
+// never-authenticated one — there is no grace window whatsoever, so
+// "stale re-auth" (a token that was valid but has since expired) is not
+// a category this implementation has. See requireSelfUpdateReauth's own
+// doc comment (admin_updates.go, "NOTE ON PROVENANCE") for the same
+// conclusion from the implementer's side.
+func TestAdminUpdates_ReauthHasNoStaleWindow_FreshCheckEveryCall(t *testing.T) {
+	router, _, fake, token, csrf := buildAdminUpdatesHarness(t)
+
+	body1, _ := json.Marshal(map[string]string{
+		"password": "TestPassword123!", "idempotency_key": "key-fresh-1", "requested_version": "1.2.3",
+	})
+	resp1, respBody1 := adminUpdatesRequest(t, router, "POST", "/api/v1/admin/updates/install", auReqOpts{
+		token: token, csrf: true, csrfVal: csrf, body: string(body1),
+	})
+	if resp1.StatusCode != 200 {
+		t.Fatalf("expected first (properly reauthenticated) call to succeed, got %d: %s", resp1.StatusCode, respBody1)
+	}
+
+	// Immediately reuse the same authenticated session/token, but omit
+	// the password this time. If there were any cacheable step-up
+	// window, this would still be within it (zero elapsed time).
+	body2, _ := json.Marshal(map[string]string{
+		"idempotency_key": "key-fresh-2", "requested_version": "1.2.4",
+	})
+	resp2, respBody2 := adminUpdatesRequest(t, router, "POST", "/api/v1/admin/updates/install", auReqOpts{
+		token: token, csrf: true, csrfVal: csrf, body: string(body2),
+	})
+	if resp2.StatusCode != 401 {
+		t.Fatalf("expected the very next call (no password) to be rejected with 401 despite zero elapsed time since a valid reauth, got %d: %s", resp2.StatusCode, respBody2)
+	}
+	if len(fake.calls) != 1 {
+		t.Fatalf("expected exactly 1 IPC call (only the properly reauthenticated one), got %d", len(fake.calls))
+	}
+}

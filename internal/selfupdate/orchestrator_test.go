@@ -21,6 +21,21 @@ type fakeRunner struct {
 	fail map[string]error
 	// custom overrides the default success result for a given key.
 	custom map[string]CmdResult
+	// failIsActiveOnly, when set, fails ONLY the "systemctl is-active
+	// orvix" call (confirmServiceActive's restart-confirmation step)
+	// while leaving "systemctl stop/restart orvix" and every other
+	// command succeeding — used to isolate the restart-confirmation
+	// failure path from the separate post-restart health-gate failure
+	// path (see TestRunInstall_RestartConfirmationFailure_TriggersRollback).
+	// It fails only the first failIsActiveOnlyTimes is-active calls (the
+	// forward install's own confirmation step) so that rollback's own
+	// restore-time confirmServiceActive call, which comes later, is left
+	// free to succeed — isolating "forward restart confirmation failed"
+	// from "rollback's restart confirmation also failed" (the latter is
+	// already covered by TestRunInstall_ServiceStopFailure_TriggersRollback).
+	failIsActiveOnly      error
+	failIsActiveOnlyTimes int
+	isActiveCalls         int
 }
 
 type fakeCall struct {
@@ -53,6 +68,10 @@ func (f *fakeRunner) Run(ctx context.Context, name string, args []string) (CmdRe
 		return CmdResult{ExitCode: 1, Stderr: err.Error()}, err
 	}
 	if base == "systemctl" && len(args) > 0 && args[0] == "is-active" {
+		f.isActiveCalls++
+		if f.failIsActiveOnly != nil && f.isActiveCalls <= f.failIsActiveOnlyTimes {
+			return CmdResult{Stdout: "inactive", ExitCode: 3}, f.failIsActiveOnly
+		}
 		return CmdResult{Stdout: "active", ExitCode: 0}, nil
 	}
 	return CmdResult{Stdout: "ok", ExitCode: 0}, nil
@@ -455,6 +474,73 @@ func TestRunInstall_HealthCheckFailure_TriggersRollback(t *testing.T) {
 	got, _ := os.ReadFile(h.binary)
 	if string(got) != "orig-binary-bytes" {
 		t.Fatalf("binary not restored byte-identically: %q", got)
+	}
+}
+
+// TestRunInstall_RestartConfirmationFailure_TriggersRollback isolates the
+// restart-confirmation step (PhaseRestarting: confirmServiceActive's
+// `systemctl is-active orvix` check, orchestrator.go) from the
+// post-restart health gate (PhaseHealthCheck: runHealthGate's HTTP
+// probes + version check). These are two distinct code paths and two
+// distinct phases; TestRunInstall_ServiceStopFailure_TriggersRollback
+// only exercises a systemctl-wide outage (stop AND is-active AND
+// restart all fail together, landing on PhaseFailed because rollback's
+// own restart also fails), and TestRunInstall_HealthCheckFailure_
+// TriggersRollback only exercises the HTTP/version health gate failing
+// while systemctl succeeds throughout. Neither existing test isolates
+// "systemctl restart succeeds but the service never reports active"
+// while the health gate itself is never even reached.
+func TestRunInstall_RestartConfirmationFailure_TriggersRollback(t *testing.T) {
+	h := newTestHarness(t)
+	disc := verifiedDiscoverResult("1.6.0", false)
+	job := h.createQueuedJobWithPreflight(t, disc)
+
+	h.runner.failIsActiveOnly = errors.New("simulated: orvix.service failed to become active")
+	h.runner.failIsActiveOnlyTimes = 1 // only the forward-install confirmation call; rollback's own restore-time check must still succeed
+
+	_, err := h.orch.RunInstall(context.Background(), InstallInput{Job: job, Discover: disc})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	final, gerr := h.store.GetJob(job.ID)
+	if gerr != nil {
+		t.Fatal(gerr)
+	}
+	// Restart-confirmation failure during the forward install (not during
+	// rollback's own restore, where is-active is not gated the same way)
+	// must still trigger the same automatic-rollback path as any other
+	// mandatory-step failure, landing on rolled_back with the original
+	// binary restored byte-identically.
+	if final.Phase != PhaseRolledBack {
+		t.Fatalf("want rolled_back after restart-confirmation failure, got %s (msg=%s)", final.Phase, final.FailureMessage)
+	}
+	got, err := os.ReadFile(h.binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "orig-binary-bytes" {
+		t.Fatalf("binary not restored byte-identically after rollback: %q", got)
+	}
+	// The terminal FailureMessage is overwritten by autoRollback's success
+	// message ("automatic rollback succeeded"), so the restart-confirmation
+	// failure itself must be found in the durable, immutable event log
+	// instead — confirming this test actually exercised confirmServiceActive
+	// and not some other step.
+	events, everr := h.store.ListEvents(job.ID)
+	if everr != nil {
+		t.Fatal(everr)
+	}
+	var sawRestartConfirmFailure bool
+	for _, e := range events {
+		if e.Phase == PhaseFailed && strings.Contains(e.Message, "not active after restart") {
+			sawRestartConfirmFailure = true
+		}
+	}
+	if !sawRestartConfirmFailure {
+		t.Fatalf("expected an event recording the restart-confirmation failure specifically; events: %+v", events)
+	}
+	if h.runner.isActiveCalls < 2 {
+		t.Fatalf("expected is-active to be called at least twice (forward-install failure + rollback restore success), got %d", h.runner.isActiveCalls)
 	}
 }
 

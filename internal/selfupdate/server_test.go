@@ -133,6 +133,25 @@ func TestIPC_FrameRoundTrip(t *testing.T) {
 	}
 }
 
+// TestServer_RejectsUnknownOperationOverTheWire exercises the server's
+// own dispatch-time guard (server.go: `handler, ok := s.Handlers[req.Op]`)
+// with a request whose Op passes Request.Validate (it is a real,
+// allow-listed Operation) but for which this particular server instance
+// has registered no handler. This is a distinct code path from
+// TestRequestValidate_RejectsUnknownOperation (protocol_test.go), which
+// only exercises Validate() in isolation and never reaches the server.
+func TestServer_UnknownOpNoHandler(t *testing.T) {
+	_, sock := newTestServer(t, 1000, 1000) // only registers OpStatus, OpGetJob
+	c := NewClient(sock)
+	resp, err := c.Call(Request{Op: OpListSnapshots})
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if resp.OK {
+		t.Fatal("expected !OK for an operation with no registered handler")
+	}
+}
+
 func TestClient_UnreachableSocketReturnsSentinelError(t *testing.T) {
 	c := NewClient(filepath.Join(t.TempDir(), "does-not-exist.sock"))
 	_, err := c.Call(Request{Op: OpStatus})
