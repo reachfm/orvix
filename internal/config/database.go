@@ -53,17 +53,19 @@ func newSQLiteDB(cfg *DatabaseConfig, logger *zap.Logger) (*gorm.DB, error) {
 	sqldb.SetMaxOpenConns(1)
 	sqldb.SetMaxIdleConns(1)
 
-	// Create GORM DB using our custom SQLite dialector
-	db, err := gorm.Open(&sqliteDialect{}, &gorm.Config{
+	// Create GORM DB using our custom SQLite dialector. The connection
+	// pool MUST be handed to the dialector so Initialize() can assign
+	// it to db.ConnPool before gorm.Open() builds the initial
+	// Statement — see the ConnPool field comment on sqliteDialect for
+	// why assigning db.ConnPool *after* gorm.Open() returns silently
+	// leaves every real query/exec pointed at a nil connection pool.
+	db, err := gorm.Open(&sqliteDialect{ConnPool: sqldb}, &gorm.Config{
 		Logger: gormlogger.Default.LogMode(gormlogger.Error),
 	})
 	if err != nil {
 		sqldb.Close()
 		return nil, fmt.Errorf("failed to create gorm.DB: %w", err)
 	}
-
-	// Use our pre-configured connection pool
-	db.ConnPool = sqldb
 
 	if logger != nil {
 		logger.Info("database connection established",

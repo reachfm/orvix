@@ -537,6 +537,21 @@ func MigrateAllRaw(db *gorm.DB) error {
 			jti TEXT PRIMARY KEY,
 			expires_at INTEGER NOT NULL
 		)`,
+		// csrf_records backs internal/auth/csrf.go's CSRFManager
+		// (double-submit-cookie CSRF protection). This table was
+		// missing from every migration path (sqlite raw SQL and
+		// postgres) even though CSRFManager.GenerateToken/Middleware
+		// have always assumed it exists — see the sqlite_dialect.go
+		// fix in this same change for how that combined with a
+		// separate GORM-wiring bug to make forged CSRF tokens pass
+		// silently on SQLite instead of failing loudly.
+		`CREATE TABLE IF NOT EXISTS csrf_records (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			token_hash TEXT NOT NULL UNIQUE,
+			user_id INTEGER NOT NULL,
+			expires_at DATETIME NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS update_histories (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			created_at DATETIME NOT NULL,
@@ -1207,6 +1222,8 @@ func MigrateAllRaw(db *gorm.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_coremail_audit_timestamp ON coremail_audit(timestamp)`,
 		`CREATE INDEX IF NOT EXISTS idx_coremail_audit_actor ON coremail_audit(actor, timestamp)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_deleted_at ON sessions(deleted_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_csrf_records_user_id ON csrf_records(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_csrf_records_expires_at ON csrf_records(expires_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_update_histories_deleted_at ON update_histories(deleted_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_guardian_logs_message_id ON guardian_logs(message_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_l_dap_configs_tenant_id ON l_dap_configs(tenant_id)`,
