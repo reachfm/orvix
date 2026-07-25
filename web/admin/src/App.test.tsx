@@ -56,7 +56,7 @@ describe("Admin console certification", () => {
     render(<Wrapper><App /></Wrapper>);
     await waitFor(() => expect(screen.getByText("Orvix Admin")).toBeInTheDocument());
 
-    for (const label of ["Domains", "Users", "Firewall", "Modules", "Audit Log"]) {
+    for (const label of ["Domains", "Users", "Firewall", "Modules", "Updates", "Audit Log"]) {
       expect(screen.getAllByRole("button", { name: new RegExp(label, "i") }).length).toBeGreaterThan(0);
     }
   });

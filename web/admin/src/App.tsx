@@ -1,10 +1,11 @@
 import { useState, useEffect } from "react";
-import { LayoutDashboard, Globe, Users, Shield, Zap, Activity, Settings, Server, Building, Mail, Monitor, HardDrive, HeartPulse, CreditCard, Keyboard, User, AtSign, BarChart, AlertTriangle, UserPlus, Send, LogOut, FileText, Bell } from "lucide-react";
+import { LayoutDashboard, Globe, Users, Shield, Zap, Activity, Settings, Server, Building, Mail, Monitor, HardDrive, HeartPulse, CreditCard, Keyboard, User, AtSign, BarChart, AlertTriangle, UserPlus, Send, LogOut, FileText, Bell, RefreshCw } from "lucide-react";
 import Dashboard from "./components/Dashboard";
 import Domains from "./components/Domains";
 import UsersPage from "./components/UsersPage";
 import Firewall from "./components/Firewall";
 import Modules from "./components/Modules";
+import UpdatesPage from "./components/UpdatesPage";
 import AuditLog from "./components/AuditLog";
 import EnterpriseDashboard from "./components/EnterpriseDashboard";
 import MailboxList from "./components/MailboxList";
@@ -34,7 +35,7 @@ import SupportPage from "./components/SupportPage";
 import PreferencesPage from "./components/PreferencesPage";
 import { initCSRF, api } from "./api";
 
-type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" | "settings"
+type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "updates" | "audit" | "settings"
   | "enterprise" | "mailboxes" | "organizations" | "backups" | "health"
   | "billing" | "onboarding" | "apikeys"
   | "account-settings" | "org-overview" | "invitations" | "members-roles" | "ownership-transfer"
@@ -51,6 +52,7 @@ const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: st
   { id: "users", label: "Users", icon: Users },
   { id: "firewall", label: "Firewall", icon: Shield },
   { id: "modules", label: "Modules", icon: Zap },
+  { id: "updates", label: "Updates", icon: RefreshCw },
   { id: "audit", label: "Audit Log", icon: Activity },
   { id: "backups", label: "Backups", icon: HardDrive },
   { id: "health", label: "Health", icon: HeartPulse },
@@ -111,6 +113,7 @@ export default function App() {
       if (t.id === "users") return false;
       if (t.id === "firewall") return false;
       if (t.id === "modules") return false;
+      if (t.id === "updates") return false;
       if (t.id === "audit") return false;
       if (t.id === "backups") return false;
       if (t.id === "health") return false;
@@ -167,6 +170,7 @@ export default function App() {
       case "users": return <UsersPage />;
       case "firewall": return <Firewall />;
       case "modules": return <Modules />;
+      case "updates": return <UpdatesPage />;
       case "audit": return <AuditLog />;
       case "enterprise": return <EnterpriseDashboard />;
       case "mailboxes": return <MailboxList />;

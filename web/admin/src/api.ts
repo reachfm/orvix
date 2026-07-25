@@ -236,4 +236,26 @@ export const api = {
     request("/auth/forgot-password", { method: "POST", body: JSON.stringify({ email }) }),
   resetPassword: (token: string, password: string) =>
     request("/auth/reset-password", { method: "POST", body: JSON.stringify({ token, password }) }),
+
+  // Self-update (system Updates page) — /api/v1/admin/updates/*.
+  // Shapes mirror internal/api/handlers/admin_updates.go exactly; see
+  // that file + internal/selfupdate/types.go and protocol.go for the
+  // authoritative contract. Do not add fields the backend doesn't send.
+  getUpdatesStatus: () => request<{ job: any | null }>("/admin/updates/status"),
+  listUpdateReleases: (channel?: string) =>
+    request<{ releases: any[] }>(`/admin/updates/releases${channel ? `?channel=${encodeURIComponent(channel)}` : ""}`),
+  checkForUpdates: (channel?: string) =>
+    request<{ releases: any[] }>("/admin/updates/check", { method: "POST", body: JSON.stringify(channel ? { channel } : {}) }),
+  runUpdatePreflight: (requestedVersion?: string) =>
+    request<{ job: any }>("/admin/updates/preflight", {
+      method: "POST",
+      body: JSON.stringify(requestedVersion ? { requested_version: requestedVersion } : {}),
+    }),
+  installUpdate: (data: { password: string; idempotency_key: string; requested_version: string; channel?: string }) =>
+    request<{ job: any; audited: boolean }>("/admin/updates/install", { method: "POST", body: JSON.stringify(data) }),
+  rollbackUpdate: (data: { password: string; idempotency_key: string; target: string }) =>
+    request<{ job: any; audited: boolean }>("/admin/updates/rollback", { method: "POST", body: JSON.stringify(data) }),
+  getUpdateJob: (id: string) => request<{ job: any }>(`/admin/updates/jobs/${encodeURIComponent(id)}`),
+  listUpdateHistory: () => request<{ history: any[] }>("/admin/updates/history"),
+  listUpdateSnapshots: () => request<{ snapshots: any[] }>("/admin/updates/snapshots"),
 };
