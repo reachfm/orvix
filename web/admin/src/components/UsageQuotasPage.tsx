@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+﻿import { useQuery } from "@tanstack/react-query";
 import { BarChart, Globe, Mail, Send, HardDrive, AlertTriangle } from "lucide-react";
 import { api } from "../api";
 
@@ -19,12 +19,12 @@ export default function UsageQuotasPage() {
 
   return (
     <div className="space-y-6">
-      <h2 className="text-xl font-semibold text-white">Usage & Quotas</h2>
+      <h2 className="text-xl font-semibold text-[var(--text-primary)]">Usage & Quotas</h2>
 
       {plan && (
-        <div className="bg-[#1A1D24] border border-[#262A33] rounded-lg p-4 text-sm">
-          <span className="text-gray-400">Plan: </span>
-          <span className="text-white font-medium">{plan.name}</span>
+        <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-lg p-4 text-sm">
+          <span className="text-[var(--text-secondary)]">Plan: </span>
+          <span className="text-[var(--text-primary)] font-medium">{plan.name}</span>
           {sub?.status && (
             <span className={`ml-2 text-xs px-2 py-0.5 rounded ${
               sub.status === "active" || sub.status === "trialing" ? "bg-green-400/10 text-green-400" : "bg-yellow-400/10 text-yellow-400"
@@ -41,22 +41,22 @@ export default function UsageQuotasPage() {
           const isOverLimit = pct >= 100;
 
           return (
-            <div key={item.label} className="bg-[#1A1D24] border border-[#262A33] rounded-lg p-4">
+            <div key={item.label} className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-lg p-4">
               <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center gap-2">
-                  <Icon className={`w-4 h-4 ${isOverLimit ? "text-red-400" : isNearLimit ? "text-yellow-400" : "text-[#4F7CFF]"}`} />
-                  <span className="text-white text-sm">{item.label}</span>
+                  <Icon className={`w-4 h-4 ${isOverLimit ? "text-red-400" : isNearLimit ? "text-yellow-400" : "text-[var(--accent-blue)]"}`} />
+                  <span className="text-[var(--text-primary)] text-sm">{item.label}</span>
                 </div>
                 <div className="flex items-center gap-2">
                   {isOverLimit && <AlertTriangle className="w-4 h-4 text-red-400" />}
-                  <span className="text-sm text-gray-300">
+                  <span className="text-sm text-[var(--text-secondary)]">
                     {item.used}{item.unit || ""} / {item.limit}{item.unit || ""}{item.suffix || ""}
                   </span>
                 </div>
               </div>
-              <div className="h-2 bg-[#0C0E12] rounded-full overflow-hidden">
+              <div className="h-2 bg-[var(--bg-base)] rounded-full overflow-hidden">
                 <div className={`h-full rounded-full transition-all ${
-                  isOverLimit ? "bg-red-500" : isNearLimit ? "bg-yellow-500" : "bg-[#4F7CFF]"
+                  isOverLimit ? "bg-red-500" : isNearLimit ? "bg-yellow-500" : "bg-[var(--accent-blue)]"
                 }`} style={{ width: `${Math.min(100, pct)}%` }} />
               </div>
             </div>

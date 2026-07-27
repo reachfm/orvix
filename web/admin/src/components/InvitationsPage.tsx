@@ -1,4 +1,4 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+﻿import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { UserPlus, X, Mail } from "lucide-react";
 import { api } from "../api";
@@ -21,38 +21,38 @@ export default function InvitationsPage() {
 
   return (
     <div className="space-y-6">
-      <h2 className="text-xl font-semibold text-white">Invitations</h2>
+      <h2 className="text-xl font-semibold text-[var(--text-primary)]">Invitations</h2>
 
-      <div className="bg-[#1A1D24] border border-[#262A33] rounded-lg p-6">
+      <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-lg p-6">
         <div className="flex items-center gap-3 mb-4">
-          <UserPlus className="w-5 h-5 text-[#4F7CFF]" />
-          <h3 className="text-lg font-medium text-white">Invite Member</h3>
+          <UserPlus className="w-5 h-5 text-[var(--accent-blue)]" />
+          <h3 className="text-lg font-medium text-[var(--text-primary)]">Invite Member</h3>
         </div>
         <div className="flex gap-2">
           <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="colleague@example.com"
-            className="flex-1 px-3 py-2 bg-[#0C0E12] border border-[#2A2F3E] rounded text-white text-sm" />
+            className="flex-1 px-3 py-2 bg-[var(--bg-base)] border border-[var(--border)] rounded text-[var(--text-primary)] text-sm" />
           <button onClick={() => createInvitation.mutate()}
             disabled={createInvitation.isPending || !email}
-            className="bg-[#4F7CFF] text-white rounded px-4 py-2 text-sm hover:bg-[#3D6AE8] disabled:opacity-50">
+            className="bg-[var(--accent-blue)] text-[var(--text-primary)] rounded px-4 py-2 text-sm hover:bg-[var(--accent-hover)] disabled:opacity-50">
             {createInvitation.isPending ? "Sending..." : "Invite"}
           </button>
         </div>
       </div>
 
       {invitations && invitations.length > 0 && (
-        <div className="bg-[#1A1D24] border border-[#262A33] rounded-lg p-6">
+        <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-lg p-6">
           <div className="space-y-2">
             {invitations.map((inv: any) => (
-              <div key={inv.id} className="flex items-center justify-between p-3 bg-[#0C0E12] rounded">
+              <div key={inv.id} className="flex items-center justify-between p-3 bg-[var(--bg-base)] rounded">
                 <div className="flex items-center gap-3">
-                  <Mail className="w-4 h-4 text-gray-400" />
-                  <span className="text-white text-sm">{inv.email}</span>
+                  <Mail className="w-4 h-4 text-[var(--text-secondary)]" />
+                  <span className="text-[var(--text-primary)] text-sm">{inv.email}</span>
                   <span className={`text-xs px-2 py-0.5 rounded ${inv.status === "pending" ? "bg-yellow-400/10 text-yellow-400" : "bg-green-400/10 text-green-400"}`}>
                     {inv.status}
                   </span>
                 </div>
                 {inv.status === "pending" && (
-                  <button onClick={() => revoke.mutate(inv.id)} className="text-gray-400 hover:text-red-400">
+                  <button onClick={() => revoke.mutate(inv.id)} className="text-[var(--text-secondary)] hover:text-red-400">
                     <X className="w-4 h-4" />
                   </button>
                 )}
@@ -63,9 +63,9 @@ export default function InvitationsPage() {
       )}
 
       {(!invitations || invitations.length === 0) && (
-        <div className="bg-[#1A1D24] border border-[#262A33] rounded-lg p-6 text-center">
-          <Mail className="w-8 h-8 text-gray-500 mx-auto mb-2" />
-          <p className="text-gray-400 text-sm">No pending invitations</p>
+        <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-lg p-6 text-center">
+          <Mail className="w-8 h-8 text-[var(--text-muted)] mx-auto mb-2" />
+          <p className="text-[var(--text-secondary)] text-sm">No pending invitations</p>
         </div>
       )}
     </div>

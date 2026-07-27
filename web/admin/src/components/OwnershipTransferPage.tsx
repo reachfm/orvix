@@ -1,4 +1,4 @@
-import { useMutation } from "@tanstack/react-query";
+﻿import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { Send, Check, X } from "lucide-react";
 import { api } from "../api";
@@ -23,20 +23,20 @@ export default function OwnershipTransferPage() {
 
   return (
     <div className="space-y-6 max-w-2xl">
-      <h2 className="text-xl font-semibold text-white">Ownership Transfer</h2>
+      <h2 className="text-xl font-semibold text-[var(--text-primary)]">Ownership Transfer</h2>
 
-      <div className="bg-[#1A1D24] border border-[#262A33] rounded-lg p-6">
+      <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-lg p-6">
         <div className="flex items-center gap-3 mb-4">
-          <Send className="w-5 h-5 text-[#4F7CFF]" />
-          <h3 className="text-lg font-medium text-white">Request Transfer</h3>
+          <Send className="w-5 h-5 text-[var(--accent-blue)]" />
+          <h3 className="text-lg font-medium text-[var(--text-primary)]">Request Transfer</h3>
         </div>
-        <p className="text-sm text-gray-400 mb-4">Transfer organization ownership to another member. They must accept within 48 hours.</p>
+        <p className="text-sm text-[var(--text-secondary)] mb-4">Transfer organization ownership to another member. They must accept within 48 hours.</p>
         <div className="flex gap-2">
           <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="new-owner@example.com"
-            className="flex-1 px-3 py-2 bg-[#0C0E12] border border-[#2A2F3E] rounded text-white text-sm" />
+            className="flex-1 px-3 py-2 bg-[var(--bg-base)] border border-[var(--border)] rounded text-[var(--text-primary)] text-sm" />
           <button onClick={() => requestTransfer.mutate()}
             disabled={requestTransfer.isPending || !email}
-            className="bg-[#4F7CFF] text-white rounded px-4 py-2 text-sm hover:bg-[#3D6AE8] disabled:opacity-50">
+            className="bg-[var(--accent-blue)] text-[var(--text-primary)] rounded px-4 py-2 text-sm hover:bg-[var(--accent-hover)] disabled:opacity-50">
             {requestTransfer.isPending ? "Requesting..." : "Request"}
           </button>
         </div>
@@ -44,18 +44,18 @@ export default function OwnershipTransferPage() {
         {requestTransfer.error && <p className="text-red-400 text-sm mt-2">{requestTransfer.error.message}</p>}
       </div>
 
-      <div className="bg-[#1A1D24] border border-[#262A33] rounded-lg p-6">
+      <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-lg p-6">
         <div className="flex items-center gap-3 mb-4">
-          <Check className="w-5 h-5 text-[#4F7CFF]" />
-          <h3 className="text-lg font-medium text-white">Accept Transfer</h3>
+          <Check className="w-5 h-5 text-[var(--accent-blue)]" />
+          <h3 className="text-lg font-medium text-[var(--text-primary)]">Accept Transfer</h3>
         </div>
-        <p className="text-sm text-gray-400 mb-4">If you received an ownership transfer token, enter it here to accept.</p>
+        <p className="text-sm text-[var(--text-secondary)] mb-4">If you received an ownership transfer token, enter it here to accept.</p>
         <div className="flex gap-2">
           <input value={token} onChange={(e) => setToken(e.target.value)} placeholder="Transfer token"
-            className="flex-1 px-3 py-2 bg-[#0C0E12] border border-[#2A2F3E] rounded text-white text-sm" />
+            className="flex-1 px-3 py-2 bg-[var(--bg-base)] border border-[var(--border)] rounded text-[var(--text-primary)] text-sm" />
           <button onClick={() => acceptTransfer.mutate()}
             disabled={acceptTransfer.isPending || !token}
-            className="bg-[#34D399] text-white rounded px-4 py-2 text-sm hover:bg-[#2DB884] disabled:opacity-50">
+            className="bg-[#34D399] text-[var(--text-primary)] rounded px-4 py-2 text-sm hover:bg-[#2DB884] disabled:opacity-50">
             {acceptTransfer.isPending ? "Accepting..." : "Accept"}
           </button>
         </div>

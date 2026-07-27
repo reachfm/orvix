@@ -323,4 +323,157 @@ export const api = {
     request("/auth/forgot-password", { method: "POST", body: JSON.stringify({ email }) }),
   resetPassword: (token: string, password: string) =>
     request("/auth/reset-password", { method: "POST", body: JSON.stringify({ token, password }) }),
+
+  // ── Platform stats / analytics ──────────────────────────────────────────
+  getPlatformStats: () => request<any>("/platform/stats"),
+  getEmailTrafficStats: (days = 7) => request<any>(`/platform/stats/email-traffic?days=${days}`),
+  getDeliveryStats: () => request<any>("/platform/stats/delivery"),
+  getBounceStats: () => request<any>("/platform/stats/bounces"),
+  getDomainReputation: () => request<any>("/platform/stats/domain-reputation"),
+
+  // ── SMTP Queue ───────────────────────────────────────────────────────────
+  listSmtpQueue: (params?: { status?: string; limit?: number; offset?: number }) => {
+    const qs = new URLSearchParams();
+    if (params?.status) qs.set("status", params.status);
+    if (params?.limit) qs.set("limit", String(params.limit));
+    if (params?.offset) qs.set("offset", String(params.offset));
+    return request<any>(`/platform/mail-queue?${qs}`);
+  },
+  retrySmtpQueueItem: (id: string) =>
+    request<any>(`/platform/mail-queue/${id}/retry`, { method: "POST" }),
+  deleteSmtpQueueItem: (id: string) =>
+    request<any>(`/platform/mail-queue/${id}`, { method: "DELETE" }),
+  flushSmtpQueue: () => request<any>("/platform/mail-queue/flush", { method: "POST" }),
+
+  // ── Ports & Services ─────────────────────────────────────────────────────
+  getPortStatus: () => request<any>("/platform/ports"),
+  getServiceHealth: () => request<any>("/platform/services/health"),
+  restartService: (name: string) =>
+    request<any>(`/platform/services/${name}/restart`, { method: "POST" }),
+
+  // ── Plans / Packages ─────────────────────────────────────────────────────
+  listPlatformPlans: () => request<any>("/platform/plans"),
+  createPlatformPlan: (data: any) =>
+    request<any>("/platform/plans", { method: "POST", body: JSON.stringify(data) }),
+  updatePlatformPlan: (id: number, data: any) =>
+    request<any>(`/platform/plans/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  deletePlatformPlan: (id: number) =>
+    request<any>(`/platform/plans/${id}`, { method: "DELETE" }),
+  togglePlanStatus: (id: number, active: boolean) =>
+    request<any>(`/platform/plans/${id}/status`, { method: "PUT", body: JSON.stringify({ active }) }),
+
+  // ── Mail Routing Rules ───────────────────────────────────────────────────
+  listRoutingRules: () => request<any>("/platform/routing-rules"),
+  createRoutingRule: (data: any) =>
+    request<any>("/platform/routing-rules", { method: "POST", body: JSON.stringify(data) }),
+  updateRoutingRule: (id: number, data: any) =>
+    request<any>(`/platform/routing-rules/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  deleteRoutingRule: (id: number) =>
+    request<any>(`/platform/routing-rules/${id}`, { method: "DELETE" }),
+
+  // ── Webhooks ─────────────────────────────────────────────────────────────
+  listWebhooks: () => request<any>("/platform/webhooks"),
+  createWebhook: (data: any) =>
+    request<any>("/platform/webhooks", { method: "POST", body: JSON.stringify(data) }),
+  updateWebhook: (id: number, data: any) =>
+    request<any>(`/platform/webhooks/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  deleteWebhook: (id: number) =>
+    request<any>(`/platform/webhooks/${id}`, { method: "DELETE" }),
+  testWebhook: (id: number) =>
+    request<any>(`/platform/webhooks/${id}/test`, { method: "POST" }),
+
+  // ── Email Templates ──────────────────────────────────────────────────────
+  listEmailTemplates: () => request<any>("/platform/email-templates"),
+  createEmailTemplate: (data: any) =>
+    request<any>("/platform/email-templates", { method: "POST", body: JSON.stringify(data) }),
+  updateEmailTemplate: (id: number, data: any) =>
+    request<any>(`/platform/email-templates/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  deleteEmailTemplate: (id: number) =>
+    request<any>(`/platform/email-templates/${id}`, { method: "DELETE" }),
+
+  // ── Retention & Compliance ───────────────────────────────────────────────
+  listRetentionPolicies: () => request<any>("/platform/retention-policies"),
+  createRetentionPolicy: (data: any) =>
+    request<any>("/platform/retention-policies", { method: "POST", body: JSON.stringify(data) }),
+  updateRetentionPolicy: (id: number, data: any) =>
+    request<any>(`/platform/retention-policies/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  deleteRetentionPolicy: (id: number) =>
+    request<any>(`/platform/retention-policies/${id}`, { method: "DELETE" }),
+  listLegalHolds: () => request<any>("/platform/legal-holds"),
+  createLegalHold: (data: any) =>
+    request<any>("/platform/legal-holds", { method: "POST", body: JSON.stringify(data) }),
+  releaseLegalHold: (id: number) =>
+    request<any>(`/platform/legal-holds/${id}/release`, { method: "POST" }),
+  listDLPPolicies: () => request<any>("/platform/dlp-policies"),
+  createDLPPolicy: (data: any) =>
+    request<any>("/platform/dlp-policies", { method: "POST", body: JSON.stringify(data) }),
+  updateDLPPolicy: (id: number, data: any) =>
+    request<any>(`/platform/dlp-policies/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  deleteDLPPolicy: (id: number) =>
+    request<any>(`/platform/dlp-policies/${id}`, { method: "DELETE" }),
+  runEDiscoverySearch: (data: any) =>
+    request<any>("/platform/ediscovery/search", { method: "POST", body: JSON.stringify(data) }),
+
+  // ── TLS Certificates ─────────────────────────────────────────────────────
+  listTLSCerts: () => request<any>("/platform/tls-certs"),
+  renewTLSCert: (domain: string) =>
+    request<any>(`/platform/tls-certs/${domain}/renew`, { method: "POST" }),
+  uploadTLSCert: (domain: string, data: any) =>
+    request<any>(`/platform/tls-certs/${domain}`, { method: "PUT", body: JSON.stringify(data) }),
+  deleteTLSCert: (domain: string) =>
+    request<any>(`/platform/tls-certs/${domain}`, { method: "DELETE" }),
+
+  // ── Anti-Spam ────────────────────────────────────────────────────────────
+  getSpamConfig: () => request<any>("/platform/spam-config"),
+  updateSpamConfig: (data: any) =>
+    request<any>("/platform/spam-config", { method: "PUT", body: JSON.stringify(data) }),
+  listSpamBlacklist: () => request<any>("/platform/spam/blacklist"),
+  addSpamBlacklistEntry: (data: any) =>
+    request<any>("/platform/spam/blacklist", { method: "POST", body: JSON.stringify(data) }),
+  removeSpamBlacklistEntry: (id: number) =>
+    request<any>(`/platform/spam/blacklist/${id}`, { method: "DELETE" }),
+  listSpamWhitelist: () => request<any>("/platform/spam/whitelist"),
+  addSpamWhitelistEntry: (data: any) =>
+    request<any>("/platform/spam/whitelist", { method: "POST", body: JSON.stringify(data) }),
+  removeSpamWhitelistEntry: (id: number) =>
+    request<any>(`/platform/spam/whitelist/${id}`, { method: "DELETE" }),
+
+  // ── Alerts & Notifications ───────────────────────────────────────────────
+  listAlertRules: () => request<any>("/platform/alert-rules"),
+  createAlertRule: (data: any) =>
+    request<any>("/platform/alert-rules", { method: "POST", body: JSON.stringify(data) }),
+  updateAlertRule: (id: number, data: any) =>
+    request<any>(`/platform/alert-rules/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  deleteAlertRule: (id: number) =>
+    request<any>(`/platform/alert-rules/${id}`, { method: "DELETE" }),
+  listAlertHistory: () => request<any>("/platform/alert-history"),
+
+  // ── System Logs ──────────────────────────────────────────────────────────
+  getSystemLogs: (params?: { service?: string; level?: string; limit?: number; search?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.service) qs.set("service", params.service);
+    if (params?.level) qs.set("level", params.level);
+    if (params?.limit) qs.set("limit", String(params.limit));
+    if (params?.search) qs.set("search", params.search);
+    return request<any>(`/platform/logs?${qs}`);
+  },
+
+  // ── Company / Departments ────────────────────────────────────────────────
+  getPlatformProfile: () => request<any>("/platform/company"),
+  updatePlatformProfile: (data: any) =>
+    request<any>("/platform/company", { method: "PUT", body: JSON.stringify(data) }),
+  listDepartments: () => request<any>("/platform/departments"),
+  createDepartment: (data: any) =>
+    request<any>("/platform/departments", { method: "POST", body: JSON.stringify(data) }),
+  updateDepartment: (id: number, data: any) =>
+    request<any>(`/platform/departments/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  deleteDepartment: (id: number) =>
+    request<any>(`/platform/departments/${id}`, { method: "DELETE" }),
+
+  // ── Reports ──────────────────────────────────────────────────────────────
+  getEmailReport: (range: string) => request<any>(`/platform/reports/email?range=${range}`),
+  getDeliveryReport: (range: string) => request<any>(`/platform/reports/delivery?range=${range}`),
+  getTenantReport: () => request<any>("/platform/reports/tenants"),
+  exportReport: (type: string, format: string) =>
+    request<any>(`/platform/reports/export?type=${type}&format=${format}`, { method: "POST" }),
 };
