@@ -1,14 +1,19 @@
 import { useState, useEffect } from "react";
-import { LayoutDashboard, Globe, Users, Shield, Zap, Activity, Settings, Server, Building, Mail, Monitor, HardDrive, HeartPulse, CreditCard, Keyboard, User, AtSign, BarChart, AlertTriangle, UserPlus, Send, LogOut, FileText, Bell } from "lucide-react";
+import {
+  LayoutDashboard, Globe, Users, Shield, Zap, Activity, Settings,
+  Server, Building, Mail, Monitor, HardDrive, HeartPulse, CreditCard,
+  Keyboard, User, AtSign, BarChart, AlertTriangle, UserPlus, Send,
+  FileText, Bell,
+} from "lucide-react";
 import Dashboard from "./components/Dashboard";
 import Domains from "./components/Domains";
 import UsersPage from "./components/UsersPage";
-import Firewall from "./components/Firewall";
+import SecurityPage from "./components/SecurityPage";
 import Modules from "./components/Modules";
 import AuditLog from "./components/AuditLog";
 import EnterpriseDashboard from "./components/EnterpriseDashboard";
 import MailboxList from "./components/MailboxList";
-import OrganizationList from "./components/OrganizationList";
+import Organizations from "./components/Organizations";
 import BackupStatus from "./components/BackupStatus";
 import SystemHealth from "./components/SystemHealth";
 import BillingPage from "./components/BillingPage";
@@ -29,56 +34,63 @@ import AliasesPage from "./components/AliasesPage";
 import GroupsPage from "./components/GroupsPage";
 import UsageQuotasPage from "./components/UsageQuotasPage";
 import InvoicesPage from "./components/InvoicesPage";
-import SecurityPage from "./components/SecurityPage";
 import SupportPage from "./components/SupportPage";
 import PreferencesPage from "./components/PreferencesPage";
 import { initCSRF, api } from "./api";
+import AppShell from "./components/layout/AppShell";
+import { ToastProvider } from "./components/ui/Toast";
+import type { NavItem, NavSection } from "./types/navigation";
 
-type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" | "settings"
-  | "enterprise" | "mailboxes" | "organizations" | "backups" | "health"
-  | "billing" | "onboarding" | "apikeys"
-  | "account-settings" | "org-overview" | "invitations" | "members-roles" | "ownership-transfer"
-  | "suspension-deletion" | "customer-mailboxes" | "aliases" | "groups" | "usage-quotas"
-  | "invoices" | "security" | "support" | "preferences"
-  | "login" | "signup" | "forgot-password" | "reset-password";
+type Tab = string;
 
-const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: string }[] = [
-  { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { id: "enterprise", label: "Enterprise", icon: Monitor, section: "Customer Admin" },
-  { id: "mailboxes", label: "Mailboxes", icon: Mail },
-  { id: "organizations", label: "Organizations", icon: Building },
-  { id: "domains", label: "Domains", icon: Globe },
-  { id: "users", label: "Users", icon: Users },
-  { id: "firewall", label: "Firewall", icon: Shield },
-  { id: "modules", label: "Modules", icon: Zap },
-  { id: "audit", label: "Audit Log", icon: Activity },
-  { id: "backups", label: "Backups", icon: HardDrive },
-  { id: "health", label: "Health", icon: HeartPulse },
-  { id: "settings", label: "Settings", icon: Settings },
-  { id: "org-overview", label: "Organization", icon: Building, section: "Customer Portal" },
-  { id: "customer-mailboxes", label: "Mailboxes", icon: Mail },
-  { id: "aliases", label: "Aliases", icon: AtSign },
-  { id: "groups", label: "Groups", icon: Users },
-  { id: "usage-quotas", label: "Usage", icon: BarChart },
-  { id: "onboarding", label: "Domain Setup", icon: Globe },
-  { id: "invitations", label: "Invitations", icon: UserPlus },
-  { id: "members-roles", label: "Members", icon: Shield },
-  { id: "ownership-transfer", label: "Ownership", icon: Send },
-  { id: "suspension-deletion", label: "Status", icon: AlertTriangle },
-  { id: "invoices", label: "Invoices", icon: FileText },
-  { id: "billing", label: "Billing", icon: CreditCard },
-  { id: "apikeys", label: "API Keys", icon: Keyboard },
-  { id: "account-settings", label: "Account", icon: User, section: "Account" },
-  { id: "security", label: "Security", icon: Shield },
-  { id: "preferences", label: "Preferences", icon: Bell },
-  { id: "support", label: "Support", icon: HeartPulse },
+const tabConfig: { id: Tab; label: string; icon: typeof LayoutDashboard; section: string; description: string }[] = [
+  { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, section: "Command", description: "Tenant health, domains, mailbox posture" },
+  { id: "enterprise", label: "Enterprise", icon: Monitor, section: "Platform", description: "Platform-wide customer operations" },
+  { id: "organizations", label: "Organizations", icon: Building, section: "Platform", description: "Tenant inventory and ownership" },
+  { id: "domains", label: "Domains", icon: Globe, section: "Mail Operations", description: "DNS readiness and domain status" },
+  { id: "mailboxes", label: "Mailboxes", icon: Mail, section: "Mail Operations", description: "Mailbox lifecycle and quota state" },
+  { id: "users", label: "Users", icon: Users, section: "Mail Operations", description: "Platform users and access" },
+  { id: "firewall", label: "Firewall", icon: Shield, section: "Security", description: "Network access controls" },
+  { id: "modules", label: "Modules", icon: Zap, section: "Security", description: "Runtime module posture" },
+  { id: "audit", label: "Audit Log", icon: Activity, section: "Security", description: "Operator and tenant audit trail" },
+  { id: "health", label: "Health", icon: HeartPulse, section: "Operations", description: "Runtime health and capacity" },
+  { id: "backups", label: "Backups", icon: HardDrive, section: "Operations", description: "Backup and restore readiness" },
+  { id: "settings", label: "Settings", icon: Settings, section: "Operations", description: "Global platform configuration" },
+  { id: "org-overview", label: "Organization", icon: Building, section: "Customer Portal", description: "Tenant profile and membership" },
+  { id: "customer-mailboxes", label: "Mailboxes", icon: Mail, section: "Customer Portal", description: "Tenant mailbox inventory" },
+  { id: "aliases", label: "Aliases", icon: AtSign, section: "Customer Portal", description: "Tenant alias management" },
+  { id: "groups", label: "Groups", icon: Users, section: "Customer Portal", description: "Group addresses and members" },
+  { id: "usage-quotas", label: "Usage", icon: BarChart, section: "Customer Portal", description: "Quota consumption and limits" },
+  { id: "onboarding", label: "Domain Setup", icon: Globe, section: "Customer Portal", description: "Domain onboarding workflow" },
+  { id: "invitations", label: "Invitations", icon: UserPlus, section: "Customer Portal", description: "Invite and revoke members" },
+  { id: "members-roles", label: "Members", icon: Shield, section: "Customer Portal", description: "Tenant roles and membership" },
+  { id: "ownership-transfer", label: "Ownership", icon: Send, section: "Customer Portal", description: "Tenant ownership transfer" },
+  { id: "suspension-deletion", label: "Status", icon: AlertTriangle, section: "Customer Portal", description: "Suspension and deletion state" },
+  { id: "invoices", label: "Invoices", icon: FileText, section: "Billing", description: "Invoice history" },
+  { id: "billing", label: "Billing", icon: CreditCard, section: "Billing", description: "Subscription and plan controls" },
+  { id: "apikeys", label: "API Keys", icon: Keyboard, section: "Integrations", description: "Scoped API access" },
+  { id: "account-settings", label: "Account", icon: User, section: "Account", description: "Profile and password" },
+  { id: "security", label: "Security", icon: Shield, section: "Account", description: "Sessions and MFA" },
+  { id: "preferences", label: "Preferences", icon: Bell, section: "Account", description: "Notification preferences" },
+  { id: "support", label: "Support", icon: HeartPulse, section: "Account", description: "Support requests" },
 ];
+
+const sectionOrder = ["Command", "Platform", "Mail Operations", "Security", "Operations", "Customer Portal", "Billing", "Integrations", "Account"];
+
+const arabicLabels: Record<string, string> = {
+  dashboard: "لوحة القيادة", enterprise: "المؤسسة", organizations: "المنظمات",
+  domains: "النطاقات", mailboxes: "صناديق البريد", users: "المستخدمون",
+  firewall: "الجدار الناري", modules: "الوحدات", audit: "سجل التدقيق",
+  health: "الصحة", backups: "النسخ الاحتياطي", settings: "الإعدادات",
+  billing: "الفوترة", apikeys: "مفاتيح API", security: "الأمان", support: "الدعم",
+};
 
 export default function App() {
   const [currentTab, setCurrentTab] = useState<Tab>("dashboard");
   const [authenticated, setAuthenticated] = useState(false);
   const [authLoading, setAuthLoading] = useState(true);
   const [userRole, setUserRole] = useState("");
+  const [userEmail, setUserEmail] = useState("");
 
   useEffect(() => {
     fetch("/api/v1/me", { credentials: "include" })
@@ -88,6 +100,7 @@ export default function App() {
           try {
             const u = await r.json();
             setUserRole(u.role || "");
+            setUserEmail(u.email || u.name || "");
             initCSRF().catch(() => {});
           } catch { setUserRole(""); }
         }
@@ -98,79 +111,39 @@ export default function App() {
 
   const isPlatformRole = userRole === "admin" || userRole === "superadmin" || userRole === "operator";
 
-  const filteredTabs = tabs.filter((t) => {
-    if (!isPlatformRole) {
-      // Customer users see only Customer Portal + Account sections.
-      // Platform admin tabs (Dashboard, Mailboxes admin, Organizations, Domains admin,
-      // Users, Firewall, Modules, Backups, Health, Settings) are hidden.
-      if (t.id === "dashboard") return true;
-      if (t.id === "enterprise") return false;
-      if (t.id === "mailboxes") return false;
-      if (t.id === "organizations") return false;
-      if (t.id === "domains") return false;
-      if (t.id === "users") return false;
-      if (t.id === "firewall") return false;
-      if (t.id === "modules") return false;
-      if (t.id === "audit") return false;
-      if (t.id === "backups") return false;
-      if (t.id === "health") return false;
-      if (t.id === "settings") return false;
-      // Keep Customer Portal + Account items
-      return true;
-    }
+  const filteredTabs = tabConfig.filter((t) => {
+    if (isPlatformRole) return true;
+    if (t.id === "dashboard") return true;
+    if (["enterprise","mailboxes","organizations","domains","users","firewall","modules","audit","backups","health","settings"].includes(t.id)) return false;
     return true;
   });
 
-  const navigateTo = (route: string) => {
-    const tabMap: Record<string, Tab> = {
-      "/": "dashboard", "/login": "login", "/signup": "signup",
-      "/forgot-password": "forgot-password", "/reset-password": "reset-password",
-    };
-    setCurrentTab(tabMap[route] || "dashboard");
-  };
+  const navSections: NavSection[] = sectionOrder
+    .map((section) => ({
+      label: section,
+      items: filteredTabs.filter((t) => t.section === section).map((t) => ({
+        id: t.id,
+        label: t.label,
+        icon: t.icon,
+        description: t.description,
+      })),
+    }))
+    .filter((s) => s.items.length > 0);
 
-  const tabFromPath = (path: string): Tab => {
-    if (path === "/admin" || path === "/admin/" || path === "/admin/login") return "login";
-    if (path === "/admin/signup") return "signup";
-    if (path === "/admin/forgot-password") return "forgot-password";
-    if (path === "/admin/reset-password") return "reset-password";
-    return "dashboard";
-  };
-
-  useEffect(() => {
-    const onPopState = () => setCurrentTab(tabFromPath(window.location.pathname));
-    window.addEventListener("popstate", onPopState);
-    return () => window.removeEventListener("popstate", onPopState);
-  }, []);
-
-  useEffect(() => {
-    setCurrentTab(tabFromPath(window.location.pathname));
-  }, []);
-
-  if (authLoading) {
-    return <div className="h-screen bg-[#0C0E12] flex items-center justify-center"><p className="text-gray-400">Loading...</p></div>;
-  }
-
-  if (!authenticated) {
-    switch (currentTab) {
-      case "signup": return <SignupPage />;
-      case "forgot-password": return <ForgotPasswordPage />;
-      case "reset-password": return <ResetPasswordPage />;
-      default: return <LoginPage />;
-    }
-  }
+  const activeTabConfig = tabConfig.find((t) => t.id === currentTab) || tabConfig[0];
+  const headerTitle = currentTab === "dashboard" ? "Dashboard" : (arabicLabels[currentTab] || activeTabConfig.label);
 
   const renderContent = () => {
     switch (currentTab) {
       case "dashboard": return <Dashboard />;
       case "domains": return <Domains />;
       case "users": return <UsersPage />;
-      case "firewall": return <Firewall />;
+      case "firewall": return <SecurityPage />;
       case "modules": return <Modules />;
       case "audit": return <AuditLog />;
       case "enterprise": return <EnterpriseDashboard />;
       case "mailboxes": return <MailboxList />;
-      case "organizations": return <OrganizationList />;
+      case "organizations": return <Organizations />;
       case "backups": return <BackupStatus />;
       case "health": return <SystemHealth />;
       case "billing": return <BillingPage />;
@@ -194,65 +167,40 @@ export default function App() {
     }
   };
 
+  if (authLoading) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-[var(--bg-base)]">
+        <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-surface)] px-5 py-4 text-sm text-[var(--text-secondary)]">
+          Loading secure console...
+        </div>
+      </div>
+    );
+  }
+
+  if (!authenticated) {
+    switch (currentTab) {
+      case "signup": return <SignupPage />;
+      case "forgot-password": return <ForgotPasswordPage />;
+      case "reset-password": return <ResetPasswordPage />;
+      default: return <LoginPage />;
+    }
+  }
+
   return (
-    <div className="flex h-screen overflow-hidden">
-      <aside className="w-64 bg-[#13161C] border-r border-[#2A2F3E] flex flex-col">
-        <div className="p-4 border-b border-[#2A2F3E] flex items-center gap-3">
-          <Server size={24} className="text-[#4F7CFF]" />
-          <div>
-            <h1 className="text-sm font-semibold text-[#E8EAF0]">Orvix Admin</h1>
-            <p className="text-xs text-[#555D73]">Console v1.0.0</p>
-          </div>
-        </div>
-
-        <nav className="flex-1 px-2 py-3 space-y-0.5 overflow-y-auto">
-          {filteredTabs.map((t) => {
-            const Icon = t.icon;
-            const active = currentTab === t.id;
-            if (t.section) {
-              return (
-                <div key={t.id}>
-                  <div className="px-3 pt-4 pb-1 text-xs font-semibold text-[#555D73] uppercase tracking-wider">{t.section}</div>
-                  <button
-                    onClick={() => setCurrentTab(t.id)}
-                    className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
-                      active ? "bg-[#222736] text-[#E8EAF0]" : "text-[#8B92A8] hover:bg-[#1A1E26] hover:text-[#E8EAF0]"
-                    }`}
-                  >
-                    <Icon size={18} />
-                    <span>{t.label}</span>
-                  </button>
-                </div>
-              );
-            }
-            return (
-              <button
-                key={t.id}
-                onClick={() => setCurrentTab(t.id)}
-                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
-                  active ? "bg-[#222736] text-[#E8EAF0]" : "text-[#8B92A8] hover:bg-[#1A1E26] hover:text-[#E8EAF0]"
-                }`}
-              >
-                <Icon size={18} />
-                <span>{t.label}</span>
-              </button>
-            );
-          })}
-        </nav>
-
-        <div className="p-3 border-t border-[#2A2F3E]">
-          <button onClick={() => { api.logout().catch(() => {}); setAuthenticated(false); }}
-            className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-[#8B92A8] hover:bg-[#1A1E26] hover:text-[#E8EAF0]">
-            <LogOut size={18} /> Logout
-          </button>
-        </div>
-      </aside>
-
-      <main className="flex-1 overflow-auto bg-[#0C0E12]">
-        <div className="max-w-7xl mx-auto p-6">
-          {renderContent()}
-        </div>
-      </main>
-    </div>
+    <ToastProvider>
+      <AppShell
+        sections={navSections}
+        activeTab={currentTab}
+        onNavigate={(id) => setCurrentTab(id)}
+        userEmail={userEmail}
+        userRole={userRole}
+        onLogout={() => { api.logout().catch(() => {}); setAuthenticated(false); }}
+        arabicLabels={arabicLabels}
+        headerTitle={activeTabConfig.description ? undefined : headerTitle}
+        headerSubtitle={activeTabConfig.description}
+      >
+        {renderContent()}
+      </AppShell>
+    </ToastProvider>
   );
 }

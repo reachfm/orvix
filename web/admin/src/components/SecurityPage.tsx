@@ -1,239 +1,117 @@
+import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
-import { Shield, Monitor, Smartphone, X, Key, Lock, Check, AlertTriangle, Loader2 } from "lucide-react";
+import { Shield, PlusCircle, Monitor, AlertTriangle } from "lucide-react";
 import { api } from "../api";
-import QRCode from "qrcode";
-
-function isMobile(userAgent: string): boolean {
-  return /mobile|android|iphone|ipad/i.test(userAgent);
-}
+import PageHeader from "./ui/PageHeader";
+import DataTable from "./ui/DataTable";
+import Badge from "./ui/Badge";
+import Button from "./ui/Button";
+import Dialog from "./ui/Dialog";
+import Tabs from "./ui/Tabs";
+import EmptyState from "./ui/EmptyState";
+import ErrorBanner from "./ui/ErrorBanner";
+import { useToast } from "./ui/Toast";
+import type { FirewallRule, Session } from "../types/security";
 
 export default function SecurityPage() {
   const queryClient = useQueryClient();
-  const { data: sessionsData, isLoading: sessionsLoading } = useQuery({ queryKey: ["sessions"], queryFn: api.listSessions });
-  const { data: mfaStatus } = useQuery({ queryKey: ["mfaStatus"], queryFn: api.getMFAStatus });
+  const { toast } = useToast();
+  const [activeTab, setActiveTab] = useState("firewall");
+  const [showAddRule, setShowAddRule] = useState(false);
+  const [showDeleteRule, setShowDeleteRule] = useState<FirewallRule | null>(null);
+  const [showTerminate, setShowTerminate] = useState<Session | null>(null);
+  const [ruleForm, setRuleForm] = useState({ type: "allow" as "allow" | "block", ip_range: "", description: "" });
 
-  const [currentPassword, setCurrentPassword] = useState("");
-  const [newPassword, setNewPassword] = useState("");
-  const [mfaSetupCode, setMfaSetupCode] = useState("");
-  const [mfaSecret, setMfaSecret] = useState("");
-  const [mfaOtpAuthUrl, setMfaOtpAuthUrl] = useState("");
-  const [qrError, setQrError] = useState(false);
-  const [showSetup, setShowSetup] = useState(false);
-  const qrCanvasRef = useRef<HTMLCanvasElement>(null);
-
-  useEffect(() => {
-    if (mfaOtpAuthUrl && qrCanvasRef.current) {
-      QRCode.toCanvas(qrCanvasRef.current, mfaOtpAuthUrl, { width: 200, margin: 1 }, (err: Error | null | undefined) => {
-        if (err) {
-          console.error("QR render failed", err);
-          setQrError(true);
-        }
-      });
-    }
-  }, [mfaOtpAuthUrl]);
-
-  const sessions: any[] = (sessionsData as any)?.sessions || [];
-  const nonCurrentSessions = sessions.filter((s: any) => !s.current);
-
-  const changePassword = useMutation({
-    mutationFn: () => api.changePassword({ current_password: currentPassword, new_password: newPassword }),
-    onSuccess: () => { setCurrentPassword(""); setNewPassword(""); },
+  const { data: rules, isLoading: rulesLoading, isError: rulesError, error: rulesErr } = useQuery({
+    queryKey: ["firewall-rules"], queryFn: api.listFirewallRules, enabled: activeTab === "firewall",
   });
 
-  const revokeSession = useMutation({
+  const { data: sessions, isLoading: sessionsLoading } = useQuery({
+    queryKey: ["sessions-list"], queryFn: api.listSessions, enabled: activeTab === "sessions",
+  });
+
+  const addRuleMutation = useMutation({
+    mutationFn: (data: typeof ruleForm) => api.addFirewallRule(data),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["firewall-rules"] }); setShowAddRule(false); setRuleForm({ type: "allow", ip_range: "", description: "" }); toast({ message: "Rule added.", variant: "success" }); },
+    onError: (err: any) => toast({ message: err?.message || "Failed to add rule", variant: "danger" }),
+  });
+
+  const deleteRuleMutation = useMutation({
+    mutationFn: (id: number) => api.deleteFirewallRule(id),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["firewall-rules"] }); setShowDeleteRule(null); toast({ message: "Rule deleted.", variant: "info" }); },
+    onError: (err: any) => toast({ message: err?.message || "Failed to delete", variant: "danger" }),
+  });
+
+  const terminateMutation = useMutation({
     mutationFn: (id: string) => api.revokeSession(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["sessions-list"] }); setShowTerminate(null); toast({ message: "Session terminated.", variant: "info" }); },
+    onError: (err: any) => toast({ message: err?.message || "Failed to terminate", variant: "danger" }),
   });
 
-  const mfaBegin = useMutation({
-    mutationFn: () => api.setupMFABegin({ current_password: currentPassword }),
-    onSuccess: (data: any) => {
-      setMfaSecret(data.secret);
-      setMfaOtpAuthUrl(data.otpauth_url);
-      setShowSetup(true);
-    },
-  });
+  const ruleList: FirewallRule[] = Array.isArray(rules) ? rules : [];
+  const sessionList: Session[] = Array.isArray(sessions) ? sessions : sessions?.sessions || [];
 
-  const mfaVerify = useMutation({
-    mutationFn: () => api.setupMFAVerify(mfaSetupCode),
-    onSuccess: () => {
-      setShowSetup(false);
-      setMfaSetupCode("");
-      setMfaSecret("");
-      queryClient.invalidateQueries({ queryKey: ["mfaStatus"] });
-    },
-  });
+  const ruleCols = [
+    { key: "type", label: "Type", render: (row: FirewallRule) => <Badge variant={row.type === "allow" ? "teal" : "danger"}>{row.type}</Badge> },
+    { key: "ip_range", label: "IP Range", render: (row: FirewallRule) => <code className="text-xs font-mono text-[var(--accent-blue)]">{row.ip_range}</code> },
+    { key: "description", label: "Description" },
+    { key: "created_at", label: "Created", render: (row: FirewallRule) => new Date(row.created_at).toLocaleDateString() },
+    { key: "actions", label: "", width: "60px", render: (row: FirewallRule) => <Button variant="danger" size="sm" onClick={() => setShowDeleteRule(row)}>Delete</Button> },
+  ];
 
-  const mfaDisable = useMutation({
-    mutationFn: () => api.disableMFA({ current_password: currentPassword, code: mfaSetupCode }),
-    onSuccess: () => {
-      setMfaSetupCode("");
-      queryClient.invalidateQueries({ queryKey: ["mfaStatus"] });
-    },
-  });
+  const sessionCols = [
+    { key: "user_email", label: "User", render: (row: Session) => <span className={row.is_current ? "font-medium text-[var(--accent)]" : ""}>{row.user_email}{row.is_current ? " (current)" : ""}</span> },
+    { key: "ip_address", label: "IP" },
+    { key: "user_agent", label: "Client", render: (row: Session) => <span className="text-xs text-[var(--text-muted)]">{row.user_agent?.slice(0, 60)}</span> },
+    { key: "created_at", label: "Created", render: (row: Session) => new Date(row.created_at).toLocaleString() },
+    { key: "last_active_at", label: "Last Active", render: (row: Session) => new Date(row.last_active_at).toLocaleString() },
+    { key: "actions", label: "", width: "60px", render: (row: Session) => !row.is_current && <Button variant="danger" size="sm" onClick={() => setShowTerminate(row)}>Terminate</Button> },
+  ];
 
   return (
-    <div className="space-y-6 max-w-2xl">
-      <h2 className="text-xl font-semibold text-white">Security</h2>
+    <div className="space-y-6">
+      <PageHeader title="Security" subtitle="Firewall rules and session management" />
 
-      <div className="bg-[#1A1D24] border border-[#262A33] rounded-lg p-6">
-        <div className="flex items-center gap-3 mb-4">
-          <Smartphone className="w-5 h-5 text-[#4F7CFF]" />
-          <h3 className="text-lg font-medium text-white">Active Sessions</h3>
+      <Tabs tabs={[{ id: "firewall", label: "Firewall Rules" }, { id: "sessions", label: "Active Sessions" }]} activeTab={activeTab} onChange={setActiveTab} />
+
+      {activeTab === "firewall" && (
+        <div className="space-y-4">
+          {rulesError && <ErrorBanner message={(rulesErr as any)?.message || "Failed to load rules"} />}
+          <Button variant="primary" size="sm" onClick={() => setShowAddRule(true)} iconLeft={<PlusCircle size={14} />}>Add Rule</Button>
+          <DataTable columns={ruleCols} rows={ruleList} loading={rulesLoading}
+            emptyState={<EmptyState icon={Shield} title="No firewall rules" />}
+          />
         </div>
+      )}
 
-        {sessionsLoading ? (
-          <div className="flex items-center gap-2 text-[#8B92A8] text-sm py-4">
-            <Loader2 className="w-4 h-4 animate-spin" />
-            Loading sessions...
-          </div>
-        ) : sessions.length === 0 ? (
-          <p className="text-[#8B92A8] text-sm">No active sessions found.</p>
-        ) : (
-          <div className="space-y-2">
-            {sessions.map((s: any) => (
-              <div key={s.id} className="flex items-center justify-between bg-[#0C0E12] rounded p-3">
-                <div className="flex items-center gap-3 min-w-0">
-                  {isMobile(s.user_agent || "") ? (
-                    <Smartphone size={16} className="text-[#8B92A8] shrink-0" />
-                  ) : (
-                    <Monitor size={16} className="text-[#8B92A8] shrink-0" />
-                  )}
-                  <div className="min-w-0">
-                    <span className="text-white text-sm truncate block">{s.user_agent || "Unknown"}</span>
-                    {s.ip && <span className="text-xs text-[#555D73]">{s.ip}</span>}
-                  </div>
-                  {s.current && <span className="text-xs px-2 py-0.5 rounded bg-[#4F7CFF]/10 text-[#4F7CFF] shrink-0">Current</span>}
-                </div>
-                <div className="flex items-center gap-3 shrink-0 ml-3">
-                  <span className="text-xs text-[#555D73]">
-                    {s.created_at ? new Date(s.created_at).toLocaleString() : ""}
-                  </span>
-                  {!s.current && (
-                    <button onClick={() => revokeSession.mutate(s.id)}
-                      disabled={revokeSession.isPending}
-                      className="text-[#F87171] hover:bg-[#F87171]/10 p-1 rounded disabled:opacity-50">
-                      <X size={14} />
-                    </button>
-                  )}
-                </div>
-              </div>
-            ))}
-            {nonCurrentSessions.length === 0 && sessions.length === 1 && (
-              <p className="text-[#8B92A8] text-sm pt-2">No other active sessions.</p>
-            )}
-          </div>
-        )}
-        {revokeSession.error && (
-          <p className="text-[#F87171] text-sm mt-2">{(revokeSession.error as any)?.message || "Failed to revoke session"}</p>
-        )}
-      </div>
+      {activeTab === "sessions" && (
+        <DataTable columns={sessionCols} rows={sessionList} loading={sessionsLoading}
+          emptyState={<EmptyState icon={Monitor} title="No active sessions" />}
+        />
+      )}
 
-      <div className="bg-[#1A1D24] border border-[#262A33] rounded-lg p-6">
-        <div className="flex items-center gap-3 mb-4">
-          <Lock className="w-5 h-5 text-[#4F7CFF]" />
-          <h3 className="text-lg font-medium text-white">Change Password</h3>
+      {/* Add rule dialog */}
+      <Dialog open={showAddRule} onClose={() => setShowAddRule(false)} title="Add Firewall Rule"
+        footer={<><Button variant="ghost" onClick={() => setShowAddRule(false)}>Cancel</Button><Button variant="primary" loading={addRuleMutation.isPending} disabled={!ruleForm.ip_range} onClick={() => addRuleMutation.mutate(ruleForm)}>Add</Button></>}
+      >
+        <div className="space-y-4">
+          <div><label className="block text-sm text-[var(--text-secondary)] mb-1">Type</label><select value={ruleForm.type} onChange={(e) => setRuleForm({ ...ruleForm, type: e.target.value as "allow" | "block" })} className="orvix-select"><option value="allow">Allow</option><option value="block">Block</option></select></div>
+          <div><label className="block text-sm text-[var(--text-secondary)] mb-1">IP Range *</label><input value={ruleForm.ip_range} onChange={(e) => setRuleForm({ ...ruleForm, ip_range: e.target.value })} placeholder="192.168.1.0/24" className="orvix-input" /></div>
+          <div><label className="block text-sm text-[var(--text-secondary)] mb-1">Description</label><input value={ruleForm.description} onChange={(e) => setRuleForm({ ...ruleForm, description: e.target.value })} placeholder="Why this rule?" className="orvix-input" /></div>
         </div>
-        <div className="space-y-3">
-          <div>
-            <label className="block text-sm text-gray-400 mb-1">Current Password</label>
-            <input type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)}
-              className="w-full px-3 py-2 bg-[#0C0E12] border border-[#2A2F3E] rounded text-white text-sm" />
-          </div>
-          <div>
-            <label className="block text-sm text-gray-400 mb-1">New Password</label>
-            <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)}
-              className="w-full px-3 py-2 bg-[#0C0E12] border border-[#2A2F3E] rounded text-white text-sm" />
-          </div>
-          <button onClick={() => changePassword.mutate()}
-            disabled={changePassword.isPending || !currentPassword || !newPassword}
-            className="flex items-center gap-2 bg-[#4F7CFF] text-white rounded px-4 py-2 text-sm hover:bg-[#3D6AE8] disabled:opacity-50">
-            <Lock className="w-4 h-4" /> {changePassword.isPending ? "Changing..." : "Update Password"}
-          </button>
-          {changePassword.isSuccess && <p className="text-[#34D399] text-sm">Password updated.</p>}
-          {changePassword.error && <p className="text-[#F87171] text-sm">{(changePassword.error as any)?.message || "Failed to update password"}</p>}
-        </div>
-      </div>
+      </Dialog>
 
-      <div className="bg-[#1A1D24] border border-[#262A33] rounded-lg p-6">
-        <div className="flex items-center gap-3 mb-4">
-          <Shield className="w-5 h-5 text-[#4F7CFF]" />
-          <h3 className="text-lg font-medium text-white">Two-Factor Authentication</h3>
-        </div>
+      {/* Delete rule */}
+      <Dialog open={!!showDeleteRule} onClose={() => setShowDeleteRule(null)} title="Delete Rule"
+        description={`Delete rule for ${showDeleteRule?.ip_range}?`}
+        footer={<><Button variant="ghost" onClick={() => setShowDeleteRule(null)}>Cancel</Button><Button variant="danger" loading={deleteRuleMutation.isPending} onClick={() => showDeleteRule && deleteRuleMutation.mutate(showDeleteRule.id)}>Delete</Button></>}
+      />
 
-        {mfaStatus ? (
-          <div className="space-y-4">
-            <div className="flex items-center gap-2">
-              <span className={`px-2 py-1 text-xs rounded-full ${
-                mfaStatus.enabled ? "bg-[#34D399]/10 text-[#34D399]" : "bg-[#FBBF24]/10 text-[#FBBF24]"
-              }`}>
-                {mfaStatus.enabled ? "Enabled" : "Disabled"}
-              </span>
-              {mfaStatus.label && <span className="text-xs text-[#8B92A8]">({mfaStatus.label})</span>}
-            </div>
-
-            {!mfaStatus.enabled && !showSetup && (
-              <button onClick={() => mfaBegin.mutate()}
-                disabled={mfaBegin.isPending || !currentPassword}
-                className="flex items-center gap-2 bg-[#4F7CFF] text-white rounded px-4 py-2 text-sm hover:bg-[#3D6AE8] disabled:opacity-50">
-                <Shield className="w-4 h-4" /> Setup MFA
-              </button>
-            )}
-
-            {showSetup && (
-              <div className="space-y-3 bg-[#0C0E12] rounded p-4">
-                {qrError ? (
-                  <p className="text-sm text-[#F87171]">QR code could not be rendered. Use the manual secret below.</p>
-                ) : (
-                  <>
-                    <p className="text-sm text-[#E8EAF0]">Scan this QR code with your authenticator app:</p>
-                    <canvas ref={qrCanvasRef} className="mx-auto bg-white p-1 rounded" width="200" height="200" />
-                  </>
-                )}
-                <details>
-                  <summary className="text-xs text-[#8B92A8] cursor-pointer hover:text-[#E8EAF0]">Enter secret manually</summary>
-                  <p className="text-xs font-mono text-[#4F7CFF] bg-[#13161C] p-2 rounded break-all mt-1">{mfaSecret}</p>
-                </details>
-                <div>
-                  <label className="block text-sm text-gray-400 mb-1">Verification Code</label>
-                  <input value={mfaSetupCode} onChange={(e) => setMfaSetupCode(e.target.value)} placeholder="000000"
-                    className="w-full px-3 py-2 bg-[#13161C] border border-[#2A2F3E] rounded text-white text-sm"
-                    maxLength={6} />
-                </div>
-                <button onClick={() => mfaVerify.mutate()}
-                  disabled={mfaVerify.isPending || mfaSetupCode.length !== 6}
-                  className="flex items-center gap-2 bg-[#34D399] text-[#0C0E12] rounded px-4 py-2 text-sm hover:bg-[#2CC48A] disabled:opacity-50 font-medium">
-                  <Check className="w-4 h-4" /> Verify & Enable
-                </button>
-              </div>
-            )}
-
-            {mfaStatus.enabled && (
-              <div className="space-y-3 bg-[#0C0E12] rounded p-4">
-                <div className="flex items-center gap-2 text-sm">
-                  <AlertTriangle size={14} className="text-[#FBBF24]" />
-                  <span className="text-[#8B92A8]">To disable MFA, enter your password and a current code:</span>
-                </div>
-                <input value={mfaSetupCode} onChange={(e) => setMfaSetupCode(e.target.value)} placeholder="MFA code"
-                  className="w-full px-3 py-2 bg-[#13161C] border border-[#2A2F3E] rounded text-white text-sm"
-                  maxLength={6} />
-                <button onClick={() => mfaDisable.mutate()}
-                  disabled={mfaDisable.isPending || !currentPassword || mfaSetupCode.length !== 6}
-                  className="flex items-center gap-2 bg-[#F87171] text-white rounded px-4 py-2 text-sm hover:bg-[#E05555] disabled:opacity-50">
-                  <X className="w-4 h-4" /> Disable MFA
-                </button>
-              </div>
-            )}
-
-            {mfaBegin.error && <p className="text-[#F87171] text-sm">{(mfaBegin.error as any)?.message || "Failed to begin MFA setup"}</p>}
-            {mfaVerify.error && <p className="text-[#F87171] text-sm">{(mfaVerify.error as any)?.message || "Invalid verification code"}</p>}
-            {mfaDisable.error && <p className="text-[#F87171] text-sm">{(mfaDisable.error as any)?.message || "Failed to disable MFA"}</p>}
-          </div>
-        ) : (
-          <p className="text-[#8B92A8] text-sm">Loading MFA status...</p>
-        )}
-      </div>
+      {/* Terminate session */}
+      <Dialog open={!!showTerminate} onClose={() => setShowTerminate(null)} title="Terminate Session"
+        description={`Terminate session for ${showTerminate?.user_email}?`}
+        footer={<><Button variant="ghost" onClick={() => setShowTerminate(null)}>Cancel</Button><Button variant="danger" loading={terminateMutation.isPending} onClick={() => showTerminate && terminateMutation.mutate(showTerminate.id)}>Terminate</Button></>}
+      />
     </div>
   );
 }

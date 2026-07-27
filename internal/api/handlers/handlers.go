@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/mail"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -2660,6 +2661,69 @@ func (h *Handler) DeleteUser(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"status": "deleted"})
 }
 
+// UpdateUserStatus updates a user's active status (suspend/activate).
+func (h *Handler) UpdateUserStatus(c fiber.Ctx) error {
+	if !isSuperRole(c) {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "super admin role required"})
+	}
+	id := c.Params("id")
+	if id == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "user id required"})
+	}
+
+	var req struct {
+		Status string `json:"status"`
+	}
+	if err := c.Bind().JSON(&req); err != nil || req.Status == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "status is required"})
+	}
+	if req.Status != "active" && req.Status != "suspended" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "status must be 'active' or 'suspended'"})
+	}
+
+	var currentActive bool
+	if err := h.db.Table("users").Select("active").Where("id = ?", id).Scan(&currentActive).Error; err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "user not found"})
+	}
+
+	active := req.Status == "active"
+	if err := h.db.Table("users").Where("id = ?", id).Update("active", active).Error; err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to update user status"})
+	}
+
+	h.writeAuditLog(c, "user.status", fmt.Sprintf("user:%s|status:%s", id, req.Status))
+	return c.JSON(fiber.Map{"status": "ok", "user_id": id, "active": active})
+}
+
+// UpdateUserRole changes a user's role (superadmin only).
+func (h *Handler) UpdateUserRole(c fiber.Ctx) error {
+	if !isSuperRole(c) {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "super admin role required"})
+	}
+	id := c.Params("id")
+	if id == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "user id required"})
+	}
+
+	var req struct {
+		Role string `json:"role"`
+	}
+	if err := c.Bind().JSON(&req); err != nil || req.Role == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "role is required"})
+	}
+	validRoles := map[string]bool{"admin": true, "user": true, "superadmin": true, "platform_super_admin": true}
+	if !validRoles[req.Role] {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid role"})
+	}
+
+	if err := h.db.Table("users").Where("id = ?", id).Update("role", req.Role).Error; err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to update user role"})
+	}
+
+	h.writeAuditLog(c, "user.role", fmt.Sprintf("user:%s|role:%s", id, req.Role))
+	return c.JSON(fiber.Map{"status": "ok", "user_id": id, "role": req.Role})
+}
+
 // ListQueue returns the mail queue with safe fields only.
 func (h *Handler) ListQueue(c fiber.Ctx) error {
 	type queueEntry struct {
@@ -3055,12 +3119,39 @@ func (h *Handler) ValidateLicense(c fiber.Ctx) error {
 // ListAuditLogs returns audit log entries with safe fields only.
 func (h *Handler) ListAuditLogs(c fiber.Ctx) error {
 	if h.auditStore == nil {
-		return c.JSON([]struct{}{})
+		return c.JSON(struct{}{})
 	}
-	logs, _, err := h.auditStore.Search(c.Context(), &audit.Query{Limit: 100})
+	q := &audit.Query{Limit: 100}
+	if action := c.Query("action"); action != "" {
+		q.Action = action
+	}
+	if actor := c.Query("actor"); actor != "" {
+		q.Actor = actor
+	}
+	if since := c.Query("from"); since != "" {
+		if t, err := time.Parse(time.RFC3339, since); err == nil {
+			q.Since = &t
+		}
+	}
+	if until := c.Query("to"); until != "" {
+		if t, err := time.Parse(time.RFC3339, until); err == nil {
+			q.Until = &t
+		}
+	}
+	if limit := c.Query("limit"); limit != "" {
+		if n, err := strconv.Atoi(limit); err == nil && n > 0 && n <= 500 {
+			q.Limit = n
+		}
+	}
+	if offset := c.Query("offset"); offset != "" {
+		if n, err := strconv.Atoi(offset); err == nil && n >= 0 {
+			q.Offset = n
+		}
+	}
+	logs, total, err := h.auditStore.Search(c.Context(), q)
 	if err != nil {
 		h.logger.Error("failed to list audit logs", zap.Error(err))
-		return c.JSON([]struct{}{})
+		return c.JSON(fiber.Map{"logs": []struct{}{}, "total": 0})
 	}
 	type safeEntry struct {
 		ID        int64  `json:"id"`
@@ -3084,7 +3175,7 @@ func (h *Handler) ListAuditLogs(c fiber.Ctx) error {
 	if result == nil {
 		result = []safeEntry{}
 	}
-	return c.JSON(result)
+	return c.JSON(fiber.Map{"logs": result, "total": total})
 }
 
 // AdminSummary returns aggregate counts for the admin dashboard.

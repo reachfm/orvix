@@ -202,11 +202,60 @@ export const api = {
   // Platform admin summary/users/firewall/modules (superadmin/admin scope,
   // distinct from the tenant-scoped /enterprise/* endpoints above)
   getAdminSummary: () => request<any>("/admin/summary"),
-  listPlatformUsers: () => request<any[]>("/users"),
   deleteUser: (userId: number) => request(`/users/${userId}`, { method: "DELETE" }),
   listFirewallRules: () => request<any[]>("/firewall/rules"),
   listFirewallLogs: () => request<any[]>("/firewall/logs"),
+  addFirewallRule: (data: any) => request<any>("/firewall/rules", { method: "POST", body: JSON.stringify(data) }),
+  deleteFirewallRule: (id: number) => request(`/firewall/rules/${id}`, { method: "DELETE" }),
   listModules: () => request<any[]>("/modules"),
+
+  // Platform Mailboxes (superadmin/admin cross-tenant)
+  listPlatformMailboxes: (params?: { q?: string; status?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.q) qs.set("q", params.q);
+    if (params?.status) qs.set("status", params.status);
+    const str = qs.toString();
+    return request<any>(`/admin/mailboxes${str ? "?" + str : ""}`);
+  },
+  getAdminMailbox: (id: number) => request<any>(`/admin/mailboxes/${id}`),
+  updateAdminMailboxStatus: (id: number, status: string) =>
+    request<any>(`/admin/mailboxes/${id}/status`, { method: "PATCH", body: JSON.stringify({ status }) }),
+  deleteAdminMailbox: (id: number) =>
+    request(`/admin/mailboxes/${id}`, { method: "DELETE" }),
+  createPlatformMailbox: (data: any) =>
+    request<any>("/admin/mailboxes", { method: "POST", body: JSON.stringify(data) }),
+
+  // Platform Domains (superadmin/admin cross-tenant)
+  listAdminDomains: (params?: { page?: number; page_size?: number; search?: string; status?: string; tenant_id?: number }) => {
+    const q = new URLSearchParams();
+    if (params?.page) q.set("page", String(params.page));
+    if (params?.page_size) q.set("page_size", String(params.page_size));
+    if (params?.search) q.set("q", params.search);
+    if (params?.status) q.set("status", params.status);
+    if (params?.tenant_id) q.set("tenant_id", String(params.tenant_id));
+    const qs = q.toString();
+    return request<any>(`/admin/domains${qs ? "?" + qs : ""}`);
+  },
+  getAdminDomain: (name: string) => request<any>(`/admin/domains/${name}`),
+  updateAdminDomainStatus: (name: string, data: { status?: string }) =>
+    request<any>(`/admin/domains/${name}/status`, { method: "PATCH", body: JSON.stringify(data) }),
+  getAdminDomainAudit: (name: string) => request<any>(`/admin/domains/${name}/audit`),
+
+  // Platform Users (superadmin)
+  listPlatformUsers: (params?: { q?: string; role?: string; status?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.q) qs.set("q", params.q);
+    if (params?.role) qs.set("role", params.role);
+    if (params?.status) qs.set("status", params.status);
+    const str = qs.toString();
+    return request<any>(`/admin/users${str ? "?" + str : ""}`);
+  },
+  getUser: (id: number) => request<any>(`/admin/users/${id}`),
+  updateUserStatus: (id: number, status: string) =>
+    request<any>(`/admin/users/${id}/status`, { method: "PATCH", body: JSON.stringify({ status }) }),
+  updateUserRole: (id: number, role: string) =>
+    request<any>(`/admin/users/${id}/role`, { method: "PATCH", body: JSON.stringify({ role }) }),
+  deletePlatformUser: (id: number) => request(`/admin/users/${id}`, { method: "DELETE" }),
 
   // Invoices
   listInvoices: () => request<any[]>("/enterprise/billing/invoices"),
@@ -214,11 +263,28 @@ export const api = {
 
   // Audit logs
   listAuditLogs: () => request<any[]>("/enterprise/audit/logs"),
+  listAdminAuditLogs: (params?: { page?: number; limit?: number; action?: string; actor?: string; from?: string; to?: string }) => {
+    const q = new URLSearchParams();
+    if (params?.page) q.set("offset", String((params.page - 1) * (params.limit || 50)));
+    if (params?.limit) q.set("limit", String(params.limit));
+    if (params?.action) q.set("action", params.action);
+    if (params?.actor) q.set("actor", params.actor);
+    if (params?.from) q.set("from", params.from);
+    if (params?.to) q.set("to", params.to);
+    const str = q.toString();
+    return request<any>(`/audit/logs${str ? "?" + str : ""}`);
+  },
 
   // Sessions
   listSessions: () => request<any>("/account/sessions"),
   revokeSession: (id: string) =>
     request(`/account/sessions/${id}/revoke`, { method: "POST" }),
+
+  // Enterprise API Keys (tenant-scoped)
+  listEnterpriseApiKeys: () => request<any[]>("/enterprise/api-keys"),
+  createEnterpriseApiKey: (data: { name: string; scopes?: string[]; ttl?: string }) =>
+    request<any>("/enterprise/api-keys", { method: "POST", body: JSON.stringify(data) }),
+  revokeEnterpriseApiKey: (id: number) => request(`/enterprise/api-keys/${id}`, { method: "DELETE" }),
 
   // MFA
   getMFAStatus: () => request<any>("/account/mfa/status"),
@@ -230,6 +296,27 @@ export const api = {
     request("/account/mfa/disable", { method: "POST", body: JSON.stringify(data) }),
   regenerateRecoveryCodes: (data: { current_password: string; code?: string }) =>
     request("/account/mfa/recovery-codes/regenerate", { method: "POST", body: JSON.stringify(data) }),
+
+  // Platform Organizations (superadmin only)
+  listPlatformOrganizations: (params?: { page?: number; page_size?: number; search?: string; status?: string }) => {
+    const q = new URLSearchParams();
+    if (params?.page) q.set("page", String(params.page));
+    if (params?.page_size) q.set("page_size", String(params.page_size));
+    if (params?.search) q.set("search", params.search);
+    if (params?.status) q.set("status", params.status);
+    const qs = q.toString();
+    return request<any>(`/platform/organizations${qs ? "?" + qs : ""}`);
+  },
+  createPlatformOrganization: (data: any) =>
+    request<any>("/platform/organizations", { method: "POST", body: JSON.stringify(data) }),
+  getPlatformOrganization: (id: number) =>
+    request<any>(`/platform/organizations/${id}`),
+  updatePlatformOrganization: (id: number, data: any) =>
+    request<any>(`/platform/organizations/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+  setPlatformOrganizationActive: (id: number, data: { active: boolean; reason?: string }) =>
+    request<any>(`/platform/organizations/${id}/active`, { method: "POST", body: JSON.stringify(data) }),
+  getPlatformOrganizationDetail: (id: number) =>
+    request<any>(`/platform/organizations/${id}/detail`),
 
   // Forgot/reset password
   forgotPassword: (email: string) =>

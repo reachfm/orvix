@@ -1256,6 +1256,8 @@ func (r *Router) setupRoutes() {
 	men.Post("/mailboxes/import/dry-run", r.h.ImportMailboxesDryRun)
 	men.Post("/domains/bulk/status", r.h.BulkDomainStatus)
 	men.Delete("/mailboxes/:id", r.h.DeleteMailbox)
+	men.Patch("/users/:id/status", r.h.UpdateUserStatus)
+	men.Patch("/users/:id/role", r.h.UpdateUserRole)
 	men.Delete("/users/:id", r.h.DeleteUser)
 	men.Delete("/queue/:id", r.h.DeleteQueue)
 	men.Post("/queue/:id/retry", r.h.RetryQueue)
