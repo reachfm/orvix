@@ -944,6 +944,11 @@ func (r *Router) setupRoutes() {
 	canWriteDomains.Post("/domains", r.h.CreateAdminDomain)
 	canWriteDomains.Patch("/domains/:id", r.h.UpdateAdminDomain)
 	canWriteDomains.Post("/domains/:id/status", r.h.SetAdminDomainStatus)
+	canWriteDomains.Delete("/domains/:id", r.h.DeleteAdminDomain)
+	enterpriseRead.Get("/domains/:id/dkim", r.h.GetAdminDomainDKIM)
+	canWriteDomains.Post("/domains/:id/dkim/generate", r.h.PostAdminDomainDKIMGenerate)
+	canWriteDomains.Post("/domains/:id/dkim/rotate", r.h.PostAdminDomainDKIMRotate)
+	enterpriseRead.Post("/domains/:id/verify", r.h.VerifyEnterpriseDomain)
 
 	// ── Mailboxes ──
 	enterpriseRead.Get("/mailboxes", r.h.ListAdminMailboxes)
@@ -1256,6 +1261,7 @@ func (r *Router) setupRoutes() {
 	men.Post("/mailboxes/import/dry-run", r.h.ImportMailboxesDryRun)
 	men.Post("/domains/bulk/status", r.h.BulkDomainStatus)
 	men.Delete("/mailboxes/:id", r.h.DeleteMailbox)
+	men.Patch("/users/:id/status", r.h.UpdateUserStatus)
 	men.Delete("/users/:id", r.h.DeleteUser)
 	men.Delete("/queue/:id", r.h.DeleteQueue)
 	men.Post("/queue/:id/retry", r.h.RetryQueue)
@@ -1297,7 +1303,7 @@ func (r *Router) setupRoutes() {
 	platform.Get("/dashboard", r.h.PlatformDashboard)
 	platform.Get("/organizations", r.h.ListPlatformOrganizations)
 	platform.Get("/organizations/:id", r.h.GetPlatformOrganization)
-	platform.Post("/organizations", r.h.CreateOrganization)
+	platform.Post("/organizations", r.h.CreatePlatformOrganization)
 	platform.Patch("/organizations/:id", r.h.UpdateOrganization)
 	platform.Post("/organizations/:id/active", r.h.SetOrganizationActive)
 	platform.Get("/organizations/:id/detail", r.h.GetOrganizationDetail)

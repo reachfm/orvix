@@ -1,6 +1,9 @@
 package handlers
 
 import (
+	"database/sql"
+	"strings"
+
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/admin/mailbox"
 	"github.com/orvix/orvix/internal/auth"
@@ -115,7 +118,55 @@ func (h *Handler) CreateAdminMailbox(c fiber.Ctx) error {
 		}
 	}
 
+	// Extract domain from email and validate domain eligibility
+	parts := strings.SplitN(req.Email, "@", 2)
+	if len(parts) != 2 || parts[1] == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid email address"})
+	}
+	domainName := parts[1]
+
 	var domainID uint
+	var domainStatus string
+	var domainTenantID uint
+	var deletedAt *string
+
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
+	}
+
+	err = sqlDB.QueryRow(
+		"SELECT id, tenant_id, status, deleted_at FROM coremail_domains WHERE name = "+h.dialect.Placeholder(1),
+		domainName,
+	).Scan(&domainID, &domainTenantID, &domainStatus, &deletedAt)
+	if err == sql.ErrNoRows {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "DOMAIN_NOT_FOUND", "domain": domainName})
+	}
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
+	}
+
+	// Check domain not deleted
+	if deletedAt != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "DOMAIN_NOT_FOUND", "domain": domainName})
+	}
+
+	// Check domain belongs to the same tenant
+	if domainTenantID != tenantID {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "DOMAIN_FORBIDDEN", "domain": domainName})
+	}
+
+	// Check domain is active
+	if domainStatus != "active" {
+		if domainStatus == "disabled" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "DOMAIN_DISABLED", "domain": domainName})
+		}
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "DOMAIN_NOT_ACTIVE", "domain": domainName})
+	}
+
+	// Check if domain has DNS verification status (if supported)
+	var dnsStatus string
+	sqlDB.QueryRow("SELECT COALESCE(dns_verification_status, '') FROM coremail_domains WHERE id = "+h.dialect.Placeholder(1), domainID).Scan(&dnsStatus)
 
 	resp, err := h.mailboxAdminSvc.CreateMailbox(c.Context(), req, tenantID, domainID)
 	if err != nil {
@@ -125,7 +176,7 @@ func (h *Handler) CreateAdminMailbox(c fiber.Ctx) error {
 		if err == mailbox.ErrInvalidEmail {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid email"})
 		}
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
 
 	status := fiber.StatusCreated

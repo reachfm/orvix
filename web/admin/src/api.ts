@@ -118,6 +118,20 @@ export const api = {
   listDomainsEnterprise: () => request<any>("/enterprise/domains"),
   createDomainEnterprise: (data: any) =>
     request("/enterprise/domains", { method: "POST", body: JSON.stringify(data) }),
+  updateDomainEnterprise: (id: number, data: any) =>
+    request(`/enterprise/domains/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+  setDomainEnterpriseStatus: (id: number, status: string, reason?: string) =>
+    request(`/enterprise/domains/${id}/status`, { method: "POST", body: JSON.stringify({ status, reason: reason || "" }) }),
+  deleteDomainEnterprise: (id: number) =>
+    request(`/enterprise/domains/${id}`, { method: "DELETE" }),
+  getDomainDKIM: (id: number) =>
+    request<any>(`/enterprise/domains/${id}/dkim`),
+  generateDomainDKIM: (id: number, selector?: string) =>
+    request(`/enterprise/domains/${id}/dkim/generate`, { method: "POST", body: JSON.stringify({ selector: selector || "mail" }) }),
+  rotateDomainDKIM: (id: number, selector?: string) =>
+    request(`/enterprise/domains/${id}/dkim/rotate`, { method: "POST", body: JSON.stringify({ selector: selector || "mail" }) }),
+  verifyDomainEnterprise: (id: number) =>
+    request(`/enterprise/domains/${id}/verify`, { method: "POST" }),
   listMailboxes: () => request<any>("/enterprise/mailboxes"),
   createMailbox: (data: any) =>
     request("/enterprise/mailboxes", { method: "POST", body: JSON.stringify(data) }),
@@ -198,15 +212,54 @@ export const api = {
 
   // Dashboard
   getDashboard: () => request<any>("/enterprise/dashboard"),
+  getPlatformDashboard: () => request<any>("/platform/dashboard"),
 
   // Platform admin summary/users/firewall/modules (superadmin/admin scope,
   // distinct from the tenant-scoped /enterprise/* endpoints above)
   getAdminSummary: () => request<any>("/admin/summary"),
   listPlatformUsers: () => request<any[]>("/users"),
   deleteUser: (userId: number) => request(`/users/${userId}`, { method: "DELETE" }),
+  updateUserStatus: (userId: number, status: "active" | "suspended") =>
+    request(`/users/${userId}/status`, { method: "PATCH", body: JSON.stringify({ status }) }),
   listFirewallRules: () => request<any[]>("/firewall/rules"),
   listFirewallLogs: () => request<any[]>("/firewall/logs"),
   listModules: () => request<any[]>("/modules"),
+
+  // Admin mailboxes (cross-tenant for superadmins, uses /mailboxes admin endpoint)
+  listAdminMailboxes: (q?: string, status?: string) => {
+    const params = new URLSearchParams();
+    if (q) params.set("q", q);
+    if (status) params.set("status", status);
+    const qs = params.toString();
+    return request<any>(`/mailboxes${qs ? "?" + qs : ""}`);
+  },
+  adminCreateMailbox: (data: { email: string; password: string; quota_mb?: number }) =>
+    request<any>("/mailboxes", { method: "POST", body: JSON.stringify(data) }),
+  adminUpdateMailboxStatus: (id: number, status: "active" | "suspended") =>
+    request<any>(`/mailboxes/${id}/status`, { method: "PATCH", body: JSON.stringify({ status }) }),
+  adminDeleteMailbox: (id: number) => request(`/mailboxes/${id}`, { method: "DELETE" }),
+
+  // Admin domains (cross-tenant for superadmins, uses /domains admin endpoint)
+  listAdminDomains: (q?: string) => {
+    const params = new URLSearchParams();
+    if (q) params.set("q", q);
+    const qs = params.toString();
+    return request<any[]>(`/domains${qs ? "?" + qs : ""}`);
+  },
+
+  // Platform organizations
+  listPlatformOrganizations: (search?: string, limit?: number, offset?: number) => {
+    const params = new URLSearchParams();
+    if (search) params.set("search", search);
+    if (limit !== undefined) params.set("limit", String(limit));
+    if (offset !== undefined) params.set("offset", String(offset));
+    const qs = params.toString();
+    return request<any>(`/platform/organizations${qs ? "?" + qs : ""}`);
+  },
+  createPlatformOrganization: (data: { name: string; slug: string; domain: string; plan?: string }) =>
+    request<any>("/platform/organizations", { method: "POST", body: JSON.stringify(data) }),
+  setPlatformOrganizationActive: (id: number, active: boolean, reason?: string) =>
+    request<any>(`/platform/organizations/${id}/active`, { method: "POST", body: JSON.stringify({ active, reason: reason || "" }) }),
 
   // Invoices
   listInvoices: () => request<any[]>("/enterprise/billing/invoices"),

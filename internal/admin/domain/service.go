@@ -2,12 +2,16 @@ package domain
 
 import (
 	"context"
+	"crypto/rsa"
+	"crypto/x509"
 	"database/sql"
+	"encoding/pem"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/orvix/orvix/internal/audit"
+	"github.com/orvix/orvix/internal/coremail/dkim"
 	"github.com/orvix/orvix/internal/dbdialect"
 	entrbac "github.com/orvix/orvix/internal/enterprise/rbac"
 )
@@ -173,6 +177,114 @@ func (r *DomainAdminRepo) CountByTenant(ctx context.Context, tenantID uint) (int
 	return count, err
 }
 
+func (r *DomainAdminRepo) GetByName(ctx context.Context, name string, tenantID uint) (*AdminDomain, error) {
+	row := r.db.QueryRowContext(ctx,
+		`SELECT d.id, d.tenant_id, d.name, d.status, COALESCE(d.plan,''), COALESCE(d.description,''),
+			d.max_mailboxes, d.max_aliases, d.max_quota_mb,
+			d.dkim_enabled, COALESCE(d.dkim_selector,'mail'), d.dmarc_enabled,
+			COALESCE((SELECT COUNT(*) FROM coremail_mailboxes m WHERE m.domain_id=d.id AND m.deleted_at IS NULL),0),
+			COALESCE((SELECT COUNT(*) FROM coremail_aliases a WHERE a.domain_id=d.id AND a.deleted_at IS NULL),0),
+			d.created_at, d.updated_at
+		FROM coremail_domains d WHERE d.name = `+r.dialect.Placeholder(1)+` AND d.tenant_id = `+r.dialect.Placeholder(2)+` AND d.deleted_at IS NULL`, name, tenantID)
+	return scanAdminDomain(row)
+}
+
+func (r *DomainAdminRepo) DeleteByID(ctx context.Context, id, tenantID uint) error {
+	now := time.Now().UTC()
+	_, err := r.db.ExecContext(ctx,
+		"UPDATE coremail_domains SET deleted_at="+r.dialect.Placeholder(1)+", updated_at="+r.dialect.Placeholder(2)+" WHERE id="+r.dialect.Placeholder(3)+" AND tenant_id="+r.dialect.Placeholder(4)+" AND deleted_at IS NULL",
+		now, now, id, tenantID)
+	return err
+}
+
+func (r *DomainAdminRepo) CountMailboxesByDomain(ctx context.Context, domainID, tenantID uint) (int64, error) {
+	var count int64
+	err := r.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM coremail_mailboxes WHERE domain_id="+r.dialect.Placeholder(1)+" AND tenant_id="+r.dialect.Placeholder(2)+" AND deleted_at IS NULL", domainID, tenantID).Scan(&count)
+	return count, err
+}
+
+func (r *DomainAdminRepo) CountAliasesByDomain(ctx context.Context, domainID, tenantID uint) (int64, error) {
+	var count int64
+	err := r.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM coremail_aliases WHERE domain_id="+r.dialect.Placeholder(1)+" AND tenant_id="+r.dialect.Placeholder(2)+" AND deleted_at IS NULL", domainID, tenantID).Scan(&count)
+	return count, err
+}
+
+func (r *DomainAdminRepo) HasDKIMConfig(ctx context.Context, domainID uint) (bool, error) {
+	var count int64
+	err := r.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM coremail_dkim_config WHERE domain_id="+r.dialect.Placeholder(1), domainID).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (r *DomainAdminRepo) GetDomainNameByID(ctx context.Context, domainID, tenantID uint) (string, error) {
+	var name string
+	err := r.db.QueryRowContext(ctx,
+		"SELECT name FROM coremail_domains WHERE id="+r.dialect.Placeholder(1)+" AND tenant_id="+r.dialect.Placeholder(2)+" AND deleted_at IS NULL", domainID, tenantID).Scan(&name)
+	if err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
+func (r *DomainAdminRepo) DeleteDKIMConfig(ctx context.Context, domainID uint) error {
+	_, err := r.db.ExecContext(ctx,
+		"DELETE FROM coremail_dkim_config WHERE domain_id="+r.dialect.Placeholder(1), domainID)
+	return err
+}
+
+func (r *DomainAdminRepo) GetDomainForVerification(ctx context.Context, domainID, tenantID uint) (*AdminDomain, error) {
+	row := r.db.QueryRowContext(ctx,
+		`SELECT d.id, d.tenant_id, d.name, d.status, COALESCE(d.plan,''), COALESCE(d.description,''),
+			d.max_mailboxes, d.max_aliases, d.max_quota_mb,
+			d.dkim_enabled, COALESCE(d.dkim_selector,'mail'), d.dmarc_enabled,
+			COALESCE((SELECT COUNT(*) FROM coremail_mailboxes m WHERE m.domain_id=d.id AND m.deleted_at IS NULL),0),
+			COALESCE((SELECT COUNT(*) FROM coremail_aliases a WHERE a.domain_id=d.id AND a.deleted_at IS NULL),0),
+			d.created_at, d.updated_at
+		FROM coremail_domains d WHERE d.id = `+r.dialect.Placeholder(1)+` AND d.tenant_id = `+r.dialect.Placeholder(2)+` AND d.deleted_at IS NULL`, domainID, tenantID)
+	return scanAdminDomain(row)
+}
+
+func (r *DomainAdminRepo) CreateOrUpdateDKIMConfig(ctx context.Context, domainID uint, selector, privateKeyPEM, publicKeyValue string) error {
+	now := time.Now().UTC()
+	var existing int64
+	err := r.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM coremail_dkim_config WHERE domain_id="+r.dialect.Placeholder(1), domainID).Scan(&existing)
+	if err != nil {
+		return err
+	}
+	if existing > 0 {
+		_, err = r.db.ExecContext(ctx,
+			"UPDATE coremail_dkim_config SET selector="+r.dialect.Placeholder(1)+", private_key_pem="+r.dialect.Placeholder(2)+", enabled="+r.dialect.TrueLiteral()+", updated_at="+r.dialect.Placeholder(3)+" WHERE domain_id="+r.dialect.Placeholder(4),
+			selector, privateKeyPEM, now, domainID)
+		return err
+	}
+	_, err = r.db.ExecContext(ctx,
+		"INSERT INTO coremail_dkim_config (domain, domain_id, selector, private_key_pem, enabled, created_at, updated_at) VALUES ("+r.dialect.Placeholder(1)+", "+r.dialect.Placeholder(2)+", "+r.dialect.Placeholder(3)+", "+r.dialect.Placeholder(4)+", "+r.dialect.TrueLiteral()+", "+r.dialect.Placeholder(5)+", "+r.dialect.Placeholder(6)+")",
+		"", domainID, selector, privateKeyPEM, now, now)
+	return err
+}
+
+func (r *DomainAdminRepo) GetDKIMConfigForDomain(ctx context.Context, domainID uint) (selector, privateKeyPEM string, err error) {
+	err = r.db.QueryRowContext(ctx,
+		"SELECT selector, private_key_pem FROM coremail_dkim_config WHERE domain_id="+r.dialect.Placeholder(1), domainID).Scan(&selector, &privateKeyPEM)
+	if err != nil {
+		return "", "", err
+	}
+	return selector, privateKeyPEM, nil
+}
+
+func (r *DomainAdminRepo) UpdateDomainDNSStatus(ctx context.Context, domainID, tenantID uint, status string) error {
+	_, err := r.db.ExecContext(ctx,
+		"UPDATE coremail_domains SET dns_verification_status="+r.dialect.Placeholder(1)+", updated_at="+r.dialect.Placeholder(2)+" WHERE id="+r.dialect.Placeholder(3)+" AND tenant_id="+r.dialect.Placeholder(4),
+		status, time.Now().UTC(), domainID, tenantID)
+	return err
+}
+
 func (r *DomainAdminRepo) AssignDomainAdmin(ctx context.Context, domainID, userID, tenantID uint) error {
 	_, err := r.db.ExecContext(ctx,
 		"INSERT INTO coremail_admin_group_members (group_id, user_id) SELECT g.id, "+r.dialect.Placeholder(1)+" FROM coremail_admin_groups g WHERE g.tenant_id="+r.dialect.Placeholder(2)+" AND g.name='domain_admin' AND g.deleted_at IS NULL",
@@ -212,6 +324,90 @@ func (s *Service) CountByTenant(ctx context.Context, tenantID uint) (int64, erro
 	return s.repo.CountByTenant(ctx, tenantID)
 }
 
+func (s *Service) GetByName(ctx context.Context, name string, tenantID uint) (*AdminDomain, error) {
+	d, err := s.repo.GetByName(ctx, name, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	return d, nil
+}
+
+func (s *Service) CountMailboxesByDomain(ctx context.Context, domainID, tenantID uint) (int64, error) {
+	return s.repo.CountMailboxesByDomain(ctx, domainID, tenantID)
+}
+
+func (s *Service) CountAliasesByDomain(ctx context.Context, domainID, tenantID uint) (int64, error) {
+	return s.repo.CountAliasesByDomain(ctx, domainID, tenantID)
+}
+
+func (s *Service) HasDKIMConfig(ctx context.Context, domainID uint) (bool, error) {
+	return s.repo.HasDKIMConfig(ctx, domainID)
+}
+
+func (s *Service) GetDomainNameByID(ctx context.Context, domainID, tenantID uint) (string, error) {
+	return s.repo.GetDomainNameByID(ctx, domainID, tenantID)
+}
+
+func (s *Service) DeleteDomain(ctx context.Context, id, tenantID uint) error {
+	d, err := s.repo.GetByID(ctx, id, tenantID)
+	if err != nil {
+		return err
+	}
+	if d == nil {
+		return ErrDomainNotFound
+	}
+
+	// Check mailbox dependencies
+	mbCount, err := s.repo.CountMailboxesByDomain(ctx, id, tenantID)
+	if err != nil {
+		return err
+	}
+	if mbCount > 0 {
+		return ErrDomainHasMailboxes
+	}
+
+	// Check alias dependencies
+	alCount, err := s.repo.CountAliasesByDomain(ctx, id, tenantID)
+	if err != nil {
+		return err
+	}
+	if alCount > 0 {
+		return ErrDomainHasDependencies
+	}
+
+	// Perform soft delete
+	entry := &audit.ExtendedEntry{Action: "domain.deleted", Target: fmt.Sprintf("domain:%d", id), TargetID: id, TenantID: tenantID, Result: "success"}
+	if s.auditStore == nil {
+		if err := s.repo.DeleteByID(ctx, id, tenantID); err != nil {
+			return ErrDomainDeleteFailed
+		}
+		// Clean up DKIM
+		s.repo.DeleteDKIMConfig(ctx, id)
+		return nil
+	}
+
+	tx, err := s.repo.BeginTx(ctx)
+	if err != nil {
+		return ErrDomainDeleteFailed
+	}
+	defer tx.Rollback()
+
+	repo := s.repo.WithTx(tx)
+	if err := repo.DeleteByID(ctx, id, tenantID); err != nil {
+		return ErrDomainDeleteFailed
+	}
+	if err := s.auditStore.RecordTx(ctx, tx, entry); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return ErrDomainDeleteFailed
+	}
+
+	// Clean up DKIM outside transaction (separate concern)
+	s.repo.DeleteDKIMConfig(ctx, id)
+	return nil
+}
+
 func (s *Service) CreateDomain(ctx context.Context, req CreateDomainRequest, tenantID uint) (*AdminDomain, error) {
 	d := &AdminDomain{
 		TenantID:     tenantID,
@@ -234,6 +430,92 @@ func (s *Service) CreateDomain(ctx context.Context, req CreateDomainRequest, ten
 		return nil, err
 	}
 	return created, nil
+}
+
+type DKIMResult struct {
+	Selector      string `json:"selector"`
+	PublicDNSTxt  string `json:"public_dns_txt"`
+	DNSRecordName string `json:"dns_record_name"`
+}
+
+func (s *Service) GenerateDKIM(ctx context.Context, id, tenantID uint, selector string) (*DKIMResult, error) {
+	d, err := s.repo.GetByID(ctx, id, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if d == nil {
+		return nil, ErrDomainNotFound
+	}
+
+	if selector == "" {
+		selector = "mail"
+	}
+
+	privPEM, _, err := dkim.GenerateKeyPair(selector, d.Name)
+	if err != nil {
+		return nil, fmt.Errorf("dkim keygen: %w", err)
+	}
+
+	pubKey, ok := deriveDKIMPublicKey(privPEM)
+	if !ok {
+		return nil, fmt.Errorf("public key derivation failed")
+	}
+
+	dnsName, dnsValue := dkim.GenerateDNSRecord(selector, d.Name, pubKey)
+
+	if err := s.repo.CreateOrUpdateDKIMConfig(ctx, id, selector, privPEM, pubKey); err != nil {
+		return nil, fmt.Errorf("save dkim config: %w", err)
+	}
+
+	// Audit
+	entry := &audit.ExtendedEntry{Action: "domain.dkim.generated", Target: fmt.Sprintf("domain:%d", id), TargetID: id, TenantID: tenantID, Result: "success"}
+	if s.auditStore != nil {
+		s.auditStore.Record(ctx, entry)
+	}
+
+	// Mark DNS verification as pending
+	s.repo.UpdateDomainDNSStatus(ctx, id, tenantID, "pending")
+
+	return &DKIMResult{
+		Selector:      selector,
+		PublicDNSTxt:  dnsValue,
+		DNSRecordName: dnsName,
+	}, nil
+}
+
+func (s *Service) RotateDKIM(ctx context.Context, id, tenantID uint, selector string) (*DKIMResult, error) {
+	return s.GenerateDKIM(ctx, id, tenantID, selector)
+}
+
+func (s *Service) GetDKIM(ctx context.Context, id, tenantID uint) (*DKIMResult, error) {
+	d, err := s.repo.GetByID(ctx, id, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if d == nil {
+		return nil, ErrDomainNotFound
+	}
+
+	dkimSel, privPEM, err := s.repo.GetDKIMConfigForDomain(ctx, id)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	pubKey, ok := deriveDKIMPublicKey(privPEM)
+	if !ok {
+		return nil, fmt.Errorf("public key derivation failed")
+	}
+
+	dnsName, dnsValue := dkim.GenerateDNSRecord(dkimSel, d.Name, pubKey)
+
+	return &DKIMResult{
+		Selector:      dkimSel,
+		PublicDNSTxt:  dnsValue,
+		DNSRecordName: dnsName,
+	}, nil
 }
 
 func (s *Service) UpdateDomain(ctx context.Context, id, tenantID uint, req UpdateDomainRequest) (*AdminDomain, error) {
@@ -319,6 +601,35 @@ func scanAdminDomain(row interface {
 	return &d, nil
 }
 
+func deriveDKIMPublicKey(privPEM string) (string, bool) {
+	block, _ := pem.Decode([]byte(privPEM))
+	if block == nil {
+		return "", false
+	}
+	keyAny, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		if k1, err1 := x509.ParsePKCS1PrivateKey(block.Bytes); err1 == nil {
+			keyAny = k1
+		} else {
+			return "", false
+		}
+	}
+	rsaKey, ok := keyAny.(*rsa.PrivateKey)
+	if !ok {
+		return "", false
+	}
+	pubBytes, err := x509.MarshalPKIXPublicKey(&rsaKey.PublicKey)
+	if err != nil {
+		return "", false
+	}
+	recordName, recordValue := dkim.GenerateDNSRecord("ignored", "ignored", string(pubBytes))
+	_ = recordName
+	if i := strings.Index(recordValue, "p="); i >= 0 {
+		return recordValue[i+2:], true
+	}
+	return "", false
+}
+
 func boolToInt(b bool) int {
 	if b {
 		return 1
@@ -326,4 +637,4 @@ func boolToInt(b bool) int {
 	return 0
 }
 
-var ErrDomainNotFound = fmt.Errorf("domain not found")
+
