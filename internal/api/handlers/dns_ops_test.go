@@ -20,15 +20,19 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/orvix/orvix/internal/dnsops/providers"
 
 	"github.com/gofiber/fiber/v3"
+	domainadminsvc "github.com/orvix/orvix/internal/admin/domain"
 	"github.com/orvix/orvix/internal/api/handlers"
+	"github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/config"
+	"github.com/orvix/orvix/internal/coremail/dkim"
 	"github.com/orvix/orvix/internal/dnsops"
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/modules"
@@ -119,6 +123,42 @@ func newDNSOpsHarness(t *testing.T) *dnsOpsHarness {
 	)`); err != nil {
 		t.Fatalf("create coremail_dkim_config: %v", err)
 	}
+	if _, err := sqlDB.Exec(`CREATE TABLE IF NOT EXISTS coremail_mailboxes (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		domain_id INTEGER NOT NULL DEFAULT 0,
+		tenant_id INTEGER NOT NULL DEFAULT 0,
+		deleted_at DATETIME
+	)`); err != nil {
+		t.Fatalf("create coremail_mailboxes: %v", err)
+	}
+	if _, err := sqlDB.Exec(`CREATE TABLE IF NOT EXISTS coremail_aliases (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		domain_id INTEGER NOT NULL DEFAULT 0,
+		tenant_id INTEGER NOT NULL DEFAULT 0,
+		deleted_at DATETIME
+	)`); err != nil {
+		t.Fatalf("create coremail_aliases: %v", err)
+	}
+	if _, err := sqlDB.Exec(`CREATE TABLE IF NOT EXISTS orvix_audit (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		actor TEXT NOT NULL DEFAULT '',
+		actor_id INTEGER NOT NULL DEFAULT 0,
+		actor_role TEXT NOT NULL DEFAULT '',
+		tenant_id INTEGER NOT NULL DEFAULT 0,
+		action TEXT NOT NULL DEFAULT '',
+		target TEXT NOT NULL DEFAULT '',
+		target_id INTEGER NOT NULL DEFAULT 0,
+		result TEXT NOT NULL DEFAULT '',
+		reason TEXT NOT NULL DEFAULT '',
+		before TEXT NOT NULL DEFAULT '',
+		after TEXT NOT NULL DEFAULT '',
+		request_id TEXT NOT NULL DEFAULT '',
+		ip TEXT NOT NULL DEFAULT '',
+		user_agent TEXT NOT NULL DEFAULT '',
+		timestamp DATETIME NOT NULL DEFAULT (datetime('now'))
+	)`); err != nil {
+		t.Fatalf("create orvix_audit: %v", err)
+	}
 	if _, err := sqlDB.Exec(`CREATE TABLE IF NOT EXISTS coremail_domains (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		name TEXT UNIQUE NOT NULL,
@@ -169,6 +209,14 @@ func newDNSOpsHarness(t *testing.T) *dnsOpsHarness {
 		}, providers.NewFakeNamecheapClient()),
 	)
 	h.SetDNSOpsService(svc)
+
+	// Wire the shared domain admin service (the same service the enterprise
+	// flow and the platform DNS-ops DKIM route delegate to). The dkim repo
+	// and the extended audit store are shared so the DNS-ops DKIM path uses
+	// exactly the same repository, transaction, and audit logic.
+	domainRepo := domainadminsvc.NewDomainAdminRepo(sqlDB)
+	domainSvc := domainadminsvc.NewService(domainRepo, dkim.NewSQLRepo(sqlDB), audit.NewExtendedStore(sqlDB), nil)
+	h.SetDomainAdminService(domainSvc)
 
 	app := fiber.New()
 	adminTok, _ := authn.GenerateAccessToken(1, auth.RoleAdmin)
@@ -866,9 +914,10 @@ func TestDNSOpsDKIMGenerateNoPrivateKeyInResponse(t *testing.T) {
 }
 
 // TestDNSOpsDKIMGenerateAuditEventCreated proves a successful
-// generation writes an audit row with the expected action and target.
-// The audit pipeline is the only durable record of who created the
-// key and when, so this contract matters for security review.
+// generation writes exactly one canonical audit row with the expected
+// action and target. The DNS-ops route delegates to the shared domain
+// DKIM service, so the action is the canonical "domain.dkim.generate"
+// (the legacy "dns.dkim.generate" action is no longer written).
 func TestDNSOpsDKIMGenerateAuditEventCreated(t *testing.T) {
 	h := newDNSOpsHarness(t)
 	defer h.close()
@@ -880,19 +929,35 @@ func TestDNSOpsDKIMGenerateAuditEventCreated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("db: %v", err)
 	}
-	var action, target string
-	row := sqlDB.QueryRow(`SELECT action, target FROM coremail_audit WHERE action = 'dns.dkim.generate' ORDER BY id DESC LIMIT 1`)
-	if err := row.Scan(&action, &target); err != nil {
-		t.Fatalf("no audit row for dns.dkim.generate; err=%v", err)
+	var action, target, after string
+	row := sqlDB.QueryRow(`SELECT action, target, after FROM orvix_audit WHERE action = 'domain.dkim.generate' ORDER BY id DESC LIMIT 1`)
+	if err := row.Scan(&action, &target, &after); err != nil {
+		t.Fatalf("no audit row for domain.dkim.generate; err=%v", err)
 	}
-	if action != "dns.dkim.generate" {
-		t.Errorf("audit action = %q, want dns.dkim.generate", action)
+	if action != "domain.dkim.generate" {
+		t.Errorf("audit action = %q, want domain.dkim.generate", action)
 	}
-	if !strings.Contains(target, "domain:example.com") || !strings.Contains(target, "selector:orvix") {
-		t.Errorf("audit target must include domain and selector; got %q", target)
+	meta := target + "|" + after
+	if !strings.Contains(after, "example.com") || !strings.Contains(after, "orvix") {
+		t.Errorf("audit metadata must include domain name and selector; target=%q after=%q", target, after)
 	}
-	if strings.Contains(target, "BEGIN") || strings.Contains(target, "PRIVATE KEY") {
-		t.Fatalf("audit target leaked the private key: %q", target)
+	if strings.Contains(meta, "BEGIN") || strings.Contains(meta, "PRIVATE KEY") {
+		t.Fatalf("audit metadata leaked the private key: %q", meta)
+	}
+	// Exactly one canonical event (no legacy duplicate).
+	var count int
+	if err := sqlDB.QueryRow(`SELECT COUNT(*) FROM orvix_audit WHERE action = 'domain.dkim.generate'`).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected exactly 1 domain.dkim.generate audit row, got %d", count)
+	}
+	var legacy int
+	if err := sqlDB.QueryRow(`SELECT COUNT(*) FROM orvix_audit WHERE action = 'dns.dkim.generate'`).Scan(&legacy); err != nil {
+		t.Fatalf("legacy count: %v", err)
+	}
+	if legacy != 0 {
+		t.Errorf("legacy dns.dkim.generate action must not be written; got %d", legacy)
 	}
 }
 
@@ -909,18 +974,20 @@ func TestDNSOpsDKIMPrivateKeyNotLogged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("db: %v", err)
 	}
-	rows, err := sqlDB.Query(`SELECT target, COALESCE(actor,'') || '|' || COALESCE(action,'') || '|' || COALESCE(result,'') FROM coremail_audit`)
-	if err != nil {
-		t.Fatalf("query audit: %v", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var t1, t2 string
-		_ = rows.Scan(&t1, &t2)
-		combined := t1 + "|" + t2
-		if strings.Contains(combined, "BEGIN") || strings.Contains(combined, "PRIVATE KEY") {
-			t.Errorf("audit row leaked the private key: %s | %s", t1, t2)
+	for _, table := range []string{"orvix_audit", "coremail_audit"} {
+		rows, err := sqlDB.Query(`SELECT target, COALESCE(actor,'') || '|' || COALESCE(action,'') || '|' || COALESCE(result,'') FROM ` + table)
+		if err != nil {
+			t.Fatalf("query audit %s: %v", table, err)
 		}
+		for rows.Next() {
+			var t1, t2 string
+			_ = rows.Scan(&t1, &t2)
+			combined := t1 + "|" + t2
+			if strings.Contains(combined, "BEGIN") || strings.Contains(combined, "PRIVATE KEY") {
+				t.Errorf("audit row leaked the private key (%s): %s | %s", table, t1, t2)
+			}
+		}
+		rows.Close()
 	}
 }
 
@@ -1279,4 +1346,56 @@ func seedDKIMRow(t *testing.T, h *dnsOpsHarness, domain, selector string) (strin
 		return "", err
 	}
 	return pubBase64, nil
+}
+
+// TestDNSOpsDKIMConcurrentGenerationDeterministic asserts that concurrent
+// DKIM generation for the same domain settles deterministically: exactly one
+// request wins (201), every loser receives a typed 409 (never a raw 500), and
+// exactly one DKIM row is persisted. The shared service performs the lookup,
+// write, domain-state update, and audit in a single transaction.
+func TestDNSOpsDKIMConcurrentGenerationDeterministic(t *testing.T) {
+	h := newDNSOpsHarness(t)
+	defer h.close()
+
+	const goroutines = 8
+	results := make([]int, goroutines)
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			code, body := h.do(t, "POST", "/api/v1/admin/dns/example.com/dkim", h.adminT, `{"selector":"orvix"}`)
+			results[idx] = code
+			if code == http.StatusInternalServerError {
+				t.Errorf("concurrent generate returned raw 500: %s", body)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	var created, conflicts int
+	for _, c := range results {
+		switch c {
+		case http.StatusCreated:
+			created++
+		case http.StatusConflict:
+			conflicts++
+		default:
+			t.Errorf("unexpected concurrent status %d", c)
+		}
+	}
+	if created != 1 {
+		t.Fatalf("exactly one concurrent generate must win, got created=%d conflicts=%d", created, conflicts)
+	}
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		t.Fatalf("db: %v", err)
+	}
+	var count int
+	if err := sqlDB.QueryRow(`SELECT COUNT(*) FROM coremail_dkim_config WHERE domain = ?`, "example.com").Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("exactly one dkim row must exist, got %d", count)
+	}
 }

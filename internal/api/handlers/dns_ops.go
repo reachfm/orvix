@@ -26,11 +26,13 @@ import (
 	"crypto/x509"
 	"database/sql"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	domainadminsvc "github.com/orvix/orvix/internal/admin/domain"
 	"github.com/orvix/orvix/internal/coremail/dkim"
 	"github.com/orvix/orvix/internal/dnsops"
 )
@@ -362,19 +364,6 @@ func (h *Handler) PostAdminDNSDKIM(c fiber.Ctx) error {
 	if domain == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "domain is required"})
 	}
-	// Domain existence check: refuse orphan DKIM rows for
-	// domains Orvix has not provisioned.
-	exists, err := h.domainExists(c.Context(), domain)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "domain lookup failed",
-		})
-	}
-	if !exists {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"error": fmt.Sprintf("domain %q is not provisioned in Orvix; add the domain under Domains before generating a DKIM key", domain),
-		})
-	}
 	var req struct {
 		Selector        string `json:"selector"`
 		ConfirmRotation string `json:"confirm_rotation"`
@@ -388,75 +377,27 @@ func (h *Handler) PostAdminDNSDKIM(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
-	// Check for existing DKIM row. If one exists, require explicit
-	// destructive confirmation before overwriting.
-	sqlDB, err := h.db.DB()
+
+	// Delegate the whole generate-or-rotate decision, the DKIM write, the
+	// related domain-state update, and the audit record to the single shared
+	// DKIM service transaction used by the enterprise flow. This eliminates
+	// the parallel handler-local check-then-write path and its TOCTOU race.
+	if h.domainAdminSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "domain admin service not available"})
+	}
+	result, err := h.domainAdminSvc.PlatformDKIM(c.Context(), domain, selector, req.ConfirmRotation)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "db unavailable",
-		})
-	}
-	now := time.Now().UTC()
-	var existing int64
-	row := sqlDB.QueryRowContext(c.Context(),
-		`SELECT COUNT(*) FROM coremail_dkim_config WHERE domain = `+h.dialect.Placeholder(1), domain)
-	if err := row.Scan(&existing); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "dkim lookup: " + err.Error(),
-		})
-	}
-	if existing > 0 {
-		if req.ConfirmRotation != "rotate-dkim-key" {
-			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
-				"error": "DKIM key already exists; confirm rotation to replace it",
-			})
+		if errors.Is(err, domainadminsvc.ErrDomainNotFound) {
+			return respondAPIError(c, fiber.StatusNotFound, domainadminsvc.CodeDomainNotFound,
+				fmt.Sprintf("domain %q is not provisioned in Orvix; add the domain under Domains before generating a DKIM key", domain))
 		}
+		return domainServiceError(c, err)
 	}
-	// Generate the RSA 2048 key pair. We generate AFTER the
-	// rotation check so we never waste keygen CPU on a rejected
-	// request.
-	privPEM, _, err := dkim.GenerateKeyPair(selector, domain)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "dkim keygen failed: " + err.Error(),
-		})
-	}
-	// Derive the public DNS TXT from the private key. The
-	// dkim.GenerateKeyPair already returned the DNS record, but
-	// we re-derive it via dkim.GenerateDNSRecord so the wire
-	// format matches the verifier's expectation.
-	pubKey, ok := deriveDKIMPublicKey(privPEM)
-	if !ok {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "dkim keygen succeeded but public key derivation failed",
-		})
-	}
-	dnsName, dnsValue := dkim.GenerateDNSRecord(selector, domain, pubKey)
-	// Persist to coremail_dkim_config.
-	if existing > 0 {
-		if _, err := sqlDB.ExecContext(c.Context(),
-			`UPDATE coremail_dkim_config SET selector = `+h.dialect.Placeholder(1)+`, private_key_pem = `+h.dialect.Placeholder(2)+`, enabled = `+h.dialect.TrueLiteral()+`, updated_at = `+h.dialect.Placeholder(3)+` WHERE domain = `+h.dialect.Placeholder(4),
-			selector, privPEM, now, domain); err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "dkim update: " + err.Error(),
-			})
-		}
-	} else {
-		if _, err := sqlDB.ExecContext(c.Context(),
-			`INSERT INTO coremail_dkim_config (domain, selector, private_key_pem, enabled, created_at, updated_at)`+
-				` VALUES (`+h.dialect.Placeholder(1)+`, `+h.dialect.Placeholder(2)+`, `+h.dialect.Placeholder(3)+`, `+h.dialect.TrueLiteral()+`, `+h.dialect.Placeholder(4)+`, `+h.dialect.Placeholder(5)+`)`,
-			domain, selector, privPEM, now, now); err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "dkim insert: " + err.Error(),
-			})
-		}
-	}
-	h.writeAuditLog(c, "dns.dkim.generate", fmt.Sprintf("domain:%s|selector:%s", domain, selector))
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
 		"domain":          domain,
-		"selector":        selector,
-		"public_dns_txt":  dnsValue,
-		"dns_record_name": dnsName,
+		"selector":        result.Selector,
+		"public_dns_txt":  result.PublicDNSTxt,
+		"dns_record_name": result.DNSRecordName,
 		"stored":          true,
 	})
 }

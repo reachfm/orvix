@@ -93,13 +93,13 @@ func (h *Handler) CreateAdminMailbox(c fiber.Ctx) error {
 
 	var req mailbox.CreateMailboxRequest
 	if err := c.Bind().JSON(&req); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
+		return respondAPIError(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Invalid request body.")
 	}
 	if req.Email == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "email is required"})
+		return respondAPIError(c, fiber.StatusBadRequest, "INVALID_EMAIL", "Email is required.")
 	}
 	if req.Password == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "password is required"})
+		return respondAPIError(c, fiber.StatusBadRequest, "INVALID_PASSWORD", "Password is required.")
 	}
 
 	// Quota enforcement: check mailbox limit before creating.
@@ -107,25 +107,19 @@ func (h *Handler) CreateAdminMailbox(c fiber.Ctx) error {
 		count := h.mailboxAdminSvc.CountByTenant(c.Context(), tenantID)
 		if result := h.quotaSvc.CanCreateMailbox(tenantID, int(count)); result != nil && !result.Allowed {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
-				"error":   "mailbox quota exceeded: " + result.Reason,
+				"code":    "MAILBOX_LIMIT_REACHED",
+				"message": "Mailbox limit reached for your plan.",
 				"limit":   result.Limit,
 				"used":    result.Used,
 				"allowed": false,
+				"error":   "mailbox quota exceeded: " + result.Reason,
 			})
 		}
 	}
 
-	var domainID uint
-
-	resp, err := h.mailboxAdminSvc.CreateMailbox(c.Context(), req, tenantID, domainID)
+	resp, err := h.mailboxAdminSvc.CreateMailbox(c.Context(), req, tenantID)
 	if err != nil {
-		if err == mailbox.ErrMailboxExists {
-			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "mailbox already exists"})
-		}
-		if err == mailbox.ErrInvalidEmail {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid email"})
-		}
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
+		return mailboxEligibilityError(c, err)
 	}
 
 	status := fiber.StatusCreated

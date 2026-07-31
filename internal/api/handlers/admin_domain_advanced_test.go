@@ -2,6 +2,7 @@ package handlers_test
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"net/http/httptest"
@@ -31,6 +32,7 @@ type adminDomainAdvancedEnv struct {
 	adminToken string
 	csrfToken  string
 	userToken  string
+	sqlDB      *sql.DB
 }
 
 func buildAdminDomainAdvancedEnv(t *testing.T) *adminDomainAdvancedEnv {
@@ -120,6 +122,7 @@ func buildAdminDomainAdvancedEnv(t *testing.T) *adminDomainAdvancedEnv {
 		adminToken: adminToken,
 		csrfToken:  csrfToken,
 		userToken:  userToken,
+		sqlDB:      sqlDB,
 	}
 }
 

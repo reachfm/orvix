@@ -38,7 +38,7 @@ func (s *IdentityService) Authenticate(ctx context.Context, username, password s
 	}
 
 	if password != "" {
-		if !s.engine.Auth.VerifyPassword(password, mbox.PasswordHash) {
+		if !s.engine.Auth.VerifyMailboxPassword(ctx, mbox, password) {
 			return nil, nil
 		}
 	}

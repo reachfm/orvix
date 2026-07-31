@@ -29,6 +29,7 @@ import (
 	"github.com/orvix/orvix/internal/billing"
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/coremail"
+	"github.com/orvix/orvix/internal/coremail/dkim"
 	"github.com/orvix/orvix/internal/coremail/push"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
@@ -160,8 +161,9 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 	router.csrf.SetCookieDomain(cfg.Auth.CookieDomain)
 
 	// Wire webmail management service.
+	var eng *coremail.Engine
 	if sqlDB, err := db.DB(); err == nil {
-		eng := coremail.NewEngine(coremail.EngineConfig{DB: sqlDB, AuthCfg: coremail.DefaultAuthConfig()})
+		eng = coremail.NewEngine(coremail.EngineConfig{DB: sqlDB, AuthCfg: coremail.DefaultAuthConfig()})
 		ws := webmailmgmt.NewService(eng, sqlDB)
 		router.h.SetWebmailService(ws)
 
@@ -190,13 +192,16 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			rbacEval := entrbac.NewEvaluator(sqlDB)
 
 			adminMailboxRepo := mailboxadminsvc.NewAdminMailboxRepo(sqlDB)
-			router.h.SetMailboxAdminService(mailboxadminsvc.NewService(adminMailboxRepo, auditExtendedStore, rbacEval))
-
+			if eng == nil {
+				eng = coremail.NewEngine(coremail.EngineConfig{DB: sqlDB, AuthCfg: coremail.DefaultAuthConfig()})
+			}
+			router.h.SetMailboxAdminService(mailboxadminsvc.NewService(adminMailboxRepo, eng.Auth, auditExtendedStore, rbacEval))
 			orgRepo := orgadminsvc.NewOrganizationRepo(sqlDB)
 			router.h.SetOrganizationAdminService(orgadminsvc.NewService(orgRepo, auditExtendedStore, rbacEval))
 
 			domainAdminRepo := domainadminsvc.NewDomainAdminRepo(sqlDB)
-			router.h.SetDomainAdminService(domainadminsvc.NewService(domainAdminRepo, auditExtendedStore, rbacEval))
+			dkimRepo := dkim.NewSQLRepo(sqlDB)
+			router.h.SetDomainAdminService(domainadminsvc.NewService(domainAdminRepo, dkimRepo, auditExtendedStore, rbacEval))
 
 			dashboardSvc := dashboardsvc.NewDashboardService(sqlDB)
 			router.h.SetDashboardService(dashboardSvc)
@@ -944,6 +949,11 @@ func (r *Router) setupRoutes() {
 	canWriteDomains.Post("/domains", r.h.CreateAdminDomain)
 	canWriteDomains.Patch("/domains/:id", r.h.UpdateAdminDomain)
 	canWriteDomains.Post("/domains/:id/status", r.h.SetAdminDomainStatus)
+	canWriteDomains.Delete("/domains/:id", r.h.DeleteAdminDomain)
+	enterpriseRead.Get("/domains/:id/dkim", r.h.GetAdminDomainDKIM)
+	canWriteDomains.Post("/domains/:id/dkim/generate", r.h.PostAdminDomainDKIMGenerate)
+	canWriteDomains.Post("/domains/:id/dkim/rotate", r.h.PostAdminDomainDKIMRotate)
+	enterpriseRead.Post("/domains/:id/verify", r.h.VerifyEnterpriseDomain)
 
 	// ── Mailboxes ──
 	enterpriseRead.Get("/mailboxes", r.h.ListAdminMailboxes)
@@ -953,6 +963,7 @@ func (r *Router) setupRoutes() {
 	canWriteMailboxes.Post("/mailboxes/:id/status", r.h.SetAdminMailboxStatus)
 	canWriteMailboxes.Post("/mailboxes/bulk/status", r.h.BulkSetAdminMailboxStatus)
 	canWriteMailboxes.Post("/mailboxes/:id/reset-password", r.h.ResetAdminMailboxPassword)
+	canWriteMailboxes.Delete("/mailboxes/:id", r.h.DeleteMailbox)
 
 	// ── Organizations ──
 	enterpriseRead.Get("/organizations/:id", r.h.GetOrganization)
@@ -1297,7 +1308,6 @@ func (r *Router) setupRoutes() {
 	platform.Get("/dashboard", r.h.PlatformDashboard)
 	platform.Get("/organizations", r.h.ListPlatformOrganizations)
 	platform.Get("/organizations/:id", r.h.GetPlatformOrganization)
-	platform.Post("/organizations", r.h.CreateOrganization)
 	platform.Patch("/organizations/:id", r.h.UpdateOrganization)
 	platform.Post("/organizations/:id/active", r.h.SetOrganizationActive)
 	platform.Get("/organizations/:id/detail", r.h.GetOrganizationDetail)

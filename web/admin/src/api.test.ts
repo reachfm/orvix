@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api, initCSRF, resetCSRFToken, setCSRFToken } from "./api";
+import { api, ApiError, domainErrorMessage, initCSRF, resetCSRFToken, setCSRFToken } from "./api";
 
 const BASE = "/api/v1";
 
@@ -260,6 +260,49 @@ describe("Auth mutations include CSRF", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     const [, init] = fetchMock.mock.calls[1];
     expect(init?.headers?.["X-CSRF-Token"]).toBe("logout-csrf");
+  });
+});
+
+// ---- Typed error contract ----
+
+describe("Typed error contract", () => {
+  it("throws ApiError carrying code and message from the backend", async () => {
+    setCSRFToken("tok");
+    fetchMock.mockResolvedValueOnce({
+      ok: false, status: 409, json: () => Promise.resolve({ code: "DOMAIN_ALREADY_EXISTS", message: "Domain already exists." }),
+    } as Response);
+
+    await expect(api.createDomainEnterprise({ name: "dup.com" })).rejects.toMatchObject({
+      name: "ApiError",
+      code: "DOMAIN_ALREADY_EXISTS",
+      status: 409,
+      message: "Domain already exists.",
+    });
+  });
+
+  it("maps typed domain codes to user-safe messages", () => {
+    expect(domainErrorMessage("DOMAIN_HAS_MAILBOXES", "fallback")).toContain("mailboxes");
+    expect(domainErrorMessage("INVALID_DOMAIN_NAME", "fallback")).toContain("not valid");
+    expect(domainErrorMessage("DOMAIN_NOT_FOUND", "fallback")).toContain("not found");
+    expect(domainErrorMessage("DOMAIN_NOT_VERIFIED", "fallback")).toContain("verified");
+    expect(domainErrorMessage("DOMAIN_DISABLED", "fallback")).toContain("disabled");
+    expect(domainErrorMessage("DOMAIN_SUSPENDED", "fallback")).toContain("suspended");
+    expect(domainErrorMessage("DOMAIN_LOCKED", "fallback")).toContain("locked");
+    expect(domainErrorMessage("DOMAIN_UNAVAILABLE", "fallback")).toContain("not available");
+    expect(domainErrorMessage("DOMAIN_STATUS_INVALID", "fallback")).toContain("not supported");
+    expect(domainErrorMessage("UNKNOWN_CODE", "safe fallback")).toBe("safe fallback");
+  });
+
+  it("falls back to error body when no code is present", async () => {
+    setCSRFToken("tok");
+    fetchMock.mockResolvedValueOnce({
+      ok: false, status: 400, json: () => Promise.resolve({ error: "plain error" }),
+    } as Response);
+
+    await expect(api.createDomainEnterprise({ name: "x.com" })).rejects.toMatchObject({
+      code: "UNKNOWN_ERROR",
+      message: "plain error",
+    });
   });
 });
 

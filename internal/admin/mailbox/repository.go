@@ -119,7 +119,7 @@ func (r *AdminMailboxRepo) Create(ctx context.Context, m *AdminMailbox, password
 			 status, quota_mb, is_admin, allow_smtp, allow_imap, allow_pop3, allow_jmap,
 			 allow_webmail, send_limit_per_hour, recv_limit_per_hour, created_at, updated_at)
 		VALUES (`+r.dialect.Placeholders(19)+`)`,
-		m.DomainID, m.TenantID, m.LocalPart, m.Email, m.Name, passwordHash, "bcrypt",
+		m.DomainID, m.TenantID, m.LocalPart, m.Email, m.Name, passwordHash, string(MailboxAuthSchemeArgon2id),
 		string(m.Status), m.QuotaMB, boolToInt(m.IsAdmin),
 		boolToInt(m.AllowSMTP), boolToInt(m.AllowIMAP), boolToInt(m.AllowPOP3), boolToInt(m.AllowJMAP),
 		true, m.SendLimit, 1000, m.CreatedAt, m.UpdatedAt,
@@ -179,8 +179,8 @@ func (r *AdminMailboxRepo) UpdateStatusBulk(ctx context.Context, ids []uint, ten
 
 func (r *AdminMailboxRepo) UpdatePassword(ctx context.Context, id, tenantID uint, passwordHash string) error {
 	_, err := r.db.ExecContext(ctx,
-		"UPDATE coremail_mailboxes SET password_hash="+r.dialect.Placeholder(1)+", updated_at="+r.dialect.Placeholder(2)+" WHERE id="+r.dialect.Placeholder(3)+" AND tenant_id="+r.dialect.Placeholder(4)+" AND deleted_at IS NULL",
-		passwordHash, time.Now().UTC(), id, tenantID)
+		"UPDATE coremail_mailboxes SET password_hash="+r.dialect.Placeholder(1)+", auth_scheme="+r.dialect.Placeholder(2)+", updated_at="+r.dialect.Placeholder(3)+" WHERE id="+r.dialect.Placeholder(4)+" AND tenant_id="+r.dialect.Placeholder(5)+" AND deleted_at IS NULL",
+		passwordHash, string(MailboxAuthSchemeArgon2id), time.Now().UTC(), id, tenantID)
 	return err
 }
 
@@ -220,6 +220,24 @@ func (r *AdminMailboxRepo) ExistsByEmail(ctx context.Context, email string, excl
 	err := r.db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM coremail_mailboxes WHERE email="+r.dialect.Placeholder(1)+" AND id!="+r.dialect.Placeholder(2)+" AND deleted_at IS NULL", email, excludeID).Scan(&count)
 	return count > 0, err
+}
+
+// ResolveDomain looks up a domain by name inside the authenticated tenant
+// scope and returns its persisted ID and status. The query is tenant-scoped
+// so a domain owned by another tenant yields sql.ErrNoRows (indistinguishable
+// from an absent domain). Deleted domains also yield sql.ErrNoRows.
+func (r *AdminMailboxRepo) ResolveDomain(ctx context.Context, name string, tenantID uint) (id uint, status string, err error) {
+	var deletedAt *string
+	err = r.db.QueryRowContext(ctx,
+		"SELECT id, status, deleted_at FROM coremail_domains WHERE name="+r.dialect.Placeholder(1)+" AND tenant_id="+r.dialect.Placeholder(2),
+		name, tenantID).Scan(&id, &status, &deletedAt)
+	if err != nil {
+		return 0, "", err
+	}
+	if deletedAt != nil {
+		return 0, "", sql.ErrNoRows
+	}
+	return id, status, nil
 }
 
 func scanAdminMailbox(row interface {

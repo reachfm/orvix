@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 // Repository defines DKIM configuration persistence operations.
@@ -18,14 +20,24 @@ type Repository interface {
 
 var _ Repository = (*SQLRepo)(nil)
 
-// SQLRepo implements Repository using database/sql.
+// SQLRepo implements Repository using database/sql. It is dialect-aware
+// (SQLite and PostgreSQL) so it can be used by both the delivery/signing
+// read path and the enterprise admin write path without a second, parallel
+// implementation of the same table.
 type SQLRepo struct {
-	db *sql.DB
+	db      *sql.DB
+	dialect *dbdialect.Info
 }
 
 func NewSQLRepo(db *sql.DB) *SQLRepo {
-	return &SQLRepo{db: db}
+	d, err := dbdialect.Detect(db)
+	if err != nil {
+		d = dbdialect.FromDriver("sqlite")
+	}
+	return &SQLRepo{db: db, dialect: d}
 }
+
+func (r *SQLRepo) ph(n int) string { return r.dialect.Placeholder(n) }
 
 func (r *SQLRepo) exec(tx interface{}) interface {
 	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
@@ -45,9 +57,10 @@ func (r *SQLRepo) Create(ctx context.Context, cfg *DKIMConfig, tx interface{}) e
 	cfg.CreatedAt = now
 	cfg.UpdatedAt = now
 	e := r.exec(tx)
-	res, err := e.ExecContext(ctx, `
+	res, err := e.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO coremail_dkim_config (domain, selector, private_key_pem, enabled, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
+		VALUES (%s, %s, %s, %s, %s, %s)`,
+		r.ph(1), r.ph(2), r.ph(3), r.ph(4), r.ph(5), r.ph(6)),
 		cfg.Domain, cfg.Selector, cfg.PrivateKeyPEM, boolToInt(cfg.Enabled), cfg.CreatedAt, cfg.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("create dkim config: %w", err)
@@ -62,33 +75,34 @@ func (r *SQLRepo) Create(ctx context.Context, cfg *DKIMConfig, tx interface{}) e
 
 func (r *SQLRepo) GetByDomain(ctx context.Context, domain string, tx interface{}) (*DKIMConfig, error) {
 	e := r.exec(tx)
-	row := e.QueryRowContext(ctx, `
+	row := e.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT id, domain, selector, private_key_pem, enabled, created_at, updated_at
-		FROM coremail_dkim_config WHERE domain = ?`, domain)
+		FROM coremail_dkim_config WHERE domain = %s`, r.ph(1)), domain)
 	return scan(row)
 }
 
 func (r *SQLRepo) Update(ctx context.Context, cfg *DKIMConfig, tx interface{}) error {
 	cfg.UpdatedAt = time.Now().UTC()
 	e := r.exec(tx)
-	_, err := e.ExecContext(ctx, `
-		UPDATE coremail_dkim_config SET selector=?, private_key_pem=?, enabled=?, updated_at=?
-		WHERE domain=?`,
+	_, err := e.ExecContext(ctx, fmt.Sprintf(`
+		UPDATE coremail_dkim_config SET selector=%s, private_key_pem=%s, enabled=%s, updated_at=%s
+		WHERE domain=%s`,
+		r.ph(1), r.ph(2), r.ph(3), r.ph(4), r.ph(5)),
 		cfg.Selector, cfg.PrivateKeyPEM, boolToInt(cfg.Enabled), cfg.UpdatedAt, cfg.Domain)
 	return err
 }
 
 func (r *SQLRepo) Delete(ctx context.Context, domain string, tx interface{}) error {
 	e := r.exec(tx)
-	_, err := e.ExecContext(ctx, "DELETE FROM coremail_dkim_config WHERE domain=?", domain)
+	_, err := e.ExecContext(ctx, fmt.Sprintf("DELETE FROM coremail_dkim_config WHERE domain=%s", r.ph(1)), domain)
 	return err
 }
 
 func (r *SQLRepo) List(ctx context.Context, tx interface{}) ([]DKIMConfig, error) {
 	e := r.exec(tx)
-	rows, err := e.QueryContext(ctx, `
+	rows, err := e.QueryContext(ctx, fmt.Sprintf(`
 		SELECT id, domain, selector, private_key_pem, enabled, created_at, updated_at
-		FROM coremail_dkim_config ORDER BY domain`)
+		FROM coremail_dkim_config ORDER BY domain`))
 	if err != nil {
 		return nil, err
 	}
