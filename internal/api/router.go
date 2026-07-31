@@ -576,6 +576,35 @@ func (r *Router) Shutdown() error {
 	return r.app.Shutdown()
 }
 
+// allowedOrigins returns the trusted Origin allow-list for browser
+// requests. It mirrors the CORS configuration in setupMiddleware:
+// cfg.Server.AllowedOrigins, falling back to the same localhost
+// defaults when unset.
+func (r *Router) allowedOrigins() []string {
+	origins := r.cfg.Server.AllowedOrigins
+	if len(origins) == 0 {
+		origins = []string{"http://localhost:3000", "http://localhost:3001"}
+	}
+	return origins
+}
+
+// isAllowedOrigin reports whether a browser request's Origin header is
+// trusted for the public CSRF bootstrap endpoint. It uses the existing
+// trusted-origin/CORS policy: the Origin must be listed in
+// cfg.Server.AllowedOrigins (with the same localhost defaults used by the
+// CORS middleware when unset). An untrusted cross-origin page is rejected
+// before a CSRF token or cookie is created. Same-origin GET bootstrap
+// requests (the admin/webmail login SPA) carry no Origin header at all and
+// are therefore allowed by the handler.
+func (r *Router) isAllowedOrigin(origin string) bool {
+	for _, o := range r.allowedOrigins() {
+		if o == origin {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *Router) setupMiddleware() {
 	r.app.Use(fiberrecover.New())
 	origins := r.cfg.Server.AllowedOrigins
@@ -714,6 +743,40 @@ func (r *Router) setupRoutes() {
 		webmailLoginGroup.Post("/login", limiter.New(limiter.Config{Max: 5, Expiration: 15 * 60 * 1000}), r.h.WebmailLogin)
 	}
 
+	// Public CSRF bootstrap for the unauthenticated admin/webmail login
+	// pages. The SPA calls GET /api/v1/csrf-token BEFORE the user has any
+	// credentials, so this MUST be registered outside the JWT/API-key
+	// protected group (otherwise the auth middleware returns 401 and the
+	// login page can never obtain a double-submit CSRF token).
+	//
+	// Security posture:
+	//   - Reuses the existing CSRFManager.GenerateToken (random token stored
+	//     as a SHA-256 hash + double-submit cookie). CSRF validation is
+	//     unchanged and never weakened.
+	//   - A browser bootstrap request with a cross-origin Origin header is
+	//     rejected (403) unless the Origin is in the trusted
+	//     cfg.Server.AllowedOrigins list — and it is rejected BEFORE any
+	//     token or cookie is created. Same-origin GET bootstrap requests
+	//     (the login SPA) carry no Origin header at all and are allowed.
+	//   - Cache-Control: no-store so a shared/forward cache can never serve a
+	//     token to a different user.
+	//   - The response body contains only the CSRF token; no user, tenant,
+	//     or session data is ever included.
+	api.Get("/csrf-token", func(c fiber.Ctx) error {
+		if origin := c.Get("Origin"); origin != "" && !r.isAllowedOrigin(origin) {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"error": "origin not allowed",
+			})
+		}
+		c.Set("Cache-Control", "no-store")
+		userID, _ := c.Locals("user_id").(uint)
+		token, err := r.csrf.GenerateToken(c, userID)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "csrf token generation failed"})
+		}
+		return c.JSON(fiber.Map{"csrf_token": token})
+	})
+
 	// TenantMiddleware resolves tenant_id from the authenticated user
 	// row and stores it in c.Locals so handlers can scope mailbox/domain
 	// lookups to the caller's own tenant (see Handler.callerOwnsTenant).
@@ -821,15 +884,6 @@ func (r *Router) setupRoutes() {
 	protected.Put("/webmail/vacation", r.h.WebmailPutVacation)
 	protected.Get("/webmail/forwarding", r.h.WebmailGetForwarding)
 	protected.Put("/webmail/forwarding", r.h.WebmailPutForwarding)
-
-	protected.Get("/csrf-token", func(c fiber.Ctx) error {
-		userID, _ := c.Locals("user_id").(uint)
-		token, err := r.csrf.GenerateToken(c, userID)
-		if err != nil {
-			return c.Status(500).JSON(fiber.Map{"error": "csrf token generation failed"})
-		}
-		return c.JSON(fiber.Map{"csrf_token": token})
-	})
 
 	authCSRF := protected.Group("", r.csrf.Middleware())
 	authCSRF.Post("/auth/logout", r.h.Logout)
