@@ -10,7 +10,7 @@ package handlers
 //
 // The three helpers cover the three Codex blockers:
 //
-//   1. Public mail IP â€” separate from the listener bind host
+//   1. Public mail IP — separate from the listener bind host
 //      (coremail.smtp_host). A fresh install defaults the
 //      listener to 0.0.0.0; we must NEVER generate A / SPF
 //      records from 0.0.0.0 or from a private / loopback /
@@ -18,7 +18,7 @@ package handlers
 //      cfg.DNS.PublicIPv4 (and optionally PublicIPv6) and
 //      must pass isPublicUnicastIP.
 //
-//   2. DKIM selector â€” must be strict DNS-label safe:
+//   2. DKIM selector — must be strict DNS-label safe:
 //      lowercase, [a-z0-9-], 1..63 chars, no leading / trailing
 //      hyphen, no dots, no spaces, no slashes, no underscores,
 //      no quotes, no unicode, no wildcard, no double-dot. The
@@ -26,14 +26,12 @@ package handlers
 //      deterministic form. Empty input returns the safe default
 //      "orvix".
 //
-//   3. Domain existence â€” Orvix must already know the domain
-//      (coremail_domains row, deleted_at IS NULL) before we
-//      generate a DKIM key pair for it. The function returns
-//      (true, nil) when a row exists, (false, nil) when it
-//      does not, and (_, err) on DB error.
+// Domain existence is now enforced by the shared domain admin
+// service (GetByNameGlobalDomain) inside the same DKIM
+// transaction as the key write, so the old handler-local
+// domainExists helper was removed.
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -176,33 +174,4 @@ func validateDKIMSelector(selector string) (string, error) {
 		return "", fmt.Errorf("dkim selector %q must not contain consecutive hyphens", s)
 	}
 	return s, nil
-}
-
-// domainExists reports whether the supplied domain has an active
-// row in coremail_domains (deleted_at IS NULL). The function is
-// used by the DKIM keygen path to refuse orphan rotations and
-// by the DNS Ops handlers that need a domain ownership check.
-//
-// The lookup is name-keyed and case-insensitive. The function
-// returns (true, nil) on a single matching row, (false, nil)
-// when no row matches, and (false, err) on a database error so
-// the handler can return 500 rather than silently accept the
-// request.
-func (h *Handler) domainExists(ctx context.Context, domain string) (bool, error) {
-	domain = strings.ToLower(strings.TrimSpace(domain))
-	if domain == "" {
-		return false, errors.New("domain is required")
-	}
-	sqlDB, err := h.db.DB()
-	if err != nil {
-		return false, fmt.Errorf("db unavailable: %w", err)
-	}
-	var count int64
-	row := sqlDB.QueryRowContext(ctx,
-		h.sqlQ(`SELECT COUNT(*) FROM coremail_domains WHERE LOWER(name) = ? AND deleted_at IS NULL`),
-		domain)
-	if err := row.Scan(&count); err != nil {
-		return false, fmt.Errorf("domain lookup: %w", err)
-	}
-	return count > 0, nil
 }

@@ -28,9 +28,12 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	domainadminsvc "github.com/orvix/orvix/internal/admin/domain"
 	"github.com/orvix/orvix/internal/api/handlers"
+	"github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/config"
+	"github.com/orvix/orvix/internal/coremail/dkim"
 	"github.com/orvix/orvix/internal/dnsops"
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/models"
@@ -535,6 +538,33 @@ func TestDNSOpsDKIMKeygenWorksAfterMigrateAllRaw(t *testing.T) {
 	resolver := dnsops.NewFakeResolver()
 	svc := dnsops.NewService(resolver)
 	h.SetDNSOpsService(svc)
+
+	// Wire the shared domain admin service so the DNS-ops DKIM route
+	// delegates to the same service/repository/audit transaction as the
+	// enterprise flow.
+	if _, err := sqlDB.Exec(`CREATE TABLE IF NOT EXISTS orvix_audit (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		actor TEXT NOT NULL DEFAULT '',
+		actor_id INTEGER NOT NULL DEFAULT 0,
+		actor_role TEXT NOT NULL DEFAULT '',
+		tenant_id INTEGER NOT NULL DEFAULT 0,
+		action TEXT NOT NULL DEFAULT '',
+		target TEXT NOT NULL DEFAULT '',
+		target_id INTEGER NOT NULL DEFAULT 0,
+		result TEXT NOT NULL DEFAULT '',
+		reason TEXT NOT NULL DEFAULT '',
+		before TEXT NOT NULL DEFAULT '',
+		after TEXT NOT NULL DEFAULT '',
+		request_id TEXT NOT NULL DEFAULT '',
+		ip TEXT NOT NULL DEFAULT '',
+		user_agent TEXT NOT NULL DEFAULT '',
+		timestamp DATETIME NOT NULL DEFAULT (datetime('now'))
+	)`); err != nil {
+		t.Fatalf("create orvix_audit: %v", err)
+	}
+	domainRepo := domainadminsvc.NewDomainAdminRepo(sqlDB)
+	domainSvc := domainadminsvc.NewService(domainRepo, dkim.NewSQLRepo(sqlDB), audit.NewExtendedStore(sqlDB), nil)
+	h.SetDomainAdminService(domainSvc)
 
 	app := fiber.New()
 	adminTok, _ := authn.GenerateAccessToken(1, auth.RoleAdmin)

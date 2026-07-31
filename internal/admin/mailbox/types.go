@@ -11,6 +11,11 @@ const (
 	AdminMailboxDeleted   AdminMailboxStatus = "deleted"
 )
 
+// MailboxAuthSchemeArgon2id is the auth_scheme stored for mailboxes created
+// or reset by this service. It matches coremail's default argon2id scheme so
+// SMTP/IMAP/POP3/JMAP authentication verifies the stored hash.
+const MailboxAuthSchemeArgon2id = "argon2id"
+
 type AdminMailbox struct {
 	ID         uint               `json:"id"`
 	DomainID   uint               `json:"domain_id"`

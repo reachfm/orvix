@@ -3,24 +3,32 @@ package mailbox
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/base64"
 	"fmt"
 	"strings"
 
-	"golang.org/x/crypto/bcrypt"
-
+	"github.com/orvix/orvix/internal/admin/domain"
 	"github.com/orvix/orvix/internal/audit"
 	entrbac "github.com/orvix/orvix/internal/enterprise/rbac"
 )
 
+// PasswordHasher abstracts password hashing so the admin mailbox service can
+// share the exact Argon2id implementation used by Coremail mailbox
+// authentication. coremail.AuthService implements this interface.
+type PasswordHasher interface {
+	HashPassword(password string) (string, error)
+}
+
 type Service struct {
 	repo       *AdminMailboxRepo
+	hasher     PasswordHasher
 	auditStore *audit.ExtendedStore
 	rbac       *entrbac.Evaluator
 }
 
-func NewService(repo *AdminMailboxRepo, auditStore *audit.ExtendedStore, rbac *entrbac.Evaluator) *Service {
-	return &Service{repo: repo, auditStore: auditStore, rbac: rbac}
+func NewService(repo *AdminMailboxRepo, hasher PasswordHasher, auditStore *audit.ExtendedStore, rbac *entrbac.Evaluator) *Service {
+	return &Service{repo: repo, hasher: hasher, auditStore: auditStore, rbac: rbac}
 }
 
 func (s *Service) CountByTenant(ctx context.Context, tenantID uint) int64 {
@@ -46,7 +54,7 @@ func (s *Service) GetMailbox(ctx context.Context, id, tenantID uint) (*AdminMail
 	return m, nil
 }
 
-func (s *Service) CreateMailbox(ctx context.Context, req CreateMailboxRequest, tenantID, domainID uint) (*CreateMailboxResponse, error) {
+func (s *Service) CreateMailbox(ctx context.Context, req CreateMailboxRequest, tenantID uint) (*CreateMailboxResponse, error) {
 	if req.Email == "" || !strings.Contains(req.Email, "@") {
 		return nil, ErrInvalidEmail
 	}
@@ -56,18 +64,13 @@ func (s *Service) CreateMailbox(ctx context.Context, req CreateMailboxRequest, t
 
 	parts := strings.SplitN(req.Email, "@", 2)
 	localPart := parts[0]
-
-	exists, err := s.repo.ExistsByEmail(ctx, req.Email, 0)
-	if err != nil {
-		return nil, fmt.Errorf("check exists: %w", err)
-	}
-	if exists {
-		return nil, ErrMailboxExists
+	if localPart == "" || parts[1] == "" {
+		return nil, ErrInvalidEmail
 	}
 
-	passwordHash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	passwordHash, err := s.hashPassword(req.Password)
 	if err != nil {
-		return nil, fmt.Errorf("hash password: %w", err)
+		return nil, err
 	}
 
 	quota := req.QuotaMB
@@ -79,26 +82,62 @@ func (s *Service) CreateMailbox(ctx context.Context, req CreateMailboxRequest, t
 		sendLimit = 500
 	}
 
-	m := &AdminMailbox{
-		DomainID:  domainID,
-		TenantID:  tenantID,
-		Email:     req.Email,
-		LocalPart: localPart,
-		Name:      req.Name,
-		Status:    AdminMailboxActive,
-		QuotaMB:   quota,
-		SendLimit: sendLimit,
-		AllowSMTP: true,
-		AllowIMAP: true,
-		AllowPOP3: true,
-		AllowJMAP: true,
-	}
-
 	var created *AdminMailbox
 	entry := &audit.ExtendedEntry{Action: "mailbox.create", TenantID: tenantID, Result: "success"}
 	if err := s.mutateWithAudit(ctx, entry, func(repo *AdminMailboxRepo) error {
+		// Resolve the domain inside the mutation transaction so the
+		// eligibility check and the mailbox insert are atomic. The domain
+		// lookup is tenant-scoped: a domain owned by another tenant or one
+		// that is deleted resolves to the safe not-found contract.
+		domainID, status, err := repo.ResolveDomain(ctx, parts[1], tenantID)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				return domain.ErrDomainNotFound
+			}
+			return err
+		}
+		if status != string(domain.DomainStatusActive) {
+			// Explicit status model: disabled and administratively restricted
+			// states are distinct. No verification state exists on
+			// coremail_domains, so unknown/legacy values fail closed with a
+			// safe "unavailable" error rather than being mislabeled as
+			// DNS-unverified (DOMAIN_NOT_VERIFIED is reserved).
+			switch domain.DomainStatus(status) {
+			case domain.DomainStatusDisabled:
+				return domain.ErrDomainDisabled
+			case domain.DomainStatusSuspended:
+				return domain.ErrDomainSuspended
+			case domain.DomainStatusLocked:
+				return domain.ErrDomainLocked
+			default:
+				return domain.ErrDomainUnavailable
+			}
+		}
+
+		exists, err := repo.ExistsByEmail(ctx, req.Email, 0)
+		if err != nil {
+			return fmt.Errorf("check exists: %w", err)
+		}
+		if exists {
+			return ErrMailboxExists
+		}
+
+		m := &AdminMailbox{
+			DomainID:  domainID,
+			TenantID:  tenantID,
+			Email:     req.Email,
+			LocalPart: localPart,
+			Name:      req.Name,
+			Status:    AdminMailboxActive,
+			QuotaMB:   quota,
+			SendLimit: sendLimit,
+			AllowSMTP: true,
+			AllowIMAP: true,
+			AllowPOP3: true,
+			AllowJMAP: true,
+		}
 		var createErr error
-		created, createErr = repo.Create(ctx, m, string(passwordHash))
+		created, createErr = repo.Create(ctx, m, passwordHash)
 		if createErr == nil {
 			entry.Target, entry.TargetID = fmt.Sprintf("mailbox:%d", created.ID), created.ID
 		}
@@ -198,18 +237,32 @@ func (s *Service) ResetPassword(ctx context.Context, id, tenantID uint) (string,
 	}
 
 	newPassword := generatePassword(24)
-	passwordHash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	passwordHash, err := s.hashPassword(newPassword)
 	if err != nil {
-		return "", fmt.Errorf("hash password: %w", err)
+		return "", err
 	}
 
 	entry := &audit.ExtendedEntry{Action: "mailbox.password_reset", Target: fmt.Sprintf("mailbox:%d", id), TargetID: id, TenantID: tenantID, Result: "success"}
 	if err := s.mutateWithAudit(ctx, entry, func(repo *AdminMailboxRepo) error {
-		return repo.UpdatePassword(ctx, id, tenantID, string(passwordHash))
+		return repo.UpdatePassword(ctx, id, tenantID, passwordHash)
 	}); err != nil {
 		return "", err
 	}
 	return newPassword, nil
+}
+
+// hashPassword produces a Coremail-compatible Argon2id hash via the injected
+// hasher. The hasher is shared with the mailbox authentication path so every
+// hash stored by this service verifies through coremail's AuthService.
+func (s *Service) hashPassword(password string) (string, error) {
+	if s.hasher == nil {
+		return "", fmt.Errorf("password hasher unavailable")
+	}
+	hash, err := s.hasher.HashPassword(password)
+	if err != nil {
+		return "", fmt.Errorf("hash password: %w", err)
+	}
+	return hash, nil
 }
 
 func (s *Service) mutateWithAudit(ctx context.Context, entry *audit.ExtendedEntry, mutate func(*AdminMailboxRepo) error) error {

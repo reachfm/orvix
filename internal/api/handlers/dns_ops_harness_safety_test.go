@@ -20,9 +20,12 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	domainadminsvc "github.com/orvix/orvix/internal/admin/domain"
 	"github.com/orvix/orvix/internal/api/handlers"
+	"github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/config"
+	"github.com/orvix/orvix/internal/coremail/dkim"
 	"github.com/orvix/orvix/internal/dnsops"
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/modules"
@@ -93,6 +96,36 @@ func newDNSOpsHarnessWithPublicIP(t *testing.T, publicIPv4, publicIPv6 string) *
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS coremail_mailboxes (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			domain_id INTEGER NOT NULL DEFAULT 0,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			deleted_at DATETIME
+		)`,
+		`CREATE TABLE IF NOT EXISTS coremail_aliases (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			domain_id INTEGER NOT NULL DEFAULT 0,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			deleted_at DATETIME
+		)`,
+		`CREATE TABLE IF NOT EXISTS orvix_audit (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			actor TEXT NOT NULL DEFAULT '',
+			actor_id INTEGER NOT NULL DEFAULT 0,
+			actor_role TEXT NOT NULL DEFAULT '',
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			action TEXT NOT NULL DEFAULT '',
+			target TEXT NOT NULL DEFAULT '',
+			target_id INTEGER NOT NULL DEFAULT 0,
+			result TEXT NOT NULL DEFAULT '',
+			reason TEXT NOT NULL DEFAULT '',
+			before TEXT NOT NULL DEFAULT '',
+			after TEXT NOT NULL DEFAULT '',
+			request_id TEXT NOT NULL DEFAULT '',
+			ip TEXT NOT NULL DEFAULT '',
+			user_agent TEXT NOT NULL DEFAULT '',
+			timestamp DATETIME NOT NULL DEFAULT (datetime('now'))
+		)`,
 		`CREATE TABLE IF NOT EXISTS coremail_domains (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT UNIQUE NOT NULL,
@@ -132,6 +165,12 @@ func newDNSOpsHarnessWithPublicIP(t *testing.T, publicIPv4, publicIPv6 string) *
 	resolver := dnsops.NewFakeResolver()
 	svc := dnsops.NewService(resolver)
 	h.SetDNSOpsService(svc)
+
+	// Wire the shared domain admin service (same service the platform
+	// DNS-ops DKIM route delegates to) with its shared dkim repo + audit.
+	domainRepo := domainadminsvc.NewDomainAdminRepo(sqlDB)
+	domainSvc := domainadminsvc.NewService(domainRepo, dkim.NewSQLRepo(sqlDB), audit.NewExtendedStore(sqlDB), nil)
+	h.SetDomainAdminService(domainSvc)
 	app := fiber.New()
 	adminTok, _ := authn.GenerateAccessToken(1, auth.RoleAdmin)
 	userTok, _ := authn.GenerateAccessToken(2, auth.RoleUser)

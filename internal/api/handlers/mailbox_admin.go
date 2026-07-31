@@ -1,9 +1,6 @@
 package handlers
 
 import (
-	"database/sql"
-	"strings"
-
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/admin/mailbox"
 	"github.com/orvix/orvix/internal/auth"
@@ -96,13 +93,13 @@ func (h *Handler) CreateAdminMailbox(c fiber.Ctx) error {
 
 	var req mailbox.CreateMailboxRequest
 	if err := c.Bind().JSON(&req); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
+		return respondAPIError(c, fiber.StatusBadRequest, "INVALID_REQUEST", "Invalid request body.")
 	}
 	if req.Email == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "email is required"})
+		return respondAPIError(c, fiber.StatusBadRequest, "INVALID_EMAIL", "Email is required.")
 	}
 	if req.Password == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "password is required"})
+		return respondAPIError(c, fiber.StatusBadRequest, "INVALID_PASSWORD", "Password is required.")
 	}
 
 	// Quota enforcement: check mailbox limit before creating.
@@ -110,73 +107,19 @@ func (h *Handler) CreateAdminMailbox(c fiber.Ctx) error {
 		count := h.mailboxAdminSvc.CountByTenant(c.Context(), tenantID)
 		if result := h.quotaSvc.CanCreateMailbox(tenantID, int(count)); result != nil && !result.Allowed {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
-				"error":   "mailbox quota exceeded: " + result.Reason,
+				"code":    "MAILBOX_LIMIT_REACHED",
+				"message": "Mailbox limit reached for your plan.",
 				"limit":   result.Limit,
 				"used":    result.Used,
 				"allowed": false,
+				"error":   "mailbox quota exceeded: " + result.Reason,
 			})
 		}
 	}
 
-	// Extract domain from email and validate domain eligibility
-	parts := strings.SplitN(req.Email, "@", 2)
-	if len(parts) != 2 || parts[1] == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid email address"})
-	}
-	domainName := parts[1]
-
-	var domainID uint
-	var domainStatus string
-	var domainTenantID uint
-	var deletedAt *string
-
-	sqlDB, err := h.db.DB()
+	resp, err := h.mailboxAdminSvc.CreateMailbox(c.Context(), req, tenantID)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
-	}
-
-	err = sqlDB.QueryRow(
-		"SELECT id, tenant_id, status, deleted_at FROM coremail_domains WHERE name = "+h.dialect.Placeholder(1),
-		domainName,
-	).Scan(&domainID, &domainTenantID, &domainStatus, &deletedAt)
-	if err == sql.ErrNoRows {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "DOMAIN_NOT_FOUND", "domain": domainName})
-	}
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
-	}
-
-	// Check domain not deleted
-	if deletedAt != nil {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "DOMAIN_NOT_FOUND", "domain": domainName})
-	}
-
-	// Check domain belongs to the same tenant
-	if domainTenantID != tenantID {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "DOMAIN_FORBIDDEN", "domain": domainName})
-	}
-
-	// Check domain is active
-	if domainStatus != "active" {
-		if domainStatus == "disabled" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "DOMAIN_DISABLED", "domain": domainName})
-		}
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "DOMAIN_NOT_ACTIVE", "domain": domainName})
-	}
-
-	// Check if domain has DNS verification status (if supported)
-	var dnsStatus string
-	sqlDB.QueryRow("SELECT COALESCE(dns_verification_status, '') FROM coremail_domains WHERE id = "+h.dialect.Placeholder(1), domainID).Scan(&dnsStatus)
-
-	resp, err := h.mailboxAdminSvc.CreateMailbox(c.Context(), req, tenantID, domainID)
-	if err != nil {
-		if err == mailbox.ErrMailboxExists {
-			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "mailbox already exists"})
-		}
-		if err == mailbox.ErrInvalidEmail {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid email"})
-		}
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return mailboxEligibilityError(c, err)
 	}
 
 	status := fiber.StatusCreated

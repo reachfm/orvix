@@ -3,6 +3,63 @@ const BASE = "/api/v1";
 let csrfTokenValue = "";
 let csrfTokenPromise: Promise<string> | null = null;
 
+/**
+ * ApiError carries the stable machine-readable `code` from the typed backend
+ * error contract together with a safe human-readable `message`. Components
+ * map `code` to user-facing copy and never parse fragile message strings.
+ */
+export class ApiError extends Error {
+  code: string;
+  status: number;
+
+  constructor(code: string, message: string, status: number) {
+    super(message || code || `Request failed (${status})`);
+    this.name = "ApiError";
+    this.code = code || "UNKNOWN_ERROR";
+    this.status = status;
+  }
+}
+
+/** Maps a typed error code to user-safe copy. Unknown codes fall back to the server message. */
+export function domainErrorMessage(code: string | undefined, fallback: string): string {
+  switch (code) {
+    case "DOMAIN_NOT_FOUND":
+      return "Domain not found or you do not have access to it.";
+    case "DOMAIN_DISABLED":
+      return "This domain is disabled. Re-enable it before creating mailboxes.";
+    case "DOMAIN_SUSPENDED":
+      return "This domain is suspended. Restore it before creating mailboxes.";
+    case "DOMAIN_LOCKED":
+      return "This domain is locked and not available for this action.";
+    case "DOMAIN_UNAVAILABLE":
+      return "This domain is not available for this action right now.";
+    case "DOMAIN_STATUS_INVALID":
+      return "That domain status is not supported.";
+    case "DOMAIN_NOT_VERIFIED":
+      return "This domain is not verified or not eligible yet. Complete domain setup first.";
+    case "DOMAIN_ALREADY_EXISTS":
+      return "This domain is already configured on your account.";
+    case "INVALID_DOMAIN_NAME":
+      return "That domain name is not valid. Use a bare domain like example.com.";
+    case "DOMAIN_HAS_MAILBOXES":
+      return "This domain still has mailboxes. Delete its mailboxes first.";
+    case "DOMAIN_HAS_DEPENDENCIES":
+      return "This domain has dependencies (aliases, DKIM, routing) and cannot be deleted.";
+    case "DOMAIN_LIMIT_REACHED":
+      return "You have reached the domain limit for your plan.";
+    case "DKIM_ALREADY_CONFIGURED":
+      return "DKIM is already configured for this domain.";
+    case "DKIM_NOT_CONFIGURED":
+      return "Generate DKIM before rotating keys.";
+    case "MAILBOX_LIMIT_REACHED":
+      return "You have reached the mailbox limit for your plan.";
+    case "MAILBOX_ALREADY_EXISTS":
+      return "A mailbox with this address already exists.";
+    default:
+      return fallback;
+  }
+}
+
 function isMutationMethod(method?: string): boolean {
   if (!method) return false;
   return ["POST", "PUT", "PATCH", "DELETE"].includes(method.toUpperCase());
@@ -75,18 +132,19 @@ async function request<T>(path: string, options?: RequestOptions): Promise<T> {
   });
 
   if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const code = body?.code || "";
+    const message = body?.message || body?.error || `${res.status} ${res.statusText}`;
     if (res.status === 403 && isMutation && !options?.skipCSRF) {
-      const body = await res.json().catch(() => ({}));
-      const errMsg = (body.error || "").toLowerCase();
+      const errMsg = String(message).toLowerCase();
       if (errMsg.includes("csrf") && csrfTokenValue && !options?._csrfRetried) {
         csrfTokenValue = "";
         await initCSRF();
         return request<T>(path, { ...options, _csrfRetried: true });
       }
-      throw new Error(body.error || `${res.status} ${res.statusText}`);
+      throw new ApiError(code || "FORBIDDEN", message, res.status);
     }
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `${res.status} ${res.statusText}`);
+    throw new ApiError(code, message, res.status);
   }
 
   if (res.status === 204) {
@@ -137,6 +195,8 @@ export const api = {
     request("/enterprise/mailboxes", { method: "POST", body: JSON.stringify(data) }),
   deleteMailbox: (id: number) =>
     request(`/enterprise/mailboxes/${id}`, { method: "DELETE" }),
+  setMailboxStatus: (id: number, status: string, reason?: string) =>
+    request(`/enterprise/mailboxes/${id}/status`, { method: "POST", body: JSON.stringify({ status, reason: reason || "" }) }),
 
   // Abuse
   listAbuseSignals: () => request<any[]>("/enterprise/abuse/signals"),
