@@ -585,6 +585,13 @@ func (r *Router) allowedOrigins() []string {
 	if len(origins) == 0 {
 		origins = []string{"http://localhost:3000", "http://localhost:3001"}
 	}
+	// A wildcard origin is incompatible with credentials (the CORS setup
+	// replaces it with the same localhost fallback); failing to do the
+	// same here would make the exact-match check reject every request
+	// because the literal string "*" never equals a real Origin.
+	if len(origins) == 1 && origins[0] == "*" {
+		origins = []string{"http://localhost:3000", "http://localhost:3001"}
+	}
 	return origins
 }
 

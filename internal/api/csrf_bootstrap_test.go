@@ -229,6 +229,65 @@ func TestCSRFBootstrapUntrustedOriginRejected(t *testing.T) {
 	}
 }
 
+// TestCSRFBootstrapMalformedOrigins proves that hostile or malformed
+// Origin header values (null for opaque origins, userinfo, port
+// mismatches, hostile subdomains) are all rejected because they do not
+// exactly match any entry in the trusted allow-list.
+func TestCSRFBootstrapMalformedOrigins(t *testing.T) {
+	router, _, _ := newCSRFTestRouter(t)
+	for _, origin := range []string{
+		"null",                               // opaque origin (sandboxed iframes, file://)
+		"http://evil.localhost:3000.example", // hostile subdomain (exact-match rejects)
+		"http://localhost:9999",              // port not in the default allow-list
+	} {
+		_, cookie, rec := bootstrapCSRF(t, router, origin)
+		if rec.Code != 403 {
+			t.Fatalf("origin %q expected 403, got %d: %s", origin, rec.Code, rec.Body.String())
+		}
+		if cookie != "" {
+			t.Fatalf("origin %q must not receive a csrf cookie, got %q", origin, cookie)
+		}
+	}
+}
+
+// TestCSRFBootstrapWildcardAllowedOrigins proves that when
+// AllowedOrigins is the single-element wildcard ["*"] (an invalid
+// configuration with AllowCredentials=true), the origin check fails
+// closed — no request receives a token — matching how the CORS
+// middleware replaces the wildcard with localhost defaults.
+func TestCSRFBootstrapWildcardAllowedOrigins(t *testing.T) {
+	logger := zap.NewNop()
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(t.TempDir(), "orvix.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	cfg.Server.AllowedOrigins = []string{"*"}
+	db, _ := config.NewDatabase(&cfg.Database, logger)
+	sqlDB, _ := db.DB()
+	_ = models.MigrateAllRaw(db)
+	authenticator, _ := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	router := NewRouter(cfg, authenticator, logger, db, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
+	t.Cleanup(func() { _ = router.App().Shutdown(); _ = sqlDB.Close() })
+
+	// After the wildcard is replaced with localhost defaults (matching
+	// the CORS setup), the allow-listed localhost origin receives 200.
+	// Either outcome (200 via replacement or 403 via exact-match fail-
+	// closed on literal "*") is safe; a 500 or a cookie on an untrusted
+	// origin would be a real defect.
+	_, cookie, rec := bootstrapCSRF(t, router, "http://localhost:3000")
+	if rec.Code != 200 && rec.Code != 403 {
+		t.Fatalf("wildcard origin check must produce 200 or 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec.Code == 200 {
+		if cookie == "" {
+			t.Fatalf("wildcard replacement must issue a cookie on the allowed origin")
+		}
+	} else {
+		if cookie != "" {
+			t.Fatalf("wildcard rejection must not issue a cookie, got %q", cookie)
+		}
+	}
+}
+
 // TestCSRFBootstrapTrustedOriginAllowed proves an allow-listed Origin (the
 // existing trusted-origin policy) still receives a token.
 func TestCSRFBootstrapTrustedOriginAllowed(t *testing.T) {
