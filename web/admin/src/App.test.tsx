@@ -46,7 +46,10 @@ describe("Admin console certification", () => {
     await waitFor(() => expect(screen.getByText("Orvix Admin")).toBeInTheDocument());
 
     fireEvent.click(screen.getAllByRole("button", { name: /domains/i })[0]);
-    await waitFor(() => expect(screen.getByText("Domain Management")).toBeInTheDocument());
+    // The domains view heading is the dense console's "Domains (<count>)" title.
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: /^domains/i })).toBeInTheDocument()
+    );
 
     fireEvent.click(screen.getAllByRole("button", { name: /audit log/i })[0]);
     await waitFor(() => expect(screen.getByText("Audit Log")).toBeInTheDocument());

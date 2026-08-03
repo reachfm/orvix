@@ -12,7 +12,6 @@ import OrganizationList from "./components/OrganizationList";
 import BackupStatus from "./components/BackupStatus";
 import SystemHealth from "./components/SystemHealth";
 import BillingPage from "./components/BillingPage";
-import DomainOnboarding from "./components/DomainOnboarding";
 import ApiKeysPage from "./components/ApiKeysPage";
 import SignupPage from "./components/SignupPage";
 import LoginPage from "./components/LoginPage";
@@ -60,7 +59,6 @@ const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: st
   { id: "aliases", label: "Aliases", icon: AtSign },
   { id: "groups", label: "Groups", icon: Users },
   { id: "usage-quotas", label: "Usage", icon: BarChart },
-  { id: "onboarding", label: "Domain Setup", icon: Globe },
   { id: "invitations", label: "Invitations", icon: UserPlus },
   { id: "members-roles", label: "Members", icon: Shield },
   { id: "ownership-transfer", label: "Ownership", icon: Send },
@@ -174,7 +172,14 @@ export default function App() {
       case "backups": return <BackupStatus />;
       case "health": return <SystemHealth />;
       case "billing": return <BillingPage />;
-      case "onboarding": return <DomainOnboarding />;
+      // Legacy "Domain Setup" route. It rendered a second, inferior copy of the
+      // DNS record UI against the customer endpoints (and read fields such as
+      // `mx_status`/`mx_record` that the DNS response never actually contained,
+      // so every record showed "pending"). Rather than maintain two DNS
+      // implementations, the route now resolves to the domains console, whose
+      // per-domain "DNS" action opens the canonical DNS Records modal. The
+      // customer DNS endpoints themselves are left untouched.
+      case "onboarding": return <Domains />;
       case "apikeys": return <ApiKeysPage />;
       case "account-settings": return <AccountSettingsPage />;
       case "org-overview": return <OrganizationOverviewPage />;
