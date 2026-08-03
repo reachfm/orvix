@@ -259,17 +259,28 @@ func (i *DNSInspector) InspectEnterprise(ctx context.Context, domain string, exp
 	mtastsResult := i.checkMTASTS(ctx, domain, now)
 	tlsrptResult := i.checkTLSRPT(ctx, domain, now)
 
+	// A valid MTA-STS TXT record on its own proves nothing: the policy it
+	// points at must actually be served over HTTPS and parse. Until that is
+	// confirmed, MTA-STS can never be recorded as a full pass — including
+	// when no fetcher is wired at all, which previously left the check at
+	// "pass" and allowed an unverified deployment to reach 100%.
 	var mtastsPolicy *MTASTSPolicy
-	if i.mtastsFetcher != nil && mtastsResult.Status == "pass" {
-		p, err := i.mtastsFetcher.Fetch(ctx, domain)
-		if err != nil || p == nil || !p.Valid {
-			mtastsResult.Reason = "MTA-STS TXT valid but HTTPS policy " + reasonFromError(err, p)
-			if mtastsResult.Reason == "" {
-				mtastsResult.Reason = "MTA-STS TXT valid but HTTPS policy unavailable"
-			}
+	if mtastsResult.Status == "pass" {
+		switch {
+		case i.mtastsFetcher == nil:
 			mtastsResult.Status = "warning"
-		} else {
-			mtastsPolicy = p
+			mtastsResult.Reason = "MTA-STS TXT valid but HTTPS policy unverified: no policy fetcher configured"
+		default:
+			p, err := i.mtastsFetcher.Fetch(ctx, domain)
+			if err != nil || p == nil || !p.Valid {
+				mtastsResult.Reason = "MTA-STS TXT valid but HTTPS policy " + reasonFromError(err, p)
+				if strings.HasSuffix(mtastsResult.Reason, "HTTPS policy ") {
+					mtastsResult.Reason = "MTA-STS TXT valid but HTTPS policy unverified: policy unavailable"
+				}
+				mtastsResult.Status = "warning"
+			} else {
+				mtastsPolicy = p
+			}
 		}
 	}
 
@@ -293,6 +304,9 @@ func (i *DNSInspector) InspectEnterprise(ctx context.Context, domain string, exp
 		}
 	}
 
+	mailHost := primaryMailHost(expectedMX, domain)
+	mailHostA := i.checkHostA(ctx, mailHost, now)
+
 	health := &EnterpriseDNSHealth{
 		DomainName:   domain,
 		MX:           mxResult,
@@ -302,7 +316,17 @@ func (i *DNSInspector) InspectEnterprise(ctx context.Context, domain string, exp
 		MTASTS:       mtastsResult,
 		TLSRPT:       tlsrptResult,
 		MTASTSPolicy: mtastsPolicy,
+
+		MailHostA:    mailHostA,
+		MailHostAAAA: i.checkHostAAAA(ctx, mailHost, now),
+		MXHosts:      i.checkMXHostResolution(ctx, domain, now),
+		PTR:          i.checkPTR(ctx, mailHost, mailHostA, now),
+		Autodiscover: i.checkDelegationCNAME(ctx, "autodiscover."+domain, mailHost, "Outlook autodiscover", now),
+		Autoconfig:   i.checkDelegationCNAME(ctx, "autoconfig."+domain, mailHost, "Thunderbird autoconfig", now),
+		TLSA:         i.checkTLSA(mailHost, now),
 	}
+
+	applyCanonicalExpectations(health, domain, mailHost)
 
 	score := computeEnterpriseHealthScore(health)
 	health.HealthScore = score.Score
@@ -372,12 +396,88 @@ func (i *DNSInspector) checkTLSRPT(ctx context.Context, domain, now string) *TLS
 	return &TLSRPTCheck{Status: string(DNSStatusPass), Observed: truncateForDisplay(tlsrpt, 200), CheckedAt: now}
 }
 
+// applyCanonicalExpectations guarantees every required record carries a real
+// `expected` value and concrete repair guidance, and that a record whose
+// required value is genuinely indeterminate is marked
+// configuration_required rather than being allowed to read as a pass.
+func applyCanonicalExpectations(health *EnterpriseDNSHealth, domain, mailHost string) {
+	if c := health.MX; c != nil {
+		if c.Expected == "" {
+			c.Expected = mailHost
+		}
+		c.Guidance = fmt.Sprintf("Add an MX record for %s pointing to %s with priority 10.", domain, c.Expected)
+	}
+
+	if c := health.SPF; c != nil {
+		// Derived from the domain's own mail infrastructure: the `mx`
+		// mechanism authorises exactly the hosts in the domain's MX set,
+		// which for ORVIX are also the sending hosts.
+		c.Expected = canonicalSPF()
+		c.Guidance = fmt.Sprintf("Publish a single TXT record at %s with the value %q. Exactly one SPF record may exist per domain.", domain, c.Expected)
+		if c.Expected == "" {
+			c.Status = string(DNSStatusConfigRequired)
+			c.Reason = "required SPF value could not be determined from configuration"
+		}
+	}
+
+	if c := health.DMARC; c != nil {
+		// ORVIX stores no per-domain DMARC policy preference, so the
+		// canonical template is the requirement.
+		c.Expected = canonicalDMARC(domain)
+		c.Guidance = fmt.Sprintf("Add a TXT record at _dmarc.%s with the value %q.", domain, c.Expected)
+		if c.Expected == "" {
+			c.Status = string(DNSStatusConfigRequired)
+			c.Reason = "required DMARC value could not be determined from configuration"
+		}
+	}
+
+	if c := health.MTASTS; c != nil {
+		if c.Expected == "" {
+			c.Expected = canonicalMTASTS()
+		}
+		c.Guidance = fmt.Sprintf("Add a TXT record at _mta-sts.%s with the value %q, and serve the matching policy document over HTTPS at https://mta-sts.%s/.well-known/mta-sts.txt.", domain, c.Expected, domain)
+	}
+
+	if c := health.TLSRPT; c != nil {
+		if c.Expected == "" {
+			c.Expected = canonicalTLSRPT(domain)
+		}
+		c.Guidance = fmt.Sprintf("Add a TXT record at _smtp._tls.%s with the value %q.", domain, c.Expected)
+	}
+
+	if c := health.DKIM; c != nil {
+		name := c.RecordName
+		if name == "" {
+			sel := c.Selector
+			if sel == "" {
+				sel = "default"
+			}
+			name = sel + "._domainkey." + domain
+		}
+		if c.Expected == "" && c.PublicTXT != "" {
+			c.Expected = c.PublicTXT
+		}
+		c.Guidance = fmt.Sprintf("Publish the DKIM public key as a TXT record at %s. Use the exact value shown in the Required column; do not re-wrap or re-quote it.", name)
+	}
+}
+
 func computeEnterpriseHealthScore(health *EnterpriseDNSHealth) HealthScoreResult {
 	result := HealthScoreResult{
 		Breakdown: make(map[string]ScoreComponent),
 	}
 
+	possible := 0
+	earnedTotal := 0
+
 	add := func(name string, weight int, status string) {
+		// optional / not_applicable records are excluded from BOTH the
+		// numerator and the denominator: they can neither penalise a
+		// deployment that legitimately does not use them nor inflate one
+		// that does.
+		if !scoredDNSStatus(status) {
+			result.Breakdown[name] = ScoreComponent{Weight: 0, Earned: 0, Status: status}
+			return
+		}
 		earned := 0
 		switch status {
 		case "pass":
@@ -386,7 +486,8 @@ func computeEnterpriseHealthScore(health *EnterpriseDNSHealth) HealthScoreResult
 			earned = weight / 2
 		}
 		result.Breakdown[name] = ScoreComponent{Weight: weight, Earned: earned, Status: status}
-		result.Score += earned
+		possible += weight
+		earnedTotal += earned
 	}
 
 	mx := "unknown"
@@ -414,12 +515,47 @@ func computeEnterpriseHealthScore(health *EnterpriseDNSHealth) HealthScoreResult
 		tlsrpt = health.TLSRPT.Status
 	}
 
-	add("mx", 25, mx)
-	add("spf", 15, spf)
-	add("dkim", 25, dkim)
-	add("dmarc", 15, dmarc)
-	add("mtasts", 10, mtasts)
-	add("tlsrpt", 10, tlsrpt)
+	add("mx", 20, mx)
+	add("spf", 12, spf)
+	add("dkim", 20, dkim)
+	add("dmarc", 12, dmarc)
+	add("mtasts", 8, mtasts)
+	add("tlsrpt", 8, tlsrpt)
+
+	// Expanded record inventory. These are only scored when they were
+	// actually computed (a health object hydrated from a snapshot written
+	// before this field existed has them nil, and a nil record must not
+	// silently change the score of an old snapshot).
+	if health.MailHostA != nil {
+		add("mail_host_a", 8, health.MailHostA.Status)
+	}
+	if health.MailHostAAAA != nil {
+		add("mail_host_aaaa", 0, health.MailHostAAAA.Status)
+	}
+	for idx, h := range health.MXHosts {
+		if h == nil {
+			continue
+		}
+		add(fmt.Sprintf("mx_host_%d", idx), 8/max(1, len(health.MXHosts)), h.Status)
+	}
+	if health.PTR != nil {
+		add("ptr", 4, health.PTR.Status)
+	}
+	if health.Autodiscover != nil {
+		add("autodiscover", 0, health.Autodiscover.Status)
+	}
+	if health.Autoconfig != nil {
+		add("autoconfig", 0, health.Autoconfig.Status)
+	}
+	if health.TLSA != nil {
+		add("tlsa", 0, health.TLSA.Status)
+	}
+
+	if possible <= 0 {
+		result.Score = 0
+		return result
+	}
+	result.Score = earnedTotal * 100 / possible
 
 	if result.Score < 0 {
 		result.Score = 0
@@ -428,6 +564,13 @@ func computeEnterpriseHealthScore(health *EnterpriseDNSHealth) HealthScoreResult
 		result.Score = 100
 	}
 	return result
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func enterpriseOverallStatus(health *EnterpriseDNSHealth) string {
@@ -450,13 +593,49 @@ func enterpriseOverallStatus(health *EnterpriseDNSHealth) string {
 	if health.TLSRPT != nil {
 		statuses = append(statuses, health.TLSRPT.Status)
 	}
+	// Expanded inventory participates in the rollup on exactly the same
+	// terms as the score: optional/not_applicable records are filtered out
+	// below, so an absent AAAA or autodiscover CNAME never degrades the
+	// overall status, while an unresolvable MX host or missing rDNS does.
+	if health.MailHostA != nil {
+		statuses = append(statuses, health.MailHostA.Status)
+	}
+	if health.MailHostAAAA != nil {
+		statuses = append(statuses, health.MailHostAAAA.Status)
+	}
+	for _, h := range health.MXHosts {
+		if h != nil {
+			statuses = append(statuses, h.Status)
+		}
+	}
+	if health.PTR != nil {
+		statuses = append(statuses, health.PTR.Status)
+	}
+	if health.Autodiscover != nil {
+		statuses = append(statuses, health.Autodiscover.Status)
+	}
+	if health.Autoconfig != nil {
+		statuses = append(statuses, health.Autoconfig.Status)
+	}
+	if health.TLSA != nil {
+		statuses = append(statuses, health.TLSA.Status)
+	}
+
+	scored := statuses[:0:0]
 	for _, s := range statuses {
-		if s == "fail" || s == "unknown" {
+		if scoredDNSStatus(s) {
+			scored = append(scored, s)
+		}
+	}
+	statuses = scored
+
+	for _, s := range statuses {
+		if s == "fail" || s == "unknown" || s == string(DNSStatusConfigRequired) {
 			return s
 		}
 	}
 	for _, s := range statuses {
-		if s == "warning" {
+		if s == "warning" || s == string(DNSStatusPending) || s == string(DNSStatusNotChecked) {
 			return "warning"
 		}
 	}

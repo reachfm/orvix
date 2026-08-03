@@ -327,7 +327,14 @@ func recomputeEnterpriseHealth(health *EnterpriseDNSHealth) {
 // whether a policy object exists at all.
 func isEnterpriseHealthComplete(health *EnterpriseDNSHealth) bool {
 	return health.MX != nil && health.SPF != nil && health.DKIM != nil &&
-		health.DMARC != nil && health.MTASTS != nil && health.TLSRPT != nil
+		health.DMARC != nil && health.MTASTS != nil && health.TLSRPT != nil &&
+		// Expanded inventory. A snapshot persisted before these records
+		// existed reconstructs them as nil, which is genuinely an
+		// incomplete picture of the domain and is reported as such rather
+		// than being papered over.
+		health.MailHostA != nil && health.MailHostAAAA != nil &&
+		len(health.MXHosts) > 0 && health.PTR != nil &&
+		health.Autodiscover != nil && health.Autoconfig != nil && health.TLSA != nil
 }
 
 // cooldownFields computes cooldown_until/retry_after_seconds from the most
