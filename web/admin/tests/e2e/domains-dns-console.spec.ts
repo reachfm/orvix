@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Browser } from "@playwright/test";
 import {
   CONFIGURED_DMARC, DNS_HEALTH_FIXTURE, REAL_ORVIX_SPF,
   mockAPI, openDNSModal, openDomains,
@@ -374,37 +374,48 @@ test("SRV row renders a resolver failure as unknown, never as 'not published'", 
   await expect(page.getByTestId("reason-autodiscover-srv")).not.toContainText("no autodiscover SRV record published");
 });
 
-test("the record table has no fixed row count and grows with the MX host set", async ({ page }) => {
-  // Baseline: whatever the default fixture yields. Nothing asserts "14".
+/**
+ * Counts the rendered record rows for a given health payload in a FRESH page.
+ *
+ * Each call gets its own page so the route table and the react-query cache
+ * start clean: re-mocking a live page and reloading raced against the cached
+ * previous response and made the row count flaky in CI.
+ */
+async function countRowsFor(browser: Browser, dnsHealth: Record<string, unknown>, settleOn?: string) {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await mockAPI(page, { dnsHealth });
   await openDomains(page);
   await openDNSModal(page);
-  const baseline = await page.getByTestId("dns-records-table").getByRole("row").count();
+  // Wait for the row that distinguishes this payload before counting, so the
+  // count is never taken mid-render.
+  if (settleOn) await expect(page.getByTestId(settleOn)).toBeVisible();
+  const rows = await page.getByTestId("dns-records-table").getByRole("row").count();
+  await context.close();
+  return rows;
+}
+
+function mxHost(n: number) {
+  return {
+    name: `mx${n}.example.com`, type: "MX-host", status: "pass", optional: false,
+    expected: "at least one A or AAAA address", observed: [`A 192.0.2.2${n}`],
+    checked_at: "2026-01-01T00:00:00Z", guidance: `Add an A record for mx${n}.example.com.`,
+  };
+}
+
+test("the record table has no fixed row count and grows with the MX host set", async ({ browser }) => {
+  // Baseline: whatever the default fixture yields. Nothing asserts "14".
+  const baseline = await countRowsFor(browser, DNS_HEALTH_FIXTURE, "dns-row-mx-host-0");
 
   // Two extra MX hosts must produce exactly two extra rows.
-  await page.getByRole("button", { name: /Close/i }).first().click();
-  await mockAPI(page, {
-    dnsHealth: {
+  const grown = await countRowsFor(
+    browser,
+    {
       ...DNS_HEALTH_FIXTURE,
-      mx_hosts: [
-        ...(DNS_HEALTH_FIXTURE.mx_hosts as unknown[]),
-        {
-          name: "mx2.example.com", type: "MX-host", status: "pass", optional: false,
-          expected: "at least one A or AAAA address", observed: ["A 192.0.2.26"],
-          checked_at: "2026-01-01T00:00:00Z", guidance: "Add an A record for mx2.example.com.",
-        },
-        {
-          name: "mx3.example.com", type: "MX-host", status: "pass", optional: false,
-          expected: "at least one A or AAAA address", observed: ["A 192.0.2.27"],
-          checked_at: "2026-01-01T00:00:00Z", guidance: "Add an A record for mx3.example.com.",
-        },
-      ],
+      mx_hosts: [...(DNS_HEALTH_FIXTURE.mx_hosts as unknown[]), mxHost(2), mxHost(3)],
     },
-  });
-  await page.reload({ waitUntil: "domcontentloaded" });
-  await openDomains(page);
-  await openDNSModal(page);
+    "dns-row-mx-host-2"
+  );
 
-  const grown = await page.getByTestId("dns-records-table").getByRole("row").count();
   expect(grown).toBe(baseline + 2);
-  await expect(page.getByTestId("dns-row-mx-host-2")).toBeVisible();
 });
