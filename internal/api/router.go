@@ -170,7 +170,22 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		// Wire customer domain administration service.
 		domainRepo := coremail.NewDomainSQLRepo(sqlDB)
 		dnsResolver := dnsops.NewNetResolver()
-		inspector := customerdomain.NewDNSInspector(dnsResolver)
+		// The canonical DNS expectations are read ONCE, here, from
+		// config and handed to the inspector. Every downstream consumer
+		// (live-record verification, the `expected` field in the API
+		// response, the repair guidance, and the record file the console
+		// downloads) reads them back out of the inspector, so no consumer
+		// can drift away from the operator's configured policy.
+		inspector := customerdomain.NewDNSInspector(dnsResolver).
+			WithExpectations(customerdomain.CanonicalExpectations{
+				SPFRecord:   cfg.CoreMail.ExpectedSPF,
+				DMARCPolicy: cfg.CoreMail.ExpectedDMARCPolicy,
+				DMARCRUA:    cfg.CoreMail.ExpectedDMARCRUA,
+				SRVTarget:   cfg.CoreMail.AutodiscoverSRVTarget,
+				SRVPort:     cfg.CoreMail.AutodiscoverSRVPort,
+				SRVPriority: cfg.CoreMail.AutodiscoverSRVPriority,
+				SRVWeight:   cfg.CoreMail.AutodiscoverSRVWeight,
+			})
 		verifRepo := customerdomain.NewVerificationRepo(sqlDB)
 		if err := verifRepo.EnsureTable(context.Background()); err != nil {
 			logger.Error("customer domain verification init failed, service disabled", zap.Error(err))

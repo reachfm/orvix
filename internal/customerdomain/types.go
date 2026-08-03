@@ -251,6 +251,13 @@ type EnterpriseDNSHealth struct {
 	// therefore OPTIONAL and never counted against the score.
 	Autodiscover *DNSRecordCheck `json:"autodiscover"`
 	Autoconfig   *DNSRecordCheck `json:"autoconfig"`
+	// AutodiscoverSRV is the live _autodiscover._tcp.<domain> SRV record
+	// compared field-by-field (priority, weight, port, target) against the
+	// operator-configured expectation in CanonicalExpectations. Like the
+	// CNAME delegation rows it is OPTIONAL — ORVIX serves autodiscover
+	// itself — but unlike them it is genuinely resolved and compared
+	// rather than assumed.
+	AutodiscoverSRV *DNSRecordCheck `json:"autodiscover_srv"`
 	// TLSA is always not_applicable: ORVIX has no DANE/TLSA configuration
 	// surface anywhere in internal/config, so there is no requirement to
 	// assert. It is reported explicitly rather than omitted so the operator

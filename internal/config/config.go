@@ -34,9 +34,55 @@ type Config struct {
 
 // CoreMailConfig controls the native CoreMail protocol runtime.
 type CoreMailConfig struct {
-	Enabled                   bool          `mapstructure:"enabled"`
-	Hostname                  string        `mapstructure:"hostname"`
-	ExpectedMX                []string      `mapstructure:"expected_mx"`
+	Enabled    bool     `mapstructure:"enabled"`
+	Hostname   string   `mapstructure:"hostname"`
+	ExpectedMX []string `mapstructure:"expected_mx"`
+
+	// ── Canonical DNS expectations ────────────────────────────────────
+	//
+	// These are the SINGLE source of truth for what the admin DNS console
+	// requires a customer domain to publish. Every consumer (the verifier
+	// that scores the live record, the `expected` field returned to the
+	// UI, the repair-guidance text, and the downloadable DNS record file)
+	// reads these same values via
+	// customerdomain.CanonicalExpectations — they must never be
+	// re-derived or hard-coded anywhere else.
+	//
+	// ExpectedSPF is the literal SPF TXT value this deployment publishes,
+	// e.g. "v=spf1 ip4:65.75.203.74 include:spf.orvix.email -all".
+	// A raw literal (rather than a mechanism list) is used because SPF
+	// mechanism ORDER is semantically significant and operators copy the
+	// value verbatim into their zone. When unset, the code falls back to
+	// a domain-derived "v=spf1 mx -all" (see canonicalSPF) purely for
+	// backward compatibility with deployments that predate this field.
+	ExpectedSPF string `mapstructure:"expected_spf"`
+
+	// ExpectedDMARCPolicy is the DMARC `p=` value ("none", "quarantine"
+	// or "reject"). Defaults to "quarantine" when unset.
+	ExpectedDMARCPolicy string `mapstructure:"expected_dmarc_policy"`
+
+	// ExpectedDMARCRUA is the FULL aggregate-report destination, e.g.
+	// "mailto:dmarc-reports@orvix.email".
+	//
+	// IMPORTANT FOR OPERATORS: when this is left unset the code emits the
+	// documented PLACEHOLDER "mailto:dmarc@<domain>" and marks the DMARC
+	// row's guidance as needing configuration. That placeholder is NOT a
+	// real, provisioned mailbox — ORVIX does not create dmarc@ on the
+	// customer's behalf. Set this to a mailbox you actually receive.
+	ExpectedDMARCRUA string `mapstructure:"expected_dmarc_rua"`
+
+	// AutodiscoverSRV* describe the expected _autodiscover._tcp.<domain>
+	// SRV record. ORVIX serves /autodiscover/autodiscover.xml from its own
+	// web host (see internal/api/router.go), so the target defaults to the
+	// domain's primary mail host and the port to 443 (autodiscover over
+	// HTTPS). Priority/weight default to 0/0 per common practice for a
+	// single-target service. Set AutodiscoverSRVTarget explicitly when the
+	// autodiscover endpoint is served from a host other than the mail host.
+	AutodiscoverSRVTarget   string `mapstructure:"autodiscover_srv_target"`
+	AutodiscoverSRVPort     int    `mapstructure:"autodiscover_srv_port"`
+	AutodiscoverSRVPriority int    `mapstructure:"autodiscover_srv_priority"`
+	AutodiscoverSRVWeight   int    `mapstructure:"autodiscover_srv_weight"`
+
 	LicenseFilePath           string        `mapstructure:"license_file_path"`
 	LicenseAuthorityCachePath string        `mapstructure:"license_authority_cache_path"`
 	LicenseAuthorityURL       string        `mapstructure:"license_authority_url"`

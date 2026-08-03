@@ -286,22 +286,137 @@ func (i *DNSInspector) checkTLSA(host, now string) *DNSRecordCheck {
 	}
 }
 
-// canonicalSPF returns the SPF record ORVIX requires. It is derived from the
-// domain's own mail infrastructure: every host that receives mail for the
-// domain (its MX set) is also the host that sends it, so the `mx` mechanism
-// authorises exactly the right senders without hardcoding an IP that would go
-// stale. `-all` (hard fail) is used because ORVIX is the sole sending path.
-func canonicalSPF() string {
-	return "v=spf1 mx -all"
+// checkAutodiscoverSRV resolves _autodiscover._tcp.<domain> and compares
+// every SRV field (priority, weight, port, target) against the single
+// canonical, operator-CONFIGURED expectation. Nothing here is invented: the
+// expected target/port come from CanonicalExpectations (coremail
+// autodiscover_srv_* falling back to the domain's own primary mail host on
+// 443, which is where ORVIX itself serves /autodiscover/autodiscover.xml —
+// see internal/api/router.go).
+//
+// RFC 2782 permits several answers for one name. A client picks ONE by
+// priority then weighted random, so any single answer may be the one used.
+// We therefore treat the record as correct when AT LEAST ONE answer matches
+// the expectation exactly, and report every answer in Observed. When
+// some-but-not-all answers match we downgrade to warning and name the
+// non-matching ones: a stray answer sends a share of clients to the wrong
+// endpoint, and hiding that would be worse than a noisy row.
+//
+// The row is OPTIONAL throughout: a missing SRV record breaks neither mail
+// flow nor client setup (ORVIX serves autodiscover directly), so it must
+// never drag the health score down.
+func (i *DNSInspector) checkAutodiscoverSRV(ctx context.Context, domain, mailHost, now string) *DNSRecordCheck {
+	name := AutodiscoverSRVName(domain)
+
+	expected, ok := i.expectations.AutodiscoverSRVExpectedString(mailHost)
+	if !ok {
+		// No configured target AND no derivable mail host. Report the row
+		// honestly as not applicable rather than fabricating a target.
+		return &DNSRecordCheck{
+			Name:      name,
+			Type:      "SRV",
+			Status:    string(DNSStatusNotApplicable),
+			Optional:  true,
+			Reason:    "no autodiscover SRV target is configured and none can be derived from the domain's mail host",
+			Guidance:  "No action required. Set coremail.autodiscover_srv_target to enable verification of this record.",
+			CheckedAt: now,
+		}
+	}
+
+	wantTarget, wantPort, wantPriority, wantWeight, _ := i.expectations.AutodiscoverSRV(mailHost)
+	guidance := fmt.Sprintf("Optional. Publish an SRV record at %s with the value %q (priority %d, weight %d, port %d, target %s).",
+		name, expected, wantPriority, wantWeight, wantPort, wantTarget)
+
+	answers, err := i.dns.LookupSRV(ctx, name)
+	if err != nil {
+		if isDNSNotFound(err) {
+			return &DNSRecordCheck{
+				Name: name, Type: "SRV",
+				Status: string(DNSStatusOptional), Optional: true,
+				Expected:  expected,
+				Reason:    "no autodiscover SRV record published",
+				Guidance:  guidance,
+				CheckedAt: now,
+			}
+		}
+		// A resolver failure or timeout is NOT the same as "not
+		// published": we do not know, and must claim neither.
+		reason := fmt.Sprintf("dns error: %v", err)
+		if isDNSTimeout(err) {
+			reason = fmt.Sprintf("dns lookup timed out: %v", err)
+		}
+		return &DNSRecordCheck{
+			Name: name, Type: "SRV",
+			Status: string(DNSStatusUnknown), Optional: true,
+			Expected:  expected,
+			Reason:    reason,
+			Guidance:  guidance,
+			CheckedAt: now,
+		}
+	}
+
+	observed := make([]string, 0, len(answers))
+	mismatches := make([]string, 0, len(answers))
+	matched := false
+	for _, a := range answers {
+		if a == nil {
+			continue
+		}
+		target := strings.TrimSuffix(a.Target, ".")
+		observed = append(observed, fmt.Sprintf("%d %d %d %s.", a.Priority, a.Weight, a.Port, target))
+		if strings.EqualFold(target, wantTarget) && int(a.Port) == wantPort &&
+			int(a.Priority) == wantPriority && int(a.Weight) == wantWeight {
+			matched = true
+			continue
+		}
+		switch {
+		case !strings.EqualFold(target, wantTarget):
+			mismatches = append(mismatches, fmt.Sprintf("target %s (want %s)", target, wantTarget))
+		case int(a.Port) != wantPort:
+			mismatches = append(mismatches, fmt.Sprintf("port %d (want %d)", a.Port, wantPort))
+		default:
+			mismatches = append(mismatches, fmt.Sprintf("priority/weight %d/%d (want %d/%d)", a.Priority, a.Weight, wantPriority, wantWeight))
+		}
+	}
+
+	if len(observed) == 0 {
+		return &DNSRecordCheck{
+			Name: name, Type: "SRV",
+			Status: string(DNSStatusOptional), Optional: true,
+			Expected:  expected,
+			Reason:    "no autodiscover SRV record published",
+			Guidance:  guidance,
+			CheckedAt: now,
+		}
+	}
+
+	check := &DNSRecordCheck{
+		Name: name, Type: "SRV",
+		Optional:  true,
+		Expected:  expected,
+		Observed:  observed,
+		Guidance:  guidance,
+		CheckedAt: now,
+	}
+	switch {
+	case matched && len(mismatches) == 0:
+		check.Status = string(DNSStatusPass)
+	case matched:
+		check.Status = string(DNSStatusWarning)
+		check.Reason = "an SRV answer matches the expected endpoint, but additional answers do not: " + strings.Join(mismatches, "; ")
+	default:
+		check.Status = string(DNSStatusWarning)
+		check.Reason = "published autodiscover SRV does not match the expected endpoint: " + strings.Join(mismatches, "; ")
+	}
+	return check
 }
 
-// canonicalDMARC returns the DMARC record ORVIX requires for a domain. ORVIX
-// stores no per-domain DMARC policy preference anywhere (the domain model
-// carries only a DMARCEnabled boolean — there is no policy or rua column), so
-// this is a fixed, correct template parameterised only by the domain name.
-func canonicalDMARC(domain string) string {
-	return fmt.Sprintf("v=DMARC1; p=quarantine; rua=mailto:dmarc@%s", domain)
-}
+// NOTE: the former canonicalSPF()/canonicalDMARC() helpers lived here and
+// hard-coded "v=spf1 mx -all" and "rua=mailto:dmarc@<domain>". They were
+// removed deliberately: hard-coding silently overrode this deployment's real
+// SPF policy and invented an unprovisioned DMARC mailbox. The required values
+// now come from CanonicalExpectations (see expectations.go), which is fed
+// from config in internal/api/router.go. Do not reintroduce a second source.
 
 // canonicalMTASTS / canonicalTLSRPT are the required values for the two
 // policy-reporting TXT records.

@@ -15,6 +15,12 @@ type DNSInspector struct {
 	timeout       time.Duration
 	nowFunc       func() time.Time
 	mtastsFetcher *MTASTSFetcher
+
+	// expectations is the single canonical source for every required
+	// record value (SPF, DMARC, autodiscover SRV). Its zero value
+	// reproduces the historical hard-coded behaviour, so an inspector
+	// built without WithExpectations still works.
+	expectations CanonicalExpectations
 }
 
 // NewDNSInspector creates a DNS inspector backed by the given resolver.
@@ -37,6 +43,19 @@ func (i *DNSInspector) WithMTASTSFetcher(f *MTASTSFetcher) *DNSInspector {
 	i.mtastsFetcher = f
 	return i
 }
+
+// WithExpectations installs the operator-configured canonical DNS
+// expectations (from coremail.expected_spf / expected_dmarc_* /
+// autodiscover_srv_*). Every consumer — verifier, `expected` field,
+// guidance text and downloaded record file — reads from this one value.
+func (i *DNSInspector) WithExpectations(e CanonicalExpectations) *DNSInspector {
+	i.expectations = e
+	return i
+}
+
+// Expectations exposes the canonical expectations so handlers and tests can
+// assert that the value they configured is the value the UI receives.
+func (i *DNSInspector) Expectations() CanonicalExpectations { return i.expectations }
 
 // Inspect runs all DNS checks for a domain and returns structured results.
 func (i *DNSInspector) Inspect(ctx context.Context, domain string, expectedMX string, dkimSelector string, expectedDKIMRecord string) *DNSResult {
@@ -130,7 +149,34 @@ func (i *DNSInspector) checkSPF(ctx context.Context, domain, now string) *SPFChe
 	if spf == "" {
 		return &SPFCheck{Status: string(DNSStatusFail), Reason: "no SPF record found", CheckedAt: now}
 	}
-	return &SPFCheck{Status: string(DNSStatusPass), Observed: spf, CheckedAt: now}
+
+	// Compare the LIVE record against the one canonical expectation. This is
+	// consumer (a) of CanonicalExpectations: the verifier and the `expected`
+	// value shown in the UI must be the same string, or the console can tell
+	// an operator their record is correct while requiring a different one.
+	//
+	// Only an operator-CONFIGURED policy is enforced. With no expected_spf
+	// set the expectation is the generic domain-derived fallback, which is
+	// not authoritative enough to warn against — that preserves the previous
+	// behaviour for deployments that have not configured this yet.
+	expected := i.expectations.SPF(domain)
+	if i.expectations.SPFIsConfigured() && !spfEquivalent(spf, expected) {
+		return &SPFCheck{
+			Status:    string(DNSStatusWarning),
+			Observed:  spf,
+			Expected:  expected,
+			Reason:    "published SPF record does not match the configured ORVIX policy",
+			CheckedAt: now,
+		}
+	}
+	return &SPFCheck{Status: string(DNSStatusPass), Observed: spf, Expected: expected, CheckedAt: now}
+}
+
+// spfEquivalent compares two SPF records ignoring case and redundant
+// whitespace. Mechanism ORDER is significant in SPF evaluation, so it is
+// deliberately NOT normalised away.
+func spfEquivalent(a, b string) bool {
+	return strings.EqualFold(strings.Join(strings.Fields(a), " "), strings.Join(strings.Fields(b), " "))
 }
 
 func (i *DNSInspector) checkDKIM(ctx context.Context, domain, selector, expectedRecord, now string) *DKIMCheck {
@@ -226,6 +272,23 @@ func (i *DNSInspector) checkDMARC(ctx context.Context, domain, now string) *DMAR
 
 	if p == "none" {
 		return &DMARCCheck{Status: string(DNSStatusWarning), Observed: truncateForDisplay(dmarc, 200), Reason: "DMARC policy is p=none (no enforcement)", CheckedAt: now}
+	}
+
+	// Consumer (a) of CanonicalExpectations for DMARC: the enforcement level
+	// actually published is compared against the one configured policy.
+	// p=reject is stricter than a configured p=quarantine, so it is accepted
+	// rather than flagged — only a WEAKER-than-required policy warns.
+	wantPolicy := strings.TrimSpace(i.expectations.DMARCPolicy)
+	if wantPolicy == "" {
+		wantPolicy = DefaultDMARCPolicy
+	}
+	if wantPolicy == "reject" && p != "reject" {
+		return &DMARCCheck{
+			Status:    string(DNSStatusWarning),
+			Observed:  truncateForDisplay(dmarc, 200),
+			Reason:    "published DMARC policy p=" + p + " is weaker than the configured policy p=reject",
+			CheckedAt: now,
+		}
 	}
 	return &DMARCCheck{Status: string(DNSStatusPass), Observed: truncateForDisplay(dmarc, 200), CheckedAt: now}
 }
@@ -324,9 +387,11 @@ func (i *DNSInspector) InspectEnterprise(ctx context.Context, domain string, exp
 		Autodiscover: i.checkDelegationCNAME(ctx, "autodiscover."+domain, mailHost, "Outlook autodiscover", now),
 		Autoconfig:   i.checkDelegationCNAME(ctx, "autoconfig."+domain, mailHost, "Thunderbird autoconfig", now),
 		TLSA:         i.checkTLSA(mailHost, now),
+
+		AutodiscoverSRV: i.checkAutodiscoverSRV(ctx, domain, mailHost, now),
 	}
 
-	applyCanonicalExpectations(health, domain, mailHost)
+	i.applyCanonicalExpectations(health, domain, mailHost)
 
 	score := computeEnterpriseHealthScore(health)
 	health.HealthScore = score.Score
@@ -400,7 +465,9 @@ func (i *DNSInspector) checkTLSRPT(ctx context.Context, domain, now string) *TLS
 // `expected` value and concrete repair guidance, and that a record whose
 // required value is genuinely indeterminate is marked
 // configuration_required rather than being allowed to read as a pass.
-func applyCanonicalExpectations(health *EnterpriseDNSHealth, domain, mailHost string) {
+func (i *DNSInspector) applyCanonicalExpectations(health *EnterpriseDNSHealth, domain, mailHost string) {
+	e := i.expectations
+
 	if c := health.MX; c != nil {
 		if c.Expected == "" {
 			c.Expected = mailHost
@@ -409,11 +476,16 @@ func applyCanonicalExpectations(health *EnterpriseDNSHealth, domain, mailHost st
 	}
 
 	if c := health.SPF; c != nil {
-		// Derived from the domain's own mail infrastructure: the `mx`
-		// mechanism authorises exactly the hosts in the domain's MX set,
-		// which for ORVIX are also the sending hosts.
-		c.Expected = canonicalSPF()
+		// Consumers (b) and (c): the `expected` field returned to the UI
+		// and the repair guidance both read the SAME
+		// CanonicalExpectations value the verifier compared against, so
+		// they can never diverge. The frontend's downloadable record file
+		// (consumer (d)) renders this same `expected` field.
+		c.Expected = e.SPF(domain)
 		c.Guidance = fmt.Sprintf("Publish a single TXT record at %s with the value %q. Exactly one SPF record may exist per domain.", domain, c.Expected)
+		if !e.SPFIsConfigured() {
+			c.Guidance += " This deployment has no coremail.expected_spf configured, so the generic MX-derived policy is shown; set expected_spf to this deployment's real SPF policy."
+		}
 		if c.Expected == "" {
 			c.Status = string(DNSStatusConfigRequired)
 			c.Reason = "required SPF value could not be determined from configuration"
@@ -421,10 +493,15 @@ func applyCanonicalExpectations(health *EnterpriseDNSHealth, domain, mailHost st
 	}
 
 	if c := health.DMARC; c != nil {
-		// ORVIX stores no per-domain DMARC policy preference, so the
-		// canonical template is the requirement.
-		c.Expected = canonicalDMARC(domain)
+		// Consumers (b)/(c)/(d) again — one source, four readers.
+		c.Expected = e.DMARC(domain)
 		c.Guidance = fmt.Sprintf("Add a TXT record at _dmarc.%s with the value %q.", domain, c.Expected)
+		if _, real := e.DMARCRUAValue(domain); !real {
+			// Never let a fabricated address read as a settled
+			// requirement: dmarc@<domain> is a PLACEHOLDER that ORVIX
+			// does not provision. Say so in the operator-facing text.
+			c.Guidance += " The rua address shown is a placeholder: ORVIX does not provision dmarc@" + domain + ". Set coremail.expected_dmarc_rua to a mailbox you actually receive before publishing."
+		}
 		if c.Expected == "" {
 			c.Status = string(DNSStatusConfigRequired)
 			c.Reason = "required DMARC value could not be determined from configuration"
@@ -549,6 +626,13 @@ func computeEnterpriseHealthScore(health *EnterpriseDNSHealth) HealthScoreResult
 	}
 	if health.TLSA != nil {
 		add("tlsa", 0, health.TLSA.Status)
+	}
+	// Weight 0: the autodiscover SRV record is a convenience, and ORVIX
+	// serves autodiscover directly, so its absence must not reduce the
+	// score. It is still added to the breakdown so the row is accounted
+	// for rather than silently dropped.
+	if health.AutodiscoverSRV != nil {
+		add("autodiscover_srv", 0, health.AutodiscoverSRV.Status)
 	}
 
 	if possible <= 0 {
