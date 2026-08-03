@@ -3,6 +3,7 @@ package domain
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -668,5 +669,51 @@ func TestPlatformDKIMRollsBackWhenAuditFails(t *testing.T) {
 	_ = svc.repo.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM coremail_dkim_config").Scan(&cfgCount)
 	if cfgCount != 0 {
 		t.Fatalf("dkim config must roll back on audit failure, got %d rows", cfgCount)
+	}
+}
+
+// TestDKIMResultNeverSerializesPrivateKey locks the response contract for all
+// four DKIM handler paths (GetAdminDomainDKIM, PostAdminDomainDKIMGenerate,
+// PostAdminDomainDKIMRotate and PlatformDKIM), every one of which serializes
+// exactly this struct as {"dkim": ...}. The private key is generated and stored
+// server-side (dkim.DKIMConfig.PrivateKeyPEM) and is read back only to derive
+// the public key — it must never become reachable over the wire. If someone
+// adds a private-key field to DKIMResult, this test fails.
+func TestDKIMResultNeverSerializesPrivateKey(t *testing.T) {
+	// A realistic-looking PEM in the selector field proves we are checking the
+	// serialized shape, not merely that the fixture happens to be clean.
+	r := DKIMResult{
+		Selector:      "mail",
+		PublicDNSTxt:  "v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A",
+		DNSRecordName: "mail._domainkey.example.com",
+	}
+	b, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	payload := string(b)
+
+	for _, marker := range []string{
+		"BEGIN RSA PRIVATE KEY", "BEGIN PRIVATE KEY", "private_key",
+		"privateKey", "PrivateKeyPEM", "private_key_pem",
+	} {
+		if strings.Contains(payload, marker) {
+			t.Fatalf("DKIM response contains private key marker %q: %s", marker, payload)
+		}
+	}
+
+	// Assert the exact field set, so a newly added field is a deliberate act.
+	var got map[string]any
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	want := map[string]bool{"selector": true, "public_dns_txt": true, "dns_record_name": true}
+	if len(got) != len(want) {
+		t.Fatalf("DKIMResult field set changed: got %v, want exactly %v", got, want)
+	}
+	for k := range got {
+		if !want[k] {
+			t.Errorf("unexpected field %q in DKIM response: %s", k, payload)
+		}
 	}
 }
