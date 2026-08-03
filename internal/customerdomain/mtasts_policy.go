@@ -13,13 +13,18 @@ import (
 	"time"
 )
 
+// MTASTSPolicy is the parsed MTA-STS HTTPS policy document. It is embedded in
+// EnterpriseDNSHealth as "mtasts_policy", so every field carries an explicit
+// snake_case json tag: without them encoding/json emits Go-style field names
+// ("Raw", "MaxAge", "MX") while every other field in the DNS health contract —
+// and the admin frontend consuming it — is snake_case. Do not remove the tags.
 type MTASTSPolicy struct {
-	Raw    string
-	Valid  bool
-	Mode   string
-	MaxAge int
-	MX     []string
-	Error  string
+	Raw    string   `json:"raw,omitempty"`
+	Valid  bool     `json:"valid"`
+	Mode   string   `json:"mode,omitempty"`
+	MaxAge int      `json:"max_age,omitempty"`
+	MX     []string `json:"mx,omitempty"`
+	Error  string   `json:"error,omitempty"`
 }
 
 type MTASTSPolicyCheck struct {
