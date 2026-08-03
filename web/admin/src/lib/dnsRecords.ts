@@ -230,6 +230,11 @@ export function buildRecordRows(
   // ── Client autodiscovery (optional) ──
   if (health.autodiscover) rows.push(rowFromRecordCheck("autodiscover", health.autodiscover));
   if (health.autoconfig) rows.push(rowFromRecordCheck("autoconfig", health.autoconfig));
+  // The SRV row is rendered only when the server actually produced it, so a
+  // health payload from an older server simply yields one row fewer — the
+  // table has no fixed row count anywhere.
+  if (health.autodiscover_srv)
+    rows.push(rowFromRecordCheck("autodiscover-srv", health.autodiscover_srv));
 
   // ── DANE / TLSA ──
   if (health.tlsa) rows.push(rowFromRecordCheck("tlsa", health.tlsa));

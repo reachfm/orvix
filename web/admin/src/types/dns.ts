@@ -91,6 +91,13 @@ export interface DomainDNSHealth {
   ptr?: DNSRecordCheck | null;
   autodiscover?: DNSRecordCheck | null;
   autoconfig?: DNSRecordCheck | null;
+  /**
+   * The live _autodiscover._tcp.<domain> SRV record, compared field by field
+   * (priority, weight, port, target) against the server's configured
+   * expectation. Optional in the scoring sense — ORVIX serves autodiscover
+   * itself — but genuinely resolved and compared rather than assumed.
+   */
+  autodiscover_srv?: DNSRecordCheck | null;
   tlsa?: DNSRecordCheck | null;
 }
 

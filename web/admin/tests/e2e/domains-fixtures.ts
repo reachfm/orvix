@@ -59,6 +59,16 @@ export const DOMAINS_FIXTURE = {
   limit: 25,
 };
 
+/**
+ * The REAL, deployed ORVIX SPF policy. Fixtures use this specific value
+ * rather than the generic "v=spf1 mx -all" a previous change hard-coded, so
+ * the e2e suite would catch that regression reappearing.
+ */
+export const REAL_ORVIX_SPF = "v=spf1 ip4:65.75.203.74 include:spf.orvix.email -all";
+
+/** A configured DMARC rua — never the fabricated dmarc@<domain> placeholder. */
+export const CONFIGURED_DMARC = "v=DMARC1; p=quarantine; rua=mailto:dmarc-reports@orvix.email";
+
 function record(over: Record<string, unknown>) {
   return { name: "", type: "", status: "unknown", observed: [], optional: false, checked_at: "2026-01-01T00:00:00Z", ...over };
 }
@@ -86,10 +96,9 @@ export const DNS_HEALTH_FIXTURE = {
   },
   spf: {
     status: "pass",
-    expected: "v=spf1 mx -all",
-    observed: "v=spf1 mx -all",
-    guidance:
-      'Publish a single TXT record at example.com with the value "v=spf1 mx -all". Exactly one SPF record may exist per domain.',
+    expected: REAL_ORVIX_SPF,
+    observed: REAL_ORVIX_SPF,
+    guidance: `Publish a single TXT record at example.com with the value "${REAL_ORVIX_SPF}". Exactly one SPF record may exist per domain.`,
     checked_at: "2026-01-01T00:00:00Z",
   },
   dkim: {
@@ -105,11 +114,10 @@ export const DNS_HEALTH_FIXTURE = {
   },
   dmarc: {
     status: "fail",
-    expected: "v=DMARC1; p=quarantine; rua=mailto:dmarc@example.com",
+    expected: CONFIGURED_DMARC,
     observed: "",
     reason: "DMARC record not found",
-    guidance:
-      'Add a TXT record at _dmarc.example.com with the value "v=DMARC1; p=quarantine; rua=mailto:dmarc@example.com".',
+    guidance: `Add a TXT record at _dmarc.example.com with the value "${CONFIGURED_DMARC}".`,
     checked_at: "2026-01-01T00:00:00Z",
   },
   mtasts: {
@@ -165,6 +173,17 @@ export const DNS_HEALTH_FIXTURE = {
     reason: "autoconfig.example.com is not published; Thunderbird autoconfig falls back to the ORVIX-hosted endpoint",
     guidance: "Optional. Add a CNAME record for autoconfig.example.com pointing to mail.example.com.",
   }),
+  // The default payload shows the SRV row in a NON-PASSING state (wrong
+  // target), which is the state the reviewer asked to see rendered.
+  autodiscover_srv: record({
+    name: "_autodiscover._tcp.example.com", type: "SRV", status: "warning", optional: true,
+    expected: "0 0 443 mail.example.com.",
+    observed: ["0 0 443 legacy.elsewhere.example."],
+    reason:
+      "published autodiscover SRV does not match the expected endpoint: target legacy.elsewhere.example (want mail.example.com)",
+    guidance:
+      'Optional. Publish an SRV record at _autodiscover._tcp.example.com with the value "0 0 443 mail.example.com." (priority 0, weight 0, port 443, target mail.example.com).',
+  }),
   tlsa: record({
     name: "_25._tcp.mail.example.com", type: "TLSA", status: "not_applicable", optional: true,
     reason: "DANE/TLSA is not a configurable feature of this ORVIX deployment, so no TLSA record is required",
@@ -175,8 +194,18 @@ export const DNS_HEALTH_FIXTURE = {
 /** Counts every POST the page makes, keyed by URL suffix. */
 export type Counters = { verify: number; generate: number; rotate: number };
 
-export async function mockAPI(page: Page): Promise<Counters> {
+/**
+ * mockAPI installs the mocked backend. `dnsHealth` replaces the DNS health
+ * payload wholesale, which lets a test render any single row (notably the
+ * autodiscover SRV row) in an arbitrary state without touching the shared
+ * fixture.
+ */
+export async function mockAPI(
+  page: Page,
+  opts: { dnsHealth?: Record<string, unknown> } = {},
+): Promise<Counters> {
   const counters: Counters = { verify: 0, generate: 0, rotate: 0 };
+  const dnsHealth = opts.dnsHealth ?? DNS_HEALTH_FIXTURE;
 
   const json = (route: Route, body: unknown, status = 200) =>
     route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
@@ -188,7 +217,7 @@ export async function mockAPI(page: Page): Promise<Counters> {
   await page.route("**/api/**", (r) => json(r, {}));
 
   await page.route("**/api/v1/enterprise/domains", (r) => json(r, DOMAINS_FIXTURE));
-  await page.route("**/api/v1/enterprise/domains/*/dns", (r) => json(r, DNS_HEALTH_FIXTURE));
+  await page.route("**/api/v1/enterprise/domains/*/dns", (r) => json(r, dnsHealth));
 
   await page.route("**/api/v1/enterprise/domains/*/dns/verify", (r) => {
     counters.verify += 1;

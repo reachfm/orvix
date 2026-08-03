@@ -316,28 +316,34 @@ describe("DNS records modal", () => {
     expect(screen.getByTestId("observed-mx-host-0")).toHaveTextContent("A 192.0.2.25");
   });
 
-  it("always renders a real required value for SPF and DMARC, never a dash", async () => {
+  it("renders whatever SPF/DMARC values the server configured, never a hard-coded generic", async () => {
+    // These are the server's CONFIGURED values (the real ORVIX policy and a
+    // real reporting mailbox). The component must display them verbatim: it
+    // previously showed a generic "v=spf1 mx -all" and a fabricated
+    // dmarc@<domain> instead.
+    const realSPF = "v=spf1 ip4:65.75.203.74 include:spf.orvix.email -all";
+    const realDMARC = "v=DMARC1; p=quarantine; rua=mailto:dmarc-reports@orvix.email";
     vi.mocked(api.getEnterpriseDomainDNS).mockResolvedValue({
       ...defaultDNSHealth,
       spf: {
-        status: "fail", observed: "", expected: "v=spf1 mx -all",
+        status: "fail", observed: "", expected: realSPF,
         reason: "no SPF record found",
-        guidance: 'Publish a single TXT record at example.com with the value "v=spf1 mx -all". Exactly one SPF record may exist per domain.',
+        guidance: `Publish a single TXT record at example.com with the value "${realSPF}". Exactly one SPF record may exist per domain.`,
       },
       dmarc: {
         status: "fail", observed: "",
-        expected: "v=DMARC1; p=quarantine; rua=mailto:dmarc@example.com",
+        expected: realDMARC,
         reason: "DMARC record not found",
-        guidance: 'Add a TXT record at _dmarc.example.com with the value "v=DMARC1; p=quarantine; rua=mailto:dmarc@example.com".',
+        guidance: `Add a TXT record at _dmarc.example.com with the value "${realDMARC}".`,
       },
     } as any);
     await openModal();
 
-    expect(screen.getByTestId("required-spf")).toHaveTextContent("v=spf1 mx -all");
+    expect(screen.getByTestId("required-spf")).toHaveTextContent(realSPF);
+    expect(screen.getByTestId("required-spf")).not.toHaveTextContent("v=spf1 mx -all");
     expect(screen.getByTestId("required-spf").textContent).not.toBe("—");
-    expect(screen.getByTestId("required-dmarc")).toHaveTextContent(
-      "v=DMARC1; p=quarantine; rua=mailto:dmarc@example.com"
-    );
+    expect(screen.getByTestId("required-dmarc")).toHaveTextContent(realDMARC);
+    expect(screen.getByTestId("required-dmarc")).not.toHaveTextContent("dmarc@example.com");
     expect(screen.getByTestId("required-dmarc").textContent).not.toBe("—");
     expect(screen.getByTestId("guidance-spf")).toHaveTextContent("Exactly one SPF record may exist per domain");
     expect(screen.getByTestId("guidance-dmarc")).toHaveTextContent("_dmarc.example.com");
