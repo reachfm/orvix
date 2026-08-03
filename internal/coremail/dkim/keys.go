@@ -8,6 +8,38 @@ import (
 	"fmt"
 )
 
+// DerivePublicKeyRecordValue parses a PEM-encoded RSA private key (PKCS8 or
+// PKCS1) and returns the DKIM DNS TXT record value ("v=DKIM1; k=rsa; p=...")
+// for its public component, matching the exact wire format GenerateKeyPair
+// produces. Returns ("", false) for any malformed, non-RSA, or otherwise
+// unsupported key — callers MUST treat that as "no derivable public key"
+// rather than inventing or logging key material. This is the single shared
+// implementation of PEM -> public-key-TXT derivation for the whole codebase;
+// do not duplicate this parsing logic elsewhere.
+func DerivePublicKeyRecordValue(privateKeyPEM string) (string, bool) {
+	block, _ := pem.Decode([]byte(privateKeyPEM))
+	if block == nil {
+		return "", false
+	}
+	keyAny, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		k1, err1 := x509.ParsePKCS1PrivateKey(block.Bytes)
+		if err1 != nil {
+			return "", false
+		}
+		keyAny = k1
+	}
+	rsaKey, ok := keyAny.(*rsa.PrivateKey)
+	if !ok {
+		return "", false
+	}
+	pubBytes, err := x509.MarshalPKIXPublicKey(&rsaKey.PublicKey)
+	if err != nil {
+		return "", false
+	}
+	return fmt.Sprintf("v=DKIM1; k=rsa; p=%s", pemEncodeBase64(pubBytes)), true
+}
+
 // GenerateKeyPair creates an RSA 2048-bit private key and returns the PEM-encoded
 // private key and the DNS TXT record value for public key publication.
 func GenerateKeyPair(selector, domain string) (privateKeyPEM string, dnsRecord string, err error) {

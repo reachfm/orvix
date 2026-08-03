@@ -2,10 +2,7 @@ package customerdomain
 
 import (
 	"context"
-	"crypto/rsa"
-	"crypto/x509"
 	"database/sql"
-	"encoding/pem"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -489,30 +486,14 @@ func statusFieldEnterprise(h *EnterpriseDNSHealth, fn func(*EnterpriseDNSHealth)
 	return fn(h)
 }
 
-func deriveExpectedDKIMRecord(privPEM string, selector string, domain string) (string, bool) {
-	block, _ := pem.Decode([]byte(privPEM))
-	if block == nil {
-		return "", false
-	}
-	keyAny, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-	if err != nil {
-		if k1, err1 := x509.ParsePKCS1PrivateKey(block.Bytes); err1 == nil {
-			keyAny = k1
-		} else {
-			return "", false
-		}
-	}
-	rsaKey, ok := keyAny.(*rsa.PrivateKey)
-	if !ok {
-		return "", false
-	}
-	pubBytes, err := x509.MarshalPKIXPublicKey(&rsaKey.PublicKey)
-	if err != nil {
-		return "", false
-	}
-	_, recordValue := dkim.GenerateDNSRecord(selector, domain, string(pubBytes))
-	if recordValue == "" {
-		return "", false
-	}
-	return recordValue, true
+// deriveExpectedDKIMRecord returns the DKIM DNS TXT record value the
+// tenant's stored private key should be publishing. It delegates entirely
+// to dkim.DerivePublicKeyRecordValue — the single shared PEM-to-public-key
+// implementation also used by internal/api/handlers/dns_ops.go — rather
+// than duplicating the pem.Decode/x509.Parse*/MarshalPKIX sequence here.
+// selector and domain are accepted for call-site symmetry with the
+// generate/rotate flow but are not otherwise used: the record value format
+// depends only on the key, not on where it will be published.
+func deriveExpectedDKIMRecord(privPEM string, _ string, _ string) (string, bool) {
+	return dkim.DerivePublicKeyRecordValue(privPEM)
 }

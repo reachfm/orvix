@@ -146,9 +146,33 @@ func (i *DNSInspector) checkDKIM(ctx context.Context, domain, selector, expected
 		return &DKIMCheck{Selector: selector, Status: string(DNSStatusUnknown), Reason: fmt.Sprintf("dns error: %v", err), CheckedAt: now}
 	}
 
-	observed := strings.Join(records, "")
-	if expectedRecord != "" && observed != expectedRecord {
-		return &DKIMCheck{Selector: selector, Status: string(DNSStatusFail), Observed: truncateForDisplay(observed, 120), Expected: truncateForDisplay(expectedRecord, 120), Reason: "DKIM record mismatch", CheckedAt: now}
+	logicalRecords := splitDKIMTXTRecords(records)
+	if len(logicalRecords) > 1 {
+		return &DKIMCheck{Selector: selector, Status: string(DNSStatusFail), Observed: truncateForDisplay(strings.Join(records, " | "), 120), Reason: fmt.Sprintf("multiple conflicting DKIM records published at %s (%d records)", dkimDomain, len(logicalRecords)), CheckedAt: now}
+	}
+	observed := strings.Join(logicalRecords[0], "")
+
+	// Never compare the raw record strings. Parse tags and compare the
+	// decoded p= public-key bytes, so reordered tags, harmless whitespace,
+	// and additional optional tags in either record do not produce a
+	// false mismatch — and so a malformed/missing/revoked/duplicate p=
+	// tag is always rejected explicitly rather than silently accepted.
+	if expectedRecord != "" {
+		match, err := dkimRecordsMatch(observed, expectedRecord)
+		if err != nil {
+			return &DKIMCheck{Selector: selector, Status: string(DNSStatusFail), Observed: truncateForDisplay(observed, 120), Expected: truncateForDisplay(expectedRecord, 120), Reason: "DKIM record invalid: " + err.Error(), CheckedAt: now}
+		}
+		if !match {
+			return &DKIMCheck{Selector: selector, Status: string(DNSStatusFail), Observed: truncateForDisplay(observed, 120), Expected: truncateForDisplay(expectedRecord, 120), Reason: "DKIM record mismatch", CheckedAt: now}
+		}
+		return &DKIMCheck{Selector: selector, Status: string(DNSStatusPass), Observed: truncateForDisplay(observed, 120), CheckedAt: now}
+	}
+
+	// No expected value was supplied: still validate the published record
+	// is well-formed and not revoked, rather than accepting any garbage
+	// that happens to be present at the selector name.
+	if _, err := dkimPublicKeyBytes(observed); err != nil {
+		return &DKIMCheck{Selector: selector, Status: string(DNSStatusFail), Observed: truncateForDisplay(observed, 120), Reason: "DKIM record invalid: " + err.Error(), CheckedAt: now}
 	}
 	return &DKIMCheck{Selector: selector, Status: string(DNSStatusPass), Observed: truncateForDisplay(observed, 120), CheckedAt: now}
 }
