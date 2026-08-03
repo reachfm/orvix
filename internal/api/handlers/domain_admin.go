@@ -467,6 +467,17 @@ func (h *Handler) VerifyEnterpriseDomainDNS(c fiber.Ctx) error {
 			return respondAPIError(c, fiber.StatusNotFound, "DOMAIN_NOT_FOUND", "Domain not found.")
 		}
 		if errors.Is(err, customerdomain.ErrVerificationCooldown) {
+			// health here (if non-nil) is the last successful snapshot —
+			// the 429 body must still carry it so the client never has to
+			// discard good data just because this particular call was
+			// rate-limited. An empty snapshot (never verified before)
+			// legitimately has no body to attach.
+			if health != nil {
+				if health.RetryAfterSeconds > 0 {
+					c.Set("Retry-After", strconv.Itoa(health.RetryAfterSeconds))
+				}
+				return c.Status(fiber.StatusTooManyRequests).JSON(health)
+			}
 			return respondAPIError(c, fiber.StatusTooManyRequests, "VERIFICATION_COOLDOWN", "Verification cooldown active, try again later.")
 		}
 		h.logger.Error("verify enterprise domain dns", zap.Error(err))

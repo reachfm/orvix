@@ -293,7 +293,14 @@ func (r *VerificationRepo) SaveAndRelease(ctx context.Context, snap *Verificatio
 	now := time.Now().UTC()
 	snap.CreatedAt = now
 	snap.CheckedAt = now
-	evidence, _ := json.Marshal(snap)
+	// snap.Evidence is already the caller-marshaled health-detail JSON
+	// (set before this call). Re-marshaling snap itself here would
+	// double-encode: the evidence column would hold a VerificationSnapshot
+	// envelope (with a nested, now-stale "evidence" string) instead of the
+	// health detail directly, so every reload's unmarshal into
+	// EnterpriseDNSHealth silently comes back empty — this was the root
+	// cause of "100% Pass, every record Not checked" on reload.
+	evidence := snap.Evidence
 
 	if r.getDialect().IsPostgres() {
 		row := tx.QueryRowContext(ctx, r.qf(`

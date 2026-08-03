@@ -301,6 +301,67 @@ func resolveExpectedMX(expectedMX []string, domainName string) []string {
 	return []string{"mail." + domainName}
 }
 
+// recomputeEnterpriseHealth is the single place HealthScore and DNSHealth
+// are derived. It is called on EVERY response path (fresh check, cache
+// hit, or cooldown-blocked GET-of-last-snapshot) and NEVER trusts a
+// persisted scalar Score/Status column verbatim — those columns exist
+// only as a fast index for listing/filtering, not as the source of truth
+// for what the client renders. computeEnterpriseHealthScore/
+// enterpriseOverallStatus already treat a nil sub-record as "unknown"
+// (zero credit, never "pass"), so a record that failed to reconstruct
+// from a persisted snapshot can never contribute to a passing score or a
+// "100%" result — this is the direct fix for the defect where a stale
+// frozen score display disagreed with visibly empty/"Not checked" rows.
+func recomputeEnterpriseHealth(health *EnterpriseDNSHealth) {
+	score := computeEnterpriseHealthScore(health)
+	health.HealthScore = score.Score
+	health.DNSHealth = enterpriseOverallStatus(health)
+}
+
+// isEnterpriseHealthComplete reports whether every record type ORVIX
+// checks was actually present in this response. MTASTSPolicy is
+// intentionally excluded: it is only ever populated when the MTA-STS TXT
+// record itself is valid AND the HTTPS policy fetch succeeded, which is
+// a normal (not incomplete) outcome even when the policy state is
+// "unverified" — that distinction is carried in MTASTS.Reason, not in
+// whether a policy object exists at all.
+func isEnterpriseHealthComplete(health *EnterpriseDNSHealth) bool {
+	return health.MX != nil && health.SPF != nil && health.DKIM != nil &&
+		health.DMARC != nil && health.MTASTS != nil && health.TLSRPT != nil
+}
+
+// cooldownFields computes cooldown_until/retry_after_seconds from the most
+// recent snapshot's timestamp, or zero values if no cooldown is active.
+func cooldownFields(snap *VerificationSnapshot, cooldown time.Duration) (until string, retryAfterSeconds int) {
+	if snap == nil {
+		return "", 0
+	}
+	expiresAt := snap.CheckedAt.Add(cooldown)
+	remaining := time.Until(expiresAt)
+	if remaining <= 0 {
+		return "", 0
+	}
+	return expiresAt.UTC().Format(time.RFC3339), int(remaining.Seconds()) + 1
+}
+
+// hydrateFromSnapshot reconstructs an EnterpriseDNSHealth from a persisted
+// VerificationSnapshot's Evidence column. Evidence is JSON-marshaled from
+// this SAME type on every save (see VerifyEnterpriseDNS) — GET must
+// unmarshal into the SAME type it was marshaled from, not a narrower or
+// differently-shaped one, or fields silently come back nil on every
+// reload regardless of what was actually verified. A failed or partial
+// unmarshal is not treated as an error: whatever fields DID survive are
+// kept, isEnterpriseHealthComplete/recomputeEnterpriseHealth handle the
+// rest honestly.
+func hydrateFromSnapshot(snap *VerificationSnapshot) *EnterpriseDNSHealth {
+	health := &EnterpriseDNSHealth{}
+	if snap.Evidence != "" {
+		_ = json.Unmarshal([]byte(snap.Evidence), health)
+	}
+	health.LastCheckedAt = snap.CheckedAt.Format(time.RFC3339)
+	return health
+}
+
 // GetEnterpriseDNS returns cached or fresh DNS health data from the enterprise context.
 func (s *Service) GetEnterpriseDNS(ctx context.Context, tenantID uint, domainID uint, expectedMX []string) (*EnterpriseDNSHealth, error) {
 	d, err := s.domains.GetByID(ctx, domainID, nil)
@@ -312,40 +373,11 @@ func (s *Service) GetEnterpriseDNS(ctx context.Context, tenantID uint, domainID 
 	}
 	expectedMX = resolveExpectedMX(expectedMX, d.Name)
 
-	health := &EnterpriseDNSHealth{
-		DomainID:          d.ID,
-		DomainName:        d.Name,
-		OperationalStatus: string(d.Status),
-	}
-
+	var health *EnterpriseDNSHealth
 	snap, _ := s.verifRepo.GetLatest(ctx, d.ID)
 	if snap != nil {
-		health.DNSHealth = snap.Status
-		health.HealthScore = snap.Score
-		health.LastCheckedAt = snap.CheckedAt.Format(time.RFC3339)
-		if snap.Evidence != "" {
-			var dnsResult DNSResult
-			if err := json.Unmarshal([]byte(snap.Evidence), &dnsResult); err == nil {
-				health.MX = dnsResult.MX
-				health.SPF = dnsResult.SPF
-				health.DMARC = dnsResult.DMARC
-				if dnsResult.DKIM != nil {
-					health.DKIM = &DKIMHealthCheck{
-						Selector:  dnsResult.DKIM.Selector,
-						Status:    dnsResult.DKIM.Status,
-						Expected:  dnsResult.DKIM.Expected,
-						Observed:  dnsResult.DKIM.Observed,
-						Reason:    dnsResult.DKIM.Reason,
-						CheckedAt: dnsResult.DKIM.CheckedAt,
-						PublicTXT: dnsResult.DKIM.PublicKey,
-					}
-					if d.DKIMEnabled && d.DKIMSelector != "" {
-						health.DKIM.RecordName = d.DKIMSelector + "._domainkey." + d.Name
-						health.DKIM.Configured = true
-					}
-				}
-			}
-		}
+		health = hydrateFromSnapshot(snap)
+		health.CooldownUntil, health.RetryAfterSeconds = cooldownFields(snap, s.cooldown)
 	} else {
 		sel := d.DKIMSelector
 		if sel == "" {
@@ -360,12 +392,18 @@ func (s *Service) GetEnterpriseDNS(ctx context.Context, tenantID uint, domainID 
 				}
 			}
 		}
-		result := s.inspector.InspectEnterprise(ctx, d.Name, expectedMX, sel, expectedDKIMRecord)
-		health = result
-		health.DomainID = d.ID
-		health.OperationalStatus = string(d.Status)
+		// No persisted snapshot exists yet: run a live check so a first
+		// GET is never a hard empty state. This is a bounded, cheap DNS-
+		// only lookup (no HTTP fetch beyond MTA-STS's own hardened
+		// SSRF-protected client) and does not consume/require a
+		// verification claim — it does not race with a concurrent
+		// POST /verify because it never writes a snapshot itself.
+		health = s.inspector.InspectEnterprise(ctx, d.Name, expectedMX, sel, expectedDKIMRecord)
 	}
 
+	health.DomainID = d.ID
+	health.DomainName = d.Name
+	health.OperationalStatus = string(d.Status)
 	if health.DKIM != nil && d.DKIMEnabled {
 		health.DKIM.Configured = true
 		if d.DKIMSelector != "" {
@@ -373,6 +411,8 @@ func (s *Service) GetEnterpriseDNS(ctx context.Context, tenantID uint, domainID 
 			health.DKIM.RecordName = d.DKIMSelector + "._domainkey." + d.Name
 		}
 	}
+	health.Complete = isEnterpriseHealthComplete(health)
+	recomputeEnterpriseHealth(health)
 
 	return health, nil
 }
@@ -393,7 +433,21 @@ func (s *Service) VerifyEnterpriseDNS(ctx context.Context, tenantID uint, domain
 		return nil, fmt.Errorf("claim verification: %w", err)
 	}
 	if !claimed {
-		return nil, ErrVerificationCooldown
+		// Cooldown-blocked: still return the last successful snapshot body
+		// (not a bare error) so a 429 response never wipes out details the
+		// client already had — the handler distinguishes this from success
+		// via the returned error, but the body is real data either way.
+		var blocked *EnterpriseDNSHealth
+		if snap, _ := s.verifRepo.GetLatest(ctx, domainID); snap != nil {
+			blocked = hydrateFromSnapshot(snap)
+			blocked.DomainID = d.ID
+			blocked.DomainName = d.Name
+			blocked.OperationalStatus = string(d.Status)
+			blocked.Complete = isEnterpriseHealthComplete(blocked)
+			recomputeEnterpriseHealth(blocked)
+			blocked.CooldownUntil, blocked.RetryAfterSeconds = cooldownFields(snap, s.cooldown)
+		}
+		return blocked, ErrVerificationCooldown
 	}
 
 	sel := d.DKIMSelector
@@ -440,7 +494,11 @@ func (s *Service) VerifyEnterpriseDNS(ctx context.Context, tenantID uint, domain
 		}
 	}
 
-	evidence, _ := json.Marshal(result)
+	health.Complete = isEnterpriseHealthComplete(health)
+	recomputeEnterpriseHealth(health)
+	health.CooldownUntil, health.RetryAfterSeconds = cooldownFields(&VerificationSnapshot{CheckedAt: time.Now()}, s.cooldown)
+
+	evidence, _ := json.Marshal(health)
 	snap := &VerificationSnapshot{
 		DomainID: domainID,
 		Score:    health.HealthScore,

@@ -126,21 +126,39 @@ type VerificationSnapshot struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
-// EnterpriseDNSHealth is the unified DNS health response for the admin panel.
+// EnterpriseDNSHealth is the unified, canonical DNS health response shared
+// by GET /enterprise/domains/:id/dns and POST .../dns/verify — both
+// endpoints return exactly this shape so the frontend never has to special-
+// case which one answered a request.
 type EnterpriseDNSHealth struct {
-	DomainID          uint             `json:"domain_id"`
-	DomainName        string           `json:"domain_name"`
-	OperationalStatus string           `json:"operational_status"`
-	DNSHealth         string           `json:"dns_health"`
-	HealthScore       int              `json:"health_score"`
-	LastCheckedAt     string           `json:"last_checked_at,omitempty"`
-	MX                *MXCheck         `json:"mx"`
-	SPF               *SPFCheck        `json:"spf"`
-	DKIM              *DKIMHealthCheck `json:"dkim"`
-	DMARC             *DMARCCheck      `json:"dmarc"`
-	MTASTS            *MTASTSCheck     `json:"mtasts"`
-	TLSRPT            *TLSRPTCheck     `json:"tlsrpt"`
-	MTASTSPolicy      *MTASTSPolicy    `json:"mtasts_policy,omitempty"`
+	DomainID          uint   `json:"domain_id"`
+	DomainName        string `json:"domain_name"`
+	OperationalStatus string `json:"operational_status"`
+	DNSHealth         string `json:"dns_health"`
+	HealthScore       int    `json:"health_score"`
+	LastCheckedAt     string `json:"last_checked_at,omitempty"`
+	// CooldownUntil/RetryAfterSeconds are populated whenever a prior
+	// verification exists and its cooldown window has not yet elapsed —
+	// on both GET (informational) and POST (whether this call itself
+	// performed a fresh check or was blocked by cooldown).
+	CooldownUntil     string `json:"cooldown_until,omitempty"`
+	RetryAfterSeconds int    `json:"retry_after_seconds,omitempty"`
+	// Complete is true only when every record below was successfully
+	// reconstructed from a real check (fresh or persisted). A missing,
+	// corrupt, or partially-reconstructable snapshot sets this false, and
+	// HealthScore/DNSHealth are ALWAYS recomputed from whatever records
+	// are actually present (never taken verbatim from a stale persisted
+	// scalar) — see recomputeEnterpriseHealth in service.go. This is the
+	// fix for the "100% Pass with every record Not checked" defect: a
+	// nil record can never contribute a passing score.
+	Complete     bool             `json:"complete"`
+	MX           *MXCheck         `json:"mx"`
+	SPF          *SPFCheck        `json:"spf"`
+	DKIM         *DKIMHealthCheck `json:"dkim"`
+	DMARC        *DMARCCheck      `json:"dmarc"`
+	MTASTS       *MTASTSCheck     `json:"mtasts"`
+	TLSRPT       *TLSRPTCheck     `json:"tlsrpt"`
+	MTASTSPolicy *MTASTSPolicy    `json:"mtasts_policy,omitempty"`
 }
 
 // DKIMHealthCheck extends DKIMCheck with admin-specific fields.
