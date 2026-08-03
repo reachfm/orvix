@@ -36,6 +36,7 @@ type Config struct {
 type CoreMailConfig struct {
 	Enabled                   bool          `mapstructure:"enabled"`
 	Hostname                  string        `mapstructure:"hostname"`
+	ExpectedMX                []string      `mapstructure:"expected_mx"`
 	LicenseFilePath           string        `mapstructure:"license_file_path"`
 	LicenseAuthorityCachePath string        `mapstructure:"license_authority_cache_path"`
 	LicenseAuthorityURL       string        `mapstructure:"license_authority_url"`

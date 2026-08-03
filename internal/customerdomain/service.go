@@ -276,3 +276,157 @@ var (
 	ErrVerificationCooldown = fmt.Errorf("verification cooldown active, try again later")
 	ErrInvalidDomainID      = fmt.Errorf("invalid domain id")
 )
+
+// GetEnterpriseDNS returns cached or fresh DNS health data from the enterprise context.
+func (s *Service) GetEnterpriseDNS(ctx context.Context, tenantID uint, domainID uint, expectedMX []string) (*EnterpriseDNSHealth, error) {
+	d, err := s.domains.GetByID(ctx, domainID, nil)
+	if err != nil {
+		return nil, fmt.Errorf("get domain: %w", err)
+	}
+	if d == nil || d.TenantID != tenantID {
+		return nil, ErrDomainNotFound
+	}
+
+	health := &EnterpriseDNSHealth{
+		DomainID:          d.ID,
+		DomainName:        d.Name,
+		OperationalStatus: string(d.Status),
+	}
+
+	snap, _ := s.verifRepo.GetLatest(ctx, d.ID)
+	if snap != nil {
+		health.DNSHealth = snap.Status
+		health.HealthScore = snap.Score
+		health.LastCheckedAt = snap.CheckedAt.Format(time.RFC3339)
+		if snap.Evidence != "" {
+			var dnsResult DNSResult
+			if err := json.Unmarshal([]byte(snap.Evidence), &dnsResult); err == nil {
+				health.MX = dnsResult.MX
+				health.SPF = dnsResult.SPF
+				health.DMARC = dnsResult.DMARC
+				if dnsResult.DKIM != nil {
+					health.DKIM = &DKIMHealthCheck{
+						Selector:   dnsResult.DKIM.Selector,
+						Status:     dnsResult.DKIM.Status,
+						Expected:   dnsResult.DKIM.Expected,
+						Observed:   dnsResult.DKIM.Observed,
+						Reason:     dnsResult.DKIM.Reason,
+						CheckedAt:  dnsResult.DKIM.CheckedAt,
+						PublicTXT:  dnsResult.DKIM.PublicKey,
+					}
+					if d.DKIMEnabled && d.DKIMSelector != "" {
+						health.DKIM.RecordName = d.DKIMSelector + "._domainkey." + d.Name
+						health.DKIM.Configured = true
+					}
+				}
+			}
+		}
+	} else {
+		sel := d.DKIMSelector
+		if sel == "" {
+			sel = "default"
+		}
+		result := s.inspector.InspectEnterprise(ctx, d.Name, expectedMX, sel, "")
+		health = result
+		health.DomainID = d.ID
+		health.OperationalStatus = string(d.Status)
+	}
+
+	if health.DKIM != nil && d.DKIMEnabled {
+		health.DKIM.Configured = true
+		if d.DKIMSelector != "" {
+			health.DKIM.Selector = d.DKIMSelector
+			health.DKIM.RecordName = d.DKIMSelector + "._domainkey." + d.Name
+		}
+	}
+
+	return health, nil
+}
+
+// VerifyEnterpriseDNS runs a fresh DNS verification with enterprise MX config.
+func (s *Service) VerifyEnterpriseDNS(ctx context.Context, tenantID uint, domainID uint, expectedMX []string) (*EnterpriseDNSHealth, error) {
+	d, err := s.domains.GetByID(ctx, domainID, nil)
+	if err != nil {
+		return nil, fmt.Errorf("get domain: %w", err)
+	}
+	if d == nil || d.TenantID != tenantID {
+		return nil, ErrDomainNotFound
+	}
+
+	claimed, err := s.verifRepo.TryClaim(ctx, domainID, s.cooldown)
+	if err != nil {
+		return nil, fmt.Errorf("claim verification: %w", err)
+	}
+	if !claimed {
+		return nil, ErrVerificationCooldown
+	}
+
+	sel := d.DKIMSelector
+	if sel == "" {
+		sel = "default"
+	}
+
+	result := s.inspector.InspectEnterprise(ctx, d.Name, expectedMX, sel, "")
+	health := result
+	health.DomainID = d.ID
+	health.OperationalStatus = string(d.Status)
+	if health.LastCheckedAt == "" {
+		health.LastCheckedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+
+	if health.DKIM != nil && d.DKIMEnabled {
+		health.DKIM.Configured = true
+		if d.DKIMSelector != "" {
+			health.DKIM.Selector = d.DKIMSelector
+			health.DKIM.RecordName = d.DKIMSelector + "._domainkey." + d.Name
+		}
+		if health.DKIM.Status == string(DNSStatusPass) && health.DKIM.Observed != "" {
+			health.DKIM.MatchesDNS = true
+		}
+	}
+
+	evidence, _ := json.Marshal(result)
+	snap := &VerificationSnapshot{
+		DomainID: domainID,
+		Score:    health.HealthScore,
+		Status:   health.DNSHealth,
+		MXStatus: statusFieldEnterprise(health, func(h *EnterpriseDNSHealth) string {
+			if h.MX != nil {
+				return h.MX.Status
+			}
+			return ""
+		}),
+		SPFStatus: statusFieldEnterprise(health, func(h *EnterpriseDNSHealth) string {
+			if h.SPF != nil {
+				return h.SPF.Status
+			}
+			return ""
+		}),
+		DKIMStatus: statusFieldEnterprise(health, func(h *EnterpriseDNSHealth) string {
+			if h.DKIM != nil {
+				return h.DKIM.Status
+			}
+			return ""
+		}),
+		DMARCStatus: statusFieldEnterprise(health, func(h *EnterpriseDNSHealth) string {
+			if h.DMARC != nil {
+				return h.DMARC.Status
+			}
+			return ""
+		}),
+		Evidence: string(evidence),
+	}
+
+	if err := s.verifRepo.SaveAndRelease(ctx, snap, domainID); err != nil {
+		return nil, fmt.Errorf("save verification: %w", err)
+	}
+
+	return health, nil
+}
+
+func statusFieldEnterprise(h *EnterpriseDNSHealth, fn func(*EnterpriseDNSHealth) string) string {
+	if h == nil {
+		return ""
+	}
+	return fn(h)
+}

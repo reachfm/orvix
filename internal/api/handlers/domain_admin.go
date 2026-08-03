@@ -9,6 +9,8 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/admin/domain"
 	"github.com/orvix/orvix/internal/auth"
+	"github.com/orvix/orvix/internal/customerdomain"
+	"go.uber.org/zap"
 )
 
 func (h *Handler) ListAdminDomains(c fiber.Ctx) error {
@@ -405,4 +407,73 @@ func (h *Handler) PostAdminDomainDKIMRotate(c fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{"dkim": result})
+}
+
+// GetEnterpriseDomainDNS returns DNS health for an enterprise domain.
+// GET /enterprise/domains/:id/dns
+func (h *Handler) GetEnterpriseDomainDNS(c fiber.Ctx) error {
+	if h.customerDomainSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "domain dns service not available"})
+	}
+	tenantID, err := auth.RequireTenantID(c)
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	idVal, err := strconv.ParseUint(c.Params("id"), 10, 64)
+	if err != nil || idVal == 0 {
+		return respondAPIError(c, fiber.StatusBadRequest, "INVALID_DOMAIN_ID", "Invalid domain id.")
+	}
+	id := uint(idVal)
+
+	expectedMX := h.cfg.CoreMail.ExpectedMX
+	if len(expectedMX) == 0 {
+		expectedMX = []string{"mail." + c.Params("id")}
+	}
+
+	health, err := h.customerDomainSvc.GetEnterpriseDNS(c.Context(), tenantID, id, expectedMX)
+	if err != nil {
+		if errors.Is(err, customerdomain.ErrDomainNotFound) {
+			return respondAPIError(c, fiber.StatusNotFound, "DOMAIN_NOT_FOUND", "Domain not found.")
+		}
+		h.logger.Error("get enterprise domain dns", zap.Error(err))
+		return respondAPIError(c, fiber.StatusInternalServerError, "INTERNAL_ERROR", "An internal error occurred.")
+	}
+	return c.JSON(health)
+}
+
+// VerifyEnterpriseDomainDNS runs live DNS verification for an enterprise domain.
+// POST /enterprise/domains/:id/dns/verify
+func (h *Handler) VerifyEnterpriseDomainDNS(c fiber.Ctx) error {
+	if h.customerDomainSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "domain dns service not available"})
+	}
+	tenantID, err := auth.RequireTenantID(c)
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	idVal, err := strconv.ParseUint(c.Params("id"), 10, 64)
+	if err != nil || idVal == 0 {
+		return respondAPIError(c, fiber.StatusBadRequest, "INVALID_DOMAIN_ID", "Invalid domain id.")
+	}
+	id := uint(idVal)
+
+	expectedMX := h.cfg.CoreMail.ExpectedMX
+	if len(expectedMX) == 0 {
+		expectedMX = []string{"mail." + c.Params("id")}
+	}
+
+	health, err := h.customerDomainSvc.VerifyEnterpriseDNS(c.Context(), tenantID, id, expectedMX)
+	if err != nil {
+		if errors.Is(err, customerdomain.ErrDomainNotFound) {
+			return respondAPIError(c, fiber.StatusNotFound, "DOMAIN_NOT_FOUND", "Domain not found.")
+		}
+		if errors.Is(err, customerdomain.ErrVerificationCooldown) {
+			return respondAPIError(c, fiber.StatusTooManyRequests, "VERIFICATION_COOLDOWN", "Verification cooldown active, try again later.")
+		}
+		h.logger.Error("verify enterprise domain dns", zap.Error(err))
+		return respondAPIError(c, fiber.StatusInternalServerError, "INTERNAL_ERROR", "An internal error occurred.")
+	}
+	return c.JSON(health)
 }

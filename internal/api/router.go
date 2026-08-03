@@ -1015,6 +1015,8 @@ func (r *Router) setupRoutes() {
 	canWriteDomains.Post("/domains/:id/dkim/generate", r.h.PostAdminDomainDKIMGenerate)
 	canWriteDomains.Post("/domains/:id/dkim/rotate", r.h.PostAdminDomainDKIMRotate)
 	enterpriseRead.Post("/domains/:id/verify", r.h.VerifyEnterpriseDomain)
+	enterpriseRead.Get("/domains/:id/dns", r.h.GetEnterpriseDomainDNS)
+	canWriteDomains.Post("/domains/:id/dns/verify", r.h.VerifyEnterpriseDomainDNS)
 
 	// ── Mailboxes ──
 	enterpriseRead.Get("/mailboxes", r.h.ListAdminMailboxes)
