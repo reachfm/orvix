@@ -34,6 +34,24 @@ jobs:
         run: npm run build
         working-directory: web/admin
 
+      - name: Verify release/admin freshness
+        run: |
+          set -euo pipefail
+          # The dist must match the committed release/admin bundle.
+          # If web/admin source was changed but release/admin was not
+          # rebuilt and committed, this step fails.
+          if ! diff -q web/admin/dist/index.html release/admin/index.html; then
+            echo "::error::release/admin/index.html differs from fresh build. Run 'npm run build' in web/admin and commit the updated release/admin/."
+            exit 1
+          fi
+          # Check asset directories match (recursive, quiet — exits
+          # non-zero on any difference or missing/extra file).
+          diff -rq web/admin/dist/assets/ release/admin/assets/ || {
+            echo "::error::release/admin/assets/ differs from fresh build. Run 'npm run build' in web/admin and commit the updated release/admin/."
+            exit 1
+          }
+          echo "release/admin freshness verified — matches clean build."
+
       - name: Run portal browser acceptance tests
         run: npx vitest run --reporter verbose src/components/PortalBrowserAcceptance.test.tsx
         working-directory: web/admin
