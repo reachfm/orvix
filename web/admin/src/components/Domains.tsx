@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { CheckCircle, XCircle, AlertTriangle, Plus, Trash2, RefreshCw, Copy } from "lucide-react";
-import { api, ApiError, domainErrorMessage } from "../api";
+import { CheckCircle, XCircle, AlertTriangle, Plus, Trash2, RefreshCw } from "lucide-react";
+import { api, domainErrorMessage } from "../api";
 
 interface EnterpriseDomain {
   id: number;
