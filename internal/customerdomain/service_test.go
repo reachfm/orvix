@@ -2,13 +2,19 @@ package customerdomain
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"database/sql"
+	"encoding/pem"
 	"net"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/orvix/orvix/internal/coremail"
+	"github.com/orvix/orvix/internal/coremail/dkim"
 	"github.com/orvix/orvix/internal/dnsops"
 	_ "modernc.org/sqlite"
 )
@@ -405,5 +411,429 @@ func TestVerifyEnterpriseDNSDoesNotFalselyClaimDKIMMatch(t *testing.T) {
 	}
 	if health.DKIM.MatchesDNS {
 		t.Error("DKIM.MatchesDNS = true, but no real comparison against the stored key was ever performed — this is a false positive")
+	}
+}
+
+// ── DKIM key matching tests (Part 1) ──────────────────────────
+
+func newServiceTestEnvWithDKIM(t *testing.T) (*Service, *sql.DB, *dnsops.FakeResolver, *dkim.SQLRepo) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "cds_dkim.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { db.Close() })
+
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS coremail_domains (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT UNIQUE NOT NULL,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			reseller_id INTEGER NOT NULL DEFAULT 0,
+			status TEXT NOT NULL DEFAULT 'active',
+			plan TEXT NOT NULL DEFAULT 'smb',
+			description TEXT NOT NULL DEFAULT '',
+			max_mailboxes INTEGER NOT NULL DEFAULT 0,
+			max_aliases INTEGER NOT NULL DEFAULT 0,
+			max_quota_mb INTEGER NOT NULL DEFAULT 0,
+			dkim_enabled INTEGER NOT NULL DEFAULT 0,
+			dkim_selector TEXT NOT NULL DEFAULT '',
+			dmarc_enabled INTEGER NOT NULL DEFAULT 0,
+			mtasts_enabled INTEGER NOT NULL DEFAULT 0,
+			catchall_address TEXT NOT NULL DEFAULT '',
+			abuse_contact TEXT NOT NULL DEFAULT '',
+			labels TEXT NOT NULL DEFAULT '',
+			mailbox_count INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME
+		);
+		CREATE TABLE IF NOT EXISTS coremail_dkim_config (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			domain TEXT UNIQUE NOT NULL,
+			selector TEXT NOT NULL DEFAULT 'default',
+			private_key_pem TEXT NOT NULL,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL
+		)`)
+	if err != nil {
+		t.Fatalf("create tables: %v", err)
+	}
+
+	domainRepo := coremail.NewDomainSQLRepo(db)
+	verifRepo := NewVerificationRepo(db)
+	if err := verifRepo.EnsureTable(context.Background()); err != nil {
+		t.Fatalf("ensure verifications table: %v", err)
+	}
+	resolver := dnsops.NewFakeResolver()
+	inspector := NewDNSInspector(resolver)
+	svc := NewService(db, domainRepo, inspector, verifRepo)
+	dkimRepo := dkim.NewSQLRepo(db)
+	svc.SetDKIMRepo(dkimRepo)
+	return svc, db, resolver, dkimRepo
+}
+
+func generateTestKey(t *testing.T) string {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
+}
+
+func generateTestKeyPubRecord(t *testing.T, privPEM, selector, domain string) string {
+	t.Helper()
+	_, record, err := dkim.GenerateKeyPair(selector, domain)
+	if err != nil {
+		t.Fatalf("GenerateKeyPair: %v", err)
+	}
+	return record
+}
+
+func TestDKIMKeyMatch_ExactMatch(t *testing.T) {
+	svc, _, resolver, dkimRepo := newServiceTestEnvWithDKIM(t)
+	ctx := context.Background()
+	domID := seedDomain(t, svc, "exactmatch.example.com", 1)
+	if _, err := svc.db.Exec(`UPDATE coremail_domains SET dkim_enabled = 1, dkim_selector = 'mail' WHERE id = ?`, domID); err != nil {
+		t.Fatalf("enable dkim: %v", err)
+	}
+
+	sel := "mail"
+	dom := "exactmatch.example.com"
+	privPEM, pubDNS, err := dkim.GenerateKeyPair(sel, dom)
+	if err != nil {
+		t.Fatalf("GenerateKeyPair: %v", err)
+	}
+
+	if err := dkimRepo.Create(ctx, &dkim.DKIMConfig{
+		Domain:        dom,
+		Selector:      sel,
+		PrivateKeyPEM: privPEM,
+		Enabled:       true,
+	}, nil); err != nil {
+		t.Fatalf("create dkim config: %v", err)
+	}
+
+	resolver.Set(sel+"._domainkey."+dom, dnsops.FakeEntry{
+		TXT: []string{pubDNS},
+	})
+
+	health, err := svc.VerifyEnterpriseDNS(ctx, 1, domID, nil)
+	if err != nil {
+		t.Fatalf("VerifyEnterpriseDNS: %v", err)
+	}
+	if health.DKIM == nil {
+		t.Fatal("expected DKIM result")
+	}
+	if !health.DKIM.MatchesDNS {
+		t.Error("DKIM.MatchesDNS = false, want true (key should match)")
+	}
+	if health.DKIM.Status != "pass" {
+		t.Errorf("DKIM status = %q, want pass", health.DKIM.Status)
+	}
+}
+
+func TestDKIMKeyMatch_DNSMissing(t *testing.T) {
+	svc, _, _, dkimRepo := newServiceTestEnvWithDKIM(t)
+	ctx := context.Background()
+	domID := seedDomain(t, svc, "dnsmissing.example.com", 1)
+	if _, err := svc.db.Exec(`UPDATE coremail_domains SET dkim_enabled = 1, dkim_selector = 'mail' WHERE id = ?`, domID); err != nil {
+		t.Fatalf("enable dkim: %v", err)
+	}
+
+	sel := "mail"
+	dom := "dnsmissing.example.com"
+	privPEM, _, err := dkim.GenerateKeyPair(sel, dom)
+	if err != nil {
+		t.Fatalf("GenerateKeyPair: %v", err)
+	}
+
+	if err := dkimRepo.Create(ctx, &dkim.DKIMConfig{
+		Domain:        dom,
+		Selector:      sel,
+		PrivateKeyPEM: privPEM,
+		Enabled:       true,
+	}, nil); err != nil {
+		t.Fatalf("create dkim config: %v", err)
+	}
+
+	health, err := svc.VerifyEnterpriseDNS(ctx, 1, domID, nil)
+	if err != nil {
+		t.Fatalf("VerifyEnterpriseDNS: %v", err)
+	}
+	if health.DKIM == nil {
+		t.Fatal("expected DKIM result")
+	}
+	if health.DKIM.MatchesDNS {
+		t.Error("DKIM.MatchesDNS = true, want false (no DNS published)")
+	}
+	if !strings.Contains(strings.ToLower(health.DKIM.Reason), "dkim") {
+		t.Logf("DKIM reason = %q", health.DKIM.Reason)
+	}
+}
+
+func TestDKIMKeyMatch_NotConfigured(t *testing.T) {
+	svc, _, _, _ := newServiceTestEnvWithDKIM(t)
+	ctx := context.Background()
+	domID := seedDomain(t, svc, "notconfig.example.com", 1)
+	if _, err := svc.db.Exec(`UPDATE coremail_domains SET dkim_enabled = 1, dkim_selector = 'mail' WHERE id = ?`, domID); err != nil {
+		t.Fatalf("enable dkim: %v", err)
+	}
+
+	health, err := svc.VerifyEnterpriseDNS(ctx, 1, domID, nil)
+	if err != nil {
+		t.Fatalf("VerifyEnterpriseDNS: %v", err)
+	}
+	if health.DKIM == nil {
+		t.Fatal("expected DKIM result")
+	}
+	if health.DKIM.Configured == false {
+		t.Log("configured=false is expected when no DKIM config exists")
+	}
+	if health.DKIM.MatchesDNS {
+		t.Error("DKIM.MatchesDNS = true, want false (no config in DB)")
+	}
+}
+
+func TestDKIMKeyMatch_StaleMismatch(t *testing.T) {
+	svc, _, resolver, dkimRepo := newServiceTestEnvWithDKIM(t)
+	ctx := context.Background()
+	domID := seedDomain(t, svc, "stale.example.com", 1)
+	if _, err := svc.db.Exec(`UPDATE coremail_domains SET dkim_enabled = 1, dkim_selector = 'mail' WHERE id = ?`, domID); err != nil {
+		t.Fatalf("enable dkim: %v", err)
+	}
+
+	sel := "mail"
+	dom := "stale.example.com"
+	privPEM, _, err := dkim.GenerateKeyPair(sel, dom)
+	if err != nil {
+		t.Fatalf("GenerateKeyPair: %v", err)
+	}
+
+	if err := dkimRepo.Create(ctx, &dkim.DKIMConfig{
+		Domain:        dom,
+		Selector:      sel,
+		PrivateKeyPEM: privPEM,
+		Enabled:       true,
+	}, nil); err != nil {
+		t.Fatalf("create dkim config: %v", err)
+	}
+
+	_, oldPubDNS, err := dkim.GenerateKeyPair(sel, dom)
+	if err != nil {
+		t.Fatalf("old GenerateKeyPair: %v", err)
+	}
+	resolver.Set(sel+"._domainkey."+dom, dnsops.FakeEntry{
+		TXT: []string{oldPubDNS},
+	})
+
+	health, err := svc.VerifyEnterpriseDNS(ctx, 1, domID, nil)
+	if err != nil {
+		t.Fatalf("VerifyEnterpriseDNS: %v", err)
+	}
+	if health.DKIM == nil {
+		t.Fatal("expected DKIM result")
+	}
+	if health.DKIM.MatchesDNS {
+		t.Error("DKIM.MatchesDNS = true, want false (DNS has old rotated key)")
+	}
+	if !strings.Contains(strings.ToLower(health.DKIM.Reason), "mismatch") {
+		t.Logf("DKIM reason = %q (expected 'key mismatch')", health.DKIM.Reason)
+	}
+}
+
+func TestDKIMKeyMatch_SplitTXT(t *testing.T) {
+	svc, _, resolver, dkimRepo := newServiceTestEnvWithDKIM(t)
+	ctx := context.Background()
+	domID := seedDomain(t, svc, "splittxt.example.com", 1)
+	if _, err := svc.db.Exec(`UPDATE coremail_domains SET dkim_enabled = 1, dkim_selector = 'mail' WHERE id = ?`, domID); err != nil {
+		t.Fatalf("enable dkim: %v", err)
+	}
+
+	sel := "mail"
+	dom := "splittxt.example.com"
+	privPEM, pubDNS, err := dkim.GenerateKeyPair(sel, dom)
+	if err != nil {
+		t.Fatalf("GenerateKeyPair: %v", err)
+	}
+
+	if err := dkimRepo.Create(ctx, &dkim.DKIMConfig{
+		Domain:        dom,
+		Selector:      sel,
+		PrivateKeyPEM: privPEM,
+		Enabled:       true,
+	}, nil); err != nil {
+		t.Fatalf("create dkim config: %v", err)
+	}
+
+	mid := len(pubDNS) / 3
+	resolver.Set(sel+"._domainkey."+dom, dnsops.FakeEntry{
+		TXT: []string{pubDNS[:mid], pubDNS[mid : 2*mid], pubDNS[2*mid:]},
+	})
+
+	health, err := svc.VerifyEnterpriseDNS(ctx, 1, domID, nil)
+	if err != nil {
+		t.Fatalf("VerifyEnterpriseDNS: %v", err)
+	}
+	if health.DKIM == nil {
+		t.Fatal("expected DKIM result")
+	}
+	if !health.DKIM.MatchesDNS {
+		t.Error("DKIM.MatchesDNS = false, want true (split TXT should join and match)")
+	}
+}
+
+func TestDKIMKeyMatch_NoPrivateKeyExposure(t *testing.T) {
+	svc, _, resolver, dkimRepo := newServiceTestEnvWithDKIM(t)
+	ctx := context.Background()
+	domID := seedDomain(t, svc, "noexp.example.com", 1)
+	if _, err := svc.db.Exec(`UPDATE coremail_domains SET dkim_enabled = 1, dkim_selector = 'mail' WHERE id = ?`, domID); err != nil {
+		t.Fatalf("enable dkim: %v", err)
+	}
+
+	sel := "mail"
+	dom := "noexp.example.com"
+	privPEM, pubDNS, err := dkim.GenerateKeyPair(sel, dom)
+	if err != nil {
+		t.Fatalf("GenerateKeyPair: %v", err)
+	}
+
+	if err := dkimRepo.Create(ctx, &dkim.DKIMConfig{
+		Domain:        dom,
+		Selector:      sel,
+		PrivateKeyPEM: privPEM,
+		Enabled:       true,
+	}, nil); err != nil {
+		t.Fatalf("create dkim config: %v", err)
+	}
+
+	resolver.Set(sel+"._domainkey."+dom, dnsops.FakeEntry{
+		TXT: []string{pubDNS},
+	})
+
+	health, err := svc.VerifyEnterpriseDNS(ctx, 1, domID, nil)
+	if err != nil {
+		t.Fatalf("VerifyEnterpriseDNS: %v", err)
+	}
+	if health.DKIM == nil {
+		t.Fatal("expected DKIM result")
+	}
+
+	fields := []string{
+		health.DKIM.Selector,
+		health.DKIM.Status,
+		health.DKIM.Expected,
+		health.DKIM.Observed,
+		health.DKIM.Reason,
+		health.DKIM.RecordName,
+	}
+	for _, f := range fields {
+		lower := strings.ToLower(f)
+		if strings.Contains(lower, "private") || strings.Contains(lower, "secret") {
+			t.Errorf("DKIMHealthCheck response field contains sensitive word: %q", f)
+		}
+	}
+	if strings.Contains(health.DKIM.Expected, "PRIVATE") {
+		t.Error("Expected field must not contain private key")
+	}
+}
+
+func TestDeriveExpectedDKIMRecord_Valid(t *testing.T) {
+	sel := "mail"
+	dom := "example.com"
+	privPEM, expectedRecord, err := dkim.GenerateKeyPair(sel, dom)
+	if err != nil {
+		t.Fatalf("GenerateKeyPair: %v", err)
+	}
+	got, ok := deriveExpectedDKIMRecord(privPEM, sel, dom)
+	if !ok {
+		t.Fatal("deriveExpectedDKIMRecord should succeed for valid PEM")
+	}
+	if got != expectedRecord {
+		t.Errorf("derived record:\n  got:  %s\n  want: %s", got, expectedRecord)
+	}
+}
+
+func TestDeriveExpectedDKIMRecord_InvalidPEM(t *testing.T) {
+	got, ok := deriveExpectedDKIMRecord("not a valid pem", "mail", "example.com")
+	if ok {
+		t.Error("deriveExpectedDKIMRecord should return false for invalid PEM")
+	}
+	if got != "" {
+		t.Errorf("got %q, want empty", got)
+	}
+}
+
+func TestDeriveExpectedDKIMRecord_WrongSelector(t *testing.T) {
+	sel := "mail"
+	dom := "example.com"
+	privPEM, _, err := dkim.GenerateKeyPair(sel, dom)
+	if err != nil {
+		t.Fatalf("GenerateKeyPair: %v", err)
+	}
+	got, ok := deriveExpectedDKIMRecord(privPEM, "other", dom)
+	if !ok {
+		t.Fatal("deriveExpectedDKIMRecord should succeed")
+	}
+	if strings.Contains(got, "BEGIN") {
+		t.Errorf("record must not contain private key: %q", got)
+	}
+	t.Logf("record with other selector: %s", got)
+}
+
+func TestDKIMKeyMatch_MalformedTXT(t *testing.T) {
+	svc, _, resolver, dkimRepo := newServiceTestEnvWithDKIM(t)
+	ctx := context.Background()
+	domID := seedDomain(t, svc, "malformed.example.com", 1)
+	if _, err := svc.db.Exec(`UPDATE coremail_domains SET dkim_enabled = 1, dkim_selector = 'mail' WHERE id = ?`, domID); err != nil {
+		t.Fatalf("enable dkim: %v", err)
+	}
+
+	sel := "mail"
+	dom := "malformed.example.com"
+	privPEM, _, err := dkim.GenerateKeyPair(sel, dom)
+	if err != nil {
+		t.Fatalf("GenerateKeyPair: %v", err)
+	}
+
+	if err := dkimRepo.Create(ctx, &dkim.DKIMConfig{
+		Domain:        dom,
+		Selector:      sel,
+		PrivateKeyPEM: privPEM,
+		Enabled:       true,
+	}, nil); err != nil {
+		t.Fatalf("create dkim config: %v", err)
+	}
+
+	resolver.Set(sel+"._domainkey."+dom, dnsops.FakeEntry{
+		TXT: []string{"some-random-txt-no-dkim-signature"},
+	})
+
+	health, err := svc.VerifyEnterpriseDNS(ctx, 1, domID, nil)
+	if err != nil {
+		t.Fatalf("VerifyEnterpriseDNS: %v", err)
+	}
+	if health.DKIM == nil {
+		t.Fatal("expected DKIM result")
+	}
+	if health.DKIM.MatchesDNS {
+		t.Error("DKIM.MatchesDNS = true, want false (malformed TXT, no p= tag in normalized expected)")
+	}
+	t.Logf("DKIM status = %q, reason = %q", health.DKIM.Status, health.DKIM.Reason)
+}
+
+func TestNormalizeDKIMTXT_WhitespaceAndQuotes(t *testing.T) {
+	input := `"v=DKIM1; k=rsa; p=TEST KEY"`
+	got := normalizeDKIMTXT(input)
+	if got != "v=DKIM1;k=rsa;p=TESTKEY" {
+		t.Errorf("normalizeDKIMTXT = %q, want whitespace-free and quote-free", got)
 	}
 }

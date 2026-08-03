@@ -140,6 +140,7 @@ type EnterpriseDNSHealth struct {
 	DMARC             *DMARCCheck      `json:"dmarc"`
 	MTASTS            *MTASTSCheck     `json:"mtasts"`
 	TLSRPT            *TLSRPTCheck     `json:"tlsrpt"`
+	MTASTSPolicy      *MTASTSPolicy    `json:"mtasts_policy,omitempty"`
 }
 
 // DKIMHealthCheck extends DKIMCheck with admin-specific fields.

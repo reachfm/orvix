@@ -11,9 +11,10 @@ import (
 
 // DNSInspector performs bounded DNS checks for a domain.
 type DNSInspector struct {
-	dns     dnsops.Resolver
-	timeout time.Duration
-	nowFunc func() time.Time
+	dns           dnsops.Resolver
+	timeout       time.Duration
+	nowFunc       func() time.Time
+	mtastsFetcher *MTASTSFetcher
 }
 
 // NewDNSInspector creates a DNS inspector backed by the given resolver.
@@ -28,6 +29,12 @@ func NewDNSInspector(dns dnsops.Resolver) *DNSInspector {
 // WithClock sets a deterministic clock for testing.
 func (i *DNSInspector) WithClock(now func() time.Time) *DNSInspector {
 	i.nowFunc = now
+	return i
+}
+
+// WithMTASTSFetcher sets the HTTPS policy fetcher for MTA-STS policy checks.
+func (i *DNSInspector) WithMTASTSFetcher(f *MTASTSFetcher) *DNSInspector {
+	i.mtastsFetcher = f
 	return i
 }
 
@@ -146,6 +153,24 @@ func (i *DNSInspector) checkDKIM(ctx context.Context, domain, selector, expected
 	return &DKIMCheck{Selector: selector, Status: string(DNSStatusPass), Observed: truncateForDisplay(observed, 120), CheckedAt: now}
 }
 
+// CheckDKIM is the public wrapper around checkDKIM for callers that
+// have a derived expected record (post-service wiring).
+func (i *DNSInspector) CheckDKIM(ctx context.Context, domain, selector, expectedRecord string) *DKIMCheck {
+	now := i.nowFunc().Format(time.RFC3339)
+	return i.checkDKIM(ctx, domain, selector, expectedRecord, now)
+}
+
+func normalizeDKIMTXT(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			return -1
+		}
+		return r
+	}, s)
+	s = strings.Trim(s, `"`)
+	return s
+}
+
 func (i *DNSInspector) checkDMARC(ctx context.Context, domain, now string) *DMARCCheck {
 	dmarcDomain := "_dmarc." + domain
 	records, err := i.dns.LookupTXT(ctx, dmarcDomain)
@@ -210,6 +235,20 @@ func (i *DNSInspector) InspectEnterprise(ctx context.Context, domain string, exp
 	mtastsResult := i.checkMTASTS(ctx, domain, now)
 	tlsrptResult := i.checkTLSRPT(ctx, domain, now)
 
+	var mtastsPolicy *MTASTSPolicy
+	if i.mtastsFetcher != nil && mtastsResult.Status == "pass" {
+		p, err := i.mtastsFetcher.Fetch(ctx, domain)
+		if err != nil || p == nil || !p.Valid {
+			mtastsResult.Reason = "MTA-STS TXT valid but HTTPS policy " + reasonFromError(err, p)
+			if mtastsResult.Reason == "" {
+				mtastsResult.Reason = "MTA-STS TXT valid but HTTPS policy unavailable"
+			}
+			mtastsResult.Status = "warning"
+		} else {
+			mtastsPolicy = p
+		}
+	}
+
 	dkimCheck := &DKIMHealthCheck{
 		Selector:  dkimRaw.Selector,
 		Status:    dkimRaw.Status,
@@ -231,13 +270,14 @@ func (i *DNSInspector) InspectEnterprise(ctx context.Context, domain string, exp
 	}
 
 	health := &EnterpriseDNSHealth{
-		DomainName: domain,
-		MX:         mxResult,
-		SPF:        spfResult,
-		DKIM:       dkimCheck,
-		DMARC:      dmarcResult,
-		MTASTS:     mtastsResult,
-		TLSRPT:     tlsrptResult,
+		DomainName:   domain,
+		MX:           mxResult,
+		SPF:          spfResult,
+		DKIM:         dkimCheck,
+		DMARC:        dmarcResult,
+		MTASTS:       mtastsResult,
+		TLSRPT:       tlsrptResult,
+		MTASTSPolicy: mtastsPolicy,
 	}
 
 	score := computeEnterpriseHealthScore(health)
@@ -407,4 +447,27 @@ func truncateForDisplay(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+func reasonFromError(err error, p *MTASTSPolicy) string {
+	if err != nil {
+		msg := err.Error()
+		if strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline") {
+			return "policy_unverified: HTTPS timeout"
+		}
+		if strings.Contains(msg, "connection refused") || strings.Contains(msg, "no such host") {
+			return "policy_unverified: endpoint unavailable"
+		}
+		if strings.Contains(msg, "unexpected status") {
+			return "policy_unverified: " + msg
+		}
+		if strings.Contains(msg, "tls") || strings.Contains(msg, "certificate") {
+			return "policy_unverified: TLS error"
+		}
+		return "policy_unverified: " + msg
+	}
+	if p != nil && p.Error != "" {
+		return "policy_unverified: " + p.Error
+	}
+	return ""
 }

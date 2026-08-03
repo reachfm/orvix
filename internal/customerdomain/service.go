@@ -2,12 +2,16 @@ package customerdomain
 
 import (
 	"context"
+	"crypto/rsa"
+	"crypto/x509"
 	"database/sql"
+	"encoding/pem"
 	"encoding/json"
 	"fmt"
 	"time"
 
 	"github.com/orvix/orvix/internal/coremail"
+	"github.com/orvix/orvix/internal/coremail/dkim"
 )
 
 // Service provides customer-facing domain administration operations.
@@ -17,6 +21,7 @@ type Service struct {
 	domains   *coremail.DomainSQLRepo
 	inspector *DNSInspector
 	verifRepo *VerificationRepo
+	dkimRepo  *dkim.SQLRepo
 	cooldown  time.Duration
 }
 
@@ -29,6 +34,13 @@ func NewService(db *sql.DB, domainRepo *coremail.DomainSQLRepo, inspector *DNSIn
 		verifRepo: verifRepo,
 		cooldown:  5 * time.Minute,
 	}
+}
+
+// SetDKIMRepo injects the DKIM configuration repository for real key matching.
+// If never called, dkimRepo remains nil and DKIM matching falls back to the
+// previous behaviour (no key matching, no panic).
+func (s *Service) SetDKIMRepo(repo *dkim.SQLRepo) {
+	s.dkimRepo = repo
 }
 
 // ListDomains returns paginated domain overviews for a tenant.
@@ -342,7 +354,16 @@ func (s *Service) GetEnterpriseDNS(ctx context.Context, tenantID uint, domainID 
 		if sel == "" {
 			sel = "default"
 		}
-		result := s.inspector.InspectEnterprise(ctx, d.Name, expectedMX, sel, "")
+		expectedDKIMRecord := ""
+		if s.dkimRepo != nil {
+			cfg, err := s.dkimRepo.GetByDomain(ctx, d.Name, nil)
+			if err == nil && cfg != nil && cfg.PrivateKeyPEM != "" {
+				if rec, ok := deriveExpectedDKIMRecord(cfg.PrivateKeyPEM, sel, d.Name); ok {
+					expectedDKIMRecord = rec
+				}
+			}
+		}
+		result := s.inspector.InspectEnterprise(ctx, d.Name, expectedMX, sel, expectedDKIMRecord)
 		health = result
 		health.DomainID = d.ID
 		health.OperationalStatus = string(d.Status)
@@ -397,18 +418,29 @@ func (s *Service) VerifyEnterpriseDNS(ctx context.Context, tenantID uint, domain
 			health.DKIM.Selector = d.DKIMSelector
 			health.DKIM.RecordName = d.DKIMSelector + "._domainkey." + d.Name
 		}
-		// MatchesDNS deliberately stays false here. checkDKIM only compares
-		// the observed TXT record against expectedDKIMRecord when the
-		// caller supplies one — InspectEnterprise is called above with an
-		// empty expectedDKIMRecord because this service does not currently
-		// derive the public key from the tenant's stored DKIM private key
-		// (coremail_dkim_config.private_key_pem). Reporting MatchesDNS=true
-		// merely because *a* DKIM TXT record was published — as the
-		// previous version of this code did — is a false positive: a
-		// stale or wrong published key would also read as "matches".
-		// TODO(dns-health): wire a public-key-derivation helper so
-		// expectedDKIMRecord reflects the actual stored key, then set
-		// MatchesDNS from a genuine comparison.
+		if s.dkimRepo != nil {
+			cfg, err := s.dkimRepo.GetByDomain(ctx, d.Name, nil)
+			if err == nil && cfg != nil && cfg.PrivateKeyPEM != "" {
+				expected, ok := deriveExpectedDKIMRecord(cfg.PrivateKeyPEM, health.DKIM.Selector, d.Name)
+				if ok {
+					health.DKIM.Expected = truncateForDisplay(expected, 120)
+					dkimResult := s.inspector.CheckDKIM(ctx, d.Name, health.DKIM.Selector, expected)
+					if dkimResult.Status == string(DNSStatusPass) {
+						health.DKIM.MatchesDNS = true
+					} else {
+						if observed := normalizeDKIMTXT(dkimResult.Observed); observed == "" {
+							dkimResult.Reason = "DKIM record not found"
+						} else {
+							dkimResult.Reason = "DKIM key mismatch — published key differs from current stored key"
+						}
+						health.DKIM.MatchesDNS = false
+					}
+					health.DKIM.Status = dkimResult.Status
+					health.DKIM.Reason = dkimResult.Reason
+					health.DKIM.Observed = dkimResult.Observed
+				}
+			}
+		}
 	}
 
 	evidence, _ := json.Marshal(result)
@@ -455,4 +487,32 @@ func statusFieldEnterprise(h *EnterpriseDNSHealth, fn func(*EnterpriseDNSHealth)
 		return ""
 	}
 	return fn(h)
+}
+
+func deriveExpectedDKIMRecord(privPEM string, selector string, domain string) (string, bool) {
+	block, _ := pem.Decode([]byte(privPEM))
+	if block == nil {
+		return "", false
+	}
+	keyAny, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		if k1, err1 := x509.ParsePKCS1PrivateKey(block.Bytes); err1 == nil {
+			keyAny = k1
+		} else {
+			return "", false
+		}
+	}
+	rsaKey, ok := keyAny.(*rsa.PrivateKey)
+	if !ok {
+		return "", false
+	}
+	pubBytes, err := x509.MarshalPKIXPublicKey(&rsaKey.PublicKey)
+	if err != nil {
+		return "", false
+	}
+	_, recordValue := dkim.GenerateDNSRecord(selector, domain, string(pubBytes))
+	if recordValue == "" {
+		return "", false
+	}
+	return recordValue, true
 }

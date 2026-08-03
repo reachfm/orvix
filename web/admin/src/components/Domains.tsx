@@ -47,6 +47,16 @@ interface DomainDNSHealth {
   dmarc: DNSHealthCheck | null;
   mtasts: DNSHealthCheck | null;
   tlsrpt: DNSHealthCheck | null;
+  mtasts_policy?: MTASTSPolicy | null;
+}
+
+interface MTASTSPolicy {
+  raw?: string;
+  valid?: boolean;
+  mode?: string;
+  max_age?: number;
+  mx?: string[];
+  error?: string;
 }
 
 interface DKIMResult {
@@ -395,12 +405,21 @@ function DNSHealthDrawer({ domain, onClose }: { domain: EnterpriseDomain; onClos
                       </p>
                     )}
                     {healthData.dkim.matches_dns !== undefined && (
-                      <p className="text-xs">
-                        <span className="text-[#555D73]">Matches DNS: </span>
-                        <span className={healthData.dkim.matches_dns ? "text-[#34D399]" : "text-[#F87171]"}>
-                          {healthData.dkim.matches_dns ? "Yes" : "No"}
-                        </span>
-                      </p>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[#555D73] text-xs">Key Match:</span>
+                        {healthData.dkim.matches_dns ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full bg-[#34D399]/10 text-[#34D399]">
+                            Published key matches current key
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full bg-[#F87171]/10 text-[#F87171]">
+                            Published key does NOT match current key
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    {healthData.dkim.matches_dns === false && healthData.dkim.observed && (
+                      <p className="text-[#FBBF24] text-xs">Publish the key above to verify</p>
                     )}
                     {healthData.dkim.reason && (
                       <p className="text-[#F87171] text-xs">{healthData.dkim.reason}</p>
@@ -415,7 +434,58 @@ function DNSHealthDrawer({ domain, onClose }: { domain: EnterpriseDomain; onClos
               </div>
 
               <DNSRecordRow label="DMARC" check={healthData.dmarc} />
-              <DNSRecordRow label="MTA-STS" check={healthData.mtasts} />
+              <div className="py-3 border-b border-[#222736] space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[#E8EAF0] text-sm font-medium">MTA-STS</span>
+                  {healthData.mtasts ? <HealthBadge status={healthData.mtasts.status} /> : null}
+                </div>
+                {!healthData.mtasts ? (
+                  <p className="text-[#8B92A8] text-xs">Not checked</p>
+                ) : (
+                  <>
+                    {healthData.mtasts.observed && (
+                      <p className="text-[#8B92A8] text-xs break-all select-all">
+                        <span className="text-[#555D73]">TXT: </span>
+                        {healthData.mtasts.observed}
+                      </p>
+                    )}
+                    {healthData.mtasts.reason && (
+                      <p className="text-[#FBBF24] text-xs">{healthData.mtasts.reason}</p>
+                    )}
+                  </>
+                )}
+                {healthData.mtasts_policy !== undefined && healthData.mtasts_policy !== null && (
+                  <>
+                    <div className="pt-1 border-t border-[#222736]">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[#8B92A8] text-xs">HTTPS Policy</span>
+                        <HealthBadge status={healthData.mtasts_policy.valid ? "pass" : "fail"} />
+                      </div>
+                    </div>
+                    {healthData.mtasts_policy.mode && (
+                      <p className="text-[#8B92A8] text-xs">
+                        <span className="text-[#555D73]">Mode: </span>
+                        {healthData.mtasts_policy.mode}
+                      </p>
+                    )}
+                    {healthData.mtasts_policy.max_age !== undefined && healthData.mtasts_policy.max_age > 0 && (
+                      <p className="text-[#8B92A8] text-xs">
+                        <span className="text-[#555D73]">Max Age: </span>
+                        {healthData.mtasts_policy.max_age}s
+                      </p>
+                    )}
+                    {healthData.mtasts_policy.mx && healthData.mtasts_policy.mx.length > 0 && (
+                      <p className="text-[#8B92A8] text-xs break-all">
+                        <span className="text-[#555D73]">MX: </span>
+                        {healthData.mtasts_policy.mx.join(", ")}
+                      </p>
+                    )}
+                    {healthData.mtasts_policy.error && (
+                      <p className="text-[#F87171] text-xs">{healthData.mtasts_policy.error}</p>
+                    )}
+                  </>
+                )}
+              </div>
               <DNSRecordRow label="TLS-RPT" check={healthData.tlsrpt} />
             </div>
           ) : (
