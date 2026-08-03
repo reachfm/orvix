@@ -3,6 +3,7 @@ package domain
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -40,8 +41,18 @@ func newDomainTestDB(t *testing.T) *sql.DB {
 		updated_at DATETIME,
 		deleted_at DATETIME
 	);
-	CREATE TABLE coremail_mailboxes (id INTEGER PRIMARY KEY, domain_id INTEGER, tenant_id INTEGER, deleted_at DATETIME);
+	CREATE TABLE coremail_mailboxes (id INTEGER PRIMARY KEY, domain_id INTEGER, tenant_id INTEGER, used_bytes INTEGER DEFAULT 0, msg_count INTEGER DEFAULT 0, deleted_at DATETIME);
 	CREATE TABLE coremail_aliases (id INTEGER PRIMARY KEY, domain_id INTEGER, tenant_id INTEGER, deleted_at DATETIME);
+	CREATE TABLE customer_domain_verifications (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		domain_id INTEGER NOT NULL,
+		score INTEGER NOT NULL DEFAULT 0,
+		status TEXT NOT NULL DEFAULT '',
+		mx_status TEXT, spf_status TEXT, dkim_status TEXT, dmarc_status TEXT,
+		evidence TEXT,
+		checked_at DATETIME,
+		created_at DATETIME
+	);
 	CREATE TABLE coremail_admin_groups (id INTEGER PRIMARY KEY, tenant_id INTEGER, name TEXT, deleted_at DATETIME);
 	CREATE TABLE coremail_admin_group_members (group_id INTEGER, user_id INTEGER);
 	CREATE TABLE coremail_dkim_config (
@@ -102,6 +113,114 @@ func TestDomainServiceTenantScopedLifecycle(t *testing.T) {
 	if got.Status != "suspended" {
 		t.Fatalf("status not persisted: %#v", got)
 	}
+}
+
+// TestListDomainsReturnsRealAggregates is the regression test for the
+// enterprise domains table: it verifies mailbox/alias counts, storage
+// bytes, message counts, and DNS health/score come back as real computed
+// values from the batched List query — not zero placeholders — and that
+// the list is scoped to the caller's tenant.
+func TestListDomainsReturnsRealAggregates(t *testing.T) {
+	db := newDomainTestDB(t)
+	svc := NewService(NewDomainAdminRepo(db), dkim.NewSQLRepo(db), nil, nil)
+	ctx := context.Background()
+
+	created, err := svc.CreateDomain(ctx, CreateDomainRequest{Name: "agg.example.com", MaxQuotaMB: 100}, 5)
+	if err != nil {
+		t.Fatalf("create domain: %v", err)
+	}
+
+	if _, err := db.Exec(`INSERT INTO coremail_mailboxes (domain_id, tenant_id, used_bytes, msg_count) VALUES (?, 5, 1000, 3), (?, 5, 2000, 7)`,
+		created.ID, created.ID); err != nil {
+		t.Fatalf("seed mailboxes: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO coremail_aliases (domain_id, tenant_id) VALUES (?, 5)`, created.ID); err != nil {
+		t.Fatalf("seed alias: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO customer_domain_verifications (domain_id, score, status, checked_at, created_at) VALUES (?, 80, 'warning', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, created.ID); err != nil {
+		t.Fatalf("seed verification: %v", err)
+	}
+
+	domains, total, err := svc.ListDomains(ctx, DomainFilter{TenantID: uintPtr(5)})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if total != 1 || len(domains) != 1 {
+		t.Fatalf("total=%d len=%d, want 1/1", total, len(domains))
+	}
+	d := domains[0]
+	if d.MailboxCount != 2 {
+		t.Errorf("MailboxCount = %d, want 2", d.MailboxCount)
+	}
+	if d.AliasCount != 1 {
+		t.Errorf("AliasCount = %d, want 1", d.AliasCount)
+	}
+	if d.StorageUsedBytes != 3000 {
+		t.Errorf("StorageUsedBytes = %d, want 3000 (real SUM, not a placeholder)", d.StorageUsedBytes)
+	}
+	if d.MessageCount != 10 {
+		t.Errorf("MessageCount = %d, want 10", d.MessageCount)
+	}
+	if d.StorageLimitBytes != 100*1024*1024 {
+		t.Errorf("StorageLimitBytes = %d, want %d", d.StorageLimitBytes, 100*1024*1024)
+	}
+	if d.DNSHealth != "warning" || d.DNSScore != 80 {
+		t.Errorf("DNSHealth/DNSScore = %q/%d, want warning/80 (from latest verification snapshot)", d.DNSHealth, d.DNSScore)
+	}
+	if d.DNSLastCheckedAt == nil {
+		t.Error("DNSLastCheckedAt is nil, want the verification's checked_at")
+	}
+}
+
+// TestListDomainsIsSingleQuery is the no-N+1 regression test: List must
+// issue exactly one query to coremail_domains (the correlated subqueries
+// for aggregates execute inside that single statement, not as separate
+// round trips) regardless of how many domains are returned.
+func TestListDomainsIsSingleQuery(t *testing.T) {
+	db := newDomainTestDB(t)
+	svc := NewService(NewDomainAdminRepo(db), dkim.NewSQLRepo(db), nil, nil)
+	ctx := context.Background()
+
+	for i := 0; i < 10; i++ {
+		if _, err := svc.CreateDomain(ctx, CreateDomainRequest{Name: fmt.Sprintf("multi%d.example.com", i)}, 5); err != nil {
+			t.Fatalf("create domain %d: %v", i, err)
+		}
+	}
+
+	counter := &countingDB{db: db}
+	repo := &DomainAdminRepo{root: db, db: counter, dialect: NewDomainAdminRepo(db).dialect}
+	domains, total, err := repo.List(ctx, DomainFilter{TenantID: uintPtr(5)})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if total != 10 || len(domains) != 10 {
+		t.Fatalf("total=%d len=%d, want 10/10", total, len(domains))
+	}
+	// COUNT(*) + the paginated SELECT = exactly 2 queries, independent of
+	// the 10 domains returned. If aggregates were computed via N separate
+	// per-domain queries instead of correlated subqueries, this would be
+	// 2 + 10 = 12.
+	if counter.queryCalls != 2 {
+		t.Errorf("List issued %d QueryContext calls for 10 domains, want exactly 2 (COUNT + paginated SELECT) — N+1 regression", counter.queryCalls)
+	}
+}
+
+// countingDB wraps *sql.DB to count QueryContext calls, for the no-N+1 test.
+type countingDB struct {
+	db         *sql.DB
+	queryCalls int
+}
+
+func (c *countingDB) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	return c.db.ExecContext(ctx, query, args...)
+}
+func (c *countingDB) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	c.queryCalls++
+	return c.db.QueryContext(ctx, query, args...)
+}
+func (c *countingDB) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	c.queryCalls++
+	return c.db.QueryRowContext(ctx, query, args...)
 }
 
 func TestDomainMutationRollsBackWhenAuditWriteFails(t *testing.T) {

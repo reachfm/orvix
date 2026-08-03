@@ -76,11 +76,22 @@ func (r *DomainAdminRepo) List(ctx context.Context, filter DomainFilter) ([]Admi
 		filter.Limit = 500
 	}
 
+	// All aggregates (mailbox/alias counts, storage/message totals, latest
+	// DNS verification) are computed as correlated subqueries within this
+	// single SELECT — one round trip for the whole page, not one query per
+	// domain. customer_domain_verifications has no per-domain unique
+	// constraint, so the DNS subqueries pick the most recent row via
+	// ORDER BY created_at DESC LIMIT 1, matching VerificationRepo.GetLatest.
 	query := `SELECT d.id, d.tenant_id, d.name, d.status, COALESCE(d.plan,''), COALESCE(d.description,''),
 		d.max_mailboxes, d.max_aliases, d.max_quota_mb,
 		d.dkim_enabled, COALESCE(d.dkim_selector,'mail'), d.dmarc_enabled,
 		COALESCE((SELECT COUNT(*) FROM coremail_mailboxes m WHERE m.domain_id=d.id AND m.deleted_at IS NULL),0),
 		COALESCE((SELECT COUNT(*) FROM coremail_aliases a WHERE a.domain_id=d.id AND a.deleted_at IS NULL),0),
+		COALESCE((SELECT SUM(m.used_bytes) FROM coremail_mailboxes m WHERE m.domain_id=d.id AND m.deleted_at IS NULL),0),
+		COALESCE((SELECT SUM(m.msg_count) FROM coremail_mailboxes m WHERE m.domain_id=d.id AND m.deleted_at IS NULL),0),
+		(SELECT v.status FROM customer_domain_verifications v WHERE v.domain_id=d.id ORDER BY v.created_at DESC LIMIT 1),
+		COALESCE((SELECT v.score FROM customer_domain_verifications v WHERE v.domain_id=d.id ORDER BY v.created_at DESC LIMIT 1),0),
+		(SELECT v.checked_at FROM customer_domain_verifications v WHERE v.domain_id=d.id ORDER BY v.created_at DESC LIMIT 1),
 		d.created_at, d.updated_at
 		FROM coremail_domains d WHERE ` + clause + ` ORDER BY d.name ASC LIMIT ` + r.dialect.Placeholder(len(args)+1) + ` OFFSET ` + r.dialect.Placeholder(len(args)+2)
 	args = append(args, filter.Limit, filter.Offset)
@@ -95,14 +106,27 @@ func (r *DomainAdminRepo) List(ctx context.Context, filter DomainFilter) ([]Admi
 	for rows.Next() {
 		var d AdminDomain
 		var dkimEnabled, dmarcEnabled int
+		var dnsHealth sql.NullString
+		var dnsCheckedAt sql.NullTime
 		if err := rows.Scan(&d.ID, &d.TenantID, &d.Name, &d.Status, &d.Plan, &d.Description,
 			&d.MaxMailboxes, &d.MaxAliases, &d.MaxQuotaMB,
 			&dkimEnabled, &d.DKIMSelector, &dmarcEnabled,
-			&d.MailboxCount, &d.AliasCount, &d.CreatedAt, &d.UpdatedAt); err != nil {
+			&d.MailboxCount, &d.AliasCount,
+			&d.StorageUsedBytes, &d.MessageCount,
+			&dnsHealth, &d.DNSScore, &dnsCheckedAt,
+			&d.CreatedAt, &d.UpdatedAt); err != nil {
 			return nil, 0, err
 		}
 		d.DKIMEnabled = dkimEnabled != 0
 		d.DMARCEnabled = dmarcEnabled != 0
+		d.StorageLimitBytes = d.MaxQuotaMB * 1024 * 1024
+		if dnsHealth.Valid {
+			d.DNSHealth = dnsHealth.String
+		}
+		if dnsCheckedAt.Valid {
+			t := dnsCheckedAt.Time
+			d.DNSLastCheckedAt = &t
+		}
 		domains = append(domains, d)
 	}
 	return domains, total, rows.Err()
