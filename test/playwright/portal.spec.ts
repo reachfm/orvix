@@ -157,7 +157,14 @@ test.describe("Orvix admin portal E2E", () => {
       { text: "Aliases", heading: "Email Aliases" },
       { text: "Groups", heading: "Groups" },
       { text: "Usage", heading: "Usage & Quotas" },
-      { text: "Domain Setup", heading: "Domain Onboarding" },
+      // The "Domain Setup" / "Domain Onboarding" section was REMOVED
+      // deliberately: it was a second, inferior copy of the DNS record UI
+      // that read response fields the API never returned, so every record
+      // rendered as "pending". DNS record management now lives solely in the
+      // admin Domains console, whose per-domain "DNS" action opens the
+      // canonical DNS Records modal (covered by
+      // web/admin/tests/e2e/domains-dns-console.spec.ts). Asserting the
+      // deleted section here would only pin a UI that no longer exists.
       { text: "Invitations", heading: "Invitations" },
       { text: "Members", heading: "Members & Roles" },
       { text: "Ownership", heading: "Ownership Transfer" },
