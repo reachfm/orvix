@@ -65,10 +65,19 @@ function UsageCell({ used, limit }: { used?: number; limit?: number }) {
   );
 }
 
+/**
+ * DNS health for one row.
+ *
+ * A domain that has never been checked has NO score — not a score of zero.
+ * Rendering an absent score as "0%" would read as "this domain failed every
+ * check", which is a different and false claim. So the score is shown only
+ * when a check has actually run AND the backend reports a numeric score;
+ * every other case renders an explicit textual state instead.
+ */
 function DNSHealthCell({ d }: { d: EnterpriseDomain }) {
   const health = (d.dns_health || "").toLowerCase();
-  if (!d.dns_last_checked_at && !health) {
-    return <span className="text-[#555D73]">Never checked</span>;
+  if (!d.dns_last_checked_at) {
+    return <span className="text-[#555D73]">Not checked</span>;
   }
   const color =
     health === "pass" ? "#34D399"
@@ -78,7 +87,9 @@ function DNSHealthCell({ d }: { d: EnterpriseDomain }) {
   return (
     <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
       <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: color }} />
-      <span style={{ color }}>{typeof d.dns_score === "number" ? `${d.dns_score}%` : "—"}</span>
+      <span style={{ color }}>
+        {typeof d.dns_score === "number" ? `${d.dns_score}%` : "Unavailable"}
+      </span>
       <span className="text-[#555D73] capitalize">{health || "unknown"}</span>
     </span>
   );
@@ -128,7 +139,6 @@ export default function Domains() {
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(25);
-  const [selected, setSelected] = useState<Set<number>>(new Set());
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [showCreate, setShowCreate] = useState(false);
   const [newDomain, setNewDomain] = useState("");
@@ -179,7 +189,6 @@ export default function Domains() {
     else next.add(id);
     return next;
   };
-  const allVisibleSelected = visible.length > 0 && visible.every((d) => selected.has(d.id));
 
   if (isLoading && items.length === 0) return <p className="text-[#8B92A8]">Loading…</p>;
   if (error && items.length === 0) {
@@ -272,16 +281,6 @@ export default function Domains() {
             <table className="w-full text-xs border-collapse">
               <thead>
                 <tr className="border-b border-[#2A2F3E] bg-[#0F1218]">
-                  <th className="w-8 px-2 py-2">
-                    <input
-                      type="checkbox"
-                      aria-label="Select all domains on this page"
-                      checked={allVisibleSelected}
-                      onChange={() =>
-                        setSelected(allVisibleSelected ? new Set() : new Set(visible.map((d) => d.id)))
-                      }
-                    />
-                  </th>
                   <th className="w-6 px-1 py-2" />
                   <th className="text-left font-medium text-[#8B92A8] px-3 py-2">Domain</th>
                   <th className="text-right font-medium text-[#8B92A8] px-3 py-2">Aliases</th>
@@ -299,14 +298,6 @@ export default function Domains() {
                 {visible.map((d) => (
                   <Fragment key={d.id}>
                     <tr className="border-b border-[#222736] hover:bg-[#161A21]">
-                      <td className="px-2 py-2">
-                        <input
-                          type="checkbox"
-                          aria-label={`Select ${d.name}`}
-                          checked={selected.has(d.id)}
-                          onChange={() => setSelected((s) => toggle(s, d.id))}
-                        />
-                      </td>
                       <td className="px-1 py-2">
                         <button
                           onClick={() => setExpanded((s) => toggle(s, d.id))}
@@ -370,7 +361,7 @@ export default function Domains() {
                     </tr>
                     {expanded.has(d.id) && (
                       <tr className="border-b border-[#222736] bg-[#0F1218]">
-                        <td colSpan={12} className="px-10 py-3">
+                        <td colSpan={11} className="px-10 py-3">
                           <dl className="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-1.5 text-[11px]">
                             <div>
                               <dt className="text-[#555D73]">Plan</dt>
@@ -425,7 +416,6 @@ export default function Domains() {
                 ))}
               </select>
             </label>
-            {selected.size > 0 && <span>{selected.size} selected</span>}
             <div className="ml-auto flex items-center gap-2">
               <span>
                 Page {currentPage + 1} of {pageCount}

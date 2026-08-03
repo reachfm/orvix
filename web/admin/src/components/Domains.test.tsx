@@ -173,8 +173,9 @@ describe("Domains table", () => {
     // DNS health score + label straight from dns_score/dns_health.
     expect(screen.getByText("72%")).toBeInTheDocument();
     expect(screen.getByText("warning")).toBeInTheDocument();
-    // A domain that has never been checked says so rather than showing 0% pass.
-    expect(screen.getByText("Never checked")).toBeInTheDocument();
+    // A domain that has never been checked says so rather than showing 0%,
+    // which would falsely read as "failed every check".
+    expect(screen.getByText("Not checked")).toBeInTheDocument();
   });
 
   it("shows the domain count and supports search", async () => {
@@ -186,16 +187,24 @@ describe("Domains table", () => {
     expect(screen.getByText("other.com")).toBeInTheDocument();
   });
 
-  it("exposes page-size, pagination, refresh and select controls", async () => {
+  it("exposes page-size, pagination and refresh controls", async () => {
     await renderTable();
     expect(screen.getByLabelText("Rows per page")).toBeInTheDocument();
     expect(screen.getByLabelText("Previous page")).toBeInTheDocument();
     expect(screen.getByLabelText("Next page")).toBeInTheDocument();
     expect(screen.getByLabelText("Refresh domains")).toBeInTheDocument();
-    expect(screen.getByLabelText("Select all domains on this page")).toBeInTheDocument();
+  });
 
-    fireEvent.click(screen.getByLabelText("Select example.com"));
-    await waitFor(() => expect(screen.getByText("1 selected")).toBeInTheDocument());
+  it("ships no selection UI, because there is no bulk operation behind it", async () => {
+    await renderTable();
+    // Inert controls are worse than absent ones: a checkbox that selects
+    // rows no action can consume trains operators to expect a bulk feature
+    // that does not exist. Removed until a real, authorized bulk action is
+    // implemented end to end.
+    expect(screen.queryByLabelText("Select all domains on this page")).toBeNull();
+    expect(screen.queryByLabelText("Select example.com")).toBeNull();
+    expect(document.querySelectorAll('input[type="checkbox"]').length).toBe(0);
+    expect(screen.queryByText(/\d+ selected/)).toBeNull();
   });
 
   it("opens the DNS modal only via the dedicated DNS action, for the right domain", async () => {
@@ -226,13 +235,129 @@ describe("DNS records modal", () => {
     expect(screen.getByTestId("reason-mx")).toHaveTextContent("MX matches expected host");
   });
 
-  it("omits the MTA-STS policy row when the API returned no policy document", async () => {
+  it("renders the full expanded record inventory with required, current, status, reason and guidance", async () => {
+    vi.mocked(api.getEnterpriseDomainDNS).mockResolvedValue({
+      ...defaultDNSHealth,
+      mail_host_a: {
+        name: "mail.example.com", type: "A", status: "pass",
+        expected: "one or more public IPv4 addresses", observed: ["192.0.2.25"],
+        guidance: "Add an A record for mail.example.com pointing to the public IPv4 address of the ORVIX mail server.",
+        optional: false, checked_at: "2026-01-01T00:00:00Z",
+      },
+      mail_host_aaaa: {
+        name: "mail.example.com", type: "AAAA", status: "optional",
+        expected: "one or more public IPv6 addresses (optional)", observed: [],
+        reason: "no AAAA record published for mail.example.com; IPv6 is not required by ORVIX",
+        guidance: "Optional. If the mail server has IPv6 connectivity, add an AAAA record for mail.example.com pointing to its public IPv6 address.",
+        optional: true, checked_at: "2026-01-01T00:00:00Z",
+      },
+      mx_hosts: [{
+        name: "mail.example.com", type: "MX-host", status: "pass",
+        expected: "at least one A or AAAA address", observed: ["A 192.0.2.25"],
+        guidance: "Add an A record (and optionally AAAA) for the MX host mail.example.com pointing to the mail server's public IP address; an MX target that does not resolve cannot receive mail.",
+        optional: false, checked_at: "2026-01-01T00:00:00Z",
+      }],
+      ptr: {
+        name: "192.0.2.25", type: "PTR", status: "fail", expected: "mail.example.com",
+        observed: [], reason: "no PTR record published for 192.0.2.25",
+        guidance: "Ask the network or hosting provider that owns 192.0.2.25 to set its reverse DNS (PTR) record to mail.example.com. Receivers commonly reject mail from IPs whose rDNS is missing or generic.",
+        optional: false, checked_at: "2026-01-01T00:00:00Z",
+      },
+      autodiscover: {
+        name: "autodiscover.example.com", type: "CNAME", status: "optional",
+        expected: "mail.example.com", observed: [],
+        reason: "autodiscover.example.com is not published; Outlook autodiscover falls back to the ORVIX-hosted endpoint",
+        guidance: "Optional. Add a CNAME record for autodiscover.example.com pointing to mail.example.com.",
+        optional: true, checked_at: "2026-01-01T00:00:00Z",
+      },
+      autoconfig: {
+        name: "autoconfig.example.com", type: "CNAME", status: "optional",
+        expected: "mail.example.com", observed: [],
+        reason: "autoconfig.example.com is not published; Thunderbird autoconfig falls back to the ORVIX-hosted endpoint",
+        guidance: "Optional. Add a CNAME record for autoconfig.example.com pointing to mail.example.com.",
+        optional: true, checked_at: "2026-01-01T00:00:00Z",
+      },
+      tlsa: {
+        name: "_25._tcp.mail.example.com", type: "TLSA", status: "not_applicable",
+        reason: "DANE/TLSA is not a configurable feature of this ORVIX deployment, so no TLSA record is required",
+        guidance: "No action required. ORVIX does not offer DANE/TLSA configuration, so this record is neither published nor validated.",
+        optional: true, checked_at: "2026-01-01T00:00:00Z",
+      },
+    } as any);
+    await openModal();
+
+    // Every expanded record type is present as its own first-class row.
+    for (const key of [
+      "mx", "mx-host-0", "mail-host-a", "mail-host-aaaa", "ptr",
+      "spf", "dkim", "dmarc", "mtasts", "mtasts-policy", "tlsrpt",
+      "autodiscover", "autoconfig", "tlsa",
+    ]) {
+      expect(screen.getByTestId(`dns-row-${key}`)).toBeInTheDocument();
+    }
+
+    // Optional and not-applicable rows are explicitly labelled, never hidden
+    // and never shown as failures.
+    expect(screen.getByTestId("dns-row-mail-host-aaaa")).toHaveTextContent("Optional — not configured");
+    expect(screen.getByTestId("dns-row-autodiscover")).toHaveTextContent("Optional — not configured");
+    expect(screen.getByTestId("dns-row-autoconfig")).toHaveTextContent("Optional — not configured");
+    expect(screen.getByTestId("dns-row-tlsa")).toHaveTextContent("Not applicable");
+    expect(screen.getByTestId("dns-row-tlsa")).not.toHaveTextContent("Fail");
+    // A not_applicable record has no required value; it says so rather than
+    // rendering a bare dash that could read as "unknown".
+    expect(screen.getByTestId("required-tlsa")).toHaveTextContent("Not required");
+
+    // Required value, current value, status, reason and guidance all render.
+    expect(screen.getByTestId("required-ptr")).toHaveTextContent("mail.example.com");
+    expect(screen.getByTestId("observed-ptr")).toHaveTextContent("Not present");
+    expect(screen.getByTestId("dns-row-ptr")).toHaveTextContent("Fail");
+    expect(screen.getByTestId("reason-ptr")).toHaveTextContent("no PTR record published for 192.0.2.25");
+    expect(screen.getByTestId("guidance-ptr")).toHaveTextContent("reverse DNS (PTR) record to mail.example.com");
+    expect(screen.getByTestId("observed-mail-host-a")).toHaveTextContent("192.0.2.25");
+    expect(screen.getByTestId("observed-mx-host-0")).toHaveTextContent("A 192.0.2.25");
+  });
+
+  it("always renders a real required value for SPF and DMARC, never a dash", async () => {
+    vi.mocked(api.getEnterpriseDomainDNS).mockResolvedValue({
+      ...defaultDNSHealth,
+      spf: {
+        status: "fail", observed: "", expected: "v=spf1 mx -all",
+        reason: "no SPF record found",
+        guidance: 'Publish a single TXT record at example.com with the value "v=spf1 mx -all". Exactly one SPF record may exist per domain.',
+      },
+      dmarc: {
+        status: "fail", observed: "",
+        expected: "v=DMARC1; p=quarantine; rua=mailto:dmarc@example.com",
+        reason: "DMARC record not found",
+        guidance: 'Add a TXT record at _dmarc.example.com with the value "v=DMARC1; p=quarantine; rua=mailto:dmarc@example.com".',
+      },
+    } as any);
+    await openModal();
+
+    expect(screen.getByTestId("required-spf")).toHaveTextContent("v=spf1 mx -all");
+    expect(screen.getByTestId("required-spf").textContent).not.toBe("—");
+    expect(screen.getByTestId("required-dmarc")).toHaveTextContent(
+      "v=DMARC1; p=quarantine; rua=mailto:dmarc@example.com"
+    );
+    expect(screen.getByTestId("required-dmarc").textContent).not.toBe("—");
+    expect(screen.getByTestId("guidance-spf")).toHaveTextContent("Exactly one SPF record may exist per domain");
+    expect(screen.getByTestId("guidance-dmarc")).toHaveTextContent("_dmarc.example.com");
+  });
+
+  it("shows the MTA-STS HTTPS policy row as unverified when no policy document was fetched", async () => {
+    // A missing policy document is exactly the condition that blocks a full
+    // pass, so the row must be visible and explicitly failing — hiding it
+    // would make an unverified deployment look complete.
     vi.mocked(api.getEnterpriseDomainDNS).mockResolvedValue({
       ...defaultDNSHealth,
       mtasts_policy: null,
     } as any);
     await openModal();
-    expect(screen.queryByTestId("dns-row-mtasts-policy")).not.toBeInTheDocument();
+    const row = screen.getByTestId("dns-row-mtasts-policy");
+    expect(row).toBeInTheDocument();
+    expect(row).toHaveTextContent("Fail");
+    expect(screen.getByTestId("guidance-mtasts-policy").textContent).toContain(
+      "https://mta-sts.example.com/.well-known/mta-sts.txt"
+    );
     expect(screen.getByTestId("dns-row-tlsrpt")).toBeInTheDocument();
   });
 
@@ -314,7 +439,9 @@ describe("DNS records modal", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /Check DNS now/i }));
     await waitFor(() => expect(screen.getByTestId("health-summary")).toHaveTextContent("100%"));
-    expect(screen.queryByTestId("dns-row-mtasts-policy")).not.toBeInTheDocument();
+    // The stale policy object is gone from the cache: the row now reports
+    // the policy as unverified rather than replaying the old pass.
+    expect(screen.getByTestId("dns-row-mtasts-policy")).toHaveTextContent("Fail");
   });
 });
 
@@ -445,7 +572,7 @@ describe("copy and download", () => {
 
     expect(clickSpy).toHaveBeenCalled();
     expect(captured).toContain("DNS records for example.com");
-    expect(captured).toContain("NAME | TYPE | PRIORITY | REQUIRED VALUE");
+    expect(captured).toContain("NAME | TYPE | PRIORITY | STATUS | REQUIRED VALUE");
     expect(captured).toContain("mail._domainkey.example.com");
     expect(captured).toContain("v=DMARC1; p=reject");
     expect(captured).toContain("| 10 |"); // MX priority column

@@ -51,6 +51,14 @@ function StatusPill({ status }: { status: string }) {
     fail: ["#F87171", "Fail"],
     pending: ["#4F7CFF", "Pending propagation"],
     unknown: ["#8B92A8", "Not checked"],
+    not_checked: ["#8B92A8", "Not checked"],
+    // Not required of this deployment. Rendered neutrally — never as a
+    // failure — and excluded from the score by the backend.
+    optional: ["#8B92A8", "Optional — not configured"],
+    not_applicable: ["#8B92A8", "Not applicable"],
+    // The required value could not be determined, so this record is
+    // indeterminate and must never read as a pass.
+    configuration_required: ["#F87171", "Configuration required"],
   };
   const [color, label] = map[s] || ["#8B92A8", status];
   return (
@@ -405,10 +413,20 @@ export default function DNSRecordsModal({ domain, onClose }: DNSRecordsModalProp
                           <span className="ml-1 text-[#555D73]">prio {r.priority}</span>
                         )}
                       </td>
-                      <td className="px-3 py-2.5 font-mono text-[#8B92A8] break-all max-w-xs">
-                        {r.required || <span className="text-[#555D73]">—</span>}
+                      <td
+                        className="px-3 py-2.5 font-mono text-[#8B92A8] break-all max-w-xs"
+                        data-testid={`required-${r.key}`}
+                      >
+                        {r.required || (
+                          <span className="text-[#555D73] not-italic">
+                            {r.optional ? "Not required" : "—"}
+                          </span>
+                        )}
                       </td>
-                      <td className="px-3 py-2.5 font-mono text-[#8B92A8] break-all max-w-xs">
+                      <td
+                        className="px-3 py-2.5 font-mono text-[#8B92A8] break-all max-w-xs"
+                        data-testid={`observed-${r.key}`}
+                      >
                         {r.observed || <span className="text-[#555D73]">Not present</span>}
                       </td>
                       <td className="px-3 py-2.5">
@@ -417,6 +435,19 @@ export default function DNSRecordsModal({ domain, onClose }: DNSRecordsModalProp
                         {r.reason && (
                           <p className="text-[#8B92A8] mt-1 max-w-[16rem]" data-testid={`reason-${r.key}`}>
                             {r.reason}
+                          </p>
+                        )}
+                        {/*
+                          Repair guidance, authored by the backend against this
+                          domain's real values. Shown on every row so an
+                          operator never has to guess what to publish.
+                        */}
+                        {r.guidance && (
+                          <p
+                            className="text-[#555D73] mt-1 max-w-[16rem]"
+                            data-testid={`guidance-${r.key}`}
+                          >
+                            {r.guidance}
                           </p>
                         )}
                       </td>

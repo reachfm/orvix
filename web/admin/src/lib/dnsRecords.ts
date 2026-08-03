@@ -1,6 +1,7 @@
 import type {
-  DomainDNSHealth, DNSHealthCheck, DNSRecordRow, DKIMResult,
+  DomainDNSHealth, DNSHealthCheck, DNSRecordCheck, DNSRecordRow, DKIMResult,
 } from "../types/dns";
+import { NON_REQUIRED_STATUSES } from "../types/dns";
 
 /** Shared React Query cache key for a domain's DNS health payload. */
 export function dnsQueryKey(domainID: number): readonly unknown[] {
@@ -36,14 +37,43 @@ function statusOf(check: DNSHealthCheck | null | undefined): string {
   return check?.status || "unknown";
 }
 
+/** True for statuses meaning "not required of this deployment". */
+export function isNonRequired(status: string): boolean {
+  return NON_REQUIRED_STATUSES.has(status);
+}
+
+/**
+ * Converts a backend DNSRecordCheck into a modal row. Every field — including
+ * the required value, the reason and the repair guidance — comes from the
+ * server; nothing here is fabricated client-side.
+ */
+function rowFromRecordCheck(key: string, c: DNSRecordCheck): DNSRecordRow {
+  return {
+    key,
+    name: c.name,
+    type: c.type,
+    required: c.expected || "",
+    observed: (c.observed || []).join(", "),
+    status: c.status || "unknown",
+    reason: c.reason || "",
+    guidance: c.guidance || "",
+    optional: Boolean(c.optional) || isNonRequired(c.status || ""),
+  };
+}
+
 /**
  * Builds the modal's record inventory from a single EnterpriseDNSHealth object.
  *
- * Every row's `status` and `reason` come straight from the server payload —
- * this function never infers pass/fail. `dkimPending` is the result of a
- * just-completed generate/rotate: its freshly published key has definitionally
- * not propagated yet, so that row is forced to "pending" rather than reusing
- * the pre-rotation check result, which would be misleading.
+ * Every row's `status`, `reason`, `required` value and `guidance` come straight
+ * from the server payload — this function never infers pass/fail and never
+ * invents a required value. `dkimPending` is the result of a just-completed
+ * generate/rotate: its freshly published key has definitionally not propagated
+ * yet, so that row is forced to "pending" rather than reusing the pre-rotation
+ * check result, which would be misleading.
+ *
+ * Optional and not-applicable records are ALWAYS emitted, never silently
+ * dropped, so the operator can see that ORVIX considered them and decided they
+ * are not required here.
  */
 export function buildRecordRows(
   health: DomainDNSHealth | undefined,
@@ -65,8 +95,22 @@ export function buildRecordRows(
     observed: observedText(mx),
     status: statusOf(mx),
     reason: mx?.reason || "",
+    guidance: mx?.guidance || "",
+    optional: false,
     priority,
   });
+
+  // ── Resolution of each published MX hostname to A/AAAA ──
+  for (const [i, h] of (health.mx_hosts || []).entries()) {
+    if (h) rows.push(rowFromRecordCheck(`mx-host-${i}`, h));
+  }
+
+  // ── Mail host addressing ──
+  if (health.mail_host_a) rows.push(rowFromRecordCheck("mail-host-a", health.mail_host_a));
+  if (health.mail_host_aaaa) rows.push(rowFromRecordCheck("mail-host-aaaa", health.mail_host_aaaa));
+
+  // ── Reverse DNS ──
+  if (health.ptr) rows.push(rowFromRecordCheck("ptr", health.ptr));
 
   // ── SPF ──
   rows.push({
@@ -77,6 +121,8 @@ export function buildRecordRows(
     observed: observedText(health.spf),
     status: statusOf(health.spf),
     reason: health.spf?.reason || "",
+    guidance: health.spf?.guidance || "",
+    optional: false,
   });
 
   // ── DKIM ──
@@ -95,6 +141,10 @@ export function buildRecordRows(
     reason: dkimPending
       ? "New key generated — publish this record; propagation can take up to 48 hours."
       : dkim?.reason || "",
+    guidance:
+      dkim?.guidance ||
+      `Publish the DKIM public key as a TXT record at ${dkimName}. Use the exact value shown in the Required column; do not re-wrap or re-quote it.`,
+    optional: false,
   });
 
   // ── DMARC ──
@@ -106,6 +156,8 @@ export function buildRecordRows(
     observed: observedText(health.dmarc),
     status: statusOf(health.dmarc),
     reason: health.dmarc?.reason || "",
+    guidance: health.dmarc?.guidance || "",
+    optional: false,
   });
 
   // ── MTA-STS TXT ──
@@ -117,10 +169,16 @@ export function buildRecordRows(
     observed: observedText(health.mtasts),
     status: statusOf(health.mtasts),
     reason: health.mtasts?.reason || "",
+    guidance: health.mtasts?.guidance || "",
+    optional: false,
   });
 
-  // ── MTA-STS HTTPS policy document (only when the backend fetched one) ──
+  // ── MTA-STS HTTPS policy document ──
+  // Always emitted. When the backend did not (or could not) fetch a policy the
+  // row is shown as unverified rather than omitted, because a missing policy is
+  // precisely the condition that blocks a full pass.
   const policy = health.mtasts_policy;
+  const policyURL = `https://mta-sts.${root}/.well-known/mta-sts.txt`;
   if (policy) {
     const detail = [
       policy.mode ? `mode: ${policy.mode}` : "",
@@ -131,12 +189,28 @@ export function buildRecordRows(
       .join("; ");
     rows.push({
       key: "mtasts-policy",
-      name: `https://mta-sts.${root}/.well-known/mta-sts.txt`,
+      name: policyURL,
       type: "HTTPS policy",
       required: "version: STSv1 (policy document served over HTTPS)",
       observed: detail || policy.raw || "",
       status: policy.valid ? "pass" : "fail",
       reason: policy.error || "",
+      guidance: `Serve the MTA-STS policy document over HTTPS at ${policyURL}. It must begin with "version: STSv1" and list the same MX hosts as the domain's MX records.`,
+      optional: false,
+    });
+  } else {
+    rows.push({
+      key: "mtasts-policy",
+      name: policyURL,
+      type: "HTTPS policy",
+      required: "version: STSv1 (policy document served over HTTPS)",
+      observed: "",
+      status: "fail",
+      reason:
+        health.mtasts?.reason ||
+        "MTA-STS HTTPS policy document has not been fetched and verified.",
+      guidance: `Serve the MTA-STS policy document over HTTPS at ${policyURL}. Until this document is fetched and parsed successfully, MTA-STS cannot be recorded as fully configured.`,
+      optional: false,
     });
   }
 
@@ -149,7 +223,16 @@ export function buildRecordRows(
     observed: observedText(health.tlsrpt),
     status: statusOf(health.tlsrpt),
     reason: health.tlsrpt?.reason || "",
+    guidance: health.tlsrpt?.guidance || "",
+    optional: false,
   });
+
+  // ── Client autodiscovery (optional) ──
+  if (health.autodiscover) rows.push(rowFromRecordCheck("autodiscover", health.autodiscover));
+  if (health.autoconfig) rows.push(rowFromRecordCheck("autoconfig", health.autoconfig));
+
+  // ── DANE / TLSA ──
+  if (health.tlsa) rows.push(rowFromRecordCheck("tlsa", health.tlsa));
 
   return rows;
 }
@@ -158,9 +241,9 @@ export function buildRecordRows(
  * Renders the modal's already-loaded rows as a plain-text zone summary.
  *
  * Generated entirely client-side from state already on screen — no extra API
- * call. It emits ONLY record name, type, priority and the required public
- * value. It must never contain DKIM private key material (which the API never
- * returns in the first place), session tokens, or internal database IDs.
+ * call. It emits ONLY record name, type, priority, status and the required
+ * public value. It must never contain DKIM private key material (which the API
+ * never returns in the first place), session tokens, or internal database IDs.
  */
 export function buildDNSRecordsFile(
   rows: DNSRecordRow[],
@@ -181,14 +264,23 @@ export function buildDNSRecordsFile(
     }
   }
   lines.push("");
-  lines.push("NAME | TYPE | PRIORITY | REQUIRED VALUE");
+  lines.push("NAME | TYPE | PRIORITY | STATUS | REQUIRED VALUE");
   lines.push("-".repeat(72));
   for (const r of rows) {
     lines.push(
-      [r.name, r.type, r.priority != null ? String(r.priority) : "-", r.required || "-"].join(" | ")
+      [
+        r.name,
+        r.type,
+        r.priority != null ? String(r.priority) : "-",
+        r.status,
+        r.required || "-",
+      ].join(" | ")
     );
   }
   lines.push("");
+  lines.push(
+    "Records marked optional or not_applicable are not required by ORVIX and do not affect the health score."
+  );
   lines.push(
     "This file contains public DNS record data only. DKIM private keys are never exported."
   );
