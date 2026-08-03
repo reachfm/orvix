@@ -331,13 +331,13 @@ func (s *Service) GetEnterpriseDNS(ctx context.Context, tenantID uint, domainID 
 				health.DMARC = dnsResult.DMARC
 				if dnsResult.DKIM != nil {
 					health.DKIM = &DKIMHealthCheck{
-						Selector:   dnsResult.DKIM.Selector,
-						Status:     dnsResult.DKIM.Status,
-						Expected:   dnsResult.DKIM.Expected,
-						Observed:   dnsResult.DKIM.Observed,
-						Reason:     dnsResult.DKIM.Reason,
-						CheckedAt:  dnsResult.DKIM.CheckedAt,
-						PublicTXT:  dnsResult.DKIM.PublicKey,
+						Selector:  dnsResult.DKIM.Selector,
+						Status:    dnsResult.DKIM.Status,
+						Expected:  dnsResult.DKIM.Expected,
+						Observed:  dnsResult.DKIM.Observed,
+						Reason:    dnsResult.DKIM.Reason,
+						CheckedAt: dnsResult.DKIM.CheckedAt,
+						PublicTXT: dnsResult.DKIM.PublicKey,
 					}
 					if d.DKIMEnabled && d.DKIMSelector != "" {
 						health.DKIM.RecordName = d.DKIMSelector + "._domainkey." + d.Name

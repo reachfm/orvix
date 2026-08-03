@@ -113,6 +113,36 @@ func resolveAndPinAddress(ctx context.Context, resolver func(ctx context.Context
 	return pinned, nil
 }
 
+// handshakeAndCleanup wraps rawConn in TLS (ServerName pinned to the real
+// hostname, never the dialed IP) and performs the handshake. On failure it
+// closes rawConn itself — the caller must not also close it — and returns
+// an error.
+//
+// The handshake error is what callers need: reasonFromError classifies it
+// into the generic client-facing "policy_unverified: TLS error" string, so
+// it must remain the PRIMARY, %w-wrapped error and stay first in the
+// message so it keeps matching that classifier's "tls" substring check. A
+// cleanup (Close) failure must never replace or hide it. The close result
+// is still checked explicitly — never discarded — and, if it also failed,
+// is folded in as secondary context only. Nothing here is logged, so no
+// additional network detail is exposed to API clients beyond what the
+// handshake error itself already carried.
+func handshakeAndCleanup(ctx context.Context, rawConn net.Conn, serverName string) (net.Conn, error) {
+	tlsConn := tls.Client(rawConn, &tls.Config{
+		ServerName: serverName,
+		MinVersion: tls.VersionTLS12,
+	})
+	handshakeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := tlsConn.HandshakeContext(handshakeCtx); err != nil {
+		if closeErr := rawConn.Close(); closeErr != nil {
+			return nil, fmt.Errorf("mtasts: tls handshake: %w (connection cleanup also failed: %v)", err, closeErr)
+		}
+		return nil, fmt.Errorf("mtasts: tls handshake: %w", err)
+	}
+	return tlsConn, nil
+}
+
 func ssrfDialer(resolver func(ctx context.Context, host string) ([]net.IPAddr, error)) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(addr)
@@ -132,17 +162,8 @@ func ssrfDialer(resolver func(ctx context.Context, host string) ([]net.IPAddr, e
 			return nil, fmt.Errorf("mtasts: dial pinned address: %w", err)
 		}
 
-		tlsConn := tls.Client(rawConn, &tls.Config{
-			ServerName: host, // certificate is checked against the real hostname, never the IP
-			MinVersion: tls.VersionTLS12,
-		})
-		handshakeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		if err := tlsConn.HandshakeContext(handshakeCtx); err != nil {
-			rawConn.Close()
-			return nil, fmt.Errorf("mtasts: tls handshake: %w", err)
-		}
-		return tlsConn, nil
+		// ServerName is pinned to host (the real hostname), never the IP.
+		return handshakeAndCleanup(ctx, rawConn, host)
 	}
 }
 

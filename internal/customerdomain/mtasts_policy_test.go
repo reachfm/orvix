@@ -3,6 +3,7 @@ package customerdomain
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -132,6 +133,112 @@ func TestMTASTSFetcher_TLSFailure(t *testing.T) {
 	lower := strings.ToLower(err.Error())
 	if !strings.Contains(lower, "certificate") && !strings.Contains(lower, "x509") {
 		t.Errorf("expected a certificate/x509 error, got: %v", err)
+	}
+}
+
+// closeTrackingConn wraps a real net.Conn to observe/control Close()
+// behavior in tests, without needing a full fake network stack.
+type closeTrackingConn struct {
+	net.Conn
+	closeCalled bool
+	closeErr    error
+}
+
+func (c *closeTrackingConn) Close() error {
+	c.closeCalled = true
+	if c.closeErr != nil {
+		// Still close the real underlying connection so the test doesn't
+		// leak a live socket even when simulating a Close() failure.
+		c.Conn.Close()
+		return c.closeErr
+	}
+	return c.Conn.Close()
+}
+
+// TestHandshakeAndCleanup_FailureClosesConnAndPreservesPrimaryError proves
+// handshakeAndCleanup, on a genuine handshake failure: (1) actually calls
+// Close() on the raw connection (the result is handled explicitly, not
+// discarded) and (2) returns the handshake error as the primary, wrapped
+// error — never replaced by a successful close.
+func TestHandshakeAndCleanup_FailureClosesConnAndPreservesPrimaryError(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(validMTASTSPolicyBody()))
+	}))
+	defer server.Close()
+
+	serverAddr := strings.TrimPrefix(server.URL, "https://")
+	raw, err := net.DialTimeout("tcp", serverAddr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial test server: %v", err)
+	}
+	tracked := &closeTrackingConn{Conn: raw}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	// ServerName deliberately wrong (the test server's cert is issued for
+	// 127.0.0.1/localhost) so the handshake genuinely fails.
+	_, err = handshakeAndCleanup(ctx, tracked, "mta-sts.example.com")
+
+	if err == nil {
+		t.Fatal("expected handshake to fail against a cert issued for a different host, but it succeeded")
+	}
+	if !tracked.closeCalled {
+		t.Error("expected the raw connection to be closed on handshake failure, but Close() was never called")
+	}
+	if !strings.Contains(err.Error(), "tls handshake") {
+		t.Errorf("error = %q, want it to preserve the wrapped 'tls handshake' message", err.Error())
+	}
+	lower := strings.ToLower(err.Error())
+	if !strings.Contains(lower, "certificate") && !strings.Contains(lower, "x509") {
+		t.Errorf("expected the primary error to still contain the underlying certificate/x509 detail, got: %v", err)
+	}
+}
+
+// TestHandshakeAndCleanup_CloseFailureDoesNotHidePrimaryError proves that
+// when Close() ALSO fails after a handshake failure, the returned error
+// still preserves the primary handshake error (via %w, so errors.Is/As and
+// substring-based classification in reasonFromError keep working) rather
+// than being silently swallowed or replaced by the close error.
+func TestHandshakeAndCleanup_CloseFailureDoesNotHidePrimaryError(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(validMTASTSPolicyBody()))
+	}))
+	defer server.Close()
+
+	serverAddr := strings.TrimPrefix(server.URL, "https://")
+	raw, err := net.DialTimeout("tcp", serverAddr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial test server: %v", err)
+	}
+	simulatedCloseErr := errors.New("simulated: connection already reset")
+	tracked := &closeTrackingConn{Conn: raw, closeErr: simulatedCloseErr}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err = handshakeAndCleanup(ctx, tracked, "mta-sts.example.com")
+
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	if !tracked.closeCalled {
+		t.Error("expected Close() to be called even though it will fail")
+	}
+	// The primary handshake/certificate error must still be present and
+	// still classify as a TLS error downstream (reasonFromError matches
+	// on the "tls" substring) — a close failure must not obscure it.
+	lower := strings.ToLower(err.Error())
+	if !strings.Contains(lower, "tls handshake") {
+		t.Errorf("error = %q, want the primary tls handshake error preserved", err.Error())
+	}
+	if !strings.Contains(lower, "certificate") && !strings.Contains(lower, "x509") {
+		t.Errorf("error = %q, want the underlying certificate/x509 detail preserved", err.Error())
+	}
+	// The close failure is folded in as secondary context, not silently
+	// dropped — this is the "handle the result explicitly" requirement.
+	if !strings.Contains(err.Error(), "cleanup") {
+		t.Errorf("error = %q, want it to mention the cleanup/close failure", err.Error())
 	}
 }
 
