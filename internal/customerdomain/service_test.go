@@ -3,6 +3,7 @@ package customerdomain
 import (
 	"context"
 	"database/sql"
+	"net"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -231,5 +232,178 @@ func TestServiceVerifyPersistsAndReadsBack(t *testing.T) {
 	// All lookups are NXDOMAIN → overall status "fail", score 0.
 	if snap.Status != "fail" {
 		t.Errorf("snapshot status = %q, want fail", snap.Status)
+	}
+}
+
+// newServiceTestEnvWithResolver is newServiceTestEnv but also returns the
+// FakeResolver, so tests can seed specific MX/TXT records instead of only
+// exercising the universal-NXDOMAIN default.
+func newServiceTestEnvWithResolver(t *testing.T) (*Service, *sql.DB, *dnsops.FakeResolver) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "cds.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { db.Close() })
+
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS coremail_domains (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT UNIQUE NOT NULL,
+			tenant_id INTEGER NOT NULL DEFAULT 0,
+			reseller_id INTEGER NOT NULL DEFAULT 0,
+			status TEXT NOT NULL DEFAULT 'active',
+			plan TEXT NOT NULL DEFAULT 'smb',
+			description TEXT NOT NULL DEFAULT '',
+			max_mailboxes INTEGER NOT NULL DEFAULT 0,
+			max_aliases INTEGER NOT NULL DEFAULT 0,
+			max_quota_mb INTEGER NOT NULL DEFAULT 0,
+			dkim_enabled INTEGER NOT NULL DEFAULT 0,
+			dkim_selector TEXT NOT NULL DEFAULT '',
+			dmarc_enabled INTEGER NOT NULL DEFAULT 0,
+			mtasts_enabled INTEGER NOT NULL DEFAULT 0,
+			catchall_address TEXT NOT NULL DEFAULT '',
+			abuse_contact TEXT NOT NULL DEFAULT '',
+			labels TEXT NOT NULL DEFAULT '',
+			mailbox_count INTEGER NOT NULL DEFAULT 0,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			deleted_at DATETIME
+		)`)
+	if err != nil {
+		t.Fatalf("create coremail_domains: %v", err)
+	}
+
+	domainRepo := coremail.NewDomainSQLRepo(db)
+	verifRepo := NewVerificationRepo(db)
+	if err := verifRepo.EnsureTable(context.Background()); err != nil {
+		t.Fatalf("ensure verifications table: %v", err)
+	}
+	resolver := dnsops.NewFakeResolver()
+	inspector := NewDNSInspector(resolver)
+	svc := NewService(db, domainRepo, inspector, verifRepo)
+	return svc, db, resolver
+}
+
+// TestGetEnterpriseDNSTenantIsolation and TestVerifyEnterpriseDNSTenantIsolation
+// are the regression tests for the two new enterprise DNS entry points this
+// package adds. TestServiceTenantIsolation above covers the pre-existing
+// GetDNS/VerifyDomain/GetDomain/GetLatestSnapshot methods, but GetEnterpriseDNS
+// and VerifyEnterpriseDNS are separate methods with their own tenant check —
+// they had zero test coverage before this change, despite being the exact
+// methods the new /enterprise/domains/:id/dns and .../dns/verify routes call.
+func TestGetEnterpriseDNSTenantIsolation(t *testing.T) {
+	svc, _, _ := newServiceTestEnvWithResolver(t)
+	ctx := context.Background()
+	domID := seedDomain(t, svc, "eowned.example.com", 1)
+	const attacker = uint(2)
+
+	if _, err := svc.GetEnterpriseDNS(ctx, attacker, domID, nil); err != ErrDomainNotFound {
+		t.Errorf("GetEnterpriseDNS cross-tenant err = %v, want ErrDomainNotFound", err)
+	}
+	if _, err := svc.GetEnterpriseDNS(ctx, attacker, domID+999, nil); err != ErrDomainNotFound {
+		t.Errorf("GetEnterpriseDNS nonexistent id err = %v, want ErrDomainNotFound (must be indistinguishable from cross-tenant)", err)
+	}
+	if _, err := svc.GetEnterpriseDNS(ctx, 1, domID, nil); err != nil {
+		t.Errorf("GetEnterpriseDNS owner err = %v, want nil", err)
+	}
+}
+
+func TestVerifyEnterpriseDNSTenantIsolation(t *testing.T) {
+	svc, db, _ := newServiceTestEnvWithResolver(t)
+	ctx := context.Background()
+	domID := seedDomain(t, svc, "eowned2.example.com", 1)
+	const attacker = uint(2)
+
+	if _, err := svc.VerifyEnterpriseDNS(ctx, attacker, domID, nil); err != ErrDomainNotFound {
+		t.Errorf("VerifyEnterpriseDNS cross-tenant err = %v, want ErrDomainNotFound", err)
+	}
+	if n := countSnapshots(t, db, domID); n != 0 {
+		t.Errorf("snapshots after cross-tenant verify attempt = %d, want 0", n)
+	}
+	if _, err := svc.VerifyEnterpriseDNS(ctx, 1, domID, nil); err != nil {
+		t.Errorf("VerifyEnterpriseDNS owner err = %v, want nil", err)
+	}
+}
+
+// TestResolveExpectedMXUsesDomainNameNotID is the regression test for the
+// fix in this change: the handler previously built the ExpectedMX fallback
+// from the URL's numeric :id path parameter ("mail.42") instead of the
+// resolved domain name ("mail.example.com"), because the fallback was
+// computed in the handler before the domain name was known. It is now
+// computed inside the service, after GetByID resolves the real name.
+func TestResolveExpectedMXUsesDomainNameNotID(t *testing.T) {
+	if got := resolveExpectedMX(nil, "example.com"); len(got) != 1 || got[0] != "mail.example.com" {
+		t.Errorf("resolveExpectedMX(nil, %q) = %v, want [mail.example.com]", "example.com", got)
+	}
+	if got := resolveExpectedMX([]string{}, "42"); len(got) != 1 || got[0] != "mail.42" {
+		// This is the literal defect shape: if a caller ever passes the
+		// numeric id string as domainName by mistake, the bug reappears.
+		// This assertion documents the contract precisely: resolveExpectedMX
+		// trusts its domainName argument completely — callers must pass a
+		// real domain name, never a path parameter.
+		t.Errorf("resolveExpectedMX(nil, %q) = %v, want [mail.42] (documents caller contract)", "42", got)
+	}
+	configured := []string{"mx1.example.com", "mx2.example.com"}
+	if got := resolveExpectedMX(configured, "example.com"); len(got) != 2 || got[0] != configured[0] || got[1] != configured[1] {
+		t.Errorf("resolveExpectedMX with configured value = %v, want unchanged %v", got, configured)
+	}
+}
+
+func TestGetEnterpriseDNSUsesRealDomainNameForMXFallback(t *testing.T) {
+	svc, _, resolver := newServiceTestEnvWithResolver(t)
+	ctx := context.Background()
+	domID := seedDomain(t, svc, "mxfallback.example.com", 1)
+
+	// Seed the MX record that the CORRECT fallback ("mail.mxfallback.example.com")
+	// would look for. If the old bug were present, the fallback would be
+	// "mail.<numeric id>" and this lookup would never match, always failing MX.
+	resolver.Set("mxfallback.example.com", dnsops.FakeEntry{
+		MX: []net.MX{{Host: "mail.mxfallback.example.com.", Pref: 10}},
+	})
+
+	health, err := svc.GetEnterpriseDNS(ctx, 1, domID, nil)
+	if err != nil {
+		t.Fatalf("GetEnterpriseDNS: %v", err)
+	}
+	if health.MX == nil {
+		t.Fatal("expected MX result")
+	}
+	if health.MX.Status != "pass" {
+		t.Errorf("MX status = %q, want pass (fallback must resolve to the real domain name, not the numeric id)", health.MX.Status)
+	}
+}
+
+// TestVerifyEnterpriseDNSDoesNotFalselyClaimDKIMMatch is the regression test
+// for the removed false-positive: the previous code set DKIM.MatchesDNS=true
+// whenever any DKIM TXT record was published, without ever comparing it
+// against the tenant's actual stored key (VerifyEnterpriseDNS always called
+// the inspector with an empty expectedDKIMRecord). A stale or wrong
+// published key would have been reported as "matches".
+func TestVerifyEnterpriseDNSDoesNotFalselyClaimDKIMMatch(t *testing.T) {
+	svc, _, resolver := newServiceTestEnvWithResolver(t)
+	ctx := context.Background()
+	domID := seedDomain(t, svc, "dkimclaim.example.com", 1)
+	if _, err := svc.db.Exec(`UPDATE coremail_domains SET dkim_enabled = 1, dkim_selector = 'mail' WHERE id = ?`, domID); err != nil {
+		t.Fatalf("enable dkim: %v", err)
+	}
+	// Publish SOME DKIM TXT record — status will read "pass" (a record
+	// exists), but the service never told the inspector what the real
+	// expected value is, so this must not be reported as a verified match.
+	resolver.Set("mail._domainkey.dkimclaim.example.com", dnsops.FakeEntry{
+		TXT: []string{"v=DKIM1; k=rsa; p=anything-could-be-here"},
+	})
+
+	health, err := svc.VerifyEnterpriseDNS(ctx, 1, domID, nil)
+	if err != nil {
+		t.Fatalf("VerifyEnterpriseDNS: %v", err)
+	}
+	if health.DKIM == nil {
+		t.Fatal("expected DKIM result")
+	}
+	if health.DKIM.MatchesDNS {
+		t.Error("DKIM.MatchesDNS = true, but no real comparison against the stored key was ever performed — this is a false positive")
 	}
 }

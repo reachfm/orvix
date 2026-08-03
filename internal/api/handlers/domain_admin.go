@@ -426,12 +426,12 @@ func (h *Handler) GetEnterpriseDomainDNS(c fiber.Ctx) error {
 	}
 	id := uint(idVal)
 
-	expectedMX := h.cfg.CoreMail.ExpectedMX
-	if len(expectedMX) == 0 {
-		expectedMX = []string{"mail." + c.Params("id")}
-	}
-
-	health, err := h.customerDomainSvc.GetEnterpriseDNS(c.Context(), tenantID, id, expectedMX)
+	// expectedMX is passed through as configured (may be empty). The
+	// fallback default ("mail.<domain-name>") is applied inside the
+	// service, which resolves the real domain name from id+tenantID —
+	// the handler only has the numeric :id, so building the fallback
+	// hostname here would incorrectly embed the id, not the domain name.
+	health, err := h.customerDomainSvc.GetEnterpriseDNS(c.Context(), tenantID, id, h.cfg.CoreMail.ExpectedMX)
 	if err != nil {
 		if errors.Is(err, customerdomain.ErrDomainNotFound) {
 			return respondAPIError(c, fiber.StatusNotFound, "DOMAIN_NOT_FOUND", "Domain not found.")
@@ -459,12 +459,9 @@ func (h *Handler) VerifyEnterpriseDomainDNS(c fiber.Ctx) error {
 	}
 	id := uint(idVal)
 
-	expectedMX := h.cfg.CoreMail.ExpectedMX
-	if len(expectedMX) == 0 {
-		expectedMX = []string{"mail." + c.Params("id")}
-	}
-
-	health, err := h.customerDomainSvc.VerifyEnterpriseDNS(c.Context(), tenantID, id, expectedMX)
+	// See GetEnterpriseDomainDNS above: the fallback is applied in the
+	// service once the real domain name is known.
+	health, err := h.customerDomainSvc.VerifyEnterpriseDNS(c.Context(), tenantID, id, h.cfg.CoreMail.ExpectedMX)
 	if err != nil {
 		if errors.Is(err, customerdomain.ErrDomainNotFound) {
 			return respondAPIError(c, fiber.StatusNotFound, "DOMAIN_NOT_FOUND", "Domain not found.")

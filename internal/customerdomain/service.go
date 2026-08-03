@@ -277,6 +277,21 @@ var (
 	ErrInvalidDomainID      = fmt.Errorf("invalid domain id")
 )
 
+// resolveExpectedMX returns the caller-configured expected MX hostnames
+// (core-mail.expected_mx) unchanged when set, or the legacy single-host
+// fallback "mail.<domainName>" when the config is empty — matching the
+// hostname convention documented for deployments that predate the
+// ExpectedMX config field. domainName must be the real domain (e.g.
+// "example.com"), never a numeric id or path parameter: a bug fixed here
+// previously built this fallback from the request's :id path param
+// ("mail.42") in the handler, before the domain name was resolved.
+func resolveExpectedMX(expectedMX []string, domainName string) []string {
+	if len(expectedMX) > 0 {
+		return expectedMX
+	}
+	return []string{"mail." + domainName}
+}
+
 // GetEnterpriseDNS returns cached or fresh DNS health data from the enterprise context.
 func (s *Service) GetEnterpriseDNS(ctx context.Context, tenantID uint, domainID uint, expectedMX []string) (*EnterpriseDNSHealth, error) {
 	d, err := s.domains.GetByID(ctx, domainID, nil)
@@ -286,6 +301,7 @@ func (s *Service) GetEnterpriseDNS(ctx context.Context, tenantID uint, domainID 
 	if d == nil || d.TenantID != tenantID {
 		return nil, ErrDomainNotFound
 	}
+	expectedMX = resolveExpectedMX(expectedMX, d.Name)
 
 	health := &EnterpriseDNSHealth{
 		DomainID:          d.ID,
@@ -352,6 +368,7 @@ func (s *Service) VerifyEnterpriseDNS(ctx context.Context, tenantID uint, domain
 	if d == nil || d.TenantID != tenantID {
 		return nil, ErrDomainNotFound
 	}
+	expectedMX = resolveExpectedMX(expectedMX, d.Name)
 
 	claimed, err := s.verifRepo.TryClaim(ctx, domainID, s.cooldown)
 	if err != nil {
@@ -380,9 +397,18 @@ func (s *Service) VerifyEnterpriseDNS(ctx context.Context, tenantID uint, domain
 			health.DKIM.Selector = d.DKIMSelector
 			health.DKIM.RecordName = d.DKIMSelector + "._domainkey." + d.Name
 		}
-		if health.DKIM.Status == string(DNSStatusPass) && health.DKIM.Observed != "" {
-			health.DKIM.MatchesDNS = true
-		}
+		// MatchesDNS deliberately stays false here. checkDKIM only compares
+		// the observed TXT record against expectedDKIMRecord when the
+		// caller supplies one — InspectEnterprise is called above with an
+		// empty expectedDKIMRecord because this service does not currently
+		// derive the public key from the tenant's stored DKIM private key
+		// (coremail_dkim_config.private_key_pem). Reporting MatchesDNS=true
+		// merely because *a* DKIM TXT record was published — as the
+		// previous version of this code did — is a false positive: a
+		// stale or wrong published key would also read as "matches".
+		// TODO(dns-health): wire a public-key-derivation helper so
+		// expectedDKIMRecord reflects the actual stored key, then set
+		// MatchesDNS from a genuine comparison.
 	}
 
 	evidence, _ := json.Marshal(result)
