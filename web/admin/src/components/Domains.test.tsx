@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ReactNode } from "react";
@@ -37,6 +37,8 @@ vi.mock("../api", () => {
       deleteDomainEnterprise: vi.fn(),
       generateDomainDKIM: vi.fn(),
       rotateDomainDKIM: vi.fn(),
+      getEnterpriseDomainDNS: vi.fn(),
+      verifyEnterpriseDomainDNS: vi.fn(),
     },
   };
 });
@@ -55,10 +57,28 @@ const sampleDomains = [
 
 const defaultDKIMResponse = { dkim: { selector: "mail", public_dns_txt: "v=DKIM1; p=TEST", dns_record_name: "mail._domainkey.example.com" } };
 
+const defaultDNSHealth = {
+  domain_id: 1,
+  domain_name: "example.com",
+  operational_status: "active",
+  dns_health: "pass",
+  health_score: 85,
+  last_checked_at: "2026-01-01T00:00:00Z",
+  mx: { status: "pass", expected: "mx1.example.com, mx2.example.com", observed: ["mx1.example.com:10", "mx2.example.com:20"], reason: "", checked_at: "2026-01-01T00:00:00Z" },
+  spf: { status: "pass", observed: "v=spf1 mx -all", expected: "", reason: "", checked_at: "2026-01-01T00:00:00Z" },
+  dkim: { selector: "mail", status: "pass", record_name: "mail._domainkey.example.com", public_txt: "v=DKIM1; k=rsa; p=...", configured: true, matches_dns: true, checked_at: "2026-01-01T00:00:00Z" },
+  dmarc: { status: "pass", observed: "v=DMARC1; p=reject", checked_at: "2026-01-01T00:00:00Z" },
+  mtasts: { status: "pass", observed: "v=STSv1; id=2025", checked_at: "2026-01-01T00:00:00Z" },
+  tlsrpt: { status: "pass", observed: "v=TLSRPTv1; rua=mailto:rpt@example.com", checked_at: "2026-01-01T00:00:00Z" },
+};
+
 beforeEach(() => {
+  qc.clear();
   vi.mocked(api.listDomainsEnterprise).mockResolvedValue({ domains: sampleDomains, total: 2 } as any);
   vi.mocked(api.generateDomainDKIM).mockResolvedValue(defaultDKIMResponse);
   vi.mocked(api.rotateDomainDKIM).mockResolvedValue(defaultDKIMResponse);
+  vi.mocked(api.getEnterpriseDomainDNS).mockResolvedValue(defaultDNSHealth);
+  Object.assign(navigator, { clipboard: { writeText: vi.fn() } });
 });
 
 afterEach(() => {
@@ -231,5 +251,151 @@ describe("Domains management", () => {
     expect(api.rotateDomainDKIM).toHaveBeenCalledTimes(1);
 
     resolveFn({ dkim: { selector: "mail", public_dns_txt: "", dns_record_name: "" } });
+  });
+
+  // ── DNS Health drawer ──
+
+  it("clicking a domain name opens the DNS Health drawer", async () => {
+    render(<Wrapper><Domains /></Wrapper>);
+    await waitFor(() => expect(screen.getByText("example.com")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /example\.com/i }));
+
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    expect(screen.getByRole("heading", { level: 3 })).toHaveTextContent(/DNS Health: example\.com/i);
+    await waitFor(() => expect(screen.getByText("85%")).toBeInTheDocument());
+  });
+
+  it("Escape key closes the DNS Health drawer", async () => {
+    render(<Wrapper><Domains /></Wrapper>);
+    await waitFor(() => expect(screen.getByText("example.com")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /example\.com/i }));
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  it("close button in the drawer dismisses the panel", async () => {
+    render(<Wrapper><Domains /></Wrapper>);
+    await waitFor(() => expect(screen.getByText("example.com")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /example\.com/i }));
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  it("DNS Health drawer shows all six record types", async () => {
+    render(<Wrapper><Domains /></Wrapper>);
+    await waitFor(() => expect(screen.getByText("example.com")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /example\.com/i }));
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+
+    const dialog = screen.getByRole("dialog");
+    await waitFor(() => expect(within(dialog).getByText("MX")).toBeInTheDocument());
+    expect(within(dialog).getByText("SPF")).toBeInTheDocument();
+    expect(within(dialog).getByText("DKIM")).toBeInTheDocument();
+    expect(within(dialog).getByText("DMARC")).toBeInTheDocument();
+    expect(within(dialog).getByText("MTA-STS")).toBeInTheDocument();
+    expect(within(dialog).getByText("TLS-RPT")).toBeInTheDocument();
+
+    const badges = dialog.querySelectorAll('[class*="inline-flex items-center gap-1.5 text-xs"]');
+    expect(badges.length).toBeGreaterThanOrEqual(6);
+  });
+
+  it("Check DNS Now button is disabled while verification is in progress", async () => {
+    let resolveVerify: (v: unknown) => void = () => {};
+    vi.mocked(api.verifyEnterpriseDomainDNS).mockImplementation(
+      () => new Promise((resolve) => { resolveVerify = resolve; })
+    );
+    render(<Wrapper><Domains /></Wrapper>);
+    await waitFor(() => expect(screen.getByText("example.com")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /example\.com/i }));
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+
+    await waitFor(() => expect(screen.getByRole("button", { name: /Checking DNS\.\.\./i })).toBeDisabled());
+    expect(api.verifyEnterpriseDomainDNS).toHaveBeenCalledTimes(1);
+
+    resolveVerify(undefined);
+  });
+
+  it("verify button triggers the verification endpoint", async () => {
+    vi.mocked(api.getEnterpriseDomainDNS).mockResolvedValue({
+      ...defaultDNSHealth,
+      last_checked_at: new Date().toISOString(),
+    });
+    vi.mocked(api.verifyEnterpriseDomainDNS).mockResolvedValue(undefined as any);
+    render(<Wrapper><Domains /></Wrapper>);
+    await waitFor(() => expect(screen.getByText("example.com")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /example\.com/i }));
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /Check DNS Now/ }));
+    await waitFor(() => expect(api.verifyEnterpriseDomainDNS).toHaveBeenCalledWith(1));
+  });
+
+  it("opens drawer with keyboard Enter on domain row", async () => {
+    render(<Wrapper><Domains /></Wrapper>);
+    await waitFor(() => expect(screen.getByText("example.com")).toBeInTheDocument());
+
+    const domainButton = screen.getByRole("button", { name: /example\.com/i });
+    domainButton.focus();
+    fireEvent.keyDown(domainButton, { key: "Enter" });
+
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    expect(screen.getByRole("heading", { level: 3 })).toHaveTextContent(/DNS Health: example\.com/i);
+  });
+
+  it("shows loading state when DNS data is not yet loaded", async () => {
+    let resolveDNS: (v: unknown) => void = () => {};
+    vi.mocked(api.getEnterpriseDomainDNS).mockImplementation(
+      () => new Promise((resolve) => { resolveDNS = resolve; })
+    );
+    render(<Wrapper><Domains /></Wrapper>);
+    await waitFor(() => expect(screen.getByText("example.com")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /example\.com/i }));
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+
+    expect(screen.getByText(/Checking DNS\.\.\./i)).toBeInTheDocument();
+
+    resolveDNS(defaultDNSHealth);
+  });
+
+  it("shows error state when DNS check fails", async () => {
+    let resolveVerify: (v: unknown) => void = () => {};
+    vi.mocked(api.getEnterpriseDomainDNS).mockRejectedValue(new Error("Failed to load DNS data."));
+    vi.mocked(api.verifyEnterpriseDomainDNS).mockImplementation(
+      () => new Promise((resolve) => { resolveVerify = resolve; })
+    );
+    render(<Wrapper><Domains /></Wrapper>);
+    await waitFor(() => expect(screen.getByText("example.com")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /example\.com/i }));
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+
+    await waitFor(() => expect(screen.getByText("Failed to load DNS data.")).toBeInTheDocument());
+
+    resolveVerify(undefined);
+  });
+
+  it("copy button works for DKIM public TXT", async () => {
+    render(<Wrapper><Domains /></Wrapper>);
+    await waitFor(() => expect(screen.getByText("example.com")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /example\.com/i }));
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+
+    await waitFor(() => expect(screen.getByRole("button", { name: /Copy DKIM TXT record/ })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Copy DKIM TXT record/ }));
+    await waitFor(() => expect(navigator.clipboard.writeText).toHaveBeenCalledWith("v=DKIM1; k=rsa; p=..."));
   });
 });

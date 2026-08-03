@@ -125,3 +125,50 @@ type VerificationSnapshot struct {
 	CheckedAt   time.Time `json:"checked_at"`
 	CreatedAt   time.Time `json:"created_at"`
 }
+
+// EnterpriseDNSHealth is the unified DNS health response for the admin panel.
+type EnterpriseDNSHealth struct {
+	DomainID          uint             `json:"domain_id"`
+	DomainName        string           `json:"domain_name"`
+	OperationalStatus string           `json:"operational_status"`
+	DNSHealth         string           `json:"dns_health"`
+	HealthScore       int              `json:"health_score"`
+	LastCheckedAt     string           `json:"last_checked_at,omitempty"`
+	MX                *MXCheck         `json:"mx"`
+	SPF               *SPFCheck        `json:"spf"`
+	DKIM              *DKIMHealthCheck `json:"dkim"`
+	DMARC             *DMARCCheck      `json:"dmarc"`
+	MTASTS            *MTASTSCheck     `json:"mtasts"`
+	TLSRPT            *TLSRPTCheck     `json:"tlsrpt"`
+	MTASTSPolicy      *MTASTSPolicy    `json:"mtasts_policy,omitempty"`
+}
+
+// DKIMHealthCheck extends DKIMCheck with admin-specific fields.
+type DKIMHealthCheck struct {
+	Selector   string `json:"selector"`
+	Status     string `json:"status"`
+	Expected   string `json:"expected,omitempty"`
+	Observed   string `json:"observed,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+	CheckedAt  string `json:"checked_at"`
+	RecordName string `json:"record_name"`
+	Configured bool   `json:"configured"`
+	PublicTXT  string `json:"public_txt,omitempty"`
+	MatchesDNS bool   `json:"matches_dns"`
+}
+
+// MTASTSCheck is the MTA-STS inspection result.
+type MTASTSCheck struct {
+	Status    string `json:"status"`
+	Observed  string `json:"observed,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+	CheckedAt string `json:"checked_at"`
+}
+
+// TLSRPTCheck is the TLS-RPT inspection result.
+type TLSRPTCheck struct {
+	Status    string `json:"status"`
+	Observed  string `json:"observed,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+	CheckedAt string `json:"checked_at"`
+}

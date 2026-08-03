@@ -190,6 +190,10 @@ export const api = {
     request(`/enterprise/domains/${id}/dkim/rotate`, { method: "POST", body: JSON.stringify({ selector: selector || "mail" }) }),
   verifyDomainEnterprise: (id: number) =>
     request(`/enterprise/domains/${id}/verify`, { method: "POST" }),
+  getEnterpriseDomainDNS: (id: number) =>
+    request<any>(`/enterprise/domains/${id}/dns`),
+  verifyEnterpriseDomainDNS: (id: number) =>
+    request<any>(`/enterprise/domains/${id}/dns/verify`, { method: "POST" }),
   listMailboxes: () => request<any>("/enterprise/mailboxes"),
   createMailbox: (data: any) =>
     request("/enterprise/mailboxes", { method: "POST", body: JSON.stringify(data) }),

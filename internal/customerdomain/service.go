@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/orvix/orvix/internal/coremail"
+	"github.com/orvix/orvix/internal/coremail/dkim"
 )
 
 // Service provides customer-facing domain administration operations.
@@ -17,6 +18,7 @@ type Service struct {
 	domains   *coremail.DomainSQLRepo
 	inspector *DNSInspector
 	verifRepo *VerificationRepo
+	dkimRepo  *dkim.SQLRepo
 	cooldown  time.Duration
 }
 
@@ -29,6 +31,13 @@ func NewService(db *sql.DB, domainRepo *coremail.DomainSQLRepo, inspector *DNSIn
 		verifRepo: verifRepo,
 		cooldown:  5 * time.Minute,
 	}
+}
+
+// SetDKIMRepo injects the DKIM configuration repository for real key matching.
+// If never called, dkimRepo remains nil and DKIM matching falls back to the
+// previous behaviour (no key matching, no panic).
+func (s *Service) SetDKIMRepo(repo *dkim.SQLRepo) {
+	s.dkimRepo = repo
 }
 
 // ListDomains returns paginated domain overviews for a tenant.
@@ -276,3 +285,215 @@ var (
 	ErrVerificationCooldown = fmt.Errorf("verification cooldown active, try again later")
 	ErrInvalidDomainID      = fmt.Errorf("invalid domain id")
 )
+
+// resolveExpectedMX returns the caller-configured expected MX hostnames
+// (core-mail.expected_mx) unchanged when set, or the legacy single-host
+// fallback "mail.<domainName>" when the config is empty — matching the
+// hostname convention documented for deployments that predate the
+// ExpectedMX config field. domainName must be the real domain (e.g.
+// "example.com"), never a numeric id or path parameter: a bug fixed here
+// previously built this fallback from the request's :id path param
+// ("mail.42") in the handler, before the domain name was resolved.
+func resolveExpectedMX(expectedMX []string, domainName string) []string {
+	if len(expectedMX) > 0 {
+		return expectedMX
+	}
+	return []string{"mail." + domainName}
+}
+
+// GetEnterpriseDNS returns cached or fresh DNS health data from the enterprise context.
+func (s *Service) GetEnterpriseDNS(ctx context.Context, tenantID uint, domainID uint, expectedMX []string) (*EnterpriseDNSHealth, error) {
+	d, err := s.domains.GetByID(ctx, domainID, nil)
+	if err != nil {
+		return nil, fmt.Errorf("get domain: %w", err)
+	}
+	if d == nil || d.TenantID != tenantID {
+		return nil, ErrDomainNotFound
+	}
+	expectedMX = resolveExpectedMX(expectedMX, d.Name)
+
+	health := &EnterpriseDNSHealth{
+		DomainID:          d.ID,
+		DomainName:        d.Name,
+		OperationalStatus: string(d.Status),
+	}
+
+	snap, _ := s.verifRepo.GetLatest(ctx, d.ID)
+	if snap != nil {
+		health.DNSHealth = snap.Status
+		health.HealthScore = snap.Score
+		health.LastCheckedAt = snap.CheckedAt.Format(time.RFC3339)
+		if snap.Evidence != "" {
+			var dnsResult DNSResult
+			if err := json.Unmarshal([]byte(snap.Evidence), &dnsResult); err == nil {
+				health.MX = dnsResult.MX
+				health.SPF = dnsResult.SPF
+				health.DMARC = dnsResult.DMARC
+				if dnsResult.DKIM != nil {
+					health.DKIM = &DKIMHealthCheck{
+						Selector:  dnsResult.DKIM.Selector,
+						Status:    dnsResult.DKIM.Status,
+						Expected:  dnsResult.DKIM.Expected,
+						Observed:  dnsResult.DKIM.Observed,
+						Reason:    dnsResult.DKIM.Reason,
+						CheckedAt: dnsResult.DKIM.CheckedAt,
+						PublicTXT: dnsResult.DKIM.PublicKey,
+					}
+					if d.DKIMEnabled && d.DKIMSelector != "" {
+						health.DKIM.RecordName = d.DKIMSelector + "._domainkey." + d.Name
+						health.DKIM.Configured = true
+					}
+				}
+			}
+		}
+	} else {
+		sel := d.DKIMSelector
+		if sel == "" {
+			sel = "default"
+		}
+		expectedDKIMRecord := ""
+		if s.dkimRepo != nil {
+			cfg, err := s.dkimRepo.GetByDomain(ctx, d.Name, nil)
+			if err == nil && cfg != nil && cfg.PrivateKeyPEM != "" {
+				if rec, ok := deriveExpectedDKIMRecord(cfg.PrivateKeyPEM, sel, d.Name); ok {
+					expectedDKIMRecord = rec
+				}
+			}
+		}
+		result := s.inspector.InspectEnterprise(ctx, d.Name, expectedMX, sel, expectedDKIMRecord)
+		health = result
+		health.DomainID = d.ID
+		health.OperationalStatus = string(d.Status)
+	}
+
+	if health.DKIM != nil && d.DKIMEnabled {
+		health.DKIM.Configured = true
+		if d.DKIMSelector != "" {
+			health.DKIM.Selector = d.DKIMSelector
+			health.DKIM.RecordName = d.DKIMSelector + "._domainkey." + d.Name
+		}
+	}
+
+	return health, nil
+}
+
+// VerifyEnterpriseDNS runs a fresh DNS verification with enterprise MX config.
+func (s *Service) VerifyEnterpriseDNS(ctx context.Context, tenantID uint, domainID uint, expectedMX []string) (*EnterpriseDNSHealth, error) {
+	d, err := s.domains.GetByID(ctx, domainID, nil)
+	if err != nil {
+		return nil, fmt.Errorf("get domain: %w", err)
+	}
+	if d == nil || d.TenantID != tenantID {
+		return nil, ErrDomainNotFound
+	}
+	expectedMX = resolveExpectedMX(expectedMX, d.Name)
+
+	claimed, err := s.verifRepo.TryClaim(ctx, domainID, s.cooldown)
+	if err != nil {
+		return nil, fmt.Errorf("claim verification: %w", err)
+	}
+	if !claimed {
+		return nil, ErrVerificationCooldown
+	}
+
+	sel := d.DKIMSelector
+	if sel == "" {
+		sel = "default"
+	}
+
+	result := s.inspector.InspectEnterprise(ctx, d.Name, expectedMX, sel, "")
+	health := result
+	health.DomainID = d.ID
+	health.OperationalStatus = string(d.Status)
+	if health.LastCheckedAt == "" {
+		health.LastCheckedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+
+	if health.DKIM != nil && d.DKIMEnabled {
+		health.DKIM.Configured = true
+		if d.DKIMSelector != "" {
+			health.DKIM.Selector = d.DKIMSelector
+			health.DKIM.RecordName = d.DKIMSelector + "._domainkey." + d.Name
+		}
+		if s.dkimRepo != nil {
+			cfg, err := s.dkimRepo.GetByDomain(ctx, d.Name, nil)
+			if err == nil && cfg != nil && cfg.PrivateKeyPEM != "" {
+				expected, ok := deriveExpectedDKIMRecord(cfg.PrivateKeyPEM, health.DKIM.Selector, d.Name)
+				if ok {
+					health.DKIM.Expected = truncateForDisplay(expected, 120)
+					dkimResult := s.inspector.CheckDKIM(ctx, d.Name, health.DKIM.Selector, expected)
+					if dkimResult.Status == string(DNSStatusPass) {
+						health.DKIM.MatchesDNS = true
+					} else {
+						if observed := normalizeDKIMTXT(dkimResult.Observed); observed == "" {
+							dkimResult.Reason = "DKIM record not found"
+						} else {
+							dkimResult.Reason = "DKIM key mismatch — published key differs from current stored key"
+						}
+						health.DKIM.MatchesDNS = false
+					}
+					health.DKIM.Status = dkimResult.Status
+					health.DKIM.Reason = dkimResult.Reason
+					health.DKIM.Observed = dkimResult.Observed
+				}
+			}
+		}
+	}
+
+	evidence, _ := json.Marshal(result)
+	snap := &VerificationSnapshot{
+		DomainID: domainID,
+		Score:    health.HealthScore,
+		Status:   health.DNSHealth,
+		MXStatus: statusFieldEnterprise(health, func(h *EnterpriseDNSHealth) string {
+			if h.MX != nil {
+				return h.MX.Status
+			}
+			return ""
+		}),
+		SPFStatus: statusFieldEnterprise(health, func(h *EnterpriseDNSHealth) string {
+			if h.SPF != nil {
+				return h.SPF.Status
+			}
+			return ""
+		}),
+		DKIMStatus: statusFieldEnterprise(health, func(h *EnterpriseDNSHealth) string {
+			if h.DKIM != nil {
+				return h.DKIM.Status
+			}
+			return ""
+		}),
+		DMARCStatus: statusFieldEnterprise(health, func(h *EnterpriseDNSHealth) string {
+			if h.DMARC != nil {
+				return h.DMARC.Status
+			}
+			return ""
+		}),
+		Evidence: string(evidence),
+	}
+
+	if err := s.verifRepo.SaveAndRelease(ctx, snap, domainID); err != nil {
+		return nil, fmt.Errorf("save verification: %w", err)
+	}
+
+	return health, nil
+}
+
+func statusFieldEnterprise(h *EnterpriseDNSHealth, fn func(*EnterpriseDNSHealth) string) string {
+	if h == nil {
+		return ""
+	}
+	return fn(h)
+}
+
+// deriveExpectedDKIMRecord returns the DKIM DNS TXT record value the
+// tenant's stored private key should be publishing. It delegates entirely
+// to dkim.DerivePublicKeyRecordValue — the single shared PEM-to-public-key
+// implementation also used by internal/api/handlers/dns_ops.go — rather
+// than duplicating the pem.Decode/x509.Parse*/MarshalPKIX sequence here.
+// selector and domain are accepted for call-site symmetry with the
+// generate/rotate flow but are not otherwise used: the record value format
+// depends only on the key, not on where it will be published.
+func deriveExpectedDKIMRecord(privPEM string, _ string, _ string) (string, bool) {
+	return dkim.DerivePublicKeyRecordValue(privPEM)
+}

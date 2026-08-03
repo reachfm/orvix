@@ -22,10 +22,7 @@ package handlers
 import (
 	"context"
 	"crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
 	"database/sql"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"strings"
@@ -143,38 +140,22 @@ func (h *Handler) dnsOpsInputsForDomain(ctx context.Context, domain string) (dns
 	}, nil
 }
 
-// deriveDKIMPublicKey parses a PEM-encoded PKCS8 RSA private key
+// deriveDKIMPublicKey parses a PEM-encoded PKCS8/PKCS1 RSA private key
 // and returns the base64-DER SubjectPublicKeyInfo string used in a
 // DKIM DNS TXT record (no PEM headers, no "v=DKIM1;" prefix).
 //
 // Returns ("", false) if the PEM is malformed. The caller MUST
 // treat the public-key-absent case as "DKIM not generated for this
 // domain" rather than silently inventing a key.
+//
+// This delegates to dkim.DerivePublicKeyRecordValue, the single shared
+// PEM-to-public-key implementation — do not reintroduce a duplicate
+// pem.Decode/x509.Parse*/MarshalPKIX sequence here or elsewhere.
 func deriveDKIMPublicKey(privPEM string) (string, bool) {
-	block, _ := pem.Decode([]byte(privPEM))
-	if block == nil {
-		return "", false
-	}
-	keyAny, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-	if err != nil {
-		if k1, err1 := x509.ParsePKCS1PrivateKey(block.Bytes); err1 == nil {
-			keyAny = k1
-		} else {
-			return "", false
-		}
-	}
-	rsaKey, ok := keyAny.(*rsa.PrivateKey)
+	recordValue, ok := dkim.DerivePublicKeyRecordValue(privPEM)
 	if !ok {
 		return "", false
 	}
-	pubBytes, err := x509.MarshalPKIXPublicKey(&rsaKey.PublicKey)
-	if err != nil {
-		return "", false
-	}
-	// Use the existing coremail/dkim encoder so the wire format
-	// matches what the signer emits.
-	recordName, recordValue := dkim.GenerateDNSRecord("ignored", "ignored", string(pubBytes))
-	_ = recordName
 	// recordValue is "v=DKIM1; k=rsa; p=<base64>"; we want just p=<base64>.
 	if i := strings.Index(recordValue, "p="); i >= 0 {
 		return recordValue[i+2:], true
