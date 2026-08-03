@@ -43,3 +43,8 @@ AUDIT_REPORTS/
 DEPLOYMENT_CERTIFICATION*
 .worktrees/
 !web/marketing/src/data/
+
+# Local Playwright artifacts (screenshots, traces, reports) — not committed.
+.artifacts/
+web/admin/test-results/
+web/admin/playwright-report/
