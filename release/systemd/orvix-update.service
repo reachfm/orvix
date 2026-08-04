@@ -59,3 +59,15 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 # their source tree (default /opt/orvix).
 Environment=ORVIX_UPDATE=1
 Environment=ORVIX_REPO_DIR=/opt/orvix
+# Go build cache under a systemd-managed directory. Without this,
+# `go build` defaults to $HOME/go/pkg/mod = /root/go/pkg/mod, which
+# ProtectHome=true hides from the sandbox and the build fails with
+# "could not create module cache: permission denied". CacheDirectory=
+# makes systemd create/own /var/cache/orvix-update/ (root:root 0750)
+# and expose it read/write inside the sandbox — no need to weaken
+# ProtectHome or add /root to ReadWritePaths.
+CacheDirectory=orvix-update
+CacheDirectoryMode=0750
+Environment=GOMODCACHE=/var/cache/orvix-update/gomod
+Environment=GOCACHE=/var/cache/orvix-update/gobuild
+Environment=GOPATH=/var/cache/orvix-update/gopath

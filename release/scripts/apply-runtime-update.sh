@@ -92,6 +92,45 @@ else
   echo "ERROR: go not found in PATH or /usr/local/go/bin/go. Install Go first." >&2
   exit 1
 fi
+
+# Prepare Go build cache dirs. Under the systemd oneshot,
+# ProtectHome=true hides /root, so `go build` cannot fall back to
+# $HOME/go/pkg/mod. Honor operator-provided GOMODCACHE/GOCACHE/GOPATH
+# when set (systemd unit exports defaults under /var/cache/orvix-update);
+# otherwise default to the same locations so manual root invocations
+# work too.
+prep_go_cache() {
+  local var val
+  for var in GOMODCACHE GOCACHE GOPATH; do
+    val="$(eval "printf '%s' \"\${$var-}\"")"
+    if [ -z "$val" ]; then
+      case "$var" in
+        GOMODCACHE) val="/var/cache/orvix-update/gomod" ;;
+        GOCACHE)    val="/var/cache/orvix-update/gobuild" ;;
+        GOPATH)     val="/var/cache/orvix-update/gopath" ;;
+      esac
+    fi
+    case "$val" in
+      /*) : ;;
+      *)  echo "ERROR: $var must be an absolute path (got: $val)" >&2; return 1 ;;
+    esac
+    case "$val" in
+      /root|/root/*) echo "ERROR: $var must not resolve under /root ($val); ProtectHome hides it from the sandbox" >&2; return 1 ;;
+    esac
+    case "$val" in
+      "$REPO_ROOT"|"$REPO_ROOT"/*)
+        echo "ERROR: $var must not resolve inside the repo tree ($val)" >&2; return 1 ;;
+    esac
+    if ! install -d -m 0750 -o root -g root "$val" 2>/dev/null; then
+      echo "ERROR: failed to create $var directory: $val" >&2
+      return 1
+    fi
+    export "$var=$val"
+  done
+  echo "  using cache under /var/cache/orvix-update (GOMODCACHE/GOCACHE/GOPATH)"
+}
+prep_go_cache
+
 "$GO_CMD" build -o /tmp/orvix-next ./cmd/orvix
 if [ ! -f /tmp/orvix-next ]; then
   echo "ERROR: Build failed, binary not found." >&2
