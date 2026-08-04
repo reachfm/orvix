@@ -580,6 +580,7 @@ func postgresTables() []string {
 			max_mailboxes INTEGER NOT NULL DEFAULT 0,
 			max_aliases INTEGER NOT NULL DEFAULT 0,
 			max_quota_mb INTEGER NOT NULL DEFAULT 0,
+			default_mailbox_quota_mb BIGINT NOT NULL DEFAULT 0,
 			dkim_enabled BOOLEAN NOT NULL DEFAULT false,
 			dkim_selector TEXT NOT NULL DEFAULT '',
 			dmarc_enabled BOOLEAN NOT NULL DEFAULT false,
@@ -1138,6 +1139,12 @@ func postgresTables() []string {
 // so re-runs are safe.
 func postgresColumnAdditions() []string {
 	return []string{
+		// coremail_domains.default_mailbox_quota_mb is the per-domain DEFAULT
+		// mailbox quota (distinct from max_quota_mb, the per-mailbox CEILING).
+		// 0 means "inherit the organization plan" (domain.LimitInherit), so
+		// every pre-existing row is correct without a backfill.
+		`ALTER TABLE coremail_domains ADD COLUMN IF NOT EXISTS default_mailbox_quota_mb BIGINT NOT NULL DEFAULT 0`,
+
 		`ALTER TABLE licenses ADD COLUMN IF NOT EXISTS tier TEXT NOT NULL DEFAULT 'smb'`,
 		`ALTER TABLE licenses ADD COLUMN IF NOT EXISTS max_domains INTEGER NOT NULL DEFAULT 10`,
 		`ALTER TABLE licenses ADD COLUMN IF NOT EXISTS max_mailboxes INTEGER NOT NULL DEFAULT 500`,

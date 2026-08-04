@@ -73,10 +73,12 @@ func (s *Service) CreateMailbox(ctx context.Context, req CreateMailboxRequest, t
 		return nil, err
 	}
 
-	quota := req.QuotaMB
-	if quota <= 0 {
-		quota = 1024
+	if req.QuotaMB < 0 {
+		return nil, ErrInvalidQuota
 	}
+	// 0 means "use the domain default"; the concrete value is resolved inside
+	// the transaction below, where the domain's bounds are known.
+	quota := req.QuotaMB
 	sendLimit := req.SendLimit
 	if sendLimit <= 0 {
 		sendLimit = 500
@@ -89,13 +91,20 @@ func (s *Service) CreateMailbox(ctx context.Context, req CreateMailboxRequest, t
 		// eligibility check and the mailbox insert are atomic. The domain
 		// lookup is tenant-scoped: a domain owned by another tenant or one
 		// that is deleted resolves to the safe not-found contract.
-		domainID, status, err := repo.ResolveDomain(ctx, parts[1], tenantID)
+		// Resolve the domain AND its allocation limits in the same locked
+		// read, so the cap check, the quota check and the insert are one
+		// atomic unit. On PostgreSQL the domain row is locked FOR UPDATE,
+		// which is what makes two concurrent creations against a domain at
+		// its cap deterministic: the second one blocks, re-counts after the
+		// first commits, and is rejected instead of overshooting the cap.
+		alloc, err := repo.ResolveDomainAllocation(ctx, parts[1], tenantID, true)
 		if err != nil {
 			if err == sql.ErrNoRows {
 				return domain.ErrDomainNotFound
 			}
 			return err
 		}
+		domainID, status := alloc.DomainID, alloc.Status
 		if status != string(domain.DomainStatusActive) {
 			// Explicit status model: disabled and administratively restricted
 			// states are distinct. No verification state exists on
@@ -120,6 +129,32 @@ func (s *Service) CreateMailbox(ctx context.Context, req CreateMailboxRequest, t
 		}
 		if exists {
 			return ErrMailboxExists
+		}
+
+		// --- domain mailbox cap (transaction-safe) -----------------------
+		// Counted INSIDE the transaction, after the domain row lock, so the
+		// check-then-act window is closed. An inheriting domain resolves
+		// against the organization plan ceiling; an unlimited domain or an
+		// unlimited plan skips the check entirely.
+		if capLimit, unlimited := domain.ResolveMailboxCap(alloc.MaxMailboxes, alloc.OrgMaxMailboxes); !unlimited {
+			used, err := repo.CountActiveByDomain(ctx, domainID, tenantID)
+			if err != nil {
+				return fmt.Errorf("count domain mailboxes: %w", err)
+			}
+			if used >= capLimit {
+				return domain.ErrMailboxLimitReached
+			}
+		}
+
+		// --- per-mailbox quota bounds ------------------------------------
+		maxQuotaMB, quotaUnlimited, defaultQuotaMB := domain.ResolveQuotaBounds(alloc.MaxQuotaMB, alloc.DefaultMailboxQuotaMB)
+		if quota == 0 {
+			// No explicit request: stamp the domain's default (which
+			// ResolveQuotaBounds has already clamped to the ceiling).
+			quota = defaultQuotaMB
+		}
+		if !quotaUnlimited && quota > maxQuotaMB {
+			return domain.ErrQuotaExceedsDomain
 		}
 
 		m := &AdminMailbox{
@@ -166,6 +201,9 @@ func (s *Service) UpdateMailbox(ctx context.Context, id, tenantID uint, req Upda
 		m.Name = *req.Name
 	}
 	if req.QuotaMB != nil {
+		if *req.QuotaMB < 0 {
+			return nil, ErrInvalidQuota
+		}
 		m.QuotaMB = *req.QuotaMB
 	}
 	if req.SendLimit != nil {
@@ -188,7 +226,25 @@ func (s *Service) UpdateMailbox(ctx context.Context, id, tenantID uint, req Upda
 	}
 
 	entry := &audit.ExtendedEntry{Action: "mailbox.update", Target: fmt.Sprintf("mailbox:%d", m.ID), TargetID: m.ID, TenantID: tenantID, Result: "success"}
-	if err := s.mutateWithAudit(ctx, entry, func(repo *AdminMailboxRepo) error { return repo.Update(ctx, m) }); err != nil {
+	if err := s.mutateWithAudit(ctx, entry, func(repo *AdminMailboxRepo) error {
+		// Quota bounds are re-checked on the CHANGE path inside the same
+		// transaction as the write. Storing a domain-level ceiling is not
+		// enforcement unless every path that can raise a mailbox quota
+		// honours it, and this is the other such path.
+		if req.QuotaMB != nil {
+			domainMaxQuotaMB, err := repo.GetDomainQuotaBounds(ctx, m.ID, tenantID)
+			if err != nil {
+				if err == sql.ErrNoRows {
+					return ErrMailboxNotFound
+				}
+				return fmt.Errorf("resolve domain quota bounds: %w", err)
+			}
+			if maxMB, unlimited, _ := domain.ResolveQuotaBounds(domainMaxQuotaMB, 0); !unlimited && m.QuotaMB > maxMB {
+				return domain.ErrQuotaExceedsDomain
+			}
+		}
+		return repo.Update(ctx, m)
+	}); err != nil {
 		return nil, err
 	}
 	return m, nil
@@ -321,4 +377,5 @@ var (
 	ErrInvalidEmail      = fmt.Errorf("invalid email address")
 	ErrPasswordRequired  = fmt.Errorf("password is required")
 	ErrInvalidTransition = fmt.Errorf("invalid status transition")
+	ErrInvalidQuota      = fmt.Errorf("invalid quota value")
 )

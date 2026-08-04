@@ -95,23 +95,18 @@ func (h *Handler) CreateAdminDomain(c fiber.Ctx) error {
 		return respondAPIError(c, fiber.StatusBadRequest, domain.CodeInvalidDomainName, "Domain name is required.")
 	}
 
-	// Validate and normalize domain name.
+	// Validate and normalize the domain name up front so an obviously bad name
+	// is rejected before a transaction is opened. The service re-validates the
+	// name inside the transaction — this is a fast path, not the guard.
 	normalized, err := domain.ValidateDomainName(req.Name)
 	if err != nil {
 		return respondAPIError(c, fiber.StatusBadRequest, domain.CodeInvalidDomainName, "Invalid domain name.")
 	}
 	req.Name = normalized
 
-	// Check for duplicate domain name. Domain names are globally unique DNS
-	// names, so the lookup is global; the bare existence flag never reveals
-	// which tenant owns the name. The database unique constraint is the final
-	// concurrency-safe guard (mapped by the service to the same code).
-	exists, err := h.domainAdminSvc.DomainExistsGlobal(c.Context(), normalized)
-	if err == nil && exists {
-		return respondAPIError(c, fiber.StatusConflict, domain.CodeDomainAlreadyExists, "Domain already exists.")
-	}
-
-	// Quota enforcement: check domain limit before creating.
+	// Quota enforcement: check domain limit before creating. The provisioning
+	// transaction performs its own authoritative, row-locked plan check; this
+	// one produces the richer limit/used payload existing clients consume.
 	count, err := h.domainAdminSvc.CountByTenant(c.Context(), tenantID)
 	if err == nil && h.quotaSvc != nil {
 		if result := h.quotaSvc.CanCreateDomain(tenantID, int(count)); result != nil && !result.Allowed {
@@ -125,17 +120,90 @@ func (h *Handler) CreateAdminDomain(c fiber.Ctx) error {
 		}
 	}
 
-	d, err := h.domainAdminSvc.CreateDomain(c.Context(), req, tenantID)
+	// ONE atomic provisioning operation: domain + limits + optional DKIM +
+	// audit, committed or rolled back together. The legacy flat request body
+	// {"name":"..."} flows through this same path unchanged.
+	result, err := h.domainAdminSvc.ProvisionDomain(c.Context(), req, tenantID)
 	if err != nil {
-		if err == domain.ErrDomainAlreadyExists {
-			return respondAPIError(c, fiber.StatusConflict, domain.CodeDomainAlreadyExists, "Domain already exists.")
+		return respondProvisioningError(c, err)
+	}
+	if h.usageSvc != nil && !result.Idempotent {
+		h.usageSvc.SetDomainCount(tenantID, int(count)+1)
+	}
+
+	// The response body carries ONLY publishable data. DKIM is represented by
+	// its selector, DNS record name and PUBLIC TXT value; the private key
+	// never leaves the database.
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+		"domain":           result.Domain,
+		"effective_limits": result.EffectiveLimits,
+		"dkim":             result.DKIM,
+		"plan":             result.Plan,
+		"dns":              result.DNS,
+		"idempotent":       result.Idempotent,
+	})
+}
+
+// respondProvisioningError maps every typed provisioning error to a stable
+// machine-readable code and an actionable HTTP status. Unmapped errors collapse
+// to a generic 500 so a raw database error is never surfaced to a caller.
+func respondProvisioningError(c fiber.Ctx, err error) error {
+	switch {
+	case errors.Is(err, domain.ErrDomainAlreadyExists):
+		return respondAPIError(c, fiber.StatusConflict, domain.CodeDomainAlreadyExists, "Domain already exists.")
+	case errors.Is(err, domain.ErrInvalidDomainName):
+		return respondAPIError(c, fiber.StatusBadRequest, domain.CodeInvalidDomainName, "Invalid domain name.")
+	case errors.Is(err, domain.ErrInvalidDomainStatus):
+		return respondAPIError(c, fiber.StatusBadRequest, domain.CodeDomainStatusInvalid, "Initial status must be active or disabled.")
+	case errors.Is(err, domain.ErrDescriptionTooLong):
+		return respondAPIError(c, fiber.StatusUnprocessableEntity, domain.CodeDescriptionTooLong, "Description must be 500 characters or fewer.")
+	case errors.Is(err, domain.ErrInvalidDKIMSelector):
+		return respondAPIError(c, fiber.StatusUnprocessableEntity, domain.CodeInvalidDKIMSelector, "Invalid DKIM selector.")
+	case errors.Is(err, domain.ErrLimitContradiction):
+		return respondAPIError(c, fiber.StatusUnprocessableEntity, domain.CodeLimitContradiction, err.Error())
+	case errors.Is(err, domain.ErrLimitExceedsPlan):
+		return respondAPIError(c, fiber.StatusUnprocessableEntity, domain.CodeLimitExceedsPlan, err.Error())
+	case errors.Is(err, domain.ErrInvalidLimit):
+		return respondAPIError(c, fiber.StatusUnprocessableEntity, domain.CodeInvalidLimit, err.Error())
+	case errors.Is(err, domain.ErrDomainLimitReached):
+		return respondAPIError(c, fiber.StatusConflict, domain.CodeDomainLimitReached, "Domain limit reached for your plan.")
+	case errors.Is(err, domain.ErrPlanUnavailable):
+		// Fail CLOSED: unknown plan data must never provision a domain.
+		return respondAPIError(c, fiber.StatusConflict, domain.CodePlanUnavailable, "Organization plan data is unavailable; provisioning is blocked.")
+	case errors.Is(err, domain.ErrDKIMAlreadyConfigured):
+		return respondAPIError(c, fiber.StatusConflict, domain.CodeDKIMAlreadyConfigured, "DKIM is already configured for this domain.")
+	case errors.Is(err, domain.ErrDomainForbidden):
+		return respondAPIError(c, fiber.StatusForbidden, "FORBIDDEN", "Access denied.")
+	default:
+		return respondAPIError(c, fiber.StatusInternalServerError, "INTERNAL_ERROR", "An internal error occurred.")
+	}
+}
+
+// GetOrganizationCapacity returns the organization plan summary the
+// provisioning wizard needs: plan name, effective ceilings, live usage and
+// remaining capacity. Unlimited dimensions are reported with an explicit
+// *_unlimited flag and a null remaining value — never a misleading 0.
+//
+// It is a READ endpoint scoped to the authenticated tenant; a caller can never
+// request another tenant's capacity because the tenant comes from the session,
+// not the request. It fails closed (409 PLAN_UNAVAILABLE) when the plan row
+// cannot be read, which is the same condition that blocks provisioning.
+func (h *Handler) GetOrganizationCapacity(c fiber.Ctx) error {
+	if h.domainAdminSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "domain admin service not available"})
+	}
+	tenantID, err := auth.RequireTenantID(c)
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": err.Error()})
+	}
+	summary, err := h.domainAdminSvc.GetPlanSummary(c.Context(), tenantID)
+	if err != nil {
+		if errors.Is(err, domain.ErrPlanUnavailable) {
+			return respondAPIError(c, fiber.StatusConflict, domain.CodePlanUnavailable, "Organization plan data is unavailable.")
 		}
 		return respondAPIError(c, fiber.StatusInternalServerError, "INTERNAL_ERROR", "An internal error occurred.")
 	}
-	if h.usageSvc != nil {
-		h.usageSvc.SetDomainCount(tenantID, int(count)+1)
-	}
-	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"domain": d})
+	return c.JSON(fiber.Map{"capacity": summary})
 }
 
 func (h *Handler) UpdateAdminDomain(c fiber.Ctx) error {

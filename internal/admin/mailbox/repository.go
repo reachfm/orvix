@@ -240,6 +240,77 @@ func (r *AdminMailboxRepo) ResolveDomain(ctx context.Context, name string, tenan
 	return id, status, nil
 }
 
+// DomainAllocation is the enforceable allocation state of a domain, read
+// inside the caller's transaction. The sentinel encoding of the three limit
+// fields is documented on domain.LimitInherit / domain.LimitUnlimited.
+type DomainAllocation struct {
+	DomainID              uint
+	Status                string
+	MaxMailboxes          int
+	MaxQuotaMB            int64
+	DefaultMailboxQuotaMB int64
+	// OrgMaxMailboxes is the organization plan ceiling used to resolve an
+	// inheriting domain. 0 or negative means the plan is unlimited.
+	OrgMaxMailboxes int
+}
+
+// ResolveDomainAllocation resolves a domain by name inside the authenticated
+// tenant scope AND reads the allocation limits needed to enforce mailbox caps
+// and quota bounds. It is tenant-scoped exactly like ResolveDomain, so a domain
+// owned by another tenant is indistinguishable from an absent one
+// (sql.ErrNoRows) and cross-tenant existence is never leaked.
+//
+// On PostgreSQL the domain row is locked FOR UPDATE so that two concurrent
+// mailbox creations against the same domain serialize on it and cannot both
+// observe the same pre-insert count. SQLite serializes writers at the
+// transaction level and does not support the clause.
+func (r *AdminMailboxRepo) ResolveDomainAllocation(ctx context.Context, name string, tenantID uint, lock bool) (*DomainAllocation, error) {
+	q := "SELECT d.id, d.status, d.deleted_at, d.max_mailboxes, d.max_quota_mb, COALESCE(d.default_mailbox_quota_mb,0) " +
+		"FROM coremail_domains d WHERE d.name=" + r.dialect.Placeholder(1) + " AND d.tenant_id=" + r.dialect.Placeholder(2)
+	if lock && r.dialect.IsPostgres() {
+		q += " FOR UPDATE"
+	}
+	var a DomainAllocation
+	var deletedAt *string
+	if err := r.db.QueryRowContext(ctx, q, name, tenantID).Scan(
+		&a.DomainID, &a.Status, &deletedAt, &a.MaxMailboxes, &a.MaxQuotaMB, &a.DefaultMailboxQuotaMB); err != nil {
+		return nil, err
+	}
+	if deletedAt != nil {
+		return nil, sql.ErrNoRows
+	}
+	// The organization ceiling is what an inheriting domain resolves to. A
+	// missing tenant row leaves OrgMaxMailboxes at 0, which ResolveMailboxCap
+	// treats as an unlimited plan — the same reading every pre-existing tenant
+	// already had, so this cannot retroactively lock anyone out.
+	_ = r.db.QueryRowContext(ctx,
+		"SELECT COALESCE(max_mailboxes,0) FROM tenants WHERE id="+r.dialect.Placeholder(1)+" AND deleted_at IS NULL",
+		tenantID).Scan(&a.OrgMaxMailboxes)
+	return &a, nil
+}
+
+// CountActiveByDomain counts the live (non-soft-deleted) mailboxes on a domain
+// inside the caller's transaction. It is the count the domain mailbox cap is
+// enforced against.
+func (r *AdminMailboxRepo) CountActiveByDomain(ctx context.Context, domainID, tenantID uint) (int, error) {
+	var n int
+	err := r.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM coremail_mailboxes WHERE domain_id="+r.dialect.Placeholder(1)+
+			" AND tenant_id="+r.dialect.Placeholder(2)+" AND deleted_at IS NULL", domainID, tenantID).Scan(&n)
+	return n, err
+}
+
+// GetDomainQuotaBounds returns the per-mailbox quota ceiling of the domain that
+// owns a mailbox. It is used by the quota-CHANGE path, which resolves the
+// domain from the mailbox rather than from an address.
+func (r *AdminMailboxRepo) GetDomainQuotaBounds(ctx context.Context, mailboxID, tenantID uint) (maxQuotaMB int64, err error) {
+	err = r.db.QueryRowContext(ctx,
+		"SELECT d.max_quota_mb FROM coremail_domains d JOIN coremail_mailboxes m ON m.domain_id = d.id "+
+			"WHERE m.id="+r.dialect.Placeholder(1)+" AND m.tenant_id="+r.dialect.Placeholder(2)+
+			" AND m.deleted_at IS NULL AND d.deleted_at IS NULL", mailboxID, tenantID).Scan(&maxQuotaMB)
+	return maxQuotaMB, err
+}
+
 func scanAdminMailbox(row interface {
 	Scan(dest ...interface{}) error
 }) (*AdminMailbox, error) {

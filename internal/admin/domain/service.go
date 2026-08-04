@@ -83,7 +83,7 @@ func (r *DomainAdminRepo) List(ctx context.Context, filter DomainFilter) ([]Admi
 	// constraint, so the DNS subqueries pick the most recent row via
 	// ORDER BY created_at DESC LIMIT 1, matching VerificationRepo.GetLatest.
 	query := `SELECT d.id, d.tenant_id, d.name, d.status, COALESCE(d.plan,''), COALESCE(d.description,''),
-		d.max_mailboxes, d.max_aliases, d.max_quota_mb,
+		d.max_mailboxes, d.max_aliases, d.max_quota_mb, COALESCE(d.default_mailbox_quota_mb,0),
 		d.dkim_enabled, COALESCE(d.dkim_selector,'mail'), d.dmarc_enabled,
 		COALESCE((SELECT COUNT(*) FROM coremail_mailboxes m WHERE m.domain_id=d.id AND m.deleted_at IS NULL),0),
 		COALESCE((SELECT COUNT(*) FROM coremail_aliases a WHERE a.domain_id=d.id AND a.deleted_at IS NULL),0),
@@ -109,7 +109,7 @@ func (r *DomainAdminRepo) List(ctx context.Context, filter DomainFilter) ([]Admi
 		var dnsHealth sql.NullString
 		var dnsCheckedAt sql.NullTime
 		if err := rows.Scan(&d.ID, &d.TenantID, &d.Name, &d.Status, &d.Plan, &d.Description,
-			&d.MaxMailboxes, &d.MaxAliases, &d.MaxQuotaMB,
+			&d.MaxMailboxes, &d.MaxAliases, &d.MaxQuotaMB, &d.DefaultMailboxQuotaMB,
 			&dkimEnabled, &d.DKIMSelector, &dmarcEnabled,
 			&d.MailboxCount, &d.AliasCount,
 			&d.StorageUsedBytes, &d.MessageCount,
@@ -119,7 +119,10 @@ func (r *DomainAdminRepo) List(ctx context.Context, filter DomainFilter) ([]Admi
 		}
 		d.DKIMEnabled = dkimEnabled != 0
 		d.DMARCEnabled = dmarcEnabled != 0
-		d.StorageLimitBytes = d.MaxQuotaMB * 1024 * 1024
+		// Overflow-safe, sentinel-aware: an inheriting (0) or unlimited (-1)
+		// per-mailbox ceiling has no byte allocation to report, so it stays 0
+		// rather than becoming a negative or wrapped value.
+		d.StorageLimitBytes = mbToBytes(d.MaxQuotaMB)
 		if dnsHealth.Valid {
 			d.DNSHealth = dnsHealth.String
 		}
@@ -135,7 +138,7 @@ func (r *DomainAdminRepo) List(ctx context.Context, filter DomainFilter) ([]Admi
 func (r *DomainAdminRepo) GetByID(ctx context.Context, id, tenantID uint) (*AdminDomain, error) {
 	row := r.db.QueryRowContext(ctx,
 		`SELECT d.id, d.tenant_id, d.name, d.status, COALESCE(d.plan,''), COALESCE(d.description,''),
-			d.max_mailboxes, d.max_aliases, d.max_quota_mb,
+			d.max_mailboxes, d.max_aliases, d.max_quota_mb, COALESCE(d.default_mailbox_quota_mb,0),
 			d.dkim_enabled, COALESCE(d.dkim_selector,'mail'), d.dmarc_enabled,
 			COALESCE((SELECT COUNT(*) FROM coremail_mailboxes m WHERE m.domain_id=d.id AND m.deleted_at IS NULL),0),
 			COALESCE((SELECT COUNT(*) FROM coremail_aliases a WHERE a.domain_id=d.id AND a.deleted_at IS NULL),0),
@@ -157,15 +160,11 @@ func (r *DomainAdminRepo) Create(ctx context.Context, d *AdminDomain) (*AdminDom
 	if d.DKIMSelector == "" {
 		d.DKIMSelector = "mail"
 	}
-	if d.MaxMailboxes == 0 {
-		d.MaxMailboxes = 500
-	}
-	if d.MaxAliases == 0 {
-		d.MaxAliases = 50
-	}
-	if d.MaxQuotaMB == 0 {
-		d.MaxQuotaMB = 10240
-	}
+	// NOTE: no limit defaulting happens here any more. The stored values are
+	// exactly what the caller resolved, so the sentinel encoding
+	// (LimitInherit=0, LimitUnlimited=-1, >0 concrete) survives the write
+	// unchanged. The legacy CreateDomain entrypoint applies the historic
+	// 500/50/10240 defaults itself so its behaviour is untouched.
 
 	res, err := r.db.ExecContext(ctx,
 		"INSERT INTO coremail_domains (tenant_id, name, status, plan, description, max_mailboxes, max_aliases, max_quota_mb, dkim_enabled, dkim_selector, dmarc_enabled, created_at, updated_at) VALUES ("+r.dialect.Placeholders(13)+")",
@@ -204,7 +203,7 @@ func (r *DomainAdminRepo) CountByTenant(ctx context.Context, tenantID uint) (int
 func (r *DomainAdminRepo) GetByName(ctx context.Context, name string, tenantID uint) (*AdminDomain, error) {
 	row := r.db.QueryRowContext(ctx,
 		`SELECT d.id, d.tenant_id, d.name, d.status, COALESCE(d.plan,''), COALESCE(d.description,''),
-			d.max_mailboxes, d.max_aliases, d.max_quota_mb,
+			d.max_mailboxes, d.max_aliases, d.max_quota_mb, COALESCE(d.default_mailbox_quota_mb,0),
 			d.dkim_enabled, COALESCE(d.dkim_selector,'mail'), d.dmarc_enabled,
 			COALESCE((SELECT COUNT(*) FROM coremail_mailboxes m WHERE m.domain_id=d.id AND m.deleted_at IS NULL),0),
 			COALESCE((SELECT COUNT(*) FROM coremail_aliases a WHERE a.domain_id=d.id AND a.deleted_at IS NULL),0),
@@ -248,7 +247,7 @@ func (r *DomainAdminRepo) GetDomainNameByID(ctx context.Context, domainID, tenan
 func (r *DomainAdminRepo) GetDomainForVerification(ctx context.Context, domainID, tenantID uint) (*AdminDomain, error) {
 	row := r.db.QueryRowContext(ctx,
 		`SELECT d.id, d.tenant_id, d.name, d.status, COALESCE(d.plan,''), COALESCE(d.description,''),
-			d.max_mailboxes, d.max_aliases, d.max_quota_mb,
+			d.max_mailboxes, d.max_aliases, d.max_quota_mb, COALESCE(d.default_mailbox_quota_mb,0),
 			d.dkim_enabled, COALESCE(d.dkim_selector,'mail'), d.dmarc_enabled,
 			COALESCE((SELECT COUNT(*) FROM coremail_mailboxes m WHERE m.domain_id=d.id AND m.deleted_at IS NULL),0),
 			COALESCE((SELECT COUNT(*) FROM coremail_aliases a WHERE a.domain_id=d.id AND a.deleted_at IS NULL),0),
@@ -295,7 +294,7 @@ func (r *DomainAdminRepo) GetByNameGlobal(ctx context.Context, name string) (boo
 func (r *DomainAdminRepo) GetByNameGlobalDomain(ctx context.Context, name string) (*AdminDomain, error) {
 	row := r.db.QueryRowContext(ctx,
 		`SELECT d.id, d.tenant_id, d.name, d.status, COALESCE(d.plan,''), COALESCE(d.description,''),
-			d.max_mailboxes, d.max_aliases, d.max_quota_mb,
+			d.max_mailboxes, d.max_aliases, d.max_quota_mb, COALESCE(d.default_mailbox_quota_mb,0),
 			d.dkim_enabled, COALESCE(d.dkim_selector,'mail'), d.dmarc_enabled,
 			COALESCE((SELECT COUNT(*) FROM coremail_mailboxes m WHERE m.domain_id=d.id AND m.deleted_at IS NULL),0),
 			COALESCE((SELECT COUNT(*) FROM coremail_aliases a WHERE a.domain_id=d.id AND a.deleted_at IS NULL),0),
@@ -440,6 +439,19 @@ func (s *Service) CreateDomain(ctx context.Context, req CreateDomainRequest, ten
 		MaxAliases:   req.MaxAliases,
 		MaxQuotaMB:   req.MaxQuotaMB,
 	}
+	// Legacy defaults, preserved verbatim from the pre-provisioning repository
+	// behaviour so existing callers of CreateDomain are unaffected by the move
+	// to sentinel-encoded limits. New callers use ProvisionDomain, which
+	// resolves inheritance against the organization plan instead.
+	if d.MaxMailboxes == 0 {
+		d.MaxMailboxes = 500
+	}
+	if d.MaxAliases == 0 {
+		d.MaxAliases = 50
+	}
+	if d.MaxQuotaMB == 0 {
+		d.MaxQuotaMB = 10240
+	}
 
 	var created *AdminDomain
 	entry := &audit.ExtendedEntry{Action: "domain.create", TenantID: tenantID, Result: "success"}
@@ -513,35 +525,9 @@ func (s *Service) GenerateDKIM(ctx context.Context, id, tenantID uint, selector 
 
 	repo := s.repo.WithTx(tx)
 
-	// Deterministic duplicate handling inside the transaction.
-	existing, err := s.dkimRepo.GetByDomain(ctx, d.Name, tx)
+	result, err := s.generateDKIMTx(ctx, tx, repo, id, tenantID, d.Name, selector)
 	if err != nil {
-		return nil, fmt.Errorf("check dkim config: %w", err)
-	}
-	if existing != nil {
-		return nil, ErrDKIMAlreadyConfigured
-	}
-
-	privPEM, dnsValue, err := dkim.GenerateKeyPair(selector, d.Name)
-	if err != nil {
-		return nil, fmt.Errorf("dkim keygen: %w", err)
-	}
-
-	cfg := &dkim.DKIMConfig{
-		Domain:        d.Name,
-		Selector:      selector,
-		PrivateKeyPEM: privPEM,
-		Enabled:       true,
-	}
-	if err := s.dkimRepo.Create(ctx, cfg, tx); err != nil {
-		if isUniqueViolation(err) {
-			return nil, ErrDKIMAlreadyConfigured
-		}
-		return nil, fmt.Errorf("save dkim config: %w", err)
-	}
-
-	if err := repo.UpdateDomainDKIMState(ctx, id, tenantID, true, selector); err != nil {
-		return nil, fmt.Errorf("mark domain dkim state: %w", err)
+		return nil, err
 	}
 
 	if s.auditStore != nil {
@@ -562,10 +548,64 @@ func (s *Service) GenerateDKIM(ctx context.Context, id, tenantID uint, selector 
 		return nil, fmt.Errorf("commit dkim generate: %w", err)
 	}
 
+	return result, nil
+}
+
+// generateDKIMTx is THE shared, transaction-scoped DKIM generation body. Both
+// the standalone GenerateDKIM entrypoint and the provisioning wizard call it,
+// so the duplicate detection, key generation and domain-state update exist in
+// exactly one place and cannot drift.
+//
+// It performs NO commit and NO rollback and writes NO audit record: the caller
+// owns the transaction and the audit semantics. It returns only PUBLIC data —
+// the generated private key is written to the DKIM config row and is never
+// returned, logged or surfaced to the caller in any form.
+func (s *Service) generateDKIMTx(ctx context.Context, tx *sql.Tx, repo *DomainAdminRepo, domainID, tenantID uint, domainName, selector string) (*DKIMResult, error) {
+	if s.dkimRepo == nil {
+		return nil, fmt.Errorf("dkim repository unavailable")
+	}
+	if selector == "" {
+		selector = "mail"
+	}
+
+	// Deterministic duplicate handling inside the caller's transaction: the
+	// losing side of a concurrent generate gets ErrDKIMAlreadyConfigured
+	// rather than a generic failure.
+	existing, err := s.dkimRepo.GetByDomain(ctx, domainName, tx)
+	if err != nil {
+		return nil, fmt.Errorf("check dkim config: %w", err)
+	}
+	if existing != nil {
+		return nil, ErrDKIMAlreadyConfigured
+	}
+
+	privPEM, dnsValue, err := dkim.GenerateKeyPair(selector, domainName)
+	if err != nil {
+		return nil, fmt.Errorf("dkim keygen: %w", err)
+	}
+
+	cfg := &dkim.DKIMConfig{
+		Domain:        domainName,
+		Selector:      selector,
+		PrivateKeyPEM: privPEM,
+		Enabled:       true,
+	}
+	if err := s.dkimRepo.Create(ctx, cfg, tx); err != nil {
+		if isUniqueViolation(err) {
+			return nil, ErrDKIMAlreadyConfigured
+		}
+		// The wrapped error deliberately carries no key material.
+		return nil, fmt.Errorf("save dkim config: %w", err)
+	}
+
+	if err := repo.UpdateDomainDKIMState(ctx, domainID, tenantID, true, selector); err != nil {
+		return nil, fmt.Errorf("mark domain dkim state: %w", err)
+	}
+
 	return &DKIMResult{
 		Selector:      selector,
 		PublicDNSTxt:  dnsValue,
-		DNSRecordName: fmt.Sprintf("%s._domainkey.%s", selector, d.Name),
+		DNSRecordName: fmt.Sprintf("%s._domainkey.%s", selector, domainName),
 	}, nil
 }
 
@@ -865,7 +905,7 @@ func scanAdminDomain(row interface {
 	var d AdminDomain
 	var dkimEnabled, dmarcEnabled int
 	err := row.Scan(&d.ID, &d.TenantID, &d.Name, &d.Status, &d.Plan, &d.Description,
-		&d.MaxMailboxes, &d.MaxAliases, &d.MaxQuotaMB,
+		&d.MaxMailboxes, &d.MaxAliases, &d.MaxQuotaMB, &d.DefaultMailboxQuotaMB,
 		&dkimEnabled, &d.DKIMSelector, &dmarcEnabled,
 		&d.MailboxCount, &d.AliasCount, &d.CreatedAt, &d.UpdatedAt)
 	if err != nil {

@@ -1046,6 +1046,11 @@ func (r *Router) setupRoutes() {
 	// ── Organizations ──
 	enterpriseRead.Get("/organizations/:id", r.h.GetOrganization)
 	enterpriseRead.Get("/organizations/current", r.h.GetCurrentOrganization)
+	// Plan + live usage summary consumed by the domain provisioning wizard.
+	// Read-only and scoped to the authenticated tenant — it uses the same
+	// enterpriseRead group as every other tenant-scoped read, so RBAC is
+	// unchanged and no new privilege is introduced.
+	enterpriseRead.Get("/organizations/current/capacity", r.h.GetOrganizationCapacity)
 
 	// ── Invitations ──
 	enterpriseRead.Get("/invitations", r.h.ListInvitations)

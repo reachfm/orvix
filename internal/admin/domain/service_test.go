@@ -35,6 +35,7 @@ func newDomainTestDB(t *testing.T) *sql.DB {
 		max_mailboxes INTEGER,
 		max_aliases INTEGER,
 		max_quota_mb INTEGER,
+		default_mailbox_quota_mb INTEGER NOT NULL DEFAULT 0,
 		dkim_enabled INTEGER DEFAULT 0,
 		dkim_selector TEXT,
 		dmarc_enabled INTEGER DEFAULT 0,
@@ -242,6 +243,7 @@ func TestDomainMutationRollsBackWhenAuditWriteFails(t *testing.T) {
 		max_mailboxes INTEGER,
 		max_aliases INTEGER,
 		max_quota_mb INTEGER,
+		default_mailbox_quota_mb INTEGER NOT NULL DEFAULT 0,
 		dkim_enabled INTEGER DEFAULT 0,
 		dkim_selector TEXT,
 		dmarc_enabled INTEGER DEFAULT 0,
@@ -490,11 +492,35 @@ func TestValidateDomainNameCanonical(t *testing.T) {
 		"", " ", "example", "https://example.com", "http://example.com/path",
 		"example.com/path", "user@example.com", "exa mple.com", "*.example.com",
 		"example.com:8080", "example.com#frag", "example.com?q=1", "-bad.com",
-		"bad-.com", strings.Repeat("a", 64) + ".com", "exa_mple.com", "m\u00fcnchen.de",
+		"bad-.com", strings.Repeat("a", 64) + ".com", "exa_mple.com",
+		// Public suffixes are not registrable and can never belong to a
+		// single tenant, so accepting one would let a tenant claim an entire
+		// namespace.
+		"com", "co.uk", "github.io",
 	}
 	for _, v := range invalid {
 		if _, err := ValidateDomainName(v); err == nil {
 			t.Errorf("ValidateDomainName(%q) should be invalid", v)
+		}
+	}
+
+	// IDNA: internationalized names are now folded to their canonical ASCII
+	// A-label (punycode) form instead of being rejected, so two spellings of
+	// the same name can never both be provisioned.
+	idnaCases := map[string]string{
+		"m\u00fcnchen.de":   "xn--mnchen-3ya.de",
+		"M\u00dcNCHEN.DE":   "xn--mnchen-3ya.de",
+		"xn--mnchen-3ya.de": "xn--mnchen-3ya.de",
+		"m\u00fcnchen.de.":  "xn--mnchen-3ya.de",
+	}
+	for in, want := range idnaCases {
+		got, err := ValidateDomainName(in)
+		if err != nil {
+			t.Errorf("ValidateDomainName(%q) should be valid, got %v", in, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("ValidateDomainName(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

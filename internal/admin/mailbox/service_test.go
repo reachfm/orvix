@@ -41,10 +41,15 @@ func newMailboxTestDB(t *testing.T) *sql.DB {
 		tenant_id INTEGER NOT NULL DEFAULT 0,
 		name TEXT NOT NULL,
 		status TEXT NOT NULL DEFAULT 'active',
+		max_mailboxes INTEGER NOT NULL DEFAULT 0,
+		max_aliases INTEGER NOT NULL DEFAULT 0,
+		max_quota_mb INTEGER NOT NULL DEFAULT 0,
+		default_mailbox_quota_mb INTEGER NOT NULL DEFAULT 0,
 		created_at DATETIME,
 		updated_at DATETIME,
 		deleted_at DATETIME
 	);
+	CREATE TABLE tenants (id INTEGER PRIMARY KEY, plan TEXT NOT NULL DEFAULT 'smb', max_domains INTEGER NOT NULL DEFAULT 0, max_mailboxes INTEGER NOT NULL DEFAULT 0, deleted_at DATETIME);
 	CREATE TABLE coremail_mailboxes (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		domain_id INTEGER NOT NULL,
