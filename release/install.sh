@@ -1848,7 +1848,12 @@ install_external_backup() {
         fi
     done
     install -d -m 0700 -o root -g root /var/cache/orvix-external-backup
-    install -d -m 0750 -o root -g root /etc/orvix
+    # NOTE: /etc/orvix is created and owned by the main installer earlier in
+    # the flow (as orvix:orvix 0750 so the orvix service user can read
+    # orvix.yaml). We intentionally do NOT `install -d` it here — running
+    # `install -d -o root -g root` against an existing directory silently
+    # rewrites its ownership and locks the orvix service user out of its own
+    # config directory, which then boots the service without a working DB.
     log_detail "external-backup installed. To enable: create /etc/orvix/external-backup.env + /etc/orvix/restic-password, then: sudo systemctl enable --now orvix-external-backup.timer"
 }
 

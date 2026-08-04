@@ -21,6 +21,10 @@
 #     release/install-public.sh
 #     release/systemd/orvix.service
 #     release/systemd/orvix-update.service
+#     release/systemd/orvix-restore.service
+#     release/systemd/orvix-restore.path
+#     release/systemd/orvix-external-backup*.service
+#     release/systemd/orvix-external-backup*.timer
 #     release/sudoers.d/orvix-update
 #     release/scripts/*.sh
 #     release/admin/**                 # admin SPA + modules
@@ -171,6 +175,12 @@ REQUIRED_FILES=(
     release/systemd/orvix-update.service
     release/systemd/orvix-restore.service
     release/systemd/orvix-restore.path
+    release/systemd/orvix-external-backup.service
+    release/systemd/orvix-external-backup.timer
+    release/systemd/orvix-external-backup-check-weekly.service
+    release/systemd/orvix-external-backup-check-weekly.timer
+    release/systemd/orvix-external-backup-check-monthly.service
+    release/systemd/orvix-external-backup-check-monthly.timer
     release/sudoers.d/orvix-update
     release/scripts/healthcheck.sh
     release/scripts/smoke-admin-js.sh
@@ -438,6 +448,12 @@ cp release/systemd/orvix.service         "$BUNDLE_ROOT/release/systemd/orvix.ser
 cp release/systemd/orvix-update.service  "$BUNDLE_ROOT/release/systemd/orvix-update.service"
 cp release/systemd/orvix-restore.service "$BUNDLE_ROOT/release/systemd/orvix-restore.service"
 cp release/systemd/orvix-restore.path    "$BUNDLE_ROOT/release/systemd/orvix-restore.path"
+cp release/systemd/orvix-external-backup.service                "$BUNDLE_ROOT/release/systemd/orvix-external-backup.service"
+cp release/systemd/orvix-external-backup.timer                  "$BUNDLE_ROOT/release/systemd/orvix-external-backup.timer"
+cp release/systemd/orvix-external-backup-check-weekly.service   "$BUNDLE_ROOT/release/systemd/orvix-external-backup-check-weekly.service"
+cp release/systemd/orvix-external-backup-check-weekly.timer     "$BUNDLE_ROOT/release/systemd/orvix-external-backup-check-weekly.timer"
+cp release/systemd/orvix-external-backup-check-monthly.service  "$BUNDLE_ROOT/release/systemd/orvix-external-backup-check-monthly.service"
+cp release/systemd/orvix-external-backup-check-monthly.timer    "$BUNDLE_ROOT/release/systemd/orvix-external-backup-check-monthly.timer"
 cp release/sudoers.d/orvix-update       "$BUNDLE_ROOT/release/sudoers.d/orvix-update"
 
 for s in release/scripts/*.sh; do
@@ -521,6 +537,12 @@ BUNDLE_REQUIRED=(
     release/systemd/orvix-update.service
     release/systemd/orvix-restore.service
     release/systemd/orvix-restore.path
+    release/systemd/orvix-external-backup.service
+    release/systemd/orvix-external-backup.timer
+    release/systemd/orvix-external-backup-check-weekly.service
+    release/systemd/orvix-external-backup-check-weekly.timer
+    release/systemd/orvix-external-backup-check-monthly.service
+    release/systemd/orvix-external-backup-check-monthly.timer
     release/sudoers.d/orvix-update
     release/admin/index.html
     release/webmail/index.html
