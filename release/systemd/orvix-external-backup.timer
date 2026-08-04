@@ -1,0 +1,12 @@
+[Unit]
+Description=Orvix External Backup (hourly, jittered)
+Documentation=https://github.com/reachfm/orvix
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=15min
+Persistent=true
+Unit=orvix-external-backup.service
+
+[Install]
+WantedBy=timers.target

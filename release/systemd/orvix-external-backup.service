@@ -1,0 +1,47 @@
+[Unit]
+Description=Orvix External Backup (Hetzner Object Storage via Restic)
+Documentation=https://github.com/reachfm/orvix
+# This unit is triggered by orvix-external-backup.timer (hourly, jittered) or
+# by an operator running `sudo systemctl start orvix-external-backup.service`.
+# It stages a consistent snapshot of the DB + mail + config + optional Caddy
+# certs and hands it to Restic, which pushes to a private Hetzner Object
+# Storage bucket. See docs/backup/hetzner-object-storage-restic.md.
+#
+# Deliberately no [Install] section: release/install.sh installs the unit but
+# never calls `systemctl enable`. Enabling is an explicit operator step after
+# creating /etc/orvix/external-backup.env and /etc/orvix/restic-password.
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+# The `-` prefix makes systemd tolerate a missing env file at unit-start; the
+# script itself then fails closed with a clear message pointing at the docs.
+EnvironmentFile=-/etc/orvix/external-backup.env
+ExecStart=/usr/share/orvix/scripts/external-backup-run.sh
+
+# --- Hardening (mirrors release/systemd/orvix-update.service) --------------
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/cache/orvix-external-backup /var/lock
+CacheDirectory=orvix-external-backup
+CacheDirectoryMode=0700
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+RemoveIPC=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# The staging script needs to read /var/lib/orvix, /etc/orvix and /var/lib/caddy;
+# ProtectSystem=strict already makes /etc read-only for us and ProtectHome=true
+# hides /root. No CapabilityBoundingSet is required — restic + sqlite3 + cp
+# need no capabilities beyond the default set for root.
+CapabilityBoundingSet=

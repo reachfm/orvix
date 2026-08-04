@@ -1808,6 +1808,50 @@ PY
     log_detail "ADMIN password rotated for $email via explicit ORVIX_RESET_ADMIN_PASSWORD=1 path (hash/password not logged)"
 }
 
+install_external_backup() {
+    # Ships the hardened external Restic backup: 4 scripts under
+    # /usr/share/orvix/scripts + 6 systemd units (3 services + 3 timers) under
+    # /etc/systemd/system + the private cache directory. Intentionally does
+    # NOT call `systemctl enable` on any external-backup unit — the operator
+    # enables the timer manually after creating /etc/orvix/external-backup.env
+    # and /etc/orvix/restic-password. See
+    # docs/backup/hetzner-object-storage-restic.md.
+    local script_src unit_src
+    for script_src in \
+        external-backup-stage.sh \
+        external-backup-run.sh \
+        external-backup-check.sh \
+        external-backup-restore-drill.sh; do
+        if [ -f "$ORVIX_SOURCE_DIR/release/scripts/$script_src" ]; then
+            install -m 0755 -o root -g root \
+                "$ORVIX_SOURCE_DIR/release/scripts/$script_src" \
+                "/usr/share/orvix/scripts/$script_src"
+            log_detail "installed /usr/share/orvix/scripts/$script_src (0755 root:root)"
+        else
+            log_detail "external-backup script $script_src not found; skipping"
+        fi
+    done
+    for unit_src in \
+        orvix-external-backup.service \
+        orvix-external-backup.timer \
+        orvix-external-backup-check-weekly.service \
+        orvix-external-backup-check-weekly.timer \
+        orvix-external-backup-check-monthly.service \
+        orvix-external-backup-check-monthly.timer; do
+        if [ -f "$ORVIX_SOURCE_DIR/release/systemd/$unit_src" ]; then
+            install -m 0644 -o root -g root \
+                "$ORVIX_SOURCE_DIR/release/systemd/$unit_src" \
+                "/etc/systemd/system/$unit_src"
+            log_detail "installed /etc/systemd/system/$unit_src (0644 root:root)"
+        else
+            log_detail "external-backup unit $unit_src not found; skipping"
+        fi
+    done
+    install -d -m 0700 -o root -g root /var/cache/orvix-external-backup
+    install -d -m 0750 -o root -g root /etc/orvix
+    log_detail "external-backup installed. To enable: create /etc/orvix/external-backup.env + /etc/orvix/restic-password, then: sudo systemctl enable --now orvix-external-backup.timer"
+}
+
 install_update_helper() {
     # Install the runtime update systemd oneshot unit.
     local unit_src="${ORVIX_SOURCE_DIR}/release/systemd/orvix-update.service"
@@ -3045,6 +3089,7 @@ IPFAIL
     set_step "systemd" "Service activation" 85
     write_service
     install_update_helper
+    install_external_backup
     write_restore_coordinator
     run_quiet systemctl daemon-reload
     run_quiet systemctl enable orvix
