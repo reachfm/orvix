@@ -6,20 +6,30 @@
 # staging producer without a network dependency.
 #
 # CONSISTENCY MODEL (read before changing the order below):
-#   internal/coremail/storage/mailstore.go:StoreMessage writes the RFC822 file
-#   to disk via os.WriteFile BEFORE the DB row is inserted (no atomic
-#   temp+rename, no fsync). On INSERT failure the file is os.Remove'd. There is
-#   no application quiesce endpoint we can call from here.
+#   Real consistency for these snapshots comes from external-backup-run.sh
+#   stopping orvix.service around the whole staging phase. The DB-first,
+#   mail-second ordering below is defense-in-depth for the case where the
+#   quiesce ever fails silently — it is NECESSARY but NOT SUFFICIENT on its
+#   own. Concretely:
 #
-#   Therefore we snapshot the DATABASE FIRST (via SQLite VACUUM INTO, which is
-#   the SQLite-native atomic snapshot that is safe against concurrent writers),
-#   then the mail directory. A message that arrives between the two snapshots
-#   will exist on disk in the mail snapshot but be absent from the DB snapshot
-#   — these are benign "orphan files" that a restore procedure can quarantine.
+#     internal/coremail/storage/mailstore.go:PurgeMessage removes the RFC822
+#     file and attachment directory BEFORE deleting the DB row (see
+#     os.RemoveAll at L329 and os.Remove at L335 wrapping Messages.Purge at
+#     L331). If we snapshotted the DB first and then the mail tree while
+#     the service was live, a Purge landing between the two snapshots would
+#     produce a DB row whose file is missing from the mail snapshot — a
+#     hard restore failure. Snapshotting mail first is even worse for
+#     StoreMessage (file on disk + DB row inserted after). Only stopping
+#     the service eliminates both windows; see the run script's
+#     `restore_service` trap.
 #
-#   Do NOT reverse this order. Snapshotting the mail dir before the DB would
-#   create DB rows referencing files that the earlier disk snapshot missed,
-#   which is a hard restore failure.
+#   Do NOT reverse the order below. Keep DB-first as a defense-in-depth in
+#   case a future refactor accidentally bypasses the run script's quiesce.
+#
+#   FOLLOW-UP (not fixed in this PR): mailstore.go:WriteRFC822 (L414-L443)
+#   does a non-atomic os.WriteFile overwrite of drafts. Even with quiesce,
+#   a snapshot taken at the exact moment a client is saving a draft could
+#   catch a truncated file. Fix belongs in the application (temp+rename).
 #
 # The script fails closed on missing required sources, refuses to run as
 # non-root, holds a flock so it never overlaps with itself or with the Restic

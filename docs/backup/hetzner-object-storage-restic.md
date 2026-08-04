@@ -1,6 +1,6 @@
 # External Backup — Hetzner Object Storage + Restic
 
-This is the operator runbook for the ORVIX external backup: hourly Restic
+This is the operator runbook for the ORVIX external backup: daily Restic
 snapshots of the ORVIX database, mail directory, config, and (optionally) Caddy
 certificates, pushed to a **private** Hetzner Object Storage bucket. It is
 complementary to the in-app backup service in `internal/backup/` — both should
@@ -28,19 +28,58 @@ external-backup timer**. Enabling is an explicit operator step.
 
 ## Snapshot consistency
 
-The staging script snapshots the **database first** (via SQLite `VACUUM INTO`,
-which is the SQLite-native atomic snapshot), then the mail directory. This
-ordering is deliberate:
+Consistency is enforced by **stopping `orvix.service` around the staging
+phase**. The run script:
 
-> `internal/coremail/storage/mailstore.go:StoreMessage` writes the RFC822 file
-> to disk **before** the DB row is inserted, and there is no application-level
-> quiesce endpoint we can call from a shell script. Snapshotting the DB first
-> and the mail dir second means the worst case is a mail file present on disk
-> that the DB snapshot does not know about — a benign "orphan file". The
-> reverse order would produce DB rows referencing files that the mail snapshot
-> missed, which is a hard restore failure.
+1. Prechecks free space in `/var/cache/orvix-external-backup` (needs ~2x
+   the size of the mail tree + DB). If there isn't enough, the service is
+   not touched.
+2. Runs `systemctl stop orvix.service` with a 90-second timeout and
+   verifies the unit is inactive.
+3. Runs the staging script: SQLite `VACUUM INTO` for the DB, then `cp -a`
+   for the mail tree.
+4. Runs `systemctl start orvix.service` and verifies it is active.
+5. **Only then** runs `restic backup`, `restic check`, and
+   `restic forget --prune`. Restic uploads happen with the service already
+   restored, so the availability window is bounded to the staging duration
+   (seconds for a small install; scales with mail tree size).
 
-Do not reorder those steps.
+A trap on `EXIT HUP INT QUIT TERM ERR` unconditionally attempts
+`systemctl start orvix.service` if a stop was issued but the resume step
+never ran — success, VACUUM failure, mail-copy failure, disk-full,
+signals, and stop-timeout all restore the service.
+
+The DB-first, mail-second ordering inside the staging script is retained
+as defense-in-depth. It is **not** sufficient on its own:
+`internal/coremail/storage/mailstore.go:PurgeMessage` (L310–L336) removes
+the RFC822 file and attachment dir **before** deleting the DB row, so
+without the service stop a Purge landing between the DB and mail
+snapshots would leave a DB row whose file is missing from the mail
+snapshot — a hard restore failure.
+
+### Known follow-up (not fixed in this PR)
+
+`internal/coremail/storage/mailstore.go:WriteRFC822` (L414–L443) does a
+non-atomic `os.WriteFile` overwrite for draft saves. Even with the
+service stop above, a client saving a draft at the exact moment the stop
+is issued could leave a truncated file. The fix belongs in the
+application (write to a temp file, `fsync`, `rename`); a separate PR
+will address it.
+
+### Timer cadence and outage window
+
+The default timer is **daily at 03:00 UTC with a 30-minute random
+jitter**. This trades snapshot frequency for shorter total service
+outage. Operators who need more frequent snapshots and can accept the
+short outages can drop in an override:
+
+```
+sudo systemctl edit orvix-external-backup.timer
+# [Timer]
+# OnCalendar=
+# OnCalendar=hourly
+# RandomizedDelaySec=15min
+```
 
 ## One-time setup
 
@@ -98,7 +137,7 @@ sudo bash -c 'set -a; . /etc/orvix/external-backup.env; set +a; restic init'
 sudo systemctl start orvix-external-backup.service
 sudo journalctl -u orvix-external-backup.service -e --no-pager
 
-# Then enable the hourly timer:
+# Then enable the daily timer (default: 03:00 UTC ± 30min jitter):
 sudo systemctl enable --now orvix-external-backup.timer
 
 # And the integrity-check timers:
