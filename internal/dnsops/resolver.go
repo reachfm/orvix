@@ -25,6 +25,16 @@ type Resolver interface {
 	LookupA(ctx context.Context, name string) ([]net.IP, error)
 	LookupAAAA(ctx context.Context, name string) ([]net.IP, error)
 	LookupPTR(ctx context.Context, ip string) ([]string, error)
+	// LookupSRV resolves an already-composed, fully-qualified SRV name
+	// (e.g. "_autodiscover._tcp.example.com") and returns every answer.
+	//
+	// We take the full name rather than net.Resolver.LookupSRV's
+	// (service, proto, name) triple because callers here already compose
+	// the name, and the triple form applies Go's own underscore-prefixing
+	// which would double-prefix an already-composed name. Passing empty
+	// service and proto to net.Resolver.LookupSRV performs a literal
+	// lookup of name, which is exactly what we want.
+	LookupSRV(ctx context.Context, name string) ([]*net.SRV, error)
 }
 
 // NetResolver wraps net.Resolver to satisfy Resolver. We use the
@@ -89,6 +99,17 @@ func (r *NetResolver) LookupPTR(ctx context.Context, ip string) ([]string, error
 	return r.resolver.LookupAddr(ctx, parsed.String())
 }
 
+// LookupSRV resolves name literally. net.Resolver.LookupSRV with an empty
+// service and proto performs a direct lookup of the name as given, which is
+// what our already-composed "_autodiscover._tcp.<domain>" names require.
+func (r *NetResolver) LookupSRV(ctx context.Context, name string) ([]*net.SRV, error) {
+	_, addrs, err := r.resolver.LookupSRV(ctx, "", "", name)
+	if err != nil {
+		return nil, err
+	}
+	return addrs, nil
+}
+
 func isV4Mapped(b []byte) bool {
 	if len(b) != 16 {
 		return false
@@ -112,6 +133,14 @@ type FakeEntry struct {
 	A      []net.IP
 	AAAA   []net.IP
 	PTRFor map[string][]string // IP -> []host (PTR answers)
+	// SRV holds the SRV answers for this exact name. As with MX, an empty
+	// slice means "no records of that type" and LookupSRV returns a
+	// not-found DNSError.
+	SRV []net.SRV
+	// SRVErr, when non-nil, is returned verbatim by LookupSRV for this
+	// name. It lets tests reproduce resolver failures and timeouts, which
+	// are distinct from a missing record.
+	SRVErr error
 }
 
 // FakeResolver is an in-memory Resolver used by tests. The DNS Ops
@@ -175,6 +204,24 @@ func (f *FakeResolver) LookupAAAA(_ context.Context, name string) ([]net.IP, err
 	}
 	out := make([]net.IP, len(e.AAAA))
 	copy(out, e.AAAA)
+	return out, nil
+}
+
+// LookupSRV implements Resolver. Answers are returned in the order the test
+// declared them; the caller is responsible for RFC 2782 selection semantics.
+func (f *FakeResolver) LookupSRV(_ context.Context, name string) ([]*net.SRV, error) {
+	e, ok := f.entries[name]
+	if ok && e.SRVErr != nil {
+		return nil, e.SRVErr
+	}
+	if !ok || len(e.SRV) == 0 {
+		return nil, &net.DNSError{Err: "no such host", Name: name, IsNotFound: true}
+	}
+	out := make([]*net.SRV, len(e.SRV))
+	for i := range e.SRV {
+		sc := e.SRV[i]
+		out[i] = &sc
+	}
 	return out, nil
 }
 

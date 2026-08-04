@@ -1,7 +1,15 @@
 node_modules/
 dist/
 build/
-release/admin/
+# release/admin is the committed admin bundle that CI checks for freshness
+# (.github/workflows/portal-browser-acceptance.yml). It must be tracked, but
+# the build emits content-hashed filenames, so a blanket ignore silently drops
+# every newly-hashed asset from the commit and breaks that check. Ignore the
+# directory by default, then re-include the bundle CI actually diffs.
+release/admin/*
+!release/admin/index.html
+!release/admin/assets/
+!release/admin/assets/*
 release/orvix-linux-amd64
 release/orvix-v1.0.0-linux-amd64.tar.gz
 *.log
@@ -43,3 +51,8 @@ AUDIT_REPORTS/
 DEPLOYMENT_CERTIFICATION*
 .worktrees/
 !web/marketing/src/data/
+
+# Local Playwright artifacts (screenshots, traces, reports) — not committed.
+.artifacts/
+web/admin/test-results/
+web/admin/playwright-report/

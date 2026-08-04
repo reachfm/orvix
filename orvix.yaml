@@ -63,3 +63,51 @@ ai:
 
 dns:
   default_provider: cloudflare
+
+coremail:
+  # Hostname of this mail server and the MX hosts tenants are expected to
+  # publish. These two keys predate the DNS-expectation keys below; an
+  # installation that only has these continues to work unchanged.
+  hostname: "mail.example.com"
+  expected_mx:
+    - "mx1.example.com"
+    - "mx2.example.com"
+
+  # ── Canonical DNS expectations (admin Domains → DNS console) ────────────
+  #
+  # These describe what THIS deployment requires tenants to publish. They are
+  # the single source of truth for the required value shown in the console,
+  # the value the verifier compares against, the repair guidance, and the
+  # downloadable record file.
+  #
+  # All of them are OPTIONAL and default to empty. When one is empty, ORVIX
+  # reports that record as `configuration_required`: it keeps displaying the
+  # record the domain actually publishes, explains which setting is missing,
+  # and deliberately does NOT invent a requirement. That matters on upgrade —
+  # a deployment already publishing a correct SPF policy must never be told
+  # to replace it with a generic guess, and an unconfigured record can never
+  # be reported as passing or allow a 100% result.
+  #
+  # Replace every placeholder below with this deployment's real values.
+
+  # The literal SPF TXT value tenants must publish, e.g.
+  #   "v=spf1 ip4:198.51.100.10 include:spf.example.com -all"
+  expected_spf: ""
+
+  # DMARC `p=` value: none | quarantine | reject. Defaults to quarantine
+  # once expected_dmarc_rua is set.
+  expected_dmarc_policy: ""
+
+  # DMARC aggregate-report destination. ORVIX does NOT provision a dmarc@
+  # mailbox and will not fabricate one — set a mailbox you actually receive,
+  # e.g. "mailto:dmarc-reports@example.com".
+  expected_dmarc_rua: ""
+
+  # Expected _autodiscover._tcp.<domain> SRV record. The target is the host
+  # that actually terminates autodiscover for this deployment, which is not
+  # necessarily an MX host, so it is never guessed. Port defaults to 443
+  # (where ORVIX serves /autodiscover/autodiscover.xml) once a target is set.
+  autodiscover_srv_target: ""
+  autodiscover_srv_port: 0
+  autodiscover_srv_priority: 0
+  autodiscover_srv_weight: 0

@@ -481,3 +481,65 @@ coremail:
 		t.Errorf("ResolvedTLSPolicy = %q, want empty", cfg.Outbound.ResolvedTLSPolicy())
 	}
 }
+
+// TestLoadLegacyCoremailYAMLWithoutNewDNSExpectationFields is the upgrade
+// regression test for the experimental-VPS configuration shape: a YAML that
+// predates expected_spf / expected_dmarc_* / autodiscover_srv_* and contains
+// only hostname + expected_mx.
+//
+// The service must start successfully and must leave every new field at its
+// zero value. Zero is load-bearing here, not incidental: customerdomain's
+// CanonicalExpectations reports SPF/DMARC/SRV as configuration_required when
+// unset rather than inventing "v=spf1 mx -all" or a dmarc@<domain> address,
+// so an upgraded install can never have its real, already-published policy
+// contradicted by a fabricated requirement.
+func TestLoadLegacyCoremailYAMLWithoutNewDNSExpectationFields(t *testing.T) {
+	unsetenv(t, "ORVIX_CONFIG")
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "legacy.yaml")
+	// Exactly the shape of an installation deployed before this feature:
+	// hostname and expected_mx present, no DNS-expectation keys at all.
+	cfgContent := `
+coremail:
+  enabled: true
+  hostname: "mail.example.test"
+  expected_mx:
+    - "mx1.example.test"
+    - "mx2.example.test"
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	setenv(t, "ORVIX_CONFIG", cfgPath)
+
+	cfg, err := Load(zap.NewNop())
+	if err != nil {
+		t.Fatalf("Load() must succeed for a legacy config lacking the new fields: %v", err)
+	}
+
+	// The pre-existing settings still load.
+	if cfg.CoreMail.Hostname != "mail.example.test" {
+		t.Errorf("coremail.hostname = %q, want mail.example.test", cfg.CoreMail.Hostname)
+	}
+	if len(cfg.CoreMail.ExpectedMX) != 2 {
+		t.Errorf("coremail.expected_mx = %v, want 2 entries", cfg.CoreMail.ExpectedMX)
+	}
+
+	// Every new field must be absent, NOT defaulted to a fabricated value.
+	if cfg.CoreMail.ExpectedSPF != "" {
+		t.Errorf("expected_spf = %q, want empty — no SPF policy may be invented for an upgraded install", cfg.CoreMail.ExpectedSPF)
+	}
+	if cfg.CoreMail.ExpectedDMARCPolicy != "" {
+		t.Errorf("expected_dmarc_policy = %q, want empty", cfg.CoreMail.ExpectedDMARCPolicy)
+	}
+	if cfg.CoreMail.ExpectedDMARCRUA != "" {
+		t.Errorf("expected_dmarc_rua = %q, want empty — no reporting address may be fabricated", cfg.CoreMail.ExpectedDMARCRUA)
+	}
+	if cfg.CoreMail.AutodiscoverSRVTarget != "" {
+		t.Errorf("autodiscover_srv_target = %q, want empty — no SRV target may be guessed", cfg.CoreMail.AutodiscoverSRVTarget)
+	}
+	if cfg.CoreMail.AutodiscoverSRVPort != 0 {
+		t.Errorf("autodiscover_srv_port = %d, want 0", cfg.CoreMail.AutodiscoverSRVPort)
+	}
+}

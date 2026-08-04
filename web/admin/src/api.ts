@@ -11,12 +11,23 @@ let csrfTokenPromise: Promise<string> | null = null;
 export class ApiError extends Error {
   code: string;
   status: number;
+  /**
+   * The decoded response body, when the server sent one. Some endpoints
+   * deliberately return real, renderable data alongside a non-2xx status —
+   * most notably POST /enterprise/domains/:id/dns/verify, which answers 429
+   * during the verification cooldown with the LAST SUCCESSFUL DNS health
+   * snapshot as its body. Callers must be able to keep rendering that data
+   * instead of collapsing to a blocking error screen, so the body is
+   * preserved here rather than discarded.
+   */
+  body: any;
 
-  constructor(code: string, message: string, status: number) {
+  constructor(code: string, message: string, status: number, body?: any) {
     super(message || code || `Request failed (${status})`);
     this.name = "ApiError";
     this.code = code || "UNKNOWN_ERROR";
     this.status = status;
+    this.body = body;
   }
 }
 
@@ -142,9 +153,9 @@ async function request<T>(path: string, options?: RequestOptions): Promise<T> {
         await initCSRF();
         return request<T>(path, { ...options, _csrfRetried: true });
       }
-      throw new ApiError(code || "FORBIDDEN", message, res.status);
+      throw new ApiError(code || "FORBIDDEN", message, res.status, body);
     }
-    throw new ApiError(code, message, res.status);
+    throw new ApiError(code, message, res.status, body);
   }
 
   if (res.status === 204) {

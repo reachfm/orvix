@@ -3,6 +3,7 @@ package customerdomain
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
@@ -591,3 +592,79 @@ type timeoutError struct{}
 func (e *timeoutError) Error() string   { return "i/o timeout" }
 func (e *timeoutError) Timeout() bool   { return true }
 func (e *timeoutError) Temporary() bool { return true }
+
+// TestMTASTSPolicyJSONContract locks the snake_case wire contract for the
+// mtasts_policy object embedded in EnterpriseDNSHealth. Before the tags were
+// added, encoding/json emitted "Raw"/"MaxAge"/"MX" while the rest of the DNS
+// health payload — and the admin frontend reading it — used snake_case, so the
+// policy mode/max-age/MX list silently rendered as undefined in the DNS modal.
+func TestMTASTSPolicyJSONContract(t *testing.T) {
+	p := MTASTSPolicy{
+		Raw:    "version: STSv1\nmode: enforce\n",
+		Valid:  true,
+		Mode:   "enforce",
+		MaxAge: 604800,
+		MX:     []string{"mail.example.com"},
+	}
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, key := range []string{"raw", "valid", "mode", "max_age", "mx"} {
+		if _, ok := got[key]; !ok {
+			t.Errorf("expected snake_case key %q in %s", key, string(b))
+		}
+	}
+	for _, bad := range []string{"Raw", "Valid", "Mode", "MaxAge", "MX", "Error"} {
+		if _, ok := got[bad]; ok {
+			t.Errorf("unexpected Go-style key %q in %s", bad, string(b))
+		}
+	}
+	if got["max_age"].(float64) != 604800 {
+		t.Errorf("max_age = %v, want 604800", got["max_age"])
+	}
+	// Error is empty and omitempty, so it must be absent entirely.
+	if _, ok := got["error"]; ok {
+		t.Errorf("empty error should be omitted, got %s", string(b))
+	}
+}
+
+// TestEnterpriseDNSHealthEmbedsPolicySnakeCase verifies the nested shape as the
+// frontend actually receives it (health.mtasts_policy.max_age), not just the
+// standalone struct.
+func TestEnterpriseDNSHealthEmbedsPolicySnakeCase(t *testing.T) {
+	h := EnterpriseDNSHealth{
+		DomainID:     7,
+		DomainName:   "example.com",
+		Complete:     true,
+		MTASTSPolicy: &MTASTSPolicy{Valid: true, Mode: "testing", MaxAge: 86400},
+	}
+	b, err := json.Marshal(h)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got struct {
+		Complete bool `json:"complete"`
+		Policy   *struct {
+			Valid  bool   `json:"valid"`
+			Mode   string `json:"mode"`
+			MaxAge int    `json:"max_age"`
+		} `json:"mtasts_policy"`
+	}
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Policy == nil {
+		t.Fatalf("mtasts_policy missing: %s", string(b))
+	}
+	if got.Policy.Mode != "testing" || got.Policy.MaxAge != 86400 || !got.Policy.Valid {
+		t.Errorf("policy decoded wrong: %+v from %s", got.Policy, string(b))
+	}
+	if !got.Complete {
+		t.Errorf("complete flag lost")
+	}
+}

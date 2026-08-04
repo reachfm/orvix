@@ -7,22 +7,35 @@ import (
 )
 
 type AdminDomain struct {
-	ID           uint      `json:"id"`
-	TenantID     uint      `json:"tenant_id"`
-	Name         string    `json:"name"`
-	Status       string    `json:"status"`
-	Plan         string    `json:"plan"`
-	Description  string    `json:"description,omitempty"`
-	MaxMailboxes int       `json:"max_mailboxes"`
-	MaxAliases   int       `json:"max_aliases"`
-	MaxQuotaMB   int64     `json:"max_quota_mb"`
-	DKIMEnabled  bool      `json:"dkim_enabled"`
-	DKIMSelector string    `json:"dkim_selector"`
-	DMARCEnabled bool      `json:"dmarc_enabled"`
-	MailboxCount int       `json:"mailbox_count"`
-	AliasCount   int       `json:"alias_count"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID           uint   `json:"id"`
+	TenantID     uint   `json:"tenant_id"`
+	Name         string `json:"name"`
+	Status       string `json:"status"`
+	Plan         string `json:"plan"`
+	Description  string `json:"description,omitempty"`
+	MaxMailboxes int    `json:"max_mailboxes"`
+	MaxAliases   int    `json:"max_aliases"`
+	MaxQuotaMB   int64  `json:"max_quota_mb"`
+	DKIMEnabled  bool   `json:"dkim_enabled"`
+	DKIMSelector string `json:"dkim_selector"`
+	DMARCEnabled bool   `json:"dmarc_enabled"`
+	MailboxCount int    `json:"mailbox_count"`
+	AliasCount   int    `json:"alias_count"`
+	// StorageUsedBytes/MessageCount are real aggregates over
+	// coremail_mailboxes.used_bytes/msg_count, computed in the same
+	// batched list query as MailboxCount/AliasCount above (correlated
+	// subqueries evaluated per-row by the database in one round trip,
+	// not one query per domain). DNSHealth/DNSScore/DNSLastCheckedAt
+	// come from the domain's latest customer_domain_verifications row,
+	// also joined in the same query — never a separate per-domain call.
+	StorageUsedBytes  int64      `json:"storage_used_bytes"`
+	StorageLimitBytes int64      `json:"storage_limit_bytes"`
+	MessageCount      int        `json:"message_count"`
+	DNSHealth         string     `json:"dns_health,omitempty"`
+	DNSScore          int        `json:"dns_score"`
+	DNSLastCheckedAt  *time.Time `json:"dns_last_checked_at,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
 }
 
 type DomainAdminAssignment struct {

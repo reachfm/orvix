@@ -9,6 +9,20 @@ import (
 	"github.com/orvix/orvix/internal/dnsops"
 )
 
+// fullyConfiguredExpectations is the operator configuration a real ORVIX
+// deployment is expected to populate. Scoring tests that assert a record can
+// reach "pass" MUST use it: with no expected_spf / expected_dmarc_rua set,
+// SPF and DMARC are deliberately reported configuration_required rather than
+// graded against an invented default (see expectations.go), so an
+// unconfigured inspector can never produce an all-pass result.
+func fullyConfiguredExpectations() CanonicalExpectations {
+	return CanonicalExpectations{
+		SPFRecord:   "v=spf1 mx -all",
+		DMARCPolicy: "quarantine",
+		DMARCRUA:    "mailto:dmarc-reports@example.com",
+	}
+}
+
 // ── Old Inspect tests (kept, still pass with checkMX([]string)) ──
 
 func TestDNSInspectorMXValid(t *testing.T) {
@@ -302,8 +316,15 @@ func TestInspectEnterpriseMTASTSValid(t *testing.T) {
 	if result.MTASTS == nil {
 		t.Fatal("expected MTA-STS result")
 	}
-	if result.MTASTS.Status != "pass" {
-		t.Errorf("MTA-STS status = %q, want pass", result.MTASTS.Status)
+	// A syntactically valid MTA-STS TXT record is NOT sufficient on its own.
+	// The policy it advertises must also be fetched and parsed over HTTPS
+	// before MTA-STS can be recorded as a pass. With no fetcher wired the
+	// policy is unverified, so the check must stay at warning.
+	if result.MTASTS.Status != "warning" {
+		t.Errorf("MTA-STS status = %q, want warning (TXT valid but HTTPS policy unverified)", result.MTASTS.Status)
+	}
+	if !strings.Contains(result.MTASTS.Reason, "unverified") {
+		t.Errorf("MTA-STS reason = %q, want it to state the HTTPS policy is unverified", result.MTASTS.Reason)
 	}
 }
 
@@ -464,11 +485,23 @@ func TestInspectEnterpriseTLSRPTDNSError(t *testing.T) {
 
 // ── Enterprise health score tests ──
 
-func TestInspectEnterpriseHealthScoreAllPass(t *testing.T) {
+// TestInspectEnterpriseMTASTSUnverifiedBlocksFullPass is the regression test
+// for the "no 100% unless the MTA-STS HTTPS policy is verified" rule.
+//
+// Every record this domain publishes is correct at the DNS layer: MX, SPF,
+// DKIM, DMARC, MTA-STS TXT and TLS-RPT all resolve and validate, the mail host
+// has an A record, the MX host resolves, and rDNS matches. The ONLY thing not
+// established is the MTA-STS HTTPS policy document. The overall result must
+// therefore be strictly below 100 and must not read as an unqualified pass.
+func TestInspectEnterpriseMTASTSUnverifiedBlocksFullPass(t *testing.T) {
 	r := dnsops.NewFakeResolver()
 	r.Set("example.com", dnsops.FakeEntry{
 		MX:  []net.MX{{Host: "mx1.example.com.", Pref: 10}},
 		TXT: []string{"v=spf1 mx -all"},
+	})
+	r.Set("mx1.example.com", dnsops.FakeEntry{
+		A:      []net.IP{net.ParseIP("192.0.2.25")},
+		PTRFor: map[string][]string{"192.0.2.25": {"mx1.example.com."}},
 	})
 	r.Set("default._domainkey.example.com", dnsops.FakeEntry{
 		TXT: []string{"v=DKIM1; k=rsa; p=TEST"},
@@ -482,14 +515,118 @@ func TestInspectEnterpriseHealthScoreAllPass(t *testing.T) {
 	r.Set("_smtp._tls.example.com", dnsops.FakeEntry{
 		TXT: []string{"v=TLSRPTv1; rua=mailto:reports@example.com"},
 	})
-	insp := NewDNSInspector(r)
+
+	insp := NewDNSInspector(r).WithExpectations(fullyConfiguredExpectations())
 	result := insp.InspectEnterprise(context.Background(), "example.com",
 		[]string{"mx1.example.com"}, "default", "v=DKIM1; k=rsa; p=TEST")
-	if result.HealthScore != 100 {
-		t.Errorf("all pass score = %d, want 100", result.HealthScore)
+
+	// Every other required record really did pass — this test is only
+	// meaningful if the MTA-STS policy is the sole outstanding item.
+	for name, status := range map[string]string{
+		"mx":           result.MX.Status,
+		"spf":          result.SPF.Status,
+		"dkim":         result.DKIM.Status,
+		"dmarc":        result.DMARC.Status,
+		"tlsrpt":       result.TLSRPT.Status,
+		"mail_host_a":  result.MailHostA.Status,
+		"ptr":          result.PTR.Status,
+		"mx_host[0]":   result.MXHosts[0].Status,
+		"__mtasts_txt": "pass",
+	} {
+		if status != "pass" {
+			t.Fatalf("precondition: %s = %q, want pass", name, status)
+		}
 	}
-	if result.DNSHealth != "pass" {
-		t.Errorf("DNSHealth = %q, want pass", result.DNSHealth)
+
+	if result.MTASTS.Status == "pass" {
+		t.Fatalf("MTA-STS reported pass without a verified HTTPS policy")
+	}
+	if result.MTASTSPolicy != nil {
+		t.Fatalf("MTASTSPolicy = %+v, want nil (no policy was ever fetched)", result.MTASTSPolicy)
+	}
+	if result.HealthScore >= 100 {
+		t.Errorf("HealthScore = %d, want < 100 while the MTA-STS HTTPS policy is unverified", result.HealthScore)
+	}
+	if result.DNSHealth == "pass" {
+		t.Errorf("DNSHealth = %q, want a non-pass rollup while the MTA-STS HTTPS policy is unverified", result.DNSHealth)
+	}
+}
+
+func TestInspectEnterpriseHealthScoreAllPass(t *testing.T) {
+	r := dnsops.NewFakeResolver()
+	r.Set("example.com", dnsops.FakeEntry{
+		MX:  []net.MX{{Host: "mx1.example.com.", Pref: 10}},
+		TXT: []string{"v=spf1 mx -all"},
+	})
+	r.Set("mx1.example.com", dnsops.FakeEntry{
+		A:      []net.IP{net.ParseIP("192.0.2.25")},
+		PTRFor: map[string][]string{"192.0.2.25": {"mx1.example.com."}},
+	})
+	r.Set("default._domainkey.example.com", dnsops.FakeEntry{
+		TXT: []string{"v=DKIM1; k=rsa; p=TEST"},
+	})
+	r.Set("_dmarc.example.com", dnsops.FakeEntry{
+		TXT: []string{"v=DMARC1; p=reject"},
+	})
+	r.Set("_mta-sts.example.com", dnsops.FakeEntry{
+		TXT: []string{"v=STSv1; id=20260101"},
+	})
+	r.Set("_smtp._tls.example.com", dnsops.FakeEntry{
+		TXT: []string{"v=TLSRPTv1; rua=mailto:reports@example.com"},
+	})
+	insp := NewDNSInspector(r).WithExpectations(fullyConfiguredExpectations())
+	result := insp.InspectEnterprise(context.Background(), "example.com",
+		[]string{"mx1.example.com"}, "default", "v=DKIM1; k=rsa; p=TEST")
+	// "All pass" at the DNS layer is deliberately NOT 100%: the MTA-STS
+	// HTTPS policy cannot be verified without a fetcher, and an unverified
+	// policy can never earn full credit. See
+	// TestInspectEnterpriseMTASTSUnverifiedBlocksFullPass. Everything except
+	// MTA-STS earns full credit, and MTA-STS earns half (warning), so the
+	// score is the maximum reachable without policy verification.
+	const maxWithoutPolicyVerification = 96 // 96 of 100 weighted points
+	if result.HealthScore != maxWithoutPolicyVerification {
+		t.Errorf("all-DNS-pass score = %d, want %d", result.HealthScore, maxWithoutPolicyVerification)
+	}
+	if result.HealthScore >= 100 {
+		t.Errorf("score reached %d without a verified MTA-STS HTTPS policy", result.HealthScore)
+	}
+	if result.DNSHealth != "warning" {
+		t.Errorf("DNSHealth = %q, want warning (MTA-STS HTTPS policy unverified)", result.DNSHealth)
+	}
+	// Optional and not-applicable records must be present and explicitly
+	// marked, never silently omitted.
+	if result.MailHostAAAA == nil || result.MailHostAAAA.Status != "optional" {
+		t.Errorf("MailHostAAAA = %+v, want status optional", result.MailHostAAAA)
+	}
+	if result.Autodiscover == nil || result.Autodiscover.Status != "optional" {
+		t.Errorf("Autodiscover = %+v, want status optional", result.Autodiscover)
+	}
+	if result.Autoconfig == nil || result.Autoconfig.Status != "optional" {
+		t.Errorf("Autoconfig = %+v, want status optional", result.Autoconfig)
+	}
+	if result.TLSA == nil || result.TLSA.Status != "not_applicable" {
+		t.Errorf("TLSA = %+v, want status not_applicable", result.TLSA)
+	}
+	// Required values must always be real, never blank.
+	if result.SPF.Expected != "v=spf1 mx -all" {
+		t.Errorf("SPF expected = %q, want %q", result.SPF.Expected, "v=spf1 mx -all")
+	}
+	want := "v=DMARC1; p=quarantine; rua=mailto:dmarc-reports@example.com"
+	if result.DMARC.Expected != want {
+		t.Errorf("DMARC expected = %q, want %q", result.DMARC.Expected, want)
+	}
+	for name, g := range map[string]string{
+		"mx":     result.MX.Guidance,
+		"spf":    result.SPF.Guidance,
+		"dmarc":  result.DMARC.Guidance,
+		"mtasts": result.MTASTS.Guidance,
+		"tlsrpt": result.TLSRPT.Guidance,
+		"ptr":    result.PTR.Guidance,
+		"tlsa":   result.TLSA.Guidance,
+	} {
+		if strings.TrimSpace(g) == "" {
+			t.Errorf("%s guidance is empty; every row must carry repair guidance", name)
+		}
 	}
 }
 
@@ -508,7 +645,7 @@ func TestInspectEnterpriseHealthScoreOneFail(t *testing.T) {
 	r.Set("_mta-sts.example.com", dnsops.FakeEntry{
 		TXT: []string{"v=STSv1; id=20260101"},
 	})
-	insp := NewDNSInspector(r)
+	insp := NewDNSInspector(r).WithExpectations(fullyConfiguredExpectations())
 	result := insp.InspectEnterprise(context.Background(), "example.com",
 		[]string{"mx1.example.com"}, "default", "v=DKIM1; k=rsa; p=TEST")
 	if result.HealthScore == 100 {
@@ -536,12 +673,23 @@ func TestInspectEnterpriseHealthScoreMXFailOthersPass(t *testing.T) {
 	r.Set("_smtp._tls.example.com", dnsops.FakeEntry{
 		TXT: []string{"v=TLSRPTv1; rua=mailto:reports@example.com"},
 	})
-	insp := NewDNSInspector(r)
+	insp := NewDNSInspector(r).WithExpectations(fullyConfiguredExpectations())
 	result := insp.InspectEnterprise(context.Background(), "example.com",
 		[]string{"mx1.example.com"}, "default", "v=DKIM1; k=rsa; p=TEST")
-	expectedScore := 15 + 25 + 15 + 10 + 10
+	// Weighted out of 100 possible points, with optional/not_applicable
+	// records excluded from both numerator and denominator:
+	//   mx           fail     0/20
+	//   spf          pass    12/12
+	//   dkim         pass    20/20
+	//   dmarc        pass    12/12
+	//   mtasts       warning  4/8   (HTTPS policy unverified)
+	//   tlsrpt       pass     8/8
+	//   mail_host_a  fail     0/8   (mx1.example.com has no A record here)
+	//   mx_host      fail     0/8   (no MX published, so nothing resolves)
+	//   ptr          fail     0/4   (no mail-host IP to reverse-resolve)
+	expectedScore := 56
 	if result.HealthScore != expectedScore {
-		t.Errorf("MX fail others pass score = %d, want %d (spf:15 + dkim:25 + dmarc:15 + mtasts:10 + tlsrpt:10)", result.HealthScore, expectedScore)
+		t.Errorf("MX fail others pass score = %d, want %d", result.HealthScore, expectedScore)
 	}
 	if result.DNSHealth != "fail" {
 		t.Errorf("DNSHealth = %q, want fail", result.DNSHealth)

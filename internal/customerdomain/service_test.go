@@ -830,6 +830,131 @@ func TestDKIMKeyMatch_MalformedTXT(t *testing.T) {
 	t.Logf("DKIM status = %q, reason = %q", health.DKIM.Status, health.DKIM.Reason)
 }
 
+// ── Canonical GET/POST contract + completeness/cooldown regression tests ──
+
+// TestVerifyThenGetReturnsSameRecordDetail is the direct regression test for
+// the "100% Pass but every record Not checked" defect: it verifies that a
+// domain's records (including MX, which the fake resolver can make pass)
+// survive a full write→read round trip through the persisted Evidence
+// column, not just the scalar score/status columns.
+func TestVerifyThenGetReturnsSameRecordDetail(t *testing.T) {
+	svc, _, resolver := newServiceTestEnvWithResolver(t)
+	ctx := context.Background()
+	domID := seedDomain(t, svc, "roundtrip.example.com", 1)
+	resolver.Set("roundtrip.example.com", dnsops.FakeEntry{
+		MX: []net.MX{{Host: "mail.roundtrip.example.com.", Pref: 10}},
+	})
+
+	verified, err := svc.VerifyEnterpriseDNS(ctx, 1, domID, nil)
+	if err != nil {
+		t.Fatalf("VerifyEnterpriseDNS: %v", err)
+	}
+	if verified.MX == nil || verified.MX.Status != "pass" {
+		t.Fatalf("verify: MX = %+v, want pass", verified.MX)
+	}
+	if !verified.Complete {
+		t.Errorf("verify: Complete = false, want true (all record types were checked)")
+	}
+
+	got, err := svc.GetEnterpriseDNS(ctx, 1, domID, nil)
+	if err != nil {
+		t.Fatalf("GetEnterpriseDNS: %v", err)
+	}
+	if got.MX == nil {
+		t.Fatal("GET after verify: MX is nil — record detail did not survive the persistence round trip")
+	}
+	if got.MX.Status != "pass" {
+		t.Errorf("GET after verify: MX.Status = %q, want pass (must match what verify just found)", got.MX.Status)
+	}
+	if got.SPF == nil || got.DKIM == nil || got.DMARC == nil || got.MTASTS == nil || got.TLSRPT == nil {
+		t.Errorf("GET after verify: some record type is nil (SPF=%v DKIM=%v DMARC=%v MTASTS=%v TLSRPT=%v) — reload must return the exact last successful record details",
+			got.SPF, got.DKIM, got.DMARC, got.MTASTS, got.TLSRPT)
+	}
+	if !got.Complete {
+		t.Error("GET after verify: Complete = false, want true")
+	}
+	if got.HealthScore != verified.HealthScore || got.DNSHealth != verified.DNSHealth {
+		t.Errorf("GET after verify: score/status = %d/%q, want exactly what verify returned (%d/%q)",
+			got.HealthScore, got.DNSHealth, verified.HealthScore, verified.DNSHealth)
+	}
+}
+
+// TestNoHundredPercentWithIncompleteRecords documents that the scoring path
+// can never report a full/passing score while a required record is nil —
+// nil records score 0 in computeEnterpriseHealthScore, so "100%" requires
+// every record to be present and actually passing. This directly forbids
+// the "100% Pass, every record Not checked" contradiction.
+func TestNoHundredPercentWithIncompleteRecords(t *testing.T) {
+	health := &EnterpriseDNSHealth{}
+	recomputeEnterpriseHealth(health)
+	if health.HealthScore != 0 {
+		t.Errorf("empty health: score = %d, want 0 (no nil record may contribute score)", health.HealthScore)
+	}
+	if isEnterpriseHealthComplete(health) {
+		t.Error("empty health: Complete must be false")
+	}
+
+	partial := &EnterpriseDNSHealth{MX: &MXCheck{Status: "pass"}}
+	if isEnterpriseHealthComplete(partial) {
+		t.Error("partial health (MX only): Complete must be false")
+	}
+}
+
+// TestCooldownBlockedVerifyPreservesLastSnapshot is the regression test for
+// "A 429 cooldown response must preserve the last successful snapshot": a
+// second VerifyEnterpriseDNS call inside the cooldown window must still
+// return the prior successful result body (not nil), alongside
+// ErrVerificationCooldown.
+func TestCooldownBlockedVerifyPreservesLastSnapshot(t *testing.T) {
+	svc, _, resolver := newServiceTestEnvWithResolver(t)
+	ctx := context.Background()
+	domID := seedDomain(t, svc, "cooldownpreserve.example.com", 1)
+	resolver.Set("cooldownpreserve.example.com", dnsops.FakeEntry{
+		MX: []net.MX{{Host: "mail.cooldownpreserve.example.com.", Pref: 10}},
+	})
+
+	first, err := svc.VerifyEnterpriseDNS(ctx, 1, domID, nil)
+	if err != nil {
+		t.Fatalf("first verify: %v", err)
+	}
+
+	second, err := svc.VerifyEnterpriseDNS(ctx, 1, domID, nil)
+	if err != ErrVerificationCooldown {
+		t.Fatalf("second verify err = %v, want ErrVerificationCooldown", err)
+	}
+	if second == nil {
+		t.Fatal("cooldown-blocked verify returned nil body, want the last successful snapshot preserved")
+	}
+	if second.MX == nil || second.MX.Status != first.MX.Status {
+		t.Errorf("cooldown-blocked verify MX = %+v, want to match prior successful verify %+v", second.MX, first.MX)
+	}
+	if second.RetryAfterSeconds <= 0 {
+		t.Error("cooldown-blocked verify: RetryAfterSeconds must be > 0")
+	}
+	if second.CooldownUntil == "" {
+		t.Error("cooldown-blocked verify: CooldownUntil must be set")
+	}
+}
+
+// TestGetEnterpriseDNSCooldownFieldsPopulated verifies GET also surfaces
+// cooldown_until/retry_after_seconds informationally right after a verify.
+func TestGetEnterpriseDNSCooldownFieldsPopulated(t *testing.T) {
+	svc, _, _ := newServiceTestEnvWithResolver(t)
+	ctx := context.Background()
+	domID := seedDomain(t, svc, "getcooldown.example.com", 1)
+
+	if _, err := svc.VerifyEnterpriseDNS(ctx, 1, domID, nil); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	got, err := svc.GetEnterpriseDNS(ctx, 1, domID, nil)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.RetryAfterSeconds <= 0 || got.CooldownUntil == "" {
+		t.Error("GET right after a verify: cooldown fields should be populated while cooldown is active")
+	}
+}
+
 func TestNormalizeDKIMTXT_WhitespaceAndQuotes(t *testing.T) {
 	input := `"v=DKIM1; k=rsa; p=TEST KEY"`
 	got := normalizeDKIMTXT(input)
