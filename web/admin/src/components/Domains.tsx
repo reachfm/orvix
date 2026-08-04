@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import { api, domainErrorMessage } from "../api";
 import DNSRecordsModal from "./DNSRecordsModal";
+import DomainWizardModal, { type ProvisionResult } from "./DomainWizardModal";
 
 /**
  * Mirrors admin/domain.AdminDomain as returned by GET /enterprise/domains.
@@ -140,13 +141,25 @@ export default function Domains() {
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(25);
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
-  const [showCreate, setShowCreate] = useState(false);
-  const [newDomain, setNewDomain] = useState("");
+  /** Whether the three-stage provisioning wizard is open. */
+  const [showWizard, setShowWizard] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<EnterpriseDomain | null>(null);
-  /** The domain whose DNS modal is open. Set ONLY by the dedicated DNS action. */
+  /**
+   * The domain whose DNS modal is open. Set by the dedicated DNS row action,
+   * and — by design — immediately after a successful provisioning so the
+   * operator lands on the records they now need to publish.
+   */
   const [dnsDomain, setDnsDomain] = useState<EnterpriseDomain | null>(null);
+  /**
+   * The freshly generated PUBLIC DKIM record, shown alongside the DNS modal
+   * right after provisioning. Only the public TXT value is ever held here;
+   * the private key is never returned by the API.
+   */
+  const [newDKIM, setNewDKIM] = useState<ProvisionResult["dkim"] | null>(null);
   /** Focus is returned to the exact DNS button that opened the modal. */
   const dnsButtonRefs = useRef<Record<number, HTMLButtonElement | null>>({});
+  /** Focus returns here when the wizard closes, per the a11y contract. */
+  const addButtonRef = useRef<HTMLButtonElement>(null);
 
   const { data, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: ["enterprise-domains"],
@@ -155,14 +168,30 @@ export default function Domains() {
     placeholderData: (prev: any) => prev,
   });
 
-  const createMutation = useMutation({
-    mutationFn: (name: string) => api.createDomainEnterprise({ name }),
-    onSuccess: () => {
-      setShowCreate(false);
-      setNewDomain("");
-      queryClient.invalidateQueries({ queryKey: ["enterprise-domains"] });
-    },
-  });
+  /**
+   * Success path for the wizard: close it, refresh the list so the new row
+   * shows its real used/limit values, then open the existing DNS comparison
+   * modal for the new domain. The DNS modal's own verification, cooldown and
+   * download behaviour is untouched — it is simply opened for a new target.
+   */
+  const handleProvisioned = (result: ProvisionResult) => {
+    setShowWizard(false);
+    queryClient.invalidateQueries({ queryKey: ["enterprise-domains"] });
+    queryClient.invalidateQueries({ queryKey: ["organization-capacity"] });
+    const d = result.domain;
+    setNewDKIM(result.dkim ?? null);
+    setDnsDomain({
+      id: Number(d.id),
+      name: String(d.name),
+      status: String((d as any).status ?? "active"),
+      dkim_selector: result.dkim?.selector ?? (d.dkim_selector as string | undefined),
+    });
+  };
+
+  const closeWizard = () => {
+    setShowWizard(false);
+    setTimeout(() => addButtonRef.current?.focus(), 0);
+  };
 
   const deleteMutation = useMutation({
     mutationFn: (id: number) => api.deleteDomainEnterprise(id),
@@ -230,42 +259,20 @@ export default function Domains() {
           <RefreshCw size={13} className={isFetching ? "animate-spin" : ""} /> Refresh
         </button>
 
+        {/*
+          Opens the three-stage provisioning wizard. The previous inline
+          one-field form has been removed entirely: it could only ever create a
+          domain with silent default limits and no DKIM, which is exactly the
+          half-provisioned state the wizard exists to prevent.
+        */}
         <button
-          onClick={() => setShowCreate((v) => !v)}
+          ref={addButtonRef}
+          onClick={() => setShowWizard(true)}
           className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#4F7CFF] text-white rounded-lg text-xs hover:bg-[#3B5FD9]"
         >
           <Plus size={13} /> Add Domain
         </button>
       </div>
-
-      {showCreate && (
-        <form
-          onSubmit={(e) => { e.preventDefault(); if (newDomain.trim()) createMutation.mutate(newDomain.trim()); }}
-          className="flex gap-2 mb-3 bg-[#13161C] border border-[#2A2F3E] rounded-lg p-2.5"
-        >
-          <input
-            type="text"
-            required
-            placeholder="example.com"
-            value={newDomain}
-            onChange={(e) => setNewDomain(e.target.value)}
-            aria-label="New domain name"
-            className="flex-1 px-3 py-1.5 bg-[#1A1E26] border border-[#2A2F3E] rounded-lg text-[#E8EAF0] text-xs font-mono"
-          />
-          <button
-            type="submit"
-            disabled={createMutation.isPending}
-            className="px-3 py-1.5 bg-[#4F7CFF] text-white rounded-lg text-xs hover:bg-[#3B5FD9] disabled:opacity-50"
-          >
-            {createMutation.isPending ? "Adding…" : "Add"}
-          </button>
-        </form>
-      )}
-      {createMutation.isError && (
-        <p className="text-[#F87171] text-xs mb-3" role="alert">
-          {errorMessage(createMutation.error, "Failed to add domain.")}
-        </p>
-      )}
 
       {/* ── Table ── */}
       {filtered.length === 0 ? (
@@ -441,6 +448,54 @@ export default function Domains() {
         </div>
       )}
 
+      {/* ── Provisioning wizard ── */}
+      {showWizard && (
+        <DomainWizardModal onCancel={closeWizard} onCreated={handleProvisioned} />
+      )}
+
+      {/*
+        Freshly generated PUBLIC DKIM record, shown once next to the DNS modal
+        after provisioning. This is the record value only — the private key is
+        never returned by the API and therefore can never be rendered here.
+      */}
+      {dnsDomain && newDKIM && (
+        <div
+          data-testid="new-dkim-notice"
+          role="status"
+          className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[55] max-w-[min(680px,calc(100vw-2rem))] w-full bg-[#13161C] border border-[#34D399]/40 rounded-xl p-3.5 shadow-2xl"
+        >
+          <div className="flex items-start gap-2">
+            <CheckCircle size={14} className="text-[#34D399] mt-0.5 shrink-0" />
+            <div className="min-w-0 flex-1">
+              <p className="text-xs text-[#E8EAF0] font-medium">
+                DKIM generated for {dnsDomain.name}
+              </p>
+              <p className="text-[11px] text-[#8B92A8] mt-0.5">
+                Publish this TXT record with your DNS provider. No public DNS was changed
+                automatically.
+              </p>
+              <dl className="mt-2 text-[11px] space-y-1">
+                <div>
+                  <dt className="text-[#555D73]">Record name</dt>
+                  <dd className="font-mono text-[#E8EAF0] break-all">{newDKIM.dns_record_name}</dd>
+                </div>
+                <div>
+                  <dt className="text-[#555D73]">Value</dt>
+                  <dd className="font-mono text-[#E8EAF0] break-all">{newDKIM.public_dns_txt}</dd>
+                </div>
+              </dl>
+            </div>
+            <button
+              onClick={() => setNewDKIM(null)}
+              aria-label="Dismiss DKIM record notice"
+              className="p-1 rounded text-[#8B92A8] hover:text-[#E8EAF0] shrink-0"
+            >
+              <XCircle size={14} />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* ── DNS modal ── */}
       {dnsDomain && (
         <DNSRecordsModal
@@ -449,8 +504,16 @@ export default function Domains() {
           onClose={() => {
             const id = dnsDomain.id;
             setDnsDomain(null);
-            // Return focus to the DNS button that opened the dialog.
-            setTimeout(() => dnsButtonRefs.current[id]?.focus(), 0);
+            setNewDKIM(null);
+            // Return focus to the DNS button that opened the dialog. After a
+            // provisioning-triggered open there may be no such button yet
+            // (the list is still refetching), in which case focus falls back
+            // to the Add Domain trigger.
+            setTimeout(() => {
+              const btn = dnsButtonRefs.current[id];
+              if (btn) btn.focus();
+              else addButtonRef.current?.focus();
+            }, 0);
           }}
         />
       )}

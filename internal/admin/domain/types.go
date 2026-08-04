@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"golang.org/x/net/idna"
+	"golang.org/x/net/publicsuffix"
 )
 
 type AdminDomain struct {
@@ -28,14 +31,18 @@ type AdminDomain struct {
 	// not one query per domain). DNSHealth/DNSScore/DNSLastCheckedAt
 	// come from the domain's latest customer_domain_verifications row,
 	// also joined in the same query — never a separate per-domain call.
-	StorageUsedBytes  int64      `json:"storage_used_bytes"`
-	StorageLimitBytes int64      `json:"storage_limit_bytes"`
-	MessageCount      int        `json:"message_count"`
-	DNSHealth         string     `json:"dns_health,omitempty"`
-	DNSScore          int        `json:"dns_score"`
-	DNSLastCheckedAt  *time.Time `json:"dns_last_checked_at,omitempty"`
-	CreatedAt         time.Time  `json:"created_at"`
-	UpdatedAt         time.Time  `json:"updated_at"`
+	// DefaultMailboxQuotaMB is the per-domain DEFAULT quota stamped onto new
+	// mailboxes. 0 means LimitInherit. It is distinct from MaxQuotaMB, which
+	// is the per-mailbox CEILING enforced at mailbox creation and update.
+	DefaultMailboxQuotaMB int64      `json:"default_mailbox_quota_mb"`
+	StorageUsedBytes      int64      `json:"storage_used_bytes"`
+	StorageLimitBytes     int64      `json:"storage_limit_bytes"`
+	MessageCount          int        `json:"message_count"`
+	DNSHealth             string     `json:"dns_health,omitempty"`
+	DNSScore              int        `json:"dns_score"`
+	DNSLastCheckedAt      *time.Time `json:"dns_last_checked_at,omitempty"`
+	CreatedAt             time.Time  `json:"created_at"`
+	UpdatedAt             time.Time  `json:"updated_at"`
 }
 
 type DomainAdminAssignment struct {
@@ -54,12 +61,41 @@ type DomainFilter struct {
 	Offset   int
 }
 
+// CreateDomainRequest is the domain creation contract. It is BACKWARD
+// COMPATIBLE: the historic flat body {"name":"...","max_mailboxes":50,...} is
+// still accepted and behaves exactly as before, while the provisioning wizard
+// sends the richer typed shape:
+//
+//	{"name":"example.com","description":"...","status":"active",
+//	 "limits":{"max_mailboxes":50,"max_aliases":200,
+//	           "default_mailbox_quota_mb":3072,"max_mailbox_quota_mb":10240},
+//	 "dkim":{"generate":true,"selector":"mail"}}
+//
+// When Limits is present it wins; when it is absent the flat fields are folded
+// into it so exactly one validation path exists.
 type CreateDomainRequest struct {
-	Name         string `json:"name"`
-	MaxMailboxes int    `json:"max_mailboxes,omitempty"`
-	MaxAliases   int    `json:"max_aliases,omitempty"`
-	MaxQuotaMB   int64  `json:"max_quota_mb,omitempty"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	// Status is the INITIAL status. Only "active" and "disabled" are
+	// accepted at provisioning time; "suspended" is an administrative
+	// action on an existing domain, not an initial state.
+	Status string        `json:"status,omitempty"`
+	Limits *DomainLimits `json:"limits,omitempty"`
+	DKIM   *DKIMOptions  `json:"dkim,omitempty"`
+	// IdempotencyKey makes a repeated submission of the same domain by the
+	// same tenant return the existing domain instead of a conflict, which is
+	// what makes an accidental double-submit safe.
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
+
+	// Legacy flat fields (deprecated, still honoured).
+	MaxMailboxes int   `json:"max_mailboxes,omitempty"`
+	MaxAliases   int   `json:"max_aliases,omitempty"`
+	MaxQuotaMB   int64 `json:"max_quota_mb,omitempty"`
 }
+
+// MaxDomainDescriptionLen bounds the optional free-text description so a
+// caller cannot store an unbounded blob on the domain row.
+const MaxDomainDescriptionLen = 500
 
 type UpdateDomainRequest struct {
 	Description  *string `json:"description,omitempty"`
@@ -131,6 +167,20 @@ var (
 	ErrInvalidDomainStatus   = fmt.Errorf("unsupported domain status")
 	ErrDKIMAlreadyConfigured = fmt.Errorf("dkim already configured for domain")
 	ErrDKIMNotConfigured     = fmt.Errorf("dkim not configured for domain")
+
+	// Provisioning errors. Each maps to a stable machine-readable code so the
+	// wizard can render an actionable message per field.
+	ErrInvalidLimit        = fmt.Errorf("invalid limit value")
+	ErrLimitExceedsPlan    = fmt.Errorf("limit exceeds organization plan")
+	ErrLimitContradiction  = fmt.Errorf("contradictory limit values")
+	ErrPlanUnavailable     = fmt.Errorf("organization plan unavailable")
+	ErrDescriptionTooLong  = fmt.Errorf("description too long")
+	ErrInvalidDKIMSelector = fmt.Errorf("invalid dkim selector")
+
+	// Enforcement errors raised by the mailbox and alias write paths.
+	ErrMailboxLimitReached = fmt.Errorf("domain mailbox limit reached")
+	ErrAliasLimitReached   = fmt.Errorf("domain alias limit reached")
+	ErrQuotaExceedsDomain  = fmt.Errorf("requested quota exceeds the domain maximum")
 )
 
 // Machine-readable error codes for the domain API contract. These codes are
@@ -158,6 +208,16 @@ const (
 	CodeDomainLimitReached    = "DOMAIN_LIMIT_REACHED"
 	CodeDKIMAlreadyConfigured = "DKIM_ALREADY_CONFIGURED"
 	CodeDKIMNotConfigured     = "DKIM_NOT_CONFIGURED"
+
+	CodeInvalidLimit        = "INVALID_LIMIT"
+	CodeLimitExceedsPlan    = "LIMIT_EXCEEDS_PLAN"
+	CodeLimitContradiction  = "LIMIT_CONTRADICTION"
+	CodePlanUnavailable     = "PLAN_UNAVAILABLE"
+	CodeDescriptionTooLong  = "DESCRIPTION_TOO_LONG"
+	CodeInvalidDKIMSelector = "INVALID_DKIM_SELECTOR"
+	CodeMailboxLimitReached = "MAILBOX_LIMIT_REACHED"
+	CodeAliasLimitReached   = "ALIAS_LIMIT_REACHED"
+	CodeQuotaExceedsDomain  = "QUOTA_EXCEEDS_DOMAIN_MAXIMUM"
 )
 
 // ValidateDomainName validates and normalizes a domain name.
@@ -165,14 +225,19 @@ const (
 // Returns the normalized lowercase domain or ErrInvalidDomainName.
 //
 // Behavior notes:
-//   - IDNA: the project does not deliberately support internationalized
-//     domain names (no punycode conversion). Any label containing a
-//     non-ASCII rune is rejected consistently here and everywhere this
-//     canonical path is used.
+//   - IDNA: internationalized domain names ARE supported. A name containing
+//     non-ASCII runes is converted to its canonical A-label (punycode) form
+//     via idna.Lookup, which applies NFC normalization, case folding and the
+//     IDNA2008 validity rules. The returned value is always ASCII, so every
+//     downstream consumer (DNS lookups, DKIM record names, the unique index)
+//     sees one canonical representation and two spellings of the same name
+//     cannot both be provisioned.
 //   - Trailing dots (FQDN form) are tolerated and stripped; the normalized
 //     form has no trailing dot.
 //   - URL schemes, paths, ports, fragments, query strings, wildcards,
 //     whitespace, email addresses, and out-of-range labels are rejected.
+//   - A name that is itself a public suffix ("com", "co.uk") is rejected:
+//     it can never be delegated to a single tenant.
 func ValidateDomainName(name string) (string, error) {
 	d := strings.TrimSpace(name)
 	if d == "" {
@@ -199,6 +264,19 @@ func ValidateDomainName(name string) (string, error) {
 	// Remove trailing dot (FQDN policy)
 	d = strings.TrimSuffix(d, ".")
 
+	// IDNA: fold any internationalized name into its canonical ASCII
+	// (punycode) A-label form BEFORE the syntactic label checks below, so the
+	// checks always run against the exact bytes that will be stored, queried
+	// and published in DNS. idna.Lookup enforces IDNA2008 validity
+	// (BiDi, joiner and script rules) and rejects mixed or malformed input.
+	if !isASCII(d) {
+		converted, err := idna.Lookup.ToASCII(d)
+		if err != nil || converted == "" {
+			return "", ErrInvalidDomainName
+		}
+		d = strings.ToLower(converted)
+	}
+
 	// Split into labels
 	labels := strings.Split(d, ".")
 	if len(labels) < 2 {
@@ -215,8 +293,8 @@ func ValidateDomainName(name string) (string, error) {
 		if strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
 			return "", ErrInvalidDomainName
 		}
-		// Check valid characters. Non-ASCII (IDN) labels are rejected
-		// consistently because the project does not implement IDNA.
+		// Check valid characters. After IDNA folding above every label is
+		// already ASCII, so anything outside LDH here is genuinely invalid.
 		for _, ch := range label {
 			if !((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-') {
 				return "", ErrInvalidDomainName
@@ -229,5 +307,23 @@ func ValidateDomainName(name string) (string, error) {
 		return "", ErrInvalidDomainName
 	}
 
+	// Reject registry suffixes. A name that IS a public suffix ("com",
+	// "co.uk", "github.io") is not registrable and can never belong to one
+	// tenant, so accepting it would let a tenant claim an entire namespace.
+	// EffectiveTLDPlusOne returns an error exactly for those inputs.
+	if _, err := publicsuffix.EffectiveTLDPlusOne(d); err != nil {
+		return "", ErrInvalidDomainName
+	}
+
 	return d, nil
+}
+
+// isASCII reports whether s contains only ASCII bytes.
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }

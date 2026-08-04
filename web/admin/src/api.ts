@@ -63,9 +63,23 @@ export function domainErrorMessage(code: string | undefined, fallback: string): 
     case "DKIM_NOT_CONFIGURED":
       return "Generate DKIM before rotating keys.";
     case "MAILBOX_LIMIT_REACHED":
-      return "You have reached the mailbox limit for your plan.";
+      return "This domain has reached its mailbox limit.";
     case "MAILBOX_ALREADY_EXISTS":
       return "A mailbox with this address already exists.";
+    // Domain provisioning contract. INVALID_LIMIT / LIMIT_EXCEEDS_PLAN /
+    // LIMIT_CONTRADICTION deliberately fall through to the server's own
+    // message, which names the specific field and ceiling — strictly more
+    // actionable than any generic sentence we could write here.
+    case "PLAN_UNAVAILABLE":
+      return "Your organization plan could not be read, so provisioning is blocked. Contact support.";
+    case "DESCRIPTION_TOO_LONG":
+      return "The description must be 500 characters or fewer.";
+    case "INVALID_DKIM_SELECTOR":
+      return "That DKIM selector is not valid. Use letters, digits, hyphens or underscores.";
+    case "ALIAS_LIMIT_REACHED":
+      return "This domain has reached its alias limit.";
+    case "QUOTA_EXCEEDS_DOMAIN_MAXIMUM":
+      return "That quota is larger than this domain's maximum quota per mailbox.";
     default:
       return fallback;
   }
@@ -185,6 +199,11 @@ export const api = {
   // Enterprise (tenant-scoped)
   getOrganization: (id: number) => request<any>(`/enterprise/organizations/${id}`),
   listDomainsEnterprise: () => request<any>("/enterprise/domains"),
+  /**
+   * Organization plan + live usage for the provisioning wizard. Tenant-scoped
+   * server-side: the tenant comes from the session, never from the caller.
+   */
+  getOrganizationCapacity: () => request<any>("/enterprise/organizations/current/capacity"),
   createDomainEnterprise: (data: any) =>
     request("/enterprise/domains", { method: "POST", body: JSON.stringify(data) }),
   updateDomainEnterprise: (id: number, data: any) =>

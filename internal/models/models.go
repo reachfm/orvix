@@ -685,6 +685,7 @@ func MigrateAllRaw(db *gorm.DB) error {
 			max_mailboxes INTEGER NOT NULL DEFAULT 0,
 			max_aliases INTEGER NOT NULL DEFAULT 0,
 			max_quota_mb INTEGER NOT NULL DEFAULT 0,
+			default_mailbox_quota_mb INTEGER NOT NULL DEFAULT 0,
 			dkim_enabled INTEGER NOT NULL DEFAULT 0,
 			dkim_selector TEXT NOT NULL DEFAULT '',
 			dmarc_enabled INTEGER NOT NULL DEFAULT 0,
@@ -1169,6 +1170,10 @@ func MigrateAllRaw(db *gorm.DB) error {
 		return err
 	}
 
+	if err := migrateCoremailDomainSchema(ctx, sqlDB); err != nil {
+		return err
+	}
+
 	if err := migrateUsersMFASchema(ctx, sqlDB); err != nil {
 		return err
 	}
@@ -1337,6 +1342,44 @@ func migrateCoremailMailboxSchema(ctx context.Context, db *sql.DB) error {
 		}
 	}
 
+	return nil
+}
+
+// migrateCoremailDomainSchema brings a pre-existing coremail_domains table up
+// to the current column set. It is additive and idempotent: every addition is
+// skipped when the column already exists, so it is safe to run on every boot
+// and on databases created by any earlier release.
+//
+// default_mailbox_quota_mb is the per-domain DEFAULT quota stamped onto newly
+// created mailboxes. It is distinct from max_quota_mb, which is the per-mailbox
+// CEILING. The value 0 means "inherit" (see domain.LimitInherit), which is why
+// the column defaults to 0 and needs no backfill: every pre-existing domain
+// correctly reads as inheriting.
+func migrateCoremailDomainSchema(ctx context.Context, db *sql.DB) error {
+	columns, err := sqliteColumns(ctx, db, "coremail_domains")
+	if err != nil {
+		return fmt.Errorf("inspect coremail_domains schema: %w", err)
+	}
+	if len(columns) == 0 {
+		return nil
+	}
+
+	additions := []struct {
+		name string
+		sql  string
+	}{
+		{"default_mailbox_quota_mb", "ALTER TABLE coremail_domains ADD COLUMN default_mailbox_quota_mb INTEGER NOT NULL DEFAULT 0"},
+	}
+
+	for _, addition := range additions {
+		if columns[addition.name] {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, addition.sql); err != nil {
+			return fmt.Errorf("add coremail_domains.%s: %w", addition.name, err)
+		}
+		columns[addition.name] = true
+	}
 	return nil
 }
 

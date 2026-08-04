@@ -83,6 +83,7 @@ func coremailTables() []string {
 			max_mailboxes INTEGER NOT NULL DEFAULT 0,
 			max_aliases INTEGER NOT NULL DEFAULT 0,
 			max_quota_mb INTEGER NOT NULL DEFAULT 0,
+			default_mailbox_quota_mb INTEGER NOT NULL DEFAULT 0,
 			dkim_enabled INTEGER NOT NULL DEFAULT 0,
 			dkim_selector TEXT NOT NULL DEFAULT '',
 			dmarc_enabled INTEGER NOT NULL DEFAULT 0,

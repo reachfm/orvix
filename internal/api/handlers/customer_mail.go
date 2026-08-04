@@ -1,10 +1,12 @@
 package handlers
 
 import (
+	"database/sql"
 	"strconv"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/admin/domain"
 	"github.com/orvix/orvix/internal/auth"
 	authrbac "github.com/orvix/orvix/internal/auth/rbac"
 )
@@ -77,13 +79,57 @@ func (h *Handler) CreateAlias(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database unavailable"})
 	}
-	now := time.Now().UTC()
-	_, err = db.ExecContext(c.Context(),
-		`INSERT INTO coremail_aliases (domain_id, tenant_id, from_addr, to_addr, active, created_at, updated_at)
-		VALUES (?, ?, ?, ?, 1, ?, ?)`,
-		req.DomainID, tenantID, req.FromAddr, req.ToAddr, now, now)
+	// The domain resolution, the alias-cap check and the insert run inside ONE
+	// transaction so the cap cannot be overshot by concurrent requests. The
+	// domain lookup is tenant-scoped, which also closes the pre-existing gap
+	// where a caller-supplied domain_id was trusted without confirming the
+	// domain belongs to the authenticated tenant.
+	tx, err := db.BeginTx(c.Context(), nil)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "failed to create alias: " + err.Error()})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database unavailable"})
+	}
+	defer tx.Rollback()
+
+	domainQuery := "SELECT max_aliases FROM coremail_domains WHERE id=" + h.dialect.Placeholder(1) +
+		" AND tenant_id=" + h.dialect.Placeholder(2) + " AND deleted_at IS NULL"
+	if h.dialect.IsPostgres() {
+		// Serializes concurrent alias creations on the same domain so two
+		// callers cannot both read the same pre-insert count. SQLite
+		// serializes writers at the transaction level and rejects the clause.
+		domainQuery += " FOR UPDATE"
+	}
+	var domainMaxAliases int
+	if err := tx.QueryRowContext(c.Context(), domainQuery, req.DomainID, tenantID).Scan(&domainMaxAliases); err != nil {
+		if err == sql.ErrNoRows {
+			return respondAPIError(c, fiber.StatusNotFound, domain.CodeDomainNotFound, "Domain not found.")
+		}
+		return respondAPIError(c, fiber.StatusInternalServerError, "INTERNAL_ERROR", "An internal error occurred.")
+	}
+
+	if capLimit, unlimited := domain.ResolveAliasCap(domainMaxAliases); !unlimited {
+		var used int
+		if err := tx.QueryRowContext(c.Context(),
+			"SELECT COUNT(*) FROM coremail_aliases WHERE domain_id="+h.dialect.Placeholder(1)+
+				" AND tenant_id="+h.dialect.Placeholder(2)+" AND deleted_at IS NULL",
+			req.DomainID, tenantID).Scan(&used); err != nil {
+			return respondAPIError(c, fiber.StatusInternalServerError, "INTERNAL_ERROR", "An internal error occurred.")
+		}
+		if used >= capLimit {
+			return respondAPIError(c, fiber.StatusConflict, domain.CodeAliasLimitReached,
+				"This domain has reached its alias limit.")
+		}
+	}
+
+	now := time.Now().UTC()
+	if _, err := tx.ExecContext(c.Context(),
+		"INSERT INTO coremail_aliases (domain_id, tenant_id, from_addr, to_addr, active, created_at, updated_at) VALUES ("+
+			h.dialect.Placeholders(7)+")",
+		req.DomainID, tenantID, req.FromAddr, req.ToAddr, true, now, now); err != nil {
+		// The raw driver error is never echoed back to the caller.
+		return respondAPIError(c, fiber.StatusBadRequest, "ALIAS_CREATE_FAILED", "Failed to create alias.")
+	}
+	if err := tx.Commit(); err != nil {
+		return respondAPIError(c, fiber.StatusInternalServerError, "INTERNAL_ERROR", "An internal error occurred.")
 	}
 	h.writeAuditLog(c, "alias.create", "from:"+req.FromAddr+" to:"+req.ToAddr)
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"status": "created"})

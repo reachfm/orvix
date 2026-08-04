@@ -585,6 +585,7 @@ func postgresServiceEnv(t *testing.T) (*Service, *sql.DB) {
 			max_mailboxes BIGINT NOT NULL DEFAULT 0,
 			max_aliases BIGINT NOT NULL DEFAULT 0,
 			max_quota_mb BIGINT NOT NULL DEFAULT 0,
+			default_mailbox_quota_mb BIGINT NOT NULL DEFAULT 0,
 			dkim_enabled BOOLEAN NOT NULL DEFAULT false,
 			dkim_selector TEXT NOT NULL DEFAULT '',
 			dmarc_enabled BOOLEAN NOT NULL DEFAULT false,
