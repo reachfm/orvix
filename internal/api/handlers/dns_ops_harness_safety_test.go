@@ -137,6 +137,7 @@ func newDNSOpsHarnessWithPublicIP(t *testing.T, publicIPv4, publicIPv6 string) *
 			max_mailboxes INTEGER NOT NULL DEFAULT 100,
 			max_aliases INTEGER NOT NULL DEFAULT 50,
 			max_quota_mb INTEGER NOT NULL DEFAULT 1024,
+			default_mailbox_quota_mb INTEGER NOT NULL DEFAULT 0,
 			dkim_enabled INTEGER NOT NULL DEFAULT 0,
 			dkim_selector TEXT NOT NULL DEFAULT '',
 			dmarc_enabled INTEGER NOT NULL DEFAULT 0,
