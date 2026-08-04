@@ -191,20 +191,111 @@ export const DNS_HEALTH_FIXTURE = {
   }),
 };
 
+/**
+ * Organization plan + live usage for the provisioning wizard. Deliberately
+ * FINITE so the plan-ceiling and remaining-capacity rules are exercised: 500
+ * mailboxes allowed with 100 already pinned by other domains, so only 400
+ * remain allocatable.
+ */
+export const CAPACITY_FIXTURE = {
+  capacity: {
+    plan: "business",
+    max_domains: 10,
+    max_domains_unlimited: false,
+    domains_used: 2,
+    remaining_domains: 8,
+    max_mailboxes: 500,
+    max_mailboxes_unlimited: false,
+    mailboxes_used: 12,
+    remaining_mailboxes: 488,
+    max_aliases_unlimited: true,
+    aliases_used: 7,
+    remaining_aliases: null,
+    storage_used_bytes: 5_368_709_120,
+    storage_allocated_bytes: 10_737_418_240,
+    mailboxes_allocated: 100,
+  },
+};
+
+/**
+ * The provisioning response for a successful submit. PUBLIC data only — no
+ * fixture in this suite contains private key material, so a leak in the UI
+ * cannot be masked by a permissive fixture.
+ */
+export const PROVISION_RESPONSE = {
+  domain: {
+    id: 3,
+    name: "newdomain.com",
+    status: "active",
+    plan: "business",
+    dkim_selector: "mail",
+    max_mailboxes: 0,
+    max_aliases: 0,
+    max_quota_mb: 0,
+    mailbox_count: 0,
+    alias_count: 0,
+  },
+  effective_limits: {
+    max_mailboxes: 500,
+    max_mailboxes_inherited: true,
+    max_mailboxes_unlimited: false,
+  },
+  dkim: {
+    selector: "mail",
+    public_dns_txt: "v=DKIM1; k=rsa; p=NEWDOMAINPUBLICKEYDATA",
+    dns_record_name: "mail._domainkey.newdomain.com",
+  },
+  dns: { public_dns_changed: false, next_step: "publish_and_verify_dns" },
+  idempotent: false,
+};
+
+/** The domains list AFTER provisioning, proving the table really refreshes. */
+export const DOMAINS_AFTER_CREATE = {
+  ...DOMAINS_FIXTURE,
+  domains: [
+    ...DOMAINS_FIXTURE.domains,
+    {
+      id: 3,
+      name: "newdomain.com",
+      status: "active",
+      plan: "business",
+      mailbox_count: 0,
+      max_mailboxes: 0,
+      alias_count: 0,
+      max_aliases: 0,
+      storage_used_bytes: 0,
+      storage_limit_bytes: 0,
+      message_count: 0,
+      dkim_enabled: true,
+      dkim_selector: "mail",
+      dmarc_enabled: false,
+    },
+  ],
+  total: 3,
+};
+
 /** Counts every POST the page makes, keyed by URL suffix. */
-export type Counters = { verify: number; generate: number; rotate: number };
+export type Counters = { verify: number; generate: number; rotate: number; createDomain: number };
 
 /**
  * mockAPI installs the mocked backend. `dnsHealth` replaces the DNS health
  * payload wholesale, which lets a test render any single row (notably the
  * autodiscover SRV row) in an arbitrary state without touching the shared
  * fixture.
+ *
+ * `capacity` and `createDomain` let a test drive the provisioning wizard:
+ * `capacity` swaps the plan (finite vs unlimited), and `createDomain` returns
+ * an arbitrary status/body so typed backend errors can be exercised.
  */
 export async function mockAPI(
   page: Page,
-  opts: { dnsHealth?: Record<string, unknown> } = {},
+  opts: {
+    dnsHealth?: Record<string, unknown>;
+    capacity?: Record<string, unknown>;
+    createDomain?: { status: number; body: unknown };
+  } = {},
 ): Promise<Counters> {
-  const counters: Counters = { verify: 0, generate: 0, rotate: 0 };
+  const counters: Counters = { verify: 0, generate: 0, rotate: 0, createDomain: 0 };
   const dnsHealth = opts.dnsHealth ?? DNS_HEALTH_FIXTURE;
 
   const json = (route: Route, body: unknown, status = 200) =>
@@ -216,7 +307,24 @@ export async function mockAPI(
   // silently swallow every call.
   await page.route("**/api/**", (r) => json(r, {}));
 
-  await page.route("**/api/v1/enterprise/domains", (r) => json(r, DOMAINS_FIXTURE));
+  // GET lists domains; POST provisions one. The same path serves both, so the
+  // handler branches on method rather than swallowing the create call.
+  //
+  // The list flips to DOMAINS_AFTER_CREATE once a domain has been created, so
+  // the "new row appears" assertion is proving a real refetch rather than a
+  // static fixture that always contained the row.
+  await page.route("**/api/v1/enterprise/domains", (r) => {
+    if (r.request().method() === "POST") {
+      counters.createDomain += 1;
+      const override = opts.createDomain;
+      if (override) return json(r, override.body, override.status);
+      return json(r, PROVISION_RESPONSE, 201);
+    }
+    return json(r, counters.createDomain > 0 ? DOMAINS_AFTER_CREATE : DOMAINS_FIXTURE);
+  });
+  await page.route("**/api/v1/enterprise/organizations/current/capacity", (r) =>
+    json(r, opts.capacity ?? CAPACITY_FIXTURE),
+  );
   await page.route("**/api/v1/enterprise/domains/*/dns", (r) => json(r, dnsHealth));
 
   await page.route("**/api/v1/enterprise/domains/*/dns/verify", (r) => {
