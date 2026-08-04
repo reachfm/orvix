@@ -131,3 +131,74 @@ describe("buildDNSRecordsFile", () => {
     expect(file).not.toContain("PRIVATE KEY");
   });
 });
+
+describe("unconfigured server expectations (upgrade path)", () => {
+  /**
+   * Regression for the upgrade-path defect: an installation whose YAML
+   * predates coremail.expected_spf / expected_dmarc_rua /
+   * autodiscover_srv_target gets `configuration_required` rows from the
+   * server with an EMPTY expected value and the observed record preserved.
+   *
+   * The UI must render exactly that: no invented required value, no mismatch
+   * framing, and no pass. The frontend never synthesises an expectation of
+   * its own — if the server says it cannot state a requirement, neither can
+   * the console.
+   */
+  const unconfigured = health({
+    complete: false,
+    health_score: 60,
+    dns_health: "configuration_required",
+    spf: {
+      status: "configuration_required",
+      expected: "",
+      observed: REAL_SPF,
+      reason:
+        "server configuration coremail.expected_spf is not set, so ORVIX cannot state a required SPF policy for this domain",
+      guidance: "Set coremail.expected_spf in the ORVIX server configuration ...",
+    },
+    dmarc: {
+      status: "configuration_required",
+      expected: "",
+      observed: "v=DMARC1; p=quarantine",
+      reason:
+        "server configuration coremail.expected_dmarc_rua is not set, so ORVIX cannot state a required DMARC record for this domain",
+      guidance: "Set coremail.expected_dmarc_rua to a reporting mailbox ...",
+    },
+  } as never);
+
+  const rows = buildRecordRows(unconfigured, "example.com", null);
+  const spf = rows.find((r) => r.type === "TXT (SPF)")!;
+  const dmarc = rows.find((r) => r.type === "TXT (DMARC)")!;
+
+  it("never invents a required value the server did not supply", () => {
+    expect(spf.required).toBe("");
+    expect(dmarc.required).toBe("");
+    // The specific values the old hard-code produced must not reappear.
+    expect(spf.required).not.toContain("v=spf1 mx -all");
+    expect(dmarc.required).not.toContain("dmarc@example.com");
+  });
+
+  it("preserves and displays the record the domain actually publishes", () => {
+    expect(spf.observed).toContain(REAL_SPF);
+    expect(dmarc.observed).toContain("v=DMARC1; p=quarantine");
+  });
+
+  it("surfaces the missing setting rather than a mismatch", () => {
+    expect(spf.status).toBe("configuration_required");
+    expect(spf.reason).toContain("coremail.expected_spf");
+    expect(spf.reason).not.toMatch(/does not match/i);
+    expect(dmarc.reason).toContain("coremail.expected_dmarc_rua");
+  });
+
+  it("never lets an unconfigured record read as a pass", () => {
+    expect(spf.status).not.toBe("pass");
+    expect(dmarc.status).not.toBe("pass");
+    expect(unconfigured.complete).toBe(false);
+  });
+
+  it("excludes unconfigured required values from the downloadable file", () => {
+    const file = buildDNSRecordsFile(rows, "example.com");
+    expect(file).not.toContain("v=spf1 mx -all");
+    expect(file).not.toContain("rua=mailto:dmarc@example.com");
+  });
+});

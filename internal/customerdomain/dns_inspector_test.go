@@ -9,6 +9,20 @@ import (
 	"github.com/orvix/orvix/internal/dnsops"
 )
 
+// fullyConfiguredExpectations is the operator configuration a real ORVIX
+// deployment is expected to populate. Scoring tests that assert a record can
+// reach "pass" MUST use it: with no expected_spf / expected_dmarc_rua set,
+// SPF and DMARC are deliberately reported configuration_required rather than
+// graded against an invented default (see expectations.go), so an
+// unconfigured inspector can never produce an all-pass result.
+func fullyConfiguredExpectations() CanonicalExpectations {
+	return CanonicalExpectations{
+		SPFRecord:   "v=spf1 mx -all",
+		DMARCPolicy: "quarantine",
+		DMARCRUA:    "mailto:dmarc-reports@example.com",
+	}
+}
+
 // ── Old Inspect tests (kept, still pass with checkMX([]string)) ──
 
 func TestDNSInspectorMXValid(t *testing.T) {
@@ -502,7 +516,7 @@ func TestInspectEnterpriseMTASTSUnverifiedBlocksFullPass(t *testing.T) {
 		TXT: []string{"v=TLSRPTv1; rua=mailto:reports@example.com"},
 	})
 
-	insp := NewDNSInspector(r)
+	insp := NewDNSInspector(r).WithExpectations(fullyConfiguredExpectations())
 	result := insp.InspectEnterprise(context.Background(), "example.com",
 		[]string{"mx1.example.com"}, "default", "v=DKIM1; k=rsa; p=TEST")
 
@@ -560,7 +574,7 @@ func TestInspectEnterpriseHealthScoreAllPass(t *testing.T) {
 	r.Set("_smtp._tls.example.com", dnsops.FakeEntry{
 		TXT: []string{"v=TLSRPTv1; rua=mailto:reports@example.com"},
 	})
-	insp := NewDNSInspector(r)
+	insp := NewDNSInspector(r).WithExpectations(fullyConfiguredExpectations())
 	result := insp.InspectEnterprise(context.Background(), "example.com",
 		[]string{"mx1.example.com"}, "default", "v=DKIM1; k=rsa; p=TEST")
 	// "All pass" at the DNS layer is deliberately NOT 100%: the MTA-STS
@@ -597,7 +611,7 @@ func TestInspectEnterpriseHealthScoreAllPass(t *testing.T) {
 	if result.SPF.Expected != "v=spf1 mx -all" {
 		t.Errorf("SPF expected = %q, want %q", result.SPF.Expected, "v=spf1 mx -all")
 	}
-	want := "v=DMARC1; p=quarantine; rua=mailto:dmarc@example.com"
+	want := "v=DMARC1; p=quarantine; rua=mailto:dmarc-reports@example.com"
 	if result.DMARC.Expected != want {
 		t.Errorf("DMARC expected = %q, want %q", result.DMARC.Expected, want)
 	}
@@ -631,7 +645,7 @@ func TestInspectEnterpriseHealthScoreOneFail(t *testing.T) {
 	r.Set("_mta-sts.example.com", dnsops.FakeEntry{
 		TXT: []string{"v=STSv1; id=20260101"},
 	})
-	insp := NewDNSInspector(r)
+	insp := NewDNSInspector(r).WithExpectations(fullyConfiguredExpectations())
 	result := insp.InspectEnterprise(context.Background(), "example.com",
 		[]string{"mx1.example.com"}, "default", "v=DKIM1; k=rsa; p=TEST")
 	if result.HealthScore == 100 {
@@ -659,7 +673,7 @@ func TestInspectEnterpriseHealthScoreMXFailOthersPass(t *testing.T) {
 	r.Set("_smtp._tls.example.com", dnsops.FakeEntry{
 		TXT: []string{"v=TLSRPTv1; rua=mailto:reports@example.com"},
 	})
-	insp := NewDNSInspector(r)
+	insp := NewDNSInspector(r).WithExpectations(fullyConfiguredExpectations())
 	result := insp.InspectEnterprise(context.Background(), "example.com",
 		[]string{"mx1.example.com"}, "default", "v=DKIM1; k=rsa; p=TEST")
 	// Weighted out of 100 possible points, with optional/not_applicable

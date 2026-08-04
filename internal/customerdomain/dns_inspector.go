@@ -278,10 +278,12 @@ func (i *DNSInspector) checkDMARC(ctx context.Context, domain, now string) *DMAR
 	// actually published is compared against the one configured policy.
 	// p=reject is stricter than a configured p=quarantine, so it is accepted
 	// rather than flagged — only a WEAKER-than-required policy warns.
+	// Only an operator-CONFIGURED policy is enforced. With no expectation
+	// configured, ORVIX does not invent one and grade the live record
+	// against it — the "p=none means no enforcement" warning above is a
+	// universal DMARC truth and still applies, but a stricter requirement
+	// is not asserted on an upgraded install that never opted in.
 	wantPolicy := strings.TrimSpace(i.expectations.DMARCPolicy)
-	if wantPolicy == "" {
-		wantPolicy = DefaultDMARCPolicy
-	}
 	if wantPolicy == "reject" && p != "reject" {
 		return &DMARCCheck{
 			Status:    string(DNSStatusWarning),
@@ -481,30 +483,35 @@ func (i *DNSInspector) applyCanonicalExpectations(health *EnterpriseDNSHealth, d
 		// CanonicalExpectations value the verifier compared against, so
 		// they can never diverge. The frontend's downloadable record file
 		// (consumer (d)) renders this same `expected` field.
-		c.Expected = e.SPF(domain)
-		c.Guidance = fmt.Sprintf("Publish a single TXT record at %s with the value %q. Exactly one SPF record may exist per domain.", domain, c.Expected)
 		if !e.SPFIsConfigured() {
-			c.Guidance += " This deployment has no coremail.expected_spf configured, so the generic MX-derived policy is shown; set expected_spf to this deployment's real SPF policy."
-		}
-		if c.Expected == "" {
+			// No invented requirement. The observed record is preserved
+			// exactly as published, so an operator upgrading from a YAML
+			// that predates expected_spf still sees their real policy and
+			// is never told to replace a valid record with a generic one.
+			// ORVIX simply has nothing authoritative to compare against.
+			c.Expected = ""
 			c.Status = string(DNSStatusConfigRequired)
-			c.Reason = "required SPF value could not be determined from configuration"
+			c.Reason = "server configuration " + ConfigKeySPF + " is not set, so ORVIX cannot state a required SPF policy for this domain"
+			c.Guidance = "Set " + ConfigKeySPF + " in the ORVIX server configuration to this deployment's real SPF policy, then re-check. Until it is set, ORVIX will neither claim this record passes nor ask you to change the record currently published."
+		} else {
+			c.Expected = e.SPF(domain)
+			c.Guidance = fmt.Sprintf("Publish a single TXT record at %s with the value %q. Exactly one SPF record may exist per domain.", domain, c.Expected)
 		}
 	}
 
 	if c := health.DMARC; c != nil {
 		// Consumers (b)/(c)/(d) again — one source, four readers.
-		c.Expected = e.DMARC(domain)
-		c.Guidance = fmt.Sprintf("Add a TXT record at _dmarc.%s with the value %q.", domain, c.Expected)
-		if _, real := e.DMARCRUAValue(domain); !real {
-			// Never let a fabricated address read as a settled
-			// requirement: dmarc@<domain> is a PLACEHOLDER that ORVIX
-			// does not provision. Say so in the operator-facing text.
-			c.Guidance += " The rua address shown is a placeholder: ORVIX does not provision dmarc@" + domain + ". Set coremail.expected_dmarc_rua to a mailbox you actually receive before publishing."
-		}
-		if c.Expected == "" {
+		if !e.DMARCIsConfigured() {
+			// dmarc@<domain> is not provisioned by ORVIX. Publishing it
+			// would send aggregate reports into a black hole, so it is
+			// never presented as the required value.
+			c.Expected = ""
 			c.Status = string(DNSStatusConfigRequired)
-			c.Reason = "required DMARC value could not be determined from configuration"
+			c.Reason = "server configuration " + ConfigKeyDMARCRUA + " is not set, so ORVIX cannot state a required DMARC record for this domain"
+			c.Guidance = "Set " + ConfigKeyDMARCRUA + " to a reporting mailbox you actually receive (and optionally " + "coremail.expected_dmarc_policy" + "), then re-check. ORVIX does not provision a dmarc@ address and will not invent one."
+		} else {
+			c.Expected = e.DMARC(domain)
+			c.Guidance = fmt.Sprintf("Add a TXT record at _dmarc.%s with the value %q.", domain, c.Expected)
 		}
 	}
 

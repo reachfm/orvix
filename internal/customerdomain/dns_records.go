@@ -305,22 +305,43 @@ func (i *DNSInspector) checkTLSA(host, now string) *DNSRecordCheck {
 // The row is OPTIONAL throughout: a missing SRV record breaks neither mail
 // flow nor client setup (ORVIX serves autodiscover directly), so it must
 // never drag the health score down.
+// formatSRVAnswers renders SRV answers in zone-file order
+// (priority weight port target.) so the observed column reads identically to
+// the expected column.
+func formatSRVAnswers(answers []*net.SRV) []string {
+	out := make([]string, 0, len(answers))
+	for _, a := range answers {
+		if a == nil {
+			continue
+		}
+		out = append(out, fmt.Sprintf("%d %d %d %s.", a.Priority, a.Weight, a.Port, strings.TrimSuffix(a.Target, ".")))
+	}
+	return out
+}
+
 func (i *DNSInspector) checkAutodiscoverSRV(ctx context.Context, domain, mailHost, now string) *DNSRecordCheck {
 	name := AutodiscoverSRVName(domain)
 
 	expected, ok := i.expectations.AutodiscoverSRVExpectedString(mailHost)
 	if !ok {
-		// No configured target AND no derivable mail host. Report the row
-		// honestly as not applicable rather than fabricating a target.
-		return &DNSRecordCheck{
+		// No configured target. The target is NOT guessed from the mail
+		// host: autodiscover may be terminated by a different host, so a
+		// guessed expectation would report "wrong target" against a
+		// perfectly correct record. Still resolve the record so the
+		// operator can SEE what is published today — just do not grade it.
+		row := &DNSRecordCheck{
 			Name:      name,
 			Type:      "SRV",
-			Status:    string(DNSStatusNotApplicable),
+			Status:    string(DNSStatusConfigRequired),
 			Optional:  true,
-			Reason:    "no autodiscover SRV target is configured and none can be derived from the domain's mail host",
-			Guidance:  "No action required. Set coremail.autodiscover_srv_target to enable verification of this record.",
+			Reason:    "server configuration " + ConfigKeySRVTarget + " is not set, so ORVIX cannot state a required autodiscover SRV target for this domain",
+			Guidance:  "Optional record. Set " + ConfigKeySRVTarget + " (and optionally the matching port/priority/weight settings) to the host that actually terminates autodiscover for this deployment, then re-check. ORVIX will not guess a target or grade the published record until it is set.",
 			CheckedAt: now,
 		}
+		if answers, err := i.dns.LookupSRV(ctx, name); err == nil && len(answers) > 0 {
+			row.Observed = formatSRVAnswers(answers)
+		}
+		return row
 	}
 
 	wantTarget, wantPort, wantPriority, wantWeight, _ := i.expectations.AutodiscoverSRV(mailHost)

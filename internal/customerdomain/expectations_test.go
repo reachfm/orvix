@@ -109,19 +109,42 @@ func TestConfiguredSPFMismatchIsFlagged(t *testing.T) {
 	}
 }
 
-// TestUnconfiguredSPFFallsBackCompatibly documents the backward-compatible
-// default for deployments predating expected_spf, and requires the guidance
-// to say the value is a generic stand-in.
-func TestUnconfiguredSPFFallsBackCompatibly(t *testing.T) {
+// TestUnconfiguredSPFIsConfigurationRequiredNotInvented is the regression
+// test for the upgrade-path defect: an installation whose YAML predates
+// expected_spf already publishes a real, valid SPF policy (baseFake publishes
+// realORVIXSPF). ORVIX must NOT invent "v=spf1 mx -all" as that domain's
+// requirement — doing so makes the console contradict a correct record, and
+// the guidance text and downloadable record file then tell the operator to
+// replace a policy that was right all along.
+func TestUnconfiguredSPFIsConfigurationRequiredNotInvented(t *testing.T) {
 	const domain = "example.com"
 	insp := newTestInspector(t, baseFake(domain), CanonicalExpectations{})
 
 	h := insp.InspectEnterprise(context.Background(), domain, []string{"mail." + domain}, "", "")
-	if h.SPF.Expected != "v=spf1 mx -all" {
-		t.Fatalf("unconfigured fallback = %q, want %q", h.SPF.Expected, "v=spf1 mx -all")
+
+	if h.SPF.Expected != "" {
+		t.Fatalf("unconfigured SPF expected = %q, want empty — ORVIX must not invent a required policy", h.SPF.Expected)
 	}
-	if !strings.Contains(h.SPF.Guidance, "expected_spf") {
-		t.Fatalf("fallback guidance must tell the operator to configure expected_spf, got %q", h.SPF.Guidance)
+	if h.SPF.Status != string(DNSStatusConfigRequired) {
+		t.Fatalf("unconfigured SPF status = %q, want %q", h.SPF.Status, DNSStatusConfigRequired)
+	}
+	// The operator's real published record must still be visible.
+	if h.SPF.Observed != realORVIXSPF {
+		t.Fatalf("observed SPF = %q, want the real published record %q preserved", h.SPF.Observed, realORVIXSPF)
+	}
+	// It must never read as a mismatch against an invented default.
+	if strings.Contains(strings.ToLower(h.SPF.Reason), "does not match") {
+		t.Fatalf("unconfigured SPF must not report a mismatch, got reason %q", h.SPF.Reason)
+	}
+	if !strings.Contains(h.SPF.Reason, ConfigKeySPF) {
+		t.Fatalf("reason must name the missing setting %q, got %q", ConfigKeySPF, h.SPF.Reason)
+	}
+	if !strings.Contains(h.SPF.Guidance, ConfigKeySPF) {
+		t.Fatalf("guidance must tell the operator to configure %q, got %q", ConfigKeySPF, h.SPF.Guidance)
+	}
+	// And it must never count as a pass or reach a full score.
+	if h.SPF.Status == string(DNSStatusPass) || h.HealthScore == 100 {
+		t.Fatalf("unconfigured SPF must never pass or reach 100%%: status=%q score=%d", h.SPF.Status, h.HealthScore)
 	}
 }
 
@@ -149,21 +172,35 @@ func TestDMARCRUAUsesConfiguredAddressWhenSet(t *testing.T) {
 	}
 }
 
-// TestDMARCRUAPlaceholderIsLabelledAsSuch documents the only circumstance in
-// which dmarc@<domain> appears: no configured address, and the guidance says
-// plainly that it is a placeholder requiring real configuration.
-func TestDMARCRUAPlaceholderIsLabelledAsSuch(t *testing.T) {
+// TestUnconfiguredDMARCIsConfigurationRequiredNotFabricated proves no
+// dmarc@<domain> address is ever synthesised. ORVIX does not provision that
+// mailbox, so presenting it as the required value would send an operator to
+// publish a reporting address that silently discards their DMARC aggregate
+// reports.
+func TestUnconfiguredDMARCIsConfigurationRequiredNotFabricated(t *testing.T) {
 	const domain = "example.com"
 	insp := newTestInspector(t, baseFake(domain), CanonicalExpectations{})
 
 	h := insp.InspectEnterprise(context.Background(), domain, []string{"mail." + domain}, "", "")
-	want := "v=DMARC1; p=quarantine; rua=mailto:dmarc@example.com"
-	if h.DMARC.Expected != want {
-		t.Fatalf("unconfigured DMARC default = %q, want documented placeholder %q", h.DMARC.Expected, want)
+
+	if h.DMARC.Expected != "" {
+		t.Fatalf("unconfigured DMARC expected = %q, want empty — no address may be fabricated", h.DMARC.Expected)
 	}
-	if !strings.Contains(h.DMARC.Guidance, "placeholder") ||
-		!strings.Contains(h.DMARC.Guidance, "expected_dmarc_rua") {
-		t.Fatalf("placeholder guidance must name it a placeholder and point at expected_dmarc_rua, got %q", h.DMARC.Guidance)
+	if strings.Contains(h.DMARC.Expected, "dmarc@") || strings.Contains(h.DMARC.Guidance, "rua=mailto:dmarc@"+domain) {
+		t.Fatalf("dmarc@%s must never be presented as a required value: expected=%q guidance=%q", domain, h.DMARC.Expected, h.DMARC.Guidance)
+	}
+	if h.DMARC.Status != string(DNSStatusConfigRequired) {
+		t.Fatalf("unconfigured DMARC status = %q, want %q", h.DMARC.Status, DNSStatusConfigRequired)
+	}
+	// The published record is still shown to the operator.
+	if h.DMARC.Observed == "" {
+		t.Fatal("observed DMARC must be preserved even when no expectation is configured")
+	}
+	if !strings.Contains(h.DMARC.Reason, ConfigKeyDMARCRUA) {
+		t.Fatalf("reason must name the missing setting %q, got %q", ConfigKeyDMARCRUA, h.DMARC.Reason)
+	}
+	if h.DMARC.Status == string(DNSStatusPass) || h.HealthScore == 100 {
+		t.Fatalf("unconfigured DMARC must never pass or reach 100%%: status=%q score=%d", h.DMARC.Status, h.HealthScore)
 	}
 }
 
@@ -382,5 +419,88 @@ func TestScoreIgnoresOptionalAndNotApplicableRows(t *testing.T) {
 	}
 	if _, ok := score.Breakdown["autodiscover_srv"]; !ok {
 		t.Fatal("the autodiscover SRV row must appear in the score breakdown even though it is unweighted")
+	}
+}
+
+// TestLegacyUpgradeConfigFabricatesNothing is the end-to-end upgrade
+// regression: a deployment upgraded from a YAML containing only
+// coremail.hostname + coremail.expected_mx yields a zero-value
+// CanonicalExpectations. Verified against a domain that already publishes a
+// correct real-world SPF/DMARC set, the console must:
+//
+//  1. not invent any required value,
+//  2. not report a mismatch against an invented default,
+//  3. still show every observed record,
+//  4. not report a pass or a complete/100% snapshot.
+func TestLegacyUpgradeConfigFabricatesNothing(t *testing.T) {
+	const domain = "example.com"
+	// Zero value == exactly what config.Load produces for a legacy YAML
+	// (see TestLoadLegacyCoremailYAMLWithoutNewDNSExpectationFields).
+	var legacy CanonicalExpectations
+
+	fake := baseFake(domain)
+	fake.Set("_autodiscover._tcp."+domain, dnsops.FakeEntry{
+		SRV: []net.SRV{{Target: "autodiscover." + domain + ".", Port: 443, Priority: 0, Weight: 0}},
+	})
+	insp := newTestInspector(t, fake, legacy)
+
+	h := insp.InspectEnterprise(context.Background(), domain, []string{"mail." + domain}, "", "")
+
+	for _, tc := range []struct {
+		name     string
+		expected string
+		status   string
+		observed string
+		reason   string
+		key      string
+	}{
+		{"SPF", h.SPF.Expected, h.SPF.Status, h.SPF.Observed, h.SPF.Reason, ConfigKeySPF},
+		{"DMARC", h.DMARC.Expected, h.DMARC.Status, h.DMARC.Observed, h.DMARC.Reason, ConfigKeyDMARCRUA},
+	} {
+		if tc.expected != "" {
+			t.Errorf("%s: required value = %q, want empty (nothing may be fabricated)", tc.name, tc.expected)
+		}
+		if tc.status != string(DNSStatusConfigRequired) {
+			t.Errorf("%s: status = %q, want %q", tc.name, tc.status, DNSStatusConfigRequired)
+		}
+		if tc.status == string(DNSStatusPass) {
+			t.Errorf("%s: must never report a false pass on an unconfigured install", tc.name)
+		}
+		if strings.Contains(strings.ToLower(tc.reason), "does not match") {
+			t.Errorf("%s: must never report a false mismatch, got %q", tc.name, tc.reason)
+		}
+		if !strings.Contains(tc.reason, tc.key) {
+			t.Errorf("%s: reason must name the missing setting %q, got %q", tc.name, tc.key, tc.reason)
+		}
+		if tc.observed == "" {
+			t.Errorf("%s: the published record must still be displayed", tc.name)
+		}
+	}
+
+	// The SRV row: no target configured, so no expectation and no verdict —
+	// but the published record is still surfaced.
+	srv := h.AutodiscoverSRV
+	if srv == nil {
+		t.Fatal("expected an autodiscover SRV row")
+	}
+	if srv.Expected != "" {
+		t.Errorf("SRV required value = %q, want empty — the target must never be guessed from the mail host", srv.Expected)
+	}
+	if srv.Status != string(DNSStatusConfigRequired) {
+		t.Errorf("SRV status = %q, want %q", srv.Status, DNSStatusConfigRequired)
+	}
+	if len(srv.Observed) == 0 {
+		t.Error("SRV: the published record must still be displayed")
+	}
+	if !strings.Contains(srv.Reason, ConfigKeySRVTarget) {
+		t.Errorf("SRV reason must name %q, got %q", ConfigKeySRVTarget, srv.Reason)
+	}
+
+	// And the snapshot as a whole must not read as complete or perfect.
+	if h.HealthScore == 100 {
+		t.Error("an unconfigured install must never reach a 100% score")
+	}
+	if h.DNSHealth == string(DNSStatusPass) {
+		t.Errorf("overall DNSHealth = %q, must not be an unqualified pass", h.DNSHealth)
 	}
 }
