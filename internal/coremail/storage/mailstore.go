@@ -107,7 +107,7 @@ func (ms *MailStore) StoreMessage(ctx context.Context, msg *Message, rfc822Data 
 	if err := os.MkdirAll(dir, 0750); err != nil {
 		return fmt.Errorf("create message dir: %w", err)
 	}
-	if err := os.WriteFile(msg.RFC822Path, rfc822Data, 0640); err != nil {
+	if err := atomicWriteFile(msg.RFC822Path, rfc822Data, 0600); err != nil {
 		return fmt.Errorf("write rfc822 file: %w", err)
 	}
 
@@ -262,7 +262,7 @@ func (ms *MailStore) extractAndStoreAttachments(ctx context.Context, msgID uint,
 		storageName := fmt.Sprintf("%d_%s", i, sanitizeFilenameForStorage(filename))
 		storagePath := filepath.Join(attDir, storageName)
 
-		if err := os.WriteFile(storagePath, p.Body, 0640); err != nil {
+		if err := atomicWriteFile(storagePath, p.Body, 0600); err != nil {
 			continue
 		}
 
@@ -430,7 +430,7 @@ func (ms *MailStore) WriteRFC822(ctx context.Context, id uint, data []byte, tx i
 		writeMu.Lock()
 		defer writeMu.Unlock()
 	}
-	if err := os.WriteFile(msg.RFC822Path, data, 0640); err != nil {
+	if err := atomicWriteFile(msg.RFC822Path, data, 0600); err != nil {
 		return fmt.Errorf("write rfc822: %w", err)
 	}
 	// Refresh sha256 + size so future de-duplication
