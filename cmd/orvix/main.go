@@ -323,16 +323,44 @@ func ensureCoreMailBootstrapSchema(db *gorm.DB) error {
 // for PostgreSQL it calls only MigrateAllPostgres (the CoreMail
 // bootstrap schema is SQLite-only DDL).
 func migrateConfiguredDatabase(db *gorm.DB, driver string, logger *zap.Logger) error {
-	switch strings.ToLower(strings.TrimSpace(driver)) {
+	drv := strings.ToLower(strings.TrimSpace(driver))
+	switch drv {
 	case "sqlite", "sqlite3":
 		if err := models.MigrateAllRaw(db); err != nil {
 			return err
 		}
+		// MigrateAllRaw already runs NormalizeAdminRoles for SQLite.
 		return ensureCoreMailBootstrapSchema(db)
 	case "postgres", "postgresql":
-		return models.MigrateAllPostgres(db)
+		if err := models.MigrateAllPostgres(db); err != nil {
+			return err
+		}
+		// PORTAL-SEPARATION-PHASE1: run the legacy-role normalization on
+		// the Postgres path too. It is idempotent, so re-running on every
+		// boot is safe. Any AMBIGUOUS_ADMIN_ROLE rows are logged at ERROR
+		// so the operator sees them.
+		sqlDB, err := db.DB()
+		if err != nil {
+			return fmt.Errorf("normalize admin roles: get sql.DB: %w", err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		res, err := models.NormalizeAdminRoles(ctx, sqlDB, "postgres")
+		if err != nil {
+			return fmt.Errorf("normalize admin roles: %w", err)
+		}
+		if logger != nil {
+			logger.Info("normalizeAdminRoles complete",
+				zap.Int("platform_promoted", res.PlatformPromoted),
+				zap.Int("tenant_promoted", res.TenantPromoted),
+				zap.Int("operator_renamed", res.OperatorRenamed),
+				zap.Int("readonly_renamed", res.ReadOnlyRenamed),
+				zap.Int("ambiguous_skipped", res.Skipped),
+			)
+		}
+		return nil
 	default:
-		return fmt.Errorf("unsupported database driver: %s", driver)
+		return fmt.Errorf("unsupported database driver: %s", drv)
 	}
 }
 
@@ -518,10 +546,17 @@ func insertBootstrapAdmin(db *sql.DB, dial *dbdialect.Info, adminEmail, hashedPa
 		return fmt.Errorf("select tenant: %w", err)
 	}
 
+	// PORTAL-SEPARATION-PHASE1: the bootstrap admin is the Platform Super
+	// Admin — a role that has no customer tenant. tenant_id is written as
+	// SQL NULL so no tenant-scoped IDOR check ever links this identity to
+	// a customer. A separate Company Admin for the orvix.email tenant must
+	// be provisioned in a later deployment (documented in
+	// docs/deployment/portal-separation-phase1.md); this bootstrap path
+	// never creates or updates that account.
 	_, err = tx.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
 		 VALUES (`+dial.Placeholder(1)+`, `+dial.Placeholder(2)+`, `+dial.Placeholder(3)+`, `+dial.Placeholder(4)+`, `+dial.Placeholder(5)+`, `+dial.Placeholder(6)+`, `+dial.Placeholder(7)+`, `+dial.Placeholder(8)+`)`,
-		now, now, adminEmail, hashedPassword, "admin", tenantID, true, true,
+		now, now, adminEmail, hashedPassword, string(auth.RolePlatformSuperAdmin), sql.NullInt64{}, true, true,
 	)
 	if err != nil {
 		return fmt.Errorf("insert user: %w", err)

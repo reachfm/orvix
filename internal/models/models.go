@@ -4,6 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/orvix/orvix/internal/config"
@@ -1174,6 +1177,14 @@ func MigrateAllRaw(db *gorm.DB) error {
 		return err
 	}
 
+	// PORTAL-SEPARATION-PHASE1: normalize legacy admin roles here on the
+	// SQLite path. The Postgres path calls NormalizeAdminRoles directly
+	// from cmd/orvix/main.go after MigrateAll(). Both paths use the same
+	// exported helper so the rules cannot drift.
+	if _, err := NormalizeAdminRoles(ctx, sqlDB, "sqlite"); err != nil {
+		return err
+	}
+
 	if err := migrateUsersMFASchema(ctx, sqlDB); err != nil {
 		return err
 	}
@@ -1551,4 +1562,183 @@ func sqliteColumns(ctx context.Context, db *sql.DB, table string) (map[string]bo
 		return nil, err
 	}
 	return columns, nil
+}
+
+// NormalizeAdminRolesResult reports how many rows the normalization
+// migration touched, for tests and startup logs. Skipped is the count
+// of "admin"-role rows without a tenant that do NOT match the bootstrap
+// email — those are AMBIGUOUS_ADMIN_ROLE and require operator review;
+// the normalizer refuses to guess between platform and tenant scope.
+type NormalizeAdminRolesResult struct {
+	PlatformPromoted int
+	TenantPromoted   int
+	OperatorRenamed  int
+	ReadOnlyRenamed  int
+	Skipped          int
+}
+
+// normalizeAdminRoles is the Portal-Separation Phase-1 data migration.
+// It maps the legacy role strings ("admin", "superadmin", "operator",
+// "readonly") to the canonical v2 role set so downstream RBAC (which no
+// longer grants any permission to "admin") stays coherent for existing
+// installs. It is idempotent — running twice after the first pass is a
+// no-op.
+//
+// Rules (email match is case-insensitive):
+//   - ORVIX_ADMIN_EMAIL exact match, role in {admin, superadmin,
+//     platform_super_admin} → platform_super_admin, tenant_id = NULL,
+//     token_version += 1 (forces re-login).
+//   - superadmin (any other email) → platform_super_admin,
+//     tenant_id = NULL, token_version += 1. Logged at warn.
+//   - admin + tenant_id IS NOT NULL, email != bootstrap →
+//     tenant_admin, keep tenant_id, token_version += 1.
+//   - admin + tenant_id IS NULL, email != bootstrap → SKIP,
+//     log AMBIGUOUS_ADMIN_ROLE at error level, count in result.
+//     Operator must decide which console this account belongs to.
+//   - operator + tenant_id IS NOT NULL → tenant_operator, bump token.
+//   - readonly + tenant_id IS NOT NULL → tenant_readonly, bump token.
+//
+// It uses only the users table columns that already exist on every
+// deployed schema (role, tenant_id, email, token_version) so it needs
+// no separate DDL step.
+func NormalizeAdminRoles(ctx context.Context, db *sql.DB, dialect string) (NormalizeAdminRolesResult, error) {
+	var res NormalizeAdminRolesResult
+	if db == nil {
+		return res, nil
+	}
+	// Dialect-aware placeholder emitter. SQLite/MySQL use "?", Postgres
+	// uses "$1", "$2". We only ever emit one placeholder per query.
+	ph := func(n int) string {
+		if strings.EqualFold(dialect, "postgres") || strings.EqualFold(dialect, "pgx") {
+			return fmt.Sprintf("$%d", n)
+		}
+		return "?"
+	}
+	// Column presence: SQLite path uses PRAGMA; Postgres path skips the
+	// probe (the users table always has role/tenant_id/email/token_version
+	// after AutoMigrate).
+	hasTokenVersion := true
+	if !strings.EqualFold(dialect, "postgres") && !strings.EqualFold(dialect, "pgx") {
+		cols, err := sqliteColumns(ctx, db, "users")
+		if err != nil {
+			return res, fmt.Errorf("normalizeAdminRoles: inspect users: %w", err)
+		}
+		if !cols["role"] || !cols["tenant_id"] || !cols["email"] {
+			return res, nil
+		}
+		hasTokenVersion = cols["token_version"]
+	}
+
+	bootstrapEmail := strings.ToLower(strings.TrimSpace(os.Getenv("ORVIX_ADMIN_EMAIL")))
+
+	// Bootstrap email → platform_super_admin, NULL tenant.
+	if bootstrapEmail != "" {
+		q := "UPDATE users SET role = 'platform_super_admin', tenant_id = NULL"
+		if hasTokenVersion {
+			q += ", token_version = token_version + 1"
+		}
+		q += " WHERE LOWER(email) = " + ph(1) + " AND role IN ('admin','superadmin') "
+		result, err := db.ExecContext(ctx, q, bootstrapEmail)
+		if err != nil {
+			return res, fmt.Errorf("normalizeAdminRoles: bootstrap promote: %w", err)
+		}
+		if n, _ := result.RowsAffected(); n > 0 {
+			res.PlatformPromoted += int(n)
+			log.Printf("normalizeAdminRoles: promoted %d bootstrap row(s) to platform_super_admin", n)
+		}
+	}
+
+	// superadmin (any other email) → platform_super_admin, NULL tenant.
+	{
+		q := "UPDATE users SET role = 'platform_super_admin', tenant_id = NULL"
+		if hasTokenVersion {
+			q += ", token_version = token_version + 1"
+		}
+		q += " WHERE role = 'superadmin'"
+		if bootstrapEmail != "" {
+			q += " AND LOWER(email) <> " + ph(1)
+		}
+		args := []interface{}{}
+		if bootstrapEmail != "" {
+			args = append(args, bootstrapEmail)
+		}
+		result, err := db.ExecContext(ctx, q, args...)
+		if err != nil {
+			return res, fmt.Errorf("normalizeAdminRoles: legacy superadmin: %w", err)
+		}
+		if n, _ := result.RowsAffected(); n > 0 {
+			res.PlatformPromoted += int(n)
+			log.Printf("WARN normalizeAdminRoles: promoted %d non-bootstrap 'superadmin' row(s) to platform_super_admin; review operator identity", n)
+		}
+	}
+
+	// admin + tenant_id IS NOT NULL, != bootstrap → tenant_admin.
+	{
+		q := "UPDATE users SET role = 'tenant_admin'"
+		if hasTokenVersion {
+			q += ", token_version = token_version + 1"
+		}
+		q += " WHERE role = 'admin' AND tenant_id IS NOT NULL"
+		args := []interface{}{}
+		if bootstrapEmail != "" {
+			q += " AND LOWER(email) <> " + ph(1)
+			args = append(args, bootstrapEmail)
+		}
+		result, err := db.ExecContext(ctx, q, args...)
+		if err != nil {
+			return res, fmt.Errorf("normalizeAdminRoles: tenant admin: %w", err)
+		}
+		if n, _ := result.RowsAffected(); n > 0 {
+			res.TenantPromoted += int(n)
+			log.Printf("normalizeAdminRoles: promoted %d 'admin' row(s) with tenant_id to tenant_admin", n)
+		}
+	}
+
+	// admin + tenant_id IS NULL, != bootstrap → AMBIGUOUS (skip + log).
+	{
+		q := "SELECT COUNT(*) FROM users WHERE role = 'admin' AND tenant_id IS NULL"
+		args := []interface{}{}
+		if bootstrapEmail != "" {
+			q += " AND LOWER(email) <> " + ph(1)
+			args = append(args, bootstrapEmail)
+		}
+		var n int
+		if err := db.QueryRowContext(ctx, q, args...).Scan(&n); err == nil && n > 0 {
+			res.Skipped = n
+			log.Printf("ERROR AMBIGUOUS_ADMIN_ROLE normalizeAdminRoles: %d row(s) have role='admin' with no tenant_id and are NOT the bootstrap admin. These accounts have no permissions until an operator picks platform_super_admin (with tenant_id=NULL) or tenant_admin (with tenant_id=<t>) via the recovery CLI (see docs/deployment/break-glass-recovery.md).", n)
+		}
+	}
+
+	// operator + tenant_id IS NOT NULL → tenant_operator.
+	{
+		q := "UPDATE users SET role = 'tenant_operator'"
+		if hasTokenVersion {
+			q += ", token_version = token_version + 1"
+		}
+		q += " WHERE role = 'operator' AND tenant_id IS NOT NULL"
+		result, err := db.ExecContext(ctx, q)
+		if err != nil {
+			return res, fmt.Errorf("normalizeAdminRoles: operator: %w", err)
+		}
+		if n, _ := result.RowsAffected(); n > 0 {
+			res.OperatorRenamed = int(n)
+		}
+	}
+
+	// readonly + tenant_id IS NOT NULL → tenant_readonly.
+	{
+		q := "UPDATE users SET role = 'tenant_readonly'"
+		if hasTokenVersion {
+			q += ", token_version = token_version + 1"
+		}
+		q += " WHERE role = 'readonly' AND tenant_id IS NOT NULL"
+		result, err := db.ExecContext(ctx, q)
+		if err != nil {
+			return res, fmt.Errorf("normalizeAdminRoles: readonly: %w", err)
+		}
+		if n, _ := result.RowsAffected(); n > 0 {
+			res.ReadOnlyRenamed = int(n)
+		}
+	}
+	return res, nil
 }
