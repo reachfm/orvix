@@ -1,0 +1,12 @@
+[Unit]
+Description=Orvix External Backup weekly integrity check
+Documentation=https://github.com/reachfm/orvix
+
+[Timer]
+OnCalendar=Sun 03:15 UTC
+RandomizedDelaySec=30min
+Persistent=true
+Unit=orvix-external-backup-check-weekly.service
+
+[Install]
+WantedBy=timers.target

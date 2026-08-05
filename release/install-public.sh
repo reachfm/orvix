@@ -378,6 +378,16 @@ release/upgrade.sh
 release/uninstall.sh
 release/systemd/orvix.service
 release/systemd/orvix-update.service
+release/systemd/orvix-external-backup.service
+release/systemd/orvix-external-backup.timer
+release/systemd/orvix-external-backup-check-weekly.service
+release/systemd/orvix-external-backup-check-weekly.timer
+release/systemd/orvix-external-backup-check-monthly.service
+release/systemd/orvix-external-backup-check-monthly.timer
+release/scripts/external-backup-stage.sh
+release/scripts/external-backup-run.sh
+release/scripts/external-backup-check.sh
+release/scripts/external-backup-restore-drill.sh
 release/sudoers.d/orvix-update
 release/scripts/smoke-admin-js.sh
 release/scripts/smoke-admin-ui.sh

@@ -1,0 +1,31 @@
+[Unit]
+Description=Orvix External Backup weekly integrity check (5%% data subset)
+Documentation=https://github.com/reachfm/orvix
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=-/etc/orvix/external-backup.env
+ExecStart=/usr/share/orvix/scripts/external-backup-check.sh weekly
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lock
+CacheDirectory=orvix-external-backup
+CacheDirectoryMode=0700
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+RemoveIPC=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=

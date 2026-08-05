@@ -1,0 +1,18 @@
+[Unit]
+Description=Orvix External Backup (daily, jittered)
+Documentation=https://github.com/reachfm/orvix
+# The backup run briefly stops orvix.service to take a consistent snapshot
+# of the mail tree + database (seconds for small installs; scales with mail
+# tree size). Daily-at-03:00-UTC with a 30-minute jitter is the safe
+# default. Operators who need more frequent snapshots and can accept the
+# short outages may override with e.g. `OnCalendar=hourly` via a
+# systemctl edit drop-in.
+
+[Timer]
+OnCalendar=*-*-* 03:00:00 UTC
+RandomizedDelaySec=30min
+Persistent=true
+Unit=orvix-external-backup.service
+
+[Install]
+WantedBy=timers.target
