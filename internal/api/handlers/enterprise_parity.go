@@ -191,13 +191,17 @@ func (h *Handler) PatchAdminTenantBranding(c fiber.Ctx) error {
 		})
 	}
 
-	// Existence check + tenant scope. Superadmins can edit any tenant;
-	// non-superadmins are bound to their own JWT-tenant id.
-	// Was: legacy raw-string comparison against three super-admin spellings.
-	// Now: canonical role check via NormalizeRole — accepts session role
-	// stored as either auth.Role (canonical middleware) or string (legacy
-	// JWT plumbing) during the migration window. Cross-tenant branding is
-	// a platform-super-admin-only escalation.
+	// Existence check + tenant scope. Cross-tenant branding is a
+	// platform-super-admin-only escalation.
+	//
+	// Design note: this authz decision uses an EXPLICIT canonical-role
+	// check, not NormalizeRole and not authrbac.HasPermission — see
+	// admin_queue.go queueAdminGate for the rationale. Accepting either
+	// auth.Role or string in c.Locals("role") is a documented
+	// migration-window compatibility with legacy JWT plumbing; the
+	// canonical super constants are the only accepted values.
+	// RoleSuperAdmin is a documented migration-window alias for
+	// RolePlatformSuperAdmin.
 	callerIsSuper := false
 	var rawRole auth.Role
 	switch v := c.Locals("role").(type) {
@@ -207,9 +211,8 @@ func (h *Handler) PatchAdminTenantBranding(c fiber.Ctx) error {
 		rawRole = auth.Role(v)
 	}
 	if rawRole != "" {
-		canonical, _ := auth.NormalizeRole(rawRole, nil)
-		callerIsSuper = canonical == auth.RolePlatformSuperAdmin ||
-			canonical == auth.RoleSuperAdmin
+		callerIsSuper = rawRole == auth.RolePlatformSuperAdmin ||
+			rawRole == auth.RoleSuperAdmin
 	}
 	ownTenant := h.tenantID(c)
 	if !callerIsSuper && id != ownTenant {

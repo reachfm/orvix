@@ -144,9 +144,11 @@ func classifyCallerIsSuper(local any) bool {
 	if rawRole == "" {
 		return false
 	}
-	canonical, _ := auth.NormalizeRole(rawRole, nil)
-	return canonical == auth.RolePlatformSuperAdmin ||
-		canonical == auth.RoleSuperAdmin
+	// Mirrors production enterprise_parity.go — explicit canonical
+	// check only, no NormalizeRole (which would map deprecated
+	// aliases like "admin" up to super and defeat the gate).
+	return rawRole == auth.RolePlatformSuperAdmin ||
+		rawRole == auth.RoleSuperAdmin
 }
 
 func TestEnterpriseParityCallerSuper_PlatformSuperAdminAllowed(t *testing.T) {
@@ -155,10 +157,23 @@ func TestEnterpriseParityCallerSuper_PlatformSuperAdminAllowed(t *testing.T) {
 	}
 }
 
-func TestEnterpriseParityCallerSuper_LegacyStringSpellingsAllowed(t *testing.T) {
-	for _, s := range []string{"superadmin", "super_admin", "super-admin"} {
+func TestEnterpriseParityCallerSuper_CanonicalStringSpellingAllowed(t *testing.T) {
+	// Only the two canonical spellings ("platform_super_admin" and
+	// the migration-window alias "superadmin") are accepted. Other
+	// legacy variants ("super_admin", "super-admin") are NOT accepted
+	// because that would require NormalizeRole in the authz path —
+	// which this PR explicitly bans (see queueAdminGate rationale).
+	// Anyone still carrying those spellings must be normalised at
+	// session establishment, not at the gate.
+	for _, s := range []string{"platform_super_admin", "superadmin"} {
 		if !classifyCallerIsSuper(s) {
-			t.Errorf("legacy spelling %q must classify as super during migration", s)
+			t.Errorf("canonical spelling %q must classify as super", s)
+		}
+	}
+	for _, s := range []string{"super_admin", "super-admin"} {
+		if classifyCallerIsSuper(s) {
+			t.Errorf("non-canonical spelling %q must NOT classify as super "+
+				"(normalise at session establishment, not at the gate)", s)
 		}
 	}
 }

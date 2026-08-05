@@ -9,23 +9,29 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/auth"
-	authrbac "github.com/orvix/orvix/internal/auth/rbac"
 	"github.com/orvix/orvix/internal/dbdialect"
 	"go.uber.org/zap"
 )
 
-// queueAdminGate returns true if the caller carries the queue.action
-// permission. All current callers (retry, bounce, cancel) are mutating
-// operations, so a single action-scoped gate is correct.
-// Was: legacy role comparison (admin || superadmin). Now: canonical
-// permission check via RBAC — respects RolePlatformSuperAdmin and any
-// future role that grants PermQueueAction.
+// queueAdminGate returns true if the caller is a platform super admin.
+// Queue actions (retry, bounce, cancel) are platform-scoped mutations.
+//
+// Design note: we deliberately use an EXPLICIT canonical-role check
+// here rather than authrbac.HasPermission(role, PermQueueAction).
+// Reason: on this base the RBAC map at internal/auth/rbac/rbac.go
+// still grants PermQueueAction to the deprecated RoleAdmin and to
+// RoleOperator, so a permission-based gate is leaky until PR #58's
+// map-emptying merges. This explicit canonical check denies
+// RoleAdmin and RoleOperator NOW, independent of the RBAC map state,
+// which is the actual defense-in-depth this PR delivers.
+// RoleSuperAdmin is a documented migration-window alias for
+// RolePlatformSuperAdmin (both name the same canonical platform role).
 func (h *Handler) queueAdminGate(c fiber.Ctx) bool {
 	role, ok := c.Locals("role").(auth.Role)
 	if !ok {
 		return false
 	}
-	return authrbac.HasPermission(role, authrbac.PermQueueAction)
+	return role == auth.RolePlatformSuperAdmin || role == auth.RoleSuperAdmin
 }
 
 // QueueMessage represents a queue entry in the API response
