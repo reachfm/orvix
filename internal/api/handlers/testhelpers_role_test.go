@@ -52,7 +52,15 @@ func mustHash(t *testing.T, pw string) string {
 
 func insertUser(t *testing.T, db *sql.DB, email, role string, tenantID *uint) SeededUser {
 	t.Helper()
-	pw := "CanonRolePass!2026-" + role
+	return insertUserWithPassword(t, db, email, role, tenantID, "CanonRolePass!2026-"+role)
+}
+
+// insertUserWithPassword is the underlying primitive that lets callers
+// (or a *WithPassword helper) pin an exact plaintext password so a
+// downstream login flow in the same test can reuse it. The plaintext
+// is still never logged.
+func insertUserWithPassword(t *testing.T, db *sql.DB, email, role string, tenantID *uint, pw string) SeededUser {
+	t.Helper()
 	hash := mustHash(t, pw)
 	now := time.Now().UTC()
 	var (
@@ -115,6 +123,23 @@ func seedTenantSupport(t *testing.T, db *sql.DB, email string, tenantID uint) Se
 func seedTenantReadOnly(t *testing.T, db *sql.DB, email string, tenantID uint) SeededUser {
 	t.Helper()
 	return insertUser(t, db, email, "tenant_readonly", &tenantID)
+}
+
+// seedPlatformSuperAdminWithPassword is the pinned-password variant of
+// seedPlatformSuperAdmin. Use when the test's downstream login flow
+// depends on a specific plaintext password (e.g. hardcoded in a shared
+// helper) — the returned SeededUser.Password field still contains it,
+// but the pinned form makes the intent obvious at call sites.
+func seedPlatformSuperAdminWithPassword(t *testing.T, db *sql.DB, email, password string) SeededUser {
+	t.Helper()
+	return insertUserWithPassword(t, db, email, "platform_super_admin", nil, password)
+}
+
+// seedTenantAdminWithPassword is the pinned-password variant of
+// seedTenantAdmin.
+func seedTenantAdminWithPassword(t *testing.T, db *sql.DB, email string, tenantID uint, password string) SeededUser {
+	t.Helper()
+	return insertUserWithPassword(t, db, email, "tenant_admin", &tenantID, password)
 }
 
 // seedLegacyAdminForMigrationTest inserts the DEPRECATED `role='admin'`
