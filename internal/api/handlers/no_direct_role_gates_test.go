@@ -24,6 +24,20 @@ var allowedRelPaths = map[string]bool{
 	"internal/auth/rbac/rbac_test.go": true,
 }
 
+// normalizeRoleAllowlist — files permitted to call auth.NormalizeRole.
+// NormalizeRole is a session-establishment / login-flow helper; it
+// must not be invoked from request handlers to make authorization
+// decisions (see PR #60 rationale: NormalizeRole silently maps
+// deprecated aliases and, on a base where the RBAC map still grants
+// broad perms to RoleAdmin, would restore the RoleAdmin escalation
+// path this PR closes).
+var normalizeRoleAllowlist = map[string]bool{
+	"internal/auth/auth.go": true, // definition
+	"cmd/orvix/main.go":     true, // bootstrap normalization
+	// Any additional entry MUST be justified inline and MUST NOT be
+	// under internal/api/handlers/ or any request-handler package.
+}
+
 // forbidden — patterns that identify a legacy-role authz gate.
 // These are strict textual patterns: any hit outside allowedRelPaths
 // is a regression.
@@ -34,6 +48,10 @@ var forbidden = []*regexp.Regexp{
 	regexp.MustCompile(`==\s*"admin"\s*\|\|\s*[a-zA-Z_.]+\s*==\s*"superadmin"`),
 	regexp.MustCompile(`==\s*"superadmin"\s*\|\|`),
 }
+
+// normalizeRoleCall — detects auth.NormalizeRole( invocation. Checked
+// separately because it has its OWN allowlist (normalizeRoleAllowlist).
+var normalizeRoleCall = regexp.MustCompile(`auth\.NormalizeRole\s*\(`)
 
 func TestNoDirectLegacyRoleComparisonInProductionCode(t *testing.T) {
 	// Walk up to the repo root: this test file lives at
@@ -76,6 +94,14 @@ func TestNoDirectLegacyRoleComparisonInProductionCode(t *testing.T) {
 				trimmed := strings.TrimSpace(line)
 				if strings.HasPrefix(trimmed, "//") {
 					continue
+				}
+				// NormalizeRole ban: independent of the legacy-role
+				// gate check, calling auth.NormalizeRole outside the
+				// enumerated allowlist is itself a violation.
+				if !normalizeRoleAllowlist[rel] && normalizeRoleCall.MatchString(line) {
+					violations = append(violations,
+						rel+":"+itoa(lineNo+1)+"  "+strings.TrimSpace(line)+
+							"   [pattern: auth.NormalizeRole( outside allowlist]")
 				}
 				// Migration-window pattern: a line that names BOTH the
 				// canonical platform-super-admin role AND the legacy
