@@ -1006,10 +1006,23 @@ func (h *Handler) DeleteAPIKey(c fiber.Ctx) error {
 }
 
 // Me returns the current user's profile.
+//
+// PORTAL-SEPARATION-PHASE1: adds a server-derived `portal` field the
+// admin SPA uses to pick between the Platform shell and the Organization
+// shell. Derivation is fail-closed:
+//   - RolePlatformSuperAdmin (or the legacy RoleSuperAdmin) → "platform".
+//     No `organization` field.
+//   - Any tenant role with a non-NULL tenant_id → "organization" and an
+//     `organization` object with id/name/slug.
+//   - Anything else (unknown role, tenant role without tenant_id) →
+//     empty portal string. The client MUST refuse to render a shell.
+//
+// The client never sends `portal`; it is derived here every request.
 func (h *Handler) Me(c fiber.Ctx) error {
 	userID := c.Locals("user_id").(uint)
 
 	var email, role string
+	var tenantID sql.NullInt64
 
 	sqlDB, err := h.db.DB()
 	if err != nil {
@@ -1017,17 +1030,46 @@ func (h *Handler) Me(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
 	}
 
-	err = sqlDB.QueryRow("SELECT email, role FROM users WHERE id = "+h.dialect.Placeholder(1), userID).Scan(&email, &role)
+	err = sqlDB.QueryRow("SELECT email, role, tenant_id FROM users WHERE id = "+h.dialect.Placeholder(1), userID).Scan(&email, &role, &tenantID)
 	if err != nil {
 		h.logger.Warn("user not found", zap.Uint("user_id", userID), zap.Error(err))
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "user not found"})
 	}
 
-	return c.JSON(fiber.Map{
-		"id":    userID,
-		"email": email,
-		"role":  role,
-	})
+	portal := ""
+	var org fiber.Map
+	switch auth.Role(role) {
+	case auth.RolePlatformSuperAdmin, auth.RoleSuperAdmin:
+		portal = "platform"
+	case auth.RoleTenantAdmin, auth.RoleTenantOperator, auth.RoleTenantSupport, auth.RoleTenantReadOnly:
+		if tenantID.Valid && tenantID.Int64 > 0 {
+			portal = "organization"
+			var tName, tSlug string
+			if qerr := sqlDB.QueryRow("SELECT name, slug FROM tenants WHERE id = "+h.dialect.Placeholder(1)+" AND deleted_at IS NULL", tenantID.Int64).Scan(&tName, &tSlug); qerr == nil {
+				org = fiber.Map{"id": tenantID.Int64, "name": tName, "slug": tSlug}
+			} else {
+				// Fail closed: tenant role without a resolvable tenant is
+				// broken data — do not surface a portal.
+				portal = ""
+			}
+		}
+	default:
+		// Unknown / legacy un-normalized role → no portal. The client
+		// shows an access-denied screen instead of falling through to
+		// the platform shell.
+		portal = ""
+	}
+
+	resp := fiber.Map{
+		"id":     userID,
+		"email":  email,
+		"role":   role,
+		"portal": portal,
+	}
+	if org != nil {
+		resp["organization"] = org
+	}
+	return c.JSON(resp)
 }
 
 // ListDomains returns all mail domains with live mailbox counts.
@@ -1931,7 +1973,12 @@ func (h *Handler) ListUsers(c fiber.Ctx) error {
 				if q != "" && !strings.Contains(strings.ToLower(email), strings.ToLower(q)) {
 					continue
 				}
-				isAdmin := role == "admin" || role == "superadmin"
+				// PORTAL-SEPARATION-PHASE1: check canonical + legacy role
+				// literals. Legacy "admin"/"superadmin" rows are remapped by
+				// normalizeAdminRoles at startup; the extra strings keep the
+				// filter honest during the transition window.
+				r := auth.Role(role)
+				isAdmin := r == auth.RolePlatformSuperAdmin || r == auth.RoleTenantAdmin || r == auth.RoleSuperAdmin || r == auth.RoleAdmin
 				switch adminFilter {
 				case "true":
 					if !isAdmin {

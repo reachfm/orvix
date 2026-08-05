@@ -77,6 +77,11 @@ export default function App() {
   const [authenticated, setAuthenticated] = useState(false);
   const [authLoading, setAuthLoading] = useState(true);
   const [userRole, setUserRole] = useState("");
+  // PORTAL-SEPARATION-PHASE1: portal is derived on the server from the
+  // authenticated user's role + tenant (see /api/v1/me). The client
+  // never sends this — it only reads it. "" means the backend refused
+  // to classify the user; the UI shows nothing platform-scoped.
+  const [portal, setPortal] = useState<"platform" | "organization" | "">("");
 
   useEffect(() => {
     fetch("/api/v1/me", { credentials: "include" })
@@ -86,15 +91,20 @@ export default function App() {
           try {
             const u = await r.json();
             setUserRole(u.role || "");
+            setPortal((u.portal === "platform" || u.portal === "organization") ? u.portal : "");
             initCSRF().catch(() => {});
-          } catch { setUserRole(""); }
+          } catch { setUserRole(""); setPortal(""); }
         }
         setAuthLoading(false);
       })
       .catch(() => { setAuthenticated(false); setAuthLoading(false); });
   }, []);
 
-  const isPlatformRole = userRole === "admin" || userRole === "superadmin" || userRole === "operator";
+  // Portal-derived shell gate. Platform items are visible ONLY when
+  // /me.portal === "platform"; anything else (organization, unknown,
+  // fail-closed empty) hides them.
+  const isPlatformRole = portal === "platform";
+  void userRole; // kept for downstream code paths; portal is the authoritative gate.
 
   const filteredTabs = tabs.filter((t) => {
     if (!isPlatformRole) {
