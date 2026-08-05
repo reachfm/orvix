@@ -9,20 +9,23 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/auth"
+	authrbac "github.com/orvix/orvix/internal/auth/rbac"
 	"github.com/orvix/orvix/internal/dbdialect"
 	"go.uber.org/zap"
 )
 
-// queueAdminGate returns true if the caller has admin or super_admin role.
-// The product uses role-based access control: admin and super_admin roles
-// have full queue read and action access. No granular queue.read/queue.action
-// permission system exists yet — the admin role gates all queue endpoints.
+// queueAdminGate returns true if the caller carries the queue.action
+// permission. All current callers (retry, bounce, cancel) are mutating
+// operations, so a single action-scoped gate is correct.
+// Was: legacy role comparison (admin || superadmin). Now: canonical
+// permission check via RBAC — respects RolePlatformSuperAdmin and any
+// future role that grants PermQueueAction.
 func (h *Handler) queueAdminGate(c fiber.Ctx) bool {
 	role, ok := c.Locals("role").(auth.Role)
 	if !ok {
 		return false
 	}
-	return role == auth.RoleAdmin || role == auth.RoleSuperAdmin
+	return authrbac.HasPermission(role, authrbac.PermQueueAction)
 }
 
 // QueueMessage represents a queue entry in the API response

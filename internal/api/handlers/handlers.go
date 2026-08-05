@@ -1931,7 +1931,14 @@ func (h *Handler) ListUsers(c fiber.Ctx) error {
 				if q != "" && !strings.Contains(strings.ToLower(email), strings.ToLower(q)) {
 					continue
 				}
-				isAdmin := role == "admin" || role == "superadmin"
+				// Was: legacy role string comparison. Now: canonical role
+				// classification via NormalizeRole — recognizes tenant_admin,
+				// platform_super_admin, etc. Row-level classification (not authz).
+				canonical, _ := auth.NormalizeRole(auth.Role(role), nil)
+				isAdmin := canonical == auth.RolePlatformSuperAdmin ||
+					canonical == auth.RoleSuperAdmin ||
+					canonical == auth.RoleTenantAdmin ||
+					canonical == auth.RoleAdmin
 				switch adminFilter {
 				case "true":
 					if !isAdmin {
