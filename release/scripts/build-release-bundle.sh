@@ -181,6 +181,10 @@ REQUIRED_FILES=(
     release/systemd/orvix-external-backup-check-weekly.timer
     release/systemd/orvix-external-backup-check-monthly.service
     release/systemd/orvix-external-backup-check-monthly.timer
+    release/scripts/external-backup-stage.sh
+    release/scripts/external-backup-run.sh
+    release/scripts/external-backup-check.sh
+    release/scripts/external-backup-restore-drill.sh
     release/sudoers.d/orvix-update
     release/scripts/healthcheck.sh
     release/scripts/smoke-admin-js.sh
@@ -454,6 +458,14 @@ cp release/systemd/orvix-external-backup-check-weekly.service   "$BUNDLE_ROOT/re
 cp release/systemd/orvix-external-backup-check-weekly.timer     "$BUNDLE_ROOT/release/systemd/orvix-external-backup-check-weekly.timer"
 cp release/systemd/orvix-external-backup-check-monthly.service  "$BUNDLE_ROOT/release/systemd/orvix-external-backup-check-monthly.service"
 cp release/systemd/orvix-external-backup-check-monthly.timer    "$BUNDLE_ROOT/release/systemd/orvix-external-backup-check-monthly.timer"
+# External-backup scripts are also picked up by the release/scripts/*.sh glob
+# below, but list them explicitly so a glob change or a rename can never
+# silently drop them — same reason install-public.sh's validate_bundle_layout
+# and smoke-install-public.sh's synthetic fixture list them by name.
+cp release/scripts/external-backup-stage.sh         "$BUNDLE_ROOT/release/scripts/external-backup-stage.sh"
+cp release/scripts/external-backup-run.sh           "$BUNDLE_ROOT/release/scripts/external-backup-run.sh"
+cp release/scripts/external-backup-check.sh         "$BUNDLE_ROOT/release/scripts/external-backup-check.sh"
+cp release/scripts/external-backup-restore-drill.sh "$BUNDLE_ROOT/release/scripts/external-backup-restore-drill.sh"
 cp release/sudoers.d/orvix-update       "$BUNDLE_ROOT/release/sudoers.d/orvix-update"
 
 for s in release/scripts/*.sh; do
@@ -543,6 +555,10 @@ BUNDLE_REQUIRED=(
     release/systemd/orvix-external-backup-check-weekly.timer
     release/systemd/orvix-external-backup-check-monthly.service
     release/systemd/orvix-external-backup-check-monthly.timer
+    release/scripts/external-backup-stage.sh
+    release/scripts/external-backup-run.sh
+    release/scripts/external-backup-check.sh
+    release/scripts/external-backup-restore-drill.sh
     release/sudoers.d/orvix-update
     release/admin/index.html
     release/webmail/index.html

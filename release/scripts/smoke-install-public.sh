@@ -217,10 +217,29 @@ exit 0
 BIN_EOF
     chmod +x "$BUNDLE_STAGING/bin/orvix"
 
-    # All required admin/webmail/systemd/sudoers/scripts files
+    # All required admin/webmail/systemd/sudoers/scripts files.
+    #
+    # This synthetic fixture is a fourth hand-maintained manifest that must
+    # stay in sync with install-public.sh's validate_bundle_layout list. When
+    # PR #55 added the six external-backup systemd units and four scripts to
+    # the validator, this fixture kept the shorter pre-PR#55 shape, so the
+    # smoke test built a fake bundle without the new files and validate_
+    # bundle_layout correctly rejected it — cratering the post-merge Release
+    # Bundle workflow. See release/scripts/tests/test-external-backup-manifests.sh
+    # for the cross-manifest sync check that catches this drift.
     for rel in \
         release/install-public.sh release/upgrade.sh release/uninstall.sh \
         release/systemd/orvix.service release/systemd/orvix-update.service \
+        release/systemd/orvix-external-backup.service \
+        release/systemd/orvix-external-backup.timer \
+        release/systemd/orvix-external-backup-check-weekly.service \
+        release/systemd/orvix-external-backup-check-weekly.timer \
+        release/systemd/orvix-external-backup-check-monthly.service \
+        release/systemd/orvix-external-backup-check-monthly.timer \
+        release/scripts/external-backup-stage.sh \
+        release/scripts/external-backup-run.sh \
+        release/scripts/external-backup-check.sh \
+        release/scripts/external-backup-restore-drill.sh \
         release/sudoers.d/orvix-update \
         release/scripts/smoke-admin-js.sh release/scripts/smoke-admin-ui.sh \
         release/scripts/smoke-admin-browser.sh \
