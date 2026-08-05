@@ -13,16 +13,25 @@ import (
 	"go.uber.org/zap"
 )
 
-// queueAdminGate returns true if the caller has admin or super_admin role.
-// The product uses role-based access control: admin and super_admin roles
-// have full queue read and action access. No granular queue.read/queue.action
-// permission system exists yet — the admin role gates all queue endpoints.
+// queueAdminGate returns true if the caller is a platform super admin.
+// Queue actions (retry, bounce, cancel) are platform-scoped mutations.
+//
+// Design note: we deliberately use an EXPLICIT canonical-role check
+// here rather than authrbac.HasPermission(role, PermQueueAction).
+// Reason: on this base the RBAC map at internal/auth/rbac/rbac.go
+// still grants PermQueueAction to the deprecated RoleAdmin and to
+// RoleOperator, so a permission-based gate is leaky until PR #58's
+// map-emptying merges. This explicit canonical check denies
+// RoleAdmin and RoleOperator NOW, independent of the RBAC map state,
+// which is the actual defense-in-depth this PR delivers.
+// RoleSuperAdmin is a documented migration-window alias for
+// RolePlatformSuperAdmin (both name the same canonical platform role).
 func (h *Handler) queueAdminGate(c fiber.Ctx) bool {
 	role, ok := c.Locals("role").(auth.Role)
 	if !ok {
 		return false
 	}
-	return role == auth.RoleAdmin || role == auth.RoleSuperAdmin
+	return role == auth.RolePlatformSuperAdmin || role == auth.RoleSuperAdmin
 }
 
 // QueueMessage represents a queue entry in the API response

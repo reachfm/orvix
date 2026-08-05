@@ -77,8 +77,12 @@ func buildQueueTestEnv(t *testing.T) *queueTestEnv {
 	if err != nil {
 		t.Fatalf("hash: %v", err)
 	}
+	// Seed with the canonical super-admin role. Was 'admin' (the
+	// deprecated ambiguous role); the queueAdminGate now denies
+	// RoleAdmin as part of the PR #60 canonical-role hardening, so
+	// this fixture must carry a canonical platform-super role.
 	if _, err := sqlDB.Exec(
-		"INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'admin@orvix.email', ?, 'admin', 1, 1, 1)",
+		"INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'admin@orvix.email', ?, 'superadmin', 1, 1, 1)",
 		now, now, hash,
 	); err != nil {
 		t.Fatalf("insert admin: %v", err)

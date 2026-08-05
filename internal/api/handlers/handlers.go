@@ -1931,7 +1931,21 @@ func (h *Handler) ListUsers(c fiber.Ctx) error {
 				if q != "" && !strings.Contains(strings.ToLower(email), strings.ToLower(q)) {
 					continue
 				}
-				isAdmin := role == "admin" || role == "superadmin"
+				// Row-level DISPLAY classification for the users list.
+				// This is NOT an authorization gate — it feeds the
+				// isAdmin column in the response so the UI can badge
+				// admin users. Kept as a direct string membership check
+				// (no NormalizeRole call in handler code — see the
+				// no_direct_role_gates_test scanner for why) and
+				// recognises the full set of admin-shaped role strings
+				// including deprecated aliases so pre-migration rows
+				// still display correctly.
+				isAdmin := role == string(auth.RolePlatformSuperAdmin) ||
+					role == string(auth.RoleSuperAdmin) ||
+					role == string(auth.RoleTenantAdmin) ||
+					role == string(auth.RoleAdmin) ||
+					role == "super_admin" ||
+					role == "super-admin"
 				switch adminFilter {
 				case "true":
 					if !isAdmin {
