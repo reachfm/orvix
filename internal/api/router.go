@@ -1120,7 +1120,17 @@ func (r *Router) setupRoutes() {
 	// no-ops on GET/HEAD/OPTIONS and on API-key-authenticated requests,
 	// so this adds no burden to the read-only routes or to the
 	// provisioning API below.
-	admin := protected.Group("", auth.RequireAnyRole(auth.RoleAdmin, auth.RoleSuperAdmin, auth.RolePlatformSuperAdmin), r.csrf.Middleware())
+	// PORTAL-SEPARATION-PHASE1: the deprecated auth.RoleAdmin was removed from
+	// this gate. Legacy "admin" rows are remapped to either RolePlatformSuperAdmin
+	// or RoleTenantAdmin at startup by normalizeAdminRoles (internal/models),
+	// so no legitimate account is affected. The RoleAdmin permission map has
+	// also been removed from internal/auth/rbac so any un-normalized "admin"
+	// row can neither pass this gate nor satisfy any per-route authrbac.Require.
+	// Tenant admins keep console access via RoleTenantAdmin; strictly platform-
+	// only routes below (backups, firewall, modules, license, monitoring, etc.)
+	// remain reachable only to platform super admins because their per-handler
+	// permission checks fail for tenant roles that lack those permissions.
+	admin := protected.Group("", auth.RequireAnyRole(auth.RoleTenantAdmin, auth.RoleSuperAdmin, auth.RolePlatformSuperAdmin), r.csrf.Middleware())
 	admin.Get("/domains", r.h.ListDomains)
 	admin.Get("/users", r.h.ListUsers)
 	admin.Get("/mailboxes", r.h.ListMailboxes)

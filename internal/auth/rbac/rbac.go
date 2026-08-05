@@ -288,28 +288,14 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermPlatformSecurityRead:   true,
 		PermPlatformSessionsRevoke: true,
 	},
-	auth.RoleAdmin: {
-		PermQueueRead: true, PermQueueAction: true,
-		PermSettingsRead: true, PermSettingsWrite: true,
-		PermBackupsRead: true, PermBackupsWrite: true,
-		PermMonitoringRead: true,
-		PermLicenseRead:    true,
-		PermUsersRead:      true, PermUsersWrite: true,
-		PermAuditRead:         true,
-		PermOrganizationsRead: true, PermOrganizationsWrite: true,
-		PermDomainsRead: true, PermDomainsWrite: true,
-		PermMailboxesRead: true, PermMailboxesWrite: true,
-		PermCredentialsReset: true,
-		PermSessionsRevoke:   true,
-		PermDashboardRead:    true,
-		PermSecurityRead:     true,
-		PermAliasesRead:      true, PermAliasesWrite: true,
-		PermGroupsRead: true, PermGroupsWrite: true,
-		PermInvitationsRead: true, PermInvitationsWrite: true,
-		PermOwnershipTransfer: true,
-		PermAPIKeysRead:       true, PermAPIKeysWrite: true,
-		PermBillingRead: true, PermBillingWrite: true,
-	},
+	// PORTAL-SEPARATION-PHASE1: the deprecated auth.RoleAdmin no longer maps
+	// to any permission. Legacy "admin" rows are normalized at startup
+	// (see internal/models normalizeAdminRoles) to either
+	// RolePlatformSuperAdmin (tenant_id IS NULL) or RoleTenantAdmin
+	// (tenant_id IS NOT NULL). A row that still carries "admin" after
+	// normalization is an operator-review case (AMBIGUOUS_ADMIN_ROLE) and
+	// must have no privilege until a human decides.
+	auth.RoleAdmin: {},
 	auth.RoleOperator: {
 		PermQueueRead: true, PermQueueAction: true,
 		PermSettingsRead:   true,

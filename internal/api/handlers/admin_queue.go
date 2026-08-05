@@ -13,16 +13,18 @@ import (
 	"go.uber.org/zap"
 )
 
-// queueAdminGate returns true if the caller has admin or super_admin role.
-// The product uses role-based access control: admin and super_admin roles
-// have full queue read and action access. No granular queue.read/queue.action
-// permission system exists yet — the admin role gates all queue endpoints.
+// queueAdminGate returns true if the caller has platform-super-admin
+// authority. PORTAL-SEPARATION-PHASE1: the mail queue is a platform-wide
+// resource — a tenant admin must not see or act on another tenant's
+// messages. The deprecated RoleAdmin is intentionally excluded because
+// after startup normalization no legitimate user carries it, and the
+// RoleAdmin permission map has been emptied in internal/auth/rbac.
 func (h *Handler) queueAdminGate(c fiber.Ctx) bool {
 	role, ok := c.Locals("role").(auth.Role)
 	if !ok {
 		return false
 	}
-	return role == auth.RoleAdmin || role == auth.RoleSuperAdmin
+	return role == auth.RolePlatformSuperAdmin || role == auth.RoleSuperAdmin
 }
 
 // QueueMessage represents a queue entry in the API response
