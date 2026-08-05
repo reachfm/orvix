@@ -468,7 +468,7 @@ func TestFreshInstall_DatabaseHasExactlyOneAdminUser(t *testing.T) {
 
 	var count int
 	if err := h.sqlDB.QueryRow(
-		`SELECT COUNT(*) FROM users WHERE email = ? AND role = 'admin' AND active = 1`,
+		`SELECT COUNT(*) FROM users WHERE email = ? AND role IN ('admin','platform_super_admin') AND active = 1`,
 		h.email,
 	).Scan(&count); err != nil {
 		t.Fatalf("count users: %v", err)

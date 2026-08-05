@@ -33,14 +33,18 @@ func TestHasPermission_Matrix(t *testing.T) {
 		{auth.RoleSuperAdmin, PermUsersWrite, true},
 		{auth.RoleSuperAdmin, PermAuditRead, true},
 
-		// Admin: everything except license.write.
-		{auth.RoleAdmin, PermQueueRead, true},
-		{auth.RoleAdmin, PermQueueAction, true},
-		{auth.RoleAdmin, PermSettingsWrite, true},
-		{auth.RoleAdmin, PermBackupsWrite, true},
-		{auth.RoleAdmin, PermLicenseRead, true},
-		{auth.RoleAdmin, PermLicenseWrite, false}, // reserved for super_admin
-		{auth.RoleAdmin, PermAuditRead, true},
+		// PORTAL-SEPARATION-PHASE1: the deprecated RoleAdmin no longer
+		// maps to any permission. Legacy "admin" rows are normalized at
+		// startup to platform_super_admin or tenant_admin; any row that
+		// still carries "admin" is AMBIGUOUS and must have zero
+		// privilege until an operator intervenes.
+		{auth.RoleAdmin, PermQueueRead, false},
+		{auth.RoleAdmin, PermQueueAction, false},
+		{auth.RoleAdmin, PermSettingsWrite, false},
+		{auth.RoleAdmin, PermBackupsWrite, false},
+		{auth.RoleAdmin, PermLicenseRead, false},
+		{auth.RoleAdmin, PermLicenseWrite, false},
+		{auth.RoleAdmin, PermAuditRead, false},
 
 		// Operator: read everything, action on queue + users.
 		{auth.RoleOperator, PermQueueRead, true},
@@ -174,9 +178,11 @@ func TestRolePermissionList_SuperAdminIsAll(t *testing.T) {
 }
 
 func TestRequire_AllPermsPresent(t *testing.T) {
+	// PORTAL-SEPARATION-PHASE1: use RoleSuperAdmin instead of the
+	// deprecated RoleAdmin (which now has zero permissions).
 	app := fiber.New()
 	app.Get("/x", func(c fiber.Ctx) error {
-		c.Locals("role", auth.RoleAdmin)
+		c.Locals("role", auth.RoleSuperAdmin)
 		return c.Next()
 	}, Require(PermQueueRead, PermQueueAction), func(c fiber.Ctx) error {
 		return c.SendStatus(200)
@@ -187,7 +193,7 @@ func TestRequire_AllPermsPresent(t *testing.T) {
 		t.Fatalf("test: %v", err)
 	}
 	if resp.StatusCode != 200 {
-		t.Errorf("admin should pass queue.read+queue.action, got %d", resp.StatusCode)
+		t.Errorf("super_admin should pass queue.read+queue.action, got %d", resp.StatusCode)
 	}
 }
 

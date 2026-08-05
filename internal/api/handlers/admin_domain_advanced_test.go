@@ -80,8 +80,11 @@ func buildAdminDomainAdvancedEnv(t *testing.T) *adminDomainAdvancedEnv {
 	)
 	adminHash, _ := bcrypt.GenerateFromPassword([]byte(adminPass), bcrypt.DefaultCost)
 	userHash, _ := bcrypt.GenerateFromPassword([]byte(userPass), bcrypt.DefaultCost)
+	// PORTAL-SEPARATION-PHASE1: plant the canonical tenant-scoped admin
+	// role directly. The deprecated "admin" role has an empty RBAC map
+	// after Phase 1a and would 403 on every domain write.
 	if _, err := sqlDB.Exec(
-		"INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, ?, ?, 'admin', 1, 1, 1)",
+		"INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, ?, ?, 'tenant_admin', 1, 1, 1)",
 		now, now, adminEmail, string(adminHash),
 	); err != nil {
 		t.Fatalf("insert admin user: %v", err)

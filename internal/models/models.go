@@ -567,6 +567,7 @@ func MigrateAllRaw(db *gorm.DB) error {
 			locale TEXT NOT NULL DEFAULT '',
 			timezone TEXT NOT NULL DEFAULT '',
 			theme TEXT NOT NULL DEFAULT 'dark',
+			token_version INTEGER NOT NULL DEFAULT 0,
 			UNIQUE(email, deleted_at)
 		)`,
 		`CREATE TABLE IF NOT EXISTS user_notification_preferences (
@@ -1524,6 +1525,9 @@ func migrateUsersProfileSchema(ctx context.Context, db *sql.DB) error {
 		{"locale", "ALTER TABLE users ADD COLUMN locale TEXT NOT NULL DEFAULT ''"},
 		{"timezone", "ALTER TABLE users ADD COLUMN timezone TEXT NOT NULL DEFAULT ''"},
 		{"theme", "ALTER TABLE users ADD COLUMN theme TEXT NOT NULL DEFAULT 'dark'"},
+		// PORTAL-SEPARATION-PHASE1: bumped by NormalizeAdminRoles and validated
+		// by internal/auth on every JWT check; missing on pre-Phase1 SQLite DBs.
+		{"token_version", "ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0"},
 	}
 
 	for _, addition := range additions {

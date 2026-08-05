@@ -2729,7 +2729,7 @@ verify_install() {
 		command -v sqlite3 >/dev/null 2>&1 || fail "sqlite3 is not installed"
 		[ -f /var/lib/orvix/orvix.db ] || fail "database does not exist at /var/lib/orvix/orvix.db"
 	fi
-	users_count="$(_orvix_db_scalar "SELECT COUNT(*) FROM users WHERE email = '$sql_email' AND role = 'admin' AND active = $(_orvix_db_true);" || true)"
+	users_count="$(_orvix_db_scalar "SELECT COUNT(*) FROM users WHERE email = '$sql_email' AND role IN ('admin','platform_super_admin') AND active = $(_orvix_db_true);" || true)"
 	[ "$users_count" = "1" ] || fail "bootstrapped admin user row was not created for $email"
 	mailbox_count="$(_orvix_db_scalar "SELECT COUNT(*) FROM coremail_mailboxes WHERE email = '$sql_email' AND is_admin = $(_orvix_db_true) AND status = 'active' AND deleted_at IS NULL;" || true)"
 	[ "$mailbox_count" = "1" ] || fail "bootstrapped admin mailbox row was not created for $email"
