@@ -272,15 +272,76 @@ jobs:
           api GET /api/v1/license | jq -e 'type=="object"' >/dev/null
           echo "license_verification=PASS" >> "$RESULTS_FILE"
 
-          # --- Tenant creation: domain + mailbox ---
+          # --- Provision a canonical tenant_admin identity ---
+          # The bootstrap admin (role='admin' on current main; will become
+          # 'platform_super_admin' after PR#58) is the platform identity —
+          # keep it exclusively for platform-scoped operations (backups /
+          # restore / license). Tenant-scoped calls (domains, mailboxes)
+          # MUST run under a distinct canonical tenant_admin so the harness
+          # exercises the same authorization boundary that will be enforced
+          # once the migration is complete.
+          #
+          # No canonical create-member API exists yet on this branch, so
+          # provision the row directly against the SQLite runtime. Password
+          # material never appears in workflow output: we generate it,
+          # write it 0600 to a tmpfs path, and shred it in the final step.
+          TENANT_ADMIN_EMAIL="tenant-admin@${STAGING_DOMAIN}"
+          TENANT_PASSWORD="$(openssl rand -base64 24)"
+          umask 077
+          printf '%s' "$TENANT_PASSWORD" > /tmp/tenant_password
+          chmod 0600 /tmp/tenant_password
+          # bcrypt cost 10, canonical $2a$ prefix (Go crypto/bcrypt reads
+          # $2a$ / $2b$ transparently; installer emits $2a$).
+          TENANT_HASH="$(htpasswd -bnBC 10 "" "$TENANT_PASSWORD" | tr -d ':\n' | sed 's/^\$2y\$/\$2a\$/')"
+          # tenant_id 1 is the bootstrap admin's tenant on a fresh install.
+          BOOTSTRAP_TID="$(sudo sqlite3 /var/lib/orvix/orvix.db "SELECT tenant_id FROM users WHERE email='${ADMIN_EMAIL}' LIMIT 1;")"
+          [ -n "$BOOTSTRAP_TID" ] || { echo "could not resolve bootstrap tenant_id"; exit 1; }
+          NOW_UTC="$(date -u '+%Y-%m-%d %H:%M:%S')"
+          sudo sqlite3 /var/lib/orvix/orvix.db \
+            "INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES ('${NOW_UTC}', '${NOW_UTC}', '${TENANT_ADMIN_EMAIL}', '${TENANT_HASH}', 'tenant_admin', ${BOOTSTRAP_TID}, 1, 1);"
+          # Verify without logging any secret: existence only.
+          sudo sqlite3 /var/lib/orvix/orvix.db "SELECT COUNT(*) FROM users WHERE email='${TENANT_ADMIN_EMAIL}' AND role='tenant_admin' AND active=1;" | grep -q '^1$' \
+            || { echo "tenant_admin identity was not seeded"; exit 1; }
+
+          # Log in as the tenant_admin; capture TENANT_TOKEN. Never echo it.
+          # We temporarily null TOKEN/CSRF so api() does not send the
+          # platform bearer on the login call.
+          _saved_token="$TOKEN"; _saved_csrf="$CSRF"; TOKEN=""; CSRF=""
+          tenant_login_body="$(api POST /api/v1/auth/login "$(jq -nc --arg e "$TENANT_ADMIN_EMAIL" --arg p "$TENANT_PASSWORD" '{email:$e,password:$p}')")"
+          TENANT_TOKEN="$(echo "$tenant_login_body" | jq -r '.access_token')"
+          [ -n "$TENANT_TOKEN" ] && [ "$TENANT_TOKEN" != "null" ] || { echo "tenant_admin login did not return a token"; exit 1; }
+          # Fetch a CSRF token issued to the tenant session.
+          TENANT_CSRF="$(curl -sS -H "Authorization: Bearer $TENANT_TOKEN" "$BASE/api/v1/csrf-token" | jq -r '.csrf_token')"
+          [ -n "$TENANT_CSRF" ] && [ "$TENANT_CSRF" != "null" ] || { echo "no tenant CSRF"; exit 1; }
+          TOKEN="$_saved_token"; CSRF="$_saved_csrf"
+
+          # tenant_api: same strict-JSON contract as api(), but the bearer
+          # and CSRF are the tenant_admin's — used for every tenant-scoped
+          # call in this harness.
+          tenant_api() {
+            local method="$1" path="$2" data="${3:-}"
+            local args=(-sS -o /tmp/body -w '%{http_code}' -X "$method" "$BASE$path" \
+              -H "Authorization: Bearer $TENANT_TOKEN" \
+              -H "X-CSRF-Token: $TENANT_CSRF" -H "Cookie: csrf_token=$TENANT_CSRF")
+            if [ -n "$data" ]; then args+=(-H 'Content-Type: application/json' --data "$data"); fi
+            local code; code="$(curl "${args[@]}")" || { echo "TRANSPORT ERROR: $method $path" >&2; return 1; }
+            local body; body="$(cat /tmp/body)"
+            if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then echo "HTTP $code: $method $path :: $body" >&2; return 1; fi
+            echo "$body" | jq -e . >/dev/null 2>&1 || { echo "INVALID JSON: $method $path :: $body" >&2; return 1; }
+            if echo "$body" | jq -e 'type=="object" and has("error")' >/dev/null 2>&1; then echo "ERROR JSON: $method $path :: $body" >&2; return 1; fi
+            printf '%s' "$body"
+          }
+          echo "tenant_identity_provisioning=PASS" >> "$RESULTS_FILE"
+
+          # --- Tenant creation: domain + mailbox (as tenant_admin) ---
           # Use a fresh domain (the installer bootstrap already created the
           # admin's own domain, which would 409 here).
           CREATE_DOMAIN="accept-$(date +%s).orvix.test"
-          api POST /api/v1/domains "$(jq -nc --arg n "$CREATE_DOMAIN" '{name:$n}')" >/dev/null
+          tenant_api POST /api/v1/domains "$(jq -nc --arg n "$CREATE_DOMAIN" '{name:$n}')" >/dev/null
           MB="acceptance@$CREATE_DOMAIN"
-          api POST /api/v1/mailboxes "$(jq -nc --arg e "$MB" '{email:$e,password:"AcceptPass123!x"}')" >/dev/null
+          tenant_api POST /api/v1/mailboxes "$(jq -nc --arg e "$MB" '{email:$e,password:"AcceptPass123!x"}')" >/dev/null
           # Prove the mailbox is actually queryable back.
-          api GET /api/v1/mailboxes | jq -e --arg e "$MB" 'any((.mailboxes? // .) []?; (.email? // "")==$e)' >/dev/null \
+          tenant_api GET /api/v1/mailboxes | jq -e --arg e "$MB" 'any((.mailboxes? // .) []?; (.email? // "")==$e)' >/dev/null \
             || { echo "created mailbox not found in listing"; exit 1; }
           echo "tenant_creation=PASS" >> "$RESULTS_FILE"
 
@@ -368,13 +429,21 @@ jobs:
           done
           echo "operations_ui=PASS" >> "$RESULTS_FILE"
 
+      - name: Shred ephemeral credential files
+        if: always()
+        run: |
+          # Best-effort scrub of the on-disk password material. Both files
+          # were written 0600; shred removes the plaintext even if the
+          # runner is later inspected.
+          shred -u /tmp/admin_password /tmp/tenant_password 2>/dev/null || rm -f /tmp/admin_password /tmp/tenant_password
+
       - name: Produce report (from actual results only)
         if: always()
         run: |
           set -euo pipefail
           # Build the report strictly from recorded results. A check that did
           # not record PASS is reported as FAIL/absent — never hard-coded.
-          checks="bundle_build install startup postgres_migration health license_verification tenant_creation tenant_isolation encrypted_backup restore restore_rollback metrics operations_ui"
+          checks="bundle_build install startup postgres_migration health license_verification tenant_identity_provisioning tenant_creation tenant_isolation encrypted_backup restore restore_rollback metrics operations_ui"
           overall="PASS"
           {
             echo "{"
