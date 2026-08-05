@@ -391,7 +391,7 @@ func TestLoginAcceptsUsernameField(t *testing.T) {
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 	_, err = sqlDB.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		 VALUES (?, ?, 'admin@test.local', ?, 'tenant_admin', 1, 1, 1)`,
 		now, now, hashedPw,
 	)
 	if err != nil {
@@ -454,7 +454,7 @@ func TestAdminListEndpointsReturnArraysAndBootstrapRows(t *testing.T) {
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 	_, err = sqlDB.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		 VALUES (?, ?, 'admin@test.local', ?, 'tenant_admin', 1, 1, 1)`,
 		now, now, hashedPw,
 	)
 	if err != nil {
@@ -961,7 +961,7 @@ func TestDomainManagement(t *testing.T) {
 	hashedPw, _ := authenticator.HashPassword("TestPassword123!")
 	_, err = sqlDB.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		 VALUES (?, ?, 'admin@test.local', ?, 'tenant_admin', 1, 1, 1)`,
 		now, now, hashedPw,
 	)
 	if err != nil {
@@ -1317,7 +1317,7 @@ func TestMailboxManagement(t *testing.T) {
 	hashedPw, _ := authenticator.HashPassword("TestPassword123!")
 	_, err = sqlDB.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		 VALUES (?, ?, 'admin@test.local', ?, 'tenant_admin', 1, 1, 1)`,
 		now, now, hashedPw,
 	)
 	if err != nil {
@@ -1723,7 +1723,7 @@ func TestCreateMailboxEndpoint(t *testing.T) {
 	hashedPw, _ := authenticator.HashPassword("TestPassword123!")
 	_, err = sqlDB.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		 VALUES (?, ?, 'admin@test.local', ?, 'tenant_admin', 1, 1, 1)`,
 		now, now, hashedPw,
 	)
 	if err != nil {
@@ -1978,7 +1978,7 @@ func TestQueueReturnsSafeFields(t *testing.T) {
 	hashedPwTest, _ := authenticator.HashPassword("TestPassword123!")
 	_, err = sqlDB.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		 VALUES (?, ?, 'admin@test.local', ?, 'tenant_admin', 1, 1, 1)`,
 		now, now, hashedPwTest,
 	)
 	if err != nil {
@@ -2079,7 +2079,7 @@ func TestAuditLogsReturnsSafeFields(t *testing.T) {
 	hashedPwAudit, _ := authenticator.HashPassword("TestPassword123!")
 	_, err = sqlDB.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		 VALUES (?, ?, 'admin@test.local', ?, 'tenant_admin', 1, 1, 1)`,
 		now, now, hashedPwAudit,
 	)
 	if err != nil {
@@ -2177,7 +2177,7 @@ func TestAdminSummaryEndpoint(t *testing.T) {
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 	_, err = sqlDB.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		 VALUES (?, ?, 'admin@test.local', ?, 'tenant_admin', 1, 1, 1)`,
 		now, now, hashedPw,
 	)
 	if err != nil {
@@ -2304,7 +2304,7 @@ func TestQueueActions(t *testing.T) {
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 	_, err = sqlDB.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		 VALUES (?, ?, 'admin@test.local', ?, 'tenant_admin', 1, 1, 1)`,
 		now, now, hashedPw,
 	)
 	if err != nil {
@@ -2589,7 +2589,7 @@ func TestMailboxDetailsEndpoint(t *testing.T) {
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 	_, err = sqlDB.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		 VALUES (?, ?, 'admin@test.local', ?, 'tenant_admin', 1, 1, 1)`,
 		now, now, hashedPw,
 	)
 	if err != nil {
@@ -2690,7 +2690,7 @@ func TestDomainDetailsEndpoint(t *testing.T) {
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 	_, err = sqlDB.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		 VALUES (?, ?, 'admin@test.local', ?, 'tenant_admin', 1, 1, 1)`,
 		now, now, hashedPw,
 	)
 	if err != nil {
@@ -2797,7 +2797,7 @@ func TestEntityAuditEndpoints(t *testing.T) {
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 	_, err = sqlDB.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		 VALUES (?, ?, 'admin@test.local', ?, 'tenant_admin', 1, 1, 1)`,
 		now, now, hashedPw,
 	)
 	if err != nil {

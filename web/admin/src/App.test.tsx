@@ -19,7 +19,7 @@ describe("Admin console certification", () => {
   beforeAll(() => {
     globalThis.fetch = vi.fn<typeof fetch>((url: any) => {
       const path = typeof url === "string" ? url.split("?")[0] : "";
-      if (path.endsWith("/api/v1/me")) return Promise.resolve(mockResponse({ email: "admin@test", role: "admin" }));
+      if (path.endsWith("/api/v1/me")) return Promise.resolve(mockResponse({ email: "admin@test", role: "platform_super_admin", portal: "platform" }));
       if (path.endsWith("/enterprise/dashboard")) return Promise.resolve(mockResponse({ total_domains: 3, active_mailboxes: 12, recent_actions: [] }));
       if (path.endsWith("/customer/domains")) return Promise.resolve(mockResponse([{ id: 1, name: "example.com", status: "active", verified: true, mx_status: "ok", spf_status: "ok", dkim_status: "ok", dmarc_status: "ok" }]));
       if (path.endsWith("/enterprise/audit/logs")) return Promise.resolve(mockResponse([{ id: 1, action: "user.login", actor: "admin@test", target: "", result: "success", timestamp: "2026-01-01T00:00:00Z" }]));

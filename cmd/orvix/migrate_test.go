@@ -619,7 +619,7 @@ func TestMigrateRealPostgresWithRowCounts(t *testing.T) {
 
 	now := time.Now().UTC().Format("2006-01-02T15:04:05Z")
 	sqlDB.Exec("INSERT INTO tenants (created_at, updated_at, name, slug, domain, plan, active) VALUES (?, ?, 'Test', 'test', 'test.example.com', 'smb', 1)", now, now)
-	sqlDB.Exec("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'admin@test.example.com', '$2a$04$placeholder', 'admin', 1, 1, 1)", now, now)
+	sqlDB.Exec("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'admin@test.example.com', '$2a$04$placeholder', 'tenant_admin', 1, 1, 1)", now, now)
 
 	var srcTenants, srcUsers int
 	sqlDB.QueryRow("SELECT COUNT(*) FROM tenants").Scan(&srcTenants)
