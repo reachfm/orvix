@@ -115,15 +115,9 @@ func buildQueueCSRFEnv(t *testing.T) *queueCSRFEnv {
 		userEmail  = "user@orvix.email"
 		userPass   = "UserPass!2026"
 	)
-	adminHash, _ := bcrypt.GenerateFromPassword([]byte(adminPass), bcrypt.MinCost)
 	userHash, _ := bcrypt.GenerateFromPassword([]byte(userPass), bcrypt.MinCost)
 	now := time.Now().UTC()
-	if _, err := sqlDB.Exec(
-		"INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, ?, ?, 'admin', 1, 1, 1)",
-		now, now, adminEmail, string(adminHash),
-	); err != nil {
-		t.Fatalf("insert admin user: %v", err)
-	}
+	seedPlatformSuperAdminWithPassword(t, sqlDB, adminEmail, adminPass)
 	if _, err := sqlDB.Exec(
 		"INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, ?, ?, 'user', 1, 1, 1)",
 		now, now, userEmail, string(userHash),

@@ -74,21 +74,11 @@ func buildProvisioningEnv(t *testing.T, planA string, maxDomainsA, maxMailboxesA
 
 	const adminAEmail = "admin@tenanta.example"
 	const adminAPass = "TenantAPass!2026"
-	adminAHash, err := authenticator.HashPassword(adminAPass)
-	if err != nil {
-		t.Fatalf("hash: %v", err)
-	}
-	exec("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, ?, ?, 'admin', 1, 1, 1)",
-		now, now, adminAEmail, adminAHash)
+	seedTenantAdminWithPassword(t, sqlDB, adminAEmail, 1, adminAPass)
 
 	const adminBEmail = "admin@tenantb.example"
 	const adminBPass = "TenantBPass!2026"
-	adminBHash, err := authenticator.HashPassword(adminBPass)
-	if err != nil {
-		t.Fatalf("hash: %v", err)
-	}
-	exec("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, ?, ?, 'admin', 2, 1, 1)",
-		now, now, adminBEmail, adminBHash)
+	seedTenantAdminWithPassword(t, sqlDB, adminBEmail, 2, adminBPass)
 
 	scratchDir := t.TempDir()
 	adminDir := filepath.Join(scratchDir, "admin")
