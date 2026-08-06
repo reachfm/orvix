@@ -1,4 +1,4 @@
-package handlers
+package handlers_test
 
 // Canonical role seeding helpers for handler tests.
 //
