@@ -275,8 +275,8 @@ func TestHTTPDenial_TenantAdmin_PlatformEndpointDenied(t *testing.T) {
 
 	for _, path := range []string{
 		"/api/v1/admin/backups",
-		"/api/v1/admin/updates/check",
-		"/api/v1/admin/queue",
+		"/api/v1/updates/check",
+		"/api/v1/queue",
 	} {
 		status, body := h.authedRequest(t, "GET", path, tok, "")
 		mustNot5xx(t, "TA "+path, status, body)

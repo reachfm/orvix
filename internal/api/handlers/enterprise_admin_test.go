@@ -63,8 +63,14 @@ func newEnterpriseRouter(t *testing.T) (*api.Router, *sql.DB) {
 		t.Fatalf("hash: %v", err)
 	}
 	if _, err := sqlDB.Exec(
+		`INSERT INTO tenants (created_at, updated_at, name, slug, domain, plan, active) VALUES (?, ?, 'test-tenant', 'test-tenant', 'test.local', 'enterprise', 1)`,
+		now, now,
+	); err != nil {
+		t.Fatalf("insert tenant: %v", err)
+	}
+	if _, err := sqlDB.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		 VALUES (?, ?, 'admin@test.local', ?, 'tenant_admin', 1, 1, 1)`,
 		now, now, hashedPw); err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
@@ -123,8 +129,13 @@ func newEnterpriseRouterWithMalformedLockouts(t *testing.T) (*api.Router, *sql.D
 		t.Fatalf("hash: %v", err)
 	}
 	if _, err := sqlDB.Exec(
+		`INSERT INTO tenants (created_at, updated_at, name, slug, domain, plan, active) VALUES (?, ?, 'test-tenant', 'test-tenant', 'test.local', 'enterprise', 1)`,
+		now, now); err != nil {
+		t.Fatalf("insert tenant: %v", err)
+	}
+	if _, err := sqlDB.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		 VALUES (?, ?, 'admin@test.local', ?, 'tenant_admin', 1, 1, 1)`,
 		now, now, hashedPw); err != nil {
 		t.Fatalf("insert user: %v", err)
 	}

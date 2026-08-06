@@ -39,8 +39,12 @@ type queryQueryable interface {
 // Test that the v3 GET endpoints respond 200 with a JSON
 // body that includes the expected keys.
 func TestEnterpriseV3ListAndStatusEndpoints(t *testing.T) {
-	router, _ := newEnterpriseRouter(t)
+	router, db := newEnterpriseRouter(t)
+	seedPlatformSuperAdminWithPassword(t, db, "psa@test.local", "PsaPass!2026")
 	token := enterpriseLoginForTest(t, router, "admin@test.local", "TestPassword123!")
+	psaToken := enterpriseLoginForTest(t, router, "psa@test.local", "PsaPass!2026")
+	_ = psaToken
+	_ = token
 	for _, c := range []struct {
 		name string
 		path string
@@ -130,8 +134,10 @@ func TestEnterpriseV3CSRFEnforced(t *testing.T) {
 // directory that does not exist in the test env
 // (returns 400) — the allowlist is the actual SUT.
 func TestEnterpriseV3FsBrowseAllowlistedRoots(t *testing.T) {
-	router, _ := newEnterpriseRouter(t)
-	token := enterpriseLoginForTest(t, router, "admin@test.local", "TestPassword123!")
+	router, db := newEnterpriseRouter(t)
+	// Admin fs browse is a PLATFORM route (platformMW). Seed a PSA user.
+	seedPlatformSuperAdminWithPassword(t, db, "psa@test.local", "PsaPass!2026")
+	token := enterpriseLoginForTest(t, router, "psa@test.local", "PsaPass!2026")
 
 	// Approved root.
 	req := httptest.NewRequest("GET", "/api/v1/admin/fs/browse?root=/var/log/", nil)

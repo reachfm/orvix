@@ -217,7 +217,7 @@ func TestAdminQueueRoutesAuth(t *testing.T) {
 	router := api.NewRouter(cfg, authn, logger, db, reg, ff, nil)
 	app := router.App()
 
-	adminTok, _ := authn.GenerateAccessToken(1, auth.RoleAdmin)
+	adminTok, _ := authn.GenerateAccessToken(1, auth.RolePlatformSuperAdmin)
 	userTok, _ := authn.GenerateAccessToken(2, auth.RoleUser)
 
 	tests := []struct {

@@ -75,7 +75,7 @@ var rawLegacyUsersAdminInsert = map[string]string{
 	// h.tenantID(c), so canonical PSA with tenant_id NULL cannot reach
 	// them; tenant_admin is not admitted by the top-level admin router
 	// group. Retained until PR #58 splits the group.
-	"internal/api/handlers/enterprise_admin_test.go": "Class H: CreateAccountClass/CreateDomainGroup/CreateMailingList handlers use h.tenantID(c) — need tenant-bound legacy identity",
+	// enterprise_admin_test.go: migrated to canonical tenant_admin (newEnterpriseRouter and malformed variant now seed tenants + tenant_admin).
 
 	// MIGRATED after Defect 1 re-audit — no longer in allowlist:
 	//   backups_test.go            → seedPlatformSuperAdminWithPassword (backup handlers have no tenantID)
