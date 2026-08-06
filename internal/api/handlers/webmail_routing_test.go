@@ -176,14 +176,8 @@ func buildWebmailRoutingEnv(t *testing.T) *webmailRoutingEnv {
 	); err != nil {
 		t.Fatalf("insert domain: %v", err)
 	}
-	senderHash, _ := bcrypt.GenerateFromPassword([]byte(senderPass), bcrypt.MinCost)
 	recipientHash, _ := bcrypt.GenerateFromPassword([]byte(recipientPass), bcrypt.MinCost)
-	if _, err := sqlDB.Exec(
-		"INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, ?, ?, 'admin', 1, 1, 1)",
-		now, now, senderEmail, string(senderHash),
-	); err != nil {
-		t.Fatalf("insert sender user: %v", err)
-	}
+	seedTenantAdminWithPassword(t, sqlDB, senderEmail, 1, senderPass)
 	if _, err := sqlDB.Exec(
 		"INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, ?, ?, 'user', 1, 1, 1)",
 		now, now, recipientEmail, string(recipientHash),

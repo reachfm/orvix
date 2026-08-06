@@ -74,13 +74,11 @@ func buildBackupHarness(t *testing.T) (*api.Router, *sql.DB, string, string, str
 	if err != nil {
 		t.Fatalf("hash: %v", err)
 	}
-	if _, err := sqlDB.Exec(
-		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
-		now, now, hash,
-	); err != nil {
-		t.Fatalf("insert admin: %v", err)
-	}
+	// Canonical: backup operations are platform-scoped (no tenantID reference
+	// in the handlers). PSA with tenant_id NULL is the correct fixture.
+	seedPlatformSuperAdminWithPassword(t, sqlDB, "admin@test.local", "TestPassword123!")
+	_ = now
+	_ = hash
 
 	router := api.NewRouter(cfg, authenticator, logger, db, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
 	token := loginBackup(t, router)

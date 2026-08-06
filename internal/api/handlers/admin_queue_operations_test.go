@@ -200,8 +200,9 @@ func TestAdminQueueRoutesAuth(t *testing.T) {
 
 	// Create users table and seed admin + non-admin users.
 	sqlDB.Exec(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at DATETIME, updated_at DATETIME, email TEXT, password_hash TEXT, role TEXT, tenant_id INTEGER, active INTEGER, email_verified INTEGER)`)
-	sqlDB.Exec(`INSERT INTO users (id, created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		1, time.Now(), time.Now(), "admin@test", "$2a$10$dummyhashdummyhashdummyhashdummyhashdummyhashdummyhashdummyhash", "admin", 1, 1, 1)
+	// Canonical: platform queue operations (AdminQueueRetryNow uses
+	// queueAdminGate which PR#60 gated to PlatformSuperAdmin || SuperAdmin).
+	seedPlatformSuperAdmin(t, sqlDB, "admin@test")
 	sqlDB.Exec(`INSERT INTO users (id, created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		2, time.Now(), time.Now(), "user@test", "$2a$10$dummyhashdummyhashdummyhashdummyhashdummyhashdummyhashdummyhash", "user", 1, 1, 1)
 
