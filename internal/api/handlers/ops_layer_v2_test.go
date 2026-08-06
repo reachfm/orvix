@@ -71,7 +71,7 @@ func buildOpsV2TestHarness(t *testing.T) (*api.Router, *sql.DB, string, string) 
 	}
 	if _, err := sqlDB.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		 VALUES (?, ?, 'admin@test.local', ?, 'tenant_admin', 1, 1, 1)`,
 		now, now, hashedPw,
 	); err != nil {
 		t.Fatalf("insert admin user: %v", err)

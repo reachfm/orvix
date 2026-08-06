@@ -33,16 +33,15 @@ var legacyHelperCallers = map[string]string{
 	// definition, which the regex counts as a "caller".
 	"internal/api/handlers/testhelpers_role_test.go": "Helper definition site",
 
-	// Class H — Route lives under router.go:1123 admin group which does not
-	// admit RoleTenantAdmin. Migrate when PR #58 splits the group.
-	"internal/api/handlers/admin_domain_advanced_test.go":             "Class H: /admin/domains routes under legacy admin group",
-	"internal/api/handlers/admin_mailing_public_folder_patch_test.go": "Class H: /admin/mailing-lists + /admin/public-folders under legacy admin group",
-	"internal/api/handlers/domain_list_isolation_test.go":             "Class H: /api/v1/domains under legacy admin group",
-	"internal/api/handlers/enterprise_mutation_smoke_test.go":         "Class H: TestAdminMailboxesRoute hits /api/v1/mailboxes under legacy admin group",
-	"internal/api/handlers/mailbox_export_isolation_test.go":          "Class H: mailbox/domain export endpoints under legacy admin group",
-	"internal/api/handlers/tenant_isolation_test.go":                  "Class H: cross-tenant isolation test hits /admin/* routes",
-	"internal/api/handlers/tenant_isolation_aliases_groups_test.go":   "Class H: alias/group isolation under /admin/* routes",
-	"internal/api/handlers/tenant_isolation_matrix_test.go":           "Class H: cross-tenant matrix hits /admin/* routes",
+	// MIGRATED to seedTenantAdminWithPassword — removed from allowlist:
+	//   admin_domain_advanced_test.go
+	//   admin_mailing_public_folder_patch_test.go
+	//   domain_list_isolation_test.go
+	//   enterprise_mutation_smoke_test.go
+	//   mailbox_export_isolation_test.go
+	//   tenant_isolation_test.go
+	//   tenant_isolation_aliases_groups_test.go
+	//   tenant_isolation_matrix_test.go
 
 	// Class C — canonical role denial tests intentionally plant legacy
 	// admin to prove the migration helper does not accidentally grant
@@ -77,7 +76,6 @@ var rawLegacyUsersAdminInsert = map[string]string{
 	// them; tenant_admin is not admitted by the top-level admin router
 	// group. Retained until PR #58 splits the group.
 	"internal/api/handlers/enterprise_admin_test.go": "Class H: CreateAccountClass/CreateDomainGroup/CreateMailingList handlers use h.tenantID(c) — need tenant-bound legacy identity",
-	"internal/api/handlers/ops_layer_v2_test.go":     "Class H: enterprise ops-layer v2 routes are tenant-scoped via h.tenantID(c)",
 
 	// MIGRATED after Defect 1 re-audit — no longer in allowlist:
 	//   backups_test.go            → seedPlatformSuperAdminWithPassword (backup handlers have no tenantID)

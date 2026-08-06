@@ -66,7 +66,7 @@ func buildMatrixEnv(t *testing.T) *matrixEnv {
 	taHash, _ := authenticator.HashPassword("TenantAdminPass!")
 	tidA := uint(1)
 	// COMPAT: see testhelpers_role_test.go seedLegacyAdminForMigrationTest doc.
-	seedLegacyAdminForMigrationTestWithPassword(t, sqlDB, "ta@tenanta.example", &tidA, "TenantAdminPass!")
+	seedTenantAdminWithPassword(t, sqlDB, "ta@tenanta.example", tidA, "TenantAdminPass!")
 	exec("INSERT INTO coremail_mailboxes (id, domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme, status, quota_mb, is_admin, created_at, updated_at) VALUES (1, 1, 1, 'ta', 'ta@tenanta.example', 'TA', ?, 'argon2id', 'active', 1024, 1, ?, ?)", taHash, now, now)
 
 	psaHash, _ := authenticator.HashPassword("PlatformSuperPass!")

@@ -83,7 +83,7 @@ func buildAdminDomainAdvancedEnv(t *testing.T) *adminDomainAdvancedEnv {
 	// PORTAL-SEPARATION-PHASE1: use canonical fixture helper so the
 	// seeded admin carries the canonical tenant-scoped role (not the
 	// deprecated "admin" whose RBAC map is empty after Phase 1a).
-	seedLegacyAdminForMigrationTestWithPassword(t, sqlDB, adminEmail, &tid, adminPass)
+	seedTenantAdminWithPassword(t, sqlDB, adminEmail, tid, adminPass)
 	if _, err := sqlDB.Exec(
 		"INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, ?, ?, 'user', 1, 1, 1)",
 		now, now, userEmail, string(userHash),

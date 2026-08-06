@@ -87,10 +87,10 @@ func buildDomainListEnv(t *testing.T) *domainListEnv {
 
 	tid1 := uint(1)
 	// COMPAT: see testhelpers_role_test.go seedLegacyAdminForMigrationTest doc.
-	seedLegacyAdminForMigrationTestWithPassword(t, sqlDB, "admin1@t1.example", &tid1, "Tenant1Pass!2026")
+	seedTenantAdminWithPassword(t, sqlDB, "admin1@t1.example", tid1, "Tenant1Pass!2026")
 	tid2 := uint(2)
 	// COMPAT (see prior): different tenant.
-	seedLegacyAdminForMigrationTestWithPassword(t, sqlDB, "admin2@t2.example", &tid2, "Tenant2Pass!2026")
+	seedTenantAdminWithPassword(t, sqlDB, "admin2@t2.example", tid2, "Tenant2Pass!2026")
 	psaHash, _ := authenticator.HashPassword("PlatformPass!2026")
 	exec("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'psa@platform.local', ?, 'platform_super_admin', NULL, 1, 1)", now, now, psaHash)
 	userHash, _ := authenticator.HashPassword("PlainUserPass!2026")

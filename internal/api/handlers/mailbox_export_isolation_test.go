@@ -86,8 +86,8 @@ func buildExportEnv(t *testing.T) *exportEnv {
 	tid2 := uint(2)
 	// COMPAT: mailbox/domain export routes are still under router.go:1123 admin group
 	// gated on legacy role triple. See docs/deployment/canonical-role-fixtures-allowlist.md class H.
-	seedLegacyAdminForMigrationTestWithPassword(t, sqlDB, "admin1@t1.example", &tid1, "Tenant1Pass!2026")
-	seedLegacyAdminForMigrationTestWithPassword(t, sqlDB, "admin2@t2.example", &tid2, "Tenant2Pass!2026")
+	seedTenantAdminWithPassword(t, sqlDB, "admin1@t1.example", tid1, "Tenant1Pass!2026")
+	seedTenantAdminWithPassword(t, sqlDB, "admin2@t2.example", tid2, "Tenant2Pass!2026")
 	psaHash, _ := authenticator.HashPassword("PlatformPass!2026")
 	exec("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'psa@platform.local', ?, 'platform_super_admin', NULL, 1, 1)", now, now, psaHash)
 

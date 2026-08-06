@@ -524,3 +524,61 @@ func TestPhase6_CrossTenantDomainAccessDenied(t *testing.T) {
 	}
 	t.Logf("cross-tenant: status=%d (per-handler tenant scoping is handler concern)", status)
 }
+
+// ── Positive: TenantSupport reaches allowed tenant read ──────────
+func TestPhase6_TenantSupport_AllowedRead(t *testing.T) {
+	h := newSepHarness(t)
+	h.insertTenantRole(t, "tsup2@sep.example", "SupPass!2026", "tenant_support")
+	tok := h.login(t, "tsup2@sep.example", "SupPass!2026")
+	status, body := h.hit(t, "GET", "/api/v1/domains", tok)
+	sepMustEq(t, "TS domains", http.StatusOK, status, body)
+}
+
+// ── Denial: TenantSupport blocked from write (DomainsWrite) ─────
+func TestPhase6_TenantSupport_WriteDenied(t *testing.T) {
+	h := newSepHarness(t)
+	h.insertTenantRole(t, "tsup3@sep.example", "SupPass!2026", "tenant_support")
+	tok := h.login(t, "tsup3@sep.example", "SupPass!2026")
+	// POST /enterprise/domains requires PermDomainsWrite — TS lacks it.
+	status, body := h.hit(t, "POST", "/api/v1/enterprise/domains", tok)
+	sepMustEq(t, "TS POST domains", http.StatusForbidden, status, body)
+}
+
+// ── Denial: TenantSupport blocked from platform route ────────────
+func TestPhase6_TenantSupport_PlatformDenied(t *testing.T) {
+	h := newSepHarness(t)
+	h.insertTenantRole(t, "tsup4@sep.example", "SupPass!2026", "tenant_support")
+	tok := h.login(t, "tsup4@sep.example", "SupPass!2026")
+	status, body := h.hit(t, "GET", "/api/v1/admin/backups", tok)
+	sepMustEq(t, "TS platform", http.StatusForbidden, status, body)
+	sepMustContain(t, "TS platform", body, `"insufficient permissions"`)
+}
+
+// ── Positive: TenantReadOnly reaches allowed tenant read ─────────
+func TestPhase6_TenantReadOnly_AllowedRead(t *testing.T) {
+	h := newSepHarness(t)
+	h.insertTenantRole(t, "tro2@sep.example", "ROPass!2026", "tenant_readonly")
+	tok := h.login(t, "tro2@sep.example", "ROPass!2026")
+	status, body := h.hit(t, "GET", "/api/v1/domains", tok)
+	sepMustEq(t, "TRO domains", http.StatusOK, status, body)
+}
+
+// ── Denial: TenantReadOnly blocked from write (MailboxesWrite) ──
+func TestPhase6_TenantReadOnly_WriteDenied(t *testing.T) {
+	h := newSepHarness(t)
+	h.insertTenantRole(t, "tro3@sep.example", "ROPass!2026", "tenant_readonly")
+	tok := h.login(t, "tro3@sep.example", "ROPass!2026")
+	// POST /enterprise/mailboxes requires PermMailboxesWrite — TRO lacks it.
+	status, body := h.hit(t, "POST", "/api/v1/enterprise/mailboxes", tok)
+	sepMustEq(t, "TRO POST mailboxes", http.StatusForbidden, status, body)
+}
+
+// ── Denial: TenantReadOnly blocked from platform route ───────────
+func TestPhase6_TenantReadOnly_PlatformDenied(t *testing.T) {
+	h := newSepHarness(t)
+	h.insertTenantRole(t, "tro4@sep.example", "ROPass!2026", "tenant_readonly")
+	tok := h.login(t, "tro4@sep.example", "ROPass!2026")
+	status, body := h.hit(t, "GET", "/api/v1/admin/backups", tok)
+	sepMustEq(t, "TRO platform", http.StatusForbidden, status, body)
+	sepMustContain(t, "TRO platform", body, `"insufficient permissions"`)
+}
