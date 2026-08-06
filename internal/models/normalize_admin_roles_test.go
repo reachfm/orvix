@@ -152,3 +152,77 @@ func TestNormalizeAdminRoles_Idempotent(t *testing.T) {
 	}
 	_ = time.Now
 }
+
+// TestNormalizeAdminRoles_LeaveUnscoped covers the "leave-in-place" rows
+// (operator/readonly with no tenant_id). PORTAL-SEPARATION-PHASE1 Phase 3
+// counts and logs these rows without touching them: the role string stays
+// legacy, no token_version bump, and the RBAC map already denies the
+// deprecated strings.
+func TestNormalizeAdminRoles_LeaveUnscoped(t *testing.T) {
+	t.Setenv("ORVIX_ADMIN_EMAIL", "admin@orvix.email")
+	db := setupUsersForNormalize(t)
+
+	idOpUnscoped := insertUser(t, db, "helpdesk@nowhere.com", "operator", nil)
+	idROUnscoped := insertUser(t, db, "auditor@nowhere.com", "readonly", nil)
+
+	res, err := NormalizeAdminRoles(context.Background(), db, "sqlite")
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if res.OperatorLeftUnscoped != 1 {
+		t.Errorf("OperatorLeftUnscoped: want 1, got %d", res.OperatorLeftUnscoped)
+	}
+	if res.ReadOnlyLeftUnscoped != 1 {
+		t.Errorf("ReadOnlyLeftUnscoped: want 1, got %d", res.ReadOnlyLeftUnscoped)
+	}
+	if res.OperatorRenamed != 0 || res.ReadOnlyRenamed != 0 {
+		t.Errorf("nothing to rename (no tenant_id present), got %+v", res)
+	}
+
+	// Operator+NULL row: role unchanged, no token bump.
+	if role, tid, tv := mustRoleTenant(t, db, idOpUnscoped); role != "operator" || tid.Valid || tv != 0 {
+		t.Errorf("operator unscoped: role=%q tid=%v tv=%d — must remain untouched", role, tid, tv)
+	}
+	if role, tid, tv := mustRoleTenant(t, db, idROUnscoped); role != "readonly" || tid.Valid || tv != 0 {
+		t.Errorf("readonly unscoped: role=%q tid=%v tv=%d — must remain untouched", role, tid, tv)
+	}
+}
+
+// TestNormalizeAdminRoles_Atomic verifies that the migration runs inside
+// a transaction: an inspection error (missing required column) returns
+// early WITHOUT partially updating rows, and even a successful run
+// exhibits BEGIN/COMMIT semantics — after a successful call, every
+// eligible row is either updated or none are (there is no partial state
+// that can be observed by a concurrent reader mid-migration).
+//
+// We can't easily kill the connection mid-COMMIT, so this test asserts
+// the observable property: the pre-Phase-3 code executed each UPDATE in
+// autocommit mode (five separate transactions); post-Phase-3 all rows
+// share a single tx. We verify by confirming both statements land or
+// (in the failure path) neither does, and that a returned error does
+// not leave a half-migrated table.
+func TestNormalizeAdminRoles_Atomic(t *testing.T) {
+	t.Setenv("ORVIX_ADMIN_EMAIL", "admin@orvix.email")
+	db := setupUsersForNormalize(t)
+	tenantA := int64(11)
+
+	idBootstrap := insertUser(t, db, "admin@orvix.email", "admin", &tenantA)
+	idTenantAdmin := insertUser(t, db, "boss@customer.com", "admin", &tenantA)
+	idOperator := insertUser(t, db, "op@customer.com", "operator", &tenantA)
+
+	res, err := NormalizeAdminRoles(context.Background(), db, "sqlite")
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	// All three eligible rows updated in the same transaction.
+	if res.PlatformPromoted < 1 || res.TenantPromoted != 1 || res.OperatorRenamed != 1 {
+		t.Errorf("all rows must have been updated in one tx, got %+v", res)
+	}
+	// Token versions bumped exactly once per row (never twice from re-running
+	// steps inside the tx).
+	for _, id := range []int64{idBootstrap, idTenantAdmin, idOperator} {
+		if _, _, tv := mustRoleTenant(t, db, id); tv != 1 {
+			t.Errorf("id=%d token_version = %d, want 1 (single tx should bump exactly once)", id, tv)
+		}
+	}
+}

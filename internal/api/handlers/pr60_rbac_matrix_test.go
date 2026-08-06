@@ -18,11 +18,16 @@ import (
 	authrbac "github.com/orvix/orvix/internal/auth/rbac"
 )
 
-// TestPR60_RBACMatrixMatchesExpectation documents the RBAC map state
-// on this base. If this test starts failing on the RoleAdmin=true or
-// RoleOperator=true cases after PR #58 merges, update the
-// DOCUMENTED-CURRENT expectations to false — that IS the RBAC-map
-// closure landing, and the test correctly reports the change.
+// TestPR60_RBACMatrixMatchesExpectation documents the RBAC map state.
+// PORTAL-SEPARATION-PHASE1 Phase 3 landed: the deprecated RoleAdmin no
+// longer maps to any permission (see internal/auth/rbac/rbac.go). The
+// previously "DOCUMENTED-CURRENT" RoleAdmin=true expectations have been
+// flipped to false as instructed by the pre-PR#58 test docstring.
+// RoleOperator retains its legacy permissions in the map because Phase
+// 3 normalization guarantees a legacy 'operator' row either becomes
+// 'tenant_operator' (when tenant_id is present) or is left in place
+// with a WARN log (operator+NULL) — the RBAC map is not the closure
+// mechanism for RoleOperator, the explicit canonical gate is.
 func TestPR60_RBACMatrixMatchesExpectation(t *testing.T) {
 	cases := []struct {
 		role      auth.Role
@@ -41,18 +46,20 @@ func TestPR60_RBACMatrixMatchesExpectation(t *testing.T) {
 		{auth.RoleTenantAdmin, authrbac.PermQueueAction, false, "tenant admin must not touch platform queue"},
 		{auth.RoleTenantAdmin, authrbac.PermBackupsWrite, false, "tenant admin must not run backups"},
 
-		// DOCUMENTED-CURRENT: pre-PR#58 RBAC map still grants broad
-		// perms to the deprecated RoleAdmin. This is exactly WHY the
-		// PR #60 gates use explicit canonical role checks and NOT
-		// authrbac.HasPermission on this base. When PR #58 merges,
-		// flip these expectations to false.
-		{auth.RoleAdmin, authrbac.PermQueueAction, true, "DOCUMENTED-CURRENT: RBAC map still grants; PR #58 empties it"},
-		{auth.RoleAdmin, authrbac.PermBackupsWrite, true, "DOCUMENTED-CURRENT: same — flip to false after PR #58"},
+		// PORTAL-SEPARATION-PHASE1 Phase 3: RBAC map for the deprecated
+		// RoleAdmin is empty. Any row still carrying "admin" after
+		// normalization is AMBIGUOUS_ADMIN_ROLE and must have zero
+		// privilege until an operator picks a canonical role.
+		{auth.RoleAdmin, authrbac.PermQueueAction, false, "PHASE3: RoleAdmin map is empty; ambiguous rows have zero privilege"},
+		{auth.RoleAdmin, authrbac.PermBackupsWrite, false, "PHASE3: RoleAdmin map is empty"},
 
 		// DOCUMENTED-CURRENT: helpdesk-shaped RoleOperator also gets
 		// PermQueueAction on this base — surprising, and also why the
-		// explicit gate does not use HasPermission here.
-		{auth.RoleOperator, authrbac.PermQueueAction, true, "DOCUMENTED-CURRENT: operator granted queue by legacy map"},
+		// explicit gate does not use HasPermission here. Phase 3 does
+		// not touch this map entry because the normalizer converts
+		// operator+tenant_id rows to tenant_operator; operator+NULL
+		// rows are logged (AMBIGUOUS_OPERATOR_ROLE) and left inert.
+		{auth.RoleOperator, authrbac.PermQueueAction, true, "DOCUMENTED-CURRENT: operator granted queue by legacy map; closure is normalization + explicit gate"},
 
 		// Fail-closed cases.
 		{auth.Role("unknown-role-xyz"), authrbac.PermQueueAction, false, "unknown must fail closed"},

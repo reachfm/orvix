@@ -18,11 +18,17 @@ func TestValidateAPIKeyScopes(t *testing.T) {
 		scopes  []string
 		wantErr bool
 	}{
-		{"empty set rejected", auth.RoleAdmin, nil, true},
-		{"blank element rejected", auth.RoleAdmin, []string{"domains.write", ""}, true},
-		{"duplicate rejected", auth.RoleAdmin, []string{"domains.write", "domains.write"}, true},
-		{"unknown scope rejected", auth.RoleAdmin, []string{"totally.bogus"}, true},
-		{"admin may grant a scope it holds", auth.RoleAdmin, []string{"domains.write"}, false},
+		// PORTAL-SEPARATION-PHASE1 Phase 3: use RolePlatformSuperAdmin as the
+		// "caller with broad permissions" fixture. The deprecated RoleAdmin
+		// now has an empty permission map (see internal/auth/rbac/rbac.go)
+		// so it cannot grant any scope — the "admin cannot grant" case
+		// below asserts exactly that.
+		{"empty set rejected", auth.RolePlatformSuperAdmin, nil, true},
+		{"blank element rejected", auth.RolePlatformSuperAdmin, []string{"domains.write", ""}, true},
+		{"duplicate rejected", auth.RolePlatformSuperAdmin, []string{"domains.write", "domains.write"}, true},
+		{"unknown scope rejected", auth.RolePlatformSuperAdmin, []string{"totally.bogus"}, true},
+		{"platform super admin may grant a scope it holds", auth.RolePlatformSuperAdmin, []string{"domains.write"}, false},
+		{"deprecated admin cannot grant any scope", auth.RoleAdmin, []string{"domains.write"}, true},
 		{"readonly cannot grant a write scope", auth.RoleReadOnly, []string{"domains.write"}, true},
 		{"billing cannot grant a domain scope", auth.RoleBilling, []string{"domains.write"}, true},
 	}

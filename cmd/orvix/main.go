@@ -356,6 +356,8 @@ func migrateConfiguredDatabase(db *gorm.DB, driver string, logger *zap.Logger) e
 				zap.Int("operator_renamed", res.OperatorRenamed),
 				zap.Int("readonly_renamed", res.ReadOnlyRenamed),
 				zap.Int("ambiguous_skipped", res.Skipped),
+				zap.Int("operator_left_unscoped", res.OperatorLeftUnscoped),
+				zap.Int("readonly_left_unscoped", res.ReadOnlyLeftUnscoped),
 			)
 		}
 		return nil
