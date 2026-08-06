@@ -337,11 +337,11 @@ jobs:
           # Use a fresh domain (the installer bootstrap already created the
           # admin's own domain, which would 409 here).
           CREATE_DOMAIN="accept-$(date +%s).orvix.test"
-          tenant_api POST /api/v1/domains "$(jq -nc --arg n "$CREATE_DOMAIN" '{name:$n}')" >/dev/null
+          tenant_api POST /api/v1/enterprise/domains "$(jq -nc --arg n "$CREATE_DOMAIN" '{name:$n}')" >/dev/null
           MB="acceptance@$CREATE_DOMAIN"
-          tenant_api POST /api/v1/mailboxes "$(jq -nc --arg e "$MB" '{email:$e,password:"AcceptPass123!x"}')" >/dev/null
+          tenant_api POST /api/v1/enterprise/mailboxes "$(jq -nc --arg e "$MB" '{email:$e,password:"AcceptPass123!x"}')" >/dev/null
           # Prove the mailbox is actually queryable back.
-          tenant_api GET /api/v1/mailboxes | jq -e --arg e "$MB" 'any((.mailboxes? // .) []?; (.email? // "")==$e)' >/dev/null \
+          tenant_api GET /api/v1/enterprise/mailboxes | jq -e --arg e "$MB" 'any((.mailboxes? // .) []?; (.email? // "")==$e)' >/dev/null \
             || { echo "created mailbox not found in listing"; exit 1; }
           echo "tenant_creation=PASS" >> "$RESULTS_FILE"
 
