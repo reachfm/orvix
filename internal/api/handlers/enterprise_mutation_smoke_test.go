@@ -93,7 +93,11 @@ func buildEnterpriseSmokeEnv(t *testing.T) *enterpriseSmokeEnv {
 	if err != nil {
 		t.Fatalf("hash: %v", err)
 	}
-	seedTenantAdminWithPassword(t, sqlDB, adminAEmail, 1, adminAPass)
+	tidA := uint(1)
+	// COMPAT: this env is reused by TestAdminMailboxesRoute_ReturnsMailboxesNotUsers
+	// which hits /api/v1/mailboxes under the admin group (router.go:1123). See
+	// docs/deployment/canonical-role-fixtures-allowlist.md class H.
+	seedLegacyAdminForMigrationTestWithPassword(t, sqlDB, adminAEmail, &tidA, adminAPass)
 	exec(`INSERT INTO coremail_mailboxes (id, domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme, status, quota_mb, is_admin, created_at, updated_at)
 	      VALUES (1, 1, 1, 'admin', ?, 'Admin A', ?, 'argon2id', 'active', 1024, 1, ?, ?)`, adminAEmail, adminAHash, now, now)
 
