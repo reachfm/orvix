@@ -76,14 +76,8 @@ func buildAdminSettingsEnv(t *testing.T) *adminSettingsEnv {
 		userEmail  = "user@orvix.email"
 		userPass   = "UserPass!2026"
 	)
-	adminHash, _ := bcrypt.GenerateFromPassword([]byte(adminPass), bcrypt.DefaultCost)
 	userHash, _ := bcrypt.GenerateFromPassword([]byte(userPass), bcrypt.DefaultCost)
-	if _, err := sqlDB.Exec(
-		"INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, ?, ?, 'admin', 1, 1, 1)",
-		now, now, adminEmail, string(adminHash),
-	); err != nil {
-		t.Fatalf("insert admin user: %v", err)
-	}
+	seedPlatformSuperAdminWithPassword(t, sqlDB, adminEmail, adminPass)
 	if _, err := sqlDB.Exec(
 		"INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, ?, ?, 'user', 1, 1, 1)",
 		now, now, userEmail, string(userHash),

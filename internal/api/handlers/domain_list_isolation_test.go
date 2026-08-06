@@ -85,18 +85,22 @@ func buildDomainListEnv(t *testing.T) *domainListEnv {
 	// Tenant 2: the victim domain tenant 1 must never see.
 	exec("INSERT INTO coremail_domains (id, name, tenant_id, status, plan, max_mailboxes, max_aliases, max_quota_mb, created_at, updated_at) VALUES (4, 'victim.t2.example', 2, 'active', 'enterprise', 0, 0, 0, ?, ?)", now, now)
 
-	a1Hash, _ := authenticator.HashPassword("Tenant1Pass!2026")
-	exec("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'admin1@t1.example', ?, 'admin', 1, 1, 1)", now, now, a1Hash)
-	a2Hash, _ := authenticator.HashPassword("Tenant2Pass!2026")
-	exec("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'admin2@t2.example', ?, 'admin', 2, 1, 1)", now, now, a2Hash)
+	tid1 := uint(1)
+	// COMPAT: see testhelpers_role_test.go seedLegacyAdminForMigrationTest doc.
+	seedLegacyAdminForMigrationTestWithPassword(t, sqlDB, "admin1@t1.example", &tid1, "Tenant1Pass!2026")
+	tid2 := uint(2)
+	// COMPAT (see prior): different tenant.
+	seedLegacyAdminForMigrationTestWithPassword(t, sqlDB, "admin2@t2.example", &tid2, "Tenant2Pass!2026")
 	psaHash, _ := authenticator.HashPassword("PlatformPass!2026")
 	exec("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'psa@platform.local', ?, 'platform_super_admin', NULL, 1, 1)", now, now, psaHash)
 	userHash, _ := authenticator.HashPassword("PlainUserPass!2026")
 	exec("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'plain@t1.example', ?, 'user', 1, 1, 1)", now, now, userHash)
-	// RoleAdmin with an unresolved tenant (tenant_id = 0 -> TenantMiddleware
-	// never sets the "tenant_id" local -> scopedTenantID falls back to -1).
-	noTenantHash, _ := authenticator.HashPassword("NoTenantPass!2026")
-	exec("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'notenant@nowhere.example', ?, 'admin', 0, 1, 1)", now, now, noTenantHash)
+	// Legacy RoleAdmin with an unresolved tenant (tenant_id = 0 -> TenantMiddleware
+	// never sets the "tenant_id" local -> scopedTenantID falls back to -1). This
+	// row intentionally exercises the deprecated `role='admin'` shape; use the
+	// legacy-migration primitive so intent is unambiguous.
+	var zeroTenant uint = 0
+	insertUserWithPassword(t, sqlDB, "notenant@nowhere.example", "admin", &zeroTenant, "NoTenantPass!2026")
 
 	scratchDir := t.TempDir()
 	adminDir := scratchDir + "/admin"

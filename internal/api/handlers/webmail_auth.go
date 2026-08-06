@@ -244,9 +244,12 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 		})
 	}
 
+	// Was: legacy auth.RoleAdmin planted into new sessions. Now: canonical
+	// auth.RoleTenantAdmin — webmail admins administer their mailbox's
+	// tenant, matching NormalizeRole (admin + tenantID != nil → tenant_admin).
 	role := auth.RoleUser
 	if isAdmin {
-		role = auth.RoleAdmin
+		role = auth.RoleTenantAdmin
 	}
 
 	// Best-effort: ensure system folders exist for

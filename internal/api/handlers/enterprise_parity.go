@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/monitoring"
 	"go.uber.org/zap"
 )
@@ -190,11 +191,28 @@ func (h *Handler) PatchAdminTenantBranding(c fiber.Ctx) error {
 		})
 	}
 
-	// Existence check + tenant scope. Superadmins can edit any tenant;
-	// non-superadmins are bound to their own JWT-tenant id.
+	// Existence check + tenant scope. Cross-tenant branding is a
+	// platform-super-admin-only escalation.
+	//
+	// Design note: this authz decision uses an EXPLICIT canonical-role
+	// check, not NormalizeRole and not authrbac.HasPermission — see
+	// admin_queue.go queueAdminGate for the rationale. Accepting either
+	// auth.Role or string in c.Locals("role") is a documented
+	// migration-window compatibility with legacy JWT plumbing; the
+	// canonical super constants are the only accepted values.
+	// RoleSuperAdmin is a documented migration-window alias for
+	// RolePlatformSuperAdmin.
 	callerIsSuper := false
-	if rid, ok := c.Locals("role").(string); ok {
-		callerIsSuper = rid == "superadmin" || rid == "super_admin" || rid == "super-admin"
+	var rawRole auth.Role
+	switch v := c.Locals("role").(type) {
+	case auth.Role:
+		rawRole = v
+	case string:
+		rawRole = auth.Role(v)
+	}
+	if rawRole != "" {
+		callerIsSuper = rawRole == auth.RolePlatformSuperAdmin ||
+			rawRole == auth.RoleSuperAdmin
 	}
 	ownTenant := h.tenantID(c)
 	if !callerIsSuper && id != ownTenant {

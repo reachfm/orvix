@@ -72,17 +72,8 @@ func buildQueueTestEnv(t *testing.T) *queueTestEnv {
 		t.Fatalf("insert domain: %v", err)
 	}
 
-	// Create admin and non-admin users.
-	hash, err := authenticator.HashPassword("AdminPass!2026")
-	if err != nil {
-		t.Fatalf("hash: %v", err)
-	}
-	if _, err := sqlDB.Exec(
-		"INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'admin@orvix.email', ?, 'admin', 1, 1, 1)",
-		now, now, hash,
-	); err != nil {
-		t.Fatalf("insert admin: %v", err)
-	}
+	// Create admin (canonical platform super-admin) and non-admin users.
+	seedPlatformSuperAdminWithPassword(t, sqlDB, "admin@orvix.email", "AdminPass!2026")
 	userHash, err := authenticator.HashPassword("UserPass!2026")
 	if err != nil {
 		t.Fatalf("hash user: %v", err)
