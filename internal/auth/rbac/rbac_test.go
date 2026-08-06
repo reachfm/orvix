@@ -46,18 +46,55 @@ func TestHasPermission_Matrix(t *testing.T) {
 		{auth.RoleAdmin, PermLicenseWrite, false},
 		{auth.RoleAdmin, PermAuditRead, false},
 
-		// Operator: read everything, action on queue + users.
-		{auth.RoleOperator, PermQueueRead, true},
-		{auth.RoleOperator, PermQueueAction, true},
-		{auth.RoleOperator, PermSettingsRead, true},
+		// Operator: tenant-scoped helpdesk persona. PORTAL-SEPARATION-
+		// PHASE1 Phase 5 (PR#58) stripped the platform bucket
+		// (queue.*, settings.*, backups.*, license.*, monitoring.read)
+		// from the legacy operator map — see rbac.go for the audit
+		// rationale.
+		{auth.RoleOperator, PermQueueRead, false},
+		{auth.RoleOperator, PermQueueAction, false},
+		{auth.RoleOperator, PermSettingsRead, false},
 		{auth.RoleOperator, PermSettingsWrite, false},
-		{auth.RoleOperator, PermBackupsRead, true},
+		{auth.RoleOperator, PermBackupsRead, false},
 		{auth.RoleOperator, PermBackupsWrite, false},
-		{auth.RoleOperator, PermLicenseRead, true},
+		{auth.RoleOperator, PermLicenseRead, false},
 		{auth.RoleOperator, PermLicenseWrite, false},
+		{auth.RoleOperator, PermMonitoringRead, false},
 		{auth.RoleOperator, PermUsersRead, true},
 		{auth.RoleOperator, PermUsersWrite, true},
 		{auth.RoleOperator, PermAuditRead, true},
+		{auth.RoleOperator, PermMailboxesWrite, true},
+
+		// Platform Super Admin: PLATFORM permissions ONLY. PORTAL-
+		// SEPARATION-PHASE1 Phase 5 (PR#58) stripped tenant-scoped
+		// perms (domains/mailboxes/users/aliases/groups/invitations/
+		// organizations write, billing, api-keys, ownership, credentials,
+		// tenant sessions, tenant security, dashboard) from the PSA
+		// map. PSA rows have NULL tenant_id and cannot reach tenant-
+		// scoped routes; this map keeps the boundary explicit.
+		{auth.RolePlatformSuperAdmin, PermQueueRead, true},
+		{auth.RolePlatformSuperAdmin, PermQueueAction, true},
+		{auth.RolePlatformSuperAdmin, PermSettingsWrite, true},
+		{auth.RolePlatformSuperAdmin, PermBackupsWrite, true},
+		{auth.RolePlatformSuperAdmin, PermLicenseWrite, true},
+		{auth.RolePlatformSuperAdmin, PermMonitoringRead, true},
+		{auth.RolePlatformSuperAdmin, PermPlatformOrganizationsWrite, true},
+		{auth.RolePlatformSuperAdmin, PermPlatformSecurityRead, true},
+		{auth.RolePlatformSuperAdmin, PermPlatformSessionsRevoke, true},
+		{auth.RolePlatformSuperAdmin, PermDomainsWrite, false},
+		{auth.RolePlatformSuperAdmin, PermMailboxesWrite, false},
+		{auth.RolePlatformSuperAdmin, PermUsersWrite, false},
+		{auth.RolePlatformSuperAdmin, PermAliasesWrite, false},
+		{auth.RolePlatformSuperAdmin, PermGroupsWrite, false},
+		{auth.RolePlatformSuperAdmin, PermInvitationsWrite, false},
+		{auth.RolePlatformSuperAdmin, PermOrganizationsWrite, false},
+		{auth.RolePlatformSuperAdmin, PermOwnershipTransfer, false},
+		{auth.RolePlatformSuperAdmin, PermAPIKeysWrite, false},
+		{auth.RolePlatformSuperAdmin, PermBillingWrite, false},
+		{auth.RolePlatformSuperAdmin, PermCredentialsReset, false},
+		{auth.RolePlatformSuperAdmin, PermSessionsRevoke, false},
+		{auth.RolePlatformSuperAdmin, PermDashboardRead, false},
+		{auth.RolePlatformSuperAdmin, PermSecurityRead, false},
 
 		// ReadOnly: read-only on every resource.
 		{auth.RoleReadOnly, PermQueueRead, true},
@@ -139,13 +176,22 @@ func TestQueueReadDoesNotImplyQueueAction(t *testing.T) {
 	// bounce a queue entry. This is exactly the regression that
 	// would happen if permissions were ever collapsed into a
 	// single "queue" permission.
-	for _, role := range []auth.Role{auth.RoleReadOnly, auth.RoleOperator} {
-		if !HasPermission(role, PermQueueRead) {
-			t.Errorf("role %q should have queue.read", role)
-		}
+	// PORTAL-SEPARATION-PHASE1 Phase 5 (PR#58): legacy RoleOperator
+	// no longer holds PermQueueRead (see rbac.go rationale — the
+	// platform bucket was stripped from the tenant-scoped operator
+	// map to close the "accidental privilege bridge" the audit
+	// flagged). RoleReadOnly remains the read-side witness here.
+	if !HasPermission(auth.RoleReadOnly, PermQueueRead) {
+		t.Errorf("role readonly should have queue.read")
 	}
 	if HasPermission(auth.RoleReadOnly, PermQueueAction) {
 		t.Errorf("readonly must NOT have queue.action")
+	}
+	if HasPermission(auth.RoleOperator, PermQueueRead) {
+		t.Errorf("PHASE5: legacy operator must NOT have queue.read (platform-scoped)")
+	}
+	if HasPermission(auth.RoleOperator, PermQueueAction) {
+		t.Errorf("PHASE5: legacy operator must NOT have queue.action (platform-scoped)")
 	}
 }
 
