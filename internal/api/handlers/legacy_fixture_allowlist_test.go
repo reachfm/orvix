@@ -72,15 +72,17 @@ var rawLegacyUsersAdminInsert = map[string]string{
 	// the helper does not permit tenant_id=0 (zero-value uint).
 	"internal/api/handlers/domain_list_isolation_test.go": "Class H: legacy admin with tenant_id=0 for unresolved-tenant test",
 
-	// Class H — legacy fixtures the prior migration missed. These files
-	// were flagged by this scanner on first activation. Each hits the
-	// same /admin/* legacy group; migrate to canonical helper when
-	// PR #58 splits the group.
-	"internal/api/handlers/enterprise_admin_test.go":       "Class H: two INSERT INTO users role='admin' fixtures at :66-67 and :126-127; hits /admin/* legacy group",
-	"internal/api/handlers/ops_layer_v2_test.go":           "Class H: INSERT INTO users role='admin' at :73-74; ops-layer /admin/* routes",
-	"internal/api/handlers/update_test.go":                 "Class H: INSERT INTO users role='admin' at :88-89; /admin/updates routes",
-	"internal/api/handlers/backups_test.go":                "Class H: INSERT INTO users role='admin' at :78-79; /admin/backups routes",
-	"internal/api/handlers/admin_queue_operations_test.go": "Class H: two positional INSERT INTO users role='admin'/'user' at :203-206; /admin/queue routes",
+	// Class H (retained after Defect 1 re-audit) — handlers reference
+	// h.tenantID(c), so canonical PSA with tenant_id NULL cannot reach
+	// them; tenant_admin is not admitted by the top-level admin router
+	// group. Retained until PR #58 splits the group.
+	"internal/api/handlers/enterprise_admin_test.go": "Class H: CreateAccountClass/CreateDomainGroup/CreateMailingList handlers use h.tenantID(c) — need tenant-bound legacy identity",
+	"internal/api/handlers/ops_layer_v2_test.go":    "Class H: enterprise ops-layer v2 routes are tenant-scoped via h.tenantID(c)",
+
+	// MIGRATED after Defect 1 re-audit — no longer in allowlist:
+	//   backups_test.go            → seedPlatformSuperAdminWithPassword (backup handlers have no tenantID)
+	//   update_test.go             → seedPlatformSuperAdminWithPassword (updater handlers are platform-only)
+	//   admin_queue_operations_test.go → seedPlatformSuperAdmin (PR#60's queueAdminGate is platform-only)
 
 	// False positives — 'admin' is a filepath segment nearby an
 	// unrelated INSERT (INSERT itself uses canonical role or 'user').
