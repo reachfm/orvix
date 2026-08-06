@@ -77,7 +77,7 @@ var rawLegacyUsersAdminInsert = map[string]string{
 	// them; tenant_admin is not admitted by the top-level admin router
 	// group. Retained until PR #58 splits the group.
 	"internal/api/handlers/enterprise_admin_test.go": "Class H: CreateAccountClass/CreateDomainGroup/CreateMailingList handlers use h.tenantID(c) — need tenant-bound legacy identity",
-	"internal/api/handlers/ops_layer_v2_test.go":    "Class H: enterprise ops-layer v2 routes are tenant-scoped via h.tenantID(c)",
+	"internal/api/handlers/ops_layer_v2_test.go":     "Class H: enterprise ops-layer v2 routes are tenant-scoped via h.tenantID(c)",
 
 	// MIGRATED after Defect 1 re-audit — no longer in allowlist:
 	//   backups_test.go            → seedPlatformSuperAdminWithPassword (backup handlers have no tenantID)
