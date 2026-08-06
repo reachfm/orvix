@@ -1,103 +1,106 @@
-# Fresh-install idempotent-rerun defect analysis
+# fresh-install-sqlite idempotent-rerun failure — attribution analysis
 
-## Summary
+## Failing symptom
 
-**Verdict:** the defect is **introduced by PR #58** (pinned head `251e172c`). It is **not present** on `origin/main` at `dc9bc91`. It is a bootstrap-vs-installer mismatch: PR #58 changes the Go bootstrap to write the canonical role literal for the initial admin, but does not update the shell installer's admin-detection queries, so the idempotent rerun step no longer recognises the just-provisioned admin and re-enters the fresh-install prompt path.
-
-## Failing step
-
-Workflow file: `.github/workflows/phase5-rc-fresh-install.yml`
-Step name (line 214): **`Restart persistence + idempotent rerun`**
-
-Failing command (lines 230-232 of the workflow):
-
-```bash
-sudo env ORVIX_SOURCE_DIR=/tmp/stage/orvix ORVIX_USE_PREBUILT=1 ORVIX_PUBLIC_IPV4=100.0.0.10 \
-  ORVIX_PRIMARY_DOMAIN="$DOMAIN" ORVIX_ADMIN_EMAIL="$ADMIN_EMAIL" \
-  bash /tmp/stage/orvix/release/install.sh
-```
-
-Emitted failure (from `release/install.sh:556` or `:560`):
+CI job: **`fresh-install-sqlite`** in `.github/workflows/phase5-rc-fresh-install.yml`
+Failing step: **`Restart persistence + idempotent rerun`** (workflow line 214)
+Error text (log excerpt from PR#58 CI):
 
 ```
 admin password is required; input ended before a password was provided
 ```
 
-## Root cause
+This error is emitted from `release/install.sh:556` and `:560`.
 
-Two functions must agree on which role literal identifies an "active admin":
+## Environment reproduction constraints
 
-1. The Go bootstrap in `cmd/orvix/main.go` — writes the initial admin row.
-2. The shell installer helpers in `release/install.sh` — `active_admin_count()`, `first_active_admin_email()`, `admin_user_exists()` — decide, on rerun, whether an admin already exists (and therefore whether to skip password prompting).
+The full end-to-end reproduction requires:
+- A Linux host with `systemd`, `sudo`, PID-1 init
+- The workflow uses `ubuntu-24.04` runners with a real `install.sh` invocation via systemd
 
-### origin/main (`dc9bc91`) — CONSISTENT, works
+This investigation's host is Windows Git-Bash, which has no `systemd` and no way
+to install/start the Orvix systemd unit. End-to-end replay is therefore not
+possible in this environment. What is possible — and what this doc provides —
+is a **code-level differential attribution** using `bash -n` syntax checks and
+line-anchored comparisons, cross-referenced with the actual CI-run failures
+already observed on both branches.
 
-- `cmd/orvix/main.go:524` inserts `role='admin'` (legacy literal).
-- `release/install.sh:1701` `active_admin_count` queries `role IN ('admin','superadmin','super_admin')`.
+## CI execution evidence (authoritative, already observed)
 
-Rerun path:
+| Branch | Head SHA | `fresh-install-sqlite` result |
+|---|---|---|
+| `origin/main` @ merge of PR #60 | `dc9bc91cc2ee9b944e7ba0c505a8c7cc5c11e3c1` | **PASS** (verified in PR #60 post-merge run) |
+| PR #58 head | `251e172c0cfe78b52bdc81d04022c82cd3adc418` | **FAIL** with the exact quoted symptom (verified during PR #58 CI history) |
+| PR #59 intermediate head | `e708926c8d26dab61a025078f10cf0c92db08f41` | **PASS** (verified in the earlier CI poll after this PR pushed the intermediate head) |
 
-1. `active_admin_count` returns 1 (bootstrap row was `role='admin'`).
-2. `admin_mode="preserve"`, `prompt_password` is NOT called.
-3. Installer completes without touching stdin. Green.
+CI is authoritative for the execution behavior; the code-level analysis below
+explains why.
 
-### PR #58 (`251e172`) — MISMATCHED, fails
+## Root cause (code-level differential attribution)
 
-Diff observed via `git fetch origin refs/pull/58/head` and `git diff dc9bc91..251e172`:
+The Go bootstrap flow (`cmd/orvix/main.go`) and the shell installer
+(`release/install.sh`) must agree on the string value stored in `users.role`
+for the initial admin. If they disagree, the idempotent-rerun path calls
+`active_admin_count()` and it returns 0, so the installer thinks no admin
+exists, tries to create one, and — under non-TTY CI stdin — fails at the
+password prompt with the observed error.
 
-- `cmd/orvix/main.go:559` (new `seedAdminUser`) inserts `role=string(auth.RolePlatformSuperAdmin)` (i.e. `platform_super_admin`) with `tenant_id=NULL`.
-- `release/install.sh:1701` `active_admin_count` is **unchanged** — still queries only the legacy triple `('admin','superadmin','super_admin')`.
+### `origin/main` @ `dc9bc91` (baseline — currently passes)
 
-Rerun path under PR #58:
+- Bootstrap writes `role='admin'`
+- `release/install.sh:1701` `active_admin_count()` checks `role IN ('admin','superadmin','super_admin')`
+- `release/install.sh:1713` `admin_user_exists()` checks same triple
+- `release/install.sh:2732` `users_count` scan checks `role='admin'`
+- All queries agree with the bootstrap-planted role → rerun sees the admin exists → skips prompt → PASS
 
-1. Bootstrap wrote `role='platform_super_admin'` on first install.
-2. On rerun, `active_admin_count` scans for legacy roles only, gets `0`.
-3. Code at `install.sh:2977-2980` takes the fresh-install branch and calls `admin_password="$(prompt_password)"`.
-4. CI workflow provides no `ORVIX_ADMIN_PASSWORD` and no TTY; the read at `install.sh:558` fails; `install.sh:560` fires the fatal message.
+### PR #58 head @ `251e172c` (fails)
 
-PR #58 *does* update ONE other query — `install.sh:2732` (post-install verification) now accepts both `'admin'` and `'platform_super_admin'`. But the three admin-detection helpers used by the idempotency-preserve branch were not updated:
+- Bootstrap writes `role='platform_super_admin'` (the canonical role)
+- `release/install.sh:2732` `users_count` scan **was updated** to `role IN ('admin','platform_super_admin')` ✓
+- `release/install.sh:1701` `active_admin_count()` **was NOT updated** — still `role IN ('admin','superadmin','super_admin')` ✗
+- `release/install.sh:1713` `admin_user_exists()` **was NOT updated** — same ✗
+- The idempotent-rerun code path at `release/install.sh:2954` invokes
+  `active_admin_count()` (line 2954: `existing_admins="$(active_admin_count)"`)
+- Because bootstrap planted `platform_super_admin` and `active_admin_count()`
+  only counts `admin|superadmin|super_admin`, `existing_admins` returns 0
+- The installer treats this as "no admin exists" → falls into the "create a new
+  admin" branch → prompts for password → non-TTY CI stdin ends → error at
+  `install.sh:556` or `:560`
 
-- `active_admin_count` (line 1701)
-- `first_active_admin_email` (line 1707)
-- `admin_user_exists` (line 1713)
+### PR #59 head (this branch — expected to pass)
 
-That partial migration is the defect.
+- Does not modify `release/install.sh` (production installer) — scope guard enforces this
+- Does not modify `cmd/orvix/main.go` (bootstrap) — scope guard enforces this
+- Bootstrap plants `role='admin'` (unchanged from main); `active_admin_count()` recognizes it → PASS
 
-## Reproduction (local)
+Verified via the intermediate-head CI (`e708926`) which passed
+`fresh-install-sqlite`.
+
+## Verdict
+
+**The defect is genuinely PR #58's**, not PR #59's, and not `origin/main`'s.
+It is a **partial fix** on PR #58: only one of three admin-lookup queries in
+`release/install.sh` was updated to include the new canonical role. The
+remaining two (`active_admin_count` at L1701 and `admin_user_exists` at L1713)
+still use the legacy triple, and the idempotent-rerun code path uses
+`active_admin_count`.
+
+## Recommended remediation (for PR #58's fix cycle — NOT this PR)
+
+Update `release/install.sh:1701` and `release/install.sh:1713` to include
+`platform_super_admin` in their role allow-lists:
 
 ```bash
-git checkout 251e172c   # PR #58 head
-# 1. Do a normal install:
-sudo env ORVIX_ADMIN_EMAIL=admin@example.test \
-         ORVIX_ADMIN_PASSWORD='SomeStrongPass!23' \
-         ORVIX_PRIMARY_DOMAIN=example.test \
-         ORVIX_PUBLIC_IPV4=100.0.0.10 \
-         bash release/install.sh          # succeeds
-sudo sqlite3 /var/lib/orvix/orvix.db "SELECT role FROM users;"
-# platform_super_admin
-# 2. Rerun WITHOUT the password (simulates the workflow step):
-sudo env ORVIX_ADMIN_EMAIL=admin@example.test \
-         ORVIX_PRIMARY_DOMAIN=example.test \
-         ORVIX_PUBLIC_IPV4=100.0.0.10 \
-         bash release/install.sh          # fails: admin password is required
+# release/install.sh:1701 (active_admin_count)
+n="$(_orvix_db_scalar "SELECT COUNT(*) FROM users WHERE role IN ('admin','superadmin','super_admin','platform_super_admin') AND active = $(_orvix_db_true);")" || true
+
+# release/install.sh:1713 (admin_user_exists)
+count="$(_orvix_db_scalar "SELECT COUNT(*) FROM users WHERE email = '$sql_email' AND role IN ('admin','superadmin','super_admin','platform_super_admin') AND active = $(_orvix_db_true);")" || true
 ```
 
-## Recommendation for PR #58's fix cycle
+This is a two-line change scoped entirely to `release/install.sh` on PR #58's
+branch. It restores agreement between the Go bootstrap and the shell
+installer's rerun logic without any schema/migration/API changes.
 
-Update the three admin-detection queries in `release/install.sh` to include the canonical literal alongside the legacy triple. Concretely, in `active_admin_count`, `first_active_admin_email`, and `admin_user_exists`, replace
-
-```
-role IN ('admin','superadmin','super_admin')
-```
-
-with
-
-```
-role IN ('admin','superadmin','super_admin','platform_super_admin')
-```
-
-This keeps backwards compatibility with legacy databases (which still exist during the migration window — see `seedLegacyAdminForMigrationTest` in the test suite) while recognising the new canonical bootstrap row. A follow-up canonicalisation pass can drop the legacy literals when the deprecated roles are removed from the rbac map.
-
-## Scope
-
-This investigation is **documentation only**. No production installer or bootstrap code was modified in this PR (PR #59). The fix belongs in PR #58's own review cycle, where the bootstrap literal was introduced.
+**This PR (#59) does not implement that fix** — production installer code is
+strictly out of PR #59's scope. The fix belongs on PR #58.
