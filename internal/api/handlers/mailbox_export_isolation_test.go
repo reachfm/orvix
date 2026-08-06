@@ -82,8 +82,12 @@ func buildExportEnv(t *testing.T) *exportEnv {
 	exec("INSERT INTO coremail_domains (id, name, tenant_id, status, plan, max_mailboxes, max_aliases, max_quota_mb, created_at, updated_at) VALUES (1, 't1.example', 1, 'active', 'enterprise', 0, 0, 0, ?, ?)", now, now)
 	exec("INSERT INTO coremail_domains (id, name, tenant_id, status, plan, max_mailboxes, max_aliases, max_quota_mb, created_at, updated_at) VALUES (2, 't2.example', 2, 'suspended', 'smb', 0, 0, 0, ?, ?)", now, now)
 
-	seedTenantAdminWithPassword(t, sqlDB, "admin1@t1.example", 1, "Tenant1Pass!2026")
-	seedTenantAdminWithPassword(t, sqlDB, "admin2@t2.example", 2, "Tenant2Pass!2026")
+	tid1 := uint(1)
+	tid2 := uint(2)
+	// COMPAT: mailbox/domain export routes are still under router.go:1123 admin group
+	// gated on legacy role triple. See docs/deployment/canonical-role-fixtures-allowlist.md class H.
+	seedLegacyAdminForMigrationTestWithPassword(t, sqlDB, "admin1@t1.example", &tid1, "Tenant1Pass!2026")
+	seedLegacyAdminForMigrationTestWithPassword(t, sqlDB, "admin2@t2.example", &tid2, "Tenant2Pass!2026")
 	psaHash, _ := authenticator.HashPassword("PlatformPass!2026")
 	exec("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'psa@platform.local', ?, 'platform_super_admin', NULL, 1, 1)", now, now, psaHash)
 
