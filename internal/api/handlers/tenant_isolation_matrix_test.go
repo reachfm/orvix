@@ -64,7 +64,7 @@ func buildMatrixEnv(t *testing.T) *matrixEnv {
 	exec("INSERT INTO coremail_domains (id, name, tenant_id, status, plan, max_mailboxes, max_aliases, max_quota_mb, created_at, updated_at) VALUES (2, 'tenantb.example', 2, 'active', 'enterprise', 0, 0, 0, ?, ?)", now, now)
 
 	taHash, _ := authenticator.HashPassword("TenantAdminPass!")
-	exec("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'ta@tenanta.example', ?, 'admin', 1, 1, 1)", now, now, taHash)
+	seedTenantAdminWithPassword(t, sqlDB, "ta@tenanta.example", 1, "TenantAdminPass!")
 	exec("INSERT INTO coremail_mailboxes (id, domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme, status, quota_mb, is_admin, created_at, updated_at) VALUES (1, 1, 1, 'ta', 'ta@tenanta.example', 'TA', ?, 'argon2id', 'active', 1024, 1, ?, ?)", taHash, now, now)
 
 	psaHash, _ := authenticator.HashPassword("PlatformSuperPass!")

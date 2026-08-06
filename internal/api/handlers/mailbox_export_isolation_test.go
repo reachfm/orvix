@@ -82,10 +82,8 @@ func buildExportEnv(t *testing.T) *exportEnv {
 	exec("INSERT INTO coremail_domains (id, name, tenant_id, status, plan, max_mailboxes, max_aliases, max_quota_mb, created_at, updated_at) VALUES (1, 't1.example', 1, 'active', 'enterprise', 0, 0, 0, ?, ?)", now, now)
 	exec("INSERT INTO coremail_domains (id, name, tenant_id, status, plan, max_mailboxes, max_aliases, max_quota_mb, created_at, updated_at) VALUES (2, 't2.example', 2, 'suspended', 'smb', 0, 0, 0, ?, ?)", now, now)
 
-	a1Hash, _ := authenticator.HashPassword("Tenant1Pass!2026")
-	exec("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'admin1@t1.example', ?, 'admin', 1, 1, 1)", now, now, a1Hash)
-	a2Hash, _ := authenticator.HashPassword("Tenant2Pass!2026")
-	exec("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'admin2@t2.example', ?, 'admin', 2, 1, 1)", now, now, a2Hash)
+	seedTenantAdminWithPassword(t, sqlDB, "admin1@t1.example", 1, "Tenant1Pass!2026")
+	seedTenantAdminWithPassword(t, sqlDB, "admin2@t2.example", 2, "Tenant2Pass!2026")
 	psaHash, _ := authenticator.HashPassword("PlatformPass!2026")
 	exec("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'psa@platform.local', ?, 'platform_super_admin', NULL, 1, 1)", now, now, psaHash)
 

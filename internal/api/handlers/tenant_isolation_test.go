@@ -86,7 +86,7 @@ func buildTenantIsolationEnv(t *testing.T) *tenantIsolationEnv {
 	if err != nil {
 		t.Fatalf("hash: %v", err)
 	}
-	exec("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, ?, ?, 'admin', 1, 1, 1)", now, now, adminAEmail, adminAHash)
+	seedTenantAdminWithPassword(t, sqlDB, adminAEmail, 1, adminAPass)
 	exec(`INSERT INTO coremail_mailboxes (id, domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme, status, quota_mb, is_admin, created_at, updated_at)
 	      VALUES (1, 1, 1, 'admin', ?, 'Admin A', ?, 'argon2id', 'active', 1024, 1, ?, ?)`, adminAEmail, adminAHash, now, now)
 
