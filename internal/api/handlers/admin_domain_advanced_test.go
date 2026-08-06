@@ -79,7 +79,11 @@ func buildAdminDomainAdvancedEnv(t *testing.T) *adminDomainAdvancedEnv {
 		userPass   = "UserPass!2026"
 	)
 	userHash, _ := bcrypt.GenerateFromPassword([]byte(userPass), bcrypt.DefaultCost)
-	seedTenantAdminWithPassword(t, sqlDB, adminEmail, 1, adminPass)
+	tid := uint(1)
+	// COMPAT: route lives under /admin/* which router.go:1123 gates on
+	// RequireAnyRole(RoleAdmin, RoleSuperAdmin, RolePlatformSuperAdmin); PR#58
+	// splits this into platform/tenant sub-groups. Until then, use legacy.
+	seedLegacyAdminForMigrationTestWithPassword(t, sqlDB, adminEmail, &tid, adminPass)
 	if _, err := sqlDB.Exec(
 		"INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, ?, ?, 'user', 1, 1, 1)",
 		now, now, userEmail, string(userHash),

@@ -86,7 +86,9 @@ func buildTenantIsolationEnv(t *testing.T) *tenantIsolationEnv {
 	if err != nil {
 		t.Fatalf("hash: %v", err)
 	}
-	seedTenantAdminWithPassword(t, sqlDB, adminAEmail, 1, adminAPass)
+	tidA := uint(1)
+	// COMPAT: see testhelpers_role_test.go seedLegacyAdminForMigrationTest doc.
+	seedLegacyAdminForMigrationTestWithPassword(t, sqlDB, adminAEmail, &tidA, adminAPass)
 	exec(`INSERT INTO coremail_mailboxes (id, domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme, status, quota_mb, is_admin, created_at, updated_at)
 	      VALUES (1, 1, 1, 'admin', ?, 'Admin A', ?, 'argon2id', 'active', 1024, 1, ?, ?)`, adminAEmail, adminAHash, now, now)
 

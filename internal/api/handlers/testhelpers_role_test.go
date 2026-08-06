@@ -144,9 +144,22 @@ func seedTenantAdminWithPassword(t *testing.T, db *sql.DB, email string, tenantI
 
 // seedLegacyAdminForMigrationTest inserts the DEPRECATED `role='admin'`
 // literal. Use ONLY in tests that intentionally exercise the legacy-role
-// migration/normalization path. The verbose name is deliberate so that every
-// call site advertises the migration-only intent at review time.
+// migration/normalization path, OR in tests that hit routes still gated on
+// the top-level `admin` group at internal/api/router.go:1123
+// (RequireAnyRole(RoleAdmin, RoleSuperAdmin, RolePlatformSuperAdmin) —
+// notably absent: RoleTenantAdmin). After PR #58 splits that group into
+// platform-only and tenant-admin sub-groups, migrate call sites to the
+// canonical tenant helpers. The verbose name is deliberate so every call
+// site advertises the migration-only intent at review time.
 func seedLegacyAdminForMigrationTest(t *testing.T, db *sql.DB, email string, tenantID *uint) SeededUser {
 	t.Helper()
 	return insertUser(t, db, email, "admin", tenantID)
+}
+
+// seedLegacyAdminForMigrationTestWithPassword is the WithPassword variant
+// used by tests that need to log the legacy-admin identity in via the auth
+// endpoint. Same constraints and migration intent as seedLegacyAdminForMigrationTest.
+func seedLegacyAdminForMigrationTestWithPassword(t *testing.T, db *sql.DB, email string, tenantID *uint, password string) SeededUser {
+	t.Helper()
+	return insertUserWithPassword(t, db, email, "admin", tenantID, password)
 }
