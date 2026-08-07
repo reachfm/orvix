@@ -147,7 +147,7 @@ func (r *OrganizationRepo) ExistsBySlug(ctx context.Context, slug string, exclud
 func (r *OrganizationRepo) CountAdmins(ctx context.Context, tenantID uint) (int, error) {
 	var count int
 	err := r.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM users WHERE tenant_id="+r.dialect.Placeholder(1)+" AND role IN ('admin','superadmin') AND deleted_at IS NULL", tenantID).Scan(&count)
+		"SELECT COUNT(*) FROM users WHERE tenant_id="+r.dialect.Placeholder(1)+" AND role IN ('admin','superadmin','tenant_admin') AND deleted_at IS NULL", tenantID).Scan(&count)
 	return count, err
 }
 

@@ -31,7 +31,18 @@ func newOrganizationTestDB(t *testing.T) *sql.DB {
 		updated_at DATETIME,
 		deleted_at DATETIME
 	);
-	CREATE TABLE users (id INTEGER PRIMARY KEY, tenant_id INTEGER, role TEXT, deleted_at DATETIME);`)
+	CREATE TABLE users (id INTEGER PRIMARY KEY, tenant_id INTEGER, role TEXT, deleted_at DATETIME, token_version INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1);
+	CREATE TABLE org_ownership_transfers (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		organization_id INTEGER NOT NULL,
+		from_user_id INTEGER NOT NULL,
+		to_user_id INTEGER NOT NULL,
+		token_hash TEXT NOT NULL,
+		status TEXT NOT NULL DEFAULT 'pending',
+		expires_at DATETIME,
+		accepted_at DATETIME,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);`)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -202,7 +202,7 @@ func (h *Handler) UpdateAdminUser(c fiber.Ctx) error {
 	args = append(args, now, id, tenantID)
 
 	res, err := sqlDB.ExecContext(c.Context(), fmt.Sprintf(
-		`UPDATE users SET %s WHERE id = ? AND tenant_id = ? AND role IN ('admin','superadmin') AND deleted_at IS NULL`,
+		`UPDATE users SET %s WHERE id = ? AND tenant_id = ? AND role IN ('admin','superadmin','tenant_admin','tenant_operator','tenant_support','tenant_readonly') AND deleted_at IS NULL`,
 		strings.Join(sets, ", ")), args...)
 	if err != nil {
 		h.logger.Error("update admin user: DB update failed", zap.Error(err))
@@ -313,7 +313,7 @@ func (h *Handler) UpdateAdminUserStatus(c fiber.Ctx) error {
 
 	now := time.Now().UTC()
 	res, err := sqlDB.ExecContext(c.Context(),
-		`UPDATE users SET active = `+h.dialect.Placeholder(1)+`, updated_at = `+h.dialect.Placeholder(2)+`, token_version = COALESCE(token_version, 0) + 1 WHERE id = `+h.dialect.Placeholder(3)+` AND tenant_id = `+h.dialect.Placeholder(4)+` AND role IN ('admin','superadmin') AND deleted_at IS NULL`,
+		`UPDATE users SET active = `+h.dialect.Placeholder(1)+`, updated_at = `+h.dialect.Placeholder(2)+`, token_version = COALESCE(token_version, 0) + 1 WHERE id = `+h.dialect.Placeholder(3)+` AND tenant_id = `+h.dialect.Placeholder(4)+` AND role IN ('admin','superadmin','tenant_admin','tenant_operator','tenant_support','tenant_readonly') AND deleted_at IS NULL`,
 		body.Active, now, id, tenantID)
 	if err != nil {
 		h.logger.Error("update admin user status: DB update failed", zap.Error(err))
@@ -435,7 +435,7 @@ func (h *Handler) DeleteAdminUser(c fiber.Ctx) error {
 
 	now := time.Now().UTC()
 	res, err := sqlDB.ExecContext(c.Context(),
-		`UPDATE users SET active = `+h.dialect.FalseLiteral()+`, deleted_at = `+h.dialect.Placeholder(1)+`, updated_at = `+h.dialect.Placeholder(2)+`, token_version = COALESCE(token_version, 0) + 1 WHERE id = `+h.dialect.Placeholder(3)+` AND tenant_id = `+h.dialect.Placeholder(4)+` AND role IN ('admin','superadmin') AND deleted_at IS NULL`,
+		`UPDATE users SET active = `+h.dialect.FalseLiteral()+`, deleted_at = `+h.dialect.Placeholder(1)+`, updated_at = `+h.dialect.Placeholder(2)+`, token_version = COALESCE(token_version, 0) + 1 WHERE id = `+h.dialect.Placeholder(3)+` AND tenant_id = `+h.dialect.Placeholder(4)+` AND role IN ('admin','superadmin','tenant_admin','tenant_operator','tenant_support','tenant_readonly') AND deleted_at IS NULL`,
 		now, now, id, tenantID)
 	if err != nil {
 		h.logger.Error("delete admin user: DB update failed", zap.Error(err))

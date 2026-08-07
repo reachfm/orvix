@@ -134,11 +134,19 @@ func (s *Service) ListOwnershipTransfers(ctx context.Context, orgID uint) ([]Own
 }
 
 func (r *OrganizationRepo) CreateOwnershipTransfer(ctx context.Context, t *OwnershipTransfer) error {
-	_, err := r.db.ExecContext(ctx,
+	res, err := r.db.ExecContext(ctx,
 		`INSERT INTO org_ownership_transfers (organization_id, from_user_id, to_user_id, token_hash, status, expires_at, created_at)
 		VALUES (`+r.dialect.Placeholders(7)+`)`,
 		t.OrganizationID, t.FromUserID, t.ToUserID, t.TokenHash, t.Status, t.ExpiresAt, t.CreatedAt)
-	return err
+	if err != nil {
+		return err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return err
+	}
+	t.ID = uint(id)
+	return nil
 }
 
 func (r *OrganizationRepo) GetOwnershipTransferByHash(ctx context.Context, hash string) (*OwnershipTransfer, error) {
@@ -163,15 +171,17 @@ func (r *OrganizationRepo) SetTransferStatus(ctx context.Context, id uint, statu
 }
 
 func (r *OrganizationRepo) AcceptOwnershipTransfer(ctx context.Context, id uint, acceptedAt time.Time) error {
+	// Read the transfer outside the transaction so the query sees the
+	// in-memory row before the transaction acquires a connection.
+	t, err := r.GetOwnershipTransferByID(ctx, id)
+	if err != nil || t == nil {
+		return ErrTransferNotFound
+	}
 	tx, err := r.root.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	t, err := r.GetOwnershipTransferByID(ctx, id)
-	if err != nil || t == nil {
-		return ErrTransferNotFound
-	}
 	if _, err := tx.ExecContext(ctx, "UPDATE org_ownership_transfers SET status = "+r.dialect.Placeholder(1)+", accepted_at = "+r.dialect.Placeholder(2)+" WHERE id = "+r.dialect.Placeholder(3),
 		TransferAccepted, acceptedAt, id); err != nil {
 		return err
