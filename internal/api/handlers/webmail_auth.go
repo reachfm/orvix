@@ -267,8 +267,10 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 			zap.Error(err))
 	}
 
-	// Issue access token from the current authorization snapshot.
-	accessToken, accessJTI, err := h.auth.GenerateAccessTokenForUserWithJTI(userID)
+	// Issue access token from the current authorization snapshot. The
+	// returned issuedRole is the SAME canonical role embedded in the JWT,
+	// reused for the opaque session so both share one snapshot.
+	accessToken, accessJTI, issuedRole, err := h.auth.GenerateAccessTokenForUserWithJTI(userID)
 	if err != nil {
 		h.logger.Error("webmail login: mint access token", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -280,7 +282,7 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 	// issuance is the source of truth for browser auth; if the
 	// store refuses the write we refuse the login rather than
 	// return success without a usable session.
-	if err := h.issueLoginSession(c, userID, h.auth.SnapshotRoleForUser(userID), loginEmail); err != nil {
+	if err := h.issueLoginSession(c, userID, issuedRole, loginEmail); err != nil {
 		h.logger.Error("webmail login: issue login session", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "authentication failed",
@@ -331,7 +333,7 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 		zap.String("email", loginEmail),
 		zap.Uint("mailbox_id", mailboxID),
 		zap.Uint("user_id", userID),
-		zap.String("role", string(h.auth.SnapshotRoleForUser(userID))))
+		zap.String("role", string(issuedRole)))
 
 	return c.JSON(fiber.Map{
 		"authenticated": true,
