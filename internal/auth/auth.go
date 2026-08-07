@@ -384,20 +384,21 @@ func (a *Authenticator) ValidateAccessToken(tokenString string) (uint, Role, err
 	// is rejected even if the JWT signature is valid.
 	if a.db != nil {
 		if tvClaim, hasTV := claims["token_version"].(float64); hasTV {
+			rawDB, dbErr := a.db.DB()
+			if dbErr != nil {
+				return 0, "", ErrTokenInvalid
+			}
+			d := a.dbDialect()
 			var currentTV int64
-			// Use raw sql.DB (not GORM) so the query works in every
-			// setup including ad-hoc test harnesses where GORM's
-			// Raw().Row() may return nil.
-			if rawDB, err := a.db.DB(); err == nil {
-				d := a.dbDialect()
-				if scanErr := rawDB.QueryRow(
-					"SELECT COALESCE(token_version, 0) FROM users WHERE id = "+d.Placeholder(1),
-					userID,
-				).Scan(&currentTV); scanErr == nil {
-					if int64(tvClaim) != currentTV {
-						return 0, "", ErrTokenInvalid
-					}
-				}
+			scanErr := rawDB.QueryRow(
+				"SELECT COALESCE(token_version, 0) FROM users WHERE id = "+d.Placeholder(1),
+				userID,
+			).Scan(&currentTV)
+			if scanErr != nil {
+				return 0, "", ErrTokenInvalid
+			}
+			if int64(tvClaim) != currentTV {
+				return 0, "", ErrTokenInvalid
 			}
 		}
 	}

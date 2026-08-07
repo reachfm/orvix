@@ -52,15 +52,17 @@ func TestAccountSessionRevokeE2E(t *testing.T) {
 
 	// Two independent sessions for the same user (5): each mints an access
 	// token whose jti is persisted on its session row.
+	// Seed a real user so token_version validation works.
+	sqlDB.Exec(`INSERT INTO users (id, created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (5, datetime('now'), datetime('now'), 'rev@test.local', 'h', 'tenant_admin', 1, 1, 1)`)
 	const uid = uint(5)
-	tokenA, jtiA, _, err := authr.GenerateAccessTokenWithJTI(uid, auth.RoleAdmin)
+	tokenA, jtiA, _, err := authr.GenerateAccessTokenWithJTI(uid, auth.RoleTenantAdmin)
 	if err != nil {
 		t.Fatalf("issue A: %v", err)
 	}
 	if _, _, err := authr.GenerateRefreshToken(uid, jtiA); err != nil {
 		t.Fatalf("refresh A: %v", err)
 	}
-	tokenB, jtiB, _, err := authr.GenerateAccessTokenWithJTI(uid, auth.RoleAdmin)
+	tokenB, jtiB, _, err := authr.GenerateAccessTokenWithJTI(uid, auth.RoleTenantAdmin)
 	if err != nil {
 		t.Fatalf("issue B: %v", err)
 	}

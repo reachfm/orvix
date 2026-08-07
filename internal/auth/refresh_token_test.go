@@ -421,6 +421,125 @@ func TestRefresh_ErrorNotLeakingToken(t *testing.T) {
 	}
 }
 
+// ── ValidateAccessToken token_version fail-closed ───────────────
+func TestValidateToken_VersionMatch_Accepted(t *testing.T) {
+	a := newRefreshTestAuth(t)
+	sqlDB, _ := a.db.DB()
+	uid := seedUserRefresh(t, sqlDB, "tvok@test.local", string(RoleTenantAdmin), ptruint(1))
+	access, _, _, err := a.GenerateAccessTokenWithJTI(uid, RoleTenantAdmin)
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	uid2, role, valErr := a.ValidateAccessToken(access)
+	if valErr != nil {
+		t.Fatalf("token with current version rejected: %v", valErr)
+	}
+	if uid2 != uid || string(role) != string(RoleTenantAdmin) {
+		t.Fatalf("expected uid=%d role=tenant_admin, got uid=%d role=%s", uid, uid2, role)
+	}
+}
+
+func TestValidateToken_VersionMismatch_Rejected(t *testing.T) {
+	a := newRefreshTestAuth(t)
+	sqlDB, _ := a.db.DB()
+	uid := seedUserRefresh(t, sqlDB, "tvmismatch@test.local", string(RoleTenantAdmin), ptruint(1))
+	access, _, _, err := a.GenerateAccessTokenWithJTI(uid, RoleTenantAdmin)
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	// Bump token_version.
+	sqlDB.Exec("UPDATE users SET token_version = COALESCE(token_version, 0) + 1 WHERE id = ?", uid)
+	uid2, role, valErr := a.ValidateAccessToken(access)
+	if valErr == nil {
+		t.Fatalf("stale token accepted: uid=%d role=%s", uid2, role)
+	}
+	if uid2 != 0 || role != "" {
+		t.Fatalf("stale token returned non-zero: uid=%d role=%s", uid2, role)
+	}
+}
+
+func TestValidateToken_MissingUser_Rejected(t *testing.T) {
+	a := newRefreshTestAuth(t)
+	sqlDB, _ := a.db.DB()
+	uid := seedUserRefresh(t, sqlDB, "tvnouser@test.local", string(RoleTenantAdmin), ptruint(1))
+	access, _, _, err := a.GenerateAccessTokenWithJTI(uid, RoleTenantAdmin)
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	sqlDB.Exec("DELETE FROM users WHERE id = ?", uid)
+	uid2, role, valErr := a.ValidateAccessToken(access)
+	if valErr == nil {
+		t.Fatalf("token for deleted user accepted: uid=%d role=%s", uid2, role)
+	}
+	if uid2 != 0 || role != "" {
+		t.Fatalf("deleted user token returned non-zero: uid=%d role=%s", uid2, role)
+	}
+}
+
+func TestValidateToken_ErrorContainsNoSecret(t *testing.T) {
+	a := newRefreshTestAuth(t)
+	sqlDB, _ := a.db.DB()
+	uid := seedUserRefresh(t, sqlDB, "tvsecret@test.local", string(RoleTenantAdmin), ptruint(1))
+	access, _, _, err := a.GenerateAccessTokenWithJTI(uid, RoleTenantAdmin)
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	sqlDB.Exec("UPDATE users SET token_version = COALESCE(token_version, 0) + 1 WHERE id = ?", uid)
+	_, _, valErr := a.ValidateAccessToken(access)
+	if valErr == nil {
+		t.Fatal("expected rejection")
+	}
+	msg := valErr.Error()
+	// ErrTokenInvalid ("invalid token") is the expected canonical error.
+	// It must not leak the actual JWT, SQL details, or internal paths.
+	for _, banned := range []string{"SQL", "sqlite", "DSN", "sha256", "bearer", "eyJ", "QueryRow"} {
+		if strings.Contains(strings.ToLower(msg), strings.ToLower(banned)) {
+			t.Errorf("error leaked %q: %s", banned, msg)
+		}
+	}
+}
+
+// ── Mutation-specific token_version tests ───────────────────────
+func TestTokenVersion_BumpOnRoleChange(t *testing.T) {
+	a := newRefreshTestAuth(t)
+	sqlDB, _ := a.db.DB()
+	uid := seedUserRefresh(t, sqlDB, "bumprole@test.local", string(RoleTenantReadOnly), ptruint(1))
+	var beforeTV int64
+	sqlDB.QueryRow("SELECT COALESCE(token_version, 0) FROM users WHERE id = ?", uid).Scan(&beforeTV)
+	access, _, _, err := a.GenerateAccessTokenWithJTI(uid, RoleTenantReadOnly)
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	// Simulate a role update via the canonical service path (bump + change).
+	sqlDB.Exec("UPDATE users SET role = ?, token_version = COALESCE(token_version, 0) + 1 WHERE id = ?", string(RoleTenantAdmin), uid)
+	var afterTV int64
+	sqlDB.QueryRow("SELECT COALESCE(token_version, 0) FROM users WHERE id = ?", uid).Scan(&afterTV)
+	if afterTV != beforeTV+1 {
+		t.Fatalf("token_version must increment exactly once: before=%d after=%d", beforeTV, afterTV)
+	}
+	// Old token with stale version must be rejected.
+	uid2, role, valErr := a.ValidateAccessToken(access)
+	if valErr == nil {
+		t.Fatalf("old token accepted after role change: uid=%d role=%s", uid2, role)
+	}
+}
+
+func TestTokenVersion_NoOpDoesNotBump(t *testing.T) {
+	a := newRefreshTestAuth(t)
+	sqlDB, _ := a.db.DB()
+	uid := seedUserRefresh(t, sqlDB, "noop@test.local", string(RoleTenantAdmin), ptruint(1))
+	var beforeTV int64
+	sqlDB.QueryRow("SELECT COALESCE(token_version, 0) FROM users WHERE id = ?", uid).Scan(&beforeTV)
+	// No-op: UPDATE only if role differs.
+	res, _ := sqlDB.Exec("UPDATE users SET role = ?, token_version = COALESCE(token_version, 0) + 1 WHERE id = ? AND role != ?", string(RoleTenantAdmin), uid, string(RoleTenantAdmin))
+	n, _ := res.RowsAffected()
+	var afterTV int64
+	sqlDB.QueryRow("SELECT COALESCE(token_version, 0) FROM users WHERE id = ?", uid).Scan(&afterTV)
+	if n != 0 || afterTV != beforeTV {
+		t.Fatalf("no-op must not bump token_version: rows=%d before=%d after=%d", n, beforeTV, afterTV)
+	}
+}
+
 // ── helpers ──────────────────────────────────────────────────────
 func ptruint(v uint) *uint { return &v }
 

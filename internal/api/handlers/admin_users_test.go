@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"strconv"
-	"strings"
 	"testing"
 )
 
@@ -169,41 +168,31 @@ func TestAdminUsersUnauthorized(t *testing.T) {
 }
 
 // TestAdminUsersDBErrorsNotLeaked verifies that when DB errors occur,
-// the canonical tenant middleware correctly blocks before the handler.
-// The admin-users routes are on tenantCompatMW which requires
-// requireTenantContext. A broken users table prevents tenant resolution,
-// so the middleware returns 403 rather than reaching the handler.
+// the auth layer fails closed before any handler runs. A broken users
+// table prevents ValidateAccessToken from checking token_version, so
+// the token is rejected as invalid (401) at the auth layer.
 func TestAdminUsersDBErrorsNotLeaked(t *testing.T) {
 	router, sqlDB := newEnterpriseRouter(t)
-	// Login BEFORE breaking the DB so we have a valid token
 	token := enterpriseLoginForTest(t, router, "admin@test.local", "TestPassword123!")
 	csrf := enterpriseCSRFForTest(t, router, token)
 
-	// Now drop the users table so tenant resolution fails
 	if _, err := sqlDB.Exec("DROP TABLE users"); err != nil {
 		t.Fatalf("drop table: %v", err)
 	}
 
-	// List — tenant context check fails → 403, no DB error leaks
+	// Auth middleware fails closed → 401 on token validation failure.
 	resp := getJSON(t, router, "/api/v1/admin/admin-users", token)
-	if resp.status != 403 {
-		t.Fatalf("list with broken DB: want 403 (tenant context fail), got %d body=%s", resp.status, resp.body)
+	if resp.status != 401 {
+		t.Fatalf("list with broken DB: want 401, got %d body=%s", resp.status, resp.body)
 	}
-	if !strings.Contains(resp.body, "tenant context") {
-		t.Errorf("expected tenant-context error; body=%s", resp.body)
-	}
-
-	// Create — same middleware blocks first
 	resp2 := postJSON(t, router, "/api/v1/admin/admin-users", token, csrf,
 		`{"email":"x@test.local","password":"TestPass123!","role":"admin"}`)
-	if resp2.status != 403 {
-		t.Fatalf("create with broken DB: want 403, got %d body=%s", resp2.status, resp2.body)
+	if resp2.status != 401 {
+		t.Fatalf("create with broken DB: want 401, got %d body=%s", resp2.status, resp2.body)
 	}
-
-	// Update status — same middleware blocks first
 	resp3 := patchJSON(t, router, "/api/v1/admin/admin-users/2/status", token, csrf,
 		`{"active":false}`)
-	if resp3.status != 403 {
-		t.Fatalf("status with broken DB: want 403, got %d body=%s", resp3.status, resp3.body)
+	if resp3.status != 401 {
+		t.Fatalf("status with broken DB: want 401, got %d body=%s", resp3.status, resp3.body)
 	}
 }

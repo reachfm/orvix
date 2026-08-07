@@ -154,10 +154,24 @@ func (s *Service) ListMembers(ctx context.Context, orgID uint) ([]OrganizationMe
 }
 
 func (s *Service) UpdateMemberRole(ctx context.Context, memberID, orgID uint, role string) error {
+	if !isValidOrgMemberRole(role) {
+		return fmt.Errorf("invalid organization member role: %s", role)
+	}
 	_, err := s.repo.db.ExecContext(ctx,
 		"UPDATE users SET role = "+s.repo.dialect.Placeholder(1)+", token_version = COALESCE(token_version, 0) + 1 WHERE id = "+s.repo.dialect.Placeholder(2)+" AND tenant_id = "+s.repo.dialect.Placeholder(3),
 		role, memberID, orgID)
 	return err
+}
+
+// isValidOrgMemberRole reports whether role is a canonical tenant role
+// permitted for organization members. platform_super_admin, legacy roles,
+// and unknown/empty roles are rejected.
+func isValidOrgMemberRole(role string) bool {
+	switch role {
+	case "tenant_admin", "tenant_operator", "tenant_support", "tenant_readonly":
+		return true
+	}
+	return false
 }
 
 func (s *Service) RemoveMember(ctx context.Context, memberID, orgID uint) error {

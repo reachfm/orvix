@@ -21,17 +21,20 @@ func sessionRevocationSuite(t *testing.T, a *Authenticator) {
 	if err != nil {
 		t.Fatalf("db: %v", err)
 	}
+	// Seed users so token_version queries find real rows.
+	sqlDB.Exec(`INSERT INTO users (id, created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (5, datetime('now'), datetime('now'), 'sess5@test.local', 'h', 'tenant_admin', 1, 1, 1)`)
+	sqlDB.Exec(`INSERT INTO users (id, created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (7, datetime('now'), datetime('now'), 'sess7@test.local', 'h', 'tenant_admin', 1, 1, 1)`)
 	d := a.dbDialect()
 
 	t.Run("bearer JWT target revoke, unrelated stays valid", func(t *testing.T) {
-		tokenA, jtiA, _, err := a.GenerateAccessTokenWithJTI(5, RoleAdmin)
+		tokenA, jtiA, _, err := a.GenerateAccessTokenWithJTI(5, RoleTenantAdmin)
 		if err != nil {
 			t.Fatalf("issue A: %v", err)
 		}
 		if _, _, err := a.GenerateRefreshToken(5, jtiA); err != nil {
 			t.Fatalf("refresh A: %v", err)
 		}
-		tokenB, jtiB, _, err := a.GenerateAccessTokenWithJTI(5, RoleAdmin)
+		tokenB, jtiB, _, err := a.GenerateAccessTokenWithJTI(5, RoleTenantAdmin)
 		if err != nil {
 			t.Fatalf("issue B: %v", err)
 		}
@@ -72,10 +75,10 @@ func sessionRevocationSuite(t *testing.T, a *Authenticator) {
 		now := time.Now().UTC()
 		ins := "INSERT INTO sessions (created_at, updated_at, user_id, token_hash, role, email, ip, jti, expires_at) VALUES (" +
 			d.Placeholders(9) + ")"
-		if _, err := sqlDB.Exec(ins, now, now, uint(7), tokenHash, "admin", "a@b.c", "", "", now.Add(time.Hour)); err != nil {
+		if _, err := sqlDB.Exec(ins, now, now, uint(7), tokenHash, "tenant_admin", "a@b.c", "", "", now.Add(time.Hour)); err != nil {
 			t.Fatalf("seed opaque session: %v", err)
 		}
-		if _, role, _, err := a.ValidateOpaqueSession(token); err != nil || role != RoleAdmin {
+		if _, role, _, err := a.ValidateOpaqueSession(token); err != nil || role != RoleTenantAdmin {
 			t.Fatalf("opaque session should be valid: role=%q err=%v", role, err)
 		}
 		if _, err := sqlDB.Exec("DELETE FROM sessions WHERE token_hash = "+d.Placeholder(1), tokenHash); err != nil {
