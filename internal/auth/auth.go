@@ -484,11 +484,22 @@ func (a *Authenticator) isTokenRevoked(jti string) bool {
 	return count > 0
 }
 
-// canonicalRefreshRole checks whether role is an allowed runtime canonical
-// role for refresh. Legacy alias roles (admin, operator, readonly, superadmin
-// and variants) are NOT silently converted — they must already be stored
+// userAuthorizationSnapshot is the canonical runtime authorization state for
+// a users row, read in a single SELECT so role, tenant binding, status, and
+// token_version are always consistent.
+type userAuthorizationSnapshot struct {
+	Role         Role
+	TenantID     sql.NullInt64
+	Active       bool
+	DeletedAt    sql.NullTime
+	TokenVersion int64
+}
+
+// canonicalRuntimeRole reports whether role is an allowed runtime canonical
+// role. Legacy alias roles (admin, operator, readonly, superadmin and
+// variants) are NOT silently converted — they must already be stored
 // canonically.
-func canonicalRefreshRole(role Role) bool {
+func canonicalRuntimeRole(role Role) bool {
 	switch role {
 	case RolePlatformSuperAdmin, RoleTenantAdmin, RoleTenantOperator,
 		RoleTenantSupport, RoleTenantReadOnly, RoleUser, RoleBilling:
@@ -497,8 +508,8 @@ func canonicalRefreshRole(role Role) bool {
 	return false
 }
 
-// isTenantScopedRefreshRole reports whether role requires a non-null tenant_id.
-func isTenantScopedRefreshRole(role Role) bool {
+// isTenantScopedRuntimeRole reports whether role requires a non-null tenant_id.
+func isTenantScopedRuntimeRole(role Role) bool {
 	switch role {
 	case RoleTenantAdmin, RoleTenantOperator, RoleTenantSupport,
 		RoleTenantReadOnly, RoleUser, RoleBilling:
@@ -506,6 +517,100 @@ func isTenantScopedRefreshRole(role Role) bool {
 	}
 	return false
 }
+
+// validateAuthorizationSnapshot enforces the canonical role allowlist, tenant
+// binding rules, and active/deleted status. It returns ErrTokenInvalid on any
+// failure. This is the single validation used by both token issuance and
+// refresh.
+func validateAuthorizationSnapshot(snap userAuthorizationSnapshot) error {
+	if !canonicalRuntimeRole(snap.Role) {
+		return ErrTokenInvalid
+	}
+	if snap.Role == RolePlatformSuperAdmin {
+		if snap.TenantID.Valid && snap.TenantID.Int64 > 0 {
+			return ErrTokenInvalid
+		}
+	} else if isTenantScopedRuntimeRole(snap.Role) {
+		if !snap.TenantID.Valid || snap.TenantID.Int64 <= 0 {
+			return ErrTokenInvalid
+		}
+	}
+	if !snap.Active || snap.DeletedAt.Valid {
+		return ErrTokenInvalid
+	}
+	return nil
+}
+
+// loadUserAuthorizationSnapshot reads one user's authorization state in a
+// single dialect-aware SELECT. Any DB acquisition/query error or missing user
+// returns ErrTokenInvalid.
+func (a *Authenticator) loadUserAuthorizationSnapshot(userID uint) (userAuthorizationSnapshot, error) {
+	var snap userAuthorizationSnapshot
+	if a.db == nil {
+		return snap, ErrTokenInvalid
+	}
+	rawDB, err := a.db.DB()
+	if err != nil {
+		return snap, ErrTokenInvalid
+	}
+	d := a.dbDialect()
+	var dbRole string
+	err = rawDB.QueryRow(
+		"SELECT role, tenant_id, active, deleted_at, COALESCE(token_version, 0) FROM users WHERE id = "+d.Placeholder(1),
+		userID,
+	).Scan(&dbRole, &snap.TenantID, &snap.Active, &snap.DeletedAt, &snap.TokenVersion)
+	if err != nil {
+		return snap, ErrTokenInvalid
+	}
+	snap.Role = Role(dbRole)
+	if err := validateAuthorizationSnapshot(snap); err != nil {
+		return snap, ErrTokenInvalid
+	}
+	return snap, nil
+}
+
+// ValidateUserForTokenIssuance verifies that userID has a valid canonical
+// authorization snapshot. It returns only nil or ErrTokenInvalid.
+func (a *Authenticator) ValidateUserForTokenIssuance(userID uint) error {
+	_, err := a.loadUserAuthorizationSnapshot(userID)
+	return err
+}
+
+// SnapshotRoleForUser returns the validated canonical role for userID, or ""
+// if the authorization snapshot is invalid. It is used only for cookie/session
+// metadata after ValidateUserForTokenIssuance has already succeeded.
+func (a *Authenticator) SnapshotRoleForUser(userID uint) Role {
+	snap, err := a.loadUserAuthorizationSnapshot(userID)
+	if err != nil {
+		return ""
+	}
+	return snap.Role
+}
+
+// GenerateAccessTokenForUserWithJTI issues an access token using the caller's
+// current authorization snapshot (role, tenant, status, token_version read in
+// one SELECT). The role and token_version embedded in the JWT come from that
+// single snapshot — never from a caller-supplied role. This closes the
+// old-role/new-token_version TOCTOU race.
+func (a *Authenticator) GenerateAccessTokenForUserWithJTI(userID uint) (string, string, error) {
+	snap, err := a.loadUserAuthorizationSnapshot(userID)
+	if err != nil {
+		return "", "", err
+	}
+	token, jti, _, err := a.signAccessToken(userID, snap.Role, snap.TokenVersion)
+	if err != nil {
+		return "", "", err
+	}
+	return token, jti, nil
+}
+
+// canonicalRefreshRole is retained for backward compatibility; it delegates to
+// canonicalRuntimeRole.
+func canonicalRefreshRole(role Role) bool { return canonicalRuntimeRole(role) }
+
+// isTenantScopedRefreshRole is retained for backward compatibility; it
+// delegates to isTenantScopedRuntimeRole.
+func isTenantScopedRefreshRole(role Role) bool { return isTenantScopedRuntimeRole(role) }
 
 // RefreshToken validates a refresh token, rotates it, and returns new tokens.
 // The access token role and token_version are read from the current users row
@@ -546,40 +651,17 @@ func (a *Authenticator) RefreshToken(ctx context.Context, refreshToken string) (
 
 	// Single authorization snapshot: role, tenant_id, active, deleted_at,
 	// and token_version are read together so the signed JWT carries a
-	// consistent {role, token_version} pair.
-	var dbRole string
-	var tenantID sql.NullInt64
-	var active bool
-	var deletedAt sql.NullTime
-	var tokenVersion int64
-	if err := sqlDB.QueryRow(
-		"SELECT role, tenant_id, active, deleted_at, COALESCE(token_version, 0) FROM users WHERE id = "+d.Placeholder(1),
-		userID,
-	).Scan(&dbRole, &tenantID, &active, &deletedAt, &tokenVersion); err != nil {
+	// consistent {role, token_version} pair. Reuse the shared snapshot
+	// loader and validator.
+	snap, err := a.loadUserAuthorizationSnapshot(userID)
+	if err != nil {
 		return "", "", time.Time{}, ErrSessionExpired
 	}
-	if !active || deletedAt.Valid {
+	if err := validateAuthorizationSnapshot(snap); err != nil {
 		return "", "", time.Time{}, ErrSessionExpired
 	}
 
-	// Strict canonical role check — no silent NormalizeRole conversion.
-	role := Role(dbRole)
-	if !canonicalRefreshRole(role) {
-		return "", "", time.Time{}, ErrSessionExpired
-	}
-
-	// Strict tenant binding.
-	if role == RolePlatformSuperAdmin {
-		if tenantID.Valid && tenantID.Int64 > 0 {
-			return "", "", time.Time{}, ErrSessionExpired
-		}
-	} else if isTenantScopedRefreshRole(role) {
-		if !tenantID.Valid || tenantID.Int64 <= 0 {
-			return "", "", time.Time{}, ErrSessionExpired
-		}
-	}
-
-	accessToken, accessJTI, _, err := a.signAccessToken(userID, role, tokenVersion)
+	accessToken, accessJTI, _, err := a.signAccessToken(userID, snap.Role, snap.TokenVersion)
 	if err != nil {
 		return "", "", time.Time{}, err
 	}

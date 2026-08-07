@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -120,14 +121,40 @@ func buildDomainListEnv(t *testing.T) *domainListEnv {
 		_ = sqlDB.Close()
 	})
 
+	// The unresolved-tenant user (tenant_admin with tenant_id=0) can no longer
+	// authenticate under strict canonical snapshot validation. Its login
+	// returns "invalid credentials"; the token stays empty. Tests that use
+	// noTenantAdmin assert this denial.
 	return &domainListEnv{
 		router:        router,
 		tenant1Adm:    domainListLogin(t, router, "admin1@t1.example", "Tenant1Pass!2026"),
 		tenant2Adm:    domainListLogin(t, router, "admin2@t2.example", "Tenant2Pass!2026"),
 		superAdm:      domainListLogin(t, router, "psa@platform.local", "PlatformPass!2026"),
 		plainUser:     domainListLogin(t, router, "plain@t1.example", "PlainUserPass!2026"),
-		noTenantAdmin: domainListLogin(t, router, "notenant@nowhere.example", "NoTenantPass!2026"),
+		noTenantAdmin: domainListLoginDenied(t, router, "notenant@nowhere.example", "NoTenantPass!2026"),
 	}
+}
+
+// domainListLoginDenied attempts a login that is expected to be denied and
+// returns an empty token (the caller must not use it as an authenticated
+// identity). It asserts the denial produces a non-5xx response.
+func domainListLoginDenied(t *testing.T, r *api.Router, email, pass string) string {
+	t.Helper()
+	b, _ := json.Marshal(map[string]string{"email": email, "password": pass})
+	req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := r.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("login %s transport: %v", email, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 500 {
+		t.Fatalf("login %s: unexpected 5xx %d", email, resp.StatusCode)
+	}
+	if resp.StatusCode == http.StatusOK {
+		t.Fatalf("login %s: expected denied, got 200", email)
+	}
+	return ""
 }
 
 func domainListLogin(t *testing.T, r *api.Router, email, pass string) string {
@@ -333,14 +360,18 @@ func TestListDomains_UnauthorizedRoleRejected(t *testing.T) {
 // handler degrades to an empty list rather than leaking or erroring.
 func TestListDomains_UnresolvedTenantFailsSafely(t *testing.T) {
 	e := buildDomainListEnv(t)
-	// Canonical tenant_admin with tenant_id=0 must fail safely — requireTenantContext
-	// rejects the request before any handler runs, with 403.
+	// Canonical tenant_admin with tenant_id=0 is now denied at login by strict
+	// canonical snapshot validation — no access token is issued. Using the
+	// empty (denied) token is unauthenticated and must be rejected with 401.
+	if e.noTenantAdmin != "" {
+		t.Fatalf("unresolved-tenant user unexpectedly obtained a token")
+	}
 	status, rows := listDomains(t, e, e.noTenantAdmin, "/api/v1/domains")
 	if status >= 500 {
 		t.Fatalf("unresolved tenant: unexpected 5xx, got %d", status)
 	}
-	if status != 403 {
-		t.Fatalf("unresolved tenant: expected 403, got %d", status)
+	if status != 401 {
+		t.Fatalf("unresolved tenant: expected 401 (login denied), got %d", status)
 	}
 	if len(rows) > 0 {
 		t.Fatalf("unresolved tenant: must not leak data; got %v", domainNames(rows))

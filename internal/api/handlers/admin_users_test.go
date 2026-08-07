@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"strconv"
 	"testing"
+	"time"
+
+	"github.com/orvix/orvix/internal/auth"
 )
 
 func TestAdminUsersCreateListGet(t *testing.T) {
@@ -106,20 +109,26 @@ func TestAdminUsersResetPassword(t *testing.T) {
 func TestAdminUsersLastSuperadminProtection(t *testing.T) {
 	router, sqlDB := newEnterpriseRouter(t)
 	token := enterpriseLoginForTest(t, router, "admin@test.local", "TestPassword123!")
-	csrf := enterpriseCSRFForTest(t, router, token)
+	_ = token
 
-	// Create a second admin
-	resp := postJSON(t, router, "/api/v1/admin/admin-users", token, csrf,
-		`{"email":"other@test.local","password":"TestPassword123!","role":"superadmin"}`)
-	if resp.status != 201 {
-		t.Fatalf("create other admin: %d %s", resp.status, resp.body)
+	// Seed a second canonical tenant_admin user directly (the admin-users
+	// create handler only accepts legacy role strings, which canonical
+	// token issuance now rejects at login).
+	otherHash, _ := auth.HashPassword("TestPassword123!")
+	now := time.Now().UTC()
+	res, err := sqlDB.Exec(
+		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'other@test.local', ?, 'tenant_admin', 1, 1, 1)`,
+		now, now, otherHash,
+	)
+	if err != nil {
+		t.Fatalf("seed other admin: %v", err)
 	}
 	var other struct {
 		ID int64 `json:"id"`
 	}
-	json.Unmarshal(resp.bodyBytes, &other)
+	other.ID, _ = res.LastInsertId()
 
-	// Demote the original admin so only one superadmin remains
+	// Demote the original admin so only one tenant_admin remains
 	if _, err := sqlDB.Exec("UPDATE users SET role = 'user' WHERE email = 'admin@test.local'"); err != nil {
 		t.Fatalf("demote: %v", err)
 	}

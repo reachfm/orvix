@@ -671,6 +671,16 @@ func (h *Handler) Login(c fiber.Ctx) error {
 		h.rateLimiter.ResetLoginLimit(c.IP())
 	}
 
+	// Validate the current user authorization snapshot BEFORE issuing any
+	// MFA challenge or token. A malformed role, wrong tenant binding,
+	// inactive/deleted user, or deprecated role must fail exactly like a
+	// wrong-password login.
+	if err := h.auth.ValidateUserForTokenIssuance(userID); err != nil {
+		h.logger.Warn("login blocked by authorization validation",
+			zap.Uint("user_id", userID))
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid credentials"})
+	}
+
 	// MFA enforcement: if MFA is enabled, do NOT issue access/refresh tokens.
 	// Instead return an MFA challenge token that can only be exchanged at
 	// the /auth/mfa/verify endpoint.
@@ -688,18 +698,20 @@ func (h *Handler) Login(c fiber.Ctx) error {
 		})
 	}
 
-	// Issue opaque session cookie alongside JWT for transition.
-	// Cookie issuance is the source of truth for browser auth; if
-	// the store refuses the write we refuse the login rather than
-	// return success without a usable session.
-	if err := h.issueLoginSession(c, userID, auth.Role(userRole), loginEmail); err != nil {
-		h.logger.Error("failed to issue login session", zap.Error(err))
+	// Issue access token from the canonical authorization snapshot. The
+	// role and token_version are read from the users row in one SELECT —
+	// never from the raw login-query role string.
+	accessToken, accessJTI, err := h.auth.GenerateAccessTokenForUserWithJTI(userID)
+	if err != nil {
+		h.logger.Error("failed to generate access token", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authentication failed"})
 	}
 
-	accessToken, accessJTI, _, err := h.auth.GenerateAccessTokenWithJTI(userID, auth.Role(userRole))
-	if err != nil {
-		h.logger.Error("failed to generate access token", zap.Error(err))
+	// Issue opaque session cookie alongside JWT for transition. Use the
+	// canonical snapshot role, not the raw login-query role string.
+	snapRole := h.auth.SnapshotRoleForUser(userID)
+	if err := h.issueLoginSession(c, userID, snapRole, loginEmail); err != nil {
+		h.logger.Error("failed to issue login session", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authentication failed"})
 	}
 

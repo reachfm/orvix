@@ -281,31 +281,34 @@ func TestPhase6_TenantAdmin_PlatformRoutesDenied(t *testing.T) {
 	}
 }
 
-// ── Legacy 'admin' role denied on BOTH platform and tenant ─────────
-// After Phase 5 the RBAC map for RoleAdmin is empty; here we assert
-// the role gate itself denies at BOTH platform and tenant sides.
+// ── Legacy 'admin' role denied everywhere ─────────────────────────
+// After Phase 5 the RBAC map for RoleAdmin is empty, and strict canonical
+// snapshot validation now rejects the deprecated admin role at login with
+// the exact wrong-password contract. The role never reaches an endpoint.
 func TestPhase6_LegacyAdmin_DeniedEverywhere(t *testing.T) {
 	h := newSepHarness(t)
 	tid := h.tenantA
 	h.insertLegacyAdmin(t, "legacy@sep.example", "LegPass!2026", &tid)
-	tok := h.login(t, "legacy@sep.example", "LegPass!2026")
 
-	for _, tc := range []struct {
-		path string
-	}{
-		{"/api/v1/admin/backups"},
-		{"/api/v1/updates/check"},
-		{"/api/v1/queue"},
-		{"/api/v1/admin/mailing-lists"},
-		{"/api/v1/admin/account-classes"},
-	} {
-		status, body := h.hit(t, "GET", tc.path, tok)
-		sepMustEq(t, "legacy "+tc.path, http.StatusForbidden, status, body)
-		sepMustContain(t, "legacy "+tc.path, body, `"insufficient permissions"`)
+	req, _ := http.NewRequestWithContext(context.Background(), "POST", "/admin/login",
+		strings.NewReader(`{"username":"legacy@sep.example","password":"LegPass!2026"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := h.router.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("legacy-admin login: %v", err)
 	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	sepMustNot5xx(t, "legacy-admin login", resp.StatusCode, body)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("legacy-admin login: want 401, got %d body=%s", resp.StatusCode, body)
+	}
+	sepMustContain(t, "legacy-admin login", body, `"error":"invalid credentials"`)
 }
 
 // ── Unknown role denied everywhere ────────────────────────────────
+// Under strict canonical snapshot validation, an unknown role is denied at
+// login with the exact wrong-password contract; it never reaches an endpoint.
 func TestPhase6_UnknownRole_DeniedEverywhere(t *testing.T) {
 	h := newSepHarness(t)
 	now := time.Now().UTC()
@@ -316,15 +319,25 @@ func TestPhase6_UnknownRole_DeniedEverywhere(t *testing.T) {
 	); err != nil {
 		t.Fatalf("insert unknown: %v", err)
 	}
-	tok := h.login(t, "unk@sep.example", "UnkPass!2026")
 
-	for _, p := range []string{
-		"/api/v1/admin/backups",
-		"/api/v1/admin/mailing-lists",
-	} {
-		status, body := h.hit(t, "GET", p, tok)
-		sepMustEq(t, "unknown "+p, http.StatusForbidden, status, body)
+	status, body := h.hit(t, "GET", "/api/v1/me", "") // unauthenticated baseline
+	sepMustEq(t, "unknown baseline", http.StatusUnauthorized, status, body)
+
+	// Login must be denied with the wrong-password contract.
+	req, _ := http.NewRequestWithContext(context.Background(), "POST", "/admin/login",
+		strings.NewReader(`{"username":"unk@sep.example","password":"UnkPass!2026"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := h.router.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("unknown-role login: %v", err)
 	}
+	defer resp.Body.Close()
+	body, _ = io.ReadAll(resp.Body)
+	sepMustNot5xx(t, "unknown-role login", resp.StatusCode, body)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unknown-role login: want 401, got %d body=%s", resp.StatusCode, body)
+	}
+	sepMustContain(t, "unknown-role login", body, `"error":"invalid credentials"`)
 }
 
 // ── Unauthenticated → exact 401 on every protected route ──────────

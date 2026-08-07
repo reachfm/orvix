@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
-	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/dbdialect"
 	"go.uber.org/zap"
@@ -386,11 +385,18 @@ func (h *Handler) MFALoginVerify(c fiber.Ctx) error {
 		h.writeAuditLog(c, "mfa.login.totp", fmt.Sprintf("user_id:%d", userID))
 	}
 
-	// MFA passed — issue tokens.
-	var userRole string
+	// MFA passed — issue tokens from the CURRENT authorization snapshot.
+	// Re-validate at completion time: a role/status/tenant change between
+	// password verification and MFA completion must be reflected (or fail).
+	if err := h.auth.ValidateUserForTokenIssuance(userID); err != nil {
+		h.logger.Warn("mfa login blocked by authorization validation",
+			zap.Uint("user_id", userID))
+		return c.Status(401).JSON(fiber.Map{"error": "invalid or expired MFA challenge"})
+	}
+
 	var userEmail string
 	dial := dbdialect.FromDriver(h.cfg.Database.Driver)
-	err = sqlDB.QueryRow("SELECT role, email FROM users WHERE id = "+dial.Placeholder(1), userID).Scan(&userRole, &userEmail)
+	err = sqlDB.QueryRow("SELECT email FROM users WHERE id = "+dial.Placeholder(1), userID).Scan(&userEmail)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "user lookup failed"})
 	}
@@ -399,12 +405,12 @@ func (h *Handler) MFALoginVerify(c fiber.Ctx) error {
 	// Cookie issuance is the source of truth for browser auth; if
 	// the store refuses the write we refuse the login rather than
 	// return success without a usable session.
-	if err := h.issueLoginSession(c, userID, auth.Role(userRole), userEmail); err != nil {
+	if err := h.issueLoginSession(c, userID, h.auth.SnapshotRoleForUser(userID), userEmail); err != nil {
 		h.logger.Error("failed to issue login session", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authentication failed"})
 	}
 
-	accessToken, accessJTI, _, err := h.auth.GenerateAccessTokenWithJTI(userID, auth.Role(userRole))
+	accessToken, accessJTI, err := h.auth.GenerateAccessTokenForUserWithJTI(userID)
 	if err != nil {
 		h.logger.Error("failed to generate access token", zap.Error(err))
 		return c.Status(500).JSON(fiber.Map{"error": "authentication failed"})
