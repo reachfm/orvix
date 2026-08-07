@@ -74,7 +74,7 @@ func TestWebmailGetOrCreateUserRoleChangeBumpsVersionAndRevokesToken(t *testing.
 	// Invoke real ensureWebmailUser. isAdmin=true → desired role=tenant_admin.
 	dial := dbdialect.FromDriver("sqlite")
 	h := &Handler{}
-	returnedID, callErr := h.ensureWebmailUser(dial, sqlDB, email, true)
+	returnedID, callErr := h.ensureWebmailUser(dial, sqlDB, email, 1, true)
 	if callErr != nil {
 		t.Fatalf("ensureWebmailUser: %v", callErr)
 	}
@@ -156,7 +156,7 @@ func TestWebmailGetOrCreateUserNoOpDoesNotBumpVersion(t *testing.T) {
 	// Invoke ensureWebmailUser with isAdmin=true (same role the user already has).
 	dial := dbdialect.FromDriver("sqlite")
 	h := &Handler{}
-	returnedID, callErr := h.ensureWebmailUser(dial, sqlDB, email, true)
+	returnedID, callErr := h.ensureWebmailUser(dial, sqlDB, email, 1, true)
 	if callErr != nil {
 		t.Fatalf("ensureWebmailUser: %v", callErr)
 	}

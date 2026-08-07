@@ -176,12 +176,13 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 		hash          string
 		authScheme    string
 		allowWebmail  bool
+		mailboxTenant uint
 	)
 	row := sqlDB.QueryRow(
-		fmt.Sprintf("SELECT id, status, is_admin, password_hash, COALESCE(auth_scheme,''), COALESCE(allow_webmail,"+dial.TrueLiteral()+") FROM coremail_mailboxes WHERE email = %s AND deleted_at IS NULL", dial.Placeholder(1)),
+		fmt.Sprintf("SELECT id, status, is_admin, password_hash, COALESCE(auth_scheme,''), COALESCE(allow_webmail,"+dial.TrueLiteral()+"), tenant_id FROM coremail_mailboxes WHERE email = %s AND deleted_at IS NULL", dial.Placeholder(1)),
 		loginEmail,
 	)
-	if err := row.Scan(&mailboxID, &mailboxStatus, &isAdmin, &hash, &authScheme, &allowWebmail); err != nil {
+	if err := row.Scan(&mailboxID, &mailboxStatus, &isAdmin, &hash, &authScheme, &allowWebmail, &mailboxTenant); err != nil {
 		if err == sql.ErrNoRows {
 			h.security.RecordFailedLogin(c.Context(), c.IP(), loginEmail)
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
@@ -236,7 +237,7 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 	// compatibility (and so the admin-role middleware
 	// still gates the right endpoints) we map the
 	// mailbox to a users row by email.
-	userID, err := h.ensureWebmailUser(dial, sqlDB, loginEmail, isAdmin)
+	userID, err := h.ensureWebmailUser(dial, sqlDB, loginEmail, mailboxTenant, isAdmin)
 	if err != nil {
 		h.logger.Error("webmail login: ensureWebmailUser failed", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -244,13 +245,9 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 		})
 	}
 
-	// Was: legacy auth.RoleAdmin planted into new sessions. Now: canonical
-	// auth.RoleTenantAdmin — webmail admins administer their mailbox's
-	// tenant, matching NormalizeRole (admin + tenantID != nil → tenant_admin).
-	role := auth.RoleUser
-	if isAdmin {
-		role = auth.RoleTenantAdmin
-	}
+	// Token issuance is handled by GenerateAccessTokenForUserWithJTI which
+	// re-reads the canonical authorization snapshot. The role is never
+	// derived directly from isAdmin here.
 
 	// Best-effort: ensure system folders exist for
 	// this mailbox. The bootstrap path also runs
@@ -270,20 +267,21 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 			zap.Error(err))
 	}
 
-	// Issue opaque session cookie for the admin SPA. Cookie
-	// issuance is the source of truth for browser auth; if the
-	// store refuses the write we refuse the login rather than
-	// return success without a usable session.
-	if err := h.issueLoginSession(c, userID, role, loginEmail); err != nil {
-		h.logger.Error("webmail login: issue login session", zap.Error(err))
+	// Issue access token from the current authorization snapshot.
+	accessToken, accessJTI, err := h.auth.GenerateAccessTokenForUserWithJTI(userID)
+	if err != nil {
+		h.logger.Error("webmail login: mint access token", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "authentication failed",
 		})
 	}
 
-	accessToken, accessJTI, _, err := h.auth.GenerateAccessTokenWithJTI(userID, role)
-	if err != nil {
-		h.logger.Error("webmail login: mint access token", zap.Error(err))
+	// Issue opaque session cookie for the admin SPA. Cookie
+	// issuance is the source of truth for browser auth; if the
+	// store refuses the write we refuse the login rather than
+	// return success without a usable session.
+	if err := h.issueLoginSession(c, userID, h.auth.SnapshotRoleForUser(userID), loginEmail); err != nil {
+		h.logger.Error("webmail login: issue login session", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "authentication failed",
 		})
@@ -333,7 +331,7 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 		zap.String("email", loginEmail),
 		zap.Uint("mailbox_id", mailboxID),
 		zap.Uint("user_id", userID),
-		zap.String("role", string(role)))
+		zap.String("role", string(h.auth.SnapshotRoleForUser(userID))))
 
 	return c.JSON(fiber.Map{
 		"authenticated": true,
@@ -573,49 +571,54 @@ func (h *Handler) WebmailChangePassword(c fiber.Ctx) error {
 // We deliberately do NOT bind the mailbox's password
 // to the user row. If the user ever sets an admin-panel
 // password, it is independent of the mailbox password.
-func (h *Handler) ensureWebmailUser(dial *dbdialect.Info, sqlDB *sql.DB, email string, isAdmin bool) (uint, error) {
+func (h *Handler) ensureWebmailUser(dial *dbdialect.Info, sqlDB *sql.DB, email string, tenantID uint, isAdmin bool) (uint, error) {
 	var userID uint
 	row := sqlDB.QueryRow(fmt.Sprintf("SELECT id FROM users WHERE email = %s", dial.Placeholder(1)), email)
 	if err := row.Scan(&userID); err == nil {
-		// Existing user row; make sure the role
-		// matches the mailbox so admin mailboxes
-		// keep admin panel access.
+		// Existing user row. Reconcile the role only when the resolved
+		// tenant matches; never rebind a user across tenants.
+		var existingTenant sql.NullInt64
+		var existingRole string
+		if err := sqlDB.QueryRow(fmt.Sprintf("SELECT tenant_id, role FROM users WHERE id = %s", dial.Placeholder(1)), userID).Scan(&existingTenant, &existingRole); err != nil {
+			return 0, fmt.Errorf("query existing user state: %w", err)
+		}
+		// platform_super_admin with NULL tenant: never demote/rebind.
+		if !existingTenant.Valid && existingRole == string(auth.RolePlatformSuperAdmin) {
+			return userID, nil
+		}
+		// Cross-tenant mismatch must fail closed.
+		if existingTenant.Valid && existingTenant.Int64 > 0 && tenantID > 0 && uint(existingTenant.Int64) != tenantID {
+			return 0, fmt.Errorf("user belongs to a different tenant")
+		}
 		desired := "user"
 		if isAdmin {
 			desired = "tenant_admin"
 		}
-		if _, err := sqlDB.Exec(
-			fmt.Sprintf("UPDATE users SET role = %s, updated_at = %s, token_version = COALESCE(token_version, 0) + 1 WHERE id = %s AND role != %s", dial.Placeholder(1), dial.Placeholder(2), dial.Placeholder(3), dial.Placeholder(1)),
-			desired, time.Now().UTC(), userID, desired,
-		); err != nil {
-			return 0, fmt.Errorf("update user role: %w", err)
+		// Migration-window: a legacy 'admin' row bound to the resolved
+		// tenant (or a NULL-binding legacy row) may be reconciled to the
+		// canonical tenant_admin atomically with a token_version bump.
+		if existingRole != desired {
+			if _, err := sqlDB.Exec(
+				fmt.Sprintf("UPDATE users SET role = %s, updated_at = %s, token_version = COALESCE(token_version, 0) + 1 WHERE id = %s AND role != %s", dial.Placeholder(1), dial.Placeholder(2), dial.Placeholder(3), dial.Placeholder(1)),
+				desired, time.Now().UTC(), userID, desired,
+			); err != nil {
+				return 0, fmt.Errorf("update user role: %w", err)
+			}
 		}
 		return userID, nil
 	} else if err != sql.ErrNoRows {
 		return 0, fmt.Errorf("query user: %w", err)
 	}
 
-	// No users row â€” create one tied to the same
-	// tenant as the mailbox.
-	var tenantID uint
-	row = sqlDB.QueryRow(
-		fmt.Sprintf(`SELECT m.tenant_id
-		FROM coremail_mailboxes m
-		WHERE m.email = %s AND m.deleted_at IS NULL`, dial.Placeholder(1)), email)
-	if err := row.Scan(&tenantID); err != nil {
-		return 0, fmt.Errorf("lookup tenant: %w", err)
+	// No users row — create one tied to the authoritative mailbox tenant.
+	// Fail closed if the authoritative tenant is missing or zero.
+	if tenantID == 0 {
+		return 0, fmt.Errorf("lookup tenant: authoritative tenant missing")
 	}
 	role := "user"
 	if isAdmin {
-		role = "admin"
+		role = "tenant_admin"
 	}
-	// The password_hash is a bcrypt of "!" so the
-	// user row cannot be used to log in via the
-	// admin /api/v1/auth/login endpoint (which would
-	// use the user row's hash, not the mailbox's).
-	// If a future operator wants to give this user
-	// an admin-panel password, they can run a
-	// password-set flow that re-hashes the column.
 	placeholder, err := bcrypt.GenerateFromPassword([]byte("!"), bcrypt.MinCost)
 	if err != nil {
 		return 0, fmt.Errorf("hash placeholder: %w", err)
