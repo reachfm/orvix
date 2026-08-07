@@ -155,7 +155,7 @@ func (s *Service) ListMembers(ctx context.Context, orgID uint) ([]OrganizationMe
 
 func (s *Service) UpdateMemberRole(ctx context.Context, memberID, orgID uint, role string) error {
 	_, err := s.repo.db.ExecContext(ctx,
-		"UPDATE users SET role = "+s.repo.dialect.Placeholder(1)+" WHERE id = "+s.repo.dialect.Placeholder(2)+" AND tenant_id = "+s.repo.dialect.Placeholder(3),
+		"UPDATE users SET role = "+s.repo.dialect.Placeholder(1)+", token_version = COALESCE(token_version, 0) + 1 WHERE id = "+s.repo.dialect.Placeholder(2)+" AND tenant_id = "+s.repo.dialect.Placeholder(3),
 		role, memberID, orgID)
 	return err
 }

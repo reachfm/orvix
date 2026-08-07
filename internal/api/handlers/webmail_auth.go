@@ -582,11 +582,11 @@ func (h *Handler) ensureWebmailUser(dial *dbdialect.Info, sqlDB *sql.DB, email s
 		// keep admin panel access.
 		desired := "user"
 		if isAdmin {
-			desired = "admin"
+			desired = "tenant_admin"
 		}
 		if _, err := sqlDB.Exec(
-			fmt.Sprintf("UPDATE users SET role = %s, updated_at = %s WHERE id = %s", dial.Placeholder(1), dial.Placeholder(2), dial.Placeholder(3)),
-			desired, time.Now().UTC(), userID,
+			fmt.Sprintf("UPDATE users SET role = %s, updated_at = %s, token_version = COALESCE(token_version, 0) + 1 WHERE id = %s AND role != %s", dial.Placeholder(1), dial.Placeholder(2), dial.Placeholder(3), dial.Placeholder(1)),
+			desired, time.Now().UTC(), userID, desired,
 		); err != nil {
 			return 0, fmt.Errorf("update user role: %w", err)
 		}

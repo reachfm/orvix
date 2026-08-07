@@ -286,55 +286,51 @@ func TestRefresh_TOCTOU_RoleVersionAtomic(t *testing.T) {
 	a := newRefreshTestAuth(t)
 	sqlDB, _ := a.db.DB()
 	uid := seedUserRefresh(t, sqlDB, "toctou@test.local", string(RoleTenantReadOnly), ptruint(1))
-	refresh := createRefreshSession(t, a, uid)
 
-	// Read current role + token_version.
-	var oldRole string
-	var oldTV int64
-	if err := sqlDB.QueryRow("SELECT role, COALESCE(token_version, 0) FROM users WHERE id = ?", uid).Scan(&oldRole, &oldTV); err != nil {
-		t.Fatalf("read old state: %v", err)
+	// Issue a current token.
+	currentAccess, _, _, err := a.GenerateAccessTokenWithJTI(uid, RoleTenantReadOnly)
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+	// Verify the token is currently valid.
+	if _, _, err := a.ValidateAccessToken(currentAccess); err != nil {
+		t.Fatalf("current token rejected before version bump: %v", err)
 	}
 
-	// Update role and bump token_version.
+	// Capture old token_version, then atomically update role + bump.
+	var oldTV, newTV int64
+	sqlDB.QueryRow("SELECT COALESCE(token_version, 0) FROM users WHERE id = ?", uid).Scan(&oldTV)
 	if _, err := sqlDB.Exec("UPDATE users SET role = ?, token_version = COALESCE(token_version, 0) + 1 WHERE id = ?", string(RoleTenantAdmin), uid); err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	var newRole string
-	var newTV int64
-	sqlDB.QueryRow("SELECT role, COALESCE(token_version, 0) FROM users WHERE id = ?", uid).Scan(&newRole, &newTV)
+	sqlDB.QueryRow("SELECT COALESCE(token_version, 0) FROM users WHERE id = ?", uid).Scan(&newTV)
 	if newTV <= oldTV {
 		t.Fatalf("token_version not bumped: old=%d new=%d", oldTV, newTV)
 	}
 
-	// 1. signAccessToken with captured old state produces a token embedding
-	//    old role and old token_version. This is what would happen if role
-	//    and token_version were read from separate queries.
-	oldAccess, _, _, err := a.signAccessToken(uid, Role(oldRole), oldTV)
-	if err != nil {
-		t.Fatalf("signAccessToken with old state: %v", err)
+	// The old token MUST be rejected — its token_version no longer matches.
+	uid2, gotRole, valErr := a.ValidateAccessToken(currentAccess)
+	if valErr == nil {
+		t.Fatalf("stale token accepted after version bump: uid=%d role=%s", uid2, gotRole)
 	}
-	_, oldGotRole, _ := a.ValidateAccessToken(oldAccess)
-	if string(oldGotRole) != oldRole {
-		t.Fatalf("old-snapshot token: expected role %s, got %s", oldRole, oldGotRole)
+	if uid2 != 0 || gotRole != "" {
+		t.Fatalf("stale token returned non-zero values: uid=%d role=%s", uid2, gotRole)
 	}
 
-	// 2. RefreshToken uses the single-snapshot query (role, token_version,
-	//    active, deleted_at) from the same SELECT. It must embed the NEW
-	//    post-update values.
+	// RefreshToken issues a new token with the current DB state
+	// (role + token_version from a single SELECT). It must carry the
+	// new role and validate successfully.
+	accessForSession, jti, _, _ := a.GenerateAccessTokenWithJTI(uid, RoleTenantReadOnly)
+	_ = accessForSession
+	refresh, _, _ := a.GenerateRefreshToken(uid, jti)
 	access2, _, _, err := a.RefreshToken(context.Background(), refresh)
 	if err != nil {
 		t.Fatalf("RefreshToken after update: %v", err)
 	}
-	gotRole := roleFromAccessToken(t, a, access2)
-	if gotRole != string(RoleTenantAdmin) {
-		t.Fatalf("expected new role tenant_admin, got %s", gotRole)
+	gotRole2 := roleFromAccessToken(t, a, access2)
+	if gotRole2 != string(RoleTenantAdmin) {
+		t.Fatalf("expected new role tenant_admin from RefreshToken, got %s", gotRole2)
 	}
-	// The role and token_version embedded in access2 came from the same
-	// snapshot; if they were split, the role could be tenant_admin but the
-	// token_version could be oldTV — we can't verify the exact embedded TV
-	// without decoding the JWT, but the fact that RefreshToken uses
-	// signAccessToken with values from a single SELECT guarantees consistency.
-	t.Logf("old role=%s oldTV=%d new role=%s newTV=%d", oldRole, oldTV, newRole, newTV)
 }
 
 // ── Role change reflected ────────────────────────────────────────

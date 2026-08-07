@@ -176,11 +176,11 @@ func (r *OrganizationRepo) AcceptOwnershipTransfer(ctx context.Context, id uint,
 		TransferAccepted, acceptedAt, id); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, "UPDATE users SET role = 'admin' WHERE id = "+r.dialect.Placeholder(1)+" AND tenant_id = "+r.dialect.Placeholder(2),
+	if _, err := tx.ExecContext(ctx, "UPDATE users SET role = 'tenant_admin', token_version = COALESCE(token_version, 0) + 1 WHERE id = "+r.dialect.Placeholder(1)+" AND tenant_id = "+r.dialect.Placeholder(2),
 		t.FromUserID, t.OrganizationID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, "UPDATE users SET role = 'superadmin' WHERE id = "+r.dialect.Placeholder(1)+" AND tenant_id = "+r.dialect.Placeholder(2),
+	if _, err := tx.ExecContext(ctx, "UPDATE users SET role = 'tenant_admin', token_version = COALESCE(token_version, 0) + 1 WHERE id = "+r.dialect.Placeholder(1)+" AND tenant_id = "+r.dialect.Placeholder(2),
 		t.ToUserID, t.OrganizationID); err != nil {
 		return err
 	}
