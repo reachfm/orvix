@@ -241,27 +241,30 @@ func (a *Authenticator) GenerateAccessToken(userID uint, role Role) (string, err
 // (its access token is added to the revocation store), and the expiry bounds
 // how long the revocation entry must live.
 func (a *Authenticator) GenerateAccessTokenWithJTI(userID uint, role Role) (string, string, time.Time, error) {
-	now := time.Now()
-	exp := now.Add(a.accessTTL)
-	jti, err := newJTI()
-	if err != nil {
-		return "", "", time.Time{}, fmt.Errorf("failed to generate token id: %w", err)
-	}
-
-	// Fetch current token_version from database to embed in JWT.
-	// Gracefully handles pre-migration databases where the column
-	// may not exist yet (COALESCE would fail).
 	var tokenVersion int64 = 0
 	if a.db != nil {
 		var currentTV int64
-		// Try raw SQL first, fallback to 0 on any error (column missing,
-		// table missing, etc.).
 		row := a.db.Raw("SELECT COALESCE(token_version, 0) FROM users WHERE id = ?", userID).Row()
 		if row != nil {
 			if err := row.Scan(&currentTV); err == nil {
 				tokenVersion = currentTV
 			}
 		}
+	}
+	return a.signAccessToken(userID, role, tokenVersion)
+}
+
+// signAccessToken creates a signed JWT access token using the caller-supplied
+// role and token_version. Unlike GenerateAccessTokenWithJTI it does NOT
+// independently query the database — the caller is responsible for providing
+// a consistent {role, token_version} pair (e.g. from a single authorization
+// snapshot). This is the only token-signing primitive used by RefreshToken.
+func (a *Authenticator) signAccessToken(userID uint, role Role, tokenVersion int64) (string, string, time.Time, error) {
+	now := time.Now()
+	exp := now.Add(a.accessTTL)
+	jti, err := newJTI()
+	if err != nil {
+		return "", "", time.Time{}, fmt.Errorf("failed to generate token id: %w", err)
 	}
 
 	claims := jwt.MapClaims{
@@ -474,10 +477,37 @@ func (a *Authenticator) isTokenRevoked(jti string) bool {
 	return count > 0
 }
 
+// canonicalRefreshRole checks whether role is an allowed runtime canonical
+// role for refresh. Legacy alias roles (admin, operator, readonly, superadmin
+// and variants) are NOT silently converted — they must already be stored
+// canonically.
+func canonicalRefreshRole(role Role) bool {
+	switch role {
+	case RolePlatformSuperAdmin, RoleTenantAdmin, RoleTenantOperator,
+		RoleTenantSupport, RoleTenantReadOnly, RoleUser, RoleBilling:
+		return true
+	}
+	return false
+}
+
+// isTenantScopedRefreshRole reports whether role requires a non-null tenant_id.
+func isTenantScopedRefreshRole(role Role) bool {
+	switch role {
+	case RoleTenantAdmin, RoleTenantOperator, RoleTenantSupport,
+		RoleTenantReadOnly, RoleUser, RoleBilling:
+		return true
+	}
+	return false
+}
+
 // RefreshToken validates a refresh token, rotates it, and returns new tokens.
-// The access token role is read from the current users row — never from the
-// refresh session, a stale JWT claim, or caller input. A role changed between
-// session creation and refresh is reflected immediately.
+// The access token role and token_version are read from the current users row
+// in a single authorization snapshot — never from the refresh session, a stale
+// JWT claim, caller input, or a second independent DB query. A role or
+// token_version changed between session creation and refresh is reflected
+// atomically; a concurrent role change that bumps token_version causes the
+// token_version embedded in the refreshed JWT to lag, so any active stale
+// access token is rejected by ValidateAccessToken.
 func (a *Authenticator) RefreshToken(ctx context.Context, refreshToken string) (string, string, time.Time, error) {
 	tokenHash := fmt.Sprintf("%x", sha256.Sum256([]byte(refreshToken)))
 
@@ -507,40 +537,42 @@ func (a *Authenticator) RefreshToken(ctx context.Context, refreshToken string) (
 		return "", "", time.Time{}, ErrSessionExpired
 	}
 
-	// Read current authorization from the users row. The refresh session
-	// may be stale — if role, tenant_id, active, or deleted_at have
-	// changed since the session was created, the refreshed token must
-	// reflect the current state (or fail closed).
+	// Single authorization snapshot: role, tenant_id, active, deleted_at,
+	// and token_version are read together so the signed JWT carries a
+	// consistent {role, token_version} pair.
 	var dbRole string
 	var tenantID sql.NullInt64
 	var active bool
 	var deletedAt sql.NullTime
+	var tokenVersion int64
 	if err := sqlDB.QueryRow(
-		"SELECT role, tenant_id, active, deleted_at FROM users WHERE id = "+d.Placeholder(1),
+		"SELECT role, tenant_id, active, deleted_at, COALESCE(token_version, 0) FROM users WHERE id = "+d.Placeholder(1),
 		userID,
-	).Scan(&dbRole, &tenantID, &active, &deletedAt); err != nil {
-		// User row missing (deleted between session creation and refresh).
+	).Scan(&dbRole, &tenantID, &active, &deletedAt, &tokenVersion); err != nil {
 		return "", "", time.Time{}, ErrSessionExpired
 	}
 	if !active || deletedAt.Valid {
 		return "", "", time.Time{}, ErrSessionExpired
 	}
-	canonRole, ok := NormalizeRole(Role(dbRole), nil)
-	if !ok {
+
+	// Strict canonical role check — no silent NormalizeRole conversion.
+	role := Role(dbRole)
+	if !canonicalRefreshRole(role) {
 		return "", "", time.Time{}, ErrSessionExpired
 	}
-	if tenantID.Valid && tenantID.Int64 > 0 {
-		var tid int64 = tenantID.Int64
-		if canonRole == RolePlatformSuperAdmin {
+
+	// Strict tenant binding.
+	if role == RolePlatformSuperAdmin {
+		if tenantID.Valid && tenantID.Int64 > 0 {
 			return "", "", time.Time{}, ErrSessionExpired
 		}
-		canonRole, ok = NormalizeRole(Role(dbRole), &tid)
-		if !ok {
+	} else if isTenantScopedRefreshRole(role) {
+		if !tenantID.Valid || tenantID.Int64 <= 0 {
 			return "", "", time.Time{}, ErrSessionExpired
 		}
 	}
 
-	accessToken, accessJTI, _, err := a.GenerateAccessTokenWithJTI(userID, canonRole)
+	accessToken, accessJTI, _, err := a.signAccessToken(userID, role, tokenVersion)
 	if err != nil {
 		return "", "", time.Time{}, err
 	}
