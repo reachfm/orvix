@@ -57,13 +57,14 @@ func newRouterWithBcryptUser(t *testing.T, email, password string) *rehashTestEn
 	}
 
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
-	// COMPAT: legacy admin fixture; test exercises password-rehash-on-login flow,
-	// which is authentication (not authorization); role choice is incidental.
-	// After PR #58 splits the ambiguous /admin/* group, this can move to a
-	// canonical helper.
+	if _, err := sqlDB.Exec(
+		`INSERT INTO tenants (created_at, updated_at, name, slug, domain, plan, active) VALUES (?, ?, 'test-tenant', 'test-tenant', 'test.local', 'enterprise', 1)`,
+		now, now); err != nil {
+		t.Fatalf("insert tenant: %v", err)
+	}
 	if _, err := sqlDB.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, ?, ?, 'admin', 1, 1, 1)`,
+		 VALUES (?, ?, ?, ?, 'tenant_admin', 1, 1, 1)`,
 		now, now, email, string(bcryptHash)); err != nil {
 		t.Fatalf("insert user: %v", err)
 	}

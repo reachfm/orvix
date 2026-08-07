@@ -60,16 +60,9 @@ var rawLegacyUsersAdminInsert = map[string]string{
 	// pattern strings and would match itself.
 	"internal/api/handlers/legacy_fixture_allowlist_test.go": "Static scanner self-reference (pattern source strings)",
 
-	// Class H — authentication-flow tests (not authorization); role
-	// choice is incidental. Migrate to canonical helper when PR #58 lands.
-	"internal/api/handlers/webmail_user_test.go":    "Class H: auth-flow test seeds a users row; role choice incidental",
-	"internal/api/handlers/rehash_on_login_test.go": "Class H: password-rehash-on-login auth flow; role choice incidental",
-
-	// Mixed-fixture file: also contains canonical seed calls; the raw
-	// legacy insert here plants a tenant_id=0 row that intentionally
-	// exercises unresolved-tenant behavior. Cannot use the helper because
-	// the helper does not permit tenant_id=0 (zero-value uint).
-	"internal/api/handlers/domain_list_isolation_test.go": "Class H: legacy admin with tenant_id=0 for unresolved-tenant test",
+	// webmail_user_test.go          → migrated to canonical tenant_admin
+	// rehash_on_login_test.go       → migrated to canonical tenant_admin
+	// domain_list_isolation_test.go → migrated to canonical tenant_admin (tenant_id=0)
 
 	// Class H (retained after Defect 1 re-audit) — handlers reference
 	// h.tenantID(c), so canonical PSA with tenant_id NULL cannot reach

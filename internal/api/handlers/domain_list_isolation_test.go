@@ -95,10 +95,10 @@ func buildDomainListEnv(t *testing.T) *domainListEnv {
 	exec("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'psa@platform.local', ?, 'platform_super_admin', NULL, 1, 1)", now, now, psaHash)
 	userHash, _ := authenticator.HashPassword("PlainUserPass!2026")
 	exec("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'plain@t1.example', ?, 'user', 1, 1, 1)", now, now, userHash)
-	// Legacy RoleAdmin with an unresolved tenant (tenant_id = 0 -> TenantMiddleware
+	// Canonical tenant_admin with an unresolved tenant (tenant_id = 0 -> TenantMiddleware
 	// never sets the "tenant_id" local -> scopedTenantID falls back to -1). This
-	// row intentionally exercises the deprecated `role='admin'` shape; use the
-	// legacy-migration primitive so intent is unambiguous.
+	// row exercises the unresolved-tenant fail-closed contract with a canonical
+	// tenant_admin role bound to tenant 0.
 	var zeroTenant uint = 0
 	insertUserWithPassword(t, sqlDB, "notenant@nowhere.example", "tenant_admin", &zeroTenant, "NoTenantPass!2026")
 

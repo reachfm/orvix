@@ -466,6 +466,35 @@ func TestPhase6_TenantReadOnly_ReachesDomains(t *testing.T) {
 	sepMustEq(t, "TRO domains", http.StatusOK, status, body)
 }
 
+// seedDomain inserts a coremail domain for tenantA for read/mutation assertions.
+func (h *sepHarness) seedDomain(t *testing.T, name string) {
+	t.Helper()
+	now := time.Now().UTC()
+	if _, err := h.sqlDB.Exec(
+		`INSERT INTO coremail_domains (name, tenant_id, status, plan, max_mailboxes, max_aliases, max_quota_mb, created_at, updated_at) VALUES (?, ?, 'active', 'enterprise', 100, 100, 102400, ?, ?)`,
+		name, h.tenantA, now, now,
+	); err != nil {
+		t.Fatalf("seed domain %s: %v", name, err)
+	}
+}
+
+// seedMailbox inserts a coremail mailbox for tenantA for count assertions.
+func (h *sepHarness) seedMailbox(t *testing.T, domainName, email string) {
+	t.Helper()
+	now := time.Now().UTC()
+	// Get domain ID
+	var domainID uint
+	if err := h.sqlDB.QueryRow("SELECT id FROM coremail_domains WHERE name = ?", domainName).Scan(&domainID); err != nil {
+		t.Fatalf("seed mailbox: domain %s not found: %v", domainName, err)
+	}
+	if _, err := h.sqlDB.Exec(
+		`INSERT INTO coremail_mailboxes (domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme, status, quota_mb, is_admin, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'hash', 'argon2id', 'active', 1024, 0, ?, ?)`,
+		domainID, h.tenantA, strings.Split(email, "@")[0], email, email, now, now,
+	); err != nil {
+		t.Fatalf("seed mailbox %s: %v", email, err)
+	}
+}
+
 // insertTenantRole creates a user with the given role bound to tenantA.
 func (h *sepHarness) insertTenantRole(t *testing.T, email, pw, role string) {
 	t.Helper()
@@ -528,20 +557,56 @@ func TestPhase6_CrossTenantDomainAccessDenied(t *testing.T) {
 // ── Positive: TenantSupport reaches allowed tenant read ──────────
 func TestPhase6_TenantSupport_AllowedRead(t *testing.T) {
 	h := newSepHarness(t)
+	h.seedDomain(t, "a.example")
 	h.insertTenantRole(t, "tsup2@sep.example", "SupPass!2026", "tenant_support")
 	tok := h.login(t, "tsup2@sep.example", "SupPass!2026")
 	status, body := h.hit(t, "GET", "/api/v1/domains", tok)
+	sepMustNot5xx(t, "TS domains", status, body)
 	sepMustEq(t, "TS domains", http.StatusOK, status, body)
+	// Parse: prove the handler returned a JSON array with seeded tenant-owned domain.
+	var domains []map[string]interface{}
+	if err := json.Unmarshal(body, &domains); err != nil {
+		t.Fatalf("TS domains: expected JSON array, got parse error: %v body=%s", err, body)
+	}
+	if len(domains) == 0 {
+		t.Fatalf("TS domains: expected at least one domain; got empty")
+	}
+	own, cross := false, false
+	for _, d := range domains {
+		n, _ := d["domain"].(string)
+		if n == "a.example" {
+			own = true
+		}
+		if n != "" && n != "a.example" {
+			cross = true
+		}
+	}
+	if !own {
+		t.Fatalf("TS domains: own tenant domain a.example not found; body=%s", body)
+	}
+	if cross {
+		t.Fatalf("TS domains: cross-tenant domain leaked; body=%s", body)
+	}
 }
 
 // ── Denial: TenantSupport blocked from write (DomainsWrite) ─────
 func TestPhase6_TenantSupport_WriteDenied(t *testing.T) {
 	h := newSepHarness(t)
+	h.seedDomain(t, "a.example")
+	before := domainCountForTenant(t, h.sqlDB, h.tenantA)
 	h.insertTenantRole(t, "tsup3@sep.example", "SupPass!2026", "tenant_support")
 	tok := h.login(t, "tsup3@sep.example", "SupPass!2026")
-	// POST /enterprise/domains requires PermDomainsWrite — TS lacks it.
 	status, body := h.hit(t, "POST", "/api/v1/enterprise/domains", tok)
+	sepMustNot5xx(t, "TS POST domains", status, body)
 	sepMustEq(t, "TS POST domains", http.StatusForbidden, status, body)
+	// CSRF middleware may block before RBAC; both produce 403 with a stable error body.
+	if !strings.Contains(string(body), "error") {
+		t.Fatalf("TS POST domains: missing error in body; body=%s", body)
+	}
+	after := domainCountForTenant(t, h.sqlDB, h.tenantA)
+	if after != before {
+		t.Fatalf("TS POST domains: mutation occurred (before=%d after=%d)", before, after)
+	}
 }
 
 // ── Denial: TenantSupport blocked from platform route ────────────
@@ -550,6 +615,7 @@ func TestPhase6_TenantSupport_PlatformDenied(t *testing.T) {
 	h.insertTenantRole(t, "tsup4@sep.example", "SupPass!2026", "tenant_support")
 	tok := h.login(t, "tsup4@sep.example", "SupPass!2026")
 	status, body := h.hit(t, "GET", "/api/v1/admin/backups", tok)
+	sepMustNot5xx(t, "TS platform", status, body)
 	sepMustEq(t, "TS platform", http.StatusForbidden, status, body)
 	sepMustContain(t, "TS platform", body, `"insufficient permissions"`)
 }
@@ -557,20 +623,56 @@ func TestPhase6_TenantSupport_PlatformDenied(t *testing.T) {
 // ── Positive: TenantReadOnly reaches allowed tenant read ─────────
 func TestPhase6_TenantReadOnly_AllowedRead(t *testing.T) {
 	h := newSepHarness(t)
+	h.seedDomain(t, "a.example")
 	h.insertTenantRole(t, "tro2@sep.example", "ROPass!2026", "tenant_readonly")
 	tok := h.login(t, "tro2@sep.example", "ROPass!2026")
 	status, body := h.hit(t, "GET", "/api/v1/domains", tok)
+	sepMustNot5xx(t, "TRO domains", status, body)
 	sepMustEq(t, "TRO domains", http.StatusOK, status, body)
+	var domains []map[string]interface{}
+	if err := json.Unmarshal(body, &domains); err != nil {
+		t.Fatalf("TRO domains: expected JSON array, got parse error: %v body=%s", err, body)
+	}
+	if len(domains) == 0 {
+		t.Fatalf("TRO domains: expected at least one domain; got empty")
+	}
+	own, cross := false, false
+	for _, d := range domains {
+		n, _ := d["domain"].(string)
+		if n == "a.example" {
+			own = true
+		}
+		if n != "" && n != "a.example" {
+			cross = true
+		}
+	}
+	if !own {
+		t.Fatalf("TRO domains: own tenant domain a.example not found; body=%s", body)
+	}
+	if cross {
+		t.Fatalf("TRO domains: cross-tenant domain leaked; body=%s", body)
+	}
 }
 
 // ── Denial: TenantReadOnly blocked from write (MailboxesWrite) ──
 func TestPhase6_TenantReadOnly_WriteDenied(t *testing.T) {
 	h := newSepHarness(t)
+	h.seedDomain(t, "a.example")
+	// Seed a mailbox so we have a count baseline to prove no mutation.
+	h.seedMailbox(t, "a.example", "box@a.example")
+	before := mailboxCountForTenant(t, h.sqlDB, h.tenantA)
 	h.insertTenantRole(t, "tro3@sep.example", "ROPass!2026", "tenant_readonly")
 	tok := h.login(t, "tro3@sep.example", "ROPass!2026")
-	// POST /enterprise/mailboxes requires PermMailboxesWrite — TRO lacks it.
 	status, body := h.hit(t, "POST", "/api/v1/enterprise/mailboxes", tok)
+	sepMustNot5xx(t, "TRO POST mailboxes", status, body)
 	sepMustEq(t, "TRO POST mailboxes", http.StatusForbidden, status, body)
+	if !strings.Contains(string(body), "error") {
+		t.Fatalf("TRO POST mailboxes: missing error in body; body=%s", body)
+	}
+	after := mailboxCountForTenant(t, h.sqlDB, h.tenantA)
+	if after != before {
+		t.Fatalf("TRO POST mailboxes: mutation occurred (before=%d after=%d)", before, after)
+	}
 }
 
 // ── Denial: TenantReadOnly blocked from platform route ───────────
@@ -579,6 +681,25 @@ func TestPhase6_TenantReadOnly_PlatformDenied(t *testing.T) {
 	h.insertTenantRole(t, "tro4@sep.example", "ROPass!2026", "tenant_readonly")
 	tok := h.login(t, "tro4@sep.example", "ROPass!2026")
 	status, body := h.hit(t, "GET", "/api/v1/admin/backups", tok)
+	sepMustNot5xx(t, "TRO platform", status, body)
 	sepMustEq(t, "TRO platform", http.StatusForbidden, status, body)
 	sepMustContain(t, "TRO platform", body, `"insufficient permissions"`)
+}
+
+func domainCountForTenant(t *testing.T, db *sql.DB, tenantID uint) int {
+	t.Helper()
+	var c int
+	if err := db.QueryRow("SELECT COUNT(*) FROM coremail_domains WHERE tenant_id = ?", tenantID).Scan(&c); err != nil {
+		return 0
+	}
+	return c
+}
+
+func mailboxCountForTenant(t *testing.T, db *sql.DB, tenantID uint) int {
+	t.Helper()
+	var c int
+	if err := db.QueryRow("SELECT COUNT(*) FROM coremail_mailboxes WHERE tenant_id = ?", tenantID).Scan(&c); err != nil {
+		return 0
+	}
+	return c
 }
