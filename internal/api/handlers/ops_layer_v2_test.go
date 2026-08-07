@@ -752,6 +752,19 @@ func TestOpsV2_AdminSummaryExtended(t *testing.T) {
 	defer router.App().Shutdown()
 	defer sqlDB.Close()
 
+	// /api/v1/admin/summary is a platform route. Seed PSA for this test.
+	seedPlatformSuperAdminWithPassword(t, sqlDB, "psa@test.local", "PsaPass!2026")
+	// Inline login for PSA.
+	psaReq := httptest.NewRequest("POST", "/admin/login", strings.NewReader(`{"username":"psa@test.local","password":"PsaPass!2026"}`))
+	psaReq.Header.Set("Content-Type", "application/json")
+	psaResp, _ := router.App().Test(psaReq, fiber.TestConfig{Timeout: 0})
+	var psaParsed struct {
+		AccessToken string `json:"access_token"`
+	}
+	json.NewDecoder(psaResp.Body).Decode(&psaParsed)
+	psaToken := psaParsed.AccessToken
+	_ = token // TA token not used in this platform-only test
+
 	insertCoreMailDomain(t, sqlDB, 1, "test.local", "enterprise", "active")
 	insertCoreMailDomain(t, sqlDB, 2, "example.com", "smb", "active")
 	insertCoreMailDomain(t, sqlDB, 3, "another.org", "smb", "suspended")
@@ -782,7 +795,7 @@ func TestOpsV2_AdminSummaryExtended(t *testing.T) {
 		}
 	}
 
-	resp, body := doOpsV2Request(t, router, "GET", "/api/v1/admin/summary", "", token, "", false)
+	resp, body := doOpsV2Request(t, router, "GET", "/api/v1/admin/summary", "", psaToken, "", false)
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, body)
 	}

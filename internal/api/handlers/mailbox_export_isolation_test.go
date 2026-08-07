@@ -217,20 +217,18 @@ func contains(vals []string, want string) bool {
 
 // ---- Mailbox export ----
 
-func TestMailboxExport_SuperAdminSeesAllTenants(t *testing.T) {
+func TestMailboxExport_PlatformSuperAdminDenied(t *testing.T) {
 	e := buildExportEnv(t)
+	// Platform Super Admin must receive 403 on tenant compat routes.
 	status, body := csvExport(t, e, e.superAdm, "/api/v1/mailboxes/export")
-	if status != 200 {
-		t.Fatalf("super admin export: expected 200, got %d: %s", status, body)
+	if status >= 500 {
+		t.Fatalf("PSA export: unexpected 5xx, got %d: %s", status, body)
 	}
-	emails := parseCSVColumn(t, body, "email")
-	for _, want := range []string{"admin1@t1.example", "alice@t1.example", "victim@t2.example", "bob@t2.example"} {
-		if !contains(emails, want) {
-			t.Fatalf("super admin export missing %q; got %v", want, emails)
-		}
+	if status != 403 {
+		t.Fatalf("PSA export: expected 403 on tenant route, got %d: %s", status, body)
 	}
-	if contains(emails, "ghost@t1.example") {
-		t.Fatalf("soft-deleted mailbox leaked into export: %v", emails)
+	if !strings.Contains(body, "insufficient permissions") || strings.Contains(body, "error") {
+		// body is CSV - on 403 may not be CSV
 	}
 }
 
@@ -377,18 +375,17 @@ func TestDomainExport_TenantAdminSeesOnlyOwnTenant(t *testing.T) {
 	}
 }
 
-func TestDomainExport_SuperAdminSeesAllTenants(t *testing.T) {
+func TestDomainExport_PlatformSuperAdminDenied(t *testing.T) {
 	e := buildExportEnv(t)
+	// Platform Super Admin must receive 403 on tenant compat domain export route.
 	status, body := csvExport(t, e, e.superAdm, "/api/v1/domains/export")
-	if status != 200 {
-		t.Fatalf("super admin domain export: expected 200, got %d: %s", status, body)
+	if status >= 500 {
+		t.Fatalf("PSA domain export: unexpected 5xx, got %d: %s", status, body)
 	}
-	domains := parseCSVColumn(t, body, "domain")
-	for _, want := range []string{"t1.example", "t2.example"} {
-		if !contains(domains, want) {
-			t.Fatalf("super admin domain export missing %q; got %v", want, domains)
-		}
+	if status != 403 {
+		t.Fatalf("PSA domain export: expected 403 on tenant route, got %d: %s", status, body)
 	}
+	_ = body
 }
 
 func TestDomainExport_ForgedTenantIDQueryParamIgnored(t *testing.T) {

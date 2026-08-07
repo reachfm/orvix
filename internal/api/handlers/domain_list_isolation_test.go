@@ -100,7 +100,7 @@ func buildDomainListEnv(t *testing.T) *domainListEnv {
 	// row intentionally exercises the deprecated `role='admin'` shape; use the
 	// legacy-migration primitive so intent is unambiguous.
 	var zeroTenant uint = 0
-	insertUserWithPassword(t, sqlDB, "notenant@nowhere.example", "admin", &zeroTenant, "NoTenantPass!2026")
+	insertUserWithPassword(t, sqlDB, "notenant@nowhere.example", "tenant_admin", &zeroTenant, "NoTenantPass!2026")
 
 	scratchDir := t.TempDir()
 	adminDir := scratchDir + "/admin"
@@ -192,16 +192,18 @@ func containsDomain(rows []domainListRow, name string) bool {
 }
 
 // 1. Platform super admin sees domains from multiple tenants.
-func TestListDomains_SuperAdminSeesMultipleTenants(t *testing.T) {
+func TestListDomains_PlatformSuperAdminDeniedOnTenantRoute(t *testing.T) {
 	e := buildDomainListEnv(t)
+	// PSA must receive 403 on tenant compat /domains route.
 	status, rows := listDomains(t, e, e.superAdm, "/api/v1/domains")
-	if status != 200 {
-		t.Fatalf("super admin: expected 200, got %d", status)
+	if status >= 500 {
+		t.Fatalf("PSA domains: unexpected 5xx, got %d", status)
 	}
-	for _, want := range []string{"alpha.t1.example", "beta.t1.example", "victim.t2.example"} {
-		if !containsDomain(rows, want) {
-			t.Fatalf("super admin list missing %q; got %v", want, domainNames(rows))
-		}
+	if status != 403 {
+		t.Fatalf("PSA domains: expected 403 on tenant route, got %d", status)
+	}
+	if len(rows) > 0 {
+		t.Fatalf("PSA domains: must not expose tenant data; got %v", domainNames(rows))
 	}
 }
 
@@ -301,9 +303,10 @@ func TestListDomains_DeletedDomainsExcluded(t *testing.T) {
 	if containsDomain(rows, "ghost.t1.example") {
 		t.Fatalf("soft-deleted domain leaked: %v", domainNames(rows))
 	}
-	_, superRows := listDomains(t, e, e.superAdm, "/api/v1/domains")
-	if containsDomain(superRows, "ghost.t1.example") {
-		t.Fatalf("soft-deleted domain leaked even to super admin: %v", domainNames(superRows))
+	// PSA receives 403 on tenant compat /domains route; no data can leak.
+	status, _ := listDomains(t, e, e.superAdm, "/api/v1/domains")
+	if status != 403 {
+		t.Fatalf("PSA on /domains: expected 403, got %d", status)
 	}
 }
 
@@ -330,12 +333,17 @@ func TestListDomains_UnauthorizedRoleRejected(t *testing.T) {
 // handler degrades to an empty list rather than leaking or erroring.
 func TestListDomains_UnresolvedTenantFailsSafely(t *testing.T) {
 	e := buildDomainListEnv(t)
+	// Canonical tenant_admin with tenant_id=0 must fail safely — requireTenantContext
+	// rejects the request before any handler runs, with 403.
 	status, rows := listDomains(t, e, e.noTenantAdmin, "/api/v1/domains")
-	if status != 200 {
-		t.Fatalf("unresolved tenant: expected 200 (empty list), got %d", status)
+	if status >= 500 {
+		t.Fatalf("unresolved tenant: unexpected 5xx, got %d", status)
 	}
-	if len(rows) != 0 {
-		t.Fatalf("unresolved tenant admin must see zero domains, got %v", domainNames(rows))
+	if status != 403 {
+		t.Fatalf("unresolved tenant: expected 403, got %d", status)
+	}
+	if len(rows) > 0 {
+		t.Fatalf("unresolved tenant: must not leak data; got %v", domainNames(rows))
 	}
 }
 
