@@ -488,8 +488,8 @@ func TestAdminListEndpointsReturnArraysAndBootstrapRows(t *testing.T) {
 
 	router := NewRouter(cfg, authenticator, logger, db, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
 	defer router.App().Shutdown()
-	taToken := loginForTest(t, router, "admin@test.local", "TaPass123!")       // TA for tenant routes
-	psaToken := loginForTest(t, router, "psa@test.local", "PsaPass123!")      // PSA for platform routes
+	taToken := loginForTest(t, router, "admin@test.local", "TaPass123!") // TA for tenant routes
+	psaToken := loginForTest(t, router, "psa@test.local", "PsaPass123!") // PSA for platform routes
 
 	domainsBody := getAdminJSON(t, router, taToken, "/api/v1/domains")
 	var domains []map[string]any

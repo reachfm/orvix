@@ -143,10 +143,31 @@ func (h *memberRoleHarness) resetTarget(t *testing.T) {
 	h.sqlDB.Exec("UPDATE users SET role = 'tenant_support', token_version = 200, active = 1, deleted_at = NULL WHERE id = ?", h.targetID)
 }
 
-func (h *memberRoleHarness) targetState(t *testing.T) (role string, tv int64, active bool) {
+func (h *memberRoleHarness) targetState(t *testing.T) (role string, tv int64, active bool, deletedAt sql.NullTime) {
 	t.Helper()
-	h.sqlDB.QueryRow("SELECT role, COALESCE(token_version,0), active FROM users WHERE id = ?", h.targetID).Scan(&role, &tv, &active)
+	h.sqlDB.QueryRow("SELECT role, COALESCE(token_version,0), active, deleted_at FROM users WHERE id = ?", h.targetID).Scan(&role, &tv, &active, &deletedAt)
 	return
+}
+
+// countSuccessfulMemberRoleAudit returns the number of audit rows
+// recording a SUCCESSFUL member.role_update for the target member.
+// Production Handler.UpdateMemberRole (customer_org.go:127) writes to
+// coremail_audit via writeAuditLog (handlers.go:3527) with
+// action="member.role_update", result="success" and
+// target="user:<memberID> role:<submittedRole>". When the Service
+// allowlist rejects the role, the handler returns 400 BEFORE
+// writeAuditLog, so no success row must appear for a forbidden role.
+func (h *memberRoleHarness) countSuccessfulMemberRoleAudit(t *testing.T) int {
+	t.Helper()
+	var n int
+	if err := h.sqlDB.QueryRow(
+		"SELECT COUNT(*) FROM coremail_audit WHERE action = ? AND result = ? AND target LIKE ?",
+		"member.role_update", "success",
+		fmt.Sprintf("user:%d%%", h.targetID),
+	).Scan(&n); err != nil {
+		t.Fatalf("audit count query: %v", err)
+	}
+	return n
 }
 
 func TestUpdateMemberRoleHTTPRejectsForbiddenRoles(t *testing.T) {
@@ -171,6 +192,14 @@ func TestUpdateMemberRoleHTTPRejectsForbiddenRoles(t *testing.T) {
 	for _, role := range forbiddenRoles {
 		t.Run(role, func(t *testing.T) {
 			h.resetTarget(t)
+
+			// BEFORE-state snapshot: target row and audit-success count.
+			beforeRole, beforeTV, beforeActive, beforeDeleted := h.targetState(t)
+			if beforeRole != "tenant_support" || beforeTV != 200 || !beforeActive || beforeDeleted.Valid {
+				t.Fatalf("baseline before %q not sane: role=%s tv=%d active=%v deleted_valid=%v",
+					role, beforeRole, beforeTV, beforeActive, beforeDeleted.Valid)
+			}
+			beforeAuditCount := h.countSuccessfulMemberRoleAudit(t)
 
 			bodyJSON, _ := json.Marshal(map[string]string{"role": role})
 			path := fmt.Sprintf("/api/v1/enterprise/members/%d/role", h.targetID)
@@ -212,10 +241,20 @@ func TestUpdateMemberRoleHTTPRejectsForbiddenRoles(t *testing.T) {
 				t.Fatalf("response echoes submitted role %q: body=%s", role, body)
 			}
 
-			// Target state unchanged.
-			storedRole, tv, active := h.targetState(t)
-			if storedRole != "tenant_support" || tv != 200 || !active {
-				t.Fatalf("target mutated for %q: role=%s tv=%d active=%v", role, storedRole, tv, active)
+			// AFTER-state: target row + audit-success count.
+			afterRole, afterTV, afterActive, afterDeleted := h.targetState(t)
+			if afterRole != "tenant_support" || afterTV != 200 || !afterActive {
+				t.Fatalf("target mutated for %q: role=%s tv=%d active=%v",
+					role, afterRole, afterTV, afterActive)
+			}
+			if afterDeleted.Valid {
+				t.Fatalf("target deleted_at changed from NULL for %q: value=%v",
+					role, afterDeleted.Time)
+			}
+			afterAuditCount := h.countSuccessfulMemberRoleAudit(t)
+			if afterAuditCount != beforeAuditCount {
+				t.Fatalf("audit count changed for rejected role %q: before=%d after=%d",
+					role, beforeAuditCount, afterAuditCount)
 			}
 		})
 	}
