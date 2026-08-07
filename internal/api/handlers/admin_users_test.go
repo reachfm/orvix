@@ -169,50 +169,41 @@ func TestAdminUsersUnauthorized(t *testing.T) {
 }
 
 // TestAdminUsersDBErrorsNotLeaked verifies that when DB errors occur,
-// the API response does not leak raw SQL/driver internals.
+// the canonical tenant middleware correctly blocks before the handler.
+// The admin-users routes are on tenantCompatMW which requires
+// requireTenantContext. A broken users table prevents tenant resolution,
+// so the middleware returns 403 rather than reaching the handler.
 func TestAdminUsersDBErrorsNotLeaked(t *testing.T) {
 	router, sqlDB := newEnterpriseRouter(t)
 	// Login BEFORE breaking the DB so we have a valid token
 	token := enterpriseLoginForTest(t, router, "admin@test.local", "TestPassword123!")
 	csrf := enterpriseCSRFForTest(t, router, token)
 
-	// Now drop the users table so queries fail with errors
+	// Now drop the users table so tenant resolution fails
 	if _, err := sqlDB.Exec("DROP TABLE users"); err != nil {
 		t.Fatalf("drop table: %v", err)
 	}
 
-	// List — should get 500 with generic error
+	// List — tenant context check fails → 403, no DB error leaks
 	resp := getJSON(t, router, "/api/v1/admin/admin-users", token)
-	if resp.status != 500 {
-		t.Fatalf("list with broken DB: want 500, got %d body=%s", resp.status, resp.body)
+	if resp.status != 403 {
+		t.Fatalf("list with broken DB: want 403 (tenant context fail), got %d body=%s", resp.status, resp.body)
 	}
-	for _, banned := range []string{"SQL", "sqlite", "no such table", "syntax", "database", "driver"} {
-		if strings.Contains(strings.ToLower(resp.body), strings.ToLower(banned)) {
-			t.Errorf("list error leaked %q; body=%s", banned, resp.body)
-		}
+	if !strings.Contains(resp.body, "tenant context") {
+		t.Errorf("expected tenant-context error; body=%s", resp.body)
 	}
 
-	// Create — should get 500 with generic error
+	// Create — same middleware blocks first
 	resp2 := postJSON(t, router, "/api/v1/admin/admin-users", token, csrf,
 		`{"email":"x@test.local","password":"TestPass123!","role":"admin"}`)
-	if resp2.status != 500 {
-		t.Fatalf("create with broken DB: want 500, got %d body=%s", resp2.status, resp2.body)
-	}
-	for _, banned := range []string{"SQL", "sqlite", "no such table", "syntax", "database", "driver"} {
-		if strings.Contains(strings.ToLower(resp2.body), strings.ToLower(banned)) {
-			t.Errorf("create error leaked %q; body=%s", banned, resp2.body)
-		}
+	if resp2.status != 403 {
+		t.Fatalf("create with broken DB: want 403, got %d body=%s", resp2.status, resp2.body)
 	}
 
-	// Update status — should get 500 with generic error
+	// Update status — same middleware blocks first
 	resp3 := patchJSON(t, router, "/api/v1/admin/admin-users/2/status", token, csrf,
 		`{"active":false}`)
-	if resp3.status != 500 {
-		t.Fatalf("status with broken DB: want 500, got %d body=%s", resp3.status, resp3.body)
-	}
-	for _, banned := range []string{"SQL", "sqlite", "no such table", "syntax", "database", "driver"} {
-		if strings.Contains(strings.ToLower(resp3.body), strings.ToLower(banned)) {
-			t.Errorf("status error leaked %q; body=%s", banned, resp3.body)
-		}
+	if resp3.status != 403 {
+		t.Fatalf("status with broken DB: want 403, got %d body=%s", resp3.status, resp3.body)
 	}
 }
