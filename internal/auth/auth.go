@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"database/sql"
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
@@ -474,17 +475,22 @@ func (a *Authenticator) isTokenRevoked(jti string) bool {
 }
 
 // RefreshToken validates a refresh token, rotates it, and returns new tokens.
+// The access token role is read from the current users row — never from the
+// refresh session, a stale JWT claim, or caller input. A role changed between
+// session creation and refresh is reflected immediately.
 func (a *Authenticator) RefreshToken(ctx context.Context, refreshToken string) (string, string, time.Time, error) {
 	tokenHash := fmt.Sprintf("%x", sha256.Sum256([]byte(refreshToken)))
 
-	// Raw, dialect-safe read/delete to stay consistent with the raw session
-	// writes (GORM and raw do not share a view under the custom SQLite
-	// dialector).
 	sqlDB, err := a.db.DB()
 	if err != nil {
 		return "", "", time.Time{}, ErrSessionExpired
 	}
 	d := a.dbDialect()
+	// Read user_id first; then delete the row. SQLite deletes are
+	// atomic per row (token_hash is UNIQUE), so at most one caller
+	// can consume the session. A second concurrent caller reads
+	// the row before the delete completes, but its delete returns
+	// zero rows affected — we check for that case below.
 	var userID uint
 	if err := sqlDB.QueryRow(
 		"SELECT user_id FROM sessions WHERE token_hash = "+d.Placeholder(1)+" AND expires_at > "+d.Placeholder(2),
@@ -492,11 +498,49 @@ func (a *Authenticator) RefreshToken(ctx context.Context, refreshToken string) (
 		return "", "", time.Time{}, ErrSessionExpired
 	}
 
-	if _, err := sqlDB.Exec("DELETE FROM sessions WHERE token_hash = "+d.Placeholder(1), tokenHash); err != nil {
+	res, err := sqlDB.Exec("DELETE FROM sessions WHERE token_hash = "+d.Placeholder(1), tokenHash)
+	if err != nil {
 		return "", "", time.Time{}, fmt.Errorf("rotate refresh session: %w", err)
 	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// Another concurrent caller consumed this session first.
+		return "", "", time.Time{}, ErrSessionExpired
+	}
 
-	accessToken, accessJTI, _, err := a.GenerateAccessTokenWithJTI(userID, RoleUser)
+	// Read current authorization from the users row. The refresh session
+	// may be stale — if role, tenant_id, active, or deleted_at have
+	// changed since the session was created, the refreshed token must
+	// reflect the current state (or fail closed).
+	var dbRole string
+	var tenantID sql.NullInt64
+	var active bool
+	var deletedAt sql.NullTime
+	if err := sqlDB.QueryRow(
+		"SELECT role, tenant_id, active, deleted_at FROM users WHERE id = "+d.Placeholder(1),
+		userID,
+	).Scan(&dbRole, &tenantID, &active, &deletedAt); err != nil {
+		// User row missing (deleted between session creation and refresh).
+		return "", "", time.Time{}, ErrSessionExpired
+	}
+	if !active || deletedAt.Valid {
+		return "", "", time.Time{}, ErrSessionExpired
+	}
+	canonRole, ok := NormalizeRole(Role(dbRole), nil)
+	if !ok {
+		return "", "", time.Time{}, ErrSessionExpired
+	}
+	if tenantID.Valid && tenantID.Int64 > 0 {
+		var tid int64 = tenantID.Int64
+		if canonRole == RolePlatformSuperAdmin {
+			return "", "", time.Time{}, ErrSessionExpired
+		}
+		canonRole, ok = NormalizeRole(Role(dbRole), &tid)
+		if !ok {
+			return "", "", time.Time{}, ErrSessionExpired
+		}
+	}
+
+	accessToken, accessJTI, _, err := a.GenerateAccessTokenWithJTI(userID, canonRole)
 	if err != nil {
 		return "", "", time.Time{}, err
 	}
