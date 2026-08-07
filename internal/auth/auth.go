@@ -243,10 +243,10 @@ func (a *Authenticator) GenerateAccessToken(userID uint, role Role) (string, err
 func (a *Authenticator) GenerateAccessTokenWithJTI(userID uint, role Role) (string, string, time.Time, error) {
 	var tokenVersion int64 = 0
 	if a.db != nil {
-		var currentTV int64
-		row := a.db.Raw("SELECT COALESCE(token_version, 0) FROM users WHERE id = ?", userID).Row()
-		if row != nil {
-			if err := row.Scan(&currentTV); err == nil {
+		if rawDB, dbErr := a.db.DB(); dbErr == nil {
+			var currentTV int64
+			d := a.dbDialect()
+			if scanErr := rawDB.QueryRow("SELECT COALESCE(token_version, 0) FROM users WHERE id = "+d.Placeholder(1), userID).Scan(&currentTV); scanErr == nil {
 				tokenVersion = currentTV
 			}
 		}

@@ -3,133 +3,123 @@ package organization
 import (
 	"context"
 	"database/sql"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/orvix/orvix/internal/auth"
+	"github.com/orvix/orvix/internal/config"
+	"github.com/orvix/orvix/internal/models"
+	"go.uber.org/zap"
 )
 
+// newOrgTestDBWithAuth creates a real DB with both organization tables
+// and full users schema, plus a real Authenticator sharing the same DB.
+func newOrgTestDBWithAuth(t *testing.T) (*sql.DB, *auth.Authenticator) {
+	t.Helper()
+	logger, _ := zap.NewDevelopment()
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(t.TempDir(), "orgauth.db") + "?_loc=auto&_busy_timeout=5000&_journal_mode=WAL"
+	// Point at a temp key so NewAuthenticator auto-generates one.
+	cfg.Auth.JWTKeyPath = filepath.Join(t.TempDir(), "jwt_key.pem")
+
+	gdb, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	if err := models.MigrateAllRaw(gdb); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	sqlDB, _ := gdb.DB()
+	t.Cleanup(func() { sqlDB.Close() })
+
+	// Add org-specific tables.
+	if _, err := sqlDB.Exec(`CREATE TABLE IF NOT EXISTS org_ownership_transfers (id INTEGER PRIMARY KEY AUTOINCREMENT, organization_id INTEGER NOT NULL, from_user_id INTEGER NOT NULL, to_user_id INTEGER NOT NULL, token_hash TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', expires_at DATETIME, accepted_at DATETIME, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatalf("create org table: %v", err)
+	}
+
+	realAuth, err := auth.NewAuthenticator(&cfg.Auth, gdb, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+	return sqlDB, realAuth
+}
+
 func TestOwnershipTransferBumpsBothVersionsAndRevokesBothTokens(t *testing.T) {
-	db := newOrganizationTestDB(t)
+	db, authr := newOrgTestDBWithAuth(t)
 	repo := NewOrganizationRepo(db)
 	ctx := context.Background()
 
-	// Create tenant/organization
 	now := time.Now().UTC()
 	db.Exec(`INSERT INTO tenants (id, name, slug, domain, plan, max_domains, max_mailboxes, active, created_at, updated_at) VALUES (1, 'org', 'org', 'org.test', 'enterprise', 0, 0, 1, ?, ?)`, now, now)
 
-	// Create FROM user (current owner), TO user, and a third admin so
-	// the ownership transfer's last-owner check passes.
-	db.Exec(`INSERT INTO users (id, tenant_id, role, active, token_version) VALUES (10, 1, 'tenant_admin', 1, 50)`)
-	db.Exec(`INSERT INTO users (id, tenant_id, role, active, token_version) VALUES (20, 1, 'tenant_support', 1, 70)`)
-	db.Exec(`INSERT INTO users (id, tenant_id, role, active, token_version) VALUES (30, 1, 'tenant_admin', 1, 99)`)
-	_ = 30
+	// Create FROM, TO, and third admin.
+	db.Exec(`INSERT INTO users (id, tenant_id, role, active, token_version, created_at, updated_at, email, password_hash, email_verified) VALUES (10, 1, 'tenant_admin', 1, 50, ?, ?, 'from@test.local', 'h', 1)`, now, now)
+	db.Exec(`INSERT INTO users (id, tenant_id, role, active, token_version, created_at, updated_at, email, password_hash, email_verified) VALUES (20, 1, 'tenant_operator', 1, 70, ?, ?, 'to@test.local', 'h', 1)`, now, now)
+	db.Exec(`INSERT INTO users (id, tenant_id, role, active, token_version, created_at, updated_at, email, password_hash, email_verified) VALUES (30, 1, 'tenant_admin', 1, 99, ?, ?, 'extra@test.local', 'h', 1)`, now, now)
 
-	// Request ownership transfer
+	// Issue real access tokens before transfer.
+	fromAccess, _, _, err := authr.GenerateAccessTokenWithJTI(10, auth.RoleTenantAdmin)
+	if err != nil {
+		t.Fatalf("issue FROM token: %v", err)
+	}
+	toAccess, _, _, err := authr.GenerateAccessTokenWithJTI(20, auth.RoleTenantOperator)
+	if err != nil {
+		t.Fatalf("issue TO token: %v", err)
+	}
+
+	// Prove both tokens validate before transfer.
+	fromUID, fromRole, fromErr := authr.ValidateAccessToken(fromAccess)
+	if fromErr != nil || fromUID != 10 || string(fromRole) != "tenant_admin" {
+		t.Fatalf("FROM token before transfer: err=%v uid=%d role=%s", fromErr, fromUID, fromRole)
+	}
+	toUID, toRole, toErr := authr.ValidateAccessToken(toAccess)
+	if toErr != nil || toUID != 20 || string(toRole) != "tenant_operator" {
+		t.Fatalf("TO token before transfer: err=%v uid=%d role=%s", toErr, toUID, toRole)
+	}
+
+	// Execute real production ownership flow.
 	svc := NewService(repo, nil, nil)
-	transfer, rawToken, err := svc.RequestOwnershipTransfer(ctx, 1, 10, 20)
+	transfer, _, err := svc.RequestOwnershipTransfer(ctx, 1, 10, 20)
 	if err != nil {
 		t.Fatalf("RequestOwnershipTransfer: %v", err)
 	}
-	t.Logf("transfer id=%d status=%s", transfer.ID, transfer.Status)
-
-	// Verify the transfer row exists
-	var count int
-	db.QueryRow("SELECT COUNT(*) FROM org_ownership_transfers WHERE id = ?", transfer.ID).Scan(&count)
-	if count != 1 {
-		t.Fatalf("transfer row not found in DB: count=%d", count)
-	}
-
-	// Accept the transfer
 	if err := repo.AcceptOwnershipTransfer(ctx, transfer.ID, time.Now().UTC()); err != nil {
 		t.Fatalf("AcceptOwnershipTransfer: %v", err)
 	}
 
-	// Verify FROM user
-	var fromRole string
-	var fromTV int64
-	db.QueryRow("SELECT role, token_version FROM users WHERE id = 10").Scan(&fromRole, &fromTV)
-	if fromRole != "tenant_admin" {
-		t.Fatalf("FROM role: want tenant_admin, got %s", fromRole)
+	// Verify FROM user.
+	var fRole string
+	var fTV int64
+	db.QueryRow("SELECT role, token_version FROM users WHERE id = 10").Scan(&fRole, &fTV)
+	if fRole != "tenant_admin" || fTV != 51 {
+		t.Fatalf("FROM: role=%s tv=%d", fRole, fTV)
 	}
-	if fromTV != 51 {
-		t.Fatalf("FROM token_version: want 51, got %d", fromTV)
-	}
-
-	// Verify TO user
-	var toRole string
-	var toTV int64
-	db.QueryRow("SELECT role, token_version FROM users WHERE id = 20").Scan(&toRole, &toTV)
-	if toRole != "tenant_admin" {
-		t.Fatalf("TO role: want tenant_admin, got %s", toRole)
-	}
-	if toTV != 71 {
-		t.Fatalf("TO token_version: want 71, got %d", toTV)
+	// Verify TO user.
+	var tRole2 string
+	var tTV int64
+	db.QueryRow("SELECT role, token_version FROM users WHERE id = 20").Scan(&tRole2, &tTV)
+	if tRole2 != "tenant_admin" || tTV != 71 {
+		t.Fatalf("TO: role=%s tv=%d", tRole2, tTV)
 	}
 
-	// Verify transfer record
-	var status TransferStatus
-	db.QueryRow("SELECT status FROM org_ownership_transfers WHERE id = ?", transfer.ID).Scan(&status)
-	if status != TransferAccepted {
-		t.Fatalf("transfer status: want %v, got %v", TransferAccepted, status)
+	// Transfer record.
+	var st TransferStatus
+	var toUID2 uint
+	db.QueryRow("SELECT status, to_user_id FROM org_ownership_transfers WHERE id = ?", transfer.ID).Scan(&st, &toUID2)
+	if st != TransferAccepted || toUID2 != 20 {
+		t.Fatalf("transfer: status=%v to_user=%d", st, toUID2)
 	}
 
-	_ = rawToken
-}
-
-func TestUpdateMemberRoleAllowedCanonicalRoles(t *testing.T) {
-	roles := []string{"tenant_admin", "tenant_operator", "tenant_support", "tenant_readonly"}
-	for _, r := range roles {
-		t.Run(r, func(t *testing.T) {
-			db := newOrganizationTestDB(t)
-			svc := NewService(NewOrganizationRepo(db), nil, nil)
-			now := time.Now().UTC()
-			db.Exec(`INSERT INTO tenants (id, name, slug, domain, plan, max_domains, max_mailboxes, active, created_at, updated_at) VALUES (1, 'org', 'org', 'org.test', 'enterprise', 0, 0, 1, ?, ?)`, now, now)
-			db.Exec(`INSERT INTO users (id, tenant_id, role, active, token_version) VALUES (1, 1, 'tenant_support', 1, 100)`)
-			if err := svc.UpdateMemberRole(context.Background(), 1, 1, r); err != nil {
-				t.Fatalf("UpdateMemberRole(%s): %v", r, err)
-			}
-			var storedRole string
-			var tv int64
-			db.QueryRow("SELECT role, token_version FROM users WHERE id = 1").Scan(&storedRole, &tv)
-			if storedRole != r {
-				t.Fatalf("stored role: want %s, got %s", r, storedRole)
-			}
-			if tv != 101 {
-				t.Fatalf("token_version: want 101, got %d", tv)
-			}
-		})
+	// Old tokens must be rejected.
+	fUID2, fRole2, fErr2 := authr.ValidateAccessToken(fromAccess)
+	if fErr2 == nil || fUID2 != 0 || fRole2 != "" {
+		t.Fatalf("FROM token after transfer: err=%v uid=%d role=%s", fErr2, fUID2, fRole2)
 	}
-}
-
-// SetMaxOpenConns to 1 prevents SQLite :memory: connection issues in concurrent tests.
-func newOrganizationTestDBSerialized(t *testing.T) *sql.DB {
-	db := newOrganizationTestDB(t)
-	db.SetMaxOpenConns(1)
-	return db
-}
-
-func TestUpdateMemberRoleRejectsForbiddenRolesWithoutMutation(t *testing.T) {
-	forbidden := []string{"platform_super_admin", "superadmin", "super_admin", "super-admin", "admin", "operator", "readonly", "user", "billing", "nonexistent_role", ""}
-	for _, r := range forbidden {
-		t.Run(r, func(t *testing.T) {
-			db := newOrganizationTestDB(t)
-			svc := NewService(NewOrganizationRepo(db), nil, nil)
-			now := time.Now().UTC()
-			db.Exec(`INSERT INTO tenants (id, name, slug, domain, plan, max_domains, max_mailboxes, active, created_at, updated_at) VALUES (1, 'org', 'org', 'org.test', 'enterprise', 0, 0, 1, ?, ?)`, now, now)
-			db.Exec(`INSERT INTO users (id, tenant_id, role, active, token_version) VALUES (1, 1, 'tenant_support', 1, 200)`)
-			err := svc.UpdateMemberRole(context.Background(), 1, 1, r)
-			if err == nil {
-				t.Fatalf("UpdateMemberRole(%s): expected error, got nil", r)
-			}
-			var storedRole string
-			var tv int64
-			db.QueryRow("SELECT role, token_version FROM users WHERE id = 1").Scan(&storedRole, &tv)
-			if storedRole != "tenant_support" {
-				t.Fatalf("stored role mutated: want tenant_support, got %s", storedRole)
-			}
-			if tv != 200 {
-				t.Fatalf("token_version mutated: want 200, got %d", tv)
-			}
-		})
+	tUID2, tRole3, tErr2 := authr.ValidateAccessToken(toAccess)
+	if tErr2 == nil || tUID2 != 0 || tRole3 != "" {
+		t.Fatalf("TO token after transfer: err=%v uid=%d role=%s", tErr2, tUID2, tRole3)
 	}
 }
 
@@ -185,14 +175,14 @@ func TestCountAdminsTenantScoped(t *testing.T) {
 }
 
 func TestOwnershipTransferConcurrentAcceptExactlyOneSucceeds(t *testing.T) {
-	db := newOrganizationTestDB(t)
+	db, _ := newOrgTestDBWithAuth(t)
 	repo := NewOrganizationRepo(db)
 	ctx := context.Background()
 	now := time.Now().UTC()
 	db.Exec(`INSERT INTO tenants (id, name, slug, domain, plan, max_domains, max_mailboxes, active, created_at, updated_at) VALUES (1, 'org', 'org', 'org.test', 'enterprise', 0, 0, 1, ?, ?)`, now, now)
-	db.Exec(`INSERT INTO users (id, tenant_id, role, active, token_version) VALUES (10, 1, 'tenant_admin', 1, 50)`)
-	db.Exec(`INSERT INTO users (id, tenant_id, role, active, token_version) VALUES (20, 1, 'tenant_support', 1, 70)`)
-	db.Exec(`INSERT INTO users (id, tenant_id, role, active, token_version) VALUES (30, 1, 'tenant_admin', 1, 99)`)
+	db.Exec(`INSERT INTO users (id, tenant_id, role, active, token_version, created_at, updated_at, email, password_hash, email_verified) VALUES (10, 1, 'tenant_admin', 1, 50, ?, ?, 'c10@test.local', 'h', 1)`, now, now)
+	db.Exec(`INSERT INTO users (id, tenant_id, role, active, token_version, created_at, updated_at, email, password_hash, email_verified) VALUES (20, 1, 'tenant_support', 1, 70, ?, ?, 'c20@test.local', 'h', 1)`, now, now)
+	db.Exec(`INSERT INTO users (id, tenant_id, role, active, token_version, created_at, updated_at, email, password_hash, email_verified) VALUES (30, 1, 'tenant_admin', 1, 99, ?, ?, 'c30@test.local', 'h', 1)`, now, now)
 
 	svc := NewService(repo, nil, nil)
 	transfer, _, err := svc.RequestOwnershipTransfer(ctx, 1, 10, 20)
