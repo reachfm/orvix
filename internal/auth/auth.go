@@ -576,32 +576,23 @@ func (a *Authenticator) ValidateUserForTokenIssuance(userID uint) error {
 	return err
 }
 
-// SnapshotRoleForUser returns the validated canonical role for userID, or ""
-// if the authorization snapshot is invalid. It is used only for cookie/session
-// metadata after ValidateUserForTokenIssuance has already succeeded.
-func (a *Authenticator) SnapshotRoleForUser(userID uint) Role {
-	snap, err := a.loadUserAuthorizationSnapshot(userID)
-	if err != nil {
-		return ""
-	}
-	return snap.Role
-}
-
 // GenerateAccessTokenForUserWithJTI issues an access token using the caller's
 // current authorization snapshot (role, tenant, status, token_version read in
 // one SELECT). The role and token_version embedded in the JWT come from that
 // single snapshot — never from a caller-supplied role. This closes the
-// old-role/new-token_version TOCTOU race.
-func (a *Authenticator) GenerateAccessTokenForUserWithJTI(userID uint) (string, string, error) {
-	snap, err := a.loadUserAuthorizationSnapshot(userID)
-	if err != nil {
-		return "", "", err
+// old-role/new-token_version TOCTOU race. The returned role is the SAME
+// validated canonical role used for the JWT, so callers can pass it directly
+// to opaque-session creation without a second authorization query.
+func (a *Authenticator) GenerateAccessTokenForUserWithJTI(userID uint) (accessToken string, jti string, role Role, err error) {
+	snap, loadErr := a.loadUserAuthorizationSnapshot(userID)
+	if loadErr != nil {
+		return "", "", "", ErrTokenInvalid
 	}
-	token, jti, _, err := a.signAccessToken(userID, snap.Role, snap.TokenVersion)
-	if err != nil {
-		return "", "", err
+	token, tokenJTI, _, signErr := a.signAccessToken(userID, snap.Role, snap.TokenVersion)
+	if signErr != nil {
+		return "", "", "", ErrTokenInvalid
 	}
-	return token, jti, nil
+	return token, tokenJTI, snap.Role, nil
 }
 
 // canonicalRefreshRole is retained for backward compatibility; it delegates to
@@ -937,21 +928,24 @@ func (a *Authenticator) ValidateOpaqueSession(token string) (uint, Role, string,
 	}
 	d := a.dbDialect()
 	var userID uint
-	var role, email string
-	sel := "SELECT user_id, role, email FROM sessions WHERE token_hash = " +
+	var email string
+	// sessions.role is informational only; the CURRENT users row is the
+	// authoritative authorization source on every validation.
+	sel := "SELECT user_id, email FROM sessions WHERE token_hash = " +
 		d.Placeholder(1) + " AND expires_at > " + d.Placeholder(2)
-	if err := sqlDB.QueryRow(sel, tokenHash, time.Now().UTC()).Scan(&userID, &role, &email); err != nil {
+	if err := sqlDB.QueryRow(sel, tokenHash, time.Now().UTC()).Scan(&userID, &email); err != nil {
 		return 0, "", "", ErrSessionExpired
 	}
 
-	// Defensive: refuse to honour sessions persisted before the role column
-	// existed. Returning ErrSessionExpired forces a fresh session, after which
-	// every request restores the real role.
-	if role == "" {
+	// Load the current canonical authorization snapshot for this user. A
+	// demoted, disabled, deleted, or malformed user loses opaque-session
+	// access immediately.
+	snap, snapErr := a.loadUserAuthorizationSnapshot(userID)
+	if snapErr != nil {
 		return 0, "", "", ErrSessionExpired
 	}
 
-	return userID, Role(role), email, nil
+	return userID, snap.Role, email, nil
 }
 
 func (a *Authenticator) ValidateMFAChallengeToken(tokenString string) (uint, error) {

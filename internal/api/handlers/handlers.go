@@ -700,17 +700,18 @@ func (h *Handler) Login(c fiber.Ctx) error {
 
 	// Issue access token from the canonical authorization snapshot. The
 	// role and token_version are read from the users row in one SELECT —
-	// never from the raw login-query role string.
-	accessToken, accessJTI, err := h.auth.GenerateAccessTokenForUserWithJTI(userID)
+	// never from the raw login-query role string. The returned issuedRole is
+	// the SAME validated canonical role embedded in the JWT, reused for the
+	// opaque session so both share one authorization snapshot.
+	accessToken, accessJTI, issuedRole, err := h.auth.GenerateAccessTokenForUserWithJTI(userID)
 	if err != nil {
 		h.logger.Error("failed to generate access token", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authentication failed"})
 	}
 
-	// Issue opaque session cookie alongside JWT for transition. Use the
-	// canonical snapshot role, not the raw login-query role string.
-	snapRole := h.auth.SnapshotRoleForUser(userID)
-	if err := h.issueLoginSession(c, userID, snapRole, loginEmail); err != nil {
+	// Issue opaque session cookie alongside JWT for transition, using the
+	// same issuedRole from the single snapshot.
+	if err := h.issueLoginSession(c, userID, issuedRole, loginEmail); err != nil {
 		h.logger.Error("failed to issue login session", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authentication failed"})
 	}

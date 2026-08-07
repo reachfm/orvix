@@ -401,19 +401,23 @@ func (h *Handler) MFALoginVerify(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"error": "user lookup failed"})
 	}
 
+	// Issue access token from the CURRENT single authorization snapshot.
+	// The returned issuedRole is the SAME validated canonical role embedded
+	// in the JWT; it is reused for the opaque session so both share one
+	// snapshot. No separate role query occurs.
+	accessToken, accessJTI, issuedRole, err := h.auth.GenerateAccessTokenForUserWithJTI(userID)
+	if err != nil {
+		h.logger.Error("failed to generate access token", zap.Error(err))
+		return c.Status(500).JSON(fiber.Map{"error": "authentication failed"})
+	}
+
 	// Issue opaque session cookie alongside JWT for transition.
 	// Cookie issuance is the source of truth for browser auth; if
 	// the store refuses the write we refuse the login rather than
 	// return success without a usable session.
-	if err := h.issueLoginSession(c, userID, h.auth.SnapshotRoleForUser(userID), userEmail); err != nil {
+	if err := h.issueLoginSession(c, userID, issuedRole, userEmail); err != nil {
 		h.logger.Error("failed to issue login session", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authentication failed"})
-	}
-
-	accessToken, accessJTI, err := h.auth.GenerateAccessTokenForUserWithJTI(userID)
-	if err != nil {
-		h.logger.Error("failed to generate access token", zap.Error(err))
-		return c.Status(500).JSON(fiber.Map{"error": "authentication failed"})
 	}
 	refreshToken, expiresAt, err := h.auth.GenerateRefreshToken(userID, accessJTI)
 	if err != nil {
