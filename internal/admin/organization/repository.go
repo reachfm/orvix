@@ -144,10 +144,15 @@ func (r *OrganizationRepo) ExistsBySlug(ctx context.Context, slug string, exclud
 	return count > 0, err
 }
 
+// CountAdmins counts active, non-deleted tenant admin users for a specific
+// tenant. platform_super_admin (tenant_id IS NULL) is never counted.
+// Legacy admin/superadmin roles remain included for pre-normalization
+// upgrade rows; they are replaced by tenant_admin after startup normalizer
+// completes.
 func (r *OrganizationRepo) CountAdmins(ctx context.Context, tenantID uint) (int, error) {
 	var count int
 	err := r.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM users WHERE tenant_id="+r.dialect.Placeholder(1)+" AND role IN ('admin','superadmin','tenant_admin') AND deleted_at IS NULL", tenantID).Scan(&count)
+		"SELECT COUNT(*) FROM users WHERE tenant_id="+r.dialect.Placeholder(1)+" AND role IN ('admin','superadmin','tenant_admin') AND active = 1 AND deleted_at IS NULL", tenantID).Scan(&count)
 	return count, err
 }
 
