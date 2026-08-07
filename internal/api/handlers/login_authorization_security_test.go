@@ -152,7 +152,9 @@ func TestLoginCanonicalAuthorizationMatrix(t *testing.T) {
 			if status != 200 {
 				t.Fatalf("login %s: want 200, got %d body=%s", tc.role, status, raw)
 			}
-			var out struct{ AccessToken string `json:"access_token"` }
+			var out struct {
+				AccessToken string `json:"access_token"`
+			}
 			json.Unmarshal(raw, &out)
 			if out.AccessToken == "" {
 				t.Fatalf("login %s: no access token", tc.role)
@@ -218,9 +220,9 @@ func TestLoginCanonicalAuthorizationMatrix(t *testing.T) {
 
 	// Status-based denials.
 	for _, tc := range []struct {
-		name    string
+		name     string
 		inactive bool
-		deleted bool
+		deleted  bool
 	}{
 		{"inactive", true, false},
 		{"deleted", false, true},
