@@ -468,6 +468,18 @@ func TestAdminListEndpointsReturnArraysAndBootstrapRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert PSA: %v", err)
 	}
+	// Cross-tenant admin used to prove Tenant Admin's /api/v1/users
+	// response is scoped to its own tenant and never leaks another
+	// tenant's users.
+	otHash, _ := authenticator.HashPassword("OtPass123!")
+	_, err = sqlDB.Exec(
+		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
+		 VALUES (?, ?, 'other@tenant-two.test', ?, 'tenant_admin', 2, 1, 1)`,
+		now, now, otHash,
+	)
+	if err != nil {
+		t.Fatalf("insert cross-tenant admin: %v", err)
+	}
 	_, err = sqlDB.Exec(
 		`INSERT INTO coremail_domains (name, tenant_id, status, plan, created_at, updated_at)
 		 VALUES ('test.local', 1, 'active', 'enterprise', ?, ?)`,
@@ -508,40 +520,51 @@ func TestAdminListEndpointsReturnArraysAndBootstrapRows(t *testing.T) {
 	if err := json.Unmarshal(usersBody, &users); err != nil {
 		t.Fatalf("users must be JSON array: %v: %s", err, usersBody)
 	}
-	found := false
-	for _, u := range users {
-		em, _ := u["email"].(string)
-		if em == "admin@test.local" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("expected admin@test.local user in response, got %s", usersBody)
-	}
 	if strings.Contains(string(usersBody), "password") || strings.Contains(string(usersBody), "argon2") {
 		t.Fatalf("users response must not expose password material: %s", usersBody)
 	}
-	if _, ok := users[0]["is_admin"]; !ok {
-		t.Fatalf("users response must include is_admin field: %s", usersBody)
+	// ListUsers builds its response from a Go map with nondeterministic
+	// iteration order, so the own-tenant admin row must be located by
+	// email rather than assumed to be users[0].
+	var ownTenantAdmin map[string]any
+	for _, u := range users {
+		em, _ := u["email"].(string)
+		if em == "psa@test.local" {
+			t.Fatalf("tenant admin's /api/v1/users must not include the NULL-tenant platform_super_admin: %s", usersBody)
+		}
+		if em == "other@tenant-two.test" {
+			t.Fatalf("tenant admin's /api/v1/users must not include another tenant's user: %s", usersBody)
+		}
+		if _, ok := u["id"]; ok {
+			t.Fatalf("users response must not include ambiguous id field: %s", usersBody)
+		}
+		if _, ok := u["mailbox_id"]; !ok {
+			t.Fatalf("users response must include mailbox_id field on every row: %s", usersBody)
+		}
+		if _, ok := u["user_id"]; !ok {
+			t.Fatalf("users response must include user_id field on every row: %s", usersBody)
+		}
+		if _, ok := u["is_admin"]; !ok {
+			t.Fatalf("users response must include is_admin field on every row: %s", usersBody)
+		}
+		if _, ok := u["status"]; !ok {
+			t.Fatalf("users response must include status field on every row: %s", usersBody)
+		}
+		if em == "admin@test.local" {
+			ownTenantAdmin = u
+		}
 	}
-	if _, ok := users[0]["status"]; !ok {
-		t.Fatalf("users response must include status field: %s", usersBody)
+	if len(users) != 1 {
+		t.Fatalf("tenant admin's /api/v1/users must contain exactly its own tenant's identity, got %s", usersBody)
 	}
-	if _, ok := users[0]["mailbox_id"]; !ok {
-		t.Fatalf("users response must include mailbox_id field: %s", usersBody)
+	if ownTenantAdmin == nil {
+		t.Fatalf("expected admin@test.local user in response, got %s", usersBody)
 	}
-	if users[0]["mailbox_id"] == nil {
+	if ownTenantAdmin["mailbox_id"] == nil {
 		t.Fatalf("admin user must have non-null mailbox_id since coremail_mailboxes row exists: %s", usersBody)
 	}
-	if _, ok := users[0]["user_id"]; !ok {
-		t.Fatalf("users response must include user_id field: %s", usersBody)
-	}
-	if users[0]["user_id"] == nil {
+	if ownTenantAdmin["user_id"] == nil {
 		t.Fatalf("admin user must have non-null user_id since users row exists: %s", usersBody)
-	}
-	if _, ok := users[0]["id"]; ok {
-		t.Fatalf("users response must not include ambiguous id field: %s", usersBody)
 	}
 
 	queueBody := getAdminJSON(t, router, psaToken, "/api/v1/queue")

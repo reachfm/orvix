@@ -1914,6 +1914,10 @@ func (h *Handler) ListUsers(c fiber.Ctx) error {
 	// Build mailbox WHERE clause using parameterized values.
 	mbConfs := []string{"deleted_at IS NULL"}
 	mbArgs := []interface{}{}
+	if !isSuperRole(c) {
+		mbConfs = append(mbConfs, "tenant_id = "+h.dialect.Placeholder(len(mbArgs)+1))
+		mbArgs = append(mbArgs, h.scopedTenantID(c))
+	}
 	if q != "" {
 		mbConfs = append(mbConfs, "LOWER(email) LIKE "+h.dialect.Placeholder(len(mbArgs)+1))
 		mbArgs = append(mbArgs, "%"+strings.ToLower(q)+"%")
@@ -1963,7 +1967,14 @@ func (h *Handler) ListUsers(c fiber.Ctx) error {
 
 	// user-only rows (no coremail_mailboxes) — only relevant when admin filter is not active.
 	// We always read users so we can attach user_id; then we narrow by q/admin/status below.
-	rows, err = sqlDB.Query("SELECT id, email, role, active FROM users ORDER BY id DESC")
+	userConfs := []string{"deleted_at IS NULL"}
+	userArgs := []interface{}{}
+	if !isSuperRole(c) {
+		userConfs = append(userConfs, "tenant_id = "+h.dialect.Placeholder(len(userArgs)+1))
+		userArgs = append(userArgs, h.scopedTenantID(c))
+	}
+	userQuery := "SELECT id, email, role, active FROM users WHERE " + strings.Join(userConfs, " AND ") + " ORDER BY id DESC"
+	rows, err = sqlDB.Query(userQuery, userArgs...)
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
