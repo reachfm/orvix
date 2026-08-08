@@ -21,9 +21,15 @@ func sessionRevocationSuite(t *testing.T, a *Authenticator) {
 	if err != nil {
 		t.Fatalf("db: %v", err)
 	}
-	// Seed users so token_version queries find real rows.
-	sqlDB.Exec(`INSERT INTO users (id, created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (5, datetime('now'), datetime('now'), 'sess5@test.local', 'h', 'tenant_admin', 1, 1, 1)`)
-	sqlDB.Exec(`INSERT INTO users (id, created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (7, datetime('now'), datetime('now'), 'sess7@test.local', 'h', 'tenant_admin', 1, 1, 1)`)
+	// Seed canonical users so token_version queries and authorization
+	// snapshots find real rows on every engine (SQLite and PostgreSQL).
+	// CURRENT_TIMESTAMP is portable across both engines.
+	if _, err := sqlDB.Exec(`INSERT INTO users (id, created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'sess5@test.local', 'h', 'tenant_admin', 1, 1, 1)`); err != nil {
+		t.Fatalf("seed user 5: %v", err)
+	}
+	if _, err := sqlDB.Exec(`INSERT INTO users (id, created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'sess7@test.local', 'h', 'tenant_admin', 1, 1, 1)`); err != nil {
+		t.Fatalf("seed user 7: %v", err)
+	}
 	d := a.dbDialect()
 
 	t.Run("bearer JWT target revoke, unrelated stays valid", func(t *testing.T) {
