@@ -363,7 +363,13 @@ export async function mockAPI(
 
   await page.route("**/api/v1/csrf-token", (r) => json(r, { csrf_token: "test-csrf-token" }));
   // portal is the authoritative platform-shell gate; role is informational.
-  await page.route("**/api/v1/me", (r) => json(r, { id: 1, email: "admin@example.com", role: "admin", portal: "platform" }));
+  // PLATFORM-SHELL: the domain management page (Domains.tsx) calls
+  // /enterprise/domains, which the backend gates with RequireTenantID —
+  // it is tenant-owned, not platform-owned. portal="platform" (a
+  // NULL-tenant identity) could never actually reach this page in
+  // production (it would get 403), so the fixture uses the real
+  // authorization shape: an organization-portal tenant identity.
+  await page.route("**/api/v1/me", (r) => json(r, { id: 1, email: "admin@example.com", role: "tenant_admin", portal: "organization", tenant_id: 1 }));
 
   return counters;
 }

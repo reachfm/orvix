@@ -31,17 +31,52 @@ import InvoicesPage from "./components/InvoicesPage";
 import SecurityPage from "./components/SecurityPage";
 import SupportPage from "./components/SupportPage";
 import PreferencesPage from "./components/PreferencesPage";
+import PlatformHome from "./components/PlatformHome";
 import { initCSRF, api } from "./api";
 
 type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" | "settings"
-  | "enterprise" | "mailboxes" | "organizations" | "backups" | "health"
+  | "enterprise" | "mailboxes" | "organizations" | "backups" | "health" | "platform-home"
   | "billing" | "onboarding" | "apikeys"
   | "account-settings" | "org-overview" | "invitations" | "members-roles" | "ownership-transfer"
   | "suspension-deletion" | "customer-mailboxes" | "aliases" | "groups" | "usage-quotas"
   | "invoices" | "security" | "support" | "preferences"
   | "login" | "signup" | "forgot-password" | "reset-password";
 
+// PORTAL-SEPARATION-PHASE1 / PLATFORM-SHELL: the explicit allow-list for
+// each portal. portal="platform" (Platform Super Admin, tenant_id=NULL)
+// gets ONLY tabs whose underlying API calls are verified platform-owned
+// routes (platformMW-gated in internal/api/router.go) plus the
+// self-scoped /account/* pages. It must NEVER include a tab backed by a
+// tenant-owned endpoint (/enterprise/*, /users, /customer/*, /firewall
+// is platform-owned — verified below) — doing so would let a NULL-tenant
+// identity trigger a tenant-scoped request that the backend correctly
+// rejects, producing the "Failed to load dashboard" defect this fixes.
+//
+// Verified ownership (internal/api/router.go, as of this change):
+//   platform-owned: /platform/organizations, /admin/backups,
+//     /firewall/rules, /firewall/logs, /modules, /monitoring/health
+//   tenant-owned:    /enterprise/* (dashboard, domains, mailboxes,
+//     audit/logs, ...), /users (tenantCompatMW), /customer/*
+//   self-scoped (safe for either portal): /account/*
+//
+// NOTE on "domains" (Domains.tsx -> /enterprise/domains): the pre-existing
+// code showed this tab only to the "platform" side of its old ad hoc
+// filter, but the handler (ListAdminDomains) calls auth.RequireTenantID
+// and 403s a NULL-tenant caller — it is, and always was, tenant-owned.
+// It is listed under ORGANIZATION_TAB_IDS here, matching the real backend
+// authorization, and is correctly absent from PLATFORM_TAB_IDS.
+const PLATFORM_TAB_IDS: Tab[] = [
+  "platform-home", "organizations", "backups", "firewall", "modules", "health",
+  "account-settings", "security", "preferences",
+];
+const ORGANIZATION_TAB_IDS: Tab[] = [
+  "dashboard", "domains", "org-overview", "customer-mailboxes", "aliases", "groups", "usage-quotas",
+  "invitations", "members-roles", "ownership-transfer", "suspension-deletion", "invoices",
+  "billing", "apikeys", "account-settings", "security", "preferences", "support",
+];
+
 const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: string }[] = [
+  { id: "platform-home", label: "Overview", icon: LayoutDashboard },
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { id: "enterprise", label: "Enterprise", icon: Monitor, section: "Customer Admin" },
   { id: "mailboxes", label: "Mailboxes", icon: Mail },
@@ -83,51 +118,48 @@ export default function App() {
   // to classify the user; the UI shows nothing platform-scoped.
   const [portal, setPortal] = useState<"platform" | "organization" | "">("");
 
+  const [userEmail, setUserEmail] = useState("");
+
   useEffect(() => {
     fetch("/api/v1/me", { credentials: "include" })
       .then(async (r) => {
+        // A non-ok /me response (401/403/5xx) means there is no valid
+        // authenticated session: clear local auth state and fall back
+        // to the login screen. No portal-specific request has been
+        // issued yet at this point, so there is nothing else to unwind.
         setAuthenticated(r.ok);
         if (r.ok) {
           try {
             const u = await r.json();
             setUserRole(u.role || "");
-            setPortal((u.portal === "platform" || u.portal === "organization") ? u.portal : "");
+            setUserEmail(u.email || "");
+            // portal is the ONLY authoritative shell selector. Anything
+            // other than the two known values fails closed to "" —
+            // never inferred from `role`.
+            const resolvedPortal = (u.portal === "platform" || u.portal === "organization") ? u.portal : "";
+            setPortal(resolvedPortal);
+            // Resolve the landing tab from the portal BEFORE authLoading
+            // flips false, so the first real paint already shows the
+            // correct shell — no flash of the wrong portal.
+            setCurrentTab(resolvedPortal === "platform" ? "platform-home" : "dashboard");
             initCSRF().catch(() => {});
-          } catch { setUserRole(""); setPortal(""); }
+          } catch { setUserRole(""); setUserEmail(""); setPortal(""); }
         }
         setAuthLoading(false);
       })
       .catch(() => { setAuthenticated(false); setAuthLoading(false); });
   }, []);
 
-  // Portal-derived shell gate. Platform items are visible ONLY when
-  // /me.portal === "platform"; anything else (organization, unknown,
-  // fail-closed empty) hides them.
-  const isPlatformRole = portal === "platform";
-  void userRole; // kept for downstream code paths; portal is the authoritative gate.
+  void userRole; // kept for display/debugging; portal is the sole authorization gate.
 
-  const filteredTabs = tabs.filter((t) => {
-    if (!isPlatformRole) {
-      // Customer users see only Customer Portal + Account sections.
-      // Platform admin tabs (Dashboard, Mailboxes admin, Organizations, Domains admin,
-      // Users, Firewall, Modules, Backups, Health, Settings) are hidden.
-      if (t.id === "dashboard") return true;
-      if (t.id === "enterprise") return false;
-      if (t.id === "mailboxes") return false;
-      if (t.id === "organizations") return false;
-      if (t.id === "domains") return false;
-      if (t.id === "users") return false;
-      if (t.id === "firewall") return false;
-      if (t.id === "modules") return false;
-      if (t.id === "audit") return false;
-      if (t.id === "backups") return false;
-      if (t.id === "health") return false;
-      if (t.id === "settings") return false;
-      // Keep Customer Portal + Account items
-      return true;
-    }
-    return true;
-  });
+  // Explicit allow-list per portal — see PLATFORM_TAB_IDS/ORGANIZATION_TAB_IDS
+  // above. An unknown/empty portal renders zero navigation items
+  // (fail-closed), never a mix of both shells.
+  const allowedTabIds: Tab[] =
+    portal === "platform" ? PLATFORM_TAB_IDS :
+    portal === "organization" ? ORGANIZATION_TAB_IDS :
+    [];
+  const filteredTabs = tabs.filter((t) => allowedTabIds.includes(t.id));
 
   const navigateTo = (route: string) => {
     const tabMap: Record<string, Tab> = {
@@ -168,8 +200,39 @@ export default function App() {
     }
   }
 
+  // Fail-closed: an authenticated identity whose /me response did not
+  // carry a recognized portal value gets NO business navigation and NO
+  // shell — neither Platform Administration nor Customer Portal. This
+  // must never fall back to inferring the shell from `role`.
+  if (portal === "") {
+    return (
+      <div className="h-screen bg-[#0C0E12] flex items-center justify-center">
+        <div className="text-center max-w-sm">
+          <h1 className="text-lg font-semibold text-[#E8EAF0] mb-2">Access Unavailable</h1>
+          <p className="text-sm text-[#8B92A8] mb-6">
+            This account could not be authorized for the admin console. Contact your administrator.
+          </p>
+          <button
+            onClick={() => { api.logout().catch(() => {}); setAuthenticated(false); }}
+            className="text-sm text-[#4F7CFF] hover:underline"
+          >
+            Return to login
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   const renderContent = () => {
+    // Defense-in-depth structural gate: even if currentTab somehow holds
+    // an id outside the current portal's allow-list (stale state, a
+    // future regression in the sidebar), never mount the other portal's
+    // component — fail back to that portal's own landing page instead.
+    if (!allowedTabIds.includes(currentTab)) {
+      return portal === "platform" ? <PlatformHome email={userEmail} onNavigate={setCurrentTab} /> : <Dashboard />;
+    }
     switch (currentTab) {
+      case "platform-home": return <PlatformHome email={userEmail} onNavigate={setCurrentTab} />;
       case "dashboard": return <Dashboard />;
       case "domains": return <Domains />;
       case "users": return <UsersPage />;
@@ -205,7 +268,7 @@ export default function App() {
       case "security": return <SecurityPage />;
       case "support": return <SupportPage />;
       case "preferences": return <PreferencesPage />;
-      default: return <Dashboard />;
+      default: return portal === "platform" ? <PlatformHome email={userEmail} onNavigate={setCurrentTab} /> : <Dashboard />;
     }
   };
 

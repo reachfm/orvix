@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { spawn, ChildProcess } from "child_process";
+import { spawn, execFileSync, ChildProcess } from "child_process";
 import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
@@ -8,6 +8,8 @@ import * as http from "http";
 
 const ADMIN_EMAIL = "admin@e2e-test.local";
 const ADMIN_PASSWORD = "E2eTestPass123!";
+const TENANT_ADMIN_EMAIL = "tenant-admin@portal-e2e-tenant.test";
+const TENANT_ADMIN_PASSWORD = "PortalE2eTenantAdmin123!";
 
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -62,7 +64,8 @@ test.beforeAll(async () => {
     throw new Error(`orvix binary not found at ${binaryPath}`);
   }
 
-  const dsn = path.join(tempDir, "orvix.db?_loc=auto&_busy_timeout=5000&_txlock=immediate");
+  const sqliteFile = path.join(tempDir, "orvix.db");
+  const dsn = sqliteFile + "?_loc=auto&_busy_timeout=5000&_txlock=immediate";
   const jwtKeyPath = path.join(tempDir, "jwt_key.pem");
 
   // Write a standalone YAML config so the project's orvix.yaml is never read
@@ -98,6 +101,21 @@ redis:
   serverProcess.stderr?.on("data", (d: Buffer) => process.stderr.write(`[orvix:err] ${d}`));
 
   await waitForHealth(`http://127.0.0.1:${adminPort}/api/v1/health`, 45000);
+
+  // Seed a genuine tenant_admin fixture for the Organization-portal test.
+  // There is currently no supported non-SQL production API to bootstrap
+  // the FIRST tenant_admin of a brand-new tenant (POST /api/v1/auth/signup
+  // always creates plain RoleUser — see seed-fixture/main.go's doc comment
+  // for the full rationale). This seeds directly into this test run's own
+  // disposable temp-file SQLite database, the same hermetic-fixture
+  // pattern internal/api/router_test.go and
+  // cmd/orvix/admin_recovery_test.go already use for their own ephemeral
+  // databases — never a live, production, or VPS database.
+  execFileSync(
+    "go",
+    ["run", "./seed-fixture", dsn, TENANT_ADMIN_EMAIL, TENANT_ADMIN_PASSWORD, "Portal E2E Tenant"],
+    { cwd: __dirname, stdio: "inherit" },
+  );
 });
 
 test.afterAll(async () => {
@@ -116,35 +134,20 @@ test.describe("Orvix admin portal E2E", () => {
   test.describe.configure({ timeout: 60000 });
 
   test("login and navigate dashboard and customer portal sections", async ({ browser, request }) => {
-    // PORTAL-SEPARATION-PHASE1: every assertion below (the Dashboard
-    // heading via GET /api/v1/enterprise/dashboard, and all 14 Customer
-    // Portal sections) targets a tenant-scoped resource gated by
-    // requireTenantContext. The env-var bootstrap identity (ADMIN_EMAIL)
-    // is canonically platform_super_admin with tenant_id=NULL — a
-    // platform principal that intentionally has no tenant context and is
-    // correctly denied every one of these endpoints post-separation. A
-    // dedicated platform-only dashboard is explicitly deferred to a
-    // later PR, so this tenant-portal smoke test authenticates as a
-    // freshly signed-up tenant owner (canonical RoleUser, real tenant_id)
-    // via the production POST /api/v1/auth/signup flow instead of the
-    // platform bootstrap admin. This exercises real production
-    // authentication for the resource scope actually under test; it does
-    // not weaken portal separation or restore any legacy role.
-    // A distinct email domain is required: the bootstrap flow
-    // (insertBootstrapAdmin) pre-creates a tenants row whose domain
-    // matches ADMIN_EMAIL's domain (e2e-test.local) even though the
-    // platform_super_admin itself is not bound to it, so reusing that
-    // domain here would collide with tenants.domain's UNIQUE constraint.
-    const tenantEmail = `portal-e2e-${Date.now()}@portal-e2e-tenant.local`;
-    const tenantPassword = "PortalE2ePass123!";
-    const signupRes = await request.post(`http://127.0.0.1:${adminPort}/api/v1/auth/signup`, {
-      data: { email: tenantEmail, password: tenantPassword, name: "Portal E2E Tenant" },
-    });
-    expect(signupRes.ok()).toBeTruthy();
-
-    // Login via API to get access token
+    // PORTAL-SEPARATION-PHASE1 / PLATFORM-SHELL: this exercises the
+    // Organization portal (portal="organization") as a genuine
+    // tenant_admin, seeded in beforeAll (see seed-fixture/main.go — there
+    // is currently no supported non-SQL production API to provision the
+    // first tenant_admin of a brand-new tenant). A PLAIN signed-up
+    // RoleUser (POST /api/v1/auth/signup) is intentionally NOT used here
+    // any more: /api/v1/me correctly returns portal="" for that role
+    // (handlers.go's Me handler has no case for RoleUser), and the
+    // frontend now correctly fails closed for portal="" instead of
+    // showing the Customer Portal shell to an unauthorized role — see
+    // the "signed-up plain user fails closed" test below for that
+    // contract.
     const loginRes = await request.post(`http://127.0.0.1:${adminPort}/api/v1/auth/login`, {
-      data: { email: tenantEmail, password: tenantPassword },
+      data: { email: TENANT_ADMIN_EMAIL, password: TENANT_ADMIN_PASSWORD },
     });
     expect(loginRes.ok()).toBeTruthy();
     const loginBody = await loginRes.json();
@@ -221,6 +224,102 @@ test.describe("Orvix admin portal E2E", () => {
 
     // Verify sidebar still shows "Orvix Admin" after all navigation
     await expect(page.getByText("Orvix Admin")).toBeVisible();
+  });
+
+  test("platform super admin gets the Platform Administration shell, never the Customer Portal", async ({ browser, request }) => {
+    // PLATFORM-SHELL: ADMIN_EMAIL is the env-var bootstrap identity and is
+    // canonically platform_super_admin with tenant_id=NULL (see the
+    // comment on the test above). Before this fix its /me.portal="platform"
+    // response was ignored by the frontend, which still rendered the
+    // Customer Portal shell and called the tenant-scoped dashboard
+    // endpoint — a NULL-tenant identity the backend correctly rejects,
+    // producing "Failed to load dashboard". This test proves the fixed
+    // contract end-to-end against the real server/build.
+    const loginRes = await request.post(`http://127.0.0.1:${adminPort}/api/v1/auth/login`, {
+      data: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD },
+    });
+    expect(loginRes.ok()).toBeTruthy();
+    const loginBody = await loginRes.json();
+    expect(loginBody.access_token).toBeTruthy();
+    const accessToken: string = loginBody.access_token;
+
+    const context = await browser.newContext({ bypassCSP: true });
+    const page = await context.newPage();
+
+    const requestedPaths: string[] = [];
+    await page.route("**/api/v1/**", async (route) => {
+      requestedPaths.push(new URL(route.request().url()).pathname);
+      const headers = {
+        ...route.request().headers(),
+        Authorization: `Bearer ${accessToken}`,
+      };
+      await route.continue({ headers });
+    });
+
+    await page.goto(`http://127.0.0.1:${adminPort}/admin`);
+    await page.waitForLoadState("networkidle");
+
+    // Platform Administration shell renders.
+    const mainContent = page.locator("main");
+    await expect(mainContent.locator("h2").filter({ hasText: "Platform Administration" })).toBeVisible();
+
+    // Customer Portal navigation must never appear for this identity.
+    await expect(page.locator("aside").getByText("Customer Portal")).toHaveCount(0);
+
+    // No "Failed to load dashboard" error anywhere on the landing page.
+    await expect(page.getByText("Failed to load dashboard")).toHaveCount(0);
+
+    // Zero requests to the tenant-owned dashboard/domain/mailbox endpoints
+    // during bootstrap and landing render.
+    for (const suffix of ["/enterprise/dashboard", "/enterprise/domains", "/enterprise/mailboxes", "/users"]) {
+      expect(requestedPaths.some((p) => p.endsWith(suffix))).toBe(false);
+    }
+
+    // Existing verified platform navigation (Organizations, Backups,
+    // Firewall, Modules, Health) is present and opens without error.
+    const backupsBtn = page.locator("aside button").filter({ hasText: /^\s*Backups\s*$/ });
+    await backupsBtn.first().click();
+    await page.waitForLoadState("networkidle");
+    await expect(page.getByText("Failed to load dashboard")).toHaveCount(0);
+
+    // Logout clears the shell.
+    await page.locator("aside button").filter({ hasText: /logout/i }).first().click();
+    await page.waitForLoadState("networkidle");
+    await expect(page.getByRole("heading", { name: "Sign In" })).toBeVisible();
+  });
+
+  test("a plain signed-up user (portal=\"\") fails closed to neither shell", async ({ browser, request }) => {
+    // Documents the real, current authorization contract: signup grants
+    // only RoleUser, which /api/v1/me maps to portal="" (no case in the
+    // Me handler's switch). The frontend must show neither the Platform
+    // Administration shell nor the Customer Portal — never infer a shell
+    // from role.
+    const email = `portal-e2e-plain-${Date.now()}@portal-e2e-plain.local`;
+    const password = "PortalE2ePlainPass123!";
+    const signupRes = await request.post(`http://127.0.0.1:${adminPort}/api/v1/auth/signup`, {
+      data: { email, password, name: "Portal E2E Plain User" },
+    });
+    expect(signupRes.ok()).toBeTruthy();
+
+    const loginRes = await request.post(`http://127.0.0.1:${adminPort}/api/v1/auth/login`, {
+      data: { email, password },
+    });
+    expect(loginRes.ok()).toBeTruthy();
+    const accessToken: string = (await loginRes.json()).access_token;
+
+    const context = await browser.newContext({ bypassCSP: true });
+    const page = await context.newPage();
+    await page.route("**/api/v1/**", async (route) => {
+      const headers = { ...route.request().headers(), Authorization: `Bearer ${accessToken}` };
+      await route.continue({ headers });
+    });
+
+    await page.goto(`http://127.0.0.1:${adminPort}/admin`);
+    await page.waitForLoadState("networkidle");
+
+    await expect(page.getByText("Access Unavailable")).toBeVisible();
+    await expect(page.getByText("Platform Administration")).toHaveCount(0);
+    await expect(page.getByText("Customer Portal")).toHaveCount(0);
   });
 
 });
