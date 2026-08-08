@@ -1,8 +1,10 @@
-# Break-Glass Recovery (Design Doc — not yet implemented)
+# Break-Glass Recovery
 
-This document describes the intended shape of a future root-only CLI for
-recovering a locked-out platform. It is **not** implemented in Phase 1.
-Anyone doing recovery today does it with `psql` under the ops runbook.
+`orvix admin recover` and `orvix admin reset-password` are **implemented**
+(see `cmd/orvix/admin_recovery.go`). Anyone doing recovery today MUST use
+these commands — raw SQL against the `users` table is not a supported
+recovery path, since it bypasses session revocation, `token_version`
+invalidation, and the audit trail these commands guarantee.
 
 ## Goals
 
@@ -11,36 +13,54 @@ Anyone doing recovery today does it with `psql` under the ops runbook.
 - Never accept a password on `argv` or in the environment.
 - Always emit an audit event and revoke existing sessions.
 
-## Proposed CLI
+## CLI
 
 ```
 orvix admin recover --email <email>
+orvix admin reset-password --email <email>
 ```
 
-Behaviour:
+`recover` behaviour:
 
-1. Refuses to run unless `EUID == 0` on Linux (or an equivalent local-root
-   check). No sudo bypass.
-2. Reads the config file used by the service, opens the same database
-   connection.
-3. Locates the user by email (case-insensitive).
-4. Prompts interactively for:
-   - New password (twice, hidden).
-   - MFA recovery / disable confirmation.
-   - Confirmation prompt with the exact email in ALL CAPS.
-5. Rewrites the row:
+1. Refuses to run unless the process is root (`EUID == 0`). Checked before
+   the database is ever opened.
+2. Opens the same config/database connection the running service uses
+   (`internal/config.Load` + `internal/config.NewDatabase`) — never a second
+   or alternate connection.
+3. Locates the user by case-insensitive email match. Zero or more-than-one
+   matches fail closed.
+4. Requires `active = true` and `deleted_at IS NULL`.
+5. Requires the source role to be an already-canonical `platform_super_admin`
+   (idempotent recovery) or `tenant_admin`, or a legacy role that
+   `auth.NormalizeRole` maps to one of those two (e.g. `superadmin`). All
+   other roles — including `tenant_operator`, `tenant_support`,
+   `tenant_readonly`, `user`, `billing`, an ambiguous bare `admin` with no
+   tenant context, or anything unknown/empty — are rejected before mutation.
+6. Prompts interactively for:
+   - Confirmation: the operator re-types the exact normalized email.
+   - New password (twice, hidden, TTY-only — never argv/env/config).
+7. In one transaction, rewrites the row:
    ```
    role = 'platform_super_admin'
    tenant_id = NULL
-   password_hash = <argon2id of new password>
+   password_hash = <the same Argon2id hash format auth.HashPassword produces>
    mfa_enabled = 0
    mfa_secret = ''
    token_version = token_version + 1
    ```
-6. Revokes every session for this user.
-7. Writes an audit row: `action='admin.recover', actor='local-root',
-   target=<email>, result='ok'`.
-8. Prints the new user id and role and exits.
+   (plus the newer pending-MFA columns, cleared the same way), revokes every
+   session for the user, and writes one `coremail_audit` row
+   (`action='admin.recover', actor='local-root', target=<email>,
+   result='success'`). Any failure at any step rolls back the whole
+   transaction — no partial mutation is ever committed.
+8. Prints only `OK: <email> recovered as platform_super_admin` — never the
+   password, its hash, a session token, or the database DSN.
+
+`reset-password` behaviour is the same shared contract, restricted to
+rotating the password (and bumping `token_version` / revoking sessions /
+writing an `admin.password_reset` audit row) of an EXISTING
+`platform_super_admin` or `tenant_admin` — it never changes `role` or
+`tenant_id`.
 
 ## Anti-goals
 

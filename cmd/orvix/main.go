@@ -95,6 +95,7 @@ Usage:
 Commands:
   serve              Start the Orvix runtime (default if no command is given).
   migrate            Migrate data between database backends. See ` + "`orvix migrate -h`" + `.
+  admin              Root-only administrator recovery. See ` + "`orvix admin -h`" + `.
   version [--full]   Print version metadata and exit. Does not touch config,
                      database, migrations, modules, or listeners.
   help, -h, --help   Print this help and exit. Same fast-path as version.
@@ -136,6 +137,10 @@ func main() {
 			// External, privileged restore coordinator invoked by
 			// orvix-restore.service. Never started by the API process.
 			os.Exit(restoreRunCommand(os.Args[2:]))
+		case "admin":
+			// Root-only operator recovery: `orvix admin reset-password`
+			// and `orvix admin recover`. See admin_recovery.go.
+			os.Exit(adminCommand(os.Args[2:]))
 		case "serve":
 			// fall through to normal startup
 			_ = 0
