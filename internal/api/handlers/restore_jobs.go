@@ -42,20 +42,24 @@ func (h *Handler) restoreCoordinator() *restorecoord.Coordinator {
 // (systemd path + service units) is installed, so the API fails closed rather
 // than accepting a restore that can never actually run.
 //
-// ORVIX_RESTORE_COORDINATOR_ASSUME_READY is a staging/test-only override that
-// skips the on-disk unit-file check. It is HONORED ONLY when the process is
-// NOT running under a production database dialect (see the gate in
-// probeOrvixHealth for the same pattern). Production installs ship the real
-// unit files, never set this env var, and are therefore gated by the actual
-// on-disk presence of orvix-restore.path.
+// ORVIX_RESTORE_COORDINATOR_ASSUME_READY is a staging/test-only override:
+//   - "1" forces the coordinator ready, skipping the on-disk unit-file check.
+//     Used by the disposable staging acceptance workflow to exercise the full
+//     restore lifecycle without manually creating unit symlinks.
+//   - "0" forces the coordinator missing, skipping the on-disk unit-file
+//     check. Used by hermetic fail-closed tests so the result does not depend
+//     on whether the host happens to have the real units installed.
+//   - unset/empty performs the real on-disk unit-file detection.
+//
+// Production installs ship the real unit files and never set this variable,
+// so they are always gated by the actual on-disk presence of
+// orvix-restore.path.
 func restoreCoordinatorInstalled() bool {
-	// Staging/test override: assume the coordinator is ready without
-	// checking for the on-disk systemd unit files. This allows the
-	// disposable staging acceptance workflow to exercise the full
-	// restore lifecycle without manually creating unit symlinks.
-	// Production deployments never set this variable.
-	if os.Getenv("ORVIX_RESTORE_COORDINATOR_ASSUME_READY") == "1" {
+	switch strings.TrimSpace(os.Getenv("ORVIX_RESTORE_COORDINATOR_ASSUME_READY")) {
+	case "1":
 		return true
+	case "0":
+		return false
 	}
 	for _, p := range []string{
 		"/etc/systemd/system/orvix-restore.path",

@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"io"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -25,7 +26,9 @@ func restoreTestHandler(t *testing.T) *Handler {
 // installed: without them the restart/health/rollback lifecycle cannot run, so
 // the API must not accept a job it can never complete.
 func TestPostRestore_FailsClosedWhenCoordinatorMissing(t *testing.T) {
-	t.Setenv("ORVIX_RESTORE_COORDINATOR_ASSUME_READY", "") // ensure no override
+	// Force "missing" hermetically so the result does not depend on whether
+	// this host happens to have the real orvix-restore.path unit installed.
+	t.Setenv("ORVIX_RESTORE_COORDINATOR_ASSUME_READY", "0")
 	h := restoreTestHandler(t)
 	app := fiber.New()
 	app.Post("/api/v1/admin/backups/:id/restore", h.PostRestoreBackup)
@@ -39,6 +42,43 @@ func TestPostRestore_FailsClosedWhenCoordinatorMissing(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != fiber.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503 (fail-closed)", resp.StatusCode)
+	}
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(bodyBytes)
+	if !strings.Contains(body, "restore coordinator is not installed") {
+		t.Fatalf("body must contain the stable coordinator-unavailable error token, got: %s", body)
+	}
+	for _, forbidden := range []string{"panic", "SQLSTATE", "SELECT", "dsn", "DSN", "goroutine", "runtime error"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("body must not contain %q (panic/SQL/secret/stack leak), got: %s", forbidden, body)
+		}
+	}
+}
+
+// restoreCoordinatorInstalled must honor the explicit override in both
+// directions, independent of whatever real systemd units happen to exist on
+// the host running the test.
+func TestRestoreCoordinatorInstalledOverride(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{"forced ready", "1", true},
+		{"forced missing", "0", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Not t.Parallel(): these mutate process-wide environment state
+			// via t.Setenv, which panics if run in parallel.
+			t.Setenv("ORVIX_RESTORE_COORDINATOR_ASSUME_READY", tc.value)
+			if got := restoreCoordinatorInstalled(); got != tc.want {
+				t.Fatalf("restoreCoordinatorInstalled() with override=%q = %v, want %v", tc.value, got, tc.want)
+			}
+		})
 	}
 }
 
