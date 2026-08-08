@@ -1696,21 +1696,37 @@ _orvix_db_true() {
     if [ "${ORVIX_DB_DRIVER:-sqlite}" = "postgres" ]; then printf 'true'; else printf '1'; fi
 }
 
+# PORTAL-SEPARATION-PHASE1: these predicates are the installer's "does
+# an admin-shaped row already exist?" test. They MUST recognize both
+# the canonical PSA role ('platform_super_admin', emitted by every
+# fresh bootstrap since the Phase-1 seedAdminUser rewrite) AND the
+# legacy strings ('admin','superadmin','super_admin') that older
+# installs still carry on disk until NormalizeAdminRoles runs.
+#
+# Including 'admin' in the WHERE clause does NOT restore any RBAC
+# authorization to legacy 'admin' rows — internal/auth/rbac.go carries
+# an empty permission list for RoleAdmin. These predicates are DB-shape
+# queries only; RBAC is unaffected. The role-string set is kept in
+# sync with cmd/orvix/main.go (bootstrap insert emits
+# platform_super_admin) and internal/models/models.go NormalizeAdminRoles
+# (converts legacy strings), and enforced by the Go static regression
+# TestInstallerAdminPredicatesRecognizeCanonicalRole in
+# cmd/orvix/installer_predicate_drift_test.go.
 active_admin_count() {
     local n
-    n="$(_orvix_db_scalar "SELECT COUNT(*) FROM users WHERE role IN ('admin','superadmin','super_admin') AND active = $(_orvix_db_true);")" || true
+    n="$(_orvix_db_scalar "SELECT COUNT(*) FROM users WHERE role IN ('admin','superadmin','super_admin','platform_super_admin') AND active = $(_orvix_db_true);")" || true
     if [ -n "$n" ]; then printf '%s' "$n"; else printf '0'; fi
 }
 
 first_active_admin_email() {
-    _orvix_db_scalar "SELECT email FROM users WHERE role IN ('admin','superadmin','super_admin') AND active = $(_orvix_db_true) ORDER BY id LIMIT 1;"
+    _orvix_db_scalar "SELECT email FROM users WHERE role IN ('admin','superadmin','super_admin','platform_super_admin') AND active = $(_orvix_db_true) ORDER BY id LIMIT 1;"
 }
 
 admin_user_exists() {
     local email="$1"
     local sql_email count
     sql_email="$(sqlite_escape "$email")"
-    count="$(_orvix_db_scalar "SELECT COUNT(*) FROM users WHERE email = '$sql_email' AND role IN ('admin','superadmin','super_admin') AND active = $(_orvix_db_true);")" || true
+    count="$(_orvix_db_scalar "SELECT COUNT(*) FROM users WHERE email = '$sql_email' AND role IN ('admin','superadmin','super_admin','platform_super_admin') AND active = $(_orvix_db_true);")" || true
     [ "$count" = "1" ]
 }
 
@@ -1785,9 +1801,13 @@ conn = sqlite3.connect(db_path)
 try:
     conn.execute("PRAGMA busy_timeout = 5000")
     cur = conn.cursor()
+    # PORTAL-SEPARATION-PHASE1: WHERE clause mirrors active_admin_count /
+    # admin_user_exists above; must include platform_super_admin so
+    # ORVIX_RESET_ADMIN_PASSWORD=1 rotates the canonical PSA row on
+    # every install, not only pre-normalization legacy rows.
     cur.execute(
         "UPDATE users SET password_hash = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') "
-        "WHERE email = ? AND role IN ('admin','superadmin','super_admin') AND active = 1",
+        "WHERE email = ? AND role IN ('admin','superadmin','super_admin','platform_super_admin') AND active = 1",
         (hash_value, email),
     )
     if cur.rowcount != 1:
@@ -2729,7 +2749,10 @@ verify_install() {
 		command -v sqlite3 >/dev/null 2>&1 || fail "sqlite3 is not installed"
 		[ -f /var/lib/orvix/orvix.db ] || fail "database does not exist at /var/lib/orvix/orvix.db"
 	fi
-	users_count="$(_orvix_db_scalar "SELECT COUNT(*) FROM users WHERE email = '$sql_email' AND role = 'admin' AND active = $(_orvix_db_true);" || true)"
+	# PORTAL-SEPARATION-PHASE1: canonical bootstrap emits
+	# platform_super_admin; legacy strings still valid pre-normalization.
+	# Kept in lockstep with active_admin_count / admin_user_exists.
+	users_count="$(_orvix_db_scalar "SELECT COUNT(*) FROM users WHERE email = '$sql_email' AND role IN ('admin','superadmin','super_admin','platform_super_admin') AND active = $(_orvix_db_true);" || true)"
 	[ "$users_count" = "1" ] || fail "bootstrapped admin user row was not created for $email"
 	mailbox_count="$(_orvix_db_scalar "SELECT COUNT(*) FROM coremail_mailboxes WHERE email = '$sql_email' AND is_admin = $(_orvix_db_true) AND status = 'active' AND deleted_at IS NULL;" || true)"
 	[ "$mailbox_count" = "1" ] || fail "bootstrapped admin mailbox row was not created for $email"

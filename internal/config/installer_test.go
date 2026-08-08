@@ -114,7 +114,7 @@ func TestInstallerTemplateRC1CleanPath(t *testing.T) {
 		"sqlite_escape()",
 		"bootstrapped admin user row was not created",
 		"bootstrapped admin mailbox row was not created",
-		"SELECT COUNT(*) FROM users WHERE email = '$sql_email' AND role = 'admin' AND active = $(",
+		"SELECT COUNT(*) FROM users WHERE email = '$sql_email' AND role IN ('admin','superadmin','super_admin','platform_super_admin') AND active = $(",
 		"SELECT COUNT(*) FROM coremail_mailboxes WHERE email = '$sql_email' AND is_admin = $(",
 		"status = 'active' AND deleted_at IS NULL;",
 		"bootstrap.env preserved for diagnosis: $BOOTSTRAP_ENV",

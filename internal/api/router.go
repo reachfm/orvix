@@ -1120,20 +1120,51 @@ func (r *Router) setupRoutes() {
 	// no-ops on GET/HEAD/OPTIONS and on API-key-authenticated requests,
 	// so this adds no burden to the read-only routes or to the
 	// provisioning API below.
-	admin := protected.Group("", auth.RequireAnyRole(auth.RoleAdmin, auth.RoleSuperAdmin, auth.RolePlatformSuperAdmin), r.csrf.Middleware())
-	admin.Get("/domains", r.h.ListDomains)
-	admin.Get("/users", r.h.ListUsers)
-	admin.Get("/mailboxes", r.h.ListMailboxes)
+	// PORTAL-SEPARATION-PHASE1: the deprecated auth.RoleAdmin was removed from
+	// this gate. Legacy "admin" rows are remapped to either RolePlatformSuperAdmin
+	// or RoleTenantAdmin at startup by normalizeAdminRoles (internal/models),
+	// so no legitimate account is affected. The RoleAdmin permission map has
+	// also been removed from internal/auth/rbac so any un-normalized "admin"
+	// row can neither pass this gate nor satisfy any per-route authrbac.Require.
+	// Tenant admins keep console access via RoleTenantAdmin; strictly platform-
+	// only routes below (backups, firewall, modules, license, monitoring, etc.)
+	// remain reachable only to platform super admins because their per-handler
+	// permission checks fail for tenant roles that lack those permissions.
+	// ── Per-route middleware stacks ────────────────────────────
+	// Fiber v3 Group("") with empty prefix merges middleware across
+	// groups registered on the same parent. To avoid cross-contamination
+	// we apply middleware per-route via MW slice indices instead of
+	// Group("") groups. The index approach must NOT drift — each group
+	// has exactly N middleware elements; the route registration pattern
+	// lists all N followed by the handler.
+	//
+	// platformMW: 2 elements — RequireAnyRole(PSA, SuperAdmin), CSRF.
+	platformMW := []fiber.Handler{
+		auth.RequireAnyRole(auth.RolePlatformSuperAdmin, auth.RoleSuperAdmin),
+		r.csrf.Middleware(),
+	}
+	// tenantCompatMW: 3 elements — RequireAnyRole(full tenant family),
+	// requireTenantContext, CSRF.
+	// Admits the canonical tenant-role family so route-level RBAC
+	// permissions (not the role gate) decide read vs write access.
+	tenantCompatMW := []fiber.Handler{
+		auth.RequireAnyRole(auth.RoleTenantAdmin, auth.RoleTenantOperator, auth.RoleTenantSupport, auth.RoleTenantReadOnly),
+		requireTenantContext,
+		r.csrf.Middleware(),
+	}
+	protected.Get("/domains", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListDomains)
+	protected.Get("/users", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListUsers)
+	protected.Get("/mailboxes", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListMailboxes)
 	// CSV exports (admin-only, GET — no CSRF required). Registered before
 	// the parameterized :id / :name routes so the literal /export segment
 	// wins over /mailboxes/:id and /domains/:name.
-	admin.Get("/mailboxes/export", r.h.ExportMailboxesCSV)
-	admin.Get("/domains/export", r.h.ExportDomainsCSV)
-	admin.Get("/domains/:name/audit", r.h.GetDomainAudit)
-	admin.Get("/domains/:name", r.h.GetDomain)
-	admin.Get("/mailboxes/:id/audit", r.h.GetMailboxAudit)
-	admin.Get("/mailboxes/:id", r.h.GetMailbox)
-	admin.Get("/queue", r.h.ListQueue)
+	protected.Get("/mailboxes/export", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ExportMailboxesCSV)
+	protected.Get("/domains/export", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ExportDomainsCSV)
+	protected.Get("/domains/:name/audit", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.GetDomainAudit)
+	protected.Get("/domains/:name", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.GetDomain)
+	protected.Get("/mailboxes/:id/audit", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.GetMailboxAudit)
+	protected.Get("/mailboxes/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.GetMailbox)
+	protected.Get("/queue", platformMW[0], platformMW[1], r.h.ListQueue)
 	// Admin Queue Operations (QUEUE-OPERATIONS-2E): summary,
 	// single-entry detail, and safe retry/delete (already wired
 	// in the CSRF-protected men group below). All admin-only.
@@ -1141,235 +1172,234 @@ func (r *Router) setupRoutes() {
 	// admin-read endpoints from legacy /queue paths (list, retry,
 	// delete) which are mounted without the segment for backward
 	// compatibility.
-	admin.Get("/admin/queue/summary", r.h.AdminQueueSummary)
-	admin.Get("/admin/queue/messages", r.h.AdminQueueList)
-	admin.Get("/admin/queue/messages/:id", r.h.AdminQueueDetail)
-	admin.Get("/admin/queue/:id", r.h.GetAdminQueueEntry)
-	admin.Get("/admin/backups", r.h.ListBackups)
-	admin.Get("/admin/backups/schedule", r.h.GetBackupSchedule)
-	admin.Get("/admin/backups/metrics", r.h.GetBackupMetrics)
-	admin.Get("/admin/backups/health", r.h.GetBackupHealth)
+	protected.Get("/admin/queue/summary", platformMW[0], platformMW[1], r.h.AdminQueueSummary)
+	protected.Get("/admin/queue/messages", platformMW[0], platformMW[1], r.h.AdminQueueList)
+	protected.Get("/admin/queue/messages/:id", platformMW[0], platformMW[1], r.h.AdminQueueDetail)
+	protected.Get("/admin/queue/:id", platformMW[0], platformMW[1], r.h.GetAdminQueueEntry)
+	protected.Get("/admin/backups", platformMW[0], platformMW[1], r.h.ListBackups)
+	protected.Get("/admin/backups/schedule", platformMW[0], platformMW[1], r.h.GetBackupSchedule)
+	protected.Get("/admin/backups/metrics", platformMW[0], platformMW[1], r.h.GetBackupMetrics)
+	protected.Get("/admin/backups/health", platformMW[0], platformMW[1], r.h.GetBackupHealth)
 	// Durable restore-job status (async restore lifecycle). Placed before the
 	// /admin/backups/:id catch-all so "restore-jobs" is never treated as an id.
-	admin.Get("/admin/backups/restore-jobs/:job_id", r.h.GetRestoreJobStatus)
-	admin.Get("/admin/backups/:id/download", r.h.DownloadBackup)
-	admin.Get("/admin/backups/:id", r.h.GetBackup)
+	protected.Get("/admin/backups/restore-jobs/:job_id", platformMW[0], platformMW[1], r.h.GetRestoreJobStatus)
+	protected.Get("/admin/backups/:id/download", platformMW[0], platformMW[1], r.h.DownloadBackup)
+	protected.Get("/admin/backups/:id", platformMW[0], platformMW[1], r.h.GetBackup)
 	// Legacy /backups routes — return 410 Gone so the frontend
 	// can safely discover the new path without accidentally
 	// performing destructive operations on the old one.
-	admin.Get("/backups", r.h.LegacyGone)
-	admin.Get("/backups/schedule", r.h.LegacyGone)
-	admin.Get("/backups/metrics", r.h.LegacyGone)
-	admin.Get("/backups/health", r.h.LegacyGone)
-	admin.Get("/backups/:id/download", r.h.LegacyGone)
-	admin.Get("/firewall/rules", r.h.ListFirewallRules)
-	admin.Get("/firewall/logs", r.h.ListFirewallLogs)
-	admin.Get("/modules", r.h.ListModules)
-	admin.Get("/license", r.h.GetLicense)
-	admin.Get("/audit/logs", r.h.ListAuditLogs)
+	protected.Get("/backups", platformMW[0], platformMW[1], r.h.LegacyGone)
+	protected.Get("/backups/schedule", platformMW[0], platformMW[1], r.h.LegacyGone)
+	protected.Get("/backups/metrics", platformMW[0], platformMW[1], r.h.LegacyGone)
+	protected.Get("/backups/health", platformMW[0], platformMW[1], r.h.LegacyGone)
+	protected.Get("/backups/:id/download", platformMW[0], platformMW[1], r.h.LegacyGone)
+	protected.Get("/firewall/rules", platformMW[0], platformMW[1], r.h.ListFirewallRules)
+	protected.Get("/firewall/logs", platformMW[0], platformMW[1], r.h.ListFirewallLogs)
+	protected.Get("/modules", platformMW[0], platformMW[1], r.h.ListModules)
+	protected.Get("/license", platformMW[0], platformMW[1], r.h.GetLicense)
+	protected.Get("/audit/logs", platformMW[0], platformMW[1], r.h.ListAuditLogs)
 	// Admin Enterprise v2 — RBAC + account classes + groups +
 	// lists + public folders + quarantine + ACL + log rules.
-	admin.Get("/admin/account-classes", r.h.ListAccountClasses)
-	admin.Get("/admin/domain-groups", r.h.ListDomainGroups)
-	admin.Get("/admin/mailing-lists", r.h.ListMailingLists)
-	admin.Get("/admin/public-folders", r.h.ListPublicFolders)
-	admin.Get("/admin/admin-groups", r.h.ListAdminGroups)
-	admin.Get("/admin/quarantine", r.h.ListQuarantine)
-	admin.Get("/admin/audit-logs", r.h.ListAdminAuditLogs)
-	admin.Get("/admin/acl-rules", r.h.ListACLRules)
-	admin.Get("/admin/login-protection/status", r.h.LoginProtectionStatus)
-	admin.Get("/admin/login-protection/lockouts", r.h.ListLockouts)
-	admin.Get("/admin/admin-users", r.h.ListAdminUsers)
-	admin.Get("/admin/admin-users/:id", r.h.GetAdminUser)
-	admin.Get("/admin/log-rules", r.h.ListLogRules)
+	protected.Get("/admin/account-classes", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListAccountClasses)
+	protected.Get("/admin/domain-groups", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListDomainGroups)
+	protected.Get("/admin/mailing-lists", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListMailingLists)
+	protected.Get("/admin/public-folders", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListPublicFolders)
+	protected.Get("/admin/admin-groups", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListAdminGroups)
+	protected.Get("/admin/quarantine", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListQuarantine)
+	protected.Get("/admin/audit-logs", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListAdminAuditLogs)
+	protected.Get("/admin/acl-rules", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListACLRules)
+	protected.Get("/admin/login-protection/status", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.LoginProtectionStatus)
+	protected.Get("/admin/login-protection/lockouts", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListLockouts)
+	protected.Get("/admin/admin-users", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListAdminUsers)
+	protected.Get("/admin/admin-users/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.GetAdminUser)
+	protected.Get("/admin/log-rules", platformMW[0], platformMW[1], r.h.ListLogRules)
 	// Enterprise v3 — SSL, acceptance rules, incoming message
 	// rules, FTP backup targets, file system browser,
 	// migration sources, clustering, antivirus, settings
 	// protocol splits.
-	admin.Get("/admin/ssl/certificates", r.h.AdminSslListCertificates)
-	admin.Get("/admin/ssl/certificates/reload", r.h.AdminSslReloadCertificates)
-	admin.Get("/admin/ssl/expiry-warnings", r.h.AdminSslExpiryWarnings)
-	admin.Get("/admin/ssl/acme/status", r.h.AdminSslAcmeStatus)
-	admin.Get("/admin/acceptance-rules", r.h.ListAcceptanceRules)
-	admin.Get("/admin/incoming-msg-rules", r.h.ListIncomingMsgRules)
-	admin.Get("/admin/migration-sources", r.h.ListMigrationSources)
-	admin.Get("/admin/backup-targets", r.h.ListBackupTargets)
-	admin.Get("/admin/backup-targets/:id/test", r.h.TestBackupTarget)
-	admin.Get("/admin/migration-sources/:id/test", r.h.TestMigrationSource)
-	admin.Get("/admin/fs/browse", r.h.AdminFsBrowse)
-	admin.Get("/admin/fs/read", r.h.AdminFsRead)
-	admin.Get("/admin/cluster/status", r.h.AdminClusteringStatus)
-	admin.Get("/admin/security/antivirus", r.h.AdminAntivirusStatus)
+	protected.Get("/admin/ssl/certificates", platformMW[0], platformMW[1], r.h.AdminSslListCertificates)
+	protected.Get("/admin/ssl/certificates/reload", platformMW[0], platformMW[1], r.h.AdminSslReloadCertificates)
+	protected.Get("/admin/ssl/expiry-warnings", platformMW[0], platformMW[1], r.h.AdminSslExpiryWarnings)
+	protected.Get("/admin/ssl/acme/status", platformMW[0], platformMW[1], r.h.AdminSslAcmeStatus)
+	protected.Get("/admin/acceptance-rules", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListAcceptanceRules)
+	protected.Get("/admin/incoming-msg-rules", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListIncomingMsgRules)
+	protected.Get("/admin/migration-sources", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListMigrationSources)
+	protected.Get("/admin/backup-targets", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListBackupTargets)
+	protected.Get("/admin/backup-targets/:id/test", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.TestBackupTarget)
+	protected.Get("/admin/migration-sources/:id/test", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.TestMigrationSource)
+	protected.Get("/admin/fs/browse", platformMW[0], platformMW[1], r.h.AdminFsBrowse)
+	protected.Get("/admin/fs/read", platformMW[0], platformMW[1], r.h.AdminFsRead)
+	protected.Get("/admin/cluster/status", platformMW[0], platformMW[1], r.h.AdminClusteringStatus)
+	protected.Get("/admin/security/antivirus", platformMW[0], platformMW[1], r.h.AdminAntivirusStatus)
 	// Per-protocol settings sub-pages. The :protocol path
 	// parameter is one of the IDs in the protocolDefs map.
-	admin.Get("/admin/settings/protocol/:protocol", r.h.ListProtocolSettings)
-	admin.Get("/admin/mailing-lists/:id/members", r.h.ListMailingListMembers)
-	admin.Get("/admin/admin-groups/:id/members", r.h.ListAdminGroupMembers)
-	admin.Get("/feature-flags", r.h.ListFeatureFlags)
-	admin.Get("/api-keys", r.h.ListAPIKeys)
-	admin.Get("/admin/summary", r.h.AdminSummary)
+	protected.Get("/admin/settings/protocol/:protocol", platformMW[0], platformMW[1], r.h.ListProtocolSettings)
+	protected.Get("/admin/mailing-lists/:id/members", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListMailingListMembers)
+	protected.Get("/admin/admin-groups/:id/members", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListAdminGroupMembers)
+	protected.Get("/feature-flags", platformMW[0], platformMW[1], r.h.ListFeatureFlags)
+	protected.Get("/api-keys", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListAPIKeys)
+	protected.Get("/admin/summary", platformMW[0], platformMW[1], r.h.AdminSummary)
 	// Admin Runtime Telemetry (ADMIN-RUNTIME-TELEMETRY-2B):
 	// read-only, admin-protected. No CSRF required (GET).
-	admin.Get("/admin/runtime", r.h.GetAdminRuntime)
+	protected.Get("/admin/runtime", platformMW[0], platformMW[1], r.h.GetAdminRuntime)
 	// Monitoring v1: read-only health + alert endpoints (admin role).
-	admin.Get("/monitoring/health", r.h.GetMonitoringHealth)
-	admin.Get("/monitoring/alerts", r.h.GetMonitoringAlerts)
-	admin.Get("/monitoring/capacity", r.h.GetMonitoringCapacity)
-	admin.Get("/monitoring/snapshot", r.h.GetMonitoringSnapshot)
-	admin.Get("/monitoring/alert-providers", r.h.GetMonitoringProviders)
+	protected.Get("/monitoring/health", platformMW[0], platformMW[1], r.h.GetMonitoringHealth)
+	protected.Get("/monitoring/alerts", platformMW[0], platformMW[1], r.h.GetMonitoringAlerts)
+	protected.Get("/monitoring/capacity", platformMW[0], platformMW[1], r.h.GetMonitoringCapacity)
+	protected.Get("/monitoring/snapshot", platformMW[0], platformMW[1], r.h.GetMonitoringSnapshot)
+	protected.Get("/monitoring/alert-providers", platformMW[0], platformMW[1], r.h.GetMonitoringProviders)
 	if r.cfg.Metrics.Enabled {
 		// Metrics contain operational state and are never exposed on a public
 		// unauthenticated route. Operators scrape this admin-authenticated path
 		// through a trusted collector or the loopback API.
-		admin.Get("/metrics", metrics.Handler())
+		protected.Get("/metrics", platformMW[0], platformMW[1], metrics.Handler())
 	}
 	// Admin alert-delivery audit (ORVIX-ADMIN-ENTERPRISE-PARITY):
 	// read-only, reuses monitoring.Dispatcher.ListDeliveries so the
 	// secret-free contract stays aligned with the rest of the alert
 	// pipeline.
-	admin.Get("/monitoring/alert-deliveries", r.h.ListAlertDeliveries)
+	protected.Get("/monitoring/alert-deliveries", platformMW[0], platformMW[1], r.h.ListAlertDeliveries)
 	// Admin storage topology (ORVIX-ADMIN-ENTERPRISE-PARITY-G):
 	// real on-disk usage for mail/attachments/backups. No replica or
 	// shard controls; see docs/ORVIX_ENTERPRISE_PARITY_AUDIT.md.
-	admin.Get("/admin/storage/volumes", r.h.ListStorageVolumes)
+	protected.Get("/admin/storage/volumes", platformMW[0], platformMW[1], r.h.ListStorageVolumes)
 	// Tenants read (ORVIX-ADMIN-ENTERPRISE-PARITY-D): surface the
 	// JWT-tenant row read-only so the admin "Branding" page knows
 	// what to render. Branding writes are CSRF-protected below.
-	admin.Get("/admin/tenants/current", r.h.GetAdminTenant)
+	protected.Get("/admin/tenants/current", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.GetAdminTenant)
 
 	// Auto-Heal
-	admin.Get("/heal/history", r.h.ListHealHistory)
-	admin.Post("/heal/check/:name", r.h.RunHealCheck)
+	protected.Get("/heal/history", platformMW[0], platformMW[1], r.h.ListHealHistory)
+	protected.Post("/heal/check/:name", platformMW[0], platformMW[1], r.h.RunHealCheck)
 
 	// Guardian
-	admin.Post("/guardian/analyze", r.h.AnalyzeEmail)
-	admin.Get("/guardian/logs", r.h.ListGuardianLogs)
+	protected.Post("/guardian/analyze", platformMW[0], platformMW[1], r.h.AnalyzeEmail)
+	protected.Get("/guardian/logs", platformMW[0], platformMW[1], r.h.ListGuardianLogs)
 
 	// Smart Compose AI
-	admin.Post("/compose/complete", r.h.ComposeComplete)
-	admin.Post("/compose/stream", r.h.ComposeStream)
+	protected.Post("/compose/complete", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ComposeComplete)
+	protected.Post("/compose/stream", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ComposeStream)
 
 	// DNS Automation — legacy endpoints (kept for backward compat
 	// with the pre-DNS-DKIM-OPERATIONS-2F UI). They now delegate
 	// to the new dnsops service when wired; they return 503 when
 	// the service is not available so the dashboard never sees a
 	// "pending" placeholder.
-	admin.Post("/dns/check/:domain", r.h.DNSCheck)
-	admin.Post("/dns/wizard/:domain", r.h.DNSWizard)
+	protected.Post("/dns/check/:domain", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.DNSCheck)
+	protected.Post("/dns/wizard/:domain", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.DNSWizard)
 
 	// Admin Settings (ENTERPRISE-SETTINGS-2H): read-only GET, write is CSRF-protected
-	admin.Get("/admin/mfa/status", r.h.MFAStatusGet)
-	admin.Get("/admin/settings", r.h.AdminSettingsGet)
+	protected.Get("/admin/mfa/status", platformMW[0], platformMW[1], r.h.MFAStatusGet)
+	protected.Get("/admin/settings", platformMW[0], platformMW[1], r.h.AdminSettingsGet)
 
 	// DNS Operations (DNS-DKIM-OPERATIONS-2F): real DNS / DKIM
 	// operations for the admin UI. All admin-only, all read-only
 	// except for DKIM keygen (CSRF-protected below in `men`)
 	// and provider apply (also CSRF-protected).
-	admin.Get("/admin/dns/providers", r.h.GetAdminDNSProviders)
-	admin.Get("/admin/dns/:domain/plan", r.h.GetAdminDNSPlan)
-	admin.Post("/admin/dns/:domain/verify", r.h.PostAdminDNSVerify)
-	admin.Get("/admin/dns/:domain/wizard", r.h.GetAdminDNSWizard)
-	admin.Post("/admin/dns/:domain/provider/plan", r.h.PostAdminDNSProviderPlan)
+	protected.Get("/admin/dns/providers", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.GetAdminDNSProviders)
+	protected.Get("/admin/dns/:domain/plan", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.GetAdminDNSPlan)
+	protected.Post("/admin/dns/:domain/verify", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.PostAdminDNSVerify)
+	protected.Get("/admin/dns/:domain/wizard", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.GetAdminDNSWizard)
+	protected.Post("/admin/dns/:domain/provider/plan", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.PostAdminDNSProviderPlan)
 
 	// Migration
-	admin.Post("/migration/test", r.h.MigrationTest)
-	admin.Post("/migration/start", r.h.MigrationStart)
-	admin.Get("/migration/jobs", r.h.ListMigrationJobs)
+	protected.Post("/migration/test", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.MigrationTest)
+	protected.Post("/migration/start", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.MigrationStart)
+	protected.Get("/migration/jobs", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListMigrationJobs)
 
 	// Webmail Management
-	admin.Get("/webmail/accounts", r.h.ListWebmailAccounts)
-	admin.Get("/webmail/sessions", r.h.ListWebmailSessions)
-	admin.Get("/webmail/activity/:mailboxId", r.h.GetWebmailLoginActivity)
-	admin.Get("/webmail/storage/:mailboxId", r.h.GetWebmailStorageMetrics)
+	protected.Get("/webmail/accounts", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListWebmailAccounts)
+	protected.Get("/webmail/sessions", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListWebmailSessions)
+	protected.Get("/webmail/activity/:mailboxId", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.GetWebmailLoginActivity)
+	protected.Get("/webmail/storage/:mailboxId", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.GetWebmailStorageMetrics)
 
 	// Provision API
-	admin.Post("/provision/domain", r.h.ProvisionDomain)
+	protected.Post("/provision/domain", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ProvisionDomain)
 
 	// Calendar
-	admin.Get("/calendar/events", r.h.ListEvents)
-	admin.Post("/calendar/events", r.h.CreateEvent)
-	admin.Put("/calendar/events/:id", r.h.UpdateEvent)
-	admin.Delete("/calendar/events/:id", r.h.DeleteEvent)
+	protected.Get("/calendar/events", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListEvents)
+	protected.Post("/calendar/events", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.CreateEvent)
+	protected.Put("/calendar/events/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.UpdateEvent)
+	protected.Delete("/calendar/events/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.DeleteEvent)
 
 	// Contacts
-	admin.Get("/contacts", r.h.ListContacts)
-	admin.Post("/contacts", r.h.CreateContact)
-	admin.Put("/contacts/:id", r.h.UpdateContact)
-	admin.Delete("/contacts/:id", r.h.DeleteContact)
+	protected.Get("/contacts", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListContacts)
+	protected.Post("/contacts", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.CreateContact)
+	protected.Put("/contacts/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.UpdateContact)
+	protected.Delete("/contacts/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.DeleteContact)
 
 	// Tasks
-	admin.Get("/tasks", r.h.ListTasks)
-	admin.Post("/tasks", r.h.CreateTask)
-	admin.Put("/tasks/:id", r.h.UpdateTask)
-	admin.Patch("/tasks/:id/complete", r.h.CompleteTask)
-	admin.Delete("/tasks/:id", r.h.DeleteTask)
+	protected.Get("/tasks", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListTasks)
+	protected.Post("/tasks", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.CreateTask)
+	protected.Put("/tasks/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.UpdateTask)
+	protected.Patch("/tasks/:id/complete", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.CompleteTask)
+	protected.Delete("/tasks/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.DeleteTask)
 
 	// Auto-Update (legacy /updates/* routes — kept for backward compat)
-	admin.Get("/updates/check", r.h.CheckUpdates)
-	admin.Get("/updates/changelog", r.h.GetChangelog)
-	admin.Post("/updates/apply/:module", r.h.ApplyUpdate)
+	protected.Get("/updates/check", platformMW[0], platformMW[1], r.h.CheckUpdates)
+	protected.Get("/updates/changelog", platformMW[0], platformMW[1], r.h.GetChangelog)
+	protected.Post("/updates/apply/:module", platformMW[0], platformMW[1], r.h.ApplyUpdate)
 
 	// Update Management v1: read-only endpoints (admin role).
-	admin.Get("/update/status", r.h.GetUpdateStatus)
-	admin.Get("/update/history", r.h.GetUpdateHistory)
-	admin.Get("/update/preflight", r.h.GetUpdatePreflight)
-	admin.Get("/update/check", r.h.GetUpdateCheck)
+	protected.Get("/update/status", platformMW[0], platformMW[1], r.h.GetUpdateStatus)
+	protected.Get("/update/history", platformMW[0], platformMW[1], r.h.GetUpdateHistory)
+	protected.Get("/update/preflight", platformMW[0], platformMW[1], r.h.GetUpdatePreflight)
+	protected.Get("/update/check", platformMW[0], platformMW[1], r.h.GetUpdateCheck)
 
 	// Email Intelligence
-	admin.Get("/intelligence/stats", r.h.GetEmailStats)
-	admin.Get("/intelligence/delivery", r.h.GetDeliveryReports)
+	protected.Get("/intelligence/stats", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.GetEmailStats)
+	protected.Get("/intelligence/delivery", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.GetDeliveryReports)
 
 	// Compliance & Legal Hold
-	admin.Get("/compliance/legal-holds", r.h.ListLegalHolds)
-	admin.Post("/compliance/legal-holds", r.h.CreateLegalHold)
-	admin.Put("/compliance/legal-holds/:id", r.h.UpdateLegalHold)
-	admin.Get("/compliance/policies", r.h.ListRetentionPolicies)
-	admin.Post("/compliance/policies", r.h.CreateRetentionPolicy)
+	protected.Get("/compliance/legal-holds", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListLegalHolds)
+	protected.Post("/compliance/legal-holds", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.CreateLegalHold)
+	protected.Put("/compliance/legal-holds/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.UpdateLegalHold)
+	protected.Get("/compliance/policies", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListRetentionPolicies)
+	protected.Post("/compliance/policies", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.CreateRetentionPolicy)
 
 	// Collaboration
-	admin.Get("/collaboration/mailboxes", r.h.ListSharedMailboxes)
-	admin.Post("/collaboration/mailboxes", r.h.CreateSharedMailbox)
+	protected.Get("/collaboration/mailboxes", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListSharedMailboxes)
+	protected.Post("/collaboration/mailboxes", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.CreateSharedMailbox)
 
 	// men no longer adds its own CSRF middleware — admin (above) now
 	// enforces it for the whole group. Kept as a separate alias so the
 	// diff for existing routes below stays minimal.
-	men := admin
-	men.Post("/domains", r.h.CreateDomain)
-	men.Patch("/domains/:name", r.h.PatchDomain)
-	men.Patch("/domains/:name/status", r.h.UpdateDomainStatus)
-	men.Delete("/domains/:name", r.h.DeleteDomain)
-	men.Post("/users", r.h.CreateUser)
-	men.Post("/mailboxes", r.h.CreateMailbox)
-	men.Patch("/mailboxes/:id/password", r.h.UpdateMailboxPassword)
-	men.Patch("/mailboxes/:id/status", r.h.UpdateMailboxStatus)
-	men.Patch("/mailboxes/:id/quota", r.h.UpdateMailboxQuota)
-	men.Patch("/mailboxes/:id/protocols", r.h.UpdateMailboxProtocols)
+	protected.Post("/domains", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.CreateDomain)
+	protected.Patch("/domains/:name", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.PatchDomain)
+	protected.Patch("/domains/:name/status", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.UpdateDomainStatus)
+	protected.Delete("/domains/:name", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.DeleteDomain)
+	protected.Post("/users", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.CreateUser)
+	protected.Post("/mailboxes", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.CreateMailbox)
+	protected.Patch("/mailboxes/:id/password", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.UpdateMailboxPassword)
+	protected.Patch("/mailboxes/:id/status", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.UpdateMailboxStatus)
+	protected.Patch("/mailboxes/:id/quota", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.UpdateMailboxQuota)
+	protected.Patch("/mailboxes/:id/protocols", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.UpdateMailboxProtocols)
 	// Bulk status operations (CSRF-protected).
-	men.Post("/mailboxes/bulk/status", r.h.BulkMailboxStatus)
-	men.Post("/mailboxes/import", r.h.ImportMailboxesCSV)
-	men.Post("/mailboxes/import/dry-run", r.h.ImportMailboxesDryRun)
-	men.Post("/domains/bulk/status", r.h.BulkDomainStatus)
-	men.Delete("/mailboxes/:id", r.h.DeleteMailbox)
-	men.Delete("/users/:id", r.h.DeleteUser)
-	men.Delete("/queue/:id", r.h.DeleteQueue)
-	men.Post("/queue/:id/retry", r.h.RetryQueue)
-	men.Post("/admin/queue/messages/:id/retry", r.h.AdminQueueRetryNow)
-	men.Post("/admin/queue/messages/:id/bounce", r.h.AdminQueueBounce)
-	men.Post("/admin/queue/messages/:id/cancel", r.h.AdminQueueCancel)
-	men.Post("/admin/backups", r.h.CreateBackup)
-	men.Post("/admin/backups/now", r.h.PostBackupNow)
-	men.Post("/admin/backups/schedule", r.h.SetBackupSchedule)
-	men.Post("/admin/backups/retention", r.h.RunBackupRetention)
-	men.Post("/admin/backups/:id/validate", r.h.PostValidateBackup)
-	men.Post("/admin/backups/:id/restore", r.h.PostRestoreBackup)
-	men.Delete("/admin/backups/:id", r.h.DeleteBackup)
+	protected.Post("/mailboxes/bulk/status", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.BulkMailboxStatus)
+	protected.Post("/mailboxes/import", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ImportMailboxesCSV)
+	protected.Post("/mailboxes/import/dry-run", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ImportMailboxesDryRun)
+	protected.Post("/domains/bulk/status", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.BulkDomainStatus)
+	protected.Delete("/mailboxes/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.DeleteMailbox)
+	protected.Delete("/users/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.DeleteUser)
+	protected.Delete("/queue/:id", platformMW[0], platformMW[1], r.h.DeleteQueue)
+	protected.Post("/queue/:id/retry", platformMW[0], platformMW[1], r.h.RetryQueue)
+	protected.Post("/admin/queue/messages/:id/retry", platformMW[0], platformMW[1], r.h.AdminQueueRetryNow)
+	protected.Post("/admin/queue/messages/:id/bounce", platformMW[0], platformMW[1], r.h.AdminQueueBounce)
+	protected.Post("/admin/queue/messages/:id/cancel", platformMW[0], platformMW[1], r.h.AdminQueueCancel)
+	protected.Post("/admin/backups", platformMW[0], platformMW[1], r.h.CreateBackup)
+	protected.Post("/admin/backups/now", platformMW[0], platformMW[1], r.h.PostBackupNow)
+	protected.Post("/admin/backups/schedule", platformMW[0], platformMW[1], r.h.SetBackupSchedule)
+	protected.Post("/admin/backups/retention", platformMW[0], platformMW[1], r.h.RunBackupRetention)
+	protected.Post("/admin/backups/:id/validate", platformMW[0], platformMW[1], r.h.PostValidateBackup)
+	protected.Post("/admin/backups/:id/restore", platformMW[0], platformMW[1], r.h.PostRestoreBackup)
+	protected.Delete("/admin/backups/:id", platformMW[0], platformMW[1], r.h.DeleteBackup)
 	// Legacy write routes return 410 Gone.
-	men.Post("/backups", r.h.LegacyGone)
-	men.Post("/backups/schedule", r.h.LegacyGone)
-	men.Post("/backups/retention", r.h.LegacyGone)
-	men.Delete("/backups/:id", r.h.LegacyGone)
+	protected.Post("/backups", platformMW[0], platformMW[1], r.h.LegacyGone)
+	protected.Post("/backups/schedule", platformMW[0], platformMW[1], r.h.LegacyGone)
+	protected.Post("/backups/retention", platformMW[0], platformMW[1], r.h.LegacyGone)
+	protected.Delete("/backups/:id", platformMW[0], platformMW[1], r.h.LegacyGone)
 	// SaaS Two-Console: Internal Ops (superadmin-only, read-only).
-	admin.Get("/console/reports", r.h.AdminReports)
+	protected.Get("/console/reports", platformMW[0], platformMW[1], r.h.AdminReports)
 	// The /console/internal/* surface is the Orvix-internal
 	// operations control plane. Customer admins must not be able
 	// to read it even if they guess the URL — the contract is
@@ -1377,131 +1407,127 @@ func (r *Router) setupRoutes() {
 	// therefore mount these routes on a sub-group that requires
 	// RolePlatformSuperAdmin or RoleSuperAdmin; the parent `admin` group still accepts
 	// admin-or-superadmin for the customer-facing read paths.
-	internalOps := admin.Group("/console/internal", auth.RequireAnyRole(auth.RoleSuperAdmin, auth.RolePlatformSuperAdmin))
-	internalOps.Get("/overview", r.h.InternalOverview)
-	internalOps.Get("/tenants", r.h.InternalTenants)
-	internalOps.Get("/domain-intelligence", r.h.InternalDomainIntelligence)
-	internalOps.Get("/security-ops", r.h.InternalSecurityOps)
-	internalOps.Get("/mail-flow-ops", r.h.InternalMailFlowOps)
+	protected.Get("/console/internal/overview", platformMW[0], platformMW[1], r.h.InternalOverview)
+	protected.Get("/console/internal/tenants", platformMW[0], platformMW[1], r.h.InternalTenants)
+	protected.Get("/console/internal/domain-intelligence", platformMW[0], platformMW[1], r.h.InternalDomainIntelligence)
+	protected.Get("/console/internal/security-ops", platformMW[0], platformMW[1], r.h.InternalSecurityOps)
+	protected.Get("/console/internal/mail-flow-ops", platformMW[0], platformMW[1], r.h.InternalMailFlowOps)
 
 	// Platform administration (cross-tenant, admin/superadmin only).
 	// These routes operate on all tenants and require explicit
 	// platform-level authorization — not just tenant membership.
-	platform := admin.Group("/platform", auth.RequireAnyRole(auth.RoleSuperAdmin, auth.RolePlatformSuperAdmin))
-	platform.Get("/dashboard", r.h.PlatformDashboard)
-	platform.Get("/organizations", r.h.ListPlatformOrganizations)
-	platform.Get("/organizations/:id", r.h.GetPlatformOrganization)
-	platform.Patch("/organizations/:id", r.h.UpdateOrganization)
-	platform.Post("/organizations/:id/active", r.h.SetOrganizationActive)
-	platform.Get("/organizations/:id/detail", r.h.GetOrganizationDetail)
+	protected.Get("/platform/dashboard", platformMW[0], platformMW[1], r.h.PlatformDashboard)
+	protected.Get("/platform/organizations", platformMW[0], platformMW[1], r.h.ListPlatformOrganizations)
+	protected.Get("/platform/organizations/:id", platformMW[0], platformMW[1], r.h.GetPlatformOrganization)
+	protected.Patch("/platform/organizations/:id", platformMW[0], platformMW[1], r.h.UpdateOrganization)
+	protected.Post("/platform/organizations/:id/active", platformMW[0], platformMW[1], r.h.SetOrganizationActive)
+	protected.Get("/platform/organizations/:id/detail", platformMW[0], platformMW[1], r.h.GetOrganizationDetail)
 
 	// Monitoring v1: resolve an alert (CSRF-protected, admin role).
-	men.Post("/monitoring/alerts/:id/resolve", r.h.PostMonitoringAlertResolve)
+	protected.Post("/monitoring/alerts/:id/resolve", platformMW[0], platformMW[1], r.h.PostMonitoringAlertResolve)
 	// Tenants branding write (ORVIX-ADMIN-ENTERPRISE-PARITY-E):
 	// CSRF-protected, admin role. logo_url must be a public
 	// http(s) URL (safeExternalURL-validated in handler);
 	// primary_color must match a #RRGGBB CSS hex.
-	men.Patch("/admin/tenants/:id/branding", r.h.PatchAdminTenantBranding)
+	protected.Patch("/admin/tenants/:id/branding", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.PatchAdminTenantBranding)
 	// Update Management v1: trigger a check or a runtime update
 	// (CSRF-protected, admin role). The actual script execution is
 	// single-flight: a second concurrent call returns 409 Conflict.
-	men.Post("/update/check", r.h.PostUpdateCheck)
-	men.Post("/update/run", r.h.PostUpdateRun)
-	men.Post("/firewall/rules", r.h.CreateFirewallRule)
-	men.Post("/license/validate", r.h.ValidateLicense)
-	men.Put("/feature-flags/:id", r.h.UpdateFeatureFlag)
-	men.Post("/api-keys", r.h.CreateAPIKey)
-	men.Delete("/api-keys/:id", r.h.DeleteAPIKey)
-	men.Put("/compliance/legal-holds/:id", r.h.UpdateLegalHold)
-	men.Delete("/compliance/legal-holds/:id", r.h.DeleteLegalHold)
-	men.Post("/compliance/policies", r.h.CreateRetentionPolicy)
-	men.Put("/compliance/policies/:id", r.h.UpdateRetentionPolicy)
-	men.Delete("/compliance/policies/:id", r.h.DeleteRetentionPolicy)
+	protected.Post("/update/check", platformMW[0], platformMW[1], r.h.PostUpdateCheck)
+	protected.Post("/update/run", platformMW[0], platformMW[1], r.h.PostUpdateRun)
+	protected.Post("/firewall/rules", platformMW[0], platformMW[1], r.h.CreateFirewallRule)
+	protected.Post("/license/validate", platformMW[0], platformMW[1], r.h.ValidateLicense)
+	protected.Put("/feature-flags/:id", platformMW[0], platformMW[1], r.h.UpdateFeatureFlag)
+	protected.Post("/api-keys", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.CreateAPIKey)
+	protected.Delete("/api-keys/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.DeleteAPIKey)
+	protected.Delete("/compliance/legal-holds/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.DeleteLegalHold)
+	protected.Put("/compliance/policies/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.UpdateRetentionPolicy)
+	protected.Delete("/compliance/policies/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.DeleteRetentionPolicy)
 
 	// Webmail Management — CSRF-protected write routes
-	men.Post("/webmail/sessions/:id/revoke", r.h.RevokeWebmailSession)
-	men.Post("/webmail/sessions/revoke-all", r.h.RevokeAllWebmailSessions)
-	men.Post("/webmail/controls/force-logout/:mailboxId", r.h.ForceLogoutWebmail)
-	men.Post("/webmail/controls/unlock/:mailboxId", r.h.UnlockWebmailMailbox)
-	men.Post("/webmail/controls/reset-preferences/:mailboxId", r.h.ResetWebmailPreferences)
-	men.Post("/webmail/controls/clear-counters/:mailboxId", r.h.ClearFailedLoginCounters)
+	protected.Post("/webmail/sessions/:id/revoke", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.RevokeWebmailSession)
+	protected.Post("/webmail/sessions/revoke-all", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.RevokeAllWebmailSessions)
+	protected.Post("/webmail/controls/force-logout/:mailboxId", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ForceLogoutWebmail)
+	protected.Post("/webmail/controls/unlock/:mailboxId", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.UnlockWebmailMailbox)
+	protected.Post("/webmail/controls/reset-preferences/:mailboxId", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ResetWebmailPreferences)
+	protected.Post("/webmail/controls/clear-counters/:mailboxId", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ClearFailedLoginCounters)
 	// DNS Operations (DNS-DKIM-OPERATIONS-2F): state-changing
 	// routes behind CSRF middleware. DKIM keygen rotates the
 	// server-side private key (irreversible — old signed mail
 	// still verifies until DKIM TTL expires); provider apply
 	// always returns a Failed result in this build because the
 	// live API path is intentionally disabled.
-	men.Post("/admin/dns/:domain/dkim", r.h.PostAdminDNSDKIM)
-	men.Post("/admin/dns/:domain/provider/apply", r.h.PostAdminDNSProviderApply)
+	protected.Post("/admin/dns/:domain/dkim", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.PostAdminDNSDKIM)
+	protected.Post("/admin/dns/:domain/provider/apply", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.PostAdminDNSProviderApply)
 
 	// Admin MFA (CSRF-protected)
-	men.Post("/admin/mfa/setup/begin", r.h.MFASetupBegin)
-	men.Post("/admin/mfa/setup/verify", r.h.MFASetupVerify)
-	men.Post("/admin/mfa/disable", r.h.MFADisable)
+	protected.Post("/admin/mfa/setup/begin", platformMW[0], platformMW[1], r.h.MFASetupBegin)
+	protected.Post("/admin/mfa/setup/verify", platformMW[0], platformMW[1], r.h.MFASetupVerify)
+	protected.Post("/admin/mfa/disable", platformMW[0], platformMW[1], r.h.MFADisable)
 
 	// Admin Settings write (CSRF-protected)
-	men.Patch("/admin/settings", r.h.AdminSettingsPatch)
+	protected.Patch("/admin/settings", platformMW[0], platformMW[1], r.h.AdminSettingsPatch)
 
 	// Admin Enterprise v2 mutations (CSRF-protected, admin
 	// role). Every mutation writes an entry to coremail_audit
 	// (action="<resource>.<verb>", target=<identifier>,
 	// result="ok"). Refusal paths return 4xx with a stable
 	// error JSON; never fabricate success.
-	men.Post("/admin/account-classes", r.h.CreateAccountClass)
-	men.Patch("/admin/account-classes/:id", r.h.UpdateAccountClass)
-	men.Delete("/admin/account-classes/:id", r.h.DeleteAccountClass)
-	men.Post("/admin/domain-groups", r.h.CreateDomainGroup)
-	men.Put("/admin/domain-groups/:id/members", r.h.UpdateDomainGroupMembers)
-	men.Delete("/admin/domain-groups/:id", r.h.DeleteDomainGroup)
-	men.Post("/admin/mailing-lists", r.h.CreateMailingList)
-	men.Patch("/admin/mailing-lists/:id", r.h.PatchMailingList)
-	men.Delete("/admin/mailing-lists/:id", r.h.DeleteMailingList)
-	men.Post("/admin/mailing-lists/:id/members", r.h.AddMailingListMember)
-	men.Delete("/admin/mailing-lists/:id/members/:memberId", r.h.RemoveMailingListMember)
-	men.Post("/admin/public-folders", r.h.CreatePublicFolder)
-	men.Patch("/admin/public-folders/:id", r.h.PatchPublicFolder)
-	men.Delete("/admin/public-folders/:id", r.h.DeletePublicFolder)
-	men.Post("/admin/admin-groups", r.h.CreateAdminGroup)
-	men.Patch("/admin/admin-groups/:id", r.h.UpdateAdminGroup)
-	men.Delete("/admin/admin-groups/:id", r.h.DeleteAdminGroup)
-	men.Post("/admin/admin-groups/:id/members", r.h.AddAdminGroupMember)
-	men.Delete("/admin/admin-groups/:id/members/:userId", r.h.RemoveAdminGroupMember)
-	men.Post("/admin/quarantine/:id/resolve", r.h.ResolveQuarantine)
-	men.Post("/admin/acl-rules", r.h.CreateACLRule)
-	men.Delete("/admin/acl-rules/:id", r.h.DeleteACLRule)
-	men.Post("/admin/login-protection/lockouts/:key/clear", r.h.ClearLockout)
-	men.Post("/admin/admin-users", r.h.CreateAdminUser)
-	men.Patch("/admin/admin-users/:id", r.h.UpdateAdminUser)
-	men.Patch("/admin/admin-users/:id/password", r.h.UpdateAdminUserPassword)
-	men.Patch("/admin/admin-users/:id/status", r.h.UpdateAdminUserStatus)
-	men.Patch("/admin/admin-users/:id/groups", r.h.UpdateAdminUserGroups)
-	men.Delete("/admin/admin-users/:id", r.h.DeleteAdminUser)
-	men.Post("/admin/log-rules", r.h.CreateLogRule)
-	men.Delete("/admin/log-rules/:id", r.h.DeleteLogRule)
+	protected.Post("/admin/account-classes", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.CreateAccountClass)
+	protected.Patch("/admin/account-classes/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.UpdateAccountClass)
+	protected.Delete("/admin/account-classes/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.DeleteAccountClass)
+	protected.Post("/admin/domain-groups", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.CreateDomainGroup)
+	protected.Put("/admin/domain-groups/:id/members", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.UpdateDomainGroupMembers)
+	protected.Delete("/admin/domain-groups/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.DeleteDomainGroup)
+	protected.Post("/admin/mailing-lists", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.CreateMailingList)
+	protected.Patch("/admin/mailing-lists/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.PatchMailingList)
+	protected.Delete("/admin/mailing-lists/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.DeleteMailingList)
+	protected.Post("/admin/mailing-lists/:id/members", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.AddMailingListMember)
+	protected.Delete("/admin/mailing-lists/:id/members/:memberId", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.RemoveMailingListMember)
+	protected.Post("/admin/public-folders", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.CreatePublicFolder)
+	protected.Patch("/admin/public-folders/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.PatchPublicFolder)
+	protected.Delete("/admin/public-folders/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.DeletePublicFolder)
+	protected.Post("/admin/admin-groups", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.CreateAdminGroup)
+	protected.Patch("/admin/admin-groups/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.UpdateAdminGroup)
+	protected.Delete("/admin/admin-groups/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.DeleteAdminGroup)
+	protected.Post("/admin/admin-groups/:id/members", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.AddAdminGroupMember)
+	protected.Delete("/admin/admin-groups/:id/members/:userId", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.RemoveAdminGroupMember)
+	protected.Post("/admin/quarantine/:id/resolve", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ResolveQuarantine)
+	protected.Post("/admin/acl-rules", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.CreateACLRule)
+	protected.Delete("/admin/acl-rules/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.DeleteACLRule)
+	protected.Post("/admin/login-protection/lockouts/:key/clear", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ClearLockout)
+	protected.Post("/admin/admin-users", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.CreateAdminUser)
+	protected.Patch("/admin/admin-users/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.UpdateAdminUser)
+	protected.Patch("/admin/admin-users/:id/password", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.UpdateAdminUserPassword)
+	protected.Patch("/admin/admin-users/:id/status", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.UpdateAdminUserStatus)
+	protected.Patch("/admin/admin-users/:id/groups", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.UpdateAdminUserGroups)
+	protected.Delete("/admin/admin-users/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.DeleteAdminUser)
+	protected.Post("/admin/log-rules", platformMW[0], platformMW[1], r.h.CreateLogRule)
+	protected.Delete("/admin/log-rules/:id", platformMW[0], platformMW[1], r.h.DeleteLogRule)
 	// Enterprise v3 — CSRF-protected mutations for the new
 	// sections. Each one is mounted inside `men` so the
 	// X-CSRF-Token check runs before the handler. All
 	// handlers in enterprise_admin_v3.go + ssl.go write to
 	// the audit table via h.appendAudit.
-	men.Post("/admin/ssl/certificates", r.h.AdminSslUploadCertificate)
-	men.Post("/admin/ssl/certificates/reload", r.h.AdminSslReloadCertificates)
-	men.Delete("/admin/ssl/certificates/:id", r.h.AdminSslDeleteCertificate)
-	men.Post("/admin/acceptance-rules", r.h.CreateAcceptanceRule)
-	men.Patch("/admin/acceptance-rules/:id", r.h.UpdateAcceptanceRule)
-	men.Post("/admin/acceptance-rules/test", r.h.TestAcceptanceRule)
-	men.Delete("/admin/acceptance-rules/:id", r.h.DeleteAcceptanceRule)
-	men.Post("/admin/incoming-msg-rules", r.h.CreateIncomingMsgRule)
-	men.Patch("/admin/incoming-msg-rules/:id", r.h.UpdateIncomingMsgRule)
-	men.Delete("/admin/incoming-msg-rules/:id", r.h.DeleteIncomingMsgRule)
-	men.Post("/admin/migration-sources", r.h.CreateMigrationSource)
-	men.Patch("/admin/migration-sources/:id", r.h.UpdateMigrationSource)
-	men.Delete("/admin/migration-sources/:id", r.h.DeleteMigrationSource)
-	men.Post("/admin/migration-sources/:id/test", r.h.TestMigrationSource)
-	men.Post("/admin/backup-targets", r.h.CreateBackupTarget)
-	men.Patch("/admin/backup-targets/:id", r.h.UpdateBackupTarget)
-	men.Delete("/admin/backup-targets/:id", r.h.DeleteBackupTarget)
-	men.Post("/admin/backup-targets/:id/test", r.h.TestBackupTarget)
-	men.Patch("/admin/settings/protocol/:protocol", r.h.PatchProtocolSettings)
+	protected.Post("/admin/ssl/certificates", platformMW[0], platformMW[1], r.h.AdminSslUploadCertificate)
+	protected.Post("/admin/ssl/certificates/reload", platformMW[0], platformMW[1], r.h.AdminSslReloadCertificates)
+	protected.Delete("/admin/ssl/certificates/:id", platformMW[0], platformMW[1], r.h.AdminSslDeleteCertificate)
+	protected.Post("/admin/acceptance-rules", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.CreateAcceptanceRule)
+	protected.Patch("/admin/acceptance-rules/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.UpdateAcceptanceRule)
+	protected.Post("/admin/acceptance-rules/test", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.TestAcceptanceRule)
+	protected.Delete("/admin/acceptance-rules/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.DeleteAcceptanceRule)
+	protected.Post("/admin/incoming-msg-rules", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.CreateIncomingMsgRule)
+	protected.Patch("/admin/incoming-msg-rules/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.UpdateIncomingMsgRule)
+	protected.Delete("/admin/incoming-msg-rules/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.DeleteIncomingMsgRule)
+	protected.Post("/admin/migration-sources", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.CreateMigrationSource)
+	protected.Patch("/admin/migration-sources/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.UpdateMigrationSource)
+	protected.Delete("/admin/migration-sources/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.DeleteMigrationSource)
+	protected.Post("/admin/migration-sources/:id/test", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.TestMigrationSource)
+	protected.Post("/admin/backup-targets", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.CreateBackupTarget)
+	protected.Patch("/admin/backup-targets/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.UpdateBackupTarget)
+	protected.Delete("/admin/backup-targets/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.DeleteBackupTarget)
+	protected.Post("/admin/backup-targets/:id/test", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.TestBackupTarget)
+	protected.Patch("/admin/settings/protocol/:protocol", platformMW[0], platformMW[1], r.h.PatchProtocolSettings)
 }
 
 func (r *Router) setupAdminUI() {

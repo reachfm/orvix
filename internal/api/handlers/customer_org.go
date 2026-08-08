@@ -3,6 +3,7 @@ package handlers
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/auth"
@@ -117,6 +118,10 @@ func (h *Handler) UpdateMemberRole(c fiber.Ctx) error {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "tenant context required"})
 	}
 	if err := h.orgAdminSvc.UpdateMemberRole(c.Context(), uint(memberID), tenantID, req.Role); err != nil {
+		// Return a stable error without the attacker-controlled role text.
+		if strings.HasPrefix(err.Error(), "invalid organization member role") {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid organization member role"})
+		}
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	h.writeAuditLog(c, "member.role_update", fmt.Sprintf("user:%d role:%s", memberID, req.Role))

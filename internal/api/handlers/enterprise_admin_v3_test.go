@@ -39,26 +39,35 @@ type queryQueryable interface {
 // Test that the v3 GET endpoints respond 200 with a JSON
 // body that includes the expected keys.
 func TestEnterpriseV3ListAndStatusEndpoints(t *testing.T) {
-	router, _ := newEnterpriseRouter(t)
+	router, db := newEnterpriseRouter(t)
+	seedPlatformSuperAdminWithPassword(t, db, "psa@test.local", "PsaPass!2026")
 	token := enterpriseLoginForTest(t, router, "admin@test.local", "TestPassword123!")
+	psaToken := enterpriseLoginForTest(t, router, "psa@test.local", "PsaPass!2026")
+	_ = psaToken
+	_ = token
 	for _, c := range []struct {
-		name string
-		path string
-		want string
+		name   string
+		path   string
+		want   string
+		usePSA bool
 	}{
-		{"acceptance_rules", "/api/v1/admin/acceptance-rules", "rules"},
-		{"incoming_msg_rules", "/api/v1/admin/incoming-msg-rules", "rules"},
-		{"migration_sources", "/api/v1/admin/migration-sources", "sources"},
-		{"backup_targets", "/api/v1/admin/backup-targets", "targets"},
-		{"cluster_status", "/api/v1/admin/cluster/status", "deployment_mode"},
-		{"antivirus_status", "/api/v1/admin/security/antivirus", "engine"},
-		{"settings_smtp_recv", "/api/v1/admin/settings/protocol/smtp_recv", "keys"},
-		{"settings_imap", "/api/v1/admin/settings/protocol/imap", "keys"},
-		{"settings_mobility", "/api/v1/admin/settings/protocol/mobility", "keys"},
+		{"acceptance_rules", "/api/v1/admin/acceptance-rules", "rules", false},
+		{"incoming_msg_rules", "/api/v1/admin/incoming-msg-rules", "rules", false},
+		{"migration_sources", "/api/v1/admin/migration-sources", "sources", false},
+		{"backup_targets", "/api/v1/admin/backup-targets", "targets", false},
+		{"cluster_status", "/api/v1/admin/cluster/status", "deployment_mode", true},
+		{"antivirus_status", "/api/v1/admin/security/antivirus", "engine", true},
+		{"settings_smtp_recv", "/api/v1/admin/settings/protocol/smtp_recv", "keys", true},
+		{"settings_imap", "/api/v1/admin/settings/protocol/imap", "keys", true},
+		{"settings_mobility", "/api/v1/admin/settings/protocol/mobility", "keys", true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			tok := token
+			if c.usePSA {
+				tok = psaToken
+			}
 			req := httptest.NewRequest("GET", c.path, nil)
-			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("Authorization", "Bearer "+tok)
 			resp, err := router.App().Test(req)
 			if err != nil {
 				t.Fatalf("GET %s: %v", c.path, err)
@@ -130,8 +139,10 @@ func TestEnterpriseV3CSRFEnforced(t *testing.T) {
 // directory that does not exist in the test env
 // (returns 400) — the allowlist is the actual SUT.
 func TestEnterpriseV3FsBrowseAllowlistedRoots(t *testing.T) {
-	router, _ := newEnterpriseRouter(t)
-	token := enterpriseLoginForTest(t, router, "admin@test.local", "TestPassword123!")
+	router, db := newEnterpriseRouter(t)
+	// Admin fs browse is a PLATFORM route (platformMW). Seed a PSA user.
+	seedPlatformSuperAdminWithPassword(t, db, "psa@test.local", "PsaPass!2026")
+	token := enterpriseLoginForTest(t, router, "psa@test.local", "PsaPass!2026")
 
 	// Approved root.
 	req := httptest.NewRequest("GET", "/api/v1/admin/fs/browse?root=/var/log/", nil)

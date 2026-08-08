@@ -671,6 +671,16 @@ func (h *Handler) Login(c fiber.Ctx) error {
 		h.rateLimiter.ResetLoginLimit(c.IP())
 	}
 
+	// Validate the current user authorization snapshot BEFORE issuing any
+	// MFA challenge or token. A malformed role, wrong tenant binding,
+	// inactive/deleted user, or deprecated role must fail exactly like a
+	// wrong-password login.
+	if err := h.auth.ValidateUserForTokenIssuance(userID); err != nil {
+		h.logger.Warn("login blocked by authorization validation",
+			zap.Uint("user_id", userID))
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid credentials"})
+	}
+
 	// MFA enforcement: if MFA is enabled, do NOT issue access/refresh tokens.
 	// Instead return an MFA challenge token that can only be exchanged at
 	// the /auth/mfa/verify endpoint.
@@ -688,18 +698,21 @@ func (h *Handler) Login(c fiber.Ctx) error {
 		})
 	}
 
-	// Issue opaque session cookie alongside JWT for transition.
-	// Cookie issuance is the source of truth for browser auth; if
-	// the store refuses the write we refuse the login rather than
-	// return success without a usable session.
-	if err := h.issueLoginSession(c, userID, auth.Role(userRole), loginEmail); err != nil {
-		h.logger.Error("failed to issue login session", zap.Error(err))
+	// Issue access token from the canonical authorization snapshot. The
+	// role and token_version are read from the users row in one SELECT —
+	// never from the raw login-query role string. The returned issuedRole is
+	// the SAME validated canonical role embedded in the JWT, reused for the
+	// opaque session so both share one authorization snapshot.
+	accessToken, accessJTI, issuedRole, err := h.auth.GenerateAccessTokenForUserWithJTI(userID)
+	if err != nil {
+		h.logger.Error("failed to generate access token", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authentication failed"})
 	}
 
-	accessToken, accessJTI, _, err := h.auth.GenerateAccessTokenWithJTI(userID, auth.Role(userRole))
-	if err != nil {
-		h.logger.Error("failed to generate access token", zap.Error(err))
+	// Issue opaque session cookie alongside JWT for transition, using the
+	// same issuedRole from the single snapshot.
+	if err := h.issueLoginSession(c, userID, issuedRole, loginEmail); err != nil {
+		h.logger.Error("failed to issue login session", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authentication failed"})
 	}
 
@@ -1006,10 +1019,23 @@ func (h *Handler) DeleteAPIKey(c fiber.Ctx) error {
 }
 
 // Me returns the current user's profile.
+//
+// PORTAL-SEPARATION-PHASE1: adds a server-derived `portal` field the
+// admin SPA uses to pick between the Platform shell and the Organization
+// shell. Derivation is fail-closed:
+//   - RolePlatformSuperAdmin (or the legacy RoleSuperAdmin) → "platform".
+//     No `organization` field.
+//   - Any tenant role with a non-NULL tenant_id → "organization" and an
+//     `organization` object with id/name/slug.
+//   - Anything else (unknown role, tenant role without tenant_id) →
+//     empty portal string. The client MUST refuse to render a shell.
+//
+// The client never sends `portal`; it is derived here every request.
 func (h *Handler) Me(c fiber.Ctx) error {
 	userID := c.Locals("user_id").(uint)
 
 	var email, role string
+	var tenantID sql.NullInt64
 
 	sqlDB, err := h.db.DB()
 	if err != nil {
@@ -1017,17 +1043,46 @@ func (h *Handler) Me(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
 	}
 
-	err = sqlDB.QueryRow("SELECT email, role FROM users WHERE id = "+h.dialect.Placeholder(1), userID).Scan(&email, &role)
+	err = sqlDB.QueryRow("SELECT email, role, tenant_id FROM users WHERE id = "+h.dialect.Placeholder(1), userID).Scan(&email, &role, &tenantID)
 	if err != nil {
 		h.logger.Warn("user not found", zap.Uint("user_id", userID), zap.Error(err))
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "user not found"})
 	}
 
-	return c.JSON(fiber.Map{
-		"id":    userID,
-		"email": email,
-		"role":  role,
-	})
+	portal := ""
+	var org fiber.Map
+	switch auth.Role(role) {
+	case auth.RolePlatformSuperAdmin, auth.RoleSuperAdmin:
+		portal = "platform"
+	case auth.RoleTenantAdmin, auth.RoleTenantOperator, auth.RoleTenantSupport, auth.RoleTenantReadOnly:
+		if tenantID.Valid && tenantID.Int64 > 0 {
+			portal = "organization"
+			var tName, tSlug string
+			if qerr := sqlDB.QueryRow("SELECT name, slug FROM tenants WHERE id = "+h.dialect.Placeholder(1)+" AND deleted_at IS NULL", tenantID.Int64).Scan(&tName, &tSlug); qerr == nil {
+				org = fiber.Map{"id": tenantID.Int64, "name": tName, "slug": tSlug}
+			} else {
+				// Fail closed: tenant role without a resolvable tenant is
+				// broken data — do not surface a portal.
+				portal = ""
+			}
+		}
+	default:
+		// Unknown / legacy un-normalized role → no portal. The client
+		// shows an access-denied screen instead of falling through to
+		// the platform shell.
+		portal = ""
+	}
+
+	resp := fiber.Map{
+		"id":     userID,
+		"email":  email,
+		"role":   role,
+		"portal": portal,
+	}
+	if org != nil {
+		resp["organization"] = org
+	}
+	return c.JSON(resp)
 }
 
 // ListDomains returns all mail domains with live mailbox counts.

@@ -362,8 +362,8 @@ export async function mockAPI(
   });
 
   await page.route("**/api/v1/csrf-token", (r) => json(r, { csrf_token: "test-csrf-token" }));
-  // role "admin" is required for the platform Domains tab to be visible.
-  await page.route("**/api/v1/me", (r) => json(r, { id: 1, email: "admin@example.com", role: "admin" }));
+  // portal is the authoritative platform-shell gate; role is informational.
+  await page.route("**/api/v1/me", (r) => json(r, { id: 1, email: "admin@example.com", role: "admin", portal: "platform" }));
 
   return counters;
 }

@@ -275,8 +275,8 @@ func TestHTTPDenial_TenantAdmin_PlatformEndpointDenied(t *testing.T) {
 
 	for _, path := range []string{
 		"/api/v1/admin/backups",
-		"/api/v1/admin/updates/check",
-		"/api/v1/admin/queue",
+		"/api/v1/updates/check",
+		"/api/v1/queue",
 	} {
 		status, body := h.authedRequest(t, "GET", path, tok, "")
 		mustNot5xx(t, "TA "+path, status, body)
@@ -373,20 +373,25 @@ func TestHTTPDenial_UnknownRole_FailsClosed(t *testing.T) {
 		now, now, hash, h.tenantA); err != nil {
 		t.Fatalf("insert unknown-role user: %v", err)
 	}
-	tok := h.login(t, "unknown@denial.example", "UnknownPass!2026")
 
-	for _, tc := range []struct {
-		path        string
-		mustContain string
-	}{
-		{"/api/v1/admin/backups", `"error":"insufficient permissions"`},
-		{"/api/v1/enterprise/domains", `"error":"insufficient permissions"`}, // enterprise gate also reports role/missing perms
-	} {
-		status, body := h.authedRequest(t, "GET", tc.path, tok, "")
-		mustNot5xx(t, "unknown "+tc.path, status, body)
-		mustEqStatus(t, "unknown "+tc.path, http.StatusForbidden, status, body)
-		mustContain(t, "unknown "+tc.path, body, tc.mustContain)
+	// Under strict canonical snapshot validation, an unknown role is denied at
+	// login with the exact wrong-password contract. It never reaches an endpoint.
+	req, _ := http.NewRequestWithContext(context.Background(), "POST", "/admin/login",
+		strings.NewReader(`{"username":"unknown@denial.example","password":"UnknownPass!2026"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := h.router.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("unknown-role login: %v", err)
 	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 500 {
+		t.Fatalf("unknown-role login: unexpected 5xx %d", resp.StatusCode)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unknown-role login: want 401, got %d body=%s", resp.StatusCode, body)
+	}
+	mustContain(t, "unknown-role login", body, `"error":"invalid credentials"`)
 }
 
 // ── Scenario E ────────────────────────────────────────────────────

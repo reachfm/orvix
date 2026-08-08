@@ -8,11 +8,20 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"go.uber.org/zap"
+
 	"github.com/orvix/orvix/internal/api"
+	"github.com/orvix/orvix/internal/auth"
+	"github.com/orvix/orvix/internal/config"
+	"github.com/orvix/orvix/internal/license"
+	"github.com/orvix/orvix/internal/models"
+	"github.com/orvix/orvix/internal/modules"
 )
 
 // bulkImportResult mirrors handlers.BulkImportResult for assertions.
@@ -37,12 +46,38 @@ type bulkImportResult struct {
 // local domain so the import endpoints have a valid target.
 func buildBulkImportHarness(t *testing.T) (*api.Router, *sql.DB, string, string) {
 	t.Helper()
-	router, sqlDB, token, csrf, _ := buildBackupHarness(t)
+	logger := zap.NewNop()
+	cfg := config.Defaults()
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.DSN = filepath.Join(t.TempDir(), "bulkimport.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
 
-	// Ensure coremail_folders exists. The default MigrateAllRaw does
-	// not include the coremail storage DDL (the MailStore creates
-	// it on demand), but the bulk-import endpoint now provisions
-	// system folders in-tx so the test schema must have the table.
+	db, err := config.NewDatabase(&cfg.Database, logger)
+	if err != nil {
+		t.Fatalf("database: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	if err := models.MigrateAllRaw(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	authenticator, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
+	if err != nil {
+		t.Fatalf("authenticator: %v", err)
+	}
+
+	now := time.Now().UTC()
+	if _, err := sqlDB.Exec(
+		`INSERT INTO tenants (id, created_at, updated_at, name, slug, domain, plan, active) VALUES (1, ?, ?, 'test-tenant', 'test-tenant', 'example.com', 'enterprise', 1)`,
+		now, now,
+	); err != nil {
+		t.Fatalf("insert tenant: %v", err)
+	}
+	// Canonical tenant_admin for tenant-owned bulk import routes.
+	seedTenantAdminWithPassword(t, sqlDB, "admin@test.local", 1, "TestPassword123!")
+
+	// Ensure coremail_folders exists.
 	if _, err := sqlDB.Exec(`
 		CREATE TABLE IF NOT EXISTS coremail_folders (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,16 +97,20 @@ func buildBulkImportHarness(t *testing.T) (*api.Router, *sql.DB, string, string)
 		t.Fatalf("create coremail_folders: %v", err)
 	}
 
-	// Seed a local, active domain. The schema is shared with the
-	// production mailbox code path (coremail_domains).
-	now := "2024-01-01 00:00:00"
+	// Seed a local, active domain.
+	nowStr := "2024-01-01 00:00:00"
 	if _, err := sqlDB.Exec(
 		`INSERT INTO coremail_domains (name, tenant_id, status, plan, max_mailboxes, max_aliases, max_quota_mb, created_at, updated_at)
 		 VALUES ('example.com', 1, 'active', 'enterprise', 1000, 1000, 102400, ?, ?)`,
-		now, now,
+		nowStr, nowStr,
 	); err != nil {
 		t.Fatalf("insert domain: %v", err)
 	}
+
+	router := api.NewRouter(cfg, authenticator, logger, db, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
+	token := loginDomainTest(t, router, "admin@test.local", "TestPassword123!")
+	csrf := getDomainCSRF(t, router, token)
+
 	return router, sqlDB, token, csrf
 }
 

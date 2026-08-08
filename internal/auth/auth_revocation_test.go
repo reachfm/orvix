@@ -60,8 +60,11 @@ func newRevocationTestAuth(t *testing.T) *Authenticator {
 // TestRevokedTokenRejected is the core H-9 guarantee.
 func TestRevokedTokenRejected(t *testing.T) {
 	a := newRevocationTestAuth(t)
+	// Seed a real user so token_version validation finds a row.
+	sqlDB, _ := a.db.DB()
+	sqlDB.Exec(`INSERT INTO users (id, created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (7, datetime('now'), datetime('now'), 'rev@test.local', 'h', 'tenant_admin', 1, 1, 1)`)
 
-	token, err := a.GenerateAccessToken(7, RoleAdmin)
+	token, err := a.GenerateAccessToken(7, RoleTenantAdmin)
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
@@ -84,9 +87,11 @@ func TestRevokedTokenRejected(t *testing.T) {
 // different, un-revoked token for the same user.
 func TestNonRevokedTokenStillValid(t *testing.T) {
 	a := newRevocationTestAuth(t)
+	sqlDB, _ := a.db.DB()
+	sqlDB.Exec(`INSERT INTO users (id, created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (7, datetime('now'), datetime('now'), 'norev@test.local', 'h', 'tenant_admin', 1, 1, 1)`)
 
-	revoked, _ := a.GenerateAccessToken(7, RoleAdmin)
-	kept, _ := a.GenerateAccessToken(7, RoleAdmin)
+	revoked, _ := a.GenerateAccessToken(7, RoleTenantAdmin)
+	kept, _ := a.GenerateAccessToken(7, RoleTenantAdmin)
 
 	if err := a.RevokeAccessToken(revoked); err != nil {
 		t.Fatalf("revoke: %v", err)

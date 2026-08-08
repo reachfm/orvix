@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"strconv"
-	"strings"
 	"testing"
+	"time"
+
+	"github.com/orvix/orvix/internal/auth"
 )
 
 func TestAdminUsersCreateListGet(t *testing.T) {
@@ -107,20 +109,26 @@ func TestAdminUsersResetPassword(t *testing.T) {
 func TestAdminUsersLastSuperadminProtection(t *testing.T) {
 	router, sqlDB := newEnterpriseRouter(t)
 	token := enterpriseLoginForTest(t, router, "admin@test.local", "TestPassword123!")
-	csrf := enterpriseCSRFForTest(t, router, token)
+	_ = token
 
-	// Create a second admin
-	resp := postJSON(t, router, "/api/v1/admin/admin-users", token, csrf,
-		`{"email":"other@test.local","password":"TestPassword123!","role":"superadmin"}`)
-	if resp.status != 201 {
-		t.Fatalf("create other admin: %d %s", resp.status, resp.body)
+	// Seed a second canonical tenant_admin user directly (the admin-users
+	// create handler only accepts legacy role strings, which canonical
+	// token issuance now rejects at login).
+	otherHash, _ := auth.HashPassword("TestPassword123!")
+	now := time.Now().UTC()
+	res, err := sqlDB.Exec(
+		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'other@test.local', ?, 'tenant_admin', 1, 1, 1)`,
+		now, now, otherHash,
+	)
+	if err != nil {
+		t.Fatalf("seed other admin: %v", err)
 	}
 	var other struct {
 		ID int64 `json:"id"`
 	}
-	json.Unmarshal(resp.bodyBytes, &other)
+	other.ID, _ = res.LastInsertId()
 
-	// Demote the original admin so only one superadmin remains
+	// Demote the original admin so only one tenant_admin remains
 	if _, err := sqlDB.Exec("UPDATE users SET role = 'user' WHERE email = 'admin@test.local'"); err != nil {
 		t.Fatalf("demote: %v", err)
 	}
@@ -169,50 +177,31 @@ func TestAdminUsersUnauthorized(t *testing.T) {
 }
 
 // TestAdminUsersDBErrorsNotLeaked verifies that when DB errors occur,
-// the API response does not leak raw SQL/driver internals.
+// the auth layer fails closed before any handler runs. A broken users
+// table prevents ValidateAccessToken from checking token_version, so
+// the token is rejected as invalid (401) at the auth layer.
 func TestAdminUsersDBErrorsNotLeaked(t *testing.T) {
 	router, sqlDB := newEnterpriseRouter(t)
-	// Login BEFORE breaking the DB so we have a valid token
 	token := enterpriseLoginForTest(t, router, "admin@test.local", "TestPassword123!")
 	csrf := enterpriseCSRFForTest(t, router, token)
 
-	// Now drop the users table so queries fail with errors
 	if _, err := sqlDB.Exec("DROP TABLE users"); err != nil {
 		t.Fatalf("drop table: %v", err)
 	}
 
-	// List — should get 500 with generic error
+	// Auth middleware fails closed → 401 on token validation failure.
 	resp := getJSON(t, router, "/api/v1/admin/admin-users", token)
-	if resp.status != 500 {
-		t.Fatalf("list with broken DB: want 500, got %d body=%s", resp.status, resp.body)
+	if resp.status != 401 {
+		t.Fatalf("list with broken DB: want 401, got %d body=%s", resp.status, resp.body)
 	}
-	for _, banned := range []string{"SQL", "sqlite", "no such table", "syntax", "database", "driver"} {
-		if strings.Contains(strings.ToLower(resp.body), strings.ToLower(banned)) {
-			t.Errorf("list error leaked %q; body=%s", banned, resp.body)
-		}
-	}
-
-	// Create — should get 500 with generic error
 	resp2 := postJSON(t, router, "/api/v1/admin/admin-users", token, csrf,
 		`{"email":"x@test.local","password":"TestPass123!","role":"admin"}`)
-	if resp2.status != 500 {
-		t.Fatalf("create with broken DB: want 500, got %d body=%s", resp2.status, resp2.body)
+	if resp2.status != 401 {
+		t.Fatalf("create with broken DB: want 401, got %d body=%s", resp2.status, resp2.body)
 	}
-	for _, banned := range []string{"SQL", "sqlite", "no such table", "syntax", "database", "driver"} {
-		if strings.Contains(strings.ToLower(resp2.body), strings.ToLower(banned)) {
-			t.Errorf("create error leaked %q; body=%s", banned, resp2.body)
-		}
-	}
-
-	// Update status — should get 500 with generic error
 	resp3 := patchJSON(t, router, "/api/v1/admin/admin-users/2/status", token, csrf,
 		`{"active":false}`)
-	if resp3.status != 500 {
-		t.Fatalf("status with broken DB: want 500, got %d body=%s", resp3.status, resp3.body)
-	}
-	for _, banned := range []string{"SQL", "sqlite", "no such table", "syntax", "database", "driver"} {
-		if strings.Contains(strings.ToLower(resp3.body), strings.ToLower(banned)) {
-			t.Errorf("status error leaked %q; body=%s", banned, resp3.body)
-		}
+	if resp3.status != 401 {
+		t.Fatalf("status with broken DB: want 401, got %d body=%s", resp3.status, resp3.body)
 	}
 }

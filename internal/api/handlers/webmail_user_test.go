@@ -237,11 +237,10 @@ func provisionAdminUser(t *testing.T, sqlDB *sql.DB, email, password string) err
 		now, periodEnd, now, now)
 
 	// Insert users row. COMPAT: legacy admin fixture; webmail tests do not
-	// exercise authorization gates, and PR #58 splits the ambiguous /admin/*
-	// group; migrate to canonical helper then.
+	// migrate to canonical helper then.
 	if _, err := sqlDB.Exec(
 		"INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-		now, now, email, string(hash), "admin", 1, 1, 1,
+		now, now, email, string(hash), "tenant_admin", 1, 1, 1,
 	); err != nil {
 		return fmt.Errorf("insert users: %w", err)
 	}

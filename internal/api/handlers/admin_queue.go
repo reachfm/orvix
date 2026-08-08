@@ -13,8 +13,12 @@ import (
 	"go.uber.org/zap"
 )
 
-// queueAdminGate returns true if the caller is a platform super admin.
-// Queue actions (retry, bounce, cancel) are platform-scoped mutations.
+// queueAdminGate returns true if the caller has platform-super-admin
+// authority. PORTAL-SEPARATION-PHASE1: the mail queue is a platform-wide
+// resource — a tenant admin must not see or act on another tenant's
+// messages. The deprecated RoleAdmin is intentionally excluded because
+// after startup normalization no legitimate user carries it, and the
+// RoleAdmin permission map has been emptied in internal/auth/rbac.
 //
 // Design note: we deliberately use an EXPLICIT canonical-role check
 // here rather than authrbac.HasPermission(role, PermQueueAction).

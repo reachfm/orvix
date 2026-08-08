@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"database/sql"
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
@@ -240,27 +241,30 @@ func (a *Authenticator) GenerateAccessToken(userID uint, role Role) (string, err
 // (its access token is added to the revocation store), and the expiry bounds
 // how long the revocation entry must live.
 func (a *Authenticator) GenerateAccessTokenWithJTI(userID uint, role Role) (string, string, time.Time, error) {
+	var tokenVersion int64 = 0
+	if a.db != nil {
+		if rawDB, dbErr := a.db.DB(); dbErr == nil {
+			var currentTV int64
+			d := a.dbDialect()
+			if scanErr := rawDB.QueryRow("SELECT COALESCE(token_version, 0) FROM users WHERE id = "+d.Placeholder(1), userID).Scan(&currentTV); scanErr == nil {
+				tokenVersion = currentTV
+			}
+		}
+	}
+	return a.signAccessToken(userID, role, tokenVersion)
+}
+
+// signAccessToken creates a signed JWT access token using the caller-supplied
+// role and token_version. Unlike GenerateAccessTokenWithJTI it does NOT
+// independently query the database — the caller is responsible for providing
+// a consistent {role, token_version} pair (e.g. from a single authorization
+// snapshot). This is the only token-signing primitive used by RefreshToken.
+func (a *Authenticator) signAccessToken(userID uint, role Role, tokenVersion int64) (string, string, time.Time, error) {
 	now := time.Now()
 	exp := now.Add(a.accessTTL)
 	jti, err := newJTI()
 	if err != nil {
 		return "", "", time.Time{}, fmt.Errorf("failed to generate token id: %w", err)
-	}
-
-	// Fetch current token_version from database to embed in JWT.
-	// Gracefully handles pre-migration databases where the column
-	// may not exist yet (COALESCE would fail).
-	var tokenVersion int64 = 0
-	if a.db != nil {
-		var currentTV int64
-		// Try raw SQL first, fallback to 0 on any error (column missing,
-		// table missing, etc.).
-		row := a.db.Raw("SELECT COALESCE(token_version, 0) FROM users WHERE id = ?", userID).Row()
-		if row != nil {
-			if err := row.Scan(&currentTV); err == nil {
-				tokenVersion = currentTV
-			}
-		}
 	}
 
 	claims := jwt.MapClaims{
@@ -380,14 +384,21 @@ func (a *Authenticator) ValidateAccessToken(tokenString string) (uint, Role, err
 	// is rejected even if the JWT signature is valid.
 	if a.db != nil {
 		if tvClaim, hasTV := claims["token_version"].(float64); hasTV {
+			rawDB, dbErr := a.db.DB()
+			if dbErr != nil {
+				return 0, "", ErrTokenInvalid
+			}
+			d := a.dbDialect()
 			var currentTV int64
-			row := a.db.Raw("SELECT COALESCE(token_version, 0) FROM users WHERE id = ?", userID).Row()
-			if row != nil {
-				if err := row.Scan(&currentTV); err == nil {
-					if int64(tvClaim) != currentTV {
-						return 0, "", ErrTokenInvalid
-					}
-				}
+			scanErr := rawDB.QueryRow(
+				"SELECT COALESCE(token_version, 0) FROM users WHERE id = "+d.Placeholder(1),
+				userID,
+			).Scan(&currentTV)
+			if scanErr != nil {
+				return 0, "", ErrTokenInvalid
+			}
+			if int64(tvClaim) != currentTV {
+				return 0, "", ErrTokenInvalid
 			}
 		}
 	}
@@ -473,18 +484,146 @@ func (a *Authenticator) isTokenRevoked(jti string) bool {
 	return count > 0
 }
 
+// userAuthorizationSnapshot is the canonical runtime authorization state for
+// a users row, read in a single SELECT so role, tenant binding, status, and
+// token_version are always consistent.
+type userAuthorizationSnapshot struct {
+	Role         Role
+	TenantID     sql.NullInt64
+	Active       bool
+	DeletedAt    sql.NullTime
+	TokenVersion int64
+}
+
+// canonicalRuntimeRole reports whether role is an allowed runtime canonical
+// role. Legacy alias roles (admin, operator, readonly, superadmin and
+// variants) are NOT silently converted — they must already be stored
+// canonically.
+func canonicalRuntimeRole(role Role) bool {
+	switch role {
+	case RolePlatformSuperAdmin, RoleTenantAdmin, RoleTenantOperator,
+		RoleTenantSupport, RoleTenantReadOnly, RoleUser, RoleBilling:
+		return true
+	}
+	return false
+}
+
+// isTenantScopedRuntimeRole reports whether role requires a non-null tenant_id.
+func isTenantScopedRuntimeRole(role Role) bool {
+	switch role {
+	case RoleTenantAdmin, RoleTenantOperator, RoleTenantSupport,
+		RoleTenantReadOnly, RoleUser, RoleBilling:
+		return true
+	}
+	return false
+}
+
+// validateAuthorizationSnapshot enforces the canonical role allowlist, tenant
+// binding rules, and active/deleted status. It returns ErrTokenInvalid on any
+// failure. This is the single validation used by both token issuance and
+// refresh.
+func validateAuthorizationSnapshot(snap userAuthorizationSnapshot) error {
+	if !canonicalRuntimeRole(snap.Role) {
+		return ErrTokenInvalid
+	}
+	if snap.Role == RolePlatformSuperAdmin {
+		if snap.TenantID.Valid && snap.TenantID.Int64 > 0 {
+			return ErrTokenInvalid
+		}
+	} else if isTenantScopedRuntimeRole(snap.Role) {
+		if !snap.TenantID.Valid || snap.TenantID.Int64 <= 0 {
+			return ErrTokenInvalid
+		}
+	}
+	if !snap.Active || snap.DeletedAt.Valid {
+		return ErrTokenInvalid
+	}
+	return nil
+}
+
+// loadUserAuthorizationSnapshot reads one user's authorization state in a
+// single dialect-aware SELECT. Any DB acquisition/query error or missing user
+// returns ErrTokenInvalid.
+func (a *Authenticator) loadUserAuthorizationSnapshot(userID uint) (userAuthorizationSnapshot, error) {
+	var snap userAuthorizationSnapshot
+	if a.db == nil {
+		return snap, ErrTokenInvalid
+	}
+	rawDB, err := a.db.DB()
+	if err != nil {
+		return snap, ErrTokenInvalid
+	}
+	d := a.dbDialect()
+	var dbRole string
+	err = rawDB.QueryRow(
+		"SELECT role, tenant_id, active, deleted_at, COALESCE(token_version, 0) FROM users WHERE id = "+d.Placeholder(1),
+		userID,
+	).Scan(&dbRole, &snap.TenantID, &snap.Active, &snap.DeletedAt, &snap.TokenVersion)
+	if err != nil {
+		return snap, ErrTokenInvalid
+	}
+	snap.Role = Role(dbRole)
+	if err := validateAuthorizationSnapshot(snap); err != nil {
+		return snap, ErrTokenInvalid
+	}
+	return snap, nil
+}
+
+// ValidateUserForTokenIssuance verifies that userID has a valid canonical
+// authorization snapshot. It returns only nil or ErrTokenInvalid.
+func (a *Authenticator) ValidateUserForTokenIssuance(userID uint) error {
+	_, err := a.loadUserAuthorizationSnapshot(userID)
+	return err
+}
+
+// GenerateAccessTokenForUserWithJTI issues an access token using the caller's
+// current authorization snapshot (role, tenant, status, token_version read in
+// one SELECT). The role and token_version embedded in the JWT come from that
+// single snapshot — never from a caller-supplied role. This closes the
+// old-role/new-token_version TOCTOU race. The returned role is the SAME
+// validated canonical role used for the JWT, so callers can pass it directly
+// to opaque-session creation without a second authorization query.
+func (a *Authenticator) GenerateAccessTokenForUserWithJTI(userID uint) (accessToken string, jti string, role Role, err error) {
+	snap, loadErr := a.loadUserAuthorizationSnapshot(userID)
+	if loadErr != nil {
+		return "", "", "", ErrTokenInvalid
+	}
+	token, tokenJTI, _, signErr := a.signAccessToken(userID, snap.Role, snap.TokenVersion)
+	if signErr != nil {
+		return "", "", "", ErrTokenInvalid
+	}
+	return token, tokenJTI, snap.Role, nil
+}
+
+// canonicalRefreshRole is retained for backward compatibility; it delegates to
+// canonicalRuntimeRole.
+func canonicalRefreshRole(role Role) bool { return canonicalRuntimeRole(role) }
+
+// isTenantScopedRefreshRole is retained for backward compatibility; it
+// delegates to isTenantScopedRuntimeRole.
+func isTenantScopedRefreshRole(role Role) bool { return isTenantScopedRuntimeRole(role) }
+
 // RefreshToken validates a refresh token, rotates it, and returns new tokens.
+// The access token role and token_version are read from the current users row
+// in a single authorization snapshot — never from the refresh session, a stale
+// JWT claim, caller input, or a second independent DB query. A role or
+// token_version changed between session creation and refresh is reflected
+// atomically; a concurrent role change that bumps token_version causes the
+// token_version embedded in the refreshed JWT to lag, so any active stale
+// access token is rejected by ValidateAccessToken.
 func (a *Authenticator) RefreshToken(ctx context.Context, refreshToken string) (string, string, time.Time, error) {
 	tokenHash := fmt.Sprintf("%x", sha256.Sum256([]byte(refreshToken)))
 
-	// Raw, dialect-safe read/delete to stay consistent with the raw session
-	// writes (GORM and raw do not share a view under the custom SQLite
-	// dialector).
 	sqlDB, err := a.db.DB()
 	if err != nil {
 		return "", "", time.Time{}, ErrSessionExpired
 	}
 	d := a.dbDialect()
+	// Read user_id first; then delete the row. SQLite deletes are
+	// atomic per row (token_hash is UNIQUE), so at most one caller
+	// can consume the session. A second concurrent caller reads
+	// the row before the delete completes, but its delete returns
+	// zero rows affected — we check for that case below.
 	var userID uint
 	if err := sqlDB.QueryRow(
 		"SELECT user_id FROM sessions WHERE token_hash = "+d.Placeholder(1)+" AND expires_at > "+d.Placeholder(2),
@@ -492,11 +631,28 @@ func (a *Authenticator) RefreshToken(ctx context.Context, refreshToken string) (
 		return "", "", time.Time{}, ErrSessionExpired
 	}
 
-	if _, err := sqlDB.Exec("DELETE FROM sessions WHERE token_hash = "+d.Placeholder(1), tokenHash); err != nil {
+	res, err := sqlDB.Exec("DELETE FROM sessions WHERE token_hash = "+d.Placeholder(1), tokenHash)
+	if err != nil {
 		return "", "", time.Time{}, fmt.Errorf("rotate refresh session: %w", err)
 	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// Another concurrent caller consumed this session first.
+		return "", "", time.Time{}, ErrSessionExpired
+	}
 
-	accessToken, accessJTI, _, err := a.GenerateAccessTokenWithJTI(userID, RoleUser)
+	// Single authorization snapshot: role, tenant_id, active, deleted_at,
+	// and token_version are read together so the signed JWT carries a
+	// consistent {role, token_version} pair. Reuse the shared snapshot
+	// loader and validator.
+	snap, err := a.loadUserAuthorizationSnapshot(userID)
+	if err != nil {
+		return "", "", time.Time{}, ErrSessionExpired
+	}
+	if err := validateAuthorizationSnapshot(snap); err != nil {
+		return "", "", time.Time{}, ErrSessionExpired
+	}
+
+	accessToken, accessJTI, _, err := a.signAccessToken(userID, snap.Role, snap.TokenVersion)
 	if err != nil {
 		return "", "", time.Time{}, err
 	}
@@ -772,21 +928,24 @@ func (a *Authenticator) ValidateOpaqueSession(token string) (uint, Role, string,
 	}
 	d := a.dbDialect()
 	var userID uint
-	var role, email string
-	sel := "SELECT user_id, role, email FROM sessions WHERE token_hash = " +
+	var email string
+	// sessions.role is informational only; the CURRENT users row is the
+	// authoritative authorization source on every validation.
+	sel := "SELECT user_id, email FROM sessions WHERE token_hash = " +
 		d.Placeholder(1) + " AND expires_at > " + d.Placeholder(2)
-	if err := sqlDB.QueryRow(sel, tokenHash, time.Now().UTC()).Scan(&userID, &role, &email); err != nil {
+	if err := sqlDB.QueryRow(sel, tokenHash, time.Now().UTC()).Scan(&userID, &email); err != nil {
 		return 0, "", "", ErrSessionExpired
 	}
 
-	// Defensive: refuse to honour sessions persisted before the role column
-	// existed. Returning ErrSessionExpired forces a fresh session, after which
-	// every request restores the real role.
-	if role == "" {
+	// Load the current canonical authorization snapshot for this user. A
+	// demoted, disabled, deleted, or malformed user loses opaque-session
+	// access immediately.
+	snap, snapErr := a.loadUserAuthorizationSnapshot(userID)
+	if snapErr != nil {
 		return 0, "", "", ErrSessionExpired
 	}
 
-	return userID, Role(role), email, nil
+	return userID, snap.Role, email, nil
 }
 
 func (a *Authenticator) ValidateMFAChallengeToken(tokenString string) (uint, error) {

@@ -9,8 +9,28 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
+	"strconv"
 	"time"
 )
+
+// idToUint converts a positive database-generated int64 id (e.g. from
+// LastInsertId) to uint, validating both that it is positive and that it
+// fits within the platform's uint width before the conversion. It never
+// returns a truncated or wrapped value; any invalid or overflowing id is
+// rejected as an error instead. On a 32-bit platform (strconv.IntSize ==
+// 32) an id above math.MaxUint32 is rejected; on a 64-bit platform every
+// positive int64 always fits in uint64, so no additional bound applies.
+func idToUint(id int64) (uint, error) {
+	if id <= 0 {
+		return 0, fmt.Errorf("invalid database id: %d", id)
+	}
+	if strconv.IntSize == 32 && uint64(id) > uint64(math.MaxUint32) {
+		return 0, fmt.Errorf("database id %d exceeds platform uint width", id)
+	}
+	// #nosec G115 -- id is positive and architecture-width bounds were validated above.
+	return uint(id), nil
+}
 
 var (
 	ErrTransferNotFound     = errors.New("ownership transfer not found")
@@ -134,11 +154,31 @@ func (s *Service) ListOwnershipTransfers(ctx context.Context, orgID uint) ([]Own
 }
 
 func (r *OrganizationRepo) CreateOwnershipTransfer(ctx context.Context, t *OwnershipTransfer) error {
-	_, err := r.db.ExecContext(ctx,
+	if r.dialect.IsPostgres() {
+		// PostgreSQL: use RETURNING id.
+		return r.db.QueryRowContext(ctx,
+			`INSERT INTO org_ownership_transfers (organization_id, from_user_id, to_user_id, token_hash, status, expires_at, created_at)
+			VALUES (`+r.dialect.Placeholders(7)+`) RETURNING id`,
+			t.OrganizationID, t.FromUserID, t.ToUserID, t.TokenHash, t.Status, t.ExpiresAt, t.CreatedAt).Scan(&t.ID)
+	}
+	// SQLite: use LastInsertId.
+	res, err := r.db.ExecContext(ctx,
 		`INSERT INTO org_ownership_transfers (organization_id, from_user_id, to_user_id, token_hash, status, expires_at, created_at)
 		VALUES (`+r.dialect.Placeholders(7)+`)`,
 		t.OrganizationID, t.FromUserID, t.ToUserID, t.TokenHash, t.Status, t.ExpiresAt, t.CreatedAt)
-	return err
+	if err != nil {
+		return err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return err
+	}
+	uid, err := idToUint(id)
+	if err != nil {
+		return err
+	}
+	t.ID = uid
+	return nil
 }
 
 func (r *OrganizationRepo) GetOwnershipTransferByHash(ctx context.Context, hash string) (*OwnershipTransfer, error) {
@@ -168,19 +208,38 @@ func (r *OrganizationRepo) AcceptOwnershipTransfer(ctx context.Context, id uint,
 		return err
 	}
 	defer tx.Rollback()
-	t, err := r.GetOwnershipTransferByID(ctx, id)
+
+	// Read the transfer INSIDE the transaction. Lock the row on
+	// PostgreSQL; SQLite serializes via its existing write-lock.
+	lockClause := ""
+	if r.dialect.IsPostgres() {
+		lockClause = " FOR UPDATE"
+	}
+	t, err := txScanTransfer(tx.QueryRowContext(ctx,
+		`SELECT id, organization_id, from_user_id, to_user_id, token_hash, status, expires_at, accepted_at, created_at
+		FROM org_ownership_transfers WHERE id = `+r.dialect.Placeholder(1)+lockClause, id))
 	if err != nil || t == nil {
 		return ErrTransferNotFound
 	}
-	if _, err := tx.ExecContext(ctx, "UPDATE org_ownership_transfers SET status = "+r.dialect.Placeholder(1)+", accepted_at = "+r.dialect.Placeholder(2)+" WHERE id = "+r.dialect.Placeholder(3),
-		TransferAccepted, acceptedAt, id); err != nil {
+	if t.Status != TransferPending {
+		return ErrTransferAlreadyUsed
+	}
+
+	// Atomically mark accepted — only if still pending.
+	res, err := tx.ExecContext(ctx, "UPDATE org_ownership_transfers SET status = "+r.dialect.Placeholder(1)+", accepted_at = "+r.dialect.Placeholder(2)+" WHERE id = "+r.dialect.Placeholder(3)+" AND status = "+r.dialect.Placeholder(4),
+		TransferAccepted, acceptedAt, id, TransferPending)
+	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, "UPDATE users SET role = 'admin' WHERE id = "+r.dialect.Placeholder(1)+" AND tenant_id = "+r.dialect.Placeholder(2),
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrTransferAlreadyUsed
+	}
+
+	if _, err := tx.ExecContext(ctx, "UPDATE users SET role = 'tenant_admin', token_version = COALESCE(token_version, 0) + 1 WHERE id = "+r.dialect.Placeholder(1)+" AND tenant_id = "+r.dialect.Placeholder(2),
 		t.FromUserID, t.OrganizationID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, "UPDATE users SET role = 'superadmin' WHERE id = "+r.dialect.Placeholder(1)+" AND tenant_id = "+r.dialect.Placeholder(2),
+	if _, err := tx.ExecContext(ctx, "UPDATE users SET role = 'tenant_admin', token_version = COALESCE(token_version, 0) + 1 WHERE id = "+r.dialect.Placeholder(1)+" AND tenant_id = "+r.dialect.Placeholder(2),
 		t.ToUserID, t.OrganizationID); err != nil {
 		return err
 	}
@@ -211,6 +270,18 @@ func scanTransfer(s interface {
 }) (*OwnershipTransfer, error) {
 	var t OwnershipTransfer
 	if err := s.Scan(&t.ID, &t.OrganizationID, &t.FromUserID, &t.ToUserID, &t.TokenHash, &t.Status, &t.ExpiresAt, &t.AcceptedAt, &t.CreatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &t, nil
+}
+
+// txScanTransfer is scanTransfer but for *sql.Row returned by tx.QueryRowContext.
+func txScanTransfer(row *sql.Row) (*OwnershipTransfer, error) {
+	var t OwnershipTransfer
+	if err := row.Scan(&t.ID, &t.OrganizationID, &t.FromUserID, &t.ToUserID, &t.TokenHash, &t.Status, &t.ExpiresAt, &t.AcceptedAt, &t.CreatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}

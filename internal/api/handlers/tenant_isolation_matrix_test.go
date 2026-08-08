@@ -66,7 +66,7 @@ func buildMatrixEnv(t *testing.T) *matrixEnv {
 	taHash, _ := authenticator.HashPassword("TenantAdminPass!")
 	tidA := uint(1)
 	// COMPAT: see testhelpers_role_test.go seedLegacyAdminForMigrationTest doc.
-	seedLegacyAdminForMigrationTestWithPassword(t, sqlDB, "ta@tenanta.example", &tidA, "TenantAdminPass!")
+	seedTenantAdminWithPassword(t, sqlDB, "ta@tenanta.example", tidA, "TenantAdminPass!")
 	exec("INSERT INTO coremail_mailboxes (id, domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme, status, quota_mb, is_admin, created_at, updated_at) VALUES (1, 1, 1, 'ta', 'ta@tenanta.example', 'TA', ?, 'argon2id', 'active', 1024, 1, ?, ?)", taHash, now, now)
 
 	psaHash, _ := authenticator.HashPassword("PlatformSuperPass!")
@@ -301,10 +301,14 @@ func TestMatrix_UnauthenticatedIsDenied(t *testing.T) {
 	}
 }
 
-func TestMatrix_PlatformSuperAdminCanAccessCrossTenant(t *testing.T) {
+func TestMatrix_PlatformSuperAdminDeniedOnTenantRoute(t *testing.T) {
 	e := buildMatrixEnv(t)
+	// PSA must receive 403 on tenant compat route, never 200/5xx.
 	status, body := matrixReq(t, e, e.platformAdmin, "", "GET", "/api/v1/mailboxes/2", nil)
-	if status != 200 {
-		t.Fatalf("platform admin accessing cross-tenant mailbox: expected 200, got %d: %v", status, body)
+	if status >= 500 {
+		t.Fatalf("PSA on tenant route: unexpected 5xx, got %d: %v", status, body)
+	}
+	if status != 403 {
+		t.Fatalf("PSA on tenant route: expected 403, got %d: %v", status, body)
 	}
 }

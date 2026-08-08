@@ -80,7 +80,7 @@ func buildadminMailingPublicFolderPatchEnv(t *testing.T) *adminMailingPublicFold
 	tid := uint(1)
 	// COMPAT: mailing-list/public-folder tests create per-tenant resources but the
 	// routes live under router.go:1123 admin group. See docs/deployment/canonical-role-fixtures-allowlist.md class H.
-	seedLegacyAdminForMigrationTestWithPassword(t, sqlDB, adminEmail, &tid, adminPass)
+	seedTenantAdminWithPassword(t, sqlDB, adminEmail, tid, adminPass)
 	if _, err := sqlDB.Exec(
 		"INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, ?, ?, 'user', 1, 1, 1)",
 		now, now, userEmail, string(userHash),

@@ -163,29 +163,35 @@ var AllPermissions = []Permission{
 // the AllPermissions list.
 var rolePermissions = map[auth.Role]map[Permission]bool{
 	// ── Canonical roles ─────────────────────────────────────
-	// Platform Super Admin: full access (like RoleSuperAdmin).
+	// Platform Super Admin: PLATFORM permissions ONLY.
+	// PORTAL-SEPARATION-PHASE1 Phase 5 (PR#58): platform_super_admin
+	// governs the platform surface — mail queue, platform settings,
+	// backups, updater, license, monitoring, platform audit, firewall/
+	// modules (inline gates), platform organizations (cross-tenant list/
+	// update) and platform security. It intentionally does NOT hold any
+	// tenant-scoped permission (domains/mailboxes/users/aliases/groups/
+	// invitations/organizations write, billing, api-keys, ownership,
+	// tenant security, credentials/sessions). A platform_super_admin
+	// bootstrap row has NULL tenant_id, so tenant-scoped routes are
+	// unreachable via requireTenantContext regardless; this map keeps
+	// the RBAC boundary explicit rather than relying only on that
+	// middleware.
 	auth.RolePlatformSuperAdmin: {
+		// Platform mail queue.
 		PermQueueRead: true, PermQueueAction: true,
+		// Platform settings.
 		PermSettingsRead: true, PermSettingsWrite: true,
+		// Platform backups.
 		PermBackupsRead: true, PermBackupsWrite: true,
+		// Platform monitoring.
 		PermMonitoringRead: true,
-		PermLicenseRead:    true, PermLicenseWrite: true,
-		PermUsersRead: true, PermUsersWrite: true,
-		PermAuditRead:         true,
-		PermOrganizationsRead: true, PermOrganizationsWrite: true,
-		PermDomainsRead: true, PermDomainsWrite: true,
-		PermMailboxesRead: true, PermMailboxesWrite: true,
-		PermCredentialsReset: true,
-		PermSessionsRevoke:   true,
-		PermDashboardRead:    true,
-		PermSecurityRead:     true,
-		PermAliasesRead:      true, PermAliasesWrite: true,
-		PermGroupsRead: true, PermGroupsWrite: true,
-		PermInvitationsRead: true, PermInvitationsWrite: true,
-		PermOwnershipTransfer: true,
-		PermAPIKeysRead:       true, PermAPIKeysWrite: true,
-		PermBillingRead: true, PermBillingWrite: true,
+		// Platform licensing (updater + license).
+		PermLicenseRead: true, PermLicenseWrite: true,
+		// Platform audit trail.
+		PermAuditRead: true,
+		// Cross-tenant organization catalog (list/update tenants).
 		PermPlatformOrganizationsRead: true, PermPlatformOrganizationsWrite: true,
+		// Cross-tenant security controls (session revocation, security ops).
 		PermPlatformSecurityRead:   true,
 		PermPlatformSessionsRevoke: true,
 	},
@@ -288,35 +294,30 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermPlatformSecurityRead:   true,
 		PermPlatformSessionsRevoke: true,
 	},
-	auth.RoleAdmin: {
-		PermQueueRead: true, PermQueueAction: true,
-		PermSettingsRead: true, PermSettingsWrite: true,
-		PermBackupsRead: true, PermBackupsWrite: true,
-		PermMonitoringRead: true,
-		PermLicenseRead:    true,
-		PermUsersRead:      true, PermUsersWrite: true,
-		PermAuditRead:         true,
-		PermOrganizationsRead: true, PermOrganizationsWrite: true,
-		PermDomainsRead: true, PermDomainsWrite: true,
-		PermMailboxesRead: true, PermMailboxesWrite: true,
-		PermCredentialsReset: true,
-		PermSessionsRevoke:   true,
-		PermDashboardRead:    true,
-		PermSecurityRead:     true,
-		PermAliasesRead:      true, PermAliasesWrite: true,
-		PermGroupsRead: true, PermGroupsWrite: true,
-		PermInvitationsRead: true, PermInvitationsWrite: true,
-		PermOwnershipTransfer: true,
-		PermAPIKeysRead:       true, PermAPIKeysWrite: true,
-		PermBillingRead: true, PermBillingWrite: true,
-	},
+	// PORTAL-SEPARATION-PHASE1: the deprecated auth.RoleAdmin no longer maps
+	// to any permission. Legacy "admin" rows are normalized at startup
+	// (see internal/models normalizeAdminRoles) to either
+	// RolePlatformSuperAdmin (tenant_id IS NULL) or RoleTenantAdmin
+	// (tenant_id IS NOT NULL). A row that still carries "admin" after
+	// normalization is an operator-review case (AMBIGUOUS_ADMIN_ROLE) and
+	// must have no privilege until a human decides.
+	auth.RoleAdmin: {},
+	// Legacy RoleOperator: tenant-scoped helpdesk persona.
+	// PORTAL-SEPARATION-PHASE1 Phase 5 (PR#58): the legacy 'operator'
+	// bucket previously carried a set of platform-adjacent single-
+	// tenant admin-panel reads (queue.*, backups.read, license.read,
+	// settings.read, monitoring.read) that no canonical tenant_* role
+	// holds. The security audit flagged this as an "accidental privilege
+	// bridge" — an un-normalized legacy 'operator' row surviving
+	// startup normalization would silently retain platform reads and
+	// queue.action. The platform bucket has been stripped here so the
+	// RBAC map, the startup normalizer and the explicit canonical gates
+	// all agree that legacy 'operator' does not touch the platform
+	// surface. Rows with tenant_id are normalized to 'tenant_operator'
+	// at startup; operator+NULL rows are logged AMBIGUOUS_OPERATOR_ROLE
+	// and left inert.
 	auth.RoleOperator: {
-		PermQueueRead: true, PermQueueAction: true,
-		PermSettingsRead:   true,
-		PermBackupsRead:    true,
-		PermMonitoringRead: true,
-		PermLicenseRead:    true,
-		PermUsersRead:      true, PermUsersWrite: true,
+		PermUsersRead: true, PermUsersWrite: true,
 		PermAuditRead:         true,
 		PermOrganizationsRead: true,
 		PermDomainsRead:       true,

@@ -171,8 +171,8 @@ func (h *Handler) UpdateAdminUser(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid JSON body")
 	}
 
-	if body.Role != "" && body.Role != "admin" && body.Role != "superadmin" {
-		return fiber.NewError(fiber.StatusBadRequest, "role must be 'admin' or 'superadmin'")
+	if body.Role != "" && body.Role != "admin" && body.Role != "superadmin" && body.Role != "tenant_admin" && body.Role != "tenant_operator" && body.Role != "tenant_support" && body.Role != "tenant_readonly" {
+		return fiber.NewError(fiber.StatusBadRequest, "role must be a valid administrative role")
 	}
 
 	now := time.Now().UTC()
@@ -183,8 +183,17 @@ func (h *Handler) UpdateAdminUser(c fiber.Ctx) error {
 		args = append(args, strings.TrimSpace(strings.ToLower(body.Email)))
 	}
 	if body.Role != "" {
+		// Map deprecated role strings to canonical equivalents.
+		role := body.Role
+		if role == "admin" {
+			role = "tenant_admin"
+		} else if role == "superadmin" {
+			role = "tenant_admin"
+		}
 		sets = append(sets, "role = ?")
-		args = append(args, body.Role)
+		args = append(args, role)
+		// Invalidate existing tokens since role changed.
+		sets = append(sets, "token_version = COALESCE(token_version, 0) + 1")
 	}
 	if len(sets) == 0 {
 		return fiber.NewError(fiber.StatusBadRequest, "no fields to update")
@@ -193,7 +202,7 @@ func (h *Handler) UpdateAdminUser(c fiber.Ctx) error {
 	args = append(args, now, id, tenantID)
 
 	res, err := sqlDB.ExecContext(c.Context(), fmt.Sprintf(
-		`UPDATE users SET %s WHERE id = ? AND tenant_id = ? AND role IN ('admin','superadmin') AND deleted_at IS NULL`,
+		`UPDATE users SET %s WHERE id = ? AND tenant_id = ? AND role IN ('admin','superadmin','tenant_admin','tenant_operator','tenant_support','tenant_readonly') AND deleted_at IS NULL`,
 		strings.Join(sets, ", ")), args...)
 	if err != nil {
 		h.logger.Error("update admin user: DB update failed", zap.Error(err))
@@ -304,7 +313,7 @@ func (h *Handler) UpdateAdminUserStatus(c fiber.Ctx) error {
 
 	now := time.Now().UTC()
 	res, err := sqlDB.ExecContext(c.Context(),
-		`UPDATE users SET active = `+h.dialect.Placeholder(1)+`, updated_at = `+h.dialect.Placeholder(2)+` WHERE id = `+h.dialect.Placeholder(3)+` AND tenant_id = `+h.dialect.Placeholder(4)+` AND role IN ('admin','superadmin') AND deleted_at IS NULL`,
+		`UPDATE users SET active = `+h.dialect.Placeholder(1)+`, updated_at = `+h.dialect.Placeholder(2)+`, token_version = COALESCE(token_version, 0) + 1 WHERE id = `+h.dialect.Placeholder(3)+` AND tenant_id = `+h.dialect.Placeholder(4)+` AND role IN ('admin','superadmin','tenant_admin','tenant_operator','tenant_support','tenant_readonly') AND deleted_at IS NULL`,
 		body.Active, now, id, tenantID)
 	if err != nil {
 		h.logger.Error("update admin user status: DB update failed", zap.Error(err))
@@ -426,7 +435,7 @@ func (h *Handler) DeleteAdminUser(c fiber.Ctx) error {
 
 	now := time.Now().UTC()
 	res, err := sqlDB.ExecContext(c.Context(),
-		`UPDATE users SET active = `+h.dialect.FalseLiteral()+`, deleted_at = `+h.dialect.Placeholder(1)+`, updated_at = `+h.dialect.Placeholder(2)+` WHERE id = `+h.dialect.Placeholder(3)+` AND tenant_id = `+h.dialect.Placeholder(4)+` AND role IN ('admin','superadmin') AND deleted_at IS NULL`,
+		`UPDATE users SET active = `+h.dialect.FalseLiteral()+`, deleted_at = `+h.dialect.Placeholder(1)+`, updated_at = `+h.dialect.Placeholder(2)+`, token_version = COALESCE(token_version, 0) + 1 WHERE id = `+h.dialect.Placeholder(3)+` AND tenant_id = `+h.dialect.Placeholder(4)+` AND role IN ('admin','superadmin','tenant_admin','tenant_operator','tenant_support','tenant_readonly') AND deleted_at IS NULL`,
 		now, now, id, tenantID)
 	if err != nil {
 		h.logger.Error("delete admin user: DB update failed", zap.Error(err))

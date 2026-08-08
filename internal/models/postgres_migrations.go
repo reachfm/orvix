@@ -1160,6 +1160,20 @@ func postgresColumnAdditions() []string {
 
 		`ALTER TABLE mailboxes ADD COLUMN IF NOT EXISTS display_name TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE mailboxes ADD COLUMN IF NOT EXISTS send_limit INTEGER NOT NULL DEFAULT 0`,
+
+		// PORTAL-SEPARATION-PHASE1: the bootstrap Platform Super Admin has
+		// no customer tenant, so tenant_id must be nullable. SQLite already
+		// declares this column nullable in models.go; Postgres needs the
+		// NOT NULL dropped so insertBootstrapAdmin can write SQL NULL.
+		// Runs BEFORE NormalizeAdminRoles (which sets tenant_id = NULL for
+		// platform_super_admin rows).
+		`ALTER TABLE users ALTER COLUMN tenant_id DROP NOT NULL`,
+
+		// PORTAL-SEPARATION-PHASE1: token_version is bumped by
+		// NormalizeAdminRoles on every promotion (forces re-login) and
+		// validated by internal/auth on every JWT check. The initial
+		// CREATE TABLE was written before this column existed.
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0`,
 	}
 }
 

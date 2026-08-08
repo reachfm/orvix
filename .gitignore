@@ -1,3 +1,8 @@
+# Root-level Go test binaries produced by `go test -c` (e.g. handlers.test).
+# The leading / anchor restricts this to the repository root, so it never
+# matches a *.test file inside a source directory (test fixtures, etc.).
+/*.test
+
 node_modules/
 dist/
 build/

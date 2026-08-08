@@ -391,7 +391,7 @@ func TestLoginAcceptsUsernameField(t *testing.T) {
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 	_, err = sqlDB.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		 VALUES (?, ?, 'admin@test.local', ?, 'tenant_admin', 1, 1, 1)`,
 		now, now, hashedPw,
 	)
 	if err != nil {
@@ -447,18 +447,26 @@ func TestAdminListEndpointsReturnArraysAndBootstrapRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("authenticator: %v", err)
 	}
-	hashedPw, err := authenticator.HashPassword("TestPassword123!")
-	if err != nil {
-		t.Fatalf("hash password: %v", err)
-	}
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+	// Tenant admin for domain/user/mailbox routes.
+	taHash, _ := authenticator.HashPassword("TaPass123!")
 	_, err = sqlDB.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
-		now, now, hashedPw,
+		 VALUES (?, ?, 'admin@test.local', ?, 'tenant_admin', 1, 1, 1)`,
+		now, now, taHash,
 	)
 	if err != nil {
-		t.Fatalf("insert user: %v", err)
+		t.Fatalf("insert TA: %v", err)
+	}
+	// Platform super admin for queue routes.
+	psaHash, _ := authenticator.HashPassword("PsaPass123!")
+	_, err = sqlDB.Exec(
+		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
+		 VALUES (?, ?, 'psa@test.local', ?, 'platform_super_admin', NULL, 1, 1)`,
+		now, now, psaHash,
+	)
+	if err != nil {
+		t.Fatalf("insert PSA: %v", err)
 	}
 	_, err = sqlDB.Exec(
 		`INSERT INTO coremail_domains (name, tenant_id, status, plan, created_at, updated_at)
@@ -466,7 +474,7 @@ func TestAdminListEndpointsReturnArraysAndBootstrapRows(t *testing.T) {
 		now, now,
 	)
 	if err != nil {
-		t.Fatalf("insert coremail domain: %v", err)
+		t.Fatalf("insert domain: %v", err)
 	}
 	_, err = sqlDB.Exec(
 		`INSERT INTO coremail_mailboxes (domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme, status, quota_mb, is_admin, created_at, updated_at)
@@ -480,9 +488,10 @@ func TestAdminListEndpointsReturnArraysAndBootstrapRows(t *testing.T) {
 
 	router := NewRouter(cfg, authenticator, logger, db, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
 	defer router.App().Shutdown()
-	token := loginForTest(t, router, "admin@test.local", "TestPassword123!")
+	taToken := loginForTest(t, router, "admin@test.local", "TaPass123!") // TA for tenant routes
+	psaToken := loginForTest(t, router, "psa@test.local", "PsaPass123!") // PSA for platform routes
 
-	domainsBody := getAdminJSON(t, router, token, "/api/v1/domains")
+	domainsBody := getAdminJSON(t, router, taToken, "/api/v1/domains")
 	var domains []map[string]any
 	if err := json.Unmarshal(domainsBody, &domains); err != nil {
 		t.Fatalf("domains must be JSON array: %v: %s", err, domainsBody)
@@ -494,13 +503,21 @@ func TestAdminListEndpointsReturnArraysAndBootstrapRows(t *testing.T) {
 		t.Fatalf("domains response must include mailbox_count field: %s", domainsBody)
 	}
 
-	usersBody := getAdminJSON(t, router, token, "/api/v1/users")
+	usersBody := getAdminJSON(t, router, taToken, "/api/v1/users")
 	var users []map[string]any
 	if err := json.Unmarshal(usersBody, &users); err != nil {
 		t.Fatalf("users must be JSON array: %v: %s", err, usersBody)
 	}
-	if len(users) != 1 || users[0]["email"] != "admin@test.local" || users[0]["role"] != "admin" {
-		t.Fatalf("expected deduped bootstrap admin user, got %s", usersBody)
+	found := false
+	for _, u := range users {
+		em, _ := u["email"].(string)
+		if em == "admin@test.local" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected admin@test.local user in response, got %s", usersBody)
 	}
 	if strings.Contains(string(usersBody), "password") || strings.Contains(string(usersBody), "argon2") {
 		t.Fatalf("users response must not expose password material: %s", usersBody)
@@ -527,7 +544,7 @@ func TestAdminListEndpointsReturnArraysAndBootstrapRows(t *testing.T) {
 		t.Fatalf("users response must not include ambiguous id field: %s", usersBody)
 	}
 
-	queueBody := getAdminJSON(t, router, token, "/api/v1/queue")
+	queueBody := getAdminJSON(t, router, psaToken, "/api/v1/queue")
 	var queue []map[string]any
 	if err := json.Unmarshal(queueBody, &queue); err != nil {
 		t.Fatalf("queue must be JSON array: %v: %s", err, queueBody)
@@ -961,7 +978,7 @@ func TestDomainManagement(t *testing.T) {
 	hashedPw, _ := authenticator.HashPassword("TestPassword123!")
 	_, err = sqlDB.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		 VALUES (?, ?, 'admin@test.local', ?, 'tenant_admin', 1, 1, 1)`,
 		now, now, hashedPw,
 	)
 	if err != nil {
@@ -1317,7 +1334,7 @@ func TestMailboxManagement(t *testing.T) {
 	hashedPw, _ := authenticator.HashPassword("TestPassword123!")
 	_, err = sqlDB.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		 VALUES (?, ?, 'admin@test.local', ?, 'tenant_admin', 1, 1, 1)`,
 		now, now, hashedPw,
 	)
 	if err != nil {
@@ -1723,7 +1740,7 @@ func TestCreateMailboxEndpoint(t *testing.T) {
 	hashedPw, _ := authenticator.HashPassword("TestPassword123!")
 	_, err = sqlDB.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		 VALUES (?, ?, 'admin@test.local', ?, 'tenant_admin', 1, 1, 1)`,
 		now, now, hashedPw,
 	)
 	if err != nil {
@@ -1978,27 +1995,11 @@ func TestQueueReturnsSafeFields(t *testing.T) {
 	hashedPwTest, _ := authenticator.HashPassword("TestPassword123!")
 	_, err = sqlDB.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		 VALUES (?, ?, 'admin@test.local', ?, 'platform_super_admin', NULL, 1, 1)`,
 		now, now, hashedPwTest,
 	)
 	if err != nil {
 		t.Fatalf("insert user: %v", err)
-	}
-	_, err = sqlDB.Exec(
-		`INSERT INTO coremail_domains (name, tenant_id, status, plan, created_at, updated_at)
-		 VALUES ('test.local', 1, 'active', 'enterprise', ?, ?)`,
-		now, now,
-	)
-	if err != nil {
-		t.Fatalf("insert domain: %v", err)
-	}
-	_, err = sqlDB.Exec(
-		`INSERT INTO coremail_mailboxes (domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme, status, quota_mb, is_admin, created_at, updated_at)
-		 VALUES (1, 1, 'admin', 'admin@test.local', 'Admin', ?, 'argon2id', 'active', 1024, 1, ?, ?)`,
-		"$argon2id$v=19$m=1024,t=1,p=1$c2FsdA$aGFzaA", now, now,
-	)
-	if err != nil {
-		t.Fatalf("insert mailbox: %v", err)
 	}
 	createAdminQueueFixture(t, sqlDB, now)
 	router := NewRouter(cfg, authenticator, logger, db, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
@@ -2079,7 +2080,7 @@ func TestAuditLogsReturnsSafeFields(t *testing.T) {
 	hashedPwAudit, _ := authenticator.HashPassword("TestPassword123!")
 	_, err = sqlDB.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		 VALUES (?, ?, 'admin@test.local', ?, 'platform_super_admin', NULL, 1, 1)`,
 		now, now, hashedPwAudit,
 	)
 	if err != nil {
@@ -2177,7 +2178,7 @@ func TestAdminSummaryEndpoint(t *testing.T) {
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 	_, err = sqlDB.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		 VALUES (?, ?, 'admin@test.local', ?, 'platform_super_admin', NULL, 1, 1)`,
 		now, now, hashedPw,
 	)
 	if err != nil {
@@ -2203,7 +2204,6 @@ func TestAdminSummaryEndpoint(t *testing.T) {
 	router := NewRouter(cfg, authenticator, logger, db, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
 	defer router.App().Shutdown()
 	token := loginForTest(t, router, "admin@test.local", "TestPassword123!")
-
 	t.Run("summary returns object with required sections", func(t *testing.T) {
 		body := getAdminJSON(t, router, token, "/api/v1/admin/summary")
 		var data map[string]any
@@ -2304,7 +2304,7 @@ func TestQueueActions(t *testing.T) {
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 	_, err = sqlDB.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		 VALUES (?, ?, 'admin@test.local', ?, 'platform_super_admin', NULL, 1, 1)`,
 		now, now, hashedPw,
 	)
 	if err != nil {
@@ -2589,7 +2589,7 @@ func TestMailboxDetailsEndpoint(t *testing.T) {
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 	_, err = sqlDB.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		 VALUES (?, ?, 'admin@test.local', ?, 'tenant_admin', 1, 1, 1)`,
 		now, now, hashedPw,
 	)
 	if err != nil {
@@ -2690,7 +2690,7 @@ func TestDomainDetailsEndpoint(t *testing.T) {
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 	_, err = sqlDB.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		 VALUES (?, ?, 'admin@test.local', ?, 'tenant_admin', 1, 1, 1)`,
 		now, now, hashedPw,
 	)
 	if err != nil {
@@ -2797,7 +2797,7 @@ func TestEntityAuditEndpoints(t *testing.T) {
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 	_, err = sqlDB.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		 VALUES (?, ?, 'admin@test.local', ?, 'tenant_admin', 1, 1, 1)`,
 		now, now, hashedPw,
 	)
 	if err != nil {

@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -87,20 +88,20 @@ func buildDomainListEnv(t *testing.T) *domainListEnv {
 
 	tid1 := uint(1)
 	// COMPAT: see testhelpers_role_test.go seedLegacyAdminForMigrationTest doc.
-	seedLegacyAdminForMigrationTestWithPassword(t, sqlDB, "admin1@t1.example", &tid1, "Tenant1Pass!2026")
+	seedTenantAdminWithPassword(t, sqlDB, "admin1@t1.example", tid1, "Tenant1Pass!2026")
 	tid2 := uint(2)
 	// COMPAT (see prior): different tenant.
-	seedLegacyAdminForMigrationTestWithPassword(t, sqlDB, "admin2@t2.example", &tid2, "Tenant2Pass!2026")
+	seedTenantAdminWithPassword(t, sqlDB, "admin2@t2.example", tid2, "Tenant2Pass!2026")
 	psaHash, _ := authenticator.HashPassword("PlatformPass!2026")
 	exec("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'psa@platform.local', ?, 'platform_super_admin', NULL, 1, 1)", now, now, psaHash)
 	userHash, _ := authenticator.HashPassword("PlainUserPass!2026")
 	exec("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'plain@t1.example', ?, 'user', 1, 1, 1)", now, now, userHash)
-	// Legacy RoleAdmin with an unresolved tenant (tenant_id = 0 -> TenantMiddleware
+	// Canonical tenant_admin with an unresolved tenant (tenant_id = 0 -> TenantMiddleware
 	// never sets the "tenant_id" local -> scopedTenantID falls back to -1). This
-	// row intentionally exercises the deprecated `role='admin'` shape; use the
-	// legacy-migration primitive so intent is unambiguous.
+	// row exercises the unresolved-tenant fail-closed contract with a canonical
+	// tenant_admin role bound to tenant 0.
 	var zeroTenant uint = 0
-	insertUserWithPassword(t, sqlDB, "notenant@nowhere.example", "admin", &zeroTenant, "NoTenantPass!2026")
+	insertUserWithPassword(t, sqlDB, "notenant@nowhere.example", "tenant_admin", &zeroTenant, "NoTenantPass!2026")
 
 	scratchDir := t.TempDir()
 	adminDir := scratchDir + "/admin"
@@ -120,14 +121,40 @@ func buildDomainListEnv(t *testing.T) *domainListEnv {
 		_ = sqlDB.Close()
 	})
 
+	// The unresolved-tenant user (tenant_admin with tenant_id=0) can no longer
+	// authenticate under strict canonical snapshot validation. Its login
+	// returns "invalid credentials"; the token stays empty. Tests that use
+	// noTenantAdmin assert this denial.
 	return &domainListEnv{
 		router:        router,
 		tenant1Adm:    domainListLogin(t, router, "admin1@t1.example", "Tenant1Pass!2026"),
 		tenant2Adm:    domainListLogin(t, router, "admin2@t2.example", "Tenant2Pass!2026"),
 		superAdm:      domainListLogin(t, router, "psa@platform.local", "PlatformPass!2026"),
 		plainUser:     domainListLogin(t, router, "plain@t1.example", "PlainUserPass!2026"),
-		noTenantAdmin: domainListLogin(t, router, "notenant@nowhere.example", "NoTenantPass!2026"),
+		noTenantAdmin: domainListLoginDenied(t, router, "notenant@nowhere.example", "NoTenantPass!2026"),
 	}
+}
+
+// domainListLoginDenied attempts a login that is expected to be denied and
+// returns an empty token (the caller must not use it as an authenticated
+// identity). It asserts the denial produces a non-5xx response.
+func domainListLoginDenied(t *testing.T, r *api.Router, email, pass string) string {
+	t.Helper()
+	b, _ := json.Marshal(map[string]string{"email": email, "password": pass})
+	req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := r.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("login %s transport: %v", email, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 500 {
+		t.Fatalf("login %s: unexpected 5xx %d", email, resp.StatusCode)
+	}
+	if resp.StatusCode == http.StatusOK {
+		t.Fatalf("login %s: expected denied, got 200", email)
+	}
+	return ""
 }
 
 func domainListLogin(t *testing.T, r *api.Router, email, pass string) string {
@@ -192,16 +219,18 @@ func containsDomain(rows []domainListRow, name string) bool {
 }
 
 // 1. Platform super admin sees domains from multiple tenants.
-func TestListDomains_SuperAdminSeesMultipleTenants(t *testing.T) {
+func TestListDomains_PlatformSuperAdminDeniedOnTenantRoute(t *testing.T) {
 	e := buildDomainListEnv(t)
+	// PSA must receive 403 on tenant compat /domains route.
 	status, rows := listDomains(t, e, e.superAdm, "/api/v1/domains")
-	if status != 200 {
-		t.Fatalf("super admin: expected 200, got %d", status)
+	if status >= 500 {
+		t.Fatalf("PSA domains: unexpected 5xx, got %d", status)
 	}
-	for _, want := range []string{"alpha.t1.example", "beta.t1.example", "victim.t2.example"} {
-		if !containsDomain(rows, want) {
-			t.Fatalf("super admin list missing %q; got %v", want, domainNames(rows))
-		}
+	if status != 403 {
+		t.Fatalf("PSA domains: expected 403 on tenant route, got %d", status)
+	}
+	if len(rows) > 0 {
+		t.Fatalf("PSA domains: must not expose tenant data; got %v", domainNames(rows))
 	}
 }
 
@@ -301,9 +330,10 @@ func TestListDomains_DeletedDomainsExcluded(t *testing.T) {
 	if containsDomain(rows, "ghost.t1.example") {
 		t.Fatalf("soft-deleted domain leaked: %v", domainNames(rows))
 	}
-	_, superRows := listDomains(t, e, e.superAdm, "/api/v1/domains")
-	if containsDomain(superRows, "ghost.t1.example") {
-		t.Fatalf("soft-deleted domain leaked even to super admin: %v", domainNames(superRows))
+	// PSA receives 403 on tenant compat /domains route; no data can leak.
+	status, _ := listDomains(t, e, e.superAdm, "/api/v1/domains")
+	if status != 403 {
+		t.Fatalf("PSA on /domains: expected 403, got %d", status)
 	}
 }
 
@@ -330,12 +360,21 @@ func TestListDomains_UnauthorizedRoleRejected(t *testing.T) {
 // handler degrades to an empty list rather than leaking or erroring.
 func TestListDomains_UnresolvedTenantFailsSafely(t *testing.T) {
 	e := buildDomainListEnv(t)
-	status, rows := listDomains(t, e, e.noTenantAdmin, "/api/v1/domains")
-	if status != 200 {
-		t.Fatalf("unresolved tenant: expected 200 (empty list), got %d", status)
+	// Canonical tenant_admin with tenant_id=0 is now denied at login by strict
+	// canonical snapshot validation — no access token is issued. Using the
+	// empty (denied) token is unauthenticated and must be rejected with 401.
+	if e.noTenantAdmin != "" {
+		t.Fatalf("unresolved-tenant user unexpectedly obtained a token")
 	}
-	if len(rows) != 0 {
-		t.Fatalf("unresolved tenant admin must see zero domains, got %v", domainNames(rows))
+	status, rows := listDomains(t, e, e.noTenantAdmin, "/api/v1/domains")
+	if status >= 500 {
+		t.Fatalf("unresolved tenant: unexpected 5xx, got %d", status)
+	}
+	if status != 401 {
+		t.Fatalf("unresolved tenant: expected 401 (login denied), got %d", status)
+	}
+	if len(rows) > 0 {
+		t.Fatalf("unresolved tenant: must not leak data; got %v", domainNames(rows))
 	}
 }
 

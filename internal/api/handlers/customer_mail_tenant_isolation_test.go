@@ -105,7 +105,7 @@ func buildCustomerMailEnv(t *testing.T, callerTenantID uint) *customerMailEnv {
 	// pulling in the full router (and its unrelated broken gate).
 	app.Use(func(c fiber.Ctx) error {
 		c.Locals("user_id", uint(1))
-		c.Locals("role", auth.RoleAdmin)
+		c.Locals("role", auth.RoleTenantAdmin)
 		c.Locals("tenant_id", callerTenantID)
 		c.Locals("email", "caller@example.com")
 		return c.Next()

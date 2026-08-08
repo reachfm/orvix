@@ -21,17 +21,30 @@ func sessionRevocationSuite(t *testing.T, a *Authenticator) {
 	if err != nil {
 		t.Fatalf("db: %v", err)
 	}
+	// Seed canonical users so token_version queries and authorization
+	// snapshots find real rows on every engine (SQLite and PostgreSQL).
+	// CURRENT_TIMESTAMP is portable across both engines.
+	// TRUE/FALSE are portable SQL boolean literals on both SQLite (stored as
+	// integer 1/0 internally) and PostgreSQL (native boolean type). A plain
+	// integer literal (1) fails on PostgreSQL with "column \"active\" is of
+	// type boolean but expression is of type integer" (SQLSTATE 42804).
+	if _, err := sqlDB.Exec(`INSERT INTO users (id, created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'sess5@test.local', 'h', 'tenant_admin', 1, TRUE, TRUE)`); err != nil {
+		t.Fatalf("seed user 5: %v", err)
+	}
+	if _, err := sqlDB.Exec(`INSERT INTO users (id, created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'sess7@test.local', 'h', 'tenant_admin', 1, TRUE, TRUE)`); err != nil {
+		t.Fatalf("seed user 7: %v", err)
+	}
 	d := a.dbDialect()
 
 	t.Run("bearer JWT target revoke, unrelated stays valid", func(t *testing.T) {
-		tokenA, jtiA, _, err := a.GenerateAccessTokenWithJTI(5, RoleAdmin)
+		tokenA, jtiA, _, err := a.GenerateAccessTokenWithJTI(5, RoleTenantAdmin)
 		if err != nil {
 			t.Fatalf("issue A: %v", err)
 		}
 		if _, _, err := a.GenerateRefreshToken(5, jtiA); err != nil {
 			t.Fatalf("refresh A: %v", err)
 		}
-		tokenB, jtiB, _, err := a.GenerateAccessTokenWithJTI(5, RoleAdmin)
+		tokenB, jtiB, _, err := a.GenerateAccessTokenWithJTI(5, RoleTenantAdmin)
 		if err != nil {
 			t.Fatalf("issue B: %v", err)
 		}
@@ -72,10 +85,10 @@ func sessionRevocationSuite(t *testing.T, a *Authenticator) {
 		now := time.Now().UTC()
 		ins := "INSERT INTO sessions (created_at, updated_at, user_id, token_hash, role, email, ip, jti, expires_at) VALUES (" +
 			d.Placeholders(9) + ")"
-		if _, err := sqlDB.Exec(ins, now, now, uint(7), tokenHash, "admin", "a@b.c", "", "", now.Add(time.Hour)); err != nil {
+		if _, err := sqlDB.Exec(ins, now, now, uint(7), tokenHash, "tenant_admin", "a@b.c", "", "", now.Add(time.Hour)); err != nil {
 			t.Fatalf("seed opaque session: %v", err)
 		}
-		if _, role, _, err := a.ValidateOpaqueSession(token); err != nil || role != RoleAdmin {
+		if _, role, _, err := a.ValidateOpaqueSession(token); err != nil || role != RoleTenantAdmin {
 			t.Fatalf("opaque session should be valid: role=%q err=%v", role, err)
 		}
 		if _, err := sqlDB.Exec("DELETE FROM sessions WHERE token_hash = "+d.Placeholder(1), tokenHash); err != nil {

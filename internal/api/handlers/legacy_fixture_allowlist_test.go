@@ -33,16 +33,15 @@ var legacyHelperCallers = map[string]string{
 	// definition, which the regex counts as a "caller".
 	"internal/api/handlers/testhelpers_role_test.go": "Helper definition site",
 
-	// Class H — Route lives under router.go:1123 admin group which does not
-	// admit RoleTenantAdmin. Migrate when PR #58 splits the group.
-	"internal/api/handlers/admin_domain_advanced_test.go":             "Class H: /admin/domains routes under legacy admin group",
-	"internal/api/handlers/admin_mailing_public_folder_patch_test.go": "Class H: /admin/mailing-lists + /admin/public-folders under legacy admin group",
-	"internal/api/handlers/domain_list_isolation_test.go":             "Class H: /api/v1/domains under legacy admin group",
-	"internal/api/handlers/enterprise_mutation_smoke_test.go":         "Class H: TestAdminMailboxesRoute hits /api/v1/mailboxes under legacy admin group",
-	"internal/api/handlers/mailbox_export_isolation_test.go":          "Class H: mailbox/domain export endpoints under legacy admin group",
-	"internal/api/handlers/tenant_isolation_test.go":                  "Class H: cross-tenant isolation test hits /admin/* routes",
-	"internal/api/handlers/tenant_isolation_aliases_groups_test.go":   "Class H: alias/group isolation under /admin/* routes",
-	"internal/api/handlers/tenant_isolation_matrix_test.go":           "Class H: cross-tenant matrix hits /admin/* routes",
+	// MIGRATED to seedTenantAdminWithPassword — removed from allowlist:
+	//   admin_domain_advanced_test.go
+	//   admin_mailing_public_folder_patch_test.go
+	//   domain_list_isolation_test.go
+	//   enterprise_mutation_smoke_test.go
+	//   mailbox_export_isolation_test.go
+	//   tenant_isolation_test.go
+	//   tenant_isolation_aliases_groups_test.go
+	//   tenant_isolation_matrix_test.go
 
 	// Class C — canonical role denial tests intentionally plant legacy
 	// admin to prove the migration helper does not accidentally grant
@@ -61,23 +60,15 @@ var rawLegacyUsersAdminInsert = map[string]string{
 	// pattern strings and would match itself.
 	"internal/api/handlers/legacy_fixture_allowlist_test.go": "Static scanner self-reference (pattern source strings)",
 
-	// Class H — authentication-flow tests (not authorization); role
-	// choice is incidental. Migrate to canonical helper when PR #58 lands.
-	"internal/api/handlers/webmail_user_test.go":    "Class H: auth-flow test seeds a users row; role choice incidental",
-	"internal/api/handlers/rehash_on_login_test.go": "Class H: password-rehash-on-login auth flow; role choice incidental",
-
-	// Mixed-fixture file: also contains canonical seed calls; the raw
-	// legacy insert here plants a tenant_id=0 row that intentionally
-	// exercises unresolved-tenant behavior. Cannot use the helper because
-	// the helper does not permit tenant_id=0 (zero-value uint).
-	"internal/api/handlers/domain_list_isolation_test.go": "Class H: legacy admin with tenant_id=0 for unresolved-tenant test",
+	// webmail_user_test.go          → migrated to canonical tenant_admin
+	// rehash_on_login_test.go       → migrated to canonical tenant_admin
+	// domain_list_isolation_test.go → migrated to canonical tenant_admin (tenant_id=0)
 
 	// Class H (retained after Defect 1 re-audit) — handlers reference
 	// h.tenantID(c), so canonical PSA with tenant_id NULL cannot reach
 	// them; tenant_admin is not admitted by the top-level admin router
 	// group. Retained until PR #58 splits the group.
-	"internal/api/handlers/enterprise_admin_test.go": "Class H: CreateAccountClass/CreateDomainGroup/CreateMailingList handlers use h.tenantID(c) — need tenant-bound legacy identity",
-	"internal/api/handlers/ops_layer_v2_test.go":     "Class H: enterprise ops-layer v2 routes are tenant-scoped via h.tenantID(c)",
+	// enterprise_admin_test.go: migrated to canonical tenant_admin (newEnterpriseRouter and malformed variant now seed tenants + tenant_admin).
 
 	// MIGRATED after Defect 1 re-audit — no longer in allowlist:
 	//   backups_test.go            → seedPlatformSuperAdminWithPassword (backup handlers have no tenantID)
@@ -92,6 +83,14 @@ var rawLegacyUsersAdminInsert = map[string]string{
 	"internal/api/handlers/admin_domain_advanced_test.go":             "False positive: adminDir=\"admin\" path segment (also legacy helper caller — see legacyHelperCallers above)",
 	"internal/api/handlers/admin_settings_test.go":                    "False positive: adminDir=\"admin\" path segment nearby seedPlatformSuperAdminWithPassword call",
 	"internal/api/handlers/admin_mailing_public_folder_patch_test.go": "False positive: adminDir=\"admin\" path segment nearby INSERT that plants 'user' role",
+
+	// Class C — Webmail migration-window regression fixtures intentionally
+	// seed legacy 'admin' to prove (a) the strict role state machine
+	// reconciles admin→tenant_admin atomically with a token_version bump
+	// and (b) role-change token-revocation. See
+	// TestWebmailLegacyAdminReconciliation and
+	// TestWebmailGetOrCreateUserRoleChangeBumpsVersionAndRevokesToken.
+	"internal/api/handlers/webmail_auth_revocation_test.go": "Class C: legacy 'admin' seed proves migration-window reconciliation + token revocation",
 }
 
 // helperCallPattern matches seedLegacyAdminForMigrationTest and its

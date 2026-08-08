@@ -63,8 +63,14 @@ func newEnterpriseRouter(t *testing.T) (*api.Router, *sql.DB) {
 		t.Fatalf("hash: %v", err)
 	}
 	if _, err := sqlDB.Exec(
+		`INSERT INTO tenants (created_at, updated_at, name, slug, domain, plan, active) VALUES (?, ?, 'test-tenant', 'test-tenant', 'test.local', 'enterprise', 1)`,
+		now, now,
+	); err != nil {
+		t.Fatalf("insert tenant: %v", err)
+	}
+	if _, err := sqlDB.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		 VALUES (?, ?, 'admin@test.local', ?, 'tenant_admin', 1, 1, 1)`,
 		now, now, hashedPw); err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
@@ -123,8 +129,13 @@ func newEnterpriseRouterWithMalformedLockouts(t *testing.T) (*api.Router, *sql.D
 		t.Fatalf("hash: %v", err)
 	}
 	if _, err := sqlDB.Exec(
+		`INSERT INTO tenants (created_at, updated_at, name, slug, domain, plan, active) VALUES (?, ?, 'test-tenant', 'test-tenant', 'test.local', 'enterprise', 1)`,
+		now, now); err != nil {
+		t.Fatalf("insert tenant: %v", err)
+	}
+	if _, err := sqlDB.Exec(
 		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified)
-		 VALUES (?, ?, 'admin@test.local', ?, 'admin', 1, 1, 1)`,
+		 VALUES (?, ?, 'admin@test.local', ?, 'tenant_admin', 1, 1, 1)`,
 		now, now, hashedPw); err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
@@ -166,7 +177,7 @@ func newEnterpriseRouterWithMalformedLockouts(t *testing.T) (*api.Router, *sql.D
 // coverage for the routes mounted in router.go — not exhaustive
 // functional verification (covered by the per-handler tests
 // in enterprise_admin_integration_test.go).
-func runEnterprise(t *testing.T, router *api.Router, sqlDB *sql.DB, token, csrf string) {
+func runEnterprise(t *testing.T, router *api.Router, sqlDB *sql.DB, token, csrf string, psaTokenAndCSRF ...string) {
 	t.Helper()
 	// Account classes
 	t.Run("account_classes", func(t *testing.T) {
@@ -288,9 +299,15 @@ func runEnterprise(t *testing.T, router *api.Router, sqlDB *sql.DB, token, csrf 
 		}
 	})
 
-	// Log rules
+	// Log rules — platform route, uses PSA token when available.
 	t.Run("log_rules", func(t *testing.T) {
-		resp := postJSON(t, router, "/api/v1/admin/log-rules", token, csrf, `{"name":"smtp-errors","source":"journald","severity":"error","match_pattern":"smtp","destination":"syslog://siem.local:514"}`)
+		ltoken := token
+		lcsrf := csrf
+		if len(psaTokenAndCSRF) >= 2 {
+			ltoken = psaTokenAndCSRF[0]
+			lcsrf = psaTokenAndCSRF[1]
+		}
+		resp := postJSON(t, router, "/api/v1/admin/log-rules", ltoken, lcsrf, `{"name":"smtp-errors","source":"journald","severity":"error","match_pattern":"smtp","destination":"syslog://siem.local:514"}`)
 		if resp.status != 201 {
 			t.Fatalf("create: want 201, got %d %s", resp.status, resp.body)
 		}
@@ -298,7 +315,7 @@ func runEnterprise(t *testing.T, router *api.Router, sqlDB *sql.DB, token, csrf 
 			ID int64 `json:"id"`
 		}
 		_ = json.Unmarshal(resp.bodyBytes, &created)
-		delResp := delJSON(t, router, "/api/v1/admin/log-rules/"+strconv.FormatInt(created.ID, 10), token, csrf)
+		delResp := delJSON(t, router, "/api/v1/admin/log-rules/"+strconv.FormatInt(created.ID, 10), ltoken, lcsrf)
 		if delResp.status != 200 {
 			t.Fatalf("delete: want 200, got %d %s", delResp.status, delResp.body)
 		}
@@ -348,9 +365,12 @@ func runEnterprise(t *testing.T, router *api.Router, sqlDB *sql.DB, token, csrf 
 
 func TestEnterpriseAdminV2Endpoints(t *testing.T) {
 	router, sqlDB := newEnterpriseRouter(t)
+	seedPlatformSuperAdminWithPassword(t, sqlDB, "psa@test.local", "PsaPass!2026")
 	token := enterpriseLoginForTest(t, router, "admin@test.local", "TestPassword123!")
+	psaToken := enterpriseLoginForTest(t, router, "psa@test.local", "PsaPass!2026")
 	csrf := enterpriseCSRFForTest(t, router, token)
-	runEnterprise(t, router, sqlDB, token, csrf)
+	psaCSRF := enterpriseCSRFForTest(t, router, psaToken)
+	runEnterprise(t, router, sqlDB, token, csrf, psaToken, psaCSRF)
 }
 
 func TestEnterpriseAdminV2CSRFEnforced(t *testing.T) {
