@@ -1678,6 +1678,8 @@ func NormalizeAdminRoles(ctx context.Context, db *sql.DB, dialect string) (Norma
 		if hasTokenVersion {
 			q += ", token_version = token_version + 1"
 		}
+		// #nosec G202 — q += ph(1) appends only a dialect placeholder;
+		// bootstrapEmail is always passed as a sql parameter.
 		q += " WHERE LOWER(email) = " + ph(1) + " AND role IN ('admin','superadmin') "
 		result, err := tx.ExecContext(ctx, q, bootstrapEmail)
 		if err != nil {
@@ -1685,6 +1687,7 @@ func NormalizeAdminRoles(ctx context.Context, db *sql.DB, dialect string) (Norma
 		}
 		if n, _ := result.RowsAffected(); n > 0 {
 			res.PlatformPromoted += int(n)
+			// #nosec G706 — n is an integer row count, not user-controlled text.
 			log.Printf("normalizeAdminRoles: promoted %d bootstrap row(s) to platform_super_admin", n)
 		}
 	}
@@ -1697,6 +1700,8 @@ func NormalizeAdminRoles(ctx context.Context, db *sql.DB, dialect string) (Norma
 		}
 		q += " WHERE role = 'superadmin'"
 		if bootstrapEmail != "" {
+			// #nosec G202 — ph(1) is a dialect placeholder; bootstrapEmail
+			// is always passed as a sql parameter.
 			q += " AND LOWER(email) <> " + ph(1)
 		}
 		args := []interface{}{}
@@ -1709,6 +1714,7 @@ func NormalizeAdminRoles(ctx context.Context, db *sql.DB, dialect string) (Norma
 		}
 		if n, _ := result.RowsAffected(); n > 0 {
 			res.PlatformPromoted += int(n)
+			// #nosec G706 — n is an integer row count, not user-controlled text.
 			log.Printf("WARN normalizeAdminRoles: promoted %d non-bootstrap 'superadmin' row(s) to platform_super_admin; review operator identity", n)
 		}
 	}
@@ -1722,6 +1728,8 @@ func NormalizeAdminRoles(ctx context.Context, db *sql.DB, dialect string) (Norma
 		q += " WHERE role = 'admin' AND tenant_id IS NOT NULL"
 		args := []interface{}{}
 		if bootstrapEmail != "" {
+			// #nosec G202 — ph(1) is a dialect placeholder; bootstrapEmail
+			// is always passed as a sql parameter.
 			q += " AND LOWER(email) <> " + ph(1)
 			args = append(args, bootstrapEmail)
 		}
@@ -1731,6 +1739,7 @@ func NormalizeAdminRoles(ctx context.Context, db *sql.DB, dialect string) (Norma
 		}
 		if n, _ := result.RowsAffected(); n > 0 {
 			res.TenantPromoted += int(n)
+			// #nosec G706 — n is an integer row count, not user-controlled text.
 			log.Printf("normalizeAdminRoles: promoted %d 'admin' row(s) with tenant_id to tenant_admin", n)
 		}
 	}
@@ -1740,6 +1749,8 @@ func NormalizeAdminRoles(ctx context.Context, db *sql.DB, dialect string) (Norma
 		q := "SELECT COUNT(*) FROM users WHERE role = 'admin' AND tenant_id IS NULL"
 		args := []interface{}{}
 		if bootstrapEmail != "" {
+			// #nosec G202 — ph(1) is a dialect placeholder; bootstrapEmail
+			// is always passed as a sql parameter.
 			q += " AND LOWER(email) <> " + ph(1)
 			args = append(args, bootstrapEmail)
 		}

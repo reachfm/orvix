@@ -9,8 +9,28 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
+	"strconv"
 	"time"
 )
+
+// idToUint converts a positive database-generated int64 id (e.g. from
+// LastInsertId) to uint, validating both that it is positive and that it
+// fits within the platform's uint width before the conversion. It never
+// returns a truncated or wrapped value; any invalid or overflowing id is
+// rejected as an error instead. On a 32-bit platform (strconv.IntSize ==
+// 32) an id above math.MaxUint32 is rejected; on a 64-bit platform every
+// positive int64 always fits in uint64, so no additional bound applies.
+func idToUint(id int64) (uint, error) {
+	if id <= 0 {
+		return 0, fmt.Errorf("invalid database id: %d", id)
+	}
+	if strconv.IntSize == 32 && uint64(id) > uint64(math.MaxUint32) {
+		return 0, fmt.Errorf("database id %d exceeds platform uint width", id)
+	}
+	// #nosec G115 -- id is positive and architecture-width bounds were validated above.
+	return uint(id), nil
+}
 
 var (
 	ErrTransferNotFound     = errors.New("ownership transfer not found")
@@ -153,7 +173,11 @@ func (r *OrganizationRepo) CreateOwnershipTransfer(ctx context.Context, t *Owner
 	if err != nil {
 		return err
 	}
-	t.ID = uint(id)
+	uid, err := idToUint(id)
+	if err != nil {
+		return err
+	}
+	t.ID = uid
 	return nil
 }
 

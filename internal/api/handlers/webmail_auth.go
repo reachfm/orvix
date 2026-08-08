@@ -46,7 +46,9 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"fmt"
+	"math"
 	"net/mail"
+	"strconv"
 	"strings"
 	"time"
 
@@ -58,6 +60,24 @@ import (
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/bcrypt"
 )
+
+// idToUint converts a positive database-generated int64 id (e.g. from
+// LastInsertId) to uint, validating both that it is positive and that it
+// fits within the platform's uint width before the conversion. It never
+// returns a truncated or wrapped value; any invalid or overflowing id is
+// rejected as an error instead. On a 32-bit platform (strconv.IntSize ==
+// 32) an id above math.MaxUint32 is rejected; on a 64-bit platform every
+// positive int64 always fits in uint64, so no additional bound applies.
+func idToUint(id int64) (uint, error) {
+	if id <= 0 {
+		return 0, fmt.Errorf("invalid database id: %d", id)
+	}
+	if strconv.IntSize == 32 && uint64(id) > uint64(math.MaxUint32) {
+		return 0, fmt.Errorf("database id %d exceeds platform uint width", id)
+	}
+	// #nosec G115 -- id is positive and architecture-width bounds were validated above.
+	return uint(id), nil
+}
 
 // WebmailSession is the probe endpoint used by
 // release/webmail/assets/auth-gate.js. It returns 200 if
@@ -649,6 +669,10 @@ func (h *Handler) ensureWebmailUser(dial *dbdialect.Info, sqlDB *sql.DB, email s
 	if err != nil {
 		return 0, fmt.Errorf("insert user last id: %w", err)
 	}
+	insertedID, err := idToUint(id)
+	if err != nil {
+		return 0, err
+	}
 	// Concurrent-safe: if another goroutine's INSERT landed the SAME email
 	// before ours, both rows now exist. Collapse to the smallest id (the
 	// row that landed first) and treat all others as duplicates whose
@@ -656,10 +680,10 @@ func (h *Handler) ensureWebmailUser(dial *dbdialect.Info, sqlDB *sql.DB, email s
 	var canonicalID uint
 	if err := sqlDB.QueryRow(
 		fmt.Sprintf("SELECT MIN(id) FROM users WHERE email = %s", dial.Placeholder(1)), email,
-	).Scan(&canonicalID); err == nil && canonicalID > 0 && canonicalID != uint(id) {
+	).Scan(&canonicalID); err == nil && canonicalID > 0 && canonicalID != insertedID {
 		return h.reconcileWebmailUser(dial, sqlDB, canonicalID, tenantID, isAdmin)
 	}
-	return uint(id), nil
+	return insertedID, nil
 }
 
 // reconcileWebmailUser applies the strict role state machine to an
