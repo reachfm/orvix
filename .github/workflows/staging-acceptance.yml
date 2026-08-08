@@ -293,9 +293,12 @@ jobs:
           # bcrypt cost 10, canonical $2a$ prefix (Go crypto/bcrypt reads
           # $2a$ / $2b$ transparently; installer emits $2a$).
           TENANT_HASH="$(htpasswd -bnBC 10 "" "$TENANT_PASSWORD" | tr -d ':\n' | sed 's/^\$2y\$/\$2a\$/')"
-          # tenant_id 1 is the bootstrap admin's tenant on a fresh install.
-          BOOTSTRAP_TID="$(sudo sqlite3 /var/lib/orvix/orvix.db "SELECT tenant_id FROM users WHERE email='${ADMIN_EMAIL}' LIMIT 1;")"
+          # The bootstrap admin is platform_super_admin with NULL tenant_id.
+          # Resolve the bootstrap tenant from the tenants table instead.
+          BOOTSTRAP_TID="$(sudo sqlite3 /var/lib/orvix/orvix.db "SELECT id FROM tenants WHERE domain = '${STAGING_DOMAIN}' AND deleted_at IS NULL LIMIT 1;")"
           [ -n "$BOOTSTRAP_TID" ] || { echo "could not resolve bootstrap tenant_id"; exit 1; }
+          case "$BOOTSTRAP_TID" in ''|*[!0-9]*) echo "invalid tenant_id: $BOOTSTRAP_TID"; exit 1;; esac
+          [ "$BOOTSTRAP_TID" -gt 0 ] || { echo "invalid tenant_id: $BOOTSTRAP_TID"; exit 1; }
           NOW_UTC="$(date -u '+%Y-%m-%d %H:%M:%S')"
           sudo sqlite3 /var/lib/orvix/orvix.db \
             "INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES ('${NOW_UTC}', '${NOW_UTC}', '${TENANT_ADMIN_EMAIL}', '${TENANT_HASH}', 'tenant_admin', ${BOOTSTRAP_TID}, 1, 1);"
