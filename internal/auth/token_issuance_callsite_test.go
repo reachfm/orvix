@@ -18,8 +18,15 @@ func repoRoot(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
 	}
-	// wd = .../internal/auth -> root = .../
-	return filepath.Dir(filepath.Dir(wd))
+	// wd = .../internal/auth -> repo root = .../orvix_portal_separation
+	root := filepath.Dir(filepath.Dir(wd))
+	// Sanity: walk only the internal/ tree, not the whole repo (which would
+	// include worktrees' node_modules and overflow the stack).
+	internal := filepath.Join(root, "internal")
+	if _, err := os.Stat(internal); err == nil {
+		return internal
+	}
+	return root
 }
 
 // scanProductionFiles walks non-test Go files under root and returns their
@@ -70,7 +77,7 @@ func TestProductionLoginFlowsUseSnapshotIssuance(t *testing.T) {
 	root := repoRoot(t)
 	files := scanProductionFiles(t, root)
 
-	handlersDir := filepath.Join(root, "internal", "api", "handlers")
+	handlersDir := filepath.Join(root, "api", "handlers")
 	for _, name := range []string{"handlers.go", "admin_mfa.go", "webmail_auth.go"} {
 		path := filepath.Join(handlersDir, name)
 		f, ok := files[path]

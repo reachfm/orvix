@@ -83,6 +83,14 @@ var rawLegacyUsersAdminInsert = map[string]string{
 	"internal/api/handlers/admin_domain_advanced_test.go":             "False positive: adminDir=\"admin\" path segment (also legacy helper caller — see legacyHelperCallers above)",
 	"internal/api/handlers/admin_settings_test.go":                    "False positive: adminDir=\"admin\" path segment nearby seedPlatformSuperAdminWithPassword call",
 	"internal/api/handlers/admin_mailing_public_folder_patch_test.go": "False positive: adminDir=\"admin\" path segment nearby INSERT that plants 'user' role",
+
+	// Class C — Webmail migration-window regression fixtures intentionally
+	// seed legacy 'admin' to prove (a) the strict role state machine
+	// reconciles admin→tenant_admin atomically with a token_version bump
+	// and (b) role-change token-revocation. See
+	// TestWebmailLegacyAdminReconciliation and
+	// TestWebmailGetOrCreateUserRoleChangeBumpsVersionAndRevokesToken.
+	"internal/api/handlers/webmail_auth_revocation_test.go": "Class C: legacy 'admin' seed proves migration-window reconciliation + token revocation",
 }
 
 // helperCallPattern matches seedLegacyAdminForMigrationTest and its

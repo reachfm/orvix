@@ -574,49 +574,35 @@ func (h *Handler) WebmailChangePassword(c fiber.Ctx) error {
 // to the user row. If the user ever sets an admin-panel
 // password, it is independent of the mailbox password.
 func (h *Handler) ensureWebmailUser(dial *dbdialect.Info, sqlDB *sql.DB, email string, tenantID uint, isAdmin bool) (uint, error) {
+	// Defect-1 fix: validate the authoritative tenant BEFORE any users-table
+	// read or mutation. tenantID == 0 or a non-existent tenants row must
+	// fail closed with no user INSERT/UPDATE, even for an existing user
+	// row that happens to share the requested email. This prevents an
+	// invalid mailbox→tenant resolution path from silently rewriting or
+	// creating an authorization identity.
+	if tenantID == 0 {
+		return 0, fmt.Errorf("lookup tenant: authoritative tenant missing")
+	}
+	var tenantExists int
+	if err := sqlDB.QueryRow(
+		fmt.Sprintf("SELECT 1 FROM tenants WHERE id = %s", dial.Placeholder(1)),
+		tenantID,
+	).Scan(&tenantExists); err != nil {
+		if err == sql.ErrNoRows {
+			return 0, fmt.Errorf("lookup tenant: authoritative tenant not found")
+		}
+		return 0, fmt.Errorf("lookup tenant: verification failed")
+	}
+
 	var userID uint
 	row := sqlDB.QueryRow(fmt.Sprintf("SELECT id FROM users WHERE email = %s", dial.Placeholder(1)), email)
 	if err := row.Scan(&userID); err == nil {
-		// Existing user row. Reconcile the role only when the resolved
-		// tenant matches; never rebind a user across tenants.
-		var existingTenant sql.NullInt64
-		var existingRole string
-		if err := sqlDB.QueryRow(fmt.Sprintf("SELECT tenant_id, role FROM users WHERE id = %s", dial.Placeholder(1)), userID).Scan(&existingTenant, &existingRole); err != nil {
-			return 0, fmt.Errorf("query existing user state: %w", err)
-		}
-		// platform_super_admin with NULL tenant: never demote/rebind.
-		if !existingTenant.Valid && existingRole == string(auth.RolePlatformSuperAdmin) {
-			return userID, nil
-		}
-		// Cross-tenant mismatch must fail closed.
-		if existingTenant.Valid && existingTenant.Int64 > 0 && tenantID > 0 && uint(existingTenant.Int64) != tenantID {
-			return 0, fmt.Errorf("user belongs to a different tenant")
-		}
-		desired := "user"
-		if isAdmin {
-			desired = "tenant_admin"
-		}
-		// Migration-window: a legacy 'admin' row bound to the resolved
-		// tenant (or a NULL-binding legacy row) may be reconciled to the
-		// canonical tenant_admin atomically with a token_version bump.
-		if existingRole != desired {
-			if _, err := sqlDB.Exec(
-				fmt.Sprintf("UPDATE users SET role = %s, updated_at = %s, token_version = COALESCE(token_version, 0) + 1 WHERE id = %s AND role != %s", dial.Placeholder(1), dial.Placeholder(2), dial.Placeholder(3), dial.Placeholder(1)),
-				desired, time.Now().UTC(), userID, desired,
-			); err != nil {
-				return 0, fmt.Errorf("update user role: %w", err)
-			}
-		}
-		return userID, nil
+		return h.reconcileWebmailUser(dial, sqlDB, userID, tenantID, isAdmin)
 	} else if err != sql.ErrNoRows {
 		return 0, fmt.Errorf("query user: %w", err)
 	}
 
 	// No users row — create one tied to the authoritative mailbox tenant.
-	// Fail closed if the authoritative tenant is missing or zero.
-	if tenantID == 0 {
-		return 0, fmt.Errorf("lookup tenant: authoritative tenant missing")
-	}
 	role := "user"
 	if isAdmin {
 		role = "tenant_admin"
@@ -632,6 +618,15 @@ func (h *Handler) ensureWebmailUser(dial *dbdialect.Info, sqlDB *sql.DB, email s
 			 VALUES (%s) RETURNING id`, dial.Placeholders(8)),
 			now, now, email, string(placeholder), role, tenantID, true, true,
 		).Scan(&userID); err != nil {
+			// Duplicate-safe fallback: a concurrent caller may have
+			// inserted the row between our SELECT and INSERT. Re-read
+			// and reconcile through the same state machine.
+			var existingID uint
+			if scanErr := sqlDB.QueryRow(
+				fmt.Sprintf("SELECT id FROM users WHERE email = %s", dial.Placeholder(1)), email,
+			).Scan(&existingID); scanErr == nil {
+				return h.reconcileWebmailUser(dial, sqlDB, existingID, tenantID, isAdmin)
+			}
 			return 0, fmt.Errorf("insert user: %w", err)
 		}
 		return userID, nil
@@ -642,13 +637,96 @@ func (h *Handler) ensureWebmailUser(dial *dbdialect.Info, sqlDB *sql.DB, email s
 		now, now, email, string(placeholder), role, tenantID, 1, 1,
 	)
 	if err != nil {
+		var existingID uint
+		if scanErr := sqlDB.QueryRow(
+			fmt.Sprintf("SELECT id FROM users WHERE email = %s", dial.Placeholder(1)), email,
+		).Scan(&existingID); scanErr == nil {
+			return h.reconcileWebmailUser(dial, sqlDB, existingID, tenantID, isAdmin)
+		}
 		return 0, fmt.Errorf("insert user: %w", err)
 	}
 	id, err := res.LastInsertId()
 	if err != nil {
 		return 0, fmt.Errorf("insert user last id: %w", err)
 	}
+	// Concurrent-safe: if another goroutine's INSERT landed the SAME email
+	// before ours, both rows now exist. Collapse to the smallest id (the
+	// row that landed first) and treat all others as duplicates whose
+	// authorization state was already reconciled by the winner's path.
+	var canonicalID uint
+	if err := sqlDB.QueryRow(
+		fmt.Sprintf("SELECT MIN(id) FROM users WHERE email = %s", dial.Placeholder(1)), email,
+	).Scan(&canonicalID); err == nil && canonicalID > 0 && canonicalID != uint(id) {
+		return h.reconcileWebmailUser(dial, sqlDB, canonicalID, tenantID, isAdmin)
+	}
 	return uint(id), nil
+}
+
+// reconcileWebmailUser applies the strict role state machine to an
+// EXISTING users row that shares email with the resolved mailbox.
+// The caller MUST have already verified the tenants row for tenantID.
+// Rules (in order):
+//
+//	A. Existing role == desired canonical role         → no-op, return id
+//	B. Existing role == PSA with NULL tenant           → no-op, return id
+//	C. Cross-tenant mismatch                            → fail closed
+//	D. Existing role == legacy 'admin' + isAdmin=true  → atomic reconcile
+//	   to tenant_admin + token_version bump
+//	E. Everything else                                  → fail closed
+//
+// No silent NormalizeRole conversion. The only migration-window write
+// is exactly admin→tenant_admin (case D).
+func (h *Handler) reconcileWebmailUser(dial *dbdialect.Info, sqlDB *sql.DB, userID, tenantID uint, isAdmin bool) (uint, error) {
+	var existingTenant sql.NullInt64
+	var existingRole string
+	var active bool
+	var deletedAt sql.NullTime
+	if err := sqlDB.QueryRow(
+		fmt.Sprintf("SELECT tenant_id, role, active, deleted_at FROM users WHERE id = %s", dial.Placeholder(1)),
+		userID,
+	).Scan(&existingTenant, &existingRole, &active, &deletedAt); err != nil {
+		return 0, fmt.Errorf("query existing user state: %w", err)
+	}
+	// B. PSA with NULL tenant: never demote/rebind.
+	if !existingTenant.Valid && existingRole == string(auth.RolePlatformSuperAdmin) {
+		return userID, nil
+	}
+	// C. Cross-tenant mismatch fails closed.
+	if existingTenant.Valid && existingTenant.Int64 > 0 && uint(existingTenant.Int64) != tenantID {
+		return 0, fmt.Errorf("user belongs to a different tenant")
+	}
+	desired := "user"
+	if isAdmin {
+		desired = "tenant_admin"
+	}
+	// A. Exact match — no UPDATE, no token_version bump.
+	if existingRole == desired {
+		return userID, nil
+	}
+	// D. Legacy 'admin' → tenant_admin (migration-window only).
+	if existingRole == "admin" && isAdmin && desired == "tenant_admin" {
+		res, err := sqlDB.Exec(
+			fmt.Sprintf(
+				"UPDATE users SET role = %s, updated_at = %s, token_version = COALESCE(token_version, 0) + 1 "+
+					"WHERE id = %s AND tenant_id = %s AND role = 'admin' AND active = %s AND deleted_at IS NULL",
+				dial.Placeholder(1), dial.Placeholder(2), dial.Placeholder(3), dial.Placeholder(4), dial.TrueLiteral(),
+			),
+			desired, time.Now().UTC(), userID, tenantID,
+		)
+		if err != nil {
+			return 0, fmt.Errorf("reconcile legacy admin: %w", err)
+		}
+		n, _ := res.RowsAffected()
+		if n != 1 {
+			// Row changed underneath us (e.g. active flipped false, tenant
+			// mismatch caught after the initial read) — fail closed.
+			return 0, fmt.Errorf("reconcile legacy admin: preconditions no longer hold")
+		}
+		return userID, nil
+	}
+	// E. Every other role mismatch fails closed. No mutation, no
+	// silent normalization.
+	return 0, fmt.Errorf("existing user role %q not reconcilable to %q", existingRole, desired)
 }
 
 // verifyMailboxPassword handles the two hash formats
