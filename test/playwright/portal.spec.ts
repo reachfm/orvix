@@ -116,9 +116,35 @@ test.describe("Orvix admin portal E2E", () => {
   test.describe.configure({ timeout: 60000 });
 
   test("login and navigate dashboard and customer portal sections", async ({ browser, request }) => {
+    // PORTAL-SEPARATION-PHASE1: every assertion below (the Dashboard
+    // heading via GET /api/v1/enterprise/dashboard, and all 14 Customer
+    // Portal sections) targets a tenant-scoped resource gated by
+    // requireTenantContext. The env-var bootstrap identity (ADMIN_EMAIL)
+    // is canonically platform_super_admin with tenant_id=NULL — a
+    // platform principal that intentionally has no tenant context and is
+    // correctly denied every one of these endpoints post-separation. A
+    // dedicated platform-only dashboard is explicitly deferred to a
+    // later PR, so this tenant-portal smoke test authenticates as a
+    // freshly signed-up tenant owner (canonical RoleUser, real tenant_id)
+    // via the production POST /api/v1/auth/signup flow instead of the
+    // platform bootstrap admin. This exercises real production
+    // authentication for the resource scope actually under test; it does
+    // not weaken portal separation or restore any legacy role.
+    // A distinct email domain is required: the bootstrap flow
+    // (insertBootstrapAdmin) pre-creates a tenants row whose domain
+    // matches ADMIN_EMAIL's domain (e2e-test.local) even though the
+    // platform_super_admin itself is not bound to it, so reusing that
+    // domain here would collide with tenants.domain's UNIQUE constraint.
+    const tenantEmail = `portal-e2e-${Date.now()}@portal-e2e-tenant.local`;
+    const tenantPassword = "PortalE2ePass123!";
+    const signupRes = await request.post(`http://127.0.0.1:${adminPort}/api/v1/auth/signup`, {
+      data: { email: tenantEmail, password: tenantPassword, name: "Portal E2E Tenant" },
+    });
+    expect(signupRes.ok()).toBeTruthy();
+
     // Login via API to get access token
     const loginRes = await request.post(`http://127.0.0.1:${adminPort}/api/v1/auth/login`, {
-      data: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD },
+      data: { email: tenantEmail, password: tenantPassword },
     });
     expect(loginRes.ok()).toBeTruthy();
     const loginBody = await loginRes.json();
