@@ -24,10 +24,14 @@ func sessionRevocationSuite(t *testing.T, a *Authenticator) {
 	// Seed canonical users so token_version queries and authorization
 	// snapshots find real rows on every engine (SQLite and PostgreSQL).
 	// CURRENT_TIMESTAMP is portable across both engines.
-	if _, err := sqlDB.Exec(`INSERT INTO users (id, created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'sess5@test.local', 'h', 'tenant_admin', 1, 1, 1)`); err != nil {
+	// TRUE/FALSE are portable SQL boolean literals on both SQLite (stored as
+	// integer 1/0 internally) and PostgreSQL (native boolean type). A plain
+	// integer literal (1) fails on PostgreSQL with "column \"active\" is of
+	// type boolean but expression is of type integer" (SQLSTATE 42804).
+	if _, err := sqlDB.Exec(`INSERT INTO users (id, created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'sess5@test.local', 'h', 'tenant_admin', 1, TRUE, TRUE)`); err != nil {
 		t.Fatalf("seed user 5: %v", err)
 	}
-	if _, err := sqlDB.Exec(`INSERT INTO users (id, created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'sess7@test.local', 'h', 'tenant_admin', 1, 1, 1)`); err != nil {
+	if _, err := sqlDB.Exec(`INSERT INTO users (id, created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'sess7@test.local', 'h', 'tenant_admin', 1, TRUE, TRUE)`); err != nil {
 		t.Fatalf("seed user 7: %v", err)
 	}
 	d := a.dbDialect()
