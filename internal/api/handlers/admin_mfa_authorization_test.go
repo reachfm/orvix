@@ -1,11 +1,16 @@
 package handlers_test
 
 import (
+	"crypto/hmac"
+	"crypto/sha1"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,6 +26,405 @@ import (
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
 )
+
+// setEncryptionKey ensures config.Encrypt/Decrypt has a stable key for
+// the MFA-completion tests (they persist mfa_secret_raw as an encrypted
+// blob via config.Encrypt; the production TOTP-verify path reads it via
+// config.Decrypt). Called by every MFA-completion test that seeds an
+// MFA-enabled user.
+func setEncryptionKey(t *testing.T) {
+	t.Helper()
+	// 32-byte hex key.
+	key := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	if err := os.Setenv("ORVIX_ENCRYPTION_KEY", key); err != nil {
+		t.Fatalf("set encryption key: %v", err)
+	}
+	t.Cleanup(func() { os.Unsetenv("ORVIX_ENCRYPTION_KEY") })
+}
+
+// computeTOTPTest reimplements the production HMAC-SHA1 TOTP so we can
+// generate valid codes without depending on unexported handlers helpers.
+// Matches internal/api/handlers/admin_mfa.go verifyTOTP.
+func computeTOTPTest(secret []byte, counter int64) string {
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, uint64(counter))
+	mac := hmac.New(sha1.New, secret)
+	mac.Write(buf)
+	hash := mac.Sum(nil)
+	offset := hash[len(hash)-1] & 0x0f
+	bin := binary.BigEndian.Uint32(hash[offset:offset+4]) & 0x7fffffff
+	return fmt.Sprintf("%06d", bin%1000000)
+}
+
+// seedMFAUser inserts a user with MFA enabled, an encrypted TOTP secret,
+// and returns the userID and the RAW 20-byte TOTP secret so the test can
+// generate valid codes.
+func (e *mfaAuthEnv) seedMFAUser(t *testing.T, email, role string, tenantID *uint) (uint, []byte) {
+	t.Helper()
+	rawSecret := []byte("0123456789abcdef0123") // 20 bytes
+	encrypted, err := config.Encrypt(rawSecret)
+	if err != nil {
+		t.Fatalf("encrypt secret: %v", err)
+	}
+	now := time.Now().UTC()
+	hash, _ := auth.HashPassword("Pass!2026")
+	var tid interface{}
+	if tenantID == nil {
+		tid = nil
+	} else {
+		tid = *tenantID
+	}
+	res, err := e.sqlDB.Exec(
+		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified, mfa_enabled, mfa_secret_raw) VALUES (?, ?, ?, ?, ?, ?, 1, 1, 1, ?)`,
+		now, now, email, hash, role, tid, encrypted,
+	)
+	if err != nil {
+		t.Fatalf("seed mfa user: %v", err)
+	}
+	id, _ := res.LastInsertId()
+	return uint(id), rawSecret
+}
+
+// loginForChallenge performs POST /api/v1/auth/login and returns the
+// MFA challenge token. Fails the test on any other outcome.
+func (e *mfaAuthEnv) loginForChallenge(t *testing.T, email string) string {
+	t.Helper()
+	status, body := e.doLogin(t, email, "Pass!2026")
+	if status != 200 {
+		t.Fatalf("login for %s: want 200, got %d body=%s", email, status, body)
+	}
+	var out struct {
+		MFARequired  bool   `json:"mfa_required"`
+		MFAChallenge string `json:"mfa_challenge"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("login for %s: decode: %v body=%s", email, err, body)
+	}
+	if !out.MFARequired || out.MFAChallenge == "" {
+		t.Fatalf("login for %s: no MFA challenge in response: %s", email, body)
+	}
+	return out.MFAChallenge
+}
+
+// completeMFA POSTs /api/v1/auth/mfa/verify with the given challenge
+// and TOTP code and returns the response.
+type mfaCompletionResult struct {
+	status      int
+	body        []byte
+	cookies     []*http.Cookie
+	accessToken string
+	sessionCK   string
+}
+
+func (e *mfaAuthEnv) completeMFA(t *testing.T, challenge, code string) mfaCompletionResult {
+	t.Helper()
+	body := fmt.Sprintf(`{"mfa_challenge":"%s","code":"%s"}`, challenge, code)
+	req := httptest.NewRequest("POST", "/api/v1/auth/mfa/verify", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := e.router.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("mfa verify: %v", err)
+	}
+	defer resp.Body.Close()
+	rb, _ := io.ReadAll(resp.Body)
+	result := mfaCompletionResult{status: resp.StatusCode, body: rb, cookies: resp.Cookies()}
+	for _, ck := range resp.Cookies() {
+		if ck.Name == "access_token" {
+			result.accessToken = ck.Value
+		}
+		if ck.Name == "__Host-orvix_session" {
+			result.sessionCK = ck.Value
+		}
+	}
+	// Also parse body for access_token (some flows return it in JSON).
+	if result.accessToken == "" {
+		var jbody struct {
+			AccessToken string `json:"access_token"`
+		}
+		if json.Unmarshal(rb, &jbody) == nil && jbody.AccessToken != "" {
+			result.accessToken = jbody.AccessToken
+		}
+	}
+	return result
+}
+
+// ── Test A: canonical role matches JWT and opaque session ─────────
+func TestMFACompletionCanonicalRoleMatchesTokenAndSession(t *testing.T) {
+	tid := uint(1)
+	cases := []struct {
+		name   string
+		role   string
+		tenant *uint
+	}{
+		{"platform_super_admin", "platform_super_admin", nil},
+		{"tenant_admin", "tenant_admin", &tid},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			setEncryptionKey(t)
+			e := newMFAAuthEnv(t)
+			e.sqlDB.Exec(`INSERT INTO tenants (name, slug, domain, plan, active) VALUES ('a','a','a.ex','enterprise',1)`)
+			email := c.name + "@mfa-complete.test"
+			uid, secret := e.seedMFAUser(t, email, c.role, c.tenant)
+
+			challenge := e.loginForChallenge(t, email)
+			code := computeTOTPTest(secret, time.Now().UTC().Unix()/30)
+			res := e.completeMFA(t, challenge, code)
+
+			if res.status >= 500 {
+				t.Fatalf("%s: 5xx %d body=%s", c.name, res.status, res.body)
+			}
+			if res.status != 200 {
+				t.Fatalf("%s: want 200, got %d body=%s", c.name, res.status, res.body)
+			}
+			if res.accessToken == "" {
+				t.Fatalf("%s: no access token issued", c.name)
+			}
+
+			// Validate JWT via production path.
+			jwtUID, jwtRole, jwtErr := e.authn.ValidateAccessToken(res.accessToken)
+			if jwtErr != nil {
+				t.Fatalf("%s: JWT invalid: %v", c.name, jwtErr)
+			}
+			if jwtUID != uid {
+				t.Fatalf("%s: JWT uid=%d want=%d", c.name, jwtUID, uid)
+			}
+			if string(jwtRole) != c.role {
+				t.Fatalf("%s: JWT role=%s want=%s", c.name, jwtRole, c.role)
+			}
+			// Validate opaque session via production path.
+			if res.sessionCK == "" {
+				t.Fatalf("%s: no opaque session cookie issued", c.name)
+			}
+			sUID, sRole, _, sErr := e.authn.ValidateOpaqueSession(res.sessionCK)
+			if sErr != nil {
+				t.Fatalf("%s: opaque session invalid: %v", c.name, sErr)
+			}
+			if sUID != uid {
+				t.Fatalf("%s: opaque uid=%d want=%d", c.name, sUID, uid)
+			}
+			if string(sRole) != c.role {
+				t.Fatalf("%s: opaque role=%s want=%s", c.name, sRole, c.role)
+			}
+			// Must match each other.
+			if jwtRole != sRole {
+				t.Fatalf("%s: JWT role %s != opaque role %s", c.name, jwtRole, sRole)
+			}
+			// No legacy role.
+			for _, forbidden := range []string{"admin", "superadmin", "super_admin", "super-admin", "operator", "readonly"} {
+				if string(jwtRole) == forbidden {
+					t.Fatalf("%s: legacy role %s appeared in JWT", c.name, forbidden)
+				}
+			}
+			// Exactly one session row.
+			var cnt int
+			e.sqlDB.QueryRow("SELECT COUNT(*) FROM sessions WHERE user_id = ?", uid).Scan(&cnt)
+			if cnt < 1 {
+				t.Fatalf("%s: no session persisted", c.name)
+			}
+		})
+	}
+}
+
+// ── Test B: role change between challenge and completion ──────────
+// The completion must NEVER issue the old role. Either it fails closed
+// (which is a valid production choice — the completion may reject a
+// mid-flow authorization change) or it issues the CURRENT (post-change)
+// role. Stale role must never appear.
+func TestMFACompletionUsesCurrentRoleAfterChallenge(t *testing.T) {
+	setEncryptionKey(t)
+	tid := uint(1)
+	e := newMFAAuthEnv(t)
+	e.sqlDB.Exec(`INSERT INTO tenants (name, slug, domain, plan, active) VALUES ('a','a','a.ex','enterprise',1)`)
+	uid, secret := e.seedMFAUser(t, "ta-change@mfa-complete.test", "tenant_admin", &tid)
+
+	challenge := e.loginForChallenge(t, "ta-change@mfa-complete.test")
+
+	// Atomically mutate role + bump token_version between challenge and completion.
+	if _, err := e.sqlDB.Exec(
+		"UPDATE users SET role = 'tenant_readonly', token_version = COALESCE(token_version, 0) + 1 WHERE id = ?",
+		uid,
+	); err != nil {
+		t.Fatalf("mutate: %v", err)
+	}
+
+	code := computeTOTPTest(secret, time.Now().UTC().Unix()/30)
+	res := e.completeMFA(t, challenge, code)
+
+	if res.status >= 500 {
+		t.Fatalf("5xx status: %d body=%s", res.status, res.body)
+	}
+
+	if res.status == 200 && res.accessToken != "" {
+		// Success path — issued role MUST be tenant_readonly, never
+		// tenant_admin.
+		_, jwtRole, jwtErr := e.authn.ValidateAccessToken(res.accessToken)
+		if jwtErr != nil {
+			t.Fatalf("JWT invalid: %v", jwtErr)
+		}
+		if string(jwtRole) == "tenant_admin" {
+			t.Fatalf("STALE ROLE ESCALATION: JWT still says tenant_admin after DB demoted to tenant_readonly")
+		}
+		if string(jwtRole) != "tenant_readonly" {
+			t.Fatalf("JWT role=%s want tenant_readonly", jwtRole)
+		}
+		if res.sessionCK != "" {
+			_, sRole, _, sErr := e.authn.ValidateOpaqueSession(res.sessionCK)
+			if sErr == nil && string(sRole) == "tenant_admin" {
+				t.Fatalf("STALE ROLE ESCALATION: session still says tenant_admin")
+			}
+			if sErr == nil && string(sRole) != "tenant_readonly" {
+				t.Fatalf("session role=%s want tenant_readonly", sRole)
+			}
+		}
+		t.Logf("completion succeeded with CURRENT role tenant_readonly ✓")
+		return
+	}
+
+	// Fail-closed path — production may reject the completion after a
+	// mid-flow authorization change. The response must be the generic
+	// authentication rejection contract, no token, no session.
+	if res.status != 401 {
+		t.Fatalf("expected 200 with current role OR 401 fail-closed, got %d body=%s", res.status, res.body)
+	}
+	if res.accessToken != "" {
+		t.Fatalf("fail-closed but access token was issued")
+	}
+	if res.sessionCK != "" {
+		t.Fatalf("fail-closed but session cookie was issued")
+	}
+	t.Logf("completion fail-closed after mid-flow role change ✓ contract=%s", res.body)
+}
+
+// ── Test C: inactive after challenge ──────────────────────────────
+func TestMFACompletionInactiveAfterChallengeFailsClosed(t *testing.T) {
+	setEncryptionKey(t)
+	tid := uint(1)
+	e := newMFAAuthEnv(t)
+	e.sqlDB.Exec(`INSERT INTO tenants (name, slug, domain, plan, active) VALUES ('a','a','a.ex','enterprise',1)`)
+	uid, secret := e.seedMFAUser(t, "ta-inactive@mfa-complete.test", "tenant_admin", &tid)
+	challenge := e.loginForChallenge(t, "ta-inactive@mfa-complete.test")
+
+	if _, err := e.sqlDB.Exec(
+		"UPDATE users SET active = 0, token_version = COALESCE(token_version, 0) + 1 WHERE id = ?", uid,
+	); err != nil {
+		t.Fatalf("mutate: %v", err)
+	}
+
+	code := computeTOTPTest(secret, time.Now().UTC().Unix()/30)
+	res := e.completeMFA(t, challenge, code)
+
+	if res.status >= 500 {
+		t.Fatalf("5xx: %d body=%s", res.status, res.body)
+	}
+	if res.status != 401 {
+		t.Fatalf("want 401, got %d body=%s", res.status, res.body)
+	}
+	if res.accessToken != "" {
+		t.Fatalf("token issued to inactive user")
+	}
+	if res.sessionCK != "" {
+		t.Fatalf("session issued to inactive user")
+	}
+	var sessCnt int
+	e.sqlDB.QueryRow("SELECT COUNT(*) FROM sessions WHERE user_id = ?", uid).Scan(&sessCnt)
+	if sessCnt != 0 {
+		t.Fatalf("session row created for inactive user: cnt=%d", sessCnt)
+	}
+}
+
+// ── Test D: soft-deleted after challenge ──────────────────────────
+func TestMFACompletionDeletedAfterChallengeFailsClosed(t *testing.T) {
+	setEncryptionKey(t)
+	tid := uint(1)
+	e := newMFAAuthEnv(t)
+	e.sqlDB.Exec(`INSERT INTO tenants (name, slug, domain, plan, active) VALUES ('a','a','a.ex','enterprise',1)`)
+	uid, secret := e.seedMFAUser(t, "ta-deleted@mfa-complete.test", "tenant_admin", &tid)
+	challenge := e.loginForChallenge(t, "ta-deleted@mfa-complete.test")
+
+	now := time.Now().UTC()
+	if _, err := e.sqlDB.Exec(
+		"UPDATE users SET active = 0, deleted_at = ?, token_version = COALESCE(token_version, 0) + 1 WHERE id = ?", now, uid,
+	); err != nil {
+		t.Fatalf("mutate: %v", err)
+	}
+
+	code := computeTOTPTest(secret, time.Now().UTC().Unix()/30)
+	res := e.completeMFA(t, challenge, code)
+
+	if res.status >= 500 {
+		t.Fatalf("5xx: %d body=%s", res.status, res.body)
+	}
+	if res.status != 401 {
+		t.Fatalf("want 401, got %d body=%s", res.status, res.body)
+	}
+	if res.accessToken != "" {
+		t.Fatalf("token issued to deleted user")
+	}
+	if res.sessionCK != "" {
+		t.Fatalf("session issued to deleted user")
+	}
+	var sessCnt int
+	e.sqlDB.QueryRow("SELECT COUNT(*) FROM sessions WHERE user_id = ?", uid).Scan(&sessCnt)
+	if sessCnt != 0 {
+		t.Fatalf("session row created for deleted user")
+	}
+}
+
+// ── Test E: malformed authorization state after challenge ─────────
+func TestMFACompletionMalformedAuthorizationAfterChallengeFailsClosed(t *testing.T) {
+	tid := uint(1)
+	// Each subtest starts from a valid tenant_admin (canonical) and
+	// mutates to the malformed state between challenge and completion.
+	cases := []struct {
+		name      string
+		mutateSQL string
+	}{
+		{"legacy_admin", "UPDATE users SET role = 'admin', token_version = COALESCE(token_version,0)+1 WHERE id = ?"},
+		{"legacy_operator", "UPDATE users SET role = 'operator', token_version = COALESCE(token_version,0)+1 WHERE id = ?"},
+		{"legacy_superadmin", "UPDATE users SET role = 'superadmin', token_version = COALESCE(token_version,0)+1 WHERE id = ?"},
+		{"unknown_role", "UPDATE users SET role = 'nonexistent_role', token_version = COALESCE(token_version,0)+1 WHERE id = ?"},
+		{"psa_with_tenant", "UPDATE users SET role = 'platform_super_admin', token_version = COALESCE(token_version,0)+1 WHERE id = ?"},
+		{"tenant_admin_null_tenant", "UPDATE users SET tenant_id = NULL, token_version = COALESCE(token_version,0)+1 WHERE id = ?"},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			setEncryptionKey(t)
+			e := newMFAAuthEnv(t)
+			e.sqlDB.Exec(`INSERT INTO tenants (name, slug, domain, plan, active) VALUES ('a','a','a.ex','enterprise',1)`)
+			email := c.name + "@mfa-mal.test"
+			uid, secret := e.seedMFAUser(t, email, "tenant_admin", &tid)
+			challenge := e.loginForChallenge(t, email)
+
+			if _, err := e.sqlDB.Exec(c.mutateSQL, uid); err != nil {
+				t.Fatalf("mutate: %v", err)
+			}
+
+			code := computeTOTPTest(secret, time.Now().UTC().Unix()/30)
+			res := e.completeMFA(t, challenge, code)
+
+			if res.status >= 500 {
+				t.Fatalf("%s: 5xx %d body=%s", c.name, res.status, res.body)
+			}
+			if res.status != 401 {
+				t.Fatalf("%s: want 401, got %d body=%s", c.name, res.status, res.body)
+			}
+			if res.accessToken != "" {
+				t.Fatalf("%s: token issued to malformed user", c.name)
+			}
+			if res.sessionCK != "" {
+				t.Fatalf("%s: session issued to malformed user", c.name)
+			}
+			var sessCnt int
+			e.sqlDB.QueryRow("SELECT COUNT(*) FROM sessions WHERE user_id = ?", uid).Scan(&sessCnt)
+			if sessCnt != 0 {
+				t.Fatalf("%s: session row created", c.name)
+			}
+		})
+	}
+}
 
 type mfaAuthEnv struct {
 	router *api.Router

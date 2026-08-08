@@ -668,7 +668,9 @@ func (h *Handler) ensureWebmailUser(dial *dbdialect.Info, sqlDB *sql.DB, email s
 // Rules (in order):
 //
 //	A. Existing role == desired canonical role         → no-op, return id
-//	B. Existing role == PSA with NULL tenant           → no-op, return id
+//	B. Existing role == platform_super_admin           → FAIL CLOSED
+//	   (regardless of tenant binding or isAdmin — PSA is a platform
+//	   principal that must never authenticate through a tenant mailbox)
 //	C. Cross-tenant mismatch                            → fail closed
 //	D. Existing role == legacy 'admin' + isAdmin=true  → atomic reconcile
 //	   to tenant_admin + token_version bump
@@ -687,9 +689,14 @@ func (h *Handler) reconcileWebmailUser(dial *dbdialect.Info, sqlDB *sql.DB, user
 	).Scan(&existingTenant, &existingRole, &active, &deletedAt); err != nil {
 		return 0, fmt.Errorf("query existing user state: %w", err)
 	}
-	// B. PSA with NULL tenant: never demote/rebind.
-	if !existingTenant.Valid && existingRole == string(auth.RolePlatformSuperAdmin) {
-		return userID, nil
+	// B. platform_super_admin fails closed regardless of tenant binding
+	// or isAdmin. PSA is a separate security principal from any Webmail
+	// identity; allowing a Webmail login to succeed under the PSA row
+	// (even as no-op) would let a platform identity ride a tenant
+	// mailbox's authentication surface. Never rebind, never rewrite,
+	// never enable a token — return a plain error and no user id.
+	if existingRole == string(auth.RolePlatformSuperAdmin) {
+		return 0, fmt.Errorf("platform_super_admin cannot authenticate via a tenant mailbox")
 	}
 	// C. Cross-tenant mismatch fails closed.
 	if existingTenant.Valid && existingTenant.Int64 > 0 && uint(existingTenant.Int64) != tenantID {

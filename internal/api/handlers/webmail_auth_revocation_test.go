@@ -291,25 +291,50 @@ func TestWebmailCrossTenantExistingUserFailsClosed(t *testing.T) {
 }
 
 func TestWebmailPlatformSuperAdminNotRebound(t *testing.T) {
-	sqlDB, _ := newWebmailRevocationAuth(t)
-	now := time.Now().UTC()
-	sqlDB.Exec(`INSERT INTO tenants (id, name, slug, domain, plan, active, created_at, updated_at) VALUES (1, 'a', 'a', 'a.example', 'enterprise', 1, ?, ?)`, now, now)
-	sqlDB.Exec(`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified, token_version) VALUES (?, ?, 'webmail-psa@example.test', 'h', 'platform_super_admin', NULL, 1, 1, 10)`, now, now)
-	dial := dbdialect.FromDriver("sqlite")
-	h := &Handler{}
-	returnedID, err := h.ensureWebmailUser(dial, sqlDB, "webmail-psa@example.test", 1, true)
-	if err != nil {
-		t.Fatalf("PSA: expected success (no-op), got %v", err)
-	}
-	if returnedID == 0 {
-		t.Fatal("PSA: returned 0")
-	}
-	var role string
-	var tid sql.NullInt64
-	var tv int64
-	sqlDB.QueryRow("SELECT role, tenant_id, COALESCE(token_version,0) FROM users WHERE email='webmail-psa@example.test'").Scan(&role, &tid, &tv)
-	if role != "platform_super_admin" || tid.Valid || tv != 10 {
-		t.Fatalf("PSA mutated: role=%s tid=%v tv=%d", role, tid, tv)
+	// PSA must NEVER authenticate through a tenant mailbox — for either
+	// isAdmin value. ensureWebmailUser must return a non-nil error, a
+	// zero user id, and leave every field of the PSA row untouched.
+	for _, isAdmin := range []bool{true, false} {
+		isAdmin := isAdmin
+		name := "isAdmin=false"
+		if isAdmin {
+			name = "isAdmin=true"
+		}
+		t.Run(name, func(t *testing.T) {
+			sqlDB, _ := newWebmailRevocationAuth(t)
+			now := time.Now().UTC()
+			sqlDB.Exec(`INSERT INTO tenants (id, name, slug, domain, plan, active, created_at, updated_at) VALUES (1, 'a', 'a', 'a.example', 'enterprise', 1, ?, ?)`, now, now)
+			sqlDB.Exec(`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified, token_version) VALUES (?, ?, 'webmail-psa@example.test', 'h', 'platform_super_admin', NULL, 1, 1, 10)`, now, now)
+
+			var beforeCnt int
+			sqlDB.QueryRow("SELECT COUNT(*) FROM users WHERE email='webmail-psa@example.test'").Scan(&beforeCnt)
+
+			dial := dbdialect.FromDriver("sqlite")
+			h := &Handler{}
+			returnedID, err := h.ensureWebmailUser(dial, sqlDB, "webmail-psa@example.test", 1, isAdmin)
+			if err == nil {
+				t.Fatalf("PSA %s: expected error, got success returnedID=%d", name, returnedID)
+			}
+			if returnedID != 0 {
+				t.Fatalf("PSA %s: expected returned id 0, got %d", name, returnedID)
+			}
+			var afterCnt int
+			sqlDB.QueryRow("SELECT COUNT(*) FROM users WHERE email='webmail-psa@example.test'").Scan(&afterCnt)
+			if afterCnt != beforeCnt || afterCnt != 1 {
+				t.Fatalf("PSA %s: user row count mutated: before=%d after=%d", name, beforeCnt, afterCnt)
+			}
+			var role string
+			var tid sql.NullInt64
+			var tv int64
+			var active bool
+			var deletedAt sql.NullTime
+			sqlDB.QueryRow("SELECT role, tenant_id, COALESCE(token_version,0), active, deleted_at FROM users WHERE email='webmail-psa@example.test'").
+				Scan(&role, &tid, &tv, &active, &deletedAt)
+			if role != "platform_super_admin" || tid.Valid || tv != 10 || !active || deletedAt.Valid {
+				t.Fatalf("PSA %s mutated: role=%s tid_valid=%v tv=%d active=%v deleted_valid=%v",
+					name, role, tid.Valid, tv, active, deletedAt.Valid)
+			}
+		})
 	}
 }
 
