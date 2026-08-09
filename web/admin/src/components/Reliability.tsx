@@ -7,18 +7,18 @@ import ConfirmDialog from "./ConfirmDialog";
 type Tab = "backups" | "updates" | "monitoring" | "storage" | "cluster";
 
 function Loading() {
-  return <div className="flex items-center justify-center h-32"><Loader2 size={20} className="text-[#4F7CFF] animate-spin" /></div>;
+  return <div className="flex items-center justify-center h-32"><Loader2 size={20} className="text-[var(--accent)] animate-spin" /></div>;
 }
 function ErrorBox({ error }: { error: unknown }) {
   return (
-    <div className="bg-[#13161C] border border-[#F87171]/30 rounded-xl p-4 flex items-center gap-3">
-      <AlertCircle size={18} className="text-[#F87171]" />
-      <span className="text-[#F87171] text-sm">{(error as Error)?.message || "Failed to load"}</span>
+    <div className="bg-[var(--bg-surface)] border border-[var(--danger)]/30 rounded-xl p-4 flex items-center gap-3">
+      <AlertCircle size={18} className="text-[var(--danger)]" />
+      <span className="text-[var(--danger)] text-sm">{(error as Error)?.message || "Failed to load"}</span>
     </div>
   );
 }
 function Empty({ text }: { text: string }) {
-  return <div className="bg-[#13161C] border border-[#2A2F3E] rounded-xl p-6 text-center text-[#8B92A8] text-sm">{text}</div>;
+  return <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-6 text-center text-[var(--text-secondary)] text-sm">{text}</div>;
 }
 
 function BackupsTab() {
@@ -47,32 +47,32 @@ function BackupsTab() {
   return (
     <div>
       <div className="flex items-center justify-between mb-4">
-        <div className="flex gap-4 text-xs text-[#8B92A8]">
-          {healthQ.data && <span>Health: <span className="text-[#E8EAF0]">{String(healthQ.data.status ?? healthQ.data.ok ?? "unknown")}</span></span>}
-          {metricsQ.data && <span>Total: <span className="text-[#E8EAF0]">{metricsQ.data.total_backups ?? metricsQ.data.total ?? "—"}</span></span>}
-          {scheduleQ.data && <span>Schedule: <span className="text-[#E8EAF0]">{scheduleQ.data.cron ?? scheduleQ.data.schedule ?? "unset"}</span></span>}
+        <div className="flex gap-4 text-xs text-[var(--text-secondary)]">
+          {healthQ.data && <span>Health: <span className="text-[var(--text-primary)]">{String(healthQ.data.status ?? healthQ.data.ok ?? "unknown")}</span></span>}
+          {metricsQ.data && <span>Total: <span className="text-[var(--text-primary)]">{metricsQ.data.total_backups ?? metricsQ.data.total ?? "—"}</span></span>}
+          {scheduleQ.data && <span>Schedule: <span className="text-[var(--text-primary)]">{scheduleQ.data.cron ?? scheduleQ.data.schedule ?? "unset"}</span></span>}
         </div>
         <div className="flex gap-2">
-          <button disabled={createMut.isPending} onClick={() => createMut.mutate()} className="px-3 py-1.5 text-xs bg-[#4F7CFF] text-white rounded disabled:opacity-50">Create backup</button>
-          <button disabled={nowMut.isPending} onClick={() => nowMut.mutate()} className="px-3 py-1.5 text-xs bg-[#222736] text-[#E8EAF0] rounded disabled:opacity-50">Run now</button>
-          <button onClick={() => setConfirm({ id: "retention", kind: "retention" })} className="px-3 py-1.5 text-xs bg-[#222736] text-[#E8EAF0] rounded">Run retention</button>
+          <button disabled={createMut.isPending} onClick={() => createMut.mutate()} className="px-3 py-1.5 text-xs bg-[var(--accent)] text-white rounded disabled:opacity-50">Create backup</button>
+          <button disabled={nowMut.isPending} onClick={() => nowMut.mutate()} className="px-3 py-1.5 text-xs bg-[var(--bg-subtle)] text-[var(--text-primary)] rounded disabled:opacity-50">Run now</button>
+          <button onClick={() => setConfirm({ id: "retention", kind: "retention" })} className="px-3 py-1.5 text-xs bg-[var(--bg-subtle)] text-[var(--text-primary)] rounded">Run retention</button>
         </div>
       </div>
 
       {listQ.isLoading ? <Loading /> : listQ.error ? <ErrorBox error={listQ.error} /> : backups.length === 0 ? <Empty text="No backups found" /> : (
-        <div className="bg-[#13161C] border border-[#2A2F3E] rounded-xl overflow-hidden">
+        <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl overflow-hidden">
           <table className="w-full text-sm">
-            <thead><tr className="border-b border-[#2A2F3E]"><th className="text-left p-3 text-[#8B92A8]">Name</th><th className="text-left p-3 text-[#8B92A8]">Status</th><th className="text-right p-3 text-[#8B92A8]">Actions</th></tr></thead>
+            <thead><tr className="border-b border-[var(--border)]"><th className="text-left p-3 text-[var(--text-secondary)]">Name</th><th className="text-left p-3 text-[var(--text-secondary)]">Status</th><th className="text-right p-3 text-[var(--text-secondary)]">Actions</th></tr></thead>
             <tbody>
               {backups.map((b: any) => (
-                <tr key={b.id} className="border-b border-[#2A2F3E] hover:bg-[#1A1E26]">
-                  <td className="p-3 text-[#E8EAF0]">{b.name || b.id}</td>
-                  <td className="p-3 text-[#8B92A8]">{b.status}</td>
+                <tr key={b.id} className="border-b border-[var(--border)] hover:bg-[var(--bg-elevated)]">
+                  <td className="p-3 text-[var(--text-primary)]">{b.name || b.id}</td>
+                  <td className="p-3 text-[var(--text-secondary)]">{b.status}</td>
                   <td className="p-3 text-right space-x-1">
-                    <a href={api.downloadBackupUrl(b.id)} title="Download" className="inline-block p-1.5 text-[#8B92A8] hover:text-[#4F7CFF]"><Download size={14} /></a>
-                    <button title="Validate" disabled={validateMut.isPending} onClick={() => validateMut.mutate(b.id)} className="p-1.5 text-[#8B92A8] hover:text-[#34D399]"><ShieldCheck size={14} /></button>
-                    <button title="Restore" onClick={() => setConfirm({ id: b.id, kind: "restore" })} className="p-1.5 text-[#8B92A8] hover:text-[#FBBF24]"><RefreshCw size={14} /></button>
-                    <button title="Delete" onClick={() => setConfirm({ id: b.id, kind: "delete" })} className="p-1.5 text-[#8B92A8] hover:text-[#F87171]"><Trash2 size={14} /></button>
+                    <a href={api.downloadBackupUrl(b.id)} title="Download" className="inline-block p-1.5 text-[var(--text-secondary)] hover:text-[var(--accent)]"><Download size={14} /></a>
+                    <button title="Validate" disabled={validateMut.isPending} onClick={() => validateMut.mutate(b.id)} className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--success)]"><ShieldCheck size={14} /></button>
+                    <button title="Restore" onClick={() => setConfirm({ id: b.id, kind: "restore" })} className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--warning)]"><RefreshCw size={14} /></button>
+                    <button title="Delete" onClick={() => setConfirm({ id: b.id, kind: "delete" })} className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--danger)]"><Trash2 size={14} /></button>
                   </td>
                 </tr>
               ))}
@@ -120,26 +120,26 @@ function UpdatesTab() {
   return (
     <div>
       <div className="flex items-center justify-between mb-4">
-        <div className="text-sm text-[#8B92A8]">
-          Status: <span className="text-[#E8EAF0]">{statusQ.data?.status ?? (statusQ.isLoading ? "…" : "unknown")}</span>
-          {checkQ.data?.available && <span className="ml-3 text-[#FBBF24]">Update available: {checkQ.data.latest_version}</span>}
+        <div className="text-sm text-[var(--text-secondary)]">
+          Status: <span className="text-[var(--text-primary)]">{statusQ.data?.status ?? (statusQ.isLoading ? "…" : "unknown")}</span>
+          {checkQ.data?.available && <span className="ml-3 text-[var(--warning)]">Update available: {checkQ.data.latest_version}</span>}
         </div>
         <div className="flex gap-2">
-          <button disabled={checkNowMut.isPending} onClick={() => checkNowMut.mutate()} className="px-3 py-1.5 text-xs bg-[#222736] text-[#E8EAF0] rounded disabled:opacity-50">Check now</button>
-          <button onClick={() => setConfirmRun(true)} className="px-3 py-1.5 text-xs bg-[#4F7CFF] text-white rounded">Run update</button>
+          <button disabled={checkNowMut.isPending} onClick={() => checkNowMut.mutate()} className="px-3 py-1.5 text-xs bg-[var(--bg-subtle)] text-[var(--text-primary)] rounded disabled:opacity-50">Check now</button>
+          <button onClick={() => setConfirmRun(true)} className="px-3 py-1.5 text-xs bg-[var(--accent)] text-white rounded">Run update</button>
         </div>
       </div>
       {preflightQ.data && (
-        <div className="bg-[#13161C] border border-[#2A2F3E] rounded-xl p-4 mb-4 text-sm text-[#8B92A8]">
-          Preflight: <span className="text-[#E8EAF0]">{preflightQ.data.ready === false ? "not ready" : "ready"}</span>
+        <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-4 mb-4 text-sm text-[var(--text-secondary)]">
+          Preflight: <span className="text-[var(--text-primary)]">{preflightQ.data.ready === false ? "not ready" : "ready"}</span>
         </div>
       )}
       {historyQ.isLoading ? <Loading /> : historyQ.error ? <ErrorBox error={historyQ.error} /> : history.length === 0 ? <Empty text="No update history" /> : (
-        <div className="bg-[#13161C] border border-[#2A2F3E] rounded-xl overflow-hidden">
+        <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl overflow-hidden">
           <table className="w-full text-sm">
-            <thead><tr className="border-b border-[#2A2F3E]"><th className="text-left p-3 text-[#8B92A8]">Version</th><th className="text-left p-3 text-[#8B92A8]">Result</th><th className="text-left p-3 text-[#8B92A8]">When</th></tr></thead>
+            <thead><tr className="border-b border-[var(--border)]"><th className="text-left p-3 text-[var(--text-secondary)]">Version</th><th className="text-left p-3 text-[var(--text-secondary)]">Result</th><th className="text-left p-3 text-[var(--text-secondary)]">When</th></tr></thead>
             <tbody>{history.map((h: any, i: number) => (
-              <tr key={i} className="border-b border-[#2A2F3E]"><td className="p-3 text-[#E8EAF0]">{h.version}</td><td className="p-3 text-[#8B92A8]">{h.result || h.status}</td><td className="p-3 text-[#8B92A8]">{h.applied_at || h.timestamp}</td></tr>
+              <tr key={i} className="border-b border-[var(--border)]"><td className="p-3 text-[var(--text-primary)]">{h.version}</td><td className="p-3 text-[var(--text-secondary)]">{h.result || h.status}</td><td className="p-3 text-[var(--text-secondary)]">{h.applied_at || h.timestamp}</td></tr>
             ))}</tbody>
           </table>
         </div>
@@ -174,25 +174,25 @@ function MonitoringTab() {
     <div>
       <div className="flex gap-1 mb-4">
         {(["alerts", "capacity", "snapshot", "providers", "deliveries"] as const).map((s) => (
-          <button key={s} onClick={() => setSub(s)} className={`px-3 py-1.5 text-xs rounded capitalize ${sub === s ? "bg-[#222736] text-[#E8EAF0]" : "text-[#8B92A8]"}`}>{s}</button>
+          <button key={s} onClick={() => setSub(s)} className={`px-3 py-1.5 text-xs rounded capitalize ${sub === s ? "bg-[var(--bg-subtle)] text-[var(--text-primary)]" : "text-[var(--text-secondary)]"}`}>{s}</button>
         ))}
-        <a href="/api/v1/metrics" target="_blank" rel="noreferrer" className="ml-auto px-3 py-1.5 text-xs text-[#4F7CFF] hover:underline">Open raw metrics</a>
+        <a href="/api/v1/metrics" target="_blank" rel="noreferrer" className="ml-auto px-3 py-1.5 text-xs text-[var(--accent)] hover:underline">Open raw metrics</a>
       </div>
       {sub === "alerts" && (alertsQ.isLoading ? <Loading /> : alertsQ.error ? <ErrorBox error={alertsQ.error} /> : alerts.length === 0 ? <Empty text="No active alerts" /> : (
-        <div className="bg-[#13161C] border border-[#2A2F3E] rounded-xl overflow-hidden">
-          <table className="w-full text-sm"><thead><tr className="border-b border-[#2A2F3E]"><th className="text-left p-3 text-[#8B92A8]">Alert</th><th className="text-left p-3 text-[#8B92A8]">Severity</th><th className="text-right p-3 text-[#8B92A8]">Action</th></tr></thead>
+        <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl overflow-hidden">
+          <table className="w-full text-sm"><thead><tr className="border-b border-[var(--border)]"><th className="text-left p-3 text-[var(--text-secondary)]">Alert</th><th className="text-left p-3 text-[var(--text-secondary)]">Severity</th><th className="text-right p-3 text-[var(--text-secondary)]">Action</th></tr></thead>
           <tbody>{alerts.map((a: any) => (
-            <tr key={a.id} className="border-b border-[#2A2F3E]"><td className="p-3 text-[#E8EAF0]">{a.title || a.name}</td><td className="p-3 text-[#8B92A8]">{a.severity}</td>
-              <td className="p-3 text-right"><button disabled={resolveMut.isPending} onClick={() => resolveMut.mutate(a.id)} className="text-xs text-[#4F7CFF] hover:underline">Resolve</button></td></tr>
+            <tr key={a.id} className="border-b border-[var(--border)]"><td className="p-3 text-[var(--text-primary)]">{a.title || a.name}</td><td className="p-3 text-[var(--text-secondary)]">{a.severity}</td>
+              <td className="p-3 text-right"><button disabled={resolveMut.isPending} onClick={() => resolveMut.mutate(a.id)} className="text-xs text-[var(--accent)] hover:underline">Resolve</button></td></tr>
           ))}</tbody></table>
         </div>
       ))}
-      {sub === "capacity" && (capacityQ.isLoading ? <Loading /> : capacityQ.error ? <ErrorBox error={capacityQ.error} /> : <pre className="bg-[#13161C] border border-[#2A2F3E] rounded-xl p-4 text-xs text-[#8B92A8] overflow-auto">{JSON.stringify(capacityQ.data, null, 2)}</pre>)}
-      {sub === "snapshot" && (snapshotQ.isLoading ? <Loading /> : snapshotQ.error ? <ErrorBox error={snapshotQ.error} /> : <pre className="bg-[#13161C] border border-[#2A2F3E] rounded-xl p-4 text-xs text-[#8B92A8] overflow-auto">{JSON.stringify(snapshotQ.data, null, 2)}</pre>)}
-      {sub === "providers" && (providersQ.isLoading ? <Loading /> : providersQ.error ? <ErrorBox error={providersQ.error} /> : <pre className="bg-[#13161C] border border-[#2A2F3E] rounded-xl p-4 text-xs text-[#8B92A8] overflow-auto">{JSON.stringify(providersQ.data, null, 2)}</pre>)}
+      {sub === "capacity" && (capacityQ.isLoading ? <Loading /> : capacityQ.error ? <ErrorBox error={capacityQ.error} /> : <pre className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-4 text-xs text-[var(--text-secondary)] overflow-auto">{JSON.stringify(capacityQ.data, null, 2)}</pre>)}
+      {sub === "snapshot" && (snapshotQ.isLoading ? <Loading /> : snapshotQ.error ? <ErrorBox error={snapshotQ.error} /> : <pre className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-4 text-xs text-[var(--text-secondary)] overflow-auto">{JSON.stringify(snapshotQ.data, null, 2)}</pre>)}
+      {sub === "providers" && (providersQ.isLoading ? <Loading /> : providersQ.error ? <ErrorBox error={providersQ.error} /> : <pre className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-4 text-xs text-[var(--text-secondary)] overflow-auto">{JSON.stringify(providersQ.data, null, 2)}</pre>)}
       {sub === "deliveries" && (deliveriesQ.isLoading ? <Loading /> : deliveriesQ.error ? <ErrorBox error={deliveriesQ.error} /> : (!deliveriesQ.data || deliveriesQ.data.length === 0) ? <Empty text="No alert deliveries" /> : (
-        <div className="bg-[#13161C] border border-[#2A2F3E] rounded-xl overflow-hidden"><table className="w-full text-sm"><tbody>{deliveriesQ.data.map((d: any, i: number) => (
-          <tr key={i} className="border-b border-[#2A2F3E]"><td className="p-3 text-[#E8EAF0]">{d.provider}</td><td className="p-3 text-[#8B92A8]">{d.status}</td></tr>
+        <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl overflow-hidden"><table className="w-full text-sm"><tbody>{deliveriesQ.data.map((d: any, i: number) => (
+          <tr key={i} className="border-b border-[var(--border)]"><td className="p-3 text-[var(--text-primary)]">{d.provider}</td><td className="p-3 text-[var(--text-secondary)]">{d.status}</td></tr>
         ))}</tbody></table></div>
       ))}
     </div>
@@ -205,9 +205,9 @@ function StorageTab() {
   return q.isLoading ? <Loading /> : q.error ? <ErrorBox error={q.error} /> : volumes.length === 0 ? <Empty text="No storage volumes reported" /> : (
     <div className="grid grid-cols-3 gap-4">
       {volumes.map((v: any, i: number) => (
-        <div key={i} className="bg-[#13161C] border border-[#2A2F3E] rounded-xl p-4">
-          <p className="text-sm font-medium text-[#E8EAF0] mb-1">{v.path || v.name}</p>
-          <p className="text-xs text-[#8B92A8]">{v.used_bytes ? `${(v.used_bytes / 1e9).toFixed(1)} GB used` : "usage unavailable"}</p>
+        <div key={i} className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-4">
+          <p className="text-sm font-medium text-[var(--text-primary)] mb-1">{v.path || v.name}</p>
+          <p className="text-xs text-[var(--text-secondary)]">{v.used_bytes ? `${(v.used_bytes / 1e9).toFixed(1)} GB used` : "usage unavailable"}</p>
         </div>
       ))}
     </div>
@@ -217,7 +217,7 @@ function StorageTab() {
 function ClusterTab() {
   const q = useQuery<any>({ queryKey: ["cluster-status"], queryFn: api.getClusterStatus });
   return q.isLoading ? <Loading /> : q.error ? <ErrorBox error={q.error} /> : (
-    <pre className="bg-[#13161C] border border-[#2A2F3E] rounded-xl p-4 text-xs text-[#8B92A8] overflow-auto">{JSON.stringify(q.data, null, 2)}</pre>
+    <pre className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-4 text-xs text-[var(--text-secondary)] overflow-auto">{JSON.stringify(q.data, null, 2)}</pre>
   );
 }
 
@@ -232,12 +232,12 @@ export default function Reliability() {
   ];
   return (
     <div>
-      <h2 className="text-2xl font-semibold mb-4 text-[#E8EAF0] flex items-center gap-2"><Server size={22} className="text-[#4F7CFF]" /> Reliability</h2>
-      <div className="flex gap-1 mb-6 border-b border-[#2A2F3E]">
+      <h2 className="text-2xl font-semibold mb-4 text-[var(--text-primary)] flex items-center gap-2"><Server size={22} className="text-[var(--accent)]" /> Reliability</h2>
+      <div className="flex gap-1 mb-6 border-b border-[var(--border)]">
         {tabs.map((t) => {
           const Icon = t.icon;
           return (
-            <button key={t.id} onClick={() => setTab(t.id)} className={`flex items-center gap-1.5 px-3 py-2 text-sm border-b-2 ${tab === t.id ? "border-[#4F7CFF] text-[#E8EAF0]" : "border-transparent text-[#8B92A8]"}`}>
+            <button key={t.id} onClick={() => setTab(t.id)} className={`flex items-center gap-1.5 px-3 py-2 text-sm border-b-2 ${tab === t.id ? "border-[var(--accent)] text-[var(--text-primary)]" : "border-transparent text-[var(--text-secondary)]"}`}>
               <Icon size={14} /> {t.label}
             </button>
           );

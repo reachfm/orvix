@@ -6,11 +6,25 @@
     <meta name="description" content="Orvix Admin Console" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>Orvix Admin Console</title>
-    <script type="module" crossorigin src="/admin/assets/index-C3weD9r3.js"></script>
+    <script>
+      // Pre-paint theme init: must run synchronously, before any CSS
+      // paints, to avoid a flash of the wrong theme. Light is the
+      // mandatory default — only an explicit prior "dark" choice in
+      // localStorage under orvix-admin-theme switches to dark. Kept in
+      // sync with src/shared/theme/theme.ts's getStoredTheme/applyTheme.
+      (function () {
+        try {
+          if (window.localStorage.getItem("orvix-admin-theme") === "dark") {
+            document.documentElement.classList.add("dark");
+          }
+        } catch (e) {}
+      })();
+    </script>
+    <script type="module" crossorigin src="/admin/assets/index-CHlMfhk0.js"></script>
     <link rel="modulepreload" crossorigin href="/admin/assets/vendor-D5-k-fij.js">
-    <link rel="stylesheet" crossorigin href="/admin/assets/index-DSOPFwlf.css">
+    <link rel="stylesheet" crossorigin href="/admin/assets/index-CB2TgrAp.css">
   </head>
-  <body class="bg-[#0C0E12] text-[#E8EAF0]">
+  <body class="bg-[var(--bg-base)] text-[var(--text-primary)]">
     <div id="root"></div>
   </body>
 </html>

@@ -59,9 +59,9 @@ function UsageCell({ used, limit }: { used?: number; limit?: number }) {
   const u = used ?? 0;
   const over = limit != null && limit > 0 && u >= limit;
   return (
-    <span className={over ? "text-[#FBBF24]" : "text-[#8B92A8]"}>
+    <span className={over ? "text-[var(--warning)]" : "text-[var(--text-secondary)]"}>
       {formatCount(u)}
-      <span className="text-[#555D73]"> / {limit != null && limit > 0 ? formatCount(limit) : "∞"}</span>
+      <span className="text-[var(--text-muted)]"> / {limit != null && limit > 0 ? formatCount(limit) : "∞"}</span>
     </span>
   );
 }
@@ -78,20 +78,20 @@ function UsageCell({ used, limit }: { used?: number; limit?: number }) {
 function DNSHealthCell({ d }: { d: EnterpriseDomain }) {
   const health = (d.dns_health || "").toLowerCase();
   if (!d.dns_last_checked_at) {
-    return <span className="text-[#555D73]">Not checked</span>;
+    return <span className="text-[var(--text-muted)]">Not checked</span>;
   }
   const color =
-    health === "pass" ? "#34D399"
-      : health === "warning" ? "#FBBF24"
-      : health === "fail" ? "#F87171"
-      : "#8B92A8";
+    health === "pass" ? "var(--success)"
+      : health === "warning" ? "var(--warning)"
+      : health === "fail" ? "var(--danger)"
+      : "var(--text-secondary)";
   return (
     <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
       <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: color }} />
       <span style={{ color }}>
         {typeof d.dns_score === "number" ? `${d.dns_score}%` : "Unavailable"}
       </span>
-      <span className="text-[#555D73] capitalize">{health || "unknown"}</span>
+      <span className="text-[var(--text-muted)] capitalize">{health || "unknown"}</span>
     </span>
   );
 }
@@ -100,7 +100,7 @@ function BoolBadge({ on, label }: { on?: boolean; label: string }) {
   return (
     <span
       className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] ${
-        on ? "bg-[#34D399]/10 text-[#34D399]" : "bg-[#555D73]/10 text-[#8B92A8]"
+        on ? "bg-[var(--success)]/10 text-[var(--success)]" : "bg-[var(--text-muted)]/10 text-[var(--text-secondary)]"
       }`}
     >
       {on ? <CheckCircle size={9} /> : <XCircle size={9} />}
@@ -116,10 +116,10 @@ function StatusBadge({ status }: { status: string }) {
     <span
       className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded-full ${
         isActive
-          ? "bg-[#34D399]/10 text-[#34D399]"
+          ? "bg-[var(--success)]/10 text-[var(--success)]"
           : isSuspended
-          ? "bg-[#F87171]/10 text-[#F87171]"
-          : "bg-[#FBBF24]/10 text-[#FBBF24]"
+          ? "bg-[var(--danger)]/10 text-[var(--danger)]"
+          : "bg-[var(--warning)]/10 text-[var(--warning)]"
       }`}
     >
       {isActive ? <CheckCircle size={9} /> : isSuspended ? <XCircle size={9} /> : <AlertTriangle size={9} />}
@@ -219,12 +219,12 @@ export default function Domains() {
     return next;
   };
 
-  if (isLoading && items.length === 0) return <p className="text-[#8B92A8]">Loading…</p>;
+  if (isLoading && items.length === 0) return <p className="text-[var(--text-secondary)]">Loading…</p>;
   if (error && items.length === 0) {
     return (
       <div className="flex flex-col gap-3">
-        <p className="text-[#F87171]">{errorMessage(error, "Failed to load domains.")}</p>
-        <button onClick={() => refetch()} className="text-sm text-[#4F7CFF] hover:underline text-left">
+        <p className="text-[var(--danger)]">{errorMessage(error, "Failed to load domains.")}</p>
+        <button onClick={() => refetch()} className="text-sm text-[var(--accent)] hover:underline text-left">
           Retry
         </button>
       </div>
@@ -235,26 +235,26 @@ export default function Domains() {
     <div>
       {/* ── Header ── */}
       <div className="flex flex-wrap items-center gap-3 mb-4">
-        <h2 className="text-lg font-semibold text-[#E8EAF0]">
-          Domains <span className="text-[#555D73] font-normal text-sm">({filtered.length})</span>
+        <h2 className="text-lg font-semibold text-[var(--text-primary)]">
+          Domains <span className="text-[var(--text-muted)] font-normal text-sm">({filtered.length})</span>
         </h2>
 
         <div className="relative ml-auto">
-          <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#555D73]" />
+          <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)]" />
           <input
             type="text"
             placeholder="Search domains…"
             aria-label="Search domains"
             value={search}
             onChange={(e) => { setSearch(e.target.value); setPage(0); }}
-            className="pl-8 pr-3 py-1.5 w-56 bg-[#1A1E26] border border-[#2A2F3E] rounded-lg text-[#E8EAF0] text-xs"
+            className="pl-8 pr-3 py-1.5 w-56 bg-[var(--bg-elevated)] border border-[var(--border)] rounded-lg text-[var(--text-primary)] text-xs"
           />
         </div>
 
         <button
           onClick={() => refetch()}
           aria-label="Refresh domains"
-          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 border border-[#2A2F3E] rounded-lg text-[#8B92A8] text-xs hover:text-[#E8EAF0] hover:bg-[#1A1E26]"
+          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 border border-[var(--border)] rounded-lg text-[var(--text-secondary)] text-xs hover:text-[var(--text-primary)] hover:bg-[var(--bg-elevated)]"
         >
           <RefreshCw size={13} className={isFetching ? "animate-spin" : ""} /> Refresh
         </button>
@@ -268,7 +268,7 @@ export default function Domains() {
         <button
           ref={addButtonRef}
           onClick={() => setShowWizard(true)}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#4F7CFF] text-white rounded-lg text-xs hover:bg-[#3B5FD9]"
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[var(--accent)] text-white rounded-lg text-xs hover:bg-[var(--accent-hover)]"
         >
           <Plus size={13} /> Add Domain
         </button>
@@ -276,60 +276,60 @@ export default function Domains() {
 
       {/* ── Table ── */}
       {filtered.length === 0 ? (
-        <div className="bg-[#13161C] border border-[#2A2F3E] rounded-xl p-8 text-center">
-          <Globe size={20} className="text-[#555D73] mx-auto mb-2" />
-          <p className="text-[#8B92A8] text-sm">
+        <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-8 text-center">
+          <Globe size={20} className="text-[var(--text-muted)] mx-auto mb-2" />
+          <p className="text-[var(--text-secondary)] text-sm">
             {items.length === 0 ? "No domains configured yet." : "No domains match your search."}
           </p>
         </div>
       ) : (
-        <div className="bg-[#13161C] border border-[#2A2F3E] rounded-xl overflow-hidden">
+        <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full text-xs border-collapse">
               <thead>
-                <tr className="border-b border-[#2A2F3E] bg-[#0F1218]">
+                <tr className="border-b border-[var(--border)] bg-[var(--bg-base)]">
                   <th className="w-6 px-1 py-2" />
-                  <th className="text-left font-medium text-[#8B92A8] px-3 py-2">Domain</th>
-                  <th className="text-right font-medium text-[#8B92A8] px-3 py-2">Aliases</th>
-                  <th className="text-right font-medium text-[#8B92A8] px-3 py-2">Mailboxes</th>
-                  <th className="text-right font-medium text-[#8B92A8] px-3 py-2">Storage</th>
-                  <th className="text-right font-medium text-[#8B92A8] px-3 py-2">Messages</th>
-                  <th className="text-left font-medium text-[#8B92A8] px-3 py-2">DKIM</th>
-                  <th className="text-left font-medium text-[#8B92A8] px-3 py-2">DMARC</th>
-                  <th className="text-left font-medium text-[#8B92A8] px-3 py-2">DNS health</th>
-                  <th className="text-left font-medium text-[#8B92A8] px-3 py-2">Status</th>
-                  <th className="text-right font-medium text-[#8B92A8] px-3 py-2">Actions</th>
+                  <th className="text-left font-medium text-[var(--text-secondary)] px-3 py-2">Domain</th>
+                  <th className="text-right font-medium text-[var(--text-secondary)] px-3 py-2">Aliases</th>
+                  <th className="text-right font-medium text-[var(--text-secondary)] px-3 py-2">Mailboxes</th>
+                  <th className="text-right font-medium text-[var(--text-secondary)] px-3 py-2">Storage</th>
+                  <th className="text-right font-medium text-[var(--text-secondary)] px-3 py-2">Messages</th>
+                  <th className="text-left font-medium text-[var(--text-secondary)] px-3 py-2">DKIM</th>
+                  <th className="text-left font-medium text-[var(--text-secondary)] px-3 py-2">DMARC</th>
+                  <th className="text-left font-medium text-[var(--text-secondary)] px-3 py-2">DNS health</th>
+                  <th className="text-left font-medium text-[var(--text-secondary)] px-3 py-2">Status</th>
+                  <th className="text-right font-medium text-[var(--text-secondary)] px-3 py-2">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {visible.map((d) => (
                   <Fragment key={d.id}>
-                    <tr className="border-b border-[#222736] hover:bg-[#161A21]">
+                    <tr className="border-b border-[var(--bg-subtle)] hover:bg-[var(--bg-surface)]">
                       <td className="px-1 py-2">
                         <button
                           onClick={() => setExpanded((s) => toggle(s, d.id))}
                           aria-label={`${expanded.has(d.id) ? "Collapse" : "Expand"} ${d.name}`}
                           aria-expanded={expanded.has(d.id)}
-                          className="text-[#8B92A8] hover:text-[#E8EAF0]"
+                          className="text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
                         >
                           {expanded.has(d.id) ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
                         </button>
                       </td>
-                      <td className="px-3 py-2 font-mono text-[#E8EAF0]">{d.name}</td>
+                      <td className="px-3 py-2 font-mono text-[var(--text-primary)]">{d.name}</td>
                       <td className="px-3 py-2 text-right">
                         <UsageCell used={d.alias_count} limit={d.max_aliases} />
                       </td>
                       <td className="px-3 py-2 text-right">
                         <UsageCell used={d.mailbox_count} limit={d.max_mailboxes} />
                       </td>
-                      <td className="px-3 py-2 text-right text-[#8B92A8] whitespace-nowrap">
+                      <td className="px-3 py-2 text-right text-[var(--text-secondary)] whitespace-nowrap">
                         {formatBytes(d.storage_used_bytes)}
-                        <span className="text-[#555D73]">
+                        <span className="text-[var(--text-muted)]">
                           {" / "}
                           {d.storage_limit_bytes ? formatBytes(d.storage_limit_bytes) : "∞"}
                         </span>
                       </td>
-                      <td className="px-3 py-2 text-right text-[#8B92A8]">{formatCount(d.message_count)}</td>
+                      <td className="px-3 py-2 text-right text-[var(--text-secondary)]">{formatCount(d.message_count)}</td>
                       <td className="px-3 py-2">
                         <BoolBadge on={d.dkim_enabled} label={d.dkim_enabled ? "Enabled" : "Off"} />
                       </td>
@@ -352,14 +352,14 @@ export default function Domains() {
                             ref={(el) => { dnsButtonRefs.current[d.id] = el; }}
                             onClick={() => setDnsDomain(d)}
                             aria-label={`Open DNS records for ${d.name}`}
-                            className="px-2 py-1 rounded border border-[#2A2F3E] text-[#4F7CFF] hover:bg-[#1A1E26]"
+                            className="px-2 py-1 rounded border border-[var(--border)] text-[var(--accent)] hover:bg-[var(--bg-elevated)]"
                           >
                             DNS
                           </button>
                           <button
                             onClick={() => setConfirmDelete(d)}
                             aria-label={`Delete ${d.name}`}
-                            className="p-1 rounded text-[#F87171] hover:bg-[#1A1E26]"
+                            className="p-1 rounded text-[var(--danger)] hover:bg-[var(--bg-elevated)]"
                           >
                             <Trash2 size={13} />
                           </button>
@@ -367,35 +367,35 @@ export default function Domains() {
                       </td>
                     </tr>
                     {expanded.has(d.id) && (
-                      <tr className="border-b border-[#222736] bg-[#0F1218]">
+                      <tr className="border-b border-[var(--bg-subtle)] bg-[var(--bg-base)]">
                         <td colSpan={11} className="px-10 py-3">
                           <dl className="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-1.5 text-[11px]">
                             <div>
-                              <dt className="text-[#555D73]">Plan</dt>
-                              <dd className="text-[#8B92A8]">{d.plan || "—"}</dd>
+                              <dt className="text-[var(--text-muted)]">Plan</dt>
+                              <dd className="text-[var(--text-secondary)]">{d.plan || "—"}</dd>
                             </div>
                             <div>
-                              <dt className="text-[#555D73]">DKIM selector</dt>
-                              <dd className="text-[#8B92A8] font-mono">{d.dkim_selector || "—"}</dd>
+                              <dt className="text-[var(--text-muted)]">DKIM selector</dt>
+                              <dd className="text-[var(--text-secondary)] font-mono">{d.dkim_selector || "—"}</dd>
                             </div>
                             <div>
-                              <dt className="text-[#555D73]">DNS last checked</dt>
-                              <dd className="text-[#8B92A8]">
+                              <dt className="text-[var(--text-muted)]">DNS last checked</dt>
+                              <dd className="text-[var(--text-secondary)]">
                                 {d.dns_last_checked_at
                                   ? new Date(d.dns_last_checked_at).toLocaleString()
                                   : "Never"}
                               </dd>
                             </div>
                             <div>
-                              <dt className="text-[#555D73]">Quota</dt>
-                              <dd className="text-[#8B92A8]">
+                              <dt className="text-[var(--text-muted)]">Quota</dt>
+                              <dd className="text-[var(--text-secondary)]">
                                 {d.max_quota_mb ? `${formatCount(d.max_quota_mb)} MB` : "Unlimited"}
                               </dd>
                             </div>
                             {d.description && (
                               <div className="col-span-2 sm:col-span-4">
-                                <dt className="text-[#555D73]">Description</dt>
-                                <dd className="text-[#8B92A8]">{d.description}</dd>
+                                <dt className="text-[var(--text-muted)]">Description</dt>
+                                <dd className="text-[var(--text-secondary)]">{d.description}</dd>
                               </div>
                             )}
                           </dl>
@@ -409,14 +409,14 @@ export default function Domains() {
           </div>
 
           {/* ── Pagination ── */}
-          <div className="flex flex-wrap items-center gap-3 px-3 py-2 border-t border-[#2A2F3E] text-[11px] text-[#8B92A8]">
+          <div className="flex flex-wrap items-center gap-3 px-3 py-2 border-t border-[var(--border)] text-[11px] text-[var(--text-secondary)]">
             <label className="flex items-center gap-1.5">
               Rows
               <select
                 aria-label="Rows per page"
                 value={pageSize}
                 onChange={(e) => { setPageSize(Number(e.target.value)); setPage(0); }}
-                className="bg-[#1A1E26] border border-[#2A2F3E] rounded px-1.5 py-1 text-[#E8EAF0]"
+                className="bg-[var(--bg-elevated)] border border-[var(--border)] rounded px-1.5 py-1 text-[var(--text-primary)]"
               >
                 {PAGE_SIZES.map((s) => (
                   <option key={s} value={s}>{s}</option>
@@ -431,7 +431,7 @@ export default function Domains() {
                 onClick={() => setPage((p) => Math.max(0, p - 1))}
                 disabled={currentPage === 0}
                 aria-label="Previous page"
-                className="p-1 rounded border border-[#2A2F3E] disabled:opacity-40 hover:bg-[#1A1E26]"
+                className="p-1 rounded border border-[var(--border)] disabled:opacity-40 hover:bg-[var(--bg-elevated)]"
               >
                 <ChevronLeft size={13} />
               </button>
@@ -439,7 +439,7 @@ export default function Domains() {
                 onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
                 disabled={currentPage >= pageCount - 1}
                 aria-label="Next page"
-                className="p-1 rounded border border-[#2A2F3E] disabled:opacity-40 hover:bg-[#1A1E26]"
+                className="p-1 rounded border border-[var(--border)] disabled:opacity-40 hover:bg-[var(--bg-elevated)]"
               >
                 <ChevronRight size={13} />
               </button>
@@ -462,33 +462,33 @@ export default function Domains() {
         <div
           data-testid="new-dkim-notice"
           role="status"
-          className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[55] max-w-[min(680px,calc(100vw-2rem))] w-full bg-[#13161C] border border-[#34D399]/40 rounded-xl p-3.5 shadow-2xl"
+          className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[55] max-w-[min(680px,calc(100vw-2rem))] w-full bg-[var(--bg-surface)] border border-[var(--success)]/40 rounded-xl p-3.5 shadow-2xl"
         >
           <div className="flex items-start gap-2">
-            <CheckCircle size={14} className="text-[#34D399] mt-0.5 shrink-0" />
+            <CheckCircle size={14} className="text-[var(--success)] mt-0.5 shrink-0" />
             <div className="min-w-0 flex-1">
-              <p className="text-xs text-[#E8EAF0] font-medium">
+              <p className="text-xs text-[var(--text-primary)] font-medium">
                 DKIM generated for {dnsDomain.name}
               </p>
-              <p className="text-[11px] text-[#8B92A8] mt-0.5">
+              <p className="text-[11px] text-[var(--text-secondary)] mt-0.5">
                 Publish this TXT record with your DNS provider. No public DNS was changed
                 automatically.
               </p>
               <dl className="mt-2 text-[11px] space-y-1">
                 <div>
-                  <dt className="text-[#555D73]">Record name</dt>
-                  <dd className="font-mono text-[#E8EAF0] break-all">{newDKIM.dns_record_name}</dd>
+                  <dt className="text-[var(--text-muted)]">Record name</dt>
+                  <dd className="font-mono text-[var(--text-primary)] break-all">{newDKIM.dns_record_name}</dd>
                 </div>
                 <div>
-                  <dt className="text-[#555D73]">Value</dt>
-                  <dd className="font-mono text-[#E8EAF0] break-all">{newDKIM.public_dns_txt}</dd>
+                  <dt className="text-[var(--text-muted)]">Value</dt>
+                  <dd className="font-mono text-[var(--text-primary)] break-all">{newDKIM.public_dns_txt}</dd>
                 </div>
               </dl>
             </div>
             <button
               onClick={() => setNewDKIM(null)}
               aria-label="Dismiss DKIM record notice"
-              className="p-1 rounded text-[#8B92A8] hover:text-[#E8EAF0] shrink-0"
+              className="p-1 rounded text-[var(--text-secondary)] hover:text-[var(--text-primary)] shrink-0"
             >
               <XCircle size={14} />
             </button>
@@ -526,32 +526,32 @@ export default function Domains() {
           aria-modal="true"
           aria-labelledby="delete-domain-title"
         >
-          <div className="bg-[#13161C] border border-[#2A2F3E] rounded-xl p-5 w-96 max-w-full">
-            <h3 id="delete-domain-title" className="text-sm font-semibold text-[#E8EAF0] mb-2">
+          <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-5 w-96 max-w-full">
+            <h3 id="delete-domain-title" className="text-sm font-semibold text-[var(--text-primary)] mb-2">
               Delete Domain
             </h3>
-            <p className="text-xs text-[#8B92A8] mb-5">
-              Permanently delete <span className="text-[#E8EAF0] font-mono">{confirmDelete.name}</span>?{" "}
+            <p className="text-xs text-[var(--text-secondary)] mb-5">
+              Permanently delete <span className="text-[var(--text-primary)] font-mono">{confirmDelete.name}</span>?{" "}
               {(confirmDelete.mailbox_count ?? 0) > 0
                 ? "This domain still has mailboxes — delete them first, then remove the domain."
                 : "This cannot be undone."}
             </p>
             {deleteMutation.isError && (
-              <p className="text-[#F87171] text-xs mb-3" role="alert">
+              <p className="text-[var(--danger)] text-xs mb-3" role="alert">
                 {errorMessage(deleteMutation.error, "Deletion failed.")}
               </p>
             )}
             <div className="flex gap-2 justify-end">
               <button
                 onClick={() => setConfirmDelete(null)}
-                className="px-3 py-1.5 text-xs text-[#8B92A8] hover:text-[#E8EAF0] rounded-lg border border-[#2A2F3E]"
+                className="px-3 py-1.5 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-lg border border-[var(--border)]"
               >
                 Cancel
               </button>
               <button
                 onClick={() => { if (!deleteMutation.isPending) deleteMutation.mutate(confirmDelete.id); }}
                 disabled={deleteMutation.isPending}
-                className="px-3 py-1.5 text-xs rounded-lg bg-[#F87171] text-white hover:bg-red-500 disabled:opacity-50"
+                className="px-3 py-1.5 text-xs rounded-lg bg-[var(--danger)] text-white hover:bg-[var(--danger)] disabled:opacity-50"
               >
                 {deleteMutation.isPending ? "Deleting…" : "Delete Domain"}
               </button>

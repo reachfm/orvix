@@ -30,26 +30,26 @@ function DetailDrawer({ id, onClose }: { id: number; onClose: () => void }) {
 
   return (
     <div className="fixed inset-0 z-40 flex justify-end bg-black/50" onClick={onClose}>
-      <div className="w-full max-w-md h-full bg-[#13161C] border-l border-[#2A2F3E] p-6 overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+      <div className="w-full max-w-md h-full bg-[var(--bg-surface)] border-l border-[var(--border)] p-6 overflow-y-auto" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-semibold text-[#E8EAF0]">Organization detail</h3>
-          <button onClick={onClose} className="text-[#8B92A8] hover:text-[#E8EAF0]">×</button>
+          <h3 className="text-lg font-semibold text-[var(--text-primary)]">Organization detail</h3>
+          <button onClick={onClose} className="text-[var(--text-secondary)] hover:text-[var(--text-primary)]">×</button>
         </div>
-        {detailQ.isLoading ? <p className="text-[#8B92A8] text-sm">Loading…</p> :
-          detailQ.error ? <p className="text-[#F87171] text-sm">Failed to load: {(detailQ.error as Error).message}</p> :
+        {detailQ.isLoading ? <p className="text-[var(--text-secondary)] text-sm">Loading…</p> :
+          detailQ.error ? <p className="text-[var(--danger)] text-sm">Failed to load: {(detailQ.error as Error).message}</p> :
           detailQ.data ? (
             <>
               <dl className="space-y-2 text-sm mb-6">
                 {Object.entries(detailQ.data).filter(([k]) => !/password|secret|token|hash/i.test(k)).map(([k, v]) => (
                   <div key={k} className="flex justify-between gap-4">
-                    <dt className="text-[#8B92A8] font-mono">{k}</dt>
-                    <dd className="text-[#E8EAF0] text-right break-all">{typeof v === "object" ? JSON.stringify(v) : String(v)}</dd>
+                    <dt className="text-[var(--text-secondary)] font-mono">{k}</dt>
+                    <dd className="text-[var(--text-primary)] text-right break-all">{typeof v === "object" ? JSON.stringify(v) : String(v)}</dd>
                   </div>
                 ))}
               </dl>
               <button
                 onClick={() => setConfirmToggle({ active: !detailQ.data.active })}
-                className={`px-3 py-2 text-sm rounded ${detailQ.data.active ? "bg-[#F87171] text-black" : "bg-[#34D399] text-black"}`}
+                className={`px-3 py-2 text-sm rounded ${detailQ.data.active ? "bg-[var(--danger)] text-black" : "bg-[var(--success)] text-black"}`}
               >
                 {detailQ.data.active ? "Suspend organization" : "Activate organization"}
               </button>
@@ -86,20 +86,20 @@ export default function OrganizationList() {
       .catch(() => setLoading(false));
   }, []);
 
-  if (loading) return <div className="text-[#8B92A8]">Loading organizations...</div>;
+  if (loading) return <div className="text-[var(--text-secondary)]">Loading organizations...</div>;
 
   return (
     <div>
-      <h2 className="text-xl font-semibold text-[#E8EAF0] mb-4">Organizations</h2>
+      <h2 className="text-xl font-semibold text-[var(--text-primary)] mb-4">Organizations</h2>
       {orgs.length === 0 ? (
-        <div className="bg-[#13161C] border border-[#2A2F3E] rounded-xl p-8 text-center text-[#8B92A8]">
+        <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-8 text-center text-[var(--text-secondary)]">
           No organizations found.
         </div>
       ) : (
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
-            <tr className="border-b border-[#2A2F3E] text-[#8B92A8] text-left">
+            <tr className="border-b border-[var(--border)] text-[var(--text-secondary)] text-left">
               <th className="py-2 px-3">Name</th>
               <th className="py-2 px-3">Domain</th>
               <th className="py-2 px-3">Plan</th>
@@ -111,18 +111,18 @@ export default function OrganizationList() {
           </thead>
           <tbody>
             {orgs.map((o) => (
-              <tr key={o.id} className="border-b border-[#1A1E26] hover:bg-[#1A1E26] cursor-pointer" onClick={() => setSelected(o.id)}>
-                <td className="py-2 px-3 text-[#E8EAF0]">{o.name}</td>
-                <td className="py-2 px-3 text-[#8B92A8]">{o.domain}</td>
-                <td className="py-2 px-3 text-[#8B92A8]">{o.plan}</td>
+              <tr key={o.id} className="border-b border-[var(--bg-elevated)] hover:bg-[var(--bg-elevated)] cursor-pointer" onClick={() => setSelected(o.id)}>
+                <td className="py-2 px-3 text-[var(--text-primary)]">{o.name}</td>
+                <td className="py-2 px-3 text-[var(--text-secondary)]">{o.domain}</td>
+                <td className="py-2 px-3 text-[var(--text-secondary)]">{o.plan}</td>
                 <td className="py-2 px-3">
                   <span className={`px-2 py-0.5 rounded text-xs ${
-                    o.active ? "bg-green-900 text-green-300" : "bg-red-900 text-red-300"
+                    o.active ? "bg-[var(--success)]/20 text-[var(--success)]" : "bg-[var(--danger)]/20 text-[var(--danger)]"
                   }`}>{o.active ? "active" : "disabled"}</span>
                 </td>
-                <td className="py-2 px-3 text-[#8B92A8]">{o.mailbox_count}</td>
-                <td className="py-2 px-3 text-[#8B92A8]">{o.domain_count}</td>
-                <td className="py-2 px-3 text-[#8B92A8]">{new Date(o.created_at).toLocaleDateString()}</td>
+                <td className="py-2 px-3 text-[var(--text-secondary)]">{o.mailbox_count}</td>
+                <td className="py-2 px-3 text-[var(--text-secondary)]">{o.domain_count}</td>
+                <td className="py-2 px-3 text-[var(--text-secondary)]">{new Date(o.created_at).toLocaleDateString()}</td>
               </tr>
             ))}
           </tbody>

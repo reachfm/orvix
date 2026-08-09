@@ -390,4 +390,52 @@ test.describe("Orvix admin portal E2E", () => {
     await expect(page.getByText("Customer Portal")).toHaveCount(0);
   });
 
+  test("theme: defaults to Light even with OS dark preference, toggles to Dark, persists across reload, and applies pre-paint", async ({ browser, request }) => {
+    const loginRes = await request.post(`http://127.0.0.1:${adminPort}/api/v1/auth/login`, {
+      data: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD },
+    });
+    expect(loginRes.ok()).toBeTruthy();
+    const accessToken: string = (await loginRes.json()).access_token;
+
+    // colorScheme: "dark" simulates an OS that prefers dark — the app
+    // must still default to Light (never inferred from the OS).
+    const context = await browser.newContext({ bypassCSP: true, colorScheme: "dark" });
+    const page = await context.newPage();
+    await page.route("**/api/v1/**", async (route) => {
+      const headers = { ...route.request().headers(), Authorization: `Bearer ${accessToken}` };
+      await route.continue({ headers });
+    });
+
+    await page.goto(`http://127.0.0.1:${adminPort}/admin`);
+    await page.waitForLoadState("networkidle");
+
+    let hasDarkClass = await page.evaluate(() => document.documentElement.classList.contains("dark"));
+    expect(hasDarkClass).toBe(false);
+    let stored = await page.evaluate(() => window.localStorage.getItem("orvix-admin-theme"));
+    expect(stored).toBeNull();
+
+    const toggle = page.getByRole("switch", { name: /switch to dark theme/i });
+    await expect(toggle).toBeVisible();
+    await toggle.click();
+
+    hasDarkClass = await page.evaluate(() => document.documentElement.classList.contains("dark"));
+    expect(hasDarkClass).toBe(true);
+    stored = await page.evaluate(() => window.localStorage.getItem("orvix-admin-theme"));
+    expect(stored).toBe("dark");
+
+    // Reload: the pre-paint init script in index.html must read the
+    // stored choice and apply .dark before React ever mounts, with no
+    // flash of the light theme in between.
+    await page.reload();
+    await page.waitForLoadState("networkidle");
+    hasDarkClass = await page.evaluate(() => document.documentElement.classList.contains("dark"));
+    expect(hasDarkClass).toBe(true);
+
+    // No console errors and the shell still renders correctly in Dark.
+    const consoleErrors: string[] = [];
+    page.on("console", (msg) => { if (msg.type() === "error") consoleErrors.push(msg.text()); });
+    await expect(page.locator("main").locator("h2").first()).toBeVisible();
+    if (consoleErrors.length) throw new Error(`console errors in dark theme: ${consoleErrors.join(" | ")}`);
+  });
+
 });

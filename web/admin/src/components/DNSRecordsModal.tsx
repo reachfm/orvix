@@ -46,21 +46,21 @@ function isCooldownError(err: unknown): err is ApiError {
 function StatusPill({ status }: { status: string }) {
   const s = (status || "unknown").toLowerCase();
   const map: Record<string, [string, string]> = {
-    pass: ["#34D399", "Pass"],
-    warning: ["#FBBF24", "Warning"],
-    fail: ["#F87171", "Fail"],
-    pending: ["#4F7CFF", "Pending propagation"],
-    unknown: ["#8B92A8", "Not checked"],
-    not_checked: ["#8B92A8", "Not checked"],
+    pass: ["var(--success)", "Pass"],
+    warning: ["var(--warning)", "Warning"],
+    fail: ["var(--danger)", "Fail"],
+    pending: ["var(--accent)", "Pending propagation"],
+    unknown: ["var(--text-secondary)", "Not checked"],
+    not_checked: ["var(--text-secondary)", "Not checked"],
     // Not required of this deployment. Rendered neutrally — never as a
     // failure — and excluded from the score by the backend.
-    optional: ["#8B92A8", "Optional — not configured"],
-    not_applicable: ["#8B92A8", "Not applicable"],
+    optional: ["var(--text-secondary)", "Optional — not configured"],
+    not_applicable: ["var(--text-secondary)", "Not applicable"],
     // The required value could not be determined, so this record is
     // indeterminate and must never read as a pass.
-    configuration_required: ["#F87171", "Configuration required"],
+    configuration_required: ["var(--danger)", "Configuration required"],
   };
-  const [color, label] = map[s] || ["#8B92A8", status];
+  const [color, label] = map[s] || ["var(--text-secondary)", status];
   return (
     <span
       className="inline-flex items-center gap-1.5 whitespace-nowrap text-xs"
@@ -89,9 +89,9 @@ function CopyButton({ value, label }: { value: string; label: string }) {
       type="button"
       onClick={onCopy}
       aria-label={`Copy ${label}`}
-      className="shrink-0 p-1 rounded text-[#4F7CFF] hover:text-[#8FABFF] hover:bg-[#1A1E26]"
+      className="shrink-0 p-1 rounded text-[var(--accent)] hover:text-[var(--accent-soft)] hover:bg-[var(--bg-elevated)]"
     >
-      {copied ? <Check size={12} className="text-[#34D399]" /> : <Copy size={12} />}
+      {copied ? <Check size={12} className="text-[var(--success)]" /> : <Copy size={12} />}
     </button>
   );
 }
@@ -287,17 +287,17 @@ export default function DNSRecordsModal({ domain, onClose }: DNSRecordsModalProp
         role="dialog"
         aria-modal="true"
         aria-labelledby="dns-records-title"
-        className="relative z-10 w-full max-w-5xl my-auto bg-[#13161C] border border-[#2A2F3E] rounded-xl shadow-2xl flex flex-col max-h-[90vh]"
+        className="relative z-10 w-full max-w-5xl my-auto bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl shadow-2xl flex flex-col max-h-[90vh]"
       >
         {/* ── Header ── */}
-        <div className="shrink-0 px-5 py-4 border-b border-[#2A2F3E]">
+        <div className="shrink-0 px-5 py-4 border-b border-[var(--border)]">
           <div className="flex items-start justify-between gap-4">
             <div className="min-w-0">
-              <h2 id="dns-records-title" className="text-base font-semibold text-[#E8EAF0]">
-                DNS Records · <span className="font-mono text-[#8FABFF]">{domain.name}</span>
+              <h2 id="dns-records-title" className="text-base font-semibold text-[var(--text-primary)]">
+                DNS Records · <span className="font-mono text-[var(--accent-soft)]">{domain.name}</span>
               </h2>
               {health?.last_checked_at && (
-                <p className="text-[#555D73] text-xs mt-0.5">
+                <p className="text-[var(--text-muted)] text-xs mt-0.5">
                   Last checked {new Date(health.last_checked_at).toLocaleString()}
                 </p>
               )}
@@ -306,7 +306,7 @@ export default function DNSRecordsModal({ domain, onClose }: DNSRecordsModalProp
               type="button"
               onClick={close}
               aria-label="Close DNS records dialog"
-              className="shrink-0 p-1.5 rounded text-[#8B92A8] hover:text-[#E8EAF0] hover:bg-[#1A1E26]"
+              className="shrink-0 p-1.5 rounded text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-elevated)]"
             >
               <X size={18} />
             </button>
@@ -315,7 +315,7 @@ export default function DNSRecordsModal({ domain, onClose }: DNSRecordsModalProp
           <div className="flex flex-wrap items-center gap-3 mt-3">
             {health && (
               <div className="flex items-center gap-2" data-testid="health-summary">
-                <span className="text-2xl font-semibold text-[#E8EAF0]">
+                <span className="text-2xl font-semibold text-[var(--text-primary)]">
                   {typeof score === "number" ? `${score}%` : "—"}
                 </span>
                 {complete ? (
@@ -324,7 +324,7 @@ export default function DNSRecordsModal({ domain, onClose }: DNSRecordsModalProp
                   /* complete:false ⇒ never a pass/100% affirmation, whatever the score says */
                   <span
                     data-testid="incomplete-indicator"
-                    className="inline-flex items-center gap-1.5 px-2 py-1 rounded-full bg-[#FBBF24]/10 text-[#FBBF24] text-xs"
+                    className="inline-flex items-center gap-1.5 px-2 py-1 rounded-full bg-[var(--warning)]/10 text-[var(--warning)] text-xs"
                   >
                     <AlertTriangle size={11} />
                     Incomplete — not all records were checked
@@ -339,7 +339,7 @@ export default function DNSRecordsModal({ domain, onClose }: DNSRecordsModalProp
                 data-autofocus
                 onClick={() => { if (!checkDisabled) verifyMutation.mutate(); }}
                 disabled={checkDisabled}
-                className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#4F7CFF] text-white text-xs hover:bg-[#3B5FD9] disabled:opacity-50 disabled:cursor-not-allowed"
+                className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[var(--accent)] text-white text-xs hover:bg-[var(--accent-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {verifying ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
                 {verifying
@@ -352,7 +352,7 @@ export default function DNSRecordsModal({ domain, onClose }: DNSRecordsModalProp
                 type="button"
                 onClick={handleDownload}
                 disabled={rows.length === 0}
-                className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border border-[#2A2F3E] text-[#E8EAF0] text-xs hover:bg-[#1A1E26] disabled:opacity-50"
+                className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border border-[var(--border)] text-[var(--text-primary)] text-xs hover:bg-[var(--bg-elevated)] disabled:opacity-50"
               >
                 <Download size={13} /> Download DNS Records
               </button>
@@ -360,13 +360,13 @@ export default function DNSRecordsModal({ domain, onClose }: DNSRecordsModalProp
           </div>
 
           {cooling && (
-            <p className="text-[#FBBF24] text-xs mt-2" role="status" data-testid="cooldown-notice">
+            <p className="text-[var(--warning)] text-xs mt-2" role="status" data-testid="cooldown-notice">
               Verification is rate limited. Showing the last completed check —
               you can re-check in {formatCountdown(cooldownRemaining)}.
             </p>
           )}
           {verifyMutation.isError && !isCooldownError(verifyMutation.error) && (
-            <p className="text-[#F87171] text-xs mt-2" role="alert">
+            <p className="text-[var(--danger)] text-xs mt-2" role="alert">
               {errorMessage(verifyMutation.error, "Verification failed.")}
             </p>
           )}
@@ -376,27 +376,27 @@ export default function DNSRecordsModal({ domain, onClose }: DNSRecordsModalProp
         <div className="flex-1 overflow-y-auto">
           {showBlockingError ? (
             <div className="p-10 text-center">
-              <ShieldAlert size={22} className="text-[#F87171] mx-auto mb-2" />
-              <p className="text-[#F87171] text-sm">
+              <ShieldAlert size={22} className="text-[var(--danger)] mx-auto mb-2" />
+              <p className="text-[var(--danger)] text-sm">
                 {errorMessage(dnsQuery.error, "Failed to load DNS data.")}
               </p>
             </div>
           ) : !health ? (
-            <div className="p-10 text-center text-[#8B92A8] text-sm">
-              <Loader2 size={20} className="animate-spin mx-auto mb-2 text-[#4F7CFF]" />
+            <div className="p-10 text-center text-[var(--text-secondary)] text-sm">
+              <Loader2 size={20} className="animate-spin mx-auto mb-2 text-[var(--accent)]" />
               Loading DNS records…
             </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-xs border-collapse" data-testid="dns-records-table">
                 <thead>
-                  <tr className="border-b border-[#2A2F3E] bg-[#0F1218]">
-                    <th className="text-left font-medium text-[#8B92A8] px-3 py-2">Name</th>
-                    <th className="text-left font-medium text-[#8B92A8] px-3 py-2">Type</th>
-                    <th className="text-left font-medium text-[#8B92A8] px-3 py-2">Required Data</th>
-                    <th className="text-left font-medium text-[#8B92A8] px-3 py-2">Current DNS</th>
-                    <th className="text-left font-medium text-[#8B92A8] px-3 py-2">Status</th>
-                    <th className="text-right font-medium text-[#8B92A8] px-3 py-2">Action</th>
+                  <tr className="border-b border-[var(--border)] bg-[var(--bg-base)]">
+                    <th className="text-left font-medium text-[var(--text-secondary)] px-3 py-2">Name</th>
+                    <th className="text-left font-medium text-[var(--text-secondary)] px-3 py-2">Type</th>
+                    <th className="text-left font-medium text-[var(--text-secondary)] px-3 py-2">Required Data</th>
+                    <th className="text-left font-medium text-[var(--text-secondary)] px-3 py-2">Current DNS</th>
+                    <th className="text-left font-medium text-[var(--text-secondary)] px-3 py-2">Status</th>
+                    <th className="text-right font-medium text-[var(--text-secondary)] px-3 py-2">Action</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -404,36 +404,36 @@ export default function DNSRecordsModal({ domain, onClose }: DNSRecordsModalProp
                     <tr
                       key={r.key}
                       data-testid={`dns-row-${r.key}`}
-                      className="border-b border-[#222736] align-top hover:bg-[#161A21]"
+                      className="border-b border-[var(--bg-subtle)] align-top hover:bg-[var(--bg-surface)]"
                     >
-                      <td className="px-3 py-2.5 font-mono text-[#E8EAF0] break-all">{r.name}</td>
-                      <td className="px-3 py-2.5 text-[#8B92A8] whitespace-nowrap">
+                      <td className="px-3 py-2.5 font-mono text-[var(--text-primary)] break-all">{r.name}</td>
+                      <td className="px-3 py-2.5 text-[var(--text-secondary)] whitespace-nowrap">
                         {r.type}
                         {r.priority != null && (
-                          <span className="ml-1 text-[#555D73]">prio {r.priority}</span>
+                          <span className="ml-1 text-[var(--text-muted)]">prio {r.priority}</span>
                         )}
                       </td>
                       <td
-                        className="px-3 py-2.5 font-mono text-[#8B92A8] break-all max-w-xs"
+                        className="px-3 py-2.5 font-mono text-[var(--text-secondary)] break-all max-w-xs"
                         data-testid={`required-${r.key}`}
                       >
                         {r.required || (
-                          <span className="text-[#555D73] not-italic">
+                          <span className="text-[var(--text-muted)] not-italic">
                             {r.optional ? "Not required" : "—"}
                           </span>
                         )}
                       </td>
                       <td
-                        className="px-3 py-2.5 font-mono text-[#8B92A8] break-all max-w-xs"
+                        className="px-3 py-2.5 font-mono text-[var(--text-secondary)] break-all max-w-xs"
                         data-testid={`observed-${r.key}`}
                       >
-                        {r.observed || <span className="text-[#555D73]">Not present</span>}
+                        {r.observed || <span className="text-[var(--text-muted)]">Not present</span>}
                       </td>
                       <td className="px-3 py-2.5">
                         <StatusPill status={r.status} />
                         {/* `reason` is rendered verbatim as the backend authored it. */}
                         {r.reason && (
-                          <p className="text-[#8B92A8] mt-1 max-w-[16rem]" data-testid={`reason-${r.key}`}>
+                          <p className="text-[var(--text-secondary)] mt-1 max-w-[16rem]" data-testid={`reason-${r.key}`}>
                             {r.reason}
                           </p>
                         )}
@@ -444,7 +444,7 @@ export default function DNSRecordsModal({ domain, onClose }: DNSRecordsModalProp
                         */}
                         {r.guidance && (
                           <p
-                            className="text-[#555D73] mt-1 max-w-[16rem]"
+                            className="text-[var(--text-muted)] mt-1 max-w-[16rem]"
                             data-testid={`guidance-${r.key}`}
                           >
                             {r.guidance}
@@ -460,11 +460,11 @@ export default function DNSRecordsModal({ domain, onClose }: DNSRecordsModalProp
               </table>
 
               {/* ── DKIM management ── */}
-              <div className="px-4 py-4 border-t border-[#2A2F3E]">
+              <div className="px-4 py-4 border-t border-[var(--border)]">
                 <div className="flex items-center justify-between gap-3 flex-wrap">
                   <div>
-                    <p className="text-[#E8EAF0] text-sm font-medium">DKIM signing key</p>
-                    <p className="text-[#8B92A8] text-xs mt-0.5">
+                    <p className="text-[var(--text-primary)] text-sm font-medium">DKIM signing key</p>
+                    <p className="text-[var(--text-secondary)] text-xs mt-0.5">
                       {dkimConfigured
                         ? `Configured with selector "${dkim?.selector || domain.dkim_selector || "mail"}".`
                         : "No DKIM key is configured for this domain yet."}
@@ -476,7 +476,7 @@ export default function DNSRecordsModal({ domain, onClose }: DNSRecordsModalProp
                       type="button"
                       onClick={() => setConfirmRotate(true)}
                       disabled={rotateDKIM.isPending}
-                      className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border border-[#2A2F3E] text-[#FBBF24] text-xs hover:bg-[#1A1E26] disabled:opacity-50"
+                      className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border border-[var(--border)] text-[var(--warning)] text-xs hover:bg-[var(--bg-elevated)] disabled:opacity-50"
                     >
                       <RefreshCw size={13} className={rotateDKIM.isPending ? "animate-spin" : ""} />
                       Rotate DKIM key
@@ -486,7 +486,7 @@ export default function DNSRecordsModal({ domain, onClose }: DNSRecordsModalProp
                       type="button"
                       onClick={() => { if (!generateDKIM.isPending) generateDKIM.mutate(); }}
                       disabled={generateDKIM.isPending}
-                      className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#4F7CFF] text-white text-xs hover:bg-[#3B5FD9] disabled:opacity-50"
+                      className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[var(--accent)] text-white text-xs hover:bg-[var(--accent-hover)] disabled:opacity-50"
                     >
                       {generateDKIM.isPending && <Loader2 size={13} className="animate-spin" />}
                       Generate DKIM key
@@ -495,7 +495,7 @@ export default function DNSRecordsModal({ domain, onClose }: DNSRecordsModalProp
                 </div>
 
                 {(generateDKIM.isError || rotateDKIM.isError) && (
-                  <p className="text-[#F87171] text-xs mt-2" role="alert">
+                  <p className="text-[var(--danger)] text-xs mt-2" role="alert">
                     {errorMessage(generateDKIM.error || rotateDKIM.error, "DKIM operation failed.")}
                   </p>
                 )}
@@ -507,24 +507,24 @@ export default function DNSRecordsModal({ domain, onClose }: DNSRecordsModalProp
                 */}
                 {dkimPending && (
                   <div
-                    className="mt-3 rounded-lg border border-[#2A2F3E] bg-[#0C0E12] p-3 space-y-2"
+                    className="mt-3 rounded-lg border border-[var(--border)] bg-[var(--bg-base)] p-3 space-y-2"
                     data-testid="dkim-pending"
                   >
                     <StatusPill status="pending" />
-                    <p className="text-[#FBBF24] text-xs">
+                    <p className="text-[var(--warning)] text-xs">
                       Publish the TXT record below. DKIM will keep reporting a failure until
                       DNS propagation completes — this can take up to 48 hours.
                     </p>
                     <div className="flex items-start gap-2">
-                      <span className="text-[#555D73] text-xs shrink-0 w-14">Name</span>
-                      <span className="font-mono text-xs text-[#E8EAF0] break-all select-all flex-1">
+                      <span className="text-[var(--text-muted)] text-xs shrink-0 w-14">Name</span>
+                      <span className="font-mono text-xs text-[var(--text-primary)] break-all select-all flex-1">
                         {dkimPending.dns_record_name}
                       </span>
                       <CopyButton value={dkimPending.dns_record_name} label="DKIM record name" />
                     </div>
                     <div className="flex items-start gap-2">
-                      <span className="text-[#555D73] text-xs shrink-0 w-14">Value</span>
-                      <span className="font-mono text-xs text-[#E8EAF0] break-all select-all flex-1">
+                      <span className="text-[var(--text-muted)] text-xs shrink-0 w-14">Value</span>
+                      <span className="font-mono text-xs text-[var(--text-primary)] break-all select-all flex-1">
                         {dkimPending.public_dns_txt}
                       </span>
                       <CopyButton value={dkimPending.public_dns_txt} label="DKIM public TXT record" />
@@ -544,12 +544,12 @@ export default function DNSRecordsModal({ domain, onClose }: DNSRecordsModalProp
             role="dialog"
             aria-modal="true"
             aria-labelledby="dkim-rotate-title"
-            className="bg-[#13161C] border border-[#2A2F3E] rounded-xl p-5 w-96 max-w-full"
+            className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-5 w-96 max-w-full"
           >
-            <h3 id="dkim-rotate-title" className="text-sm font-semibold text-[#E8EAF0] mb-2">
+            <h3 id="dkim-rotate-title" className="text-sm font-semibold text-[var(--text-primary)] mb-2">
               Rotate DKIM key for {domain.name}?
             </h3>
-            <p className="text-xs text-[#FBBF24] mb-4">
+            <p className="text-xs text-[var(--warning)] mb-4">
               A new key pair is generated immediately, but the published DNS record still
               carries the old key. Until you publish the new TXT record and DNS propagation
               completes (up to 48 hours), DKIM signatures on outbound mail may fail
@@ -560,7 +560,7 @@ export default function DNSRecordsModal({ domain, onClose }: DNSRecordsModalProp
                 type="button"
                 onClick={() => setConfirmRotate(false)}
                 disabled={rotateDKIM.isPending}
-                className="px-3 py-1.5 text-xs rounded-lg border border-[#2A2F3E] text-[#8B92A8] hover:text-[#E8EAF0] disabled:opacity-50"
+                className="px-3 py-1.5 text-xs rounded-lg border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:opacity-50"
               >
                 Cancel
               </button>
@@ -568,7 +568,7 @@ export default function DNSRecordsModal({ domain, onClose }: DNSRecordsModalProp
                 type="button"
                 onClick={() => { if (!rotateDKIM.isPending) rotateDKIM.mutate(); }}
                 disabled={rotateDKIM.isPending}
-                className="px-3 py-1.5 text-xs rounded-lg bg-[#FBBF24] text-[#0C0E12] font-medium hover:bg-[#F0B01C] disabled:opacity-50"
+                className="px-3 py-1.5 text-xs rounded-lg bg-[var(--warning)] text-[var(--bg-base)] font-medium hover:bg-[var(--warning)] disabled:opacity-50"
               >
                 {rotateDKIM.isPending ? "Rotating…" : "Rotate key"}
               </button>

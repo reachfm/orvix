@@ -36,34 +36,34 @@ export default function ConfirmDialog({
     <Dialog.Root open={open} onOpenChange={(o) => { onOpenChange(o); if (!o) setTyped(""); }}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 bg-black/60 z-40" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-md bg-[#13161C] border border-[#2A2F3E] rounded-xl p-6">
+        <Dialog.Content className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-md bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-6">
           <div className="flex items-start justify-between mb-3">
             <div className="flex items-center gap-2">
-              {danger && <AlertTriangle size={18} className="text-[#F87171]" />}
-              <Dialog.Title className="text-base font-semibold text-[#E8EAF0]">{title}</Dialog.Title>
+              {danger && <AlertTriangle size={18} className="text-[var(--danger)]" />}
+              <Dialog.Title className="text-base font-semibold text-[var(--text-primary)]">{title}</Dialog.Title>
             </div>
-            <Dialog.Close className="text-[#8B92A8] hover:text-[#E8EAF0]"><X size={18} /></Dialog.Close>
+            <Dialog.Close className="text-[var(--text-secondary)] hover:text-[var(--text-primary)]"><X size={18} /></Dialog.Close>
           </div>
-          <Dialog.Description className="text-sm text-[#8B92A8] mb-4">{description}</Dialog.Description>
+          <Dialog.Description className="text-sm text-[var(--text-secondary)] mb-4">{description}</Dialog.Description>
           {requireTypedName && (
             <div className="mb-4">
-              <label className="block text-xs text-[#8B92A8] mb-1">
-                Type <span className="text-[#E8EAF0] font-mono">{requireTypedName}</span> to confirm
+              <label className="block text-xs text-[var(--text-secondary)] mb-1">
+                Type <span className="text-[var(--text-primary)] font-mono">{requireTypedName}</span> to confirm
               </label>
               <input
                 autoFocus
                 value={typed}
                 onChange={(e) => setTyped(e.target.value)}
-                className="w-full px-3 py-2 bg-[#1A1E26] border border-[#2A2F3E] rounded text-sm text-[#E8EAF0]"
+                className="w-full px-3 py-2 bg-[var(--bg-elevated)] border border-[var(--border)] rounded text-sm text-[var(--text-primary)]"
               />
             </div>
           )}
           <div className="flex justify-end gap-2">
-            <Dialog.Close className="px-3 py-2 text-sm text-[#8B92A8] hover:text-[#E8EAF0]">Cancel</Dialog.Close>
+            <Dialog.Close className="px-3 py-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)]">Cancel</Dialog.Close>
             <button
               disabled={!canConfirm || pending}
               onClick={onConfirm}
-              className={`px-3 py-2 text-sm rounded disabled:opacity-40 ${danger ? "bg-[#F87171] text-black" : "bg-[#4F7CFF] text-white"}`}
+              className={`px-3 py-2 text-sm rounded disabled:opacity-40 ${danger ? "bg-[var(--danger)] text-black" : "bg-[var(--accent)] text-white"}`}
             >
               {pending ? "Working…" : confirmLabel}
             </button>

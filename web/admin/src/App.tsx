@@ -37,6 +37,7 @@ import Reliability from "./components/Reliability";
 import PlatformSecurity from "./components/PlatformSecurity";
 import PlatformConfiguration from "./components/PlatformConfiguration";
 import { initCSRF, api } from "./api";
+import ThemeToggle from "./shared/theme/ThemeToggle";
 
 type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" | "settings"
   | "enterprise" | "mailboxes" | "organizations" | "health" | "platform-home" | "license"
@@ -223,7 +224,7 @@ export default function App() {
   }, []);
 
   if (authLoading) {
-    return <div className="h-screen bg-[#0C0E12] flex items-center justify-center"><p className="text-gray-400">Loading...</p></div>;
+    return <div className="h-screen bg-[var(--bg-base)] flex items-center justify-center"><p className="text-[var(--text-secondary)]">Loading...</p></div>;
   }
 
   if (!authenticated) {
@@ -241,15 +242,15 @@ export default function App() {
   // must never fall back to inferring the shell from `role`.
   if (portal === "") {
     return (
-      <div className="h-screen bg-[#0C0E12] flex items-center justify-center">
+      <div className="h-screen bg-[var(--bg-base)] flex items-center justify-center">
         <div className="text-center max-w-sm">
-          <h1 className="text-lg font-semibold text-[#E8EAF0] mb-2">Access Unavailable</h1>
-          <p className="text-sm text-[#8B92A8] mb-6">
+          <h1 className="text-lg font-semibold text-[var(--text-primary)] mb-2">Access Unavailable</h1>
+          <p className="text-sm text-[var(--text-secondary)] mb-6">
             This account could not be authorized for the admin console. Contact your administrator.
           </p>
           <button
             onClick={() => { api.logout().catch(() => {}); setAuthenticated(false); }}
-            className="text-sm text-[#4F7CFF] hover:underline"
+            className="text-sm text-[var(--accent)] hover:underline"
           >
             Return to login
           </button>
@@ -313,13 +314,14 @@ export default function App() {
 
   return (
     <div className="flex h-screen overflow-hidden">
-      <aside className="w-64 bg-[#13161C] border-r border-[#2A2F3E] flex flex-col">
-        <div className="p-4 border-b border-[#2A2F3E] flex items-center gap-3">
-          <Server size={24} className="text-[#4F7CFF]" />
-          <div>
-            <h1 className="text-sm font-semibold text-[#E8EAF0]">Orvix Admin</h1>
-            <p className="text-xs text-[#555D73]">Console v1.0.0</p>
+      <aside className="w-64 bg-[var(--bg-surface)] border-r border-[var(--border)] flex flex-col">
+        <div className="p-4 border-b border-[var(--border)] flex items-center gap-3">
+          <Server size={24} className="text-[var(--accent)]" />
+          <div className="flex-1 min-w-0">
+            <h1 className="text-sm font-semibold text-[var(--text-primary)]">Orvix Admin</h1>
+            <p className="text-xs text-[var(--text-muted)]">Console v1.0.0</p>
           </div>
+          <ThemeToggle compact />
         </div>
 
         <nav className="flex-1 px-2 py-3 space-y-0.5 overflow-y-auto">
@@ -329,11 +331,11 @@ export default function App() {
             if (t.section) {
               return (
                 <div key={t.id}>
-                  <div className="px-3 pt-4 pb-1 text-xs font-semibold text-[#555D73] uppercase tracking-wider">{t.section}</div>
+                  <div className="px-3 pt-4 pb-1 text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider">{t.section}</div>
                   <button
                     onClick={() => setCurrentTab(t.id)}
                     className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
-                      active ? "bg-[#222736] text-[#E8EAF0]" : "text-[#8B92A8] hover:bg-[#1A1E26] hover:text-[#E8EAF0]"
+                      active ? "bg-[var(--bg-subtle)] text-[var(--text-primary)]" : "text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)]"
                     }`}
                   >
                     <Icon size={18} />
@@ -347,7 +349,7 @@ export default function App() {
                 key={t.id}
                 onClick={() => setCurrentTab(t.id)}
                 className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
-                  active ? "bg-[#222736] text-[#E8EAF0]" : "text-[#8B92A8] hover:bg-[#1A1E26] hover:text-[#E8EAF0]"
+                  active ? "bg-[var(--bg-subtle)] text-[var(--text-primary)]" : "text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)]"
                 }`}
               >
                 <Icon size={18} />
@@ -357,15 +359,15 @@ export default function App() {
           })}
         </nav>
 
-        <div className="p-3 border-t border-[#2A2F3E]">
+        <div className="p-3 border-t border-[var(--border)]">
           <button onClick={() => { api.logout().catch(() => {}); setAuthenticated(false); }}
-            className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-[#8B92A8] hover:bg-[#1A1E26] hover:text-[#E8EAF0]">
+            className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)]">
             <LogOut size={18} /> Logout
           </button>
         </div>
       </aside>
 
-      <main className="flex-1 overflow-auto bg-[#0C0E12]">
+      <main className="flex-1 overflow-auto bg-[var(--bg-base)]">
         <div className="max-w-7xl mx-auto p-6">
           {renderContent()}
         </div>

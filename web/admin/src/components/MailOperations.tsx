@@ -70,22 +70,22 @@ export default function MailOperations() {
 
   return (
     <div>
-      <h2 className="text-2xl font-semibold mb-6 text-[#E8EAF0] flex items-center gap-2">
-        <Send size={22} className="text-[#4F7CFF]" /> Mail Operations
+      <h2 className="text-2xl font-semibold mb-6 text-[var(--text-primary)] flex items-center gap-2">
+        <Send size={22} className="text-[var(--accent)]" /> Mail Operations
       </h2>
 
       {disabled ? (
-        <div className="bg-[#13161C] border border-[#2A2F3E] rounded-xl p-8 text-center">
-          <MailWarning size={32} className="text-[#8B92A8] mx-auto mb-3" />
-          <p className="text-[#E8EAF0] text-sm font-medium mb-1">CoreMail is disabled</p>
-          <p className="text-[#8B92A8] text-sm">The mail queue is not available on this deployment.</p>
+        <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-8 text-center">
+          <MailWarning size={32} className="text-[var(--text-secondary)] mx-auto mb-3" />
+          <p className="text-[var(--text-primary)] text-sm font-medium mb-1">CoreMail is disabled</p>
+          <p className="text-[var(--text-secondary)] text-sm">The mail queue is not available on this deployment.</p>
         </div>
       ) : (
       <>
       {summaryQ.isLoading ? (
-        <p className="text-[#8B92A8] mb-6">Loading summary…</p>
+        <p className="text-[var(--text-secondary)] mb-6">Loading summary…</p>
       ) : summaryQ.error ? (
-        <p className="text-[#F87171] mb-6">Failed to load queue summary: {(summaryQ.error as Error).message}</p>
+        <p className="text-[var(--danger)] mb-6">Failed to load queue summary: {(summaryQ.error as Error).message}</p>
       ) : summaryQ.data?.metrics ? (
         <div className="grid grid-cols-4 gap-4 mb-6">
           {([
@@ -94,9 +94,9 @@ export default function MailOperations() {
             ["deferred", summaryQ.data.metrics.deferred],
             ["failed", summaryQ.data.metrics.dead_letter + summaryQ.data.metrics.bounced],
           ] as const).map(([k, v]) => (
-            <div key={k} className="bg-[#13161C] border border-[#2A2F3E] rounded-xl p-4">
-              <p className="text-xs text-[#8B92A8] mb-1 capitalize">{k}</p>
-              <p className={`text-2xl font-bold ${k === "failed" && v > 0 ? "text-[#F87171]" : "text-[#E8EAF0]"}`}>{v}</p>
+            <div key={k} className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-4">
+              <p className="text-xs text-[var(--text-secondary)] mb-1 capitalize">{k}</p>
+              <p className={`text-2xl font-bold ${k === "failed" && v > 0 ? "text-[var(--danger)]" : "text-[var(--text-primary)]"}`}>{v}</p>
             </div>
           ))}
         </div>
@@ -107,9 +107,9 @@ export default function MailOperations() {
           placeholder="Search from/to…"
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          className="px-3 py-2 bg-[#1A1E26] border border-[#2A2F3E] rounded text-sm text-[#E8EAF0]"
+          className="px-3 py-2 bg-[var(--bg-elevated)] border border-[var(--border)] rounded text-sm text-[var(--text-primary)]"
         />
-        <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="px-3 py-2 bg-[#1A1E26] border border-[#2A2F3E] rounded text-sm text-[#E8EAF0]">
+        <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="px-3 py-2 bg-[var(--bg-elevated)] border border-[var(--border)] rounded text-sm text-[var(--text-primary)]">
           <option value="">All statuses</option>
           <option value="pending">Pending</option>
           <option value="deferred">Deferred</option>
@@ -118,37 +118,37 @@ export default function MailOperations() {
       </div>
 
       {listQ.isLoading ? (
-        <div className="flex items-center justify-center h-48"><Loader2 size={24} className="text-[#4F7CFF] animate-spin" /></div>
+        <div className="flex items-center justify-center h-48"><Loader2 size={24} className="text-[var(--accent)] animate-spin" /></div>
       ) : listQ.error ? (
-        <div className="bg-[#13161C] border border-[#F87171]/30 rounded-xl p-6 flex items-center gap-3">
-          <AlertCircle size={20} className="text-[#F87171]" />
-          <span className="text-[#F87171] text-sm">Failed to load queue: {(listQ.error as Error).message}</span>
+        <div className="bg-[var(--bg-surface)] border border-[var(--danger)]/30 rounded-xl p-6 flex items-center gap-3">
+          <AlertCircle size={20} className="text-[var(--danger)]" />
+          <span className="text-[var(--danger)] text-sm">Failed to load queue: {(listQ.error as Error).message}</span>
         </div>
       ) : messages.length === 0 ? (
-        <div className="bg-[#13161C] border border-[#2A2F3E] rounded-xl p-8 text-center text-[#8B92A8] text-sm">Queue is empty</div>
+        <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-8 text-center text-[var(--text-secondary)] text-sm">Queue is empty</div>
       ) : (
-        <div className="bg-[#13161C] border border-[#2A2F3E] rounded-xl overflow-hidden">
+        <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl overflow-hidden">
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b border-[#2A2F3E]">
-                <th className="text-left p-3 text-[#8B92A8] font-medium">From</th>
-                <th className="text-left p-3 text-[#8B92A8] font-medium">To</th>
-                <th className="text-left p-3 text-[#8B92A8] font-medium">Status</th>
-                <th className="text-left p-3 text-[#8B92A8] font-medium">Attempts</th>
-                <th className="text-right p-3 text-[#8B92A8] font-medium">Actions</th>
+              <tr className="border-b border-[var(--border)]">
+                <th className="text-left p-3 text-[var(--text-secondary)] font-medium">From</th>
+                <th className="text-left p-3 text-[var(--text-secondary)] font-medium">To</th>
+                <th className="text-left p-3 text-[var(--text-secondary)] font-medium">Status</th>
+                <th className="text-left p-3 text-[var(--text-secondary)] font-medium">Attempts</th>
+                <th className="text-right p-3 text-[var(--text-secondary)] font-medium">Actions</th>
               </tr>
             </thead>
             <tbody>
               {messages.map((m) => (
-                <tr key={m.id} className="border-b border-[#2A2F3E] hover:bg-[#1A1E26] cursor-pointer" onClick={() => setSelected(m.id)}>
-                  <td className="p-3 text-[#E8EAF0]">{m.from}</td>
-                  <td className="p-3 text-[#E8EAF0]">{m.to}</td>
-                  <td className="p-3 text-[#8B92A8]">{m.status}</td>
-                  <td className="p-3 text-[#8B92A8]">{m.attempts}</td>
+                <tr key={m.id} className="border-b border-[var(--border)] hover:bg-[var(--bg-elevated)] cursor-pointer" onClick={() => setSelected(m.id)}>
+                  <td className="p-3 text-[var(--text-primary)]">{m.from}</td>
+                  <td className="p-3 text-[var(--text-primary)]">{m.to}</td>
+                  <td className="p-3 text-[var(--text-secondary)]">{m.status}</td>
+                  <td className="p-3 text-[var(--text-secondary)]">{m.attempts}</td>
                   <td className="p-3 text-right" onClick={(e) => e.stopPropagation()}>
-                    <button title="Retry" disabled={retryMut.isPending} onClick={() => retryMut.mutate(m.id)} className="p-1.5 text-[#8B92A8] hover:text-[#4F7CFF]"><RotateCw size={14} /></button>
-                    <button title="Bounce" onClick={() => setConfirmAction({ id: m.id, kind: "bounce" })} className="p-1.5 text-[#8B92A8] hover:text-[#FBBF24]"><Ban size={14} /></button>
-                    <button title="Cancel" onClick={() => setConfirmAction({ id: m.id, kind: "cancel" })} className="p-1.5 text-[#8B92A8] hover:text-[#F87171]"><XCircle size={14} /></button>
+                    <button title="Retry" disabled={retryMut.isPending} onClick={() => retryMut.mutate(m.id)} className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--accent)]"><RotateCw size={14} /></button>
+                    <button title="Bounce" onClick={() => setConfirmAction({ id: m.id, kind: "bounce" })} className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--warning)]"><Ban size={14} /></button>
+                    <button title="Cancel" onClick={() => setConfirmAction({ id: m.id, kind: "cancel" })} className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--danger)]"><XCircle size={14} /></button>
                   </td>
                 </tr>
               ))}
@@ -158,15 +158,15 @@ export default function MailOperations() {
       )}
 
       {selected && (
-        <div className="mt-6 bg-[#13161C] border border-[#2A2F3E] rounded-xl p-4">
-          <h3 className="text-sm font-semibold text-[#E8EAF0] mb-3">Message Detail</h3>
-          {detailQ.isLoading ? <p className="text-[#8B92A8] text-sm">Loading…</p> :
-            detailQ.error ? <p className="text-[#F87171] text-sm">Failed to load: {(detailQ.error as Error).message}</p> :
+        <div className="mt-6 bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-4">
+          <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">Message Detail</h3>
+          {detailQ.isLoading ? <p className="text-[var(--text-secondary)] text-sm">Loading…</p> :
+            detailQ.error ? <p className="text-[var(--danger)] text-sm">Failed to load: {(detailQ.error as Error).message}</p> :
             detailQ.data ? (
               <dl className="text-sm space-y-1">
-                <div className="flex justify-between"><dt className="text-[#8B92A8]">ID</dt><dd className="text-[#E8EAF0] font-mono">{detailQ.data.id}</dd></div>
-                <div className="flex justify-between"><dt className="text-[#8B92A8]">Status</dt><dd className="text-[#E8EAF0]">{detailQ.data.status}</dd></div>
-                {detailQ.data.last_error && <div className="flex justify-between"><dt className="text-[#8B92A8]">Last error</dt><dd className="text-[#F87171] max-w-xs truncate">{detailQ.data.last_error}</dd></div>}
+                <div className="flex justify-between"><dt className="text-[var(--text-secondary)]">ID</dt><dd className="text-[var(--text-primary)] font-mono">{detailQ.data.id}</dd></div>
+                <div className="flex justify-between"><dt className="text-[var(--text-secondary)]">Status</dt><dd className="text-[var(--text-primary)]">{detailQ.data.status}</dd></div>
+                {detailQ.data.last_error && <div className="flex justify-between"><dt className="text-[var(--text-secondary)]">Last error</dt><dd className="text-[var(--danger)] max-w-xs truncate">{detailQ.data.last_error}</dd></div>}
               </dl>
             ) : null}
         </div>

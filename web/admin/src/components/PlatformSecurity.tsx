@@ -6,21 +6,21 @@ import ConfirmDialog from "./ConfirmDialog";
 
 type Tab = "audit" | "ssl" | "antivirus" | "guardian" | "self-heal" | "log-rules";
 
-function Loading() { return <div className="flex items-center justify-center h-32"><Loader2 size={20} className="text-[#4F7CFF] animate-spin" /></div>; }
+function Loading() { return <div className="flex items-center justify-center h-32"><Loader2 size={20} className="text-[var(--accent)] animate-spin" /></div>; }
 function ErrorBox({ error }: { error: unknown }) {
-  return <div className="bg-[#13161C] border border-[#F87171]/30 rounded-xl p-4 flex items-center gap-3"><AlertCircle size={18} className="text-[#F87171]" /><span className="text-[#F87171] text-sm">{(error as Error)?.message || "Failed to load"}</span></div>;
+  return <div className="bg-[var(--bg-surface)] border border-[var(--danger)]/30 rounded-xl p-4 flex items-center gap-3"><AlertCircle size={18} className="text-[var(--danger)]" /><span className="text-[var(--danger)] text-sm">{(error as Error)?.message || "Failed to load"}</span></div>;
 }
-function Empty({ text }: { text: string }) { return <div className="bg-[#13161C] border border-[#2A2F3E] rounded-xl p-6 text-center text-[#8B92A8] text-sm">{text}</div>; }
+function Empty({ text }: { text: string }) { return <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-6 text-center text-[var(--text-secondary)] text-sm">{text}</div>; }
 
 function AuditTab() {
   const q = useQuery<any[]>({ queryKey: ["platform-audit"], queryFn: api.listPlatformAuditLogs });
   const rows = q.data ?? [];
   return q.isLoading ? <Loading /> : q.error ? <ErrorBox error={q.error} /> : rows.length === 0 ? <Empty text="No audit events" /> : (
-    <div className="bg-[#13161C] border border-[#2A2F3E] rounded-xl overflow-hidden">
+    <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl overflow-hidden">
       <table className="w-full text-sm">
-        <thead><tr className="border-b border-[#2A2F3E]"><th className="text-left p-3 text-[#8B92A8]">Actor</th><th className="text-left p-3 text-[#8B92A8]">Action</th><th className="text-left p-3 text-[#8B92A8]">Target</th><th className="text-left p-3 text-[#8B92A8]">Result</th><th className="text-left p-3 text-[#8B92A8]">Time</th></tr></thead>
+        <thead><tr className="border-b border-[var(--border)]"><th className="text-left p-3 text-[var(--text-secondary)]">Actor</th><th className="text-left p-3 text-[var(--text-secondary)]">Action</th><th className="text-left p-3 text-[var(--text-secondary)]">Target</th><th className="text-left p-3 text-[var(--text-secondary)]">Result</th><th className="text-left p-3 text-[var(--text-secondary)]">Time</th></tr></thead>
         <tbody>{rows.map((r: any, i: number) => (
-          <tr key={i} className="border-b border-[#2A2F3E]"><td className="p-3 text-[#E8EAF0]">{r.actor}</td><td className="p-3 text-[#8B92A8]">{r.action}</td><td className="p-3 text-[#8B92A8]">{r.target}</td><td className="p-3 text-[#8B92A8]">{r.result}</td><td className="p-3 text-[#555D73]">{r.timestamp}</td></tr>
+          <tr key={i} className="border-b border-[var(--border)]"><td className="p-3 text-[var(--text-primary)]">{r.actor}</td><td className="p-3 text-[var(--text-secondary)]">{r.action}</td><td className="p-3 text-[var(--text-secondary)]">{r.target}</td><td className="p-3 text-[var(--text-secondary)]">{r.result}</td><td className="p-3 text-[var(--text-muted)]">{r.timestamp}</td></tr>
         ))}</tbody>
       </table>
     </div>
@@ -40,18 +40,18 @@ function SslTab() {
   return (
     <div>
       <div className="flex items-center justify-between mb-4">
-        <div className="text-sm text-[#8B92A8]">
-          ACME: <span className="text-[#E8EAF0]">{acmeQ.data?.status ?? (acmeQ.isLoading ? "…" : "unknown")}</span>
-          {warningsQ.data?.warnings?.length > 0 && <span className="ml-3 text-[#FBBF24]">{warningsQ.data.warnings.length} expiring soon</span>}
+        <div className="text-sm text-[var(--text-secondary)]">
+          ACME: <span className="text-[var(--text-primary)]">{acmeQ.data?.status ?? (acmeQ.isLoading ? "…" : "unknown")}</span>
+          {warningsQ.data?.warnings?.length > 0 && <span className="ml-3 text-[var(--warning)]">{warningsQ.data.warnings.length} expiring soon</span>}
         </div>
-        <button disabled={reloadMut.isPending} onClick={() => reloadMut.mutate()} className="px-3 py-1.5 text-xs bg-[#222736] text-[#E8EAF0] rounded disabled:opacity-50">Reload certificates</button>
+        <button disabled={reloadMut.isPending} onClick={() => reloadMut.mutate()} className="px-3 py-1.5 text-xs bg-[var(--bg-subtle)] text-[var(--text-primary)] rounded disabled:opacity-50">Reload certificates</button>
       </div>
       {certsQ.isLoading ? <Loading /> : certsQ.error ? <ErrorBox error={certsQ.error} /> : certs.length === 0 ? <Empty text="No certificates configured" /> : (
-        <div className="bg-[#13161C] border border-[#2A2F3E] rounded-xl overflow-hidden">
-          <table className="w-full text-sm"><thead><tr className="border-b border-[#2A2F3E]"><th className="text-left p-3 text-[#8B92A8]">Domain</th><th className="text-left p-3 text-[#8B92A8]">Expires</th><th className="text-right p-3 text-[#8B92A8]">Action</th></tr></thead>
+        <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl overflow-hidden">
+          <table className="w-full text-sm"><thead><tr className="border-b border-[var(--border)]"><th className="text-left p-3 text-[var(--text-secondary)]">Domain</th><th className="text-left p-3 text-[var(--text-secondary)]">Expires</th><th className="text-right p-3 text-[var(--text-secondary)]">Action</th></tr></thead>
           <tbody>{certs.map((c: any) => (
-            <tr key={c.id} className="border-b border-[#2A2F3E]"><td className="p-3 text-[#E8EAF0]">{c.domain || c.name}</td><td className="p-3 text-[#8B92A8]">{c.expires_at}</td>
-              <td className="p-3 text-right"><button onClick={() => setConfirmDelete(c.id)} className="p-1.5 text-[#8B92A8] hover:text-[#F87171]"><Trash2 size={14} /></button></td></tr>
+            <tr key={c.id} className="border-b border-[var(--border)]"><td className="p-3 text-[var(--text-primary)]">{c.domain || c.name}</td><td className="p-3 text-[var(--text-secondary)]">{c.expires_at}</td>
+              <td className="p-3 text-right"><button onClick={() => setConfirmDelete(c.id)} className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--danger)]"><Trash2 size={14} /></button></td></tr>
           ))}</tbody></table>
         </div>
       )}
@@ -63,9 +63,9 @@ function SslTab() {
 function AntivirusTab() {
   const q = useQuery<any>({ queryKey: ["antivirus-status"], queryFn: api.getAntivirusStatus });
   return q.isLoading ? <Loading /> : q.error ? <ErrorBox error={q.error} /> : (
-    <div className="bg-[#13161C] border border-[#2A2F3E] rounded-xl p-4 text-sm">
-      <p className="text-[#8B92A8]">Status: <span className="text-[#E8EAF0]">{q.data?.status ?? q.data?.enabled === false ? "disabled" : "unknown"}</span></p>
-      {q.data?.engine && <p className="text-[#8B92A8] mt-1">Engine: <span className="text-[#E8EAF0]">{q.data.engine}</span></p>}
+    <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-4 text-sm">
+      <p className="text-[var(--text-secondary)]">Status: <span className="text-[var(--text-primary)]">{q.data?.status ?? q.data?.enabled === false ? "disabled" : "unknown"}</span></p>
+      {q.data?.engine && <p className="text-[var(--text-secondary)] mt-1">Engine: <span className="text-[var(--text-primary)]">{q.data.engine}</span></p>}
     </div>
   );
 }
@@ -74,9 +74,9 @@ function GuardianTab() {
   const q = useQuery<any[]>({ queryKey: ["guardian-logs"], queryFn: api.listGuardianLogs });
   const rows = q.data ?? [];
   return q.isLoading ? <Loading /> : q.error ? <ErrorBox error={q.error} /> : rows.length === 0 ? <Empty text="No guardian analysis events" /> : (
-    <div className="bg-[#13161C] border border-[#2A2F3E] rounded-xl overflow-hidden">
+    <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl overflow-hidden">
       <table className="w-full text-sm"><tbody>{rows.map((r: any, i: number) => (
-        <tr key={i} className="border-b border-[#2A2F3E]"><td className="p-3 text-[#E8EAF0]">{r.subject || r.summary}</td><td className="p-3 text-[#8B92A8]">{r.verdict || r.result}</td></tr>
+        <tr key={i} className="border-b border-[var(--border)]"><td className="p-3 text-[var(--text-primary)]">{r.subject || r.summary}</td><td className="p-3 text-[var(--text-secondary)]">{r.verdict || r.result}</td></tr>
       ))}</tbody></table>
     </div>
   );
@@ -91,16 +91,16 @@ function SelfHealTab() {
   return (
     <div>
       <div className="flex items-center gap-2 mb-4">
-        <select value={name} onChange={(e) => setName(e.target.value)} className="px-3 py-2 bg-[#1A1E26] border border-[#2A2F3E] rounded text-sm text-[#E8EAF0]">
+        <select value={name} onChange={(e) => setName(e.target.value)} className="px-3 py-2 bg-[var(--bg-elevated)] border border-[var(--border)] rounded text-sm text-[var(--text-primary)]">
           <option value="database">database</option>
           <option value="disk">disk</option>
         </select>
-        <button disabled={runMut.isPending} onClick={() => runMut.mutate(name)} className="flex items-center gap-1 px-3 py-1.5 text-xs bg-[#4F7CFF] text-white rounded disabled:opacity-50"><Play size={12} /> Run check</button>
+        <button disabled={runMut.isPending} onClick={() => runMut.mutate(name)} className="flex items-center gap-1 px-3 py-1.5 text-xs bg-[var(--accent)] text-white rounded disabled:opacity-50"><Play size={12} /> Run check</button>
       </div>
       {q.isLoading ? <Loading /> : q.error ? <ErrorBox error={q.error} /> : rows.length === 0 ? <Empty text="No self-heal history" /> : (
-        <div className="bg-[#13161C] border border-[#2A2F3E] rounded-xl overflow-hidden">
+        <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl overflow-hidden">
           <table className="w-full text-sm"><tbody>{rows.map((r: any, i: number) => (
-            <tr key={i} className="border-b border-[#2A2F3E]"><td className="p-3 text-[#E8EAF0]">{r.name}</td><td className="p-3 text-[#8B92A8]">{r.result || r.status}</td><td className="p-3 text-[#555D73]">{r.timestamp}</td></tr>
+            <tr key={i} className="border-b border-[var(--border)]"><td className="p-3 text-[var(--text-primary)]">{r.name}</td><td className="p-3 text-[var(--text-secondary)]">{r.result || r.status}</td><td className="p-3 text-[var(--text-muted)]">{r.timestamp}</td></tr>
           ))}</tbody></table>
         </div>
       )}
@@ -123,13 +123,13 @@ function LogRulesTab() {
   return (
     <div>
       <div className="flex gap-2 mb-4">
-        <input value={newPattern} onChange={(e) => setNewPattern(e.target.value)} placeholder="Log pattern…" className="px-3 py-2 bg-[#1A1E26] border border-[#2A2F3E] rounded text-sm text-[#E8EAF0] flex-1" />
-        <button disabled={!newPattern || createMut.isPending} onClick={() => createMut.mutate()} className="flex items-center gap-1 px-3 py-1.5 text-xs bg-[#4F7CFF] text-white rounded disabled:opacity-50"><Plus size={12} /> Add rule</button>
+        <input value={newPattern} onChange={(e) => setNewPattern(e.target.value)} placeholder="Log pattern…" className="px-3 py-2 bg-[var(--bg-elevated)] border border-[var(--border)] rounded text-sm text-[var(--text-primary)] flex-1" />
+        <button disabled={!newPattern || createMut.isPending} onClick={() => createMut.mutate()} className="flex items-center gap-1 px-3 py-1.5 text-xs bg-[var(--accent)] text-white rounded disabled:opacity-50"><Plus size={12} /> Add rule</button>
       </div>
       {q.isLoading ? <Loading /> : q.error ? <ErrorBox error={q.error} /> : rows.length === 0 ? <Empty text="No log rules configured" /> : (
-        <div className="bg-[#13161C] border border-[#2A2F3E] rounded-xl overflow-hidden">
+        <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl overflow-hidden">
           <table className="w-full text-sm"><tbody>{rows.map((r: any) => (
-            <tr key={r.id} className="border-b border-[#2A2F3E]"><td className="p-3 text-[#E8EAF0]">{r.pattern}</td><td className="p-3 text-right"><button onClick={() => setConfirmDelete(r.id)} className="p-1.5 text-[#8B92A8] hover:text-[#F87171]"><Trash2 size={14} /></button></td></tr>
+            <tr key={r.id} className="border-b border-[var(--border)]"><td className="p-3 text-[var(--text-primary)]">{r.pattern}</td><td className="p-3 text-right"><button onClick={() => setConfirmDelete(r.id)} className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--danger)]"><Trash2 size={14} /></button></td></tr>
           ))}</tbody></table>
         </div>
       )}
@@ -150,10 +150,10 @@ export default function PlatformSecurity() {
   ];
   return (
     <div>
-      <h2 className="text-2xl font-semibold mb-4 text-[#E8EAF0] flex items-center gap-2"><ShieldAlert size={22} className="text-[#4F7CFF]" /> Security</h2>
-      <div className="flex gap-1 mb-6 border-b border-[#2A2F3E] flex-wrap">
+      <h2 className="text-2xl font-semibold mb-4 text-[var(--text-primary)] flex items-center gap-2"><ShieldAlert size={22} className="text-[var(--accent)]" /> Security</h2>
+      <div className="flex gap-1 mb-6 border-b border-[var(--border)] flex-wrap">
         {tabs.map((t) => (
-          <button key={t.id} onClick={() => setTab(t.id)} className={`px-3 py-2 text-sm border-b-2 ${tab === t.id ? "border-[#4F7CFF] text-[#E8EAF0]" : "border-transparent text-[#8B92A8]"}`}>{t.label}</button>
+          <button key={t.id} onClick={() => setTab(t.id)} className={`px-3 py-2 text-sm border-b-2 ${tab === t.id ? "border-[var(--accent)] text-[var(--text-primary)]" : "border-transparent text-[var(--text-secondary)]"}`}>{t.label}</button>
         ))}
       </div>
       {tab === "audit" && <AuditTab />}
