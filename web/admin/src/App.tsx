@@ -30,7 +30,7 @@ import InvoicesPage from "./components/InvoicesPage";
 import SecurityPage from "./components/SecurityPage";
 import SupportPage from "./components/SupportPage";
 import PreferencesPage from "./components/PreferencesPage";
-import PlatformHome from "./components/PlatformHome";
+import OverviewPage from "./features/platform/overview/page";
 import MailOperations from "./components/MailOperations";
 import Reliability from "./components/Reliability";
 import PlatformSecurity from "./components/PlatformSecurity";
@@ -270,10 +270,10 @@ export default function App() {
     // future regression in the sidebar), never mount the other portal's
     // component — fail back to that portal's own landing page instead.
     if (!allowedTabIds.includes(currentTab)) {
-      return portal === "platform" ? <PlatformHome email={userEmail} onNavigate={setCurrentTab} /> : <Dashboard />;
+      return portal === "platform" ? <OverviewPage email={userEmail} onNavigate={setCurrentTab} /> : <Dashboard />;
     }
     switch (currentTab) {
-      case "platform-home": return <PlatformHome email={userEmail} onNavigate={setCurrentTab} />;
+      case "platform-home": return <OverviewPage email={userEmail} onNavigate={setCurrentTab} />;
       case "dashboard": return <Dashboard />;
       case "domains": return <Domains />;
       case "users": return <UsersPage />;
@@ -312,7 +312,7 @@ export default function App() {
       case "security": return <SecurityPage />;
       case "support": return <SupportPage />;
       case "preferences": return <PreferencesPage />;
-      default: return portal === "platform" ? <PlatformHome email={userEmail} onNavigate={setCurrentTab} /> : <Dashboard />;
+      default: return portal === "platform" ? <OverviewPage email={userEmail} onNavigate={setCurrentTab} /> : <Dashboard />;
     }
   };
 

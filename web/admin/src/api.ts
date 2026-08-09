@@ -311,7 +311,7 @@ export const api = {
 
   // Dashboard
   getDashboard: () => request<any>("/enterprise/dashboard"),
-  getPlatformDashboard: () => request<any>("/platform/dashboard"),
+  // getPlatformDashboard moved to features/platform/overview/api.ts
 
   // Platform admin summary/users/firewall/modules (superadmin/admin scope,
   // distinct from the tenant-scoped /enterprise/* endpoints above)
