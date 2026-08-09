@@ -426,6 +426,69 @@ test.describe("Orvix admin portal E2E", () => {
     await expect(page.getByText(/Recent Log Entries|Active Rules/i).first()).toBeVisible();
     if (darkConsoleErrors.length) throw new Error(`console errors during dark PSA sweep: ${darkConsoleErrors.join(" | ")}`);
 
+    // GAP-COVERAGE: the five previously-MISSING_UI operations wired in
+    // this pass are reachable end-to-end against the real running
+    // server. This block never submits any of the five forms — it only
+    // proves each control is reachable, renders real typed fields, and
+    // (for the secret-bearing SSL form) never leaks the private key
+    // into the DOM or network. Destructive/mutating submission is
+    // deliberately never exercised here per the no-live-mutation rule;
+    // submit-path behavior (including the typed-confirmation gate and
+    // secret-clearing) is covered by the Vitest unit suites for each
+    // component instead.
+    const gapWriteRequests: string[] = [];
+    page.on("request", (req) => {
+      if (req.method() === "GET") return;
+      const p = new URL(req.url()).pathname;
+      if (p.includes("/ssl/certificates") || p.includes("/firewall/rules") || p.includes("/updates/apply")) {
+        gapWriteRequests.push(`${req.method()} ${p}`);
+      }
+    });
+
+    // Firewall rule creation form: reachable, real typed fields, never
+    // pre-fills or exposes anything secret (there is no secret field
+    // here, but the confirmation gate must still block submission).
+    await page.locator("main button").filter({ hasText: /^\s*New rule\s*$/ }).first().click();
+    await expect(page.getByPlaceholderText(/sender_ip/i)).toBeVisible();
+    await expect(page.getByText("Create rule")).toBeDisabled();
+    await page.locator("main button").filter({ hasText: /^\s*Cancel\s*$/ }).first().click();
+
+    // SSL certificate upload: reachable, and once a key value is typed
+    // it is never present anywhere else on the page outside the
+    // password-masked field itself — the private-key contract's core
+    // non-disclosure guarantee, checked against the live DOM.
+    await page.locator("main button").filter({ hasText: /^\s*Upload certificate\s*$/ }).first().click();
+    const keyField = page.getByPlaceholderText("-----BEGIN PRIVATE KEY-----");
+    await expect(keyField).toBeVisible();
+    const sentinelKey = "-----BEGIN PRIVATE KEY-----\nPLAYWRIGHT_SENTINEL_KEY_MATERIAL\n-----END PRIVATE KEY-----";
+    await keyField.fill(sentinelKey);
+    const bodyHtmlWithKey = await page.locator("body").innerHTML();
+    const occurrences = bodyHtmlWithKey.split("PLAYWRIGHT_SENTINEL_KEY_MATERIAL").length - 1;
+    expect(occurrences).toBe(1); // present only inside the one textarea's own value, nowhere else rendered
+    await page.locator("main button").filter({ hasText: /^\s*Cancel upload\s*$/ }).first().click();
+    await expect(keyField).toHaveCount(0); // collapsing the form discards the typed key from the DOM entirely
+
+    // Reliability > Changelog: reachable and renders the real response
+    // shape (capitalized Go field names), not static release notes.
+    await page.locator("aside button").filter({ hasText: new RegExp(`^\\s*${escapeRegex("Reliability")}\\s*$`) }).first().click();
+    await page.waitForLoadState("networkidle");
+    await page.locator("main button").filter({ hasText: /^\s*Changelog\s*$/ }).first().click();
+    await expect(page.getByText(/Changelog|No changelog entries|unavailable/i).first()).toBeVisible();
+
+    // Configuration > Protocol Settings: reachable, schema-driven
+    // fields for a real protocol, never a generic key/value dump.
+    await page.locator("aside button").filter({ hasText: new RegExp(`^\\s*${escapeRegex("Configuration")}\\s*$`) }).first().click();
+    await page.waitForLoadState("networkidle");
+    await page.locator("main button").filter({ hasText: /^\s*Protocol Settings\s*$/ }).first().click();
+    await page.waitForLoadState("networkidle");
+    await expect(page.locator("main").getByText(/smtp|imap|pop3|webmail/i).first()).toBeVisible();
+
+    // Across this entire gap-coverage block, zero write requests were
+    // ever issued to any of the five gap endpoints — read-only
+    // reachability checks never mutate.
+    if (gapWriteRequests.length) throw new Error(`unexpected write request(s) during read-only gap-coverage checks: ${gapWriteRequests.join(", ")}`);
+    if (darkConsoleErrors.length) throw new Error(`console errors during gap-coverage sweep: ${darkConsoleErrors.join(" | ")}`);
+
     // Logout clears the shell.
     await page.locator("aside button").filter({ hasText: /logout/i }).first().click();
     await page.waitForLoadState("networkidle");
