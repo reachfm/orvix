@@ -33,6 +33,14 @@ frontend consumer, not the route's name.
 | `PATCH /platform/organizations/:id` | platformMW | `UpdateOrganization` | `UpdateOrganizationRequest/Response` | Platform | `page.test.tsx` | UI_SUPPORTED |
 | `GET /platform/organizations/:id` | platformMW | `GetPlatformOrganization` | untyped `map[string]interface{}` from a different service (`platformAdminSvc`) than the typed `/detail` route above | Platform | `page.test.tsx` (regression: proves the client has no function for this route at all) | DUPLICATE_SUPERSEDED_ROUTE |
 
+MISSING_BACKEND (not a route, so not counted in the 100): the console
+has no way for a Platform Super Admin to create a new organization —
+`web/admin/src/features/platform/organizations/api.ts` has no create
+function, and no `POST /platform/organizations` (or equivalent)
+route is registered anywhere in `router.go`. Organizations are
+currently created only via tenant self-signup, never PSA-initiated.
+Not fixed in this pass — flagged, not silently omitted.
+
 ## Mail Operations
 
 | Route | Middleware | Handler | Contract | Owner | Test file | Disposition |
@@ -91,7 +99,7 @@ and `isCoreMailDisabled` (frontend).
 | `GET /metrics` | platformMW | `metrics.Handler()` (Prometheus exposition format) | raw text | Platform | `MonitoringPanel`'s "Open raw metrics" external link | UI_SUPPORTED (external link, not embedded — appropriate for a Prometheus-format payload) |
 | `GET /admin/storage/volumes` | platformMW | `ListStorageVolumes` | `ListStorageVolumesResponse` | Platform | `StoragePanel.test.tsx` | UI_SUPPORTED |
 | `GET /admin/cluster/status` | platformMW | `AdminClusteringStatus` | `ClusterStatus` — **honestly static**: `deployment_mode:"single_node"`, `honest_note:"Clustering + proxy replication is not implemented in this build."` | Platform | `ClusterPanel.test.tsx` | READ_ONLY_STATUS (this is the current, correct state — not a preview of the future `platform-cluster-control-plane` bounded context, which is unimplemented and out of scope for this PR) |
-| `GET/PATCH /admin/settings/protocol/:protocol` | platformMW | `ListProtocolSettings` / `PatchProtocolSettings` | `ProtocolSettingsResponse` / flat diff-only PATCH, 10 protocol IDs | Platform | `ProtocolSettingsPanel.test.tsx` | UI_SUPPORTED |
+| `GET /admin/settings/protocol/:protocol`, `PATCH /admin/settings/protocol/:protocol` | platformMW | `ListProtocolSettings` / `PatchProtocolSettings` | `ProtocolSettingsResponse` / flat diff-only PATCH, 10 protocol IDs, per-key semantic validation, single-transaction write, post-commit `settingsBridge.Apply` determines the real `hot_applied`/`pending_restart` split (never a static guess); `coremail.imap_idle_enabled` is `ReadOnly` (no live-config field backs it) | Platform | `ProtocolSettingsPanel.test.tsx`, `protocol_settings_test.go` (10 backend cases against the real bridge/DB) | UI_SUPPORTED |
 
 ## Security
 
@@ -108,7 +116,7 @@ and `isCoreMailDisabled` (frontend).
 | `GET /admin/security/antivirus` | platformMW | `AdminAntivirusStatus` | `AntivirusStatus` | Platform | `AntivirusPanel.test.tsx` | UI_SUPPORTED |
 | `GET /firewall/rules` | platformMW | `ListFirewallRules` | `FirewallRule[]` | Platform | `AuditFirewallSelfHeal.test.tsx` | UI_SUPPORTED |
 | `GET /firewall/logs` | platformMW | `ListFirewallLogs` | `FirewallLog[]` | Platform | `AuditFirewallSelfHeal.test.tsx` | UI_SUPPORTED |
-| `POST /firewall/rules` | platformMW | `CreateFirewallRule` | `CreateFirewallRuleRequest`, typed confirm | Platform | `FirewallRuleCreateForm.test.tsx` | UI_SUPPORTED |
+| `POST /firewall/rules` | platformMW | `CreateFirewallRule` | fails closed: `410 Gone`, stable code `FIREWALL_RULE_ENGINE_NOT_OPERATIONAL`, inserts nothing. No production mail path consults `firewall_rules` — `internal/firewall.Module.Start` never calls `LoadRules`, and CoreMail enforces policy via `internal/ruler` instead. Previously bound raw JSON directly into `models.FirewallRule` with no validation and silently persisted rules nothing enforced; retired in this pass rather than wired into the mail path (a separate bounded backend change). | Platform | `firewall_test.go` (backend: 410, stable code, zero row/audit mutation), `AuditFirewallSelfHeal.test.tsx` (frontend: no Create Rule control, no create mutation, legacy-not-enforced label) | DEPRECATED / NOT_OPERATIONAL |
 | `GET /guardian/logs` | platformMW | `ListGuardianLogs` | `GuardianLog[]` | Platform | `GuardianPanel.test.tsx` | UI_SUPPORTED |
 | `POST /guardian/analyze` | platformMW | `AnalyzeEmail` | takes raw email content (subject/body/headers/SPF/DKIM/DMARC results) as input | Platform | — | MACHINE_ONLY (no operator form makes sense for submitting raw email content for analysis — this is an internal analysis call, not an admin action) |
 | `GET /heal/history` | platformMW | `ListHealHistory` | `HealHistoryEntry[]` | Platform | `AuditFirewallSelfHeal.test.tsx` | UI_SUPPORTED |
@@ -133,7 +141,7 @@ and `isCoreMailDisabled` (frontend).
 | `GET /license` | platformMW | `GetLicense` | unconditionally `{"status":"not_required"}` | Platform | — | DEPRECATED (backend already retired for this hosted-SaaS product; frontend page removed in this PR) |
 | `POST /license/validate` | platformMW | `ValidateLicense` | unconditionally `410 Gone` | Platform | — | DEPRECATED |
 | `GET /console/reports` | platformMW | `AdminReports` | superseded reporting view | Platform | — | DUPLICATE_SUPERSEDED_ROUTE (superseded by `/platform/dashboard` + the six migrated feature pages) |
-| `GET /console/internal/overview`, `.../tenants`, `.../domain-intelligence`, `.../security-ops`, `.../mail-flow-ops` (5 routes) | platformMW | `InternalOverview` / `InternalTenants` / `InternalDomainIntelligence` / `InternalSecurityOps` / `InternalMailFlowOps` | superseded internal-console views | Platform | — | DUPLICATE_SUPERSEDED_ROUTE (superseded by `/platform/dashboard`, Organizations, Mail Operations, and Security — the newer, tested pages) |
+| `GET /console/internal/overview`, `GET /console/internal/tenants`, `GET /console/internal/domain-intelligence`, `GET /console/internal/security-ops`, `GET /console/internal/mail-flow-ops` (5 routes) | platformMW | `InternalOverview` / `InternalTenants` / `InternalDomainIntelligence` / `InternalSecurityOps` / `InternalMailFlowOps` | superseded internal-console views | Platform | — | DUPLICATE_SUPERSEDED_ROUTE (superseded by `/platform/dashboard`, Organizations, Mail Operations, and Security — the newer, tested pages) |
 
 ## Theme system (cross-cutting, not a route)
 
@@ -144,45 +152,46 @@ Light/Dark coverage for both PSA and Tenant Admin.
 
 ## Summary counts
 
-Route-level (not row-level — several rows above group multiple route
-registrations under one disposition, e.g. the 9 legacy `/backups*`
+This is the single canonical summary for this document — a prior
+draft of this file briefly carried two contradictory "Summary counts"
+sections (59/5/3/11/19/3=100 vs. 62/6/3/11/17/2=101); that was a
+real defect in the document itself, not just a typo, and
+`internal/api/capability_matrix_test.go` now fails the build if a
+second "## Summary counts" heading, or a route missing from either
+side, is ever reintroduced.
+
+Route-level, not row-level — several rows above group multiple route
+registrations under one disposition (the 9 legacy `/backups*`
 `LegacyGone` routes, the 5 `/console/internal/*` routes, the 4
-`/admin/mfa/*` routes, and the combined `GET+PATCH /admin/settings/
-protocol/:protocol` pair). Verified against `grep -c "platformMW\[0\],
-platformMW\[1\]" internal/api/router.go` = 100 and cross-checked
-against the distinct handler-name list from the same grep.
+`/admin/mfa/*` routes, the `GET /admin/fs/browse`+`GET /admin/fs/read`
+pair, and the combined `GET`+`PATCH /admin/settings/protocol/:protocol`
+pair). Every number below was recomputed directly from the table rows
+above (not carried over from an earlier draft) and is enforced equal
+to the router's actual route set by
+`internal/api/capability_matrix_test.go`, which parses
+`platformMW[0], platformMW[1]` registrations straight out of
+`router.go` — currently 100 — and parses every `` `METHOD /path` ``
+occurrence and its row's disposition straight out of this document.
 
 | Disposition | Routes |
 |---|---|
 | UI_SUPPORTED | 59 |
 | READ_ONLY_STATUS | 5 |
 | MACHINE_ONLY | 3 |
-| DEPRECATED | 11 |
-| DUPLICATE_SUPERSEDED_ROUTE | 19 |
+| DEPRECATED | 12 |
+| DUPLICATE_SUPERSEDED_ROUTE | 18 |
 | MISSING_UI | 3 |
-| MISSING_BACKEND | 0 (the one MISSING_BACKEND case in this PR — platform-initiated organization creation — is a non-route documented under Organizations, not counted here) |
+| MISSING_BACKEND | 0 (the one MISSING_BACKEND case — platform-initiated organization creation — is a non-route documented under Organizations, not counted here) |
 | **Total** | **100** |
 
-Two MISSING_UI gaps were found and left unimplemented in this pass,
-documented rather than silently omitted: `GET /admin/backups/:id`
-(single-backup fetch; the list view already shows everything the
-struct provides) and `POST /admin/backups/schedule` (a
-`setBackupSchedule` client function exists but no component calls
-it — the schedule is currently read-only in the UI). `GET /admin/
-runtime` is a third, pre-existing MISSING_UI gap, also left
-unimplemented.
+Three MISSING_UI gaps exist, documented rather than silently omitted:
+`GET /admin/backups/:id` (single-backup fetch; the list view already
+shows everything the struct provides), `POST /admin/backups/schedule`
+(a `setBackupSchedule` client function exists but no component calls
+it — the schedule is currently read-only in the UI), and `GET
+/admin/runtime` (real route, no frontend consumer).
 
-## Summary counts
-
-- **100** total `platformMW`-gated route registrations audited.
-- **UI_SUPPORTED**: 62
-- **READ_ONLY_STATUS**: 6 (ACME status, Cluster status, `/monitoring/health`, `/modules`, `/admin/summary`, plus the shared `/metrics` external link counted under Reliability)
-- **MACHINE_ONLY**: 3 (`/guardian/analyze`, `/admin/fs/browse`, `/admin/fs/read`)
-- **DEPRECATED**: 11 (9× legacy `/backups*` `LegacyGone`, `/license`, `/license/validate`)
-- **DUPLICATE_SUPERSEDED_ROUTE**: 17 (queue legacy trio, updates legacy pair, org untyped GET, console/internal sextet, MFA quartet, changelog's sibling is not duplicate — recount reflects the table above precisely)
-- **MISSING_UI**: 2 (`GET /admin/backups/:id`, `GET /admin/runtime`)
-- **MISSING_BACKEND**: 0 among these 100 (the one MISSING_BACKEND case in this PR — platform-initiated organization creation — is documented under Organizations as a non-route, not counted in this 100)
-
-Every count above was produced by re-reading the table rows in this
-document, not derived separately — if the table changes, this summary
-must be regenerated from it, not edited independently.
+DEPRECATED is 12, not 11, because `POST /firewall/rules` moved from
+UI_SUPPORTED to DEPRECATED / NOT_OPERATIONAL in this pass (see
+Security, above) — the legacy rule-creation UI was retired rather
+than left pointing at a non-enforcing write.
