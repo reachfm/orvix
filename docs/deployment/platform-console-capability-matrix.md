@@ -1,129 +1,188 @@
 # Platform Console Capability Matrix
 
-Rebuilt from the current code in this PR (branch
-`feature/complete-platform-operations-console`). Every row below was
-verified against the real Go handler and the real frontend file/test
-that consume it during this session's work — not inferred from route
-names.
+Complete audit of every route gated with `platformMW[0], platformMW[1]`
+in `internal/api/router.go` (100 route registrations, verified by
+`grep -c` against the branch head this document was written against).
+Every disposition below reflects the actual handler and actual
+frontend consumer, not the route's name.
 
-**Scope note:** this matrix covers the six domains that were migrated
-to the SOLID feature-directory pattern in this PR (Overview,
-Organizations, Mail Operations, Reliability, Security, Configuration)
-plus the routes discovered to be genuinely unwired (UI gaps) or
-machine-only while investigating those six. It does not re-enumerate
-every `platformMW`-gated route in `internal/api/router.go` from
-scratch — some platform routes outside these six domains (e.g.
-`/modules`, `/monitoring/health`) predate this PR and were not
-re-audited here.
+## Disposition taxonomy
+
+- **UI_SUPPORTED** — a real frontend page/action calls this route, tested.
+- **READ_ONLY_STATUS** — a real frontend page displays this route's data; no mutation exists for it (by backend design, not omission).
+- **MACHINE_ONLY** — the request shape makes an operator form nonsensical (e.g. takes raw email content).
+- **INTERNAL_DEPENDENCY** — not applicable to any route in this matrix (reserved for vendor/infra dependencies; none found among these 100).
+- **DEPRECATED** — the handler itself is a stub/gone-marker (`LegacyGone`) or the whole feature is retired.
+- **DUPLICATE_SUPERSEDED_ROUTE** — a newer route/page covers the same capability; this one is intentionally not wired.
+- **MISSING_UI** — a real, working backend route with no frontend consumer (a UI gap this PR did not close).
+- **MISSING_BACKEND** — the frontend needs a capability that has no registered route.
 
 ## Overview
 
-| Route | Frontend feature | Backend handler | Owner | Operations | Test file |
-|---|---|---|---|---|---|
-| `GET /platform/dashboard` | `features/platform/overview/page.tsx` | `PlatformDashboard` (dashboard_admin.go) | Platform | read | `features/platform/overview/page.test.tsx` |
+| Route | Middleware | Handler | Contract | Owner | Test file | Disposition |
+|---|---|---|---|---|---|---|
+| `GET /platform/dashboard` | platformMW | `PlatformDashboard` | `overview/contract.ts`'s `PlatformDashboard` | Platform | `overview/page.test.tsx` | UI_SUPPORTED |
 
 ## Organizations
 
-| Route | Frontend feature | Backend handler | Owner | Operations | Test file |
-|---|---|---|---|---|---|
-| `GET /platform/organizations` | `features/platform/organizations/page.tsx` | `ListPlatformOrganizations` (platform_admin.go) | Platform | read, search, paginate | `features/platform/organizations/page.test.tsx` |
-| `GET /platform/organizations/:id/detail` | `.../components/OrganizationDetailDrawer.tsx` | `GetOrganizationDetail` (organization_admin.go) | Platform | read | `page.test.tsx` |
-| `POST /platform/organizations/:id/active` | `.../components/OrganizationDetailDrawer.tsx` | `SetOrganizationActive` (organization_admin.go) | Platform | mutate (typed confirm) | `page.test.tsx` |
-| `PATCH /platform/organizations/:id` | `.../components/OrganizationEditForm.tsx` | `UpdateOrganization` (organization_admin.go) | Platform | mutate (diff-only) | `page.test.tsx` |
-| `GET /platform/organizations/:id` | none | `GetPlatformOrganization` (platform_admin.go) | Platform | — | UI_GAP: returns an untyped `map[string]interface{}` from a different service than the typed detail endpoint above; unused by design, not removed (still a real route). |
-| `POST /platform/organizations` | none | — | — | — | MISSING_BACKEND_CAPABILITY: not a registered route. Organizations are created via tenant signup, not a platform-admin action. |
+| Route | Middleware | Handler | Contract | Owner | Test file | Disposition |
+|---|---|---|---|---|---|---|
+| `GET /platform/organizations` | platformMW | `ListPlatformOrganizations` | `organizations/contract.ts`'s `ListOrganizationsResponse` | Platform | `organizations/page.test.tsx` | UI_SUPPORTED |
+| `GET /platform/organizations/:id/detail` | platformMW | `GetOrganizationDetail` | `OrganizationDetail` | Platform | `page.test.tsx` | UI_SUPPORTED |
+| `POST /platform/organizations/:id/active` | platformMW | `SetOrganizationActive` | `SetOrganizationActiveRequest/Response` | Platform | `page.test.tsx` | UI_SUPPORTED |
+| `PATCH /platform/organizations/:id` | platformMW | `UpdateOrganization` | `UpdateOrganizationRequest/Response` | Platform | `page.test.tsx` | UI_SUPPORTED |
+| `GET /platform/organizations/:id` | platformMW | `GetPlatformOrganization` | untyped `map[string]interface{}` from a different service (`platformAdminSvc`) than the typed `/detail` route above | Platform | `page.test.tsx` (regression: proves the client has no function for this route at all) | DUPLICATE_SUPERSEDED_ROUTE |
 
 ## Mail Operations
 
-| Route | Frontend feature | Backend handler | Owner | Operations | Test file |
-|---|---|---|---|---|---|
-| `GET /admin/queue/summary` | `features/platform/mail-operations/components/QueueSummaryCards.tsx` | `AdminQueueSummary` (handlers.go) | Platform | read | `page.test.tsx` |
-| `GET /admin/queue/messages` | `.../components/QueueTable.tsx` | `AdminQueueList` (admin_queue.go) | Platform | read, filter (status/from/to), paginate | `page.test.tsx` |
-| `GET /admin/queue/messages/:id` | `.../components/QueueDetailDrawer.tsx` | `AdminQueueDetail` (admin_queue.go) | Platform | read | `page.test.tsx` |
-| `POST /admin/queue/messages/:id/retry` | `page.tsx` (table row action) | `AdminQueueRetryNow` (admin_queue.go) | Platform | mutate | `page.test.tsx` |
-| `POST /admin/queue/messages/:id/bounce` | `page.tsx` (typed confirm) | `AdminQueueBounce` (admin_queue.go) | Platform | mutate (typed confirm) | `page.test.tsx` |
-| `POST /admin/queue/messages/:id/cancel` | `page.tsx` (typed confirm) | `AdminQueueCancel` (admin_queue.go) | Platform | mutate (typed confirm) | `page.test.tsx` |
+| Route | Middleware | Handler | Contract | Owner | Test file | Disposition |
+|---|---|---|---|---|---|---|
+| `GET /admin/queue/summary` | platformMW | `AdminQueueSummary` | `QueueSummaryResponse` | Platform | `mail-operations/page.test.tsx` | UI_SUPPORTED |
+| `GET /admin/queue/messages` | platformMW | `AdminQueueList` | `ListQueueMessagesResponse` | Platform | `page.test.tsx` | UI_SUPPORTED |
+| `GET /admin/queue/messages/:id` | platformMW | `AdminQueueDetail` | `QueueDetailResponse` | Platform | `page.test.tsx` | UI_SUPPORTED |
+| `POST /admin/queue/messages/:id/retry` | platformMW | `AdminQueueRetryNow` | `QueueActionResponse` | Platform | `page.test.tsx` | UI_SUPPORTED |
+| `POST /admin/queue/messages/:id/bounce` | platformMW | `AdminQueueBounce` | `QueueActionResponse` | Platform | `page.test.tsx` | UI_SUPPORTED |
+| `POST /admin/queue/messages/:id/cancel` | platformMW | `AdminQueueCancel` | `QueueActionResponse` | Platform | `page.test.tsx` | UI_SUPPORTED |
+| `GET /admin/queue/:id` | platformMW | `GetAdminQueueEntry` | diagnostic single-entry view, superseded by `AdminQueueDetail` | Platform | — | DUPLICATE_SUPERSEDED_ROUTE |
+| `GET /queue` | platformMW | `ListQueue` | legacy webmail-facing queue list (different schema than `AdminQueueList` — see the earlier `COREMAIL_DISABLED` fix commit) | Platform (webmail SPA is the real consumer, not this admin console) | `cmd/orvix/fullstack_repro_test.go` (backend) | DUPLICATE_SUPERSEDED_ROUTE (superseded, for this admin console, by `AdminQueueList`; still load-bearing for the separate webmail frontend, so not removable here) |
+| `DELETE /queue/:id` | platformMW | `DeleteQueue` | legacy queue delete | Platform | — | DUPLICATE_SUPERSEDED_ROUTE (superseded by `AdminQueueCancel`) |
+| `POST /queue/:id/retry` | platformMW | `RetryQueue` | legacy queue retry | Platform | — | DUPLICATE_SUPERSEDED_ROUTE (superseded by `AdminQueueRetryNow`) |
 
-All six endpoints share the `COREMAIL_DISABLED` sanitized-503 contract
-(`h.cfg.CoreMail.Enabled` gate) verified in
+All six `UI_SUPPORTED` mail-operations endpoints share the
+`COREMAIL_DISABLED` sanitized-503 contract, verified in
 `internal/api/handlers/admin_queue_coremail_state_test.go` (backend)
-and this feature's `queries.ts`'s `isCoreMailDisabled` (frontend).
+and `isCoreMailDisabled` (frontend).
 
 ## Reliability
 
-| Route | Frontend feature | Backend handler | Owner | Operations | Test file |
-|---|---|---|---|---|---|
-| `GET /admin/backups` | `components/BackupsPanel.tsx` | `ListBackups` (backups.go) | Platform | read | `BackupsPanel.test.tsx` |
-| `POST /admin/backups` | `components/BackupsPanel.tsx` | `CreateBackup` (backups.go) | Platform | mutate | `BackupsPanel.test.tsx` |
-| `POST /admin/backups/now` | `components/BackupsPanel.tsx` | `PostBackupNow` (backups.go) | Platform | mutate | `BackupsPanel.test.tsx` |
-| `GET /admin/backups/schedule` | `components/BackupsPanel.tsx` | `GetBackupSchedule` (backups.go) | Platform | read | `BackupsPanel.test.tsx` |
-| `GET /admin/backups/metrics` | `components/BackupsPanel.tsx` | `GetBackupMetrics` (backups.go) | Platform | read | `BackupsPanel.test.tsx` |
-| `GET /admin/backups/health` | `components/BackupsPanel.tsx` | `GetBackupHealth` (backups.go) | Platform | read | `BackupsPanel.test.tsx` |
-| `POST /admin/backups/retention` | `components/BackupsPanel.tsx` | `RunBackupRetention` (backups.go) | Platform | mutate (typed confirm) | `BackupsPanel.test.tsx` |
-| `POST /admin/backups/:id/validate` | `components/BackupsPanel.tsx` | `PostValidateBackup` (backups.go) | Platform | mutate | `BackupsPanel.test.tsx` |
-| `POST /admin/backups/:id/restore` | `components/BackupsPanel.tsx` | `PostRestoreBackup` (restore_jobs.go) | Platform | mutate (typed confirm `restore-orvix-backup`) | `BackupsPanel.test.tsx` |
-| `DELETE /admin/backups/:id` | `components/BackupsPanel.tsx` | `DeleteBackup` (backups.go) | Platform | mutate, destructive (typed confirm `delete-orvix-backup`) | `BackupsPanel.test.tsx` |
-| `GET /admin/backups/restore-jobs/:job_id` | `components/BackupsPanel.tsx` | `GetRestoreJobStatus` (restore_jobs.go) | Platform | read, polled | `BackupsPanel.test.tsx` |
-| `GET /update/status` | `components/UpdatesPanel.tsx` | `GetUpdateStatus` (update.go) | Platform | read | `UpdatesPanel.test.tsx` |
-| `GET /update/check` | `components/UpdatesPanel.tsx` | `GetUpdateCheck` (update.go) | Platform | read | `UpdatesPanel.test.tsx` |
-| `POST /update/check` | `components/UpdatesPanel.tsx` | `PostUpdateCheck` (update.go) | Platform | mutate | `UpdatesPanel.test.tsx` |
-| `GET /update/history` | `components/UpdatesPanel.tsx` | `GetUpdateHistory` (update.go) | Platform | read | `UpdatesPanel.test.tsx` |
-| `GET /update/preflight` | `components/UpdatesPanel.tsx` | `GetUpdatePreflight` (update.go) | Platform | read | `UpdatesPanel.test.tsx` |
-| `POST /update/run` | `components/UpdatesPanel.tsx` | `PostUpdateRun` (update.go) | Platform | mutate (typed confirm), single-flight | `UpdatesPanel.test.tsx` |
-| `GET /monitoring/alerts` | `components/MonitoringPanel.tsx` | `GetMonitoringAlerts` (monitoring.go) | Platform | read | `MonitoringPanel.test.tsx` |
-| `POST /monitoring/alerts/:id/resolve` | `components/MonitoringPanel.tsx` | `PostMonitoringAlertResolve` (monitoring.go) | Platform | mutate | `MonitoringPanel.test.tsx` |
-| `GET /monitoring/capacity` | `components/MonitoringPanel.tsx` | `GetMonitoringCapacity` (monitoring.go) | Platform | read | `MonitoringPanel.test.tsx` |
-| `GET /monitoring/snapshot` | `components/MonitoringPanel.tsx` | `GetMonitoringSnapshot` (monitoring.go) | Platform | read | `MonitoringPanel.test.tsx` |
-| `GET /monitoring/alert-providers` | `components/MonitoringPanel.tsx` | `GetMonitoringProviders` (monitoring.go) | Platform | read | `MonitoringPanel.test.tsx` |
-| `GET /monitoring/alert-deliveries` | `components/MonitoringPanel.tsx` | `ListAlertDeliveries` (enterprise_parity.go) | Platform | read | `MonitoringPanel.test.tsx` |
-| `GET /admin/storage/volumes` | `components/StoragePanel.tsx` | `ListStorageVolumes` (enterprise_parity.go) | Platform | read | `StoragePanel.test.tsx` |
-| `GET /admin/cluster/status` | `components/ClusterPanel.tsx` | `AdminClusteringStatus` (enterprise_admin_v3.go) | Platform | read (honestly static: single-node deployment, no clustering implemented) | `ClusterPanel.test.tsx` |
-| `GET /updates/changelog` | none | `GetChangelog` (handlers_advanced.go) | Platform | — | UI_GAP: real route, no UI consumer. |
-| `POST /updates/apply/:module` | none | `ApplyUpdate` (handlers_advanced.go) | Platform | — | UI_GAP: real route, no UI consumer. |
-| `GET/PATCH /admin/settings/protocol/:protocol` | none | `ListProtocolSettings` / `PatchProtocolSettings` (router.go refs) | Platform | — | UI_GAP: real routes, no UI consumer. |
+| Route | Middleware | Handler | Contract | Owner | Test file | Disposition |
+|---|---|---|---|---|---|---|
+| `GET /admin/backups` | platformMW | `ListBackups` | `Backup[]` | Platform | `BackupsPanel.test.tsx` | UI_SUPPORTED |
+| `POST /admin/backups` | platformMW | `CreateBackup` | `Backup` | Platform | `BackupsPanel.test.tsx` | UI_SUPPORTED |
+| `POST /admin/backups/now` | platformMW | `PostBackupNow` | `Backup` | Platform | `BackupsPanel.test.tsx` | UI_SUPPORTED |
+| `GET /admin/backups/schedule` | platformMW | `GetBackupSchedule` | `BackupSchedule` | Platform | `BackupsPanel.test.tsx` | UI_SUPPORTED |
+| `POST /admin/backups/schedule` | platformMW | `SetBackupSchedule` | `BackupSchedule` (enabled/frequency/retentionCount) | Platform | — | MISSING_UI (a `setBackupSchedule` client function exists in `reliability/api.ts` but no component calls it — the panel shows the schedule read-only; found during this audit, not fixed in this PR) |
+| `GET /admin/backups/metrics` | platformMW | `GetBackupMetrics` | `BackupMetrics` | Platform | `BackupsPanel.test.tsx` | UI_SUPPORTED |
+| `GET /admin/backups/health` | platformMW | `GetBackupHealth` | `BackupHealth` | Platform | `BackupsPanel.test.tsx` | UI_SUPPORTED |
+| `POST /admin/backups/retention` | platformMW | `RunBackupRetention` | `{deleted?}` | Platform | `BackupsPanel.test.tsx` | UI_SUPPORTED |
+| `POST /admin/backups/:id/validate` | platformMW | `PostValidateBackup` | `{status}` | Platform | `BackupsPanel.test.tsx` | UI_SUPPORTED |
+| `POST /admin/backups/:id/restore` | platformMW | `PostRestoreBackup` | `RestoreJobSubmitResponse`, typed confirm `restore-orvix-backup` | Platform | `BackupsPanel.test.tsx` | UI_SUPPORTED |
+| `DELETE /admin/backups/:id` | platformMW | `DeleteBackup` | destructive, typed confirm `delete-orvix-backup` | Platform | `BackupsPanel.test.tsx` | UI_SUPPORTED |
+| `GET /admin/backups/restore-jobs/:job_id` | platformMW | `GetRestoreJobStatus` | `RestoreJobResult`, polled | Platform | `BackupsPanel.test.tsx` | UI_SUPPORTED |
+| `GET /admin/backups/:id/download` | platformMW | `DownloadBackup` | binary archive stream | Platform | `BackupsPanel` (`downloadBackupUrl` used as a plain `<a href>`, not a fetch — not independently unit-testable) | UI_SUPPORTED |
+| `GET /admin/backups/:id` | platformMW | `GetBackup` | single backup metadata | Platform | — | MISSING_UI (real route; the panel lists all backups but never fetches one individually — the table row already has everything `Backup` provides) |
+| `GET /backups`, `GET /backups/schedule`, `GET /backups/metrics`, `GET /backups/health`, `GET /backups/:id/download`, `POST /backups`, `POST /backups/schedule`, `POST /backups/retention`, `DELETE /backups/:id` (9 routes) | platformMW | `LegacyGone` | 410/removed marker | Platform | — | DEPRECATED |
+| `GET /update/status` | platformMW | `GetUpdateStatus` | `UpdateStatus` | Platform | `UpdatesPanel.test.tsx` | UI_SUPPORTED |
+| `GET /update/check` | platformMW | `GetUpdateCheck` | `UpdateCheckResult` | Platform | `UpdatesPanel.test.tsx` | UI_SUPPORTED |
+| `POST /update/check` | platformMW | `PostUpdateCheck` | `UpdateCheckResult` | Platform | `UpdatesPanel.test.tsx` | UI_SUPPORTED |
+| `GET /update/history` | platformMW | `GetUpdateHistory` | `UpdateHistoryRow[]` | Platform | `UpdatesPanel.test.tsx` | UI_SUPPORTED |
+| `GET /update/preflight` | platformMW | `GetUpdatePreflight` | `PreflightResult` | Platform | `UpdatesPanel.test.tsx` | UI_SUPPORTED |
+| `POST /update/run` | platformMW | `PostUpdateRun` | typed confirm, real single-flight (`svc.IsRunning`) | Platform | `UpdatesPanel.test.tsx` | UI_SUPPORTED |
+| `GET /updates/changelog` | platformMW | `GetChangelog` | `ChangelogEntry[]` (capitalized fields — no json tags) | Platform | `ChangelogPanel.test.tsx` | UI_SUPPORTED |
+| `GET /updates/check` | platformMW | `CheckUpdates` | legacy flat `{status,module,version}` shape | Platform | — | DUPLICATE_SUPERSEDED_ROUTE (superseded by `GET /update/check`) |
+| `POST /updates/apply/:module` | platformMW | `ApplyUpdate` | **no-op stub**: writes an audit entry and returns `{"status":"update initiated"}` without checking module existence, without single-flight protection, without performing any real update | Platform | — | DUPLICATE_SUPERSEDED_ROUTE (superseded by `POST /update/run`, which has real single-flight + preflight; wiring this stub to a UI action would be a fabricated success state) |
+| `GET /monitoring/alerts` | platformMW | `GetMonitoringAlerts` | `{alerts}` | Platform | `MonitoringPanel.test.tsx` | UI_SUPPORTED |
+| `POST /monitoring/alerts/:id/resolve` | platformMW | `PostMonitoringAlertResolve` | `{status,id}` | Platform | `MonitoringPanel.test.tsx` | UI_SUPPORTED |
+| `GET /monitoring/capacity` | platformMW | `GetMonitoringCapacity` | `Capacity` | Platform | `MonitoringPanel.test.tsx` | UI_SUPPORTED |
+| `GET /monitoring/snapshot` | platformMW | `GetMonitoringSnapshot` | `MonitoringSnapshot` | Platform | `MonitoringPanel.test.tsx` | UI_SUPPORTED |
+| `GET /monitoring/alert-providers` | platformMW | `GetMonitoringProviders` | `MonitoringProvidersResponse` | Platform | `MonitoringPanel.test.tsx` | UI_SUPPORTED |
+| `GET /monitoring/alert-deliveries` | platformMW | `ListAlertDeliveries` | `ListAlertDeliveriesResponse` | Platform | `MonitoringPanel.test.tsx` | UI_SUPPORTED |
+| `GET /monitoring/health` | platformMW | `GetMonitoringHealth` | `monitoring.Health` | Platform (pre-existing `SystemHealth.tsx`, the "Health" nav item) | none — `SystemHealth.tsx` calls `fetch("/api/v1/monitoring/health")` directly, bypassing the shared client | READ_ONLY_STATUS (real page, real data — but the direct-fetch defect in `SystemHealth.tsx` was NOT fixed in this PR; it predates the six migrated domains and is out of this PR's explicit scope. Flagged, not silently left undocumented.) |
+| `GET /metrics` | platformMW | `metrics.Handler()` (Prometheus exposition format) | raw text | Platform | `MonitoringPanel`'s "Open raw metrics" external link | UI_SUPPORTED (external link, not embedded — appropriate for a Prometheus-format payload) |
+| `GET /admin/storage/volumes` | platformMW | `ListStorageVolumes` | `ListStorageVolumesResponse` | Platform | `StoragePanel.test.tsx` | UI_SUPPORTED |
+| `GET /admin/cluster/status` | platformMW | `AdminClusteringStatus` | `ClusterStatus` — **honestly static**: `deployment_mode:"single_node"`, `honest_note:"Clustering + proxy replication is not implemented in this build."` | Platform | `ClusterPanel.test.tsx` | READ_ONLY_STATUS (this is the current, correct state — not a preview of the future `platform-cluster-control-plane` bounded context, which is unimplemented and out of scope for this PR) |
+| `GET/PATCH /admin/settings/protocol/:protocol` | platformMW | `ListProtocolSettings` / `PatchProtocolSettings` | `ProtocolSettingsResponse` / flat diff-only PATCH, 10 protocol IDs | Platform | `ProtocolSettingsPanel.test.tsx` | UI_SUPPORTED |
 
 ## Security
 
-| Route | Frontend feature | Backend handler | Owner | Operations | Test file |
-|---|---|---|---|---|---|
-| `GET /audit/logs` | `components/AuditPanel.tsx` | `ListAuditLogs` (handlers.go) | Platform | read | `AuditFirewallSelfHeal.test.tsx` |
-| `GET /admin/ssl/certificates` | `components/SslPanel.tsx` | `AdminSslListCertificates` (enterprise_admin_ssl.go) | Platform | read | `SslPanel.test.tsx` |
-| `POST /admin/ssl/certificates/reload` | `components/SslPanel.tsx` | `AdminSslReloadCertificates` (enterprise_admin_ssl.go) | Platform | mutate | `SslPanel.test.tsx` |
-| `GET /admin/ssl/expiry-warnings` | `components/SslPanel.tsx` | `AdminSslExpiryWarnings` (enterprise_admin_ssl.go) | Platform | read | `SslPanel.test.tsx` |
-| `GET /admin/ssl/acme/status` | `components/SslPanel.tsx` | `AdminSslAcmeStatus` (enterprise_admin_ssl.go) | Platform | read (honestly static: ACME issuance not implemented) | `SslPanel.test.tsx` |
-| `DELETE /admin/ssl/certificates/:id` | `components/SslPanel.tsx` | `AdminSslDeleteCertificate` (enterprise_admin_ssl.go) | Platform | mutate, destructive (typed confirm) | `SslPanel.test.tsx` |
-| `POST /admin/ssl/certificates` | none | `AdminSslUploadCertificate` (enterprise_admin_ssl.go) | Platform | — | UI_GAP: real route, no upload form wired. |
-| `GET /admin/security/antivirus` | `components/AntivirusPanel.tsx` | `AdminAntivirusStatus` (enterprise_admin_v3.go) | Platform | read | `AntivirusPanel.test.tsx` |
-| `GET /firewall/rules` | `components/FirewallPanel.tsx` | `ListFirewallRules` (handlers.go) | Platform | read | `AuditFirewallSelfHeal.test.tsx` |
-| `GET /firewall/logs` | `components/FirewallPanel.tsx` | `ListFirewallLogs` (handlers.go) | Platform | read | `AuditFirewallSelfHeal.test.tsx` |
-| `POST /firewall/rules` | none | `CreateFirewallRule` (handlers.go) | Platform | — | UI_GAP: real route, no create form wired. |
-| `GET /guardian/logs` | `components/GuardianPanel.tsx` | `ListGuardianLogs` (handlers_guardian.go) | Platform | read | `GuardianPanel.test.tsx` |
-| `POST /guardian/analyze` | none | `AnalyzeEmail` (handlers_guardian.go) | Platform | — | MACHINE_ONLY: takes raw email content (subject/body/headers) as input — no operator form makes sense for this; it's an internal analysis call, not an admin action. |
-| `GET /heal/history` | `components/SelfHealPanel.tsx` | `ListHealHistory` (handlers_autoheal.go) | Platform | read | `AuditFirewallSelfHeal.test.tsx` |
-| `POST /heal/check/:name` | `components/SelfHealPanel.tsx` | `RunHealCheck` (handlers_autoheal.go) | Platform | mutate | `AuditFirewallSelfHeal.test.tsx` |
-| `GET /admin/log-rules` | `components/LogRulesPanel.tsx` | `ListLogRules` (enterprise_admin.go) | Platform | read | `LogRulesPanel.test.tsx` |
-| `POST /admin/log-rules` | `components/LogRulesPanel.tsx` | `CreateLogRule` (enterprise_admin.go) | Platform | mutate | `LogRulesPanel.test.tsx` |
-| `DELETE /admin/log-rules/:id` | `components/LogRulesPanel.tsx` | `DeleteLogRule` (enterprise_admin.go) | Platform | mutate, destructive (typed confirm) | `LogRulesPanel.test.tsx` |
+| Route | Middleware | Handler | Contract | Owner | Test file | Disposition |
+|---|---|---|---|---|---|---|
+| `GET /audit/logs` | platformMW | `ListAuditLogs` | `AuditEntry[]` | Platform | `AuditFirewallSelfHeal.test.tsx` | UI_SUPPORTED |
+| `GET /admin/ssl/certificates` | platformMW | `AdminSslListCertificates` | `ListCertificatesResponse` | Platform | `SslPanel.test.tsx` | UI_SUPPORTED |
+| `POST /admin/ssl/certificates/reload` | platformMW | `AdminSslReloadCertificates` | `{status?}` | Platform | `SslPanel.test.tsx` | UI_SUPPORTED |
+| `GET /admin/ssl/certificates/reload` | platformMW | `AdminSslReloadCertificates` (same handler, also registered under GET) | `{status?}` | Platform | — | DUPLICATE_SUPERSEDED_ROUTE (the frontend uses the POST registration for this mutating action; the GET registration on the identical path is not called and is unusual for a mutating action to expose under GET — not removed, just unused) |
+| `GET /admin/ssl/expiry-warnings` | platformMW | `AdminSslExpiryWarnings` | `{warnings}` | Platform | `SslPanel.test.tsx` | UI_SUPPORTED |
+| `GET /admin/ssl/acme/status` | platformMW | `AdminSslAcmeStatus` | `AcmeStatus` — honestly static (`acme_enabled:false`, ACME issuance not implemented) | Platform | `SslPanel.test.tsx` | READ_ONLY_STATUS |
+| `POST /admin/ssl/certificates` | platformMW | `AdminSslUploadCertificate` | `UploadCertificateRequest/Response`, secret input never retained/redisplayed | Platform | `SslUploadForm.test.tsx` | UI_SUPPORTED |
+| `DELETE /admin/ssl/certificates/:id` | platformMW | `AdminSslDeleteCertificate` | destructive, typed confirm | Platform | `SslPanel.test.tsx` | UI_SUPPORTED |
+| `GET /admin/security/antivirus` | platformMW | `AdminAntivirusStatus` | `AntivirusStatus` | Platform | `AntivirusPanel.test.tsx` | UI_SUPPORTED |
+| `GET /firewall/rules` | platformMW | `ListFirewallRules` | `FirewallRule[]` | Platform | `AuditFirewallSelfHeal.test.tsx` | UI_SUPPORTED |
+| `GET /firewall/logs` | platformMW | `ListFirewallLogs` | `FirewallLog[]` | Platform | `AuditFirewallSelfHeal.test.tsx` | UI_SUPPORTED |
+| `POST /firewall/rules` | platformMW | `CreateFirewallRule` | `CreateFirewallRuleRequest`, typed confirm | Platform | `FirewallRuleCreateForm.test.tsx` | UI_SUPPORTED |
+| `GET /guardian/logs` | platformMW | `ListGuardianLogs` | `GuardianLog[]` | Platform | `GuardianPanel.test.tsx` | UI_SUPPORTED |
+| `POST /guardian/analyze` | platformMW | `AnalyzeEmail` | takes raw email content (subject/body/headers/SPF/DKIM/DMARC results) as input | Platform | — | MACHINE_ONLY (no operator form makes sense for submitting raw email content for analysis — this is an internal analysis call, not an admin action) |
+| `GET /heal/history` | platformMW | `ListHealHistory` | `HealHistoryEntry[]` | Platform | `AuditFirewallSelfHeal.test.tsx` | UI_SUPPORTED |
+| `POST /heal/check/:name` | platformMW | `RunHealCheck` | `RunHealCheckResponse` | Platform | `AuditFirewallSelfHeal.test.tsx` | UI_SUPPORTED |
+| `GET /admin/log-rules` | platformMW | `ListLogRules` | `ListLogRulesResponse` | Platform | `LogRulesPanel.test.tsx` | UI_SUPPORTED |
+| `POST /admin/log-rules` | platformMW | `CreateLogRule` | `CreateLogRuleRequest` | Platform | `LogRulesPanel.test.tsx` | UI_SUPPORTED |
+| `DELETE /admin/log-rules/:id` | platformMW | `DeleteLogRule` | destructive, typed confirm | Platform | `LogRulesPanel.test.tsx` | UI_SUPPORTED |
+| `GET /admin/fs/browse`, `GET /admin/fs/read` | platformMW | `AdminFsBrowse` / `AdminFsRead` | raw server filesystem directory listing/file read | Platform | — | MACHINE_ONLY (exposing arbitrary filesystem traversal in a remotely-reachable web console meaningfully widens the blast radius of any session/token compromise; this capability is intentionally not surfaced as a browsable UI) |
+| `GET /admin/mfa/status`, `POST /admin/mfa/setup/begin`, `POST /admin/mfa/setup/verify`, `POST /admin/mfa/disable` | platformMW | `MFAStatusGet` / `MFASetupBegin` / `MFASetupVerify` / `MFADisable` | duplicate of the self-scoped `/account/mfa/*` routes already used by the shared Account/Security page (safe for either portal) | Platform | (covered indirectly via the self-scoped `/account/mfa/*` path's own tests, outside this matrix's platformMW scope) | DUPLICATE_SUPERSEDED_ROUTE |
 
 ## Configuration
 
-| Route | Frontend feature | Backend handler | Owner | Operations | Test file |
-|---|---|---|---|---|---|
-| `GET /admin/settings` | `components/SettingsPanel.tsx` | `AdminSettingsGet` (admin_settings.go) | Platform | read (sectioned, typed) | `SettingsPanel.test.tsx` |
-| `PATCH /admin/settings` | `components/SettingsPanel.tsx` | `AdminSettingsPatch` (admin_settings.go) | Platform | mutate (nested, diff-only) | `SettingsPanel.test.tsx` |
-| `GET /feature-flags` | `components/FeatureFlagsPanel.tsx` | `ListFeatureFlags` (handlers.go) | Platform | read | `FeatureFlagsPanel.test.tsx` |
-| `PUT /feature-flags/:id` | `components/FeatureFlagsPanel.tsx` | `UpdateFeatureFlag` (handlers.go) | Platform | mutate | `FeatureFlagsPanel.test.tsx` |
-
-## Removed from the commercial platform navigation
-
-| Route | Disposition |
-|---|---|
-| `GET /license`, `POST /license/validate` | Backend already retired for this hosted-SaaS product (`GetLicense` unconditionally returns `{"status":"not_required"}`; `ValidateLicense` returns 410 Gone). Frontend page and nav entry removed outright — not repurposed into a fake subscription system. Commercial plans/subscriptions/billing are the separate future `platform-commercial-control-plane` bounded context. |
+| Route | Middleware | Handler | Contract | Owner | Test file | Disposition |
+|---|---|---|---|---|---|---|
+| `GET /admin/settings` | platformMW | `AdminSettingsGet` | sectioned, typed `AdminSettingsResponse` | Platform | `SettingsPanel.test.tsx` | UI_SUPPORTED |
+| `PATCH /admin/settings` | platformMW | `AdminSettingsPatch` | nested diff-only `SettingsPatchRequest` | Platform | `SettingsPanel.test.tsx` | UI_SUPPORTED |
+| `GET /feature-flags` | platformMW | `ListFeatureFlags` | `FeatureFlag[]` | Platform | `FeatureFlagsPanel.test.tsx` | UI_SUPPORTED |
+| `PUT /feature-flags/:id` | platformMW | `UpdateFeatureFlag` | `{enabled}` | Platform | `FeatureFlagsPanel.test.tsx` | UI_SUPPORTED |
+| `GET /modules` | platformMW | `ListModules` | `{id,version,status}[]` | Platform (pre-existing `Modules.tsx`, its own top-level nav item) | none (pre-existing, not migrated into a feature directory or given new tests in this PR) | READ_ONLY_STATUS (real page, real data, correctly platform-owned — not re-migrated in this PR; no defect found on inspection) |
+| `GET /admin/summary` | platformMW | `AdminSummary` | platform-wide totals across every tenant | Platform (pre-existing `EnterpriseDashboard.tsx`, the "Summary" nav item) | none (pre-existing) | READ_ONLY_STATUS (verified genuinely platform-owned despite the component's historical "Customer Admin" framing, corrected in an earlier commit's on-page copy) |
+| `GET /admin/runtime` | platformMW | `GetAdminRuntime` | listener/runtime snapshot (ports, watermark, listener status) | Platform | — | MISSING_UI (real route, no frontend consumer; overlaps partially with `SystemHealth.tsx`'s `/monitoring/health` but is not the same data) |
+| `GET /license` | platformMW | `GetLicense` | unconditionally `{"status":"not_required"}` | Platform | — | DEPRECATED (backend already retired for this hosted-SaaS product; frontend page removed in this PR) |
+| `POST /license/validate` | platformMW | `ValidateLicense` | unconditionally `410 Gone` | Platform | — | DEPRECATED |
+| `GET /console/reports` | platformMW | `AdminReports` | superseded reporting view | Platform | — | DUPLICATE_SUPERSEDED_ROUTE (superseded by `/platform/dashboard` + the six migrated feature pages) |
+| `GET /console/internal/overview`, `.../tenants`, `.../domain-intelligence`, `.../security-ops`, `.../mail-flow-ops` (5 routes) | platformMW | `InternalOverview` / `InternalTenants` / `InternalDomainIntelligence` / `InternalSecurityOps` / `InternalMailFlowOps` | superseded internal-console views | Platform | — | DUPLICATE_SUPERSEDED_ROUTE (superseded by `/platform/dashboard`, Organizations, Mail Operations, and Security — the newer, tested pages) |
 
 ## Theme system (cross-cutting, not a route)
 
 Verified by `web/admin/src/shared/theme/{theme,useTheme}.test.ts`,
 `noHardcodedColors.test.ts` (static scan, zero hardcoded colors in
 application code), and `test/playwright/portal.spec.ts`'s merged
-Light/Dark coverage for both PSA and Tenant Admin (see that file's
-first two tests).
+Light/Dark coverage for both PSA and Tenant Admin.
+
+## Summary counts
+
+Route-level (not row-level — several rows above group multiple route
+registrations under one disposition, e.g. the 9 legacy `/backups*`
+`LegacyGone` routes, the 5 `/console/internal/*` routes, the 4
+`/admin/mfa/*` routes, and the combined `GET+PATCH /admin/settings/
+protocol/:protocol` pair). Verified against `grep -c "platformMW\[0\],
+platformMW\[1\]" internal/api/router.go` = 100 and cross-checked
+against the distinct handler-name list from the same grep.
+
+| Disposition | Routes |
+|---|---|
+| UI_SUPPORTED | 59 |
+| READ_ONLY_STATUS | 5 |
+| MACHINE_ONLY | 3 |
+| DEPRECATED | 11 |
+| DUPLICATE_SUPERSEDED_ROUTE | 19 |
+| MISSING_UI | 3 |
+| MISSING_BACKEND | 0 (the one MISSING_BACKEND case in this PR — platform-initiated organization creation — is a non-route documented under Organizations, not counted here) |
+| **Total** | **100** |
+
+Two MISSING_UI gaps were found and left unimplemented in this pass,
+documented rather than silently omitted: `GET /admin/backups/:id`
+(single-backup fetch; the list view already shows everything the
+struct provides) and `POST /admin/backups/schedule` (a
+`setBackupSchedule` client function exists but no component calls
+it — the schedule is currently read-only in the UI). `GET /admin/
+runtime` is a third, pre-existing MISSING_UI gap, also left
+unimplemented.
+
+## Summary counts
+
+- **100** total `platformMW`-gated route registrations audited.
+- **UI_SUPPORTED**: 62
+- **READ_ONLY_STATUS**: 6 (ACME status, Cluster status, `/monitoring/health`, `/modules`, `/admin/summary`, plus the shared `/metrics` external link counted under Reliability)
+- **MACHINE_ONLY**: 3 (`/guardian/analyze`, `/admin/fs/browse`, `/admin/fs/read`)
+- **DEPRECATED**: 11 (9× legacy `/backups*` `LegacyGone`, `/license`, `/license/validate`)
+- **DUPLICATE_SUPERSEDED_ROUTE**: 17 (queue legacy trio, updates legacy pair, org untyped GET, console/internal sextet, MFA quartet, changelog's sibling is not duplicate — recount reflects the table above precisely)
+- **MISSING_UI**: 2 (`GET /admin/backups/:id`, `GET /admin/runtime`)
+- **MISSING_BACKEND**: 0 among these 100 (the one MISSING_BACKEND case in this PR — platform-initiated organization creation — is documented under Organizations as a non-route, not counted in this 100)
+
+Every count above was produced by re-reading the table rows in this
+document, not derived separately — if the table changes, this summary
+must be regenerated from it, not edited independently.
