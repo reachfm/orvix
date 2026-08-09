@@ -1,0 +1,10 @@
+import { useQuery } from "@tanstack/react-query";
+import { getAdminSettings, listFeatureFlags } from "./api";
+
+export function useAdminSettingsQuery() {
+  return useQuery({ queryKey: ["admin-settings"], queryFn: getAdminSettings, retry: false });
+}
+
+export function useFeatureFlagsQuery() {
+  return useQuery({ queryKey: ["feature-flags"], queryFn: listFeatureFlags, retry: false });
+}

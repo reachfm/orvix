@@ -387,17 +387,11 @@ export const api = {
   // caller in either the old or new component); tracked as UI gaps in
   // the capability matrix rather than wired to fabricated forms.
 
-  // --- Platform: Configuration (Settings / Feature Flags / License) ---
-  getAdminSettings: () => request<any>("/admin/settings"),
-  patchAdminSettings: (data: Record<string, unknown>) =>
-    request<any>("/admin/settings", { method: "PATCH", body: JSON.stringify(data) }),
-  getProtocolSettings: (protocol: string) => request<any>(`/admin/settings/protocol/${protocol}`),
-  patchProtocolSettings: (protocol: string, data: Record<string, unknown>) =>
-    request<any>(`/admin/settings/protocol/${protocol}`, { method: "PATCH", body: JSON.stringify(data) }),
-
-  listFeatureFlags: () => request<any[]>("/feature-flags"),
-  updateFeatureFlag: (id: string, data: Record<string, unknown>) =>
-    request<any>(`/feature-flags/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  // Configuration (Settings/Feature Flags) moved to
+  // features/platform/configuration/api.ts. getProtocolSettings /
+  // patchProtocolSettings (GET/PATCH /admin/settings/protocol/:protocol)
+  // are real, registered routes with no UI caller in either the old or
+  // new component — tracked as a UI gap in the capability matrix.
 
   // Invoices
   listInvoices: () => request<any[]>("/enterprise/billing/invoices"),

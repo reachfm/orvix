@@ -34,7 +34,7 @@ import OverviewPage from "./features/platform/overview/page";
 import MailOperationsPage from "./features/platform/mail-operations/page";
 import ReliabilityPage from "./features/platform/reliability/page";
 
-import PlatformConfiguration from "./components/PlatformConfiguration";
+import ConfigurationPage from "./features/platform/configuration/page";
 import { initCSRF, api } from "./api";
 import ThemeToggle from "./shared/theme/ThemeToggle";
 
@@ -285,7 +285,7 @@ export default function App() {
       case "mail-operations": return <MailOperationsPage />;
       case "reliability": return <ReliabilityPage />;
       case "platform-security": return <SecurityPageFeature />;
-      case "platform-configuration": return <PlatformConfiguration />;
+      case "platform-configuration": return <ConfigurationPage />;
       case "billing": return <BillingPage />;
       // Legacy "Domain Setup" route. It rendered a second, inferior copy of the
       // DNS record UI against the customer endpoints (and read fields such as
