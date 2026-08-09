@@ -1,7 +1,10 @@
+import { useState } from "react";
 import { useFirewallRulesQuery, useFirewallLogsQuery } from "../queries";
 import { Loading, ErrorBox, Empty } from "./StateViews";
+import FirewallRuleCreateForm from "./FirewallRuleCreateForm";
 
 export default function FirewallPanel() {
+  const [creating, setCreating] = useState(false);
   const rulesQuery = useFirewallRulesQuery();
   const logsQuery = useFirewallLogsQuery();
   const rules = rulesQuery.data ?? [];
@@ -20,7 +23,11 @@ export default function FirewallPanel() {
         </div>
       </div>
 
-      <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">Rules</h3>
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-semibold text-[var(--text-primary)]">Rules</h3>
+        <button onClick={() => setCreating((v) => !v)} className="px-3 py-1.5 text-xs bg-[var(--bg-subtle)] text-[var(--text-primary)] rounded">{creating ? "Cancel" : "New rule"}</button>
+      </div>
+      {creating && <FirewallRuleCreateForm onDone={() => setCreating(false)} />}
       {rulesQuery.isLoading ? <Loading /> : rulesQuery.error ? <ErrorBox error={rulesQuery.error} /> : rules.length === 0 ? (
         <div className="mb-6"><Empty text="No firewall rules configured." /></div>
       ) : (

@@ -3,6 +3,7 @@ import type {
   AuditEntry, ListCertificatesResponse, AcmeStatus, ExpiryWarning, AntivirusStatus,
   FirewallRule, FirewallLog, GuardianLog, HealHistoryEntry, RunHealCheckResponse,
   ListLogRulesResponse, CreateLogRuleRequest, LogRule,
+  UploadCertificateRequest, UploadCertificateResponse, CreateFirewallRuleRequest,
 } from "./contract";
 
 export const listAuditLogs = () => request<AuditEntry[]>("/audit/logs");
@@ -12,11 +13,18 @@ export const reloadSslCertificates = () => request<{ status?: string }>("/admin/
 export const getAcmeStatus = () => request<AcmeStatus>("/admin/ssl/acme/status");
 export const getSslExpiryWarnings = () => request<{ warnings: ExpiryWarning[] }>("/admin/ssl/expiry-warnings");
 export const deleteSslCertificate = (id: string) => request<void>(`/admin/ssl/certificates/${id}`, { method: "DELETE" });
+// The request body carries the private key (key_pem) — never logged,
+// never echoed by this function, and the caller must clear its own
+// form state immediately after the request settles either way.
+export const uploadSslCertificate = (body: UploadCertificateRequest) =>
+  request<UploadCertificateResponse>("/admin/ssl/certificates", { method: "POST", body: JSON.stringify(body) });
 
 export const getAntivirusStatus = () => request<AntivirusStatus>("/admin/security/antivirus");
 
 export const listFirewallRules = () => request<FirewallRule[]>("/firewall/rules");
 export const listFirewallLogs = () => request<FirewallLog[]>("/firewall/logs");
+export const createFirewallRule = (body: CreateFirewallRuleRequest) =>
+  request<FirewallRule>("/firewall/rules", { method: "POST", body: JSON.stringify(body) });
 
 export const listGuardianLogs = () => request<GuardianLog[]>("/guardian/logs");
 

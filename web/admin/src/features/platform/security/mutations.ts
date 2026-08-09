@@ -1,14 +1,31 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import * as api from "./api";
-import type { CreateLogRuleRequest } from "./contract";
+import type { CreateLogRuleRequest, UploadCertificateRequest, CreateFirewallRuleRequest } from "./contract";
+
+function invalidateSsl(qc: ReturnType<typeof useQueryClient>) {
+  qc.invalidateQueries({ queryKey: ["ssl-certs"] });
+  qc.invalidateQueries({ queryKey: ["ssl-warnings"] });
+}
 
 export function useReloadSslCertificatesMutation() {
   const qc = useQueryClient();
-  return useMutation({ mutationFn: api.reloadSslCertificates, onSuccess: () => qc.invalidateQueries({ queryKey: ["ssl-certs"] }) });
+  return useMutation({ mutationFn: api.reloadSslCertificates, onSuccess: () => invalidateSsl(qc) });
 }
 export function useDeleteSslCertificateMutation() {
   const qc = useQueryClient();
-  return useMutation({ mutationFn: (id: string) => api.deleteSslCertificate(id), onSuccess: () => qc.invalidateQueries({ queryKey: ["ssl-certs"] }) });
+  return useMutation({ mutationFn: (id: string) => api.deleteSslCertificate(id), onSuccess: () => invalidateSsl(qc) });
+}
+export function useUploadSslCertificateMutation() {
+  const qc = useQueryClient();
+  return useMutation({ mutationFn: (body: UploadCertificateRequest) => api.uploadSslCertificate(body), onSuccess: () => invalidateSsl(qc) });
+}
+
+export function useCreateFirewallRuleMutation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CreateFirewallRuleRequest) => api.createFirewallRule(body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["firewall-rules"] }),
+  });
 }
 
 export function useRunHealCheckMutation() {

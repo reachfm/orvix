@@ -46,6 +46,27 @@ export interface ListCertificatesResponse {
   config_key_path: string;
 }
 
+// POST /admin/ssl/certificates (AdminSslUploadCertificate). The
+// request carries the private key in cert_pem/key_pem — it is never
+// echoed back. The response is metadata only (no PEM/key material).
+export interface UploadCertificateRequest {
+  name: string;
+  cert_pem: string;
+  key_pem: string;
+}
+
+export interface UploadCertificateResponse {
+  name: string;
+  common_name: string;
+  issuer: string;
+  not_after: string;
+  days_remaining: number;
+  status: string;
+  fingerprint_sha256: string;
+  path: string;
+  key_path?: string;
+}
+
 export interface AcmeStatus {
   acme_enabled: boolean;
   issuing_certificates: boolean;
@@ -97,6 +118,20 @@ export interface FirewallRule {
   name: string;
   condition: string;
   action: string;
+  priority: number;
+  enabled: boolean;
+}
+
+// POST /firewall/rules (CreateFirewallRule) binds directly into
+// models.FirewallRule — there is no separate IP/CIDR/port/protocol/
+// direction schema; "condition" is a single free-text field. The
+// three action values below are the ones FirewallPanel.tsx's existing
+// row-coloring logic already recognizes (block/throttle/anything
+// else renders as "allow"-styled).
+export interface CreateFirewallRuleRequest {
+  name: string;
+  condition: string;
+  action: "block" | "throttle" | "allow";
   priority: number;
   enabled: boolean;
 }
