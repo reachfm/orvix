@@ -75,7 +75,7 @@ and `isCoreMailDisabled` (frontend).
 | `GET /update/status` | platformMW | `GetUpdateStatus` | `UpdateStatus` | Platform | `UpdatesPanel.test.tsx` | UI_SUPPORTED |
 | `GET /update/check` | platformMW | `GetUpdateCheck` | `UpdateCheckResult` | Platform | `UpdatesPanel.test.tsx` | UI_SUPPORTED |
 | `POST /update/check` | platformMW | `PostUpdateCheck` | `UpdateCheckResult` | Platform | `UpdatesPanel.test.tsx` | UI_SUPPORTED |
-| `GET /update/history` | platformMW | `GetUpdateHistory` | `UpdateHistoryRow[]` | Platform | `UpdatesPanel.test.tsx` | UI_SUPPORTED |
+| `GET /update/history` | platformMW | `GetUpdateHistory` | `{"history": UpdateHistoryRow[]}` — an envelope, unlike its status/check/preflight siblings; a real bug where the frontend cast it straight through as a bare array (crashing every real load) was found and fixed via `test/playwright/portal.spec.ts`'s live-server gap-coverage sweep, `api.ts` unwraps it now | Platform | `UpdatesPanel.test.tsx`, `api.test.ts` | UI_SUPPORTED |
 | `GET /update/preflight` | platformMW | `GetUpdatePreflight` | `PreflightResult` | Platform | `UpdatesPanel.test.tsx` | UI_SUPPORTED |
 | `POST /update/run` | platformMW | `PostUpdateRun` | typed confirm, real single-flight (`svc.IsRunning`) | Platform | `UpdatesPanel.test.tsx` | UI_SUPPORTED |
 | `GET /updates/changelog` | platformMW | `GetChangelog` | `ChangelogEntry[]` (capitalized fields — no json tags) | Platform | `ChangelogPanel.test.tsx` | UI_SUPPORTED |
