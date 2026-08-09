@@ -80,9 +80,9 @@ describe("Platform Administration shell (portal=platform)", () => {
       "/admin/queue/summary": { metrics: { pending: 0, leased: 0, delivering: 0, deferred: 0, delivered: 0, bounced: 0, dead_letter: 0, cancelled: 0, total: 0, avg_attempts: 0 } },
       "/admin/queue/messages": { messages: [], total: 0, limit: 50, offset: 0 },
       "/audit/logs": [],
-      "/admin/ssl/certificates": [],
+      "/admin/ssl/certificates": { runtime: [], uploaded: [], expiry_warnings: [], expiry_cutoff_days: 30, config_path: "", config_key_path: "" },
       "/admin/ssl/expiry-warnings": { warnings: [] },
-      "/admin/ssl/acme/status": { status: "ok" },
+      "/admin/ssl/acme/status": { acme_enabled: false, issuing_certificates: false, acme_provider: "none", manual_paths: [], script_helper: "", on_disk_candidates: [], honest_notes: [] },
       "/admin/security/antivirus": {
         engine: "clamav", engine_configured: true, engine_reachable: true, engine_active: true,
         runtime_enforced: false, clamav_host: "localhost", clamav_port: 3310, clamav_response: "PONG",
@@ -92,7 +92,7 @@ describe("Platform Administration shell (portal=platform)", () => {
       },
       "/guardian/logs": [],
       "/heal/history": [],
-      "/admin/log-rules": [],
+      "/admin/log-rules": { rules: [] },
       "/admin/settings": {},
       "/feature-flags": [],
       "/firewall/rules": [],
@@ -135,7 +135,7 @@ describe("Platform Administration shell (portal=platform)", () => {
   it("shows exactly the final verified platform navigation set", async () => {
     render(<Wrapper><App /></Wrapper>);
     await waitFor(() => expect(screen.getByText("Platform Administration")).toBeInTheDocument());
-    for (const label of ["Organizations", "Summary", "Mail Operations", "Reliability", "Health", "Firewall", "Security", "Modules", "Configuration"]) {
+    for (const label of ["Organizations", "Summary", "Mail Operations", "Reliability", "Health", "Security", "Modules", "Configuration"]) {
       expect(screen.getAllByRole("button", { name: new RegExp(`^${label}$`, "i") }).length).toBeGreaterThan(0);
     }
   });
@@ -155,7 +155,6 @@ describe("Platform Administration shell (portal=platform)", () => {
     { label: "Mail Operations", expectHeading: /mail operations/i },
     { label: "Reliability", expectHeading: /reliability/i },
     { label: "Health", expectHeading: /health|runtime|system/i },
-    { label: "Firewall", expectHeading: /firewall/i },
     { label: "Security", expectHeading: /security/i },
     { label: "Modules", expectHeading: /modules/i },
     { label: "Configuration", expectHeading: /configuration/i },

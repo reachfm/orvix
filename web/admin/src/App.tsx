@@ -3,7 +3,7 @@ import { LayoutDashboard, Globe, Users, Shield, Zap, Activity, Settings, Server,
 import Dashboard from "./components/Dashboard";
 import Domains from "./components/Domains";
 import UsersPage from "./components/UsersPage";
-import Firewall from "./components/Firewall";
+import SecurityPageFeature from "./features/platform/security/page";
 import Modules from "./components/Modules";
 import AuditLog from "./components/AuditLog";
 import EnterpriseDashboard from "./components/EnterpriseDashboard";
@@ -33,7 +33,7 @@ import PreferencesPage from "./components/PreferencesPage";
 import OverviewPage from "./features/platform/overview/page";
 import MailOperationsPage from "./features/platform/mail-operations/page";
 import ReliabilityPage from "./features/platform/reliability/page";
-import PlatformSecurity from "./components/PlatformSecurity";
+
 import PlatformConfiguration from "./components/PlatformConfiguration";
 import { initCSRF, api } from "./api";
 import ThemeToggle from "./shared/theme/ThemeToggle";
@@ -97,7 +97,7 @@ type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" 
 // not a repurposing of this endpoint.
 const PLATFORM_TAB_IDS: Tab[] = [
   "platform-home", "organizations", "enterprise", "mail-operations", "reliability", "health",
-  "firewall", "platform-security", "modules", "platform-configuration",
+  "platform-security", "modules", "platform-configuration",
   "account-settings", "security", "preferences",
 ];
 const ORGANIZATION_TAB_IDS: Tab[] = [
@@ -115,8 +115,7 @@ const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: st
   { id: "mail-operations", label: "Mail Operations", icon: Send },
   { id: "reliability", label: "Reliability", icon: HardDrive },
   { id: "health", label: "Health", icon: HeartPulse },
-  { id: "firewall", label: "Firewall", icon: Shield, section: "Security" },
-  { id: "platform-security", label: "Security", icon: ShieldAlert },
+  { id: "platform-security", label: "Security", icon: ShieldAlert, section: "Security" },
   { id: "modules", label: "Modules", icon: Zap, section: "System" },
   { id: "platform-configuration", label: "Configuration", icon: Settings },
   // Tabs below are pre-existing tenant-owned entries that were never
@@ -277,7 +276,6 @@ export default function App() {
       case "dashboard": return <Dashboard />;
       case "domains": return <Domains />;
       case "users": return <UsersPage />;
-      case "firewall": return <Firewall />;
       case "modules": return <Modules />;
       case "audit": return <AuditLog />;
       case "enterprise": return <EnterpriseDashboard />;
@@ -286,7 +284,7 @@ export default function App() {
       case "health": return <SystemHealth />;
       case "mail-operations": return <MailOperationsPage />;
       case "reliability": return <ReliabilityPage />;
-      case "platform-security": return <PlatformSecurity />;
+      case "platform-security": return <SecurityPageFeature />;
       case "platform-configuration": return <PlatformConfiguration />;
       case "billing": return <BillingPage />;
       // Legacy "Domain Setup" route. It rendered a second, inferior copy of the

@@ -380,28 +380,12 @@ export const api = {
   // action; tracked as a UI gap in the capability matrix rather than
   // wired to a fabricated control.
 
-  // --- Platform: Security (Audit / SSL / Antivirus / Guardian / Self-Heal / Log Rules) ---
-  listPlatformAuditLogs: () => request<any[]>("/audit/logs"),
-  createFirewallRule: (data: Record<string, unknown>) =>
-    request<any>("/firewall/rules", { method: "POST", body: JSON.stringify(data) }),
-
-  listSslCertificates: () => request<any[]>("/admin/ssl/certificates"),
-  reloadSslCertificates: () => request<any>("/admin/ssl/certificates/reload", { method: "POST" }),
-  getSslExpiryWarnings: () => request<any>("/admin/ssl/expiry-warnings"),
-  getAcmeStatus: () => request<any>("/admin/ssl/acme/status"),
-  uploadSslCertificate: (data: Record<string, unknown>) =>
-    request<any>("/admin/ssl/certificates", { method: "POST", body: JSON.stringify(data) }),
-  deleteSslCertificate: (id: string) => request<any>(`/admin/ssl/certificates/${id}`, { method: "DELETE" }),
-
-  getAntivirusStatus: () => request<any>("/admin/security/antivirus"),
-  listGuardianLogs: () => request<any[]>("/guardian/logs"),
-  listHealHistory: () => request<any[]>("/heal/history"),
-  runHealCheck: (name: string) => request<any>(`/heal/check/${name}`, { method: "POST" }),
-
-  listLogRules: () => request<any[]>("/admin/log-rules"),
-  createLogRule: (data: Record<string, unknown>) =>
-    request<any>("/admin/log-rules", { method: "POST", body: JSON.stringify(data) }),
-  deleteLogRule: (id: string) => request<any>(`/admin/log-rules/${id}`, { method: "DELETE" }),
+  // Security (Audit/SSL/Antivirus/Firewall/Guardian/Self-Heal/Log Rules)
+  // moved to features/platform/security/api.ts. createFirewallRule and
+  // uploadSslCertificate were dead code (real, registered routes —
+  // POST /firewall/rules, POST /admin/ssl/certificates — with no UI
+  // caller in either the old or new component); tracked as UI gaps in
+  // the capability matrix rather than wired to fabricated forms.
 
   // --- Platform: Configuration (Settings / Feature Flags / License) ---
   getAdminSettings: () => request<any>("/admin/settings"),

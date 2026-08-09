@@ -1,35 +1,14 @@
-import { useQuery } from "@tanstack/react-query";
-import { api } from "../api";
+import { useFirewallRulesQuery, useFirewallLogsQuery } from "../queries";
+import { Loading, ErrorBox, Empty } from "./StateViews";
 
-interface FirewallRule {
-  id: number;
-  name: string;
-  condition: string;
-  action: string;
-  priority: number;
-  enabled: boolean;
-}
-
-interface FirewallLog {
-  id: number;
-  ip: string;
-  domain: string;
-  sender: string;
-  recipient: string;
-  created_at: string;
-}
-
-export default function Firewall() {
-  const rulesQuery = useQuery<FirewallRule[]>({ queryKey: ["firewall-rules"], queryFn: api.listFirewallRules });
-  const logsQuery = useQuery<FirewallLog[]>({ queryKey: ["firewall-logs"], queryFn: api.listFirewallLogs });
-
-  const rules = rulesQuery.data || [];
-  const logs = logsQuery.data || [];
+export default function FirewallPanel() {
+  const rulesQuery = useFirewallRulesQuery();
+  const logsQuery = useFirewallLogsQuery();
+  const rules = rulesQuery.data ?? [];
+  const logs = logsQuery.data ?? [];
 
   return (
     <div>
-      <h2 className="text-2xl font-semibold mb-6 text-[var(--text-primary)]">Mail Firewall</h2>
-
       <div className="grid grid-cols-2 gap-4 mb-6">
         <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-4">
           <p className="text-xs text-[var(--text-secondary)] mb-1">Recent Log Entries</p>
@@ -42,14 +21,8 @@ export default function Firewall() {
       </div>
 
       <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">Rules</h3>
-      {rulesQuery.isLoading ? (
-        <p className="text-[var(--text-secondary)] mb-6">Loading rules...</p>
-      ) : rulesQuery.error ? (
-        <p className="text-[var(--danger)] mb-6">Failed to load rules: {(rulesQuery.error as Error).message}</p>
-      ) : rules.length === 0 ? (
-        <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-8 text-center text-[var(--text-secondary)] mb-6">
-          No firewall rules configured.
-        </div>
+      {rulesQuery.isLoading ? <Loading /> : rulesQuery.error ? <ErrorBox error={rulesQuery.error} /> : rules.length === 0 ? (
+        <div className="mb-6"><Empty text="No firewall rules configured." /></div>
       ) : (
         <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl overflow-hidden mb-6">
           <table className="w-full text-sm">
@@ -88,14 +61,8 @@ export default function Firewall() {
       )}
 
       <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">Recent Activity</h3>
-      {logsQuery.isLoading ? (
-        <p className="text-[var(--text-secondary)]">Loading logs...</p>
-      ) : logsQuery.error ? (
-        <p className="text-[var(--danger)]">Failed to load logs: {(logsQuery.error as Error).message}</p>
-      ) : logs.length === 0 ? (
-        <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-8 text-center text-[var(--text-secondary)]">
-          No firewall activity recorded yet.
-        </div>
+      {logsQuery.isLoading ? <Loading /> : logsQuery.error ? <ErrorBox error={logsQuery.error} /> : logs.length === 0 ? (
+        <Empty text="No firewall activity recorded yet." />
       ) : (
         <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl overflow-hidden">
           <table className="w-full text-sm">
