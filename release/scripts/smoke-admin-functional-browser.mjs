@@ -133,7 +133,16 @@ function startServer() {
           if (pathname === '/api/v1/me') {
             const cookie = req.headers.cookie || '';
             if (cookie.includes(`__Host-orvix_session=${SMOKE_SESSION}`)) {
-              return sendJSON(res, 200, { email: 'admin@example.com', roles: ['admin'], role: 'admin' });
+              // PLATFORM-SHELL: portal is the authoritative shell selector
+              // (see web/admin/src/App.tsx) — the frontend now fails
+              // closed and renders no <nav> at all when it's missing. This
+              // smoke test exercises the tenant-scoped route/API surface
+              // below (the "dashboard" nav text check, the
+              // /enterprise/dashboard call), so it uses portal="organization"
+              // (a tenant identity) — the real backend's /me sets exactly
+              // this for a tenant_admin/tenant_operator/etc with a real
+              // tenant_id, matching this stub's shape.
+              return sendJSON(res, 200, { email: 'admin@example.com', roles: ['admin'], role: 'admin', portal: 'organization' });
             }
             return sendJSON(res, 401, { error: 'unauthorized' });
           }
