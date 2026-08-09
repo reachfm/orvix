@@ -278,22 +278,50 @@ test.describe("Orvix admin portal E2E", () => {
     // PLATFORM-SHELL-2: the complete restored platform navigation set.
     // Click every visible item sequentially, assert a stable heading, and
     // reject console errors / failed API responses / tenant-owned calls.
+    // The E2E harness runs with coremail.enabled=false, so the Mail
+    // Operations page's queue calls correctly receive a 503
+    // {"code":"COREMAIL_DISABLED"} contract (see internal/api/handlers
+    // admin_queue.go's coreMailUnavailableResponse) and the page renders
+    // a graceful "CoreMail is disabled" state for it. Chromium still logs
+    // that fetch as "Failed to load resource" to both the console and the
+    // response stream — that is expected, correct fail-closed behavior,
+    // not a bug, so it is the one 503 excluded from the error assertions
+    // below. Any other 4xx/5xx, or a 503 without that exact code, still
+    // fails the test.
+    // Chromium's built-in "Failed to load resource: ... 503" console message
+    // is excluded from the console-error check unconditionally here, but the
+    // failedResponses handler below independently re-verifies every such 503
+    // actually carries the COREMAIL_DISABLED contract on a /queue path — if
+    // it doesn't, it is pushed to failedResponses and still fails the test.
     const consoleErrors: string[] = [];
-    page.on("console", (msg) => { if (msg.type() === "error") consoleErrors.push(msg.text()); });
+    page.on("console", (msg) => {
+      if (msg.type() !== "error") return;
+      if (/status of 503 \(Service Unavailable\)/.test(msg.text())) return;
+      consoleErrors.push(msg.text());
+    });
     const failedResponses: string[] = [];
-    page.on("response", (res) => {
-      if (res.status() >= 400 && new URL(res.url()).pathname.startsWith("/api/")) {
-        failedResponses.push(`${res.status()} ${new URL(res.url()).pathname}`);
+    page.on("response", async (res) => {
+      const pathname = new URL(res.url()).pathname;
+      if (res.status() < 400 || !pathname.startsWith("/api/")) return;
+      if (res.status() === 503 && pathname.includes("/queue")) {
+        try {
+          const body = await res.json();
+          if (body?.code === "COREMAIL_DISABLED") return;
+        } catch { /* fall through to treat as a genuine failure */ }
       }
+      failedResponses.push(`${res.status()} ${pathname}`);
     });
 
     const platformNav: { label: string; heading: string | RegExp }[] = [
       { label: "Organizations", heading: /organizations/i },
       { label: "Summary", heading: "Platform Summary" },
-      { label: "Backups", heading: /backup/i },
+      { label: "Mail Operations", heading: /mail operations/i },
+      { label: "Reliability", heading: /reliability/i },
       { label: "Health", heading: /health|runtime|system/i },
       { label: "Firewall", heading: /firewall/i },
+      { label: "Security", heading: /security/i },
       { label: "Modules", heading: /modules/i },
+      { label: "Configuration", heading: /configuration/i },
       { label: "License", heading: "License" },
     ];
     for (const item of platformNav) {

@@ -58,8 +58,38 @@ describe("Platform Administration shell (portal=platform)", () => {
   beforeEach(() => {
     installFetchMock({
       "/api/v1/me": PLATFORM_ME,
+      "/platform/dashboard": { tenants: { total: 1, active: 1 }, mailboxes: { total: 1 }, domains: { total: 1 }, queue: { pending: 0, failed: 0 } },
       "/platform/organizations": [],
+      "/admin/backups/schedule": {},
+      "/admin/backups/metrics": {},
+      "/admin/backups/health": { status: "ok" },
       "/admin/backups": [],
+      "/updates/check": { available: false },
+      "/updates/changelog": {},
+      "/update/status": { status: "up-to-date" },
+      "/update/history": [],
+      "/update/preflight": { ready: true },
+      "/monitoring/alerts": [],
+      "/monitoring/capacity": {},
+      "/monitoring/snapshot": {},
+      "/monitoring/alert-providers": {},
+      "/monitoring/alert-deliveries": [],
+      "/admin/storage/volumes": [],
+      "/admin/cluster/status": { nodes: [] },
+      "/admin/runtime": {},
+      "/queue": [],
+      "/admin/queue/summary": { total: 0, pending: 0, deferred: 0, failed: 0 },
+      "/admin/queue/messages": [],
+      "/audit/logs": [],
+      "/admin/ssl/certificates": [],
+      "/admin/ssl/expiry-warnings": { warnings: [] },
+      "/admin/ssl/acme/status": { status: "ok" },
+      "/admin/security/antivirus": { status: "enabled" },
+      "/guardian/logs": [],
+      "/heal/history": [],
+      "/admin/log-rules": [],
+      "/admin/settings": {},
+      "/feature-flags": [],
       "/firewall/rules": [],
       "/firewall/logs": [],
       "/modules": [],
@@ -101,7 +131,7 @@ describe("Platform Administration shell (portal=platform)", () => {
   it("shows exactly the final verified platform navigation set", async () => {
     render(<Wrapper><App /></Wrapper>);
     await waitFor(() => expect(screen.getByText("Platform Administration")).toBeInTheDocument());
-    for (const label of ["Organizations", "Summary", "Backups", "Health", "Firewall", "Modules", "License"]) {
+    for (const label of ["Organizations", "Summary", "Mail Operations", "Reliability", "Health", "Firewall", "Security", "Modules", "Configuration", "License"]) {
       expect(screen.getAllByRole("button", { name: new RegExp(`^${label}$`, "i") }).length).toBeGreaterThan(0);
     }
   });
@@ -112,10 +142,13 @@ describe("Platform Administration shell (portal=platform)", () => {
   const PLATFORM_NAV_CASES: { label: string; expectHeading: string | RegExp }[] = [
     { label: "Organizations", expectHeading: /organizations/i },
     { label: "Summary", expectHeading: "Platform Summary" },
-    { label: "Backups", expectHeading: /backup/i },
+    { label: "Mail Operations", expectHeading: /mail operations/i },
+    { label: "Reliability", expectHeading: /reliability/i },
     { label: "Health", expectHeading: /health|runtime|system/i },
     { label: "Firewall", expectHeading: /firewall/i },
+    { label: "Security", expectHeading: /security/i },
     { label: "Modules", expectHeading: /modules/i },
+    { label: "Configuration", expectHeading: /configuration/i },
     { label: "License", expectHeading: "License" },
   ];
   for (const c of PLATFORM_NAV_CASES) {
@@ -212,6 +245,22 @@ describe("Customer Portal shell (portal=organization) — unchanged", () => {
     render(<Wrapper><App /></Wrapper>);
     await waitFor(() => expect(screen.getByText("Orvix Admin")).toBeInTheDocument());
     expect(screen.getByRole("button", { name: /logout/i })).toBeInTheDocument();
+  });
+
+  it("never calls any platform-owned endpoint during bootstrap", async () => {
+    render(<Wrapper><App /></Wrapper>);
+    await waitFor(() => expect(screen.getByText("Orvix Admin")).toBeInTheDocument());
+    await new Promise((r) => setTimeout(r, 20));
+    const PLATFORM_ONLY_SUFFIXES = [
+      "/platform/dashboard", "/platform/organizations", "/admin/summary", "/admin/backups",
+      "/admin/queue/summary", "/queue", "/audit/logs", "/admin/ssl/certificates",
+      "/admin/security/antivirus", "/guardian/logs", "/heal/history", "/admin/log-rules",
+      "/admin/settings", "/feature-flags", "/updates/check", "/monitoring/alerts",
+      "/admin/storage/volumes", "/admin/cluster/status",
+    ];
+    for (const suffix of PLATFORM_ONLY_SUFFIXES) {
+      expect(requestedPaths.some((p) => p.endsWith(suffix))).toBe(false);
+    }
   });
 });
 

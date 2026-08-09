@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { LayoutDashboard, Globe, Users, Shield, Zap, Activity, Settings, Server, Building, Mail, Monitor, HardDrive, HeartPulse, CreditCard, Keyboard, User, AtSign, BarChart, AlertTriangle, UserPlus, Send, LogOut, FileText, Bell } from "lucide-react";
+import { LayoutDashboard, Globe, Users, Shield, Zap, Activity, Settings, Server, Building, Mail, Monitor, HardDrive, HeartPulse, CreditCard, Keyboard, User, AtSign, BarChart, AlertTriangle, UserPlus, Send, LogOut, FileText, Bell, ShieldAlert } from "lucide-react";
 import Dashboard from "./components/Dashboard";
 import Domains from "./components/Domains";
 import UsersPage from "./components/UsersPage";
@@ -9,7 +9,6 @@ import AuditLog from "./components/AuditLog";
 import EnterpriseDashboard from "./components/EnterpriseDashboard";
 import MailboxList from "./components/MailboxList";
 import OrganizationList from "./components/OrganizationList";
-import BackupStatus from "./components/BackupStatus";
 import SystemHealth from "./components/SystemHealth";
 import BillingPage from "./components/BillingPage";
 import ApiKeysPage from "./components/ApiKeysPage";
@@ -33,10 +32,15 @@ import SupportPage from "./components/SupportPage";
 import PreferencesPage from "./components/PreferencesPage";
 import PlatformHome from "./components/PlatformHome";
 import LicenseStatus from "./components/LicenseStatus";
+import MailOperations from "./components/MailOperations";
+import Reliability from "./components/Reliability";
+import PlatformSecurity from "./components/PlatformSecurity";
+import PlatformConfiguration from "./components/PlatformConfiguration";
 import { initCSRF, api } from "./api";
 
 type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" | "settings"
-  | "enterprise" | "mailboxes" | "organizations" | "backups" | "health" | "platform-home" | "license"
+  | "enterprise" | "mailboxes" | "organizations" | "health" | "platform-home" | "license"
+  | "mail-operations" | "reliability" | "platform-security" | "platform-configuration"
   | "billing" | "onboarding" | "apikeys"
   | "account-settings" | "org-overview" | "invitations" | "members-roles" | "ownership-transfer"
   | "suspension-deletion" | "customer-mailboxes" | "aliases" | "groups" | "usage-quotas"
@@ -85,8 +89,9 @@ type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" 
 // navigation, in any version — not a PLATFORM-SHELL regression, but a
 // pre-existing, fully-working platform-owned page restored here.
 const PLATFORM_TAB_IDS: Tab[] = [
-  "platform-home", "organizations", "enterprise", "backups", "health", "firewall", "modules",
-  "license", "account-settings", "security", "preferences",
+  "platform-home", "organizations", "enterprise", "mail-operations", "reliability", "health",
+  "firewall", "platform-security", "modules", "platform-configuration", "license",
+  "account-settings", "security", "preferences",
 ];
 const ORGANIZATION_TAB_IDS: Tab[] = [
   "dashboard", "domains", "org-overview", "customer-mailboxes", "aliases", "groups", "usage-quotas",
@@ -100,10 +105,13 @@ const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: st
   { id: "platform-home", label: "Overview", icon: LayoutDashboard },
   { id: "organizations", label: "Organizations", icon: Building, section: "Organizations" },
   { id: "enterprise", label: "Summary", icon: Monitor, section: "Operations" },
-  { id: "backups", label: "Backups", icon: HardDrive },
+  { id: "mail-operations", label: "Mail Operations", icon: Send },
+  { id: "reliability", label: "Reliability", icon: HardDrive },
   { id: "health", label: "Health", icon: HeartPulse },
   { id: "firewall", label: "Firewall", icon: Shield, section: "Security" },
+  { id: "platform-security", label: "Security", icon: ShieldAlert },
   { id: "modules", label: "Modules", icon: Zap, section: "System" },
+  { id: "platform-configuration", label: "Configuration", icon: Settings },
   { id: "license", label: "License", icon: FileText },
   // Tabs below are pre-existing tenant-owned entries that were never
   // reachable by a real Platform Super Admin (see PLATFORM-SHELL final
@@ -269,9 +277,12 @@ export default function App() {
       case "enterprise": return <EnterpriseDashboard />;
       case "mailboxes": return <MailboxList />;
       case "organizations": return <OrganizationList />;
-      case "backups": return <BackupStatus />;
       case "health": return <SystemHealth />;
       case "license": return <LicenseStatus />;
+      case "mail-operations": return <MailOperations />;
+      case "reliability": return <Reliability />;
+      case "platform-security": return <PlatformSecurity />;
+      case "platform-configuration": return <PlatformConfiguration />;
       case "billing": return <BillingPage />;
       // Legacy "Domain Setup" route. It rendered a second, inferior copy of the
       // DNS record UI against the customer endpoints (and read fields such as
