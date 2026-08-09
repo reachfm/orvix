@@ -431,6 +431,11 @@ func TestAdminListEndpointsReturnArraysAndBootstrapRows(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Database.Driver = "sqlite"
 	cfg.Database.DSN = filepath.Join(t.TempDir(), "orvix.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	// This test's createAdminQueueFixture below provisions a working
+	// coremail_queue table and rows, so CoreMail must be enabled for the
+	// queue routes' 200 assertions to reflect the intended enabled+healthy
+	// case rather than the disabled-CoreMail 503 contract.
+	cfg.CoreMail.Enabled = true
 	db, err := config.NewDatabase(&cfg.Database, logger)
 	if err != nil {
 		t.Fatalf("database: %v", err)
@@ -1998,6 +2003,11 @@ func TestQueueReturnsSafeFields(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Database.Driver = "sqlite"
 	cfg.Database.DSN = filepath.Join(t.TempDir(), "orvix.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	// createAdminQueueFixture below provisions a working coremail_queue
+	// table and rows, so CoreMail must be enabled for the 200/safe-fields
+	// assertions to reflect the enabled+healthy case, not the disabled
+	// CoreMail 503 contract.
+	cfg.CoreMail.Enabled = true
 	db, err := config.NewDatabase(&cfg.Database, logger)
 	if err != nil {
 		t.Fatalf("database: %v", err)
@@ -2304,6 +2314,11 @@ func TestQueueActions(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Database.Driver = "sqlite"
 	cfg.Database.DSN = filepath.Join(t.TempDir(), "orvix.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	// createAdminQueueFixture below provisions a working coremail_queue
+	// table and rows, so CoreMail must be enabled for the queue-actions
+	// assertions to reflect the enabled+healthy case, not the disabled
+	// CoreMail 503 contract.
+	cfg.CoreMail.Enabled = true
 	db, err := config.NewDatabase(&cfg.Database, logger)
 	if err != nil {
 		t.Fatalf("database: %v", err)

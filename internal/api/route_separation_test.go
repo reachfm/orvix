@@ -436,10 +436,22 @@ func TestPhase6_PSA_ReachesPlatformRoutes(t *testing.T) {
 	for _, p := range []string{
 		"/api/v1/admin/backups",
 		"/api/v1/updates/check",
-		"/api/v1/queue",
 	} {
 		status, body := h.hit(t, "GET", p, tok)
 		sepMustEq(t, "PSA "+p, http.StatusOK, status, body)
+	}
+
+	// This harness's newSepHarness runs with CoreMail.Enabled=false (the
+	// config.Defaults() default) and provisions no coremail_queue table,
+	// so /api/v1/queue correctly returns the sanitized 503
+	// COREMAIL_DISABLED contract rather than a 200 — this test's purpose
+	// is proving PSA is not RBAC-blocked from the route, not exercising
+	// queue business logic, so 503 (reached, correctly fail-closed on
+	// disabled CoreMail) is an accepted outcome alongside 200; a 401/403
+	// would mean the route is unreachable and still fails the test.
+	status, body := h.hit(t, "GET", "/api/v1/queue", tok)
+	if status != http.StatusOK && status != http.StatusServiceUnavailable {
+		t.Fatalf("PSA /api/v1/queue: expected 200 or 503, got %d body=%s", status, body)
 	}
 }
 
