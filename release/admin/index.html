@@ -6,20 +6,10 @@
     <meta name="description" content="Orvix Admin Console" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>Orvix Admin Console</title>
-    <script>
-      // Pre-paint theme init: must run synchronously, before any CSS
-      // paints, to avoid a flash of the wrong theme. Light is the
-      // mandatory default — only an explicit prior "dark" choice in
-      // localStorage under orvix-admin-theme switches to dark. Kept in
-      // sync with src/shared/theme/theme.ts's getStoredTheme/applyTheme.
-      (function () {
-        try {
-          if (window.localStorage.getItem("orvix-admin-theme") === "dark") {
-            document.documentElement.classList.add("dark");
-          }
-        } catch (e) {}
-      })();
-    </script>
+    <!-- Pre-paint theme init, kept as an external file (not inlined) —
+         the admin page's CSP is script-src 'self' with no inline-script
+         allowance. See public/theme-init.js / src/shared/theme/theme.ts. -->
+    <script src="/admin/theme-init.js"></script>
     <script type="module" crossorigin src="/admin/assets/index-CHlMfhk0.js"></script>
     <link rel="modulepreload" crossorigin href="/admin/assets/vendor-D5-k-fij.js">
     <link rel="stylesheet" crossorigin href="/admin/assets/index-CB2TgrAp.css">
