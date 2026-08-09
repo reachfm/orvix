@@ -1,4 +1,4 @@
-import { Building, HardDrive, Shield, Zap, HeartPulse, ServerCog } from "lucide-react";
+import { Building, HardDrive, Shield, Zap, HeartPulse, ServerCog, Monitor, FileText } from "lucide-react";
 
 // PlatformHome is the Platform Administration landing page for
 // portal="platform" identities (Platform Super Admin). It is a
@@ -13,14 +13,16 @@ export default function PlatformHome({
   onNavigate,
 }: {
   email: string;
-  onNavigate: (tab: "organizations" | "backups" | "firewall" | "modules" | "health") => void;
+  onNavigate: (tab: "organizations" | "enterprise" | "backups" | "firewall" | "modules" | "license" | "health") => void;
 }) {
-  const cards: { id: "organizations" | "backups" | "firewall" | "modules" | "health"; label: string; description: string; icon: typeof Building }[] = [
+  const cards: { id: "organizations" | "enterprise" | "backups" | "firewall" | "modules" | "license" | "health"; label: string; description: string; icon: typeof Building }[] = [
     { id: "organizations", label: "Organizations", description: "All tenant organizations on this platform", icon: Building },
+    { id: "enterprise", label: "Summary", description: "Platform-wide totals and metrics across every tenant", icon: Monitor },
     { id: "backups", label: "Backups", description: "Platform backup status and restore jobs", icon: HardDrive },
+    { id: "health", label: "Health", description: "System and runtime health", icon: HeartPulse },
     { id: "firewall", label: "Firewall", description: "Mail firewall rules and activity", icon: Shield },
     { id: "modules", label: "Modules", description: "Installed platform modules", icon: Zap },
-    { id: "health", label: "Health", description: "System and runtime health", icon: HeartPulse },
+    { id: "license", label: "License", description: "License tier, expiration, and validation status", icon: FileText },
   ];
 
   return (

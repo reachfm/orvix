@@ -32,10 +32,11 @@ import SecurityPage from "./components/SecurityPage";
 import SupportPage from "./components/SupportPage";
 import PreferencesPage from "./components/PreferencesPage";
 import PlatformHome from "./components/PlatformHome";
+import LicenseStatus from "./components/LicenseStatus";
 import { initCSRF, api } from "./api";
 
 type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" | "settings"
-  | "enterprise" | "mailboxes" | "organizations" | "backups" | "health" | "platform-home"
+  | "enterprise" | "mailboxes" | "organizations" | "backups" | "health" | "platform-home" | "license"
   | "billing" | "onboarding" | "apikeys"
   | "account-settings" | "org-overview" | "invitations" | "members-roles" | "ownership-transfer"
   | "suspension-deletion" | "customer-mailboxes" | "aliases" | "groups" | "usage-quotas"
@@ -54,9 +55,12 @@ type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" 
 //
 // Verified ownership (internal/api/router.go, as of this change):
 //   platform-owned: /platform/organizations, /admin/backups,
-//     /firewall/rules, /firewall/logs, /modules, /monitoring/health
-//   tenant-owned:    /enterprise/* (dashboard, domains, mailboxes,
-//     audit/logs, ...), /users (tenantCompatMW), /customer/*
+//     /firewall/rules, /firewall/logs, /modules, /monitoring/health,
+//     /admin/summary (EnterpriseDashboard.tsx, despite its name — see
+//     below), /license
+//   tenant-owned:    /enterprise/* EXCEPT /admin/summary (dashboard,
+//     domains, mailboxes, audit/logs, ...), /users (tenantCompatMW),
+//     /customer/*
 //   self-scoped (safe for either portal): /account/*
 //
 // NOTE on "domains" (Domains.tsx -> /enterprise/domains): the pre-existing
@@ -65,9 +69,24 @@ type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" 
 // and 403s a NULL-tenant caller — it is, and always was, tenant-owned.
 // It is listed under ORGANIZATION_TAB_IDS here, matching the real backend
 // authorization, and is correctly absent from PLATFORM_TAB_IDS.
+//
+// NOTE on "enterprise" (EnterpriseDashboard.tsx -> api.getAdminSummary ->
+// /admin/summary): despite the component's own on-page copy ("Customer
+// administration overview") and its historical "Customer Admin" section
+// label, the route is platformMW-gated and AdminSummary aggregates
+// PLATFORM-WIDE totals across every tenant — it is genuinely
+// platform-owned. PLATFORM-SHELL's first pass incorrectly excluded it
+// (a real regression, restored here as the "Summary" item under
+// Operations); the misleading on-page copy is corrected in
+// EnterpriseDashboard.tsx itself.
+//
+// NOTE on "license" (LicenseStatus.tsx -> /license, platformMW): this
+// component existed in the tree but was never wired into any App.tsx
+// navigation, in any version — not a PLATFORM-SHELL regression, but a
+// pre-existing, fully-working platform-owned page restored here.
 const PLATFORM_TAB_IDS: Tab[] = [
-  "platform-home", "organizations", "backups", "firewall", "modules", "health",
-  "account-settings", "security", "preferences",
+  "platform-home", "organizations", "enterprise", "backups", "health", "firewall", "modules",
+  "license", "account-settings", "security", "preferences",
 ];
 const ORGANIZATION_TAB_IDS: Tab[] = [
   "dashboard", "domains", "org-overview", "customer-mailboxes", "aliases", "groups", "usage-quotas",
@@ -76,18 +95,26 @@ const ORGANIZATION_TAB_IDS: Tab[] = [
 ];
 
 const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: string }[] = [
+  // Platform (portal="platform") navigation. Grouped per PLATFORM-SHELL-2:
+  // Overview / Organizations / Operations / Security / System / Account.
   { id: "platform-home", label: "Overview", icon: LayoutDashboard },
-  { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { id: "enterprise", label: "Enterprise", icon: Monitor, section: "Customer Admin" },
-  { id: "mailboxes", label: "Mailboxes", icon: Mail },
-  { id: "organizations", label: "Organizations", icon: Building },
-  { id: "domains", label: "Domains", icon: Globe },
-  { id: "users", label: "Users", icon: Users },
-  { id: "firewall", label: "Firewall", icon: Shield },
-  { id: "modules", label: "Modules", icon: Zap },
-  { id: "audit", label: "Audit Log", icon: Activity },
+  { id: "organizations", label: "Organizations", icon: Building, section: "Organizations" },
+  { id: "enterprise", label: "Summary", icon: Monitor, section: "Operations" },
   { id: "backups", label: "Backups", icon: HardDrive },
   { id: "health", label: "Health", icon: HeartPulse },
+  { id: "firewall", label: "Firewall", icon: Shield, section: "Security" },
+  { id: "modules", label: "Modules", icon: Zap, section: "System" },
+  { id: "license", label: "License", icon: FileText },
+  // Tabs below are pre-existing tenant-owned entries that were never
+  // reachable by a real Platform Super Admin (see PLATFORM-SHELL final
+  // report's ownership matrix) — their labels/sections are irrelevant to
+  // the platform portal since PLATFORM_TAB_IDS excludes them; they exist
+  // here only for the organization portal's tabs.
+  { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+  { id: "mailboxes", label: "Mailboxes", icon: Mail },
+  { id: "domains", label: "Domains", icon: Globe },
+  { id: "users", label: "Users", icon: Users },
+  { id: "audit", label: "Audit Log", icon: Activity },
   { id: "settings", label: "Settings", icon: Settings },
   { id: "org-overview", label: "Organization", icon: Building, section: "Customer Portal" },
   { id: "customer-mailboxes", label: "Mailboxes", icon: Mail },
@@ -244,6 +271,7 @@ export default function App() {
       case "organizations": return <OrganizationList />;
       case "backups": return <BackupStatus />;
       case "health": return <SystemHealth />;
+      case "license": return <LicenseStatus />;
       case "billing": return <BillingPage />;
       // Legacy "Domain Setup" route. It rendered a second, inferior copy of the
       // DNS record UI against the customer endpoints (and read fields such as

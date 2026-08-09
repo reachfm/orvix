@@ -65,6 +65,16 @@ describe("Platform Administration shell (portal=platform)", () => {
       "/modules": [],
       "/monitoring/health": { status: "ok" },
       "/account/profile": { display_name: "PSA" },
+      "/admin/summary": {
+        domains: { total: 1, active: 1, suspended: 0 },
+        mailboxes: { total: 1, active: 1, suspended: 0, admin: 1 },
+        queue: { total: 0, pending: 0, deferred: 0, failed: 0 },
+        audit: { recent: 0 },
+        runtime: { status: "ok", version: "1.0.0" },
+        recent_activity: [],
+        top_domains: [],
+      },
+      "/license": { status: "valid", tier: "enterprise" },
     });
   });
 
@@ -88,13 +98,44 @@ describe("Platform Administration shell (portal=platform)", () => {
     }
   });
 
-  it("shows only verified platform navigation (Organizations, Backups, Firewall, Modules, Health)", async () => {
+  it("shows exactly the final verified platform navigation set", async () => {
     render(<Wrapper><App /></Wrapper>);
     await waitFor(() => expect(screen.getByText("Platform Administration")).toBeInTheDocument());
-    for (const label of ["Organizations", "Backups", "Firewall", "Modules", "Health"]) {
+    for (const label of ["Organizations", "Summary", "Backups", "Health", "Firewall", "Modules", "License"]) {
       expect(screen.getAllByRole("button", { name: new RegExp(`^${label}$`, "i") }).length).toBeGreaterThan(0);
     }
   });
+
+  // PLATFORM-SHELL-2 Phase 3: table-driven proof that every visible platform
+  // navigation item renders its intended component, calls only
+  // platform-owned endpoints, and never produces "Failed to load dashboard".
+  const PLATFORM_NAV_CASES: { label: string; expectHeading: string | RegExp }[] = [
+    { label: "Organizations", expectHeading: /organizations/i },
+    { label: "Summary", expectHeading: "Platform Summary" },
+    { label: "Backups", expectHeading: /backup/i },
+    { label: "Health", expectHeading: /health|runtime|system/i },
+    { label: "Firewall", expectHeading: /firewall/i },
+    { label: "Modules", expectHeading: /modules/i },
+    { label: "License", expectHeading: "License" },
+  ];
+  for (const c of PLATFORM_NAV_CASES) {
+    it(`platform nav item "${c.label}" renders its intended component with no tenant call`, async () => {
+      render(<Wrapper><App /></Wrapper>);
+      await waitFor(() => expect(screen.getByText("Platform Administration")).toBeInTheDocument());
+      fireEvent.click(screen.getAllByRole("button", { name: new RegExp(`^${c.label}$`, "i") })[0]);
+      await waitFor(() => {
+        const matches = typeof c.expectHeading === "string"
+          ? screen.queryAllByText(c.expectHeading)
+          : screen.queryAllByText(c.expectHeading);
+        expect(matches.length).toBeGreaterThan(0);
+      });
+      expect(screen.queryByText("Failed to load dashboard")).not.toBeInTheDocument();
+      expect(screen.queryByText(/^403$/)).not.toBeInTheDocument();
+      for (const suffix of TENANT_OWNED_SUFFIXES) {
+        expect(requestedPaths.some((p) => p.endsWith(suffix))).toBe(false);
+      }
+    });
+  }
 
   it("makes zero calls to /api/v1/enterprise/dashboard or any other tenant-owned endpoint during bootstrap", async () => {
     render(<Wrapper><App /></Wrapper>);

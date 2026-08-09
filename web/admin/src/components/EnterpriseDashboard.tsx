@@ -33,8 +33,8 @@ export default function EnterpriseDashboard() {
 
   return (
     <div>
-      <h2 className="text-xl font-semibold text-[#E8EAF0] mb-1">Enterprise Dashboard</h2>
-      <p className="text-[#8B92A8] mb-6">Customer administration overview and metrics.</p>
+      <h2 className="text-xl font-semibold text-[#E8EAF0] mb-1">Platform Summary</h2>
+      <p className="text-[#8B92A8] mb-6">Platform-wide totals and metrics across every tenant.</p>
 
       <div className="grid grid-cols-4 gap-4 mb-6">
         <StatCard label="Domains" value={data.domains.total} />

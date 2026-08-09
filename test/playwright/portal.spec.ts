@@ -275,11 +275,51 @@ test.describe("Orvix admin portal E2E", () => {
       expect(requestedPaths.some((p) => p.endsWith(suffix))).toBe(false);
     }
 
-    // Existing verified platform navigation (Organizations, Backups,
-    // Firewall, Modules, Health) is present and opens without error.
-    const backupsBtn = page.locator("aside button").filter({ hasText: /^\s*Backups\s*$/ });
-    await backupsBtn.first().click();
-    await page.waitForLoadState("networkidle");
+    // PLATFORM-SHELL-2: the complete restored platform navigation set.
+    // Click every visible item sequentially, assert a stable heading, and
+    // reject console errors / failed API responses / tenant-owned calls.
+    const consoleErrors: string[] = [];
+    page.on("console", (msg) => { if (msg.type() === "error") consoleErrors.push(msg.text()); });
+    const failedResponses: string[] = [];
+    page.on("response", (res) => {
+      if (res.status() >= 400 && new URL(res.url()).pathname.startsWith("/api/")) {
+        failedResponses.push(`${res.status()} ${new URL(res.url()).pathname}`);
+      }
+    });
+
+    const platformNav: { label: string; heading: string | RegExp }[] = [
+      { label: "Organizations", heading: /organizations/i },
+      { label: "Summary", heading: "Platform Summary" },
+      { label: "Backups", heading: /backup/i },
+      { label: "Health", heading: /health|runtime|system/i },
+      { label: "Firewall", heading: /firewall/i },
+      { label: "Modules", heading: /modules/i },
+      { label: "License", heading: "License" },
+    ];
+    for (const item of platformNav) {
+      const btn = page.locator("aside button").filter({ hasText: new RegExp(`^\\s*${escapeRegex(item.label)}\\s*$`) });
+      await btn.first().scrollIntoViewIfNeeded();
+      await btn.first().click();
+      await page.waitForLoadState("networkidle");
+      const heading = typeof item.heading === "string"
+        ? page.getByText(item.heading)
+        : page.locator("main").getByText(item.heading);
+      await expect(heading.first()).toBeVisible();
+      await expect(page.getByText("Failed to load dashboard")).toHaveCount(0);
+    }
+
+    // No console errors, no failed API responses, and still zero requests
+    // to any tenant-owned endpoint across the entire navigation sweep.
+    if (consoleErrors.length) throw new Error(`console errors during platform nav sweep: ${consoleErrors.join(" | ")}`);
+    if (failedResponses.length) throw new Error(`failed API responses during platform nav sweep: ${failedResponses.join(" | ")}`);
+    for (const suffix of ["/enterprise/dashboard", "/enterprise/domains", "/enterprise/mailboxes", "/users"]) {
+      expect(requestedPaths.some((p) => p.endsWith(suffix))).toBe(false);
+    }
+
+    // Direct deep-link refresh (full page reload) preserves the Platform
+    // shell — no flash of the wrong portal, no Customer Portal nav.
+    await page.reload({ waitUntil: "networkidle" });
+    await expect(page.locator("aside").getByText("Customer Portal")).toHaveCount(0);
     await expect(page.getByText("Failed to load dashboard")).toHaveCount(0);
 
     // Logout clears the shell.
