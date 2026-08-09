@@ -2742,6 +2742,9 @@ func (h *Handler) DeleteUser(c fiber.Ctx) error {
 
 // ListQueue returns the mail queue with safe fields only.
 func (h *Handler) ListQueue(c fiber.Ctx) error {
+	if !h.cfg.CoreMail.Enabled {
+		return coreMailUnavailableResponse(c)
+	}
 	type queueEntry struct {
 		ID          uint   `json:"id"`
 		MessageID   string `json:"message_id"`
@@ -2774,7 +2777,11 @@ func (h *Handler) ListQueue(c fiber.Ctx) error {
 	var raw []rawQueue
 	rows, err := sqlDB.Query("SELECT id, message_id, from_address, to_address, status, attempt_count, next_attempt_at, created_at, updated_at FROM coremail_queue WHERE deleted_at IS NULL ORDER BY id DESC LIMIT 200")
 	if err != nil {
-		return c.JSON([]queueEntry{})
+		// CoreMail is enabled (checked above) but the query still failed —
+		// a genuine server/migration inconsistency, not an empty queue.
+		// Log the real cause server-side only; never leak SQL/table text.
+		h.logger.Error("queue list query failed", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "queue unavailable"})
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -2898,12 +2905,16 @@ func (h *Handler) RetryQueue(c fiber.Ctx) error {
 // AdminQueueSummary returns aggregated queue metrics for the admin dashboard.
 // Admin-only by route registration. Read-only.
 func (h *Handler) AdminQueueSummary(c fiber.Ctx) error {
+	if !h.cfg.CoreMail.Enabled {
+		return coreMailUnavailableResponse(c)
+	}
 	if h.queueEngine == nil || h.queueEngine.Repo == nil {
-		return c.JSON(fiber.Map{"error": "queue engine not available", "metrics": nil})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "queue metrics unavailable"})
 	}
 	metrics, err := h.queueEngine.Repo.Metrics(c.Context(), nil, nil)
 	if err != nil {
-		return c.JSON(fiber.Map{"error": "metrics unavailable", "metrics": nil})
+		h.logger.Error("queue metrics query failed", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "queue metrics unavailable"})
 	}
 	return c.JSON(fiber.Map{"metrics": metrics})
 }
