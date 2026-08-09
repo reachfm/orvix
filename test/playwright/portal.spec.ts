@@ -449,13 +449,14 @@ test.describe("Orvix admin portal E2E", () => {
       }
     });
 
-    // Firewall rule creation form: reachable, real typed fields, never
-    // pre-fills or exposes anything secret (there is no secret field
-    // here, but the confirmation gate must still block submission).
-    await page.locator("main button").filter({ hasText: /^\s*New rule\s*$/ }).first().click();
-    await expect(page.getByPlaceholder(/sender_ip/i)).toBeVisible();
-    await expect(page.getByText("Create rule")).toBeDisabled();
-    await page.locator("main button").filter({ hasText: /^\s*Cancel\s*$/ }).first().click();
+    // Firewall rule creation was retired (POST /firewall/rules now
+    // fails closed with 410 FIREWALL_RULE_ENGINE_NOT_OPERATIONAL — no
+    // production mail path consults this table). The console must
+    // offer no Create Rule control and must label the existing
+    // records honestly as legacy/not-enforced against the real
+    // running server.
+    await expect(page.locator("main button").filter({ hasText: /^\s*New rule\s*$/ })).toHaveCount(0);
+    await expect(page.getByText(/legacy rule records — not enforced by the current coremail runtime/i)).toBeVisible();
 
     // SSL certificate upload: reachable, and once a key value is typed
     // it is never present anywhere else on the page outside the
