@@ -267,6 +267,10 @@ test.describe("Orvix admin portal E2E", () => {
   });
 
   test("platform super admin gets the Platform Administration shell, never the Customer Portal", async ({ browser, request }) => {
+    // Extended past the file's default 60s: this test's full-nav sweep,
+    // Dark-mode subset, and the five-gap reachability block together
+    // legitimately take longer than the default budget.
+    test.setTimeout(120000);
     // PLATFORM-SHELL: ADMIN_EMAIL is the env-var bootstrap identity and is
     // canonically platform_super_admin with tenant_id=NULL (see the
     // comment on the test above). Before this fix its /me.portal="platform"
@@ -449,7 +453,7 @@ test.describe("Orvix admin portal E2E", () => {
     // pre-fills or exposes anything secret (there is no secret field
     // here, but the confirmation gate must still block submission).
     await page.locator("main button").filter({ hasText: /^\s*New rule\s*$/ }).first().click();
-    await expect(page.getByPlaceholderText(/sender_ip/i)).toBeVisible();
+    await expect(page.getByPlaceholder(/sender_ip/i)).toBeVisible();
     await expect(page.getByText("Create rule")).toBeDisabled();
     await page.locator("main button").filter({ hasText: /^\s*Cancel\s*$/ }).first().click();
 
@@ -457,8 +461,9 @@ test.describe("Orvix admin portal E2E", () => {
     // it is never present anywhere else on the page outside the
     // password-masked field itself — the private-key contract's core
     // non-disclosure guarantee, checked against the live DOM.
+    await page.locator("main button").filter({ hasText: /^\s*SSL \/ ACME\s*$/ }).first().click();
     await page.locator("main button").filter({ hasText: /^\s*Upload certificate\s*$/ }).first().click();
-    const keyField = page.getByPlaceholderText("-----BEGIN PRIVATE KEY-----");
+    const keyField = page.getByPlaceholder("-----BEGIN PRIVATE KEY-----");
     await expect(keyField).toBeVisible();
     const sentinelKey = "-----BEGIN PRIVATE KEY-----\nPLAYWRIGHT_SENTINEL_KEY_MATERIAL\n-----END PRIVATE KEY-----";
     await keyField.fill(sentinelKey);
@@ -470,9 +475,25 @@ test.describe("Orvix admin portal E2E", () => {
 
     // Reliability > Changelog: reachable and renders the real response
     // shape (capitalized Go field names), not static release notes.
+    //
+    // GAP-COVERAGE-REGRESSION: this exact sequence (Reliability ->
+    // Updates -> Changelog against the real running server) is what
+    // caught a genuine pre-existing bug during this pass: GetUpdateHistory
+    // (internal/api/handlers/update.go) wraps its rows in
+    // {"history": [...]}, unlike the sibling status/check/preflight
+    // endpoints on the same resource, and the frontend was casting the
+    // envelope straight through as if it were a bare array — every real
+    // load of this tab crashed with "history.map is not a function"
+    // (masked in unit tests, which mock api.getUpdateHistory's already-
+    // unwrapped return value, not the raw HTTP response). Fixed in
+    // reliability/api.ts; regression-tested in reliability/api.test.ts.
     await page.locator("aside button").filter({ hasText: new RegExp(`^\\s*${escapeRegex("Reliability")}\\s*$`) }).first().click();
     await page.waitForLoadState("networkidle");
-    await page.locator("main button").filter({ hasText: /^\s*Changelog\s*$/ }).first().click();
+    await page.locator("main button").filter({ hasText: /^\s*Updates\s*$/ }).first().click();
+    await page.waitForLoadState("networkidle");
+    const changelogBtn = page.locator("main button").filter({ hasText: /^\s*Changelog\s*$/ }).first();
+    await expect(changelogBtn).toBeVisible();
+    await changelogBtn.click();
     await expect(page.getByText(/Changelog|No changelog entries|unavailable/i).first()).toBeVisible();
 
     // Configuration > Protocol Settings: reachable, schema-driven
@@ -481,7 +502,12 @@ test.describe("Orvix admin portal E2E", () => {
     await page.waitForLoadState("networkidle");
     await page.locator("main button").filter({ hasText: /^\s*Protocol Settings\s*$/ }).first().click();
     await page.waitForLoadState("networkidle");
-    await expect(page.locator("main").getByText(/smtp|imap|pop3|webmail/i).first()).toBeVisible();
+    // Assert against the schema-driven field list itself (a real
+    // protocol key's label), not the closed <select> — its selected
+    // <option> is present in the DOM but not "visible" per Playwright's
+    // actionability rules, so a getByText match against it always
+    // reports hidden even though the dropdown correctly shows it.
+    await expect(page.locator("main dl dt").first()).toBeVisible();
 
     // Across this entire gap-coverage block, zero write requests were
     // ever issued to any of the five gap endpoints — read-only
