@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Building, HardDrive, Shield, Zap, HeartPulse, ServerCog, Monitor, FileText, Send, Settings, ShieldAlert, Loader2, AlertCircle } from "lucide-react";
+import { Building, HardDrive, Shield, Zap, HeartPulse, ServerCog, Monitor, Send, Settings, ShieldAlert, Loader2, AlertCircle } from "lucide-react";
 import { api } from "../api";
 
 // PlatformHome is the Platform Administration landing page for
@@ -11,7 +11,7 @@ import { api } from "../api";
 // docs/deployment/platform-console-capability-matrix.md). It must never
 // call a tenant-owned endpoint (e.g. /enterprise/*, /users, /customer/*)
 // during bootstrap or render.
-type PlatformNavTarget = "organizations" | "enterprise" | "mail-operations" | "reliability" | "platform-security" | "firewall" | "modules" | "platform-configuration" | "license" | "health";
+type PlatformNavTarget = "organizations" | "enterprise" | "mail-operations" | "reliability" | "platform-security" | "firewall" | "modules" | "platform-configuration" | "health";
 
 interface PlatformDashboardData {
   tenants?: { total?: number; active?: number };
@@ -38,7 +38,6 @@ export default function PlatformHome({
     { id: "firewall", label: "Firewall", description: "Mail firewall rules and activity", icon: Shield },
     { id: "platform-configuration", label: "Configuration", description: "Runtime settings and feature flags", icon: Settings },
     { id: "modules", label: "Modules", description: "Installed platform modules", icon: Zap },
-    { id: "license", label: "License", description: "License tier, expiration, and validation status", icon: FileText },
     { id: "health", label: "Health", description: "System and runtime health", icon: HeartPulse },
   ];
 

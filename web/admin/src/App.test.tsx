@@ -104,7 +104,6 @@ describe("Platform Administration shell (portal=platform)", () => {
         recent_activity: [],
         top_domains: [],
       },
-      "/license": { status: "valid", tier: "enterprise" },
     });
   });
 
@@ -131,9 +130,15 @@ describe("Platform Administration shell (portal=platform)", () => {
   it("shows exactly the final verified platform navigation set", async () => {
     render(<Wrapper><App /></Wrapper>);
     await waitFor(() => expect(screen.getByText("Platform Administration")).toBeInTheDocument());
-    for (const label of ["Organizations", "Summary", "Mail Operations", "Reliability", "Health", "Firewall", "Security", "Modules", "Configuration", "License"]) {
+    for (const label of ["Organizations", "Summary", "Mail Operations", "Reliability", "Health", "Firewall", "Security", "Modules", "Configuration"]) {
       expect(screen.getAllByRole("button", { name: new RegExp(`^${label}$`, "i") }).length).toBeGreaterThan(0);
     }
+  });
+
+  it("never renders a License nav item — Orvix is hosted SaaS, not a licensed self-hosted product", async () => {
+    render(<Wrapper><App /></Wrapper>);
+    await waitFor(() => expect(screen.getByText("Platform Administration")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: /^License$/i })).not.toBeInTheDocument();
   });
 
   // PLATFORM-SHELL-2 Phase 3: table-driven proof that every visible platform
@@ -149,7 +154,6 @@ describe("Platform Administration shell (portal=platform)", () => {
     { label: "Security", expectHeading: /security/i },
     { label: "Modules", expectHeading: /modules/i },
     { label: "Configuration", expectHeading: /configuration/i },
-    { label: "License", expectHeading: "License" },
   ];
   for (const c of PLATFORM_NAV_CASES) {
     it(`platform nav item "${c.label}" renders its intended component with no tenant call`, async () => {

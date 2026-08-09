@@ -322,7 +322,6 @@ test.describe("Orvix admin portal E2E", () => {
       { label: "Security", heading: /security/i },
       { label: "Modules", heading: /modules/i },
       { label: "Configuration", heading: /configuration/i },
-      { label: "License", heading: "License" },
     ];
     for (const item of platformNav) {
       const btn = page.locator("aside button").filter({ hasText: new RegExp(`^\\s*${escapeRegex(item.label)}\\s*$`) });

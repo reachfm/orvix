@@ -451,8 +451,6 @@ export const api = {
   updateFeatureFlag: (id: string, data: Record<string, unknown>) =>
     request<any>(`/feature-flags/${id}`, { method: "PUT", body: JSON.stringify(data) }),
 
-  validateLicense: () => request<any>("/license/validate", { method: "POST" }),
-
   // Invoices
   listInvoices: () => request<any[]>("/enterprise/billing/invoices"),
   getInvoice: (id: number) => request<any>(`/enterprise/billing/invoices/${id}`),

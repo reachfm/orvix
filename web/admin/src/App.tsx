@@ -31,7 +31,6 @@ import SecurityPage from "./components/SecurityPage";
 import SupportPage from "./components/SupportPage";
 import PreferencesPage from "./components/PreferencesPage";
 import PlatformHome from "./components/PlatformHome";
-import LicenseStatus from "./components/LicenseStatus";
 import MailOperations from "./components/MailOperations";
 import Reliability from "./components/Reliability";
 import PlatformSecurity from "./components/PlatformSecurity";
@@ -40,7 +39,7 @@ import { initCSRF, api } from "./api";
 import ThemeToggle from "./shared/theme/ThemeToggle";
 
 type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" | "settings"
-  | "enterprise" | "mailboxes" | "organizations" | "health" | "platform-home" | "license"
+  | "enterprise" | "mailboxes" | "organizations" | "health" | "platform-home"
   | "mail-operations" | "reliability" | "platform-security" | "platform-configuration"
   | "billing" | "onboarding" | "apikeys"
   | "account-settings" | "org-overview" | "invitations" | "members-roles" | "ownership-transfer"
@@ -85,13 +84,20 @@ type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" 
 // Operations); the misleading on-page copy is corrected in
 // EnterpriseDashboard.tsx itself.
 //
-// NOTE on "license" (LicenseStatus.tsx -> /license, platformMW): this
-// component existed in the tree but was never wired into any App.tsx
-// navigation, in any version — not a PLATFORM-SHELL regression, but a
-// pre-existing, fully-working platform-owned page restored here.
+// NOTE on removing "license": GetLicense (internal/api/handlers/handlers.go)
+// unconditionally returns {"status":"not_required", "reason":"Local product
+// licensing is disabled; SaaS plans and quotas apply."} and ValidateLicense
+// returns 410 Gone — Orvix is a hosted SaaS, not a self-hosted licensed
+// product, so this backend concept has no real operational meaning here.
+// The removed LicenseStatus.tsx page also called fetch() directly and
+// rendered a tier/expires_at/customer_id/warnings schema the handler has
+// never returned since this retirement — a stale, fake-looking UI on top
+// of a conceptually wrong feature. Commercial plans/subscriptions/billing
+// are a distinct future bounded context (platform-commercial-control-plane),
+// not a repurposing of this endpoint.
 const PLATFORM_TAB_IDS: Tab[] = [
   "platform-home", "organizations", "enterprise", "mail-operations", "reliability", "health",
-  "firewall", "platform-security", "modules", "platform-configuration", "license",
+  "firewall", "platform-security", "modules", "platform-configuration",
   "account-settings", "security", "preferences",
 ];
 const ORGANIZATION_TAB_IDS: Tab[] = [
@@ -113,7 +119,6 @@ const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: st
   { id: "platform-security", label: "Security", icon: ShieldAlert },
   { id: "modules", label: "Modules", icon: Zap, section: "System" },
   { id: "platform-configuration", label: "Configuration", icon: Settings },
-  { id: "license", label: "License", icon: FileText },
   // Tabs below are pre-existing tenant-owned entries that were never
   // reachable by a real Platform Super Admin (see PLATFORM-SHELL final
   // report's ownership matrix) — their labels/sections are irrelevant to
@@ -279,7 +284,6 @@ export default function App() {
       case "mailboxes": return <MailboxList />;
       case "organizations": return <OrganizationList />;
       case "health": return <SystemHealth />;
-      case "license": return <LicenseStatus />;
       case "mail-operations": return <MailOperations />;
       case "reliability": return <Reliability />;
       case "platform-security": return <PlatformSecurity />;
