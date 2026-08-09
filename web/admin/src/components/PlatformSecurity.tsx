@@ -60,12 +60,110 @@ function SslTab() {
   );
 }
 
-function AntivirusTab() {
-  const q = useQuery<any>({ queryKey: ["antivirus-status"], queryFn: api.getAntivirusStatus });
-  return q.isLoading ? <Loading /> : q.error ? <ErrorBox error={q.error} /> : (
-    <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-4 text-sm">
-      <p className="text-[var(--text-secondary)]">Status: <span className="text-[var(--text-primary)]">{q.data?.status ?? q.data?.enabled === false ? "disabled" : "unknown"}</span></p>
-      {q.data?.engine && <p className="text-[var(--text-secondary)] mt-1">Engine: <span className="text-[var(--text-primary)]">{q.data.engine}</span></p>}
+// Matches AdminAntivirusStatus's exact response
+// (internal/api/handlers/enterprise_admin_v3.go) field for field —
+// there is no "status" or "enabled" field on the wire; the previous
+// version of this component read those two nonexistent fields through
+// an operator-precedence bug (`a ?? b === c ? d : e` parses as
+// `(a ?? (b === c)) ? d : e`), which meant ANY truthy value collapsed
+// to the literal string "disabled" and the real status was never
+// shown. engine_reachable (the daemon PING probe) and runtime_enforced
+// (whether the SMTP receiver actually calls the engine) are
+// independent per the handler's own "honest_notes" and must be shown
+// as two distinct facts, not collapsed into one status word.
+interface AntivirusStatus {
+  engine: string;
+  engine_configured: boolean;
+  engine_reachable: boolean;
+  engine_active: boolean;
+  runtime_enforced: boolean;
+  clamav_host: string;
+  clamav_port: number;
+  clamav_response: string;
+  policy_on_infected: string;
+  policy_on_scanner_unavailable: string;
+  last_error: string;
+  counts: {
+    scanned: number;
+    infected: number;
+    rejected: number;
+    quarantined: number;
+    tagged: number;
+    fail_open: number;
+    fail_closed: number;
+  };
+  honest_notes: string[];
+}
+
+function StatusPill({ ok, onLabel, offLabel }: { ok: boolean; onLabel: string; offLabel: string }) {
+  return (
+    <span className={`px-2 py-0.5 rounded text-xs font-medium ${ok ? "bg-[var(--success)]/10 text-[var(--success)]" : "bg-[var(--danger)]/10 text-[var(--danger)]"}`}>
+      {ok ? onLabel : offLabel}
+    </span>
+  );
+}
+
+export function AntivirusTab() {
+  const q = useQuery<AntivirusStatus>({ queryKey: ["antivirus-status"], queryFn: api.getAntivirusStatus });
+  if (q.isLoading) return <Loading />;
+  if (q.error) return <ErrorBox error={q.error} />;
+  const d = q.data;
+  if (!d) return <Empty text="No antivirus status available" />;
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-4 text-sm space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-[var(--text-secondary)]">Engine</span>
+            <span className="text-[var(--text-primary)] font-medium">{d.engine} @ {d.clamav_host}:{d.clamav_port}</span>
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="text-[var(--text-secondary)]">Daemon reachable</span>
+            <StatusPill ok={d.engine_reachable} onLabel={d.clamav_response || "reachable"} offLabel="unreachable" />
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="text-[var(--text-secondary)]">Enforced on SMTP receive</span>
+            <StatusPill ok={d.runtime_enforced} onLabel="enforced" offLabel="not enforced" />
+          </div>
+          {d.last_error && (
+            <div className="flex items-center justify-between">
+              <span className="text-[var(--text-secondary)]">Last error</span>
+              <span className="text-[var(--danger)] text-xs max-w-[60%] truncate" title={d.last_error}>{d.last_error}</span>
+            </div>
+          )}
+        </div>
+        <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-4 text-sm space-y-2">
+          <div className="flex items-center justify-between"><span className="text-[var(--text-secondary)]">On infected</span><span className="text-[var(--text-primary)]">{d.policy_on_infected}</span></div>
+          <div className="flex items-center justify-between"><span className="text-[var(--text-secondary)]">On scanner unavailable</span><span className="text-[var(--text-primary)]">{d.policy_on_scanner_unavailable}</span></div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-3 md:grid-cols-7 gap-3">
+        {([
+          ["scanned", d.counts.scanned],
+          ["infected", d.counts.infected],
+          ["rejected", d.counts.rejected],
+          ["quarantined", d.counts.quarantined],
+          ["tagged", d.counts.tagged],
+          ["fail_open", d.counts.fail_open],
+          ["fail_closed", d.counts.fail_closed],
+        ] as const).map(([k, v]) => (
+          <div key={k} className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-3">
+            <p className="text-xs text-[var(--text-secondary)] mb-1 capitalize">{k.replace("_", " ")}</p>
+            <p className={`text-lg font-bold ${(k === "infected" || k === "fail_open") && v > 0 ? "text-[var(--danger)]" : "text-[var(--text-primary)]"}`}>{v}</p>
+          </div>
+        ))}
+      </div>
+
+      {d.honest_notes?.length > 0 && (
+        <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-4">
+          <p className="text-xs font-medium text-[var(--text-secondary)] mb-2">Notes</p>
+          <ul className="space-y-1">
+            {d.honest_notes.map((note) => <li key={note} className="text-xs text-[var(--text-muted)]">{note}</li>)}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }
