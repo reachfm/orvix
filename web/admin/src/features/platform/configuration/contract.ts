@@ -57,6 +57,45 @@ export interface SettingsPatchResult {
   restart_required: boolean;
 }
 
+// --- Protocol Settings (GET/PATCH /admin/settings/protocol/:protocol,
+// enterprise_admin_v3.go). A SEPARATE contract from the sectioned
+// /admin/settings above: this endpoint is keyed by a fixed protocol
+// ID (see PROTOCOL_IDS in schema.ts, taken from the handler's own
+// protocolDefs map) and PATCH accepts a FLAT {key: value} body — not
+// nested by section. None of the ten protocols' key lists include a
+// secret-shaped field, verified against protocolDefs directly. ---
+
+export type ProtocolFieldType = "bool" | "int" | "string";
+
+export interface ProtocolSettingKey {
+  key: string;
+  label: string;
+  description: string;
+  type: ProtocolFieldType;
+  restart_required: boolean;
+  default?: string | number | boolean;
+  value: string | number | boolean;
+  persisted: boolean;
+  updated_at?: string;
+}
+
+export interface ProtocolSettingsResponse {
+  protocol: string;
+  title: string;
+  description: string;
+  keys: ProtocolSettingKey[];
+}
+
+export interface ProtocolSettingsPatchRequest {
+  [key: string]: string | number | boolean;
+}
+
+export interface ProtocolSettingsPatchResult {
+  applied?: { key: string; [k: string]: unknown }[];
+  rejected?: { key: string; reason: string }[];
+  restart_required?: boolean;
+}
+
 // --- Feature Flags ---
 
 export interface FeatureFlag {

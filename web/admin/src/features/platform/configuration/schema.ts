@@ -83,3 +83,19 @@ export const BUILD_INFO_FIELDS: { key: string; label: string }[] = [
   { key: "os", label: "OS" },
   { key: "arch", label: "Arch" },
 ];
+
+// The exact, closed set of protocol IDs enterprise_admin_v3.go's
+// protocolDefs map recognizes — GET/PATCH for any other id returns
+// 404. Enumerated from that map directly, not guessed.
+export const PROTOCOL_IDS = [
+  { id: "smtp_recv", label: "SMTP receiving" },
+  { id: "smtp_tx", label: "SMTP sending / submission" },
+  { id: "imap", label: "IMAP" },
+  { id: "pop3", label: "POP3" },
+  { id: "webmail", label: "WebMail" },
+  { id: "webadmin", label: "WebAdmin" },
+  { id: "dns", label: "DNS automation" },
+  { id: "remote_pop", label: "Remote POP" },
+  { id: "jmap", label: "JMAP / CJA" },
+  { id: "mobility", label: "Mobility & Sync" },
+] as const;
