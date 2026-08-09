@@ -50,7 +50,11 @@ export const getChangelog = (module: string = "orvix-core") =>
 // used here.
 export const checkUpdates = () => request<UpdateCheckResult>("/update/check");
 export const getUpdateStatus = () => request<UpdateStatus>("/update/status");
-export const getUpdateHistory = () => request<UpdateHistoryRow[]>("/update/history");
+// GetUpdateHistory (internal/api/handlers/update.go) wraps its rows in
+// an envelope — {"history": [...]}, not a bare array — unlike
+// GetUpdateStatus/GetUpdateCheck/GetUpdatePreflight on the same
+// resource. Unwrap it here so every caller sees a plain row array.
+export const getUpdateHistory = () => request<{ history: UpdateHistoryRow[] }>("/update/history").then((r) => r.history);
 export const getUpdatePreflight = () => request<PreflightResult>("/update/preflight");
 export const postUpdateCheck = () => request<UpdateCheckResult>("/update/check", { method: "POST" });
 export const runUpdate = () => request<UpdateHistoryRow>("/update/run", { method: "POST" });
