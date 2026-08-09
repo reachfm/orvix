@@ -224,6 +224,46 @@ test.describe("Orvix admin portal E2E", () => {
 
     // Verify sidebar still shows "Orvix Admin" after all navigation
     await expect(page.getByText("Orvix Admin")).toBeVisible();
+
+    // Tenant Admin in Dark mode — reuses this test's already-
+    // authenticated session (no new /auth/login call: the no-Redis
+    // fallback login limiter is a flat 5-per-15min counter across the
+    // whole file, internal/api/router.go's `limiter.New(Max:5,...)`,
+    // and does not reset on success the way the Redis path's
+    // ResetLoginLimit does — every additional standalone login test
+    // in this file consumes irreplaceable budget from that same
+    // per-IP counter).
+    // A passive listener, not a new page.route() — a second route
+    // handler for the same pattern would shadow the Authorization-
+    // header-injecting handler registered above and break auth on
+    // every subsequent request.
+    const requestedPathsDark: string[] = [];
+    page.on("request", (req) => {
+      const u = new URL(req.url());
+      if (u.pathname.startsWith("/api/v1/")) requestedPathsDark.push(u.pathname);
+    });
+    const darkConsoleErrors: string[] = [];
+    page.on("console", (msg) => { if (msg.type() === "error") darkConsoleErrors.push(msg.text()); });
+
+    await page.evaluate(() => window.localStorage.setItem("orvix-admin-theme", "dark"));
+    await page.reload();
+    await page.waitForLoadState("networkidle");
+
+    const hasDarkClass = await page.evaluate(() => document.documentElement.classList.contains("dark"));
+    expect(hasDarkClass).toBe(true);
+    await expect(page.locator("main").locator("h2").filter({ hasText: "Dashboard" })).toBeVisible();
+    // Tenant Admin never sees the Platform Administration shell, in
+    // either theme.
+    await expect(page.getByText("Platform Administration")).toHaveCount(0);
+    if (darkConsoleErrors.length) throw new Error(`console errors for Tenant Admin in dark theme: ${darkConsoleErrors.join(" | ")}`);
+    const platformOnlySuffixes = [
+      "/platform/dashboard", "/platform/organizations", "/admin/backups", "/admin/queue/summary",
+      "/admin/security/antivirus", "/guardian/logs", "/heal/history", "/admin/log-rules",
+      "/admin/settings", "/feature-flags", "/monitoring/alerts", "/admin/storage/volumes", "/admin/cluster/status",
+    ];
+    for (const suffix of platformOnlySuffixes) {
+      expect(requestedPathsDark.some((p) => p.endsWith(suffix))).toBe(false);
+    }
   });
 
   test("platform super admin gets the Platform Administration shell, never the Customer Portal", async ({ browser, request }) => {
@@ -318,7 +358,6 @@ test.describe("Orvix admin portal E2E", () => {
       { label: "Mail Operations", heading: /mail operations/i },
       { label: "Reliability", heading: /reliability/i },
       { label: "Health", heading: /health|runtime|system/i },
-      { label: "Firewall", heading: /firewall/i },
       { label: "Security", heading: /security/i },
       { label: "Modules", heading: /modules/i },
       { label: "Configuration", heading: /configuration/i },
@@ -348,6 +387,44 @@ test.describe("Orvix admin portal E2E", () => {
     await page.reload({ waitUntil: "networkidle" });
     await expect(page.locator("aside").getByText("Customer Portal")).toHaveCount(0);
     await expect(page.getByText("Failed to load dashboard")).toHaveCount(0);
+
+    // PSA in Dark mode — reuses this test's already-authenticated
+    // session rather than a fresh /auth/login (see the Tenant Admin
+    // Dark-mode comment above on the no-Redis login limiter's flat,
+    // non-resetting 5-per-15min-per-IP budget across this whole file).
+    // A representative subset, not the full nav — the full sweep
+    // already ran above in Light mode.
+    const darkConsoleErrors: string[] = [];
+    page.on("console", (msg) => {
+      if (msg.type() !== "error") return;
+      if (/status of 503 \(Service Unavailable\)/.test(msg.text())) return;
+      darkConsoleErrors.push(msg.text());
+    });
+    await page.evaluate(() => window.localStorage.setItem("orvix-admin-theme", "dark"));
+    await page.reload();
+    await page.waitForLoadState("networkidle");
+    const hasDarkClass = await page.evaluate(() => document.documentElement.classList.contains("dark"));
+    expect(hasDarkClass).toBe(true);
+    await expect(page.locator("main").locator("h2").filter({ hasText: "Platform Administration" })).toBeVisible();
+    await expect(page.locator("aside").getByText("Customer Portal")).toHaveCount(0);
+
+    const darkNavSubset: { label: string; heading: string | RegExp }[] = [
+      { label: "Organizations", heading: /organizations/i },
+      { label: "Security", heading: /security/i },
+    ];
+    for (const item of darkNavSubset) {
+      const btn = page.locator("aside button").filter({ hasText: new RegExp(`^\\s*${escapeRegex(item.label)}\\s*$`) });
+      await btn.first().scrollIntoViewIfNeeded();
+      await btn.first().click();
+      await page.waitForLoadState("networkidle");
+      const heading = typeof item.heading === "string" ? page.getByText(item.heading) : page.locator("main").getByText(item.heading);
+      await expect(heading.first()).toBeVisible();
+    }
+    // Security's Firewall tab (folded in, no longer a top-level item)
+    // is reachable and renders in Dark mode.
+    await page.locator("main button").filter({ hasText: /^\s*Firewall\s*$/ }).first().click();
+    await expect(page.getByText(/Recent Log Entries|Active Rules/i).first()).toBeVisible();
+    if (darkConsoleErrors.length) throw new Error(`console errors during dark PSA sweep: ${darkConsoleErrors.join(" | ")}`);
 
     // Logout clears the shell.
     await page.locator("aside button").filter({ hasText: /logout/i }).first().click();

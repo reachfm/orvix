@@ -161,30 +161,26 @@ export default function App() {
   const [userEmail, setUserEmail] = useState("");
 
   useEffect(() => {
-    fetch("/api/v1/me", { credentials: "include" })
-      .then(async (r) => {
-        // A non-ok /me response (401/403/5xx) means there is no valid
-        // authenticated session: clear local auth state and fall back
-        // to the login screen. No portal-specific request has been
-        // issued yet at this point, so there is nothing else to unwind.
-        setAuthenticated(r.ok);
-        if (r.ok) {
-          try {
-            const u = await r.json();
-            setUserRole(u.role || "");
-            setUserEmail(u.email || "");
-            // portal is the ONLY authoritative shell selector. Anything
-            // other than the two known values fails closed to "" —
-            // never inferred from `role`.
-            const resolvedPortal = (u.portal === "platform" || u.portal === "organization") ? u.portal : "";
-            setPortal(resolvedPortal);
-            // Resolve the landing tab from the portal BEFORE authLoading
-            // flips false, so the first real paint already shows the
-            // correct shell — no flash of the wrong portal.
-            setCurrentTab(resolvedPortal === "platform" ? "platform-home" : "dashboard");
-            initCSRF().catch(() => {});
-          } catch { setUserRole(""); setUserEmail(""); setPortal(""); }
-        }
+    // A failed api.getMe() (401/403/5xx, or a network error) means
+    // there is no valid authenticated session: clear local auth state
+    // and fall back to the login screen. No portal-specific request
+    // has been issued yet at this point, so there is nothing else to
+    // unwind.
+    api.getMe()
+      .then((u) => {
+        setAuthenticated(true);
+        setUserRole(u.role || "");
+        setUserEmail(u.email || "");
+        // portal is the ONLY authoritative shell selector. Anything
+        // other than the two known values fails closed to "" — never
+        // inferred from `role`.
+        const resolvedPortal = (u.portal === "platform" || u.portal === "organization") ? u.portal : "";
+        setPortal(resolvedPortal);
+        // Resolve the landing tab from the portal BEFORE authLoading
+        // flips false, so the first real paint already shows the
+        // correct shell — no flash of the wrong portal.
+        setCurrentTab(resolvedPortal === "platform" ? "platform-home" : "dashboard");
+        initCSRF().catch(() => {});
         setAuthLoading(false);
       })
       .catch(() => { setAuthenticated(false); setAuthLoading(false); });
