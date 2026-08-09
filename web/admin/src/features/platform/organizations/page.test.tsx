@@ -113,4 +113,31 @@ describe("features/platform/organizations", () => {
     await screen.findByDisplayValue("Acme Corp");
     expect(screen.getByText("Save changes")).toBeDisabled();
   });
+
+  // Regression evidence for the DUPLICATE_SUPERSEDED_ROUTE disposition
+  // of GET /platform/organizations/:id (GetPlatformOrganization,
+  // platform_admin.go): it returns an untyped map[string]interface{}
+  // from a different service than the typed
+  // GET /platform/organizations/:id/detail this feature uses, and
+  // api.ts intentionally has no client function for it at all — so a
+  // request can never be issued from this feature. This test proves
+  // that structurally: the full list -> detail -> edit -> suspend flow
+  // never calls a non-/detail single-organization GET.
+  it("never calls the untyped GET /platform/organizations/:id — only the typed /detail endpoint", async () => {
+    vi.spyOn(api, "listOrganizations").mockResolvedValue(SUMMARY);
+    vi.spyOn(api, "getOrganizationDetail").mockResolvedValue(DETAIL);
+    vi.spyOn(api, "setOrganizationActive").mockResolvedValue({ status: "ok" });
+    vi.spyOn(api, "updateOrganization").mockResolvedValue({
+      organization: { id: 1, name: DETAIL.name, slug: DETAIL.slug, domain: DETAIL.domain, plan: DETAIL.plan, max_domains: DETAIL.max_domains, max_mailboxes: DETAIL.max_mailboxes, primary_color: DETAIL.primary_color, active: DETAIL.active, created_at: DETAIL.created_at, updated_at: DETAIL.updated_at },
+    });
+    // The untyped single-org GET has no client function at all in
+    // this feature's api.ts — asserting its absence is itself the
+    // proof, alongside the explicit key check below.
+    expect(Object.keys(api)).not.toContain("getPlatformOrganization");
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Acme Corp")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Acme Corp"));
+    await waitFor(() => expect(screen.getByText("Edit organization")).toBeInTheDocument());
+  });
 });
