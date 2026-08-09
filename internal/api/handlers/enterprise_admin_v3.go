@@ -86,6 +86,22 @@ type protocolKey struct {
 	Description     string `json:"description"`
 	RestartRequired bool   `json:"restart_required"`
 	Default         any    `json:"default,omitempty"`
+	// ReadOnly, when non-empty, is the reason this key can never be
+	// PATCHed — e.g. no corresponding live-config field exists to
+	// bind it to, or no canonical valid range/format could be proven
+	// for it. PATCH always rejects a write to a read-only key with
+	// this exact reason rather than silently persisting a no-op
+	// setting.
+	ReadOnly string `json:"read_only,omitempty"`
+}
+
+// validatedProtocolField is one field of a PATCH request that passed
+// type coercion and semantic validation, paired with its protocolDef
+// entry (for RestartRequired at write time) and its normalized value.
+type validatedProtocolField struct {
+	key    string
+	defKey protocolKey
+	value  any
 }
 
 var protocolDefs = map[string]protocolDef{
@@ -96,10 +112,10 @@ var protocolDefs = map[string]protocolDef{
 		Keys: []protocolKey{
 			{Key: "coremail.smtp_port", Type: "int", Label: "SMTP port", RestartRequired: true, Default: 25},
 			{Key: "coremail.smtp_host", Type: "string", Label: "SMTP bind host", RestartRequired: true, Default: "0.0.0.0"},
-			{Key: "coremail.require_tls_for_auth", Type: "bool", Label: "Require TLS for AUTH", RestartRequired: false, Default: true},
-			{Key: "coremail.require_auth_for_submission", Type: "bool", Label: "Require AUTH for submission (587)", RestartRequired: false, Default: true},
-			{Key: "coremail.max_attachment_size_mb", Type: "int", Label: "Max attachment size (MB)", RestartRequired: false, Default: 25},
-			{Key: "coremail.max_attachments_per_message", Type: "int", Label: "Max attachments per message", RestartRequired: false, Default: 20},
+			{Key: "coremail.require_tls_for_auth", Type: "bool", Label: "Require TLS for AUTH", RestartRequired: true, Default: true},
+			{Key: "coremail.require_auth_for_submission", Type: "bool", Label: "Require AUTH for submission (587)", RestartRequired: true, Default: true},
+			{Key: "coremail.max_attachment_size_mb", Type: "int", Label: "Max attachment size (MB)", RestartRequired: true, Default: 25},
+			{Key: "coremail.max_attachments_per_message", Type: "int", Label: "Max attachments per message", RestartRequired: true, Default: 20},
 			{Key: "coremail.queue_workers", Type: "int", Label: "Queue workers", RestartRequired: true, Default: 1},
 			{Key: "coremail.worker_interval", Type: "string", Label: "Worker interval (duration)", RestartRequired: true, Default: "5s"},
 		},
@@ -109,10 +125,10 @@ var protocolDefs = map[string]protocolDef{
 		Title:       "SMTP sending / submission",
 		Description: "Outbound SMTP delivery and submission listener (587, SMTPS 465).",
 		Keys: []protocolKey{
-			{Key: "coremail.submission_enabled", Type: "bool", Label: "Submission enabled (587)", RestartRequired: false, Default: true},
+			{Key: "coremail.submission_enabled", Type: "bool", Label: "Submission enabled (587)", RestartRequired: true, Default: true},
 			{Key: "coremail.submission_port", Type: "int", Label: "Submission port", RestartRequired: true, Default: 587},
 			{Key: "coremail.submission_host", Type: "string", Label: "Submission bind host", RestartRequired: true, Default: "0.0.0.0"},
-			{Key: "coremail.smtps_enabled", Type: "bool", Label: "SMTPS enabled (465)", RestartRequired: false, Default: false},
+			{Key: "coremail.smtps_enabled", Type: "bool", Label: "SMTPS enabled (465)", RestartRequired: true, Default: false},
 			{Key: "coremail.smtps_port", Type: "int", Label: "SMTPS port", RestartRequired: true, Default: 465},
 			{Key: "outbound.prefer_ipv4", Type: "bool", Label: "Prefer IPv4 for outbound delivery", RestartRequired: false, Default: false},
 		},
@@ -124,7 +140,7 @@ var protocolDefs = map[string]protocolDef{
 		Keys: []protocolKey{
 			{Key: "coremail.imap_host", Type: "string", Label: "IMAP bind host", RestartRequired: true, Default: "0.0.0.0"},
 			{Key: "coremail.imap_port", Type: "int", Label: "IMAP port", RestartRequired: true, Default: 143},
-			{Key: "coremail.imaps_enabled", Type: "bool", Label: "IMAPS enabled (993)", RestartRequired: false, Default: false},
+			{Key: "coremail.imaps_enabled", Type: "bool", Label: "IMAPS enabled (993)", RestartRequired: true, Default: false},
 			{Key: "coremail.imaps_port", Type: "int", Label: "IMAPS port", RestartRequired: true, Default: 993},
 		},
 	},
@@ -135,7 +151,7 @@ var protocolDefs = map[string]protocolDef{
 		Keys: []protocolKey{
 			{Key: "coremail.pop3_host", Type: "string", Label: "POP3 bind host", RestartRequired: true, Default: "0.0.0.0"},
 			{Key: "coremail.pop3_port", Type: "int", Label: "POP3 port", RestartRequired: true, Default: 110},
-			{Key: "coremail.pop3s_enabled", Type: "bool", Label: "POP3S enabled (995)", RestartRequired: false, Default: false},
+			{Key: "coremail.pop3s_enabled", Type: "bool", Label: "POP3S enabled (995)", RestartRequired: true, Default: false},
 			{Key: "coremail.pop3s_port", Type: "int", Label: "POP3S port", RestartRequired: true, Default: 995},
 		},
 	},
@@ -154,7 +170,7 @@ var protocolDefs = map[string]protocolDef{
 		Title:       "WebAdmin",
 		Description: "Admin console runtime configuration.",
 		Keys: []protocolKey{
-			{Key: "auth.password_min_length", Type: "int", Label: "Password min length", RestartRequired: true, Default: 8},
+			{Key: "auth.password_min_len", Type: "int", Label: "Password min length", RestartRequired: true, Default: 8},
 			{Key: "monitoring.disk_usage_warning_pct", Type: "int", Label: "Disk usage warning %", RestartRequired: false, Default: 85},
 			{Key: "monitoring.disk_usage_critical_pct", Type: "int", Label: "Disk usage critical %", RestartRequired: false, Default: 95},
 		},
@@ -174,7 +190,7 @@ var protocolDefs = map[string]protocolDef{
 		Title:       "Remote POP",
 		Description: "Remote POP fetch (fetchmail) settings used by per-mailbox external pop3 polling.",
 		Keys: []protocolKey{
-			{Key: "coremail.imap_idle_enabled", Type: "bool", Label: "IMAP IDLE push", RestartRequired: false, Default: false},
+			{Key: "coremail.imap_idle_enabled", Type: "bool", Label: "IMAP IDLE push", RestartRequired: false, Default: false, ReadOnly: "no corresponding field exists on the live CoreMail config — this key was never wired to a real runtime setting"},
 		},
 	},
 	"jmap": {
@@ -191,8 +207,8 @@ var protocolDefs = map[string]protocolDef{
 		Title:       "Mobility & Sync",
 		Description: "Mobile device sync (EAS / Activesync) and push notification settings.",
 		Keys: []protocolKey{
-			{Key: "coremail.vapid_subject", Type: "string", Label: "VAPID subject (mailto:)", RestartRequired: false, Default: ""},
-			{Key: "coremail.max_attachment_size_mb", Type: "int", Label: "Max attachment size (MB)", RestartRequired: false, Default: 25},
+			{Key: "coremail.vapid_subject", Type: "string", Label: "VAPID subject (mailto:)", RestartRequired: true, Default: ""},
+			{Key: "coremail.max_attachment_size_mb", Type: "int", Label: "Max attachment size (MB)", RestartRequired: true, Default: 25},
 		},
 	},
 }
@@ -224,6 +240,9 @@ func (h *Handler) ListProtocolSettings(c fiber.Ctx) error {
 			"type":             k.Type,
 			"restart_required": k.RestartRequired,
 			"default":          k.Default,
+		}
+		if k.ReadOnly != "" {
+			row["read_only"] = k.ReadOnly
 		}
 		if h.settingsStore != nil {
 			if entry, err := h.settingsStore.Get(c.Context(), k.Key); err == nil && entry != nil && !entry.Redacted {
@@ -266,6 +285,19 @@ func (h *Handler) PatchProtocolSettings(c fiber.Ctx) error {
 			"error": "settings persistence not wired; PATCH unavailable",
 		})
 	}
+	// Truthful hot/pending-restart reporting depends on running the
+	// real bridge after every write — if it isn't wired, refuse the
+	// mutation rather than silently falling back to unverified static
+	// flags the way the previous implementation did.
+	if h.settingsBridge == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"error": "settings bridge not wired; cannot report real apply state, PATCH unavailable",
+		})
+	}
+	sqlDB, err := h.db.DB()
+	if err != nil || sqlDB == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "database not ready"})
+	}
 
 	var raw map[string]json.RawMessage
 	if err := c.Bind().JSON(&raw); err != nil {
@@ -278,81 +310,270 @@ func (h *Handler) PatchProtocolSettings(c fiber.Ctx) error {
 	}
 
 	var (
-		applied         []map[string]any
-		rejected        []map[string]any
-		restartRequired bool
+		good     []validatedProtocolField
+		rejected []map[string]any
 	)
 
 	for key, val := range raw {
 		defKey, ok := allowed[key]
 		if !ok {
-			rejected = append(rejected, map[string]any{
-				"key":    key,
-				"reason": "not editable on this protocol page",
-			})
+			rejected = append(rejected, map[string]any{"key": key, "reason": "not editable on this protocol page"})
+			continue
+		}
+		if defKey.ReadOnly != "" {
+			rejected = append(rejected, map[string]any{"key": key, "reason": "read-only: " + defKey.ReadOnly})
 			continue
 		}
 		typed, err := coerceForType(val, defKey.Type)
 		if err != nil {
-			rejected = append(rejected, map[string]any{
-				"key":    key,
-				"reason": err.Error(),
-			})
+			rejected = append(rejected, map[string]any{"key": key, "reason": err.Error()})
 			continue
 		}
-		encoded, _ := json.Marshal(typed)
-		if _, err := h.settingsStore.Get(c.Context(), key); err != nil {
-			h.logger.Warn("settings get failed", zap.String("key", key), zap.Error(err))
+		validator, hasValidator := protocolKeyValidators[key]
+		if !hasValidator {
+			// No provable canonical constraint exists for this key —
+			// per policy it must be ReadOnly, not silently accepted.
+			// A key ending up here is a def/validator drift bug.
+			rejected = append(rejected, map[string]any{"key": key, "reason": "no validator registered for this key — treated as not editable"})
+			continue
 		}
-		now := time.Now().UTC()
-		if h.db != nil {
-			sqlDB, derr := h.db.DB()
-			if derr == nil {
-				d := h.sqlDialect()
-				if _, execErr := sqlDB.ExecContext(c.Context(),
-					`INSERT INTO admin_settings (key, value, section, requires_restart, updated_at, updated_by) VALUES (`+d.Placeholders(6)+`)
-				 ON CONFLICT (key) DO UPDATE SET value=`+d.Excluded("value")+`, section=`+d.Excluded("section")+`, requires_restart=`+d.Excluded("requires_restart")+`, updated_at=`+d.Excluded("updated_at"),
-					key, string(encoded), pid, boolToInt(defKey.RestartRequired), now, auditActorFromCtx(c)); execErr != nil {
-					rejected = append(rejected, map[string]any{
-						"key":    key,
-						"reason": "persist: " + execErr.Error(),
-					})
-					continue
-				}
-			}
+		normalized, err := validator(typed)
+		if err != nil {
+			rejected = append(rejected, map[string]any{"key": key, "reason": err.Error()})
+			continue
 		}
-		if defKey.RestartRequired {
-			restartRequired = true
+		good = append(good, validatedProtocolField{key: key, defKey: defKey, value: normalized})
+	}
+
+	// Cross-field: disk usage warning % must stay below critical %.
+	// Both keys live on the "webadmin" protocol page; only enforced
+	// when at least one of them is actually part of this patch.
+	if pid == "webadmin" {
+		if rej := h.validateDiskUsageOrdering(c, good); rej != nil {
+			rejected = append(rejected, rej...)
 		}
-		applied = append(applied, map[string]any{
-			"key":              key,
-			"value":            typed,
-			"restart_required": defKey.RestartRequired,
-			"updated_at":       now.Format(time.RFC3339),
+	}
+
+	// Any rejection — unknown key, read-only, invalid value, or a
+	// failed cross-field check — aborts the ENTIRE request. Nothing
+	// below this point may run: zero DB mutations, zero live-config
+	// changes, zero audit rows.
+	if len(rejected) > 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"applied":  []map[string]any{},
+			"rejected": rejected,
 		})
 	}
 
-	h.writeAuditLog(c, "settings.patch.protocol",
-		fmt.Sprintf("protocol:%s|applied:%d|rejected:%d|restart_required:%v", pid, len(applied), len(rejected), restartRequired))
+	// No-op detection: drop any field whose new value already equals
+	// the current effective value (persisted override, else live
+	// config). A patch that changes nothing must not write a row or
+	// an audit entry.
+	toApply := make([]validatedProtocolField, 0, len(good))
+	for _, g := range good {
+		current := h.currentEffectiveProtocolValue(c, g.key)
+		if valuesEqual(current, g.value) {
+			continue
+		}
+		toApply = append(toApply, g)
+	}
+	if len(toApply) == 0 {
+		return c.JSON(fiber.Map{
+			"applied":          []map[string]any{},
+			"rejected":         []map[string]any{},
+			"hot_applied":      []string{},
+			"pending_restart":  []string{},
+			"restart_required": false,
+		})
+	}
 
-	status := fiber.StatusOK
-	// If any field was rejected for being off-protocol,
-	// the entire patch is rolled back conceptually (we
-	// never persisted rejected rows) and we surface a 400
-	// so the admin UI shows the rejection without
-	// silently swallowing it. This mirrors the global
-	// /admin/settings behaviour for ErrUnsafeOrUnknown.
-	for _, rj := range rejected {
-		if strings.Contains(strings.ToLower(rj["reason"].(string)), "not editable") {
-			status = fiber.StatusBadRequest
-			break
+	now := time.Now().UTC()
+	d := h.sqlDialect()
+	tx, err := sqlDB.BeginTx(c.Context(), nil)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "begin transaction: "+err.Error())
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			tx.Rollback()
+		}
+	}()
+
+	applied := make([]map[string]any, 0, len(toApply))
+	for _, g := range toApply {
+		encoded, err := json.Marshal(g.value)
+		if err != nil {
+			return fiber.NewError(fiber.StatusInternalServerError, "encode "+g.key+": "+err.Error())
+		}
+		if _, execErr := tx.ExecContext(c.Context(),
+			`INSERT INTO admin_settings (key, value, section, requires_restart, updated_at, updated_by) VALUES (`+d.Placeholders(6)+`)
+			 ON CONFLICT (key) DO UPDATE SET value=`+d.Excluded("value")+`, section=`+d.Excluded("section")+`, requires_restart=`+d.Excluded("requires_restart")+`, updated_at=`+d.Excluded("updated_at"),
+			g.key, string(encoded), pid, boolToInt(g.defKey.RestartRequired), now, auditActorFromCtx(c),
+		); execErr != nil {
+			// A mid-transaction persist failure aborts the WHOLE
+			// patch (the deferred Rollback above undoes every row
+			// this loop already wrote) — never a partial commit.
+			return fiber.NewError(fiber.StatusInternalServerError, "persist "+g.key+": "+execErr.Error())
+		}
+		applied = append(applied, map[string]any{
+			"key":              g.key,
+			"value":            g.value,
+			"restart_required": g.defKey.RestartRequired,
+			"updated_at":       now.Format(time.RFC3339),
+		})
+	}
+	if err := tx.Commit(); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "commit: "+err.Error())
+	}
+	committed = true
+
+	// Only now — after a successful commit — ask the bridge what
+	// ACTUALLY took effect in the live process. This replaces the old
+	// behavior of trusting the static per-key RestartRequired flag as
+	// if it were the outcome; the flag is only ever used above to
+	// decide what to WRITE to admin_settings, never what to report as
+	// applied.
+	summary, bridgeErr := h.settingsBridge.Apply(c.Context())
+	appliedSet := make(map[string]bool, len(toApply))
+	for _, g := range toApply {
+		appliedSet[g.key] = true
+	}
+	hotApplied := make([]string, 0, len(toApply))
+	pendingRestart := make([]string, 0, len(toApply))
+	if bridgeErr == nil {
+		hotSet := make(map[string]bool, len(summary.AppliedKeys))
+		for _, k := range summary.AppliedKeys {
+			hotSet[k] = true
+		}
+		for _, g := range toApply {
+			if hotSet[g.key] {
+				hotApplied = append(hotApplied, g.key)
+			} else {
+				pendingRestart = append(pendingRestart, g.key)
+			}
+		}
+	} else {
+		// The write already committed; we just can't confirm which
+		// keys are hot vs pending right now. Report everything as
+		// pending — the honest, conservative default — rather than
+		// guessing "applied".
+		for _, g := range toApply {
+			pendingRestart = append(pendingRestart, g.key)
 		}
 	}
-	return c.Status(status).JSON(fiber.Map{
+
+	h.writeAuditLog(c, "settings.patch.protocol",
+		fmt.Sprintf("protocol:%s|applied:%d|hot_applied:%d|pending_restart:%d", pid, len(applied), len(hotApplied), len(pendingRestart)))
+
+	resp := fiber.Map{
 		"applied":          applied,
-		"rejected":         rejected,
-		"restart_required": restartRequired,
-	})
+		"rejected":         []map[string]any{},
+		"hot_applied":      hotApplied,
+		"pending_restart":  pendingRestart,
+		"restart_required": len(pendingRestart) > 0,
+	}
+	if bridgeErr != nil {
+		h.logger.Warn("settings bridge apply failed after successful commit", zap.String("protocol", pid), zap.Error(bridgeErr))
+		resp["bridge_apply_error"] = "settings were saved but the live-apply check failed; treat all changed fields as pending restart until confirmed"
+	}
+	return c.JSON(resp)
+}
+
+// currentEffectiveProtocolValue mirrors ListProtocolSettings' own
+// value resolution (persisted override, else live config) so no-op
+// detection compares against exactly what the operator would see on
+// the GET response.
+func (h *Handler) currentEffectiveProtocolValue(c fiber.Ctx, key string) any {
+	if h.settingsStore != nil {
+		if entry, err := h.settingsStore.Get(c.Context(), key); err == nil && entry != nil && !entry.Redacted {
+			return entry.Value
+		}
+	}
+	return resolveLiveConfigValue(h.cfg, key)
+}
+
+// valuesEqual compares a stored/live value (often float64 or int64
+// from JSON round-tripping) against a freshly-validated value without
+// caring about the exact numeric Go type.
+func valuesEqual(a, b any) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	af, aIsNum := toFloat64(a)
+	bf, bIsNum := toFloat64(b)
+	if aIsNum && bIsNum {
+		return af == bf
+	}
+	return fmt.Sprintf("%v", a) == fmt.Sprintf("%v", b)
+}
+
+func toFloat64(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case float32:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case int32:
+		return float64(n), true
+	}
+	return 0, false
+}
+
+// validateDiskUsageOrdering enforces monitoring.disk_usage_warning_pct
+// < monitoring.disk_usage_critical_pct using the EFFECTIVE value of
+// each (the patched value if present in this request, else the
+// current stored/live value) — so a patch touching only one of the
+// pair still can't put the pair out of order.
+func (h *Handler) validateDiskUsageOrdering(c fiber.Ctx, good []validatedProtocolField) []map[string]any {
+	const warnKey = "monitoring.disk_usage_warning_pct"
+	const critKey = "monitoring.disk_usage_critical_pct"
+
+	touches := false
+	patched := map[string]any{}
+	for _, g := range good {
+		if g.key == warnKey || g.key == critKey {
+			touches = true
+			patched[g.key] = g.value
+		}
+	}
+	if !touches {
+		return nil
+	}
+
+	effective := func(key string) (int64, bool) {
+		if v, ok := patched[key]; ok {
+			if n, ok := v.(int64); ok {
+				return n, true
+			}
+		}
+		cur := h.currentEffectiveProtocolValue(c, key)
+		if n, ok := toFloat64(cur); ok {
+			return int64(n), true
+		}
+		return 0, false
+	}
+
+	warn, warnOK := effective(warnKey)
+	crit, critOK := effective(critKey)
+	if !warnOK || !critOK {
+		return nil // one side has no resolvable current value yet; nothing to compare
+	}
+	if warn >= crit {
+		var rej []map[string]any
+		if _, ok := patched[warnKey]; ok {
+			rej = append(rej, map[string]any{"key": warnKey, "reason": fmt.Sprintf("warning %% (%d) must be less than critical %% (%d)", warn, crit)})
+		}
+		if _, ok := patched[critKey]; ok {
+			rej = append(rej, map[string]any{"key": critKey, "reason": fmt.Sprintf("critical %% (%d) must be greater than warning %% (%d)", crit, warn)})
+		}
+		return rej
+	}
+	return nil
 }
 
 // auditActorFromCtx is a tiny helper that returns the current
@@ -376,20 +597,22 @@ func resolveLiveConfigValue(cfg interface{}, key string) any {
 	if len(parts) < 2 {
 		return nil
 	}
-	// Map our dotted config paths to the live Config struct
-	// using reflection. We restrict the lookup to the keys
-	// we actually advertise in protocolDefs so the resolver
-	// never accidentally reaches into unrelated nested
-	// fields (and the test coverage stays bounded).
+	// Map our dotted config paths (which follow the config package's
+	// mapstructure tags, e.g. "coremail.smtp_port") to the live Config
+	// struct by matching each segment's `mapstructure` tag rather than
+	// the exported Go field name — struct fields are capitalized
+	// (CoreMail, Auth, DNS, ...) and a literal FieldByName("coremail")
+	// never matches FieldByName("CoreMail"), which previously made
+	// this resolver return nil for every single key.
 	v := reflect.ValueOf(cfg)
 	if v.Kind() != reflect.Struct {
 		return nil
 	}
-	sub := v.FieldByName(parts[0])
+	sub := fieldByMapstructureTag(v, parts[0])
 	if !sub.IsValid() || sub.Kind() != reflect.Struct {
 		return nil
 	}
-	field := sub.FieldByName(parts[1])
+	field := fieldByMapstructureTag(sub, parts[1])
 	if !field.IsValid() {
 		return nil
 	}
@@ -398,6 +621,12 @@ func resolveLiveConfigValue(cfg interface{}, key string) any {
 			return nil
 		}
 		field = field.Elem()
+	}
+	// time.Duration fields are declared as "string" in protocolDefs
+	// (duration literals like "5s") — surface the same formatted
+	// string on GET, not the raw underlying int64 nanosecond count.
+	if field.Type() == reflect.TypeOf(time.Duration(0)) {
+		return time.Duration(field.Int()).String()
 	}
 	switch field.Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
@@ -410,6 +639,21 @@ func resolveLiveConfigValue(cfg interface{}, key string) any {
 		return field.String()
 	}
 	return nil
+}
+
+// fieldByMapstructureTag finds the struct field of v whose
+// `mapstructure:"..."` tag equals name (case-insensitive). Falls back
+// to an exact Go field name match so callers passing an
+// already-capitalized name still work.
+func fieldByMapstructureTag(v reflect.Value, name string) reflect.Value {
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		sf := t.Field(i)
+		if tag, ok := sf.Tag.Lookup("mapstructure"); ok && strings.EqualFold(tag, name) {
+			return v.Field(i)
+		}
+	}
+	return v.FieldByName(name)
 }
 
 // coerceForType does the same job as settings.coerceType but
