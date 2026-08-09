@@ -40,6 +40,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/mail"
 	"os"
 	"strconv"
 	"strings"
@@ -66,6 +67,10 @@ var (
 	errAdminRecoveryRoleRejected  = errors.New("user's role is not eligible for this operation")
 	errAdminRecoveryConfirmFailed = errors.New("confirmation email did not match; aborting")
 	errAdminRecoveryRowsAffected  = errors.New("unexpected number of rows affected; aborting")
+	errAdminInvalidTenantID       = errors.New("--tenant-id must be a positive integer")
+	errAdminTenantNotFound        = errors.New("no active tenant found for that tenant id")
+	errAdminEmailInvalid          = errors.New("invalid email format")
+	errAdminEmailExists           = errors.New("a user with that email already exists")
 )
 
 // adminCLIDeps abstracts every side effect the recovery commands perform, so
@@ -243,6 +248,28 @@ func lookupExactlyOneUser(ctx context.Context, q interface {
 		return nil, errAdminRecoveryUserNotFound
 	}
 	return &u, nil
+}
+
+// lookupActiveTenant resolves tenantID on the SAME open connection/
+// transaction the caller supplies, failing closed (errAdminTenantNotFound)
+// unless the tenant exists, is active, and is not soft-deleted.
+func lookupActiveTenant(ctx context.Context, q interface {
+	QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
+}, dial *dbdialect.Info, tenantID int64) error {
+	var id int64
+	var active int
+	var deletedAt sql.NullTime
+	err := q.QueryRowContext(ctx,
+		"SELECT id, active, deleted_at FROM tenants WHERE id = "+dial.Placeholder(1),
+		tenantID,
+	).Scan(&id, &active, &deletedAt)
+	if err != nil {
+		return errAdminTenantNotFound
+	}
+	if active == 0 || deletedAt.Valid {
+		return errAdminTenantNotFound
+	}
+	return nil
 }
 
 // resetPasswordAllowedRole reports whether role is an eligible LITERAL
@@ -551,6 +578,155 @@ func recoverTx(ctx context.Context, sqlDB *sql.DB, dial *dbdialect.Info, user *a
 	return tx.Commit()
 }
 
+// runAdminCreateTenantAdmin implements
+// `orvix admin create-tenant-admin --tenant-id <id> --email <email>`. It
+// provisions a brand-new tenant_admin for an EXISTING tenant — the missing
+// non-SQL production path noted in
+// docs/deployment/portal-separation-phase1.md and by
+// test/playwright/seed-fixture/main.go's doc comment. Unlike reset-password
+// and recover, this never touches an existing user row: it fails closed if
+// the email already exists rather than updating or promoting it.
+func runAdminCreateTenantAdmin(tenantID int64, email string, deps adminCLIDeps) int {
+	if !deps.isRoot() {
+		fmt.Fprintln(deps.stderr, "error:", errAdminRecoveryNotRoot)
+		return 1
+	}
+	if tenantID <= 0 {
+		fmt.Fprintln(deps.stderr, "error:", errAdminInvalidTenantID)
+		return 2
+	}
+	normEmail := normalizeEmail(email)
+	if normEmail == "" {
+		fmt.Fprintln(deps.stderr, "error: --email is required")
+		return 2
+	}
+	if _, err := mail.ParseAddress(normEmail); err != nil {
+		fmt.Fprintln(deps.stderr, "error:", errAdminEmailInvalid)
+		return 2
+	}
+
+	sqlDB, dial, closeDB, err := deps.openDB()
+	if err != nil {
+		fmt.Fprintln(deps.stderr, "error: unable to access the database")
+		return 1
+	}
+	defer closeDB()
+
+	ctx := context.Background()
+
+	if err := lookupActiveTenant(ctx, sqlDB, dial, tenantID); err != nil {
+		fmt.Fprintln(deps.stderr, "error:", errAdminTenantNotFound)
+		return 1
+	}
+
+	var existing int64
+	if err := sqlDB.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM users WHERE LOWER(email) = "+dial.Placeholder(1),
+		normEmail,
+	).Scan(&existing); err != nil {
+		fmt.Fprintln(deps.stderr, "error: unable to check existing users")
+		return 1
+	}
+	if existing > 0 {
+		fmt.Fprintln(deps.stderr, "error:", errAdminEmailExists)
+		return 1
+	}
+
+	password, err := deps.readPassword(deps.stderr)
+	if err != nil {
+		fmt.Fprintln(deps.stderr, "error:", err)
+		return 1
+	}
+	if err := validateNewPassword(password); err != nil {
+		password = ""
+		fmt.Fprintln(deps.stderr, "error:", err)
+		return 1
+	}
+
+	hash, err := auth.HashPassword(password)
+	password = ""
+	if err != nil {
+		fmt.Fprintln(deps.stderr, "error: failed to hash password")
+		return 1
+	}
+
+	userID, err := createTenantAdminTx(ctx, sqlDB, dial, tenantID, normEmail, hash, deps.now())
+	if err != nil {
+		fmt.Fprintln(deps.stderr, "error: tenant admin creation failed; no changes were made")
+		return 1
+	}
+
+	fmt.Fprintf(deps.stdout, "OK: created user id=%d email=%s tenant_id=%d role=%s\n", userID, normEmail, tenantID, auth.RoleTenantAdmin)
+	return 0
+}
+
+func createTenantAdminTx(ctx context.Context, sqlDB *sql.DB, dial *dbdialect.Info, tenantID int64, email, hash string, now time.Time) (userID int64, err error) {
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+
+	// Re-verify inside the transaction to close the TOCTOU window between
+	// the pre-prompt reads and the write.
+	if err := lookupActiveTenant(ctx, tx, dial, tenantID); err != nil {
+		return 0, err
+	}
+	var existing int64
+	if qerr := tx.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM users WHERE LOWER(email) = "+dial.Placeholder(1),
+		email,
+	).Scan(&existing); qerr != nil {
+		return 0, qerr
+	}
+	if existing > 0 {
+		return 0, errAdminEmailExists
+	}
+
+	var newID int64
+	if dial.IsPostgres() {
+		if qerr := tx.QueryRowContext(ctx,
+			"INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified, mfa_enabled, mfa_secret, token_version) VALUES ("+
+				dial.Placeholders(11)+") RETURNING id",
+			now, now, email, hash, string(auth.RoleTenantAdmin), tenantID, true, true, false, "", 0,
+		).Scan(&newID); qerr != nil {
+			return 0, qerr
+		}
+	} else {
+		res, uerr := tx.ExecContext(ctx,
+			"INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified, mfa_enabled, mfa_secret, token_version) VALUES ("+
+				dial.Placeholders(11)+")",
+			now, now, email, hash, string(auth.RoleTenantAdmin), tenantID, true, true, false, "", 0,
+		)
+		if uerr != nil {
+			return 0, uerr
+		}
+		affected, raErr := res.RowsAffected()
+		if raErr != nil {
+			return 0, raErr
+		}
+		if affected != 1 {
+			return 0, errAdminRecoveryRowsAffected
+		}
+		newID, uerr = res.LastInsertId()
+		if uerr != nil {
+			return 0, uerr
+		}
+	}
+
+	if err := insertAuditRow(ctx, tx, dial, "admin.tenant_admin_create", email, now); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return newID, nil
+}
+
 // adminCommand is the `orvix admin <subcommand>` entrypoint, dispatched from
 // main() before any server bootstrap happens (matching the migrate/
 // restore-run pattern).
@@ -590,6 +766,23 @@ func runAdminCommand(args []string, deps adminCLIDeps) int {
 			return 2
 		}
 		return runAdminRecover(*email, deps)
+	case "create-tenant-admin":
+		fs := flag.NewFlagSet("admin create-tenant-admin", flag.ContinueOnError)
+		fs.SetOutput(deps.stderr)
+		email := fs.String("email", "", "new tenant admin's email (required)")
+		tenantID := fs.Int64("tenant-id", 0, "existing, active tenant's numeric id (required, positive)")
+		if err := fs.Parse(rest); err != nil {
+			return 2
+		}
+		if strings.TrimSpace(*email) == "" {
+			fmt.Fprintln(deps.stderr, "error: --email is required")
+			return 2
+		}
+		if *tenantID <= 0 {
+			fmt.Fprintln(deps.stderr, "error:", errAdminInvalidTenantID)
+			return 2
+		}
+		return runAdminCreateTenantAdmin(*tenantID, *email, deps)
 	case "-h", "--help", "help":
 		fmt.Fprintln(deps.stdout, adminUsage())
 		return 0
@@ -612,12 +805,19 @@ Usage:
       already-canonical/legacy-superadmin account) to platform_super_admin
       with tenant_id=NULL, rotate its password, and clear MFA.
 
-Both commands:
+  orvix admin create-tenant-admin --tenant-id <id> --email <email>
+      Provision a brand-new tenant_admin for an existing, active tenant.
+      Fails closed if the email already exists — never updates or
+      promotes an existing user. Creates no session.
+
+All three commands:
   - must be run as root;
   - prompt for the new password twice on an interactive hidden TTY only
     (never via a flag, environment variable, or config file);
-  - revoke every existing session for the target user;
   - write exactly one coremail_audit row on success.
+
+reset-password and recover additionally revoke every existing session
+for the target user.
 
 ` + strconv.Itoa(adminPasswordMinBytes) + `-` + strconv.Itoa(adminPasswordMaxBytes) + ` byte password length is enforced.`
 }
