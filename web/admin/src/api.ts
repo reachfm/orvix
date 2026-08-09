@@ -127,7 +127,12 @@ interface RequestOptions extends RequestInit {
   _csrfRetried?: boolean;
 }
 
-async function request<T>(path: string, options?: RequestOptions): Promise<T> {
+// Exported so feature modules under src/features/**/api.ts can perform
+// HTTP transport through this same CSRF/auth-aware client instead of
+// calling fetch() directly. A full relocation of this client into
+// shared/api/ is tracked as follow-up scope, not done in this change
+// to avoid a risky blind rewrite of every existing api.ts consumer.
+export async function request<T>(path: string, options?: RequestOptions): Promise<T> {
   const method = options?.method || "GET";
   const isMutation = isMutationMethod(method);
 
@@ -341,23 +346,24 @@ export const api = {
     return request<any[]>(`/domains${qs ? "?" + qs : ""}`);
   },
 
-  // Platform organizations
-  listPlatformOrganizations: (search?: string, limit?: number, offset?: number) => {
-    const params = new URLSearchParams();
-    if (search) params.set("search", search);
-    if (limit !== undefined) params.set("limit", String(limit));
-    if (offset !== undefined) params.set("offset", String(offset));
-    const qs = params.toString();
-    return request<any>(`/platform/organizations${qs ? "?" + qs : ""}`);
-  },
-  createPlatformOrganization: (data: { name: string; slug: string; domain: string; plan?: string }) =>
-    request<any>("/platform/organizations", { method: "POST", body: JSON.stringify(data) }),
-  setPlatformOrganizationActive: (id: number, active: boolean, reason?: string) =>
-    request<any>(`/platform/organizations/${id}/active`, { method: "POST", body: JSON.stringify({ active, reason: reason || "" }) }),
-  getPlatformOrganization: (id: number) => request<any>(`/platform/organizations/${id}`),
-  getPlatformOrganizationDetail: (id: number) => request<any>(`/platform/organizations/${id}/detail`),
-  updatePlatformOrganization: (id: number, data: Record<string, unknown>) =>
-    request<any>(`/platform/organizations/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+  // Platform organizations: moved to src/features/platform/organizations/
+  // (contract.ts/api.ts/queries.ts/mutations.ts) as the SOLID
+  // feature-directory pattern. createPlatformOrganization was removed
+  // outright — it called POST /platform/organizations, which is not a
+  // registered route (internal/api/router.go registers only GET on that
+  // path); it was also unused by any component. Organizations are
+  // created via tenant signup, not a platform-admin action — a real
+  // platform-initiated "create organization" capability does not exist
+  // in the backend today (MISSING_BACKEND_CAPABILITY, see the
+  // capability matrix). getPlatformOrganization (GET /platform/
+  // organizations/:id) was also unused — it returns an untyped
+  // map[string]interface{} from a different service than the typed
+  // detail endpoint the new feature module uses. updatePlatformOrganization
+  // (PATCH /platform/organizations/:id) is a real, registered route with
+  // no current UI consumer — also MISSING_BACKEND_CAPABILITY-adjacent
+  // (backend-supported, not yet wired to a UI action) rather than
+  // removed, since a future PR may wire an edit form to it; tracked in
+  // the capability matrix, not implemented as a fake control here.
 
   // --- Platform: Mail Operations (Queue) ---
   listPlatformQueue: () => request<any[]>("/queue"),

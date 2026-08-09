@@ -59,7 +59,7 @@ describe("Platform Administration shell (portal=platform)", () => {
     installFetchMock({
       "/api/v1/me": PLATFORM_ME,
       "/platform/dashboard": { tenants: { total: 1, active: 1 }, mailboxes: { total: 1 }, domains: { total: 1 }, queue: { pending: 0, failed: 0 } },
-      "/platform/organizations": [],
+      "/platform/organizations": { organizations: [], total: 0 },
       "/admin/backups/schedule": {},
       "/admin/backups/metrics": {},
       "/admin/backups/health": { status: "ok" },

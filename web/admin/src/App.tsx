@@ -8,7 +8,7 @@ import Modules from "./components/Modules";
 import AuditLog from "./components/AuditLog";
 import EnterpriseDashboard from "./components/EnterpriseDashboard";
 import MailboxList from "./components/MailboxList";
-import OrganizationList from "./components/OrganizationList";
+import OrganizationsPage from "./features/platform/organizations/page";
 import SystemHealth from "./components/SystemHealth";
 import BillingPage from "./components/BillingPage";
 import ApiKeysPage from "./components/ApiKeysPage";
@@ -282,7 +282,7 @@ export default function App() {
       case "audit": return <AuditLog />;
       case "enterprise": return <EnterpriseDashboard />;
       case "mailboxes": return <MailboxList />;
-      case "organizations": return <OrganizationList />;
+      case "organizations": return <OrganizationsPage />;
       case "health": return <SystemHealth />;
       case "mail-operations": return <MailOperations />;
       case "reliability": return <Reliability />;
