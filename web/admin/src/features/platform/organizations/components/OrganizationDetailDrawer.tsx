@@ -2,6 +2,7 @@ import { useState } from "react";
 import ConfirmDialog from "../../../../components/ConfirmDialog";
 import { useOrganizationDetailQuery } from "../queries";
 import { useSetOrganizationActiveMutation } from "../mutations";
+import OrganizationEditForm from "./OrganizationEditForm";
 
 function formatBytes(n: number): string {
   if (n <= 0) return "0 B";
@@ -12,6 +13,7 @@ function formatBytes(n: number): string {
 
 export default function OrganizationDetailDrawer({ id, onClose }: { id: number; onClose: () => void }) {
   const [confirmToggle, setConfirmToggle] = useState<{ active: boolean } | null>(null);
+  const [editing, setEditing] = useState(false);
   const detailQ = useOrganizationDetailQuery(id);
   const toggleMut = useSetOrganizationActiveMutation(id);
 
@@ -47,15 +49,25 @@ export default function OrganizationDetailDrawer({ id, onClose }: { id: number; 
               <Row label="Created" value={new Date(detailQ.data.created_at).toLocaleDateString()} />
             </dl>
 
-            <button
-              onClick={() => setConfirmToggle({ active: !detailQ.data!.active })}
-              disabled={toggleMut.isPending}
-              className={`px-3 py-2 text-sm rounded disabled:opacity-50 ${detailQ.data.active ? "bg-[var(--danger)] text-black" : "bg-[var(--success)] text-black"}`}
-            >
-              {toggleMut.isPending ? "Working…" : detailQ.data.active ? "Suspend organization" : "Activate organization"}
-            </button>
-            {toggleMut.isSuccess && <p className="text-[var(--success)] text-sm mt-2">Updated.</p>}
-            {toggleMut.error && <p className="text-[var(--danger)] text-sm mt-2">{(toggleMut.error as Error).message}</p>}
+            {editing ? (
+              <OrganizationEditForm org={detailQ.data} id={id} onDone={() => setEditing(false)} />
+            ) : (
+              <button onClick={() => setEditing(true)} className="px-3 py-1.5 text-xs bg-[var(--bg-elevated)] border border-[var(--border)] text-[var(--text-primary)] rounded mb-3">
+                Edit organization
+              </button>
+            )}
+
+            <div>
+              <button
+                onClick={() => setConfirmToggle({ active: !detailQ.data!.active })}
+                disabled={toggleMut.isPending}
+                className={`px-3 py-2 text-sm rounded disabled:opacity-50 ${detailQ.data.active ? "bg-[var(--danger)] text-black" : "bg-[var(--success)] text-black"}`}
+              >
+                {toggleMut.isPending ? "Working…" : detailQ.data.active ? "Suspend organization" : "Activate organization"}
+              </button>
+              {toggleMut.isSuccess && <p className="text-[var(--success)] text-sm mt-2">Updated.</p>}
+              {toggleMut.error && <p className="text-[var(--danger)] text-sm mt-2">{(toggleMut.error as Error).message}</p>}
+            </div>
           </>
         )}
 

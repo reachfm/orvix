@@ -58,3 +58,44 @@ export interface SetOrganizationActiveRequest {
 export interface SetOrganizationActiveResponse {
   status: string;
 }
+
+// PATCH /platform/organizations/:id (UpdateOrganization,
+// organization_admin.go) — a real, registered, previously-unwired
+// route. Matches organization.UpdateOrganizationRequest's pointer
+// fields exactly: every field is optional, and only fields present in
+// the JSON body are applied (a Go nil pointer means "leave unchanged",
+// not "clear to zero value"). The frontend must therefore only include
+// keys the operator actually edited, never the full form state.
+export interface UpdateOrganizationRequest {
+  name?: string;
+  domain?: string;
+  plan?: string;
+  max_domains?: number;
+  max_mailboxes?: number;
+  logo_url?: string;
+  primary_color?: string;
+}
+
+// The handler returns {"organization": Organization} — the base
+// struct (id/name/slug/domain/plan/max_domains/max_mailboxes/
+// logo_url/primary_color/active/created_at/updated_at), NOT the
+// Detail-augmented shape GetOrganizationDetail returns (no
+// domain_count/mailbox_count/admin_count/quota_used_bytes/
+// status_label) — the caller must invalidate the detail query to see
+// those recomputed, not read them off this response.
+export interface UpdateOrganizationResponse {
+  organization: {
+    id: number;
+    name: string;
+    slug: string;
+    domain: string;
+    plan: string;
+    max_domains: number;
+    max_mailboxes: number;
+    logo_url?: string;
+    primary_color: string;
+    active: boolean;
+    created_at: string;
+    updated_at: string;
+  };
+}

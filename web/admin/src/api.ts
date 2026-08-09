@@ -358,12 +358,10 @@ export const api = {
   // capability matrix). getPlatformOrganization (GET /platform/
   // organizations/:id) was also unused — it returns an untyped
   // map[string]interface{} from a different service than the typed
-  // detail endpoint the new feature module uses. updatePlatformOrganization
-  // (PATCH /platform/organizations/:id) is a real, registered route with
-  // no current UI consumer — also MISSING_BACKEND_CAPABILITY-adjacent
-  // (backend-supported, not yet wired to a UI action) rather than
-  // removed, since a future PR may wire an edit form to it; tracked in
-  // the capability matrix, not implemented as a fake control here.
+  // detail endpoint the new feature module uses. updateOrganization
+  // (PATCH /platform/organizations/:id) is now wired to a real, typed
+  // "Edit organization" form (OrganizationEditForm.tsx) — see that
+  // feature's api.ts/mutations.ts.
 
   // Mail Operations (queue admin) moved to
   // features/platform/mail-operations/api.ts. listPlatformQueue

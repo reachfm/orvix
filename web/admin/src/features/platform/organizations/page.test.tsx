@@ -82,4 +82,35 @@ describe("features/platform/organizations", () => {
 
     await waitFor(() => expect(setActiveSpy).toHaveBeenCalledWith(1, { active: false }));
   });
+
+  it("editing the organization sends only the changed fields via PATCH, never the full form", async () => {
+    vi.spyOn(api, "listOrganizations").mockResolvedValue(SUMMARY);
+    vi.spyOn(api, "getOrganizationDetail").mockResolvedValue(DETAIL);
+    const updateSpy = vi.spyOn(api, "updateOrganization").mockResolvedValue({
+      organization: { id: 1, name: "Acme Corporation", slug: "acme", domain: "acme.example", plan: "enterprise", max_domains: 10, max_mailboxes: 500, primary_color: "#000", active: true, created_at: DETAIL.created_at, updated_at: DETAIL.updated_at },
+    });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Acme Corp")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Acme Corp"));
+    await waitFor(() => expect(screen.getByText("Edit organization")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Edit organization"));
+
+    const nameInput = await screen.findByDisplayValue("Acme Corp");
+    fireEvent.change(nameInput, { target: { value: "Acme Corporation" } });
+    fireEvent.click(screen.getByText("Save changes"));
+
+    await waitFor(() => expect(updateSpy).toHaveBeenCalledWith(1, { name: "Acme Corporation" }));
+  });
+
+  it("the edit form's save button is disabled until a field actually changes", async () => {
+    vi.spyOn(api, "listOrganizations").mockResolvedValue(SUMMARY);
+    vi.spyOn(api, "getOrganizationDetail").mockResolvedValue(DETAIL);
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Acme Corp")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Acme Corp"));
+    await waitFor(() => expect(screen.getByText("Edit organization")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Edit organization"));
+    await screen.findByDisplayValue("Acme Corp");
+    expect(screen.getByText("Save changes")).toBeDisabled();
+  });
 });

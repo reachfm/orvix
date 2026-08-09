@@ -8,6 +8,8 @@ import type {
   OrganizationDetail,
   SetOrganizationActiveRequest,
   SetOrganizationActiveResponse,
+  UpdateOrganizationRequest,
+  UpdateOrganizationResponse,
 } from "./contract";
 
 export function listOrganizations(search?: string, limit?: number, offset?: number): Promise<ListOrganizationsResponse> {
@@ -26,6 +28,13 @@ export function getOrganizationDetail(id: number): Promise<OrganizationDetail> {
 export function setOrganizationActive(id: number, body: SetOrganizationActiveRequest): Promise<SetOrganizationActiveResponse> {
   return request<SetOrganizationActiveResponse>(`/platform/organizations/${id}/active`, {
     method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function updateOrganization(id: number, body: UpdateOrganizationRequest): Promise<UpdateOrganizationResponse> {
+  return request<UpdateOrganizationResponse>(`/platform/organizations/${id}`, {
+    method: "PATCH",
     body: JSON.stringify(body),
   });
 }
