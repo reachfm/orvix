@@ -77,13 +77,12 @@ const server = createServer((req, res) => {
     }
   }
 
-  // Static asset under /admin/assets/
+  // Any static file under /admin/ — assets (/admin/assets/xxx) and
+  // top-level public/ files alike (e.g. /admin/theme-init.js) — maps
+  // directly to dist/xxx, mirroring the real Go production server's
+  // serveSPA (prefix "/admin" trimmed, joined with the SPA's dist dir).
   if (pathname.startsWith("/admin/")) {
-    let relative = pathname;
-    // Rewrite /admin/assets/xxx to dist/assets/xxx
-    if (pathname.startsWith("/admin/assets/")) {
-      relative = "/assets/" + pathname.slice("/admin/assets/".length);
-    }
+    const relative = pathname.slice("/admin/".length - 1);
     const safe = relative.replace(/\\/g, "/").replace(/^\/+/, "");
     const filePath = join(DIST, safe);
     if (!isPathSafe(filePath)) {
