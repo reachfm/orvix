@@ -29,6 +29,33 @@ describe("Security > FirewallPanel", () => {
     renderWith(<FirewallPanel />);
     await waitFor(() => expect(screen.getByText("block-spam")).toBeInTheDocument());
   });
+
+  // POST /firewall/rules now fails closed (410) — no production mail
+  // path consults this table (internal/firewall.Module.Start never
+  // calls LoadRules; CoreMail enforces policy via internal/ruler).
+  // These assertions prove the console never offers a control that
+  // would mislead an operator into believing a rule takes effect.
+  it("offers no Create Rule control and never calls a create mutation", async () => {
+    vi.spyOn(api, "listFirewallRules").mockResolvedValue([{ id: 1, name: "block-spam", condition: "spam_score>5", action: "block", priority: 1, enabled: true }]);
+    vi.spyOn(api, "listFirewallLogs").mockResolvedValue([]);
+    renderWith(<FirewallPanel />);
+    await waitFor(() => expect(screen.getByText("block-spam")).toBeInTheDocument());
+
+    expect(screen.queryByText(/new rule/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/create rule/i)).not.toBeInTheDocument();
+    // The mutation and its API function no longer exist in this
+    // feature's module surface at all — not merely unused.
+    expect(Object.keys(api)).not.toContain("createFirewallRule");
+  });
+
+  it("clearly labels the displayed rules as legacy and not enforced", async () => {
+    vi.spyOn(api, "listFirewallRules").mockResolvedValue([{ id: 1, name: "block-spam", condition: "spam_score>5", action: "block", priority: 1, enabled: true }]);
+    vi.spyOn(api, "listFirewallLogs").mockResolvedValue([]);
+    renderWith(<FirewallPanel />);
+    await waitFor(() => expect(screen.getByText(/legacy rule records — not enforced by the current coremail runtime/i)).toBeInTheDocument());
+    expect(screen.queryByText(/takes effect immediately/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/active rules/i)).not.toBeInTheDocument();
+  });
 });
 
 describe("Security > SelfHealPanel", () => {

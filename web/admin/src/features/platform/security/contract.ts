@@ -122,20 +122,6 @@ export interface FirewallRule {
   enabled: boolean;
 }
 
-// POST /firewall/rules (CreateFirewallRule) binds directly into
-// models.FirewallRule — there is no separate IP/CIDR/port/protocol/
-// direction schema; "condition" is a single free-text field. The
-// three action values below are the ones FirewallPanel.tsx's existing
-// row-coloring logic already recognizes (block/throttle/anything
-// else renders as "allow"-styled).
-export interface CreateFirewallRuleRequest {
-  name: string;
-  condition: string;
-  action: "block" | "throttle" | "allow";
-  priority: number;
-  enabled: boolean;
-}
-
 export interface FirewallLog {
   id: number;
   ip: string;

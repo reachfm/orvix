@@ -3,7 +3,7 @@ import type {
   AuditEntry, ListCertificatesResponse, AcmeStatus, ExpiryWarning, AntivirusStatus,
   FirewallRule, FirewallLog, GuardianLog, HealHistoryEntry, RunHealCheckResponse,
   ListLogRulesResponse, CreateLogRuleRequest, LogRule,
-  UploadCertificateRequest, UploadCertificateResponse, CreateFirewallRuleRequest,
+  UploadCertificateRequest, UploadCertificateResponse,
 } from "./contract";
 
 export const listAuditLogs = () => request<AuditEntry[]>("/audit/logs");
@@ -21,10 +21,13 @@ export const uploadSslCertificate = (body: UploadCertificateRequest) =>
 
 export const getAntivirusStatus = () => request<AntivirusStatus>("/admin/security/antivirus");
 
+// POST /firewall/rules is intentionally not called by this client: the
+// legacy internal/firewall engine it once fed is not wired into any
+// production mail path (CoreMail enforces policy via internal/ruler
+// instead), and the handler now fails closed with 410
+// FIREWALL_RULE_ENGINE_NOT_OPERATIONAL. See FirewallPanel.tsx.
 export const listFirewallRules = () => request<FirewallRule[]>("/firewall/rules");
 export const listFirewallLogs = () => request<FirewallLog[]>("/firewall/logs");
-export const createFirewallRule = (body: CreateFirewallRuleRequest) =>
-  request<FirewallRule>("/firewall/rules", { method: "POST", body: JSON.stringify(body) });
 
 export const listGuardianLogs = () => request<GuardianLog[]>("/guardian/logs");
 

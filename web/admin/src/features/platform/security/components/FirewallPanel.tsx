@@ -1,10 +1,7 @@
-import { useState } from "react";
 import { useFirewallRulesQuery, useFirewallLogsQuery } from "../queries";
 import { Loading, ErrorBox, Empty } from "./StateViews";
-import FirewallRuleCreateForm from "./FirewallRuleCreateForm";
 
 export default function FirewallPanel() {
-  const [creating, setCreating] = useState(false);
   const rulesQuery = useFirewallRulesQuery();
   const logsQuery = useFirewallLogsQuery();
   const rules = rulesQuery.data ?? [];
@@ -18,16 +15,20 @@ export default function FirewallPanel() {
           <p className="text-2xl font-bold text-[var(--text-primary)]">{logsQuery.isLoading ? "…" : logs.length}</p>
         </div>
         <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-4">
-          <p className="text-xs text-[var(--text-secondary)] mb-1">Active Rules</p>
-          <p className="text-2xl font-bold text-[var(--success)]">{rulesQuery.isLoading ? "…" : rules.filter((r) => r.enabled).length}</p>
+          <p className="text-xs text-[var(--text-secondary)] mb-1">Legacy Rule Records</p>
+          <p className="text-2xl font-bold text-[var(--text-primary)]">{rulesQuery.isLoading ? "…" : rules.length}</p>
         </div>
       </div>
 
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-semibold text-[var(--text-primary)]">Rules</h3>
-        <button onClick={() => setCreating((v) => !v)} className="px-3 py-1.5 text-xs bg-[var(--bg-subtle)] text-[var(--text-primary)] rounded">{creating ? "Cancel" : "New rule"}</button>
+      {/* No production mail path consults this table: internal/firewall.Module.Start
+          never calls LoadRules, and CoreMail enforces policy via internal/ruler
+          instead. POST /firewall/rules fails closed (410) — there is no
+          create/edit/delete control here because none of it would do anything. */}
+      <div className="mb-3 px-3 py-2 text-xs bg-[var(--warning)]/10 text-[var(--warning)] rounded-lg border border-[var(--warning)]/30">
+        Legacy rule records — not enforced by the current CoreMail runtime.
       </div>
-      {creating && <FirewallRuleCreateForm onDone={() => setCreating(false)} />}
+
+      <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">Rules</h3>
       {rulesQuery.isLoading ? <Loading /> : rulesQuery.error ? <ErrorBox error={rulesQuery.error} /> : rules.length === 0 ? (
         <div className="mb-6"><Empty text="No firewall rules configured." /></div>
       ) : (

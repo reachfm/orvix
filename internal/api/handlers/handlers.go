@@ -3071,17 +3071,25 @@ func (h *Handler) ListFirewallRules(c fiber.Ctx) error {
 	return c.JSON(rules)
 }
 
-// CreateFirewallRule creates a new firewall rule.
+// CreateFirewallRule serves POST /api/v1/firewall/rules.
+//
+// The legacy internal/firewall rule engine this table once fed is not
+// wired into any production mail path: Module.Start never calls
+// LoadRules, and no SMTP/CoreMail code consumes RuleEngine — CoreMail
+// enforces policy through internal/ruler instead. Accepting writes
+// here would silently persist rules an operator reasonably believes
+// are protecting live mail traffic while nothing enforces them. This
+// endpoint fails closed rather than perform that mass-assignment
+// write (raw JSON bound directly into models.FirewallRule, no action
+// allowlist, no condition/priority validation) against a table that
+// isn't consulted at delivery time. Wiring a real, validated firewall
+// policy engine into the mail path is out of scope for this PR and
+// belongs in its own bounded backend change.
 func (h *Handler) CreateFirewallRule(c fiber.Ctx) error {
-	var rule models.FirewallRule
-	if err := c.Bind().JSON(&rule); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid rule"})
-	}
-	if err := h.db.Create(&rule).Error; err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create rule"})
-	}
-	h.writeAuditLog(c, "firewall.rule.create", fmt.Sprintf("rule:%s", rule.Name))
-	return c.Status(fiber.StatusCreated).JSON(rule)
+	return c.Status(fiber.StatusGone).JSON(fiber.Map{
+		"error": "firewall rule engine is not operational in the current CoreMail runtime",
+		"code":  "FIREWALL_RULE_ENGINE_NOT_OPERATIONAL",
+	})
 }
 
 // ListFirewallLogs returns firewall logs.
