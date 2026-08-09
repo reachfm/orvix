@@ -32,7 +32,7 @@ import SupportPage from "./components/SupportPage";
 import PreferencesPage from "./components/PreferencesPage";
 import OverviewPage from "./features/platform/overview/page";
 import MailOperationsPage from "./features/platform/mail-operations/page";
-import Reliability from "./components/Reliability";
+import ReliabilityPage from "./features/platform/reliability/page";
 import PlatformSecurity from "./components/PlatformSecurity";
 import PlatformConfiguration from "./components/PlatformConfiguration";
 import { initCSRF, api } from "./api";
@@ -285,7 +285,7 @@ export default function App() {
       case "organizations": return <OrganizationsPage />;
       case "health": return <SystemHealth />;
       case "mail-operations": return <MailOperationsPage />;
-      case "reliability": return <Reliability />;
+      case "reliability": return <ReliabilityPage />;
       case "platform-security": return <PlatformSecurity />;
       case "platform-configuration": return <PlatformConfiguration />;
       case "billing": return <BillingPage />;

@@ -371,45 +371,14 @@ export const api = {
   // admin-console caller and is a different resource than the
   // /admin/queue/* platform-admin endpoints the new feature uses.
 
-  // --- Platform: Reliability (Backups / Restore / Updates / Monitoring / Storage / Cluster) ---
-  listBackups: () => request<any>("/admin/backups"),
-  getBackup: (id: string) => request<any>(`/admin/backups/${id}`),
-  downloadBackupUrl: (id: string) => `/api/v1/admin/backups/${id}/download`,
-  createBackup: (data?: Record<string, unknown>) =>
-    request<any>("/admin/backups", { method: "POST", body: JSON.stringify(data || {}) }),
-  runBackupNow: () => request<any>("/admin/backups/now", { method: "POST" }),
-  getBackupSchedule: () => request<any>("/admin/backups/schedule"),
-  setBackupSchedule: (data: Record<string, unknown>) =>
-    request<any>("/admin/backups/schedule", { method: "POST", body: JSON.stringify(data) }),
-  getBackupMetrics: () => request<any>("/admin/backups/metrics"),
-  getBackupHealth: () => request<any>("/admin/backups/health"),
-  runBackupRetention: () => request<any>("/admin/backups/retention", { method: "POST" }),
-  validateBackup: (id: string) => request<any>(`/admin/backups/${id}/validate`, { method: "POST" }),
-  restoreBackup: (id: string) =>
-    request<any>(`/admin/backups/${id}/restore`, { method: "POST", body: JSON.stringify({ confirm: "restore-orvix-backup" }) }),
-  deleteBackup: (id: string) => request<any>(`/admin/backups/${id}`, { method: "DELETE" }),
-  getRestoreJobStatus: (jobId: string) => request<any>(`/admin/backups/restore-jobs/${jobId}`),
-
-  checkUpdates: () => request<any>("/updates/check"),
-  getChangelog: () => request<any>("/updates/changelog"),
-  getUpdateStatus: () => request<any>("/update/status"),
-  getUpdateHistory: () => request<any>("/update/history"),
-  getUpdatePreflight: () => request<any>("/update/preflight"),
-  postUpdateCheck: () => request<any>("/update/check", { method: "POST" }),
-  runUpdate: () => request<any>("/update/run", { method: "POST" }),
-  applyModuleUpdate: (module: string) => request<any>(`/updates/apply/${module}`, { method: "POST" }),
-
-  getMonitoringHealth: () => request<any>("/monitoring/health"),
-  getMonitoringAlerts: () => request<any>("/monitoring/alerts"),
-  resolveMonitoringAlert: (id: string) => request<any>(`/monitoring/alerts/${id}/resolve`, { method: "POST" }),
-  getMonitoringCapacity: () => request<any>("/monitoring/capacity"),
-  getMonitoringSnapshot: () => request<any>("/monitoring/snapshot"),
-  getMonitoringProviders: () => request<any>("/monitoring/alert-providers"),
-  listAlertDeliveries: () => request<any[]>("/monitoring/alert-deliveries"),
-
-  listStorageVolumes: () => request<any[]>("/admin/storage/volumes"),
-  getClusterStatus: () => request<any>("/admin/cluster/status"),
-  getAdminRuntime: () => request<any>("/admin/runtime"),
+  // Reliability (Backups/Restore/Updates/Monitoring/Storage/Cluster)
+  // moved to features/platform/reliability/api.ts. getBackup (single),
+  // getChangelog, applyModuleUpdate, getMonitoringHealth, and
+  // getAdminRuntime were dead code (no UI caller) — getChangelog and
+  // applyModuleUpdate correspond to real, registered routes
+  // (/updates/changelog, /updates/apply/:module) with no frontend
+  // action; tracked as a UI gap in the capability matrix rather than
+  // wired to a fabricated control.
 
   // --- Platform: Security (Audit / SSL / Antivirus / Guardian / Self-Heal / Log Rules) ---
   listPlatformAuditLogs: () => request<any[]>("/audit/logs"),
