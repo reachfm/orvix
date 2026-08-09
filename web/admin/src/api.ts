@@ -365,22 +365,11 @@ export const api = {
   // removed, since a future PR may wire an edit form to it; tracked in
   // the capability matrix, not implemented as a fake control here.
 
-  // --- Platform: Mail Operations (Queue) ---
-  listPlatformQueue: () => request<any[]>("/queue"),
-  getQueueSummary: () => request<any>("/admin/queue/summary"),
-  listQueueMessages: (params?: { status?: string; q?: string; limit?: number; offset?: number }) => {
-    const p = new URLSearchParams();
-    if (params?.status) p.set("status", params.status);
-    if (params?.q) p.set("q", params.q);
-    if (params?.limit !== undefined) p.set("limit", String(params.limit));
-    if (params?.offset !== undefined) p.set("offset", String(params.offset));
-    const qs = p.toString();
-    return request<any>(`/admin/queue/messages${qs ? "?" + qs : ""}`);
-  },
-  getQueueMessage: (id: string) => request<any>(`/admin/queue/messages/${id}`),
-  retryQueueMessage: (id: string) => request<any>(`/admin/queue/messages/${id}/retry`, { method: "POST" }),
-  bounceQueueMessage: (id: string) => request<any>(`/admin/queue/messages/${id}/bounce`, { method: "POST" }),
-  cancelQueueMessage: (id: string) => request<any>(`/admin/queue/messages/${id}/cancel`, { method: "POST" }),
+  // Mail Operations (queue admin) moved to
+  // features/platform/mail-operations/api.ts. listPlatformQueue
+  // (GET /queue, the legacy webmail-facing ListQueue handler) had no
+  // admin-console caller and is a different resource than the
+  // /admin/queue/* platform-admin endpoints the new feature uses.
 
   // --- Platform: Reliability (Backups / Restore / Updates / Monitoring / Storage / Cluster) ---
   listBackups: () => request<any>("/admin/backups"),

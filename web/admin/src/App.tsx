@@ -31,7 +31,7 @@ import SecurityPage from "./components/SecurityPage";
 import SupportPage from "./components/SupportPage";
 import PreferencesPage from "./components/PreferencesPage";
 import OverviewPage from "./features/platform/overview/page";
-import MailOperations from "./components/MailOperations";
+import MailOperationsPage from "./features/platform/mail-operations/page";
 import Reliability from "./components/Reliability";
 import PlatformSecurity from "./components/PlatformSecurity";
 import PlatformConfiguration from "./components/PlatformConfiguration";
@@ -284,7 +284,7 @@ export default function App() {
       case "mailboxes": return <MailboxList />;
       case "organizations": return <OrganizationsPage />;
       case "health": return <SystemHealth />;
-      case "mail-operations": return <MailOperations />;
+      case "mail-operations": return <MailOperationsPage />;
       case "reliability": return <Reliability />;
       case "platform-security": return <PlatformSecurity />;
       case "platform-configuration": return <PlatformConfiguration />;
