@@ -3,9 +3,11 @@ import ConfirmDialog from "../../../../components/ConfirmDialog";
 import { useUpdateStatusQuery, useUpdateCheckQuery, useUpdateHistoryQuery, useUpdatePreflightQuery } from "../queries";
 import { useCheckForUpdateMutation, useRunUpdateMutation } from "../mutations";
 import { Loading, ErrorBox, Empty } from "./StateViews";
+import ChangelogPanel from "./ChangelogPanel";
 
 export default function UpdatesPanel() {
   const [confirmRun, setConfirmRun] = useState(false);
+  const [showChangelog, setShowChangelog] = useState(false);
   const statusQ = useUpdateStatusQuery();
   const checkQ = useUpdateCheckQuery(statusQ.isSuccess || statusQ.isError);
   const historyQ = useUpdateHistoryQuery(checkQ.isSuccess || checkQ.isError);
@@ -23,10 +25,17 @@ export default function UpdatesPanel() {
           {checkQ.data?.update_available && <span className="ml-3 text-[var(--warning)]">Update available: {checkQ.data.latest_version}</span>}
         </div>
         <div className="flex gap-2">
+          <button onClick={() => setShowChangelog((v) => !v)} className="px-3 py-1.5 text-xs bg-[var(--bg-subtle)] text-[var(--text-primary)] rounded">{showChangelog ? "Hide changelog" : "Changelog"}</button>
           <button disabled={checkNowMut.isPending} onClick={() => checkNowMut.mutate()} className="px-3 py-1.5 text-xs bg-[var(--bg-subtle)] text-[var(--text-primary)] rounded disabled:opacity-50">Check now</button>
           <button onClick={() => setConfirmRun(true)} className="px-3 py-1.5 text-xs bg-[var(--accent)] text-white rounded">Run update</button>
         </div>
       </div>
+      {showChangelog && (
+        <div className="mb-4">
+          <h4 className="text-xs font-semibold text-[var(--text-secondary)] mb-2 uppercase tracking-wide">Changelog</h4>
+          <ChangelogPanel />
+        </div>
+      )}
       {preflightQ.data && (
         <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-4 mb-4 text-sm">
           <p className="text-[var(--text-secondary)] mb-2">Preflight: <span className={preflightQ.data.pass ? "text-[var(--success)]" : "text-[var(--danger)]"}>{preflightQ.data.pass ? "ready" : "not ready"}</span></p>

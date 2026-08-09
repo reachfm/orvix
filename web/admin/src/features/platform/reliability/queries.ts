@@ -44,6 +44,9 @@ export function useUpdateHistoryQuery(enabled: boolean) {
 export function useUpdatePreflightQuery(enabled: boolean) {
   return useQuery({ queryKey: ["update-preflight"], queryFn: api.getUpdatePreflight, enabled, retry: false });
 }
+export function useChangelogQuery(enabled: boolean) {
+  return useQuery({ queryKey: ["changelog"], queryFn: () => api.getChangelog(), enabled, retry: false });
+}
 
 export function useMonitoringAlertsQuery(enabled: boolean) {
   return useQuery({ queryKey: ["mon-alerts"], queryFn: api.getMonitoringAlerts, enabled, retry: false });

@@ -111,6 +111,20 @@ export interface UpdateHistoryRow {
   notes?: string;
 }
 
+// GET /updates/changelog (GetChangelog, handlers_advanced.go). This
+// legacy struct (internal/updater/changelog.go's ChangelogEntry) has
+// no `json` tags, so Go's default JSON marshaling capitalizes every
+// field — genuinely different from every other camelCase/snake_case
+// contract in this codebase, verified against the struct source, not
+// assumed for consistency with the rest of the API.
+export interface ChangelogEntry {
+  ID: number;
+  ModuleID: string;
+  Version: string;
+  Changes: string;
+  ReleasedAt: string;
+}
+
 export interface PreflightCheck {
   name: string;
   status: "pass" | "warning" | "fail";

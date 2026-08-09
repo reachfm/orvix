@@ -3,7 +3,7 @@ import { request } from "../../../api";
 import type {
   Backup, BackupSchedule, BackupMetrics, BackupHealth,
   RestoreJobSubmitResponse, RestoreJobResult,
-  UpdateStatus, UpdateHistoryRow, PreflightResult, UpdateCheckResult,
+  UpdateStatus, UpdateHistoryRow, PreflightResult, UpdateCheckResult, ChangelogEntry,
   Alert, MonitoringSnapshot, Capacity, MonitoringProvidersResponse, ListAlertDeliveriesResponse,
   ListStorageVolumesResponse, ClusterStatus,
 } from "./contract";
@@ -34,6 +34,12 @@ export const deleteBackup = (id: string) =>
 export const restoreBackup = (id: string) =>
   request<RestoreJobSubmitResponse>(`/admin/backups/${id}/restore`, { method: "POST", body: JSON.stringify({ confirm: "restore-orvix-backup" }) });
 export const getRestoreJobStatus = (jobId: string) => request<RestoreJobResult>(`/admin/backups/restore-jobs/${jobId}`);
+
+// GetChangelog defaults the "module" query param to "orvix-core"
+// server-side when omitted — matched explicitly here rather than
+// relying on that default, so the frontend contract is self-evident.
+export const getChangelog = (module: string = "orvix-core") =>
+  request<ChangelogEntry[]>(`/updates/changelog?module=${encodeURIComponent(module)}`);
 
 // Updates
 // GET /update/check (GetUpdateCheck) and POST /update/check
