@@ -20,12 +20,14 @@ export interface AuditEntry {
 
 // --- SSL / ACME ---
 
+// key_path is intentionally not part of this contract — the backend
+// no longer returns it (private-key file paths are not exposed to
+// the client, only the fingerprint + metadata).
 export interface CertInfo {
   id: string;
   name: string;
   source: "runtime" | "uploaded";
   path: string;
-  key_path?: string;
   common_name: string;
   sans?: string[];
   issuer: string;
@@ -64,7 +66,6 @@ export interface UploadCertificateResponse {
   status: string;
   fingerprint_sha256: string;
   path: string;
-  key_path?: string;
 }
 
 export interface AcmeStatus {
