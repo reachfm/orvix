@@ -26,6 +26,12 @@ type SupportAccessContext struct {
 // grant and fails closed if it is missing, expired, revoked, or
 // cross-tenant.
 func SupportAccess(svc *supportaccess.Service) fiber.Handler {
+	return SupportAccessWithScope(svc, "")
+}
+
+// SupportAccessWithScope enforces a grant and, when scope is non-empty,
+// requires that exact effective scope before entering the real handler.
+func SupportAccessWithScope(svc *supportaccess.Service, scope string) fiber.Handler {
 	return func(c fiber.Ctx) error {
 		actor, ok := auth.ActorFromCtx(c)
 		if !ok || actor.UserID == 0 {
@@ -38,7 +44,7 @@ func SupportAccess(svc *supportaccess.Service) fiber.Handler {
 			return err
 		}
 		grant, err := svc.GrantForOperator(c.Context(), actor.UserID, tenantID)
-		if err != nil {
+		if err != nil || grant == nil {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
 				"error": "no active support access grant for this tenant",
 			})
@@ -59,6 +65,16 @@ func SupportAccess(svc *supportaccess.Service) fiber.Handler {
 				})
 			}
 		}
+		if scope != "" && !hasScope(grant, scope) {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"error": "support scope " + scope + " is required",
+			})
+		}
+		originalTenant := c.Locals("tenant_id")
+		defer c.Locals("tenant_id", originalTenant)
+		// The tenant ID is request-local only. The authenticated support
+		// actor's permanent role and membership are never changed.
+		c.Locals("tenant_id", tenantID)
 		c.Locals("support_access", &SupportAccessContext{
 			Grant:      grant,
 			OperatorID: actor.UserID,
@@ -72,6 +88,15 @@ func SupportAccess(svc *supportaccess.Service) fiber.Handler {
 		}
 		return c.Next()
 	}
+}
+
+func hasScope(grant *supportaccess.AccessGrant, required string) bool {
+	for _, scope := range grant.Scopes() {
+		if scope == required {
+			return true
+		}
+	}
+	return false
 }
 
 // requireSupportTenant parses and validates the target tenant header.

@@ -1069,6 +1069,14 @@ func (r *Router) setupRoutes() {
 		return c.Next()
 	}
 
+	// This route intentionally sits outside enterpriseRead: a platform
+	// support actor has no permanent tenant membership, so enterpriseRead's
+	// requireTenantContext would reject it before SupportAccess can establish
+	// the grant-scoped, request-local tenant context. The support gate admits
+	// the normal tenant role family unchanged and requires an active
+	// read_only grant for platform actors.
+	protected.Get("/enterprise/organizations/current", r.h.SupportAccessMiddlewareForScope("read_only"), r.csrf.Middleware(), r.h.GetCurrentOrganization)
+
 	enterpriseRead := protected.Group("/enterprise",
 		requireTenantContext,
 		r.csrf.Middleware(),
@@ -1146,7 +1154,6 @@ func (r *Router) setupRoutes() {
 
 	// ── Organizations ──
 	enterpriseRead.Get("/organizations/:id", r.h.GetOrganization)
-	enterpriseRead.Get("/organizations/current", r.h.GetCurrentOrganization)
 	// Plan + live usage summary consumed by the domain provisioning wizard.
 	// Read-only and scoped to the authenticated tenant — it uses the same
 	// enterpriseRead group as every other tenant-scoped read, so RBAC is
@@ -1253,9 +1260,9 @@ func (r *Router) setupRoutes() {
 		requireTenantContext,
 		r.csrf.Middleware(),
 	}
-	protected.Get("/domains", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListDomains)
-	protected.Get("/users", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListUsers)
-	protected.Get("/mailboxes", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListMailboxes)
+	protected.Get("/domains", r.h.SupportAccessMiddlewareForScope("domain_view"), tenantCompatMW[2], r.h.ListDomains)
+	protected.Get("/users", r.h.SupportAccessMiddlewareForScope("read_only"), tenantCompatMW[2], r.h.ListUsers)
+	protected.Get("/mailboxes", r.h.SupportAccessMiddlewareForScope("mailbox_view"), tenantCompatMW[2], r.h.ListMailboxes)
 	// CSV exports (admin-only, GET — no CSRF required). Registered before
 	// the parameterized :id / :name routes so the literal /export segment
 	// wins over /mailboxes/:id and /domains/:name.
@@ -1584,8 +1591,6 @@ func (r *Router) setupRoutes() {
 	// These routes demonstrate the support-access middleware enforcing
 	// tenant binding, scope, expiry, and revocation for a support
 	// operator accessing tenant-scoped resources.
-	protected.Get("/platform/support/tenant/domains", platformMW[0], platformMW[1], r.h.SupportAccessMiddleware(), r.h.SupportAccessExample)
-
 	// ── Runtime capability endpoint (Milestone 16, platform-only) ─
 	protected.Get("/platform/capabilities", platformMW[0], platformMW[1], r.h.GetCapabilities)
 

@@ -219,7 +219,6 @@ and `isCoreMailDisabled` (frontend).
 | `GET /platform/config` | platformMW | `ListConfigurationSettings` | list authoritative configuration settings with source/effective/pending state | Platform | `internal/configtruth/` | MISSING_UI |
 | `GET /platform/config/:key` | platformMW | `GetConfigurationSetting` | get authoritative view of one setting | Platform | `internal/configtruth/` | MISSING_UI |
 | `PATCH /platform/config/:key` | platformMW | `MutateConfigurationSetting` | validate and apply a configuration mutation with optimistic concurrency | Platform | `internal/configtruth/` | MISSING_UI |
-| `GET /platform/support/tenant/domains` | platformMW | `SupportAccessExample` | example endpoint demonstrating support-access enforcement | Platform | `internal/api/middleware/` | MISSING_UI |
 
 ## Theme system (cross-cutting, not a route)
 
@@ -248,7 +247,7 @@ above (not carried over from an earlier draft) and is enforced equal
 to the router's actual route set by
 `internal/api/capability_matrix_test.go`, which parses
 `platformMW[0], platformMW[1]` registrations straight out of
-`router.go` — currently 153 — and parses every `` `METHOD /path` ``
+`router.go` — currently 152 — and parses every `` `METHOD /path` ``
 occurrence and its row's disposition straight out of this document.
 
 | Disposition | Routes |
@@ -258,9 +257,9 @@ occurrence and its row's disposition straight out of this document.
 | MACHINE_ONLY | 3 |
 | DEPRECATED | 12 |
 | DUPLICATE_SUPERSEDED_ROUTE | 18 |
-| MISSING_UI | 56 |
+| MISSING_UI | 55 |
 | MISSING_BACKEND | 0 (the one MISSING_BACKEND case — platform-initiated organization creation — is a non-route documented under Organizations, not counted here) |
-| **Total** | **153** |
+| **Total** | **152** |
 
 Three pre-existing MISSING_UI gaps were documented rather than
 silently omitted: `GET /admin/backups/:id` (single-backup fetch; the

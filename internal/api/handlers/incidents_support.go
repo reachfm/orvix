@@ -8,6 +8,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/audit"
+	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/capability"
 	"github.com/orvix/orvix/internal/incident"
 	"github.com/orvix/orvix/internal/supportaccess"
@@ -219,23 +220,57 @@ func (h *Handler) SupportAccessMiddleware() fiber.Handler {
 	return middleware.SupportAccess(h.supportAccessService())
 }
 
-// SupportAccessExample is a tenant-scoped endpoint protected by the
-// support-access middleware. It demonstrates that a support operator
-// with a valid grant can access tenant resources, while missing,
-// expired, revoked, or cross-tenant grants are rejected.
-func (h *Handler) SupportAccessExample(c fiber.Ctx) error {
-	ctx, ok := middleware.SupportContext(c)
-	if !ok {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "support access context missing"})
+// SupportAccessMiddlewareForScope is used only by real tenant-resource
+// routes. Tenant users remain on the normal tenant middleware; platform
+// support actors must present an active grant for the target tenant.
+func (h *Handler) SupportAccessMiddlewareForScope(scope string) fiber.Handler {
+	support := middleware.SupportAccessWithScope(h.supportAccessService(), scope)
+	return func(c fiber.Ctx) error {
+		role, _ := c.Locals("role").(auth.Role)
+		switch role {
+		case auth.RoleTenantAdmin, auth.RoleTenantOperator, auth.RoleTenantSupport, auth.RoleTenantReadOnly:
+			if _, err := auth.RequireTenantID(c); err != nil {
+				return err
+			}
+			return c.Next()
+		case auth.RolePlatformSuperAdmin, auth.RoleSuperAdmin:
+			err := support(c)
+			if access, ok := middleware.SupportContext(c); ok {
+				result := "success"
+				if err != nil || c.Response().StatusCode() >= fiber.StatusBadRequest {
+					result = "denied"
+				}
+				h.recordSupportAccess(c, access, scope, result)
+			}
+			return err
+		default:
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "insufficient permissions"})
+		}
 	}
-	return c.JSON(fiber.Map{
-		"status":      "ok",
-		"tenant_id":   ctx.TenantID,
-		"operator_id": ctx.OperatorID,
-		"scopes":      ctx.Scopes,
-		"grant_id":    ctx.Grant.ID,
-		"ticket_ref":  ctx.Grant.TicketRef,
-		"expires_at":  ctx.Grant.ExpiresAt,
+}
+
+// recordSupportAccess records each completed grant-scoped operation. The
+// record deliberately captures the actor, target tenant, granted scope and
+// request correlation identifier without writing the operator's free-form
+// support reason into the audit stream.
+func (h *Handler) recordSupportAccess(c fiber.Ctx, access *middleware.SupportAccessContext, scope, result string) {
+	if h.auditStore == nil || access == nil {
+		return
+	}
+	role, _ := c.Locals("role").(auth.Role)
+	target := fmt.Sprintf("tenant:%d grant:%d scope:%s", access.TenantID, access.Grant.ID, scope)
+	if requestID := c.Get("X-Request-ID"); requestID != "" {
+		target += " request:" + requestID
+	}
+	_ = h.auditStore.Record(c.Context(), &audit.Entry{
+		Actor:     fmt.Sprintf("user:%d", access.OperatorID),
+		Role:      string(role),
+		Action:    "support.access.use",
+		Target:    target,
+		Result:    result,
+		IP:        c.IP(),
+		UserAgent: string(c.Request().Header.UserAgent()),
+		TenantID:  access.TenantID,
 	})
 }
 

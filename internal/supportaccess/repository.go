@@ -52,9 +52,21 @@ func (r *Repository) Insert(ctx context.Context, g *AccessGrant) error {
 	if g.EmergencyBreakGlass {
 		glass = 1
 	}
-	res, err := r.db.ExecContext(ctx,
+	query := r.dialect.Rewrite(
 		`INSERT INTO platform_support_access_grants (ticket_ref, reason, target_tenant_id, granted_by_id, permission_scope, status, expires_at, emergency_break_glass, version, created_at, updated_at)
-		VALUES (?,?,?,?,?,?,?,?,1,?,?)`,
+		VALUES (?,?,?,?,?,?,?,?,1,?,?)`)
+	if r.dialect.IsPostgres() {
+		var id uint
+		err := r.db.QueryRowContext(ctx, query+" RETURNING id",
+			g.TicketRef, g.Reason, g.TargetTenantID, g.GrantedByID, g.PermissionScope, g.Status, g.ExpiresAt, glass, g.CreatedAt, g.UpdatedAt).Scan(&id)
+		if err != nil {
+			return err
+		}
+		g.ID = id
+		g.version = 1
+		return nil
+	}
+	res, err := r.db.ExecContext(ctx, query,
 		g.TicketRef, g.Reason, g.TargetTenantID, g.GrantedByID, g.PermissionScope, g.Status, g.ExpiresAt, glass, g.CreatedAt, g.UpdatedAt)
 	if err != nil {
 		return err
@@ -67,9 +79,9 @@ func (r *Repository) Insert(ctx context.Context, g *AccessGrant) error {
 
 func (r *Repository) Update(ctx context.Context, g *AccessGrant) error {
 	g.UpdatedAt = time.Now().UTC()
-	res, err := r.db.ExecContext(ctx,
+	res, err := r.db.ExecContext(ctx, r.dialect.Rewrite(
 		`UPDATE platform_support_access_grants SET status=?, activated_at=?, revoked_at=?, revoke_reason=?, version=version+1, updated_at=? WHERE id=? AND version=?`,
-		g.Status, g.ActivatedAt, g.RevokedAt, g.RevokeReason, g.UpdatedAt, g.ID, g.version)
+	), g.Status, g.ActivatedAt, g.RevokedAt, g.RevokeReason, g.UpdatedAt, g.ID, g.version)
 	if err != nil {
 		return err
 	}
@@ -85,9 +97,9 @@ func (r *Repository) Get(ctx context.Context, id uint) (*AccessGrant, error) {
 	var g AccessGrant
 	var activatedAt, revokedAt sql.NullTime
 	var glass int
-	err := r.db.QueryRowContext(ctx,
+	err := r.db.QueryRowContext(ctx, r.dialect.Rewrite(
 		`SELECT id, ticket_ref, reason, target_tenant_id, granted_by_id, permission_scope, status, activated_at, expires_at, revoked_at, revoke_reason, emergency_break_glass, version, created_at, updated_at
-		FROM platform_support_access_grants WHERE id=?`, id).
+		FROM platform_support_access_grants WHERE id=?`), id).
 		Scan(&g.ID, &g.TicketRef, &g.Reason, &g.TargetTenantID, &g.GrantedByID, &g.PermissionScope, &g.Status, &activatedAt, &g.ExpiresAt, &revokedAt, &g.RevokeReason, &glass, &g.version, &g.CreatedAt, &g.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound
@@ -109,10 +121,10 @@ func (r *Repository) FindActiveForTenant(ctx context.Context, tenantID uint) (*A
 	var g AccessGrant
 	var activatedAt, revokedAt sql.NullTime
 	var glass int
-	err := r.db.QueryRowContext(ctx,
+	err := r.db.QueryRowContext(ctx, r.dialect.Rewrite(
 		`SELECT id, ticket_ref, reason, target_tenant_id, granted_by_id, permission_scope, status, activated_at, expires_at, revoked_at, revoke_reason, emergency_break_glass, version, created_at, updated_at
 		FROM platform_support_access_grants WHERE target_tenant_id=? AND status='active' AND expires_at > ? ORDER BY created_at DESC LIMIT 1`,
-		tenantID, time.Now().UTC()).
+	), tenantID, time.Now().UTC()).
 		Scan(&g.ID, &g.TicketRef, &g.Reason, &g.TargetTenantID, &g.GrantedByID, &g.PermissionScope, &g.Status, &activatedAt, &g.ExpiresAt, &revokedAt, &g.RevokeReason, &glass, &g.version, &g.CreatedAt, &g.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -134,10 +146,10 @@ func (r *Repository) FindGrantByOperator(ctx context.Context, operatorID, tenant
 	var g AccessGrant
 	var activatedAt, revokedAt sql.NullTime
 	var glass int
-	err := r.db.QueryRowContext(ctx,
+	err := r.db.QueryRowContext(ctx, r.dialect.Rewrite(
 		`SELECT id, ticket_ref, reason, target_tenant_id, granted_by_id, permission_scope, status, activated_at, expires_at, revoked_at, revoke_reason, emergency_break_glass, version, created_at, updated_at
 		FROM platform_support_access_grants WHERE granted_by_id=? AND target_tenant_id=? AND status='active' AND expires_at > ? ORDER BY created_at DESC LIMIT 1`,
-		operatorID, tenantID, time.Now().UTC()).
+	), operatorID, tenantID, time.Now().UTC()).
 		Scan(&g.ID, &g.TicketRef, &g.Reason, &g.TargetTenantID, &g.GrantedByID, &g.PermissionScope, &g.Status, &activatedAt, &g.ExpiresAt, &revokedAt, &g.RevokeReason, &glass, &g.version, &g.CreatedAt, &g.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -159,9 +171,9 @@ func (r *Repository) List(ctx context.Context, tenantID uint, limit int) ([]Acce
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
-	rows, err := r.db.QueryContext(ctx,
+	rows, err := r.db.QueryContext(ctx, r.dialect.Rewrite(
 		`SELECT id, ticket_ref, reason, target_tenant_id, granted_by_id, permission_scope, status, activated_at, expires_at, revoked_at, revoke_reason, emergency_break_glass, version, created_at, updated_at
-		FROM platform_support_access_grants WHERE target_tenant_id=? ORDER BY created_at DESC LIMIT ?`, tenantID, limit)
+		FROM platform_support_access_grants WHERE target_tenant_id=? ORDER BY created_at DESC LIMIT ?`), tenantID, limit)
 	if err != nil {
 		return nil, err
 	}
