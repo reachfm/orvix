@@ -1,4 +1,4 @@
-﻿package ssrf
+package ssrf
 
 import (
 	"context"

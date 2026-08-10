@@ -1588,6 +1588,11 @@ func (r *Router) setupRoutes() {
 
 	// ── Runtime capability endpoint (Milestone 16, platform-only) ─
 	protected.Get("/platform/capabilities", platformMW[0], platformMW[1], r.h.GetCapabilities)
+
+	// ── Configuration truth model (Milestone 16, platform-only) ────
+	protected.Get("/platform/config", platformMW[0], platformMW[1], r.h.ListConfigurationSettings)
+	protected.Get("/platform/config/:key", platformMW[0], platformMW[1], r.h.GetConfigurationSetting)
+	protected.Patch("/platform/config/:key", platformMW[0], platformMW[1], r.h.MutateConfigurationSetting)
 	protected.Post("/webhooks/subscriptions", platformMW[0], platformMW[1], r.h.CreateWebhookSubscription)
 	protected.Get("/webhooks/subscriptions", platformMW[0], platformMW[1], r.h.ListWebhookSubscriptions)
 	protected.Get("/webhooks/subscriptions/:id", platformMW[0], platformMW[1], r.h.GetWebhookSubscription)

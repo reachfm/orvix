@@ -1,4 +1,4 @@
-﻿package jobs
+package jobs
 
 import (
 	"context"
@@ -122,7 +122,7 @@ func backoff(attempt int) time.Duration {
 func ptr[T any](v T) *T { return &v }
 
 var (
-	ErrNotFound = &jobError{"job not found"}
+	ErrNotFound          = &jobError{"job not found"}
 	ErrInvalidTransition = &jobError{"invalid job status transition"}
 )
 

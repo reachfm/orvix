@@ -1,4 +1,4 @@
-﻿package supportaccess
+package supportaccess
 
 import (
 	"context"

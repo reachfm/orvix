@@ -46,13 +46,13 @@ func (s *Service) Create(ctx context.Context, title, description string, severit
 	}
 	severity = normalizeSeverity(severity)
 	inc := &Incident{
-		Title:      title,
+		Title:       title,
 		Description: description,
-		Severity:   severity,
-		Status:     StatusInvestigating,
-		Services:   services,
-		Regions:    regions,
-		TenantIDs:  tenantIDs,
+		Severity:    severity,
+		Status:      StatusInvestigating,
+		Services:    services,
+		Regions:     regions,
+		TenantIDs:   tenantIDs,
 	}
 	if err := s.repo.Insert(ctx, inc); err != nil {
 		return nil, err

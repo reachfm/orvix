@@ -28,7 +28,9 @@ import (
 	"github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/billing"
+	"github.com/orvix/orvix/internal/capability"
 	"github.com/orvix/orvix/internal/config"
+	"github.com/orvix/orvix/internal/configtruth"
 	"github.com/orvix/orvix/internal/coremail"
 	"github.com/orvix/orvix/internal/coremail/delivery"
 	"github.com/orvix/orvix/internal/coremail/push"
@@ -102,6 +104,10 @@ type Handler struct {
 	supportAccessSvc *supportaccess.Service
 	// webhookSvc is lazily initialized by h.webhookService().
 	webhookSvc *webhooks.Service
+	// capabilitySvc is lazily initialized by h.capabilityService().
+	capabilitySvc *capability.Service
+	// configTruthSvc is lazily initialized by h.configTruthService().
+	configTruthSvc *configtruth.Service
 
 	// updateSvc is the process-wide Update Management v1 service.
 	// It is set once at router construction (see
