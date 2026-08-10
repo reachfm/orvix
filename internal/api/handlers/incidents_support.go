@@ -8,8 +8,12 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/audit"
+	"github.com/orvix/orvix/internal/capability"
 	"github.com/orvix/orvix/internal/incident"
 	"github.com/orvix/orvix/internal/supportaccess"
+
+	// middleware provides support-access enforcement.
+	"github.com/orvix/orvix/internal/api/middleware"
 )
 
 // ── Incident Management (platform-only) ───────────────────────────
@@ -205,4 +209,42 @@ func (h *Handler) writeAudit(c fiber.Ctx, action, target string) {
 		IP:        c.IP(),
 		UserAgent: string(c.Request().Header.UserAgent()),
 	})
+}
+
+// ── Support-access enforcement middleware ───────────────────────────
+
+// SupportAccessMiddleware returns the support-access enforcement
+// middleware bound to this handler's support-access service.
+func (h *Handler) SupportAccessMiddleware() fiber.Handler {
+	return middleware.SupportAccess(h.supportAccessService())
+}
+
+// SupportAccessExample is a tenant-scoped endpoint protected by the
+// support-access middleware. It demonstrates that a support operator
+// with a valid grant can access tenant resources, while missing,
+// expired, revoked, or cross-tenant grants are rejected.
+func (h *Handler) SupportAccessExample(c fiber.Ctx) error {
+	ctx, ok := middleware.SupportContext(c)
+	if !ok {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "support access context missing"})
+	}
+	return c.JSON(fiber.Map{
+		"status":      "ok",
+		"tenant_id":   ctx.TenantID,
+		"operator_id": ctx.OperatorID,
+		"scopes":      ctx.Scopes,
+		"grant_id":    ctx.Grant.ID,
+		"ticket_ref":  ctx.Grant.TicketRef,
+		"expires_at":  ctx.Grant.ExpiresAt,
+	})
+}
+
+// ── Runtime capabilities ───────────────────────────────────────────
+
+// GetCapabilities returns the runtime capability registry derived from
+// actual registered modules and services.
+func (h *Handler) GetCapabilities(c fiber.Ctx) error {
+	reg := h.registry
+	entries := capability.FromRuntime(reg, h.hasUpdater, h.hasDR)
+	return c.JSON(fiber.Map{"capabilities": entries})
 }

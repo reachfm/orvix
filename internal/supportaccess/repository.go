@@ -130,6 +130,31 @@ func (r *Repository) FindActiveForTenant(ctx context.Context, tenantID uint) (*A
 	return &g, nil
 }
 
+func (r *Repository) FindGrantByOperator(ctx context.Context, operatorID, tenantID uint) (*AccessGrant, error) {
+	var g AccessGrant
+	var activatedAt, revokedAt sql.NullTime
+	var glass int
+	err := r.db.QueryRowContext(ctx,
+		`SELECT id, ticket_ref, reason, target_tenant_id, granted_by_id, permission_scope, status, activated_at, expires_at, revoked_at, revoke_reason, emergency_break_glass, version, created_at, updated_at
+		FROM platform_support_access_grants WHERE granted_by_id=? AND target_tenant_id=? AND status='active' AND expires_at > ? ORDER BY created_at DESC LIMIT 1`,
+		operatorID, tenantID, time.Now().UTC()).
+		Scan(&g.ID, &g.TicketRef, &g.Reason, &g.TargetTenantID, &g.GrantedByID, &g.PermissionScope, &g.Status, &activatedAt, &g.ExpiresAt, &revokedAt, &g.RevokeReason, &glass, &g.version, &g.CreatedAt, &g.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if activatedAt.Valid {
+		g.ActivatedAt = &activatedAt.Time
+	}
+	if revokedAt.Valid {
+		g.RevokedAt = &revokedAt.Time
+	}
+	g.EmergencyBreakGlass = glass == 1
+	return &g, nil
+}
+
 func (r *Repository) List(ctx context.Context, tenantID uint, limit int) ([]AccessGrant, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 50

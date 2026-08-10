@@ -124,3 +124,27 @@ func (s *Service) ValidateAccess(ctx context.Context, tenantID uint) error {
 	}
 	return nil
 }
+
+// GrantForOperator returns the active support grant for a given operator
+// and target tenant, or nil if none exists.
+func (s *Service) GrantForOperator(ctx context.Context, operatorID, tenantID uint) (*AccessGrant, error) {
+	return s.repo.FindGrantByOperator(ctx, operatorID, tenantID)
+}
+
+// Scopes returns the effective scopes for a grant based on its
+// permission_scope. Higher privilege scopes include the permissions
+// of lower scopes.
+func (g *AccessGrant) Scopes() []string {
+	switch g.PermissionScope {
+	case "full_tenant_view":
+		return []string{"read_only", "mailbox_view", "domain_view", "full_tenant_view"}
+	case "domain_view":
+		return []string{"read_only", "mailbox_view", "domain_view"}
+	case "mailbox_view":
+		return []string{"read_only", "mailbox_view"}
+	case "read_only":
+		return []string{"read_only"}
+	default:
+		return []string{}
+	}
+}

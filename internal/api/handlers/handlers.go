@@ -112,6 +112,11 @@ type Handler struct {
 	// guarantee. This field is read by h.updateService().
 	updateSvc *updater.RuntimeService
 
+	// hasUpdater reports whether the update coordinator is installed.
+	hasUpdater bool
+	// hasDR reports whether disaster-recovery coordination is available.
+	hasDR bool
+
 	// updateSvcOnce ensures the schema is created exactly once
 	// for the lifetime of the Handler, even if updateService()
 	// is called many times. The schema is a CREATE TABLE IF NOT

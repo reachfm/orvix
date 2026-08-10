@@ -1580,7 +1580,14 @@ func (r *Router) setupRoutes() {
 	protected.Post("/platform/support/grants/:id/activate", platformMW[0], platformMW[1], r.h.ActivateSupportAccessGrant)
 	protected.Post("/platform/support/grants/:id/revoke", platformMW[0], platformMW[1], r.h.RevokeSupportAccessGrant)
 
-	// ── Webhooks (Milestone 16, platform + tenant) ────────────────
+	// ── Support-access enforcement (Milestone 16) ─────────────────
+	// These routes demonstrate the support-access middleware enforcing
+	// tenant binding, scope, expiry, and revocation for a support
+	// operator accessing tenant-scoped resources.
+	protected.Get("/platform/support/tenant/domains", platformMW[0], platformMW[1], r.h.SupportAccessMiddleware(), r.h.SupportAccessExample)
+
+	// ── Runtime capability endpoint (Milestone 16, platform-only) ─
+	protected.Get("/platform/capabilities", platformMW[0], platformMW[1], r.h.GetCapabilities)
 	protected.Post("/webhooks/subscriptions", platformMW[0], platformMW[1], r.h.CreateWebhookSubscription)
 	protected.Get("/webhooks/subscriptions", platformMW[0], platformMW[1], r.h.ListWebhookSubscriptions)
 	protected.Get("/webhooks/subscriptions/:id", platformMW[0], platformMW[1], r.h.GetWebhookSubscription)
