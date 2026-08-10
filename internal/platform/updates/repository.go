@@ -36,10 +36,23 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 		prev_hash TEXT NOT NULL DEFAULT '',
 		failure_note TEXT NOT NULL DEFAULT '',
 		actor_id INTEGER NOT NULL DEFAULT 0,
+		apply_job_id TEXT NOT NULL DEFAULT '',
+		rollback_job_id TEXT NOT NULL DEFAULT '',
 		created_at `+ts+` NOT NULL,
 		updated_at `+ts+` NOT NULL
 	)`)
-	return err
+	if err != nil {
+		return err
+	}
+	// Additive column migrations for records created by an older schema
+	// version — ignore "duplicate column" style errors from either dialect.
+	for _, stmt := range []string{
+		`ALTER TABLE platform_update_records ADD COLUMN apply_job_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE platform_update_records ADD COLUMN rollback_job_id TEXT NOT NULL DEFAULT ''`,
+	} {
+		_, _ = r.db.ExecContext(ctx, stmt)
+	}
+	return nil
 }
 
 func (r *Repository) Insert(ctx context.Context, rec *Record) error {
@@ -64,16 +77,35 @@ func (r *Repository) UpdateState(ctx context.Context, id uint, state State, fail
 	return err
 }
 
+// UpdateApplyJob atomically records the coordinator job id handed off
+// for apply alongside the new state, so a crash between "coordinator
+// accepted the job" and "we recorded that fact" cannot cause a retry
+// to double-submit — TriggerApply checks ApplyJobID before submitting.
+func (r *Repository) UpdateApplyJob(ctx context.Context, id uint, state State, jobID string, now time.Time) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE platform_update_records SET state=`+r.dialect.Placeholder(1)+`, apply_job_id=`+r.dialect.Placeholder(2)+`, updated_at=`+r.dialect.Placeholder(3)+` WHERE id=`+r.dialect.Placeholder(4),
+		state, jobID, now, id)
+	return err
+}
+
+// UpdateRollbackJob is UpdateApplyJob's counterpart for rollback.
+func (r *Repository) UpdateRollbackJob(ctx context.Context, id uint, state State, jobID, failureNote string, now time.Time) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE platform_update_records SET state=`+r.dialect.Placeholder(1)+`, rollback_job_id=`+r.dialect.Placeholder(2)+`, failure_note=`+r.dialect.Placeholder(3)+`, updated_at=`+r.dialect.Placeholder(4)+` WHERE id=`+r.dialect.Placeholder(5),
+		state, jobID, failureNote, now, id)
+	return err
+}
+
 func (r *Repository) Get(ctx context.Context, id uint) (*Record, error) {
 	row := r.db.QueryRowContext(ctx, `
-		SELECT id, version, platform, arch, artifact_hash, artifact_path, state, prev_version, prev_hash, failure_note, actor_id, created_at, updated_at
+		SELECT id, version, platform, arch, artifact_hash, artifact_path, state, prev_version, prev_hash, failure_note, actor_id, apply_job_id, rollback_job_id, created_at, updated_at
 		FROM platform_update_records WHERE id=`+r.dialect.Placeholder(1), id)
 	return scanRecord(row)
 }
 
 func (r *Repository) Latest(ctx context.Context) (*Record, error) {
 	row := r.db.QueryRowContext(ctx, `
-		SELECT id, version, platform, arch, artifact_hash, artifact_path, state, prev_version, prev_hash, failure_note, actor_id, created_at, updated_at
+		SELECT id, version, platform, arch, artifact_hash, artifact_path, state, prev_version, prev_hash, failure_note, actor_id, apply_job_id, rollback_job_id, created_at, updated_at
 		FROM platform_update_records ORDER BY id DESC LIMIT 1`)
 	rec, err := scanRecord(row)
 	if err == sql.ErrNoRows {
@@ -87,7 +119,7 @@ func (r *Repository) List(ctx context.Context, limit int) ([]Record, error) {
 		limit = 50
 	}
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, version, platform, arch, artifact_hash, artifact_path, state, prev_version, prev_hash, failure_note, actor_id, created_at, updated_at
+		SELECT id, version, platform, arch, artifact_hash, artifact_path, state, prev_version, prev_hash, failure_note, actor_id, apply_job_id, rollback_job_id, created_at, updated_at
 		FROM platform_update_records ORDER BY id DESC LIMIT `+r.dialect.Placeholder(1), limit)
 	if err != nil {
 		return nil, err
@@ -96,7 +128,7 @@ func (r *Repository) List(ctx context.Context, limit int) ([]Record, error) {
 	var out []Record
 	for rows.Next() {
 		var rec Record
-		if err := rows.Scan(&rec.ID, &rec.Version, &rec.Platform, &rec.Arch, &rec.ArtifactHash, &rec.ArtifactPath, &rec.State, &rec.PrevVersion, &rec.PrevHash, &rec.FailureNote, &rec.ActorID, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
+		if err := rows.Scan(&rec.ID, &rec.Version, &rec.Platform, &rec.Arch, &rec.ArtifactHash, &rec.ArtifactPath, &rec.State, &rec.PrevVersion, &rec.PrevHash, &rec.FailureNote, &rec.ActorID, &rec.ApplyJobID, &rec.RollbackJobID, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, rec)
@@ -106,7 +138,7 @@ func (r *Repository) List(ctx context.Context, limit int) ([]Record, error) {
 
 func scanRecord(row *sql.Row) (*Record, error) {
 	var rec Record
-	err := row.Scan(&rec.ID, &rec.Version, &rec.Platform, &rec.Arch, &rec.ArtifactHash, &rec.ArtifactPath, &rec.State, &rec.PrevVersion, &rec.PrevHash, &rec.FailureNote, &rec.ActorID, &rec.CreatedAt, &rec.UpdatedAt)
+	err := row.Scan(&rec.ID, &rec.Version, &rec.Platform, &rec.Arch, &rec.ArtifactHash, &rec.ArtifactPath, &rec.State, &rec.PrevVersion, &rec.PrevHash, &rec.FailureNote, &rec.ActorID, &rec.ApplyJobID, &rec.RollbackJobID, &rec.CreatedAt, &rec.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}

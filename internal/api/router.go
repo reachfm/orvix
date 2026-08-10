@@ -1561,6 +1561,7 @@ func (r *Router) setupRoutes() {
 	protected.Get("/updates/artifacts/:id", platformMW[0], platformMW[1], r.h.GetUpdateArtifactStatus)
 	protected.Post("/updates/artifacts/:id/apply", platformMW[0], platformMW[1], r.h.PostUpdateArtifactApply)
 	protected.Post("/updates/artifacts/:id/rollback", platformMW[0], platformMW[1], r.h.PostUpdateArtifactRollback)
+	protected.Get("/updates/operations/:job_id", platformMW[0], platformMW[1], r.h.GetUpdateOperationStatus)
 
 	// ── Platform billing balances/adjustments (Milestone 15) ───────
 	protected.Get("/platform/billing/tenants/:tenant_id/balance", platformMW[0], platformMW[1], r.h.GetPlatformBillingBalance)

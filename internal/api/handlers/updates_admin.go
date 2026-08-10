@@ -14,6 +14,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/platform/updates"
+	"github.com/orvix/orvix/internal/updatecoord"
 	"github.com/orvix/orvix/internal/updater"
 	"go.uber.org/zap"
 )
@@ -164,12 +165,66 @@ func (h *Handler) GetUpdateArtifactHistory(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"history": history})
 }
 
-// PostUpdateArtifactApply hands a staged update off to an external
-// apply coordinator. No such coordinator exists in this codebase yet
-// (see updates.ApplyCoordinator's doc comment), so today this always
-// reports 503 with updates.ErrNoCoordinator rather than pretending to
-// apply the update — the API process must never restart or replace
-// itself in-process.
+// updateCoordinatorRoot is the FIXED update job/result directory —
+// analogous to restoreCoordinatorRoot — matching the systemd
+// orvix-update.path watched directory (which cannot read config).
+// Overridable via ORVIX_UPDATE_JOBS_DIR only for test/staging
+// harnesses.
+func (h *Handler) updateCoordinatorRoot() string {
+	if v := strings.TrimSpace(os.Getenv("ORVIX_UPDATE_JOBS_DIR")); v != "" {
+		return v
+	}
+	return "/var/lib/orvix/update-jobs"
+}
+
+// updateCoordinatorInstalled reports whether the external update-apply
+// coordinator (systemd path + service units) is installed, mirroring
+// restoreCoordinatorInstalled exactly — the API must fail closed
+// rather than accepting an apply/rollback it can never actually run.
+//
+// ORVIX_UPDATE_COORDINATOR_ASSUME_READY is a staging/test-only
+// override with the same "1"/"0"/unset semantics as its restore
+// counterpart.
+func updateCoordinatorInstalled() bool {
+	switch strings.TrimSpace(os.Getenv("ORVIX_UPDATE_COORDINATOR_ASSUME_READY")) {
+	case "1":
+		return true
+	case "0":
+		return false
+	}
+	for _, p := range []string{
+		"/etc/systemd/system/orvix-update.path",
+		"/lib/systemd/system/orvix-update.path",
+		"/usr/lib/systemd/system/orvix-update.path",
+	} {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			return true
+		}
+	}
+	return false
+}
+
+// updateCoordinatorAdapter builds a fresh CoordinatorAdapter over the
+// real on-disk job queue, scoped to this handler's stage directory so
+// the coordinator's own path-allowlist check (never trust a caller
+// path) is anchored at the exact directory updates.Service stages
+// verified artifacts into.
+func (h *Handler) updateCoordinatorAdapter(actor string) *updates.CoordinatorAdapter {
+	stageDir := strings.TrimSpace(os.Getenv("ORVIX_UPDATE_STAGE_DIR"))
+	if stageDir == "" {
+		stageDir = "/var/lib/orvix/update-staging"
+	}
+	coord := updatecoord.New(h.updateCoordinatorRoot(), stageDir)
+	return updates.NewCoordinatorAdapter(coord, actor)
+}
+
+// PostUpdateArtifactApply hands a staged, already-verified update off
+// to the external update-apply coordinator — the same
+// submit-a-durable-job / never-restart-in-process pattern as
+// PostRestoreBackup. It fails closed (503) if the coordinator units
+// are not installed, and requires an exact typed confirmation phrase
+// since applying an update is a destructive, service-restarting
+// action.
 func (h *Handler) PostUpdateArtifactApply(c fiber.Ctx) error {
 	svc, err := h.updatesService()
 	if err != nil {
@@ -179,8 +234,27 @@ func (h *Handler) PostUpdateArtifactApply(c fiber.Ctx) error {
 	if err != nil || idVal == 0 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid update id"})
 	}
+	var req struct {
+		Confirm string `json:"confirm"`
+	}
+	if err := c.Bind().JSON(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
+	}
+	if req.Confirm != "APPLY-STAGED-UPDATE" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "apply requires typed confirmation: APPLY-STAGED-UPDATE"})
+	}
+	if !updateCoordinatorInstalled() {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"error": "no update-apply coordinator is installed (orvix-update.path/.service); artifact remains staged and was not applied",
+		})
+	}
 	actorID, _ := c.Locals("user_id").(uint)
-	_, _, err = svc.TriggerApply(c.Context(), uint(idVal), nil, actorID)
+	actor := fmt.Sprintf("user:%d", actorID)
+	coord := h.updateCoordinatorAdapter(actor)
+	rec, jobID, err := svc.TriggerApply(c.Context(), uint(idVal), coord, actorID)
+	if err == updatecoord.ErrActiveJob {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "an update operation is already in progress"})
+	}
 	if err == updates.ErrNoCoordinator {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
 			"error": "no update-apply coordinator is installed; artifact remains staged and was not applied",
@@ -189,13 +263,23 @@ func (h *Handler) PostUpdateArtifactApply(c fiber.Ctx) error {
 	if err != nil {
 		return updatesActionError(c, err)
 	}
-	return c.SendStatus(fiber.StatusAccepted)
+	h.writeAuditLog(c, "update.apply.submitted", fmt.Sprintf("update_id:%d|job_id:%s", idVal, jobID))
+	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
+		"update":   rec,
+		"job_id":   jobID,
+		"status":   string(updatecoord.StatusPending),
+		"poll_url": "/api/v1/admin/updates/operations/" + jobID,
+		"message":  "Apply accepted. Orvix will restart and this connection may drop; poll the operation status. Success is reported only after the restarted service passes a health check. On failure the previous version is restored automatically.",
+	})
 }
 
-// PostUpdateArtifactRollback marks a previously applied update
-// RolledBack, using the rollback metadata (previous version/hash)
-// captured at staging time. Like apply, the actual revert is an
-// external-coordinator responsibility; this records the decision.
+// PostUpdateArtifactRollback hands a previously applied update off to
+// the same external coordinator for reversion, using the rollback
+// metadata (previous version/hash) captured at staging time — the
+// actual revert is the coordinator's responsibility, never performed
+// in-process. Apply and rollback are mutually exclusive: the
+// coordinator's ErrActiveJob check covers both directions since they
+// share one job queue/lock.
 func (h *Handler) PostUpdateArtifactRollback(c fiber.Ctx) error {
 	svc, err := h.updatesService()
 	if err != nil {
@@ -206,18 +290,60 @@ func (h *Handler) PostUpdateArtifactRollback(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid update id"})
 	}
 	var req struct {
-		Reason string `json:"reason"`
+		Confirm string `json:"confirm"`
+		Reason  string `json:"reason"`
 	}
 	if err := c.Bind().JSON(&req); err != nil || strings.TrimSpace(req.Reason) == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "reason is required"})
 	}
+	if req.Confirm != "ROLLBACK-APPLIED-UPDATE" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "rollback requires typed confirmation: ROLLBACK-APPLIED-UPDATE"})
+	}
+	if !updateCoordinatorInstalled() {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"error": "no update-apply coordinator is installed (orvix-update.path/.service); rollback is unavailable",
+		})
+	}
 	actorID, _ := c.Locals("user_id").(uint)
-	rec, err := svc.Rollback(c.Context(), uint(idVal), req.Reason, actorID)
+	actor := fmt.Sprintf("user:%d", actorID)
+	coord := h.updateCoordinatorAdapter(actor)
+	rec, jobID, err := svc.Rollback(c.Context(), uint(idVal), coord, req.Reason, actorID)
+	if err == updatecoord.ErrActiveJob {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "an update operation is already in progress"})
+	}
+	if err == updates.ErrNoCoordinator {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "no update-apply coordinator is installed"})
+	}
 	if err != nil {
 		return updatesActionError(c, err)
 	}
-	h.writeAuditLog(c, "update.rollback", fmt.Sprintf("update_id:%d|reason:%s", idVal, req.Reason))
-	return c.JSON(rec)
+	h.writeAuditLog(c, "update.rollback.submitted", fmt.Sprintf("update_id:%d|job_id:%s|reason:%s", idVal, jobID, req.Reason))
+	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
+		"update":   rec,
+		"job_id":   jobID,
+		"status":   string(updatecoord.StatusPending),
+		"poll_url": "/api/v1/admin/updates/operations/" + jobID,
+	})
+}
+
+// GetUpdateOperationStatus returns the durable status of an
+// apply/rollback job, read fresh from disk on every call so it works
+// across the Orvix restart the coordinator performs.
+func (h *Handler) GetUpdateOperationStatus(c fiber.Ctx) error {
+	jobID := c.Params("job_id")
+	if !updatecoord.ValidJobID(jobID) {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid update job id"})
+	}
+	coord := updatecoord.New(h.updateCoordinatorRoot(), "")
+	res, err := coord.GetResult(jobID)
+	if err == updatecoord.ErrNotFound {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "update job not found"})
+	}
+	if err != nil {
+		h.logger.Error("update job status failed", zap.String("job_id", jobID), zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to read update job status"})
+	}
+	return c.JSON(res)
 }
 
 func updatesActionError(c fiber.Ctx, err error) error {

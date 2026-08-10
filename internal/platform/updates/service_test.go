@@ -164,6 +164,10 @@ func (f fakeCoordinator) Submit(ctx context.Context, artifactPath, version strin
 	return f.jobID, nil
 }
 
+func (f fakeCoordinator) SubmitRollback(ctx context.Context, targetVersion, targetHash, fromVersion string) (string, error) {
+	return f.jobID, nil
+}
+
 func TestTriggerApply_WithCoordinator_TransitionsToApplied(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(nil)
 	svc := newTestService(t, pub)
@@ -185,7 +189,7 @@ func TestTriggerApply_WithCoordinator_TransitionsToApplied(t *testing.T) {
 		t.Fatalf("expected Applied, got %s", applied.State)
 	}
 
-	rolledBack, err := svc.Rollback(context.Background(), rec.ID, "regression found", 1)
+	rolledBack, _, err := svc.Rollback(context.Background(), rec.ID, fakeCoordinator{jobID: "job-2"}, "regression found", 1)
 	if err != nil {
 		t.Fatalf("rollback: %v", err)
 	}
@@ -195,4 +199,103 @@ func TestTriggerApply_WithCoordinator_TransitionsToApplied(t *testing.T) {
 	if rolledBack.PrevVersion != "1.0.0" {
 		t.Fatalf("expected prev version 1.0.0, got %s", rolledBack.PrevVersion)
 	}
+}
+
+// TestTriggerApply_RetryIsIdempotent proves a second TriggerApply call
+// on an already-applied record does not resubmit to the coordinator —
+// it must return the SAME job id that was recorded on the first call,
+// so a client retry (e.g. after a dropped connection during the
+// service restart the real coordinator triggers) can never cause a
+// second apply job for the same record.
+func TestTriggerApply_RetryIsIdempotent(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	svc := newTestService(t, pub)
+	artifact := []byte("payload")
+	manifestJSON, sig, _ := buildSignedManifest(t, priv, artifact, "2.0.0", "linux", "amd64")
+	rec, err := svc.SubmitArtifact(context.Background(), artifact, manifestJSON, sig, "2.0.0", "linux", "amd64", 1)
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+
+	coord := &countingCoordinator{jobID: "job-1"}
+	_, jobID1, err := svc.TriggerApply(context.Background(), rec.ID, coord, 1)
+	if err != nil {
+		t.Fatalf("first trigger apply: %v", err)
+	}
+	_, jobID2, err := svc.TriggerApply(context.Background(), rec.ID, coord, 1)
+	if err != nil {
+		t.Fatalf("second trigger apply: %v", err)
+	}
+	if jobID1 != jobID2 {
+		t.Fatalf("expected identical job id across retries, got %s vs %s", jobID1, jobID2)
+	}
+	if coord.submitCalls != 1 {
+		t.Fatalf("expected the coordinator to receive exactly 1 Submit call across 2 TriggerApply calls, got %d", coord.submitCalls)
+	}
+}
+
+// TestRollback_RetryIsIdempotent is TestTriggerApply_RetryIsIdempotent's
+// counterpart for rollback.
+func TestRollback_RetryIsIdempotent(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	svc := newTestService(t, pub)
+	artifact := []byte("payload")
+	manifestJSON, sig, _ := buildSignedManifest(t, priv, artifact, "2.0.0", "linux", "amd64")
+	rec, err := svc.SubmitArtifact(context.Background(), artifact, manifestJSON, sig, "2.0.0", "linux", "amd64", 1)
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	coord := &countingCoordinator{jobID: "apply-job"}
+	if _, _, err := svc.TriggerApply(context.Background(), rec.ID, coord, 1); err != nil {
+		t.Fatalf("trigger apply: %v", err)
+	}
+
+	rbCoord := &countingCoordinator{jobID: "rollback-job"}
+	_, jobID1, err := svc.Rollback(context.Background(), rec.ID, rbCoord, "regression", 1)
+	if err != nil {
+		t.Fatalf("first rollback: %v", err)
+	}
+	_, jobID2, err := svc.Rollback(context.Background(), rec.ID, rbCoord, "regression", 1)
+	if err != nil {
+		t.Fatalf("second rollback: %v", err)
+	}
+	if jobID1 != jobID2 {
+		t.Fatalf("expected identical rollback job id across retries, got %s vs %s", jobID1, jobID2)
+	}
+	if rbCoord.submitRollbackCalls != 1 {
+		t.Fatalf("expected the coordinator to receive exactly 1 SubmitRollback call across 2 Rollback calls, got %d", rbCoord.submitRollbackCalls)
+	}
+}
+
+// TestRollback_WithoutApply_Rejected proves rollback cannot be
+// triggered on a record that was never applied.
+func TestRollback_WithoutApply_Rejected(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	svc := newTestService(t, pub)
+	artifact := []byte("payload")
+	manifestJSON, sig, _ := buildSignedManifest(t, priv, artifact, "2.0.0", "linux", "amd64")
+	rec, err := svc.SubmitArtifact(context.Background(), artifact, manifestJSON, sig, "2.0.0", "linux", "amd64", 1)
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	_, _, err = svc.Rollback(context.Background(), rec.ID, &countingCoordinator{jobID: "x"}, "reason", 1)
+	if err != ErrInvalidTransition {
+		t.Fatalf("expected ErrInvalidTransition rolling back a Staged (never-applied) record, got %v", err)
+	}
+}
+
+type countingCoordinator struct {
+	jobID               string
+	submitCalls         int
+	submitRollbackCalls int
+}
+
+func (c *countingCoordinator) Submit(ctx context.Context, artifactPath, version string) (string, error) {
+	c.submitCalls++
+	return c.jobID, nil
+}
+
+func (c *countingCoordinator) SubmitRollback(ctx context.Context, targetVersion, targetHash, fromVersion string) (string, error) {
+	c.submitRollbackCalls++
+	return c.jobID, nil
 }

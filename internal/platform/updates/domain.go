@@ -43,17 +43,19 @@ type Manifest struct {
 // the requirement that rollback metadata exist ahead of any apply
 // attempt, not be reconstructed after the fact.
 type Record struct {
-	ID           uint      `json:"id"`
-	Version      string    `json:"version"`
-	Platform     string    `json:"platform"`
-	Arch         string    `json:"arch"`
-	ArtifactHash string    `json:"artifact_hash"`
-	ArtifactPath string    `json:"artifact_path,omitempty"`
-	State        State     `json:"state"`
-	PrevVersion  string    `json:"prev_version,omitempty"`
-	PrevHash     string    `json:"prev_hash,omitempty"`
-	FailureNote  string    `json:"failure_note,omitempty"`
-	ActorID      uint      `json:"actor_id"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID            uint      `json:"id"`
+	Version       string    `json:"version"`
+	Platform      string    `json:"platform"`
+	Arch          string    `json:"arch"`
+	ArtifactHash  string    `json:"artifact_hash"`
+	ArtifactPath  string    `json:"artifact_path,omitempty"`
+	State         State     `json:"state"`
+	PrevVersion   string    `json:"prev_version,omitempty"`
+	PrevHash      string    `json:"prev_hash,omitempty"`
+	FailureNote   string    `json:"failure_note,omitempty"`
+	ActorID       uint      `json:"actor_id"`
+	ApplyJobID    string    `json:"apply_job_id,omitempty"`
+	RollbackJobID string    `json:"rollback_job_id,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }

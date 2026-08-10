@@ -193,8 +193,9 @@ and `isCoreMailDisabled` (frontend).
 | `POST /updates/artifacts` | platformMW | `PostUpdateArtifact` | ed25519-signed manifest verification + hash check + staged lifecycle; rejects unsigned/tampered/wrong-version/wrong-platform artifacts | Platform | `internal/platform/updates/service_test.go` (unsigned, tampered, invalid signature, wrong version, wrong platform, valid end-to-end) | MISSING_UI |
 | `GET /updates/artifacts/history` | platformMW | `GetUpdateArtifactHistory` | `{history: updates.Record[]}` | Platform | `internal/platform/updates/service_test.go` | MISSING_UI |
 | `GET /updates/artifacts/:id` | platformMW | `GetUpdateArtifactStatus` | `updates.Record` | Platform | `internal/platform/updates/service_test.go` | MISSING_UI |
-| `POST /updates/artifacts/:id/apply` | platformMW | `PostUpdateArtifactApply` | hands off to an external `ApplyCoordinator`; no coordinator is wired yet in this codebase, so this currently always reports 503 rather than applying in-process | Platform | `internal/platform/updates/service_test.go` (`TestTriggerApply_NoCoordinator_LeavesStaged`) | MISSING_UI |
-| `POST /updates/artifacts/:id/rollback` | platformMW | `PostUpdateArtifactRollback` | records rollback decision using pre-captured previous-version/hash metadata | Platform | `internal/platform/updates/service_test.go` | MISSING_UI |
+| `POST /updates/artifacts/:id/apply` | platformMW | `PostUpdateArtifactApply` | requires typed confirmation `APPLY-STAGED-UPDATE`; fails closed (503) unless the external `orvix-update.path`/`.service` coordinator is installed; hands the staged, verified artifact off to `internal/updatecoord` (durable job, mutually exclusive with rollback, idempotent retries) — never applies in-process | Platform | `internal/platform/updates/service_test.go` (`TestTriggerApply_NoCoordinator_LeavesStaged`, `TestTriggerApply_WithCoordinator_TransitionsToApplied`, `TestTriggerApply_RetryIsIdempotent`), `internal/updatecoord/coordinator_test.go` | MISSING_UI |
+| `POST /updates/artifacts/:id/rollback` | platformMW | `PostUpdateArtifactRollback` | requires typed confirmation `ROLLBACK-APPLIED-UPDATE` + reason; hands off to the same external coordinator using pre-captured previous-version/hash metadata; fails closed if not installed | Platform | `internal/platform/updates/service_test.go` (`TestRollback_RetryIsIdempotent`, `TestRollback_WithoutApply_Rejected`) | MISSING_UI |
+| `GET /updates/operations/:job_id` | platformMW | `GetUpdateOperationStatus` | durable apply/rollback job status, re-read from disk every call so it survives the Orvix restart the coordinator performs | Platform | `internal/updatecoord/coordinator_test.go` | MISSING_UI |
 
 ## Theme system (cross-cutting, not a route)
 
@@ -233,9 +234,9 @@ occurrence and its row's disposition straight out of this document.
 | MACHINE_ONLY | 3 |
 | DEPRECATED | 12 |
 | DUPLICATE_SUPERSEDED_ROUTE | 18 |
-| MISSING_UI | 31 |
+| MISSING_UI | 32 |
 | MISSING_BACKEND | 0 (the one MISSING_BACKEND case — platform-initiated organization creation — is a non-route documented under Organizations, not counted here) |
-| **Total** | **128** |
+| **Total** | **129** |
 
 Three pre-existing MISSING_UI gaps were documented rather than
 silently omitted: `GET /admin/backups/:id` (single-backup fetch; the
