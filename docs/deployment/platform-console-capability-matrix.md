@@ -114,6 +114,8 @@ and `isCoreMailDisabled` (frontend).
 | Route | Middleware | Handler | Contract | Owner | Test file | Disposition |
 |---|---|---|---|---|---|---|
 | `GET /audit/logs` | platformMW | `ListAuditLogs` | `AuditEntry[]` | Platform | `AuditFirewallSelfHeal.test.tsx` | UI_SUPPORTED |
+| `GET /audit/logs/export` | platformMW | `ExportAuditLogs` | CSV/JSON export of filtered audit entries | Platform | `internal/audit/` | MISSING_UI |
+| `GET /audit/logs/:id` | platformMW | `GetAuditEntry` | single audit entry by ID | Platform | `internal/audit/` | MISSING_UI |
 | `GET /admin/ssl/certificates` | platformMW | `AdminSslListCertificates` | `ListCertificatesResponse` | Platform | `SslPanel.test.tsx` | UI_SUPPORTED |
 | `POST /admin/ssl/certificates/reload` | platformMW | `AdminSslReloadCertificates` | `{status?}` | Platform | `SslPanel.test.tsx` | UI_SUPPORTED |
 | `GET /admin/ssl/certificates/reload` | platformMW | `AdminSslReloadCertificates` (same handler, also registered under GET) | `{status?}` | Platform | — | DUPLICATE_SUPERSEDED_ROUTE (the frontend uses the POST registration for this mutating action; the GET registration on the identical path is not called and is unusual for a mutating action to expose under GET — not removed, just unused) |
@@ -210,6 +212,14 @@ and `isCoreMailDisabled` (frontend).
 | `GET /webhooks/subscriptions` | platformMW | `ListWebhookSubscriptions` | list webhook subscriptions | Platform/Tenant | `internal/webhooks/` | MISSING_UI |
 | `GET /webhooks/subscriptions/:id` | platformMW | `GetWebhookSubscription` | get a webhook subscription by ID | Platform/Tenant | `internal/webhooks/` | MISSING_UI |
 | `GET /webhooks/subscriptions/:id/history` | platformMW | `GetWebhookDeliveryHistory` | get delivery history for a subscription | Platform/Tenant | `internal/webhooks/` | MISSING_UI |
+| `POST /webhooks/subscriptions/:id/rotate-secret` | platformMW | `RotateWebhookSecret` | rotate webhook signing secret; returns new secret once | Platform/Tenant | `internal/webhooks/` | MISSING_UI |
+| `POST /webhooks/subscriptions/:id/reactivate` | platformMW | `ReactivateWebhookSubscription` | reactivate a suspended webhook subscription | Platform/Tenant | `internal/webhooks/` | MISSING_UI |
+| `POST /webhooks/deliveries/:id/retry` | platformMW | `RetryWebhookDelivery` | manually retry a failed/suspended delivery | Platform/Tenant | `internal/webhooks/` | MISSING_UI |
+| `GET /platform/capabilities` | platformMW | `GetCapabilities` | runtime capability registry derived from registered modules and health | Platform | `internal/capability/` | MISSING_UI |
+| `GET /platform/config` | platformMW | `ListConfigurationSettings` | list authoritative configuration settings with source/effective/pending state | Platform | `internal/configtruth/` | MISSING_UI |
+| `GET /platform/config/:key` | platformMW | `GetConfigurationSetting` | get authoritative view of one setting | Platform | `internal/configtruth/` | MISSING_UI |
+| `PATCH /platform/config/:key` | platformMW | `MutateConfigurationSetting` | validate and apply a configuration mutation with optimistic concurrency | Platform | `internal/configtruth/` | MISSING_UI |
+| `GET /platform/support/tenant/domains` | platformMW | `SupportAccessExample` | example endpoint demonstrating support-access enforcement | Platform | `internal/api/middleware/` | MISSING_UI |
 
 ## Theme system (cross-cutting, not a route)
 
@@ -238,7 +248,7 @@ above (not carried over from an earlier draft) and is enforced equal
 to the router's actual route set by
 `internal/api/capability_matrix_test.go`, which parses
 `platformMW[0], platformMW[1]` registrations straight out of
-`router.go` — currently 143 — and parses every `` `METHOD /path` ``
+`router.go` — currently 153 — and parses every `` `METHOD /path` ``
 occurrence and its row's disposition straight out of this document.
 
 | Disposition | Routes |
@@ -248,9 +258,9 @@ occurrence and its row's disposition straight out of this document.
 | MACHINE_ONLY | 3 |
 | DEPRECATED | 12 |
 | DUPLICATE_SUPERSEDED_ROUTE | 18 |
-| MISSING_UI | 46 |
+| MISSING_UI | 56 |
 | MISSING_BACKEND | 0 (the one MISSING_BACKEND case — platform-initiated organization creation — is a non-route documented under Organizations, not counted here) |
-| **Total** | **143** |
+| **Total** | **153** |
 
 Three pre-existing MISSING_UI gaps were documented rather than
 silently omitted: `GET /admin/backups/:id` (single-backup fetch; the
