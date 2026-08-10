@@ -23,6 +23,7 @@ import (
 	"github.com/orvix/orvix/internal/antivirus"
 	"github.com/orvix/orvix/internal/api/handlers"
 	"github.com/orvix/orvix/internal/api/handlers/settings"
+	"github.com/orvix/orvix/internal/api/publicv1"
 	auditpkg "github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/auth"
 	authrbac "github.com/orvix/orvix/internal/auth/rbac"
@@ -795,6 +796,39 @@ func (r *Router) setupRoutes() {
 	api.Post("/billing/webhook", r.h.ReceivePaymentWebhook)
 	api.Post("/billing/complaint", r.h.ReceiveComplaintWebhook)
 	api.Get("/status", r.h.GetPublicStatus)
+
+	// Stable tenant-facing automation API. Authentication is API-key only;
+	// it intentionally does not fall through to browser JWT sessions. Every
+	// operation declares one explicit public scope and all resource IDs are
+	// resolved inside the tenant bound to the validated key.
+	publicAPI := api.Group("/public", publicv1.Correlation(), r.apikeys.PublicMiddleware())
+	publicAPI.Get("/organization", publicv1.RequireScope(publicv1.ScopeOrganizationRead), r.h.PublicOrganization)
+	publicAPI.Get("/usage", publicv1.RequireScope(publicv1.ScopeUsageRead), r.h.PublicUsage)
+	publicAPI.Get("/domains", publicv1.RequireScope(publicv1.ScopeDomainsRead), r.h.PublicListDomains)
+	publicAPI.Get("/domains/:id", publicv1.RequireScope(publicv1.ScopeDomainsRead), r.h.PublicGetDomain)
+	publicAPI.Post("/domains", publicv1.RequireScope(publicv1.ScopeDomainsWrite), r.h.PublicCreateDomain)
+	publicAPI.Patch("/domains/:id", publicv1.RequireScope(publicv1.ScopeDomainsWrite), r.h.PublicUpdateDomain)
+	publicAPI.Post("/domains/:id/status", publicv1.RequireScope(publicv1.ScopeDomainsWrite), r.h.PublicSetDomainStatus)
+	publicAPI.Delete("/domains/:id", publicv1.RequireScope(publicv1.ScopeDomainsWrite), r.h.PublicDeleteDomain)
+	publicAPI.Get("/mailboxes", publicv1.RequireScope(publicv1.ScopeMailboxesRead), r.h.PublicListMailboxes)
+	publicAPI.Get("/mailboxes/:id", publicv1.RequireScope(publicv1.ScopeMailboxesRead), r.h.PublicGetMailbox)
+	publicAPI.Post("/mailboxes", publicv1.RequireScope(publicv1.ScopeMailboxesWrite), r.h.PublicCreateMailbox)
+	publicAPI.Patch("/mailboxes/:id", publicv1.RequireScope(publicv1.ScopeMailboxesWrite), r.h.PublicUpdateMailbox)
+	publicAPI.Post("/mailboxes/:id/status", publicv1.RequireScope(publicv1.ScopeMailboxesWrite), r.h.PublicSetMailboxStatus)
+	publicAPI.Delete("/mailboxes/:id", publicv1.RequireScope(publicv1.ScopeMailboxesWrite), r.h.PublicDeleteMailbox)
+	publicAPI.Get("/aliases", publicv1.RequireScope(publicv1.ScopeAliasesRead), r.h.PublicListAliases)
+	publicAPI.Get("/aliases/:id", publicv1.RequireScope(publicv1.ScopeAliasesRead), r.h.PublicGetAlias)
+	publicAPI.Post("/aliases", publicv1.RequireScope(publicv1.ScopeAliasesWrite), r.h.PublicCreateAlias)
+	publicAPI.Patch("/aliases/:id", publicv1.RequireScope(publicv1.ScopeAliasesWrite), r.h.PublicUpdateAlias)
+	publicAPI.Delete("/aliases/:id", publicv1.RequireScope(publicv1.ScopeAliasesWrite), r.h.PublicDeleteAlias)
+	publicAPI.Get("/groups", publicv1.RequireScope(publicv1.ScopeGroupsRead), r.h.PublicListGroups)
+	publicAPI.Get("/groups/:id", publicv1.RequireScope(publicv1.ScopeGroupsRead), r.h.PublicGetGroup)
+	publicAPI.Post("/groups", publicv1.RequireScope(publicv1.ScopeGroupsWrite), r.h.PublicCreateGroup)
+	publicAPI.Patch("/groups/:id", publicv1.RequireScope(publicv1.ScopeGroupsWrite), r.h.PublicUpdateGroup)
+	publicAPI.Delete("/groups/:id", publicv1.RequireScope(publicv1.ScopeGroupsWrite), r.h.PublicDeleteGroup)
+	publicAPI.Get("/groups/:id/members", publicv1.RequireScope(publicv1.ScopeGroupsRead), r.h.PublicListGroupMembers)
+	publicAPI.Post("/groups/:id/members", publicv1.RequireScope(publicv1.ScopeGroupsWrite), r.h.PublicAddGroupMember)
+	publicAPI.Delete("/groups/:id/members/:memberId", publicv1.RequireScope(publicv1.ScopeGroupsWrite), r.h.PublicDeleteGroupMember)
 
 	loginGroup := api.Group("/auth")
 	if r.redisLimiter != nil {

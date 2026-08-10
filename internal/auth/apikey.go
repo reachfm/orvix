@@ -449,7 +449,49 @@ func (m *APIKeyManager) Middleware() fiber.Handler {
 		c.Locals("user_id", record.UserID)
 		c.Locals("role", Role(record.Role))
 		c.Locals("auth_method", "apikey")
+		c.Locals("api_key_id", record.ID)
+		c.Locals("api_key_tenant_id", record.TenantID)
+		c.Locals("api_key_scopes", parseAPIKeyScopes(record.Scopes))
 
 		return c.Next()
 	}
+}
+
+// PublicMiddleware is the fail-closed authentication boundary for the
+// tenant-facing public API. Unlike Middleware, it never falls through to JWT
+// authentication: a public API request must present a tenant-bound Orvix API
+// key, and platform-super-admin keys are deliberately not tenant credentials.
+func (m *APIKeyManager) PublicMiddleware() fiber.Handler {
+	return func(c fiber.Ctx) error {
+		authHeader := strings.TrimSpace(c.Get("Authorization"))
+		if !strings.HasPrefix(authHeader, "Bearer ") {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": fiber.Map{"code": "UNAUTHENTICATED", "message": "A valid tenant API key is required."}})
+		}
+		token := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+		if !strings.HasPrefix(token, "orv_") {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": fiber.Map{"code": "UNAUTHENTICATED", "message": "A valid tenant API key is required."}})
+		}
+		record, err := m.ValidateForIP(token, c.IP())
+		if err != nil || record.TenantID == 0 || Role(record.Role) == RolePlatformSuperAdmin {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": fiber.Map{"code": "UNAUTHENTICATED", "message": "A valid tenant API key is required."}})
+		}
+		c.Locals("user_id", record.UserID)
+		c.Locals("tenant_id", record.TenantID)
+		c.Locals("role", Role(record.Role))
+		c.Locals("auth_method", "apikey")
+		c.Locals("api_key_id", record.ID)
+		c.Locals("api_key_tenant_id", record.TenantID)
+		c.Locals("api_key_scopes", parseAPIKeyScopes(record.Scopes))
+		return c.Next()
+	}
+}
+
+func parseAPIKeyScopes(csv string) map[string]struct{} {
+	result := make(map[string]struct{})
+	for _, value := range strings.Split(csv, ",") {
+		if scope := strings.TrimSpace(value); scope != "" {
+			result[scope] = struct{}{}
+		}
+	}
+	return result
 }
