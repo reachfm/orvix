@@ -1,4 +1,4 @@
-﻿package capability
+package capability
 
 import (
 	"testing"
@@ -21,46 +21,64 @@ func (m *testModule) Start() error                               { return nil }
 func (m *testModule) Stop() error                                { return nil }
 func (m *testModule) Migrate() error                             { return nil }
 
-func TestFromRuntime_ModulesAvailable(t *testing.T) {
-	logger := zap.NewNop()
-	reg := modules.NewRegistry(logger)
+func TestCapabilities_DerivedFromRuntime(t *testing.T) {
+	reg := modules.NewRegistry(zap.NewNop())
 	_ = reg.Register(&testModule{id: "coremail-runtime"})
 	_ = reg.Register(&testModule{id: "dns"})
-	entries := FromRuntime(reg, true, false)
-	if len(entries) == 0 {
-		t.Fatal("expected capability entries")
+	svc := NewService(reg, nil)
+	caps := svc.Capabilities()
+	if len(caps) == 0 {
+		t.Fatal("expected capabilities")
 	}
-	found := map[string]bool{}
-	for _, e := range entries {
-		found[e.ID] = true
-		if e.ID == "mailbox_management" && e.Availability != Available {
-			t.Fatalf("mailbox_management should be available when coremail-runtime is registered, got %s", e.Availability)
-		}
-		if e.ID == "update_management" && e.Availability != Available {
-			t.Fatalf("update_management should be available when hasUpdater=true, got %s", e.Availability)
-		}
-		if e.ID == "disaster_recovery" && e.Availability != Unavailable {
-			t.Fatalf("disaster_recovery should be unavailable when hasDR=false, got %s", e.Availability)
-		}
+	found := map[string]Capability{}
+	for _, c := range caps {
+		found[c.ID] = c
 	}
-	if !found["mailbox_management"] {
-		t.Fatal("expected mailbox_management capability")
+	if !found["mailbox_management"].Enabled {
+		t.Fatal("mailbox_management should be enabled when coremail-runtime is registered")
+	}
+	if !found["dns_automation"].Enabled {
+		t.Fatal("dns_automation should be enabled when dns is registered")
+	}
+	if found["firewall"].Enabled {
+		t.Fatal("firewall should be disabled when firewall module is missing")
+	}
+	if !found["platform_audit"].Enabled {
+		t.Fatal("platform_audit should always be enabled")
 	}
 }
 
-func TestFromRuntime_ModuleMissing(t *testing.T) {
+func TestCapabilities_HealthSource(t *testing.T) {
 	reg := modules.NewRegistry(zap.NewNop())
-	entries := FromRuntime(reg, false, false)
-	for _, e := range entries {
-		switch e.ID {
-		case "mailbox_management", "dns_automation", "firewall":
-			if e.Availability != Unavailable {
-				t.Fatalf("%s should be unavailable when module missing, got %s", e.ID, e.Availability)
+	_ = reg.Register(&testModule{id: "coremail-runtime"})
+	svc := NewService(reg, &fakeHealth{healthy: false})
+	caps := svc.Capabilities()
+	for _, c := range caps {
+		if c.ID == "mailbox_management" {
+			if c.Healthy {
+				t.Fatal("mailbox_management should be unhealthy when health source reports unhealthy")
 			}
-		case "platform_audit", "incident_management", "support_access":
-			if e.Availability != Available {
-				t.Fatalf("%s should be available regardless of modules, got %s", e.ID, e.Availability)
+			if c.Availability != StatusDegraded {
+				t.Fatalf("expected degraded, got %s", c.Availability)
 			}
+		}
+	}
+}
+
+func TestCapabilities_AvailabilityStates(t *testing.T) {
+	tests := []struct {
+		supported, enabled, healthy bool
+		want                        Status
+	}{
+		{false, false, false, StatusUnavailable},
+		{true, false, false, StatusDisabled},
+		{true, true, false, StatusDegraded},
+		{true, true, true, StatusHealthy},
+	}
+	for _, tt := range tests {
+		got := computeAvailability(tt.supported, tt.enabled, tt.healthy)
+		if got != tt.want {
+			t.Fatalf("computeAvailability(%v,%v,%v)=%s want %s", tt.supported, tt.enabled, tt.healthy, got, tt.want)
 		}
 	}
 }
@@ -90,3 +108,14 @@ func TestRegistry_SortedSnapshot(t *testing.T) {
 		t.Fatalf("expected sorted order a,m,z got %s,%s,%s", snap[0].ID, snap[1].ID, snap[2].ID)
 	}
 }
+
+type fakeHealth struct {
+	healthy bool
+}
+
+func (f *fakeHealth) HealthStatus(name string) (bool, string) {
+	return f.healthy, ""
+}
+
+var _ = config.Defaults
+var _ = gorm.DB{}

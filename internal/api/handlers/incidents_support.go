@@ -244,7 +244,14 @@ func (h *Handler) SupportAccessExample(c fiber.Ctx) error {
 // GetCapabilities returns the runtime capability registry derived from
 // actual registered modules and services.
 func (h *Handler) GetCapabilities(c fiber.Ctx) error {
-	reg := h.registry
-	entries := capability.FromRuntime(reg, h.hasUpdater, h.hasDR)
-	return c.JSON(fiber.Map{"capabilities": entries})
+	svc := h.capabilityService()
+	caps := svc.Capabilities()
+	return c.JSON(fiber.Map{"capabilities": caps})
+}
+
+func (h *Handler) capabilityService() *capability.Service {
+	if h.capabilitySvc == nil {
+		h.capabilitySvc = capability.NewService(h.registry, nil)
+	}
+	return h.capabilitySvc
 }
