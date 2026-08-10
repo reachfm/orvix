@@ -12,6 +12,10 @@ import (
 
 type EventID string
 
+type whError struct{ msg string }
+
+func (e *whError) Error() string { return e.msg }
+
 type SubscriptionScope string
 
 const (
@@ -31,19 +35,36 @@ type Subscription struct {
 	CreatedAt       time.Time         `json:"created_at"`
 	UpdatedAt       time.Time         `json:"updated_at"`
 	Version         int               `json:"-"`
+	FailureCount    int               `json:"failure_count"`
 }
 
 type Delivery struct {
-	ID             uint       `json:"id"`
-	EventID        string     `json:"event_id"`
-	SubscriptionID uint       `json:"subscription_id"`
-	Status         string     `json:"status"`
-	AttemptCount   int        `json:"attempt_count"`
-	HTTPStatus     int        `json:"http_status,omitempty"`
-	RedactedError  string     `json:"error,omitempty"`
-	NextAttemptAt  *time.Time `json:"next_attempt_at,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	ID              uint       `json:"id"`
+	EventID         string     `json:"event_id"`
+	SubscriptionID  uint       `json:"subscription_id"`
+	Status          string     `json:"status"`
+	AttemptCount    int        `json:"attempt_count"`
+	HTTPStatus      int        `json:"http_status,omitempty"`
+	RedactedError   string     `json:"error,omitempty"`
+	ResponseExcerpt string     `json:"response_excerpt,omitempty"`
+	NextAttemptAt   *time.Time `json:"next_attempt_at,omitempty"`
+	ReplayOf        *uint      `json:"replay_of_delivery_id,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	LeaseToken      string     `json:"-"`
+	LeaseUntil      *time.Time `json:"-"`
+}
+
+type Attempt struct {
+	ID              uint       `json:"id"`
+	DeliveryID      uint       `json:"delivery_id"`
+	AttemptNumber   int        `json:"attempt_number"`
+	Status          string     `json:"status"`
+	HTTPStatus      int        `json:"http_status,omitempty"`
+	RedactedError   string     `json:"error,omitempty"`
+	ResponseExcerpt string     `json:"response_excerpt,omitempty"`
+	StartedAt       time.Time  `json:"started_at"`
+	CompletedAt     *time.Time `json:"completed_at,omitempty"`
 }
 
 type Event struct {
@@ -100,12 +121,17 @@ func Sign(secret, body []byte, ts int64) string {
 }
 
 func Verify(secret, body []byte, ts int64, signature string, window time.Duration) bool {
+	return VerifyAt(secret, body, ts, signature, window, time.Now().UTC())
+}
+
+func VerifyAt(secret, body []byte, ts int64, signature string, window time.Duration, now time.Time) bool {
 	expected := Sign(secret, body, ts)
 	if !hmac.Equal([]byte(signature), []byte(expected)) {
 		return false
 	}
 	eventTime := time.Unix(ts, 0)
-	if time.Since(eventTime) > window || time.Since(eventTime) < -window {
+	age := now.Sub(eventTime)
+	if age > window || age < -window {
 		return false
 	}
 	return true

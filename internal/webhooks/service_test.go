@@ -151,8 +151,12 @@ func TestWHRetryAndReactivate(t *testing.T) {
 		t.Fatalf("retry: %v", err)
 	}
 	got, _ := repo.GetDelivery(ctx, d.ID)
-	if got.Status != "pending" {
-		t.Fatalf("expected pending retry, got %s", got.Status)
+	if got.Status != "suspended" {
+		t.Fatalf("manual replay mutated original history: got %s", got.Status)
+	}
+	history, err := repo.DeliveryHistory(ctx, sub.ID, 10)
+	if err != nil || len(history) != 2 || history[0].Status != "pending" || history[0].ReplayOf == nil || *history[0].ReplayOf != d.ID {
+		t.Fatalf("expected a new pending replay referencing original: history=%+v err=%v", history, err)
 	}
 	if _, err := svc.Reactivate(ctx, sub.ID); err != nil {
 		t.Fatalf("reactivate: %v", err)

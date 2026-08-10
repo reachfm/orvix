@@ -252,7 +252,7 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			} else if err := webhookRepo.EnsureSchema(context.Background()); err != nil {
 				logger.Error("webhook schema initialization failed", zap.Error(err))
 			} else {
-				webhookSvc := webhooks.NewService(webhookRepo, nil)
+				webhookSvc := webhooks.NewService(webhookRepo, nil).WithOutbox(outboxRepo)
 				router.h.SetWebhookService(webhookSvc)
 				domainAdminSvc.SetWebhookPublisher(webhooks.NewOutboxPublisher(outboxRepo))
 				logger.Info("transactional webhook outbox wired")
@@ -683,6 +683,7 @@ func newUserRateLimiter(prefix string, max int, window time.Duration, retryAfter
 func (r *Router) Start() {
 	r.startOnce.Do(func() {
 		r.h.StartBillingScheduler(r.appCtx, 15*time.Minute)
+		r.h.StartWebhookWorker(r.appCtx, time.Second)
 	})
 }
 

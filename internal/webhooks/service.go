@@ -5,56 +5,108 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/orvix/orvix/internal/config"
+	"github.com/orvix/orvix/internal/platform/kernel"
 	"github.com/orvix/orvix/internal/webhooks/ssrf"
 )
 
 const (
-	maxSecretBytes    = 64
-	maxSecretAttempts = 8
-	maxBackoff        = 300 * time.Second
-	maxAttempts       = 8
+	maxSecretBytes       = 64
+	maxBackoff           = 5 * time.Minute
+	defaultMaxAttempts   = 8
+	defaultSuspendAfter  = 8
+	defaultLeaseDuration = 45 * time.Second
+	defaultResponseLimit = 64 << 10
 )
 
-// Service is the webhook platform service.
 type Service struct {
-	repo      *Repository
-	ssrfAllow *ssrf.Allowlist
+	repo         *Repository
+	ssrfAllow    *ssrf.Allowlist
+	outbox       *kernel.OutboxRepository
+	clock        kernel.Clock
+	httpOptions  ssrf.ClientOptions
+	maxAttempts  int
+	suspendAfter int
+	lease        time.Duration
+	responseMax  int64
 }
 
-func NewService(repo *Repository, ssrfAllow *ssrf.Allowlist) *Service {
-	return &Service{repo: repo, ssrfAllow: ssrfAllow}
+func NewService(repo *Repository, allow *ssrf.Allowlist) *Service {
+	return &Service{repo: repo, ssrfAllow: allow, clock: kernel.SystemClock{}, maxAttempts: defaultMaxAttempts, suspendAfter: defaultSuspendAfter, lease: defaultLeaseDuration, responseMax: defaultResponseLimit}
 }
 
-func (s *Service) EnsureSchema(ctx context.Context) error {
-	return s.repo.EnsureSchema(ctx)
+func (s *Service) WithOutbox(outbox *kernel.OutboxRepository) *Service { s.outbox = outbox; return s }
+func (s *Service) WithClock(clock kernel.Clock) *Service {
+	if clock != nil {
+		s.clock = clock
+	}
+	return s
+}
+func (s *Service) WithHTTPOptions(options ssrf.ClientOptions) *Service {
+	s.httpOptions = options
+	return s
+}
+func (s *Service) WithRetryPolicy(maxAttempts, suspendAfter int, lease time.Duration) *Service {
+	if maxAttempts > 0 {
+		s.maxAttempts = maxAttempts
+	}
+	if suspendAfter > 0 {
+		s.suspendAfter = suspendAfter
+	}
+	if lease > 0 {
+		s.lease = lease
+	}
+	return s
 }
 
-// CreateSubscription registers a webhook subscription.
+func (s *Service) EnsureSchema(ctx context.Context) error { return s.repo.EnsureSchema(ctx) }
+
+func normalizeEvents(events []string) ([]string, error) {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(events))
+	for _, event := range events {
+		event = strings.TrimSpace(event)
+		if !AllowedEvents[event] {
+			return nil, fmt.Errorf("%w: %s", ErrInvalidEvent, event)
+		}
+		if !seen[event] {
+			seen[event] = true
+			out = append(out, event)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("%w: at least one event is required", ErrInvalidEvent)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 func (s *Service) CreateSubscription(ctx context.Context, tenantID uint, scope SubscriptionScope, url string, events []string, secret []byte) (*Subscription, error) {
 	sub, _, err := s.CreateSubscriptionWithSecret(ctx, tenantID, scope, url, events, secret)
 	return sub, err
 }
 
-// CreateSubscriptionWithSecret creates a subscription and returns the
-// plaintext secret exactly once to the caller. Only the encrypted value is
-// persisted and subsequent reads never expose plaintext.
 func (s *Service) CreateSubscriptionWithSecret(ctx context.Context, tenantID uint, scope SubscriptionScope, url string, events []string, secret []byte) (*Subscription, string, error) {
-	if err := ssrf.ValidateURL(url, s.ssrfAllow); err != nil {
-		return nil, "", fmt.Errorf("%w: %v", ErrInvalidURL, err)
+	if tenantID == 0 || scope != ScopeTenant {
+		return nil, "", ErrTenantRequired
 	}
-	// Validate events against allowlist
-	for _, ev := range events {
-		if !AllowedEvents[ev] {
-			return nil, "", fmt.Errorf("%w: %s", ErrInvalidEvent, ev)
-		}
+	if err := ssrf.ValidateURL(url, s.ssrfAllow); err != nil {
+		return nil, "", fmt.Errorf("%w: destination rejected", ErrInvalidURL)
+	}
+	normalized, err := normalizeEvents(events)
+	if err != nil {
+		return nil, "", err
 	}
 	if len(secret) == 0 {
-		var err error
 		secret, err = GenerateSecret()
 		if err != nil {
 			return nil, "", err
@@ -64,21 +116,13 @@ func (s *Service) CreateSubscriptionWithSecret(ctx context.Context, tenantID uin
 	if err != nil {
 		return nil, "", fmt.Errorf("encrypt webhook secret: %w", err)
 	}
-	sub := &Subscription{
-		TenantID:        tenantID,
-		Scope:           scope,
-		URL:             url,
-		Events:          events,
-		Active:          true,
-		SecretEncrypted: encrypted,
-	}
+	sub := &Subscription{TenantID: tenantID, Scope: ScopeTenant, URL: url, Events: normalized, Active: true, SecretEncrypted: encrypted}
 	if err := s.repo.InsertSubscription(ctx, sub); err != nil {
 		return nil, "", err
 	}
 	return sub, hex.EncodeToString(secret), nil
 }
 
-// GenerateSecret creates a new webhook signing secret.
 func GenerateSecret() ([]byte, error) {
 	b := make([]byte, maxSecretBytes)
 	if _, err := rand.Read(b); err != nil {
@@ -87,154 +131,262 @@ func GenerateSecret() ([]byte, error) {
 	return b, nil
 }
 
-// Dispatch enqueues an event for delivery to all matching subscriptions.
-func (s *Service) Dispatch(ctx context.Context, eventType string, scopeStr string, tenantID uint, payload []byte) (string, error) {
-	if !AllowedEvents[eventType] {
-		return "", fmt.Errorf("%w: %s", ErrInvalidEvent, eventType)
+// Dispatch is retained for internal callers that already hold a complete
+// event. Production business mutations use OutboxPublisher instead.
+func (s *Service) Dispatch(ctx context.Context, eventType, scope string, tenantID uint, payload []byte) (string, error) {
+	if scope != string(ScopeTenant) || tenantID == 0 {
+		return "", ErrTenantRequired
 	}
-	id, err := newEventID()
+	var data any = json.RawMessage(payload)
+	event, err := NewEvent(eventType, tenantID, data, s.clock.Now())
 	if err != nil {
 		return "", err
 	}
-	// Find matching subscriptions
-	subs, err := s.repo.ListSubscriptions(ctx, 0, scopeStr, true)
+	tx, err := s.repo.db.BeginTx(ctx, nil)
 	if err != nil {
 		return "", err
 	}
-	for _, sub := range subs {
-		if !sub.Active || sub.Suspended {
-			continue
-		}
-		if !hasEvent(sub.Events, eventType) {
-			continue
-		}
-		// Check tenant scope
-		if sub.Scope == ScopeTenant && sub.TenantID != tenantID {
-			continue
-		}
-		d := &Delivery{EventID: id, SubscriptionID: sub.ID, Status: "pending"}
-		if derr := s.repo.InsertDelivery(ctx, d); derr != nil {
-			return "", derr
-		}
+	defer tx.Rollback()
+	if _, err = s.repo.InsertEventAndFanoutTx(ctx, tx, event); err != nil {
+		return "", err
 	}
-	return id, nil
+	if err = tx.Commit(); err != nil {
+		return "", err
+	}
+	return event.ID, nil
 }
 
 func hasEvent(events []string, target string) bool {
-	for _, e := range events {
-		if e == target {
+	for _, event := range events {
+		if event == target {
 			return true
 		}
 	}
 	return false
 }
 
-// ProcessPendingDeliveries processes pending/failed deliveries.
-func (s *Service) ProcessPendingDeliveries(ctx context.Context, batchSize int) error {
-	deliveries, err := s.repo.PendingDeliveries(ctx, batchSize)
+func (s *Service) ProcessOutbox(ctx context.Context, batchSize int) error {
+	if s.outbox == nil {
+		return nil
+	}
+	now := s.clock.Now()
+	items, err := s.outbox.ClaimTopicBatch(ctx, s.repo.db, OutboxTopic, batchSize, now)
 	if err != nil {
 		return err
 	}
-	for i := range deliveries {
-		d := &deliveries[i]
-		sub, err := s.repo.GetSubscription(ctx, d.SubscriptionID)
-		if err != nil {
-			d.Status = "failed"
-			d.RedactedError = "subscription not found"
-			s.repo.UpdateDelivery(ctx, d)
+	for _, item := range items {
+		var event Event
+		if err := json.Unmarshal(item.Payload, &event); err != nil || event.ID == "" || event.TenantID == 0 || !AllowedEvents[event.Type] || event.SchemaVersion <= 0 {
+			_ = s.outbox.MarkRetry(ctx, s.repo.db, item.ID, item.Attempts+1, s.maxAttempts, "invalid webhook event envelope", now.Add(backoffDuration(item.Attempts+1)), now)
 			continue
 		}
-		if !sub.Active || sub.Suspended {
-			d.Status = "failed"
-			d.RedactedError = "subscription inactive"
-			s.repo.UpdateDelivery(ctx, d)
-			continue
-		}
-		secret, err := config.Decrypt(sub.SecretEncrypted)
+		tx, err := s.repo.db.BeginTx(ctx, nil)
 		if err != nil {
-			d.Status = "failed"
-			d.RedactedError = "subscription secret unavailable"
-			s.repo.UpdateDelivery(ctx, d)
-			continue
+			return err
 		}
-		payload := []byte(fmt.Sprintf(`{"event_id":"%s","type":"%s"}`, d.EventID, "domain.created"))
-		ts := time.Now().Unix()
-		sig := Sign(secret, payload, ts)
-		hc := ssrf.SafeHTTPClient(30*time.Second, s.ssrfAllow)
-		req, _ := http.NewRequest("POST", sub.URL, bytes.NewReader(payload))
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-Webhook-Timestamp", fmt.Sprintf("%d", ts))
-		req.Header.Set("X-Webhook-Signature", sig)
-		resp, err := hc.Do(req)
-		d.AttemptCount++
-		if err != nil {
-			d.Status = "failed"
-			d.RedactedError = redactError(err)
-			d.NextAttemptAt = ptr(time.Now().UTC().Add(backoffDuration(d.AttemptCount)))
-			if d.AttemptCount >= maxAttempts {
-				d.Status = "suspended"
-				sub.Suspended = true
-				s.repo.UpdateSubscription(ctx, sub)
-			}
+		_, err = s.repo.InsertEventAndFanoutTx(ctx, tx, event)
+		if err == nil {
+			err = s.outbox.MarkDone(ctx, tx, item.ID, now)
+		}
+		if err == nil {
+			err = tx.Commit()
 		} else {
-			resp.Body.Close()
-			d.HTTPStatus = resp.StatusCode
-			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-				d.Status = "delivered"
-			} else {
-				d.Status = "failed"
-				d.RedactedError = fmt.Sprintf("http %d", resp.StatusCode)
-				if d.AttemptCount >= maxAttempts {
-					d.Status = "suspended"
-					sub.Suspended = true
-					s.repo.UpdateSubscription(ctx, sub)
-				}
-			}
+			_ = tx.Rollback()
 		}
-		s.repo.UpdateDelivery(ctx, d)
+		if err != nil {
+			_ = s.outbox.MarkRetry(ctx, s.repo.db, item.ID, item.Attempts+1, s.maxAttempts, "webhook event fanout failed", now.Add(backoffDuration(item.Attempts+1)), now)
+		}
+	}
+	return nil
+}
+
+func (s *Service) ProcessPendingDeliveries(ctx context.Context, batchSize int) error {
+	now := s.clock.Now()
+	deliveries, err := s.repo.ClaimDeliveries(ctx, batchSize, now, s.lease)
+	if err != nil {
+		return err
+	}
+	var combined error
+	for _, delivery := range deliveries {
+		if err := s.deliver(ctx, delivery); err != nil {
+			combined = errors.Join(combined, err)
+		}
+	}
+	return combined
+}
+
+func (s *Service) deliver(ctx context.Context, d Delivery) error {
+	now := s.clock.Now()
+	attemptID, err := s.repo.InsertAttempt(ctx, d, now)
+	if err != nil {
+		return err
+	}
+	event, err := s.repo.GetEvent(ctx, d.EventID)
+	if err != nil {
+		return s.finishFailure(ctx, d, attemptID, 0, "event unavailable", "", false)
+	}
+	sub, err := s.repo.GetSubscription(ctx, d.SubscriptionID)
+	if err != nil || !sub.Active || sub.Suspended {
+		return s.finishFailure(ctx, d, attemptID, 0, "subscription unavailable", "", false)
+	}
+	if err := ssrf.ValidateURLContext(ctx, sub.URL, s.ssrfAllow, s.httpOptions.Resolver); err != nil {
+		return s.finishFailure(ctx, d, attemptID, 0, "destination rejected", "", false)
+	}
+	secret, err := config.Decrypt(sub.SecretEncrypted)
+	if err != nil {
+		return s.finishFailure(ctx, d, attemptID, 0, "signing secret unavailable", "", false)
+	}
+	body, err := json.Marshal(event)
+	if err != nil {
+		return s.finishFailure(ctx, d, attemptID, 0, "event encoding failed", "", false)
+	}
+	timestamp := now.Unix()
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, sub.URL, bytes.NewReader(body))
+	if err != nil {
+		return s.finishFailure(ctx, d, attemptID, 0, "request creation failed", "", false)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", "Orvix-Webhooks/1.0")
+	request.Header.Set("X-Orvix-Event-ID", event.ID)
+	request.Header.Set("X-Orvix-Timestamp", fmt.Sprintf("%d", timestamp))
+	request.Header.Set("X-Orvix-Signature", Sign(secret, body, timestamp))
+	options := s.httpOptions
+	options.Allowlist = s.ssrfAllow
+	if options.Timeout <= 0 {
+		options.Timeout = 15 * time.Second
+	}
+	client := ssrf.SafeHTTPClientWithOptions(options)
+	response, err := client.Do(request)
+	if err != nil {
+		return s.finishFailure(ctx, d, attemptID, 0, "delivery transport failed", "", true)
+	}
+	defer response.Body.Close()
+	limited, readErr := io.ReadAll(io.LimitReader(response.Body, s.responseMax+1))
+	if readErr != nil {
+		return s.finishFailure(ctx, d, attemptID, response.StatusCode, "response read failed", "", true)
+	}
+	if int64(len(limited)) > s.responseMax {
+		return s.finishFailure(ctx, d, attemptID, response.StatusCode, "response body exceeded limit", "", true)
+	}
+	excerpt := safeExcerpt(limited)
+	if response.StatusCode >= 200 && response.StatusCode < 300 {
+		if err := s.repo.CompleteAttempt(ctx, attemptID, "delivered", response.StatusCode, "", excerpt, now); err != nil {
+			return err
+		}
+		if err := s.repo.CompleteDelivery(ctx, d, "delivered", response.StatusCode, "", excerpt, nil, now); err != nil {
+			return err
+		}
+		return s.repo.ResetFailures(ctx, sub)
+	}
+	retryable := response.StatusCode == 408 || response.StatusCode == 425 || response.StatusCode == 429 || response.StatusCode >= 500
+	return s.finishFailure(ctx, d, attemptID, response.StatusCode, fmt.Sprintf("http %d", response.StatusCode), excerpt, retryable)
+}
+
+func (s *Service) finishFailure(ctx context.Context, d Delivery, attemptID uint, httpStatus int, safeErr, excerpt string, retryable bool) error {
+	now := s.clock.Now()
+	attempt := d.AttemptCount + 1
+	terminal := !retryable || attempt >= s.maxAttempts
+	status := "retrying"
+	var next *time.Time
+	if terminal {
+		status = "terminal"
+	} else {
+		at := now.Add(backoffDuration(attempt))
+		next = &at
+	}
+	if err := s.repo.CompleteAttempt(ctx, attemptID, status, httpStatus, safeErr, excerpt, now); err != nil {
+		return err
+	}
+	if err := s.repo.CompleteDelivery(ctx, d, status, httpStatus, safeErr, excerpt, next, now); err != nil {
+		return err
+	}
+	sub, err := s.repo.GetSubscription(ctx, d.SubscriptionID)
+	if err == nil {
+		if err = s.repo.RecordFailure(ctx, sub, s.suspendAfter); err != nil {
+			return err
+		}
+		if sub.Suspended && status != "delivered" {
+			_, _ = s.repo.db.ExecContext(ctx, s.repo.q(`UPDATE webhook_deliveries SET status='terminal',next_attempt_at=NULL WHERE id=? AND status='retrying'`), d.ID)
+		}
 	}
 	return nil
 }
 
 func backoffDuration(attempt int) time.Duration {
-	d := time.Duration(1<<uint(attempt-1)) * time.Second
+	if attempt < 1 {
+		attempt = 1
+	}
+	d := time.Duration(1<<uint(min(attempt-1, 20))) * time.Second
 	if d > maxBackoff {
 		d = maxBackoff
 	}
 	return d
 }
-
-func ptr[T any](v T) *T { return &v }
-
-func redactError(err error) string {
-	msg := err.Error()
-	if len(msg) > 200 {
-		msg = msg[:200]
+func safeExcerpt(body []byte) string {
+	if len(body) == 0 {
+		return ""
 	}
-	return msg
+	return fmt.Sprintf("response body: %d bytes", len(body))
 }
 
-// ErrNotFound, ErrInvalidURL, ErrInvalidEvent are stable typed errors.
 var (
-	ErrNotFound     = &whError{"webhook subscription not found"}
-	ErrInvalidURL   = &whError{"invalid webhook URL"}
-	ErrInvalidEvent = &whError{"invalid webhook event type"}
+	ErrNotFound       = &whError{"webhook resource not found"}
+	ErrInvalidURL     = &whError{"invalid webhook URL"}
+	ErrInvalidEvent   = &whError{"invalid webhook event type"}
+	ErrTenantRequired = &whError{"tenant webhook scope is required"}
 )
 
-// ListSubscriptions returns subscriptions matching the filters.
 func (s *Service) ListSubscriptions(ctx context.Context, tenantID uint, scope string, onlyActive bool) ([]Subscription, error) {
 	return s.repo.ListSubscriptions(ctx, tenantID, scope, onlyActive)
 }
-
-// GetSubscription returns one subscription by ID.
 func (s *Service) GetSubscription(ctx context.Context, id uint) (*Subscription, error) {
 	return s.repo.GetSubscription(ctx, id)
 }
+func (s *Service) GetSubscriptionForTenant(ctx context.Context, id, tenantID uint) (*Subscription, error) {
+	return s.repo.GetSubscriptionForTenant(ctx, id, tenantID)
+}
 
-// RotateSecret replaces the signing secret and returns the new plaintext
-// exactly once. The previous secret is not retained for future delivery.
+func (s *Service) UpdateSubscription(ctx context.Context, id, tenantID uint, url string, events []string, active *bool, version int) (*Subscription, error) {
+	sub, err := s.repo.GetSubscriptionForTenant(ctx, id, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if version > 0 && version != sub.Version {
+		return nil, errStale
+	}
+	if url != "" {
+		if err := ssrf.ValidateURL(url, s.ssrfAllow); err != nil {
+			return nil, ErrInvalidURL
+		}
+		sub.URL = url
+	}
+	if events != nil {
+		sub.Events, err = normalizeEvents(events)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if active != nil {
+		sub.Active = *active
+	}
+	if err := s.repo.UpdateSubscription(ctx, sub); err != nil {
+		return nil, err
+	}
+	return sub, nil
+}
+func (s *Service) Disable(ctx context.Context, id, tenantID uint) (*Subscription, error) {
+	active := false
+	return s.UpdateSubscription(ctx, id, tenantID, "", nil, &active, 0)
+}
+func (s *Service) Delete(ctx context.Context, id, tenantID uint) error {
+	return s.repo.DeleteSubscription(ctx, id, tenantID)
+}
+
 func (s *Service) RotateSecret(ctx context.Context, id uint) (*Subscription, string, error) {
-	sub, err := s.repo.GetSubscription(ctx, id)
+	return s.RotateSecretForTenant(ctx, id, 0)
+}
+func (s *Service) RotateSecretForTenant(ctx context.Context, id, tenantID uint) (*Subscription, string, error) {
+	sub, err := s.repo.GetSubscriptionForTenant(ctx, id, tenantID)
 	if err != nil {
 		return nil, "", err
 	}
@@ -246,44 +398,62 @@ func (s *Service) RotateSecret(ctx context.Context, id uint) (*Subscription, str
 	if err != nil {
 		return nil, "", fmt.Errorf("encrypt webhook secret: %w", err)
 	}
-	if err := s.repo.UpdateSubscription(ctx, sub); err != nil {
+	if err = s.repo.UpdateSubscription(ctx, sub); err != nil {
 		return nil, "", err
 	}
 	return sub, hex.EncodeToString(secret), nil
 }
-
-// Reactivate clears suspension after an operator explicitly confirms the
-// endpoint is healthy again.
 func (s *Service) Reactivate(ctx context.Context, id uint) (*Subscription, error) {
-	sub, err := s.repo.GetSubscription(ctx, id)
+	return s.ReactivateForTenant(ctx, id, 0)
+}
+func (s *Service) ReactivateForTenant(ctx context.Context, id, tenantID uint) (*Subscription, error) {
+	sub, err := s.repo.GetSubscriptionForTenant(ctx, id, tenantID)
 	if err != nil {
 		return nil, err
 	}
 	sub.Suspended = false
 	sub.Active = true
-	if err := s.repo.UpdateSubscription(ctx, sub); err != nil {
+	sub.FailureCount = 0
+	if err = s.repo.UpdateSubscription(ctx, sub); err != nil {
 		return nil, err
 	}
 	return sub, nil
 }
-
-// DeliveryHistory returns delivery history for a subscription.
 func (s *Service) DeliveryHistory(ctx context.Context, subscriptionID uint, limit int) ([]Delivery, error) {
 	return s.repo.DeliveryHistory(ctx, subscriptionID, limit)
 }
-
-// RetryDelivery requeues a failed or suspended delivery without exposing
-// its request body or secret material.
+func (s *Service) DeliveryHistoryForTenant(ctx context.Context, subscriptionID, tenantID uint, limit, offset int) ([]Delivery, error) {
+	if _, err := s.repo.GetSubscriptionForTenant(ctx, subscriptionID, tenantID); err != nil {
+		return nil, err
+	}
+	return s.repo.DeliveryHistoryForTenant(ctx, subscriptionID, tenantID, limit, offset)
+}
+func (s *Service) DeliveryForTenant(ctx context.Context, id, tenantID uint) (*Delivery, []Attempt, error) {
+	delivery, err := s.repo.GetDeliveryForTenant(ctx, id, tenantID)
+	if err != nil {
+		return nil, nil, err
+	}
+	attempts, err := s.repo.Attempts(ctx, id)
+	return delivery, attempts, err
+}
+func (s *Service) ReplayForTenant(ctx context.Context, id, tenantID uint) (*Delivery, error) {
+	delivery, err := s.repo.GetDeliveryForTenant(ctx, id, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if delivery.Status != "terminal" && delivery.Status != "failed" && delivery.Status != "suspended" {
+		return nil, fmt.Errorf("delivery is not replayable")
+	}
+	return s.repo.CreateManualReplay(ctx, *delivery)
+}
 func (s *Service) RetryDelivery(ctx context.Context, id uint) error {
-	d, err := s.repo.GetDelivery(ctx, id)
+	delivery, err := s.repo.GetDelivery(ctx, id)
 	if err != nil {
 		return err
 	}
-	if d.Status != "failed" && d.Status != "suspended" {
+	if delivery.Status != "failed" && delivery.Status != "terminal" && delivery.Status != "suspended" {
 		return fmt.Errorf("delivery is not retryable")
 	}
-	d.Status = "pending"
-	d.NextAttemptAt = nil
-	d.RedactedError = ""
-	return s.repo.UpdateDelivery(ctx, d)
+	_, err = s.repo.CreateManualReplay(ctx, *delivery)
+	return err
 }

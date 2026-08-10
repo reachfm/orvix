@@ -101,9 +101,25 @@ func (r *OutboxRepository) Enqueue(ctx context.Context, q Querier, topic, aggreg
 // atomic per-row even without row locking, since a losing concurrent
 // UPDATE simply affects 0 rows.
 func (r *OutboxRepository) ClaimBatch(ctx context.Context, db *sql.DB, limit int, now time.Time) ([]OutboxEvent, error) {
+	return r.claimBatch(ctx, db, "", limit, now)
+}
+
+// ClaimTopicBatch claims only one exact topic, allowing independent durable
+// workers to share the kernel outbox without consuming each other's jobs.
+func (r *OutboxRepository) ClaimTopicBatch(ctx context.Context, db *sql.DB, topic string, limit int, now time.Time) ([]OutboxEvent, error) {
+	return r.claimBatch(ctx, db, topic, limit, now)
+}
+
+func (r *OutboxRepository) claimBatch(ctx context.Context, db *sql.DB, topic string, limit int, now time.Time) ([]OutboxEvent, error) {
+	where := `status = ` + r.dialect.Placeholder(1) + ` AND next_attempt_at <= ` + r.dialect.Placeholder(2)
+	args := []any{string(OutboxPending), now}
+	if topic != "" {
+		where += ` AND topic = ` + r.dialect.Placeholder(3)
+		args = append(args, topic)
+	}
+	args = append(args, limit)
 	rows, err := db.QueryContext(ctx,
-		`SELECT id FROM platform_outbox_events WHERE status = `+r.dialect.Placeholder(1)+` AND next_attempt_at <= `+r.dialect.Placeholder(2)+` ORDER BY id ASC LIMIT `+r.dialect.Placeholder(3),
-		string(OutboxPending), now, limit,
+		`SELECT id FROM platform_outbox_events WHERE `+where+` ORDER BY id ASC LIMIT `+r.dialect.Placeholder(len(args)), args...,
 	)
 	if err != nil {
 		return nil, Wrap(ErrCodeInternal, "list claimable outbox events", err)
@@ -168,8 +184,8 @@ func (r *OutboxRepository) getByID(ctx context.Context, db *sql.DB, id int64) (*
 }
 
 // MarkDone records successful processing.
-func (r *OutboxRepository) MarkDone(ctx context.Context, db *sql.DB, id int64, now time.Time) error {
-	_, err := db.ExecContext(ctx,
+func (r *OutboxRepository) MarkDone(ctx context.Context, q Querier, id int64, now time.Time) error {
+	_, err := q.ExecContext(ctx,
 		`UPDATE platform_outbox_events SET status = `+r.dialect.Placeholder(1)+`, completed_at = `+r.dialect.Placeholder(2)+` WHERE id = `+r.dialect.Placeholder(3),
 		string(OutboxDone), now, id,
 	)

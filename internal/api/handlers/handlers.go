@@ -438,6 +438,29 @@ func (h *Handler) SetDomainAdminService(s *domainadminsvc.Service) {
 
 func (h *Handler) SetWebhookService(s *webhooks.Service) { h.webhookSvc = s }
 
+func (h *Handler) StartWebhookWorker(ctx context.Context, interval time.Duration) {
+	if h.webhookSvc == nil {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := h.webhookSvc.ProcessOutbox(ctx, 50); err != nil {
+					h.logger.Error("webhook outbox processing failed", zap.Error(err))
+				}
+				if err := h.webhookSvc.ProcessPendingDeliveries(ctx, 50); err != nil {
+					h.logger.Error("webhook delivery processing failed", zap.Error(err))
+				}
+			}
+		}
+	}()
+}
+
 // DomainAdminService returns the wired domain admin service, or nil if
 // it was never set. Used by router.go to wire the TLS service into it
 // after both have been constructed, without changing construction
