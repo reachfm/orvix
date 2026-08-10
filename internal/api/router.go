@@ -44,6 +44,7 @@ import (
 	"github.com/orvix/orvix/internal/modules"
 	"github.com/orvix/orvix/internal/observability"
 	"github.com/orvix/orvix/internal/platform/bulkprovision"
+	"github.com/orvix/orvix/internal/platform/cluster"
 	"github.com/orvix/orvix/internal/platform/relay"
 	"github.com/orvix/orvix/internal/ruler"
 	orvixruntime "github.com/orvix/orvix/internal/runtime"
@@ -351,6 +352,18 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		// workers already write to — not a separate history store.
 		if sqlDB, err := db.DB(); err == nil {
 			router.h.SetAttemptHistoryRepo(delivery.NewAttemptHistorySQLRepo(sqlDB))
+		}
+		// Wire the cluster node registry service (Milestone 10) from
+		// the same runtime module that self-enrolled at boot — the
+		// admin API reads/commands the SAME node rows, not a second
+		// registry.
+		if clProvider, ok := mod.(interface {
+			ClusterService() *cluster.Service
+		}); ok {
+			if cs := clProvider.ClusterService(); cs != nil {
+				router.h.SetClusterService(cs)
+				logger.Info("cluster service wired for admin API")
+			}
 		}
 		// Wire the Web Push (RFC 8030) notifier from the
 		// same runtime module. The webmail
@@ -1093,6 +1106,13 @@ func (r *Router) setupRoutes() {
 	canWriteDomains.Post("/relay/providers/:id/test", r.h.PostRelayProviderTest)
 	canWriteDomains.Post("/relay/routing-rules", r.h.PostRelayRoutingRule)
 	canWriteDomains.Post("/relay/emergency-override", r.h.PostRelayEmergencyOverride)
+
+	// ── Cluster control plane (Milestone 10) ──
+	enterpriseRead.Get("/cluster/nodes", r.h.GetClusterNodes)
+	canWriteDomains.Post("/cluster/nodes/:id/cordon", r.h.PostClusterNodeCordon)
+	canWriteDomains.Post("/cluster/nodes/:id/uncordon", r.h.PostClusterNodeUncordon)
+	canWriteDomains.Post("/cluster/nodes/:id/drain", r.h.PostClusterNodeDrain)
+	canWriteDomains.Post("/cluster/nodes/:id/resume", r.h.PostClusterNodeResume)
 
 	// ── Organizations ──
 	enterpriseRead.Get("/organizations/:id", r.h.GetOrganization)

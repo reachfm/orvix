@@ -27,6 +27,7 @@ import (
 	"github.com/orvix/orvix/internal/licensing"
 	"github.com/orvix/orvix/internal/licensingauthority"
 	"github.com/orvix/orvix/internal/observability"
+	"github.com/orvix/orvix/internal/platform/cluster"
 	"github.com/orvix/orvix/internal/platform/deliverability"
 	"github.com/orvix/orvix/internal/platform/relay"
 	"github.com/orvix/orvix/internal/policy"
@@ -74,6 +75,9 @@ type Module struct {
 	pop3sServer       *pop3.Server
 	jmapServer        *jmap.Server
 	workers           []*delivery.DeliveryWorker
+	// clusterSvc is the Milestone 10 node registry/placement/lease
+	// service. nil if schema init failed (never blocks startup).
+	clusterSvc *cluster.Service
 
 	// pushNotifier is the Web Push (RFC 8030 / RFC 8291) dispatcher.
 	// It is constructed in initCore from cfg.CoreMail.VAPIDPublicKey
@@ -499,6 +503,32 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 		deliverabilityAdapter = deliverability.NewDeliveryAdapter(deliverability.NewService(deliverabilityRepo, audit.NewExtendedStore(sqlDB), nil, nil))
 	}
 
+	// Cluster control plane (Milestone 10) — a fresh/single-node
+	// install self-enrolls as its own sole node on first boot and
+	// simply heartbeats on every later boot; nothing about existing
+	// single-node behavior changes if the multi-node APIs are never
+	// used.
+	clusterRepo := cluster.NewRepository(sqlDB)
+	if err := clusterRepo.EnsureSchema(context.Background()); err != nil {
+		if m.logger != nil {
+			m.logger.Warn("cluster schema init failed; node registry disabled", zap.Error(err))
+		}
+	} else {
+		m.clusterSvc = cluster.NewService(clusterRepo, audit.NewExtendedStore(sqlDB), nil, nil)
+		selfID := cfg.CoreMail.Hostname
+		if selfID == "" {
+			selfID = "orvix-node"
+		}
+		alreadyEnrolled, _, err := m.clusterSvc.EnsureSelfNode(context.Background(), selfID, cluster.Node{
+			Role: "all-in-one", Capabilities: []string{"smtp", "delivery_worker", "imap", "pop3", "jmap"},
+		})
+		if err != nil && m.logger != nil {
+			m.logger.Warn("cluster self-enrollment failed", zap.Error(err))
+		} else if !alreadyEnrolled && m.logger != nil {
+			m.logger.Info("cluster node self-enrolled", zap.String("node_id", selfID))
+		}
+	}
+
 	m.workers = make([]*delivery.DeliveryWorker, 0, workerCount)
 	for i := 0; i < workerCount; i++ {
 		worker := delivery.NewDeliveryWorker(
@@ -829,6 +859,12 @@ func (m *Module) MailStore() *storage.MailStore {
 // the runtime was not booted.
 func (m *Module) QueueEngine() *queue.QueueEngine {
 	return m.queue
+}
+
+// ClusterService returns the Milestone 10 node registry service, or
+// nil if cluster schema init failed or the runtime was not booted.
+func (m *Module) ClusterService() *cluster.Service {
+	return m.clusterSvc
 }
 
 // AntivirusEngine returns the antivirus engine wired into
