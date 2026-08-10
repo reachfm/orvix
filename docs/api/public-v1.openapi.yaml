@@ -1,0 +1,596 @@
+openapi: 3.1.0
+info:
+  title: Orvix Tenant Public API
+  version: 1.0.0
+  description: Stable API-key-only automation surface for tenant-owned mail resources.
+  license: {name: Proprietary, identifier: LicenseRef-Orvix-Proprietary}
+servers:
+  - url: https://api.orvix.email
+security:
+  - tenantApiKey: []
+tags:
+  - {name: Organization, description: Current tenant identity and limits.}
+  - {name: Domains, description: Tenant-owned mail domain lifecycle.}
+  - {name: Mailboxes, description: Tenant mailbox lifecycle.}
+  - {name: Aliases, description: Tenant alias lifecycle.}
+  - {name: Groups, description: Tenant distribution groups and memberships.}
+  - {name: Usage, description: Current tenant usage counters.}
+paths:
+  /api/v1/public/organization:
+    get:
+      tags: [Organization]
+      summary: Get the API key's organization
+      operationId: getCurrentOrganization
+      x-orvix-scope: public:organization:read
+      security: [{tenantApiKey: []}]
+      responses: &readResponses
+        '200': {$ref: '#/components/responses/ReadResponse'}
+        '400': {$ref: '#/components/responses/ErrorResponse'}
+        '401': {$ref: '#/components/responses/ErrorResponse'}
+        '403': {$ref: '#/components/responses/ErrorResponse'}
+        '404': {$ref: '#/components/responses/ErrorResponse'}
+        '429': {$ref: '#/components/responses/ErrorResponse'}
+        '500': {$ref: '#/components/responses/ErrorResponse'}
+  /api/v1/public/usage:
+    get:
+      tags: [Usage]
+      summary: Get current tenant usage
+      operationId: getCurrentUsage
+      x-orvix-scope: public:usage:read
+      security: [{tenantApiKey: []}]
+      responses: *readResponses
+  /api/v1/public/domains:
+    get:
+      tags: [Domains]
+      summary: List tenant domains
+      operationId: listDomains
+      x-orvix-scope: public:domains:read
+      security: [{tenantApiKey: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {$ref: '#/components/parameters/Search'}
+        - name: status
+          in: query
+          schema: {type: string, enum: [active, disabled, suspended]}
+      responses: &listResponses
+        '200': {$ref: '#/components/responses/ListResponse'}
+        '400': {$ref: '#/components/responses/ErrorResponse'}
+        '401': {$ref: '#/components/responses/ErrorResponse'}
+        '403': {$ref: '#/components/responses/ErrorResponse'}
+        '429': {$ref: '#/components/responses/ErrorResponse'}
+        '500': {$ref: '#/components/responses/ErrorResponse'}
+    post:
+      tags: [Domains]
+      summary: Create a domain
+      operationId: createDomain
+      x-orvix-scope: public:domains:write
+      x-idempotent: true
+      security: [{tenantApiKey: []}]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateDomainRequest'}
+      responses: &mutationResponses
+        '200': {$ref: '#/components/responses/MutationResponse'}
+        '201': {$ref: '#/components/responses/MutationResponse'}
+        '400': {$ref: '#/components/responses/ErrorResponse'}
+        '401': {$ref: '#/components/responses/ErrorResponse'}
+        '403': {$ref: '#/components/responses/ErrorResponse'}
+        '404': {$ref: '#/components/responses/ErrorResponse'}
+        '409': {$ref: '#/components/responses/ErrorResponse'}
+        '422': {$ref: '#/components/responses/ErrorResponse'}
+        '429': {$ref: '#/components/responses/ErrorResponse'}
+        '500': {$ref: '#/components/responses/ErrorResponse'}
+  /api/v1/public/domains/{id}:
+    parameters: [{$ref: '#/components/parameters/ResourceID'}]
+    get:
+      tags: [Domains]
+      summary: Get a domain
+      operationId: getDomain
+      x-orvix-scope: public:domains:read
+      security: [{tenantApiKey: []}]
+      responses: *readResponses
+    patch:
+      tags: [Domains]
+      summary: Update a domain
+      operationId: updateDomain
+      x-orvix-scope: public:domains:write
+      x-idempotent: true
+      security: [{tenantApiKey: []}]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/UpdateDomainRequest'}}}
+      responses: *mutationResponses
+    delete:
+      tags: [Domains]
+      summary: Delete a domain
+      operationId: deleteDomain
+      x-orvix-scope: public:domains:write
+      x-idempotent: true
+      security: [{tenantApiKey: []}]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      responses: *mutationResponses
+  /api/v1/public/domains/{id}/status:
+    parameters: [{$ref: '#/components/parameters/ResourceID'}]
+    post:
+      tags: [Domains]
+      summary: Change a domain status
+      operationId: setDomainStatus
+      x-orvix-scope: public:domains:write
+      x-idempotent: true
+      security: [{tenantApiKey: []}]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/StatusRequest'}}}}
+      responses: *mutationResponses
+  /api/v1/public/mailboxes:
+    get:
+      tags: [Mailboxes]
+      summary: List tenant mailboxes
+      operationId: listMailboxes
+      x-orvix-scope: public:mailboxes:read
+      security: [{tenantApiKey: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {$ref: '#/components/parameters/Search'}
+        - name: domain_id
+          in: query
+          schema: {type: integer, minimum: 1}
+        - name: status
+          in: query
+          schema: {type: string, enum: [active, disabled, suspended]}
+      responses: *listResponses
+    post:
+      tags: [Mailboxes]
+      summary: Create a mailbox
+      operationId: createMailbox
+      x-orvix-scope: public:mailboxes:write
+      x-idempotent: true
+      security: [{tenantApiKey: []}]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CreateMailboxRequest'}}}}
+      responses: *mutationResponses
+  /api/v1/public/mailboxes/{id}:
+    parameters: [{$ref: '#/components/parameters/ResourceID'}]
+    get:
+      tags: [Mailboxes]
+      summary: Get a mailbox
+      operationId: getMailbox
+      x-orvix-scope: public:mailboxes:read
+      security: [{tenantApiKey: []}]
+      responses: *readResponses
+    patch:
+      tags: [Mailboxes]
+      summary: Update a mailbox
+      operationId: updateMailbox
+      x-orvix-scope: public:mailboxes:write
+      x-idempotent: true
+      security: [{tenantApiKey: []}]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/UpdateMailboxRequest'}}}}
+      responses: *mutationResponses
+    delete:
+      tags: [Mailboxes]
+      summary: Delete a mailbox
+      operationId: deleteMailbox
+      x-orvix-scope: public:mailboxes:write
+      x-idempotent: true
+      security: [{tenantApiKey: []}]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      responses: *mutationResponses
+  /api/v1/public/mailboxes/{id}/status:
+    parameters: [{$ref: '#/components/parameters/ResourceID'}]
+    post:
+      tags: [Mailboxes]
+      summary: Change a mailbox status
+      operationId: setMailboxStatus
+      x-orvix-scope: public:mailboxes:write
+      x-idempotent: true
+      security: [{tenantApiKey: []}]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/StatusRequest'}}}}
+      responses: *mutationResponses
+  /api/v1/public/aliases:
+    get:
+      tags: [Aliases]
+      summary: List tenant aliases
+      operationId: listAliases
+      x-orvix-scope: public:aliases:read
+      security: [{tenantApiKey: []}]
+      parameters: [{$ref: '#/components/parameters/Page'}, {$ref: '#/components/parameters/PageSize'}, {$ref: '#/components/parameters/Search'}]
+      responses: *listResponses
+    post:
+      tags: [Aliases]
+      summary: Create an alias
+      operationId: createAlias
+      x-orvix-scope: public:aliases:write
+      x-idempotent: true
+      security: [{tenantApiKey: []}]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/AliasRequest'}}}}
+      responses: *mutationResponses
+  /api/v1/public/aliases/{id}:
+    parameters: [{$ref: '#/components/parameters/ResourceID'}]
+    get:
+      tags: [Aliases]
+      summary: Get an alias
+      operationId: getAlias
+      x-orvix-scope: public:aliases:read
+      security: [{tenantApiKey: []}]
+      responses: *readResponses
+    patch:
+      tags: [Aliases]
+      summary: Update an alias
+      operationId: updateAlias
+      x-orvix-scope: public:aliases:write
+      x-idempotent: true
+      security: [{tenantApiKey: []}]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/AliasRequest'}}}}
+      responses: *mutationResponses
+    delete:
+      tags: [Aliases]
+      summary: Delete an alias
+      operationId: deleteAlias
+      x-orvix-scope: public:aliases:write
+      x-idempotent: true
+      security: [{tenantApiKey: []}]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      responses: *mutationResponses
+  /api/v1/public/groups:
+    get:
+      tags: [Groups]
+      summary: List tenant groups
+      operationId: listGroups
+      x-orvix-scope: public:groups:read
+      security: [{tenantApiKey: []}]
+      parameters: [{$ref: '#/components/parameters/Page'}, {$ref: '#/components/parameters/PageSize'}, {$ref: '#/components/parameters/Search'}]
+      responses: *listResponses
+    post:
+      tags: [Groups]
+      summary: Create a group
+      operationId: createGroup
+      x-orvix-scope: public:groups:write
+      x-idempotent: true
+      security: [{tenantApiKey: []}]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/GroupRequest'}}}}
+      responses: *mutationResponses
+  /api/v1/public/groups/{id}:
+    parameters: [{$ref: '#/components/parameters/ResourceID'}]
+    get:
+      tags: [Groups]
+      summary: Get a group
+      operationId: getGroup
+      x-orvix-scope: public:groups:read
+      security: [{tenantApiKey: []}]
+      responses: *readResponses
+    patch:
+      tags: [Groups]
+      summary: Update a group
+      operationId: updateGroup
+      x-orvix-scope: public:groups:write
+      x-idempotent: true
+      security: [{tenantApiKey: []}]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/GroupRequest'}}}}
+      responses: *mutationResponses
+    delete:
+      tags: [Groups]
+      summary: Delete a group
+      operationId: deleteGroup
+      x-orvix-scope: public:groups:write
+      x-idempotent: true
+      security: [{tenantApiKey: []}]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      responses: *mutationResponses
+  /api/v1/public/groups/{id}/members:
+    parameters: [{$ref: '#/components/parameters/ResourceID'}]
+    get:
+      tags: [Groups]
+      summary: List group members
+      operationId: listGroupMembers
+      x-orvix-scope: public:groups:read
+      security: [{tenantApiKey: []}]
+      parameters: [{$ref: '#/components/parameters/Page'}, {$ref: '#/components/parameters/PageSize'}]
+      responses: *listResponses
+    post:
+      tags: [Groups]
+      summary: Add a group member
+      operationId: addGroupMember
+      x-orvix-scope: public:groups:write
+      x-idempotent: true
+      security: [{tenantApiKey: []}]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/GroupMemberRequest'}}}}
+      responses: *mutationResponses
+  /api/v1/public/groups/{id}/members/{memberId}:
+    parameters:
+      - {$ref: '#/components/parameters/ResourceID'}
+      - name: memberId
+        in: path
+        required: true
+        schema: {type: integer, minimum: 1}
+    delete:
+      tags: [Groups]
+      summary: Delete a group member
+      operationId: deleteGroupMember
+      x-orvix-scope: public:groups:write
+      x-idempotent: true
+      security: [{tenantApiKey: []}]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      responses: *mutationResponses
+components:
+  securitySchemes:
+    tenantApiKey:
+      type: http
+      scheme: bearer
+      bearerFormat: orv_ API key
+      description: Tenant-bound API key. Session/JWT credentials are not accepted.
+  parameters:
+    ResourceID: {name: id, in: path, required: true, schema: {type: integer, minimum: 1}}
+    Page: {name: page, in: query, schema: {type: integer, minimum: 1, default: 1}}
+    PageSize: {name: page_size, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 25}}
+    Search: {name: search, in: query, schema: {type: string, maxLength: 200}}
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Unique for 24 hours per tenant, API key, method, and resource route. Same canonical JSON replays; changed JSON conflicts.
+      schema: {type: string, minLength: 1, maxLength: 255}
+  responses:
+    ErrorResponse:
+      description: Stable error envelope. The response also carries X-Request-ID.
+      headers: {X-Request-ID: {$ref: '#/components/headers/RequestID'}}
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    ReadResponse:
+      description: Successful response.
+      headers: {X-Request-ID: {$ref: '#/components/headers/RequestID'}}
+      content: {application/json: {schema: {$ref: '#/components/schemas/ResourceEnvelope'}}}
+    ListResponse:
+      description: Successful paginated response.
+      headers: {X-Request-ID: {$ref: '#/components/headers/RequestID'}}
+      content: {application/json: {schema: {$ref: '#/components/schemas/ListEnvelope'}}}
+    MutationResponse:
+      description: Successful idempotent mutation. Replays include Idempotency-Replayed true.
+      headers:
+        X-Request-ID: {$ref: '#/components/headers/RequestID'}
+        Idempotency-Replayed: {schema: {type: string, enum: ['true']}}
+      content: {application/json: {schema: {$ref: '#/components/schemas/ResourceEnvelope'}}}
+  headers:
+    RequestID: {schema: {type: string}, description: Correlation identifier for this request.}
+  schemas:
+    Metadata:
+      type: object
+      required: [request_id]
+      properties: {request_id: {type: string}}
+      additionalProperties: false
+    Page:
+      type: object
+      required: [page, page_size, total_count, total_pages]
+      properties:
+        page: {type: integer}
+        page_size: {type: integer}
+        total_count: {type: integer}
+        total_pages: {type: integer}
+      additionalProperties: false
+    ResourceEnvelope:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          oneOf:
+            - {$ref: '#/components/schemas/Organization'}
+            - {$ref: '#/components/schemas/Usage'}
+            - {$ref: '#/components/schemas/Domain'}
+            - {$ref: '#/components/schemas/Mailbox'}
+            - {$ref: '#/components/schemas/Alias'}
+            - {$ref: '#/components/schemas/Group'}
+            - {$ref: '#/components/schemas/GroupMember'}
+            - {$ref: '#/components/schemas/DeleteResult'}
+        meta: {$ref: '#/components/schemas/Metadata'}
+      additionalProperties: false
+    ListEnvelope:
+      type: object
+      required: [data, page, meta]
+      properties:
+        data:
+          type: array
+          items:
+            oneOf:
+              - {$ref: '#/components/schemas/Domain'}
+              - {$ref: '#/components/schemas/Mailbox'}
+              - {$ref: '#/components/schemas/Alias'}
+              - {$ref: '#/components/schemas/Group'}
+              - {$ref: '#/components/schemas/GroupMember'}
+        page: {$ref: '#/components/schemas/Page'}
+        meta: {$ref: '#/components/schemas/Metadata'}
+      additionalProperties: false
+    Organization:
+      type: object
+      required: [id, name, slug, domain, plan, max_domains, max_mailboxes, active, created_at, updated_at]
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        slug: {type: string}
+        domain: {type: string}
+        plan: {type: string}
+        max_domains: {type: integer}
+        max_mailboxes: {type: integer}
+        active: {type: boolean}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+      additionalProperties: false
+    Usage:
+      type: object
+      required: [period_start, period_end, mailboxes_used, domains_used, storage_used_mb, emails_sent, emails_received, api_calls]
+      properties:
+        period_start: {type: string, format: date-time}
+        period_end: {type: string, format: date-time}
+        mailboxes_used: {type: integer}
+        domains_used: {type: integer}
+        storage_used_mb: {type: integer}
+        emails_sent: {type: integer}
+        emails_received: {type: integer}
+        api_calls: {type: integer}
+      additionalProperties: false
+    Domain:
+      type: object
+      required: [id, name, status, plan, max_mailboxes, max_aliases, max_quota_mb, default_mailbox_quota_mb, mailbox_count, alias_count, storage_used_bytes, created_at, updated_at]
+      properties:
+        id: {type: integer}
+        name: {type: string, format: hostname}
+        status: {type: string}
+        plan: {type: string}
+        description: {type: string}
+        max_mailboxes: {type: integer}
+        max_aliases: {type: integer}
+        max_quota_mb: {type: integer}
+        default_mailbox_quota_mb: {type: integer}
+        mailbox_count: {type: integer}
+        alias_count: {type: integer}
+        storage_used_bytes: {type: integer}
+        dns_last_checked_at: {type: [string, 'null'], format: date-time}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+      additionalProperties: false
+    Mailbox:
+      type: object
+      required: [id, domain_id, email, local_part, name, status, quota_mb, used_bytes, message_count, send_limit_per_hour, created_at, updated_at]
+      properties:
+        id: {type: integer}
+        domain_id: {type: integer}
+        email: {type: string, format: email}
+        local_part: {type: string}
+        name: {type: string}
+        status: {type: string}
+        quota_mb: {type: integer}
+        used_bytes: {type: integer}
+        message_count: {type: integer}
+        send_limit_per_hour: {type: integer}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+      additionalProperties: false
+    Alias:
+      type: object
+      required: [id, domain_id, source, destination, active, created_at, updated_at]
+      properties:
+        id: {type: integer}
+        domain_id: {type: integer}
+        source: {type: string, format: email}
+        destination: {type: string, format: email}
+        active: {type: boolean}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+      additionalProperties: false
+    Group:
+      type: object
+      required: [id, name, description, created_at, updated_at]
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        description: {type: string}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+      additionalProperties: false
+    GroupMember:
+      type: object
+      required: [id, email, added_at]
+      properties:
+        id: {type: integer}
+        email: {type: string, format: email}
+        added_at: {type: string, format: date-time}
+      additionalProperties: false
+    DeleteResult:
+      type: object
+      required: [deleted]
+      properties: {deleted: {type: boolean, const: true}}
+      additionalProperties: false
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, request_id]
+          properties:
+            code: {type: string}
+            message: {type: string}
+            request_id: {type: string}
+            details:
+              type: array
+              items:
+                type: object
+                required: [field, reason]
+                properties: {field: {type: string}, reason: {type: string}}
+                additionalProperties: false
+          additionalProperties: false
+      additionalProperties: false
+    CreateDomainRequest:
+      type: object
+      required: [name]
+      properties:
+        name: {type: string, format: hostname}
+        description: {type: string, maxLength: 500}
+        status: {type: string, enum: [active, disabled]}
+        max_mailboxes: {type: integer, minimum: 0}
+        max_aliases: {type: integer, minimum: 0}
+        max_quota_mb: {type: integer, minimum: 0}
+      additionalProperties: false
+    UpdateDomainRequest:
+      type: object
+      properties:
+        description: {type: string, maxLength: 500}
+        max_mailboxes: {type: integer, minimum: 0}
+        max_aliases: {type: integer, minimum: 0}
+        max_quota_mb: {type: integer, minimum: 0}
+      additionalProperties: false
+    StatusRequest:
+      type: object
+      required: [status]
+      properties: {status: {type: string}, reason: {type: string, maxLength: 500}}
+      additionalProperties: false
+    CreateMailboxRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: {type: string, format: email}
+        password: {type: string, format: password, writeOnly: true}
+        name: {type: string}
+        quota_mb: {type: integer, minimum: 0}
+        send_limit_per_hour: {type: integer, minimum: 0}
+      additionalProperties: false
+    UpdateMailboxRequest:
+      type: object
+      properties:
+        name: {type: string}
+        quota_mb: {type: integer, minimum: 0}
+        send_limit_per_hour: {type: integer, minimum: 0}
+        allow_smtp: {type: boolean}
+        allow_imap: {type: boolean}
+        allow_pop3: {type: boolean}
+        allow_jmap: {type: boolean}
+      additionalProperties: false
+    AliasRequest:
+      type: object
+      required: [domain_id, source, destination]
+      properties:
+        domain_id: {type: integer, minimum: 1}
+        source: {type: string, format: email}
+        destination: {type: string, format: email}
+        active: {type: boolean}
+      additionalProperties: false
+    GroupRequest:
+      type: object
+      required: [name]
+      properties: {name: {type: string, minLength: 1}, description: {type: string}}
+      additionalProperties: false
+    GroupMemberRequest:
+      type: object
+      required: [email]
+      properties: {email: {type: string, format: email}}
+      additionalProperties: false

@@ -463,17 +463,21 @@ func (m *APIKeyManager) Middleware() fiber.Handler {
 // key, and platform-super-admin keys are deliberately not tenant credentials.
 func (m *APIKeyManager) PublicMiddleware() fiber.Handler {
 	return func(c fiber.Ctx) error {
+		unauthorized := func() error {
+			requestID, _ := c.Locals("public_request_id").(string)
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": fiber.Map{"code": "UNAUTHENTICATED", "message": "A valid tenant API key is required.", "request_id": requestID}})
+		}
 		authHeader := strings.TrimSpace(c.Get("Authorization"))
 		if !strings.HasPrefix(authHeader, "Bearer ") {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": fiber.Map{"code": "UNAUTHENTICATED", "message": "A valid tenant API key is required."}})
+			return unauthorized()
 		}
 		token := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
 		if !strings.HasPrefix(token, "orv_") {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": fiber.Map{"code": "UNAUTHENTICATED", "message": "A valid tenant API key is required."}})
+			return unauthorized()
 		}
 		record, err := m.ValidateForIP(token, c.IP())
 		if err != nil || record.TenantID == 0 || Role(record.Role) == RolePlatformSuperAdmin {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": fiber.Map{"code": "UNAUTHENTICATED", "message": "A valid tenant API key is required."}})
+			return unauthorized()
 		}
 		c.Locals("user_id", record.UserID)
 		c.Locals("tenant_id", record.TenantID)

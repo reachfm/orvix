@@ -732,7 +732,7 @@ func (r *Router) setupMiddleware() {
 	r.app.Use(cors.New(cors.Config{
 		AllowOrigins:     allowOrigins,
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-CSRF-Token"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-CSRF-Token", "Idempotency-Key", "X-Request-ID"},
 		AllowCredentials: true,
 	}))
 	r.app.Use(securityHeaders())

@@ -118,10 +118,11 @@ func validateAPIKeyScopes(scopes []string, role auth.Role) error {
 		}
 		seen[s] = true
 		permission := publicScopePermission(s)
+		isPublicScope := permission != ""
 		if permission == "" {
 			permission = rbac.Permission(s)
 		}
-		if role == auth.RolePlatformSuperAdmin || !rbac.HasPermission(role, permission) {
+		if (isPublicScope && role == auth.RolePlatformSuperAdmin) || !rbac.HasPermission(role, permission) {
 			return fmt.Errorf("scope %s exceeds caller permissions or is unknown", s)
 		}
 	}
