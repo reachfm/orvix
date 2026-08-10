@@ -1,12 +1,15 @@
-﻿package webhooks
+package webhooks
 
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/orvix/orvix/internal/config"
 	_ "modernc.org/sqlite"
 )
 
@@ -87,5 +90,75 @@ func TestWHSubscriptionConcurrency(t *testing.T) {
 	c2.Active = false
 	if err := repo.UpdateSubscription(ctx, c2); err == nil {
 		t.Fatal("expected stale version error")
+	}
+}
+
+func TestWHSecretEncryptedAndRotatable(t *testing.T) {
+	oldKey := os.Getenv("ORVIX_ENCRYPTION_KEY")
+	defer os.Setenv("ORVIX_ENCRYPTION_KEY", oldKey)
+	os.Setenv("ORVIX_ENCRYPTION_KEY", "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff")
+	db := newWHTestDB(t)
+	repo := NewRepository(db)
+	ctx := context.Background()
+	if err := repo.EnsureSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(repo, nil)
+	sub, returned, err := svc.CreateSubscriptionWithSecret(ctx, 1, ScopeTenant, "https://example.com/hook", []string{"domain.created"}, []byte("original-secret"))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if returned != hex.EncodeToString([]byte("original-secret")) {
+		t.Fatal("creation did not return the one-time secret")
+	}
+	stored, err := repo.GetSubscription(ctx, sub.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.SecretEncrypted == "original-secret" || stored.SecretEncrypted == returned {
+		t.Fatal("secret was stored in plaintext")
+	}
+	plain, err := config.Decrypt(stored.SecretEncrypted)
+	if err != nil || string(plain) != "original-secret" {
+		t.Fatalf("stored secret does not decrypt to original: %v", err)
+	}
+	rotated, newSecret, err := svc.RotateSecret(ctx, sub.ID)
+	if err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	if newSecret == returned || rotated.SecretEncrypted == stored.SecretEncrypted {
+		t.Fatal("rotation did not replace secret")
+	}
+}
+
+func TestWHRetryAndReactivate(t *testing.T) {
+	db := newWHTestDB(t)
+	repo := NewRepository(db)
+	ctx := context.Background()
+	if err := repo.EnsureSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(repo, nil)
+	sub := &Subscription{TenantID: 1, Scope: ScopeTenant, URL: "https://example.com", Events: []string{"domain.created"}, Active: true, Suspended: true}
+	if err := repo.InsertSubscription(ctx, sub); err != nil {
+		t.Fatal(err)
+	}
+	d := &Delivery{EventID: "evt_test", SubscriptionID: sub.ID, Status: "suspended"}
+	if err := repo.InsertDelivery(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.RetryDelivery(ctx, d.ID); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	got, _ := repo.GetDelivery(ctx, d.ID)
+	if got.Status != "pending" {
+		t.Fatalf("expected pending retry, got %s", got.Status)
+	}
+	if _, err := svc.Reactivate(ctx, sub.ID); err != nil {
+		t.Fatalf("reactivate: %v", err)
+	}
+	gotSub, _ := repo.GetSubscription(ctx, sub.ID)
+	if !gotSub.Active || gotSub.Suspended {
+		t.Fatal("subscription was not reactivated")
 	}
 }

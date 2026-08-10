@@ -1,4 +1,4 @@
-﻿package handlers
+package handlers
 
 import (
 	"fmt"
@@ -27,12 +27,12 @@ func (h *Handler) CreateWebhookSubscription(c fiber.Ctx) error {
 	}
 	tenantID, _ := c.Locals("tenant_id").(uint)
 	scope := webhooks.SubscriptionScope(req.Scope)
-	sub, err := h.webhookService().CreateSubscription(c.Context(), tenantID, scope, req.URL, req.Events, nil)
+	sub, secret, err := h.webhookService().CreateSubscriptionWithSecret(c.Context(), tenantID, scope, req.URL, req.Events, nil)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	h.writeAudit(c, "webhook.subscription.create", fmt.Sprintf("sub:%d url:%s", sub.ID, sub.URL))
-	return c.Status(fiber.StatusCreated).JSON(sub)
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"subscription": sub, "secret": secret})
 }
 
 func (h *Handler) ListWebhookSubscriptions(c fiber.Ctx) error {
@@ -69,5 +69,39 @@ func (h *Handler) GetWebhookDeliveryHistory(c fiber.Ctx) error {
 }
 
 func (h *Handler) RetryWebhookDelivery(c fiber.Ctx) error {
-	return c.Status(fiber.StatusNotImplemented).JSON(fiber.Map{"error": "not yet implemented"})
+	id, err := strconv.ParseUint(c.Params("id"), 10, 64)
+	if err != nil || id == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid delivery id"})
+	}
+	if err := h.webhookService().RetryDelivery(c.Context(), uint(id)); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	h.writeAudit(c, "webhook.delivery.retry", fmt.Sprintf("delivery:%d", id))
+	return c.JSON(fiber.Map{"status": "queued"})
+}
+
+func (h *Handler) RotateWebhookSecret(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 64)
+	if err != nil || id == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid subscription id"})
+	}
+	sub, secret, err := h.webhookService().RotateSecret(c.Context(), uint(id))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	h.writeAudit(c, "webhook.subscription.secret.rotate", fmt.Sprintf("subscription:%d", id))
+	return c.JSON(fiber.Map{"subscription": sub, "secret": secret})
+}
+
+func (h *Handler) ReactivateWebhookSubscription(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 64)
+	if err != nil || id == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid subscription id"})
+	}
+	sub, err := h.webhookService().Reactivate(c.Context(), uint(id))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	h.writeAudit(c, "webhook.subscription.reactivate", fmt.Sprintf("subscription:%d", id))
+	return c.JSON(sub)
 }

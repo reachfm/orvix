@@ -1,4 +1,4 @@
-﻿package webhooks
+package webhooks
 
 import (
 	"context"
@@ -171,6 +171,23 @@ func (r *Repository) UpdateDelivery(ctx context.Context, d *Delivery) error {
 	_, err := r.db.ExecContext(ctx, "UPDATE webhook_deliveries SET status=?, attempt_count=?, http_status=?, error=?, next_attempt_at=?, updated_at=? WHERE id=?",
 		d.Status, d.AttemptCount, d.HTTPStatus, d.RedactedError, d.NextAttemptAt, d.UpdatedAt, d.ID)
 	return err
+}
+
+func (r *Repository) GetDelivery(ctx context.Context, id uint) (*Delivery, error) {
+	var d Delivery
+	var next sql.NullTime
+	err := r.db.QueryRowContext(ctx, "SELECT id, event_id, subscription_id, status, attempt_count, http_status, error, next_attempt_at, created_at, updated_at FROM webhook_deliveries WHERE id=?", id).
+		Scan(&d.ID, &d.EventID, &d.SubscriptionID, &d.Status, &d.AttemptCount, &d.HTTPStatus, &d.RedactedError, &next, &d.CreatedAt, &d.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if next.Valid {
+		d.NextAttemptAt = &next.Time
+	}
+	return &d, nil
 }
 
 func (r *Repository) PendingDeliveries(ctx context.Context, limit int) ([]Delivery, error) {

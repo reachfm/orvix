@@ -1,4 +1,4 @@
-﻿package webhooks
+package webhooks
 
 import (
 	"bytes"
@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/webhooks/ssrf"
 )
 
@@ -35,29 +36,46 @@ func (s *Service) EnsureSchema(ctx context.Context) error {
 
 // CreateSubscription registers a webhook subscription.
 func (s *Service) CreateSubscription(ctx context.Context, tenantID uint, scope SubscriptionScope, url string, events []string, secret []byte) (*Subscription, error) {
+	sub, _, err := s.CreateSubscriptionWithSecret(ctx, tenantID, scope, url, events, secret)
+	return sub, err
+}
+
+// CreateSubscriptionWithSecret creates a subscription and returns the
+// plaintext secret exactly once to the caller. Only the encrypted value is
+// persisted and subsequent reads never expose plaintext.
+func (s *Service) CreateSubscriptionWithSecret(ctx context.Context, tenantID uint, scope SubscriptionScope, url string, events []string, secret []byte) (*Subscription, string, error) {
 	if err := ssrf.ValidateURL(url, s.ssrfAllow); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidURL, err)
+		return nil, "", fmt.Errorf("%w: %v", ErrInvalidURL, err)
 	}
 	// Validate events against allowlist
 	for _, ev := range events {
 		if !AllowedEvents[ev] {
-			return nil, fmt.Errorf("%w: %s", ErrInvalidEvent, ev)
+			return nil, "", fmt.Errorf("%w: %s", ErrInvalidEvent, ev)
 		}
 	}
-	sub := &Subscription{
-		TenantID: tenantID,
-		Scope:    scope,
-		URL:      url,
-		Events:   events,
-		Active:   true,
+	if len(secret) == 0 {
+		var err error
+		secret, err = GenerateSecret()
+		if err != nil {
+			return nil, "", err
+		}
 	}
-	if secret != nil {
-		sub.SecretEncrypted = hex.EncodeToString(secret)
+	encrypted, err := config.Encrypt(secret)
+	if err != nil {
+		return nil, "", fmt.Errorf("encrypt webhook secret: %w", err)
+	}
+	sub := &Subscription{
+		TenantID:        tenantID,
+		Scope:           scope,
+		URL:             url,
+		Events:          events,
+		Active:          true,
+		SecretEncrypted: encrypted,
 	}
 	if err := s.repo.InsertSubscription(ctx, sub); err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return sub, nil
+	return sub, hex.EncodeToString(secret), nil
 }
 
 // GenerateSecret creates a new webhook signing secret.
@@ -132,7 +150,13 @@ func (s *Service) ProcessPendingDeliveries(ctx context.Context, batchSize int) e
 			s.repo.UpdateDelivery(ctx, d)
 			continue
 		}
-		secret, _ := hex.DecodeString(sub.SecretEncrypted)
+		secret, err := config.Decrypt(sub.SecretEncrypted)
+		if err != nil {
+			d.Status = "failed"
+			d.RedactedError = "subscription secret unavailable"
+			s.repo.UpdateDelivery(ctx, d)
+			continue
+		}
 		payload := []byte(fmt.Sprintf(`{"event_id":"%s","type":"%s"}`, d.EventID, "domain.created"))
 		ts := time.Now().Unix()
 		sig := Sign(secret, payload, ts)
@@ -200,8 +224,8 @@ func newEventID() (string, error) {
 
 // ErrNotFound, ErrInvalidURL, ErrInvalidEvent are stable typed errors.
 var (
-	ErrNotFound    = &whError{"webhook subscription not found"}
-	ErrInvalidURL  = &whError{"invalid webhook URL"}
+	ErrNotFound     = &whError{"webhook subscription not found"}
+	ErrInvalidURL   = &whError{"invalid webhook URL"}
 	ErrInvalidEvent = &whError{"invalid webhook event type"}
 )
 
@@ -215,7 +239,59 @@ func (s *Service) GetSubscription(ctx context.Context, id uint) (*Subscription, 
 	return s.repo.GetSubscription(ctx, id)
 }
 
+// RotateSecret replaces the signing secret and returns the new plaintext
+// exactly once. The previous secret is not retained for future delivery.
+func (s *Service) RotateSecret(ctx context.Context, id uint) (*Subscription, string, error) {
+	sub, err := s.repo.GetSubscription(ctx, id)
+	if err != nil {
+		return nil, "", err
+	}
+	secret, err := GenerateSecret()
+	if err != nil {
+		return nil, "", err
+	}
+	sub.SecretEncrypted, err = config.Encrypt(secret)
+	if err != nil {
+		return nil, "", fmt.Errorf("encrypt webhook secret: %w", err)
+	}
+	if err := s.repo.UpdateSubscription(ctx, sub); err != nil {
+		return nil, "", err
+	}
+	return sub, hex.EncodeToString(secret), nil
+}
+
+// Reactivate clears suspension after an operator explicitly confirms the
+// endpoint is healthy again.
+func (s *Service) Reactivate(ctx context.Context, id uint) (*Subscription, error) {
+	sub, err := s.repo.GetSubscription(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	sub.Suspended = false
+	sub.Active = true
+	if err := s.repo.UpdateSubscription(ctx, sub); err != nil {
+		return nil, err
+	}
+	return sub, nil
+}
+
 // DeliveryHistory returns delivery history for a subscription.
 func (s *Service) DeliveryHistory(ctx context.Context, subscriptionID uint, limit int) ([]Delivery, error) {
 	return s.repo.DeliveryHistory(ctx, subscriptionID, limit)
+}
+
+// RetryDelivery requeues a failed or suspended delivery without exposing
+// its request body or secret material.
+func (s *Service) RetryDelivery(ctx context.Context, id uint) error {
+	d, err := s.repo.GetDelivery(ctx, id)
+	if err != nil {
+		return err
+	}
+	if d.Status != "failed" && d.Status != "suspended" {
+		return fmt.Errorf("delivery is not retryable")
+	}
+	d.Status = "pending"
+	d.NextAttemptAt = nil
+	d.RedactedError = ""
+	return s.repo.UpdateDelivery(ctx, d)
 }

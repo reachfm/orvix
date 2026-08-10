@@ -1585,6 +1585,9 @@ func (r *Router) setupRoutes() {
 	protected.Get("/webhooks/subscriptions", platformMW[0], platformMW[1], r.h.ListWebhookSubscriptions)
 	protected.Get("/webhooks/subscriptions/:id", platformMW[0], platformMW[1], r.h.GetWebhookSubscription)
 	protected.Get("/webhooks/subscriptions/:id/history", platformMW[0], platformMW[1], r.h.GetWebhookDeliveryHistory)
+	protected.Post("/webhooks/subscriptions/:id/rotate-secret", platformMW[0], platformMW[1], r.h.RotateWebhookSecret)
+	protected.Post("/webhooks/subscriptions/:id/reactivate", platformMW[0], platformMW[1], r.h.ReactivateWebhookSubscription)
+	protected.Post("/webhooks/deliveries/:id/retry", platformMW[0], platformMW[1], r.h.RetryWebhookDelivery)
 
 	// ── Platform billing balances/adjustments (Milestone 15) ───────
 	protected.Get("/platform/billing/tenants/:tenant_id/balance", platformMW[0], platformMW[1], r.h.GetPlatformBillingBalance)
