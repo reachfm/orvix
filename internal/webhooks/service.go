@@ -333,6 +333,7 @@ var (
 	ErrNotFound       = &whError{"webhook resource not found"}
 	ErrInvalidURL     = &whError{"invalid webhook URL"}
 	ErrInvalidEvent   = &whError{"invalid webhook event type"}
+	ErrInvalidStatus  = &whError{"invalid webhook delivery status"}
 	ErrTenantRequired = &whError{"tenant webhook scope is required"}
 )
 
@@ -427,6 +428,17 @@ func (s *Service) DeliveryHistoryForTenant(ctx context.Context, subscriptionID, 
 		return nil, err
 	}
 	return s.repo.DeliveryHistoryForTenant(ctx, subscriptionID, tenantID, limit, offset)
+}
+func (s *Service) DeliveryHistoryFiltered(ctx context.Context, subscriptionID, tenantID uint, status string, limit, offset int) ([]Delivery, error) {
+	if _, err := s.repo.GetSubscriptionForTenant(ctx, subscriptionID, tenantID); err != nil {
+		return nil, err
+	}
+	switch status {
+	case "", "pending", "processing", "retrying", "delivered", "terminal", "failed", "suspended":
+	default:
+		return nil, ErrInvalidStatus
+	}
+	return s.repo.DeliveryHistoryFiltered(ctx, subscriptionID, tenantID, status, limit, offset)
 }
 func (s *Service) DeliveryForTenant(ctx context.Context, id, tenantID uint) (*Delivery, []Attempt, error) {
 	delivery, err := s.repo.GetDeliveryForTenant(ctx, id, tenantID)

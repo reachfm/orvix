@@ -200,7 +200,14 @@ func (h *Handler) writeAudit(c fiber.Ctx, action, target string) {
 		return
 	}
 	uid, _ := c.Locals("user_id").(uint)
-	role, _ := c.Locals("role").(string)
+	tenantID, _ := auth.RequireTenantID(c)
+	var role string
+	switch value := c.Locals("role").(type) {
+	case auth.Role:
+		role = string(value)
+	case string:
+		role = value
+	}
 	_ = h.auditStore.Record(c.Context(), &audit.Entry{
 		Actor:     fmt.Sprintf("user:%d", uid),
 		Role:      role,
@@ -209,6 +216,7 @@ func (h *Handler) writeAudit(c fiber.Ctx, action, target string) {
 		Result:    "success",
 		IP:        c.IP(),
 		UserAgent: string(c.Request().Header.UserAgent()),
+		TenantID:  tenantID,
 	})
 }
 

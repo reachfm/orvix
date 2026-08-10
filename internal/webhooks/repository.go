@@ -37,7 +37,7 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 			url TEXT NOT NULL, events TEXT NOT NULL DEFAULT '[]', secret_encrypted TEXT NOT NULL DEFAULT '',
 			active INTEGER NOT NULL DEFAULT 1, suspended INTEGER NOT NULL DEFAULT 0,
 			version INTEGER NOT NULL DEFAULT 1, failure_count INTEGER NOT NULL DEFAULT 0,
-			created_at ` + ts + ` NOT NULL, updated_at ` + ts + ` NOT NULL)`,
+			created_at ` + ts + ` NOT NULL, updated_at ` + ts + ` NOT NULL, deleted_at ` + ts + `)`,
 		`CREATE TABLE IF NOT EXISTS webhook_events (
 			id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL, event_type TEXT NOT NULL,
 			schema_version INTEGER NOT NULL, occurred_at ` + ts + ` NOT NULL,
@@ -63,6 +63,7 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 	}
 	columns := []struct{ table, name, definition string }{
 		{"webhook_subscriptions", "failure_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"webhook_subscriptions", "deleted_at", ts},
 		{"webhook_deliveries", "response_excerpt", "TEXT NOT NULL DEFAULT ''"},
 		{"webhook_deliveries", "replay_of_delivery_id", "INTEGER"},
 		{"webhook_deliveries", "replay_key", "TEXT NOT NULL DEFAULT ''"},
@@ -201,7 +202,7 @@ func (r *Repository) GetSubscription(ctx context.Context, id uint) (*Subscriptio
 }
 
 func (r *Repository) GetSubscriptionForTenant(ctx context.Context, id, tenantID uint) (*Subscription, error) {
-	query := `SELECT id,tenant_id,scope,url,events,secret_encrypted,active,suspended,version,failure_count,created_at,updated_at FROM webhook_subscriptions WHERE id=?`
+	query := `SELECT id,tenant_id,scope,url,events,secret_encrypted,active,suspended,version,failure_count,created_at,updated_at FROM webhook_subscriptions WHERE id=? AND deleted_at IS NULL`
 	args := []any{id}
 	if tenantID > 0 {
 		query += " AND tenant_id=?"
@@ -225,7 +226,7 @@ func (r *Repository) GetSubscriptionForTenant(ctx context.Context, id, tenantID 
 }
 
 func (r *Repository) ListSubscriptions(ctx context.Context, tenantID uint, scope string, onlyActive bool) ([]Subscription, error) {
-	query := `SELECT id,tenant_id,scope,url,events,secret_encrypted,active,suspended,version,failure_count,created_at,updated_at FROM webhook_subscriptions WHERE 1=1`
+	query := `SELECT id,tenant_id,scope,url,events,secret_encrypted,active,suspended,version,failure_count,created_at,updated_at FROM webhook_subscriptions WHERE deleted_at IS NULL`
 	args := []any{}
 	if tenantID > 0 {
 		query += " AND tenant_id=?"
@@ -277,7 +278,7 @@ func (r *Repository) InsertEventAndFanoutTx(ctx context.Context, tx *sql.Tx, eve
 	if n == 0 {
 		return false, nil
 	}
-	rows, err := tx.QueryContext(ctx, r.q(`SELECT id,events FROM webhook_subscriptions WHERE tenant_id=? AND scope='tenant' AND active=1 AND suspended=0`), event.TenantID)
+	rows, err := tx.QueryContext(ctx, r.q(`SELECT id,events FROM webhook_subscriptions WHERE tenant_id=? AND scope='tenant' AND active=1 AND suspended=0 AND deleted_at IS NULL`), event.TenantID)
 	if err != nil {
 		return false, err
 	}
@@ -448,19 +449,23 @@ func (r *Repository) CompleteDelivery(ctx context.Context, d Delivery, status st
 }
 
 func (r *Repository) RecordFailure(ctx context.Context, sub *Subscription, suspendAt int) error {
-	sub.FailureCount++
-	if sub.FailureCount >= suspendAt {
-		sub.Suspended = true
+	res, err := r.db.ExecContext(ctx, r.q(`UPDATE webhook_subscriptions SET failure_count=failure_count+1,suspended=CASE WHEN failure_count+1>=? THEN 1 ELSE suspended END,version=version+1,updated_at=? WHERE id=? AND deleted_at IS NULL`), suspendAt, time.Now().UTC(), sub.ID)
+	if err != nil {
+		return err
 	}
-	return r.UpdateSubscription(ctx, sub)
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (r *Repository) ResetFailures(ctx context.Context, sub *Subscription) error {
-	if sub.FailureCount == 0 {
-		return nil
-	}
-	sub.FailureCount = 0
-	return r.UpdateSubscription(ctx, sub)
+	_, err := r.db.ExecContext(ctx, r.q(`UPDATE webhook_subscriptions SET failure_count=0,version=version+1,updated_at=? WHERE id=? AND deleted_at IS NULL AND failure_count<>0`), time.Now().UTC(), sub.ID)
+	return err
 }
 
 func (r *Repository) InsertDelivery(ctx context.Context, d *Delivery) error {
@@ -536,6 +541,10 @@ func (r *Repository) DeliveryHistory(ctx context.Context, subscriptionID uint, l
 	return r.DeliveryHistoryForTenant(ctx, subscriptionID, 0, limit, 0)
 }
 func (r *Repository) DeliveryHistoryForTenant(ctx context.Context, subscriptionID, tenantID uint, limit, offset int) ([]Delivery, error) {
+	return r.DeliveryHistoryFiltered(ctx, subscriptionID, tenantID, "", limit, offset)
+}
+
+func (r *Repository) DeliveryHistoryFiltered(ctx context.Context, subscriptionID, tenantID uint, status string, limit, offset int) ([]Delivery, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
@@ -544,6 +553,10 @@ func (r *Repository) DeliveryHistoryForTenant(ctx context.Context, subscriptionI
 	if tenantID > 0 {
 		q += " AND s.tenant_id=?"
 		args = append(args, tenantID)
+	}
+	if status != "" {
+		q += " AND d.status=?"
+		args = append(args, status)
 	}
 	q += " ORDER BY d.id DESC LIMIT ? OFFSET ?"
 	args = append(args, limit, offset)
@@ -608,7 +621,7 @@ func (r *Repository) CreateManualReplay(ctx context.Context, original Delivery) 
 }
 
 func (r *Repository) DeleteSubscription(ctx context.Context, id, tenantID uint) error {
-	res, err := r.db.ExecContext(ctx, r.q(`DELETE FROM webhook_subscriptions WHERE id=? AND tenant_id=?`), id, tenantID)
+	res, err := r.db.ExecContext(ctx, r.q(`UPDATE webhook_subscriptions SET active=0,deleted_at=?,updated_at=? WHERE id=? AND tenant_id=? AND deleted_at IS NULL`), time.Now().UTC(), time.Now().UTC(), id, tenantID)
 	if err != nil {
 		return err
 	}

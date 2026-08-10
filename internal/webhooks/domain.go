@@ -34,7 +34,7 @@ type Subscription struct {
 	Suspended       bool              `json:"suspended"`
 	CreatedAt       time.Time         `json:"created_at"`
 	UpdatedAt       time.Time         `json:"updated_at"`
-	Version         int               `json:"-"`
+	Version         int               `json:"version"`
 	FailureCount    int               `json:"failure_count"`
 }
 
