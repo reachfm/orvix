@@ -1146,6 +1146,11 @@ func postgresColumnAdditions() []string {
 		// every pre-existing row is correct without a backfill.
 		`ALTER TABLE coremail_domains ADD COLUMN IF NOT EXISTS default_mailbox_quota_mb BIGINT NOT NULL DEFAULT 0`,
 
+		// coremail_domains.mail_access_mode: internal_only restricts a
+		// domain to local-only delivery (Milestone 5, Feature 6/7);
+		// internal_external is the default, unrestricted mode.
+		`ALTER TABLE coremail_domains ADD COLUMN IF NOT EXISTS mail_access_mode TEXT NOT NULL DEFAULT 'internal_external'`,
+
 		`ALTER TABLE licenses ADD COLUMN IF NOT EXISTS tier TEXT NOT NULL DEFAULT 'smb'`,
 		`ALTER TABLE licenses ADD COLUMN IF NOT EXISTS max_domains INTEGER NOT NULL DEFAULT 10`,
 		`ALTER TABLE licenses ADD COLUMN IF NOT EXISTS max_mailboxes INTEGER NOT NULL DEFAULT 500`,

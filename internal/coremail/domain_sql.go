@@ -234,6 +234,51 @@ func (r *DomainSQLRepo) Delete(ctx context.Context, id uint, tx interface{}) err
 	return err
 }
 
+// GetMailAccessMode is a single-column, indexed-lookup read used on
+// the SMTP hot path — see the interface doc in domain.go for why this
+// stays separate from GetByName. sql.ErrNoRows (unknown domain) is
+// treated the same as "internal_external": handleRCPT's existing
+// isLocalDomain check is what decides whether the domain is hosted
+// here at all — this method only answers "if it is local, what's its
+// policy", so a not-found domain here must not itself cause a
+// different failure mode than an existing default-mode domain.
+func (r *DomainSQLRepo) GetMailAccessMode(ctx context.Context, name string, tx interface{}) (MailAccessMode, error) {
+	e := r.execer(tx)
+	var mode string
+	err := e.QueryRowContext(ctx, r.qf(`SELECT mail_access_mode FROM coremail_domains WHERE name = ? AND deleted_at IS NULL`), name).Scan(&mode)
+	if err == sql.ErrNoRows {
+		return MailAccessInternalExternal, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get mail access mode: %w", err)
+	}
+	if mode == "" || !MailAccessMode(mode).IsValid() {
+		return MailAccessInternalExternal, nil
+	}
+	return MailAccessMode(mode), nil
+}
+
+// SetMailAccessMode updates the domain's access mode, tenant-scoped.
+func (r *DomainSQLRepo) SetMailAccessMode(ctx context.Context, id, tenantID uint, mode MailAccessMode, tx interface{}) error {
+	if !mode.IsValid() {
+		return fmt.Errorf("invalid mail access mode: %q", mode)
+	}
+	e := r.execer(tx)
+	res, err := e.ExecContext(ctx, r.qf(`UPDATE coremail_domains SET mail_access_mode=?, updated_at=? WHERE id=? AND tenant_id=? AND deleted_at IS NULL`),
+		string(mode), time.Now().UTC(), id, tenantID)
+	if err != nil {
+		return fmt.Errorf("set mail access mode: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 func (r *DomainSQLRepo) CountByTenant(ctx context.Context, tenantID uint, tx interface{}) (int64, error) {
 	e := r.execer(tx)
 	var count int64

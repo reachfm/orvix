@@ -41,6 +41,7 @@ func newDomainTestDB(t *testing.T) *sql.DB {
 		dkim_enabled INTEGER DEFAULT 0,
 		dkim_selector TEXT,
 		dmarc_enabled INTEGER DEFAULT 0,
+		mail_access_mode TEXT NOT NULL DEFAULT 'internal_external',
 		created_at DATETIME,
 		updated_at DATETIME,
 		deleted_at DATETIME
@@ -249,6 +250,7 @@ func TestDomainMutationRollsBackWhenAuditWriteFails(t *testing.T) {
 		dkim_enabled INTEGER DEFAULT 0,
 		dkim_selector TEXT,
 		dmarc_enabled INTEGER DEFAULT 0,
+		mail_access_mode TEXT NOT NULL DEFAULT 'internal_external',
 		created_at DATETIME,
 		updated_at DATETIME,
 		deleted_at DATETIME
@@ -937,5 +939,60 @@ func TestDomainTLSStatus_UnknownDomainIsNotFound(t *testing.T) {
 	_, err := svc.DomainTLSStatus(ctx, 99999, 5)
 	if err != ErrDomainNotFound {
 		t.Fatalf("expected ErrDomainNotFound, got %v", err)
+	}
+}
+
+func TestMailAccessMode_DefaultsToInternalExternal(t *testing.T) {
+	_, svc := newDomainWithDKIMTestDB(t)
+	ctx := context.Background()
+	d, _ := svc.CreateDomain(ctx, CreateDomainRequest{Name: "defaultmode.example.test"}, 5)
+
+	mode, err := svc.GetMailAccessMode(ctx, d.ID, 5)
+	if err != nil {
+		t.Fatalf("get mode: %v", err)
+	}
+	if mode != MailAccessInternalExternal {
+		t.Fatalf("expected default internal_external, got %q", mode)
+	}
+}
+
+func TestMailAccessMode_SetAndGetRoundTrip(t *testing.T) {
+	_, svc := newDomainWithDKIMTestDB(t)
+	ctx := context.Background()
+	d, _ := svc.CreateDomain(ctx, CreateDomainRequest{Name: "setmode.example.test"}, 5)
+
+	if err := svc.SetMailAccessMode(ctx, d.ID, 5, "internal_only"); err != nil {
+		t.Fatalf("set mode: %v", err)
+	}
+	mode, err := svc.GetMailAccessMode(ctx, d.ID, 5)
+	if err != nil {
+		t.Fatalf("get mode: %v", err)
+	}
+	if mode != MailAccessInternalOnly {
+		t.Fatalf("expected internal_only, got %q", mode)
+	}
+}
+
+func TestMailAccessMode_InvalidValueRejected(t *testing.T) {
+	_, svc := newDomainWithDKIMTestDB(t)
+	ctx := context.Background()
+	d, _ := svc.CreateDomain(ctx, CreateDomainRequest{Name: "badmode.example.test"}, 5)
+
+	err := svc.SetMailAccessMode(ctx, d.ID, 5, "totally-invalid")
+	if err != ErrInvalidMailAccessMode {
+		t.Fatalf("expected ErrInvalidMailAccessMode, got %v", err)
+	}
+}
+
+func TestMailAccessMode_CrossTenantIsNotFound(t *testing.T) {
+	_, svc := newDomainWithDKIMTestDB(t)
+	ctx := context.Background()
+	d, _ := svc.CreateDomain(ctx, CreateDomainRequest{Name: "tenantiso.example.test"}, 5)
+
+	if err := svc.SetMailAccessMode(ctx, d.ID, 6, "internal_only"); err != ErrDomainNotFound {
+		t.Fatalf("expected ErrDomainNotFound for a different tenant, got %v", err)
+	}
+	if _, err := svc.GetMailAccessMode(ctx, d.ID, 6); err != ErrDomainNotFound {
+		t.Fatalf("expected ErrDomainNotFound for a different tenant, got %v", err)
 	}
 }

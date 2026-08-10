@@ -83,6 +83,16 @@ var (
 	ResponseTempFail        = Response{StatusTransactionFailed, "5.0.0 Temporary server error"}
 	ResponseSizeExceeded    = Response{StatusMessageTooLarge, "5.3.4 Message too large"}
 	ResponseMailboxNotFound = Response{StatusMailboxNotFound, "5.1.1 User unknown"}
+	// ResponseExternalInboundBlocked is returned at RCPT TO when the
+	// recipient domain is mail_access_mode=internal_only and the
+	// sender is not on a locally hosted domain. Stable code/text so
+	// callers (and tests) can assert on it directly rather than
+	// string-matching a formatted message.
+	ResponseExternalInboundBlocked = Response{StatusMailboxNotFound, "5.7.1 Recipient domain accepts internal mail only"}
+	// ResponseExternalOutboundBlocked is returned at RCPT TO when the
+	// authenticated sender's own domain is mail_access_mode=internal_only
+	// and the recipient is on a non-local (external) domain.
+	ResponseExternalOutboundBlocked = Response{StatusMailboxNotFound, "5.7.1 Sender domain is restricted to internal mail only"}
 )
 
 var MessageAccepted = Response{StatusOK, "2.0.0 Message accepted for delivery"}

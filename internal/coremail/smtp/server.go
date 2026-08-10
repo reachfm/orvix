@@ -39,6 +39,7 @@ type Server struct {
 	done     chan struct{}
 
 	localDomainChecker func(ctx context.Context, domain string) (bool, error)
+	mailAccessMode     func(ctx context.Context, domain string) (string, error)
 
 	// listenerCb is called after the real listener is created
 	// or on bind failure. Used by the admin runtime telemetry.
@@ -129,6 +130,13 @@ func LoadTLSConfigWithCert(cert tls.Certificate) *tls.Config {
 // SetLocalDomainChecker sets the local domain checker for relay protection.
 func (s *Server) SetLocalDomainChecker(fn func(ctx context.Context, domain string) (bool, error)) {
 	s.localDomainChecker = fn
+}
+
+// SetMailAccessModeChecker wires the domain mail-access-mode lookup
+// (internal_only vs internal_external) used to enforce that policy at
+// RCPT TO for every connection this server accepts.
+func (s *Server) SetMailAccessModeChecker(fn func(ctx context.Context, domain string) (string, error)) {
+	s.mailAccessMode = fn
 }
 
 // SetListener assigns a pre-bound net.Listener to the server.
@@ -223,6 +231,9 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 	if s.localDomainChecker != nil {
 		handler.SetLocalDomainChecker(s.localDomainChecker)
+	}
+	if s.mailAccessMode != nil {
+		handler.SetMailAccessModeChecker(s.mailAccessMode)
 	}
 
 	for {

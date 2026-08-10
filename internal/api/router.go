@@ -1035,6 +1035,8 @@ func (r *Router) setupRoutes() {
 	canWriteDomains.Post("/domains/:id/dkim/revoke", r.h.PostAdminDomainDKIMRevoke)
 	enterpriseRead.Get("/domains/:id/dkim/history", r.h.GetAdminDomainDKIMHistory)
 	enterpriseRead.Get("/domains/:id/tls", r.h.GetAdminDomainTLSStatus)
+	enterpriseRead.Get("/domains/:id/mail-access-mode", r.h.GetAdminDomainMailAccessMode)
+	canWriteDomains.Post("/domains/:id/mail-access-mode", r.h.PostAdminDomainMailAccessMode)
 	enterpriseRead.Post("/domains/:id/verify", r.h.VerifyEnterpriseDomain)
 	enterpriseRead.Get("/domains/:id/dns", r.h.GetEnterpriseDomainDNS)
 	canWriteDomains.Post("/domains/:id/dns/verify", r.h.VerifyEnterpriseDomainDNS)

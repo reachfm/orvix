@@ -699,6 +699,7 @@ func MigrateAllRaw(db *gorm.DB) error {
 			abuse_contact TEXT NOT NULL DEFAULT '',
 			labels TEXT NOT NULL DEFAULT '',
 			mailbox_count INTEGER NOT NULL DEFAULT 0,
+			mail_access_mode TEXT NOT NULL DEFAULT 'internal_external',
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL,
 			deleted_at DATETIME
@@ -1382,6 +1383,7 @@ func migrateCoremailDomainSchema(ctx context.Context, db *sql.DB) error {
 		sql  string
 	}{
 		{"default_mailbox_quota_mb", "ALTER TABLE coremail_domains ADD COLUMN default_mailbox_quota_mb INTEGER NOT NULL DEFAULT 0"},
+		{"mail_access_mode", "ALTER TABLE coremail_domains ADD COLUMN mail_access_mode TEXT NOT NULL DEFAULT 'internal_external'"},
 	}
 
 	for _, addition := range additions {
