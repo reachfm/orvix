@@ -345,12 +345,16 @@ func (s *Service) mutateWithAudit(ctx context.Context, entry *audit.ExtendedEntr
 func isValidStatusTransition(from, to AdminMailboxStatus) bool {
 	switch from {
 	case AdminMailboxActive:
-		return to == AdminMailboxDisabled || to == AdminMailboxSuspended
+		return to == AdminMailboxDisabled || to == AdminMailboxSuspended || to == AdminMailboxDeleted
 	case AdminMailboxDisabled:
-		return to == AdminMailboxActive
+		return to == AdminMailboxActive || to == AdminMailboxDeleted
 	case AdminMailboxSuspended:
-		return to == AdminMailboxActive
+		return to == AdminMailboxActive || to == AdminMailboxDeleted
 	case AdminMailboxDeleted:
+		// Deleted is reached only via SetStatus/SoftDeleteMailbox and
+		// left only via RestoreMailbox (a dedicated path with its own
+		// email-conflict re-check) — never via a plain status
+		// transition, which would skip that check.
 		return false
 	}
 	return false
