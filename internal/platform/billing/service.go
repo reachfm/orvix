@@ -101,3 +101,13 @@ func (s *Service) GetBalance(ctx context.Context, tenantID uint) (*Balance, erro
 	}
 	return b, nil
 }
+
+// ListAdjustments returns the recent adjustment history for a tenant,
+// newest first.
+func (s *Service) ListAdjustments(ctx context.Context, tenantID uint, limit int) ([]Adjustment, error) {
+	out, err := s.repo.ListAdjustments(ctx, tenantID, limit)
+	if err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "list adjustments", err)
+	}
+	return out, nil
+}

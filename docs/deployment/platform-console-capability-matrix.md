@@ -1,8 +1,11 @@
 # Platform Console Capability Matrix
 
 Complete audit of every route gated with `platformMW[0], platformMW[1]`
-in `internal/api/router.go` (100 route registrations, verified by
-`grep -c` against the branch head this document was written against).
+in `internal/api/router.go` (126 route registrations, verified by
+`internal/api/capability_matrix_test.go` against the branch head this
+document was written against — updated for the Milestone 13-15 DR,
+retention, platform billing, and signed-update-artifact routes, plus
+three pre-existing queue routes found undocumented during that pass).
 Every disposition below reflects the actual handler and actual
 frontend consumer, not the route's name.
 
@@ -55,6 +58,9 @@ Not fixed in this pass — flagged, not silently omitted.
 | `GET /queue` | platformMW | `ListQueue` | legacy webmail-facing queue list (different schema than `AdminQueueList` — see the earlier `COREMAIL_DISABLED` fix commit) | Platform (webmail SPA is the real consumer, not this admin console) | `cmd/orvix/fullstack_repro_test.go` (backend) | DUPLICATE_SUPERSEDED_ROUTE (superseded, for this admin console, by `AdminQueueList`; still load-bearing for the separate webmail frontend, so not removable here) |
 | `DELETE /queue/:id` | platformMW | `DeleteQueue` | legacy queue delete | Platform | — | DUPLICATE_SUPERSEDED_ROUTE (superseded by `AdminQueueCancel`) |
 | `POST /queue/:id/retry` | platformMW | `RetryQueue` | legacy queue retry | Platform | — | DUPLICATE_SUPERSEDED_ROUTE (superseded by `AdminQueueRetryNow`) |
+| `GET /admin/queue/history` | platformMW | `AdminQueueHistory` | queue history | Platform | — | MISSING_UI (real route, no frontend consumer found) |
+| `GET /admin/queue/export` | platformMW | `AdminQueueExport` | queue export | Platform | — | MISSING_UI (real route, no frontend consumer found) |
+| `POST /admin/queue/messages/bulk-action` | platformMW | `AdminQueueBulkAction` | bulk queue action | Platform | — | MISSING_UI (real route, no frontend consumer found) |
 
 All six `UI_SUPPORTED` mail-operations endpoints share the
 `COREMAIL_DISABLED` sanitized-503 contract, verified in
@@ -143,6 +149,49 @@ and `isCoreMailDisabled` (frontend).
 | `GET /console/reports` | platformMW | `AdminReports` | superseded reporting view | Platform | — | DUPLICATE_SUPERSEDED_ROUTE (superseded by `/platform/dashboard` + the six migrated feature pages) |
 | `GET /console/internal/overview`, `GET /console/internal/tenants`, `GET /console/internal/domain-intelligence`, `GET /console/internal/security-ops`, `GET /console/internal/mail-flow-ops` (5 routes) | platformMW | `InternalOverview` / `InternalTenants` / `InternalDomainIntelligence` / `InternalSecurityOps` / `InternalMailFlowOps` | superseded internal-console views | Platform | — | DUPLICATE_SUPERSEDED_ROUTE (superseded by `/platform/dashboard`, Organizations, Mail Operations, and Security — the newer, tested pages) |
 
+## Disaster Recovery (Milestone 13)
+
+| Route | Middleware | Handler | Contract | Owner | Test file | Disposition |
+|---|---|---|---|---|---|---|
+| `GET /dr/readiness` | platformMW | `GetDRReadiness` | `dr.Readiness` | Platform | `internal/platform/dr` service tests | MISSING_UI (real route, no frontend consumer yet — backend-only in this pass) |
+| `GET /dr/drills` | platformMW | `GetDRDrills` | `{drills: dr.Drill[]}` | Platform | `internal/platform/dr` service tests | MISSING_UI |
+| `POST /dr/drills` | platformMW | `PostDRDrill` | records drill outcome, no restore performed | Platform | `internal/platform/dr` service tests | MISSING_UI |
+| `POST /dr/backup` | platformMW | `PostDRCoordinatedBackup` | durable-lease-coordinated backup over `backup.Service.CreateBackup` | Platform | `internal/platform/dr` service tests | MISSING_UI |
+| `POST /dr/backups/:id/restore` | platformMW | `PostDRCoordinatedRestore` | typed confirm `RESTORE-THIS-BACKUP`; submits to the same `restorecoord.Coordinator` as `POST /admin/backups/:id/restore` — no competing restart/rollback implementation | Platform | `internal/restorecoord` tests (shared coordinator) | MISSING_UI |
+| `GET /dr/operations/:job_id` | platformMW | `GetDROperationStatus` | reads the same `restorecoord` job result as `GET /admin/backups/restore-jobs/:job_id` | Platform | `internal/restorecoord` tests | MISSING_UI |
+
+## Retention / Legal Hold / Purge (Milestone 14)
+
+| Route | Middleware | Handler | Contract | Owner | Test file | Disposition |
+|---|---|---|---|---|---|---|
+| `POST /retention/policies` | platformMW | `PostRetentionPolicy` | `retention.Policy` | Platform | `internal/platform/retention` service tests | MISSING_UI |
+| `GET /retention/policies/effective` | platformMW | `GetRetentionEffectivePolicy` | resolved `retention.Policy` for a scope | Platform | `internal/platform/retention` service tests | MISSING_UI |
+| `POST /retention/legal-holds` | platformMW | `PostRetentionLegalHold` | `retention.LegalHold` | Platform | `internal/platform/retention` service tests | MISSING_UI |
+| `GET /retention/legal-holds` | platformMW | `GetRetentionLegalHolds` | `{holds: retention.LegalHold[]}` for a scope | Platform | `internal/platform/retention` service tests | MISSING_UI |
+| `POST /retention/legal-holds/:id/release` | platformMW | `PostRetentionLegalHoldRelease` | releases a hold | Platform | `internal/platform/retention` service tests | MISSING_UI |
+| `POST /retention/purge/plan` | platformMW | `PostRetentionPurgePlan` | non-destructive dry-run `retention.PurgePlan` | Platform | `internal/platform/retention` service tests | MISSING_UI |
+| `POST /retention/purge/execute` | platformMW | `PostRetentionPurgeExecute` | destructive, typed confirm `PURGE-ELIGIBLE-DATA`, rechecks legal hold at execution time | Platform | `internal/platform/retention` service tests | MISSING_UI |
+| `POST /retention/mailboxes/:id/recover` | platformMW | `PostRetentionRecoverMailbox` | delegates to the existing `mailboxAdminSvc.RestoreMailbox` undelete capability (same one behind `POST /enterprise/mailboxes/:id/restore`), records chain-of-custody | Platform | `internal/admin/mailbox` restore tests | MISSING_UI |
+| `GET /retention/custody` | platformMW | `GetRetentionCustody` | paginated `retention.ChainOfCustodyEvent[]` — IDs/hashes/metadata only, never message bodies | Platform | `internal/platform/retention` service tests | MISSING_UI |
+
+## Platform Billing Balances/Adjustments (Milestone 15)
+
+| Route | Middleware | Handler | Contract | Owner | Test file | Disposition |
+|---|---|---|---|---|---|---|
+| `GET /platform/billing/tenants/:tenant_id/balance` | platformMW | `GetPlatformBillingBalance` | `platformbilling.Balance` | Platform | `internal/platform/billing` service tests | MISSING_UI |
+| `POST /platform/billing/tenants/:tenant_id/adjustments` | platformMW | `PostPlatformBillingAdjustment` | `platformbilling.Adjustment`, integer minor units + currency only, idempotency-key supported | Platform | `internal/platform/billing` service tests (incl. concurrent-idempotency-key test) | MISSING_UI |
+| `GET /platform/billing/tenants/:tenant_id/adjustments` | platformMW | `GetPlatformBillingAdjustments` | `{adjustments: platformbilling.Adjustment[]}` | Platform | `internal/platform/billing` service tests | MISSING_UI |
+
+## Signed Update Artifacts (Milestone 13)
+
+| Route | Middleware | Handler | Contract | Owner | Test file | Disposition |
+|---|---|---|---|---|---|---|
+| `POST /updates/artifacts` | platformMW | `PostUpdateArtifact` | ed25519-signed manifest verification + hash check + staged lifecycle; rejects unsigned/tampered/wrong-version/wrong-platform artifacts | Platform | `internal/platform/updates/service_test.go` (unsigned, tampered, invalid signature, wrong version, wrong platform, valid end-to-end) | MISSING_UI |
+| `GET /updates/artifacts/history` | platformMW | `GetUpdateArtifactHistory` | `{history: updates.Record[]}` | Platform | `internal/platform/updates/service_test.go` | MISSING_UI |
+| `GET /updates/artifacts/:id` | platformMW | `GetUpdateArtifactStatus` | `updates.Record` | Platform | `internal/platform/updates/service_test.go` | MISSING_UI |
+| `POST /updates/artifacts/:id/apply` | platformMW | `PostUpdateArtifactApply` | hands off to an external `ApplyCoordinator`; no coordinator is wired yet in this codebase, so this currently always reports 503 rather than applying in-process | Platform | `internal/platform/updates/service_test.go` (`TestTriggerApply_NoCoordinator_LeavesStaged`) | MISSING_UI |
+| `POST /updates/artifacts/:id/rollback` | platformMW | `PostUpdateArtifactRollback` | records rollback decision using pre-captured previous-version/hash metadata | Platform | `internal/platform/updates/service_test.go` | MISSING_UI |
+
 ## Theme system (cross-cutting, not a route)
 
 Verified by `web/admin/src/shared/theme/{theme,useTheme}.test.ts`,
@@ -180,16 +229,23 @@ occurrence and its row's disposition straight out of this document.
 | MACHINE_ONLY | 3 |
 | DEPRECATED | 12 |
 | DUPLICATE_SUPERSEDED_ROUTE | 18 |
-| MISSING_UI | 3 |
+| MISSING_UI | 29 |
 | MISSING_BACKEND | 0 (the one MISSING_BACKEND case — platform-initiated organization creation — is a non-route documented under Organizations, not counted here) |
-| **Total** | **100** |
+| **Total** | **126** |
 
-Three MISSING_UI gaps exist, documented rather than silently omitted:
-`GET /admin/backups/:id` (single-backup fetch; the list view already
-shows everything the struct provides), `POST /admin/backups/schedule`
-(a `setBackupSchedule` client function exists but no component calls
-it — the schedule is currently read-only in the UI), and `GET
-/admin/runtime` (real route, no frontend consumer).
+Three pre-existing MISSING_UI gaps were documented rather than
+silently omitted: `GET /admin/backups/:id` (single-backup fetch; the
+list view already shows everything the struct provides), `POST
+/admin/backups/schedule` (a `setBackupSchedule` client function exists
+but no component calls it — the schedule is currently read-only in the
+UI), and `GET /admin/runtime` (real route, no frontend consumer). The
+remaining 26 MISSING_UI rows were added in the Milestone 13-15 pass:
+three pre-existing queue routes (`/admin/queue/history`,
+`/admin/queue/export`, `/admin/queue/messages/bulk-action`) found
+undocumented, and 23 new backend-only routes for DR coordination,
+retention/legal-hold/purge, platform billing balances/adjustments, and
+signed update-artifact staging — all thin handlers over already-tested
+service layers, with no console UI built for them in this pass.
 
 DEPRECATED is 12, not 11, because `POST /firewall/rules` moved from
 UI_SUPPORTED to DEPRECATED / NOT_OPERATIONAL in this pass (see

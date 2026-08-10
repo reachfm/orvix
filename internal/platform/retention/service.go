@@ -207,7 +207,26 @@ func (s *Service) ExecutePurge(ctx context.Context, scopeKind string, scopeID ui
 	return total, nil
 }
 
+// ListActiveHolds returns the active legal holds for a scope.
+func (s *Service) ListActiveHolds(ctx context.Context, scopeKind string, scopeID uint) ([]LegalHold, error) {
+	out, err := s.repo.ActiveHoldsForScope(ctx, scopeKind, scopeID, s.clock.Now())
+	if err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "list active legal holds", err)
+	}
+	return out, nil
+}
+
 // ── Chain of custody ─────────────────────────────────────────────
+
+// ListCustodyEvents returns chain-of-custody evidence records for a
+// scope, paginated, newest first.
+func (s *Service) ListCustodyEvents(ctx context.Context, scopeKind string, scopeID uint, limit, offset int) ([]ChainOfCustodyEvent, error) {
+	out, err := s.repo.ListCustodyEvents(ctx, scopeKind, scopeID, limit, offset)
+	if err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "list chain of custody events", err)
+	}
+	return out, nil
+}
 
 func (s *Service) RecordCustody(ctx context.Context, operation, scopeKind string, scopeID uint, actorID uint, recordCount int, content []byte) error {
 	hash := ""

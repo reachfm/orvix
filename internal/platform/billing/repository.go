@@ -93,6 +93,33 @@ func (r *Repository) FindByIdempotencyKey(ctx context.Context, tenantID uint, ke
 	return &a, nil
 }
 
+// ListAdjustments returns the most recent adjustments for a tenant,
+// newest first — used by the admin history endpoint. No message
+// bodies or PII beyond the operator-supplied reason string are
+// stored on this row.
+func (r *Repository) ListAdjustments(ctx context.Context, tenantID uint, limit int) ([]Adjustment, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, tenant_id, type, amount_cents, currency, reason, actor_id, idempotency_key, created_at
+		FROM platform_billing_adjustments WHERE tenant_id=`+r.dialect.Placeholder(1)+`
+		ORDER BY id DESC LIMIT `+r.dialect.Placeholder(2), tenantID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Adjustment
+	for rows.Next() {
+		var a Adjustment
+		if err := rows.Scan(&a.ID, &a.TenantID, &a.Type, &a.AmountCents, &a.Currency, &a.Reason, &a.ActorID, &a.IdempotencyKey, &a.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 func (r *Repository) GetBalance(ctx context.Context, tx *sql.Tx, tenantID uint) (*Balance, error) {
 	q := `SELECT tenant_id, currency, balance_cents, version, updated_at FROM platform_billing_balances WHERE tenant_id=` + r.dialect.Placeholder(1)
 	var row *sql.Row

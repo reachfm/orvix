@@ -220,6 +220,36 @@ func (r *Repository) GetPurgeExecution(ctx context.Context, idempotencyKey strin
 	return purgedCount, true, nil
 }
 
+// ListCustodyEvents returns chain-of-custody records for a scope,
+// newest first, paginated — metadata/hashes only, never message
+// bodies (ChainOfCustodyEvent has no field capable of holding one).
+func (r *Repository) ListCustodyEvents(ctx context.Context, scopeKind string, scopeID uint, limit, offset int) ([]ChainOfCustodyEvent, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, operation, scope_kind, scope_id, actor_id, content_hash, record_count, created_at
+		FROM platform_chain_of_custody WHERE scope_kind=`+r.dialect.Placeholder(1)+` AND scope_id=`+r.dialect.Placeholder(2)+`
+		ORDER BY id DESC LIMIT `+r.dialect.Placeholder(3)+` OFFSET `+r.dialect.Placeholder(4),
+		scopeKind, scopeID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ChainOfCustodyEvent
+	for rows.Next() {
+		var e ChainOfCustodyEvent
+		if err := rows.Scan(&e.ID, &e.Operation, &e.ScopeKind, &e.ScopeID, &e.ActorID, &e.ContentHash, &e.RecordCount, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 func boolToInt(b bool) int {
 	if b {
 		return 1

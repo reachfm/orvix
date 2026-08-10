@@ -126,3 +126,31 @@ func (s *Service) PurgeMailbox(ctx context.Context, id, tenantID uint, reason st
 		return nil
 	})
 }
+
+// CountEligibleForPurge counts mailboxes already soft-deleted (status
+// = deleted) for tenantID whose deleted_at is older than cutoff — the
+// "past the recovery window" set. Read-only; used by the retention
+// bounded context's dry-run purge plan.
+func (r *AdminMailboxRepo) CountEligibleForPurge(ctx context.Context, tenantID uint, cutoff time.Time) (int, error) {
+	var n int
+	err := r.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM coremail_mailboxes WHERE tenant_id="+r.dialect.Placeholder(1)+" AND status="+r.dialect.Placeholder(2)+" AND deleted_at IS NOT NULL AND deleted_at < "+r.dialect.Placeholder(3),
+		tenantID, string(AdminMailboxDeleted), cutoff).Scan(&n)
+	return n, err
+}
+
+// PurgeBatchEligible permanently removes up to limit mailboxes already
+// soft-deleted for tenantID with deleted_at older than cutoff, and
+// returns how many rows were actually removed — bounded per call so a
+// large backlog is never one unbounded DELETE. Like PurgeByID, the
+// WHERE clause requiring status=deleted AND deleted_at IS NOT NULL
+// makes purging a live mailbox structurally impossible here too.
+func (r *AdminMailboxRepo) PurgeBatchEligible(ctx context.Context, tenantID uint, cutoff time.Time, limit int) (int64, error) {
+	res, err := r.db.ExecContext(ctx,
+		"DELETE FROM coremail_mailboxes WHERE id IN (SELECT id FROM coremail_mailboxes WHERE tenant_id="+r.dialect.Placeholder(1)+" AND status="+r.dialect.Placeholder(2)+" AND deleted_at IS NOT NULL AND deleted_at < "+r.dialect.Placeholder(3)+" LIMIT "+r.dialect.Placeholder(4)+")",
+		tenantID, string(AdminMailboxDeleted), cutoff, limit)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}

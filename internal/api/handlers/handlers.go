@@ -41,9 +41,11 @@ import (
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
 	"github.com/orvix/orvix/internal/observability"
+	platformbilling "github.com/orvix/orvix/internal/platform/billing"
 	"github.com/orvix/orvix/internal/platform/bulkprovision"
 	"github.com/orvix/orvix/internal/platform/cluster"
 	"github.com/orvix/orvix/internal/platform/relay"
+	"github.com/orvix/orvix/internal/platform/retention"
 	"github.com/orvix/orvix/internal/ruler"
 	"github.com/orvix/orvix/internal/runtime"
 	settingsbridge "github.com/orvix/orvix/internal/settings/bridge"
@@ -202,6 +204,8 @@ type Handler struct {
 	bulkProvisionSvc *bulkprovision.Service
 	relaySvc         *relay.Service
 	clusterSvc       *cluster.Service
+	retentionSvc     *retention.Service
+	platformBillSvc  *platformbilling.Service
 
 	billingSvc   *billing.Service
 	usageSvc     *billing.UsageService
@@ -432,6 +436,18 @@ func (h *Handler) SetRelayService(s *relay.Service) {
 // SetClusterService wires the cluster node registry service.
 func (h *Handler) SetClusterService(s *cluster.Service) {
 	h.clusterSvc = s
+}
+
+// SetRetentionService wires the retention/legal-hold/compliance service.
+func (h *Handler) SetRetentionService(s *retention.Service) {
+	h.retentionSvc = s
+}
+
+// SetPlatformBillingService wires the platform-level balances/manual
+// adjustments service (Milestone 15) — distinct from the pre-existing
+// internal/billing subscription/invoice package.
+func (h *Handler) SetPlatformBillingService(s *platformbilling.Service) {
+	h.platformBillSvc = s
 }
 
 // SetPlatformAdminService wires the platform admin service.

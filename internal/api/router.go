@@ -43,9 +43,11 @@ import (
 	"github.com/orvix/orvix/internal/metrics"
 	"github.com/orvix/orvix/internal/modules"
 	"github.com/orvix/orvix/internal/observability"
+	platformbilling "github.com/orvix/orvix/internal/platform/billing"
 	"github.com/orvix/orvix/internal/platform/bulkprovision"
 	"github.com/orvix/orvix/internal/platform/cluster"
 	"github.com/orvix/orvix/internal/platform/relay"
+	"github.com/orvix/orvix/internal/platform/retention"
 	"github.com/orvix/orvix/internal/ruler"
 	orvixruntime "github.com/orvix/orvix/internal/runtime"
 	settingsbridge "github.com/orvix/orvix/internal/settings/bridge"
@@ -243,6 +245,25 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 
 			platformSvc := platformpkg.NewPlatformService(sqlDB, auditExtendedStore, rbacEval)
 			router.h.SetPlatformAdminService(platformSvc)
+
+			// Retention/legal-hold/compliance (Milestone 14) — the
+			// purge target is the REAL mailbox soft-delete lifecycle
+			// (Milestone 5), not a fake or disconnected table.
+			retentionRepo := retention.NewRepository(sqlDB)
+			if err := retentionRepo.EnsureSchema(context.Background()); err != nil {
+				logger.Warn("retention schema init failed; service disabled", zap.Error(err))
+			} else {
+				purgeTarget := retention.NewMailboxPurgeAdapter(adminMailboxRepo)
+				router.h.SetRetentionService(retention.NewService(retentionRepo, purgeTarget, auditExtendedStore, nil, nil))
+			}
+
+			// Manual credits/adjustments (Milestone 15).
+			platformBillingRepo := platformbilling.NewRepository(sqlDB)
+			if err := platformBillingRepo.EnsureSchema(context.Background()); err != nil {
+				logger.Warn("platform billing schema init failed; service disabled", zap.Error(err))
+			} else {
+				router.h.SetPlatformBillingService(platformbilling.NewService(sqlDB, platformBillingRepo, auditExtendedStore, nil, nil))
+			}
 
 			logger.Info("enterprise admin services wired with transactional audit and RBAC")
 		}
@@ -1498,6 +1519,44 @@ func (r *Router) setupRoutes() {
 	protected.Patch("/platform/organizations/:id", platformMW[0], platformMW[1], r.h.UpdateOrganization)
 	protected.Post("/platform/organizations/:id/active", platformMW[0], platformMW[1], r.h.SetOrganizationActive)
 	protected.Get("/platform/organizations/:id/detail", platformMW[0], platformMW[1], r.h.GetOrganizationDetail)
+
+	// ── Disaster Recovery (Milestone 13) — coordinated backup/restore
+	// on top of the existing internal/backup mechanics and restorecoord
+	// restart/rollback lifecycle. Platform-admin only, CSRF-protected
+	// (platformMW carries CSRF for every route registered with it).
+	protected.Get("/dr/readiness", platformMW[0], platformMW[1], r.h.GetDRReadiness)
+	protected.Get("/dr/drills", platformMW[0], platformMW[1], r.h.GetDRDrills)
+	protected.Post("/dr/drills", platformMW[0], platformMW[1], r.h.PostDRDrill)
+	protected.Post("/dr/backup", platformMW[0], platformMW[1], r.h.PostDRCoordinatedBackup)
+	protected.Post("/dr/backups/:id/restore", platformMW[0], platformMW[1], r.h.PostDRCoordinatedRestore)
+	protected.Get("/dr/operations/:job_id", platformMW[0], platformMW[1], r.h.GetDROperationStatus)
+
+	// ── Retention / legal hold / purge (Milestone 14) ──────────────
+	protected.Post("/retention/policies", platformMW[0], platformMW[1], r.h.PostRetentionPolicy)
+	protected.Get("/retention/policies/effective", platformMW[0], platformMW[1], r.h.GetRetentionEffectivePolicy)
+	protected.Post("/retention/legal-holds", platformMW[0], platformMW[1], r.h.PostRetentionLegalHold)
+	protected.Get("/retention/legal-holds", platformMW[0], platformMW[1], r.h.GetRetentionLegalHolds)
+	protected.Post("/retention/legal-holds/:id/release", platformMW[0], platformMW[1], r.h.PostRetentionLegalHoldRelease)
+	protected.Post("/retention/purge/plan", platformMW[0], platformMW[1], r.h.PostRetentionPurgePlan)
+	protected.Post("/retention/purge/execute", platformMW[0], platformMW[1], r.h.PostRetentionPurgeExecute)
+	protected.Post("/retention/mailboxes/:id/recover", platformMW[0], platformMW[1], r.h.PostRetentionRecoverMailbox)
+	protected.Get("/retention/custody", platformMW[0], platformMW[1], r.h.GetRetentionCustody)
+
+	// ── Signed update-artifact verification + staged lifecycle
+	// (Milestone 13). Independent of the legacy /update/* routes above
+	// (version check/changelog/systemd-oneshot runtime update) — this
+	// adds cryptographic verification and staging; apply/rollback only
+	// hand off to an external coordinator, never restart in-process.
+	protected.Post("/updates/artifacts", platformMW[0], platformMW[1], r.h.PostUpdateArtifact)
+	protected.Get("/updates/artifacts/history", platformMW[0], platformMW[1], r.h.GetUpdateArtifactHistory)
+	protected.Get("/updates/artifacts/:id", platformMW[0], platformMW[1], r.h.GetUpdateArtifactStatus)
+	protected.Post("/updates/artifacts/:id/apply", platformMW[0], platformMW[1], r.h.PostUpdateArtifactApply)
+	protected.Post("/updates/artifacts/:id/rollback", platformMW[0], platformMW[1], r.h.PostUpdateArtifactRollback)
+
+	// ── Platform billing balances/adjustments (Milestone 15) ───────
+	protected.Get("/platform/billing/tenants/:tenant_id/balance", platformMW[0], platformMW[1], r.h.GetPlatformBillingBalance)
+	protected.Post("/platform/billing/tenants/:tenant_id/adjustments", platformMW[0], platformMW[1], r.h.PostPlatformBillingAdjustment)
+	protected.Get("/platform/billing/tenants/:tenant_id/adjustments", platformMW[0], platformMW[1], r.h.GetPlatformBillingAdjustments)
 
 	// Monitoring v1: resolve an alert (CSRF-protected, admin role).
 	protected.Post("/monitoring/alerts/:id/resolve", platformMW[0], platformMW[1], r.h.PostMonitoringAlertResolve)
