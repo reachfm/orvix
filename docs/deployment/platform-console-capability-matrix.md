@@ -208,13 +208,11 @@ and `isCoreMailDisabled` (frontend).
 | `GET /platform/support/grants/:id` | platformMW | `GetSupportAccessGrant` | get a support-access grant by ID | Platform | `internal/supportaccess/` | MISSING_UI |
 | `POST /platform/support/grants/:id/activate` | platformMW | `ActivateSupportAccessGrant` | activate an approved support-access grant | Platform | `internal/supportaccess/` | MISSING_UI |
 | `POST /platform/support/grants/:id/revoke` | platformMW | `RevokeSupportAccessGrant` | revoke an active support-access grant | Platform | `internal/supportaccess/` | MISSING_UI |
-| `POST /webhooks/subscriptions` | platformMW | `CreateWebhookSubscription` | create a webhook subscription with validated URL and event allowlist | Platform/Tenant | `internal/webhooks/` | MISSING_UI |
-| `GET /webhooks/subscriptions` | platformMW | `ListWebhookSubscriptions` | list webhook subscriptions | Platform/Tenant | `internal/webhooks/` | MISSING_UI |
-| `GET /webhooks/subscriptions/:id` | platformMW | `GetWebhookSubscription` | get a webhook subscription by ID | Platform/Tenant | `internal/webhooks/` | MISSING_UI |
-| `GET /webhooks/subscriptions/:id/history` | platformMW | `GetWebhookDeliveryHistory` | get delivery history for a subscription | Platform/Tenant | `internal/webhooks/` | MISSING_UI |
-| `POST /webhooks/subscriptions/:id/rotate-secret` | platformMW | `RotateWebhookSecret` | rotate webhook signing secret; returns new secret once | Platform/Tenant | `internal/webhooks/` | MISSING_UI |
-| `POST /webhooks/subscriptions/:id/reactivate` | platformMW | `ReactivateWebhookSubscription` | reactivate a suspended webhook subscription | Platform/Tenant | `internal/webhooks/` | MISSING_UI |
-| `POST /webhooks/deliveries/:id/retry` | platformMW | `RetryWebhookDelivery` | manually retry a failed/suspended delivery | Platform/Tenant | `internal/webhooks/` | MISSING_UI |
+| `POST /platform/automation/jobs` | platformMW | `SubmitPlatformAutomationJob` | submit an explicitly platform-scoped allowlisted durable job; requires idempotency key | Platform | `internal/platform/jobs/` | MISSING_UI |
+| `GET /platform/automation/jobs` | platformMW | `ListPlatformAutomationJobs` | paginated and filterable platform-job history | Platform | `internal/platform/jobs/` | MISSING_UI |
+| `GET /platform/automation/jobs/:id` | platformMW | `GetPlatformAutomationJob` | safe durable job detail without payload, lease, or idempotency internals | Platform | `internal/platform/jobs/` | MISSING_UI |
+| `POST /platform/automation/jobs/:id/cancel` | platformMW | `CancelPlatformAutomationJob` | atomically cancel queued work or request cooperative cancellation of running work | Platform | `internal/platform/jobs/` | MISSING_UI |
+| `POST /platform/automation/jobs/:id/retry` | platformMW | `RetryPlatformAutomationJob` | idempotently requeue an eligible failed platform job | Platform | `internal/platform/jobs/` | MISSING_UI |
 | `GET /platform/capabilities` | platformMW | `GetCapabilities` | runtime capability registry derived from registered modules and health | Platform | `internal/capability/` | MISSING_UI |
 | `GET /platform/config` | platformMW | `ListConfigurationSettings` | list authoritative configuration settings with source/effective/pending state | Platform | `internal/configtruth/` | MISSING_UI |
 | `GET /platform/config/:key` | platformMW | `GetConfigurationSetting` | get authoritative view of one setting | Platform | `internal/configtruth/` | MISSING_UI |
@@ -257,9 +255,9 @@ occurrence and its row's disposition straight out of this document.
 | MACHINE_ONLY | 3 |
 | DEPRECATED | 12 |
 | DUPLICATE_SUPERSEDED_ROUTE | 18 |
-| MISSING_UI | 55 |
+| MISSING_UI | 53 |
 | MISSING_BACKEND | 0 (the one MISSING_BACKEND case — platform-initiated organization creation — is a non-route documented under Organizations, not counted here) |
-| **Total** | **152** |
+| **Total** | **150** |
 
 Three pre-existing MISSING_UI gaps were documented rather than
 silently omitted: `GET /admin/backups/:id` (single-backup fetch; the

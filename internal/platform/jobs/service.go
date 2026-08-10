@@ -51,9 +51,11 @@ func (s *Service) Submit(ctx context.Context, submission Submission) (*Job, bool
 	if submission.Scope == ScopePlatform && submission.TenantID != 0 {
 		return nil, false, kernel.ValidationError(map[string]string{"tenant_id": "platform jobs cannot carry a tenant"})
 	}
-	if strings.TrimSpace(submission.Actor) == "" || strings.TrimSpace(submission.IdempotencyKey) == "" {
+	key := strings.TrimSpace(submission.IdempotencyKey)
+	if strings.TrimSpace(submission.Actor) == "" || key == "" || len(key) > 255 || strings.ContainsAny(key, "\r\n") {
 		return nil, false, kernel.ValidationError(map[string]string{"idempotency_key": "Idempotency-Key is required", "actor": "authenticated actor is required"})
 	}
+	submission.IdempotencyKey = key
 	payload, err := normalizeSafeJSON(submission.Payload)
 	if err != nil {
 		return nil, false, err
@@ -125,6 +127,12 @@ func (s *Service) List(ctx context.Context, filter ListFilter) (kernel.PageRespo
 	}
 	if filter.Scope == ScopeTenant && filter.TenantID == 0 {
 		return kernel.PageResponse[Job]{}, kernel.ValidationError(map[string]string{"tenant_id": "tenant context is required"})
+	}
+	if filter.Type != "" {
+		definition, ok := s.registry.Lookup(filter.Type)
+		if !ok || definition.Scope != filter.Scope {
+			return kernel.PageResponse[Job]{}, ErrUnknownJobType
+		}
 	}
 	return s.repo.List(ctx, filter)
 }

@@ -259,6 +259,28 @@ func TestWorkerPanicRecoveryAndUnknownTypeFailure(t *testing.T) {
 	}
 }
 
+func TestFailureMetadataRedactsConnectionSecrets(t *testing.T) {
+	svc, _, _, _, _ := newTestService(t)
+	job, _, err := svc.Submit(context.Background(), validSubmission("safe-error"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := svc.Claim(context.Background(), "worker", time.Minute)
+	if err != nil || claimed == nil || claimed.ID != job.ID {
+		t.Fatalf("claim=%+v err=%v", claimed, err)
+	}
+	if err = svc.Fail(context.Background(), leaseFor(claimed), "DATABASE_ERROR", "postgres://user:secret@db/jobs", false); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := svc.Get(context.Background(), job.ID, 7, ScopeTenant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.ErrorMessage != "automation job execution failed" || strings.Contains(stored.ErrorMessage, "secret") {
+		t.Fatalf("unsafe failure metadata: %q", stored.ErrorMessage)
+	}
+}
+
 type fakeDomainVerifier struct {
 	tenant, domain uint
 	calls          atomic.Int32

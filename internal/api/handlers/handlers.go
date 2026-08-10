@@ -47,6 +47,7 @@ import (
 	platformbilling "github.com/orvix/orvix/internal/platform/billing"
 	"github.com/orvix/orvix/internal/platform/bulkprovision"
 	"github.com/orvix/orvix/internal/platform/cluster"
+	platformjobs "github.com/orvix/orvix/internal/platform/jobs"
 	"github.com/orvix/orvix/internal/platform/relay"
 	"github.com/orvix/orvix/internal/platform/retention"
 	"github.com/orvix/orvix/internal/ruler"
@@ -104,6 +105,8 @@ type Handler struct {
 	supportAccessSvc *supportaccess.Service
 	// webhookSvc is lazily initialized by h.webhookService().
 	webhookSvc *webhooks.Service
+	jobSvc     *platformjobs.Service
+	jobWorker  *platformjobs.Worker
 	// capabilitySvc is lazily initialized by h.capabilityService().
 	capabilitySvc *capability.Service
 	// configTruthSvc is lazily initialized by h.configTruthService().
@@ -437,6 +440,26 @@ func (h *Handler) SetDomainAdminService(s *domainadminsvc.Service) {
 }
 
 func (h *Handler) SetWebhookService(s *webhooks.Service) { h.webhookSvc = s }
+
+func (h *Handler) WebhookService() *webhooks.Service { return h.webhookSvc }
+
+func (h *Handler) CustomerDomainService() *customerdomain.Service { return h.customerDomainSvc }
+
+func (h *Handler) SetAutomationJobs(service *platformjobs.Service, worker *platformjobs.Worker) {
+	h.jobSvc = service
+	h.jobWorker = worker
+}
+
+func (h *Handler) StartAutomationWorker(ctx context.Context) {
+	if h.jobWorker == nil {
+		return
+	}
+	go func() {
+		if err := h.jobWorker.Run(ctx); err != nil && ctx.Err() == nil {
+			h.logger.Error("automation jobs worker stopped", zap.Error(err))
+		}
+	}()
+}
 
 func (h *Handler) StartWebhookWorker(ctx context.Context, interval time.Duration) {
 	if h.webhookSvc == nil {

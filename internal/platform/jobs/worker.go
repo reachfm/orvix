@@ -14,6 +14,12 @@ type Worker struct {
 	id            string
 	pollInterval  time.Duration
 	leaseDuration time.Duration
+	onError       func(error)
+}
+
+func (w *Worker) WithErrorHandler(handler func(error)) *Worker {
+	w.onError = handler
+	return w
 }
 
 func NewWorker(service *Service, registry *Registry, id string) *Worker {
@@ -35,11 +41,12 @@ func (w *Worker) Run(ctx context.Context) error {
 	defer ticker.Stop()
 	for {
 		if _, err := w.service.RecoverExpired(ctx, 50); err != nil && !errors.Is(err, context.Canceled) {
-			return err
+			w.report(err)
 		}
 		worked, err := w.RunOnce(ctx)
 		if err != nil && !errors.Is(err, context.Canceled) {
-			return err
+			w.report(err)
+			worked = false
 		}
 		if worked {
 			continue
@@ -49,6 +56,12 @@ func (w *Worker) Run(ctx context.Context) error {
 			return ctx.Err()
 		case <-ticker.C:
 		}
+	}
+}
+
+func (w *Worker) report(err error) {
+	if w.onError != nil && err != nil {
+		w.onError(err)
 	}
 }
 

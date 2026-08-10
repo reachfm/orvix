@@ -103,6 +103,10 @@ const (
 	PermAPIKeysRead  Permission = "apikeys.read"
 	PermAPIKeysWrite Permission = "apikeys.write"
 
+	// Durable automation jobs.
+	PermJobsRead  Permission = "jobs.read"
+	PermJobsWrite Permission = "jobs.write"
+
 	// Billing.
 	PermBillingRead  Permission = "billing.read"
 	PermBillingWrite Permission = "billing.write"
@@ -149,6 +153,8 @@ var AllPermissions = []Permission{
 	PermOwnershipTransfer,
 	PermAPIKeysRead,
 	PermAPIKeysWrite,
+	PermJobsRead,
+	PermJobsWrite,
 	PermBillingRead,
 	PermBillingWrite,
 	PermPlatformOrganizationsRead,
@@ -194,6 +200,7 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		// Cross-tenant security controls (session revocation, security ops).
 		PermPlatformSecurityRead:   true,
 		PermPlatformSessionsRevoke: true,
+		PermJobsRead:               true, PermJobsWrite: true,
 	},
 	// Tenant Admin: full tenant permissions (no platform).
 	auth.RoleTenantAdmin: {
@@ -207,6 +214,7 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermInvitationsRead: true, PermInvitationsWrite: true,
 		PermOwnershipTransfer: true,
 		PermAPIKeysRead:       true, PermAPIKeysWrite: true,
+		PermJobsRead: true, PermJobsWrite: true,
 		PermBillingRead: true, PermBillingWrite: true,
 		PermAuditRead:        true,
 		PermSettingsRead:     true,
@@ -232,6 +240,7 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermSessionsRevoke:   true,
 		PermSecurityRead:     true,
 		PermBillingRead:      true,
+		PermJobsRead:         true, PermJobsWrite: true,
 	},
 	// Tenant Support: read + password reset + mailbox status.
 	auth.RoleTenantSupport: {
@@ -250,6 +259,7 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermSessionsRevoke:    true,
 		PermSecurityRead:      true,
 		PermBillingRead:       true,
+		PermJobsRead:          true,
 	},
 	// Tenant Read Only.
 	auth.RoleTenantReadOnly: {
@@ -266,6 +276,7 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermMonitoringRead:    true,
 		PermSecurityRead:      true,
 		PermBillingRead:       true,
+		PermJobsRead:          true,
 	},
 
 	// ── Legacy roles ────────────────────────────────────────
@@ -293,6 +304,7 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermPlatformOrganizationsRead: true, PermPlatformOrganizationsWrite: true,
 		PermPlatformSecurityRead:   true,
 		PermPlatformSessionsRevoke: true,
+		PermJobsRead:               true, PermJobsWrite: true,
 	},
 	// PORTAL-SEPARATION-PHASE1: the deprecated auth.RoleAdmin no longer maps
 	// to any permission. Legacy "admin" rows are normalized at startup
@@ -331,6 +343,7 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermInvitationsRead:  true,
 		PermAPIKeysRead:      true,
 		PermBillingRead:      true,
+		PermJobsRead:         true, PermJobsWrite: true,
 	},
 	auth.RoleReadOnly: {
 		PermQueueRead:         true,
@@ -350,6 +363,7 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermInvitationsRead:   true,
 		PermAPIKeysRead:       true,
 		PermBillingRead:       true,
+		PermJobsRead:          true,
 	},
 	// RoleUser is a tenant owner/member who has full control over their
 	// own tenant resources but NO platform-level privileges (platform
@@ -366,6 +380,7 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermOwnershipTransfer: true,
 		PermAPIKeysRead:       true, PermAPIKeysWrite: true,
 		PermBillingRead: true, PermBillingWrite: true,
+		PermJobsRead: true, PermJobsWrite: true,
 		PermAuditRead:        true,
 		PermSettingsRead:     true,
 		PermMonitoringRead:   true,
@@ -388,6 +403,7 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermInvitationsRead: true,
 		PermAliasesRead:     true,
 		PermAPIKeysRead:     true,
+		PermJobsRead:        true,
 	},
 }
 

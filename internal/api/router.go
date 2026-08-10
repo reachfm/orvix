@@ -47,6 +47,7 @@ import (
 	platformbilling "github.com/orvix/orvix/internal/platform/billing"
 	"github.com/orvix/orvix/internal/platform/bulkprovision"
 	"github.com/orvix/orvix/internal/platform/cluster"
+	platformjobs "github.com/orvix/orvix/internal/platform/jobs"
 	"github.com/orvix/orvix/internal/platform/kernel"
 	"github.com/orvix/orvix/internal/platform/relay"
 	"github.com/orvix/orvix/internal/platform/retention"
@@ -618,6 +619,23 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 	ms := initTransactionalMailSender(cfg.CoreMail.SMTPHost, cfg.CoreMail.SMTPPort, cfg.CoreMail.Hostname, logger)
 	router.h.SetMailSender(ms)
 
+	if sqlDB, err := db.DB(); err == nil {
+		jobRepo := platformjobs.NewJobRepository(sqlDB)
+		jobRegistry := platformjobs.NewRegistry()
+		if err := jobRepo.EnsureSchema(context.Background()); err != nil {
+			logger.Error("automation jobs schema initialization failed", zap.Error(err))
+		} else if err := platformjobs.RegisterProductionHandlers(jobRegistry, router.h.CustomerDomainService(), router.h.WebhookService()); err != nil {
+			logger.Error("automation jobs handler registration failed", zap.Error(err))
+		} else {
+			jobService := platformjobs.NewServiceWithRegistry(jobRepo, jobRegistry, kernel.SystemClock{})
+			jobWorker := platformjobs.NewWorker(jobService, jobRegistry, "orvix-"+kernel.UUIDGenerator{}.NewID()).WithErrorHandler(func(err error) {
+				logger.Error("automation jobs worker iteration failed", zap.Error(err))
+			})
+			router.h.SetAutomationJobs(jobService, jobWorker)
+			logger.Info("durable automation jobs wired")
+		}
+	}
+
 	router.setupMiddleware()
 	router.setupRoutes()
 	router.setupAdminUI()
@@ -684,6 +702,7 @@ func (r *Router) Start() {
 	r.startOnce.Do(func() {
 		r.h.StartBillingScheduler(r.appCtx, 15*time.Minute)
 		r.h.StartWebhookWorker(r.appCtx, time.Second)
+		r.h.StartAutomationWorker(r.appCtx)
 	})
 }
 
@@ -1683,6 +1702,18 @@ func (r *Router) setupRoutes() {
 	protected.Get("/webhooks/deliveries/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermAPIKeysRead), r.h.GetWebhookDelivery)
 	protected.Post("/webhooks/deliveries/:id/replay", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermAPIKeysWrite), r.h.ReplayWebhookDelivery)
 	protected.Post("/webhooks/deliveries/:id/retry", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermAPIKeysWrite), r.h.RetryWebhookDelivery)
+
+	protected.Post("/automation/jobs", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermJobsWrite), r.h.SubmitTenantAutomationJob)
+	protected.Get("/automation/jobs", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermJobsRead), r.h.ListTenantAutomationJobs)
+	protected.Get("/automation/jobs/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermJobsRead), r.h.GetTenantAutomationJob)
+	protected.Post("/automation/jobs/:id/cancel", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermJobsWrite), r.h.CancelTenantAutomationJob)
+	protected.Post("/automation/jobs/:id/retry", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermJobsWrite), r.h.RetryTenantAutomationJob)
+
+	protected.Post("/platform/automation/jobs", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermJobsWrite), r.h.SubmitPlatformAutomationJob)
+	protected.Get("/platform/automation/jobs", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermJobsRead), r.h.ListPlatformAutomationJobs)
+	protected.Get("/platform/automation/jobs/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermJobsRead), r.h.GetPlatformAutomationJob)
+	protected.Post("/platform/automation/jobs/:id/cancel", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermJobsWrite), r.h.CancelPlatformAutomationJob)
+	protected.Post("/platform/automation/jobs/:id/retry", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermJobsWrite), r.h.RetryPlatformAutomationJob)
 
 	// ── Platform billing balances/adjustments (Milestone 15) ───────
 	protected.Get("/platform/billing/tenants/:tenant_id/balance", platformMW[0], platformMW[1], r.h.GetPlatformBillingBalance)
