@@ -54,6 +54,7 @@ import (
 	"github.com/orvix/orvix/internal/tlsmgmt"
 	"github.com/orvix/orvix/internal/trustmgmt"
 	"github.com/orvix/orvix/internal/updater"
+	"github.com/orvix/orvix/internal/webhooks"
 	"github.com/orvix/orvix/internal/webmailmgmt"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/argon2"
@@ -99,6 +100,8 @@ type Handler struct {
 	incidentSvc *incident.Service
 	// supportAccessSvc is lazily initialized by h.supportAccessService().
 	supportAccessSvc *supportaccess.Service
+	// webhookSvc is lazily initialized by h.webhookService().
+	webhookSvc *webhooks.Service
 
 	// updateSvc is the process-wide Update Management v1 service.
 	// It is set once at router construction (see

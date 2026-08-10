@@ -79,6 +79,12 @@ func (r *Registry) Get(id string) (Module, bool) {
 	return mod, ok
 }
 
+// HasModule reports whether a module with the given ID is registered.
+func (r *Registry) HasModule(id string) bool {
+	_, ok := r.Get(id)
+	return ok
+}
+
 // All returns all registered modules in registration order.
 func (r *Registry) All() []Module {
 	r.mu.RLock()

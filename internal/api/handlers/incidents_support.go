@@ -34,7 +34,7 @@ func (h *Handler) CreateIncident(c fiber.Ctx) error {
 	if err := c.Bind().JSON(&req); err != nil || req.Title == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "title is required"})
 	}
-	inc, err := h.incidentService().Create(c.Context(), req.Title, req.Description, incident.Severity(req.Severity), req.Services, req.Regions)
+	inc, err := h.incidentService().Create(c.Context(), req.Title, req.Description, incident.Severity(req.Severity), req.Services, req.Regions, nil)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}

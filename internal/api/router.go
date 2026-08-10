@@ -1578,6 +1578,12 @@ func (r *Router) setupRoutes() {
 	protected.Post("/platform/support/grants/:id/activate", platformMW[0], platformMW[1], r.h.ActivateSupportAccessGrant)
 	protected.Post("/platform/support/grants/:id/revoke", platformMW[0], platformMW[1], r.h.RevokeSupportAccessGrant)
 
+	// ── Webhooks (Milestone 16, platform + tenant) ────────────────
+	protected.Post("/webhooks/subscriptions", platformMW[0], platformMW[1], r.h.CreateWebhookSubscription)
+	protected.Get("/webhooks/subscriptions", platformMW[0], platformMW[1], r.h.ListWebhookSubscriptions)
+	protected.Get("/webhooks/subscriptions/:id", platformMW[0], platformMW[1], r.h.GetWebhookSubscription)
+	protected.Get("/webhooks/subscriptions/:id/history", platformMW[0], platformMW[1], r.h.GetWebhookDeliveryHistory)
+
 	// ── Platform billing balances/adjustments (Milestone 15) ───────
 	protected.Get("/platform/billing/tenants/:tenant_id/balance", platformMW[0], platformMW[1], r.h.GetPlatformBillingBalance)
 	protected.Post("/platform/billing/tenants/:tenant_id/adjustments", platformMW[0], platformMW[1], r.h.PostPlatformBillingAdjustment)

@@ -206,6 +206,10 @@ and `isCoreMailDisabled` (frontend).
 | `GET /platform/support/grants/:id` | platformMW | `GetSupportAccessGrant` | get a support-access grant by ID | Platform | `internal/supportaccess/` | MISSING_UI |
 | `POST /platform/support/grants/:id/activate` | platformMW | `ActivateSupportAccessGrant` | activate an approved support-access grant | Platform | `internal/supportaccess/` | MISSING_UI |
 | `POST /platform/support/grants/:id/revoke` | platformMW | `RevokeSupportAccessGrant` | revoke an active support-access grant | Platform | `internal/supportaccess/` | MISSING_UI |
+| `POST /webhooks/subscriptions` | platformMW | `CreateWebhookSubscription` | create a webhook subscription with validated URL and event allowlist | Platform/Tenant | `internal/webhooks/` | MISSING_UI |
+| `GET /webhooks/subscriptions` | platformMW | `ListWebhookSubscriptions` | list webhook subscriptions | Platform/Tenant | `internal/webhooks/` | MISSING_UI |
+| `GET /webhooks/subscriptions/:id` | platformMW | `GetWebhookSubscription` | get a webhook subscription by ID | Platform/Tenant | `internal/webhooks/` | MISSING_UI |
+| `GET /webhooks/subscriptions/:id/history` | platformMW | `GetWebhookDeliveryHistory` | get delivery history for a subscription | Platform/Tenant | `internal/webhooks/` | MISSING_UI |
 
 ## Theme system (cross-cutting, not a route)
 
@@ -234,7 +238,7 @@ above (not carried over from an earlier draft) and is enforced equal
 to the router's actual route set by
 `internal/api/capability_matrix_test.go`, which parses
 `platformMW[0], platformMW[1]` registrations straight out of
-`router.go` — currently 139 — and parses every `` `METHOD /path` ``
+`router.go` — currently 143 — and parses every `` `METHOD /path` ``
 occurrence and its row's disposition straight out of this document.
 
 | Disposition | Routes |
@@ -244,9 +248,9 @@ occurrence and its row's disposition straight out of this document.
 | MACHINE_ONLY | 3 |
 | DEPRECATED | 12 |
 | DUPLICATE_SUPERSEDED_ROUTE | 18 |
-| MISSING_UI | 42 |
+| MISSING_UI | 46 |
 | MISSING_BACKEND | 0 (the one MISSING_BACKEND case — platform-initiated organization creation — is a non-route documented under Organizations, not counted here) |
-| **Total** | **139** |
+| **Total** | **143** |
 
 Three pre-existing MISSING_UI gaps were documented rather than
 silently omitted: `GET /admin/backups/:id` (single-backup fetch; the

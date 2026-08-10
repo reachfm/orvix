@@ -112,7 +112,7 @@ func (s *Service) ValidateAccess(ctx context.Context, tenantID uint) error {
 		return err
 	}
 	if g == nil {
-		return nil
+		return &saError{"no active support access grant for this tenant"}
 	}
 	if time.Now().UTC().After(g.ExpiresAt) {
 		g.Status = StatusExpired
