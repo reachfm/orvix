@@ -30,6 +30,7 @@ import (
 	"github.com/orvix/orvix/internal/platform/cluster"
 	"github.com/orvix/orvix/internal/platform/deliverability"
 	"github.com/orvix/orvix/internal/platform/relay"
+	"github.com/orvix/orvix/internal/platform/security"
 	"github.com/orvix/orvix/internal/policy"
 	"github.com/orvix/orvix/internal/ruler"
 	orvixruntime "github.com/orvix/orvix/internal/runtime"
@@ -78,6 +79,9 @@ type Module struct {
 	// clusterSvc is the Milestone 10 node registry/placement/lease
 	// service. nil if schema init failed (never blocks startup).
 	clusterSvc *cluster.Service
+	// securitySvc is the Milestone 12 normalized security-event
+	// recorder. nil if schema init failed (never blocks startup).
+	securitySvc *security.Service
 
 	// pushNotifier is the Web Push (RFC 8030 / RFC 8291) dispatcher.
 	// It is constructed in initCore from cfg.CoreMail.VAPIDPublicKey
@@ -529,6 +533,21 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 		}
 	}
 
+	// Security event normalization (Milestone 12) — the recording
+	// choke point for antivirus/antispam/ACL/auth events. Wired here
+	// so it's available to future producers; individual subsystems
+	// (internal/antivirus.Engine, internal/coremail/antispam.Engine,
+	// the ACL enforcement path) emitting INTO it is a follow-up
+	// integration slice, not fabricated here.
+	securityRepo := security.NewRepository(sqlDB)
+	if err := securityRepo.EnsureSchema(context.Background()); err != nil {
+		if m.logger != nil {
+			m.logger.Warn("security event schema init failed; normalized security events disabled", zap.Error(err))
+		}
+	} else {
+		m.securitySvc = security.NewService(securityRepo, nil)
+	}
+
 	m.workers = make([]*delivery.DeliveryWorker, 0, workerCount)
 	for i := 0; i < workerCount; i++ {
 		worker := delivery.NewDeliveryWorker(
@@ -865,6 +884,13 @@ func (m *Module) QueueEngine() *queue.QueueEngine {
 // nil if cluster schema init failed or the runtime was not booted.
 func (m *Module) ClusterService() *cluster.Service {
 	return m.clusterSvc
+}
+
+// SecurityService returns the Milestone 12 normalized security-event
+// service, or nil if schema init failed or the runtime was not
+// booted.
+func (m *Module) SecurityService() *security.Service {
+	return m.securitySvc
 }
 
 // HealthStatus implements the admin API's optional moduleHealthReporter
