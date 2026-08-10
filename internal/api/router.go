@@ -42,6 +42,7 @@ import (
 	"github.com/orvix/orvix/internal/metrics"
 	"github.com/orvix/orvix/internal/modules"
 	"github.com/orvix/orvix/internal/observability"
+	"github.com/orvix/orvix/internal/platform/bulkprovision"
 	"github.com/orvix/orvix/internal/ruler"
 	orvixruntime "github.com/orvix/orvix/internal/runtime"
 	settingsbridge "github.com/orvix/orvix/internal/settings/bridge"
@@ -210,13 +211,22 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			if eng == nil {
 				eng = coremail.NewEngine(coremail.EngineConfig{DB: sqlDB, AuthCfg: coremail.DefaultAuthConfig()})
 			}
-			router.h.SetMailboxAdminService(mailboxadminsvc.NewService(adminMailboxRepo, eng.Auth, auditExtendedStore, rbacEval))
+			mailboxAdminSvc := mailboxadminsvc.NewService(adminMailboxRepo, eng.Auth, auditExtendedStore, rbacEval)
+			router.h.SetMailboxAdminService(mailboxAdminSvc)
 			orgRepo := orgadminsvc.NewOrganizationRepo(sqlDB)
 			router.h.SetOrganizationAdminService(orgadminsvc.NewService(orgRepo, auditExtendedStore, rbacEval))
 
 			domainAdminRepo := domainadminsvc.NewDomainAdminRepo(sqlDB)
 			dkimRepo := dkim.NewSQLRepo(sqlDB)
-			router.h.SetDomainAdminService(domainadminsvc.NewService(domainAdminRepo, dkimRepo, auditExtendedStore, rbacEval))
+			domainAdminSvc := domainadminsvc.NewService(domainAdminRepo, dkimRepo, auditExtendedStore, rbacEval)
+			router.h.SetDomainAdminService(domainAdminSvc)
+
+			bulkProvisionRepo := bulkprovision.NewRepository(sqlDB)
+			if err := bulkProvisionRepo.EnsureSchema(context.Background()); err != nil {
+				logger.Warn("bulk provisioning schema init failed; service disabled", zap.Error(err))
+			} else {
+				router.h.SetBulkProvisionService(bulkprovision.NewService(bulkProvisionRepo, mailboxAdminSvc, domainAdminSvc, nil, nil, nil))
+			}
 
 			dashboardSvc := dashboardsvc.NewDashboardService(sqlDB)
 			router.h.SetDashboardService(dashboardSvc)
@@ -1052,6 +1062,14 @@ func (r *Router) setupRoutes() {
 	canWriteMailboxes.Delete("/mailboxes/:id", r.h.DeleteMailbox)
 	canWriteMailboxes.Post("/mailboxes/:id/restore", r.h.PostAdminMailboxRestore)
 	canWriteMailboxes.Delete("/mailboxes/:id/purge", r.h.DeleteAdminMailboxPurge)
+
+	// ── Bulk mailbox provisioning (Milestone 6) ──
+	canWriteMailboxes.Post("/domains/:id/mailboxes/bulk/validate", r.h.PostBulkProvisionValidate)
+	canWriteMailboxes.Post("/domains/:id/mailboxes/bulk/jobs", r.h.PostBulkProvisionCreateJob)
+	enterpriseRead.Get("/mailboxes/bulk/jobs/:jobId", r.h.GetBulkProvisionJob)
+	canWriteMailboxes.Post("/mailboxes/bulk/jobs/:jobId/execute", r.h.PostBulkProvisionExecute)
+	canWriteMailboxes.Post("/mailboxes/bulk/jobs/:jobId/cancel", r.h.PostBulkProvisionCancel)
+	canWriteMailboxes.Post("/mailboxes/bulk/jobs/:jobId/retry", r.h.PostBulkProvisionRetry)
 
 	// ── Organizations ──
 	enterpriseRead.Get("/organizations/:id", r.h.GetOrganization)

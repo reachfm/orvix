@@ -40,6 +40,7 @@ import (
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
 	"github.com/orvix/orvix/internal/observability"
+	"github.com/orvix/orvix/internal/platform/bulkprovision"
 	"github.com/orvix/orvix/internal/ruler"
 	"github.com/orvix/orvix/internal/runtime"
 	settingsbridge "github.com/orvix/orvix/internal/settings/bridge"
@@ -192,6 +193,7 @@ type Handler struct {
 	domainAdminSvc   *domainadminsvc.Service
 	platformAdminSvc *platformsvc.PlatformService
 	dashboardSvc     *dashboardsvc.DashboardService
+	bulkProvisionSvc *bulkprovision.Service
 
 	billingSvc   *billing.Service
 	usageSvc     *billing.UsageService
@@ -407,6 +409,11 @@ func (h *Handler) SetDomainAdminService(s *domainadminsvc.Service) {
 // order or NewService's signature.
 func (h *Handler) DomainAdminService() *domainadminsvc.Service {
 	return h.domainAdminSvc
+}
+
+// SetBulkProvisionService wires the bulk mailbox provisioning service.
+func (h *Handler) SetBulkProvisionService(s *bulkprovision.Service) {
+	h.bulkProvisionSvc = s
 }
 
 // SetPlatformAdminService wires the platform admin service.
