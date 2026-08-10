@@ -30,6 +30,7 @@ import (
 	"github.com/orvix/orvix/internal/billing"
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/coremail"
+	"github.com/orvix/orvix/internal/coremail/delivery"
 	"github.com/orvix/orvix/internal/coremail/push"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
@@ -85,6 +86,9 @@ type Handler struct {
 	// parallel pipeline. Set via SetQueueEngine at router
 	// construction time.
 	queueEngine *queue.QueueEngine
+	// historyRepo is the immutable delivery-attempt history store
+	// (Milestone 8), set via SetAttemptHistoryRepo.
+	historyRepo delivery.AttemptHistoryRepository
 
 	// updateSvc is the process-wide Update Management v1 service.
 	// It is set once at router construction (see

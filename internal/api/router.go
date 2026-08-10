@@ -29,6 +29,7 @@ import (
 	"github.com/orvix/orvix/internal/billing"
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/coremail"
+	"github.com/orvix/orvix/internal/coremail/delivery"
 	"github.com/orvix/orvix/internal/coremail/dkim"
 	"github.com/orvix/orvix/internal/coremail/push"
 	"github.com/orvix/orvix/internal/coremail/queue"
@@ -344,6 +345,12 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 				router.h.SetQueueEngine(qe)
 				logger.Info("queue engine wired for webmail send")
 			}
+		}
+		// Wire the immutable delivery-attempt history repo
+		// (Milestone 8) against the same table the delivery
+		// workers already write to — not a separate history store.
+		if sqlDB, err := db.DB(); err == nil {
+			router.h.SetAttemptHistoryRepo(delivery.NewAttemptHistorySQLRepo(sqlDB))
 		}
 		// Wire the Web Push (RFC 8030) notifier from the
 		// same runtime module. The webmail
@@ -1219,6 +1226,10 @@ func (r *Router) setupRoutes() {
 	protected.Get("/admin/queue/summary", platformMW[0], platformMW[1], r.h.AdminQueueSummary)
 	protected.Get("/admin/queue/messages", platformMW[0], platformMW[1], r.h.AdminQueueList)
 	protected.Get("/admin/queue/messages/:id", platformMW[0], platformMW[1], r.h.AdminQueueDetail)
+	// history/export MUST be registered before the /admin/queue/:id
+	// wildcard below, or fiber matches "history"/"export" as :id.
+	protected.Get("/admin/queue/history", platformMW[0], platformMW[1], r.h.AdminQueueHistory)
+	protected.Get("/admin/queue/export", platformMW[0], platformMW[1], r.h.AdminQueueExport)
 	protected.Get("/admin/queue/:id", platformMW[0], platformMW[1], r.h.GetAdminQueueEntry)
 	protected.Get("/admin/backups", platformMW[0], platformMW[1], r.h.ListBackups)
 	protected.Get("/admin/backups/schedule", platformMW[0], platformMW[1], r.h.GetBackupSchedule)
@@ -1430,6 +1441,7 @@ func (r *Router) setupRoutes() {
 	protected.Post("/admin/queue/messages/:id/retry", platformMW[0], platformMW[1], r.h.AdminQueueRetryNow)
 	protected.Post("/admin/queue/messages/:id/bounce", platformMW[0], platformMW[1], r.h.AdminQueueBounce)
 	protected.Post("/admin/queue/messages/:id/cancel", platformMW[0], platformMW[1], r.h.AdminQueueCancel)
+	protected.Post("/admin/queue/messages/bulk-action", platformMW[0], platformMW[1], r.h.AdminQueueBulkAction)
 	protected.Post("/admin/backups", platformMW[0], platformMW[1], r.h.CreateBackup)
 	protected.Post("/admin/backups/now", platformMW[0], platformMW[1], r.h.PostBackupNow)
 	protected.Post("/admin/backups/schedule", platformMW[0], platformMW[1], r.h.SetBackupSchedule)

@@ -9,6 +9,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/auth"
+	"github.com/orvix/orvix/internal/coremail/delivery"
 	"github.com/orvix/orvix/internal/dbdialect"
 	"go.uber.org/zap"
 )
@@ -343,10 +344,193 @@ func (h *Handler) AdminQueueCancel(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"status": "cancelled", "id": id})
 }
 
+// queueActionError maps a queue-action failure to an HTTP status and a
+// stable machine-readable code. The HTTP status intentionally stays
+// 400 for an invalid state transition (queue.SQLRepo.transitionStatus's
+// "queue entry %d is in status %q; allowed statuses: %v" message) —
+// that is the established, tested contract
+// (TestAdminQueueActionsRejectLeasedEntries asserts 400 for a
+// leased-entry rejection) — but the response body now also carries a
+// `code` field so a caller can distinguish "the resource doesn't
+// exist" from "the resource exists but isn't in a state this action
+// allows" without parsing the free-text message.
 func queueActionError(c fiber.Ctx, err error) error {
-	code := 400
-	if strings.Contains(err.Error(), "not found") {
-		code = 404
+	httpStatus := 400
+	code := "invalid_state_transition"
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "not found"):
+		httpStatus = 404
+		code = "not_found"
+	case strings.Contains(msg, "allowed statuses"):
+		code = "invalid_state_transition"
+	default:
+		code = "bad_request"
 	}
-	return c.Status(code).JSON(fiber.Map{"error": err.Error()})
+	return c.Status(httpStatus).JSON(fiber.Map{"error": msg, "code": code})
+}
+
+// bulkActionResult is the per-message outcome for a bulk queue
+// action — every ID gets an explicit result, success or typed
+// failure, so a caller never has to guess which of N messages
+// actually changed state.
+type bulkActionResult struct {
+	ID      uint   `json:"id"`
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+	Code    string `json:"code,omitempty"`
+}
+
+// AdminQueueBulkAction serves POST /api/v1/admin/queue/messages/bulk-action.
+// Applies the same action (retry/cancel/bounce) to a list of IDs,
+// each through the existing single-message state-machine-guarded
+// path (AdminRetryNow/AdminCancel/AdminDeadLetter) — one failing ID
+// never blocks or rolls back the others, and the response reports
+// every ID's own outcome.
+func (h *Handler) AdminQueueBulkAction(c fiber.Ctx) error {
+	if !h.cfg.CoreMail.Enabled {
+		return coreMailUnavailableResponse(c)
+	}
+	if !h.queueAdminGate(c) {
+		return c.Status(403).JSON(fiber.Map{"error": "admin role required for queue operations"})
+	}
+	if h.queueEngine == nil || h.queueEngine.Repo == nil {
+		return c.Status(503).JSON(fiber.Map{"error": "queue engine unavailable"})
+	}
+
+	var req struct {
+		IDs    []uint `json:"ids"`
+		Action string `json:"action"`
+		Reason string `json:"reason"`
+	}
+	if err := c.Bind().JSON(&req); err != nil || len(req.IDs) == 0 {
+		return c.Status(400).JSON(fiber.Map{"error": "ids and action are required"})
+	}
+	if len(req.IDs) > 500 {
+		return c.Status(400).JSON(fiber.Map{"error": "at most 500 ids per bulk action"})
+	}
+	reason := req.Reason
+	if reason == "" {
+		reason = "bulk operator action"
+	}
+
+	var apply func(context.Context, uint) error
+	switch req.Action {
+	case "retry":
+		apply = func(ctx context.Context, id uint) error { return h.queueEngine.Repo.AdminRetryNow(ctx, id, nil) }
+	case "cancel":
+		apply = func(ctx context.Context, id uint) error { return h.queueEngine.Repo.AdminCancel(ctx, id, nil) }
+	case "bounce":
+		apply = func(ctx context.Context, id uint) error {
+			return h.queueEngine.Repo.AdminDeadLetter(ctx, id, reason, nil)
+		}
+	default:
+		return c.Status(400).JSON(fiber.Map{"error": "action must be one of: retry, cancel, bounce"})
+	}
+
+	results := make([]bulkActionResult, 0, len(req.IDs))
+	succeeded := 0
+	for _, id := range req.IDs {
+		if err := apply(context.Background(), id); err != nil {
+			code := "bad_request"
+			if strings.Contains(err.Error(), "not found") {
+				code = "not_found"
+			} else {
+				code = "invalid_state_transition"
+			}
+			results = append(results, bulkActionResult{ID: id, Success: false, Error: err.Error(), Code: code})
+			continue
+		}
+		succeeded++
+		results = append(results, bulkActionResult{ID: id, Success: true})
+	}
+
+	h.writeAuditLog(c, "queue.bulk_"+req.Action, fmt.Sprintf("count:%d succeeded:%d", len(req.IDs), succeeded))
+	return c.JSON(fiber.Map{"action": req.Action, "total": len(req.IDs), "succeeded": succeeded, "results": results})
+}
+
+// redactAddress masks the local part of an email address for export/
+// history views, keeping only the domain and a length hint — enough
+// for an operator to spot patterns without exposing full addresses in
+// a downloadable file.
+func redactAddress(addr string) string {
+	at := strings.LastIndex(addr, "@")
+	if at <= 0 {
+		return "***"
+	}
+	return "***@" + addr[at+1:]
+}
+
+// AdminQueueHistory serves GET /api/v1/admin/queue/history — the
+// immutable, cross-entry delivery-attempt history, cursor-paginated
+// (query param after_id), separate from the mutable live queue
+// listing in AdminQueueList.
+func (h *Handler) AdminQueueHistory(c fiber.Ctx) error {
+	if !h.cfg.CoreMail.Enabled {
+		return coreMailUnavailableResponse(c)
+	}
+	if h.historyRepo == nil {
+		return c.Status(503).JSON(fiber.Map{"error": "delivery history unavailable", "code": "queue_unavailable"})
+	}
+	var filter delivery.HistoryFilter
+	filter.Status = c.Query("status", "")
+	filter.RemoteHost = c.Query("remote_host", "")
+	if v, err := strconv.ParseUint(c.Query("after_id", "0"), 10, 64); err == nil {
+		filter.AfterID = uint(v)
+	}
+	filter.Limit = 100
+	if v, err := strconv.Atoi(c.Query("limit", "100")); err == nil && v > 0 && v <= 500 {
+		filter.Limit = v
+	}
+
+	attempts, err := h.historyRepo.ListRecent(c.Context(), filter, nil)
+	if err != nil {
+		h.logger.Error("delivery history query failed", zap.Error(err))
+		return c.Status(500).JSON(fiber.Map{"error": "query failed"})
+	}
+	var nextCursor uint
+	if len(attempts) > 0 {
+		nextCursor = attempts[len(attempts)-1].ID
+	}
+	return c.JSON(fiber.Map{"attempts": attempts, "next_after_id": nextCursor, "count": len(attempts)})
+}
+
+// AdminQueueExport serves GET /api/v1/admin/queue/export — a safe,
+// redacted CSV export of the current live queue. Requires the same
+// platform-super-admin gate as every other queue action; recipient/
+// sender addresses are masked to domain-only (redactAddress).
+func (h *Handler) AdminQueueExport(c fiber.Ctx) error {
+	if !h.cfg.CoreMail.Enabled {
+		return coreMailUnavailableResponse(c)
+	}
+	if !h.queueAdminGate(c) {
+		return c.Status(403).JSON(fiber.Map{"error": "admin role required for queue export"})
+	}
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "database error"})
+	}
+	rows, err := sqlDB.Query(`SELECT id, from_address, to_address, recipient_domain, status, attempt_count, created_at
+		FROM coremail_queue WHERE deleted_at IS NULL ORDER BY id DESC LIMIT 5000`)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "query failed"})
+	}
+	defer rows.Close()
+
+	var b strings.Builder
+	b.WriteString("id,from,to,recipient_domain,status,attempt_count,created_at\n")
+	for rows.Next() {
+		var id uint
+		var from, to, domain, status string
+		var attemptCount int
+		var createdAt time.Time
+		if err := rows.Scan(&id, &from, &to, &domain, &status, &attemptCount, &createdAt); err != nil {
+			continue
+		}
+		fmt.Fprintf(&b, "%d,%s,%s,%s,%s,%d,%s\n", id, redactAddress(from), redactAddress(to), domain, status, attemptCount, createdAt.Format(time.RFC3339))
+	}
+	h.writeAuditLog(c, "queue.export", "format:csv")
+	c.Set("Content-Type", "text/csv")
+	c.Set("Content-Disposition", "attachment; filename=\"queue-export.csv\"")
+	return c.SendString(b.String())
 }
