@@ -2,8 +2,10 @@ package webhooks
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -45,12 +47,35 @@ type Delivery struct {
 }
 
 type Event struct {
-	ID        string    `json:"id"`
-	Type      string    `json:"type"`
-	Scope     string    `json:"scope"`
-	TenantID  uint      `json:"tenant_id,omitempty"`
-	Payload   []byte    `json:"payload"`
-	CreatedAt time.Time `json:"created_at"`
+	ID            string          `json:"id"`
+	TenantID      uint            `json:"tenant_id"`
+	Type          string          `json:"type"`
+	SchemaVersion int             `json:"schema_version"`
+	OccurredAt    time.Time       `json:"occurred_at"`
+	Payload       json.RawMessage `json:"payload"`
+}
+
+func NewEvent(eventType string, tenantID uint, payload any, occurredAt time.Time) (Event, error) {
+	if !AllowedEvents[eventType] {
+		return Event{}, fmt.Errorf("%w: %s", ErrInvalidEvent, eventType)
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return Event{}, fmt.Errorf("encode webhook event payload: %w", err)
+	}
+	id, err := newEventID()
+	if err != nil {
+		return Event{}, err
+	}
+	return Event{ID: id, TenantID: tenantID, Type: eventType, SchemaVersion: 1, OccurredAt: occurredAt.UTC(), Payload: body}, nil
+}
+
+func newEventID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate webhook event id: %w", err)
+	}
+	return "evt_" + hex.EncodeToString(b), nil
 }
 
 var AllowedEvents = map[string]bool{

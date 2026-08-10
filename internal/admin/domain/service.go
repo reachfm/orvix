@@ -14,6 +14,7 @@ import (
 	"github.com/orvix/orvix/internal/coremail/dkim"
 	"github.com/orvix/orvix/internal/dbdialect"
 	entrbac "github.com/orvix/orvix/internal/enterprise/rbac"
+	"github.com/orvix/orvix/internal/platform/kernel"
 )
 
 type DomainAdminRepo struct {
@@ -320,6 +321,11 @@ type Service struct {
 	rbac        *entrbac.Evaluator
 	dkimHistory *dkimSelectorHistoryRepo
 	tlsSvc      tlsStatusSource
+	webhooks    webhookPublisher
+}
+
+type webhookPublisher interface {
+	Publish(context.Context, kernel.Querier, string, string, uint, any, time.Time) (string, error)
 }
 
 func NewService(repo *DomainAdminRepo, dkimRepo dkim.Repository, auditStore *audit.ExtendedStore, rbac *entrbac.Evaluator) *Service {
@@ -330,6 +336,11 @@ func NewService(repo *DomainAdminRepo, dkimRepo dkim.Repository, auditStore *aud
 	}
 	return &Service{repo: repo, dkimRepo: dkimRepo, auditStore: auditStore, rbac: rbac, dkimHistory: hist}
 }
+
+// SetWebhookPublisher wires the transactional webhook event adapter. It is
+// optional for isolated service consumers, but production wiring supplies it
+// so supported mutations publish from the same transaction as their audit.
+func (s *Service) SetWebhookPublisher(p webhookPublisher) { s.webhooks = p }
 
 // recordDKIMHistory is best-effort: a history-write failure must never
 // roll back or block the DKIM key operation that already committed —
@@ -555,6 +566,16 @@ func (s *Service) CreateDomain(ctx context.Context, req CreateDomainRequest, ten
 		created, createErr = repo.Create(ctx, d)
 		if createErr == nil {
 			entry.Target, entry.TargetID = fmt.Sprintf("domain:%d", created.ID), created.ID
+			if s.webhooks != nil {
+				_, createErr = s.webhooks.Publish(ctx, repo.db, "domain.created", fmt.Sprintf("domain:%d", created.ID), tenantID, map[string]any{
+					"domain_id": created.ID,
+					"name":      created.Name,
+					"status":    created.Status,
+				}, created.CreatedAt)
+				if createErr != nil {
+					return fmt.Errorf("publish domain webhook event: %w", createErr)
+				}
+			}
 			return nil
 		}
 		// A concurrent duplicate create surfaces as a unique-constraint
@@ -978,9 +999,6 @@ func (s *Service) SetDomainStatus(ctx context.Context, id, tenantID uint, status
 }
 
 func (s *Service) mutateWithAudit(ctx context.Context, entry *audit.ExtendedEntry, mutate func(*DomainAdminRepo) error) error {
-	if s.auditStore == nil {
-		return mutate(s.repo)
-	}
 	tx, err := s.repo.BeginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("begin domain mutation: %w", err)
@@ -989,8 +1007,10 @@ func (s *Service) mutateWithAudit(ctx context.Context, entry *audit.ExtendedEntr
 	if err := mutate(s.repo.WithTx(tx)); err != nil {
 		return err
 	}
-	if err := s.auditStore.RecordTx(ctx, tx, entry); err != nil {
-		return err
+	if s.auditStore != nil {
+		if err := s.auditStore.RecordTx(ctx, tx, entry); err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit domain mutation: %w", err)

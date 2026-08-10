@@ -214,14 +214,6 @@ func redactError(err error) string {
 	return msg
 }
 
-func newEventID() (string, error) {
-	b := make([]byte, 12)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return "evt_" + hex.EncodeToString(b), nil
-}
-
 // ErrNotFound, ErrInvalidURL, ErrInvalidEvent are stable typed errors.
 var (
 	ErrNotFound     = &whError{"webhook subscription not found"}

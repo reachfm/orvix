@@ -57,6 +57,7 @@ import (
 	"github.com/orvix/orvix/internal/trust"
 	"github.com/orvix/orvix/internal/trustmgmt"
 	"github.com/orvix/orvix/internal/updater"
+	"github.com/orvix/orvix/internal/webhooks"
 	"github.com/orvix/orvix/internal/webmailmgmt"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
@@ -240,6 +241,22 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			domainAdminRepo := domainadminsvc.NewDomainAdminRepo(sqlDB)
 			dkimRepo := dkim.NewSQLRepo(sqlDB)
 			domainAdminSvc := domainadminsvc.NewService(domainAdminRepo, dkimRepo, auditExtendedStore, rbacEval)
+			webhookDialect, dialectErr := dbdialect.Detect(sqlDB)
+			if dialectErr != nil {
+				webhookDialect = dbdialect.FromDriver("sqlite")
+			}
+			outboxRepo := kernel.NewOutboxRepository(webhookDialect)
+			webhookRepo := webhooks.NewRepository(sqlDB)
+			if err := outboxRepo.EnsureSchema(context.Background(), sqlDB); err != nil {
+				logger.Error("webhook outbox initialization failed", zap.Error(err))
+			} else if err := webhookRepo.EnsureSchema(context.Background()); err != nil {
+				logger.Error("webhook schema initialization failed", zap.Error(err))
+			} else {
+				webhookSvc := webhooks.NewService(webhookRepo, nil)
+				router.h.SetWebhookService(webhookSvc)
+				domainAdminSvc.SetWebhookPublisher(webhooks.NewOutboxPublisher(outboxRepo))
+				logger.Info("transactional webhook outbox wired")
+			}
 			router.h.SetDomainAdminService(domainAdminSvc)
 
 			bulkProvisionRepo := bulkprovision.NewRepository(sqlDB)

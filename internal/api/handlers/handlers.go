@@ -436,6 +436,8 @@ func (h *Handler) SetDomainAdminService(s *domainadminsvc.Service) {
 	h.domainAdminSvc = s
 }
 
+func (h *Handler) SetWebhookService(s *webhooks.Service) { h.webhookSvc = s }
+
 // DomainAdminService returns the wired domain admin service, or nil if
 // it was never set. Used by router.go to wire the TLS service into it
 // after both have been constructed, without changing construction
