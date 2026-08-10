@@ -2,11 +2,13 @@ package jobs
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/orvix/orvix/internal/platform/kernel"
 )
@@ -125,4 +127,95 @@ func (s *Service) List(ctx context.Context, filter ListFilter) (kernel.PageRespo
 		return kernel.PageResponse[Job]{}, kernel.ValidationError(map[string]string{"tenant_id": "tenant context is required"})
 	}
 	return s.repo.List(ctx, filter)
+}
+
+func (s *Service) Claim(ctx context.Context, owner string, leaseDuration time.Duration) (*Job, error) {
+	if leaseDuration <= 0 {
+		leaseDuration = 30 * time.Second
+	}
+	tokenBytes := make([]byte, 24)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "generate automation job lease token", err)
+	}
+	return s.repo.ClaimOne(ctx, owner, hex.EncodeToString(tokenBytes), s.clock.Now(), leaseDuration)
+}
+
+func leaseFor(job *Job) Lease {
+	return Lease{JobID: job.ID, Owner: job.LeaseOwner, Token: job.LeaseToken, LeaseVersion: job.LeaseVersion}
+}
+
+func (s *Service) Heartbeat(ctx context.Context, lease Lease, extension time.Duration) error {
+	return s.repo.Heartbeat(ctx, lease, s.clock.Now(), extension)
+}
+
+func (s *Service) UpdateProgress(ctx context.Context, lease Lease, progress int) error {
+	if progress < 0 || progress > 100 {
+		return kernel.ValidationError(map[string]string{"progress": "must be between 0 and 100"})
+	}
+	return s.repo.UpdateProgress(ctx, lease, progress, s.clock.Now())
+}
+
+func (s *Service) Complete(ctx context.Context, lease Lease, result json.RawMessage) error {
+	normalized, err := normalizeSafeResult(result)
+	if err != nil {
+		return err
+	}
+	return s.repo.Complete(ctx, lease, normalized, s.clock.Now())
+}
+
+func normalizeSafeResult(result []byte) (json.RawMessage, error) {
+	if len(result) == 0 {
+		return json.RawMessage(`{}`), nil
+	}
+	return normalizeSafeJSON(result)
+}
+
+func (s *Service) Fail(ctx context.Context, lease Lease, code, message string, retryable bool) error {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		code = "JOB_EXECUTION_FAILED"
+	}
+	message = safeErrorMessage(message)
+	if message == "" {
+		message = "automation job execution failed"
+	}
+	if len(message) > 512 {
+		message = message[:512]
+	}
+	return s.repo.Fail(ctx, lease, code, message, retryable, s.clock.Now())
+}
+
+func safeErrorMessage(message string) string {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return "automation job execution failed"
+	}
+	lower := strings.ToLower(message)
+	if kernel.IsSecretField(message) || strings.Contains(lower, "postgres://") || strings.Contains(lower, "sqlite:") {
+		return "automation job execution failed"
+	}
+	return message
+}
+
+func (s *Service) RequestCancellation(ctx context.Context, id, tenantID uint, scope Scope) (*Job, error) {
+	return s.repo.RequestCancellation(ctx, id, tenantID, scope, s.clock.Now())
+}
+
+func (s *Service) CancellationRequested(ctx context.Context, lease Lease) (bool, error) {
+	return s.repo.CancellationRequested(ctx, lease)
+}
+
+func (s *Service) FinishCancellation(ctx context.Context, lease Lease) error {
+	return s.repo.FinishCancellation(ctx, lease, s.clock.Now())
+}
+
+func (s *Service) RecoverExpired(ctx context.Context, limit int) (int, error) {
+	return s.repo.RecoverExpired(ctx, s.clock.Now(), limit)
+}
+
+func (s *Service) ManualRetry(ctx context.Context, id, tenantID uint, scope Scope, idempotencyKey string) (*Job, bool, error) {
+	if strings.TrimSpace(idempotencyKey) == "" {
+		return nil, false, kernel.ValidationError(map[string]string{"idempotency_key": "Idempotency-Key is required"})
+	}
+	return s.repo.ManualRetry(ctx, id, tenantID, scope, strings.TrimSpace(idempotencyKey), s.clock.Now())
 }

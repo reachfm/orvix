@@ -9,6 +9,7 @@ import (
 )
 
 type Execution interface {
+	TenantID() uint
 	Heartbeat(context.Context) error
 	SetProgress(context.Context, int) error
 	CancellationRequested(context.Context) (bool, error)

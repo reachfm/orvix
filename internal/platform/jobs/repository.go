@@ -303,3 +303,208 @@ func scanJobRows(rows *sql.Rows) (*Job, error) {
 	assign(cancelled, &job.CancelledAt)
 	return &job, nil
 }
+
+func (r *Repository) ClaimOne(ctx context.Context, owner, token string, now time.Time, leaseDuration time.Duration) (*Job, error) {
+	if strings.TrimSpace(owner) == "" || strings.TrimSpace(token) == "" {
+		return nil, kernel.ValidationError(map[string]string{"worker": "lease owner and token are required"})
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	query := r.q(`SELECT id,version FROM platform_jobs WHERE status='queued' AND run_after<=? AND cancellation_requested_at IS NULL ORDER BY run_after,id LIMIT 1`)
+	if r.dialect.IsPostgres() {
+		query += ` FOR UPDATE SKIP LOCKED`
+	}
+	var id uint
+	var version int
+	if err = tx.QueryRowContext(ctx, query, now).Scan(&id, &version); errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	leaseExpiry := now.Add(leaseDuration)
+	res, err := tx.ExecContext(ctx, r.q(`UPDATE platform_jobs SET status='running',lease_owner=?,lease_token=?,lease_version=lease_version+1,lease_expires_at=?,heartbeat_at=?,attempt_count=attempt_count+1,started_at=COALESCE(started_at,?),version=version+1,updated_at=? WHERE id=? AND version=? AND status='queued' AND cancellation_requested_at IS NULL`), owner, token, leaseExpiry, now, now, now, id, version)
+	if err != nil {
+		return nil, err
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		if err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+	job, err := r.getWith(ctx, tx, id, 0, "")
+	if err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	return job, nil
+}
+
+func (r *Repository) Heartbeat(ctx context.Context, lease Lease, now time.Time, extension time.Duration) error {
+	res, err := r.db.ExecContext(ctx, r.q(`UPDATE platform_jobs SET heartbeat_at=?,lease_expires_at=?,version=version+1,updated_at=? WHERE id=? AND status='running' AND lease_owner=? AND lease_token=? AND lease_version=? AND cancellation_requested_at IS NULL`), now, now.Add(extension), now, lease.JobID, lease.Owner, lease.Token, lease.LeaseVersion)
+	return r.requireLeaseResult(ctx, lease, res, err)
+}
+
+func (r *Repository) UpdateProgress(ctx context.Context, lease Lease, progress int, now time.Time) error {
+	res, err := r.db.ExecContext(ctx, r.q(`UPDATE platform_jobs SET progress=?,version=version+1,updated_at=? WHERE id=? AND status='running' AND lease_owner=? AND lease_token=? AND lease_version=? AND cancellation_requested_at IS NULL`), progress, now, lease.JobID, lease.Owner, lease.Token, lease.LeaseVersion)
+	return r.requireLeaseResult(ctx, lease, res, err)
+}
+
+func (r *Repository) requireLeaseResult(ctx context.Context, lease Lease, result sql.Result, err error) error {
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows > 0 {
+		return nil
+	}
+	job, getErr := r.Get(ctx, lease.JobID)
+	if getErr != nil {
+		return getErr
+	}
+	if job.CancellationAskedAt != nil {
+		return ErrCancellationAsked
+	}
+	return ErrLeaseLost
+}
+
+func (r *Repository) Complete(ctx context.Context, lease Lease, result json.RawMessage, now time.Time) error {
+	res, err := r.db.ExecContext(ctx, r.q(`UPDATE platform_jobs SET status='succeeded',progress=100,result=?,error_code='',error_message='',completed_at=?,lease_owner='',lease_token='',lease_expires_at=NULL,heartbeat_at=?,version=version+1,updated_at=? WHERE id=? AND status='running' AND lease_owner=? AND lease_token=? AND lease_version=? AND cancellation_requested_at IS NULL`), string(result), now, now, now, lease.JobID, lease.Owner, lease.Token, lease.LeaseVersion)
+	return r.requireLeaseResult(ctx, lease, res, err)
+}
+
+func (r *Repository) Fail(ctx context.Context, lease Lease, code, message string, retryable bool, now time.Time) error {
+	job, err := r.Get(ctx, lease.JobID)
+	if err != nil {
+		return err
+	}
+	status, runAfter, completed := StatusFailed, now, any(now)
+	if retryable && job.Attempt < job.MaxAttempts {
+		status, runAfter, completed = StatusQueued, now.Add(backoff(job.Attempt)), nil
+	}
+	res, err := r.db.ExecContext(ctx, r.q(`UPDATE platform_jobs SET status=?,run_after=?,error_code=?,error_message=?,completed_at=?,lease_owner='',lease_token='',lease_expires_at=NULL,heartbeat_at=?,version=version+1,updated_at=? WHERE id=? AND status='running' AND lease_owner=? AND lease_token=? AND lease_version=? AND cancellation_requested_at IS NULL`), status, runAfter, code, message, completed, now, now, lease.JobID, lease.Owner, lease.Token, lease.LeaseVersion)
+	return r.requireLeaseResult(ctx, lease, res, err)
+}
+
+func (r *Repository) RequestCancellation(ctx context.Context, id, tenantID uint, scope Scope, now time.Time) (*Job, error) {
+	query := `UPDATE platform_jobs SET status=CASE WHEN status='queued' THEN 'cancelled' ELSE status END,cancellation_requested_at=?,cancelled_at=CASE WHEN status='queued' THEN ? ELSE cancelled_at END,completed_at=CASE WHEN status='queued' THEN ? ELSE completed_at END,version=version+1,updated_at=? WHERE id=? AND status IN ('queued','running')`
+	args := []any{now, now, now, now, id}
+	if scope == ScopeTenant {
+		query += ` AND tenant_id=? AND scope='tenant'`
+		args = append(args, tenantID)
+	} else {
+		query += ` AND scope='platform'`
+	}
+	res, err := r.db.ExecContext(ctx, r.q(query), args...)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		job, getErr := r.GetForScope(ctx, id, tenantID, scope)
+		if getErr != nil {
+			return nil, getErr
+		}
+		return nil, kernel.InvalidStateTransition(string(job.Status), string(StatusCancelled))
+	}
+	return r.GetForScope(ctx, id, tenantID, scope)
+}
+
+func (r *Repository) CancellationRequested(ctx context.Context, lease Lease) (bool, error) {
+	var requested sql.NullTime
+	err := r.db.QueryRowContext(ctx, r.q(`SELECT cancellation_requested_at FROM platform_jobs WHERE id=? AND status='running' AND lease_owner=? AND lease_token=? AND lease_version=?`), lease.JobID, lease.Owner, lease.Token, lease.LeaseVersion).Scan(&requested)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, ErrLeaseLost
+	}
+	return requested.Valid, err
+}
+
+func (r *Repository) FinishCancellation(ctx context.Context, lease Lease, now time.Time) error {
+	res, err := r.db.ExecContext(ctx, r.q(`UPDATE platform_jobs SET status='cancelled',cancelled_at=?,completed_at=?,lease_owner='',lease_token='',lease_expires_at=NULL,version=version+1,updated_at=? WHERE id=? AND status='running' AND lease_owner=? AND lease_token=? AND lease_version=? AND cancellation_requested_at IS NOT NULL`), now, now, now, lease.JobID, lease.Owner, lease.Token, lease.LeaseVersion)
+	return r.requireLeaseResult(ctx, lease, res, err)
+}
+
+func (r *Repository) RecoverExpired(ctx context.Context, now time.Time, limit int) (int, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	rows, err := r.db.QueryContext(ctx, r.q(`SELECT id,lease_version,attempt_count,max_attempts FROM platform_jobs WHERE status='running' AND lease_expires_at<? ORDER BY lease_expires_at,id LIMIT ?`), now, limit)
+	if err != nil {
+		return 0, err
+	}
+	type expired struct {
+		id                         uint
+		leaseVersion, attempt, max int
+	}
+	var jobs []expired
+	for rows.Next() {
+		var item expired
+		if err := rows.Scan(&item.id, &item.leaseVersion, &item.attempt, &item.max); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		jobs = append(jobs, item)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	recovered := 0
+	for _, item := range jobs {
+		status, runAfter, completed := StatusFailed, now, any(now)
+		if item.attempt < item.max {
+			status, runAfter, completed = StatusQueued, now.Add(backoff(item.attempt)), nil
+		}
+		res, err := r.db.ExecContext(ctx, r.q(`UPDATE platform_jobs SET status=?,run_after=?,error_code='LEASE_EXPIRED',error_message='worker lease expired',completed_at=?,lease_owner='',lease_token='',lease_expires_at=NULL,lease_version=lease_version+1,version=version+1,updated_at=? WHERE id=? AND status='running' AND lease_version=? AND lease_expires_at<?`), status, runAfter, completed, now, item.id, item.leaseVersion, now)
+		if err != nil {
+			return recovered, err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			recovered++
+		}
+	}
+	return recovered, nil
+}
+
+func (r *Repository) ManualRetry(ctx context.Context, id, tenantID uint, scope Scope, key string, now time.Time) (*Job, bool, error) {
+	job, err := r.GetForScope(ctx, id, tenantID, scope)
+	if err != nil {
+		return nil, false, err
+	}
+	if job.Status == StatusQueued && job.ManualRetryKey == key {
+		return job, true, nil
+	}
+	if job.Status != StatusFailed {
+		return nil, false, kernel.InvalidStateTransition(string(job.Status), string(StatusQueued))
+	}
+	res, err := r.db.ExecContext(ctx, r.q(`UPDATE platform_jobs SET status='queued',run_after=?,completed_at=NULL,error_code='',error_message='',manual_retry_key=?,version=version+1,updated_at=? WHERE id=? AND status='failed' AND version=?`), now, key, now, id, job.Version)
+	if err != nil {
+		return nil, false, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		current, getErr := r.GetForScope(ctx, id, tenantID, scope)
+		if getErr == nil && current.Status == StatusQueued && current.ManualRetryKey == key {
+			return current, true, nil
+		}
+		return nil, false, kernel.NewError(kernel.ErrCodePreconditionFail, "automation job changed concurrently")
+	}
+	updated, err := r.GetForScope(ctx, id, tenantID, scope)
+	return updated, false, err
+}
+
+func backoff(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	delay := time.Duration(1<<min(attempt, 8)) * time.Second
+	if delay > 5*time.Minute {
+		return 5 * time.Minute
+	}
+	return delay
+}
