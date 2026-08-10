@@ -61,6 +61,14 @@ type DeliveryWorker struct {
 	// nil disables relay selection even if RelaySelector is set (fails
 	// safe to direct delivery, never to a misrouted relay).
 	TenantIDForRelay func(entry *queue.QueueEntry) (tenantID uint, senderMailAccessMode string)
+
+	// SuppressionChecker is the optional deliverability control plane
+	// (internal/platform/deliverability, Milestone 9). nil preserves
+	// pre-existing behavior exactly (no suppression enforcement).
+	SuppressionChecker SuppressionChecker
+	// DeliverabilityRecorder records real delivery outcomes as
+	// reputation signals. nil disables recording only, never delivery.
+	DeliverabilityRecorder DeliverabilityRecorder
 }
 
 // NewDeliveryWorker creates a delivery worker with optional reliability integrations.
@@ -188,6 +196,13 @@ func (w *DeliveryWorker) deliver(ctx context.Context, entry *queue.QueueEntry) e
 
 	// 7. Record attempt history.
 	w.recordAttempt(ctx, entry, attemptNumber, result)
+	if w.DeliverabilityRecorder != nil && !isLocal {
+		var tenantID uint
+		if w.TenantIDForRelay != nil {
+			tenantID, _ = w.TenantIDForRelay(entry)
+		}
+		w.DeliverabilityRecorder.RecordOutcome(ctx, entry, tenantID, result.RemoteHost, result, attemptNumber)
+	}
 
 	// 8. Classify result using retry policy (with entry-level max attempts).
 	decisionPolicy := w.RetryPolicy
@@ -590,6 +605,23 @@ func (w *DeliveryWorker) deliverLocal(ctx context.Context, entry *queue.QueueEnt
 
 func (w *DeliveryWorker) deliverRemote(ctx context.Context, entry *queue.QueueEntry) *DeliveryResult {
 	domain := entry.RecipientDomain
+
+	// ── Suppression enforcement (optional) ──────────────────
+	// Checked before any network I/O or MailStore access, matching the
+	// same "fail fast, touch nothing unnecessary" contract as the
+	// relay routing decision below. A suppressed recipient is a
+	// permanent failure, not a temp-fail — retrying a suppressed
+	// address would just burn attempts for a result that cannot
+	// change without an operator or bounce/complaint event first.
+	if w.SuppressionChecker != nil {
+		var tenantID uint
+		if w.TenantIDForRelay != nil {
+			tenantID, _ = w.TenantIDForRelay(entry)
+		}
+		if suppressed, err := w.SuppressionChecker.IsSuppressed(ctx, tenantID, entry.ToAddress); err == nil && suppressed {
+			return &DeliveryResult{StatusMsg: "recipient is suppressed", TempFail: false}
+		}
+	}
 
 	// ── Relay routing decision (optional) ──────────────────
 	// Resolved BEFORE touching MailStore or the MX resolver — matching

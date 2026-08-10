@@ -1,6 +1,10 @@
 package delivery
 
-import "context"
+import (
+	"context"
+
+	"github.com/orvix/orvix/internal/coremail/queue"
+)
 
 // RelayRoute is the delivery-path-facing shape of a routing decision.
 // Deliberately a plain struct with primitive fields (no dependency on
@@ -48,4 +52,19 @@ type RelayDeliverResult struct {
 	Success   bool
 	TempFail  bool
 	StatusMsg string
+}
+
+// SuppressionChecker is the deliverability control plane's real-path
+// enforcement port (Milestone 9). nil disables the check entirely —
+// preserving pre-existing behavior for any deployment that hasn't
+// wired it.
+type SuppressionChecker interface {
+	IsSuppressed(ctx context.Context, tenantID uint, address string) (bool, error)
+}
+
+// DeliverabilityRecorder is the reputation-signal recording port. Like
+// SuppressionChecker, nil disables recording without affecting
+// delivery behavior.
+type DeliverabilityRecorder interface {
+	RecordOutcome(ctx context.Context, entry *queue.QueueEntry, tenantID uint, relayProviderName string, result *DeliveryResult, attemptNumber int)
 }

@@ -27,6 +27,7 @@ import (
 	"github.com/orvix/orvix/internal/licensing"
 	"github.com/orvix/orvix/internal/licensingauthority"
 	"github.com/orvix/orvix/internal/observability"
+	"github.com/orvix/orvix/internal/platform/deliverability"
 	"github.com/orvix/orvix/internal/platform/relay"
 	"github.com/orvix/orvix/internal/policy"
 	"github.com/orvix/orvix/internal/ruler"
@@ -486,6 +487,18 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 		return tenantID, mode
 	}
 
+	// Deliverability control plane (Milestone 9) — optional, same
+	// fail-safe-to-disabled pattern as the relay control plane above.
+	deliverabilityRepo := deliverability.NewRepository(sqlDB)
+	var deliverabilityAdapter *deliverability.DeliveryAdapter
+	if err := deliverabilityRepo.EnsureSchema(context.Background()); err != nil {
+		if m.logger != nil {
+			m.logger.Warn("deliverability schema init failed; suppression enforcement and reputation signals disabled", zap.Error(err))
+		}
+	} else {
+		deliverabilityAdapter = deliverability.NewDeliveryAdapter(deliverability.NewService(deliverabilityRepo, audit.NewExtendedStore(sqlDB), nil, nil))
+	}
+
 	m.workers = make([]*delivery.DeliveryWorker, 0, workerCount)
 	for i := 0; i < workerCount; i++ {
 		worker := delivery.NewDeliveryWorker(
@@ -501,6 +514,13 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 		if relayAdapter != nil {
 			worker.RelaySelector = relayAdapter
 			worker.TenantIDForRelay = tenantForRelay
+		}
+		if deliverabilityAdapter != nil {
+			worker.SuppressionChecker = deliverabilityAdapter
+			worker.DeliverabilityRecorder = deliverabilityAdapter
+			if worker.TenantIDForRelay == nil {
+				worker.TenantIDForRelay = tenantForRelay
+			}
 		}
 		m.workers = append(m.workers, worker)
 	}
