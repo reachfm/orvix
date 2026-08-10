@@ -8,9 +8,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/coremail/dkim"
+	"github.com/orvix/orvix/internal/tlsmgmt"
 	_ "modernc.org/sqlite"
 )
 
@@ -825,6 +827,114 @@ func TestDKIMSelectorHistory_UnknownDomainIsNotFound(t *testing.T) {
 	_, svc := newDomainWithDKIMTestDB(t)
 	ctx := context.Background()
 	_, err := svc.ListDKIMHistory(ctx, 99999, 5)
+	if err != ErrDomainNotFound {
+		t.Fatalf("expected ErrDomainNotFound, got %v", err)
+	}
+}
+
+// fakeTLSSource is a minimal in-memory tlsStatusSource for testing
+// DomainTLSStatus without depending on internal/tlsmgmt's real
+// filesystem/database-backed certificate loading.
+type fakeTLSSource struct {
+	uploaded   []tlsmgmt.TLSCertificate
+	configured []tlsmgmt.TLSCertificate
+}
+
+func (f *fakeTLSSource) LoadCertificates(ctx context.Context) ([]tlsmgmt.TLSCertificate, error) {
+	return f.configured, nil
+}
+
+func (f *fakeTLSSource) ListUploadedCertificates(ctx context.Context, tenantID int64) ([]tlsmgmt.TLSCertificate, error) {
+	return f.uploaded, nil
+}
+
+func TestDomainTLSStatus_NoTLSServiceWiredReportsUnconfigured(t *testing.T) {
+	_, svc := newDomainWithDKIMTestDB(t)
+	ctx := context.Background()
+	d, _ := svc.CreateDomain(ctx, CreateDomainRequest{Name: "notls.example.test"}, 5)
+
+	res, err := svc.DomainTLSStatus(ctx, d.ID, 5)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if res.Configured {
+		t.Fatal("expected Configured=false with no TLS service wired")
+	}
+	if res.Source != "none" {
+		t.Fatalf("expected source none, got %q", res.Source)
+	}
+}
+
+func TestDomainTLSStatus_MatchesUploadedCertByExactCommonName(t *testing.T) {
+	_, svc := newDomainWithDKIMTestDB(t)
+	ctx := context.Background()
+	d, _ := svc.CreateDomain(ctx, CreateDomainRequest{Name: "exact.example.test"}, 5)
+
+	svc.SetTLSService(&fakeTLSSource{
+		uploaded: []tlsmgmt.TLSCertificate{
+			{CommonName: "exact.example.test", Status: tlsmgmt.CertActive, DaysRemaining: 60, NotAfter: time.Now().Add(60 * 24 * time.Hour)},
+		},
+	})
+
+	res, err := svc.DomainTLSStatus(ctx, d.ID, 5)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if !res.Configured || res.Source != "uploaded" {
+		t.Fatalf("expected uploaded match, got %#v", res)
+	}
+	if res.RenewalRequired {
+		t.Fatal("expected RenewalRequired=false for an active cert")
+	}
+}
+
+func TestDomainTLSStatus_MatchesWildcardSAN(t *testing.T) {
+	_, svc := newDomainWithDKIMTestDB(t)
+	ctx := context.Background()
+	d, _ := svc.CreateDomain(ctx, CreateDomainRequest{Name: "mail.wild.example.test"}, 5)
+
+	svc.SetTLSService(&fakeTLSSource{
+		configured: []tlsmgmt.TLSCertificate{
+			{CommonName: "wild.example.test", SANs: []string{"*.wild.example.test"}, Status: tlsmgmt.CertWarning, DaysRemaining: 5},
+		},
+	})
+
+	res, err := svc.DomainTLSStatus(ctx, d.ID, 5)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if !res.Configured || res.Source != "configured" {
+		t.Fatalf("expected wildcard SAN match via configured cert, got %#v", res)
+	}
+	if !res.RenewalRequired {
+		t.Fatal("expected RenewalRequired=true for a warning-status cert")
+	}
+}
+
+func TestDomainTLSStatus_WildcardNeverMatchesBareApex(t *testing.T) {
+	_, svc := newDomainWithDKIMTestDB(t)
+	ctx := context.Background()
+	d, _ := svc.CreateDomain(ctx, CreateDomainRequest{Name: "wild.example.test"}, 5)
+
+	svc.SetTLSService(&fakeTLSSource{
+		configured: []tlsmgmt.TLSCertificate{
+			{CommonName: "other.test", SANs: []string{"*.wild.example.test"}, Status: tlsmgmt.CertActive},
+		},
+	})
+
+	res, err := svc.DomainTLSStatus(ctx, d.ID, 5)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if res.Configured {
+		t.Fatal("expected a wildcard SAN to never match the bare apex domain")
+	}
+}
+
+func TestDomainTLSStatus_UnknownDomainIsNotFound(t *testing.T) {
+	_, svc := newDomainWithDKIMTestDB(t)
+	ctx := context.Background()
+	_, err := svc.DomainTLSStatus(ctx, 99999, 5)
 	if err != ErrDomainNotFound {
 		t.Fatalf("expected ErrDomainNotFound, got %v", err)
 	}

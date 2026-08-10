@@ -491,6 +491,9 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			logger.Warn("ensure uploaded cert schema failed", zap.Error(err))
 		}
 		router.h.SetTLSService(tlsSvc)
+		if das := router.h.DomainAdminService(); das != nil {
+			das.SetTLSService(tlsSvc)
+		}
 		logger.Info("admin TLS service wired")
 	}
 
@@ -1029,6 +1032,9 @@ func (r *Router) setupRoutes() {
 	enterpriseRead.Get("/domains/:id/dkim", r.h.GetAdminDomainDKIM)
 	canWriteDomains.Post("/domains/:id/dkim/generate", r.h.PostAdminDomainDKIMGenerate)
 	canWriteDomains.Post("/domains/:id/dkim/rotate", r.h.PostAdminDomainDKIMRotate)
+	canWriteDomains.Post("/domains/:id/dkim/revoke", r.h.PostAdminDomainDKIMRevoke)
+	enterpriseRead.Get("/domains/:id/dkim/history", r.h.GetAdminDomainDKIMHistory)
+	enterpriseRead.Get("/domains/:id/tls", r.h.GetAdminDomainTLSStatus)
 	enterpriseRead.Post("/domains/:id/verify", r.h.VerifyEnterpriseDomain)
 	enterpriseRead.Get("/domains/:id/dns", r.h.GetEnterpriseDomainDNS)
 	canWriteDomains.Post("/domains/:id/dns/verify", r.h.VerifyEnterpriseDomainDNS)

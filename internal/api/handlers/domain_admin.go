@@ -477,6 +477,68 @@ func (h *Handler) PostAdminDomainDKIMRotate(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"dkim": result})
 }
 
+// PostAdminDomainDKIMRevoke handles POST /admin/domains/:id/dkim/revoke.
+func (h *Handler) PostAdminDomainDKIMRevoke(c fiber.Ctx) error {
+	if h.domainAdminSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "domain admin service not available"})
+	}
+	tenantID, err := auth.RequireTenantID(c)
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": err.Error()})
+	}
+	idVal, err := strconv.ParseUint(c.Params("id"), 10, 64)
+	if err != nil || idVal == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid domain id"})
+	}
+	if err := h.domainAdminSvc.RevokeDKIM(c.Context(), uint(idVal), tenantID); err != nil {
+		return domainServiceError(c, err)
+	}
+	return c.JSON(fiber.Map{"revoked": true})
+}
+
+// GetAdminDomainDKIMHistory handles GET /admin/domains/:id/dkim/history.
+func (h *Handler) GetAdminDomainDKIMHistory(c fiber.Ctx) error {
+	if h.domainAdminSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "domain admin service not available"})
+	}
+	tenantID, err := auth.RequireTenantID(c)
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": err.Error()})
+	}
+	idVal, err := strconv.ParseUint(c.Params("id"), 10, 64)
+	if err != nil || idVal == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid domain id"})
+	}
+	hist, err := h.domainAdminSvc.ListDKIMHistory(c.Context(), uint(idVal), tenantID)
+	if err != nil {
+		return domainServiceError(c, err)
+	}
+	if hist == nil {
+		hist = []domain.DKIMSelectorHistoryEntry{}
+	}
+	return c.JSON(fiber.Map{"history": hist})
+}
+
+// GetAdminDomainTLSStatus handles GET /admin/domains/:id/tls.
+func (h *Handler) GetAdminDomainTLSStatus(c fiber.Ctx) error {
+	if h.domainAdminSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "domain admin service not available"})
+	}
+	tenantID, err := auth.RequireTenantID(c)
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": err.Error()})
+	}
+	idVal, err := strconv.ParseUint(c.Params("id"), 10, 64)
+	if err != nil || idVal == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid domain id"})
+	}
+	result, err := h.domainAdminSvc.DomainTLSStatus(c.Context(), uint(idVal), tenantID)
+	if err != nil {
+		return domainServiceError(c, err)
+	}
+	return c.JSON(fiber.Map{"tls": result})
+}
+
 // GetEnterpriseDomainDNS returns DNS health for an enterprise domain.
 // GET /enterprise/domains/:id/dns
 func (h *Handler) GetEnterpriseDomainDNS(c fiber.Ctx) error {

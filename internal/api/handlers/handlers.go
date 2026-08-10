@@ -401,6 +401,14 @@ func (h *Handler) SetDomainAdminService(s *domainadminsvc.Service) {
 	h.domainAdminSvc = s
 }
 
+// DomainAdminService returns the wired domain admin service, or nil if
+// it was never set. Used by router.go to wire the TLS service into it
+// after both have been constructed, without changing construction
+// order or NewService's signature.
+func (h *Handler) DomainAdminService() *domainadminsvc.Service {
+	return h.domainAdminSvc
+}
+
 // SetPlatformAdminService wires the platform admin service.
 func (h *Handler) SetPlatformAdminService(s *platformsvc.PlatformService) {
 	h.platformAdminSvc = s

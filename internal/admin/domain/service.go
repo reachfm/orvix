@@ -319,6 +319,7 @@ type Service struct {
 	auditStore  *audit.ExtendedStore
 	rbac        *entrbac.Evaluator
 	dkimHistory *dkimSelectorHistoryRepo
+	tlsSvc      tlsStatusSource
 }
 
 func NewService(repo *DomainAdminRepo, dkimRepo dkim.Repository, auditStore *audit.ExtendedStore, rbac *entrbac.Evaluator) *Service {
