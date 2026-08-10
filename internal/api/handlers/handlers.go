@@ -517,7 +517,7 @@ func (h *Handler) issueLoginSession(c fiber.Ctx, userID uint, role auth.Role, em
 	if role == "" {
 		return fmt.Errorf("issue login session: role is required")
 	}
-	token, err := h.auth.GenerateOpaqueSession(userID, role, email)
+	token, err := h.auth.GenerateOpaqueSession(userID, role, email, c.IP(), c.Get("User-Agent"))
 	if err != nil {
 		return err
 	}
@@ -716,7 +716,7 @@ func (h *Handler) Login(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authentication failed"})
 	}
 
-	refreshToken, expiresAt, err := h.auth.GenerateRefreshToken(userID, accessJTI)
+	refreshToken, expiresAt, err := h.auth.GenerateRefreshToken(userID, accessJTI, c.IP(), c.Get("User-Agent"))
 	if err != nil {
 		h.logger.Error("failed to generate refresh token", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authentication failed"})

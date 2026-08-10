@@ -308,7 +308,7 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 			"error": "authentication failed",
 		})
 	}
-	refreshToken, refreshExp, err := h.auth.GenerateRefreshToken(userID, accessJTI)
+	refreshToken, refreshExp, err := h.auth.GenerateRefreshToken(userID, accessJTI, c.IP(), c.Get("User-Agent"))
 	if err != nil {
 		h.logger.Error("webmail login: mint refresh token", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{

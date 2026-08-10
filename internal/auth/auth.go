@@ -300,7 +300,14 @@ func newJTI() (string, error) {
 // it is persisted on the session row so RevokeAccountSession can revoke that
 // exact access token immediately when the session is revoked. Pass "" for flows
 // that do not mint an access token.
-func (a *Authenticator) GenerateRefreshToken(userID uint, accessJTI string) (string, time.Time, error) {
+// ip and userAgent are the request's real client IP and User-Agent
+// header — persisted on the session row so ListAccountSessions can
+// report actual device/client metadata instead of an always-empty
+// value the frontend has to render as "Unknown". Pass "" for either
+// when genuinely unavailable (e.g. a non-HTTP caller); the session
+// still stores correctly, it just carries an honestly-empty field
+// rather than a fabricated one.
+func (a *Authenticator) GenerateRefreshToken(userID uint, accessJTI, ip, userAgent string) (string, time.Time, error) {
 	expiresAt := time.Now().Add(a.refreshTTL)
 
 	b := make([]byte, 32)
@@ -321,9 +328,9 @@ func (a *Authenticator) GenerateRefreshToken(userID uint, accessJTI string) (str
 	}
 	d := a.dbDialect()
 	now := time.Now().UTC()
-	insert := "INSERT INTO sessions (created_at, updated_at, user_id, token_hash, role, email, ip, jti, expires_at) VALUES (" +
-		d.Placeholders(9) + ")"
-	if _, err := sqlDB.Exec(insert, now, now, userID, tokenHash, "", "", "", accessJTI, expiresAt); err != nil {
+	insert := "INSERT INTO sessions (created_at, updated_at, user_id, token_hash, role, email, ip, user_agent, jti, expires_at) VALUES (" +
+		d.Placeholders(10) + ")"
+	if _, err := sqlDB.Exec(insert, now, now, userID, tokenHash, "", "", ip, userAgent, accessJTI, expiresAt); err != nil {
 		return "", time.Time{}, fmt.Errorf("failed to store session: %w", err)
 	}
 
@@ -624,10 +631,16 @@ func (a *Authenticator) RefreshToken(ctx context.Context, refreshToken string) (
 	// can consume the session. A second concurrent caller reads
 	// the row before the delete completes, but its delete returns
 	// zero rows affected — we check for that case below.
+	// ip/user_agent are captured from the session being rotated (not
+	// re-derived from the current request, which this function has no
+	// access to) so device metadata a caller sees via
+	// ListAccountSessions survives a refresh instead of reverting to
+	// empty on every rotation.
 	var userID uint
+	var sessIP, sessUA sql.NullString
 	if err := sqlDB.QueryRow(
-		"SELECT user_id FROM sessions WHERE token_hash = "+d.Placeholder(1)+" AND expires_at > "+d.Placeholder(2),
-		tokenHash, time.Now().UTC()).Scan(&userID); err != nil {
+		"SELECT user_id, ip, user_agent FROM sessions WHERE token_hash = "+d.Placeholder(1)+" AND expires_at > "+d.Placeholder(2),
+		tokenHash, time.Now().UTC()).Scan(&userID, &sessIP, &sessUA); err != nil {
 		return "", "", time.Time{}, ErrSessionExpired
 	}
 
@@ -657,7 +670,7 @@ func (a *Authenticator) RefreshToken(ctx context.Context, refreshToken string) (
 		return "", "", time.Time{}, err
 	}
 
-	newRefresh, expiresAt, err := a.GenerateRefreshToken(userID, accessJTI)
+	newRefresh, expiresAt, err := a.GenerateRefreshToken(userID, accessJTI, sessIP.String, sessUA.String)
 	if err != nil {
 		return "", "", time.Time{}, err
 	}
@@ -873,7 +886,11 @@ const OpaqueSessionTTL = 30 * time.Minute
 // middleware reads back; passing the client's claim would defeat the
 // purpose. email is the canonical user email and is included so
 // future /me and audit calls do not need a second DB roundtrip.
-func (a *Authenticator) GenerateOpaqueSession(userID uint, role Role, email string) (string, error) {
+// ip and userAgent are the request's real client IP and User-Agent
+// header, persisted on the row for the same "no fabricated Unknown
+// metadata" reason documented on GenerateRefreshToken. Pass "" for
+// either when genuinely unavailable.
+func (a *Authenticator) GenerateOpaqueSession(userID uint, role Role, email, ip, userAgent string) (string, error) {
 	if userID == 0 {
 		return "", fmt.Errorf("generate opaque session: userID is required")
 	}
@@ -899,9 +916,9 @@ func (a *Authenticator) GenerateOpaqueSession(userID uint, role Role, email stri
 	}
 	d := a.dbDialect()
 	now := time.Now().UTC()
-	insert := "INSERT INTO sessions (created_at, updated_at, user_id, token_hash, role, email, ip, jti, expires_at) VALUES (" +
-		d.Placeholders(9) + ")"
-	if _, err := sqlDB.Exec(insert, now, now, userID, tokenHash, string(role), email, "", "", expiresAt); err != nil {
+	insert := "INSERT INTO sessions (created_at, updated_at, user_id, token_hash, role, email, ip, user_agent, jti, expires_at) VALUES (" +
+		d.Placeholders(10) + ")"
+	if _, err := sqlDB.Exec(insert, now, now, userID, tokenHash, string(role), email, ip, userAgent, "", expiresAt); err != nil {
 		return "", fmt.Errorf("store session: %w", err)
 	}
 
