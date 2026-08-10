@@ -743,3 +743,89 @@ func TestDKIMResultNeverSerializesPrivateKey(t *testing.T) {
 		}
 	}
 }
+
+func TestRevokeDKIM_DisablesButPreservesConfigRow(t *testing.T) {
+	db, svc := newDomainWithDKIMTestDB(t)
+	ctx := context.Background()
+	d, err := svc.CreateDomain(ctx, CreateDomainRequest{Name: "revoke.example.test"}, 5)
+	if err != nil {
+		t.Fatalf("create domain: %v", err)
+	}
+	if _, err := svc.GenerateDKIM(ctx, d.ID, 5, "mail"); err != nil {
+		t.Fatalf("generate dkim: %v", err)
+	}
+
+	if err := svc.RevokeDKIM(ctx, d.ID, 5); err != nil {
+		t.Fatalf("revoke dkim: %v", err)
+	}
+
+	got, _ := svc.GetDomain(ctx, d.ID, 5)
+	if got.DKIMEnabled {
+		t.Fatal("expected dkim_enabled to be false after revoke")
+	}
+
+	cfg, err := dkim.NewSQLRepo(db).GetByDomain(ctx, "revoke.example.test", nil)
+	if err != nil {
+		t.Fatalf("get dkim config: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("expected the dkim config row to still exist after revoke (not deleted)")
+	}
+	if cfg.Enabled {
+		t.Fatal("expected the dkim config row itself to be marked disabled")
+	}
+}
+
+func TestRevokeDKIM_NotConfiguredReturnsTypedError(t *testing.T) {
+	_, svc := newDomainWithDKIMTestDB(t)
+	ctx := context.Background()
+	d, _ := svc.CreateDomain(ctx, CreateDomainRequest{Name: "norevoke.example.test"}, 5)
+
+	err := svc.RevokeDKIM(ctx, d.ID, 5)
+	if err != ErrDKIMNotConfigured {
+		t.Fatalf("expected ErrDKIMNotConfigured, got %v", err)
+	}
+}
+
+func TestDKIMSelectorHistory_RecordsGenerateRotateRevokeInOrder(t *testing.T) {
+	_, svc := newDomainWithDKIMTestDB(t)
+	ctx := context.Background()
+	d, _ := svc.CreateDomain(ctx, CreateDomainRequest{Name: "history.example.test"}, 5)
+
+	if _, err := svc.GenerateDKIM(ctx, d.ID, 5, "mail1"); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if _, err := svc.RotateDKIM(ctx, d.ID, 5, "mail2"); err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	if err := svc.RevokeDKIM(ctx, d.ID, 5); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+
+	hist, err := svc.ListDKIMHistory(ctx, d.ID, 5)
+	if err != nil {
+		t.Fatalf("list history: %v", err)
+	}
+	if len(hist) != 3 {
+		t.Fatalf("expected 3 history entries, got %d: %#v", len(hist), hist)
+	}
+	// Newest first.
+	if hist[0].Action != "revoked" || hist[0].Selector != "mail2" {
+		t.Fatalf("entry 0 = %#v, want revoked/mail2", hist[0])
+	}
+	if hist[1].Action != "rotated" || hist[1].Selector != "mail2" {
+		t.Fatalf("entry 1 = %#v, want rotated/mail2", hist[1])
+	}
+	if hist[2].Action != "generated" || hist[2].Selector != "mail1" {
+		t.Fatalf("entry 2 = %#v, want generated/mail1", hist[2])
+	}
+}
+
+func TestDKIMSelectorHistory_UnknownDomainIsNotFound(t *testing.T) {
+	_, svc := newDomainWithDKIMTestDB(t)
+	ctx := context.Background()
+	_, err := svc.ListDKIMHistory(ctx, 99999, 5)
+	if err != ErrDomainNotFound {
+		t.Fatalf("expected ErrDomainNotFound, got %v", err)
+	}
+}

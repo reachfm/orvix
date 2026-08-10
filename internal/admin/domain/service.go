@@ -314,14 +314,108 @@ func (r *DomainAdminRepo) AssignDomainAdmin(ctx context.Context, domainID, userI
 }
 
 type Service struct {
-	repo       *DomainAdminRepo
-	dkimRepo   dkim.Repository
-	auditStore *audit.ExtendedStore
-	rbac       *entrbac.Evaluator
+	repo        *DomainAdminRepo
+	dkimRepo    dkim.Repository
+	auditStore  *audit.ExtendedStore
+	rbac        *entrbac.Evaluator
+	dkimHistory *dkimSelectorHistoryRepo
 }
 
 func NewService(repo *DomainAdminRepo, dkimRepo dkim.Repository, auditStore *audit.ExtendedStore, rbac *entrbac.Evaluator) *Service {
-	return &Service{repo: repo, dkimRepo: dkimRepo, auditStore: auditStore, rbac: rbac}
+	var hist *dkimSelectorHistoryRepo
+	if repo != nil && repo.root != nil {
+		hist = newDKIMSelectorHistoryRepo(repo.root)
+		_ = hist.ensureSchema(context.Background())
+	}
+	return &Service{repo: repo, dkimRepo: dkimRepo, auditStore: auditStore, rbac: rbac, dkimHistory: hist}
+}
+
+// recordDKIMHistory is best-effort: a history-write failure must never
+// roll back or block the DKIM key operation that already committed —
+// it is a secondary audit trail, not the source of truth for the
+// active key (coremail_dkim_config is).
+func (s *Service) recordDKIMHistory(ctx context.Context, tx *sql.Tx, domainName string, tenantID uint, selector, action string) {
+	if s.dkimHistory == nil {
+		return
+	}
+	_ = s.dkimHistory.record(ctx, tx, domainName, tenantID, selector, action, time.Now().UTC())
+}
+
+// ListDKIMHistory returns the append-only selector transition history
+// for a domain (generate/rotate/revoke), newest first.
+func (s *Service) ListDKIMHistory(ctx context.Context, id, tenantID uint) ([]DKIMSelectorHistoryEntry, error) {
+	d, err := s.repo.GetByID(ctx, id, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if d == nil {
+		return nil, ErrDomainNotFound
+	}
+	if s.dkimHistory == nil {
+		return nil, nil
+	}
+	return s.dkimHistory.listByDomain(ctx, d.Name)
+}
+
+// RevokeDKIM disables DKIM signing for a domain without deleting the
+// configuration row (the private key stays available for signature
+// verification of already-queued mail and for an eventual restore),
+// clears the domain's dkim_enabled flag, and records the revocation in
+// the selector history. A domain with no configured DKIM returns
+// ErrDKIMNotConfigured.
+func (s *Service) RevokeDKIM(ctx context.Context, id, tenantID uint) error {
+	d, err := s.repo.GetByID(ctx, id, tenantID)
+	if err != nil {
+		return err
+	}
+	if d == nil {
+		return ErrDomainNotFound
+	}
+
+	tx, err := s.repo.BeginTx(ctx)
+	if err != nil {
+		return fmt.Errorf("begin dkim revoke: %w", err)
+	}
+	defer tx.Rollback()
+
+	repo := s.repo.WithTx(tx)
+
+	existing, err := s.dkimRepo.GetByDomain(ctx, d.Name, tx)
+	if err != nil {
+		return fmt.Errorf("check dkim config: %w", err)
+	}
+	if existing == nil {
+		return ErrDKIMNotConfigured
+	}
+
+	existing.Enabled = false
+	if err := s.dkimRepo.Update(ctx, existing, tx); err != nil {
+		return fmt.Errorf("update dkim config: %w", err)
+	}
+	if err := repo.UpdateDomainDKIMState(ctx, id, tenantID, false, existing.Selector); err != nil {
+		return fmt.Errorf("mark domain dkim state: %w", err)
+	}
+
+	s.recordDKIMHistory(ctx, tx, d.Name, tenantID, existing.Selector, "revoked")
+
+	if s.auditStore != nil {
+		entry := &audit.ExtendedEntry{
+			Action:   "domain.dkim.revoke",
+			Target:   fmt.Sprintf("domain:%d", id),
+			TargetID: id,
+			TenantID: tenantID,
+			Result:   "success",
+			After:    fmt.Sprintf(`{"domain":"%s","selector":"%s"}`, d.Name, existing.Selector),
+		}
+		if err := s.auditStore.RecordTx(ctx, tx, entry); err != nil {
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit dkim revoke: %w", err)
+	}
+	return nil
 }
 
 func (s *Service) ListDomains(ctx context.Context, filter DomainFilter) ([]AdminDomain, int64, error) {
@@ -602,6 +696,8 @@ func (s *Service) generateDKIMTx(ctx context.Context, tx *sql.Tx, repo *DomainAd
 		return nil, fmt.Errorf("mark domain dkim state: %w", err)
 	}
 
+	s.recordDKIMHistory(ctx, tx, domainName, tenantID, selector, "generated")
+
 	return &DKIMResult{
 		Selector:      selector,
 		PublicDNSTxt:  dnsValue,
@@ -660,6 +756,8 @@ func (s *Service) RotateDKIM(ctx context.Context, id, tenantID uint, selector st
 	if err := repo.UpdateDomainDKIMState(ctx, id, tenantID, true, selector); err != nil {
 		return nil, fmt.Errorf("mark domain dkim state: %w", err)
 	}
+
+	s.recordDKIMHistory(ctx, tx, d.Name, tenantID, selector, "rotated")
 
 	if s.auditStore != nil {
 		entry := &audit.ExtendedEntry{
