@@ -61,28 +61,44 @@ type DeletionRecord struct {
 
 func (s *Service) SuspendOrganization(ctx context.Context, orgID, suspendedBy uint, reason SuspensionState, note string) error {
 	org, err := s.repo.GetByID(ctx, orgID)
-	if err != nil || org == nil {
+	if err != nil {
+		return err
+	}
+	if org == nil {
 		return ErrOrganizationNotFound
 	}
-	if !org.Active {
-		return ErrOrganizationSuspended
-	}
-	if err := s.repo.SetActive(ctx, orgID, false); err != nil {
+	// Atomic conditional transition (active=true -> active=false) closes
+	// the TOCTOU race a separate GetByID+SetActive would have: only the
+	// request that wins the WHERE active=true clause proceeds to record
+	// a suspension row. A loser (or a genuinely-already-suspended org)
+	// gets the same stable ErrOrganizationSuspended, not a duplicate
+	// suspension record.
+	applied, err := s.repo.SetActiveIfCurrentlyIs(ctx, orgID, true, false)
+	if err != nil {
 		return err
+	}
+	if !applied {
+		return ErrOrganizationSuspended
 	}
 	return s.repo.RecordSuspension(ctx, orgID, suspendedBy, reason, note)
 }
 
 func (s *Service) ReactivateOrganization(ctx context.Context, orgID uint) error {
 	org, err := s.repo.GetByID(ctx, orgID)
-	if err != nil || org == nil {
+	if err != nil {
+		return err
+	}
+	if org == nil {
 		return ErrOrganizationNotFound
 	}
-	if org.Active {
-		return nil
-	}
-	if err := s.repo.SetActive(ctx, orgID, true); err != nil {
+	applied, err := s.repo.SetActiveIfCurrentlyIs(ctx, orgID, false, true)
+	if err != nil {
 		return err
+	}
+	if !applied {
+		// Already active: idempotent no-op, matching the prior behavior
+		// (a second reactivate of an already-active org is not an error).
+		return nil
 	}
 	return s.repo.CloseActiveSuspension(ctx, orgID)
 }

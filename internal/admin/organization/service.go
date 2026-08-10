@@ -6,6 +6,7 @@ import (
 
 	"github.com/orvix/orvix/internal/audit"
 	entrbac "github.com/orvix/orvix/internal/enterprise/rbac"
+	"github.com/orvix/orvix/internal/platform/kernel"
 )
 
 type Service struct {
@@ -67,6 +68,17 @@ func (s *Service) CreateOrganization(ctx context.Context, req CreateOrganization
 		}
 		return createErr
 	}); err != nil {
+		// A concurrent request can win the INSERT between our pre-check
+		// (ExistsBySlug, above) and this transaction's commit — the
+		// database's own UNIQUE constraint on tenants.slug is the real
+		// enforcement point, this pre-check is only an optimization to
+		// avoid a doomed transaction in the common case. Translate the
+		// resulting UNIQUE violation into the same stable
+		// ErrOrganizationExists a caller already handles, instead of a
+		// raw 500 for what is actually a legitimate conflict.
+		if kernel.IsUniqueViolation(err) {
+			return nil, ErrOrganizationExists
+		}
 		return nil, err
 	}
 	return created, nil
