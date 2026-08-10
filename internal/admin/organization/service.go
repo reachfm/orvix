@@ -165,14 +165,33 @@ func (s *Service) ListMembers(ctx context.Context, orgID uint) ([]OrganizationMe
 	return members, rows.Err()
 }
 
+// UpdateMemberRole refuses to demote the organization's last active
+// tenant_admin away from that role — an equivalent lockout to deleting
+// or suspending them, since a demoted-to-tenant_readonly last admin
+// leaves nobody able to administer the org either.
 func (s *Service) UpdateMemberRole(ctx context.Context, memberID, orgID uint, role string) error {
 	if !isValidOrgMemberRole(role) {
 		return fmt.Errorf("invalid organization member role: %s", role)
 	}
-	_, err := s.repo.db.ExecContext(ctx,
+	if !isAdminLikeRole(role) {
+		isLast, err := s.isLastActiveAdmin(ctx, memberID, orgID)
+		if err != nil {
+			return err
+		}
+		if isLast {
+			return ErrLastActiveAdmin
+		}
+	}
+	res, err := s.repo.db.ExecContext(ctx,
 		"UPDATE users SET role = "+s.repo.dialect.Placeholder(1)+", token_version = COALESCE(token_version, 0) + 1 WHERE id = "+s.repo.dialect.Placeholder(2)+" AND tenant_id = "+s.repo.dialect.Placeholder(3),
 		role, memberID, orgID)
-	return err
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrMemberNotFound
+	}
+	return nil
 }
 
 // isValidOrgMemberRole reports whether role is a canonical tenant role
@@ -186,11 +205,113 @@ func isValidOrgMemberRole(role string) bool {
 	return false
 }
 
+// ErrLastActiveAdmin is returned when a removal or suspension would
+// leave an organization with zero active tenant admins — an org that
+// can never be administered again is a self-inflicted lockout, not a
+// legitimate operator action.
+var ErrLastActiveAdmin = fmt.Errorf("cannot remove or suspend the organization's last active admin")
+
+// ErrMemberNotFound is returned when memberID does not belong to orgID
+// (or does not exist at all) — RemoveMember/SetMemberActive/
+// UpdateMemberRole must never silently no-op a 0-row UPDATE/DELETE, that
+// looks like success to a caller who then wrongly believes the action
+// took effect.
+var ErrMemberNotFound = fmt.Errorf("organization member not found")
+
+// adminLikeRoles matches CountAdmins' own role set exactly (including
+// the legacy 'admin'/'superadmin' roles it counts for pre-normalization
+// data) — using a narrower set here would let a legacy-role admin's
+// removal slip past the last-admin guard that CountAdmins itself would
+// have caught.
+func isAdminLikeRole(role string) bool {
+	switch role {
+	case "admin", "superadmin", "tenant_admin":
+		return true
+	}
+	return false
+}
+
+func (s *Service) isLastActiveAdmin(ctx context.Context, memberID, orgID uint) (bool, error) {
+	var role string
+	var active int
+	err := s.repo.db.QueryRowContext(ctx,
+		"SELECT role, active FROM users WHERE id = "+s.repo.dialect.Placeholder(1)+" AND tenant_id = "+s.repo.dialect.Placeholder(2),
+		memberID, orgID).Scan(&role, &active)
+	if err != nil {
+		return false, ErrMemberNotFound
+	}
+	if !isAdminLikeRole(role) || active == 0 {
+		return false, nil // not an active admin at all; removing/suspending it can't be "the last one"
+	}
+	count, err := s.repo.CountAdmins(ctx, orgID)
+	if err != nil {
+		return false, err
+	}
+	return count <= 1, nil
+}
+
+// RemoveMember deletes memberID from orgID, refusing if memberID is the
+// organization's last active tenant admin (see ErrLastActiveAdmin) or
+// does not belong to orgID at all (see ErrMemberNotFound).
 func (s *Service) RemoveMember(ctx context.Context, memberID, orgID uint) error {
-	_, err := s.repo.db.ExecContext(ctx,
+	isLast, err := s.isLastActiveAdmin(ctx, memberID, orgID)
+	if err != nil {
+		return err
+	}
+	if isLast {
+		return ErrLastActiveAdmin
+	}
+	res, err := s.repo.db.ExecContext(ctx,
 		"DELETE FROM users WHERE id = "+s.repo.dialect.Placeholder(1)+" AND tenant_id = "+s.repo.dialect.Placeholder(2),
 		memberID, orgID)
-	return err
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrMemberNotFound
+	}
+	return nil
+}
+
+// SetMemberActive activates or suspends an individual organization
+// member — distinct from SetOrganizationActive, which suspends the
+// WHOLE organization. Suspending bumps token_version so any of that
+// member's currently-valid JWTs are rejected on their very next
+// request (ValidateAccessToken compares embedded token_version against
+// the live row), not merely on their next login — an "active-immediately"
+// session revocation, not an eventual one. Refuses to suspend the
+// organization's last active tenant admin for the same lockout reason
+// RemoveMember does.
+func (s *Service) SetMemberActive(ctx context.Context, memberID, orgID uint, active bool) error {
+	if !active {
+		isLast, err := s.isLastActiveAdmin(ctx, memberID, orgID)
+		if err != nil {
+			return err
+		}
+		if isLast {
+			return ErrLastActiveAdmin
+		}
+	}
+	activeVal := 0
+	if active {
+		activeVal = 1
+	}
+	query := "UPDATE users SET active = " + s.repo.dialect.Placeholder(1) + " WHERE id = " + s.repo.dialect.Placeholder(2) + " AND tenant_id = " + s.repo.dialect.Placeholder(3)
+	args := []any{activeVal, memberID, orgID}
+	if !active {
+		// Only bump token_version on suspend — reactivating does not
+		// need to invalidate anything, and doing so would pointlessly
+		// force a re-login the member never lost.
+		query = "UPDATE users SET active = " + s.repo.dialect.Placeholder(1) + ", token_version = COALESCE(token_version, 0) + 1 WHERE id = " + s.repo.dialect.Placeholder(2) + " AND tenant_id = " + s.repo.dialect.Placeholder(3)
+	}
+	res, err := s.repo.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrMemberNotFound
+	}
+	return nil
 }
 
 func (s *Service) GetSuspensionStatus(ctx context.Context, orgID uint) (*SuspensionRecord, error) {
