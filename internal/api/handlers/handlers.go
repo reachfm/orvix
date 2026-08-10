@@ -3132,23 +3132,42 @@ func (h *Handler) ListFirewallLogs(c fiber.Ctx) error {
 	return c.JSON(logs)
 }
 
-// ListModules returns registered modules.
+// moduleHealthReporter is an optional capability a registered module
+// may implement to report its OWN real runtime health. ListModules
+// checks for it via a type assertion rather than assuming every
+// module is healthy — a module that doesn't implement it reports
+// "unknown", never a fabricated "active".
+type moduleHealthReporter interface {
+	HealthStatus() (status, message string)
+}
+
+// ListModules returns registered modules with status DERIVED from
+// each module's actual runtime health when available, closing the
+// "module status must be derived from actual runtime/module state,
+// not a static always-active list" defect: this previously hardcoded
+// status="active" for every module regardless of whether it was
+// actually healthy, degraded, or had failed to initialize.
 func (h *Handler) ListModules(c fiber.Ctx) error {
 	type moduleInfo struct {
 		ID      string `json:"id"`
 		Version string `json:"version"`
 		Status  string `json:"status"`
+		Message string `json:"message,omitempty"`
 	}
-	var modules []moduleInfo
+	var mods []moduleInfo
 	for _, m := range h.registry.All() {
-		status := "active"
-		modules = append(modules, moduleInfo{
+		status, message := "unknown", ""
+		if hr, ok := m.(moduleHealthReporter); ok {
+			status, message = hr.HealthStatus()
+		}
+		mods = append(mods, moduleInfo{
 			ID:      m.ID(),
 			Version: m.Version(),
 			Status:  status,
+			Message: message,
 		})
 	}
-	return c.JSON(modules)
+	return c.JSON(mods)
 }
 
 // GetLicense returns the current license status.

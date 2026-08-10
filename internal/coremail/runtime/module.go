@@ -867,6 +867,42 @@ func (m *Module) ClusterService() *cluster.Service {
 	return m.clusterSvc
 }
 
+// HealthStatus implements the admin API's optional moduleHealthReporter
+// capability (internal/api/handlers.moduleHealthReporter): it derives
+// this module's status from its OWN observability.HealthChecker
+// report (populated throughout initCore via m.obs.Health.Ready/
+// NotReady/Degraded on real subsystem checks — database, mailstore,
+// queue, DNS resolver, DKIM config) rather than a hardcoded "active".
+func (m *Module) HealthStatus() (status, message string) {
+	if !m.cfg.CoreMail.Enabled {
+		return "disabled", "coremail.enabled=false"
+	}
+	if m.obs == nil {
+		return "unknown", "observability not initialized"
+	}
+	report := m.obs.Health.Report()
+	switch report.Overall {
+	case observability.HealthReady:
+		return "active", ""
+	case observability.HealthDegraded:
+		return "degraded", degradedSummary(report)
+	default:
+		return "unavailable", degradedSummary(report)
+	}
+}
+
+func degradedSummary(report *observability.HealthReport) string {
+	for name, check := range report.Checks {
+		if check.Status != observability.HealthReady {
+			if check.Message != "" {
+				return name + ": " + check.Message
+			}
+			return name + " not ready"
+		}
+	}
+	return ""
+}
+
 // AntivirusEngine returns the antivirus engine wired into
 // the SMTP receive path, or nil when the runtime has not
 // initialized one. The admin handler uses this to read
