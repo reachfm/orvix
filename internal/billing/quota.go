@@ -4,9 +4,29 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
+
+	"github.com/orvix/orvix/internal/platform/kernel"
 )
+
+// AsError returns a stable, typed kernel.Error for a denied quota check
+// (kernel.ErrCodeQuotaExceeded for "over limit", ErrCodeForbidden for a
+// suspended/expired subscription), or nil if the check was allowed. This
+// is the "stable quota-exceeded error codes" requirement — a caller now
+// gets a machine-branchable code instead of only the free-text Reason
+// string QuotaCheckResult has always carried (kept for backward
+// compatibility with existing callers of CanCreateDomain/etc.).
+func (r *QuotaCheckResult) AsError(dimension string) error {
+	if r == nil || r.Allowed {
+		return nil
+	}
+	if strings.Contains(r.Reason, "subscription is") || strings.Contains(r.Reason, "no active subscription") || r.Reason == "plan not found" {
+		return kernel.Forbidden(r.Reason)
+	}
+	return kernel.QuotaExceeded(fmt.Sprintf("%s quota exceeded (used %d/%d)", dimension, r.Used, r.Limit))
+}
 
 type QuotaService struct {
 	db        *sql.DB
