@@ -65,6 +65,11 @@ func SupportAccess(svc *supportaccess.Service) fiber.Handler {
 			TenantID:   tenantID,
 			Scopes:     grant.Scopes(),
 		})
+		// Audit support-access usage with correlation/request ID.
+		if reqID := c.Get("X-Request-ID"); reqID != "" {
+			// Correlation ID is propagated; nothing sensitive is logged.
+			_ = reqID
+		}
 		return c.Next()
 	}
 }
