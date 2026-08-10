@@ -794,6 +794,7 @@ func (r *Router) setupRoutes() {
 	api.Get("/billing/plans", r.h.ListBillingPlans)
 	api.Post("/billing/webhook", r.h.ReceivePaymentWebhook)
 	api.Post("/billing/complaint", r.h.ReceiveComplaintWebhook)
+	api.Get("/status", r.h.GetPublicStatus)
 
 	loginGroup := api.Group("/auth")
 	if r.redisLimiter != nil {
@@ -1562,6 +1563,20 @@ func (r *Router) setupRoutes() {
 	protected.Post("/updates/artifacts/:id/apply", platformMW[0], platformMW[1], r.h.PostUpdateArtifactApply)
 	protected.Post("/updates/artifacts/:id/rollback", platformMW[0], platformMW[1], r.h.PostUpdateArtifactRollback)
 	protected.Get("/updates/operations/:job_id", platformMW[0], platformMW[1], r.h.GetUpdateOperationStatus)
+
+	// ── Incident management (Milestone 16, platform-only) ──────────
+	protected.Post("/incidents", platformMW[0], platformMW[1], r.h.CreateIncident)
+	protected.Get("/incidents", platformMW[0], platformMW[1], r.h.ListIncidents)
+	protected.Get("/incidents/:id", platformMW[0], platformMW[1], r.h.GetIncident)
+	protected.Patch("/incidents/:id", platformMW[0], platformMW[1], r.h.UpdateIncident)
+	protected.Get("/incidents/:id/timeline", platformMW[0], platformMW[1], r.h.GetIncidentTimeline)
+
+	// ── Support access (Milestone 16, platform-only) ───────────────
+	protected.Post("/platform/support/grants", platformMW[0], platformMW[1], r.h.CreateSupportAccessGrant)
+	protected.Get("/platform/support/grants", platformMW[0], platformMW[1], r.h.ListSupportAccessGrants)
+	protected.Get("/platform/support/grants/:id", platformMW[0], platformMW[1], r.h.GetSupportAccessGrant)
+	protected.Post("/platform/support/grants/:id/activate", platformMW[0], platformMW[1], r.h.ActivateSupportAccessGrant)
+	protected.Post("/platform/support/grants/:id/revoke", platformMW[0], platformMW[1], r.h.RevokeSupportAccessGrant)
 
 	// ── Platform billing balances/adjustments (Milestone 15) ───────
 	protected.Get("/platform/billing/tenants/:tenant_id/balance", platformMW[0], platformMW[1], r.h.GetPlatformBillingBalance)

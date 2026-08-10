@@ -37,6 +37,7 @@ import (
 	"github.com/orvix/orvix/internal/customerdomain"
 	"github.com/orvix/orvix/internal/dbdialect"
 	"github.com/orvix/orvix/internal/dnsops"
+	"github.com/orvix/orvix/internal/incident"
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
@@ -49,6 +50,7 @@ import (
 	"github.com/orvix/orvix/internal/ruler"
 	"github.com/orvix/orvix/internal/runtime"
 	settingsbridge "github.com/orvix/orvix/internal/settings/bridge"
+	"github.com/orvix/orvix/internal/supportaccess"
 	"github.com/orvix/orvix/internal/tlsmgmt"
 	"github.com/orvix/orvix/internal/trustmgmt"
 	"github.com/orvix/orvix/internal/updater"
@@ -92,6 +94,11 @@ type Handler struct {
 	// historyRepo is the immutable delivery-attempt history store
 	// (Milestone 8), set via SetAttemptHistoryRepo.
 	historyRepo delivery.AttemptHistoryRepository
+
+	// incidentSvc is lazily initialized by h.incidentService().
+	incidentSvc *incident.Service
+	// supportAccessSvc is lazily initialized by h.supportAccessService().
+	supportAccessSvc *supportaccess.Service
 
 	// updateSvc is the process-wide Update Management v1 service.
 	// It is set once at router construction (see

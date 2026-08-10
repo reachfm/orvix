@@ -196,6 +196,16 @@ and `isCoreMailDisabled` (frontend).
 | `POST /updates/artifacts/:id/apply` | platformMW | `PostUpdateArtifactApply` | requires typed confirmation `APPLY-STAGED-UPDATE`; fails closed (503) unless the external `orvix-update.path`/`.service` coordinator is installed; hands the staged, verified artifact off to `internal/updatecoord` (durable job, mutually exclusive with rollback, idempotent retries) — never applies in-process | Platform | `internal/platform/updates/service_test.go` (`TestTriggerApply_NoCoordinator_LeavesStaged`, `TestTriggerApply_WithCoordinator_TransitionsToApplied`, `TestTriggerApply_RetryIsIdempotent`), `internal/updatecoord/coordinator_test.go` | MISSING_UI |
 | `POST /updates/artifacts/:id/rollback` | platformMW | `PostUpdateArtifactRollback` | requires typed confirmation `ROLLBACK-APPLIED-UPDATE` + reason; hands off to the same external coordinator using pre-captured previous-version/hash metadata; fails closed if not installed | Platform | `internal/platform/updates/service_test.go` (`TestRollback_RetryIsIdempotent`, `TestRollback_WithoutApply_Rejected`) | MISSING_UI |
 | `GET /updates/operations/:job_id` | platformMW | `GetUpdateOperationStatus` | durable apply/rollback job status, re-read from disk every call so it survives the Orvix restart the coordinator performs | Platform | `internal/updatecoord/coordinator_test.go` | MISSING_UI |
+| `POST /incidents` | platformMW | `CreateIncident` | create a new incident with severity, services, and regions | Platform | `internal/incident/` | MISSING_UI |
+| `GET /incidents` | platformMW | `ListIncidents` | list incidents with optional status filter | Platform | `internal/incident/` | MISSING_UI |
+| `GET /incidents/:id` | platformMW | `GetIncident` | get an incident by ID | Platform | `internal/incident/` | MISSING_UI |
+| `PATCH /incidents/:id` | platformMW | `UpdateIncident` | update incident status with timeline event | Platform | `internal/incident/` | MISSING_UI |
+| `GET /incidents/:id/timeline` | platformMW | `GetIncidentTimeline` | get incident timeline events | Platform | `internal/incident/` | MISSING_UI |
+| `POST /platform/support/grants` | platformMW | `CreateSupportAccessGrant` | request a temporary support-access grant for a tenant | Platform | `internal/supportaccess/` | MISSING_UI |
+| `GET /platform/support/grants` | platformMW | `ListSupportAccessGrants` | list support-access grants by tenant | Platform | `internal/supportaccess/` | MISSING_UI |
+| `GET /platform/support/grants/:id` | platformMW | `GetSupportAccessGrant` | get a support-access grant by ID | Platform | `internal/supportaccess/` | MISSING_UI |
+| `POST /platform/support/grants/:id/activate` | platformMW | `ActivateSupportAccessGrant` | activate an approved support-access grant | Platform | `internal/supportaccess/` | MISSING_UI |
+| `POST /platform/support/grants/:id/revoke` | platformMW | `RevokeSupportAccessGrant` | revoke an active support-access grant | Platform | `internal/supportaccess/` | MISSING_UI |
 
 ## Theme system (cross-cutting, not a route)
 
@@ -224,7 +234,7 @@ above (not carried over from an earlier draft) and is enforced equal
 to the router's actual route set by
 `internal/api/capability_matrix_test.go`, which parses
 `platformMW[0], platformMW[1]` registrations straight out of
-`router.go` — currently 128 — and parses every `` `METHOD /path` ``
+`router.go` — currently 139 — and parses every `` `METHOD /path` ``
 occurrence and its row's disposition straight out of this document.
 
 | Disposition | Routes |
@@ -234,9 +244,9 @@ occurrence and its row's disposition straight out of this document.
 | MACHINE_ONLY | 3 |
 | DEPRECATED | 12 |
 | DUPLICATE_SUPERSEDED_ROUTE | 18 |
-| MISSING_UI | 32 |
+| MISSING_UI | 42 |
 | MISSING_BACKEND | 0 (the one MISSING_BACKEND case — platform-initiated organization creation — is a non-route documented under Organizations, not counted here) |
-| **Total** | **129** |
+| **Total** | **139** |
 
 Three pre-existing MISSING_UI gaps were documented rather than
 silently omitted: `GET /admin/backups/:id` (single-backup fetch; the
