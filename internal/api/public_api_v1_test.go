@@ -41,7 +41,7 @@ func newPublicAPITestRouter(t *testing.T) (*Router, string, string) {
 		sqlDB, _ := db.DB()
 		_ = sqlDB.Close()
 	})
-	writeKey, _, err := router.apikeys.Generate("writer", 10, 1, string(auth.RoleTenantAdmin), []string{publicv1.ScopeGroupsRead, publicv1.ScopeGroupsWrite}, 1)
+	writeKey, _, err := router.apikeys.Generate("writer", 10, 1, string(auth.RoleTenantAdmin), []string{publicv1.ScopeGroupsRead, publicv1.ScopeGroupsWrite, publicv1.ScopeAliasesRead, publicv1.ScopeAliasesWrite}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,6 +90,9 @@ func TestPublicAPIRealRouterIdempotencyAndScopes(t *testing.T) {
 	if got := publicRequest(t, router, "POST", "/api/v1/public/groups", writeKey, "", `{"name":"missing-idem"}`); got.StatusCode != 400 {
 		t.Fatalf("missing idempotency status=%d", got.StatusCode)
 	}
+	if got := publicRequest(t, router, "GET", "/api/v1/platform/organizations", writeKey, "", ""); got.StatusCode >= 200 && got.StatusCode < 300 {
+		t.Fatalf("tenant public key accessed platform route: status=%d", got.StatusCode)
+	}
 }
 
 func TestPublicAPIRealRouterPaginationFilteringAndTenantIsolation(t *testing.T) {
@@ -135,5 +138,33 @@ func TestPublicAPIRealRouterPaginationFilteringAndTenantIsolation(t *testing.T) 
 	}
 	if len(empty.Data) != 0 || empty.Page.TotalCount != 0 {
 		t.Fatalf("empty page=%+v", empty)
+	}
+}
+
+func TestPublicAPIAliasMoveRespectsTargetDomainCap(t *testing.T) {
+	router, writeKey, _ := newPublicAPITestRouter(t)
+	sqlDB, _ := router.db.DB()
+	now := time.Now().UTC()
+	for _, statement := range []string{
+		"INSERT INTO coremail_domains (id,name,tenant_id,status,plan,max_mailboxes,max_aliases,max_quota_mb,created_at,updated_at) VALUES (101,'source.example',1,'active','enterprise',10,10,1024,?,?)",
+		"INSERT INTO coremail_domains (id,name,tenant_id,status,plan,max_mailboxes,max_aliases,max_quota_mb,created_at,updated_at) VALUES (102,'target.example',1,'active','enterprise',10,1,1024,?,?)",
+	} {
+		if _, err := sqlDB.Exec(statement, now, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := sqlDB.Exec("INSERT INTO coremail_aliases (id,domain_id,tenant_id,from_addr,to_addr,active,created_at,updated_at) VALUES (201,101,1,'move@source.example','dest@source.example',1,?,?)", now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sqlDB.Exec("INSERT INTO coremail_aliases (id,domain_id,tenant_id,from_addr,to_addr,active,created_at,updated_at) VALUES (202,102,1,'full@target.example','dest@target.example',1,?,?)", now, now); err != nil {
+		t.Fatal(err)
+	}
+	resp := publicRequest(t, router, "PATCH", "/api/v1/public/aliases/201", writeKey, "alias-move", `{"domain_id":102,"source":"move@target.example","destination":"dest@target.example"}`)
+	if resp.StatusCode != 409 {
+		t.Fatalf("alias move status=%d, want 409", resp.StatusCode)
+	}
+	var domainID uint
+	if err := sqlDB.QueryRow("SELECT domain_id FROM coremail_aliases WHERE id=201").Scan(&domainID); err != nil || domainID != 101 {
+		t.Fatalf("alias moved despite cap: domain=%d err=%v", domainID, err)
 	}
 }

@@ -298,6 +298,12 @@ func (h *Handler) PublicCreateMailbox(c fiber.Ctx) error {
 		return publicv1.WriteError(c, 422, "VALIDATION_ERROR", "A valid email and password are required.")
 	}
 	tenantID, _ := publicTenantID(c)
+	if h.quotaSvc != nil {
+		count := h.mailboxAdminSvc.CountByTenant(c.Context(), tenantID)
+		if result := h.quotaSvc.CanCreateMailbox(tenantID, int(count)); result != nil && !result.Allowed {
+			return publicv1.WriteError(c, fiber.StatusConflict, "MAILBOX_LIMIT_REACHED", "The tenant mailbox limit has been reached.")
+		}
+	}
 	resp, e := h.mailboxAdminSvc.CreateMailbox(c.Context(), mailboxadmin.CreateMailboxRequest{Email: req.Email, Password: req.Password, Name: req.Name, QuotaMB: req.QuotaMB, SendLimit: req.SendLimitPerHour}, tenantID)
 	if e != nil {
 		return publicMailboxError(c, e)

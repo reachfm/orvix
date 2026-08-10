@@ -154,24 +154,60 @@ func (h *Handler) PublicUpdateAlias(c fiber.Ctx) error {
 	if e := c.Bind().JSON(&req); e != nil || !validateAliasRequest(req) {
 		return publicv1.WriteError(c, 422, "VALIDATION_ERROR", "A valid domain_id, source, and destination are required.")
 	}
-	db, _ := h.publicSQLDB()
+	db, e := h.publicSQLDB()
+	if e != nil {
+		return publicv1.WriteError(c, 503, "SERVICE_UNAVAILABLE", "Alias service is unavailable.")
+	}
 	tenantID, _ := publicTenantID(c)
 	id, e := parsePublicID(c, "id")
 	if e != nil {
 		return publicv1.WriteError(c, 400, "INVALID_ID", "Invalid alias id.")
+	}
+	tx, e := db.BeginTx(c.Context(), nil)
+	if e != nil {
+		return publicv1.WriteError(c, 500, "INTERNAL_ERROR", "The request could not be completed.")
+	}
+	defer tx.Rollback()
+	var currentDomainID uint
+	if e = tx.QueryRowContext(c.Context(), "SELECT domain_id FROM coremail_aliases WHERE id="+h.sqlDialect().Placeholder(1)+" AND tenant_id="+h.sqlDialect().Placeholder(2)+" AND deleted_at IS NULL", id, tenantID).Scan(&currentDomainID); errors.Is(e, sql.ErrNoRows) {
+		return publicv1.WriteError(c, 404, "ALIAS_NOT_FOUND", "Alias not found.")
+	} else if e != nil {
+		return publicv1.WriteError(c, 500, "INTERNAL_ERROR", "The request could not be completed.")
+	}
+	domainQuery := "SELECT max_aliases FROM coremail_domains WHERE id=" + h.sqlDialect().Placeholder(1) + " AND tenant_id=" + h.sqlDialect().Placeholder(2) + " AND deleted_at IS NULL"
+	if h.sqlDialect().IsPostgres() {
+		domainQuery += " FOR UPDATE"
+	}
+	var maxAliases int
+	if e = tx.QueryRowContext(c.Context(), domainQuery, req.DomainID, tenantID).Scan(&maxAliases); errors.Is(e, sql.ErrNoRows) {
+		return publicv1.WriteError(c, 404, "DOMAIN_NOT_FOUND", "Domain not found.")
+	} else if e != nil {
+		return publicv1.WriteError(c, 500, "INTERNAL_ERROR", "The request could not be completed.")
+	}
+	if req.DomainID != currentDomainID && maxAliases > 0 {
+		var used int
+		if e = tx.QueryRowContext(c.Context(), "SELECT COUNT(*) FROM coremail_aliases WHERE domain_id="+h.sqlDialect().Placeholder(1)+" AND tenant_id="+h.sqlDialect().Placeholder(2)+" AND deleted_at IS NULL", req.DomainID, tenantID).Scan(&used); e != nil {
+			return publicv1.WriteError(c, 500, "INTERNAL_ERROR", "The request could not be completed.")
+		}
+		if used >= maxAliases {
+			return publicv1.WriteError(c, 409, "ALIAS_LIMIT_REACHED", "The target domain alias limit has been reached.")
+		}
 	}
 	active := true
 	if req.Active != nil {
 		active = *req.Active
 	}
 	now := time.Now().UTC()
-	res, e := db.ExecContext(c.Context(), "UPDATE coremail_aliases SET domain_id="+h.sqlDialect().Placeholder(1)+",from_addr="+h.sqlDialect().Placeholder(2)+",to_addr="+h.sqlDialect().Placeholder(3)+",active="+h.sqlDialect().Placeholder(4)+",updated_at="+h.sqlDialect().Placeholder(5)+" WHERE id="+h.sqlDialect().Placeholder(6)+" AND tenant_id="+h.sqlDialect().Placeholder(7)+" AND deleted_at IS NULL AND domain_id IN (SELECT id FROM coremail_domains WHERE id="+h.sqlDialect().Placeholder(8)+" AND tenant_id="+h.sqlDialect().Placeholder(9)+" AND deleted_at IS NULL)", req.DomainID, req.Source, req.Destination, active, now, id, tenantID, req.DomainID, tenantID)
+	res, e := tx.ExecContext(c.Context(), "UPDATE coremail_aliases SET domain_id="+h.sqlDialect().Placeholder(1)+",from_addr="+h.sqlDialect().Placeholder(2)+",to_addr="+h.sqlDialect().Placeholder(3)+",active="+h.sqlDialect().Placeholder(4)+",updated_at="+h.sqlDialect().Placeholder(5)+" WHERE id="+h.sqlDialect().Placeholder(6)+" AND tenant_id="+h.sqlDialect().Placeholder(7)+" AND deleted_at IS NULL", req.DomainID, req.Source, req.Destination, active, now, id, tenantID)
 	if e != nil {
 		return publicv1.WriteError(c, 409, "ALIAS_UPDATE_FAILED", "The alias could not be updated.")
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return publicv1.WriteError(c, 404, "ALIAS_NOT_FOUND", "Alias not found.")
+	}
+	if e = tx.Commit(); e != nil {
+		return publicv1.WriteError(c, 500, "INTERNAL_ERROR", "The request could not be completed.")
 	}
 	h.writeAuditLog(c, "public.alias.update", strconvID(id))
 	return h.PublicGetAlias(c)
