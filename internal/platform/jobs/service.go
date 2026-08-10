@@ -2,130 +2,127 @@ package jobs
 
 import (
 	"context"
-	"errors"
-	"time"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"github.com/orvix/orvix/internal/platform/kernel"
 )
 
-// Service is the automation jobs service.
+const maxPayloadBytes = 64 << 10
+
 type Service struct {
-	repo *Repository
+	repo     *Repository
+	registry *Registry
+	clock    kernel.Clock
 }
 
 func NewService(repo *Repository) *Service {
-	return &Service{repo: repo}
+	return &Service{repo: repo, registry: NewRegistry(), clock: kernel.SystemClock{}}
 }
 
-func (s *Service) EnsureSchema(ctx context.Context) error {
-	return s.repo.EnsureSchema(ctx)
-}
-
-// CreateJob creates a new job with idempotency key support.
-func (s *Service) CreateJob(ctx context.Context, jobType string, payload []byte, tenantID uint) (*Job, error) {
-	j := &Job{Type: jobType, Payload: payload, TenantID: tenantID}
-	if err := s.repo.Insert(ctx, j); err != nil {
-		return nil, err
+func NewServiceWithRegistry(repo *Repository, registry *Registry, clock kernel.Clock) *Service {
+	if registry == nil {
+		registry = NewRegistry()
 	}
-	return j, nil
+	if clock == nil {
+		clock = kernel.SystemClock{}
+	}
+	return &Service{repo: repo, registry: registry, clock: clock}
 }
 
-// Claim claims pending jobs for a worker.
-func (s *Service) Claim(ctx context.Context, workerID string, limit int) ([]Job, error) {
-	return s.repo.Claim(ctx, workerID, limit)
-}
+func (s *Service) EnsureSchema(ctx context.Context) error { return s.repo.EnsureSchema(ctx) }
 
-// Complete marks a job as succeeded.
-func (s *Service) Complete(ctx context.Context, id uint, result []byte) error {
-	j, err := s.repo.Get(ctx, id)
+func (s *Service) Submit(ctx context.Context, submission Submission) (*Job, bool, error) {
+	definition, ok := s.registry.Lookup(strings.TrimSpace(submission.Type))
+	if !ok {
+		return nil, false, ErrUnknownJobType
+	}
+	if submission.Scope != definition.Scope {
+		return nil, false, kernel.ValidationError(map[string]string{"scope": "job type is not allowed in this scope"})
+	}
+	if submission.Scope == ScopeTenant && submission.TenantID == 0 {
+		return nil, false, kernel.ValidationError(map[string]string{"tenant_id": "tenant context is required"})
+	}
+	if submission.Scope == ScopePlatform && submission.TenantID != 0 {
+		return nil, false, kernel.ValidationError(map[string]string{"tenant_id": "platform jobs cannot carry a tenant"})
+	}
+	if strings.TrimSpace(submission.Actor) == "" || strings.TrimSpace(submission.IdempotencyKey) == "" {
+		return nil, false, kernel.ValidationError(map[string]string{"idempotency_key": "Idempotency-Key is required", "actor": "authenticated actor is required"})
+	}
+	payload, err := normalizeSafeJSON(submission.Payload)
 	if err != nil {
-		return err
+		return nil, false, err
 	}
-	if !j.Status.CanTransition(StatusSucceeded) {
-		return &jobError{"cannot transition to succeeded from " + string(j.Status)}
+	if err = definition.Validate(payload); err != nil {
+		return nil, false, kernel.ValidationError(map[string]string{"payload": "payload failed validation"})
 	}
-	j.Status = StatusSucceeded
-	j.Progress = 100
-	j.Result = result
-	now := time.Now().UTC()
-	j.CompletedAt = &now
-	return s.repo.Update(ctx, j)
+	submission.Type = definition.Type
+	submission.PayloadVersion = definition.PayloadVersion
+	submission.Payload = payload
+	requestHash := submissionHash(submission)
+	idempotencyScope := fmt.Sprintf("%s|%d|%s|%s", submission.Scope, submission.TenantID, strings.TrimSpace(submission.Actor), definition.Type)
+	return s.repo.SubmitIdempotent(ctx, submission, requestHash, idempotencyScope, s.clock.Now())
 }
 
-// Fail marks a job as failed and schedules a retry if attempts remain.
-func (s *Service) Fail(ctx context.Context, id uint, errMsg string) error {
-	j, err := s.repo.Get(ctx, id)
+func normalizeSafeJSON(payload []byte) (json.RawMessage, error) {
+	if len(payload) == 0 || len(payload) > maxPayloadBytes {
+		return nil, kernel.ValidationError(map[string]string{"payload": "payload must be non-empty and at most 64 KiB"})
+	}
+	var value any
+	decoder := json.NewDecoder(strings.NewReader(string(payload)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		return nil, kernel.ValidationError(map[string]string{"payload": "payload must be valid JSON"})
+	}
+	if containsSensitiveField(value) {
+		return nil, kernel.ValidationError(map[string]string{"payload": "credentials and secrets are not permitted"})
+	}
+	normalized, err := json.Marshal(value)
 	if err != nil {
-		return err
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "normalize automation job payload", err)
 	}
-	if !j.Status.CanTransition(StatusFailed) {
-		return &jobError{"cannot transition to failed from " + string(j.Status)}
-	}
-	j.Status = StatusFailed
-	j.Error = errMsg
-	j.Attempt++
-	if j.Attempt < j.MaxAttempts {
-		// Re-queue for retry
-		j.Status = StatusQueued
-		j.NextRunAt = ptr(time.Now().UTC().Add(backoff(j.Attempt)))
-	}
-	return s.repo.Update(ctx, j)
+	return normalized, nil
 }
 
-// Cancel cancels a job.
-func (s *Service) Cancel(ctx context.Context, id uint) error {
-	j, err := s.repo.Get(ctx, id)
-	if err != nil {
-		return err
-	}
-	if !j.Status.CanTransition(StatusCancelled) {
-		return &jobError{"cannot transition to cancelled from " + string(j.Status)}
-	}
-	j.Status = StatusCancelled
-	now := time.Now().UTC()
-	j.CompletedAt = &now
-	return s.repo.Update(ctx, j)
-}
-
-// RecoverStaleJobs resets stale running jobs back to queued.
-func (s *Service) RecoverStaleJobs(ctx context.Context, threshold time.Duration, limit int) (int, error) {
-	stale, err := s.repo.StaleJobs(ctx, threshold, limit)
-	if err != nil {
-		return 0, err
-	}
-	for i := range stale {
-		stale[i].Status = StatusQueued
-		stale[i].WorkerID = ""
-		if err := s.repo.Update(ctx, &stale[i]); err != nil {
-			return i, err
+func containsSensitiveField(value any) bool {
+	sensitive := map[string]bool{"authorization": true, "password": true, "secret": true, "token": true, "api_key": true, "apikey": true, "cookie": true, "private_key": true}
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			normalized := strings.ToLower(strings.TrimSpace(key))
+			if sensitive[normalized] || containsSensitiveField(child) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if containsSensitiveField(child) {
+				return true
+			}
 		}
 	}
-	return len(stale), nil
+	return false
 }
 
-// Get returns a job by ID.
-func (s *Service) Get(ctx context.Context, id uint) (*Job, error) {
-	return s.repo.Get(ctx, id)
+func submissionHash(submission Submission) string {
+	hash := sha256.New()
+	fmt.Fprintf(hash, "%s\x00%d\x00%s", submission.Type, submission.PayloadVersion, submission.Payload)
+	return hex.EncodeToString(hash.Sum(nil))
 }
 
-// List returns jobs with optional filters.
-func (s *Service) List(ctx context.Context, tenantID uint, status string, limit int) ([]Job, error) {
-	return s.repo.List(ctx, tenantID, status, limit)
+func (s *Service) Get(ctx context.Context, id, tenantID uint, scope Scope) (*Job, error) {
+	return s.repo.GetForScope(ctx, id, tenantID, scope)
 }
 
-func backoff(attempt int) time.Duration {
-	d := time.Duration(1<<uint(attempt)) * time.Second
-	if d > 5*time.Minute {
-		d = 5 * time.Minute
+func (s *Service) List(ctx context.Context, filter ListFilter) (kernel.PageResponse[Job], error) {
+	if filter.Status != "" && !filter.Status.Valid() {
+		return kernel.PageResponse[Job]{}, kernel.ValidationError(map[string]string{"status": "invalid job status"})
 	}
-	return d
-}
-
-func ptr[T any](v T) *T { return &v }
-
-var (
-	ErrNotFound          = &jobError{"job not found"}
-	ErrInvalidTransition = &jobError{"invalid job status transition"}
-)
-
-func IsNotFound(err error) bool {
-	return errors.Is(err, ErrNotFound)
+	if filter.Scope == ScopeTenant && filter.TenantID == 0 {
+		return kernel.PageResponse[Job]{}, kernel.ValidationError(map[string]string{"tenant_id": "tenant context is required"})
+	}
+	return s.repo.List(ctx, filter)
 }
