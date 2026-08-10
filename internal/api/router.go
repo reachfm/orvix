@@ -1303,6 +1303,8 @@ func (r *Router) setupRoutes() {
 	protected.Get("/modules", platformMW[0], platformMW[1], r.h.ListModules)
 	protected.Get("/license", platformMW[0], platformMW[1], r.h.GetLicense)
 	protected.Get("/audit/logs", platformMW[0], platformMW[1], r.h.ListAuditLogs)
+	protected.Get("/audit/logs/export", platformMW[0], platformMW[1], r.h.ExportAuditLogs)
+	protected.Get("/audit/logs/:id", platformMW[0], platformMW[1], r.h.GetAuditEntry)
 	// Admin Enterprise v2 — RBAC + account classes + groups +
 	// lists + public folders + quarantine + ACL + log rules.
 	protected.Get("/admin/account-classes", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListAccountClasses)

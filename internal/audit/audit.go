@@ -201,6 +201,7 @@ func (s *Store) Search(ctx context.Context, q *Query) ([]Entry, int64, error) {
 
 // PurgeOlderThan removes audit entries older than the specified time.
 func (s *Store) PurgeOlderThan(ctx context.Context, olderThan time.Time) (int64, error) {
+	olderThan = olderThan.UTC()
 	res, err := s.db.ExecContext(ctx, "DELETE FROM coremail_audit WHERE timestamp < "+s.dialect.Placeholder(1), olderThan)
 	if err != nil {
 		return 0, err
