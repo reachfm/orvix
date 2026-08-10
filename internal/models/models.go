@@ -675,7 +675,8 @@ func MigrateAllRaw(db *gorm.DB) error {
 			scopes TEXT NOT NULL DEFAULT '',
 			active INTEGER NOT NULL DEFAULT 1,
 			last_used_at DATETIME,
-			expires_at DATETIME
+			expires_at DATETIME,
+			allowed_ips TEXT NOT NULL DEFAULT ''
 		)`,
 		// CoreMail tables
 		`CREATE TABLE IF NOT EXISTS coremail_domains (
@@ -1497,6 +1498,11 @@ func migrateAPIKeysSchema(ctx context.Context, db *sql.DB) error {
 		{"tenant_id", "ALTER TABLE api_keys ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 0"},
 		{"role", "ALTER TABLE api_keys ADD COLUMN role TEXT NOT NULL DEFAULT 'user'"},
 		{"scopes", "ALTER TABLE api_keys ADD COLUMN scopes TEXT NOT NULL DEFAULT ''"},
+		// allowed_ips: comma-separated CIDRs an issued key may be used
+		// from; empty means unrestricted. Did not exist at all before
+		// this change, so every previously-issued key was structurally
+		// unrestricted (Feature 4/19's "IP restrictions where configured").
+		{"allowed_ips", "ALTER TABLE api_keys ADD COLUMN allowed_ips TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, addition := range additions {
 		if columns[addition.name] {

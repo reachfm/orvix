@@ -213,6 +213,7 @@ func postgresTables() []string {
 			expires_at TIMESTAMP
 		)`,
 		`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS scopes TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS allowed_ips TEXT NOT NULL DEFAULT ''`,
 
 		// --- Sessions / security / audit ---
 

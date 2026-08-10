@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -28,7 +29,74 @@ type APIKeyRecord struct {
 	Enabled   bool       `gorm:"column:active;not null;default:true" json:"enabled"`
 	LastUsed  *time.Time `gorm:"column:last_used_at" json:"last_used,omitempty"`
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
-	CreatedAt time.Time  `json:"created_at"`
+	// AllowedIPs is a comma-separated list of CIDRs (e.g.
+	// "203.0.113.0/24,198.51.100.7/32") this key may be used from. Empty
+	// means unrestricted — the pre-existing behavior for every key
+	// issued before this field existed.
+	AllowedIPs string    `gorm:"column:allowed_ips;not null;default:''" json:"allowed_ips,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// ParseAllowedIPs validates a comma-separated CIDR list, returning a
+// clean per-entry slice or an error naming the first invalid entry — a
+// caller-facing validation error, not a runtime IP-check failure. An
+// entry without a "/" is treated as a single host (appended "/32" for
+// IPv4, "/128" for IPv6) so an operator can type a bare IP.
+func ParseAllowedIPs(raw string) ([]string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		p := strings.TrimSpace(part)
+		if p == "" {
+			continue
+		}
+		cidr := p
+		if !strings.Contains(cidr, "/") {
+			if strings.Contains(cidr, ":") {
+				cidr += "/128"
+			} else {
+				cidr += "/32"
+			}
+		}
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			return nil, fmt.Errorf("invalid IP/CIDR %q: %w", p, err)
+		}
+		out = append(out, cidr)
+	}
+	return out, nil
+}
+
+// ipAllowed reports whether remoteIP satisfies allowedCSV — an empty
+// allowedCSV means unrestricted (true). remoteIP that fails to parse
+// (e.g. empty string from a test harness or a proxy stripping it) fails
+// CLOSED when a restriction is configured, never open.
+func ipAllowed(allowedCSV, remoteIP string) bool {
+	if strings.TrimSpace(allowedCSV) == "" {
+		return true
+	}
+	ip := net.ParseIP(remoteIP)
+	if ip == nil {
+		return false
+	}
+	cidrs, err := ParseAllowedIPs(allowedCSV)
+	if err != nil {
+		// A stored value that fails to parse is a data-integrity bug,
+		// not a reason to fail open — treat as "no addresses match".
+		return false
+	}
+	for _, c := range cidrs {
+		_, network, err := net.ParseCIDR(c)
+		if err != nil {
+			continue
+		}
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // APIKeyRequest is used for creating or rotating API keys.
@@ -125,22 +193,45 @@ func (m *APIKeyManager) Generate(name string, userID, tenantID uint, role string
 	return fullKey, record, nil
 }
 
-// Validate checks if an API key is valid and returns the record.
+// Validate checks if an API key is valid and returns the record. It does
+// NOT enforce any IP restriction on the key — callers that have a
+// request IP available MUST use ValidateForIP instead. Validate remains
+// for callers with no request context (background jobs, CLI) where an
+// IP-restricted key is simply never usable, by design.
 func (m *APIKeyManager) Validate(key string) (*APIKeyRecord, error) {
+	return m.validate(key, "", false)
+}
+
+// ValidateForIP is Validate plus enforcement of the key's AllowedIPs
+// restriction against remoteIP. A key with a non-empty AllowedIPs used
+// from an address outside every listed CIDR is rejected with the exact
+// same "invalid API key" error Validate uses for a wrong secret — never
+// a distinguishable error that would let an attacker probe whether a
+// key exists versus whether their IP is merely disallowed.
+func (m *APIKeyManager) ValidateForIP(key, remoteIP string) (*APIKeyRecord, error) {
+	return m.validate(key, remoteIP, true)
+}
+
+func (m *APIKeyManager) validate(key, remoteIP string, enforceIP bool) (*APIKeyRecord, error) {
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(key)))
 
 	sqlDB, d, err := m.dialect()
 	if err != nil {
 		return nil, err
 	}
-	sel := "SELECT id, name, user_id, tenant_id, role, key_prefix, scopes, expires_at FROM api_keys WHERE key_hash = " +
+	sel := "SELECT id, name, user_id, tenant_id, role, key_prefix, scopes, expires_at, allowed_ips FROM api_keys WHERE key_hash = " +
 		d.Placeholder(1) + " AND active = " + d.TrueLiteral() + " AND deleted_at IS NULL"
 	var r APIKeyRecord
-	if err := sqlDB.QueryRow(sel, hash).Scan(&r.ID, &r.Name, &r.UserID, &r.TenantID, &r.Role, &r.KeyPrefix, &r.Scopes, &r.ExpiresAt); err != nil {
+	if err := sqlDB.QueryRow(sel, hash).Scan(&r.ID, &r.Name, &r.UserID, &r.TenantID, &r.Role, &r.KeyPrefix, &r.Scopes, &r.ExpiresAt, &r.AllowedIPs); err != nil {
 		return nil, fmt.Errorf("invalid API key")
 	}
 	if r.ExpiresAt != nil && time.Now().After(*r.ExpiresAt) {
 		return nil, fmt.Errorf("API key expired")
+	}
+	if enforceIP && !ipAllowed(r.AllowedIPs, remoteIP) {
+		// Deliberately the same error text as an unknown/wrong key —
+		// see the ValidateForIP doc comment.
+		return nil, fmt.Errorf("invalid API key")
 	}
 	r.KeyHash = hash
 	r.Enabled = true
@@ -148,6 +239,30 @@ func (m *APIKeyManager) Validate(key string) (*APIKeyRecord, error) {
 	// Best-effort last-used bookkeeping; never fail auth on it.
 	_, _ = sqlDB.Exec("UPDATE api_keys SET last_used_at = "+d.Placeholder(1)+" WHERE id = "+d.Placeholder(2), time.Now().UTC(), r.ID)
 	return &r, nil
+}
+
+// SetAllowedIPs configures (or clears, with an empty string) the IP
+// restriction for a key the caller owns. cidrsCSV is validated via
+// ParseAllowedIPs before being persisted — an invalid entry is rejected
+// outright rather than silently stored and never matching anything.
+func (m *APIKeyManager) SetAllowedIPs(id, userID uint, cidrsCSV string) error {
+	if _, err := ParseAllowedIPs(cidrsCSV); err != nil {
+		return err
+	}
+	sqlDB, d, err := m.dialect()
+	if err != nil {
+		return err
+	}
+	res, err := sqlDB.Exec("UPDATE api_keys SET allowed_ips = "+d.Placeholder(1)+", updated_at = "+d.Placeholder(2)+
+		" WHERE id = "+d.Placeholder(3)+" AND user_id = "+d.Placeholder(4)+" AND deleted_at IS NULL",
+		strings.TrimSpace(cidrsCSV), time.Now().UTC(), id, userID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("API key not found")
+	}
+	return nil
 }
 
 // RotateByID atomically rotates an API key by ID using a raw database/sql
@@ -326,7 +441,7 @@ func (m *APIKeyManager) Middleware() fiber.Handler {
 			return c.Next()
 		}
 
-		record, err := m.Validate(token)
+		record, err := m.ValidateForIP(token, c.IP())
 		if err != nil {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid API key"})
 		}
