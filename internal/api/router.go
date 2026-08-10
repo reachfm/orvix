@@ -47,6 +47,7 @@ import (
 	platformbilling "github.com/orvix/orvix/internal/platform/billing"
 	"github.com/orvix/orvix/internal/platform/bulkprovision"
 	"github.com/orvix/orvix/internal/platform/cluster"
+	"github.com/orvix/orvix/internal/platform/kernel"
 	"github.com/orvix/orvix/internal/platform/relay"
 	"github.com/orvix/orvix/internal/platform/retention"
 	"github.com/orvix/orvix/internal/ruler"
@@ -75,6 +76,7 @@ type Router struct {
 	cancel       context.CancelFunc
 	db           *gorm.DB
 	startOnce    sync.Once
+	publicIdem   *kernel.IdempotencyStore
 }
 
 func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *zap.Logger,
@@ -120,6 +122,19 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		cancel:       cancel,
 		h:            handlers.NewHandler(db, authenticator, apikeyMgr, logger, cfg, registry, ff, rateLimiter),
 		db:           db,
+	}
+	if sqlDB, err := db.DB(); err == nil {
+		dialect, detectErr := dbdialect.Detect(sqlDB)
+		if detectErr != nil {
+			dialect = dbdialect.FromDriver(cfg.Database.Driver)
+		}
+		router.publicIdem = kernel.NewIdempotencyStore(sqlDB, dialect)
+		if err := router.publicIdem.EnsureSchema(ctx); err != nil {
+			logger.Error("public API idempotency schema init failed", zap.Error(err))
+			router.publicIdem = nil
+		} else if _, err := router.publicIdem.PurgeBefore(ctx, time.Now().UTC().Add(-publicv1.IdempotencyRetention)); err != nil {
+			logger.Warn("public API idempotency retention purge failed", zap.Error(err))
+		}
 	}
 
 	// Cancel the background context when the Fiber app shuts
@@ -802,33 +817,39 @@ func (r *Router) setupRoutes() {
 	// operation declares one explicit public scope and all resource IDs are
 	// resolved inside the tenant bound to the validated key.
 	publicAPI := api.Group("/public", publicv1.Correlation(), r.apikeys.PublicMiddleware())
+	publicMutation := func(c fiber.Ctx) error {
+		if r.publicIdem == nil {
+			return publicv1.WriteError(c, fiber.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Idempotent mutations are unavailable.")
+		}
+		return publicv1.Idempotent(r.publicIdem)(c)
+	}
 	publicAPI.Get("/organization", publicv1.RequireScope(publicv1.ScopeOrganizationRead), r.h.PublicOrganization)
 	publicAPI.Get("/usage", publicv1.RequireScope(publicv1.ScopeUsageRead), r.h.PublicUsage)
 	publicAPI.Get("/domains", publicv1.RequireScope(publicv1.ScopeDomainsRead), r.h.PublicListDomains)
 	publicAPI.Get("/domains/:id", publicv1.RequireScope(publicv1.ScopeDomainsRead), r.h.PublicGetDomain)
-	publicAPI.Post("/domains", publicv1.RequireScope(publicv1.ScopeDomainsWrite), r.h.PublicCreateDomain)
-	publicAPI.Patch("/domains/:id", publicv1.RequireScope(publicv1.ScopeDomainsWrite), r.h.PublicUpdateDomain)
-	publicAPI.Post("/domains/:id/status", publicv1.RequireScope(publicv1.ScopeDomainsWrite), r.h.PublicSetDomainStatus)
-	publicAPI.Delete("/domains/:id", publicv1.RequireScope(publicv1.ScopeDomainsWrite), r.h.PublicDeleteDomain)
+	publicAPI.Post("/domains", publicv1.RequireScope(publicv1.ScopeDomainsWrite), publicMutation, r.h.PublicCreateDomain)
+	publicAPI.Patch("/domains/:id", publicv1.RequireScope(publicv1.ScopeDomainsWrite), publicMutation, r.h.PublicUpdateDomain)
+	publicAPI.Post("/domains/:id/status", publicv1.RequireScope(publicv1.ScopeDomainsWrite), publicMutation, r.h.PublicSetDomainStatus)
+	publicAPI.Delete("/domains/:id", publicv1.RequireScope(publicv1.ScopeDomainsWrite), publicMutation, r.h.PublicDeleteDomain)
 	publicAPI.Get("/mailboxes", publicv1.RequireScope(publicv1.ScopeMailboxesRead), r.h.PublicListMailboxes)
 	publicAPI.Get("/mailboxes/:id", publicv1.RequireScope(publicv1.ScopeMailboxesRead), r.h.PublicGetMailbox)
-	publicAPI.Post("/mailboxes", publicv1.RequireScope(publicv1.ScopeMailboxesWrite), r.h.PublicCreateMailbox)
-	publicAPI.Patch("/mailboxes/:id", publicv1.RequireScope(publicv1.ScopeMailboxesWrite), r.h.PublicUpdateMailbox)
-	publicAPI.Post("/mailboxes/:id/status", publicv1.RequireScope(publicv1.ScopeMailboxesWrite), r.h.PublicSetMailboxStatus)
-	publicAPI.Delete("/mailboxes/:id", publicv1.RequireScope(publicv1.ScopeMailboxesWrite), r.h.PublicDeleteMailbox)
+	publicAPI.Post("/mailboxes", publicv1.RequireScope(publicv1.ScopeMailboxesWrite), publicMutation, r.h.PublicCreateMailbox)
+	publicAPI.Patch("/mailboxes/:id", publicv1.RequireScope(publicv1.ScopeMailboxesWrite), publicMutation, r.h.PublicUpdateMailbox)
+	publicAPI.Post("/mailboxes/:id/status", publicv1.RequireScope(publicv1.ScopeMailboxesWrite), publicMutation, r.h.PublicSetMailboxStatus)
+	publicAPI.Delete("/mailboxes/:id", publicv1.RequireScope(publicv1.ScopeMailboxesWrite), publicMutation, r.h.PublicDeleteMailbox)
 	publicAPI.Get("/aliases", publicv1.RequireScope(publicv1.ScopeAliasesRead), r.h.PublicListAliases)
 	publicAPI.Get("/aliases/:id", publicv1.RequireScope(publicv1.ScopeAliasesRead), r.h.PublicGetAlias)
-	publicAPI.Post("/aliases", publicv1.RequireScope(publicv1.ScopeAliasesWrite), r.h.PublicCreateAlias)
-	publicAPI.Patch("/aliases/:id", publicv1.RequireScope(publicv1.ScopeAliasesWrite), r.h.PublicUpdateAlias)
-	publicAPI.Delete("/aliases/:id", publicv1.RequireScope(publicv1.ScopeAliasesWrite), r.h.PublicDeleteAlias)
+	publicAPI.Post("/aliases", publicv1.RequireScope(publicv1.ScopeAliasesWrite), publicMutation, r.h.PublicCreateAlias)
+	publicAPI.Patch("/aliases/:id", publicv1.RequireScope(publicv1.ScopeAliasesWrite), publicMutation, r.h.PublicUpdateAlias)
+	publicAPI.Delete("/aliases/:id", publicv1.RequireScope(publicv1.ScopeAliasesWrite), publicMutation, r.h.PublicDeleteAlias)
 	publicAPI.Get("/groups", publicv1.RequireScope(publicv1.ScopeGroupsRead), r.h.PublicListGroups)
 	publicAPI.Get("/groups/:id", publicv1.RequireScope(publicv1.ScopeGroupsRead), r.h.PublicGetGroup)
-	publicAPI.Post("/groups", publicv1.RequireScope(publicv1.ScopeGroupsWrite), r.h.PublicCreateGroup)
-	publicAPI.Patch("/groups/:id", publicv1.RequireScope(publicv1.ScopeGroupsWrite), r.h.PublicUpdateGroup)
-	publicAPI.Delete("/groups/:id", publicv1.RequireScope(publicv1.ScopeGroupsWrite), r.h.PublicDeleteGroup)
+	publicAPI.Post("/groups", publicv1.RequireScope(publicv1.ScopeGroupsWrite), publicMutation, r.h.PublicCreateGroup)
+	publicAPI.Patch("/groups/:id", publicv1.RequireScope(publicv1.ScopeGroupsWrite), publicMutation, r.h.PublicUpdateGroup)
+	publicAPI.Delete("/groups/:id", publicv1.RequireScope(publicv1.ScopeGroupsWrite), publicMutation, r.h.PublicDeleteGroup)
 	publicAPI.Get("/groups/:id/members", publicv1.RequireScope(publicv1.ScopeGroupsRead), r.h.PublicListGroupMembers)
-	publicAPI.Post("/groups/:id/members", publicv1.RequireScope(publicv1.ScopeGroupsWrite), r.h.PublicAddGroupMember)
-	publicAPI.Delete("/groups/:id/members/:memberId", publicv1.RequireScope(publicv1.ScopeGroupsWrite), r.h.PublicDeleteGroupMember)
+	publicAPI.Post("/groups/:id/members", publicv1.RequireScope(publicv1.ScopeGroupsWrite), publicMutation, r.h.PublicAddGroupMember)
+	publicAPI.Delete("/groups/:id/members/:memberId", publicv1.RequireScope(publicv1.ScopeGroupsWrite), publicMutation, r.h.PublicDeleteGroupMember)
 
 	loginGroup := api.Group("/auth")
 	if r.redisLimiter != nil {

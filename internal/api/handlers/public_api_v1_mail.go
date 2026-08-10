@@ -25,8 +25,11 @@ func (h *Handler) PublicListAliases(c fiber.Ctx) error {
 	where := "tenant_id=" + h.sqlDialect().Placeholder(1) + " AND deleted_at IS NULL"
 	args := []any{tenantID}
 	if p.Search != "" {
-		args = append(args, "%"+strings.ToLower(p.Search)+"%")
-		where += " AND (LOWER(from_addr) LIKE " + h.sqlDialect().Placeholder(len(args)) + " OR LOWER(to_addr) LIKE " + h.sqlDialect().Placeholder(len(args)) + ")"
+		search := "%" + strings.ToLower(p.Search) + "%"
+		args = append(args, search)
+		fromPlaceholder := h.sqlDialect().Placeholder(len(args))
+		args = append(args, search)
+		where += " AND (LOWER(from_addr) LIKE " + fromPlaceholder + " OR LOWER(to_addr) LIKE " + h.sqlDialect().Placeholder(len(args)) + ")"
 	}
 	var total int64
 	if err = db.QueryRowContext(c.Context(), "SELECT COUNT(*) FROM coremail_aliases WHERE "+where, args...).Scan(&total); err != nil {
@@ -208,8 +211,9 @@ func (h *Handler) PublicListGroups(c fiber.Ctx) error {
 	where := "tenant_id=" + h.sqlDialect().Placeholder(1) + " AND deleted_at IS NULL"
 	args := []any{tenantID}
 	if p.Search != "" {
-		args = append(args, "%"+strings.ToLower(p.Search)+"%")
-		where += " AND (LOWER(name) LIKE " + h.sqlDialect().Placeholder(2) + " OR LOWER(description) LIKE " + h.sqlDialect().Placeholder(2) + ")"
+		search := "%" + strings.ToLower(p.Search) + "%"
+		args = append(args, search, search)
+		where += " AND (LOWER(name) LIKE " + h.sqlDialect().Placeholder(2) + " OR LOWER(description) LIKE " + h.sqlDialect().Placeholder(3) + ")"
 	}
 	var total int64
 	if e = db.QueryRowContext(c.Context(), "SELECT COUNT(*) FROM coremail_groups WHERE "+where, args...).Scan(&total); e != nil {

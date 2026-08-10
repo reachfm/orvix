@@ -146,6 +146,18 @@ func (s *IdempotencyStore) Abandon(ctx context.Context, scope, key string) error
 	return nil
 }
 
+// PurgeBefore removes completed replay records and abandoned in-flight claims
+// older than the retention cutoff. Callers choose and document the retention
+// policy; this store never silently grows forever.
+func (s *IdempotencyStore) PurgeBefore(ctx context.Context, cutoff time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM platform_idempotency_keys WHERE created_at < `+s.dialect.Placeholder(1), cutoff)
+	if err != nil {
+		return 0, Wrap(ErrCodeInternal, "purge idempotency records", err)
+	}
+	return res.RowsAffected()
+}
+
 type StoredResult struct {
 	StatusCode   int
 	ResponseBody string
