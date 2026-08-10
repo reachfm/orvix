@@ -41,6 +41,7 @@ import (
 	"github.com/orvix/orvix/internal/modules"
 	"github.com/orvix/orvix/internal/observability"
 	"github.com/orvix/orvix/internal/platform/bulkprovision"
+	"github.com/orvix/orvix/internal/platform/relay"
 	"github.com/orvix/orvix/internal/ruler"
 	"github.com/orvix/orvix/internal/runtime"
 	settingsbridge "github.com/orvix/orvix/internal/settings/bridge"
@@ -194,6 +195,7 @@ type Handler struct {
 	platformAdminSvc *platformsvc.PlatformService
 	dashboardSvc     *dashboardsvc.DashboardService
 	bulkProvisionSvc *bulkprovision.Service
+	relaySvc         *relay.Service
 
 	billingSvc   *billing.Service
 	usageSvc     *billing.UsageService
@@ -414,6 +416,11 @@ func (h *Handler) DomainAdminService() *domainadminsvc.Service {
 // SetBulkProvisionService wires the bulk mailbox provisioning service.
 func (h *Handler) SetBulkProvisionService(s *bulkprovision.Service) {
 	h.bulkProvisionSvc = s
+}
+
+// SetRelayService wires the outbound relay control plane service.
+func (h *Handler) SetRelayService(s *relay.Service) {
+	h.relaySvc = s
 }
 
 // SetPlatformAdminService wires the platform admin service.

@@ -51,6 +51,16 @@ type DeliveryWorker struct {
 
 	// PushNotifier dispatches browser push notifications after local delivery.
 	PushNotifier *push.PushNotifier
+
+	// RelaySelector is the optional outbound relay control plane
+	// (internal/platform/relay). nil (the default) means every message
+	// delivers direct-to-MX exactly as before this integration existed.
+	RelaySelector RelaySelector
+	// TenantIDForRelay resolves the sending tenant/domain context for a
+	// queue entry, since QueueEntry alone doesn't carry a tenant ID.
+	// nil disables relay selection even if RelaySelector is set (fails
+	// safe to direct delivery, never to a misrouted relay).
+	TenantIDForRelay func(entry *queue.QueueEntry) (tenantID uint, senderMailAccessMode string)
 }
 
 // NewDeliveryWorker creates a delivery worker with optional reliability integrations.
@@ -580,6 +590,51 @@ func (w *DeliveryWorker) deliverLocal(ctx context.Context, entry *queue.QueueEnt
 
 func (w *DeliveryWorker) deliverRemote(ctx context.Context, entry *queue.QueueEntry) *DeliveryResult {
 	domain := entry.RecipientDomain
+
+	// ── Relay routing decision (optional) ──────────────────
+	// Resolved BEFORE touching MailStore or the MX resolver — matching
+	// the pre-existing contract that a resolver failure returns
+	// immediately without ever loading the message (see
+	// TestRegressMXFailureDefers, which constructs a DeliveryWorker
+	// with a nil MailStore specifically to prove this). A configured
+	// RelaySelector gets first say on how this message leaves the
+	// building; when it resolves to a non-direct route, we load the
+	// message and dial the chosen provider instead of the recipient's
+	// own MX. The entire block is skipped (falling through to the
+	// pre-existing direct-to-MX logic below, byte-for-byte unchanged)
+	// when no selector is wired, so this integration cannot regress
+	// the no-relay-configured case.
+	if w.RelaySelector != nil && w.TenantIDForRelay != nil {
+		tenantID, accessMode := w.TenantIDForRelay(entry)
+		senderDomain := extractDomainFromAddress(entry.FromAddress)
+		route, rerr := w.RelaySelector.SelectRoute(ctx, tenantID, senderDomain, accessMode, domain, int64(entry.ID))
+		if rerr == nil && route != nil && !route.Direct {
+			msg, data, err := w.MailStore.LoadMessageByMessageID(ctx, entry.MessageID)
+			if err != nil {
+				return &DeliveryResult{StatusMsg: fmt.Sprintf("load message: %v", err), TempFail: false}
+			}
+			if msg == nil {
+				return &DeliveryResult{StatusMsg: "message not found", TempFail: false}
+			}
+			data = w.signWithDKIM(ctx, data, entry)
+			relayResult := w.RelaySelector.Deliver(ctx, route, entry.FromAddress, []string{entry.ToAddress}, data)
+			w.RelaySelector.RecordAttemptResult(ctx, route.ProviderID, relayResult.Success)
+			result := &DeliveryResult{
+				Success: relayResult.Success, TempFail: relayResult.TempFail,
+				StatusMsg: relayResult.StatusMsg, RemoteHost: route.Host,
+			}
+			if result.Success || !result.TempFail {
+				return result
+			}
+			// Relay failed with a temp error — fall through to
+			// direct-to-MX rather than giving up on one provider's
+			// transient failure. (The selector's own fallback chain
+			// governs which PROVIDER Deliver dials; a temp failure
+			// after exhausting that chain still has direct delivery as
+			// a last resort here.)
+		}
+	}
+
 	mxRecords, err := w.Resolver.LookupMX(ctx, domain)
 	if err != nil {
 		return &DeliveryResult{StatusMsg: fmt.Sprintf("mx lookup: %v", err), TempFail: true}

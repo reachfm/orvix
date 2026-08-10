@@ -27,6 +27,7 @@ import (
 	"github.com/orvix/orvix/internal/licensing"
 	"github.com/orvix/orvix/internal/licensingauthority"
 	"github.com/orvix/orvix/internal/observability"
+	"github.com/orvix/orvix/internal/platform/relay"
 	"github.com/orvix/orvix/internal/policy"
 	"github.com/orvix/orvix/internal/ruler"
 	orvixruntime "github.com/orvix/orvix/internal/runtime"
@@ -461,6 +462,30 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 		}
 		transportCfg.TLSPolicy = parsed
 	}
+	// Outbound relay control plane (Milestone 7) — optional. A schema
+	// init failure disables relay routing for this run; every worker
+	// simply keeps its RelaySelector nil and delivers direct-to-MX
+	// exactly as before this integration existed.
+	relayRepo := relay.NewRepository(sqlDB)
+	var relayAdapter *relay.DeliveryAdapter
+	if err := relayRepo.EnsureSchema(context.Background()); err != nil {
+		if m.logger != nil {
+			m.logger.Warn("relay control plane schema init failed; outbound relay disabled", zap.Error(err))
+		}
+	} else {
+		relayAdapter = relay.NewDeliveryAdapter(relay.NewService(relayRepo, nil, nil))
+	}
+	tenantForRelay := func(entry *queue.QueueEntry) (uint, string) {
+		var tenantID uint
+		var mode string
+		row := sqlDB.QueryRowContext(context.Background(),
+			`SELECT m.tenant_id, COALESCE(d.mail_access_mode, 'internal_external')
+			 FROM coremail_mailboxes m JOIN coremail_domains d ON d.id = m.domain_id
+			 WHERE m.email = ?`, entry.FromAddress)
+		_ = row.Scan(&tenantID, &mode)
+		return tenantID, mode
+	}
+
 	m.workers = make([]*delivery.DeliveryWorker, 0, workerCount)
 	for i := 0; i < workerCount; i++ {
 		worker := delivery.NewDeliveryWorker(
@@ -473,6 +498,10 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 		)
 		worker.Observability = m.obs
 		worker.PreferIPv4 = cfg.Outbound.PreferIPv4
+		if relayAdapter != nil {
+			worker.RelaySelector = relayAdapter
+			worker.TenantIDForRelay = tenantForRelay
+		}
 		m.workers = append(m.workers, worker)
 	}
 

@@ -43,6 +43,7 @@ import (
 	"github.com/orvix/orvix/internal/modules"
 	"github.com/orvix/orvix/internal/observability"
 	"github.com/orvix/orvix/internal/platform/bulkprovision"
+	"github.com/orvix/orvix/internal/platform/relay"
 	"github.com/orvix/orvix/internal/ruler"
 	orvixruntime "github.com/orvix/orvix/internal/runtime"
 	settingsbridge "github.com/orvix/orvix/internal/settings/bridge"
@@ -226,6 +227,13 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 				logger.Warn("bulk provisioning schema init failed; service disabled", zap.Error(err))
 			} else {
 				router.h.SetBulkProvisionService(bulkprovision.NewService(bulkProvisionRepo, mailboxAdminSvc, domainAdminSvc, nil, nil, nil))
+			}
+
+			relayRepo := relay.NewRepository(sqlDB)
+			if err := relayRepo.EnsureSchema(context.Background()); err != nil {
+				logger.Warn("relay control plane schema init failed; service disabled", zap.Error(err))
+			} else {
+				router.h.SetRelayService(relay.NewService(relayRepo, nil, nil))
 			}
 
 			dashboardSvc := dashboardsvc.NewDashboardService(sqlDB)
@@ -1070,6 +1078,14 @@ func (r *Router) setupRoutes() {
 	canWriteMailboxes.Post("/mailboxes/bulk/jobs/:jobId/execute", r.h.PostBulkProvisionExecute)
 	canWriteMailboxes.Post("/mailboxes/bulk/jobs/:jobId/cancel", r.h.PostBulkProvisionCancel)
 	canWriteMailboxes.Post("/mailboxes/bulk/jobs/:jobId/retry", r.h.PostBulkProvisionRetry)
+
+	// ── Outbound relay control plane (Milestone 7) ──
+	canWriteDomains.Post("/relay/pools", r.h.PostRelayPool)
+	canWriteDomains.Post("/relay/providers", r.h.PostRelayProvider)
+	enterpriseRead.Get("/relay/pools/:id/providers", r.h.GetRelayPoolProviders)
+	canWriteDomains.Post("/relay/providers/:id/test", r.h.PostRelayProviderTest)
+	canWriteDomains.Post("/relay/routing-rules", r.h.PostRelayRoutingRule)
+	canWriteDomains.Post("/relay/emergency-override", r.h.PostRelayEmergencyOverride)
 
 	// ── Organizations ──
 	enterpriseRead.Get("/organizations/:id", r.h.GetOrganization)
