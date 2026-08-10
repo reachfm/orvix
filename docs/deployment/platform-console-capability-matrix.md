@@ -1,11 +1,13 @@
 # Platform Console Capability Matrix
 
 Complete audit of every route gated with `platformMW[0], platformMW[1]`
-in `internal/api/router.go` (126 route registrations, verified by
+in `internal/api/router.go` (128 route registrations, verified by
 `internal/api/capability_matrix_test.go` against the branch head this
 document was written against — updated for the Milestone 13-15 DR,
 retention, platform billing, and signed-update-artifact routes, plus
-three pre-existing queue routes found undocumented during that pass).
+three pre-existing queue routes found undocumented during that pass,
+plus the DR operation-history and platform-billing reconciliation
+routes added during the M13-15 re-audit gap-closure pass).
 Every disposition below reflects the actual handler and actual
 frontend consumer, not the route's name.
 
@@ -158,6 +160,7 @@ and `isCoreMailDisabled` (frontend).
 | `POST /dr/drills` | platformMW | `PostDRDrill` | records drill outcome, no restore performed | Platform | `internal/platform/dr` service tests | MISSING_UI |
 | `POST /dr/backup` | platformMW | `PostDRCoordinatedBackup` | durable-lease-coordinated backup over `backup.Service.CreateBackup` | Platform | `internal/platform/dr` service tests | MISSING_UI |
 | `POST /dr/backups/:id/restore` | platformMW | `PostDRCoordinatedRestore` | typed confirm `RESTORE-THIS-BACKUP`; submits to the same `restorecoord.Coordinator` as `POST /admin/backups/:id/restore` — no competing restart/rollback implementation | Platform | `internal/restorecoord` tests (shared coordinator) | MISSING_UI |
+| `GET /dr/operations` | platformMW | `GetDROperationHistory` | paginated `{operations: dr.Operation[], total, limit, offset}` — past coordinated backup/restore operations, newest first (distinct from the live single-job status below) | Platform | `internal/platform/dr` service tests, `internal/api/handlers` idempotency-replay test | MISSING_UI |
 | `GET /dr/operations/:job_id` | platformMW | `GetDROperationStatus` | reads the same `restorecoord` job result as `GET /admin/backups/restore-jobs/:job_id` | Platform | `internal/restorecoord` tests | MISSING_UI |
 
 ## Retention / Legal Hold / Purge (Milestone 14)
@@ -181,6 +184,7 @@ and `isCoreMailDisabled` (frontend).
 | `GET /platform/billing/tenants/:tenant_id/balance` | platformMW | `GetPlatformBillingBalance` | `platformbilling.Balance` | Platform | `internal/platform/billing` service tests | MISSING_UI |
 | `POST /platform/billing/tenants/:tenant_id/adjustments` | platformMW | `PostPlatformBillingAdjustment` | `platformbilling.Adjustment`, integer minor units + currency only, idempotency-key supported | Platform | `internal/platform/billing` service tests (incl. concurrent-idempotency-key test) | MISSING_UI |
 | `GET /platform/billing/tenants/:tenant_id/adjustments` | platformMW | `GetPlatformBillingAdjustments` | `{adjustments: platformbilling.Adjustment[]}` | Platform | `internal/platform/billing` service tests | MISSING_UI |
+| `GET /platform/billing/tenants/:tenant_id/reconciliation` | platformMW | `GetPlatformBillingReconciliation` | read-only `billing.ReconciliationReport` — recomputes the ledger balance from full adjustment history and reports any discrepancy against the maintained balance row; never auto-corrects (Milestone 13-15 re-audit gap fix) | Platform | `internal/api/handlers` idempotency-replay test | MISSING_UI |
 
 ## Signed Update Artifacts (Milestone 13)
 
@@ -219,7 +223,7 @@ above (not carried over from an earlier draft) and is enforced equal
 to the router's actual route set by
 `internal/api/capability_matrix_test.go`, which parses
 `platformMW[0], platformMW[1]` registrations straight out of
-`router.go` — currently 100 — and parses every `` `METHOD /path` ``
+`router.go` — currently 128 — and parses every `` `METHOD /path` ``
 occurrence and its row's disposition straight out of this document.
 
 | Disposition | Routes |
@@ -229,9 +233,9 @@ occurrence and its row's disposition straight out of this document.
 | MACHINE_ONLY | 3 |
 | DEPRECATED | 12 |
 | DUPLICATE_SUPERSEDED_ROUTE | 18 |
-| MISSING_UI | 29 |
+| MISSING_UI | 31 |
 | MISSING_BACKEND | 0 (the one MISSING_BACKEND case — platform-initiated organization creation — is a non-route documented under Organizations, not counted here) |
-| **Total** | **126** |
+| **Total** | **128** |
 
 Three pre-existing MISSING_UI gaps were documented rather than
 silently omitted: `GET /admin/backups/:id` (single-backup fetch; the

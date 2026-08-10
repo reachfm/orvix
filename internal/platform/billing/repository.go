@@ -120,6 +120,21 @@ func (r *Repository) ListAdjustments(ctx context.Context, tenantID uint, limit i
 	return out, rows.Err()
 }
 
+// SumAdjustments independently totals every credit and debit ever
+// recorded for a tenant, straight from the adjustment ledger — used
+// by reconciliation to recompute what the balance SHOULD be without
+// trusting the incrementally-maintained platform_billing_balances
+// row, so a reconciliation report actually catches drift instead of
+// just re-reading the same value it is supposed to be checking.
+func (r *Repository) SumAdjustments(ctx context.Context, tenantID uint) (creditCents, debitCents int64, err error) {
+	row := r.db.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(CASE WHEN type='credit' THEN amount_cents ELSE 0 END),0),
+		       COALESCE(SUM(CASE WHEN type='debit' THEN amount_cents ELSE 0 END),0)
+		FROM platform_billing_adjustments WHERE tenant_id=`+r.dialect.Placeholder(1), tenantID)
+	err = row.Scan(&creditCents, &debitCents)
+	return
+}
+
 func (r *Repository) GetBalance(ctx context.Context, tx *sql.Tx, tenantID uint) (*Balance, error) {
 	q := `SELECT tenant_id, currency, balance_cents, version, updated_at FROM platform_billing_balances WHERE tenant_id=` + r.dialect.Placeholder(1)
 	var row *sql.Row

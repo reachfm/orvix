@@ -157,7 +157,8 @@ func (h *Handler) PostDRCoordinatedBackup(c fiber.Ctx) error {
 	}
 	_ = c.Bind().JSON(&req)
 	actorID, _ := c.Locals("user_id").(uint)
-	id, err := svc.CoordinatedBackup(c.Context(), req.Name, actorID)
+	idemKey := strings.TrimSpace(c.Get("Idempotency-Key"))
+	id, err := svc.CoordinatedBackup(c.Context(), req.Name, idemKey, actorID)
 	if err != nil {
 		if err == dr.ErrOperationInProgress {
 			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": err.Error()})
@@ -272,6 +273,7 @@ func (h *Handler) PostDRCoordinatedRestore(c fiber.Ctx) error {
 	// the durable lease held by restorecoord itself (single source of
 	// truth for "is a restore active" stays restorecoord.Coordinator).
 	h.writeAuditLog(c, "dr.restore.coordinated_submit", fmt.Sprintf("backup_id:%s|job_id:%s|reason:%s|idempotency_key:%s", id, job.ID, req.Reason, idemKey))
+	drSvc.RecordRestoreOperation(c.Context(), job.ID, idemKey, actorID)
 
 	readiness, _ := drSvc.Readiness(c.Context())
 
@@ -303,4 +305,27 @@ func (h *Handler) GetDROperationStatus(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to read dr operation status"})
 	}
 	return c.JSON(res)
+}
+
+// GetDROperationHistory lists past coordinated backup/restore
+// operations, newest first, with pagination — distinct from
+// GetDROperationStatus, which reads the live status of a single
+// restorecoord job by ID. Query params: limit (default 50, max 500),
+// offset (default 0).
+func (h *Handler) GetDROperationHistory(c fiber.Ctx) error {
+	svc, err := h.drService()
+	if err != nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": err.Error()})
+	}
+	limit, _ := strconv.Atoi(c.Query("limit", "50"))
+	offset, _ := strconv.Atoi(c.Query("offset", "0"))
+	ops, total, err := svc.ListOperations(c.Context(), limit, offset)
+	if err != nil {
+		h.logger.Error("dr operation history failed", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list dr operations"})
+	}
+	if ops == nil {
+		ops = []dr.Operation{}
+	}
+	return c.JSON(fiber.Map{"operations": ops, "total": total, "limit": limit, "offset": offset})
 }

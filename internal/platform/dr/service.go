@@ -88,10 +88,35 @@ func (s *Service) resourceLock(key string) *sync.Mutex {
 // concurrent caller (another admin request, or in a multi-node
 // deployment another node) gets a clean typed rejection instead of
 // racing the first operation.
-func (s *Service) CoordinatedBackup(ctx context.Context, name string, actorID uint) (string, error) {
+//
+// It is also idempotent on the caller-supplied idempotencyKey: the
+// lease alone is not sufficient to make a RETRY safe, because the
+// lease is released (by this call returning) once the first backup
+// completes — a naive retry after that point would race past the
+// lease check and create a second backup. Recording each completed
+// operation keyed by (op_type, idempotency_key) and checking it
+// before acquiring the lease closes that gap the same way
+// retention.ExecutePurge and billing.ApplyAdjustment are already
+// idempotent.
+func (s *Service) CoordinatedBackup(ctx context.Context, name, idempotencyKey string, actorID uint) (string, error) {
+	if idempotencyKey != "" {
+		if existing, err := s.repo.FindOperationByIdempotencyKey(ctx, OperationBackup, idempotencyKey); err == nil && existing != nil {
+			return existing.RefID, nil
+		}
+	}
+
 	lock := s.resourceLock(BackupLeaseResource)
 	lock.Lock()
 	defer lock.Unlock()
+
+	// Re-check inside the lock: two concurrent requests with the same
+	// idempotency key racing past the outer check must still only
+	// perform the backup once.
+	if idempotencyKey != "" {
+		if existing, err := s.repo.FindOperationByIdempotencyKey(ctx, OperationBackup, idempotencyKey); err == nil && existing != nil {
+			return existing.RefID, nil
+		}
+	}
 
 	holder, err := s.leases.AcquireLease(ctx, BackupLeaseResource, s.nodeID, 10*time.Minute)
 	if err != nil || holder != s.nodeID {
@@ -101,6 +126,12 @@ func (s *Service) CoordinatedBackup(ctx context.Context, name string, actorID ui
 	if err != nil {
 		return "", kernel.Wrap(kernel.ErrCodeInternal, "coordinated backup", err)
 	}
+	if err := s.repo.RecordOperation(ctx, &Operation{Type: OperationBackup, RefID: id, Status: "completed", IdempotencyKey: idempotencyKey, ActorID: actorID, CreatedAt: s.clock.Now()}); err != nil {
+		// The backup itself succeeded; failing to persist the history
+		// row must not fail the request (and re-recording a duplicate
+		// history row on a genuinely-retried request without an
+		// idempotency key is expected behavior, not a bug).
+	}
 	if s.audit != nil {
 		_ = s.audit.Record(ctx, &audit.ExtendedEntry{Action: "dr.backup.create", ActorID: actorID, Result: "success", After: id})
 	}
@@ -108,6 +139,21 @@ func (s *Service) CoordinatedBackup(ctx context.Context, name string, actorID ui
 		_ = s.outbox.Enqueue(ctx, s.repo.db, "dr.backup.completed", id, map[string]any{"name": name}, s.clock.Now())
 	}
 	return id, nil
+}
+
+// RecordRestoreOperation logs a submitted coordinated-restore job in
+// the DR operation history — called by the handler after
+// restorecoord.Coordinator.Submit accepts the job, so ListOperations
+// reflects restores too (their live status stays tracked by
+// restorecoord itself; this is history/audit only).
+func (s *Service) RecordRestoreOperation(ctx context.Context, jobID, idempotencyKey string, actorID uint) {
+	_ = s.repo.RecordOperation(ctx, &Operation{Type: OperationRestore, RefID: jobID, Status: "submitted", IdempotencyKey: idempotencyKey, ActorID: actorID, CreatedAt: s.clock.Now()})
+}
+
+// ListOperations returns past coordinated backup/restore operations,
+// newest first, with pagination.
+func (s *Service) ListOperations(ctx context.Context, limit, offset int) ([]Operation, int, error) {
+	return s.repo.ListOperations(ctx, limit, offset)
 }
 
 // CoordinatedRestore requires the exact typed confirmation phrase

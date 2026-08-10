@@ -111,3 +111,42 @@ func (s *Service) ListAdjustments(ctx context.Context, tenantID uint, limit int)
 	}
 	return out, nil
 }
+
+// Reconcile is the minimal financial-reconciliation report for a
+// tenant's platform-billing ledger: it independently recomputes the
+// balance from the full adjustment history (SumAdjustments) and
+// compares it against the incrementally-maintained Balance row,
+// reporting any discrepancy rather than assuming the two always
+// agree. This is a read-only report — it never corrects a
+// discrepancy itself; a genuine mismatch is an operator/incident
+// matter (apply a new, reasoned, audited adjustment via
+// ApplyAdjustment), not something this endpoint silently patches.
+func (s *Service) Reconcile(ctx context.Context, tenantID uint) (*ReconciliationReport, error) {
+	bal, err := s.repo.GetBalance(ctx, nil, tenantID)
+	if err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "reconcile: get balance", err)
+	}
+	credits, debits, err := s.repo.SumAdjustments(ctx, tenantID)
+	if err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "reconcile: sum adjustments", err)
+	}
+	recomputed := credits - debits
+	var stored int64
+	currency := ""
+	if bal != nil {
+		stored = bal.BalanceCents
+		currency = bal.Currency
+	}
+	disc := stored - recomputed
+	return &ReconciliationReport{
+		TenantID:               tenantID,
+		Currency:               currency,
+		StoredBalanceCents:     stored,
+		RecomputedBalanceCents: recomputed,
+		TotalCreditsCents:      credits,
+		TotalDebitsCents:       debits,
+		DiscrepancyCents:       disc,
+		Discrepant:             disc != 0,
+		GeneratedAt:            s.clock.Now(),
+	}, nil
+}

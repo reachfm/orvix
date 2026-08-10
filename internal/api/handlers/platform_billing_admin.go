@@ -96,6 +96,29 @@ func (h *Handler) GetPlatformBillingAdjustments(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"adjustments": adjustments})
 }
 
+// GetPlatformBillingReconciliation is the minimal financial
+// reconciliation report (Milestone 15 re-audit gap): it recomputes a
+// tenant's ledger balance directly from the full adjustment history
+// and reports any discrepancy against the maintained balance row —
+// read-only, never auto-corrects. A genuine discrepancy is surfaced
+// for an operator to investigate and correct via a new, reasoned
+// adjustment, not silently patched by this endpoint.
+func (h *Handler) GetPlatformBillingReconciliation(c fiber.Ctx) error {
+	if h.platformBillSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "platform billing service not available"})
+	}
+	tenantID, err := parseUintParam(c, "tenant_id")
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid tenant id"})
+	}
+	report, err := h.platformBillSvc.Reconcile(c.Context(), tenantID)
+	if err != nil {
+		h.logger.Error("platform billing reconciliation failed", zap.Uint("tenant_id", tenantID), zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to reconcile tenant ledger"})
+	}
+	return c.JSON(report)
+}
+
 func parseUintParam(c fiber.Ctx, name string) (uint, error) {
 	v, err := strconv.ParseUint(c.Params(name), 10, 64)
 	if err != nil || v == 0 {

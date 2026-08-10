@@ -54,3 +54,22 @@ type Balance struct {
 	Version      int       `json:"version"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
+
+// ReconciliationReport recomputes a tenant's ledger balance directly
+// from the adjustment history and compares it against the
+// incrementally-maintained Balance row — the check a real "financial
+// reconciliation" endpoint exists to make. Discrepant is true when
+// the two disagree, which (given ApplyDelta's single-UPDATE atomicity
+// and ApplyAdjustment's idempotency) should never happen in normal
+// operation; the report surfaces it rather than assuming it can't.
+type ReconciliationReport struct {
+	TenantID               uint      `json:"tenant_id"`
+	Currency               string    `json:"currency"`
+	StoredBalanceCents     int64     `json:"stored_balance_cents"`
+	RecomputedBalanceCents int64     `json:"recomputed_balance_cents"`
+	TotalCreditsCents      int64     `json:"total_credits_cents"`
+	TotalDebitsCents       int64     `json:"total_debits_cents"`
+	DiscrepancyCents       int64     `json:"discrepancy_cents"`
+	Discrepant             bool      `json:"discrepant"`
+	GeneratedAt            time.Time `json:"generated_at"`
+}

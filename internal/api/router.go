@@ -608,6 +608,14 @@ func (r *Router) SetTrustPersistence(ok bool, errMsg string) {
 	r.h.SetTrustPersistence(ok, errMsg)
 }
 
+// SetClusterService wires the cluster node registry service into the
+// router's handler for test setups where the coremail runtime module
+// (which normally self-enrolls and wires this) is not available —
+// mirrors SetQueueEngine/SetTrustService above.
+func (r *Router) SetClusterService(s *cluster.Service) {
+	r.h.SetClusterService(s)
+}
+
 func (r *Router) App() *fiber.App { return r.app }
 
 // Start begins background services (billing scheduler, etc).
@@ -1529,6 +1537,7 @@ func (r *Router) setupRoutes() {
 	protected.Post("/dr/drills", platformMW[0], platformMW[1], r.h.PostDRDrill)
 	protected.Post("/dr/backup", platformMW[0], platformMW[1], r.h.PostDRCoordinatedBackup)
 	protected.Post("/dr/backups/:id/restore", platformMW[0], platformMW[1], r.h.PostDRCoordinatedRestore)
+	protected.Get("/dr/operations", platformMW[0], platformMW[1], r.h.GetDROperationHistory)
 	protected.Get("/dr/operations/:job_id", platformMW[0], platformMW[1], r.h.GetDROperationStatus)
 
 	// ── Retention / legal hold / purge (Milestone 14) ──────────────
@@ -1557,6 +1566,7 @@ func (r *Router) setupRoutes() {
 	protected.Get("/platform/billing/tenants/:tenant_id/balance", platformMW[0], platformMW[1], r.h.GetPlatformBillingBalance)
 	protected.Post("/platform/billing/tenants/:tenant_id/adjustments", platformMW[0], platformMW[1], r.h.PostPlatformBillingAdjustment)
 	protected.Get("/platform/billing/tenants/:tenant_id/adjustments", platformMW[0], platformMW[1], r.h.GetPlatformBillingAdjustments)
+	protected.Get("/platform/billing/tenants/:tenant_id/reconciliation", platformMW[0], platformMW[1], r.h.GetPlatformBillingReconciliation)
 
 	// Monitoring v1: resolve an alert (CSRF-protected, admin role).
 	protected.Post("/monitoring/alerts/:id/resolve", platformMW[0], platformMW[1], r.h.PostMonitoringAlertResolve)

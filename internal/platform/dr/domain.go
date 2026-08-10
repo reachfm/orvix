@@ -55,6 +55,29 @@ type Drill struct {
 	StartedAt     time.Time    `json:"started_at"`
 }
 
+// OperationType distinguishes coordinated-backup from
+// coordinated-restore rows in the DR operation history.
+type OperationType string
+
+const (
+	OperationBackup  OperationType = "backup"
+	OperationRestore OperationType = "restore"
+)
+
+// Operation is one historical coordinated DR operation (backup or
+// restore), recorded so GetDROperationHistory can report past
+// operations with pagination — distinct from GetDROperationStatus,
+// which reads the LIVE status of a single restorecoord job by ID.
+type Operation struct {
+	ID             uint          `json:"id"`
+	Type           OperationType `json:"type"`
+	RefID          string        `json:"ref_id"` // backup ID for OperationBackup, restorecoord job ID for OperationRestore
+	Status         string        `json:"status"` // "completed" for backup (synchronous), "submitted" for restore (async, poll ref_id via GetDROperationStatus)
+	IdempotencyKey string        `json:"idempotency_key,omitempty"`
+	ActorID        uint          `json:"actor_id"`
+	CreatedAt      time.Time     `json:"created_at"`
+}
+
 // Readiness summarizes DR posture from real evidence: the most recent
 // verified backup (RPO proxy — how much data could be lost) and the
 // most recent successful drill (RTO proxy — proven restore capability

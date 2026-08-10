@@ -223,7 +223,22 @@ func (h *Handler) PostRetentionRecoverMailbox(c fiber.Ctx) error {
 }
 
 // ── Chain of custody ──────────────────────────────────────────────
-
+//
+// M13-15 re-audit note (Gap 2b): no original spec text mandating a
+// durable async "search/export job" pattern for retention/compliance
+// was found anywhere in this repo (git log, commit bodies, or docs) —
+// the only compliance-adjacent capability actually promised anywhere
+// is chain-of-custody evidence (who/what/when/hash for every
+// hold/purge/export/recover operation, see ChainOfCustodyEvent in
+// domain.go). GetRetentionCustody below already serves that as a
+// real, paginated, synchronous listing. A synchronous paginated GET
+// is the right shape for this: chain-of-custody rows are small,
+// bounded, already-computed metadata (not a heavyweight report that
+// needs background computation), so there is no async-job problem to
+// solve here. Concluding this is NOT a gap — adding a fake "job"
+// wrapper around an already-cheap synchronous list would be scope
+// padding, not a fix.
+//
 // GetRetentionCustody returns chain-of-custody evidence records for a
 // scope — IDs/metadata/hashes only, never message bodies or other
 // sensitive content (ChainOfCustodyEvent carries no such field).

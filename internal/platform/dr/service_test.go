@@ -78,12 +78,44 @@ func newTestService(t *testing.T, nodeID string, leases *fakeLeases, backups *fa
 
 func TestCoordinatedBackup_Succeeds(t *testing.T) {
 	_, svc := newTestService(t, "node-a", newFakeLeases(), &fakeBackups{})
-	id, err := svc.CoordinatedBackup(context.Background(), "nightly", 1)
+	id, err := svc.CoordinatedBackup(context.Background(), "nightly", "", 1)
 	if err != nil {
 		t.Fatalf("backup: %v", err)
 	}
 	if id == "" {
 		t.Fatal("expected a non-empty backup id")
+	}
+}
+
+// TestCoordinatedBackup_IdempotentOnRetryKey proves a retried request
+// with the same idempotency key returns the original backup ID
+// without creating a second backup — closing the gap where the lease
+// alone permitted a same-node retry after completion to double-run.
+func TestCoordinatedBackup_IdempotentOnRetryKey(t *testing.T) {
+	backups := &fakeBackups{}
+	_, svc := newTestService(t, "node-a", newFakeLeases(), backups)
+
+	id1, err := svc.CoordinatedBackup(context.Background(), "nightly", "retry-key-1", 1)
+	if err != nil {
+		t.Fatalf("first backup: %v", err)
+	}
+	id2, err := svc.CoordinatedBackup(context.Background(), "nightly", "retry-key-1", 1)
+	if err != nil {
+		t.Fatalf("second backup: %v", err)
+	}
+	if id1 != id2 {
+		t.Fatalf("expected same backup id on retry, got %q then %q", id1, id2)
+	}
+	if backups.callCount != 1 {
+		t.Fatalf("expected exactly one CreateBackup call, got %d", backups.callCount)
+	}
+
+	ops, total, err := svc.ListOperations(context.Background(), 50, 0)
+	if err != nil {
+		t.Fatalf("list operations: %v", err)
+	}
+	if total != 1 || len(ops) != 1 {
+		t.Fatalf("expected exactly one recorded operation, got total=%d len=%d", total, len(ops))
 	}
 }
 
@@ -113,7 +145,7 @@ func TestCoordinatedBackup_TwoDifferentNodesRacingOnlyOneWins(t *testing.T) {
 			if i%2 == 0 {
 				svc = svc2
 			}
-			_, err := svc.CoordinatedBackup(context.Background(), "concurrent", 1)
+			_, err := svc.CoordinatedBackup(context.Background(), "concurrent", "", 1)
 			results[i] = err
 		}(i)
 	}
@@ -151,7 +183,7 @@ func TestCoordinatedBackup_SameNodeConcurrentCallsAreSerialized(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			svc.CoordinatedBackup(context.Background(), "serialized", 1)
+			svc.CoordinatedBackup(context.Background(), "serialized", "", 1)
 		}()
 	}
 	wg.Wait()
