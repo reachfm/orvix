@@ -38,7 +38,7 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 			active INTEGER NOT NULL DEFAULT 1, suspended INTEGER NOT NULL DEFAULT 0,
 			version INTEGER NOT NULL DEFAULT 1, failure_count INTEGER NOT NULL DEFAULT 0,
 			created_at ` + ts + ` NOT NULL, updated_at ` + ts + ` NOT NULL, deleted_at ` + ts + `)`,
-		`CREATE TABLE IF NOT EXISTS webhook_events (
+		`CREATE TABLE IF NOT EXISTS webhook_outbox_events (
 			id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL, event_type TEXT NOT NULL,
 			schema_version INTEGER NOT NULL, occurred_at ` + ts + ` NOT NULL,
 			payload TEXT NOT NULL, created_at ` + ts + ` NOT NULL)`,
@@ -90,7 +90,7 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 		}
 	}
 	indexes := []string{
-		`CREATE INDEX IF NOT EXISTS idx_webhook_events_tenant_type ON webhook_events(tenant_id,event_type,occurred_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_webhook_outbox_events_tenant_type ON webhook_outbox_events(tenant_id,event_type,occurred_at)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_webhook_delivery_identity ON webhook_deliveries(event_id,subscription_id,replay_key)`,
 		`CREATE INDEX IF NOT EXISTS idx_webhook_delivery_due ON webhook_deliveries(status,next_attempt_at,lease_until)`,
 		`CREATE INDEX IF NOT EXISTS idx_webhook_attempt_delivery ON webhook_delivery_attempts(delivery_id,attempt_number)`,
@@ -263,9 +263,9 @@ func (r *Repository) ListSubscriptions(ctx context.Context, tenantID uint, scope
 }
 
 func (r *Repository) InsertEventAndFanoutTx(ctx context.Context, tx *sql.Tx, event Event) (bool, error) {
-	query := `INSERT OR IGNORE INTO webhook_events (id,tenant_id,event_type,schema_version,occurred_at,payload,created_at) VALUES (?,?,?,?,?,?,?)`
+	query := `INSERT OR IGNORE INTO webhook_outbox_events (id,tenant_id,event_type,schema_version,occurred_at,payload,created_at) VALUES (?,?,?,?,?,?,?)`
 	if r.dialect.IsPostgres() {
-		query = `INSERT INTO webhook_events (id,tenant_id,event_type,schema_version,occurred_at,payload,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(id) DO NOTHING`
+		query = `INSERT INTO webhook_outbox_events (id,tenant_id,event_type,schema_version,occurred_at,payload,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(id) DO NOTHING`
 	}
 	res, err := tx.ExecContext(ctx, query, event.ID, event.TenantID, event.Type, event.SchemaVersion, event.OccurredAt, string(event.Payload), time.Now().UTC())
 	if err != nil {
@@ -318,7 +318,7 @@ func (r *Repository) InsertEventAndFanoutTx(ctx context.Context, tx *sql.Tx, eve
 func (r *Repository) GetEvent(ctx context.Context, id string) (*Event, error) {
 	var e Event
 	var payload string
-	err := r.db.QueryRowContext(ctx, r.q(`SELECT id,tenant_id,event_type,schema_version,occurred_at,payload FROM webhook_events WHERE id=?`), id).Scan(&e.ID, &e.TenantID, &e.Type, &e.SchemaVersion, &e.OccurredAt, &payload)
+	err := r.db.QueryRowContext(ctx, r.q(`SELECT id,tenant_id,event_type,schema_version,occurred_at,payload FROM webhook_outbox_events WHERE id=?`), id).Scan(&e.ID, &e.TenantID, &e.Type, &e.SchemaVersion, &e.OccurredAt, &payload)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}

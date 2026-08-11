@@ -218,6 +218,26 @@ and `isCoreMailDisabled` (frontend).
 | `GET /platform/config/:key` | platformMW | `GetConfigurationSetting` | get authoritative view of one setting | Platform | `internal/configtruth/` | MISSING_UI |
 | `PATCH /platform/config/:key` | platformMW | `MutateConfigurationSetting` | validate and apply a configuration mutation with optimistic concurrency | Platform | `internal/configtruth/` | MISSING_UI |
 
+## Imports (Milestone 16, Phase 4B)
+
+Bulk tenant provisioning via staged CSV/JSON sources. All nine routes
+are backend-only in this pass (no console UI consumer yet): the
+importer is driven through the API and the `orvix` CLI. The full
+import lifecycle is covered by `internal/platform/importer`
+service/worker tests and `internal/api/handlers/import_route_acceptance_test.go`
+(tenant isolation, RBAC, CSRF, confirmation strings, idempotency,
+hash verification, safe-field updates, compensation).
+
+| `GET /platform/imports` | platformMW | `ListImports` | paginated/filtered import history, tenant-scoped | Platform | `internal/api/handlers/import_route_acceptance_test.go`, `internal/platform/importer/` | MISSING_UI |
+| `GET /platform/imports/:id` | platformMW | `GetImport` | import job detail without staging/lease/idempotency internals | Platform | `internal/api/handlers/import_route_acceptance_test.go`, `internal/platform/importer/` | MISSING_UI |
+| `GET /platform/imports/:id/report` | platformMW | `GetImportReport` | dry-run validation report with before/after diffs and redacted secrets | Platform | `internal/api/handlers/import_route_acceptance_test.go`, `internal/platform/importer/` | MISSING_UI |
+| `POST /platform/imports` | platformMW | `CreateImport` | stage a new import source (SHA-256 verified at every later read) | Platform | `internal/api/handlers/import_route_acceptance_test.go`, `internal/platform/importer/` | MISSING_UI |
+| `POST /platform/imports/:id/validate` | platformMW | `ValidateImport` | dry-run validation with zero mutations | Platform | `internal/api/handlers/import_route_acceptance_test.go`, `internal/platform/importer/` | MISSING_UI |
+| `POST /platform/imports/:id/execute` | platformMW | `ExecuteImport` | durable queued-activation handoff; requires `Idempotency-Key` and exact confirmation `EXECUTE-IMPORT-<id>` | Platform | `internal/api/handlers/import_route_acceptance_test.go`, `internal/platform/importer/` | MISSING_UI |
+| `POST /platform/imports/:id/resume` | platformMW | `ResumeImport` | idempotent resume of a paused/failed import; requires `Idempotency-Key` | Platform | `internal/api/handlers/import_route_acceptance_test.go`, `internal/platform/importer/` | MISSING_UI |
+| `POST /platform/imports/:id/cancel` | platformMW | `CancelImport` | cancel a running/paused import | Platform | `internal/api/handlers/import_route_acceptance_test.go`, `internal/platform/importer/` | MISSING_UI |
+| `POST /platform/imports/:id/compensate` | platformMW | `CompensateImport` | reverse the import's own mutations only; requires `Idempotency-Key` and exact confirmation `COMPENSATE-IMPORT-<id>`; refuses to overwrite human changes | Platform | `internal/api/handlers/import_route_acceptance_test.go`, `internal/platform/importer/` | MISSING_UI |
+
 ## Theme system (cross-cutting, not a route)
 
 Verified by `web/admin/src/shared/theme/{theme,useTheme}.test.ts`,
@@ -245,7 +265,7 @@ above (not carried over from an earlier draft) and is enforced equal
 to the router's actual route set by
 `internal/api/capability_matrix_test.go`, which parses
 `platformMW[0], platformMW[1]` registrations straight out of
-`router.go` — currently 152 — and parses every `` `METHOD /path` ``
+`router.go` — currently 159 — and parses every `` `METHOD /path` ``
 occurrence and its row's disposition straight out of this document.
 
 | Disposition | Routes |
@@ -255,9 +275,9 @@ occurrence and its row's disposition straight out of this document.
 | MACHINE_ONLY | 3 |
 | DEPRECATED | 12 |
 | DUPLICATE_SUPERSEDED_ROUTE | 18 |
-| MISSING_UI | 53 |
+| MISSING_UI | 62 |
 | MISSING_BACKEND | 0 (the one MISSING_BACKEND case — platform-initiated organization creation — is a non-route documented under Organizations, not counted here) |
-| **Total** | **150** |
+| **Total** | **159** |
 
 Three pre-existing MISSING_UI gaps were documented rather than
 silently omitted: `GET /admin/backups/:id` (single-backup fetch; the
@@ -271,7 +291,10 @@ three pre-existing queue routes (`/admin/queue/history`,
 undocumented, and 23 new backend-only routes for DR coordination,
 retention/legal-hold/purge, platform billing balances/adjustments, and
 signed update-artifact staging — all thin handlers over already-tested
-service layers, with no console UI built for them in this pass.
+service layers, with no console UI built for them in this pass. The
+Milestone 16 pass adds 9 more MISSING_UI rows for the platform import
+routes (bulk tenant provisioning via the durable importer), also
+backend-only and driven through the API and CLI.
 
 DEPRECATED is 12, not 11, because `POST /firewall/rules` moved from
 UI_SUPPORTED to DEPRECATED / NOT_OPERATIONAL in this pass (see
