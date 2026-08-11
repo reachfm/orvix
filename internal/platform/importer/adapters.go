@@ -12,21 +12,25 @@ import (
 type OrganizationPort interface {
 	CreateOrganization(ctx context.Context, name, domain string, tenantID uint) (uint, error)
 	SoftDeleteOrganization(ctx context.Context, id, tenantID uint) error
+	UpdateOrganization(ctx context.Context, id, tenantID uint, safeFields map[string]any) error
 }
 
 type TenantAdminPort interface {
 	CreateTenantAdmin(ctx context.Context, email, name, password, role string, tenantID uint) (uint, error)
 	SoftDeleteUser(ctx context.Context, id, tenantID uint) error
+	UpdateTenantAdmin(ctx context.Context, id, tenantID uint, safeFields map[string]any) error
 }
 
 type DomainPort interface {
 	CreateDomain(ctx context.Context, name string, tenantID uint) (uint, error)
 	SoftDeleteDomain(ctx context.Context, id, tenantID uint) error
+	UpdateDomain(ctx context.Context, id, tenantID uint, safeFields map[string]any) error
 }
 
 type MailboxPort interface {
 	CreateMailbox(ctx context.Context, email, name, password, domainName string, tenantID uint) (uint, error)
 	SoftDeleteMailbox(ctx context.Context, id, tenantID uint) error
+	UpdateMailbox(ctx context.Context, id, tenantID uint, safeFields map[string]any) error
 }
 
 type AliasPort interface {
@@ -39,6 +43,7 @@ type GroupPort interface {
 	AddGroupMember(ctx context.Context, groupName, email string, tenantID uint) error
 	SoftDeleteGroup(ctx context.Context, id, tenantID uint) error
 	RemoveGroupMember(ctx context.Context, memberID, tenantID uint) error
+	UpdateGroup(ctx context.Context, id, tenantID uint, safeFields map[string]any) error
 }
 
 type Compensator interface {
@@ -49,6 +54,11 @@ type Compensator interface {
 	SoftDeleteAlias(ctx context.Context, id, tenantID uint) error
 	SoftDeleteGroup(ctx context.Context, id, tenantID uint) error
 	RemoveGroupMember(ctx context.Context, memberID, tenantID uint) error
+	RestoreOrganization(ctx context.Context, id, tenantID uint, fields map[string]any) error
+	RestoreTenantAdmin(ctx context.Context, id, tenantID uint, fields map[string]any) error
+	RestoreDomain(ctx context.Context, id, tenantID uint, fields map[string]any) error
+	RestoreMailbox(ctx context.Context, id, tenantID uint, fields map[string]any) error
+	RestoreGroup(ctx context.Context, id, tenantID uint, fields map[string]any) error
 }
 
 // Adapters is a pure port registry. Every port is required at construction

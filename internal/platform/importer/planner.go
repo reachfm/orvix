@@ -16,6 +16,12 @@ type EntityLookup interface {
 	UserExists(ctx context.Context, email string) (bool, error)
 	DomainExists(ctx context.Context, name string) (bool, uint, error)
 	MailboxExists(ctx context.Context, email string) (bool, error)
+
+	GetOrg(ctx context.Context, domain string, tenantID uint) (*EntityInfo, error)
+	GetUser(ctx context.Context, email string) (*EntityInfo, error)
+	GetDomain(ctx context.Context, name string) (*EntityInfo, error)
+	GetMailbox(ctx context.Context, email string) (*EntityInfo, error)
+	GetGroup(ctx context.Context, name string, tenantID uint) (*EntityInfo, error)
 }
 
 func NewPlanner(lookup EntityLookup, tenantID uint, adapters *Adapters) *Planner {
@@ -46,11 +52,21 @@ func (p *Planner) DryRun(ctx context.Context, source *ParsedSource, conflict Con
 			report.Invalid++
 		case RowConflict:
 			report.Conflict++
+		case RowUpdated:
+			report.Updated++
 		case RowDeferred:
 			report.Deferred++
 		case RowSkipped:
 			report.Unchanged++
 		}
+	}
+
+	// Redact any secret-like field values before persisting the report so a
+	// dry-run diff never leaks credentials.
+	for i := range rows {
+		rows[i].SafeData = RedactSensitive(rows[i].SafeData)
+		rows[i].BeforeImage = RedactSensitive(rows[i].BeforeImage)
+		rows[i].AfterImage = RedactSensitive(rows[i].AfterImage)
 	}
 
 	report.Rows = reorderByDependency(rows)

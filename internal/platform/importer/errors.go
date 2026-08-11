@@ -26,6 +26,7 @@ const (
 	CodePlatformRoleInj     ErrorCode = "PLATFORM_ROLE_INJECTION"
 	CodeQuotaExceeded       ErrorCode = "QUOTA_EXCEEDED"
 	CodeInvalidField        ErrorCode = "INVALID_FIELD"
+	CodeForbiddenField      ErrorCode = "FORBIDDEN_FIELD"
 	CodeExecutionFailed     ErrorCode = "EXECUTION_FAILED"
 	CodeCompensationFailed  ErrorCode = "COMPENSATION_FAILED"
 	CodeModifiedAfterImport ErrorCode = "MODIFIED_AFTER_IMPORT"

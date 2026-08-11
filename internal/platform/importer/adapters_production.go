@@ -14,6 +14,7 @@ import (
 	"github.com/orvix/orvix/internal/coremail"
 	"github.com/orvix/orvix/internal/coremail/dkim"
 	"github.com/orvix/orvix/internal/dbdialect"
+	"github.com/orvix/orvix/internal/platform/kernel"
 )
 
 // ProductionAdapterDeps carries the real business services the production
@@ -81,6 +82,24 @@ func (a *prodOrgAdapter) SoftDeleteOrganization(ctx context.Context, id, tenantI
 	return a.svc.SetOrganizationActive(ctx, id, false, "import compensation")
 }
 
+func (a *prodOrgAdapter) UpdateOrganization(ctx context.Context, id, tenantID uint, safeFields map[string]any) error {
+	req := organization.UpdateOrganizationRequest{}
+	if v, ok := safeFields["name"]; ok {
+		s := v.(string)
+		req.Name = &s
+	}
+	if v, ok := safeFields["logo_url"]; ok {
+		s := v.(string)
+		req.LogoURL = &s
+	}
+	if v, ok := safeFields["primary_color"]; ok {
+		s := v.(string)
+		req.PrimaryColor = &s
+	}
+	_, err := a.svc.UpdateOrganization(ctx, id, req)
+	return err
+}
+
 // ── Tenant admin / user ───────────────────────────────────────────────
 
 // prodAdminAdapter persists tenant-admin user rows through the real users
@@ -107,6 +126,18 @@ func (a *prodAdminAdapter) SoftDeleteUser(ctx context.Context, id, tenantID uint
 	return err
 }
 
+func (a *prodAdminAdapter) UpdateTenantAdmin(ctx context.Context, id, tenantID uint, safeFields map[string]any) error {
+	if v, ok := safeFields["name"]; ok {
+		s := v.(string)
+		res, err := a.db.ExecContext(ctx, a.dialect.Rewrite(`UPDATE users SET full_name=?, updated_at=? WHERE id=? AND tenant_id=? AND deleted_at IS NULL`), s, timeNow(), id, tenantID)
+		if err != nil {
+			return err
+		}
+		return kernel.CheckExistenceUpdate(res, "tenant admin")
+	}
+	return nil
+}
+
 // ── Domain ────────────────────────────────────────────────────────────
 
 type prodDomainAdapter struct{ svc *domain.Service }
@@ -123,6 +154,16 @@ func (a *prodDomainAdapter) SoftDeleteDomain(ctx context.Context, id, tenantID u
 	return a.svc.DeleteDomain(ctx, id, tenantID)
 }
 
+func (a *prodDomainAdapter) UpdateDomain(ctx context.Context, id, tenantID uint, safeFields map[string]any) error {
+	req := domain.UpdateDomainRequest{}
+	if v, ok := safeFields["description"]; ok {
+		s := v.(string)
+		req.Description = &s
+	}
+	_, err := a.svc.UpdateDomain(ctx, id, tenantID, req)
+	return err
+}
+
 // ── Mailbox ───────────────────────────────────────────────────────────
 
 type prodMailboxAdapter struct{ svc *mailbox.Service }
@@ -137,6 +178,16 @@ func (a *prodMailboxAdapter) CreateMailbox(ctx context.Context, email, name, pas
 
 func (a *prodMailboxAdapter) SoftDeleteMailbox(ctx context.Context, id, tenantID uint) error {
 	return a.svc.SoftDeleteMailbox(ctx, id, tenantID, "import compensation")
+}
+
+func (a *prodMailboxAdapter) UpdateMailbox(ctx context.Context, id, tenantID uint, safeFields map[string]any) error {
+	req := mailbox.UpdateMailboxRequest{}
+	if v, ok := safeFields["name"]; ok {
+		s := v.(string)
+		req.Name = &s
+	}
+	_, err := a.svc.UpdateMailbox(ctx, id, tenantID, req)
+	return err
 }
 
 // ── Alias ─────────────────────────────────────────────────────────────
@@ -201,6 +252,27 @@ func (a *prodGroupAdapter) SoftDeleteGroup(ctx context.Context, id, tenantID uin
 func (a *prodGroupAdapter) RemoveGroupMember(ctx context.Context, memberID, tenantID uint) error {
 	_, err := a.db.ExecContext(ctx, a.dialect.Rewrite(`DELETE FROM coremail_group_members WHERE id=? AND group_id IN (SELECT id FROM coremail_groups WHERE tenant_id=?)`), memberID, tenantID)
 	return err
+}
+
+func (a *prodGroupAdapter) UpdateGroup(ctx context.Context, id, tenantID uint, safeFields map[string]any) error {
+	now := timeNow()
+	if v, ok := safeFields["name"]; ok {
+		s := v.(string)
+		res, err := a.db.ExecContext(ctx, a.dialect.Rewrite(`UPDATE coremail_groups SET name=?, updated_at=? WHERE id=? AND tenant_id=? AND deleted_at IS NULL`), s, now, id, tenantID)
+		if err != nil {
+			return err
+		}
+		if err := kernel.CheckExistenceUpdate(res, "group"); err != nil {
+			return err
+		}
+	}
+	if v, ok := safeFields["description"]; ok {
+		s := v.(string)
+		if _, err := a.db.ExecContext(ctx, a.dialect.Rewrite(`UPDATE coremail_groups SET description=?, updated_at=? WHERE id=? AND tenant_id=? AND deleted_at IS NULL`), s, now, id, tenantID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ── helpers ───────────────────────────────────────────────────────────

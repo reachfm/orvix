@@ -88,6 +88,149 @@ func (r *Repository) MailboxExists(ctx context.Context, email string) (bool, err
 	return c > 0, nil
 }
 
+func (r *Repository) GetOrg(ctx context.Context, domain string, tenantID uint) (*EntityInfo, error) {
+	var id uint
+	var name, logoURL, primaryColor string
+	err := r.db.QueryRowContext(ctx, r.q(`SELECT id, name, COALESCE(logo_url,''), COALESCE(primary_color,'') FROM tenants WHERE domain=? AND deleted_at IS NULL`), domain).Scan(&id, &name, &logoURL, &primaryColor)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &EntityInfo{
+		ID: id, EntityType: EntityOrganization, CurrentName: name,
+		Fields: map[string]any{"name": name, "logo_url": logoURL, "primary_color": primaryColor},
+	}, nil
+}
+
+func (r *Repository) GetUser(ctx context.Context, email string) (*EntityInfo, error) {
+	var id uint
+	var name string
+	err := r.db.QueryRowContext(ctx, r.q(`SELECT id, COALESCE(full_name,'') FROM users WHERE email=? AND deleted_at IS NULL`), email).Scan(&id, &name)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &EntityInfo{
+		ID: id, EntityType: EntityTenantAdmin, CurrentName: name,
+		Fields: map[string]any{"name": name},
+	}, nil
+}
+
+func (r *Repository) GetDomain(ctx context.Context, name string) (*EntityInfo, error) {
+	var id uint
+	var desc string
+	err := r.db.QueryRowContext(ctx, r.q(`SELECT id, COALESCE(description,'') FROM coremail_domains WHERE name=? AND deleted_at IS NULL AND status='active'`), name).Scan(&id, &desc)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &EntityInfo{
+		ID: id, EntityType: EntityDomain, CurrentName: name,
+		Fields: map[string]any{"description": desc},
+	}, nil
+}
+
+func (r *Repository) GetMailbox(ctx context.Context, email string) (*EntityInfo, error) {
+	var id uint
+	var mbName string
+	err := r.db.QueryRowContext(ctx, r.q(`SELECT id, COALESCE(name,'') FROM coremail_mailboxes WHERE email=? AND deleted_at IS NULL`), email).Scan(&id, &mbName)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &EntityInfo{
+		ID: id, EntityType: EntityMailbox, CurrentName: mbName,
+		Fields: map[string]any{"name": mbName},
+	}, nil
+}
+
+func (r *Repository) GetGroup(ctx context.Context, name string, tenantID uint) (*EntityInfo, error) {
+	var id uint
+	var desc string
+	err := r.db.QueryRowContext(ctx, r.q(`SELECT id, COALESCE(description,'') FROM coremail_groups WHERE name=? AND tenant_id=? AND deleted_at IS NULL`), name, tenantID).Scan(&id, &desc)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &EntityInfo{
+		ID: id, EntityType: EntityGroup, CurrentName: name,
+		Fields: map[string]any{"name": name, "description": desc},
+	}, nil
+}
+
+// CurrentEntityFields reads the current safe-field values for a resource by
+// ID, tenant-scoped. It is used by the compensation path to verify that an
+// entity's current state still equals the recorded after-image before a
+// restore is applied, and to refuse overwriting human changes. The returned
+// map contains only allowlisted safe fields. A nil map with nil error means
+// the resource no longer exists for the tenant.
+func (r *Repository) CurrentEntityFields(ctx context.Context, entity ImportEntityType, resourceID, tenantID uint) (map[string]any, error) {
+	switch entity {
+	case EntityOrganization:
+		var name, logoURL, primaryColor string
+		err := r.db.QueryRowContext(ctx, r.q(`SELECT name, COALESCE(logo_url,''), COALESCE(primary_color,'') FROM tenants WHERE id=? AND deleted_at IS NULL`), resourceID).Scan(&name, &logoURL, &primaryColor)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				return nil, nil
+			}
+			return nil, err
+		}
+		return map[string]any{"name": name, "logo_url": logoURL, "primary_color": primaryColor}, nil
+	case EntityTenantAdmin:
+		var name string
+		err := r.db.QueryRowContext(ctx, r.q(`SELECT COALESCE(full_name,'') FROM users WHERE id=? AND tenant_id=? AND deleted_at IS NULL`), resourceID, tenantID).Scan(&name)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				return nil, nil
+			}
+			return nil, err
+		}
+		return map[string]any{"name": name}, nil
+	case EntityDomain:
+		var desc string
+		err := r.db.QueryRowContext(ctx, r.q(`SELECT COALESCE(description,'') FROM coremail_domains WHERE id=? AND tenant_id=? AND deleted_at IS NULL`), resourceID, tenantID).Scan(&desc)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				return nil, nil
+			}
+			return nil, err
+		}
+		return map[string]any{"description": desc}, nil
+	case EntityMailbox:
+		var name string
+		err := r.db.QueryRowContext(ctx, r.q(`SELECT COALESCE(name,'') FROM coremail_mailboxes WHERE id=? AND tenant_id=? AND deleted_at IS NULL`), resourceID, tenantID).Scan(&name)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				return nil, nil
+			}
+			return nil, err
+		}
+		return map[string]any{"name": name}, nil
+	case EntityGroup:
+		var name, desc string
+		err := r.db.QueryRowContext(ctx, r.q(`SELECT name, COALESCE(description,'') FROM coremail_groups WHERE id=? AND tenant_id=? AND deleted_at IS NULL`), resourceID, tenantID).Scan(&name, &desc)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				return nil, nil
+			}
+			return nil, err
+		}
+		return map[string]any{"name": name, "description": desc}, nil
+	default:
+		return nil, nil
+	}
+}
+
 const importColumns = `id,tenant_id,scope,actor,source_type,conflict_policy,schema_version,status,source_hash,source_name,staging_id,stored_size,total_rows,processed_rows,succeeded_rows,skipped_rows,failed_rows,current_checkpoint,checkpoint_entity,checkpoint_row,last_error,job_id,validation_report,created_at,updated_at,version`
 
 func (r *Repository) EnsureSchema(ctx context.Context) error {
@@ -121,11 +264,13 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 	comddl := `CREATE TABLE IF NOT EXISTS platform_import_compensations (
 		id ` + auto + `, import_id INTEGER NOT NULL, resource_id INTEGER NOT NULL,
 		entity_type TEXT NOT NULL, row_key TEXT NOT NULL DEFAULT '', row_index INTEGER NOT NULL DEFAULT 0,
-		status TEXT NOT NULL DEFAULT 'pending', compensated_at ` + ts + `,
+		mutation_type TEXT NOT NULL DEFAULT 'created', before_image TEXT NOT NULL DEFAULT '',
+		after_image TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending', compensated_at ` + ts + `,
 		error TEXT NOT NULL DEFAULT '', created_at ` + ts + ` NOT NULL)`
 	if _, err := r.db.ExecContext(ctx, comddl); err != nil {
 		return fmt.Errorf("ensure platform_import_compensations table: %w", err)
 	}
+	r.migrateCompensationColumns(ctx)
 	// idempotency table for execute/resume/compensate actions
 	iddl := `CREATE TABLE IF NOT EXISTS platform_import_idempotency (
 		id ` + auto + `, scope TEXT NOT NULL, actor TEXT NOT NULL,
@@ -163,6 +308,20 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// migrateCompensationColumns adds mutation_type, before_image, and after_image
+// columns to an existing platform_import_compensations table. Errors from
+// ALTER TABLE (e.g. "column already exists") are silently ignored since the
+// CREATE TABLE IF NOT EXISTS above already covers new installs.
+func (r *Repository) migrateCompensationColumns(ctx context.Context) {
+	for _, col := range []string{
+		`ALTER TABLE platform_import_compensations ADD COLUMN mutation_type TEXT NOT NULL DEFAULT 'created'`,
+		`ALTER TABLE platform_import_compensations ADD COLUMN before_image TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE platform_import_compensations ADD COLUMN after_image TEXT NOT NULL DEFAULT ''`,
+	} {
+		r.db.ExecContext(ctx, col)
+	}
 }
 
 func (r *Repository) Create(ctx context.Context, job *ImportJob) error {
@@ -375,12 +534,12 @@ func (r *Repository) LastCheckpoint(ctx context.Context, importID uint) (*Checkp
 }
 
 func (r *Repository) SaveCompensationRecord(ctx context.Context, rec *CompensationRecord) error {
-	_, err := r.db.ExecContext(ctx, r.q(`INSERT INTO platform_import_compensations (import_id,resource_id,entity_type,row_key,row_index,status,compensated_at,error,created_at) VALUES (?,?,?,?,?,?,?,?,?)`), rec.ImportID, rec.ResourceID, rec.EntityType, rec.RowKey, rec.RowIndex, rec.Status, rec.CompensatedAt, rec.Error, rec.CreatedAt)
+	_, err := r.db.ExecContext(ctx, r.q(`INSERT INTO platform_import_compensations (import_id,resource_id,entity_type,row_key,row_index,mutation_type,before_image,after_image,status,compensated_at,error,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`), rec.ImportID, rec.ResourceID, rec.EntityType, rec.RowKey, rec.RowIndex, rec.MutationType, rec.BeforeImage, rec.AfterImage, rec.Status, rec.CompensatedAt, rec.Error, rec.CreatedAt)
 	return err
 }
 
 func (r *Repository) GetCompensationRecords(ctx context.Context, importID uint) ([]CompensationRecord, error) {
-	rows, err := r.db.QueryContext(ctx, r.q(`SELECT import_id,resource_id,entity_type,row_key,row_index,status,compensated_at,error,created_at FROM platform_import_compensations WHERE import_id=? ORDER BY id DESC`), importID)
+	rows, err := r.db.QueryContext(ctx, r.q(`SELECT import_id,resource_id,entity_type,row_key,row_index,COALESCE(mutation_type,'created'),COALESCE(before_image,''),COALESCE(after_image,''),status,compensated_at,error,created_at FROM platform_import_compensations WHERE import_id=? ORDER BY id DESC`), importID)
 	if err != nil {
 		return nil, err
 	}
@@ -389,7 +548,7 @@ func (r *Repository) GetCompensationRecords(ctx context.Context, importID uint) 
 	for rows.Next() {
 		var rec CompensationRecord
 		var compAt sql.NullTime
-		if err := rows.Scan(&rec.ImportID, &rec.ResourceID, &rec.EntityType, &rec.RowKey, &rec.RowIndex, &rec.Status, &compAt, &rec.Error, &rec.CreatedAt); err != nil {
+		if err := rows.Scan(&rec.ImportID, &rec.ResourceID, &rec.EntityType, &rec.RowKey, &rec.RowIndex, &rec.MutationType, &rec.BeforeImage, &rec.AfterImage, &rec.Status, &compAt, &rec.Error, &rec.CreatedAt); err != nil {
 			return nil, err
 		}
 		if compAt.Valid {
@@ -400,14 +559,29 @@ func (r *Repository) GetCompensationRecords(ctx context.Context, importID uint) 
 	return records, rows.Err()
 }
 
-func (r *Repository) UpdateCompensationStatus(ctx context.Context, importID, resourceID uint, status string, errMsg string) error {
+func (r *Repository) UpdateCompensationStatus(ctx context.Context, importID, resourceID uint, entityType ImportEntityType, status string, errMsg string) error {
 	var compAt *time.Time
 	if status == "compensated" {
 		now := time.Now().UTC()
 		compAt = &now
 	}
-	_, execErr := r.db.ExecContext(ctx, r.q(`UPDATE platform_import_compensations SET status=?,compensated_at=?,error=? WHERE import_id=? AND resource_id=?`), status, compAt, errMsg, importID, resourceID)
+	_, execErr := r.db.ExecContext(ctx, r.q(`UPDATE platform_import_compensations SET status=?,compensated_at=?,error=? WHERE import_id=? AND resource_id=? AND entity_type=?`), status, compAt, errMsg, importID, resourceID, entityType)
 	return execErr
+}
+
+// ClaimCompensationRecord atomically transitions a compensation record from
+// pending (or failed, for retry/resume) to the in-progress state so two
+// concurrent compensation runs can never both compensate the same record.
+// The record is uniquely addressed by (import_id, resource_id, entity_type)
+// because resource_id is only unique within its entity table. It returns
+// true only for the caller that won the claim (rows affected == 1).
+func (r *Repository) ClaimCompensationRecord(ctx context.Context, importID, resourceID uint, entityType ImportEntityType) (bool, error) {
+	res, err := r.db.ExecContext(ctx, r.q(`UPDATE platform_import_compensations SET status='compensating' WHERE import_id=? AND resource_id=? AND entity_type=? AND status IN ('pending','failed')`), importID, resourceID, entityType)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // CompensationExistsForRow reports whether a compensation record has already

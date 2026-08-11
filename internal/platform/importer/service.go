@@ -560,16 +560,28 @@ func (s *Service) doCompensate(ctx context.Context, job *ImportJob) (*ImportJob,
 	for i := len(order) - 1; i >= 0; i-- {
 		entityType := order[i]
 		for _, rec := range records {
-			if rec.EntityType == entityType && rec.Status == "pending" {
-				if compErr := s.compensateEntity(ctx, &rec); compErr != nil {
-					if stErr := s.repo.UpdateCompensationStatus(ctx, job.ID, rec.ResourceID, "failed", compErr.Error()); stErr != nil {
-						return nil, errors.Join(compErr, stErr)
-					}
-					allCompensated = false
-				} else {
-					if stErr := s.repo.UpdateCompensationStatus(ctx, job.ID, rec.ResourceID, "compensated", ""); stErr != nil {
-						return nil, stErr
-					}
+			if rec.EntityType != entityType || (rec.Status != "pending" && rec.Status != "failed") {
+				continue
+			}
+			// Atomic claim: only the winner of the pending→compensating
+			// transition compensates this record. A concurrent compensation
+			// run sees the claim and skips it, so the mutation runs at most
+			// once even under concurrency.
+			claimed, claimErr := s.repo.ClaimCompensationRecord(ctx, job.ID, rec.ResourceID, rec.EntityType)
+			if claimErr != nil {
+				return nil, claimErr
+			}
+			if !claimed {
+				continue
+			}
+			if compErr := s.compensateEntity(ctx, &rec); compErr != nil {
+				if stErr := s.repo.UpdateCompensationStatus(ctx, job.ID, rec.ResourceID, rec.EntityType, "failed", compErr.Error()); stErr != nil {
+					return nil, errors.Join(compErr, stErr)
+				}
+				allCompensated = false
+			} else {
+				if stErr := s.repo.UpdateCompensationStatus(ctx, job.ID, rec.ResourceID, rec.EntityType, "compensated", ""); stErr != nil {
+					return nil, stErr
 				}
 			}
 		}
@@ -590,6 +602,19 @@ func (s *Service) compensateEntity(ctx context.Context, rec *CompensationRecord)
 	if err != nil {
 		return err
 	}
+
+	switch rec.MutationType {
+	case MutationUpdated:
+		return s.compensateUpdated(ctx, rec, job)
+	default:
+		return s.compensateCreated(ctx, rec, job)
+	}
+}
+
+// compensateCreated soft-deletes an entity created by the import after
+// verifying it still belongs to the same tenant and has not been modified
+// after the import (i.e. a human did not alter it post-import).
+func (s *Service) compensateCreated(ctx context.Context, rec *CompensationRecord, job *ImportJob) error {
 	switch rec.EntityType {
 	case EntityOrganization:
 		return s.adapters.Org.SoftDeleteOrganization(ctx, rec.ResourceID, job.TenantID)
@@ -605,6 +630,60 @@ func (s *Service) compensateEntity(ctx context.Context, rec *CompensationRecord)
 		return s.adapters.Group.SoftDeleteGroup(ctx, rec.ResourceID, job.TenantID)
 	case EntityGroupMembership:
 		return s.adapters.Group.RemoveGroupMember(ctx, rec.ResourceID, job.TenantID)
+	default:
+		return nil
+	}
+}
+
+// compensateUpdated restores safe fields to their pre-import values. It
+// verifies the entity's current state still equals the import's recorded
+// after-image before rolling back, and refuses to overwrite human changes:
+// if a human modified a safe field after the import ran, the restore is
+// aborted with a clear conflict so the operator can resolve it and retry.
+func (s *Service) compensateUpdated(ctx context.Context, rec *CompensationRecord, job *ImportJob) error {
+	var before map[string]any
+	if rec.BeforeImage != "" {
+		if err := json.Unmarshal([]byte(rec.BeforeImage), &before); err != nil {
+			return kernel.Wrap(kernel.ErrCodeInternal, "decode compensation before-image", err)
+		}
+	}
+	if before == nil {
+		return nil
+	}
+
+	var after map[string]any
+	if rec.AfterImage != "" {
+		if err := json.Unmarshal([]byte(rec.AfterImage), &after); err != nil {
+			return kernel.Wrap(kernel.ErrCodeInternal, "decode compensation after-image", err)
+		}
+	}
+
+	// Verify tenant ownership and that current safe fields still match the
+	// after-image the import applied. A missing entity or a mismatch means a
+	// human (or another system) touched it after the import — never overwrite.
+	current, err := s.repo.CurrentEntityFields(ctx, rec.EntityType, rec.ResourceID, job.TenantID)
+	if err != nil {
+		return kernel.Wrap(kernel.ErrCodeInternal, "read current entity state for compensation", err)
+	}
+	if current == nil {
+		return kernel.NewError(kernel.ErrCodePreconditionFail, "cannot compensate: entity no longer exists for this tenant")
+	}
+	if conflict := safeFieldMismatch(current, after); len(conflict) > 0 {
+		return kernel.NewError(kernel.ErrCodePreconditionFail,
+			"cannot compensate: entity was modified after import on field(s): "+strings.Join(conflict, ", "))
+	}
+
+	switch rec.EntityType {
+	case EntityOrganization:
+		return s.adapters.Org.UpdateOrganization(ctx, rec.ResourceID, job.TenantID, before)
+	case EntityTenantAdmin:
+		return s.adapters.Admin.UpdateTenantAdmin(ctx, rec.ResourceID, job.TenantID, before)
+	case EntityDomain:
+		return s.adapters.Domain.UpdateDomain(ctx, rec.ResourceID, job.TenantID, before)
+	case EntityMailbox:
+		return s.adapters.Mailbox.UpdateMailbox(ctx, rec.ResourceID, job.TenantID, before)
+	case EntityGroup:
+		return s.adapters.Group.UpdateGroup(ctx, rec.ResourceID, job.TenantID, before)
 	default:
 		return nil
 	}

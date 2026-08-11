@@ -131,13 +131,15 @@ const (
 )
 
 type ImportRow struct {
-	Line     int                  `json:"line"`
-	Entity   ImportEntityType     `json:"entity"`
-	RowKey   string               `json:"row_key"`
-	Data     json.RawMessage      `json:"-"`
-	SafeData json.RawMessage      `json:"data,omitempty"`
-	Errors   []RowValidationError `json:"errors,omitempty"`
-	Status   RowResultStatus      `json:"status"`
+	Line        int                  `json:"line"`
+	Entity      ImportEntityType     `json:"entity"`
+	RowKey      string               `json:"row_key"`
+	Data        json.RawMessage      `json:"-"`
+	SafeData    json.RawMessage      `json:"data,omitempty"`
+	Errors      []RowValidationError `json:"errors,omitempty"`
+	Status      RowResultStatus      `json:"status"`
+	BeforeImage json.RawMessage      `json:"before,omitempty"`
+	AfterImage  json.RawMessage      `json:"after,omitempty"`
 }
 
 type RowValidationError struct {
@@ -153,6 +155,7 @@ type ValidationReport struct {
 	Valid         int         `json:"valid"`
 	Invalid       int         `json:"invalid"`
 	Conflict      int         `json:"conflict"`
+	Updated       int         `json:"updated"`
 	Unchanged     int         `json:"unchanged"`
 	Deferred      int         `json:"deferred"`
 	Total         int         `json:"total"`
@@ -221,11 +224,19 @@ type CompensationRecord struct {
 	EntityType    ImportEntityType `json:"entity_type"`
 	RowKey        string           `json:"row_key"`
 	RowIndex      int              `json:"row_index"`
+	MutationType  string           `json:"mutation_type"`
 	Status        string           `json:"status"`
+	BeforeImage   string           `json:"before_image,omitempty"`
+	AfterImage    string           `json:"after_image,omitempty"`
 	CompensatedAt *time.Time       `json:"compensated_at,omitempty"`
 	Error         string           `json:"error,omitempty"`
 	CreatedAt     time.Time        `json:"created_at"`
 }
+
+const (
+	MutationCreated = "created"
+	MutationUpdated = "updated"
+)
 
 var (
 	ErrNotFound             = kernel.NotFound("import job")

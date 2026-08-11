@@ -81,6 +81,86 @@ func (l *testLookup) MailboxExists(ctx context.Context, email string) (bool, err
 	return c > 0, err
 }
 
+func (l *testLookup) GetOrg(ctx context.Context, domain string, tenantID uint) (*EntityInfo, error) {
+	var id uint
+	var name, logoURL, primaryColor string
+	err := l.db.QueryRowContext(ctx, `SELECT id, name, COALESCE(logo_url,''), COALESCE(primary_color,'') FROM tenants WHERE domain=? AND deleted_at IS NULL`, domain).Scan(&id, &name, &logoURL, &primaryColor)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &EntityInfo{
+		ID: id, EntityType: EntityOrganization, CurrentName: name,
+		Fields: map[string]any{"name": name, "logo_url": logoURL, "primary_color": primaryColor},
+	}, nil
+}
+
+func (l *testLookup) GetUser(ctx context.Context, email string) (*EntityInfo, error) {
+	var id uint
+	var name string
+	err := l.db.QueryRowContext(ctx, `SELECT id, COALESCE(name,'') FROM users WHERE email=? AND deleted_at IS NULL`, email).Scan(&id, &name)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &EntityInfo{
+		ID: id, EntityType: EntityTenantAdmin, CurrentName: name,
+		Fields: map[string]any{"name": name},
+	}, nil
+}
+
+func (l *testLookup) GetDomain(ctx context.Context, name string) (*EntityInfo, error) {
+	var id uint
+	var desc string
+	err := l.db.QueryRowContext(ctx, `SELECT id, COALESCE(description,'') FROM coremail_domains WHERE name=? AND deleted_at IS NULL AND status='active'`, name).Scan(&id, &desc)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &EntityInfo{
+		ID: id, EntityType: EntityDomain, CurrentName: name,
+		Fields: map[string]any{"description": desc},
+	}, nil
+}
+
+func (l *testLookup) GetMailbox(ctx context.Context, email string) (*EntityInfo, error) {
+	var id uint
+	var mbName string
+	err := l.db.QueryRowContext(ctx, `SELECT id, COALESCE(name,'') FROM coremail_mailboxes WHERE email=? AND deleted_at IS NULL`, email).Scan(&id, &mbName)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &EntityInfo{
+		ID: id, EntityType: EntityMailbox, CurrentName: mbName,
+		Fields: map[string]any{"name": mbName},
+	}, nil
+}
+
+func (l *testLookup) GetGroup(ctx context.Context, name string, tenantID uint) (*EntityInfo, error) {
+	var id uint
+	var desc string
+	err := l.db.QueryRowContext(ctx, `SELECT id, COALESCE(description,'') FROM coremail_groups WHERE name=? AND tenant_id=? AND deleted_at IS NULL`, name, tenantID).Scan(&id, &desc)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &EntityInfo{
+		ID: id, EntityType: EntityGroup, CurrentName: name,
+		Fields: map[string]any{"name": name, "description": desc},
+	}, nil
+}
+
 // Test port implementations
 type testOrgPort struct{ db *sql.DB }
 
@@ -95,6 +175,28 @@ func (p *testOrgPort) CreateOrganization(ctx context.Context, name, domain strin
 func (p *testOrgPort) SoftDeleteOrganization(ctx context.Context, id, tenantID uint) error {
 	_, err := p.db.ExecContext(ctx, `UPDATE tenants SET deleted_at=CURRENT_TIMESTAMP WHERE id=?`, id)
 	return err
+}
+
+func (p *testOrgPort) UpdateOrganization(ctx context.Context, id, tenantID uint, safeFields map[string]any) error {
+	if v, ok := safeFields["name"]; ok {
+		s := v.(string)
+		if _, err := p.db.ExecContext(ctx, `UPDATE tenants SET name=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, s, id); err != nil {
+			return err
+		}
+	}
+	if v, ok := safeFields["logo_url"]; ok {
+		s := v.(string)
+		if _, err := p.db.ExecContext(ctx, `UPDATE tenants SET logo_url=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, s, id); err != nil {
+			return err
+		}
+	}
+	if v, ok := safeFields["primary_color"]; ok {
+		s := v.(string)
+		if _, err := p.db.ExecContext(ctx, `UPDATE tenants SET primary_color=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, s, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type testAdminPort struct{ db *sql.DB }
@@ -117,6 +219,15 @@ func (p *testAdminPort) SoftDeleteUser(ctx context.Context, id, tenantID uint) e
 	return err
 }
 
+func (p *testAdminPort) UpdateTenantAdmin(ctx context.Context, id, tenantID uint, safeFields map[string]any) error {
+	if v, ok := safeFields["name"]; ok {
+		s := v.(string)
+		_, err := p.db.ExecContext(ctx, `UPDATE users SET name=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, s, id)
+		return err
+	}
+	return nil
+}
+
 type testDomainPort struct{ db *sql.DB }
 
 func (p *testDomainPort) CreateDomain(ctx context.Context, name string, tenantID uint) (uint, error) {
@@ -135,6 +246,15 @@ func (p *testDomainPort) CreateDomain(ctx context.Context, name string, tenantID
 func (p *testDomainPort) SoftDeleteDomain(ctx context.Context, id, tenantID uint) error {
 	_, err := p.db.ExecContext(ctx, `UPDATE coremail_domains SET deleted_at=CURRENT_TIMESTAMP WHERE id=?`, id)
 	return err
+}
+
+func (p *testDomainPort) UpdateDomain(ctx context.Context, id, tenantID uint, safeFields map[string]any) error {
+	if v, ok := safeFields["description"]; ok {
+		s := v.(string)
+		_, err := p.db.ExecContext(ctx, `UPDATE coremail_domains SET description=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, s, id)
+		return err
+	}
+	return nil
 }
 
 type testMailboxPort struct{ db *sql.DB }
@@ -157,6 +277,15 @@ func (p *testMailboxPort) CreateMailbox(ctx context.Context, email, name, passwo
 func (p *testMailboxPort) SoftDeleteMailbox(ctx context.Context, id, tenantID uint) error {
 	_, err := p.db.ExecContext(ctx, `UPDATE coremail_mailboxes SET deleted_at=CURRENT_TIMESTAMP WHERE id=?`, id)
 	return err
+}
+
+func (p *testMailboxPort) UpdateMailbox(ctx context.Context, id, tenantID uint, safeFields map[string]any) error {
+	if v, ok := safeFields["name"]; ok {
+		s := v.(string)
+		_, err := p.db.ExecContext(ctx, `UPDATE coremail_mailboxes SET name=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, s, id)
+		return err
+	}
+	return nil
 }
 
 type testAliasPort struct{ db *sql.DB }
@@ -199,6 +328,22 @@ func (p *testGroupPort) SoftDeleteGroup(ctx context.Context, id, tenantID uint) 
 func (p *testGroupPort) RemoveGroupMember(ctx context.Context, memberID, tenantID uint) error {
 	_, err := p.db.ExecContext(ctx, `DELETE FROM coremail_group_members WHERE id=?`, memberID)
 	return err
+}
+
+func (p *testGroupPort) UpdateGroup(ctx context.Context, id, tenantID uint, safeFields map[string]any) error {
+	if v, ok := safeFields["name"]; ok {
+		s := v.(string)
+		if _, err := p.db.ExecContext(ctx, `UPDATE coremail_groups SET name=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, s, id); err != nil {
+			return err
+		}
+	}
+	if v, ok := safeFields["description"]; ok {
+		s := v.(string)
+		if _, err := p.db.ExecContext(ctx, `UPDATE coremail_groups SET description=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, s, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ── Tests ──────────────────────────────────────────────────────────

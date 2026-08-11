@@ -2,6 +2,7 @@ package importer
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -113,28 +114,31 @@ func (e *Executor) Execute(ctx context.Context, job *ImportJob, data []byte) (*E
 			continue
 		}
 
-		resourceID, execErr := e.executeEntity(ctx, entity, job)
+		outcome, execErr := e.executeEntity(ctx, entity, job)
 		if execErr != nil {
 			failed++
 			processed++
 			continue
 		}
 
-		if resourceID > 0 {
+		if outcome.resourceID > 0 {
 			succeeded++
 			result.Created = append(result.Created, CreatedResource{
 				EntityType: entity.Entity,
-				ResourceID: resourceID,
-				RowKey:     fmt.Sprintf("%s_%d", entity.Entity, resourceID),
+				ResourceID: outcome.resourceID,
+				RowKey:     fmt.Sprintf("%s_%d", entity.Entity, outcome.resourceID),
 			})
 			if recErr := e.repo.SaveCompensationRecord(ctx, &CompensationRecord{
-				ImportID:   job.ID,
-				ResourceID: resourceID,
-				EntityType: entity.Entity,
-				RowKey:     fmt.Sprintf("%s_%d", entity.Entity, resourceID),
-				RowIndex:   entity.Line,
-				Status:     "pending",
-				CreatedAt:  time.Now().UTC(),
+				ImportID:     job.ID,
+				ResourceID:   outcome.resourceID,
+				EntityType:   entity.Entity,
+				RowKey:       fmt.Sprintf("%s_%d", entity.Entity, outcome.resourceID),
+				RowIndex:     entity.Line,
+				MutationType: outcome.mutationType,
+				BeforeImage:  outcome.beforeImage,
+				AfterImage:   outcome.afterImage,
+				Status:       "pending",
+				CreatedAt:    time.Now().UTC(),
 			}); recErr != nil {
 				return nil, recErr
 			}
@@ -194,25 +198,193 @@ func (e *Executor) checkpointBatch(ctx context.Context, job *ImportJob, entity P
 	return e.Execution.SetProgress(ctx, processed)
 }
 
-func (e *Executor) executeEntity(ctx context.Context, entity ParsedEntity, job *ImportJob) (uint, error) {
+type entityOutcome struct {
+	resourceID   uint
+	mutationType string
+	beforeImage  string
+	afterImage   string
+}
+
+func (e *Executor) executeEntity(ctx context.Context, entity ParsedEntity, job *ImportJob) (*entityOutcome, error) {
 	switch entity.Entity {
 	case EntityOrganization:
-		return e.createOrganization(ctx, entity, job)
+		return e.dispatchOrg(ctx, entity, job)
 	case EntityTenantAdmin:
-		return e.createTenantAdmin(ctx, entity, job)
+		return e.dispatchAdmin(ctx, entity, job)
 	case EntityDomain:
-		return e.createDomain(ctx, entity, job)
+		return e.dispatchDomain(ctx, entity, job)
 	case EntityMailbox:
-		return e.createMailbox(ctx, entity, job)
+		return e.dispatchMailbox(ctx, entity, job)
 	case EntityAlias:
-		return e.createAlias(ctx, entity, job)
+		return e.createAliasOutcome(ctx, entity, job)
 	case EntityGroup:
-		return e.createGroup(ctx, entity, job)
+		return e.dispatchGroup(ctx, entity, job)
 	case EntityGroupMembership:
-		return e.createGroupMembership(ctx, entity, job)
+		return e.createGroupMembershipOutcome(ctx, entity, job)
 	default:
-		return 0, fmt.Errorf("unsupported entity type: %s", entity.Entity)
+		return nil, fmt.Errorf("unsupported entity type: %s", entity.Entity)
 	}
+}
+
+// ── Dispatch helpers: check existence, then create or update ─────────
+
+func (e *Executor) dispatchOrg(ctx context.Context, entity ParsedEntity, job *ImportJob) (*entityOutcome, error) {
+	domain := fieldStr(entity.Raw, "domain")
+	info, _ := e.repo.GetOrg(ctx, domain, job.TenantID)
+	if info == nil {
+		return e.createOutcome(ctx, func() (uint, error) { return e.createOrganization(ctx, entity, job) }), nil
+	}
+	switch job.ConflictPolicy {
+	case ConflictSkip:
+		return &entityOutcome{}, nil
+	case ConflictUpdateSafe:
+		return e.updateOrganization(ctx, entity, job, info)
+	default:
+		return nil, fmt.Errorf("organization with domain %s already exists", domain)
+	}
+}
+
+func (e *Executor) dispatchAdmin(ctx context.Context, entity ParsedEntity, job *ImportJob) (*entityOutcome, error) {
+	email := fieldStr(entity.Raw, "email")
+	info, _ := e.repo.GetUser(ctx, email)
+	if info == nil {
+		return e.createOutcome(ctx, func() (uint, error) { return e.createTenantAdmin(ctx, entity, job) }), nil
+	}
+	switch job.ConflictPolicy {
+	case ConflictSkip:
+		return &entityOutcome{}, nil
+	case ConflictUpdateSafe:
+		return e.updateTenantAdmin(ctx, entity, job, info)
+	default:
+		return nil, fmt.Errorf("user with email %s already exists", email)
+	}
+}
+
+func (e *Executor) dispatchDomain(ctx context.Context, entity ParsedEntity, job *ImportJob) (*entityOutcome, error) {
+	name := fieldStr(entity.Raw, "name", "domain")
+	info, _ := e.repo.GetDomain(ctx, name)
+	if info == nil {
+		return e.createOutcome(ctx, func() (uint, error) { return e.createDomain(ctx, entity, job) }), nil
+	}
+	switch job.ConflictPolicy {
+	case ConflictSkip:
+		return &entityOutcome{}, nil
+	case ConflictUpdateSafe:
+		return e.updateDomain(ctx, entity, job, info)
+	default:
+		return nil, fmt.Errorf("domain %s already exists", name)
+	}
+}
+
+func (e *Executor) dispatchMailbox(ctx context.Context, entity ParsedEntity, job *ImportJob) (*entityOutcome, error) {
+	email := fieldStr(entity.Raw, "email")
+	info, _ := e.repo.GetMailbox(ctx, email)
+	if info == nil {
+		return e.createOutcome(ctx, func() (uint, error) { return e.createMailbox(ctx, entity, job) }), nil
+	}
+	switch job.ConflictPolicy {
+	case ConflictSkip:
+		return &entityOutcome{}, nil
+	case ConflictUpdateSafe:
+		return e.updateMailbox(ctx, entity, job, info)
+	default:
+		return nil, fmt.Errorf("mailbox %s already exists", email)
+	}
+}
+
+func (e *Executor) dispatchGroup(ctx context.Context, entity ParsedEntity, job *ImportJob) (*entityOutcome, error) {
+	name := fieldStr(entity.Raw, "name")
+	info, _ := e.repo.GetGroup(ctx, name, job.TenantID)
+	if info == nil {
+		return e.createOutcome(ctx, func() (uint, error) { return e.createGroup(ctx, entity, job) }), nil
+	}
+	switch job.ConflictPolicy {
+	case ConflictSkip:
+		return &entityOutcome{}, nil
+	case ConflictUpdateSafe:
+		return e.updateGroup(ctx, entity, job, info)
+	default:
+		return nil, fmt.Errorf("group %s already exists", name)
+	}
+}
+
+// createOutcome wraps a create call and labels the result as a create
+// mutation (no before/after images — the entity is brand new).
+func (e *Executor) createOutcome(ctx context.Context, create func() (uint, error)) *entityOutcome {
+	id, _ := create()
+	return &entityOutcome{resourceID: id, mutationType: MutationCreated, beforeImage: "", afterImage: ""}
+}
+
+// ── Update methods (called when conflict_policy=update_safe_fields) ──
+
+func (e *Executor) updateOrganization(ctx context.Context, entity ParsedEntity, job *ImportJob, info *EntityInfo) (*entityOutcome, error) {
+	return e.applySafeUpdate(ctx, entity, job, info, EntityOrganization,
+		func(changed map[string]any) error {
+			return e.adapters.Org.UpdateOrganization(ctx, info.ID, job.TenantID, changed)
+		})
+}
+
+func (e *Executor) updateTenantAdmin(ctx context.Context, entity ParsedEntity, job *ImportJob, info *EntityInfo) (*entityOutcome, error) {
+	return e.applySafeUpdate(ctx, entity, job, info, EntityTenantAdmin,
+		func(changed map[string]any) error {
+			return e.adapters.Admin.UpdateTenantAdmin(ctx, info.ID, job.TenantID, changed)
+		})
+}
+
+func (e *Executor) updateDomain(ctx context.Context, entity ParsedEntity, job *ImportJob, info *EntityInfo) (*entityOutcome, error) {
+	return e.applySafeUpdate(ctx, entity, job, info, EntityDomain,
+		func(changed map[string]any) error {
+			return e.adapters.Domain.UpdateDomain(ctx, info.ID, job.TenantID, changed)
+		})
+}
+
+func (e *Executor) updateMailbox(ctx context.Context, entity ParsedEntity, job *ImportJob, info *EntityInfo) (*entityOutcome, error) {
+	return e.applySafeUpdate(ctx, entity, job, info, EntityMailbox,
+		func(changed map[string]any) error {
+			return e.adapters.Mailbox.UpdateMailbox(ctx, info.ID, job.TenantID, changed)
+		})
+}
+
+func (e *Executor) updateGroup(ctx context.Context, entity ParsedEntity, job *ImportJob, info *EntityInfo) (*entityOutcome, error) {
+	return e.applySafeUpdate(ctx, entity, job, info, EntityGroup,
+		func(changed map[string]any) error {
+			return e.adapters.Group.UpdateGroup(ctx, info.ID, job.TenantID, changed)
+		})
+}
+
+// applySafeUpdate computes the safe-field diff, applies it through the
+// production adapter, and returns an outcome labeled as an update mutation
+// with before/after images for compensation. A no-op (nothing changed) is
+// not a mutation and returns a zero outcome so no compensation is recorded.
+func (e *Executor) applySafeUpdate(ctx context.Context, entity ParsedEntity, job *ImportJob, info *EntityInfo, entityType ImportEntityType, apply func(map[string]any) error) (*entityOutcome, error) {
+	safe, _ := ExtractSafeFields(entity.Raw, entityType)
+	changed := SafeFieldsChanged(info.Fields, safe, entityType)
+	if len(changed) == 0 {
+		return &entityOutcome{}, nil
+	}
+	beforeJSON, _ := json.Marshal(info.Fields)
+	afterJSON, _ := json.Marshal(changed)
+	if err := apply(changed); err != nil {
+		return nil, err
+	}
+	return &entityOutcome{
+		resourceID:   info.ID,
+		mutationType: MutationUpdated,
+		beforeImage:  string(beforeJSON),
+		afterImage:   string(afterJSON),
+	}, nil
+}
+
+func (e *Executor) createAliasOutcome(ctx context.Context, entity ParsedEntity, job *ImportJob) (*entityOutcome, error) {
+	id, err := e.createAlias(ctx, entity, job)
+	return &entityOutcome{resourceID: id, mutationType: MutationCreated}, err
+}
+
+func (e *Executor) createGroupMembershipOutcome(ctx context.Context, entity ParsedEntity, job *ImportJob) (*entityOutcome, error) {
+	if err := e.adapters.Group.AddGroupMember(ctx, fieldStr(entity.Raw, "group_name", "group"), fieldStr(entity.Raw, "email", "member_email"), job.TenantID); err != nil {
+		return nil, err
+	}
+	return &entityOutcome{}, nil
 }
 
 func (e *Executor) createOrganization(ctx context.Context, entity ParsedEntity, job *ImportJob) (uint, error) {

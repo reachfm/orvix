@@ -86,8 +86,9 @@ func (v *Validator) validateOrganization(ctx context.Context, entity ParsedEntit
 	row.RowKey = "org_" + strings.ToLower(domain)
 	if exists, _ := v.lookup.OrgExists(ctx, domain, v.tenantID); exists {
 		switch v.conflict {
-		case ConflictFail:
-			row.Status = RowConflict
+		case ConflictUpdateSafe:
+			info, _ := v.lookup.GetOrg(ctx, domain, v.tenantID)
+			return v.resolveSafeUpdate(ctx, entity, row, info)
 		case ConflictSkip:
 			row.Status = RowSkipped
 		default:
@@ -130,8 +131,9 @@ func (v *Validator) validateTenantAdmin(ctx context.Context, entity ParsedEntity
 	row.RowKey = "admin_" + email
 	if exists, _ := v.lookup.UserExists(ctx, email); exists {
 		switch v.conflict {
-		case ConflictFail:
-			row.Status = RowConflict
+		case ConflictUpdateSafe:
+			info, _ := v.lookup.GetUser(ctx, email)
+			return v.resolveSafeUpdate(ctx, entity, row, info)
 		case ConflictSkip:
 			row.Status = RowSkipped
 		default:
@@ -166,8 +168,9 @@ func (v *Validator) validateDomain(ctx context.Context, entity ParsedEntity) Imp
 			return row
 		}
 		switch v.conflict {
-		case ConflictFail:
-			row.Status = RowConflict
+		case ConflictUpdateSafe:
+			info, _ := v.lookup.GetDomain(ctx, name)
+			return v.resolveSafeUpdate(ctx, entity, row, info)
 		case ConflictSkip:
 			row.Status = RowSkipped
 		default:
@@ -217,8 +220,9 @@ func (v *Validator) validateMailbox(ctx context.Context, entity ParsedEntity) Im
 	row.RowKey = "mb_" + strings.ToLower(email)
 	if exists, _ := v.lookup.MailboxExists(ctx, email); exists {
 		switch v.conflict {
-		case ConflictFail:
-			row.Status = RowConflict
+		case ConflictUpdateSafe:
+			info, _ := v.lookup.GetMailbox(ctx, email)
+			return v.resolveSafeUpdate(ctx, entity, row, info)
 		case ConflictSkip:
 			row.Status = RowSkipped
 		default:
@@ -247,6 +251,21 @@ func (v *Validator) validateAlias(ctx context.Context, entity ParsedEntity) Impo
 		return row
 	}
 	row.RowKey = "alias_" + strings.ToLower(from)
+	if exists, _ := v.lookup.MailboxExists(ctx, from); exists {
+		switch v.conflict {
+		case ConflictUpdateSafe:
+			row.Status = RowConflict
+			row.Errors = append(row.Errors, RowValidationError{
+				Code:    string(CodeForbiddenField),
+				Message: "alias has no safe fields; destination changes require tenant isolation and loop detection via the alias service",
+			})
+		case ConflictSkip:
+			row.Status = RowSkipped
+		default:
+			row.Status = RowConflict
+		}
+		return row
+	}
 	return row
 }
 
@@ -259,6 +278,18 @@ func (v *Validator) validateGroup(ctx context.Context, entity ParsedEntity) Impo
 		return row
 	}
 	row.RowKey = "group_" + strings.ToLower(name)
+	info, lookupErr := v.lookup.GetGroup(ctx, name, v.tenantID)
+	if lookupErr == nil && info != nil {
+		switch v.conflict {
+		case ConflictUpdateSafe:
+			return v.resolveSafeUpdate(ctx, entity, row, info)
+		case ConflictSkip:
+			row.Status = RowSkipped
+		default:
+			row.Status = RowConflict
+		}
+		return row
+	}
 	return row
 }
 
@@ -307,6 +338,53 @@ func formatEntityErrors(errs []string) []RowValidationError {
 		out = append(out, RowValidationError{Code: string(CodeParseError), Message: e})
 	}
 	return out
+}
+
+// resolveSafeUpdate determines the conflict resolution for an existing entity
+// under the update_safe_fields policy. It extracts safe and forbidden fields,
+// compares them against the current entity state, and returns:
+//
+//   - RowUpdated:  safe fields differ → updateable with before/after diff
+//   - RowSkipped:  nothing changed → no action needed
+//   - RowConflict: forbidden fields differ or no safe fields exist
+func (v *Validator) resolveSafeUpdate(ctx context.Context, entity ParsedEntity, row ImportRow, info *EntityInfo) ImportRow {
+	if info == nil {
+		row.Status = RowConflict
+		return row
+	}
+
+	safe, forbidden := ExtractSafeFields(entity.Raw, entity.Entity)
+
+	if len(forbidden) > 0 {
+		row.Status = RowConflict
+		row.Errors = append(row.Errors, RowValidationError{
+			Code:    string(CodeForbiddenField),
+			Message: "forbidden fields for " + string(entity.Entity) + ": " + strings.Join(forbidden, ", "),
+		})
+		return row
+	}
+
+	if !SafeFields(entity.Entity).HasAny() {
+		row.Status = RowConflict
+		row.Errors = append(row.Errors, RowValidationError{
+			Code:    string(CodeForbiddenField),
+			Message: string(entity.Entity) + " has no safe fields for update",
+		})
+		return row
+	}
+
+	changed := SafeFieldsChanged(info.Fields, safe, entity.Entity)
+	if len(changed) == 0 {
+		row.Status = RowSkipped
+		return row
+	}
+
+	beforeBytes, _ := json.Marshal(info.Fields)
+	afterBytes, _ := json.Marshal(changed)
+	row.Status = RowUpdated
+	row.BeforeImage = json.RawMessage(beforeBytes)
+	row.AfterImage = json.RawMessage(afterBytes)
+	return row
 }
 
 // Ensure fmt import used
