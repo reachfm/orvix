@@ -23,7 +23,6 @@ type ProductionAdapterDeps struct {
 	OrgService     *organization.Service
 	DomainService  *domain.Service
 	MailboxService *mailbox.Service
-	AliasRepo      coremail.AliasRepository
 	DB             *sql.DB
 	Dialect        *dbdialect.Info
 }
@@ -34,9 +33,6 @@ func NewProductionAdapters(deps ProductionAdapterDeps) (*Adapters, error) {
 	if deps.OrgService == nil || deps.DomainService == nil || deps.MailboxService == nil {
 		return nil, fmt.Errorf("import production adapters: org, domain and mailbox services are required")
 	}
-	if deps.AliasRepo == nil {
-		return nil, fmt.Errorf("import production adapters: alias repository is required")
-	}
 	if deps.DB == nil || deps.Dialect == nil {
 		return nil, fmt.Errorf("import production adapters: db and dialect are required")
 	}
@@ -45,7 +41,7 @@ func NewProductionAdapters(deps ProductionAdapterDeps) (*Adapters, error) {
 		&prodAdminAdapter{db: deps.DB, dialect: deps.Dialect},
 		&prodDomainAdapter{svc: deps.DomainService},
 		&prodMailboxAdapter{svc: deps.MailboxService},
-		&prodAliasAdapter{repo: deps.AliasRepo, db: deps.DB, dialect: deps.Dialect},
+		&prodAliasAdapter{db: deps.DB, dialect: deps.Dialect},
 		&prodGroupAdapter{db: deps.DB, dialect: deps.Dialect},
 	), nil
 }
@@ -60,7 +56,6 @@ func NewProductionAdaptersFromDB(db *sql.DB, dialect *dbdialect.Info) (*Adapters
 		OrgService:     organization.NewService(organization.NewOrganizationRepo(db), nil, nil),
 		DomainService:  domain.NewService(domain.NewDomainAdminRepo(db), dkim.NewSQLRepo(db), nil, nil),
 		MailboxService: mailbox.NewService(mailbox.NewAdminMailboxRepo(db), eng.Auth, nil, nil),
-		AliasRepo:      eng.Aliases,
 		DB:             db,
 		Dialect:        dialect,
 	})
@@ -102,16 +97,9 @@ func (a *prodAdminAdapter) CreateTenantAdmin(ctx context.Context, email, name, p
 		return 0, err
 	}
 	now := timeNow()
-	res, err := a.db.ExecContext(ctx, a.dialect.Rewrite(`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified, full_name) VALUES (?,?,?,?,?,?,1,1,?)`),
+	return insertReturningID(ctx, a.db, a.dialect,
+		`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified, full_name) VALUES (?,?,?,?,?,?,1,1,?)`,
 		now, now, strings.TrimSpace(email), hash, role, tenantID, name)
-	if err != nil {
-		return 0, err
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return 0, err
-	}
-	return uint(id), nil
 }
 
 func (a *prodAdminAdapter) SoftDeleteUser(ctx context.Context, id, tenantID uint) error {
@@ -153,8 +141,10 @@ func (a *prodMailboxAdapter) SoftDeleteMailbox(ctx context.Context, id, tenantID
 
 // ── Alias ─────────────────────────────────────────────────────────────
 
+// prodAliasAdapter persists aliases directly through a dialect-portable
+// insert. The coremail AliasSQLRepo uses LastInsertId which is not
+// PostgreSQL-portable, so the importer adapter owns its own portable insert.
 type prodAliasAdapter struct {
-	repo    coremail.AliasRepository
 	db      *sql.DB
 	dialect *dbdialect.Info
 }
@@ -167,11 +157,10 @@ func (a *prodAliasAdapter) CreateAlias(ctx context.Context, fromEmail, toEmail s
 			return 0, err
 		}
 	}
-	al := &coremail.Alias{DomainID: domainID, TenantID: tenantID, FromAddr: fromEmail, ToAddr: toEmail, Active: true}
-	if err := a.repo.Create(ctx, al, nil); err != nil {
-		return 0, err
-	}
-	return al.ID, nil
+	now := timeNow()
+	return insertReturningID(ctx, a.db, a.dialect,
+		`INSERT INTO coremail_aliases (domain_id, tenant_id, from_addr, to_addr, active, created_at, updated_at) VALUES (?,?,?,?,1,?,?)`,
+		domainID, tenantID, fromEmail, toEmail, now, now)
 }
 
 func (a *prodAliasAdapter) SoftDeleteAlias(ctx context.Context, id, tenantID uint) error {
@@ -190,16 +179,9 @@ type prodGroupAdapter struct {
 
 func (a *prodGroupAdapter) CreateGroup(ctx context.Context, name, description string, tenantID uint) (uint, error) {
 	now := timeNow()
-	res, err := a.db.ExecContext(ctx, a.dialect.Rewrite(`INSERT INTO coremail_groups (tenant_id, name, description, created_at, updated_at) VALUES (?,?,?,?,?)`),
+	return insertReturningID(ctx, a.db, a.dialect,
+		`INSERT INTO coremail_groups (tenant_id, name, description, created_at, updated_at) VALUES (?,?,?,?,?)`,
 		tenantID, name, description, now, now)
-	if err != nil {
-		return 0, err
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return 0, err
-	}
-	return uint(id), nil
 }
 
 func (a *prodGroupAdapter) AddGroupMember(ctx context.Context, groupName, email string, tenantID uint) error {

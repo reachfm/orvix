@@ -657,7 +657,6 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 							OrgService:     router.h.OrganizationAdminService(),
 							DomainService:  router.h.DomainAdminService(),
 							MailboxService: router.h.MailboxAdminService(),
-							AliasRepo:      eng.Aliases,
 							DB:             sqlDB,
 							Dialect:        importDialect,
 						})

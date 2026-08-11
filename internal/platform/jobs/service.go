@@ -209,6 +209,14 @@ func (s *Service) RequestCancellation(ctx context.Context, id, tenantID uint, sc
 	return s.repo.RequestCancellation(ctx, id, tenantID, scope, s.clock.Now())
 }
 
+// Activate makes a held queued job claimable now (queued-activation handoff).
+// The importer submits a platform.import job held far in the future, links
+// the import to it, and only then activates it so a worker can never claim a
+// job whose import is not already linked and running.
+func (s *Service) Activate(ctx context.Context, id, tenantID uint, scope Scope) error {
+	return s.repo.Activate(ctx, id, tenantID, scope, s.clock.Now())
+}
+
 func (s *Service) CancellationRequested(ctx context.Context, lease Lease) (bool, error) {
 	return s.repo.CancellationRequested(ctx, lease)
 }

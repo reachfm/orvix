@@ -72,7 +72,10 @@ func (e *Executor) Execute(ctx context.Context, job *ImportJob, data []byte) (*E
 	}
 
 	var startFrom int
-	lastCp, _ := e.repo.LastCheckpoint(ctx, job.ID)
+	lastCp, cpErr := e.repo.LastCheckpoint(ctx, job.ID)
+	if cpErr != nil {
+		return nil, cpErr
+	}
 	if lastCp != nil {
 		startFrom = lastCp.ProcessedCount
 	}

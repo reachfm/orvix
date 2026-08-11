@@ -350,6 +350,34 @@ func (r *Repository) Heartbeat(ctx context.Context, lease Lease, now time.Time, 
 	return r.requireLeaseResult(ctx, lease, res, err)
 }
 
+// Activate makes a previously-held queued durable job claimable now by
+// moving its run_after into the past. Held jobs (submitted with a far-future
+// run_after) are never picked up by ClaimOne until this is called, which is
+// the queued-activation handoff the importer uses so a worker can never
+// claim a job whose import is not already linked and running. It is
+// idempotent: activating an already-claimable queued job succeeds.
+func (r *Repository) Activate(ctx context.Context, id, tenantID uint, scope Scope, now time.Time) error {
+	query := `UPDATE platform_jobs SET run_after=?,updated_at=? WHERE id=? AND status='queued' AND run_after > ?`
+	args := []any{now, now, id, now}
+	if scope == ScopeTenant {
+		query += ` AND tenant_id=? AND scope='tenant'`
+		args = append(args, tenantID)
+	} else {
+		query += ` AND scope='platform'`
+	}
+	res, err := r.db.ExecContext(ctx, r.q(query), args...)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
+	}
+	// Already claimable (run_after <= now) or terminal — idempotent success.
+	// Just confirm the job still exists in the given scope.
+	_, getErr := r.GetForScope(ctx, id, tenantID, scope)
+	return getErr
+}
+
 func (r *Repository) UpdateProgress(ctx context.Context, lease Lease, progress int, now time.Time) error {
 	res, err := r.db.ExecContext(ctx, r.q(`UPDATE platform_jobs SET progress=?,version=version+1,updated_at=? WHERE id=? AND status='running' AND lease_owner=? AND lease_token=? AND lease_version=? AND cancellation_requested_at IS NULL`), progress, now, lease.JobID, lease.Owner, lease.Token, lease.LeaseVersion)
 	return r.requireLeaseResult(ctx, lease, res, err)

@@ -15,6 +15,10 @@ import (
 type Repository struct {
 	db      *sql.DB
 	dialect *dbdialect.Info
+
+	// failMarkRunningAndLink is an unexported test-only failpoint used by
+	// the submission/link failure-injection tests.
+	failMarkRunningAndLink func() error
 }
 
 func NewRepository(db *sql.DB) *Repository {
@@ -23,6 +27,12 @@ func NewRepository(db *sql.DB) *Repository {
 		dialect = dbdialect.FromDriver("sqlite")
 	}
 	return &Repository{db: db, dialect: dialect}
+}
+
+// SetTestFailpoint installs the MarkRunningAndLink failure-injection hook.
+// Intended only for tests.
+func (r *Repository) SetTestFailpoint(fn func() error) {
+	r.failMarkRunningAndLink = fn
 }
 
 func (r *Repository) q(query string) string { return r.dialect.Rewrite(query) }
@@ -119,11 +129,23 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 	if _, err := r.db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_platform_import_idempotency_key ON platform_import_idempotency(scope,actor,tenant_id,idempotency_key)`); err != nil {
 		return fmt.Errorf("ensure import idempotency index: %w", err)
 	}
+	// pending cleanup table: recoverable staged-file cleanup records so a
+	// file that could not be removed immediately is retried, never silently
+	// orphaned.
+	pclddl := `CREATE TABLE IF NOT EXISTS platform_import_cleanup (
+		id ` + auto + `, import_id INTEGER NOT NULL DEFAULT 0, staging_id TEXT NOT NULL,
+		reason TEXT NOT NULL DEFAULT '', attempts INTEGER NOT NULL DEFAULT 0,
+		last_error TEXT NOT NULL DEFAULT '', created_at ` + ts + ` NOT NULL,
+		updated_at ` + ts + ` NOT NULL, resolved_at ` + ts + `)`
+	if _, err := r.db.ExecContext(ctx, pclddl); err != nil {
+		return fmt.Errorf("ensure platform_import_cleanup table: %w", err)
+	}
 	indexes := []string{
 		`CREATE INDEX IF NOT EXISTS idx_platform_imports_tenant ON platform_imports(tenant_id,scope,status)`,
 		`CREATE INDEX IF NOT EXISTS idx_platform_imports_hash ON platform_imports(source_hash)`,
 		`CREATE INDEX IF NOT EXISTS idx_platform_import_checkpoints_import ON platform_import_checkpoints(import_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_platform_import_cmp_import ON platform_import_compensations(import_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_platform_import_cleanup_unresolved ON platform_import_cleanup(import_id) WHERE resolved_at IS NULL`,
 	}
 	for _, idx := range indexes {
 		if _, err := r.db.ExecContext(ctx, idx); err != nil {
@@ -230,6 +252,49 @@ func (r *Repository) UpdateStatus(ctx context.Context, id uint, fromStatus, toSt
 	return nil
 }
 
+// MarkRunningAndLink atomically transitions the import to running and
+// records the durable job ID in a single transaction, so a worker can never
+// observe a running import without its durable job relationship. It is
+// idempotent: if the import is already running and linked to the same
+// durable job, it returns success so an idempotent retry recovers the same
+// job instead of creating a duplicate.
+func (r *Repository) MarkRunningAndLink(ctx context.Context, id uint, fromStatus ImportStatus, version int, jobID uint, now time.Time) error {
+	if r.failMarkRunningAndLink != nil {
+		if err := r.failMarkRunningAndLink(); err != nil {
+			return err
+		}
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, r.q(`UPDATE platform_imports SET status=?,job_id=?,version=version+1,updated_at=? WHERE id=? AND status=? AND version=?`),
+		StatusRunning, jobID, now, id, fromStatus, version)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// Idempotent retry: already running and linked to the same job?
+		var currentStatus ImportStatus
+		var currentJobID uint
+		if err := tx.QueryRowContext(ctx, r.q(`SELECT status,job_id FROM platform_imports WHERE id=?`), id).Scan(&currentStatus, &currentJobID); err != nil {
+			return err
+		}
+		if currentStatus == StatusRunning && currentJobID == jobID {
+			if err := tx.Commit(); err != nil {
+				return err
+			}
+			return nil
+		}
+		return kernel.InvalidStateTransition(string(fromStatus), string(StatusRunning))
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (r *Repository) UpdateProgress(ctx context.Context, id uint, processed, succeeded, skipped, failed int, checkpoint int, entity ImportEntityType, rowIndex int) error {
 	_, err := r.db.ExecContext(ctx, r.q(`UPDATE platform_imports SET processed_rows=?,succeeded_rows=?,skipped_rows=?,failed_rows=?,current_checkpoint=?,checkpoint_entity=?,checkpoint_row=?,updated_at=? WHERE id=?`), processed, succeeded, skipped, failed, checkpoint, entity, rowIndex, time.Now().UTC(), id)
 	return err
@@ -248,8 +313,11 @@ func (r *Repository) UpdateStatusAndHash(ctx context.Context, id uint, status Im
 }
 
 func (r *Repository) SaveValidationReport(ctx context.Context, id uint, report *ValidationReport, hash string) error {
-	raw, _ := json.Marshal(report)
-	_, err := r.db.ExecContext(ctx, r.q(`UPDATE platform_imports SET validation_report=?,source_hash=?,total_rows=?,processed_rows=0,succeeded_rows=0,skipped_rows=0,failed_rows=0,updated_at=? WHERE id=?`), string(raw), hash, report.Total, time.Now().UTC(), id)
+	raw, err := json.Marshal(report)
+	if err != nil {
+		return kernel.Wrap(kernel.ErrCodeInternal, "encode validation report", err)
+	}
+	_, err = r.db.ExecContext(ctx, r.q(`UPDATE platform_imports SET validation_report=?,source_hash=?,total_rows=?,processed_rows=0,succeeded_rows=0,skipped_rows=0,failed_rows=0,updated_at=? WHERE id=?`), string(raw), hash, report.Total, time.Now().UTC(), id)
 	return err
 }
 
@@ -265,9 +333,15 @@ func (r *Repository) GetActiveForSource(ctx context.Context, sourceHash string, 
 }
 
 func (r *Repository) SaveCheckpoint(ctx context.Context, cp *Checkpoint) error {
-	ids, _ := json.Marshal(cp.SucceededIDs)
-	failed, _ := json.Marshal(cp.FailedRows)
-	_, err := r.db.ExecContext(ctx, r.q(`INSERT INTO platform_import_checkpoints (import_id,entity,row_index,succeeded_ids,failed_rows,processed_count,committed_at) VALUES (?,?,?,?,?,?,?)`), cp.ImportID, cp.Entity, cp.RowIndex, string(ids), string(failed), cp.ProcessedCount, cp.CommittedAt)
+	ids, err := json.Marshal(cp.SucceededIDs)
+	if err != nil {
+		return kernel.Wrap(kernel.ErrCodeInternal, "encode checkpoint succeeded ids", err)
+	}
+	failed, err := json.Marshal(cp.FailedRows)
+	if err != nil {
+		return kernel.Wrap(kernel.ErrCodeInternal, "encode checkpoint failed rows", err)
+	}
+	_, err = r.db.ExecContext(ctx, r.q(`INSERT INTO platform_import_checkpoints (import_id,entity,row_index,succeeded_ids,failed_rows,processed_count,committed_at) VALUES (?,?,?,?,?,?,?)`), cp.ImportID, cp.Entity, cp.RowIndex, string(ids), string(failed), cp.ProcessedCount, cp.CommittedAt)
 	return err
 }
 
@@ -281,8 +355,12 @@ func (r *Repository) LastCheckpoint(ctx context.Context, importID uint) (*Checkp
 		}
 		return nil, err
 	}
-	json.Unmarshal([]byte(idsStr), &cp.SucceededIDs)
-	json.Unmarshal([]byte(failedStr), &cp.FailedRows)
+	if err := json.Unmarshal([]byte(idsStr), &cp.SucceededIDs); err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "decode checkpoint succeeded ids", err)
+	}
+	if err := json.Unmarshal([]byte(failedStr), &cp.FailedRows); err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "decode checkpoint failed rows", err)
+	}
 	return &cp, nil
 }
 
@@ -335,6 +413,59 @@ func (r *Repository) CompensationExistsForRow(ctx context.Context, importID uint
 	return c > 0, nil
 }
 
+// PendingCleanup records a staged file that could not be removed. It is
+// persisted so a later reconciliation pass can retry the removal instead of
+// silently leaving an orphaned file.
+type PendingCleanup struct {
+	ID        uint
+	ImportID  uint
+	StagingID string
+	Reason    string
+	Attempts  int
+	LastError string
+	CreatedAt time.Time
+}
+
+// RecordPendingCleanup persists a recoverable staged-file cleanup record.
+func (r *Repository) RecordPendingCleanup(ctx context.Context, importID uint, stagingID, reason string, now time.Time) error {
+	_, err := r.db.ExecContext(ctx, r.q(`INSERT INTO platform_import_cleanup (import_id, staging_id, reason, attempts, last_error, created_at, updated_at) VALUES (?,?,?,0,'',?,?)`),
+		importID, stagingID, reason, now, now)
+	if err != nil {
+		return kernel.Wrap(kernel.ErrCodeInternal, "persist pending staged-file cleanup", err)
+	}
+	return nil
+}
+
+// PendingCleanups returns all unresolved cleanup records for an import.
+func (r *Repository) PendingCleanups(ctx context.Context, importID uint) ([]PendingCleanup, error) {
+	rows, err := r.db.QueryContext(ctx, r.q(`SELECT id,import_id,staging_id,reason,attempts,last_error,created_at FROM platform_import_cleanup WHERE import_id=? AND resolved_at IS NULL ORDER BY id`), importID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PendingCleanup
+	for rows.Next() {
+		var pc PendingCleanup
+		if err := rows.Scan(&pc.ID, &pc.ImportID, &pc.StagingID, &pc.Reason, &pc.Attempts, &pc.LastError, &pc.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, pc)
+	}
+	return out, rows.Err()
+}
+
+// BumpCleanupAttempt records a failed removal attempt for a pending cleanup.
+func (r *Repository) BumpCleanupAttempt(ctx context.Context, id uint, lastError string, now time.Time) error {
+	_, err := r.db.ExecContext(ctx, r.q(`UPDATE platform_import_cleanup SET attempts=attempts+1,last_error=?,updated_at=? WHERE id=? AND resolved_at IS NULL`), lastError, now, id)
+	return err
+}
+
+// ResolveCleanup marks a pending cleanup as resolved.
+func (r *Repository) ResolveCleanup(ctx context.Context, id uint, now time.Time) error {
+	_, err := r.db.ExecContext(ctx, r.q(`UPDATE platform_import_cleanup SET resolved_at=?,updated_at=? WHERE id=?`), now, now, id)
+	return err
+}
+
 func (r *Repository) UpdateStagingID(ctx context.Context, id uint, stagingID string) error {
 	_, err := r.db.ExecContext(ctx, r.q(`UPDATE platform_imports SET staging_id=?,updated_at=? WHERE id=?`), stagingID, time.Now().UTC(), id)
 	return err
@@ -350,6 +481,10 @@ func (r *Repository) UpdateStagingID(ctx context.Context, id uint, stagingID str
 //   - (nil, false, err): the key was reused with a different request hash
 //     (ErrCodeIdempotencyReuse), the key is currently in flight
 //     (ErrIdempotencyInFlight), or a persistence error occurred.
+//
+// A row that is in flight but older than the stale threshold is treated as
+// abandoned (the claiming process crashed before Complete/Abandon) so a
+// retry is a fresh attempt rather than a permanently stuck "in flight".
 func (r *Repository) IdempotencyBegin(ctx context.Context, scope, actor string, tenantID uint, key, requestHash string, now time.Time) (*StoredResult, bool, error) {
 	var existingHash, responseBody string
 	var statusCode int
@@ -375,10 +510,29 @@ func (r *Repository) IdempotencyBegin(ctx context.Context, scope, actor string, 
 		return nil, false, kernel.NewError(kernel.ErrCodeIdempotencyReuse, "idempotency key was already used for a different request")
 	}
 	if !completedAt.Valid {
+		// In flight. If the claim is stale (older than the stale window), the
+		// owning process crashed before completing or abandoning; reclaim it
+		// so the retry is a fresh attempt and cannot be stuck forever.
+		var createdAt time.Time
+		if scanErr := r.db.QueryRowContext(ctx, r.q(`SELECT created_at FROM platform_import_idempotency WHERE scope=? AND actor=? AND tenant_id=? AND idempotency_key=?`),
+			scope, actor, tenantID, key).Scan(&createdAt); scanErr != nil {
+			return nil, false, kernel.Wrap(kernel.ErrCodeInternal, "lookup in-flight import idempotency claim", scanErr)
+		}
+		if now.Sub(createdAt) > StaleIdempotencyWindow {
+			if _, abandonErr := r.db.ExecContext(ctx, r.q(`DELETE FROM platform_import_idempotency WHERE scope=? AND actor=? AND tenant_id=? AND idempotency_key=? AND completed_at IS NULL`),
+				scope, actor, tenantID, key); abandonErr != nil {
+				return nil, false, kernel.Wrap(kernel.ErrCodeInternal, "reclaim stale import idempotency claim", abandonErr)
+			}
+			return r.IdempotencyBegin(ctx, scope, actor, tenantID, key, requestHash, now)
+		}
 		return nil, false, kernel.ErrIdempotencyInFlight
 	}
 	return &StoredResult{StatusCode: statusCode, ResponseBody: responseBody}, true, nil
 }
+
+// StaleIdempotencyWindow is how long an in-flight idempotency claim may
+// remain before a retry treats it as abandoned (the owner crashed).
+const StaleIdempotencyWindow = 10 * time.Minute
 
 // IdempotencyComplete records a successful outcome for an idempotency key.
 func (r *Repository) IdempotencyComplete(ctx context.Context, scope, actor string, tenantID uint, key string, statusCode int, response any, now time.Time) error {
