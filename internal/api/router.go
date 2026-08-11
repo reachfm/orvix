@@ -624,7 +624,7 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		jobRegistry := platformjobs.NewRegistry()
 		if err := jobRepo.EnsureSchema(context.Background()); err != nil {
 			logger.Error("automation jobs schema initialization failed", zap.Error(err))
-		} else if err := platformjobs.RegisterProductionHandlers(jobRegistry, router.h.CustomerDomainService(), router.h.WebhookService()); err != nil {
+		} else if err := platformjobs.RegisterProductionHandlers(jobRegistry, router.h.CustomerDomainService(), router.h.WebhookService(), nil); err != nil {
 			logger.Error("automation jobs handler registration failed", zap.Error(err))
 		} else {
 			jobService := platformjobs.NewServiceWithRegistry(jobRepo, jobRegistry, kernel.SystemClock{})
@@ -1186,6 +1186,8 @@ func (r *Router) setupRoutes() {
 	canWriteBilling := enterpriseRead.Group("", authrbac.Require(authrbac.PermBillingWrite))
 	canWriteAliases := enterpriseRead.Group("", authrbac.Require(authrbac.PermAliasesWrite))
 	canWriteGroups := enterpriseRead.Group("", authrbac.Require(authrbac.PermGroupsWrite))
+	canWriteImports := enterpriseRead.Group("", authrbac.Require(authrbac.PermImportsWrite))
+	canExecuteImports := enterpriseRead.Group("", authrbac.Require(authrbac.PermImportsExecute))
 
 	// ── Dashboard ──
 	enterpriseRead.Get("/dashboard", r.h.CustomerDashboard)
@@ -1315,11 +1317,12 @@ func (r *Router) setupRoutes() {
 	enterpriseRead.Get("/imports", r.h.ListImports)
 	enterpriseRead.Get("/imports/:id", r.h.GetImport)
 	enterpriseRead.Get("/imports/:id/report", r.h.GetImportReport)
-	canWriteOrgs.Post("/imports", r.h.CreateImport)
-	canWriteOrgs.Post("/imports/:id/validate", r.h.ValidateImport)
-	canWriteOrgs.Post("/imports/:id/execute", r.h.ExecuteImport)
-	canWriteOrgs.Post("/imports/:id/cancel", r.h.CancelImport)
-	canWriteOrgs.Post("/imports/:id/compensate", r.h.CompensateImport)
+	canWriteImports.Post("/imports", r.h.CreateImport)
+	canWriteImports.Post("/imports/:id/validate", r.h.ValidateImport)
+	canExecuteImports.Post("/imports/:id/execute", r.h.ExecuteImport)
+	canExecuteImports.Post("/imports/:id/resume", r.h.ResumeImport)
+	canExecuteImports.Post("/imports/:id/cancel", r.h.CancelImport)
+	canExecuteImports.Post("/imports/:id/compensate", r.h.CompensateImport)
 
 	// CSRF is enforced on the entire admin group by default (deny-list,
 	// not allow-list) rather than only on routes an author remembered to
@@ -1708,6 +1711,7 @@ func (r *Router) setupRoutes() {
 	protected.Post("/platform/imports", platformMW[0], platformMW[1], r.h.CreateImport)
 	protected.Post("/platform/imports/:id/validate", platformMW[0], platformMW[1], r.h.ValidateImport)
 	protected.Post("/platform/imports/:id/execute", platformMW[0], platformMW[1], r.h.ExecuteImport)
+	protected.Post("/platform/imports/:id/resume", platformMW[0], platformMW[1], r.h.ResumeImport)
 	protected.Post("/platform/imports/:id/cancel", platformMW[0], platformMW[1], r.h.CancelImport)
 	protected.Post("/platform/imports/:id/compensate", platformMW[0], platformMW[1], r.h.CompensateImport)
 

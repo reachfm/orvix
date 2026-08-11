@@ -2,21 +2,19 @@ package importer
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
 )
 
 type Executor struct {
-	adapters       *ServiceAdapters
+	adapters       *Adapters
 	repo           *Repository
 	tenantID       uint
 	idempotencyKey string
 }
 
-func NewExecutor(adapters *ServiceAdapters, repo *Repository, tenantID uint, idempotencyKey string) *Executor {
+func NewExecutor(adapters *Adapters, repo *Repository, tenantID uint, idempotencyKey string) *Executor {
 	return &Executor{
 		adapters:       adapters,
 		repo:           repo,
@@ -51,8 +49,7 @@ func (e *Executor) Execute(ctx context.Context, job *ImportJob, data []byte) (*E
 		startFrom = lastCp.ProcessedCount
 	}
 
-	entities := source.Entities
-	if startFrom >= len(entities) {
+	if startFrom >= len(source.Entities) {
 		return &ExecutionResult{}, nil
 	}
 
@@ -62,7 +59,7 @@ func (e *Executor) Execute(ctx context.Context, job *ImportJob, data []byte) (*E
 	skipped := 0
 	failed := 0
 
-	ordered := reorderEntities(entities)
+	ordered := reorderEntities(source.Entities)
 	for i := startFrom; i < len(ordered); i++ {
 		entity := ordered[i]
 		if len(entity.Errors) > 0 {
@@ -106,8 +103,8 @@ func (e *Executor) Execute(ctx context.Context, job *ImportJob, data []byte) (*E
 				ProcessedCount: processed,
 				CommittedAt:    time.Now().UTC(),
 			}
-			if err := e.repo.SaveCheckpoint(ctx, checkpoint); err != nil {
-				return nil, err
+			if cpErr := e.repo.SaveCheckpoint(ctx, checkpoint); cpErr != nil {
+				return nil, cpErr
 			}
 			e.repo.UpdateProgress(ctx, job.ID, processed, succeeded+job.SucceededRows, skipped+job.SkippedRows, failed+job.FailedRows, processed, entity.Entity, entity.Line)
 		}
@@ -144,7 +141,7 @@ func (e *Executor) executeEntity(ctx context.Context, entity ParsedEntity, job *
 func (e *Executor) createOrganization(ctx context.Context, entity ParsedEntity, job *ImportJob) (uint, error) {
 	name := fieldStr(entity.Raw, "name")
 	domain := fieldStr(entity.Raw, "domain")
-	return e.adapters.CreateOrganization(name, domain, job.TenantID)
+	return e.adapters.Org.CreateOrganization(ctx, name, domain, job.TenantID)
 }
 
 func (e *Executor) createTenantAdmin(ctx context.Context, entity ParsedEntity, job *ImportJob) (uint, error) {
@@ -155,27 +152,12 @@ func (e *Executor) createTenantAdmin(ctx context.Context, entity ParsedEntity, j
 	if role == "" {
 		role = "tenant_admin"
 	}
-
-	var exists int
-	if err := e.adapters.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE email=? AND deleted_at IS NULL`, email).Scan(&exists); err == nil && exists > 0 {
-		return 0, nil
-	}
-
-	h := sha256.Sum256([]byte(password))
-	hash := hex.EncodeToString(h[:])
-
-	_, err := e.adapters.db.ExecContext(ctx,
-		`INSERT INTO users (tenant_id, email, name, password_hash, role, status, created_at, updated_at) VALUES (?,?,?,?,?,'active',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
-		job.TenantID, email, name, hash, role)
-	if err != nil {
-		return 0, err
-	}
-	return uint(job.ID*1000 + uint(len(password))), nil
+	return e.adapters.Admin.CreateTenantAdmin(ctx, email, name, password, role, job.TenantID)
 }
 
 func (e *Executor) createDomain(ctx context.Context, entity ParsedEntity, job *ImportJob) (uint, error) {
 	name := fieldStr(entity.Raw, "name", "domain")
-	return e.adapters.CreateDomain(name, job.TenantID)
+	return e.adapters.Domain.CreateDomain(ctx, name, job.TenantID)
 }
 
 func (e *Executor) createMailbox(ctx context.Context, entity ParsedEntity, job *ImportJob) (uint, error) {
@@ -183,48 +165,34 @@ func (e *Executor) createMailbox(ctx context.Context, entity ParsedEntity, job *
 	name := fieldStr(entity.Raw, "name")
 	domain := fieldStr(entity.Raw, "domain")
 	password := fieldStr(entity.Raw, "password")
-	_ = password
 
 	parts := strings.SplitN(email, "@", 2)
 	if len(parts) == 2 && domain == "" {
 		domain = parts[1]
 	}
 
-	return e.adapters.CreateMailbox(email, name, password, domain, job.TenantID)
+	return e.adapters.Mailbox.CreateMailbox(ctx, email, name, password, domain, job.TenantID)
 }
 
 func (e *Executor) createAlias(ctx context.Context, entity ParsedEntity, job *ImportJob) (uint, error) {
 	from := fieldStr(entity.Raw, "from_addr", "from", "alias")
 	to := fieldStr(entity.Raw, "to_addr", "to", "forward_to")
-
-	fromParts := strings.SplitN(from, "@", 2)
-	var domainID int64
-	if len(fromParts) == 2 {
-		e.adapters.db.QueryRowContext(ctx, `SELECT id FROM coremail_domains WHERE name=? AND tenant_id=? AND deleted_at IS NULL`, strings.ToLower(fromParts[1]), job.TenantID).Scan(&domainID)
-	}
-
-	return e.adapters.CreateAlias(from, to, job.TenantID, uint(domainID))
+	return e.adapters.Alias.CreateAlias(ctx, from, to, job.TenantID, 0)
 }
 
 func (e *Executor) createGroup(ctx context.Context, entity ParsedEntity, job *ImportJob) (uint, error) {
 	name := fieldStr(entity.Raw, "name")
 	description := fieldStr(entity.Raw, "description")
-	return e.adapters.CreateGroup(name, description, job.TenantID)
+	return e.adapters.Group.CreateGroup(ctx, name, description, job.TenantID)
 }
 
 func (e *Executor) createGroupMembership(ctx context.Context, entity ParsedEntity, job *ImportJob) (uint, error) {
 	groupName := fieldStr(entity.Raw, "group_name", "group")
 	email := fieldStr(entity.Raw, "email", "member_email")
-
-	var groupID uint
-	if err := e.adapters.db.QueryRowContext(ctx, `SELECT id FROM coremail_groups WHERE name=? AND tenant_id=? AND deleted_at IS NULL`, groupName, job.TenantID).Scan(&groupID); err != nil {
-		return 0, fmt.Errorf("group not found: %s", groupName)
-	}
-
-	if err := e.adapters.AddGroupMember(groupID, email); err != nil {
+	if err := e.adapters.Group.AddGroupMember(ctx, groupName, email, job.TenantID); err != nil {
 		return 0, err
 	}
-	return groupID, nil
+	return 0, nil
 }
 
 func reorderEntities(entities []ParsedEntity) []ParsedEntity {

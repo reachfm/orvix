@@ -107,6 +107,12 @@ const (
 	PermJobsRead  Permission = "jobs.read"
 	PermJobsWrite Permission = "jobs.write"
 
+	// Imports.
+	PermImportsRead    Permission = "imports.read"
+	PermImportsWrite   Permission = "imports.write"
+	PermImportsExecute Permission = "imports.execute"
+	PermImportsAdmin   Permission = "imports.admin"
+
 	// Billing.
 	PermBillingRead  Permission = "billing.read"
 	PermBillingWrite Permission = "billing.write"
@@ -155,6 +161,10 @@ var AllPermissions = []Permission{
 	PermAPIKeysWrite,
 	PermJobsRead,
 	PermJobsWrite,
+	PermImportsRead,
+	PermImportsWrite,
+	PermImportsExecute,
+	PermImportsAdmin,
 	PermBillingRead,
 	PermBillingWrite,
 	PermPlatformOrganizationsRead,
@@ -241,8 +251,8 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermSecurityRead:     true,
 		PermBillingRead:      true,
 		PermJobsRead:         true, PermJobsWrite: true,
+		PermImportsRead: true, PermImportsWrite: true, PermImportsExecute: true,
 	},
-	// Tenant Support: read + password reset + mailbox status.
 	auth.RoleTenantSupport: {
 		PermDashboardRead: true,
 		PermDomainsRead:   true,
@@ -260,6 +270,7 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermSecurityRead:      true,
 		PermBillingRead:       true,
 		PermJobsRead:          true,
+		PermImportsRead:       true,
 	},
 	// Tenant Read Only.
 	auth.RoleTenantReadOnly: {

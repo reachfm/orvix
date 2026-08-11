@@ -49,6 +49,10 @@ func (s ImportStatus) IsTerminal() bool {
 	}
 }
 
+func (j *ImportJob) IsTerminal() bool {
+	return j.Status.IsTerminal()
+}
+
 func (s ImportStatus) CanTransition(to ImportStatus) bool {
 	return importTransitions[s][to]
 }
@@ -181,6 +185,9 @@ type ImportJob struct {
 	LastError string `json:"last_error,omitempty"`
 
 	JobID      uint   `json:"job_id,omitempty"`
+	StagingID  string `json:"-"`
+	StoredSize int64  `json:"stored_size,omitempty"`
+
 	LeaseOwner string `json:"-"`
 	LeaseToken string `json:"-"`
 

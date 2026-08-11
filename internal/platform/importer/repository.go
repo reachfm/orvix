@@ -27,7 +27,7 @@ func NewRepository(db *sql.DB) *Repository {
 
 func (r *Repository) q(query string) string { return r.dialect.Rewrite(query) }
 
-const importColumns = `id,tenant_id,scope,actor,source_type,conflict_policy,schema_version,status,source_hash,source_name,total_rows,processed_rows,succeeded_rows,skipped_rows,failed_rows,current_checkpoint,checkpoint_entity,checkpoint_row,last_error,job_id,validation_report,created_at,updated_at,version`
+const importColumns = `id,tenant_id,scope,actor,source_type,conflict_policy,schema_version,status,source_hash,source_name,staging_id,stored_size,total_rows,processed_rows,succeeded_rows,skipped_rows,failed_rows,current_checkpoint,checkpoint_entity,checkpoint_row,last_error,job_id,validation_report,created_at,updated_at,version`
 
 func (r *Repository) EnsureSchema(ctx context.Context) error {
 	ts, auto := r.dialect.TimestampType(), r.dialect.AutoIncrement()
@@ -36,6 +36,7 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 		actor TEXT NOT NULL DEFAULT '', source_type TEXT NOT NULL, conflict_policy TEXT NOT NULL DEFAULT 'fail',
 		schema_version INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'uploaded',
 		source_hash TEXT NOT NULL DEFAULT '', source_name TEXT NOT NULL DEFAULT '',
+		staging_id TEXT NOT NULL DEFAULT '', stored_size BIGINT NOT NULL DEFAULT 0,
 		total_rows INTEGER NOT NULL DEFAULT 0, processed_rows INTEGER NOT NULL DEFAULT 0,
 		succeeded_rows INTEGER NOT NULL DEFAULT 0, skipped_rows INTEGER NOT NULL DEFAULT 0,
 		failed_rows INTEGER NOT NULL DEFAULT 0, current_checkpoint INTEGER NOT NULL DEFAULT 0,
@@ -79,10 +80,11 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 }
 
 func (r *Repository) Create(ctx context.Context, job *ImportJob) error {
-	query := r.q(`INSERT INTO platform_imports (tenant_id,scope,actor,source_type,conflict_policy,schema_version,status,source_hash,source_name,total_rows,processed_rows,succeeded_rows,skipped_rows,failed_rows,current_checkpoint,checkpoint_entity,checkpoint_row,last_error,job_id,validation_report,created_at,updated_at,version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	query := r.q(`INSERT INTO platform_imports (tenant_id,scope,actor,source_type,conflict_policy,schema_version,status,source_hash,source_name,staging_id,stored_size,total_rows,processed_rows,succeeded_rows,skipped_rows,failed_rows,current_checkpoint,checkpoint_entity,checkpoint_row,last_error,job_id,validation_report,created_at,updated_at,version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	args := []any{
 		job.TenantID, job.Scope, job.Actor, job.SourceType, job.ConflictPolicy,
 		job.SchemaVersion, job.Status, job.SourceHash, job.SourceName,
+		job.StagingID, job.StoredSize,
 		job.TotalRows, job.ProcessedRows, job.SucceededRows, job.SkippedRows, job.FailedRows,
 		job.CurrentCheckpoint, job.CheckpointEntity, job.CheckpointRow,
 		job.LastError, job.JobID, job.ValidationReportRaw,
@@ -266,13 +268,25 @@ func (r *Repository) UpdateCompensationStatus(ctx context.Context, importID, res
 	return execErr
 }
 
+func (r *Repository) UpdateStagingID(ctx context.Context, id uint, stagingID string) error {
+	_, err := r.db.ExecContext(ctx, r.q(`UPDATE platform_imports SET staging_id=?,updated_at=? WHERE id=?`), stagingID, time.Now().UTC(), id)
+	return err
+}
+
+func (r *Repository) LinkJobID(ctx context.Context, importID, durableJobID uint) error {
+	_, err := r.db.ExecContext(ctx, r.q(`UPDATE platform_imports SET job_id=?,updated_at=? WHERE id=?`), durableJobID, time.Now().UTC(), importID)
+	return err
+}
+
 func scanImportJob(row *sql.Row) (*ImportJob, error) {
 	var job ImportJob
 	var report string
-	var sourceType, conflictPolicy, status string
+	var sourceType, conflictPolicy, status, stagingID string
+	var storedSize int64
 	err := row.Scan(&job.ID, &job.TenantID, &job.Scope, &job.Actor,
 		&sourceType, &conflictPolicy, &job.SchemaVersion, &status,
-		&job.SourceHash, &job.SourceName, &job.TotalRows, &job.ProcessedRows,
+		&job.SourceHash, &job.SourceName, &stagingID, &storedSize,
+		&job.TotalRows, &job.ProcessedRows,
 		&job.SucceededRows, &job.SkippedRows, &job.FailedRows,
 		&job.CurrentCheckpoint, &job.CheckpointEntity, &job.CheckpointRow,
 		&job.LastError, &job.JobID, &report, &job.CreatedAt, &job.UpdatedAt, &job.Version)
@@ -282,6 +296,8 @@ func scanImportJob(row *sql.Row) (*ImportJob, error) {
 	job.SourceType = ImportSourceType(sourceType)
 	job.ConflictPolicy = ConflictPolicy(conflictPolicy)
 	job.Status = ImportStatus(status)
+	job.StagingID = stagingID
+	job.StoredSize = storedSize
 	job.ValidationReportRaw = report
 	return &job, nil
 }
@@ -289,10 +305,12 @@ func scanImportJob(row *sql.Row) (*ImportJob, error) {
 func scanImportRows(rows *sql.Rows) (*ImportJob, error) {
 	var job ImportJob
 	var report string
-	var sourceType, conflictPolicy, status string
+	var sourceType, conflictPolicy, status, stagingID string
+	var storedSize int64
 	err := rows.Scan(&job.ID, &job.TenantID, &job.Scope, &job.Actor,
 		&sourceType, &conflictPolicy, &job.SchemaVersion, &status,
-		&job.SourceHash, &job.SourceName, &job.TotalRows, &job.ProcessedRows,
+		&job.SourceHash, &job.SourceName, &stagingID, &storedSize,
+		&job.TotalRows, &job.ProcessedRows,
 		&job.SucceededRows, &job.SkippedRows, &job.FailedRows,
 		&job.CurrentCheckpoint, &job.CheckpointEntity, &job.CheckpointRow,
 		&job.LastError, &job.JobID, &report, &job.CreatedAt, &job.UpdatedAt, &job.Version)
@@ -302,6 +320,8 @@ func scanImportRows(rows *sql.Rows) (*ImportJob, error) {
 	job.SourceType = ImportSourceType(sourceType)
 	job.ConflictPolicy = ConflictPolicy(conflictPolicy)
 	job.Status = ImportStatus(status)
+	job.StagingID = stagingID
+	job.StoredSize = storedSize
 	job.ValidationReportRaw = report
 	return &job, nil
 }

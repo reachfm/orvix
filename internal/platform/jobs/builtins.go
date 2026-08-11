@@ -16,7 +16,11 @@ type WebhookProcessor interface {
 	ProcessPendingDeliveries(context.Context, int) error
 }
 
-func RegisterProductionHandlers(registry *Registry, domains DomainVerifier, webhooks WebhookProcessor) error {
+type ImportExecutor interface {
+	HandleImportJob(ctx context.Context, exec Execution, payload json.RawMessage) (json.RawMessage, error)
+}
+
+func RegisterProductionHandlers(registry *Registry, domains DomainVerifier, webhooks WebhookProcessor, imports ImportExecutor) error {
 	if domains != nil {
 		if err := registry.Register(Definition{Type: "tenant.domain.verify", Scope: ScopeTenant, PayloadVersion: 1, Timeout: 2 * time.Minute, Validate: validateDomainVerification, Handle: func(ctx context.Context, execution Execution, payload json.RawMessage) (json.RawMessage, error) {
 			var body domainVerificationPayload
@@ -51,6 +55,23 @@ func RegisterProductionHandlers(registry *Registry, domains DomainVerifier, webh
 				return err
 			}
 		}
+	}
+	if imports != nil {
+		if err := registry.Register(Definition{Type: "platform.import", Scope: ScopePlatform, PayloadVersion: 1, Timeout: 30 * time.Minute, Validate: validateImportPayload, Handle: imports.HandleImportJob}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type importPayload struct {
+	ImportID uint `json:"import_id"`
+}
+
+func validateImportPayload(payload json.RawMessage) error {
+	var body importPayload
+	if json.Unmarshal(payload, &body) != nil || body.ImportID == 0 {
+		return fmt.Errorf("import_id is required")
 	}
 	return nil
 }

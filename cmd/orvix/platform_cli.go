@@ -804,8 +804,15 @@ func runImports(args []string, deps platformCLIDeps, fs *flag.FlagSet) int {
 	ctx := context.Background()
 
 	repo := importerRepo(db)
-	adapters := importer.NewServiceAdapters(db, nil, nil, nil, nil, nil)
-	svc := importer.NewService(repo, adapters, nil)
+	adapters := importer.NewAdapters(
+		cliOrgPort{db: db},
+		cliAdminPort{db: db},
+		cliDomainPort{db: db},
+		cliMailboxPort{db: db},
+		cliAliasPort{db: db},
+		cliGroupPort{db: db},
+	)
+	svc := importer.NewService(repo, adapters, nil, nil, nil)
 
 	switch action {
 	case "list":
@@ -841,8 +848,27 @@ func runImports(args []string, deps platformCLIDeps, fs *flag.FlagSet) int {
 		if outputJSON {
 			json.NewEncoder(deps.stdout).Encode(job)
 		} else {
-			fmt.Fprintf(deps.stdout, "ID: %d\nSource: %s\nStatus: %s\nPolicy: %s\nTotal: %d\nSucceeded: %d\nFailed: %d\n",
-				job.ID, job.SourceType, job.Status, job.ConflictPolicy, job.TotalRows, job.SucceededRows, job.FailedRows)
+			fmt.Fprintf(deps.stdout, "ID: %d\nSource: %s\nStatus: %s\nPolicy: %s\nHash: %s\nTotal: %d\nSucceeded: %d\nFailed: %d\nCheckpoint: %d/%d\n",
+				job.ID, job.SourceType, job.Status, job.ConflictPolicy, job.SourceHash[:16], job.TotalRows, job.SucceededRows, job.FailedRows, job.CurrentCheckpoint, job.TotalRows)
+		}
+		return exitSuccess
+
+	case "validate":
+		if *iid <= 0 {
+			fmt.Fprintln(deps.stderr, "--id is required")
+			return exitBadArgs
+		}
+		report, cerr := svc.Validate(ctx, uint(*iid), 0, "platform")
+		if cerr != nil {
+			fmt.Fprintf(deps.stderr, "validation error: %v\n", cerr)
+			return exitInternal
+		}
+		if outputJSON {
+			json.NewEncoder(deps.stdout).Encode(report)
+		} else {
+			fmt.Fprintf(deps.stdout, "Validation report (ID %d):\n", report.ImportID)
+			fmt.Fprintf(deps.stdout, "  Total: %d\n  Valid: %d\n  Invalid: %d\n  Conflict: %d\n  Deferred: %d\n  Unchanged: %d\n",
+				report.Total, report.Valid, report.Invalid, report.Conflict, report.Deferred, report.Unchanged)
 		}
 		return exitSuccess
 
@@ -861,7 +887,14 @@ func runImports(args []string, deps platformCLIDeps, fs *flag.FlagSet) int {
 			fmt.Fprintln(deps.stderr, "import job not found")
 			return exitNotFound
 		}
-		printOK(deps, fmt.Sprintf("Import %d queued for execution", job.ID), map[string]any{"id": job.ID, "status": string(job.Status)})
+		// Execute submits the durable job
+		idemKey := "cli-" + fmt.Sprintf("%d-%d", job.ID, deps.now().Unix())
+		result, exerr := svc.Execute(ctx, uint(*iid), 0, "platform", idemKey, want)
+		if exerr != nil {
+			fmt.Fprintf(deps.stderr, "execute error: %v\n", exerr)
+			return exitInternal
+		}
+		printOK(deps, fmt.Sprintf("Import %d queued for execution (status: %s)", result.ID, result.Status), map[string]any{"id": result.ID, "status": string(result.Status)})
 		return exitSuccess
 
 	case "cancel":
@@ -877,6 +910,20 @@ func runImports(args []string, deps platformCLIDeps, fs *flag.FlagSet) int {
 		printOK(deps, fmt.Sprintf("Import %d cancelled", job.ID), nil)
 		return exitSuccess
 
+	case "resume":
+		if *iid <= 0 {
+			fmt.Fprintln(deps.stderr, "--id is required")
+			return exitBadArgs
+		}
+		idemKey := "cli-resume-" + fmt.Sprintf("%d-%d", *iid, deps.now().Unix())
+		job, rerr := svc.Resume(ctx, uint(*iid), 0, "platform", idemKey)
+		if rerr != nil {
+			fmt.Fprintf(deps.stderr, "resume error: %v\n", rerr)
+			return exitInternal
+		}
+		printOK(deps, fmt.Sprintf("Import %d resumed (status: %s)", job.ID, job.Status), map[string]any{"id": job.ID, "status": string(job.Status)})
+		return exitSuccess
+
 	case "compensate":
 		if *iid <= 0 {
 			fmt.Fprintln(deps.stderr, "--id is required")
@@ -887,7 +934,7 @@ func runImports(args []string, deps platformCLIDeps, fs *flag.FlagSet) int {
 			fmt.Fprintln(deps.stderr, "confirmation refused")
 			return exitConfirmRefused
 		}
-		job, cerr := svc.Compensate(ctx, uint(*iid), 0, "platform")
+		job, cerr := svc.Compensate(ctx, uint(*iid), 0, "platform", want)
 		if cerr != nil {
 			fmt.Fprintf(deps.stderr, "error: %v\n", cerr)
 			return exitInternal
@@ -905,6 +952,75 @@ func importerRepo(db *sql.DB) *importer.Repository {
 	repo := importer.NewRepository(db)
 	repo.EnsureSchema(context.Background())
 	return repo
+}
+
+// CLI adapter ports — lightweight platform-only implementations.
+
+type cliOrgPort struct{ db *sql.DB }
+
+func (p cliOrgPort) CreateOrganization(ctx context.Context, name, domain string, tenantID uint) (uint, error) {
+	return 0, fmt.Errorf("CLI org creation not supported")
+}
+func (p cliOrgPort) SoftDeleteOrganization(ctx context.Context, id uint) error {
+	_, err := p.db.ExecContext(ctx, `UPDATE tenants SET deleted_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`, id)
+	return err
+}
+
+type cliAdminPort struct{ db *sql.DB }
+
+func (p cliAdminPort) CreateTenantAdmin(ctx context.Context, email, name, password, role string, tenantID uint) (uint, error) {
+	return 0, fmt.Errorf("CLI admin creation not supported")
+}
+func (p cliAdminPort) SoftDeleteUser(ctx context.Context, id uint) error {
+	_, err := p.db.ExecContext(ctx, `UPDATE users SET deleted_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`, id)
+	return err
+}
+
+type cliDomainPort struct{ db *sql.DB }
+
+func (p cliDomainPort) CreateDomain(ctx context.Context, name string, tenantID uint) (uint, error) {
+	return 0, fmt.Errorf("CLI domain creation not supported")
+}
+func (p cliDomainPort) SoftDeleteDomain(ctx context.Context, id uint) error {
+	_, err := p.db.ExecContext(ctx, `UPDATE coremail_domains SET deleted_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`, id)
+	return err
+}
+
+type cliMailboxPort struct{ db *sql.DB }
+
+func (p cliMailboxPort) CreateMailbox(ctx context.Context, email, name, password, domainName string, tenantID uint) (uint, error) {
+	return 0, fmt.Errorf("CLI mailbox creation not supported")
+}
+func (p cliMailboxPort) SoftDeleteMailbox(ctx context.Context, id uint) error {
+	_, err := p.db.ExecContext(ctx, `UPDATE coremail_mailboxes SET deleted_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`, id)
+	return err
+}
+
+type cliAliasPort struct{ db *sql.DB }
+
+func (p cliAliasPort) CreateAlias(ctx context.Context, fromEmail, toEmail string, tenantID, domainID uint) (uint, error) {
+	return 0, fmt.Errorf("CLI alias creation not supported")
+}
+func (p cliAliasPort) SoftDeleteAlias(ctx context.Context, id uint) error {
+	_, err := p.db.ExecContext(ctx, `UPDATE coremail_aliases SET deleted_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`, id)
+	return err
+}
+
+type cliGroupPort struct{ db *sql.DB }
+
+func (p cliGroupPort) CreateGroup(ctx context.Context, name, description string, tenantID uint) (uint, error) {
+	return 0, fmt.Errorf("CLI group creation not supported")
+}
+func (p cliGroupPort) AddGroupMember(ctx context.Context, groupName, email string, tenantID uint) error {
+	return fmt.Errorf("CLI group member add not supported")
+}
+func (p cliGroupPort) SoftDeleteGroup(ctx context.Context, id uint) error {
+	_, err := p.db.ExecContext(ctx, `UPDATE coremail_groups SET deleted_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`, id)
+	return err
+}
+func (p cliGroupPort) RemoveGroupMember(ctx context.Context, memberID uint) error {
+	_, err := p.db.ExecContext(ctx, `DELETE FROM coremail_group_members WHERE id=?`, memberID)
+	return err
 }
 
 // ── Helpers ───────────────────────────────────────────────────────

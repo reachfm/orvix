@@ -5,27 +5,30 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/orvix/orvix/internal/platform/jobs"
 	"github.com/orvix/orvix/internal/platform/kernel"
 )
 
+const ImportJobType = "platform.import"
+
 type Service struct {
 	repo     *Repository
-	adapters *ServiceAdapters
+	adapters *Adapters
+	staging  *StagingService
+	jobSvc   *jobs.Service
 	clock    kernel.Clock
-	maxRows  int
-	maxBytes int64
 }
 
-func NewService(repo *Repository, adapters *ServiceAdapters, clock kernel.Clock) *Service {
+func NewService(repo *Repository, adapters *Adapters, staging *StagingService, jobSvc *jobs.Service, clock kernel.Clock) *Service {
 	if clock == nil {
 		clock = kernel.SystemClock{}
 	}
 	return &Service{
 		repo:     repo,
 		adapters: adapters,
+		staging:  staging,
+		jobSvc:   jobSvc,
 		clock:    clock,
-		maxRows:  MaxSourceRows,
-		maxBytes: MaxSourceBytes,
 	}
 }
 
@@ -33,11 +36,19 @@ func (s *Service) EnsureSchema(ctx context.Context) error {
 	return s.repo.EnsureSchema(ctx)
 }
 
-func (s *Service) Create(ctx context.Context, params CreateImportParams) (*ImportJob, error) {
-	params.validate()
+func (s *Service) Create(ctx context.Context, params CreateImportParams, data []byte) (*ImportJob, error) {
+	params.normalize()
+
+	// Store source data to staging
+	stagingID, hash, size, err := s.staging.Store(data, 0)
+	if err != nil {
+		return nil, err
+	}
+	_ = size
 
 	// Reject active import for same source
-	if existing, _ := s.repo.GetActiveForSource(ctx, params.SourceHash, params.TenantID); existing != nil {
+	if existing, _ := s.repo.GetActiveForSource(ctx, hash, params.TenantID); existing != nil {
+		s.staging.Remove(stagingID)
 		return nil, ErrActiveJob
 	}
 
@@ -50,16 +61,25 @@ func (s *Service) Create(ctx context.Context, params CreateImportParams) (*Impor
 		ConflictPolicy: params.ConflictPolicy,
 		SchemaVersion:  params.SchemaVersion,
 		Status:         StatusUploaded,
-		SourceHash:     params.SourceHash,
+		SourceHash:     hash,
 		SourceName:     params.SourceName,
+		StagingID:      stagingID,
+		StoredSize:     size,
 		CreatedAt:      now,
 		UpdatedAt:      now,
 		Version:        1,
 	}
 
 	if err := s.repo.Create(ctx, job); err != nil {
+		s.staging.Remove(stagingID)
 		return nil, err
 	}
+
+	// Update with actual import ID in staging filename
+	_ = s.staging.Remove(stagingID)
+	newStagingID, _, _, _ := s.staging.Store(data, job.ID)
+	s.repo.UpdateStagingID(ctx, job.ID, newStagingID)
+
 	return job, nil
 }
 
@@ -76,7 +96,7 @@ func (s *Service) List(ctx context.Context, filter ImportFilter) (kernel.PageRes
 	return kernel.NewPageResponse(jobs, page, total), nil
 }
 
-func (s *Service) Validate(ctx context.Context, id, tenantID uint, scope string, data []byte) (*ValidationReport, error) {
+func (s *Service) Validate(ctx context.Context, id, tenantID uint, scope string) (*ValidationReport, error) {
 	job, err := s.repo.GetForScope(ctx, id, tenantID, scope)
 	if err != nil {
 		return nil, err
@@ -85,37 +105,116 @@ func (s *Service) Validate(ctx context.Context, id, tenantID uint, scope string,
 		return nil, kernel.InvalidStateTransition(string(job.Status), string(StatusValidating))
 	}
 
+	// Verify staged source
+	if err := s.staging.Verify(job.StagingID, job.SourceHash); err != nil {
+		return nil, err
+	}
+
+	data, err := s.staging.Read(job.StagingID)
+	if err != nil {
+		return nil, err
+	}
+
 	if err := s.repo.UpdateStatus(ctx, job.ID, job.Status, StatusValidating, job.Version); err != nil {
 		return nil, err
 	}
-	job, _ = s.repo.Get(ctx, job.ID)
 
-	source, err := ParseSource(data, job.SourceType)
-	if err != nil {
-		s.repo.UpdateStatus(ctx, job.ID, StatusValidating, StatusValidationFailed, job.Version)
-		return nil, err
+	source, parseErr := ParseSource(data, job.SourceType)
+	if parseErr != nil {
+		s.repo.UpdateStatus(ctx, job.ID, StatusValidating, StatusValidationFailed, job.Version+1)
+		return nil, parseErr
 	}
 
-	planner := NewPlanner(s.adapters.db, tenantID)
-	currentHash := HashSource(data)
-	report, err := planner.DryRun(ctx, source, job.ConflictPolicy)
-	if err != nil {
-		s.repo.UpdateStatus(ctx, job.ID, StatusValidating, StatusValidationFailed, job.Version)
-		return nil, err
+	planner := NewPlanner(nil, tenantID, s.adapters)
+	report, planErr := planner.DryRun(ctx, source, job.ConflictPolicy)
+	if planErr != nil {
+		s.repo.UpdateStatus(ctx, job.ID, StatusValidating, StatusValidationFailed, job.Version+1)
+		return nil, planErr
 	}
 	report.ImportID = job.ID
-	report.SourceHash = currentHash
+	report.SourceHash = job.SourceHash
 	report.SchemaVersion = source.SchemaVersion
 
-	if err := s.repo.SaveValidationReport(ctx, job.ID, report, currentHash); err != nil {
-		return nil, err
+	if saveErr := s.repo.SaveValidationReport(ctx, job.ID, report, job.SourceHash); saveErr != nil {
+		return nil, saveErr
 	}
 	s.repo.UpdateStatus(ctx, job.ID, StatusValidating, StatusValidated, job.Version+1)
 
 	return report, nil
 }
 
-func (s *Service) Execute(ctx context.Context, id, tenantID uint, scope string, data []byte, idempotencyKey string) (*ImportJob, error) {
+func (s *Service) Execute(ctx context.Context, id, tenantID uint, scope, idempotencyKey, confirmation string) (*ImportJob, error) {
+	job, err := s.repo.GetForScope(ctx, id, tenantID, scope)
+	if err != nil {
+		return nil, err
+	}
+
+	wantConfirm := "EXECUTE-IMPORT-" + itoa(id)
+	if confirmation != wantConfirm {
+		return nil, ErrConfirmationRequired
+	}
+
+	if !job.Status.CanTransition(StatusRunning) {
+		return nil, kernel.InvalidStateTransition(string(job.Status), string(StatusRunning))
+	}
+
+	// Verify staged source hash before execution
+	if err := s.staging.Verify(job.StagingID, job.SourceHash); err != nil {
+		return nil, err
+	}
+
+	// Validate for execution (hash match, validated status)
+	if err := s.validateForExecution(ctx, job); err != nil {
+		return nil, err
+	}
+
+	if s.jobSvc == nil {
+		return s.executeInline(ctx, job, idempotencyKey)
+	}
+
+	// Submit durable job
+	submission := jobs.Submission{
+		TenantID:       job.TenantID,
+		Scope:          mapScope(job.Scope),
+		Actor:          job.Actor,
+		Type:           ImportJobType,
+		PayloadVersion: 1,
+		Payload:        marshalJSON(importJobPayload{ImportID: job.ID, TenantID: job.TenantID, Scope: job.Scope, StagingID: job.StagingID}),
+		IdempotencyKey: idempotencyKey,
+		CorrelationID:  "import_" + itoa(job.ID),
+		MaxAttempts:    3,
+	}
+
+	durableJob, _, err := s.jobSvc.Submit(ctx, submission)
+	if err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "submit import durable job", err)
+	}
+
+	s.repo.UpdateStatus(ctx, job.ID, job.Status, StatusRunning, job.Version)
+	s.repo.LinkJobID(ctx, job.ID, durableJob.ID)
+
+	return s.repo.Get(ctx, job.ID)
+}
+
+func (s *Service) executeInline(ctx context.Context, job *ImportJob, idempotencyKey string) (*ImportJob, error) {
+	data, err := s.staging.Read(job.StagingID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.repo.UpdateStatus(ctx, job.ID, job.Status, StatusRunning, job.Version); err != nil {
+		return nil, err
+	}
+	executor := NewExecutor(s.adapters, s.repo, job.TenantID, idempotencyKey)
+	_, execErr := executor.Execute(ctx, job, data)
+	if execErr != nil {
+		s.repo.UpdateStatus(ctx, job.ID, StatusRunning, StatusFailed, job.Version+1)
+		return s.repo.Get(ctx, job.ID)
+	}
+	s.repo.UpdateStatus(ctx, job.ID, StatusRunning, StatusCompleted, job.Version+1)
+	return s.repo.Get(ctx, job.ID)
+}
+
+func (s *Service) Resume(ctx context.Context, id, tenantID uint, scope, idempotencyKey string) (*ImportJob, error) {
 	job, err := s.repo.GetForScope(ctx, id, tenantID, scope)
 	if err != nil {
 		return nil, err
@@ -123,42 +222,8 @@ func (s *Service) Execute(ctx context.Context, id, tenantID uint, scope string, 
 	if !job.Status.CanTransition(StatusRunning) {
 		return nil, kernel.InvalidStateTransition(string(job.Status), string(StatusRunning))
 	}
-
-	currentHash := HashSource(data)
-
-	planner := NewPlanner(s.adapters.db, tenantID)
-	if err := planner.ValidateForExecution(ctx, job, currentHash); err != nil {
-		return nil, err
-	}
-
-	executor := NewExecutor(s.adapters, s.repo, tenantID, idempotencyKey)
-	result, execErr := executor.Execute(ctx, job, data)
-	if execErr != nil {
-		s.repo.UpdateStatus(ctx, job.ID, job.Status, StatusFailed, job.Version)
-		job.Status = StatusFailed
-		job.LastError = execErr.Error()
-		return job, execErr
-	}
-
-	s.repo.UpdateStatus(ctx, job.ID, job.Status, StatusCompleted, job.Version)
-	job.Status = StatusCompleted
-	_ = result
-	return job, nil
-}
-
-func (s *Service) ExecuteDryRun(ctx context.Context, data []byte, sourceType ImportSourceType, tenantID uint, conflict ConflictPolicy) (*ValidationReport, error) {
-	source, err := ParseSource(data, sourceType)
-	if err != nil {
-		return nil, err
-	}
-	planner := NewPlanner(s.adapters.db, tenantID)
-	report, err := planner.DryRun(ctx, source, conflict)
-	if err != nil {
-		return nil, err
-	}
-	report.SourceHash = HashSource(data)
-	report.SchemaVersion = source.SchemaVersion
-	return report, nil
+	// Re-run execute which resumes from last checkpoint
+	return s.Execute(ctx, id, tenantID, scope, idempotencyKey, "EXECUTE-IMPORT-"+itoa(id))
 }
 
 func (s *Service) Cancel(ctx context.Context, id, tenantID uint, scope string) (*ImportJob, error) {
@@ -166,20 +231,31 @@ func (s *Service) Cancel(ctx context.Context, id, tenantID uint, scope string) (
 	if err != nil {
 		return nil, err
 	}
-	if !job.Status.CanTransition(StatusCancelled) && job.Status != StatusCancelled {
+	if job.IsTerminal() {
+		return job, nil
+	}
+	if !job.Status.CanTransition(StatusCancelled) {
 		return nil, kernel.InvalidStateTransition(string(job.Status), string(StatusCancelled))
+	}
+	// Cancel the durable job first if present
+	if job.JobID > 0 && s.jobSvc != nil {
+		js := mapScope(job.Scope)
+		s.jobSvc.RequestCancellation(ctx, job.JobID, job.TenantID, js)
 	}
 	if err := s.repo.UpdateStatus(ctx, job.ID, job.Status, StatusCancelled, job.Version); err != nil {
 		return nil, err
 	}
-	job.Status = StatusCancelled
-	return job, nil
+	return s.repo.Get(ctx, job.ID)
 }
 
-func (s *Service) Compensate(ctx context.Context, id, tenantID uint, scope string) (*ImportJob, error) {
+func (s *Service) Compensate(ctx context.Context, id, tenantID uint, scope, confirmation string) (*ImportJob, error) {
 	job, err := s.repo.GetForScope(ctx, id, tenantID, scope)
 	if err != nil {
 		return nil, err
+	}
+	wantConfirm := "COMPENSATE-IMPORT-" + itoa(id)
+	if confirmation != wantConfirm {
+		return nil, ErrConfirmationRequired
 	}
 	if !job.Status.CanTransition(StatusCompensating) {
 		return nil, kernel.InvalidStateTransition(string(job.Status), string(StatusCompensating))
@@ -194,14 +270,13 @@ func (s *Service) Compensate(ctx context.Context, id, tenantID uint, scope strin
 	}
 
 	allCompensated := true
-	// Reverse dependency order for compensation
 	order := EntityDependencyOrder()
 	for i := len(order) - 1; i >= 0; i-- {
 		entityType := order[i]
 		for _, rec := range records {
 			if rec.EntityType == entityType && rec.Status == "pending" {
-				if err := s.compensateEntity(ctx, &rec); err != nil {
-					s.repo.UpdateCompensationStatus(ctx, id, rec.ResourceID, "failed", err.Error())
+				if compErr := s.compensateEntity(ctx, &rec); compErr != nil {
+					s.repo.UpdateCompensationStatus(ctx, id, rec.ResourceID, "failed", compErr.Error())
 					allCompensated = false
 				} else {
 					s.repo.UpdateCompensationStatus(ctx, id, rec.ResourceID, "compensated", "")
@@ -212,39 +287,31 @@ func (s *Service) Compensate(ctx context.Context, id, tenantID uint, scope strin
 
 	if allCompensated {
 		s.repo.UpdateStatus(ctx, job.ID, StatusCompensating, StatusCompensated, job.Version+1)
-		job.Status = StatusCompensated
 	} else {
 		s.repo.UpdateStatus(ctx, job.ID, StatusCompensating, StatusCompensationFailed, job.Version+1)
-		job.Status = StatusCompensationFailed
 	}
-	return job, nil
+	return s.repo.Get(ctx, job.ID)
 }
 
 func (s *Service) compensateEntity(ctx context.Context, rec *CompensationRecord) error {
 	switch rec.EntityType {
 	case EntityOrganization:
-		_, err := s.adapters.db.Exec(`UPDATE tenants SET deleted_at=CURRENT_TIMESTAMP WHERE id=?`, rec.ResourceID)
-		return err
+		return s.adapters.Org.SoftDeleteOrganization(ctx, rec.ResourceID)
 	case EntityTenantAdmin:
-		_, err := s.adapters.db.Exec(`UPDATE users SET deleted_at=CURRENT_TIMESTAMP WHERE id=?`, rec.ResourceID)
-		return err
+		return s.adapters.Admin.SoftDeleteUser(ctx, rec.ResourceID)
 	case EntityDomain:
-		_, err := s.adapters.db.Exec(`UPDATE coremail_domains SET deleted_at=CURRENT_TIMESTAMP WHERE id=?`, rec.ResourceID)
-		return err
+		return s.adapters.Domain.SoftDeleteDomain(ctx, rec.ResourceID)
 	case EntityMailbox:
-		_, err := s.adapters.db.Exec(`UPDATE coremail_mailboxes SET deleted_at=CURRENT_TIMESTAMP WHERE id=?`, rec.ResourceID)
-		return err
+		return s.adapters.Mailbox.SoftDeleteMailbox(ctx, rec.ResourceID)
 	case EntityAlias:
-		_, err := s.adapters.db.Exec(`UPDATE coremail_aliases SET deleted_at=CURRENT_TIMESTAMP WHERE id=?`, rec.ResourceID)
-		return err
+		return s.adapters.Alias.SoftDeleteAlias(ctx, rec.ResourceID)
 	case EntityGroup:
-		_, err := s.adapters.db.Exec(`UPDATE coremail_groups SET deleted_at=CURRENT_TIMESTAMP WHERE id=?`, rec.ResourceID)
-		return err
+		return s.adapters.Group.SoftDeleteGroup(ctx, rec.ResourceID)
 	case EntityGroupMembership:
-		_, err := s.adapters.db.Exec(`DELETE FROM coremail_group_members WHERE id=?`, rec.ResourceID)
-		return err
+		return s.adapters.Group.RemoveGroupMember(ctx, rec.ResourceID)
+	default:
+		return nil
 	}
-	return nil
 }
 
 func (s *Service) GetReport(ctx context.Context, id, tenantID uint, scope string) (*ValidationReport, error) {
@@ -252,15 +319,62 @@ func (s *Service) GetReport(ctx context.Context, id, tenantID uint, scope string
 	if err != nil {
 		return nil, err
 	}
-	var report ValidationReport
 	if job.ValidationReportRaw == "" {
 		return nil, kernel.NotFound("validation report")
 	}
+	var report ValidationReport
 	if err := json.Unmarshal([]byte(job.ValidationReportRaw), &report); err != nil {
 		return nil, err
 	}
 	return &report, nil
 }
+
+func (s *Service) validateForExecution(ctx context.Context, job *ImportJob) error {
+	if job.Status != StatusValidated {
+		return ErrDryRunRequired
+	}
+	return nil
+}
+
+func (s *Service) ImportHandler() func(ctx context.Context, exec jobs.Execution, payload json.RawMessage) (json.RawMessage, error) {
+	return s.HandleImportJob
+}
+
+func (s *Service) HandleImportJob(ctx context.Context, exec jobs.Execution, payload json.RawMessage) (json.RawMessage, error) {
+	var ip importJobPayload
+	if err := json.Unmarshal(payload, &ip); err != nil {
+		return nil, &jobs.ExecutionError{Code: "INVALID_PAYLOAD", Message: "import payload invalid", Retryable: false}
+	}
+	data, err := s.staging.Read(ip.StagingID)
+	if err != nil {
+		return nil, &jobs.ExecutionError{Code: "STAGING_READ_FAILED", Message: err.Error(), Retryable: false}
+	}
+	// Verify hash on resume
+	if err := s.staging.Verify(ip.StagingID, HashSource(data)); err != nil {
+		return nil, &jobs.ExecutionError{Code: "HASH_MISMATCH", Message: err.Error(), Retryable: false}
+	}
+	// Look up import job for resume
+	importJob, getErr := s.repo.Get(ctx, ip.ImportID)
+	if getErr != nil {
+		return nil, &jobs.ExecutionError{Code: "IMPORT_NOT_FOUND", Message: getErr.Error(), Retryable: false}
+	}
+	executor := NewExecutor(s.adapters, s.repo, importJob.TenantID, ip.ImportIDString())
+	result, execErr := executor.Execute(ctx, importJob, data)
+	if execErr != nil {
+		return nil, &jobs.ExecutionError{Code: "EXECUTION_FAILED", Message: execErr.Error(), Retryable: true}
+	}
+	resJSON, _ := json.Marshal(result)
+	return resJSON, nil
+}
+
+type importJobPayload struct {
+	ImportID  uint   `json:"import_id"`
+	TenantID  uint   `json:"tenant_id"`
+	Scope     string `json:"scope"`
+	StagingID string `json:"staging_id"`
+}
+
+func (p importJobPayload) ImportIDString() string { return itoa(p.ImportID) }
 
 type CreateImportParams struct {
 	TenantID       uint
@@ -269,11 +383,10 @@ type CreateImportParams struct {
 	SourceType     ImportSourceType
 	ConflictPolicy ConflictPolicy
 	SchemaVersion  int
-	SourceHash     string
 	SourceName     string
 }
 
-func (p *CreateImportParams) validate() {
+func (p *CreateImportParams) normalize() {
 	if p.Scope == "" {
 		p.Scope = "tenant"
 	}
@@ -290,4 +403,30 @@ func (p *CreateImportParams) validate() {
 	if p.Actor == "" {
 		p.Actor = "system"
 	}
+}
+
+func mapScope(s string) jobs.Scope {
+	if s == "platform" {
+		return jobs.ScopePlatform
+	}
+	return jobs.ScopeTenant
+}
+
+func marshalJSON(v any) json.RawMessage {
+	data, _ := json.Marshal(v)
+	return data
+}
+
+func itoa(n uint) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte(n%10) + '0'
+		n /= 10
+	}
+	return string(buf[i:])
 }

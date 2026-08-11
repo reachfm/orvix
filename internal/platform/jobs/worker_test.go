@@ -304,7 +304,7 @@ func TestProductionHandlersReuseTenantAndWebhookServices(t *testing.T) {
 	_, repo, _, clock, _ := newTestService(t)
 	registry := NewRegistry()
 	domains, hooks := &fakeDomainVerifier{}, &fakeWebhookProcessor{}
-	if err := RegisterProductionHandlers(registry, domains, hooks); err != nil {
+	if err := RegisterProductionHandlers(registry, domains, hooks, nil); err != nil {
 		t.Fatal(err)
 	}
 	svc := NewServiceWithRegistry(repo, registry, clock)
