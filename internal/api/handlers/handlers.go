@@ -47,6 +47,7 @@ import (
 	platformbilling "github.com/orvix/orvix/internal/platform/billing"
 	"github.com/orvix/orvix/internal/platform/bulkprovision"
 	"github.com/orvix/orvix/internal/platform/cluster"
+	"github.com/orvix/orvix/internal/platform/importer"
 	platformjobs "github.com/orvix/orvix/internal/platform/jobs"
 	"github.com/orvix/orvix/internal/platform/relay"
 	"github.com/orvix/orvix/internal/platform/retention"
@@ -243,6 +244,8 @@ type Handler struct {
 	paymentProvider  billing.PaymentProvider
 	sendEnforcer     *billing.SendEnforcer
 	mailSender       MailSender
+
+	importSvc *importer.Service
 }
 
 // MailSender sends transactional emails.

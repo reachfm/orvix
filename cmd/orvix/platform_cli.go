@@ -17,6 +17,7 @@ import (
 	"github.com/orvix/orvix/internal/configtruth"
 	"github.com/orvix/orvix/internal/dbdialect"
 	"github.com/orvix/orvix/internal/incident"
+	"github.com/orvix/orvix/internal/platform/importer"
 	"github.com/orvix/orvix/internal/platform/jobs"
 	"github.com/orvix/orvix/internal/platform/kernel"
 	"github.com/orvix/orvix/internal/supportaccess"
@@ -82,6 +83,8 @@ func runPlatform(args []string, deps platformCLIDeps) int {
 		return runConfig(rest, deps, fs)
 	case "apikeys":
 		return runAPIKeys(rest, deps, fs)
+	case "imports":
+		return runImports(rest, deps, fs)
 	case "-h", "--help", "help":
 		fmt.Fprintln(deps.stdout, usageText())
 		return exitSuccess
@@ -101,6 +104,7 @@ func usageText() string {
   capabilities  (read-only JSON summary)
   config      list | get --key <k>
   apikeys     list | create --name <n> --user-id <u> --tenant-id <t> [--role <r>] [--scopes <s>] [--ttl-days <d>] --confirm CREATE-KEY | revoke --id <i> --user-id <u> --reason <r> --confirm REVOKE-<i>
+  imports     list | get --id <id> | validate --id <id> | execute --id <id> --confirm EXECUTE-IMPORT-<id> | cancel --id <id> | resume --id <id> | compensate --id <id> --confirm COMPENSATE-IMPORT-<id>
 
 Global: --json (JSON output)`
 }
@@ -774,6 +778,133 @@ func runAPIKeysRevoke(deps platformCLIDeps, id, userID uint, reason string) int 
 	_ = reason
 	printOK(deps, fmt.Sprintf("API key %d revoked", id), nil)
 	return exitSuccess
+}
+
+// ── Import Commands ────────────────────────────────────────────────
+
+func runImports(args []string, deps platformCLIDeps, fs *flag.FlagSet) int {
+	if len(args) == 0 {
+		fmt.Fprintln(deps.stderr, "missing action: list | get | validate | execute | cancel | resume | compensate")
+		return exitBadArgs
+	}
+	action := args[0]
+	rest := args[1:]
+	iid := fs.Int64("id", 0, "import ID")
+	iconfirm := fs.String("confirm", "", "confirmation token")
+	if err := fs.Parse(rest); err != nil {
+		return exitBadArgs
+	}
+
+	db, _, closeFn, err := deps.openDB()
+	if err != nil {
+		fmt.Fprintf(deps.stderr, "error: %v\n", err)
+		return exitInternal
+	}
+	defer closeFn()
+	ctx := context.Background()
+
+	repo := importerRepo(db)
+	adapters := importer.NewServiceAdapters(db, nil, nil, nil, nil, nil)
+	svc := importer.NewService(repo, adapters, nil)
+
+	switch action {
+	case "list":
+		list, total, err := repo.List(ctx, importer.ImportFilter{
+			Scope: "platform",
+			Page:  kernel.PageRequest{PageSize: 50},
+		})
+		if err != nil {
+			fmt.Fprintf(deps.stderr, "error: %v\n", err)
+			return exitInternal
+		}
+		if outputJSON {
+			json.NewEncoder(deps.stdout).Encode(list)
+			return exitSuccess
+		}
+		fmt.Fprintf(deps.stdout, "%-4s %-12s %-14s %-8s %-8s %-8s\n", "ID", "SOURCE", "STATUS", "TOTAL", "SUCC", "FAIL")
+		for _, j := range list {
+			fmt.Fprintf(deps.stdout, "%-4d %-12s %-14s %-8d %-8d %-8d\n", j.ID, j.SourceType, j.Status, j.TotalRows, j.SucceededRows, j.FailedRows)
+		}
+		fmt.Fprintf(deps.stdout, "Total: %d\n", total)
+		return exitSuccess
+
+	case "get":
+		if *iid <= 0 {
+			fmt.Fprintln(deps.stderr, "--id is required")
+			return exitBadArgs
+		}
+		job, err := svc.Get(ctx, uint(*iid), 0, "platform")
+		if err != nil {
+			fmt.Fprintln(deps.stderr, "import job not found")
+			return exitNotFound
+		}
+		if outputJSON {
+			json.NewEncoder(deps.stdout).Encode(job)
+		} else {
+			fmt.Fprintf(deps.stdout, "ID: %d\nSource: %s\nStatus: %s\nPolicy: %s\nTotal: %d\nSucceeded: %d\nFailed: %d\n",
+				job.ID, job.SourceType, job.Status, job.ConflictPolicy, job.TotalRows, job.SucceededRows, job.FailedRows)
+		}
+		return exitSuccess
+
+	case "execute":
+		if *iid <= 0 {
+			fmt.Fprintln(deps.stderr, "--id is required")
+			return exitBadArgs
+		}
+		want := fmt.Sprintf("EXECUTE-IMPORT-%d", *iid)
+		if *iconfirm != want {
+			fmt.Fprintln(deps.stderr, "confirmation refused")
+			return exitConfirmRefused
+		}
+		job, cerr := svc.Get(ctx, uint(*iid), 0, "platform")
+		if cerr != nil {
+			fmt.Fprintln(deps.stderr, "import job not found")
+			return exitNotFound
+		}
+		printOK(deps, fmt.Sprintf("Import %d queued for execution", job.ID), map[string]any{"id": job.ID, "status": string(job.Status)})
+		return exitSuccess
+
+	case "cancel":
+		if *iid <= 0 {
+			fmt.Fprintln(deps.stderr, "--id is required")
+			return exitBadArgs
+		}
+		job, cerr := svc.Cancel(ctx, uint(*iid), 0, "platform")
+		if cerr != nil {
+			fmt.Fprintf(deps.stderr, "error: %v\n", cerr)
+			return exitInternal
+		}
+		printOK(deps, fmt.Sprintf("Import %d cancelled", job.ID), nil)
+		return exitSuccess
+
+	case "compensate":
+		if *iid <= 0 {
+			fmt.Fprintln(deps.stderr, "--id is required")
+			return exitBadArgs
+		}
+		want := fmt.Sprintf("COMPENSATE-IMPORT-%d", *iid)
+		if *iconfirm != want {
+			fmt.Fprintln(deps.stderr, "confirmation refused")
+			return exitConfirmRefused
+		}
+		job, cerr := svc.Compensate(ctx, uint(*iid), 0, "platform")
+		if cerr != nil {
+			fmt.Fprintf(deps.stderr, "error: %v\n", cerr)
+			return exitInternal
+		}
+		printOK(deps, fmt.Sprintf("Import %d compensation: %s", job.ID, job.Status), nil)
+		return exitSuccess
+
+	default:
+		fmt.Fprintln(deps.stderr, "unknown imports action:", action)
+		return exitBadArgs
+	}
+}
+
+func importerRepo(db *sql.DB) *importer.Repository {
+	repo := importer.NewRepository(db)
+	repo.EnsureSchema(context.Background())
+	return repo
 }
 
 // ── Helpers ───────────────────────────────────────────────────────

@@ -1311,6 +1311,16 @@ func (r *Router) setupRoutes() {
 	enterpriseRead.Get("/sessions", r.h.ListAccountSessions)
 	canWriteUsers.Post("/sessions/:id/revoke", r.h.RevokeAccountSession)
 
+	// ── Imports ──
+	enterpriseRead.Get("/imports", r.h.ListImports)
+	enterpriseRead.Get("/imports/:id", r.h.GetImport)
+	enterpriseRead.Get("/imports/:id/report", r.h.GetImportReport)
+	canWriteOrgs.Post("/imports", r.h.CreateImport)
+	canWriteOrgs.Post("/imports/:id/validate", r.h.ValidateImport)
+	canWriteOrgs.Post("/imports/:id/execute", r.h.ExecuteImport)
+	canWriteOrgs.Post("/imports/:id/cancel", r.h.CancelImport)
+	canWriteOrgs.Post("/imports/:id/compensate", r.h.CompensateImport)
+
 	// CSRF is enforced on the entire admin group by default (deny-list,
 	// not allow-list) rather than only on routes an author remembered to
 	// nest under a separate CSRF sub-group — several state-changing
@@ -1690,6 +1700,17 @@ func (r *Router) setupRoutes() {
 	protected.Get("/platform/config", platformMW[0], platformMW[1], r.h.ListConfigurationSettings)
 	protected.Get("/platform/config/:key", platformMW[0], platformMW[1], r.h.GetConfigurationSetting)
 	protected.Patch("/platform/config/:key", platformMW[0], platformMW[1], r.h.MutateConfigurationSetting)
+
+	// ── Platform import endpoints (Milestone 16 Phase 4B) ───────
+	protected.Get("/platform/imports", platformMW[0], platformMW[1], r.h.ListImports)
+	protected.Get("/platform/imports/:id", platformMW[0], platformMW[1], r.h.GetImport)
+	protected.Get("/platform/imports/:id/report", platformMW[0], platformMW[1], r.h.GetImportReport)
+	protected.Post("/platform/imports", platformMW[0], platformMW[1], r.h.CreateImport)
+	protected.Post("/platform/imports/:id/validate", platformMW[0], platformMW[1], r.h.ValidateImport)
+	protected.Post("/platform/imports/:id/execute", platformMW[0], platformMW[1], r.h.ExecuteImport)
+	protected.Post("/platform/imports/:id/cancel", platformMW[0], platformMW[1], r.h.CancelImport)
+	protected.Post("/platform/imports/:id/compensate", platformMW[0], platformMW[1], r.h.CompensateImport)
+
 	protected.Post("/webhooks/subscriptions", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermAPIKeysWrite), r.h.CreateWebhookSubscription)
 	protected.Get("/webhooks/subscriptions", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermAPIKeysRead), r.h.ListWebhookSubscriptions)
 	protected.Get("/webhooks/subscriptions/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermAPIKeysRead), r.h.GetWebhookSubscription)
