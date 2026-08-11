@@ -102,8 +102,43 @@ func TestJobsList(t *testing.T) {
 	db, dial, closeFn := testDB(t)
 	defer closeFn()
 	deps, stdout, _ := platformTestDeps(t, db, dial)
-	db.Exec(`CREATE TABLE IF NOT EXISTS platform_jobs (id INTEGER PRIMARY KEY, type TEXT, status TEXT DEFAULT 'queued', progress INTEGER DEFAULT 0, tenant_id INTEGER DEFAULT 0, version INTEGER DEFAULT 1, created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL, scope TEXT DEFAULT 'platform', actor TEXT DEFAULT '', payload_version INTEGER DEFAULT 1, run_after DATETIME DEFAULT CURRENT_TIMESTAMP)`)
-	db.Exec(`INSERT INTO platform_jobs (id, type, status, created_at, updated_at, run_after) VALUES (1, 'bulk-import', 'queued', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`)
+	// Canonical platform_jobs DDL (from internal/platform/jobs/repository.go)
+	db.Exec(`CREATE TABLE IF NOT EXISTS platform_jobs (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		tenant_id INTEGER NOT NULL DEFAULT 0,
+		scope TEXT NOT NULL DEFAULT 'platform',
+		actor TEXT NOT NULL DEFAULT '',
+		type TEXT NOT NULL,
+		payload_version INTEGER NOT NULL DEFAULT 1,
+		payload TEXT NOT NULL DEFAULT '{}',
+		status TEXT NOT NULL DEFAULT 'queued',
+		progress INTEGER NOT NULL DEFAULT 0,
+		attempt_count INTEGER NOT NULL DEFAULT 0,
+		max_attempts INTEGER NOT NULL DEFAULT 3,
+		run_after DATETIME NOT NULL,
+		lease_owner TEXT NOT NULL DEFAULT '',
+		lease_token TEXT NOT NULL DEFAULT '',
+		lease_version INTEGER NOT NULL DEFAULT 0,
+		lease_expires_at DATETIME,
+		heartbeat_at DATETIME,
+		cancellation_requested_at DATETIME,
+		created_at DATETIME NOT NULL,
+		started_at DATETIME,
+		completed_at DATETIME,
+		cancelled_at DATETIME,
+		result TEXT NOT NULL DEFAULT '',
+		error_code TEXT NOT NULL DEFAULT '',
+		error_message TEXT NOT NULL DEFAULT '',
+		idempotency_key TEXT NOT NULL DEFAULT '',
+		idempotency_scope TEXT NOT NULL DEFAULT '',
+		request_hash TEXT NOT NULL DEFAULT '',
+		manual_retry_key TEXT NOT NULL DEFAULT '',
+		correlation_id TEXT NOT NULL DEFAULT '',
+		version INTEGER NOT NULL DEFAULT 1,
+		updated_at DATETIME NOT NULL
+	)`)
+	now := time.Now().UTC()
+	db.Exec(`INSERT INTO platform_jobs (id, type, status, run_after, created_at, updated_at) VALUES (1, 'bulk-import', 'queued', ?, ?, ?)`, now, now, now)
 
 	if code := runPlatform([]string{"jobs", "list", "--json"}, deps); code != exitSuccess {
 		t.Fatalf("want success, got %d", code)
@@ -150,8 +185,27 @@ func TestSupportRevoke(t *testing.T) {
 	db, dial, closeFn := testDB(t)
 	defer closeFn()
 	deps, stdout, _ := platformTestDeps(t, db, dial)
-	db.Exec(`CREATE TABLE IF NOT EXISTS platform_support_access_grants (id INTEGER PRIMARY KEY, ticket_ref TEXT, reason TEXT, target_tenant_id INTEGER, granted_by_id INTEGER, permission_scope TEXT, status TEXT, expires_at DATETIME, version INTEGER DEFAULT 1, created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL)`)
-	db.Exec(`INSERT INTO platform_support_access_grants (id, ticket_ref, reason, target_tenant_id, granted_by_id, permission_scope, status, expires_at, created_at, updated_at) VALUES (1, 'T-1', 'investigation', 1, 1, 'read_only', 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`)
+	// Canonical support access grants DDL (from internal/supportaccess/repository.go)
+	db.Exec(`CREATE TABLE IF NOT EXISTS platform_support_access_grants (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		ticket_ref TEXT NOT NULL,
+		reason TEXT NOT NULL,
+		target_tenant_id INTEGER NOT NULL,
+		granted_by_id INTEGER NOT NULL,
+		permission_scope TEXT NOT NULL DEFAULT 'read_only',
+		status TEXT NOT NULL DEFAULT 'requested',
+		activated_at DATETIME,
+		expires_at DATETIME NOT NULL,
+		revoked_at DATETIME,
+		revoke_reason TEXT NOT NULL DEFAULT '',
+		emergency_break_glass INTEGER NOT NULL DEFAULT 0,
+		version INTEGER NOT NULL DEFAULT 1,
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL
+	)`)
+	expires := time.Now().UTC().Add(1 * time.Hour)
+	created := time.Now().UTC()
+	db.Exec(`INSERT INTO platform_support_access_grants (id, ticket_ref, reason, target_tenant_id, granted_by_id, permission_scope, status, expires_at, created_at, updated_at) VALUES (1, 'T-1', 'investigation', 1, 1, 'read_only', 'active', ?, ?, ?)`, expires, created, created)
 
 	code := runPlatform([]string{"support", "revoke", "--id", "1", "--reason", "done", "--confirm", "REVOKE-1"}, deps)
 	if code != exitSuccess {
@@ -230,5 +284,75 @@ func TestExitCodes(t *testing.T) {
 		if code != tt.want {
 			t.Errorf("args=%v: want %d, got %d", tt.args, tt.want, code)
 		}
+	}
+}
+
+func TestAPIKeysCreate(t *testing.T) {
+	db, dial, closeFn := testDB(t)
+	defer closeFn()
+	deps, stdout, _ := platformTestDeps(t, db, dial)
+	db.Exec(`CREATE TABLE IF NOT EXISTS api_keys (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL,
+		name TEXT NOT NULL, user_id INTEGER NOT NULL, tenant_id INTEGER NOT NULL,
+		role TEXT NOT NULL DEFAULT 'user', key_hash TEXT NOT NULL,
+		key_prefix TEXT NOT NULL, scopes TEXT NOT NULL DEFAULT '',
+		active INTEGER NOT NULL DEFAULT 1, last_used_at DATETIME,
+		expires_at DATETIME, deleted_at DATETIME, allowed_ips TEXT NOT NULL DEFAULT ''
+	)`)
+
+	code := runPlatform([]string{"apikeys", "create", "--name", "ci-key", "--user-id", "1", "--tenant-id", "1", "--scopes", "read,write", "--confirm", "CREATE-KEY"}, deps)
+	if code != exitSuccess {
+		t.Fatalf("want success, got %d", code)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "orv_") {
+		t.Fatalf("want plaintext key in output: %s", out)
+	}
+	var hash string
+	if err := db.QueryRow("SELECT key_hash FROM api_keys WHERE name='ci-key'").Scan(&hash); err != nil {
+		t.Fatalf("key not stored: %v", err)
+	}
+	if hash == "" {
+		t.Fatal("key hash is empty")
+	}
+}
+
+func TestAPIKeysCreateConfirmRefused(t *testing.T) {
+	db, dial, closeFn := testDB(t)
+	defer closeFn()
+	deps, _, _ := platformTestDeps(t, db, dial)
+
+	code := runPlatform([]string{"apikeys", "create", "--name", "k", "--user-id", "1", "--tenant-id", "1", "--confirm", "WRONG"}, deps)
+	if code != exitConfirmRefused {
+		t.Fatalf("want confirm_refused(5), got %d", code)
+	}
+}
+
+func TestAPIKeysRevoke(t *testing.T) {
+	db, dial, closeFn := testDB(t)
+	defer closeFn()
+	deps, _, _ := platformTestDeps(t, db, dial)
+	db.Exec(`CREATE TABLE IF NOT EXISTS api_keys (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL,
+		name TEXT NOT NULL, user_id INTEGER NOT NULL, tenant_id INTEGER NOT NULL,
+		role TEXT NOT NULL DEFAULT 'user', key_hash TEXT NOT NULL,
+		key_prefix TEXT NOT NULL, scopes TEXT NOT NULL DEFAULT '',
+		active INTEGER NOT NULL DEFAULT 1, last_used_at DATETIME,
+		expires_at DATETIME, deleted_at DATETIME, allowed_ips TEXT NOT NULL DEFAULT ''
+	)`)
+	db.Exec(`INSERT INTO api_keys (name, user_id, tenant_id, role, key_hash, key_prefix, scopes, active, created_at, updated_at) VALUES ('k', 1, 1, 'user', 'h', 'orv_abc', 'read', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`)
+
+	code := runPlatform([]string{"apikeys", "revoke", "--id", "1", "--user-id", "1", "--reason", "compromised", "--confirm", "REVOKE-1"}, deps)
+	if code != exitSuccess {
+		t.Fatalf("want success, got %d", code)
+	}
+	var active int
+	if err := db.QueryRow("SELECT active FROM api_keys WHERE id=1").Scan(&active); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if active != 0 {
+		t.Fatal("key was not revoked")
 	}
 }

@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/orvix/orvix/internal/configtruth"
@@ -90,13 +94,13 @@ func runPlatform(args []string, deps platformCLIDeps) int {
 func usageText() string {
 	return `orvix platform <resource> <action> [flags]
 
-orgs        list | get --id <id> | suspend --id <id> --reason <r> --confirm SUSPEND-<id> | reactivate --id <id> --reason <r> --confirm REACTIVATE-<id>
-jobs        list [--status <s>] | get --id <id> | cancel --id <id> | retry --id <id>
-incidents   list [--status <s>] | get --id <id> | create --title <t> [--severity <s>] | update --id <id> --status <s> [--message <m>] | resolve --id <id> [--message <m>]
-support     list [--tenant-id <id>] | get --id <id> | revoke --id <id> --reason <r> --confirm REVOKE-<id>
-capabilities  (read-only JSON summary)
-config      list | get --key <k>
-apikeys     list
+  orgs        list | get --id <id> | suspend --id <id> --reason <r> --confirm SUSPEND-<id> | reactivate --id <id> --reason <r> --confirm REACTIVATE-<id>
+  jobs        list [--status <s>] | get --id <id> | cancel --id <id> | retry --id <id>
+  incidents   list [--status <s>] | get --id <id> | create --title <t> [--severity <s>] | update --id <id> --status <s> [--message <m>] | resolve --id <id> [--message <m>]
+  support     list [--tenant-id <id>] | get --id <id> | revoke --id <id> --reason <r> --confirm REVOKE-<id>
+  capabilities  (read-only JSON summary)
+  config      list | get --key <k>
+  apikeys     list | create --name <n> --user-id <u> --tenant-id <t> [--role <r>] [--scopes <s>] [--ttl-days <d>] --confirm CREATE-KEY | revoke --id <i> --user-id <u> --reason <r> --confirm REVOKE-<i>
 
 Global: --json (JSON output)`
 }
@@ -634,25 +638,142 @@ func runConfig(args []string, deps platformCLIDeps, fs *flag.FlagSet) int {
 
 func runAPIKeys(args []string, deps platformCLIDeps, fs *flag.FlagSet) int {
 	if len(args) == 0 {
-		fmt.Fprintln(deps.stderr, "missing action: list")
+		fmt.Fprintln(deps.stderr, "missing action: list | create | revoke")
 		return exitBadArgs
 	}
 	action := args[0]
 	rest := args[1:]
-	fs.Parse(rest)
-
 	switch action {
 	case "list":
+		fs.Parse(rest)
 		if outputJSON {
-			fmt.Fprintln(deps.stdout, `{"note":"API key listing requires a running process"}`)
+			fmt.Fprintln(deps.stdout, `{"note":"API key listing requires a running process; use GET /api/v1/api-keys"}`)
 		} else {
 			fmt.Fprintln(deps.stdout, "API key listing requires a running process.")
+			fmt.Fprintln(deps.stdout, "Use GET /api/v1/api-keys from a running orvix instance.")
 		}
 		return exitSuccess
+	case "create":
+		name := fs.String("name", "", "key name (required)")
+		userID := fs.Uint("user-id", 0, "owning user ID (required)")
+		tenantID := fs.Uint("tenant-id", 0, "tenant ID (required)")
+		role := fs.String("role", "user", "role bound to the key")
+		scopes := fs.String("scopes", "", "comma-separated scopes")
+		ttlDays := fs.Int("ttl-days", 0, "days until expiry (0=never)")
+		confirm := fs.String("confirm", "", "type CREATE-KEY to confirm")
+		if err := fs.Parse(rest); err != nil {
+			return exitBadArgs
+		}
+		if *name == "" || *userID == 0 || *tenantID == 0 {
+			fmt.Fprintln(deps.stderr, "error: --name, --user-id, and --tenant-id are required")
+			return exitBadArgs
+		}
+		if *confirm != "CREATE-KEY" {
+			fmt.Fprintln(deps.stderr, "error: confirmation refused")
+			return exitConfirmRefused
+		}
+		return runAPIKeysCreate(deps, *name, *userID, *tenantID, *role, *scopes, *ttlDays)
+	case "revoke":
+		id := fs.Uint("id", 0, "key ID (required)")
+		userID := fs.Uint("user-id", 0, "owning user ID (required)")
+		reason := fs.String("reason", "", "revocation reason (required)")
+		confirm := fs.String("confirm", "", "type REVOKE-<id> to confirm")
+		if err := fs.Parse(rest); err != nil {
+			return exitBadArgs
+		}
+		if *id == 0 || *userID == 0 || *reason == "" {
+			fmt.Fprintln(deps.stderr, "error: --id, --user-id, and --reason are required")
+			return exitBadArgs
+		}
+		if *confirm != fmt.Sprintf("REVOKE-%d", *id) {
+			fmt.Fprintln(deps.stderr, "error: confirmation refused")
+			return exitConfirmRefused
+		}
+		return runAPIKeysRevoke(deps, *id, *userID, *reason)
 	default:
 		fmt.Fprintln(deps.stderr, "unknown apikeys action:", action)
 		return exitBadArgs
 	}
+}
+
+func runAPIKeysCreate(deps platformCLIDeps, name string, userID, tenantID uint, role, scopesStr string, ttlDays int) int {
+	db, _, closeFn, err := deps.openDB()
+	if err != nil {
+		fmt.Fprintf(deps.stderr, "error: %v\n", err)
+		return exitInternal
+	}
+	defer closeFn()
+
+	// Generate secure random key (matches auth.NewAPIKeyManager.Generate)
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		fmt.Fprintf(deps.stderr, "error generating key: %v\n", err)
+		return exitInternal
+	}
+	fullKey := "orv_" + hex.EncodeToString(b)
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(fullKey)))
+	prefix := fullKey[:11]
+	scopes := strings.TrimSpace(scopesStr)
+	now := time.Now().UTC()
+	var expiresAt *time.Time
+	if ttlDays > 0 {
+		t := now.AddDate(0, 0, ttlDays)
+		expiresAt = &t
+	}
+	// Ensure schema
+	db.Exec(`CREATE TABLE IF NOT EXISTS api_keys (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL,
+		name TEXT NOT NULL, user_id INTEGER NOT NULL, tenant_id INTEGER NOT NULL,
+		role TEXT NOT NULL DEFAULT 'user', key_hash TEXT NOT NULL,
+		key_prefix TEXT NOT NULL, scopes TEXT NOT NULL DEFAULT '',
+		active INTEGER NOT NULL DEFAULT 1, last_used_at DATETIME,
+		expires_at DATETIME, deleted_at DATETIME, allowed_ips TEXT NOT NULL DEFAULT ''
+	)`)
+	res, err := db.Exec(`INSERT INTO api_keys (created_at, updated_at, name, user_id, tenant_id, role, key_hash, key_prefix, scopes, active, expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		now, now, name, userID, tenantID, role, hash, prefix, scopes, 1, expiresAt)
+	if err != nil {
+		fmt.Fprintf(deps.stderr, "error storing key: %v\n", err)
+		return exitInternal
+	}
+	id, _ := res.LastInsertId()
+	// Plaintext key shown exactly once. Never logged, audited, or stored.
+	if outputJSON {
+		fmt.Fprintf(deps.stdout, "{\"id\":%d,\"name\":%q,\"key\":%q,\"prefix\":%q,\"tenant_id\":%d,\"role\":%q,\"scopes\":%q,\"expires_at\":%s}\n",
+			id, name, fullKey, prefix, tenantID, role, scopes, fmt.Sprintf("%q", expiresAt.Format(time.RFC3339)))
+	} else {
+		fmt.Fprintf(deps.stdout, "API key created (ID %d, name %q):\n", id, name)
+		fmt.Fprintf(deps.stdout, "  Key: %s\n", fullKey)
+		fmt.Fprintf(deps.stdout, "  Prefix: %s\n", prefix)
+		fmt.Fprintf(deps.stdout, "  Tenant: %d\n", tenantID)
+		fmt.Fprintf(deps.stdout, "  Role: %s\n", role)
+		fmt.Fprintf(deps.stdout, "  Scopes: %s\n", scopes)
+		fmt.Fprintf(deps.stdout, "  Store this key securely - it cannot be retrieved again.\n")
+	}
+	return exitSuccess
+}
+
+func runAPIKeysRevoke(deps platformCLIDeps, id, userID uint, reason string) int {
+	db, _, closeFn, err := deps.openDB()
+	if err != nil {
+		fmt.Fprintf(deps.stderr, "error: %v\n", err)
+		return exitInternal
+	}
+	defer closeFn()
+	res, err := db.Exec(`UPDATE api_keys SET active=0, updated_at=? WHERE id=? AND user_id=? AND deleted_at IS NULL`,
+		time.Now().UTC(), id, userID)
+	if err != nil {
+		fmt.Fprintf(deps.stderr, "error revoking key: %v\n", err)
+		return exitInternal
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		fmt.Fprintln(deps.stderr, "API key not found")
+		return exitForbidden
+	}
+	_ = reason
+	printOK(deps, fmt.Sprintf("API key %d revoked", id), nil)
+	return exitSuccess
 }
 
 // ── Helpers ───────────────────────────────────────────────────────
