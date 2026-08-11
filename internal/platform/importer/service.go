@@ -2,7 +2,11 @@ package importer
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/orvix/orvix/internal/platform/jobs"
@@ -10,6 +14,12 @@ import (
 )
 
 const ImportJobType = "platform.import"
+
+// BatchSize is the number of source rows processed between durable-job
+// checkpoints. Every checkpoint is persisted transactionally before the
+// worker is allowed to continue, so a crash resumes from the last
+// committed batch instead of replaying side effects.
+const BatchSize = 50
 
 type Service struct {
 	repo     *Repository
@@ -32,23 +42,48 @@ func NewService(repo *Repository, adapters *Adapters, staging *StagingService, j
 	}
 }
 
+// RequiredDependencies validates that every mandatory dependency is wired.
+// nil staging or adapters are programming errors: the importer can neither
+// store nor mutate safely without them.
+func (s *Service) RequiredDependencies() error {
+	if s.adapters == nil {
+		return fmt.Errorf("import service: adapters are required")
+	}
+	if err := s.adapters.Validate(); err != nil {
+		return err
+	}
+	if s.staging == nil {
+		return fmt.Errorf("import service: staging service is required")
+	}
+	return nil
+}
+
 func (s *Service) EnsureSchema(ctx context.Context) error {
 	return s.repo.EnsureSchema(ctx)
 }
 
+// Create stores the source exactly once, persists its staging ID, byte
+// size and SHA-256 hash, and returns a job. On any failure the staged file
+// is removed so neither an unusable DB job nor an orphaned staged file is
+// left behind.
 func (s *Service) Create(ctx context.Context, params CreateImportParams, data []byte) (*ImportJob, error) {
 	params.normalize()
 
-	// Store source data to staging
+	// Store source exactly once: temp file + fsync + atomic rename, with
+	// traversal and symlink rejection enforced by the staging service.
 	stagingID, hash, size, err := s.staging.Store(data, 0)
 	if err != nil {
 		return nil, err
 	}
-	_ = size
 
-	// Reject active import for same source
-	if existing, _ := s.repo.GetActiveForSource(ctx, hash, params.TenantID); existing != nil {
-		s.staging.Remove(stagingID)
+	// Reject an active import for the same source hash.
+	existing, err := s.repo.GetActiveForSource(ctx, hash, params.TenantID)
+	if err != nil {
+		_ = s.staging.Remove(stagingID)
+		return nil, err
+	}
+	if existing != nil {
+		_ = s.staging.Remove(stagingID)
 		return nil, ErrActiveJob
 	}
 
@@ -71,14 +106,10 @@ func (s *Service) Create(ctx context.Context, params CreateImportParams, data []
 	}
 
 	if err := s.repo.Create(ctx, job); err != nil {
-		s.staging.Remove(stagingID)
+		// Never leave an orphaned staged file behind a failed DB insert.
+		_ = s.staging.Remove(stagingID)
 		return nil, err
 	}
-
-	// Update with actual import ID in staging filename
-	_ = s.staging.Remove(stagingID)
-	newStagingID, _, _, _ := s.staging.Store(data, job.ID)
-	s.repo.UpdateStagingID(ctx, job.ID, newStagingID)
 
 	return job, nil
 }
@@ -105,7 +136,8 @@ func (s *Service) Validate(ctx context.Context, id, tenantID uint, scope string)
 		return nil, kernel.InvalidStateTransition(string(job.Status), string(StatusValidating))
 	}
 
-	// Verify staged source
+	// Verify staged bytes against the immutable SourceHash captured when the
+	// upload was accepted — never against a hash recomputed from the file.
 	if err := s.staging.Verify(job.StagingID, job.SourceHash); err != nil {
 		return nil, err
 	}
@@ -125,7 +157,7 @@ func (s *Service) Validate(ctx context.Context, id, tenantID uint, scope string)
 		return nil, parseErr
 	}
 
-	planner := NewPlanner(nil, tenantID, s.adapters)
+	planner := NewPlanner(s.repo, tenantID, s.adapters)
 	report, planErr := planner.DryRun(ctx, source, job.ConflictPolicy)
 	if planErr != nil {
 		s.repo.UpdateStatus(ctx, job.ID, StatusValidating, StatusValidationFailed, job.Version+1)
@@ -143,6 +175,10 @@ func (s *Service) Validate(ctx context.Context, id, tenantID uint, scope string)
 	return report, nil
 }
 
+// Execute submits (or continues) a platform.import durable job. Inline
+// execution is intentionally not supported in production: if the durable
+// jobs infrastructure is unavailable a stable typed error is returned and
+// the import state is never advanced to completed.
 func (s *Service) Execute(ctx context.Context, id, tenantID uint, scope, idempotencyKey, confirmation string) (*ImportJob, error) {
 	job, err := s.repo.GetForScope(ctx, id, tenantID, scope)
 	if err != nil {
@@ -154,25 +190,62 @@ func (s *Service) Execute(ctx context.Context, id, tenantID uint, scope, idempot
 		return nil, ErrConfirmationRequired
 	}
 
+	if strings.TrimSpace(idempotencyKey) == "" {
+		return nil, ErrIdempotencyRequired
+	}
+
+	scopeKey := fmt.Sprintf("%s|%d", scope, tenantID)
+	requestHash := requestHash("execute", job)
+
+	// Idempotency gate runs before the state-transition check so a replayed
+	// request returns the original result even though the import has since
+	// advanced (e.g. to running) — the whole point of the key.
+	stored, replay, err := s.repo.IdempotencyBegin(ctx, scopeKey, job.Actor, tenantID, idempotencyKey, requestHash, s.clock.Now())
+	if err != nil {
+		if errors.Is(err, kernel.ErrIdempotencyInFlight) {
+			return nil, kernel.NewError(kernel.ErrCodeIdempotencyReuse, "an execute for this import is already in progress")
+		}
+		return nil, err
+	}
+	if replay {
+		return unmarshalStoredJob(stored, job.ID)
+	}
+
 	if !job.Status.CanTransition(StatusRunning) {
 		return nil, kernel.InvalidStateTransition(string(job.Status), string(StatusRunning))
 	}
 
-	// Verify staged source hash before execution
+	// Verify staged bytes against the persisted SourceHash.
 	if err := s.staging.Verify(job.StagingID, job.SourceHash); err != nil {
 		return nil, err
 	}
 
-	// Validate for execution (hash match, validated status)
 	if err := s.validateForExecution(ctx, job); err != nil {
 		return nil, err
 	}
 
-	if s.jobSvc == nil {
-		return s.executeInline(ctx, job, idempotencyKey)
+	result, execErr := s.executeDurable(ctx, job, idempotencyKey)
+	if execErr != nil {
+		// Abandon the in-flight idempotency record so a retry is a fresh
+		// attempt rather than a stuck "in flight".
+		_ = s.repo.IdempotencyAbandon(ctx, scopeKey, job.Actor, tenantID, idempotencyKey)
+		return nil, execErr
 	}
 
-	// Submit durable job
+	if err := s.repo.IdempotencyComplete(ctx, scopeKey, job.Actor, tenantID, idempotencyKey, 200, result, s.clock.Now()); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (s *Service) executeDurable(ctx context.Context, job *ImportJob, idempotencyKey string) (*ImportJob, error) {
+	if s.jobSvc == nil {
+		return nil, ErrJobsUnavailable
+	}
+	if err := s.staging.Verify(job.StagingID, job.SourceHash); err != nil {
+		return nil, err
+	}
+
 	submission := jobs.Submission{
 		TenantID:       job.TenantID,
 		Scope:          mapScope(job.Scope),
@@ -190,27 +263,12 @@ func (s *Service) Execute(ctx context.Context, id, tenantID uint, scope, idempot
 		return nil, kernel.Wrap(kernel.ErrCodeInternal, "submit import durable job", err)
 	}
 
-	s.repo.UpdateStatus(ctx, job.ID, job.Status, StatusRunning, job.Version)
-	s.repo.LinkJobID(ctx, job.ID, durableJob.ID)
-
-	return s.repo.Get(ctx, job.ID)
-}
-
-func (s *Service) executeInline(ctx context.Context, job *ImportJob, idempotencyKey string) (*ImportJob, error) {
-	data, err := s.staging.Read(job.StagingID)
-	if err != nil {
-		return nil, err
-	}
 	if err := s.repo.UpdateStatus(ctx, job.ID, job.Status, StatusRunning, job.Version); err != nil {
 		return nil, err
 	}
-	executor := NewExecutor(s.adapters, s.repo, job.TenantID, idempotencyKey)
-	_, execErr := executor.Execute(ctx, job, data)
-	if execErr != nil {
-		s.repo.UpdateStatus(ctx, job.ID, StatusRunning, StatusFailed, job.Version+1)
-		return s.repo.Get(ctx, job.ID)
+	if err := s.repo.LinkJobID(ctx, job.ID, durableJob.ID); err != nil {
+		return nil, err
 	}
-	s.repo.UpdateStatus(ctx, job.ID, StatusRunning, StatusCompleted, job.Version+1)
 	return s.repo.Get(ctx, job.ID)
 }
 
@@ -219,11 +277,40 @@ func (s *Service) Resume(ctx context.Context, id, tenantID uint, scope, idempote
 	if err != nil {
 		return nil, err
 	}
+	if strings.TrimSpace(idempotencyKey) == "" {
+		return nil, ErrIdempotencyRequired
+	}
+
+	scopeKey := fmt.Sprintf("%s|%d", scope, tenantID)
+	requestHash := requestHash("resume", job)
+
+	stored, replay, err := s.repo.IdempotencyBegin(ctx, scopeKey, job.Actor, tenantID, idempotencyKey, requestHash, s.clock.Now())
+	if err != nil {
+		if errors.Is(err, kernel.ErrIdempotencyInFlight) {
+			return nil, kernel.NewError(kernel.ErrCodeIdempotencyReuse, "a resume for this import is already in progress")
+		}
+		return nil, err
+	}
+	if replay {
+		return unmarshalStoredJob(stored, job.ID)
+	}
+
 	if !job.Status.CanTransition(StatusRunning) {
 		return nil, kernel.InvalidStateTransition(string(job.Status), string(StatusRunning))
 	}
-	// Re-run execute which resumes from last checkpoint
-	return s.Execute(ctx, id, tenantID, scope, idempotencyKey, "EXECUTE-IMPORT-"+itoa(id))
+	if err := s.staging.Verify(job.StagingID, job.SourceHash); err != nil {
+		return nil, err
+	}
+
+	result, execErr := s.executeDurable(ctx, job, idempotencyKey)
+	if execErr != nil {
+		_ = s.repo.IdempotencyAbandon(ctx, scopeKey, job.Actor, tenantID, idempotencyKey)
+		return nil, execErr
+	}
+	if err := s.repo.IdempotencyComplete(ctx, scopeKey, job.Actor, tenantID, idempotencyKey, 200, result, s.clock.Now()); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (s *Service) Cancel(ctx context.Context, id, tenantID uint, scope string) (*ImportJob, error) {
@@ -237,10 +324,9 @@ func (s *Service) Cancel(ctx context.Context, id, tenantID uint, scope string) (
 	if !job.Status.CanTransition(StatusCancelled) {
 		return nil, kernel.InvalidStateTransition(string(job.Status), string(StatusCancelled))
 	}
-	// Cancel the durable job first if present
 	if job.JobID > 0 && s.jobSvc != nil {
 		js := mapScope(job.Scope)
-		s.jobSvc.RequestCancellation(ctx, job.JobID, job.TenantID, js)
+		_, _ = s.jobSvc.RequestCancellation(ctx, job.JobID, job.TenantID, js)
 	}
 	if err := s.repo.UpdateStatus(ctx, job.ID, job.Status, StatusCancelled, job.Version); err != nil {
 		return nil, err
@@ -248,7 +334,10 @@ func (s *Service) Cancel(ctx context.Context, id, tenantID uint, scope string) (
 	return s.repo.Get(ctx, job.ID)
 }
 
-func (s *Service) Compensate(ctx context.Context, id, tenantID uint, scope, confirmation string) (*ImportJob, error) {
+// Compensate undoes the entities an import created. It requires an
+// idempotency key so a retried compensation replays the original outcome
+// instead of double-compensating.
+func (s *Service) Compensate(ctx context.Context, id, tenantID uint, scope, idempotencyKey, confirmation string) (*ImportJob, error) {
 	job, err := s.repo.GetForScope(ctx, id, tenantID, scope)
 	if err != nil {
 		return nil, err
@@ -257,14 +346,45 @@ func (s *Service) Compensate(ctx context.Context, id, tenantID uint, scope, conf
 	if confirmation != wantConfirm {
 		return nil, ErrConfirmationRequired
 	}
+	if strings.TrimSpace(idempotencyKey) == "" {
+		return nil, ErrIdempotencyRequired
+	}
+
+	scopeKey := fmt.Sprintf("%s|%d", scope, tenantID)
+	requestHash := requestHash("compensate", job)
+
+	stored, replay, err := s.repo.IdempotencyBegin(ctx, scopeKey, job.Actor, tenantID, idempotencyKey, requestHash, s.clock.Now())
+	if err != nil {
+		if errors.Is(err, kernel.ErrIdempotencyInFlight) {
+			return nil, kernel.NewError(kernel.ErrCodeIdempotencyReuse, "a compensation for this import is already in progress")
+		}
+		return nil, err
+	}
+	if replay {
+		return unmarshalStoredJob(stored, job.ID)
+	}
+
 	if !job.Status.CanTransition(StatusCompensating) {
 		return nil, kernel.InvalidStateTransition(string(job.Status), string(StatusCompensating))
 	}
+
+	result, compErr := s.doCompensate(ctx, job)
+	if compErr != nil {
+		_ = s.repo.IdempotencyAbandon(ctx, scopeKey, job.Actor, tenantID, idempotencyKey)
+		return nil, compErr
+	}
+	if err := s.repo.IdempotencyComplete(ctx, scopeKey, job.Actor, tenantID, idempotencyKey, 200, result, s.clock.Now()); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (s *Service) doCompensate(ctx context.Context, job *ImportJob) (*ImportJob, error) {
 	if err := s.repo.UpdateStatus(ctx, job.ID, job.Status, StatusCompensating, job.Version); err != nil {
 		return nil, err
 	}
 
-	records, err := s.repo.GetCompensationRecords(ctx, id)
+	records, err := s.repo.GetCompensationRecords(ctx, job.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -276,10 +396,10 @@ func (s *Service) Compensate(ctx context.Context, id, tenantID uint, scope, conf
 		for _, rec := range records {
 			if rec.EntityType == entityType && rec.Status == "pending" {
 				if compErr := s.compensateEntity(ctx, &rec); compErr != nil {
-					s.repo.UpdateCompensationStatus(ctx, id, rec.ResourceID, "failed", compErr.Error())
+					s.repo.UpdateCompensationStatus(ctx, job.ID, rec.ResourceID, "failed", compErr.Error())
 					allCompensated = false
 				} else {
-					s.repo.UpdateCompensationStatus(ctx, id, rec.ResourceID, "compensated", "")
+					s.repo.UpdateCompensationStatus(ctx, job.ID, rec.ResourceID, "compensated", "")
 				}
 			}
 		}
@@ -294,21 +414,25 @@ func (s *Service) Compensate(ctx context.Context, id, tenantID uint, scope, conf
 }
 
 func (s *Service) compensateEntity(ctx context.Context, rec *CompensationRecord) error {
+	job, err := s.repo.Get(ctx, rec.ImportID)
+	if err != nil {
+		return err
+	}
 	switch rec.EntityType {
 	case EntityOrganization:
-		return s.adapters.Org.SoftDeleteOrganization(ctx, rec.ResourceID)
+		return s.adapters.Org.SoftDeleteOrganization(ctx, rec.ResourceID, job.TenantID)
 	case EntityTenantAdmin:
-		return s.adapters.Admin.SoftDeleteUser(ctx, rec.ResourceID)
+		return s.adapters.Admin.SoftDeleteUser(ctx, rec.ResourceID, job.TenantID)
 	case EntityDomain:
-		return s.adapters.Domain.SoftDeleteDomain(ctx, rec.ResourceID)
+		return s.adapters.Domain.SoftDeleteDomain(ctx, rec.ResourceID, job.TenantID)
 	case EntityMailbox:
-		return s.adapters.Mailbox.SoftDeleteMailbox(ctx, rec.ResourceID)
+		return s.adapters.Mailbox.SoftDeleteMailbox(ctx, rec.ResourceID, job.TenantID)
 	case EntityAlias:
-		return s.adapters.Alias.SoftDeleteAlias(ctx, rec.ResourceID)
+		return s.adapters.Alias.SoftDeleteAlias(ctx, rec.ResourceID, job.TenantID)
 	case EntityGroup:
-		return s.adapters.Group.SoftDeleteGroup(ctx, rec.ResourceID)
+		return s.adapters.Group.SoftDeleteGroup(ctx, rec.ResourceID, job.TenantID)
 	case EntityGroupMembership:
-		return s.adapters.Group.RemoveGroupMember(ctx, rec.ResourceID)
+		return s.adapters.Group.RemoveGroupMember(ctx, rec.ResourceID, job.TenantID)
 	default:
 		return nil
 	}
@@ -340,31 +464,118 @@ func (s *Service) ImportHandler() func(ctx context.Context, exec jobs.Execution,
 	return s.HandleImportJob
 }
 
+// HandleImportJob implements the durable platform.import worker contract:
+//   - lease/fencing ownership is validated on every heartbeat and progress
+//     update (a lost lease surfaces as an error, never a silent success);
+//   - heartbeats are sent during long batches;
+//   - cooperative cancellation is checked between batches;
+//   - a checkpoint is persisted every BatchSize rows and execution resumes
+//     from the last committed checkpoint;
+//   - stale workers are rejected via the jobs lease;
+//   - max attempts are respected by returning retryable errors for
+//     transient failures and non-retryable errors otherwise;
+//   - success is only reported after all writes, the final checkpoint, and
+//     the import state update succeed.
 func (s *Service) HandleImportJob(ctx context.Context, exec jobs.Execution, payload json.RawMessage) (json.RawMessage, error) {
 	var ip importJobPayload
 	if err := json.Unmarshal(payload, &ip); err != nil {
 		return nil, &jobs.ExecutionError{Code: "INVALID_PAYLOAD", Message: "import payload invalid", Retryable: false}
 	}
-	data, err := s.staging.Read(ip.StagingID)
-	if err != nil {
-		return nil, &jobs.ExecutionError{Code: "STAGING_READ_FAILED", Message: err.Error(), Retryable: false}
+	if exec == nil {
+		return nil, &jobs.ExecutionError{Code: "MISSING_EXECUTION", Message: "import handler requires a jobs execution", Retryable: false}
 	}
-	// Verify hash on resume
-	if err := s.staging.Verify(ip.StagingID, HashSource(data)); err != nil {
-		return nil, &jobs.ExecutionError{Code: "HASH_MISMATCH", Message: err.Error(), Retryable: false}
-	}
-	// Look up import job for resume
+
 	importJob, getErr := s.repo.Get(ctx, ip.ImportID)
 	if getErr != nil {
-		return nil, &jobs.ExecutionError{Code: "IMPORT_NOT_FOUND", Message: getErr.Error(), Retryable: false}
+		return nil, &jobs.ExecutionError{Code: "IMPORT_NOT_FOUND", Message: "import job not found", Retryable: false}
 	}
-	executor := NewExecutor(s.adapters, s.repo, importJob.TenantID, ip.ImportIDString())
+	if importJob.IsTerminal() {
+		// Already completed/cancelled/compensated — nothing to do.
+		return json.RawMessage(`{"status":"noop"}`), nil
+	}
+
+	// Tamper gate: compare the staged bytes against the immutable SourceHash
+	// persisted when the upload was accepted.
+	if err := s.staging.Verify(importJob.StagingID, importJob.SourceHash); err != nil {
+		return nil, &jobs.ExecutionError{Code: "HASH_MISMATCH", Message: "staged source does not match the accepted upload hash", Retryable: false}
+	}
+	data, readErr := s.staging.Read(importJob.StagingID)
+	if readErr != nil {
+		return nil, &jobs.ExecutionError{Code: "STAGING_READ_FAILED", Message: "staged source could not be read", Retryable: true}
+	}
+
+	// Enforce the durable-job lease before doing any work.
+	if err := exec.Heartbeat(ctx); err != nil {
+		return nil, leaseExecutionError(err)
+	}
+
+	executor := NewExecutor(s.adapters, s.repo, importJob.TenantID, "import_"+itoa(importJob.ID))
+	executor.Execution = newExecutionAdapter(exec, importJob)
+
 	result, execErr := executor.Execute(ctx, importJob, data)
-	if execErr != nil {
-		return nil, &jobs.ExecutionError{Code: "EXECUTION_FAILED", Message: execErr.Error(), Retryable: true}
+	if errors.Is(execErr, ErrCancelled) {
+		return nil, &jobs.ExecutionError{Code: "CANCELLED", Message: "import cancelled during execution", Retryable: false}
 	}
+	if execErr != nil {
+		// Transient failures (DB hiccups, lease races) are retryable so the
+		// durable job respects max attempts; permanent failures are not.
+		if isRetryable(execErr) {
+			return nil, &jobs.ExecutionError{Code: "EXECUTION_FAILED", Message: "import execution failed", Retryable: true}
+		}
+		return nil, &jobs.ExecutionError{Code: "EXECUTION_FAILED", Message: "import execution failed", Retryable: false}
+	}
+
+	// Final checkpoint + import state update must succeed before success is
+	// reported to the worker.
+	finalCp := &Checkpoint{
+		ImportID:       importJob.ID,
+		Entity:         importJob.CheckpointEntity,
+		RowIndex:       importJob.CheckpointRow,
+		ProcessedCount: importJob.TotalRows,
+		CommittedAt:    s.clock.Now(),
+	}
+	if cpErr := s.repo.SaveCheckpoint(ctx, finalCp); cpErr != nil {
+		return nil, &jobs.ExecutionError{Code: "CHECKPOINT_FAILED", Message: "final checkpoint could not be persisted", Retryable: true}
+	}
+	if stateErr := s.repo.UpdateStatus(ctx, importJob.ID, StatusRunning, StatusCompleted, importJob.Version); stateErr != nil {
+		return nil, &jobs.ExecutionError{Code: "STATE_UPDATE_FAILED", Message: "import completion state could not be persisted", Retryable: true}
+	}
+
 	resJSON, _ := json.Marshal(result)
 	return resJSON, nil
+}
+
+// executionAdapter bridges jobs.Execution into the executor's bounded-batch
+// progress, heartbeat and cancellation contract.
+type executionAdapter struct {
+	exec      jobs.Execution
+	importJob *ImportJob
+	reported  int
+}
+
+func newExecutionAdapter(exec jobs.Execution, importJob *ImportJob) *executionAdapter {
+	return &executionAdapter{exec: exec, importJob: importJob}
+}
+
+func (a *executionAdapter) Heartbeat(ctx context.Context) error {
+	return a.exec.Heartbeat(ctx)
+}
+
+func (a *executionAdapter) CancellationRequested(ctx context.Context) (bool, error) {
+	return a.exec.CancellationRequested(ctx)
+}
+
+func (a *executionAdapter) SetProgress(ctx context.Context, processed int) error {
+	total := a.importJob.TotalRows
+	if total <= 0 {
+		return nil
+	}
+	pct := processed * 100 / total
+	if pct > 100 {
+		pct = 100
+	}
+	a.reported = pct
+	return a.exec.SetProgress(ctx, pct)
 }
 
 type importJobPayload struct {
@@ -429,4 +640,47 @@ func itoa(n uint) string {
 		n /= 10
 	}
 	return string(buf[i:])
+}
+
+// requestHash is a stable hash of the normalized request (action + import
+// identity) used to detect idempotency-key reuse with a different request.
+func requestHash(action string, job *ImportJob) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "%s\x00%s\x00%s\x00%d\x00%s", action, job.Scope, job.SourceHash, job.ID, job.ConflictPolicy)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func unmarshalStoredJob(stored *StoredResult, id uint) (*ImportJob, error) {
+	if stored == nil || stored.ResponseBody == "" {
+		return nil, kernel.NewError(kernel.ErrCodeInternal, "stored idempotency result is empty")
+	}
+	var job ImportJob
+	if err := json.Unmarshal([]byte(stored.ResponseBody), &job); err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "decode stored import result", err)
+	}
+	if job.ID == 0 {
+		job.ID = id
+	}
+	return &job, nil
+}
+
+func leaseExecutionError(err error) error {
+	if errors.Is(err, jobs.ErrLeaseLost) {
+		return &jobs.ExecutionError{Code: "LEASE_LOST", Message: "import lease lost to another worker", Retryable: false}
+	}
+	if errors.Is(err, jobs.ErrCancellationAsked) {
+		return &jobs.ExecutionError{Code: "CANCELLED", Message: "import cancellation requested", Retryable: false}
+	}
+	return &jobs.ExecutionError{Code: "LEASE_ERROR", Message: "import lease operation failed", Retryable: true}
+}
+
+func isRetryable(err error) bool {
+	var ie *ImportError
+	if errors.As(err, &ie) {
+		switch ie.Code {
+		case CodeHashMismatch, CodeInvalidSource, CodeParseError, CodeInvalidUTF8, CodeUnknownSchema, CodeUnknownField, CodeOversizedInput, CodeTooManyRows, CodeDuplicateRow, CodeInvalidField, CodeUnsupportedEntity, CodePlatformRoleInj, CodeCrossTenant:
+			return false
+		}
+	}
+	return true
 }

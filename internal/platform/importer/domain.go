@@ -30,7 +30,7 @@ var importTransitions = map[ImportStatus]map[ImportStatus]bool{
 	StatusValidating:         {StatusValidated: true, StatusValidationFailed: true, StatusCancelled: true},
 	StatusValidated:          {StatusRunning: true, StatusValidating: true, StatusCancelled: true},
 	StatusValidationFailed:   {StatusUploaded: true, StatusCancelled: true},
-	StatusRunning:            {StatusCompleted: true, StatusPaused: true, StatusFailed: true, StatusCancelled: true},
+	StatusRunning:            {StatusCompleted: true, StatusPaused: true, StatusFailed: true, StatusCancelled: true, StatusRunning: true},
 	StatusPaused:             {StatusRunning: true, StatusCancelled: true},
 	StatusFailed:             {StatusValidating: true, StatusCancelled: true},
 	StatusCancelled:          {},
@@ -234,6 +234,9 @@ var (
 	ErrDryRunRequired       = kernel.NewError(kernel.ErrCodePreconditionFail, "dry-run validation must succeed before execution")
 	ErrActiveJob            = kernel.NewError(kernel.ErrCodeConflict, "another import is already active for this source")
 	ErrConfirmationRequired = kernel.NewError(kernel.ErrCodeValidation, "confirmation is required for this action")
+	ErrJobsUnavailable      = kernel.NewError(kernel.ErrCodeUnavailable, "durable job service is unavailable")
+	ErrIdempotencyRequired  = kernel.NewError(kernel.ErrCodeValidation, "Idempotency-Key is required for this action")
+	ErrCancelled            = errors.New("import cancelled during execution")
 )
 
 func IsNotFound(err error) bool { return errors.Is(err, ErrNotFound) }

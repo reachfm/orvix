@@ -211,6 +211,8 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermPlatformSecurityRead:   true,
 		PermPlatformSessionsRevoke: true,
 		PermJobsRead:               true, PermJobsWrite: true,
+		// Platform imports (the /platform/imports surface is platform-scope).
+		PermImportsRead: true, PermImportsWrite: true, PermImportsExecute: true, PermImportsAdmin: true,
 	},
 	// Tenant Admin: full tenant permissions (no platform).
 	auth.RoleTenantAdmin: {
@@ -232,6 +234,7 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermCredentialsReset: true,
 		PermSessionsRevoke:   true,
 		PermSecurityRead:     true,
+		PermImportsRead:      true, PermImportsWrite: true, PermImportsExecute: true,
 	},
 	// Tenant Operator: operational management without user/role/admin.
 	auth.RoleTenantOperator: {
@@ -316,6 +319,7 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermPlatformSecurityRead:   true,
 		PermPlatformSessionsRevoke: true,
 		PermJobsRead:               true, PermJobsWrite: true,
+		PermImportsRead: true, PermImportsWrite: true, PermImportsExecute: true, PermImportsAdmin: true,
 	},
 	// PORTAL-SEPARATION-PHASE1: the deprecated auth.RoleAdmin no longer maps
 	// to any permission. Legacy "admin" rows are normalized at startup

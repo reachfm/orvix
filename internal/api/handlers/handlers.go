@@ -495,6 +495,16 @@ func (h *Handler) DomainAdminService() *domainadminsvc.Service {
 	return h.domainAdminSvc
 }
 
+// OrganizationAdminService returns the wired organization admin service.
+func (h *Handler) OrganizationAdminService() *orgadminsvc.Service {
+	return h.orgAdminSvc
+}
+
+// MailboxAdminService returns the wired mailbox admin service.
+func (h *Handler) MailboxAdminService() *mailboxadminsvc.Service {
+	return h.mailboxAdminSvc
+}
+
 // SetBulkProvisionService wires the bulk mailbox provisioning service.
 func (h *Handler) SetBulkProvisionService(s *bulkprovision.Service) {
 	h.bulkProvisionSvc = s

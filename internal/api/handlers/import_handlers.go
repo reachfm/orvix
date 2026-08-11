@@ -13,9 +13,17 @@ func (h *Handler) SetImportService(svc *importer.Service) {
 	h.importSvc = svc
 }
 
+// ImportService returns the wired import service, or nil when the router
+// could not construct it (e.g. missing staging directory). Handlers must
+// 503 on nil rather than panic.
+func (h *Handler) ImportService() *importer.Service { return h.importSvc }
+
 // ── Tenant-scoped handlers ─────────────────────────────────────────
 
 func (h *Handler) CreateImport(c fiber.Ctx) error {
+	if err := checkImportService(h, c); err != nil {
+		return err
+	}
 	scope := importScope(c)
 	tenantID := h.tenantIDForScope(c, scope)
 	if tenantID == 0 && scope == "tenant" {
@@ -55,6 +63,9 @@ func (h *Handler) CreateImport(c fiber.Ctx) error {
 }
 
 func (h *Handler) ListImports(c fiber.Ctx) error {
+	if err := checkImportService(h, c); err != nil {
+		return err
+	}
 	scope := importScope(c)
 	tenantID := h.tenantIDForScope(c, scope)
 
@@ -73,6 +84,9 @@ func (h *Handler) ListImports(c fiber.Ctx) error {
 }
 
 func (h *Handler) GetImport(c fiber.Ctx) error {
+	if err := checkImportService(h, c); err != nil {
+		return err
+	}
 	scope := importScope(c)
 	tenantID := h.tenantIDForScope(c, scope)
 	id := parseImportID(c)
@@ -85,6 +99,9 @@ func (h *Handler) GetImport(c fiber.Ctx) error {
 }
 
 func (h *Handler) ValidateImport(c fiber.Ctx) error {
+	if err := checkImportService(h, c); err != nil {
+		return err
+	}
 	scope := importScope(c)
 	tenantID := h.tenantIDForScope(c, scope)
 	id := parseImportID(c)
@@ -97,6 +114,9 @@ func (h *Handler) ValidateImport(c fiber.Ctx) error {
 }
 
 func (h *Handler) GetImportReport(c fiber.Ctx) error {
+	if err := checkImportService(h, c); err != nil {
+		return err
+	}
 	scope := importScope(c)
 	tenantID := h.tenantIDForScope(c, scope)
 	id := parseImportID(c)
@@ -109,6 +129,9 @@ func (h *Handler) GetImportReport(c fiber.Ctx) error {
 }
 
 func (h *Handler) ExecuteImport(c fiber.Ctx) error {
+	if err := checkImportService(h, c); err != nil {
+		return err
+	}
 	scope := importScope(c)
 	tenantID := h.tenantIDForScope(c, scope)
 	id := parseImportID(c)
@@ -128,6 +151,9 @@ func (h *Handler) ExecuteImport(c fiber.Ctx) error {
 }
 
 func (h *Handler) ResumeImport(c fiber.Ctx) error {
+	if err := checkImportService(h, c); err != nil {
+		return err
+	}
 	scope := importScope(c)
 	tenantID := h.tenantIDForScope(c, scope)
 	id := parseImportID(c)
@@ -145,6 +171,9 @@ func (h *Handler) ResumeImport(c fiber.Ctx) error {
 }
 
 func (h *Handler) CancelImport(c fiber.Ctx) error {
+	if err := checkImportService(h, c); err != nil {
+		return err
+	}
 	scope := importScope(c)
 	tenantID := h.tenantIDForScope(c, scope)
 	id := parseImportID(c)
@@ -157,13 +186,21 @@ func (h *Handler) CancelImport(c fiber.Ctx) error {
 }
 
 func (h *Handler) CompensateImport(c fiber.Ctx) error {
+	if err := checkImportService(h, c); err != nil {
+		return err
+	}
 	scope := importScope(c)
 	tenantID := h.tenantIDForScope(c, scope)
 	id := parseImportID(c)
 
+	idempotencyKey := c.Get("Idempotency-Key")
+	if idempotencyKey == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Idempotency-Key header is required"})
+	}
+
 	confirmation := c.Get("X-Import-Confirm", c.FormValue("confirm"))
 
-	job, err := h.importSvc.Compensate(c.Context(), id, tenantID, scope, confirmation)
+	job, err := h.importSvc.Compensate(c.Context(), id, tenantID, scope, idempotencyKey, confirmation)
 	if err != nil {
 		return errorResponse(c, err)
 	}

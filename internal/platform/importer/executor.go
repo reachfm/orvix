@@ -7,11 +7,29 @@ import (
 	"time"
 )
 
+// BatchExecution is the narrow slice of the durable job execution contract
+// the executor needs: heartbeats during long batches, cooperative
+// cancellation between batches, and durable progress reporting. It is
+// satisfied by the jobs package's Execution in production; tests may supply
+// a lightweight stub.
+type BatchExecution interface {
+	Heartbeat(context.Context) error
+	CancellationRequested(context.Context) (bool, error)
+	SetProgress(context.Context, int) error
+}
+
 type Executor struct {
 	adapters       *Adapters
 	repo           *Repository
 	tenantID       uint
 	idempotencyKey string
+	// BatchSize controls how many rows are processed between checkpoints.
+	// It defaults to the package BatchSize constant when zero. Tests shrink
+	// it to exercise crash-and-resume with small fixtures.
+	BatchSize int
+	// Execution is optional; when nil the executor runs without heartbeats,
+	// cancellation checks or progress reporting (unit tests).
+	Execution BatchExecution
 }
 
 func NewExecutor(adapters *Adapters, repo *Repository, tenantID uint, idempotencyKey string) *Executor {
@@ -37,6 +55,16 @@ type CreatedResource struct {
 	RowKey     string           `json:"row_key"`
 }
 
+// Execute processes the source in bounded batches. Between batches it:
+//   - sends a heartbeat to extend the durable lease,
+//   - checks cooperative cancellation,
+//   - persists a checkpoint so a crash resumes from the last committed
+//     batch,
+//   - reports progress to the durable job.
+//
+// Resume is idempotent at the row level: any row whose compensation record
+// was already persisted (i.e. its entity was created before a crash) is
+// skipped, so a resumed run never duplicates entities.
 func (e *Executor) Execute(ctx context.Context, job *ImportJob, data []byte) (*ExecutionResult, error) {
 	source, parseErr := ParseSource(data, job.SourceType)
 	if parseErr != nil {
@@ -49,9 +77,7 @@ func (e *Executor) Execute(ctx context.Context, job *ImportJob, data []byte) (*E
 		startFrom = lastCp.ProcessedCount
 	}
 
-	if startFrom >= len(source.Entities) {
-		return &ExecutionResult{}, nil
-	}
+	ordered := reorderEntities(source.Entities)
 
 	result := &ExecutionResult{}
 	processed := startFrom
@@ -59,12 +85,28 @@ func (e *Executor) Execute(ctx context.Context, job *ImportJob, data []byte) (*E
 	skipped := 0
 	failed := 0
 
-	ordered := reorderEntities(source.Entities)
+	if startFrom >= len(ordered) {
+		return &ExecutionResult{Processed: len(ordered)}, nil
+	}
+
 	for i := startFrom; i < len(ordered); i++ {
 		entity := ordered[i]
-		if len(entity.Errors) > 0 {
-			skipped++
+
+		// Idempotent resume: if this row's entity was already created (its
+		// compensation record is present), skip it rather than duplicating.
+		exists, checkErr := e.repo.CompensationExistsForRow(ctx, job.ID, entity.Line)
+		if checkErr != nil {
+			return nil, checkErr
+		}
+		if exists {
 			processed++
+			skipped++
+			continue
+		}
+
+		if len(entity.Errors) > 0 {
+			processed++
+			skipped++
 			continue
 		}
 
@@ -82,7 +124,7 @@ func (e *Executor) Execute(ctx context.Context, job *ImportJob, data []byte) (*E
 				ResourceID: resourceID,
 				RowKey:     fmt.Sprintf("%s_%d", entity.Entity, resourceID),
 			})
-			e.repo.SaveCompensationRecord(ctx, &CompensationRecord{
+			if recErr := e.repo.SaveCompensationRecord(ctx, &CompensationRecord{
 				ImportID:   job.ID,
 				ResourceID: resourceID,
 				EntityType: entity.Entity,
@@ -90,23 +132,22 @@ func (e *Executor) Execute(ctx context.Context, job *ImportJob, data []byte) (*E
 				RowIndex:   entity.Line,
 				Status:     "pending",
 				CreatedAt:  time.Now().UTC(),
-			})
+			}); recErr != nil {
+				return nil, recErr
+			}
 		}
 
 		processed++
 
-		if processed%50 == 0 {
-			checkpoint := &Checkpoint{
-				ImportID:       job.ID,
-				Entity:         entity.Entity,
-				RowIndex:       entity.Line,
-				ProcessedCount: processed,
-				CommittedAt:    time.Now().UTC(),
+		// Bounded batch: checkpoint, heartbeat, cancellation, progress.
+		batchSize := e.BatchSize
+		if batchSize <= 0 {
+			batchSize = BatchSize
+		}
+		if processed%batchSize == 0 {
+			if err := e.checkpointBatch(ctx, job, entity, processed, succeeded, skipped, failed); err != nil {
+				return nil, err
 			}
-			if cpErr := e.repo.SaveCheckpoint(ctx, checkpoint); cpErr != nil {
-				return nil, cpErr
-			}
-			e.repo.UpdateProgress(ctx, job.ID, processed, succeeded+job.SucceededRows, skipped+job.SkippedRows, failed+job.FailedRows, processed, entity.Entity, entity.Line)
 		}
 	}
 
@@ -115,6 +156,39 @@ func (e *Executor) Execute(ctx context.Context, job *ImportJob, data []byte) (*E
 	result.Skipped = skipped
 	result.Failed = failed
 	return result, nil
+}
+
+func (e *Executor) checkpointBatch(ctx context.Context, job *ImportJob, entity ParsedEntity, processed, succeeded, skipped, failed int) error {
+	checkpoint := &Checkpoint{
+		ImportID:       job.ID,
+		Entity:         entity.Entity,
+		RowIndex:       entity.Line,
+		ProcessedCount: processed,
+		CommittedAt:    time.Now().UTC(),
+	}
+	if cpErr := e.repo.SaveCheckpoint(ctx, checkpoint); cpErr != nil {
+		return cpErr
+	}
+	if progErr := e.repo.UpdateProgress(ctx, job.ID, processed, succeeded+job.SucceededRows, skipped+job.SkippedRows, failed+job.FailedRows, processed, entity.Entity, entity.Line); progErr != nil {
+		return progErr
+	}
+
+	if e.Execution == nil {
+		return nil
+	}
+	// Cooperative cancellation between batches.
+	requested, cancelErr := e.Execution.CancellationRequested(ctx)
+	if cancelErr != nil {
+		return cancelErr
+	}
+	if requested {
+		return ErrCancelled
+	}
+	// Heartbeat to extend the lease before the next batch.
+	if hbErr := e.Execution.Heartbeat(ctx); hbErr != nil {
+		return hbErr
+	}
+	return e.Execution.SetProgress(ctx, processed)
 }
 
 func (e *Executor) executeEntity(ctx context.Context, entity ParsedEntity, job *ImportJob) (uint, error) {

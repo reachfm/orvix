@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -26,18 +27,20 @@ import (
 var outputJSON bool
 
 type platformCLIDeps struct {
-	openDB func() (*sql.DB, *dbdialect.Info, func() error, error)
-	now    func() time.Time
-	stdout io.Writer
-	stderr io.Writer
+	openDB     func() (*sql.DB, *dbdialect.Info, func() error, error)
+	stagingDir func() string
+	now        func() time.Time
+	stdout     io.Writer
+	stderr     io.Writer
 }
 
 func defaultPlatformCLIDeps() platformCLIDeps {
 	return platformCLIDeps{
-		openDB: openProductionDB,
-		now:    func() time.Time { return time.Now().UTC() },
-		stdout: os.Stdout,
-		stderr: os.Stderr,
+		openDB:     openProductionDB,
+		stagingDir: defaultStagingDir,
+		now:        func() time.Time { return time.Now().UTC() },
+		stdout:     os.Stdout,
+		stderr:     os.Stderr,
 	}
 }
 
@@ -50,6 +53,20 @@ const (
 	exitConfirmRefused = 5
 	exitUnavailable    = 6
 )
+
+// defaultStagingDir returns the confined directory used to stage import
+// source files. It prefers the configured ORVIX_DATA_DIR and falls back to
+// the platform temp directory so the CLI works without a site config.
+func defaultStagingDir() string {
+	if dir := os.Getenv("ORVIX_IMPORT_STAGING_DIR"); dir != "" {
+		return dir
+	}
+	base := os.Getenv("ORVIX_DATA_DIR")
+	if base == "" {
+		base = os.TempDir()
+	}
+	return filepath.Join(base, "orvix-imports")
+}
 
 func platformCommand(args []string) int {
 	return runPlatform(args, defaultPlatformCLIDeps())
@@ -795,7 +812,7 @@ func runImports(args []string, deps platformCLIDeps, fs *flag.FlagSet) int {
 		return exitBadArgs
 	}
 
-	db, _, closeFn, err := deps.openDB()
+	db, dial, closeFn, err := deps.openDB()
 	if err != nil {
 		fmt.Fprintf(deps.stderr, "error: %v\n", err)
 		return exitInternal
@@ -803,16 +820,53 @@ func runImports(args []string, deps platformCLIDeps, fs *flag.FlagSet) int {
 	defer closeFn()
 	ctx := context.Background()
 
-	repo := importerRepo(db)
-	adapters := importer.NewAdapters(
-		cliOrgPort{db: db},
-		cliAdminPort{db: db},
-		cliDomainPort{db: db},
-		cliMailboxPort{db: db},
-		cliAliasPort{db: db},
-		cliGroupPort{db: db},
-	)
-	svc := importer.NewService(repo, adapters, nil, nil, nil)
+	// Real service construction: repository, confined staging service,
+	// durable jobs service with the platform.import handler registered, and
+	// concrete adapters around the real admin services. There is no inline
+	// execution fallback and no nil dependency.
+	repo := importer.NewRepository(db)
+	if err := repo.EnsureSchema(ctx); err != nil {
+		fmt.Fprintf(deps.stderr, "error initializing import schema: %v\n", err)
+		return exitInternal
+	}
+
+	stagingDir := deps.stagingDir()
+	if stagingDir == "" {
+		fmt.Fprintln(deps.stderr, "error: no staging directory configured")
+		return exitInternal
+	}
+	if err := os.MkdirAll(stagingDir, 0o700); err != nil {
+		fmt.Fprintf(deps.stderr, "error creating staging directory: %v\n", err)
+		return exitInternal
+	}
+	staging, err := importer.NewStagingService(stagingDir)
+	if err != nil {
+		fmt.Fprintf(deps.stderr, "error initializing staging: %v\n", err)
+		return exitInternal
+	}
+
+	jobRepo := jobs.NewJobRepository(db)
+	if err := jobRepo.EnsureSchema(ctx); err != nil {
+		fmt.Fprintf(deps.stderr, "error initializing jobs schema: %v\n", err)
+		return exitInternal
+	}
+	jobRegistry := jobs.NewRegistry()
+	jobSvc := jobs.NewServiceWithRegistry(jobRepo, jobRegistry, kernel.SystemClock{})
+
+	adapters, err := importer.NewProductionAdaptersFromDB(db, dial)
+	if err != nil {
+		fmt.Fprintf(deps.stderr, "error building import adapters: %v\n", err)
+		return exitInternal
+	}
+	svc := importer.NewService(repo, adapters, staging, jobSvc, nil)
+	if err := svc.RequiredDependencies(); err != nil {
+		fmt.Fprintf(deps.stderr, "error: %v\n", err)
+		return exitInternal
+	}
+	if err := jobs.RegisterProductionHandlers(jobRegistry, nil, nil, svc); err != nil {
+		fmt.Fprintf(deps.stderr, "error registering import job handler: %v\n", err)
+		return exitInternal
+	}
 
 	switch action {
 	case "list":
@@ -887,8 +941,9 @@ func runImports(args []string, deps platformCLIDeps, fs *flag.FlagSet) int {
 			fmt.Fprintln(deps.stderr, "import job not found")
 			return exitNotFound
 		}
-		// Execute submits the durable job
-		idemKey := "cli-" + fmt.Sprintf("%d-%d", job.ID, deps.now().Unix())
+		// Stable deterministic idempotency key: retrying the same CLI
+		// invocation replays the original result instead of double-submitting.
+		idemKey := "cli-execute-import-" + itoaCLI(job.ID)
 		result, exerr := svc.Execute(ctx, uint(*iid), 0, "platform", idemKey, want)
 		if exerr != nil {
 			fmt.Fprintf(deps.stderr, "execute error: %v\n", exerr)
@@ -915,7 +970,7 @@ func runImports(args []string, deps platformCLIDeps, fs *flag.FlagSet) int {
 			fmt.Fprintln(deps.stderr, "--id is required")
 			return exitBadArgs
 		}
-		idemKey := "cli-resume-" + fmt.Sprintf("%d-%d", *iid, deps.now().Unix())
+		idemKey := "cli-resume-import-" + itoaCLI(uint(*iid))
 		job, rerr := svc.Resume(ctx, uint(*iid), 0, "platform", idemKey)
 		if rerr != nil {
 			fmt.Fprintf(deps.stderr, "resume error: %v\n", rerr)
@@ -934,7 +989,8 @@ func runImports(args []string, deps platformCLIDeps, fs *flag.FlagSet) int {
 			fmt.Fprintln(deps.stderr, "confirmation refused")
 			return exitConfirmRefused
 		}
-		job, cerr := svc.Compensate(ctx, uint(*iid), 0, "platform", want)
+		idemKey := "cli-compensate-import-" + itoaCLI(uint(*iid))
+		job, cerr := svc.Compensate(ctx, uint(*iid), 0, "platform", idemKey, want)
 		if cerr != nil {
 			fmt.Fprintf(deps.stderr, "error: %v\n", cerr)
 			return exitInternal
@@ -948,79 +1004,18 @@ func runImports(args []string, deps platformCLIDeps, fs *flag.FlagSet) int {
 	}
 }
 
-func importerRepo(db *sql.DB) *importer.Repository {
-	repo := importer.NewRepository(db)
-	repo.EnsureSchema(context.Background())
-	return repo
-}
-
-// CLI adapter ports — lightweight platform-only implementations.
-
-type cliOrgPort struct{ db *sql.DB }
-
-func (p cliOrgPort) CreateOrganization(ctx context.Context, name, domain string, tenantID uint) (uint, error) {
-	return 0, fmt.Errorf("CLI org creation not supported")
-}
-func (p cliOrgPort) SoftDeleteOrganization(ctx context.Context, id uint) error {
-	_, err := p.db.ExecContext(ctx, `UPDATE tenants SET deleted_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`, id)
-	return err
-}
-
-type cliAdminPort struct{ db *sql.DB }
-
-func (p cliAdminPort) CreateTenantAdmin(ctx context.Context, email, name, password, role string, tenantID uint) (uint, error) {
-	return 0, fmt.Errorf("CLI admin creation not supported")
-}
-func (p cliAdminPort) SoftDeleteUser(ctx context.Context, id uint) error {
-	_, err := p.db.ExecContext(ctx, `UPDATE users SET deleted_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`, id)
-	return err
-}
-
-type cliDomainPort struct{ db *sql.DB }
-
-func (p cliDomainPort) CreateDomain(ctx context.Context, name string, tenantID uint) (uint, error) {
-	return 0, fmt.Errorf("CLI domain creation not supported")
-}
-func (p cliDomainPort) SoftDeleteDomain(ctx context.Context, id uint) error {
-	_, err := p.db.ExecContext(ctx, `UPDATE coremail_domains SET deleted_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`, id)
-	return err
-}
-
-type cliMailboxPort struct{ db *sql.DB }
-
-func (p cliMailboxPort) CreateMailbox(ctx context.Context, email, name, password, domainName string, tenantID uint) (uint, error) {
-	return 0, fmt.Errorf("CLI mailbox creation not supported")
-}
-func (p cliMailboxPort) SoftDeleteMailbox(ctx context.Context, id uint) error {
-	_, err := p.db.ExecContext(ctx, `UPDATE coremail_mailboxes SET deleted_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`, id)
-	return err
-}
-
-type cliAliasPort struct{ db *sql.DB }
-
-func (p cliAliasPort) CreateAlias(ctx context.Context, fromEmail, toEmail string, tenantID, domainID uint) (uint, error) {
-	return 0, fmt.Errorf("CLI alias creation not supported")
-}
-func (p cliAliasPort) SoftDeleteAlias(ctx context.Context, id uint) error {
-	_, err := p.db.ExecContext(ctx, `UPDATE coremail_aliases SET deleted_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`, id)
-	return err
-}
-
-type cliGroupPort struct{ db *sql.DB }
-
-func (p cliGroupPort) CreateGroup(ctx context.Context, name, description string, tenantID uint) (uint, error) {
-	return 0, fmt.Errorf("CLI group creation not supported")
-}
-func (p cliGroupPort) AddGroupMember(ctx context.Context, groupName, email string, tenantID uint) error {
-	return fmt.Errorf("CLI group member add not supported")
-}
-func (p cliGroupPort) SoftDeleteGroup(ctx context.Context, id uint) error {
-	_, err := p.db.ExecContext(ctx, `UPDATE coremail_groups SET deleted_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`, id)
-	return err
-}
-func (p cliGroupPort) RemoveGroupMember(ctx context.Context, memberID uint) error {
-	_, err := p.db.ExecContext(ctx, `DELETE FROM coremail_group_members WHERE id=?`, memberID)
-	return err
+func itoaCLI(n uint) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte(n%10) + '0'
+		n /= 10
+	}
+	return string(buf[i:])
 }
 
 // ── Helpers ───────────────────────────────────────────────────────

@@ -29,13 +29,15 @@ func testDB(t *testing.T) (*sql.DB, *dbdialect.Info, func() error) {
 func platformTestDeps(t *testing.T, db *sql.DB, dial *dbdialect.Info) (platformCLIDeps, *bytes.Buffer, *bytes.Buffer) {
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
+	stagingDir := t.TempDir()
 	return platformCLIDeps{
 		openDB: func() (*sql.DB, *dbdialect.Info, func() error, error) {
 			return db, dial, func() error { return nil }, nil
 		},
-		now:    func() time.Time { return time.Now().UTC() },
-		stdout: stdout,
-		stderr: stderr,
+		stagingDir: func() string { return stagingDir },
+		now:        func() time.Time { return time.Now().UTC() },
+		stdout:     stdout,
+		stderr:     stderr,
 	}, stdout, stderr
 }
 

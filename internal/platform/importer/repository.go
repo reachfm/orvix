@@ -27,6 +27,47 @@ func NewRepository(db *sql.DB) *Repository {
 
 func (r *Repository) q(query string) string { return r.dialect.Rewrite(query) }
 
+// ── EntityLookup (used by the planner/validator dry-run) ──────────────
+
+func (r *Repository) OrgExists(ctx context.Context, domain string, tenantID uint) (bool, error) {
+	var c int
+	err := r.db.QueryRowContext(ctx, r.q(`SELECT COUNT(*) FROM tenants WHERE domain=? AND deleted_at IS NULL`), domain).Scan(&c)
+	if err != nil {
+		return false, err
+	}
+	return c > 0, nil
+}
+
+func (r *Repository) UserExists(ctx context.Context, email string) (bool, error) {
+	var c int
+	err := r.db.QueryRowContext(ctx, r.q(`SELECT COUNT(*) FROM users WHERE email=? AND deleted_at IS NULL`), email).Scan(&c)
+	if err != nil {
+		return false, err
+	}
+	return c > 0, nil
+}
+
+func (r *Repository) DomainExists(ctx context.Context, name string) (bool, uint, error) {
+	var id, tenantID uint
+	err := r.db.QueryRowContext(ctx, r.q(`SELECT id, tenant_id FROM coremail_domains WHERE name=? AND deleted_at IS NULL AND status='active'`), name).Scan(&id, &tenantID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return false, 0, nil
+		}
+		return false, 0, err
+	}
+	return true, tenantID, nil
+}
+
+func (r *Repository) MailboxExists(ctx context.Context, email string) (bool, error) {
+	var c int
+	err := r.db.QueryRowContext(ctx, r.q(`SELECT COUNT(*) FROM coremail_mailboxes WHERE email=? AND deleted_at IS NULL`), email).Scan(&c)
+	if err != nil {
+		return false, err
+	}
+	return c > 0, nil
+}
+
 const importColumns = `id,tenant_id,scope,actor,source_type,conflict_policy,schema_version,status,source_hash,source_name,staging_id,stored_size,total_rows,processed_rows,succeeded_rows,skipped_rows,failed_rows,current_checkpoint,checkpoint_entity,checkpoint_row,last_error,job_id,validation_report,created_at,updated_at,version`
 
 func (r *Repository) EnsureSchema(ctx context.Context) error {
@@ -64,6 +105,19 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 		error TEXT NOT NULL DEFAULT '', created_at ` + ts + ` NOT NULL)`
 	if _, err := r.db.ExecContext(ctx, comddl); err != nil {
 		return fmt.Errorf("ensure platform_import_compensations table: %w", err)
+	}
+	// idempotency table for execute/resume/compensate actions
+	iddl := `CREATE TABLE IF NOT EXISTS platform_import_idempotency (
+		id ` + auto + `, scope TEXT NOT NULL, actor TEXT NOT NULL,
+		tenant_id INTEGER NOT NULL DEFAULT 0, import_id INTEGER NOT NULL DEFAULT 0,
+		idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL DEFAULT '',
+		status_code INTEGER NOT NULL DEFAULT 0, response_body TEXT NOT NULL DEFAULT '',
+		created_at ` + ts + ` NOT NULL, completed_at ` + ts + `)`
+	if _, err := r.db.ExecContext(ctx, iddl); err != nil {
+		return fmt.Errorf("ensure platform_import_idempotency table: %w", err)
+	}
+	if _, err := r.db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_platform_import_idempotency_key ON platform_import_idempotency(scope,actor,tenant_id,idempotency_key)`); err != nil {
+		return fmt.Errorf("ensure import idempotency index: %w", err)
 	}
 	indexes := []string{
 		`CREATE INDEX IF NOT EXISTS idx_platform_imports_tenant ON platform_imports(tenant_id,scope,status)`,
@@ -268,9 +322,97 @@ func (r *Repository) UpdateCompensationStatus(ctx context.Context, importID, res
 	return execErr
 }
 
+// CompensationExistsForRow reports whether a compensation record has already
+// been recorded for the given source row index. The executor uses this to
+// resume a crashed import without duplicating entities whose creation had
+// already persisted a compensation record before the crash.
+func (r *Repository) CompensationExistsForRow(ctx context.Context, importID uint, rowIndex int) (bool, error) {
+	var c int
+	err := r.db.QueryRowContext(ctx, r.q(`SELECT COUNT(*) FROM platform_import_compensations WHERE import_id=? AND row_index=?`), importID, rowIndex).Scan(&c)
+	if err != nil {
+		return false, err
+	}
+	return c > 0, nil
+}
+
 func (r *Repository) UpdateStagingID(ctx context.Context, id uint, stagingID string) error {
 	_, err := r.db.ExecContext(ctx, r.q(`UPDATE platform_imports SET staging_id=?,updated_at=? WHERE id=?`), stagingID, time.Now().UTC(), id)
 	return err
+}
+
+// IdempotencyBegin registers an attempt to process an idempotent import
+// action (execute/resume/compensate). The key is scoped by
+// scope|actor|tenantID, and the request hash covers the action, import ID
+// and import identity, so:
+//   - (nil, false, nil): the key is new and the caller should proceed.
+//   - (stored, true, nil): a completed result exists for the same key and
+//     request hash; the caller must replay it without re-executing.
+//   - (nil, false, err): the key was reused with a different request hash
+//     (ErrCodeIdempotencyReuse), the key is currently in flight
+//     (ErrIdempotencyInFlight), or a persistence error occurred.
+func (r *Repository) IdempotencyBegin(ctx context.Context, scope, actor string, tenantID uint, key, requestHash string, now time.Time) (*StoredResult, bool, error) {
+	var existingHash, responseBody string
+	var statusCode int
+	var completedAt sql.NullTime
+	row := r.db.QueryRowContext(ctx, r.q(`SELECT request_hash,status_code,response_body,completed_at FROM platform_import_idempotency WHERE scope=? AND actor=? AND tenant_id=? AND idempotency_key=?`),
+		scope, actor, tenantID, key)
+	err := row.Scan(&existingHash, &statusCode, &responseBody, &completedAt)
+	if err == sql.ErrNoRows {
+		if _, insertErr := r.db.ExecContext(ctx, r.q(`INSERT INTO platform_import_idempotency (scope,actor,tenant_id,idempotency_key,request_hash,status_code,response_body,created_at) VALUES (?,?,?,?,?,0,'',?)`),
+			scope, actor, tenantID, key, requestHash, now); insertErr != nil {
+			if kernel.IsUniqueViolation(insertErr) {
+				// A concurrent request claimed the key first; recurse once.
+				return r.IdempotencyBegin(ctx, scope, actor, tenantID, key, requestHash, now)
+			}
+			return nil, false, kernel.Wrap(kernel.ErrCodeInternal, "register import idempotency key", insertErr)
+		}
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, kernel.Wrap(kernel.ErrCodeInternal, "lookup import idempotency key", err)
+	}
+	if existingHash != requestHash {
+		return nil, false, kernel.NewError(kernel.ErrCodeIdempotencyReuse, "idempotency key was already used for a different request")
+	}
+	if !completedAt.Valid {
+		return nil, false, kernel.ErrIdempotencyInFlight
+	}
+	return &StoredResult{StatusCode: statusCode, ResponseBody: responseBody}, true, nil
+}
+
+// IdempotencyComplete records a successful outcome for an idempotency key.
+func (r *Repository) IdempotencyComplete(ctx context.Context, scope, actor string, tenantID uint, key string, statusCode int, response any, now time.Time) error {
+	body, err := json.Marshal(response)
+	if err != nil {
+		return kernel.Wrap(kernel.ErrCodeInternal, "encode idempotent import result", err)
+	}
+	res, err := r.db.ExecContext(ctx, r.q(`UPDATE platform_import_idempotency SET status_code=?,response_body=?,completed_at=? WHERE scope=? AND actor=? AND tenant_id=? AND idempotency_key=? AND completed_at IS NULL`),
+		statusCode, string(body), now, scope, actor, tenantID, key)
+	if err != nil {
+		return kernel.Wrap(kernel.ErrCodeInternal, "complete import idempotency record", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return kernel.NewError(kernel.ErrCodeInternal, "no in-flight import idempotency row to complete")
+	}
+	return nil
+}
+
+// IdempotencyAbandon removes an in-flight (never completed) idempotency
+// record so a failed attempt can be retried safely with the same key.
+func (r *Repository) IdempotencyAbandon(ctx context.Context, scope, actor string, tenantID uint, key string) error {
+	_, err := r.db.ExecContext(ctx, r.q(`DELETE FROM platform_import_idempotency WHERE scope=? AND actor=? AND tenant_id=? AND idempotency_key=? AND completed_at IS NULL`),
+		scope, actor, tenantID, key)
+	if err != nil {
+		return kernel.Wrap(kernel.ErrCodeInternal, "abandon import idempotency record", err)
+	}
+	return nil
+}
+
+// StoredResult mirrors kernel.StoredResult so callers do not need to import
+// the kernel idempotency package.
+type StoredResult struct {
+	StatusCode   int
+	ResponseBody string
 }
 
 func (r *Repository) LinkJobID(ctx context.Context, importID, durableJobID uint) error {

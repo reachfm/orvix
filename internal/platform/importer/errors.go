@@ -34,6 +34,9 @@ const (
 	CodeStagingError        ErrorCode = "STAGING_ERROR"
 	CodeHashMismatch        ErrorCode = "HASH_MISMATCH"
 	CodeCSVFormulaInjection ErrorCode = "CSV_FORMULA_INJECTION"
+	CodeJobsUnavailable     ErrorCode = "JOBS_UNAVAILABLE"
+	CodeIdempotencyRequired ErrorCode = "IDEMPOTENCY_KEY_REQUIRED"
+	CodeCancelled           ErrorCode = "CANCELLED"
 )
 
 type ImportError struct {

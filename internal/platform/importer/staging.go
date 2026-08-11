@@ -12,6 +12,34 @@ import (
 
 type StagingService struct {
 	root string
+
+	// failpoints are unexported test-only hooks. Production code leaves
+	// them nil; tests inject failures to prove every filesystem error is
+	// checked and cleaned up. See the failure-injection tests.
+	failCreateTemp func() error
+	failWrite      func() error
+	failSync       func() error
+	failClose      func() error
+	failRename     func() error
+	failRemove     func() error
+}
+
+// SetTestFailpoints installs failure-injection hooks. Intended only for
+// tests; passing non-nil hooks from production code is a programming error.
+func (s *StagingService) SetTestFailpoints(hooks struct {
+	CreateTemp func() error
+	Write      func() error
+	Sync       func() error
+	Close      func() error
+	Rename     func() error
+	Remove     func() error
+}) {
+	s.failCreateTemp = hooks.CreateTemp
+	s.failWrite = hooks.Write
+	s.failSync = hooks.Sync
+	s.failClose = hooks.Close
+	s.failRename = hooks.Rename
+	s.failRemove = hooks.Remove
 }
 
 func NewStagingService(root string) (*StagingService, error) {
@@ -50,25 +78,51 @@ func (s *StagingService) Store(data []byte, importID uint) (stagingID, hash stri
 	}
 
 	tmpName := full + ".tmp"
+	if s.failCreateTemp != nil {
+		if err := s.failCreateTemp(); err != nil {
+			return "", "", 0, newImportError(CodeStagingError, fmt.Sprintf("cannot create temp file: %v", err))
+		}
+	}
 	tmp, openErr := os.OpenFile(tmpName, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0600)
 	if openErr != nil {
 		return "", "", 0, newImportError(CodeStagingError, fmt.Sprintf("cannot create temp file: %v", openErr))
 	}
-	defer func() {
+	removeTemp := func() {
 		tmp.Close()
 		os.Remove(tmpName)
-	}()
+	}
+	defer removeTemp()
 
+	if s.failWrite != nil {
+		if err := s.failWrite(); err != nil {
+			return "", "", 0, newImportError(CodeStagingError, fmt.Sprintf("write failed: %v", err))
+		}
+	}
 	if _, werr := tmp.Write(data); werr != nil {
 		return "", "", 0, newImportError(CodeStagingError, fmt.Sprintf("write failed: %v", werr))
 	}
+	if s.failSync != nil {
+		if err := s.failSync(); err != nil {
+			return "", "", 0, newImportError(CodeStagingError, fmt.Sprintf("fsync failed: %v", err))
+		}
+	}
 	if serr := tmp.Sync(); serr != nil {
 		return "", "", 0, newImportError(CodeStagingError, fmt.Sprintf("fsync failed: %v", serr))
+	}
+	if s.failClose != nil {
+		if err := s.failClose(); err != nil {
+			return "", "", 0, newImportError(CodeStagingError, fmt.Sprintf("close failed: %v", err))
+		}
 	}
 	if cerr := tmp.Close(); cerr != nil {
 		return "", "", 0, newImportError(CodeStagingError, fmt.Sprintf("close failed: %v", cerr))
 	}
 	// Now rename atomically
+	if s.failRename != nil {
+		if err := s.failRename(); err != nil {
+			return "", "", 0, newImportError(CodeStagingError, fmt.Sprintf("rename failed: %v", err))
+		}
+	}
 	if rerr := os.Rename(tmpName, full); rerr != nil {
 		return "", "", 0, newImportError(CodeStagingError, fmt.Sprintf("rename failed: %v", rerr))
 	}
@@ -120,7 +174,14 @@ func (s *StagingService) Remove(stagingID string) error {
 	if !s.isConfined(full) {
 		return newImportError(CodeStagingError, "staging path escapes root during removal")
 	}
-	os.Remove(full)
+	if s.failRemove != nil {
+		if err := s.failRemove(); err != nil {
+			return newImportError(CodeStagingError, fmt.Sprintf("remove failed: %v", err))
+		}
+	}
+	if err := os.Remove(full); err != nil && !os.IsNotExist(err) {
+		return newImportError(CodeStagingError, fmt.Sprintf("remove failed: %v", err))
+	}
 	return nil
 }
 

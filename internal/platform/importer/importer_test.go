@@ -14,7 +14,7 @@ import (
 
 func setupTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "test.db")+"?_txlock=immediate")
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "test.db")+"?_pragma=busy_timeout(5000)&_txlock=immediate")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func (p *testOrgPort) CreateOrganization(ctx context.Context, name, domain strin
 	id, _ := res.LastInsertId()
 	return uint(id), nil
 }
-func (p *testOrgPort) SoftDeleteOrganization(ctx context.Context, id uint) error {
+func (p *testOrgPort) SoftDeleteOrganization(ctx context.Context, id, tenantID uint) error {
 	_, err := p.db.ExecContext(ctx, `UPDATE tenants SET deleted_at=CURRENT_TIMESTAMP WHERE id=?`, id)
 	return err
 }
@@ -112,7 +112,7 @@ func (p *testAdminPort) CreateTenantAdmin(ctx context.Context, email, name, pass
 	id, _ := res.LastInsertId()
 	return uint(id), nil
 }
-func (p *testAdminPort) SoftDeleteUser(ctx context.Context, id uint) error {
+func (p *testAdminPort) SoftDeleteUser(ctx context.Context, id, tenantID uint) error {
 	_, err := p.db.ExecContext(ctx, `UPDATE users SET deleted_at=CURRENT_TIMESTAMP WHERE id=?`, id)
 	return err
 }
@@ -132,7 +132,7 @@ func (p *testDomainPort) CreateDomain(ctx context.Context, name string, tenantID
 	id, _ := res.LastInsertId()
 	return uint(id), nil
 }
-func (p *testDomainPort) SoftDeleteDomain(ctx context.Context, id uint) error {
+func (p *testDomainPort) SoftDeleteDomain(ctx context.Context, id, tenantID uint) error {
 	_, err := p.db.ExecContext(ctx, `UPDATE coremail_domains SET deleted_at=CURRENT_TIMESTAMP WHERE id=?`, id)
 	return err
 }
@@ -154,7 +154,7 @@ func (p *testMailboxPort) CreateMailbox(ctx context.Context, email, name, passwo
 	id, _ := res.LastInsertId()
 	return uint(id), nil
 }
-func (p *testMailboxPort) SoftDeleteMailbox(ctx context.Context, id uint) error {
+func (p *testMailboxPort) SoftDeleteMailbox(ctx context.Context, id, tenantID uint) error {
 	_, err := p.db.ExecContext(ctx, `UPDATE coremail_mailboxes SET deleted_at=CURRENT_TIMESTAMP WHERE id=?`, id)
 	return err
 }
@@ -169,7 +169,7 @@ func (p *testAliasPort) CreateAlias(ctx context.Context, fromEmail, toEmail stri
 	id, _ := res.LastInsertId()
 	return uint(id), nil
 }
-func (p *testAliasPort) SoftDeleteAlias(ctx context.Context, id uint) error {
+func (p *testAliasPort) SoftDeleteAlias(ctx context.Context, id, tenantID uint) error {
 	_, err := p.db.ExecContext(ctx, `UPDATE coremail_aliases SET deleted_at=CURRENT_TIMESTAMP WHERE id=?`, id)
 	return err
 }
@@ -192,11 +192,11 @@ func (p *testGroupPort) AddGroupMember(ctx context.Context, groupName, email str
 	_, err := p.db.ExecContext(ctx, `INSERT INTO coremail_group_members (group_id,email,created_at) VALUES (?,?,CURRENT_TIMESTAMP)`, groupID, email)
 	return err
 }
-func (p *testGroupPort) SoftDeleteGroup(ctx context.Context, id uint) error {
+func (p *testGroupPort) SoftDeleteGroup(ctx context.Context, id, tenantID uint) error {
 	_, err := p.db.ExecContext(ctx, `UPDATE coremail_groups SET deleted_at=CURRENT_TIMESTAMP WHERE id=?`, id)
 	return err
 }
-func (p *testGroupPort) RemoveGroupMember(ctx context.Context, memberID uint) error {
+func (p *testGroupPort) RemoveGroupMember(ctx context.Context, memberID, tenantID uint) error {
 	_, err := p.db.ExecContext(ctx, `DELETE FROM coremail_group_members WHERE id=?`, memberID)
 	return err
 }

@@ -7,47 +7,48 @@ import (
 
 // Domain-level ports that the importer uses. Each port is a single-purpose
 // interface consumed only by the executor/compensation paths. The importer
-// itself never issues raw SQL against business tables.
+// itself never issues raw SQL against business tables. Soft-delete methods
+// carry the tenantID so every mutation is tenant-scoped end to end.
 type OrganizationPort interface {
 	CreateOrganization(ctx context.Context, name, domain string, tenantID uint) (uint, error)
-	SoftDeleteOrganization(ctx context.Context, id uint) error
+	SoftDeleteOrganization(ctx context.Context, id, tenantID uint) error
 }
 
 type TenantAdminPort interface {
 	CreateTenantAdmin(ctx context.Context, email, name, password, role string, tenantID uint) (uint, error)
-	SoftDeleteUser(ctx context.Context, id uint) error
+	SoftDeleteUser(ctx context.Context, id, tenantID uint) error
 }
 
 type DomainPort interface {
 	CreateDomain(ctx context.Context, name string, tenantID uint) (uint, error)
-	SoftDeleteDomain(ctx context.Context, id uint) error
+	SoftDeleteDomain(ctx context.Context, id, tenantID uint) error
 }
 
 type MailboxPort interface {
 	CreateMailbox(ctx context.Context, email, name, password, domainName string, tenantID uint) (uint, error)
-	SoftDeleteMailbox(ctx context.Context, id uint) error
+	SoftDeleteMailbox(ctx context.Context, id, tenantID uint) error
 }
 
 type AliasPort interface {
 	CreateAlias(ctx context.Context, fromEmail, toEmail string, tenantID, domainID uint) (uint, error)
-	SoftDeleteAlias(ctx context.Context, id uint) error
+	SoftDeleteAlias(ctx context.Context, id, tenantID uint) error
 }
 
 type GroupPort interface {
 	CreateGroup(ctx context.Context, name, description string, tenantID uint) (uint, error)
 	AddGroupMember(ctx context.Context, groupName, email string, tenantID uint) error
-	SoftDeleteGroup(ctx context.Context, id uint) error
-	RemoveGroupMember(ctx context.Context, memberID uint) error
+	SoftDeleteGroup(ctx context.Context, id, tenantID uint) error
+	RemoveGroupMember(ctx context.Context, memberID, tenantID uint) error
 }
 
 type Compensator interface {
-	SoftDeleteOrg(ctx context.Context, id uint) error
-	SoftDeleteUser(ctx context.Context, id uint) error
-	SoftDeleteDomain(ctx context.Context, id uint) error
-	SoftDeleteMailbox(ctx context.Context, id uint) error
-	SoftDeleteAlias(ctx context.Context, id uint) error
-	SoftDeleteGroup(ctx context.Context, id uint) error
-	RemoveGroupMember(ctx context.Context, memberID uint) error
+	SoftDeleteOrg(ctx context.Context, id, tenantID uint) error
+	SoftDeleteUser(ctx context.Context, id, tenantID uint) error
+	SoftDeleteDomain(ctx context.Context, id, tenantID uint) error
+	SoftDeleteMailbox(ctx context.Context, id, tenantID uint) error
+	SoftDeleteAlias(ctx context.Context, id, tenantID uint) error
+	SoftDeleteGroup(ctx context.Context, id, tenantID uint) error
+	RemoveGroupMember(ctx context.Context, memberID, tenantID uint) error
 }
 
 // Adapters is a pure port registry. Every port is required at construction

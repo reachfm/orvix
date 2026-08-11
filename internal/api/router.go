@@ -47,6 +47,7 @@ import (
 	platformbilling "github.com/orvix/orvix/internal/platform/billing"
 	"github.com/orvix/orvix/internal/platform/bulkprovision"
 	"github.com/orvix/orvix/internal/platform/cluster"
+	platformimporter "github.com/orvix/orvix/internal/platform/importer"
 	platformjobs "github.com/orvix/orvix/internal/platform/jobs"
 	"github.com/orvix/orvix/internal/platform/kernel"
 	"github.com/orvix/orvix/internal/platform/relay"
@@ -624,15 +625,62 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		jobRegistry := platformjobs.NewRegistry()
 		if err := jobRepo.EnsureSchema(context.Background()); err != nil {
 			logger.Error("automation jobs schema initialization failed", zap.Error(err))
-		} else if err := platformjobs.RegisterProductionHandlers(jobRegistry, router.h.CustomerDomainService(), router.h.WebhookService(), nil); err != nil {
-			logger.Error("automation jobs handler registration failed", zap.Error(err))
 		} else {
 			jobService := platformjobs.NewServiceWithRegistry(jobRepo, jobRegistry, kernel.SystemClock{})
-			jobWorker := platformjobs.NewWorker(jobService, jobRegistry, "orvix-"+kernel.UUIDGenerator{}.NewID()).WithErrorHandler(func(err error) {
-				logger.Error("automation jobs worker iteration failed", zap.Error(err))
-			})
-			router.h.SetAutomationJobs(jobService, jobWorker)
-			logger.Info("durable automation jobs wired")
+
+			// Wire the durable import service (Phase 4B): real repository,
+			// a confined staging directory, the durable jobs service, and
+			// concrete service adapters. The platform.import handler is
+			// registered below so the worker can execute it.
+			importRepo := platformimporter.NewRepository(sqlDB)
+			if err := importRepo.EnsureSchema(context.Background()); err != nil {
+				logger.Error("import schema initialization failed; import service disabled", zap.Error(err))
+			} else {
+				stagingDir := cfg.Imports.StagingDir
+				if stagingDir == "" {
+					stagingDir = filepath.Join(os.TempDir(), "orvix-imports")
+				}
+				if err := os.MkdirAll(stagingDir, 0o700); err != nil {
+					logger.Error("import staging directory could not be created; import service disabled", zap.Error(err))
+				} else {
+					staging, err := platformimporter.NewStagingService(stagingDir)
+					if err != nil {
+						logger.Error("import staging initialization failed; import service disabled", zap.Error(err))
+					} else if eng == nil {
+						logger.Error("coremail engine unavailable; import service disabled")
+					} else {
+						importDialect, dialectErr := dbdialect.Detect(sqlDB)
+						if dialectErr != nil {
+							importDialect = dbdialect.FromDriver("sqlite")
+						}
+						adapters, err := platformimporter.NewProductionAdapters(platformimporter.ProductionAdapterDeps{
+							OrgService:     router.h.OrganizationAdminService(),
+							DomainService:  router.h.DomainAdminService(),
+							MailboxService: router.h.MailboxAdminService(),
+							AliasRepo:      eng.Aliases,
+							DB:             sqlDB,
+							Dialect:        importDialect,
+						})
+						if err != nil {
+							logger.Error("import adapters initialization failed; import service disabled", zap.Error(err))
+						} else {
+							importSvc := platformimporter.NewService(importRepo, adapters, staging, jobService, kernel.SystemClock{})
+							router.h.SetImportService(importSvc)
+							logger.Info("durable import service wired")
+						}
+					}
+				}
+			}
+
+			if err := platformjobs.RegisterProductionHandlers(jobRegistry, router.h.CustomerDomainService(), router.h.WebhookService(), router.h.ImportService()); err != nil {
+				logger.Error("automation jobs handler registration failed", zap.Error(err))
+			} else {
+				jobWorker := platformjobs.NewWorker(jobService, jobRegistry, "orvix-"+kernel.UUIDGenerator{}.NewID()).WithErrorHandler(func(err error) {
+					logger.Error("automation jobs worker iteration failed", zap.Error(err))
+				})
+				router.h.SetAutomationJobs(jobService, jobWorker)
+				logger.Info("durable automation jobs wired")
+			}
 		}
 	}
 
