@@ -34,12 +34,24 @@ type Service struct {
 	// Production leaves it nil (newExecutionAdapter is used); tests inject a
 	// crashing adapter to exercise the real worker integration path.
 	executionFactory func(jobs.Execution, *ImportJob) BatchExecution
+
+	// failActivate is an unexported test-only failpoint used by the
+	// activation-failure recovery tests: it injects a failure between
+	// MarkRunningAndLink and JobSvc.Activate.
+	failActivate func() error
 }
 
 // SetExecutionFactory installs a test-only BatchExecution factory used by
 // the durable handler. Intended only for tests.
 func (s *Service) SetExecutionFactory(fn func(jobs.Execution, *ImportJob) BatchExecution) {
 	s.executionFactory = fn
+}
+
+// SetActivateFailpoint installs a test-only failpoint that fires between
+// MarkRunningAndLink and Activate to prove activation-failure recovery.
+// Intended only for tests.
+func (s *Service) SetActivateFailpoint(fn func() error) {
+	s.failActivate = fn
 }
 
 func NewService(repo *Repository, adapters *Adapters, staging *StagingService, jobSvc *jobs.Service, clock kernel.Clock) *Service {
@@ -258,50 +270,34 @@ func (s *Service) Execute(ctx context.Context, id, tenantID uint, scope, idempot
 		return nil, ErrIdempotencyRequired
 	}
 
-	scopeKey := fmt.Sprintf("%s|%d", scope, tenantID)
-	requestHash := requestHash("execute", job)
-
-	// Idempotency gate runs before the state-transition check so a replayed
-	// request returns the original result even though the import has since
-	// advanced (e.g. to running) — the whole point of the key.
-	stored, replay, err := s.repo.IdempotencyBegin(ctx, scopeKey, job.Actor, tenantID, idempotencyKey, requestHash, s.clock.Now())
-	if err != nil {
-		if errors.Is(err, kernel.ErrIdempotencyInFlight) {
-			return nil, kernel.NewError(kernel.ErrCodeIdempotencyReuse, "an execute for this import is already in progress")
+	return s.runIdempotent(ctx, job, "execute", idempotencyKey, requestHash("execute", job), func() (*ImportJob, error) {
+		if !job.Status.CanTransition(StatusRunning) {
+			return nil, kernel.InvalidStateTransition(string(job.Status), string(StatusRunning))
 		}
-		return nil, err
-	}
-	if replay {
-		return unmarshalStoredJob(stored, job.ID)
-	}
-
-	if !job.Status.CanTransition(StatusRunning) {
-		return nil, kernel.InvalidStateTransition(string(job.Status), string(StatusRunning))
-	}
-
-	// Verify staged bytes against the persisted SourceHash.
-	if err := s.staging.Verify(job.StagingID, job.SourceHash); err != nil {
-		return nil, err
-	}
-
-	if err := s.validateForExecution(ctx, job); err != nil {
-		return nil, err
-	}
-
-	result, execErr := s.executeDurable(ctx, job)
-	if execErr != nil {
-		// Abandon the in-flight idempotency record so a retry is a fresh
-		// attempt rather than a stuck "in flight". The abandon failure is
-		// surfaced alongside the original failure, never swallowed.
-		return nil, errors.Join(execErr, s.repo.IdempotencyAbandon(ctx, scopeKey, job.Actor, tenantID, idempotencyKey))
-	}
-
-	if err := s.repo.IdempotencyComplete(ctx, scopeKey, job.Actor, tenantID, idempotencyKey, 200, result, s.clock.Now()); err != nil {
-		return nil, err
-	}
-	return result, nil
+		if err := s.staging.Verify(job.StagingID, job.SourceHash); err != nil {
+			return nil, err
+		}
+		return s.executeDurable(ctx, job)
+	})
 }
 
+// executeDurable performs the queued-activation handoff that guarantees a
+// worker can never claim a platform.import job until its import is linked
+// and running. It is a recoverable state machine:
+//
+//   - Not linked (JobID == 0): submit a held durable job, atomically mark
+//     the import running and link the job ID, then activate it.
+//   - Linked (JobID != 0): a previous attempt already linked the import. If
+//     the import is running this is an activation-failure recovery: NEVER
+//     submit a second durable job and never wait for the 24-hour hold —
+//     recover the SAME held job and activate it immediately. If the import
+//     is not yet running (e.g. resumed from paused) re-link the same job
+//     while transitioning back to running.
+//
+// Linkage is verified before any activation: if PlatformImports.JobID
+// points at anything other than this import's own durable job
+// (type=platform.import, idempotency key import-run-<id>), execution fails
+// closed and the foreign job is never activated.
 func (s *Service) executeDurable(ctx context.Context, job *ImportJob) (*ImportJob, error) {
 	if s.jobSvc == nil {
 		return nil, ErrJobsUnavailable
@@ -316,6 +312,30 @@ func (s *Service) executeDurable(ctx context.Context, job *ImportJob) (*ImportJo
 	// of creating duplicates. The caller key still governs the higher-level
 	// execute/resume idempotency replay.
 	durableKey := "import-run-" + itoa(job.ID)
+
+	// ── Recovery: already linked (activation pending or resumed) ────────
+	if job.JobID != 0 {
+		if err := s.verifyLinkage(ctx, job, durableKey); err != nil {
+			return nil, err
+		}
+		if job.Status != StatusRunning {
+			// e.g. resumed from paused: transition back to running while
+			// keeping the same linked job (MarkRunningAndLink is idempotent
+			// for the identical linkage).
+			if err := s.repo.MarkRunningAndLink(ctx, job.ID, job.Status, job.Version, job.JobID, s.clock.Now()); err != nil {
+				return nil, err
+			}
+		}
+		if err := s.activateDurable(ctx, job.ID, job.JobID, job.TenantID, job.Scope); err != nil {
+			return nil, kernel.Wrap(kernel.ErrCodeInternal, "activate import durable job", err)
+		}
+		return s.repo.Get(ctx, job.ID)
+	}
+
+	// ── Fresh submission: import must be validated (first execution) ─────
+	if job.Status != StatusValidated {
+		return nil, ErrDryRunRequired
+	}
 
 	submission := jobs.Submission{
 		TenantID:       job.TenantID,
@@ -347,11 +367,40 @@ func (s *Service) executeDurable(ctx context.Context, job *ImportJob) (*ImportJo
 	}
 
 	// Only now release the held job so it becomes claimable.
-	if err := s.jobSvc.Activate(ctx, durableJob.ID, job.TenantID, mapScope(job.Scope)); err != nil {
+	if err := s.activateDurable(ctx, job.ID, durableJob.ID, job.TenantID, job.Scope); err != nil {
 		return nil, kernel.Wrap(kernel.ErrCodeInternal, "activate import durable job", err)
 	}
 
 	return s.repo.Get(ctx, job.ID)
+}
+
+// verifyLinkage fails closed when PlatformImports.JobID points at any
+// durable job other than this import's own (type=platform.import with the
+// derived idempotency key). A conflicting linkage must never be activated.
+func (s *Service) verifyLinkage(ctx context.Context, job *ImportJob, durableKey string) error {
+	linked, err := s.jobSvc.Get(ctx, job.JobID, job.TenantID, mapScope(job.Scope))
+	if err != nil {
+		if errors.Is(err, jobs.ErrNotFound) {
+			return kernel.Wrap(kernel.ErrCodeInternal, "import is linked to a durable job that no longer exists", nil)
+		}
+		return kernel.Wrap(kernel.ErrCodeInternal, "lookup linked import durable job", err)
+	}
+	if linked.Type != ImportJobType || linked.IdempotencyKey != durableKey {
+		return kernel.Wrap(kernel.ErrCodeConflict, "import durable job linkage conflicts with another job", nil)
+	}
+	return nil
+}
+
+// activateDurable releases a held durable job so it becomes claimable now.
+// The test-only failpoint sits here so tests can prove recovery from an
+// activation failure after the import was already linked and marked running.
+func (s *Service) activateDurable(ctx context.Context, importID, durableJobID, tenantID uint, scope string) error {
+	if s.failActivate != nil {
+		if err := s.failActivate(); err != nil {
+			return err
+		}
+	}
+	return s.jobSvc.Activate(ctx, durableJobID, tenantID, mapScope(scope))
 }
 
 // activationHold is the far-future run_after used to hold a freshly
@@ -369,35 +418,15 @@ func (s *Service) Resume(ctx context.Context, id, tenantID uint, scope, idempote
 		return nil, ErrIdempotencyRequired
 	}
 
-	scopeKey := fmt.Sprintf("%s|%d", scope, tenantID)
-	requestHash := requestHash("resume", job)
-
-	stored, replay, err := s.repo.IdempotencyBegin(ctx, scopeKey, job.Actor, tenantID, idempotencyKey, requestHash, s.clock.Now())
-	if err != nil {
-		if errors.Is(err, kernel.ErrIdempotencyInFlight) {
-			return nil, kernel.NewError(kernel.ErrCodeIdempotencyReuse, "a resume for this import is already in progress")
+	return s.runIdempotent(ctx, job, "resume", idempotencyKey, requestHash("resume", job), func() (*ImportJob, error) {
+		if !job.Status.CanTransition(StatusRunning) {
+			return nil, kernel.InvalidStateTransition(string(job.Status), string(StatusRunning))
 		}
-		return nil, err
-	}
-	if replay {
-		return unmarshalStoredJob(stored, job.ID)
-	}
-
-	if !job.Status.CanTransition(StatusRunning) {
-		return nil, kernel.InvalidStateTransition(string(job.Status), string(StatusRunning))
-	}
-	if err := s.staging.Verify(job.StagingID, job.SourceHash); err != nil {
-		return nil, err
-	}
-
-	result, execErr := s.executeDurable(ctx, job)
-	if execErr != nil {
-		return nil, errors.Join(execErr, s.repo.IdempotencyAbandon(ctx, scopeKey, job.Actor, tenantID, idempotencyKey))
-	}
-	if err := s.repo.IdempotencyComplete(ctx, scopeKey, job.Actor, tenantID, idempotencyKey, 200, result, s.clock.Now()); err != nil {
-		return nil, err
-	}
-	return result, nil
+		if err := s.staging.Verify(job.StagingID, job.SourceHash); err != nil {
+			return nil, err
+		}
+		return s.executeDurable(ctx, job)
+	})
 }
 
 func (s *Service) Cancel(ctx context.Context, id, tenantID uint, scope string) (*ImportJob, error) {
@@ -445,13 +474,39 @@ func (s *Service) Compensate(ctx context.Context, id, tenantID uint, scope, idem
 		return nil, ErrIdempotencyRequired
 	}
 
-	scopeKey := fmt.Sprintf("%s|%d", scope, tenantID)
-	requestHash := requestHash("compensate", job)
+	return s.runIdempotent(ctx, job, "compensate", idempotencyKey, requestHash("compensate", job), func() (*ImportJob, error) {
+		if !job.Status.CanTransition(StatusCompensating) {
+			return nil, kernel.InvalidStateTransition(string(job.Status), string(StatusCompensating))
+		}
+		return s.doCompensate(ctx, job)
+	})
+}
 
-	stored, replay, err := s.repo.IdempotencyBegin(ctx, scopeKey, job.Actor, tenantID, idempotencyKey, requestHash, s.clock.Now())
+// runIdempotent executes an import action (execute/resume/compensate) under
+// its idempotency reservation and guarantees the reservation can never be
+// left dangling in-flight:
+//
+//   - a completed replay is returned unchanged;
+//   - key reuse with a different request and concurrent in-flight claims are
+//     rejected exactly as before;
+//   - any failure of fn, OR of final persistence, OR a panic, BEFORE
+//     IdempotencyComplete abandons the reservation, so a retried request is
+//     a fresh attempt rather than a stale-window-bound "in flight".
+//
+// The defer is the single structured guard: future early returns cannot
+// accidentally leave an in-flight record behind.
+func (s *Service) runIdempotent(
+	ctx context.Context,
+	job *ImportJob,
+	action, idempotencyKey, reqHash string,
+	fn func() (*ImportJob, error),
+) (result *ImportJob, err error) {
+	scopeKey := fmt.Sprintf("%s|%d", job.Scope, job.TenantID)
+
+	stored, replay, err := s.repo.IdempotencyBegin(ctx, scopeKey, job.Actor, job.TenantID, idempotencyKey, reqHash, s.clock.Now())
 	if err != nil {
 		if errors.Is(err, kernel.ErrIdempotencyInFlight) {
-			return nil, kernel.NewError(kernel.ErrCodeIdempotencyReuse, "a compensation for this import is already in progress")
+			return nil, kernel.NewError(kernel.ErrCodeIdempotencyReuse, "a "+action+" for this import is already in progress")
 		}
 		return nil, err
 	}
@@ -459,17 +514,34 @@ func (s *Service) Compensate(ctx context.Context, id, tenantID uint, scope, idem
 		return unmarshalStoredJob(stored, job.ID)
 	}
 
-	if !job.Status.CanTransition(StatusCompensating) {
-		return nil, kernel.InvalidStateTransition(string(job.Status), string(StatusCompensating))
-	}
+	// A reservation is now in flight. It must never leak: any error return
+	// (or panic) before IdempotencyComplete abandons the row. The abandon
+	// failure is only surfaced (never swallowed) when it actually fails.
+	completed := false
+	defer func() {
+		if completed {
+			return
+		}
+		panicValue := recover()
+		if panicValue == nil && err == nil {
+			return
+		}
+		if abandonErr := s.repo.IdempotencyAbandon(ctx, scopeKey, job.Actor, job.TenantID, idempotencyKey); abandonErr != nil && panicValue == nil {
+			err = errors.Join(err, kernel.Wrap(kernel.ErrCodeInternal, "abandon "+action+" idempotency reservation", abandonErr))
+		}
+		if panicValue != nil {
+			panic(panicValue)
+		}
+	}()
 
-	result, compErr := s.doCompensate(ctx, job)
-	if compErr != nil {
-		return nil, errors.Join(compErr, s.repo.IdempotencyAbandon(ctx, scopeKey, job.Actor, tenantID, idempotencyKey))
-	}
-	if err := s.repo.IdempotencyComplete(ctx, scopeKey, job.Actor, tenantID, idempotencyKey, 200, result, s.clock.Now()); err != nil {
+	result, err = fn()
+	if err != nil {
 		return nil, err
 	}
+	if err = s.repo.IdempotencyComplete(ctx, scopeKey, job.Actor, job.TenantID, idempotencyKey, 200, result, s.clock.Now()); err != nil {
+		return nil, err
+	}
+	completed = true
 	return result, nil
 }
 
@@ -551,13 +623,6 @@ func (s *Service) GetReport(ctx context.Context, id, tenantID uint, scope string
 		return nil, err
 	}
 	return &report, nil
-}
-
-func (s *Service) validateForExecution(ctx context.Context, job *ImportJob) error {
-	if job.Status != StatusValidated {
-		return ErrDryRunRequired
-	}
-	return nil
 }
 
 func (s *Service) ImportHandler() func(ctx context.Context, exec jobs.Execution, payload json.RawMessage) (json.RawMessage, error) {

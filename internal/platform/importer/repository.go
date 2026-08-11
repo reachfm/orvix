@@ -19,6 +19,10 @@ type Repository struct {
 	// failMarkRunningAndLink is an unexported test-only failpoint used by
 	// the submission/link failure-injection tests.
 	failMarkRunningAndLink func() error
+
+	// failIdempotencyComplete is an unexported test-only failpoint used to
+	// prove idempotency abandonment on final-response persistence failure.
+	failIdempotencyComplete func() error
 }
 
 func NewRepository(db *sql.DB) *Repository {
@@ -33,6 +37,12 @@ func NewRepository(db *sql.DB) *Repository {
 // Intended only for tests.
 func (r *Repository) SetTestFailpoint(fn func() error) {
 	r.failMarkRunningAndLink = fn
+}
+
+// SetIdempotencyCompleteFailpoint installs a failure-injection hook for
+// IdempotencyComplete. Intended only for tests.
+func (r *Repository) SetIdempotencyCompleteFailpoint(fn func() error) {
+	r.failIdempotencyComplete = fn
 }
 
 func (r *Repository) q(query string) string { return r.dialect.Rewrite(query) }
@@ -536,6 +546,11 @@ const StaleIdempotencyWindow = 10 * time.Minute
 
 // IdempotencyComplete records a successful outcome for an idempotency key.
 func (r *Repository) IdempotencyComplete(ctx context.Context, scope, actor string, tenantID uint, key string, statusCode int, response any, now time.Time) error {
+	if r.failIdempotencyComplete != nil {
+		if err := r.failIdempotencyComplete(); err != nil {
+			return err
+		}
+	}
 	body, err := json.Marshal(response)
 	if err != nil {
 		return kernel.Wrap(kernel.ErrCodeInternal, "encode idempotent import result", err)
