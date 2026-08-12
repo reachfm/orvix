@@ -90,7 +90,7 @@ export default function DomainDetailDrawer({
                 <Field label="Aliases">{domain.alias_count}</Field>
                 <Field label="DKIM">
                   {domain.dkim_enabled
-                    ? `enabled${domain.dkim_selector ? ` Â· selector ${domain.dkim_selector}` : ""}`
+                    ? `enabled${domain.dkim_selector ? ` · selector ${domain.dkim_selector}` : ""}`
                     : "not enabled"}
                 </Field>
                 <Field label="DMARC">{domain.dmarc_enabled ? "enabled" : "not enabled"}</Field>
