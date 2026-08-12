@@ -248,7 +248,7 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		// Platform mail control: relay administration, suppression
 		// lifecycle, and deliverability metrics. Platform-scoped only —
 		// no tenant role inherits these.
-		PermRelaysRead:         true, PermRelaysWrite: true, PermRelaysTest: true,
+		PermRelaysRead: true, PermRelaysWrite: true, PermRelaysTest: true,
 		PermSuppressionsRead: true, PermSuppressionsWrite: true,
 		PermDeliverabilityRead: true,
 	},
@@ -359,7 +359,7 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermJobsRead:               true, PermJobsWrite: true,
 		PermImportsRead: true, PermImportsWrite: true, PermImportsExecute: true, PermImportsAdmin: true,
 		// Platform mail control (legacy super-admin mirrors the PSA).
-		PermRelaysRead:         true, PermRelaysWrite: true, PermRelaysTest: true,
+		PermRelaysRead: true, PermRelaysWrite: true, PermRelaysTest: true,
 		PermSuppressionsRead: true, PermSuppressionsWrite: true,
 		PermDeliverabilityRead: true,
 	},

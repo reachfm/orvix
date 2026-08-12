@@ -294,10 +294,40 @@ func TestPlatformRelayRoutes(t *testing.T) {
 		if strings.Contains(string(raw), gen) {
 			t.Fatalf("generated password leaked into detail: %s", raw)
 		}
-		// Replay of the same rotation returns the same generated password.
+		// Replay of the same rotation returns the same REDACTED relay
+		// WITHOUT re-exposing the generated password (the credential is
+		// returned exactly once and is never persisted in the
+		// idempotency record).
 		resp, raw = env.relayDo(t, "POST", relayBase+"/"+u64str(id)+"/rotate-credentials", env.psaToken, "ROTATE-RELAY-"+u64str(id), "rot-1", map[string]interface{}{"version": 1})
-		if resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), gen) {
-			t.Fatalf("rotation replay status %d body %s", resp.StatusCode, raw)
+		if resp.StatusCode != http.StatusOK || resp.Header.Get("X-Idempotency-Replay") != "true" {
+			t.Fatalf("rotation replay status %d headers %v body %s", resp.StatusCode, resp.Header, raw)
+		}
+		if strings.Contains(string(raw), gen) {
+			t.Fatalf("rotation replay must not re-expose the generated password: %s", raw)
+		}
+		if !strings.Contains(string(raw), `"has_credential":true`) {
+			t.Fatalf("rotation replay must return the redacted relay state: %s", raw)
+		}
+		// The idempotency table must never contain the plaintext.
+		sqlDB, err := env.dbHandle()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var bodies []string
+		rows, err := sqlDB.Query(`SELECT response_body FROM platform_idempotency_keys WHERE scope LIKE 'platform.relay.rotate%'`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var b string
+			rows.Scan(&b)
+			bodies = append(bodies, b)
+		}
+		for _, b := range bodies {
+			if strings.Contains(b, gen) {
+				t.Fatalf("idempotency record persisted the generated credential: %s", b)
+			}
 		}
 	})
 

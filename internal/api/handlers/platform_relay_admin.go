@@ -55,7 +55,12 @@ func (h *Handler) relayActor(c fiber.Ctx) relay.AuditActor {
 // response; a different body under the same key is a 409 conflict; a
 // missing key is a 400. On handler failure the in-flight claim is
 // abandoned so a client retry is treated as a fresh attempt.
-func (h *Handler) platformIdempotent(c fiber.Ctx, scope string, run func() (int, any, error)) error {
+//
+// run returns (status, storedBody, responseBody, err): storedBody is
+// what a replay will return and MUST be safe to persist verbatim —
+// callers with one-time secrets (e.g. a generated credential) store a
+// redacted projection and return the secret only in responseBody.
+func (h *Handler) platformIdempotent(c fiber.Ctx, scope string, run func() (int, any, any, error)) error {
 	if h.platformIdem == nil {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
 			"error": "idempotent platform mutations are unavailable",
@@ -85,15 +90,15 @@ func (h *Handler) platformIdempotent(c fiber.Ctx, scope string, run func() (int,
 		c.Set("X-Idempotency-Replay", "true")
 		return c.Status(stored.StatusCode).SendString(stored.ResponseBody)
 	}
-	status, body, runErr := run()
+	status, storedBody, responseBody, runErr := run()
 	if runErr != nil {
 		_ = h.platformIdem.Abandon(c.Context(), scope, key)
 		return errorResponse(c, runErr)
 	}
-	if err := h.platformIdem.Complete(c.Context(), scope, key, status, body, time.Now().UTC()); err != nil {
+	if err := h.platformIdem.Complete(c.Context(), scope, key, status, storedBody, time.Now().UTC()); err != nil {
 		return errorResponse(c, err)
 	}
-	return c.Status(status).JSON(body)
+	return c.Status(status).JSON(responseBody)
 }
 
 // typedConfirm enforces the X-Confirm typed-confirmation convention
@@ -232,12 +237,12 @@ func (h *Handler) CreatePlatformRelay(c fiber.Ctx) error {
 		ConnSecurity: relay.ConnSecurity(req.ConnSecurity), TLSValidation: relay.TLSValidation(req.TLSValidation),
 		Priority: req.Priority, Weight: req.Weight, Active: req.Active, RateLimitPerMin: req.RateLimitPerMin,
 	}
-	return h.platformIdempotent(c, "platform.relay.create", func() (int, any, error) {
+	return h.platformIdempotent(c, "platform.relay.create", func() (int, any, any, error) {
 		created, err := svc.CreateRelay(c.Context(), in, h.relayActor(c))
 		if err != nil {
-			return 0, nil, relayMutationError(err)
+			return 0, nil, nil, relayMutationError(err)
 		}
-		return fiber.StatusCreated, created, nil
+		return fiber.StatusCreated, created, created, nil
 	})
 }
 
@@ -289,12 +294,12 @@ func (h *Handler) UpdatePlatformRelay(c fiber.Ctx) error {
 		v := relay.TLSValidation(*req.TLSValidation)
 		in.TLSValidation = &v
 	}
-	return h.platformIdempotent(c, "platform.relay.update:"+strconv.FormatUint(uint64(id), 10), func() (int, any, error) {
+	return h.platformIdempotent(c, "platform.relay.update:"+strconv.FormatUint(uint64(id), 10), func() (int, any, any, error) {
 		updated, err := svc.UpdateRelay(c.Context(), id, req.Version, in, h.relayActor(c))
 		if err != nil {
-			return 0, nil, relayMutationError(err)
+			return 0, nil, nil, relayMutationError(err)
 		}
-		return fiber.StatusOK, updated, nil
+		return fiber.StatusOK, updated, updated, nil
 	})
 }
 
@@ -334,12 +339,12 @@ func (h *Handler) setRelayActive(c fiber.Ctx, active bool) error {
 	if !active {
 		action = "disable"
 	}
-	return h.platformIdempotent(c, "platform.relay."+action+":"+strconv.FormatUint(uint64(id), 10), func() (int, any, error) {
+	return h.platformIdempotent(c, "platform.relay."+action+":"+strconv.FormatUint(uint64(id), 10), func() (int, any, any, error) {
 		updated, err := svc.SetRelayActive(c.Context(), id, active, version, h.relayActor(c))
 		if err != nil {
-			return 0, nil, relayMutationError(err)
+			return 0, nil, nil, relayMutationError(err)
 		}
-		return fiber.StatusOK, updated, nil
+		return fiber.StatusOK, updated, updated, nil
 	})
 }
 
@@ -367,17 +372,21 @@ func (h *Handler) RotatePlatformRelayCredentials(c fiber.Ctx) error {
 	if err := c.Bind().JSON(&req); err != nil || req.Version <= 0 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body: a positive version is required", "code": "VALIDATION_FAILED"})
 	}
-	return h.platformIdempotent(c, "platform.relay.rotate:"+strconv.FormatUint(uint64(id), 10), func() (int, any, error) {
+	return h.platformIdempotent(c, "platform.relay.rotate:"+strconv.FormatUint(uint64(id), 10), func() (int, any, any, error) {
 		updated, generated, err := svc.RotateRelayCredentials(c.Context(), id, req.Version, req.NewPassword, h.relayActor(c))
 		if err != nil {
-			return 0, nil, relayMutationError(err)
+			return 0, nil, nil, relayMutationError(err)
 		}
-		resp := fiber.Map{"relay": updated}
+		// The generated credential is returned to the caller EXACTLY
+		// ONCE. The idempotency record stores only the redacted relay —
+		// a plaintext credential must never be persisted in the
+		// idempotency table, so a replay returns the relay state
+		// without re-exposing the password.
+		stored := fiber.Map{"relay": updated}
 		if generated != "" {
-			resp["generated_password"] = generated
-			resp["show_once"] = true
+			return fiber.StatusOK, stored, fiber.Map{"relay": updated, "generated_password": generated, "show_once": true}, nil
 		}
-		return fiber.StatusOK, resp, nil
+		return fiber.StatusOK, stored, stored, nil
 	})
 }
 
@@ -393,12 +402,12 @@ func (h *Handler) TestPlatformRelay(c fiber.Ctx) error {
 	if err != nil {
 		return errorResponse(c, err)
 	}
-	return h.platformIdempotent(c, "platform.relay.test:"+strconv.FormatUint(uint64(id), 10), func() (int, any, error) {
+	return h.platformIdempotent(c, "platform.relay.test:"+strconv.FormatUint(uint64(id), 10), func() (int, any, any, error) {
 		result, err := svc.TestRelay(c.Context(), id, h.relayActor(c))
 		if err != nil {
-			return 0, nil, relayMutationError(err)
+			return 0, nil, nil, relayMutationError(err)
 		}
-		return fiber.StatusOK, result, nil
+		return fiber.StatusOK, result, result, nil
 	})
 }
 

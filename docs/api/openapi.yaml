@@ -1157,3 +1157,137 @@ paths:
           description: Window metrics + summary with category/domain/provider breakdowns and time buckets
         '400':
           description: Invalid window or dimension
+
+  /admin/queue/messages:
+    get:
+      summary: List queue messages with safe attribution (tenant/domain/relay, category, retryable)
+      tags: [Operations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: domain
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - name: offset
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Redacted queue list (no lease tokens, bodies, or SMTP material)
+
+  /admin/queue/messages/{id}:
+    get:
+      summary: Queue entry detail with attempt history and safe attribution
+      tags: [Operations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Safe detail projection
+        '404':
+          description: Queue entry not found
+
+  /admin/queue/messages/{id}/retry:
+    post:
+      summary: Retry a queue entry (state-machine guarded; delivered/cancelled rejected)
+      tags: [Operations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Entry retried
+        '400':
+          description: Invalid state transition (stable code invalid_state_transition)
+
+  /admin/queue/messages/{id}/bounce:
+    post:
+      summary: Bounce a queue entry to dead letter (typed confirmation required)
+      tags: [Operations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: X-Confirm
+          in: header
+          required: true
+          schema:
+            type: string
+            example: BOUNCE-QUEUE-1
+      responses:
+        '200':
+          description: Entry bounced
+        '428':
+          description: Typed confirmation required
+
+  /admin/queue/messages/{id}/cancel:
+    post:
+      summary: Cancel a queue entry (typed confirmation required)
+      tags: [Operations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: X-Confirm
+          in: header
+          required: true
+          schema:
+            type: string
+            example: CANCEL-QUEUE-1
+      responses:
+        '200':
+          description: Entry cancelled
+        '428':
+          description: Typed confirmation required
+
+  /admin/queue/messages/bulk-action:
+    post:
+      summary: Bounded bulk queue action with per-item results (max 500 ids)
+      tags: [Operations]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids, action]
+              properties:
+                ids: { type: array, items: { type: integer } }
+                action: { type: string, enum: [retry, cancel, bounce] }
+                reason: { type: string }
+      responses:
+        '200':
+          description: Per-item results
+        '400':
+          description: Malformed body or unknown action
