@@ -238,6 +238,61 @@ hash verification, safe-field updates, compensation).
 | `POST /platform/imports/:id/cancel` | platformMW | `CancelImport` | cancel a running/paused import | Platform | `internal/api/handlers/import_route_acceptance_test.go`, `internal/platform/importer/` | MISSING_UI |
 | `POST /platform/imports/:id/compensate` | platformMW | `CompensateImport` | reverse the import's own mutations only; requires `Idempotency-Key` and exact confirmation `COMPENSATE-IMPORT-<id>`; refuses to overwrite human changes | Platform | `internal/api/handlers/import_route_acceptance_test.go`, `internal/platform/importer/` | MISSING_UI |
 
+## Platform Mail Control (Mail-Control enablement)
+
+Platform Super Admin mail-control surface over the production admin
+services. Every route requires an explicit target `tenant_id` in the
+path and is platformMW-gated (tenant roles are denied); all mutations
+are RBAC-permissioned, audited, and tenant-scoped in SQL.
+
+| `GET /platform/domains/:tenant_id` | platformMW | `ListPlatformDomains` | paginated platform domain list for an explicit tenant; search/status filters | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
+| `GET /platform/domains/:tenant_id/:id` | platformMW | `GetPlatformDomain` | domain detail with counts and mail-access mode, tenant-scoped | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
+| `POST /platform/domains/:tenant_id/:id/status` | platformMW | `SetPlatformDomainStatus` | allowed lifecycle transition, tenant-scoped, audited | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
+| `POST /platform/domains/:tenant_id/:id/mail-access-mode` | platformMW | `SetPlatformDomainMailAccessMode` | set canonical SMTP mail-access mode (`internal_only`/`internal_external`), audited | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
+| `GET /platform/mailboxes/:tenant_id` | platformMW | `ListPlatformMailboxes` | paginated platform mailbox list for an explicit tenant/domain | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
+| `GET /platform/mailboxes/:tenant_id/:id` | platformMW | `GetPlatformMailbox` | mailbox detail, tenant-scoped | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
+| `POST /platform/mailboxes/:tenant_id/:id/status` | platformMW | `SetPlatformMailboxStatus` | mailbox lifecycle transition, tenant-scoped, audited | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
+| `POST /platform/mailboxes/:tenant_id/:id/quota` | platformMW | `SetPlatformMailboxQuota` | quota update with domain-bound ceiling, audited | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
+| `POST /platform/mailboxes/:tenant_id/:id/reset-password` | platformMW | `ResetPlatformMailboxPassword` | secure one-time password reset via the production service, audited | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
+| `DELETE /platform/mailboxes/:tenant_id/:id` | platformMW | `DeletePlatformMailbox` | soft-delete with typed confirmation `PURGE-MAILBOX-<id>`, audited | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
+| `POST /platform/mailboxes/:tenant_id/bulk/status` | platformMW | `BulkPlatformMailboxStatus` | bounded bulk status transition (max 500 ids), tenant-scoped, audited | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
+| `GET /platform/aliases/:tenant_id` | platformMW | `ListPlatformAliases` | paginated alias list for an explicit tenant/domain | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
+| `GET /platform/aliases/:tenant_id/:id` | platformMW | `GetPlatformAlias` | alias detail, tenant-scoped | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
+| `POST /platform/aliases/:tenant_id` | platformMW | `CreatePlatformAlias` | create alias with domain ownership, loop rejection, conflict detection, audited | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
+| `DELETE /platform/aliases/:tenant_id/:id` | platformMW | `DeletePlatformAlias` | soft-delete alias, tenant-scoped, audited | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
+| `GET /platform/groups/:tenant_id` | platformMW | `ListPlatformGroups` | paginated group list for an explicit tenant | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
+| `GET /platform/groups/:tenant_id/:id` | platformMW | `GetPlatformGroup` | group detail with member count, tenant-scoped | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
+| `GET /platform/groups/:tenant_id/:id/members` | platformMW | `ListPlatformGroupMembers` | group member emails, tenant-scoped | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
+| `GET /platform/suppressions/:tenant_id` | platformMW | `ListPlatformSuppressions` | paginated/filterable suppression list (domain/state/reason/source/ranges), default active-only | Platform | `internal/platform/deliverability/lifecycle_test.go` | MISSING_UI |
+| `POST /platform/suppressions/:tenant_id` | platformMW | `AddPlatformSuppression` | create a reasoned, tenant-scoped suppression (atomic upsert, idempotent); audited | Platform | `internal/platform/deliverability/lifecycle_test.go` | MISSING_UI |
+| `GET /platform/suppressions/:tenant_id/:id` | platformMW | `GetPlatformSuppression` | suppression detail with state/version/release fields, tenant-scoped | Platform | `internal/platform/deliverability/lifecycle_test.go` | MISSING_UI |
+| `GET /platform/suppressions/:tenant_id/:id/history` | platformMW | `GetPlatformSuppressionHistory` | append-only lifecycle evidence (created/released/reactivated/expired) | Platform | `internal/platform/deliverability/lifecycle_test.go` | MISSING_UI |
+| `POST /platform/suppressions/:tenant_id/:id/release` | platformMW | `ReleasePlatformSuppression` | guarded active->released transition, audited, history-recorded | Platform | `internal/platform/deliverability/lifecycle_test.go` | MISSING_UI |
+| `POST /platform/suppressions/:tenant_id/:id/reactivate` | platformMW | `ReactivatePlatformSuppression` | guarded terminal->active transition (policy permits), audited | Platform | `internal/platform/deliverability/lifecycle_test.go` | MISSING_UI |
+| `DELETE /platform/suppressions/:tenant_id/:id` | platformMW | `DeletePlatformSuppression` | release semantics with typed confirmation (RELEASE-SUPPRESSION-<id>) | Platform | `internal/platform/deliverability/lifecycle_test.go` | MISSING_UI |
+| `DELETE /platform/suppressions/:tenant_id` | platformMW | `RemovePlatformSuppression` | release an active suppression by address; audited | Platform | `internal/platform/deliverability/lifecycle_test.go` | MISSING_UI |
+| `GET /platform/deliverability/:tenant_id/metrics` | platformMW | `GetPlatformDeliverabilityMetrics` | totals + real rates + failure/domain/provider breakdowns + UTC time buckets | Platform | `internal/platform/deliverability/lifecycle_test.go` | MISSING_UI |
+| `GET /platform/deliverability/:tenant_id/events` | platformMW | `ListPlatformDeliverabilityEvents` | real delivery evidence, filters (domain/type/provider/time), bounded pagination, safe projection | Platform | `internal/platform/deliverability/lifecycle_test.go` | MISSING_UI |
+| `GET /platform/deliverability/:tenant_id/events/:id` | platformMW | `GetPlatformDeliverabilityEvent` | one event detail, tenant-scoped, safe projection | Platform | `internal/platform/deliverability/lifecycle_test.go` | MISSING_UI |
+
+## Platform Relay Administration (Mail-Control Phase B)
+
+Production outbound relay endpoints (the same providers the delivery
+worker routes through). Credentials are encrypted at rest and never
+returned; mutations are idempotency-keyed, version-guarded, and
+typed-confirmation gated; connectivity tests are SSRF/DNS-rebinding
+safe.
+
+| `GET /platform/relays` | platformMW | `ListPlatformRelays` | paginated relay list with scope/tenant/domain/active/search filters, redacted | Platform | `internal/platform/relay/admin_test.go` | MISSING_UI |
+| `GET /platform/relays/:id` | platformMW | `GetPlatformRelay` | relay detail, redacted, with last safe test outcome | Platform | `internal/platform/relay/admin_test.go` | MISSING_UI |
+| `POST /platform/relays` | platformMW | `CreatePlatformRelay` | create relay endpoint (credential encrypted at rest), idempotent | Platform | `internal/platform/relay/admin_test.go` | MISSING_UI |
+| `PATCH /platform/relays/:id` | platformMW | `UpdatePlatformRelay` | guarded versioned update, idempotent | Platform | `internal/platform/relay/admin_test.go` | MISSING_UI |
+| `POST /platform/relays/:id/enable` | platformMW | `EnablePlatformRelay` | enable relay for routing, version-guarded, idempotent, audited | Platform | `internal/platform/relay/admin_test.go` | MISSING_UI |
+| `POST /platform/relays/:id/disable` | platformMW | `DisablePlatformRelay` | disable relay, typed confirmation + version + idempotency, audited | Platform | `internal/platform/relay/admin_test.go` | MISSING_UI |
+| `POST /platform/relays/:id/rotate-credentials` | platformMW | `RotatePlatformRelayCredentials` | rotate credential (generated once if not supplied), typed confirmation, idempotent | Platform | `internal/platform/relay/admin_test.go` | MISSING_UI |
+| `POST /platform/relays/:id/test` | platformMW | `TestPlatformRelay` | SSRF/DNS-rebinding-safe connection test, bounded timeouts, idempotent, redacted | Platform | `internal/platform/relay/admin_test.go` | MISSING_UI |
+| `DELETE /platform/relays/:id` | platformMW | `DeletePlatformRelay` | delete relay, typed confirmation, audited | Platform | `internal/platform/relay/admin_test.go` | MISSING_UI |
+
 ## Theme system (cross-cutting, not a route)
 
 Verified by `web/admin/src/shared/theme/{theme,useTheme}.test.ts`,
@@ -265,7 +320,7 @@ above (not carried over from an earlier draft) and is enforced equal
 to the router's actual route set by
 `internal/api/capability_matrix_test.go`, which parses
 `platformMW[0], platformMW[1]` registrations straight out of
-`router.go` — currently 159 — and parses every `` `METHOD /path` ``
+`router.go` — currently 197 — and parses every `` `METHOD /path` ``
 occurrence and its row's disposition straight out of this document.
 
 | Disposition | Routes |
@@ -275,9 +330,9 @@ occurrence and its row's disposition straight out of this document.
 | MACHINE_ONLY | 3 |
 | DEPRECATED | 12 |
 | DUPLICATE_SUPERSEDED_ROUTE | 18 |
-| MISSING_UI | 62 |
+| MISSING_UI | 100 |
 | MISSING_BACKEND | 0 (the one MISSING_BACKEND case — platform-initiated organization creation — is a non-route documented under Organizations, not counted here) |
-| **Total** | **159** |
+| **Total** | **197** |
 
 Three pre-existing MISSING_UI gaps were documented rather than
 silently omitted: `GET /admin/backups/:id` (single-backup fetch; the
