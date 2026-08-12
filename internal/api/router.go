@@ -82,6 +82,7 @@ type Router struct {
 	db           *gorm.DB
 	startOnce    sync.Once
 	publicIdem   *kernel.IdempotencyStore
+	platformIdem *kernel.IdempotencyStore
 }
 
 func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *zap.Logger,
@@ -140,6 +141,17 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		} else if _, err := router.publicIdem.PurgeBefore(ctx, time.Now().UTC().Add(-publicv1.IdempotencyRetention)); err != nil {
 			logger.Warn("public API idempotency retention purge failed", zap.Error(err))
 		}
+		// Platform control-plane idempotency (relay create/update/
+		// rotate/test). Same kernel store, distinct scope namespace.
+		router.platformIdem = kernel.NewIdempotencyStore(sqlDB, dialect)
+		if err := router.platformIdem.EnsureSchema(ctx); err != nil {
+			logger.Error("platform idempotency schema init failed", zap.Error(err))
+			router.platformIdem = nil
+		}
+		// Wire the platform control-plane idempotency store into the
+		// handler (nil when the schema init failed — the relay
+		// mutation handlers then fail closed with 503).
+		router.h.SetPlatformIdempotencyStore(router.platformIdem)
 	}
 
 	// Cancel the background context when the Fiber app shuts
@@ -280,7 +292,7 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			if err := deliverabilityRepo.EnsureSchema(context.Background()); err != nil {
 				logger.Warn("platform deliverability schema init failed; suppression/metrics disabled", zap.Error(err))
 			} else {
-				router.h.SetDeliverabilityService(deliverability.NewService(deliverabilityRepo, auditExtendedStore, nil, nil))
+				router.h.SetDeliverabilityService(deliverability.NewService(deliverabilityRepo, auditExtendedStore, outboxRepo, nil))
 			}
 
 			bulkProvisionRepo := bulkprovision.NewRepository(sqlDB)
@@ -294,7 +306,9 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			if err := relayRepo.EnsureSchema(context.Background()); err != nil {
 				logger.Warn("relay control plane schema init failed; service disabled", zap.Error(err))
 			} else {
-				router.h.SetRelayService(relay.NewService(relayRepo, nil, nil))
+				relaySvc := relay.NewService(relayRepo, nil, outboxRepo)
+				relaySvc.WithAuditStore(auditExtendedStore)
+				router.h.SetRelayService(relaySvc)
 			}
 
 			dashboardSvc := dashboardsvc.NewDashboardService(sqlDB)
@@ -1816,10 +1830,25 @@ func (r *Router) setupRoutes() {
 	// context; the production service enforces suppression in the real
 	// outbound path — these routes expose safe platform management and
 	// metrics, all explicit-tenant).
-	protected.Get("/platform/suppressions/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesRead), r.h.ListPlatformSuppressions)
-	protected.Post("/platform/suppressions/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.AddPlatformSuppression)
-	protected.Delete("/platform/suppressions/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.RemovePlatformSuppression)
-	protected.Get("/platform/deliverability/:tenant_id/metrics", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesRead), r.h.GetPlatformDeliverabilityMetrics)
+	protected.Get("/platform/suppressions/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermSuppressionsRead), r.h.ListPlatformSuppressions)
+	protected.Post("/platform/suppressions/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermSuppressionsWrite), r.h.AddPlatformSuppression)
+	protected.Delete("/platform/suppressions/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermSuppressionsWrite), r.h.RemovePlatformSuppression)
+	protected.Get("/platform/deliverability/:tenant_id/metrics", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDeliverabilityRead), r.h.GetPlatformDeliverabilityMetrics)
+
+	// ── Platform relay administration (Mail-Control Phase B) ────────
+	// Production relay endpoints (the same providers the outbound
+	// delivery path routes through). Credentials are encrypted at
+	// rest; every response is redacted; mutations are idempotent,
+	// version-guarded, and typed-confirmation gated.
+	protected.Get("/platform/relays", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermRelaysRead), r.h.ListPlatformRelays)
+	protected.Get("/platform/relays/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermRelaysRead), r.h.GetPlatformRelay)
+	protected.Post("/platform/relays", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermRelaysWrite), r.h.CreatePlatformRelay)
+	protected.Patch("/platform/relays/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermRelaysWrite), r.h.UpdatePlatformRelay)
+	protected.Post("/platform/relays/:id/enable", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermRelaysWrite), r.h.EnablePlatformRelay)
+	protected.Post("/platform/relays/:id/disable", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermRelaysWrite), r.h.DisablePlatformRelay)
+	protected.Post("/platform/relays/:id/rotate-credentials", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermRelaysWrite), r.h.RotatePlatformRelayCredentials)
+	protected.Post("/platform/relays/:id/test", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermRelaysTest), r.h.TestPlatformRelay)
+	protected.Delete("/platform/relays/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermRelaysWrite), r.h.DeletePlatformRelay)
 
 	protected.Post("/webhooks/subscriptions", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermAPIKeysWrite), r.h.CreateWebhookSubscription)
 	protected.Get("/webhooks/subscriptions", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermAPIKeysRead), r.h.ListWebhookSubscriptions)

@@ -268,6 +268,24 @@ are RBAC-permissioned, audited, and tenant-scoped in SQL.
 | `DELETE /platform/suppressions/:tenant_id` | platformMW | `RemovePlatformSuppression` | release a suppression by address; audited | Platform | `internal/platform/deliverability/service_test.go` | MISSING_UI |
 | `GET /platform/deliverability/:tenant_id/metrics` | platformMW | `GetPlatformDeliverabilityMetrics` | aggregated window metrics (delivered/failed/bounced) for a dimension, UTC-normalized | Platform | `internal/platform/deliverability/service_test.go` | MISSING_UI |
 
+## Platform Relay Administration (Mail-Control Phase B)
+
+Production outbound relay endpoints (the same providers the delivery
+worker routes through). Credentials are encrypted at rest and never
+returned; mutations are idempotency-keyed, version-guarded, and
+typed-confirmation gated; connectivity tests are SSRF/DNS-rebinding
+safe.
+
+| `GET /platform/relays` | platformMW | `ListPlatformRelays` | paginated relay list with scope/tenant/domain/active/search filters, redacted | Platform | `internal/platform/relay/admin_test.go` | MISSING_UI |
+| `GET /platform/relays/:id` | platformMW | `GetPlatformRelay` | relay detail, redacted, with last safe test outcome | Platform | `internal/platform/relay/admin_test.go` | MISSING_UI |
+| `POST /platform/relays` | platformMW | `CreatePlatformRelay` | create relay endpoint (credential encrypted at rest), idempotent | Platform | `internal/platform/relay/admin_test.go` | MISSING_UI |
+| `PATCH /platform/relays/:id` | platformMW | `UpdatePlatformRelay` | guarded versioned update, idempotent | Platform | `internal/platform/relay/admin_test.go` | MISSING_UI |
+| `POST /platform/relays/:id/enable` | platformMW | `EnablePlatformRelay` | enable relay for routing, version-guarded, idempotent, audited | Platform | `internal/platform/relay/admin_test.go` | MISSING_UI |
+| `POST /platform/relays/:id/disable` | platformMW | `DisablePlatformRelay` | disable relay, typed confirmation + version + idempotency, audited | Platform | `internal/platform/relay/admin_test.go` | MISSING_UI |
+| `POST /platform/relays/:id/rotate-credentials` | platformMW | `RotatePlatformRelayCredentials` | rotate credential (generated once if not supplied), typed confirmation, idempotent | Platform | `internal/platform/relay/admin_test.go` | MISSING_UI |
+| `POST /platform/relays/:id/test` | platformMW | `TestPlatformRelay` | SSRF/DNS-rebinding-safe connection test, bounded timeouts, idempotent, redacted | Platform | `internal/platform/relay/admin_test.go` | MISSING_UI |
+| `DELETE /platform/relays/:id` | platformMW | `DeletePlatformRelay` | delete relay, typed confirmation, audited | Platform | `internal/platform/relay/admin_test.go` | MISSING_UI |
+
 ## Theme system (cross-cutting, not a route)
 
 Verified by `web/admin/src/shared/theme/{theme,useTheme}.test.ts`,
@@ -295,7 +313,7 @@ above (not carried over from an earlier draft) and is enforced equal
 to the router's actual route set by
 `internal/api/capability_matrix_test.go`, which parses
 `platformMW[0], platformMW[1]` registrations straight out of
-`router.go` — currently 181 — and parses every `` `METHOD /path` ``
+`router.go` — currently 190 — and parses every `` `METHOD /path` ``
 occurrence and its row's disposition straight out of this document.
 
 | Disposition | Routes |
@@ -305,9 +323,9 @@ occurrence and its row's disposition straight out of this document.
 | MACHINE_ONLY | 3 |
 | DEPRECATED | 12 |
 | DUPLICATE_SUPERSEDED_ROUTE | 18 |
-| MISSING_UI | 84 |
+| MISSING_UI | 93 |
 | MISSING_BACKEND | 0 (the one MISSING_BACKEND case — platform-initiated organization creation — is a non-route documented under Organizations, not counted here) |
-| **Total** | **181** |
+| **Total** | **190** |
 
 Three pre-existing MISSING_UI gaps were documented rather than
 silently omitted: `GET /admin/backups/:id` (single-backup fetch; the

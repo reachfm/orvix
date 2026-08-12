@@ -35,10 +35,27 @@ func (netDialer) DialContext(ctx context.Context, network, addr string) (net.Con
 	return d.DialContext(ctx, network, addr)
 }
 
+// totalTestTimeout bounds an entire operator-triggered connection test
+// (DNS + connect + TLS handshake + command exchange) — a test that has
+// not completed inside this budget is reported as a timeout instead of
+// hanging the request.
+const totalTestTimeout = 15 * time.Second
+
 // TestConnection performs a real connect + EHLO + (STARTTLS if
 // required) + AUTH PLAIN (if a credential is configured) + QUIT
 // against a provider, WITHOUT sending any mail. This is the
 // operator-triggered connection test.
+//
+// Security posture (mandatory for server-side connectivity tests):
+//   - the target must pass ValidateRelayTarget (hostname/IP policy);
+//   - DNS resolution is performed by a validating dialer that rejects
+//     unsafe resolved addresses and dials the validated IP (no
+//     DNS-rebinding window);
+//   - the whole exchange runs under totalTestTimeout;
+//   - every error is redacted and bounded before it reaches the
+//     caller, an audit record, or a log line;
+//   - the credential is decrypted only for the single dial and is
+//     never returned, logged, or persisted.
 func (s *Service) TestConnection(ctx context.Context, providerID uint) (*HealthCheckResult, error) {
 	p, err := s.repo.GetProvider(ctx, providerID)
 	if err != nil {
@@ -47,11 +64,41 @@ func (s *Service) TestConnection(ctx context.Context, providerID uint) (*HealthC
 	if p == nil {
 		return nil, ErrProviderNotFound
 	}
+	if err := ValidateRelayTarget(p.Host, p.Port); err != nil {
+		return &HealthCheckResult{Error: redactHealthError("unsafe relay target: " + err.Error())}, nil
+	}
 	password, err := s.decryptCredential(*p)
 	if err != nil {
 		return &HealthCheckResult{Error: "credential decrypt failed"}, nil
 	}
-	return dialAndTest(ctx, netDialer{}, *p, password), nil
+	ctx, cancel := context.WithTimeout(ctx, totalTestTimeout)
+	defer cancel()
+	result := dialAndTest(ctx, newValidatingDialer(), *p, password)
+	_ = s.repo.SetTestResult(ctx, providerID, s.clock.Now(), testResultSummary(result), p.Version)
+	return result, nil
+}
+
+// testResultSummary maps a HealthCheckResult into the safe, persisted
+// one-word outcome stored on the provider row. Only this vocabulary
+// ever reaches LastTestResult — never a raw error string.
+func testResultSummary(r *HealthCheckResult) string {
+	switch {
+	case r.Connected && r.TLSNegotiated && r.AuthOK:
+		return "ok"
+	case !r.Connected:
+		return "connect_failed"
+	case r.Connected && !r.TLSNegotiated && r.AuthOK:
+		// ConnSecurity none + auth ok.
+		return "ok"
+	case r.Connected && !r.AuthOK && r.Error == "":
+		return "ok"
+	case r.Error != "" && strings.Contains(strings.ToLower(r.Error), "tls"):
+		return "tls_failed"
+	case r.Error != "" && (strings.Contains(strings.ToLower(r.Error), "auth") || strings.Contains(strings.ToLower(r.Error), "authentication")):
+		return "auth_failed"
+	default:
+		return "failed"
+	}
 }
 
 func dialAndTest(ctx context.Context, d dialer, p Provider, password string) *HealthCheckResult {
@@ -59,11 +106,13 @@ func dialAndTest(ctx context.Context, d dialer, p Provider, password string) *He
 	result := &HealthCheckResult{}
 	conn, reader, err := connectAndAuth(ctx, d, p, password, result)
 	if err != nil {
+		result.Error = redactHealthError(result.Error)
 		result.DurationMS = time.Since(start).Milliseconds()
 		return result
 	}
 	defer conn.Close()
 	_, _ = smtpCommand(conn, reader, "QUIT")
+	result.Error = redactHealthError(result.Error)
 	result.DurationMS = time.Since(start).Milliseconds()
 	return result
 }
@@ -165,28 +214,28 @@ func Deliver(ctx context.Context, p Provider, password string, from string, to [
 	result := &HealthCheckResult{}
 	conn, reader, err := connectAndAuth(ctx, netDialer{}, p, password, result)
 	if err != nil {
-		return &DeliverResult{TempFail: true, StatusMsg: result.Error}
+		return &DeliverResult{TempFail: true, StatusMsg: redactHealthError(result.Error)}
 	}
 	defer conn.Close()
 
 	if _, err := smtpCommand(conn, reader, "MAIL FROM:<"+from+">"); err != nil {
-		return &DeliverResult{TempFail: isTempSMTPErr(err), StatusMsg: err.Error()}
+		return &DeliverResult{TempFail: isTempSMTPErr(err), StatusMsg: redactHealthError(err.Error())}
 	}
 	for _, rcpt := range to {
 		if _, err := smtpCommand(conn, reader, "RCPT TO:<"+rcpt+">"); err != nil {
-			return &DeliverResult{TempFail: isTempSMTPErr(err), StatusMsg: err.Error()}
+			return &DeliverResult{TempFail: isTempSMTPErr(err), StatusMsg: redactHealthError(err.Error())}
 		}
 	}
 	if _, err := smtpCommand(conn, reader, "DATA"); err != nil {
-		return &DeliverResult{TempFail: isTempSMTPErr(err), StatusMsg: err.Error()}
+		return &DeliverResult{TempFail: isTempSMTPErr(err), StatusMsg: redactHealthError(err.Error())}
 	}
 	payload := dataTerminated(data)
 	if _, err := conn.Write(payload); err != nil {
-		return &DeliverResult{TempFail: true, StatusMsg: err.Error()}
+		return &DeliverResult{TempFail: true, StatusMsg: redactHealthError(err.Error())}
 	}
 	code, msg, err := readSMTPLine(reader)
 	if err != nil {
-		return &DeliverResult{TempFail: true, StatusMsg: err.Error()}
+		return &DeliverResult{TempFail: true, StatusMsg: redactHealthError(err.Error())}
 	}
 	_, _ = smtpCommand(conn, reader, "QUIT")
 	if code >= 200 && code < 300 {
@@ -228,8 +277,17 @@ func tlsConfigFor(p Provider) *tls.Config {
 
 func localHostForEHLO() string { return "orvix-relay-client" }
 
+// maxSMTPLineLen bounds a single SMTP response line and
+// maxSMTPContinuationLines bounds a multi-line reply (RFC 5321
+// "250-..." style). Together they make response reads bounded — a
+// pathological server cannot grow memory or time unboundedly.
+const (
+	maxSMTPLineLen           = 8192
+	maxSMTPContinuationLines = 100
+)
+
 func readSMTPLine(r *bufio.Reader) (code int, msg string, err error) {
-	line, err := r.ReadString('\n')
+	line, err := readBoundedLine(r)
 	if err != nil {
 		return 0, "", err
 	}
@@ -244,19 +302,44 @@ func readSMTPLine(r *bufio.Reader) (code int, msg string, err error) {
 	msg = line
 	// Multi-line response: "250-..." continues until "250 ...".
 	if len(line) > 3 && line[3] == '-' {
-		for {
-			next, err := r.ReadString('\n')
-			if err != nil {
-				return code, msg, err
+		for i := 0; i < maxSMTPContinuationLines; i++ {
+			next, rerr := readBoundedLine(r)
+			if rerr != nil {
+				return code, msg, rerr
 			}
 			next = strings.TrimRight(next, "\r\n")
 			msg += "\n" + next
 			if len(next) >= 4 && next[3] == ' ' {
-				break
+				return code, msg, nil
 			}
 		}
+		return 0, "", fmt.Errorf("response exceeds bounded multi-line limit")
 	}
 	return code, msg, nil
+}
+
+// readBoundedLine reads one CRLF-terminated line, refusing to buffer
+// more than maxSMTPLineLen bytes even if the peer never sends a
+// terminator.
+func readBoundedLine(r *bufio.Reader) (string, error) {
+	var b []byte
+	for {
+		chunk, err := r.ReadSlice('\n')
+		b = append(b, chunk...)
+		if err == bufio.ErrBufferFull {
+			if len(b) > maxSMTPLineLen {
+				return "", fmt.Errorf("response line exceeds %d bytes", maxSMTPLineLen)
+			}
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		if len(b) > maxSMTPLineLen {
+			return "", fmt.Errorf("response line exceeds %d bytes", maxSMTPLineLen)
+		}
+		return string(b), nil
+	}
 }
 
 func smtpCommand(conn net.Conn, r *bufio.Reader, cmd string) ([]string, error) {

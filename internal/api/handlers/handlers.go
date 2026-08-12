@@ -49,6 +49,7 @@ import (
 	"github.com/orvix/orvix/internal/platform/cluster"
 	"github.com/orvix/orvix/internal/platform/importer"
 	platformjobs "github.com/orvix/orvix/internal/platform/jobs"
+	"github.com/orvix/orvix/internal/platform/kernel"
 	"github.com/orvix/orvix/internal/platform/relay"
 	"github.com/orvix/orvix/internal/platform/deliverability"
 	"github.com/orvix/orvix/internal/platform/mailcontrol"
@@ -252,6 +253,11 @@ type Handler struct {
 	mailControlSvc *mailcontrol.Service
 
 	deliverabilitySvc *deliverability.Service
+
+	// platformIdem is the idempotency store for platform control-plane
+	// mutations (relay create/update/rotate/test). Wired by the router;
+	// nil disables idempotent mutations with a 503.
+	platformIdem *kernel.IdempotencyStore
 }
 
 // MailSender sends transactional emails.

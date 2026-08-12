@@ -23,6 +23,12 @@ func (h *Handler) SetDeliverabilityService(svc *deliverability.Service) {
 	h.deliverabilitySvc = svc
 }
 
+// SetPlatformIdempotencyStore wires the idempotency store used by
+// platform control-plane mutations. nil disables idempotency with 503.
+func (h *Handler) SetPlatformIdempotencyStore(s *kernel.IdempotencyStore) {
+	h.platformIdem = s
+}
+
 func (h *Handler) deliverability() (*deliverability.Service, error) {
 	if h.deliverabilitySvc == nil {
 		return nil, kernel.NewError(kernel.ErrCodeUnavailable, "deliverability service is unavailable")

@@ -536,3 +536,275 @@ paths:
       tags: [Platform]
       security:
         - bearerAuth: []
+
+  /platform/relays:
+    get:
+      summary: List platform relay endpoints (redacted)
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: scope
+          in: query
+          schema:
+            type: string
+        - name: tenant_id
+          in: query
+          schema:
+            type: integer
+        - name: domain_id
+          in: query
+          schema:
+            type: integer
+        - name: active
+          in: query
+          schema:
+            type: boolean
+        - name: q
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - name: offset
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Redacted relay list (never contains credentials)
+    post:
+      summary: Create a relay endpoint (credential encrypted at rest)
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, host, port]
+              properties:
+                name: { type: string }
+                host: { type: string }
+                port: { type: integer }
+                username: { type: string }
+                password: { type: string }
+                conn_security: { type: string, enum: [none, starttls, implicit_tls] }
+                tls_validation: { type: string, enum: [strict, opportunistic] }
+                priority: { type: integer }
+                active: { type: boolean }
+      responses:
+        '201':
+          description: Created relay (redacted)
+        '400':
+          description: Validation failure (unsafe target, bad JSON, missing idempotency key)
+        '409':
+          description: Idempotency key conflict or duplicate relay name
+
+  /platform/relays/{id}:
+    get:
+      summary: Relay endpoint detail (redacted)
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Relay detail with last safe test outcome
+        '404':
+          description: Relay not found
+    patch:
+      summary: Update a relay endpoint (version-guarded, idempotent)
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                version: { type: integer }
+                name: { type: string }
+                host: { type: string }
+                port: { type: integer }
+                password: { type: string }
+      responses:
+        '200':
+          description: Updated relay (redacted)
+        '412':
+          description: Stale version (optimistic concurrency)
+    delete:
+      summary: Delete a relay endpoint (typed confirmation required)
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: X-Confirm
+          in: header
+          required: true
+          schema:
+            type: string
+            example: DELETE-RELAY-1
+      responses:
+        '200':
+          description: Relay deleted
+        '428':
+          description: Typed confirmation required
+
+  /platform/relays/{id}/enable:
+    post:
+      summary: Enable a relay endpoint (version-guarded, idempotent)
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                version: { type: integer }
+      responses:
+        '200':
+          description: Relay enabled (redacted)
+
+  /platform/relays/{id}/disable:
+    post:
+      summary: Disable a relay endpoint (typed confirmation, version, idempotency)
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: X-Confirm
+          in: header
+          required: true
+          schema:
+            type: string
+            example: DISABLE-RELAY-1
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                version: { type: integer }
+      responses:
+        '200':
+          description: Relay disabled (redacted)
+
+  /platform/relays/{id}/rotate-credentials:
+    post:
+      summary: Rotate relay credentials (generated credential returned once)
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: X-Confirm
+          in: header
+          required: true
+          schema:
+            type: string
+            example: ROTATE-RELAY-1
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                version: { type: integer }
+                new_password: { type: string }
+      responses:
+        '200':
+          description: Rotation applied; generated_password present exactly once when generated
+
+  /platform/relays/{id}/test:
+    post:
+      summary: SSRF-safe connection test (bounded timeouts, redacted, idempotent)
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Redacted test result (connected/tls/auth/error, bounded)

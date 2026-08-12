@@ -13,6 +13,7 @@ package handlers_test
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -38,6 +39,7 @@ type platformMailControlEnv struct {
 	tenantAdm string
 	otherAdm  string
 	psaCSRF   string
+	db        *sql.DB
 }
 
 const (
@@ -94,10 +96,11 @@ func buildPlatformMailControlEnv(t *testing.T) *platformMailControlEnv {
 
 	return &platformMailControlEnv{
 		router:    router,
-		psaToken:  psaToken,
+		psaToken:  importRouteLogin(t, router, pmcPSAEmail, pmcPSAPass),
 		tenantAdm: importRouteLogin(t, router, pmcTenantEmail, pmcTenantPass),
 		otherAdm:  importRouteLogin(t, router, pmcOtherEmail, pmcOtherPass),
 		psaCSRF:   importRouteCSRF(t, router, psaToken),
+		db:        sqlDB,
 	}
 }
 

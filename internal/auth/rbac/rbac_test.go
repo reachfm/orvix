@@ -357,3 +357,36 @@ func TestAllPermissions_AllInRoleMap(t *testing.T) {
 		}
 	}
 }
+
+func TestPlatformMailControlPermissionsBoundary(t *testing.T) {
+	// Platform mail control permissions are PLATFORM-scoped: the
+	// platform super admin (and the legacy super-admin alias) hold
+	// them; no tenant role inherits any of them.
+	platformPerms := []Permission{
+		PermRelaysRead, PermRelaysWrite, PermRelaysTest,
+		PermSuppressionsRead, PermSuppressionsWrite,
+		PermDeliverabilityRead,
+	}
+	for _, p := range platformPerms {
+		if !HasPermission(auth.RolePlatformSuperAdmin, p) {
+			t.Errorf("platform_super_admin must hold %q", p)
+		}
+		if !HasPermission(auth.RoleSuperAdmin, p) {
+			t.Errorf("legacy super_admin must hold %q", p)
+		}
+		for _, role := range []auth.Role{
+			auth.RoleTenantAdmin, auth.RoleTenantOperator,
+			auth.RoleTenantSupport, auth.RoleTenantReadOnly,
+			auth.RoleUser, auth.RoleBilling, auth.RoleReadOnly,
+		} {
+			if HasPermission(role, p) {
+				t.Errorf("tenant role %s must NOT hold platform permission %q", role, p)
+			}
+		}
+	}
+	// Queue attribution reads reuse the pre-existing queue.read /
+	// queue.action permissions; the PSA must hold them.
+	if !HasPermission(auth.RolePlatformSuperAdmin, PermQueueRead) || !HasPermission(auth.RolePlatformSuperAdmin, PermQueueAction) {
+		t.Error("platform_super_admin must hold queue.read and queue.action")
+	}
+}
