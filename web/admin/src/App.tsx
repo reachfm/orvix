@@ -43,6 +43,7 @@ import IncidentsPage from "./features/platform/incidents/page";
 import RetentionPage from "./features/platform/retention/page";
 import AuditPage from "./features/platform/audit/page";
 import DRPage from "./features/platform/dr/page";
+import ConfigTruthPage from "./features/platform/config-truth/page";
 import { initCSRF, api } from "./api";
 import ThemeToggle from "./shared/theme/ThemeToggle";
 
@@ -55,7 +56,8 @@ type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" 
   | "invoices" | "security" | "support" | "preferences"
   | "login" | "signup" | "forgot-password" | "reset-password"
   | "platform-billing" | "platform-imports" | "automation-jobs" | "support-access"
-  | "platform-incidents" | "platform-retention" | "platform-audit" | "platform-dr";
+  | "platform-incidents" | "platform-retention" | "platform-audit" | "platform-dr"
+  | "platform-config-truth";
 
 // PORTAL-SEPARATION-PHASE1 / PLATFORM-SHELL: the explicit allow-list for
 // each portal. portal="platform" (Platform Super Admin, tenant_id=NULL)
@@ -109,7 +111,7 @@ const PLATFORM_TAB_IDS: Tab[] = [
   "platform-home", "organizations", "platform-billing", "platform-imports", "automation-jobs",
   "platform-incidents", "platform-retention", "platform-dr", "enterprise", "mail-operations",
   "reliability", "health", "platform-audit", "support-access",
-  "platform-security", "modules", "platform-configuration",
+  "platform-security", "modules", "platform-configuration", "platform-config-truth",
   "account-settings", "security", "preferences",
 ];
 const ORGANIZATION_TAB_IDS: Tab[] = [
@@ -138,6 +140,7 @@ const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: st
   { id: "platform-security", label: "Security", icon: ShieldAlert },
   { id: "modules", label: "Modules", icon: Zap, section: "System" },
   { id: "platform-configuration", label: "Configuration", icon: Settings },
+  { id: "platform-config-truth", label: "Config Truth", icon: Settings },
   // Tabs below are pre-existing tenant-owned entries that were never
   // reachable by a real Platform Super Admin (see PLATFORM-SHELL final
   // report's ownership matrix) — their labels/sections are irrelevant to
@@ -305,6 +308,7 @@ export default function App() {
       case "platform-dr": return <DRPage />;
       case "platform-audit": return <AuditPage />;
       case "support-access": return <SupportAccessPage />;
+      case "platform-config-truth": return <ConfigTruthPage />;
       case "health": return <SystemHealth />;
       case "mail-operations": return <MailOperationsPage />;
       case "reliability": return <ReliabilityPage />;
