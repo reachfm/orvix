@@ -101,16 +101,22 @@ func (s *OverrideStore) Set(ctx context.Context, tenantID uint, dim OverrideDime
 	}
 	defer tx.Rollback()
 
-	res, err := tx.ExecContext(ctx,
-		`INSERT INTO billing_operator_overrides (tenant_id, dimension, limit_value, reason, actor_id, created_at, expires_at) VALUES (`+s.dialect.Placeholders(7)+`)`,
-		tenantID, string(dim), limit, reason, actorID, now, expiresAt,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("billing: insert override: %w", err)
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return nil, fmt.Errorf("billing: read override id: %w", err)
+	insertQuery := `INSERT INTO billing_operator_overrides (tenant_id, dimension, limit_value, reason, actor_id, created_at, expires_at) VALUES (` + s.dialect.Placeholders(7) + `)`
+	args := []any{tenantID, string(dim), limit, reason, actorID, now, expiresAt}
+	var id int64
+	if s.dialect.IsPostgres() {
+		if err := tx.QueryRowContext(ctx, insertQuery+` RETURNING id`, args...).Scan(&id); err != nil {
+			return nil, fmt.Errorf("billing: insert override: %w", err)
+		}
+	} else {
+		res, err := tx.ExecContext(ctx, insertQuery, args...)
+		if err != nil {
+			return nil, fmt.Errorf("billing: insert override: %w", err)
+		}
+		id, err = res.LastInsertId()
+		if err != nil {
+			return nil, fmt.Errorf("billing: read override id: %w", err)
+		}
 	}
 
 	if s.audit != nil {
