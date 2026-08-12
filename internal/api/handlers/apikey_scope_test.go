@@ -35,6 +35,13 @@ func TestValidateAPIKeyScopes(t *testing.T) {
 		{"unknown scope rejected", auth.RolePlatformSuperAdmin, []string{"totally.bogus"}, true},
 		{"platform super admin may grant a scope it holds", auth.RolePlatformSuperAdmin, []string{"queue.action"}, false},
 		{"platform super admin cannot grant tenant-scoped domains.write", auth.RolePlatformSuperAdmin, []string{"domains.write"}, true},
+		// The PSA holds canonical tenant permissions (domains.write etc.)
+		// for the /platform/* control-plane routes (Mail-Control
+		// enablement), but that authority is platform-scoped: it must
+		// never leak into tenant-scoped API keys. The boundary is
+		// enforced explicitly in validateAPIKeyScopes, independent of
+		// the PSA permission map.
+		{"platform super admin cannot grant tenant-scoped public:mailboxes:read even holding it", auth.RolePlatformSuperAdmin, []string{"public:mailboxes:read"}, true},
 		{"deprecated admin cannot grant any scope", auth.RoleAdmin, []string{"domains.write"}, true},
 		{"readonly cannot grant a write scope", auth.RoleReadOnly, []string{"domains.write"}, true},
 		{"billing cannot grant a domain scope", auth.RoleBilling, []string{"domains.write"}, true},

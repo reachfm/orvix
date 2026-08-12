@@ -181,6 +181,12 @@ func getQueueCSRFCookie(t *testing.T, router *api.Router, bearer string) string 
 }
 
 func queueRequest(t *testing.T, e *queueTestEnv, method, path string, body string, token, csrf string) (*http.Response, []byte) {
+	return queueRequestConfirm(t, e, method, path, body, token, csrf, "")
+}
+
+// queueRequestConfirm is queueRequest plus an optional X-Confirm typed
+// confirmation header (required for bounce/cancel).
+func queueRequestConfirm(t *testing.T, e *queueTestEnv, method, path string, body string, token, csrf, confirm string) (*http.Response, []byte) {
 	t.Helper()
 	var reader io.Reader
 	if body != "" {
@@ -196,6 +202,9 @@ func queueRequest(t *testing.T, e *queueTestEnv, method, path string, body strin
 	if csrf != "" {
 		req.Header.Set("Cookie", "csrf_token="+csrf)
 		req.Header.Set("X-CSRF-Token", csrf)
+	}
+	if confirm != "" {
+		req.Header.Set("X-Confirm", confirm)
 	}
 	resp, err := e.router.App().Test(req, fiber.TestConfig{Timeout: 0})
 	if err != nil {
@@ -418,9 +427,17 @@ func TestAdminQueueBounce(t *testing.T) {
 
 	id := seedQueueEntry(t, e, "pending", "bounce@test.com", "bounce-to@test.com")
 
-	resp, body := queueRequest(t, e, "POST",
+	// Bounce without typed confirmation is rejected.
+	resp0, _ := queueRequest(t, e, "POST",
 		"/api/v1/admin/queue/messages/"+strconv.FormatUint(uint64(id), 10)+"/bounce",
 		`{"reason":"test bounce"}`, e.adminToken, e.csrfToken)
+	if resp0.StatusCode != http.StatusPreconditionRequired {
+		t.Fatalf("bounce without confirmation: expected 428, got %d", resp0.StatusCode)
+	}
+
+	resp, body := queueRequestConfirm(t, e, "POST",
+		"/api/v1/admin/queue/messages/"+strconv.FormatUint(uint64(id), 10)+"/bounce",
+		`{"reason":"test bounce"}`, e.adminToken, e.csrfToken, "BOUNCE-QUEUE-"+strconv.FormatUint(uint64(id), 10))
 	if resp.StatusCode != 200 {
 		t.Fatalf("bounce: expected 200, got %d: %s", resp.StatusCode, string(body))
 	}
@@ -441,9 +458,9 @@ func TestAdminQueueBounce(t *testing.T) {
 
 	// Bounce with no reason (default).
 	id2 := seedQueueEntry(t, e, "pending", "bounce2@test.com", "bounce2-to@test.com")
-	resp2, _ := queueRequest(t, e, "POST",
+	resp2, _ := queueRequestConfirm(t, e, "POST",
 		"/api/v1/admin/queue/messages/"+strconv.FormatUint(uint64(id2), 10)+"/bounce",
-		`{}`, e.adminToken, e.csrfToken)
+		`{}`, e.adminToken, e.csrfToken, "BOUNCE-QUEUE-"+strconv.FormatUint(uint64(id2), 10))
 	if resp2.StatusCode != 200 {
 		t.Fatalf("bounce default: expected 200, got %d", resp2.StatusCode)
 	}
@@ -465,9 +482,17 @@ func TestAdminQueueCancel(t *testing.T) {
 
 	id := seedQueueEntry(t, e, "pending", "cancel@test.com", "cancel-to@test.com")
 
-	resp, body := queueRequest(t, e, "POST",
+	// Cancel without typed confirmation is rejected.
+	resp0, _ := queueRequest(t, e, "POST",
 		"/api/v1/admin/queue/messages/"+strconv.FormatUint(uint64(id), 10)+"/cancel",
 		"", e.adminToken, e.csrfToken)
+	if resp0.StatusCode != http.StatusPreconditionRequired {
+		t.Fatalf("cancel without confirmation: expected 428, got %d", resp0.StatusCode)
+	}
+
+	resp, body := queueRequestConfirm(t, e, "POST",
+		"/api/v1/admin/queue/messages/"+strconv.FormatUint(uint64(id), 10)+"/cancel",
+		"", e.adminToken, e.csrfToken, "CANCEL-QUEUE-"+strconv.FormatUint(uint64(id), 10))
 	if resp.StatusCode != 200 {
 		t.Fatalf("cancel: expected 200, got %d: %s", resp.StatusCode, string(body))
 	}
@@ -510,9 +535,16 @@ func TestAdminQueueActionsRejectLeasedEntries(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			id := seedQueueEntry(t, e, "leased", tt.name+"@test.com", tt.name+"-to@test.com")
-			resp, body := queueRequest(t, e, "POST",
+			confirm := ""
+			if tt.action == "bounce" {
+				confirm = "BOUNCE-QUEUE-" + strconv.FormatUint(uint64(id), 10)
+			}
+			if tt.action == "cancel" {
+				confirm = "CANCEL-QUEUE-" + strconv.FormatUint(uint64(id), 10)
+			}
+			resp, body := queueRequestConfirm(t, e, "POST",
 				"/api/v1/admin/queue/messages/"+strconv.FormatUint(uint64(id), 10)+"/"+tt.action,
-				tt.body, e.adminToken, e.csrfToken)
+				tt.body, e.adminToken, e.csrfToken, confirm)
 			if resp.StatusCode != 400 {
 				t.Fatalf("%s leased: expected 400, got %d: %s", tt.action, resp.StatusCode, string(body))
 			}
@@ -579,17 +611,17 @@ func TestAdminQueueAudit(t *testing.T) {
 	}
 
 	// Bounce.
-	resp2, _ := queueRequest(t, e, "POST",
+	resp2, _ := queueRequestConfirm(t, e, "POST",
 		"/api/v1/admin/queue/messages/"+strconv.FormatUint(uint64(id1), 10)+"/bounce",
-		`{"reason":"test audit"}`, e.adminToken, e.csrfToken)
+		`{"reason":"test audit"}`, e.adminToken, e.csrfToken, "BOUNCE-QUEUE-"+strconv.FormatUint(uint64(id1), 10))
 	if resp2.StatusCode != 200 {
 		t.Fatalf("bounce for audit: %d", resp2.StatusCode)
 	}
 
 	// Cancel.
-	resp3, _ := queueRequest(t, e, "POST",
+	resp3, _ := queueRequestConfirm(t, e, "POST",
 		"/api/v1/admin/queue/messages/"+strconv.FormatUint(uint64(id3), 10)+"/cancel",
-		"", e.adminToken, e.csrfToken)
+		"", e.adminToken, e.csrfToken, "CANCEL-QUEUE-"+strconv.FormatUint(uint64(id3), 10))
 	if resp3.StatusCode != 200 {
 		t.Fatalf("cancel for audit: %d", resp3.StatusCode)
 	}

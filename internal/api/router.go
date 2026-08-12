@@ -49,6 +49,8 @@ import (
 	"github.com/orvix/orvix/internal/platform/cluster"
 	platformimporter "github.com/orvix/orvix/internal/platform/importer"
 	platformjobs "github.com/orvix/orvix/internal/platform/jobs"
+	"github.com/orvix/orvix/internal/platform/deliverability"
+	"github.com/orvix/orvix/internal/platform/mailcontrol"
 	"github.com/orvix/orvix/internal/platform/kernel"
 	"github.com/orvix/orvix/internal/platform/relay"
 	"github.com/orvix/orvix/internal/platform/retention"
@@ -80,6 +82,7 @@ type Router struct {
 	db           *gorm.DB
 	startOnce    sync.Once
 	publicIdem   *kernel.IdempotencyStore
+	platformIdem *kernel.IdempotencyStore
 }
 
 func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *zap.Logger,
@@ -138,6 +141,17 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		} else if _, err := router.publicIdem.PurgeBefore(ctx, time.Now().UTC().Add(-publicv1.IdempotencyRetention)); err != nil {
 			logger.Warn("public API idempotency retention purge failed", zap.Error(err))
 		}
+		// Platform control-plane idempotency (relay create/update/
+		// rotate/test). Same kernel store, distinct scope namespace.
+		router.platformIdem = kernel.NewIdempotencyStore(sqlDB, dialect)
+		if err := router.platformIdem.EnsureSchema(ctx); err != nil {
+			logger.Error("platform idempotency schema init failed", zap.Error(err))
+			router.platformIdem = nil
+		}
+		// Wire the platform control-plane idempotency store into the
+		// handler (nil when the schema init failed — the relay
+		// mutation handlers then fail closed with 503).
+		router.h.SetPlatformIdempotencyStore(router.platformIdem)
 	}
 
 	// Cancel the background context when the Fiber app shuts
@@ -261,6 +275,26 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			}
 			router.h.SetDomainAdminService(domainAdminSvc)
 
+			// Platform mail control: orchestrates the production admin
+			// services for the platform_super_admin surface. Every
+			// platform mail-control request requires an explicit target
+			// tenant; the PSA never impersonates a tenant.
+			mailControlRepo := mailcontrol.NewRepository(sqlDB)
+			router.h.SetMailControlService(mailcontrol.NewService(mailControlRepo, mailcontrol.Ports{
+				Domains: domainAdminSvc, Mailboxes: mailboxAdminSvc, Audit: auditExtendedStore,
+			}))
+
+			// Platform deliverability / suppression (Milestone 9 bounded
+			// context): the production service already enforces
+			// suppression in the real outbound path; these platform
+			// routes expose safe management and metrics.
+			deliverabilityRepo := deliverability.NewRepository(sqlDB)
+			if err := deliverabilityRepo.EnsureSchema(context.Background()); err != nil {
+				logger.Warn("platform deliverability schema init failed; suppression/metrics disabled", zap.Error(err))
+			} else {
+				router.h.SetDeliverabilityService(deliverability.NewService(deliverabilityRepo, auditExtendedStore, outboxRepo, nil))
+			}
+
 			bulkProvisionRepo := bulkprovision.NewRepository(sqlDB)
 			if err := bulkProvisionRepo.EnsureSchema(context.Background()); err != nil {
 				logger.Warn("bulk provisioning schema init failed; service disabled", zap.Error(err))
@@ -272,7 +306,9 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			if err := relayRepo.EnsureSchema(context.Background()); err != nil {
 				logger.Warn("relay control plane schema init failed; service disabled", zap.Error(err))
 			} else {
-				router.h.SetRelayService(relay.NewService(relayRepo, nil, nil))
+				relaySvc := relay.NewService(relayRepo, nil, outboxRepo)
+				relaySvc.WithAuditStore(auditExtendedStore)
+				router.h.SetRelayService(relaySvc)
 			}
 
 			dashboardSvc := dashboardsvc.NewDashboardService(sqlDB)
@@ -750,6 +786,7 @@ func (r *Router) Start() {
 		r.h.StartBillingScheduler(r.appCtx, 15*time.Minute)
 		r.h.StartWebhookWorker(r.appCtx, time.Second)
 		r.h.StartAutomationWorker(r.appCtx)
+		r.h.StartDeliverabilityScheduler(r.appCtx, 15*time.Minute)
 	})
 }
 
@@ -1761,6 +1798,66 @@ func (r *Router) setupRoutes() {
 	protected.Post("/platform/imports/:id/resume", platformMW[0], platformMW[1], r.h.ResumeImport)
 	protected.Post("/platform/imports/:id/cancel", platformMW[0], platformMW[1], r.h.CancelImport)
 	protected.Post("/platform/imports/:id/compensate", platformMW[0], platformMW[1], r.h.CompensateImport)
+
+	// ── Platform mail control (Mail-Control enablement) ─────────
+	// platformMW-gated: only platform_super_admin may call these; every
+	// route requires an explicit target tenant_id in the path. Tenant
+	// Admin roles cannot reach them (platformMW[0] role gate), and the
+	// PSA is never treated as a tenant admin. RBAC permissions reuse
+	// the canonical domain/mailbox/alias/group permissions.
+	protected.Get("/platform/domains/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsRead), r.h.ListPlatformDomains)
+	protected.Get("/platform/domains/:tenant_id/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsRead), r.h.GetPlatformDomain)
+	protected.Post("/platform/domains/:tenant_id/:id/status", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.SetPlatformDomainStatus)
+	protected.Post("/platform/domains/:tenant_id/:id/mail-access-mode", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.SetPlatformDomainMailAccessMode)
+
+	protected.Get("/platform/mailboxes/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesRead), r.h.ListPlatformMailboxes)
+	protected.Get("/platform/mailboxes/:tenant_id/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesRead), r.h.GetPlatformMailbox)
+	protected.Post("/platform/mailboxes/:tenant_id/:id/status", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.SetPlatformMailboxStatus)
+	protected.Post("/platform/mailboxes/:tenant_id/:id/quota", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.SetPlatformMailboxQuota)
+	protected.Post("/platform/mailboxes/:tenant_id/:id/reset-password", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.ResetPlatformMailboxPassword)
+	protected.Delete("/platform/mailboxes/:tenant_id/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.DeletePlatformMailbox)
+	protected.Post("/platform/mailboxes/:tenant_id/bulk/status", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.BulkPlatformMailboxStatus)
+
+	protected.Get("/platform/aliases/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermAliasesRead), r.h.ListPlatformAliases)
+	protected.Get("/platform/aliases/:tenant_id/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermAliasesRead), r.h.GetPlatformAlias)
+	protected.Post("/platform/aliases/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermAliasesWrite), r.h.CreatePlatformAlias)
+	protected.Delete("/platform/aliases/:tenant_id/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermAliasesWrite), r.h.DeletePlatformAlias)
+
+	protected.Get("/platform/groups/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermGroupsRead), r.h.ListPlatformGroups)
+	protected.Get("/platform/groups/:tenant_id/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermGroupsRead), r.h.GetPlatformGroup)
+	protected.Get("/platform/groups/:tenant_id/:id/members", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermGroupsRead), r.h.ListPlatformGroupMembers)
+
+	// Platform suppression + deliverability (Milestone 9 bounded
+	// context; the production service enforces suppression in the real
+	// outbound path — these routes expose safe platform management and
+	// metrics, all explicit-tenant). Gated by the canonical
+	// platform-scoped suppressions.* / deliverability.read permissions.
+	protected.Get("/platform/suppressions/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermSuppressionsRead), r.h.ListPlatformSuppressions)
+	protected.Post("/platform/suppressions/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermSuppressionsWrite), r.h.AddPlatformSuppression)
+	protected.Get("/platform/suppressions/:tenant_id/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermSuppressionsRead), r.h.GetPlatformSuppression)
+	protected.Get("/platform/suppressions/:tenant_id/:id/history", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermSuppressionsRead), r.h.GetPlatformSuppressionHistory)
+	protected.Post("/platform/suppressions/:tenant_id/:id/release", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermSuppressionsWrite), r.h.ReleasePlatformSuppression)
+	protected.Post("/platform/suppressions/:tenant_id/:id/reactivate", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermSuppressionsWrite), r.h.ReactivatePlatformSuppression)
+	protected.Delete("/platform/suppressions/:tenant_id/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermSuppressionsWrite), r.h.DeletePlatformSuppression)
+	protected.Delete("/platform/suppressions/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermSuppressionsWrite), r.h.RemovePlatformSuppression)
+	protected.Get("/platform/deliverability/:tenant_id/metrics", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDeliverabilityRead), r.h.GetPlatformDeliverabilityMetrics)
+	protected.Get("/platform/deliverability/:tenant_id/events", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDeliverabilityRead), r.h.ListPlatformDeliverabilityEvents)
+	protected.Get("/platform/deliverability/:tenant_id/events/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDeliverabilityRead), r.h.GetPlatformDeliverabilityEvent)
+
+	// ── Platform relay administration (Mail-Control Phase B) ────────
+	// Production relay endpoints (the same providers the outbound
+	// delivery path routes through). Credentials are encrypted at
+	// rest; every response is redacted; mutations are idempotent,
+	// version-guarded, and typed-confirmation gated.
+	protected.Get("/platform/relays", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermRelaysRead), r.h.ListPlatformRelays)
+	protected.Get("/platform/relays/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermRelaysRead), r.h.GetPlatformRelay)
+	protected.Post("/platform/relays", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermRelaysWrite), r.h.CreatePlatformRelay)
+	protected.Patch("/platform/relays/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermRelaysWrite), r.h.UpdatePlatformRelay)
+	protected.Post("/platform/relays/:id/enable", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermRelaysWrite), r.h.EnablePlatformRelay)
+	protected.Post("/platform/relays/:id/disable", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermRelaysWrite), r.h.DisablePlatformRelay)
+	protected.Post("/platform/relays/:id/rotate-credentials", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermRelaysWrite), r.h.RotatePlatformRelayCredentials)
+	protected.Post("/platform/relays/:id/test", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermRelaysTest), r.h.TestPlatformRelay)
+	protected.Delete("/platform/relays/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermRelaysWrite), r.h.DeletePlatformRelay)
 
 	protected.Post("/webhooks/subscriptions", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermAPIKeysWrite), r.h.CreateWebhookSubscription)
 	protected.Get("/webhooks/subscriptions", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermAPIKeysRead), r.h.ListWebhookSubscriptions)

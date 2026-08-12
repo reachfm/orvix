@@ -3,10 +3,22 @@ package relay
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"time"
 
 	"github.com/orvix/orvix/internal/dbdialect"
 )
+
+// ProviderFilter bounds the platform-wide relay list.
+type ProviderFilter struct {
+	Scope    Scope
+	TenantID *uint
+	DomainID *uint
+	Active   *bool
+	Search   string
+	Limit    int
+	Offset   int
+}
 
 type Repository struct {
 	db      *sql.DB
@@ -57,10 +69,15 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 			circuit_state TEXT NOT NULL DEFAULT 'closed',
 			circuit_failures INTEGER NOT NULL DEFAULT 0,
 			circuit_opened_at ` + ts + `,
+			last_test_at ` + ts + `,
+			last_test_result TEXT NOT NULL DEFAULT '',
 			version INTEGER NOT NULL DEFAULT 1,
 			created_at ` + ts + ` NOT NULL,
 			updated_at ` + ts + ` NOT NULL
 		)`,
+		`CREATE INDEX IF NOT EXISTS idx_relay_providers_scope ON platform_relay_providers (scope, tenant_id, domain_id, active)`,
+		`CREATE INDEX IF NOT EXISTS idx_relay_providers_pool ON platform_relay_providers (pool_id, active)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_relay_providers_scope_name ON platform_relay_providers (scope, tenant_id, domain_id, name) WHERE name <> ''`,
 		`CREATE TABLE IF NOT EXISTS platform_relay_routing_rules (
 			id ` + autoInc + `,
 			tenant_id INTEGER NOT NULL DEFAULT 0,
@@ -94,30 +111,78 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 			return err
 		}
 	}
+	// Additive migrations for databases created before the platform
+	// relay administration surface existed. CREATE TABLE IF NOT EXISTS
+	// cannot add columns to an existing table, so each column is added
+	// with an idempotent ALTER that ignores the already-exists error
+	// (which has different text on SQLite vs PostgreSQL).
+	if err := r.ensureColumn(ctx, "platform_relay_providers", "last_test_at", ts); err != nil {
+		return err
+	}
+	if err := r.ensureColumn(ctx, "platform_relay_providers", "last_test_result", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	return nil
+}
+
+// ensureColumn attempts an additive ALTER TABLE ... ADD COLUMN and
+// treats an "already exists" error as success so the migration is
+// idempotent across both supported drivers.
+func (r *Repository) ensureColumn(ctx context.Context, table, column, columnDDL string) error {
+	_, err := r.db.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+column+` `+columnDDL)
+	if err == nil {
+		return nil
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "duplicate column") || strings.Contains(msg, "already exists") {
+		return nil
+	}
+	return err
 }
 
 // ── Providers ─────────────────────────────────────────────────────
 
+// insertReturningID executes an INSERT and captures the new row's id
+// portably: PostgreSQL uses RETURNING id (LastInsertId is not reliable
+// on Postgres drivers), SQLite uses LastInsertId.
+func (r *Repository) insertReturningID(ctx context.Context, query string, args ...any) (int64, error) {
+	if r.dialect.IsPostgres() {
+		var id int64
+		err := r.db.QueryRowContext(ctx, query+" RETURNING id", args...).Scan(&id)
+		return id, err
+	}
+	res, err := r.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
 func (r *Repository) CreateProvider(ctx context.Context, p *Provider) error {
-	res, err := r.db.ExecContext(ctx,
+	id, err := r.insertReturningID(ctx,
 		`INSERT INTO platform_relay_providers (scope, tenant_id, domain_id, pool_id, name, host, port, username, secret_ref, conn_security, tls_validation, priority, weight, active, rate_limit_per_min, circuit_state, version, created_at, updated_at) VALUES (`+r.dialect.Placeholders(19)+`)`,
 		p.Scope, p.TenantID, p.DomainID, p.PoolID, p.Name, p.Host, p.Port, p.Username, p.SecretRef, p.ConnSecurity, p.TLSValidation, p.Priority, p.Weight, boolToInt(p.Active), p.RateLimitPerMin, CircuitClosed, 1, p.CreatedAt, p.UpdatedAt)
 	if err != nil {
 		return err
 	}
-	id, _ := res.LastInsertId()
 	p.ID = uint(id)
 	p.Version = 1
 	p.CircuitState = CircuitClosed
 	return nil
 }
 
-const providerCols = `id, scope, tenant_id, domain_id, pool_id, name, host, port, username, secret_ref, conn_security, tls_validation, priority, weight, active, rate_limit_per_min, circuit_state, circuit_failures, circuit_opened_at, version, created_at, updated_at`
+const providerCols = `id, scope, tenant_id, domain_id, pool_id, name, host, port, username, secret_ref, conn_security, tls_validation, priority, weight, active, rate_limit_per_min, circuit_state, circuit_failures, circuit_opened_at, last_test_at, last_test_result, version, created_at, updated_at`
 
 func (r *Repository) GetProvider(ctx context.Context, id uint) (*Provider, error) {
 	row := r.db.QueryRowContext(ctx, `SELECT `+providerCols+` FROM platform_relay_providers WHERE id=`+r.dialect.Placeholder(1), id)
-	return scanProvider(row)
+	p, err := scanProvider(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
 }
 
 func (r *Repository) ListProvidersByPool(ctx context.Context, poolID uint) ([]Provider, error) {
@@ -144,16 +209,204 @@ func (r *Repository) UpdateProviderCircuit(ctx context.Context, id uint, state C
 	return err
 }
 
+// ── Platform relay administration ─────────────────────────────────
+
+// ListProviders returns the platform-wide relay list with optional
+// scope/tenant/domain/active filters, bounded pagination, and a
+// deterministic ordering (id ASC). The name/host search filter is a
+// bounded LIKE on both columns.
+func (r *Repository) ListProviders(ctx context.Context, f ProviderFilter) ([]Provider, int64, error) {
+	where := []string{"1=1"}
+	var args []any
+	add := func(cond string, val any) {
+		where = append(where, cond)
+		args = append(args, val)
+	}
+	if f.Scope != "" {
+		add("scope="+r.dialect.Placeholder(len(args)+1), string(f.Scope))
+	}
+	if f.TenantID != nil {
+		add("tenant_id="+r.dialect.Placeholder(len(args)+1), *f.TenantID)
+	}
+	if f.DomainID != nil {
+		add("domain_id="+r.dialect.Placeholder(len(args)+1), *f.DomainID)
+	}
+	if f.Active != nil {
+		add("active="+r.dialect.Placeholder(len(args)+1), boolToInt(*f.Active))
+	}
+	if f.Search != "" {
+		add("(name LIKE "+r.dialect.Placeholder(len(args)+1)+" OR host LIKE "+r.dialect.Placeholder(len(args)+2)+")", "%"+f.Search+"%")
+		args = append(args, "%"+f.Search+"%")
+	}
+	whereClause := " WHERE " + strings.Join(where, " AND ")
+
+	var total int64
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM platform_relay_providers`+whereClause, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	if f.Limit <= 0 || f.Limit > 200 {
+		f.Limit = 50
+	}
+	if f.Offset < 0 {
+		f.Offset = 0
+	}
+	args = append(args, f.Limit, f.Offset)
+	rows, err := r.db.QueryContext(ctx, `SELECT `+providerCols+` FROM platform_relay_providers`+whereClause+
+		` ORDER BY id ASC LIMIT `+r.dialect.Placeholder(len(args)-1)+` OFFSET `+r.dialect.Placeholder(len(args)), args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var out []Provider
+	for rows.Next() {
+		p, err := scanProvider(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, *p)
+	}
+	return out, total, rows.Err()
+}
+
+// UpdateProvider applies a guarded, optimistic-concurrency update:
+// the version predicate makes two concurrent writers race safely (the
+// loser affects 0 rows). Only non-zero fields of p are applied; the
+// caller is responsible for pre-filling unchanged values when a field
+// legitimately needs to be cleared.
+func (r *Repository) UpdateProvider(ctx context.Context, p *Provider) (bool, error) {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE platform_relay_providers SET
+			scope=`+r.dialect.Placeholder(1)+`, tenant_id=`+r.dialect.Placeholder(2)+`, domain_id=`+r.dialect.Placeholder(3)+`, pool_id=`+r.dialect.Placeholder(4)+`, name=`+r.dialect.Placeholder(5)+`, host=`+r.dialect.Placeholder(6)+`, port=`+r.dialect.Placeholder(7)+`,
+			username=`+r.dialect.Placeholder(8)+`, secret_ref=`+r.dialect.Placeholder(9)+`, conn_security=`+r.dialect.Placeholder(10)+`, tls_validation=`+r.dialect.Placeholder(11)+`,
+			priority=`+r.dialect.Placeholder(12)+`, weight=`+r.dialect.Placeholder(13)+`, active=`+r.dialect.Placeholder(14)+`, rate_limit_per_min=`+r.dialect.Placeholder(15)+`,
+			version=version+1, updated_at=`+r.dialect.Placeholder(16)+`
+		 WHERE id=`+r.dialect.Placeholder(17)+` AND version=`+r.dialect.Placeholder(18),
+		p.Scope, p.TenantID, p.DomainID, p.PoolID, p.Name, p.Host, p.Port,
+		p.Username, p.SecretRef, p.ConnSecurity, p.TLSValidation,
+		p.Priority, p.Weight, boolToInt(p.Active), p.RateLimitPerMin,
+		p.UpdatedAt, p.ID, p.Version)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// SetProviderActive is the guarded enable/disable transition. Returns
+// (affected, nil); affected=false means the version predicate failed
+// (stale write) or the row is missing.
+func (r *Repository) SetProviderActive(ctx context.Context, id uint, active bool, version int, now time.Time) (bool, error) {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE platform_relay_providers SET active=`+r.dialect.Placeholder(1)+`, version=version+1, updated_at=`+r.dialect.Placeholder(2)+` WHERE id=`+r.dialect.Placeholder(3)+` AND version=`+r.dialect.Placeholder(4),
+		boolToInt(active), now, id, version)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// SetProviderActiveTx is SetProviderActive inside the caller's
+// mutation transaction (used when the mutation, outbox event, and
+// audit record must commit atomically).
+func (r *Repository) SetProviderActiveTx(ctx context.Context, tx *sql.Tx, id uint, active bool, version int, now time.Time) (bool, error) {
+	res, err := tx.ExecContext(ctx,
+		`UPDATE platform_relay_providers SET active=`+r.dialect.Placeholder(1)+`, version=version+1, updated_at=`+r.dialect.Placeholder(2)+` WHERE id=`+r.dialect.Placeholder(3)+` AND version=`+r.dialect.Placeholder(4),
+		boolToInt(active), now, id, version)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// RotateProviderSecret swaps the encrypted credential under the
+// version predicate.
+func (r *Repository) RotateProviderSecret(ctx context.Context, id uint, secretRef string, version int, now time.Time) (bool, error) {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE platform_relay_providers SET secret_ref=`+r.dialect.Placeholder(1)+`, version=version+1, updated_at=`+r.dialect.Placeholder(2)+` WHERE id=`+r.dialect.Placeholder(3)+` AND version=`+r.dialect.Placeholder(4),
+		secretRef, now, id, version)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// RotateProviderSecretTx is RotateProviderSecret inside the caller's
+// mutation transaction.
+func (r *Repository) RotateProviderSecretTx(ctx context.Context, tx *sql.Tx, id uint, secretRef string, version int, now time.Time) (bool, error) {
+	res, err := tx.ExecContext(ctx,
+		`UPDATE platform_relay_providers SET secret_ref=`+r.dialect.Placeholder(1)+`, version=version+1, updated_at=`+r.dialect.Placeholder(2)+` WHERE id=`+r.dialect.Placeholder(3)+` AND version=`+r.dialect.Placeholder(4),
+		secretRef, now, id, version)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// SetTestResult records the last safe connection-test outcome.
+func (r *Repository) SetTestResult(ctx context.Context, id uint, at time.Time, result string, version int) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE platform_relay_providers SET last_test_at=`+r.dialect.Placeholder(1)+`, last_test_result=`+r.dialect.Placeholder(2)+`, version=version+1, updated_at=`+r.dialect.Placeholder(3)+` WHERE id=`+r.dialect.Placeholder(4)+` AND version=`+r.dialect.Placeholder(5),
+		at, result, at, id, version)
+	return err
+}
+
+// DeleteProvider removes a relay endpoint (hard delete — routing rules
+// pointing at its pool simply skip it). Returns whether a row existed.
+func (r *Repository) DeleteProvider(ctx context.Context, id uint) (bool, error) {
+	res, err := r.db.ExecContext(ctx, `DELETE FROM platform_relay_providers WHERE id=`+r.dialect.Placeholder(1), id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// DeleteProviderTx is DeleteProvider inside the caller's mutation
+// transaction.
+func (r *Repository) DeleteProviderTx(ctx context.Context, tx *sql.Tx, id uint) (bool, error) {
+	res, err := tx.ExecContext(ctx, `DELETE FROM platform_relay_providers WHERE id=`+r.dialect.Placeholder(1), id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // ── Pools ─────────────────────────────────────────────────────────
 
 func (r *Repository) CreatePool(ctx context.Context, p *Pool) error {
-	res, err := r.db.ExecContext(ctx,
+	id, err := r.insertReturningID(ctx,
 		`INSERT INTO platform_relay_pools (scope, tenant_id, domain_id, name, strategy, direct_only, version, created_at, updated_at) VALUES (`+r.dialect.Placeholders(9)+`)`,
 		p.Scope, p.TenantID, p.DomainID, p.Name, p.Strategy, boolToInt(p.DirectOnly), 1, p.CreatedAt, p.UpdatedAt)
 	if err != nil {
 		return err
 	}
-	id, _ := res.LastInsertId()
 	p.ID = uint(id)
 	p.Version = 1
 	return nil
@@ -299,7 +552,7 @@ func (r *Repository) IncrementAndCheck(ctx context.Context, providerID uint, win
 func scanProvider(row interface{ Scan(...any) error }) (*Provider, error) {
 	var p Provider
 	var active int
-	err := row.Scan(&p.ID, &p.Scope, &p.TenantID, &p.DomainID, &p.PoolID, &p.Name, &p.Host, &p.Port, &p.Username, &p.SecretRef, &p.ConnSecurity, &p.TLSValidation, &p.Priority, &p.Weight, &active, &p.RateLimitPerMin, &p.CircuitState, &p.CircuitFailures, &p.CircuitOpenedAt, &p.Version, &p.CreatedAt, &p.UpdatedAt)
+	err := row.Scan(&p.ID, &p.Scope, &p.TenantID, &p.DomainID, &p.PoolID, &p.Name, &p.Host, &p.Port, &p.Username, &p.SecretRef, &p.ConnSecurity, &p.TLSValidation, &p.Priority, &p.Weight, &active, &p.RateLimitPerMin, &p.CircuitState, &p.CircuitFailures, &p.CircuitOpenedAt, &p.LastTestAt, &p.LastTestResult, &p.Version, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}

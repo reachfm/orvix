@@ -536,3 +536,758 @@ paths:
       tags: [Platform]
       security:
         - bearerAuth: []
+
+  /platform/relays:
+    get:
+      summary: List platform relay endpoints (redacted)
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: scope
+          in: query
+          schema:
+            type: string
+        - name: tenant_id
+          in: query
+          schema:
+            type: integer
+        - name: domain_id
+          in: query
+          schema:
+            type: integer
+        - name: active
+          in: query
+          schema:
+            type: boolean
+        - name: q
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - name: offset
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Redacted relay list (never contains credentials)
+    post:
+      summary: Create a relay endpoint (credential encrypted at rest)
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, host, port]
+              properties:
+                name: { type: string }
+                host: { type: string }
+                port: { type: integer }
+                username: { type: string }
+                password: { type: string }
+                conn_security: { type: string, enum: [none, starttls, implicit_tls] }
+                tls_validation: { type: string, enum: [strict, opportunistic] }
+                priority: { type: integer }
+                active: { type: boolean }
+      responses:
+        '201':
+          description: Created relay (redacted)
+        '400':
+          description: Validation failure (unsafe target, bad JSON, missing idempotency key)
+        '409':
+          description: Idempotency key conflict or duplicate relay name
+
+  /platform/relays/{id}:
+    get:
+      summary: Relay endpoint detail (redacted)
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Relay detail with last safe test outcome
+        '404':
+          description: Relay not found
+    patch:
+      summary: Update a relay endpoint (version-guarded, idempotent)
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                version: { type: integer }
+                name: { type: string }
+                host: { type: string }
+                port: { type: integer }
+                password: { type: string }
+      responses:
+        '200':
+          description: Updated relay (redacted)
+        '412':
+          description: Stale version (optimistic concurrency)
+    delete:
+      summary: Delete a relay endpoint (typed confirmation required)
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: X-Confirm
+          in: header
+          required: true
+          schema:
+            type: string
+            example: DELETE-RELAY-1
+      responses:
+        '200':
+          description: Relay deleted
+        '428':
+          description: Typed confirmation required
+
+  /platform/relays/{id}/enable:
+    post:
+      summary: Enable a relay endpoint (version-guarded, idempotent)
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                version: { type: integer }
+      responses:
+        '200':
+          description: Relay enabled (redacted)
+
+  /platform/relays/{id}/disable:
+    post:
+      summary: Disable a relay endpoint (typed confirmation, version, idempotency)
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: X-Confirm
+          in: header
+          required: true
+          schema:
+            type: string
+            example: DISABLE-RELAY-1
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                version: { type: integer }
+      responses:
+        '200':
+          description: Relay disabled (redacted)
+
+  /platform/relays/{id}/rotate-credentials:
+    post:
+      summary: Rotate relay credentials (generated credential returned once)
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: X-Confirm
+          in: header
+          required: true
+          schema:
+            type: string
+            example: ROTATE-RELAY-1
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                version: { type: integer }
+                new_password: { type: string }
+      responses:
+        '200':
+          description: Rotation applied; generated_password present exactly once when generated
+
+  /platform/relays/{id}/test:
+    post:
+      summary: SSRF-safe connection test (bounded timeouts, redacted, idempotent)
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Redacted test result (connected/tls/auth/error, bounded)
+
+  /platform/suppressions/{tenant_id}:
+    get:
+      summary: List suppressions for an explicit tenant (filterable, default active)
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: domain
+          in: query
+          schema:
+            type: string
+        - name: q
+          in: query
+          schema:
+            type: string
+        - name: reason
+          in: query
+          schema:
+            type: string
+        - name: source
+          in: query
+          schema:
+            type: string
+        - name: state
+          in: query
+          schema:
+            type: string
+            enum: [active, released, expired, all]
+        - name: created_from
+          in: query
+          schema:
+            type: string
+        - name: created_to
+          in: query
+          schema:
+            type: string
+        - name: expiry_from
+          in: query
+          schema:
+            type: string
+        - name: expiry_to
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - name: offset
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Suppression list envelope
+    post:
+      summary: Add a suppression (atomic upsert, idempotent)
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [address, reason]
+              properties:
+                address: { type: string }
+                reason: { type: string, enum: [hard_bounce, complaint, manual] }
+                source: { type: string }
+                notes: { type: string }
+                expires_at: { type: string }
+      responses:
+        '201':
+          description: Suppression created/reactivated
+    delete:
+      summary: Release an active suppression by address
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: address
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Suppression released
+
+  /platform/suppressions/{tenant_id}/{id}:
+    get:
+      summary: Suppression detail (tenant-scoped)
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Suppression with state/version/release fields
+        '404':
+          description: Suppression not found
+    delete:
+      summary: Release a suppression (typed confirmation RELEASE-SUPPRESSION-<id>)
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: X-Confirm
+          in: header
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Suppression released
+        '428':
+          description: Typed confirmation required
+
+  /platform/suppressions/{tenant_id}/{id}/history:
+    get:
+      summary: Append-only suppression lifecycle evidence
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Lifecycle events (created/released/reactivated/expired)
+
+  /platform/suppressions/{tenant_id}/{id}/release:
+    post:
+      summary: Release an active suppression (guarded, audited)
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string }
+      responses:
+        '200':
+          description: Suppression released
+        '404':
+          description: Suppression not found
+        '409':
+          description: Suppression not active
+
+  /platform/suppressions/{tenant_id}/{id}/reactivate:
+    post:
+      summary: Reactivate a released/expired suppression (policy permits)
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string, enum: [hard_bounce, complaint, manual] }
+                source: { type: string }
+                notes: { type: string }
+                expires_at: { type: string }
+      responses:
+        '200':
+          description: Suppression reactivated
+        '409':
+          description: Suppression already active
+
+  /platform/deliverability/{tenant_id}/events:
+    get:
+      summary: Real delivery evidence for an explicit tenant (filters, bounded pagination)
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: domain
+          in: query
+          schema:
+            type: string
+        - name: type
+          in: query
+          schema:
+            type: string
+        - name: provider
+          in: query
+          schema:
+            type: string
+        - name: start
+          in: query
+          schema:
+            type: string
+        - name: end
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - name: offset
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Safe event projection list (no bodies, no credentials)
+
+  /platform/deliverability/{tenant_id}/events/{id}:
+    get:
+      summary: One delivery event detail (tenant-scoped, safe projection)
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Event projection with canonical category
+        '404':
+          description: Event not found
+
+  /platform/deliverability/{tenant_id}/metrics:
+    get:
+      summary: Tenant deliverability metrics (totals, real rates, breakdowns, UTC buckets)
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: dimension
+          in: query
+          schema:
+            type: string
+            enum: [tenant, sending_domain, recipient_domain, relay_provider]
+        - name: value
+          in: query
+          schema:
+            type: string
+        - name: start
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: end
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Window metrics + summary with category/domain/provider breakdowns and time buckets
+        '400':
+          description: Invalid window or dimension
+
+  /admin/queue/messages:
+    get:
+      summary: List queue messages with safe attribution (tenant/domain/relay, category, retryable)
+      tags: [Operations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: domain
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - name: offset
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Redacted queue list (no lease tokens, bodies, or SMTP material)
+
+  /admin/queue/messages/{id}:
+    get:
+      summary: Queue entry detail with attempt history and safe attribution
+      tags: [Operations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Safe detail projection
+        '404':
+          description: Queue entry not found
+
+  /admin/queue/messages/{id}/retry:
+    post:
+      summary: Retry a queue entry (state-machine guarded; delivered/cancelled rejected)
+      tags: [Operations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Entry retried
+        '400':
+          description: Invalid state transition (stable code invalid_state_transition)
+
+  /admin/queue/messages/{id}/bounce:
+    post:
+      summary: Bounce a queue entry to dead letter (typed confirmation required)
+      tags: [Operations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: X-Confirm
+          in: header
+          required: true
+          schema:
+            type: string
+            example: BOUNCE-QUEUE-1
+      responses:
+        '200':
+          description: Entry bounced
+        '428':
+          description: Typed confirmation required
+
+  /admin/queue/messages/{id}/cancel:
+    post:
+      summary: Cancel a queue entry (typed confirmation required)
+      tags: [Operations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: X-Confirm
+          in: header
+          required: true
+          schema:
+            type: string
+            example: CANCEL-QUEUE-1
+      responses:
+        '200':
+          description: Entry cancelled
+        '428':
+          description: Typed confirmation required
+
+  /admin/queue/messages/bulk-action:
+    post:
+      summary: Bounded bulk queue action with per-item results (max 500 ids)
+      tags: [Operations]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids, action]
+              properties:
+                ids: { type: array, items: { type: integer } }
+                action: { type: string, enum: [retry, cancel, bounce] }
+                reason: { type: string }
+      responses:
+        '200':
+          description: Per-item results
+        '400':
+          description: Malformed body or unknown action
