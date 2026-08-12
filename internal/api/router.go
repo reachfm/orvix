@@ -49,6 +49,7 @@ import (
 	"github.com/orvix/orvix/internal/platform/cluster"
 	platformimporter "github.com/orvix/orvix/internal/platform/importer"
 	platformjobs "github.com/orvix/orvix/internal/platform/jobs"
+	"github.com/orvix/orvix/internal/platform/deliverability"
 	"github.com/orvix/orvix/internal/platform/mailcontrol"
 	"github.com/orvix/orvix/internal/platform/kernel"
 	"github.com/orvix/orvix/internal/platform/relay"
@@ -270,6 +271,17 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			router.h.SetMailControlService(mailcontrol.NewService(mailControlRepo, mailcontrol.Ports{
 				Domains: domainAdminSvc, Mailboxes: mailboxAdminSvc, Audit: auditExtendedStore,
 			}))
+
+			// Platform deliverability / suppression (Milestone 9 bounded
+			// context): the production service already enforces
+			// suppression in the real outbound path; these platform
+			// routes expose safe management and metrics.
+			deliverabilityRepo := deliverability.NewRepository(sqlDB)
+			if err := deliverabilityRepo.EnsureSchema(context.Background()); err != nil {
+				logger.Warn("platform deliverability schema init failed; suppression/metrics disabled", zap.Error(err))
+			} else {
+				router.h.SetDeliverabilityService(deliverability.NewService(deliverabilityRepo, auditExtendedStore, nil, nil))
+			}
 
 			bulkProvisionRepo := bulkprovision.NewRepository(sqlDB)
 			if err := bulkProvisionRepo.EnsureSchema(context.Background()); err != nil {
@@ -1799,6 +1811,15 @@ func (r *Router) setupRoutes() {
 	protected.Get("/platform/groups/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermGroupsRead), r.h.ListPlatformGroups)
 	protected.Get("/platform/groups/:tenant_id/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermGroupsRead), r.h.GetPlatformGroup)
 	protected.Get("/platform/groups/:tenant_id/:id/members", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermGroupsRead), r.h.ListPlatformGroupMembers)
+
+	// Platform suppression + deliverability (Milestone 9 bounded
+	// context; the production service enforces suppression in the real
+	// outbound path — these routes expose safe platform management and
+	// metrics, all explicit-tenant).
+	protected.Get("/platform/suppressions/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesRead), r.h.ListPlatformSuppressions)
+	protected.Post("/platform/suppressions/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.AddPlatformSuppression)
+	protected.Delete("/platform/suppressions/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.RemovePlatformSuppression)
+	protected.Get("/platform/deliverability/:tenant_id/metrics", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesRead), r.h.GetPlatformDeliverabilityMetrics)
 
 	protected.Post("/webhooks/subscriptions", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermAPIKeysWrite), r.h.CreateWebhookSubscription)
 	protected.Get("/webhooks/subscriptions", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermAPIKeysRead), r.h.ListWebhookSubscriptions)

@@ -263,6 +263,10 @@ are RBAC-permissioned, audited, and tenant-scoped in SQL.
 | `GET /platform/groups/:tenant_id` | platformMW | `ListPlatformGroups` | paginated group list for an explicit tenant | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
 | `GET /platform/groups/:tenant_id/:id` | platformMW | `GetPlatformGroup` | group detail with member count, tenant-scoped | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
 | `GET /platform/groups/:tenant_id/:id/members` | platformMW | `ListPlatformGroupMembers` | group member emails, tenant-scoped | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
+| `GET /platform/suppressions/:tenant_id` | platformMW | `ListPlatformSuppressions` | paginated suppression list for an explicit tenant | Platform | `internal/platform/deliverability/service_test.go` | MISSING_UI |
+| `POST /platform/suppressions/:tenant_id` | platformMW | `AddPlatformSuppression` | create a reasoned, tenant-scoped suppression; audited | Platform | `internal/platform/deliverability/service_test.go` | MISSING_UI |
+| `DELETE /platform/suppressions/:tenant_id` | platformMW | `RemovePlatformSuppression` | release a suppression by address; audited | Platform | `internal/platform/deliverability/service_test.go` | MISSING_UI |
+| `GET /platform/deliverability/:tenant_id/metrics` | platformMW | `GetPlatformDeliverabilityMetrics` | aggregated window metrics (delivered/failed/bounced) for a dimension, UTC-normalized | Platform | `internal/platform/deliverability/service_test.go` | MISSING_UI |
 
 ## Theme system (cross-cutting, not a route)
 
@@ -291,7 +295,7 @@ above (not carried over from an earlier draft) and is enforced equal
 to the router's actual route set by
 `internal/api/capability_matrix_test.go`, which parses
 `platformMW[0], platformMW[1]` registrations straight out of
-`router.go` — currently 177 — and parses every `` `METHOD /path` ``
+`router.go` — currently 181 — and parses every `` `METHOD /path` ``
 occurrence and its row's disposition straight out of this document.
 
 | Disposition | Routes |
@@ -301,9 +305,9 @@ occurrence and its row's disposition straight out of this document.
 | MACHINE_ONLY | 3 |
 | DEPRECATED | 12 |
 | DUPLICATE_SUPERSEDED_ROUTE | 18 |
-| MISSING_UI | 80 |
+| MISSING_UI | 84 |
 | MISSING_BACKEND | 0 (the one MISSING_BACKEND case — platform-initiated organization creation — is a non-route documented under Organizations, not counted here) |
-| **Total** | **177** |
+| **Total** | **181** |
 
 Three pre-existing MISSING_UI gaps were documented rather than
 silently omitted: `GET /admin/backups/:id` (single-backup fetch; the
