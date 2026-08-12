@@ -1,8 +1,13 @@
 # Platform Console Capability Matrix
 
 Complete audit of every route gated with `platformMW[0], platformMW[1]`
-in `internal/api/router.go` (100 route registrations, verified by
-`grep -c` against the branch head this document was written against).
+in `internal/api/router.go` (128 route registrations, verified by
+`internal/api/capability_matrix_test.go` against the branch head this
+document was written against — updated for the Milestone 13-15 DR,
+retention, platform billing, and signed-update-artifact routes, plus
+three pre-existing queue routes found undocumented during that pass,
+plus the DR operation-history and platform-billing reconciliation
+routes added during the M13-15 re-audit gap-closure pass).
 Every disposition below reflects the actual handler and actual
 frontend consumer, not the route's name.
 
@@ -55,6 +60,9 @@ Not fixed in this pass — flagged, not silently omitted.
 | `GET /queue` | platformMW | `ListQueue` | legacy webmail-facing queue list (different schema than `AdminQueueList` — see the earlier `COREMAIL_DISABLED` fix commit) | Platform (webmail SPA is the real consumer, not this admin console) | `cmd/orvix/fullstack_repro_test.go` (backend) | DUPLICATE_SUPERSEDED_ROUTE (superseded, for this admin console, by `AdminQueueList`; still load-bearing for the separate webmail frontend, so not removable here) |
 | `DELETE /queue/:id` | platformMW | `DeleteQueue` | legacy queue delete | Platform | — | DUPLICATE_SUPERSEDED_ROUTE (superseded by `AdminQueueCancel`) |
 | `POST /queue/:id/retry` | platformMW | `RetryQueue` | legacy queue retry | Platform | — | DUPLICATE_SUPERSEDED_ROUTE (superseded by `AdminQueueRetryNow`) |
+| `GET /admin/queue/history` | platformMW | `AdminQueueHistory` | queue history | Platform | — | MISSING_UI (real route, no frontend consumer found) |
+| `GET /admin/queue/export` | platformMW | `AdminQueueExport` | queue export | Platform | — | MISSING_UI (real route, no frontend consumer found) |
+| `POST /admin/queue/messages/bulk-action` | platformMW | `AdminQueueBulkAction` | bulk queue action | Platform | — | MISSING_UI (real route, no frontend consumer found) |
 
 All six `UI_SUPPORTED` mail-operations endpoints share the
 `COREMAIL_DISABLED` sanitized-503 contract, verified in
@@ -106,6 +114,8 @@ and `isCoreMailDisabled` (frontend).
 | Route | Middleware | Handler | Contract | Owner | Test file | Disposition |
 |---|---|---|---|---|---|---|
 | `GET /audit/logs` | platformMW | `ListAuditLogs` | `AuditEntry[]` | Platform | `AuditFirewallSelfHeal.test.tsx` | UI_SUPPORTED |
+| `GET /audit/logs/export` | platformMW | `ExportAuditLogs` | CSV/JSON export of filtered audit entries | Platform | `internal/audit/` | MISSING_UI |
+| `GET /audit/logs/:id` | platformMW | `GetAuditEntry` | single audit entry by ID | Platform | `internal/audit/` | MISSING_UI |
 | `GET /admin/ssl/certificates` | platformMW | `AdminSslListCertificates` | `ListCertificatesResponse` | Platform | `SslPanel.test.tsx` | UI_SUPPORTED |
 | `POST /admin/ssl/certificates/reload` | platformMW | `AdminSslReloadCertificates` | `{status?}` | Platform | `SslPanel.test.tsx` | UI_SUPPORTED |
 | `GET /admin/ssl/certificates/reload` | platformMW | `AdminSslReloadCertificates` (same handler, also registered under GET) | `{status?}` | Platform | — | DUPLICATE_SUPERSEDED_ROUTE (the frontend uses the POST registration for this mutating action; the GET registration on the identical path is not called and is unusual for a mutating action to expose under GET — not removed, just unused) |
@@ -143,6 +153,91 @@ and `isCoreMailDisabled` (frontend).
 | `GET /console/reports` | platformMW | `AdminReports` | superseded reporting view | Platform | — | DUPLICATE_SUPERSEDED_ROUTE (superseded by `/platform/dashboard` + the six migrated feature pages) |
 | `GET /console/internal/overview`, `GET /console/internal/tenants`, `GET /console/internal/domain-intelligence`, `GET /console/internal/security-ops`, `GET /console/internal/mail-flow-ops` (5 routes) | platformMW | `InternalOverview` / `InternalTenants` / `InternalDomainIntelligence` / `InternalSecurityOps` / `InternalMailFlowOps` | superseded internal-console views | Platform | — | DUPLICATE_SUPERSEDED_ROUTE (superseded by `/platform/dashboard`, Organizations, Mail Operations, and Security — the newer, tested pages) |
 
+## Disaster Recovery (Milestone 13)
+
+| Route | Middleware | Handler | Contract | Owner | Test file | Disposition |
+|---|---|---|---|---|---|---|
+| `GET /dr/readiness` | platformMW | `GetDRReadiness` | `dr.Readiness` | Platform | `internal/platform/dr` service tests | MISSING_UI (real route, no frontend consumer yet — backend-only in this pass) |
+| `GET /dr/drills` | platformMW | `GetDRDrills` | `{drills: dr.Drill[]}` | Platform | `internal/platform/dr` service tests | MISSING_UI |
+| `POST /dr/drills` | platformMW | `PostDRDrill` | records drill outcome, no restore performed | Platform | `internal/platform/dr` service tests | MISSING_UI |
+| `POST /dr/backup` | platformMW | `PostDRCoordinatedBackup` | durable-lease-coordinated backup over `backup.Service.CreateBackup` | Platform | `internal/platform/dr` service tests | MISSING_UI |
+| `POST /dr/backups/:id/restore` | platformMW | `PostDRCoordinatedRestore` | typed confirm `RESTORE-THIS-BACKUP`; submits to the same `restorecoord.Coordinator` as `POST /admin/backups/:id/restore` — no competing restart/rollback implementation | Platform | `internal/restorecoord` tests (shared coordinator) | MISSING_UI |
+| `GET /dr/operations` | platformMW | `GetDROperationHistory` | paginated `{operations: dr.Operation[], total, limit, offset}` — past coordinated backup/restore operations, newest first (distinct from the live single-job status below) | Platform | `internal/platform/dr` service tests, `internal/api/handlers` idempotency-replay test | MISSING_UI |
+| `GET /dr/operations/:job_id` | platformMW | `GetDROperationStatus` | reads the same `restorecoord` job result as `GET /admin/backups/restore-jobs/:job_id` | Platform | `internal/restorecoord` tests | MISSING_UI |
+
+## Retention / Legal Hold / Purge (Milestone 14)
+
+| Route | Middleware | Handler | Contract | Owner | Test file | Disposition |
+|---|---|---|---|---|---|---|
+| `POST /retention/policies` | platformMW | `PostRetentionPolicy` | `retention.Policy` | Platform | `internal/platform/retention` service tests | MISSING_UI |
+| `GET /retention/policies/effective` | platformMW | `GetRetentionEffectivePolicy` | resolved `retention.Policy` for a scope | Platform | `internal/platform/retention` service tests | MISSING_UI |
+| `POST /retention/legal-holds` | platformMW | `PostRetentionLegalHold` | `retention.LegalHold` | Platform | `internal/platform/retention` service tests | MISSING_UI |
+| `GET /retention/legal-holds` | platformMW | `GetRetentionLegalHolds` | `{holds: retention.LegalHold[]}` for a scope | Platform | `internal/platform/retention` service tests | MISSING_UI |
+| `POST /retention/legal-holds/:id/release` | platformMW | `PostRetentionLegalHoldRelease` | releases a hold | Platform | `internal/platform/retention` service tests | MISSING_UI |
+| `POST /retention/purge/plan` | platformMW | `PostRetentionPurgePlan` | non-destructive dry-run `retention.PurgePlan` | Platform | `internal/platform/retention` service tests | MISSING_UI |
+| `POST /retention/purge/execute` | platformMW | `PostRetentionPurgeExecute` | destructive, typed confirm `PURGE-ELIGIBLE-DATA`, rechecks legal hold at execution time | Platform | `internal/platform/retention` service tests | MISSING_UI |
+| `POST /retention/mailboxes/:id/recover` | platformMW | `PostRetentionRecoverMailbox` | delegates to the existing `mailboxAdminSvc.RestoreMailbox` undelete capability (same one behind `POST /enterprise/mailboxes/:id/restore`), records chain-of-custody | Platform | `internal/admin/mailbox` restore tests | MISSING_UI |
+| `GET /retention/custody` | platformMW | `GetRetentionCustody` | paginated `retention.ChainOfCustodyEvent[]` — IDs/hashes/metadata only, never message bodies | Platform | `internal/platform/retention` service tests | MISSING_UI |
+
+## Platform Billing Balances/Adjustments (Milestone 15)
+
+| Route | Middleware | Handler | Contract | Owner | Test file | Disposition |
+|---|---|---|---|---|---|---|
+| `GET /platform/billing/tenants/:tenant_id/balance` | platformMW | `GetPlatformBillingBalance` | `platformbilling.Balance` | Platform | `internal/platform/billing` service tests | MISSING_UI |
+| `POST /platform/billing/tenants/:tenant_id/adjustments` | platformMW | `PostPlatformBillingAdjustment` | `platformbilling.Adjustment`, integer minor units + currency only, idempotency-key supported | Platform | `internal/platform/billing` service tests (incl. concurrent-idempotency-key test) | MISSING_UI |
+| `GET /platform/billing/tenants/:tenant_id/adjustments` | platformMW | `GetPlatformBillingAdjustments` | `{adjustments: platformbilling.Adjustment[]}` | Platform | `internal/platform/billing` service tests | MISSING_UI |
+| `GET /platform/billing/tenants/:tenant_id/reconciliation` | platformMW | `GetPlatformBillingReconciliation` | read-only `billing.ReconciliationReport` — recomputes the ledger balance from full adjustment history and reports any discrepancy against the maintained balance row; never auto-corrects (Milestone 13-15 re-audit gap fix) | Platform | `internal/api/handlers` idempotency-replay test | MISSING_UI |
+
+## Signed Update Artifacts (Milestone 13)
+
+| Route | Middleware | Handler | Contract | Owner | Test file | Disposition |
+|---|---|---|---|---|---|---|
+| `POST /updates/artifacts` | platformMW | `PostUpdateArtifact` | ed25519-signed manifest verification + hash check + staged lifecycle; rejects unsigned/tampered/wrong-version/wrong-platform artifacts | Platform | `internal/platform/updates/service_test.go` (unsigned, tampered, invalid signature, wrong version, wrong platform, valid end-to-end) | MISSING_UI |
+| `GET /updates/artifacts/history` | platformMW | `GetUpdateArtifactHistory` | `{history: updates.Record[]}` | Platform | `internal/platform/updates/service_test.go` | MISSING_UI |
+| `GET /updates/artifacts/:id` | platformMW | `GetUpdateArtifactStatus` | `updates.Record` | Platform | `internal/platform/updates/service_test.go` | MISSING_UI |
+| `POST /updates/artifacts/:id/apply` | platformMW | `PostUpdateArtifactApply` | requires typed confirmation `APPLY-STAGED-UPDATE`; fails closed (503) unless the external `orvix-update.path`/`.service` coordinator is installed; hands the staged, verified artifact off to `internal/updatecoord` (durable job, mutually exclusive with rollback, idempotent retries) — never applies in-process | Platform | `internal/platform/updates/service_test.go` (`TestTriggerApply_NoCoordinator_LeavesStaged`, `TestTriggerApply_WithCoordinator_TransitionsToApplied`, `TestTriggerApply_RetryIsIdempotent`), `internal/updatecoord/coordinator_test.go` | MISSING_UI |
+| `POST /updates/artifacts/:id/rollback` | platformMW | `PostUpdateArtifactRollback` | requires typed confirmation `ROLLBACK-APPLIED-UPDATE` + reason; hands off to the same external coordinator using pre-captured previous-version/hash metadata; fails closed if not installed | Platform | `internal/platform/updates/service_test.go` (`TestRollback_RetryIsIdempotent`, `TestRollback_WithoutApply_Rejected`) | MISSING_UI |
+| `GET /updates/operations/:job_id` | platformMW | `GetUpdateOperationStatus` | durable apply/rollback job status, re-read from disk every call so it survives the Orvix restart the coordinator performs | Platform | `internal/updatecoord/coordinator_test.go` | MISSING_UI |
+| `POST /incidents` | platformMW | `CreateIncident` | create a new incident with severity, services, and regions | Platform | `internal/incident/` | MISSING_UI |
+| `GET /incidents` | platformMW | `ListIncidents` | list incidents with optional status filter | Platform | `internal/incident/` | MISSING_UI |
+| `GET /incidents/:id` | platformMW | `GetIncident` | get an incident by ID | Platform | `internal/incident/` | MISSING_UI |
+| `PATCH /incidents/:id` | platformMW | `UpdateIncident` | update incident status with timeline event | Platform | `internal/incident/` | MISSING_UI |
+| `GET /incidents/:id/timeline` | platformMW | `GetIncidentTimeline` | get incident timeline events | Platform | `internal/incident/` | MISSING_UI |
+| `POST /platform/support/grants` | platformMW | `CreateSupportAccessGrant` | request a temporary support-access grant for a tenant | Platform | `internal/supportaccess/` | MISSING_UI |
+| `GET /platform/support/grants` | platformMW | `ListSupportAccessGrants` | list support-access grants by tenant | Platform | `internal/supportaccess/` | MISSING_UI |
+| `GET /platform/support/grants/:id` | platformMW | `GetSupportAccessGrant` | get a support-access grant by ID | Platform | `internal/supportaccess/` | MISSING_UI |
+| `POST /platform/support/grants/:id/activate` | platformMW | `ActivateSupportAccessGrant` | activate an approved support-access grant | Platform | `internal/supportaccess/` | MISSING_UI |
+| `POST /platform/support/grants/:id/revoke` | platformMW | `RevokeSupportAccessGrant` | revoke an active support-access grant | Platform | `internal/supportaccess/` | MISSING_UI |
+| `POST /platform/automation/jobs` | platformMW | `SubmitPlatformAutomationJob` | submit an explicitly platform-scoped allowlisted durable job; requires idempotency key | Platform | `internal/platform/jobs/` | MISSING_UI |
+| `GET /platform/automation/jobs` | platformMW | `ListPlatformAutomationJobs` | paginated and filterable platform-job history | Platform | `internal/platform/jobs/` | MISSING_UI |
+| `GET /platform/automation/jobs/:id` | platformMW | `GetPlatformAutomationJob` | safe durable job detail without payload, lease, or idempotency internals | Platform | `internal/platform/jobs/` | MISSING_UI |
+| `POST /platform/automation/jobs/:id/cancel` | platformMW | `CancelPlatformAutomationJob` | atomically cancel queued work or request cooperative cancellation of running work | Platform | `internal/platform/jobs/` | MISSING_UI |
+| `POST /platform/automation/jobs/:id/retry` | platformMW | `RetryPlatformAutomationJob` | idempotently requeue an eligible failed platform job | Platform | `internal/platform/jobs/` | MISSING_UI |
+| `GET /platform/capabilities` | platformMW | `GetCapabilities` | runtime capability registry derived from registered modules and health | Platform | `internal/capability/` | MISSING_UI |
+| `GET /platform/config` | platformMW | `ListConfigurationSettings` | list authoritative configuration settings with source/effective/pending state | Platform | `internal/configtruth/` | MISSING_UI |
+| `GET /platform/config/:key` | platformMW | `GetConfigurationSetting` | get authoritative view of one setting | Platform | `internal/configtruth/` | MISSING_UI |
+| `PATCH /platform/config/:key` | platformMW | `MutateConfigurationSetting` | validate and apply a configuration mutation with optimistic concurrency | Platform | `internal/configtruth/` | MISSING_UI |
+
+## Imports (Milestone 16, Phase 4B)
+
+Bulk tenant provisioning via staged CSV/JSON sources. All nine routes
+are backend-only in this pass (no console UI consumer yet): the
+importer is driven through the API and the `orvix` CLI. The full
+import lifecycle is covered by `internal/platform/importer`
+service/worker tests and `internal/api/handlers/import_route_acceptance_test.go`
+(tenant isolation, RBAC, CSRF, confirmation strings, idempotency,
+hash verification, safe-field updates, compensation).
+
+| `GET /platform/imports` | platformMW | `ListImports` | paginated/filtered import history, tenant-scoped | Platform | `internal/api/handlers/import_route_acceptance_test.go`, `internal/platform/importer/` | MISSING_UI |
+| `GET /platform/imports/:id` | platformMW | `GetImport` | import job detail without staging/lease/idempotency internals | Platform | `internal/api/handlers/import_route_acceptance_test.go`, `internal/platform/importer/` | MISSING_UI |
+| `GET /platform/imports/:id/report` | platformMW | `GetImportReport` | dry-run validation report with before/after diffs and redacted secrets | Platform | `internal/api/handlers/import_route_acceptance_test.go`, `internal/platform/importer/` | MISSING_UI |
+| `POST /platform/imports` | platformMW | `CreateImport` | stage a new import source (SHA-256 verified at every later read) | Platform | `internal/api/handlers/import_route_acceptance_test.go`, `internal/platform/importer/` | MISSING_UI |
+| `POST /platform/imports/:id/validate` | platformMW | `ValidateImport` | dry-run validation with zero mutations | Platform | `internal/api/handlers/import_route_acceptance_test.go`, `internal/platform/importer/` | MISSING_UI |
+| `POST /platform/imports/:id/execute` | platformMW | `ExecuteImport` | durable queued-activation handoff; requires `Idempotency-Key` and exact confirmation `EXECUTE-IMPORT-<id>` | Platform | `internal/api/handlers/import_route_acceptance_test.go`, `internal/platform/importer/` | MISSING_UI |
+| `POST /platform/imports/:id/resume` | platformMW | `ResumeImport` | idempotent resume of a paused/failed import; requires `Idempotency-Key` | Platform | `internal/api/handlers/import_route_acceptance_test.go`, `internal/platform/importer/` | MISSING_UI |
+| `POST /platform/imports/:id/cancel` | platformMW | `CancelImport` | cancel a running/paused import | Platform | `internal/api/handlers/import_route_acceptance_test.go`, `internal/platform/importer/` | MISSING_UI |
+| `POST /platform/imports/:id/compensate` | platformMW | `CompensateImport` | reverse the import's own mutations only; requires `Idempotency-Key` and exact confirmation `COMPENSATE-IMPORT-<id>`; refuses to overwrite human changes | Platform | `internal/api/handlers/import_route_acceptance_test.go`, `internal/platform/importer/` | MISSING_UI |
+
 ## Theme system (cross-cutting, not a route)
 
 Verified by `web/admin/src/shared/theme/{theme,useTheme}.test.ts`,
@@ -170,7 +265,7 @@ above (not carried over from an earlier draft) and is enforced equal
 to the router's actual route set by
 `internal/api/capability_matrix_test.go`, which parses
 `platformMW[0], platformMW[1]` registrations straight out of
-`router.go` — currently 100 — and parses every `` `METHOD /path` ``
+`router.go` — currently 159 — and parses every `` `METHOD /path` ``
 occurrence and its row's disposition straight out of this document.
 
 | Disposition | Routes |
@@ -180,16 +275,26 @@ occurrence and its row's disposition straight out of this document.
 | MACHINE_ONLY | 3 |
 | DEPRECATED | 12 |
 | DUPLICATE_SUPERSEDED_ROUTE | 18 |
-| MISSING_UI | 3 |
+| MISSING_UI | 62 |
 | MISSING_BACKEND | 0 (the one MISSING_BACKEND case — platform-initiated organization creation — is a non-route documented under Organizations, not counted here) |
-| **Total** | **100** |
+| **Total** | **159** |
 
-Three MISSING_UI gaps exist, documented rather than silently omitted:
-`GET /admin/backups/:id` (single-backup fetch; the list view already
-shows everything the struct provides), `POST /admin/backups/schedule`
-(a `setBackupSchedule` client function exists but no component calls
-it — the schedule is currently read-only in the UI), and `GET
-/admin/runtime` (real route, no frontend consumer).
+Three pre-existing MISSING_UI gaps were documented rather than
+silently omitted: `GET /admin/backups/:id` (single-backup fetch; the
+list view already shows everything the struct provides), `POST
+/admin/backups/schedule` (a `setBackupSchedule` client function exists
+but no component calls it — the schedule is currently read-only in the
+UI), and `GET /admin/runtime` (real route, no frontend consumer). The
+remaining 26 MISSING_UI rows were added in the Milestone 13-15 pass:
+three pre-existing queue routes (`/admin/queue/history`,
+`/admin/queue/export`, `/admin/queue/messages/bulk-action`) found
+undocumented, and 23 new backend-only routes for DR coordination,
+retention/legal-hold/purge, platform billing balances/adjustments, and
+signed update-artifact staging — all thin handlers over already-tested
+service layers, with no console UI built for them in this pass. The
+Milestone 16 pass adds 9 more MISSING_UI rows for the platform import
+routes (bulk tenant provisioning via the durable importer), also
+backend-only and driven through the API and CLI.
 
 DEPRECATED is 12, not 11, because `POST /firewall/rules` moved from
 UI_SUPPORTED to DEPRECATED / NOT_OPERATIONAL in this pass (see

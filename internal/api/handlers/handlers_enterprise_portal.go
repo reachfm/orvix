@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/api/publicv1"
 	"github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/auth"
 	rbac "github.com/orvix/orvix/internal/auth/rbac"
@@ -116,12 +117,43 @@ func validateAPIKeyScopes(scopes []string, role auth.Role) error {
 			return fmt.Errorf("duplicate scope: %s", s)
 		}
 		seen[s] = true
-		// Validate against known permissions.
-		if !rbac.HasPermission(role, rbac.Permission(s)) {
+		permission := publicScopePermission(s)
+		isPublicScope := permission != ""
+		if permission == "" {
+			permission = rbac.Permission(s)
+		}
+		if (isPublicScope && role == auth.RolePlatformSuperAdmin) || !rbac.HasPermission(role, permission) {
 			return fmt.Errorf("scope %s exceeds caller permissions or is unknown", s)
 		}
 	}
 	return nil
+}
+
+func publicScopePermission(scope string) rbac.Permission {
+	switch scope {
+	case publicv1.ScopeOrganizationRead:
+		return rbac.PermOrganizationsRead
+	case publicv1.ScopeDomainsRead:
+		return rbac.PermDomainsRead
+	case publicv1.ScopeDomainsWrite:
+		return rbac.PermDomainsWrite
+	case publicv1.ScopeMailboxesRead:
+		return rbac.PermMailboxesRead
+	case publicv1.ScopeMailboxesWrite:
+		return rbac.PermMailboxesWrite
+	case publicv1.ScopeAliasesRead:
+		return rbac.PermAliasesRead
+	case publicv1.ScopeAliasesWrite:
+		return rbac.PermAliasesWrite
+	case publicv1.ScopeGroupsRead:
+		return rbac.PermGroupsRead
+	case publicv1.ScopeGroupsWrite:
+		return rbac.PermGroupsWrite
+	case publicv1.ScopeUsageRead:
+		return rbac.PermBillingRead
+	default:
+		return ""
+	}
 }
 
 func parseScopes(s string) []string {

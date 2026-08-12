@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/orvix/orvix/internal/coremail"
 	"github.com/orvix/orvix/internal/observability"
 )
 
@@ -26,6 +27,13 @@ type CommandHandler struct {
 	validateRcpt   RecipientValidator
 	validateSender SenderValidator
 	isLocalDomain  func(ctx context.Context, domain string) (bool, error)
+	// mailAccessMode returns the domain's policy ("internal_only" or
+	// "internal_external"); nil means "policy checking disabled" and
+	// handleRCPT skips the check entirely (matching isLocalDomain's
+	// nil-means-disabled convention). An empty/unknown return value is
+	// treated as internal_external (safe default), never as a reason
+	// to reject — only an explicit internal_only blocks external mail.
+	mailAccessMode func(ctx context.Context, domain string) (string, error)
 	onAuthEvent    func(eventType string, identity string, detail string)
 	// acceptanceEngine applies admin acceptance rules at
 	// MAIL FROM + RCPT TO. nil means "no rules configured"
@@ -78,6 +86,14 @@ func (h *CommandHandler) SetSendEnforcer(fn func(ctx context.Context, tenantID, 
 // SetLocalDomainChecker sets a function to check if a domain is hosted locally.
 func (h *CommandHandler) SetLocalDomainChecker(fn func(ctx context.Context, domain string) (bool, error)) {
 	h.isLocalDomain = fn
+}
+
+// SetMailAccessModeChecker wires the domain mail-access-mode lookup
+// used to enforce internal_only vs internal_external at RCPT TO. nil
+// disables the check (no policy restriction beyond existing relay
+// protection).
+func (h *CommandHandler) SetMailAccessModeChecker(fn func(ctx context.Context, domain string) (string, error)) {
+	h.mailAccessMode = fn
 }
 
 // SetAuthEventHandler sets a callback for authentication events.
@@ -239,10 +255,15 @@ func (h *CommandHandler) handleRCPT(ctx context.Context, cmd *ParsedCommand) Res
 		return ResponseSyntaxErr
 	}
 
+	rcptDomain := ExtractDomain(address)
+	var rcptIsLocal bool
+	if rcptDomain != "" && h.isLocalDomain != nil {
+		rcptIsLocal, _ = h.isLocalDomain(ctx, rcptDomain) // errors fail closed (treated as non-local) in every caller below
+	}
+
 	// Relay protection: unauthenticated users cannot send to external domains.
 	// Fail-closed: if the local domain checker errors, relay is denied.
 	if !h.session.Authenticated {
-		rcptDomain := ExtractDomain(address)
 		if rcptDomain != "" {
 			isLocal, err := h.isLocalDomain(ctx, rcptDomain)
 			if err != nil || !isLocal {
@@ -250,6 +271,47 @@ func (h *CommandHandler) handleRCPT(ctx context.Context, cmd *ParsedCommand) Res
 					h.onAuthEvent("relay_denied", "", fmt.Sprintf("unauthenticated relay to %s", rcptDomain))
 				}
 				return ResponseNoRelay
+			}
+		}
+	}
+
+	// mail_access_mode enforcement — real delivery-path policy, not
+	// just a CRUD flag. Runs for every sender (authenticated or not);
+	// unauthenticated relay is already blocked above, so this is what
+	// closes the remaining two cases: (1) an external sender delivering
+	// INBOUND to a local internal_only domain, and (2) an authenticated
+	// local sender whose OWN domain is internal_only relaying OUTBOUND
+	// to an external recipient (the existing relay-protection block
+	// above only restricts unauthenticated senders, so authenticated
+	// outbound is otherwise unrestricted regardless of domain policy).
+	if h.mailAccessMode != nil && h.isLocalDomain != nil {
+		senderDomain := ExtractDomain(h.session.MailFrom)
+		if rcptDomain != "" && rcptIsLocal {
+			mode, merr := h.mailAccessMode(ctx, rcptDomain)
+			if merr == nil && mode == string(coremail.MailAccessInternalOnly) {
+				senderIsLocal := false
+				if senderDomain != "" {
+					senderIsLocal, _ = h.isLocalDomain(ctx, senderDomain)
+				}
+				if !senderIsLocal {
+					if h.onAuthEvent != nil {
+						h.onAuthEvent("policy_denied", h.session.AuthUser,
+							fmt.Sprintf("external inbound to internal-only domain %s blocked (sender %s)", rcptDomain, h.session.MailFrom))
+					}
+					return ResponseExternalInboundBlocked
+				}
+			}
+		} else if senderDomain != "" {
+			senderIsLocal, lerr := h.isLocalDomain(ctx, senderDomain)
+			if lerr == nil && senderIsLocal {
+				mode, merr := h.mailAccessMode(ctx, senderDomain)
+				if merr == nil && mode == string(coremail.MailAccessInternalOnly) {
+					if h.onAuthEvent != nil {
+						h.onAuthEvent("policy_denied", h.session.AuthUser,
+							fmt.Sprintf("external outbound from internal-only domain %s blocked (recipient %s)", senderDomain, address))
+					}
+					return ResponseExternalOutboundBlocked
+				}
 			}
 		}
 	}

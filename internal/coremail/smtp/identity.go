@@ -69,6 +69,17 @@ func (s *IdentityService) IsLocalDomain(ctx context.Context, domain string) (boo
 	return d != nil && d.Status == coremail.DomainActive, nil
 }
 
+// MailAccessMode reports the domain's configured mail access policy
+// (internal_only vs internal_external), used by handleRCPT to enforce
+// the policy on the real delivery path. See coremail.MailAccessMode.
+func (s *IdentityService) MailAccessMode(ctx context.Context, domain string) (string, error) {
+	mode, err := s.engine.Domains.GetMailAccessMode(ctx, domain, nil)
+	if err != nil {
+		return "", err
+	}
+	return string(mode), nil
+}
+
 // ResolveSender checks if an identity is authorized to send as a given from address.
 func (s *IdentityService) ResolveSender(ctx context.Context, identity *AuthIdentity, fromAddress string) (bool, error) {
 	if identity == nil {

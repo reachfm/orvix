@@ -391,7 +391,19 @@ var validTimezones = map[string]bool{
 }
 
 func isValidTimezone(tz string) bool {
-	return validTimezones[tz]
+	if tz == "" {
+		return true
+	}
+	if validTimezones[tz] {
+		return true
+	}
+	// Validate against the IANA timezone database when available.
+	// This accepts any canonical IANA zone (e.g. "America/New_York")
+	// that the platform's runtime can load.
+	if _, err := time.LoadLocation(tz); err == nil {
+		return true
+	}
+	return false
 }
 
 func (h *Handler) ListCustomerInvoices(c fiber.Ctx) error {

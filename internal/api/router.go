@@ -23,12 +23,14 @@ import (
 	"github.com/orvix/orvix/internal/antivirus"
 	"github.com/orvix/orvix/internal/api/handlers"
 	"github.com/orvix/orvix/internal/api/handlers/settings"
+	"github.com/orvix/orvix/internal/api/publicv1"
 	auditpkg "github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/auth"
 	authrbac "github.com/orvix/orvix/internal/auth/rbac"
 	"github.com/orvix/orvix/internal/billing"
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/coremail"
+	"github.com/orvix/orvix/internal/coremail/delivery"
 	"github.com/orvix/orvix/internal/coremail/dkim"
 	"github.com/orvix/orvix/internal/coremail/push"
 	"github.com/orvix/orvix/internal/coremail/queue"
@@ -42,6 +44,14 @@ import (
 	"github.com/orvix/orvix/internal/metrics"
 	"github.com/orvix/orvix/internal/modules"
 	"github.com/orvix/orvix/internal/observability"
+	platformbilling "github.com/orvix/orvix/internal/platform/billing"
+	"github.com/orvix/orvix/internal/platform/bulkprovision"
+	"github.com/orvix/orvix/internal/platform/cluster"
+	platformimporter "github.com/orvix/orvix/internal/platform/importer"
+	platformjobs "github.com/orvix/orvix/internal/platform/jobs"
+	"github.com/orvix/orvix/internal/platform/kernel"
+	"github.com/orvix/orvix/internal/platform/relay"
+	"github.com/orvix/orvix/internal/platform/retention"
 	"github.com/orvix/orvix/internal/ruler"
 	orvixruntime "github.com/orvix/orvix/internal/runtime"
 	settingsbridge "github.com/orvix/orvix/internal/settings/bridge"
@@ -49,6 +59,7 @@ import (
 	"github.com/orvix/orvix/internal/trust"
 	"github.com/orvix/orvix/internal/trustmgmt"
 	"github.com/orvix/orvix/internal/updater"
+	"github.com/orvix/orvix/internal/webhooks"
 	"github.com/orvix/orvix/internal/webmailmgmt"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
@@ -68,6 +79,7 @@ type Router struct {
 	cancel       context.CancelFunc
 	db           *gorm.DB
 	startOnce    sync.Once
+	publicIdem   *kernel.IdempotencyStore
 }
 
 func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *zap.Logger,
@@ -113,6 +125,19 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		cancel:       cancel,
 		h:            handlers.NewHandler(db, authenticator, apikeyMgr, logger, cfg, registry, ff, rateLimiter),
 		db:           db,
+	}
+	if sqlDB, err := db.DB(); err == nil {
+		dialect, detectErr := dbdialect.Detect(sqlDB)
+		if detectErr != nil {
+			dialect = dbdialect.FromDriver(cfg.Database.Driver)
+		}
+		router.publicIdem = kernel.NewIdempotencyStore(sqlDB, dialect)
+		if err := router.publicIdem.EnsureSchema(ctx); err != nil {
+			logger.Error("public API idempotency schema init failed", zap.Error(err))
+			router.publicIdem = nil
+		} else if _, err := router.publicIdem.PurgeBefore(ctx, time.Now().UTC().Add(-publicv1.IdempotencyRetention)); err != nil {
+			logger.Warn("public API idempotency retention purge failed", zap.Error(err))
+		}
 	}
 
 	// Cancel the background context when the Fiber app shuts
@@ -210,19 +235,70 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			if eng == nil {
 				eng = coremail.NewEngine(coremail.EngineConfig{DB: sqlDB, AuthCfg: coremail.DefaultAuthConfig()})
 			}
-			router.h.SetMailboxAdminService(mailboxadminsvc.NewService(adminMailboxRepo, eng.Auth, auditExtendedStore, rbacEval))
+			mailboxAdminSvc := mailboxadminsvc.NewService(adminMailboxRepo, eng.Auth, auditExtendedStore, rbacEval)
+			router.h.SetMailboxAdminService(mailboxAdminSvc)
 			orgRepo := orgadminsvc.NewOrganizationRepo(sqlDB)
 			router.h.SetOrganizationAdminService(orgadminsvc.NewService(orgRepo, auditExtendedStore, rbacEval))
 
 			domainAdminRepo := domainadminsvc.NewDomainAdminRepo(sqlDB)
 			dkimRepo := dkim.NewSQLRepo(sqlDB)
-			router.h.SetDomainAdminService(domainadminsvc.NewService(domainAdminRepo, dkimRepo, auditExtendedStore, rbacEval))
+			domainAdminSvc := domainadminsvc.NewService(domainAdminRepo, dkimRepo, auditExtendedStore, rbacEval)
+			webhookDialect, dialectErr := dbdialect.Detect(sqlDB)
+			if dialectErr != nil {
+				webhookDialect = dbdialect.FromDriver("sqlite")
+			}
+			outboxRepo := kernel.NewOutboxRepository(webhookDialect)
+			webhookRepo := webhooks.NewRepository(sqlDB)
+			if err := outboxRepo.EnsureSchema(context.Background(), sqlDB); err != nil {
+				logger.Error("webhook outbox initialization failed", zap.Error(err))
+			} else if err := webhookRepo.EnsureSchema(context.Background()); err != nil {
+				logger.Error("webhook schema initialization failed", zap.Error(err))
+			} else {
+				webhookSvc := webhooks.NewService(webhookRepo, nil).WithOutbox(outboxRepo)
+				router.h.SetWebhookService(webhookSvc)
+				domainAdminSvc.SetWebhookPublisher(webhooks.NewOutboxPublisher(outboxRepo))
+				logger.Info("transactional webhook outbox wired")
+			}
+			router.h.SetDomainAdminService(domainAdminSvc)
+
+			bulkProvisionRepo := bulkprovision.NewRepository(sqlDB)
+			if err := bulkProvisionRepo.EnsureSchema(context.Background()); err != nil {
+				logger.Warn("bulk provisioning schema init failed; service disabled", zap.Error(err))
+			} else {
+				router.h.SetBulkProvisionService(bulkprovision.NewService(bulkProvisionRepo, mailboxAdminSvc, domainAdminSvc, nil, nil, nil))
+			}
+
+			relayRepo := relay.NewRepository(sqlDB)
+			if err := relayRepo.EnsureSchema(context.Background()); err != nil {
+				logger.Warn("relay control plane schema init failed; service disabled", zap.Error(err))
+			} else {
+				router.h.SetRelayService(relay.NewService(relayRepo, nil, nil))
+			}
 
 			dashboardSvc := dashboardsvc.NewDashboardService(sqlDB)
 			router.h.SetDashboardService(dashboardSvc)
 
 			platformSvc := platformpkg.NewPlatformService(sqlDB, auditExtendedStore, rbacEval)
 			router.h.SetPlatformAdminService(platformSvc)
+
+			// Retention/legal-hold/compliance (Milestone 14) — the
+			// purge target is the REAL mailbox soft-delete lifecycle
+			// (Milestone 5), not a fake or disconnected table.
+			retentionRepo := retention.NewRepository(sqlDB)
+			if err := retentionRepo.EnsureSchema(context.Background()); err != nil {
+				logger.Warn("retention schema init failed; service disabled", zap.Error(err))
+			} else {
+				purgeTarget := retention.NewMailboxPurgeAdapter(adminMailboxRepo)
+				router.h.SetRetentionService(retention.NewService(retentionRepo, purgeTarget, auditExtendedStore, nil, nil))
+			}
+
+			// Manual credits/adjustments (Milestone 15).
+			platformBillingRepo := platformbilling.NewRepository(sqlDB)
+			if err := platformBillingRepo.EnsureSchema(context.Background()); err != nil {
+				logger.Warn("platform billing schema init failed; service disabled", zap.Error(err))
+			} else {
+				router.h.SetPlatformBillingService(platformbilling.NewService(sqlDB, platformBillingRepo, auditExtendedStore, nil, nil))
+			}
 
 			logger.Info("enterprise admin services wired with transactional audit and RBAC")
 		}
@@ -325,6 +401,24 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			if qe := qeProvider.QueueEngine(); qe != nil {
 				router.h.SetQueueEngine(qe)
 				logger.Info("queue engine wired for webmail send")
+			}
+		}
+		// Wire the immutable delivery-attempt history repo
+		// (Milestone 8) against the same table the delivery
+		// workers already write to — not a separate history store.
+		if sqlDB, err := db.DB(); err == nil {
+			router.h.SetAttemptHistoryRepo(delivery.NewAttemptHistorySQLRepo(sqlDB))
+		}
+		// Wire the cluster node registry service (Milestone 10) from
+		// the same runtime module that self-enrolled at boot — the
+		// admin API reads/commands the SAME node rows, not a second
+		// registry.
+		if clProvider, ok := mod.(interface {
+			ClusterService() *cluster.Service
+		}); ok {
+			if cs := clProvider.ClusterService(); cs != nil {
+				router.h.SetClusterService(cs)
+				logger.Info("cluster service wired for admin API")
 			}
 		}
 		// Wire the Web Push (RFC 8030) notifier from the
@@ -491,6 +585,9 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			logger.Warn("ensure uploaded cert schema failed", zap.Error(err))
 		}
 		router.h.SetTLSService(tlsSvc)
+		if das := router.h.DomainAdminService(); das != nil {
+			das.SetTLSService(tlsSvc)
+		}
 		logger.Info("admin TLS service wired")
 	}
 
@@ -523,6 +620,69 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 	ms := initTransactionalMailSender(cfg.CoreMail.SMTPHost, cfg.CoreMail.SMTPPort, cfg.CoreMail.Hostname, logger)
 	router.h.SetMailSender(ms)
 
+	if sqlDB, err := db.DB(); err == nil {
+		jobRepo := platformjobs.NewJobRepository(sqlDB)
+		jobRegistry := platformjobs.NewRegistry()
+		if err := jobRepo.EnsureSchema(context.Background()); err != nil {
+			logger.Error("automation jobs schema initialization failed", zap.Error(err))
+		} else {
+			jobService := platformjobs.NewServiceWithRegistry(jobRepo, jobRegistry, kernel.SystemClock{})
+
+			// Wire the durable import service (Phase 4B): real repository,
+			// a confined staging directory, the durable jobs service, and
+			// concrete service adapters. The platform.import handler is
+			// registered below so the worker can execute it.
+			importRepo := platformimporter.NewRepository(sqlDB)
+			if err := importRepo.EnsureSchema(context.Background()); err != nil {
+				logger.Error("import schema initialization failed; import service disabled", zap.Error(err))
+			} else {
+				stagingDir := cfg.Imports.StagingDir
+				if stagingDir == "" {
+					stagingDir = filepath.Join(os.TempDir(), "orvix-imports")
+				}
+				if err := os.MkdirAll(stagingDir, 0o700); err != nil {
+					logger.Error("import staging directory could not be created; import service disabled", zap.Error(err))
+				} else {
+					staging, err := platformimporter.NewStagingService(stagingDir)
+					if err != nil {
+						logger.Error("import staging initialization failed; import service disabled", zap.Error(err))
+					} else if eng == nil {
+						logger.Error("coremail engine unavailable; import service disabled")
+					} else {
+						importDialect, dialectErr := dbdialect.Detect(sqlDB)
+						if dialectErr != nil {
+							importDialect = dbdialect.FromDriver("sqlite")
+						}
+						adapters, err := platformimporter.NewProductionAdapters(platformimporter.ProductionAdapterDeps{
+							OrgService:     router.h.OrganizationAdminService(),
+							DomainService:  router.h.DomainAdminService(),
+							MailboxService: router.h.MailboxAdminService(),
+							DB:             sqlDB,
+							Dialect:        importDialect,
+						})
+						if err != nil {
+							logger.Error("import adapters initialization failed; import service disabled", zap.Error(err))
+						} else {
+							importSvc := platformimporter.NewService(importRepo, adapters, staging, jobService, kernel.SystemClock{})
+							router.h.SetImportService(importSvc)
+							logger.Info("durable import service wired")
+						}
+					}
+				}
+			}
+
+			if err := platformjobs.RegisterProductionHandlers(jobRegistry, router.h.CustomerDomainService(), router.h.WebhookService(), router.h.ImportService()); err != nil {
+				logger.Error("automation jobs handler registration failed", zap.Error(err))
+			} else {
+				jobWorker := platformjobs.NewWorker(jobService, jobRegistry, "orvix-"+kernel.UUIDGenerator{}.NewID()).WithErrorHandler(func(err error) {
+					logger.Error("automation jobs worker iteration failed", zap.Error(err))
+				})
+				router.h.SetAutomationJobs(jobService, jobWorker)
+				logger.Info("durable automation jobs wired")
+			}
+		}
+	}
+
 	router.setupMiddleware()
 	router.setupRoutes()
 	router.setupAdminUI()
@@ -544,6 +704,14 @@ func (r *Router) SetTrustService(s *trustmgmt.Service) {
 // SetTrustPersistence sets the trust engine persistence state.
 func (r *Router) SetTrustPersistence(ok bool, errMsg string) {
 	r.h.SetTrustPersistence(ok, errMsg)
+}
+
+// SetClusterService wires the cluster node registry service into the
+// router's handler for test setups where the coremail runtime module
+// (which normally self-enrolls and wires this) is not available —
+// mirrors SetQueueEngine/SetTrustService above.
+func (r *Router) SetClusterService(s *cluster.Service) {
+	r.h.SetClusterService(s)
 }
 
 func (r *Router) App() *fiber.App { return r.app }
@@ -580,6 +748,8 @@ func newUserRateLimiter(prefix string, max int, window time.Duration, retryAfter
 func (r *Router) Start() {
 	r.startOnce.Do(func() {
 		r.h.StartBillingScheduler(r.appCtx, 15*time.Minute)
+		r.h.StartWebhookWorker(r.appCtx, time.Second)
+		r.h.StartAutomationWorker(r.appCtx)
 	})
 }
 
@@ -646,7 +816,7 @@ func (r *Router) setupMiddleware() {
 	r.app.Use(cors.New(cors.Config{
 		AllowOrigins:     allowOrigins,
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-CSRF-Token"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-CSRF-Token", "Idempotency-Key", "X-Request-ID"},
 		AllowCredentials: true,
 	}))
 	r.app.Use(securityHeaders())
@@ -724,6 +894,46 @@ func (r *Router) setupRoutes() {
 	api.Get("/billing/plans", r.h.ListBillingPlans)
 	api.Post("/billing/webhook", r.h.ReceivePaymentWebhook)
 	api.Post("/billing/complaint", r.h.ReceiveComplaintWebhook)
+	api.Get("/status", r.h.GetPublicStatus)
+
+	// Stable tenant-facing automation API. Authentication is API-key only;
+	// it intentionally does not fall through to browser JWT sessions. Every
+	// operation declares one explicit public scope and all resource IDs are
+	// resolved inside the tenant bound to the validated key.
+	publicAPI := api.Group("/public", publicv1.Correlation(), r.apikeys.PublicMiddleware())
+	publicMutation := func(c fiber.Ctx) error {
+		if r.publicIdem == nil {
+			return publicv1.WriteError(c, fiber.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Idempotent mutations are unavailable.")
+		}
+		return publicv1.Idempotent(r.publicIdem)(c)
+	}
+	publicAPI.Get("/organization", publicv1.RequireScope(publicv1.ScopeOrganizationRead), r.h.PublicOrganization)
+	publicAPI.Get("/usage", publicv1.RequireScope(publicv1.ScopeUsageRead), r.h.PublicUsage)
+	publicAPI.Get("/domains", publicv1.RequireScope(publicv1.ScopeDomainsRead), r.h.PublicListDomains)
+	publicAPI.Get("/domains/:id", publicv1.RequireScope(publicv1.ScopeDomainsRead), r.h.PublicGetDomain)
+	publicAPI.Post("/domains", publicv1.RequireScope(publicv1.ScopeDomainsWrite), publicMutation, r.h.PublicCreateDomain)
+	publicAPI.Patch("/domains/:id", publicv1.RequireScope(publicv1.ScopeDomainsWrite), publicMutation, r.h.PublicUpdateDomain)
+	publicAPI.Post("/domains/:id/status", publicv1.RequireScope(publicv1.ScopeDomainsWrite), publicMutation, r.h.PublicSetDomainStatus)
+	publicAPI.Delete("/domains/:id", publicv1.RequireScope(publicv1.ScopeDomainsWrite), publicMutation, r.h.PublicDeleteDomain)
+	publicAPI.Get("/mailboxes", publicv1.RequireScope(publicv1.ScopeMailboxesRead), r.h.PublicListMailboxes)
+	publicAPI.Get("/mailboxes/:id", publicv1.RequireScope(publicv1.ScopeMailboxesRead), r.h.PublicGetMailbox)
+	publicAPI.Post("/mailboxes", publicv1.RequireScope(publicv1.ScopeMailboxesWrite), publicMutation, r.h.PublicCreateMailbox)
+	publicAPI.Patch("/mailboxes/:id", publicv1.RequireScope(publicv1.ScopeMailboxesWrite), publicMutation, r.h.PublicUpdateMailbox)
+	publicAPI.Post("/mailboxes/:id/status", publicv1.RequireScope(publicv1.ScopeMailboxesWrite), publicMutation, r.h.PublicSetMailboxStatus)
+	publicAPI.Delete("/mailboxes/:id", publicv1.RequireScope(publicv1.ScopeMailboxesWrite), publicMutation, r.h.PublicDeleteMailbox)
+	publicAPI.Get("/aliases", publicv1.RequireScope(publicv1.ScopeAliasesRead), r.h.PublicListAliases)
+	publicAPI.Get("/aliases/:id", publicv1.RequireScope(publicv1.ScopeAliasesRead), r.h.PublicGetAlias)
+	publicAPI.Post("/aliases", publicv1.RequireScope(publicv1.ScopeAliasesWrite), publicMutation, r.h.PublicCreateAlias)
+	publicAPI.Patch("/aliases/:id", publicv1.RequireScope(publicv1.ScopeAliasesWrite), publicMutation, r.h.PublicUpdateAlias)
+	publicAPI.Delete("/aliases/:id", publicv1.RequireScope(publicv1.ScopeAliasesWrite), publicMutation, r.h.PublicDeleteAlias)
+	publicAPI.Get("/groups", publicv1.RequireScope(publicv1.ScopeGroupsRead), r.h.PublicListGroups)
+	publicAPI.Get("/groups/:id", publicv1.RequireScope(publicv1.ScopeGroupsRead), r.h.PublicGetGroup)
+	publicAPI.Post("/groups", publicv1.RequireScope(publicv1.ScopeGroupsWrite), publicMutation, r.h.PublicCreateGroup)
+	publicAPI.Patch("/groups/:id", publicv1.RequireScope(publicv1.ScopeGroupsWrite), publicMutation, r.h.PublicUpdateGroup)
+	publicAPI.Delete("/groups/:id", publicv1.RequireScope(publicv1.ScopeGroupsWrite), publicMutation, r.h.PublicDeleteGroup)
+	publicAPI.Get("/groups/:id/members", publicv1.RequireScope(publicv1.ScopeGroupsRead), r.h.PublicListGroupMembers)
+	publicAPI.Post("/groups/:id/members", publicv1.RequireScope(publicv1.ScopeGroupsWrite), publicMutation, r.h.PublicAddGroupMember)
+	publicAPI.Delete("/groups/:id/members/:memberId", publicv1.RequireScope(publicv1.ScopeGroupsWrite), publicMutation, r.h.PublicDeleteGroupMember)
 
 	loginGroup := api.Group("/auth")
 	if r.redisLimiter != nil {
@@ -998,6 +1208,14 @@ func (r *Router) setupRoutes() {
 		return c.Next()
 	}
 
+	// This route intentionally sits outside enterpriseRead: a platform
+	// support actor has no permanent tenant membership, so enterpriseRead's
+	// requireTenantContext would reject it before SupportAccess can establish
+	// the grant-scoped, request-local tenant context. The support gate admits
+	// the normal tenant role family unchanged and requires an active
+	// read_only grant for platform actors.
+	protected.Get("/enterprise/organizations/current", r.h.SupportAccessMiddlewareForScope("read_only"), r.csrf.Middleware(), r.h.GetCurrentOrganization)
+
 	enterpriseRead := protected.Group("/enterprise",
 		requireTenantContext,
 		r.csrf.Middleware(),
@@ -1015,6 +1233,8 @@ func (r *Router) setupRoutes() {
 	canWriteBilling := enterpriseRead.Group("", authrbac.Require(authrbac.PermBillingWrite))
 	canWriteAliases := enterpriseRead.Group("", authrbac.Require(authrbac.PermAliasesWrite))
 	canWriteGroups := enterpriseRead.Group("", authrbac.Require(authrbac.PermGroupsWrite))
+	canWriteImports := enterpriseRead.Group("", authrbac.Require(authrbac.PermImportsWrite))
+	canExecuteImports := enterpriseRead.Group("", authrbac.Require(authrbac.PermImportsExecute))
 
 	// ── Dashboard ──
 	enterpriseRead.Get("/dashboard", r.h.CustomerDashboard)
@@ -1029,6 +1249,11 @@ func (r *Router) setupRoutes() {
 	enterpriseRead.Get("/domains/:id/dkim", r.h.GetAdminDomainDKIM)
 	canWriteDomains.Post("/domains/:id/dkim/generate", r.h.PostAdminDomainDKIMGenerate)
 	canWriteDomains.Post("/domains/:id/dkim/rotate", r.h.PostAdminDomainDKIMRotate)
+	canWriteDomains.Post("/domains/:id/dkim/revoke", r.h.PostAdminDomainDKIMRevoke)
+	enterpriseRead.Get("/domains/:id/dkim/history", r.h.GetAdminDomainDKIMHistory)
+	enterpriseRead.Get("/domains/:id/tls", r.h.GetAdminDomainTLSStatus)
+	enterpriseRead.Get("/domains/:id/mail-access-mode", r.h.GetAdminDomainMailAccessMode)
+	canWriteDomains.Post("/domains/:id/mail-access-mode", r.h.PostAdminDomainMailAccessMode)
 	enterpriseRead.Post("/domains/:id/verify", r.h.VerifyEnterpriseDomain)
 	enterpriseRead.Get("/domains/:id/dns", r.h.GetEnterpriseDomainDNS)
 	canWriteDomains.Post("/domains/:id/dns/verify", r.h.VerifyEnterpriseDomainDNS)
@@ -1042,10 +1267,34 @@ func (r *Router) setupRoutes() {
 	canWriteMailboxes.Post("/mailboxes/bulk/status", r.h.BulkSetAdminMailboxStatus)
 	canWriteMailboxes.Post("/mailboxes/:id/reset-password", r.h.ResetAdminMailboxPassword)
 	canWriteMailboxes.Delete("/mailboxes/:id", r.h.DeleteMailbox)
+	canWriteMailboxes.Post("/mailboxes/:id/restore", r.h.PostAdminMailboxRestore)
+	canWriteMailboxes.Delete("/mailboxes/:id/purge", r.h.DeleteAdminMailboxPurge)
+
+	// ── Bulk mailbox provisioning (Milestone 6) ──
+	canWriteMailboxes.Post("/domains/:id/mailboxes/bulk/validate", r.h.PostBulkProvisionValidate)
+	canWriteMailboxes.Post("/domains/:id/mailboxes/bulk/jobs", r.h.PostBulkProvisionCreateJob)
+	enterpriseRead.Get("/mailboxes/bulk/jobs/:jobId", r.h.GetBulkProvisionJob)
+	canWriteMailboxes.Post("/mailboxes/bulk/jobs/:jobId/execute", r.h.PostBulkProvisionExecute)
+	canWriteMailboxes.Post("/mailboxes/bulk/jobs/:jobId/cancel", r.h.PostBulkProvisionCancel)
+	canWriteMailboxes.Post("/mailboxes/bulk/jobs/:jobId/retry", r.h.PostBulkProvisionRetry)
+
+	// ── Outbound relay control plane (Milestone 7) ──
+	canWriteDomains.Post("/relay/pools", r.h.PostRelayPool)
+	canWriteDomains.Post("/relay/providers", r.h.PostRelayProvider)
+	enterpriseRead.Get("/relay/pools/:id/providers", r.h.GetRelayPoolProviders)
+	canWriteDomains.Post("/relay/providers/:id/test", r.h.PostRelayProviderTest)
+	canWriteDomains.Post("/relay/routing-rules", r.h.PostRelayRoutingRule)
+	canWriteDomains.Post("/relay/emergency-override", r.h.PostRelayEmergencyOverride)
+
+	// ── Cluster control plane (Milestone 10) ──
+	enterpriseRead.Get("/cluster/nodes", r.h.GetClusterNodes)
+	canWriteDomains.Post("/cluster/nodes/:id/cordon", r.h.PostClusterNodeCordon)
+	canWriteDomains.Post("/cluster/nodes/:id/uncordon", r.h.PostClusterNodeUncordon)
+	canWriteDomains.Post("/cluster/nodes/:id/drain", r.h.PostClusterNodeDrain)
+	canWriteDomains.Post("/cluster/nodes/:id/resume", r.h.PostClusterNodeResume)
 
 	// ── Organizations ──
 	enterpriseRead.Get("/organizations/:id", r.h.GetOrganization)
-	enterpriseRead.Get("/organizations/current", r.h.GetCurrentOrganization)
 	// Plan + live usage summary consumed by the domain provisioning wizard.
 	// Read-only and scoped to the authenticated tenant — it uses the same
 	// enterpriseRead group as every other tenant-scoped read, so RBAC is
@@ -1111,6 +1360,17 @@ func (r *Router) setupRoutes() {
 	enterpriseRead.Get("/sessions", r.h.ListAccountSessions)
 	canWriteUsers.Post("/sessions/:id/revoke", r.h.RevokeAccountSession)
 
+	// ── Imports ──
+	enterpriseRead.Get("/imports", r.h.ListImports)
+	enterpriseRead.Get("/imports/:id", r.h.GetImport)
+	enterpriseRead.Get("/imports/:id/report", r.h.GetImportReport)
+	canWriteImports.Post("/imports", r.h.CreateImport)
+	canWriteImports.Post("/imports/:id/validate", r.h.ValidateImport)
+	canExecuteImports.Post("/imports/:id/execute", r.h.ExecuteImport)
+	canExecuteImports.Post("/imports/:id/resume", r.h.ResumeImport)
+	canExecuteImports.Post("/imports/:id/cancel", r.h.CancelImport)
+	canExecuteImports.Post("/imports/:id/compensate", r.h.CompensateImport)
+
 	// CSRF is enforced on the entire admin group by default (deny-list,
 	// not allow-list) rather than only on routes an author remembered to
 	// nest under a separate CSRF sub-group — several state-changing
@@ -1152,9 +1412,9 @@ func (r *Router) setupRoutes() {
 		requireTenantContext,
 		r.csrf.Middleware(),
 	}
-	protected.Get("/domains", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListDomains)
-	protected.Get("/users", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListUsers)
-	protected.Get("/mailboxes", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListMailboxes)
+	protected.Get("/domains", r.h.SupportAccessMiddlewareForScope("domain_view"), tenantCompatMW[2], r.h.ListDomains)
+	protected.Get("/users", r.h.SupportAccessMiddlewareForScope("read_only"), tenantCompatMW[2], r.h.ListUsers)
+	protected.Get("/mailboxes", r.h.SupportAccessMiddlewareForScope("mailbox_view"), tenantCompatMW[2], r.h.ListMailboxes)
 	// CSV exports (admin-only, GET — no CSRF required). Registered before
 	// the parameterized :id / :name routes so the literal /export segment
 	// wins over /mailboxes/:id and /domains/:name.
@@ -1175,6 +1435,10 @@ func (r *Router) setupRoutes() {
 	protected.Get("/admin/queue/summary", platformMW[0], platformMW[1], r.h.AdminQueueSummary)
 	protected.Get("/admin/queue/messages", platformMW[0], platformMW[1], r.h.AdminQueueList)
 	protected.Get("/admin/queue/messages/:id", platformMW[0], platformMW[1], r.h.AdminQueueDetail)
+	// history/export MUST be registered before the /admin/queue/:id
+	// wildcard below, or fiber matches "history"/"export" as :id.
+	protected.Get("/admin/queue/history", platformMW[0], platformMW[1], r.h.AdminQueueHistory)
+	protected.Get("/admin/queue/export", platformMW[0], platformMW[1], r.h.AdminQueueExport)
 	protected.Get("/admin/queue/:id", platformMW[0], platformMW[1], r.h.GetAdminQueueEntry)
 	protected.Get("/admin/backups", platformMW[0], platformMW[1], r.h.ListBackups)
 	protected.Get("/admin/backups/schedule", platformMW[0], platformMW[1], r.h.GetBackupSchedule)
@@ -1198,6 +1462,8 @@ func (r *Router) setupRoutes() {
 	protected.Get("/modules", platformMW[0], platformMW[1], r.h.ListModules)
 	protected.Get("/license", platformMW[0], platformMW[1], r.h.GetLicense)
 	protected.Get("/audit/logs", platformMW[0], platformMW[1], r.h.ListAuditLogs)
+	protected.Get("/audit/logs/export", platformMW[0], platformMW[1], r.h.ExportAuditLogs)
+	protected.Get("/audit/logs/:id", platformMW[0], platformMW[1], r.h.GetAuditEntry)
 	// Admin Enterprise v2 — RBAC + account classes + groups +
 	// lists + public folders + quarantine + ACL + log rules.
 	protected.Get("/admin/account-classes", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], r.h.ListAccountClasses)
@@ -1386,6 +1652,7 @@ func (r *Router) setupRoutes() {
 	protected.Post("/admin/queue/messages/:id/retry", platformMW[0], platformMW[1], r.h.AdminQueueRetryNow)
 	protected.Post("/admin/queue/messages/:id/bounce", platformMW[0], platformMW[1], r.h.AdminQueueBounce)
 	protected.Post("/admin/queue/messages/:id/cancel", platformMW[0], platformMW[1], r.h.AdminQueueCancel)
+	protected.Post("/admin/queue/messages/bulk-action", platformMW[0], platformMW[1], r.h.AdminQueueBulkAction)
 	protected.Post("/admin/backups", platformMW[0], platformMW[1], r.h.CreateBackup)
 	protected.Post("/admin/backups/now", platformMW[0], platformMW[1], r.h.PostBackupNow)
 	protected.Post("/admin/backups/schedule", platformMW[0], platformMW[1], r.h.SetBackupSchedule)
@@ -1422,6 +1689,109 @@ func (r *Router) setupRoutes() {
 	protected.Patch("/platform/organizations/:id", platformMW[0], platformMW[1], r.h.UpdateOrganization)
 	protected.Post("/platform/organizations/:id/active", platformMW[0], platformMW[1], r.h.SetOrganizationActive)
 	protected.Get("/platform/organizations/:id/detail", platformMW[0], platformMW[1], r.h.GetOrganizationDetail)
+
+	// ── Disaster Recovery (Milestone 13) — coordinated backup/restore
+	// on top of the existing internal/backup mechanics and restorecoord
+	// restart/rollback lifecycle. Platform-admin only, CSRF-protected
+	// (platformMW carries CSRF for every route registered with it).
+	protected.Get("/dr/readiness", platformMW[0], platformMW[1], r.h.GetDRReadiness)
+	protected.Get("/dr/drills", platformMW[0], platformMW[1], r.h.GetDRDrills)
+	protected.Post("/dr/drills", platformMW[0], platformMW[1], r.h.PostDRDrill)
+	protected.Post("/dr/backup", platformMW[0], platformMW[1], r.h.PostDRCoordinatedBackup)
+	protected.Post("/dr/backups/:id/restore", platformMW[0], platformMW[1], r.h.PostDRCoordinatedRestore)
+	protected.Get("/dr/operations", platformMW[0], platformMW[1], r.h.GetDROperationHistory)
+	protected.Get("/dr/operations/:job_id", platformMW[0], platformMW[1], r.h.GetDROperationStatus)
+
+	// ── Retention / legal hold / purge (Milestone 14) ──────────────
+	protected.Post("/retention/policies", platformMW[0], platformMW[1], r.h.PostRetentionPolicy)
+	protected.Get("/retention/policies/effective", platformMW[0], platformMW[1], r.h.GetRetentionEffectivePolicy)
+	protected.Post("/retention/legal-holds", platformMW[0], platformMW[1], r.h.PostRetentionLegalHold)
+	protected.Get("/retention/legal-holds", platformMW[0], platformMW[1], r.h.GetRetentionLegalHolds)
+	protected.Post("/retention/legal-holds/:id/release", platformMW[0], platformMW[1], r.h.PostRetentionLegalHoldRelease)
+	protected.Post("/retention/purge/plan", platformMW[0], platformMW[1], r.h.PostRetentionPurgePlan)
+	protected.Post("/retention/purge/execute", platformMW[0], platformMW[1], r.h.PostRetentionPurgeExecute)
+	protected.Post("/retention/mailboxes/:id/recover", platformMW[0], platformMW[1], r.h.PostRetentionRecoverMailbox)
+	protected.Get("/retention/custody", platformMW[0], platformMW[1], r.h.GetRetentionCustody)
+
+	// ── Signed update-artifact verification + staged lifecycle
+	// (Milestone 13). Independent of the legacy /update/* routes above
+	// (version check/changelog/systemd-oneshot runtime update) — this
+	// adds cryptographic verification and staging; apply/rollback only
+	// hand off to an external coordinator, never restart in-process.
+	protected.Post("/updates/artifacts", platformMW[0], platformMW[1], r.h.PostUpdateArtifact)
+	protected.Get("/updates/artifacts/history", platformMW[0], platformMW[1], r.h.GetUpdateArtifactHistory)
+	protected.Get("/updates/artifacts/:id", platformMW[0], platformMW[1], r.h.GetUpdateArtifactStatus)
+	protected.Post("/updates/artifacts/:id/apply", platformMW[0], platformMW[1], r.h.PostUpdateArtifactApply)
+	protected.Post("/updates/artifacts/:id/rollback", platformMW[0], platformMW[1], r.h.PostUpdateArtifactRollback)
+	protected.Get("/updates/operations/:job_id", platformMW[0], platformMW[1], r.h.GetUpdateOperationStatus)
+
+	// ── Incident management (Milestone 16, platform-only) ──────────
+	protected.Post("/incidents", platformMW[0], platformMW[1], r.h.CreateIncident)
+	protected.Get("/incidents", platformMW[0], platformMW[1], r.h.ListIncidents)
+	protected.Get("/incidents/:id", platformMW[0], platformMW[1], r.h.GetIncident)
+	protected.Patch("/incidents/:id", platformMW[0], platformMW[1], r.h.UpdateIncident)
+	protected.Get("/incidents/:id/timeline", platformMW[0], platformMW[1], r.h.GetIncidentTimeline)
+
+	// ── Support access (Milestone 16, platform-only) ───────────────
+	protected.Post("/platform/support/grants", platformMW[0], platformMW[1], r.h.CreateSupportAccessGrant)
+	protected.Get("/platform/support/grants", platformMW[0], platformMW[1], r.h.ListSupportAccessGrants)
+	protected.Get("/platform/support/grants/:id", platformMW[0], platformMW[1], r.h.GetSupportAccessGrant)
+	protected.Post("/platform/support/grants/:id/activate", platformMW[0], platformMW[1], r.h.ActivateSupportAccessGrant)
+	protected.Post("/platform/support/grants/:id/revoke", platformMW[0], platformMW[1], r.h.RevokeSupportAccessGrant)
+
+	// ── Support-access enforcement (Milestone 16) ─────────────────
+	// These routes demonstrate the support-access middleware enforcing
+	// tenant binding, scope, expiry, and revocation for a support
+	// operator accessing tenant-scoped resources.
+	// ── Runtime capability endpoint (Milestone 16, platform-only) ─
+	protected.Get("/platform/capabilities", platformMW[0], platformMW[1], r.h.GetCapabilities)
+
+	// ── Configuration truth model (Milestone 16, platform-only) ────
+	protected.Get("/platform/config", platformMW[0], platformMW[1], r.h.ListConfigurationSettings)
+	protected.Get("/platform/config/:key", platformMW[0], platformMW[1], r.h.GetConfigurationSetting)
+	protected.Patch("/platform/config/:key", platformMW[0], platformMW[1], r.h.MutateConfigurationSetting)
+
+	// ── Platform import endpoints (Milestone 16 Phase 4B) ───────
+	protected.Get("/platform/imports", platformMW[0], platformMW[1], r.h.ListImports)
+	protected.Get("/platform/imports/:id", platformMW[0], platformMW[1], r.h.GetImport)
+	protected.Get("/platform/imports/:id/report", platformMW[0], platformMW[1], r.h.GetImportReport)
+	protected.Post("/platform/imports", platformMW[0], platformMW[1], r.h.CreateImport)
+	protected.Post("/platform/imports/:id/validate", platformMW[0], platformMW[1], r.h.ValidateImport)
+	protected.Post("/platform/imports/:id/execute", platformMW[0], platformMW[1], r.h.ExecuteImport)
+	protected.Post("/platform/imports/:id/resume", platformMW[0], platformMW[1], r.h.ResumeImport)
+	protected.Post("/platform/imports/:id/cancel", platformMW[0], platformMW[1], r.h.CancelImport)
+	protected.Post("/platform/imports/:id/compensate", platformMW[0], platformMW[1], r.h.CompensateImport)
+
+	protected.Post("/webhooks/subscriptions", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermAPIKeysWrite), r.h.CreateWebhookSubscription)
+	protected.Get("/webhooks/subscriptions", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermAPIKeysRead), r.h.ListWebhookSubscriptions)
+	protected.Get("/webhooks/subscriptions/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermAPIKeysRead), r.h.GetWebhookSubscription)
+	protected.Patch("/webhooks/subscriptions/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermAPIKeysWrite), r.h.UpdateWebhookSubscription)
+	protected.Post("/webhooks/subscriptions/:id/disable", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermAPIKeysWrite), r.h.DisableWebhookSubscription)
+	protected.Delete("/webhooks/subscriptions/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermAPIKeysWrite), r.h.DeleteWebhookSubscription)
+	protected.Get("/webhooks/subscriptions/:id/history", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermAPIKeysRead), r.h.GetWebhookDeliveryHistory)
+	protected.Post("/webhooks/subscriptions/:id/rotate-secret", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermAPIKeysWrite), r.h.RotateWebhookSecret)
+	protected.Post("/webhooks/subscriptions/:id/reactivate", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermAPIKeysWrite), r.h.ReactivateWebhookSubscription)
+	protected.Get("/webhooks/deliveries/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermAPIKeysRead), r.h.GetWebhookDelivery)
+	protected.Post("/webhooks/deliveries/:id/replay", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermAPIKeysWrite), r.h.ReplayWebhookDelivery)
+	protected.Post("/webhooks/deliveries/:id/retry", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermAPIKeysWrite), r.h.RetryWebhookDelivery)
+
+	protected.Post("/automation/jobs", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermJobsWrite), r.h.SubmitTenantAutomationJob)
+	protected.Get("/automation/jobs", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermJobsRead), r.h.ListTenantAutomationJobs)
+	protected.Get("/automation/jobs/:id", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermJobsRead), r.h.GetTenantAutomationJob)
+	protected.Post("/automation/jobs/:id/cancel", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermJobsWrite), r.h.CancelTenantAutomationJob)
+	protected.Post("/automation/jobs/:id/retry", tenantCompatMW[0], tenantCompatMW[1], tenantCompatMW[2], authrbac.Require(authrbac.PermJobsWrite), r.h.RetryTenantAutomationJob)
+
+	protected.Post("/platform/automation/jobs", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermJobsWrite), r.h.SubmitPlatformAutomationJob)
+	protected.Get("/platform/automation/jobs", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermJobsRead), r.h.ListPlatformAutomationJobs)
+	protected.Get("/platform/automation/jobs/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermJobsRead), r.h.GetPlatformAutomationJob)
+	protected.Post("/platform/automation/jobs/:id/cancel", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermJobsWrite), r.h.CancelPlatformAutomationJob)
+	protected.Post("/platform/automation/jobs/:id/retry", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermJobsWrite), r.h.RetryPlatformAutomationJob)
+
+	// ── Platform billing balances/adjustments (Milestone 15) ───────
+	protected.Get("/platform/billing/tenants/:tenant_id/balance", platformMW[0], platformMW[1], r.h.GetPlatformBillingBalance)
+	protected.Post("/platform/billing/tenants/:tenant_id/adjustments", platformMW[0], platformMW[1], r.h.PostPlatformBillingAdjustment)
+	protected.Get("/platform/billing/tenants/:tenant_id/adjustments", platformMW[0], platformMW[1], r.h.GetPlatformBillingAdjustments)
+	protected.Get("/platform/billing/tenants/:tenant_id/reconciliation", platformMW[0], platformMW[1], r.h.GetPlatformBillingReconciliation)
 
 	// Monitoring v1: resolve an alert (CSRF-protected, admin role).
 	protected.Post("/monitoring/alerts/:id/resolve", platformMW[0], platformMW[1], r.h.PostMonitoringAlertResolve)

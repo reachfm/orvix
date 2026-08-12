@@ -28,24 +28,37 @@ import (
 	"github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/billing"
+	"github.com/orvix/orvix/internal/capability"
 	"github.com/orvix/orvix/internal/config"
+	"github.com/orvix/orvix/internal/configtruth"
 	"github.com/orvix/orvix/internal/coremail"
+	"github.com/orvix/orvix/internal/coremail/delivery"
 	"github.com/orvix/orvix/internal/coremail/push"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
 	"github.com/orvix/orvix/internal/customerdomain"
 	"github.com/orvix/orvix/internal/dbdialect"
 	"github.com/orvix/orvix/internal/dnsops"
+	"github.com/orvix/orvix/internal/incident"
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
 	"github.com/orvix/orvix/internal/observability"
+	platformbilling "github.com/orvix/orvix/internal/platform/billing"
+	"github.com/orvix/orvix/internal/platform/bulkprovision"
+	"github.com/orvix/orvix/internal/platform/cluster"
+	"github.com/orvix/orvix/internal/platform/importer"
+	platformjobs "github.com/orvix/orvix/internal/platform/jobs"
+	"github.com/orvix/orvix/internal/platform/relay"
+	"github.com/orvix/orvix/internal/platform/retention"
 	"github.com/orvix/orvix/internal/ruler"
 	"github.com/orvix/orvix/internal/runtime"
 	settingsbridge "github.com/orvix/orvix/internal/settings/bridge"
+	"github.com/orvix/orvix/internal/supportaccess"
 	"github.com/orvix/orvix/internal/tlsmgmt"
 	"github.com/orvix/orvix/internal/trustmgmt"
 	"github.com/orvix/orvix/internal/updater"
+	"github.com/orvix/orvix/internal/webhooks"
 	"github.com/orvix/orvix/internal/webmailmgmt"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/argon2"
@@ -83,6 +96,22 @@ type Handler struct {
 	// parallel pipeline. Set via SetQueueEngine at router
 	// construction time.
 	queueEngine *queue.QueueEngine
+	// historyRepo is the immutable delivery-attempt history store
+	// (Milestone 8), set via SetAttemptHistoryRepo.
+	historyRepo delivery.AttemptHistoryRepository
+
+	// incidentSvc is lazily initialized by h.incidentService().
+	incidentSvc *incident.Service
+	// supportAccessSvc is lazily initialized by h.supportAccessService().
+	supportAccessSvc *supportaccess.Service
+	// webhookSvc is lazily initialized by h.webhookService().
+	webhookSvc *webhooks.Service
+	jobSvc     *platformjobs.Service
+	jobWorker  *platformjobs.Worker
+	// capabilitySvc is lazily initialized by h.capabilityService().
+	capabilitySvc *capability.Service
+	// configTruthSvc is lazily initialized by h.configTruthService().
+	configTruthSvc *configtruth.Service
 
 	// updateSvc is the process-wide Update Management v1 service.
 	// It is set once at router construction (see
@@ -92,6 +121,11 @@ type Handler struct {
 	// service per request would defeat the single-flight
 	// guarantee. This field is read by h.updateService().
 	updateSvc *updater.RuntimeService
+
+	// hasUpdater reports whether the update coordinator is installed.
+	hasUpdater bool
+	// hasDR reports whether disaster-recovery coordination is available.
+	hasDR bool
 
 	// updateSvcOnce ensures the schema is created exactly once
 	// for the lifetime of the Handler, even if updateService()
@@ -192,6 +226,11 @@ type Handler struct {
 	domainAdminSvc   *domainadminsvc.Service
 	platformAdminSvc *platformsvc.PlatformService
 	dashboardSvc     *dashboardsvc.DashboardService
+	bulkProvisionSvc *bulkprovision.Service
+	relaySvc         *relay.Service
+	clusterSvc       *cluster.Service
+	retentionSvc     *retention.Service
+	platformBillSvc  *platformbilling.Service
 
 	billingSvc   *billing.Service
 	usageSvc     *billing.UsageService
@@ -205,6 +244,8 @@ type Handler struct {
 	paymentProvider  billing.PaymentProvider
 	sendEnforcer     *billing.SendEnforcer
 	mailSender       MailSender
+
+	importSvc *importer.Service
 }
 
 // MailSender sends transactional emails.
@@ -401,6 +442,96 @@ func (h *Handler) SetDomainAdminService(s *domainadminsvc.Service) {
 	h.domainAdminSvc = s
 }
 
+func (h *Handler) SetWebhookService(s *webhooks.Service) { h.webhookSvc = s }
+
+func (h *Handler) WebhookService() *webhooks.Service { return h.webhookSvc }
+
+func (h *Handler) CustomerDomainService() *customerdomain.Service { return h.customerDomainSvc }
+
+func (h *Handler) SetAutomationJobs(service *platformjobs.Service, worker *platformjobs.Worker) {
+	h.jobSvc = service
+	h.jobWorker = worker
+}
+
+func (h *Handler) StartAutomationWorker(ctx context.Context) {
+	if h.jobWorker == nil {
+		return
+	}
+	go func() {
+		if err := h.jobWorker.Run(ctx); err != nil && ctx.Err() == nil {
+			h.logger.Error("automation jobs worker stopped", zap.Error(err))
+		}
+	}()
+}
+
+func (h *Handler) StartWebhookWorker(ctx context.Context, interval time.Duration) {
+	if h.webhookSvc == nil {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := h.webhookSvc.ProcessOutbox(ctx, 50); err != nil {
+					h.logger.Error("webhook outbox processing failed", zap.Error(err))
+				}
+				if err := h.webhookSvc.ProcessPendingDeliveries(ctx, 50); err != nil {
+					h.logger.Error("webhook delivery processing failed", zap.Error(err))
+				}
+			}
+		}
+	}()
+}
+
+// DomainAdminService returns the wired domain admin service, or nil if
+// it was never set. Used by router.go to wire the TLS service into it
+// after both have been constructed, without changing construction
+// order or NewService's signature.
+func (h *Handler) DomainAdminService() *domainadminsvc.Service {
+	return h.domainAdminSvc
+}
+
+// OrganizationAdminService returns the wired organization admin service.
+func (h *Handler) OrganizationAdminService() *orgadminsvc.Service {
+	return h.orgAdminSvc
+}
+
+// MailboxAdminService returns the wired mailbox admin service.
+func (h *Handler) MailboxAdminService() *mailboxadminsvc.Service {
+	return h.mailboxAdminSvc
+}
+
+// SetBulkProvisionService wires the bulk mailbox provisioning service.
+func (h *Handler) SetBulkProvisionService(s *bulkprovision.Service) {
+	h.bulkProvisionSvc = s
+}
+
+// SetRelayService wires the outbound relay control plane service.
+func (h *Handler) SetRelayService(s *relay.Service) {
+	h.relaySvc = s
+}
+
+// SetClusterService wires the cluster node registry service.
+func (h *Handler) SetClusterService(s *cluster.Service) {
+	h.clusterSvc = s
+}
+
+// SetRetentionService wires the retention/legal-hold/compliance service.
+func (h *Handler) SetRetentionService(s *retention.Service) {
+	h.retentionSvc = s
+}
+
+// SetPlatformBillingService wires the platform-level balances/manual
+// adjustments service (Milestone 15) — distinct from the pre-existing
+// internal/billing subscription/invoice package.
+func (h *Handler) SetPlatformBillingService(s *platformbilling.Service) {
+	h.platformBillSvc = s
+}
+
 // SetPlatformAdminService wires the platform admin service.
 func (h *Handler) SetPlatformAdminService(s *platformsvc.PlatformService) {
 	h.platformAdminSvc = s
@@ -517,7 +648,7 @@ func (h *Handler) issueLoginSession(c fiber.Ctx, userID uint, role auth.Role, em
 	if role == "" {
 		return fmt.Errorf("issue login session: role is required")
 	}
-	token, err := h.auth.GenerateOpaqueSession(userID, role, email)
+	token, err := h.auth.GenerateOpaqueSession(userID, role, email, c.IP(), c.Get("User-Agent"))
 	if err != nil {
 		return err
 	}
@@ -716,7 +847,7 @@ func (h *Handler) Login(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authentication failed"})
 	}
 
-	refreshToken, expiresAt, err := h.auth.GenerateRefreshToken(userID, accessJTI)
+	refreshToken, expiresAt, err := h.auth.GenerateRefreshToken(userID, accessJTI, c.IP(), c.Get("User-Agent"))
 	if err != nil {
 		h.logger.Error("failed to generate refresh token", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authentication failed"})
@@ -3099,23 +3230,42 @@ func (h *Handler) ListFirewallLogs(c fiber.Ctx) error {
 	return c.JSON(logs)
 }
 
-// ListModules returns registered modules.
+// moduleHealthReporter is an optional capability a registered module
+// may implement to report its OWN real runtime health. ListModules
+// checks for it via a type assertion rather than assuming every
+// module is healthy — a module that doesn't implement it reports
+// "unknown", never a fabricated "active".
+type moduleHealthReporter interface {
+	HealthStatus() (status, message string)
+}
+
+// ListModules returns registered modules with status DERIVED from
+// each module's actual runtime health when available, closing the
+// "module status must be derived from actual runtime/module state,
+// not a static always-active list" defect: this previously hardcoded
+// status="active" for every module regardless of whether it was
+// actually healthy, degraded, or had failed to initialize.
 func (h *Handler) ListModules(c fiber.Ctx) error {
 	type moduleInfo struct {
 		ID      string `json:"id"`
 		Version string `json:"version"`
 		Status  string `json:"status"`
+		Message string `json:"message,omitempty"`
 	}
-	var modules []moduleInfo
+	var mods []moduleInfo
 	for _, m := range h.registry.All() {
-		status := "active"
-		modules = append(modules, moduleInfo{
+		status, message := "unknown", ""
+		if hr, ok := m.(moduleHealthReporter); ok {
+			status, message = hr.HealthStatus()
+		}
+		mods = append(mods, moduleInfo{
 			ID:      m.ID(),
 			Version: m.Version(),
 			Status:  status,
+			Message: message,
 		})
 	}
-	return c.JSON(modules)
+	return c.JSON(mods)
 }
 
 // GetLicense returns the current license status.

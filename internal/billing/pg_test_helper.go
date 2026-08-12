@@ -29,6 +29,23 @@ func newTestDB(t testCleanuper) *sql.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// modernc.org/sqlite's :memory: DSN gives each new pooled connection
+	// its own separate, empty in-memory database unless shared-cache mode
+	// is used — with MaxOpenConns left unbounded, a test that runs enough
+	// concurrent goroutines forces the pool to open more than one
+	// connection, and writers on a later connection silently never see
+	// rows a schema-setup/earlier writer inserted on the first one. This
+	// surfaced as a real test failure (TestUsageCounter_
+	// ConcurrentReservesNeverExceedLimit — 20 concurrent goroutines got
+	// far fewer successes than the real constraint allowed, because most
+	// of them landed on a connection that had never seen EnsureCounter's
+	// insert). SQLite only supports one writer at a time regardless, so
+	// forcing a single connection matches both the Postgres branch below
+	// and the database's real concurrency model — it does not change
+	// what any test actually verifies, it makes the harness correctly
+	// exercise the database-level atomicity/locking the code under test
+	// depends on.
+	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { db.Close() })
 	if err := CreateTables(db); err != nil {
 		t.Fatal(err)

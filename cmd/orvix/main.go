@@ -141,6 +141,10 @@ func main() {
 			// Root-only operator recovery: `orvix admin reset-password`
 			// and `orvix admin recover`. See admin_recovery.go.
 			os.Exit(adminCommand(os.Args[2:]))
+		case "platform":
+			// Root-only platform operations: `orvix platform orgs list`,
+			// `orvix platform jobs get`, etc.
+			os.Exit(platformCommand(os.Args[2:]))
 		case "serve":
 			// fall through to normal startup
 			_ = 0

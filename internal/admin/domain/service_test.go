@@ -8,9 +8,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/coremail/dkim"
+	"github.com/orvix/orvix/internal/tlsmgmt"
 	_ "modernc.org/sqlite"
 )
 
@@ -39,6 +41,7 @@ func newDomainTestDB(t *testing.T) *sql.DB {
 		dkim_enabled INTEGER DEFAULT 0,
 		dkim_selector TEXT,
 		dmarc_enabled INTEGER DEFAULT 0,
+		mail_access_mode TEXT NOT NULL DEFAULT 'internal_external',
 		created_at DATETIME,
 		updated_at DATETIME,
 		deleted_at DATETIME
@@ -247,6 +250,7 @@ func TestDomainMutationRollsBackWhenAuditWriteFails(t *testing.T) {
 		dkim_enabled INTEGER DEFAULT 0,
 		dkim_selector TEXT,
 		dmarc_enabled INTEGER DEFAULT 0,
+		mail_access_mode TEXT NOT NULL DEFAULT 'internal_external',
 		created_at DATETIME,
 		updated_at DATETIME,
 		deleted_at DATETIME
@@ -741,5 +745,254 @@ func TestDKIMResultNeverSerializesPrivateKey(t *testing.T) {
 		if !want[k] {
 			t.Errorf("unexpected field %q in DKIM response: %s", k, payload)
 		}
+	}
+}
+
+func TestRevokeDKIM_DisablesButPreservesConfigRow(t *testing.T) {
+	db, svc := newDomainWithDKIMTestDB(t)
+	ctx := context.Background()
+	d, err := svc.CreateDomain(ctx, CreateDomainRequest{Name: "revoke.example.test"}, 5)
+	if err != nil {
+		t.Fatalf("create domain: %v", err)
+	}
+	if _, err := svc.GenerateDKIM(ctx, d.ID, 5, "mail"); err != nil {
+		t.Fatalf("generate dkim: %v", err)
+	}
+
+	if err := svc.RevokeDKIM(ctx, d.ID, 5); err != nil {
+		t.Fatalf("revoke dkim: %v", err)
+	}
+
+	got, _ := svc.GetDomain(ctx, d.ID, 5)
+	if got.DKIMEnabled {
+		t.Fatal("expected dkim_enabled to be false after revoke")
+	}
+
+	cfg, err := dkim.NewSQLRepo(db).GetByDomain(ctx, "revoke.example.test", nil)
+	if err != nil {
+		t.Fatalf("get dkim config: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("expected the dkim config row to still exist after revoke (not deleted)")
+	}
+	if cfg.Enabled {
+		t.Fatal("expected the dkim config row itself to be marked disabled")
+	}
+}
+
+func TestRevokeDKIM_NotConfiguredReturnsTypedError(t *testing.T) {
+	_, svc := newDomainWithDKIMTestDB(t)
+	ctx := context.Background()
+	d, _ := svc.CreateDomain(ctx, CreateDomainRequest{Name: "norevoke.example.test"}, 5)
+
+	err := svc.RevokeDKIM(ctx, d.ID, 5)
+	if err != ErrDKIMNotConfigured {
+		t.Fatalf("expected ErrDKIMNotConfigured, got %v", err)
+	}
+}
+
+func TestDKIMSelectorHistory_RecordsGenerateRotateRevokeInOrder(t *testing.T) {
+	_, svc := newDomainWithDKIMTestDB(t)
+	ctx := context.Background()
+	d, _ := svc.CreateDomain(ctx, CreateDomainRequest{Name: "history.example.test"}, 5)
+
+	if _, err := svc.GenerateDKIM(ctx, d.ID, 5, "mail1"); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if _, err := svc.RotateDKIM(ctx, d.ID, 5, "mail2"); err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	if err := svc.RevokeDKIM(ctx, d.ID, 5); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+
+	hist, err := svc.ListDKIMHistory(ctx, d.ID, 5)
+	if err != nil {
+		t.Fatalf("list history: %v", err)
+	}
+	if len(hist) != 3 {
+		t.Fatalf("expected 3 history entries, got %d: %#v", len(hist), hist)
+	}
+	// Newest first.
+	if hist[0].Action != "revoked" || hist[0].Selector != "mail2" {
+		t.Fatalf("entry 0 = %#v, want revoked/mail2", hist[0])
+	}
+	if hist[1].Action != "rotated" || hist[1].Selector != "mail2" {
+		t.Fatalf("entry 1 = %#v, want rotated/mail2", hist[1])
+	}
+	if hist[2].Action != "generated" || hist[2].Selector != "mail1" {
+		t.Fatalf("entry 2 = %#v, want generated/mail1", hist[2])
+	}
+}
+
+func TestDKIMSelectorHistory_UnknownDomainIsNotFound(t *testing.T) {
+	_, svc := newDomainWithDKIMTestDB(t)
+	ctx := context.Background()
+	_, err := svc.ListDKIMHistory(ctx, 99999, 5)
+	if err != ErrDomainNotFound {
+		t.Fatalf("expected ErrDomainNotFound, got %v", err)
+	}
+}
+
+// fakeTLSSource is a minimal in-memory tlsStatusSource for testing
+// DomainTLSStatus without depending on internal/tlsmgmt's real
+// filesystem/database-backed certificate loading.
+type fakeTLSSource struct {
+	uploaded   []tlsmgmt.TLSCertificate
+	configured []tlsmgmt.TLSCertificate
+}
+
+func (f *fakeTLSSource) LoadCertificates(ctx context.Context) ([]tlsmgmt.TLSCertificate, error) {
+	return f.configured, nil
+}
+
+func (f *fakeTLSSource) ListUploadedCertificates(ctx context.Context, tenantID int64) ([]tlsmgmt.TLSCertificate, error) {
+	return f.uploaded, nil
+}
+
+func TestDomainTLSStatus_NoTLSServiceWiredReportsUnconfigured(t *testing.T) {
+	_, svc := newDomainWithDKIMTestDB(t)
+	ctx := context.Background()
+	d, _ := svc.CreateDomain(ctx, CreateDomainRequest{Name: "notls.example.test"}, 5)
+
+	res, err := svc.DomainTLSStatus(ctx, d.ID, 5)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if res.Configured {
+		t.Fatal("expected Configured=false with no TLS service wired")
+	}
+	if res.Source != "none" {
+		t.Fatalf("expected source none, got %q", res.Source)
+	}
+}
+
+func TestDomainTLSStatus_MatchesUploadedCertByExactCommonName(t *testing.T) {
+	_, svc := newDomainWithDKIMTestDB(t)
+	ctx := context.Background()
+	d, _ := svc.CreateDomain(ctx, CreateDomainRequest{Name: "exact.example.test"}, 5)
+
+	svc.SetTLSService(&fakeTLSSource{
+		uploaded: []tlsmgmt.TLSCertificate{
+			{CommonName: "exact.example.test", Status: tlsmgmt.CertActive, DaysRemaining: 60, NotAfter: time.Now().Add(60 * 24 * time.Hour)},
+		},
+	})
+
+	res, err := svc.DomainTLSStatus(ctx, d.ID, 5)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if !res.Configured || res.Source != "uploaded" {
+		t.Fatalf("expected uploaded match, got %#v", res)
+	}
+	if res.RenewalRequired {
+		t.Fatal("expected RenewalRequired=false for an active cert")
+	}
+}
+
+func TestDomainTLSStatus_MatchesWildcardSAN(t *testing.T) {
+	_, svc := newDomainWithDKIMTestDB(t)
+	ctx := context.Background()
+	d, _ := svc.CreateDomain(ctx, CreateDomainRequest{Name: "mail.wild.example.test"}, 5)
+
+	svc.SetTLSService(&fakeTLSSource{
+		configured: []tlsmgmt.TLSCertificate{
+			{CommonName: "wild.example.test", SANs: []string{"*.wild.example.test"}, Status: tlsmgmt.CertWarning, DaysRemaining: 5},
+		},
+	})
+
+	res, err := svc.DomainTLSStatus(ctx, d.ID, 5)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if !res.Configured || res.Source != "configured" {
+		t.Fatalf("expected wildcard SAN match via configured cert, got %#v", res)
+	}
+	if !res.RenewalRequired {
+		t.Fatal("expected RenewalRequired=true for a warning-status cert")
+	}
+}
+
+func TestDomainTLSStatus_WildcardNeverMatchesBareApex(t *testing.T) {
+	_, svc := newDomainWithDKIMTestDB(t)
+	ctx := context.Background()
+	d, _ := svc.CreateDomain(ctx, CreateDomainRequest{Name: "wild.example.test"}, 5)
+
+	svc.SetTLSService(&fakeTLSSource{
+		configured: []tlsmgmt.TLSCertificate{
+			{CommonName: "other.test", SANs: []string{"*.wild.example.test"}, Status: tlsmgmt.CertActive},
+		},
+	})
+
+	res, err := svc.DomainTLSStatus(ctx, d.ID, 5)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if res.Configured {
+		t.Fatal("expected a wildcard SAN to never match the bare apex domain")
+	}
+}
+
+func TestDomainTLSStatus_UnknownDomainIsNotFound(t *testing.T) {
+	_, svc := newDomainWithDKIMTestDB(t)
+	ctx := context.Background()
+	_, err := svc.DomainTLSStatus(ctx, 99999, 5)
+	if err != ErrDomainNotFound {
+		t.Fatalf("expected ErrDomainNotFound, got %v", err)
+	}
+}
+
+func TestMailAccessMode_DefaultsToInternalExternal(t *testing.T) {
+	_, svc := newDomainWithDKIMTestDB(t)
+	ctx := context.Background()
+	d, _ := svc.CreateDomain(ctx, CreateDomainRequest{Name: "defaultmode.example.test"}, 5)
+
+	mode, err := svc.GetMailAccessMode(ctx, d.ID, 5)
+	if err != nil {
+		t.Fatalf("get mode: %v", err)
+	}
+	if mode != MailAccessInternalExternal {
+		t.Fatalf("expected default internal_external, got %q", mode)
+	}
+}
+
+func TestMailAccessMode_SetAndGetRoundTrip(t *testing.T) {
+	_, svc := newDomainWithDKIMTestDB(t)
+	ctx := context.Background()
+	d, _ := svc.CreateDomain(ctx, CreateDomainRequest{Name: "setmode.example.test"}, 5)
+
+	if err := svc.SetMailAccessMode(ctx, d.ID, 5, "internal_only"); err != nil {
+		t.Fatalf("set mode: %v", err)
+	}
+	mode, err := svc.GetMailAccessMode(ctx, d.ID, 5)
+	if err != nil {
+		t.Fatalf("get mode: %v", err)
+	}
+	if mode != MailAccessInternalOnly {
+		t.Fatalf("expected internal_only, got %q", mode)
+	}
+}
+
+func TestMailAccessMode_InvalidValueRejected(t *testing.T) {
+	_, svc := newDomainWithDKIMTestDB(t)
+	ctx := context.Background()
+	d, _ := svc.CreateDomain(ctx, CreateDomainRequest{Name: "badmode.example.test"}, 5)
+
+	err := svc.SetMailAccessMode(ctx, d.ID, 5, "totally-invalid")
+	if err != ErrInvalidMailAccessMode {
+		t.Fatalf("expected ErrInvalidMailAccessMode, got %v", err)
+	}
+}
+
+func TestMailAccessMode_CrossTenantIsNotFound(t *testing.T) {
+	_, svc := newDomainWithDKIMTestDB(t)
+	ctx := context.Background()
+	d, _ := svc.CreateDomain(ctx, CreateDomainRequest{Name: "tenantiso.example.test"}, 5)
+
+	if err := svc.SetMailAccessMode(ctx, d.ID, 6, "internal_only"); err != ErrDomainNotFound {
+		t.Fatalf("expected ErrDomainNotFound for a different tenant, got %v", err)
+	}
+	if _, err := svc.GetMailAccessMode(ctx, d.ID, 6); err != ErrDomainNotFound {
+		t.Fatalf("expected ErrDomainNotFound for a different tenant, got %v", err)
 	}
 }

@@ -41,14 +41,14 @@ func sessionRevocationSuite(t *testing.T, a *Authenticator) {
 		if err != nil {
 			t.Fatalf("issue A: %v", err)
 		}
-		if _, _, err := a.GenerateRefreshToken(5, jtiA); err != nil {
+		if _, _, err := a.GenerateRefreshToken(5, jtiA, "", ""); err != nil {
 			t.Fatalf("refresh A: %v", err)
 		}
 		tokenB, jtiB, _, err := a.GenerateAccessTokenWithJTI(5, RoleTenantAdmin)
 		if err != nil {
 			t.Fatalf("issue B: %v", err)
 		}
-		if _, _, err := a.GenerateRefreshToken(5, jtiB); err != nil {
+		if _, _, err := a.GenerateRefreshToken(5, jtiB, "", ""); err != nil {
 			t.Fatalf("refresh B: %v", err)
 		}
 

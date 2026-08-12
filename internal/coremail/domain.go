@@ -15,6 +15,33 @@ const (
 	DomainDeleted   DomainStatus = "deleted"
 )
 
+// MailAccessMode governs whether a domain may exchange mail with the
+// outside world. It is enforced in the real SMTP inbound/outbound
+// delivery paths (internal/coremail/smtp/commands.go handleRCPT), not
+// merely surfaced in CRUD/API responses.
+type MailAccessMode string
+
+const (
+	// MailAccessInternalOnly permits local delivery between mailboxes
+	// on domains hosted by this platform only. Inbound mail from an
+	// external (non-local) sender and outbound relay to an external
+	// recipient are both rejected.
+	MailAccessInternalOnly MailAccessMode = "internal_only"
+	// MailAccessInternalExternal permits local delivery plus normal
+	// inbound receipt from and outbound relay to external domains —
+	// the default, unrestricted mode.
+	MailAccessInternalExternal MailAccessMode = "internal_external"
+)
+
+func (m MailAccessMode) IsValid() bool {
+	switch m {
+	case MailAccessInternalOnly, MailAccessInternalExternal:
+		return true
+	default:
+		return false
+	}
+}
+
 // Domain represents a mail domain hosted by Orvix.
 // Enterprise fields support multi-tenant, reseller, licensing, and abuse tracking.
 type Domain struct {
@@ -69,4 +96,15 @@ type DomainRepository interface {
 	CountByTenant(ctx context.Context, tenantID uint, tx interface{}) (int64, error)
 	CountByReseller(ctx context.Context, resellerID uint, tx interface{}) (int64, error)
 	Exists(ctx context.Context, name string, tx interface{}) (bool, error)
+	// GetMailAccessMode is a narrow, dedicated read used on the SMTP
+	// hot path (handleRCPT, once per RCPT TO) — deliberately separate
+	// from the full GetByName/scanDomain path so the policy check
+	// stays a single indexed column read. Returns
+	// MailAccessInternalExternal (the safe default) when the domain
+	// has no explicit mode set, so pre-migration rows never fail
+	// closed against inbound/outbound mail unexpectedly.
+	GetMailAccessMode(ctx context.Context, name string, tx interface{}) (MailAccessMode, error)
+	// SetMailAccessMode updates the domain's access mode by ID,
+	// tenant-scoped so a caller cannot alter a domain it does not own.
+	SetMailAccessMode(ctx context.Context, id, tenantID uint, mode MailAccessMode, tx interface{}) error
 }

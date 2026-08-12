@@ -419,7 +419,7 @@ func (h *Handler) MFALoginVerify(c fiber.Ctx) error {
 		h.logger.Error("failed to issue login session", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authentication failed"})
 	}
-	refreshToken, expiresAt, err := h.auth.GenerateRefreshToken(userID, accessJTI)
+	refreshToken, expiresAt, err := h.auth.GenerateRefreshToken(userID, accessJTI, c.IP(), c.Get("User-Agent"))
 	if err != nil {
 		h.logger.Error("failed to generate refresh token", zap.Error(err))
 		return c.Status(500).JSON(fiber.Map{"error": "authentication failed"})
