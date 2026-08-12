@@ -180,21 +180,33 @@ var AllPermissions = []Permission{
 var rolePermissions = map[auth.Role]map[Permission]bool{
 	// ── Canonical roles ─────────────────────────────────────
 	// Platform Super Admin: PLATFORM permissions ONLY.
-	// PORTAL-SEPARATION-PHASE1 Phase 5 (PR#58): platform_super_admin
-	// governs the platform surface — mail queue, platform settings,
-	// backups, updater, license, monitoring, platform audit, firewall/
-	// modules (inline gates), platform organizations (cross-tenant list/
-	// update) and platform security. It intentionally does NOT hold any
-	// tenant-scoped permission (domains/mailboxes/users/aliases/groups/
-	// invitations/organizations write, billing, api-keys, ownership,
-	// tenant security, credentials/sessions). A platform_super_admin
-	// bootstrap row has NULL tenant_id, so tenant-scoped routes are
-	// unreachable via requireTenantContext regardless; this map keeps
-	// the RBAC boundary explicit rather than relying only on that
-	// middleware.
+	// PORTAL-SEPARATION-PHASE1 Phase 5 (PR#58) + Mail-Control enablement:
+	// platform_super_admin governs the platform surface — mail queue,
+	// cross-tenant mail control (domains/mailboxes/aliases/groups through
+	// the /platform/* routes with explicit target tenants), platform
+	// settings, backups, updater, license, monitoring, platform audit,
+	// firewall/modules (inline gates), platform organizations (cross-
+	// tenant list/update) and platform security. It intentionally does
+	// NOT hold any tenant-scoped route permission — the /platform/*
+	// routes it may call are platformMW-owned and every request must
+	// name an explicit target tenant; it is never treated as a tenant
+	// admin. A platform_super_admin bootstrap row has NULL tenant_id,
+	// so tenant-scoped routes remain unreachable via requireTenantContext
+	// regardless; this map keeps the RBAC boundary explicit rather than
+	// relying only on that middleware.
 	auth.RolePlatformSuperAdmin: {
 		// Platform mail queue.
 		PermQueueRead: true, PermQueueAction: true,
+		// Platform mail control (cross-tenant platform surface). These
+		// reuse the canonical domain/mailbox/alias/group permissions so
+		// route-level RBAC is uniform; the /platform/* routes they gate
+		// are platformMW-owned and require an explicit target tenant in
+		// every request — a platform_super_admin never acquires tenant
+		// identity implicitly.
+		PermDomainsRead: true, PermDomainsWrite: true,
+		PermMailboxesRead: true, PermMailboxesWrite: true,
+		PermAliasesRead: true, PermAliasesWrite: true,
+		PermGroupsRead: true, PermGroupsWrite: true,
 		// Platform settings.
 		PermSettingsRead: true, PermSettingsWrite: true,
 		// Platform backups.

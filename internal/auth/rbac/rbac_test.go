@@ -67,11 +67,15 @@ func TestHasPermission_Matrix(t *testing.T) {
 
 		// Platform Super Admin: PLATFORM permissions ONLY. PORTAL-
 		// SEPARATION-PHASE1 Phase 5 (PR#58) stripped tenant-scoped
-		// perms (domains/mailboxes/users/aliases/groups/invitations/
-		// organizations write, billing, api-keys, ownership, credentials,
-		// tenant sessions, tenant security, dashboard) from the PSA
-		// map. PSA rows have NULL tenant_id and cannot reach tenant-
-		// scoped routes; this map keeps the boundary explicit.
+		// perms from the PSA map. Mail-Control enablement grants the
+		// PSA the canonical domain/mailbox/alias/group permissions for
+		// the platform-owned /platform/* surface (explicit target tenant
+		// required per request); tenant-scoped ROUTE permissions
+		// (users, invitations, tenant org write, ownership, api-keys,
+		// billing, credentials, tenant sessions, tenant security,
+		// dashboard) remain absent. PSA rows have NULL tenant_id and
+		// cannot reach tenant-scoped routes; this map keeps the
+		// boundary explicit.
 		{auth.RolePlatformSuperAdmin, PermQueueRead, true},
 		{auth.RolePlatformSuperAdmin, PermQueueAction, true},
 		{auth.RolePlatformSuperAdmin, PermSettingsWrite, true},
@@ -81,11 +85,17 @@ func TestHasPermission_Matrix(t *testing.T) {
 		{auth.RolePlatformSuperAdmin, PermPlatformOrganizationsWrite, true},
 		{auth.RolePlatformSuperAdmin, PermPlatformSecurityRead, true},
 		{auth.RolePlatformSuperAdmin, PermPlatformSessionsRevoke, true},
-		{auth.RolePlatformSuperAdmin, PermDomainsWrite, false},
-		{auth.RolePlatformSuperAdmin, PermMailboxesWrite, false},
+		// Platform mail control (platform-owned /platform/* surface).
+		{auth.RolePlatformSuperAdmin, PermDomainsRead, true},
+		{auth.RolePlatformSuperAdmin, PermDomainsWrite, true},
+		{auth.RolePlatformSuperAdmin, PermMailboxesRead, true},
+		{auth.RolePlatformSuperAdmin, PermMailboxesWrite, true},
+		{auth.RolePlatformSuperAdmin, PermAliasesRead, true},
+		{auth.RolePlatformSuperAdmin, PermAliasesWrite, true},
+		{auth.RolePlatformSuperAdmin, PermGroupsRead, true},
+		{auth.RolePlatformSuperAdmin, PermGroupsWrite, true},
+		// Tenant-scoped ROUTE permissions remain absent for the PSA.
 		{auth.RolePlatformSuperAdmin, PermUsersWrite, false},
-		{auth.RolePlatformSuperAdmin, PermAliasesWrite, false},
-		{auth.RolePlatformSuperAdmin, PermGroupsWrite, false},
 		{auth.RolePlatformSuperAdmin, PermInvitationsWrite, false},
 		{auth.RolePlatformSuperAdmin, PermOrganizationsWrite, false},
 		{auth.RolePlatformSuperAdmin, PermOwnershipTransfer, false},

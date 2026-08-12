@@ -50,6 +50,7 @@ import (
 	"github.com/orvix/orvix/internal/platform/importer"
 	platformjobs "github.com/orvix/orvix/internal/platform/jobs"
 	"github.com/orvix/orvix/internal/platform/relay"
+	"github.com/orvix/orvix/internal/platform/mailcontrol"
 	"github.com/orvix/orvix/internal/platform/retention"
 	"github.com/orvix/orvix/internal/ruler"
 	"github.com/orvix/orvix/internal/runtime"
@@ -246,6 +247,8 @@ type Handler struct {
 	mailSender       MailSender
 
 	importSvc *importer.Service
+
+	mailControlSvc *mailcontrol.Service
 }
 
 // MailSender sends transactional emails.
