@@ -127,7 +127,12 @@ interface RequestOptions extends RequestInit {
   _csrfRetried?: boolean;
 }
 
-async function request<T>(path: string, options?: RequestOptions): Promise<T> {
+// Exported so feature modules under src/features/**/api.ts can perform
+// HTTP transport through this same CSRF/auth-aware client instead of
+// calling fetch() directly. A full relocation of this client into
+// shared/api/ is tracked as follow-up scope, not done in this change
+// to avoid a risky blind rewrite of every existing api.ts consumer.
+export async function request<T>(path: string, options?: RequestOptions): Promise<T> {
   const method = options?.method || "GET";
   const isMutation = isMutationMethod(method);
 
@@ -306,7 +311,7 @@ export const api = {
 
   // Dashboard
   getDashboard: () => request<any>("/enterprise/dashboard"),
-  getPlatformDashboard: () => request<any>("/platform/dashboard"),
+  // getPlatformDashboard moved to features/platform/overview/api.ts
 
   // Platform admin summary/users/firewall/modules (superadmin/admin scope,
   // distinct from the tenant-scoped /enterprise/* endpoints above)
@@ -341,19 +346,50 @@ export const api = {
     return request<any[]>(`/domains${qs ? "?" + qs : ""}`);
   },
 
-  // Platform organizations
-  listPlatformOrganizations: (search?: string, limit?: number, offset?: number) => {
-    const params = new URLSearchParams();
-    if (search) params.set("search", search);
-    if (limit !== undefined) params.set("limit", String(limit));
-    if (offset !== undefined) params.set("offset", String(offset));
-    const qs = params.toString();
-    return request<any>(`/platform/organizations${qs ? "?" + qs : ""}`);
-  },
-  createPlatformOrganization: (data: { name: string; slug: string; domain: string; plan?: string }) =>
-    request<any>("/platform/organizations", { method: "POST", body: JSON.stringify(data) }),
-  setPlatformOrganizationActive: (id: number, active: boolean, reason?: string) =>
-    request<any>(`/platform/organizations/${id}/active`, { method: "POST", body: JSON.stringify({ active, reason: reason || "" }) }),
+  // Platform organizations: moved to src/features/platform/organizations/
+  // (contract.ts/api.ts/queries.ts/mutations.ts) as the SOLID
+  // feature-directory pattern. createPlatformOrganization was removed
+  // outright — it called POST /platform/organizations, which is not a
+  // registered route (internal/api/router.go registers only GET on that
+  // path); it was also unused by any component. Organizations are
+  // created via tenant signup, not a platform-admin action — a real
+  // platform-initiated "create organization" capability does not exist
+  // in the backend today (MISSING_BACKEND_CAPABILITY, see the
+  // capability matrix). getPlatformOrganization (GET /platform/
+  // organizations/:id) was also unused — it returns an untyped
+  // map[string]interface{} from a different service than the typed
+  // detail endpoint the new feature module uses. updateOrganization
+  // (PATCH /platform/organizations/:id) is now wired to a real, typed
+  // "Edit organization" form (OrganizationEditForm.tsx) — see that
+  // feature's api.ts/mutations.ts.
+
+  // Mail Operations (queue admin) moved to
+  // features/platform/mail-operations/api.ts. listPlatformQueue
+  // (GET /queue, the legacy webmail-facing ListQueue handler) had no
+  // admin-console caller and is a different resource than the
+  // /admin/queue/* platform-admin endpoints the new feature uses.
+
+  // Reliability (Backups/Restore/Updates/Monitoring/Storage/Cluster)
+  // moved to features/platform/reliability/api.ts. getBackup (single),
+  // getChangelog, applyModuleUpdate, getMonitoringHealth, and
+  // getAdminRuntime were dead code (no UI caller) — getChangelog and
+  // applyModuleUpdate correspond to real, registered routes
+  // (/updates/changelog, /updates/apply/:module) with no frontend
+  // action; tracked as a UI gap in the capability matrix rather than
+  // wired to a fabricated control.
+
+  // Security (Audit/SSL/Antivirus/Firewall/Guardian/Self-Heal/Log Rules)
+  // moved to features/platform/security/api.ts. createFirewallRule and
+  // uploadSslCertificate were dead code (real, registered routes —
+  // POST /firewall/rules, POST /admin/ssl/certificates — with no UI
+  // caller in either the old or new component); tracked as UI gaps in
+  // the capability matrix rather than wired to fabricated forms.
+
+  // Configuration (Settings/Feature Flags) moved to
+  // features/platform/configuration/api.ts. getProtocolSettings /
+  // patchProtocolSettings (GET/PATCH /admin/settings/protocol/:protocol)
+  // are real, registered routes with no UI caller in either the old or
+  // new component — tracked as a UI gap in the capability matrix.
 
   // Invoices
   listInvoices: () => request<any[]>("/enterprise/billing/invoices"),

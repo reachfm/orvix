@@ -6,11 +6,15 @@
     <meta name="description" content="Orvix Admin Console" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>Orvix Admin Console</title>
-    <script type="module" crossorigin src="/admin/assets/index-BwEYgmZz.js"></script>
-    <link rel="modulepreload" crossorigin href="/admin/assets/vendor-NIgv9UGi.js">
-    <link rel="stylesheet" crossorigin href="/admin/assets/index-Dr4hsUwy.css">
+    <!-- Pre-paint theme init, kept as an external file (not inlined) —
+         the admin page's CSP is script-src 'self' with no inline-script
+         allowance. See public/theme-init.js / src/shared/theme/theme.ts. -->
+    <script src="/admin/theme-init.js"></script>
+    <script type="module" crossorigin src="/admin/assets/index-CrINylIG.js"></script>
+    <link rel="modulepreload" crossorigin href="/admin/assets/vendor-D5-k-fij.js">
+    <link rel="stylesheet" crossorigin href="/admin/assets/index-CsmSY1Gq.css">
   </head>
-  <body class="bg-[#0C0E12] text-[#E8EAF0]">
+  <body class="bg-[var(--bg-base)] text-[var(--text-primary)]">
     <div id="root"></div>
   </body>
 </html>

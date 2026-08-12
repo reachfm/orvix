@@ -23,7 +23,6 @@ import (
 	"os"
 	"reflect"
 	"strings"
-	"time"
 	"unicode"
 
 	"github.com/gofiber/fiber/v3"
@@ -39,7 +38,6 @@ func (h *Handler) AdminSslListCertificates(c fiber.Ctx) error {
 		Name              string   `json:"name"`
 		Source            string   `json:"source"`
 		Path              string   `json:"path"`
-		KeyPath           string   `json:"key_path,omitempty"`
 		CommonName        string   `json:"common_name"`
 		SANs              []string `json:"sans,omitempty"`
 		Issuer            string   `json:"issuer"`
@@ -63,7 +61,6 @@ func (h *Handler) AdminSslListCertificates(c fiber.Ctx) error {
 			Name:              ci.Name,
 			Source:            source,
 			Path:              ci.Path,
-			KeyPath:           ci.KeyPath,
 			CommonName:        ci.CommonName,
 			SANs:              ci.SANs,
 			Issuer:            ci.Issuer,
@@ -162,6 +159,12 @@ func (h *Handler) AdminSslUploadCertificate(c fiber.Ctx) error {
 	if !strings.Contains(body.KeyPEM, "PRIVATE KEY") {
 		return fiber.NewError(fiber.StatusBadRequest, "key_pem must contain a PRIVATE KEY block")
 	}
+	if len(body.CertPEM) > tlsmgmt.MaxPEMSize {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("cert_pem exceeds maximum size of %d bytes", tlsmgmt.MaxPEMSize))
+	}
+	if len(body.KeyPEM) > tlsmgmt.MaxPEMSize {
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("key_pem exceeds maximum size of %d bytes", tlsmgmt.MaxPEMSize))
+	}
 	if err := h.tlsService.EnsureUploadedCertSchema(c.Context()); err != nil {
 		h.logger.Warn("ensure uploaded cert schema", zap.Error(err))
 	}
@@ -185,11 +188,17 @@ func (h *Handler) AdminSslUploadCertificate(c fiber.Ctx) error {
 		"status":             string(cert.Status),
 		"fingerprint_sha256": cert.FingerprintSHA256,
 		"path":               cert.Path,
-		"key_path":           cert.KeyPath,
 	})
 }
 
 // AdminSslDeleteCertificate serves DELETE /api/v1/admin/ssl/certificates/:id.
+//
+// Deletion is a recoverable two-phase operation (see
+// tlsmgmt.Service.DeleteUploadedCertificate): files are quarantined
+// before the DB row is soft-deleted, and restored if the DB
+// transaction fails. Both configured runtime paths (cert AND key) are
+// checked — deleting a row whose cert_path or key_path matches either
+// active runtime file is refused.
 func (h *Handler) AdminSslDeleteCertificate(c fiber.Ctx) error {
 	if h.tlsService == nil {
 		return fiber.NewError(fiber.StatusServiceUnavailable, "TLS service not wired")
@@ -199,37 +208,33 @@ func (h *Handler) AdminSslDeleteCertificate(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "id is required")
 	}
 	tenantID := h.tenantID(c)
-	row := h.sqlDB().QueryRowContext(c.Context(),
-		h.sqlQ(`SELECT id, name, cert_path, key_path FROM coremail_uploaded_certificates WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`),
-		id, tenantID)
-	var (
-		rowID int64
-		name  string
-		certP string
-		keyP  string
-	)
-	if err := row.Scan(&rowID, &name, &certP, &keyP); err != nil {
+	runtimeCertPath := sslConfigStringField(h.cfg, "CoreMail", "TLSCertFile", "")
+	runtimeKeyPath := sslConfigStringField(h.cfg, "CoreMail", "TLSKeyFile", "")
+
+	result, err := h.tlsService.DeleteUploadedCertificate(c.Context(), id, tenantID, runtimeCertPath, runtimeKeyPath)
+	if err != nil {
+		if err == tlsmgmt.ErrCertificateActive {
+			return fiber.NewError(fiber.StatusConflict, "certificate or key is currently used by the runtime; change coremail.tls_cert_file/tls_key_file first")
+		}
 		return fiber.NewError(fiber.StatusNotFound, "certificate not found in this tenant")
 	}
-	runtimeCert := sslConfigStringField(h.cfg, "CoreMail", "TLSCertFile", "")
-	if runtimeCert != "" && (certP == runtimeCert || keyP == runtimeCert) {
-		return fiber.NewError(fiber.StatusConflict, "certificate is currently used by the runtime; change coremail.tls_cert_file first")
+
+	auditResult := "ok"
+	if !result.FilesRemoved {
+		auditResult = "ok_cleanup_incomplete"
+		// Logged server-side only — CleanupError can carry a
+		// filesystem path, which never belongs in an audit row or an
+		// API response.
+		h.logger.Warn("ssl certificate quarantine cleanup incomplete", zap.Int64("id", result.ID))
 	}
-	if _, err := h.sqlDB().ExecContext(c.Context(),
-		`UPDATE coremail_uploaded_certificates SET deleted_at = `+h.dialect.Placeholder(1)+`, updated_at = `+h.dialect.Placeholder(2)+` WHERE id = `+h.dialect.Placeholder(3)+` AND tenant_id = `+h.dialect.Placeholder(4),
-		time.Now().UTC(), time.Now().UTC(), rowID, tenantID); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("soft delete: %v", err))
-	}
-	if certP != "" {
-		_ = os.Remove(certP)
-	}
-	if keyP != "" {
-		_ = os.Remove(keyP)
-	}
-	if err := h.appendAudit(c, "ssl.certificate.delete", fmt.Sprintf("id:%d|name:%s", rowID, name), "ok"); err != nil {
+	if err := h.appendAudit(c, "ssl.certificate.delete", fmt.Sprintf("id:%d|name:%s", result.ID, result.Name), auditResult); err != nil {
 		return err
 	}
-	return c.JSON(fiber.Map{"id": rowID, "deleted": true})
+	return c.JSON(fiber.Map{
+		"id":            result.ID,
+		"deleted":       true,
+		"files_removed": result.FilesRemoved,
+	})
 }
 
 // AdminSslReloadCertificates serves POST /api/v1/admin/ssl/certificates/reload.

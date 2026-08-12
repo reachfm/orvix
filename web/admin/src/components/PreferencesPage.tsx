@@ -2,6 +2,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Bell, Globe, Moon, Sun, Save, Loader2 } from "lucide-react";
 import { api } from "../api";
+import { useTheme } from "../shared/theme/useTheme";
 
 export default function PreferencesPage() {
   const queryClient = useQueryClient();
@@ -16,13 +17,17 @@ export default function PreferencesPage() {
   const [billingAlerts, setBillingAlerts] = useState(true);
   const [language, setLanguage] = useState("en");
   const [timezone, setTimezone] = useState("UTC");
-  const [darkMode, setDarkMode] = useState(true);
+  // Theme is a client-only preference (persisted to localStorage under
+  // orvix-admin-theme, applied pre-paint) — it is never sent to or read
+  // from the backend profile, unlike the notification/locale settings
+  // below which are real server-persisted fields.
+  const { theme, toggleTheme } = useTheme();
+  const darkMode = theme === "dark";
 
   useEffect(() => {
     if (profile) {
       setLanguage(profile.locale || profile.language || "en");
       setTimezone(profile.timezone || "UTC");
-      setDarkMode(profile.dark_mode ?? true);
       setEmailNotifications(profile.email_notifications ?? true);
       setInAppNotifications(profile.in_app_notifications ?? true);
       setLoginAlerts(profile.login_alerts ?? true);
@@ -39,7 +44,6 @@ export default function PreferencesPage() {
         billing_alerts: billingAlerts,
         locale: language,
         timezone,
-        dark_mode: darkMode,
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["profile"] });
@@ -61,8 +65,8 @@ export default function PreferencesPage() {
   if (isLoading) {
     return (
       <div className="space-y-6 max-w-2xl">
-        <h2 className="text-xl font-semibold text-white">Preferences</h2>
-        <div className="flex items-center gap-3 text-[#8B92A8] text-sm">
+        <h2 className="text-xl font-semibold text-[var(--text-primary)]">Preferences</h2>
+        <div className="flex items-center gap-3 text-[var(--text-secondary)] text-sm">
           <Loader2 className="w-4 h-4 animate-spin" /> Loading preferences...
         </div>
       </div>
@@ -72,22 +76,22 @@ export default function PreferencesPage() {
   if (isError) {
     return (
       <div className="space-y-6 max-w-2xl">
-        <h2 className="text-xl font-semibold text-white">Preferences</h2>
-        <p className="text-[#F87171] text-sm">Failed to load preferences. Please try again later.</p>
+        <h2 className="text-xl font-semibold text-[var(--text-primary)]">Preferences</h2>
+        <p className="text-[var(--danger)] text-sm">Failed to load preferences. Please try again later.</p>
       </div>
     );
   }
 
   return (
     <div className="space-y-6 max-w-2xl">
-      <h2 className="text-xl font-semibold text-white">Preferences</h2>
+      <h2 className="text-xl font-semibold text-[var(--text-primary)]">Preferences</h2>
 
-      <div className="bg-[#1A1D24] border border-[#262A33] rounded-lg p-6">
+      <div className="bg-[var(--bg-elevated)] border border-[var(--bg-subtle)] rounded-lg p-6">
         <div className="flex items-center gap-3 mb-4">
-          <Bell className="w-5 h-5 text-[#4F7CFF]" />
-          <h3 className="text-lg font-medium text-white">Email Notifications</h3>
+          <Bell className="w-5 h-5 text-[var(--accent)]" />
+          <h3 className="text-lg font-medium text-[var(--text-primary)]">Email Notifications</h3>
         </div>
-        <p className="text-xs text-[#8B92A8] mb-3">Control which emails you receive from the platform.</p>
+        <p className="text-xs text-[var(--text-secondary)] mb-3">Control which emails you receive from the platform.</p>
         <div className="space-y-3">
           <ToggleRow label="Transactional Emails" description="Delivery receipts, bounce alerts, and system notices" checked={emailNotifications} onChange={setEmailNotifications} />
           <ToggleRow label="In-App Notifications" description="Show alerts and banners within the dashboard" checked={inAppNotifications} onChange={setInAppNotifications} />
@@ -96,25 +100,25 @@ export default function PreferencesPage() {
         </div>
       </div>
 
-      <div className="bg-[#1A1D24] border border-[#262A33] rounded-lg p-6">
+      <div className="bg-[var(--bg-elevated)] border border-[var(--bg-subtle)] rounded-lg p-6">
         <div className="flex items-center gap-3 mb-4">
-          <Globe className="w-5 h-5 text-[#4F7CFF]" />
-          <h3 className="text-lg font-medium text-white">Display</h3>
+          <Globe className="w-5 h-5 text-[var(--accent)]" />
+          <h3 className="text-lg font-medium text-[var(--text-primary)]">Display</h3>
         </div>
         <div className="space-y-3">
           <div>
-            <label className="block text-sm text-gray-400 mb-1">Language</label>
+            <label className="block text-sm text-[var(--text-secondary)] mb-1">Language</label>
             <select value={language} onChange={(e) => setLanguage(e.target.value)}
-              className="w-full px-3 py-2 bg-[#0C0E12] border border-[#2A2F3E] rounded text-white text-sm">
+              className="w-full px-3 py-2 bg-[var(--bg-base)] border border-[var(--border)] rounded text-[var(--text-primary)] text-sm">
               {languages.map((l) => (
                 <option key={l.value} value={l.value}>{l.label}</option>
               ))}
             </select>
           </div>
           <div>
-            <label className="block text-sm text-gray-400 mb-1">Timezone</label>
+            <label className="block text-sm text-[var(--text-secondary)] mb-1">Timezone</label>
             <select value={timezone} onChange={(e) => setTimezone(e.target.value)}
-              className="w-full px-3 py-2 bg-[#0C0E12] border border-[#2A2F3E] rounded text-white text-sm">
+              className="w-full px-3 py-2 bg-[var(--bg-base)] border border-[var(--border)] rounded text-[var(--text-primary)] text-sm">
               {timezones.map((tz) => (
                 <option key={tz} value={tz}>{tz}</option>
               ))}
@@ -123,19 +127,22 @@ export default function PreferencesPage() {
         </div>
       </div>
 
-      <div className="bg-[#1A1D24] border border-[#262A33] rounded-lg p-6">
+      <div className="bg-[var(--bg-elevated)] border border-[var(--bg-subtle)] rounded-lg p-6">
         <div className="flex items-center gap-3 mb-4">
-          {darkMode ? <Moon className="w-5 h-5 text-[#4F7CFF]" /> : <Sun className="w-5 h-5 text-[#4F7CFF]" />}
-          <h3 className="text-lg font-medium text-white">Appearance</h3>
+          {darkMode ? <Moon className="w-5 h-5 text-[var(--accent)]" /> : <Sun className="w-5 h-5 text-[var(--accent)]" />}
+          <h3 className="text-lg font-medium text-[var(--text-primary)]">Appearance</h3>
         </div>
         <div className="flex items-center justify-between">
           <div>
-            <p className="text-sm text-white">Dark Mode</p>
-            <p className="text-xs text-gray-400">Toggle dark theme for the console</p>
+            <p className="text-sm text-[var(--text-primary)]">Dark Mode</p>
+            <p className="text-xs text-[var(--text-secondary)]">Toggle dark theme for the console</p>
           </div>
           <button
-            onClick={() => setDarkMode(!darkMode)}
-            className={`relative w-11 h-6 rounded-full transition-colors ${darkMode ? "bg-[#4F7CFF]" : "bg-[#2A2F3E]"}`}
+            role="switch"
+            aria-checked={darkMode}
+            aria-label="Toggle dark theme"
+            onClick={toggleTheme}
+            className={`relative w-11 h-6 rounded-full transition-colors ${darkMode ? "bg-[var(--accent)]" : "bg-[var(--border)]"}`}
           >
             <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-transform ${darkMode ? "translate-x-5" : "translate-x-0.5"}`} />
           </button>
@@ -144,11 +151,11 @@ export default function PreferencesPage() {
 
       <button onClick={() => savePreferences.mutate()}
         disabled={savePreferences.isPending}
-        className="flex items-center gap-2 bg-[#4F7CFF] text-white rounded px-4 py-2 text-sm hover:bg-[#3D6AE8] disabled:opacity-50">
+        className="flex items-center gap-2 bg-[var(--accent)] text-white rounded px-4 py-2 text-sm hover:bg-[var(--accent-hover)] disabled:opacity-50">
         <Save className="w-4 h-4" /> {savePreferences.isPending ? "Saving..." : "Save Preferences"}
       </button>
-      {savePreferences.isSuccess && <p className="text-[#34D399] text-sm">Preferences saved.</p>}
-      {savePreferences.error && <p className="text-[#F87171] text-sm">{(savePreferences.error as any)?.message || "Failed to save preferences"}</p>}
+      {savePreferences.isSuccess && <p className="text-[var(--success)] text-sm">Preferences saved.</p>}
+      {savePreferences.error && <p className="text-[var(--danger)] text-sm">{(savePreferences.error as any)?.message || "Failed to save preferences"}</p>}
     </div>
   );
 }
@@ -159,12 +166,12 @@ function ToggleRow({ label, description, checked, onChange }: {
   return (
     <div className="flex items-center justify-between py-2">
       <div>
-        <p className="text-sm text-white">{label}</p>
-        <p className="text-xs text-gray-400">{description}</p>
+        <p className="text-sm text-[var(--text-primary)]">{label}</p>
+        <p className="text-xs text-[var(--text-secondary)]">{description}</p>
       </div>
       <button
         onClick={() => onChange(!checked)}
-        className={`relative w-10 h-5 rounded-full transition-colors ${checked ? "bg-[#4F7CFF]" : "bg-[#2A2F3E]"}`}
+        className={`relative w-10 h-5 rounded-full transition-colors ${checked ? "bg-[var(--accent)]" : "bg-[var(--border)]"}`}
       >
         <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${checked ? "translate-x-5" : "translate-x-0.5"}`} />
       </button>

@@ -54,6 +54,12 @@ func buildFullStackHarness(t *testing.T, email, password string) *fullStackHarne
 	cfg := config.Defaults()
 	cfg.Database.Driver = "sqlite"
 	cfg.Database.DSN = t.TempDir() + "/orvix.db?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	// This harness simulates a real, complete webmail deployment (the
+	// mail engine is what the webmail SPA's /api/v1/queue calls depend
+	// on), so CoreMail must be enabled and its queue table provisioned —
+	// otherwise the queue endpoints now correctly return the sanitized
+	// 503 COREMAIL_DISABLED contract instead of a misleading empty 200.
+	cfg.CoreMail.Enabled = true
 
 	db, err := config.NewDatabase(&cfg.Database, logger)
 	if err != nil {
@@ -61,6 +67,29 @@ func buildFullStackHarness(t *testing.T, email, password string) *fullStackHarne
 	}
 	if err := models.MigrateAllRaw(db); err != nil {
 		t.Fatalf("migrate: %v", err)
+	}
+	preSqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	// Matches internal/api/handlers/handlers.go's ListQueue raw SQL
+	// column set exactly (id, message_id, from_address, to_address,
+	// status, attempt_count, next_attempt_at, created_at, updated_at,
+	// deleted_at) — that legacy webmail-facing handler predates the
+	// internal/coremail/queue package's schema and does not use it.
+	if _, err := preSqlDB.Exec(`CREATE TABLE IF NOT EXISTS coremail_queue (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		message_id TEXT NOT NULL DEFAULT '',
+		from_address TEXT NOT NULL DEFAULT '',
+		to_address TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT 'pending',
+		attempt_count INTEGER NOT NULL DEFAULT 0,
+		next_attempt_at DATETIME,
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL,
+		deleted_at DATETIME
+	)`); err != nil {
+		t.Fatalf("queue schema: %v", err)
 	}
 	authenticator, err := auth.NewAuthenticator(&cfg.Auth, db, logger)
 	if err != nil {

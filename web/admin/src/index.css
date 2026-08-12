@@ -1,16 +1,44 @@
 @import "tailwindcss";
 
+/* Tailwind v4 class-based dark mode: applied only when <html> carries
+   .dark (set by shared/theme's pre-paint init script / toggle), never
+   from prefers-color-scheme directly — light is the mandatory default. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 :root {
+  color-scheme: light;
+  --bg-base: #F6F7FA;
+  --bg-surface: #FFFFFF;
+  --bg-elevated: #FFFFFF;
+  --bg-subtle: #F1F3F7;
+  --border: #E2E5EC;
+  --border-strong: #C9CEDA;
+  --text-primary: #171A21;
+  --text-secondary: #5B6373;
+  --text-muted: #8A93A6;
+  --accent: #3D63DD;
+  --accent-hover: #2F4FC0;
+  --accent-soft: #EEF2FF;
+  --success: #16A34A;
+  --warning: #B45309;
+  --danger: #DC2626;
+  --info: #2563EB;
+}
+
+.dark {
+  color-scheme: dark;
   --bg-base: #0C0E12;
   --bg-surface: #13161C;
   --bg-elevated: #1A1E26;
   --bg-subtle: #222736;
   --border: #2A2F3E;
+  --border-strong: #3A4155;
   --text-primary: #E8EAF0;
   --text-secondary: #8B92A8;
   --text-muted: #555D73;
   --accent: #4F7CFF;
   --accent-hover: #6B93FF;
+  --accent-soft: #1E2A4D;
   --success: #34D399;
   --warning: #FBBF24;
   --danger: #F87171;

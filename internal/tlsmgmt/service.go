@@ -3,6 +3,7 @@ package tlsmgmt
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/tls"
@@ -13,12 +14,17 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/orvix/orvix/internal/dbdialect"
 )
+
+// MaxPEMSize bounds the size of an uploaded certificate or private-key
+// PEM blob. Enforced before any filesystem mutation.
+const MaxPEMSize = 1 << 20 // 1 MiB
 
 type ConfigProvider interface {
 	GetCertPath() string
@@ -125,6 +131,23 @@ func (s *Service) ImportCertificate(ctx context.Context, name string, certPEM, k
 	if len(certPEM) == 0 || len(keyPEM) == 0 {
 		return nil, "", fmt.Errorf("cert and key are required")
 	}
+	// Reject oversized input before any filesystem mutation.
+	if len(certPEM) > MaxPEMSize {
+		return nil, "", fmt.Errorf("certificate PEM exceeds maximum size of %d bytes", MaxPEMSize)
+	}
+	if len(keyPEM) > MaxPEMSize {
+		return nil, "", fmt.Errorf("private key PEM exceeds maximum size of %d bytes", MaxPEMSize)
+	}
+
+	// Validate the pair before touching the filesystem at all.
+	// validateKeyPair uses tls.X509KeyPair, which never panics on a
+	// mismatched cert/key algorithm (RSA cert + ECDSA key, etc.) and
+	// supports RSA, ECDSA, and Ed25519 uniformly.
+	x509Cert, err := validateKeyPair(certPEM, keyPEM)
+	if err != nil {
+		return nil, "", err
+	}
+
 	if targetDir == "" {
 		targetDir = "/etc/orvix/tls/admin"
 	}
@@ -132,47 +155,27 @@ func (s *Service) ImportCertificate(ctx context.Context, name string, certPEM, k
 		return nil, "", fmt.Errorf("create target dir: %w", err)
 	}
 
-	// Save cert + key to per-row files under the target dir.
+	certFingerprint := sha256.Sum256(x509Cert.Raw)
+	fingerprintHex := hex.EncodeToString(certFingerprint[:])
+
+	// Filenames are content-addressed (name + short fingerprint), so a
+	// re-upload of different material for the same "name" NEVER
+	// overwrites the previous cert/key files in place — it writes a
+	// new pair under a new path. A DB failure below can therefore
+	// only ever remove the newly-written files; the previous
+	// certificate, key, and DB row are structurally untouched.
 	safeName := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(name)), " ", "_")
-	certPath := targetDir + "/" + safeName + ".crt.pem"
-	keyPath := targetDir + "/" + safeName + ".key.pem"
+	suffix := fingerprintHex[:12]
+	certPath := filepath.Join(targetDir, safeName+"."+suffix+".crt.pem")
+	keyPath := filepath.Join(targetDir, safeName+"."+suffix+".key.pem")
 
-	// Parse cert (and cross-check the key) before persisting so the
-	// DB row never carries invalid material.
-	block, _ := pem.Decode(certPEM)
-	if block == nil {
-		return nil, "", fmt.Errorf("failed to decode cert PEM")
-	}
-	x509Cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return nil, "", fmt.Errorf("parse cert: %w", err)
-	}
-	keyBlock, _ := pem.Decode(keyPEM)
-	if keyBlock == nil {
-		return nil, "", fmt.Errorf("failed to decode key PEM")
-	}
-	var key interface{}
-	if k, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes); err == nil {
-		key = k
-	} else if k, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes); err == nil {
-		key = k
-	} else {
-		return nil, "", fmt.Errorf("parse private key: unsupported format (need PKCS1 / PKCS8)")
-	}
-	if !certKeyMatch(x509Cert, key) {
-		return nil, "", fmt.Errorf("certificate and private key do not match")
-	}
-
-	if err := os.WriteFile(certPath, certPEM, 0o644); err != nil {
+	if err := atomicWriteSecure(certPath, certPEM, 0o644); err != nil {
 		return nil, "", fmt.Errorf("write cert file: %w", err)
 	}
-	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+	if err := atomicWriteSecure(keyPath, keyPEM, 0o600); err != nil {
 		_ = os.Remove(certPath)
 		return nil, "", fmt.Errorf("write key file: %w", err)
 	}
-
-	fingerprint := sha256.Sum256(block.Bytes)
-	fingerprintHex := hex.EncodeToString(fingerprint[:])
 
 	notBefore := x509Cert.NotBefore
 	notAfter := x509Cert.NotAfter
@@ -189,6 +192,14 @@ func (s *Service) ImportCertificate(ctx context.Context, name string, certPEM, k
 	sansCSV := strings.Join(sans, ",")
 
 	now := time.Now().UTC()
+
+	// Fetch the previous row (if any) so its files can be cleaned up
+	// AFTER a successful commit — never before, and never on failure.
+	var prevCertPath, prevKeyPath string
+	_ = s.db.QueryRowContext(ctx,
+		`SELECT cert_path, key_path FROM coremail_uploaded_certificates WHERE tenant_id = `+s.dialect.Placeholder(1)+` AND name = `+s.dialect.Placeholder(2)+` AND deleted_at IS NULL`,
+		tenantID, name,
+	).Scan(&prevCertPath, &prevKeyPath)
 
 	ph := s.dialect
 	setConflict := "excluded"
@@ -217,9 +228,21 @@ func (s *Service) ImportCertificate(ctx context.Context, name string, certPEM, k
 		x509Cert.Issuer.CommonName, formatSerial(x509Cert.SerialNumber),
 		notBefore, notAfter, fingerprintHex, string(status), createdBy, now, now,
 	); err != nil {
+		// DB failure: remove only the files this call just created.
+		// The previous certificate, key, and DB row (if any) were
+		// never touched above and remain exactly as they were.
 		_ = os.Remove(certPath)
 		_ = os.Remove(keyPath)
 		return nil, "", fmt.Errorf("persist certificate metadata: %w", err)
+	}
+
+	// Commit succeeded: the row now points at the new files. Clean up
+	// the orphaned previous files, if any and if actually different.
+	if prevCertPath != "" && prevCertPath != certPath {
+		_ = os.Remove(prevCertPath)
+	}
+	if prevKeyPath != "" && prevKeyPath != keyPath {
+		_ = os.Remove(prevKeyPath)
 	}
 
 	return &TLSCertificate{
@@ -236,6 +259,76 @@ func (s *Service) ImportCertificate(ctx context.Context, name string, certPEM, k
 		FingerprintSHA256: fingerprintHex,
 		Status:            status,
 	}, fingerprintHex, nil
+}
+
+// validateKeyPair validates that certPEM/keyPEM form a usable,
+// matching pair without ever panicking on a type mismatch (RSA cert +
+// ECDSA key and vice versa are both rejected cleanly). It supports
+// RSA, ECDSA, and Ed25519 private keys — anything tls.X509KeyPair
+// accepts — and returns the parsed leaf certificate on success.
+func validateKeyPair(certPEM, keyPEM []byte) (*x509.Certificate, error) {
+	pair, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("certificate and private key are invalid or do not match: %w", err)
+	}
+	if len(pair.Certificate) == 0 {
+		return nil, fmt.Errorf("no certificate data in cert_pem")
+	}
+	switch pair.PrivateKey.(type) {
+	case *rsa.PrivateKey, *ecdsa.PrivateKey, ed25519.PrivateKey:
+	default:
+		return nil, fmt.Errorf("unsupported private key type %T", pair.PrivateKey)
+	}
+	leaf, err := x509.ParseCertificate(pair.Certificate[0])
+	if err != nil {
+		return nil, fmt.Errorf("parse leaf certificate: %w", err)
+	}
+	return leaf, nil
+}
+
+// atomicWriteSecure writes data to a temp file in the same directory
+// as path, fsyncs it, chmods it to mode (which — unlike os.WriteFile
+// on an EXISTING path — always applies, since this is always a new
+// inode), and atomically renames it into place. The temp file is
+// cleaned up on any failure before the rename.
+func atomicWriteSecure(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".tmp-"+filepath.Base(path)+"-*")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			tmp.Close()
+			os.Remove(tmpPath)
+		}
+	}()
+
+	if _, err := tmp.Write(data); err != nil {
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return fmt.Errorf("fsync temp file: %w", err)
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		return fmt.Errorf("chmod temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp file: %w", err)
+	}
+	cleanup = false
+
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("rename into place: %w", err)
+	}
+	// Belt-and-suspenders: explicitly chmod the final path too, so
+	// even a rename that didn't preserve mode bits (uncommon, but
+	// filesystem-dependent) still lands on the intended permission.
+	_ = os.Chmod(path, mode)
+	return nil
 }
 
 // ListUploadedCertificates returns all non-deleted rows in
@@ -287,6 +380,129 @@ func (s *Service) ListUploadedCertificates(ctx context.Context, tenantID int64) 
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// DeleteResult reports what actually happened during a
+// DeleteUploadedCertificate call, so the caller never has to guess
+// whether on-disk cleanup genuinely succeeded.
+type DeleteResult struct {
+	ID           int64
+	Name         string
+	FilesRemoved bool
+	CleanupError string // non-empty only when FilesRemoved is false
+}
+
+// ErrCertificateActive is returned when the requested certificate or
+// key path is currently the runtime-configured cert/key — deletion is
+// refused rather than risk removing material a live listener depends
+// on.
+var ErrCertificateActive = fmt.Errorf("certificate or key is currently used by the runtime")
+
+// DeleteUploadedCertificate performs a recoverable, two-phase delete:
+// the cert/key files are atomically renamed to quarantine names first,
+// then the DB row is soft-deleted in a transaction. If the DB
+// transaction fails, the quarantined files are renamed back to their
+// original names and the row is left exactly as it was. Only after
+// the DB commit succeeds are the quarantined files permanently
+// removed — and that removal's success/failure is reported honestly,
+// never silently swallowed.
+//
+// runtimeCertPath and runtimeKeyPath are the live, configured
+// CoreMail.TLSCertFile / CoreMail.TLSKeyFile paths (both, not just
+// one) — deletion is blocked if the row's cert_path OR key_path
+// equals EITHER of them, in any combination.
+func (s *Service) DeleteUploadedCertificate(ctx context.Context, id string, tenantID int64, runtimeCertPath, runtimeKeyPath string) (*DeleteResult, error) {
+	if s.db == nil {
+		return nil, fmt.Errorf("tls service: no db")
+	}
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, name, cert_path, key_path FROM coremail_uploaded_certificates WHERE id = `+s.dialect.Placeholder(1)+` AND tenant_id = `+s.dialect.Placeholder(2)+` AND deleted_at IS NULL`,
+		id, tenantID)
+	var (
+		rowID int64
+		name  string
+		certP string
+		keyP  string
+	)
+	if err := row.Scan(&rowID, &name, &certP, &keyP); err != nil {
+		return nil, fmt.Errorf("certificate not found: %w", err)
+	}
+
+	active := func(p string) bool {
+		return p != "" && (runtimeCertPath != "" && p == runtimeCertPath || runtimeKeyPath != "" && p == runtimeKeyPath)
+	}
+	if active(certP) || active(keyP) {
+		return nil, ErrCertificateActive
+	}
+
+	ts := time.Now().UTC().Format("20060102T150405.000000000")
+	certQuarantine := ""
+	keyQuarantine := ""
+	if certP != "" {
+		certQuarantine = certP + ".deleted-" + ts
+		if err := os.Rename(certP, certQuarantine); err != nil && !os.IsNotExist(err) {
+			return nil, fmt.Errorf("quarantine cert file: %w", err)
+		}
+	}
+	if keyP != "" {
+		keyQuarantine = keyP + ".deleted-" + ts
+		if err := os.Rename(keyP, keyQuarantine); err != nil && !os.IsNotExist(err) {
+			// Restore the cert file before returning.
+			if certQuarantine != "" {
+				_ = os.Rename(certQuarantine, certP)
+			}
+			return nil, fmt.Errorf("quarantine key file: %w", err)
+		}
+	}
+
+	restoreFiles := func() {
+		if certQuarantine != "" {
+			_ = os.Rename(certQuarantine, certP)
+		}
+		if keyQuarantine != "" {
+			_ = os.Rename(keyQuarantine, keyP)
+		}
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		restoreFiles()
+		return nil, fmt.Errorf("begin transaction: %w", err)
+	}
+	now := time.Now().UTC()
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE coremail_uploaded_certificates SET deleted_at = `+s.dialect.Placeholder(1)+`, updated_at = `+s.dialect.Placeholder(2)+` WHERE id = `+s.dialect.Placeholder(3)+` AND tenant_id = `+s.dialect.Placeholder(4),
+		now, now, rowID, tenantID,
+	); err != nil {
+		tx.Rollback()
+		restoreFiles()
+		return nil, fmt.Errorf("soft delete: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		restoreFiles()
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+
+	// DB commit succeeded — the row is authoritatively deleted from
+	// this point on regardless of what happens to the quarantined
+	// files below. Permanently remove them and report honestly.
+	result := &DeleteResult{ID: rowID, Name: name, FilesRemoved: true}
+	if certQuarantine != "" {
+		if err := os.Remove(certQuarantine); err != nil && !os.IsNotExist(err) {
+			result.FilesRemoved = false
+			result.CleanupError = err.Error()
+		}
+	}
+	if keyQuarantine != "" {
+		if err := os.Remove(keyQuarantine); err != nil && !os.IsNotExist(err) {
+			result.FilesRemoved = false
+			if result.CleanupError != "" {
+				result.CleanupError += "; "
+			}
+			result.CleanupError += err.Error()
+		}
+	}
+	return result, nil
 }
 
 // ── Certificate Inventory ─────────────────────────────────
@@ -429,24 +645,12 @@ func (s *Service) ValidateCertificate(ctx context.Context, id string) (*CertVali
 			result.Valid = false
 			return result, nil
 		}
-		keyBlock, _ := pem.Decode(keyData)
-		if keyBlock == nil {
+		// validateKeyPair (tls.X509KeyPair under the hood) never
+		// panics on an algorithm mismatch and accepts RSA, ECDSA, and
+		// Ed25519 uniformly.
+		if _, err := validateKeyPair(certData, keyData); err != nil {
 			result.Valid = false
-			result.Errors = append(result.Errors, "failed to decode key PEM")
-			return result, nil
-		}
-		key, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
-		if err != nil {
-			key, err = x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
-			if err != nil {
-				result.Valid = false
-				result.Errors = append(result.Errors, "failed to parse private key")
-				return result, nil
-			}
-		}
-		if !certKeyMatch(x509Cert, key) {
-			result.Valid = false
-			result.Errors = append(result.Errors, "certificate and private key do not match")
+			result.Errors = append(result.Errors, err.Error())
 		}
 	}
 
@@ -667,16 +871,6 @@ func formatSerial(serial *big.Int) string {
 		return ""
 	}
 	return fmt.Sprintf("%x", serial)
-}
-
-func certKeyMatch(cert *x509.Certificate, key interface{}) bool {
-	switch k := key.(type) {
-	case *rsa.PrivateKey:
-		return cert.PublicKey.(*rsa.PublicKey).N.Cmp(k.N) == 0
-	case *ecdsa.PrivateKey:
-		return cert.PublicKey.(*ecdsa.PublicKey).X.Cmp(k.X) == 0 && cert.PublicKey.(*ecdsa.PublicKey).Y.Cmp(k.Y) == 0
-	}
-	return false
 }
 
 func daysUntil(t time.Time) int {

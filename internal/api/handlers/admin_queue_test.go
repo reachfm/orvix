@@ -41,6 +41,10 @@ func buildQueueTestEnv(t *testing.T) *queueTestEnv {
 	cfg := config.Defaults()
 	cfg.Database.Driver = "sqlite"
 	cfg.Database.DSN = filepath.Join(t.TempDir(), "queue_test.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	// The queue-admin endpoints fail closed with 503 COREMAIL_DISABLED when
+	// this is false (config.Defaults()'s zero value) — this suite exercises
+	// the enabled path, matching a real CoreMail-enabled deployment.
+	cfg.CoreMail.Enabled = true
 	db, err := config.NewDatabase(&cfg.Database, logger)
 	if err != nil {
 		t.Fatalf("database: %v", err)

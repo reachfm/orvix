@@ -1,15 +1,14 @@
 import { useState, useEffect } from "react";
-import { LayoutDashboard, Globe, Users, Shield, Zap, Activity, Settings, Server, Building, Mail, Monitor, HardDrive, HeartPulse, CreditCard, Keyboard, User, AtSign, BarChart, AlertTriangle, UserPlus, Send, LogOut, FileText, Bell } from "lucide-react";
+import { LayoutDashboard, Globe, Users, Shield, Zap, Activity, Settings, Server, Building, Mail, Monitor, HardDrive, HeartPulse, CreditCard, Keyboard, User, AtSign, BarChart, AlertTriangle, UserPlus, Send, LogOut, FileText, Bell, ShieldAlert } from "lucide-react";
 import Dashboard from "./components/Dashboard";
 import Domains from "./components/Domains";
 import UsersPage from "./components/UsersPage";
-import Firewall from "./components/Firewall";
+import SecurityPageFeature from "./features/platform/security/page";
 import Modules from "./components/Modules";
 import AuditLog from "./components/AuditLog";
 import EnterpriseDashboard from "./components/EnterpriseDashboard";
 import MailboxList from "./components/MailboxList";
-import OrganizationList from "./components/OrganizationList";
-import BackupStatus from "./components/BackupStatus";
+import OrganizationsPage from "./features/platform/organizations/page";
 import SystemHealth from "./components/SystemHealth";
 import BillingPage from "./components/BillingPage";
 import ApiKeysPage from "./components/ApiKeysPage";
@@ -31,12 +30,17 @@ import InvoicesPage from "./components/InvoicesPage";
 import SecurityPage from "./components/SecurityPage";
 import SupportPage from "./components/SupportPage";
 import PreferencesPage from "./components/PreferencesPage";
-import PlatformHome from "./components/PlatformHome";
-import LicenseStatus from "./components/LicenseStatus";
+import OverviewPage from "./features/platform/overview/page";
+import MailOperationsPage from "./features/platform/mail-operations/page";
+import ReliabilityPage from "./features/platform/reliability/page";
+
+import ConfigurationPage from "./features/platform/configuration/page";
 import { initCSRF, api } from "./api";
+import ThemeToggle from "./shared/theme/ThemeToggle";
 
 type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" | "settings"
-  | "enterprise" | "mailboxes" | "organizations" | "backups" | "health" | "platform-home" | "license"
+  | "enterprise" | "mailboxes" | "organizations" | "health" | "platform-home"
+  | "mail-operations" | "reliability" | "platform-security" | "platform-configuration"
   | "billing" | "onboarding" | "apikeys"
   | "account-settings" | "org-overview" | "invitations" | "members-roles" | "ownership-transfer"
   | "suspension-deletion" | "customer-mailboxes" | "aliases" | "groups" | "usage-quotas"
@@ -80,13 +84,21 @@ type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" 
 // Operations); the misleading on-page copy is corrected in
 // EnterpriseDashboard.tsx itself.
 //
-// NOTE on "license" (LicenseStatus.tsx -> /license, platformMW): this
-// component existed in the tree but was never wired into any App.tsx
-// navigation, in any version — not a PLATFORM-SHELL regression, but a
-// pre-existing, fully-working platform-owned page restored here.
+// NOTE on removing "license": GetLicense (internal/api/handlers/handlers.go)
+// unconditionally returns {"status":"not_required", "reason":"Local product
+// licensing is disabled; SaaS plans and quotas apply."} and ValidateLicense
+// returns 410 Gone — Orvix is a hosted SaaS, not a self-hosted licensed
+// product, so this backend concept has no real operational meaning here.
+// The removed LicenseStatus.tsx page also called fetch() directly and
+// rendered a tier/expires_at/customer_id/warnings schema the handler has
+// never returned since this retirement — a stale, fake-looking UI on top
+// of a conceptually wrong feature. Commercial plans/subscriptions/billing
+// are a distinct future bounded context (platform-commercial-control-plane),
+// not a repurposing of this endpoint.
 const PLATFORM_TAB_IDS: Tab[] = [
-  "platform-home", "organizations", "enterprise", "backups", "health", "firewall", "modules",
-  "license", "account-settings", "security", "preferences",
+  "platform-home", "organizations", "enterprise", "mail-operations", "reliability", "health",
+  "platform-security", "modules", "platform-configuration",
+  "account-settings", "security", "preferences",
 ];
 const ORGANIZATION_TAB_IDS: Tab[] = [
   "dashboard", "domains", "org-overview", "customer-mailboxes", "aliases", "groups", "usage-quotas",
@@ -100,11 +112,12 @@ const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: st
   { id: "platform-home", label: "Overview", icon: LayoutDashboard },
   { id: "organizations", label: "Organizations", icon: Building, section: "Organizations" },
   { id: "enterprise", label: "Summary", icon: Monitor, section: "Operations" },
-  { id: "backups", label: "Backups", icon: HardDrive },
+  { id: "mail-operations", label: "Mail Operations", icon: Send },
+  { id: "reliability", label: "Reliability", icon: HardDrive },
   { id: "health", label: "Health", icon: HeartPulse },
-  { id: "firewall", label: "Firewall", icon: Shield, section: "Security" },
+  { id: "platform-security", label: "Security", icon: ShieldAlert, section: "Security" },
   { id: "modules", label: "Modules", icon: Zap, section: "System" },
-  { id: "license", label: "License", icon: FileText },
+  { id: "platform-configuration", label: "Configuration", icon: Settings },
   // Tabs below are pre-existing tenant-owned entries that were never
   // reachable by a real Platform Super Admin (see PLATFORM-SHELL final
   // report's ownership matrix) — their labels/sections are irrelevant to
@@ -148,30 +161,26 @@ export default function App() {
   const [userEmail, setUserEmail] = useState("");
 
   useEffect(() => {
-    fetch("/api/v1/me", { credentials: "include" })
-      .then(async (r) => {
-        // A non-ok /me response (401/403/5xx) means there is no valid
-        // authenticated session: clear local auth state and fall back
-        // to the login screen. No portal-specific request has been
-        // issued yet at this point, so there is nothing else to unwind.
-        setAuthenticated(r.ok);
-        if (r.ok) {
-          try {
-            const u = await r.json();
-            setUserRole(u.role || "");
-            setUserEmail(u.email || "");
-            // portal is the ONLY authoritative shell selector. Anything
-            // other than the two known values fails closed to "" —
-            // never inferred from `role`.
-            const resolvedPortal = (u.portal === "platform" || u.portal === "organization") ? u.portal : "";
-            setPortal(resolvedPortal);
-            // Resolve the landing tab from the portal BEFORE authLoading
-            // flips false, so the first real paint already shows the
-            // correct shell — no flash of the wrong portal.
-            setCurrentTab(resolvedPortal === "platform" ? "platform-home" : "dashboard");
-            initCSRF().catch(() => {});
-          } catch { setUserRole(""); setUserEmail(""); setPortal(""); }
-        }
+    // A failed api.getMe() (401/403/5xx, or a network error) means
+    // there is no valid authenticated session: clear local auth state
+    // and fall back to the login screen. No portal-specific request
+    // has been issued yet at this point, so there is nothing else to
+    // unwind.
+    api.getMe()
+      .then((u) => {
+        setAuthenticated(true);
+        setUserRole(u.role || "");
+        setUserEmail(u.email || "");
+        // portal is the ONLY authoritative shell selector. Anything
+        // other than the two known values fails closed to "" — never
+        // inferred from `role`.
+        const resolvedPortal = (u.portal === "platform" || u.portal === "organization") ? u.portal : "";
+        setPortal(resolvedPortal);
+        // Resolve the landing tab from the portal BEFORE authLoading
+        // flips false, so the first real paint already shows the
+        // correct shell — no flash of the wrong portal.
+        setCurrentTab(resolvedPortal === "platform" ? "platform-home" : "dashboard");
+        initCSRF().catch(() => {});
         setAuthLoading(false);
       })
       .catch(() => { setAuthenticated(false); setAuthLoading(false); });
@@ -215,7 +224,7 @@ export default function App() {
   }, []);
 
   if (authLoading) {
-    return <div className="h-screen bg-[#0C0E12] flex items-center justify-center"><p className="text-gray-400">Loading...</p></div>;
+    return <div className="h-screen bg-[var(--bg-base)] flex items-center justify-center"><p className="text-[var(--text-secondary)]">Loading...</p></div>;
   }
 
   if (!authenticated) {
@@ -233,15 +242,15 @@ export default function App() {
   // must never fall back to inferring the shell from `role`.
   if (portal === "") {
     return (
-      <div className="h-screen bg-[#0C0E12] flex items-center justify-center">
+      <div className="h-screen bg-[var(--bg-base)] flex items-center justify-center">
         <div className="text-center max-w-sm">
-          <h1 className="text-lg font-semibold text-[#E8EAF0] mb-2">Access Unavailable</h1>
-          <p className="text-sm text-[#8B92A8] mb-6">
+          <h1 className="text-lg font-semibold text-[var(--text-primary)] mb-2">Access Unavailable</h1>
+          <p className="text-sm text-[var(--text-secondary)] mb-6">
             This account could not be authorized for the admin console. Contact your administrator.
           </p>
           <button
             onClick={() => { api.logout().catch(() => {}); setAuthenticated(false); }}
-            className="text-sm text-[#4F7CFF] hover:underline"
+            className="text-sm text-[var(--accent)] hover:underline"
           >
             Return to login
           </button>
@@ -256,22 +265,23 @@ export default function App() {
     // future regression in the sidebar), never mount the other portal's
     // component — fail back to that portal's own landing page instead.
     if (!allowedTabIds.includes(currentTab)) {
-      return portal === "platform" ? <PlatformHome email={userEmail} onNavigate={setCurrentTab} /> : <Dashboard />;
+      return portal === "platform" ? <OverviewPage email={userEmail} onNavigate={setCurrentTab} /> : <Dashboard />;
     }
     switch (currentTab) {
-      case "platform-home": return <PlatformHome email={userEmail} onNavigate={setCurrentTab} />;
+      case "platform-home": return <OverviewPage email={userEmail} onNavigate={setCurrentTab} />;
       case "dashboard": return <Dashboard />;
       case "domains": return <Domains />;
       case "users": return <UsersPage />;
-      case "firewall": return <Firewall />;
       case "modules": return <Modules />;
       case "audit": return <AuditLog />;
       case "enterprise": return <EnterpriseDashboard />;
       case "mailboxes": return <MailboxList />;
-      case "organizations": return <OrganizationList />;
-      case "backups": return <BackupStatus />;
+      case "organizations": return <OrganizationsPage />;
       case "health": return <SystemHealth />;
-      case "license": return <LicenseStatus />;
+      case "mail-operations": return <MailOperationsPage />;
+      case "reliability": return <ReliabilityPage />;
+      case "platform-security": return <SecurityPageFeature />;
+      case "platform-configuration": return <ConfigurationPage />;
       case "billing": return <BillingPage />;
       // Legacy "Domain Setup" route. It rendered a second, inferior copy of the
       // DNS record UI against the customer endpoints (and read fields such as
@@ -296,19 +306,20 @@ export default function App() {
       case "security": return <SecurityPage />;
       case "support": return <SupportPage />;
       case "preferences": return <PreferencesPage />;
-      default: return portal === "platform" ? <PlatformHome email={userEmail} onNavigate={setCurrentTab} /> : <Dashboard />;
+      default: return portal === "platform" ? <OverviewPage email={userEmail} onNavigate={setCurrentTab} /> : <Dashboard />;
     }
   };
 
   return (
     <div className="flex h-screen overflow-hidden">
-      <aside className="w-64 bg-[#13161C] border-r border-[#2A2F3E] flex flex-col">
-        <div className="p-4 border-b border-[#2A2F3E] flex items-center gap-3">
-          <Server size={24} className="text-[#4F7CFF]" />
-          <div>
-            <h1 className="text-sm font-semibold text-[#E8EAF0]">Orvix Admin</h1>
-            <p className="text-xs text-[#555D73]">Console v1.0.0</p>
+      <aside className="w-64 bg-[var(--bg-surface)] border-r border-[var(--border)] flex flex-col">
+        <div className="p-4 border-b border-[var(--border)] flex items-center gap-3">
+          <Server size={24} className="text-[var(--accent)]" />
+          <div className="flex-1 min-w-0">
+            <h1 className="text-sm font-semibold text-[var(--text-primary)]">Orvix Admin</h1>
+            <p className="text-xs text-[var(--text-muted)]">Console v1.0.0</p>
           </div>
+          <ThemeToggle compact />
         </div>
 
         <nav className="flex-1 px-2 py-3 space-y-0.5 overflow-y-auto">
@@ -318,11 +329,11 @@ export default function App() {
             if (t.section) {
               return (
                 <div key={t.id}>
-                  <div className="px-3 pt-4 pb-1 text-xs font-semibold text-[#555D73] uppercase tracking-wider">{t.section}</div>
+                  <div className="px-3 pt-4 pb-1 text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider">{t.section}</div>
                   <button
                     onClick={() => setCurrentTab(t.id)}
                     className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
-                      active ? "bg-[#222736] text-[#E8EAF0]" : "text-[#8B92A8] hover:bg-[#1A1E26] hover:text-[#E8EAF0]"
+                      active ? "bg-[var(--bg-subtle)] text-[var(--text-primary)]" : "text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)]"
                     }`}
                   >
                     <Icon size={18} />
@@ -336,7 +347,7 @@ export default function App() {
                 key={t.id}
                 onClick={() => setCurrentTab(t.id)}
                 className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
-                  active ? "bg-[#222736] text-[#E8EAF0]" : "text-[#8B92A8] hover:bg-[#1A1E26] hover:text-[#E8EAF0]"
+                  active ? "bg-[var(--bg-subtle)] text-[var(--text-primary)]" : "text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)]"
                 }`}
               >
                 <Icon size={18} />
@@ -346,15 +357,15 @@ export default function App() {
           })}
         </nav>
 
-        <div className="p-3 border-t border-[#2A2F3E]">
+        <div className="p-3 border-t border-[var(--border)]">
           <button onClick={() => { api.logout().catch(() => {}); setAuthenticated(false); }}
-            className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-[#8B92A8] hover:bg-[#1A1E26] hover:text-[#E8EAF0]">
+            className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)]">
             <LogOut size={18} /> Logout
           </button>
         </div>
       </aside>
 
-      <main className="flex-1 overflow-auto bg-[#0C0E12]">
+      <main className="flex-1 overflow-auto bg-[var(--bg-base)]">
         <div className="max-w-7xl mx-auto p-6">
           {renderContent()}
         </div>

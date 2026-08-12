@@ -115,7 +115,7 @@ function LimitField({
   const hintId = `${id}-hint`;
   return (
     <div className="flex flex-col gap-1.5">
-      <label htmlFor={id} className="text-xs font-medium text-[#E8EAF0]">
+      <label htmlFor={id} className="text-xs font-medium text-[var(--text-primary)]">
         {label}
       </label>
       <div className="flex flex-col sm:flex-row gap-2">
@@ -125,7 +125,7 @@ function LimitField({
           aria-describedby={error ? `${errorId} ${hintId}` : hintId}
           aria-invalid={error ? true : undefined}
           onChange={(e) => onChange({ ...value, mode: e.target.value as LimitMode })}
-          className="sm:w-56 px-2.5 py-2 bg-[#1A1E26] border border-[#2A2F3E] rounded-lg text-[#E8EAF0] text-xs"
+          className="sm:w-56 px-2.5 py-2 bg-[var(--bg-elevated)] border border-[var(--border)] rounded-lg text-[var(--text-primary)] text-xs"
         >
           <option value="inherit">Inherit organization plan</option>
           {allowUnlimited && <option value="unlimited">Unlimited</option>}
@@ -142,17 +142,17 @@ function LimitField({
               aria-describedby={error ? errorId : undefined}
               value={value.value}
               onChange={(e) => onChange({ ...value, value: e.target.value })}
-              className="flex-1 min-w-0 px-2.5 py-2 bg-[#1A1E26] border border-[#2A2F3E] rounded-lg text-[#E8EAF0] text-xs font-mono"
+              className="flex-1 min-w-0 px-2.5 py-2 bg-[var(--bg-elevated)] border border-[var(--border)] rounded-lg text-[var(--text-primary)] text-xs font-mono"
             />
-            {unit && <span className="text-[11px] text-[#8B92A8] shrink-0">{unit}</span>}
+            {unit && <span className="text-[11px] text-[var(--text-secondary)] shrink-0">{unit}</span>}
           </div>
         )}
       </div>
-      <p id={hintId} className="text-[11px] text-[#555D73]">
+      <p id={hintId} className="text-[11px] text-[var(--text-muted)]">
         {value.mode === "inherit" ? inheritedLabel : hint}
       </p>
       {error && (
-        <p id={errorId} role="alert" className="text-[11px] text-[#F87171]">
+        <p id={errorId} role="alert" className="text-[11px] text-[var(--danger)]">
           {error}
         </p>
       )}
@@ -162,9 +162,9 @@ function LimitField({
 
 function SummaryRow({ label, value }: { label: string; value: React.ReactNode }) {
   return (
-    <div className="flex items-start justify-between gap-4 py-1.5 border-b border-[#222736] last:border-b-0">
-      <dt className="text-[11px] text-[#555D73] shrink-0">{label}</dt>
-      <dd className="text-[11px] text-[#E8EAF0] text-right break-all">{value}</dd>
+    <div className="flex items-start justify-between gap-4 py-1.5 border-b border-[var(--bg-subtle)] last:border-b-0">
+      <dt className="text-[11px] text-[var(--text-muted)] shrink-0">{label}</dt>
+      <dd className="text-[11px] text-[var(--text-primary)] text-right break-all">{value}</dd>
     </div>
   );
 }
@@ -315,16 +315,16 @@ export default function DomainWizardModal({ organizationName, onCancel, onCreate
         aria-modal="true"
         aria-labelledby="domain-wizard-title"
         data-testid="domain-wizard"
-        className="bg-[#13161C] border border-[#2A2F3E] sm:rounded-xl w-full sm:max-w-[1000px] min-h-screen sm:min-h-0 sm:max-h-[90vh] flex flex-col shadow-2xl"
+        className="bg-[var(--bg-surface)] border border-[var(--border)] sm:rounded-xl w-full sm:max-w-[1000px] min-h-screen sm:min-h-0 sm:max-h-[90vh] flex flex-col shadow-2xl"
       >
         {/* ── Sticky header ── */}
-        <div className="shrink-0 border-b border-[#2A2F3E] px-4 sm:px-6 py-4 bg-[#13161C] sm:rounded-t-xl">
+        <div className="shrink-0 border-b border-[var(--border)] px-4 sm:px-6 py-4 bg-[var(--bg-surface)] sm:rounded-t-xl">
           <div className="flex items-start gap-3">
             <div className="min-w-0">
-              <h2 id="domain-wizard-title" className="text-base font-semibold text-[#E8EAF0]">
+              <h2 id="domain-wizard-title" className="text-base font-semibold text-[var(--text-primary)]">
                 Add a domain
               </h2>
-              <p className="text-[11px] text-[#8B92A8] mt-0.5">
+              <p className="text-[11px] text-[var(--text-secondary)] mt-0.5">
                 Provision the domain, then publish and verify its DNS records.
               </p>
             </div>
@@ -332,7 +332,7 @@ export default function DomainWizardModal({ organizationName, onCancel, onCreate
               type="button"
               onClick={requestClose}
               aria-label="Close add domain"
-              className="ml-auto p-1.5 rounded text-[#8B92A8] hover:text-[#E8EAF0] hover:bg-[#1A1E26]"
+              className="ml-auto p-1.5 rounded text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-elevated)]"
             >
               <X size={16} />
             </button>
@@ -346,16 +346,16 @@ export default function DomainWizardModal({ organizationName, onCancel, onCreate
                   aria-current={i === stage ? "step" : undefined}
                   className={`inline-flex items-center gap-1.5 px-2 py-1 rounded text-[11px] whitespace-nowrap ${
                     i === stage
-                      ? "bg-[#4F7CFF]/15 text-[#4F7CFF]"
+                      ? "bg-[var(--accent)]/15 text-[var(--accent)]"
                       : i < stage
-                      ? "text-[#34D399]"
-                      : "text-[#555D73]"
+                      ? "text-[var(--success)]"
+                      : "text-[var(--text-muted)]"
                   }`}
                 >
                   {i < stage ? <Check size={11} /> : <span className="font-mono">{i + 1}</span>}
                   <span className="hidden sm:inline">{label}</span>
                 </span>
-                {i < STAGES.length - 1 && <span className="text-[#2A2F3E]">/</span>}
+                {i < STAGES.length - 1 && <span className="text-[var(--border)]">/</span>}
               </li>
             ))}
           </ol>
@@ -370,12 +370,12 @@ export default function DomainWizardModal({ organizationName, onCancel, onCreate
               tabIndex={-1}
               role="alert"
               data-testid="wizard-error-summary"
-              className="mb-5 rounded-lg border border-[#F87171]/40 bg-[#F87171]/10 px-3 py-2.5"
+              className="mb-5 rounded-lg border border-[var(--danger)]/40 bg-[var(--danger)]/10 px-3 py-2.5"
             >
-              <p className="flex items-center gap-1.5 text-xs font-medium text-[#F87171]">
+              <p className="flex items-center gap-1.5 text-xs font-medium text-[var(--danger)]">
                 <AlertTriangle size={13} /> There is a problem
               </p>
-              <ul className="mt-1.5 space-y-0.5 text-[11px] text-[#F87171]">
+              <ul className="mt-1.5 space-y-0.5 text-[11px] text-[var(--danger)]">
                 {submitError && <li>{submitError.message}</li>}
                 {errorList.map(([field, msg]) => (
                   <li key={field}>{msg}</li>
@@ -388,8 +388,8 @@ export default function DomainWizardModal({ organizationName, onCancel, onCreate
           {stage === 0 && (
             <div className="flex flex-col gap-5 max-w-2xl">
               <div className="flex flex-col gap-1.5">
-                <label htmlFor="wizard-domain-name" className="text-xs font-medium text-[#E8EAF0]">
-                  Domain name <span className="text-[#F87171]">*</span>
+                <label htmlFor="wizard-domain-name" className="text-xs font-medium text-[var(--text-primary)]">
+                  Domain name <span className="text-[var(--danger)]">*</span>
                 </label>
                 <input
                   id="wizard-domain-name"
@@ -403,25 +403,25 @@ export default function DomainWizardModal({ organizationName, onCancel, onCreate
                   aria-invalid={errors.name ? true : undefined}
                   aria-describedby="wizard-domain-name-preview"
                   onChange={(e) => setState((s) => ({ ...s, name: e.target.value }))}
-                  className="px-3 py-2 bg-[#1A1E26] border border-[#2A2F3E] rounded-lg text-[#E8EAF0] text-sm font-mono"
+                  className="px-3 py-2 bg-[var(--bg-elevated)] border border-[var(--border)] rounded-lg text-[var(--text-primary)] text-sm font-mono"
                 />
                 <p id="wizard-domain-name-preview" className="text-[11px]" data-testid="normalization-preview">
                   {state.name.trim() === "" ? (
-                    <span className="text-[#555D73]">Enter the domain exactly as it is registered.</span>
+                    <span className="text-[var(--text-muted)]">Enter the domain exactly as it is registered.</span>
                   ) : preview.error ? (
-                    <span className="text-[#F87171]">{preview.error}</span>
+                    <span className="text-[var(--danger)]">{preview.error}</span>
                   ) : (
-                    <span className="text-[#8B92A8]">
+                    <span className="text-[var(--text-secondary)]">
                       Will be saved as{" "}
-                      <span className="font-mono text-[#34D399]">{preview.normalized}</span>
+                      <span className="font-mono text-[var(--success)]">{preview.normalized}</span>
                     </span>
                   )}
                 </p>
               </div>
 
               <div className="flex flex-col gap-1.5">
-                <label htmlFor="wizard-domain-description" className="text-xs font-medium text-[#E8EAF0]">
-                  Description <span className="text-[#555D73] font-normal">(optional)</span>
+                <label htmlFor="wizard-domain-description" className="text-xs font-medium text-[var(--text-primary)]">
+                  Description <span className="text-[var(--text-muted)] font-normal">(optional)</span>
                 </label>
                 <textarea
                   id="wizard-domain-description"
@@ -431,15 +431,15 @@ export default function DomainWizardModal({ organizationName, onCancel, onCreate
                   aria-invalid={errors.description ? true : undefined}
                   aria-describedby="wizard-domain-description-count"
                   onChange={(e) => setState((s) => ({ ...s, description: e.target.value }))}
-                  className="px-3 py-2 bg-[#1A1E26] border border-[#2A2F3E] rounded-lg text-[#E8EAF0] text-xs resize-y"
+                  className="px-3 py-2 bg-[var(--bg-elevated)] border border-[var(--border)] rounded-lg text-[var(--text-primary)] text-xs resize-y"
                 />
-                <p id="wizard-domain-description-count" className="text-[11px] text-[#555D73]">
+                <p id="wizard-domain-description-count" className="text-[11px] text-[var(--text-muted)]">
                   {state.description.length} / {MAX_DESCRIPTION_LEN}
                 </p>
               </div>
 
               <div className="flex flex-col gap-1.5">
-                <label htmlFor="wizard-domain-org" className="text-xs font-medium text-[#E8EAF0]">
+                <label htmlFor="wizard-domain-org" className="text-xs font-medium text-[var(--text-primary)]">
                   Organization
                 </label>
                 {/*
@@ -452,15 +452,15 @@ export default function DomainWizardModal({ organizationName, onCancel, onCreate
                   type="text"
                   readOnly
                   value={organizationName || plan?.plan || "Your organization"}
-                  className="px-3 py-2 bg-[#0F1218] border border-[#2A2F3E] rounded-lg text-[#8B92A8] text-xs cursor-not-allowed"
+                  className="px-3 py-2 bg-[var(--bg-base)] border border-[var(--border)] rounded-lg text-[var(--text-secondary)] text-xs cursor-not-allowed"
                 />
-                <p className="text-[11px] text-[#555D73]">
+                <p className="text-[11px] text-[var(--text-muted)]">
                   Domains are always created in your own organization.
                 </p>
               </div>
 
               <fieldset className="flex flex-col gap-2">
-                <legend className="text-xs font-medium text-[#E8EAF0] mb-1">Initial status</legend>
+                <legend className="text-xs font-medium text-[var(--text-primary)] mb-1">Initial status</legend>
                 {(["active", "disabled"] as const).map((value) => (
                   <label key={value} className="flex items-start gap-2 cursor-pointer">
                     <input
@@ -469,11 +469,11 @@ export default function DomainWizardModal({ organizationName, onCancel, onCreate
                       value={value}
                       checked={state.status === value}
                       onChange={() => setState((s) => ({ ...s, status: value }))}
-                      className="mt-0.5 accent-[#4F7CFF]"
+                      className="mt-0.5 accent-[var(--accent)]"
                     />
-                    <span className="text-xs text-[#E8EAF0]">
+                    <span className="text-xs text-[var(--text-primary)]">
                       {value === "active" ? "Active" : "Disabled"}
-                      <span className="block text-[11px] text-[#555D73]">
+                      <span className="block text-[11px] text-[var(--text-muted)]">
                         {value === "active"
                           ? "Mail can be delivered once DNS is published and verified."
                           : "Created but not accepting mail. You can enable it later."}
@@ -490,15 +490,15 @@ export default function DomainWizardModal({ organizationName, onCancel, onCreate
             <div className="flex flex-col gap-5">
               {/* Plan summary card */}
               <div
-                className="rounded-lg border border-[#2A2F3E] bg-[#0F1218] p-3.5"
+                className="rounded-lg border border-[var(--border)] bg-[var(--bg-base)] p-3.5"
                 data-testid="plan-summary"
               >
                 {capacityLoading ? (
-                  <p className="text-[11px] text-[#8B92A8] flex items-center gap-1.5">
+                  <p className="text-[11px] text-[var(--text-secondary)] flex items-center gap-1.5">
                     <Loader2 size={12} className="animate-spin" /> Loading your plan…
                   </p>
                 ) : capacityError || !plan ? (
-                  <p className="text-[11px] text-[#F87171] flex items-center gap-1.5" role="alert">
+                  <p className="text-[11px] text-[var(--danger)] flex items-center gap-1.5" role="alert">
                     <AlertTriangle size={12} />
                     Your plan allowance could not be loaded, so limits cannot be validated here.
                     Leave the controls on <strong>Inherit organization plan</strong> or try again.
@@ -506,56 +506,56 @@ export default function DomainWizardModal({ organizationName, onCancel, onCreate
                 ) : (
                   <>
                     <div className="flex items-center gap-2 mb-3">
-                      <span className="text-xs font-medium text-[#E8EAF0]">Organization plan</span>
-                      <span className="px-1.5 py-0.5 rounded bg-[#4F7CFF]/15 text-[#4F7CFF] text-[10px] capitalize">
+                      <span className="text-xs font-medium text-[var(--text-primary)]">Organization plan</span>
+                      <span className="px-1.5 py-0.5 rounded bg-[var(--accent)]/15 text-[var(--accent)] text-[10px] capitalize">
                         {plan.plan || "unknown"}
                       </span>
                     </div>
                     <dl className="grid grid-cols-2 lg:grid-cols-4 gap-x-5 gap-y-2.5 text-[11px]">
                       <div>
-                        <dt className="text-[#555D73]">Domains</dt>
-                        <dd className="text-[#E8EAF0]">
+                        <dt className="text-[var(--text-muted)]">Domains</dt>
+                        <dd className="text-[var(--text-primary)]">
                           {plan.domains_used.toLocaleString()} /{" "}
                           {formatAllowance(plan.max_domains, plan.max_domains_unlimited)}
                         </dd>
-                        <dd className="text-[#8B92A8]">
+                        <dd className="text-[var(--text-secondary)]">
                           {formatRemaining(plan.remaining_domains)} remaining
                         </dd>
                       </div>
                       <div>
-                        <dt className="text-[#555D73]">Mailboxes</dt>
-                        <dd className="text-[#E8EAF0]">
+                        <dt className="text-[var(--text-muted)]">Mailboxes</dt>
+                        <dd className="text-[var(--text-primary)]">
                           {plan.mailboxes_used.toLocaleString()} /{" "}
                           {formatAllowance(plan.max_mailboxes, plan.max_mailboxes_unlimited)}
                         </dd>
-                        <dd className="text-[#8B92A8]" data-testid="remaining-mailboxes">
+                        <dd className="text-[var(--text-secondary)]" data-testid="remaining-mailboxes">
                           {formatRemaining(plan.remaining_mailboxes)} remaining
                         </dd>
                       </div>
                       <div>
-                        <dt className="text-[#555D73]">Aliases</dt>
-                        <dd className="text-[#E8EAF0]">
+                        <dt className="text-[var(--text-muted)]">Aliases</dt>
+                        <dd className="text-[var(--text-primary)]">
                           {plan.aliases_used.toLocaleString()} /{" "}
                           {plan.max_aliases_unlimited ? "Unlimited" : "—"}
                         </dd>
-                        <dd className="text-[#8B92A8]" data-testid="remaining-aliases">
+                        <dd className="text-[var(--text-secondary)]" data-testid="remaining-aliases">
                           {formatRemaining(plan.remaining_aliases)} remaining
                         </dd>
                       </div>
                       <div>
-                        <dt className="text-[#555D73]">Storage used</dt>
-                        <dd className="text-[#E8EAF0]">{formatBytesShort(plan.storage_used_bytes)}</dd>
+                        <dt className="text-[var(--text-muted)]">Storage used</dt>
+                        <dd className="text-[var(--text-primary)]">{formatBytesShort(plan.storage_used_bytes)}</dd>
                         {/*
                           READ-ONLY on purpose: no delivery or JMAP path
                           enforces an organization storage ceiling, so a
                           writable control here would not limit anything.
                         */}
-                        <dd className="text-[#8B92A8]">
+                        <dd className="text-[var(--text-secondary)]">
                           {formatBytesShort(plan.storage_allocated_bytes)} allocated
                         </dd>
                       </div>
                     </dl>
-                    <p className="mt-3 text-[10px] text-[#555D73] flex items-start gap-1.5">
+                    <p className="mt-3 text-[10px] text-[var(--text-muted)] flex items-start gap-1.5">
                       <Info size={11} className="mt-px shrink-0" />
                       Mailboxes already reserved by other domains: {plan.mailboxes_allocated.toLocaleString()}.
                       Storage figures are reported for information and are not a writable cap.
@@ -621,18 +621,18 @@ export default function DomainWizardModal({ organizationName, onCancel, onCreate
           {stage === 2 && (
             <div className="flex flex-col gap-5">
               {/* DKIM */}
-              <section className="rounded-lg border border-[#2A2F3E] bg-[#0F1218] p-3.5 flex flex-col gap-3">
-                <h3 className="text-xs font-medium text-[#E8EAF0]">DKIM signing</h3>
+              <section className="rounded-lg border border-[var(--border)] bg-[var(--bg-base)] p-3.5 flex flex-col gap-3">
+                <h3 className="text-xs font-medium text-[var(--text-primary)]">DKIM signing</h3>
                 <label className="flex items-start gap-2 cursor-pointer">
                   <input
                     type="checkbox"
                     checked={state.dkimGenerate}
                     onChange={(e) => setState((s) => ({ ...s, dkimGenerate: e.target.checked }))}
-                    className="mt-0.5 accent-[#4F7CFF]"
+                    className="mt-0.5 accent-[var(--accent)]"
                   />
-                  <span className="text-xs text-[#E8EAF0]">
+                  <span className="text-xs text-[var(--text-primary)]">
                     Generate DKIM during provisioning
-                    <span className="block text-[11px] text-[#555D73]">
+                    <span className="block text-[11px] text-[var(--text-muted)]">
                       The key pair is created in the same transaction as the domain. Only the
                       public DNS record is shown — the private key never leaves the server.
                     </span>
@@ -640,7 +640,7 @@ export default function DomainWizardModal({ organizationName, onCancel, onCreate
                 </label>
                 {state.dkimGenerate && (
                   <div className="flex flex-col gap-1.5 max-w-xs">
-                    <label htmlFor="wizard-dkim-selector" className="text-[11px] text-[#8B92A8]">
+                    <label htmlFor="wizard-dkim-selector" className="text-[11px] text-[var(--text-secondary)]">
                       Selector
                     </label>
                     <input
@@ -651,10 +651,10 @@ export default function DomainWizardModal({ organizationName, onCancel, onCreate
                       aria-invalid={errors.dkimSelector ? true : undefined}
                       aria-describedby={errors.dkimSelector ? "wizard-dkim-selector-error" : undefined}
                       onChange={(e) => setState((s) => ({ ...s, dkimSelector: e.target.value }))}
-                      className="px-2.5 py-2 bg-[#1A1E26] border border-[#2A2F3E] rounded-lg text-[#E8EAF0] text-xs font-mono"
+                      className="px-2.5 py-2 bg-[var(--bg-elevated)] border border-[var(--border)] rounded-lg text-[var(--text-primary)] text-xs font-mono"
                     />
                     {errors.dkimSelector && (
-                      <p id="wizard-dkim-selector-error" role="alert" className="text-[11px] text-[#F87171]">
+                      <p id="wizard-dkim-selector-error" role="alert" className="text-[11px] text-[var(--danger)]">
                         {errors.dkimSelector}
                       </p>
                     )}
@@ -668,27 +668,27 @@ export default function DomainWizardModal({ organizationName, onCancel, onCreate
                 write, so a switch here would change nothing.
               */}
               <section
-                className="rounded-lg border border-[#2A2F3E] bg-[#0F1218] p-3.5"
+                className="rounded-lg border border-[var(--border)] bg-[var(--bg-base)] p-3.5"
                 data-testid="jmap-info"
               >
-                <h3 className="text-xs font-medium text-[#E8EAF0] mb-2">JMAP</h3>
+                <h3 className="text-xs font-medium text-[var(--text-primary)] mb-2">JMAP</h3>
                 <dl className="text-[11px] space-y-1.5">
                   <div className="flex justify-between gap-3">
-                    <dt className="text-[#555D73]">Discovery URL</dt>
-                    <dd className="text-[#E8EAF0] font-mono break-all">
+                    <dt className="text-[var(--text-muted)]">Discovery URL</dt>
+                    <dd className="text-[var(--text-primary)] font-mono break-all">
                       {typeof window !== "undefined" ? window.location.origin : ""}/.well-known/jmap
                     </dd>
                   </div>
                 </dl>
-                <p className="mt-2 text-[10px] text-[#555D73]">
+                <p className="mt-2 text-[10px] text-[var(--text-muted)]">
                   JMAP is enabled server-wide. Accounts for this domain appear automatically as
                   its mailboxes are created — there is nothing to switch on here.
                 </p>
               </section>
 
               {/* Review */}
-              <section className="rounded-lg border border-[#2A2F3E] bg-[#0F1218] p-3.5">
-                <h3 className="text-xs font-medium text-[#E8EAF0] mb-2">Review</h3>
+              <section className="rounded-lg border border-[var(--border)] bg-[var(--bg-base)] p-3.5">
+                <h3 className="text-xs font-medium text-[var(--text-primary)] mb-2">Review</h3>
                 <dl data-testid="wizard-review">
                   <SummaryRow label="Domain" value={<span className="font-mono">{preview.normalized || "—"}</span>} />
                   {state.description.trim() && <SummaryRow label="Description" value={state.description.trim()} />}
@@ -716,8 +716,8 @@ export default function DomainWizardModal({ organizationName, onCancel, onCreate
                     }
                   />
                 </dl>
-                <p className="mt-3 text-[11px] text-[#8B92A8] flex items-start gap-1.5">
-                  <Info size={12} className="mt-px shrink-0 text-[#4F7CFF]" />
+                <p className="mt-3 text-[11px] text-[var(--text-secondary)] flex items-start gap-1.5">
+                  <Info size={12} className="mt-px shrink-0 text-[var(--accent)]" />
                   Next step: publish the DNS records for this domain with your DNS provider, then
                   verify them. Orvix never changes public DNS for you.
                 </p>
@@ -727,11 +727,11 @@ export default function DomainWizardModal({ organizationName, onCancel, onCreate
         </div>
 
         {/* ── Sticky footer ── */}
-        <div className="shrink-0 border-t border-[#2A2F3E] px-4 sm:px-6 py-3.5 bg-[#13161C] sm:rounded-b-xl flex flex-wrap items-center gap-2">
+        <div className="shrink-0 border-t border-[var(--border)] px-4 sm:px-6 py-3.5 bg-[var(--bg-surface)] sm:rounded-b-xl flex flex-wrap items-center gap-2">
           <button
             type="button"
             onClick={requestClose}
-            className="px-3 py-2 text-xs text-[#8B92A8] hover:text-[#E8EAF0] rounded-lg border border-[#2A2F3E]"
+            className="px-3 py-2 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-lg border border-[var(--border)]"
           >
             Cancel
           </button>
@@ -740,7 +740,7 @@ export default function DomainWizardModal({ organizationName, onCancel, onCreate
               <button
                 type="button"
                 onClick={goBack}
-                className="inline-flex items-center gap-1 px-3 py-2 text-xs text-[#8B92A8] hover:text-[#E8EAF0] rounded-lg border border-[#2A2F3E]"
+                className="inline-flex items-center gap-1 px-3 py-2 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-lg border border-[var(--border)]"
               >
                 <ChevronLeft size={13} /> Back
               </button>
@@ -749,7 +749,7 @@ export default function DomainWizardModal({ organizationName, onCancel, onCreate
               <button
                 type="button"
                 onClick={goNext}
-                className="inline-flex items-center gap-1 px-3.5 py-2 bg-[#4F7CFF] text-white rounded-lg text-xs hover:bg-[#3B5FD9]"
+                className="inline-flex items-center gap-1 px-3.5 py-2 bg-[var(--accent)] text-white rounded-lg text-xs hover:bg-[var(--accent-hover)]"
               >
                 Continue <ChevronRight size={13} />
               </button>
@@ -759,7 +759,7 @@ export default function DomainWizardModal({ organizationName, onCancel, onCreate
                 onClick={submit}
                 disabled={submitting}
                 data-testid="wizard-submit"
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-[#4F7CFF] text-white rounded-lg text-xs hover:bg-[#3B5FD9] disabled:opacity-60 disabled:cursor-not-allowed"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-[var(--accent)] text-white rounded-lg text-xs hover:bg-[var(--accent-hover)] disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 {submitting && <Loader2 size={13} className="animate-spin" />}
                 {submitting ? "Creating…" : "Create Domain & Review DNS"}
@@ -777,25 +777,25 @@ export default function DomainWizardModal({ organizationName, onCancel, onCreate
           aria-modal="true"
           aria-labelledby="discard-title"
         >
-          <div className="bg-[#13161C] border border-[#2A2F3E] rounded-xl p-5 w-96 max-w-full">
-            <h3 id="discard-title" className="text-sm font-semibold text-[#E8EAF0] mb-2">
+          <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-5 w-96 max-w-full">
+            <h3 id="discard-title" className="text-sm font-semibold text-[var(--text-primary)] mb-2">
               Discard this domain?
             </h3>
-            <p className="text-xs text-[#8B92A8] mb-5">
+            <p className="text-xs text-[var(--text-secondary)] mb-5">
               You have entered details that have not been saved. Closing now discards them.
             </p>
             <div className="flex gap-2 justify-end">
               <button
                 type="button"
                 onClick={() => setConfirmDiscard(false)}
-                className="px-3 py-1.5 text-xs text-[#8B92A8] hover:text-[#E8EAF0] rounded-lg border border-[#2A2F3E]"
+                className="px-3 py-1.5 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-lg border border-[var(--border)]"
               >
                 Keep editing
               </button>
               <button
                 type="button"
                 onClick={onCancel}
-                className="px-3 py-1.5 text-xs rounded-lg bg-[#F87171] text-white hover:bg-red-500"
+                className="px-3 py-1.5 text-xs rounded-lg bg-[var(--danger)] text-white hover:bg-[var(--danger)]"
               >
                 Discard
               </button>

@@ -70,7 +70,25 @@ type QueueFilter struct {
 
 // AdminQueueList serves GET /api/v1/admin/queue/messages
 // Lists queue messages with filtering, sorting, pagination.
+// coreMailUnavailableResponse writes the stable, sanitized 503 contract for
+// every queue-admin endpoint when CoreMail is intentionally disabled
+// (h.cfg.CoreMail.Enabled == false — the authoritative production
+// configuration flag, never inferred from a missing table). "Disabled" is
+// never reported as an empty queue: the two states are operationally
+// different (nothing to see vs. the feature isn't running at all), and
+// collapsing them would hide a real deployment/config problem behind a
+// falsely-reassuring empty list.
+func coreMailUnavailableResponse(c fiber.Ctx) error {
+	return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+		"error": "mail queue unavailable",
+		"code":  "COREMAIL_DISABLED",
+	})
+}
+
 func (h *Handler) AdminQueueList(c fiber.Ctx) error {
+	if !h.cfg.CoreMail.Enabled {
+		return coreMailUnavailableResponse(c)
+	}
 	var f QueueFilter
 	f.Status = c.Query("status", "")
 	f.Domain = c.Query("domain", "")
