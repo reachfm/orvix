@@ -30,6 +30,16 @@ type Config struct {
 	Monitoring MonitoringConfig `mapstructure:"monitoring"`
 	CoreMail   CoreMailConfig   `mapstructure:"coremail"`
 	Outbound   OutboundConfig   `mapstructure:"outbound"`
+	Imports    ImportsConfig    `mapstructure:"imports"`
+}
+
+// ImportsConfig controls the platform import/migration subsystem.
+type ImportsConfig struct {
+	// StagingDir is the confined directory used to stage uploaded source
+	// files before an import is validated and executed. It must be a
+	// dedicated directory owned by the orvix process; the staging service
+	// rejects traversal and symlink escapes.
+	StagingDir string `mapstructure:"staging_dir"`
 }
 
 // CoreMailConfig controls the native CoreMail protocol runtime.
@@ -599,6 +609,9 @@ func Defaults() *Config {
 			VAPIDSubject:             "mailto:admin@localhost",
 			MaxAttachmentSizeMB:      25,
 			MaxAttachmentsPerMessage: 20,
+		},
+		Imports: ImportsConfig{
+			StagingDir: "/var/lib/orvix/imports",
 		},
 		License: LicenseConfig{
 			OfflineMode: true,

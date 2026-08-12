@@ -73,7 +73,7 @@ func createRefreshSession(t *testing.T, a *Authenticator, userID uint) string {
 	if err != nil {
 		t.Fatalf("GenerateAccessTokenWithJTI: %v", err)
 	}
-	refresh, _, err := a.GenerateRefreshToken(userID, jti)
+	refresh, _, err := a.GenerateRefreshToken(userID, jti, "", "")
 	if err != nil {
 		t.Fatalf("GenerateRefreshToken: %v", err)
 	}
@@ -322,7 +322,7 @@ func TestRefresh_TOCTOU_RoleVersionAtomic(t *testing.T) {
 	// new role and validate successfully.
 	accessForSession, jti, _, _ := a.GenerateAccessTokenWithJTI(uid, RoleTenantReadOnly)
 	_ = accessForSession
-	refresh, _, _ := a.GenerateRefreshToken(uid, jti)
+	refresh, _, _ := a.GenerateRefreshToken(uid, jti, "", "")
 	access2, _, _, err := a.RefreshToken(context.Background(), refresh)
 	if err != nil {
 		t.Fatalf("RefreshToken after update: %v", err)

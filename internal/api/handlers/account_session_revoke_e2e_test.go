@@ -59,14 +59,14 @@ func TestAccountSessionRevokeE2E(t *testing.T) {
 	if err != nil {
 		t.Fatalf("issue A: %v", err)
 	}
-	if _, _, err := authr.GenerateRefreshToken(uid, jtiA); err != nil {
+	if _, _, err := authr.GenerateRefreshToken(uid, jtiA, "", ""); err != nil {
 		t.Fatalf("refresh A: %v", err)
 	}
 	tokenB, jtiB, _, err := authr.GenerateAccessTokenWithJTI(uid, auth.RoleTenantAdmin)
 	if err != nil {
 		t.Fatalf("issue B: %v", err)
 	}
-	if _, _, err := authr.GenerateRefreshToken(uid, jtiB); err != nil {
+	if _, _, err := authr.GenerateRefreshToken(uid, jtiB, "", ""); err != nil {
 		t.Fatalf("refresh B: %v", err)
 	}
 

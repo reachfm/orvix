@@ -243,4 +243,62 @@ func (h *Handler) ResetAdminMailboxPassword(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"status": "ok", "password": newPassword, "mailbox_id": id})
 }
 
+// PostAdminMailboxRestore handles POST /admin/mailboxes/:id/restore.
+func (h *Handler) PostAdminMailboxRestore(c fiber.Ctx) error {
+	if h.mailboxAdminSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "mailbox admin service not available"})
+	}
+	tenantID, err := auth.RequireTenantID(c)
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": err.Error()})
+	}
+	idVal, err := strconv.ParseUint(c.Params("id"), 10, 64)
+	if err != nil || idVal == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid mailbox id"})
+	}
+	m, err := h.mailboxAdminSvc.RestoreMailbox(c.Context(), uint(idVal), tenantID)
+	if err != nil {
+		switch err {
+		case mailbox.ErrMailboxNotFound:
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": err.Error()})
+		case mailbox.ErrMailboxNotDeleted, mailbox.ErrMailboxEmailConflict:
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": err.Error()})
+		default:
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
+		}
+	}
+	return c.JSON(fiber.Map{"mailbox": m})
+}
+
+// DeleteAdminMailboxPurge handles DELETE /admin/mailboxes/:id/purge — a
+// permanent, irreversible removal of an already soft-deleted mailbox.
+func (h *Handler) DeleteAdminMailboxPurge(c fiber.Ctx) error {
+	if h.mailboxAdminSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "mailbox admin service not available"})
+	}
+	tenantID, err := auth.RequireTenantID(c)
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": err.Error()})
+	}
+	idVal, err := strconv.ParseUint(c.Params("id"), 10, 64)
+	if err != nil || idVal == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid mailbox id"})
+	}
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	c.Bind().JSON(&req)
+	if err := h.mailboxAdminSvc.PurgeMailbox(c.Context(), uint(idVal), tenantID, req.Reason); err != nil {
+		switch err {
+		case mailbox.ErrMailboxNotFound:
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": err.Error()})
+		case mailbox.ErrMailboxNotDeleted:
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": err.Error()})
+		default:
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
+		}
+	}
+	return c.JSON(fiber.Map{"status": "purged"})
+}
+
 var _ = rbac.Permission("") // ensure import used

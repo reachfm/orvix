@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/coremail/delivery"
 	"github.com/orvix/orvix/internal/coremail/push"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
@@ -32,6 +33,15 @@ func (h *Handler) SetQueueEngine(qe *queue.QueueEngine) {
 
 func (h *Handler) SetPushNotifier(pn *push.PushNotifier) {
 	h.pushNotifier = pn
+}
+
+// SetAttemptHistoryRepo wires the immutable delivery-attempt history
+// store (Milestone 8) used by the admin queue history/export
+// endpoints — the same table the delivery worker already writes to
+// (internal/coremail/delivery/history.go), not a separate history
+// store.
+func (h *Handler) SetAttemptHistoryRepo(r delivery.AttemptHistoryRepository) {
+	h.historyRepo = r
 }
 
 func (h *Handler) webmailService() *webmailmgmt.Service {

@@ -707,6 +707,16 @@ func (s *Service) ProvisionDomain(ctx context.Context, req CreateDomainRequest, 
 		created.DKIMSelector = dkimResult.Selector
 	}
 
+	if s.webhooks != nil {
+		if _, err := s.webhooks.Publish(ctx, repo.db, "domain.created", fmt.Sprintf("domain:%d", created.ID), tenantID, map[string]any{
+			"domain_id": created.ID,
+			"name":      created.Name,
+			"status":    created.Status,
+		}, created.CreatedAt); err != nil {
+			return nil, fmt.Errorf("publish domain webhook event: %w", err)
+		}
+	}
+
 	if s.auditStore != nil {
 		// Canonical provisioning audit event. The payload records only the
 		// public provisioning decision: domain, status, resolved limits and

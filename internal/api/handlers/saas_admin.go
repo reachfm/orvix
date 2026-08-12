@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/api/middleware"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/dbdialect"
 )
@@ -50,6 +51,11 @@ type tenantOpsRow struct {
 }
 
 func isSuperRole(c fiber.Ctx) bool {
+	// A support request retains the operator's platform role but is
+	// deliberately tenant-scoped for the lifetime of this request.
+	if _, ok := middleware.SupportContext(c); ok {
+		return false
+	}
 	role, _ := c.Locals("role").(auth.Role)
 	return role == auth.RoleSuperAdmin || role == auth.RolePlatformSuperAdmin
 }

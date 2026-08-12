@@ -258,6 +258,82 @@ func TestAttemptHistoryListEmpty(t *testing.T) {
 	}
 }
 
+// ── Delivery History (Milestone 8) ───────────────────────────
+
+func TestAttemptHistoryListRecent_CursorPagination(t *testing.T) {
+	db := historyDB(t)
+	repo := NewAttemptHistorySQLRepo(db)
+	ctx := context.Background()
+
+	for i := 1; i <= 5; i++ {
+		a := &DeliveryAttempt{QueueEntryID: uint(i), AttemptNumber: 1, Status: "success", RemoteHost: "mx.example.com"}
+		if err := repo.RecordAttempt(ctx, a, nil); err != nil {
+			t.Fatalf("record attempt %d: %v", i, err)
+		}
+	}
+
+	page1, err := repo.ListRecent(ctx, HistoryFilter{Limit: 2}, nil)
+	if err != nil {
+		t.Fatalf("list recent page 1: %v", err)
+	}
+	if len(page1) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(page1))
+	}
+	if page1[0].QueueEntryID != 1 || page1[1].QueueEntryID != 2 {
+		t.Fatalf("expected ascending order starting at entry 1, got %+v", page1)
+	}
+
+	page2, err := repo.ListRecent(ctx, HistoryFilter{Limit: 2, AfterID: page1[len(page1)-1].ID}, nil)
+	if err != nil {
+		t.Fatalf("list recent page 2: %v", err)
+	}
+	if len(page2) != 2 || page2[0].QueueEntryID != 3 {
+		t.Fatalf("expected page 2 to continue from entry 3, got %+v", page2)
+	}
+	// No overlap between pages.
+	if page1[len(page1)-1].ID >= page2[0].ID {
+		t.Fatalf("expected page 2's first ID to be strictly greater than page 1's last, got %d vs %d", page2[0].ID, page1[len(page1)-1].ID)
+	}
+}
+
+func TestAttemptHistoryListRecent_FiltersByStatusAndRemoteHost(t *testing.T) {
+	db := historyDB(t)
+	repo := NewAttemptHistorySQLRepo(db)
+	ctx := context.Background()
+
+	repo.RecordAttempt(ctx, &DeliveryAttempt{QueueEntryID: 1, AttemptNumber: 1, Status: "success", RemoteHost: "mx1.example.com"}, nil)
+	repo.RecordAttempt(ctx, &DeliveryAttempt{QueueEntryID: 2, AttemptNumber: 1, Status: "deferred", RemoteHost: "mx1.example.com"}, nil)
+	repo.RecordAttempt(ctx, &DeliveryAttempt{QueueEntryID: 3, AttemptNumber: 1, Status: "success", RemoteHost: "mx2.example.com"}, nil)
+
+	byStatus, err := repo.ListRecent(ctx, HistoryFilter{Status: "success"}, nil)
+	if err != nil {
+		t.Fatalf("list by status: %v", err)
+	}
+	if len(byStatus) != 2 {
+		t.Fatalf("expected 2 success attempts, got %d", len(byStatus))
+	}
+
+	byHost, err := repo.ListRecent(ctx, HistoryFilter{RemoteHost: "mx2.example.com"}, nil)
+	if err != nil {
+		t.Fatalf("list by host: %v", err)
+	}
+	if len(byHost) != 1 || byHost[0].QueueEntryID != 3 {
+		t.Fatalf("expected exactly entry 3, got %+v", byHost)
+	}
+}
+
+func TestAttemptHistoryListRecent_EmptyReturnsNoRows(t *testing.T) {
+	db := historyDB(t)
+	repo := NewAttemptHistorySQLRepo(db)
+	attempts, err := repo.ListRecent(context.Background(), HistoryFilter{}, nil)
+	if err != nil {
+		t.Fatalf("list recent: %v", err)
+	}
+	if len(attempts) != 0 {
+		t.Fatalf("expected 0, got %d", len(attempts))
+	}
+}
+
 // ── Shutdown Manager Tests ───────────────────────────────────
 
 func TestShutdownManagerBeginEndJob(t *testing.T) {

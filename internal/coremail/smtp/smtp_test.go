@@ -1618,6 +1618,121 @@ func TestLocalInboundStillAccepted(t *testing.T) {
 	}
 }
 
+// ── mail_access_mode enforcement (Milestone 5) ──────────────────────
+
+func newAccessModeTestHandler(t *testing.T, authenticated bool, localDomains map[string]bool, modes map[string]string) (*CommandHandler, *Session) {
+	t.Helper()
+	cfg := DefaultConfig()
+	cfg.RequireAuthForSubmission = false
+	verify := func(ctx context.Context, username, password string) (string, bool) {
+		return username, true
+	}
+	auth := NewAuthenticator(NewFuncAuthBackend(verify))
+	session := NewSession("127.0.0.1:0", nil, cfg)
+	if authenticated {
+		session.Authenticated = true
+		session.State = StateAuthenticated
+	}
+	h := NewCommandHandler(cfg, auth, session)
+	h.SetLocalDomainChecker(func(ctx context.Context, domain string) (bool, error) {
+		return localDomains[domain], nil
+	})
+	h.SetMailAccessModeChecker(func(ctx context.Context, domain string) (string, error) {
+		if m, ok := modes[domain]; ok {
+			return m, nil
+		}
+		return string(coremail.MailAccessInternalExternal), nil
+	})
+	h.SetRecipientValidator(func(ctx context.Context, address string) (bool, error) { return true, nil })
+	h.SetSenderValidator(func(ctx context.Context, identity *AuthIdentity, from string) (bool, error) { return true, nil })
+	return h, session
+}
+
+func TestMailAccessMode_InternalOnlyRejectsExternalInbound(t *testing.T) {
+	h, _ := newAccessModeTestHandler(t, false,
+		map[string]bool{"internal.test": true},
+		map[string]string{"internal.test": string(coremail.MailAccessInternalOnly)},
+	)
+	h.Handle(context.Background(), parse(t, "EHLO test.com"))
+	h.Handle(context.Background(), parse(t, "MAIL FROM:<outsider@external.test>"))
+	resp := h.Handle(context.Background(), parse(t, "RCPT TO:<user@internal.test>"))
+	if resp.Code != ResponseExternalInboundBlocked.Code || resp.Message != ResponseExternalInboundBlocked.Message {
+		t.Fatalf("expected ResponseExternalInboundBlocked, got %d: %s", resp.Code, resp.Message)
+	}
+}
+
+func TestMailAccessMode_InternalOnlyAllowsLocalToLocal(t *testing.T) {
+	h, _ := newAccessModeTestHandler(t, false,
+		map[string]bool{"internal.test": true},
+		map[string]string{"internal.test": string(coremail.MailAccessInternalOnly)},
+	)
+	h.Handle(context.Background(), parse(t, "EHLO test.com"))
+	h.Handle(context.Background(), parse(t, "MAIL FROM:<sender@internal.test>"))
+	resp := h.Handle(context.Background(), parse(t, "RCPT TO:<user@internal.test>"))
+	if resp.Code != 250 {
+		t.Fatalf("expected local-to-local delivery to succeed, got %d: %s", resp.Code, resp.Message)
+	}
+}
+
+func TestMailAccessMode_InternalOnlyRejectsAuthenticatedExternalOutbound(t *testing.T) {
+	h, _ := newAccessModeTestHandler(t, true,
+		map[string]bool{"internal.test": true},
+		map[string]string{"internal.test": string(coremail.MailAccessInternalOnly)},
+	)
+	h.Handle(context.Background(), parse(t, "EHLO test.com"))
+	h.Handle(context.Background(), parse(t, "MAIL FROM:<sender@internal.test>"))
+	resp := h.Handle(context.Background(), parse(t, "RCPT TO:<external@other.test>"))
+	if resp.Code != ResponseExternalOutboundBlocked.Code || resp.Message != ResponseExternalOutboundBlocked.Message {
+		t.Fatalf("expected ResponseExternalOutboundBlocked, got %d: %s", resp.Code, resp.Message)
+	}
+}
+
+func TestMailAccessMode_InternalExternalAllowsExternalInboundAndOutbound(t *testing.T) {
+	h, _ := newAccessModeTestHandler(t, true,
+		map[string]bool{"internal.test": true},
+		map[string]string{"internal.test": string(coremail.MailAccessInternalExternal)},
+	)
+	h.Handle(context.Background(), parse(t, "EHLO test.com"))
+	h.Handle(context.Background(), parse(t, "MAIL FROM:<sender@internal.test>"))
+	resp := h.Handle(context.Background(), parse(t, "RCPT TO:<external@other.test>"))
+	if resp.Code != 250 {
+		t.Fatalf("expected internal_external outbound to succeed, got %d: %s", resp.Code, resp.Message)
+	}
+
+	h2, _ := newAccessModeTestHandler(t, false,
+		map[string]bool{"internal.test": true},
+		map[string]string{"internal.test": string(coremail.MailAccessInternalExternal)},
+	)
+	h2.Handle(context.Background(), parse(t, "EHLO test.com"))
+	h2.Handle(context.Background(), parse(t, "MAIL FROM:<outsider@external.test>"))
+	resp2 := h2.Handle(context.Background(), parse(t, "RCPT TO:<user@internal.test>"))
+	if resp2.Code != 250 {
+		t.Fatalf("expected internal_external inbound to succeed, got %d: %s", resp2.Code, resp2.Message)
+	}
+}
+
+func TestMailAccessMode_NilCheckerDisablesEnforcement(t *testing.T) {
+	// No SetMailAccessModeChecker call at all — must never panic and must
+	// never restrict mail beyond the pre-existing relay protection.
+	cfg := DefaultConfig()
+	cfg.RequireAuthForSubmission = false
+	verify := func(ctx context.Context, username, password string) (string, bool) { return username, true }
+	auth := NewAuthenticator(NewFuncAuthBackend(verify))
+	session := NewSession("127.0.0.1:0", nil, cfg)
+	session.Authenticated = true
+	session.State = StateAuthenticated
+	h := NewCommandHandler(cfg, auth, session)
+	h.SetLocalDomainChecker(func(ctx context.Context, domain string) (bool, error) { return domain == "internal.test", nil })
+	h.SetSenderValidator(func(ctx context.Context, identity *AuthIdentity, from string) (bool, error) { return true, nil })
+
+	h.Handle(context.Background(), parse(t, "EHLO test.com"))
+	h.Handle(context.Background(), parse(t, "MAIL FROM:<sender@internal.test>"))
+	resp := h.Handle(context.Background(), parse(t, "RCPT TO:<external@other.test>"))
+	if resp.Code != 250 {
+		t.Fatalf("expected unrestricted outbound when no access-mode checker is wired, got %d: %s", resp.Code, resp.Message)
+	}
+}
+
 func TestSMTPDATAStillWorksWithChunkingRemoved(t *testing.T) {
 	// Prove that removing CHUNKING from EHLO does not break DATA delivery.
 	addr, ms, _, _, cleanup := testIntegrationServer(t, false)

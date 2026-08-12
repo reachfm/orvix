@@ -27,6 +27,10 @@ import (
 	"github.com/orvix/orvix/internal/licensing"
 	"github.com/orvix/orvix/internal/licensingauthority"
 	"github.com/orvix/orvix/internal/observability"
+	"github.com/orvix/orvix/internal/platform/cluster"
+	"github.com/orvix/orvix/internal/platform/deliverability"
+	"github.com/orvix/orvix/internal/platform/relay"
+	"github.com/orvix/orvix/internal/platform/security"
 	"github.com/orvix/orvix/internal/policy"
 	"github.com/orvix/orvix/internal/ruler"
 	orvixruntime "github.com/orvix/orvix/internal/runtime"
@@ -72,6 +76,12 @@ type Module struct {
 	pop3sServer       *pop3.Server
 	jmapServer        *jmap.Server
 	workers           []*delivery.DeliveryWorker
+	// clusterSvc is the Milestone 10 node registry/placement/lease
+	// service. nil if schema init failed (never blocks startup).
+	clusterSvc *cluster.Service
+	// securitySvc is the Milestone 12 normalized security-event
+	// recorder. nil if schema init failed (never blocks startup).
+	securitySvc *security.Service
 
 	// pushNotifier is the Web Push (RFC 8030 / RFC 8291) dispatcher.
 	// It is constructed in initCore from cfg.CoreMail.VAPIDPublicKey
@@ -329,6 +339,7 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 		return err == nil, err
 	}
 	m.smtpServer.SetLocalDomainChecker(identity.IsLocalDomain)
+	m.smtpServer.SetMailAccessModeChecker(identity.MailAccessMode)
 	m.smtpServer.Observability = m.obs
 
 	// ── Submission SMTP (port 587, STARTTLS) ───────────────
@@ -364,6 +375,7 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 			m.submissionServer = smtp.NewServer(subCfg, subHandler, receiver)
 			m.submissionServer.TLSConfig = tlsCfg
 			m.submissionServer.SetLocalDomainChecker(identity.IsLocalDomain)
+			m.submissionServer.SetMailAccessModeChecker(identity.MailAccessMode)
 			m.submissionServer.SenderValidator = identity.ResolveSender
 			m.submissionServer.Observability = m.obs
 		}
@@ -459,6 +471,83 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 		}
 		transportCfg.TLSPolicy = parsed
 	}
+	// Outbound relay control plane (Milestone 7) — optional. A schema
+	// init failure disables relay routing for this run; every worker
+	// simply keeps its RelaySelector nil and delivers direct-to-MX
+	// exactly as before this integration existed.
+	relayRepo := relay.NewRepository(sqlDB)
+	var relayAdapter *relay.DeliveryAdapter
+	if err := relayRepo.EnsureSchema(context.Background()); err != nil {
+		if m.logger != nil {
+			m.logger.Warn("relay control plane schema init failed; outbound relay disabled", zap.Error(err))
+		}
+	} else {
+		relayAdapter = relay.NewDeliveryAdapter(relay.NewService(relayRepo, nil, nil))
+	}
+	tenantForRelay := func(entry *queue.QueueEntry) (uint, string) {
+		var tenantID uint
+		var mode string
+		row := sqlDB.QueryRowContext(context.Background(),
+			`SELECT m.tenant_id, COALESCE(d.mail_access_mode, 'internal_external')
+			 FROM coremail_mailboxes m JOIN coremail_domains d ON d.id = m.domain_id
+			 WHERE m.email = ?`, entry.FromAddress)
+		_ = row.Scan(&tenantID, &mode)
+		return tenantID, mode
+	}
+
+	// Deliverability control plane (Milestone 9) — optional, same
+	// fail-safe-to-disabled pattern as the relay control plane above.
+	deliverabilityRepo := deliverability.NewRepository(sqlDB)
+	var deliverabilityAdapter *deliverability.DeliveryAdapter
+	if err := deliverabilityRepo.EnsureSchema(context.Background()); err != nil {
+		if m.logger != nil {
+			m.logger.Warn("deliverability schema init failed; suppression enforcement and reputation signals disabled", zap.Error(err))
+		}
+	} else {
+		deliverabilityAdapter = deliverability.NewDeliveryAdapter(deliverability.NewService(deliverabilityRepo, audit.NewExtendedStore(sqlDB), nil, nil))
+	}
+
+	// Cluster control plane (Milestone 10) — a fresh/single-node
+	// install self-enrolls as its own sole node on first boot and
+	// simply heartbeats on every later boot; nothing about existing
+	// single-node behavior changes if the multi-node APIs are never
+	// used.
+	clusterRepo := cluster.NewRepository(sqlDB)
+	if err := clusterRepo.EnsureSchema(context.Background()); err != nil {
+		if m.logger != nil {
+			m.logger.Warn("cluster schema init failed; node registry disabled", zap.Error(err))
+		}
+	} else {
+		m.clusterSvc = cluster.NewService(clusterRepo, audit.NewExtendedStore(sqlDB), nil, nil)
+		selfID := cfg.CoreMail.Hostname
+		if selfID == "" {
+			selfID = "orvix-node"
+		}
+		alreadyEnrolled, _, err := m.clusterSvc.EnsureSelfNode(context.Background(), selfID, cluster.Node{
+			Role: "all-in-one", Capabilities: []string{"smtp", "delivery_worker", "imap", "pop3", "jmap"},
+		})
+		if err != nil && m.logger != nil {
+			m.logger.Warn("cluster self-enrollment failed", zap.Error(err))
+		} else if !alreadyEnrolled && m.logger != nil {
+			m.logger.Info("cluster node self-enrolled", zap.String("node_id", selfID))
+		}
+	}
+
+	// Security event normalization (Milestone 12) — the recording
+	// choke point for antivirus/antispam/ACL/auth events. Wired here
+	// so it's available to future producers; individual subsystems
+	// (internal/antivirus.Engine, internal/coremail/antispam.Engine,
+	// the ACL enforcement path) emitting INTO it is a follow-up
+	// integration slice, not fabricated here.
+	securityRepo := security.NewRepository(sqlDB)
+	if err := securityRepo.EnsureSchema(context.Background()); err != nil {
+		if m.logger != nil {
+			m.logger.Warn("security event schema init failed; normalized security events disabled", zap.Error(err))
+		}
+	} else {
+		m.securitySvc = security.NewService(securityRepo, nil)
+	}
+
 	m.workers = make([]*delivery.DeliveryWorker, 0, workerCount)
 	for i := 0; i < workerCount; i++ {
 		worker := delivery.NewDeliveryWorker(
@@ -471,6 +560,17 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 		)
 		worker.Observability = m.obs
 		worker.PreferIPv4 = cfg.Outbound.PreferIPv4
+		if relayAdapter != nil {
+			worker.RelaySelector = relayAdapter
+			worker.TenantIDForRelay = tenantForRelay
+		}
+		if deliverabilityAdapter != nil {
+			worker.SuppressionChecker = deliverabilityAdapter
+			worker.DeliverabilityRecorder = deliverabilityAdapter
+			if worker.TenantIDForRelay == nil {
+				worker.TenantIDForRelay = tenantForRelay
+			}
+		}
 		m.workers = append(m.workers, worker)
 	}
 
@@ -778,6 +878,55 @@ func (m *Module) MailStore() *storage.MailStore {
 // the runtime was not booted.
 func (m *Module) QueueEngine() *queue.QueueEngine {
 	return m.queue
+}
+
+// ClusterService returns the Milestone 10 node registry service, or
+// nil if cluster schema init failed or the runtime was not booted.
+func (m *Module) ClusterService() *cluster.Service {
+	return m.clusterSvc
+}
+
+// SecurityService returns the Milestone 12 normalized security-event
+// service, or nil if schema init failed or the runtime was not
+// booted.
+func (m *Module) SecurityService() *security.Service {
+	return m.securitySvc
+}
+
+// HealthStatus implements the admin API's optional moduleHealthReporter
+// capability (internal/api/handlers.moduleHealthReporter): it derives
+// this module's status from its OWN observability.HealthChecker
+// report (populated throughout initCore via m.obs.Health.Ready/
+// NotReady/Degraded on real subsystem checks — database, mailstore,
+// queue, DNS resolver, DKIM config) rather than a hardcoded "active".
+func (m *Module) HealthStatus() (status, message string) {
+	if !m.cfg.CoreMail.Enabled {
+		return "disabled", "coremail.enabled=false"
+	}
+	if m.obs == nil {
+		return "unknown", "observability not initialized"
+	}
+	report := m.obs.Health.Report()
+	switch report.Overall {
+	case observability.HealthReady:
+		return "active", ""
+	case observability.HealthDegraded:
+		return "degraded", degradedSummary(report)
+	default:
+		return "unavailable", degradedSummary(report)
+	}
+}
+
+func degradedSummary(report *observability.HealthReport) string {
+	for name, check := range report.Checks {
+		if check.Status != observability.HealthReady {
+			if check.Message != "" {
+				return name + ": " + check.Message
+			}
+			return name + " not ready"
+		}
+	}
+	return ""
 }
 
 // AntivirusEngine returns the antivirus engine wired into
