@@ -152,7 +152,7 @@ func TestSuppression_ExpiresAutomatically(t *testing.T) {
 	db, svc := newTestService(t)
 	ctx := context.Background()
 	past := time.Now().Add(-time.Minute)
-	if _, err := db.Exec(`INSERT INTO platform_deliverability_suppressions (tenant_id, address, reason, source, created_at, expires_at) VALUES (1, 'expired@test.com', 'manual', 'operator', ?, ?)`, time.Now(), past); err != nil {
+	if _, err := db.Exec(`INSERT INTO platform_deliverability_suppressions (tenant_id, address, reason, source, created_at, updated_at, expires_at) VALUES (1, 'expired@test.com', 'manual', 'operator', ?, ?, ?)`, time.Now(), time.Now(), past); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	suppressed, err := svc.IsSuppressed(ctx, 1, "expired@test.com")

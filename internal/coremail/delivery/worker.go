@@ -330,6 +330,7 @@ func (w *DeliveryWorker) checkPolicy(ctx context.Context, entry *queue.QueueEntr
 		w.emitAudit(ctx, entry, EventPolicyRejected, &DeliveryResult{StatusMsg: pr.Reason, StatusCode: pr.Code})
 		w.Metrics.RecordBounce()
 		w.callOnBounceFn(ctx, entry, "policy:sender")
+		w.recordDeliverabilityOutcome(ctx, entry, attemptNumber, &DeliveryResult{StatusCode: pr.Code, StatusMsg: pr.Reason, TempFail: false})
 		w.Queue.Repo.Bounce(ctx, entry.ID, pr.Reason, nil)
 		return false
 	}
@@ -340,11 +341,27 @@ func (w *DeliveryWorker) checkPolicy(ctx context.Context, entry *queue.QueueEntr
 		w.emitAudit(ctx, entry, EventPolicyRejected, &DeliveryResult{StatusMsg: pr2.Reason, StatusCode: pr2.Code})
 		w.Metrics.RecordBounce()
 		w.callOnBounceFn(ctx, entry, "policy:domain")
+		w.recordDeliverabilityOutcome(ctx, entry, attemptNumber, &DeliveryResult{StatusCode: pr2.Code, StatusMsg: pr2.Reason, TempFail: false})
 		w.Queue.Repo.Bounce(ctx, entry.ID, pr2.Reason, nil)
 		return false
 	}
 
 	return true
+}
+
+// recordDeliverabilityOutcome feeds a delivery outcome into the
+// deliverability control plane (reputation signals). nil-safe: with no
+// recorder wired this is a no-op, so the early-failure paths that call
+// it cannot change delivery behavior.
+func (w *DeliveryWorker) recordDeliverabilityOutcome(ctx context.Context, entry *queue.QueueEntry, attemptNumber int, result *DeliveryResult) {
+	if w.DeliverabilityRecorder == nil {
+		return
+	}
+	var tenantID uint
+	if w.TenantIDForRelay != nil {
+		tenantID, _ = w.TenantIDForRelay(entry)
+	}
+	w.DeliverabilityRecorder.RecordOutcome(ctx, entry, tenantID, result.RemoteHost, result, attemptNumber)
 }
 
 // checkLoops runs all loop detection checks.
@@ -368,6 +385,7 @@ func (w *DeliveryWorker) handleLoop(ctx context.Context, entry *queue.QueueEntry
 	w.emitAudit(ctx, entry, EventLoopDetected, &DeliveryResult{StatusMsg: reason, StatusCode: 550})
 	w.Metrics.RecordBounce()
 	w.callOnBounceFn(ctx, entry, "loop")
+	w.recordDeliverabilityOutcome(ctx, entry, attemptNumber, &DeliveryResult{StatusMsg: reason, StatusCode: 550, TempFail: false})
 	w.Queue.Repo.Bounce(ctx, entry.ID, reason, nil)
 	return false
 }
@@ -381,6 +399,7 @@ func (w *DeliveryWorker) failPermanent(ctx context.Context, entry *queue.QueueEn
 	w.emitAudit(ctx, entry, EventBounced, &DeliveryResult{StatusMsg: msg})
 	w.Metrics.RecordBounce()
 	w.callOnBounceFn(ctx, entry, tag)
+	w.recordDeliverabilityOutcome(ctx, entry, attemptNumber, &DeliveryResult{StatusMsg: msg, TempFail: false})
 	return w.Queue.Repo.Bounce(ctx, entry.ID, msg, nil)
 }
 
@@ -389,6 +408,7 @@ func (w *DeliveryWorker) failPolicy(ctx context.Context, entry *queue.QueueEntry
 	w.emitAudit(ctx, entry, EventPolicyRejected, &DeliveryResult{StatusCode: code, StatusMsg: reason})
 	w.Metrics.RecordBounce()
 	w.callOnBounceFn(ctx, entry, "policy")
+	w.recordDeliverabilityOutcome(ctx, entry, attemptNumber, &DeliveryResult{StatusCode: code, StatusMsg: reason, TempFail: false})
 	return w.Queue.Repo.Bounce(ctx, entry.ID, reason, nil)
 }
 
@@ -601,6 +621,14 @@ func (w *DeliveryWorker) deliverLocal(ctx context.Context, entry *queue.QueueEnt
 		return &DeliveryResult{StatusMsg: fmt.Sprintf("store for local: %v", err), TempFail: true}
 	}
 	return &DeliveryResult{Success: true}
+}
+
+// DeliverRemoteForTest exposes the canonical remote-delivery path to
+// integration tests in dependent packages (the deliverability control
+// plane uses it to prove suppression enforcement through the REAL
+// worker). Production code never calls this.
+func (w *DeliveryWorker) DeliverRemoteForTest(entry *queue.QueueEntry) *DeliveryResult {
+	return w.deliverRemote(context.Background(), entry)
 }
 
 func (w *DeliveryWorker) deliverRemote(ctx context.Context, entry *queue.QueueEntry) *DeliveryResult {

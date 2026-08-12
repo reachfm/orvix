@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"errors"
 	"strconv"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/orvix/orvix/internal/platform/deliverability"
 	"github.com/orvix/orvix/internal/platform/kernel"
 	"github.com/orvix/orvix/internal/platform/mailcontrol"
+	"go.uber.org/zap"
 )
 
 // SetMailControlService wires the platform mail-control service.
@@ -34,6 +36,38 @@ func (h *Handler) deliverability() (*deliverability.Service, error) {
 		return nil, kernel.NewError(kernel.ErrCodeUnavailable, "deliverability service is unavailable")
 	}
 	return h.deliverabilitySvc, nil
+}
+
+// StartDeliverabilityScheduler runs the bounded background jobs of the
+// deliverability control plane: suppression-expiry reconciliation and
+// signal retention purge. These jobs exist specifically so expiry is
+// never resolved by request-time table scans — the delivery path
+// performs only the single indexed point lookup.
+func (h *Handler) StartDeliverabilityScheduler(ctx context.Context, interval time.Duration) {
+	if h.deliverabilitySvc == nil {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if n, err := h.deliverabilitySvc.ReconcileExpired(ctx); err != nil {
+					h.logger.Warn("deliverability expiry reconciliation failed", zap.Error(err))
+				} else if n > 0 {
+					h.logger.Info("deliverability expiry reconciliation", zap.Int64("expired", n))
+				}
+				if n, err := h.deliverabilitySvc.PurgeOldSignals(ctx, 90*24*time.Hour); err != nil {
+					h.logger.Warn("deliverability signal retention purge failed", zap.Error(err))
+				} else if n > 0 {
+					h.logger.Info("deliverability signal retention purge", zap.Int64("purged", n))
+				}
+			}
+		}
+	}()
 }
 
 func (h *Handler) mailControl() (*mailcontrol.Service, error) {
@@ -518,12 +552,192 @@ func (h *Handler) ListPlatformSuppressions(c fiber.Ctx) error {
 	if limit < 1 || limit > 500 {
 		limit = 50
 	}
-	afterID := uint(queryIntDefault(c, "after_id", 0))
-	list, err := svc.ListSuppressions(c.Context(), tenantID, limit, afterID)
+	offset := queryIntDefault(c, "offset", 0)
+	if offset < 0 {
+		offset = 0
+	}
+	f := deliverability.SuppressionFilter{
+		TenantID: tenantID,
+		Domain:   strings.TrimSpace(c.Query("domain")),
+		Search:   strings.TrimSpace(c.Query("q")),
+		Reason:   strings.TrimSpace(c.Query("reason")),
+		Source:   strings.TrimSpace(c.Query("source")),
+		State:    deliverability.SuppressionState(strings.TrimSpace(c.Query("state"))),
+		Limit:    limit,
+		Offset:   offset,
+	}
+	parseRFC3339 := func(key string) *time.Time {
+		raw := strings.TrimSpace(c.Query(key))
+		if raw == "" {
+			return nil
+		}
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			return nil
+		}
+		u := t.UTC()
+		return &u
+	}
+	f.CreatedFrom = parseRFC3339("created_from")
+	f.CreatedTo = parseRFC3339("created_to")
+	f.ExpiryFrom = parseRFC3339("expiry_from")
+	f.ExpiryTo = parseRFC3339("expiry_to")
+	list, total, err := svc.ListSuppressions(c.Context(), f)
 	if err != nil {
 		return errorResponse(c, err)
 	}
-	return c.JSON(fiber.Map{"suppressions": list})
+	return c.JSON(fiber.Map{"suppressions": list, "total": total, "limit": limit, "offset": offset})
+}
+
+func (h *Handler) GetPlatformSuppression(c fiber.Ctx) error {
+	svc, err := h.deliverability()
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	tenantID, err := parseTenantParam(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	id, err := parseIDParam(c, "id")
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	sup, err := svc.GetSuppression(c.Context(), id, tenantID)
+	if err != nil {
+		if errors.Is(err, deliverability.ErrSuppressionNotFound) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "suppression not found", "code": "NOT_FOUND"})
+		}
+		return errorResponse(c, err)
+	}
+	return c.JSON(sup)
+}
+
+func (h *Handler) GetPlatformSuppressionHistory(c fiber.Ctx) error {
+	svc, err := h.deliverability()
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	tenantID, err := parseTenantParam(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	id, err := parseIDParam(c, "id")
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	limit := queryIntDefault(c, "limit", 50)
+	if limit < 1 || limit > 200 {
+		limit = 50
+	}
+	events, err := svc.ListSuppressionEvents(c.Context(), id, tenantID, limit)
+	if err != nil {
+		if errors.Is(err, deliverability.ErrSuppressionNotFound) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "suppression not found", "code": "NOT_FOUND"})
+		}
+		return errorResponse(c, err)
+	}
+	return c.JSON(fiber.Map{"suppression_id": id, "events": events})
+}
+
+func (h *Handler) ReleasePlatformSuppression(c fiber.Ctx) error {
+	svc, err := h.deliverability()
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	tenantID, err := parseTenantParam(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	id, err := parseIDParam(c, "id")
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if err := c.Bind().JSON(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body", "code": "VALIDATION_FAILED"})
+	}
+	if err := svc.ReleaseSuppression(c.Context(), id, tenantID, h.platformActorID(c), req.Reason); err != nil {
+		if errors.Is(err, deliverability.ErrSuppressionNotFound) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "suppression not found", "code": "NOT_FOUND"})
+		}
+		if errors.Is(err, deliverability.ErrSuppressionNotActive) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "suppression is not active", "code": "CONFLICT"})
+		}
+		return errorResponse(c, err)
+	}
+	return c.JSON(fiber.Map{"status": "ok", "id": id, "state": string(deliverability.SuppressionReleased)})
+}
+
+func (h *Handler) ReactivatePlatformSuppression(c fiber.Ctx) error {
+	svc, err := h.deliverability()
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	tenantID, err := parseTenantParam(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	id, err := parseIDParam(c, "id")
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	var req struct {
+		Reason    string     `json:"reason"`
+		Source    string     `json:"source"`
+		Notes     string     `json:"notes"`
+		ExpiresAt *time.Time `json:"expires_at"`
+	}
+	if err := c.Bind().JSON(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body", "code": "VALIDATION_FAILED"})
+	}
+	reason := deliverability.SuppressionReason(strings.ToLower(strings.TrimSpace(req.Reason)))
+	if reason != deliverability.SuppressionHardBounce && reason != deliverability.SuppressionComplaint && reason != deliverability.SuppressionManual {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": "reason must be hard_bounce, complaint, or manual", "code": "VALIDATION_FAILED"})
+	}
+	source := strings.TrimSpace(req.Source)
+	if source == "" {
+		source = "platform_operator"
+	}
+	if err := svc.ReactivateSuppression(c.Context(), id, tenantID, h.platformActorID(c), reason, source, req.Notes, req.ExpiresAt); err != nil {
+		if errors.Is(err, deliverability.ErrSuppressionNotFound) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "suppression not found", "code": "NOT_FOUND"})
+		}
+		if errors.Is(err, deliverability.ErrSuppressionActive) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "suppression is already active", "code": "CONFLICT"})
+		}
+		return errorResponse(c, err)
+	}
+	return c.JSON(fiber.Map{"status": "ok", "id": id, "state": string(deliverability.SuppressionActive)})
+}
+
+// DeletePlatformSuppression handles DELETE
+// /api/v1/platform/suppressions/:tenant_id/:id — release semantics
+// (history preserved) with typed confirmation.
+func (h *Handler) DeletePlatformSuppression(c fiber.Ctx) error {
+	svc, err := h.deliverability()
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	tenantID, err := parseTenantParam(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	id, err := parseIDParam(c, "id")
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	if err := typedConfirm(c, "RELEASE-SUPPRESSION-"+strconv.FormatUint(uint64(id), 10)); err != nil {
+		return err
+	}
+	if err := svc.ReleaseSuppression(c.Context(), id, tenantID, h.platformActorID(c), "operator release"); err != nil {
+		if errors.Is(err, deliverability.ErrSuppressionNotFound) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "suppression not found", "code": "NOT_FOUND"})
+		}
+		return errorResponse(c, err)
+	}
+	return c.JSON(fiber.Map{"status": "ok", "id": id})
 }
 
 func (h *Handler) AddPlatformSuppression(c fiber.Ctx) error {
@@ -536,10 +750,10 @@ func (h *Handler) AddPlatformSuppression(c fiber.Ctx) error {
 		return errorResponse(c, err)
 	}
 	var req struct {
-		Address   string `json:"address"`
-		Reason    string `json:"reason"`
-		Source    string `json:"source"`
-		Notes     string `json:"notes,omitempty"`
+		Address   string     `json:"address"`
+		Reason    string     `json:"reason"`
+		Source    string     `json:"source"`
+		Notes     string     `json:"notes,omitempty"`
 		ExpiresAt *time.Time `json:"expires_at,omitempty"`
 	}
 	if err := c.Bind().JSON(&req); err != nil {
@@ -593,15 +807,6 @@ func (h *Handler) GetPlatformDeliverabilityMetrics(c fiber.Ctx) error {
 	if err != nil {
 		return errorResponse(c, err)
 	}
-	dim := deliverability.Dimension(strings.TrimSpace(c.Query("dimension")))
-	if dim != deliverability.DimensionTenant && dim != deliverability.DimensionSendingDomain &&
-		dim != deliverability.DimensionRecipientDomain && dim != deliverability.DimensionRelayProvider {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "dimension must be tenant, sending_domain, recipient_domain, or relay_provider", "code": "VALIDATION_FAILED"})
-	}
-	dimValue := strings.TrimSpace(c.Query("value"))
-	if dimValue == "" {
-		dimValue = strconv.FormatUint(uint64(tenantID), 10)
-	}
 	windowStart, err := time.Parse(time.RFC3339, c.Query("start"))
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "start must be RFC3339", "code": "VALIDATION_FAILED"})
@@ -610,9 +815,122 @@ func (h *Handler) GetPlatformDeliverabilityMetrics(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "end must be RFC3339", "code": "VALIDATION_FAILED"})
 	}
-	m, err := svc.Metrics(c.Context(), dim, dimValue, windowStart, windowEnd)
+	// Backward-compatible dimension view (legacy contract).
+	dim := deliverability.Dimension(strings.TrimSpace(c.Query("dimension")))
+	dimValue := strings.TrimSpace(c.Query("value"))
+	if dimValue == "" {
+		dimValue = strconv.FormatUint(uint64(tenantID), 10)
+	}
+	if dim == "" {
+		dim = deliverability.DimensionTenant
+	}
+	var window *deliverability.WindowMetrics
+	if dim == deliverability.DimensionTenant || dim == deliverability.DimensionSendingDomain ||
+		dim == deliverability.DimensionRecipientDomain || dim == deliverability.DimensionRelayProvider {
+		m, err := svc.Metrics(c.Context(), dim, dimValue, windowStart, windowEnd)
+		if err != nil {
+			return errorResponse(c, err)
+		}
+		window = m
+	} else {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "dimension must be tenant, sending_domain, recipient_domain, or relay_provider", "code": "VALIDATION_FAILED"})
+	}
+	summary, err := svc.MetricsSummary(c.Context(), tenantID, windowStart, windowEnd)
 	if err != nil {
 		return errorResponse(c, err)
 	}
-	return c.JSON(m)
+	return c.JSON(fiber.Map{
+		"window":        window,
+		"summary":       summary,
+		"volume":        summary.Volume,
+		"delivered":     summary.Delivered,
+		"bounced":       summary.Bounced,
+		"complaints":    summary.Complaints,
+		"delivery_rate": summary.DeliveryRate,
+		"bounce_rate":   summary.BounceRate,
+		"complaint_rate": func() float64 {
+			if summary.Volume > 0 {
+				return float64(summary.Complaints) / float64(summary.Volume)
+			}
+			return 0
+		}(),
+	})
+}
+
+// ListPlatformDeliverabilityEvents handles
+// GET /api/v1/platform/deliverability/:tenant_id/events — the
+// tenant's real delivery evidence with filters, bounded pagination,
+// and safe projections.
+func (h *Handler) ListPlatformDeliverabilityEvents(c fiber.Ctx) error {
+	svc, err := h.deliverability()
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	tenantID, err := parseTenantParam(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	limit := queryIntDefault(c, "limit", 100)
+	if limit < 1 || limit > 500 {
+		limit = 100
+	}
+	offset := queryIntDefault(c, "offset", 0)
+	if offset < 0 {
+		offset = 0
+	}
+	f := deliverability.EventFilter{
+		TenantID: tenantID,
+		Domain:   strings.TrimSpace(c.Query("domain")),
+		Type:     deliverability.SignalType(strings.TrimSpace(c.Query("type"))),
+		Provider: strings.TrimSpace(c.Query("provider")),
+		Limit:    limit,
+		Offset:   offset,
+	}
+	if f.Type != "" && !f.Type.IsValid() {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid event type", "code": "VALIDATION_FAILED"})
+	}
+	if raw := strings.TrimSpace(c.Query("start")); raw != "" {
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "start must be RFC3339", "code": "VALIDATION_FAILED"})
+		}
+		u := t.UTC()
+		f.Start = &u
+	}
+	if raw := strings.TrimSpace(c.Query("end")); raw != "" {
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "end must be RFC3339", "code": "VALIDATION_FAILED"})
+		}
+		u := t.UTC()
+		f.End = &u
+	}
+	events, total, err := svc.ListEvents(c.Context(), f)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	return c.JSON(fiber.Map{"events": events, "total": total, "limit": limit, "offset": offset})
+}
+
+// GetPlatformDeliverabilityEvent handles
+// GET /api/v1/platform/deliverability/:tenant_id/events/:id — one
+// safe event projection, tenant-scoped.
+func (h *Handler) GetPlatformDeliverabilityEvent(c fiber.Ctx) error {
+	svc, err := h.deliverability()
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	tenantID, err := parseTenantParam(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	id, err := parseIDParam(c, "id")
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	ev, err := svc.GetEvent(c.Context(), id, tenantID)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	return c.JSON(ev)
 }

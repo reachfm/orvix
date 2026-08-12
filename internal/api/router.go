@@ -786,6 +786,7 @@ func (r *Router) Start() {
 		r.h.StartBillingScheduler(r.appCtx, 15*time.Minute)
 		r.h.StartWebhookWorker(r.appCtx, time.Second)
 		r.h.StartAutomationWorker(r.appCtx)
+		r.h.StartDeliverabilityScheduler(r.appCtx, 15*time.Minute)
 	})
 }
 
@@ -1829,11 +1830,19 @@ func (r *Router) setupRoutes() {
 	// Platform suppression + deliverability (Milestone 9 bounded
 	// context; the production service enforces suppression in the real
 	// outbound path — these routes expose safe platform management and
-	// metrics, all explicit-tenant).
+	// metrics, all explicit-tenant). Gated by the canonical
+	// platform-scoped suppressions.* / deliverability.read permissions.
 	protected.Get("/platform/suppressions/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermSuppressionsRead), r.h.ListPlatformSuppressions)
 	protected.Post("/platform/suppressions/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermSuppressionsWrite), r.h.AddPlatformSuppression)
+	protected.Get("/platform/suppressions/:tenant_id/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermSuppressionsRead), r.h.GetPlatformSuppression)
+	protected.Get("/platform/suppressions/:tenant_id/:id/history", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermSuppressionsRead), r.h.GetPlatformSuppressionHistory)
+	protected.Post("/platform/suppressions/:tenant_id/:id/release", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermSuppressionsWrite), r.h.ReleasePlatformSuppression)
+	protected.Post("/platform/suppressions/:tenant_id/:id/reactivate", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermSuppressionsWrite), r.h.ReactivatePlatformSuppression)
+	protected.Delete("/platform/suppressions/:tenant_id/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermSuppressionsWrite), r.h.DeletePlatformSuppression)
 	protected.Delete("/platform/suppressions/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermSuppressionsWrite), r.h.RemovePlatformSuppression)
 	protected.Get("/platform/deliverability/:tenant_id/metrics", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDeliverabilityRead), r.h.GetPlatformDeliverabilityMetrics)
+	protected.Get("/platform/deliverability/:tenant_id/events", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDeliverabilityRead), r.h.ListPlatformDeliverabilityEvents)
+	protected.Get("/platform/deliverability/:tenant_id/events/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDeliverabilityRead), r.h.GetPlatformDeliverabilityEvent)
 
 	// ── Platform relay administration (Mail-Control Phase B) ────────
 	// Production relay endpoints (the same providers the outbound

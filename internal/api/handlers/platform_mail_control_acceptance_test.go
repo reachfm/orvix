@@ -267,6 +267,16 @@ func TestPlatformDeliverabilityMetricsRoute(t *testing.T) {
 				t.Fatalf("metrics missing %s: %s", key, raw)
 			}
 		}
+		// The extended summary is present with real breakdown fields.
+		summary, ok := out["summary"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("metrics missing summary: %s", raw)
+		}
+		for _, key := range []string{"by_category", "by_domain", "by_provider", "time_buckets", "bucket_size", "policy_denied", "suppressed"} {
+			if _, ok := summary[key]; !ok {
+				t.Fatalf("summary missing %s: %s", key, raw)
+			}
+		}
 	})
 
 	t.Run("tenant_admin_denied", func(t *testing.T) {
@@ -289,6 +299,175 @@ func TestPlatformDeliverabilityMetricsRoute(t *testing.T) {
 		resp, _ := env.do(t, "GET", bad, env.psaToken, nil)
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("missing window status %d", resp.StatusCode)
+		}
+	})
+}
+
+func TestPlatformSuppressionLifecycleRoutes(t *testing.T) {
+	env := buildPlatformMailControlEnv(t)
+	base := "/api/v1/platform/suppressions/1"
+
+	t.Run("full_lifecycle_with_history", func(t *testing.T) {
+		// Add.
+		resp, raw := env.csrfDo(t, "POST", base, env.psaToken, map[string]interface{}{
+			"address": "lifecycle@example.test", "reason": "manual", "source": "platform_operator",
+		})
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("add status %d: %s", resp.StatusCode, raw)
+		}
+		var created struct {
+			ID uint `json:"id"`
+		}
+		if err := json.Unmarshal(raw, &created); err != nil || created.ID == 0 {
+			t.Fatalf("add decode: %v %s", err, raw)
+		}
+		// Detail.
+		resp, raw = env.do(t, "GET", base+"/"+u64str(created.ID), env.psaToken, nil)
+		if resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), `"state":"active"`) {
+			t.Fatalf("detail status %d: %s", resp.StatusCode, raw)
+		}
+		// Cross-tenant detail denied.
+		resp, raw = env.do(t, "GET", "/api/v1/platform/suppressions/2/"+u64str(created.ID), env.psaToken, nil)
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("cross-tenant detail status %d: %s", resp.StatusCode, raw)
+		}
+		// Release (guarded).
+		resp, raw = env.csrfDo(t, "POST", base+"/"+u64str(created.ID)+"/release", env.psaToken, map[string]interface{}{"reason": "operator decision"})
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("release status %d: %s", resp.StatusCode, raw)
+		}
+		// Double release conflicts.
+		resp, raw = env.csrfDo(t, "POST", base+"/"+u64str(created.ID)+"/release", env.psaToken, map[string]interface{}{})
+		if resp.StatusCode != http.StatusConflict {
+			t.Fatalf("double release status %d: %s", resp.StatusCode, raw)
+		}
+		// Cross-tenant release denied.
+		resp, raw = env.csrfDo(t, "POST", "/api/v1/platform/suppressions/2/"+u64str(created.ID)+"/release", env.psaToken, map[string]interface{}{})
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("cross-tenant release status %d: %s", resp.StatusCode, raw)
+		}
+		// History evidence.
+		resp, raw = env.do(t, "GET", base+"/"+u64str(created.ID)+"/history", env.psaToken, nil)
+		if resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), `"event":"created"`) || !strings.Contains(string(raw), `"event":"released"`) {
+			t.Fatalf("history status %d: %s", resp.StatusCode, raw)
+		}
+		// Reactivate.
+		resp, raw = env.csrfDo(t, "POST", base+"/"+u64str(created.ID)+"/reactivate", env.psaToken, map[string]interface{}{"reason": "manual"})
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("reactivate status %d: %s", resp.StatusCode, raw)
+		}
+		// List default shows it active again.
+		resp, raw = env.do(t, "GET", base+"?state=active&q=lifecycle", env.psaToken, nil)
+		if resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), "lifecycle@example.test") {
+			t.Fatalf("active list status %d: %s", resp.StatusCode, raw)
+		}
+		// Typed-confirmation delete (release semantics).
+		resp, raw = env.relayDo(t, "DELETE", base+"/"+u64str(created.ID), env.psaToken, "", "", nil)
+		if resp.StatusCode != http.StatusPreconditionRequired {
+			t.Fatalf("delete without confirmation status %d: %s", resp.StatusCode, raw)
+		}
+		resp, raw = env.relayDo(t, "DELETE", base+"/"+u64str(created.ID), env.psaToken, "RELEASE-SUPPRESSION-"+u64str(created.ID), "", nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("confirmed delete status %d: %s", resp.StatusCode, raw)
+		}
+		// Released state visible via state=released filter.
+		resp, raw = env.do(t, "GET", base+"?state=released&q=lifecycle", env.psaToken, nil)
+		if resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), "lifecycle@example.test") {
+			t.Fatalf("released list status %d: %s", resp.StatusCode, raw)
+		}
+	})
+
+	t.Run("tenant_admin_denied_lifecycle_routes", func(t *testing.T) {
+		resp, raw := env.do(t, "GET", base+"/1", env.tenantAdm, nil)
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("tenant detail status %d: %s", resp.StatusCode, raw)
+		}
+		resp, raw = env.csrfDo(t, "POST", base+"/1/release", env.tenantAdm, map[string]interface{}{})
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("tenant release status %d: %s", resp.StatusCode, raw)
+		}
+	})
+}
+
+func TestPlatformDeliverabilityEventsRoutes(t *testing.T) {
+	env := buildPlatformMailControlEnv(t)
+	base := "/api/v1/platform/deliverability/1/events"
+
+	t.Run("PSA_can_list_and_get_events", func(t *testing.T) {
+		resp, raw := env.do(t, "GET", base+"?limit=50", env.psaToken, nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("events status %d: %s", resp.StatusCode, raw)
+		}
+		var out struct {
+			Events []map[string]interface{} `json:"events"`
+			Total  int64                    `json:"total"`
+		}
+		if err := json.Unmarshal(raw, &out); err != nil {
+			t.Fatalf("events decode: %v", err)
+		}
+		// No events exist yet — an empty window must be a valid,
+		// zeroed response (not an error).
+		if out.Total != 0 || len(out.Events) != 0 {
+			t.Fatalf("expected empty event list, got %s", raw)
+		}
+		for _, banned := range []string{"event_key", "message", "body", "password", "secret"} {
+			if strings.Contains(string(raw), `"`+banned+`"`) {
+				t.Fatalf("events response leaked %q: %s", banned, raw)
+			}
+		}
+		// Seed a real signal via the delivery outcome recording path.
+		env.seedDeliverabilitySignal(t, "delivered", "sender.example", "recipient.example", "provider-x")
+		env.seedDeliverabilitySignal(t, "bounce", "sender.example", "recipient2.example", "provider-x")
+
+		resp, raw = env.do(t, "GET", base+"?limit=50", env.psaToken, nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("events after seed status %d: %s", resp.StatusCode, raw)
+		}
+		if err := json.Unmarshal(raw, &out); err != nil {
+			t.Fatalf("events decode: %v", err)
+		}
+		if out.Total == 0 || len(out.Events) == 0 {
+			t.Fatalf("expected seeded events, got %s", raw)
+		}
+		// Deterministic ordering + safe projection fields.
+		first := out.Events[0]
+		for _, key := range []string{"id", "dimension", "dimension_value", "type", "category", "recorded_at"} {
+			if _, ok := first[key]; !ok {
+				t.Fatalf("event missing %s: %v", key, first)
+			}
+		}
+		// Event detail (tenant-scoped).
+		id := uint(first["id"].(float64))
+		resp, raw = env.do(t, "GET", base+"/"+u64str(id), env.psaToken, nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("event detail status %d: %s", resp.StatusCode, raw)
+		}
+		// Cross-tenant detail denied.
+		resp, raw = env.do(t, "GET", "/api/v1/platform/deliverability/2/events/"+u64str(id), env.psaToken, nil)
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("cross-tenant event detail status %d: %s", resp.StatusCode, raw)
+		}
+		// Type filter.
+		resp, raw = env.do(t, "GET", base+"?type=bounce", env.psaToken, nil)
+		if resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), `"type":"bounce"`) {
+			t.Fatalf("type filter status %d: %s", resp.StatusCode, raw)
+		}
+		// Provider filter.
+		resp, raw = env.do(t, "GET", base+"?provider=provider-x", env.psaToken, nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("provider filter status %d: %s", resp.StatusCode, raw)
+		}
+		// Invalid type rejected.
+		resp, raw = env.do(t, "GET", base+"?type=bogus", env.psaToken, nil)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("invalid type status %d: %s", resp.StatusCode, raw)
+		}
+	})
+
+	t.Run("tenant_admin_denied_events", func(t *testing.T) {
+		resp, raw := env.do(t, "GET", base, env.tenantAdm, nil)
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("tenant events status %d: %s", resp.StatusCode, raw)
 		}
 	})
 }

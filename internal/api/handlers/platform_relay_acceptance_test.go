@@ -16,6 +16,7 @@ package handlers_test
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -397,6 +398,27 @@ func (e *platformMailControlEnv) rawInsertRelay(t *testing.T, name, host string,
 	}
 	id, _ := res.LastInsertId()
 	return uint(id)
+}
+
+// seedDeliverabilitySignal inserts a real delivery signal row for
+// tenant 1 (the same table the delivery-path recorder writes to).
+func (e *platformMailControlEnv) seedDeliverabilitySignal(t *testing.T, typ, sendingDomain, recipientDomain, provider string) {
+	t.Helper()
+	sqlDB, err := e.dbHandle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	key := fmt.Sprintf("seed:%s:%d", typ, time.Now().UnixNano())
+	insert := func(dim, val string) {
+		if _, err := sqlDB.Exec(`INSERT INTO platform_deliverability_signals (event_key, tenant_id, dimension, dimension_value, type, latency_ms, recorded_at) VALUES (?, 1, ?, ?, ?, 10, ?)`,
+			key+":"+dim, dim, val, typ, now); err != nil {
+			t.Fatalf("seed signal: %v", err)
+		}
+	}
+	insert("sending_domain", sendingDomain)
+	insert("recipient_domain", recipientDomain)
+	insert("relay_provider", provider)
 }
 
 // dbHandle exposes the router's underlying *sql.DB for direct assertions.
