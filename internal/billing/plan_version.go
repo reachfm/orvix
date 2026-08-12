@@ -116,16 +116,22 @@ func (s *PlanVersionStore) Publish(ctx context.Context, planID PlanID, limits Pl
 	if err != nil {
 		return nil, fmt.Errorf("billing: encode plan limits: %w", err)
 	}
-	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO billing_plan_versions (plan_id, version, limits, created_at, created_by) VALUES (`+s.dialect.Placeholders(5)+`)`,
-		string(planID), nextVersion, string(body), now, createdBy,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("billing: publish plan version: %w", err)
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return nil, fmt.Errorf("billing: read plan version id: %w", err)
+	insertQuery := `INSERT INTO billing_plan_versions (plan_id, version, limits, created_at, created_by) VALUES (` + s.dialect.Placeholders(5) + `)`
+	args := []any{string(planID), nextVersion, string(body), now, createdBy}
+	var id int64
+	if s.dialect.IsPostgres() {
+		if err := s.db.QueryRowContext(ctx, insertQuery+` RETURNING id`, args...).Scan(&id); err != nil {
+			return nil, fmt.Errorf("billing: publish plan version: %w", err)
+		}
+	} else {
+		res, err := s.db.ExecContext(ctx, insertQuery, args...)
+		if err != nil {
+			return nil, fmt.Errorf("billing: publish plan version: %w", err)
+		}
+		id, err = res.LastInsertId()
+		if err != nil {
+			return nil, fmt.Errorf("billing: read plan version id: %w", err)
+		}
 	}
 	return &PlanVersion{ID: id, PlanID: planID, Version: nextVersion, Limits: limits, CreatedAt: now, CreatedBy: createdBy}, nil
 }
