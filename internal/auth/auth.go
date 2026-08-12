@@ -548,6 +548,42 @@ func validateAuthorizationSnapshot(snap userAuthorizationSnapshot) error {
 	return nil
 }
 
+// rowQuerier is the minimal read surface shared by *sql.DB and *sql.Tx.
+type rowQuerier interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+// loadAuthorizationSnapshot reads one user's authorization state in a single
+// dialect-aware SELECT and validates it. It is the single canonical
+// implementation, shared by JWT/session authentication (via the Authenticator
+// method below) and by API-key authentication (internal/auth/apikey.go), so
+// there is exactly one definition of "is this user still allowed to act".
+// Any DB error, missing user, or invalid snapshot returns ErrTokenInvalid.
+//
+// It accepts any rowQuerier so callers already holding a transaction pass the
+// *sql.Tx. That is not a style preference: the SQLite pool is configured with
+// MaxOpenConns(1), so issuing this read against the *sql.DB while a
+// transaction holds the only connection deadlocks the request.
+func loadAuthorizationSnapshot(q rowQuerier, d *dbdialect.Info, userID uint) (userAuthorizationSnapshot, error) {
+	var snap userAuthorizationSnapshot
+	if q == nil || d == nil {
+		return snap, ErrTokenInvalid
+	}
+	var dbRole string
+	err := q.QueryRow(
+		"SELECT role, tenant_id, active, deleted_at, COALESCE(token_version, 0) FROM users WHERE id = "+d.Placeholder(1),
+		userID,
+	).Scan(&dbRole, &snap.TenantID, &snap.Active, &snap.DeletedAt, &snap.TokenVersion)
+	if err != nil {
+		return snap, ErrTokenInvalid
+	}
+	snap.Role = Role(dbRole)
+	if err := validateAuthorizationSnapshot(snap); err != nil {
+		return snap, ErrTokenInvalid
+	}
+	return snap, nil
+}
+
 // loadUserAuthorizationSnapshot reads one user's authorization state in a
 // single dialect-aware SELECT. Any DB acquisition/query error or missing user
 // returns ErrTokenInvalid.
@@ -560,20 +596,7 @@ func (a *Authenticator) loadUserAuthorizationSnapshot(userID uint) (userAuthoriz
 	if err != nil {
 		return snap, ErrTokenInvalid
 	}
-	d := a.dbDialect()
-	var dbRole string
-	err = rawDB.QueryRow(
-		"SELECT role, tenant_id, active, deleted_at, COALESCE(token_version, 0) FROM users WHERE id = "+d.Placeholder(1),
-		userID,
-	).Scan(&dbRole, &snap.TenantID, &snap.Active, &snap.DeletedAt, &snap.TokenVersion)
-	if err != nil {
-		return snap, ErrTokenInvalid
-	}
-	snap.Role = Role(dbRole)
-	if err := validateAuthorizationSnapshot(snap); err != nil {
-		return snap, ErrTokenInvalid
-	}
-	return snap, nil
+	return loadAuthorizationSnapshot(rawDB, a.dbDialect(), userID)
 }
 
 // ValidateUserForTokenIssuance verifies that userID has a valid canonical
@@ -749,11 +772,30 @@ func (a *Authenticator) Middleware() fiber.Handler {
 			return c.Next()
 		}
 
+		// credentialSource records HOW the caller authenticated, because
+		// CSRF applicability depends entirely on whether the credential is
+		// *ambient* (attached automatically by the browser) or not.
+		//
+		// A cookie is ambient: the victim's browser sends it on cross-site
+		// requests, so a cookie-authenticated mutation is forgeable and MUST
+		// carry a CSRF token. An Authorization: Bearer header is not
+		// ambient — an attacker page cannot make the browser add it, and
+		// adding it explicitly forces a CORS preflight the server refuses
+		// for untrusted origins. This is the same reasoning already applied
+		// to API keys in CSRFManager.Middleware.
+		//
+		// Order matters for safety: the cookie is checked FIRST, so a
+		// request that carries the victim's cookie is always classified as
+		// cookie-authenticated (CSRF enforced) even if an attacker also
+		// appends a Bearer header. The bearer classification is only
+		// reachable when no valid session cookie authenticated the request.
+		credentialSource := CredentialCookie
 		token := c.Cookies("access_token")
 		if token == "" {
 			authHeader := c.Get("Authorization")
 			if len(authHeader) > 7 && authHeader[:7] == "Bearer " {
 				token = authHeader[7:]
+				credentialSource = CredentialBearer
 			}
 		}
 
@@ -762,6 +804,7 @@ func (a *Authenticator) Middleware() fiber.Handler {
 			if err == nil {
 				c.Locals("user_id", userID)
 				c.Locals("role", role)
+				c.Locals(CredentialSourceLocal, credentialSource)
 				return c.Next()
 			}
 		}
@@ -780,6 +823,9 @@ func (a *Authenticator) Middleware() fiber.Handler {
 			if err == nil {
 				c.Locals("user_id", userID)
 				c.Locals("role", role)
+				// An opaque session cookie is ambient, exactly like
+				// access_token, so it always requires CSRF on mutations.
+				c.Locals(CredentialSourceLocal, CredentialCookie)
 				if email != "" {
 					c.Locals("email", email)
 				}

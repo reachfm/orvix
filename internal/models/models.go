@@ -676,7 +676,8 @@ func MigrateAllRaw(db *gorm.DB) error {
 			active INTEGER NOT NULL DEFAULT 1,
 			last_used_at DATETIME,
 			expires_at DATETIME,
-			allowed_ips TEXT NOT NULL DEFAULT ''
+			allowed_ips TEXT NOT NULL DEFAULT '',
+			owner_token_version INTEGER NOT NULL DEFAULT 0
 		)`,
 		// CoreMail tables
 		`CREATE TABLE IF NOT EXISTS coremail_domains (
@@ -1505,6 +1506,16 @@ func migrateAPIKeysSchema(ctx context.Context, db *sql.DB) error {
 		// this change, so every previously-issued key was structurally
 		// unrestricted (Feature 4/19's "IP restrictions where configured").
 		{"allowed_ips", "ALTER TABLE api_keys ADD COLUMN allowed_ips TEXT NOT NULL DEFAULT ''"},
+		// owner_token_version: the users.token_version captured when the key
+		// was minted (H-2). Authentication rejects a key whose recorded
+		// version no longer matches the owner's current one, so password
+		// reset / global revocation / forced logout invalidates outstanding
+		// keys through the same token-version mechanism JWTs already use.
+		// Keys issued before this column existed default to 0, which still
+		// matches a never-revoked user (token_version 0); the first
+		// revocation event for that user invalidates them, so no key retains
+		// authority across a revocation.
+		{"owner_token_version", "ALTER TABLE api_keys ADD COLUMN owner_token_version INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, addition := range additions {
 		if columns[addition.name] {

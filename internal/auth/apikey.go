@@ -35,6 +35,13 @@ type APIKeyRecord struct {
 	// issued before this field existed.
 	AllowedIPs string    `gorm:"column:allowed_ips;not null;default:''" json:"allowed_ips,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
+	// OwnerTokenVersion is the owner's users.token_version at mint time.
+	// Authentication rejects the key when it no longer matches the owner's
+	// current token_version, so password reset, forced logout, and global
+	// session revocation invalidate outstanding API keys through the same
+	// mechanism that already invalidates JWTs. Never serialised: it is
+	// internal security metadata, not something a caller needs.
+	OwnerTokenVersion int64 `gorm:"column:owner_token_version;not null;default:0" json:"-"`
 }
 
 // ParseAllowedIPs validates a comma-separated CIDR list, returning a
@@ -160,12 +167,27 @@ func (m *APIKeyManager) Generate(name string, userID, tenantID uint, role string
 	if err != nil {
 		return "", nil, err
 	}
-	cols := "created_at, updated_at, name, user_id, tenant_id, role, key_hash, key_prefix, scopes, active, expires_at"
+
+	// H-2: capture the owner's current authorization snapshot at mint time.
+	// A key may never be issued to a user who is not currently authorised,
+	// and the recorded token_version is what later lets revocation events
+	// invalidate this key.
+	snap, err := loadAuthorizationSnapshot(sqlDB, d, userID)
+	if err != nil {
+		return "", nil, fmt.Errorf("API key owner is not authorized")
+	}
+	if Role(role) != snap.Role {
+		// The caller must not be able to mint a key carrying a role the
+		// owner does not currently hold.
+		return "", nil, fmt.Errorf("API key role does not match the owner's current role")
+	}
+
+	cols := "created_at, updated_at, name, user_id, tenant_id, role, key_hash, key_prefix, scopes, active, expires_at, owner_token_version"
 	vals := d.Placeholder(1) + ", " + d.Placeholder(2) + ", " + d.Placeholder(3) + ", " +
 		d.Placeholder(4) + ", " + d.Placeholder(5) + ", " + d.Placeholder(6) + ", " +
 		d.Placeholder(7) + ", " + d.Placeholder(8) + ", " + d.Placeholder(9) + ", " +
-		d.TrueLiteral() + ", " + d.Placeholder(10)
-	args := []any{now, now, name, userID, tenantID, role, hash, prefix, scopesStr, expiresAt}
+		d.TrueLiteral() + ", " + d.Placeholder(10) + ", " + d.Placeholder(11)
+	args := []any{now, now, name, userID, tenantID, role, hash, prefix, scopesStr, expiresAt, snap.TokenVersion}
 
 	var id uint
 	if d.IsPostgres() {
@@ -187,7 +209,7 @@ func (m *APIKeyManager) Generate(name string, userID, tenantID uint, role string
 	record := &APIKeyRecord{
 		ID: id, Name: name, KeyPrefix: prefix, KeyHash: hash, UserID: userID,
 		TenantID: tenantID, Role: role, Scopes: scopesStr, Enabled: true,
-		ExpiresAt: expiresAt, CreatedAt: now,
+		ExpiresAt: expiresAt, CreatedAt: now, OwnerTokenVersion: snap.TokenVersion,
 	}
 	m.logger.Info("API key generated", zap.String("name", name), zap.String("prefix", prefix), zap.Uint("tenant", tenantID))
 	return fullKey, record, nil
@@ -219,10 +241,10 @@ func (m *APIKeyManager) validate(key, remoteIP string, enforceIP bool) (*APIKeyR
 	if err != nil {
 		return nil, err
 	}
-	sel := "SELECT id, name, user_id, tenant_id, role, key_prefix, scopes, expires_at, allowed_ips FROM api_keys WHERE key_hash = " +
+	sel := "SELECT id, name, user_id, tenant_id, role, key_prefix, scopes, expires_at, allowed_ips, COALESCE(owner_token_version, 0) FROM api_keys WHERE key_hash = " +
 		d.Placeholder(1) + " AND active = " + d.TrueLiteral() + " AND deleted_at IS NULL"
 	var r APIKeyRecord
-	if err := sqlDB.QueryRow(sel, hash).Scan(&r.ID, &r.Name, &r.UserID, &r.TenantID, &r.Role, &r.KeyPrefix, &r.Scopes, &r.ExpiresAt, &r.AllowedIPs); err != nil {
+	if err := sqlDB.QueryRow(sel, hash).Scan(&r.ID, &r.Name, &r.UserID, &r.TenantID, &r.Role, &r.KeyPrefix, &r.Scopes, &r.ExpiresAt, &r.AllowedIPs, &r.OwnerTokenVersion); err != nil {
 		return nil, fmt.Errorf("invalid API key")
 	}
 	if r.ExpiresAt != nil && time.Now().After(*r.ExpiresAt) {
@@ -233,12 +255,99 @@ func (m *APIKeyManager) validate(key, remoteIP string, enforceIP bool) (*APIKeyR
 		// see the ValidateForIP doc comment.
 		return nil, fmt.Errorf("invalid API key")
 	}
+
+	// H-2: the key row is not the authority. Re-derive the owner's CURRENT
+	// authorization snapshot on every authentication so a demoted,
+	// suspended, deleted, or globally-revoked operator loses API access
+	// immediately instead of retaining whatever role was copied into the key
+	// row when it was minted.
+	if err := m.revalidateOwner(sqlDB, d, &r); err != nil {
+		return nil, err
+	}
+
 	r.KeyHash = hash
 	r.Enabled = true
 
 	// Best-effort last-used bookkeeping; never fail auth on it.
 	_, _ = sqlDB.Exec("UPDATE api_keys SET last_used_at = "+d.Placeholder(1)+" WHERE id = "+d.Placeholder(2), time.Now().UTC(), r.ID)
 	return &r, nil
+}
+
+// revalidateOwner enforces that the key's owner is still allowed to exercise
+// the authority the key claims. It mutates r.Role to the owner's CURRENT
+// canonical role so downstream authorization can never read a stale value.
+//
+// Every rejection returns the same opaque "invalid API key" error as an
+// unknown secret, so a caller cannot distinguish "this key exists but its
+// owner was suspended" from "no such key" and use the API as an account-state
+// oracle.
+func (m *APIKeyManager) revalidateOwner(sqlDB *sql.DB, d *dbdialect.Info, r *APIKeyRecord) error {
+	invalid := fmt.Errorf("invalid API key")
+
+	snap, err := loadAuthorizationSnapshot(sqlDB, d, r.UserID)
+	if err != nil {
+		// Owner missing, soft-deleted, inactive, or holding a
+		// non-canonical / structurally invalid role+tenant combination.
+		return invalid
+	}
+
+	// Revocation events (password reset, forced logout, global session
+	// revocation) bump users.token_version. A key minted under an older
+	// version no longer speaks for this account.
+	if r.OwnerTokenVersion != snap.TokenVersion {
+		return invalid
+	}
+
+	// A role change must not leave historical authority usable. Rejecting on
+	// ANY mismatch handles both directions safely: a demoted platform admin
+	// immediately loses platform access, and a promoted user does not have an
+	// old, narrowly-scoped key silently widened to their new role. Re-minting
+	// the key after a role change is the explicit, auditable path.
+	if snap.Role != Role(r.Role) {
+		return invalid
+	}
+
+	// Portal/tenant binding must stay consistent with the owner's record.
+	ownerTenant := uint(0)
+	if snap.TenantID.Valid && snap.TenantID.Int64 > 0 {
+		ownerTenant = uint(snap.TenantID.Int64)
+	}
+	if snap.Role == RolePlatformSuperAdmin {
+		// Platform keys are never tenant credentials.
+		if r.TenantID != 0 || ownerTenant != 0 {
+			return invalid
+		}
+	} else {
+		// Tenant-scoped roles require a real tenant, and the key must be
+		// bound to exactly the owner's tenant.
+		if ownerTenant == 0 || r.TenantID != ownerTenant {
+			return invalid
+		}
+		if err := m.requireActiveTenant(sqlDB, d, ownerTenant); err != nil {
+			return invalid
+		}
+	}
+
+	// Authority derives from current identity, not the stored copy.
+	r.Role = string(snap.Role)
+	return nil
+}
+
+// requireActiveTenant rejects keys whose owning tenant has been deactivated or
+// soft-deleted.
+func (m *APIKeyManager) requireActiveTenant(sqlDB *sql.DB, d *dbdialect.Info, tenantID uint) error {
+	var active bool
+	err := sqlDB.QueryRow(
+		"SELECT active FROM tenants WHERE id = "+d.Placeholder(1)+" AND deleted_at IS NULL",
+		tenantID,
+	).Scan(&active)
+	if err != nil {
+		return err
+	}
+	if !active {
+		return fmt.Errorf("tenant inactive")
+	}
+	return nil
 }
 
 // SetAllowedIPs configures (or clears, with an empty string) the IP
@@ -332,12 +441,25 @@ func (m *APIKeyManager) RotateByID(oldID, userID, tenantID uint, role string, sc
 
 	// 3. Insert the replacement (active written as a dialect literal so the
 	// boolean/integer column type is correct on both engines).
-	cols := "created_at, updated_at, name, user_id, tenant_id, role, key_hash, key_prefix, scopes, active, expires_at"
+	// H-2: a rotation re-issues authority, so it must re-check the owner and
+	// stamp the replacement with the owner's CURRENT token_version rather
+	// than inheriting the old key's. The read goes through tx: the SQLite
+	// pool allows a single connection, so querying sqlDB here while this
+	// transaction holds it would deadlock.
+	snap, err := loadAuthorizationSnapshot(tx, d, userID)
+	if err != nil {
+		return "", nil, fmt.Errorf("API key owner is not authorized")
+	}
+	if Role(role) != snap.Role {
+		return "", nil, fmt.Errorf("API key role does not match the owner's current role")
+	}
+
+	cols := "created_at, updated_at, name, user_id, tenant_id, role, key_hash, key_prefix, scopes, active, expires_at, owner_token_version"
 	vals := d.Placeholder(1) + ", " + d.Placeholder(2) + ", " + d.Placeholder(3) + ", " +
 		d.Placeholder(4) + ", " + d.Placeholder(5) + ", " + d.Placeholder(6) + ", " +
 		d.Placeholder(7) + ", " + d.Placeholder(8) + ", " + d.Placeholder(9) + ", " +
-		d.TrueLiteral() + ", " + d.Placeholder(10)
-	insArgs := []any{now, now, oldName, userID, tenantID, role, hash, prefix, scopesStr, expiresAt}
+		d.TrueLiteral() + ", " + d.Placeholder(10) + ", " + d.Placeholder(11)
+	insArgs := []any{now, now, oldName, userID, tenantID, role, hash, prefix, scopesStr, expiresAt, snap.TokenVersion}
 
 	var newID uint
 	if d.IsPostgres() {

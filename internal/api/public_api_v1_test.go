@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 func newPublicAPITestRouter(t *testing.T) (*Router, string, string) {
@@ -41,6 +43,10 @@ func newPublicAPITestRouter(t *testing.T) (*Router, string, string) {
 		sqlDB, _ := db.DB()
 		_ = sqlDB.Close()
 	})
+	// H-2: an API key may only be minted for a real, currently-authorized
+	// owner, and its role must match the owner's current role.
+	seedPublicAPIOwner(t, db, 10, 1, string(auth.RoleTenantAdmin))
+	seedPublicAPIOwner(t, db, 11, 1, string(auth.RoleTenantReadOnly))
 	writeKey, _, err := router.apikeys.Generate("writer", 10, 1, string(auth.RoleTenantAdmin), []string{publicv1.ScopeGroupsRead, publicv1.ScopeGroupsWrite, publicv1.ScopeAliasesRead, publicv1.ScopeAliasesWrite}, 1)
 	if err != nil {
 		t.Fatal(err)
@@ -166,5 +172,29 @@ func TestPublicAPIAliasMoveRespectsTargetDomainCap(t *testing.T) {
 	var domainID uint
 	if err := sqlDB.QueryRow("SELECT domain_id FROM coremail_aliases WHERE id=201").Scan(&domainID); err != nil || domainID != 101 {
 		t.Fatalf("alias moved despite cap: domain=%d err=%v", domainID, err)
+	}
+}
+
+// seedPublicAPIOwner provisions the tenant + user an API key is minted for.
+func seedPublicAPIOwner(t *testing.T, db *gorm.DB, userID, tenantID uint, role string) {
+	t.Helper()
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	var n int
+	_ = sqlDB.QueryRow("SELECT COUNT(*) FROM tenants WHERE id = ?", tenantID).Scan(&n)
+	if n == 0 {
+		if _, err := sqlDB.Exec(
+			"INSERT INTO tenants (id, created_at, updated_at, name, slug, domain, plan, active) VALUES (?, ?, ?, 'pub', 'pub', 'pub.test', 'enterprise', 1)",
+			tenantID, now, now); err != nil {
+			t.Fatalf("seed tenant: %v", err)
+		}
+	}
+	if _, err := sqlDB.Exec(
+		"INSERT INTO users (id, created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified, token_version) VALUES (?, ?, ?, ?, 'x', ?, ?, 1, 1, 0)",
+		userID, now, now, fmt.Sprintf("owner%d@public.test", userID), role, tenantID); err != nil {
+		t.Fatalf("seed user %d: %v", userID, err)
 	}
 }
