@@ -1,55 +1,66 @@
-import { describe, expect, it, vi } from "vitest";
-import { TENANT_CONTEXT_QUERY_KEY } from "./contract";
-import { headerForTenantContext, useSetTenantContext } from "./queries";
+import { describe, expect, it, vi, beforeEach } from "vitest";
+import { renderHook, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { createElement, type ReactNode } from "react";
+import { useSetTenantScope, useClearTenantScope, useTenantScope } from "./queries";
+import { request } from "../../../api";
 
-// These tests verify the tenant-context contract and the query
-// invalidation behavior that prevents cross-tenant cache leakage.
-// The React Query integration is verified through the mutation's
-// onSuccess which removes all tenant-scoped mail queries.
+vi.mock("../../../api", () => ({
+  request: vi.fn(),
+}));
 
-describe("tenant-context", () => {
-  it("exposes a fixed query key", () => {
-    expect(TENANT_CONTEXT_QUERY_KEY).toEqual(["tenant-context"]);
+const mockedRequest = vi.mocked(request);
+
+function makeWrapper(qc: QueryClient) {
+  return ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client: qc }, children);
+}
+
+describe("platform tenant scope isolation", () => {
+  beforeEach(() => {
+    mockedRequest.mockReset();
   });
 
-  it("never fabricates a tenant header without a real tenant id", () => {
-    expect(headerForTenantContext(null)).toEqual({});
-    expect(headerForTenantContext(undefined)).toEqual({});
-    expect(headerForTenantContext(0)).toEqual({});
+  it("starts with no tenant scope and never fabricates a tenant", async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { result } = renderHook(() => useTenantScope(), { wrapper: makeWrapper(qc) });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.tenantId).toBeNull();
   });
 
-  it("emits the X-Support-Tenant-ID header only for a real tenant id", () => {
-    expect(headerForTenantContext(42)).toEqual({ "X-Support-Tenant-ID": "42" });
+  it("setting a scope evicts every tenant-scoped mail query", async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    qc.setQueryData(["platform-domains", "list", 7], { domains: [] });
+    qc.setQueryData(["platform-mailboxes", "list", 7], { mailboxes: [] });
+    qc.setQueryData(["platform-aliases", "list", 7], { aliases: [] });
+    qc.setQueryData(["platform-groups", "list", 7], { groups: [] });
+    qc.setQueryData(["platform-suppressions", "list", 7], { suppressions: [] });
+
+    const { result } = renderHook(() => useSetTenantScope(), { wrapper: makeWrapper(qc) });
+
+    result.current.mutate({ tenantId: 7, tenantName: "Acme" });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(qc.getQueryData(["platform-domains", "list", 7])).toBeUndefined();
+    expect(qc.getQueryData(["platform-mailboxes", "list", 7])).toBeUndefined();
+    expect(qc.getQueryData(["platform-aliases", "list", 7])).toBeUndefined();
+    expect(qc.getQueryData(["platform-groups", "list", 7])).toBeUndefined();
+    expect(qc.getQueryData(["platform-suppressions", "list", 7])).toBeUndefined();
   });
 
-  it("invalidates tenant-scoped queries when the context changes", () => {
-    const removeQueries = vi.fn();
-    const setQueryData = vi.fn();
-    const queryClient = {
-      removeQueries,
-      setQueryData,
-      invalidateQueries: vi.fn(),
-    };
-    // The mutation uses the injected client via React Query; here we
-    // assert the contract: a tenant change must clear the mail-scoped
-    // query caches so no stale data from a prior tenant is rendered.
-    const expectedInvalidations = [
-      ["platform-domains"],
-      ["platform-mailboxes"],
-      ["support-grants", "list"],
-    ];
-    for (const key of expectedInvalidations) {
-      removeQueries({ queryKey: key });
-    }
-    expect(removeQueries).toHaveBeenCalledTimes(3);
-    expect(removeQueries).toHaveBeenCalledWith({ queryKey: ["platform-domains"] });
-    expect(removeQueries).toHaveBeenCalledWith({ queryKey: ["platform-mailboxes"] });
-    expect(removeQueries).toHaveBeenCalledWith({ queryKey: ["support-grants", "list"] });
-    void setQueryData;
-    void queryClient;
+  it("clearing the scope evicts tenant-scoped queries too", async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    qc.setQueryData(["platform-mailboxes", "list", 7], { mailboxes: [] });
+    const { result } = renderHook(() => useClearTenantScope(), { wrapper: makeWrapper(qc) });
+    result.current.mutate();
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(qc.getQueryData(["platform-mailboxes", "list", 7])).toBeUndefined();
   });
 
-  it("exports the context-setting mutation hook", () => {
-    expect(typeof useSetTenantContext).toBe("function");
+  it("the scope state is a pure client selection: no network call and no tenant route", async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { result } = renderHook(() => useTenantScope(), { wrapper: makeWrapper(qc) });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(mockedRequest).not.toHaveBeenCalled();
   });
 });

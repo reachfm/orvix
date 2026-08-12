@@ -2,8 +2,8 @@
 //
 // This is the machine-verifiable source of truth for what this frontend
 // may render and navigate to. Every entry is derived from a real route
-// in internal/api/router.go (verified at integration SHA aeec470 and
-// the Mail Control batch). Classifications:
+// in internal/api/router.go (verified at integration SHA aeec470, PR #65
+// head f1d2954, and the frontend merge de49a8e). Classifications:
 //
 //   - WIRED:         real backend route + real frontend page in this console
 //   - BACKEND_ONLY:  real backend route, no frontend page yet (never invent one)
@@ -14,23 +14,23 @@
 //   - PLATFORM_ONLY: real backend route gated to platform-super-admin roles
 //                    (platformMW); tenant roles cannot call it
 //
-// Portal ownership model (verified from router.go):
-//   - platformMW routes (PSA-direct): /admin/queue/*, /dr/*, /retention/*,
-//     /platform/*, /incidents, /audit/logs, /monitoring/*, /admin/backups/*,
-//     /update*, /updates/*, /firewall/*, /guardian/*, /heal/*, /modules,
-//     /feature-flags, /admin/security/*, /admin/ssl/*, /admin/settings/*,
-//     /admin/storage/*, /admin/cluster/*, /admin/runtime
-//   - Support-access-aware reads (PSA with active grant + X-Support-Tenant-ID):
-//     GET /domains, GET /mailboxes, GET /users, GET
-//     /enterprise/organizations/current
-//   - Tenant-family-only (TENANT_ONLY): all /domains/* detail + mutations,
-//     all /mailboxes/* detail + mutations, /enterprise/*, /customer/*,
-//     /admin/relay/*, aliases, groups
+// Mail-control ownership model (verified from router.go, PR #65):
+//   - PSA mail control uses ONLY /api/v1/platform/domains|mailboxes|aliases|
+//     groups|suppressions|deliverability|relays routes, platformMW-gated +
+//     RBAC-permissioned (domains.read/write, mailboxes.read/write,
+//     aliases.read/write, groups.read, suppressions.read/write,
+//     deliverability.read, relay.read/write/test). Every route requires an
+//     EXPLICIT target tenant_id in the path (except relays, which are
+//     platform-wide). There is NO support-access requirement: no
+//     X-Support-Tenant-ID header and no grant is involved.
+//   - Tenant Admin continues to use tenant-owned routes (/domains,
+//     /mailboxes, /enterprise/aliases, /enterprise/groups, ...) — those
+//     remain TENANT_ONLY and must never be called by PSA pages.
+//   - Support Access remains a separate feature (support-access page +
+//     /platform/support/grants* routes) and is not part of mail control.
 //
-// A Platform Super Admin has no owning tenant. It must NEVER fabricate a
-// tenant ID or call a tenant-only route. Support-access reads require an
-// explicit, backend-validated grant; the UI models this through the
-// tenant-context feature.
+// No dead navigation: every WIRED feature below has a functional page
+// plus focused tests. No route is marked WIRED without one.
 
 export type CapabilityState = "WIRED" | "BACKEND_ONLY" | "UNAVAILABLE" | "TENANT_ONLY" | "PLATFORM_ONLY";
 export type PortalOwner = "platform" | "tenant" | "shared" | "none";
@@ -52,10 +52,12 @@ export interface Capability {
   page?: string;
   /** Frontend navigation label, when WIRED. */
   label?: string;
+  /** RBAC permission(s) the backend requires on this route. */
+  permission?: string;
   note?: string;
 }
 
-const PLATFORM_ROUTES: ReadonlyArray<{ method: Capability["method"]; route: string; feature: string }> = [
+const PLATFORM_ROUTES: ReadonlyArray<{ method: Capability["method"]; route: string; feature: string; permission?: string }> = [
   // Overview / summary
   { method: "GET", route: "/platform/dashboard", feature: "overview" },
   { method: "GET", route: "/admin/summary", feature: "overview" },
@@ -93,6 +95,51 @@ const PLATFORM_ROUTES: ReadonlyArray<{ method: Capability["method"]; route: stri
   { method: "POST", route: "/admin/queue/messages/:id/cancel", feature: "mail-operations" },
   { method: "POST", route: "/admin/queue/messages/:id/bounce", feature: "mail-operations" },
   { method: "POST", route: "/admin/queue/messages/bulk-action", feature: "mail-operations" },
+  // Platform mail control — domains
+  { method: "GET", route: "/platform/domains/:tenant_id", feature: "domains", permission: "domains.read" },
+  { method: "GET", route: "/platform/domains/:tenant_id/:id", feature: "domains", permission: "domains.read" },
+  { method: "POST", route: "/platform/domains/:tenant_id/:id/status", feature: "domains", permission: "domains.write" },
+  { method: "POST", route: "/platform/domains/:tenant_id/:id/mail-access-mode", feature: "domains", permission: "domains.write" },
+  // Platform mail control — mailboxes
+  { method: "GET", route: "/platform/mailboxes/:tenant_id", feature: "mailboxes", permission: "mailboxes.read" },
+  { method: "GET", route: "/platform/mailboxes/:tenant_id/:id", feature: "mailboxes", permission: "mailboxes.read" },
+  { method: "POST", route: "/platform/mailboxes/:tenant_id/:id/status", feature: "mailboxes", permission: "mailboxes.write" },
+  { method: "POST", route: "/platform/mailboxes/:tenant_id/:id/quota", feature: "mailboxes", permission: "mailboxes.write" },
+  { method: "POST", route: "/platform/mailboxes/:tenant_id/:id/reset-password", feature: "mailboxes", permission: "mailboxes.write" },
+  { method: "DELETE", route: "/platform/mailboxes/:tenant_id/:id", feature: "mailboxes", permission: "mailboxes.write" },
+  { method: "POST", route: "/platform/mailboxes/:tenant_id/bulk/status", feature: "bulk-mailboxes", permission: "mailboxes.write" },
+  // Platform mail control — aliases
+  { method: "GET", route: "/platform/aliases/:tenant_id", feature: "aliases", permission: "aliases.read" },
+  { method: "GET", route: "/platform/aliases/:tenant_id/:id", feature: "aliases", permission: "aliases.read" },
+  { method: "POST", route: "/platform/aliases/:tenant_id", feature: "aliases", permission: "aliases.write" },
+  { method: "DELETE", route: "/platform/aliases/:tenant_id/:id", feature: "aliases", permission: "aliases.write" },
+  // Platform mail control — groups / memberships
+  { method: "GET", route: "/platform/groups/:tenant_id", feature: "groups", permission: "groups.read" },
+  { method: "GET", route: "/platform/groups/:tenant_id/:id", feature: "groups", permission: "groups.read" },
+  { method: "GET", route: "/platform/groups/:tenant_id/:id/members", feature: "groups", permission: "groups.read" },
+  // Platform mail control — suppressions
+  { method: "GET", route: "/platform/suppressions/:tenant_id", feature: "suppressions", permission: "suppressions.read" },
+  { method: "POST", route: "/platform/suppressions/:tenant_id", feature: "suppressions", permission: "suppressions.write" },
+  { method: "GET", route: "/platform/suppressions/:tenant_id/:id", feature: "suppressions", permission: "suppressions.read" },
+  { method: "GET", route: "/platform/suppressions/:tenant_id/:id/history", feature: "suppressions", permission: "suppressions.read" },
+  { method: "POST", route: "/platform/suppressions/:tenant_id/:id/release", feature: "suppressions", permission: "suppressions.write" },
+  { method: "POST", route: "/platform/suppressions/:tenant_id/:id/reactivate", feature: "suppressions", permission: "suppressions.write" },
+  { method: "DELETE", route: "/platform/suppressions/:tenant_id/:id", feature: "suppressions", permission: "suppressions.write" },
+  { method: "DELETE", route: "/platform/suppressions/:tenant_id", feature: "suppressions", permission: "suppressions.write" },
+  // Platform mail control — deliverability
+  { method: "GET", route: "/platform/deliverability/:tenant_id/metrics", feature: "deliverability", permission: "deliverability.read" },
+  { method: "GET", route: "/platform/deliverability/:tenant_id/events", feature: "deliverability", permission: "deliverability.read" },
+  { method: "GET", route: "/platform/deliverability/:tenant_id/events/:id", feature: "deliverability", permission: "deliverability.read" },
+  // Platform mail control — relay administration
+  { method: "GET", route: "/platform/relays", feature: "relay", permission: "relay.read" },
+  { method: "GET", route: "/platform/relays/:id", feature: "relay", permission: "relay.read" },
+  { method: "POST", route: "/platform/relays", feature: "relay", permission: "relay.write" },
+  { method: "PATCH", route: "/platform/relays/:id", feature: "relay", permission: "relay.write" },
+  { method: "POST", route: "/platform/relays/:id/enable", feature: "relay", permission: "relay.write" },
+  { method: "POST", route: "/platform/relays/:id/disable", feature: "relay", permission: "relay.write" },
+  { method: "POST", route: "/platform/relays/:id/rotate-credentials", feature: "relay", permission: "relay.write" },
+  { method: "POST", route: "/platform/relays/:id/test", feature: "relay", permission: "relay.test" },
+  { method: "DELETE", route: "/platform/relays/:id", feature: "relay", permission: "relay.write" },
   // Reliability / backups / DR / updates / cluster / monitoring / storage
   { method: "GET", route: "/admin/backups", feature: "reliability" },
   { method: "GET", route: "/admin/backups/:id", feature: "reliability" },
@@ -183,6 +230,41 @@ const PLATFORM_ROUTES: ReadonlyArray<{ method: Capability["method"]; route: stri
   { method: "POST", route: "/platform/support/grants/:id/revoke", feature: "support-access" },
 ];
 
+// Tenant-family-only mail-control routes (never callable by PSA). Kept
+// so the inventory proves the PSA pages never depend on them and the
+// tenant console continues to own them.
+const TENANT_MAIL_CONTROL_ROUTES: ReadonlyArray<{ method: Capability["method"]; route: string; feature: string }> = [
+  { method: "GET", route: "/domains", feature: "domains" },
+  { method: "GET", route: "/domains/:name", feature: "domains" },
+  { method: "POST", route: "/domains", feature: "domains" },
+  { method: "PATCH", route: "/domains/:name", feature: "domains" },
+  { method: "PATCH", route: "/domains/:name/status", feature: "domains" },
+  { method: "DELETE", route: "/domains/:name", feature: "domains" },
+  { method: "POST", route: "/domains/bulk/status", feature: "domains" },
+  { method: "GET", route: "/mailboxes", feature: "mailboxes" },
+  { method: "GET", route: "/mailboxes/:id", feature: "mailboxes" },
+  { method: "POST", route: "/mailboxes", feature: "mailboxes" },
+  { method: "PATCH", route: "/mailboxes/:id/status", feature: "mailboxes" },
+  { method: "PATCH", route: "/mailboxes/:id/quota", feature: "mailboxes" },
+  { method: "PATCH", route: "/mailboxes/:id/password", feature: "mailboxes" },
+  { method: "DELETE", route: "/mailboxes/:id", feature: "mailboxes" },
+  { method: "POST", route: "/mailboxes/bulk/status", feature: "mailboxes" },
+  { method: "GET", route: "/enterprise/aliases", feature: "aliases" },
+  { method: "POST", route: "/enterprise/aliases", feature: "aliases" },
+  { method: "DELETE", route: "/enterprise/aliases/:id", feature: "aliases" },
+  { method: "GET", route: "/enterprise/groups", feature: "groups" },
+  { method: "POST", route: "/enterprise/groups", feature: "groups" },
+  { method: "DELETE", route: "/enterprise/groups/:id", feature: "groups" },
+  { method: "POST", route: "/enterprise/groups/:id/members", feature: "groups" },
+  { method: "DELETE", route: "/enterprise/groups/:id/members/:memberId", feature: "groups" },
+  { method: "GET", route: "/enterprise/relay/pools/:id/providers", feature: "relay" },
+  { method: "POST", route: "/enterprise/relay/pools", feature: "relay" },
+  { method: "POST", route: "/enterprise/relay/providers", feature: "relay" },
+  { method: "POST", route: "/enterprise/relay/providers/:id/test", feature: "relay" },
+  { method: "POST", route: "/enterprise/relay/routing-rules", feature: "relay" },
+  { method: "POST", route: "/enterprise/relay/emergency-override", feature: "relay" },
+];
+
 const WIRED_FEATURES: ReadonlySet<string> = new Set([
   "overview",
   "organizations",
@@ -201,74 +283,16 @@ const WIRED_FEATURES: ReadonlySet<string> = new Set([
   "health",
   "domains",
   "mailboxes",
-  "suppression",
+  "aliases",
+  "groups",
+  "bulk-mailboxes",
+  "relay",
+  "suppressions",
   "deliverability",
 ]);
 
-// Mail-control routes with verified ownership (see header comment for
-// the middleware evidence). owner values:
-//   - "platform": PSA-direct (platformMW)
-//   - "tenant": tenant-family role only (tenantCompatMW[0] role gate)
-//   - "shared": support-access-aware read (PSA needs grant + tenant header)
-const MAIL_CONTROL_ROUTES: ReadonlyArray<{
-  method: Capability["method"];
-  route: string;
-  feature: string;
-  owner: PortalOwner;
-  requiresSupportAccess?: boolean;
-  tenantFamilyOnly?: boolean;
-  backendRoute?: boolean;
-}> = [
-  // Platform domains (list = support-access-aware read; detail/mutations = tenant-only)
-  { method: "GET", route: "/domains", feature: "domains", owner: "shared", requiresSupportAccess: true },
-  { method: "GET", route: "/domains/:name", feature: "domains", owner: "tenant", tenantFamilyOnly: true },
-  { method: "GET", route: "/domains/:name/audit", feature: "domains", owner: "tenant", tenantFamilyOnly: true },
-  { method: "GET", route: "/domains/export", feature: "domains", owner: "tenant", tenantFamilyOnly: true },
-  { method: "POST", route: "/domains", feature: "domains", owner: "tenant", tenantFamilyOnly: true },
-  { method: "PATCH", route: "/domains/:name", feature: "domains", owner: "tenant", tenantFamilyOnly: true },
-  { method: "PATCH", route: "/domains/:name/status", feature: "domains", owner: "tenant", tenantFamilyOnly: true },
-  { method: "DELETE", route: "/domains/:name", feature: "domains", owner: "tenant", tenantFamilyOnly: true },
-  { method: "POST", route: "/domains/bulk/status", feature: "domains", owner: "tenant", tenantFamilyOnly: true },
-  // Platform mailboxes (list = support-access-aware read; detail/mutations = tenant-only)
-  { method: "GET", route: "/mailboxes", feature: "mailboxes", owner: "shared", requiresSupportAccess: true },
-  { method: "GET", route: "/mailboxes/:id", feature: "mailboxes", owner: "tenant", tenantFamilyOnly: true },
-  { method: "GET", route: "/mailboxes/:id/audit", feature: "mailboxes", owner: "tenant", tenantFamilyOnly: true },
-  { method: "GET", route: "/mailboxes/export", feature: "mailboxes", owner: "tenant", tenantFamilyOnly: true },
-  { method: "POST", route: "/mailboxes", feature: "mailboxes", owner: "tenant", tenantFamilyOnly: true },
-  { method: "PATCH", route: "/mailboxes/:id/status", feature: "mailboxes", owner: "tenant", tenantFamilyOnly: true },
-  { method: "PATCH", route: "/mailboxes/:id/quota", feature: "mailboxes", owner: "tenant", tenantFamilyOnly: true },
-  { method: "PATCH", route: "/mailboxes/:id/password", feature: "mailboxes", owner: "tenant", tenantFamilyOnly: true },
-  { method: "PATCH", route: "/mailboxes/:id/protocols", feature: "mailboxes", owner: "tenant", tenantFamilyOnly: true },
-  { method: "DELETE", route: "/mailboxes/:id", feature: "mailboxes", owner: "tenant", tenantFamilyOnly: true },
-  { method: "POST", route: "/mailboxes/bulk/status", feature: "mailboxes", owner: "tenant", tenantFamilyOnly: true },
-  { method: "POST", route: "/mailboxes/import", feature: "mailboxes", owner: "tenant", tenantFamilyOnly: true },
-  { method: "POST", route: "/mailboxes/import/dry-run", feature: "mailboxes", owner: "tenant", tenantFamilyOnly: true },
-  // Aliases / groups (tenant-family only; no PSA route exists)
-  { method: "GET", route: "/enterprise/aliases", feature: "aliases", owner: "tenant", tenantFamilyOnly: true },
-  { method: "POST", route: "/enterprise/aliases", feature: "aliases", owner: "tenant", tenantFamilyOnly: true },
-  { method: "DELETE", route: "/enterprise/aliases/:id", feature: "aliases", owner: "tenant", tenantFamilyOnly: true },
-  { method: "GET", route: "/enterprise/groups", feature: "groups", owner: "tenant", tenantFamilyOnly: true },
-  { method: "POST", route: "/enterprise/groups", feature: "groups", owner: "tenant", tenantFamilyOnly: true },
-  { method: "DELETE", route: "/enterprise/groups/:id", feature: "groups", owner: "tenant", tenantFamilyOnly: true },
-  { method: "POST", route: "/enterprise/groups/:id/members", feature: "groups", owner: "tenant", tenantFamilyOnly: true },
-  { method: "DELETE", route: "/enterprise/groups/:id/members/:memberId", feature: "groups", owner: "tenant", tenantFamilyOnly: true },
-  // Relay (tenant-family only)
-  { method: "GET", route: "/enterprise/relay/pools/:id/providers", feature: "relay", owner: "tenant", tenantFamilyOnly: true },
-  { method: "POST", route: "/enterprise/relay/pools", feature: "relay", owner: "tenant", tenantFamilyOnly: true },
-  { method: "POST", route: "/enterprise/relay/providers", feature: "relay", owner: "tenant", tenantFamilyOnly: true },
-  { method: "POST", route: "/enterprise/relay/providers/:id/test", feature: "relay", owner: "tenant", tenantFamilyOnly: true },
-  { method: "POST", route: "/enterprise/relay/routing-rules", feature: "relay", owner: "tenant", tenantFamilyOnly: true },
-  { method: "POST", route: "/enterprise/relay/emergency-override", feature: "relay", owner: "tenant", tenantFamilyOnly: true },
-  // Mail queue (platform-owned) — already present in PLATFORM_ROUTES;
-  // the base array maps to owner "platform" in ALL_ROUTES, so the queue
-  // routes are intentionally NOT duplicated here.
-  // Suppression / deliverability: no backend routes exist anywhere
-  { method: "GET", route: "/suppression", feature: "suppression", owner: "none", backendRoute: false },
-  { method: "GET", route: "/deliverability", feature: "deliverability", owner: "none", backendRoute: false },
-];
-
 function classify(
-  route: { method: Capability["method"]; route: string; feature: string; owner?: PortalOwner; requiresSupportAccess?: boolean; tenantFamilyOnly?: boolean; backendRoute?: boolean },
+  route: { method: Capability["method"]; route: string; feature: string; owner?: PortalOwner; requiresSupportAccess?: boolean; tenantFamilyOnly?: boolean; backendRoute?: boolean; permission?: string },
 ): Capability {
   const wired = WIRED_FEATURES.has(route.feature);
   const owner = route.owner ?? "platform";
@@ -279,8 +303,6 @@ function classify(
     state = "TENANT_ONLY";
   } else if (owner === "platform") {
     state = wired ? "WIRED" : "BACKEND_ONLY";
-  } else if (owner === "shared") {
-    state = "WIRED"; // support-access-aware read; the tenant-context feature gates it
   } else {
     state = "UNAVAILABLE";
   }
@@ -293,33 +315,52 @@ function classify(
     owner,
     requiresSupportAccess: route.requiresSupportAccess,
     tenantFamilyOnly: route.tenantFamilyOnly,
+    permission: route.permission,
   };
 }
 
 const ALL_ROUTES = [
   ...PLATFORM_ROUTES.map((r) => ({ ...r, owner: "platform" as PortalOwner })),
-  ...MAIL_CONTROL_ROUTES,
+  ...TENANT_MAIL_CONTROL_ROUTES.map((r) => ({ ...r, owner: "tenant" as PortalOwner, tenantFamilyOnly: true })),
 ];
 
 export const CAPABILITY_INVENTORY: readonly Capability[] = ALL_ROUTES.map(classify);
 
-export const PLATFORM_NAVIGATION: ReadonlyArray<{ label: string; route: string; feature: string }> = [
+// Navigation is organized in groups: "Mail Control" (identity
+// inventory) and "Operations" (queue/suppression/deliverability/bulk).
+// Visibility is derived from WIRED_FEATURES so a page is never shown
+// without a real page behind it; the tenant portal never renders any of
+// these (App.tsx allow-lists per portal).
+export interface PlatformNavItem {
+  label: string;
+  route: string;
+  feature: string;
+  section?: "Mail Control" | "Operations" | "Commercial" | "Security" | "System";
+}
+
+export const PLATFORM_NAVIGATION: ReadonlyArray<PlatformNavItem> = [
   { label: "Overview", route: "platform-home", feature: "overview" },
-  { label: "Organizations", route: "organizations", feature: "organizations" },
+  { label: "Organizations", route: "organizations", feature: "organizations", section: "Commercial" },
   { label: "Platform Billing", route: "platform-billing", feature: "platform-billing" },
-  { label: "Imports", route: "platform-imports", feature: "imports" },
-  { label: "Domains", route: "platform-domains", feature: "domains" },
+  { label: "Domains", route: "platform-domains", feature: "domains", section: "Mail Control" },
   { label: "Mailboxes", route: "platform-mailboxes", feature: "mailboxes" },
-  { label: "Mail Operations", route: "mail-operations", feature: "mail-operations" },
+  { label: "Aliases", route: "platform-aliases", feature: "aliases" },
+  { label: "Groups", route: "platform-groups", feature: "groups" },
+  { label: "Relays", route: "platform-relays", feature: "relay" },
+  { label: "Mail Queue", route: "mail-operations", feature: "mail-operations", section: "Operations" },
+  { label: "Suppressions", route: "platform-suppressions", feature: "suppressions" },
+  { label: "Deliverability", route: "platform-deliverability", feature: "deliverability" },
+  { label: "Bulk Mailboxes", route: "platform-bulk-mailboxes", feature: "bulk-mailboxes" },
+  { label: "Imports", route: "platform-imports", feature: "imports" },
   { label: "Automation Jobs", route: "automation-jobs", feature: "automation-jobs" },
   { label: "Incidents", route: "platform-incidents", feature: "incidents" },
   { label: "Retention", route: "platform-retention", feature: "retention" },
   { label: "DR", route: "platform-dr", feature: "dr" },
   { label: "Reliability", route: "reliability", feature: "reliability" },
-  { label: "Audit Log", route: "platform-audit", feature: "audit" },
+  { label: "Audit Log", route: "platform-audit", feature: "audit", section: "Security" },
   { label: "Support Access", route: "support-access", feature: "support-access" },
   { label: "Security", route: "platform-security", feature: "security" },
-  { label: "Configuration", route: "platform-configuration", feature: "configuration" },
+  { label: "Configuration", route: "platform-configuration", feature: "configuration", section: "System" },
   { label: "Health", route: "health", feature: "health" },
 ];
 
@@ -329,4 +370,13 @@ export function capabilitiesForFeature(feature: string): readonly Capability[] {
 
 export function isWired(feature: string): boolean {
   return WIRED_FEATURES.has(feature);
+}
+
+export function navigationForFeature(feature: string): readonly PlatformNavItem[] {
+  return PLATFORM_NAVIGATION.filter((n) => n.feature === feature);
+}
+
+/** Every navigation item must be backed by a WIRED feature. */
+export function navigationDeadLinkCheck(): readonly PlatformNavItem[] {
+  return PLATFORM_NAVIGATION.filter((n) => !isWired(n.feature));
 }

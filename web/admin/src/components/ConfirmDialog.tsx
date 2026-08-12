@@ -48,14 +48,14 @@ export default function ConfirmDialog({
           {requireTypedName && (
             <div className="mb-4">
               <label className="block text-xs text-[var(--text-secondary)] mb-1">
-                Type <span className="text-[var(--text-primary)] font-mono">{requireTypedName}</span> to confirm
+                <span>Type <span className="text-[var(--text-primary)] font-mono">{requireTypedName}</span> to confirm</span>
+                <input
+                  autoFocus
+                  value={typed}
+                  onChange={(e) => setTyped(e.target.value)}
+                  className="mt-1 w-full px-3 py-2 bg-[var(--bg-elevated)] border border-[var(--border)] rounded text-sm text-[var(--text-primary)]"
+                />
               </label>
-              <input
-                autoFocus
-                value={typed}
-                onChange={(e) => setTyped(e.target.value)}
-                className="w-full px-3 py-2 bg-[var(--bg-elevated)] border border-[var(--border)] rounded text-sm text-[var(--text-primary)]"
-              />
             </div>
           )}
           <div className="flex justify-end gap-2">

@@ -1,69 +1,69 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useGrants } from "../support-access/queries";
-import { TENANT_CONTEXT_QUERY_KEY, type TenantContextState } from "./contract";
+import { listOrganizations } from "../organizations/api";
+import { TENANT_SCOPE_QUERY_KEY, type TenantScopeState } from "./contract";
 
 /**
- * Tenant-context state is a client-side *selection* only. It is never
- * sent to the backend as authentication, and it never replaces the
- * operator's real identity. Every mail-control read that uses it must
- * ALSO carry the X-Support-Tenant-ID header, which the backend
- * validates against the operator's active grant per request.
- *
- * The selected tenant is derived from the real platform organization
- * list (GET /platform/organizations) so the operator picks a real
- * tenant, never a fabricated id.
+ * Reads the operator's explicit tenant-scope selection. This is a pure
+ * client-side filter over the platform routes — the selected tenant id
+ * is passed in the route path (/platform/domains/:tenant_id), never as
+ * an authentication header.
  */
-export function useTenantContext() {
-  const qc = useQueryClient();
+export function useTenantScope() {
   return useQuery({
-    queryKey: TENANT_CONTEXT_QUERY_KEY,
-    queryFn: () => ({ tenantId: null, tenantName: undefined, grant: undefined }) as TenantContextState,
+    queryKey: TENANT_SCOPE_QUERY_KEY,
+    queryFn: () => ({ tenantId: null }) as TenantScopeState,
     staleTime: Infinity,
   });
 }
 
-export function useSetTenantContext() {
+export function useSetTenantScope() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (state: TenantContextState) => Promise.resolve(state),
+    mutationFn: (state: TenantScopeState) => Promise.resolve(state),
     onSuccess: (state) => {
-      // Setting a new tenant context MUST invalidate every tenant-
-      // scoped mail query so cached data from a previous tenant can
-      // never leak into the newly selected tenant's view.
-      qc.setQueryData(TENANT_CONTEXT_QUERY_KEY, state);
+      // Binding the new scope MUST evict every tenant-scoped mail
+      // query so cached rows from a previous tenant can never leak
+      // into the newly selected tenant's view.
+      qc.setQueryData(TENANT_SCOPE_QUERY_KEY, state);
       qc.removeQueries({ queryKey: ["platform-domains"] });
       qc.removeQueries({ queryKey: ["platform-mailboxes"] });
-      qc.removeQueries({ queryKey: ["support-grants", "list"] });
+      qc.removeQueries({ queryKey: ["platform-aliases"] });
+      qc.removeQueries({ queryKey: ["platform-groups"] });
+      qc.removeQueries({ queryKey: ["platform-suppressions"] });
+      qc.removeQueries({ queryKey: ["platform-deliverability"] });
+      qc.removeQueries({ queryKey: ["platform-bulk-mailboxes"] });
     },
   });
 }
 
-export function useClearTenantContext() {
+export function useClearTenantScope() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => Promise.resolve(undefined),
     onSuccess: () => {
-      qc.setQueryData(TENANT_CONTEXT_QUERY_KEY, { tenantId: null, grant: undefined });
+      qc.setQueryData(TENANT_SCOPE_QUERY_KEY, { tenantId: null });
       qc.removeQueries({ queryKey: ["platform-domains"] });
       qc.removeQueries({ queryKey: ["platform-mailboxes"] });
+      qc.removeQueries({ queryKey: ["platform-aliases"] });
+      qc.removeQueries({ queryKey: ["platform-groups"] });
+      qc.removeQueries({ queryKey: ["platform-suppressions"] });
+      qc.removeQueries({ queryKey: ["platform-deliverability"] });
+      qc.removeQueries({ queryKey: ["platform-bulk-mailboxes"] });
     },
   });
 }
 
 /**
- * Resolves the active grant for the selected tenant from the real
- * support-grants inventory. Returns undefined when no grant exists or
- * the grant is not active — callers must render the unavailable state.
+ * Real tenant options for the explicit scope selector, sourced from
+ * GET /platform/organizations so the operator always picks a real
+ * tenant id — never a fabricated one. Mail-control pages do not ship
+ * their own tenant list; they reuse this organization-derived source.
  */
-export function useActiveGrantForSelectedTenant() {
-  const { data: context } = useTenantContext();
-  const { data: grants } = useGrants();
-  const tenantId = context?.tenantId ?? null;
-  if (!tenantId || !grants) return undefined;
-  const g = grants.grants.find((x) => x.target_tenant_id === tenantId && (x.status === "active" || x.status === "approved"));
-  return g ? { id: g.id, scope: g.permission_scope, status: g.status } : undefined;
-}
-
-export function headerForTenantContext(tenantId: number | null | undefined): Record<string, string> {
-  return tenantId ? { "X-Support-Tenant-ID": String(tenantId) } : {};
+export function useTenantOptions() {
+  return useQuery({
+    queryKey: ["platform-organizations", "", 200, 0],
+    queryFn: () => listOrganizations(undefined, 200, 0),
+    retry: false,
+    staleTime: 60_000,
+  });
 }

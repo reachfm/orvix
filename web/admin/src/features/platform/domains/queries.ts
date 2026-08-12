@@ -1,23 +1,33 @@
 import { useQuery } from "@tanstack/react-query";
-import { listDomainsForTenant } from "./api";
-import { useTenantContext } from "../tenant-context/queries";
+import { getPlatformDomain, listPlatformDomains } from "./api";
+import type { PlatformDomainFilter } from "./contract";
 
 export const domainKeys = {
-  list: (tenantId: number | null) => ["platform-domains", "list", tenantId ?? "none"] as const,
+  list: (tenantId: number | null, filter: PlatformDomainFilter) =>
+    ["platform-domains", "list", tenantId ?? "none", filter.q ?? "", filter.status ?? "", filter.limit ?? 25, filter.offset ?? 0] as const,
+  detail: (tenantId: number | null, id: number) =>
+    ["platform-domains", "detail", tenantId ?? "none", id] as const,
 };
 
 /**
- * Reads the selected tenant's domains. The query key is bound to the
- * tenant id so switching tenant context invalidates and refetches —
- * cached data from a previous tenant can never leak into another.
+ * Platform-wide domain inventory for one EXPLICIT tenant. The query
+ * key is bound to the tenant id — switching scope evicts and refetches,
+ * so cached rows from another tenant can never leak into this view.
  */
-export function useDomainsForTenant() {
-  const { data: context } = useTenantContext();
-  const tenantId = context?.tenantId ?? null;
+export function usePlatformDomains(tenantId: number | null, filter: PlatformDomainFilter) {
   return useQuery({
-    queryKey: domainKeys.list(tenantId),
-    queryFn: () => listDomainsForTenant(tenantId),
+    queryKey: domainKeys.list(tenantId, filter),
+    queryFn: () => listPlatformDomains(tenantId as number, filter),
     enabled: tenantId !== null,
+    retry: false,
+  });
+}
+
+export function usePlatformDomain(tenantId: number | null, id: number | null) {
+  return useQuery({
+    queryKey: domainKeys.detail(tenantId, id ?? 0),
+    queryFn: () => getPlatformDomain(tenantId as number, id as number),
+    enabled: tenantId !== null && id !== null,
     retry: false,
   });
 }
