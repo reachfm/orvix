@@ -35,6 +35,14 @@ import MailOperationsPage from "./features/platform/mail-operations/page";
 import ReliabilityPage from "./features/platform/reliability/page";
 
 import ConfigurationPage from "./features/platform/configuration/page";
+import PlatformBillingPage from "./features/platform/platform-billing/page";
+import ImportsPage from "./features/platform/imports/page";
+import AutomationJobsPage from "./features/platform/automation-jobs/page";
+import SupportAccessPage from "./features/platform/support-access/page";
+import IncidentsPage from "./features/platform/incidents/page";
+import RetentionPage from "./features/platform/retention/page";
+import AuditPage from "./features/platform/audit/page";
+import DRPage from "./features/platform/dr/page";
 import { initCSRF, api } from "./api";
 import ThemeToggle from "./shared/theme/ThemeToggle";
 
@@ -45,7 +53,9 @@ type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" 
   | "account-settings" | "org-overview" | "invitations" | "members-roles" | "ownership-transfer"
   | "suspension-deletion" | "customer-mailboxes" | "aliases" | "groups" | "usage-quotas"
   | "invoices" | "security" | "support" | "preferences"
-  | "login" | "signup" | "forgot-password" | "reset-password";
+  | "login" | "signup" | "forgot-password" | "reset-password"
+  | "platform-billing" | "platform-imports" | "automation-jobs" | "support-access"
+  | "platform-incidents" | "platform-retention" | "platform-audit" | "platform-dr";
 
 // PORTAL-SEPARATION-PHASE1 / PLATFORM-SHELL: the explicit allow-list for
 // each portal. portal="platform" (Platform Super Admin, tenant_id=NULL)
@@ -96,7 +106,9 @@ type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" 
 // are a distinct future bounded context (platform-commercial-control-plane),
 // not a repurposing of this endpoint.
 const PLATFORM_TAB_IDS: Tab[] = [
-  "platform-home", "organizations", "enterprise", "mail-operations", "reliability", "health",
+  "platform-home", "organizations", "platform-billing", "platform-imports", "automation-jobs",
+  "platform-incidents", "platform-retention", "platform-dr", "enterprise", "mail-operations",
+  "reliability", "health", "platform-audit", "support-access",
   "platform-security", "modules", "platform-configuration",
   "account-settings", "security", "preferences",
 ];
@@ -110,12 +122,20 @@ const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: st
   // Platform (portal="platform") navigation. Grouped per PLATFORM-SHELL-2:
   // Overview / Organizations / Operations / Security / System / Account.
   { id: "platform-home", label: "Overview", icon: LayoutDashboard },
-  { id: "organizations", label: "Organizations", icon: Building, section: "Organizations" },
-  { id: "enterprise", label: "Summary", icon: Monitor, section: "Operations" },
+  { id: "organizations", label: "Organizations", icon: Building, section: "Commercial" },
+  { id: "platform-billing", label: "Platform Billing", icon: CreditCard },
+  { id: "platform-imports", label: "Imports", icon: Send, section: "Operations" },
+  { id: "automation-jobs", label: "Automation Jobs", icon: Zap },
   { id: "mail-operations", label: "Mail Operations", icon: Send },
+  { id: "platform-incidents", label: "Incidents", icon: AlertTriangle },
+  { id: "platform-retention", label: "Retention", icon: FileText },
+  { id: "platform-dr", label: "DR", icon: HardDrive },
+  { id: "enterprise", label: "Summary", icon: Monitor },
   { id: "reliability", label: "Reliability", icon: HardDrive },
   { id: "health", label: "Health", icon: HeartPulse },
-  { id: "platform-security", label: "Security", icon: ShieldAlert, section: "Security" },
+  { id: "platform-audit", label: "Audit Log", icon: Activity, section: "Security" },
+  { id: "support-access", label: "Support Access", icon: ShieldAlert },
+  { id: "platform-security", label: "Security", icon: ShieldAlert },
   { id: "modules", label: "Modules", icon: Zap, section: "System" },
   { id: "platform-configuration", label: "Configuration", icon: Settings },
   // Tabs below are pre-existing tenant-owned entries that were never
@@ -277,6 +297,14 @@ export default function App() {
       case "enterprise": return <EnterpriseDashboard />;
       case "mailboxes": return <MailboxList />;
       case "organizations": return <OrganizationsPage />;
+      case "platform-billing": return <PlatformBillingPage tenantId={1} />;
+      case "platform-imports": return <ImportsPage />;
+      case "automation-jobs": return <AutomationJobsPage />;
+      case "platform-incidents": return <IncidentsPage />;
+      case "platform-retention": return <RetentionPage />;
+      case "platform-dr": return <DRPage />;
+      case "platform-audit": return <AuditPage />;
+      case "support-access": return <SupportAccessPage />;
       case "health": return <SystemHealth />;
       case "mail-operations": return <MailOperationsPage />;
       case "reliability": return <ReliabilityPage />;
