@@ -35,6 +35,23 @@ import MailOperationsPage from "./features/platform/mail-operations/page";
 import ReliabilityPage from "./features/platform/reliability/page";
 
 import ConfigurationPage from "./features/platform/configuration/page";
+import PlatformBillingPage from "./features/platform/platform-billing/page";
+import ImportsPage from "./features/platform/imports/page";
+import AutomationJobsPage from "./features/platform/automation-jobs/page";
+import SupportAccessPage from "./features/platform/support-access/page";
+import IncidentsPage from "./features/platform/incidents/page";
+import RetentionPage from "./features/platform/retention/page";
+import AuditPage from "./features/platform/audit/page";
+import DRPage from "./features/platform/dr/page";
+import ConfigTruthPage from "./features/platform/config-truth/page";
+import PlatformDomainsPage from "./features/platform/domains/page";
+import PlatformMailboxesPage from "./features/platform/mailboxes/page";
+import PlatformAliasesPage from "./features/platform/aliases/page";
+import PlatformGroupsPage from "./features/platform/groups/page";
+import PlatformRelaysPage from "./features/platform/relay/page";
+import PlatformSuppressionsPage from "./features/platform/suppressions/page";
+import PlatformDeliverabilityPage from "./features/platform/deliverability/page";
+import BulkMailboxesPage from "./features/platform/bulk-mailboxes/page";
 import { initCSRF, api } from "./api";
 import ThemeToggle from "./shared/theme/ThemeToggle";
 
@@ -45,7 +62,12 @@ type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" 
   | "account-settings" | "org-overview" | "invitations" | "members-roles" | "ownership-transfer"
   | "suspension-deletion" | "customer-mailboxes" | "aliases" | "groups" | "usage-quotas"
   | "invoices" | "security" | "support" | "preferences"
-  | "login" | "signup" | "forgot-password" | "reset-password";
+  | "login" | "signup" | "forgot-password" | "reset-password"
+  | "platform-billing" | "platform-imports" | "automation-jobs" | "support-access"
+  | "platform-incidents" | "platform-retention" | "platform-audit" | "platform-dr"
+  | "platform-config-truth" | "platform-domains" | "platform-mailboxes"
+  | "platform-aliases" | "platform-groups" | "platform-relays"
+  | "platform-suppressions" | "platform-deliverability" | "platform-bulk-mailboxes";
 
 // PORTAL-SEPARATION-PHASE1 / PLATFORM-SHELL: the explicit allow-list for
 // each portal. portal="platform" (Platform Super Admin, tenant_id=NULL)
@@ -96,8 +118,12 @@ type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" 
 // are a distinct future bounded context (platform-commercial-control-plane),
 // not a repurposing of this endpoint.
 const PLATFORM_TAB_IDS: Tab[] = [
-  "platform-home", "organizations", "enterprise", "mail-operations", "reliability", "health",
-  "platform-security", "modules", "platform-configuration",
+  "platform-home", "organizations", "platform-billing", "platform-imports", "automation-jobs",
+  "platform-incidents", "platform-retention", "platform-dr", "enterprise", "mail-operations",
+  "reliability", "health", "platform-audit", "support-access",
+  "platform-security", "modules", "platform-configuration", "platform-config-truth",
+  "platform-domains", "platform-mailboxes", "platform-aliases", "platform-groups",
+  "platform-relays", "platform-suppressions", "platform-deliverability", "platform-bulk-mailboxes",
   "account-settings", "security", "preferences",
 ];
 const ORGANIZATION_TAB_IDS: Tab[] = [
@@ -110,14 +136,33 @@ const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: st
   // Platform (portal="platform") navigation. Grouped per PLATFORM-SHELL-2:
   // Overview / Organizations / Operations / Security / System / Account.
   { id: "platform-home", label: "Overview", icon: LayoutDashboard },
-  { id: "organizations", label: "Organizations", icon: Building, section: "Organizations" },
-  { id: "enterprise", label: "Summary", icon: Monitor, section: "Operations" },
-  { id: "mail-operations", label: "Mail Operations", icon: Send },
+  { id: "organizations", label: "Organizations", icon: Building, section: "Commercial" },
+  { id: "platform-billing", label: "Platform Billing", icon: CreditCard },
+  { id: "platform-imports", label: "Imports", icon: Send, section: "Operations" },
+  { id: "automation-jobs", label: "Automation Jobs", icon: Zap },
+  // Mail Control group — platform identity inventory (PSA only).
+  { id: "platform-domains", label: "Domains", icon: Globe, section: "Mail Control" },
+  { id: "platform-mailboxes", label: "Mailboxes", icon: Mail },
+  { id: "platform-aliases", label: "Aliases", icon: AtSign },
+  { id: "platform-groups", label: "Groups", icon: Users },
+  { id: "platform-relays", label: "Relays", icon: Send },
+  // Operations group — queue + delivery operations.
+  { id: "mail-operations", label: "Mail Queue", icon: Send, section: "Operations" },
+  { id: "platform-suppressions", label: "Suppressions", icon: Shield },
+  { id: "platform-deliverability", label: "Deliverability", icon: BarChart },
+  { id: "platform-bulk-mailboxes", label: "Bulk Mailboxes", icon: Users },
+  { id: "platform-incidents", label: "Incidents", icon: AlertTriangle },
+  { id: "platform-retention", label: "Retention", icon: FileText },
+  { id: "platform-dr", label: "DR", icon: HardDrive },
+  { id: "enterprise", label: "Summary", icon: Monitor },
   { id: "reliability", label: "Reliability", icon: HardDrive },
   { id: "health", label: "Health", icon: HeartPulse },
-  { id: "platform-security", label: "Security", icon: ShieldAlert, section: "Security" },
+  { id: "platform-audit", label: "Audit Log", icon: Activity, section: "Security" },
+  { id: "support-access", label: "Support Access", icon: ShieldAlert },
+  { id: "platform-security", label: "Security", icon: ShieldAlert },
   { id: "modules", label: "Modules", icon: Zap, section: "System" },
   { id: "platform-configuration", label: "Configuration", icon: Settings },
+  { id: "platform-config-truth", label: "Config Truth", icon: Settings },
   // Tabs below are pre-existing tenant-owned entries that were never
   // reachable by a real Platform Super Admin (see PLATFORM-SHELL final
   // report's ownership matrix) — their labels/sections are irrelevant to
@@ -277,6 +322,23 @@ export default function App() {
       case "enterprise": return <EnterpriseDashboard />;
       case "mailboxes": return <MailboxList />;
       case "organizations": return <OrganizationsPage />;
+      case "platform-billing": return <PlatformBillingPage tenantId={1} />;
+      case "platform-imports": return <ImportsPage />;
+      case "automation-jobs": return <AutomationJobsPage />;
+      case "platform-incidents": return <IncidentsPage />;
+      case "platform-retention": return <RetentionPage />;
+      case "platform-dr": return <DRPage />;
+      case "platform-audit": return <AuditPage />;
+      case "support-access": return <SupportAccessPage />;
+      case "platform-config-truth": return <ConfigTruthPage />;
+      case "platform-domains": return <PlatformDomainsPage />;
+      case "platform-mailboxes": return <PlatformMailboxesPage />;
+      case "platform-aliases": return <PlatformAliasesPage />;
+      case "platform-groups": return <PlatformGroupsPage />;
+      case "platform-relays": return <PlatformRelaysPage />;
+      case "platform-suppressions": return <PlatformSuppressionsPage />;
+      case "platform-deliverability": return <PlatformDeliverabilityPage />;
+      case "platform-bulk-mailboxes": return <BulkMailboxesPage />;
       case "health": return <SystemHealth />;
       case "mail-operations": return <MailOperationsPage />;
       case "reliability": return <ReliabilityPage />;

@@ -18,9 +18,11 @@ const SUMMARY: QueueSummaryResponse = {
 
 const LIST: ListQueueMessagesResponse = {
   messages: [
-    { id: 42, from_address: "sender@a.example", to_address: "rcpt@b.example", recipient_domain: "b.example", status: "pending", priority: 0, attempt_count: 1, max_attempts: 16, last_status_code: 0, created_at: "2026-01-01T00:00:00Z" },
+    { id: 42, tenant_id: 1, domain_id: 1, from_address: "sender@a.example", to_address: "rcpt@b.example", recipient_domain: "b.example", status: "pending", priority: 0, attempt_count: 1, max_attempts: 16, last_status_code: 0, retryable: true, failure_category: "other", created_at: "2026-01-01T00:00:00Z" },
+    { id: 43, tenant_id: 1, domain_id: 1, from_address: "s2@a.example", to_address: "r2@b.example", recipient_domain: "b.example", status: "delivered", priority: 0, attempt_count: 2, max_attempts: 16, last_status_code: 250, retryable: false, created_at: "2026-01-01T00:00:00Z" },
+    { id: 44, tenant_id: 1, domain_id: 1, from_address: "s3@a.example", to_address: "r3@b.example", recipient_domain: "b.example", status: "deferred", priority: 0, attempt_count: 3, max_attempts: 16, last_status_code: 450, last_error: "recipient is suppressed", retryable: true, failure_category: "suppressed", created_at: "2026-01-01T00:00:00Z" },
   ],
-  total: 1, limit: 50, offset: 0,
+  total: 3, limit: 50, offset: 0,
 };
 
 function coreMailDisabledError() {
@@ -73,26 +75,40 @@ describe("features/platform/mail-operations", () => {
     vi.spyOn(api, "retryQueueMessage").mockReturnValue(new Promise((res) => { resolveRetry = res; }));
     renderPage();
     await waitFor(() => expect(screen.getByText("sender@a.example")).toBeInTheDocument());
-    const retryBtn = screen.getByTitle("Retry");
+    const retryBtn = screen.getByRole("button", { name: "Retry message 42" });
     fireEvent.click(retryBtn);
     await waitFor(() => expect(retryBtn).toBeDisabled());
     resolveRetry!({ status: "retrying", id: 42 });
   });
 
-  it("bounce requires typed confirmation of the message id before calling the API", async () => {
+  it("bounce requires the typed X-Confirm phrase before calling the API", async () => {
     vi.spyOn(api, "listQueueMessages").mockResolvedValue(LIST);
     vi.spyOn(api, "getQueueSummary").mockResolvedValue(SUMMARY);
     const bounceSpy = vi.spyOn(api, "bounceQueueMessage").mockResolvedValue({ status: "bounced", id: 42 });
     renderPage();
     await waitFor(() => expect(screen.getByText("sender@a.example")).toBeInTheDocument());
-    fireEvent.click(screen.getByTitle("Bounce"));
+    fireEvent.click(screen.getByRole("button", { name: "Bounce message 42" }));
 
-    const input = await screen.findByRole("textbox");
     const confirmBtn = screen.getByRole("button", { name: /confirm/i });
     expect(confirmBtn).toBeDisabled();
-    fireEvent.change(input, { target: { value: "42" } });
+    fireEvent.change(screen.getByLabelText(/Type BOUNCE-QUEUE-42 to confirm/i), { target: { value: "BOUNCE-QUEUE-42" } });
+    await waitFor(() => expect(confirmBtn).toBeEnabled());
     fireEvent.click(confirmBtn);
 
-    await waitFor(() => expect(bounceSpy).toHaveBeenCalledWith(42, undefined));
+    await waitFor(() => expect(bounceSpy).toHaveBeenCalledWith(42, undefined, "BOUNCE-QUEUE-42"));
+  });
+
+  it("exposes state-aware actions: delivered entries never show retry/bounce/cancel", async () => {
+    vi.spyOn(api, "listQueueMessages").mockResolvedValue(LIST);
+    vi.spyOn(api, "getQueueSummary").mockResolvedValue(SUMMARY);
+    renderPage();
+    await waitFor(() => expect(screen.getByText("sender@a.example")).toBeInTheDocument());
+    // #43 is delivered (terminal) — its action buttons are disabled.
+    expect(screen.getByRole("button", { name: "Retry message 43" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Bounce message 43" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Cancel message 43" })).toBeDisabled();
+    // #42 pending — retry enabled, and the suppressed entry shows its category.
+    expect(screen.getByRole("button", { name: "Retry message 42" })).toBeEnabled();
+    expect(screen.getByText("Suppressed")).toBeInTheDocument();
   });
 });

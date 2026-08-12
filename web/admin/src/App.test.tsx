@@ -127,15 +127,20 @@ describe("Platform Administration shell (portal=platform)", () => {
   it("never renders tenant-only navigation items", async () => {
     render(<Wrapper><App /></Wrapper>);
     await waitFor(() => expect(screen.getByText("Platform Administration")).toBeInTheDocument());
-    for (const label of ["Aliases", "Groups", "Invitations", "Ownership", "Invoices"]) {
+    // Tenant-family-only items must never appear in the platform shell.
+    for (const label of ["Invitations", "Ownership", "Invoices", "Usage"]) {
       expect(screen.queryByRole("button", { name: new RegExp(`^${label}$`, "i") })).not.toBeInTheDocument();
+    }
+    // Platform mail-control items ARE present (backed by /platform/* routes).
+    for (const label of ["Domains", "Mailboxes", "Aliases", "Groups", "Relays"]) {
+      expect(screen.getAllByRole("button", { name: new RegExp(`^${label}$`, "i") }).length).toBeGreaterThan(0);
     }
   });
 
   it("shows exactly the final verified platform navigation set", async () => {
     render(<Wrapper><App /></Wrapper>);
     await waitFor(() => expect(screen.getByText("Platform Administration")).toBeInTheDocument());
-    for (const label of ["Organizations", "Summary", "Mail Operations", "Reliability", "Health", "Security", "Modules", "Configuration"]) {
+    for (const label of ["Organizations", "Summary", "Mail Queue", "Domains", "Mailboxes", "Aliases", "Groups", "Relays", "Suppressions", "Deliverability", "Bulk Mailboxes", "Reliability", "Health", "Security", "Modules", "Configuration"]) {
       expect(screen.getAllByRole("button", { name: new RegExp(`^${label}$`, "i") }).length).toBeGreaterThan(0);
     }
   });
@@ -152,7 +157,15 @@ describe("Platform Administration shell (portal=platform)", () => {
   const PLATFORM_NAV_CASES: { label: string; expectHeading: string | RegExp }[] = [
     { label: "Organizations", expectHeading: /organizations/i },
     { label: "Summary", expectHeading: "Platform Summary" },
-    { label: "Mail Operations", expectHeading: /mail operations/i },
+    { label: "Mail Queue", expectHeading: /mail operations/i },
+    { label: "Domains", expectHeading: /platform domains/i },
+    { label: "Mailboxes", expectHeading: /platform mailboxes/i },
+    { label: "Aliases", expectHeading: /platform aliases/i },
+    { label: "Groups", expectHeading: /platform groups/i },
+    { label: "Relays", expectHeading: /platform relays/i },
+    { label: "Suppressions", expectHeading: /suppression management/i },
+    { label: "Deliverability", expectHeading: /deliverability/i },
+    { label: "Bulk Mailboxes", expectHeading: /bulk mailbox operations/i },
     { label: "Reliability", expectHeading: /reliability/i },
     { label: "Health", expectHeading: /health|runtime|system/i },
     { label: "Security", expectHeading: /security/i },

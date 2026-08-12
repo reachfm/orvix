@@ -39,9 +39,16 @@ func (h *Handler) queueAdminGate(c fiber.Ctx) bool {
 	return role == auth.RolePlatformSuperAdmin || role == auth.RoleSuperAdmin
 }
 
-// QueueMessage represents a queue entry in the API response
+// QueueMessage represents a queue entry in the API response. The
+// projection carries SAFE real attribution only: tenant, domain,
+// relay/provider host, canonical failure category, retryable state,
+// and attempt timestamps. Lease tokens, worker fencing tokens, raw
+// message bodies, SMTP authentication material, and internal payloads
+// are never exposed.
 type QueueMessage struct {
 	ID              uint    `json:"id"`
+	TenantID        uint    `json:"tenant_id"`
+	DomainID        uint    `json:"domain_id"`
 	FromAddress     string  `json:"from_address"`
 	ToAddress       string  `json:"to_address"`
 	RecipientDomain string  `json:"recipient_domain"`
@@ -56,6 +63,42 @@ type QueueMessage struct {
 	DeliveryMode    string  `json:"delivery_mode,omitempty"`
 	RemoteHost      string  `json:"remote_host,omitempty"`
 	CreatedAt       string  `json:"created_at"`
+	// Retryable is derived from the real queue state machine: only
+	// pending/deferred/bounced/dead_letter entries may be retried;
+	// delivered/cancelled terminal messages are not retryable.
+	Retryable bool `json:"retryable"`
+	// FailureCategory is the canonical classification derived from the
+	// entry's real status message: suppressed (the delivery worker's
+	// suppression rejection), policy (sender/domain/size/recipient
+	// policy denial), bounce (permanent SMTP rejection), or other.
+	FailureCategory string `json:"failure_category,omitempty"`
+}
+
+// retryableStatuses is the set of queue states the canonical state
+// machine accepts for AdminRetryNow.
+var retryableStatuses = map[string]bool{
+	"pending": true, "deferred": true, "bounced": true, "dead_letter": true,
+}
+
+// failureCategoryFor derives the canonical failure category from the
+// entry's status + last error — mapped to the same vocabulary the
+// deliverability control plane records (suppressed / policy_denied /
+// bounce / other).
+func failureCategoryFor(status, lastError string) string {
+	if status == "delivered" {
+		return ""
+	}
+	msg := strings.ToLower(lastError)
+	switch {
+	case strings.Contains(msg, "recipient is suppressed"):
+		return "suppressed"
+	case strings.Contains(msg, "policy") || strings.Contains(msg, "exceeds maximum") || strings.Contains(msg, " limit "):
+		return "policy_denied"
+	case strings.Contains(msg, "smtp error 5") || strings.Contains(msg, "550") || strings.Contains(msg, "permanent"):
+		return "bounce"
+	default:
+		return "other"
+	}
 }
 
 // QueueFilter allows querying the queue with filters
@@ -115,7 +158,7 @@ func (h *Handler) AdminQueueList(c fiber.Ctx) error {
 
 	dial := dbdialect.FromDriver(h.cfg.Database.Driver)
 
-	query := `SELECT id, from_address, to_address, recipient_domain, status, priority,
+	query := `SELECT id, tenant_id, domain_id, from_address, to_address, recipient_domain, status, priority,
 		attempt_count, max_attempts, next_attempt_at, last_attempt_at,
 		last_error, last_status_code, delivery_mode, remote_host,
 		created_at FROM coremail_queue WHERE deleted_at IS NULL`
@@ -163,14 +206,18 @@ func (h *Handler) AdminQueueList(c fiber.Ctx) error {
 		var m QueueMessage
 		var nextAt, lastAt *time.Time
 		var createdAt time.Time
-		err := rows.Scan(&m.ID, &m.FromAddress, &m.ToAddress, &m.RecipientDomain,
+		var lastError string
+		err := rows.Scan(&m.ID, &m.TenantID, &m.DomainID, &m.FromAddress, &m.ToAddress, &m.RecipientDomain,
 			&m.Status, &m.Priority, &m.AttemptCount, &m.MaxAttempts,
-			&nextAt, &lastAt, &m.LastError, &m.LastStatusCode,
+			&nextAt, &lastAt, &lastError, &m.LastStatusCode,
 			&m.DeliveryMode, &m.RemoteHost, &createdAt)
 		if err != nil {
 			h.logger.Error("queue row scan failed", zap.Error(err))
 			continue
 		}
+		m.LastError = capQueueError(lastError)
+		m.Retryable = retryableStatuses[m.Status]
+		m.FailureCategory = failureCategoryFor(m.Status, lastError)
 		if nextAt != nil {
 			s := nextAt.Format(time.RFC3339)
 			m.NextAttemptAt = &s
@@ -209,18 +256,22 @@ func (h *Handler) AdminQueueDetail(c fiber.Ctx) error {
 	var m QueueMessage
 	var nextAt, lastAt *time.Time
 	var createdAt time.Time
+	var lastError string
 	err = sqlDB.QueryRow(
-		`SELECT id, from_address, to_address, recipient_domain, status, priority,
+		`SELECT id, tenant_id, domain_id, from_address, to_address, recipient_domain, status, priority,
 		attempt_count, max_attempts, next_attempt_at, last_attempt_at,
 		last_error, last_status_code, delivery_mode, remote_host,
 		created_at FROM coremail_queue WHERE id = `+dial.Placeholder(1)+` AND deleted_at IS NULL`, id).
-		Scan(&m.ID, &m.FromAddress, &m.ToAddress, &m.RecipientDomain,
+		Scan(&m.ID, &m.TenantID, &m.DomainID, &m.FromAddress, &m.ToAddress, &m.RecipientDomain,
 			&m.Status, &m.Priority, &m.AttemptCount, &m.MaxAttempts,
-			&nextAt, &lastAt, &m.LastError, &m.LastStatusCode,
+			&nextAt, &lastAt, &lastError, &m.LastStatusCode,
 			&m.DeliveryMode, &m.RemoteHost, &createdAt)
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"error": "queue entry not found"})
 	}
+	m.LastError = capQueueError(lastError)
+	m.Retryable = retryableStatuses[m.Status]
+	m.FailureCategory = failureCategoryFor(m.Status, lastError)
 	if nextAt != nil {
 		s := nextAt.Format(time.RFC3339)
 		m.NextAttemptAt = &s
@@ -288,8 +339,31 @@ func (h *Handler) AdminQueueRetryNow(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"status": "retrying", "id": id})
 }
 
+// capQueueError bounds a queue entry's last_error to 500 chars in
+// every projection (list and detail), so a pathological provider
+// message can never bloat a response.
+func capQueueError(msg string) string {
+	const maxLen = 500
+	if len(msg) <= maxLen {
+		return msg
+	}
+	return msg[:maxLen] + "..."
+}
+
+// queueActionConfirm enforces the typed-confirmation convention for
+// destructive queue actions (bounce/cancel). Confirmation never
+// travels in query strings.
+func queueActionConfirm(c fiber.Ctx, expected string) error {
+	typed := strings.TrimSpace(c.Get("X-Confirm"))
+	if typed == "" || typed != expected {
+		return fiber.NewError(fiber.StatusPreconditionRequired, "typed confirmation required")
+	}
+	return nil
+}
+
 // AdminQueueBounce serves POST /api/v1/admin/queue/messages/:id/bounce
-// Bounces a message (marks as dead letter with note).
+// Bounces a message (marks as dead letter with note). Requires typed
+// confirmation (BOUNCE-QUEUE-<id>).
 func (h *Handler) AdminQueueBounce(c fiber.Ctx) error {
 	if !h.queueAdminGate(c) {
 		return c.Status(403).JSON(fiber.Map{"error": "admin role required for queue operations"})
@@ -298,6 +372,9 @@ func (h *Handler) AdminQueueBounce(c fiber.Ctx) error {
 	id, err := strconv.ParseUint(c.Params("id"), 10, 64)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "invalid id"})
+	}
+	if err := queueActionConfirm(c, "BOUNCE-QUEUE-"+strconv.FormatUint(id, 10)); err != nil {
+		return err
 	}
 
 	var req struct {
@@ -322,7 +399,8 @@ func (h *Handler) AdminQueueBounce(c fiber.Ctx) error {
 }
 
 // AdminQueueCancel serves POST /api/v1/admin/queue/messages/:id/cancel
-// Cancels (soft-deletes) a message from the queue.
+// Cancels (soft-deletes) a message from the queue. Requires typed
+// confirmation (CANCEL-QUEUE-<id>).
 func (h *Handler) AdminQueueCancel(c fiber.Ctx) error {
 	if !h.queueAdminGate(c) {
 		return c.Status(403).JSON(fiber.Map{"error": "admin role required for queue operations"})
@@ -331,6 +409,9 @@ func (h *Handler) AdminQueueCancel(c fiber.Ctx) error {
 	id, err := strconv.ParseUint(c.Params("id"), 10, 64)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "invalid id"})
+	}
+	if err := queueActionConfirm(c, "CANCEL-QUEUE-"+strconv.FormatUint(id, 10)); err != nil {
+		return err
 	}
 
 	if h.queueEngine == nil || h.queueEngine.Repo == nil {

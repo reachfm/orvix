@@ -90,9 +90,16 @@ type Provider struct {
 	CircuitState    CircuitState  `json:"circuit_state"`
 	CircuitFailures int           `json:"circuit_failures"`
 	CircuitOpenedAt *time.Time    `json:"circuit_opened_at,omitempty"`
-	Version         int           `json:"version"`
-	CreatedAt       time.Time     `json:"created_at"`
-	UpdatedAt       time.Time     `json:"updated_at"`
+	// LastTestAt / LastTestResult persist the last operator-triggered
+	// connection test outcome (see TestConnection). LastTestResult only
+	// ever holds the safe, redacted outcome ("ok", "connect_failed",
+	// "tls_failed", "auth_failed", "timeout", "unsafe_target") — never a
+	// raw SMTP/TLS error string and never any credential material.
+	LastTestAt     *time.Time `json:"last_test_at,omitempty"`
+	LastTestResult string     `json:"last_test_result,omitempty"`
+	Version        int        `json:"version"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
 }
 
 // HasSecret reports whether a credential is configured, WITHOUT

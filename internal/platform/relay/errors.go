@@ -11,4 +11,7 @@ var (
 	ErrRateLimited         = errors.New("relay provider rate limit exceeded")
 	ErrPolicyBlocked       = errors.New("mail access policy blocks this route")
 	ErrOverrideExpired     = errors.New("emergency override has expired")
+	ErrUnsafeTarget        = errors.New("unsafe relay target")
+	ErrNameRequired        = errors.New("relay name is required")
+	ErrRelayNameConflict   = errors.New("a relay with this name already exists in the same scope")
 )
