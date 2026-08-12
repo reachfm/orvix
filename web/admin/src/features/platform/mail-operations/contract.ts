@@ -80,6 +80,22 @@ export interface QueueActionResponse {
   id: number;
 }
 
+export type BulkQueueAction = "retry" | "cancel" | "bounce";
+
+export interface BulkQueueActionResult {
+  id: number;
+  success: boolean;
+  error?: string;
+  code?: string;
+}
+
+export interface BulkQueueActionResponse {
+  action: BulkQueueAction;
+  total: number;
+  succeeded: number;
+  results: BulkQueueActionResult[];
+}
+
 // The stable, sanitized contract every queue-admin endpoint returns
 // when CoreMail is intentionally disabled (coreMailUnavailableResponse
 // in admin_queue.go) — 503 with this exact body, never leaked SQL/

@@ -7,6 +7,7 @@ import QueueSummaryCards from "./components/QueueSummaryCards";
 import QueueTable from "./components/QueueTable";
 import QueueDetailDrawer from "./components/QueueDetailDrawer";
 import CoreMailDisabledBanner from "./components/CoreMailDisabledBanner";
+import BulkQueueActionPanel from "./components/BulkQueueActionPanel";
 
 export default function MailOperationsPage() {
   const [statusFilter, setStatusFilter] = useState("");
@@ -34,6 +35,8 @@ export default function MailOperationsPage() {
       ) : (
         <>
           <QueueSummaryCards />
+
+          <BulkQueueActionPanel messages={messages} />
 
           <div className="flex gap-2 mb-4">
             <input

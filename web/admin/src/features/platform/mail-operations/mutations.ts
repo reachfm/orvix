@@ -1,5 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { bounceQueueMessage, cancelQueueMessage, retryQueueMessage } from "./api";
+import { bounceQueueMessage, bulkQueueAction, cancelQueueMessage, retryQueueMessage } from "./api";
+import type { BulkQueueAction } from "./contract";
 
 // React Query's useMutation already serializes concurrent .mutate()
 // calls against isPending — every caller (QueueTable's row buttons)
@@ -32,6 +33,18 @@ export function useCancelQueueMessageMutation() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: number) => cancelQueueMessage(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["queue-messages"] });
+      qc.invalidateQueries({ queryKey: ["queue-summary"] });
+    },
+  });
+}
+
+export function useBulkQueueActionMutation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ ids, action, reason }: { ids: number[]; action: BulkQueueAction; reason?: string }) =>
+      bulkQueueAction(ids, action, reason),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["queue-messages"] });
       qc.invalidateQueries({ queryKey: ["queue-summary"] });

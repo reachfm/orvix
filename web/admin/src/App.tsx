@@ -44,6 +44,8 @@ import RetentionPage from "./features/platform/retention/page";
 import AuditPage from "./features/platform/audit/page";
 import DRPage from "./features/platform/dr/page";
 import ConfigTruthPage from "./features/platform/config-truth/page";
+import PlatformDomainsPage from "./features/platform/domains/page";
+import PlatformMailboxesPage from "./features/platform/mailboxes/page";
 import { initCSRF, api } from "./api";
 import ThemeToggle from "./shared/theme/ThemeToggle";
 
@@ -57,7 +59,7 @@ type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" 
   | "login" | "signup" | "forgot-password" | "reset-password"
   | "platform-billing" | "platform-imports" | "automation-jobs" | "support-access"
   | "platform-incidents" | "platform-retention" | "platform-audit" | "platform-dr"
-  | "platform-config-truth";
+  | "platform-config-truth" | "platform-domains" | "platform-mailboxes";
 
 // PORTAL-SEPARATION-PHASE1 / PLATFORM-SHELL: the explicit allow-list for
 // each portal. portal="platform" (Platform Super Admin, tenant_id=NULL)
@@ -112,6 +114,7 @@ const PLATFORM_TAB_IDS: Tab[] = [
   "platform-incidents", "platform-retention", "platform-dr", "enterprise", "mail-operations",
   "reliability", "health", "platform-audit", "support-access",
   "platform-security", "modules", "platform-configuration", "platform-config-truth",
+  "platform-domains", "platform-mailboxes",
   "account-settings", "security", "preferences",
 ];
 const ORGANIZATION_TAB_IDS: Tab[] = [
@@ -128,6 +131,8 @@ const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: st
   { id: "platform-billing", label: "Platform Billing", icon: CreditCard },
   { id: "platform-imports", label: "Imports", icon: Send, section: "Operations" },
   { id: "automation-jobs", label: "Automation Jobs", icon: Zap },
+  { id: "platform-domains", label: "Domains", icon: Globe, section: "Mail Control" },
+  { id: "platform-mailboxes", label: "Mailboxes", icon: Mail },
   { id: "mail-operations", label: "Mail Operations", icon: Send },
   { id: "platform-incidents", label: "Incidents", icon: AlertTriangle },
   { id: "platform-retention", label: "Retention", icon: FileText },
@@ -309,6 +314,8 @@ export default function App() {
       case "platform-audit": return <AuditPage />;
       case "support-access": return <SupportAccessPage />;
       case "platform-config-truth": return <ConfigTruthPage />;
+      case "platform-domains": return <PlatformDomainsPage />;
+      case "platform-mailboxes": return <PlatformMailboxesPage />;
       case "health": return <SystemHealth />;
       case "mail-operations": return <MailOperationsPage />;
       case "reliability": return <ReliabilityPage />;

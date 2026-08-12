@@ -6,6 +6,8 @@ import type {
   QueueSummaryResponse,
   QueueDetailResponse,
   QueueActionResponse,
+  BulkQueueAction,
+  BulkQueueActionResponse,
 } from "./contract";
 
 export function listQueueMessages(filter: QueueMessageFilter): Promise<ListQueueMessagesResponse> {
@@ -43,4 +45,11 @@ export function bounceQueueMessage(id: number, reason?: string): Promise<QueueAc
 
 export function cancelQueueMessage(id: number): Promise<QueueActionResponse> {
   return request<QueueActionResponse>(`/admin/queue/messages/${id}/cancel`, { method: "POST" });
+}
+
+export function bulkQueueAction(ids: number[], action: BulkQueueAction, reason?: string): Promise<BulkQueueActionResponse> {
+  return request<BulkQueueActionResponse>("/admin/queue/messages/bulk-action", {
+    method: "POST",
+    body: JSON.stringify({ ids, action, reason: reason || "" }),
+  });
 }

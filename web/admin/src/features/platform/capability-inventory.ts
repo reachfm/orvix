@@ -1,27 +1,53 @@
 // Capability inventory for the Platform Super Admin console.
 //
 // This is the machine-verifiable source of truth for what this frontend
-// may render and navigate to. Every entry is derived from a real
-// platformMW-gated route in internal/api/router.go (verified at
-// integration SHA aeec470). Classifications:
+// may render and navigate to. Every entry is derived from a real route
+// in internal/api/router.go (verified at integration SHA aeec470 and
+// the Mail Control batch). Classifications:
 //
-//   - WIRED:        real backend route + real frontend page in this console
-//   - BACKEND_ONLY: real backend route, no frontend page yet (never invent one)
-//   - UNAVAILABLE:  no real backend route exists; the UI must not fabricate it
+//   - WIRED:         real backend route + real frontend page in this console
+//   - BACKEND_ONLY:  real backend route, no frontend page yet (never invent one)
+//   - UNAVAILABLE:   no real backend route exists; the UI must not fabricate it
+//   - TENANT_ONLY:   real backend route gated to the tenant-family roles
+//                    (tenantCompatMW[0] = RequireAnyRole(tenant family)); a
+//                    Platform Super Admin cannot call it even with a grant
+//   - PLATFORM_ONLY: real backend route gated to platform-super-admin roles
+//                    (platformMW); tenant roles cannot call it
 //
-// The Platform Super Admin shell MUST NOT include any tenant-owned route
-// (portal separation rule). Tenant-owned routes live in the organization
-// portal inventory, which is out of scope for this module.
+// Portal ownership model (verified from router.go):
+//   - platformMW routes (PSA-direct): /admin/queue/*, /dr/*, /retention/*,
+//     /platform/*, /incidents, /audit/logs, /monitoring/*, /admin/backups/*,
+//     /update*, /updates/*, /firewall/*, /guardian/*, /heal/*, /modules,
+//     /feature-flags, /admin/security/*, /admin/ssl/*, /admin/settings/*,
+//     /admin/storage/*, /admin/cluster/*, /admin/runtime
+//   - Support-access-aware reads (PSA with active grant + X-Support-Tenant-ID):
+//     GET /domains, GET /mailboxes, GET /users, GET
+//     /enterprise/organizations/current
+//   - Tenant-family-only (TENANT_ONLY): all /domains/* detail + mutations,
+//     all /mailboxes/* detail + mutations, /enterprise/*, /customer/*,
+//     /admin/relay/*, aliases, groups
+//
+// A Platform Super Admin has no owning tenant. It must NEVER fabricate a
+// tenant ID or call a tenant-only route. Support-access reads require an
+// explicit, backend-validated grant; the UI models this through the
+// tenant-context feature.
 
-export type CapabilityState = "WIRED" | "BACKEND_ONLY" | "UNAVAILABLE";
+export type CapabilityState = "WIRED" | "BACKEND_ONLY" | "UNAVAILABLE" | "TENANT_ONLY" | "PLATFORM_ONLY";
+export type PortalOwner = "platform" | "tenant" | "shared" | "none";
 
 export interface Capability {
   feature: string;
   route: string;
   method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
-  /** Real backend route exists (platformMW-gated). */
+  /** Real backend route exists. */
   backendRoute: boolean;
   state: CapabilityState;
+  /** Who may call this route. */
+  owner: PortalOwner;
+  /** Whether a PSA needs an active support-access grant + tenant header. */
+  requiresSupportAccess?: boolean;
+  /** Whether the route requires a tenant-family role (not usable by PSA). */
+  tenantFamilyOnly?: boolean;
   /** Frontend page module, when WIRED. */
   page?: string;
   /** Frontend navigation label, when WIRED. */
@@ -173,26 +199,117 @@ const WIRED_FEATURES: ReadonlySet<string> = new Set([
   "audit",
   "dr",
   "health",
+  "domains",
+  "mailboxes",
+  "suppression",
+  "deliverability",
 ]);
 
-function classify(route: { method: Capability["method"]; route: string; feature: string }): Capability {
+// Mail-control routes with verified ownership (see header comment for
+// the middleware evidence). owner values:
+//   - "platform": PSA-direct (platformMW)
+//   - "tenant": tenant-family role only (tenantCompatMW[0] role gate)
+//   - "shared": support-access-aware read (PSA needs grant + tenant header)
+const MAIL_CONTROL_ROUTES: ReadonlyArray<{
+  method: Capability["method"];
+  route: string;
+  feature: string;
+  owner: PortalOwner;
+  requiresSupportAccess?: boolean;
+  tenantFamilyOnly?: boolean;
+  backendRoute?: boolean;
+}> = [
+  // Platform domains (list = support-access-aware read; detail/mutations = tenant-only)
+  { method: "GET", route: "/domains", feature: "domains", owner: "shared", requiresSupportAccess: true },
+  { method: "GET", route: "/domains/:name", feature: "domains", owner: "tenant", tenantFamilyOnly: true },
+  { method: "GET", route: "/domains/:name/audit", feature: "domains", owner: "tenant", tenantFamilyOnly: true },
+  { method: "GET", route: "/domains/export", feature: "domains", owner: "tenant", tenantFamilyOnly: true },
+  { method: "POST", route: "/domains", feature: "domains", owner: "tenant", tenantFamilyOnly: true },
+  { method: "PATCH", route: "/domains/:name", feature: "domains", owner: "tenant", tenantFamilyOnly: true },
+  { method: "PATCH", route: "/domains/:name/status", feature: "domains", owner: "tenant", tenantFamilyOnly: true },
+  { method: "DELETE", route: "/domains/:name", feature: "domains", owner: "tenant", tenantFamilyOnly: true },
+  { method: "POST", route: "/domains/bulk/status", feature: "domains", owner: "tenant", tenantFamilyOnly: true },
+  // Platform mailboxes (list = support-access-aware read; detail/mutations = tenant-only)
+  { method: "GET", route: "/mailboxes", feature: "mailboxes", owner: "shared", requiresSupportAccess: true },
+  { method: "GET", route: "/mailboxes/:id", feature: "mailboxes", owner: "tenant", tenantFamilyOnly: true },
+  { method: "GET", route: "/mailboxes/:id/audit", feature: "mailboxes", owner: "tenant", tenantFamilyOnly: true },
+  { method: "GET", route: "/mailboxes/export", feature: "mailboxes", owner: "tenant", tenantFamilyOnly: true },
+  { method: "POST", route: "/mailboxes", feature: "mailboxes", owner: "tenant", tenantFamilyOnly: true },
+  { method: "PATCH", route: "/mailboxes/:id/status", feature: "mailboxes", owner: "tenant", tenantFamilyOnly: true },
+  { method: "PATCH", route: "/mailboxes/:id/quota", feature: "mailboxes", owner: "tenant", tenantFamilyOnly: true },
+  { method: "PATCH", route: "/mailboxes/:id/password", feature: "mailboxes", owner: "tenant", tenantFamilyOnly: true },
+  { method: "PATCH", route: "/mailboxes/:id/protocols", feature: "mailboxes", owner: "tenant", tenantFamilyOnly: true },
+  { method: "DELETE", route: "/mailboxes/:id", feature: "mailboxes", owner: "tenant", tenantFamilyOnly: true },
+  { method: "POST", route: "/mailboxes/bulk/status", feature: "mailboxes", owner: "tenant", tenantFamilyOnly: true },
+  { method: "POST", route: "/mailboxes/import", feature: "mailboxes", owner: "tenant", tenantFamilyOnly: true },
+  { method: "POST", route: "/mailboxes/import/dry-run", feature: "mailboxes", owner: "tenant", tenantFamilyOnly: true },
+  // Aliases / groups (tenant-family only; no PSA route exists)
+  { method: "GET", route: "/enterprise/aliases", feature: "aliases", owner: "tenant", tenantFamilyOnly: true },
+  { method: "POST", route: "/enterprise/aliases", feature: "aliases", owner: "tenant", tenantFamilyOnly: true },
+  { method: "DELETE", route: "/enterprise/aliases/:id", feature: "aliases", owner: "tenant", tenantFamilyOnly: true },
+  { method: "GET", route: "/enterprise/groups", feature: "groups", owner: "tenant", tenantFamilyOnly: true },
+  { method: "POST", route: "/enterprise/groups", feature: "groups", owner: "tenant", tenantFamilyOnly: true },
+  { method: "DELETE", route: "/enterprise/groups/:id", feature: "groups", owner: "tenant", tenantFamilyOnly: true },
+  { method: "POST", route: "/enterprise/groups/:id/members", feature: "groups", owner: "tenant", tenantFamilyOnly: true },
+  { method: "DELETE", route: "/enterprise/groups/:id/members/:memberId", feature: "groups", owner: "tenant", tenantFamilyOnly: true },
+  // Relay (tenant-family only)
+  { method: "GET", route: "/enterprise/relay/pools/:id/providers", feature: "relay", owner: "tenant", tenantFamilyOnly: true },
+  { method: "POST", route: "/enterprise/relay/pools", feature: "relay", owner: "tenant", tenantFamilyOnly: true },
+  { method: "POST", route: "/enterprise/relay/providers", feature: "relay", owner: "tenant", tenantFamilyOnly: true },
+  { method: "POST", route: "/enterprise/relay/providers/:id/test", feature: "relay", owner: "tenant", tenantFamilyOnly: true },
+  { method: "POST", route: "/enterprise/relay/routing-rules", feature: "relay", owner: "tenant", tenantFamilyOnly: true },
+  { method: "POST", route: "/enterprise/relay/emergency-override", feature: "relay", owner: "tenant", tenantFamilyOnly: true },
+  // Mail queue (platform-owned) — already present in PLATFORM_ROUTES;
+  // the base array maps to owner "platform" in ALL_ROUTES, so the queue
+  // routes are intentionally NOT duplicated here.
+  // Suppression / deliverability: no backend routes exist anywhere
+  { method: "GET", route: "/suppression", feature: "suppression", owner: "none", backendRoute: false },
+  { method: "GET", route: "/deliverability", feature: "deliverability", owner: "none", backendRoute: false },
+];
+
+function classify(
+  route: { method: Capability["method"]; route: string; feature: string; owner?: PortalOwner; requiresSupportAccess?: boolean; tenantFamilyOnly?: boolean; backendRoute?: boolean },
+): Capability {
   const wired = WIRED_FEATURES.has(route.feature);
+  const owner = route.owner ?? "platform";
+  let state: CapabilityState;
+  if (route.backendRoute === false) {
+    state = "UNAVAILABLE";
+  } else if (owner === "tenant") {
+    state = "TENANT_ONLY";
+  } else if (owner === "platform") {
+    state = wired ? "WIRED" : "BACKEND_ONLY";
+  } else if (owner === "shared") {
+    state = "WIRED"; // support-access-aware read; the tenant-context feature gates it
+  } else {
+    state = "UNAVAILABLE";
+  }
   return {
     feature: route.feature,
     route: route.route,
     method: route.method,
-    backendRoute: true,
-    state: wired ? "WIRED" : "BACKEND_ONLY",
+    backendRoute: route.backendRoute !== false,
+    state,
+    owner,
+    requiresSupportAccess: route.requiresSupportAccess,
+    tenantFamilyOnly: route.tenantFamilyOnly,
   };
 }
 
-export const CAPABILITY_INVENTORY: readonly Capability[] = PLATFORM_ROUTES.map(classify);
+const ALL_ROUTES = [
+  ...PLATFORM_ROUTES.map((r) => ({ ...r, owner: "platform" as PortalOwner })),
+  ...MAIL_CONTROL_ROUTES,
+];
+
+export const CAPABILITY_INVENTORY: readonly Capability[] = ALL_ROUTES.map(classify);
 
 export const PLATFORM_NAVIGATION: ReadonlyArray<{ label: string; route: string; feature: string }> = [
   { label: "Overview", route: "platform-home", feature: "overview" },
   { label: "Organizations", route: "organizations", feature: "organizations" },
   { label: "Platform Billing", route: "platform-billing", feature: "platform-billing" },
   { label: "Imports", route: "platform-imports", feature: "imports" },
+  { label: "Domains", route: "platform-domains", feature: "domains" },
+  { label: "Mailboxes", route: "platform-mailboxes", feature: "mailboxes" },
   { label: "Mail Operations", route: "mail-operations", feature: "mail-operations" },
   { label: "Automation Jobs", route: "automation-jobs", feature: "automation-jobs" },
   { label: "Incidents", route: "platform-incidents", feature: "incidents" },
