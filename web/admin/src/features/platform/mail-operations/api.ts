@@ -36,15 +36,19 @@ export function retryQueueMessage(id: number): Promise<QueueActionResponse> {
   return request<QueueActionResponse>(`/admin/queue/messages/${id}/retry`, { method: "POST" });
 }
 
-export function bounceQueueMessage(id: number, reason?: string): Promise<QueueActionResponse> {
+export function bounceQueueMessage(id: number, reason?: string, confirmation?: string): Promise<QueueActionResponse> {
   return request<QueueActionResponse>(`/admin/queue/messages/${id}/bounce`, {
     method: "POST",
     body: JSON.stringify({ reason: reason || "" }),
+    headers: confirmation ? { "X-Confirm": confirmation } : undefined,
   });
 }
 
-export function cancelQueueMessage(id: number): Promise<QueueActionResponse> {
-  return request<QueueActionResponse>(`/admin/queue/messages/${id}/cancel`, { method: "POST" });
+export function cancelQueueMessage(id: number, confirmation?: string): Promise<QueueActionResponse> {
+  return request<QueueActionResponse>(`/admin/queue/messages/${id}/cancel`, {
+    method: "POST",
+    headers: confirmation ? { "X-Confirm": confirmation } : undefined,
+  });
 }
 
 export function bulkQueueAction(ids: number[], action: BulkQueueAction, reason?: string): Promise<BulkQueueActionResponse> {

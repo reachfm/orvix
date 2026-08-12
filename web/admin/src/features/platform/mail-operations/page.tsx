@@ -3,6 +3,7 @@ import { Send, Loader2, AlertCircle } from "lucide-react";
 import ConfirmDialog from "../../../components/ConfirmDialog";
 import { useQueueMessagesQuery, isCoreMailDisabled, useQueueSummaryQuery } from "./queries";
 import { useRetryQueueMessageMutation, useBounceQueueMessageMutation, useCancelQueueMessageMutation } from "./mutations";
+import { bounceQueueConfirmation, cancelQueueConfirmation } from "./contract";
 import QueueSummaryCards from "./components/QueueSummaryCards";
 import QueueTable from "./components/QueueTable";
 import QueueDetailDrawer from "./components/QueueDetailDrawer";
@@ -83,7 +84,13 @@ export default function MailOperationsPage() {
             onOpenChange={(o) => !o && setConfirmAction(null)}
             title={confirmAction?.kind === "bounce" ? "Bounce message" : "Cancel message"}
             description={`This will ${confirmAction?.kind} message #${confirmAction?.id}. This cannot be undone.`}
-            requireTypedName={confirmAction ? String(confirmAction.id) : ""}
+            requireTypedName={
+              confirmAction
+                ? confirmAction.kind === "bounce"
+                  ? bounceQueueConfirmation(confirmAction.id)
+                  : cancelQueueConfirmation(confirmAction.id)
+                : undefined
+            }
             danger
             pending={bounceMut.isPending || cancelMut.isPending}
             onConfirm={() => {

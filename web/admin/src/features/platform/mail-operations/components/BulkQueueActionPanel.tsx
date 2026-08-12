@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { useBulkQueueActionMutation } from "../mutations";
-import type { BulkQueueAction, BulkQueueActionResult } from "../contract";
+import ConfirmDialog from "../../../../components/ConfirmDialog";
+import type { BulkQueueAction, BulkQueueActionResult, QueueMessage } from "../contract";
+import { canBounceMessage, canCancelMessage, canRetryMessage } from "../contract";
 
 interface Props {
-  messages: Array<{ id: number; status: string }>;
+  messages: QueueMessage[];
 }
 
 /**
@@ -11,7 +13,9 @@ interface Props {
  * messages through the real POST /admin/queue/messages/bulk-action
  * endpoint (platformMW-gated). The backend reports per-row results; the
  * panel surfaces succeeded/failed counts and per-row errors without
- * pretending the operation was atomic.
+ * pretending the operation was atomic. Selection is state-aware: retry
+ * only on retryable entries; cancel/bounce only on non-terminal
+ * entries. Destructive bulk actions require a typed confirmation.
  */
 export default function BulkQueueActionPanel({ messages }: Props) {
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -30,8 +34,13 @@ export default function BulkQueueActionPanel({ messages }: Props) {
   };
 
   const toggleAll = () => {
-    setSelected((prev) => (prev.size === messages.length ? new Set() : new Set(messages.map((m) => m.id))));
+    const eligible = eligibleFor(action).map((m) => m.id);
+    setSelected((prev) => (prev.size === eligible.length && eligible.length > 0 ? new Set() : new Set(eligible)));
   };
+
+  /** Only entries the backend state machine accepts for the action. */
+  const eligibleFor = (a: BulkQueueAction): QueueMessage[] =>
+    messages.filter((m) => (a === "retry" ? canRetryMessage(m) : a === "cancel" ? canCancelMessage(m) : canBounceMessage(m)));
 
   const run = () => {
     setConfirming(false);
@@ -48,14 +57,9 @@ export default function BulkQueueActionPanel({ messages }: Props) {
     );
   };
 
-  const availableActions = (): BulkQueueAction[] => {
-    const statuses = new Set(messages.filter((m) => selected.has(m.id)).map((m) => m.status));
-    const actions: BulkQueueAction[] = [];
-    if (!statuses.has("cancelled") && !statuses.has("bounced")) actions.push("retry");
-    if (statuses.has("pending") || statuses.has("deferred") || statuses.has("delivering")) actions.push("cancel");
-    if (statuses.has("pending") || statuses.has("deferred")) actions.push("bounce");
-    return actions.length > 0 ? actions : ["retry", "cancel", "bounce"];
-  };
+  const destructive = action !== "retry";
+  const typedPhrase = destructive ? `BULK-${action.toUpperCase()}` : undefined;
+  const eligible = eligibleFor(action);
 
   if (messages.length === 0) return null;
 
@@ -63,12 +67,14 @@ export default function BulkQueueActionPanel({ messages }: Props) {
     <div className="border border-[var(--border)] rounded-lg p-3 bg-[var(--bg-surface)] space-y-2 mb-4">
       <div className="flex flex-wrap items-center gap-3 text-sm">
         <label className="flex items-center gap-1 text-[var(--text-secondary)]">
-          <input type="checkbox" checked={selected.size === messages.length && messages.length > 0} onChange={toggleAll} aria-label="Select all messages" />
-          All
+          <input type="checkbox" checked={selected.size === eligible.length && eligible.length > 0} onChange={toggleAll} aria-label="Select all eligible messages" />
+          All eligible
         </label>
         <span className="text-[var(--text-primary)]">{selected.size} selected</span>
-        <select value={action} onChange={(e) => setAction(e.target.value as BulkQueueAction)} className="px-3 py-1.5 bg-[var(--bg-elevated)] border border-[var(--border)] rounded text-sm">
-          {availableActions().map((a) => <option key={a} value={a}>{a}</option>)}
+        <select value={action} onChange={(e) => { setAction(e.target.value as BulkQueueAction); setSelected(new Set()); }} className="px-3 py-1.5 bg-[var(--bg-elevated)] border border-[var(--border)] rounded text-sm">
+          {(["retry", "cancel", "bounce"] as BulkQueueAction[]).map((a) => (
+            <option key={a} value={a}>{a}</option>
+          ))}
         </select>
         {action === "bounce" && (
           <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Bounce reason" className="px-3 py-1.5 bg-[var(--bg-elevated)] border border-[var(--border)] rounded text-sm" />
@@ -82,27 +88,20 @@ export default function BulkQueueActionPanel({ messages }: Props) {
         </button>
       </div>
 
-      {messages.map((m) => (
-        <label key={m.id} className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
-          <input type="checkbox" checked={selected.has(m.id)} onChange={() => toggle(m.id)} aria-label={`Select message ${m.id}`} />
-          #{m.id} · {m.status}
-        </label>
-      ))}
-
-      {confirming && (
-        <div className="border border-[var(--warning)] rounded p-3 bg-[var(--warning)]/5 space-y-2">
-          <p className="text-sm text-[var(--text-primary)]">
-            Apply <b>{action}</b> to <b>{selected.size}</b> queue message(s)? This is a real, destructive bulk operation.
-          </p>
-          <div className="flex gap-2">
-            <button onClick={run} disabled={bulk.isPending} className="px-3 py-1.5 rounded text-sm bg-[var(--danger)] text-white disabled:opacity-50">Confirm {action}</button>
-            <button onClick={() => setConfirming(false)} className="px-3 py-1.5 rounded text-sm bg-[var(--bg-subtle)] text-[var(--text-primary)]">Cancel</button>
-          </div>
-        </div>
-      )}
+      <div className="space-y-1">
+        {messages.map((m) => {
+          const selectable = (action === "retry" ? canRetryMessage : action === "cancel" ? canCancelMessage : canBounceMessage)(m);
+          return (
+            <label key={m.id} className={`flex items-center gap-2 text-xs ${selectable ? "text-[var(--text-secondary)]" : "text-[var(--text-muted)]"}`}>
+              <input type="checkbox" checked={selected.has(m.id)} disabled={!selectable} onChange={() => toggle(m.id)} aria-label={`Select message ${m.id}`} />
+              #{m.id} · {m.status}
+            </label>
+          );
+        })}
+      </div>
 
       {result && (
-        <div className="text-sm">
+        <div className="text-sm" role="status">
           <p className={result.failed.length === 0 ? "text-[var(--success)]" : "text-[var(--warning)]"}>
             Succeeded: {result.succeeded} · Failed: {result.failed.length}
           </p>
@@ -115,6 +114,18 @@ export default function BulkQueueActionPanel({ messages }: Props) {
           )}
         </div>
       )}
+
+      <ConfirmDialog
+        open={confirming}
+        onOpenChange={(o) => !o && setConfirming(false)}
+        title={`${action === "retry" ? "Retry" : action === "cancel" ? "Cancel" : "Bounce"} ${selected.size} message(s)`}
+        description={`Apply ${action} to ${selected.size} queue message(s)? This is a real bulk operation; the backend reports per-message results.`}
+        requireTypedName={typedPhrase}
+        confirmLabel={`Confirm ${action}`}
+        danger={destructive}
+        pending={bulk.isPending}
+        onConfirm={run}
+      />
     </div>
   );
 }
