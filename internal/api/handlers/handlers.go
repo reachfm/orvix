@@ -871,14 +871,24 @@ func (h *Handler) Login(c fiber.Ctx) error {
 		Expires:  time.Now().Add(15 * time.Minute),
 		HTTPOnly: true,
 		Secure:   true,
-		// None + Domain=cfg.Auth.CookieDomain lets the
-		// browser send this cookie to admin.<parent> AND
-		// webmail.<parent> (single sign-on across
-		// subdomains). The installer writes a non-empty
-		// CookieDomain for production; in dev / docker the
-		// field is empty and the cookie is scoped to the
+		// Domain=cfg.Auth.CookieDomain is what lets the browser
+		// send this cookie to admin.<parent> AND webmail.<parent>
+		// (single sign-on across subdomains). The installer writes
+		// a non-empty CookieDomain for production; in dev / docker
+		// the field is empty and the cookie is scoped to the
 		// response Host.
-		SameSite: "None",
+		//
+		// H-1: SameSite is Lax, NOT None. SameSite is evaluated
+		// against the registrable domain (eTLD+1), so
+		// admin.<parent> and webmail.<parent> are already SAME-site
+		// — cross-subdomain SSO never needed None. None also
+		// attached this cookie to genuinely cross-SITE requests,
+		// which is exactly what made every webmail mutation
+		// forgeable from an attacker page. Lax preserves SSO while
+		// withholding the cookie from cross-site sub-resource
+		// requests and cross-site form POSTs. CSRF middleware on
+		// every mutation remains the primary, independent defence.
+		SameSite: "Lax",
 		Path:     "/",
 		Domain:   h.cfg.Auth.CookieDomain,
 	})
@@ -889,7 +899,7 @@ func (h *Handler) Login(c fiber.Ctx) error {
 		Expires:  expiresAt,
 		HTTPOnly: true,
 		Secure:   true,
-		SameSite: "None",
+		SameSite: "Lax",
 		Path:     "/api/v1/auth/refresh",
 		Domain:   h.cfg.Auth.CookieDomain,
 	})
@@ -921,7 +931,7 @@ func (h *Handler) Refresh(c fiber.Ctx) error {
 		Expires:  time.Now().Add(15 * time.Minute),
 		HTTPOnly: true,
 		Secure:   true,
-		SameSite: "None",
+		SameSite: "Lax",
 		Path:     "/",
 		Domain:   h.cfg.Auth.CookieDomain,
 	})
@@ -932,7 +942,7 @@ func (h *Handler) Refresh(c fiber.Ctx) error {
 		Expires:  expiresAt,
 		HTTPOnly: true,
 		Secure:   true,
-		SameSite: "None",
+		SameSite: "Lax",
 		Path:     "/api/v1/auth/refresh",
 		Domain:   h.cfg.Auth.CookieDomain,
 	})
@@ -954,7 +964,7 @@ func (h *Handler) clearAuthCookies(c fiber.Ctx) {
 		Expires:  expiry,
 		HTTPOnly: true,
 		Secure:   true,
-		SameSite: "None",
+		SameSite: "Lax",
 		Path:     "/",
 		Domain:   h.cfg.Auth.CookieDomain,
 	})
@@ -964,7 +974,7 @@ func (h *Handler) clearAuthCookies(c fiber.Ctx) {
 		Expires:  expiry,
 		HTTPOnly: true,
 		Secure:   true,
-		SameSite: "None",
+		SameSite: "Lax",
 		Path:     "/api/v1/auth/refresh",
 		Domain:   h.cfg.Auth.CookieDomain,
 	})

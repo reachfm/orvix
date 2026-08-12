@@ -1087,14 +1087,41 @@ func (r *Router) setupRoutes() {
 	// middleware as the "show the login form" signal,
 	// and a 200 with authenticated:true as the "reveal
 	// the SPA" signal.
+	// H-1: every cookie-authenticated webmail MUTATION carries the canonical
+	// CSRF middleware plus a strict JSON content-type guard, applied
+	// PER-ROUTE. Effective middleware order is therefore
+	// authentication -> portal/tenant context (from the `protected` group)
+	// -> CSRF -> content type -> handler; the handlers still perform their
+	// own mailbox-ownership authorization via resolveWebmailUserContext.
+	//
+	// These are deliberately NOT mounted with protected.Group("", ...):
+	// an empty-prefix group installs its middleware for every route
+	// registered on the parent group afterwards, which would silently apply
+	// the webmail JSON-only rule to unrelated admin routes further down (and
+	// did — it broke the multipart send route). Per-route registration keeps
+	// the blast radius exactly equal to the route list below.
+	//
+	// Read-only GETs are left bare: they change no state, and the CSRF
+	// middleware no-ops on safe methods anyway.
+	//
+	// webmailSendCT additionally permits multipart/form-data because
+	// /webmail/send is the only webmail route that genuinely parses an
+	// upload (webmailParseMultipartSend, for attachments). Every other
+	// mutation is JSON-only, so a plain cross-site HTML <form> — which can
+	// only emit urlencoded/multipart/text-plain — is rejected with 415
+	// before the handler runs, independently of the CSRF check.
+	webmailCSRF := r.csrf.Middleware()
+	webmailJSONCT := auth.RequireJSONContentType()
+	webmailSendCT := auth.RequireJSONContentType(auth.AllowMultipart())
+
 	protected.Get("/webmail/session", r.h.WebmailSession)
 	protected.Get("/webmail/me", r.h.WebmailMe)
 	protected.Get("/webmail/folders", r.h.WebmailFolders)
 	protected.Get("/webmail/messages", r.h.WebmailMessages)
 	protected.Get("/webmail/messages/:id", r.h.WebmailMessage)
-	protected.Patch("/webmail/messages/:id", r.h.WebmailUpdateMessage)
-	protected.Post("/webmail/messages/:id/archive", r.h.WebmailArchive)
-	protected.Post("/webmail/messages/:id/delete", r.h.WebmailDelete)
+	protected.Patch("/webmail/messages/:id", webmailCSRF, webmailJSONCT, r.h.WebmailUpdateMessage)
+	protected.Post("/webmail/messages/:id/archive", webmailCSRF, webmailJSONCT, r.h.WebmailArchive)
+	protected.Post("/webmail/messages/:id/delete", webmailCSRF, webmailJSONCT, r.h.WebmailDelete)
 	// New in Webmail Enterprise 2: per-message source
 	// download, single-message move, multi-message batch
 	// operations. All behind the same protected group as
@@ -1102,8 +1129,8 @@ func (r *Router) setupRoutes() {
 	// auth middleware rejects missing/invalid cookies
 	// with 401 before the handler runs.
 	protected.Get("/webmail/messages/:id/source", r.h.WebmailMessageSource)
-	protected.Post("/webmail/messages/:id/move", r.h.WebmailMoveMessage)
-	protected.Post("/webmail/messages/batch", r.h.WebmailMessageBatch)
+	protected.Post("/webmail/messages/:id/move", webmailCSRF, webmailJSONCT, r.h.WebmailMoveMessage)
+	protected.Post("/webmail/messages/batch", webmailCSRF, webmailJSONCT, r.h.WebmailMessageBatch)
 	// Attachment download / preview. The :id is parsed
 	// with parseMessageID (digits only) and the
 	// handler confirms the attachment's parent message
@@ -1112,28 +1139,28 @@ func (r *Router) setupRoutes() {
 	// response shape does not leak existence.
 	protected.Get("/webmail/attachments/:id", r.h.WebmailAttachmentDownload)
 	protected.Get("/webmail/attachments/:id/preview", r.h.WebmailAttachmentPreview)
-	protected.Post("/webmail/folders/:id/read-all", r.h.WebmailMarkFolderRead)
-	protected.Post("/webmail/send", r.h.WebmailSend)
+	protected.Post("/webmail/folders/:id/read-all", webmailCSRF, webmailJSONCT, r.h.WebmailMarkFolderRead)
+	protected.Post("/webmail/send", webmailCSRF, webmailSendCT, r.h.WebmailSend)
 	// Drafts — minimal CRUD. Drafts are Message rows
 	// with Draft=true in the Drafts system folder; no
 	// separate draft table, no schema change.
 	protected.Get("/webmail/drafts", r.h.WebmailListDrafts)
-	protected.Post("/webmail/drafts", r.h.WebmailSaveDraft)
+	protected.Post("/webmail/drafts", webmailCSRF, webmailJSONCT, r.h.WebmailSaveDraft)
 	protected.Get("/webmail/drafts/:id", r.h.WebmailGetDraft)
-	protected.Put("/webmail/drafts/:id", r.h.WebmailSaveDraft)
-	protected.Delete("/webmail/drafts/:id", r.h.WebmailDeleteDraft)
+	protected.Put("/webmail/drafts/:id", webmailCSRF, webmailJSONCT, r.h.WebmailSaveDraft)
+	protected.Delete("/webmail/drafts/:id", webmailCSRF, webmailJSONCT, r.h.WebmailDeleteDraft)
 	// Push notification subscription management.
-	protected.Post("/webmail/push/subscribe", r.h.PushSubscribe)
-	protected.Post("/webmail/push/unsubscribe", r.h.PushUnsubscribe)
+	protected.Post("/webmail/push/subscribe", webmailCSRF, webmailJSONCT, r.h.PushSubscribe)
+	protected.Post("/webmail/push/unsubscribe", webmailCSRF, webmailJSONCT, r.h.PushUnsubscribe)
 	protected.Get("/webmail/push/status", r.h.PushStatus)
-	protected.Post("/webmail/push/test", r.h.PushTest)
+	protected.Post("/webmail/push/test", webmailCSRF, webmailJSONCT, r.h.PushTest)
 
 	// User settings — per-mailbox profile / appearance / compose /
 	// mail behavior / notification preferences. Auth + mailbox
 	// ownership enforced by resolveWebmailUserContext inside the
 	// handlers; no id is taken from the request body.
 	protected.Get("/webmail/settings", r.h.WebmailGetSettings)
-	protected.Put("/webmail/settings", r.h.WebmailPutSettings)
+	protected.Put("/webmail/settings", webmailCSRF, webmailJSONCT, r.h.WebmailPutSettings)
 
 	// Per-mailbox rules engine API. The handlers resolve
 	// the caller's mailbox from the JWT identity via
@@ -1146,13 +1173,13 @@ func (r *Router) setupRoutes() {
 	// so missing / invalid cookies get 401 before any
 	// mailbox lookup runs.
 	protected.Get("/webmail/rules", r.h.WebmailListRules)
-	protected.Post("/webmail/rules", r.h.WebmailCreateRule)
-	protected.Put("/webmail/rules/:id", r.h.WebmailUpdateRule)
-	protected.Delete("/webmail/rules/:id", r.h.WebmailDeleteRule)
+	protected.Post("/webmail/rules", webmailCSRF, webmailJSONCT, r.h.WebmailCreateRule)
+	protected.Put("/webmail/rules/:id", webmailCSRF, webmailJSONCT, r.h.WebmailUpdateRule)
+	protected.Delete("/webmail/rules/:id", webmailCSRF, webmailJSONCT, r.h.WebmailDeleteRule)
 	protected.Get("/webmail/vacation", r.h.WebmailGetVacation)
-	protected.Put("/webmail/vacation", r.h.WebmailPutVacation)
+	protected.Put("/webmail/vacation", webmailCSRF, webmailJSONCT, r.h.WebmailPutVacation)
 	protected.Get("/webmail/forwarding", r.h.WebmailGetForwarding)
-	protected.Put("/webmail/forwarding", r.h.WebmailPutForwarding)
+	protected.Put("/webmail/forwarding", webmailCSRF, webmailJSONCT, r.h.WebmailPutForwarding)
 
 	authCSRF := protected.Group("", r.csrf.Middleware())
 	authCSRF.Post("/auth/logout", r.h.Logout)

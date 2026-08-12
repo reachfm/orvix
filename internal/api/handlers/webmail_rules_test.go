@@ -243,6 +243,14 @@ func doJSON(t *testing.T, router *api.Router, method, path, token string, body i
 	req := httptest.NewRequest(method, path, rdr)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
+	// H-1: webmail mutations now require the canonical double-submit CSRF
+	// material. Enforcement is uniform for every non-API-key credential, so
+	// bearer-authenticated clients present it too.
+	if isWebmailMutation(method) {
+		csrfTok := mintWebmailCSRF(t, router, "")
+		req.Header.Set("Cookie", "csrf_token="+csrfTok)
+		req.Header.Set("X-CSRF-Token", csrfTok)
+	}
 	resp, err := router.App().Test(req, fiber.TestConfig{Timeout: 0})
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, path, err)

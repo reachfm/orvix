@@ -37,7 +37,11 @@ func (e *webmailTestEnv) appTest(t *testing.T, method, path, accessToken string,
 	t.Helper()
 	req := httptest.NewRequest(method, path, body)
 	if accessToken != "" {
-		req.Header.Set("Cookie", "access_token="+accessToken)
+		cookie, csrfTok := webmailCookieAndCSRF(t, e.router, method, accessToken)
+		req.Header.Set("Cookie", cookie)
+		if csrfTok != "" {
+			req.Header.Set("X-CSRF-Token", csrfTok)
+		}
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")

@@ -47,7 +47,11 @@ func multipartSend(t *testing.T, e *webmailTestEnv, accessToken string, fields m
 	req := httptest.NewRequest("POST", "/api/v1/webmail/send", &buf)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	if accessToken != "" {
-		req.Header.Set("Cookie", "access_token="+accessToken)
+		cookie, csrfTok := webmailCookieAndCSRF(t, e.router, "POST", accessToken)
+		req.Header.Set("Cookie", cookie)
+		if csrfTok != "" {
+			req.Header.Set("X-CSRF-Token", csrfTok)
+		}
 	}
 	resp, err := e.router.App().Test(req, fiber.TestConfig{Timeout: 0})
 	if err != nil {
