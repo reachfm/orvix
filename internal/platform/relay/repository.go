@@ -475,7 +475,18 @@ func (r *Repository) DeleteProviderTx(ctx context.Context, tx *sql.Tx, id uint) 
 // ── Pools ─────────────────────────────────────────────────────────
 
 func (r *Repository) CreatePool(ctx context.Context, p *Pool) error {
-	id, err := r.insertReturningID(ctx,
+	return r.createPoolWith(ctx, r.db, p)
+}
+
+// CreatePoolTx inserts a pool inside the caller's transaction so the
+// row, its audit entry, and its outbox event commit or roll back
+// together.
+func (r *Repository) CreatePoolTx(ctx context.Context, tx *sql.Tx, p *Pool) error {
+	return r.createPoolWith(ctx, tx, p)
+}
+
+func (r *Repository) createPoolWith(ctx context.Context, q execQuerier, p *Pool) error {
+	id, err := r.insertReturningIDWith(ctx, q,
 		`INSERT INTO platform_relay_pools (scope, tenant_id, domain_id, name, strategy, direct_only, version, created_at, updated_at) VALUES (`+r.dialect.Placeholders(9)+`)`,
 		p.Scope, p.TenantID, p.DomainID, p.Name, p.Strategy, boolToInt(p.DirectOnly), 1, p.CreatedAt, p.UpdatedAt)
 	if err != nil {

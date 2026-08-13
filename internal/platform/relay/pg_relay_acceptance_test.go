@@ -29,7 +29,7 @@ func TestPostgresRelay_RoutingRuleCreateReturnsRealID(t *testing.T) {
 	db, svc := newPostgresRelayService(t)
 	ctx := context.Background()
 
-	pool, err := svc.CreatePool(ctx, Pool{Scope: ScopeGlobal, Name: uniqueName("pgpool"), Strategy: StrategyPriority})
+	pool, err := svc.CreatePool(ctx, Pool{Scope: ScopeGlobal, Name: uniqueName("pgpool"), Strategy: StrategyPriority}, testActor)
 	if err != nil {
 		t.Fatalf("create pool: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestPostgresRelay_OverrideLifecycle(t *testing.T) {
 	db, svc := newPostgresRelayService(t)
 	ctx := context.Background()
 
-	pool, err := svc.CreatePool(ctx, Pool{Scope: ScopeGlobal, Name: uniqueName("ovrpool"), Strategy: StrategyPriority})
+	pool, err := svc.CreatePool(ctx, Pool{Scope: ScopeGlobal, Name: uniqueName("ovrpool"), Strategy: StrategyPriority}, testActor)
 	if err != nil {
 		t.Fatalf("create pool: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestPostgresRelay_OverrideExpiry(t *testing.T) {
 	_, svc := newPostgresRelayService(t)
 	ctx := context.Background()
 
-	pool, err := svc.CreatePool(ctx, Pool{Scope: ScopeGlobal, Name: uniqueName("exppool"), Strategy: StrategyPriority})
+	pool, err := svc.CreatePool(ctx, Pool{Scope: ScopeGlobal, Name: uniqueName("exppool"), Strategy: StrategyPriority}, testActor)
 	if err != nil {
 		t.Fatalf("create pool: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestPostgresRelay_ProviderMembershipAndSelection(t *testing.T) {
 	_, svc := newPostgresRelayService(t)
 	ctx := context.Background()
 
-	pool, err := svc.CreatePool(ctx, Pool{Scope: ScopeGlobal, Name: uniqueName("selpool"), Strategy: StrategyPriority})
+	pool, err := svc.CreatePool(ctx, Pool{Scope: ScopeGlobal, Name: uniqueName("selpool"), Strategy: StrategyPriority}, testActor)
 	if err != nil {
 		t.Fatalf("create pool: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestPostgresRelay_ProviderMembershipAndSelection(t *testing.T) {
 		Host: "smtp.provider.example.com", Port: 587,
 		ConnSecurity: ConnSecurityStartTLS, TLSValidation: TLSValidationStrict,
 		Active: true, Priority: 10, Weight: 1,
-	}, "")
+	}, "", testActor)
 	if err != nil {
 		t.Fatalf("create provider: %v", err)
 	}
@@ -275,7 +275,7 @@ func TestPostgresRelay_CircuitStateAndRateLimitPersist(t *testing.T) {
 	_, svc := newPostgresRelayService(t)
 	ctx := context.Background()
 
-	pool, err := svc.CreatePool(ctx, Pool{Scope: ScopeGlobal, Name: uniqueName("statepool"), Strategy: StrategyPriority})
+	pool, err := svc.CreatePool(ctx, Pool{Scope: ScopeGlobal, Name: uniqueName("statepool"), Strategy: StrategyPriority}, testActor)
 	if err != nil {
 		t.Fatalf("create pool: %v", err)
 	}
@@ -284,7 +284,7 @@ func TestPostgresRelay_CircuitStateAndRateLimitPersist(t *testing.T) {
 		Host: "smtp.state.example.com", Port: 587,
 		ConnSecurity: ConnSecurityStartTLS, TLSValidation: TLSValidationStrict,
 		Active: true, RateLimitPerMin: 3,
-	}, "")
+	}, "", testActor)
 	if err != nil {
 		t.Fatalf("create provider: %v", err)
 	}
@@ -335,7 +335,7 @@ func TestPostgresRelay_AttemptBookkeepingPersists(t *testing.T) {
 	_, svc := newPostgresRelayService(t)
 	ctx := context.Background()
 
-	pool, err := svc.CreatePool(ctx, Pool{Scope: ScopeGlobal, Name: uniqueName("bkpool"), Strategy: StrategyPriority})
+	pool, err := svc.CreatePool(ctx, Pool{Scope: ScopeGlobal, Name: uniqueName("bkpool"), Strategy: StrategyPriority}, testActor)
 	if err != nil {
 		t.Fatalf("create pool: %v", err)
 	}
@@ -343,7 +343,7 @@ func TestPostgresRelay_AttemptBookkeepingPersists(t *testing.T) {
 		PoolID: pool.ID, Scope: ScopeGlobal, Name: uniqueName("bkprov"),
 		Host: "smtp.bk.example.com", Port: 587,
 		ConnSecurity: ConnSecurityStartTLS, TLSValidation: TLSValidationStrict, Active: true,
-	}, "")
+	}, "", testActor)
 	if err != nil {
 		t.Fatalf("create provider: %v", err)
 	}
@@ -387,7 +387,7 @@ func TestPostgresRelay_NoSQLitePlaceholdersReachPostgres(t *testing.T) {
 	_, svc := newPostgresRelayService(t)
 	ctx := context.Background()
 
-	pool, err := svc.CreatePool(ctx, Pool{Scope: ScopeGlobal, Name: uniqueName("phpool"), Strategy: StrategyPriority})
+	pool, err := svc.CreatePool(ctx, Pool{Scope: ScopeGlobal, Name: uniqueName("phpool"), Strategy: StrategyPriority}, testActor)
 	if err != nil {
 		t.Fatalf("create pool: %v", err)
 	}
@@ -395,7 +395,7 @@ func TestPostgresRelay_NoSQLitePlaceholdersReachPostgres(t *testing.T) {
 		PoolID: pool.ID, Scope: ScopeGlobal, Name: uniqueName("phprov"),
 		Host: "smtp.ph.example.com", Port: 587,
 		ConnSecurity: ConnSecurityStartTLS, TLSValidation: TLSValidationStrict, Active: true,
-	}, "")
+	}, "", testActor)
 	if err != nil {
 		t.Fatalf("create provider: %v", err)
 	}

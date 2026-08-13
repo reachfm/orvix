@@ -24,6 +24,15 @@ var (
 	// provider owned by a different tenant. Configuration integrity failure;
 	// permanent, and never a direct-delivery downgrade.
 	ErrCrossTenantProvider = errors.New("relay provider belongs to another tenant")
+	// ErrCrossTenantPool signals that a provider, rule, or override
+	// referenced a pool owned by a different tenant — or that a tenant
+	// attempted to attach a provider to a platform-global pool (default
+	// deny). Configuration integrity failure; permanent.
+	ErrCrossTenantPool = errors.New("relay pool belongs to another tenant")
+	// ErrGlobalPoolRequiresPlatform signals a tenant attempting to create
+	// or use a platform-global pool. Platform-managed resources are
+	// created through the platform surface only.
+	ErrGlobalPoolRequiresPlatform = errors.New("global relay pools are platform-managed")
 	// ErrInsecureCredentialTransport signals that a provider is configured to
 	// send SMTP AUTH over a channel that is not a verified TLS session
 	// (plaintext, or opportunistic/unvalidated TLS). The credential is

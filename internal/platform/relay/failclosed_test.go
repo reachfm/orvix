@@ -25,7 +25,7 @@ func newRouteFixture(t *testing.T) (*sql.DB, *Service, *DeliveryAdapter, *Pool) 
 	db, svc := newTestService(t)
 	adapter := NewDeliveryAdapter(svc)
 	ctx := context.Background()
-	pool, err := svc.CreatePool(ctx, Pool{Scope: ScopeGlobal, Name: "p", Strategy: StrategyPriority})
+	pool, err := svc.CreatePool(ctx, Pool{Scope: ScopeGlobal, Name: "p", Strategy: StrategyPriority}, testActor)
 	if err != nil {
 		t.Fatalf("create pool: %v", err)
 	}
@@ -43,7 +43,7 @@ func mustProvider(t *testing.T, svc *Service, poolID uint, name string, opts ...
 	for _, o := range opts {
 		o(&p)
 	}
-	created, err := svc.CreateProvider(context.Background(), p, "")
+	created, err := svc.CreateProvider(context.Background(), p, "", testActor)
 	if err != nil {
 		t.Fatalf("create provider %s: %v", name, err)
 	}
@@ -102,14 +102,21 @@ func TestResolveProviderRoute_MissingProviderNeverBecomesDirect(t *testing.T) {
 }
 
 // TestResolveProviderRoute_CrossTenantProviderRejected proves a stale or
-// hostile rule cannot dial another tenant's provider.
+// hostile rule cannot dial another tenant's provider. The fixture now
+// follows the F2 ownership model: the provider lives in a pool owned by
+// tenant 42, and a delivery resolution for tenant 7 must be refused.
 func TestResolveProviderRoute_CrossTenantProviderRejected(t *testing.T) {
-	_, svc, adapter, pool := newRouteFixture(t)
-	other := mustProvider(t, svc, pool.ID, "othertenant", func(p *Provider) {
+	_, svc, adapter, _ := newRouteFixture(t)
+	ctx := context.Background()
+	otherPool, err := svc.CreatePool(ctx, Pool{Scope: ScopeTenant, TenantID: 42, Name: "t42-pool", Strategy: StrategyPriority}, testActor)
+	if err != nil {
+		t.Fatalf("create tenant-42 pool: %v", err)
+	}
+	other := mustProvider(t, svc, otherPool.ID, "othertenant", func(p *Provider) {
 		p.Scope, p.TenantID = ScopeTenant, 42
 	})
-	route, err := adapter.resolveProviderRoute(context.Background(),
-		SelectedRoute{PoolID: pool.ID, ProviderID: other.ID, Host: other.Host, Port: other.Port}, 7)
+	route, err := adapter.resolveProviderRoute(ctx,
+		SelectedRoute{PoolID: otherPool.ID, ProviderID: other.ID, Host: other.Host, Port: other.Port}, 7)
 	if !errors.Is(err, ErrCrossTenantProvider) {
 		t.Fatalf("expected ErrCrossTenantProvider, got %v", err)
 	}
@@ -128,7 +135,7 @@ func TestResolveProviderRoute_InsecureCredentialRefusedBeforeDecrypt(t *testing.
 		Host: "smtp.plain.example.com", Port: 25,
 		ConnSecurity: ConnSecurityNone, TLSValidation: TLSValidationStrict,
 		Active: true,
-	}, "a-real-password")
+	}, "a-real-password", testActor)
 	if err != nil {
 		t.Fatalf("create provider: %v", err)
 	}

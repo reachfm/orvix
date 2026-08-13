@@ -38,13 +38,13 @@ func relayError(c fiber.Ctx, err error) error {
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": err.Error()})
 	case errors.Is(err, relay.ErrRelayNameConflict):
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": err.Error()})
-	case errors.Is(err, relay.ErrCrossTenantProvider):
+	case errors.Is(err, relay.ErrCrossTenantProvider), errors.Is(err, relay.ErrCrossTenantPool), errors.Is(err, relay.ErrGlobalPoolRequiresPlatform):
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": err.Error()})
 	case errors.Is(err, relay.ErrInvalidConnSecurity),
 		errors.Is(err, relay.ErrUnsafeTarget),
 		errors.Is(err, relay.ErrNameRequired),
 		errors.Is(err, relay.ErrInsecureCredentialTransport):
-		return relayError(c, err)
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	// Field-level validation errors are safe: they name request fields, not
 	// internal state.
@@ -73,7 +73,7 @@ func (h *Handler) PostRelayPool(c fiber.Ctx) error {
 	}
 	c.Bind().JSON(&req)
 	pool := relay.Pool{Scope: relay.Scope(req.Scope), TenantID: tenantID, DomainID: req.DomainID, Name: req.Name, Strategy: relay.SelectionStrategy(req.Strategy), DirectOnly: req.DirectOnly}
-	created, err := h.relaySvc.CreatePool(c.Context(), pool)
+	created, err := h.relaySvc.CreatePool(c.Context(), pool, relayActor(c))
 	if err != nil {
 		return relayError(c, err)
 	}
@@ -84,10 +84,18 @@ func (h *Handler) PostRelayPool(c fiber.Ctx) error {
 // credential (if any) travels only in this one request body and is
 // encrypted before it is ever persisted — it is never echoed back in
 // the response.
+//
+// OWNERSHIP (F2): the provider is stamped with the authenticated
+// tenant ID — never taken from the request body — and the service
+// refuses to attach it to any pool the tenant does not own. A tenant
+// admin must not be able to inject a provider into another tenant's
+// pool (which would otherwise route that tenant's mail through the
+// attacker's SMTP server).
 func (h *Handler) PostRelayProvider(c fiber.Ctx) error {
 	if h.relaySvc == nil {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "relay service not available"})
 	}
+	tenantID, _ := auth.RequireTenantID(c)
 	var req struct {
 		PoolID          uint   `json:"pool_id"`
 		Scope           string `json:"scope"`
@@ -108,8 +116,10 @@ func (h *Handler) PostRelayProvider(c fiber.Ctx) error {
 		PoolID: req.PoolID, Scope: relay.Scope(req.Scope), Name: req.Name, Host: req.Host, Port: req.Port,
 		Username: req.Username, ConnSecurity: relay.ConnSecurity(req.ConnSecurity), TLSValidation: relay.TLSValidation(req.TLSValidation),
 		Priority: req.Priority, Weight: req.Weight, Active: req.Active, RateLimitPerMin: req.RateLimitPerMin,
+		// The tenant is taken from the authenticated request, never the body.
+		TenantID: tenantID,
 	}
-	created, err := h.relaySvc.CreateProvider(c.Context(), p, req.Password)
+	created, err := h.relaySvc.CreateProvider(c.Context(), p, req.Password, relayActor(c))
 	req.Password = "" // discard local copy immediately after use
 	if err != nil {
 		return relayError(c, err)
@@ -117,16 +127,18 @@ func (h *Handler) PostRelayProvider(c fiber.Ctx) error {
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"provider": relay.Redact(*created)})
 }
 
-// GetRelayPoolProviders handles GET /admin/relay/pools/:id/providers — redacted list.
+// GetRelayPoolProviders handles GET /admin/relay/pools/:id/providers —
+// redacted list, scoped to the authenticated tenant's own pools.
 func (h *Handler) GetRelayPoolProviders(c fiber.Ctx) error {
 	if h.relaySvc == nil {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "relay service not available"})
 	}
+	tenantID, _ := auth.RequireTenantID(c)
 	idVal, err := strconv.ParseUint(c.Params("id"), 10, 64)
 	if err != nil || idVal == 0 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid pool id"})
 	}
-	providers, err := h.relaySvc.ListProvidersRedacted(c.Context(), uint(idVal))
+	providers, err := h.relaySvc.ListPoolProvidersScoped(c.Context(), uint(idVal), tenantID)
 	if err != nil {
 		return relayError(c, err)
 	}
@@ -134,16 +146,18 @@ func (h *Handler) GetRelayPoolProviders(c fiber.Ctx) error {
 }
 
 // PostRelayProviderTest handles POST /admin/relay/providers/:id/test —
-// operator-triggered connection test. Never sends mail.
+// operator-triggered connection test, scoped to the authenticated
+// tenant's own providers. Never sends mail.
 func (h *Handler) PostRelayProviderTest(c fiber.Ctx) error {
 	if h.relaySvc == nil {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "relay service not available"})
 	}
+	tenantID, _ := auth.RequireTenantID(c)
 	idVal, err := strconv.ParseUint(c.Params("id"), 10, 64)
 	if err != nil || idVal == 0 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid provider id"})
 	}
-	result, err := h.relaySvc.TestConnection(c.Context(), uint(idVal))
+	result, err := h.relaySvc.TestConnectionScoped(c.Context(), uint(idVal), tenantID, relayActor(c))
 	if err != nil {
 		return relayError(c, err)
 	}

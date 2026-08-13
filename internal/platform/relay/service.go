@@ -561,15 +561,41 @@ func GenerateRelayCredential() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
-// CreatePool creates a routing pool.
-func (s *Service) CreatePool(ctx context.Context, p Pool) (*Pool, error) {
+// CreatePool creates a routing pool. A tenant-owned pool carries the
+// authenticated tenant ID (the tenant handler stamps it from auth
+// context); a platform-created pool (TenantID 0) is platform-managed.
+// The row, its audit entry, and its outbox event commit together.
+func (s *Service) CreatePool(ctx context.Context, p Pool, actor AuditActor) (*Pool, error) {
+	if strings.TrimSpace(p.Name) == "" {
+		return nil, ErrNameRequired
+	}
 	now := s.clock.Now()
 	p.CreatedAt, p.UpdatedAt = now, now
 	if p.Strategy == "" {
 		p.Strategy = StrategyPriority
 	}
-	if err := s.repo.CreatePool(ctx, &p); err != nil {
+	tx, err := s.repo.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "begin relay pool create", err)
+	}
+	defer tx.Rollback()
+	if err := s.repo.CreatePoolTx(ctx, tx, &p); err != nil {
 		return nil, kernel.Wrap(kernel.ErrCodeInternal, "create relay pool", err)
+	}
+	if s.outbox != nil {
+		if err := s.outbox.Enqueue(ctx, tx, "relay.pool.created", fmt.Sprintf("%d", p.ID), map[string]any{
+			"tenant_id": p.TenantID, "scope": string(p.Scope), "name": p.Name,
+		}, now); err != nil {
+			return nil, kernel.Wrap(kernel.ErrCodeInternal, "enqueue relay pool create event", err)
+		}
+	}
+	if s.audit != nil {
+		if err := s.audit.RecordTx(ctx, tx, s.auditEntry(actor, "relay.pool.create", fmt.Sprintf("relay_pool:%d", p.ID), p.TenantID, "success", "")); err != nil {
+			return nil, kernel.Wrap(kernel.ErrCodeInternal, "record relay pool create audit", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "commit relay pool create", err)
 	}
 	return &p, nil
 }
@@ -579,9 +605,33 @@ func (s *Service) CreatePool(ctx context.Context, p Pool) (*Pool, error) {
 // — the caller-supplied plaintext password never gets assigned to
 // p.SecretRef directly; it exists only as the `password` parameter
 // and is discarded after Encrypt returns.
-func (s *Service) CreateProvider(ctx context.Context, p Provider, password string) (*Provider, error) {
+//
+// OWNERSHIP (F2): the provider may join ONLY a pool owned by the same
+// tenant (p.TenantID == pool.TenantID). A tenant-owned provider cannot
+// attach to another tenant's pool or to a platform-global pool
+// (default deny); a platform-global provider (TenantID 0) cannot
+// attach to a tenant-owned pool. This closes the cross-tenant
+// provider-injection path: an injected tenant-0 provider inside a
+// tenant's pool would otherwise be treated as platform-shared and
+// route that tenant's mail through an attacker-controlled SMTP server.
+//
+// The row, its audit entry, and its outbox event commit together.
+func (s *Service) CreateProvider(ctx context.Context, p Provider, password string, actor AuditActor) (*Provider, error) {
 	if !p.ConnSecurity.IsValid() {
 		return nil, ErrInvalidConnSecurity
+	}
+	if p.PoolID == 0 {
+		return nil, kernel.ValidationError(map[string]string{"pool_id": "a target pool is required"})
+	}
+	pool, err := s.repo.GetPool(ctx, p.PoolID)
+	if err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "get relay pool", err)
+	}
+	if pool == nil {
+		return nil, ErrPoolNotFound
+	}
+	if pool.TenantID != p.TenantID {
+		return nil, ErrCrossTenantPool
 	}
 	if password != "" {
 		ref, err := s.secrets.Encrypt(password)
@@ -593,21 +643,89 @@ func (s *Service) CreateProvider(ctx context.Context, p Provider, password strin
 	now := s.clock.Now()
 	p.CreatedAt, p.UpdatedAt = now, now
 	p.CircuitState = CircuitClosed
-	if err := s.repo.CreateProvider(ctx, &p); err != nil {
+	tx, err := s.repo.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "begin relay provider create", err)
+	}
+	defer tx.Rollback()
+	if err := s.repo.CreateProviderTx(ctx, tx, &p); err != nil {
+		if kernel.IsUniqueViolation(err) {
+			return nil, ErrRelayNameConflict
+		}
 		return nil, kernel.Wrap(kernel.ErrCodeInternal, "create relay provider", err)
+	}
+	if s.outbox != nil {
+		if err := s.outbox.Enqueue(ctx, tx, "relay.provider.created", fmt.Sprintf("%d", p.ID), map[string]any{
+			"tenant_id": p.TenantID, "pool_id": p.PoolID, "scope": string(p.Scope),
+		}, now); err != nil {
+			return nil, kernel.Wrap(kernel.ErrCodeInternal, "enqueue relay provider create event", err)
+		}
+	}
+	if s.audit != nil {
+		if err := s.audit.RecordTx(ctx, tx, s.auditEntry(actor, "relay.provider.create", fmt.Sprintf("relay_provider:%d", p.ID), p.TenantID, "success", "")); err != nil {
+			return nil, kernel.Wrap(kernel.ErrCodeInternal, "record relay provider create audit", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "commit relay provider create", err)
 	}
 	return &p, nil
 }
 
 // ListProvidersRedacted returns a pool's providers with credentials
 // stripped — the only form this service ever returns to an API caller
-// or audit record.
+// or audit record. Platform surface: no ownership restriction.
 func (s *Service) ListProvidersRedacted(ctx context.Context, poolID uint) ([]RedactedProvider, error) {
 	ps, err := s.repo.ListProvidersByPool(ctx, poolID)
 	if err != nil {
 		return nil, kernel.Wrap(kernel.ErrCodeInternal, "list relay providers", err)
 	}
 	return RedactAll(ps), nil
+}
+
+// ListPoolProvidersScoped returns a pool's providers (redacted) for a
+// TENANT caller, verifying the pool belongs to that tenant first. A
+// tenant must never enumerate another tenant's relay configuration.
+func (s *Service) ListPoolProvidersScoped(ctx context.Context, poolID, tenantID uint) ([]RedactedProvider, error) {
+	pool, err := s.repo.GetPool(ctx, poolID)
+	if err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "get relay pool", err)
+	}
+	if pool == nil {
+		return nil, ErrPoolNotFound
+	}
+	if pool.TenantID != tenantID {
+		return nil, ErrCrossTenantPool
+	}
+	return s.ListProvidersRedacted(ctx, poolID)
+}
+
+// TestConnectionScoped is the TENANT-surface connection test. It
+// verifies the provider belongs to the authenticated tenant before
+// dialing anything, and records an audited outcome. A tenant must
+// never probe another tenant's relay endpoint.
+func (s *Service) TestConnectionScoped(ctx context.Context, providerID, tenantID uint, actor AuditActor) (*HealthCheckResult, error) {
+	p, err := s.repo.GetProvider(ctx, providerID)
+	if err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "get relay provider", err)
+	}
+	if p == nil {
+		return nil, ErrProviderNotFound
+	}
+	if p.TenantID != tenantID {
+		return nil, ErrCrossTenantProvider
+	}
+	result, err := s.TestConnection(ctx, providerID)
+	if err != nil {
+		return nil, err
+	}
+	if s.audit != nil {
+		if aerr := s.audit.Record(ctx, s.auditEntry(actor, "relay.provider.test", fmt.Sprintf("relay_provider:%d", providerID), tenantID,
+			map[bool]string{true: "success", false: "failed"}[result.Connected], "")); aerr != nil {
+			return nil, kernel.Wrap(kernel.ErrCodeInternal, "record relay provider test audit", aerr)
+		}
+	}
+	return result, nil
 }
 
 // decryptCredential is the ONLY place in this package a plaintext
@@ -859,6 +977,13 @@ func (s *Service) SelectRoute(ctx context.Context, req RouteRequest) (*SelectedR
 	}
 	if pool == nil {
 		return nil, ErrPoolNotFound
+	}
+	// POOL VISIBILITY (F2): a pool owned by another tenant must never be
+	// selected for this tenant's traffic, even when a legacy rule or
+	// override row references it. Tenant-0 pools are platform-managed and
+	// globally usable; a tenant-owned pool is usable only by its owner.
+	if pool.TenantID != 0 && req.TenantID != 0 && pool.TenantID != req.TenantID {
+		return nil, ErrCrossTenantPool
 	}
 	if pool.DirectOnly {
 		return &SelectedRoute{PoolID: pool.ID, Direct: true}, nil

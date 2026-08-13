@@ -115,6 +115,27 @@ func (a *DeliveryAdapter) resolveProviderRoute(ctx context.Context, route Select
 		return nil, ErrCrossTenantProvider
 	}
 
+	// POOL-OWNERSHIP RE-CHECK (F2): a provider may serve only the pool it
+	// belongs to — provider.TenantID must equal pool.TenantID. This closes
+	// the cross-tenant provider-injection shape at the delivery boundary
+	// even for rows created before the API-side fix: a legacy tenant-0
+	// provider injected into a tenant-owned pool would otherwise be treated
+	// as platform-shared and carry that tenant's mail through an
+	// attacker-controlled SMTP endpoint. A mismatch is a configuration
+	// integrity failure — permanent, never a direct-delivery downgrade.
+	if provider.PoolID != 0 {
+		pool, perr := a.svc.repo.GetPool(ctx, provider.PoolID)
+		if perr != nil {
+			return nil, ErrProviderUnavailable
+		}
+		if pool == nil {
+			return nil, ErrProviderNotFound
+		}
+		if pool.TenantID != provider.TenantID {
+			return nil, ErrCrossTenantProvider
+		}
+	}
+
 	// Validate the destination BEFORE decrypting the credential, so an unsafe
 	// host never causes the secret to exist in memory. (Hostnames resolving
 	// to internal addresses are additionally refused by the validating dialer
