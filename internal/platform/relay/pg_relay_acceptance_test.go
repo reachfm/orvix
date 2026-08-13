@@ -217,8 +217,14 @@ func TestPostgresRelay_ProviderMembershipAndSelection(t *testing.T) {
 
 	const tenant = uint(41)
 	const domainID = uint(9)
+	// The rule selectors must be UNIQUE per run (F8): a reused database
+	// retains rules from prior runs, and identical selectors break the
+	// precedence tie by lowest ID — a leftover rule would win and point
+	// selection at an earlier run's pool. A per-run sender pattern makes
+	// every run's rule the only match for its own sender.
+	uniqueSender := "billing@" + uniqueName("acme") + ".test"
 	if _, err := svc.CreateRoutingRule(ctx, RoutingRule{
-		TenantID: tenant, DomainID: domainID, SenderPattern: "billing@acme.test",
+		TenantID: tenant, DomainID: domainID, SenderPattern: uniqueSender,
 		PoolID: pool.ID, Priority: 1,
 	}, testActor); err != nil {
 		t.Fatalf("create rule: %v", err)
@@ -227,7 +233,7 @@ func TestPostgresRelay_ProviderMembershipAndSelection(t *testing.T) {
 	// The matching sender routes through the pool.
 	got, err := svc.SelectRoute(ctx, RouteRequest{
 		TenantID: tenant, DomainID: domainID,
-		SenderAddress: "billing@acme.test", SenderDomain: "acme.test",
+		SenderAddress: uniqueSender, SenderDomain: "acme.test",
 		RecipientDomain: "dest.test",
 	})
 	if err != nil {
@@ -256,7 +262,7 @@ func TestPostgresRelay_ProviderMembershipAndSelection(t *testing.T) {
 	// CROSS-TENANT: another tenant must not pick up this tenant's rule.
 	foreign, err := svc.SelectRoute(ctx, RouteRequest{
 		TenantID: tenant + 1, DomainID: domainID,
-		SenderAddress: "billing@acme.test", SenderDomain: "acme.test",
+		SenderAddress: uniqueSender, SenderDomain: "acme.test",
 		RecipientDomain: "dest.test",
 	})
 	if err != nil {
