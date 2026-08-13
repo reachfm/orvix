@@ -359,7 +359,13 @@ test.describe("Orvix admin portal E2E", () => {
     const platformNav: { label: string; heading: string | RegExp }[] = [
       { label: "Organizations", heading: /organizations/i },
       { label: "Summary", heading: "Platform Summary" },
-      { label: "Mail Operations", heading: /mail operations/i },
+      // The sidebar button is labelled "Mail Queue" (App.tsx nav table);
+      // "Mail Operations" is the PAGE heading, which the heading assertion
+      // below still checks. Selecting by the page heading text as if it were
+      // the nav label matched no button, so the step hung until the 120s
+      // test timeout. Both halves are asserted: the real nav control is
+      // clicked, and the page it opens must show the Mail Operations heading.
+      { label: "Mail Queue", heading: /mail operations/i },
       { label: "Reliability", heading: /reliability/i },
       { label: "Health", heading: /health|runtime|system/i },
       { label: "Security", heading: /security/i },
