@@ -736,6 +736,12 @@ func (w *DeliveryWorker) deliverRemote(ctx context.Context, entry *queue.QueueEn
 
 		// Direct delivery happens ONLY when routing explicitly selected it.
 		if !decision.Route.Direct {
+			// A worker with no mail store cannot load the message. This was
+			// an unguarded dereference, so a misconfigured worker panicked
+			// its goroutine mid-delivery instead of deferring the message.
+			if w.MailStore == nil {
+				return &DeliveryResult{StatusMsg: "message store unavailable; delivery deferred", TempFail: true}
+			}
 			msg, data, err := w.MailStore.LoadMessageByMessageID(ctx, entry.MessageID)
 			if err != nil {
 				return &DeliveryResult{StatusMsg: fmt.Sprintf("load message: %v", err), TempFail: false}
@@ -744,53 +750,7 @@ func (w *DeliveryWorker) deliverRemote(ctx context.Context, entry *queue.QueueEn
 				return &DeliveryResult{StatusMsg: "message not found", TempFail: false}
 			}
 			data = w.signWithDKIM(ctx, data, entry)
-
-			// Walk the primary route then each fallback IN ORDER, within
-			// this same delivery attempt (C). The chain is already
-			// deduplicated and scope-checked by the relay service.
-			chain := make([]*RelayRoute, 0, 1+len(decision.Fallbacks))
-			chain = append(chain, decision.Route)
-			for i := range decision.Fallbacks {
-				chain = append(chain, &decision.Fallbacks[i])
-			}
-
-			var lastRelay *DeliveryResult
-			for _, route := range chain {
-				relayResult := w.RelaySelector.Deliver(ctx, route, entry.FromAddress, []string{entry.ToAddress}, data)
-				// Bookkeeping must never change the delivery outcome: the
-				// SMTP transaction has already happened. Record the error
-				// rather than discarding it (I), but do not re-deliver.
-				if rerr := w.RelaySelector.RecordAttemptResult(ctx, route.ProviderID, relayResult.Success); rerr != nil {
-					// (I) Surfaced, never silently discarded — but it must
-					// NOT change the delivery outcome: the SMTP transaction
-					// already happened, and retrying to repair local metrics
-					// would duplicate the recipient's message.
-					if w.RelayBookkeepingFailed != nil {
-						w.RelayBookkeepingFailed(ctx, route.ProviderID, relayResult.Success, rerr)
-					}
-				}
-				result := &DeliveryResult{
-					Success: relayResult.Success, TempFail: relayResult.TempFail,
-					StatusMsg: relayResult.StatusMsg, RemoteHost: route.Host,
-				}
-				if result.Success || !result.TempFail {
-					// Success, or a PERMANENT failure: a permanent rejection
-					// is a policy/content decision that another provider
-					// would also reject, so the chain stops here.
-					return result
-				}
-				lastRelay = result
-			}
-
-			// Every provider in the chain temp-failed. This does NOT fall
-			// through to direct-to-MX: policy selected a relay, and quietly
-			// bypassing it would send the message out an unauthorised path
-			// with none of the relay's guarantees. Defer instead.
-			if lastRelay == nil {
-				lastRelay = &DeliveryResult{StatusMsg: "relay chain produced no result", TempFail: true}
-			}
-			lastRelay.TempFail = true
-			return lastRelay
+			return w.deliverViaRelayChain(ctx, entry, decision, data)
 		}
 	}
 
@@ -891,4 +851,60 @@ func hasExplicitPort(host string) bool {
 	}
 	_, err := strconv.Atoi(host[colon+1:])
 	return err == nil
+}
+
+// deliverViaRelayChain walks the primary route and then each fallback IN ORDER
+// within a single delivery attempt (C).
+//
+// It is a named method rather than an inline block so the chain semantics -
+// ordering, stop conditions, bookkeeping, and the refusal to fall through to
+// direct delivery - can be tested directly, without standing up a mail store.
+//
+// The chain arrives already deduplicated, bounded and tenant-scope checked by
+// the relay service; this function does not re-derive it, it executes it
+// faithfully.
+func (w *DeliveryWorker) deliverViaRelayChain(ctx context.Context, entry *queue.QueueEntry, decision *RelayRouteDecision, data []byte) *DeliveryResult {
+	chain := make([]*RelayRoute, 0, 1+len(decision.Fallbacks))
+	chain = append(chain, decision.Route)
+	for i := range decision.Fallbacks {
+		chain = append(chain, &decision.Fallbacks[i])
+	}
+
+	var lastRelay *DeliveryResult
+	for _, route := range chain {
+		relayResult := w.RelaySelector.Deliver(ctx, route, entry.FromAddress, []string{entry.ToAddress}, data)
+
+		// (I) A bookkeeping failure is surfaced, never silently discarded -
+		// but it must NOT change the delivery outcome. The SMTP transaction
+		// has already completed; retrying to repair local circuit-breaker
+		// metrics would deliver the recipient a second copy of the message.
+		if rerr := w.RelaySelector.RecordAttemptResult(ctx, route.ProviderID, relayResult.Success); rerr != nil {
+			if w.RelayBookkeepingFailed != nil {
+				w.RelayBookkeepingFailed(ctx, route.ProviderID, relayResult.Success, rerr)
+			}
+		}
+
+		result := &DeliveryResult{
+			Success: relayResult.Success, TempFail: relayResult.TempFail,
+			StatusMsg: relayResult.StatusMsg, RemoteHost: route.Host,
+		}
+		if result.Success || !result.TempFail {
+			// Success, or a PERMANENT failure: a permanent rejection is a
+			// policy/content decision that another provider would also
+			// reject, so the chain stops here rather than re-offering the
+			// same message to every remaining relay.
+			return result
+		}
+		lastRelay = result
+	}
+
+	// Every provider in the chain temp-failed. This does NOT fall through to
+	// direct-to-MX: policy selected a relay, and quietly bypassing it would
+	// send the message out an unauthorised path with none of the relay's
+	// compliance, egress-IP, SSRF or TLS guarantees. Defer instead.
+	if lastRelay == nil {
+		lastRelay = &DeliveryResult{StatusMsg: "relay chain produced no result", TempFail: true}
+	}
+	lastRelay.TempFail = true
+	return lastRelay
 }

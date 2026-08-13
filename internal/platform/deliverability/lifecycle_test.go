@@ -645,15 +645,29 @@ func TestSuppressionEnforcement_RealDeliveryWorker(t *testing.T) {
 		t.Fatal("expired suppression must no longer block")
 	}
 
-	// 7. Store unavailable → fails OPEN (documented): the worker only
-	// blocks when the check returns suppressed with no error.
+	// 7. Store unavailable → fails CLOSED.
+	//
+	// This step previously asserted the OPPOSITE ("store failure must fail
+	// open (delivery proceeds)"), documenting the Fix H defect as intended
+	// behaviour. Failing open here delivers mail to every hard-bounced,
+	// complained, or legally suppressed recipient on the list — precisely the
+	// recipients suppression exists to protect, and precisely when the
+	// platform's sending reputation is most at risk. The delivery is now
+	// deferred so it retries once the store recovers: nothing is bounced and
+	// nothing is delivered blind.
 	closed := &delivery.DeliveryWorker{
 		Resolver:           resolver,
 		SuppressionChecker: failingChecker{err: fmt.Errorf("store unavailable")},
 	}
 	res = workerDeliverRemote(t, closed, entry("blocked@blocked.test"))
-	if res.StatusMsg == "recipient is suppressed" {
-		t.Fatal("store failure must fail open (delivery proceeds), never silently block")
+	if res.Success {
+		t.Fatal("an unavailable suppression store must never deliver")
+	}
+	if !res.TempFail {
+		t.Fatalf("an unavailable suppression store must DEFER (temp fail), got %+v", res)
+	}
+	if res.StatusMsg != "suppression check unavailable; delivery deferred" {
+		t.Fatalf("expected the stable deferral message, got %q", res.StatusMsg)
 	}
 
 	_ = db
