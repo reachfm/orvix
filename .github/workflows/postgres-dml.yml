@@ -193,3 +193,70 @@ jobs:
             fi
             grep -q -- "--- PASS: ${name}" "$out" || { echo "::error::missing PASS for ${name} against PostgreSQL" >&2; exit 1; }
           done
+
+      # ── Phase 3A acceptance: relay fail-closed hardening (Fix F) ─────────
+      #
+      # Fix F was a PostgreSQL-ONLY class of defect. `id, _ := res.LastInsertId()`
+      # is supported on SQLite and UNSUPPORTED on PostgreSQL, and the error was
+      # discarded — so routing rules and emergency overrides created on the
+      # shipping dialect came back with ID 0. A rule could not be addressed for
+      # update or delete, and an emergency override could never be revoked by
+      # id, which is the one operation an emergency control must always
+      # support. No SQLite run could observe any of it.
+      #
+      # These steps execute the relay acceptance suite against the real
+      # PostgreSQL 16 service and FAIL if any mandatory test merely SKIPS — a
+      # skipped acceptance test proves nothing, and a silently skipped suite is
+      # how this class of defect reached production in the first place.
+      - name: Relay PostgreSQL acceptance tests (Phase 3A Fix F)
+        run: |
+          set -euo pipefail
+          out="$(mktemp)"
+          go test ./internal/platform/relay/... -run 'TestPostgresRelay' -count=1 -timeout 300s -v | tee "$out"
+          for name in \
+            TestPostgresRelay_RoutingRuleCreateReturnsRealID \
+            TestPostgresRelay_OverrideLifecycle \
+            TestPostgresRelay_OverrideExpiry \
+            TestPostgresRelay_ProviderMembershipAndSelection \
+            TestPostgresRelay_CircuitStateAndRateLimitPersist \
+            TestPostgresRelay_AttemptBookkeepingPersists \
+            TestPostgresRelay_NoSQLitePlaceholdersReachPostgres \
+            TestPostgresRelay_SchemaIsIdempotent \
+            TestPostgresRelayAdmin_CreateReturnsIDWithoutLastInsertId \
+            TestPostgresRelayAdmin_GuardedTransitionsAndVersion; do
+            if grep -q -- "--- SKIP: ${name}" "$out"; then
+              echo "::error::${name} SKIPPED; the PostgreSQL environment is not wired correctly" >&2
+              exit 1
+            fi
+            grep -q -- "--- PASS: ${name}" "$out" || { echo "::error::missing PASS for ${name} against PostgreSQL" >&2; exit 1; }
+          done
+
+      # The relay fail-closed and credential-transport suites are dialect
+      # independent, but they gate the same code paths the PostgreSQL steps
+      # above exercise. Running them here keeps a PostgreSQL-only regression
+      # from being masked by a green SQLite-only run elsewhere.
+      - name: Relay fail-closed and credential-transport suites
+        run: |
+          set -euo pipefail
+          out="$(mktemp)"
+          PGHOST= ORVIX_RUN_POSTGRES_DML_TEST= go test ./internal/platform/relay/... \
+            -run 'SelectRoute|ResolveProviderRoute|RuleMatches|MatchRule|SenderPattern|FallbackChain|AuthOver|DeliverAuthenticated|ValidateCredentialTransport|StartTLSDowngrade' \
+            -count=1 -timeout 300s -v | tee "$out"
+          grep -q -- "--- FAIL" "$out" && { echo "::error::relay fail-closed suite failed" >&2; exit 1; }
+          grep -q -- "--- PASS: TestAuthOverVerifiedTLS_Succeeds" "$out" || { echo "::error::verified-TLS positive control did not run" >&2; exit 1; }
+          grep -q -- "--- PASS: TestAuthOverPlaintext_RefusedAndCredentialNeverSent" "$out" || { echo "::error::plaintext-AUTH refusal did not run" >&2; exit 1; }
+
+      - name: Delivery worker fail-closed suite (Fixes A, C, H, I)
+        run: |
+          set -euo pipefail
+          out="$(mktemp)"
+          PGHOST= ORVIX_RUN_POSTGRES_DML_TEST= go test ./internal/coremail/delivery/... -run 'TestDeliverRemote_' -count=1 -timeout 300s -v | tee "$out"
+          for name in \
+            TestDeliverRemote_SuppressionStoreFailureDefersAndNeverDelivers \
+            TestDeliverRemote_RouteSelectionErrorDefersNeverDirect \
+            TestDeliverRemote_NilDecisionDefersNeverDirect \
+            TestDeliverRemote_WalksFallbackChainInOrder \
+            TestDeliverRemote_ExhaustedChainDefersNeverDirect \
+            TestDeliverRemote_BookkeepingFailureNeverRedelivers; do
+            grep -q -- "--- PASS: ${name}" "$out" || { echo "::error::missing PASS for ${name}" >&2; exit 1; }
+          done

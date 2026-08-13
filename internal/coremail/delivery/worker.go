@@ -60,7 +60,34 @@ type DeliveryWorker struct {
 	// queue entry, since QueueEntry alone doesn't carry a tenant ID.
 	// nil disables relay selection even if RelaySelector is set (fails
 	// safe to direct delivery, never to a misrouted relay).
-	TenantIDForRelay func(entry *queue.QueueEntry) (tenantID uint, senderMailAccessMode string)
+	//
+	// FAIL-CLOSED (F3): a non-nil error means the identity could not be
+	// established (database unavailable, timeout, malformed or
+	// inconsistent identity). The worker MUST defer — it must never
+	// fabricate tenant 0 + "internal_external" on an infrastructure
+	// failure, because that would bypass tenant-scoped relay rules and
+	// the internal-only policy during a partial outage.
+	TenantIDForRelay func(ctx context.Context, entry *queue.QueueEntry) (tenantID uint, senderMailAccessMode string, err error)
+
+	// DomainIDForRelay resolves the SENDING domain's row id for a queue
+	// entry. Domain-scoped routing rules match on this id, so without it a
+	// domain rule can never match and domain-specific routing is silently
+	// ignored. nil means "unknown" (0), which routing treats as
+	// "matches no domain-scoped rule" — never as "matches any". A
+	// non-nil error defers delivery (F3), same as TenantIDForRelay.
+	DomainIDForRelay func(ctx context.Context, entry *queue.QueueEntry) (uint, error)
+
+	// RelayBookkeepingFailed is invoked when circuit-breaker/attempt
+	// bookkeeping could not be persisted after a relay delivery.
+	//
+	// The SMTP transaction has ALREADY completed at that point, so the
+	// delivery is deliberately NOT retried: re-delivering to fix local
+	// metrics would send the recipient a duplicate message. The failure is
+	// surfaced here instead of being discarded, so the runtime can route it
+	// to a durable reconciliation path or an operator alert. nil means the
+	// deployment has not wired one — the error is still never swallowed
+	// silently inside the delivery decision, it simply has nowhere to go.
+	RelayBookkeepingFailed func(ctx context.Context, providerID uint, success bool, err error)
 
 	// SuppressionChecker is the optional deliverability control plane
 	// (internal/platform/deliverability, Milestone 9). nil preserves
@@ -199,7 +226,10 @@ func (w *DeliveryWorker) deliver(ctx context.Context, entry *queue.QueueEntry) e
 	if w.DeliverabilityRecorder != nil && !isLocal {
 		var tenantID uint
 		if w.TenantIDForRelay != nil {
-			tenantID, _ = w.TenantIDForRelay(entry)
+			// Delivery has already completed; an identity failure here only
+			// degrades metrics attribution, never blocks the outcome.
+			tid, _, _ := w.TenantIDForRelay(ctx, entry)
+			tenantID = tid
 		}
 		w.DeliverabilityRecorder.RecordOutcome(ctx, entry, tenantID, result.RemoteHost, result, attemptNumber)
 	}
@@ -247,7 +277,7 @@ func (w *DeliveryWorker) deliver(ctx context.Context, entry *queue.QueueEntry) e
 			recipientEmail := strings.TrimSpace(entry.ToAddress)
 			w.PushNotifier.NotifyMailboxMessage(ctx, *entry.MailboxID, entry.MessageID, entry.FromAddress, subject, recipientEmail)
 		}
-		return w.Queue.AckDelivered(ctx, entry.ID)
+		return w.Queue.AckDeliveredForOwner(ctx, entry.ID, w.WorkerID)
 
 	case DecisionRetry:
 		w.emitAudit(ctx, entry, EventDeferred, result)
@@ -359,7 +389,10 @@ func (w *DeliveryWorker) recordDeliverabilityOutcome(ctx context.Context, entry 
 	}
 	var tenantID uint
 	if w.TenantIDForRelay != nil {
-		tenantID, _ = w.TenantIDForRelay(entry)
+		// Post-outcome metrics attribution only; identity failure degrades
+		// attribution, never the already-completed delivery.
+		tid, _, _ := w.TenantIDForRelay(ctx, entry)
+		tenantID = tid
 	}
 	w.DeliverabilityRecorder.RecordOutcome(ctx, entry, tenantID, result.RemoteHost, result, attemptNumber)
 }
@@ -644,9 +677,34 @@ func (w *DeliveryWorker) deliverRemote(ctx context.Context, entry *queue.QueueEn
 	if w.SuppressionChecker != nil {
 		var tenantID uint
 		if w.TenantIDForRelay != nil {
-			tenantID, _ = w.TenantIDForRelay(entry)
+			tid, _, idErr := w.TenantIDForRelay(ctx, entry)
+			if idErr != nil {
+				// FAIL CLOSED (F3): the suppression check cannot be scoped
+				// without the sender identity. Deferring is the only safe
+				// answer — delivering "somewhere" without knowing the tenant
+				// could bypass a suppression that tenant configured.
+				return &DeliveryResult{StatusMsg: "sender identity unavailable; suppression check deferred", TempFail: true}
+			}
+			tenantID = tid
 		}
-		if suppressed, err := w.SuppressionChecker.IsSuppressed(ctx, tenantID, entry.ToAddress); err == nil && suppressed {
+		suppressed, serr := w.SuppressionChecker.IsSuppressed(ctx, tenantID, entry.ToAddress)
+		switch {
+		case serr != nil:
+			// FAIL CLOSED (H). The previous condition was
+			// `err == nil && suppressed`, so a suppression-store outage
+			// silently answered "not suppressed" and the message was
+			// delivered — to an address that hard-bounced or filed a
+			// complaint. That is how a sending reputation is destroyed and
+			// how a recipient who asked never to be contacted again is
+			// contacted again.
+			//
+			// An infrastructure failure is temporary, so defer for a later
+			// attempt rather than permanently rejecting a message that is
+			// probably deliverable once the store recovers. The recipient
+			// address is deliberately absent from the status text, which
+			// travels into logs and bounce messages.
+			return &DeliveryResult{StatusMsg: "suppression check unavailable; delivery deferred", TempFail: true}
+		case suppressed:
 			return &DeliveryResult{StatusMsg: "recipient is suppressed", TempFail: false}
 		}
 	}
@@ -665,10 +723,59 @@ func (w *DeliveryWorker) deliverRemote(ctx context.Context, entry *queue.QueueEn
 	// when no selector is wired, so this integration cannot regress
 	// the no-relay-configured case.
 	if w.RelaySelector != nil && w.TenantIDForRelay != nil {
-		tenantID, accessMode := w.TenantIDForRelay(entry)
+		tenantID, accessMode, idErr := w.TenantIDForRelay(ctx, entry)
+		// FAIL CLOSED (F3): a sender identity that cannot be resolved must
+		// never fall through to direct-to-MX with an anonymous permissive
+		// default. The previous wiring returned tenant 0 + "internal_external"
+		// on every database error, which silently bypassed tenant-scoped
+		// relay rules and the internal-only policy during partial outages.
+		if idErr != nil {
+			return &DeliveryResult{StatusMsg: "sender identity unavailable; delivery deferred", TempFail: true}
+		}
 		senderDomain := extractDomainFromAddress(entry.FromAddress)
-		route, rerr := w.RelaySelector.SelectRoute(ctx, tenantID, senderDomain, accessMode, domain, int64(entry.ID))
-		if rerr == nil && route != nil && !route.Direct {
+		var domainID uint
+		if w.DomainIDForRelay != nil {
+			dID, dErr := w.DomainIDForRelay(ctx, entry)
+			if dErr != nil {
+				return &DeliveryResult{StatusMsg: "sender identity unavailable; delivery deferred", TempFail: true}
+			}
+			domainID = dID
+		}
+		decision, rerr := w.RelaySelector.SelectRoute(ctx, RelayRouteRequest{
+			TenantID:             tenantID,
+			SenderAddress:        entry.FromAddress,
+			SenderDomain:         senderDomain,
+			DomainID:             domainID,
+			SenderMailAccessMode: accessMode,
+			RecipientDomain:      domain,
+			Seed:                 int64(entry.ID),
+		})
+
+		// FAIL CLOSED (A). Previously any selector error simply skipped this
+		// whole block and fell through to direct-to-MX, so a database
+		// outage, a missing provider, a decryption failure, an unsafe
+		// target, or an expired override silently downgraded a MANDATORY
+		// relay route to unauthenticated direct delivery — defeating
+		// compliance routing, egress-IP policy and the relay's own SSRF and
+		// TLS protections. Routing that cannot be determined defers.
+		if rerr != nil {
+			return &DeliveryResult{StatusMsg: "relay routing unavailable; delivery deferred", TempFail: true}
+		}
+		if decision == nil || decision.Route == nil {
+			// A nil decision without an error is a contract violation by the
+			// selector. Refusing is the only safe reading: we cannot know
+			// whether policy required a relay.
+			return &DeliveryResult{StatusMsg: "relay routing returned no decision; delivery deferred", TempFail: true}
+		}
+
+		// Direct delivery happens ONLY when routing explicitly selected it.
+		if !decision.Route.Direct {
+			// A worker with no mail store cannot load the message. This was
+			// an unguarded dereference, so a misconfigured worker panicked
+			// its goroutine mid-delivery instead of deferring the message.
+			if w.MailStore == nil {
+				return &DeliveryResult{StatusMsg: "message store unavailable; delivery deferred", TempFail: true}
+			}
 			msg, data, err := w.MailStore.LoadMessageByMessageID(ctx, entry.MessageID)
 			if err != nil {
 				return &DeliveryResult{StatusMsg: fmt.Sprintf("load message: %v", err), TempFail: false}
@@ -677,21 +784,7 @@ func (w *DeliveryWorker) deliverRemote(ctx context.Context, entry *queue.QueueEn
 				return &DeliveryResult{StatusMsg: "message not found", TempFail: false}
 			}
 			data = w.signWithDKIM(ctx, data, entry)
-			relayResult := w.RelaySelector.Deliver(ctx, route, entry.FromAddress, []string{entry.ToAddress}, data)
-			w.RelaySelector.RecordAttemptResult(ctx, route.ProviderID, relayResult.Success)
-			result := &DeliveryResult{
-				Success: relayResult.Success, TempFail: relayResult.TempFail,
-				StatusMsg: relayResult.StatusMsg, RemoteHost: route.Host,
-			}
-			if result.Success || !result.TempFail {
-				return result
-			}
-			// Relay failed with a temp error — fall through to
-			// direct-to-MX rather than giving up on one provider's
-			// transient failure. (The selector's own fallback chain
-			// governs which PROVIDER Deliver dials; a temp failure
-			// after exhausting that chain still has direct delivery as
-			// a last resort here.)
+			return w.deliverViaRelayChain(ctx, entry, decision, data)
 		}
 	}
 
@@ -792,4 +885,72 @@ func hasExplicitPort(host string) bool {
 	}
 	_, err := strconv.Atoi(host[colon+1:])
 	return err == nil
+}
+
+// deliverViaRelayChain walks the primary route and then each fallback IN ORDER
+// within a single delivery attempt (C).
+//
+// It is a named method rather than an inline block so the chain semantics -
+// ordering, stop conditions, bookkeeping, and the refusal to fall through to
+// direct delivery - can be tested directly, without standing up a mail store.
+//
+// The chain arrives already deduplicated, bounded and tenant-scope checked by
+// the relay service; this function does not re-derive it, it executes it
+// faithfully.
+func (w *DeliveryWorker) deliverViaRelayChain(ctx context.Context, entry *queue.QueueEntry, decision *RelayRouteDecision, data []byte) *DeliveryResult {
+	chain := make([]*RelayRoute, 0, 1+len(decision.Fallbacks))
+	chain = append(chain, decision.Route)
+	for i := range decision.Fallbacks {
+		chain = append(chain, &decision.Fallbacks[i])
+	}
+
+	var lastRelay *DeliveryResult
+	for _, route := range chain {
+		relayResult := w.RelaySelector.Deliver(ctx, route, entry.FromAddress, []string{entry.ToAddress}, data)
+
+		// (I) A bookkeeping failure is surfaced, never silently discarded -
+		// but it must NOT change the delivery outcome. The SMTP transaction
+		// has already completed; retrying to repair local circuit-breaker
+		// metrics would deliver the recipient a second copy of the message.
+		if rerr := w.RelaySelector.RecordAttemptResult(ctx, route.ProviderID, relayResult.Success); rerr != nil {
+			if w.RelayBookkeepingFailed != nil {
+				w.RelayBookkeepingFailed(ctx, route.ProviderID, relayResult.Success, rerr)
+			}
+		}
+
+		result := &DeliveryResult{
+			Success: relayResult.Success, TempFail: relayResult.TempFail,
+			StatusMsg: relayResult.StatusMsg, RemoteHost: route.Host,
+		}
+		if relayResult.Ambiguous {
+			// F6: the payload was sent (including the terminating dot) but
+			// the final response was never read. The recipient MAY have
+			// received the message, so the chain STOPS here: re-offering
+			// the same message to a fallback provider could deliver a
+			// duplicate copy. The message is deferred for controlled
+			// reconciliation, and the explicit status text tells the
+			// operator the outcome is unknown — never that it failed
+			// cleanly.
+			result.StatusMsg = "relay delivery outcome ambiguous; recipient may have received the message"
+			return result
+		}
+		if result.Success || !result.TempFail {
+			// Success, or a PERMANENT failure: a permanent rejection is a
+			// policy/content decision that another provider would also
+			// reject, so the chain stops here rather than re-offering the
+			// same message to every remaining relay.
+			return result
+		}
+		lastRelay = result
+	}
+
+	// Every provider in the chain temp-failed. This does NOT fall through to
+	// direct-to-MX: policy selected a relay, and quietly bypassing it would
+	// send the message out an unauthorised path with none of the relay's
+	// compliance, egress-IP, SSRF or TLS guarantees. Defer instead.
+	if lastRelay == nil {
+		lastRelay = &DeliveryResult{StatusMsg: "relay chain produced no result", TempFail: true}
+	}
+	lastRelay.TempFail = true
+	return lastRelay
 }

@@ -52,10 +52,24 @@ func newPostgresRelayService(t *testing.T) (*sql.DB, *Service) {
 	return db, svc
 }
 
+// pgCreate returns a create input with a name unique to this run.
+//
+// baseCreate() uses a FIXED name, which is safe for the SQLite suites because
+// each builds a fresh in-memory database. The PostgreSQL suites share one
+// database, and platform_relay_providers carries a unique index on
+// (scope, tenant_id, domain_id, name) — so two tests using baseCreate()
+// collide with ErrRelayNameConflict. That collision was invisible until the
+// Phase 3A workflow step began executing these tests in CI for the first time.
+func pgCreate() RelayCreateInput {
+	in := baseCreate()
+	in.Name = uniqueName(in.Name)
+	return in
+}
+
 func TestPostgresRelayAdmin_CreateReturnsIDWithoutLastInsertId(t *testing.T) {
 	db, svc := newPostgresRelayService(t)
 	ctx := context.Background()
-	r, err := svc.CreateRelay(ctx, baseCreate(), testActor)
+	r, err := svc.CreateRelay(ctx, pgCreate(), testActor)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -81,7 +95,7 @@ func TestPostgresRelayAdmin_CreateReturnsIDWithoutLastInsertId(t *testing.T) {
 func TestPostgresRelayAdmin_GuardedTransitionsAndVersion(t *testing.T) {
 	_, svc := newPostgresRelayService(t)
 	ctx := context.Background()
-	r, err := svc.CreateRelay(ctx, baseCreate(), testActor)
+	r, err := svc.CreateRelay(ctx, pgCreate(), testActor)
 	if err != nil {
 		t.Fatal(err)
 	}

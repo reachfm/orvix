@@ -4,8 +4,11 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"strings"
@@ -67,13 +70,31 @@ func (s *Service) TestConnection(ctx context.Context, providerID uint) (*HealthC
 	if err := ValidateRelayTarget(p.Host, p.Port); err != nil {
 		return &HealthCheckResult{Error: redactHealthError("unsafe relay target: " + err.Error())}, nil
 	}
+	// (D) TestConnection follows the SAME credential-transport policy as real
+	// delivery. Without this, an operator could "successfully" test a provider
+	// configured for cleartext or opportunistic AUTH — leaking the credential
+	// on an operator-triggered action, and reporting a green result for a
+	// configuration that real delivery would refuse. The credential is not
+	// decrypted at all on this path.
+	if err := ValidateCredentialTransport(*p); err != nil {
+		res := &HealthCheckResult{Error: "refusing SMTP AUTH without verified TLS"}
+		_ = s.repo.SetTestResult(ctx, providerID, s.clock.Now(), "insecure_credential_transport", p.Version)
+		return res, nil
+	}
 	password, err := s.decryptCredential(*p)
 	if err != nil {
 		return &HealthCheckResult{Error: "credential decrypt failed"}, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, totalTestTimeout)
 	defer cancel()
-	result := dialAndTest(ctx, newValidatingDialer(), *p, password)
+	result := dialAndTest(ctx, newValidatingDialer(), *p, password, nil)
+	// Persisting the last-test summary is a convenience for the admin UI, not
+	// a security control: the authoritative evidence of who ran the test and
+	// what happened is the audit entry written by TestRelay, whose failure IS
+	// reported. This statement is version-guarded, so a concurrent edit of the
+	// provider makes it affect zero rows; that is a benign race, not a lost
+	// security record, and failing the operator's connection test over it
+	// would be actively unhelpful.
 	_ = s.repo.SetTestResult(ctx, providerID, s.clock.Now(), testResultSummary(result), p.Version)
 	return result, nil
 }
@@ -101,17 +122,21 @@ func testResultSummary(r *HealthCheckResult) string {
 	}
 }
 
-func dialAndTest(ctx context.Context, d dialer, p Provider, password string) *HealthCheckResult {
+func dialAndTest(ctx context.Context, d dialer, p Provider, password string, roots *x509.CertPool) *HealthCheckResult {
 	start := time.Now()
 	result := &HealthCheckResult{}
-	conn, reader, err := connectAndAuth(ctx, d, p, password, result)
+	conn, reader, err := connectAndAuth(ctx, d, p, password, result, roots)
 	if err != nil {
 		result.Error = redactHealthError(result.Error)
 		result.DurationMS = time.Since(start).Milliseconds()
 		return result
 	}
 	defer conn.Close()
-	_, _ = smtpCommand(conn, reader, "QUIT")
+	deadline := time.Now().Add(totalTestTimeout)
+	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
+		deadline = dl
+	}
+	_, _ = smtpCommand(conn, reader, "QUIT", deadline)
 	result.Error = redactHealthError(result.Error)
 	result.DurationMS = time.Since(start).Milliseconds()
 	return result
@@ -122,7 +147,7 @@ func dialAndTest(ctx context.Context, d dialer, p Provider, password string) *He
 // the real Deliver path — one implementation of the handshake, so the
 // two can never drift (a health check that passes but a delivery that
 // fails the same handshake would be a trap for operators).
-func connectAndAuth(ctx context.Context, d dialer, p Provider, password string, result *HealthCheckResult) (net.Conn, *bufio.Reader, error) {
+func connectAndAuth(ctx context.Context, d dialer, p Provider, password string, result *HealthCheckResult, roots *x509.CertPool) (net.Conn, *bufio.Reader, error) {
 	addr := net.JoinHostPort(p.Host, strconv.Itoa(p.Port))
 	conn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
@@ -131,8 +156,22 @@ func connectAndAuth(ctx context.Context, d dialer, p Provider, password string, 
 	}
 	result.Connected = true
 
+	// F6: the dial succeeded but every subsequent read/write (greeting,
+	// EHLO, STARTTLS, AUTH, MAIL/RCPT/DATA) is bounded by an absolute
+	// deadline derived from the context and the per-command timeout. The
+	// caller's deadline, if any, wins when it is earlier.
+	handshakeDeadline := time.Now().Add(smtpCommandTimeout)
+	if dl, ok := ctx.Deadline(); ok && dl.Before(handshakeDeadline) {
+		handshakeDeadline = dl
+	}
+	if err := conn.SetDeadline(handshakeDeadline); err != nil {
+		result.Error = "set handshake deadline: " + err.Error()
+		conn.Close()
+		return nil, nil, err
+	}
+
 	if p.ConnSecurity == ConnSecurityImplicitTLS {
-		tlsConn := tls.Client(conn, tlsConfigFor(p))
+		tlsConn := tls.Client(conn, tlsConfigFor(p, roots))
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
 			result.Error = "implicit tls handshake: " + err.Error()
 			conn.Close()
@@ -148,7 +187,7 @@ func connectAndAuth(ctx context.Context, d dialer, p Provider, password string, 
 		conn.Close()
 		return nil, nil, err
 	}
-	caps, err := smtpCommand(conn, reader, "EHLO "+localHostForEHLO())
+	caps, err := smtpCommand(conn, reader, "EHLO "+localHostForEHLO(), handshakeDeadline)
 	if err != nil {
 		result.Error = "ehlo: " + err.Error()
 		conn.Close()
@@ -156,12 +195,12 @@ func connectAndAuth(ctx context.Context, d dialer, p Provider, password string, 
 	}
 
 	if p.ConnSecurity == ConnSecurityStartTLS {
-		if _, err := smtpCommand(conn, reader, "STARTTLS"); err != nil {
+		if _, err := smtpCommand(conn, reader, "STARTTLS", handshakeDeadline); err != nil {
 			result.Error = "starttls: " + err.Error()
 			conn.Close()
 			return nil, nil, err
 		}
-		tlsConn := tls.Client(conn, tlsConfigFor(p))
+		tlsConn := tls.Client(conn, tlsConfigFor(p, roots))
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
 			result.Error = "starttls handshake: " + err.Error()
 			conn.Close()
@@ -170,7 +209,7 @@ func connectAndAuth(ctx context.Context, d dialer, p Provider, password string, 
 		conn = tlsConn
 		reader = bufio.NewReader(conn)
 		result.TLSNegotiated = true
-		caps, err = smtpCommand(conn, reader, "EHLO "+localHostForEHLO())
+		caps, err = smtpCommand(conn, reader, "EHLO "+localHostForEHLO(), handshakeDeadline)
 		if err != nil {
 			result.Error = "ehlo after starttls: " + err.Error()
 			conn.Close()
@@ -179,13 +218,25 @@ func connectAndAuth(ctx context.Context, d dialer, p Provider, password string, 
 	}
 
 	if password != "" {
+		// (D) The credential may only be transmitted over a VERIFIED TLS
+		// session. This is checked against what actually happened on the wire:
+		// result.TLSNegotiated is true only after a completed implicit-TLS or
+		// STARTTLS handshake. It therefore also catches a server that accepted
+		// the connection but never upgraded, which configuration alone cannot
+		// detect. The connection is torn down without sending AUTH, so the
+		// credential never reaches the socket.
+		if err := requireVerifiedTLSForAuth(p, result.TLSNegotiated); err != nil {
+			result.Error = "refusing SMTP AUTH without verified TLS"
+			conn.Close()
+			return nil, nil, err
+		}
 		if !capsContain(caps, "AUTH") {
 			result.Error = "server does not advertise AUTH"
 			conn.Close()
 			return nil, nil, fmt.Errorf("no auth capability")
 		}
 		authStr := base64.StdEncoding.EncodeToString([]byte("\x00" + p.Username + "\x00" + password))
-		if _, err := smtpCommand(conn, reader, "AUTH PLAIN "+authStr); err != nil {
+		if _, err := smtpCommand(conn, reader, "AUTH PLAIN "+authStr, handshakeDeadline); err != nil {
 			result.Error = "auth: " + err.Error()
 			conn.Close()
 			return nil, nil, err
@@ -199,8 +250,14 @@ func connectAndAuth(ctx context.Context, d dialer, p Provider, password string, 
 // deliberately separate from HealthCheckResult so a caller can never
 // confuse "connection tested OK" with "mail was accepted".
 type DeliverResult struct {
-	Success    bool
-	TempFail   bool
+	Success  bool
+	TempFail bool
+	// Ambiguous is true when the DATA payload (including the terminating
+	// dot) was written but the final response was never read: the
+	// recipient MAY have received the message. The caller must NOT
+	// immediately re-send through a fallback provider; the outcome needs
+	// controlled reconciliation (F6).
+	Ambiguous  bool
 	StatusCode int
 	StatusMsg  string
 }
@@ -219,40 +276,75 @@ type DeliverResult struct {
 // SSRF where a tenant-controlled relay hostname resolves to an internal
 // address during real delivery.
 func Deliver(ctx context.Context, p Provider, password string, from string, to []string, data []byte) *DeliverResult {
-	return deliverWith(ctx, newValidatingDialer(), p, password, from, to, data)
+	return deliverWith(ctx, newValidatingDialer(), p, password, from, to, data, nil)
 }
 
 // deliverWith is the delivery body parameterised by dialer, so the exported
 // Deliver always uses the secure dialer while tests can drive the SMTP
 // exchange over an in-process pipe.
-func deliverWith(ctx context.Context, d dialer, p Provider, password string, from string, to []string, data []byte) *DeliverResult {
+func deliverWith(ctx context.Context, d dialer, p Provider, password string, from string, to []string, data []byte, roots *x509.CertPool) *DeliverResult {
 	result := &HealthCheckResult{}
-	conn, reader, err := connectAndAuth(ctx, d, p, password, result)
+	conn, reader, err := connectAndAuth(ctx, d, p, password, result, roots)
 	if err != nil {
 		return &DeliverResult{TempFail: true, StatusMsg: redactHealthError(result.Error)}
 	}
 	defer conn.Close()
 
-	if _, err := smtpCommand(conn, reader, "MAIL FROM:<"+from+">"); err != nil {
+	// F6: bounded SMTP transaction. Every read and write on the exchange
+	// below runs under a per-command deadline AND the total transaction
+	// deadline, both well below the queue lease (DefaultLeaseSeconds =
+	// 300s), so a hung relay can never pin a worker goroutine past its
+	// lease. Deadlines are derived from the context: if the caller's
+	// context is already closer than the configured bound, the context
+	// wins.
+	transactionDeadline := time.Now().Add(smtpTransactionTimeout)
+	if dl, ok := ctx.Deadline(); ok && dl.Before(transactionDeadline) {
+		transactionDeadline = dl
+	}
+	applyDeadline := func() error {
+		return conn.SetDeadline(transactionDeadline)
+	}
+	if err := applyDeadline(); err != nil {
+		return &DeliverResult{TempFail: true, StatusMsg: redactHealthError("set transaction deadline: " + err.Error())}
+	}
+
+	if _, err := smtpCommand(conn, reader, "MAIL FROM:<"+from+">", transactionDeadline); err != nil {
 		return &DeliverResult{TempFail: isTempSMTPErr(err), StatusMsg: redactHealthError(err.Error())}
 	}
 	for _, rcpt := range to {
-		if _, err := smtpCommand(conn, reader, "RCPT TO:<"+rcpt+">"); err != nil {
+		if _, err := smtpCommand(conn, reader, "RCPT TO:<"+rcpt+">", transactionDeadline); err != nil {
 			return &DeliverResult{TempFail: isTempSMTPErr(err), StatusMsg: redactHealthError(err.Error())}
 		}
 	}
-	if _, err := smtpCommand(conn, reader, "DATA"); err != nil {
+	if _, err := smtpCommand(conn, reader, "DATA", transactionDeadline); err != nil {
 		return &DeliverResult{TempFail: isTempSMTPErr(err), StatusMsg: redactHealthError(err.Error())}
 	}
 	payload := dataTerminated(data)
+	if err := conn.SetWriteDeadline(time.Now().Add(smtpCommandTimeout)); err != nil {
+		return &DeliverResult{TempFail: true, StatusMsg: redactHealthError(err.Error())}
+	}
 	if _, err := conn.Write(payload); err != nil {
+		return &DeliverResult{TempFail: true, StatusMsg: redactHealthError(err.Error())}
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(smtpCommandTimeout)); err != nil {
 		return &DeliverResult{TempFail: true, StatusMsg: redactHealthError(err.Error())}
 	}
 	code, msg, err := readSMTPLine(reader)
 	if err != nil {
+		// F6: AMBIGUOUS acceptance. The DATA payload — including the
+		// terminating dot — has already been written and flushed to the
+		// socket. A timeout or connection drop AFTER that point means we
+		// cannot know whether the server accepted the message. This is
+		// deliberately NOT a plain temp-fail: the caller must not
+		// immediately re-send through a fallback provider, because the
+		// recipient may already have received the message. The status
+		// string never carries credentials or message content.
+		if isTimeoutOrEOF(err) {
+			return &DeliverResult{TempFail: true, Ambiguous: true, StatusMsg: redactHealthError("delivery outcome unknown after DATA; recipient may have received the message")}
+		}
 		return &DeliverResult{TempFail: true, StatusMsg: redactHealthError(err.Error())}
 	}
-	_, _ = smtpCommand(conn, reader, "QUIT")
+	_, _ = smtpCommand(conn, reader, "QUIT", transactionDeadline)
 	if code >= 200 && code < 300 {
 		return &DeliverResult{Success: true, StatusCode: code, StatusMsg: msg}
 	}
@@ -282,11 +374,21 @@ func isTempSMTPErr(err error) bool {
 	return strings.Contains(err.Error(), "smtp error 4")
 }
 
-func tlsConfigFor(p Provider) *tls.Config {
+// tlsConfigFor builds the TLS configuration for one dial.
+//
+// roots is nil on every production path, meaning the host trust store is used.
+// It is non-nil only in tests, which need a self-signed CA to be trusted so
+// the VERIFIED-TLS credential path can be exercised for real (with strict
+// verification genuinely on) rather than simulated with InsecureSkipVerify.
+func tlsConfigFor(p Provider, roots *x509.CertPool) *tls.Config {
 	return &tls.Config{
-		ServerName:         p.Host,
+		ServerName: p.Host,
+		// Only ever true for a provider with NO credential: SelectRoute and
+		// requireVerifiedTLSForAuth both refuse to authenticate over a session
+		// configured this way. See credential_transport.go.
 		InsecureSkipVerify: p.TLSValidation == TLSValidationOpportunistic,
 		MinVersion:         tls.VersionTLS12,
+		RootCAs:            roots,
 	}
 }
 
@@ -299,7 +401,28 @@ func localHostForEHLO() string { return "orvix-relay-client" }
 const (
 	maxSMTPLineLen           = 8192
 	maxSMTPContinuationLines = 100
+	// smtpCommandTimeout bounds ONE command/response exchange.
+	smtpCommandTimeout = 30 * time.Second
+	// smtpTransactionTimeout bounds the ENTIRE SMTP transaction
+	// (MAIL/RCPT/DATA/body/final response). It is deliberately well
+	// below the queue lease (DefaultLeaseSeconds = 300s) so a hung
+	// relay cannot pin a worker goroutine past its lease (F6).
+	smtpTransactionTimeout = 90 * time.Second
 )
+
+// isTimeoutOrEOF reports whether an SMTP read failed because the peer
+// went silent or closed after the payload was sent — the conditions
+// that make the acceptance outcome ambiguous.
+func isTimeoutOrEOF(err error) bool {
+	if err == nil {
+		return false
+	}
+	var nerr net.Error
+	if errors.As(err, &nerr) && nerr.Timeout() {
+		return true
+	}
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed)
+}
 
 func readSMTPLine(r *bufio.Reader) (code int, msg string, err error) {
 	line, err := readBoundedLine(r)
@@ -357,8 +480,23 @@ func readBoundedLine(r *bufio.Reader) (string, error) {
 	}
 }
 
-func smtpCommand(conn net.Conn, r *bufio.Reader, cmd string) ([]string, error) {
+func smtpCommand(conn net.Conn, r *bufio.Reader, cmd string, deadline time.Time) ([]string, error) {
+	// F6: per-command deadline, so a peer that stops answering mid-
+	// exchange cannot pin the worker. The overall transaction deadline
+	// (set by deliverWith / connectAndAuth) remains the harder bound:
+	// the per-command window is the EARLIER of the two, so an already
+	// near-expiring context always wins.
+	cmdDeadline := time.Now().Add(smtpCommandTimeout)
+	if deadline.Before(cmdDeadline) {
+		cmdDeadline = deadline
+	}
+	if err := conn.SetWriteDeadline(cmdDeadline); err != nil {
+		return nil, err
+	}
 	if _, err := conn.Write([]byte(cmd + "\r\n")); err != nil {
+		return nil, err
+	}
+	if err := conn.SetReadDeadline(cmdDeadline); err != nil {
 		return nil, err
 	}
 	code, msg, err := readSMTPLine(r)

@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -29,6 +30,7 @@ import (
 	"github.com/orvix/orvix/internal/observability"
 	"github.com/orvix/orvix/internal/platform/cluster"
 	"github.com/orvix/orvix/internal/platform/deliverability"
+	"github.com/orvix/orvix/internal/platform/kernel"
 	"github.com/orvix/orvix/internal/platform/relay"
 	"github.com/orvix/orvix/internal/platform/security"
 	"github.com/orvix/orvix/internal/policy"
@@ -475,6 +477,20 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	// init failure disables relay routing for this run; every worker
 	// simply keeps its RelaySelector nil and delivers direct-to-MX
 	// exactly as before this integration existed.
+	//
+	// F9: the runtime relay service is wired with the canonical
+	// transactional outbox, so circuit transitions and other meaningful
+	// relay state changes are published as operational events. It was
+	// constructed with `relay.NewService(relayRepo, nil, nil)`, so
+	// RecordAttemptResult skipped outbox enqueue entirely and a tripped
+	// circuit produced no event for operators. The outbox is a single
+	// canonical instance (same dialect detection as the webhook outbox),
+	// and a failure to initialize it degrades relay routing explicitly
+	// rather than running silently without events.
+	relayDialect, rderr := dbdialect.Detect(sqlDB)
+	if rderr != nil {
+		relayDialect = dbdialect.FromDriver("sqlite")
+	}
 	relayRepo := relay.NewRepository(sqlDB)
 	var relayAdapter *relay.DeliveryAdapter
 	if err := relayRepo.EnsureSchema(context.Background()); err != nil {
@@ -482,17 +498,100 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 			m.logger.Warn("relay control plane schema init failed; outbound relay disabled", zap.Error(err))
 		}
 	} else {
-		relayAdapter = relay.NewDeliveryAdapter(relay.NewService(relayRepo, nil, nil))
+		relayOutbox := kernel.NewOutboxRepository(relayDialect)
+		if oerr := relayOutbox.EnsureSchema(context.Background(), sqlDB); oerr != nil {
+			if m.logger != nil {
+				m.logger.Warn("relay outbox init failed; outbound relay disabled", zap.Error(oerr))
+			}
+		} else {
+			relayAdapter = relay.NewDeliveryAdapter(relay.NewService(relayRepo, nil, relayOutbox))
+		}
 	}
-	tenantForRelay := func(entry *queue.QueueEntry) (uint, string) {
-		var tenantID uint
-		var mode string
-		row := sqlDB.QueryRowContext(context.Background(),
-			`SELECT m.tenant_id, COALESCE(d.mail_access_mode, 'internal_external')
-			 FROM coremail_mailboxes m JOIN coremail_domains d ON d.id = m.domain_id
-			 WHERE m.email = ?`, entry.FromAddress)
-		_ = row.Scan(&tenantID, &mode)
-		return tenantID, mode
+	// Sending-identity resolution for relay routing.
+	//
+	// Three defects are closed here:
+	//
+	//  1. The statement used a raw `?` placeholder. On PostgreSQL that is a
+	//     syntax error, the error was discarded by `_ = row.Scan(...)`, and
+	//     every outbound message therefore resolved to tenant 0 with the
+	//     default mail-access mode — so tenant-scoped relay routing and the
+	//     internal-only policy check were both inert on the dialect that
+	//     ships in production. It now goes through dbdialect.
+	//  2. The sending domain's row id was never resolved at all, so
+	//     domain-scoped routing rules could not match. It is selected here and
+	//     handed to the worker via DomainIDForRelay.
+	//  3. (F3) Every identity-lookup failure collapsed to tenant 0 +
+	//     "internal_external" — a permissive anonymous identity — and the
+	//     query ran under unbounded context.Background(). Identity failures
+	//     are now typed and the worker defers before any network I/O.
+	//
+	// senderIdentityQueryTimeout bounds a single identity lookup well below
+	// the queue lease (300s), so a hung or locked database cannot pin a
+	// worker goroutine indefinitely.
+	const senderIdentityQueryTimeout = 5 * time.Second
+	senderIdentityQuery := relayDialect.Rewrite(
+		`SELECT m.tenant_id, m.domain_id, COALESCE(d.mail_access_mode, 'internal_external')
+		 FROM coremail_mailboxes m JOIN coremail_domains d ON d.id = m.domain_id
+		 WHERE m.email = ?`)
+	type senderIdentity struct {
+		tenantID uint
+		domainID uint
+		mode     string
+	}
+	// senderIdentityError signals that a sender identity could not be
+	// established for a reason other than "the address is genuinely not
+	// a local mailbox" (which is sql.ErrNoRows). The delivery worker
+	// treats it as fail-closed: defer, never fabricate an anonymous
+	// permissive identity.
+	var errSenderIdentityUnavailable = errors.New("sender identity unavailable")
+
+	// resolveSenderIdentity FAILS CLOSED (F3): the previous form returned
+	// {tenantID: 0, mode: "internal_external"} on EVERY error, so a
+	// transient database failure silently disabled tenant-scoped relay
+	// rules and the internal-only policy — and the query ran under
+	// unbounded context.Background(). Distinctions:
+	//   - row found: identity (tenant, domain, mode) as stored;
+	//   - sql.ErrNoRows: the sender is genuinely not a local mailbox;
+	//     the caller decides policy from the enqueue origin, never from
+	//     a fabricated identity;
+	//   - any other error (database unavailable, timeout, malformed
+	//     row): a typed identity-unavailable error → the worker defers
+	//     BEFORE any direct or relay network I/O.
+	// The query runs under the delivery operation's context with a hard
+	// timeout well below the queue lease, so a hung database cannot pin
+	// a worker indefinitely.
+	resolveSenderIdentity := func(ctx context.Context, entry *queue.QueueEntry) (senderIdentity, error) {
+		qctx, cancel := context.WithTimeout(ctx, senderIdentityQueryTimeout)
+		defer cancel()
+		id := senderIdentity{}
+		row := sqlDB.QueryRowContext(qctx, senderIdentityQuery, entry.FromAddress)
+		if err := row.Scan(&id.tenantID, &id.domainID, &id.mode); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				// Genuinely absent sender: not an infrastructure failure.
+				// The caller uses the enqueue origin; we never fabricate a
+				// tenant or a permissive mode from nothing.
+				return senderIdentity{}, sql.ErrNoRows
+			}
+			if m.logger != nil {
+				m.logger.Warn("relay sender identity lookup failed", zap.Error(err))
+			}
+			return senderIdentity{}, errSenderIdentityUnavailable
+		}
+		return id, nil
+	}
+	tenantForRelay := func(ctx context.Context, entry *queue.QueueEntry) (uint, string, error) {
+		id, err := resolveSenderIdentity(ctx, entry)
+		if err != nil {
+			return 0, "", err
+		}
+		return id.tenantID, id.mode, nil
+	}
+	domainForRelay := func(ctx context.Context, entry *queue.QueueEntry) (uint, error) {
+		id, err := resolveSenderIdentity(ctx, entry)
+		if err != nil {
+			return 0, err
+		}
+		return id.domainID, nil
 	}
 
 	// Deliverability control plane (Milestone 9) — optional, same
@@ -563,6 +662,19 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 		if relayAdapter != nil {
 			worker.RelaySelector = relayAdapter
 			worker.TenantIDForRelay = tenantForRelay
+			worker.DomainIDForRelay = domainForRelay
+			// Bookkeeping failures after an already-completed SMTP
+			// transaction are surfaced, not swallowed: the mail was
+			// delivered, so this must not retry, but an operator needs to
+			// know the circuit breaker is not seeing real outcomes.
+			worker.RelayBookkeepingFailed = func(ctx context.Context, providerID uint, success bool, err error) {
+				if m.logger != nil {
+					m.logger.Warn("relay attempt bookkeeping failed",
+						zap.Uint("provider_id", providerID),
+						zap.Bool("delivery_succeeded", success),
+						zap.Error(err))
+				}
+			}
 		}
 		if deliverabilityAdapter != nil {
 			worker.SuppressionChecker = deliverabilityAdapter

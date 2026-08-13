@@ -62,7 +62,7 @@ func TestDialAndTest_UnauthenticatedConnectionSucceeds(t *testing.T) {
 	addr := fakeSMTPServer(t, false)
 	host, port := splitHostPort(t, addr)
 	p := Provider{Host: host, Port: port, ConnSecurity: ConnSecurityNone}
-	result := dialAndTest(context.Background(), netDialer{}, p, "")
+	result := dialAndTest(context.Background(), netDialer{}, p, "", nil)
 	if !result.Connected {
 		t.Fatalf("expected connected, got error: %s", result.Error)
 	}
@@ -71,22 +71,28 @@ func TestDialAndTest_UnauthenticatedConnectionSucceeds(t *testing.T) {
 	}
 }
 
-func TestDialAndTest_AuthenticatedConnectionSucceeds(t *testing.T) {
+// TestDialAndTest_AuthenticatedConnectionRefusesPlaintext replaces an earlier
+// test that asserted AUTH SUCCEEDS over a ConnSecurityNone session. That
+// assertion encoded the Fix D vulnerability: passing it REQUIRED the
+// credential to be sent in the clear. The protocol exchange for a legitimate
+// authenticated session is now proven over real verified TLS in
+// TestAuthOverVerifiedTLS_Succeeds; this test pins the refusal.
+func TestDialAndTest_AuthenticatedConnectionRefusesPlaintext(t *testing.T) {
 	addr := fakeSMTPServer(t, true)
 	host, port := splitHostPort(t, addr)
 	p := Provider{Host: host, Port: port, ConnSecurity: ConnSecurityNone, Username: "relay-user"}
-	result := dialAndTest(context.Background(), netDialer{}, p, "relay-password")
+	result := dialAndTest(context.Background(), netDialer{}, p, "relay-password", nil)
 	if !result.Connected {
 		t.Fatalf("expected connected, got error: %s", result.Error)
 	}
-	if !result.AuthOK {
-		t.Fatalf("expected AuthOK=true, got error: %s", result.Error)
+	if result.AuthOK {
+		t.Fatal("AUTH must be refused over a plaintext session")
 	}
 }
 
 func TestDialAndTest_UnreachableHostReportsErrorNotPanic(t *testing.T) {
 	p := Provider{Host: "127.0.0.1", Port: 1, ConnSecurity: ConnSecurityNone}
-	result := dialAndTest(context.Background(), netDialer{}, p, "")
+	result := dialAndTest(context.Background(), netDialer{}, p, "", nil)
 	if result.Connected {
 		t.Fatal("expected connection to an unused port to fail")
 	}

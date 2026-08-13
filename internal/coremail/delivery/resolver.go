@@ -56,6 +56,9 @@ type FakeResolver struct {
 	Hosts      map[string][]string
 	FailDomain string
 	FailHost   string
+	// MXLookups counts LookupMX invocations — the side-effect the
+	// fail-closed tests assert did NOT happen.
+	MXLookups int
 }
 
 func NewFakeResolver() *FakeResolver {
@@ -66,6 +69,7 @@ func NewFakeResolver() *FakeResolver {
 }
 
 func (r *FakeResolver) LookupMX(ctx context.Context, domain string) ([]MXRecord, error) {
+	r.MXLookups++
 	if r.FailDomain != "" && domain == r.FailDomain {
 		return nil, fmt.Errorf("simulated mx failure for %s", domain)
 	}

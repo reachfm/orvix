@@ -384,6 +384,15 @@ func (h *Handler) RotatePlatformRelayCredentials(c fiber.Ctx) error {
 		// without re-exposing the password.
 		stored := fiber.Map{"relay": updated}
 		if generated != "" {
+			// This is the ONE response in the relay surface that carries a
+			// plaintext secret. It must not be written to any cache: without
+			// these headers a shared proxy, or the browser's own disk cache,
+			// can retain the credential long after the "show once" moment has
+			// passed, and it becomes recoverable from history by anyone with
+			// access to the machine.
+			c.Set("Cache-Control", "no-store, no-cache, must-revalidate, private")
+			c.Set("Pragma", "no-cache")
+			c.Set("Expires", "0")
 			return fiber.StatusOK, stored, fiber.Map{"relay": updated, "generated_password": generated, "show_once": true}, nil
 		}
 		return fiber.StatusOK, stored, stored, nil

@@ -1,8 +1,14 @@
 package queue
 
 import (
+	"errors"
 	"time"
 )
+
+// ErrLeaseLost is returned by lease-fenced completions when the row is
+// no longer leased by the calling worker — the lease expired and was
+// re-claimed elsewhere, so the caller must not race the new owner (F6).
+var ErrLeaseLost = errors.New("queue lease lost")
 
 // QueueStatus represents the lifecycle state of a queue entry.
 type QueueStatus string

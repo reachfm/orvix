@@ -97,7 +97,7 @@ func TestDeliver_RejectsInternalLiteralWithoutConnectingOrLeakingCredential(t *t
 		}
 		p := Provider{Host: host, Port: 587, Username: "relay-user", ConnSecurity: ConnSecurityStartTLS, TLSValidation: TLSValidationStrict}
 		res := deliverWith(context.Background(), d, p, "super-secret-relay-password",
-			"sender@tenant.example", []string{"victim@example.com"}, []byte("Subject: x\r\n\r\nbody"))
+			"sender@tenant.example", []string{"victim@example.com"}, []byte("Subject: x\r\n\r\nbody"), nil)
 
 		if res.Success {
 			t.Fatalf("%s: delivery to a blocked destination must not succeed", host)
@@ -129,7 +129,7 @@ func TestDeliver_ResolvedInternalHostRejectedBeforeCredential(t *testing.T) {
 		},
 	}
 	p := Provider{Host: "relay.attacker.example", Port: 587, Username: "u", ConnSecurity: ConnSecurityStartTLS}
-	res := deliverWith(context.Background(), d, p, "secret", "a@b.example", []string{"c@d.example"}, []byte("data"))
+	res := deliverWith(context.Background(), d, p, "secret", "a@b.example", []string{"c@d.example"}, []byte("data"), nil)
 	if res.Success || !res.TempFail {
 		t.Fatalf("expected temp failure for a host resolving internal, got %+v", res)
 	}
@@ -217,8 +217,13 @@ func TestDeliver_PublicRelayStillWorks(t *testing.T) {
 	host, portStr, _ := net.SplitHostPort(addr)
 	port := 0
 	fmt.Sscanf(portStr, "%d", &port)
-	p := Provider{Host: host, Port: port, Username: "u", ConnSecurity: ConnSecurityNone}
-	res := deliverWith(context.Background(), netDialer{}, p, "pw", "a@b.example", []string{"c@d.example"}, []byte("Subject: ok\r\n\r\nbody"))
+	// No credential: an UNAUTHENTICATED relay over a plaintext session is a
+	// legitimate configuration (internal smarthosts) and must keep working.
+	// The authenticated equivalent is covered by
+	// TestDeliverAuthenticated_RequiresVerifiedTLS, which proves a credential
+	// is only ever sent over verified TLS.
+	p := Provider{Host: host, Port: port, ConnSecurity: ConnSecurityNone}
+	res := deliverWith(context.Background(), netDialer{}, p, "", "a@b.example", []string{"c@d.example"}, []byte("Subject: ok\r\n\r\nbody"), nil)
 	if !res.Success {
 		t.Fatalf("legitimate delivery through a reachable relay must succeed, got %+v", res)
 	}
