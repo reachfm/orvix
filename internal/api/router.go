@@ -1436,6 +1436,7 @@ func (r *Router) setupRoutes() {
 	canWriteDomains.Post("/relay/providers/:id/test", r.h.PostRelayProviderTest)
 	canWriteDomains.Post("/relay/routing-rules", r.h.PostRelayRoutingRule)
 	canWriteDomains.Post("/relay/emergency-override", r.h.PostRelayEmergencyOverride)
+	canWriteDomains.Delete("/relay/emergency-override/:id", r.h.DeleteRelayEmergencyOverride)
 
 	// ── Cluster control plane (Milestone 10) ──
 	enterpriseRead.Get("/cluster/nodes", r.h.GetClusterNodes)

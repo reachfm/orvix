@@ -199,3 +199,31 @@ func (h *Handler) PostRelayEmergencyOverride(c fiber.Ctx) error {
 	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"override": override})
 }
+
+// DeleteRelayEmergencyOverride handles
+// DELETE /admin/relay/emergency-override/:id.
+//
+// Revocation had no route at all: an override could be created but only ended
+// by waiting for its expiry. An emergency control that cannot be switched off
+// early is not an emergency control. The tenant is taken from the
+// authenticated request, and the service refuses a revocation whose tenant
+// does not own the override.
+func (h *Handler) DeleteRelayEmergencyOverride(c fiber.Ctx) error {
+	if h.relaySvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "relay service not available"})
+	}
+	tenantID, _ := auth.RequireTenantID(c)
+	actorID, _ := c.Locals("user_id").(uint)
+	idVal, err := strconv.ParseUint(c.Params("id"), 10, 64)
+	if err != nil || idVal == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid override id"})
+	}
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	c.Bind().JSON(&req)
+	if err := h.relaySvc.RevokeEmergencyOverride(c.Context(), uint(idVal), tenantID, actorID, req.Reason); err != nil {
+		return relayError(c, err)
+	}
+	return c.JSON(fiber.Map{"revoked": true})
+}
